@@ -54,6 +54,44 @@ app_secret = "your-feishu-app-secret"
 # client_id = "your-dingtalk-client-id"
 # client_secret = "your-dingtalk-client-secret"
 
+# Telegram (uncomment to enable)
+# 1. Message @BotFather on Telegram, send /newbot to create a bot
+# 2. Copy the bot token below
+# Connection: Long polling (no public URL needed)
+
+# [[projects.platforms]]
+# type = "telegram"
+#
+# [projects.platforms.options]
+# token = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+
+# Slack (uncomment to enable)
+# 1. Create an app at https://api.slack.com/apps
+# 2. Enable Socket Mode (Settings > Socket Mode)
+# 3. Subscribe to bot events: message.channels, message.im (Event Subscriptions)
+# 4. Install app to workspace, copy Bot Token (xoxb-...) and App Token (xapp-...)
+# Connection: Socket Mode WebSocket (no public URL needed)
+
+# [[projects.platforms]]
+# type = "slack"
+#
+# [projects.platforms.options]
+# bot_token = "xoxb-your-bot-token"
+# app_token = "xapp-your-app-level-token"
+
+# Discord (uncomment to enable)
+# 1. Create an app at https://discord.com/developers/applications
+# 2. Under "Bot", create a bot and copy the token
+# 3. Enable "Message Content Intent" under Privileged Gateway Intents
+# 4. Invite bot to server with OAuth2 URL Generator (scopes: bot; permissions: Send Messages)
+# Connection: Gateway WebSocket (no public URL needed)
+
+# [[projects.platforms]]
+# type = "discord"
+#
+# [projects.platforms.options]
+# token = "your-discord-bot-token"
+
 # =============================================================================
 # Project 2 (uncomment to enable)
 # =============================================================================
@@ -68,14 +106,8 @@ app_secret = "your-feishu-app-secret"
 # work_dir = "/path/to/frontend"
 # mode = "auto"
 #
-# # DingTalk
-# # 1. Create an app at https://open-dev.dingtalk.com
-# # 2. Create a Bot, select Stream mode
-# # Note: No WebSocket URL needed — the Stream SDK handles the connection.
-#
 # [[projects.platforms]]
-# type = "dingtalk"
+# type = "telegram"
 #
 # [projects.platforms.options]
-# client_id = "your-dingtalk-client-id"
-# client_secret = "your-dingtalk-client-secret"
+# token = "your-telegram-bot-token"
