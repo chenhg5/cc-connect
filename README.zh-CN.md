@@ -42,9 +42,17 @@
 
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) 已安装并配置
 
-### 安装
+### 通过 AI Agent 安装配置（推荐）
 
-**通过 npm 安装（推荐）：**
+把下面这段话发给 Claude Code 或其他 AI 编程助手，它会帮你完成整个安装和配置过程：
+
+```
+请参考 https://raw.githubusercontent.com/chenhg5/cc-connect/refs/heads/main/INSTALL.md 帮我安装和配置 cc-connect
+```
+
+### 手动安装
+
+**通过 npm 安装：**
 
 ```bash
 npm install -g cc-connect
@@ -73,12 +81,6 @@ make build
 cp config.example.toml config.toml
 vim config.toml   # 填入你的平台凭证
 ```
-
-> 💡 **让 AI 帮你配置：** 把 [INSTALL.md](./INSTALL.md) 文件发给 Claude Code 或其他 AI agent，它可以帮你完成整个配置过程 —— 创建机器人、获取凭证、编写 config.toml。
->
-> ```bash
-> claude "阅读 INSTALL.md 并帮我配置 cc-connect 连接飞书"
-> ```
 
 ### 运行
 

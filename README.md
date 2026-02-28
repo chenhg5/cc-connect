@@ -42,9 +42,17 @@ All components are decoupled via Go interfaces — fully pluggable and extensibl
 
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and configured
 
-### Install
+### Install & Configure via AI Agent (Recommended)
 
-**Via npm (recommended):**
+Send this to Claude Code or any AI coding agent, and it will handle the entire installation and configuration for you:
+
+```
+Please refer to https://raw.githubusercontent.com/chenhg5/cc-connect/refs/heads/main/INSTALL.md to help me install and configure cc-connect
+```
+
+### Manual Install
+
+**Via npm:**
 
 ```bash
 npm install -g cc-connect
@@ -73,12 +81,6 @@ make build
 cp config.example.toml config.toml
 vim config.toml   # Fill in your platform credentials
 ```
-
-> 💡 **Let AI help you configure:** Feed the [INSTALL.md](./INSTALL.md) file to Claude Code or any AI agent, and it can walk you through the entire setup process — creating bots, getting credentials, and writing config.toml for you.
->
-> ```bash
-> claude "Read INSTALL.md and help me set up cc-connect with Feishu"
-> ```
 
 ### Run
 
