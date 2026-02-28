@@ -108,6 +108,31 @@ app_secret = "your-feishu-app-secret"
 # port = "8080"
 # callback_path = "/callback"
 
+# WeChat Work / 企业微信 (uncomment to enable)
+# 1. Log in to https://work.weixin.qq.com/wework_admin/frame
+# 2. App Management > Create a custom app > note AgentId + Secret
+# 3. My Enterprise > note Corp ID
+# 4. App > Receive Messages > Set API Receive:
+#    URL: http(s)://<your-domain>:<port>/wecom/callback
+#    Token: any random string
+#    EncodingAESKey: click "Random Generate" (43 chars)
+#    (Start cc-connect FIRST, then save to pass verification)
+# 5. App > Trusted IP > add your server's outbound IP
+# 6. (Optional) My Enterprise > WeChat Plugin > scan QR to link personal WeChat
+# Connection: HTTP Webhook — you need a public URL (use ngrok, cloudflared, etc.)
+
+# [[projects.platforms]]
+# type = "wecom"
+#
+# [projects.platforms.options]
+# corp_id = "your-corp-id"
+# corp_secret = "your-app-secret"
+# agent_id = "1000002"
+# callback_token = "your-callback-token"
+# callback_aes_key = "your-43-char-encoding-aes-key"
+# port = "8081"
+# callback_path = "/wecom/callback"
+
 # =============================================================================
 # Project 2 (uncomment to enable)
 # =============================================================================

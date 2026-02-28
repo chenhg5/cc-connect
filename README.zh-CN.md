@@ -34,6 +34,7 @@
 | Platform | Slack | ✅ 已支持 |
 | Platform | Discord | ✅ 已支持 |
 | Platform | LINE | ✅ 已支持 |
+| Platform | 企业微信 (WeChat Work) | ✅ 已支持 |
 
 ## 快速开始
 
@@ -181,6 +182,20 @@ client_secret = "xxxx"
 3. 在 LINE 控制台设置 Webhook URL 为 `http(s)://<your-domain>:<port>/callback`
 4. 连接方式：HTTP Webhook —— 需要通过 ngrok、cloudflared 等工具将本地端口暴露到公网
 
+### 企业微信配置
+
+1. 登录[企业微信管理后台](https://work.weixin.qq.com/wework_admin/frame)
+2. **应用管理** → 创建自建应用 → 记录 AgentId 和 Secret
+3. **我的企业** → 记录企业 ID (CorpId)
+4. 进入应用 → **接收消息** → 设置 API 接收：
+   - URL：`http(s)://<your-domain>:<port>/wecom/callback`
+   - Token：任意随机字符串
+   - EncodingAESKey：点击「随机生成」
+   - 需要**先启动 cc-connect**，再保存以通过验证
+5. **企业可信 IP** → 添加服务器出口公网 IP
+6. （可选）**我的企业** → **微信插件** → 扫码关联个人微信，即可在个人微信中直接对话
+7. 连接方式：HTTP Webhook —— 需要通过 ngrok、cloudflared 等工具将本地端口暴露到公网
+
 ## 扩展开发
 
 ### 添加新平台
@@ -231,7 +246,8 @@ cc-connect/
 │   ├── telegram/            # Telegram（Long Polling）
 │   ├── slack/               # Slack（Socket Mode）
 │   ├── discord/             # Discord（Gateway WebSocket）
-│   └── line/                # LINE（HTTP Webhook）
+│   ├── line/                # LINE（HTTP Webhook）
+│   └── wecom/               # 企业微信（HTTP Webhook + AES 加解密）
 ├── agent/                   # AI 助手适配器
 │   └── claudecode/          # Claude Code CLI（auto + interactive）
 ├── config/                  # 配置加载

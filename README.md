@@ -34,6 +34,7 @@ All components are decoupled via Go interfaces — fully pluggable and extensibl
 | Platform | Slack | ✅ Supported |
 | Platform | Discord | ✅ Supported |
 | Platform | LINE | ✅ Supported |
+| Platform | WeChat Work (企业微信) | ✅ Supported |
 
 ## Quick Start
 
@@ -181,6 +182,20 @@ client_secret = "xxxx"
 3. Set your webhook URL in LINE console to `http(s)://<your-domain>:<port>/callback`
 4. Connection: HTTP Webhook — you must expose the local port via ngrok, cloudflared, etc.
 
+### WeChat Work (企业微信)
+
+1. Log in to [WeChat Work Admin](https://work.weixin.qq.com/wework_admin/frame)
+2. **App Management** > Create a custom app > note the AgentId and Secret
+3. **My Enterprise** > note the Corp ID
+4. In your app > **Receive Messages** > Set API Receive:
+   - URL: `http(s)://<your-domain>:<port>/wecom/callback`
+   - Token: any random string
+   - EncodingAESKey: click "Random Generate"
+   - Start cc-connect **first**, then save to pass verification
+5. **Trusted IP** > add your server's outbound public IP
+6. (Optional) **My Enterprise** > **WeChat Plugin** > scan QR to link personal WeChat — this allows chatting from regular WeChat too
+7. Connection: HTTP Webhook — you must expose the local port via ngrok, cloudflared, etc.
+
 ## Extending
 
 ### Adding a New Platform
@@ -231,7 +246,8 @@ cc-connect/
 │   ├── telegram/            # Telegram (Long Polling)
 │   ├── slack/               # Slack (Socket Mode)
 │   ├── discord/             # Discord (Gateway WebSocket)
-│   └── line/                # LINE (HTTP Webhook)
+│   ├── line/                # LINE (HTTP Webhook)
+│   └── wecom/               # WeChat Work (HTTP Webhook + AES)
 ├── agent/                   # Agent adapters
 │   └── claudecode/          # Claude Code CLI (auto + interactive)
 ├── config/                  # Config loading
