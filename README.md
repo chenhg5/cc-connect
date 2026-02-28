@@ -35,6 +35,11 @@ All components are decoupled via Go interfaces — fully pluggable and extensibl
 | Platform | Discord | ✅ Gateway — no public IP needed |
 | Platform | LINE | ✅ Webhook — public URL required |
 | Platform | WeChat Work (企业微信) | ✅ Webhook — public URL required |
+| Platform | WhatsApp | 🔜 Planned (Business Cloud API) |
+| Platform | Microsoft Teams | 🔜 Planned (Bot Framework) |
+| Platform | Google Chat | 🔜 Planned (Chat API) |
+| Platform | Mattermost | 🔜 Planned (Webhook + Bot) |
+| Platform | Matrix (Element) | 🔜 Planned (Client-Server API) |
 
 ## Quick Start
 

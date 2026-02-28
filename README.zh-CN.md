@@ -35,6 +35,11 @@
 | Platform | Discord | ✅ Gateway — 无需公网 IP |
 | Platform | LINE | ✅ Webhook — 需要公网 URL |
 | Platform | 企业微信 (WeChat Work) | ✅ Webhook — 需要公网 URL |
+| Platform | WhatsApp | 🔜 计划中 (Business Cloud API) |
+| Platform | Microsoft Teams | 🔜 计划中 (Bot Framework) |
+| Platform | Google Chat | 🔜 计划中 (Chat API) |
+| Platform | Mattermost | 🔜 计划中 (Webhook + Bot) |
+| Platform | Matrix (Element) | 🔜 计划中 (Client-Server API) |
 
 ## 快速开始
 
