@@ -72,7 +72,7 @@ Claude Code 适配器支持两种模式，通过 `mode` 配置：
 | `auto` | 自动批准所有操作（`--dangerously-skip-permissions`） | 可信/沙箱环境 |
 
 ```toml
-[agent.options]
+[projects.agent.options]
 mode = "interactive"
 # allowed_tools = ["Read", "Grep", "Glob", "Bash"]
 ```
@@ -103,37 +103,37 @@ mode = "interactive"
 [[projects]]
 name = "my-backend"
 
-  [projects.agent]
-  type = "claudecode"
+[projects.agent]
+type = "claudecode"
 
-    [projects.agent.options]
-    work_dir = "/path/to/backend"
-    mode = "interactive"
+[projects.agent.options]
+work_dir = "/path/to/backend"
+mode = "interactive"
 
-  [[projects.platforms]]
-  type = "feishu"
+[[projects.platforms]]
+type = "feishu"
 
-    [projects.platforms.options]
-    app_id     = "cli_xxxx"
-    app_secret = "xxxx"
+[projects.platforms.options]
+app_id = "cli_xxxx"
+app_secret = "xxxx"
 
 # 项目 2 —— 不同目录、不同机器人
 [[projects]]
 name = "my-frontend"
 
-  [projects.agent]
-  type = "claudecode"
+[projects.agent]
+type = "claudecode"
 
-    [projects.agent.options]
-    work_dir = "/path/to/frontend"
-    mode = "auto"
+[projects.agent.options]
+work_dir = "/path/to/frontend"
+mode = "auto"
 
-  [[projects.platforms]]
-  type = "dingtalk"
+[[projects.platforms]]
+type = "dingtalk"
 
-    [projects.platforms.options]
-    client_id     = "xxxx"
-    client_secret = "xxxx"
+[projects.platforms.options]
+client_id = "xxxx"
+client_secret = "xxxx"
 ```
 
 ### 飞书配置

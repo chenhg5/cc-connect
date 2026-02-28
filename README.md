@@ -72,7 +72,7 @@ Claude Code adapter supports two modes, controlled by the `mode` option:
 | `auto` | Auto-approves all operations (`--dangerously-skip-permissions`). | Trusted / sandboxed environments. |
 
 ```toml
-[agent.options]
+[projects.agent.options]
 mode = "interactive"
 # allowed_tools = ["Read", "Grep", "Glob", "Bash"]
 ```
@@ -103,37 +103,37 @@ Each `[[projects]]` entry binds one code directory to its own agent and platform
 [[projects]]
 name = "my-backend"
 
-  [projects.agent]
-  type = "claudecode"
+[projects.agent]
+type = "claudecode"
 
-    [projects.agent.options]
-    work_dir = "/path/to/backend"
-    mode = "interactive"
+[projects.agent.options]
+work_dir = "/path/to/backend"
+mode = "interactive"
 
-  [[projects.platforms]]
-  type = "feishu"
+[[projects.platforms]]
+type = "feishu"
 
-    [projects.platforms.options]
-    app_id     = "cli_xxxx"
-    app_secret = "xxxx"
+[projects.platforms.options]
+app_id = "cli_xxxx"
+app_secret = "xxxx"
 
 # Project 2 — different folder, different bot
 [[projects]]
 name = "my-frontend"
 
-  [projects.agent]
-  type = "claudecode"
+[projects.agent]
+type = "claudecode"
 
-    [projects.agent.options]
-    work_dir = "/path/to/frontend"
-    mode = "auto"
+[projects.agent.options]
+work_dir = "/path/to/frontend"
+mode = "auto"
 
-  [[projects.platforms]]
-  type = "dingtalk"
+[[projects.platforms]]
+type = "dingtalk"
 
-    [projects.platforms.options]
-    client_id     = "xxxx"
-    client_secret = "xxxx"
+[projects.platforms.options]
+client_id = "xxxx"
+client_secret = "xxxx"
 ```
 
 ### Feishu (Lark)
