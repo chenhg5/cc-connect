@@ -132,6 +132,8 @@ app_secret = "your-feishu-app-secret"
 # callback_aes_key = "your-43-char-encoding-aes-key"
 # port = "8081"
 # callback_path = "/wecom/callback"
+# proxy = ""  # optional: forward proxy for API calls if your IP is dynamic
+              # e.g. "http://your-vps-ip:8888" — the VPS IP goes into trusted IP list
 
 # =============================================================================
 # Project 2 (uncomment to enable)

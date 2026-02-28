@@ -13,6 +13,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -65,6 +66,7 @@ type Platform struct {
 	callbackPath string
 	server       *http.Server
 	handler      core.MessageHandler
+	apiClient    *http.Client // HTTP client for outbound API calls (may use proxy)
 	tokenCache   tokenCache
 }
 
@@ -96,6 +98,16 @@ func New(opts map[string]any) (core.Platform, error) {
 		path = "/wecom/callback"
 	}
 
+	apiClient := &http.Client{Timeout: 30 * time.Second}
+	if proxyURL, _ := opts["proxy"].(string); proxyURL != "" {
+		u, err := url.Parse(proxyURL)
+		if err != nil {
+			return nil, fmt.Errorf("wecom: invalid proxy URL %q: %w", proxyURL, err)
+		}
+		apiClient.Transport = &http.Transport{Proxy: http.ProxyURL(u)}
+		slog.Info("wecom: outbound API requests will use proxy", "proxy", proxyURL)
+	}
+
 	return &Platform{
 		corpID:       corpID,
 		corpSecret:   corpSecret,
@@ -104,6 +116,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		aesKey:       aesKey,
 		port:         port,
 		callbackPath: path,
+		apiClient:    apiClient,
 	}, nil
 }
 
@@ -260,9 +273,9 @@ func (p *Platform) sendText(accessToken, toUser, text string) error {
 	}
 
 	body, _ := json.Marshal(payload)
-	url := "https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=" + accessToken
+	apiURL := "https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=" + accessToken
 
-	resp, err := http.Post(url, "application/json", strings.NewReader(string(body)))
+	resp, err := p.apiClient.Post(apiURL, "application/json", strings.NewReader(string(body)))
 	if err != nil {
 		return fmt.Errorf("wecom: send message: %w", err)
 	}
@@ -289,12 +302,12 @@ func (p *Platform) getAccessToken() (string, error) {
 		return p.tokenCache.token, nil
 	}
 
-	url := fmt.Sprintf(
+	apiURL := fmt.Sprintf(
 		"https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid=%s&corpsecret=%s",
 		p.corpID, p.corpSecret,
 	)
 
-	resp, err := http.Get(url)
+	resp, err := p.apiClient.Get(apiURL)
 	if err != nil {
 		return "", fmt.Errorf("wecom: request access_token: %w", err)
 	}
