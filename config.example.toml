@@ -41,6 +41,19 @@ type = "feishu"
 app_id = "your-feishu-app-id"
 app_secret = "your-feishu-app-secret"
 
+# DingTalk (uncomment to enable)
+# 1. Create an app at https://open-dev.dingtalk.com
+# 2. Under "App Features > Bot", enable the bot capability and select Stream mode
+# 3. Fill in client_id (AppKey) and client_secret (AppSecret) below
+# Note: No WebSocket URL needed — the DingTalk Stream SDK handles the connection.
+
+# [[projects.platforms]]
+# type = "dingtalk"
+#
+# [projects.platforms.options]
+# client_id = "your-dingtalk-client-id"
+# client_secret = "your-dingtalk-client-secret"
+
 # =============================================================================
 # Project 2 (uncomment to enable)
 # =============================================================================

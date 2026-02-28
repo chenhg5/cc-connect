@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -58,10 +59,13 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		return fmt.Errorf("dingtalk: start stream: %w", err)
 	}
 
+	slog.Info("dingtalk: stream connected", "client_id", p.clientID)
 	return nil
 }
 
 func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel) {
+	slog.Debug("dingtalk: message received", "user", data.SenderNick, "content_len", len(data.Text.Content))
+
 	sessionKey := fmt.Sprintf("dingtalk:%s:%s", data.ConversationId, data.SenderStaffId)
 
 	msg := &core.Message{
