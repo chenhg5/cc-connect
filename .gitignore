@@ -7,3 +7,4 @@ config.toml
 *.dylib
 .env
 .DS_Store
+dist
