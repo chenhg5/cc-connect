@@ -24,13 +24,15 @@ func init() {
 // Agent drives Claude Code CLI using --input-format stream-json
 // and --permission-prompt-tool stdio for bidirectional communication.
 //
-// Modes:
-//   - "interactive": permission requests are forwarded to the user via IM
-//   - "auto": permission requests are auto-approved in code (no --dangerously-skip-permissions needed)
+// Permission modes (maps to Claude's --permission-mode):
+//   - "default":           every tool call requires user approval
+//   - "acceptEdits":       auto-approve file edit tools, ask for others
+//   - "plan":              plan only, no execution until approved
+//   - "bypassPermissions": auto-approve everything (YOLO mode)
 type Agent struct {
 	workDir      string
 	model        string
-	mode         string // "auto" | "interactive"
+	mode         string // "default" | "acceptEdits" | "plan" | "bypassPermissions"
 	allowedTools []string
 	mu           sync.Mutex
 }
@@ -42,9 +44,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 	model, _ := opts["model"].(string)
 	mode, _ := opts["mode"].(string)
-	if mode == "" {
-		mode = "interactive"
-	}
+	mode = normalizePermissionMode(mode)
 
 	var allowedTools []string
 	if tools, ok := opts["allowed_tools"].([]any); ok {
@@ -65,6 +65,21 @@ func New(opts map[string]any) (core.Agent, error) {
 		mode:         mode,
 		allowedTools: allowedTools,
 	}, nil
+}
+
+// normalizePermissionMode maps user-friendly aliases to Claude CLI values.
+func normalizePermissionMode(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "acceptedits", "accept-edits", "accept_edits", "edit":
+		return "acceptEdits"
+	case "plan":
+		return "plan"
+	case "bypasspermissions", "bypass-permissions", "bypass_permissions",
+		"yolo", "auto":
+		return "bypassPermissions"
+	default:
+		return "default"
+	}
 }
 
 func (a *Agent) Name() string { return "claudecode" }
@@ -169,6 +184,31 @@ func scanSessionMeta(path string) (string, int) {
 }
 
 func (a *Agent) Stop() error { return nil }
+
+// SetMode changes the permission mode for future sessions.
+func (a *Agent) SetMode(mode string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.mode = normalizePermissionMode(mode)
+	slog.Info("claudecode: permission mode changed", "mode", a.mode)
+}
+
+// GetMode returns the current permission mode.
+func (a *Agent) GetMode() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.mode
+}
+
+// PermissionModes returns all supported permission modes.
+func (a *Agent) PermissionModes() []core.PermissionModeInfo {
+	return []core.PermissionModeInfo{
+		{Key: "default", Name: "Default", NameZh: "默认", Desc: "Ask permission for every tool call", DescZh: "每次工具调用都需确认"},
+		{Key: "acceptEdits", Name: "Accept Edits", NameZh: "接受编辑", Desc: "Auto-approve file edits, ask for others", DescZh: "自动允许文件编辑，其他需确认"},
+		{Key: "plan", Name: "Plan Mode", NameZh: "计划模式", Desc: "Plan only, no execution until approved", DescZh: "只做规划不执行，审批后再执行"},
+		{Key: "bypassPermissions", Name: "YOLO", NameZh: "YOLO 模式", Desc: "Auto-approve everything", DescZh: "全部自动通过"},
+	}
+}
 
 // AddAllowedTools adds tools to the pre-allowed list (takes effect on next session).
 func (a *Agent) AddAllowedTools(tools ...string) error {

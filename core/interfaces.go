@@ -64,3 +64,19 @@ type ToolAuthorizer interface {
 	AddAllowedTools(tools ...string) error
 	GetAllowedTools() []string
 }
+
+// ModeSwitcher is an optional interface for agents that support runtime permission mode switching.
+type ModeSwitcher interface {
+	SetMode(mode string)
+	GetMode() string
+	PermissionModes() []PermissionModeInfo
+}
+
+// PermissionModeInfo describes a permission mode for display.
+type PermissionModeInfo struct {
+	Key    string
+	Name   string
+	NameZh string
+	Desc   string
+	DescZh string
+}

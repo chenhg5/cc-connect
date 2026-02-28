@@ -29,7 +29,7 @@ type = "claudecode"
 
 [projects.agent.options]
 work_dir = "/path/to/backend"
-mode = "interactive" # "interactive" (default) | "auto"
+mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "bypassPermissions" (yolo)
 
 # Mode options:
 # - "interactive": Claude will ask for permission before sensitive operations.
@@ -38,7 +38,7 @@ mode = "interactive" # "interactive" (default) | "auto"
 # - "auto": All operations are automatically approved (use with caution).
 #   Best for trusted environments or when you want uninterrupted execution.
 
-# In interactive mode, you can pre-approve specific tools:
+# In default/acceptEdits mode, you can pre-approve specific tools:
 # allowed_tools = ["Read", "Grep", "Glob", "Bash", "Edit", "Write"]
 
 # Optional: specify a model
@@ -164,7 +164,7 @@ app_secret = "your-feishu-app-secret"
 #
 # [projects.agent.options]
 # work_dir = "/path/to/frontend"
-# mode = "auto"
+# mode = "bypassPermissions"
 #
 # [[projects.platforms]]
 # type = "telegram"

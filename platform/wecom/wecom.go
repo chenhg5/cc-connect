@@ -263,9 +263,12 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 
 	chunks := splitByBytes(content, 2000)
 	for i, chunk := range chunks {
-		if err := p.sendText(accessToken, rc.userID, chunk); err != nil {
-			slog.Error("wecom: send failed", "user", rc.userID, "chunk", i, "error", err)
-			return err
+		if err := p.sendMarkdown(accessToken, rc.userID, chunk); err != nil {
+			slog.Warn("wecom: markdown send failed, falling back to text", "error", err)
+			if err := p.sendText(accessToken, rc.userID, chunk); err != nil {
+				slog.Error("wecom: text fallback send failed", "user", rc.userID, "chunk", i, "error", err)
+				return err
+			}
 		}
 	}
 	slog.Debug("wecom: message sent", "user", rc.userID, "chunks", len(chunks), "total_len", len(content))
@@ -275,6 +278,36 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 // Send sends a new message (same as Reply for WeChat Work)
 func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	return p.Reply(ctx, rctx, content)
+}
+
+func (p *Platform) sendMarkdown(accessToken, toUser, content string) error {
+	payload := map[string]any{
+		"touser":  toUser,
+		"msgtype": "markdown",
+		"agentid": p.agentID,
+		"markdown": map[string]string{"content": content},
+	}
+
+	body, _ := json.Marshal(payload)
+	apiURL := "https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=" + accessToken
+
+	resp, err := p.apiClient.Post(apiURL, "application/json", strings.NewReader(string(body)))
+	if err != nil {
+		return fmt.Errorf("wecom: send markdown: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		ErrCode int    `json:"errcode"`
+		ErrMsg  string `json:"errmsg"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("wecom: decode send response: %w", err)
+	}
+	if result.ErrCode != 0 {
+		return fmt.Errorf("wecom: send markdown failed: %d %s", result.ErrCode, result.ErrMsg)
+	}
+	return nil
 }
 
 func (p *Platform) sendText(accessToken, toUser, text string) error {

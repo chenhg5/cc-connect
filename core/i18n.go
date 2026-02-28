@@ -71,6 +71,9 @@ func (i *I18n) currentLang() Language {
 	return i.lang
 }
 
+// CurrentLang returns the resolved language (exported for mode display).
+func (i *I18n) CurrentLang() Language { return i.currentLang() }
+
 // Message keys
 type MsgKey string
 
@@ -95,7 +98,10 @@ const (
 	MsgPermissionHint       MsgKey = "permission_hint"
 	MsgQuietOn              MsgKey = "quiet_on"
 	MsgQuietOff             MsgKey = "quiet_off"
+	MsgModeChanged          MsgKey = "mode_changed"
+	MsgModeNotSupported     MsgKey = "mode_not_supported"
 	MsgSessionRestarting    MsgKey = "session_restarting"
+	MsgHelp                 MsgKey = "help"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -179,9 +185,39 @@ var messages = map[MsgKey]map[Language]string{
 		LangEnglish: "🔔 Quiet mode OFF — thinking and tool progress messages will be shown.",
 		LangChinese: "🔔 安静模式已关闭 — 将恢复推送思考和工具调用进度消息。",
 	},
+	MsgModeChanged: {
+		LangEnglish: "🔄 Permission mode switched to **%s**. New sessions will use this mode.",
+		LangChinese: "🔄 权限模式已切换为 **%s**，新会话将使用此模式。",
+	},
+	MsgModeNotSupported: {
+		LangEnglish: "This agent does not support permission mode switching.",
+		LangChinese: "当前 Agent 不支持权限模式切换。",
+	},
 	MsgSessionRestarting: {
 		LangEnglish: "🔄 Session process exited, restarting...",
 		LangChinese: "🔄 会话进程已退出，正在重启...",
+	},
+	MsgHelp: {
+		LangEnglish: `/new [name]         — Start a new Claude session
+/list               — List Claude Code sessions
+/switch <id_prefix> — Resume an existing session
+/current            — Show current active session
+/history [n]        — Show last n messages (default 10)
+/allow <tool>       — Pre-allow a tool (next session)
+/mode [name]        — View/switch permission mode (default/edit/plan/yolo)
+/quiet              — Toggle thinking/tool progress messages
+/stop               — Stop current execution
+/help               — Show this help`,
+		LangChinese: `/new [名称]          — 创建新的 Claude 会话
+/list               — 列出 Claude Code 会话列表
+/switch <id前缀>    — 恢复已有会话
+/current            — 查看当前活跃会话
+/history [n]        — 查看最近 n 条消息（默认 10）
+/allow <工具名>      — 预授权工具（下次会话生效）
+/mode [名称]         — 查看/切换权限模式（default/edit/plan/yolo）
+/quiet              — 开关思考和工具进度消息
+/stop               — 停止当前执行
+/help               — 显示此帮助`,
 	},
 }
 

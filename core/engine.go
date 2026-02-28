@@ -470,6 +470,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) {
 		e.cmdHistory(p, msg, args)
 	case "/allow":
 		e.cmdAllow(p, msg, args)
+	case "/mode":
+		e.cmdMode(p, msg, args)
 	case "/quiet":
 		e.cmdQuiet(p, msg)
 	case "/stop":
@@ -615,15 +617,61 @@ func (e *Engine) cmdHistory(p Platform, msg *Message, args []string) {
 }
 
 func (e *Engine) cmdHelp(p Platform, msg *Message) {
-	e.reply(p, msg.ReplyCtx, `/new [name]         — Start a brand-new Claude session
-/list               — List Claude Code sessions for this project
-/switch <id_prefix> — Resume an existing Claude session
-/current            — Show current active session
-/history [n]        — Show last n messages (default 10)
-/allow <tool>       — Pre-allow a tool (takes effect on next session)
-/quiet              — Toggle thinking/tool progress messages
-/stop               — Stop current execution
-/help               — Show this help`)
+	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHelp))
+}
+
+func (e *Engine) cmdMode(p Platform, msg *Message, args []string) {
+	switcher, ok := e.agent.(ModeSwitcher)
+	if !ok {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgModeNotSupported))
+		return
+	}
+
+	if len(args) == 0 {
+		current := switcher.GetMode()
+		modes := switcher.PermissionModes()
+		var sb strings.Builder
+		isZh := e.i18n.CurrentLang() == LangChinese
+		for _, m := range modes {
+			marker := "  "
+			if m.Key == current {
+				marker = "▶ "
+			}
+			if isZh {
+				sb.WriteString(fmt.Sprintf("%s**%s** — %s\n", marker, m.NameZh, m.DescZh))
+			} else {
+				sb.WriteString(fmt.Sprintf("%s**%s** — %s\n", marker, m.Name, m.Desc))
+			}
+		}
+		if isZh {
+			sb.WriteString("\n使用 `/mode <名称>` 切换模式\n可用值: `default` / `edit` / `plan` / `yolo`")
+		} else {
+			sb.WriteString("\nUse `/mode <name>` to switch.\nAvailable: `default` / `edit` / `plan` / `yolo`")
+		}
+		e.reply(p, msg.ReplyCtx, sb.String())
+		return
+	}
+
+	target := strings.ToLower(args[0])
+	switcher.SetMode(target)
+	newMode := switcher.GetMode()
+
+	e.cleanupInteractiveState(msg.SessionKey)
+
+	modes := switcher.PermissionModes()
+	displayName := newMode
+	isZh := e.i18n.CurrentLang() == LangChinese
+	for _, m := range modes {
+		if m.Key == newMode {
+			if isZh {
+				displayName = m.NameZh
+			} else {
+				displayName = m.Name
+			}
+			break
+		}
+	}
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgModeChanged), displayName))
 }
 
 func (e *Engine) cmdQuiet(p Platform, msg *Message) {

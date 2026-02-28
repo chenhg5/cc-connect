@@ -44,6 +44,9 @@ func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode strin
 		"--permission-prompt-tool", "stdio",
 	}
 
+	if mode != "" && mode != "default" {
+		args = append(args, "--permission-mode", mode)
+	}
 	if sessionID != "" {
 		args = append(args, "--resume", sessionID)
 	}
@@ -83,7 +86,7 @@ func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode strin
 		cmd:         cmd,
 		stdin:       stdin,
 		events:      make(chan core.Event, 64),
-		autoApprove: mode == "auto",
+		autoApprove: mode == "bypassPermissions",
 		ctx:         sessionCtx,
 		cancel:      cancel,
 		done:        make(chan struct{}),
