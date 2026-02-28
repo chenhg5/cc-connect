@@ -1,0 +1,49 @@
+# cc-connect 配置文件
+# 复制此文件为 config.toml 并填入你的实际配置
+
+# =============================================================================
+# AI Agent 配置
+# =============================================================================
+[agent]
+# 支持的类型: claudecode
+# 即将支持: cursor-agent, gemini-cli, codex
+type = "claudecode"
+
+  [agent.options]
+  # Claude Code 的工作目录（会在此目录下执行代码操作）
+  work_dir = "."
+  # 可选：指定使用的模型
+  # model = "claude-sonnet-4-20250514"
+
+# =============================================================================
+# 日志配置
+# =============================================================================
+[log]
+# 日志级别: debug, info, warn, error
+level = "info"
+
+# =============================================================================
+# 平台配置（可同时配置多个平台）
+# =============================================================================
+
+# ---- 飞书 / Lark ----
+# 1. 前往 https://open.feishu.cn 创建应用
+# 2. 开启机器人能力
+# 3. 在「事件订阅」中添加 im.message.receive_v1 事件
+# 4. 选择 WebSocket 长连接模式
+[[platforms]]
+type = "feishu"
+
+  [platforms.options]
+  app_id = "your-feishu-app-id"
+  app_secret = "your-feishu-app-secret"
+
+# ---- 钉钉 / DingTalk ----
+# 1. 前往 https://open-dev.dingtalk.com 创建应用
+# 2. 创建机器人，选择 Stream 模式
+# [[platforms]]
+# type = "dingtalk"
+#
+#   [platforms.options]
+#   client_id = "your-dingtalk-client-id"
+#   client_secret = "your-dingtalk-client-secret"

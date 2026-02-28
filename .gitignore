@@ -1,0 +1,8 @@
+cc-connect
+config.toml
+*.exe
+*.dll
+*.so
+*.dylib
+.env
+.DS_Store
