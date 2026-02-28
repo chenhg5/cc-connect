@@ -14,7 +14,7 @@ const VERSION = `v${PACKAGE.version}`;
 const NAME = "cc-connect";
 
 const GITHUB_REPO = "chenhg5/cc-connect";
-const GITEE_REPO = "chenhg5/cc-connect";
+const GITEE_REPO = "cg33/cc-connect";
 
 const PLATFORM_MAP = {
   darwin: "darwin",
@@ -148,6 +148,15 @@ async function main() {
 
   if (platform !== "windows") {
     fs.chmodSync(binaryPath, 0o755);
+  }
+
+  if (platform === "darwin") {
+    try {
+      execSync(`xattr -d com.apple.quarantine "${binaryPath}"`, { stdio: "pipe" });
+      console.log(`[cc-connect] Removed macOS quarantine attribute`);
+    } catch {
+      // xattr fails if the attribute doesn't exist, which is fine
+    }
   }
 
   console.log(`[cc-connect] Installed to ${binaryPath}`);
