@@ -16,7 +16,7 @@ Bridge your local AI coding assistants (Claude Code / Cursor / Gemini CLI / Code
 
 - **Platform** — Messaging platform adapter. Handles receiving/sending messages over WebSocket, Stream, etc.
 - **Agent** — AI assistant adapter. Invokes the local AI tool and collects its response.
-- **Engine** — Core router. Forwards platform messages to the agent and relays responses back.
+- **Engine** — Core router. Manages sessions, routes messages between platforms and agents, handles slash commands.
 
 All components are decoupled via Go interfaces — fully pluggable and extensible.
 
@@ -58,12 +58,41 @@ vim config.toml
 ### Run
 
 ```bash
-# Use default config file (config.toml)
-./cc-connect
-
-# Use a custom config file
-./cc-connect -config /path/to/config.toml
+./cc-connect                              # uses config.toml by default
+./cc-connect -config /path/to/config.toml # custom path
 ```
+
+## Execution Modes
+
+Claude Code adapter supports two modes, controlled by the `mode` option:
+
+| Mode | Behavior | Use Case |
+|------|----------|----------|
+| `interactive` (default) | Respects tool permissions. Shows tool-use details in every response. Use `allowed_tools` to grant specific tools. | Daily development — you stay in control. |
+| `auto` | Auto-approves all operations (`--dangerously-skip-permissions`). | Trusted / sandboxed environments. |
+
+```toml
+[agent.options]
+mode = "interactive"
+# allowed_tools = ["Read", "Grep", "Glob", "Bash"]
+```
+
+In both modes, Claude Code can ask clarifying questions. The conversation continues naturally — just reply on the messaging platform.
+
+## Session Management
+
+Each user gets an independent session with full conversation context. You can manage multiple sessions via slash commands directly from the messaging platform:
+
+| Command | Description |
+|---------|-------------|
+| `/new [name]` | Create a new session (and switch to it) |
+| `/list` | List all your sessions |
+| `/switch <id\|name>` | Switch to a different session |
+| `/current` | Show current session info |
+| `/history [n]` | Show last n messages (default 10) |
+| `/help` | Show available commands |
+
+Sessions are isolated — switching to a different session resumes a completely independent Claude Code conversation.
 
 ## Configuration
 
@@ -73,6 +102,8 @@ type = "claudecode"
 
   [agent.options]
   work_dir = "/path/to/your/project"
+  mode = "interactive"
+  # allowed_tools = ["Read", "Grep", "Glob"]
 
 [[platforms]]
 type = "feishu"
@@ -137,14 +168,14 @@ cc-connect/
 ├── core/                    # Core abstractions
 │   ├── interfaces.go        # Platform + Agent interfaces
 │   ├── registry.go          # Plugin-style factory registry
-│   ├── message.go           # Unified message types
-│   ├── session.go           # Session management
-│   └── engine.go            # Message routing engine
+│   ├── message.go           # Unified message / event types
+│   ├── session.go           # Multi-session management
+│   └── engine.go            # Routing engine + slash commands
 ├── platform/                # Platform adapters
 │   ├── feishu/              # Feishu / Lark (WebSocket)
 │   └── dingtalk/            # DingTalk (Stream)
 ├── agent/                   # Agent adapters
-│   └── claudecode/          # Claude Code CLI
+│   └── claudecode/          # Claude Code CLI (auto + interactive)
 ├── config/                  # Config loading
 ├── config.example.toml      # Config template
 ├── Makefile

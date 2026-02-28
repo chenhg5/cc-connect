@@ -3,8 +3,6 @@ package core
 import "context"
 
 // Platform abstracts a messaging platform (Feishu, DingTalk, Slack, etc.).
-// Each implementation handles its own connection protocol (WebSocket, HTTP, etc.)
-// and translates platform-specific messages into the unified Message type.
 type Platform interface {
 	Name() string
 	Start(handler MessageHandler) error
@@ -13,13 +11,14 @@ type Platform interface {
 }
 
 // MessageHandler is called by platforms when a new message arrives.
-// The Platform reference is passed so the engine knows which platform to reply through.
 type MessageHandler func(p Platform, msg *Message)
 
 // Agent abstracts an AI coding assistant (Claude Code, Cursor, Gemini CLI, etc.).
-// Execute sends a prompt and returns a channel that streams response chunks.
+// Execute sends a prompt and returns a channel that streams Event values.
+// The channel may emit tool_use events (showing what the agent did), text events,
+// and a final result event.
 type Agent interface {
 	Name() string
-	Execute(ctx context.Context, sessionID string, prompt string) (<-chan Response, error)
+	Execute(ctx context.Context, sessionID string, prompt string) (<-chan Event, error)
 	Stop() error
 }

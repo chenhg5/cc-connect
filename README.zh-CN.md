@@ -2,7 +2,7 @@
 
 [English](./README.md) | 中文
 
-将本地 AI 编程助手（Claude Code / Cursor / Gemini CLI / Codex）连接到飞书、钉钉、Slack 等即时通讯平台，实现双向对话。
+将本地 AI 编程助手（Claude Code / Cursor / Gemini CLI / Codex）连接到飞书、钉钉、Slack 等即时通讯平台，实现双向对话。无需公网 IP。
 
 ## 架构
 
@@ -16,7 +16,7 @@
 
 - **Platform**：消息平台适配器，负责接收/发送消息（WebSocket / Stream）
 - **Agent**：AI 助手适配器，负责调用 AI 工具并获取响应
-- **Engine**：核心路由引擎，将平台消息转发给 Agent，再将响应回传平台
+- **Engine**：核心路由引擎，管理会话、路由消息、处理斜杠命令
 
 所有组件通过接口解耦，支持即插即用扩展。
 
@@ -58,12 +58,41 @@ vim config.toml
 ### 运行
 
 ```bash
-# 使用默认配置文件 (config.toml)
-./cc-connect
-
-# 指定配置文件
-./cc-connect -config /path/to/config.toml
+./cc-connect                              # 默认使用 config.toml
+./cc-connect -config /path/to/config.toml # 自定义路径
 ```
+
+## 执行模式
+
+Claude Code 适配器支持两种模式，通过 `mode` 配置：
+
+| 模式 | 行为 | 适用场景 |
+|------|------|---------|
+| `interactive`（默认）| 尊重工具权限，每次响应展示工具调用详情。可通过 `allowed_tools` 精确授权。 | 日常开发——保持控制权 |
+| `auto` | 自动批准所有操作（`--dangerously-skip-permissions`） | 可信/沙箱环境 |
+
+```toml
+[agent.options]
+mode = "interactive"
+# allowed_tools = ["Read", "Grep", "Glob", "Bash"]
+```
+
+两种模式下 Claude Code 都可以向你提出澄清问题，直接在聊天平台上回复即可继续对话。
+
+## 会话管理
+
+每个用户拥有独立的会话和完整的对话上下文。你可以在聊天平台上通过斜杠命令管理多个会话：
+
+| 命令 | 说明 |
+|------|------|
+| `/new [名称]` | 创建新会话（并切换过去） |
+| `/list` | 列出所有会话 |
+| `/switch <id\|名称>` | 切换到指定会话 |
+| `/current` | 显示当前会话信息 |
+| `/history [n]` | 显示最近 n 条消息（默认 10） |
+| `/help` | 显示可用命令 |
+
+会话之间完全隔离——切换到不同会话会恢复一个完全独立的 Claude Code 对话。
 
 ## 配置说明
 
@@ -73,6 +102,8 @@ type = "claudecode"
 
   [agent.options]
   work_dir = "/path/to/your/project"
+  mode = "interactive"
+  # allowed_tools = ["Read", "Grep", "Glob"]
 
 [[platforms]]
 type = "feishu"
@@ -137,14 +168,14 @@ cc-connect/
 ├── core/                    # 核心抽象层
 │   ├── interfaces.go        # Platform + Agent 接口定义
 │   ├── registry.go          # 工厂注册表（插件化）
-│   ├── message.go           # 统一消息类型
-│   ├── session.go           # 会话管理
-│   └── engine.go            # 路由引擎
+│   ├── message.go           # 统一消息/事件类型
+│   ├── session.go           # 多会话管理
+│   └── engine.go            # 路由引擎 + 斜杠命令
 ├── platform/                # 平台适配器
 │   ├── feishu/              # 飞书（WebSocket 长连接）
 │   └── dingtalk/            # 钉钉（Stream 模式）
 ├── agent/                   # AI 助手适配器
-│   └── claudecode/          # Claude Code CLI
+│   └── claudecode/          # Claude Code CLI（auto + interactive）
 ├── config/                  # 配置加载
 ├── config.example.toml      # 配置模板
 ├── Makefile

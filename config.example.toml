@@ -1,49 +1,59 @@
-# cc-connect 配置文件
-# 复制此文件为 config.toml 并填入你的实际配置
+# cc-connect configuration
+# Copy this file to config.toml and fill in your credentials.
 
 # =============================================================================
-# AI Agent 配置
+# AI Agent
 # =============================================================================
 [agent]
-# 支持的类型: claudecode
-# 即将支持: cursor-agent, gemini-cli, codex
+# Supported: claudecode
+# Planned:   cursor-agent, gemini-cli, codex
 type = "claudecode"
 
   [agent.options]
-  # Claude Code 的工作目录（会在此目录下执行代码操作）
+  # Working directory for Claude Code (it operates on code in this directory)
   work_dir = "."
-  # 可选：指定使用的模型
+
+  # Execution mode:
+  #   "interactive" (default) — respects tool permissions; shows tool-use details
+  #   "auto"                  — auto-approves all operations (--dangerously-skip-permissions)
+  mode = "interactive"
+
+  # Optional: restrict which tools Claude Code may use (interactive mode only).
+  # When omitted, Claude Code uses permissions from its own settings.
+  # allowed_tools = ["Read", "Grep", "Glob", "LS"]
+
+  # Optional: override the model
   # model = "claude-sonnet-4-20250514"
 
 # =============================================================================
-# 日志配置
-# =============================================================================
-[log]
-# 日志级别: debug, info, warn, error
-level = "info"
-
-# =============================================================================
-# 平台配置（可同时配置多个平台）
+# Platforms (you can enable multiple at once)
 # =============================================================================
 
-# ---- 飞书 / Lark ----
-# 1. 前往 https://open.feishu.cn 创建应用
-# 2. 开启机器人能力
-# 3. 在「事件订阅」中添加 im.message.receive_v1 事件
-# 4. 选择 WebSocket 长连接模式
+# ---- Feishu / Lark ----
+# 1. Create an app at https://open.feishu.cn
+# 2. Enable the Bot capability
+# 3. Add im.message.receive_v1 under Event Subscriptions
+# 4. Select WebSocket long-connection mode
 [[platforms]]
 type = "feishu"
 
   [platforms.options]
-  app_id = "your-feishu-app-id"
+  app_id     = "your-feishu-app-id"
   app_secret = "your-feishu-app-secret"
 
-# ---- 钉钉 / DingTalk ----
-# 1. 前往 https://open-dev.dingtalk.com 创建应用
-# 2. 创建机器人，选择 Stream 模式
+# ---- DingTalk ----
+# 1. Create an app at https://open-dev.dingtalk.com
+# 2. Create a Bot and select Stream mode
 # [[platforms]]
 # type = "dingtalk"
 #
 #   [platforms.options]
-#   client_id = "your-dingtalk-client-id"
+#   client_id     = "your-dingtalk-client-id"
 #   client_secret = "your-dingtalk-client-secret"
+
+# =============================================================================
+# Logging
+# =============================================================================
+[log]
+# Level: debug, info, warn, error
+level = "info"
