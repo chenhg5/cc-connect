@@ -96,21 +96,44 @@ mode = "interactive"
 
 ## 配置说明
 
+每个 `[[projects]]` 将一个代码目录绑定到独立的 agent 和平台。单个 cc-connect 进程可以同时管理多个项目。
+
 ```toml
-[agent]
-type = "claudecode"
+# 项目 1
+[[projects]]
+name = "my-backend"
 
-  [agent.options]
-  work_dir = "/path/to/your/project"
-  mode = "interactive"
-  # allowed_tools = ["Read", "Grep", "Glob"]
+  [projects.agent]
+  type = "claudecode"
 
-[[platforms]]
-type = "feishu"
+    [projects.agent.options]
+    work_dir = "/path/to/backend"
+    mode = "interactive"
 
-  [platforms.options]
-  app_id = "cli_xxxx"
-  app_secret = "xxxx"
+  [[projects.platforms]]
+  type = "feishu"
+
+    [projects.platforms.options]
+    app_id     = "cli_xxxx"
+    app_secret = "xxxx"
+
+# 项目 2 —— 不同目录、不同机器人
+[[projects]]
+name = "my-frontend"
+
+  [projects.agent]
+  type = "claudecode"
+
+    [projects.agent.options]
+    work_dir = "/path/to/frontend"
+    mode = "auto"
+
+  [[projects.platforms]]
+  type = "dingtalk"
+
+    [projects.platforms.options]
+    client_id     = "xxxx"
+    client_secret = "xxxx"
 ```
 
 ### 飞书配置

@@ -1,59 +1,57 @@
 # cc-connect configuration
 # Copy this file to config.toml and fill in your credentials.
-
-# =============================================================================
-# AI Agent
-# =============================================================================
-[agent]
-# Supported: claudecode
-# Planned:   cursor-agent, gemini-cli, codex
-type = "claudecode"
-
-  [agent.options]
-  # Working directory for Claude Code (it operates on code in this directory)
-  work_dir = "."
-
-  # Execution mode:
-  #   "interactive" (default) — respects tool permissions; shows tool-use details
-  #   "auto"                  — auto-approves all operations (--dangerously-skip-permissions)
-  mode = "interactive"
-
-  # Optional: restrict which tools Claude Code may use (interactive mode only).
-  # When omitted, Claude Code uses permissions from its own settings.
-  # allowed_tools = ["Read", "Grep", "Glob", "LS"]
-
-  # Optional: override the model
-  # model = "claude-sonnet-4-20250514"
-
-# =============================================================================
-# Platforms (you can enable multiple at once)
-# =============================================================================
-
-# ---- Feishu / Lark ----
-# 1. Create an app at https://open.feishu.cn
-# 2. Enable the Bot capability
-# 3. Add im.message.receive_v1 under Event Subscriptions
-# 4. Select WebSocket long-connection mode
-[[platforms]]
-type = "feishu"
-
-  [platforms.options]
-  app_id     = "your-feishu-app-id"
-  app_secret = "your-feishu-app-secret"
-
-# ---- DingTalk ----
-# 1. Create an app at https://open-dev.dingtalk.com
-# 2. Create a Bot and select Stream mode
-# [[platforms]]
-# type = "dingtalk"
 #
-#   [platforms.options]
-#   client_id     = "your-dingtalk-client-id"
-#   client_secret = "your-dingtalk-client-secret"
+# Each [[projects]] entry binds one code directory to its own agent + platforms.
+# A single cc-connect process can manage multiple projects simultaneously.
 
 # =============================================================================
 # Logging
 # =============================================================================
 [log]
-# Level: debug, info, warn, error
-level = "info"
+level = "info"  # debug, info, warn, error
+
+# =============================================================================
+# Project 1
+# =============================================================================
+[[projects]]
+name = "my-backend"
+
+  [projects.agent]
+  type = "claudecode"
+
+    [projects.agent.options]
+    work_dir = "/path/to/backend"
+    mode = "interactive"       # "interactive" (default) | "auto"
+    # allowed_tools = ["Read", "Grep", "Glob", "Bash"]
+    # model = "claude-sonnet-4-20250514"
+
+  # Feishu bot for this project
+  # 1. Create an app at https://open.feishu.cn
+  # 2. Enable Bot capability
+  # 3. Add im.message.receive_v1 event, select WebSocket mode
+  [[projects.platforms]]
+  type = "feishu"
+
+    [projects.platforms.options]
+    app_id     = "your-feishu-app-id"
+    app_secret = "your-feishu-app-secret"
+
+# =============================================================================
+# Project 2 (uncomment to enable)
+# =============================================================================
+# [[projects]]
+# name = "my-frontend"
+#
+#   [projects.agent]
+#   type = "claudecode"
+#
+#     [projects.agent.options]
+#     work_dir = "/path/to/frontend"
+#     mode = "auto"
+#
+#   [[projects.platforms]]
+#   type = "dingtalk"
+#
+#     [projects.platforms.options]
+#     client_id     = "your-dingtalk-client-id"
+#     client_secret = "your-dingtalk-client-secret"

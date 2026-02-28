@@ -8,9 +8,15 @@ import (
 )
 
 type Config struct {
+	Projects []ProjectConfig `toml:"projects"`
+	Log      LogConfig       `toml:"log"`
+}
+
+// ProjectConfig binds one agent (with a specific work_dir) to one or more platforms.
+type ProjectConfig struct {
+	Name      string           `toml:"name"`
 	Agent     AgentConfig      `toml:"agent"`
 	Platforms []PlatformConfig `toml:"platforms"`
-	Log       LogConfig        `toml:"log"`
 }
 
 type AgentConfig struct {
@@ -47,15 +53,24 @@ func Load(path string) (*Config, error) {
 }
 
 func (c *Config) validate() error {
-	if c.Agent.Type == "" {
-		return fmt.Errorf("config: agent.type is required")
+	if len(c.Projects) == 0 {
+		return fmt.Errorf("config: at least one [[projects]] entry is required")
 	}
-	if len(c.Platforms) == 0 {
-		return fmt.Errorf("config: at least one platform must be configured")
-	}
-	for i, p := range c.Platforms {
-		if p.Type == "" {
-			return fmt.Errorf("config: platforms[%d].type is required", i)
+	for i, proj := range c.Projects {
+		prefix := fmt.Sprintf("projects[%d]", i)
+		if proj.Name == "" {
+			return fmt.Errorf("config: %s.name is required", prefix)
+		}
+		if proj.Agent.Type == "" {
+			return fmt.Errorf("config: %s.agent.type is required", prefix)
+		}
+		if len(proj.Platforms) == 0 {
+			return fmt.Errorf("config: %s needs at least one [[projects.platforms]]", prefix)
+		}
+		for j, p := range proj.Platforms {
+			if p.Type == "" {
+				return fmt.Errorf("config: %s.platforms[%d].type is required", prefix, j)
+			}
 		}
 	}
 	return nil

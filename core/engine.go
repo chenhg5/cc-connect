@@ -10,8 +10,9 @@ import (
 
 const maxPlatformMessageLen = 4000
 
-// Engine routes messages between platforms and the agent.
+// Engine routes messages between platforms and the agent for a single project.
 type Engine struct {
+	name      string
 	agent     Agent
 	platforms []Platform
 	sessions  *SessionManager
@@ -19,9 +20,10 @@ type Engine struct {
 	cancel    context.CancelFunc
 }
 
-func NewEngine(ag Agent, platforms []Platform) *Engine {
+func NewEngine(name string, ag Agent, platforms []Platform) *Engine {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Engine{
+		name:      name,
 		agent:     ag,
 		platforms: platforms,
 		sessions:  NewSessionManager(),
@@ -33,11 +35,11 @@ func NewEngine(ag Agent, platforms []Platform) *Engine {
 func (e *Engine) Start() error {
 	for _, p := range e.platforms {
 		if err := p.Start(e.handleMessage); err != nil {
-			return fmt.Errorf("start platform %s: %w", p.Name(), err)
+			return fmt.Errorf("[%s] start platform %s: %w", e.name, p.Name(), err)
 		}
-		slog.Info("platform started", "name", p.Name())
+		slog.Info("platform started", "project", e.name, "platform", p.Name())
 	}
-	slog.Info("engine started", "agent", e.agent.Name(), "platforms", len(e.platforms))
+	slog.Info("engine started", "project", e.name, "agent", e.agent.Name(), "platforms", len(e.platforms))
 	return nil
 }
 

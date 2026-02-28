@@ -96,21 +96,44 @@ Sessions are isolated — switching to a different session resumes a completely 
 
 ## Configuration
 
+Each `[[projects]]` entry binds one code directory to its own agent and platforms. A single cc-connect process can manage multiple projects simultaneously.
+
 ```toml
-[agent]
-type = "claudecode"
+# Project 1
+[[projects]]
+name = "my-backend"
 
-  [agent.options]
-  work_dir = "/path/to/your/project"
-  mode = "interactive"
-  # allowed_tools = ["Read", "Grep", "Glob"]
+  [projects.agent]
+  type = "claudecode"
 
-[[platforms]]
-type = "feishu"
+    [projects.agent.options]
+    work_dir = "/path/to/backend"
+    mode = "interactive"
 
-  [platforms.options]
-  app_id = "cli_xxxx"
-  app_secret = "xxxx"
+  [[projects.platforms]]
+  type = "feishu"
+
+    [projects.platforms.options]
+    app_id     = "cli_xxxx"
+    app_secret = "xxxx"
+
+# Project 2 — different folder, different bot
+[[projects]]
+name = "my-frontend"
+
+  [projects.agent]
+  type = "claudecode"
+
+    [projects.agent.options]
+    work_dir = "/path/to/frontend"
+    mode = "auto"
+
+  [[projects.platforms]]
+  type = "dingtalk"
+
+    [projects.platforms.options]
+    client_id     = "xxxx"
+    client_secret = "xxxx"
 ```
 
 ### Feishu (Lark)
