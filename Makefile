@@ -48,7 +48,17 @@ release-all: clean
 		echo "Building $(OUT)" && \
 		GOOS=$(GOOS) GOARCH=$(GOARCH) CGO_ENABLED=0 \
 			go build -ldflags "$(LDFLAGS)" -o $(OUT) $(CMD) && \
-	) echo "Done. Binaries in $(DIST)/"
+	) true
+	@echo "Packaging archives..."
+	@cd $(DIST) && for f in $(APP)-*; do \
+		case "$$f" in \
+			*.tar.gz|*.zip) continue ;; \
+			*.exe) zip "$${f%.exe}.zip" "$$f" ;; \
+			*)     tar czf "$$f.tar.gz" "$$f" ;; \
+		esac; \
+	done
+	@cd $(DIST) && sha256sum * > checksums.txt
+	@echo "Done. Binaries and archives in $(DIST)/"
 
 release:
 	@if [ -z "$(TARGET)" ]; then \
