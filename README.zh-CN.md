@@ -23,9 +23,9 @@
 ## 效果截图
 
 <p align="center">
-  <img src="docs/images/screenshot/cc-connect-lark.JPG" alt="飞书" width="280" />
-  <img src="docs/images/screenshot/cc-connect-discord.png" alt="Discord" width="280" />
-  <img src="docs/images/screenshot/cc-connect-wechat.JPG" alt="微信" width="280" />
+  <img src="docs/images/screenshot/cc-connect-lark.JPG" alt="飞书" width="32%" />
+  <img src="docs/images/screenshot/cc-connect-discord.png" alt="Discord" width="32%" />
+  <img src="docs/images/screenshot/cc-connect-wechat.JPG" alt="微信" width="32%" />
 </p>
 <p align="center">
   <em>左：飞书 &nbsp;|&nbsp; 中：Discord &nbsp;|&nbsp; 右：个人微信（通过企业微信关联）</em>
