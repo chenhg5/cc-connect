@@ -472,6 +472,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) {
 		e.cmdAllow(p, msg, args)
 	case "/mode":
 		e.cmdMode(p, msg, args)
+	case "/lang":
+		e.cmdLang(p, msg, args)
 	case "/quiet":
 		e.cmdQuiet(p, msg)
 	case "/stop":
@@ -614,6 +616,44 @@ func (e *Engine) cmdHistory(p Platform, msg *Message, args []string) {
 		sb.WriteString(fmt.Sprintf("%s [%s]\n%s\n\n", icon, e.Timestamp.Format("15:04:05"), content))
 	}
 	e.reply(p, msg.ReplyCtx, sb.String())
+}
+
+func (e *Engine) cmdLang(p Platform, msg *Message, args []string) {
+	if len(args) == 0 {
+		cur := e.i18n.CurrentLang()
+		name := langDisplayName(cur)
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgLangCurrent, name))
+		return
+	}
+
+	target := strings.ToLower(strings.TrimSpace(args[0]))
+	var lang Language
+	switch target {
+	case "en", "english":
+		lang = LangEnglish
+	case "zh", "cn", "chinese", "中文":
+		lang = LangChinese
+	case "auto":
+		lang = LangAuto
+	default:
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgLangInvalid))
+		return
+	}
+
+	e.i18n.SetLang(lang)
+	name := langDisplayName(lang)
+	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgLangChanged, name))
+}
+
+func langDisplayName(lang Language) string {
+	switch lang {
+	case LangEnglish:
+		return "English"
+	case LangChinese:
+		return "中文"
+	default:
+		return "Auto"
+	}
 }
 
 func (e *Engine) cmdHelp(p Platform, msg *Message) {

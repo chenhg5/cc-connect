@@ -74,6 +74,12 @@ func (i *I18n) currentLang() Language {
 // CurrentLang returns the resolved language (exported for mode display).
 func (i *I18n) CurrentLang() Language { return i.currentLang() }
 
+// SetLang overrides the language (disabling auto-detect).
+func (i *I18n) SetLang(lang Language) {
+	i.lang = lang
+	i.detected = ""
+}
+
 // Message keys
 type MsgKey string
 
@@ -101,6 +107,9 @@ const (
 	MsgModeChanged          MsgKey = "mode_changed"
 	MsgModeNotSupported     MsgKey = "mode_not_supported"
 	MsgSessionRestarting    MsgKey = "session_restarting"
+	MsgLangChanged          MsgKey = "lang_changed"
+	MsgLangInvalid          MsgKey = "lang_invalid"
+	MsgLangCurrent          MsgKey = "lang_current"
 	MsgHelp                 MsgKey = "help"
 )
 
@@ -197,6 +206,18 @@ var messages = map[MsgKey]map[Language]string{
 		LangEnglish: "🔄 Session process exited, restarting...",
 		LangChinese: "🔄 会话进程已退出，正在重启...",
 	},
+	MsgLangChanged: {
+		LangEnglish: "🌐 Language switched to **%s**.",
+		LangChinese: "🌐 语言已切换为 **%s**。",
+	},
+	MsgLangInvalid: {
+		LangEnglish: "Unknown language. Supported: `en` (English), `zh` (中文), `auto` (auto-detect).",
+		LangChinese: "未知语言。支持: `en` (English), `zh` (中文), `auto` (自动检测)。",
+	},
+	MsgLangCurrent: {
+		LangEnglish: "🌐 Current language: **%s**\n\nUsage: /lang <en|zh|auto>",
+		LangChinese: "🌐 当前语言: **%s**\n\n用法: /lang <en|zh|auto>",
+	},
 	MsgHelp: {
 		LangEnglish: "📖 Available Commands\n\n" +
 			"/new [name]\n  Start a new Claude session\n\n" +
@@ -206,6 +227,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/history [n]\n  Show last n messages (default 10)\n\n" +
 			"/allow <tool>\n  Pre-allow a tool (next session)\n\n" +
 			"/mode [name]\n  View/switch permission mode\n\n" +
+			"/lang [en|zh|auto]\n  View/switch language\n\n" +
 			"/quiet\n  Toggle thinking/tool progress\n\n" +
 			"/stop\n  Stop current execution\n\n" +
 			"/help\n  Show this help\n\n" +
@@ -218,6 +240,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/history [n]\n  查看最近 n 条消息（默认 10）\n\n" +
 			"/allow <工具名>\n  预授权工具（下次会话生效）\n\n" +
 			"/mode [名称]\n  查看/切换权限模式\n\n" +
+			"/lang [en|zh|auto]\n  查看/切换语言\n\n" +
 			"/quiet\n  开关思考和工具进度消息\n\n" +
 			"/stop\n  停止当前执行\n\n" +
 			"/help\n  显示此帮助\n\n" +
