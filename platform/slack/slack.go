@@ -141,6 +141,20 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	return nil
 }
 
+// Send sends a new message (not a reply)
+func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("slack: invalid reply context type %T", rctx)
+	}
+
+	_, _, err := p.client.PostMessageContext(ctx, rc.channel, slack.MsgOptionText(content, false))
+	if err != nil {
+		return fmt.Errorf("slack: send: %w", err)
+	}
+	return nil
+}
+
 func (p *Platform) Stop() error {
 	if p.cancel != nil {
 		p.cancel()

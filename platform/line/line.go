@@ -168,6 +168,11 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	return nil
 }
 
+// Send sends a new message (same as Reply for LINE)
+func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
+	return p.Reply(ctx, rctx, content)
+}
+
 func splitMessage(s string, maxLen int) []string {
 	if len(s) <= maxLen {
 		return []string{s}

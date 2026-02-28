@@ -113,6 +113,11 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	return nil
 }
 
+// Send sends a new message (same as Reply for DingTalk)
+func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
+	return p.Reply(ctx, rctx, content)
+}
+
 func (p *Platform) Stop() error {
 	if p.streamClient != nil {
 		p.streamClient.Close()

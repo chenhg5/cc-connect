@@ -22,6 +22,7 @@ func init() {
 
 type replyContext struct {
 	messageID string
+	chatID    string
 }
 
 type Platform struct {
@@ -115,7 +116,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		UserID:     userID,
 		UserName:   userName,
 		Content:    textBody.Text,
-		ReplyCtx:   replyContext{messageID: *msg.MessageId},
+		ReplyCtx:   replyContext{messageID: *msg.MessageId, chatID: chatID},
 	}
 
 	p.handler(p, coreMsg)
@@ -142,6 +143,37 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	}
 	if !resp.Success() {
 		return fmt.Errorf("feishu: reply failed code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	return nil
+}
+
+// Send sends a new message to the same chat (not a reply to original message)
+func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("feishu: invalid reply context type %T", rctx)
+	}
+
+	if rc.chatID == "" {
+		return fmt.Errorf("feishu: chatID is empty, cannot send new message")
+	}
+
+	msgType, msgBody := buildReplyContent(content)
+
+	// Send a new message to the chat (not a reply)
+	resp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
+		ReceiveIdType(larkim.ReceiveIdTypeChatId).
+		Body(larkim.NewCreateMessageReqBodyBuilder().
+			ReceiveId(rc.chatID).
+			MsgType(msgType).
+			Content(msgBody).
+			Build()).
+		Build())
+	if err != nil {
+		return fmt.Errorf("feishu: send api call: %w", err)
+	}
+	if !resp.Success() {
+		return fmt.Errorf("feishu: send failed code=%d msg=%s", resp.Code, resp.Msg)
 	}
 	return nil
 }

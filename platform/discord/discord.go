@@ -112,6 +112,35 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	return nil
 }
 
+// Send sends a new message (not a reply)
+func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("discord: invalid reply context type %T", rctx)
+	}
+
+	// Discord has a 2000 char limit per message
+	for len(content) > 0 {
+		chunk := content
+		if len(chunk) > maxDiscordLen {
+			cut := maxDiscordLen
+			if idx := lastIndexBefore(content, '\n', cut); idx > 0 {
+				cut = idx + 1
+			}
+			chunk = content[:cut]
+			content = content[cut:]
+		} else {
+			content = ""
+		}
+
+		_, err := p.session.ChannelMessageSend(rc.channelID, chunk)
+		if err != nil {
+			return fmt.Errorf("discord: send: %w", err)
+		}
+	}
+	return nil
+}
+
 func (p *Platform) Stop() error {
 	if p.session != nil {
 		return p.session.Close()

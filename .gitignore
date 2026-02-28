@@ -8,3 +8,4 @@ config.toml
 .env
 .DS_Store
 dist
+test

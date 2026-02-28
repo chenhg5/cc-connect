@@ -2,7 +2,6 @@ package claudecode
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,6 +11,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -20,14 +21,18 @@ func init() {
 	core.RegisterAgent("claudecode", New)
 }
 
-// Agent drives the Claude Code CLI in one of two modes:
-//   - "auto":        uses --dangerously-skip-permissions (all tools auto-approved)
-//   - "interactive":  respects tool permissions; optionally scoped via --allowedTools
+// Agent drives Claude Code CLI using --input-format stream-json
+// and --permission-prompt-tool stdio for bidirectional communication.
+//
+// Modes:
+//   - "interactive": permission requests are forwarded to the user via IM
+//   - "auto": permission requests are auto-approved in code (no --dangerously-skip-permissions needed)
 type Agent struct {
 	workDir      string
 	model        string
-	mode         string   // "auto" | "interactive"
-	allowedTools []string // only used in interactive mode
+	mode         string // "auto" | "interactive"
+	allowedTools []string
+	mu           sync.Mutex
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -64,122 +69,14 @@ func New(opts map[string]any) (core.Agent, error) {
 
 func (a *Agent) Name() string { return "claudecode" }
 
-func (a *Agent) Execute(ctx context.Context, sessionID string, prompt string) (<-chan core.Event, error) {
-	args := []string{"-p", prompt, "--output-format", "stream-json", "--verbose"}
-	if sessionID != "" {
-		args = append(args, "--resume", sessionID)
-	}
-	if a.model != "" {
-		args = append(args, "--model", a.model)
-	}
+// StartSession creates a persistent interactive Claude Code session.
+func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
+	a.mu.Lock()
+	tools := make([]string, len(a.allowedTools))
+	copy(tools, a.allowedTools)
+	a.mu.Unlock()
 
-	switch a.mode {
-	case "auto":
-		args = append(args, "--dangerously-skip-permissions")
-	default:
-		if len(a.allowedTools) > 0 {
-			args = append(args, "--allowedTools", strings.Join(a.allowedTools, ","))
-		}
-	}
-
-	slog.Debug("claudecode: executing", "args", args, "dir", a.workDir)
-
-	cmd := exec.CommandContext(ctx, "claude", args...)
-	cmd.Dir = a.workDir
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("claudecode: stdout pipe: %w", err)
-	}
-
-	var stderrBuf bytes.Buffer
-	cmd.Stderr = &stderrBuf
-
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("claudecode: start: %w", err)
-	}
-
-	ch := make(chan core.Event, 16)
-
-	go func() {
-		defer close(ch)
-		defer func() {
-			if err := cmd.Wait(); err != nil {
-				stderrMsg := strings.TrimSpace(stderrBuf.String())
-				slog.Error("claudecode: process failed", "error", err, "stderr", stderrMsg)
-				if stderrMsg != "" {
-					ch <- core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
-				}
-			}
-		}()
-
-		scanner := bufio.NewScanner(stdout)
-		scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
-
-		var lastContent string
-		var detectedSessionID string
-
-		for scanner.Scan() {
-			line := scanner.Text()
-			if line == "" {
-				continue
-			}
-
-			var raw map[string]any
-			if err := json.Unmarshal([]byte(line), &raw); err != nil {
-				continue
-			}
-
-			eventType, _ := raw["type"].(string)
-			subType, _ := raw["subtype"].(string)
-
-			switch eventType {
-			case "system":
-				if sid, ok := raw["session_id"].(string); ok {
-					detectedSessionID = sid
-					ch <- core.Event{Type: core.EventText, SessionID: sid}
-				}
-
-			case "assistant":
-				switch subType {
-				case "tool_use":
-					name := strOr(raw, "name", "tool")
-					input := summarizeInput(name, raw["input"])
-					ch <- core.Event{
-						Type:      core.EventToolUse,
-						ToolName:  name,
-						ToolInput: input,
-					}
-				default:
-					if text, ok := raw["text"].(string); ok {
-						lastContent += text
-					}
-				}
-
-			case "result":
-				if result, ok := raw["result"].(string); ok {
-					lastContent = result
-				}
-				if sid, ok := raw["session_id"].(string); ok {
-					detectedSessionID = sid
-				}
-			}
-		}
-
-		if err := scanner.Err(); err != nil {
-			ch <- core.Event{Type: core.EventError, Error: fmt.Errorf("read output: %w", err)}
-			return
-		}
-
-		ch <- core.Event{
-			Type:      core.EventResult,
-			Content:   lastContent,
-			SessionID: detectedSessionID,
-			Done:      true,
-		}
-	}()
-
-	return ch, nil
+	return newClaudeSession(ctx, a.workDir, a.model, sessionID, a.mode, tools)
 }
 
 func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {
@@ -234,8 +131,6 @@ func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, erro
 	return sessions, nil
 }
 
-// scanSessionMeta reads a session JSONL and returns (firstUserMessage, messageCount).
-// Only counts "user" and "assistant" type entries as messages.
 func scanSessionMeta(path string) (string, int) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -263,8 +158,8 @@ func scanSessionMeta(path string) (string, int) {
 			count++
 			if summary == "" && entry.Type == "user" && entry.Message.Content != "" {
 				s := entry.Message.Content
-				if len(s) > 40 {
-					s = s[:40] + "..."
+				if utf8.RuneCountInString(s) > 40 {
+					s = string([]rune(s)[:40]) + "..."
 				}
 				summary = s
 			}
@@ -275,14 +170,32 @@ func scanSessionMeta(path string) (string, int) {
 
 func (a *Agent) Stop() error { return nil }
 
-// strOr returns the first non-empty string value found for the given keys.
-func strOr(m map[string]any, keys ...string) string {
-	for _, k := range keys {
-		if v, ok := m[k].(string); ok && v != "" {
-			return v
+// AddAllowedTools adds tools to the pre-allowed list (takes effect on next session).
+func (a *Agent) AddAllowedTools(tools ...string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	existing := make(map[string]bool)
+	for _, t := range a.allowedTools {
+		existing[t] = true
+	}
+	for _, tool := range tools {
+		if !existing[tool] {
+			a.allowedTools = append(a.allowedTools, tool)
+			existing[tool] = true
 		}
 	}
-	return "unknown"
+	slog.Info("claudecode: updated allowed tools", "tools", tools, "total", len(a.allowedTools))
+	return nil
+}
+
+// GetAllowedTools returns the current list of pre-allowed tools.
+func (a *Agent) GetAllowedTools() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	result := make([]string, len(a.allowedTools))
+	copy(result, a.allowedTools)
+	return result
 }
 
 // summarizeInput produces a short human-readable description of tool input.
@@ -299,8 +212,8 @@ func summarizeInput(tool string, input any) string {
 		}
 	case "Bash":
 		if cmd, ok := m["command"].(string); ok {
-			if len(cmd) > 80 {
-				return cmd[:80] + "..."
+			if utf8.RuneCountInString(cmd) > 200 {
+				return string([]rune(cmd)[:200]) + "..."
 			}
 			return cmd
 		}
@@ -322,8 +235,8 @@ func summarizeInput(tool string, input any) string {
 		return ""
 	}
 	s := string(b)
-	if len(s) > 100 {
-		return s[:100] + "..."
+	if utf8.RuneCountInString(s) > 200 {
+		return string([]rune(s)[:200]) + "..."
 	}
 	return s
 }

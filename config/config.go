@@ -7,9 +7,13 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+// ConfigPath stores the path to the config file for saving
+var ConfigPath string
+
 type Config struct {
 	Projects []ProjectConfig `toml:"projects"`
 	Log      LogConfig       `toml:"log"`
+	Language string          `toml:"language"` // "en" or "zh", default is "en"
 }
 
 // ProjectConfig binds one agent (with a specific work_dir) to one or more platforms.
@@ -73,5 +77,40 @@ func (c *Config) validate() error {
 			}
 		}
 	}
+	return nil
+}
+
+// SaveLanguage saves the language setting to the config file
+func SaveLanguage(lang string) error {
+	if ConfigPath == "" {
+		return fmt.Errorf("config path not set")
+	}
+
+	// Read current config
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+
+	// Parse to get current config
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+
+	// Update language
+	cfg.Language = lang
+
+	// Write back
+	f, err := os.Create(ConfigPath)
+	if err != nil {
+		return fmt.Errorf("create config: %w", err)
+	}
+	defer f.Close()
+
+	if err := toml.NewEncoder(f).Encode(cfg); err != nil {
+		return fmt.Errorf("encode config: %w", err)
+	}
+
 	return nil
 }

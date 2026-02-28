@@ -122,6 +122,29 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	return nil
 }
 
+// Send sends a new message (not a reply)
+func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("telegram: invalid reply context type %T", rctx)
+	}
+
+	msg := tgbotapi.NewMessage(rc.chatID, content)
+	msg.ParseMode = tgbotapi.ModeMarkdown
+
+	if _, err := p.bot.Send(msg); err != nil {
+		// Markdown parse failure → retry as plain text
+		if strings.Contains(err.Error(), "can't parse") {
+			msg.ParseMode = ""
+			_, err = p.bot.Send(msg)
+		}
+		if err != nil {
+			return fmt.Errorf("telegram: send: %w", err)
+		}
+	}
+	return nil
+}
+
 func (p *Platform) Stop() error {
 	if p.cancel != nil {
 		p.cancel()

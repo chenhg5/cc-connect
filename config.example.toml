@@ -5,8 +5,14 @@
 # A single cc-connect process can manage multiple projects simultaneously.
 
 # =============================================================================
-# Logging
+# Global Settings
 # =============================================================================
+
+# Language for bot messages
+# - "en": English
+# - "zh": Chinese
+# - "" (empty/not set): Auto-detect from user's first message
+# language = "en"
 
 [log]
 level = "info" # debug, info, warn, error
@@ -24,7 +30,18 @@ type = "claudecode"
 [projects.agent.options]
 work_dir = "/path/to/backend"
 mode = "interactive" # "interactive" (default) | "auto"
-# allowed_tools = ["Read", "Grep", "Glob", "Bash"]
+
+# Mode options:
+# - "interactive": Claude will ask for permission before sensitive operations.
+#   When using IM platforms (Feishu, DingTalk, etc.), you can reply "允许" or "allow"
+#   to grant permission. Progress updates will be sent in real-time.
+# - "auto": All operations are automatically approved (use with caution).
+#   Best for trusted environments or when you want uninterrupted execution.
+
+# In interactive mode, you can pre-approve specific tools:
+# allowed_tools = ["Read", "Grep", "Glob", "Bash", "Edit", "Write"]
+
+# Optional: specify a model
 # model = "claude-sonnet-4-20250514"
 
 # Feishu / Lark

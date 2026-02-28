@@ -98,15 +98,21 @@ func New(opts map[string]any) (core.Platform, error) {
 		path = "/wecom/callback"
 	}
 
-	apiClient := &http.Client{Timeout: 30 * time.Second}
+	transport := &http.Transport{
+		MaxIdleConns:        5,
+		MaxIdleConnsPerHost: 2,
+		IdleConnTimeout:     30 * time.Second,
+		DisableKeepAlives:   false,
+	}
 	if proxyURL, _ := opts["proxy"].(string); proxyURL != "" {
 		u, err := url.Parse(proxyURL)
 		if err != nil {
 			return nil, fmt.Errorf("wecom: invalid proxy URL %q: %w", proxyURL, err)
 		}
-		apiClient.Transport = &http.Transport{Proxy: http.ProxyURL(u)}
+		transport.Proxy = http.ProxyURL(u)
 		slog.Info("wecom: outbound API requests will use proxy", "proxy", proxyURL)
 	}
+	apiClient := &http.Client{Timeout: 30 * time.Second, Transport: transport}
 
 	return &Platform{
 		corpID:       corpID,
@@ -251,16 +257,24 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 
 	accessToken, err := p.getAccessToken()
 	if err != nil {
+		slog.Error("wecom: get access_token failed", "error", err)
 		return fmt.Errorf("wecom: get access_token: %w", err)
 	}
 
 	chunks := splitByBytes(content, 2000)
-	for _, chunk := range chunks {
+	for i, chunk := range chunks {
 		if err := p.sendText(accessToken, rc.userID, chunk); err != nil {
+			slog.Error("wecom: send failed", "user", rc.userID, "chunk", i, "error", err)
 			return err
 		}
 	}
+	slog.Debug("wecom: message sent", "user", rc.userID, "chunks", len(chunks), "total_len", len(content))
 	return nil
+}
+
+// Send sends a new message (same as Reply for WeChat Work)
+func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
+	return p.Reply(ctx, rctx, content)
 }
 
 func (p *Platform) sendText(accessToken, toUser, text string) error {
