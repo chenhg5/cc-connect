@@ -2,7 +2,7 @@
 
 [English](./README.md) | 中文
 
-将本地 AI 编程助手（Claude Code / Cursor / Gemini CLI / Codex）连接到飞书、钉钉、Slack 等即时通讯平台，实现双向对话。无需公网 IP。
+将本地 AI 编程助手（Claude Code / Cursor / Gemini CLI / Codex）连接到飞书、钉钉、Slack 等即时通讯平台，实现双向对话。大部分平台无需公网 IP。
 
 ## 架构
 
@@ -28,24 +28,38 @@
 | Agent | Cursor Agent | 🔜 计划中 |
 | Agent | Gemini CLI | 🔜 计划中 |
 | Agent | Codex | 🔜 计划中 |
-| Platform | 飞书 (Lark) | ✅ 已支持（WebSocket 长连接）|
-| Platform | 钉钉 (DingTalk) | ✅ 已支持（Stream 模式）|
-| Platform | Telegram | ✅ 已支持（Long Polling）|
-| Platform | Slack | ✅ 已支持（Socket Mode）|
-| Platform | Discord | ✅ 已支持（Gateway WebSocket）|
-| Platform | LINE | ✅ 已支持（HTTP Webhook）|
-| Platform | 企业微信 (WeChat Work) | ✅ 已支持（HTTP Webhook + Markdown）|
+| Platform | 飞书 (Lark) | ✅ WebSocket 长连接 — 无需公网 IP |
+| Platform | 钉钉 (DingTalk) | ✅ Stream 模式 — 无需公网 IP |
+| Platform | Telegram | ✅ Long Polling — 无需公网 IP |
+| Platform | Slack | ✅ Socket Mode — 无需公网 IP |
+| Platform | Discord | ✅ Gateway — 无需公网 IP |
+| Platform | LINE | ✅ Webhook — 需要公网 URL |
+| Platform | 企业微信 (WeChat Work) | ✅ Webhook — 需要公网 URL |
 
 ## 快速开始
 
 ### 前置条件
 
-- Go 1.22+
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) 已安装并配置
 
 ### 安装
 
-**从源码编译：**
+**通过 npm 安装（推荐）：**
+
+```bash
+npm install -g cc-connect
+```
+
+**从 [GitHub Releases](https://github.com/chenhg5/cc-connect/releases) 下载二进制：**
+
+```bash
+# Linux amd64 示例
+curl -L -o cc-connect https://github.com/chenhg5/cc-connect/releases/latest/download/cc-connect-linux-amd64
+chmod +x cc-connect
+sudo mv cc-connect /usr/local/bin/
+```
+
+**从源码编译（需要 Go 1.22+）：**
 
 ```bash
 git clone https://github.com/chenhg5/cc-connect.git
@@ -53,18 +67,18 @@ cd cc-connect
 make build
 ```
 
-**通过 npm 安装：**
-
-```bash
-npm install -g cc-connect
-```
-
 ### 配置
 
 ```bash
 cp config.example.toml config.toml
-vim config.toml
+vim config.toml   # 填入你的平台凭证
 ```
+
+> 💡 **让 AI 帮你配置：** 把 [INSTALL.md](./INSTALL.md) 文件发给 Claude Code 或其他 AI agent，它可以帮你完成整个配置过程 —— 创建机器人、获取凭证、编写 config.toml。
+>
+> ```bash
+> claude "阅读 INSTALL.md 并帮我配置 cc-connect 连接飞书"
+> ```
 
 ### 运行
 
@@ -74,6 +88,77 @@ vim config.toml
 ./cc-connect --version                    # 显示版本信息
 ```
 
+## 平台接入指南
+
+每个平台都需要在其开发者后台创建机器人/应用。我们提供了详细的分步指南：
+
+| 平台 | 指南 | 连接方式 | 需要公网 IP? |
+|------|------|---------|-------------|
+| 飞书 (Lark) | [docs/feishu.md](docs/feishu.md) | WebSocket | 不需要 |
+| 钉钉 | [docs/dingtalk.md](docs/dingtalk.md) | Stream | 不需要 |
+| Telegram | [docs/telegram.md](docs/telegram.md) | Long Polling | 不需要 |
+| Slack | [docs/slack.md](docs/slack.md) | Socket Mode | 不需要 |
+| Discord | [docs/discord.md](docs/discord.md) | Gateway | 不需要 |
+| LINE | [INSTALL.md](./INSTALL.md#line--requires-public-url) | Webhook | 需要 |
+| 企业微信 | [docs/wecom.md](docs/wecom.md) | Webhook | 需要 |
+
+各平台快速配置示例：
+
+```toml
+# 飞书
+[[projects.platforms]]
+type = "feishu"
+[projects.platforms.options]
+app_id = "cli_xxxx"
+app_secret = "xxxx"
+
+# 钉钉
+[[projects.platforms]]
+type = "dingtalk"
+[projects.platforms.options]
+client_id = "dingxxxx"
+client_secret = "xxxx"
+
+# Telegram
+[[projects.platforms]]
+type = "telegram"
+[projects.platforms.options]
+token = "123456:ABC-xxx"
+
+# Slack
+[[projects.platforms]]
+type = "slack"
+[projects.platforms.options]
+bot_token = "xoxb-xxx"
+app_token = "xapp-xxx"
+
+# Discord
+[[projects.platforms]]
+type = "discord"
+[projects.platforms.options]
+token = "your-discord-bot-token"
+
+# LINE（需要公网 URL）
+[[projects.platforms]]
+type = "line"
+[projects.platforms.options]
+channel_secret = "xxx"
+channel_token = "xxx"
+port = "8080"
+
+# 企业微信（需要公网 URL）
+[[projects.platforms]]
+type = "wecom"
+[projects.platforms.options]
+corp_id = "wwxxx"
+corp_secret = "xxx"
+agent_id = "1000002"
+callback_token = "xxx"
+callback_aes_key = "xxx"
+port = "8081"
+enable_markdown = false  # 设为 true 则发送 Markdown 消息（仅企业微信应用内可渲染，个人微信显示"暂不支持"）
+```
+
 ## 权限模式
 
 Claude Code 适配器支持四种权限模式（对应 Claude 的 `--permission-mode` 参数），可在运行时通过 `/mode` 命令切换：
@@ -81,7 +166,7 @@ Claude Code 适配器支持四种权限模式（对应 Claude 的 `--permission-
 | 模式 | 配置值 | 行为 |
 |------|--------|------|
 | **默认** | `default` | 每次工具调用都需要用户确认，完全掌控。 |
-| **接受编辑** | `acceptEdits`（别名: `edit`）| 文件编辑类工具自动通过，其他工具（如 Bash）仍需确认。 |
+| **接受编辑** | `acceptEdits`（别名: `edit`）| 文件编辑类工具自动通过，其他工具仍需确认。 |
 | **计划模式** | `plan` | Claude 只做规划不执行，审批计划后再执行。 |
 | **YOLO 模式** | `bypassPermissions`（别名: `yolo`）| 所有工具调用自动通过。适用于可信/沙箱环境。 |
 
@@ -104,18 +189,18 @@ mode = "default"
 
 每个用户拥有独立的会话和完整的对话上下文。通过斜杠命令管理会话：
 
-| 命令 | 说明 |
-|------|------|
-| `/new [名称]` | 创建新会话 |
-| `/list` | 列出当前项目的 Claude Code 会话列表 |
-| `/switch <id\|名称>` | 切换到指定会话 |
-| `/current` | 查看当前活跃会话 |
-| `/history [n]` | 查看最近 n 条消息（默认 10） |
-| `/allow <工具名>` | 预授权工具（下次会话生效） |
-| `/mode [名称]` | 查看或切换权限模式 |
-| `/quiet` | 开关思考和工具进度消息推送 |
-| `/stop` | 停止当前执行 |
-| `/help` | 显示可用命令 |
+```
+/new [名称]       创建新会话
+/list             列出当前项目的 Claude Code 会话列表
+/switch <id>      切换到指定会话
+/current          查看当前活跃会话
+/history [n]      查看最近 n 条消息（默认 10）
+/allow <工具名>    预授权工具（下次会话生效）
+/mode [名称]      查看或切换权限模式
+/quiet            开关思考和工具进度消息推送
+/stop             停止当前执行
+/help             显示可用命令
+```
 
 会话进行中，Claude 可能请求工具权限。回复 **允许** / **拒绝** / **允许所有**（本次会话自动批准后续所有请求）。
 
@@ -161,63 +246,7 @@ client_id = "xxxx"
 client_secret = "xxxx"
 ```
 
-### 飞书配置
-
-1. 前往 [飞书开放平台](https://open.feishu.cn) 创建应用
-2. 开启**机器人**能力
-3. 在「事件订阅」中添加 `im.message.receive_v1` 事件
-4. 选择 **WebSocket 长连接**模式（无需公网 IP）
-5. 将 App ID 和 App Secret 填入配置
-
-### 钉钉配置
-
-1. 前往 [钉钉开放平台](https://open-dev.dingtalk.com) 创建应用
-2. 创建**机器人**，选择 **Stream 模式**
-3. 将 Client ID 和 Client Secret 填入配置
-
-### Telegram 配置
-
-1. 在 Telegram 中找到 [@BotFather](https://t.me/BotFather)，发送 `/newbot` 创建机器人
-2. 将 Bot Token 填入配置
-3. 连接方式：Long Polling（无需公网 IP）
-
-### Slack 配置
-
-1. 前往 [Slack API](https://api.slack.com/apps) 创建应用
-2. 开启 **Socket Mode**（Settings > Socket Mode）
-3. 订阅 Bot 事件：`message.channels`、`message.im`
-4. 安装应用到工作区，复制 Bot Token（`xoxb-...`）和 App Token（`xapp-...`）
-5. 连接方式：Socket Mode WebSocket（无需公网 IP）
-
-### Discord 配置
-
-1. 前往 [Discord 开发者门户](https://discord.com/developers/applications) 创建应用
-2. 在 **Bot** 页面创建机器人并复制 Token
-3. 开启 **Message Content Intent**（Privileged Gateway Intents 下）
-4. 通过 OAuth2 URL Generator 邀请机器人加入服务器（scopes: `bot`；权限: `Send Messages`）
-5. 连接方式：Gateway WebSocket（无需公网 IP）
-
-### LINE 配置
-
-1. 前往 [LINE Developers Console](https://developers.line.biz/console/) 创建 **Messaging API** 频道
-2. 复制 Channel Secret 和 Channel Access Token（长期有效）
-3. 在 LINE 控制台设置 Webhook URL 为 `http(s)://<your-domain>:<port>/callback`
-4. 连接方式：HTTP Webhook —— 需要通过 ngrok、cloudflared 等工具将本地端口暴露到公网
-
-### 企业微信配置
-
-1. 登录[企业微信管理后台](https://work.weixin.qq.com/wework_admin/frame)
-2. **应用管理** → 创建自建应用 → 记录 AgentId 和 Secret
-3. **我的企业** → 记录企业 ID (CorpId)
-4. 进入应用 → **接收消息** → 设置 API 接收：
-   - URL：`http(s)://<your-domain>:<port>/wecom/callback`
-   - Token：任意随机字符串
-   - EncodingAESKey：点击「随机生成」
-   - 需要**先启动 cc-connect**，再保存以通过验证
-5. **企业可信 IP** → 添加服务器出口公网 IP
-6. （可选）**我的企业** → **微信插件** → 扫码关联个人微信，即可在个人微信中直接对话
-7. 连接方式：HTTP Webhook —— 需要通过 ngrok、cloudflared 等工具将本地端口暴露到公网
-8. 消息以 Markdown 格式发送（自动降级为纯文本）
+完整带注释的配置模板见 [config.example.toml](config.example.toml)。
 
 ## 扩展开发
 
@@ -271,11 +300,12 @@ cc-connect/
 │   ├── slack/               # Slack（Socket Mode）
 │   ├── discord/             # Discord（Gateway WebSocket）
 │   ├── line/                # LINE（HTTP Webhook）
-│   └── wecom/               # 企业微信（HTTP Webhook + AES + Markdown）
+│   └── wecom/               # 企业微信（HTTP Webhook）
 ├── agent/                   # AI 助手适配器
 │   └── claudecode/          # Claude Code CLI（交互式会话）
-├── config/                  # 配置加载
+├── docs/                    # 平台接入指南
 ├── config.example.toml      # 配置模板
+├── INSTALL.md               # AI agent 友好的安装配置指南
 ├── Makefile
 └── README.md
 ```
