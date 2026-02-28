@@ -20,6 +20,17 @@
 
 所有组件通过接口解耦，支持即插即用扩展。
 
+## 效果截图
+
+<p align="center">
+  <img src="docs/images/screenshot/cc-connect-lark.JPG" alt="飞书" width="280" />
+  <img src="docs/images/screenshot/cc-connect-discord.png" alt="Discord" width="280" />
+  <img src="docs/images/screenshot/cc-connect-wechat.JPG" alt="微信" width="280" />
+</p>
+<p align="center">
+  <em>左：飞书 &nbsp;|&nbsp; 中：Discord &nbsp;|&nbsp; 右：个人微信（通过企业微信关联）</em>
+</p>
+
 ## 支持状态
 
 | 组件 | 类型 | 状态 |
@@ -316,6 +327,10 @@ cc-connect/
 ├── Makefile
 └── README.md
 ```
+
+## 微信用户群
+
+![用户群][https://quick.go-admin.cn/ai/article/cc-connect_wechat_group.JPG]
 
 ## License
 

@@ -20,6 +20,17 @@ Bridge your local AI coding assistants (Claude Code / Cursor / Gemini CLI / Code
 
 All components are decoupled via Go interfaces — fully pluggable and extensible.
 
+## Screenshots
+
+<p align="center">
+  <img src="docs/images/screenshot/cc-connect-lark.JPG" alt="Feishu (Lark)" width="280" />
+  <img src="docs/images/screenshot/cc-connect-discord.png" alt="Discord" width="280" />
+  <img src="docs/images/screenshot/cc-connect-wechat.JPG" alt="WeChat" width="280" />
+</p>
+<p align="center">
+  <em>Left: Feishu (Lark) &nbsp;|&nbsp; Middle: Discord &nbsp;|&nbsp; Right: WeChat (via WeChat Work)</em>
+</p>
+
 ## Support Matrix
 
 | Component | Type | Status |
