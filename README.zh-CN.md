@@ -30,8 +30,10 @@
 | Agent | Codex | 🔜 计划中 |
 | Platform | 飞书 (Lark) | ✅ 已支持 |
 | Platform | 钉钉 (DingTalk) | ✅ 已支持 |
-| Platform | Slack | 🔜 计划中 |
-| Platform | Telegram | 🔜 计划中 |
+| Platform | Telegram | ✅ 已支持 |
+| Platform | Slack | ✅ 已支持 |
+| Platform | Discord | ✅ 已支持 |
+| Platform | LINE | ✅ 已支持 |
 
 ## 快速开始
 
@@ -150,6 +152,35 @@ client_secret = "xxxx"
 2. 创建**机器人**，选择 **Stream 模式**
 3. 将 Client ID 和 Client Secret 填入配置
 
+### Telegram 配置
+
+1. 在 Telegram 中找到 [@BotFather](https://t.me/BotFather)，发送 `/newbot` 创建机器人
+2. 将 Bot Token 填入配置
+3. 连接方式：Long Polling（无需公网 IP）
+
+### Slack 配置
+
+1. 前往 [Slack API](https://api.slack.com/apps) 创建应用
+2. 开启 **Socket Mode**（Settings > Socket Mode）
+3. 订阅 Bot 事件：`message.channels`、`message.im`
+4. 安装应用到工作区，复制 Bot Token（`xoxb-...`）和 App Token（`xapp-...`）
+5. 连接方式：Socket Mode WebSocket（无需公网 IP）
+
+### Discord 配置
+
+1. 前往 [Discord 开发者门户](https://discord.com/developers/applications) 创建应用
+2. 在 **Bot** 页面创建机器人并复制 Token
+3. 开启 **Message Content Intent**（Privileged Gateway Intents 下）
+4. 通过 OAuth2 URL Generator 邀请机器人加入服务器（scopes: `bot`；权限: `Send Messages`）
+5. 连接方式：Gateway WebSocket（无需公网 IP）
+
+### LINE 配置
+
+1. 前往 [LINE Developers Console](https://developers.line.biz/console/) 创建 **Messaging API** 频道
+2. 复制 Channel Secret 和 Channel Access Token（长期有效）
+3. 在 LINE 控制台设置 Webhook URL 为 `http(s)://<your-domain>:<port>/callback`
+4. 连接方式：HTTP Webhook —— 需要通过 ngrok、cloudflared 等工具将本地端口暴露到公网
+
 ## 扩展开发
 
 ### 添加新平台
@@ -196,7 +227,11 @@ cc-connect/
 │   └── engine.go            # 路由引擎 + 斜杠命令
 ├── platform/                # 平台适配器
 │   ├── feishu/              # 飞书（WebSocket 长连接）
-│   └── dingtalk/            # 钉钉（Stream 模式）
+│   ├── dingtalk/            # 钉钉（Stream 模式）
+│   ├── telegram/            # Telegram（Long Polling）
+│   ├── slack/               # Slack（Socket Mode）
+│   ├── discord/             # Discord（Gateway WebSocket）
+│   └── line/                # LINE（HTTP Webhook）
 ├── agent/                   # AI 助手适配器
 │   └── claudecode/          # Claude Code CLI（auto + interactive）
 ├── config/                  # 配置加载

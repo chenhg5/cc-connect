@@ -30,8 +30,10 @@ All components are decoupled via Go interfaces — fully pluggable and extensibl
 | Agent | Codex | 🔜 Planned |
 | Platform | Feishu (Lark) | ✅ Supported |
 | Platform | DingTalk | ✅ Supported |
-| Platform | Slack | 🔜 Planned |
-| Platform | Telegram | 🔜 Planned |
+| Platform | Telegram | ✅ Supported |
+| Platform | Slack | ✅ Supported |
+| Platform | Discord | ✅ Supported |
+| Platform | LINE | ✅ Supported |
 
 ## Quick Start
 
@@ -150,6 +152,35 @@ client_secret = "xxxx"
 2. Create a **Bot** and select **Stream mode**
 3. Copy the Client ID and Client Secret into your config
 
+### Telegram
+
+1. Message [@BotFather](https://t.me/BotFather) on Telegram, send `/newbot`
+2. Copy the bot token into your config
+3. Connection: Long polling (no public URL needed)
+
+### Slack
+
+1. Create an app at [Slack API](https://api.slack.com/apps)
+2. Enable **Socket Mode** (Settings > Socket Mode)
+3. Subscribe to bot events: `message.channels`, `message.im`
+4. Install app to workspace, copy Bot Token (`xoxb-...`) and App Token (`xapp-...`)
+5. Connection: Socket Mode WebSocket (no public URL needed)
+
+### Discord
+
+1. Create an app at [Discord Developer Portal](https://discord.com/developers/applications)
+2. Under **Bot**, create a bot and copy the token
+3. Enable **Message Content Intent** under Privileged Gateway Intents
+4. Invite bot to server via OAuth2 URL Generator (scopes: `bot`; permissions: `Send Messages`)
+5. Connection: Gateway WebSocket (no public URL needed)
+
+### LINE
+
+1. Create a **Messaging API** channel at [LINE Developers Console](https://developers.line.biz/console/)
+2. Copy the Channel Secret and Channel Access Token (long-lived)
+3. Set your webhook URL in LINE console to `http(s)://<your-domain>:<port>/callback`
+4. Connection: HTTP Webhook — you must expose the local port via ngrok, cloudflared, etc.
+
 ## Extending
 
 ### Adding a New Platform
@@ -196,7 +227,11 @@ cc-connect/
 │   └── engine.go            # Routing engine + slash commands
 ├── platform/                # Platform adapters
 │   ├── feishu/              # Feishu / Lark (WebSocket)
-│   └── dingtalk/            # DingTalk (Stream)
+│   ├── dingtalk/            # DingTalk (Stream)
+│   ├── telegram/            # Telegram (Long Polling)
+│   ├── slack/               # Slack (Socket Mode)
+│   ├── discord/             # Discord (Gateway WebSocket)
+│   └── line/                # LINE (HTTP Webhook)
 ├── agent/                   # Agent adapters
 │   └── claudecode/          # Claude Code CLI (auto + interactive)
 ├── config/                  # Config loading

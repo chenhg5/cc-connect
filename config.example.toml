@@ -92,6 +92,22 @@ app_secret = "your-feishu-app-secret"
 # [projects.platforms.options]
 # token = "your-discord-bot-token"
 
+# LINE (uncomment to enable)
+# 1. Create a channel at https://developers.line.biz/console/ (Messaging API)
+# 2. Copy Channel Secret and Channel Access Token (long-lived)
+# 3. Set your webhook URL to: http(s)://<your-domain>:<port>/callback
+# Connection: HTTP Webhook — you need a public URL (use ngrok, cloudflared, etc.)
+# The built-in HTTP server listens on the configured port; expose it yourself.
+
+# [[projects.platforms]]
+# type = "line"
+#
+# [projects.platforms.options]
+# channel_secret = "your-line-channel-secret"
+# channel_token = "your-line-channel-access-token"
+# port = "8080"
+# callback_path = "/callback"
+
 # =============================================================================
 # Project 2 (uncomment to enable)
 # =============================================================================
