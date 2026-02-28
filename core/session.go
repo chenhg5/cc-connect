@@ -65,10 +65,10 @@ func (s *Session) GetHistory(n int) []HistoryEntry {
 
 // sessionSnapshot is the JSON-serializable state of the SessionManager.
 type sessionSnapshot struct {
-	Sessions      map[string]*Session  `json:"sessions"`
-	ActiveSession map[string]string    `json:"active_session"`
-	UserSessions  map[string][]string  `json:"user_sessions"`
-	Counter       int64                `json:"counter"`
+	Sessions      map[string]*Session `json:"sessions"`
+	ActiveSession map[string]string   `json:"active_session"`
+	UserSessions  map[string][]string `json:"user_sessions"`
+	Counter       int64               `json:"counter"`
 }
 
 // SessionManager supports multiple named sessions per user with active-session tracking.

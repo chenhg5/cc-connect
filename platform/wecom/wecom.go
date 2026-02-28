@@ -57,17 +57,18 @@ type tokenCache struct {
 }
 
 type Platform struct {
-	corpID       string
-	corpSecret   string
-	agentID      string
-	token        string // callback verification token
-	aesKey       []byte // decoded EncodingAESKey (32 bytes)
-	port         string
-	callbackPath string
-	server       *http.Server
-	handler      core.MessageHandler
-	apiClient    *http.Client // HTTP client for outbound API calls (may use proxy)
-	tokenCache   tokenCache
+	corpID         string
+	corpSecret     string
+	agentID        string
+	token          string // callback verification token
+	aesKey         []byte // decoded EncodingAESKey (32 bytes)
+	port           string
+	callbackPath   string
+	enableMarkdown bool
+	server         *http.Server
+	handler        core.MessageHandler
+	apiClient      *http.Client // HTTP client for outbound API calls (may use proxy)
+	tokenCache     tokenCache
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -99,10 +100,9 @@ func New(opts map[string]any) (core.Platform, error) {
 	}
 
 	transport := &http.Transport{
-		MaxIdleConns:        5,
-		MaxIdleConnsPerHost: 2,
-		IdleConnTimeout:     30 * time.Second,
-		DisableKeepAlives:   false,
+		MaxIdleConns:        2,
+		MaxIdleConnsPerHost: 1,
+		IdleConnTimeout:     10 * time.Second,
 	}
 	if proxyURL, _ := opts["proxy"].(string); proxyURL != "" {
 		u, err := url.Parse(proxyURL)
@@ -110,19 +110,23 @@ func New(opts map[string]any) (core.Platform, error) {
 			return nil, fmt.Errorf("wecom: invalid proxy URL %q: %w", proxyURL, err)
 		}
 		transport.Proxy = http.ProxyURL(u)
-		slog.Info("wecom: outbound API requests will use proxy", "proxy", proxyURL)
+		transport.DisableKeepAlives = true // prevent CONNECT tunnel accumulation on proxy
+		slog.Info("wecom: outbound API requests will use proxy (keep-alive disabled)", "proxy", proxyURL)
 	}
 	apiClient := &http.Client{Timeout: 30 * time.Second, Transport: transport}
 
+	enableMarkdown, _ := opts["enable_markdown"].(bool)
+
 	return &Platform{
-		corpID:       corpID,
-		corpSecret:   corpSecret,
-		agentID:      agentID,
-		token:        callbackToken,
-		aesKey:       aesKey,
-		port:         port,
-		callbackPath: path,
-		apiClient:    apiClient,
+		corpID:         corpID,
+		corpSecret:     corpSecret,
+		agentID:        agentID,
+		token:          callbackToken,
+		aesKey:         aesKey,
+		port:           port,
+		callbackPath:   path,
+		enableMarkdown: enableMarkdown,
+		apiClient:      apiClient,
 	}, nil
 }
 
@@ -263,12 +267,15 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 
 	chunks := splitByBytes(content, 2000)
 	for i, chunk := range chunks {
-		if err := p.sendMarkdown(accessToken, rc.userID, chunk); err != nil {
-			slog.Warn("wecom: markdown send failed, falling back to text", "error", err)
-			if err := p.sendText(accessToken, rc.userID, chunk); err != nil {
-				slog.Error("wecom: text fallback send failed", "user", rc.userID, "chunk", i, "error", err)
-				return err
-			}
+		var sendErr error
+		if p.enableMarkdown {
+			sendErr = p.sendMarkdown(accessToken, rc.userID, chunk)
+		} else {
+			sendErr = p.sendText(accessToken, rc.userID, chunk)
+		}
+		if sendErr != nil {
+			slog.Error("wecom: send failed", "user", rc.userID, "chunk", i, "error", sendErr)
+			return sendErr
 		}
 	}
 	slog.Debug("wecom: message sent", "user", rc.userID, "chunks", len(chunks), "total_len", len(content))
@@ -282,9 +289,9 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 
 func (p *Platform) sendMarkdown(accessToken, toUser, content string) error {
 	payload := map[string]any{
-		"touser":  toUser,
-		"msgtype": "markdown",
-		"agentid": p.agentID,
+		"touser":   toUser,
+		"msgtype":  "markdown",
+		"agentid":  p.agentID,
 		"markdown": map[string]string{"content": content},
 	}
 

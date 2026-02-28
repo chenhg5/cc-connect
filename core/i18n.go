@@ -6,7 +6,7 @@ import "fmt"
 type Language string
 
 const (
-	LangAuto    Language = ""   // auto-detect from user messages
+	LangAuto    Language = "" // auto-detect from user messages
 	LangEnglish Language = "en"
 	LangChinese Language = "zh"
 )
@@ -78,20 +78,20 @@ func (i *I18n) CurrentLang() Language { return i.currentLang() }
 type MsgKey string
 
 const (
-	MsgStarting            MsgKey = "starting"
-	MsgThinking            MsgKey = "thinking"
-	MsgTool                MsgKey = "tool"
-	MsgExecutionStopped    MsgKey = "execution_stopped"
-	MsgNoExecution         MsgKey = "no_execution"
-	MsgPreviousProcessing  MsgKey = "previous_processing"
-	MsgNoToolsAllowed      MsgKey = "no_tools_allowed"
-	MsgCurrentTools        MsgKey = "current_tools"
+	MsgStarting             MsgKey = "starting"
+	MsgThinking             MsgKey = "thinking"
+	MsgTool                 MsgKey = "tool"
+	MsgExecutionStopped     MsgKey = "execution_stopped"
+	MsgNoExecution          MsgKey = "no_execution"
+	MsgPreviousProcessing   MsgKey = "previous_processing"
+	MsgNoToolsAllowed       MsgKey = "no_tools_allowed"
+	MsgCurrentTools         MsgKey = "current_tools"
 	MsgToolAuthNotSupported MsgKey = "tool_auth_not_supported"
-	MsgToolAllowFailed     MsgKey = "tool_allow_failed"
-	MsgToolAllowedNew      MsgKey = "tool_allowed_new"
-	MsgError               MsgKey = "error"
-	MsgEmptyResponse       MsgKey = "empty_response"
-	MsgPermissionPrompt    MsgKey = "permission_prompt"
+	MsgToolAllowFailed      MsgKey = "tool_allow_failed"
+	MsgToolAllowedNew       MsgKey = "tool_allowed_new"
+	MsgError                MsgKey = "error"
+	MsgEmptyResponse        MsgKey = "empty_response"
+	MsgPermissionPrompt     MsgKey = "permission_prompt"
 	MsgPermissionAllowed    MsgKey = "permission_allowed"
 	MsgPermissionApproveAll MsgKey = "permission_approve_all"
 	MsgPermissionDenied     MsgKey = "permission_denied_msg"
@@ -198,26 +198,30 @@ var messages = map[MsgKey]map[Language]string{
 		LangChinese: "🔄 会话进程已退出，正在重启...",
 	},
 	MsgHelp: {
-		LangEnglish: `/new [name]         — Start a new Claude session
-/list               — List Claude Code sessions
-/switch <id_prefix> — Resume an existing session
-/current            — Show current active session
-/history [n]        — Show last n messages (default 10)
-/allow <tool>       — Pre-allow a tool (next session)
-/mode [name]        — View/switch permission mode (default/edit/plan/yolo)
-/quiet              — Toggle thinking/tool progress messages
-/stop               — Stop current execution
-/help               — Show this help`,
-		LangChinese: `/new [名称]          — 创建新的 Claude 会话
-/list               — 列出 Claude Code 会话列表
-/switch <id前缀>    — 恢复已有会话
-/current            — 查看当前活跃会话
-/history [n]        — 查看最近 n 条消息（默认 10）
-/allow <工具名>      — 预授权工具（下次会话生效）
-/mode [名称]         — 查看/切换权限模式（default/edit/plan/yolo）
-/quiet              — 开关思考和工具进度消息
-/stop               — 停止当前执行
-/help               — 显示此帮助`,
+		LangEnglish: "📖 Available Commands\n\n" +
+			"/new [name]\n  Start a new Claude session\n\n" +
+			"/list\n  List Claude Code sessions\n\n" +
+			"/switch <id>\n  Resume an existing session\n\n" +
+			"/current\n  Show current active session\n\n" +
+			"/history [n]\n  Show last n messages (default 10)\n\n" +
+			"/allow <tool>\n  Pre-allow a tool (next session)\n\n" +
+			"/mode [name]\n  View/switch permission mode\n\n" +
+			"/quiet\n  Toggle thinking/tool progress\n\n" +
+			"/stop\n  Stop current execution\n\n" +
+			"/help\n  Show this help\n\n" +
+			"Permission modes: default / edit / plan / yolo",
+		LangChinese: "📖 可用命令\n\n" +
+			"/new [名称]\n  创建新的 Claude 会话\n\n" +
+			"/list\n  列出 Claude Code 会话列表\n\n" +
+			"/switch <id>\n  恢复已有会话\n\n" +
+			"/current\n  查看当前活跃会话\n\n" +
+			"/history [n]\n  查看最近 n 条消息（默认 10）\n\n" +
+			"/allow <工具名>\n  预授权工具（下次会话生效）\n\n" +
+			"/mode [名称]\n  查看/切换权限模式\n\n" +
+			"/quiet\n  开关思考和工具进度消息\n\n" +
+			"/stop\n  停止当前执行\n\n" +
+			"/help\n  显示此帮助\n\n" +
+			"权限模式：default / edit / plan / yolo",
 	},
 }
 

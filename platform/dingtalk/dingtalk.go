@@ -10,8 +10,8 @@ import (
 
 	"github.com/chenhg5/cc-connect/core"
 
-	dingtalkClient "github.com/open-dingtalk/dingtalk-stream-sdk-go/client"
 	"github.com/open-dingtalk/dingtalk-stream-sdk-go/chatbot"
+	dingtalkClient "github.com/open-dingtalk/dingtalk-stream-sdk-go/client"
 )
 
 func init() {
@@ -87,8 +87,8 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	}
 
 	payload := map[string]any{
-		"msgtype": "text",
-		"text":    map[string]string{"content": content},
+		"msgtype":  "markdown",
+		"markdown": map[string]string{"title": "reply", "text": content},
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
