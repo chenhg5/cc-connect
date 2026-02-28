@@ -1,5 +1,6 @@
 cc-connect
 config.toml
+.cc-connect/
 *.exe
 *.dll
 *.so

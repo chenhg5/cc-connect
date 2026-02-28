@@ -2,11 +2,15 @@ package claudecode
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -61,9 +65,9 @@ func New(opts map[string]any) (core.Agent, error) {
 func (a *Agent) Name() string { return "claudecode" }
 
 func (a *Agent) Execute(ctx context.Context, sessionID string, prompt string) (<-chan core.Event, error) {
-	args := []string{"-p", prompt, "--output-format", "stream-json"}
+	args := []string{"-p", prompt, "--output-format", "stream-json", "--verbose"}
 	if sessionID != "" {
-		args = append(args, "--session-id", sessionID)
+		args = append(args, "--resume", sessionID)
 	}
 	if a.model != "" {
 		args = append(args, "--model", a.model)
@@ -78,6 +82,8 @@ func (a *Agent) Execute(ctx context.Context, sessionID string, prompt string) (<
 		}
 	}
 
+	slog.Debug("claudecode: executing", "args", args, "dir", a.workDir)
+
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Dir = a.workDir
 
@@ -85,6 +91,9 @@ func (a *Agent) Execute(ctx context.Context, sessionID string, prompt string) (<
 	if err != nil {
 		return nil, fmt.Errorf("claudecode: stdout pipe: %w", err)
 	}
+
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("claudecode: start: %w", err)
@@ -96,7 +105,11 @@ func (a *Agent) Execute(ctx context.Context, sessionID string, prompt string) (<
 		defer close(ch)
 		defer func() {
 			if err := cmd.Wait(); err != nil {
-				slog.Debug("claudecode: process exited", "error", err)
+				stderrMsg := strings.TrimSpace(stderrBuf.String())
+				slog.Error("claudecode: process failed", "error", err, "stderr", stderrMsg)
+				if stderrMsg != "" {
+					ch <- core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
+				}
 			}
 		}()
 
@@ -167,6 +180,97 @@ func (a *Agent) Execute(ctx context.Context, sessionID string, prompt string) (<
 	}()
 
 	return ch, nil
+}
+
+func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("claudecode: cannot determine home dir: %w", err)
+	}
+
+	absWorkDir, err := filepath.Abs(a.workDir)
+	if err != nil {
+		return nil, fmt.Errorf("claudecode: resolve work_dir: %w", err)
+	}
+
+	projectKey := strings.ReplaceAll(absWorkDir, string(filepath.Separator), "-")
+	projectDir := filepath.Join(homeDir, ".claude", "projects", projectKey)
+
+	entries, err := os.ReadDir(projectDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("claudecode: read project dir: %w", err)
+	}
+
+	var sessions []core.AgentSessionInfo
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".jsonl") {
+			continue
+		}
+
+		sessionID := strings.TrimSuffix(name, ".jsonl")
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+
+		summary, msgCount := scanSessionMeta(filepath.Join(projectDir, name))
+
+		sessions = append(sessions, core.AgentSessionInfo{
+			ID:           sessionID,
+			Summary:      summary,
+			MessageCount: msgCount,
+			ModifiedAt:   info.ModTime(),
+		})
+	}
+
+	sort.Slice(sessions, func(i, j int) bool {
+		return sessions[i].ModifiedAt.After(sessions[j].ModifiedAt)
+	})
+
+	return sessions, nil
+}
+
+// scanSessionMeta reads a session JSONL and returns (firstUserMessage, messageCount).
+// Only counts "user" and "assistant" type entries as messages.
+func scanSessionMeta(path string) (string, int) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", 0
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+
+	var summary string
+	var count int
+
+	for scanner.Scan() {
+		var entry struct {
+			Type    string `json:"type"`
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+			continue
+		}
+		if entry.Type == "user" || entry.Type == "assistant" {
+			count++
+			if summary == "" && entry.Type == "user" && entry.Message.Content != "" {
+				s := entry.Message.Content
+				if len(s) > 40 {
+					s = s[:40] + "..."
+				}
+				summary = s
+			}
+		}
+	}
+	return summary, count
 }
 
 func (a *Agent) Stop() error { return nil }

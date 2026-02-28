@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/chenhg5/cc-connect/core"
 
@@ -53,6 +54,10 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	eventHandler := dispatcher.NewEventDispatcher("", "").
 		OnP2MessageReceiveV1(func(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
 			return p.onMessage(event)
+		}).
+		OnP2ChatAccessEventBotP2pChatEnteredV1(func(ctx context.Context, event *larkim.P2ChatAccessEventBotP2pChatEnteredV1) error {
+			slog.Debug("feishu: user opened bot chat")
+			return nil
 		})
 
 	p.wsClient = larkws.NewClient(p.appID, p.appSecret,
@@ -123,13 +128,13 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 		return fmt.Errorf("feishu: invalid reply context type %T", rctx)
 	}
 
-	body, _ := json.Marshal(map[string]string{"text": content})
+	msgType, msgBody := buildReplyContent(content)
 
 	resp, err := p.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
 		MessageId(rc.messageID).
 		Body(larkim.NewReplyMessageReqBodyBuilder().
-			MsgType(larkim.MsgTypeText).
-			Content(string(body)).
+			MsgType(msgType).
+			Content(msgBody).
 			Build()).
 		Build())
 	if err != nil {
@@ -139,6 +144,80 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 		return fmt.Errorf("feishu: reply failed code=%d msg=%s", resp.Code, resp.Msg)
 	}
 	return nil
+}
+
+// buildReplyContent decides between plain text and interactive card based on content.
+func buildReplyContent(content string) (msgType string, body string) {
+	if !containsMarkdown(content) {
+		b, _ := json.Marshal(map[string]string{"text": content})
+		return larkim.MsgTypeText, string(b)
+	}
+	return larkim.MsgTypeInteractive, buildCardJSON(adaptMarkdown(content))
+}
+
+var markdownIndicators = []string{
+	"```", "**", "~~", "\n- ", "\n* ", "\n1. ", "\n# ", "---",
+}
+
+func containsMarkdown(s string) bool {
+	for _, ind := range markdownIndicators {
+		if strings.Contains(s, ind) {
+			return true
+		}
+	}
+	return false
+}
+
+// adaptMarkdown converts standard markdown to Feishu card-compatible markdown.
+// Feishu card markdown elements do NOT support # headers or > blockquotes,
+// so we convert them to bold text and indented text respectively.
+func adaptMarkdown(s string) string {
+	lines := strings.Split(s, "\n")
+	inCodeBlock := false
+
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
+			inCodeBlock = !inCodeBlock
+			continue
+		}
+		if inCodeBlock {
+			continue
+		}
+
+		for level := 6; level >= 1; level-- {
+			prefix := strings.Repeat("#", level) + " "
+			if strings.HasPrefix(line, prefix) {
+				lines[i] = "**" + strings.TrimPrefix(line, prefix) + "**"
+				break
+			}
+		}
+
+		if strings.HasPrefix(line, "> ") {
+			lines[i] = "  " + strings.TrimPrefix(line, "> ")
+		}
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+func buildCardJSON(content string) string {
+	card := map[string]any{
+		"config": map[string]any{
+			"wide_screen_mode": true,
+		},
+		"elements": []any{
+			map[string]any{
+				"tag": "div",
+				"text": map[string]any{
+					"tag":     "lark_md",
+					"content": content,
+				},
+			},
+		},
+	}
+	b, _ := json.Marshal(card)
+	return string(b)
 }
 
 func (p *Platform) Stop() error {

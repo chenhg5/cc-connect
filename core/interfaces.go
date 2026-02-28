@@ -14,11 +14,10 @@ type Platform interface {
 type MessageHandler func(p Platform, msg *Message)
 
 // Agent abstracts an AI coding assistant (Claude Code, Cursor, Gemini CLI, etc.).
-// Execute sends a prompt and returns a channel that streams Event values.
-// The channel may emit tool_use events (showing what the agent did), text events,
-// and a final result event.
 type Agent interface {
 	Name() string
 	Execute(ctx context.Context, sessionID string, prompt string) (<-chan Event, error)
+	// ListSessions returns sessions known to the agent backend (e.g. from Claude Code's session index).
+	ListSessions(ctx context.Context) ([]AgentSessionInfo, error)
 	Stop() error
 }
