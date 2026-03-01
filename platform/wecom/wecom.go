@@ -282,35 +282,39 @@ func (p *Platform) handleMessage(w http.ResponseWriter, r *http.Request, msgSig,
 
 	case "image":
 		slog.Debug("wecom: image received", "user", msg.FromUserName)
-		imgData, err := p.downloadMedia(msg.MediaId)
-		if err != nil {
-			slog.Error("wecom: download image failed", "error", err)
-			return
-		}
-		go p.handler(p, &core.Message{
-			SessionKey: sessionKey, Platform: "wecom",
-			UserID: msg.FromUserName, UserName: msg.FromUserName,
-			Images:  []core.ImageAttachment{{MimeType: "image/jpeg", Data: imgData}},
-			ReplyCtx: rctx,
-		})
+		go func() {
+			imgData, err := p.downloadMedia(msg.MediaId)
+			if err != nil {
+				slog.Error("wecom: download image failed", "error", err)
+				return
+			}
+			p.handler(p, &core.Message{
+				SessionKey: sessionKey, Platform: "wecom",
+				UserID: msg.FromUserName, UserName: msg.FromUserName,
+				Images:  []core.ImageAttachment{{MimeType: "image/jpeg", Data: imgData}},
+				ReplyCtx: rctx,
+			})
+		}()
 
 	case "voice":
 		slog.Debug("wecom: voice received", "user", msg.FromUserName, "format", msg.Format)
-		audioData, err := p.downloadMedia(msg.MediaId)
-		if err != nil {
-			slog.Error("wecom: download voice failed", "error", err)
-			return
-		}
-		format := strings.ToLower(msg.Format)
-		if format == "" {
-			format = "amr"
-		}
-		go p.handler(p, &core.Message{
-			SessionKey: sessionKey, Platform: "wecom",
-			UserID: msg.FromUserName, UserName: msg.FromUserName,
-			Audio:    &core.AudioAttachment{MimeType: "audio/" + format, Data: audioData, Format: format},
-			ReplyCtx: rctx,
-		})
+		go func() {
+			audioData, err := p.downloadMedia(msg.MediaId)
+			if err != nil {
+				slog.Error("wecom: download voice failed", "error", err)
+				return
+			}
+			format := strings.ToLower(msg.Format)
+			if format == "" {
+				format = "amr"
+			}
+			p.handler(p, &core.Message{
+				SessionKey: sessionKey, Platform: "wecom",
+				UserID: msg.FromUserName, UserName: msg.FromUserName,
+				Audio:    &core.AudioAttachment{MimeType: "audio/" + format, Data: audioData, Format: format},
+				ReplyCtx: rctx,
+			})
+		}()
 
 	default:
 		slog.Debug("wecom: ignoring unsupported message type", "type", msg.MsgType)
