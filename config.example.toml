@@ -48,6 +48,26 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "bypassPermission
 # Optional: specify a model
 # model = "claude-sonnet-4-20250514"
 
+# Active provider (matches a name in [[projects.agent.providers]])
+# provider = "anthropic"
+
+# API Providers — switch between them via /provider command in chat
+# or via CLI: cc-connect provider add --project my-backend --name relay --api-key sk-xxx
+#
+# [[projects.agent.providers]]
+# name = "anthropic"
+# api_key = "sk-ant-xxx"
+#
+# [[projects.agent.providers]]
+# name = "relay"
+# api_key = "sk-xxx"
+# base_url = "https://api.relay-service.com"
+# model = "claude-sonnet-4-20250514"
+#
+# [[projects.agent.providers]]
+# name = "bedrock"
+# env = { CLAUDE_CODE_USE_BEDROCK = "1", AWS_PROFILE = "bedrock" }
+
 # Feishu / Lark
 # 1. Create an app at https://open.feishu.cn
 # 2. Enable Bot capability
@@ -181,6 +201,19 @@ app_secret = "your-feishu-app-secret"
 #
 # Optional: specify a model
 # model = "o3"
+#
+# # Active provider
+# # provider = "openai"
+#
+# [[projects.agent.providers]]
+# name = "openai"
+# api_key = "sk-xxx"
+#
+# [[projects.agent.providers]]
+# name = "custom"
+# api_key = "sk-xxx"
+# base_url = "https://custom-api.com/v1"
+# model = "gpt-4o"
 #
 # [[projects.platforms]]
 # type = "telegram"

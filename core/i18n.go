@@ -117,6 +117,19 @@ const (
 	MsgListSwitchHint       MsgKey = "list_switch_hint"
 	MsgListError            MsgKey = "list_error"
 	MsgHistoryEmpty         MsgKey = "history_empty"
+	MsgProviderNotSupported MsgKey = "provider_not_supported"
+	MsgProviderNone         MsgKey = "provider_none"
+	MsgProviderCurrent      MsgKey = "provider_current"
+	MsgProviderListTitle    MsgKey = "provider_list_title"
+	MsgProviderListEmpty    MsgKey = "provider_list_empty"
+	MsgProviderSwitchHint   MsgKey = "provider_switch_hint"
+	MsgProviderNotFound     MsgKey = "provider_not_found"
+	MsgProviderSwitched     MsgKey = "provider_switched"
+	MsgProviderAdded        MsgKey = "provider_added"
+	MsgProviderAddUsage     MsgKey = "provider_add_usage"
+	MsgProviderAddFailed    MsgKey = "provider_add_failed"
+	MsgProviderRemoved      MsgKey = "provider_removed"
+	MsgProviderRemoveFailed MsgKey = "provider_remove_failed"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -231,6 +244,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/switch <id>\n  Resume an existing session\n\n" +
 			"/current\n  Show current active session\n\n" +
 			"/history [n]\n  Show last n messages (default 10)\n\n" +
+			"/provider [list|add|remove|switch]\n  Manage API providers\n\n" +
 			"/allow <tool>\n  Pre-allow a tool (next session)\n\n" +
 			"/mode [name]\n  View/switch permission mode\n\n" +
 			"/lang [en|zh|auto]\n  View/switch language\n\n" +
@@ -244,6 +258,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/switch <id>\n  恢复已有会话\n\n" +
 			"/current\n  查看当前活跃会话\n\n" +
 			"/history [n]\n  查看最近 n 条消息（默认 10）\n\n" +
+			"/provider [list|add|remove|switch]\n  管理 API Provider\n\n" +
 			"/allow <工具名>\n  预授权工具（下次会话生效）\n\n" +
 			"/mode [名称]\n  查看/切换权限模式\n\n" +
 			"/lang [en|zh|auto]\n  查看/切换语言\n\n" +
@@ -275,6 +290,64 @@ var messages = map[MsgKey]map[Language]string{
 	MsgHistoryEmpty: {
 		LangEnglish: "No history in current session.",
 		LangChinese: "当前会话暂无历史消息。",
+	},
+	MsgProviderNotSupported: {
+		LangEnglish: "This agent does not support provider switching.",
+		LangChinese: "当前 Agent 不支持 Provider 切换。",
+	},
+	MsgProviderNone: {
+		LangEnglish: "No provider configured. Using agent's default environment.\n\nAdd providers in `config.toml` or via `cc-connect provider add`.",
+		LangChinese: "未配置 Provider，使用 Agent 默认环境。\n\n可在 `config.toml` 中添加或使用 `cc-connect provider add` 命令。",
+	},
+	MsgProviderCurrent: {
+		LangEnglish: "📡 Active provider: **%s**\n\nUse `/provider list` to see all, `/provider switch <name>` to switch.",
+		LangChinese: "📡 当前 Provider: **%s**\n\n使用 `/provider list` 查看全部，`/provider switch <名称>` 切换。",
+	},
+	MsgProviderListTitle: {
+		LangEnglish: "📡 **Providers**\n\n",
+		LangChinese: "📡 **Provider 列表**\n\n",
+	},
+	MsgProviderListEmpty: {
+		LangEnglish: "No providers configured.\n\nAdd providers in `config.toml` or via `cc-connect provider add`.",
+		LangChinese: "未配置 Provider。\n\n可在 `config.toml` 中添加或使用 `cc-connect provider add` 命令。",
+	},
+	MsgProviderSwitchHint: {
+		LangEnglish: "`/provider switch <name>` to switch",
+		LangChinese: "`/provider switch <名称>` 切换",
+	},
+	MsgProviderNotFound: {
+		LangEnglish: "❌ Provider %q not found. Use `/provider list` to see available providers.",
+		LangChinese: "❌ 未找到 Provider %q。使用 `/provider list` 查看可用列表。",
+	},
+	MsgProviderSwitched: {
+		LangEnglish: "✅ Provider switched to **%s**. New sessions will use this provider.",
+		LangChinese: "✅ Provider 已切换为 **%s**，新会话将使用此 Provider。",
+	},
+	MsgProviderAdded: {
+		LangEnglish: "✅ Provider **%s** added.\n\nUse `/provider switch %s` to activate.",
+		LangChinese: "✅ Provider **%s** 已添加。\n\n使用 `/provider switch %s` 激活。",
+	},
+	MsgProviderAddUsage: {
+		LangEnglish: "Usage:\n\n" +
+			"`/provider add <name> <api_key> [base_url] [model]`\n\n" +
+			"Or JSON:\n" +
+			"`/provider add {\"name\":\"relay\",\"api_key\":\"sk-xxx\",\"base_url\":\"https://...\",\"model\":\"...\"}`",
+		LangChinese: "用法:\n\n" +
+			"`/provider add <名称> <api_key> [base_url] [model]`\n\n" +
+			"或 JSON:\n" +
+			"`/provider add {\"name\":\"relay\",\"api_key\":\"sk-xxx\",\"base_url\":\"https://...\",\"model\":\"...\"}`",
+	},
+	MsgProviderAddFailed: {
+		LangEnglish: "❌ Failed to add provider: %v",
+		LangChinese: "❌ 添加 Provider 失败: %v",
+	},
+	MsgProviderRemoved: {
+		LangEnglish: "✅ Provider **%s** removed.",
+		LangChinese: "✅ Provider **%s** 已移除。",
+	},
+	MsgProviderRemoveFailed: {
+		LangEnglish: "❌ Failed to remove provider: %v",
+		LangChinese: "❌ 移除 Provider 失败: %v",
 	},
 }
 

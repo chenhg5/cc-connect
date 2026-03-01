@@ -90,15 +90,20 @@ make build
 ### Configure
 
 ```bash
+# Global config (recommended)
+mkdir -p ~/.cc-connect
+cp config.example.toml ~/.cc-connect/config.toml
+vim ~/.cc-connect/config.toml
+
+# Or local config (also supported)
 cp config.example.toml config.toml
-vim config.toml   # Fill in your platform credentials
 ```
 
 ### Run
 
 ```bash
-./cc-connect                              # uses config.toml by default
-./cc-connect -config /path/to/config.toml # custom path
+./cc-connect                              # auto: ./config.toml → ~/.cc-connect/config.toml
+./cc-connect -config /path/to/config.toml # explicit path
 ./cc-connect --version                    # show version info
 ```
 
@@ -215,16 +220,88 @@ Switch mode at runtime from the chat:
 /mode default  # switch back to default
 ```
 
+## API Provider Management
+
+Switch between different API providers (e.g. Anthropic direct, relay services, AWS Bedrock) at runtime — no restart needed. Provider credentials are injected as environment variables into the agent subprocess, so your local config stays untouched.
+
+### Configure Providers
+
+**In `config.toml`:**
+
+```toml
+[projects.agent.options]
+work_dir = "/path/to/project"
+provider = "anthropic"   # active provider name
+
+[[projects.agent.providers]]
+name = "anthropic"
+api_key = "sk-ant-xxx"
+
+[[projects.agent.providers]]
+name = "relay"
+api_key = "sk-xxx"
+base_url = "https://api.relay-service.com"
+model = "claude-sonnet-4-20250514"
+
+# For special setups (Bedrock, Vertex, etc.), use the env map:
+[[projects.agent.providers]]
+name = "bedrock"
+env = { CLAUDE_CODE_USE_BEDROCK = "1", AWS_PROFILE = "bedrock" }
+```
+
+**Via CLI:**
+
+```bash
+cc-connect provider add --project my-backend --name relay --api-key sk-xxx --base-url https://api.relay.com
+cc-connect provider add --project my-backend --name bedrock --env CLAUDE_CODE_USE_BEDROCK=1,AWS_PROFILE=bedrock
+cc-connect provider list --project my-backend
+cc-connect provider remove --project my-backend --name relay
+```
+
+**Import from [cc-switch](https://github.com/SaladDay/cc-switch-cli):**
+
+If you already use cc-switch to manage providers, import them with one command (requires `sqlite3`):
+
+```bash
+cc-connect provider import --project my-backend
+cc-connect provider import --project my-backend --type claude     # only Claude providers
+cc-connect provider import --db-path ~/.cc-switch/cc-switch.db    # explicit DB path
+```
+
+### Manage Providers in Chat
+
+```
+/provider                   Show current active provider
+/provider list              List all configured providers
+/provider add <name> <key> [url] [model]   Add a provider
+/provider add {"name":"relay","api_key":"sk-xxx","base_url":"https://..."}
+/provider remove <name>     Remove a provider
+/provider switch <name>     Switch to a provider
+/provider <name>            Shortcut for switch
+```
+
+Adding, removing, and switching providers all persist to `config.toml` automatically. Switching restarts the agent session with the new credentials.
+
+**Env var mapping by agent type:**
+
+| Agent | api_key → | base_url → |
+|-------|-----------|------------|
+| Claude Code | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
+| Codex | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
+
+The `env` map in provider config lets you set arbitrary environment variables for any setup (Bedrock, Vertex, Azure, custom proxies, etc.).
+
 ## Session Management
 
 Each user gets an independent session with full conversation context. Manage sessions via slash commands:
 
 ```
 /new [name]       Start a new session
-/list             List all Claude Code sessions for this project
+/list             List all agent sessions for this project
 /switch <id>      Switch to a different session
 /current          Show current session info
 /history [n]      Show last n messages (default 10)
+/provider [...]   Manage API providers (list/add/remove/switch)
 /allow <tool>     Pre-allow a tool (takes effect on next session)
 /mode [name]      View or switch permission mode
 /quiet            Toggle thinking/tool progress messages
@@ -232,7 +309,7 @@ Each user gets an independent session with full conversation context. Manage ses
 /help             Show available commands
 ```
 
-During a session, Claude may request tool permissions. Reply **allow** / **deny** / **allow all** (auto-approve all remaining requests this session).
+During a session, the agent may request tool permissions. Reply **allow** / **deny** / **allow all** (auto-approve all remaining requests this session).
 
 ## Configuration
 

@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -21,6 +22,10 @@ type Engine struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 	i18n      *I18n
+
+	providerSaveFunc       func(providerName string) error
+	providerAddSaveFunc    func(p ProviderConfig) error
+	providerRemoveSaveFunc func(name string) error
 
 	// Interactive agent session management
 	interactiveMu     sync.Mutex
@@ -63,6 +68,18 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 
 func (e *Engine) SetLanguageSaveFunc(fn func(Language) error) {
 	e.i18n.SetSaveFunc(fn)
+}
+
+func (e *Engine) SetProviderSaveFunc(fn func(providerName string) error) {
+	e.providerSaveFunc = fn
+}
+
+func (e *Engine) SetProviderAddSaveFunc(fn func(ProviderConfig) error) {
+	e.providerAddSaveFunc = fn
+}
+
+func (e *Engine) SetProviderRemoveSaveFunc(fn func(string) error) {
+	e.providerRemoveSaveFunc = fn
 }
 
 func (e *Engine) Start() error {
@@ -476,6 +493,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) {
 		e.cmdLang(p, msg, args)
 	case "/quiet":
 		e.cmdQuiet(p, msg)
+	case "/provider":
+		e.cmdProvider(p, msg, args)
 	case "/stop":
 		e.cmdStop(p, msg)
 	case "/help":
@@ -808,6 +827,207 @@ func (e *Engine) cmdAllow(p Platform, msg *Message, args []string) {
 	} else {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgToolAuthNotSupported))
 	}
+}
+
+func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
+	switcher, ok := e.agent.(ProviderSwitcher)
+	if !ok {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgProviderNotSupported))
+		return
+	}
+
+	if len(args) == 0 {
+		current := switcher.GetActiveProvider()
+		if current == nil {
+			providers := switcher.ListProviders()
+			if len(providers) == 0 {
+				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgProviderNone))
+			} else {
+				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgProviderNone))
+			}
+			return
+		}
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgProviderCurrent), current.Name))
+		return
+	}
+
+	sub := strings.ToLower(args[0])
+	switch sub {
+	case "list":
+		providers := switcher.ListProviders()
+		if len(providers) == 0 {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgProviderListEmpty))
+			return
+		}
+		current := switcher.GetActiveProvider()
+		var sb strings.Builder
+		sb.WriteString(e.i18n.T(MsgProviderListTitle))
+		for _, prov := range providers {
+			marker := "  "
+			if current != nil && prov.Name == current.Name {
+				marker = "▶ "
+			}
+			detail := prov.Name
+			if prov.BaseURL != "" {
+				detail += " (" + prov.BaseURL + ")"
+			}
+			if prov.Model != "" {
+				detail += " [" + prov.Model + "]"
+			}
+			sb.WriteString(fmt.Sprintf("%s**%s**\n", marker, detail))
+		}
+		sb.WriteString("\n" + e.i18n.T(MsgProviderSwitchHint))
+		e.reply(p, msg.ReplyCtx, sb.String())
+
+	case "add":
+		e.cmdProviderAdd(p, msg, switcher, args[1:])
+
+	case "remove", "rm", "delete":
+		e.cmdProviderRemove(p, msg, switcher, args[1:])
+
+	case "switch":
+		if len(args) < 2 {
+			e.reply(p, msg.ReplyCtx, "Usage: /provider switch <name>")
+			return
+		}
+		e.switchProvider(p, msg, switcher, args[1])
+
+	case "current":
+		current := switcher.GetActiveProvider()
+		if current == nil {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgProviderNone))
+			return
+		}
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgProviderCurrent), current.Name))
+
+	default:
+		e.switchProvider(p, msg, switcher, args[0])
+	}
+}
+
+func (e *Engine) cmdProviderAdd(p Platform, msg *Message, switcher ProviderSwitcher, args []string) {
+	if len(args) == 0 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgProviderAddUsage))
+		return
+	}
+
+	var prov ProviderConfig
+
+	// Join args back; detect JSON (starts with '{') vs positional
+	raw := strings.Join(args, " ")
+	raw = strings.TrimSpace(raw)
+
+	if strings.HasPrefix(raw, "{") {
+		// JSON format: /provider add {"name":"relay","api_key":"sk-xxx",...}
+		var jp struct {
+			Name    string            `json:"name"`
+			APIKey  string            `json:"api_key"`
+			BaseURL string            `json:"base_url"`
+			Model   string            `json:"model"`
+			Env     map[string]string `json:"env"`
+		}
+		if err := json.Unmarshal([]byte(raw), &jp); err != nil {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgProviderAddFailed), "invalid JSON: "+err.Error()))
+			return
+		}
+		if jp.Name == "" {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgProviderAddFailed), "\"name\" is required"))
+			return
+		}
+		prov = ProviderConfig{Name: jp.Name, APIKey: jp.APIKey, BaseURL: jp.BaseURL, Model: jp.Model, Env: jp.Env}
+	} else {
+		// Positional: /provider add <name> <api_key> [base_url] [model]
+		if len(args) < 2 {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgProviderAddUsage))
+			return
+		}
+		prov.Name = args[0]
+		prov.APIKey = args[1]
+		if len(args) > 2 {
+			prov.BaseURL = args[2]
+		}
+		if len(args) > 3 {
+			prov.Model = args[3]
+		}
+	}
+
+	// Check for duplicates
+	for _, existing := range switcher.ListProviders() {
+		if existing.Name == prov.Name {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgProviderAddFailed), fmt.Sprintf("provider %q already exists", prov.Name)))
+			return
+		}
+	}
+
+	// Add to runtime
+	updated := append(switcher.ListProviders(), prov)
+	switcher.SetProviders(updated)
+
+	// Persist to config
+	if e.providerAddSaveFunc != nil {
+		if err := e.providerAddSaveFunc(prov); err != nil {
+			slog.Error("failed to persist provider", "error", err)
+		}
+	}
+
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgProviderAdded), prov.Name, prov.Name))
+}
+
+func (e *Engine) cmdProviderRemove(p Platform, msg *Message, switcher ProviderSwitcher, args []string) {
+	if len(args) == 0 {
+		e.reply(p, msg.ReplyCtx, "Usage: /provider remove <name>")
+		return
+	}
+	name := args[0]
+
+	providers := switcher.ListProviders()
+	found := false
+	var remaining []ProviderConfig
+	for _, prov := range providers {
+		if prov.Name == name {
+			found = true
+		} else {
+			remaining = append(remaining, prov)
+		}
+	}
+
+	if !found {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgProviderNotFound), name))
+		return
+	}
+
+	// If removing the active provider, clear it
+	active := switcher.GetActiveProvider()
+	switcher.SetProviders(remaining)
+	if active != nil && active.Name == name {
+		// No active provider after removal
+		slog.Info("removed active provider, clearing selection", "name", name)
+	}
+
+	// Persist
+	if e.providerRemoveSaveFunc != nil {
+		if err := e.providerRemoveSaveFunc(name); err != nil {
+			slog.Error("failed to persist provider removal", "error", err)
+		}
+	}
+
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgProviderRemoved), name))
+}
+
+func (e *Engine) switchProvider(p Platform, msg *Message, switcher ProviderSwitcher, name string) {
+	if !switcher.SetActiveProvider(name) {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgProviderNotFound), name))
+		return
+	}
+	e.cleanupInteractiveState(msg.SessionKey)
+
+	if e.providerSaveFunc != nil {
+		if err := e.providerSaveFunc(name); err != nil {
+			slog.Error("failed to save provider", "error", err)
+		}
+	}
+
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgProviderSwitched), name))
 }
 
 // ──────────────────────────────────────────────────────────────

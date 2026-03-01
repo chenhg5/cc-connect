@@ -95,15 +95,20 @@ make build
 ### 配置
 
 ```bash
+# 全局配置（推荐）
+mkdir -p ~/.cc-connect
+cp config.example.toml ~/.cc-connect/config.toml
+vim ~/.cc-connect/config.toml
+
+# 或本地配置（也支持）
 cp config.example.toml config.toml
-vim config.toml   # 填入你的平台凭证
 ```
 
 ### 运行
 
 ```bash
-./cc-connect                              # 默认使用 config.toml
-./cc-connect -config /path/to/config.toml # 自定义路径
+./cc-connect                              # 自动: ./config.toml → ~/.cc-connect/config.toml
+./cc-connect -config /path/to/config.toml # 指定路径
 ./cc-connect --version                    # 显示版本信息
 ```
 
@@ -220,24 +225,96 @@ mode = "full-auto"
 /mode default  # 切换回默认模式
 ```
 
+## API Provider 管理
+
+支持在运行时切换不同的 API Provider（如 Anthropic 直连、中转服务、AWS Bedrock 等），无需重启服务。Provider 凭证通过环境变量注入 Agent 子进程，不会修改本地配置文件。
+
+### 配置 Provider
+
+**在 `config.toml` 中：**
+
+```toml
+[projects.agent.options]
+work_dir = "/path/to/project"
+provider = "anthropic"   # 当前激活的 provider 名称
+
+[[projects.agent.providers]]
+name = "anthropic"
+api_key = "sk-ant-xxx"
+
+[[projects.agent.providers]]
+name = "relay"
+api_key = "sk-xxx"
+base_url = "https://api.relay-service.com"
+model = "claude-sonnet-4-20250514"
+
+# 特殊环境（Bedrock、Vertex 等）使用 env 字段：
+[[projects.agent.providers]]
+name = "bedrock"
+env = { CLAUDE_CODE_USE_BEDROCK = "1", AWS_PROFILE = "bedrock" }
+```
+
+**通过 CLI 命令：**
+
+```bash
+cc-connect provider add --project my-backend --name relay --api-key sk-xxx --base-url https://api.relay.com
+cc-connect provider add --project my-backend --name bedrock --env CLAUDE_CODE_USE_BEDROCK=1,AWS_PROFILE=bedrock
+cc-connect provider list --project my-backend
+cc-connect provider remove --project my-backend --name relay
+```
+
+**从 [cc-switch](https://github.com/SaladDay/cc-switch-cli) 导入：**
+
+如果你已经使用 cc-switch 管理 Provider，一条命令即可导入（需要 `sqlite3`）：
+
+```bash
+cc-connect provider import --project my-backend
+cc-connect provider import --project my-backend --type claude     # 仅 Claude Provider
+cc-connect provider import --db-path ~/.cc-switch/cc-switch.db    # 指定数据库路径
+```
+
+### 在聊天中管理 Provider
+
+```
+/provider                   查看当前 Provider
+/provider list              列出所有可用 Provider
+/provider add <名称> <key> [url] [model]   添加 Provider
+/provider add {"name":"relay","api_key":"sk-xxx","base_url":"https://..."}
+/provider remove <名称>     移除 Provider
+/provider switch <名称>     切换 Provider
+/provider <名称>            switch 的快捷方式
+```
+
+添加、移除、切换操作均自动持久化到 `config.toml`。切换时会自动重启 Agent 会话并加载新凭证。
+
+**各 Agent 的环境变量映射：**
+
+| Agent | api_key → | base_url → |
+|-------|-----------|------------|
+| Claude Code | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
+| Codex | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
+
+Provider 配置中的 `env` 字段支持设置任意环境变量，可用于 Bedrock、Vertex、Azure、自定义代理等各种场景。
+
 ## 会话管理
 
 每个用户拥有独立的会话和完整的对话上下文。通过斜杠命令管理会话：
 
 ```
-/new [名称]       创建新会话
-/list             列出当前项目的 Claude Code 会话列表
-/switch <id>      切换到指定会话
-/current          查看当前活跃会话
-/history [n]      查看最近 n 条消息（默认 10）
-/allow <工具名>    预授权工具（下次会话生效）
-/mode [名称]      查看或切换权限模式
-/quiet            开关思考和工具进度消息推送
-/stop             停止当前执行
-/help             显示可用命令
+/new [名称]            创建新会话
+/list                  列出当前项目的会话列表
+/switch <id>           切换到指定会话
+/current               查看当前活跃会话
+/history [n]           查看最近 n 条消息（默认 10）
+/provider [list|add|remove|switch] 管理 API Provider
+/allow <工具名>         预授权工具（下次会话生效）
+/mode [名称]           查看或切换权限模式
+/quiet                 开关思考和工具进度消息推送
+/stop                  停止当前执行
+/help                  显示可用命令
 ```
 
-会话进行中，Claude 可能请求工具权限。回复 **允许** / **拒绝** / **允许所有**（本次会话自动批准后续所有请求）。
+会话进行中，Agent 可能请求工具权限。回复 **允许** / **拒绝** / **允许所有**（本次会话自动批准后续所有请求）。
 
 ## 配置说明
 

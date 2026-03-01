@@ -23,10 +23,12 @@ func init() {
 //   - "full-auto": --full-auto (sandbox-protected auto execution)
 //   - "yolo":      --dangerously-bypass-approvals-and-sandbox
 type Agent struct {
-	workDir string
-	model   string
-	mode    string // "suggest" | "auto-edit" | "full-auto" | "yolo"
-	mu      sync.Mutex
+	workDir   string
+	model     string
+	mode      string // "suggest" | "auto-edit" | "full-auto" | "yolo"
+	providers []core.ProviderConfig
+	activeIdx int // -1 = no provider set
+	mu        sync.Mutex
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -43,9 +45,10 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 
 	return &Agent{
-		workDir: workDir,
-		model:   model,
-		mode:    mode,
+		workDir:   workDir,
+		model:     model,
+		mode:      mode,
+		activeIdx: -1,
 	}, nil
 }
 
@@ -68,9 +71,15 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	a.mu.Lock()
 	mode := a.mode
 	model := a.model
+	extraEnv := a.providerEnvLocked()
+	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
+		if m := a.providers[a.activeIdx].Model; m != "" {
+			model = m
+		}
+	}
 	a.mu.Unlock()
 
-	return newCodexSession(ctx, a.workDir, model, mode, sessionID)
+	return newCodexSession(ctx, a.workDir, model, mode, sessionID, extraEnv)
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
@@ -95,6 +104,63 @@ func (a *Agent) GetMode() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.mode
+}
+
+// ── ProviderSwitcher implementation ──────────────────────────
+
+func (a *Agent) SetProviders(providers []core.ProviderConfig) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.providers = providers
+}
+
+func (a *Agent) SetActiveProvider(name string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for i, p := range a.providers {
+		if p.Name == name {
+			a.activeIdx = i
+			slog.Info("codex: provider switched", "provider", name)
+			return true
+		}
+	}
+	return false
+}
+
+func (a *Agent) GetActiveProvider() *core.ProviderConfig {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.activeIdx < 0 || a.activeIdx >= len(a.providers) {
+		return nil
+	}
+	p := a.providers[a.activeIdx]
+	return &p
+}
+
+func (a *Agent) ListProviders() []core.ProviderConfig {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	result := make([]core.ProviderConfig, len(a.providers))
+	copy(result, a.providers)
+	return result
+}
+
+func (a *Agent) providerEnvLocked() []string {
+	if a.activeIdx < 0 || a.activeIdx >= len(a.providers) {
+		return nil
+	}
+	p := a.providers[a.activeIdx]
+	var env []string
+	if p.APIKey != "" {
+		env = append(env, "OPENAI_API_KEY="+p.APIKey)
+	}
+	if p.BaseURL != "" {
+		env = append(env, "OPENAI_BASE_URL="+p.BaseURL)
+	}
+	for k, v := range p.Env {
+		env = append(env, k+"="+v)
+	}
+	return env
 }
 
 func (a *Agent) PermissionModes() []core.PermissionModeInfo {

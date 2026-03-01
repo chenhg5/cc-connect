@@ -71,6 +71,23 @@ type HistoryProvider interface {
 	GetSessionHistory(ctx context.Context, sessionID string, limit int) ([]HistoryEntry, error)
 }
 
+// ProviderConfig holds API provider settings for an agent.
+type ProviderConfig struct {
+	Name    string
+	APIKey  string
+	BaseURL string
+	Model   string
+	Env     map[string]string // arbitrary extra env vars (e.g. CLAUDE_CODE_USE_BEDROCK=1)
+}
+
+// ProviderSwitcher is an optional interface for agents that support multiple API providers.
+type ProviderSwitcher interface {
+	SetProviders(providers []ProviderConfig)
+	SetActiveProvider(name string) bool
+	GetActiveProvider() *ProviderConfig
+	ListProviders() []ProviderConfig
+}
+
 // ModeSwitcher is an optional interface for agents that support runtime permission mode switching.
 type ModeSwitcher interface {
 	SetMode(mode string)

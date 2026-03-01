@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -23,6 +24,7 @@ type codexSession struct {
 	workDir  string
 	model    string
 	mode     string
+	extraEnv []string
 	events   chan core.Event
 	threadID atomic.Value // stores string — Codex thread_id
 	ctx      context.Context
@@ -31,16 +33,17 @@ type codexSession struct {
 	alive    atomic.Bool
 }
 
-func newCodexSession(ctx context.Context, workDir, model, mode, resumeID string) (*codexSession, error) {
+func newCodexSession(ctx context.Context, workDir, model, mode, resumeID string, extraEnv []string) (*codexSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	cs := &codexSession{
-		workDir: workDir,
-		model:   model,
-		mode:    mode,
-		events:  make(chan core.Event, 64),
-		ctx:     sessionCtx,
-		cancel:  cancel,
+		workDir:  workDir,
+		model:    model,
+		mode:     mode,
+		extraEnv: extraEnv,
+		events:   make(chan core.Event, 64),
+		ctx:      sessionCtx,
+		cancel:   cancel,
 	}
 	cs.alive.Store(true)
 
@@ -90,6 +93,9 @@ func (cs *codexSession) Send(prompt string) error {
 
 	cmd := exec.CommandContext(cs.ctx, "codex", args...)
 	cmd.Dir = cs.workDir
+	if len(cs.extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), cs.extraEnv...)
+	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
