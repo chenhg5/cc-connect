@@ -31,7 +31,7 @@ All components are decoupled via Go interfaces — fully pluggable and extensibl
 | Component | Type | Status |
 |-----------|------|--------|
 | Agent | Claude Code | ✅ Supported |
-| Agent | Codex (OpenAI) | ✅ Supported |
+| Agent | Codex (OpenAI) | ✅ Supported (Beta) |
 | Agent | Gemini CLI (Google) | 🔜 Planned |
 | Agent | Crush / OpenCode | 🔜 Planned |
 | Agent | Goose (Block) | 🔜 Planned |
@@ -52,8 +52,10 @@ All components are decoupled via Go interfaces — fully pluggable and extensibl
 | Platform | Google Chat | 🔜 Planned (Chat API) |
 | Platform | Mattermost | 🔜 Planned (Webhook + Bot) |
 | Platform | Matrix (Element) | 🔜 Planned (Client-Server API) |
-| Feature | Voice Messages (STT) | ✅ Whisper API (OpenAI / Groq) + ffmpeg |
-| Feature | Image Messages | ✅ Multimodal (Claude Code) |
+| Feature | Voice Messages (STT) | ✅ Beta — Whisper API (OpenAI / Groq) + ffmpeg |
+| Feature | Image Messages | ✅ Beta — Multimodal (Claude Code) |
+| Feature | API Provider Management | ✅ Beta — Runtime provider switching |
+| Feature | CLI Send (`cc-connect send`) | ✅ Beta — Send messages to sessions via CLI |
 
 ## Quick Start
 
@@ -242,7 +244,7 @@ Switch mode at runtime from the chat:
 /mode default  # switch back to default
 ```
 
-## API Provider Management
+## API Provider Management `Beta`
 
 Switch between different API providers (e.g. Anthropic direct, relay services, AWS Bedrock) at runtime — no restart needed. Provider credentials are injected as environment variables into the agent subprocess, so your local config stays untouched.
 
@@ -313,7 +315,7 @@ Adding, removing, and switching providers all persist to `config.toml` automatic
 
 The `env` map in provider config lets you set arbitrary environment variables for any setup (Bedrock, Vertex, Azure, custom proxies, etc.).
 
-## Voice Messages (Speech-to-Text)
+## Voice Messages (Speech-to-Text) `Beta`
 
 Send voice messages directly — cc-connect transcribes them to text using a configurable STT provider, then forwards the text to the agent.
 

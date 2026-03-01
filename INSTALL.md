@@ -326,14 +326,15 @@ level=INFO msg="cc-connect is running" projects=1
 Once running, send messages to your bot on the configured platform. Available slash commands:
 
 ```
-/new [name]      — Start a new Claude session
-/list            — List Claude Code sessions
+/new [name]      — Start a new session
+/list            — List agent sessions
 /switch <id>     — Resume an existing session
 /current         — Show current active session
 /history [n]     — Show last n messages (default 10)
 /mode [name]     — View/switch permission mode (default/edit/plan/yolo)
 /quiet           — Toggle thinking/tool progress messages
 /allow <tool>    — Pre-allow a tool (next session)
+/provider [...]  — Manage API providers (list/add/remove/switch) [Beta]
 /stop            — Stop current execution
 /help            — Show available commands
 ```
@@ -416,6 +417,16 @@ make build
 ```
 
 After upgrading, restart the running cc-connect process.
+
+## Beta Features
+
+The following features are available in beta (`npm install -g cc-connect@beta` or `cc-connect update --pre`):
+
+- **Codex Agent**: OpenAI Codex CLI integration (`codex exec --json`)
+- **Voice Messages (STT)**: Speech-to-text via Whisper API (OpenAI / Groq / SiliconFlow). Requires `ffmpeg` and `[speech]` config.
+- **Image Messages**: Send images to Claude Code for multimodal analysis
+- **API Provider Management**: Runtime switching between API providers via `/provider` command or CLI
+- **CLI Send**: `cc-connect send` to inject messages into active sessions from external processes
 
 ## Troubleshooting
 

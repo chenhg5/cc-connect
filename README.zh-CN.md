@@ -36,7 +36,7 @@
 | 组件 | 类型 | 状态 |
 |------|------|------|
 | Agent | Claude Code | ✅ 已支持 |
-| Agent | Codex (OpenAI) | ✅ 已支持 |
+| Agent | Codex (OpenAI) | ✅ 已支持 (Beta) |
 | Agent | Gemini CLI (Google) | 🔜 计划中 |
 | Agent | Crush / OpenCode | 🔜 计划中 |
 | Agent | Goose (Block) | 🔜 计划中 |
@@ -57,8 +57,10 @@
 | Platform | Google Chat | 🔜 计划中 (Chat API) |
 | Platform | Mattermost | 🔜 计划中 (Webhook + Bot) |
 | Platform | Matrix (Element) | 🔜 计划中 (Client-Server API) |
-| Feature | 语音消息（语音转文字） | ✅ Whisper API (OpenAI / Groq) + ffmpeg |
-| Feature | 图片消息 | ✅ 多模态 (Claude Code) |
+| Feature | 语音消息（语音转文字） | ✅ Beta — Whisper API (OpenAI / Groq) + ffmpeg |
+| Feature | 图片消息 | ✅ Beta — 多模态 (Claude Code) |
+| Feature | API Provider 管理 | ✅ Beta — 运行时切换 Provider |
+| Feature | CLI 发送 (`cc-connect send`) | ✅ Beta — 通过命令行发送消息到会话 |
 
 ## 快速开始
 
@@ -245,7 +247,7 @@ mode = "full-auto"
 /mode default  # 切换回默认模式
 ```
 
-## API Provider 管理
+## API Provider 管理 `Beta`
 
 支持在运行时切换不同的 API Provider（如 Anthropic 直连、中转服务、AWS Bedrock 等），无需重启服务。Provider 凭证通过环境变量注入 Agent 子进程，不会修改本地配置文件。
 
@@ -316,7 +318,7 @@ cc-connect provider import --db-path ~/.cc-switch/cc-switch.db    # 指定数据
 
 Provider 配置中的 `env` 字段支持设置任意环境变量，可用于 Bedrock、Vertex、Azure、自定义代理等各种场景。
 
-## 语音消息（语音转文字）
+## 语音消息（语音转文字） `Beta`
 
 直接发送语音消息 — cc-connect 自动将语音转为文字，再将文字转发给 Agent 处理。
 
