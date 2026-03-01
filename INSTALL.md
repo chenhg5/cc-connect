@@ -383,6 +383,40 @@ type = "telegram"
 token = "xxx"
 ```
 
+## Upgrade
+
+### Check current version
+
+```bash
+cc-connect --version
+```
+
+### npm users
+
+```bash
+npm update -g cc-connect
+```
+
+### Binary users
+
+Check the latest release at https://github.com/chenhg5/cc-connect/releases and compare with your local version. To upgrade:
+
+```bash
+# Linux/macOS — replace with your platform suffix
+curl -L -o /usr/local/bin/cc-connect https://github.com/chenhg5/cc-connect/releases/latest/download/cc-connect-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/')
+chmod +x /usr/local/bin/cc-connect
+```
+
+### Source users
+
+```bash
+cd cc-connect
+git pull
+make build
+```
+
+After upgrading, restart the running cc-connect process.
+
 ## Troubleshooting
 
 - **"session already in use"** — A previous Claude Code process may still be running. Use `/new` to start a fresh session.
