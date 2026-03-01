@@ -1,5 +1,58 @@
 # Changelog
 
+## v1.1.0-beta.5 (2026-03-01)
+
+### New Features
+
+- **Gemini CLI Agent Support**: Full integration with [Google Gemini CLI](https://github.com/google-gemini/gemini-cli) (`gemini -p --output-format stream-json`).
+  - Headless mode with streaming JSON event parsing (`init`, `message`, `tool_use`, `tool_result`, `error`, `result`)
+  - Multi-turn conversations via `--resume <session_id>`
+  - 4 permission modes: `default`, `auto_edit`, `yolo`, `plan`
+  - Provider switching via `GEMINI_API_KEY` env var, plus Vertex AI support via `env` map
+  - Session listing from `~/.gemini/tmp/<project>/chats/*.json`
+  - Image support via temp file references
+  - Free tier: 60 requests/min, 1,000 requests/day with Google account
+
+- **Cursor Agent Support**: Full integration with [Cursor Agent CLI](https://docs.cursor.com/agent) (`agent --print --output-format stream-json`).
+  - Multi-turn conversations via `--resume <chatId>`
+  - 4 permission modes: `default`, `force`, `plan`, `ask`
+  - Session listing from Cursor's SQLite database
+  - Provider switching via `CURSOR_API_KEY` env var
+
+### Improvements
+
+- **npm auto-update**: `run.js` now checks binary version at runtime and auto-reinstalls if outdated, ensuring `npm install -g cc-connect@beta` always gets the correct binary version
+- **Updated documentation**: README, INSTALL.md, and config.example.toml updated with Gemini CLI and Cursor Agent examples
+
+### Configuration
+
+```toml
+# Gemini CLI
+[[projects]]
+name = "my-gemini-project"
+
+[projects.agent]
+type = "gemini"
+
+[projects.agent.options]
+work_dir = "/path/to/project"
+mode = "yolo"   # "default" | "auto_edit" | "yolo" | "plan"
+# model = "gemini-2.5-flash"
+
+# Cursor Agent
+[[projects]]
+name = "my-cursor-project"
+
+[projects.agent]
+type = "cursor"
+
+[projects.agent.options]
+work_dir = "/path/to/project"
+mode = "force"  # "default" | "force" | "plan" | "ask"
+```
+
+---
+
 ## v1.1.0-beta.3 (2026-03-01)
 
 ### New Features
