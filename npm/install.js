@@ -133,8 +133,18 @@ async function main() {
   const binaryPath = path.join(binDir, binaryName);
 
   if (fs.existsSync(binaryPath)) {
-    console.log(`[cc-connect] Binary already exists at ${binaryPath}`);
-    return;
+    try {
+      const out = execSync(`"${binaryPath}" --version`, { encoding: "utf8", timeout: 5000 });
+      if (out.includes(VERSION.slice(1))) {
+        console.log(`[cc-connect] Binary ${VERSION} already installed, skipping.`);
+        return;
+      }
+      console.log(`[cc-connect] Existing binary is outdated, upgrading to ${VERSION}...`);
+      fs.unlinkSync(binaryPath);
+    } catch {
+      console.log(`[cc-connect] Replacing existing binary with ${VERSION}...`);
+      fs.unlinkSync(binaryPath);
+    }
   }
 
   const urls = getDownloadURLs(filename);
