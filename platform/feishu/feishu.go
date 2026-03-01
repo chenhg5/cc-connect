@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"strings"
 
@@ -86,17 +87,9 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 	msg := event.Event.Message
 	sender := event.Event.Sender
 
-	if msg.MessageType == nil || *msg.MessageType != "text" {
-		slog.Debug("feishu: ignoring non-text message", "type", msg.MessageType)
-		return nil
-	}
-
-	var textBody struct {
-		Text string `json:"text"`
-	}
-	if err := json.Unmarshal([]byte(*msg.Content), &textBody); err != nil {
-		slog.Error("feishu: failed to parse message content", "error", err)
-		return nil
+	msgType := ""
+	if msg.MessageType != nil {
+		msgType = *msg.MessageType
 	}
 
 	chatID := ""
@@ -113,17 +106,47 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 	}
 
 	sessionKey := fmt.Sprintf("feishu:%s:%s", chatID, userID)
+	rctx := replyContext{messageID: *msg.MessageId, chatID: chatID}
 
-	coreMsg := &core.Message{
-		SessionKey: sessionKey,
-		Platform:   "feishu",
-		UserID:     userID,
-		UserName:   userName,
-		Content:    textBody.Text,
-		ReplyCtx:   replyContext{messageID: *msg.MessageId, chatID: chatID},
+	switch msgType {
+	case "text":
+		var textBody struct {
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal([]byte(*msg.Content), &textBody); err != nil {
+			slog.Error("feishu: failed to parse text content", "error", err)
+			return nil
+		}
+		p.handler(p, &core.Message{
+			SessionKey: sessionKey, Platform: "feishu",
+			UserID: userID, UserName: userName,
+			Content: textBody.Text, ReplyCtx: rctx,
+		})
+
+	case "image":
+		var imgBody struct {
+			ImageKey string `json:"image_key"`
+		}
+		if err := json.Unmarshal([]byte(*msg.Content), &imgBody); err != nil {
+			slog.Error("feishu: failed to parse image content", "error", err)
+			return nil
+		}
+		imgData, mimeType, err := p.downloadImage(*msg.MessageId, imgBody.ImageKey)
+		if err != nil {
+			slog.Error("feishu: download image failed", "error", err)
+			return nil
+		}
+		p.handler(p, &core.Message{
+			SessionKey: sessionKey, Platform: "feishu",
+			UserID: userID, UserName: userName,
+			Images:  []core.ImageAttachment{{MimeType: mimeType, Data: imgData}},
+			ReplyCtx: rctx,
+		})
+
+	default:
+		slog.Debug("feishu: ignoring unsupported message type", "type", msgType)
 	}
 
-	p.handler(p, coreMsg)
 	return nil
 }
 
@@ -180,6 +203,48 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 		return fmt.Errorf("feishu: send failed code=%d msg=%s", resp.Code, resp.Msg)
 	}
 	return nil
+}
+
+// downloadImage fetches an image from Feishu by message_id and image_key.
+func (p *Platform) downloadImage(messageID, imageKey string) ([]byte, string, error) {
+	resp, err := p.client.Im.MessageResource.Get(context.Background(),
+		larkim.NewGetMessageResourceReqBuilder().
+			MessageId(messageID).
+			FileKey(imageKey).
+			Type("image").
+			Build())
+	if err != nil {
+		return nil, "", fmt.Errorf("feishu: image API: %w", err)
+	}
+	if !resp.Success() {
+		return nil, "", fmt.Errorf("feishu: image API code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	data, err := io.ReadAll(resp.File)
+	if err != nil {
+		return nil, "", fmt.Errorf("feishu: read image: %w", err)
+	}
+
+	mimeType := detectMimeType(data)
+	slog.Debug("feishu: downloaded image", "key", imageKey, "size", len(data), "mime", mimeType)
+	return data, mimeType, nil
+}
+
+func detectMimeType(data []byte) string {
+	if len(data) >= 8 {
+		if data[0] == 0x89 && data[1] == 'P' && data[2] == 'N' && data[3] == 'G' {
+			return "image/png"
+		}
+		if data[0] == 0xFF && data[1] == 0xD8 {
+			return "image/jpeg"
+		}
+		if string(data[:4]) == "GIF8" {
+			return "image/gif"
+		}
+		if string(data[:4]) == "RIFF" && string(data[8:12]) == "WEBP" {
+			return "image/webp"
+		}
+	}
+	return "image/png"
 }
 
 // buildReplyContent decides between plain text and interactive card based on content.

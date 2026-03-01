@@ -3,7 +3,9 @@ package telegram
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"strconv"
 	"strings"
 
@@ -62,32 +64,51 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 			case <-ctx.Done():
 				return
 			case update := <-updates:
-				if update.Message == nil || update.Message.Text == "" {
+				if update.Message == nil {
 					continue
 				}
 
 				msg := update.Message
-				text := msg.Text
-
-				// Strip bot mention in group chats: "/cmd@botname args" → "/cmd args"
-				if p.bot.Self.UserName != "" {
-					text = strings.Replace(text, "@"+p.bot.Self.UserName, "", 1)
-				}
-
 				userName := msg.From.UserName
 				if userName == "" {
 					userName = strings.TrimSpace(msg.From.FirstName + " " + msg.From.LastName)
 				}
-
 				sessionKey := fmt.Sprintf("telegram:%d:%d", msg.Chat.ID, msg.From.ID)
+				rctx := replyContext{chatID: msg.Chat.ID, messageID: msg.MessageID}
+
+				// Handle photo messages
+				if msg.Photo != nil && len(msg.Photo) > 0 {
+					// Pick the largest photo
+					best := msg.Photo[len(msg.Photo)-1]
+					imgData, err := p.downloadFile(best.FileID)
+					if err != nil {
+						slog.Error("telegram: download photo failed", "error", err)
+						continue
+					}
+					coreMsg := &core.Message{
+						SessionKey: sessionKey, Platform: "telegram",
+						UserID: strconv.FormatInt(msg.From.ID, 10), UserName: userName,
+						Content:  msg.Caption,
+						Images:   []core.ImageAttachment{{MimeType: "image/jpeg", Data: imgData}},
+						ReplyCtx: rctx,
+					}
+					p.handler(p, coreMsg)
+					continue
+				}
+
+				if msg.Text == "" {
+					continue
+				}
+
+				text := msg.Text
+				if p.bot.Self.UserName != "" {
+					text = strings.Replace(text, "@"+p.bot.Self.UserName, "", 1)
+				}
 
 				coreMsg := &core.Message{
-					SessionKey: sessionKey,
-					Platform:   "telegram",
-					UserID:     strconv.FormatInt(msg.From.ID, 10),
-					UserName:   userName,
-					Content:    text,
-					ReplyCtx:   replyContext{chatID: msg.Chat.ID, messageID: msg.MessageID},
+					SessionKey: sessionKey, Platform: "telegram",
+					UserID: strconv.FormatInt(msg.From.ID, 10), UserName: userName,
+					Content: text, ReplyCtx: rctx,
 				}
 
 				slog.Debug("telegram: message received", "user", userName, "chat", msg.Chat.ID)
@@ -143,6 +164,22 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 		}
 	}
 	return nil
+}
+
+func (p *Platform) downloadFile(fileID string) ([]byte, error) {
+	fileConfig := tgbotapi.FileConfig{FileID: fileID}
+	file, err := p.bot.GetFile(fileConfig)
+	if err != nil {
+		return nil, fmt.Errorf("get file: %w", err)
+	}
+	link := file.Link(p.bot.Token)
+
+	resp, err := http.Get(link)
+	if err != nil {
+		return nil, fmt.Errorf("download: %w", err)
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(resp.Body)
 }
 
 func (p *Platform) Stop() error {

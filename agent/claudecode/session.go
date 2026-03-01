@@ -4,15 +4,18 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -29,6 +32,7 @@ type claudeSession struct {
 	events      chan core.Event
 	sessionID   atomic.Value // stores string
 	autoApprove bool         // auto mode: approve all permission requests
+	workDir     string
 	ctx         context.Context
 	cancel      context.CancelFunc
 	done        chan struct{}
@@ -91,6 +95,7 @@ func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode strin
 		stdin:       stdin,
 		events:      make(chan core.Event, 64),
 		autoApprove: mode == "bypassPermissions",
+		workDir:     workDir,
 		ctx:         sessionCtx,
 		cancel:      cancel,
 		done:        make(chan struct{}),
@@ -283,19 +288,80 @@ func (cs *claudeSession) handleControlRequest(raw map[string]any) {
 	}
 }
 
-// Send writes a user message to the Claude process stdin.
-func (cs *claudeSession) Send(prompt string) error {
+// Send writes a user message (with optional images) to the Claude process stdin.
+// Images are saved to local temp files first, then sent as base64 in the
+// multimodal content array. File paths are also mentioned in the text prompt
+// as a fallback so Claude Code can read them with its built-in tools.
+func (cs *claudeSession) Send(prompt string, images []core.ImageAttachment) error {
 	if !cs.alive.Load() {
 		return fmt.Errorf("session process is not running")
 	}
-	msg := map[string]any{
-		"type": "user",
-		"message": map[string]any{
-			"role":    "user",
-			"content": prompt,
-		},
+
+	if len(images) == 0 {
+		return cs.writeJSON(map[string]any{
+			"type":    "user",
+			"message": map[string]any{"role": "user", "content": prompt},
+		})
 	}
-	return cs.writeJSON(msg)
+
+	// Save images to local files and build multimodal content
+	imgDir := filepath.Join(cs.workDir, ".cc-connect", "images")
+	os.MkdirAll(imgDir, 0o755)
+
+	var parts []map[string]any
+	var savedPaths []string
+	for i, img := range images {
+		ext := extFromMime(img.MimeType)
+		fname := fmt.Sprintf("img_%d_%d%s", time.Now().UnixMilli(), i, ext)
+		fpath := filepath.Join(imgDir, fname)
+		if err := os.WriteFile(fpath, img.Data, 0o644); err != nil {
+			slog.Error("claudeSession: save image failed", "error", err)
+			continue
+		}
+		savedPaths = append(savedPaths, fpath)
+		slog.Debug("claudeSession: image saved", "path", fpath, "size", len(img.Data))
+
+		mimeType := img.MimeType
+		if mimeType == "" {
+			mimeType = "image/png"
+		}
+		parts = append(parts, map[string]any{
+			"type": "image",
+			"source": map[string]any{
+				"type":       "base64",
+				"media_type": mimeType,
+				"data":       base64.StdEncoding.EncodeToString(img.Data),
+			},
+		})
+	}
+
+	// Build text part: user prompt + file path references as fallback
+	textPart := prompt
+	if textPart == "" {
+		textPart = "Please analyze the attached image(s)."
+	}
+	if len(savedPaths) > 0 {
+		textPart += "\n\n(Images also saved locally: " + strings.Join(savedPaths, ", ") + ")"
+	}
+	parts = append(parts, map[string]any{"type": "text", "text": textPart})
+
+	return cs.writeJSON(map[string]any{
+		"type":    "user",
+		"message": map[string]any{"role": "user", "content": parts},
+	})
+}
+
+func extFromMime(mime string) string {
+	switch mime {
+	case "image/jpeg":
+		return ".jpg"
+	case "image/gif":
+		return ".gif"
+	case "image/webp":
+		return ".webp"
+	default:
+		return ".png"
+	}
 }
 
 // RespondPermission writes a control_response to the Claude process stdin.

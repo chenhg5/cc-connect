@@ -3,7 +3,9 @@ package slack
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 
 	"github.com/chenhg5/cc-connect/core"
 
@@ -95,19 +97,32 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 				slog.Debug("slack: message received", "user", ev.User, "channel", ev.Channel)
 
 				sessionKey := fmt.Sprintf("slack:%s:%s", ev.Channel, ev.User)
-
-				// Use the message timestamp as thread_ts so replies are threaded
 				ts := ev.TimeStamp
 
-				msg := &core.Message{
-					SessionKey: sessionKey,
-					Platform:   "slack",
-					UserID:     ev.User,
-					UserName:   ev.User,
-					Content:    ev.Text,
-					ReplyCtx:   replyContext{channel: ev.Channel, timestamp: ts},
+				var images []core.ImageAttachment
+				for _, f := range ev.Files {
+					if f.Mimetype != "" && (len(f.Mimetype) > 6 && f.Mimetype[:6] == "image/") {
+						imgData, err := p.downloadSlackFile(f.URLPrivateDownload)
+						if err != nil {
+							slog.Error("slack: download file failed", "error", err)
+							continue
+						}
+						images = append(images, core.ImageAttachment{
+							MimeType: f.Mimetype, Data: imgData, FileName: f.Name,
+						})
+					}
 				}
 
+				if ev.Text == "" && len(images) == 0 {
+					return
+				}
+
+				msg := &core.Message{
+					SessionKey: sessionKey, Platform: "slack",
+					UserID: ev.User, UserName: ev.User,
+					Content: ev.Text, Images: images,
+					ReplyCtx: replyContext{channel: ev.Channel, timestamp: ts},
+				}
 				p.handler(p, msg)
 			}
 		}
@@ -153,6 +168,20 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 		return fmt.Errorf("slack: send: %w", err)
 	}
 	return nil
+}
+
+func (p *Platform) downloadSlackFile(url string) ([]byte, error) {
+	if url == "" {
+		return nil, fmt.Errorf("empty URL")
+	}
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("Authorization", "Bearer "+p.botToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(resp.Body)
 }
 
 func (p *Platform) Stop() error {

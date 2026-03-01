@@ -42,6 +42,8 @@ type xmlMessage struct {
 	CreateTime   int64    `xml:"CreateTime"`
 	MsgType      string   `xml:"MsgType"`
 	Content      string   `xml:"Content"`
+	PicUrl       string   `xml:"PicUrl"`
+	MediaId      string   `xml:"MediaId"`
 	MsgId        int64    `xml:"MsgId"`
 	AgentID      int64    `xml:"AgentID"`
 }
@@ -69,6 +71,36 @@ type Platform struct {
 	handler        core.MessageHandler
 	apiClient      *http.Client // HTTP client for outbound API calls (may use proxy)
 	tokenCache     tokenCache
+	dedup          msgDedup
+}
+
+// msgDedup tracks recently processed MsgIds to avoid WeChat Work retry duplicates.
+type msgDedup struct {
+	mu   sync.Mutex
+	seen map[int64]time.Time
+}
+
+func (d *msgDedup) isDuplicate(msgID int64) bool {
+	if msgID == 0 {
+		return false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.seen == nil {
+		d.seen = make(map[int64]time.Time)
+	}
+	// Evict old entries (older than 60s)
+	now := time.Now()
+	for k, t := range d.seen {
+		if now.Sub(t) > 60*time.Second {
+			delete(d.seen, k)
+		}
+	}
+	if _, exists := d.seen[msgID]; exists {
+		return true
+	}
+	d.seen[msgID] = now
+	return false
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -230,24 +262,40 @@ func (p *Platform) handleMessage(w http.ResponseWriter, r *http.Request, msgSig,
 		return
 	}
 
-	if msg.MsgType != "text" {
-		slog.Debug("wecom: ignoring non-text message", "type", msg.MsgType)
+	if p.dedup.isDuplicate(msg.MsgId) {
+		slog.Debug("wecom: skipping duplicate message", "msg_id", msg.MsgId)
 		return
 	}
 
-	slog.Debug("wecom: message received", "user", msg.FromUserName, "text_len", len(msg.Content))
-
 	sessionKey := fmt.Sprintf("wecom:%s", msg.FromUserName)
-	coreMsg := &core.Message{
-		SessionKey: sessionKey,
-		Platform:   "wecom",
-		UserID:     msg.FromUserName,
-		UserName:   msg.FromUserName,
-		Content:    msg.Content,
-		ReplyCtx:   replyContext{userID: msg.FromUserName},
-	}
+	rctx := replyContext{userID: msg.FromUserName}
 
-	go p.handler(p, coreMsg)
+	switch msg.MsgType {
+	case "text":
+		slog.Debug("wecom: message received", "user", msg.FromUserName, "text_len", len(msg.Content))
+		go p.handler(p, &core.Message{
+			SessionKey: sessionKey, Platform: "wecom",
+			UserID: msg.FromUserName, UserName: msg.FromUserName,
+			Content: msg.Content, ReplyCtx: rctx,
+		})
+
+	case "image":
+		slog.Debug("wecom: image received", "user", msg.FromUserName)
+		imgData, err := p.downloadMedia(msg.MediaId)
+		if err != nil {
+			slog.Error("wecom: download image failed", "error", err)
+			return
+		}
+		go p.handler(p, &core.Message{
+			SessionKey: sessionKey, Platform: "wecom",
+			UserID: msg.FromUserName, UserName: msg.FromUserName,
+			Images:  []core.ImageAttachment{{MimeType: "image/jpeg", Data: imgData}},
+			ReplyCtx: rctx,
+		})
+
+	default:
+		slog.Debug("wecom: ignoring unsupported message type", "type", msg.MsgType)
+	}
 }
 
 func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
@@ -472,6 +520,21 @@ func pkcs7Unpad(data []byte) []byte {
 		return data
 	}
 	return data[:len(data)-pad]
+}
+
+// downloadMedia fetches a temporary media file from WeChat Work by media_id.
+func (p *Platform) downloadMedia(mediaID string) ([]byte, error) {
+	accessToken, err := p.getAccessToken()
+	if err != nil {
+		return nil, fmt.Errorf("get token: %w", err)
+	}
+	u := fmt.Sprintf("https://qyapi.weixin.qq.com/cgi-bin/media/get?access_token=%s&media_id=%s", accessToken, mediaID)
+	resp, err := p.apiClient.Get(u)
+	if err != nil {
+		return nil, fmt.Errorf("download: %w", err)
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(resp.Body)
 }
 
 // splitByBytes splits text by UTF-8 byte length (WeChat Work limit is 2048 bytes).

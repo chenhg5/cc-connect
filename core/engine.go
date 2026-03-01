@@ -122,11 +122,11 @@ func (e *Engine) Stop() error {
 
 func (e *Engine) handleMessage(p Platform, msg *Message) {
 	content := strings.TrimSpace(msg.Content)
-	if content == "" {
+	if content == "" && len(msg.Images) == 0 {
 		return
 	}
 
-	if strings.HasPrefix(content, "/") {
+	if len(msg.Images) == 0 && strings.HasPrefix(content, "/") {
 		e.handleCommand(p, msg, content)
 		return
 	}
@@ -270,7 +270,7 @@ func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Se
 		return
 	}
 
-	if err := state.agentSession.Send(msg.Content); err != nil {
+	if err := state.agentSession.Send(msg.Content, msg.Images); err != nil {
 		slog.Error("failed to send prompt", "error", err)
 
 		if !state.agentSession.Alive() {
@@ -282,7 +282,7 @@ func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Se
 				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), "failed to restart agent session"))
 				return
 			}
-			if err := state.agentSession.Send(msg.Content); err != nil {
+			if err := state.agentSession.Send(msg.Content, msg.Images); err != nil {
 				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
 				return
 			}
@@ -1033,6 +1033,35 @@ func (e *Engine) switchProvider(p Platform, msg *Message, switcher ProviderSwitc
 // ──────────────────────────────────────────────────────────────
 // Helpers
 // ──────────────────────────────────────────────────────────────
+
+// SendToSession sends a message to an active session from an external caller (API/CLI).
+// If sessionKey is empty, it picks the first active session.
+func (e *Engine) SendToSession(sessionKey, message string) error {
+	e.interactiveMu.Lock()
+	defer e.interactiveMu.Unlock()
+
+	var state *interactiveState
+	if sessionKey != "" {
+		state = e.interactiveStates[sessionKey]
+	} else {
+		// Pick the first active session
+		for _, s := range e.interactiveStates {
+			state = s
+			break
+		}
+	}
+
+	if state == nil || state.platform == nil {
+		return fmt.Errorf("no active session found (key=%q)", sessionKey)
+	}
+
+	state.mu.Lock()
+	p := state.platform
+	replyCtx := state.replyCtx
+	state.mu.Unlock()
+
+	return p.Send(e.ctx, replyCtx, message)
+}
 
 // send wraps p.Send with error logging.
 func (e *Engine) send(p Platform, replyCtx any, content string) {

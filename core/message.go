@@ -2,6 +2,13 @@ package core
 
 import "time"
 
+// ImageAttachment represents an image sent by the user.
+type ImageAttachment struct {
+	MimeType string // e.g. "image/png", "image/jpeg"
+	Data     []byte // raw image bytes
+	FileName string // original filename (optional)
+}
+
 // Message represents a unified incoming message from any platform.
 type Message struct {
 	SessionKey string // unique key for user context, e.g. "feishu:{chatID}:{userID}"
@@ -9,7 +16,8 @@ type Message struct {
 	UserID     string
 	UserName   string
 	Content    string
-	ReplyCtx   any // platform-specific context needed for replying
+	Images     []ImageAttachment // attached images (if any)
+	ReplyCtx   any               // platform-specific context needed for replying
 }
 
 // EventType distinguishes different kinds of agent output.

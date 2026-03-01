@@ -3,7 +3,9 @@ package discord
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 
 	"github.com/chenhg5/cc-connect/core"
 
@@ -62,16 +64,31 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		slog.Debug("discord: message received", "user", m.Author.Username, "channel", m.ChannelID)
 
 		sessionKey := fmt.Sprintf("discord:%s:%s", m.ChannelID, m.Author.ID)
+		rctx := replyContext{channelID: m.ChannelID, messageID: m.ID}
 
-		msg := &core.Message{
-			SessionKey: sessionKey,
-			Platform:   "discord",
-			UserID:     m.Author.ID,
-			UserName:   m.Author.Username,
-			Content:    m.Content,
-			ReplyCtx:   replyContext{channelID: m.ChannelID, messageID: m.ID},
+		var images []core.ImageAttachment
+		for _, att := range m.Attachments {
+			if att.Width > 0 && att.Height > 0 { // image attachment
+				data, err := downloadURL(att.URL)
+				if err != nil {
+					slog.Error("discord: download attachment failed", "url", att.URL, "error", err)
+					continue
+				}
+				images = append(images, core.ImageAttachment{
+					MimeType: att.ContentType, Data: data, FileName: att.Filename,
+				})
+			}
 		}
 
+		if m.Content == "" && len(images) == 0 {
+			return
+		}
+
+		msg := &core.Message{
+			SessionKey: sessionKey, Platform: "discord",
+			UserID: m.Author.ID, UserName: m.Author.Username,
+			Content: m.Content, Images: images, ReplyCtx: rctx,
+		}
 		p.handler(p, msg)
 	})
 
@@ -146,6 +163,15 @@ func (p *Platform) Stop() error {
 		return p.session.Close()
 	}
 	return nil
+}
+
+func downloadURL(u string) ([]byte, error) {
+	resp, err := http.Get(u)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(resp.Body)
 }
 
 func lastIndexBefore(s string, b byte, before int) int {

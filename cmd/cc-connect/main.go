@@ -46,6 +46,9 @@ func main() {
 		case "provider":
 			runProviderCommand(os.Args[2:])
 			return
+		case "send":
+			runSend(os.Args[2:])
+			return
 		}
 	}
 
@@ -166,6 +169,17 @@ func main() {
 		}
 	}
 
+	// Start internal API server for CLI send
+	apiSrv, err := core.NewAPIServer(cfg.DataDir)
+	if err != nil {
+		slog.Warn("api server unavailable", "error", err)
+	} else {
+		for i, e := range engines {
+			apiSrv.RegisterEngine(cfg.Projects[i].Name, e)
+		}
+		apiSrv.Start()
+	}
+
 	slog.Info("cc-connect is running", "projects", len(engines))
 
 	sigCh := make(chan os.Signal, 1)
@@ -173,6 +187,9 @@ func main() {
 	<-sigCh
 
 	slog.Info("shutting down...")
+	if apiSrv != nil {
+		apiSrv.Stop()
+	}
 	for _, e := range engines {
 		if err := e.Stop(); err != nil {
 			slog.Error("shutdown error", "error", err)

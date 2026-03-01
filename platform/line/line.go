@@ -3,6 +3,7 @@ package line
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 
@@ -102,26 +103,37 @@ func (p *Platform) webhookHandler(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			continue
 		}
-		textMsg, ok := e.Message.(webhook.TextMessageContent)
-		if !ok {
-			continue
-		}
 
 		targetID, targetType, userID := extractSource(e.Source)
 		sessionKey := fmt.Sprintf("line:%s", targetID)
+		rctx := replyContext{targetID: targetID, targetType: targetType}
 
-		slog.Debug("line: message received", "user", userID, "target", targetID, "text_len", len(textMsg.Text))
+		switch m := e.Message.(type) {
+		case webhook.TextMessageContent:
+			slog.Debug("line: message received", "user", userID, "text_len", len(m.Text))
+			p.handler(p, &core.Message{
+				SessionKey: sessionKey, Platform: "line",
+				UserID: userID, UserName: userID,
+				Content: m.Text, ReplyCtx: rctx,
+			})
 
-		msg := &core.Message{
-			SessionKey: sessionKey,
-			Platform:   "line",
-			UserID:     userID,
-			UserName:   userID,
-			Content:    textMsg.Text,
-			ReplyCtx:   replyContext{targetID: targetID, targetType: targetType},
+		case webhook.ImageMessageContent:
+			slog.Debug("line: image received", "user", userID)
+			imgData, err := p.downloadContent(m.Id)
+			if err != nil {
+				slog.Error("line: download image failed", "error", err)
+				continue
+			}
+			p.handler(p, &core.Message{
+				SessionKey: sessionKey, Platform: "line",
+				UserID: userID, UserName: userID,
+				Images:  []core.ImageAttachment{{MimeType: "image/jpeg", Data: imgData}},
+				ReplyCtx: rctx,
+			})
+
+		default:
+			slog.Debug("line: ignoring unsupported message type")
 		}
-
-		p.handler(p, msg)
 	}
 }
 
@@ -136,6 +148,18 @@ func extractSource(src webhook.SourceInterface) (targetID, targetType, userID st
 	default:
 		return "unknown", "unknown", "unknown"
 	}
+}
+
+func (p *Platform) downloadContent(messageID string) ([]byte, error) {
+	url := fmt.Sprintf("https://api-data.line.me/v2/bot/message/%s/content", messageID)
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("Authorization", "Bearer "+p.channelToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(resp.Body)
 }
 
 func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
