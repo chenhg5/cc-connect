@@ -94,7 +94,7 @@ level = "info"  # debug, info, warn, error
 name = "my-project"
 
 [projects.agent]
-type = "claudecode"  # or "codex" for OpenAI Codex
+type = "claudecode"  # or "codex" for OpenAI Codex, or "cursor" for Cursor Agent
 
 [projects.agent.options]
 work_dir = "/absolute/path/to/your/project"
@@ -388,6 +388,23 @@ type = "telegram"
 
 [projects.platforms.options]
 token = "xxx"
+
+# Third project — using Cursor Agent
+[[projects]]
+name = "design-system"
+
+[projects.agent]
+type = "cursor"
+
+[projects.agent.options]
+work_dir = "/path/to/design-system"
+mode = "force"
+
+[[projects.platforms]]
+type = "discord"
+
+[projects.platforms.options]
+token = "xxx"
 ```
 
 ## Upgrade
@@ -429,6 +446,7 @@ After upgrading, restart the running cc-connect process.
 The following features are available in beta (`npm install -g cc-connect@beta` or `cc-connect update --pre`):
 
 - **Codex Agent**: OpenAI Codex CLI integration (`codex exec --json`)
+- **Cursor Agent**: Cursor Agent CLI integration (`agent --print --output-format stream-json`)
 - **Voice Messages (STT)**: Speech-to-text via Whisper API (OpenAI / Groq / SiliconFlow). Requires `ffmpeg` and `[speech]` config.
 - **Image Messages**: Send images to Claude Code for multimodal analysis
 - **API Provider Management**: Runtime switching between API providers via `/provider` command or CLI

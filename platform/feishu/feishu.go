@@ -64,6 +64,10 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		OnP2ChatAccessEventBotP2pChatEnteredV1(func(ctx context.Context, event *larkim.P2ChatAccessEventBotP2pChatEnteredV1) error {
 			slog.Debug("feishu: user opened bot chat", "app_id", p.appID)
 			return nil
+		}).
+		OnP1P2PChatCreatedV1(func(ctx context.Context, event *larkim.P1P2PChatCreatedV1) error {
+			slog.Debug("feishu: p2p chat created", "app_id", p.appID)
+			return nil
 		})
 
 	p.wsClient = larkws.NewClient(p.appID, p.appSecret,

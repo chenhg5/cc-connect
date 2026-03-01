@@ -32,11 +32,11 @@ All components are decoupled via Go interfaces — fully pluggable and extensibl
 |-----------|------|--------|
 | Agent | Claude Code | ✅ Supported |
 | Agent | Codex (OpenAI) | ✅ Supported (Beta) |
+| Agent | Cursor Agent | ✅ Supported (Beta) |
 | Agent | Gemini CLI (Google) | 🔜 Planned |
 | Agent | Crush / OpenCode | 🔜 Planned |
 | Agent | Goose (Block) | 🔜 Planned |
 | Agent | Aider | 🔜 Planned |
-| Agent | Cursor Agent | 🔜 Planned |
 | Agent | Kimi Code (Moonshot) | 🔭 Exploring |
 | Agent | GLM Code / CodeGeeX (ZhipuAI) | 🔭 Exploring |
 | Agent | MiniMax Code | 🔭 Exploring |
@@ -62,7 +62,8 @@ All components are decoupled via Go interfaces — fully pluggable and extensibl
 ### Prerequisites
 
 - **Claude Code**: [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and configured, OR
-- **Codex**: [Codex CLI](https://github.com/openai/codex) installed (`npm install -g @openai/codex`)
+- **Codex**: [Codex CLI](https://github.com/openai/codex) installed (`npm install -g @openai/codex`), OR
+- **Cursor Agent**: [Cursor Agent CLI](https://docs.cursor.com/agent) installed (`agent --version` to verify)
 
 ### Install & Configure via AI Agent (Recommended)
 
@@ -490,7 +491,8 @@ cc-connect/
 │   └── wecom/               # WeChat Work (HTTP Webhook)
 ├── agent/                   # Agent adapters
 │   ├── claudecode/          # Claude Code CLI (interactive sessions)
-│   └── codex/               # OpenAI Codex CLI (exec --json)
+│   ├── codex/               # OpenAI Codex CLI (exec --json)
+│   └── cursor/              # Cursor Agent CLI (--print stream-json)
 ├── docs/                    # Platform setup guides
 ├── config.example.toml      # Config template
 ├── INSTALL.md               # AI-agent-friendly install guide

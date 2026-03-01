@@ -37,11 +37,11 @@
 |------|------|------|
 | Agent | Claude Code | ✅ 已支持 |
 | Agent | Codex (OpenAI) | ✅ 已支持 (Beta) |
+| Agent | Cursor Agent | ✅ 已支持 (Beta) |
 | Agent | Gemini CLI (Google) | 🔜 计划中 |
 | Agent | Crush / OpenCode | 🔜 计划中 |
 | Agent | Goose (Block) | 🔜 计划中 |
 | Agent | Aider | 🔜 计划中 |
-| Agent | Cursor Agent | 🔜 计划中 |
 | Agent | Kimi Code (月之暗面) | 🔭 探索中 |
 | Agent | GLM Code / CodeGeeX (智谱AI) | 🔭 探索中 |
 | Agent | MiniMax Code | 🔭 探索中 |
@@ -67,7 +67,8 @@
 ### 前置条件
 
 - **Claude Code**: [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) 已安装并配置，或
-- **Codex**: [Codex CLI](https://github.com/openai/codex) 已安装（`npm install -g @openai/codex`）
+- **Codex**: [Codex CLI](https://github.com/openai/codex) 已安装（`npm install -g @openai/codex`），或
+- **Cursor Agent**: [Cursor Agent CLI](https://docs.cursor.com/agent) 已安装（`agent --version` 验证）
 
 ### 通过 AI Agent 安装配置（推荐）
 
@@ -493,7 +494,8 @@ cc-connect/
 │   └── wecom/               # 企业微信（HTTP Webhook）
 ├── agent/                   # AI 助手适配器
 │   ├── claudecode/          # Claude Code CLI（交互式会话）
-│   └── codex/               # OpenAI Codex CLI（exec --json）
+│   ├── codex/               # OpenAI Codex CLI（exec --json）
+│   └── cursor/              # Cursor Agent CLI（--print stream-json）
 ├── docs/                    # 平台接入指南
 ├── config.example.toml      # 配置模板
 ├── INSTALL.md               # AI agent 友好的安装配置指南

@@ -17,6 +17,7 @@ import (
 
 	_ "github.com/chenhg5/cc-connect/agent/claudecode"
 	_ "github.com/chenhg5/cc-connect/agent/codex"
+	_ "github.com/chenhg5/cc-connect/agent/cursor"
 
 	_ "github.com/chenhg5/cc-connect/platform/dingtalk"
 	_ "github.com/chenhg5/cc-connect/platform/discord"

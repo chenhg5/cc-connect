@@ -237,7 +237,42 @@ app_secret = "your-feishu-app-secret"
 #             # 示例："http://你的VPS-IP:8888" — 将 VPS IP 加入可信 IP 列表
 
 # =============================================================================
-# Project 2: Using Codex agent / 项目 2：使用 Codex agent (uncomment to enable / 取消注释以启用)
+# Project 2: Using Cursor Agent / 项目 2：使用 Cursor Agent (uncomment to enable / 取消注释以启用)
+# =============================================================================
+# Requires: Cursor Agent CLI (`agent`) — install via Cursor IDE or `npm i -g @anthropic-ai/cursor-agent`
+# 需要安装：Cursor Agent CLI (`agent`) — 通过 Cursor IDE 或 npm 安装
+# Uses `agent --print --output-format stream-json` under the hood.
+# 底层使用 `agent --print --output-format stream-json` 命令。
+
+# [[projects]]
+# name = "my-cursor-project"
+#
+# [projects.agent]
+# type = "cursor"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/project"
+# mode = "force"  # "default" | "force" (yolo) | "plan" | "ask"
+# cmd = "agent"   # CLI binary name (default: "agent") / CLI 二进制名称（默认 "agent"）
+#
+# Mode options / 模式说明:
+# - "default": Trust workspace, ask before tool use / 信任工作区，工具调用前询问
+# - "force":   Auto-approve all tool calls (same as --force/--yolo) / 自动批准所有工具调用
+# - "plan":    Read-only analysis, no edits / 只读分析，不做修改
+# - "ask":     Q&A style, read-only / 问答风格，只读
+#
+# Optional: specify a model / 可选：指定模型
+# model = "claude-sonnet-4-20250514"
+#
+# [[projects.platforms]]
+# type = "feishu"
+#
+# [projects.platforms.options]
+# app_id = "your-feishu-app-id"
+# app_secret = "your-feishu-app-secret"
+
+# =============================================================================
+# Project 3: Using Codex agent / 项目 3：使用 Codex agent (uncomment to enable / 取消注释以启用)
 # =============================================================================
 # Requires: npm install -g @openai/codex
 # 需要安装：npm install -g @openai/codex
@@ -283,7 +318,7 @@ app_secret = "your-feishu-app-secret"
 # token = "your-telegram-bot-token"
 
 # =============================================================================
-# Project 3: Another example / 项目 3：更多示例 (uncomment to enable / 取消注释以启用)
+# Project 4: Another example / 项目 4：更多示例 (uncomment to enable / 取消注释以启用)
 # =============================================================================
 
 # [[projects]]
