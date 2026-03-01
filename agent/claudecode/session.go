@@ -66,9 +66,13 @@ func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode strin
 
 	cmd := exec.CommandContext(sessionCtx, "claude", args...)
 	cmd.Dir = workDir
+	// Filter out CLAUDECODE env var to prevent "nested session" detection,
+	// since cc-connect is a bridge, not a nested Claude Code session.
+	env := filterEnv(os.Environ(), "CLAUDECODE")
 	if len(extraEnv) > 0 {
-		cmd.Env = append(os.Environ(), extraEnv...)
+		env = append(env, extraEnv...)
 	}
+	cmd.Env = env
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -435,4 +439,16 @@ func (cs *claudeSession) Close() error {
 	cs.cancel()
 	<-cs.done
 	return nil
+}
+
+// filterEnv returns a copy of env with entries matching the given key removed.
+func filterEnv(env []string, key string) []string {
+	prefix := key + "="
+	out := make([]string, 0, len(env))
+	for _, e := range env {
+		if !strings.HasPrefix(e, prefix) {
+			out = append(out, e)
+		}
+	}
+	return out
 }

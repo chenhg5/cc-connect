@@ -308,6 +308,16 @@ enable_markdown = false  # true = Markdown messages (WeChat Work app only; perso
 
 ## Step 5: Run cc-connect
 
+**Important: If you are running inside a Claude Code session** (e.g., Claude Code helped you install and configure cc-connect), you must unset the `CLAUDECODE` environment variable before starting, otherwise Claude Code will refuse to launch as a subprocess:
+
+```bash
+unset CLAUDECODE && cc-connect
+```
+
+Alternatively, open a **separate terminal** and run cc-connect there — this avoids the issue entirely.
+
+**Normal startup:**
+
 ```bash
 # Run with config.toml in current directory
 cc-connect
