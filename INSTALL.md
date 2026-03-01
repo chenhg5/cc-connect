@@ -73,10 +73,25 @@ claude --version
 
 ## Step 3: Create config.toml
 
-Create a `config.toml` file in the directory where you will run cc-connect. You can also copy the example:
+cc-connect looks for config in this order:
+1. `-config <path>` flag (explicit)
+2. `./config.toml` (current directory)
+3. `~/.cc-connect/config.toml` (global, **recommended**)
+
+If no config file exists, running `cc-connect` will auto-create a starter template at `~/.cc-connect/config.toml`.
+
+**Recommended: use the global config location:**
 
 ```bash
-# If you cloned the repo:
+mkdir -p ~/.cc-connect
+# If you cloned the repo, copy the example:
+cp config.example.toml ~/.cc-connect/config.toml
+# Or just run cc-connect once — it will create a starter config automatically
+```
+
+You can also use a local config in the current directory:
+
+```bash
 cp config.example.toml config.toml
 ```
 
