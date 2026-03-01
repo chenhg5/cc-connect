@@ -32,8 +32,14 @@ All components are decoupled via Go interfaces — fully pluggable and extensibl
 |-----------|------|--------|
 | Agent | Claude Code | ✅ Supported |
 | Agent | Codex (OpenAI) | ✅ Supported |
+| Agent | Gemini CLI (Google) | 🔜 Planned |
+| Agent | Crush / OpenCode | 🔜 Planned |
+| Agent | Goose (Block) | 🔜 Planned |
+| Agent | Aider | 🔜 Planned |
 | Agent | Cursor Agent | 🔜 Planned |
-| Agent | Gemini CLI | 🔜 Planned |
+| Agent | Kimi Code (Moonshot) | 🔭 Exploring |
+| Agent | GLM Code / CodeGeeX (ZhipuAI) | 🔭 Exploring |
+| Agent | MiniMax Code | 🔭 Exploring |
 | Platform | Feishu (Lark) | ✅ WebSocket — no public IP needed |
 | Platform | DingTalk | ✅ Stream — no public IP needed |
 | Platform | Telegram | ✅ Long Polling — no public IP needed |

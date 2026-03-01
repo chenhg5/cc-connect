@@ -37,8 +37,14 @@
 |------|------|------|
 | Agent | Claude Code | ✅ 已支持 |
 | Agent | Codex (OpenAI) | ✅ 已支持 |
+| Agent | Gemini CLI (Google) | 🔜 计划中 |
+| Agent | Crush / OpenCode | 🔜 计划中 |
+| Agent | Goose (Block) | 🔜 计划中 |
+| Agent | Aider | 🔜 计划中 |
 | Agent | Cursor Agent | 🔜 计划中 |
-| Agent | Gemini CLI | 🔜 计划中 |
+| Agent | Kimi Code (月之暗面) | 🔭 探索中 |
+| Agent | GLM Code / CodeGeeX (智谱AI) | 🔭 探索中 |
+| Agent | MiniMax Code | 🔭 探索中 |
 | Platform | 飞书 (Lark) | ✅ WebSocket 长连接 — 无需公网 IP |
 | Platform | 钉钉 (DingTalk) | ✅ Stream 模式 — 无需公网 IP |
 | Platform | Telegram | ✅ Long Polling — 无需公网 IP |
