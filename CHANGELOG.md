@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.1.0-beta.2 (2026-03-01)
+
+### Bug Fixes
+
+- **Fix .gitignore**: The pattern `cc-connect` was inadvertently ignoring `cmd/cc-connect/` directory at any depth. Changed to `/cc-connect` to only match the binary at repo root. This caused all entrypoint source files (`main.go`, `update.go`, `provider.go`) to be untracked.
+- **Auto-create config on first run**: Running `cc-connect` without any config file no longer crashes with "no such file or directory". It now auto-creates `~/.cc-connect/config.toml` with a starter template and prints a friendly setup guide.
+
+### Improvements
+
+- **Expanded Agent roadmap**: README now lists Crush (OpenCode), Goose, Aider as planned agents, and Kimi Code, GLM Code / CodeGeeX, MiniMax Code as exploring.
+
+---
+
 ## v1.1.0-beta.1 (2026-02-28)
 
 ### New Features
