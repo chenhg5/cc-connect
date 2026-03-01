@@ -1,4 +1,4 @@
-cc-connect
+/cc-connect
 config.toml
 .cc-connect/
 *.exe
