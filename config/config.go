@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/BurntSushi/toml"
 )
@@ -11,6 +12,7 @@ import (
 var ConfigPath string
 
 type Config struct {
+	DataDir  string          `toml:"data_dir"` // session store directory, default ~/.cc-connect
 	Projects []ProjectConfig `toml:"projects"`
 	Log      LogConfig       `toml:"log"`
 	Language string          `toml:"language"` // "en" or "zh", default is "en"
@@ -48,6 +50,14 @@ func Load(path string) (*Config, error) {
 	}
 	if err := toml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
+	}
+
+	if cfg.DataDir == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			cfg.DataDir = filepath.Join(home, ".cc-connect")
+		} else {
+			cfg.DataDir = ".cc-connect"
+		}
 	}
 
 	if err := cfg.validate(); err != nil {

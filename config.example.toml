@@ -14,6 +14,10 @@
 # - "" (empty/not set): Auto-detect from user's first message
 # language = "en"
 
+# Session data storage directory (default: ~/.cc-connect)
+# Stores conversation history and session state as JSON files.
+# data_dir = "/path/to/custom/dir"
+
 [log]
 level = "info" # debug, info, warn, error
 
@@ -154,7 +158,38 @@ app_secret = "your-feishu-app-secret"
               # e.g. "http://your-vps-ip:8888" — the VPS IP goes into trusted IP list
 
 # =============================================================================
-# Project 2 (uncomment to enable)
+# Project 2: Using Codex agent (uncomment to enable)
+# =============================================================================
+# Requires: npm install -g @openai/codex
+# Codex uses `codex exec --json` under the hood.
+
+# [[projects]]
+# name = "my-codex-project"
+#
+# [projects.agent]
+# type = "codex"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/project"
+# mode = "suggest"  # "suggest" | "auto-edit" | "full-auto" | "yolo"
+#
+# Mode options:
+# - "suggest":   ask permission for every tool call (default, safest)
+# - "auto-edit": auto-approve file edits, ask for shell commands
+# - "full-auto": auto-approve everything with workspace sandbox
+# - "yolo":      bypass all approvals and sandbox (dangerous)
+#
+# Optional: specify a model
+# model = "o3"
+#
+# [[projects.platforms]]
+# type = "telegram"
+#
+# [projects.platforms.options]
+# token = "your-telegram-bot-token"
+
+# =============================================================================
+# Project 3: Another example (uncomment to enable)
 # =============================================================================
 
 # [[projects]]
@@ -168,7 +203,7 @@ app_secret = "your-feishu-app-secret"
 # mode = "bypassPermissions"
 #
 # [[projects.platforms]]
-# type = "telegram"
+# type = "discord"
 #
 # [projects.platforms.options]
-# token = "your-telegram-bot-token"
+# token = "your-discord-bot-token"

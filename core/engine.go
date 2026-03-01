@@ -499,14 +499,15 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 func (e *Engine) cmdList(p Platform, msg *Message) {
 	agentSessions, err := e.agent.ListSessions(e.ctx)
 	if err != nil {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ Failed to list sessions: %v", err))
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgListError), err))
 		return
 	}
 	if len(agentSessions) == 0 {
-		e.reply(p, msg.ReplyCtx, "No Claude Code sessions found for this project.")
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgListEmpty))
 		return
 	}
 
+	agentName := e.agent.Name()
 	activeSession := e.sessions.GetOrCreateActive(msg.SessionKey)
 	activeAgentID := activeSession.AgentSessionID
 
@@ -516,7 +517,7 @@ func (e *Engine) cmdList(p Platform, msg *Message) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("**Claude Code Sessions** (%d)\n\n", len(agentSessions)))
+	sb.WriteString(fmt.Sprintf(e.i18n.T(MsgListTitle), agentName, len(agentSessions)))
 	for i := 0; i < limit; i++ {
 		s := agentSessions[i]
 		marker := "◻"
@@ -524,8 +525,8 @@ func (e *Engine) cmdList(p Platform, msg *Message) {
 			marker = "▶"
 		}
 		shortID := s.ID
-		if len(shortID) > 8 {
-			shortID = shortID[:8]
+		if len(shortID) > 12 {
+			shortID = shortID[:12]
 		}
 		summary := s.Summary
 		if summary == "" {
@@ -535,9 +536,9 @@ func (e *Engine) cmdList(p Platform, msg *Message) {
 			marker, shortID, summary, s.MessageCount, s.ModifiedAt.Format("01-02 15:04")))
 	}
 	if len(agentSessions) > limit {
-		sb.WriteString(fmt.Sprintf("\n... and %d more\n", len(agentSessions)-limit))
+		sb.WriteString(fmt.Sprintf(e.i18n.T(MsgListMore), len(agentSessions)-limit))
 	}
-	sb.WriteString("\n`/switch <id>` to switch session")
+	sb.WriteString(e.i18n.T(MsgListSwitchHint))
 	e.reply(p, msg.ReplyCtx, sb.String())
 }
 
@@ -571,10 +572,15 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	session := e.sessions.GetOrCreateActive(msg.SessionKey)
 	session.AgentSessionID = matched.ID
 	session.Name = matched.Summary
+	session.ClearHistory()
 	e.sessions.Save()
 
+	shortID := matched.ID
+	if len(shortID) > 12 {
+		shortID = shortID[:12]
+	}
 	e.reply(p, msg.ReplyCtx,
-		fmt.Sprintf("✅ Switched to: %s (%s, %d msgs)", matched.Summary, matched.ID[:8], matched.MessageCount))
+		fmt.Sprintf("✅ Switched to: %s (%s, %d msgs)", matched.Summary, shortID, matched.MessageCount))
 }
 
 func (e *Engine) cmdCurrent(p Platform, msg *Message) {
@@ -596,24 +602,35 @@ func (e *Engine) cmdHistory(p Platform, msg *Message, args []string) {
 			n = v
 		}
 	}
+
 	entries := s.GetHistory(n)
+
+	// Fallback: load from agent backend if in-memory history is empty
+	if len(entries) == 0 && s.AgentSessionID != "" {
+		if hp, ok := e.agent.(HistoryProvider); ok {
+			if agentEntries, err := hp.GetSessionHistory(e.ctx, s.AgentSessionID, n); err == nil {
+				entries = agentEntries
+			}
+		}
+	}
+
 	if len(entries) == 0 {
-		e.reply(p, msg.ReplyCtx, "No history in current session.")
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHistoryEmpty))
 		return
 	}
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("📜 History (last %d):\n\n", len(entries)))
-	for _, e := range entries {
+	for _, h := range entries {
 		icon := "👤"
-		if e.Role == "assistant" {
+		if h.Role == "assistant" {
 			icon = "🤖"
 		}
-		content := e.Content
-		if len(content) > 200 {
-			content = content[:200] + "..."
+		content := h.Content
+		if len([]rune(content)) > 200 {
+			content = string([]rune(content)[:200]) + "..."
 		}
-		sb.WriteString(fmt.Sprintf("%s [%s]\n%s\n\n", icon, e.Timestamp.Format("15:04:05"), content))
+		sb.WriteString(fmt.Sprintf("%s [%s]\n%s\n\n", icon, h.Timestamp.Format("15:04:05"), content))
 	}
 	e.reply(p, msg.ReplyCtx, sb.String())
 }

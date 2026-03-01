@@ -65,6 +65,12 @@ type ToolAuthorizer interface {
 	GetAllowedTools() []string
 }
 
+// HistoryProvider is an optional interface for agents that can retrieve
+// conversation history from their backend session files.
+type HistoryProvider interface {
+	GetSessionHistory(ctx context.Context, sessionID string, limit int) ([]HistoryEntry, error)
+}
+
 // ModeSwitcher is an optional interface for agents that support runtime permission mode switching.
 type ModeSwitcher interface {
 	SetMode(mode string)

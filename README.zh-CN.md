@@ -36,9 +36,9 @@
 | 组件 | 类型 | 状态 |
 |------|------|------|
 | Agent | Claude Code | ✅ 已支持 |
+| Agent | Codex (OpenAI) | ✅ 已支持 |
 | Agent | Cursor Agent | 🔜 计划中 |
 | Agent | Gemini CLI | 🔜 计划中 |
-| Agent | Codex | 🔜 计划中 |
 | Platform | 飞书 (Lark) | ✅ WebSocket 长连接 — 无需公网 IP |
 | Platform | 钉钉 (DingTalk) | ✅ Stream 模式 — 无需公网 IP |
 | Platform | Telegram | ✅ Long Polling — 无需公网 IP |
@@ -56,7 +56,8 @@
 
 ### 前置条件
 
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) 已安装并配置
+- **Claude Code**: [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) 已安装并配置，或
+- **Codex**: [Codex CLI](https://github.com/openai/codex) 已安装（`npm install -g @openai/codex`）
 
 ### 通过 AI Agent 安装配置（推荐）
 
@@ -179,7 +180,9 @@ enable_markdown = false  # 设为 true 则发送 Markdown 消息（仅企业微�
 
 ## 权限模式
 
-Claude Code 适配器支持四种权限模式（对应 Claude 的 `--permission-mode` 参数），可在运行时通过 `/mode` 命令切换：
+两种 Agent 均支持权限模式，可在运行时通过 `/mode` 命令切换。
+
+**Claude Code** 模式（对应 `--permission-mode`）：
 
 | 模式 | 配置值 | 行为 |
 |------|--------|------|
@@ -188,11 +191,25 @@ Claude Code 适配器支持四种权限模式（对应 Claude 的 `--permission-
 | **计划模式** | `plan` | Claude 只做规划不执行，审批计划后再执行。 |
 | **YOLO 模式** | `bypassPermissions`（别名: `yolo`）| 所有工具调用自动通过。适用于可信/沙箱环境。 |
 
+**Codex** 模式（对应 `--ask-for-approval`）：
+
+| 模式 | 配置值 | 行为 |
+|------|--------|------|
+| **建议** | `suggest` | 仅受信命令（ls、cat...）自动执行，其余需确认。 |
+| **自动编辑** | `auto-edit` | 模型自行决定何时请求批准，沙箱保护。 |
+| **全自动** | `full-auto` | 自动通过，工作区沙箱。推荐日常使用。 |
+| **YOLO 模式** | `yolo` | 跳过所有审批和沙箱。 |
+
 ```toml
+# Claude Code
 [projects.agent.options]
 mode = "default"
-# 在 default/acceptEdits 模式下，还可以预授权特定工具：
 # allowed_tools = ["Read", "Grep", "Glob"]
+
+# Codex
+[projects.agent.options]
+mode = "full-auto"
+# model = "o3"
 ```
 
 在聊天中切换模式：
@@ -245,23 +262,22 @@ type = "feishu"
 app_id = "cli_xxxx"
 app_secret = "xxxx"
 
-# 项目 2 —— 不同目录、不同机器人
+# 项目 2 —— 使用 Codex 搭配 Telegram
 [[projects]]
 name = "my-frontend"
 
 [projects.agent]
-type = "claudecode"
+type = "codex"
 
 [projects.agent.options]
 work_dir = "/path/to/frontend"
-mode = "bypassPermissions"
+mode = "full-auto"
 
 [[projects.platforms]]
-type = "dingtalk"
+type = "telegram"
 
 [projects.platforms.options]
-client_id = "xxxx"
-client_secret = "xxxx"
+token = "xxxx"
 ```
 
 完整带注释的配置模板见 [config.example.toml](config.example.toml)。
@@ -320,7 +336,8 @@ cc-connect/
 │   ├── line/                # LINE（HTTP Webhook）
 │   └── wecom/               # 企业微信（HTTP Webhook）
 ├── agent/                   # AI 助手适配器
-│   └── claudecode/          # Claude Code CLI（交互式会话）
+│   ├── claudecode/          # Claude Code CLI（交互式会话）
+│   └── codex/               # OpenAI Codex CLI（exec --json）
 ├── docs/                    # 平台接入指南
 ├── config.example.toml      # 配置模板
 ├── INSTALL.md               # AI agent 友好的安装配置指南

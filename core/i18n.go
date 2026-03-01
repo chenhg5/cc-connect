@@ -111,6 +111,12 @@ const (
 	MsgLangInvalid          MsgKey = "lang_invalid"
 	MsgLangCurrent          MsgKey = "lang_current"
 	MsgHelp                 MsgKey = "help"
+	MsgListTitle            MsgKey = "list_title"
+	MsgListEmpty            MsgKey = "list_empty"
+	MsgListMore             MsgKey = "list_more"
+	MsgListSwitchHint       MsgKey = "list_switch_hint"
+	MsgListError            MsgKey = "list_error"
+	MsgHistoryEmpty         MsgKey = "history_empty"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -167,8 +173,8 @@ var messages = map[MsgKey]map[Language]string{
 		LangChinese: "(空响应)",
 	},
 	MsgPermissionPrompt: {
-		LangEnglish: "⚠️ **Permission Request**\n\nClaude wants to use **%s**:\n\n`%s`\n\nReply **allow** / **deny** / **allow all** (skip all future prompts this session).",
-		LangChinese: "⚠️ **权限请求**\n\nClaude 想要使用 **%s**:\n\n`%s`\n\n回复 **允许** / **拒绝** / **允许所有**（本次会话不再提醒）。",
+		LangEnglish: "⚠️ **Permission Request**\n\nAgent wants to use **%s**:\n\n`%s`\n\nReply **allow** / **deny** / **allow all** (skip all future prompts this session).",
+		LangChinese: "⚠️ **权限请求**\n\nAgent 想要使用 **%s**:\n\n`%s`\n\n回复 **允许** / **拒绝** / **允许所有**（本次会话不再提醒）。",
 	},
 	MsgPermissionAllowed: {
 		LangEnglish: "✅ Allowed, continuing...",
@@ -179,8 +185,8 @@ var messages = map[MsgKey]map[Language]string{
 		LangChinese: "✅ 本次会话已开启自动批准，后续权限请求将自动允许。",
 	},
 	MsgPermissionDenied: {
-		LangEnglish: "❌ Denied. Claude will stop this tool use.",
-		LangChinese: "❌ 已拒绝。Claude 将停止此工具使用。",
+		LangEnglish: "❌ Denied. Agent will stop this tool use.",
+		LangChinese: "❌ 已拒绝。Agent 将停止此工具使用。",
 	},
 	MsgPermissionHint: {
 		LangEnglish: "⚠️ Waiting for permission response. Reply **allow** / **deny** / **allow all**.",
@@ -220,8 +226,8 @@ var messages = map[MsgKey]map[Language]string{
 	},
 	MsgHelp: {
 		LangEnglish: "📖 Available Commands\n\n" +
-			"/new [name]\n  Start a new Claude session\n\n" +
-			"/list\n  List Claude Code sessions\n\n" +
+			"/new [name]\n  Start a new session\n\n" +
+			"/list\n  List agent sessions\n\n" +
 			"/switch <id>\n  Resume an existing session\n\n" +
 			"/current\n  Show current active session\n\n" +
 			"/history [n]\n  Show last n messages (default 10)\n\n" +
@@ -233,8 +239,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/help\n  Show this help\n\n" +
 			"Permission modes: default / edit / plan / yolo",
 		LangChinese: "📖 可用命令\n\n" +
-			"/new [名称]\n  创建新的 Claude 会话\n\n" +
-			"/list\n  列出 Claude Code 会话列表\n\n" +
+			"/new [名称]\n  创建新会话\n\n" +
+			"/list\n  列出 Agent 会话列表\n\n" +
 			"/switch <id>\n  恢复已有会话\n\n" +
 			"/current\n  查看当前活跃会话\n\n" +
 			"/history [n]\n  查看最近 n 条消息（默认 10）\n\n" +
@@ -245,6 +251,30 @@ var messages = map[MsgKey]map[Language]string{
 			"/stop\n  停止当前执行\n\n" +
 			"/help\n  显示此帮助\n\n" +
 			"权限模式：default / edit / plan / yolo",
+	},
+	MsgListTitle: {
+		LangEnglish: "**%s Sessions** (%d)\n\n",
+		LangChinese: "**%s 会话列表** (%d)\n\n",
+	},
+	MsgListEmpty: {
+		LangEnglish: "No sessions found for this project.",
+		LangChinese: "未找到此项目的会话。",
+	},
+	MsgListMore: {
+		LangEnglish: "\n... and %d more\n",
+		LangChinese: "\n... 还有 %d 条\n",
+	},
+	MsgListSwitchHint: {
+		LangEnglish: "\n`/switch <id>` to switch session",
+		LangChinese: "\n`/switch <id>` 切换会话",
+	},
+	MsgListError: {
+		LangEnglish: "❌ Failed to list sessions: %v",
+		LangChinese: "❌ 获取会话列表失败: %v",
+	},
+	MsgHistoryEmpty: {
+		LangEnglish: "No history in current session.",
+		LangChinese: "当前会话暂无历史消息。",
 	},
 }
 

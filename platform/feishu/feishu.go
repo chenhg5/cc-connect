@@ -54,10 +54,14 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 
 	eventHandler := dispatcher.NewEventDispatcher("", "").
 		OnP2MessageReceiveV1(func(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
+			slog.Debug("feishu: message received", "app_id", p.appID)
 			return p.onMessage(event)
 		}).
+		OnP2MessageReadV1(func(ctx context.Context, event *larkim.P2MessageReadV1) error {
+			return nil // ignore read receipts
+		}).
 		OnP2ChatAccessEventBotP2pChatEnteredV1(func(ctx context.Context, event *larkim.P2ChatAccessEventBotP2pChatEnteredV1) error {
-			slog.Debug("feishu: user opened bot chat")
+			slog.Debug("feishu: user opened bot chat", "app_id", p.appID)
 			return nil
 		})
 

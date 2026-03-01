@@ -50,6 +50,12 @@ func (s *Session) AddHistory(role, content string) {
 	})
 }
 
+func (s *Session) ClearHistory() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.History = nil
+}
+
 // GetHistory returns the last n entries. If n <= 0, returns all.
 func (s *Session) GetHistory(n int) []HistoryEntry {
 	s.mu.Lock()

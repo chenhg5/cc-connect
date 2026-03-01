@@ -31,9 +31,9 @@ All components are decoupled via Go interfaces — fully pluggable and extensibl
 | Component | Type | Status |
 |-----------|------|--------|
 | Agent | Claude Code | ✅ Supported |
+| Agent | Codex (OpenAI) | ✅ Supported |
 | Agent | Cursor Agent | 🔜 Planned |
 | Agent | Gemini CLI | 🔜 Planned |
-| Agent | Codex | 🔜 Planned |
 | Platform | Feishu (Lark) | ✅ WebSocket — no public IP needed |
 | Platform | DingTalk | ✅ Stream — no public IP needed |
 | Platform | Telegram | ✅ Long Polling — no public IP needed |
@@ -51,7 +51,8 @@ All components are decoupled via Go interfaces — fully pluggable and extensibl
 
 ### Prerequisites
 
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and configured
+- **Claude Code**: [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and configured, OR
+- **Codex**: [Codex CLI](https://github.com/openai/codex) installed (`npm install -g @openai/codex`)
 
 ### Install & Configure via AI Agent (Recommended)
 
@@ -174,7 +175,9 @@ enable_markdown = false  # true only if all users use WeChat Work app (not perso
 
 ## Permission Modes
 
-Claude Code adapter supports four permission modes (matching Claude's `--permission-mode`), switchable at runtime via the `/mode` command:
+Both agents support permission modes switchable at runtime via `/mode`.
+
+**Claude Code** modes (maps to `--permission-mode`):
 
 | Mode | Config Value | Behavior |
 |------|-------------|----------|
@@ -183,11 +186,25 @@ Claude Code adapter supports four permission modes (matching Claude's `--permiss
 | **Plan Mode** | `plan` | Claude only plans — no execution until you approve. |
 | **YOLO** | `bypassPermissions` (alias: `yolo`) | All tool calls auto-approved. For trusted/sandboxed environments. |
 
+**Codex** modes (maps to `--ask-for-approval`):
+
+| Mode | Config Value | Behavior |
+|------|-------------|----------|
+| **Suggest** | `suggest` | Only trusted commands (ls, cat...) run without approval. |
+| **Auto Edit** | `auto-edit` | Model decides when to ask; sandbox-protected. |
+| **Full Auto** | `full-auto` | Auto-approve with workspace sandbox. Recommended. |
+| **YOLO** | `yolo` | Bypass all approvals and sandbox. |
+
 ```toml
+# Claude Code
 [projects.agent.options]
 mode = "default"
-# In default/acceptEdits mode, you can also pre-approve specific tools:
 # allowed_tools = ["Read", "Grep", "Glob"]
+
+# Codex
+[projects.agent.options]
+mode = "full-auto"
+# model = "o3"
 ```
 
 Switch mode at runtime from the chat:
@@ -240,23 +257,22 @@ type = "feishu"
 app_id = "cli_xxxx"
 app_secret = "xxxx"
 
-# Project 2 — different folder, different bot
+# Project 2 — Codex agent with Telegram
 [[projects]]
 name = "my-frontend"
 
 [projects.agent]
-type = "claudecode"
+type = "codex"
 
 [projects.agent.options]
 work_dir = "/path/to/frontend"
-mode = "bypassPermissions"
+mode = "full-auto"
 
 [[projects.platforms]]
-type = "dingtalk"
+type = "telegram"
 
 [projects.platforms.options]
-client_id = "xxxx"
-client_secret = "xxxx"
+token = "xxxx"
 ```
 
 See [config.example.toml](config.example.toml) for a fully commented configuration template.
@@ -315,7 +331,8 @@ cc-connect/
 │   ├── line/                # LINE (HTTP Webhook)
 │   └── wecom/               # WeChat Work (HTTP Webhook)
 ├── agent/                   # Agent adapters
-│   └── claudecode/          # Claude Code CLI (interactive sessions)
+│   ├── claudecode/          # Claude Code CLI (interactive sessions)
+│   └── codex/               # OpenAI Codex CLI (exec --json)
 ├── docs/                    # Platform setup guides
 ├── config.example.toml      # Config template
 ├── INSTALL.md               # AI-agent-friendly install guide

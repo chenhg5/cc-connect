@@ -88,13 +88,19 @@ level = "info"  # debug, info, warn, error
 name = "my-project"
 
 [projects.agent]
-type = "claudecode"
+type = "claudecode"  # or "codex" for OpenAI Codex
 
 [projects.agent.options]
 work_dir = "/absolute/path/to/your/project"
 mode = "default"
-# mode options: "default", "acceptEdits" (alias: "edit"), "plan", "bypassPermissions" (alias: "yolo")
+
+# --- Claude Code mode options ---
+# "default", "acceptEdits" (alias: "edit"), "plan", "bypassPermissions" (alias: "yolo")
 # allowed_tools = ["Read", "Grep", "Glob"]  # optional: pre-approve specific tools
+
+# --- Codex mode options ---
+# "suggest" (default), "auto-edit", "full-auto", "yolo"
+# model = "o3"  # optional: specify model
 
 # Add one or more platform sections below
 ```
@@ -359,16 +365,16 @@ type = "feishu"
 app_id = "cli_xxx"
 app_secret = "xxx"
 
-# Second project
+# Second project — using Codex
 [[projects]]
 name = "frontend"
 
 [projects.agent]
-type = "claudecode"
+type = "codex"
 
 [projects.agent.options]
 work_dir = "/path/to/frontend"
-mode = "bypassPermissions"
+mode = "full-auto"
 
 [[projects.platforms]]
 type = "telegram"
