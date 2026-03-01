@@ -16,6 +16,12 @@ GitHub: https://github.com/chenhg5/cc-connect
 npm install -g cc-connect
 ```
 
+Install beta version:
+
+```bash
+npm install -g cc-connect@beta
+```
+
 After installation, the `cc-connect` binary will be available globally.
 
 ### Option B: Download binary from GitHub Releases
