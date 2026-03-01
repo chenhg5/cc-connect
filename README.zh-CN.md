@@ -38,7 +38,7 @@
 | Agent | Claude Code | ✅ 已支持 |
 | Agent | Codex (OpenAI) | ✅ 已支持 (Beta) |
 | Agent | Cursor Agent | ✅ 已支持 (Beta) |
-| Agent | Gemini CLI (Google) | 🔜 计划中 |
+| Agent | Gemini CLI (Google) | ✅ 已支持 (Beta) |
 | Agent | Crush / OpenCode | 🔜 计划中 |
 | Agent | Goose (Block) | 🔜 计划中 |
 | Agent | Aider | 🔜 计划中 |
@@ -68,7 +68,8 @@
 
 - **Claude Code**: [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) 已安装并配置，或
 - **Codex**: [Codex CLI](https://github.com/openai/codex) 已安装（`npm install -g @openai/codex`），或
-- **Cursor Agent**: [Cursor Agent CLI](https://docs.cursor.com/agent) 已安装（`agent --version` 验证）
+- **Cursor Agent**: [Cursor Agent CLI](https://docs.cursor.com/agent) 已安装（`agent --version` 验证），或
+- **Gemini CLI**: [Gemini CLI](https://github.com/google-gemini/gemini-cli) 已安装（`npm install -g @google/gemini-cli`）
 
 ### 通过 AI Agent 安装配置（推荐）
 
@@ -322,6 +323,7 @@ cc-connect provider import --db-path ~/.cc-switch/cc-switch.db    # 指定数据
 |-------|-----------|------------|
 | Claude Code | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
 | Codex | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
+| Gemini CLI | `GEMINI_API_KEY` | —（使用 `env` 字段）|
 
 Provider 配置中的 `env` 字段支持设置任意环境变量，可用于 Bedrock、Vertex、Azure、自定义代理等各种场景。
 
@@ -495,7 +497,8 @@ cc-connect/
 ├── agent/                   # AI 助手适配器
 │   ├── claudecode/          # Claude Code CLI（交互式会话）
 │   ├── codex/               # OpenAI Codex CLI（exec --json）
-│   └── cursor/              # Cursor Agent CLI（--print stream-json）
+│   ├── cursor/              # Cursor Agent CLI（--print stream-json）
+│   └── gemini/              # Gemini CLI（-p --output-format stream-json）
 ├── docs/                    # 平台接入指南
 ├── config.example.toml      # 配置模板
 ├── INSTALL.md               # AI agent 友好的安装配置指南

@@ -33,7 +33,7 @@ All components are decoupled via Go interfaces — fully pluggable and extensibl
 | Agent | Claude Code | ✅ Supported |
 | Agent | Codex (OpenAI) | ✅ Supported (Beta) |
 | Agent | Cursor Agent | ✅ Supported (Beta) |
-| Agent | Gemini CLI (Google) | 🔜 Planned |
+| Agent | Gemini CLI (Google) | ✅ Supported (Beta) |
 | Agent | Crush / OpenCode | 🔜 Planned |
 | Agent | Goose (Block) | 🔜 Planned |
 | Agent | Aider | 🔜 Planned |
@@ -63,7 +63,8 @@ All components are decoupled via Go interfaces — fully pluggable and extensibl
 
 - **Claude Code**: [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and configured, OR
 - **Codex**: [Codex CLI](https://github.com/openai/codex) installed (`npm install -g @openai/codex`), OR
-- **Cursor Agent**: [Cursor Agent CLI](https://docs.cursor.com/agent) installed (`agent --version` to verify)
+- **Cursor Agent**: [Cursor Agent CLI](https://docs.cursor.com/agent) installed (`agent --version` to verify), OR
+- **Gemini CLI**: [Gemini CLI](https://github.com/google-gemini/gemini-cli) installed (`npm install -g @google/gemini-cli`)
 
 ### Install & Configure via AI Agent (Recommended)
 
@@ -319,6 +320,7 @@ Adding, removing, and switching providers all persist to `config.toml` automatic
 |-------|-----------|------------|
 | Claude Code | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
 | Codex | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
+| Gemini CLI | `GEMINI_API_KEY` | — (use `env` map) |
 
 The `env` map in provider config lets you set arbitrary environment variables for any setup (Bedrock, Vertex, Azure, custom proxies, etc.).
 
@@ -492,7 +494,8 @@ cc-connect/
 ├── agent/                   # Agent adapters
 │   ├── claudecode/          # Claude Code CLI (interactive sessions)
 │   ├── codex/               # OpenAI Codex CLI (exec --json)
-│   └── cursor/              # Cursor Agent CLI (--print stream-json)
+│   ├── cursor/              # Cursor Agent CLI (--print stream-json)
+│   └── gemini/              # Gemini CLI (-p --output-format stream-json)
 ├── docs/                    # Platform setup guides
 ├── config.example.toml      # Config template
 ├── INSTALL.md               # AI-agent-friendly install guide

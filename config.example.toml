@@ -272,7 +272,57 @@ app_secret = "your-feishu-app-secret"
 # app_secret = "your-feishu-app-secret"
 
 # =============================================================================
-# Project 3: Using Codex agent / 项目 3：使用 Codex agent (uncomment to enable / 取消注释以启用)
+# Project 3: Using Gemini CLI / 项目 3：使用 Gemini CLI (uncomment to enable / 取消注释以启用)
+# =============================================================================
+# Requires: npm install -g @google/gemini-cli
+# 需要安装：npm install -g @google/gemini-cli
+# Gemini CLI uses `gemini -p --output-format stream-json` under the hood.
+# Gemini CLI 底层使用 `gemini -p --output-format stream-json` 命令。
+#
+# Authentication / 认证方式:
+#   - Google Account login (free: 60 req/min, 1000 req/day) / Google 账号登录（免费额度）
+#   - GEMINI_API_KEY env var / 环境变量
+#   - Vertex AI (GOOGLE_API_KEY + GOOGLE_GENAI_USE_VERTEXAI=true)
+
+# [[projects]]
+# name = "my-gemini-project"
+#
+# [projects.agent]
+# type = "gemini"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/project"
+# mode = "yolo"  # "default" | "auto_edit" | "yolo" | "plan"
+# cmd = "gemini" # CLI binary name (default: "gemini") / CLI 二进制名称（默认 "gemini"）
+#
+# Mode options / 模式说明:
+# - "default":   Prompt for approval on each tool use / 每次工具调用都需要确认
+# - "auto_edit": Auto-approve edit tools, ask for others / 编辑工具自动通过，其他仍需确认
+# - "yolo":      Auto-approve all tool calls (-y flag) / 自动批准所有工具调用
+# - "plan":      Read-only plan mode, no execution / 只读规划模式，不做修改
+#
+# Optional: specify a model / 可选：指定模型
+# model = "gemini-2.5-flash"
+#
+# # Provider with API key / 使用 API Key 的 Provider
+# [[projects.agent.providers]]
+# name = "google"
+# api_key = "your-gemini-api-key"    # GEMINI_API_KEY
+#
+# # Vertex AI provider / Vertex AI 提供商
+# [[projects.agent.providers]]
+# name = "vertex"
+# env = { GOOGLE_API_KEY = "your-key", GOOGLE_GENAI_USE_VERTEXAI = "true" }
+#
+# [[projects.platforms]]
+# type = "feishu"
+#
+# [projects.platforms.options]
+# app_id = "your-feishu-app-id"
+# app_secret = "your-feishu-app-secret"
+
+# =============================================================================
+# Project 4: Using Codex agent / 项目 4：使用 Codex agent (uncomment to enable / 取消注释以启用)
 # =============================================================================
 # Requires: npm install -g @openai/codex
 # 需要安装：npm install -g @openai/codex
@@ -318,7 +368,7 @@ app_secret = "your-feishu-app-secret"
 # token = "your-telegram-bot-token"
 
 # =============================================================================
-# Project 4: Another example / 项目 4：更多示例 (uncomment to enable / 取消注释以启用)
+# Project 5: Another example / 项目 5：更多示例 (uncomment to enable / 取消注释以启用)
 # =============================================================================
 
 # [[projects]]
