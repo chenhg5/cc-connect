@@ -80,6 +80,12 @@ Please refer to https://raw.githubusercontent.com/chenhg5/cc-connect/refs/heads/
 npm install -g cc-connect
 ```
 
+install beta version:
+
+```bash
+npm install -g cc-connect@beta
+```
+
 **Download binary from [GitHub Releases](https://github.com/chenhg5/cc-connect/releases):**
 
 ```bash

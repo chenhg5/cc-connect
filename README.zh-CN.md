@@ -85,6 +85,12 @@
 npm install -g cc-connect
 ```
 
+安装beta版本：
+
+```bash
+npm install -g cc-connect@beta
+```
+
 **从 [GitHub Releases](https://github.com/chenhg5/cc-connect/releases) 下载二进制：**
 
 ```bash
@@ -497,7 +503,7 @@ cc-connect/
 
 ## 微信用户群
 
-![用户群][https://quick.go-admin.cn/ai/article/cc-connect_wechat_group.JPG]
+!(用户群)[https://quick.go-admin.cn/ai/article/cc-connect_wechat_group.JPG]
 
 ## License
 
