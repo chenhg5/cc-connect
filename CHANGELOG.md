@@ -1,5 +1,46 @@
 # Changelog
 
+## v1.1.0-beta.3 (2026-03-01)
+
+### New Features
+
+- **Voice Message Support (Speech-to-Text)**: Send voice messages on any supported platform — cc-connect transcribes them to text via configurable STT provider, then forwards to the agent.
+  - Supported platforms: Feishu, WeChat Work, Telegram, LINE, Discord, Slack
+  - STT providers: OpenAI Whisper, Groq Whisper, SiliconFlow SenseVoice, or any OpenAI-compatible endpoint
+  - Audio format conversion via `ffmpeg` (AMR/OGG → MP3)
+  - Configurable language hint for better recognition accuracy
+- **Image Message Support**: Send images directly from messaging platforms to AI agents.
+  - Supported platforms: Feishu, WeChat Work, Telegram, LINE, Discord, Slack
+  - Images are saved locally and sent to Claude Code as multimodal content (base64 + file path fallback)
+- **CLI Send Command**: `cc-connect send` allows external processes to send messages to active sessions via Unix socket API, enabling scheduled tasks (e.g., "daily summary at 6 AM")
+
+### Bug Fixes
+
+- **WeChat Work duplicate messages**: Added `MsgId`-based deduplication to prevent WeChat Work callback retries from causing duplicate processing
+- **WeChat Work media download timeout**: Moved image/voice download to async goroutines to prevent blocking the callback handler and triggering retries
+
+### Improvements
+
+- **Bilingual config template**: `config.example.toml` now includes both English and Chinese comments for all settings
+- **Updated README**: Added Voice Messages and Image Messages to support matrix and documentation
+
+### Configuration Changes
+
+```toml
+# New: Speech-to-Text configuration
+[speech]
+enabled = true
+provider = "openai"    # "openai" or "groq"
+language = "zh"        # empty = auto-detect
+
+[speech.openai]
+api_key = "sk-xxx"
+base_url = ""          # custom endpoint (SiliconFlow, etc.)
+model = "whisper-1"
+```
+
+---
+
 ## v1.1.0-beta.2 (2026-03-01)
 
 ### Bug Fixes
