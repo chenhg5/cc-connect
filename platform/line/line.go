@@ -148,6 +148,8 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 		return nil
 	}
 
+	content = core.StripMarkdown(content)
+
 	// LINE text message limit is 5000 characters
 	messages := splitMessage(content, 5000)
 	for _, text := range messages {
