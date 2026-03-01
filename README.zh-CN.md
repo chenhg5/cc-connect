@@ -57,6 +57,8 @@
 | Platform | Google Chat | 🔜 计划中 (Chat API) |
 | Platform | Mattermost | 🔜 计划中 (Webhook + Bot) |
 | Platform | Matrix (Element) | 🔜 计划中 (Client-Server API) |
+| Feature | 语音消息（语音转文字） | ✅ Whisper API (OpenAI / Groq) + ffmpeg |
+| Feature | 图片消息 | ✅ 多模态 (Claude Code) |
 
 ## 快速开始
 
@@ -314,6 +316,56 @@ cc-connect provider import --db-path ~/.cc-switch/cc-switch.db    # 指定数据
 
 Provider 配置中的 `env` 字段支持设置任意环境变量，可用于 Bedrock、Vertex、Azure、自定义代理等各种场景。
 
+## 语音消息（语音转文字）
+
+直接发送语音消息 — cc-connect 自动将语音转为文字，再将文字转发给 Agent 处理。
+
+**支持平台：** 飞书、企业微信、Telegram、LINE、Discord、Slack
+
+**前置条件：**
+- OpenAI 或 Groq 的 API Key（用于 Whisper 语音识别）
+- 安装 `ffmpeg`（用于音频格式转换 — 大部分平台语音格式为 AMR/OGG，Whisper 不直接支持）
+
+### 配置
+
+```toml
+[speech]
+enabled = true
+provider = "openai"    # "openai" 或 "groq"
+language = ""          # 如 "zh"、"en"；留空自动检测
+
+[speech.openai]
+api_key = "sk-xxx"     # OpenAI API Key
+# base_url = ""        # 自定义端点（可选，兼容 OpenAI 接口的服务）
+# model = "whisper-1"  # 默认模型
+
+# -- 或使用 Groq（更快更便宜） --
+# [speech.groq]
+# api_key = "gsk_xxx"
+# model = "whisper-large-v3-turbo"
+```
+
+### 工作原理
+
+1. 用户在任何支持的平台发送语音消息
+2. cc-connect 从平台下载音频文件
+3. 如需格式转换（AMR、OGG → MP3），由 `ffmpeg` 处理
+4. 音频发送至 Whisper API 进行转录
+5. 转录文字展示给用户，并转发给 Agent
+
+### 安装 ffmpeg
+
+```bash
+# Ubuntu / Debian
+sudo apt install ffmpeg
+
+# macOS
+brew install ffmpeg
+
+# Alpine
+apk add ffmpeg
+```
+
 ## 会话管理
 
 每个用户拥有独立的会话和完整的对话上下文。通过斜杠命令管理会话：
@@ -421,6 +473,7 @@ cc-connect/
 │   ├── message.go           # 统一消息/事件类型
 │   ├── session.go           # 多会话管理
 │   ├── i18n.go              # 国际化（中/英）
+│   ├── speech.go            # 语音转文字（Whisper API + ffmpeg）
 │   └── engine.go            # 路由引擎 + 斜杠命令
 ├── platform/                # 平台适配器
 │   ├── feishu/              # 飞书（WebSocket 长连接）

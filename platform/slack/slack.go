@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/chenhg5/cc-connect/core"
 
@@ -100,8 +101,22 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 				ts := ev.TimeStamp
 
 				var images []core.ImageAttachment
+				var audio *core.AudioAttachment
 				for _, f := range ev.Files {
-					if f.Mimetype != "" && (len(f.Mimetype) > 6 && f.Mimetype[:6] == "image/") {
+					if f.Mimetype != "" && strings.HasPrefix(f.Mimetype, "audio/") {
+						data, err := p.downloadSlackFile(f.URLPrivateDownload)
+						if err != nil {
+							slog.Error("slack: download audio failed", "error", err)
+							continue
+						}
+						format := "mp3"
+						if parts := strings.SplitN(f.Mimetype, "/", 2); len(parts) == 2 {
+							format = parts[1]
+						}
+						audio = &core.AudioAttachment{
+							MimeType: f.Mimetype, Data: data, Format: format,
+						}
+					} else if f.Mimetype != "" && strings.HasPrefix(f.Mimetype, "image/") {
 						imgData, err := p.downloadSlackFile(f.URLPrivateDownload)
 						if err != nil {
 							slog.Error("slack: download file failed", "error", err)
@@ -113,14 +128,14 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					}
 				}
 
-				if ev.Text == "" && len(images) == 0 {
+				if ev.Text == "" && len(images) == 0 && audio == nil {
 					return
 				}
 
 				msg := &core.Message{
 					SessionKey: sessionKey, Platform: "slack",
 					UserID: ev.User, UserName: ev.User,
-					Content: ev.Text, Images: images,
+					Content: ev.Text, Images: images, Audio: audio,
 					ReplyCtx: replyContext{channel: ev.Channel, timestamp: ts},
 				}
 				p.handler(p, msg)

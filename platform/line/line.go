@@ -131,6 +131,29 @@ func (p *Platform) webhookHandler(w http.ResponseWriter, r *http.Request) {
 				ReplyCtx: rctx,
 			})
 
+		case webhook.AudioMessageContent:
+			slog.Debug("line: audio received", "user", userID)
+			audioData, err := p.downloadContent(m.Id)
+			if err != nil {
+				slog.Error("line: download audio failed", "error", err)
+				continue
+			}
+			dur := 0
+			if m.Duration > 0 {
+				dur = int(m.Duration / 1000)
+			}
+			p.handler(p, &core.Message{
+				SessionKey: sessionKey, Platform: "line",
+				UserID: userID, UserName: userID,
+				Audio: &core.AudioAttachment{
+					MimeType: "audio/m4a",
+					Data:     audioData,
+					Format:   "m4a",
+					Duration: dur,
+				},
+				ReplyCtx: rctx,
+			})
+
 		default:
 			slog.Debug("line: ignoring unsupported message type")
 		}

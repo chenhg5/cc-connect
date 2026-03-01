@@ -78,7 +78,6 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 
 				// Handle photo messages
 				if msg.Photo != nil && len(msg.Photo) > 0 {
-					// Pick the largest photo
 					best := msg.Photo[len(msg.Photo)-1]
 					imgData, err := p.downloadFile(best.FileID)
 					if err != nil {
@@ -90,6 +89,59 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 						UserID: strconv.FormatInt(msg.From.ID, 10), UserName: userName,
 						Content:  msg.Caption,
 						Images:   []core.ImageAttachment{{MimeType: "image/jpeg", Data: imgData}},
+						ReplyCtx: rctx,
+					}
+					p.handler(p, coreMsg)
+					continue
+				}
+
+				// Handle voice messages
+				if msg.Voice != nil {
+					slog.Debug("telegram: voice received", "user", userName, "duration", msg.Voice.Duration)
+					audioData, err := p.downloadFile(msg.Voice.FileID)
+					if err != nil {
+						slog.Error("telegram: download voice failed", "error", err)
+						continue
+					}
+					coreMsg := &core.Message{
+						SessionKey: sessionKey, Platform: "telegram",
+						UserID: strconv.FormatInt(msg.From.ID, 10), UserName: userName,
+						Audio: &core.AudioAttachment{
+							MimeType: msg.Voice.MimeType,
+							Data:     audioData,
+							Format:   "ogg",
+							Duration: msg.Voice.Duration,
+						},
+						ReplyCtx: rctx,
+					}
+					p.handler(p, coreMsg)
+					continue
+				}
+
+				// Handle audio file messages
+				if msg.Audio != nil {
+					slog.Debug("telegram: audio file received", "user", userName)
+					audioData, err := p.downloadFile(msg.Audio.FileID)
+					if err != nil {
+						slog.Error("telegram: download audio failed", "error", err)
+						continue
+					}
+					format := "mp3"
+					if msg.Audio.MimeType != "" {
+						parts := strings.SplitN(msg.Audio.MimeType, "/", 2)
+						if len(parts) == 2 {
+							format = parts[1]
+						}
+					}
+					coreMsg := &core.Message{
+						SessionKey: sessionKey, Platform: "telegram",
+						UserID: strconv.FormatInt(msg.From.ID, 10), UserName: userName,
+						Audio: &core.AudioAttachment{
+							MimeType: msg.Audio.MimeType,
+							Data:     audioData,
+							Format:   format,
+							Duration: msg.Audio.Duration,
+						},
 						ReplyCtx: rctx,
 					}
 					p.handler(p, coreMsg)

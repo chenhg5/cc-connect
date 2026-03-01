@@ -9,6 +9,14 @@ type ImageAttachment struct {
 	FileName string // original filename (optional)
 }
 
+// AudioAttachment represents a voice/audio message sent by the user.
+type AudioAttachment struct {
+	MimeType string // e.g. "audio/amr", "audio/ogg", "audio/mp4"
+	Data     []byte // raw audio bytes
+	Format   string // short format hint: "amr", "ogg", "m4a", "mp3", "wav", etc.
+	Duration int    // duration in seconds (if known)
+}
+
 // Message represents a unified incoming message from any platform.
 type Message struct {
 	SessionKey string // unique key for user context, e.g. "feishu:{chatID}:{userID}"
@@ -17,6 +25,7 @@ type Message struct {
 	UserName   string
 	Content    string
 	Images     []ImageAttachment // attached images (if any)
+	Audio      *AudioAttachment  // voice message (if any)
 	ReplyCtx   any               // platform-specific context needed for replying
 }
 

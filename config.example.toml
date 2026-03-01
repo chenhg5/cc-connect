@@ -1,28 +1,59 @@
 # cc-connect configuration
+# cc-connect 配置文件
+#
 # Copy this file to config.toml and fill in your credentials.
+# 复制此文件为 config.toml，填入你的凭证信息。
 #
 # Each [[projects]] entry binds one code directory to its own agent + platforms.
 # A single cc-connect process can manage multiple projects simultaneously.
+# 每个 [[projects]] 将一个代码目录绑定到独立的 agent 和平台。
+# 单个 cc-connect 进程可以同时管理多个项目。
 
 # =============================================================================
-# Global Settings
+# Global Settings / 全局设置
 # =============================================================================
 
-# Language for bot messages
+# Language for bot messages / 机器人消息语言
 # - "en": English
-# - "zh": Chinese
-# - "" (empty/not set): Auto-detect from user's first message
+# - "zh": 中文
+# - "" (empty/not set): Auto-detect from user's first message / 留空自动检测
 # language = "en"
 
 # Session data storage directory (default: ~/.cc-connect)
 # Stores conversation history and session state as JSON files.
+# 会话数据存储目录（默认 ~/.cc-connect），以 JSON 文件保存对话历史和会话状态。
 # data_dir = "/path/to/custom/dir"
 
 [log]
 level = "info" # debug, info, warn, error
 
 # =============================================================================
-# Project 1
+# Speech-to-Text (Voice Messages) / 语音转文字（语音消息）
+# =============================================================================
+# Enable to transcribe voice messages to text before sending to agents.
+# 启用后，语音消息会先转为文字再发送给 Agent。
+#
+# Requires ffmpeg for audio format conversion (AMR/OGG → MP3).
+# 需要安装 ffmpeg 进行音频格式转换（AMR/OGG → MP3）。
+
+# [speech]
+# enabled = true
+# provider = "openai"    # "openai" or "groq" / "openai" 或 "groq"
+# language = ""          # e.g. "zh", "en"; empty = auto-detect / 如 "zh"、"en"；留空自动检测
+#
+# [speech.openai]
+# api_key = "sk-xxx"     # OpenAI API key
+# base_url = ""          # optional: custom endpoint (OpenAI-compatible) / 可选：自定义端点（兼容 OpenAI 接口）
+# model = "whisper-1"    # default model / 默认模型
+#
+# # Alternative: Groq (faster, free tier available)
+# # 备选：Groq（更快，有免费额度）
+# [speech.groq]
+# api_key = "gsk_xxx"
+# model = "whisper-large-v3-turbo"
+
+# =============================================================================
+# Project 1 / 项目 1
 # =============================================================================
 
 [[projects]]
@@ -35,24 +66,29 @@ type = "claudecode"
 work_dir = "/path/to/backend"
 mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "bypassPermissions" (yolo)
 
-# Mode options:
-# - "interactive": Claude will ask for permission before sensitive operations.
-#   When using IM platforms (Feishu, DingTalk, etc.), you can reply "允许" or "allow"
-#   to grant permission. Progress updates will be sent in real-time.
-# - "auto": All operations are automatically approved (use with caution).
-#   Best for trusted environments or when you want uninterrupted execution.
+# Mode options / 模式说明:
+# - "default":            Every tool call requires user approval. / 每次工具调用都需要用户确认。
+# - "acceptEdits" (edit): File edit tools auto-approved; other tools still ask. / 文件编辑自动通过，其他仍需确认。
+# - "plan":               Claude only plans — no execution until you approve. / 只做规划不执行，审批后再执行。
+# - "bypassPermissions" (yolo): All tool calls auto-approved. Use with caution. / 全部自动通过，请谨慎使用。
+#
+# When using IM platforms, you can reply "允许"/"allow" to grant permission.
+# 在 IM 平台中，可回复"允许"或"allow"来授权操作。
 
 # In default/acceptEdits mode, you can pre-approve specific tools:
+# 在 default/acceptEdits 模式下，可预授权特定工具：
 # allowed_tools = ["Read", "Grep", "Glob", "Bash", "Edit", "Write"]
 
-# Optional: specify a model
+# Optional: specify a model / 可选：指定模型
 # model = "claude-sonnet-4-20250514"
 
 # Active provider (matches a name in [[projects.agent.providers]])
+# 当前激活的 provider（对应下方 providers 中的 name）
 # provider = "anthropic"
 
 # API Providers — switch between them via /provider command in chat
 # or via CLI: cc-connect provider add --project my-backend --name relay --api-key sk-xxx
+# API Provider 管理 — 可通过聊天命令 /provider 或 CLI 命令切换
 #
 # [[projects.agent.providers]]
 # name = "anthropic"
@@ -64,16 +100,20 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "bypassPermission
 # base_url = "https://api.relay-service.com"
 # model = "claude-sonnet-4-20250514"
 #
+# # For special setups (Bedrock, Vertex, etc.), use the env map:
+# # 特殊环境（Bedrock、Vertex 等）使用 env 字段：
 # [[projects.agent.providers]]
 # name = "bedrock"
 # env = { CLAUDE_CODE_USE_BEDROCK = "1", AWS_PROFILE = "bedrock" }
 
-# Feishu / Lark
-# 1. Create an app at https://open.feishu.cn
-# 2. Enable Bot capability
+# Feishu / Lark / 飞书
+# 1. Create an app at https://open.feishu.cn / 在 https://open.feishu.cn 创建应用
+# 2. Enable Bot capability / 开启机器人能力
 # 3. Add im.message.receive_v1 event, select WebSocket long-connection mode
-# 4. Fill in app_id and app_secret below
-# Note: No WebSocket URL needed — the SDK auto-negotiates the connection via credentials.
+#    添加 im.message.receive_v1 事件，选择 WebSocket 长连接模式
+# 4. Fill in app_id and app_secret below / 填入下方 app_id 和 app_secret
+# Note: No WebSocket URL needed — the SDK auto-negotiates the connection.
+# 注意：无需配置 WebSocket URL，SDK 会自动通过凭证建立连接。
 
 [[projects.platforms]]
 type = "feishu"
@@ -82,11 +122,12 @@ type = "feishu"
 app_id = "your-feishu-app-id"
 app_secret = "your-feishu-app-secret"
 
-# DingTalk (uncomment to enable)
-# 1. Create an app at https://open-dev.dingtalk.com
-# 2. Under "App Features > Bot", enable the bot capability and select Stream mode
+# DingTalk / 钉钉 (uncomment to enable / 取消注释以启用)
+# 1. Create an app at https://open-dev.dingtalk.com / 在钉钉开放平台创建应用
+# 2. Under "App Features > Bot", enable bot and select Stream mode
+#    在"应用功能 > 机器人"中启用机器人并选择 Stream 模式
 # 3. Fill in client_id (AppKey) and client_secret (AppSecret) below
-# Note: No WebSocket URL needed — the DingTalk Stream SDK handles the connection.
+#    填入下方 client_id (AppKey) 和 client_secret (AppSecret)
 
 # [[projects.platforms]]
 # type = "dingtalk"
@@ -95,10 +136,11 @@ app_secret = "your-feishu-app-secret"
 # client_id = "your-dingtalk-client-id"
 # client_secret = "your-dingtalk-client-secret"
 
-# Telegram (uncomment to enable)
+# Telegram (uncomment to enable / 取消注释以启用)
 # 1. Message @BotFather on Telegram, send /newbot to create a bot
-# 2. Copy the bot token below
-# Connection: Long polling (no public URL needed)
+#    在 Telegram 中找 @BotFather，发送 /newbot 创建机器人
+# 2. Copy the bot token below / 复制 token 到下方
+# Connection: Long polling (no public URL needed) / 长轮询（无需公网 IP）
 
 # [[projects.platforms]]
 # type = "telegram"
@@ -106,12 +148,14 @@ app_secret = "your-feishu-app-secret"
 # [projects.platforms.options]
 # token = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
 
-# Slack (uncomment to enable)
-# 1. Create an app at https://api.slack.com/apps
-# 2. Enable Socket Mode (Settings > Socket Mode)
-# 3. Subscribe to bot events: message.channels, message.im (Event Subscriptions)
+# Slack (uncomment to enable / 取消注释以启用)
+# 1. Create an app at https://api.slack.com/apps / 创建应用
+# 2. Enable Socket Mode (Settings > Socket Mode) / 开启 Socket Mode
+# 3. Subscribe to bot events: message.channels, message.im
+#    订阅事件：message.channels, message.im
 # 4. Install app to workspace, copy Bot Token (xoxb-...) and App Token (xapp-...)
-# Connection: Socket Mode WebSocket (no public URL needed)
+#    安装应用到工作区，复制 Bot Token 和 App Token
+# Connection: Socket Mode WebSocket (no public URL needed) / 无需公网 IP
 
 # [[projects.platforms]]
 # type = "slack"
@@ -120,12 +164,14 @@ app_secret = "your-feishu-app-secret"
 # bot_token = "xoxb-your-bot-token"
 # app_token = "xapp-your-app-level-token"
 
-# Discord (uncomment to enable)
-# 1. Create an app at https://discord.com/developers/applications
-# 2. Under "Bot", create a bot and copy the token
+# Discord (uncomment to enable / 取消注释以启用)
+# 1. Create an app at https://discord.com/developers/applications / 创建应用
+# 2. Under "Bot", create a bot and copy the token / 创建 Bot 并复制 token
 # 3. Enable "Message Content Intent" under Privileged Gateway Intents
+#    在 Privileged Gateway Intents 中开启 Message Content Intent
 # 4. Invite bot to server with OAuth2 URL Generator (scopes: bot; permissions: Send Messages)
-# Connection: Gateway WebSocket (no public URL needed)
+#    通过 OAuth2 URL 邀请 Bot 到服务器（权限：Send Messages）
+# Connection: Gateway WebSocket (no public URL needed) / 无需公网 IP
 
 # [[projects.platforms]]
 # type = "discord"
@@ -133,12 +179,15 @@ app_secret = "your-feishu-app-secret"
 # [projects.platforms.options]
 # token = "your-discord-bot-token"
 
-# LINE (uncomment to enable)
+# LINE (uncomment to enable / 取消注释以启用)
 # 1. Create a channel at https://developers.line.biz/console/ (Messaging API)
+#    在 LINE Developers 创建 Messaging API Channel
 # 2. Copy Channel Secret and Channel Access Token (long-lived)
+#    复制 Channel Secret 和 Channel Access Token
 # 3. Set your webhook URL to: http(s)://<your-domain>:<port>/callback
+#    设置 Webhook URL：http(s)://<你的域名>:<端口>/callback
 # Connection: HTTP Webhook — you need a public URL (use ngrok, cloudflared, etc.)
-# The built-in HTTP server listens on the configured port; expose it yourself.
+# 连接方式：HTTP Webhook — 需要公网 URL（可用 ngrok、cloudflared 等）
 
 # [[projects.platforms]]
 # type = "line"
@@ -149,18 +198,25 @@ app_secret = "your-feishu-app-secret"
 # port = "8080"
 # callback_path = "/callback"
 
-# WeChat Work / 企业微信 (uncomment to enable)
+# WeChat Work / 企业微信 (uncomment to enable / 取消注释以启用)
 # 1. Log in to https://work.weixin.qq.com/wework_admin/frame
+#    登录企业微信管理后台
 # 2. App Management > Create a custom app > note AgentId + Secret
-# 3. My Enterprise > note Corp ID
+#    应用管理 > 创建自建应用 > 记录 AgentId 和 Secret
+# 3. My Enterprise > note Corp ID / 我的企业 > 记录 Corp ID
 # 4. App > Receive Messages > Set API Receive:
+#    应用 > 接收消息 > 设置 API 接收：
 #    URL: http(s)://<your-domain>:<port>/wecom/callback
-#    Token: any random string
-#    EncodingAESKey: click "Random Generate" (43 chars)
+#    Token: any random string / 任意随机字符串
+#    EncodingAESKey: click "Random Generate" (43 chars) / 点击"随机生成"（43位）
 #    (Start cc-connect FIRST, then save to pass verification)
+#    （先启动 cc-connect，再保存以通过验证）
 # 5. App > Trusted IP > add your server's outbound IP
+#    应用 > 企业可信 IP > 添加服务器出口 IP
 # 6. (Optional) My Enterprise > WeChat Plugin > scan QR to link personal WeChat
-# Connection: HTTP Webhook — you need a public URL (use ngrok, cloudflared, etc.)
+#    （可选）我的企业 > 微信插件 > 扫码关联个人微信
+# Connection: HTTP Webhook — you need a public URL
+# 连接方式：HTTP Webhook — 需要公网 URL
 
 # [[projects.platforms]]
 # type = "wecom"
@@ -173,15 +229,20 @@ app_secret = "your-feishu-app-secret"
 # callback_aes_key = "your-43-char-encoding-aes-key"
 # port = "8081"
 # callback_path = "/wecom/callback"
-# enable_markdown = false  # set true to send Markdown messages (only renders in WeChat Work app, NOT personal WeChat)
+# enable_markdown = false  # set true to send Markdown (only renders in WeChat Work app, NOT personal WeChat)
+#                          # 设为 true 发送 Markdown（仅企业微信应用内可渲染，个人微信显示"暂不支持"）
 # proxy = ""  # optional: forward proxy for API calls if your IP is dynamic
-              # e.g. "http://your-vps-ip:8888" — the VPS IP goes into trusted IP list
+#             # 可选：正向代理，用于 IP 不固定的场景
+#             # e.g. "http://your-vps-ip:8888" — the VPS IP goes into trusted IP list
+#             # 示例："http://你的VPS-IP:8888" — 将 VPS IP 加入可信 IP 列表
 
 # =============================================================================
-# Project 2: Using Codex agent (uncomment to enable)
+# Project 2: Using Codex agent / 项目 2：使用 Codex agent (uncomment to enable / 取消注释以启用)
 # =============================================================================
 # Requires: npm install -g @openai/codex
+# 需要安装：npm install -g @openai/codex
 # Codex uses `codex exec --json` under the hood.
+# Codex 底层使用 `codex exec --json` 命令。
 
 # [[projects]]
 # name = "my-codex-project"
@@ -193,16 +254,16 @@ app_secret = "your-feishu-app-secret"
 # work_dir = "/path/to/project"
 # mode = "suggest"  # "suggest" | "auto-edit" | "full-auto" | "yolo"
 #
-# Mode options:
-# - "suggest":   ask permission for every tool call (default, safest)
-# - "auto-edit": auto-approve file edits, ask for shell commands
-# - "full-auto": auto-approve everything with workspace sandbox
-# - "yolo":      bypass all approvals and sandbox (dangerous)
+# Mode options / 模式说明:
+# - "suggest":   ask permission for every tool call (default, safest) / 每次调用都需确认（默认，最安全）
+# - "auto-edit": auto-approve file edits, ask for shell commands / 文件编辑自动通过，Shell 命令仍需确认
+# - "full-auto": auto-approve everything with workspace sandbox / 全部自动通过，工作区沙箱保护
+# - "yolo":      bypass all approvals and sandbox (dangerous) / 跳过所有审批和沙箱（危险）
 #
-# Optional: specify a model
+# Optional: specify a model / 可选：指定模型
 # model = "o3"
 #
-# # Active provider
+# # Active provider / 当前激活的 provider
 # # provider = "openai"
 #
 # [[projects.agent.providers]]
@@ -222,7 +283,7 @@ app_secret = "your-feishu-app-secret"
 # token = "your-telegram-bot-token"
 
 # =============================================================================
-# Project 3: Another example (uncomment to enable)
+# Project 3: Another example / 项目 3：更多示例 (uncomment to enable / 取消注释以启用)
 # =============================================================================
 
 # [[projects]]

@@ -16,6 +16,23 @@ type Config struct {
 	Projects []ProjectConfig `toml:"projects"`
 	Log      LogConfig       `toml:"log"`
 	Language string          `toml:"language"` // "en" or "zh", default is "en"
+	Speech   SpeechConfig    `toml:"speech"`
+}
+
+// SpeechConfig configures speech-to-text for voice messages.
+type SpeechConfig struct {
+	Enabled  bool   `toml:"enabled"`
+	Provider string `toml:"provider"` // "openai" | "groq"
+	Language string `toml:"language"` // e.g. "zh", "en"; empty = auto-detect
+	OpenAI   struct {
+		APIKey  string `toml:"api_key"`
+		BaseURL string `toml:"base_url"`
+		Model   string `toml:"model"`
+	} `toml:"openai"`
+	Groq struct {
+		APIKey string `toml:"api_key"`
+		Model  string `toml:"model"`
+	} `toml:"groq"`
 }
 
 // ProjectConfig binds one agent (with a specific work_dir) to one or more platforms.

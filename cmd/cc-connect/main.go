@@ -137,6 +137,40 @@ func main() {
 
 		engine := core.NewEngine(proj.Name, agent, platforms, sessionFile, lang)
 
+		// Wire speech-to-text if enabled
+		if cfg.Speech.Enabled {
+			speechCfg := core.SpeechCfg{
+				Enabled:  true,
+				Language: cfg.Speech.Language,
+			}
+			switch cfg.Speech.Provider {
+			case "groq":
+				apiKey := cfg.Speech.Groq.APIKey
+				model := cfg.Speech.Groq.Model
+				if model == "" {
+					model = "whisper-large-v3-turbo"
+				}
+				if apiKey != "" {
+					speechCfg.STT = core.NewOpenAIWhisper(apiKey, "https://api.groq.com/openai/v1", model)
+				} else {
+					slog.Warn("speech: groq provider enabled but api_key is empty")
+				}
+			default: // "openai" or unspecified
+				apiKey := cfg.Speech.OpenAI.APIKey
+				baseURL := cfg.Speech.OpenAI.BaseURL
+				model := cfg.Speech.OpenAI.Model
+				if apiKey != "" {
+					speechCfg.STT = core.NewOpenAIWhisper(apiKey, baseURL, model)
+				} else {
+					slog.Warn("speech: openai provider enabled but api_key is empty")
+				}
+			}
+			if speechCfg.STT != nil {
+				engine.SetSpeechConfig(speechCfg)
+				slog.Info("speech: enabled", "provider", cfg.Speech.Provider)
+			}
+		}
+
 		// Set up save callback for auto-detected language
 		if lang == core.LangAuto {
 			engine.SetLanguageSaveFunc(func(l core.Language) error {

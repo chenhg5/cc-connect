@@ -44,6 +44,7 @@ type xmlMessage struct {
 	Content      string   `xml:"Content"`
 	PicUrl       string   `xml:"PicUrl"`
 	MediaId      string   `xml:"MediaId"`
+	Format       string   `xml:"Format"` // voice format: amr, speex, etc.
 	MsgId        int64    `xml:"MsgId"`
 	AgentID      int64    `xml:"AgentID"`
 }
@@ -290,6 +291,24 @@ func (p *Platform) handleMessage(w http.ResponseWriter, r *http.Request, msgSig,
 			SessionKey: sessionKey, Platform: "wecom",
 			UserID: msg.FromUserName, UserName: msg.FromUserName,
 			Images:  []core.ImageAttachment{{MimeType: "image/jpeg", Data: imgData}},
+			ReplyCtx: rctx,
+		})
+
+	case "voice":
+		slog.Debug("wecom: voice received", "user", msg.FromUserName, "format", msg.Format)
+		audioData, err := p.downloadMedia(msg.MediaId)
+		if err != nil {
+			slog.Error("wecom: download voice failed", "error", err)
+			return
+		}
+		format := strings.ToLower(msg.Format)
+		if format == "" {
+			format = "amr"
+		}
+		go p.handler(p, &core.Message{
+			SessionKey: sessionKey, Platform: "wecom",
+			UserID: msg.FromUserName, UserName: msg.FromUserName,
+			Audio:    &core.AudioAttachment{MimeType: "audio/" + format, Data: audioData, Format: format},
 			ReplyCtx: rctx,
 		})
 

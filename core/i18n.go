@@ -130,6 +130,13 @@ const (
 	MsgProviderAddFailed    MsgKey = "provider_add_failed"
 	MsgProviderRemoved      MsgKey = "provider_removed"
 	MsgProviderRemoveFailed MsgKey = "provider_remove_failed"
+
+	MsgVoiceNotEnabled      MsgKey = "voice_not_enabled"
+	MsgVoiceNoFFmpeg        MsgKey = "voice_no_ffmpeg"
+	MsgVoiceTranscribing    MsgKey = "voice_transcribing"
+	MsgVoiceTranscribed     MsgKey = "voice_transcribed"
+	MsgVoiceTranscribeFailed MsgKey = "voice_transcribe_failed"
+	MsgVoiceEmpty           MsgKey = "voice_empty"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -348,6 +355,30 @@ var messages = map[MsgKey]map[Language]string{
 	MsgProviderRemoveFailed: {
 		LangEnglish: "❌ Failed to remove provider: %v",
 		LangChinese: "❌ 移除 Provider 失败: %v",
+	},
+	MsgVoiceNotEnabled: {
+		LangEnglish: "🎙 Voice messages are not enabled. Please configure `[speech]` in config.toml.",
+		LangChinese: "🎙 语音消息未启用，请在 config.toml 中配置 `[speech]` 部分。",
+	},
+	MsgVoiceNoFFmpeg: {
+		LangEnglish: "🎙 Voice message requires `ffmpeg` for format conversion. Please install ffmpeg.",
+		LangChinese: "🎙 语音消息需要 `ffmpeg` 进行格式转换，请安装 ffmpeg。",
+	},
+	MsgVoiceTranscribing: {
+		LangEnglish: "🎙 Transcribing voice message...",
+		LangChinese: "🎙 正在转录语音消息...",
+	},
+	MsgVoiceTranscribed: {
+		LangEnglish: "🎙 [Voice] %s",
+		LangChinese: "🎙 [语音] %s",
+	},
+	MsgVoiceTranscribeFailed: {
+		LangEnglish: "🎙 Voice transcription failed: %v",
+		LangChinese: "🎙 语音转文字失败: %v",
+	},
+	MsgVoiceEmpty: {
+		LangEnglish: "🎙 Voice message was empty or could not be recognized.",
+		LangChinese: "🎙 语音消息为空或无法识别。",
 	},
 }
 

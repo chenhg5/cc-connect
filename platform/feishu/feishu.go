@@ -143,6 +143,33 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 			ReplyCtx: rctx,
 		})
 
+	case "audio":
+		var audioBody struct {
+			FileKey  string `json:"file_key"`
+			Duration int    `json:"duration"` // milliseconds
+		}
+		if err := json.Unmarshal([]byte(*msg.Content), &audioBody); err != nil {
+			slog.Error("feishu: failed to parse audio content", "error", err)
+			return nil
+		}
+		slog.Debug("feishu: audio received", "user", userID, "file_key", audioBody.FileKey)
+		audioData, err := p.downloadResource(*msg.MessageId, audioBody.FileKey, "file")
+		if err != nil {
+			slog.Error("feishu: download audio failed", "error", err)
+			return nil
+		}
+		p.handler(p, &core.Message{
+			SessionKey: sessionKey, Platform: "feishu",
+			UserID: userID, UserName: userName,
+			Audio: &core.AudioAttachment{
+				MimeType: "audio/opus",
+				Data:     audioData,
+				Format:   "ogg",
+				Duration: audioBody.Duration / 1000,
+			},
+			ReplyCtx: rctx,
+		})
+
 	default:
 		slog.Debug("feishu: ignoring unsupported message type", "type", msgType)
 	}
@@ -227,6 +254,28 @@ func (p *Platform) downloadImage(messageID, imageKey string) ([]byte, string, er
 	mimeType := detectMimeType(data)
 	slog.Debug("feishu: downloaded image", "key", imageKey, "size", len(data), "mime", mimeType)
 	return data, mimeType, nil
+}
+
+// downloadResource fetches a file resource (audio, etc.) from Feishu by message_id and file_key.
+func (p *Platform) downloadResource(messageID, fileKey, resType string) ([]byte, error) {
+	resp, err := p.client.Im.MessageResource.Get(context.Background(),
+		larkim.NewGetMessageResourceReqBuilder().
+			MessageId(messageID).
+			FileKey(fileKey).
+			Type(resType).
+			Build())
+	if err != nil {
+		return nil, fmt.Errorf("feishu: resource API: %w", err)
+	}
+	if !resp.Success() {
+		return nil, fmt.Errorf("feishu: resource API code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	data, err := io.ReadAll(resp.File)
+	if err != nil {
+		return nil, fmt.Errorf("feishu: read resource: %w", err)
+	}
+	slog.Debug("feishu: downloaded resource", "key", fileKey, "type", resType, "size", len(data))
+	return data, nil
 }
 
 func detectMimeType(data []byte) string {

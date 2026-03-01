@@ -52,6 +52,8 @@ All components are decoupled via Go interfaces — fully pluggable and extensibl
 | Platform | Google Chat | 🔜 Planned (Chat API) |
 | Platform | Mattermost | 🔜 Planned (Webhook + Bot) |
 | Platform | Matrix (Element) | 🔜 Planned (Client-Server API) |
+| Feature | Voice Messages (STT) | ✅ Whisper API (OpenAI / Groq) + ffmpeg |
+| Feature | Image Messages | ✅ Multimodal (Claude Code) |
 
 ## Quick Start
 
@@ -311,6 +313,56 @@ Adding, removing, and switching providers all persist to `config.toml` automatic
 
 The `env` map in provider config lets you set arbitrary environment variables for any setup (Bedrock, Vertex, Azure, custom proxies, etc.).
 
+## Voice Messages (Speech-to-Text)
+
+Send voice messages directly — cc-connect transcribes them to text using a configurable STT provider, then forwards the text to the agent.
+
+**Supported platforms:** Feishu, WeChat Work, Telegram, LINE, Discord, Slack
+
+**Prerequisites:**
+- An API key for OpenAI or Groq (for Whisper STT)
+- `ffmpeg` installed (for audio format conversion — most platforms send AMR/OGG which Whisper doesn't accept directly)
+
+### Configure
+
+```toml
+[speech]
+enabled = true
+provider = "openai"    # "openai" or "groq"
+language = ""          # e.g. "zh", "en"; empty = auto-detect
+
+[speech.openai]
+api_key = "sk-xxx"     # your OpenAI API key
+# base_url = ""        # custom endpoint (optional, for OpenAI-compatible APIs)
+# model = "whisper-1"  # default model
+
+# -- OR use Groq (faster and cheaper) --
+# [speech.groq]
+# api_key = "gsk_xxx"
+# model = "whisper-large-v3-turbo"
+```
+
+### How It Works
+
+1. User sends a voice message on any supported platform
+2. cc-connect downloads the audio from the platform
+3. If the format needs conversion (AMR, OGG → MP3), `ffmpeg` handles it
+4. Audio is sent to the Whisper API for transcription
+5. Transcribed text is shown to the user and forwarded to the agent
+
+### Install ffmpeg
+
+```bash
+# Ubuntu / Debian
+sudo apt install ffmpeg
+
+# macOS
+brew install ffmpeg
+
+# Alpine
+apk add ffmpeg
+```
+
 ## Session Management
 
 Each user gets an independent session with full conversation context. Manage sessions via slash commands:
@@ -418,6 +470,7 @@ cc-connect/
 │   ├── message.go           # Unified message / event types
 │   ├── session.go           # Multi-session management
 │   ├── i18n.go              # Internationalization (en/zh)
+│   ├── speech.go            # Speech-to-text (Whisper API + ffmpeg)
 │   └── engine.go            # Routing engine + slash commands
 ├── platform/                # Platform adapters
 │   ├── feishu/              # Feishu / Lark (WebSocket)

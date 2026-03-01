@@ -22,6 +22,7 @@ type Engine struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 	i18n      *I18n
+	speech    SpeechCfg
 
 	providerSaveFunc       func(providerName string) error
 	providerAddSaveFunc    func(p ProviderConfig) error
@@ -64,6 +65,11 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		i18n:              NewI18n(lang),
 		interactiveStates: make(map[string]*interactiveState),
 	}
+}
+
+// SetSpeechConfig configures the speech-to-text subsystem.
+func (e *Engine) SetSpeechConfig(cfg SpeechCfg) {
+	e.speech = cfg
 }
 
 func (e *Engine) SetLanguageSaveFunc(fn func(Language) error) {
@@ -121,6 +127,12 @@ func (e *Engine) Stop() error {
 }
 
 func (e *Engine) handleMessage(p Platform, msg *Message) {
+	// Voice message: transcribe to text first
+	if msg.Audio != nil {
+		e.handleVoiceMessage(p, msg)
+		return
+	}
+
 	content := strings.TrimSpace(msg.Content)
 	if content == "" && len(msg.Images) == 0 {
 		return
@@ -149,6 +161,50 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	)
 
 	go e.processInteractiveMessage(p, msg, session)
+}
+
+// ──────────────────────────────────────────────────────────────
+// Voice message handling
+// ──────────────────────────────────────────────────────────────
+
+func (e *Engine) handleVoiceMessage(p Platform, msg *Message) {
+	if !e.speech.Enabled || e.speech.STT == nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgVoiceNotEnabled))
+		return
+	}
+
+	audio := msg.Audio
+	if NeedsConversion(audio.Format) && !HasFFmpeg() {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgVoiceNoFFmpeg))
+		return
+	}
+
+	slog.Info("transcribing voice message",
+		"platform", msg.Platform, "user", msg.UserName,
+		"format", audio.Format, "size", len(audio.Data),
+	)
+	e.send(p, msg.ReplyCtx, e.i18n.T(MsgVoiceTranscribing))
+
+	text, err := TranscribeAudio(e.ctx, e.speech.STT, audio, e.speech.Language)
+	if err != nil {
+		slog.Error("speech transcription failed", "error", err)
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgVoiceTranscribeFailed), err))
+		return
+	}
+
+	text = strings.TrimSpace(text)
+	if text == "" {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgVoiceEmpty))
+		return
+	}
+
+	slog.Info("voice transcribed", "text_len", len(text))
+	e.send(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgVoiceTranscribed), text))
+
+	// Replace audio with transcribed text and re-dispatch
+	msg.Audio = nil
+	msg.Content = text
+	e.handleMessage(p, msg)
 }
 
 // ──────────────────────────────────────────────────────────────

@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/chenhg5/cc-connect/core"
 
@@ -67,8 +68,23 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		rctx := replyContext{channelID: m.ChannelID, messageID: m.ID}
 
 		var images []core.ImageAttachment
+		var audio *core.AudioAttachment
 		for _, att := range m.Attachments {
-			if att.Width > 0 && att.Height > 0 { // image attachment
+			ct := strings.ToLower(att.ContentType)
+			if strings.HasPrefix(ct, "audio/") {
+				data, err := downloadURL(att.URL)
+				if err != nil {
+					slog.Error("discord: download audio failed", "url", att.URL, "error", err)
+					continue
+				}
+				format := "ogg"
+				if parts := strings.SplitN(ct, "/", 2); len(parts) == 2 {
+					format = parts[1]
+				}
+				audio = &core.AudioAttachment{
+					MimeType: ct, Data: data, Format: format,
+				}
+			} else if att.Width > 0 && att.Height > 0 {
 				data, err := downloadURL(att.URL)
 				if err != nil {
 					slog.Error("discord: download attachment failed", "url", att.URL, "error", err)
@@ -80,14 +96,14 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 			}
 		}
 
-		if m.Content == "" && len(images) == 0 {
+		if m.Content == "" && len(images) == 0 && audio == nil {
 			return
 		}
 
 		msg := &core.Message{
 			SessionKey: sessionKey, Platform: "discord",
 			UserID: m.Author.ID, UserName: m.Author.Username,
-			Content: m.Content, Images: images, ReplyCtx: rctx,
+			Content: m.Content, Images: images, Audio: audio, ReplyCtx: rctx,
 		}
 		p.handler(p, msg)
 	})
