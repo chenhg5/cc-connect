@@ -107,6 +107,20 @@ cp config.example.toml config.toml
 ./cc-connect --version                    # show version info
 ```
 
+### Upgrade
+
+```bash
+# npm
+npm install -g cc-connect
+
+# Binary self-update
+cc-connect update
+
+# Beta / pre-release channel
+npm install -g cc-connect@beta
+cc-connect update --pre
+```
+
 ## Platform Setup Guides
 
 Each platform requires creating a bot/app on the platform's developer console. We provide detailed step-by-step guides:

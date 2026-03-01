@@ -112,6 +112,18 @@ cp config.example.toml config.toml
 ./cc-connect --version                    # 显示版本信息
 ```
 
+### 升级
+
+```bash
+# npm
+npm install -g cc-connect           # 稳定版
+npm install -g cc-connect@beta      # 内测版
+
+# 二进制自更新
+cc-connect update                   # 稳定版
+cc-connect update --pre             # 内测版（含 pre-release）
+```
+
 ## 平台接入指南
 
 每个平台都需要在其开发者后台创建机器人/应用。我们提供了详细的分步指南：
