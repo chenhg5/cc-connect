@@ -123,8 +123,10 @@ func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, erro
 		return nil, fmt.Errorf("claudecode: resolve work_dir: %w", err)
 	}
 
-	projectKey := strings.ReplaceAll(absWorkDir, string(filepath.Separator), "-")
-	projectDir := filepath.Join(homeDir, ".claude", "projects", projectKey)
+	projectDir := findProjectDir(homeDir, absWorkDir)
+	if projectDir == "" {
+		return nil, nil
+	}
 
 	entries, err := os.ReadDir(projectDir)
 	if err != nil {
@@ -355,4 +357,51 @@ func summarizeInput(tool string, input any) string {
 		return string([]rune(s)[:200]) + "..."
 	}
 	return s
+}
+
+// findProjectDir locates the Claude Code session directory for a given work dir.
+// Claude Code stores sessions at ~/.claude/projects/{projectKey}/ where projectKey
+// is derived from the absolute path. On Windows, the key format may vary (colon
+// handling, slash direction), so we try multiple key candidates and fall back to
+// scanning the projects directory.
+func findProjectDir(homeDir, absWorkDir string) string {
+	projectsBase := filepath.Join(homeDir, ".claude", "projects")
+
+	// Build candidate keys: different ways Claude Code might encode the path
+	candidates := []string{
+		// Unix-style: replace OS separator with "-"
+		strings.ReplaceAll(absWorkDir, string(filepath.Separator), "-"),
+		// Windows: replace both "\" and ":" with "-"
+		strings.NewReplacer("/", "-", "\\", "-", ":", "-").Replace(absWorkDir),
+	}
+	// Also try with forward slashes (config might use forward slashes on Windows)
+	fwd := strings.ReplaceAll(absWorkDir, "\\", "/")
+	candidates = append(candidates, strings.ReplaceAll(fwd, "/", "-"))
+
+	for _, key := range candidates {
+		dir := filepath.Join(projectsBase, key)
+		if _, err := os.Stat(dir); err == nil {
+			return dir
+		}
+	}
+
+	// Fallback: scan the projects directory and find a match by
+	// comparing the tail of the encoded path (case-insensitive for Windows).
+	entries, err := os.ReadDir(projectsBase)
+	if err != nil {
+		return ""
+	}
+
+	normWork := strings.ToLower(strings.NewReplacer("/", "-", "\\", "-", ":", "-").Replace(absWorkDir))
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		normEntry := strings.ToLower(entry.Name())
+		if normEntry == normWork {
+			return filepath.Join(projectsBase, entry.Name())
+		}
+	}
+
+	return ""
 }
