@@ -367,6 +367,29 @@ app_secret = "your-feishu-app-secret"
 # [projects.platforms.options]
 # token = "your-telegram-bot-token"
 
+# QQ (via NapCat / OneBot v11) (uncomment to enable / 取消注释以启用)
+# Requires a OneBot v11 implementation running alongside your QQ client:
+# 需要一个 OneBot v11 实现配合 QQ 客户端运行：
+#   - NapCat (recommended / 推荐): https://github.com/NapNeko/NapCatQQ
+#     - Docker: docker run -d --name napcat -e ACCOUNT=<QQ号> -p 3001:3001 -p 6099:6099 mlikiowa/napcat-docker:latest
+#     - Enable Forward WebSocket in NapCat WebUI (http://localhost:6099), default port 3001
+#       在 NapCat WebUI 中启用正向 WebSocket，默认端口 3001
+#   - LLOneBot: https://github.com/LLOneBot/LLOneBot (NTQQ plugin / NTQQ 插件)
+#
+# allow_from: comma-separated QQ user IDs that are allowed to interact, or "*" for all.
+#             允许交互的 QQ 号列表（逗号分隔），设为 "*" 允许所有人。
+# token: optional access_token for WebSocket authentication (must match NapCat config).
+#        可选的 WebSocket 鉴权 token（需与 NapCat 配置一致）。
+
+# [[projects.platforms]]
+# type = "qq"
+#
+# [projects.platforms.options]
+# ws_url = "ws://127.0.0.1:3001"  # NapCat Forward WebSocket URL
+# token = ""                       # optional: access_token / 可选鉴权 token
+# allow_from = "*"                 # allowed QQ user IDs, e.g. "12345,67890" or "*" for all
+#                                  # 允许的 QQ 号，如 "12345,67890"，"*" 表示所有
+
 # =============================================================================
 # Project 5: Another example / 项目 5：更多示例 (uncomment to enable / 取消注释以启用)
 # =============================================================================

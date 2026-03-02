@@ -47,6 +47,7 @@ All components are decoupled via Go interfaces — fully pluggable and extensibl
 | Platform | Discord | ✅ Gateway — no public IP needed |
 | Platform | LINE | ✅ Webhook — public URL required |
 | Platform | WeChat Work (企业微信) | ✅ Webhook — public URL required |
+| Platform | QQ (via NapCat/OneBot) | ✅ Beta — WebSocket, no public IP needed |
 | Platform | WhatsApp | 🔜 Planned (Business Cloud API) |
 | Platform | Microsoft Teams | 🔜 Planned (Bot Framework) |
 | Platform | Google Chat | 🔜 Planned (Chat API) |
@@ -152,6 +153,7 @@ Each platform requires creating a bot/app on the platform's developer console. W
 | Discord | [docs/discord.md](docs/discord.md) | Gateway | No |
 | LINE | [INSTALL.md](./INSTALL.md#line--requires-public-url) | Webhook | Yes |
 | WeChat Work | [docs/wecom.md](docs/wecom.md) | Webhook | Yes |
+| QQ (NapCat) | [docs/qq.md](docs/qq.md) | WebSocket (OneBot v11) | No |
 
 Quick config examples for each platform:
 
@@ -208,6 +210,13 @@ callback_token = "xxx"
 callback_aes_key = "xxx"
 port = "8081"
 enable_markdown = false  # true only if all users use WeChat Work app (not personal WeChat)
+
+# QQ (via NapCat/OneBot v11, no public IP needed)
+[[projects.platforms]]
+type = "qq"
+[projects.platforms.options]
+ws_url = "ws://127.0.0.1:3001"
+allow_from = "*"  # QQ user IDs, e.g. "12345,67890" or "*" for all
 ```
 
 ## Permission Modes
@@ -490,7 +499,8 @@ cc-connect/
 │   ├── slack/               # Slack (Socket Mode)
 │   ├── discord/             # Discord (Gateway WebSocket)
 │   ├── line/                # LINE (HTTP Webhook)
-│   └── wecom/               # WeChat Work (HTTP Webhook)
+│   ├── wecom/               # WeChat Work (HTTP Webhook)
+│   └── qq/                  # QQ (NapCat / OneBot v11 WebSocket)
 ├── agent/                   # Agent adapters
 │   ├── claudecode/          # Claude Code CLI (interactive sessions)
 │   ├── codex/               # OpenAI Codex CLI (exec --json)

@@ -4,7 +4,7 @@
 
 ## What is cc-connect?
 
-cc-connect bridges local AI coding assistants to messaging platforms (Feishu, DingTalk, Telegram, Slack, Discord, LINE, WeChat Work), enabling bidirectional chat with your local AI agent from anywhere.
+cc-connect bridges local AI coding assistants to messaging platforms (Feishu, DingTalk, Telegram, Slack, Discord, LINE, WeChat Work, QQ), enabling bidirectional chat with your local AI agent from anywhere.
 
 GitHub: https://github.com/chenhg5/cc-connect
 
@@ -318,6 +318,30 @@ enable_markdown = false  # true = Markdown messages (WeChat Work app only; perso
 ```
 
 **Detailed guide:** [docs/wecom.md](docs/wecom.md)
+
+### QQ (via NapCat / OneBot v11) — No public IP needed `Beta`
+
+QQ integration requires a third-party OneBot v11 implementation (e.g., NapCat) as a bridge.
+
+1. Deploy NapCat (recommended via Docker):
+   ```bash
+   docker run -d --name napcat -e ACCOUNT=<QQ号> -p 3001:3001 -p 6099:6099 --restart unless-stopped mlikiowa/napcat-docker:latest
+   ```
+2. First launch: check `docker logs -f napcat` for a QR code, scan with QQ mobile app to log in
+3. Open NapCat WebUI at `http://localhost:6099`, enable **Forward WebSocket** on port 3001
+4. Add to `config.toml`:
+
+```toml
+[[projects.platforms]]
+type = "qq"
+
+[projects.platforms.options]
+ws_url = "ws://127.0.0.1:3001"  # NapCat Forward WebSocket URL
+token = ""                       # optional: access_token (must match NapCat config)
+allow_from = "*"                 # allowed QQ user IDs: "12345,67890" or "*" for all
+```
+
+**Detailed guide:** [docs/qq.md](docs/qq.md)
 
 ---
 

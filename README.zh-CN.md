@@ -52,6 +52,7 @@
 | Platform | Discord | ✅ Gateway — 无需公网 IP |
 | Platform | LINE | ✅ Webhook — 需要公网 URL |
 | Platform | 企业微信 (WeChat Work) | ✅ Webhook — 需要公网 URL |
+| Platform | QQ (通过 NapCat/OneBot) | ✅ Beta — WebSocket，无需公网 IP |
 | Platform | WhatsApp | 🔜 计划中 (Business Cloud API) |
 | Platform | Microsoft Teams | 🔜 计划中 (Bot Framework) |
 | Platform | Google Chat | 🔜 计划中 (Chat API) |
@@ -155,6 +156,7 @@ cc-connect update --pre             # 内测版（含 pre-release）
 | Discord | [docs/discord.md](docs/discord.md) | Gateway | 不需要 |
 | LINE | [INSTALL.md](./INSTALL.md#line--requires-public-url) | Webhook | 需要 |
 | 企业微信 | [docs/wecom.md](docs/wecom.md) | Webhook | 需要 |
+| QQ (NapCat) | [docs/qq.md](docs/qq.md) | WebSocket (OneBot v11) | 不需要 |
 
 各平台快速配置示例：
 
@@ -211,6 +213,13 @@ callback_token = "xxx"
 callback_aes_key = "xxx"
 port = "8081"
 enable_markdown = false  # 设为 true 则发送 Markdown 消息（仅企业微信应用内可渲染，个人微信显示"暂不支持"）
+
+# QQ（通过 NapCat/OneBot v11，无需公网 IP）
+[[projects.platforms]]
+type = "qq"
+[projects.platforms.options]
+ws_url = "ws://127.0.0.1:3001"
+allow_from = "*"  # 允许的 QQ 号，如 "12345,67890"，"*" 表示所有
 ```
 
 ## 权限模式
@@ -493,7 +502,8 @@ cc-connect/
 │   ├── slack/               # Slack（Socket Mode）
 │   ├── discord/             # Discord（Gateway WebSocket）
 │   ├── line/                # LINE（HTTP Webhook）
-│   └── wecom/               # 企业微信（HTTP Webhook）
+│   ├── wecom/               # 企业微信（HTTP Webhook）
+│   └── qq/                  # QQ（NapCat / OneBot v11 WebSocket）
 ├── agent/                   # AI 助手适配器
 │   ├── claudecode/          # Claude Code CLI（交互式会话）
 │   ├── codex/               # OpenAI Codex CLI（exec --json）
