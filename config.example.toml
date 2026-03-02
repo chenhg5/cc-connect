@@ -121,6 +121,8 @@ type = "feishu"
 [projects.platforms.options]
 app_id = "your-feishu-app-id"
 app_secret = "your-feishu-app-secret"
+# reaction_emoji = "OnIt"  # Emoji reaction on incoming messages (default: "OnIt"); set to "none" to disable
+#                           # 收到消息时添加的表情回复（默认 "OnIt"）；设为 "none" 可禁用
 
 # DingTalk / 钉钉 (uncomment to enable / 取消注释以启用)
 # 1. Create an app at https://open-dev.dingtalk.com / 在钉钉开放平台创建应用

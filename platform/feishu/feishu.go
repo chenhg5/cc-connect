@@ -27,12 +27,13 @@ type replyContext struct {
 }
 
 type Platform struct {
-	appID     string
-	appSecret string
-	client    *lark.Client
-	wsClient  *larkws.Client
-	handler   core.MessageHandler
-	cancel    context.CancelFunc
+	appID         string
+	appSecret     string
+	reactionEmoji string
+	client        *lark.Client
+	wsClient      *larkws.Client
+	handler       core.MessageHandler
+	cancel        context.CancelFunc
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -41,10 +42,19 @@ func New(opts map[string]any) (core.Platform, error) {
 	if appID == "" || appSecret == "" {
 		return nil, fmt.Errorf("feishu: app_id and app_secret are required")
 	}
+	reactionEmoji, _ := opts["reaction_emoji"].(string)
+	if reactionEmoji == "" {
+		reactionEmoji = "OnIt"
+	}
+	if v, ok := opts["reaction_emoji"].(string); ok && v == "none" {
+		reactionEmoji = ""
+	}
+
 	return &Platform{
-		appID:     appID,
-		appSecret: appSecret,
-		client:    lark.NewClient(appID, appSecret),
+		appID:         appID,
+		appSecret:     appSecret,
+		reactionEmoji: reactionEmoji,
+		client:        lark.NewClient(appID, appSecret),
 	}, nil
 }
 
@@ -87,6 +97,29 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	return nil
 }
 
+func (p *Platform) addReaction(messageID string) {
+	if p.reactionEmoji == "" {
+		return
+	}
+	emojiType := p.reactionEmoji
+	go func() {
+		resp, err := p.client.Im.MessageReaction.Create(context.Background(),
+			larkim.NewCreateMessageReactionReqBuilder().
+				MessageId(messageID).
+				Body(larkim.NewCreateMessageReactionReqBodyBuilder().
+					ReactionType(&larkim.Emoji{EmojiType: &emojiType}).
+					Build()).
+				Build())
+		if err != nil {
+			slog.Debug("feishu: add reaction failed", "error", err)
+			return
+		}
+		if !resp.Success() {
+			slog.Debug("feishu: add reaction failed", "code", resp.Code, "msg", resp.Msg)
+		}
+	}()
+}
+
 func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 	msg := event.Event.Message
 	sender := event.Event.Sender
@@ -109,8 +142,17 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		userName = *sender.SenderType
 	}
 
+	messageID := ""
+	if msg.MessageId != nil {
+		messageID = *msg.MessageId
+	}
+
+	if msgType != "" && messageID != "" {
+		p.addReaction(messageID)
+	}
+
 	sessionKey := fmt.Sprintf("feishu:%s:%s", chatID, userID)
-	rctx := replyContext{messageID: *msg.MessageId, chatID: chatID}
+	rctx := replyContext{messageID: messageID, chatID: chatID}
 
 	switch msgType {
 	case "text":
@@ -135,7 +177,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 			slog.Error("feishu: failed to parse image content", "error", err)
 			return nil
 		}
-		imgData, mimeType, err := p.downloadImage(*msg.MessageId, imgBody.ImageKey)
+		imgData, mimeType, err := p.downloadImage(messageID, imgBody.ImageKey)
 		if err != nil {
 			slog.Error("feishu: download image failed", "error", err)
 			return nil
@@ -157,7 +199,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 			return nil
 		}
 		slog.Debug("feishu: audio received", "user", userID, "file_key", audioBody.FileKey)
-		audioData, err := p.downloadResource(*msg.MessageId, audioBody.FileKey, "file")
+		audioData, err := p.downloadResource(messageID, audioBody.FileKey, "file")
 		if err != nil {
 			slog.Error("feishu: download audio failed", "error", err)
 			return nil
