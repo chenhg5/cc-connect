@@ -199,6 +199,15 @@ func (p *Platform) downloadSlackFile(url string) ([]byte, error) {
 	return io.ReadAll(resp.Body)
 }
 
+func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
+	// slack:{channel}:{user}
+	parts := strings.SplitN(sessionKey, ":", 3)
+	if len(parts) < 2 || parts[0] != "slack" {
+		return nil, fmt.Errorf("slack: invalid session key %q", sessionKey)
+	}
+	return replyContext{channel: parts[1]}, nil
+}
+
 func (p *Platform) Stop() error {
 	if p.cancel != nil {
 		p.cancel()

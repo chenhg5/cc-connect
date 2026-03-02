@@ -137,6 +137,19 @@ const (
 	MsgVoiceTranscribed     MsgKey = "voice_transcribed"
 	MsgVoiceTranscribeFailed MsgKey = "voice_transcribe_failed"
 	MsgVoiceEmpty           MsgKey = "voice_empty"
+
+	MsgCronNotAvailable MsgKey = "cron_not_available"
+	MsgCronUsage        MsgKey = "cron_usage"
+	MsgCronAddUsage     MsgKey = "cron_add_usage"
+	MsgCronAdded        MsgKey = "cron_added"
+	MsgCronEmpty        MsgKey = "cron_empty"
+	MsgCronListTitle    MsgKey = "cron_list_title"
+	MsgCronListFooter   MsgKey = "cron_list_footer"
+	MsgCronDelUsage     MsgKey = "cron_del_usage"
+	MsgCronDeleted      MsgKey = "cron_deleted"
+	MsgCronNotFound     MsgKey = "cron_not_found"
+	MsgCronEnabled      MsgKey = "cron_enabled"
+	MsgCronDisabled     MsgKey = "cron_disabled"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -257,6 +270,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|auto]\n  View/switch language\n\n" +
 			"/quiet\n  Toggle thinking/tool progress\n\n" +
 			"/stop\n  Stop current execution\n\n" +
+			"/cron [add|list|del|enable|disable]\n  Manage scheduled tasks\n\n" +
 			"/version\n  Show cc-connect version\n\n" +
 			"/help\n  Show this help\n\n" +
 			"Permission modes: default / edit / plan / yolo",
@@ -272,6 +286,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|auto]\n  查看/切换语言\n\n" +
 			"/quiet\n  开关思考和工具进度消息\n\n" +
 			"/stop\n  停止当前执行\n\n" +
+			"/cron [add|list|del|enable|disable]\n  管理定时任务\n\n" +
 			"/version\n  查看 cc-connect 版本\n\n" +
 			"/help\n  显示此帮助\n\n" +
 			"权限模式：default / edit / plan / yolo",
@@ -381,6 +396,54 @@ var messages = map[MsgKey]map[Language]string{
 	MsgVoiceEmpty: {
 		LangEnglish: "🎙 Voice message was empty or could not be recognized.",
 		LangChinese: "🎙 语音消息为空或无法识别。",
+	},
+	MsgCronNotAvailable: {
+		LangEnglish: "Cron scheduler is not available.",
+		LangChinese: "定时任务调度器未启用。",
+	},
+	MsgCronUsage: {
+		LangEnglish: "Usage:\n/cron add <min> <hour> <day> <month> <weekday> <prompt>\n/cron list\n/cron del <id>\n/cron enable <id>\n/cron disable <id>",
+		LangChinese: "用法：\n/cron add <分> <时> <日> <月> <周> <任务描述>\n/cron list\n/cron del <id>\n/cron enable <id>\n/cron disable <id>",
+	},
+	MsgCronAddUsage: {
+		LangEnglish: "Usage: /cron add <min> <hour> <day> <month> <weekday> <prompt>\nExample: /cron add 0 6 * * * Collect GitHub trending data and send me a summary",
+		LangChinese: "用法：/cron add <分> <时> <日> <月> <周> <任务描述>\n示例：/cron add 0 6 * * * 收集 GitHub Trending 数据整理成简报发给我",
+	},
+	MsgCronAdded: {
+		LangEnglish: "✅ Cron job created\nID: `%s`\nSchedule: `%s`\nPrompt: %s",
+		LangChinese: "✅ 定时任务已创建\nID: `%s`\n调度: `%s`\n内容: %s",
+	},
+	MsgCronEmpty: {
+		LangEnglish: "No scheduled tasks.",
+		LangChinese: "暂无定时任务。",
+	},
+	MsgCronListTitle: {
+		LangEnglish: "⏰ Scheduled Tasks (%d)",
+		LangChinese: "⏰ 定时任务 (%d)",
+	},
+	MsgCronListFooter: {
+		LangEnglish: "`/cron del <id>` to remove · `/cron enable/disable <id>` to toggle",
+		LangChinese: "`/cron del <id>` 删除 · `/cron enable/disable <id>` 启停",
+	},
+	MsgCronDelUsage: {
+		LangEnglish: "Usage: /cron del <id>",
+		LangChinese: "用法：/cron del <id>",
+	},
+	MsgCronDeleted: {
+		LangEnglish: "✅ Cron job `%s` deleted.",
+		LangChinese: "✅ 定时任务 `%s` 已删除。",
+	},
+	MsgCronNotFound: {
+		LangEnglish: "❌ Cron job `%s` not found.",
+		LangChinese: "❌ 定时任务 `%s` 未找到。",
+	},
+	MsgCronEnabled: {
+		LangEnglish: "✅ Cron job `%s` enabled.",
+		LangChinese: "✅ 定时任务 `%s` 已启用。",
+	},
+	MsgCronDisabled: {
+		LangEnglish: "⏸ Cron job `%s` disabled.",
+		LangChinese: "⏸ 定时任务 `%s` 已暂停。",
 	},
 }
 

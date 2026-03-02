@@ -36,6 +36,7 @@ type Agent struct {
 	allowedTools []string
 	providers    []core.ProviderConfig
 	activeIdx    int // -1 = no provider set
+	sessionEnv   []string
 	mu           sync.Mutex
 }
 
@@ -87,6 +88,12 @@ func normalizePermissionMode(raw string) string {
 
 func (a *Agent) Name() string { return "claudecode" }
 
+func (a *Agent) SetSessionEnv(env []string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.sessionEnv = env
+}
+
 // StartSession creates a persistent interactive Claude Code session.
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
 	a.mu.Lock()
@@ -94,6 +101,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	copy(tools, a.allowedTools)
 	model := a.model
 	extraEnv := a.providerEnvLocked()
+	extraEnv = append(extraEnv, a.sessionEnv...)
 	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
 		if m := a.providers[a.activeIdx].Model; m != "" {
 			model = m

@@ -23,12 +23,13 @@ func init() {
 //   - "full-auto": --full-auto (sandbox-protected auto execution)
 //   - "yolo":      --dangerously-bypass-approvals-and-sandbox
 type Agent struct {
-	workDir   string
-	model     string
-	mode      string // "suggest" | "auto-edit" | "full-auto" | "yolo"
-	providers []core.ProviderConfig
-	activeIdx int // -1 = no provider set
-	mu        sync.Mutex
+	workDir    string
+	model      string
+	mode       string // "suggest" | "auto-edit" | "full-auto" | "yolo"
+	providers  []core.ProviderConfig
+	activeIdx  int // -1 = no provider set
+	sessionEnv []string
+	mu         sync.Mutex
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -67,11 +68,18 @@ func normalizeMode(raw string) string {
 
 func (a *Agent) Name() string { return "codex" }
 
+func (a *Agent) SetSessionEnv(env []string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.sessionEnv = env
+}
+
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
 	a.mu.Lock()
 	mode := a.mode
 	model := a.model
 	extraEnv := a.providerEnvLocked()
+	extraEnv = append(extraEnv, a.sessionEnv...)
 	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
 		if m := a.providers[a.activeIdx].Model; m != "" {
 			model = m

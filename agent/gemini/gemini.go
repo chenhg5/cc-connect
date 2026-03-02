@@ -29,13 +29,14 @@ func init() {
 //   - "yolo":      auto-approve all tools (-y / --approval-mode yolo)
 //   - "plan":      read-only plan mode (--approval-mode plan)
 type Agent struct {
-	workDir   string
-	model     string
-	mode      string
-	cmd       string // CLI binary name, default "gemini"
-	providers []core.ProviderConfig
-	activeIdx int
-	mu        sync.Mutex
+	workDir    string
+	model      string
+	mode       string
+	cmd        string // CLI binary name, default "gemini"
+	providers  []core.ProviderConfig
+	activeIdx  int
+	sessionEnv []string
+	mu         sync.Mutex
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -79,6 +80,12 @@ func normalizeMode(raw string) string {
 
 func (a *Agent) Name() string { return "gemini" }
 
+func (a *Agent) SetSessionEnv(env []string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.sessionEnv = env
+}
+
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
 	a.mu.Lock()
 	model := a.model
@@ -86,6 +93,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	cmd := a.cmd
 	workDir := a.workDir
 	extraEnv := a.providerEnvLocked()
+	extraEnv = append(extraEnv, a.sessionEnv...)
 	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
 		if m := a.providers[a.activeIdx].Model; m != "" {
 			model = m

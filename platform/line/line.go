@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/chenhg5/cc-connect/core"
 
@@ -237,6 +238,15 @@ func splitMessage(s string, maxLen int) []string {
 		runes = runes[end:]
 	}
 	return parts
+}
+
+func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
+	// line:{targetID} (user or group)
+	parts := strings.SplitN(sessionKey, ":", 2)
+	if len(parts) < 2 || parts[0] != "line" {
+		return nil, fmt.Errorf("line: invalid session key %q", sessionKey)
+	}
+	return replyContext{targetID: parts[1], targetType: "user"}, nil
 }
 
 func (p *Platform) Stop() error {

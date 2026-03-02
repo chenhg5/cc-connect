@@ -374,6 +374,15 @@ func buildCardJSON(content string) string {
 	return string(b)
 }
 
+func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
+	// feishu:{chatID}:{userID}
+	parts := strings.SplitN(sessionKey, ":", 3)
+	if len(parts) < 2 || parts[0] != "feishu" {
+		return nil, fmt.Errorf("feishu: invalid session key %q", sessionKey)
+	}
+	return replyContext{chatID: parts[1]}, nil
+}
+
 func (p *Platform) Stop() error {
 	if p.cancel != nil {
 		p.cancel()

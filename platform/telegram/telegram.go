@@ -234,6 +234,19 @@ func (p *Platform) downloadFile(fileID string) ([]byte, error) {
 	return io.ReadAll(resp.Body)
 }
 
+func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
+	// telegram:{chatID}:{userID}
+	parts := strings.SplitN(sessionKey, ":", 3)
+	if len(parts) < 2 || parts[0] != "telegram" {
+		return nil, fmt.Errorf("telegram: invalid session key %q", sessionKey)
+	}
+	chatID, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("telegram: invalid chat ID in %q", sessionKey)
+	}
+	return replyContext{chatID: chatID}, nil
+}
+
 func (p *Platform) Stop() error {
 	if p.cancel != nil {
 		p.cancel()

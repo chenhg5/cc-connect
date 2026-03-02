@@ -17,6 +17,19 @@ type Platform interface {
 // ErrNotSupported indicates a platform doesn't support a particular operation.
 var ErrNotSupported = errors.New("operation not supported by this platform")
 
+// ReplyContextReconstructor is an optional interface for platforms that can
+// recreate a reply context from a session key. This is needed for cron jobs
+// to send messages to users without an incoming message.
+type ReplyContextReconstructor interface {
+	ReconstructReplyCtx(sessionKey string) (any, error)
+}
+
+// SessionEnvInjector is an optional interface for agents that accept
+// per-session environment variables (e.g. CC_PROJECT, CC_SESSION_KEY).
+type SessionEnvInjector interface {
+	SetSessionEnv(env []string)
+}
+
 // MessageUpdater is an optional interface for platforms that support updating messages.
 type MessageUpdater interface {
 	UpdateMessage(ctx context.Context, replyCtx any, content string) error

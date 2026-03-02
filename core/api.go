@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 // APIServer exposes a local Unix socket API for external tools (e.g. cron jobs)
@@ -18,6 +19,7 @@ type APIServer struct {
 	listener   net.Listener
 	mux        *http.ServeMux
 	engines    map[string]*Engine // project name → engine
+	cron       *CronScheduler
 	mu         sync.RWMutex
 }
 
@@ -53,6 +55,9 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 	}
 	s.mux.HandleFunc("/send", s.handleSend)
 	s.mux.HandleFunc("/sessions", s.handleSessions)
+	s.mux.HandleFunc("/cron/add", s.handleCronAdd)
+	s.mux.HandleFunc("/cron/list", s.handleCronList)
+	s.mux.HandleFunc("/cron/del", s.handleCronDel)
 
 	return s, nil
 }
@@ -65,6 +70,10 @@ func (s *APIServer) RegisterEngine(name string, e *Engine) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.engines[name] = e
+}
+
+func (s *APIServer) SetCronScheduler(cs *CronScheduler) {
+	s.cron = cs
 }
 
 func (s *APIServer) Start() {
@@ -155,4 +164,119 @@ func (s *APIServer) handleSessions(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
+}
+
+// ── Cron API ───────────────────────────────────────────────────
+
+// CronAddRequest is the JSON body for POST /cron/add.
+type CronAddRequest struct {
+	Project     string `json:"project"`
+	SessionKey  string `json:"session_key"`
+	CronExpr    string `json:"cron_expr"`
+	Prompt      string `json:"prompt"`
+	Description string `json:"description"`
+}
+
+func (s *APIServer) handleCronAdd(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.cron == nil {
+		http.Error(w, "cron scheduler not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req CronAddRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.CronExpr == "" || req.Prompt == "" {
+		http.Error(w, "cron_expr and prompt are required", http.StatusBadRequest)
+		return
+	}
+
+	// Resolve project: use provided, or pick single engine
+	project := req.Project
+	if project == "" {
+		s.mu.RLock()
+		if len(s.engines) == 1 {
+			for name := range s.engines {
+				project = name
+			}
+		}
+		s.mu.RUnlock()
+	}
+	if project == "" {
+		http.Error(w, "project is required (multiple projects configured)", http.StatusBadRequest)
+		return
+	}
+
+	job := &CronJob{
+		ID:          GenerateCronID(),
+		Project:     project,
+		SessionKey:  req.SessionKey,
+		CronExpr:    req.CronExpr,
+		Prompt:      req.Prompt,
+		Description: req.Description,
+		Enabled:     true,
+	}
+	job.CreatedAt = time.Now()
+
+	if err := s.cron.AddJob(job); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(job)
+}
+
+func (s *APIServer) handleCronList(w http.ResponseWriter, r *http.Request) {
+	if s.cron == nil {
+		http.Error(w, "cron scheduler not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	project := r.URL.Query().Get("project")
+	var jobs []*CronJob
+	if project != "" {
+		jobs = s.cron.Store().ListByProject(project)
+	} else {
+		jobs = s.cron.Store().List()
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(jobs)
+}
+
+func (s *APIServer) handleCronDel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.cron == nil {
+		http.Error(w, "cron scheduler not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.ID == "" {
+		http.Error(w, "id is required", http.StatusBadRequest)
+		return
+	}
+
+	if s.cron.RemoveJob(req.ID) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	} else {
+		http.Error(w, fmt.Sprintf("job %q not found", req.ID), http.StatusNotFound)
+	}
 }

@@ -378,6 +378,21 @@ type replyContext struct {
 	messageID   int32
 }
 
+func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
+	// qq:{userID} or qq:{groupID}:{userID}
+	parts := strings.SplitN(sessionKey, ":", 3)
+	if len(parts) < 2 || parts[0] != "qq" {
+		return nil, fmt.Errorf("qq: invalid session key %q", sessionKey)
+	}
+	if len(parts) == 3 {
+		gid, _ := strconv.ParseInt(parts[1], 10, 64)
+		uid, _ := strconv.ParseInt(parts[2], 10, 64)
+		return &replyContext{messageType: "group", groupID: gid, userID: uid}, nil
+	}
+	uid, _ := strconv.ParseInt(parts[1], 10, 64)
+	return &replyContext{messageType: "private", userID: uid}, nil
+}
+
 func (p *Platform) isAllowed(userID int64) bool {
 	if p.allowFrom == "" || p.allowFrom == "*" {
 		return true

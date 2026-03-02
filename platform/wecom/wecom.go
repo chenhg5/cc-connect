@@ -462,6 +462,15 @@ func (p *Platform) getAccessToken() (string, error) {
 	return result.AccessToken, nil
 }
 
+func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
+	// wecom:{userID}
+	parts := strings.SplitN(sessionKey, ":", 2)
+	if len(parts) < 2 || parts[0] != "wecom" {
+		return nil, fmt.Errorf("wecom: invalid session key %q", sessionKey)
+	}
+	return replyContext{userID: parts[1]}, nil
+}
+
 func (p *Platform) Stop() error {
 	if p.server != nil {
 		return p.server.Shutdown(context.Background())

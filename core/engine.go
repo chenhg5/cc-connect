@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 )
 
@@ -30,6 +31,8 @@ type Engine struct {
 	providerSaveFunc       func(providerName string) error
 	providerAddSaveFunc    func(p ProviderConfig) error
 	providerRemoveSaveFunc func(name string) error
+
+	cronScheduler *CronScheduler
 
 	// Interactive agent session management
 	interactiveMu     sync.Mutex
@@ -89,6 +92,70 @@ func (e *Engine) SetProviderAddSaveFunc(fn func(ProviderConfig) error) {
 
 func (e *Engine) SetProviderRemoveSaveFunc(fn func(string) error) {
 	e.providerRemoveSaveFunc = fn
+}
+
+func (e *Engine) SetCronScheduler(cs *CronScheduler) {
+	e.cronScheduler = cs
+}
+
+func (e *Engine) ProjectName() string {
+	return e.name
+}
+
+// ExecuteCronJob runs a cron job by injecting a synthetic message into the engine.
+// It finds the platform that owns the session key, reconstructs a reply context,
+// and processes the message as if the user sent it.
+func (e *Engine) ExecuteCronJob(job *CronJob) error {
+	sessionKey := job.SessionKey
+	platformName := ""
+	if idx := strings.Index(sessionKey, ":"); idx > 0 {
+		platformName = sessionKey[:idx]
+	}
+
+	var targetPlatform Platform
+	for _, p := range e.platforms {
+		if p.Name() == platformName {
+			targetPlatform = p
+			break
+		}
+	}
+	if targetPlatform == nil {
+		return fmt.Errorf("platform %q not found for session %q", platformName, sessionKey)
+	}
+
+	rc, ok := targetPlatform.(ReplyContextReconstructor)
+	if !ok {
+		return fmt.Errorf("platform %q does not support proactive messaging (cron)", platformName)
+	}
+
+	replyCtx, err := rc.ReconstructReplyCtx(sessionKey)
+	if err != nil {
+		return fmt.Errorf("reconstruct reply context: %w", err)
+	}
+
+	// Notify user that a cron job is executing
+	desc := job.Description
+	if desc == "" {
+		desc = truncateStr(job.Prompt, 40)
+	}
+	e.send(targetPlatform, replyCtx, fmt.Sprintf("⏰ %s", desc))
+
+	msg := &Message{
+		SessionKey: sessionKey,
+		Platform:   platformName,
+		UserID:     "cron",
+		UserName:   "cron",
+		Content:    job.Prompt,
+		ReplyCtx:   replyCtx,
+	}
+
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	if !session.TryLock() {
+		return fmt.Errorf("session %q is busy", sessionKey)
+	}
+
+	e.processInteractiveMessage(targetPlatform, msg, session)
+	return nil
 }
 
 func (e *Engine) Start() error {
@@ -363,6 +430,14 @@ func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, repl
 		return state
 	}
 
+	// Inject per-session env vars so the agent subprocess can call `cc-connect cron add` etc.
+	if inj, ok := e.agent.(SessionEnvInjector); ok {
+		inj.SetSessionEnv([]string{
+			"CC_PROJECT=" + e.name,
+			"CC_SESSION_KEY=" + sessionKey,
+		})
+	}
+
 	agentSession, err := e.agent.StartSession(e.ctx, session.AgentSessionID)
 	if err != nil {
 		slog.Error("failed to start interactive session", "error", err)
@@ -554,6 +629,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) {
 		e.cmdQuiet(p, msg)
 	case "/provider":
 		e.cmdProvider(p, msg, args)
+	case "/cron":
+		e.cmdCron(p, msg, args)
 	case "/stop":
 		e.cmdStop(p, msg)
 	case "/help":
@@ -1135,6 +1212,132 @@ func (e *Engine) send(p Platform, replyCtx any, content string) {
 func (e *Engine) reply(p Platform, replyCtx any, content string) {
 	if err := p.Reply(e.ctx, replyCtx, content); err != nil {
 		slog.Error("platform reply failed", "platform", p.Name(), "error", err, "content_len", len(content))
+	}
+}
+
+// ──────────────────────────────────────────────────────────────
+// /cron command
+// ──────────────────────────────────────────────────────────────
+
+func (e *Engine) cmdCron(p Platform, msg *Message, args []string) {
+	if e.cronScheduler == nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCronNotAvailable))
+		return
+	}
+
+	if len(args) == 0 {
+		e.cmdCronList(p, msg)
+		return
+	}
+
+	sub := strings.ToLower(args[0])
+	switch sub {
+	case "add":
+		e.cmdCronAdd(p, msg, args[1:])
+	case "list":
+		e.cmdCronList(p, msg)
+	case "del", "delete", "rm", "remove":
+		e.cmdCronDel(p, msg, args[1:])
+	case "enable":
+		e.cmdCronToggle(p, msg, args[1:], true)
+	case "disable":
+		e.cmdCronToggle(p, msg, args[1:], false)
+	default:
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCronUsage))
+	}
+}
+
+func (e *Engine) cmdCronAdd(p Platform, msg *Message, args []string) {
+	// /cron add <min> <hour> <day> <month> <weekday> <prompt...>
+	if len(args) < 6 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCronAddUsage))
+		return
+	}
+
+	cronExpr := strings.Join(args[:5], " ")
+	prompt := strings.Join(args[5:], " ")
+
+	job := &CronJob{
+		ID:         GenerateCronID(),
+		Project:    e.name,
+		SessionKey: msg.SessionKey,
+		CronExpr:   cronExpr,
+		Prompt:     prompt,
+		Enabled:    true,
+		CreatedAt:  time.Now(),
+	}
+
+	if err := e.cronScheduler.AddJob(job); err != nil {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
+		return
+	}
+
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronAdded), job.ID, cronExpr, truncateStr(prompt, 60)))
+}
+
+func (e *Engine) cmdCronList(p Platform, msg *Message) {
+	jobs := e.cronScheduler.Store().ListBySessionKey(msg.SessionKey)
+	if len(jobs) == 0 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCronEmpty))
+		return
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf(e.i18n.T(MsgCronListTitle), len(jobs)))
+	for _, j := range jobs {
+		status := "✅"
+		if !j.Enabled {
+			status = "⏸"
+		}
+		desc := j.Description
+		if desc == "" {
+			desc = truncateStr(j.Prompt, 40)
+		}
+		sb.WriteString(fmt.Sprintf("\n%s `%s` · %s · %s", status, j.ID, j.CronExpr, desc))
+		if !j.LastRun.IsZero() {
+			sb.WriteString(fmt.Sprintf(" · last: %s", j.LastRun.Format("01-02 15:04")))
+		}
+		if j.LastError != "" {
+			sb.WriteString(fmt.Sprintf(" · ❌ %s", truncateStr(j.LastError, 30)))
+		}
+	}
+	sb.WriteString(fmt.Sprintf("\n\n%s", e.i18n.T(MsgCronListFooter)))
+	e.reply(p, msg.ReplyCtx, sb.String())
+}
+
+func (e *Engine) cmdCronDel(p Platform, msg *Message, args []string) {
+	if len(args) == 0 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCronDelUsage))
+		return
+	}
+	id := args[0]
+	if e.cronScheduler.RemoveJob(id) {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronDeleted), id))
+	} else {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronNotFound), id))
+	}
+}
+
+func (e *Engine) cmdCronToggle(p Platform, msg *Message, args []string, enable bool) {
+	if len(args) == 0 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCronDelUsage))
+		return
+	}
+	id := args[0]
+	var err error
+	if enable {
+		err = e.cronScheduler.EnableJob(id)
+	} else {
+		err = e.cronScheduler.DisableJob(id)
+	}
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
+		return
+	}
+	if enable {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronEnabled), id))
+	} else {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronDisabled), id))
 	}
 }
 

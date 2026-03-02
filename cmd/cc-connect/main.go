@@ -52,6 +52,9 @@ func main() {
 		case "send":
 			runSend(os.Args[2:])
 			return
+		case "cron":
+			runCron(os.Args[2:])
+			return
 		}
 	}
 
@@ -201,10 +204,30 @@ func main() {
 		engines = append(engines, engine)
 	}
 
+	// Start cron scheduler
+	cronStore, err := core.NewCronStore(cfg.DataDir)
+	if err != nil {
+		slog.Warn("cron store unavailable", "error", err)
+	}
+	var cronSched *core.CronScheduler
+	if cronStore != nil {
+		cronSched = core.NewCronScheduler(cronStore)
+		for i, e := range engines {
+			cronSched.RegisterEngine(cfg.Projects[i].Name, e)
+			e.SetCronScheduler(cronSched)
+		}
+	}
+
 	for _, e := range engines {
 		if err := e.Start(); err != nil {
 			slog.Error("failed to start engine", "error", err)
 			os.Exit(1)
+		}
+	}
+
+	if cronSched != nil {
+		if err := cronSched.Start(); err != nil {
+			slog.Error("cron scheduler start failed", "error", err)
 		}
 	}
 
@@ -216,6 +239,9 @@ func main() {
 		for i, e := range engines {
 			apiSrv.RegisterEngine(cfg.Projects[i].Name, e)
 		}
+		if cronSched != nil {
+			apiSrv.SetCronScheduler(cronSched)
+		}
 		apiSrv.Start()
 	}
 
@@ -226,6 +252,9 @@ func main() {
 	<-sigCh
 
 	slog.Info("shutting down...")
+	if cronSched != nil {
+		cronSched.Stop()
+	}
 	if apiSrv != nil {
 		apiSrv.Stop()
 	}

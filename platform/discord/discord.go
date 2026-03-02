@@ -174,6 +174,15 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	return nil
 }
 
+func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
+	// discord:{channelID}:{userID}
+	parts := strings.SplitN(sessionKey, ":", 3)
+	if len(parts) < 2 || parts[0] != "discord" {
+		return nil, fmt.Errorf("discord: invalid session key %q", sessionKey)
+	}
+	return replyContext{channelID: parts[1]}, nil
+}
+
 func (p *Platform) Stop() error {
 	if p.session != nil {
 		return p.session.Close()
