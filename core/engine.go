@@ -14,8 +14,20 @@ import (
 
 const maxPlatformMessageLen = 4000
 
+const (
+	defaultThinkingMaxLen = 300
+	defaultToolMaxLen     = 500
+)
+
 // VersionInfo is set by main at startup so that /version works.
 var VersionInfo string
+
+// DisplayCfg controls truncation of intermediate messages.
+// A value of -1 means "use default", 0 means "no truncation".
+type DisplayCfg struct {
+	ThinkingMaxLen int // max runes for thinking preview; 0 = no truncation
+	ToolMaxLen     int // max runes for tool use preview; 0 = no truncation
+}
 
 // Engine routes messages between platforms and the agent for a single project.
 type Engine struct {
@@ -27,6 +39,7 @@ type Engine struct {
 	cancel    context.CancelFunc
 	i18n      *I18n
 	speech    SpeechCfg
+	display   DisplayCfg
 
 	providerSaveFunc       func(providerName string) error
 	providerAddSaveFunc    func(p ProviderConfig) error
@@ -69,6 +82,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		ctx:               ctx,
 		cancel:            cancel,
 		i18n:              NewI18n(lang),
+		display:           DisplayCfg{ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen},
 		interactiveStates: make(map[string]*interactiveState),
 	}
 }
@@ -76,6 +90,11 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 // SetSpeechConfig configures the speech-to-text subsystem.
 func (e *Engine) SetSpeechConfig(cfg SpeechCfg) {
 	e.speech = cfg
+}
+
+// SetDisplayConfig overrides the default truncation settings.
+func (e *Engine) SetDisplayConfig(cfg DisplayCfg) {
+	e.display = cfg
 }
 
 func (e *Engine) SetLanguageSaveFunc(fn func(Language) error) {
@@ -485,14 +504,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		switch event.Type {
 		case EventThinking:
 			if !state.quiet && event.Content != "" {
-				preview := truncate(event.Content, 300)
+				preview := truncateIf(event.Content, e.display.ThinkingMaxLen)
 				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgThinking), preview))
 			}
 
 		case EventToolUse:
 			toolCount++
 			if !state.quiet {
-				inputPreview := truncate(event.ToolInput, 500)
+				inputPreview := truncateIf(event.ToolInput, e.display.ToolMaxLen)
 				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgTool), toolCount, event.ToolName, inputPreview))
 			}
 
@@ -524,7 +543,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				"tool", event.ToolName,
 			)
 
-			prompt := fmt.Sprintf(e.i18n.T(MsgPermissionPrompt), event.ToolName, truncate(event.ToolInput, 800))
+			permLimit := e.display.ToolMaxLen
+			if permLimit > 0 {
+				permLimit = permLimit * 8 / 5 // permission prompts get ~1.6x more room
+			}
+			prompt := fmt.Sprintf(e.i18n.T(MsgPermissionPrompt), event.ToolName, truncateIf(event.ToolInput, permLimit))
 			e.send(p, replyCtx, prompt)
 
 			pending := &pendingPermission{
@@ -1341,15 +1364,15 @@ func (e *Engine) cmdCronToggle(p Platform, msg *Message, args []string, enable b
 	}
 }
 
-func truncate(s string, maxLen int) string {
+// truncateIf truncates s to maxLen runes. 0 means no truncation.
+func truncateIf(s string, maxLen int) string {
+	if maxLen <= 0 {
+		return s
+	}
 	if utf8.RuneCountInString(s) <= maxLen {
 		return s
 	}
-	runes := []rune(s)
-	if len(runes) > maxLen {
-		return string(runes[:maxLen]) + "..."
-	}
-	return s
+	return string([]rune(s)[:maxLen]) + "..."
 }
 
 func splitMessage(text string, maxLen int) []string {

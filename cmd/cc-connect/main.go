@@ -145,6 +145,21 @@ func main() {
 
 		engine := core.NewEngine(proj.Name, agent, platforms, sessionFile, lang)
 
+		// Wire display truncation settings
+		{
+			dcfg := core.DisplayCfg{
+				ThinkingMaxLen: 300,
+				ToolMaxLen:     500,
+			}
+			if cfg.Display.ThinkingMaxLen != nil {
+				dcfg.ThinkingMaxLen = *cfg.Display.ThinkingMaxLen
+			}
+			if cfg.Display.ToolMaxLen != nil {
+				dcfg.ToolMaxLen = *cfg.Display.ToolMaxLen
+			}
+			engine.SetDisplayConfig(dcfg)
+		}
+
 		// Wire speech-to-text if enabled
 		if cfg.Speech.Enabled {
 			speechCfg := core.SpeechCfg{

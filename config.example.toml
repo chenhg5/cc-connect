@@ -28,6 +28,19 @@
 level = "info" # debug, info, warn, error
 
 # =============================================================================
+# Display Settings / 显示设置
+# =============================================================================
+# Controls how intermediate messages (thinking, tool use) are shown in chat.
+# 控制中间消息（思考过程、工具调用）在聊天中的显示方式。
+#
+# Set to 0 to disable truncation (show full content).
+# 设为 0 表示不截断（显示完整内容）。
+
+# [display]
+# thinking_max_len = 300   # Max chars for thinking messages (default: 300) / 思考消息最大字符数（默认 300）
+# tool_max_len = 500       # Max chars for tool use messages (default: 500) / 工具调用消息最大字符数（默认 500）
+
+# =============================================================================
 # Speech-to-Text (Voice Messages) / 语音转文字（语音消息）
 # =============================================================================
 # Enable to transcribe voice messages to text before sending to agents.

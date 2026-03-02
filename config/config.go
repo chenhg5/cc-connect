@@ -17,6 +17,13 @@ type Config struct {
 	Log      LogConfig       `toml:"log"`
 	Language string          `toml:"language"` // "en" or "zh", default is "en"
 	Speech   SpeechConfig    `toml:"speech"`
+	Display  DisplayConfig   `toml:"display"`
+}
+
+// DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
+type DisplayConfig struct {
+	ThinkingMaxLen  *int `toml:"thinking_max_len"`    // max chars for thinking messages; 0 = no truncation; default 300
+	ToolMaxLen      *int `toml:"tool_max_len"`        // max chars for tool use messages; 0 = no truncation; default 500
 }
 
 // SpeechConfig configures speech-to-text for voice messages.
