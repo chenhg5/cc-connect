@@ -64,6 +64,8 @@ func main() {
 		return
 	}
 
+	core.VersionInfo = fmt.Sprintf("cc-connect %s\ncommit: %s\nbuilt: %s", version, commit, buildTime)
+
 	configPath := resolveConfigPath(*configFlag)
 
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {

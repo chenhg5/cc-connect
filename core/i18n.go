@@ -257,6 +257,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|auto]\n  View/switch language\n\n" +
 			"/quiet\n  Toggle thinking/tool progress\n\n" +
 			"/stop\n  Stop current execution\n\n" +
+			"/version\n  Show cc-connect version\n\n" +
 			"/help\n  Show this help\n\n" +
 			"Permission modes: default / edit / plan / yolo",
 		LangChinese: "📖 可用命令\n\n" +
@@ -271,6 +272,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|auto]\n  查看/切换语言\n\n" +
 			"/quiet\n  开关思考和工具进度消息\n\n" +
 			"/stop\n  停止当前执行\n\n" +
+			"/version\n  查看 cc-connect 版本\n\n" +
 			"/help\n  显示此帮助\n\n" +
 			"权限模式：default / edit / plan / yolo",
 	},

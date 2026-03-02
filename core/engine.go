@@ -13,6 +13,9 @@ import (
 
 const maxPlatformMessageLen = 4000
 
+// VersionInfo is set by main at startup so that /version works.
+var VersionInfo string
+
 // Engine routes messages between platforms and the agent for a single project.
 type Engine struct {
 	name      string
@@ -555,6 +558,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) {
 		e.cmdStop(p, msg)
 	case "/help":
 		e.cmdHelp(p, msg)
+	case "/version":
+		e.reply(p, msg.ReplyCtx, VersionInfo)
 	default:
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf("Unknown command: %s\nType /help for available commands.", cmd))
 	}
