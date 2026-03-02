@@ -508,7 +508,7 @@ cc-connect/
 
 ## 微信用户群
 
-!(用户群)[https://quick.go-admin.cn/ai/article/cc-connect_wechat_group.JPG]
+![用户群](https://quick.go-admin.cn/ai/article/cc-connect_wechat_group.JPG)
 
 ## License
 
