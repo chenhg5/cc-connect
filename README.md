@@ -510,6 +510,22 @@ For short single-line messages:
   cc-connect send -m "short message"
 ```
 
+## Daemon Mode
+
+Run cc-connect as a background service managed by the OS init system (Linux systemd user service, macOS launchd LaunchAgent).
+
+```bash
+cc-connect daemon install --config ~/.cc-connect/config.toml   # install service
+cc-connect daemon start
+cc-connect daemon stop
+cc-connect daemon restart
+cc-connect daemon status
+cc-connect daemon logs [-f] [-n N] [--log-file PATH]
+cc-connect daemon uninstall
+```
+
+**Install flags:** `--log-file PATH`, `--log-max-size N` (MB), `--work-dir DIR`, `--force`. Logs auto-rotate at the size limit and keep one backup.
+
 ## Session Management
 
 Each user gets an independent session with full conversation context. Manage sessions via slash commands:

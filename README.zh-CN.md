@@ -514,6 +514,22 @@ For short single-line messages:
   cc-connect send -m "short message"
 ```
 
+## 守护进程模式
+
+将 cc-connect 作为后台服务运行，由系统 init 管理（Linux systemd 用户服务，macOS launchd LaunchAgent）。
+
+```bash
+cc-connect daemon install --config ~/.cc-connect/config.toml   # 安装服务
+cc-connect daemon start
+cc-connect daemon stop
+cc-connect daemon restart
+cc-connect daemon status
+cc-connect daemon logs [-f] [-n N] [--log-file PATH]
+cc-connect daemon uninstall
+```
+
+**install 参数：** `--log-file PATH`、`--log-max-size N`（MB）、`--work-dir DIR`、`--force`。日志在达到大小限制时自动轮转，保留 1 个备份。
+
 ## 会话管理
 
 每个用户拥有独立的会话和完整的对话上下文。通过斜杠命令管理会话：

@@ -579,6 +579,44 @@ make build
 
 After upgrading, restart the running cc-connect process.
 
+## Step 8: Run as Background Service (Optional)
+
+You can run cc-connect as a daemon managed by the OS init system (Linux systemd user service, macOS launchd LaunchAgent).
+
+### Install the daemon
+
+```bash
+cc-connect daemon install --config ~/.cc-connect/config.toml
+```
+
+Optional flags: `--log-file PATH`, `--log-max-size N` (MB), `--work-dir DIR`, `--force` (overwrite existing unit).
+
+### Control the service
+
+```bash
+cc-connect daemon start
+cc-connect daemon stop
+cc-connect daemon restart
+cc-connect daemon status
+```
+
+### View logs
+
+```bash
+cc-connect daemon logs           # tail current log
+cc-connect daemon logs -f         # follow (like tail -f)
+cc-connect daemon logs -n 100     # last 100 lines
+cc-connect daemon logs --log-file /path/to/log  # custom log file
+```
+
+Logs auto-rotate at the configured max size and keep one backup.
+
+### Uninstall
+
+```bash
+cc-connect daemon uninstall
+```
+
 ## Additional Features
 
 The following additional features are available:

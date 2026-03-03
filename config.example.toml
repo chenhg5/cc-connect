@@ -66,6 +66,17 @@ level = "info" # debug, info, warn, error
 # model = "whisper-large-v3-turbo"
 
 # =============================================================================
+# Daemon Mode / 守护进程模式
+# =============================================================================
+# Run cc-connect as a background service (systemd user / launchd LaunchAgent).
+# 将 cc-connect 作为后台服务运行（systemd 用户服务 / launchd LaunchAgent）。
+#
+# CLI: cc-connect daemon install|uninstall|start|stop|restart|status|logs
+# Install: --log-file PATH, --log-max-size N (MB), --work-dir DIR, --force
+# Logs: -f/--follow, -n N, --log-file PATH
+# 配置均通过 CLI 参数，无需在此文件中设置。
+
+# =============================================================================
 # Project 1 / 项目 1
 # =============================================================================
 
