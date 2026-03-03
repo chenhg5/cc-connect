@@ -20,15 +20,15 @@ cc-connect bridges AI coding assistants running on your dev machine to the messa
               └────────────┘
               ┌─────┼─────┐
               ▼     ▼     ▼
-         Claude  Gemini  Codex  ...5 agents
-          Code    CLI
+         Claude  Gemini  Codex  ...6 agents
+          Code    CLI   OpenCode
 ```
 
 ### Why cc-connect?
 
 > Time to uninstall OpenClaw — cc-connect gives you access to the most powerful coding agents available, not just one.
 
-- **5 AI Agents** — Claude Code, Codex, Cursor Agent, Qoder CLI, Gemini CLI. Use whichever fits your workflow, or all of them at once.
+- **6 AI Agents** — Claude Code, Codex, Cursor Agent, Qoder CLI, Gemini CLI, OpenCode. Use whichever fits your workflow, or all of them at once.
 - **8 Chat Platforms** — Feishu, DingTalk, Slack, Telegram, Discord, WeChat Work, LINE, QQ. Most need zero public IP.
 - **Full Control from Chat** — Switch models (`/model`), change permission modes (`/mode`), manage sessions, all via slash commands.
 - **Agent Memory** — Read and write agent instruction files (`/memory`) without touching the terminal.
@@ -49,7 +49,8 @@ cc-connect bridges AI coding assistants running on your dev machine to the messa
 | Agent | Cursor Agent | ✅ Supported |
 | Agent | Gemini CLI (Google) | ✅ Supported |
 | Agent | Qoder CLI | ✅ Supported |
-| Agent | Crush / OpenCode | 🔜 Planned |
+| Agent | OpenCode | ✅ Supported |
+| Agent | Crush | 🔜 Planned |
 | Agent | Goose (Block) | 🔜 Planned |
 | Agent | Aider | 🔜 Planned |
 | Agent | Kimi Code (Moonshot) | 🔭 Exploring |
@@ -81,7 +82,8 @@ cc-connect bridges AI coding assistants running on your dev machine to the messa
 - **Codex**: [Codex CLI](https://github.com/openai/codex) installed (`npm install -g @openai/codex`), OR
 - **Cursor Agent**: [Cursor Agent CLI](https://docs.cursor.com/agent) installed (`agent --version` to verify), OR
 - **Gemini CLI**: [Gemini CLI](https://github.com/google-gemini/gemini-cli) installed (`npm install -g @google/gemini-cli`), OR
-- **Qoder CLI**: [Qoder CLI](https://qoder.com) installed (`curl -fsSL https://qoder.com/install | bash`)
+- **Qoder CLI**: [Qoder CLI](https://qoder.com) installed (`curl -fsSL https://qoder.com/install | bash`), OR
+- **OpenCode**: [OpenCode](https://github.com/opencode-ai/opencode) installed (`opencode --version` to verify)
 
 ### Install & Configure via AI Agent (Recommended)
 
@@ -274,6 +276,13 @@ All agents support permission modes switchable at runtime via `/mode`.
 | **Default** | `default` | Standard permissions; prompt for approval. |
 | **YOLO** | `yolo` | Skip all permission checks, auto-approve. |
 
+**OpenCode** modes:
+
+| Mode | Config Value | Behavior |
+|------|-------------|----------|
+| **Default** | `default` | Standard mode. |
+| **YOLO** | `yolo` | Auto-approve all tool calls. |
+
 ```toml
 # Claude Code
 [projects.agent.options]
@@ -294,6 +303,10 @@ mode = "default"
 mode = "default"
 
 # Qoder CLI
+[projects.agent.options]
+mode = "default"
+
+# OpenCode
 [projects.agent.options]
 mode = "default"
 ```
@@ -375,6 +388,7 @@ Adding, removing, and switching providers all persist to `config.toml` automatic
 | Claude Code | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
 | Codex | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
 | Gemini CLI | `GEMINI_API_KEY` | — (use `env` map) |
+| OpenCode | `ANTHROPIC_API_KEY` | — (use `env` map) |
 
 The `env` map in provider config lets you set arbitrary environment variables for any setup (Bedrock, Vertex, Azure, custom proxies, etc.).
 
@@ -473,6 +487,7 @@ Claude Code will automatically translate your request into a `cc-connect cron ad
 | Cursor | `.cursorrules` |
 | Qoder CLI | `AGENTS.md` (project), `~/.qoder/AGENTS.md` (global) |
 | Gemini CLI | `GEMINI.md` |
+| OpenCode | `OPENCODE.md` |
 
 **Content to add:**
 
@@ -649,7 +664,8 @@ cc-connect/
 │   ├── codex/               # OpenAI Codex CLI (exec --json)
 │   ├── cursor/              # Cursor Agent CLI (--print stream-json)
 │   ├── qoder/               # Qoder CLI (-p -f stream-json)
-│   └── gemini/              # Gemini CLI (-p --output-format stream-json)
+│   ├── gemini/              # Gemini CLI (-p --output-format stream-json)
+│   └── opencode/            # OpenCode (run --format json)
 ├── docs/                    # Platform setup guides
 ├── config.example.toml      # Config template
 ├── INSTALL.md               # AI-agent-friendly install guide
