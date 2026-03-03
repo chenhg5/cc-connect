@@ -6,8 +6,10 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 
@@ -24,11 +26,12 @@ type replyContext struct {
 }
 
 type Platform struct {
-	token     string
-	allowFrom string
-	bot       *tgbotapi.BotAPI
-	handler   core.MessageHandler
-	cancel    context.CancelFunc
+	token      string
+	allowFrom  string
+	bot        *tgbotapi.BotAPI
+	httpClient *http.Client
+	handler    core.MessageHandler
+	cancel     context.CancelFunc
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -37,7 +40,24 @@ func New(opts map[string]any) (core.Platform, error) {
 		return nil, fmt.Errorf("telegram: token is required")
 	}
 	allowFrom, _ := opts["allow_from"].(string)
-	return &Platform{token: token, allowFrom: allowFrom}, nil
+
+	// Build HTTP client with optional proxy support
+	httpClient := &http.Client{Timeout: 60 * time.Second}
+	if proxyURL, _ := opts["proxy"].(string); proxyURL != "" {
+		u, err := url.Parse(proxyURL)
+		if err != nil {
+			return nil, fmt.Errorf("telegram: invalid proxy URL %q: %w", proxyURL, err)
+		}
+		proxyUser, _ := opts["proxy_username"].(string)
+		proxyPass, _ := opts["proxy_password"].(string)
+		if proxyUser != "" {
+			u.User = url.UserPassword(proxyUser, proxyPass)
+		}
+		httpClient.Transport = &http.Transport{Proxy: http.ProxyURL(u)}
+		slog.Info("telegram: using proxy", "proxy", u.Host, "auth", proxyUser != "")
+	}
+
+	return &Platform{token: token, allowFrom: allowFrom, httpClient: httpClient}, nil
 }
 
 func (p *Platform) Name() string { return "telegram" }
@@ -45,7 +65,7 @@ func (p *Platform) Name() string { return "telegram" }
 func (p *Platform) Start(handler core.MessageHandler) error {
 	p.handler = handler
 
-	bot, err := tgbotapi.NewBotAPI(p.token)
+	bot, err := tgbotapi.NewBotAPIWithClient(p.token, tgbotapi.APIEndpoint, p.httpClient)
 	if err != nil {
 		return fmt.Errorf("telegram: auth failed: %w", err)
 	}
@@ -344,7 +364,7 @@ func (p *Platform) downloadFile(fileID string) ([]byte, error) {
 	}
 	link := file.Link(p.bot.Token)
 
-	resp, err := http.Get(link)
+	resp, err := p.httpClient.Get(link)
 	if err != nil {
 		return nil, fmt.Errorf("download: %w", err)
 	}
