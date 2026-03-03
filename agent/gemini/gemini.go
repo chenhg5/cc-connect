@@ -208,6 +208,20 @@ func (a *Agent) PermissionModes() []core.PermissionModeInfo {
 	}
 }
 
+// ── CommandProvider implementation ────────────────────────────
+
+func (a *Agent) CommandDirs() []string {
+	absDir, err := filepath.Abs(a.workDir)
+	if err != nil {
+		absDir = a.workDir
+	}
+	dirs := []string{filepath.Join(absDir, ".gemini", "commands")}
+	if home, err := os.UserHomeDir(); err == nil {
+		dirs = append(dirs, filepath.Join(home, ".gemini", "commands"))
+	}
+	return dirs
+}
+
 // ── ContextCompressor implementation ──────────────────────────
 
 func (a *Agent) CompressCommand() string { return "/compress" }

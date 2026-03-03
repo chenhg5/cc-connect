@@ -172,6 +172,13 @@ type ContextCompressor interface {
 	CompressCommand() string
 }
 
+// CommandProvider is an optional interface for agents that expose custom slash
+// commands via local files (e.g. .claude/commands/*.md). The engine scans the
+// returned directories for *.md files and registers them as slash commands.
+type CommandProvider interface {
+	CommandDirs() []string
+}
+
 // ModeSwitcher is an optional interface for agents that support runtime permission mode switching.
 type ModeSwitcher interface {
 	SetMode(mode string)

@@ -14,6 +14,7 @@ var ConfigPath string
 type Config struct {
 	DataDir  string          `toml:"data_dir"` // session store directory, default ~/.cc-connect
 	Projects []ProjectConfig `toml:"projects"`
+	Commands []CommandConfig  `toml:"commands"` // global custom slash commands
 	Log      LogConfig       `toml:"log"`
 	Language string          `toml:"language"` // "en" or "zh", default is "en"
 	Speech   SpeechConfig    `toml:"speech"`
@@ -66,6 +67,13 @@ type ProviderConfig struct {
 type PlatformConfig struct {
 	Type    string         `toml:"type"`
 	Options map[string]any `toml:"options"`
+}
+
+// CommandConfig defines a user-customizable slash command that expands a prompt template.
+type CommandConfig struct {
+	Name        string `toml:"name"`
+	Description string `toml:"description"`
+	Prompt      string `toml:"prompt"`
 }
 
 type LogConfig struct {
@@ -259,6 +267,57 @@ func ListProjects() ([]string, error) {
 		names = append(names, p.Name)
 	}
 	return names, nil
+}
+
+// AddCommand adds a global custom command and persists to config.
+func AddCommand(cmd CommandConfig) error {
+	if ConfigPath == "" {
+		return fmt.Errorf("config path not set")
+	}
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+	for _, c := range cfg.Commands {
+		if c.Name == cmd.Name {
+			return fmt.Errorf("command %q already exists", cmd.Name)
+		}
+	}
+	cfg.Commands = append(cfg.Commands, cmd)
+	return saveConfig(cfg)
+}
+
+// RemoveCommand removes a global custom command and persists to config.
+func RemoveCommand(name string) error {
+	if ConfigPath == "" {
+		return fmt.Errorf("config path not set")
+	}
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+	found := false
+	var remaining []CommandConfig
+	for _, c := range cfg.Commands {
+		if c.Name == name {
+			found = true
+		} else {
+			remaining = append(remaining, c)
+		}
+	}
+	if !found {
+		return fmt.Errorf("command %q not found", name)
+	}
+	cfg.Commands = remaining
+	return saveConfig(cfg)
 }
 
 // GetProjectProviders returns providers for a given project.

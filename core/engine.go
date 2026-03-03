@@ -48,7 +48,12 @@ type Engine struct {
 	providerAddSaveFunc    func(p ProviderConfig) error
 	providerRemoveSaveFunc func(name string) error
 
+	commandSaveAddFunc func(name, description, prompt string) error
+	commandSaveDelFunc func(name string) error
+
 	cronScheduler *CronScheduler
+
+	commands *CommandRegistry
 
 	// Interactive agent session management
 	interactiveMu     sync.Mutex
@@ -77,7 +82,7 @@ type pendingPermission struct {
 
 func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath string, lang Language) *Engine {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Engine{
+	e := &Engine{
 		name:              name,
 		agent:             ag,
 		platforms:         platforms,
@@ -86,9 +91,16 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		cancel:            cancel,
 		i18n:              NewI18n(lang),
 		display:           DisplayCfg{ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen},
+		commands:          NewCommandRegistry(),
 		interactiveStates: make(map[string]*interactiveState),
 		startedAt:         time.Now(),
 	}
+
+	if cp, ok := ag.(CommandProvider); ok {
+		e.commands.SetAgentDirs(cp.CommandDirs())
+	}
+
+	return e
 }
 
 // SetSpeechConfig configures the speech-to-text subsystem.
@@ -119,6 +131,24 @@ func (e *Engine) SetProviderRemoveSaveFunc(fn func(string) error) {
 
 func (e *Engine) SetCronScheduler(cs *CronScheduler) {
 	e.cronScheduler = cs
+}
+
+func (e *Engine) SetCommandSaveAddFunc(fn func(name, description, prompt string) error) {
+	e.commandSaveAddFunc = fn
+}
+
+func (e *Engine) SetCommandSaveDelFunc(fn func(name string) error) {
+	e.commandSaveDelFunc = fn
+}
+
+// AddCommand registers a custom slash command.
+func (e *Engine) AddCommand(name, description, prompt, source string) {
+	e.commands.Add(name, description, prompt, source)
+}
+
+// RemoveCommand removes a custom command by name. Returns false if not found.
+func (e *Engine) RemoveCommand(name string) bool {
+	return e.commands.Remove(name)
 }
 
 func (e *Engine) ProjectName() string {
@@ -681,7 +711,14 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) {
 		e.cmdHelp(p, msg)
 	case "/version":
 		e.reply(p, msg.ReplyCtx, VersionInfo)
+	case "/commands", "/command", "/cmd":
+		e.cmdCommands(p, msg, args)
 	default:
+		cmdName := strings.TrimPrefix(cmd, "/")
+		if custom, ok := e.commands.Resolve(cmdName); ok {
+			e.executeCustomCommand(p, msg, custom, args)
+			return
+		}
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf("Unknown command: %s\nType /help for available commands.", cmd))
 	}
 }
@@ -1733,6 +1770,120 @@ func (e *Engine) cmdCronToggle(p Platform, msg *Message, args []string, enable b
 	} else {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronDisabled), id))
 	}
+}
+
+// ──────────────────────────────────────────────────────────────
+// Custom command execution & management
+// ──────────────────────────────────────────────────────────────
+
+func (e *Engine) executeCustomCommand(p Platform, msg *Message, cmd *CustomCommand, args []string) {
+	prompt := ExpandPrompt(cmd.Prompt, args)
+
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	if !session.TryLock() {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
+		return
+	}
+
+	slog.Info("executing custom command",
+		"command", cmd.Name,
+		"source", cmd.Source,
+		"user", msg.UserName,
+	)
+
+	msg.Content = prompt
+	go e.processInteractiveMessage(p, msg, session)
+}
+
+func (e *Engine) cmdCommands(p Platform, msg *Message, args []string) {
+	if len(args) == 0 {
+		e.cmdCommandsList(p, msg)
+		return
+	}
+
+	sub := strings.ToLower(args[0])
+	switch sub {
+	case "list":
+		e.cmdCommandsList(p, msg)
+	case "add":
+		e.cmdCommandsAdd(p, msg, args[1:])
+	case "del", "delete", "rm", "remove":
+		e.cmdCommandsDel(p, msg, args[1:])
+	default:
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCommandsUsage))
+	}
+}
+
+func (e *Engine) cmdCommandsList(p Platform, msg *Message) {
+	cmds := e.commands.ListAll()
+	if len(cmds) == 0 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCommandsEmpty))
+		return
+	}
+
+	var sb strings.Builder
+	sb.WriteString(e.i18n.Tf(MsgCommandsTitle, len(cmds)))
+
+	for _, c := range cmds {
+		desc := c.Description
+		if desc == "" {
+			desc = truncateStr(c.Prompt, 50)
+		}
+		tag := ""
+		if c.Source == "agent" {
+			tag = " [agent]"
+		}
+		sb.WriteString(fmt.Sprintf("  /%s — %s%s\n", c.Name, desc, tag))
+	}
+
+	sb.WriteString("\n" + e.i18n.T(MsgCommandsHint))
+	e.reply(p, msg.ReplyCtx, sb.String())
+}
+
+func (e *Engine) cmdCommandsAdd(p Platform, msg *Message, args []string) {
+	// /commands add <name> <prompt...>
+	if len(args) < 2 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCommandsAddUsage))
+		return
+	}
+	name := strings.ToLower(args[0])
+	prompt := strings.Join(args[1:], " ")
+
+	if _, exists := e.commands.Resolve(name); exists {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandsAddExists), name, name))
+		return
+	}
+
+	e.commands.Add(name, "", prompt, "config")
+
+	if e.commandSaveAddFunc != nil {
+		if err := e.commandSaveAddFunc(name, "", prompt); err != nil {
+			slog.Error("failed to persist command", "error", err)
+		}
+	}
+
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandsAdded), name, truncateStr(prompt, 80)))
+}
+
+func (e *Engine) cmdCommandsDel(p Platform, msg *Message, args []string) {
+	if len(args) == 0 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCommandsDelUsage))
+		return
+	}
+	name := strings.ToLower(args[0])
+
+	if !e.commands.Remove(name) {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandsNotFound), name))
+		return
+	}
+
+	if e.commandSaveDelFunc != nil {
+		if err := e.commandSaveDelFunc(name); err != nil {
+			slog.Error("failed to persist command removal", "error", err)
+		}
+	}
+
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandsDeleted), name))
 }
 
 // truncateIf truncates s to maxLen runes. 0 means no truncation.

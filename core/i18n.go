@@ -222,6 +222,17 @@ const (
 	MsgPermBtnAllow    MsgKey = "perm_btn_allow"
 	MsgPermBtnDeny     MsgKey = "perm_btn_deny"
 	MsgPermBtnAllowAll MsgKey = "perm_btn_allow_all"
+
+	MsgCommandsTitle    MsgKey = "commands_title"
+	MsgCommandsEmpty    MsgKey = "commands_empty"
+	MsgCommandsHint     MsgKey = "commands_hint"
+	MsgCommandsUsage    MsgKey = "commands_usage"
+	MsgCommandsAddUsage MsgKey = "commands_add_usage"
+	MsgCommandsAdded    MsgKey = "commands_added"
+	MsgCommandsAddExists MsgKey = "commands_add_exists"
+	MsgCommandsDelUsage MsgKey = "commands_del_usage"
+	MsgCommandsDeleted  MsgKey = "commands_deleted"
+	MsgCommandsNotFound MsgKey = "commands_not_found"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -421,9 +432,11 @@ var messages = map[MsgKey]map[Language]string{
 			"/compress\n  Compress conversation context\n\n" +
 			"/stop\n  Stop current execution\n\n" +
 			"/cron [add|list|del|enable|disable]\n  Manage scheduled tasks\n\n" +
+			"/commands [add|del]\n  Manage custom slash commands\n\n" +
 			"/status\n  Show system status\n\n" +
 			"/version\n  Show cc-connect version\n\n" +
 			"/help\n  Show this help\n\n" +
+			"Custom commands: define via `/commands add` or `[[commands]]` in config.toml.\n" +
 			"Permission modes: default / edit / plan / yolo",
 		LangChinese: "📖 可用命令\n\n" +
 			"/new [名称]\n  创建新会话\n\n" +
@@ -441,9 +454,11 @@ var messages = map[MsgKey]map[Language]string{
 			"/compress\n  压缩会话上下文\n\n" +
 			"/stop\n  停止当前执行\n\n" +
 			"/cron [add|list|del|enable|disable]\n  管理定时任务\n\n" +
+			"/commands [add|del]\n  管理自定义命令\n\n" +
 			"/status\n  查看系统状态\n\n" +
 			"/version\n  查看 cc-connect 版本\n\n" +
 			"/help\n  显示此帮助\n\n" +
+			"自定义命令：通过 `/commands add` 添加，或在 config.toml 中配置 `[[commands]]`。\n" +
 			"权限模式：default / edit / plan / yolo",
 		LangTraditionalChinese: "📖 可用命令\n\n" +
 			"/new [名稱]\n  建立新會話\n\n" +
@@ -461,9 +476,11 @@ var messages = map[MsgKey]map[Language]string{
 			"/compress\n  壓縮會話上下文\n\n" +
 			"/stop\n  停止當前執行\n\n" +
 			"/cron [add|list|del|enable|disable]\n  管理定時任務\n\n" +
+			"/commands [add|del]\n  管理自訂命令\n\n" +
 			"/status\n  查看系統狀態\n\n" +
 			"/version\n  查看 cc-connect 版本\n\n" +
 			"/help\n  顯示此說明\n\n" +
+			"自訂命令：透過 `/commands add` 新增，或在 config.toml 中配置 `[[commands]]`。\n" +
 			"權限模式：default / edit / plan / yolo",
 		LangJapanese: "📖 利用可能なコマンド\n\n" +
 			"/new [名前]\n  新しいセッションを開始\n\n" +
@@ -481,9 +498,11 @@ var messages = map[MsgKey]map[Language]string{
 			"/compress\n  会話コンテキストを圧縮\n\n" +
 			"/stop\n  現在の実行を停止\n\n" +
 			"/cron [add|list|del|enable|disable]\n  スケジュールタスク管理\n\n" +
+			"/commands [add|del]\n  カスタムコマンド管理\n\n" +
 			"/status\n  システム状態を表示\n\n" +
 			"/version\n  cc-connect のバージョンを表示\n\n" +
 			"/help\n  このヘルプを表示\n\n" +
+			"カスタムコマンド: `/commands add` または config.toml の `[[commands]]` で定義。\n" +
 			"権限モード: default / edit / plan / yolo",
 		LangSpanish: "📖 Comandos disponibles\n\n" +
 			"/new [nombre]\n  Iniciar una nueva sesión\n\n" +
@@ -501,9 +520,11 @@ var messages = map[MsgKey]map[Language]string{
 			"/compress\n  Comprimir contexto de conversación\n\n" +
 			"/stop\n  Detener ejecución actual\n\n" +
 			"/cron [add|list|del|enable|disable]\n  Gestionar tareas programadas\n\n" +
+			"/commands [add|del]\n  Gestionar comandos personalizados\n\n" +
 			"/status\n  Mostrar estado del sistema\n\n" +
 			"/version\n  Mostrar versión de cc-connect\n\n" +
 			"/help\n  Mostrar esta ayuda\n\n" +
+			"Comandos personalizados: use `/commands add` o defina `[[commands]]` en config.toml.\n" +
 			"Modos de permisos: default / edit / plan / yolo",
 	},
 	MsgListTitle: {
@@ -1020,6 +1041,76 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "✅ 允許所有 (本次會話)",
 		LangJapanese:           "✅ すべて許可 (このセッション)",
 		LangSpanish:            "✅ Permitir todo (esta sesión)",
+	},
+	MsgCommandsTitle: {
+		LangEnglish:            "🔧 **Custom Commands** (%d)\n\n",
+		LangChinese:            "🔧 **自定义命令** (%d)\n\n",
+		LangTraditionalChinese: "🔧 **自訂命令** (%d)\n\n",
+		LangJapanese:           "🔧 **カスタムコマンド** (%d)\n\n",
+		LangSpanish:            "🔧 **Comandos personalizados** (%d)\n\n",
+	},
+	MsgCommandsEmpty: {
+		LangEnglish:            "No custom commands configured.\n\nUse `/commands add <name> <prompt>` or add `[[commands]]` in config.toml.",
+		LangChinese:            "未配置自定义命令。\n\n使用 `/commands add <名称> <prompt>` 添加，或在 config.toml 中配置 `[[commands]]`。",
+		LangTraditionalChinese: "未配置自訂命令。\n\n使用 `/commands add <名稱> <prompt>` 新增，或在 config.toml 中配置 `[[commands]]`。",
+		LangJapanese:           "カスタムコマンドが設定されていません。\n\n`/commands add <名前> <プロンプト>` で追加するか、config.toml に `[[commands]]` を追加してください。",
+		LangSpanish:            "No hay comandos personalizados configurados.\n\nUse `/commands add <nombre> <prompt>` o agregue `[[commands]]` en config.toml.",
+	},
+	MsgCommandsHint: {
+		LangEnglish:            "Type `/<name> [args]` to use.\n`/commands add <name> <prompt>` to add · `/commands del <name>` to remove",
+		LangChinese:            "输入 `/<名称> [参数]` 使用。\n`/commands add <名称> <prompt>` 添加 · `/commands del <名称>` 删除",
+		LangTraditionalChinese: "輸入 `/<名稱> [參數]` 使用。\n`/commands add <名稱> <prompt>` 新增 · `/commands del <名稱>` 刪除",
+		LangJapanese:           "`/<名前> [引数]` で使用。\n`/commands add <名前> <プロンプト>` で追加 · `/commands del <名前>` で削除",
+		LangSpanish:            "Escriba `/<nombre> [args]` para usar.\n`/commands add <nombre> <prompt>` para agregar · `/commands del <nombre>` para eliminar",
+	},
+	MsgCommandsUsage: {
+		LangEnglish:            "Usage:\n`/commands` — list all custom commands\n`/commands add <name> <prompt>` — add a command\n`/commands del <name>` — remove a command",
+		LangChinese:            "用法：\n`/commands` — 列出所有自定义命令\n`/commands add <名称> <prompt>` — 添加命令\n`/commands del <名称>` — 删除命令",
+		LangTraditionalChinese: "用法：\n`/commands` — 列出所有自訂命令\n`/commands add <名稱> <prompt>` — 新增命令\n`/commands del <名稱>` — 刪除命令",
+		LangJapanese:           "使い方:\n`/commands` — カスタムコマンド一覧\n`/commands add <名前> <プロンプト>` — コマンド追加\n`/commands del <名前>` — コマンド削除",
+		LangSpanish:            "Uso:\n`/commands` — listar comandos personalizados\n`/commands add <nombre> <prompt>` — agregar comando\n`/commands del <nombre>` — eliminar comando",
+	},
+	MsgCommandsAddUsage: {
+		LangEnglish:            "Usage: `/commands add <name> <prompt template>`\n\nExample: `/commands add finduser Search the database for user「{{1}}」and return details.`",
+		LangChinese:            "用法：`/commands add <名称> <prompt 模板>`\n\n示例：`/commands add finduser 在数据库中查找用户「{{1}}」，返回详细信息。`",
+		LangTraditionalChinese: "用法：`/commands add <名稱> <prompt 模板>`\n\n範例：`/commands add finduser 在資料庫中查找用戶「{{1}}」，回傳詳細資訊。`",
+		LangJapanese:           "使い方: `/commands add <名前> <プロンプトテンプレート>`\n\n例: `/commands add finduser データベースでユーザー「{{1}}」を検索して詳細を返してください。`",
+		LangSpanish:            "Uso: `/commands add <nombre> <plantilla prompt>`\n\nEjemplo: `/commands add finduser Buscar en la base de datos al usuario「{{1}}」y devolver detalles.`",
+	},
+	MsgCommandsAdded: {
+		LangEnglish:            "✅ Command `/%s` added.\nPrompt: %s",
+		LangChinese:            "✅ 命令 `/%s` 已添加。\nPrompt: %s",
+		LangTraditionalChinese: "✅ 命令 `/%s` 已新增。\nPrompt: %s",
+		LangJapanese:           "✅ コマンド `/%s` を追加しました。\nプロンプト: %s",
+		LangSpanish:            "✅ Comando `/%s` agregado.\nPrompt: %s",
+	},
+	MsgCommandsAddExists: {
+		LangEnglish:            "❌ Command `/%s` already exists. Remove it first with `/commands del %s`.",
+		LangChinese:            "❌ 命令 `/%s` 已存在。请先使用 `/commands del %s` 删除。",
+		LangTraditionalChinese: "❌ 命令 `/%s` 已存在。請先使用 `/commands del %s` 刪除。",
+		LangJapanese:           "❌ コマンド `/%s` は既に存在します。`/commands del %s` で削除してから追加してください。",
+		LangSpanish:            "❌ El comando `/%s` ya existe. Elimínelo primero con `/commands del %s`.",
+	},
+	MsgCommandsDelUsage: {
+		LangEnglish:            "Usage: `/commands del <name>`",
+		LangChinese:            "用法：`/commands del <名称>`",
+		LangTraditionalChinese: "用法：`/commands del <名稱>`",
+		LangJapanese:           "使い方: `/commands del <名前>`",
+		LangSpanish:            "Uso: `/commands del <nombre>`",
+	},
+	MsgCommandsDeleted: {
+		LangEnglish:            "✅ Command `/%s` removed.",
+		LangChinese:            "✅ 命令 `/%s` 已删除。",
+		LangTraditionalChinese: "✅ 命令 `/%s` 已刪除。",
+		LangJapanese:           "✅ コマンド `/%s` を削除しました。",
+		LangSpanish:            "✅ Comando `/%s` eliminado.",
+	},
+	MsgCommandsNotFound: {
+		LangEnglish:            "❌ Command `/%s` not found. Use `/commands` to see available commands.",
+		LangChinese:            "❌ 命令 `/%s` 未找到。使用 `/commands` 查看可用命令。",
+		LangTraditionalChinese: "❌ 命令 `/%s` 未找到。使用 `/commands` 查看可用命令。",
+		LangJapanese:           "❌ コマンド `/%s` が見つかりません。`/commands` で一覧を確認してください。",
+		LangSpanish:            "❌ Comando `/%s` no encontrado. Use `/commands` para ver los comandos disponibles.",
 	},
 }
 

@@ -77,6 +77,57 @@ level = "info" # debug, info, warn, error
 # 配置均通过 CLI 参数，无需在此文件中设置。
 
 # =============================================================================
+# Custom Skills (Slash Commands) / 自定义命令
+# =============================================================================
+# Define reusable prompt templates as global slash commands (available in all projects).
+# 定义可复用的 prompt 模板作为全局 slash 命令（所有项目通用）。
+#
+# Placeholders / 占位符:
+#   {{1}}, {{2}}        — positional argument / 位置参数
+#   {{1:default}}       — positional with default value / 带默认值的位置参数
+#   {{2*}}              — argument N and everything after / 第 N 个及之后所有参数
+#   {{2*:default}}      — same, with default / 同上，带默认值
+#   {{args}}            — all arguments / 所有参数
+#   {{args:default}}    — all arguments, with default if none / 所有参数，无参数时使用默认值
+#   (no placeholder — args appended to end / 无占位符则参数追加到末尾)
+#
+# Default values are used when the corresponding argument is not provided.
+# 当对应参数未提供时，使用默认值替代。
+#
+# Usage: /finduser 张三  →  expands prompt with "张三" and sends to agent
+# 用法: /finduser 张三   →  展开模板并发送给 Agent
+
+# [[commands]]
+# name = "finduser"
+# description = "Look up user info by name / 按姓名查找用户信息"
+# prompt = "Search the database for user「{{1}}」and return details including registration time, last login, and permissions."
+
+# [[commands]]
+# name = "review"
+# description = "Code review with focus area / 代码审查（可指定关注点）"
+# prompt = "Please review {{1}} focusing on: {{2*:code quality and potential bugs}}"
+
+# [[commands]]
+# name = "translate"
+# description = "Translate text to specified language / 翻译文本到指定语言"
+# prompt = "Translate the following text to {{1:English}}:\n{{2*}}"
+
+# [[commands]]
+# name = "daily"
+# description = "Generate daily progress report / 生成每日进度报告"
+# prompt = "Summarize today's code changes and project progress. Generate a concise daily report."
+#
+# You can also add/remove commands at runtime via chat:
+# 也可以在聊天中动态添加/删除命令：
+#   /commands add finduser Search the database for user「{{1}}」
+#   /commands del finduser
+#   /commands         — list all custom commands
+#
+# In addition, cc-connect auto-discovers .md files from the agent's commands
+# directory (e.g. .claude/commands/*.md, .gemini/commands/*.md).
+# 此外，cc-connect 还会自动发现 Agent 的 commands 目录下的 .md 文件。
+
+# =============================================================================
 # Project 1 / 项目 1
 # =============================================================================
 

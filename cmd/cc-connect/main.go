@@ -178,6 +178,19 @@ func main() {
 
 		engine := core.NewEngine(proj.Name, agent, platforms, sessionFile, lang)
 
+		// Wire global custom commands
+		for _, c := range cfg.Commands {
+			engine.AddCommand(c.Name, c.Description, c.Prompt, "config")
+		}
+
+		// Wire command persistence callbacks
+		engine.SetCommandSaveAddFunc(func(name, description, prompt string) error {
+			return config.AddCommand(config.CommandConfig{Name: name, Description: description, Prompt: prompt})
+		})
+		engine.SetCommandSaveDelFunc(func(name string) error {
+			return config.RemoveCommand(name)
+		})
+
 		// Wire display truncation settings
 		{
 			dcfg := core.DisplayCfg{
