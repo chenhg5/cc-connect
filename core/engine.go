@@ -160,6 +160,9 @@ type Engine struct {
 	// Interactive agent session management
 	interactiveMu     sync.Mutex
 	interactiveStates map[string]*interactiveState // key = sessionKey
+
+	quietMu sync.RWMutex
+	quiet   bool // when true, suppress thinking and tool progress messages globally
 }
 
 // interactiveState tracks a running interactive agent session and its permission state.
@@ -169,8 +172,7 @@ type interactiveState struct {
 	replyCtx     any
 	mu           sync.Mutex
 	pending      *pendingPermission
-	approveAll   bool // when true, auto-approve all permission requests for this session
-	quiet        bool // when true, suppress thinking and tool progress messages
+	approveAll bool // when true, auto-approve all permission requests for this session
 }
 
 // pendingPermission represents a permission request waiting for user response.
@@ -958,6 +960,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		replyCtx := state.replyCtx
 		quiet := state.quiet
 		state.mu.Unlock()
+
+		e.quietMu.RLock()
+		quiet := e.quiet
+		e.quietMu.RUnlock()
 
 		switch event.Type {
 		case EventThinking:
@@ -1955,24 +1961,10 @@ func (e *Engine) cmdMode(p Platform, msg *Message, args []string) {
 }
 
 func (e *Engine) cmdQuiet(p Platform, msg *Message) {
-	e.interactiveMu.Lock()
-	state, ok := e.interactiveStates[msg.SessionKey]
-	e.interactiveMu.Unlock()
-
-	if !ok || state == nil {
-		// No state yet, create one so the flag persists
-		state = &interactiveState{platform: p, replyCtx: msg.ReplyCtx, quiet: true}
-		e.interactiveMu.Lock()
-		e.interactiveStates[msg.SessionKey] = state
-		e.interactiveMu.Unlock()
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQuietOn))
-		return
-	}
-
-	state.mu.Lock()
-	state.quiet = !state.quiet
-	quiet := state.quiet
-	state.mu.Unlock()
+	e.quietMu.Lock()
+	e.quiet = !e.quiet
+	quiet := e.quiet
+	e.quietMu.Unlock()
 
 	if quiet {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQuietOn))

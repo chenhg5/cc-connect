@@ -25,12 +25,15 @@ func (s *stubAgentSession) CurrentSessionID() string                           {
 func (s *stubAgentSession) Alive() bool                                        { return true }
 func (s *stubAgentSession) Close() error                                       { return nil }
 
-type stubPlatformEngine struct{ n string }
+type stubPlatformEngine struct {
+	n    string
+	sent []string
+}
 
 func (p *stubPlatformEngine) Name() string                                           { return p.n }
 func (p *stubPlatformEngine) Start(MessageHandler) error                             { return nil }
-func (p *stubPlatformEngine) Reply(_ context.Context, _ any, _ string) error         { return nil }
-func (p *stubPlatformEngine) Send(_ context.Context, _ any, _ string) error          { return nil }
+func (p *stubPlatformEngine) Reply(_ context.Context, _ any, content string) error   { p.sent = append(p.sent, content); return nil }
+func (p *stubPlatformEngine) Send(_ context.Context, _ any, content string) error    { p.sent = append(p.sent, content); return nil }
 func (p *stubPlatformEngine) Stop() error                                            { return nil }
 
 func newTestEngine() *Engine {
@@ -118,5 +121,68 @@ func TestEngine_DisabledCommandsWithSlash(t *testing.T) {
 
 	if !e.disabledCmds["upgrade"] {
 		t.Error("upgrade should be disabled even when prefixed with /")
+	}
+}
+
+// --- quiet tests ---
+
+func TestQuietToggle(t *testing.T) {
+	e := newTestEngine()
+
+	// Default: quiet is off
+	if e.quiet {
+		t.Fatal("expected quiet to be false by default")
+	}
+
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	// Toggle on
+	e.cmdQuiet(p, msg)
+	e.quietMu.RLock()
+	q := e.quiet
+	e.quietMu.RUnlock()
+	if !q {
+		t.Fatal("expected quiet to be true after first toggle")
+	}
+	if len(p.sent) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(p.sent))
+	}
+
+	// Toggle off
+	e.cmdQuiet(p, msg)
+	e.quietMu.RLock()
+	q = e.quiet
+	e.quietMu.RUnlock()
+	if q {
+		t.Fatal("expected quiet to be false after second toggle")
+	}
+	if len(p.sent) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(p.sent))
+	}
+}
+
+func TestQuietPersistsAcrossSessions(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "test"}
+
+	// Enable quiet
+	e.cmdQuiet(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"})
+	e.quietMu.RLock()
+	q := e.quiet
+	e.quietMu.RUnlock()
+	if !q {
+		t.Fatal("expected quiet to be true")
+	}
+
+	// Simulate /new — cleanup interactive state, create new session
+	e.cleanupInteractiveState("test:user1")
+
+	// Quiet should still be on
+	e.quietMu.RLock()
+	q = e.quiet
+	e.quietMu.RUnlock()
+	if !q {
+		t.Fatal("expected quiet to remain true after session cleanup")
 	}
 }
