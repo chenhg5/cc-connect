@@ -37,6 +37,66 @@ var VersionInfo string
 // CurrentVersion is the semver tag (e.g. "v1.2.0-beta.1"), set by main.
 var CurrentVersion string
 
+// RestartRequest carries info needed to send a post-restart notification.
+type RestartRequest struct {
+	SessionKey string `json:"session_key"`
+	Platform   string `json:"platform"`
+}
+
+// SaveRestartNotify persists restart info so the new process can send
+// a "restart successful" message after startup.
+func SaveRestartNotify(dataDir string, req RestartRequest) error {
+	dir := filepath.Join(dataDir, "run")
+	os.MkdirAll(dir, 0o755)
+	data, _ := json.Marshal(req)
+	return os.WriteFile(filepath.Join(dir, "restart_notify"), data, 0o644)
+}
+
+// ConsumeRestartNotify reads and deletes the restart notification file.
+// Returns nil if no notification is pending.
+func ConsumeRestartNotify(dataDir string) *RestartRequest {
+	p := filepath.Join(dataDir, "run", "restart_notify")
+	data, err := os.ReadFile(p)
+	if err != nil {
+		return nil
+	}
+	os.Remove(p)
+	var req RestartRequest
+	if json.Unmarshal(data, &req) != nil {
+		return nil
+	}
+	return &req
+}
+
+// SendRestartNotification sends a "restart successful" message to the
+// platform/session that initiated the restart.
+func (e *Engine) SendRestartNotification(platformName, sessionKey string) {
+	for _, p := range e.platforms {
+		if p.Name() != platformName {
+			continue
+		}
+		rc, ok := p.(ReplyContextReconstructor)
+		if !ok {
+			slog.Debug("restart notify: platform does not support ReconstructReplyCtx", "platform", platformName)
+			return
+		}
+		rctx, err := rc.ReconstructReplyCtx(sessionKey)
+		if err != nil {
+			slog.Debug("restart notify: reconstruct failed", "error", err)
+			return
+		}
+		msg := e.i18n.T(MsgRestartSuccess)
+		if err := p.Send(e.ctx, rctx, msg); err != nil {
+			slog.Debug("restart notify: send failed", "error", err)
+		}
+		return
+	}
+}
+
+// RestartCh is signaled when /restart is invoked. main listens on it
+// to perform a graceful shutdown followed by syscall.Exec.
+var RestartCh = make(chan RestartRequest, 1)
+
 // DisplayCfg controls truncation of intermediate messages.
 // A value of -1 means "use default", 0 means "no truncation".
 type DisplayCfg struct {
@@ -787,6 +847,7 @@ var builtinCommands = []struct {
 	{[]string{"config"}, "config"},
 	{[]string{"doctor"}, "doctor"},
 	{[]string{"upgrade", "update"}, "upgrade"},
+	{[]string{"restart"}, "restart"},
 }
 
 // matchPrefix finds a unique command matching the given prefix.
@@ -895,6 +956,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdDoctor(p, msg)
 	case "upgrade":
 		e.cmdUpgrade(p, msg, args)
+	case "restart":
+		e.cmdRestart(p, msg)
 	default:
 		if custom, ok := e.commands.Resolve(cmd); ok {
 			e.executeCustomCommand(p, msg, custom, args)
@@ -2383,6 +2446,17 @@ func (e *Engine) cmdUpgradeConfirm(p Platform, msg *Message) {
 	}
 
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgUpgradeSuccess), release.TagName))
+}
+
+func (e *Engine) cmdRestart(p Platform, msg *Message) {
+	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgRestarting))
+	select {
+	case RestartCh <- RestartRequest{
+		SessionKey: msg.SessionKey,
+		Platform:   p.Name(),
+	}:
+	default:
+	}
 }
 
 // truncateIf truncates s to maxLen runes. 0 means no truncation.

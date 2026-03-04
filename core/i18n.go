@@ -251,6 +251,9 @@ const (
 	MsgDoctorTitle   MsgKey = "doctor_title"
 	MsgDoctorSummary MsgKey = "doctor_summary"
 
+	MsgRestarting      MsgKey = "restarting"
+	MsgRestartSuccess  MsgKey = "restart_success"
+
 	MsgUpgradeChecking    MsgKey = "upgrade_checking"
 	MsgUpgradeUpToDate    MsgKey = "upgrade_up_to_date"
 	MsgUpgradeAvailable   MsgKey = "upgrade_available"
@@ -468,6 +471,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/config [get|set] [key] [value]\n  View/update runtime configuration\n\n" +
 			"/doctor\n  Run system diagnostics\n\n" +
 			"/upgrade\n  Check for updates and self-update\n\n" +
+			"/restart\n  Restart cc-connect service\n\n" +
 			"/status\n  Show system status\n\n" +
 			"/version\n  Show cc-connect version\n\n" +
 			"/help\n  Show this help\n\n" +
@@ -496,6 +500,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/config [get|set] [key] [value]\n  查看/修改运行时配置\n\n" +
 			"/doctor\n  运行系统诊断\n\n" +
 			"/upgrade\n  检查更新并自动升级\n\n" +
+			"/restart\n  重启 cc-connect 服务\n\n" +
 			"/status\n  查看系统状态\n\n" +
 			"/version\n  查看 cc-connect 版本\n\n" +
 			"/help\n  显示此帮助\n\n" +
@@ -524,6 +529,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/config [get|set] [key] [value]\n  查看/修改執行階段配置\n\n" +
 			"/doctor\n  執行系統診斷\n\n" +
 			"/upgrade\n  檢查更新並自動升級\n\n" +
+			"/restart\n  重啟 cc-connect 服務\n\n" +
 			"/status\n  查看系統狀態\n\n" +
 			"/version\n  查看 cc-connect 版本\n\n" +
 			"/help\n  顯示此說明\n\n" +
@@ -552,6 +558,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/config [get|set] [key] [value]\n  ランタイム設定の表示/変更\n\n" +
 			"/doctor\n  システム診断を実行\n\n" +
 			"/upgrade\n  アップデートを確認して自動更新\n\n" +
+			"/restart\n  cc-connect サービスを再起動\n\n" +
 			"/status\n  システム状態を表示\n\n" +
 			"/version\n  cc-connect のバージョンを表示\n\n" +
 			"/help\n  このヘルプを表示\n\n" +
@@ -580,6 +587,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/config [get|set] [key] [value]\n  Ver/actualizar configuración en tiempo de ejecución\n\n" +
 			"/doctor\n  Ejecutar diagnósticos del sistema\n\n" +
 			"/upgrade\n  Buscar actualizaciones y auto-actualizar\n\n" +
+			"/restart\n  Reiniciar el servicio cc-connect\n\n" +
 			"/status\n  Mostrar estado del sistema\n\n" +
 			"/version\n  Mostrar versión de cc-connect\n\n" +
 			"/help\n  Mostrar esta ayuda\n\n" +
@@ -1284,6 +1292,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "\n✅ %d 項通過  ⚠️ %d 項警告  ❌ %d 項失敗",
 		LangJapanese:           "\n✅ %d 合格  ⚠️ %d 警告  ❌ %d 失敗",
 		LangSpanish:            "\n✅ %d aprobados  ⚠️ %d advertencias  ❌ %d fallidos",
+	},
+	MsgRestarting: {
+		LangEnglish:            "🔄 Restarting cc-connect...",
+		LangChinese:            "🔄 正在重启 cc-connect...",
+		LangTraditionalChinese: "🔄 正在重啟 cc-connect...",
+		LangJapanese:           "🔄 cc-connect を再起動中...",
+		LangSpanish:            "🔄 Reiniciando cc-connect...",
+	},
+	MsgRestartSuccess: {
+		LangEnglish:            "✅ cc-connect restarted successfully.",
+		LangChinese:            "✅ cc-connect 重启成功。",
+		LangTraditionalChinese: "✅ cc-connect 重啟成功。",
+		LangJapanese:           "✅ cc-connect の再起動が完了しました。",
+		LangSpanish:            "✅ cc-connect se reinició correctamente.",
 	},
 	MsgUpgradeChecking: {
 		LangEnglish:            "🔍 Checking for updates...",

@@ -314,9 +314,24 @@ func main() {
 
 	slog.Info("cc-connect is running", "projects", len(engines))
 
+	// After startup, check if we were restarted and send success notification
+	if notify := core.ConsumeRestartNotify(cfg.DataDir); notify != nil {
+		slog.Info("post-restart: sending success notification", "platform", notify.Platform, "session", notify.SessionKey)
+		for _, e := range engines {
+			e.SendRestartNotification(notify.Platform, notify.SessionKey)
+		}
+	}
+
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
+
+	var restartReq *core.RestartRequest
+	select {
+	case <-sigCh:
+	case req := <-core.RestartCh:
+		restartReq = &req
+		slog.Info("restart requested via /restart command", "session", req.SessionKey, "platform", req.Platform)
+	}
 
 	slog.Info("shutting down...")
 	if cronSched != nil {
@@ -333,6 +348,23 @@ func main() {
 	if logCloser != nil {
 		logCloser.Close()
 	}
+
+	if restartReq != nil {
+		if err := core.SaveRestartNotify(cfg.DataDir, *restartReq); err != nil {
+			slog.Error("restart: save notify failed", "error", err)
+		}
+		execPath, err := os.Executable()
+		if err != nil {
+			slog.Error("restart: cannot determine executable path", "error", err)
+			os.Exit(1)
+		}
+		slog.Info("restarting...", "path", execPath, "args", os.Args)
+		if err := syscall.Exec(execPath, os.Args, os.Environ()); err != nil {
+			slog.Error("restart: exec failed", "error", err)
+			os.Exit(1)
+		}
+	}
+
 	slog.Info("bye")
 }
 
