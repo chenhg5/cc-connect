@@ -251,9 +251,19 @@ app_secret = "your-feishu-app-secret"
 # 2. Under "Bot", create a bot and copy the token / 创建 Bot 并复制 token
 # 3. Enable "Message Content Intent" under Privileged Gateway Intents
 #    在 Privileged Gateway Intents 中开启 Message Content Intent
-# 4. Invite bot to server with OAuth2 URL Generator (scopes: bot; permissions: Send Messages)
-#    通过 OAuth2 URL 邀请 Bot 到服务器（权限：Send Messages）
+# 4. Invite bot with OAuth2 URL Generator:
+#    通过 OAuth2 URL 邀请 Bot 到服务器：
+#    Scopes: bot + applications.commands (BOTH required for slash command menu)
+#    Scopes 需要同时勾选: bot + applications.commands（缺少后者则 / 菜单不会出现）
+#    Bot Permissions: Send Messages, Use Slash Commands
+#    Bot 权限: Send Messages, Use Slash Commands
 # Connection: Gateway WebSocket (no public URL needed) / 无需公网 IP
+#
+# NOTE: Global slash commands may take up to 1 hour to appear in Discord.
+#       Set guild_id for instant per-guild registration (recommended for testing).
+# 注意：全局 slash 命令最多需 1 小时生效。设置 guild_id 可秒级生效（推荐测试时使用）。
+# To find your guild ID: Discord Settings > Advanced > Developer Mode ON, then right-click server > Copy Server ID
+# 获取 guild_id：Discord 设置 > 高级 > 开启开发者模式，然后右键服务器 > 复制服务器 ID
 
 # [[projects.platforms]]
 # type = "discord"
@@ -261,6 +271,8 @@ app_secret = "your-feishu-app-secret"
 # [projects.platforms.options]
 # token = "your-discord-bot-token"
 # allow_from = "*"  # Allowed Discord user IDs / 允许的 Discord 用户 ID
+# guild_id = ""     # Optional: set for instant slash command registration (per-guild)
+#                   # 可选：设置后 slash 命令秒级生效（仅该服务器）
 
 # LINE (uncomment to enable / 取消注释以启用)
 # 1. Create a channel at https://developers.line.biz/console/ (Messaging API)

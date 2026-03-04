@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/chenhg5/cc-connect/core"
 
@@ -24,12 +25,24 @@ type replyContext struct {
 	messageID string
 }
 
+// interactionReplyCtx handles Discord slash command (Application Command)
+// responses. The first reply edits the deferred interaction response;
+// subsequent replies use followup messages.
+type interactionReplyCtx struct {
+	interaction *discordgo.Interaction
+	channelID   string
+	mu          sync.Mutex
+	firstDone   bool
+}
+
 type Platform struct {
 	token     string
 	allowFrom string
+	guildID   string // optional: per-guild registration (instant) vs global (up to 1h propagation)
 	session   *discordgo.Session
 	handler   core.MessageHandler
 	botID     string
+	appID     string
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -38,10 +51,80 @@ func New(opts map[string]any) (core.Platform, error) {
 		return nil, fmt.Errorf("discord: token is required")
 	}
 	allowFrom, _ := opts["allow_from"].(string)
-	return &Platform{token: token, allowFrom: allowFrom}, nil
+	guildID, _ := opts["guild_id"].(string)
+	return &Platform{token: token, allowFrom: allowFrom, guildID: guildID}, nil
 }
 
 func (p *Platform) Name() string { return "discord" }
+
+// builtinSlashCommands defines the Application Commands registered with Discord.
+func builtinSlashCommands() []*discordgo.ApplicationCommand {
+	optStr := func(name, desc string, required bool) *discordgo.ApplicationCommandOption {
+		return &discordgo.ApplicationCommandOption{
+			Type: discordgo.ApplicationCommandOptionString, Name: name, Description: desc, Required: required,
+		}
+	}
+	optInt := func(name, desc string) *discordgo.ApplicationCommandOption {
+		return &discordgo.ApplicationCommandOption{
+			Type: discordgo.ApplicationCommandOptionInteger, Name: name, Description: desc, Required: false,
+		}
+	}
+
+	return []*discordgo.ApplicationCommand{
+		{Name: "help", Description: "Show available commands"},
+		{Name: "new", Description: "Start a new session", Options: []*discordgo.ApplicationCommandOption{
+			optStr("name", "Session name", false),
+		}},
+		{Name: "list", Description: "List agent sessions"},
+		{Name: "cc-switch", Description: "Resume an existing session", Options: []*discordgo.ApplicationCommandOption{
+			optStr("id", "Session ID prefix", true),
+		}},
+		{Name: "current", Description: "Show current active session"},
+		{Name: "status", Description: "Show system status"},
+		{Name: "history", Description: "Show recent messages", Options: []*discordgo.ApplicationCommandOption{
+			optInt("count", "Number of messages (default 10)"),
+		}},
+		{Name: "model", Description: "View or switch model", Options: []*discordgo.ApplicationCommandOption{
+			optStr("name", "Model name or number", false),
+		}},
+		{Name: "mode", Description: "View or switch permission mode", Options: []*discordgo.ApplicationCommandOption{
+			optStr("name", "Mode: default / edit / plan / yolo", false),
+		}},
+		{Name: "lang", Description: "View or switch language", Options: []*discordgo.ApplicationCommandOption{
+			optStr("language", "en / zh / zh-TW / ja / es / auto", false),
+		}},
+		{Name: "quiet", Description: "Toggle thinking/tool progress messages"},
+		{Name: "compress", Description: "Compress conversation context"},
+		{Name: "cc-stop", Description: "Stop current execution"},
+		{Name: "version", Description: "Show cc-connect version"},
+		{Name: "doctor", Description: "Run system diagnostics"},
+		{Name: "skills", Description: "List agent skills"},
+		{Name: "allow", Description: "Pre-allow a tool for next session", Options: []*discordgo.ApplicationCommandOption{
+			optStr("tool", "Tool name (e.g. Bash)", false),
+		}},
+		{Name: "config", Description: "View or update runtime configuration", Options: []*discordgo.ApplicationCommandOption{
+			optStr("args", "e.g. thinking_max_len 200", false),
+		}},
+		{Name: "provider", Description: "Manage API providers", Options: []*discordgo.ApplicationCommandOption{
+			optStr("args", "e.g. list, switch <name>, add ...", false),
+		}},
+		{Name: "memory", Description: "View or edit agent memory files", Options: []*discordgo.ApplicationCommandOption{
+			optStr("args", "e.g. add <text>, global, global add <text>", false),
+		}},
+		{Name: "cron", Description: "Manage scheduled tasks", Options: []*discordgo.ApplicationCommandOption{
+			optStr("args", "e.g. list, add 0 6 * * * <prompt>", false),
+		}},
+		{Name: "commands", Description: "Manage custom slash commands", Options: []*discordgo.ApplicationCommandOption{
+			optStr("args", "e.g. list, add <name> <prompt>, del <name>", false),
+		}},
+	}
+}
+
+// slashNameToEngine maps Discord command names that differ from engine names.
+var slashNameToEngine = map[string]string{
+	"cc-switch": "switch",
+	"cc-stop":   "stop",
+}
 
 func (p *Platform) Start(handler core.MessageHandler) error {
 	p.handler = handler
@@ -56,7 +139,9 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 
 	session.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
 		p.botID = r.User.ID
+		p.appID = r.User.ID
 		slog.Info("discord: connected", "bot", r.User.Username+"#"+r.User.Discriminator)
+		go p.registerSlashCommands()
 	})
 
 	session.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
@@ -114,6 +199,10 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		p.handler(p, msg)
 	})
 
+	session.AddHandler(func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+		p.handleInteraction(s, i)
+	})
+
 	if err := session.Open(); err != nil {
 		return fmt.Errorf("discord: open gateway: %w", err)
 	}
@@ -121,17 +210,170 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	return nil
 }
 
-func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
-	rc, ok := rctx.(replyContext)
-	if !ok {
-		return fmt.Errorf("discord: invalid reply context type %T", rctx)
+// registerSlashCommands registers all built-in commands with the Discord API.
+func (p *Platform) registerSlashCommands() {
+	cmds := builtinSlashCommands()
+	registered, err := p.session.ApplicationCommandBulkOverwrite(p.appID, p.guildID, cmds)
+	if err != nil {
+		slog.Error("discord: failed to register slash commands — "+
+			"make sure the bot was invited with BOTH 'bot' AND 'applications.commands' OAuth2 scopes. "+
+			"Re-invite URL: https://discord.com/oauth2/authorize?client_id="+p.appID+
+			"&scope=bot+applications.commands&permissions=2147485696",
+			"error", err, "guild_id", p.guildID)
+		return
+	}
+	scope := "global (may take up to 1h to appear — set guild_id for instant)"
+	if p.guildID != "" {
+		scope = "guild:" + p.guildID
+	}
+	slog.Info("discord: registered slash commands", "count", len(registered), "scope", scope)
+}
+
+// handleInteraction processes an incoming Discord slash command interaction.
+func (p *Platform) handleInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	if i.Type != discordgo.InteractionApplicationCommand {
+		return
 	}
 
-	// Discord has a 2000 char limit per message
+	userID, userName := "", ""
+	if i.Member != nil && i.Member.User != nil {
+		userID = i.Member.User.ID
+		userName = i.Member.User.Username
+	} else if i.User != nil {
+		userID = i.User.ID
+		userName = i.User.Username
+	}
+
+	if !core.AllowList(p.allowFrom, userID) {
+		slog.Debug("discord: interaction from unauthorized user", "user", userID)
+		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "You are not authorized to use this bot.",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+
+	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+	}); err != nil {
+		slog.Error("discord: defer interaction failed", "error", err)
+		return
+	}
+
+	data := i.ApplicationCommandData()
+	cmdText := reconstructCommand(data)
+	channelID := i.ChannelID
+
+	slog.Debug("discord: slash command", "user", userName, "command", cmdText, "channel", channelID)
+
+	sessionKey := fmt.Sprintf("discord:%s:%s", channelID, userID)
+	ictx := &interactionReplyCtx{
+		interaction: i.Interaction,
+		channelID:   channelID,
+	}
+
+	msg := &core.Message{
+		SessionKey: sessionKey, Platform: "discord",
+		UserID: userID, UserName: userName,
+		Content: cmdText, ReplyCtx: ictx,
+	}
+	p.handler(p, msg)
+}
+
+// reconstructCommand converts a Discord interaction back to a text command string
+// (e.g. "/config thinking_max_len 200") that the engine can parse.
+func reconstructCommand(data discordgo.ApplicationCommandInteractionData) string {
+	name := data.Name
+	if engineName, ok := slashNameToEngine[name]; ok {
+		name = engineName
+	}
+
+	var parts []string
+	parts = append(parts, "/"+name)
+	for _, opt := range data.Options {
+		switch opt.Type {
+		case discordgo.ApplicationCommandOptionInteger:
+			parts = append(parts, fmt.Sprintf("%d", opt.IntValue()))
+		default:
+			parts = append(parts, opt.StringValue())
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
+	switch rc := rctx.(type) {
+	case *interactionReplyCtx:
+		return p.sendInteraction(rc, content)
+	case replyContext:
+		return p.sendChannelReply(rc, content)
+	default:
+		return fmt.Errorf("discord: invalid reply context type %T", rctx)
+	}
+}
+
+// Send sends a new message (not a reply).
+func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
+	switch rc := rctx.(type) {
+	case *interactionReplyCtx:
+		return p.sendInteraction(rc, content)
+	case replyContext:
+		return p.sendChannel(rc, content)
+	default:
+		return fmt.Errorf("discord: invalid reply context type %T", rctx)
+	}
+}
+
+// sendInteraction delivers a message through the Discord interaction response
+// mechanism. The first call edits the deferred "thinking" response; subsequent
+// calls create followup messages.
+func (p *Platform) sendInteraction(ictx *interactionReplyCtx, content string) error {
 	for len(content) > 0 {
 		chunk := content
 		if len(chunk) > maxDiscordLen {
-			// Try to split at a newline
+			cut := maxDiscordLen
+			if idx := lastIndexBefore(content, '\n', cut); idx > 0 {
+				cut = idx + 1
+			}
+			chunk = content[:cut]
+			content = content[cut:]
+		} else {
+			content = ""
+		}
+
+		ictx.mu.Lock()
+		first := !ictx.firstDone
+		if first {
+			ictx.firstDone = true
+		}
+		ictx.mu.Unlock()
+
+		var err error
+		if first {
+			c := chunk
+			_, err = p.session.InteractionResponseEdit(ictx.interaction, &discordgo.WebhookEdit{Content: &c})
+		} else {
+			_, err = p.session.FollowupMessageCreate(ictx.interaction, true, &discordgo.WebhookParams{Content: chunk})
+		}
+
+		if err != nil {
+			slog.Warn("discord: interaction response failed, falling back to channel message", "error", err)
+			_, err = p.session.ChannelMessageSend(ictx.channelID, chunk)
+			if err != nil {
+				return fmt.Errorf("discord: send fallback: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
+func (p *Platform) sendChannelReply(rc replyContext, content string) error {
+	for len(content) > 0 {
+		chunk := content
+		if len(chunk) > maxDiscordLen {
 			cut := maxDiscordLen
 			if idx := lastIndexBefore(content, '\n', cut); idx > 0 {
 				cut = idx + 1
@@ -151,14 +393,7 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	return nil
 }
 
-// Send sends a new message (not a reply)
-func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
-	rc, ok := rctx.(replyContext)
-	if !ok {
-		return fmt.Errorf("discord: invalid reply context type %T", rctx)
-	}
-
-	// Discord has a 2000 char limit per message
+func (p *Platform) sendChannel(rc replyContext, content string) error {
 	for len(content) > 0 {
 		chunk := content
 		if len(chunk) > maxDiscordLen {
