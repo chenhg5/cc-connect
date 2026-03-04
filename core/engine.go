@@ -34,6 +34,9 @@ const (
 // VersionInfo is set by main at startup so that /version works.
 var VersionInfo string
 
+// CurrentVersion is the semver tag (e.g. "v1.2.0-beta.1"), set by main.
+var CurrentVersion string
+
 // DisplayCfg controls truncation of intermediate messages.
 // A value of -1 means "use default", 0 means "no truncation".
 type DisplayCfg struct {
@@ -783,6 +786,7 @@ var builtinCommands = []struct {
 	{[]string{"skills", "skill"}, "skills"},
 	{[]string{"config"}, "config"},
 	{[]string{"doctor"}, "doctor"},
+	{[]string{"upgrade", "update"}, "upgrade"},
 }
 
 // matchPrefix finds a unique command matching the given prefix.
@@ -889,6 +893,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdConfig(p, msg, args)
 	case "doctor":
 		e.cmdDoctor(p, msg)
+	case "upgrade":
+		e.cmdUpgrade(p, msg, args)
 	default:
 		if custom, ok := e.commands.Resolve(cmd); ok {
 			e.executeCustomCommand(p, msg, custom, args)
@@ -2312,6 +2318,71 @@ func (e *Engine) cmdDoctor(p Platform, msg *Message) {
 	results := RunDoctorChecks(e.ctx, e.agent, e.platforms)
 	report := FormatDoctorResults(results, e.i18n)
 	e.reply(p, msg.ReplyCtx, report)
+}
+
+func (e *Engine) cmdUpgrade(p Platform, msg *Message, args []string) {
+	subCmd := ""
+	if len(args) > 0 {
+		subCmd = matchSubCommand(args[0], []string{"confirm", "check"})
+	}
+
+	if subCmd == "confirm" {
+		e.cmdUpgradeConfirm(p, msg)
+		return
+	}
+
+	// Default: check for updates
+	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgUpgradeChecking))
+
+	cur := CurrentVersion
+	if cur == "" || cur == "dev" {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgUpgradeDevBuild))
+		return
+	}
+
+	release, err := CheckForUpdate(cur)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %s", err))
+		return
+	}
+	if release == nil {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgUpgradeUpToDate), cur))
+		return
+	}
+
+	body := release.Body
+	if len([]rune(body)) > 300 {
+		body = string([]rune(body)[:300]) + "…"
+	}
+
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgUpgradeAvailable), cur, release.TagName, body))
+}
+
+func (e *Engine) cmdUpgradeConfirm(p Platform, msg *Message) {
+	cur := CurrentVersion
+	if cur == "" || cur == "dev" {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgUpgradeDevBuild))
+		return
+	}
+
+	release, err := CheckForUpdate(cur)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %s", err))
+		return
+	}
+	if release == nil {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgUpgradeUpToDate), cur))
+		return
+	}
+
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgUpgradeDownloading), release.TagName))
+
+	if err := SelfUpdate(release.TagName); err != nil {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %s", err))
+		return
+	}
+
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgUpgradeSuccess), release.TagName))
 }
 
 // truncateIf truncates s to maxLen runes. 0 means no truncation.

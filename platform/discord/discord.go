@@ -98,6 +98,9 @@ func builtinSlashCommands() []*discordgo.ApplicationCommand {
 		{Name: "cc-stop", Description: "Stop current execution"},
 		{Name: "version", Description: "Show cc-connect version"},
 		{Name: "doctor", Description: "Run system diagnostics"},
+		{Name: "upgrade", Description: "Check for updates and self-update", Options: []*discordgo.ApplicationCommandOption{
+			optStr("action", "confirm to install update", false),
+		}},
 		{Name: "skills", Description: "List agent skills"},
 		{Name: "allow", Description: "Pre-allow a tool for next session", Options: []*discordgo.ApplicationCommandOption{
 			optStr("tool", "Tool name (e.g. Bash)", false),

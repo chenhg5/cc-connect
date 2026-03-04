@@ -250,6 +250,13 @@ const (
 	MsgDoctorRunning MsgKey = "doctor_running"
 	MsgDoctorTitle   MsgKey = "doctor_title"
 	MsgDoctorSummary MsgKey = "doctor_summary"
+
+	MsgUpgradeChecking    MsgKey = "upgrade_checking"
+	MsgUpgradeUpToDate    MsgKey = "upgrade_up_to_date"
+	MsgUpgradeAvailable   MsgKey = "upgrade_available"
+	MsgUpgradeDownloading MsgKey = "upgrade_downloading"
+	MsgUpgradeSuccess     MsgKey = "upgrade_success"
+	MsgUpgradeDevBuild    MsgKey = "upgrade_dev_build"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -460,6 +467,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/skills\n  List agent skills (from SKILL.md)\n\n" +
 			"/config [get|set] [key] [value]\n  View/update runtime configuration\n\n" +
 			"/doctor\n  Run system diagnostics\n\n" +
+			"/upgrade\n  Check for updates and self-update\n\n" +
 			"/status\n  Show system status\n\n" +
 			"/version\n  Show cc-connect version\n\n" +
 			"/help\n  Show this help\n\n" +
@@ -487,6 +495,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/skills\n  列出 Agent Skills（来自 SKILL.md）\n\n" +
 			"/config [get|set] [key] [value]\n  查看/修改运行时配置\n\n" +
 			"/doctor\n  运行系统诊断\n\n" +
+			"/upgrade\n  检查更新并自动升级\n\n" +
 			"/status\n  查看系统状态\n\n" +
 			"/version\n  查看 cc-connect 版本\n\n" +
 			"/help\n  显示此帮助\n\n" +
@@ -514,6 +523,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/skills\n  列出 Agent Skills（來自 SKILL.md）\n\n" +
 			"/config [get|set] [key] [value]\n  查看/修改執行階段配置\n\n" +
 			"/doctor\n  執行系統診斷\n\n" +
+			"/upgrade\n  檢查更新並自動升級\n\n" +
 			"/status\n  查看系統狀態\n\n" +
 			"/version\n  查看 cc-connect 版本\n\n" +
 			"/help\n  顯示此說明\n\n" +
@@ -541,6 +551,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/skills\n  エージェントスキル一覧（SKILL.md から）\n\n" +
 			"/config [get|set] [key] [value]\n  ランタイム設定の表示/変更\n\n" +
 			"/doctor\n  システム診断を実行\n\n" +
+			"/upgrade\n  アップデートを確認して自動更新\n\n" +
 			"/status\n  システム状態を表示\n\n" +
 			"/version\n  cc-connect のバージョンを表示\n\n" +
 			"/help\n  このヘルプを表示\n\n" +
@@ -568,6 +579,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/skills\n  Listar skills del agente (desde SKILL.md)\n\n" +
 			"/config [get|set] [key] [value]\n  Ver/actualizar configuración en tiempo de ejecución\n\n" +
 			"/doctor\n  Ejecutar diagnósticos del sistema\n\n" +
+			"/upgrade\n  Buscar actualizaciones y auto-actualizar\n\n" +
 			"/status\n  Mostrar estado del sistema\n\n" +
 			"/version\n  Mostrar versión de cc-connect\n\n" +
 			"/help\n  Mostrar esta ayuda\n\n" +
@@ -1272,6 +1284,68 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "\n✅ %d 項通過  ⚠️ %d 項警告  ❌ %d 項失敗",
 		LangJapanese:           "\n✅ %d 合格  ⚠️ %d 警告  ❌ %d 失敗",
 		LangSpanish:            "\n✅ %d aprobados  ⚠️ %d advertencias  ❌ %d fallidos",
+	},
+	MsgUpgradeChecking: {
+		LangEnglish:            "🔍 Checking for updates...",
+		LangChinese:            "🔍 正在检查更新...",
+		LangTraditionalChinese: "🔍 正在檢查更新...",
+		LangJapanese:           "🔍 アップデートを確認中...",
+		LangSpanish:            "🔍 Buscando actualizaciones...",
+	},
+	MsgUpgradeUpToDate: {
+		LangEnglish:            "✅ Already up to date (%s)",
+		LangChinese:            "✅ 已是最新版本 (%s)",
+		LangTraditionalChinese: "✅ 已是最新版本 (%s)",
+		LangJapanese:           "✅ 最新バージョンです (%s)",
+		LangSpanish:            "✅ Ya está actualizado (%s)",
+	},
+	MsgUpgradeAvailable: {
+		LangEnglish: "🆕 New version available!\n\n" +
+			"Current: **%s**\n" +
+			"Latest:  **%s**\n\n" +
+			"%s\n\n" +
+			"Run `/upgrade confirm` to install.",
+		LangChinese: "🆕 发现新版本！\n\n" +
+			"当前版本：**%s**\n" +
+			"最新版本：**%s**\n\n" +
+			"%s\n\n" +
+			"执行 `/upgrade confirm` 进行更新。",
+		LangTraditionalChinese: "🆕 發現新版本！\n\n" +
+			"當前版本：**%s**\n" +
+			"最新版本：**%s**\n\n" +
+			"%s\n\n" +
+			"執行 `/upgrade confirm` 進行更新。",
+		LangJapanese: "🆕 新しいバージョンがあります！\n\n" +
+			"現在: **%s**\n" +
+			"最新: **%s**\n\n" +
+			"%s\n\n" +
+			"`/upgrade confirm` でインストール。",
+		LangSpanish: "🆕 ¡Nueva versión disponible!\n\n" +
+			"Actual: **%s**\n" +
+			"Última: **%s**\n\n" +
+			"%s\n\n" +
+			"Ejecute `/upgrade confirm` para instalar.",
+	},
+	MsgUpgradeDownloading: {
+		LangEnglish:            "⬇️ Downloading %s ...",
+		LangChinese:            "⬇️ 正在下载 %s ...",
+		LangTraditionalChinese: "⬇️ 正在下載 %s ...",
+		LangJapanese:           "⬇️ ダウンロード中 %s ...",
+		LangSpanish:            "⬇️ Descargando %s ...",
+	},
+	MsgUpgradeSuccess: {
+		LangEnglish:            "✅ Updated to **%s** successfully! Please restart cc-connect for changes to take effect.",
+		LangChinese:            "✅ 已成功更新到 **%s**！请重启 cc-connect 使更新生效。",
+		LangTraditionalChinese: "✅ 已成功更新到 **%s**！請重啟 cc-connect 使更新生效。",
+		LangJapanese:           "✅ **%s** に更新しました！変更を有効にするため cc-connect を再起動してください。",
+		LangSpanish:            "✅ ¡Actualizado a **%s** con éxito! Reinicie cc-connect para aplicar los cambios.",
+	},
+	MsgUpgradeDevBuild: {
+		LangEnglish:            "⚠️ Running a dev build — version check is not available. Please build from source or install a release version.",
+		LangChinese:            "⚠️ 当前为开发版本，无法检查更新。请从源码构建或安装正式发布版本。",
+		LangTraditionalChinese: "⚠️ 當前為開發版本，無法檢查更新。請從源碼構建或安裝正式發佈版本。",
+		LangJapanese:           "⚠️ 開発ビルドのため、バージョン確認ができません。ソースからビルドするか、リリース版をインストールしてください。",
+		LangSpanish:            "⚠️ Compilación de desarrollo — la verificación de versión no está disponible. Compile desde el código fuente o instale una versión publicada.",
 	},
 }
 

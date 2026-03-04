@@ -96,6 +96,7 @@ func main() {
 	}
 
 	core.VersionInfo = fmt.Sprintf("cc-connect %s\ncommit: %s\nbuilt: %s", version, commit, buildTime)
+	core.CurrentVersion = version
 
 	configPath := resolveConfigPath(*configFlag)
 
