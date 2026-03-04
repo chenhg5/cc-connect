@@ -35,6 +35,7 @@ type Platform struct {
 	wsClient      *larkws.Client
 	handler       core.MessageHandler
 	cancel        context.CancelFunc
+	dedup         core.MessageDedup
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -151,6 +152,11 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 	messageID := ""
 	if msg.MessageId != nil {
 		messageID = *msg.MessageId
+	}
+
+	if p.dedup.IsDuplicate(messageID) {
+		slog.Debug("feishu: duplicate message ignored", "message_id", messageID)
+		return nil
 	}
 
 	if !core.AllowList(p.allowFrom, userID) {

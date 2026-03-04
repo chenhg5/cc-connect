@@ -85,7 +85,10 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 			select {
 			case <-ctx.Done():
 				return
-		case update := <-updates:
+		case update, ok := <-updates:
+			if !ok {
+				return
+			}
 			// Handle inline keyboard button clicks
 			if update.CallbackQuery != nil {
 				p.handleCallbackQuery(update.CallbackQuery)

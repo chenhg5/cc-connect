@@ -92,7 +92,7 @@ func (cs *codexSession) Send(prompt string, images []core.ImageAttachment) error
 		args = append(args, "--cd", cs.workDir, prompt)
 	}
 
-	slog.Debug("codexSession: launching", "resume", isResume, "args", args)
+	slog.Debug("codexSession: launching", "resume", isResume, "args", core.RedactArgs(args))
 
 	cmd := exec.CommandContext(cs.ctx, "codex", args...)
 	cmd.Dir = cs.workDir
@@ -125,7 +125,12 @@ func (cs *codexSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf 
 			stderrMsg := strings.TrimSpace(stderrBuf.String())
 			if stderrMsg != "" {
 				slog.Error("codexSession: process failed", "error", err, "stderr", stderrMsg)
-				cs.events <- core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
+				evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
+				select {
+				case cs.events <- evt:
+				case <-cs.ctx.Done():
+					return
+				}
 			}
 		}
 	}()
@@ -150,7 +155,12 @@ func (cs *codexSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf 
 
 	if err := scanner.Err(); err != nil {
 		slog.Error("codexSession: scanner error", "error", err)
-		cs.events <- core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
+		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
+		select {
+		case cs.events <- evt:
+		case <-cs.ctx.Done():
+			return
+		}
 	}
 }
 
@@ -174,10 +184,11 @@ func (cs *codexSession) handleEvent(raw map[string]any) {
 		cs.handleItemCompleted(raw)
 
 	case "turn.completed":
-		cs.events <- core.Event{
-			Type:      core.EventResult,
-			SessionID: cs.CurrentSessionID(),
-			Done:      true,
+		evt := core.Event{Type: core.EventResult, SessionID: cs.CurrentSessionID(), Done: true}
+		select {
+		case cs.events <- evt:
+		case <-cs.ctx.Done():
+			return
 		}
 
 	case "error":
@@ -199,10 +210,11 @@ func (cs *codexSession) handleItemStarted(raw map[string]any) {
 
 	if itemType == "command_execution" {
 		command, _ := item["command"].(string)
-		cs.events <- core.Event{
-			Type:      core.EventToolUse,
-			ToolName:  "Bash",
-			ToolInput: command,
+		evt := core.Event{Type: core.EventToolUse, ToolName: "Bash", ToolInput: command}
+		select {
+		case cs.events <- evt:
+		case <-cs.ctx.Done():
+			return
 		}
 	}
 }
@@ -218,18 +230,22 @@ func (cs *codexSession) handleItemCompleted(raw map[string]any) {
 	case "reasoning":
 		text, _ := item["text"].(string)
 		if text != "" {
-			cs.events <- core.Event{
-				Type:    core.EventThinking,
-				Content: text,
+			evt := core.Event{Type: core.EventThinking, Content: text}
+			select {
+			case cs.events <- evt:
+			case <-cs.ctx.Done():
+				return
 			}
 		}
 
 	case "agent_message":
 		text, _ := item["text"].(string)
 		if text != "" {
-			cs.events <- core.Event{
-				Type:    core.EventText,
-				Content: text,
+			evt := core.Event{Type: core.EventText, Content: text}
+			select {
+			case cs.events <- evt:
+			case <-cs.ctx.Done():
+				return
 			}
 		}
 

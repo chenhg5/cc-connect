@@ -111,7 +111,12 @@ func (qs *qoderSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf 
 			stderrMsg := strings.TrimSpace(stderrBuf.String())
 			if stderrMsg != "" {
 				slog.Error("qoderSession: process failed", "error", err, "stderr", truncStr(stderrMsg, 200))
-				qs.events <- core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
+				evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
+				select {
+				case qs.events <- evt:
+				case <-qs.ctx.Done():
+					return
+				}
 			}
 		}
 	}()
@@ -136,7 +141,12 @@ func (qs *qoderSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf 
 
 	if err := scanner.Err(); err != nil {
 		slog.Error("qoderSession: scanner error", "error", err)
-		qs.events <- core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
+		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
+		select {
+		case qs.events <- evt:
+		case <-qs.ctx.Done():
+			return
+		}
 	}
 }
 
@@ -205,18 +215,21 @@ func (qs *qoderSession) handleAssistant(ev *streamEvent) {
 		switch item.Type {
 		case "text":
 			if item.Text != "" {
-				qs.events <- core.Event{
-					Type:    core.EventText,
-					Content: item.Text,
+				evt := core.Event{Type: core.EventText, Content: item.Text}
+				select {
+				case qs.events <- evt:
+				case <-qs.ctx.Done():
+					return
 				}
 			}
 
 		case "function":
 			inputPreview := extractToolPreview(item.Input)
-			qs.events <- core.Event{
-				Type:      core.EventToolUse,
-				ToolName:  item.Name,
-				ToolInput: inputPreview,
+			evt := core.Event{Type: core.EventToolUse, ToolName: item.Name, ToolInput: inputPreview}
+			select {
+			case qs.events <- evt:
+			case <-qs.ctx.Done():
+				return
 			}
 		}
 	}
@@ -235,11 +248,11 @@ func (qs *qoderSession) handleResult(ev *streamEvent) {
 		}
 	}
 
-	qs.events <- core.Event{
-		Type:      core.EventResult,
-		Content:   finalText,
-		SessionID: qs.CurrentSessionID(),
-		Done:      true,
+	evt := core.Event{Type: core.EventResult, Content: finalText, SessionID: qs.CurrentSessionID(), Done: true}
+	select {
+	case qs.events <- evt:
+	case <-qs.ctx.Done():
+		return
 	}
 }
 

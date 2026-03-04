@@ -74,6 +74,11 @@ func (r *CommandRegistry) Resolve(name string) (*CustomCommand, bool) {
 
 	for _, dir := range r.agentDirs {
 		mdPath := filepath.Join(dir, name+".md")
+		absDir, err1 := filepath.Abs(dir)
+		absPath, err2 := filepath.Abs(mdPath)
+		if err1 != nil || err2 != nil || !strings.HasPrefix(absPath, absDir+string(filepath.Separator)) {
+			continue
+		}
 		data, err := os.ReadFile(mdPath)
 		if err != nil {
 			continue

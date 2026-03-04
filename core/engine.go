@@ -91,6 +91,12 @@ type pendingPermission struct {
 	ToolInput    map[string]any
 	InputPreview string
 	Resolved     chan struct{} // closed when user responds
+	resolveOnce  sync.Once
+}
+
+// resolve safely closes the Resolved channel exactly once.
+func (pp *pendingPermission) resolve() {
+	pp.resolveOnce.Do(func() { close(pp.Resolved) })
 }
 
 func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath string, lang Language) *Engine {
@@ -412,7 +418,7 @@ func (e *Engine) handlePendingPermission(p Platform, msg *Message, content strin
 	state.mu.Lock()
 	state.pending = nil
 	state.mu.Unlock()
-	close(pending.Resolved)
+	pending.resolve()
 
 	return true
 }
@@ -587,18 +593,19 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		state.mu.Lock()
 		p := state.platform
 		replyCtx := state.replyCtx
+		quiet := state.quiet
 		state.mu.Unlock()
 
 		switch event.Type {
 		case EventThinking:
-			if !state.quiet && event.Content != "" {
+			if !quiet && event.Content != "" {
 				preview := truncateIf(event.Content, e.display.ThinkingMaxLen)
 				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgThinking), preview))
 			}
 
 		case EventToolUse:
 			toolCount++
-			if !state.quiet {
+			if !quiet {
 				inputPreview := truncateIf(event.ToolInput, e.display.ToolMaxLen)
 				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgTool), toolCount, event.ToolName, inputPreview))
 			}
@@ -607,9 +614,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if event.Content != "" {
 				textParts = append(textParts, event.Content)
 			}
-			if event.SessionID != "" && session.AgentSessionID == "" {
-				session.AgentSessionID = event.SessionID
-				e.sessions.Save()
+			if event.SessionID != "" {
+				session.mu.Lock()
+				if session.AgentSessionID == "" {
+					session.AgentSessionID = event.SessionID
+					session.mu.Unlock()
+					e.sessions.Save()
+				} else {
+					session.mu.Unlock()
+				}
 			}
 
 		case EventPermissionRequest:
@@ -654,7 +667,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventResult:
 			if event.SessionID != "" {
+				session.mu.Lock()
 				session.AgentSessionID = event.SessionID
+				session.mu.Unlock()
 			}
 
 			fullResponse := event.Content
@@ -1245,7 +1260,7 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 	}
 	state.mu.Unlock()
 	if pending != nil {
-		close(pending.Resolved)
+		pending.resolve()
 	}
 
 	e.cleanupInteractiveState(msg.SessionKey)
@@ -1530,7 +1545,7 @@ func (e *Engine) SendToSession(sessionKey, message string) error {
 		}
 	}
 
-	if state == nil || state.platform == nil {
+	if state == nil {
 		return fmt.Errorf("no active session found (key=%q)", sessionKey)
 	}
 
@@ -1538,6 +1553,10 @@ func (e *Engine) SendToSession(sessionKey, message string) error {
 	p := state.platform
 	replyCtx := state.replyCtx
 	state.mu.Unlock()
+
+	if p == nil {
+		return fmt.Errorf("no active session found (key=%q)", sessionKey)
+	}
 
 	return p.Send(e.ctx, replyCtx, message)
 }

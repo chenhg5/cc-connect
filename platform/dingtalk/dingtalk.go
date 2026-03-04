@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 
@@ -28,6 +29,7 @@ type Platform struct {
 	allowFrom    string
 	streamClient *dingtalkClient.StreamClient
 	handler      core.MessageHandler
+	dedup        core.MessageDedup
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -58,8 +60,16 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		return []byte(""), nil
 	})
 
-	if err := p.streamClient.Start(context.Background()); err != nil {
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- p.streamClient.Start(context.Background())
+	}()
+
+	// Give the stream a short window to fail fast on auth errors.
+	select {
+	case err := <-errCh:
 		return fmt.Errorf("dingtalk: start stream: %w", err)
+	case <-time.After(3 * time.Second):
 	}
 
 	slog.Info("dingtalk: stream connected", "client_id", p.clientID)
@@ -68,6 +78,11 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 
 func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel) {
 	slog.Debug("dingtalk: message received", "user", data.SenderNick, "content_len", len(data.Text.Content))
+
+	if p.dedup.IsDuplicate(data.MsgId) {
+		slog.Debug("dingtalk: duplicate message ignored", "msg_id", data.MsgId)
+		return
+	}
 
 	if !core.AllowList(p.allowFrom, data.SenderStaffId) {
 		slog.Debug("dingtalk: message from unauthorized user", "user", data.SenderStaffId)
@@ -109,7 +124,7 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := core.HTTPClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("dingtalk: send reply: %w", err)
 	}

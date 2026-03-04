@@ -432,11 +432,14 @@ func (p *Platform) Stop() error {
 }
 
 func downloadURL(u string) ([]byte, error) {
-	resp, err := http.Get(u)
+	resp, err := core.HTTPClient.Get(u)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("download %s: status %d", u, resp.StatusCode)
+	}
 	return io.ReadAll(resp.Body)
 }
 

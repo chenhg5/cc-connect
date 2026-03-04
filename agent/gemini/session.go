@@ -117,7 +117,7 @@ func (gs *geminiSession) Send(prompt string, images []core.ImageAttachment) erro
 
 	args = append(args, "-p", fullPrompt)
 
-	slog.Debug("geminiSession: launching", "resume", isResume, "args", args)
+	slog.Debug("geminiSession: launching", "resume", isResume, "args", core.RedactArgs(args))
 
 	cmd := exec.CommandContext(gs.ctx, gs.cmd, args...)
 	cmd.Dir = gs.workDir
@@ -156,7 +156,12 @@ func (gs *geminiSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf
 			stderrMsg := strings.TrimSpace(stderrBuf.String())
 			if stderrMsg != "" {
 				slog.Error("geminiSession: process failed", "error", err, "stderr", stderrMsg)
-				gs.events <- core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
+				evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
+				select {
+				case gs.events <- evt:
+				case <-gs.ctx.Done():
+					return
+				}
 			}
 		}
 	}()
@@ -181,7 +186,12 @@ func (gs *geminiSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf
 
 	if err := scanner.Err(); err != nil {
 		slog.Error("geminiSession: scanner error", "error", err)
-		gs.events <- core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
+		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
+		select {
+		case gs.events <- evt:
+		case <-gs.ctx.Done():
+			return
+		}
 	}
 }
 
@@ -221,11 +231,11 @@ func (gs *geminiSession) handleInit(raw map[string]any) {
 		gs.chatID.Store(sid)
 		slog.Debug("geminiSession: session init", "session_id", sid, "model", model)
 
-		gs.events <- core.Event{
-			Type:      core.EventText,
-			SessionID: sid,
-			Content:   "",
-			ToolName:  model,
+		evt := core.Event{Type: core.EventText, SessionID: sid, Content: "", ToolName: model}
+		select {
+		case gs.events <- evt:
+		case <-gs.ctx.Done():
+			return
 		}
 	}
 }
@@ -242,9 +252,11 @@ func (gs *geminiSession) handleMessage(raw map[string]any) {
 	// assistant message (may be delta or full)
 	if content != "" {
 		_ = delta // both delta and full messages are streamed as text events
-		gs.events <- core.Event{
-			Type:    core.EventText,
-			Content: content,
+		evt := core.Event{Type: core.EventText, Content: content}
+		select {
+		case gs.events <- evt:
+		case <-gs.ctx.Done():
+			return
 		}
 	}
 }
@@ -257,10 +269,11 @@ func (gs *geminiSession) handleToolUse(raw map[string]any) {
 	input := formatToolParams(toolName, params)
 
 	slog.Debug("geminiSession: tool_use", "tool", toolName, "id", toolID)
-	gs.events <- core.Event{
-		Type:      core.EventToolUse,
-		ToolName:  toolName,
-		ToolInput: input,
+	evt := core.Event{Type: core.EventToolUse, ToolName: toolName, ToolInput: input}
+	select {
+	case gs.events <- evt:
+	case <-gs.ctx.Done():
+		return
 	}
 }
 
@@ -282,10 +295,11 @@ func (gs *geminiSession) handleToolResult(raw map[string]any) {
 	}
 
 	if output != "" {
-		gs.events <- core.Event{
-			Type:     core.EventToolResult,
-			ToolName: toolID,
-			Content:  truncate(output, 500),
+		evt := core.Event{Type: core.EventToolResult, ToolName: toolID, Content: truncate(output, 500)}
+		select {
+		case gs.events <- evt:
+		case <-gs.ctx.Done():
+			return
 		}
 	}
 }
@@ -296,9 +310,11 @@ func (gs *geminiSession) handleError(raw map[string]any) {
 
 	if message != "" {
 		slog.Warn("geminiSession: error event", "severity", severity, "message", message)
-		gs.events <- core.Event{
-			Type:  core.EventError,
-			Error: fmt.Errorf("[%s] %s", severity, message),
+		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("[%s] %s", severity, message)}
+		select {
+		case gs.events <- evt:
+		case <-gs.ctx.Done():
+			return
 		}
 	}
 }
@@ -317,18 +333,18 @@ func (gs *geminiSession) handleResult(raw map[string]any) {
 	sid := gs.CurrentSessionID()
 
 	if errMsg != "" {
-		gs.events <- core.Event{
-			Type:      core.EventResult,
-			Content:   errMsg,
-			SessionID: sid,
-			Done:      true,
-			Error:     fmt.Errorf("%s", errMsg),
+		evt := core.Event{Type: core.EventResult, Content: errMsg, SessionID: sid, Done: true, Error: fmt.Errorf("%s", errMsg)}
+		select {
+		case gs.events <- evt:
+		case <-gs.ctx.Done():
+			return
 		}
 	} else {
-		gs.events <- core.Event{
-			Type:      core.EventResult,
-			SessionID: sid,
-			Done:      true,
+		evt := core.Event{Type: core.EventResult, SessionID: sid, Done: true}
+		select {
+		case gs.events <- evt:
+		case <-gs.ctx.Done():
+			return
 		}
 	}
 }

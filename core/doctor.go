@@ -48,10 +48,10 @@ type DoctorChecker interface {
 func RunDoctorChecks(ctx context.Context, agent Agent, platforms []Platform) []DoctorCheckResult {
 	var results []DoctorCheckResult
 
-	results = append(results, checkAgentBinary(agent)...)
+	results = append(results, checkAgentBinary(ctx, agent)...)
 	results = append(results, checkAgentAuth(ctx, agent)...)
 	results = append(results, checkPlatforms(platforms)...)
-	results = append(results, checkSystem()...)
+	results = append(results, checkSystem(ctx)...)
 	results = append(results, checkDependencies()...)
 	results = append(results, checkNetwork(ctx)...)
 
@@ -70,7 +70,7 @@ var agentBinMap = map[string]string{
 	"qoder":      "qodercli",
 }
 
-func checkAgentBinary(agent Agent) []DoctorCheckResult {
+func checkAgentBinary(ctx context.Context, agent Agent) []DoctorCheckResult {
 	name := agent.Name()
 	bin, ok := agentBinMap[name]
 	if !ok {
@@ -87,7 +87,9 @@ func checkAgentBinary(agent Agent) []DoctorCheckResult {
 	}
 
 	detail := path
-	if out, err := exec.Command(bin, "--version").Output(); err == nil {
+	tctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if out, err := exec.CommandContext(tctx, bin, "--version").Output(); err == nil {
 		ver := strings.TrimSpace(string(out))
 		if len(ver) > 80 {
 			ver = ver[:80]
@@ -170,7 +172,7 @@ func checkPlatforms(platforms []Platform) []DoctorCheckResult {
 	return results
 }
 
-func checkSystem() []DoctorCheckResult {
+func checkSystem(ctx context.Context) []DoctorCheckResult {
 	var results []DoctorCheckResult
 
 	// Memory
@@ -245,7 +247,9 @@ func checkSystem() []DoctorCheckResult {
 
 	// Disk space
 	if wd, err := os.Getwd(); err == nil {
-		if out, err := exec.Command("df", "-h", wd).Output(); err == nil {
+		tctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		if out, err := exec.CommandContext(tctx, "df", "-h", wd).Output(); err == nil {
 			lines := strings.Split(strings.TrimSpace(string(out)), "\n")
 			if len(lines) >= 2 {
 				fields := strings.Fields(lines[len(lines)-1])

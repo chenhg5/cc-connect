@@ -185,7 +185,7 @@ func (p *Platform) downloadContent(messageID string) ([]byte, error) {
 	url := fmt.Sprintf("https://api-data.line.me/v2/bot/message/%s/content", messageID)
 	req, _ := http.NewRequest("GET", url, nil)
 	req.Header.Set("Authorization", "Bearer "+p.channelToken)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := core.HTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}

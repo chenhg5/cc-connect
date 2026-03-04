@@ -256,6 +256,13 @@ func runProviderImport(args []string) {
 	// Query cc-switch database
 	query := "SELECT id, app_type, name, settings_config, is_current FROM providers"
 	if *appType != "" {
+		// Sanitize: only allow simple alphanumeric app type values
+		for _, c := range *appType {
+			if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-') {
+				fmt.Fprintf(os.Stderr, "Error: invalid app_type value %q\n", *appType)
+				os.Exit(1)
+			}
+		}
 		query += fmt.Sprintf(" WHERE app_type = '%s'", *appType)
 	}
 	cmd := exec.Command("sqlite3", db, "-json", query)

@@ -82,7 +82,7 @@ func (s *opencodeSession) Send(prompt string, images []core.ImageAttachment) err
 	// Append prompt as positional arg
 	args = append(args, prompt)
 
-	slog.Debug("opencodeSession: launching", "resume", isResume, "args", args)
+	slog.Debug("opencodeSession: launching", "resume", isResume, "args", core.RedactArgs(args))
 
 	cmd := exec.CommandContext(s.ctx, s.cmd, args...)
 	cmd.Dir = s.workDir
@@ -117,7 +117,12 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 			stderrMsg := stderrBuf.String()
 			if stderrMsg != "" {
 				slog.Error("opencodeSession: process failed", "error", err, "stderr", stderrMsg)
-				s.events <- core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
+				evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
+				select {
+				case s.events <- evt:
+				case <-s.ctx.Done():
+					return
+				}
 			}
 		}
 	}()
@@ -142,7 +147,12 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 
 	if err := scanner.Err(); err != nil {
 		slog.Error("opencodeSession: scanner error", "error", err)
-		s.events <- core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
+		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
+		select {
+		case s.events <- evt:
+		case <-s.ctx.Done():
+			return
+		}
 	}
 }
 
@@ -176,9 +186,11 @@ func (s *opencodeSession) handleText(raw map[string]any) {
 	}
 	text, _ := part["text"].(string)
 	if text != "" {
-		s.events <- core.Event{
-			Type:    core.EventText,
-			Content: text,
+		evt := core.Event{Type: core.EventText, Content: text}
+		select {
+		case s.events <- evt:
+		case <-s.ctx.Done():
+			return
 		}
 	}
 }
@@ -204,10 +216,11 @@ func (s *opencodeSession) handleToolUse(raw map[string]any) {
 		if state != nil {
 			output, _ = state["output"].(string)
 		}
-		s.events <- core.Event{
-			Type:     core.EventToolResult,
-			ToolName: toolName,
-			Content:  truncate(output, 500),
+		evt := core.Event{Type: core.EventToolResult, ToolName: toolName, Content: truncate(output, 500)}
+		select {
+		case s.events <- evt:
+		case <-s.ctx.Done():
+			return
 		}
 	} else {
 		// Tool use (running or starting)
@@ -224,10 +237,11 @@ func (s *opencodeSession) handleToolUse(raw map[string]any) {
 				}
 			}
 		}
-		s.events <- core.Event{
-			Type:      core.EventToolUse,
-			ToolName:  toolName,
-			ToolInput: input,
+		evt := core.Event{Type: core.EventToolUse, ToolName: toolName, ToolInput: input}
+		select {
+		case s.events <- evt:
+		case <-s.ctx.Done():
+			return
 		}
 	}
 }
@@ -239,9 +253,11 @@ func (s *opencodeSession) handleReasoning(raw map[string]any) {
 	}
 	text, _ := part["text"].(string)
 	if text != "" {
-		s.events <- core.Event{
-			Type:    core.EventThinking,
-			Content: text,
+		evt := core.Event{Type: core.EventThinking, Content: text}
+		select {
+		case s.events <- evt:
+		case <-s.ctx.Done():
+			return
 		}
 	}
 }
@@ -260,10 +276,11 @@ func (s *opencodeSession) handleStepStart(raw map[string]any) {
 
 func (s *opencodeSession) handleStepFinish(_ map[string]any) {
 	sid := s.CurrentSessionID()
-	s.events <- core.Event{
-		Type:      core.EventResult,
-		SessionID: sid,
-		Done:      true,
+	evt := core.Event{Type: core.EventResult, SessionID: sid, Done: true}
+	select {
+	case s.events <- evt:
+	case <-s.ctx.Done():
+		return
 	}
 }
 

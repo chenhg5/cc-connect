@@ -60,7 +60,7 @@ func (s *CronStore) save() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.path, data, 0o644)
+	return AtomicWriteFile(s.path, data, 0o644)
 }
 
 func (s *CronStore) Add(job *CronJob) error {
@@ -285,6 +285,8 @@ func (cs *CronScheduler) scheduleJob(job *CronJob) error {
 	return nil
 }
 
+const cronJobTimeout = 30 * time.Minute
+
 func (cs *CronScheduler) executeJob(jobID string) {
 	job := cs.store.Get(jobID)
 	if job == nil || !job.Enabled {
@@ -303,7 +305,18 @@ func (cs *CronScheduler) executeJob(jobID string) {
 
 	slog.Info("cron: executing job", "id", jobID, "project", job.Project, "prompt", truncateStr(job.Prompt, 60))
 
-	err := engine.ExecuteCronJob(job)
+	done := make(chan error, 1)
+	go func() {
+		done <- engine.ExecuteCronJob(job)
+	}()
+
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(cronJobTimeout):
+		err = fmt.Errorf("job timed out after %v", cronJobTimeout)
+	}
+
 	cs.store.MarkRun(jobID, err)
 
 	if err != nil {

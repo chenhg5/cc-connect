@@ -66,7 +66,7 @@ func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode strin
 		args = append(args, "--append-system-prompt", sysPrompt)
 	}
 
-	slog.Debug("claudeSession: starting", "args", args, "dir", workDir, "mode", mode)
+	slog.Debug("claudeSession: starting", "args", core.RedactArgs(args), "dir", workDir, "mode", mode)
 
 	cmd := exec.CommandContext(sessionCtx, "claude", args...)
 	cmd.Dir = workDir
@@ -123,7 +123,12 @@ func (cs *claudeSession) readLoop(stdout io.ReadCloser, stderrBuf *bytes.Buffer)
 			stderrMsg := strings.TrimSpace(stderrBuf.String())
 			if stderrMsg != "" {
 				slog.Error("claudeSession: process failed", "error", err, "stderr", stderrMsg)
-				cs.events <- core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
+				evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
+				select {
+				case cs.events <- evt:
+				case <-cs.ctx.Done():
+					return
+				}
 			}
 		}
 		close(cs.events)
@@ -167,14 +172,24 @@ func (cs *claudeSession) readLoop(stdout io.ReadCloser, stderrBuf *bytes.Buffer)
 
 	if err := scanner.Err(); err != nil {
 		slog.Error("claudeSession: scanner error", "error", err)
-		cs.events <- core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
+		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
+		select {
+		case cs.events <- evt:
+		case <-cs.ctx.Done():
+			return
+		}
 	}
 }
 
 func (cs *claudeSession) handleSystem(raw map[string]any) {
 	if sid, ok := raw["session_id"].(string); ok && sid != "" {
 		cs.sessionID.Store(sid)
-		cs.events <- core.Event{Type: core.EventText, SessionID: sid}
+		evt := core.Event{Type: core.EventText, SessionID: sid}
+		select {
+		case cs.events <- evt:
+		case <-cs.ctx.Done():
+			return
+		}
 	}
 }
 
@@ -197,23 +212,28 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 		case "tool_use":
 			toolName, _ := item["name"].(string)
 			inputSummary := summarizeInput(toolName, item["input"])
-			cs.events <- core.Event{
-				Type:      core.EventToolUse,
-				ToolName:  toolName,
-				ToolInput: inputSummary,
+			evt := core.Event{Type: core.EventToolUse, ToolName: toolName, ToolInput: inputSummary}
+			select {
+			case cs.events <- evt:
+			case <-cs.ctx.Done():
+				return
 			}
 		case "thinking":
 			if thinking, ok := item["thinking"].(string); ok && thinking != "" {
-				cs.events <- core.Event{
-					Type:    core.EventThinking,
-					Content: thinking,
+				evt := core.Event{Type: core.EventThinking, Content: thinking}
+				select {
+				case cs.events <- evt:
+				case <-cs.ctx.Done():
+					return
 				}
 			}
 		case "text":
 			if text, ok := item["text"].(string); ok && text != "" {
-				cs.events <- core.Event{
-					Type:    core.EventText,
-					Content: text,
+				evt := core.Event{Type: core.EventText, Content: text}
+				select {
+				case cs.events <- evt:
+				case <-cs.ctx.Done():
+					return
 				}
 			}
 		}
@@ -253,11 +273,11 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 	if sid, ok := raw["session_id"].(string); ok && sid != "" {
 		cs.sessionID.Store(sid)
 	}
-	cs.events <- core.Event{
-		Type:      core.EventResult,
-		Content:   content,
-		SessionID: cs.CurrentSessionID(),
-		Done:      true,
+	evt := core.Event{Type: core.EventResult, Content: content, SessionID: cs.CurrentSessionID(), Done: true}
+	select {
+	case cs.events <- evt:
+	case <-cs.ctx.Done():
+		return
 	}
 }
 
@@ -287,12 +307,17 @@ func (cs *claudeSession) handleControlRequest(raw map[string]any) {
 	}
 
 	slog.Info("claudeSession: permission request", "request_id", requestID, "tool", toolName)
-	cs.events <- core.Event{
+	evt := core.Event{
 		Type:         core.EventPermissionRequest,
 		RequestID:    requestID,
 		ToolName:     toolName,
 		ToolInput:    summarizeInput(toolName, input),
 		ToolInputRaw: input,
+	}
+	select {
+	case cs.events <- evt:
+	case <-cs.ctx.Done():
+		return
 	}
 }
 

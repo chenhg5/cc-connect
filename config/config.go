@@ -4,9 +4,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/BurntSushi/toml"
 )
+
+// configMu serializes read-modify-write cycles to prevent lost updates.
+var configMu sync.Mutex
 
 // ConfigPath stores the path to the config file for saving
 var ConfigPath string
@@ -133,6 +137,8 @@ func (c *Config) validate() error {
 
 // SaveActiveProvider persists the active provider name for a project.
 func SaveActiveProvider(projectName, providerName string) error {
+	configMu.Lock()
+	defer configMu.Unlock()
 	if ConfigPath == "" {
 		return fmt.Errorf("config path not set")
 	}
@@ -158,6 +164,8 @@ func SaveActiveProvider(projectName, providerName string) error {
 
 // AddProviderToConfig adds a provider to a project's agent config and saves.
 func AddProviderToConfig(projectName string, provider ProviderConfig) error {
+	configMu.Lock()
+	defer configMu.Unlock()
 	if ConfigPath == "" {
 		return fmt.Errorf("config path not set")
 	}
@@ -191,6 +199,8 @@ func AddProviderToConfig(projectName string, provider ProviderConfig) error {
 
 // RemoveProviderFromConfig removes a provider from a project's agent config and saves.
 func RemoveProviderFromConfig(projectName, providerName string) error {
+	configMu.Lock()
+	defer configMu.Unlock()
 	if ConfigPath == "" {
 		return fmt.Errorf("config path not set")
 	}
@@ -224,16 +234,34 @@ func RemoveProviderFromConfig(projectName, providerName string) error {
 }
 
 func saveConfig(cfg *Config) error {
-	f, err := os.Create(ConfigPath)
+	dir := filepath.Dir(ConfigPath)
+	tmp, err := os.CreateTemp(dir, ".config-*.tmp")
 	if err != nil {
-		return fmt.Errorf("create config: %w", err)
+		return fmt.Errorf("create temp config: %w", err)
 	}
-	defer f.Close()
-	return toml.NewEncoder(f).Encode(cfg)
+	tmpPath := tmp.Name()
+
+	if err := toml.NewEncoder(tmp).Encode(cfg); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("encode config: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	return os.Rename(tmpPath, ConfigPath)
 }
 
 // SaveLanguage saves the language setting to the config file.
 func SaveLanguage(lang string) error {
+	configMu.Lock()
+	defer configMu.Unlock()
 	if ConfigPath == "" {
 		return fmt.Errorf("config path not set")
 	}
@@ -271,6 +299,8 @@ func ListProjects() ([]string, error) {
 
 // AddCommand adds a global custom command and persists to config.
 func AddCommand(cmd CommandConfig) error {
+	configMu.Lock()
+	defer configMu.Unlock()
 	if ConfigPath == "" {
 		return fmt.Errorf("config path not set")
 	}
@@ -293,6 +323,8 @@ func AddCommand(cmd CommandConfig) error {
 
 // RemoveCommand removes a global custom command and persists to config.
 func RemoveCommand(name string) error {
+	configMu.Lock()
+	defer configMu.Unlock()
 	if ConfigPath == "" {
 		return fmt.Errorf("config path not set")
 	}
@@ -322,6 +354,8 @@ func RemoveCommand(name string) error {
 
 // SaveDisplayConfig persists the display truncation settings to the config file.
 func SaveDisplayConfig(thinkingMaxLen, toolMaxLen *int) error {
+	configMu.Lock()
+	defer configMu.Unlock()
 	if ConfigPath == "" {
 		return fmt.Errorf("config path not set")
 	}

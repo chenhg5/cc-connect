@@ -90,7 +90,7 @@ func (cs *cursorSession) Send(prompt string, images []core.ImageAttachment) erro
 	}
 	args = append(args, "--workspace", cs.workDir, "--", prompt)
 
-	slog.Debug("cursorSession: launching", "resume", isResume, "args", args)
+	slog.Debug("cursorSession: launching", "resume", isResume, "args", core.RedactArgs(args))
 
 	cmd := exec.CommandContext(cs.ctx, cs.cmd, args...)
 	cmd.Dir = cs.workDir
@@ -125,7 +125,12 @@ func (cs *cursorSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf
 			stderrMsg := strings.TrimSpace(stderrBuf.String())
 			if stderrMsg != "" {
 				slog.Error("cursorSession: process failed", "error", err, "stderr", stderrMsg)
-				cs.events <- core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
+				evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
+				select {
+				case cs.events <- evt:
+				case <-cs.ctx.Done():
+					return
+				}
 			}
 		}
 	}()
@@ -150,7 +155,12 @@ func (cs *cursorSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf
 
 	if err := scanner.Err(); err != nil {
 		slog.Error("cursorSession: scanner error", "error", err)
-		cs.events <- core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
+		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
+		select {
+		case cs.events <- evt:
+		case <-cs.ctx.Done():
+			return
+		}
 	}
 }
 
@@ -187,11 +197,11 @@ func (cs *cursorSession) handleSystem(raw map[string]any) {
 		slog.Debug("cursorSession: session init", "session_id", sid)
 
 		model, _ := raw["model"].(string)
-		cs.events <- core.Event{
-			Type:      core.EventText,
-			SessionID: sid,
-			Content:   "", // init event, no content to display
-			ToolName:  model,
+		evt := core.Event{Type: core.EventText, SessionID: sid, Content: "", ToolName: model}
+		select {
+		case cs.events <- evt:
+		case <-cs.ctx.Done():
+			return
 		}
 	}
 }
@@ -223,9 +233,11 @@ func (cs *cursorSession) handleAssistant(raw map[string]any) {
 		contentType, _ := item["type"].(string)
 		if contentType == "text" {
 			if text, ok := item["text"].(string); ok && text != "" {
-				cs.events <- core.Event{
-					Type:    core.EventText,
-					Content: text,
+				evt := core.Event{Type: core.EventText, Content: text}
+				select {
+				case cs.events <- evt:
+				case <-cs.ctx.Done():
+					return
 				}
 			}
 		}
@@ -242,10 +254,11 @@ func (cs *cursorSession) handleToolCall(raw map[string]any) {
 	if subtype == "started" {
 		name, input := extractToolInfo(tc)
 		if name != "" {
-			cs.events <- core.Event{
-				Type:      core.EventToolUse,
-				ToolName:  name,
-				ToolInput: input,
+			evt := core.Event{Type: core.EventToolUse, ToolName: name, ToolInput: input}
+			select {
+			case cs.events <- evt:
+			case <-cs.ctx.Done():
+				return
 			}
 		}
 	}
@@ -340,11 +353,11 @@ func (cs *cursorSession) handleResult(raw map[string]any) {
 	if sid, ok := raw["session_id"].(string); ok && sid != "" {
 		cs.chatID.Store(sid)
 	}
-	cs.events <- core.Event{
-		Type:      core.EventResult,
-		Content:   content,
-		SessionID: cs.CurrentSessionID(),
-		Done:      true,
+	evt := core.Event{Type: core.EventResult, Content: content, SessionID: cs.CurrentSessionID(), Done: true}
+	select {
+	case cs.events <- evt:
+	case <-cs.ctx.Done():
+		return
 	}
 }
 

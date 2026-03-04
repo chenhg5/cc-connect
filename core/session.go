@@ -187,8 +187,24 @@ func (sm *SessionManager) saveLocked() {
 	if sm.storePath == "" {
 		return
 	}
+
+	// Build a deep-copy snapshot to avoid racing with concurrent Session mutations.
+	snapSessions := make(map[string]*Session, len(sm.sessions))
+	for id, s := range sm.sessions {
+		s.mu.Lock()
+		snapSessions[id] = &Session{
+			ID:             s.ID,
+			Name:           s.Name,
+			AgentSessionID: s.AgentSessionID,
+			History:        append([]HistoryEntry(nil), s.History...),
+			CreatedAt:      s.CreatedAt,
+			UpdatedAt:      s.UpdatedAt,
+		}
+		s.mu.Unlock()
+	}
+
 	snap := sessionSnapshot{
-		Sessions:      sm.sessions,
+		Sessions:      snapSessions,
 		ActiveSession: sm.activeSession,
 		UserSessions:  sm.userSessions,
 		Counter:       sm.counter,
@@ -202,7 +218,7 @@ func (sm *SessionManager) saveLocked() {
 		slog.Error("session: failed to create dir", "error", err)
 		return
 	}
-	if err := os.WriteFile(sm.storePath, data, 0o644); err != nil {
+	if err := AtomicWriteFile(sm.storePath, data, 0o644); err != nil {
 		slog.Error("session: failed to write", "path", sm.storePath, "error", err)
 	}
 }

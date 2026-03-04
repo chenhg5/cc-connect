@@ -89,7 +89,9 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 		if !ok {
 			return
 		}
-		p.socket.Ack(*evt.Request)
+		if evt.Request != nil {
+			p.socket.Ack(*evt.Request)
+		}
 
 		if data.Type == slackevents.CallbackEvent {
 			switch ev := data.InnerEvent.Data.(type) {
@@ -199,7 +201,7 @@ func (p *Platform) downloadSlackFile(url string) ([]byte, error) {
 	}
 	req, _ := http.NewRequest("GET", url, nil)
 	req.Header.Set("Authorization", "Bearer "+p.botToken)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := core.HTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
