@@ -179,6 +179,14 @@ type CommandProvider interface {
 	CommandDirs() []string
 }
 
+// SkillProvider is an optional interface for agents that expose skills via
+// local directories (e.g. .claude/skills/<name>/SKILL.md). Each subdirectory
+// containing a SKILL.md is treated as a skill. Skills are project-level and
+// agent-specific — they are NOT shared across different agent types.
+type SkillProvider interface {
+	SkillDirs() []string
+}
+
 // ModeSwitcher is an optional interface for agents that support runtime permission mode switching.
 type ModeSwitcher interface {
 	SetMode(mode string)

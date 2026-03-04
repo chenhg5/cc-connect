@@ -222,6 +222,20 @@ func (a *Agent) CommandDirs() []string {
 	return dirs
 }
 
+// ── SkillProvider implementation ──────────────────────────────
+
+func (a *Agent) SkillDirs() []string {
+	absDir, err := filepath.Abs(a.workDir)
+	if err != nil {
+		absDir = a.workDir
+	}
+	dirs := []string{filepath.Join(absDir, ".gemini", "skills")}
+	if home, err := os.UserHomeDir(); err == nil {
+		dirs = append(dirs, filepath.Join(home, ".gemini", "skills"))
+	}
+	return dirs
+}
+
 // ── ContextCompressor implementation ──────────────────────────
 
 func (a *Agent) CompressCommand() string { return "/compress" }

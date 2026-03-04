@@ -233,6 +233,10 @@ const (
 	MsgCommandsDelUsage MsgKey = "commands_del_usage"
 	MsgCommandsDeleted  MsgKey = "commands_deleted"
 	MsgCommandsNotFound MsgKey = "commands_not_found"
+
+	MsgSkillsTitle MsgKey = "skills_title"
+	MsgSkillsEmpty MsgKey = "skills_empty"
+	MsgSkillsHint  MsgKey = "skills_hint"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -433,10 +437,12 @@ var messages = map[MsgKey]map[Language]string{
 			"/stop\n  Stop current execution\n\n" +
 			"/cron [add|list|del|enable|disable]\n  Manage scheduled tasks\n\n" +
 			"/commands [add|del]\n  Manage custom slash commands\n\n" +
+			"/skills\n  List agent skills (from SKILL.md)\n\n" +
 			"/status\n  Show system status\n\n" +
 			"/version\n  Show cc-connect version\n\n" +
 			"/help\n  Show this help\n\n" +
 			"Custom commands: define via `/commands add` or `[[commands]]` in config.toml.\n" +
+			"Agent skills: auto-discovered from .claude/skills/<name>/SKILL.md etc.\n" +
 			"Permission modes: default / edit / plan / yolo",
 		LangChinese: "📖 可用命令\n\n" +
 			"/new [名称]\n  创建新会话\n\n" +
@@ -455,10 +461,12 @@ var messages = map[MsgKey]map[Language]string{
 			"/stop\n  停止当前执行\n\n" +
 			"/cron [add|list|del|enable|disable]\n  管理定时任务\n\n" +
 			"/commands [add|del]\n  管理自定义命令\n\n" +
+			"/skills\n  列出 Agent Skills（来自 SKILL.md）\n\n" +
 			"/status\n  查看系统状态\n\n" +
 			"/version\n  查看 cc-connect 版本\n\n" +
 			"/help\n  显示此帮助\n\n" +
 			"自定义命令：通过 `/commands add` 添加，或在 config.toml 中配置 `[[commands]]`。\n" +
+			"Agent Skills：自动发现自 .claude/skills/<name>/SKILL.md 等目录。\n" +
 			"权限模式：default / edit / plan / yolo",
 		LangTraditionalChinese: "📖 可用命令\n\n" +
 			"/new [名稱]\n  建立新會話\n\n" +
@@ -477,10 +485,12 @@ var messages = map[MsgKey]map[Language]string{
 			"/stop\n  停止當前執行\n\n" +
 			"/cron [add|list|del|enable|disable]\n  管理定時任務\n\n" +
 			"/commands [add|del]\n  管理自訂命令\n\n" +
+			"/skills\n  列出 Agent Skills（來自 SKILL.md）\n\n" +
 			"/status\n  查看系統狀態\n\n" +
 			"/version\n  查看 cc-connect 版本\n\n" +
 			"/help\n  顯示此說明\n\n" +
 			"自訂命令：透過 `/commands add` 新增，或在 config.toml 中配置 `[[commands]]`。\n" +
+			"Agent Skills：自動發現自 .claude/skills/<name>/SKILL.md 等目錄。\n" +
 			"權限模式：default / edit / plan / yolo",
 		LangJapanese: "📖 利用可能なコマンド\n\n" +
 			"/new [名前]\n  新しいセッションを開始\n\n" +
@@ -499,10 +509,12 @@ var messages = map[MsgKey]map[Language]string{
 			"/stop\n  現在の実行を停止\n\n" +
 			"/cron [add|list|del|enable|disable]\n  スケジュールタスク管理\n\n" +
 			"/commands [add|del]\n  カスタムコマンド管理\n\n" +
+			"/skills\n  エージェントスキル一覧（SKILL.md から）\n\n" +
 			"/status\n  システム状態を表示\n\n" +
 			"/version\n  cc-connect のバージョンを表示\n\n" +
 			"/help\n  このヘルプを表示\n\n" +
 			"カスタムコマンド: `/commands add` または config.toml の `[[commands]]` で定義。\n" +
+			"エージェントスキル: .claude/skills/<name>/SKILL.md などから自動検出。\n" +
 			"権限モード: default / edit / plan / yolo",
 		LangSpanish: "📖 Comandos disponibles\n\n" +
 			"/new [nombre]\n  Iniciar una nueva sesión\n\n" +
@@ -521,10 +533,12 @@ var messages = map[MsgKey]map[Language]string{
 			"/stop\n  Detener ejecución actual\n\n" +
 			"/cron [add|list|del|enable|disable]\n  Gestionar tareas programadas\n\n" +
 			"/commands [add|del]\n  Gestionar comandos personalizados\n\n" +
+			"/skills\n  Listar skills del agente (desde SKILL.md)\n\n" +
 			"/status\n  Mostrar estado del sistema\n\n" +
 			"/version\n  Mostrar versión de cc-connect\n\n" +
 			"/help\n  Mostrar esta ayuda\n\n" +
 			"Comandos personalizados: use `/commands add` o defina `[[commands]]` en config.toml.\n" +
+			"Skills del agente: descubiertos de .claude/skills/<name>/SKILL.md etc.\n" +
 			"Modos de permisos: default / edit / plan / yolo",
 	},
 	MsgListTitle: {
@@ -1111,6 +1125,27 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 命令 `/%s` 未找到。使用 `/commands` 查看可用命令。",
 		LangJapanese:           "❌ コマンド `/%s` が見つかりません。`/commands` で一覧を確認してください。",
 		LangSpanish:            "❌ Comando `/%s` no encontrado. Use `/commands` para ver los comandos disponibles.",
+	},
+	MsgSkillsTitle: {
+		LangEnglish:            "📋 Available Skills (%s) — %d skill(s)\n──────────────────────────────\n",
+		LangChinese:            "📋 可用 Skills (%s) — %d 个\n──────────────────────────────\n",
+		LangTraditionalChinese: "📋 可用 Skills (%s) — %d 個\n──────────────────────────────\n",
+		LangJapanese:           "📋 利用可能なスキル (%s) — %d 個\n──────────────────────────────\n",
+		LangSpanish:            "📋 Skills disponibles (%s) — %d skill(s)\n──────────────────────────────\n",
+	},
+	MsgSkillsEmpty: {
+		LangEnglish:            "No skills found.\nSkills are discovered from agent directories (e.g. .claude/skills/<name>/SKILL.md).",
+		LangChinese:            "未发现任何 Skill。\nSkill 从 Agent 目录自动发现（如 .claude/skills/<name>/SKILL.md）。",
+		LangTraditionalChinese: "未發現任何 Skill。\nSkill 從 Agent 目錄自動發現（如 .claude/skills/<name>/SKILL.md）。",
+		LangJapanese:           "スキルが見つかりません。\nスキルはエージェントのディレクトリから自動検出されます（例: .claude/skills/<name>/SKILL.md）。",
+		LangSpanish:            "No se encontraron skills.\nLos skills se descubren de los directorios del agente (ej. .claude/skills/<name>/SKILL.md).",
+	},
+	MsgSkillsHint: {
+		LangEnglish:            "Usage: /<skill-name> [args...] to invoke a skill.",
+		LangChinese:            "用法：/<skill名称> [参数...] 来调用 Skill。",
+		LangTraditionalChinese: "用法：/<skill名稱> [參數...] 來調用 Skill。",
+		LangJapanese:           "使い方：/<スキル名> [引数...] でスキルを実行します。",
+		LangSpanish:            "Uso: /<nombre-skill> [args...] para invocar un skill.",
 	},
 }
 

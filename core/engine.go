@@ -54,6 +54,7 @@ type Engine struct {
 	cronScheduler *CronScheduler
 
 	commands *CommandRegistry
+	skills   *SkillRegistry
 
 	// Interactive agent session management
 	interactiveMu     sync.Mutex
@@ -92,12 +93,16 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		i18n:              NewI18n(lang),
 		display:           DisplayCfg{ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen},
 		commands:          NewCommandRegistry(),
+		skills:            NewSkillRegistry(),
 		interactiveStates: make(map[string]*interactiveState),
 		startedAt:         time.Now(),
 	}
 
 	if cp, ok := ag.(CommandProvider); ok {
 		e.commands.SetAgentDirs(cp.CommandDirs())
+	}
+	if sp, ok := ag.(SkillProvider); ok {
+		e.skills.SetDirs(sp.SkillDirs())
 	}
 
 	return e
@@ -713,10 +718,16 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) {
 		e.reply(p, msg.ReplyCtx, VersionInfo)
 	case "/commands", "/command", "/cmd":
 		e.cmdCommands(p, msg, args)
+	case "/skills", "/skill":
+		e.cmdSkills(p, msg)
 	default:
 		cmdName := strings.TrimPrefix(cmd, "/")
 		if custom, ok := e.commands.Resolve(cmdName); ok {
 			e.executeCustomCommand(p, msg, custom, args)
+			return
+		}
+		if skill := e.skills.Resolve(cmdName); skill != nil {
+			e.executeSkill(p, msg, skill, args)
 			return
 		}
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf("Unknown command: %s\nType /help for available commands.", cmd))
@@ -1884,6 +1895,49 @@ func (e *Engine) cmdCommandsDel(p Platform, msg *Message, args []string) {
 	}
 
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandsDeleted), name))
+}
+
+// ──────────────────────────────────────────────────────────────
+// Skill discovery & execution
+// ──────────────────────────────────────────────────────────────
+
+func (e *Engine) executeSkill(p Platform, msg *Message, skill *Skill, args []string) {
+	prompt := BuildSkillInvocationPrompt(skill, args)
+
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	if !session.TryLock() {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
+		return
+	}
+
+	slog.Info("executing skill",
+		"skill", skill.Name,
+		"source", skill.Source,
+		"user", msg.UserName,
+	)
+
+	msg.Content = prompt
+	go e.processInteractiveMessage(p, msg, session)
+}
+
+func (e *Engine) cmdSkills(p Platform, msg *Message) {
+	skills := e.skills.ListAll()
+	if len(skills) == 0 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSkillsEmpty))
+		return
+	}
+
+	var sb strings.Builder
+	sb.WriteString(e.i18n.Tf(MsgSkillsTitle, e.agent.Name(), len(skills)))
+
+	for _, s := range skills {
+		desc := s.Description
+		name := s.Name
+		sb.WriteString(fmt.Sprintf("  /%s — %s\n", name, desc))
+	}
+
+	sb.WriteString("\n" + e.i18n.T(MsgSkillsHint))
+	e.reply(p, msg.ReplyCtx, sb.String())
 }
 
 // truncateIf truncates s to maxLen runes. 0 means no truncation.
