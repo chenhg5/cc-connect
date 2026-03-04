@@ -276,18 +276,25 @@ func listCursorSessions(workDir string) ([]core.AgentSessionInfo, error) {
 		}
 
 		meta := readSessionMeta(dbPath)
+		msgCount, firstUserMsg := countSessionMessages(dbPath, meta.RootBlobID)
+
 		summary := meta.Name
 		if summary == "" || summary == "New Agent" {
-			summary = sessionID[:12] + "..."
+			if firstUserMsg != "" {
+				summary = firstUserMsg
+			} else {
+				summary = sessionID[:12] + "..."
+			}
 		}
 		if utf8.RuneCountInString(summary) > 60 {
 			summary = string([]rune(summary)[:60]) + "..."
 		}
 
 		sessions = append(sessions, core.AgentSessionInfo{
-			ID:         sessionID,
-			Summary:    summary,
-			ModifiedAt: info.ModTime(),
+			ID:           sessionID,
+			Summary:      summary,
+			MessageCount: msgCount,
+			ModifiedAt:   info.ModTime(),
 		})
 	}
 
@@ -300,13 +307,15 @@ func listCursorSessions(workDir string) ([]core.AgentSessionInfo, error) {
 
 // sessionMeta holds metadata extracted from a Cursor chat store.db.
 type sessionMeta struct {
-	AgentID string
-	Name    string
-	Mode    string
+	AgentID    string
+	Name       string
+	Mode       string
+	RootBlobID string
 }
 
 // readSessionMeta reads the meta table from store.db without importing database/sql.
-// The meta value at key "0" is a hex-encoded JSON string.
+// The meta value at key "0" is already a hex-encoded JSON string in the TEXT column,
+// so we read it directly (no extra hex() wrapping) and decode once.
 func readSessionMeta(dbPath string) sessionMeta {
 	sqliteBin, err := exec.LookPath("sqlite3")
 	if err != nil {
@@ -314,7 +323,7 @@ func readSessionMeta(dbPath string) sessionMeta {
 	}
 
 	out, err := exec.Command(sqliteBin, dbPath,
-		"SELECT hex(value) FROM meta WHERE key='0' LIMIT 1;",
+		"SELECT value FROM meta WHERE key='0' LIMIT 1;",
 	).Output()
 	if err != nil {
 		return sessionMeta{}
@@ -327,17 +336,134 @@ func readSessionMeta(dbPath string) sessionMeta {
 
 	decoded, err := hex.DecodeString(hexStr)
 	if err != nil {
-		return sessionMeta{}
+		// Fallback: value might be raw JSON (not hex-encoded) in some versions
+		decoded = []byte(hexStr)
 	}
 
 	var m struct {
-		AgentID string `json:"agentId"`
-		Name    string `json:"name"`
-		Mode    string `json:"mode"`
+		AgentID    string `json:"agentId"`
+		Name       string `json:"name"`
+		Mode       string `json:"mode"`
+		RootBlobID string `json:"latestRootBlobId"`
 	}
 	if json.Unmarshal(decoded, &m) != nil {
 		return sessionMeta{}
 	}
 
-	return sessionMeta{AgentID: m.AgentID, Name: m.Name, Mode: m.Mode}
+	return sessionMeta{AgentID: m.AgentID, Name: m.Name, Mode: m.Mode, RootBlobID: m.RootBlobID}
+}
+
+// countSessionMessages reads the root blob from store.db and counts conversation
+// messages. It also returns the first user message text as a summary fallback.
+// The root blob uses a protobuf-like encoding where field 1 (tag 0x0a, length 0x20)
+// entries are 32-byte SHA-256 references to child message blobs.
+func countSessionMessages(dbPath, rootBlobID string) (int, string) {
+	if rootBlobID == "" {
+		return 0, ""
+	}
+	sqliteBin, err := exec.LookPath("sqlite3")
+	if err != nil {
+		return 0, ""
+	}
+
+	// Read root blob header (first ~8KB is enough for counting refs)
+	out, err := exec.Command(sqliteBin, dbPath,
+		fmt.Sprintf("SELECT hex(substr(data,1,8192)) FROM blobs WHERE id='%s' LIMIT 1;", rootBlobID),
+	).Output()
+	if err != nil {
+		return 0, ""
+	}
+	rootHex := strings.TrimSpace(string(out))
+	rootBytes, err := hex.DecodeString(rootHex)
+	if err != nil || len(rootBytes) == 0 {
+		return 0, ""
+	}
+
+	// Count field-1 entries (0x0a 0x20 + 32-byte hash)
+	var childIDs []string
+	i := 0
+	for i+33 < len(rootBytes) && rootBytes[i] == 0x0a && rootBytes[i+1] == 0x20 {
+		childIDs = append(childIDs, hex.EncodeToString(rootBytes[i+2:i+34]))
+		i += 34
+	}
+	if len(childIDs) == 0 {
+		return 0, ""
+	}
+
+	// Read the first few children to find the first real user message for summary,
+	// and count roles to determine message count (excluding system).
+	msgCount := 0
+	var firstUserMsg string
+	limit := len(childIDs)
+	if limit > 80 {
+		limit = 80
+	}
+
+	// Build a single query to read multiple children
+	var ids []string
+	for _, cid := range childIDs[:limit] {
+		ids = append(ids, "'"+cid+"'")
+	}
+	query := fmt.Sprintf(
+		"SELECT id, data FROM blobs WHERE id IN (%s);",
+		strings.Join(ids, ","),
+	)
+	blobOut, err := exec.Command(sqliteBin, "-separator", "|", dbPath, query).Output()
+	if err != nil {
+		// Fallback: estimate from child count minus 1 (system message)
+		if len(childIDs) > 1 {
+			return len(childIDs) - 1, ""
+		}
+		return 0, ""
+	}
+
+	roleCount := make(map[string]int)
+	blobMap := make(map[string][]byte)
+	for _, line := range strings.Split(string(blobOut), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "|", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		blobMap[parts[0]] = []byte(parts[1])
+	}
+
+	for _, cid := range childIDs[:limit] {
+		raw, ok := blobMap[cid]
+		if !ok || len(raw) == 0 {
+			continue
+		}
+		var msg struct {
+			Role    string `json:"role"`
+			Content any    `json:"content"`
+		}
+		if json.Unmarshal(raw, &msg) != nil {
+			continue
+		}
+		roleCount[msg.Role]++
+		if msg.Role == "user" && firstUserMsg == "" {
+			if s, ok := msg.Content.(string); ok {
+				s = strings.TrimSpace(s)
+				// Skip injected context (XML tags, conversation summaries, etc.)
+				if len(s) > 0 && !strings.HasPrefix(s, "<") && !strings.HasPrefix(s, "[") && !strings.HasPrefix(s, "{") {
+					if utf8.RuneCountInString(s) > 50 {
+						s = string([]rune(s)[:50]) + "..."
+					}
+					firstUserMsg = s
+				}
+			}
+		}
+	}
+
+	msgCount = roleCount["user"] + roleCount["assistant"]
+	if limit < len(childIDs) {
+		// Extrapolate for remaining children
+		total := len(childIDs)
+		msgCount = msgCount * total / limit
+	}
+
+	return msgCount, firstUserMsg
 }
