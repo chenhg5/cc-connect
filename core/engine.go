@@ -867,9 +867,13 @@ func (e *Engine) cmdList(p Platform, msg *Message) {
 		if len(shortID) > 12 {
 			shortID = shortID[:12]
 		}
-		summary := s.Summary
+		summary := strings.ReplaceAll(s.Summary, "\n", " ")
+		summary = strings.Join(strings.Fields(summary), " ")
 		if summary == "" {
 			summary = "(empty)"
+		}
+		if len([]rune(summary)) > 40 {
+			summary = string([]rune(summary)[:40]) + "…"
 		}
 		sb.WriteString(fmt.Sprintf("%s `%s` · %s · **%d** msgs · %s\n",
 			marker, shortID, summary, s.MessageCount, s.ModifiedAt.Format("01-02 15:04")))
