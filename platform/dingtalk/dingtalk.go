@@ -66,9 +66,13 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	}()
 
 	// Give the stream a short window to fail fast on auth errors.
+	// If Start() returns nil quickly, it means it connected successfully (non-blocking SDK).
+	// If it doesn't return within 3s, it's a blocking call that's running fine.
 	select {
 	case err := <-errCh:
-		return fmt.Errorf("dingtalk: start stream: %w", err)
+		if err != nil {
+			return fmt.Errorf("dingtalk: start stream: %w", err)
+		}
 	case <-time.After(3 * time.Second):
 	}
 
