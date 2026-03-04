@@ -21,6 +21,16 @@ const (
 	defaultToolMaxLen     = 500
 )
 
+// Slow-operation thresholds. Operations exceeding these durations produce a
+// slog.Warn so operators can quickly pinpoint bottlenecks.
+const (
+	slowPlatformSend    = 2 * time.Second  // platform Reply / Send
+	slowAgentStart      = 5 * time.Second  // agent.StartSession
+	slowAgentClose      = 3 * time.Second  // agentSession.Close
+	slowAgentSend       = 2 * time.Second  // agentSession.Send
+	slowAgentFirstEvent = 15 * time.Second // time from send to first agent event
+)
+
 // VersionInfo is set by main at startup so that /version works.
 var VersionInfo string
 
@@ -443,6 +453,7 @@ func isDenyResponse(s string) bool {
 
 func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Session) {
 	defer session.Unlock()
+	turnStart := time.Now()
 
 	e.i18n.DetectAndSet(msg.Content)
 	session.AddHistory("user", msg.Content)
@@ -460,6 +471,7 @@ func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Se
 		return
 	}
 
+	sendStart := time.Now()
 	if err := state.agentSession.Send(msg.Content, msg.Images); err != nil {
 		slog.Error("failed to send prompt", "error", err)
 
@@ -472,6 +484,7 @@ func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Se
 				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), "failed to restart agent session"))
 				return
 			}
+			sendStart = time.Now()
 			if err := state.agentSession.Send(msg.Content, msg.Images); err != nil {
 				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
 				return
@@ -481,8 +494,11 @@ func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Se
 			return
 		}
 	}
+	if elapsed := time.Since(sendStart); elapsed >= slowAgentSend {
+		slog.Warn("slow agent send", "elapsed", elapsed, "session", msg.SessionKey, "content_len", len(msg.Content))
+	}
 
-	e.processInteractiveEvents(state, session, msg.SessionKey)
+	e.processInteractiveEvents(state, session, msg.SessionKey, turnStart)
 }
 
 func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, replyCtx any, session *Session) *interactiveState {
@@ -511,12 +527,17 @@ func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, repl
 		inj.SetSessionEnv(envVars)
 	}
 
+	startAt := time.Now()
 	agentSession, err := e.agent.StartSession(e.ctx, session.AgentSessionID)
+	startElapsed := time.Since(startAt)
 	if err != nil {
-		slog.Error("failed to start interactive session", "error", err)
+		slog.Error("failed to start interactive session", "error", err, "elapsed", startElapsed)
 		state = &interactiveState{platform: p, replyCtx: replyCtx}
 		e.interactiveStates[sessionKey] = state
 		return state
+	}
+	if startElapsed >= slowAgentStart {
+		slog.Warn("slow agent session start", "elapsed", startElapsed, "agent", e.agent.Name(), "session_id", session.AgentSessionID)
 	}
 
 	state = &interactiveState{
@@ -526,7 +547,7 @@ func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, repl
 	}
 	e.interactiveStates[sessionKey] = state
 
-	slog.Info("interactive session started", "session_key", sessionKey, "agent_session", session.AgentSessionID)
+	slog.Info("interactive session started", "session_key", sessionKey, "agent_session", session.AgentSessionID, "elapsed", startElapsed)
 	return state
 }
 
@@ -536,18 +557,31 @@ func (e *Engine) cleanupInteractiveState(sessionKey string) {
 
 	state, ok := e.interactiveStates[sessionKey]
 	if ok && state.agentSession != nil {
+		closeStart := time.Now()
 		state.agentSession.Close()
+		if elapsed := time.Since(closeStart); elapsed >= slowAgentClose {
+			slog.Warn("slow agent session close", "elapsed", elapsed, "session", sessionKey)
+		}
 	}
 	delete(e.interactiveStates, sessionKey)
 }
 
-func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessionKey string) {
+func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessionKey string, turnStart time.Time) {
 	var textParts []string
 	toolCount := 0
+	waitStart := time.Now()
+	firstEventLogged := false
 
 	for event := range state.agentSession.Events() {
 		if e.ctx.Err() != nil {
 			return
+		}
+
+		if !firstEventLogged {
+			firstEventLogged = true
+			if elapsed := time.Since(waitStart); elapsed >= slowAgentFirstEvent {
+				slog.Warn("slow agent first event", "elapsed", elapsed, "session", sessionKey, "event_type", event.Type)
+			}
 		}
 
 		state.mu.Lock()
@@ -634,18 +668,24 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			session.AddHistory("assistant", fullResponse)
 			e.sessions.Save()
 
-			slog.Debug("turn complete",
+			turnDuration := time.Since(turnStart)
+			slog.Info("turn complete",
 				"session", session.ID,
 				"agent_session", session.AgentSessionID,
 				"tools", toolCount,
 				"response_len", len(fullResponse),
+				"turn_duration", turnDuration,
 			)
 
+			replyStart := time.Now()
 			for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
 				if err := p.Send(e.ctx, replyCtx, chunk); err != nil {
 					slog.Error("failed to send reply", "error", err)
 					return
 				}
+			}
+			if elapsed := time.Since(replyStart); elapsed >= slowPlatformSend {
+				slog.Warn("slow final reply send", "platform", p.Name(), "elapsed", elapsed, "response_len", len(fullResponse))
 			}
 			return
 
@@ -1522,17 +1562,25 @@ func (e *Engine) sendPermissionPrompt(p Platform, replyCtx any, prompt string) {
 	e.send(p, replyCtx, prompt)
 }
 
-// send wraps p.Send with error logging.
+// send wraps p.Send with error logging and slow-operation warnings.
 func (e *Engine) send(p Platform, replyCtx any, content string) {
+	start := time.Now()
 	if err := p.Send(e.ctx, replyCtx, content); err != nil {
 		slog.Error("platform send failed", "platform", p.Name(), "error", err, "content_len", len(content))
 	}
+	if elapsed := time.Since(start); elapsed >= slowPlatformSend {
+		slog.Warn("slow platform send", "platform", p.Name(), "elapsed", elapsed, "content_len", len(content))
+	}
 }
 
-// reply wraps p.Reply with error logging.
+// reply wraps p.Reply with error logging and slow-operation warnings.
 func (e *Engine) reply(p Platform, replyCtx any, content string) {
+	start := time.Now()
 	if err := p.Reply(e.ctx, replyCtx, content); err != nil {
 		slog.Error("platform reply failed", "platform", p.Name(), "error", err, "content_len", len(content))
+	}
+	if elapsed := time.Since(start); elapsed >= slowPlatformSend {
+		slog.Warn("slow platform reply", "platform", p.Name(), "elapsed", elapsed, "content_len", len(content))
 	}
 }
 

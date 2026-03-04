@@ -202,7 +202,7 @@ func (cs *codexSession) handleItemStarted(raw map[string]any) {
 		cs.events <- core.Event{
 			Type:      core.EventToolUse,
 			ToolName:  "Bash",
-			ToolInput: truncate(command, 200),
+			ToolInput: command,
 		}
 	}
 }
