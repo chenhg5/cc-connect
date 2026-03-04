@@ -237,6 +237,15 @@ const (
 	MsgSkillsTitle MsgKey = "skills_title"
 	MsgSkillsEmpty MsgKey = "skills_empty"
 	MsgSkillsHint  MsgKey = "skills_hint"
+
+	MsgConfigTitle       MsgKey = "config_title"
+	MsgConfigHint        MsgKey = "config_hint"
+	MsgConfigGetUsage    MsgKey = "config_get_usage"
+	MsgConfigSetUsage    MsgKey = "config_set_usage"
+	MsgConfigUpdated     MsgKey = "config_updated"
+	MsgConfigKeyNotFound MsgKey = "config_key_not_found"
+
+	MsgDoctorRunning MsgKey = "doctor_running"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -438,6 +447,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/cron [add|list|del|enable|disable]\n  Manage scheduled tasks\n\n" +
 			"/commands [add|del]\n  Manage custom slash commands\n\n" +
 			"/skills\n  List agent skills (from SKILL.md)\n\n" +
+			"/config [key] [value]\n  View/update runtime configuration\n\n" +
+			"/doctor\n  Run system diagnostics\n\n" +
 			"/status\n  Show system status\n\n" +
 			"/version\n  Show cc-connect version\n\n" +
 			"/help\n  Show this help\n\n" +
@@ -462,6 +473,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/cron [add|list|del|enable|disable]\n  管理定时任务\n\n" +
 			"/commands [add|del]\n  管理自定义命令\n\n" +
 			"/skills\n  列出 Agent Skills（来自 SKILL.md）\n\n" +
+			"/config [key] [value]\n  查看/修改运行时配置\n\n" +
+			"/doctor\n  运行系统诊断\n\n" +
 			"/status\n  查看系统状态\n\n" +
 			"/version\n  查看 cc-connect 版本\n\n" +
 			"/help\n  显示此帮助\n\n" +
@@ -486,6 +499,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/cron [add|list|del|enable|disable]\n  管理定時任務\n\n" +
 			"/commands [add|del]\n  管理自訂命令\n\n" +
 			"/skills\n  列出 Agent Skills（來自 SKILL.md）\n\n" +
+			"/config [key] [value]\n  查看/修改執行階段配置\n\n" +
+			"/doctor\n  執行系統診斷\n\n" +
 			"/status\n  查看系統狀態\n\n" +
 			"/version\n  查看 cc-connect 版本\n\n" +
 			"/help\n  顯示此說明\n\n" +
@@ -510,6 +525,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/cron [add|list|del|enable|disable]\n  スケジュールタスク管理\n\n" +
 			"/commands [add|del]\n  カスタムコマンド管理\n\n" +
 			"/skills\n  エージェントスキル一覧（SKILL.md から）\n\n" +
+			"/config [key] [value]\n  ランタイム設定の表示/変更\n\n" +
+			"/doctor\n  システム診断を実行\n\n" +
 			"/status\n  システム状態を表示\n\n" +
 			"/version\n  cc-connect のバージョンを表示\n\n" +
 			"/help\n  このヘルプを表示\n\n" +
@@ -534,6 +551,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/cron [add|list|del|enable|disable]\n  Gestionar tareas programadas\n\n" +
 			"/commands [add|del]\n  Gestionar comandos personalizados\n\n" +
 			"/skills\n  Listar skills del agente (desde SKILL.md)\n\n" +
+			"/config [key] [value]\n  Ver/actualizar configuración en tiempo de ejecución\n\n" +
+			"/doctor\n  Ejecutar diagnósticos del sistema\n\n" +
 			"/status\n  Mostrar estado del sistema\n\n" +
 			"/version\n  Mostrar versión de cc-connect\n\n" +
 			"/help\n  Mostrar esta ayuda\n\n" +
@@ -1146,6 +1165,56 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "用法：/<skill名稱> [參數...] 來調用 Skill。",
 		LangJapanese:           "使い方：/<スキル名> [引数...] でスキルを実行します。",
 		LangSpanish:            "Uso: /<nombre-skill> [args...] para invocar un skill.",
+	},
+
+	MsgConfigTitle: {
+		LangEnglish:            "⚙️ **Runtime Configuration**\n\n",
+		LangChinese:            "⚙️ **运行时配置**\n\n",
+		LangTraditionalChinese: "⚙️ **執行階段配置**\n\n",
+		LangJapanese:           "⚙️ **ランタイム設定**\n\n",
+		LangSpanish:            "⚙️ **Configuración en tiempo de ejecución**\n\n",
+	},
+	MsgConfigHint: {
+		LangEnglish:            "`/config <key> <value>` to update\n`/config get <key>` to view\n\n`0` = no truncation",
+		LangChinese:            "`/config <key> <value>` 修改配置\n`/config get <key>` 查看配置\n\n`0` = 不截断",
+		LangTraditionalChinese: "`/config <key> <value>` 修改配置\n`/config get <key>` 查看配置\n\n`0` = 不截斷",
+		LangJapanese:           "`/config <key> <value>` で変更\n`/config get <key>` で確認\n\n`0` = 切り捨てなし",
+		LangSpanish:            "`/config <key> <value>` para actualizar\n`/config get <key>` para ver\n\n`0` = sin truncamiento",
+	},
+	MsgConfigGetUsage: {
+		LangEnglish:            "Usage: `/config get <key>`",
+		LangChinese:            "用法：`/config get <key>`",
+		LangTraditionalChinese: "用法：`/config get <key>`",
+		LangJapanese:           "使い方: `/config get <key>`",
+		LangSpanish:            "Uso: `/config get <key>`",
+	},
+	MsgConfigSetUsage: {
+		LangEnglish:            "Usage: `/config set <key> <value>`",
+		LangChinese:            "用法：`/config set <key> <value>`",
+		LangTraditionalChinese: "用法：`/config set <key> <value>`",
+		LangJapanese:           "使い方: `/config set <key> <value>`",
+		LangSpanish:            "Uso: `/config set <key> <value>`",
+	},
+	MsgConfigUpdated: {
+		LangEnglish:            "✅ `%s` updated to **%s**",
+		LangChinese:            "✅ `%s` 已更新为 **%s**",
+		LangTraditionalChinese: "✅ `%s` 已更新為 **%s**",
+		LangJapanese:           "✅ `%s` を **%s** に更新しました",
+		LangSpanish:            "✅ `%s` actualizado a **%s**",
+	},
+	MsgConfigKeyNotFound: {
+		LangEnglish:            "❌ Unknown config key `%s`. Use `/config` to see available keys.",
+		LangChinese:            "❌ 未知配置项 `%s`。使用 `/config` 查看可用配置。",
+		LangTraditionalChinese: "❌ 未知配置項 `%s`。使用 `/config` 查看可用配置。",
+		LangJapanese:           "❌ 不明な設定キー `%s`。`/config` で一覧を確認してください。",
+		LangSpanish:            "❌ Clave de configuración desconocida `%s`. Use `/config` para ver las disponibles.",
+	},
+	MsgDoctorRunning: {
+		LangEnglish:            "🏥 Running diagnostics...",
+		LangChinese:            "🏥 正在运行系统诊断...",
+		LangTraditionalChinese: "🏥 正在執行系統診斷...",
+		LangJapanese:           "🏥 診断を実行中...",
+		LangSpanish:            "🏥 Ejecutando diagnósticos...",
 	},
 }
 

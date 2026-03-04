@@ -51,6 +51,8 @@ type Engine struct {
 	commandSaveAddFunc func(name, description, prompt string) error
 	commandSaveDelFunc func(name string) error
 
+	displaySaveFunc func(thinkingMaxLen, toolMaxLen *int) error
+
 	cronScheduler *CronScheduler
 
 	commands *CommandRegistry
@@ -144,6 +146,10 @@ func (e *Engine) SetCommandSaveAddFunc(fn func(name, description, prompt string)
 
 func (e *Engine) SetCommandSaveDelFunc(fn func(name string) error) {
 	e.commandSaveDelFunc = fn
+}
+
+func (e *Engine) SetDisplaySaveFunc(fn func(thinkingMaxLen, toolMaxLen *int) error) {
+	e.displaySaveFunc = fn
 }
 
 // AddCommand registers a custom slash command.
@@ -720,6 +726,10 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) {
 		e.cmdCommands(p, msg, args)
 	case "/skills", "/skill":
 		e.cmdSkills(p, msg)
+	case "/config":
+		e.cmdConfig(p, msg, args)
+	case "/doctor":
+		e.cmdDoctor(p, msg)
 	default:
 		cmdName := strings.TrimPrefix(cmd, "/")
 		if custom, ok := e.commands.Resolve(cmdName); ok {
@@ -1938,6 +1948,143 @@ func (e *Engine) cmdSkills(p Platform, msg *Message) {
 
 	sb.WriteString("\n" + e.i18n.T(MsgSkillsHint))
 	e.reply(p, msg.ReplyCtx, sb.String())
+}
+
+// ── /config command ──────────────────────────────────────────
+
+// configItem describes a configurable runtime parameter.
+type configItem struct {
+	key     string
+	getFunc func() string
+	setFunc func(string) error
+}
+
+func (e *Engine) configItems() []configItem {
+	return []configItem{
+		{
+			key: "thinking_max_len",
+			getFunc: func() string {
+				return fmt.Sprintf("%d", e.display.ThinkingMaxLen)
+			},
+			setFunc: func(v string) error {
+				n, err := strconv.Atoi(v)
+				if err != nil {
+					return fmt.Errorf("invalid integer: %s", v)
+				}
+				if n < 0 {
+					return fmt.Errorf("value must be >= 0")
+				}
+				e.display.ThinkingMaxLen = n
+				if e.displaySaveFunc != nil {
+					return e.displaySaveFunc(&n, nil)
+				}
+				return nil
+			},
+		},
+		{
+			key: "tool_max_len",
+			getFunc: func() string {
+				return fmt.Sprintf("%d", e.display.ToolMaxLen)
+			},
+			setFunc: func(v string) error {
+				n, err := strconv.Atoi(v)
+				if err != nil {
+					return fmt.Errorf("invalid integer: %s", v)
+				}
+				if n < 0 {
+					return fmt.Errorf("value must be >= 0")
+				}
+				e.display.ToolMaxLen = n
+				if e.displaySaveFunc != nil {
+					return e.displaySaveFunc(nil, &n)
+				}
+				return nil
+			},
+		},
+	}
+}
+
+func (e *Engine) cmdConfig(p Platform, msg *Message, args []string) {
+	items := e.configItems()
+
+	if len(args) == 0 {
+		// Show all
+		var sb strings.Builder
+		sb.WriteString(e.i18n.T(MsgConfigTitle))
+		for _, item := range items {
+			sb.WriteString(fmt.Sprintf("  `%s` = **%s**\n", item.key, item.getFunc()))
+		}
+		sb.WriteString("\n" + e.i18n.T(MsgConfigHint))
+		e.reply(p, msg.ReplyCtx, sb.String())
+		return
+	}
+
+	sub := strings.ToLower(args[0])
+
+	switch sub {
+	case "get":
+		if len(args) < 2 {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgConfigGetUsage))
+			return
+		}
+		key := strings.ToLower(args[1])
+		for _, item := range items {
+			if item.key == key {
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf("`%s` = **%s**", key, item.getFunc()))
+				return
+			}
+		}
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgConfigKeyNotFound, key))
+
+	case "set":
+		if len(args) < 3 {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgConfigSetUsage))
+			return
+		}
+		key := strings.ToLower(args[1])
+		value := args[2]
+		for _, item := range items {
+			if item.key == key {
+				if err := item.setFunc(value); err != nil {
+					e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
+					return
+				}
+				e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgConfigUpdated, key, item.getFunc()))
+				return
+			}
+		}
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgConfigKeyNotFound, key))
+
+	default:
+		// Treat "/config <key>" as get, "/config <key> <value>" as set
+		key := strings.ToLower(sub)
+		for _, item := range items {
+			if item.key == key {
+				if len(args) >= 2 {
+					// Set
+					if err := item.setFunc(args[1]); err != nil {
+						e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
+						return
+					}
+					e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgConfigUpdated, key, item.getFunc()))
+				} else {
+					// Get
+					e.reply(p, msg.ReplyCtx, fmt.Sprintf("`%s` = **%s**", key, item.getFunc()))
+				}
+				return
+			}
+		}
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgConfigKeyNotFound, key))
+	}
+}
+
+// ── /doctor command ─────────────────────────────────────────
+
+func (e *Engine) cmdDoctor(p Platform, msg *Message) {
+	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDoctorRunning))
+	results := RunDoctorChecks(e.ctx, e.agent, e.platforms)
+	report := FormatDoctorResults(results, e.i18n.IsZhLike())
+	e.reply(p, msg.ReplyCtx, report)
 }
 
 // truncateIf truncates s to maxLen runes. 0 means no truncation.

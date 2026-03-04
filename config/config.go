@@ -320,6 +320,28 @@ func RemoveCommand(name string) error {
 	return saveConfig(cfg)
 }
 
+// SaveDisplayConfig persists the display truncation settings to the config file.
+func SaveDisplayConfig(thinkingMaxLen, toolMaxLen *int) error {
+	if ConfigPath == "" {
+		return fmt.Errorf("config path not set")
+	}
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+	if thinkingMaxLen != nil {
+		cfg.Display.ThinkingMaxLen = thinkingMaxLen
+	}
+	if toolMaxLen != nil {
+		cfg.Display.ToolMaxLen = toolMaxLen
+	}
+	return saveConfig(cfg)
+}
+
 // GetProjectProviders returns providers for a given project.
 func GetProjectProviders(projectName string) ([]ProviderConfig, string, error) {
 	if ConfigPath == "" {

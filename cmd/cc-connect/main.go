@@ -205,6 +205,9 @@ func main() {
 			}
 			engine.SetDisplayConfig(dcfg)
 		}
+		engine.SetDisplaySaveFunc(func(thinkingMaxLen, toolMaxLen *int) error {
+			return config.SaveDisplayConfig(thinkingMaxLen, toolMaxLen)
+		})
 
 		// Wire speech-to-text if enabled
 		if cfg.Speech.Enabled {
