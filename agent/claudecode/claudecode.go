@@ -38,6 +38,8 @@ type Agent struct {
 	providers    []core.ProviderConfig
 	activeIdx    int // -1 = no provider set
 	sessionEnv   []string
+	routerURL    string // Claude Code Router URL (e.g., "http://127.0.0.1:3456")
+	routerAPIKey string // Claude Code Router API key (optional)
 	mu           sync.Mutex
 }
 
@@ -59,6 +61,10 @@ func New(opts map[string]any) (core.Agent, error) {
 		}
 	}
 
+	// Claude Code Router support
+	routerURL, _ := opts["router_url"].(string)
+	routerAPIKey, _ := opts["router_api_key"].(string)
+
 	if _, err := exec.LookPath("claude"); err != nil {
 		return nil, fmt.Errorf("claudecode: 'claude' CLI not found in PATH, please install Claude Code first")
 	}
@@ -69,6 +75,8 @@ func New(opts map[string]any) (core.Agent, error) {
 		mode:         mode,
 		allowedTools: allowedTools,
 		activeIdx:    -1,
+		routerURL:    routerURL,
+		routerAPIKey: routerAPIKey,
 	}, nil
 }
 
@@ -185,6 +193,20 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	model := a.model
 	extraEnv := a.providerEnvLocked()
 	extraEnv = append(extraEnv, a.sessionEnv...)
+
+	// Add Claude Code Router environment variables if configured
+	if a.routerURL != "" {
+		extraEnv = append(extraEnv, "ANTHROPIC_BASE_URL="+a.routerURL)
+		// When using router, we need to prevent proxy interference
+		extraEnv = append(extraEnv, "NO_PROXY=127.0.0.1")
+		// Disable telemetry and cost warnings for cleaner router integration
+		extraEnv = append(extraEnv, "DISABLE_TELEMETRY=true")
+		extraEnv = append(extraEnv, "DISABLE_COST_WARNINGS=true")
+	}
+	if a.routerAPIKey != "" {
+		extraEnv = append(extraEnv, "ANTHROPIC_API_KEY="+a.routerAPIKey)
+	}
+
 	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
 		if m := a.providers[a.activeIdx].Model; m != "" {
 			model = m
