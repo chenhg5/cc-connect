@@ -133,12 +133,13 @@ func main() {
 		if ps, ok := agent.(core.ProviderSwitcher); ok && len(proj.Agent.Providers) > 0 {
 			providers := make([]core.ProviderConfig, len(proj.Agent.Providers))
 			for i, p := range proj.Agent.Providers {
-				providers[i] = core.ProviderConfig{
-					Name:    p.Name,
-					APIKey:  p.APIKey,
-					BaseURL: p.BaseURL,
-					Model:   p.Model,
-					Env:     p.Env,
+			providers[i] = core.ProviderConfig{
+				Name:     p.Name,
+				APIKey:   p.APIKey,
+				BaseURL:  p.BaseURL,
+				Model:    p.Model,
+				Thinking: p.Thinking,
+				Env:      p.Env,
 				}
 			}
 			ps.SetProviders(providers)
@@ -259,7 +260,7 @@ func main() {
 		engine.SetProviderAddSaveFunc(func(p core.ProviderConfig) error {
 			return config.AddProviderToConfig(projName, config.ProviderConfig{
 				Name: p.Name, APIKey: p.APIKey, BaseURL: p.BaseURL,
-				Model: p.Model, Env: p.Env,
+				Model: p.Model, Thinking: p.Thinking, Env: p.Env,
 			})
 		})
 		engine.SetProviderRemoveSaveFunc(func(name string) error {

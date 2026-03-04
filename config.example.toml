@@ -192,6 +192,18 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "bypassPermission
 # base_url = "https://api.relay-service.com"
 # model = "claude-sonnet-4-20250514"
 #
+# # Third-party provider with thinking override / 第三方 Provider 并覆盖 thinking 参数
+# # Some providers (e.g. SiliconFlow) don't support Claude's adaptive thinking.
+# # Set thinking = "disabled" to auto-rewrite via a local proxy.
+# # 部分第三方 Provider（如硅基流动）不支持 Claude 的 adaptive thinking，
+# # 设置 thinking = "disabled" 后 cc-connect 会通过本地代理自动改写请求。
+# [[projects.agent.providers]]
+# name = "siliconflow"
+# api_key = "sk-xxx"
+# base_url = "https://api.siliconflow.cn"
+# model = "deepseek-ai/DeepSeek-V3"
+# thinking = "disabled"
+#
 # # For special setups (Bedrock, Vertex, etc.), use the env map:
 # # 特殊环境（Bedrock、Vertex 等）使用 env 字段：
 # [[projects.agent.providers]]

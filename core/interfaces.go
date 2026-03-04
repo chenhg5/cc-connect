@@ -125,11 +125,12 @@ type HistoryProvider interface {
 
 // ProviderConfig holds API provider settings for an agent.
 type ProviderConfig struct {
-	Name    string
-	APIKey  string
-	BaseURL string
-	Model   string
-	Env     map[string]string // arbitrary extra env vars (e.g. CLAUDE_CODE_USE_BEDROCK=1)
+	Name     string
+	APIKey   string
+	BaseURL  string
+	Model    string
+	Thinking string            // override thinking type sent to this provider ("disabled", "enabled", or "" for no rewrite)
+	Env      map[string]string // arbitrary extra env vars (e.g. CLAUDE_CODE_USE_BEDROCK=1)
 }
 
 // ProviderSwitcher is an optional interface for agents that support multiple API providers.

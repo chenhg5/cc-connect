@@ -61,11 +61,12 @@ type AgentConfig struct {
 }
 
 type ProviderConfig struct {
-	Name    string            `toml:"name"`
-	APIKey  string            `toml:"api_key"`
-	BaseURL string            `toml:"base_url,omitempty"`
-	Model   string            `toml:"model,omitempty"`
-	Env     map[string]string `toml:"env,omitempty"`
+	Name     string            `toml:"name"`
+	APIKey   string            `toml:"api_key"`
+	BaseURL  string            `toml:"base_url,omitempty"`
+	Model    string            `toml:"model,omitempty"`
+	Thinking string            `toml:"thinking,omitempty"`
+	Env      map[string]string `toml:"env,omitempty"`
 }
 
 type PlatformConfig struct {

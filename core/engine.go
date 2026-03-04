@@ -298,7 +298,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		if e.handleCommand(p, msg, content) {
 			return
 		}
-		// unrecognized slash command — fall through to agent
+		// Unrecognized slash command — fall through to agent as normal message
 	}
 
 	// Permission responses bypass the session lock
@@ -815,7 +815,9 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 			e.executeSkill(p, msg, skill, args)
 			return true
 		}
-		return false // unrecognized, let caller forward to agent
+		// Not a cc-connect command — notify user, then fall through to agent
+		e.send(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgUnknownCommand), cmd))
+		return false
 	}
 	return true
 }
@@ -1358,16 +1360,30 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 
 	if len(args) == 0 {
 		current := switcher.GetActiveProvider()
-		if current == nil {
-			providers := switcher.ListProviders()
-			if len(providers) == 0 {
-				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgProviderNone))
-			} else {
-				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgProviderNone))
-			}
+		providers := switcher.ListProviders()
+		if current == nil && len(providers) == 0 {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgProviderNone))
 			return
 		}
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgProviderCurrent), current.Name))
+		if current != nil {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgProviderCurrent), current.Name))
+			return
+		}
+		// Has providers but no active one — show the list
+		var sb strings.Builder
+		sb.WriteString(e.i18n.T(MsgProviderListTitle))
+		for _, prov := range providers {
+			detail := prov.Name
+			if prov.BaseURL != "" {
+				detail += " (" + prov.BaseURL + ")"
+			}
+			if prov.Model != "" {
+				detail += " [" + prov.Model + "]"
+			}
+			sb.WriteString(fmt.Sprintf("  **%s**\n", detail))
+		}
+		sb.WriteString("\n" + e.i18n.T(MsgProviderSwitchHint))
+		e.reply(p, msg.ReplyCtx, sb.String())
 		return
 	}
 
@@ -1419,6 +1435,16 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 			return
 		}
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgProviderCurrent), current.Name))
+
+	case "clear", "reset", "none":
+		switcher.SetActiveProvider("")
+		e.cleanupInteractiveState(msg.SessionKey)
+		if e.providerSaveFunc != nil {
+			if err := e.providerSaveFunc(""); err != nil {
+				slog.Error("failed to save provider", "error", err)
+			}
+		}
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgProviderCleared))
 
 	default:
 		e.switchProvider(p, msg, switcher, args[0])

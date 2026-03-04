@@ -372,17 +372,19 @@ func detectMimeType(data []byte) string {
 	return "image/png"
 }
 
-// buildReplyContent decides between plain text and interactive card based on content.
+// buildReplyContent converts content to a Feishu message payload.
+// Uses "post" (rich text) for markdown content — renders at normal font
+// size unlike interactive cards which display smaller.
 func buildReplyContent(content string) (msgType string, body string) {
 	if !containsMarkdown(content) {
 		b, _ := json.Marshal(map[string]string{"text": content})
 		return larkim.MsgTypeText, string(b)
 	}
-	return larkim.MsgTypeInteractive, buildCardJSON(adaptMarkdown(content))
+	return larkim.MsgTypePost, buildPostJSON(content)
 }
 
 var markdownIndicators = []string{
-	"```", "**", "~~", "\n- ", "\n* ", "\n1. ", "\n# ", "---",
+	"```", "**", "~~", "`", "\n- ", "\n* ", "\n1. ", "\n# ", "---",
 }
 
 func containsMarkdown(s string) bool {
@@ -394,56 +396,134 @@ func containsMarkdown(s string) bool {
 	return false
 }
 
-// adaptMarkdown converts standard markdown to Feishu card-compatible markdown.
-// Feishu card markdown elements do NOT support # headers or > blockquotes,
-// so we convert them to bold text and indented text respectively.
-func adaptMarkdown(s string) string {
-	lines := strings.Split(s, "\n")
+// buildPostJSON converts markdown content to Feishu post (rich text) format.
+func buildPostJSON(content string) string {
+	lines := strings.Split(content, "\n")
+	var postLines [][]map[string]any
 	inCodeBlock := false
+	var codeLines []string
+	codeLang := ""
 
-	for i, line := range lines {
+	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
+
 		if strings.HasPrefix(trimmed, "```") {
-			inCodeBlock = !inCodeBlock
-			continue
-		}
-		if inCodeBlock {
+			if !inCodeBlock {
+				inCodeBlock = true
+				codeLang = strings.TrimPrefix(trimmed, "```")
+				codeLines = nil
+			} else {
+				inCodeBlock = false
+				postLines = append(postLines, []map[string]any{{
+					"tag":      "code_block",
+					"language": codeLang,
+					"text":     strings.Join(codeLines, "\n"),
+				}})
+			}
 			continue
 		}
 
+		if inCodeBlock {
+			codeLines = append(codeLines, line)
+			continue
+		}
+
+		// Convert # headers to bold
+		headerLine := line
 		for level := 6; level >= 1; level-- {
 			prefix := strings.Repeat("#", level) + " "
 			if strings.HasPrefix(line, prefix) {
-				lines[i] = "**" + strings.TrimPrefix(line, prefix) + "**"
+				headerLine = "**" + strings.TrimPrefix(line, prefix) + "**"
 				break
 			}
 		}
 
-		if strings.HasPrefix(line, "> ") {
-			lines[i] = "  " + strings.TrimPrefix(line, "> ")
+		elements := parseInlineMarkdown(headerLine)
+		if len(elements) > 0 {
+			postLines = append(postLines, elements)
+		} else {
+			postLines = append(postLines, []map[string]any{{"tag": "text", "text": ""}})
 		}
 	}
 
-	return strings.Join(lines, "\n")
-}
+	// Handle unclosed code block
+	if inCodeBlock && len(codeLines) > 0 {
+		postLines = append(postLines, []map[string]any{{
+			"tag":      "code_block",
+			"language": codeLang,
+			"text":     strings.Join(codeLines, "\n"),
+		}})
+	}
 
-func buildCardJSON(content string) string {
-	card := map[string]any{
-		"config": map[string]any{
-			"wide_screen_mode": true,
-		},
-		"elements": []any{
-			map[string]any{
-				"tag": "div",
-				"text": map[string]any{
-					"tag":     "lark_md",
-					"content": content,
-				},
-			},
+	post := map[string]any{
+		"zh_cn": map[string]any{
+			"content": postLines,
 		},
 	}
-	b, _ := json.Marshal(card)
+	b, _ := json.Marshal(post)
 	return string(b)
+}
+
+// parseInlineMarkdown parses a single line of markdown into Feishu post elements.
+// Supports **bold** and `code` inline formatting.
+func parseInlineMarkdown(line string) []map[string]any {
+	var elements []map[string]any
+	remaining := line
+
+	for len(remaining) > 0 {
+		// Find the next formatting marker
+		boldIdx := strings.Index(remaining, "**")
+		codeIdx := strings.Index(remaining, "`")
+
+		// No more markers
+		if boldIdx < 0 && codeIdx < 0 {
+			if remaining != "" {
+				elements = append(elements, map[string]any{"tag": "text", "text": remaining})
+			}
+			break
+		}
+
+		// Determine which marker comes first
+		nextIdx := boldIdx
+		marker := "**"
+		if boldIdx < 0 || (codeIdx >= 0 && codeIdx < boldIdx) {
+			nextIdx = codeIdx
+			marker = "`"
+		}
+
+		// Add text before the marker
+		if nextIdx > 0 {
+			elements = append(elements, map[string]any{"tag": "text", "text": remaining[:nextIdx]})
+		}
+		remaining = remaining[nextIdx+len(marker):]
+
+		// Find closing marker
+		closeIdx := strings.Index(remaining, marker)
+		if closeIdx < 0 {
+			elements = append(elements, map[string]any{"tag": "text", "text": marker + remaining})
+			remaining = ""
+			break
+		}
+
+		inner := remaining[:closeIdx]
+		remaining = remaining[closeIdx+len(marker):]
+
+		if marker == "**" {
+			elements = append(elements, map[string]any{
+				"tag":   "text",
+				"text":  inner,
+				"style": []string{"bold"},
+			})
+		} else {
+			elements = append(elements, map[string]any{
+				"tag":   "text",
+				"text":  inner,
+				"style": []string{"code"},
+			})
+		}
+	}
+
+	return elements
 }
 
 func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {

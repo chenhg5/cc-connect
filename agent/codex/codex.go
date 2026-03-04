@@ -275,6 +275,11 @@ func (a *Agent) SetProviders(providers []core.ProviderConfig) {
 func (a *Agent) SetActiveProvider(name string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if name == "" {
+		a.activeIdx = -1
+		slog.Info("codex: provider cleared")
+		return true
+	}
 	for i, p := range a.providers {
 		if p.Name == name {
 			a.activeIdx = i

@@ -145,6 +145,7 @@ const (
 	MsgLangChanged          MsgKey = "lang_changed"
 	MsgLangInvalid          MsgKey = "lang_invalid"
 	MsgLangCurrent          MsgKey = "lang_current"
+	MsgUnknownCommand       MsgKey = "unknown_command"
 	MsgHelp                 MsgKey = "help"
 	MsgListTitle            MsgKey = "list_title"
 	MsgListEmpty            MsgKey = "list_empty"
@@ -160,6 +161,7 @@ const (
 	MsgProviderSwitchHint   MsgKey = "provider_switch_hint"
 	MsgProviderNotFound     MsgKey = "provider_not_found"
 	MsgProviderSwitched     MsgKey = "provider_switched"
+	MsgProviderCleared      MsgKey = "provider_cleared"
 	MsgProviderAdded        MsgKey = "provider_added"
 	MsgProviderAddUsage     MsgKey = "provider_add_usage"
 	MsgProviderAddFailed    MsgKey = "provider_add_failed"
@@ -430,6 +432,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "🌐 現在の言語: **%s**\n\n使い方: /lang <en|zh|zh-TW|ja|es|auto>",
 		LangSpanish:            "🌐 Idioma actual: **%s**\n\nUso: /lang <en|zh|zh-TW|ja|es|auto>",
 	},
+	MsgUnknownCommand: {
+		LangEnglish:            "`%s` is not a cc-connect command, forwarding to agent...",
+		LangChinese:            "`%s` 不是 cc-connect 命令，已转发给 Agent 处理...",
+		LangTraditionalChinese: "`%s` 不是 cc-connect 命令，已轉發給 Agent 處理...",
+		LangJapanese:           "`%s` は cc-connect のコマンドではありません。エージェントに転送します...",
+		LangSpanish:            "`%s` no es un comando de cc-connect, reenviando al agente...",
+	},
 	MsgHelp: {
 		LangEnglish: "📖 Available Commands\n\n" +
 			"/new [name]\n  Start a new session\n\n" +
@@ -640,11 +649,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "No hay proveedores configurados.\n\nAgregue proveedores en `config.toml` o mediante `cc-connect provider add`.",
 	},
 	MsgProviderSwitchHint: {
-		LangEnglish:            "`/provider switch <name>` to switch",
-		LangChinese:            "`/provider switch <名称>` 切换",
-		LangTraditionalChinese: "`/provider switch <名稱>` 切換",
-		LangJapanese:           "`/provider switch <名前>` で切り替え",
-		LangSpanish:            "`/provider switch <nombre>` para cambiar",
+		LangEnglish:            "`/provider switch <name>` to switch | `/provider clear` to reset",
+		LangChinese:            "`/provider switch <名称>` 切换 | `/provider clear` 清除",
+		LangTraditionalChinese: "`/provider switch <名稱>` 切換 | `/provider clear` 清除",
+		LangJapanese:           "`/provider switch <名前>` で切り替え | `/provider clear` でリセット",
+		LangSpanish:            "`/provider switch <nombre>` para cambiar | `/provider clear` para restablecer",
 	},
 	MsgProviderNotFound: {
 		LangEnglish:            "❌ Provider %q not found. Use `/provider list` to see available providers.",
@@ -659,6 +668,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "✅ Provider 已切換為 **%s**，新會話將使用此 Provider。",
 		LangJapanese:           "✅ プロバイダを **%s** に切り替えました。新しいセッションで使用されます。",
 		LangSpanish:            "✅ Proveedor cambiado a **%s**. Las nuevas sesiones usarán este proveedor.",
+	},
+	MsgProviderCleared: {
+		LangEnglish:            "✅ Provider cleared. New sessions will use the default provider.",
+		LangChinese:            "✅ Provider 已清除，新会话将使用默认 Provider。",
+		LangTraditionalChinese: "✅ Provider 已清除，新會話將使用預設 Provider。",
+		LangJapanese:           "✅ プロバイダをクリアしました。新しいセッションではデフォルトのプロバイダが使用されます。",
+		LangSpanish:            "✅ Proveedor eliminado. Las nuevas sesiones usarán el proveedor predeterminado.",
 	},
 	MsgProviderAdded: {
 		LangEnglish:            "✅ Provider **%s** added.\n\nUse `/provider switch %s` to activate.",

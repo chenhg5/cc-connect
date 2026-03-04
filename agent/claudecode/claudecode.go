@@ -40,7 +40,11 @@ type Agent struct {
 	sessionEnv   []string
 	routerURL    string // Claude Code Router URL (e.g., "http://127.0.0.1:3456")
 	routerAPIKey string // Claude Code Router API key (optional)
-	mu           sync.Mutex
+
+	providerProxy *core.ProviderProxy // local proxy for third-party providers
+	proxyLocalURL string              // local URL of the proxy
+
+	mu sync.Mutex
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -424,6 +428,12 @@ func (a *Agent) SetProviders(providers []core.ProviderConfig) {
 func (a *Agent) SetActiveProvider(name string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.stopProviderProxyLocked()
+	if name == "" {
+		a.activeIdx = -1
+		slog.Info("claudecode: provider cleared")
+		return true
+	}
 	for i, p := range a.providers {
 		if p.Name == name {
 			a.activeIdx = i
@@ -453,22 +463,72 @@ func (a *Agent) ListProviders() []core.ProviderConfig {
 }
 
 // providerEnvLocked returns env vars for the active provider. Caller must hold mu.
+//
+// When a custom base_url is configured:
+//  1. We use ANTHROPIC_AUTH_TOKEN (Bearer) instead of ANTHROPIC_API_KEY
+//     (x-api-key). Claude Code validates API keys against api.anthropic.com
+//     which hangs for third-party endpoints; Bearer auth skips that check.
+//  2. If the provider sets thinking (e.g. "disabled"), a local reverse proxy
+//     rewrites the thinking parameter for compatibility with providers that
+//     don't support adaptive thinking.
 func (a *Agent) providerEnvLocked() []string {
 	if a.activeIdx < 0 || a.activeIdx >= len(a.providers) {
+		a.stopProviderProxyLocked()
 		return nil
 	}
 	p := a.providers[a.activeIdx]
 	var env []string
-	if p.APIKey != "" {
-		env = append(env, "ANTHROPIC_API_KEY="+p.APIKey)
-	}
+
 	if p.BaseURL != "" {
-		env = append(env, "ANTHROPIC_BASE_URL="+p.BaseURL)
+		if p.Thinking != "" {
+			if err := a.ensureProviderProxyLocked(p.BaseURL, p.Thinking); err != nil {
+				slog.Error("providerproxy: failed to start", "error", err)
+				env = append(env, "ANTHROPIC_BASE_URL="+p.BaseURL)
+			} else {
+				env = append(env, "ANTHROPIC_BASE_URL="+a.proxyLocalURL)
+				env = append(env, "NO_PROXY=127.0.0.1")
+			}
+		} else {
+			a.stopProviderProxyLocked()
+			env = append(env, "ANTHROPIC_BASE_URL="+p.BaseURL)
+		}
+		if p.APIKey != "" {
+			env = append(env, "ANTHROPIC_AUTH_TOKEN="+p.APIKey)
+			env = append(env, "ANTHROPIC_API_KEY=")
+		}
+	} else {
+		a.stopProviderProxyLocked()
+		if p.APIKey != "" {
+			env = append(env, "ANTHROPIC_API_KEY="+p.APIKey)
+		}
 	}
+
 	for k, v := range p.Env {
 		env = append(env, k+"="+v)
 	}
 	return env
+}
+
+func (a *Agent) ensureProviderProxyLocked(targetURL, thinkingOverride string) error {
+	if a.providerProxy != nil && a.proxyLocalURL != "" {
+		return nil
+	}
+	a.stopProviderProxyLocked()
+	proxy, localURL, err := core.NewProviderProxy(targetURL, thinkingOverride)
+	if err != nil {
+		return err
+	}
+	a.providerProxy = proxy
+	a.proxyLocalURL = localURL
+	return nil
+}
+
+func (a *Agent) stopProviderProxyLocked() {
+	if a.providerProxy != nil {
+		a.providerProxy.Close()
+		a.providerProxy = nil
+		a.proxyLocalURL = ""
+	}
 }
 
 // summarizeInput produces a short human-readable description of tool input.
