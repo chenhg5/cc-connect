@@ -212,6 +212,32 @@ func (a *Agent) GetMode() string {
 	return a.mode
 }
 
+// ── SkillProvider implementation ──────────────────────────────
+
+func (a *Agent) SkillDirs() []string {
+	absDir, err := filepath.Abs(a.workDir)
+	if err != nil {
+		absDir = a.workDir
+	}
+	dirs := []string{
+		filepath.Join(absDir, ".codex", "skills"),
+		filepath.Join(absDir, ".claude", "skills"),
+	}
+	codexHome := os.Getenv("CODEX_HOME")
+	if codexHome == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			codexHome = filepath.Join(home, ".codex")
+		}
+	}
+	if codexHome != "" {
+		dirs = append(dirs, filepath.Join(codexHome, "skills"))
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		dirs = append(dirs, filepath.Join(home, ".claude", "skills"))
+	}
+	return dirs
+}
+
 // ── ContextCompressor implementation ──────────────────────────
 
 func (a *Agent) CompressCommand() string { return "/compact" }
