@@ -43,6 +43,17 @@ func (r *CommandRegistry) Add(name, description, prompt, source string) {
 	}
 }
 
+// ClearSource removes all commands from a given source (e.g. "config").
+func (r *CommandRegistry) ClearSource(source string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for k, c := range r.commands {
+		if c.Source == source {
+			delete(r.commands, k)
+		}
+	}
+}
+
 // Remove deletes a config-defined custom command by name. Returns false if not found.
 func (r *CommandRegistry) Remove(name string) bool {
 	r.mu.Lock()

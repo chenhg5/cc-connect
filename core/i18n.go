@@ -246,6 +246,7 @@ const (
 	MsgConfigSetUsage    MsgKey = "config_set_usage"
 	MsgConfigUpdated     MsgKey = "config_updated"
 	MsgConfigKeyNotFound MsgKey = "config_key_not_found"
+	MsgConfigReloaded    MsgKey = "config_reloaded"
 
 	MsgDoctorRunning MsgKey = "doctor_running"
 	MsgDoctorTitle   MsgKey = "doctor_title"
@@ -468,7 +469,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/cron [add|list|del|enable|disable]\n  Manage scheduled tasks\n\n" +
 			"/commands [add|del]\n  Manage custom slash commands\n\n" +
 			"/skills\n  List agent skills (from SKILL.md)\n\n" +
-			"/config [get|set] [key] [value]\n  View/update runtime configuration\n\n" +
+			"/config [get|set|reload] [key] [value]\n  View/update runtime configuration\n\n" +
 			"/doctor\n  Run system diagnostics\n\n" +
 			"/upgrade\n  Check for updates and self-update\n\n" +
 			"/restart\n  Restart cc-connect service\n\n" +
@@ -497,7 +498,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/cron [add|list|del|enable|disable]\n  管理定时任务\n\n" +
 			"/commands [add|del]\n  管理自定义命令\n\n" +
 			"/skills\n  列出 Agent Skills（来自 SKILL.md）\n\n" +
-			"/config [get|set] [key] [value]\n  查看/修改运行时配置\n\n" +
+			"/config [get|set|reload] [key] [value]\n  查看/修改运行时配置\n\n" +
 			"/doctor\n  运行系统诊断\n\n" +
 			"/upgrade\n  检查更新并自动升级\n\n" +
 			"/restart\n  重启 cc-connect 服务\n\n" +
@@ -526,7 +527,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/cron [add|list|del|enable|disable]\n  管理定時任務\n\n" +
 			"/commands [add|del]\n  管理自訂命令\n\n" +
 			"/skills\n  列出 Agent Skills（來自 SKILL.md）\n\n" +
-			"/config [get|set] [key] [value]\n  查看/修改執行階段配置\n\n" +
+			"/config [get|set|reload] [key] [value]\n  查看/修改執行階段配置\n\n" +
 			"/doctor\n  執行系統診斷\n\n" +
 			"/upgrade\n  檢查更新並自動升級\n\n" +
 			"/restart\n  重啟 cc-connect 服務\n\n" +
@@ -555,7 +556,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/cron [add|list|del|enable|disable]\n  スケジュールタスク管理\n\n" +
 			"/commands [add|del]\n  カスタムコマンド管理\n\n" +
 			"/skills\n  エージェントスキル一覧（SKILL.md から）\n\n" +
-			"/config [get|set] [key] [value]\n  ランタイム設定の表示/変更\n\n" +
+			"/config [get|set|reload] [key] [value]\n  ランタイム設定の表示/変更\n\n" +
 			"/doctor\n  システム診断を実行\n\n" +
 			"/upgrade\n  アップデートを確認して自動更新\n\n" +
 			"/restart\n  cc-connect サービスを再起動\n\n" +
@@ -584,7 +585,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/cron [add|list|del|enable|disable]\n  Gestionar tareas programadas\n\n" +
 			"/commands [add|del]\n  Gestionar comandos personalizados\n\n" +
 			"/skills\n  Listar skills del agente (desde SKILL.md)\n\n" +
-			"/config [get|set] [key] [value]\n  Ver/actualizar configuración en tiempo de ejecución\n\n" +
+			"/config [get|set|reload] [key] [value]\n  Ver/actualizar configuración en tiempo de ejecución\n\n" +
 			"/doctor\n  Ejecutar diagnósticos del sistema\n\n" +
 			"/upgrade\n  Buscar actualizaciones y auto-actualizar\n\n" +
 			"/restart\n  Reiniciar el servicio cc-connect\n\n" +
@@ -1271,6 +1272,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 未知配置項 `%s`。使用 `/config` 查看可用配置。",
 		LangJapanese:           "❌ 不明な設定キー `%s`。`/config` で一覧を確認してください。",
 		LangSpanish:            "❌ Clave de configuración desconocida `%s`. Use `/config` para ver las disponibles.",
+	},
+	MsgConfigReloaded: {
+		LangEnglish:            "✅ Config reloaded\n\nDisplay updated: %v\nProviders synced: %d\nCommands synced: %d",
+		LangChinese:            "✅ 配置已重新加载\n\n显示设置已更新：%v\nProvider 已同步：%d 个\n自定义命令已同步：%d 个",
+		LangTraditionalChinese: "✅ 配置已重新載入\n\n顯示設定已更新：%v\nProvider 已同步：%d 個\n自訂命令已同步：%d 個",
+		LangJapanese:           "✅ 設定をリロードしました\n\n表示設定更新: %v\nプロバイダ同期: %d 件\nコマンド同期: %d 件",
+		LangSpanish:            "✅ Configuración recargada\n\nPantalla actualizada: %v\nProveedores sincronizados: %d\nComandos sincronizados: %d",
 	},
 	MsgDoctorRunning: {
 		LangEnglish:            "🏥 Running diagnostics...",

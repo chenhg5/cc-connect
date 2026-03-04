@@ -268,6 +268,13 @@ func main() {
 			return config.RemoveProviderFromConfig(projName, name)
 		})
 
+		// Wire config reload
+		capturedEngine := engine
+		capturedProjName := projName
+		engine.SetConfigReloadFunc(func() (*core.ConfigReloadResult, error) {
+			return reloadConfig(configPath, capturedProjName, capturedEngine)
+		})
+
 		engines = append(engines, engine)
 	}
 
@@ -470,4 +477,65 @@ func setupLogger(level string, w io.Writer) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{
 		Level: logLevel,
 	})))
+}
+
+// reloadConfig re-reads config.toml and applies hot-reloadable settings
+// (display, providers, commands) to the given engine.
+func reloadConfig(configPath, projName string, engine *core.Engine) (*core.ConfigReloadResult, error) {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("reload config: %w", err)
+	}
+
+	result := &core.ConfigReloadResult{}
+
+	// Find the matching project
+	var proj *config.ProjectConfig
+	for i := range cfg.Projects {
+		if cfg.Projects[i].Name == projName {
+			proj = &cfg.Projects[i]
+			break
+		}
+	}
+	if proj == nil {
+		return nil, fmt.Errorf("project %q not found in config", projName)
+	}
+
+	// Reload display config
+	dcfg := core.DisplayCfg{ThinkingMaxLen: 300, ToolMaxLen: 500}
+	if cfg.Display.ThinkingMaxLen != nil {
+		dcfg.ThinkingMaxLen = *cfg.Display.ThinkingMaxLen
+	}
+	if cfg.Display.ToolMaxLen != nil {
+		dcfg.ToolMaxLen = *cfg.Display.ToolMaxLen
+	}
+	engine.SetDisplayConfig(dcfg)
+	result.DisplayUpdated = true
+
+	// Reload providers
+	if ps, ok := engine.GetAgent().(core.ProviderSwitcher); ok {
+		providers := make([]core.ProviderConfig, len(proj.Agent.Providers))
+		for i, p := range proj.Agent.Providers {
+			providers[i] = core.ProviderConfig{
+				Name: p.Name, APIKey: p.APIKey, BaseURL: p.BaseURL,
+				Model: p.Model, Thinking: p.Thinking, Env: p.Env,
+			}
+		}
+		ps.SetProviders(providers)
+		result.ProvidersUpdated = len(providers)
+
+		if active, _ := proj.Agent.Options["provider"].(string); active != "" {
+			ps.SetActiveProvider(active)
+		}
+	}
+
+	// Reload custom commands
+	engine.ClearCommands("config")
+	for _, c := range cfg.Commands {
+		engine.AddCommand(c.Name, c.Description, c.Prompt, "config")
+	}
+	result.CommandsUpdated = len(cfg.Commands)
+
+	slog.Info("config reloaded", "project", projName)
+	return result, nil
 }

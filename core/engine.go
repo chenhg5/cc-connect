@@ -124,7 +124,8 @@ type Engine struct {
 	commandSaveAddFunc func(name, description, prompt string) error
 	commandSaveDelFunc func(name string) error
 
-	displaySaveFunc func(thinkingMaxLen, toolMaxLen *int) error
+	displaySaveFunc  func(thinkingMaxLen, toolMaxLen *int) error
+	configReloadFunc func() (*ConfigReloadResult, error)
 
 	cronScheduler *CronScheduler
 
@@ -231,9 +232,30 @@ func (e *Engine) SetDisplaySaveFunc(fn func(thinkingMaxLen, toolMaxLen *int) err
 	e.displaySaveFunc = fn
 }
 
+// ConfigReloadResult describes what was updated by a config reload.
+type ConfigReloadResult struct {
+	DisplayUpdated   bool
+	ProvidersUpdated int
+	CommandsUpdated  int
+}
+
+func (e *Engine) SetConfigReloadFunc(fn func() (*ConfigReloadResult, error)) {
+	e.configReloadFunc = fn
+}
+
+// GetAgent returns the engine's agent (for type assertions like ProviderSwitcher).
+func (e *Engine) GetAgent() Agent {
+	return e.agent
+}
+
 // AddCommand registers a custom slash command.
 func (e *Engine) AddCommand(name, description, prompt, source string) {
 	e.commands.Add(name, description, prompt, source)
+}
+
+// ClearCommands removes all commands from the given source.
+func (e *Engine) ClearCommands(source string) {
+	e.commands.ClearSource(source)
 }
 
 // RemoveCommand removes a custom command by name. Returns false if not found.
@@ -2319,9 +2341,12 @@ func (e *Engine) cmdConfig(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	sub := matchSubCommand(strings.ToLower(args[0]), []string{"get", "set"})
+	sub := matchSubCommand(strings.ToLower(args[0]), []string{"get", "set", "reload"})
 
 	switch sub {
+	case "reload":
+		e.cmdConfigReload(p, msg)
+		return
 	case "get":
 		if len(args) < 2 {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgConfigGetUsage))
@@ -2446,6 +2471,20 @@ func (e *Engine) cmdUpgradeConfirm(p Platform, msg *Message) {
 	}
 
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgUpgradeSuccess), release.TagName))
+}
+
+func (e *Engine) cmdConfigReload(p Platform, msg *Message) {
+	if e.configReloadFunc == nil {
+		e.reply(p, msg.ReplyCtx, "❌ Config reload not available")
+		return
+	}
+	result, err := e.configReloadFunc()
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
+		return
+	}
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgConfigReloaded),
+		result.DisplayUpdated, result.ProvidersUpdated, result.CommandsUpdated))
 }
 
 func (e *Engine) cmdRestart(p Platform, msg *Message) {
