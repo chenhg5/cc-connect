@@ -274,21 +274,21 @@ func (qs *qoderSession) Close() error {
 func extractToolPreview(inputJSON string) string {
 	var m map[string]any
 	if err := json.Unmarshal([]byte(inputJSON), &m); err != nil {
-		return truncStr(inputJSON, 200)
+		return inputJSON
 	}
 	if cmd, ok := m["command"].(string); ok {
-		return truncStr(cmd, 200)
+		return cmd
 	}
 	if file, ok := m["file_path"].(string); ok {
-		return truncStr(file, 200)
+		return file
 	}
 	if pattern, ok := m["pattern"].(string); ok {
-		return truncStr(pattern, 200)
+		return pattern
 	}
 	if query, ok := m["query"].(string); ok {
-		return truncStr(query, 200)
+		return query
 	}
-	return truncStr(inputJSON, 200)
+	return inputJSON
 }
 
 func truncStr(s string, maxRunes int) string {

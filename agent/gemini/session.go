@@ -368,7 +368,7 @@ func formatToolParams(toolName string, params map[string]any) string {
 	switch toolName {
 	case "shell", "run_shell_command":
 		if cmd, ok := params["command"].(string); ok {
-			return truncate(cmd, 200)
+			return cmd
 		}
 	case "write_file", "read_file", "replace":
 		if p, ok := params["file_path"].(string); ok {
@@ -379,16 +379,16 @@ func formatToolParams(toolName string, params map[string]any) string {
 		}
 	case "web_fetch":
 		if u, ok := params["url"].(string); ok {
-			return truncate(u, 200)
+			return u
 		}
 	case "google_web_search":
 		if q, ok := params["query"].(string); ok {
-			return truncate(q, 200)
+			return q
 		}
 	}
 
 	b, _ := json.Marshal(params)
-	return truncate(string(b), 200)
+	return string(b)
 }
 
 func truncate(s string, maxRunes int) string {

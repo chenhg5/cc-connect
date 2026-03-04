@@ -293,7 +293,7 @@ func extractToolInput(toolName string, call map[string]any) string {
 	args, _ := call["args"].(map[string]any)
 	if args == nil {
 		if desc, ok := call["description"].(string); ok {
-			return truncateStr(desc, 200)
+			return desc
 		}
 		return ""
 	}
@@ -301,7 +301,7 @@ func extractToolInput(toolName string, call map[string]any) string {
 	switch toolName {
 	case "Bash":
 		if cmd, ok := args["command"].(string); ok {
-			return truncateStr(cmd, 200)
+			return cmd
 		}
 	case "Read":
 		if p, ok := args["path"].(string); ok {
@@ -325,11 +325,11 @@ func extractToolInput(toolName string, call map[string]any) string {
 	}
 
 	if desc, ok := call["description"].(string); ok && desc != "" {
-		return truncateStr(desc, 200)
+		return desc
 	}
 
 	b, _ := json.Marshal(args)
-	return truncateStr(string(b), 200)
+	return string(b)
 }
 
 func (cs *cursorSession) handleResult(raw map[string]any) {

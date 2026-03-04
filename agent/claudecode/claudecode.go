@@ -463,9 +463,6 @@ func summarizeInput(tool string, input any) string {
 		}
 	case "Bash":
 		if cmd, ok := m["command"].(string); ok {
-			if utf8.RuneCountInString(cmd) > 200 {
-				return string([]rune(cmd)[:200]) + "..."
-			}
 			return cmd
 		}
 	case "Grep":
@@ -485,11 +482,7 @@ func summarizeInput(tool string, input any) string {
 	if err != nil {
 		return ""
 	}
-	s := string(b)
-	if utf8.RuneCountInString(s) > 200 {
-		return string([]rune(s)[:200]) + "..."
-	}
-	return s
+	return string(b)
 }
 
 // findProjectDir locates the Claude Code session directory for a given work dir.
