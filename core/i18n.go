@@ -246,6 +246,8 @@ const (
 	MsgConfigKeyNotFound MsgKey = "config_key_not_found"
 
 	MsgDoctorRunning MsgKey = "doctor_running"
+	MsgDoctorTitle   MsgKey = "doctor_title"
+	MsgDoctorSummary MsgKey = "doctor_summary"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -1146,11 +1148,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "❌ Comando `/%s` no encontrado. Use `/commands` para ver los comandos disponibles.",
 	},
 	MsgSkillsTitle: {
-		LangEnglish:            "📋 Available Skills (%s) — %d skill(s)\n──────────────────────────────\n",
-		LangChinese:            "📋 可用 Skills (%s) — %d 个\n──────────────────────────────\n",
-		LangTraditionalChinese: "📋 可用 Skills (%s) — %d 個\n──────────────────────────────\n",
-		LangJapanese:           "📋 利用可能なスキル (%s) — %d 個\n──────────────────────────────\n",
-		LangSpanish:            "📋 Skills disponibles (%s) — %d skill(s)\n──────────────────────────────\n",
+		LangEnglish:            "📋 Available Skills (%s) — %d skill(s)\n\n",
+		LangChinese:            "📋 可用 Skills (%s) — %d 个\n\n",
+		LangTraditionalChinese: "📋 可用 Skills (%s) — %d 個\n\n",
+		LangJapanese:           "📋 利用可能なスキル (%s) — %d 個\n\n",
+		LangSpanish:            "📋 Skills disponibles (%s) — %d skill(s)\n\n",
 	},
 	MsgSkillsEmpty: {
 		LangEnglish:            "No skills found.\nSkills are discovered from agent directories (e.g. .claude/skills/<name>/SKILL.md).",
@@ -1175,32 +1177,52 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "⚙️ **Configuración en tiempo de ejecución**\n\n",
 	},
 	MsgConfigHint: {
-		LangEnglish:            "`/config <key> <value>` to update\n`/config get <key>` to view\n\n`0` = no truncation",
-		LangChinese:            "`/config <key> <value>` 修改配置\n`/config get <key>` 查看配置\n\n`0` = 不截断",
-		LangTraditionalChinese: "`/config <key> <value>` 修改配置\n`/config get <key>` 查看配置\n\n`0` = 不截斷",
-		LangJapanese:           "`/config <key> <value>` で変更\n`/config get <key>` で確認\n\n`0` = 切り捨てなし",
-		LangSpanish:            "`/config <key> <value>` para actualizar\n`/config get <key>` para ver\n\n`0` = sin truncamiento",
+		LangEnglish: "Usage:\n" +
+			"`/config` — show all\n" +
+			"`/config thinking_max_len 200` — update\n" +
+			"`/config get thinking_max_len` — view single\n\n" +
+			"Set to `0` to disable truncation.",
+		LangChinese: "用法：\n" +
+			"`/config` — 查看所有配置\n" +
+			"`/config thinking_max_len 200` — 修改配置\n" +
+			"`/config get thinking_max_len` — 查看单项\n\n" +
+			"设为 `0` 表示不截断。",
+		LangTraditionalChinese: "用法：\n" +
+			"`/config` — 查看所有配置\n" +
+			"`/config thinking_max_len 200` — 修改配置\n" +
+			"`/config get thinking_max_len` — 查看單項\n\n" +
+			"設為 `0` 表示不截斷。",
+		LangJapanese: "使い方:\n" +
+			"`/config` — 全設定を表示\n" +
+			"`/config thinking_max_len 200` — 変更\n" +
+			"`/config get thinking_max_len` — 単一確認\n\n" +
+			"`0` = 切り捨てなし",
+		LangSpanish: "Uso:\n" +
+			"`/config` — ver todo\n" +
+			"`/config thinking_max_len 200` — actualizar\n" +
+			"`/config get thinking_max_len` — ver uno\n\n" +
+			"Establecer `0` para no truncar.",
 	},
 	MsgConfigGetUsage: {
-		LangEnglish:            "Usage: `/config get <key>`",
-		LangChinese:            "用法：`/config get <key>`",
-		LangTraditionalChinese: "用法：`/config get <key>`",
-		LangJapanese:           "使い方: `/config get <key>`",
-		LangSpanish:            "Uso: `/config get <key>`",
+		LangEnglish:            "Usage: `/config get thinking_max_len`",
+		LangChinese:            "用法：`/config get thinking_max_len`",
+		LangTraditionalChinese: "用法：`/config get thinking_max_len`",
+		LangJapanese:           "使い方: `/config get thinking_max_len`",
+		LangSpanish:            "Uso: `/config get thinking_max_len`",
 	},
 	MsgConfigSetUsage: {
-		LangEnglish:            "Usage: `/config set <key> <value>`",
-		LangChinese:            "用法：`/config set <key> <value>`",
-		LangTraditionalChinese: "用法：`/config set <key> <value>`",
-		LangJapanese:           "使い方: `/config set <key> <value>`",
-		LangSpanish:            "Uso: `/config set <key> <value>`",
+		LangEnglish:            "Usage: `/config set thinking_max_len 200`",
+		LangChinese:            "用法：`/config set thinking_max_len 200`",
+		LangTraditionalChinese: "用法：`/config set thinking_max_len 200`",
+		LangJapanese:           "使い方: `/config set thinking_max_len 200`",
+		LangSpanish:            "Uso: `/config set thinking_max_len 200`",
 	},
 	MsgConfigUpdated: {
-		LangEnglish:            "✅ `%s` updated to **%s**",
-		LangChinese:            "✅ `%s` 已更新为 **%s**",
-		LangTraditionalChinese: "✅ `%s` 已更新為 **%s**",
-		LangJapanese:           "✅ `%s` を **%s** に更新しました",
-		LangSpanish:            "✅ `%s` actualizado a **%s**",
+		LangEnglish:            "✅ `%s` → `%s`",
+		LangChinese:            "✅ `%s` → `%s`",
+		LangTraditionalChinese: "✅ `%s` → `%s`",
+		LangJapanese:           "✅ `%s` → `%s`",
+		LangSpanish:            "✅ `%s` → `%s`",
 	},
 	MsgConfigKeyNotFound: {
 		LangEnglish:            "❌ Unknown config key `%s`. Use `/config` to see available keys.",
@@ -1215,6 +1237,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "🏥 正在執行系統診斷...",
 		LangJapanese:           "🏥 診断を実行中...",
 		LangSpanish:            "🏥 Ejecutando diagnósticos...",
+	},
+	MsgDoctorTitle: {
+		LangEnglish:            "🏥 **System Diagnostic Report**\n\n",
+		LangChinese:            "🏥 **系统诊断报告**\n\n",
+		LangTraditionalChinese: "🏥 **系統診斷報告**\n\n",
+		LangJapanese:           "🏥 **システム診断レポート**\n\n",
+		LangSpanish:            "🏥 **Informe de diagnóstico del sistema**\n\n",
+	},
+	MsgDoctorSummary: {
+		LangEnglish:            "\n✅ %d passed  ⚠️ %d warnings  ❌ %d failed",
+		LangChinese:            "\n✅ %d 项通过  ⚠️ %d 项警告  ❌ %d 项失败",
+		LangTraditionalChinese: "\n✅ %d 項通過  ⚠️ %d 項警告  ❌ %d 項失敗",
+		LangJapanese:           "\n✅ %d 合格  ⚠️ %d 警告  ❌ %d 失敗",
+		LangSpanish:            "\n✅ %d aprobados  ⚠️ %d advertencias  ❌ %d fallidos",
 	},
 }
 

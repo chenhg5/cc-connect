@@ -415,14 +415,73 @@ func checkNetwork(ctx context.Context) []DoctorCheckResult {
 	return results
 }
 
-// FormatDoctorResults formats check results into a readable report.
-func FormatDoctorResults(results []DoctorCheckResult, isZh bool) string {
-	var sb strings.Builder
-	if isZh {
-		sb.WriteString("🏥 **系统诊断报告**\n\n")
-	} else {
-		sb.WriteString("🏥 **System Diagnostic Report**\n\n")
+// checkNameZh provides Chinese translations for common check names.
+var checkNameZh = map[string]string{
+	"Memory (Go runtime)": "内存 (Go runtime)",
+	"System Memory":       "系统内存",
+	"CPU":                 "CPU",
+	"CPU Load":            "CPU 负载",
+	"Disk Space":          "磁盘空间",
+	"Git":                 "Git",
+	"SQLite3":             "SQLite3",
+	"FFmpeg (voice)":      "FFmpeg (语音)",
+	"HTTPS (Anthropic)":   "HTTPS (Anthropic)",
+	"Data Directory":      "数据目录",
+	"Config File":         "配置文件",
+	"Platforms":           "平台",
+}
+
+// checkNameJa provides Japanese translations for common check names.
+var checkNameJa = map[string]string{
+	"Memory (Go runtime)": "メモリ (Go runtime)",
+	"System Memory":       "システムメモリ",
+	"CPU Load":            "CPU 負荷",
+	"Disk Space":          "ディスク容量",
+	"FFmpeg (voice)":      "FFmpeg (音声)",
+	"Data Directory":      "データディレクトリ",
+	"Config File":         "設定ファイル",
+	"Platforms":           "プラットフォーム",
+}
+
+func localizeCheckName(name string, lang Language) string {
+	switch lang {
+	case LangChinese, LangTraditionalChinese:
+		// Translate known names; parametric names (e.g. "Agent CLI (claude)") need prefix matching
+		if zh, ok := checkNameZh[name]; ok {
+			return zh
+		}
+		if strings.HasPrefix(name, "Agent CLI") {
+			return strings.Replace(name, "Agent CLI", "Agent 命令行", 1)
+		}
+		if strings.HasPrefix(name, "Platform (") {
+			return strings.Replace(name, "Platform", "平台", 1)
+		}
+		if strings.Contains(name, "Auth") {
+			return strings.Replace(name, "Auth", "认证", 1)
+		}
+	case LangJapanese:
+		if ja, ok := checkNameJa[name]; ok {
+			return ja
+		}
+		if strings.HasPrefix(name, "Agent CLI") {
+			return strings.Replace(name, "Agent CLI", "Agent CLI", 1)
+		}
+		if strings.HasPrefix(name, "Platform (") {
+			return strings.Replace(name, "Platform", "プラットフォーム", 1)
+		}
+		if strings.Contains(name, "Auth") {
+			return strings.Replace(name, "Auth", "認証", 1)
+		}
 	}
+	return name
+}
+
+// FormatDoctorResults formats check results using the i18n system.
+func FormatDoctorResults(results []DoctorCheckResult, i18n *I18n) string {
+	lang := i18n.currentLang()
+
+	var sb strings.Builder
+	sb.WriteString(i18n.T(MsgDoctorTitle))
 
 	passCount, warnCount, failCount := 0, 0, 0
 	for _, r := range results {
@@ -435,18 +494,14 @@ func FormatDoctorResults(results []DoctorCheckResult, isZh bool) string {
 			failCount++
 		}
 
+		displayName := localizeCheckName(r.Name, lang)
 		latStr := ""
 		if r.Latency > 0 {
 			latStr = fmt.Sprintf(" (%s)", r.Latency.Round(time.Millisecond))
 		}
-		sb.WriteString(fmt.Sprintf("%s **%s**%s\n   %s\n\n", r.Status.Icon(), r.Name, latStr, r.Detail))
+		sb.WriteString(fmt.Sprintf("%s %s%s\n   %s\n\n", r.Status.Icon(), displayName, latStr, r.Detail))
 	}
 
-	sb.WriteString("──────────────────────────────\n")
-	if isZh {
-		sb.WriteString(fmt.Sprintf("总计: %d 项通过, %d 项警告, %d 项失败", passCount, warnCount, failCount))
-	} else {
-		sb.WriteString(fmt.Sprintf("Total: %d passed, %d warnings, %d failed", passCount, warnCount, failCount))
-	}
+	sb.WriteString(i18n.Tf(MsgDoctorSummary, passCount, warnCount, failCount))
 	return sb.String()
 }

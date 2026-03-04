@@ -1955,14 +1955,25 @@ func (e *Engine) cmdSkills(p Platform, msg *Message) {
 // configItem describes a configurable runtime parameter.
 type configItem struct {
 	key     string
+	desc    string // en description
+	descZh  string // zh description
 	getFunc func() string
 	setFunc func(string) error
+}
+
+func (ci configItem) description(isZh bool) string {
+	if isZh && ci.descZh != "" {
+		return ci.descZh
+	}
+	return ci.desc
 }
 
 func (e *Engine) configItems() []configItem {
 	return []configItem{
 		{
-			key: "thinking_max_len",
+			key:    "thinking_max_len",
+			desc:   "Max chars for thinking messages (0=no truncation)",
+			descZh: "思考消息最大长度 (0=不截断)",
 			getFunc: func() string {
 				return fmt.Sprintf("%d", e.display.ThinkingMaxLen)
 			},
@@ -1982,7 +1993,9 @@ func (e *Engine) configItems() []configItem {
 			},
 		},
 		{
-			key: "tool_max_len",
+			key:    "tool_max_len",
+			desc:   "Max chars for tool use messages (0=no truncation)",
+			descZh: "工具消息最大长度 (0=不截断)",
 			getFunc: func() string {
 				return fmt.Sprintf("%d", e.display.ToolMaxLen)
 			},
@@ -2006,15 +2019,15 @@ func (e *Engine) configItems() []configItem {
 
 func (e *Engine) cmdConfig(p Platform, msg *Message, args []string) {
 	items := e.configItems()
+	isZh := e.i18n.IsZhLike()
 
 	if len(args) == 0 {
-		// Show all
 		var sb strings.Builder
 		sb.WriteString(e.i18n.T(MsgConfigTitle))
 		for _, item := range items {
-			sb.WriteString(fmt.Sprintf("  `%s` = **%s**\n", item.key, item.getFunc()))
+			sb.WriteString(fmt.Sprintf("`%s` = `%s`\n  %s\n\n", item.key, item.getFunc(), item.description(isZh)))
 		}
-		sb.WriteString("\n" + e.i18n.T(MsgConfigHint))
+		sb.WriteString(e.i18n.T(MsgConfigHint))
 		e.reply(p, msg.ReplyCtx, sb.String())
 		return
 	}
@@ -2030,7 +2043,7 @@ func (e *Engine) cmdConfig(p Platform, msg *Message, args []string) {
 		key := strings.ToLower(args[1])
 		for _, item := range items {
 			if item.key == key {
-				e.reply(p, msg.ReplyCtx, fmt.Sprintf("`%s` = **%s**", key, item.getFunc()))
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf("`%s` = `%s`\n  %s", key, item.getFunc(), item.description(isZh)))
 				return
 			}
 		}
@@ -2056,20 +2069,17 @@ func (e *Engine) cmdConfig(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgConfigKeyNotFound, key))
 
 	default:
-		// Treat "/config <key>" as get, "/config <key> <value>" as set
 		key := strings.ToLower(sub)
 		for _, item := range items {
 			if item.key == key {
 				if len(args) >= 2 {
-					// Set
 					if err := item.setFunc(args[1]); err != nil {
 						e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
 						return
 					}
 					e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgConfigUpdated, key, item.getFunc()))
 				} else {
-					// Get
-					e.reply(p, msg.ReplyCtx, fmt.Sprintf("`%s` = **%s**", key, item.getFunc()))
+					e.reply(p, msg.ReplyCtx, fmt.Sprintf("`%s` = `%s`\n  %s", key, item.getFunc(), item.description(isZh)))
 				}
 				return
 			}
@@ -2081,9 +2091,8 @@ func (e *Engine) cmdConfig(p Platform, msg *Message, args []string) {
 // ── /doctor command ─────────────────────────────────────────
 
 func (e *Engine) cmdDoctor(p Platform, msg *Message) {
-	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDoctorRunning))
 	results := RunDoctorChecks(e.ctx, e.agent, e.platforms)
-	report := FormatDoctorResults(results, e.i18n.IsZhLike())
+	report := FormatDoctorResults(results, e.i18n)
 	e.reply(p, msg.ReplyCtx, report)
 }
 
