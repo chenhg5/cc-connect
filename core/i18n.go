@@ -225,16 +225,16 @@ const (
 	MsgPermBtnDeny     MsgKey = "perm_btn_deny"
 	MsgPermBtnAllowAll MsgKey = "perm_btn_allow_all"
 
-	MsgCommandsTitle    MsgKey = "commands_title"
-	MsgCommandsEmpty    MsgKey = "commands_empty"
-	MsgCommandsHint     MsgKey = "commands_hint"
-	MsgCommandsUsage    MsgKey = "commands_usage"
-	MsgCommandsAddUsage MsgKey = "commands_add_usage"
-	MsgCommandsAdded    MsgKey = "commands_added"
+	MsgCommandsTitle     MsgKey = "commands_title"
+	MsgCommandsEmpty     MsgKey = "commands_empty"
+	MsgCommandsHint      MsgKey = "commands_hint"
+	MsgCommandsUsage     MsgKey = "commands_usage"
+	MsgCommandsAddUsage  MsgKey = "commands_add_usage"
+	MsgCommandsAdded     MsgKey = "commands_added"
 	MsgCommandsAddExists MsgKey = "commands_add_exists"
-	MsgCommandsDelUsage MsgKey = "commands_del_usage"
-	MsgCommandsDeleted  MsgKey = "commands_deleted"
-	MsgCommandsNotFound MsgKey = "commands_not_found"
+	MsgCommandsDelUsage  MsgKey = "commands_del_usage"
+	MsgCommandsDeleted   MsgKey = "commands_deleted"
+	MsgCommandsNotFound  MsgKey = "commands_not_found"
 
 	MsgSkillsTitle MsgKey = "skills_title"
 	MsgSkillsEmpty MsgKey = "skills_empty"
@@ -443,10 +443,10 @@ var messages = map[MsgKey]map[Language]string{
 		LangEnglish: "📖 Available Commands\n\n" +
 			"/new [name]\n  Start a new session\n\n" +
 			"/list\n  List agent sessions\n\n" +
-			"/switch <id>\n  Resume an existing session\n\n" +
+			"/switch <number>\n  Resume a session by its list number\n\n" +
 			"/current\n  Show current active session\n\n" +
 			"/history [n]\n  Show last n messages (default 10)\n\n" +
-			"/provider [list|add|remove|switch]\n  Manage API providers\n\n" +
+			"/provider [list|add|remove|switch|clear]\n  Manage API providers\n\n" +
 			"/memory [add|global|global add]\n  View/edit agent memory files\n\n" +
 			"/allow <tool>\n  Pre-allow a tool (next session)\n\n" +
 			"/model [name]\n  View/switch model\n\n" +
@@ -458,21 +458,22 @@ var messages = map[MsgKey]map[Language]string{
 			"/cron [add|list|del|enable|disable]\n  Manage scheduled tasks\n\n" +
 			"/commands [add|del]\n  Manage custom slash commands\n\n" +
 			"/skills\n  List agent skills (from SKILL.md)\n\n" +
-			"/config [key] [value]\n  View/update runtime configuration\n\n" +
+			"/config [get|set] [key] [value]\n  View/update runtime configuration\n\n" +
 			"/doctor\n  Run system diagnostics\n\n" +
 			"/status\n  Show system status\n\n" +
 			"/version\n  Show cc-connect version\n\n" +
 			"/help\n  Show this help\n\n" +
-			"Custom commands: define via `/commands add` or `[[commands]]` in config.toml.\n" +
-			"Agent skills: auto-discovered from .claude/skills/<name>/SKILL.md etc.\n" +
+			"Tip: Commands support prefix matching, e.g. `/pro l` = `/provider list`, `/sw 2` = `/switch 2`.\n\n" +
+			"Custom commands: define via `/commands add` or `[[commands]]` in config.toml.\n\n" +
+			"Agent skills: auto-discovered from .claude/skills/<name>/SKILL.md etc.\n\n" +
 			"Permission modes: default / edit / plan / yolo",
 		LangChinese: "📖 可用命令\n\n" +
 			"/new [名称]\n  创建新会话\n\n" +
 			"/list\n  列出 Agent 会话列表\n\n" +
-			"/switch <id>\n  恢复已有会话\n\n" +
+			"/switch <序号>\n  按列表序号切换会话\n\n" +
 			"/current\n  查看当前活跃会话\n\n" +
 			"/history [n]\n  查看最近 n 条消息（默认 10）\n\n" +
-			"/provider [list|add|remove|switch]\n  管理 API Provider\n\n" +
+			"/provider [list|add|remove|switch|clear]\n  管理 API Provider\n\n" +
 			"/memory [add|global|global add]\n  查看/编辑 Agent 记忆文件\n\n" +
 			"/allow <工具名>\n  预授权工具（下次会话生效）\n\n" +
 			"/model [名称]\n  查看/切换模型\n\n" +
@@ -484,21 +485,22 @@ var messages = map[MsgKey]map[Language]string{
 			"/cron [add|list|del|enable|disable]\n  管理定时任务\n\n" +
 			"/commands [add|del]\n  管理自定义命令\n\n" +
 			"/skills\n  列出 Agent Skills（来自 SKILL.md）\n\n" +
-			"/config [key] [value]\n  查看/修改运行时配置\n\n" +
+			"/config [get|set] [key] [value]\n  查看/修改运行时配置\n\n" +
 			"/doctor\n  运行系统诊断\n\n" +
 			"/status\n  查看系统状态\n\n" +
 			"/version\n  查看 cc-connect 版本\n\n" +
 			"/help\n  显示此帮助\n\n" +
-			"自定义命令：通过 `/commands add` 添加，或在 config.toml 中配置 `[[commands]]`。\n" +
-			"Agent Skills：自动发现自 .claude/skills/<name>/SKILL.md 等目录。\n" +
+			"提示：命令支持前缀匹配，如 `/pro l` = `/provider list`，`/sw 2` = `/switch 2`。\n\n" +
+			"自定义命令：通过 `/commands add` 添加，或在 config.toml 中配置 `[[commands]]`。\n\n" +
+			"Agent Skills：自动发现自 .claude/skills/<name>/SKILL.md 等目录。\n\n" +
 			"权限模式：default / edit / plan / yolo",
 		LangTraditionalChinese: "📖 可用命令\n\n" +
 			"/new [名稱]\n  建立新會話\n\n" +
 			"/list\n  列出 Agent 會話列表\n\n" +
-			"/switch <id>\n  恢復已有會話\n\n" +
+			"/switch <序號>\n  按列表序號切換會話\n\n" +
 			"/current\n  查看當前活躍會話\n\n" +
 			"/history [n]\n  查看最近 n 條訊息（預設 10）\n\n" +
-			"/provider [list|add|remove|switch]\n  管理 API Provider\n\n" +
+			"/provider [list|add|remove|switch|clear]\n  管理 API Provider\n\n" +
 			"/memory [add|global|global add]\n  查看/編輯 Agent 記憶檔案\n\n" +
 			"/allow <工具名>\n  預授權工具（下次會話生效）\n\n" +
 			"/model [名稱]\n  查看/切換模型\n\n" +
@@ -510,21 +512,22 @@ var messages = map[MsgKey]map[Language]string{
 			"/cron [add|list|del|enable|disable]\n  管理定時任務\n\n" +
 			"/commands [add|del]\n  管理自訂命令\n\n" +
 			"/skills\n  列出 Agent Skills（來自 SKILL.md）\n\n" +
-			"/config [key] [value]\n  查看/修改執行階段配置\n\n" +
+			"/config [get|set] [key] [value]\n  查看/修改執行階段配置\n\n" +
 			"/doctor\n  執行系統診斷\n\n" +
 			"/status\n  查看系統狀態\n\n" +
 			"/version\n  查看 cc-connect 版本\n\n" +
 			"/help\n  顯示此說明\n\n" +
-			"自訂命令：透過 `/commands add` 新增，或在 config.toml 中配置 `[[commands]]`。\n" +
-			"Agent Skills：自動發現自 .claude/skills/<name>/SKILL.md 等目錄。\n" +
+			"提示：命令支持前綴匹配，如 `/pro l` = `/provider list`，`/sw 2` = `/switch 2`。\n\n" +
+			"自訂命令：透過 `/commands add` 新增，或在 config.toml 中配置 `[[commands]]`。\n\n" +
+			"Agent Skills：自動發現自 .claude/skills/<name>/SKILL.md 等目錄。\n\n" +
 			"權限模式：default / edit / plan / yolo",
 		LangJapanese: "📖 利用可能なコマンド\n\n" +
 			"/new [名前]\n  新しいセッションを開始\n\n" +
 			"/list\n  エージェントセッション一覧\n\n" +
-			"/switch <id>\n  既存セッションに切り替え\n\n" +
+			"/switch <番号>\n  リスト番号でセッションを切り替え\n\n" +
 			"/current\n  現在のアクティブセッションを表示\n\n" +
 			"/history [n]\n  直近 n 件のメッセージを表示（デフォルト 10）\n\n" +
-			"/provider [list|add|remove|switch]\n  API プロバイダ管理\n\n" +
+			"/provider [list|add|remove|switch|clear]\n  API プロバイダ管理\n\n" +
 			"/memory [add|global|global add]\n  エージェントメモリの表示/編集\n\n" +
 			"/allow <ツール名>\n  ツールを事前許可（次のセッションで有効）\n\n" +
 			"/model [名前]\n  モデルの表示/切り替え\n\n" +
@@ -536,21 +539,22 @@ var messages = map[MsgKey]map[Language]string{
 			"/cron [add|list|del|enable|disable]\n  スケジュールタスク管理\n\n" +
 			"/commands [add|del]\n  カスタムコマンド管理\n\n" +
 			"/skills\n  エージェントスキル一覧（SKILL.md から）\n\n" +
-			"/config [key] [value]\n  ランタイム設定の表示/変更\n\n" +
+			"/config [get|set] [key] [value]\n  ランタイム設定の表示/変更\n\n" +
 			"/doctor\n  システム診断を実行\n\n" +
 			"/status\n  システム状態を表示\n\n" +
 			"/version\n  cc-connect のバージョンを表示\n\n" +
 			"/help\n  このヘルプを表示\n\n" +
-			"カスタムコマンド: `/commands add` または config.toml の `[[commands]]` で定義。\n" +
-			"エージェントスキル: .claude/skills/<name>/SKILL.md などから自動検出。\n" +
+			"ヒント：コマンドはプレフィックスマッチに対応しています。例: `/pro l` = `/provider list`、`/sw 2` = `/switch 2`。\n\n" +
+			"カスタムコマンド: `/commands add` または config.toml の `[[commands]]` で定義。\n\n" +
+			"エージェントスキル: .claude/skills/<name>/SKILL.md などから自動検出。\n\n" +
 			"権限モード: default / edit / plan / yolo",
 		LangSpanish: "📖 Comandos disponibles\n\n" +
 			"/new [nombre]\n  Iniciar una nueva sesión\n\n" +
 			"/list\n  Listar sesiones del agente\n\n" +
-			"/switch <id>\n  Reanudar una sesión existente\n\n" +
+			"/switch <número>\n  Reanudar sesión por su número en la lista\n\n" +
 			"/current\n  Mostrar sesión activa actual\n\n" +
 			"/history [n]\n  Mostrar últimos n mensajes (por defecto 10)\n\n" +
-			"/provider [list|add|remove|switch]\n  Gestionar proveedores API\n\n" +
+			"/provider [list|add|remove|switch|clear]\n  Gestionar proveedores API\n\n" +
 			"/memory [add|global|global add]\n  Ver/editar archivos de memoria del agente\n\n" +
 			"/allow <herramienta>\n  Pre-autorizar herramienta (próxima sesión)\n\n" +
 			"/model [nombre]\n  Ver/cambiar modelo\n\n" +
@@ -562,13 +566,14 @@ var messages = map[MsgKey]map[Language]string{
 			"/cron [add|list|del|enable|disable]\n  Gestionar tareas programadas\n\n" +
 			"/commands [add|del]\n  Gestionar comandos personalizados\n\n" +
 			"/skills\n  Listar skills del agente (desde SKILL.md)\n\n" +
-			"/config [key] [value]\n  Ver/actualizar configuración en tiempo de ejecución\n\n" +
+			"/config [get|set] [key] [value]\n  Ver/actualizar configuración en tiempo de ejecución\n\n" +
 			"/doctor\n  Ejecutar diagnósticos del sistema\n\n" +
 			"/status\n  Mostrar estado del sistema\n\n" +
 			"/version\n  Mostrar versión de cc-connect\n\n" +
 			"/help\n  Mostrar esta ayuda\n\n" +
-			"Comandos personalizados: use `/commands add` o defina `[[commands]]` en config.toml.\n" +
-			"Skills del agente: descubiertos de .claude/skills/<name>/SKILL.md etc.\n" +
+			"Consejo: Los comandos admiten coincidencia por prefijo, ej. `/pro l` = `/provider list`, `/sw 2` = `/switch 2`.\n\n" +
+			"Comandos personalizados: use `/commands add` o defina `[[commands]]` en config.toml.\n\n" +
+			"Skills del agente: descubiertos de .claude/skills/<name>/SKILL.md etc.\n\n" +
 			"Modos de permisos: default / edit / plan / yolo",
 	},
 	MsgListTitle: {
@@ -593,11 +598,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "\n... y %d más\n",
 	},
 	MsgListSwitchHint: {
-		LangEnglish:            "\n`/switch <id>` to switch session",
-		LangChinese:            "\n`/switch <id>` 切换会话",
-		LangTraditionalChinese: "\n`/switch <id>` 切換會話",
-		LangJapanese:           "\n`/switch <id>` でセッション切替",
-		LangSpanish:            "\n`/switch <id>` para cambiar sesión",
+		LangEnglish:            "\n`/switch <number>` to switch session",
+		LangChinese:            "\n`/switch <序号>` 切换会话",
+		LangTraditionalChinese: "\n`/switch <序號>` 切換會話",
+		LangJapanese:           "\n`/switch <番号>` でセッション切替",
+		LangSpanish:            "\n`/switch <número>` para cambiar sesión",
 	},
 	MsgListError: {
 		LangEnglish:            "❌ Failed to list sessions: %v",

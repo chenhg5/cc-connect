@@ -755,68 +755,151 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 // Command handling
 // ──────────────────────────────────────────────────────────────
 
+// builtinCommands maps canonical command names to their aliases/full names.
+// The first entry is the canonical name used for prefix matching.
+var builtinCommands = []struct {
+	names []string
+	id    string
+}{
+	{[]string{"new"}, "new"},
+	{[]string{"list", "sessions"}, "list"},
+	{[]string{"switch"}, "switch"},
+	{[]string{"current"}, "current"},
+	{[]string{"status"}, "status"},
+	{[]string{"history"}, "history"},
+	{[]string{"allow"}, "allow"},
+	{[]string{"model"}, "model"},
+	{[]string{"mode"}, "mode"},
+	{[]string{"lang"}, "lang"},
+	{[]string{"quiet"}, "quiet"},
+	{[]string{"provider"}, "provider"},
+	{[]string{"memory"}, "memory"},
+	{[]string{"cron"}, "cron"},
+	{[]string{"compress", "compact"}, "compress"},
+	{[]string{"stop"}, "stop"},
+	{[]string{"help"}, "help"},
+	{[]string{"version"}, "version"},
+	{[]string{"commands", "command", "cmd"}, "commands"},
+	{[]string{"skills", "skill"}, "skills"},
+	{[]string{"config"}, "config"},
+	{[]string{"doctor"}, "doctor"},
+}
+
+// matchPrefix finds a unique command matching the given prefix.
+// Returns the command id or "" if no match / ambiguous.
+func matchPrefix(prefix string, candidates []struct {
+	names []string
+	id    string
+}) string {
+	// Exact match first
+	for _, c := range candidates {
+		for _, n := range c.names {
+			if prefix == n {
+				return c.id
+			}
+		}
+	}
+	// Prefix match
+	var matched string
+	for _, c := range candidates {
+		for _, n := range c.names {
+			if strings.HasPrefix(n, prefix) {
+				if matched != "" && matched != c.id {
+					return "" // ambiguous
+				}
+				matched = c.id
+				break
+			}
+		}
+	}
+	return matched
+}
+
+// matchSubCommand does prefix matching against a flat list of subcommand names.
+func matchSubCommand(input string, candidates []string) string {
+	for _, c := range candidates {
+		if input == c {
+			return c
+		}
+	}
+	var matched string
+	for _, c := range candidates {
+		if strings.HasPrefix(c, input) {
+			if matched != "" {
+				return input // ambiguous → return raw input (will hit default)
+			}
+			matched = c
+		}
+	}
+	if matched != "" {
+		return matched
+	}
+	return input
+}
+
 func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 	parts := strings.Fields(raw)
-	cmd := strings.ToLower(parts[0])
+	cmd := strings.ToLower(strings.TrimPrefix(parts[0], "/"))
 	args := parts[1:]
 
-	switch cmd {
-	case "/new":
+	cmdID := matchPrefix(cmd, builtinCommands)
+
+	switch cmdID {
+	case "new":
 		e.cmdNew(p, msg, args)
-	case "/list", "/sessions":
+	case "list":
 		e.cmdList(p, msg)
-	case "/switch":
+	case "switch":
 		e.cmdSwitch(p, msg, args)
-	case "/current":
+	case "current":
 		e.cmdCurrent(p, msg)
-	case "/status":
+	case "status":
 		e.cmdStatus(p, msg)
-	case "/history":
+	case "history":
 		e.cmdHistory(p, msg, args)
-	case "/allow":
+	case "allow":
 		e.cmdAllow(p, msg, args)
-	case "/model":
+	case "model":
 		e.cmdModel(p, msg, args)
-	case "/mode":
+	case "mode":
 		e.cmdMode(p, msg, args)
-	case "/lang":
+	case "lang":
 		e.cmdLang(p, msg, args)
-	case "/quiet":
+	case "quiet":
 		e.cmdQuiet(p, msg)
-	case "/provider":
+	case "provider":
 		e.cmdProvider(p, msg, args)
-	case "/memory":
+	case "memory":
 		e.cmdMemory(p, msg, args)
-	case "/cron":
+	case "cron":
 		e.cmdCron(p, msg, args)
-	case "/compress", "/compact":
+	case "compress":
 		e.cmdCompress(p, msg)
-	case "/stop":
+	case "stop":
 		e.cmdStop(p, msg)
-	case "/help":
+	case "help":
 		e.cmdHelp(p, msg)
-	case "/version":
+	case "version":
 		e.reply(p, msg.ReplyCtx, VersionInfo)
-	case "/commands", "/command", "/cmd":
+	case "commands":
 		e.cmdCommands(p, msg, args)
-	case "/skills", "/skill":
+	case "skills":
 		e.cmdSkills(p, msg)
-	case "/config":
+	case "config":
 		e.cmdConfig(p, msg, args)
-	case "/doctor":
+	case "doctor":
 		e.cmdDoctor(p, msg)
 	default:
-		cmdName := strings.TrimPrefix(cmd, "/")
-		if custom, ok := e.commands.Resolve(cmdName); ok {
+		if custom, ok := e.commands.Resolve(cmd); ok {
 			e.executeCustomCommand(p, msg, custom, args)
 			return true
 		}
-		if skill := e.skills.Resolve(cmdName); skill != nil {
+		if skill := e.skills.Resolve(cmd); skill != nil {
 			e.executeSkill(p, msg, skill, args)
 			return true
 		}
 		// Not a cc-connect command — notify user, then fall through to agent
-		e.send(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgUnknownCommand), cmd))
+		e.send(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgUnknownCommand), "/"+cmd))
 		return false
 	}
 	return true
@@ -863,10 +946,6 @@ func (e *Engine) cmdList(p Platform, msg *Message) {
 		if s.ID == activeAgentID {
 			marker = "▶"
 		}
-		shortID := s.ID
-		if len(shortID) > 12 {
-			shortID = shortID[:12]
-		}
 		summary := strings.ReplaceAll(s.Summary, "\n", " ")
 		summary = strings.Join(strings.Fields(summary), " ")
 		if summary == "" {
@@ -875,8 +954,8 @@ func (e *Engine) cmdList(p Platform, msg *Message) {
 		if len([]rune(summary)) > 40 {
 			summary = string([]rune(summary)[:40]) + "…"
 		}
-		sb.WriteString(fmt.Sprintf("%s `%s` · %s · **%d** msgs · %s\n",
-			marker, shortID, summary, s.MessageCount, s.ModifiedAt.Format("01-02 15:04")))
+		sb.WriteString(fmt.Sprintf("%s **%d.** %s · **%d** msgs · %s\n",
+			marker, i+1, summary, s.MessageCount, s.ModifiedAt.Format("01-02 15:04")))
 	}
 	if len(agentSessions) > limit {
 		sb.WriteString(fmt.Sprintf(e.i18n.T(MsgListMore), len(agentSessions)-limit))
@@ -887,7 +966,7 @@ func (e *Engine) cmdList(p Platform, msg *Message) {
 
 func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	if len(args) == 0 {
-		e.reply(p, msg.ReplyCtx, "Usage: /switch <session_id_prefix>")
+		e.reply(p, msg.ReplyCtx, "Usage: /switch <number or id_prefix>")
 		return
 	}
 	prefix := strings.TrimSpace(args[0])
@@ -900,14 +979,20 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	}
 
 	var matched *AgentSessionInfo
-	for i := range agentSessions {
-		if strings.HasPrefix(agentSessions[i].ID, prefix) {
-			matched = &agentSessions[i]
-			break
+
+	// Try numeric index first (1-based, matching /list output)
+	if idx, err := strconv.Atoi(prefix); err == nil && idx >= 1 && idx <= len(agentSessions) {
+		matched = &agentSessions[idx-1]
+	} else {
+		for i := range agentSessions {
+			if strings.HasPrefix(agentSessions[i].ID, prefix) {
+				matched = &agentSessions[i]
+				break
+			}
 		}
 	}
 	if matched == nil {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ No session matching prefix %q", prefix))
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ No session matching %q", prefix))
 		return
 	}
 
@@ -1391,7 +1476,9 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	sub := strings.ToLower(args[0])
+	sub := matchSubCommand(strings.ToLower(args[0]), []string{
+		"list", "add", "remove", "switch", "current", "clear", "reset", "none",
+	})
 	switch sub {
 	case "list":
 		providers := switcher.ListProviders()
@@ -1676,7 +1763,7 @@ func (e *Engine) cmdMemory(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	sub := strings.ToLower(args[0])
+	sub := matchSubCommand(strings.ToLower(args[0]), []string{"add", "global", "show", "help"})
 	switch sub {
 	case "add":
 		text := strings.TrimSpace(strings.Join(args[1:], " "))
@@ -1781,7 +1868,9 @@ func (e *Engine) cmdCron(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	sub := strings.ToLower(args[0])
+	sub := matchSubCommand(strings.ToLower(args[0]), []string{
+		"add", "list", "del", "delete", "rm", "remove", "enable", "disable",
+	})
 	switch sub {
 	case "add":
 		e.cmdCronAdd(p, msg, args[1:])
@@ -1945,7 +2034,9 @@ func (e *Engine) cmdCommands(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	sub := strings.ToLower(args[0])
+	sub := matchSubCommand(strings.ToLower(args[0]), []string{
+		"list", "add", "del", "delete", "rm", "remove",
+	})
 	switch sub {
 	case "list":
 		e.cmdCommandsList(p, msg)
@@ -2155,7 +2246,7 @@ func (e *Engine) cmdConfig(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	sub := strings.ToLower(args[0])
+	sub := matchSubCommand(strings.ToLower(args[0]), []string{"get", "set"})
 
 	switch sub {
 	case "get":
