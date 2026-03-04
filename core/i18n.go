@@ -432,8 +432,9 @@ var messages = map[MsgKey]map[Language]string{
 	},
 	MsgHelp: {
 		LangEnglish: "📖 Available Commands\n\n" +
-			"/new [name]\n  Start a new session\n\n" +
-			"/list\n  List agent sessions\n\n" +
+			"/new [name|path]\n  Start a new session (path creates session with custom work dir)\n\n" +
+			"/delete [id|name]\n  Delete a session (default: current)\n\n" +
+			"/list\n  List local & agent sessions\n\n" +
 			"/switch <id>\n  Resume an existing session\n\n" +
 			"/current\n  Show current active session\n\n" +
 			"/history [n]\n  Show last n messages (default 10)\n\n" +
@@ -458,8 +459,9 @@ var messages = map[MsgKey]map[Language]string{
 			"Agent skills: auto-discovered from .claude/skills/<name>/SKILL.md etc.\n" +
 			"Permission modes: default / edit / plan / yolo",
 		LangChinese: "📖 可用命令\n\n" +
-			"/new [名称]\n  创建新会话\n\n" +
-			"/list\n  列出 Agent 会话列表\n\n" +
+			"/new [名称|路径]\n  创建新会话（路径参数可指定工作目录）\n\n" +
+			"/delete [id|名称]\n  删除会话（默认删除当前会话）\n\n" +
+			"/list\n  列出本地和 Agent 会话列表\n\n" +
 			"/switch <id>\n  恢复已有会话\n\n" +
 			"/current\n  查看当前活跃会话\n\n" +
 			"/history [n]\n  查看最近 n 条消息（默认 10）\n\n" +
@@ -484,8 +486,9 @@ var messages = map[MsgKey]map[Language]string{
 			"Agent Skills：自动发现自 .claude/skills/<name>/SKILL.md 等目录。\n" +
 			"权限模式：default / edit / plan / yolo",
 		LangTraditionalChinese: "📖 可用命令\n\n" +
-			"/new [名稱]\n  建立新會話\n\n" +
-			"/list\n  列出 Agent 會話列表\n\n" +
+			"/new [名稱|路徑]\n  建立新會話（路徑參數可指定工作目錄）\n\n" +
+			"/delete [id|名稱]\n  刪除會話（預設刪除當前會話）\n\n" +
+			"/list\n  列出本地和 Agent 會話列表\n\n" +
 			"/switch <id>\n  恢復已有會話\n\n" +
 			"/current\n  查看當前活躍會話\n\n" +
 			"/history [n]\n  查看最近 n 條訊息（預設 10）\n\n" +
@@ -510,8 +513,9 @@ var messages = map[MsgKey]map[Language]string{
 			"Agent Skills：自動發現自 .claude/skills/<name>/SKILL.md 等目錄。\n" +
 			"權限模式：default / edit / plan / yolo",
 		LangJapanese: "📖 利用可能なコマンド\n\n" +
-			"/new [名前]\n  新しいセッションを開始\n\n" +
-			"/list\n  エージェントセッション一覧\n\n" +
+			"/new [名前|パス]\n  新しいセッションを開始（パスで作業ディレクトリを指定）\n\n" +
+			"/delete [id|名前]\n  セッションを削除（デフォルト: 現在のセッション）\n\n" +
+			"/list\n  ローカル＆エージェントセッション一覧\n\n" +
 			"/switch <id>\n  既存セッションに切り替え\n\n" +
 			"/current\n  現在のアクティブセッションを表示\n\n" +
 			"/history [n]\n  直近 n 件のメッセージを表示（デフォルト 10）\n\n" +
@@ -536,8 +540,9 @@ var messages = map[MsgKey]map[Language]string{
 			"エージェントスキル: .claude/skills/<name>/SKILL.md などから自動検出。\n" +
 			"権限モード: default / edit / plan / yolo",
 		LangSpanish: "📖 Comandos disponibles\n\n" +
-			"/new [nombre]\n  Iniciar una nueva sesión\n\n" +
-			"/list\n  Listar sesiones del agente\n\n" +
+			"/new [nombre|ruta]\n  Iniciar una nueva sesión (ruta para directorio de trabajo personalizado)\n\n" +
+			"/delete [id|nombre]\n  Eliminar una sesión (por defecto: actual)\n\n" +
+			"/list\n  Listar sesiones locales y del agente\n\n" +
 			"/switch <id>\n  Reanudar una sesión existente\n\n" +
 			"/current\n  Mostrar sesión activa actual\n\n" +
 			"/history [n]\n  Mostrar últimos n mensajes (por defecto 10)\n\n" +

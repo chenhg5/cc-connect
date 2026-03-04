@@ -30,6 +30,14 @@ type SessionEnvInjector interface {
 	SetSessionEnv(env []string)
 }
 
+// WorkDirOverrider is an optional interface for agents that support
+// per-session working directory override. The engine calls SetWorkDir
+// before StartSession and ResetWorkDir after to restore the default.
+type WorkDirOverrider interface {
+	SetWorkDir(dir string)
+	ResetWorkDir()
+}
+
 // AgentSystemPrompt returns the system prompt fragment that informs agents about
 // cc-connect capabilities (cron scheduling, etc.).
 // The prompt is designed to be appended to the agent's existing system prompt.

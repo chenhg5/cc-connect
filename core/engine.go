@@ -527,6 +527,14 @@ func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, repl
 		inj.SetSessionEnv(envVars)
 	}
 
+	// Apply per-session working directory override if available.
+	if session.WorkDir != "" {
+		if wdo, ok := e.agent.(WorkDirOverrider); ok {
+			wdo.SetWorkDir(session.WorkDir)
+			defer wdo.ResetWorkDir()
+		}
+	}
+
 	startAt := time.Now()
 	agentSession, err := e.agent.StartSession(e.ctx, session.AgentSessionID)
 	startElapsed := time.Since(startAt)
@@ -732,6 +740,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) {
 		e.cmdList(p, msg)
 	case "/switch":
 		e.cmdSwitch(p, msg, args)
+	case "/delete":
+		e.cmdDelete(p, msg, args)
 	case "/current":
 		e.cmdCurrent(p, msg)
 	case "/status":
@@ -786,57 +796,154 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) {
 
 func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 	e.cleanupInteractiveState(msg.SessionKey)
+
 	name := "session"
+	workDir := ""
+
 	if len(args) > 0 {
-		name = strings.Join(args, " ")
+		arg := strings.Join(args, " ")
+		// Detect if the argument is a directory path
+		if strings.HasPrefix(arg, "/") || strings.HasPrefix(arg, ".") || strings.HasPrefix(arg, "~") {
+			// Expand ~ to home directory
+			expanded := arg
+			if strings.HasPrefix(expanded, "~") {
+				if home, err := os.UserHomeDir(); err == nil {
+					expanded = filepath.Join(home, expanded[1:])
+				}
+			}
+			absPath, err := filepath.Abs(expanded)
+			if err == nil {
+				if info, statErr := os.Stat(absPath); statErr == nil && info.IsDir() {
+					workDir = absPath
+					name = filepath.Base(absPath)
+				} else {
+					e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ Directory not found: %s", arg))
+					return
+				}
+			} else {
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ Invalid path: %s", arg))
+				return
+			}
+		} else {
+			name = arg
+		}
 	}
-	s := e.sessions.NewSession(msg.SessionKey, name)
-	e.reply(p, msg.ReplyCtx,
-		fmt.Sprintf("✅ New session created: %s (id: %s)", s.Name, s.ID))
+
+	var s *Session
+	if workDir != "" {
+		s = e.sessions.NewSessionWithWorkDir(msg.SessionKey, name, workDir)
+	} else {
+		s = e.sessions.NewSession(msg.SessionKey, name)
+	}
+
+	reply := fmt.Sprintf("✅ New session created: %s (id: %s)", s.Name, s.ID)
+	if workDir != "" {
+		reply += fmt.Sprintf("\n📁 %s", workDir)
+	}
+	e.reply(p, msg.ReplyCtx, reply)
+}
+
+func (e *Engine) cmdDelete(p Platform, msg *Message, args []string) {
+	var target string
+	if len(args) > 0 {
+		target = strings.TrimSpace(args[0])
+	} else {
+		// Delete the current active session
+		s := e.sessions.GetOrCreateActive(msg.SessionKey)
+		target = s.ID
+	}
+
+	// Cleanup interactive state if the session being deleted has one
+	localSessions := e.sessions.ListSessions(msg.SessionKey)
+	for _, s := range localSessions {
+		if s.ID == target || s.Name == target {
+			e.cleanupInteractiveState(msg.SessionKey)
+			break
+		}
+	}
+
+	deleted, err := e.sessions.DeleteSession(msg.SessionKey, target)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
+		return
+	}
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf("🗑 Session deleted: %s (id: %s)", deleted.Name, deleted.ID))
 }
 
 func (e *Engine) cmdList(p Platform, msg *Message) {
+	// Show local cc-connect sessions first
+	localSessions := e.sessions.ListSessions(msg.SessionKey)
+	activeID := e.sessions.ActiveSessionID(msg.SessionKey)
+
+	var sb strings.Builder
+	if len(localSessions) > 0 {
+		sb.WriteString("📋 **Local Sessions**\n")
+		for _, s := range localSessions {
+			marker := "◻"
+			if s.ID == activeID {
+				marker = "▶"
+			}
+			line := fmt.Sprintf("%s `%s` · %s", marker, s.ID, s.Name)
+			if s.WorkDir != "" {
+				line += fmt.Sprintf(" · 📁 %s", s.WorkDir)
+			}
+			if s.AgentSessionID != "" {
+				shortAgent := s.AgentSessionID
+				if len(shortAgent) > 12 {
+					shortAgent = shortAgent[:12]
+				}
+				line += fmt.Sprintf(" · %s:%s", e.agent.Name(), shortAgent)
+			}
+			sb.WriteString(line + "\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	// Show agent backend sessions
 	agentSessions, err := e.agent.ListSessions(e.ctx)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgListError), err))
 		return
 	}
-	if len(agentSessions) == 0 {
+
+	if len(agentSessions) == 0 && len(localSessions) == 0 {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgListEmpty))
 		return
 	}
 
-	agentName := e.agent.Name()
-	activeSession := e.sessions.GetOrCreateActive(msg.SessionKey)
-	activeAgentID := activeSession.AgentSessionID
+	if len(agentSessions) > 0 {
+		agentName := e.agent.Name()
+		activeSession := e.sessions.GetOrCreateActive(msg.SessionKey)
+		activeAgentID := activeSession.AgentSessionID
 
-	limit := 20
-	if len(agentSessions) < limit {
-		limit = len(agentSessions)
+		limit := 20
+		if len(agentSessions) < limit {
+			limit = len(agentSessions)
+		}
+
+		sb.WriteString(fmt.Sprintf(e.i18n.T(MsgListTitle), agentName, len(agentSessions)))
+		for i := 0; i < limit; i++ {
+			s := agentSessions[i]
+			marker := "◻"
+			if s.ID == activeAgentID {
+				marker = "▶"
+			}
+			shortID := s.ID
+			if len(shortID) > 12 {
+				shortID = shortID[:12]
+			}
+			summary := s.Summary
+			if summary == "" {
+				summary = "(empty)"
+			}
+			sb.WriteString(fmt.Sprintf("%s `%s` · %s · **%d** msgs · %s\n",
+				marker, shortID, summary, s.MessageCount, s.ModifiedAt.Format("01-02 15:04")))
+		}
+		if len(agentSessions) > limit {
+			sb.WriteString(fmt.Sprintf(e.i18n.T(MsgListMore), len(agentSessions)-limit))
+		}
 	}
 
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf(e.i18n.T(MsgListTitle), agentName, len(agentSessions)))
-	for i := 0; i < limit; i++ {
-		s := agentSessions[i]
-		marker := "◻"
-		if s.ID == activeAgentID {
-			marker = "▶"
-		}
-		shortID := s.ID
-		if len(shortID) > 12 {
-			shortID = shortID[:12]
-		}
-		summary := s.Summary
-		if summary == "" {
-			summary = "(empty)"
-		}
-		sb.WriteString(fmt.Sprintf("%s `%s` · %s · **%d** msgs · %s\n",
-			marker, shortID, summary, s.MessageCount, s.ModifiedAt.Format("01-02 15:04")))
-	}
-	if len(agentSessions) > limit {
-		sb.WriteString(fmt.Sprintf(e.i18n.T(MsgListMore), len(agentSessions)-limit))
-	}
 	sb.WriteString(e.i18n.T(MsgListSwitchHint))
 	e.reply(p, msg.ReplyCtx, sb.String())
 }
@@ -888,9 +995,13 @@ func (e *Engine) cmdCurrent(p Platform, msg *Message) {
 	if agentID == "" {
 		agentID = "(new — not yet started)"
 	}
-	e.reply(p, msg.ReplyCtx, fmt.Sprintf(
-		"📌 Current session\nName: %s\nClaude Session: %s\nLocal messages: %d",
-		s.Name, agentID, len(s.History)))
+	info := fmt.Sprintf(
+		"📌 Current session\nName: %s\nID: %s\n%s Session: %s\nLocal messages: %d",
+		s.Name, s.ID, e.agent.Name(), agentID, len(s.History))
+	if s.WorkDir != "" {
+		info += fmt.Sprintf("\nWork Dir: %s", s.WorkDir)
+	}
+	e.reply(p, msg.ReplyCtx, info)
 }
 
 func (e *Engine) cmdStatus(p Platform, msg *Message) {

@@ -14,6 +14,7 @@ import (
 type Session struct {
 	ID             string         `json:"id"`
 	Name           string         `json:"name"`
+	WorkDir        string         `json:"work_dir,omitempty"`
 	AgentSessionID string         `json:"agent_session_id"`
 	History        []HistoryEntry `json:"history"`
 	CreatedAt      time.Time      `json:"created_at"`
@@ -115,23 +116,32 @@ func (sm *SessionManager) GetOrCreateActive(userKey string) *Session {
 			return s
 		}
 	}
-	return sm.createLocked(userKey, "default")
+	return sm.createLocked(userKey, "default", "")
 }
 
 func (sm *SessionManager) NewSession(userKey, name string) *Session {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	s := sm.createLocked(userKey, name)
+	s := sm.createLocked(userKey, name, "")
 	sm.saveLocked()
 	return s
 }
 
-func (sm *SessionManager) createLocked(userKey, name string) *Session {
+func (sm *SessionManager) NewSessionWithWorkDir(userKey, name, workDir string) *Session {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	s := sm.createLocked(userKey, name, workDir)
+	sm.saveLocked()
+	return s
+}
+
+func (sm *SessionManager) createLocked(userKey, name, workDir string) *Session {
 	id := sm.nextID()
 	now := time.Now()
 	s := &Session{
 		ID:        id,
 		Name:      name,
+		WorkDir:   workDir,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -139,6 +149,45 @@ func (sm *SessionManager) createLocked(userKey, name string) *Session {
 	sm.activeSession[userKey] = id
 	sm.userSessions[userKey] = append(sm.userSessions[userKey], id)
 	return s
+}
+
+// DeleteSession removes a session by ID or name. If the deleted session is active,
+// it switches to the most recent remaining session.
+func (sm *SessionManager) DeleteSession(userKey, target string) (*Session, error) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	var found *Session
+	var foundIdx int = -1
+	for i, sid := range sm.userSessions[userKey] {
+		s := sm.sessions[sid]
+		if s != nil && (s.ID == target || s.Name == target) {
+			found = s
+			foundIdx = i
+			break
+		}
+	}
+	if found == nil {
+		return nil, fmt.Errorf("session %q not found", target)
+	}
+
+	// Remove from maps
+	delete(sm.sessions, found.ID)
+	ids := sm.userSessions[userKey]
+	sm.userSessions[userKey] = append(ids[:foundIdx], ids[foundIdx+1:]...)
+
+	// If deleted session was active, switch to the last remaining session
+	if sm.activeSession[userKey] == found.ID {
+		remaining := sm.userSessions[userKey]
+		if len(remaining) > 0 {
+			sm.activeSession[userKey] = remaining[len(remaining)-1]
+		} else {
+			delete(sm.activeSession, userKey)
+		}
+	}
+
+	sm.saveLocked()
+	return found, nil
 }
 
 func (sm *SessionManager) SwitchSession(userKey, target string) (*Session, error) {

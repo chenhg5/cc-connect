@@ -19,11 +19,12 @@ func init() {
 
 // Agent drives Qoder CLI using `qodercli -p <prompt> -f stream-json`.
 type Agent struct {
-	workDir    string
-	model      string
-	mode       string // "default" | "yolo"
-	sessionEnv []string
-	mu         sync.Mutex
+	workDir         string
+	overrideWorkDir string // per-session override, cleared after use
+	model           string
+	mode            string // "default" | "yolo"
+	sessionEnv      []string
+	mu              sync.Mutex
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -90,10 +91,14 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	a.mu.Lock()
 	mode := a.mode
 	model := a.model
+	dir := a.workDir
+	if a.overrideWorkDir != "" {
+		dir = a.overrideWorkDir
+	}
 	extraEnv := append([]string{}, a.sessionEnv...)
 	a.mu.Unlock()
 
-	return newQoderSession(ctx, a.workDir, model, mode, sessionID, extraEnv)
+	return newQoderSession(ctx, dir, model, mode, sessionID, extraEnv)
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
@@ -101,6 +106,20 @@ func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error)
 }
 
 func (a *Agent) Stop() error { return nil }
+
+// SetWorkDir sets a per-session working directory override.
+func (a *Agent) SetWorkDir(dir string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.overrideWorkDir = dir
+}
+
+// ResetWorkDir clears the per-session working directory override.
+func (a *Agent) ResetWorkDir() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.overrideWorkDir = ""
+}
 
 // ── ModeSwitcher ─────────────────────────────────────────────
 
