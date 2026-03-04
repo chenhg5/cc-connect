@@ -392,6 +392,105 @@ Adding, removing, and switching providers all persist to `config.toml` automatic
 
 The `env` map in provider config lets you set arbitrary environment variables for any setup (Bedrock, Vertex, Azure, custom proxies, etc.).
 
+## Claude Code Router Integration
+
+[Claude Code Router](https://github.com/musistudio/claude-code-router) is a powerful tool that routes Claude Code requests to different model providers (OpenRouter, DeepSeek, Gemini, etc.) with custom transformations. cc-connect now supports seamless integration with Claude Code Router.
+
+### Why Use Claude Code Router?
+
+- **Multi-Provider Support**: Route requests to OpenRouter, DeepSeek, Ollama, Gemini, Volcengine, SiliconFlow, and more
+- **Model Routing**: Use different models for different tasks (background, thinking, long context, web search)
+- **Request/Response Transformation**: Automatic adaptation for different provider APIs
+- **Dynamic Model Switching**: Switch models on-the-fly without restarting
+
+### Setup
+
+1. **Install Claude Code Router**:
+
+```bash
+npm install -g @musistudio/claude-code-router
+```
+
+2. **Configure Router** (create `~/.claude-code-router/config.json`):
+
+```json
+{
+  "APIKEY": "your-secret-key",
+  "Providers": [
+    {
+      "name": "openrouter",
+      "api_base_url": "https://openrouter.ai/api/v1/chat/completions",
+      "api_key": "sk-xxx",
+      "models": ["anthropic/claude-sonnet-4", "google/gemini-2.5-pro-preview"],
+      "transformer": { "use": ["openrouter"] }
+    },
+    {
+      "name": "deepseek",
+      "api_base_url": "https://api.deepseek.com/chat/completions",
+      "api_key": "sk-xxx",
+      "models": ["deepseek-chat", "deepseek-reasoner"],
+      "transformer": { "use": ["deepseek"] }
+    }
+  ],
+  "Router": {
+    "default": "deepseek,deepseek-chat",
+    "think": "deepseek,deepseek-reasoner",
+    "longContext": "openrouter,google/gemini-2.5-pro-preview"
+  }
+}
+```
+
+3. **Start Router**:
+
+```bash
+ccr start
+```
+
+4. **Configure cc-connect** (in `config.toml`):
+
+```toml
+[projects.agent.options]
+work_dir = "/path/to/project"
+mode = "default"
+
+# Router integration
+router_url = "http://127.0.0.1:3456"        # Router URL (default port)
+router_api_key = "your-secret-key"          # Optional: if router requires auth
+```
+
+### How It Works
+
+When `router_url` is configured, cc-connect automatically:
+
+- Sets `ANTHROPIC_BASE_URL` to the router URL
+- Sets `NO_PROXY=127.0.0.1` to prevent proxy interference
+- Disables telemetry and cost warnings for cleaner integration
+
+All Claude Code requests are then routed through the router, which handles model selection and provider communication.
+
+### Usage
+
+Once configured, use cc-connect as usual. The router transparently handles model routing:
+
+```
+You: Help me refactor this code
+Router → DeepSeek (default model)
+
+You: Think through this architecture decision
+Router → DeepSeek Reasoner (thinking model)
+
+You: Analyze this large codebase
+Router → Gemini Pro (long context model)
+```
+
+### Important Notes
+
+- **Provider settings are ignored**: When using router, the `[[projects.agent.providers]]` settings are bypassed as the router manages model selection
+- **Router must be running**: Ensure `ccr start` is executed before starting cc-connect
+- **Configuration changes**: After modifying router config, restart with `ccr restart`
+
+For more details, see the [Claude Code Router documentation](https://github.com/musistudio/claude-code-router).
+
 ## Voice Messages (Speech-to-Text)
 
 Send voice messages directly — cc-connect transcribes them to text using a configurable STT provider, then forwards the text to the agent.

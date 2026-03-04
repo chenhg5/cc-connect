@@ -157,6 +157,23 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "bypassPermission
 # Optional: specify a model / 可选：指定模型
 # model = "claude-sonnet-4-20250514"
 
+# Claude Code Router Integration / Claude Code Router 集成
+# Route Claude Code requests through Claude Code Router to use different model providers.
+# 通过 Claude Code Router 路由 Claude Code 请求，使用不同的模型提供商。
+# See: https://github.com/musistudio/claude-code-router
+#
+# router_url = "http://127.0.0.1:3456"  # Claude Code Router URL (default: http://127.0.0.1:3456)
+# router_api_key = "your-router-api-key" # Optional: API key if router requires authentication / 可选：如果 router 需要认证
+#
+# When router_url is set, cc-connect will automatically:
+# 设置 router_url 后，cc-connect 会自动：
+#   - Set ANTHROPIC_BASE_URL to router_url
+#   - Set NO_PROXY=127.0.0.1 to prevent proxy interference
+#   - Disable telemetry and cost warnings for cleaner integration
+#
+# Note: When using router, provider settings below are ignored as the router handles model selection.
+# 注意：使用 router 时，下方的 provider 设置将被忽略，因为 router 负责模型选择。
+
 # Active provider (matches a name in [[projects.agent.providers]])
 # 当前激活的 provider（对应下方 providers 中的 name）
 # provider = "anthropic"

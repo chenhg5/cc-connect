@@ -396,6 +396,105 @@ cc-connect provider import --db-path ~/.cc-switch/cc-switch.db    # 指定数据
 
 Provider 配置中的 `env` 字段支持设置任意环境变量，可用于 Bedrock、Vertex、Azure、自定义代理等各种场景。
 
+## Claude Code Router 集成
+
+[Claude Code Router](https://github.com/musistudio/claude-code-router) 是一个强大的工具，可以将 Claude Code 请求路由到不同的模型提供商（OpenRouter、DeepSeek、Gemini 等），并支持自定义请求转换。cc-connect 现已支持与 Claude Code Router 无缝集成。
+
+### 为什么使用 Claude Code Router？
+
+- **多提供商支持**：路由请求到 OpenRouter、DeepSeek、Ollama、Gemini、火山引擎、SiliconFlow 等
+- **模型路由**：针对不同任务使用不同模型（后台任务、思考、长上下文、网络搜索）
+- **请求/响应转换**：自动适配不同提供商的 API
+- **动态模型切换**：无需重启即可切换模型
+
+### 安装配置
+
+1. **安装 Claude Code Router**：
+
+```bash
+npm install -g @musistudio/claude-code-router
+```
+
+2. **配置 Router**（创建 `~/.claude-code-router/config.json`）：
+
+```json
+{
+  "APIKEY": "your-secret-key",
+  "Providers": [
+    {
+      "name": "openrouter",
+      "api_base_url": "https://openrouter.ai/api/v1/chat/completions",
+      "api_key": "sk-xxx",
+      "models": ["anthropic/claude-sonnet-4", "google/gemini-2.5-pro-preview"],
+      "transformer": { "use": ["openrouter"] }
+    },
+    {
+      "name": "deepseek",
+      "api_base_url": "https://api.deepseek.com/chat/completions",
+      "api_key": "sk-xxx",
+      "models": ["deepseek-chat", "deepseek-reasoner"],
+      "transformer": { "use": ["deepseek"] }
+    }
+  ],
+  "Router": {
+    "default": "deepseek,deepseek-chat",
+    "think": "deepseek,deepseek-reasoner",
+    "longContext": "openrouter,google/gemini-2.5-pro-preview"
+  }
+}
+```
+
+3. **启动 Router**：
+
+```bash
+ccr start
+```
+
+4. **配置 cc-connect**（在 `config.toml` 中）：
+
+```toml
+[projects.agent.options]
+work_dir = "/path/to/project"
+mode = "default"
+
+# Router 集成
+router_url = "http://127.0.0.1:3456"        # Router URL（默认端口）
+router_api_key = "your-secret-key"          # 可选：如果 router 需要认证
+```
+
+### 工作原理
+
+配置 `router_url` 后，cc-connect 会自动：
+
+- 设置 `ANTHROPIC_BASE_URL` 为 router URL
+- 设置 `NO_PROXY=127.0.0.1` 防止代理干扰
+- 禁用遥测和成本警告以获得更清洁的集成
+
+所有 Claude Code 请求都会通过 router 路由，由 router 处理模型选择和提供商通信。
+
+### 使用方式
+
+配置完成后，像往常一样使用 cc-connect。Router 会透明地处理模型路由：
+
+```
+你：帮我重构这段代码
+Router → DeepSeek（默认模型）
+
+你：思考一下这个架构决策
+Router → DeepSeek Reasoner（思考模型）
+
+你：分析这个大型代码库
+Router → Gemini Pro（长上下文模型）
+```
+
+### 重要说明
+
+- **Provider 设置被忽略**：使用 router 时，`[[projects.agent.providers]]` 设置会被绕过，因为 router 管理模型选择
+- **Router 必须运行**：确保在启动 cc-connect 之前执行 `ccr start`
+- **配置更改**：修改 router 配置后，需要重启：`ccr restart`
+
+更多详情请参考 [Claude Code Router 文档](https://github.com/musistudio/claude-code-router)。
+
 ## 语音消息（语音转文字）
 
 直接发送语音消息 — cc-connect 自动将语音转为文字，再将文字转发给 Agent 处理。
