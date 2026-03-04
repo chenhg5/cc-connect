@@ -17,6 +17,7 @@ import (
 type APIServer struct {
 	socketPath string
 	listener   net.Listener
+	server     *http.Server
 	mux        *http.ServeMux
 	engines    map[string]*Engine // project name → engine
 	cron       *CronScheduler
@@ -77,9 +78,9 @@ func (s *APIServer) SetCronScheduler(cs *CronScheduler) {
 }
 
 func (s *APIServer) Start() {
+	s.server = &http.Server{Handler: s.mux}
 	go func() {
-		srv := &http.Server{Handler: s.mux}
-		if err := srv.Serve(s.listener); err != nil && err != http.ErrServerClosed {
+		if err := s.server.Serve(s.listener); err != nil && err != http.ErrServerClosed {
 			slog.Error("api server error", "error", err)
 		}
 	}()
@@ -87,7 +88,7 @@ func (s *APIServer) Start() {
 }
 
 func (s *APIServer) Stop() {
-	s.listener.Close()
+	s.server.Close()
 	os.Remove(s.socketPath)
 }
 

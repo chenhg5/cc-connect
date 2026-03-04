@@ -1462,6 +1462,10 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 		var sb strings.Builder
 		sb.WriteString(e.i18n.T(MsgProviderListTitle))
 		for _, prov := range providers {
+			marker := "  "
+			if current != nil && prov.Name == current.Name {
+				marker = "▶ "
+			}
 			detail := prov.Name
 			if prov.BaseURL != "" {
 				detail += " (" + prov.BaseURL + ")"
@@ -1469,7 +1473,7 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 			if prov.Model != "" {
 				detail += " [" + prov.Model + "]"
 			}
-			sb.WriteString(fmt.Sprintf("  **%s**\n", detail))
+			sb.WriteString(fmt.Sprintf("%s%s\n", marker, detail))
 		}
 		sb.WriteString("\n" + e.i18n.T(MsgProviderSwitchHint))
 		e.reply(p, msg.ReplyCtx, sb.String())
@@ -1501,7 +1505,7 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 			if prov.Model != "" {
 				detail += " [" + prov.Model + "]"
 			}
-			sb.WriteString(fmt.Sprintf("%s**%s**\n", marker, detail))
+			sb.WriteString(fmt.Sprintf("%s%s\n", marker, detail))
 		}
 		sb.WriteString("\n" + e.i18n.T(MsgProviderSwitchHint))
 		e.reply(p, msg.ReplyCtx, sb.String())

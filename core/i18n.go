@@ -640,11 +640,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "📡 Proveedor activo: **%s**\n\nUse `/provider list` para ver todos, `/provider switch <nombre>` para cambiar.",
 	},
 	MsgProviderListTitle: {
-		LangEnglish:            "📡 **Providers**\n\n",
-		LangChinese:            "📡 **Provider 列表**\n\n",
-		LangTraditionalChinese: "📡 **Provider 列表**\n\n",
-		LangJapanese:           "📡 **プロバイダ一覧**\n\n",
-		LangSpanish:            "📡 **Proveedores**\n\n",
+		LangEnglish:            "📡 Providers\n\n",
+		LangChinese:            "📡 Provider 列表\n\n",
+		LangTraditionalChinese: "📡 Provider 列表\n\n",
+		LangJapanese:           "📡 プロバイダ一覧\n\n",
+		LangSpanish:            "📡 Proveedores\n\n",
 	},
 	MsgProviderListEmpty: {
 		LangEnglish:            "No providers configured.\n\nAdd providers in `config.toml` or via `cc-connect provider add`.",
