@@ -110,6 +110,16 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 					slog.Debug("telegram: message from unauthorized user", "user", userID)
 					continue
 				}
+
+				isGroup := msg.Chat.Type == "group" || msg.Chat.Type == "supergroup"
+
+				// In group chats, filter messages not directed at this bot
+				if isGroup {
+					if !p.isDirectedAtBot(msg) {
+						continue
+					}
+				}
+
 				rctx := replyContext{chatID: msg.Chat.ID, messageID: msg.MessageID}
 
 				// Handle photo messages
@@ -120,10 +130,15 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 						slog.Error("telegram: download photo failed", "error", err)
 						continue
 					}
+					caption := msg.Caption
+					if p.bot.Self.UserName != "" {
+						caption = strings.ReplaceAll(caption, "@"+p.bot.Self.UserName, "")
+						caption = strings.TrimSpace(caption)
+					}
 					coreMsg := &core.Message{
 						SessionKey: sessionKey, Platform: "telegram",
 						UserID: userID, UserName: userName,
-						Content:  msg.Caption,
+						Content:  caption,
 						Images:   []core.ImageAttachment{{MimeType: "image/jpeg", Data: imgData}},
 						ReplyCtx: rctx,
 					}
@@ -190,7 +205,8 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 
 				text := msg.Text
 				if p.bot.Self.UserName != "" {
-					text = strings.Replace(text, "@"+p.bot.Self.UserName, "", 1)
+					text = strings.ReplaceAll(text, "@"+p.bot.Self.UserName, "")
+					text = strings.TrimSpace(text)
 				}
 
 				coreMsg := &core.Message{
@@ -279,6 +295,64 @@ func (p *Platform) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 		ReplyCtx:   rctx,
 	}
 	p.handler(p, coreMsg)
+}
+
+// isDirectedAtBot checks whether a group message is directed at this bot:
+//   - Command with @thisbot suffix (e.g. /help@thisbot)
+//   - Command without @suffix (broadcast to all bots — accept it)
+//   - Command with @otherbot suffix → reject
+//   - Non-command: accept if bot is @mentioned or message is a reply to bot
+func (p *Platform) isDirectedAtBot(msg *tgbotapi.Message) bool {
+	botName := p.bot.Self.UserName
+
+	// Commands: /cmd or /cmd@botname
+	if msg.IsCommand() {
+		atIdx := strings.Index(msg.Text, "@")
+		spaceIdx := strings.Index(msg.Text, " ")
+		cmdEnd := len(msg.Text)
+		if spaceIdx > 0 {
+			cmdEnd = spaceIdx
+		}
+		if atIdx > 0 && atIdx < cmdEnd {
+			target := msg.Text[atIdx+1 : cmdEnd]
+			return strings.EqualFold(target, botName)
+		}
+		return true // /cmd without @suffix — accept
+	}
+
+	// Non-command: check @mention
+	if msg.Entities != nil {
+		for _, e := range msg.Entities {
+			if e.Type == "mention" && e.Offset+e.Length <= len(msg.Text) {
+				mention := msg.Text[e.Offset : e.Offset+e.Length]
+				if strings.EqualFold(mention, "@"+botName) {
+					return true
+				}
+			}
+		}
+	}
+
+	// Check if replying to a message from this bot
+	if msg.ReplyToMessage != nil && msg.ReplyToMessage.From != nil {
+		if msg.ReplyToMessage.From.ID == p.bot.Self.ID {
+			return true
+		}
+	}
+
+	// Also check caption entities (for photos with captions)
+	if msg.CaptionEntities != nil {
+		for _, e := range msg.CaptionEntities {
+			if e.Type == "mention" && e.Offset+e.Length <= len(msg.Caption) {
+				mention := msg.Caption[e.Offset : e.Offset+e.Length]
+				if strings.EqualFold(mention, "@"+botName) {
+					return true
+				}
+			}
+		}
+	}
+
+	slog.Debug("telegram: ignoring group message not directed at bot", "chat", msg.Chat.ID)
+	return false
 }
 
 func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {

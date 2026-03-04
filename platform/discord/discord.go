@@ -153,6 +153,22 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 			return
 		}
 
+		// In guild channels, only respond when the bot is @mentioned
+		if m.GuildID != "" {
+			mentioned := false
+			for _, u := range m.Mentions {
+				if u.ID == p.botID {
+					mentioned = true
+					break
+				}
+			}
+			if !mentioned {
+				slog.Debug("discord: ignoring guild message without bot mention", "channel", m.ChannelID)
+				return
+			}
+			m.Content = stripDiscordMention(m.Content, p.botID)
+		}
+
 		slog.Debug("discord: message received", "user", m.Author.Username, "channel", m.ChannelID)
 
 		sessionKey := fmt.Sprintf("discord:%s:%s", m.ChannelID, m.Author.ID)
@@ -429,6 +445,13 @@ func (p *Platform) Stop() error {
 		return p.session.Close()
 	}
 	return nil
+}
+
+// stripDiscordMention removes <@botID> and <@!botID> (nick mention) from text.
+func stripDiscordMention(text, botID string) string {
+	text = strings.ReplaceAll(text, "<@!"+botID+">", "")
+	text = strings.ReplaceAll(text, "<@"+botID+">", "")
+	return strings.TrimSpace(text)
 }
 
 func downloadURL(u string) ([]byte, error) {

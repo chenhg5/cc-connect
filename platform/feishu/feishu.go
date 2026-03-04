@@ -36,6 +36,7 @@ type Platform struct {
 	handler       core.MessageHandler
 	cancel        context.CancelFunc
 	dedup         core.MessageDedup
+	botOpenID     string
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -66,6 +67,13 @@ func (p *Platform) Name() string { return "feishu" }
 
 func (p *Platform) Start(handler core.MessageHandler) error {
 	p.handler = handler
+
+	if openID, err := p.fetchBotOpenID(); err != nil {
+		slog.Warn("feishu: failed to get bot open_id, group chat filtering disabled", "error", err)
+	} else {
+		p.botOpenID = openID
+		slog.Info("feishu: bot identified", "open_id", openID)
+	}
 
 	eventHandler := dispatcher.NewEventDispatcher("", "").
 		OnP2MessageReceiveV1(func(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
@@ -159,6 +167,18 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		return nil
 	}
 
+	chatType := ""
+	if msg.ChatType != nil {
+		chatType = *msg.ChatType
+	}
+
+	if chatType == "group" && p.botOpenID != "" {
+		if !isBotMentioned(msg.Mentions, p.botOpenID) {
+			slog.Debug("feishu: ignoring group message without bot mention", "chat_id", chatID)
+			return nil
+		}
+	}
+
 	if !core.AllowList(p.allowFrom, userID) {
 		slog.Debug("feishu: message from unauthorized user", "user", userID)
 		return nil
@@ -180,10 +200,14 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 			slog.Error("feishu: failed to parse text content", "error", err)
 			return nil
 		}
+		text := stripMentions(textBody.Text, msg.Mentions)
+		if text == "" {
+			return nil
+		}
 		p.handler(p, &core.Message{
 			SessionKey: sessionKey, Platform: "feishu",
 			UserID: userID, UserName: userName,
-			Content: textBody.Text, ReplyCtx: rctx,
+			Content: text, ReplyCtx: rctx,
 		})
 
 	case "image":
@@ -235,7 +259,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 
 	case "post":
 		textParts, images := p.parsePostContent(messageID, *msg.Content)
-		text := strings.Join(textParts, "\n")
+		text := stripMentions(strings.Join(textParts, "\n"), msg.Mentions)
 		if text == "" && len(images) == 0 {
 			return nil
 		}
@@ -524,6 +548,51 @@ func parseInlineMarkdown(line string) []map[string]any {
 	}
 
 	return elements
+}
+
+// fetchBotOpenID retrieves the bot's open_id via the Feishu bot info API.
+func (p *Platform) fetchBotOpenID() (string, error) {
+	resp, err := p.client.Get(context.Background(),
+		"/open-apis/bot/v3/info", nil, larkcore.AccessTokenTypeTenant)
+	if err != nil {
+		return "", fmt.Errorf("api call: %w", err)
+	}
+	var result struct {
+		Code int `json:"code"`
+		Bot  struct {
+			OpenID string `json:"open_id"`
+		} `json:"bot"`
+	}
+	if err := json.Unmarshal(resp.RawBody, &result); err != nil {
+		return "", fmt.Errorf("parse response: %w", err)
+	}
+	if result.Code != 0 {
+		return "", fmt.Errorf("api code=%d", result.Code)
+	}
+	return result.Bot.OpenID, nil
+}
+
+func isBotMentioned(mentions []*larkim.MentionEvent, botOpenID string) bool {
+	for _, m := range mentions {
+		if m.Id != nil && m.Id.OpenId != nil && *m.Id.OpenId == botOpenID {
+			return true
+		}
+	}
+	return false
+}
+
+// stripMentions removes @mention placeholders (e.g. @_user_1) from text
+// so that group-chat messages like "@Bot /help" become "/help".
+func stripMentions(text string, mentions []*larkim.MentionEvent) string {
+	if len(mentions) == 0 {
+		return text
+	}
+	for _, m := range mentions {
+		if m.Key != nil {
+			text = strings.ReplaceAll(text, *m.Key, "")
+		}
+	}
+	return strings.TrimSpace(text)
 }
 
 func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
