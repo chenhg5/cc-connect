@@ -30,14 +30,15 @@ func init() {
 //   - "yolo":      auto-approve all tools (-y / --approval-mode yolo)
 //   - "plan":      read-only plan mode (--approval-mode plan)
 type Agent struct {
-	workDir    string
-	model      string
-	mode       string
-	cmd        string // CLI binary name, default "gemini"
-	providers  []core.ProviderConfig
-	activeIdx  int
-	sessionEnv []string
-	mu         sync.Mutex
+	workDir         string
+	overrideWorkDir string // per-session override, cleared after use
+	model           string
+	mode            string
+	cmd             string // CLI binary name, default "gemini"
+	providers       []core.ProviderConfig
+	activeIdx       int
+	sessionEnv      []string
+	mu              sync.Mutex
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -165,6 +166,9 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	mode := a.mode
 	cmd := a.cmd
 	workDir := a.workDir
+	if a.overrideWorkDir != "" {
+		workDir = a.overrideWorkDir
+	}
 	extraEnv := a.providerEnvLocked()
 	extraEnv = append(extraEnv, a.sessionEnv...)
 	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
@@ -183,6 +187,20 @@ func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error)
 }
 
 func (a *Agent) Stop() error { return nil }
+
+// SetWorkDir sets a per-session working directory override.
+func (a *Agent) SetWorkDir(dir string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.overrideWorkDir = dir
+}
+
+// ResetWorkDir clears the per-session working directory override.
+func (a *Agent) ResetWorkDir() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.overrideWorkDir = ""
+}
 
 // ── ModeSwitcher ────────────────────────────────────────────────
 

@@ -31,14 +31,15 @@ func init() {
 //   - "plan":              plan only, no execution until approved
 //   - "bypassPermissions": auto-approve everything (YOLO mode)
 type Agent struct {
-	workDir      string
-	model        string
-	mode         string // "default" | "acceptEdits" | "plan" | "bypassPermissions"
-	allowedTools []string
-	providers    []core.ProviderConfig
-	activeIdx    int // -1 = no provider set
-	sessionEnv   []string
-	mu           sync.Mutex
+	workDir         string
+	overrideWorkDir string // per-session override, cleared after use
+	model           string
+	mode            string // "default" | "acceptEdits" | "plan" | "bypassPermissions"
+	allowedTools    []string
+	providers       []core.ProviderConfig
+	activeIdx       int // -1 = no provider set
+	sessionEnv      []string
+	mu              sync.Mutex
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -190,9 +191,27 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 			model = m
 		}
 	}
+	dir := a.workDir
+	if a.overrideWorkDir != "" {
+		dir = a.overrideWorkDir
+	}
 	a.mu.Unlock()
 
-	return newClaudeSession(ctx, a.workDir, model, sessionID, a.mode, tools, extraEnv)
+	return newClaudeSession(ctx, dir, model, sessionID, a.mode, tools, extraEnv)
+}
+
+// SetWorkDir sets a per-session working directory override.
+func (a *Agent) SetWorkDir(dir string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.overrideWorkDir = dir
+}
+
+// ResetWorkDir clears the per-session working directory override.
+func (a *Agent) ResetWorkDir() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.overrideWorkDir = ""
 }
 
 func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {
