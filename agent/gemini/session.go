@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -370,7 +371,16 @@ func (gs *geminiSession) Alive() bool {
 func (gs *geminiSession) Close() error {
 	gs.alive.Store(false)
 	gs.cancel()
-	gs.wg.Wait()
+	done := make(chan struct{})
+	go func() {
+		gs.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(8 * time.Second):
+		slog.Warn("geminiSession: close timed out, abandoning wg.Wait")
+	}
 	close(gs.events)
 	return nil
 }

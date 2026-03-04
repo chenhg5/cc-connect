@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -382,7 +383,16 @@ func (cs *cursorSession) Alive() bool {
 func (cs *cursorSession) Close() error {
 	cs.alive.Store(false)
 	cs.cancel()
-	cs.wg.Wait()
+	done := make(chan struct{})
+	go func() {
+		cs.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(8 * time.Second):
+		slog.Warn("cursorSession: close timed out, abandoning wg.Wait")
+	}
 	close(cs.events)
 	return nil
 }

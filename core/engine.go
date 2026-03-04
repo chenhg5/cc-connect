@@ -253,13 +253,19 @@ func (e *Engine) Stop() error {
 	e.cancel()
 
 	e.interactiveMu.Lock()
-	for key, state := range e.interactiveStates {
-		if state.agentSession != nil {
-			state.agentSession.Close()
-		}
-		delete(e.interactiveStates, key)
+	states := make(map[string]*interactiveState, len(e.interactiveStates))
+	for k, v := range e.interactiveStates {
+		states[k] = v
+		delete(e.interactiveStates, k)
 	}
 	e.interactiveMu.Unlock()
+
+	for key, state := range states {
+		if state.agentSession != nil {
+			slog.Debug("engine.Stop: closing agent session", "session", key)
+			state.agentSession.Close()
+		}
+	}
 
 	var errs []error
 	for _, p := range e.platforms {
@@ -561,17 +567,29 @@ func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, repl
 
 func (e *Engine) cleanupInteractiveState(sessionKey string) {
 	e.interactiveMu.Lock()
-	defer e.interactiveMu.Unlock()
-
 	state, ok := e.interactiveStates[sessionKey]
-	if ok && state.agentSession != nil {
+	delete(e.interactiveStates, sessionKey)
+	e.interactiveMu.Unlock()
+
+	if ok && state != nil && state.agentSession != nil {
+		slog.Debug("cleanupInteractiveState: closing agent session", "session", sessionKey)
 		closeStart := time.Now()
-		state.agentSession.Close()
-		if elapsed := time.Since(closeStart); elapsed >= slowAgentClose {
-			slog.Warn("slow agent session close", "elapsed", elapsed, "session", sessionKey)
+
+		done := make(chan struct{})
+		go func() {
+			state.agentSession.Close()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			if elapsed := time.Since(closeStart); elapsed >= slowAgentClose {
+				slog.Warn("slow agent session close", "elapsed", elapsed, "session", sessionKey)
+			}
+		case <-time.After(10 * time.Second):
+			slog.Error("agent session close timed out (10s), abandoning", "session", sessionKey)
 		}
 	}
-	delete(e.interactiveStates, sessionKey)
 }
 
 func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessionKey string, turnStart time.Time) {
@@ -803,7 +821,9 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 }
 
 func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
+	slog.Info("cmdNew: cleaning up old session", "session_key", msg.SessionKey)
 	e.cleanupInteractiveState(msg.SessionKey)
+	slog.Info("cmdNew: cleanup done, creating new session", "session_key", msg.SessionKey)
 	name := "session"
 	if len(args) > 0 {
 		name = strings.Join(args, " ")
@@ -866,6 +886,7 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	}
 	prefix := strings.TrimSpace(args[0])
 
+	slog.Info("cmdSwitch: listing agent sessions", "session_key", msg.SessionKey)
 	agentSessions, err := e.agent.ListSessions(e.ctx)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
@@ -884,7 +905,9 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 		return
 	}
 
+	slog.Info("cmdSwitch: cleaning up old session", "session_key", msg.SessionKey)
 	e.cleanupInteractiveState(msg.SessionKey)
+	slog.Info("cmdSwitch: cleanup done", "session_key", msg.SessionKey)
 
 	session := e.sessions.GetOrCreateActive(msg.SessionKey)
 	session.AgentSessionID = matched.ID

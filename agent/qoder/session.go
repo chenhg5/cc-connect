@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -276,7 +277,16 @@ func (qs *qoderSession) Alive() bool {
 func (qs *qoderSession) Close() error {
 	qs.alive.Store(false)
 	qs.cancel()
-	qs.wg.Wait()
+	done := make(chan struct{})
+	go func() {
+		qs.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(8 * time.Second):
+		slog.Warn("qoderSession: close timed out, abandoning wg.Wait")
+	}
 	close(qs.events)
 	return nil
 }

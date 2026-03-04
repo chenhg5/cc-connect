@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -305,7 +306,16 @@ func (s *opencodeSession) Alive() bool {
 func (s *opencodeSession) Close() error {
 	s.alive.Store(false)
 	s.cancel()
-	s.wg.Wait()
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(8 * time.Second):
+		slog.Warn("opencodeSession: close timed out, abandoning wg.Wait")
+	}
 	close(s.events)
 	return nil
 }

@@ -466,8 +466,18 @@ func (cs *claudeSession) Alive() bool {
 
 func (cs *claudeSession) Close() error {
 	cs.cancel()
-	<-cs.done
-	return nil
+
+	select {
+	case <-cs.done:
+		return nil
+	case <-time.After(8 * time.Second):
+		slog.Warn("claudeSession: graceful close timed out, killing process")
+		if cs.cmd != nil && cs.cmd.Process != nil {
+			_ = cs.cmd.Process.Kill()
+		}
+		<-cs.done
+		return nil
+	}
 }
 
 // filterEnv returns a copy of env with entries matching the given key removed.
