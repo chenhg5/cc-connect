@@ -227,6 +227,19 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 			ReplyCtx: rctx,
 		})
 
+	case "post":
+		textParts, images := p.parsePostContent(messageID, *msg.Content)
+		text := strings.Join(textParts, "\n")
+		if text == "" && len(images) == 0 {
+			return nil
+		}
+		p.handler(p, &core.Message{
+			SessionKey: sessionKey, Platform: "feishu",
+			UserID: userID, UserName: userName,
+			Content: text, Images: images,
+			ReplyCtx: rctx,
+		})
+
 	default:
 		slog.Debug("feishu: ignoring unsupported message type", "type", msgType)
 	}
@@ -441,4 +454,68 @@ func (p *Platform) Stop() error {
 		p.cancel()
 	}
 	return nil
+}
+
+type postElement struct {
+	Tag      string `json:"tag"`
+	Text     string `json:"text,omitempty"`
+	ImageKey string `json:"image_key,omitempty"`
+	Href     string `json:"href,omitempty"`
+}
+
+type postLang struct {
+	Title   string          `json:"title"`
+	Content [][]postElement `json:"content"`
+}
+
+// parsePostContent handles both formats of feishu post content:
+// 1. {"title":"...", "content":[[...]]}  (receive event)
+// 2. {"zh_cn":{"title":"...", "content":[[...]]}}  (some SDK versions)
+func (p *Platform) parsePostContent(messageID, raw string) ([]string, []core.ImageAttachment) {
+	// try flat format first
+	var flat postLang
+	if err := json.Unmarshal([]byte(raw), &flat); err == nil && flat.Content != nil {
+		return p.extractPostParts(messageID, &flat)
+	}
+	// try language-keyed format
+	var langMap map[string]postLang
+	if err := json.Unmarshal([]byte(raw), &langMap); err == nil {
+		for _, lang := range langMap {
+			return p.extractPostParts(messageID, &lang)
+		}
+	}
+	slog.Error("feishu: failed to parse post content", "raw", raw)
+	return nil, nil
+}
+
+func (p *Platform) extractPostParts(messageID string, post *postLang) ([]string, []core.ImageAttachment) {
+	var textParts []string
+	var images []core.ImageAttachment
+	if post.Title != "" {
+		textParts = append(textParts, post.Title)
+	}
+	for _, line := range post.Content {
+		for _, elem := range line {
+			switch elem.Tag {
+			case "text":
+				if elem.Text != "" {
+					textParts = append(textParts, elem.Text)
+				}
+			case "a":
+				if elem.Text != "" {
+					textParts = append(textParts, elem.Text)
+				}
+			case "img":
+				if elem.ImageKey != "" {
+					imgData, mimeType, err := p.downloadImage(messageID, elem.ImageKey)
+					if err != nil {
+						slog.Error("feishu: download post image failed", "error", err, "key", elem.ImageKey)
+						continue
+					}
+					images = append(images, core.ImageAttachment{MimeType: mimeType, Data: imgData})
+				}
+			}
+		}
+	}
+	return textParts, images
 }

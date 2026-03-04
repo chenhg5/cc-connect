@@ -283,8 +283,10 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	}
 
 	if len(msg.Images) == 0 && strings.HasPrefix(content, "/") {
-		e.handleCommand(p, msg, content)
-		return
+		if e.handleCommand(p, msg, content) {
+			return
+		}
+		// unrecognized slash command — fall through to agent
 	}
 
 	// Permission responses bypass the session lock
@@ -720,7 +722,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 // Command handling
 // ──────────────────────────────────────────────────────────────
 
-func (e *Engine) handleCommand(p Platform, msg *Message, raw string) {
+func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 	parts := strings.Fields(raw)
 	cmd := strings.ToLower(parts[0])
 	args := parts[1:]
@@ -774,14 +776,15 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) {
 		cmdName := strings.TrimPrefix(cmd, "/")
 		if custom, ok := e.commands.Resolve(cmdName); ok {
 			e.executeCustomCommand(p, msg, custom, args)
-			return
+			return true
 		}
 		if skill := e.skills.Resolve(cmdName); skill != nil {
 			e.executeSkill(p, msg, skill, args)
-			return
+			return true
 		}
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf("Unknown command: %s\nType /help for available commands.", cmd))
+		return false // unrecognized, let caller forward to agent
 	}
+	return true
 }
 
 func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
