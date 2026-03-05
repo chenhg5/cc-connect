@@ -1276,7 +1276,7 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 
 func (e *Engine) cmdName(p Platform, msg *Message, args []string) {
 	if len(args) == 0 {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgNameUsage)))
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNameUsage))
 		return
 	}
 
@@ -1287,7 +1287,7 @@ func (e *Engine) cmdName(p Platform, msg *Message, args []string) {
 	if idx, err := strconv.Atoi(args[0]); err == nil && idx >= 1 {
 		// /name <number> <name...>
 		if len(args) < 2 {
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgNameUsage)))
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNameUsage))
 			return
 		}
 		agentSessions, err := e.agent.ListSessions(e.ctx)
@@ -1314,7 +1314,7 @@ func (e *Engine) cmdName(p Platform, msg *Message, args []string) {
 
 	name = strings.TrimSpace(name)
 	if name == "" {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgNameUsage)))
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNameUsage))
 		return
 	}
 
@@ -2739,7 +2739,7 @@ func (e *Engine) cmdAlias(p Platform, msg *Message, args []string) {
 	case "del", "delete", "remove":
 		e.cmdAliasDel(p, msg, args[1:])
 	default:
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgAliasUsage)))
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgAliasUsage))
 	}
 }
 
