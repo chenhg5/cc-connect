@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -132,6 +133,11 @@ type Engine struct {
 
 	commands *CommandRegistry
 	skills   *SkillRegistry
+	aliases  map[string]string // trigger → command (e.g. "帮助" → "/help")
+	aliasMu  sync.RWMutex
+
+	aliasSaveAddFunc func(name, command string) error
+	aliasSaveDelFunc func(name string) error
 
 	// Interactive agent session management
 	interactiveMu     sync.Mutex
@@ -177,6 +183,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		display:           DisplayCfg{ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen},
 		commands:          NewCommandRegistry(),
 		skills:            NewSkillRegistry(),
+		aliases:           make(map[string]string),
 		interactiveStates: make(map[string]*interactiveState),
 		startedAt:         time.Now(),
 	}
@@ -262,6 +269,28 @@ func (e *Engine) AddCommand(name, description, prompt, source string) {
 // ClearCommands removes all commands from the given source.
 func (e *Engine) ClearCommands(source string) {
 	e.commands.ClearSource(source)
+}
+
+// AddAlias registers a command alias.
+func (e *Engine) AddAlias(name, command string) {
+	e.aliasMu.Lock()
+	defer e.aliasMu.Unlock()
+	e.aliases[name] = command
+}
+
+func (e *Engine) SetAliasSaveAddFunc(fn func(name, command string) error) {
+	e.aliasSaveAddFunc = fn
+}
+
+func (e *Engine) SetAliasSaveDelFunc(fn func(name string) error) {
+	e.aliasSaveDelFunc = fn
+}
+
+// ClearAliases removes all aliases (for config reload).
+func (e *Engine) ClearAliases() {
+	e.aliasMu.Lock()
+	defer e.aliasMu.Unlock()
+	e.aliases = make(map[string]string)
 }
 
 // RemoveCommand removes a custom command by name. Returns false if not found.
@@ -373,6 +402,31 @@ func (e *Engine) Stop() error {
 	return nil
 }
 
+// resolveAlias checks if the content (or its first word) matches an alias and replaces it.
+func (e *Engine) resolveAlias(content string) string {
+	e.aliasMu.RLock()
+	defer e.aliasMu.RUnlock()
+
+	if len(e.aliases) == 0 {
+		return content
+	}
+
+	// Exact match on full content
+	if cmd, ok := e.aliases[content]; ok {
+		return cmd
+	}
+
+	// Match first word, append remaining args
+	parts := strings.SplitN(content, " ", 2)
+	if cmd, ok := e.aliases[parts[0]]; ok {
+		if len(parts) > 1 {
+			return cmd + " " + parts[1]
+		}
+		return cmd
+	}
+	return content
+}
+
 func (e *Engine) handleMessage(p Platform, msg *Message) {
 	// Voice message: transcribe to text first
 	if msg.Audio != nil {
@@ -384,6 +438,10 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	if content == "" && len(msg.Images) == 0 {
 		return
 	}
+
+	// Resolve aliases: check if the first word (or whole content) matches an alias
+	content = e.resolveAlias(content)
+	msg.Content = content
 
 	if len(msg.Images) == 0 && strings.HasPrefix(content, "/") {
 		if e.handleCommand(p, msg, content) {
@@ -878,6 +936,7 @@ var builtinCommands = []struct {
 	{[]string{"doctor"}, "doctor"},
 	{[]string{"upgrade", "update"}, "upgrade"},
 	{[]string{"restart"}, "restart"},
+	{[]string{"alias"}, "alias"},
 }
 
 // matchPrefix finds a unique command matching the given prefix.
@@ -990,6 +1049,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdUpgrade(p, msg, args)
 	case "restart":
 		e.cmdRestart(p, msg)
+	case "alias":
+		e.cmdAlias(p, msg, args)
 	default:
 		if custom, ok := e.commands.Resolve(cmd); ok {
 			e.executeCustomCommand(p, msg, custom, args)
@@ -2572,6 +2633,102 @@ func (e *Engine) cmdRestart(p Platform, msg *Message) {
 	}:
 	default:
 	}
+}
+
+func (e *Engine) cmdAlias(p Platform, msg *Message, args []string) {
+	if len(args) == 0 {
+		e.cmdAliasList(p, msg)
+		return
+	}
+
+	sub := matchSubCommand(strings.ToLower(args[0]), []string{"list", "add", "del", "delete", "remove"})
+	switch sub {
+	case "list":
+		e.cmdAliasList(p, msg)
+	case "add":
+		e.cmdAliasAdd(p, msg, args[1:])
+	case "del", "delete", "remove":
+		e.cmdAliasDel(p, msg, args[1:])
+	default:
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgAliasUsage)))
+	}
+}
+
+func (e *Engine) cmdAliasList(p Platform, msg *Message) {
+	e.aliasMu.RLock()
+	defer e.aliasMu.RUnlock()
+
+	if len(e.aliases) == 0 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgAliasEmpty))
+		return
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf(e.i18n.T(MsgAliasListHeader), len(e.aliases)))
+	sb.WriteString("\n")
+
+	names := make([]string, 0, len(e.aliases))
+	for n := range e.aliases {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+
+	for _, n := range names {
+		sb.WriteString(fmt.Sprintf("  %s → %s\n", n, e.aliases[n]))
+	}
+	e.reply(p, msg.ReplyCtx, strings.TrimRight(sb.String(), "\n"))
+}
+
+func (e *Engine) cmdAliasAdd(p Platform, msg *Message, args []string) {
+	if len(args) < 2 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgAliasUsage))
+		return
+	}
+	name := args[0]
+	command := strings.Join(args[1:], " ")
+	if !strings.HasPrefix(command, "/") {
+		command = "/" + command
+	}
+
+	e.aliasMu.Lock()
+	e.aliases[name] = command
+	e.aliasMu.Unlock()
+
+	if e.aliasSaveAddFunc != nil {
+		if err := e.aliasSaveAddFunc(name, command); err != nil {
+			slog.Error("alias: save failed", "error", err)
+		}
+	}
+
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgAliasAdded), name, command))
+}
+
+func (e *Engine) cmdAliasDel(p Platform, msg *Message, args []string) {
+	if len(args) < 1 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgAliasUsage))
+		return
+	}
+	name := args[0]
+
+	e.aliasMu.Lock()
+	_, exists := e.aliases[name]
+	if exists {
+		delete(e.aliases, name)
+	}
+	e.aliasMu.Unlock()
+
+	if !exists {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgAliasNotFound), name))
+		return
+	}
+
+	if e.aliasSaveDelFunc != nil {
+		if err := e.aliasSaveDelFunc(name); err != nil {
+			slog.Error("alias: save failed", "error", err)
+		}
+	}
+
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgAliasDeleted), name))
 }
 
 // truncateIf truncates s to maxLen runes. 0 means no truncation.

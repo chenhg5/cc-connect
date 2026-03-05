@@ -121,6 +121,9 @@ func builtinSlashCommands() []*discordgo.ApplicationCommand {
 		{Name: "commands", Description: "Manage custom slash commands", Options: []*discordgo.ApplicationCommandOption{
 			optStr("args", "e.g. list, add <name> <prompt>, del <name>", false),
 		}},
+		{Name: "alias", Description: "Manage command aliases", Options: []*discordgo.ApplicationCommandOption{
+			optStr("args", "e.g. list, add 帮助 /help, del 帮助", false),
+		}},
 	}
 }
 

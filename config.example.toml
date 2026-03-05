@@ -133,6 +133,40 @@ level = "info" # debug, info, warn, error
 # 此外，cc-connect 还会自动发现 Agent 的 commands 目录下的 .md 文件。
 
 # =============================================================================
+# Command Aliases / 命令别名
+# =============================================================================
+#
+# Create aliases for commands — like Linux shell aliases.
+# 为命令创建别名，类似 Linux shell 的 alias。
+#
+# When a user sends a message matching the alias trigger (exact match on first
+# word), it is automatically replaced with the target command.
+# 当用户发送的消息首词匹配别名触发词时，自动替换为目标命令。
+#
+# Example: typing "帮助" triggers "/help", typing "新建 测试" triggers "/new 测试".
+# 示例：输入"帮助"触发 "/help"，输入"新建 测试"触发 "/new 测试"。
+
+# [[aliases]]
+# name = "帮助"
+# command = "/help"
+
+# [[aliases]]
+# name = "新建"
+# command = "/new"
+
+# [[aliases]]
+# name = "列表"
+# command = "/list"
+
+#
+# You can also add/remove aliases at runtime via chat:
+# 也可以在聊天中动态添加/删除别名：
+#   /alias add 帮助 /help
+#   /alias del 帮助
+#   /alias         — list all aliases
+#
+
+# =============================================================================
 # Project 1 / 项目 1
 # =============================================================================
 

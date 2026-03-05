@@ -264,6 +264,13 @@ const (
 	MsgUpgradeDownloading MsgKey = "upgrade_downloading"
 	MsgUpgradeSuccess     MsgKey = "upgrade_success"
 	MsgUpgradeDevBuild    MsgKey = "upgrade_dev_build"
+
+	MsgAliasEmpty     MsgKey = "alias_empty"
+	MsgAliasListHeader MsgKey = "alias_list_header"
+	MsgAliasAdded     MsgKey = "alias_added"
+	MsgAliasDeleted   MsgKey = "alias_deleted"
+	MsgAliasNotFound  MsgKey = "alias_not_found"
+	MsgAliasUsage     MsgKey = "alias_usage"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -472,6 +479,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/stop\n  Stop current execution\n\n" +
 			"/cron [add|list|del|enable|disable]\n  Manage scheduled tasks\n\n" +
 			"/commands [add|del]\n  Manage custom slash commands\n\n" +
+			"/alias [add|del]\n  Manage command aliases (e.g. 帮助 → /help)\n\n" +
 			"/skills\n  List agent skills (from SKILL.md)\n\n" +
 			"/config [get|set|reload] [key] [value]\n  View/update runtime configuration\n\n" +
 			"/doctor\n  Run system diagnostics\n\n" +
@@ -482,6 +490,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/help\n  Show this help\n\n" +
 			"Tip: Commands support prefix matching, e.g. `/pro l` = `/provider list`, `/sw 2` = `/switch 2`.\n\n" +
 			"Custom commands: define via `/commands add` or `[[commands]]` in config.toml.\n\n" +
+			"Command aliases: use `/alias add <trigger> <command>` or `[[aliases]]` in config.toml.\n\n" +
 			"Agent skills: auto-discovered from .claude/skills/<name>/SKILL.md etc.\n\n" +
 			"Permission modes: default / edit / plan / yolo",
 		LangChinese: "📖 可用命令\n\n" +
@@ -502,6 +511,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/stop\n  停止当前执行\n\n" +
 			"/cron [add|list|del|enable|disable]\n  管理定时任务\n\n" +
 			"/commands [add|del]\n  管理自定义命令\n\n" +
+			"/alias [add|del]\n  管理命令别名（如 帮助 → /help）\n\n" +
 			"/skills\n  列出 Agent Skills（来自 SKILL.md）\n\n" +
 			"/config [get|set|reload] [key] [value]\n  查看/修改运行时配置\n\n" +
 			"/doctor\n  运行系统诊断\n\n" +
@@ -512,6 +522,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/help\n  显示此帮助\n\n" +
 			"提示：命令支持前缀匹配，如 `/pro l` = `/provider list`，`/sw 2` = `/switch 2`。\n\n" +
 			"自定义命令：通过 `/commands add` 添加，或在 config.toml 中配置 `[[commands]]`。\n\n" +
+			"命令别名：使用 `/alias add <触发词> <命令>` 或在 config.toml 中配置 `[[aliases]]`。\n\n" +
 			"Agent Skills：自动发现自 .claude/skills/<name>/SKILL.md 等目录。\n\n" +
 			"权限模式：default / edit / plan / yolo",
 		LangTraditionalChinese: "📖 可用命令\n\n" +
@@ -532,6 +543,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/stop\n  停止當前執行\n\n" +
 			"/cron [add|list|del|enable|disable]\n  管理定時任務\n\n" +
 			"/commands [add|del]\n  管理自訂命令\n\n" +
+			"/alias [add|del]\n  管理命令別名（如 幫助 → /help）\n\n" +
 			"/skills\n  列出 Agent Skills（來自 SKILL.md）\n\n" +
 			"/config [get|set|reload] [key] [value]\n  查看/修改執行階段配置\n\n" +
 			"/doctor\n  執行系統診斷\n\n" +
@@ -542,6 +554,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/help\n  顯示此說明\n\n" +
 			"提示：命令支持前綴匹配，如 `/pro l` = `/provider list`，`/sw 2` = `/switch 2`。\n\n" +
 			"自訂命令：透過 `/commands add` 新增，或在 config.toml 中配置 `[[commands]]`。\n\n" +
+			"命令別名：使用 `/alias add <觸發詞> <命令>` 或在 config.toml 中配置 `[[aliases]]`。\n\n" +
 			"Agent Skills：自動發現自 .claude/skills/<name>/SKILL.md 等目錄。\n\n" +
 			"權限模式：default / edit / plan / yolo",
 		LangJapanese: "📖 利用可能なコマンド\n\n" +
@@ -562,6 +575,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/stop\n  現在の実行を停止\n\n" +
 			"/cron [add|list|del|enable|disable]\n  スケジュールタスク管理\n\n" +
 			"/commands [add|del]\n  カスタムコマンド管理\n\n" +
+			"/alias [add|del]\n  コマンドエイリアス管理（例: ヘルプ → /help）\n\n" +
 			"/skills\n  エージェントスキル一覧（SKILL.md から）\n\n" +
 			"/config [get|set|reload] [key] [value]\n  ランタイム設定の表示/変更\n\n" +
 			"/doctor\n  システム診断を実行\n\n" +
@@ -572,6 +586,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/help\n  このヘルプを表示\n\n" +
 			"ヒント：コマンドはプレフィックスマッチに対応しています。例: `/pro l` = `/provider list`、`/sw 2` = `/switch 2`。\n\n" +
 			"カスタムコマンド: `/commands add` または config.toml の `[[commands]]` で定義。\n\n" +
+			"コマンドエイリアス: `/alias add <トリガー> <コマンド>` または config.toml の `[[aliases]]` で定義。\n\n" +
 			"エージェントスキル: .claude/skills/<name>/SKILL.md などから自動検出。\n\n" +
 			"権限モード: default / edit / plan / yolo",
 		LangSpanish: "📖 Comandos disponibles\n\n" +
@@ -592,6 +607,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/stop\n  Detener ejecución actual\n\n" +
 			"/cron [add|list|del|enable|disable]\n  Gestionar tareas programadas\n\n" +
 			"/commands [add|del]\n  Gestionar comandos personalizados\n\n" +
+			"/alias [add|del]\n  Gestionar alias de comandos (ej. ayuda → /help)\n\n" +
 			"/skills\n  Listar skills del agente (desde SKILL.md)\n\n" +
 			"/config [get|set|reload] [key] [value]\n  Ver/actualizar configuración en tiempo de ejecución\n\n" +
 			"/doctor\n  Ejecutar diagnósticos del sistema\n\n" +
@@ -602,6 +618,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/help\n  Mostrar esta ayuda\n\n" +
 			"Consejo: Los comandos admiten coincidencia por prefijo, ej. `/pro l` = `/provider list`, `/sw 2` = `/switch 2`.\n\n" +
 			"Comandos personalizados: use `/commands add` o defina `[[commands]]` en config.toml.\n\n" +
+			"Alias de comandos: use `/alias add <trigger> <comando>` o `[[aliases]]` en config.toml.\n\n" +
 			"Skills del agente: descubiertos de .claude/skills/<name>/SKILL.md etc.\n\n" +
 			"Modos de permisos: default / edit / plan / yolo",
 	},
@@ -1405,6 +1422,48 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "⚠️ 當前為開發版本，無法檢查更新。請從源碼構建或安裝正式發佈版本。",
 		LangJapanese:           "⚠️ 開発ビルドのため、バージョン確認ができません。ソースからビルドするか、リリース版をインストールしてください。",
 		LangSpanish:            "⚠️ Compilación de desarrollo — la verificación de versión no está disponible. Compile desde el código fuente o instale una versión publicada.",
+	},
+	MsgAliasEmpty: {
+		LangEnglish:            "No aliases configured. Use `/alias add <trigger> <command>` to create one.",
+		LangChinese:            "暂无别名配置。使用 `/alias add <触发词> <命令>` 创建别名。",
+		LangTraditionalChinese: "尚無別名配置。使用 `/alias add <觸發詞> <命令>` 建立別名。",
+		LangJapanese:           "エイリアスは設定されていません。`/alias add <トリガー> <コマンド>` で作成してください。",
+		LangSpanish:            "No hay alias configurados. Use `/alias add <trigger> <comando>` para crear uno.",
+	},
+	MsgAliasListHeader: {
+		LangEnglish:            "📎 Aliases (%d)",
+		LangChinese:            "📎 命令别名 (%d)",
+		LangTraditionalChinese: "📎 命令別名 (%d)",
+		LangJapanese:           "📎 エイリアス (%d)",
+		LangSpanish:            "📎 Alias (%d)",
+	},
+	MsgAliasAdded: {
+		LangEnglish:            "✅ Alias added: %s → %s",
+		LangChinese:            "✅ 别名已添加：%s → %s",
+		LangTraditionalChinese: "✅ 別名已新增：%s → %s",
+		LangJapanese:           "✅ エイリアス追加：%s → %s",
+		LangSpanish:            "✅ Alias añadido: %s → %s",
+	},
+	MsgAliasDeleted: {
+		LangEnglish:            "✅ Alias removed: %s",
+		LangChinese:            "✅ 别名已删除：%s",
+		LangTraditionalChinese: "✅ 別名已刪除：%s",
+		LangJapanese:           "✅ エイリアス削除：%s",
+		LangSpanish:            "✅ Alias eliminado: %s",
+	},
+	MsgAliasNotFound: {
+		LangEnglish:            "❌ Alias `%s` not found.",
+		LangChinese:            "❌ 别名 `%s` 不存在。",
+		LangTraditionalChinese: "❌ 別名 `%s` 不存在。",
+		LangJapanese:           "❌ エイリアス `%s` が見つかりません。",
+		LangSpanish:            "❌ Alias `%s` no encontrado.",
+	},
+	MsgAliasUsage: {
+		LangEnglish:            "Usage:\n  `/alias` — list all aliases\n  `/alias add <trigger> <command>` — add alias\n  `/alias del <trigger>` — remove alias\n\nExample: `/alias add 帮助 /help`",
+		LangChinese:            "用法：\n  `/alias` — 列出所有别名\n  `/alias add <触发词> <命令>` — 添加别名\n  `/alias del <触发词>` — 删除别名\n\n示例：`/alias add 帮助 /help`",
+		LangTraditionalChinese: "用法：\n  `/alias` — 列出所有別名\n  `/alias add <觸發詞> <命令>` — 新增別名\n  `/alias del <觸發詞>` — 刪除別名\n\n範例：`/alias add 幫助 /help`",
+		LangJapanese:           "使い方：\n  `/alias` — エイリアス一覧\n  `/alias add <トリガー> <コマンド>` — 追加\n  `/alias del <トリガー>` — 削除\n\n例: `/alias add ヘルプ /help`",
+		LangSpanish:            "Uso:\n  `/alias` — listar aliases\n  `/alias add <trigger> <comando>` — añadir alias\n  `/alias del <trigger>` — eliminar alias\n\nEjemplo: `/alias add ayuda /help`",
 	},
 }
 

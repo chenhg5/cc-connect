@@ -194,6 +194,17 @@ func main() {
 			return config.RemoveCommand(name)
 		})
 
+		// Wire global aliases
+		for _, a := range cfg.Aliases {
+			engine.AddAlias(a.Name, a.Command)
+		}
+		engine.SetAliasSaveAddFunc(func(name, command string) error {
+			return config.AddAlias(config.AliasConfig{Name: name, Command: command})
+		})
+		engine.SetAliasSaveDelFunc(func(name string) error {
+			return config.RemoveAlias(name)
+		})
+
 		// Wire display truncation settings
 		{
 			dcfg := core.DisplayCfg{
@@ -551,6 +562,12 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		engine.AddCommand(c.Name, c.Description, c.Prompt, "config")
 	}
 	result.CommandsUpdated = len(cfg.Commands)
+
+	// Reload aliases
+	engine.ClearAliases()
+	for _, a := range cfg.Aliases {
+		engine.AddAlias(a.Name, a.Command)
+	}
 
 	slog.Info("config reloaded", "project", projName)
 	return result, nil

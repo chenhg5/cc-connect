@@ -19,6 +19,7 @@ type Config struct {
 	DataDir  string          `toml:"data_dir"` // session store directory, default ~/.cc-connect
 	Projects []ProjectConfig `toml:"projects"`
 	Commands []CommandConfig  `toml:"commands"` // global custom slash commands
+	Aliases  []AliasConfig   `toml:"aliases"`   // global command aliases
 	Log      LogConfig       `toml:"log"`
 	Language string          `toml:"language"` // "en" or "zh", default is "en"
 	Speech   SpeechConfig    `toml:"speech"`
@@ -74,6 +75,12 @@ type ProviderConfig struct {
 type PlatformConfig struct {
 	Type    string         `toml:"type"`
 	Options map[string]any `toml:"options"`
+}
+
+// AliasConfig maps a trigger string to a command (e.g. "帮助" → "/help").
+type AliasConfig struct {
+	Name    string `toml:"name"`    // trigger text (e.g. "帮助")
+	Command string `toml:"command"` // target command (e.g. "/help")
 }
 
 // CommandConfig defines a user-customizable slash command that expands a prompt template.
@@ -352,6 +359,62 @@ func RemoveCommand(name string) error {
 		return fmt.Errorf("command %q not found", name)
 	}
 	cfg.Commands = remaining
+	return saveConfig(cfg)
+}
+
+// AddAlias adds a global alias and persists to config.
+func AddAlias(alias AliasConfig) error {
+	configMu.Lock()
+	defer configMu.Unlock()
+	if ConfigPath == "" {
+		return fmt.Errorf("config path not set")
+	}
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+	for i, a := range cfg.Aliases {
+		if a.Name == alias.Name {
+			cfg.Aliases[i] = alias
+			return saveConfig(cfg)
+		}
+	}
+	cfg.Aliases = append(cfg.Aliases, alias)
+	return saveConfig(cfg)
+}
+
+// RemoveAlias removes a global alias and persists to config.
+func RemoveAlias(name string) error {
+	configMu.Lock()
+	defer configMu.Unlock()
+	if ConfigPath == "" {
+		return fmt.Errorf("config path not set")
+	}
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+	found := false
+	var remaining []AliasConfig
+	for _, a := range cfg.Aliases {
+		if a.Name == name {
+			found = true
+		} else {
+			remaining = append(remaining, a)
+		}
+	}
+	if !found {
+		return fmt.Errorf("alias %q not found", name)
+	}
+	cfg.Aliases = remaining
 	return saveConfig(cfg)
 }
 
