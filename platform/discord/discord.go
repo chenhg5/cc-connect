@@ -79,7 +79,13 @@ func builtinSlashCommands() []*discordgo.ApplicationCommand {
 		}},
 		{Name: "list", Description: "List agent sessions"},
 		{Name: "cc-switch", Description: "Resume an existing session", Options: []*discordgo.ApplicationCommandOption{
-			optStr("id", "Session ID prefix", true),
+			optStr("id", "Session number or ID prefix", true),
+		}},
+		{Name: "delete", Description: "Delete a session by list number", Options: []*discordgo.ApplicationCommandOption{
+			optStr("target", "Session number or ID prefix", true),
+		}},
+		{Name: "name", Description: "Name a session for easy identification", Options: []*discordgo.ApplicationCommandOption{
+			optStr("args", "e.g. my-project, or: 2 my-project", true),
 		}},
 		{Name: "current", Description: "Show current active session"},
 		{Name: "status", Description: "Show system status"},
@@ -125,9 +131,6 @@ func builtinSlashCommands() []*discordgo.ApplicationCommand {
 		}},
 		{Name: "alias", Description: "Manage command aliases", Options: []*discordgo.ApplicationCommandOption{
 			optStr("args", "e.g. list, add 帮助 /help, del 帮助", false),
-		}},
-		{Name: "delete", Description: "Delete a session by list number", Options: []*discordgo.ApplicationCommandOption{
-			optStr("target", "Session number or ID prefix", true),
 		}},
 	}
 }
