@@ -402,6 +402,15 @@ func (e *Engine) Start() error {
 }
 
 func (e *Engine) Stop() error {
+	// Stop platforms first to prevent new incoming messages
+	var errs []error
+	for _, p := range e.platforms {
+		if err := p.Stop(); err != nil {
+			errs = append(errs, fmt.Errorf("stop platform %s: %w", p.Name(), err))
+		}
+	}
+
+	// Now cancel context and clean up sessions
 	e.cancel()
 
 	e.interactiveMu.Lock()
@@ -419,12 +428,6 @@ func (e *Engine) Stop() error {
 		}
 	}
 
-	var errs []error
-	for _, p := range e.platforms {
-		if err := p.Stop(); err != nil {
-			errs = append(errs, fmt.Errorf("stop platform %s: %w", p.Name(), err))
-		}
-	}
 	if err := e.agent.Stop(); err != nil {
 		errs = append(errs, fmt.Errorf("stop agent %s: %w", e.agent.Name(), err))
 	}
@@ -673,6 +676,11 @@ func isDenyResponse(s string) bool {
 
 func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Session) {
 	defer session.Unlock()
+
+	if e.ctx.Err() != nil {
+		return
+	}
+
 	turnStart := time.Now()
 
 	e.i18n.DetectAndSet(msg.Content)
@@ -745,6 +753,14 @@ func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, repl
 			}
 		}
 		inj.SetSessionEnv(envVars)
+	}
+
+	// Check if context is already canceled (e.g. during shutdown/restart)
+	if e.ctx.Err() != nil {
+		slog.Debug("skipping session start: context canceled", "session_key", sessionKey)
+		state = &interactiveState{platform: p, replyCtx: replyCtx, quiet: e.defaultQuiet}
+		e.interactiveStates[sessionKey] = state
+		return state
 	}
 
 	startAt := time.Now()
