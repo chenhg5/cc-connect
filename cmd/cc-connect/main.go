@@ -205,6 +205,11 @@ func main() {
 			return config.RemoveAlias(name)
 		})
 
+		// Wire banned words
+		if len(cfg.BannedWords) > 0 {
+			engine.SetBannedWords(cfg.BannedWords)
+		}
+
 		// Wire display truncation settings
 		{
 			dcfg := core.DisplayCfg{
@@ -568,6 +573,9 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	for _, a := range cfg.Aliases {
 		engine.AddAlias(a.Name, a.Command)
 	}
+
+	// Reload banned words
+	engine.SetBannedWords(cfg.BannedWords)
 
 	slog.Info("config reloaded", "project", projName)
 	return result, nil

@@ -16,15 +16,16 @@ var configMu sync.Mutex
 var ConfigPath string
 
 type Config struct {
-	DataDir  string          `toml:"data_dir"` // session store directory, default ~/.cc-connect
-	Projects []ProjectConfig `toml:"projects"`
-	Commands []CommandConfig  `toml:"commands"` // global custom slash commands
-	Aliases  []AliasConfig   `toml:"aliases"`   // global command aliases
-	Log      LogConfig       `toml:"log"`
-	Language string          `toml:"language"` // "en" or "zh", default is "en"
-	Speech   SpeechConfig    `toml:"speech"`
-	Display  DisplayConfig   `toml:"display"`
-	Quiet    *bool           `toml:"quiet,omitempty"` // global default for quiet mode; project-level overrides this
+	DataDir     string          `toml:"data_dir"` // session store directory, default ~/.cc-connect
+	Projects    []ProjectConfig `toml:"projects"`
+	Commands    []CommandConfig `toml:"commands"`     // global custom slash commands
+	Aliases     []AliasConfig   `toml:"aliases"`     // global command aliases
+	BannedWords []string        `toml:"banned_words"` // messages containing any of these words are blocked
+	Log         LogConfig       `toml:"log"`
+	Language    string          `toml:"language"` // "en" or "zh", default is "en"
+	Speech      SpeechConfig    `toml:"speech"`
+	Display     DisplayConfig   `toml:"display"`
+	Quiet       *bool           `toml:"quiet,omitempty"` // global default for quiet mode; project-level overrides this
 }
 
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.

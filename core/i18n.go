@@ -279,6 +279,8 @@ const (
 	MsgDeleteSuccess      MsgKey = "delete_success"
 	MsgDeleteActiveDenied MsgKey = "delete_active_denied"
 	MsgDeleteNotSupported MsgKey = "delete_not_supported"
+
+	MsgBannedWordBlocked MsgKey = "banned_word_blocked"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -1519,6 +1521,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 當前 Agent 不支持刪除會話。",
 		LangJapanese:           "❌ このエージェントはセッション削除をサポートしていません。",
 		LangSpanish:            "❌ Este agente no admite la eliminación de sesiones.",
+	},
+	MsgBannedWordBlocked: {
+		LangEnglish:            "⚠️ Your message was blocked because it contains a prohibited word.",
+		LangChinese:            "⚠️ 消息已被拦截，包含违禁词。",
+		LangTraditionalChinese: "⚠️ 訊息已被攔截，包含違禁詞。",
+		LangJapanese:           "⚠️ 禁止ワードが含まれているため、メッセージがブロックされました。",
+		LangSpanish:            "⚠️ Su mensaje fue bloqueado porque contiene una palabra prohibida.",
 	},
 }
 

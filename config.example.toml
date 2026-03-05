@@ -133,6 +133,16 @@ level = "info" # debug, info, warn, error
 # 此外，cc-connect 还会自动发现 Agent 的 commands 目录下的 .md 文件。
 
 # =============================================================================
+# Banned Words / 违禁词
+# =============================================================================
+#
+# Messages containing any of these words will be blocked and NOT forwarded to
+# the AI agent. Matching is case-insensitive.
+# 消息中包含以下任一违禁词时，将被拦截，不会转发给 AI Agent。匹配不区分大小写。
+
+# banned_words = ["违禁词1", "违禁词2", "secret_project"]
+
+# =============================================================================
 # Command Aliases / 命令别名
 # =============================================================================
 #

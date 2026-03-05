@@ -139,6 +139,9 @@ type Engine struct {
 	aliasSaveAddFunc func(name, command string) error
 	aliasSaveDelFunc func(name string) error
 
+	bannedWords []string
+	bannedMu    sync.RWMutex
+
 	// Interactive agent session management
 	interactiveMu     sync.Mutex
 	interactiveStates map[string]*interactiveState // key = sessionKey
@@ -293,6 +296,17 @@ func (e *Engine) ClearAliases() {
 	e.aliases = make(map[string]string)
 }
 
+// SetBannedWords replaces the banned words list.
+func (e *Engine) SetBannedWords(words []string) {
+	e.bannedMu.Lock()
+	defer e.bannedMu.Unlock()
+	lower := make([]string, len(words))
+	for i, w := range words {
+		lower[i] = strings.ToLower(w)
+	}
+	e.bannedWords = lower
+}
+
 // RemoveCommand removes a custom command by name. Returns false if not found.
 func (e *Engine) RemoveCommand(name string) bool {
 	return e.commands.Remove(name)
@@ -402,6 +416,22 @@ func (e *Engine) Stop() error {
 	return nil
 }
 
+// matchBannedWord returns the first banned word found in content, or "".
+func (e *Engine) matchBannedWord(content string) string {
+	e.bannedMu.RLock()
+	defer e.bannedMu.RUnlock()
+	if len(e.bannedWords) == 0 {
+		return ""
+	}
+	lower := strings.ToLower(content)
+	for _, w := range e.bannedWords {
+		if strings.Contains(lower, w) {
+			return w
+		}
+	}
+	return ""
+}
+
 // resolveAlias checks if the content (or its first word) matches an alias and replaces it.
 func (e *Engine) resolveAlias(content string) string {
 	e.aliasMu.RLock()
@@ -442,6 +472,15 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	// Resolve aliases: check if the first word (or whole content) matches an alias
 	content = e.resolveAlias(content)
 	msg.Content = content
+
+	// Banned words check (skip for slash commands)
+	if !strings.HasPrefix(content, "/") {
+		if word := e.matchBannedWord(content); word != "" {
+			slog.Info("message blocked by banned word", "word", word, "user", msg.UserName)
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgBannedWordBlocked))
+			return
+		}
+	}
 
 	if len(msg.Images) == 0 && strings.HasPrefix(content, "/") {
 		if e.handleCommand(p, msg, content) {
