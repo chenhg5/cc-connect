@@ -1,5 +1,10 @@
 # cc-connect
 
+[![Discord](https://img.shields.io/discord/1383794594498605148?logo=discord&label=Discord)](https://discord.gg/kHpwgaM4kq)
+[![Telegram](https://img.shields.io/badge/Telegram-Group-26A5E4?logo=telegram)](https://t.me/+odGNDhCjbjdmMmZl)
+[![GitHub release](https://img.shields.io/github/v/release/chenhg5/cc-connect?include_prereleases)](https://github.com/chenhg5/cc-connect/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 [English](./README.md) | 中文
 
 **在任何聊天工具里，远程操控你的本地 AI 编程助手。**
@@ -776,7 +781,11 @@ cc-connect/
 └── README.md
 ```
 
-## 微信用户群
+## 社区
+
+- [Discord](https://discord.gg/kHpwgaM4kq)
+- [Telegram](https://t.me/+odGNDhCjbjdmMmZl)
+- 微信用户群
 
 <img src="https://quick.go-admin.cn/ai/article/cc-connect_wechat_group.JPG" alt="用户群" width="100px" />
 
