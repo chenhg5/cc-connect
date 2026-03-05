@@ -788,7 +788,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				session.mu.Lock()
 				if session.AgentSessionID == "" {
 					session.AgentSessionID = event.SessionID
+					pendingName := session.Name
 					session.mu.Unlock()
+					if pendingName != "" && pendingName != "session" && pendingName != "default" {
+						e.sessions.SetSessionName(event.SessionID, pendingName)
+					}
 					e.sessions.Save()
 				} else {
 					session.mu.Unlock()
@@ -1071,13 +1075,17 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 	slog.Info("cmdNew: cleaning up old session", "session_key", msg.SessionKey)
 	e.cleanupInteractiveState(msg.SessionKey)
 	slog.Info("cmdNew: cleanup done, creating new session", "session_key", msg.SessionKey)
-	name := "session"
+	name := ""
 	if len(args) > 0 {
 		name = strings.Join(args, " ")
 	}
 	s := e.sessions.NewSession(msg.SessionKey, name)
-	e.reply(p, msg.ReplyCtx,
-		fmt.Sprintf("✅ New session created: %s (id: %s)", s.Name, s.ID))
+	if name != "" {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgNewSessionCreatedName), name))
+	} else {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNewSessionCreated))
+	}
+	_ = s
 }
 
 func (e *Engine) cmdList(p Platform, msg *Message) {

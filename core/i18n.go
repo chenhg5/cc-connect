@@ -271,6 +271,9 @@ const (
 	MsgAliasDeleted   MsgKey = "alias_deleted"
 	MsgAliasNotFound  MsgKey = "alias_not_found"
 	MsgAliasUsage     MsgKey = "alias_usage"
+
+	MsgNewSessionCreated     MsgKey = "new_session_created"
+	MsgNewSessionCreatedName MsgKey = "new_session_created_name"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -1464,6 +1467,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "用法：\n  `/alias` — 列出所有別名\n  `/alias add <觸發詞> <命令>` — 新增別名\n  `/alias del <觸發詞>` — 刪除別名\n\n範例：`/alias add 幫助 /help`",
 		LangJapanese:           "使い方：\n  `/alias` — エイリアス一覧\n  `/alias add <トリガー> <コマンド>` — 追加\n  `/alias del <トリガー>` — 削除\n\n例: `/alias add ヘルプ /help`",
 		LangSpanish:            "Uso:\n  `/alias` — listar aliases\n  `/alias add <trigger> <comando>` — añadir alias\n  `/alias del <trigger>` — eliminar alias\n\nEjemplo: `/alias add ayuda /help`",
+	},
+	MsgNewSessionCreated: {
+		LangEnglish:            "✅ New session created",
+		LangChinese:            "✅ 新会话已创建",
+		LangTraditionalChinese: "✅ 新會話已建立",
+		LangJapanese:           "✅ 新しいセッションを作成しました",
+		LangSpanish:            "✅ Nueva sesión creada",
+	},
+	MsgNewSessionCreatedName: {
+		LangEnglish:            "✅ New session created: **%s**",
+		LangChinese:            "✅ 新会话已创建：**%s**",
+		LangTraditionalChinese: "✅ 新會話已建立：**%s**",
+		LangJapanese:           "✅ 新しいセッションを作成しました：**%s**",
+		LangSpanish:            "✅ Nueva sesión creada: **%s**",
 	},
 }
 
