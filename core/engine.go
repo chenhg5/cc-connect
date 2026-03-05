@@ -105,6 +105,12 @@ type DisplayCfg struct {
 	ToolMaxLen     int // max runes for tool use preview; 0 = no truncation
 }
 
+// RateLimitCfg controls per-session message rate limiting.
+type RateLimitCfg struct {
+	MaxMessages int           // max messages per window; 0 = disabled
+	Window      time.Duration // sliding window size
+}
+
 // Engine routes messages between platforms and the agent for a single project.
 type Engine struct {
 	name      string
@@ -143,6 +149,9 @@ type Engine struct {
 	bannedMu    sync.RWMutex
 
 	disabledCmds map[string]bool
+
+	rateLimiter   *RateLimiter
+	streamPreview StreamPreviewCfg
 
 	// Interactive agent session management
 	interactiveMu     sync.Mutex
@@ -191,6 +200,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		aliases:           make(map[string]string),
 		interactiveStates: make(map[string]*interactiveState),
 		startedAt:         time.Now(),
+		streamPreview:     DefaultStreamPreviewCfg(),
 	}
 
 	if cp, ok := ag.(CommandProvider); ok {
@@ -323,6 +333,16 @@ func (e *Engine) SetBannedWords(words []string) {
 		lower[i] = strings.ToLower(w)
 	}
 	e.bannedWords = lower
+}
+
+// SetRateLimitCfg configures per-session message rate limiting.
+func (e *Engine) SetRateLimitCfg(cfg RateLimitCfg) {
+	e.rateLimiter = NewRateLimiter(cfg.MaxMessages, cfg.Window)
+}
+
+// SetStreamPreviewCfg configures the streaming preview behavior.
+func (e *Engine) SetStreamPreviewCfg(cfg StreamPreviewCfg) {
+	e.streamPreview = cfg
 }
 
 // RemoveCommand removes a custom command by name. Returns false if not found.
@@ -493,6 +513,13 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	// Resolve aliases: check if the first word (or whole content) matches an alias
 	content = e.resolveAlias(content)
 	msg.Content = content
+
+	// Rate limit check
+	if e.rateLimiter != nil && !e.rateLimiter.Allow(msg.SessionKey) {
+		slog.Info("message rate limited", "session", msg.SessionKey, "user", msg.UserName)
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgRateLimited))
+		return
+	}
 
 	// Banned words check (skip for slash commands)
 	if !strings.HasPrefix(content, "/") {
@@ -821,6 +848,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	waitStart := time.Now()
 	firstEventLogged := false
 
+	state.mu.Lock()
+	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx)
+	state.mu.Unlock()
+
 	for event := range state.agentSession.Events() {
 		if e.ctx.Err() != nil {
 			return
@@ -856,6 +887,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case EventText:
 			if event.Content != "" {
 				textParts = append(textParts, event.Content)
+				if sp.canPreview() {
+					sp.appendText(event.Content)
+				}
 			}
 			if event.SessionID != "" {
 				session.mu.Lock()
@@ -940,18 +974,26 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			)
 
 			replyStart := time.Now()
-			for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
-				if err := p.Send(e.ctx, replyCtx, chunk); err != nil {
-					slog.Error("failed to send reply", "error", err)
-					return
+
+			// If streaming preview was active, try to finalize in-place
+			if sp.finish(fullResponse) {
+				slog.Debug("stream preview: finalized in-place", "response_len", len(fullResponse))
+			} else {
+				for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
+					if err := p.Send(e.ctx, replyCtx, chunk); err != nil {
+						slog.Error("failed to send reply", "error", err)
+						return
+					}
 				}
 			}
+
 			if elapsed := time.Since(replyStart); elapsed >= slowPlatformSend {
 				slog.Warn("slow final reply send", "platform", p.Name(), "elapsed", elapsed, "response_len", len(fullResponse))
 			}
 			return
 
 		case EventError:
+			sp.finish("") // clean up preview on error
 			if event.Error != nil {
 				slog.Error("agent error", "error", event.Error)
 				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
@@ -972,8 +1014,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		fullResponse := strings.Join(textParts, "")
 		session.AddHistory("assistant", fullResponse)
-		for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
-			e.send(p, replyCtx, chunk)
+
+		if sp.finish(fullResponse) {
+			slog.Debug("stream preview: finalized in-place (process exited)")
+		} else {
+			for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
+				e.send(p, replyCtx, chunk)
+			}
 		}
 	}
 }

@@ -1,0 +1,241 @@
+package core
+
+import (
+	"context"
+	"log/slog"
+	"sync"
+	"time"
+)
+
+// StreamPreviewCfg controls the streaming preview behavior.
+type StreamPreviewCfg struct {
+	Enabled       bool          // global toggle
+	IntervalMs    int           // minimum ms between updates (default 1500)
+	MinDeltaChars int           // minimum new chars before sending an update (default 30)
+	MaxChars      int           // max preview length (default 2000)
+}
+
+// DefaultStreamPreviewCfg returns sensible defaults.
+func DefaultStreamPreviewCfg() StreamPreviewCfg {
+	return StreamPreviewCfg{
+		Enabled:       true,
+		IntervalMs:    1500,
+		MinDeltaChars: 30,
+		MaxChars:      2000,
+	}
+}
+
+// streamPreview manages the state and throttling of a single streaming preview.
+// It accumulates text from EventText events and periodically pushes
+// updates to the platform via MessageUpdater.UpdateMessage.
+type streamPreview struct {
+	mu sync.Mutex
+
+	cfg       StreamPreviewCfg
+	platform  Platform
+	replyCtx  any
+	ctx       context.Context
+
+	fullText     string // accumulated full text so far
+	lastSentText string // what was last successfully sent to the platform
+	lastSentAt   time.Time
+	previewMsgID any    // platform-specific ID for the preview message (returned by SendPreviewStart)
+	degraded     bool   // if true, stop trying (platform doesn't support it or permanent error)
+
+	timer     *time.Timer
+	timerStop chan struct{} // closed when preview ends
+}
+
+// PreviewStarter is an optional interface for platforms that can initiate a
+// streaming preview message and return a handle for subsequent updates.
+type PreviewStarter interface {
+	// SendPreviewStart sends the initial preview message and returns a handle
+	// that can be passed to UpdateMessage for edits. Returns nil handle if
+	// preview is not supported for this context.
+	SendPreviewStart(ctx context.Context, replyCtx any, content string) (previewHandle any, err error)
+}
+
+// PreviewCleaner is an optional interface for platforms that need to clean up
+// the preview message after the final response is sent (e.g. Discord deletes
+// the preview and sends a fresh message).
+type PreviewCleaner interface {
+	DeletePreviewMessage(ctx context.Context, previewHandle any) error
+}
+
+func newStreamPreview(cfg StreamPreviewCfg, p Platform, replyCtx any, ctx context.Context) *streamPreview {
+	return &streamPreview{
+		cfg:       cfg,
+		platform:  p,
+		replyCtx:  replyCtx,
+		ctx:       ctx,
+		timerStop: make(chan struct{}),
+	}
+}
+
+// canPreview returns true if the platform supports message updating.
+func (sp *streamPreview) canPreview() bool {
+	if sp.degraded || !sp.cfg.Enabled {
+		return false
+	}
+	_, ok := sp.platform.(MessageUpdater)
+	return ok
+}
+
+// appendText adds new text content and triggers a throttled flush if needed.
+func (sp *streamPreview) appendText(text string) {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+
+	if sp.degraded || !sp.cfg.Enabled {
+		return
+	}
+
+	sp.fullText += text
+
+	displayText := sp.fullText
+	maxChars := sp.cfg.MaxChars
+	if maxChars > 0 && len([]rune(displayText)) > maxChars {
+		displayText = string([]rune(displayText)[:maxChars]) + "…"
+	}
+
+	delta := len([]rune(displayText)) - len([]rune(sp.lastSentText))
+	elapsed := time.Since(sp.lastSentAt)
+	interval := time.Duration(sp.cfg.IntervalMs) * time.Millisecond
+
+	if delta < sp.cfg.MinDeltaChars && !sp.lastSentAt.IsZero() {
+		sp.scheduleFlushLocked(interval)
+		return
+	}
+
+	if elapsed < interval && !sp.lastSentAt.IsZero() {
+		remaining := interval - elapsed
+		sp.scheduleFlushLocked(remaining)
+		return
+	}
+
+	sp.cancelTimerLocked()
+	sp.flushLocked(displayText)
+}
+
+func (sp *streamPreview) scheduleFlushLocked(delay time.Duration) {
+	if sp.timer != nil {
+		return // already scheduled
+	}
+	sp.timer = time.AfterFunc(delay, func() {
+		sp.mu.Lock()
+		defer sp.mu.Unlock()
+		sp.timer = nil
+		if sp.degraded {
+			return
+		}
+		displayText := sp.fullText
+		maxChars := sp.cfg.MaxChars
+		if maxChars > 0 && len([]rune(displayText)) > maxChars {
+			displayText = string([]rune(displayText)[:maxChars]) + "…"
+		}
+		sp.flushLocked(displayText)
+	})
+}
+
+func (sp *streamPreview) cancelTimerLocked() {
+	if sp.timer != nil {
+		sp.timer.Stop()
+		sp.timer = nil
+	}
+}
+
+// flushLocked sends the current preview text to the platform. Must hold sp.mu.
+func (sp *streamPreview) flushLocked(text string) {
+	if text == sp.lastSentText || text == "" {
+		return
+	}
+
+	updater, ok := sp.platform.(MessageUpdater)
+	if !ok {
+		sp.degraded = true
+		return
+	}
+
+	if sp.previewMsgID == nil {
+		// First preview: try to send a new preview message
+		if starter, ok := sp.platform.(PreviewStarter); ok {
+			handle, err := starter.SendPreviewStart(sp.ctx, sp.replyCtx, text+"▍")
+			if err != nil {
+				slog.Debug("stream preview: start failed, degrading", "error", err)
+				sp.degraded = true
+				return
+			}
+			sp.previewMsgID = handle
+		} else {
+			// Platform supports UpdateMessage but not PreviewStarter;
+			// use Send to create initial message, then update in-place
+			if err := sp.platform.Send(sp.ctx, sp.replyCtx, text+"▍"); err != nil {
+				slog.Debug("stream preview: initial send failed", "error", err)
+				sp.degraded = true
+				return
+			}
+			// For platforms without PreviewStarter, replyCtx itself serves as the handle
+			sp.previewMsgID = sp.replyCtx
+		}
+		sp.lastSentText = text
+		sp.lastSentAt = time.Now()
+		return
+	}
+
+	// Update existing preview message
+	if err := updater.UpdateMessage(sp.ctx, sp.previewMsgID, text+"▍"); err != nil {
+		slog.Debug("stream preview: update failed, degrading", "error", err)
+		sp.degraded = true
+		return
+	}
+	sp.lastSentText = text
+	sp.lastSentAt = time.Now()
+}
+
+// finish is called when the agent response is complete. It cancels any pending
+// timer and optionally cleans up the preview message.
+// Returns true if a preview was active and the final message was sent via preview
+// (so the caller should skip sending the full response separately).
+func (sp *streamPreview) finish(finalText string) bool {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+
+	sp.cancelTimerLocked()
+	close(sp.timerStop)
+
+	if sp.previewMsgID == nil || sp.degraded {
+		return false
+	}
+
+	// If platform wants to delete the preview and send fresh, let it
+	if cleaner, ok := sp.platform.(PreviewCleaner); ok {
+		_ = cleaner.DeletePreviewMessage(sp.ctx, sp.previewMsgID)
+		return false // caller should send the final message normally
+	}
+
+	// Otherwise update the preview message in-place with the final text
+	updater, ok := sp.platform.(MessageUpdater)
+	if !ok {
+		return false
+	}
+
+	// For very long responses, we may need chunked sending instead
+	maxChars := sp.cfg.MaxChars
+	if maxChars > 0 && len([]rune(finalText)) > maxChars {
+		// Final text exceeds preview limit; delete preview and let caller handle it
+		return false
+	}
+
+	if err := updater.UpdateMessage(sp.ctx, sp.previewMsgID, finalText); err != nil {
+		slog.Debug("stream preview: final update failed", "error", err)
+		return false
+	}
+	return true
+}
+
+// getFullText returns the accumulated text so far.
+func (sp *streamPreview) getFullText() string {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	return sp.fullText
+}

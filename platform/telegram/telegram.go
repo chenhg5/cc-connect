@@ -464,6 +464,42 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	return replyContext{chatID: chatID}, nil
 }
 
+// telegramPreviewHandle stores the chat and message IDs for an editable preview message.
+type telegramPreviewHandle struct {
+	chatID    int64
+	messageID int
+}
+
+// SendPreviewStart sends a new message and returns a handle for subsequent edits.
+func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content string) (any, error) {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return nil, fmt.Errorf("telegram: invalid reply context type %T", rctx)
+	}
+
+	msg := tgbotapi.NewMessage(rc.chatID, content)
+	msg.ParseMode = ""
+	sent, err := p.bot.Send(msg)
+	if err != nil {
+		return nil, fmt.Errorf("telegram: send preview: %w", err)
+	}
+	return &telegramPreviewHandle{chatID: rc.chatID, messageID: sent.MessageID}, nil
+}
+
+// UpdateMessage edits an existing message identified by previewHandle.
+func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content string) error {
+	h, ok := previewHandle.(*telegramPreviewHandle)
+	if !ok {
+		return fmt.Errorf("telegram: invalid preview handle type %T", previewHandle)
+	}
+	edit := tgbotapi.NewEditMessageText(h.chatID, h.messageID, content)
+	_, err := p.bot.Send(edit)
+	if err != nil {
+		return fmt.Errorf("telegram: edit message: %w", err)
+	}
+	return nil
+}
+
 func (p *Platform) Stop() error {
 	if p.cancel != nil {
 		p.cancel()

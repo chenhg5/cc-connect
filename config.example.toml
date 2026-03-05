@@ -46,6 +46,32 @@ level = "info" # debug, info, warn, error
 # tool_max_len = 500       # Max chars for tool use messages (default: 500) / 工具调用消息最大字符数（默认 500）
 
 # =============================================================================
+# Streaming Preview / 流式预览
+# =============================================================================
+# Real-time message preview: shows agent output as it streams, updating the
+# message in-place (like a "typing" indicator). Supported on Telegram, Discord,
+# and Feishu. The message is edited periodically until the final response is sent.
+# 实时流式预览：Agent 输出时实时更新消息（类似"正在输入"效果）。
+# 支持 Telegram、Discord 和飞书。消息会定期编辑，直到最终回复发送。
+
+# [stream_preview]
+# enabled = true            # Enable/disable streaming preview (default: true) / 启用/禁用流式预览（默认 true）
+# interval_ms = 1500        # Min ms between updates (default: 1500) / 更新最小间隔毫秒数（默认 1500）
+# min_delta_chars = 30      # Min new chars before sending update (default: 30) / 发送更新前最少新增字符数（默认 30）
+# max_chars = 2000          # Max preview length (default: 2000) / 预览最大长度（默认 2000）
+
+# =============================================================================
+# Rate Limiting / 速率限制
+# =============================================================================
+# Per-session sliding-window rate limiter. Prevents users from flooding the bot
+# with too many messages. When exceeded, a friendly "slow down" message is sent.
+# 每会话滑动窗口速率限制。防止用户刷消息。超限时返回友好的提示。
+
+# [rate_limit]
+# max_messages = 20         # Max messages per window; 0 = disabled (default: 20) / 窗口内最大消息数；0 = 禁用（默认 20）
+# window_secs = 60          # Window size in seconds (default: 60) / 窗口时间秒数（默认 60）
+
+# =============================================================================
 # Speech-to-Text (Voice Messages) / 语音转文字（语音消息）
 # =============================================================================
 # Enable to transcribe voice messages to text before sending to agents.

@@ -282,6 +282,7 @@ const (
 
 	MsgBannedWordBlocked MsgKey = "banned_word_blocked"
 	MsgCommandDisabled   MsgKey = "command_disabled"
+	MsgRateLimited       MsgKey = "rate_limited"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -1536,6 +1537,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "🚫 命令 `%s` 在當前專案中已被停用。",
 		LangJapanese:           "🚫 コマンド `%s` はこのプロジェクトで無効化されています。",
 		LangSpanish:            "🚫 El comando `%s` está deshabilitado para este proyecto.",
+	},
+	MsgRateLimited: {
+		LangEnglish:            "⏳ You are sending messages too fast. Please wait a moment.",
+		LangChinese:            "⏳ 消息发送过快，请稍后再试。",
+		LangTraditionalChinese: "⏳ 訊息發送過快，請稍後再試。",
+		LangJapanese:           "⏳ メッセージの送信が速すぎます。しばらくお待ちください。",
+		LangSpanish:            "⏳ Estás enviando mensajes demasiado rápido. Espera un momento.",
 	},
 }
 

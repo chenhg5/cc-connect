@@ -607,6 +607,76 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	return replyContext{chatID: parts[1]}, nil
 }
 
+// feishuPreviewHandle stores the message ID for an editable preview message.
+type feishuPreviewHandle struct {
+	messageID string
+	chatID    string
+}
+
+// SendPreviewStart sends a new text message and returns a handle for subsequent edits.
+func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content string) (any, error) {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return nil, fmt.Errorf("feishu: invalid reply context type %T", rctx)
+	}
+
+	chatID := rc.chatID
+	if chatID == "" {
+		return nil, fmt.Errorf("feishu: chatID is empty")
+	}
+
+	b, _ := json.Marshal(map[string]string{"text": content})
+	resp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
+		ReceiveIdType(larkim.ReceiveIdTypeChatId).
+		Body(larkim.NewCreateMessageReqBodyBuilder().
+			ReceiveId(chatID).
+			MsgType(larkim.MsgTypeText).
+			Content(string(b)).
+			Build()).
+		Build())
+	if err != nil {
+		return nil, fmt.Errorf("feishu: send preview: %w", err)
+	}
+	if !resp.Success() {
+		return nil, fmt.Errorf("feishu: send preview code=%d msg=%s", resp.Code, resp.Msg)
+	}
+
+	msgID := ""
+	if resp.Data != nil && resp.Data.MessageId != nil {
+		msgID = *resp.Data.MessageId
+	}
+	if msgID == "" {
+		return nil, fmt.Errorf("feishu: send preview: no message ID returned")
+	}
+
+	return &feishuPreviewHandle{messageID: msgID, chatID: chatID}, nil
+}
+
+// UpdateMessage edits an existing text message identified by previewHandle.
+func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content string) error {
+	h, ok := previewHandle.(*feishuPreviewHandle)
+	if !ok {
+		return fmt.Errorf("feishu: invalid preview handle type %T", previewHandle)
+	}
+
+	b, _ := json.Marshal(map[string]string{"text": content})
+	msgType := larkim.MsgTypeText
+	resp, err := p.client.Im.Message.Update(ctx, larkim.NewUpdateMessageReqBuilder().
+		MessageId(h.messageID).
+		Body(larkim.NewUpdateMessageReqBodyBuilder().
+			MsgType(msgType).
+			Content(string(b)).
+			Build()).
+		Build())
+	if err != nil {
+		return fmt.Errorf("feishu: update message: %w", err)
+	}
+	if !resp.Success() {
+		return fmt.Errorf("feishu: update message code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	return nil
+}
+
 func (p *Platform) Stop() error {
 	if p.cancel != nil {
 		p.cancel()

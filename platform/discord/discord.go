@@ -455,6 +455,60 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	return replyContext{channelID: parts[1]}, nil
 }
 
+// discordPreviewHandle stores the IDs needed to edit or delete a preview message.
+type discordPreviewHandle struct {
+	channelID string
+	messageID string
+}
+
+// SendPreviewStart sends a new message and returns a handle for subsequent edits.
+func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content string) (any, error) {
+	var channelID string
+	switch rc := rctx.(type) {
+	case replyContext:
+		channelID = rc.channelID
+	case *interactionReplyCtx:
+		channelID = rc.channelID
+	default:
+		return nil, fmt.Errorf("discord: invalid reply context type %T", rctx)
+	}
+
+	if len(content) > maxDiscordLen {
+		content = content[:maxDiscordLen]
+	}
+	sent, err := p.session.ChannelMessageSend(channelID, content)
+	if err != nil {
+		return nil, fmt.Errorf("discord: send preview: %w", err)
+	}
+	return &discordPreviewHandle{channelID: channelID, messageID: sent.ID}, nil
+}
+
+// UpdateMessage edits an existing message identified by previewHandle.
+func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content string) error {
+	h, ok := previewHandle.(*discordPreviewHandle)
+	if !ok {
+		return fmt.Errorf("discord: invalid preview handle type %T", previewHandle)
+	}
+	if len(content) > maxDiscordLen {
+		content = content[:maxDiscordLen]
+	}
+	_, err := p.session.ChannelMessageEdit(h.channelID, h.messageID, content)
+	if err != nil {
+		return fmt.Errorf("discord: edit message: %w", err)
+	}
+	return nil
+}
+
+// DeletePreviewMessage removes the preview message so the final response can
+// be sent as a fresh message (avoids notification confusion).
+func (p *Platform) DeletePreviewMessage(ctx context.Context, previewHandle any) error {
+	h, ok := previewHandle.(*discordPreviewHandle)
+	if !ok {
+		return fmt.Errorf("discord: invalid preview handle type %T", previewHandle)
+	}
+	return p.session.ChannelMessageDelete(h.channelID, h.messageID)
+}
+
 func (p *Platform) Stop() error {
 	if p.session != nil {
 		return p.session.Close()

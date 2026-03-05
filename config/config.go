@@ -24,14 +24,30 @@ type Config struct {
 	Log         LogConfig       `toml:"log"`
 	Language    string          `toml:"language"` // "en" or "zh", default is "en"
 	Speech      SpeechConfig    `toml:"speech"`
-	Display     DisplayConfig   `toml:"display"`
-	Quiet       *bool           `toml:"quiet,omitempty"` // global default for quiet mode; project-level overrides this
+	Display       DisplayConfig       `toml:"display"`
+	StreamPreview StreamPreviewConfig `toml:"stream_preview"` // real-time streaming preview
+	RateLimit     RateLimitConfig     `toml:"rate_limit"`     // per-session rate limiting
+	Quiet         *bool               `toml:"quiet,omitempty"` // global default for quiet mode; project-level overrides this
 }
 
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
 type DisplayConfig struct {
 	ThinkingMaxLen  *int `toml:"thinking_max_len"`    // max chars for thinking messages; 0 = no truncation; default 300
 	ToolMaxLen      *int `toml:"tool_max_len"`        // max chars for tool use messages; 0 = no truncation; default 500
+}
+
+// StreamPreviewConfig controls real-time streaming preview in IM.
+type StreamPreviewConfig struct {
+	Enabled       *bool `toml:"enabled"`         // default true
+	IntervalMs    *int  `toml:"interval_ms"`     // min ms between updates; default 1500
+	MinDeltaChars *int  `toml:"min_delta_chars"` // min new chars before update; default 30
+	MaxChars      *int  `toml:"max_chars"`       // max preview length; default 2000
+}
+
+// RateLimitConfig controls per-session message rate limiting.
+type RateLimitConfig struct {
+	MaxMessages *int `toml:"max_messages"` // max messages per window; 0 = disabled; default 20
+	WindowSecs  *int `toml:"window_secs"`  // window size in seconds; default 60
 }
 
 // SpeechConfig configures speech-to-text for voice messages.

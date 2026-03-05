@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/chenhg5/cc-connect/config"
 	"github.com/chenhg5/cc-connect/core"
@@ -228,6 +229,42 @@ func main() {
 				dcfg.ToolMaxLen = *cfg.Display.ToolMaxLen
 			}
 			engine.SetDisplayConfig(dcfg)
+		}
+
+		// Wire streaming preview
+		{
+			spcfg := core.DefaultStreamPreviewCfg()
+			if cfg.StreamPreview.Enabled != nil {
+				spcfg.Enabled = *cfg.StreamPreview.Enabled
+			}
+			if cfg.StreamPreview.IntervalMs != nil {
+				spcfg.IntervalMs = *cfg.StreamPreview.IntervalMs
+			}
+			if cfg.StreamPreview.MinDeltaChars != nil {
+				spcfg.MinDeltaChars = *cfg.StreamPreview.MinDeltaChars
+			}
+			if cfg.StreamPreview.MaxChars != nil {
+				spcfg.MaxChars = *cfg.StreamPreview.MaxChars
+			}
+			engine.SetStreamPreviewCfg(spcfg)
+		}
+
+		// Wire rate limiting
+		{
+			maxMsg := 20
+			windowSecs := 60
+			if cfg.RateLimit.MaxMessages != nil {
+				maxMsg = *cfg.RateLimit.MaxMessages
+			}
+			if cfg.RateLimit.WindowSecs != nil {
+				windowSecs = *cfg.RateLimit.WindowSecs
+			}
+			if maxMsg > 0 {
+				engine.SetRateLimitCfg(core.RateLimitCfg{
+					MaxMessages: maxMsg,
+					Window:      time.Duration(windowSecs) * time.Second,
+				})
+			}
 		}
 		engine.SetDisplaySaveFunc(func(thinkingMaxLen, toolMaxLen *int) error {
 			return config.SaveDisplayConfig(thinkingMaxLen, toolMaxLen)
