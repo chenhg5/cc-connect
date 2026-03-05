@@ -268,6 +268,8 @@ app_secret = "your-feishu-app-secret"
 # allow_from = "*"          # Allowed user open_ids, comma-separated; "*" = all (default) / 允许的用户 open_id，逗号分隔；"*" 表示所有（默认）
 # reaction_emoji = "OnIt"  # Emoji reaction on incoming messages (default: "OnIt"); set to "none" to disable
 #                           # 收到消息时添加的表情回复（默认 "OnIt"）；设为 "none" 可禁用
+# group_reply_all = false   # If true, respond to ALL group messages without requiring @mention
+#                           # 设为 true 时，群聊中无需 @机器人 也会响应所有消息（默认 false）
 
 # DingTalk / 钉钉 (uncomment to enable / 取消注释以启用)
 # 1. Create an app at https://open-dev.dingtalk.com / 在钉钉开放平台创建应用
@@ -297,6 +299,7 @@ app_secret = "your-feishu-app-secret"
 # token = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
 # allow_from = "*"  # Allowed Telegram user IDs, e.g. "123456789,987654321"; "*" = all
 #                   # 允许的 Telegram 用户 ID，如 "123456789,987654321"；"*" 表示所有
+# group_reply_all = false  # If true, respond to ALL group messages without @mention / 设为 true 群聊无需 @ 也响应
 
 # Slack (uncomment to enable / 取消注释以启用)
 # 1. Create an app at https://api.slack.com/apps / 创建应用
@@ -342,6 +345,7 @@ app_secret = "your-feishu-app-secret"
 # allow_from = "*"  # Allowed Discord user IDs / 允许的 Discord 用户 ID
 # guild_id = ""     # Optional: set for instant slash command registration (per-guild)
 #                   # 可选：设置后 slash 命令秒级生效（仅该服务器）
+# group_reply_all = false  # If true, respond to ALL guild messages without @mention / 设为 true 群聊无需 @ 也响应
 
 # LINE (uncomment to enable / 取消注释以启用)
 # 1. Create a channel at https://developers.line.biz/console/ (Messaging API)

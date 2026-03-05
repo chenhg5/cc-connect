@@ -36,13 +36,14 @@ type interactionReplyCtx struct {
 }
 
 type Platform struct {
-	token     string
-	allowFrom string
-	guildID   string // optional: per-guild registration (instant) vs global (up to 1h propagation)
-	session   *discordgo.Session
-	handler   core.MessageHandler
-	botID     string
-	appID     string
+	token         string
+	allowFrom     string
+	guildID       string // optional: per-guild registration (instant) vs global (up to 1h propagation)
+	groupReplyAll bool
+	session       *discordgo.Session
+	handler       core.MessageHandler
+	botID         string
+	appID         string
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -52,7 +53,8 @@ func New(opts map[string]any) (core.Platform, error) {
 	}
 	allowFrom, _ := opts["allow_from"].(string)
 	guildID, _ := opts["guild_id"].(string)
-	return &Platform{token: token, allowFrom: allowFrom, guildID: guildID}, nil
+	groupReplyAll, _ := opts["group_reply_all"].(bool)
+	return &Platform{token: token, allowFrom: allowFrom, guildID: guildID, groupReplyAll: groupReplyAll}, nil
 }
 
 func (p *Platform) Name() string { return "discord" }
@@ -160,8 +162,8 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 			return
 		}
 
-		// In guild channels, only respond when the bot is @mentioned
-		if m.GuildID != "" {
+		// In guild channels, only respond when the bot is @mentioned (unless group_reply_all)
+		if m.GuildID != "" && !p.groupReplyAll {
 			mentioned := false
 			for _, u := range m.Mentions {
 				if u.ID == p.botID {

@@ -26,12 +26,13 @@ type replyContext struct {
 }
 
 type Platform struct {
-	token      string
-	allowFrom  string
-	bot        *tgbotapi.BotAPI
-	httpClient *http.Client
-	handler    core.MessageHandler
-	cancel     context.CancelFunc
+	token         string
+	allowFrom     string
+	groupReplyAll bool
+	bot           *tgbotapi.BotAPI
+	httpClient    *http.Client
+	handler       core.MessageHandler
+	cancel        context.CancelFunc
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -57,7 +58,8 @@ func New(opts map[string]any) (core.Platform, error) {
 		slog.Info("telegram: using proxy", "proxy", u.Host, "auth", proxyUser != "")
 	}
 
-	return &Platform{token: token, allowFrom: allowFrom, httpClient: httpClient}, nil
+	groupReplyAll, _ := opts["group_reply_all"].(bool)
+	return &Platform{token: token, allowFrom: allowFrom, groupReplyAll: groupReplyAll, httpClient: httpClient}, nil
 }
 
 func (p *Platform) Name() string { return "telegram" }
@@ -113,12 +115,12 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 
 				isGroup := msg.Chat.Type == "group" || msg.Chat.Type == "supergroup"
 
-				// In group chats, filter messages not directed at this bot
-				if isGroup {
-					if !p.isDirectedAtBot(msg) {
-						continue
-					}
+			// In group chats, filter messages not directed at this bot (unless group_reply_all)
+			if isGroup && !p.groupReplyAll {
+				if !p.isDirectedAtBot(msg) {
+					continue
 				}
+			}
 
 				rctx := replyContext{chatID: msg.Chat.ID, messageID: msg.MessageID}
 

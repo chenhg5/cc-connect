@@ -27,16 +27,17 @@ type replyContext struct {
 }
 
 type Platform struct {
-	appID         string
-	appSecret     string
-	reactionEmoji string
-	allowFrom     string
-	client        *lark.Client
-	wsClient      *larkws.Client
-	handler       core.MessageHandler
-	cancel        context.CancelFunc
-	dedup         core.MessageDedup
-	botOpenID     string
+	appID          string
+	appSecret      string
+	reactionEmoji  string
+	allowFrom      string
+	groupReplyAll  bool
+	client         *lark.Client
+	wsClient       *larkws.Client
+	handler        core.MessageHandler
+	cancel         context.CancelFunc
+	dedup          core.MessageDedup
+	botOpenID      string
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -53,12 +54,14 @@ func New(opts map[string]any) (core.Platform, error) {
 		reactionEmoji = ""
 	}
 	allowFrom, _ := opts["allow_from"].(string)
+	groupReplyAll, _ := opts["group_reply_all"].(bool)
 
 	return &Platform{
 		appID:         appID,
 		appSecret:     appSecret,
 		reactionEmoji: reactionEmoji,
 		allowFrom:     allowFrom,
+		groupReplyAll: groupReplyAll,
 		client:        lark.NewClient(appID, appSecret),
 	}, nil
 }
@@ -172,7 +175,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		chatType = *msg.ChatType
 	}
 
-	if chatType == "group" && p.botOpenID != "" {
+	if chatType == "group" && !p.groupReplyAll && p.botOpenID != "" {
 		if !isBotMentioned(msg.Mentions, p.botOpenID) {
 			slog.Debug("feishu: ignoring group message without bot mention", "chat_id", chatID)
 			return nil
