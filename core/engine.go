@@ -856,6 +856,7 @@ var builtinCommands = []struct {
 	{[]string{"new"}, "new"},
 	{[]string{"list", "sessions"}, "list"},
 	{[]string{"switch"}, "switch"},
+	{[]string{"name", "rename"}, "name"},
 	{[]string{"current"}, "current"},
 	{[]string{"status"}, "status"},
 	{[]string{"history"}, "history"},
@@ -945,6 +946,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdList(p, msg)
 	case "switch":
 		e.cmdSwitch(p, msg, args)
+	case "name":
+		e.cmdName(p, msg, args)
 	case "current":
 		e.cmdCurrent(p, msg)
 	case "status":
@@ -1044,16 +1047,21 @@ func (e *Engine) cmdList(p Platform, msg *Message) {
 		if s.ID == activeAgentID {
 			marker = "▶"
 		}
-		summary := strings.ReplaceAll(s.Summary, "\n", " ")
-		summary = strings.Join(strings.Fields(summary), " ")
-		if summary == "" {
-			summary = "(empty)"
-		}
-		if len([]rune(summary)) > 40 {
-			summary = string([]rune(summary)[:40]) + "…"
+		displayName := e.sessions.GetSessionName(s.ID)
+		if displayName != "" {
+			displayName = "📌 " + displayName
+		} else {
+			displayName = strings.ReplaceAll(s.Summary, "\n", " ")
+			displayName = strings.Join(strings.Fields(displayName), " ")
+			if displayName == "" {
+				displayName = "(empty)"
+			}
+			if len([]rune(displayName)) > 40 {
+				displayName = string([]rune(displayName)[:40]) + "…"
+			}
 		}
 		sb.WriteString(fmt.Sprintf("%s **%d.** %s · **%d** msgs · %s\n",
-			marker, i+1, summary, s.MessageCount, s.ModifiedAt.Format("01-02 15:04")))
+			marker, i+1, displayName, s.MessageCount, s.ModifiedAt.Format("01-02 15:04")))
 	}
 	if len(agentSessions) > limit {
 		sb.WriteString(fmt.Sprintf(e.i18n.T(MsgListMore), len(agentSessions)-limit))
@@ -1108,8 +1116,65 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	if len(shortID) > 12 {
 		shortID = shortID[:12]
 	}
+	displayName := e.sessions.GetSessionName(matched.ID)
+	if displayName == "" {
+		displayName = matched.Summary
+	}
 	e.reply(p, msg.ReplyCtx,
-		fmt.Sprintf("✅ Switched to: %s (%s, %d msgs)", matched.Summary, shortID, matched.MessageCount))
+		fmt.Sprintf("✅ Switched to: %s (%s, %d msgs)", displayName, shortID, matched.MessageCount))
+}
+
+func (e *Engine) cmdName(p Platform, msg *Message, args []string) {
+	if len(args) == 0 {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgNameUsage)))
+		return
+	}
+
+	// Check if first arg is a number → naming a specific session by list index
+	var targetID string
+	var name string
+
+	if idx, err := strconv.Atoi(args[0]); err == nil && idx >= 1 {
+		// /name <number> <name...>
+		if len(args) < 2 {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgNameUsage)))
+			return
+		}
+		agentSessions, err := e.agent.ListSessions(e.ctx)
+		if err != nil {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
+			return
+		}
+		if idx > len(agentSessions) {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ No session #%d", idx))
+			return
+		}
+		targetID = agentSessions[idx-1].ID
+		name = strings.Join(args[1:], " ")
+	} else {
+		// /name <name...> → current session
+		session := e.sessions.GetOrCreateActive(msg.SessionKey)
+		targetID = session.AgentSessionID
+		if targetID == "" {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNameNoSession))
+			return
+		}
+		name = strings.Join(args, " ")
+	}
+
+	name = strings.TrimSpace(name)
+	if name == "" {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgNameUsage)))
+		return
+	}
+
+	e.sessions.SetSessionName(targetID, name)
+
+	shortID := targetID
+	if len(shortID) > 12 {
+		shortID = shortID[:12]
+	}
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgNameSet), name, shortID))
 }
 
 func (e *Engine) cmdCurrent(p Platform, msg *Message) {
@@ -1152,7 +1217,11 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 
 	// Session info
 	s := e.sessions.GetOrCreateActive(msg.SessionKey)
-	sessionStr := e.i18n.Tf(MsgStatusSession, s.Name, len(s.History))
+	sessionDisplayName := e.sessions.GetSessionName(s.AgentSessionID)
+	if sessionDisplayName == "" {
+		sessionDisplayName = s.Name
+	}
+	sessionStr := e.i18n.Tf(MsgStatusSession, sessionDisplayName, len(s.History))
 
 	// Cron jobs
 	var cronStr string

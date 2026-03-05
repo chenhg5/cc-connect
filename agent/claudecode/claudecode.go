@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -300,16 +301,104 @@ func scanSessionMeta(path string) (string, int) {
 		}
 		if entry.Type == "user" || entry.Type == "assistant" {
 			count++
-			if summary == "" && entry.Type == "user" && entry.Message.Content != "" {
-				s := entry.Message.Content
-				if utf8.RuneCountInString(s) > 40 {
-					s = string([]rune(s)[:40]) + "..."
-				}
-				summary = s
+			if entry.Type == "user" && entry.Message.Content != "" {
+				summary = entry.Message.Content
 			}
 		}
 	}
+	if utf8.RuneCountInString(summary) > 40 {
+		summary = string([]rune(summary)[:40]) + "..."
+	}
 	return summary, count
+}
+
+// GetSessionHistory reads the Claude Code JSONL transcript and returns user/assistant messages.
+func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int) ([]core.HistoryEntry, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	absWorkDir, _ := filepath.Abs(a.workDir)
+	projectDir := findProjectDir(homeDir, absWorkDir)
+	if projectDir == "" {
+		return nil, fmt.Errorf("claudecode: project dir not found")
+	}
+
+	path := filepath.Join(projectDir, sessionID+".jsonl")
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("claudecode: open session file: %w", err)
+	}
+	defer f.Close()
+
+	var entries []core.HistoryEntry
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+
+	for scanner.Scan() {
+		var raw struct {
+			Type      string `json:"type"`
+			Timestamp string `json:"timestamp"`
+			Message   struct {
+				Role    string          `json:"role"`
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &raw) != nil {
+			continue
+		}
+		if raw.Type != "user" && raw.Type != "assistant" {
+			continue
+		}
+
+		ts, _ := time.Parse(time.RFC3339Nano, raw.Timestamp)
+		text := extractTextContent(raw.Message.Content)
+		if text == "" {
+			continue
+		}
+
+		entries = append(entries, core.HistoryEntry{
+			Role:      raw.Type,
+			Content:   text,
+			Timestamp: ts,
+		})
+	}
+
+	if limit > 0 && len(entries) > limit {
+		entries = entries[len(entries)-limit:]
+	}
+	return entries, nil
+}
+
+// extractTextContent extracts readable text from Claude Code message content.
+// Content can be a plain string or an array of content blocks.
+func extractTextContent(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+
+	// Try plain string first
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+
+	// Try array of content blocks
+	var blocks []struct {
+		Type     string `json:"type"`
+		Text     string `json:"text"`
+		Thinking string `json:"thinking"`
+	}
+	if json.Unmarshal(raw, &blocks) != nil {
+		return ""
+	}
+
+	for _, b := range blocks {
+		if b.Type == "text" && b.Text != "" {
+			return b.Text
+		}
+	}
+	return ""
 }
 
 func (a *Agent) Stop() error { return nil }

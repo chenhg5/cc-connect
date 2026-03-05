@@ -153,6 +153,9 @@ const (
 	MsgListSwitchHint       MsgKey = "list_switch_hint"
 	MsgListError            MsgKey = "list_error"
 	MsgHistoryEmpty         MsgKey = "history_empty"
+	MsgNameUsage            MsgKey = "name_usage"
+	MsgNameSet              MsgKey = "name_set"
+	MsgNameNoSession        MsgKey = "name_no_session"
 	MsgProviderNotSupported MsgKey = "provider_not_supported"
 	MsgProviderNone         MsgKey = "provider_none"
 	MsgProviderCurrent      MsgKey = "provider_current"
@@ -455,6 +458,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/new [name]\n  Start a new session\n\n" +
 			"/list\n  List agent sessions\n\n" +
 			"/switch <number>\n  Resume a session by its list number\n\n" +
+			"/name [number] <text>\n  Name a session for easy identification\n\n" +
 			"/current\n  Show current active session\n\n" +
 			"/history [n]\n  Show last n messages (default 10)\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  Manage API providers\n\n" +
@@ -484,6 +488,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/new [名称]\n  创建新会话\n\n" +
 			"/list\n  列出 Agent 会话列表\n\n" +
 			"/switch <序号>\n  按列表序号切换会话\n\n" +
+			"/name [序号] <名称>\n  给会话命名，方便识别\n\n" +
 			"/current\n  查看当前活跃会话\n\n" +
 			"/history [n]\n  查看最近 n 条消息（默认 10）\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  管理 API Provider\n\n" +
@@ -513,6 +518,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/new [名稱]\n  建立新會話\n\n" +
 			"/list\n  列出 Agent 會話列表\n\n" +
 			"/switch <序號>\n  按列表序號切換會話\n\n" +
+			"/name [序號] <名稱>\n  為會話命名，方便辨識\n\n" +
 			"/current\n  查看當前活躍會話\n\n" +
 			"/history [n]\n  查看最近 n 條訊息（預設 10）\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  管理 API Provider\n\n" +
@@ -542,6 +548,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/new [名前]\n  新しいセッションを開始\n\n" +
 			"/list\n  エージェントセッション一覧\n\n" +
 			"/switch <番号>\n  リスト番号でセッションを切り替え\n\n" +
+			"/name [番号] <名前>\n  セッションに名前を付ける\n\n" +
 			"/current\n  現在のアクティブセッションを表示\n\n" +
 			"/history [n]\n  直近 n 件のメッセージを表示（デフォルト 10）\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  API プロバイダ管理\n\n" +
@@ -571,6 +578,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/new [nombre]\n  Iniciar una nueva sesión\n\n" +
 			"/list\n  Listar sesiones del agente\n\n" +
 			"/switch <número>\n  Reanudar sesión por su número en la lista\n\n" +
+			"/name [número] <texto>\n  Nombrar una sesión para fácil identificación\n\n" +
 			"/current\n  Mostrar sesión activa actual\n\n" +
 			"/history [n]\n  Mostrar últimos n mensajes (por defecto 10)\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  Gestionar proveedores API\n\n" +
@@ -638,6 +646,27 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "當前會話暫無歷史訊息。",
 		LangJapanese:           "現在のセッションに履歴がありません。",
 		LangSpanish:            "No hay historial en la sesión actual.",
+	},
+	MsgNameUsage: {
+		LangEnglish:            "Usage:\n`/name <text>` — name the current session\n`/name <number> <text>` — name a session by list number",
+		LangChinese:            "用法：\n`/name <名称>` — 命名当前会话\n`/name <序号> <名称>` — 按列表序号命名会话",
+		LangTraditionalChinese: "用法：\n`/name <名稱>` — 命名當前會話\n`/name <序號> <名稱>` — 按列表序號命名會話",
+		LangJapanese:           "使い方：\n`/name <名前>` — 現在のセッションに名前を付ける\n`/name <番号> <名前>` — リスト番号でセッションに名前を付ける",
+		LangSpanish:            "Uso:\n`/name <texto>` — nombrar la sesión actual\n`/name <número> <texto>` — nombrar una sesión por número de lista",
+	},
+	MsgNameSet: {
+		LangEnglish:            "✅ Session named: **%s** (%s)",
+		LangChinese:            "✅ 会话已命名：**%s** (%s)",
+		LangTraditionalChinese: "✅ 會話已命名：**%s** (%s)",
+		LangJapanese:           "✅ セッション名設定：**%s** (%s)",
+		LangSpanish:            "✅ Sesión nombrada: **%s** (%s)",
+	},
+	MsgNameNoSession: {
+		LangEnglish:            "❌ No active session. Send a message first or switch to a session.",
+		LangChinese:            "❌ 没有活跃会话，请先发送消息或切换到一个会话。",
+		LangTraditionalChinese: "❌ 沒有活躍會話，請先傳送訊息或切換到一個會話。",
+		LangJapanese:           "❌ アクティブなセッションがありません。メッセージを送信するかセッションに切り替えてください。",
+		LangSpanish:            "❌ No hay sesión activa. Envía un mensaje primero o cambia a una sesión.",
 	},
 	MsgProviderNotSupported: {
 		LangEnglish:            "This agent does not support provider switching.",

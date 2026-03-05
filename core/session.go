@@ -75,6 +75,7 @@ type sessionSnapshot struct {
 	ActiveSession map[string]string   `json:"active_session"`
 	UserSessions  map[string][]string `json:"user_sessions"`
 	Counter       int64               `json:"counter"`
+	SessionNames  map[string]string   `json:"session_names,omitempty"` // agent session ID → custom name
 }
 
 // SessionManager supports multiple named sessions per user with active-session tracking.
@@ -84,6 +85,7 @@ type SessionManager struct {
 	sessions      map[string]*Session
 	activeSession map[string]string
 	userSessions  map[string][]string
+	sessionNames  map[string]string // agent session ID → custom name
 	counter       int64
 	storePath     string // empty = no persistence
 }
@@ -93,6 +95,7 @@ func NewSessionManager(storePath string) *SessionManager {
 		sessions:      make(map[string]*Session),
 		activeSession: make(map[string]string),
 		userSessions:  make(map[string][]string),
+		sessionNames:  make(map[string]string),
 		storePath:     storePath,
 	}
 	if storePath != "" {
@@ -176,6 +179,25 @@ func (sm *SessionManager) ActiveSessionID(userKey string) string {
 	return sm.activeSession[userKey]
 }
 
+// SetSessionName sets a custom display name for an agent session.
+func (sm *SessionManager) SetSessionName(agentSessionID, name string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if name == "" {
+		delete(sm.sessionNames, agentSessionID)
+	} else {
+		sm.sessionNames[agentSessionID] = name
+	}
+	sm.saveLocked()
+}
+
+// GetSessionName returns the custom name for an agent session, or "".
+func (sm *SessionManager) GetSessionName(agentSessionID string) string {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return sm.sessionNames[agentSessionID]
+}
+
 // Save persists current state to disk. Safe to call from outside (e.g. after message processing).
 func (sm *SessionManager) Save() {
 	sm.mu.RLock()
@@ -208,6 +230,7 @@ func (sm *SessionManager) saveLocked() {
 		ActiveSession: sm.activeSession,
 		UserSessions:  sm.userSessions,
 		Counter:       sm.counter,
+		SessionNames:  sm.sessionNames,
 	}
 	data, err := json.MarshalIndent(snap, "", "  ")
 	if err != nil {
@@ -239,6 +262,7 @@ func (sm *SessionManager) load() {
 	sm.sessions = snap.Sessions
 	sm.activeSession = snap.ActiveSession
 	sm.userSessions = snap.UserSessions
+	sm.sessionNames = snap.SessionNames
 	sm.counter = snap.Counter
 
 	if sm.sessions == nil {
@@ -249,6 +273,9 @@ func (sm *SessionManager) load() {
 	}
 	if sm.userSessions == nil {
 		sm.userSessions = make(map[string][]string)
+	}
+	if sm.sessionNames == nil {
+		sm.sessionNames = make(map[string]string)
 	}
 
 	slog.Info("session: loaded from disk", "path", sm.storePath, "sessions", len(sm.sessions))
