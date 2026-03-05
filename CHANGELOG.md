@@ -1,5 +1,41 @@
 # Changelog
 
+## v1.2.0-beta.2 (2026-03-01)
+
+### New Features
+- **`/upgrade` Command**: Check for available updates (including beta) and self-update the binary in-place; queries both GitHub and Gitee releases
+- **`/restart` Command**: Restart cc-connect service from chat with post-restart success notification
+- **`/config reload` Command**: Hot-reload configuration (display, providers, commands) without restarting
+- **`/name` Command**: Set custom display names for sessions (e.g. `/name my-feature`, `/name 3 bugfix`); names persist across restarts and show in `/list`, `/switch`, `/status`
+- **Default Quiet Mode**: Configure `quiet = true` globally or per-project in config.toml to suppress thinking/tool progress by default; users can still toggle with `/quiet`
+- **Command Prefix Matching**: Type shortened commands like `/pro l` for `/provider list`, `/sw 2` for `/switch 2`; works for all commands and subcommands
+- **Numeric Session Switching**: `/list` shows numbered sessions; `/switch 3` switches by number instead of copying long IDs
+- **Group Chat Mention Filtering**: Feishu, Discord, and Telegram bots now only respond to @mentions in group chats instead of all messages
+- **Claude Code Router Support**: Integration with Claude Code Router for enhanced routing capabilities
+- **Third-party Provider Proxy**: Local reverse proxy rewrites incompatible `thinking` parameters for third-party LLM providers (e.g. SiliconFlow)
+
+### Improvements
+- **Session History for Claude Code**: `/history` now works after `/switch` by reading from agent JSONL files
+- **List Summary**: `/list` now shows the most recent user message as summary instead of the first
+- **Session Names in UI**: Custom session names display with 📌 prefix in `/list`, `/switch`, `/status`
+- **API Server Shutdown**: Clean shutdown without "use of closed network connection" error
+- **Agent Session Timeouts**: 8-second graceful shutdown timeout for all agent sessions with kill fallback
+- **Feishu Rich Text**: Use Post (rich text) messages instead of Interactive Cards for normal font size
+
+### Bug Fixes
+- **DingTalk Startup**: Fix false startup failure when stream client returns nil error
+- **Deadlock on /new and /switch**: Release lock before async agent session close to prevent hangs
+- **Provider Command**: Correctly list providers when no active provider is set
+- **Unknown Command Handling**: Show i18n-friendly warning and fall through to agent for native commands
+
+### Security & Reliability
+- **Race Condition Fixes**: `sync.Once` for channel close, mutex protection for concurrent fields, non-blocking event sends
+- **Atomic File Writes**: Config, session, and cron files use temp+rename pattern
+- **Message Deduplication**: Platform-level dedup for Feishu and DingTalk webhooks
+- **HTTP Client Timeouts**: Shared 30s-timeout HTTP client for all outbound requests
+- **Path Traversal Protection**: Validate command file paths
+- **Sensitive Data Redaction**: Redact API keys and tokens in logs
+
 ## v1.2.0-beta.1 (2026-03-01)
 
 ### New Features
