@@ -113,9 +113,10 @@ type Engine struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 	i18n      *I18n
-	speech    SpeechCfg
-	display   DisplayCfg
-	startedAt time.Time
+	speech       SpeechCfg
+	display      DisplayCfg
+	defaultQuiet bool
+	startedAt    time.Time
 
 	providerSaveFunc       func(providerName string) error
 	providerAddSaveFunc    func(p ProviderConfig) error
@@ -198,6 +199,11 @@ func (e *Engine) SetSpeechConfig(cfg SpeechCfg) {
 // SetDisplayConfig overrides the default truncation settings.
 func (e *Engine) SetDisplayConfig(cfg DisplayCfg) {
 	e.display = cfg
+}
+
+// SetDefaultQuiet sets whether new sessions start in quiet mode.
+func (e *Engine) SetDefaultQuiet(q bool) {
+	e.defaultQuiet = q
 }
 
 func (e *Engine) SetLanguageSaveFunc(fn func(Language) error) {
@@ -631,7 +637,7 @@ func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, repl
 	startElapsed := time.Since(startAt)
 	if err != nil {
 		slog.Error("failed to start interactive session", "error", err, "elapsed", startElapsed)
-		state = &interactiveState{platform: p, replyCtx: replyCtx}
+		state = &interactiveState{platform: p, replyCtx: replyCtx, quiet: e.defaultQuiet}
 		e.interactiveStates[sessionKey] = state
 		return state
 	}
@@ -643,6 +649,7 @@ func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, repl
 		agentSession: agentSession,
 		platform:     p,
 		replyCtx:     replyCtx,
+		quiet:        e.defaultQuiet,
 	}
 	e.interactiveStates[sessionKey] = state
 

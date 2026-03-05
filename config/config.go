@@ -23,6 +23,7 @@ type Config struct {
 	Language string          `toml:"language"` // "en" or "zh", default is "en"
 	Speech   SpeechConfig    `toml:"speech"`
 	Display  DisplayConfig   `toml:"display"`
+	Quiet    *bool           `toml:"quiet,omitempty"` // global default for quiet mode; project-level overrides this
 }
 
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
@@ -52,6 +53,7 @@ type ProjectConfig struct {
 	Name      string           `toml:"name"`
 	Agent     AgentConfig      `toml:"agent"`
 	Platforms []PlatformConfig `toml:"platforms"`
+	Quiet     *bool            `toml:"quiet,omitempty"` // project-level quiet mode; overrides global setting
 }
 
 type AgentConfig struct {

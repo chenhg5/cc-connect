@@ -24,6 +24,11 @@
 # 会话数据存储目录（默认 ~/.cc-connect），以 JSON 文件保存对话历史和会话状态。
 # data_dir = "/path/to/custom/dir"
 
+# Default quiet mode (suppress thinking/tool progress messages) / 默认静默模式（隐藏思考和工具进度消息）
+# Can be overridden per-project. Users can still toggle with /quiet command.
+# 可被项目级配置覆盖。用户仍可通过 /quiet 命令切换。
+# quiet = true
+
 [log]
 level = "info" # debug, info, warn, error
 
@@ -133,6 +138,7 @@ level = "info" # debug, info, warn, error
 
 [[projects]]
 name = "my-backend"
+# quiet = true  # Override global quiet for this project / 覆盖全局静默模式
 
 [projects.agent]
 type = "claudecode"

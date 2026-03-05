@@ -212,6 +212,13 @@ func main() {
 			return config.SaveDisplayConfig(thinkingMaxLen, toolMaxLen)
 		})
 
+		// Wire default quiet mode: project-level overrides global
+		if proj.Quiet != nil {
+			engine.SetDefaultQuiet(*proj.Quiet)
+		} else if cfg.Quiet != nil {
+			engine.SetDefaultQuiet(*cfg.Quiet)
+		}
+
 		// Wire speech-to-text if enabled
 		if cfg.Speech.Enabled {
 			speechCfg := core.SpeechCfg{
@@ -511,6 +518,15 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	}
 	engine.SetDisplayConfig(dcfg)
 	result.DisplayUpdated = true
+
+	// Reload default quiet mode
+	if proj.Quiet != nil {
+		engine.SetDefaultQuiet(*proj.Quiet)
+	} else if cfg.Quiet != nil {
+		engine.SetDefaultQuiet(*cfg.Quiet)
+	} else {
+		engine.SetDefaultQuiet(false)
+	}
 
 	// Reload providers
 	if ps, ok := engine.GetAgent().(core.ProviderSwitcher); ok {
