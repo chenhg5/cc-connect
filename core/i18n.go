@@ -139,6 +139,8 @@ const (
 	MsgPermissionHint       MsgKey = "permission_hint"
 	MsgQuietOn              MsgKey = "quiet_on"
 	MsgQuietOff             MsgKey = "quiet_off"
+	MsgQuietGlobalOn        MsgKey = "quiet_global_on"
+	MsgQuietGlobalOff       MsgKey = "quiet_global_off"
 	MsgModeChanged          MsgKey = "mode_changed"
 	MsgModeNotSupported     MsgKey = "mode_not_supported"
 	MsgSessionRestarting    MsgKey = "session_restarting"
@@ -446,6 +448,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "🔔 静音モード OFF — 思考とツール実行の進捗メッセージを表示します。",
 		LangSpanish:            "🔔 Modo silencioso desactivado — los mensajes de progreso se mostrarán.",
 	},
+	MsgQuietGlobalOn: {
+		LangEnglish:            "🔇 Global quiet mode ON — all sessions will hide thinking and tool progress.",
+		LangChinese:            "🔇 全局安静模式已开启 — 所有会话将不再推送思考和工具调用进度消息。",
+		LangTraditionalChinese: "🔇 全域安靜模式已開啟 — 所有會話將不再推送思考和工具調用進度訊息。",
+		LangJapanese:           "🔇 グローバル静音モード ON — 全セッションで思考とツール進捗を非表示にします。",
+		LangSpanish:            "🔇 Modo silencioso global activado — todas las sesiones ocultarán los mensajes de progreso.",
+	},
+	MsgQuietGlobalOff: {
+		LangEnglish:            "🔔 Global quiet mode OFF — all sessions will show thinking and tool progress.",
+		LangChinese:            "🔔 全局安静模式已关闭 — 所有会话将恢复推送思考和工具调用进度消息。",
+		LangTraditionalChinese: "🔔 全域安靜模式已關閉 — 所有會話將恢復推送思考和工具調用進度訊息。",
+		LangJapanese:           "🔔 グローバル静音モード OFF — 全セッションで思考とツール進捗を表示します。",
+		LangSpanish:            "🔔 Modo silencioso global desactivado — todas las sesiones mostrarán los mensajes de progreso.",
+	},
 	MsgModeChanged: {
 		LangEnglish:            "🔄 Permission mode switched to **%s**. New sessions will use this mode.",
 		LangChinese:            "🔄 权限模式已切换为 **%s**，新会话将使用此模式。",
@@ -511,7 +527,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/model [name]\n  View/switch model\n\n" +
 			"/mode [name]\n  View/switch permission mode\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  View/switch language\n\n" +
-			"/quiet\n  Toggle thinking/tool progress\n\n" +
+			"/quiet [global]\n  Toggle thinking/tool progress (global = all sessions)\n\n" +
 			"/compress\n  Compress conversation context\n\n" +
 			"/stop\n  Stop current execution\n\n" +
 			"/cron [add|list|del|enable|disable]\n  Manage scheduled tasks\n\n" +
@@ -545,7 +561,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/model [名称]\n  查看/切换模型\n\n" +
 			"/mode [名称]\n  查看/切换权限模式\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  查看/切换语言\n\n" +
-			"/quiet\n  开关思考和工具进度消息\n\n" +
+			"/quiet [global]\n  开关思考和工具进度消息（global = 全部会话）\n\n" +
 			"/compress\n  压缩会话上下文\n\n" +
 			"/stop\n  停止当前执行\n\n" +
 			"/cron [add|list|del|enable|disable]\n  管理定时任务\n\n" +
@@ -579,7 +595,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/model [名稱]\n  查看/切換模型\n\n" +
 			"/mode [名稱]\n  查看/切換權限模式\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  查看/切換語言\n\n" +
-			"/quiet\n  開關思考和工具進度訊息\n\n" +
+			"/quiet [global]\n  開關思考和工具進度訊息（global = 全部會話）\n\n" +
 			"/compress\n  壓縮會話上下文\n\n" +
 			"/stop\n  停止當前執行\n\n" +
 			"/cron [add|list|del|enable|disable]\n  管理定時任務\n\n" +
@@ -612,7 +628,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/model [名前]\n  モデルの表示/切り替え\n\n" +
 			"/mode [名前]\n  権限モードの表示/切り替え\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  言語の表示/切り替え\n\n" +
-			"/quiet\n  思考/ツール進捗メッセージの表示切替\n\n" +
+			"/quiet [global]\n  思考/ツール進捗メッセージの表示切替（global = 全セッション）\n\n" +
 			"/compress\n  会話コンテキストを圧縮\n\n" +
 			"/stop\n  現在の実行を停止\n\n" +
 			"/cron [add|list|del|enable|disable]\n  スケジュールタスク管理\n\n" +
@@ -645,7 +661,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/model [nombre]\n  Ver/cambiar modelo\n\n" +
 			"/mode [nombre]\n  Ver/cambiar modo de permisos\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  Ver/cambiar idioma\n\n" +
-			"/quiet\n  Alternar mensajes de progreso\n\n" +
+			"/quiet [global]\n  Alternar mensajes de progreso (global = todas las sesiones)\n\n" +
 			"/compress\n  Comprimir contexto de conversación\n\n" +
 			"/stop\n  Detener ejecución actual\n\n" +
 			"/cron [add|list|del|enable|disable]\n  Gestionar tareas programadas\n\n" +
