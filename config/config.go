@@ -52,10 +52,11 @@ type SpeechConfig struct {
 
 // ProjectConfig binds one agent (with a specific work_dir) to one or more platforms.
 type ProjectConfig struct {
-	Name      string           `toml:"name"`
-	Agent     AgentConfig      `toml:"agent"`
-	Platforms []PlatformConfig `toml:"platforms"`
-	Quiet     *bool            `toml:"quiet,omitempty"` // project-level quiet mode; overrides global setting
+	Name             string           `toml:"name"`
+	Agent            AgentConfig      `toml:"agent"`
+	Platforms        []PlatformConfig `toml:"platforms"`
+	Quiet            *bool            `toml:"quiet,omitempty"`             // project-level quiet mode; overrides global setting
+	DisabledCommands []string         `toml:"disabled_commands,omitempty"` // commands to disable for this project (e.g. ["restart", "upgrade"])
 }
 
 type AgentConfig struct {

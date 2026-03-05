@@ -210,6 +210,11 @@ func main() {
 			engine.SetBannedWords(cfg.BannedWords)
 		}
 
+		// Wire disabled commands (project-level)
+		if len(proj.DisabledCommands) > 0 {
+			engine.SetDisabledCommands(proj.DisabledCommands)
+		}
+
 		// Wire display truncation settings
 		{
 			dcfg := core.DisplayCfg{
@@ -576,6 +581,9 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 
 	// Reload banned words
 	engine.SetBannedWords(cfg.BannedWords)
+
+	// Reload disabled commands
+	engine.SetDisabledCommands(proj.DisabledCommands)
 
 	slog.Info("config reloaded", "project", projName)
 	return result, nil

@@ -142,6 +142,8 @@ type Engine struct {
 	bannedWords []string
 	bannedMu    sync.RWMutex
 
+	disabledCmds map[string]bool
+
 	// Interactive agent session management
 	interactiveMu     sync.Mutex
 	interactiveStates map[string]*interactiveState // key = sessionKey
@@ -294,6 +296,22 @@ func (e *Engine) ClearAliases() {
 	e.aliasMu.Lock()
 	defer e.aliasMu.Unlock()
 	e.aliases = make(map[string]string)
+}
+
+// SetDisabledCommands sets the list of command IDs that are disabled for this project.
+func (e *Engine) SetDisabledCommands(cmds []string) {
+	m := make(map[string]bool, len(cmds))
+	for _, c := range cmds {
+		c = strings.ToLower(strings.TrimPrefix(c, "/"))
+		// Resolve alias names to canonical IDs
+		id := matchPrefix(c, builtinCommands)
+		if id != "" {
+			m[id] = true
+		} else {
+			m[c] = true
+		}
+	}
+	e.disabledCmds = m
 }
 
 // SetBannedWords replaces the banned words list.
@@ -1041,6 +1059,11 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 	args := parts[1:]
 
 	cmdID := matchPrefix(cmd, builtinCommands)
+
+	if cmdID != "" && e.disabledCmds[cmdID] {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandDisabled), "/"+cmdID))
+		return true
+	}
 
 	switch cmdID {
 	case "new":

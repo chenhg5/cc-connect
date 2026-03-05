@@ -183,6 +183,8 @@ level = "info" # debug, info, warn, error
 [[projects]]
 name = "my-backend"
 # quiet = true  # Override global quiet for this project / 覆盖全局静默模式
+# disabled_commands = ["restart", "upgrade", "cron"]  # Disable specific commands for this project
+#                                                     # 禁用该项目的指定命令
 
 [projects.agent]
 type = "claudecode"

@@ -281,6 +281,7 @@ const (
 	MsgDeleteNotSupported MsgKey = "delete_not_supported"
 
 	MsgBannedWordBlocked MsgKey = "banned_word_blocked"
+	MsgCommandDisabled   MsgKey = "command_disabled"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -1528,6 +1529,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "⚠️ 訊息已被攔截，包含違禁詞。",
 		LangJapanese:           "⚠️ 禁止ワードが含まれているため、メッセージがブロックされました。",
 		LangSpanish:            "⚠️ Su mensaje fue bloqueado porque contiene una palabra prohibida.",
+	},
+	MsgCommandDisabled: {
+		LangEnglish:            "🚫 Command `%s` is disabled for this project.",
+		LangChinese:            "🚫 命令 `%s` 在当前项目中已被禁用。",
+		LangTraditionalChinese: "🚫 命令 `%s` 在當前專案中已被停用。",
+		LangJapanese:           "🚫 コマンド `%s` はこのプロジェクトで無効化されています。",
+		LangSpanish:            "🚫 El comando `%s` está deshabilitado para este proyecto.",
 	},
 }
 
