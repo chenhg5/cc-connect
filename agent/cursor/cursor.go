@@ -132,6 +132,19 @@ func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error)
 	return listCursorSessions(a.workDir)
 }
 
+func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("cursor: cannot determine home dir: %w", err)
+	}
+	hash := workspaceHash(a.workDir)
+	dir := filepath.Join(homeDir, ".cursor", "chats", hash, sessionID)
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		return fmt.Errorf("session not found: %s", sessionID)
+	}
+	return os.RemoveAll(dir)
+}
+
 func (a *Agent) Stop() error { return nil }
 
 // ── SkillProvider implementation ──────────────────────────────

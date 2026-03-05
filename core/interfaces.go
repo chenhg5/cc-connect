@@ -188,6 +188,11 @@ type SkillProvider interface {
 	SkillDirs() []string
 }
 
+// SessionDeleter is an optional interface for agents that support deleting sessions.
+type SessionDeleter interface {
+	DeleteSession(ctx context.Context, sessionID string) error
+}
+
 // ModeSwitcher is an optional interface for agents that support runtime permission mode switching.
 type ModeSwitcher interface {
 	SetMode(mode string)

@@ -196,6 +196,14 @@ func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int
 	return getSessionHistory(sessionID, limit)
 }
 
+func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
+	path := findSessionFile(sessionID)
+	if path == "" {
+		return fmt.Errorf("session file not found: %s", sessionID)
+	}
+	return os.Remove(path)
+}
+
 func (a *Agent) Stop() error { return nil }
 
 // SetMode changes the approval mode for future sessions.

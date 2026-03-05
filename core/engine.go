@@ -941,6 +941,7 @@ var builtinCommands = []struct {
 	{[]string{"upgrade", "update"}, "upgrade"},
 	{[]string{"restart"}, "restart"},
 	{[]string{"alias"}, "alias"},
+	{[]string{"delete", "del", "rm"}, "delete"},
 }
 
 // matchPrefix finds a unique command matching the given prefix.
@@ -1055,6 +1056,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdRestart(p, msg)
 	case "alias":
 		e.cmdAlias(p, msg, args)
+	case "delete":
+		e.cmdDelete(p, msg, args)
 	default:
 		if custom, ok := e.commands.Resolve(cmd); ok {
 			e.executeCustomCommand(p, msg, custom, args)
@@ -2737,6 +2740,71 @@ func (e *Engine) cmdAliasDel(p Platform, msg *Message, args []string) {
 	}
 
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgAliasDeleted), name))
+}
+
+func (e *Engine) cmdDelete(p Platform, msg *Message, args []string) {
+	deleter, ok := e.agent.(SessionDeleter)
+	if !ok {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDeleteNotSupported))
+		return
+	}
+
+	if len(args) == 0 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDeleteUsage))
+		return
+	}
+
+	agentSessions, err := e.agent.ListSessions(e.ctx)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
+		return
+	}
+
+	prefix := strings.TrimSpace(args[0])
+	var matched *AgentSessionInfo
+
+	if idx, err := strconv.Atoi(prefix); err == nil && idx >= 1 && idx <= len(agentSessions) {
+		matched = &agentSessions[idx-1]
+	} else {
+		for i := range agentSessions {
+			if strings.HasPrefix(agentSessions[i].ID, prefix) {
+				matched = &agentSessions[i]
+				break
+			}
+		}
+	}
+
+	if matched == nil {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ No session matching %q", prefix))
+		return
+	}
+
+	// Prevent deleting the currently active session
+	activeSession := e.sessions.GetOrCreateActive(msg.SessionKey)
+	if activeSession.AgentSessionID == matched.ID {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDeleteActiveDenied))
+		return
+	}
+
+	displayName := e.sessions.GetSessionName(matched.ID)
+	if displayName == "" {
+		displayName = matched.Summary
+	}
+	if displayName == "" {
+		shortID := matched.ID
+		if len(shortID) > 12 {
+			shortID = shortID[:12]
+		}
+		displayName = shortID
+	}
+
+	if err := deleter.DeleteSession(e.ctx, matched.ID); err != nil {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
+		return
+	}
+
+	e.sessions.SetSessionName(matched.ID, "")
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgDeleteSuccess), displayName))
 }
 
 // truncateIf truncates s to maxLen runes. 0 means no truncation.

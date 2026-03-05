@@ -182,6 +182,19 @@ func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error)
 	return listGeminiSessions(a.workDir)
 }
 
+func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("gemini: cannot determine home dir: %w", err)
+	}
+	projName := geminiProjectHash(a.workDir)
+	path := filepath.Join(homeDir, ".gemini", "tmp", projName, "chats", sessionID+".json")
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("session file not found: %s", sessionID)
+	}
+	return os.Remove(path)
+}
+
 func (a *Agent) Stop() error { return nil }
 
 // ── ModeSwitcher ────────────────────────────────────────────────

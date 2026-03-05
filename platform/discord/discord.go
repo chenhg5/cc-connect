@@ -126,6 +126,9 @@ func builtinSlashCommands() []*discordgo.ApplicationCommand {
 		{Name: "alias", Description: "Manage command aliases", Options: []*discordgo.ApplicationCommandOption{
 			optStr("args", "e.g. list, add 帮助 /help, del 帮助", false),
 		}},
+		{Name: "delete", Description: "Delete a session by list number", Options: []*discordgo.ApplicationCommandOption{
+			optStr("target", "Session number or ID prefix", true),
+		}},
 	}
 }
 

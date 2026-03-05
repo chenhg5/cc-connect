@@ -276,6 +276,26 @@ func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, erro
 	return sessions, nil
 }
 
+func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("claudecode: cannot determine home dir: %w", err)
+	}
+	absWorkDir, err := filepath.Abs(a.workDir)
+	if err != nil {
+		return fmt.Errorf("claudecode: resolve work_dir: %w", err)
+	}
+	projectDir := findProjectDir(homeDir, absWorkDir)
+	if projectDir == "" {
+		return fmt.Errorf("session not found")
+	}
+	path := filepath.Join(projectDir, sessionID+".jsonl")
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("session file not found: %s", sessionID)
+	}
+	return os.Remove(path)
+}
+
 func scanSessionMeta(path string) (string, int) {
 	f, err := os.Open(path)
 	if err != nil {

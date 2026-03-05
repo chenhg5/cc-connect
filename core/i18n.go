@@ -274,6 +274,11 @@ const (
 
 	MsgNewSessionCreated     MsgKey = "new_session_created"
 	MsgNewSessionCreatedName MsgKey = "new_session_created_name"
+
+	MsgDeleteUsage        MsgKey = "delete_usage"
+	MsgDeleteSuccess      MsgKey = "delete_success"
+	MsgDeleteActiveDenied MsgKey = "delete_active_denied"
+	MsgDeleteNotSupported MsgKey = "delete_not_supported"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -468,6 +473,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/new [name]\n  Start a new session\n\n" +
 			"/list\n  List agent sessions\n\n" +
 			"/switch <number>\n  Resume a session by its list number\n\n" +
+			"/delete <number>\n  Delete a session by its list number\n\n" +
 			"/name [number] <text>\n  Name a session for easy identification\n\n" +
 			"/current\n  Show current active session\n\n" +
 			"/history [n]\n  Show last n messages (default 10)\n\n" +
@@ -500,6 +506,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/new [名称]\n  创建新会话\n\n" +
 			"/list\n  列出 Agent 会话列表\n\n" +
 			"/switch <序号>\n  按列表序号切换会话\n\n" +
+			"/delete <序号>\n  按列表序号删除会话\n\n" +
 			"/name [序号] <名称>\n  给会话命名，方便识别\n\n" +
 			"/current\n  查看当前活跃会话\n\n" +
 			"/history [n]\n  查看最近 n 条消息（默认 10）\n\n" +
@@ -532,6 +539,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/new [名稱]\n  建立新會話\n\n" +
 			"/list\n  列出 Agent 會話列表\n\n" +
 			"/switch <序號>\n  按列表序號切換會話\n\n" +
+			"/delete <序號>\n  按列表序號刪除會話\n\n" +
 			"/name [序號] <名稱>\n  為會話命名，方便辨識\n\n" +
 			"/current\n  查看當前活躍會話\n\n" +
 			"/history [n]\n  查看最近 n 條訊息（預設 10）\n\n" +
@@ -564,6 +572,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/new [名前]\n  新しいセッションを開始\n\n" +
 			"/list\n  エージェントセッション一覧\n\n" +
 			"/switch <番号>\n  リスト番号でセッションを切り替え\n\n" +
+			"/delete <番号>\n  リスト番号でセッションを削除\n\n" +
 			"/name [番号] <名前>\n  セッションに名前を付ける\n\n" +
 			"/current\n  現在のアクティブセッションを表示\n\n" +
 			"/history [n]\n  直近 n 件のメッセージを表示（デフォルト 10）\n\n" +
@@ -596,6 +605,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/new [nombre]\n  Iniciar una nueva sesión\n\n" +
 			"/list\n  Listar sesiones del agente\n\n" +
 			"/switch <número>\n  Reanudar sesión por su número en la lista\n\n" +
+			"/delete <número>\n  Eliminar sesión por su número en la lista\n\n" +
 			"/name [número] <texto>\n  Nombrar una sesión para fácil identificación\n\n" +
 			"/current\n  Mostrar sesión activa actual\n\n" +
 			"/history [n]\n  Mostrar últimos n mensajes (por defecto 10)\n\n" +
@@ -1481,6 +1491,34 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "✅ 新會話已建立：**%s**",
 		LangJapanese:           "✅ 新しいセッションを作成しました：**%s**",
 		LangSpanish:            "✅ Nueva sesión creada: **%s**",
+	},
+	MsgDeleteUsage: {
+		LangEnglish:            "Usage: `/delete <number>` — delete a session by its list number.\nUse `/list` to see session numbers.",
+		LangChinese:            "用法：`/delete <序号>` — 按列表序号删除会话。\n使用 `/list` 查看会话序号。",
+		LangTraditionalChinese: "用法：`/delete <序號>` — 按列表序號刪除會話。\n使用 `/list` 查看會話序號。",
+		LangJapanese:           "使い方：`/delete <番号>` — リスト番号でセッションを削除。\n`/list` で番号を確認できます。",
+		LangSpanish:            "Uso: `/delete <número>` — eliminar sesión por número de lista.\nUse `/list` para ver los números.",
+	},
+	MsgDeleteSuccess: {
+		LangEnglish:            "🗑️ Session deleted: %s",
+		LangChinese:            "🗑️ 会话已删除：%s",
+		LangTraditionalChinese: "🗑️ 會話已刪除：%s",
+		LangJapanese:           "🗑️ セッション削除：%s",
+		LangSpanish:            "🗑️ Sesión eliminada: %s",
+	},
+	MsgDeleteActiveDenied: {
+		LangEnglish:            "❌ Cannot delete the currently active session. Switch to another session first.",
+		LangChinese:            "❌ 不能删除当前活跃会话，请先切换到其他会话。",
+		LangTraditionalChinese: "❌ 不能刪除當前活躍會話，請先切換到其他會話。",
+		LangJapanese:           "❌ 現在アクティブなセッションは削除できません。先に別のセッションに切り替えてください。",
+		LangSpanish:            "❌ No se puede eliminar la sesión activa. Cambie a otra sesión primero.",
+	},
+	MsgDeleteNotSupported: {
+		LangEnglish:            "❌ This agent does not support session deletion.",
+		LangChinese:            "❌ 当前 Agent 不支持删除会话。",
+		LangTraditionalChinese: "❌ 當前 Agent 不支持刪除會話。",
+		LangJapanese:           "❌ このエージェントはセッション削除をサポートしていません。",
+		LangSpanish:            "❌ Este agente no admite la eliminación de sesiones.",
 	},
 }
 
