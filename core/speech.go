@@ -207,8 +207,17 @@ func ConvertAudioToMP3(audio []byte, srcFormat string) ([]byte, error) {
 		return nil, fmt.Errorf("ffmpeg not found in PATH: install ffmpeg to enable voice message support")
 	}
 
-	var cmd *exec.Cmd
-	if srcFormat == "amr" || srcFormat == "silk" {
+	cmd := exec.Command(ffmpegPath,
+		"-i", "pipe:0",
+		"-f", srcFormat,
+		"-f", "mp3",
+		"-ac", "1",
+		"-ar", "16000",
+		"-y",
+		"pipe:1",
+	)
+	// For formats where ffmpeg can't auto-detect from pipe, specify input format
+        if srcFormat == "amr" || srcFormat == "silk" {
 		cmd = exec.Command(ffmpegPath,
 			"-f", srcFormat,
 			"-i", "pipe:0",
