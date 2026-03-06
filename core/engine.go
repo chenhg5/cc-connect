@@ -884,6 +884,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		switch event.Type {
 		case EventThinking:
 			if !quiet && event.Content != "" {
+				sp.freeze()
 				preview := truncateIf(event.Content, e.display.ThinkingMaxLen)
 				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgThinking), preview))
 			}
@@ -891,6 +892,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case EventToolUse:
 			toolCount++
 			if !quiet {
+				sp.freeze()
 				inputPreview := truncateIf(event.ToolInput, e.display.ToolMaxLen)
 				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgTool), toolCount, event.ToolName, inputPreview))
 			}
