@@ -10,3 +10,4 @@ config.toml
 dist
 test
 RELEASE.md
+.npmrc

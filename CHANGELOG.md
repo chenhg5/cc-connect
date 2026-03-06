@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.2.0-beta.3 (2026-03-06)
+## v1.2.0-beta.4 (2026-03-06)
 
 ### New Features
 - **Streaming Preview**: Real-time message preview that updates in-place as the agent streams output; supported on Telegram, Discord, and Feishu with configurable interval, min delta, and max length
