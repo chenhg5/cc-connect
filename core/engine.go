@@ -86,8 +86,11 @@ func (e *Engine) SendRestartNotification(platformName, sessionKey string) {
 			slog.Debug("restart notify: reconstruct failed", "error", err)
 			return
 		}
-		msg := e.i18n.T(MsgRestartSuccess)
-		if err := p.Send(e.ctx, rctx, msg); err != nil {
+		text := e.i18n.T(MsgRestartSuccess)
+		if CurrentVersion != "" {
+			text += fmt.Sprintf(" (%s)", CurrentVersion)
+		}
+		if err := p.Send(e.ctx, rctx, text); err != nil {
 			slog.Debug("restart notify: send failed", "error", err)
 		}
 		return
@@ -2783,7 +2786,8 @@ func (e *Engine) cmdUpgrade(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	release, err := CheckForUpdate(cur)
+	useGitee := e.i18n.IsZhLike()
+	release, err := CheckForUpdate(cur, useGitee)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %s", err))
 		return
@@ -2808,7 +2812,8 @@ func (e *Engine) cmdUpgradeConfirm(p Platform, msg *Message) {
 		return
 	}
 
-	release, err := CheckForUpdate(cur)
+	useGitee := e.i18n.IsZhLike()
+	release, err := CheckForUpdate(cur, useGitee)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %s", err))
 		return
@@ -2820,12 +2825,21 @@ func (e *Engine) cmdUpgradeConfirm(p Platform, msg *Message) {
 
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgUpgradeDownloading), release.TagName))
 
-	if err := SelfUpdate(release.TagName); err != nil {
+	if err := SelfUpdate(release.TagName, useGitee); err != nil {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %s", err))
 		return
 	}
 
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgUpgradeSuccess), release.TagName))
+
+	// Auto-restart to apply the update
+	select {
+	case RestartCh <- RestartRequest{
+		SessionKey: msg.SessionKey,
+		Platform:   p.Name(),
+	}:
+	default:
+	}
 }
 
 func (e *Engine) cmdConfigReload(p Platform, msg *Message) {

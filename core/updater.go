@@ -35,9 +35,9 @@ type ReleaseInfo struct {
 }
 
 // CheckForUpdate queries GitHub/Gitee for newer releases.
-// Returns the latest release if it's newer than currentVersion, otherwise nil.
-func CheckForUpdate(currentVersion string) (*ReleaseInfo, error) {
-	releases, err := fetchReleases()
+// If preferGitee is true, tries Gitee first (faster in China); otherwise GitHub first.
+func CheckForUpdate(currentVersion string, preferGitee bool) (*ReleaseInfo, error) {
+	releases, err := fetchReleases(preferGitee)
 	if err != nil {
 		return nil, err
 	}
@@ -70,17 +70,28 @@ func CheckForUpdate(currentVersion string) (*ReleaseInfo, error) {
 	return best, nil
 }
 
-func fetchReleases() ([]ReleaseInfo, error) {
-	// Try Gitee first (faster in China), then GitHub
-	releases, err := fetchReleasesFrom(giteeReleasesAPI + "?per_page=20&direction=desc&sort=created")
+func fetchReleases(preferGitee bool) ([]ReleaseInfo, error) {
+	type source struct {
+		name string
+		url  string
+	}
+	sources := []source{
+		{"github", githubReleasesAPI + "?per_page=20"},
+		{"gitee", giteeReleasesAPI + "?per_page=20&direction=desc&sort=created"},
+	}
+	if preferGitee {
+		sources[0], sources[1] = sources[1], sources[0]
+	}
+
+	releases, err := fetchReleasesFrom(sources[0].url)
 	if err == nil && len(releases) > 0 {
 		return releases, nil
 	}
-	slog.Debug("updater: gitee api failed, trying github", "error", err)
+	slog.Debug("updater: primary source failed, trying fallback", "primary", sources[0].name, "error", err)
 
-	releases, err = fetchReleasesFrom(githubReleasesAPI + "?per_page=20")
+	releases, err = fetchReleasesFrom(sources[1].url)
 	if err != nil {
-		return nil, fmt.Errorf("check updates failed (both Gitee and GitHub): %w", err)
+		return nil, fmt.Errorf("check updates failed (both sources): %w", err)
 	}
 	return releases, nil
 }
@@ -112,7 +123,8 @@ func fetchReleasesFrom(apiURL string) ([]ReleaseInfo, error) {
 }
 
 // SelfUpdate downloads and installs the given release version.
-func SelfUpdate(tag string) error {
+// If preferGitee is true, tries Gitee download first.
+func SelfUpdate(tag string, preferGitee bool) error {
 	goos := runtime.GOOS
 	goarch := runtime.GOARCH
 
@@ -122,9 +134,11 @@ func SelfUpdate(tag string) error {
 	}
 	filename := fmt.Sprintf("cc-connect-%s-%s-%s%s", tag, goos, goarch, ext)
 
-	urls := []string{
-		fmt.Sprintf("%s/%s/%s", giteeDownload, tag, filename),
-		fmt.Sprintf("%s/%s/%s", githubDownload, tag, filename),
+	giteeURL := fmt.Sprintf("%s/%s/%s", giteeDownload, tag, filename)
+	githubURL := fmt.Sprintf("%s/%s/%s", githubDownload, tag, filename)
+	urls := []string{githubURL, giteeURL}
+	if preferGitee {
+		urls = []string{giteeURL, githubURL}
 	}
 
 	var data []byte

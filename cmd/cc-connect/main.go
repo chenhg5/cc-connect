@@ -440,8 +440,8 @@ func main() {
 			os.Exit(1)
 		}
 		slog.Info("restarting...", "path", execPath, "args", os.Args)
-		if err := syscall.Exec(execPath, os.Args, os.Environ()); err != nil {
-			slog.Error("restart: exec failed", "error", err)
+		if err := restartProcess(execPath); err != nil {
+			slog.Error("restart: failed", "error", err)
 			os.Exit(1)
 		}
 	}

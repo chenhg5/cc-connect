@@ -1403,30 +1403,30 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "✅ Ya está actualizado (%s)",
 	},
 	MsgUpgradeAvailable: {
-		LangEnglish: "🆕 New version available!\n\n" +
+		LangEnglish: "🆕 New version available!\n\n\n" +
 			"Current: **%s**\n" +
-			"Latest:  **%s**\n\n" +
-			"%s\n\n" +
+			"Latest:  **%s**\n\n\n" +
+			"%s\n\n\n" +
 			"Run `/upgrade confirm` to install.",
-		LangChinese: "🆕 发现新版本！\n\n" +
+		LangChinese: "🆕 发现新版本！\n\n\n" +
 			"当前版本：**%s**\n" +
-			"最新版本：**%s**\n\n" +
-			"%s\n\n" +
+			"最新版本：**%s**\n\n\n" +
+			"%s\n\n\n" +
 			"执行 `/upgrade confirm` 进行更新。",
-		LangTraditionalChinese: "🆕 發現新版本！\n\n" +
+		LangTraditionalChinese: "🆕 發現新版本！\n\n\n" +
 			"當前版本：**%s**\n" +
-			"最新版本：**%s**\n\n" +
-			"%s\n\n" +
+			"最新版本：**%s**\n\n\n" +
+			"%s\n\n\n" +
 			"執行 `/upgrade confirm` 進行更新。",
-		LangJapanese: "🆕 新しいバージョンがあります！\n\n" +
+		LangJapanese: "🆕 新しいバージョンがあります！\n\n\n" +
 			"現在: **%s**\n" +
-			"最新: **%s**\n\n" +
+			"最新: **%s**\n\n\n" +
 			"%s\n\n" +
 			"`/upgrade confirm` でインストール。",
-		LangSpanish: "🆕 ¡Nueva versión disponible!\n\n" +
+		LangSpanish: "🆕 ¡Nueva versión disponible!\n\n\n" +
 			"Actual: **%s**\n" +
-			"Última: **%s**\n\n" +
-			"%s\n\n" +
+			"Última: **%s**\n\n\n" +
+			"%s\n\n\n" +
 			"Ejecute `/upgrade confirm` para instalar.",
 	},
 	MsgUpgradeDownloading: {
@@ -1437,11 +1437,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "⬇️ Descargando %s ...",
 	},
 	MsgUpgradeSuccess: {
-		LangEnglish:            "✅ Updated to **%s** successfully! Please restart cc-connect for changes to take effect.",
-		LangChinese:            "✅ 已成功更新到 **%s**！请重启 cc-connect 使更新生效。",
-		LangTraditionalChinese: "✅ 已成功更新到 **%s**！請重啟 cc-connect 使更新生效。",
-		LangJapanese:           "✅ **%s** に更新しました！変更を有効にするため cc-connect を再起動してください。",
-		LangSpanish:            "✅ ¡Actualizado a **%s** con éxito! Reinicie cc-connect para aplicar los cambios.",
+		LangEnglish:            "✅ Updated to **%s** successfully! Restarting...",
+		LangChinese:            "✅ 已成功更新到 **%s**！正在重启...",
+		LangTraditionalChinese: "✅ 已成功更新到 **%s**！正在重啟...",
+		LangJapanese:           "✅ **%s** に更新しました！再起動中...",
+		LangSpanish:            "✅ ¡Actualizado a **%s** con éxito! Reiniciando...",
 	},
 	MsgUpgradeDevBuild: {
 		LangEnglish:            "⚠️ Running a dev build — version check is not available. Please build from source or install a release version.",
