@@ -1144,6 +1144,7 @@ var builtinCommands = []struct {
 	{[]string{"alias"}, "alias"},
 	{[]string{"delete", "del", "rm"}, "delete"},
 	{[]string{"bind"}, "bind"},
+	{[]string{"search", "find"}, "search"},
 }
 
 // matchPrefix finds a unique command matching the given prefix.
@@ -1267,6 +1268,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdDelete(p, msg, args)
 	case "bind":
 		e.cmdBind(p, msg, args)
+	case "search":
+		e.cmdSearch(p, msg, args)
 	default:
 		if custom, ok := e.commands.Resolve(cmd); ok {
 			e.executeCustomCommand(p, msg, custom, args)
@@ -1462,6 +1465,88 @@ func (e *Engine) matchSession(sessions []AgentSessionInfo, query string) *AgentS
 	}
 
 	return nil
+}
+
+// cmdSearch searches sessions by name or message content.
+// Usage: /search <keyword>
+func (e *Engine) cmdSearch(p Platform, msg *Message, args []string) {
+	if len(args) == 0 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSearchUsage))
+		return
+	}
+
+	keyword := strings.ToLower(strings.Join(args, " "))
+
+	// Get all agent sessions
+	agentSessions, err := e.agent.ListSessions(e.ctx)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgSearchError), err))
+		return
+	}
+
+	type searchResult struct {
+		id           string
+		name         string
+		summary      string
+		matchType    string // "name" or "message"
+		messageCount int
+	}
+
+	var results []searchResult
+
+	for _, s := range agentSessions {
+		// Check session name (custom name or summary)
+		customName := e.sessions.GetSessionName(s.ID)
+		displayName := customName
+		if displayName == "" {
+			displayName = s.Summary
+		}
+
+		// Match by name/summary
+		if strings.Contains(strings.ToLower(displayName), keyword) {
+			results = append(results, searchResult{
+				id:           s.ID,
+				name:         displayName,
+				summary:      s.Summary,
+				matchType:    "name",
+				messageCount: s.MessageCount,
+			})
+			continue
+		}
+
+		// Match by session ID prefix
+		if strings.HasPrefix(strings.ToLower(s.ID), keyword) {
+			results = append(results, searchResult{
+				id:           s.ID,
+				name:         displayName,
+				summary:      s.Summary,
+				matchType:    "id",
+				messageCount: s.MessageCount,
+			})
+			continue
+		}
+	}
+
+	if len(results) == 0 {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgSearchNoResult), keyword))
+		return
+	}
+
+	// Build result message
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf(e.i18n.T(MsgSearchResult), len(results), keyword))
+
+	for i, r := range results {
+		shortID := r.id
+		if len(shortID) > 12 {
+			shortID = shortID[:12]
+		}
+		sb.WriteString(fmt.Sprintf("\n%d. [%s] %s", i+1, shortID, r.name))
+	}
+
+	sb.WriteString("\n\n" + e.i18n.T(MsgSearchHint))
+
+	e.reply(p, msg.ReplyCtx, sb.String())
 }
 
 func (e *Engine) cmdName(p Platform, msg *Message, args []string) {

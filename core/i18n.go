@@ -295,6 +295,12 @@ const (
 	MsgRelayBindSelf     MsgKey = "relay_bind_self"
 	MsgRelayNotFound     MsgKey = "relay_not_found"
 	MsgRelayNoTarget     MsgKey = "relay_no_target"
+
+	MsgSearchUsage     MsgKey = "search_usage"
+	MsgSearchError     MsgKey = "search_error"
+	MsgSearchNoResult  MsgKey = "search_no_result"
+	MsgSearchResult    MsgKey = "search_result"
+	MsgSearchHint      MsgKey = "search_hint"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -488,6 +494,7 @@ var messages = map[MsgKey]map[Language]string{
 		LangEnglish: "📖 Available Commands\n\n" +
 			"/new [name]\n  Start a new session\n\n" +
 			"/list\n  List agent sessions\n\n" +
+			"/search <keyword>\n  Search sessions by name or ID\n\n" +
 			"/switch <number>\n  Resume a session by its list number\n\n" +
 			"/delete <number>\n  Delete a session by its list number\n\n" +
 			"/name [number] <text>\n  Name a session for easy identification\n\n" +
@@ -521,6 +528,7 @@ var messages = map[MsgKey]map[Language]string{
 		LangChinese: "📖 可用命令\n\n" +
 			"/new [名称]\n  创建新会话\n\n" +
 			"/list\n  列出 Agent 会话列表\n\n" +
+			"/search <关键词>\n  搜索会话名称或 ID\n\n" +
 			"/switch <序号>\n  按列表序号切换会话\n\n" +
 			"/delete <序号>\n  按列表序号删除会话\n\n" +
 			"/name [序号] <名称>\n  给会话命名，方便识别\n\n" +
@@ -554,6 +562,7 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "📖 可用命令\n\n" +
 			"/new [名稱]\n  建立新會話\n\n" +
 			"/list\n  列出 Agent 會話列表\n\n" +
+			"/search <關鍵詞>\n  搜尋會話名稱或 ID\n\n" +
 			"/switch <序號>\n  按列表序號切換會話\n\n" +
 			"/delete <序號>\n  按列表序號刪除會話\n\n" +
 			"/name [序號] <名稱>\n  為會話命名，方便辨識\n\n" +
@@ -1606,6 +1615,41 @@ var messages = map[MsgKey]map[Language]string{
 	MsgRelayNoTarget: {
 		LangEnglish: "Project %q not found. No other projects are configured.",
 		LangChinese: "项目 %q 不存在。没有配置其他项目。",
+	},
+	MsgSearchUsage: {
+		LangEnglish:            "Usage: /search <keyword>\nSearch sessions by name or ID.",
+		LangChinese:            "用法: /search <关键词>\n搜索会话名称或 ID。",
+		LangTraditionalChinese: "用法: /search <關鍵詞>\n搜尋會話名稱或 ID。",
+		LangJapanese:           "使い方: /search <キーワード>\nセッション名またはIDで検索。",
+		LangSpanish:            "Uso: /search <palabra_clave>\nBuscar sesiones por nombre o ID.",
+	},
+	MsgSearchError: {
+		LangEnglish:            "❌ Search error: %v",
+		LangChinese:            "❌ 搜索失败: %v",
+		LangTraditionalChinese: "❌ 搜尋失敗: %v",
+		LangJapanese:           "❌ 検索エラー: %v",
+		LangSpanish:            "❌ Error de búsqueda: %v",
+	},
+	MsgSearchNoResult: {
+		LangEnglish:            "No sessions found matching %q",
+		LangChinese:            "没有找到匹配 %q 的会话",
+		LangTraditionalChinese: "沒有找到匹配 %q 的會話",
+		LangJapanese:           "%q に一致するセッションが見つかりません",
+		LangSpanish:            "No se encontraron sesiones que coincidan con %q",
+	},
+	MsgSearchResult: {
+		LangEnglish:            "🔍 Found %d session(s) matching %q:",
+		LangChinese:            "🔍 找到 %d 个匹配 %q 的会话:",
+		LangTraditionalChinese: "🔍 找到 %d 個匹配 %q 的會話:",
+		LangJapanese:           "🔍 %q に一致する %d 件のセッション:",
+		LangSpanish:            "🔍 Se encontraron %d sesiones que coinciden con %q:",
+	},
+	MsgSearchHint: {
+		LangEnglish:            "Use /switch <id> to switch to a session.",
+		LangChinese:            "使用 /switch <id> 切换到对应会话。",
+		LangTraditionalChinese: "使用 /switch <id> 切換到對應會話。",
+		LangJapanese:           "/switch <id> でセッションを切り替え。",
+		LangSpanish:            "Usa /switch <id> para cambiar a una sesión.",
 	},
 }
 
