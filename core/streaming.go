@@ -255,17 +255,6 @@ func (sp *streamPreview) finish(finalText string) bool {
 		return false
 	}
 
-	// For very long responses, we may need chunked sending instead
-	maxChars := sp.cfg.MaxChars
-	if maxChars > 0 && len([]rune(finalText)) > maxChars {
-		slog.Debug("stream preview finish: text exceeds maxChars, falling back to chunked send",
-			"text_runes", len([]rune(finalText)), "maxChars", maxChars)
-		if sp.lastSentText != "" {
-			_ = updater.UpdateMessage(sp.ctx, sp.previewMsgID, sp.lastSentText)
-		}
-		return false
-	}
-
 	if finalText == "" {
 		slog.Debug("stream preview finish: empty final text")
 		return false
@@ -283,11 +272,19 @@ func (sp *streamPreview) finish(finalText string) bool {
 		return true
 	}
 
+	// Try to update the preview in-place with the full final text.
+	// maxChars only throttles intermediate streaming updates; at finish time
+	// we always attempt a single final update regardless of length.
 	slog.Debug("stream preview finish: sending final UpdateMessage",
 		"text_len", len(finalText), "lastSent_len", len(sp.lastSentText),
 		"same", finalText == sp.lastSentText, "viaUpdate", sp.lastSentViaUpdate)
 	if err := updater.UpdateMessage(sp.ctx, sp.previewMsgID, finalText); err != nil {
-		slog.Debug("stream preview finish: final update FAILED", "error", err)
+		slog.Debug("stream preview finish: final update FAILED, cleaning up preview", "error", err)
+		// Update failed (e.g. text too long for platform edit API).
+		// Try to delete the stale preview so caller can send a fresh message.
+		if cleaner, ok := sp.platform.(PreviewCleaner); ok {
+			_ = cleaner.DeletePreviewMessage(sp.ctx, sp.previewMsgID)
+		}
 		return false
 	}
 	slog.Debug("stream preview finish: success via UpdateMessage")
