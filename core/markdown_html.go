@@ -91,43 +91,53 @@ var (
 	reLinkHTML       = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
 )
 
-// convertInlineHTML converts inline Markdown formatting to HTML.
-// Processing order matters: links first (to protect URLs), then code, bold, italic, strikethrough.
+// convertInlineHTML converts inline Markdown formatting to Telegram-compatible HTML.
+//
+// Strategy (matches Claude-to-IM): extract code/links into placeholders first,
+// then HTML-escape ALL remaining text, then apply bold/italic/strike regex on
+// the escaped text (their markers **, *, ~~ don't contain HTML special chars),
+// then restore placeholders.
 func convertInlineHTML(s string) string {
-	// Protect inline code first — extract, replace with placeholders, process rest, then restore.
-	type codeSpan struct {
-		placeholder string
-		html        string
+	type placeholder struct {
+		key  string
+		html string
 	}
-	var codes []codeSpan
-	codeIdx := 0
+	var phs []placeholder
+	phIdx := 0
+
+	nextPH := func(html string) string {
+		key := "\x00PH" + string(rune('0'+phIdx)) + "\x00"
+		phs = append(phs, placeholder{key: key, html: html})
+		phIdx++
+		return key
+	}
+
+	// 1. Extract inline code → placeholder (content escaped)
 	s = reInlineCodeHTML.ReplaceAllStringFunc(s, func(m string) string {
 		inner := m[1 : len(m)-1]
-		ph := "\x00CODE" + string(rune('0'+codeIdx)) + "\x00"
-		codes = append(codes, codeSpan{placeholder: ph, html: "<code>" + escapeHTML(inner) + "</code>"})
-		codeIdx++
-		return ph
+		return nextPH("<code>" + escapeHTML(inner) + "</code>")
 	})
 
-	// Links [text](url) → <a href="url">text</a>
+	// 2. Extract links → placeholder (text & URL escaped)
 	s = reLinkHTML.ReplaceAllStringFunc(s, func(m string) string {
 		sm := reLinkHTML.FindStringSubmatch(m)
 		if len(sm) < 3 {
-			return escapeHTML(m)
+			return m
 		}
-		return `<a href="` + escapeHTML(sm[2]) + `">` + escapeHTML(sm[1]) + `</a>`
+		return nextPH(`<a href="` + escapeHTML(sm[2]) + `">` + escapeHTML(sm[1]) + `</a>`)
 	})
 
-	// Bold **text** and __text__
+	// 3. HTML-escape the entire remaining text.
+	//    Placeholders (\x00PH...\x00) contain no HTML special chars so they survive.
+	//    Markdown markers **, *, ~~, __ also survive since they aren't <, >, or &.
+	s = escapeHTML(s)
+
+	// 4. Apply formatting on the escaped text.
 	s = reBoldAstHTML.ReplaceAllString(s, "<b>$1</b>")
 	s = reBoldUndHTML.ReplaceAllString(s, "<b>$1</b>")
-
-	// Strikethrough ~~text~~
 	s = reStrikeHTML.ReplaceAllString(s, "<s>$1</s>")
 
-	// Italic *text* — be careful not to match ** (already processed)
 	s = reItalicAstHTML.ReplaceAllStringFunc(s, func(m string) string {
-		// The regex may capture surrounding non-* chars; find the actual *content*
 		idx := strings.Index(m, "*")
 		if idx < 0 {
 			return m
@@ -136,18 +146,12 @@ func convertInlineHTML(s string) string {
 		if lastIdx <= idx {
 			return m
 		}
-		prefix := m[:idx]
-		inner := m[idx+1 : lastIdx]
-		suffix := m[lastIdx+1:]
-		return prefix + "<i>" + inner + "</i>" + suffix
+		return m[:idx] + "<i>" + m[idx+1:lastIdx] + "</i>" + m[lastIdx+1:]
 	})
 
-	// Escape remaining special chars that aren't already in tags
-	// (We skip full escape here since tags are already inserted)
-
-	// Restore code placeholders
-	for _, c := range codes {
-		s = strings.Replace(s, c.placeholder, c.html, 1)
+	// 5. Restore placeholders
+	for _, ph := range phs {
+		s = strings.Replace(s, ph.key, ph.html, 1)
 	}
 
 	return s

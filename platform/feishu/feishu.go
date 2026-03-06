@@ -115,27 +115,61 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	return nil
 }
 
-func (p *Platform) addReaction(messageID string) {
+func (p *Platform) addReaction(messageID string) string {
 	if p.reactionEmoji == "" {
-		return
+		return ""
 	}
 	emojiType := p.reactionEmoji
-	go func() {
-		resp, err := p.client.Im.MessageReaction.Create(context.Background(),
-			larkim.NewCreateMessageReactionReqBuilder().
-				MessageId(messageID).
-				Body(larkim.NewCreateMessageReactionReqBodyBuilder().
-					ReactionType(&larkim.Emoji{EmojiType: &emojiType}).
-					Build()).
-				Build())
-		if err != nil {
-			slog.Debug("feishu: add reaction failed", "error", err)
-			return
-		}
-		if !resp.Success() {
-			slog.Debug("feishu: add reaction failed", "code", resp.Code, "msg", resp.Msg)
-		}
-	}()
+	resp, err := p.client.Im.MessageReaction.Create(context.Background(),
+		larkim.NewCreateMessageReactionReqBuilder().
+			MessageId(messageID).
+			Body(larkim.NewCreateMessageReactionReqBodyBuilder().
+				ReactionType(&larkim.Emoji{EmojiType: &emojiType}).
+				Build()).
+			Build())
+	if err != nil {
+		slog.Debug("feishu: add reaction failed", "error", err)
+		return ""
+	}
+	if !resp.Success() {
+		slog.Debug("feishu: add reaction failed", "code", resp.Code, "msg", resp.Msg)
+		return ""
+	}
+	if resp.Data != nil && resp.Data.ReactionId != nil {
+		return *resp.Data.ReactionId
+	}
+	return ""
+}
+
+func (p *Platform) removeReaction(messageID, reactionID string) {
+	if reactionID == "" || messageID == "" {
+		return
+	}
+	resp, err := p.client.Im.MessageReaction.Delete(context.Background(),
+		larkim.NewDeleteMessageReactionReqBuilder().
+			MessageId(messageID).
+			ReactionId(reactionID).
+			Build())
+	if err != nil {
+		slog.Debug("feishu: remove reaction failed", "error", err)
+		return
+	}
+	if !resp.Success() {
+		slog.Debug("feishu: remove reaction failed", "code", resp.Code, "msg", resp.Msg)
+	}
+}
+
+// StartTyping adds an emoji reaction to the user's message and returns a stop
+// function that removes the reaction when processing is complete.
+func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
+	rc, ok := rctx.(replyContext)
+	if !ok || rc.messageID == "" {
+		return func() {}
+	}
+	reactionID := p.addReaction(rc.messageID)
+	return func() {
+		go p.removeReaction(rc.messageID, reactionID)
+	}
 }
 
 func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
@@ -185,10 +219,6 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 	if !core.AllowList(p.allowFrom, userID) {
 		slog.Debug("feishu: message from unauthorized user", "user", userID)
 		return nil
-	}
-
-	if msgType != "" && messageID != "" {
-		p.addReaction(messageID)
 	}
 
 	sessionKey := fmt.Sprintf("feishu:%s:%s", chatID, userID)
@@ -732,16 +762,19 @@ type feishuPreviewHandle struct {
 }
 
 // buildCardJSON builds a Feishu interactive card JSON string with a markdown element.
-// Uses schema 2.0 with body.elements so that text_size is respected.
+// Uses schema 2.0 which supports code blocks, tables, and inline formatting.
+// Card font is inherently smaller than Post/Text — this is a Feishu platform limitation.
 func buildCardJSON(content string) string {
 	card := map[string]any{
 		"schema": "2.0",
+		"config": map[string]any{
+			"wide_screen_mode": true,
+		},
 		"body": map[string]any{
 			"elements": []map[string]any{
 				{
-					"tag":       "markdown",
-					"content":   content,
-					"text_size": "normal",
+					"tag":     "markdown",
+					"content": content,
 				},
 			},
 		},

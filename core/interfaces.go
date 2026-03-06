@@ -56,6 +56,14 @@ You can also list or delete cron jobs:
 `
 }
 
+// TypingIndicator is an optional interface for platforms that can show a
+// "processing" indicator (typing bubble, emoji reaction, etc.) while the
+// agent is working. StartTyping is called when processing begins and returns
+// a stop function that the caller must invoke when processing ends.
+type TypingIndicator interface {
+	StartTyping(ctx context.Context, replyCtx any) (stop func())
+}
+
 // MessageUpdater is an optional interface for platforms that support updating messages.
 type MessageUpdater interface {
 	UpdateMessage(ctx context.Context, replyCtx any, content string) error

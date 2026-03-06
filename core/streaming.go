@@ -159,7 +159,7 @@ func (sp *streamPreview) flushLocked(text string) {
 	if sp.previewMsgID == nil {
 		// First preview: try to send a new preview message
 		if starter, ok := sp.platform.(PreviewStarter); ok {
-			handle, err := starter.SendPreviewStart(sp.ctx, sp.replyCtx, text+"▍")
+			handle, err := starter.SendPreviewStart(sp.ctx, sp.replyCtx, text)
 			if err != nil {
 				slog.Debug("stream preview: start failed, degrading", "error", err)
 				sp.degraded = true
@@ -169,7 +169,7 @@ func (sp *streamPreview) flushLocked(text string) {
 		} else {
 			// Platform supports UpdateMessage but not PreviewStarter;
 			// use Send to create initial message, then update in-place
-			if err := sp.platform.Send(sp.ctx, sp.replyCtx, text+"▍"); err != nil {
+			if err := sp.platform.Send(sp.ctx, sp.replyCtx, text); err != nil {
 				slog.Debug("stream preview: initial send failed", "error", err)
 				sp.degraded = true
 				return
@@ -183,7 +183,7 @@ func (sp *streamPreview) flushLocked(text string) {
 	}
 
 	// Update existing preview message
-	if err := updater.UpdateMessage(sp.ctx, sp.previewMsgID, text+"▍"); err != nil {
+	if err := updater.UpdateMessage(sp.ctx, sp.previewMsgID, text); err != nil {
 		slog.Debug("stream preview: update failed, degrading", "error", err)
 		sp.degraded = true
 		return
@@ -193,9 +193,9 @@ func (sp *streamPreview) flushLocked(text string) {
 }
 
 // freeze stops the streaming preview permanently: cancels pending timers,
-// updates the preview message in-place with the accumulated text (without
-// the cursor), and marks the preview as degraded so no further updates are
-// sent. Call this when a permission prompt or other interruption occurs.
+// updates the preview message in-place with the accumulated text, and marks
+// the preview as degraded so no further updates are sent.
+// Call this when a permission prompt or other interruption occurs.
 func (sp *streamPreview) freeze() {
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
@@ -252,7 +252,7 @@ func (sp *streamPreview) finish(finalText string) bool {
 	// For very long responses, we may need chunked sending instead
 	maxChars := sp.cfg.MaxChars
 	if maxChars > 0 && len([]rune(finalText)) > maxChars {
-		// Remove the cursor from the preview before falling back to chunked send
+		// Preview content stays as-is; fall back to chunked send for the full response
 		if sp.lastSentText != "" {
 			_ = updater.UpdateMessage(sp.ctx, sp.previewMsgID, sp.lastSentText)
 		}
@@ -260,7 +260,7 @@ func (sp *streamPreview) finish(finalText string) bool {
 	}
 
 	if finalText == "" {
-		// Empty final text (error path) — remove cursor from preview
+		// Empty final text (error path) — nothing to update
 		if sp.lastSentText != "" {
 			_ = updater.UpdateMessage(sp.ctx, sp.previewMsgID, sp.lastSentText)
 		}

@@ -67,8 +67,53 @@ func TestMarkdownToTelegramHTML_Blockquote(t *testing.T) {
 
 func TestMarkdownToTelegramHTML_EscapesHTML(t *testing.T) {
 	out := MarkdownToTelegramHTML("x < y && y > z")
-	if strings.Contains(out, "<y") || strings.Contains(out, ">z") {
-		t.Errorf("HTML should be escaped, got %q", out)
+	if !strings.Contains(out, "&lt;") || !strings.Contains(out, "&gt;") || !strings.Contains(out, "&amp;") {
+		t.Errorf("HTML special chars should be escaped, got %q", out)
+	}
+}
+
+func TestMarkdownToTelegramHTML_EscapesInsideBold(t *testing.T) {
+	out := MarkdownToTelegramHTML("**x < y**")
+	if !strings.Contains(out, "<b>x &lt; y</b>") {
+		t.Errorf("expected escaped content inside bold, got %q", out)
+	}
+}
+
+func TestMarkdownToTelegramHTML_LinkWithAmpersand(t *testing.T) {
+	out := MarkdownToTelegramHTML("click [here](https://example.com?a=1&b=2)")
+	if !strings.Contains(out, "&amp;b=2") {
+		t.Errorf("URL ampersand should be escaped, got %q", out)
+	}
+	if !strings.Contains(out, `<a href=`) {
+		t.Errorf("expected link tag, got %q", out)
+	}
+}
+
+func TestMarkdownToTelegramHTML_CodeBlockEscapesHTML(t *testing.T) {
+	md := "```\nif a < b && c > d {\n}\n```"
+	out := MarkdownToTelegramHTML(md)
+	if !strings.Contains(out, "&lt;") || !strings.Contains(out, "&gt;") {
+		t.Errorf("code block content should be HTML-escaped, got %q", out)
+	}
+}
+
+func TestMarkdownToTelegramHTML_InlineCodeEscapesHTML(t *testing.T) {
+	out := MarkdownToTelegramHTML("run `x<y>z`")
+	if !strings.Contains(out, "<code>x&lt;y&gt;z</code>") {
+		t.Errorf("inline code should escape HTML, got %q", out)
+	}
+}
+
+func TestMarkdownToTelegramHTML_MixedFormattingWithSpecialChars(t *testing.T) {
+	out := MarkdownToTelegramHTML("**bold** & *italic* < normal")
+	if !strings.Contains(out, "<b>bold</b>") {
+		t.Errorf("expected bold tag, got %q", out)
+	}
+	if !strings.Contains(out, "&amp;") {
+		t.Errorf("expected escaped &, got %q", out)
+	}
+	if !strings.Contains(out, "&lt;") {
+		t.Errorf("expected escaped <, got %q", out)
 	}
 }
 

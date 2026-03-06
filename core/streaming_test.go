@@ -61,8 +61,8 @@ func TestStreamPreview_BasicFlow(t *testing.T) {
 	if len(msgs) == 0 {
 		t.Fatal("expected at least one message sent")
 	}
-	if msgs[0] != "start:Hello ▍" {
-		t.Errorf("first message = %q, want 'start:Hello ▍'", msgs[0])
+	if msgs[0] != "start:Hello " {
+		t.Errorf("first message = %q, want 'start:Hello '", msgs[0])
 	}
 }
 
@@ -123,7 +123,7 @@ func TestStreamPreview_MaxChars(t *testing.T) {
 					content = content[len(prefix):]
 				}
 			}
-			if len([]rune(content)) > 15 { // 10 chars + "…" + "▍" with some margin
+			if len([]rune(content)) > 15 { // 10 chars + "…" with some margin
 				t.Errorf("message too long: %q (%d runes)", content, len([]rune(content)))
 			}
 		}

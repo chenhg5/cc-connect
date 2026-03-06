@@ -504,6 +504,36 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 	return nil
 }
 
+// StartTyping sends a "typing…" chat action and repeats every 5 seconds
+// until the returned stop function is called.
+func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return func() {}
+	}
+
+	action := tgbotapi.NewChatAction(rc.chatID, tgbotapi.ChatTyping)
+	p.bot.Send(action)
+
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				p.bot.Send(action)
+			}
+		}
+	}()
+
+	return func() { close(done) }
+}
+
 func (p *Platform) Stop() error {
 	if p.cancel != nil {
 		p.cancel()

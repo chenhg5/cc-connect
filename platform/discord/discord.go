@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 
@@ -485,6 +486,39 @@ func (p *Platform) DeletePreviewMessage(ctx context.Context, previewHandle any) 
 		return fmt.Errorf("discord: invalid preview handle type %T", previewHandle)
 	}
 	return p.session.ChannelMessageDelete(h.channelID, h.messageID)
+}
+
+// StartTyping sends a typing indicator and repeats every 8 seconds
+// (Discord typing status lasts ~10s) until the returned stop function is called.
+func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return func() {}
+	}
+	channelID := rc.channelID
+	if channelID == "" {
+		return func() {}
+	}
+
+	_ = p.session.ChannelTyping(channelID)
+
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(8 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				_ = p.session.ChannelTyping(channelID)
+			}
+		}
+	}()
+
+	return func() { close(done) }
 }
 
 func (p *Platform) Stop() error {

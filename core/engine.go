@@ -726,6 +726,17 @@ func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Se
 		return
 	}
 
+	// Start typing indicator if platform supports it
+	var stopTyping func()
+	if ti, ok := p.(TypingIndicator); ok {
+		stopTyping = ti.StartTyping(e.ctx, msg.ReplyCtx)
+	}
+	defer func() {
+		if stopTyping != nil {
+			stopTyping()
+		}
+	}()
+
 	sendStart := time.Now()
 	if err := state.agentSession.Send(msg.Content, msg.Images); err != nil {
 		slog.Error("failed to send prompt", "error", err)
