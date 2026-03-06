@@ -399,15 +399,65 @@ func detectMimeType(data []byte) string {
 	return "image/png"
 }
 
-// buildReplyContent converts content to a Feishu message payload.
-// Uses "post" (rich text) for markdown content — renders at normal font
-// size unlike interactive cards which display smaller.
 func buildReplyContent(content string) (msgType string, body string) {
 	if !containsMarkdown(content) {
 		b, _ := json.Marshal(map[string]string{"text": content})
 		return larkim.MsgTypeText, string(b)
 	}
-	return larkim.MsgTypePost, buildPostJSON(content)
+	// Dual rendering strategy (aligned with Claude-to-IM / Openclaw):
+	// - Code blocks / tables → interactive card (schema 2.0 markdown), smaller font but renders code properly
+	// - Other markdown → post with md tag, normal chat font size
+	if hasComplexMarkdown(content) {
+		return larkim.MsgTypeInteractive, buildCardJSON(preprocessFeishuMarkdown(content))
+	}
+	return larkim.MsgTypePost, buildPostMdJSON(content)
+}
+
+// hasComplexMarkdown detects code blocks or tables that require card rendering.
+func hasComplexMarkdown(s string) bool {
+	if strings.Contains(s, "```") {
+		return true
+	}
+	// Table: line starting and ending with |
+	for _, line := range strings.Split(s, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if len(trimmed) > 1 && trimmed[0] == '|' && trimmed[len(trimmed)-1] == '|' {
+			return true
+		}
+	}
+	return false
+}
+
+// buildPostMdJSON builds a Feishu post message using the md tag,
+// which renders markdown at normal chat font size.
+func buildPostMdJSON(content string) string {
+	post := map[string]any{
+		"zh_cn": map[string]any{
+			"content": [][]map[string]any{
+				{
+					{"tag": "md", "text": content},
+				},
+			},
+		},
+	}
+	b, _ := json.Marshal(post)
+	return string(b)
+}
+
+// preprocessFeishuMarkdown ensures code fences have a newline before them,
+// which prevents rendering issues in Feishu card markdown.
+// Tables, headings, blockquotes, etc. are rendered natively by the card markdown element.
+func preprocessFeishuMarkdown(md string) string {
+	// Ensure ``` has a newline before it (unless at start of text)
+	var b strings.Builder
+	b.Grow(len(md) + 32)
+	for i := 0; i < len(md); i++ {
+		if i > 0 && md[i] == '`' && i+2 < len(md) && md[i+1] == '`' && md[i+2] == '`' && md[i-1] != '\n' {
+			b.WriteByte('\n')
+		}
+		b.WriteByte(md[i])
+	}
+	return b.String()
 }
 
 var markdownIndicators = []string{
@@ -494,63 +544,131 @@ func buildPostJSON(content string) string {
 // parseInlineMarkdown parses a single line of markdown into Feishu post elements.
 // Supports **bold** and `code` inline formatting.
 func parseInlineMarkdown(line string) []map[string]any {
+	type markerDef struct {
+		pattern string
+		tag     string
+		style   string // for text elements with style
+		isLink  bool
+	}
+	markers := []markerDef{
+		{pattern: "**", tag: "text", style: "bold"},
+		{pattern: "~~", tag: "text", style: "lineThrough"},
+		{pattern: "`", tag: "text", style: "code"},
+		{pattern: "*", tag: "text", style: "italic"},
+	}
+
 	var elements []map[string]any
 	remaining := line
 
 	for len(remaining) > 0 {
-		// Find the next formatting marker
-		boldIdx := strings.Index(remaining, "**")
-		codeIdx := strings.Index(remaining, "`")
+		// Check for link [text](url)
+		linkIdx := strings.Index(remaining, "[")
+		if linkIdx >= 0 {
+			parenClose := -1
+			bracketClose := strings.Index(remaining[linkIdx:], "](")
+			if bracketClose >= 0 {
+				bracketClose += linkIdx
+				parenClose = strings.Index(remaining[bracketClose+2:], ")")
+				if parenClose >= 0 {
+					parenClose += bracketClose + 2
+				}
+			}
+			if parenClose >= 0 {
+				// Check if any marker comes before this link
+				foundEarlierMarker := false
+				for _, m := range markers {
+					idx := strings.Index(remaining, m.pattern)
+					if idx >= 0 && idx < linkIdx {
+						foundEarlierMarker = true
+						break
+					}
+				}
+				if !foundEarlierMarker {
+					if linkIdx > 0 {
+						elements = append(elements, map[string]any{"tag": "text", "text": remaining[:linkIdx]})
+					}
+					linkText := remaining[linkIdx+1 : bracketClose]
+					linkURL := remaining[bracketClose+2 : parenClose]
+					elements = append(elements, map[string]any{
+						"tag":  "a",
+						"text": linkText,
+						"href": linkURL,
+					})
+					remaining = remaining[parenClose+1:]
+					continue
+				}
+			}
+		}
 
-		// No more markers
-		if boldIdx < 0 && codeIdx < 0 {
+		// Find the earliest formatting marker
+		bestIdx := -1
+		var bestMarker markerDef
+		for _, m := range markers {
+			idx := strings.Index(remaining, m.pattern)
+			if idx < 0 {
+				continue
+			}
+			// For single * marker, skip if it's actually ** (bold)
+			if m.pattern == "*" && idx+1 < len(remaining) && remaining[idx+1] == '*' {
+				idx = findSingleAsterisk(remaining)
+				if idx < 0 {
+					continue
+				}
+			}
+			if bestIdx < 0 || idx < bestIdx {
+				bestIdx = idx
+				bestMarker = m
+			}
+		}
+
+		if bestIdx < 0 {
 			if remaining != "" {
 				elements = append(elements, map[string]any{"tag": "text", "text": remaining})
 			}
 			break
 		}
 
-		// Determine which marker comes first
-		nextIdx := boldIdx
-		marker := "**"
-		if boldIdx < 0 || (codeIdx >= 0 && codeIdx < boldIdx) {
-			nextIdx = codeIdx
-			marker = "`"
+		if bestIdx > 0 {
+			elements = append(elements, map[string]any{"tag": "text", "text": remaining[:bestIdx]})
 		}
+		remaining = remaining[bestIdx+len(bestMarker.pattern):]
 
-		// Add text before the marker
-		if nextIdx > 0 {
-			elements = append(elements, map[string]any{"tag": "text", "text": remaining[:nextIdx]})
+		closeIdx := strings.Index(remaining, bestMarker.pattern)
+		// For single *, make sure we don't match ** as close
+		if bestMarker.pattern == "*" {
+			closeIdx = findSingleAsterisk(remaining)
 		}
-		remaining = remaining[nextIdx+len(marker):]
-
-		// Find closing marker
-		closeIdx := strings.Index(remaining, marker)
 		if closeIdx < 0 {
-			elements = append(elements, map[string]any{"tag": "text", "text": marker + remaining})
+			elements = append(elements, map[string]any{"tag": "text", "text": bestMarker.pattern + remaining})
 			remaining = ""
 			break
 		}
 
 		inner := remaining[:closeIdx]
-		remaining = remaining[closeIdx+len(marker):]
+		remaining = remaining[closeIdx+len(bestMarker.pattern):]
 
-		if marker == "**" {
-			elements = append(elements, map[string]any{
-				"tag":   "text",
-				"text":  inner,
-				"style": []string{"bold"},
-			})
-		} else {
-			elements = append(elements, map[string]any{
-				"tag":   "text",
-				"text":  inner,
-				"style": []string{"code"},
-			})
-		}
+		elements = append(elements, map[string]any{
+			"tag":   bestMarker.tag,
+			"text":  inner,
+			"style": []string{bestMarker.style},
+		})
 	}
 
 	return elements
+}
+
+// findSingleAsterisk finds the index of a single '*' not part of '**' in s.
+func findSingleAsterisk(s string) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == '*' {
+			if i+1 < len(s) && s[i+1] == '*' {
+				i++ // skip **
+				continue
+			}
+			return i
+		}
+	}
+	return -1
 }
 
 // fetchBotOpenID retrieves the bot's open_id via the Feishu bot info API.
@@ -613,7 +731,28 @@ type feishuPreviewHandle struct {
 	chatID    string
 }
 
-// SendPreviewStart sends a new text message and returns a handle for subsequent edits.
+// buildCardJSON builds a Feishu interactive card JSON string with a markdown element.
+// Uses schema 2.0 with body.elements so that text_size is respected.
+func buildCardJSON(content string) string {
+	card := map[string]any{
+		"schema": "2.0",
+		"body": map[string]any{
+			"elements": []map[string]any{
+				{
+					"tag":       "markdown",
+					"content":   content,
+					"text_size": "normal",
+				},
+			},
+		},
+	}
+	b, _ := json.Marshal(card)
+	return string(b)
+}
+
+// SendPreviewStart sends a new card message and returns a handle for subsequent edits.
+// Using card (interactive) type for both preview and final message so updates
+// are in-place without needing to delete and resend.
 func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content string) (any, error) {
 	rc, ok := rctx.(replyContext)
 	if !ok {
@@ -625,13 +764,13 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 		return nil, fmt.Errorf("feishu: chatID is empty")
 	}
 
-	b, _ := json.Marshal(map[string]string{"text": content})
+	cardJSON := buildCardJSON(content)
 	resp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
 		ReceiveIdType(larkim.ReceiveIdTypeChatId).
 		Body(larkim.NewCreateMessageReqBodyBuilder().
 			ReceiveId(chatID).
-			MsgType(larkim.MsgTypeText).
-			Content(string(b)).
+			MsgType(larkim.MsgTypeInteractive).
+			Content(cardJSON).
 			Build()).
 		Build())
 	if err != nil {
@@ -652,27 +791,30 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 	return &feishuPreviewHandle{messageID: msgID, chatID: chatID}, nil
 }
 
-// UpdateMessage edits an existing text message identified by previewHandle.
+// UpdateMessage edits an existing card message identified by previewHandle.
+// Uses the Patch API (HTTP PATCH) which is required for interactive card messages.
 func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content string) error {
 	h, ok := previewHandle.(*feishuPreviewHandle)
 	if !ok {
 		return fmt.Errorf("feishu: invalid preview handle type %T", previewHandle)
 	}
 
-	b, _ := json.Marshal(map[string]string{"text": content})
-	msgType := larkim.MsgTypeText
-	resp, err := p.client.Im.Message.Update(ctx, larkim.NewUpdateMessageReqBuilder().
+	processed := content
+	if containsMarkdown(content) {
+		processed = preprocessFeishuMarkdown(content)
+	}
+	cardJSON := buildCardJSON(processed)
+	resp, err := p.client.Im.Message.Patch(ctx, larkim.NewPatchMessageReqBuilder().
 		MessageId(h.messageID).
-		Body(larkim.NewUpdateMessageReqBodyBuilder().
-			MsgType(msgType).
-			Content(string(b)).
+		Body(larkim.NewPatchMessageReqBodyBuilder().
+			Content(cardJSON).
 			Build()).
 		Build())
 	if err != nil {
-		return fmt.Errorf("feishu: update message: %w", err)
+		return fmt.Errorf("feishu: patch message: %w", err)
 	}
 	if !resp.Success() {
-		return fmt.Errorf("feishu: update message code=%d msg=%s", resp.Code, resp.Msg)
+		return fmt.Errorf("feishu: patch message code=%d msg=%s", resp.Code, resp.Msg)
 	}
 	return nil
 }

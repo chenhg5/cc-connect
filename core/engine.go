@@ -920,6 +920,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				continue
 			}
 
+			// Stop streaming preview before sending permission prompt
+			sp.freeze()
+
 			slog.Info("permission request",
 				"request_id", event.RequestID,
 				"tool", event.ToolName,

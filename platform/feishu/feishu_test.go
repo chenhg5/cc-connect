@@ -1,6 +1,7 @@
 package feishu
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -99,5 +100,114 @@ func TestParsePostContent_InvalidJSON(t *testing.T) {
 	texts, images := p.parsePostContent("", "not json")
 	if texts != nil || images != nil {
 		t.Errorf("expected nil results for invalid json")
+	}
+}
+
+func TestParseInlineMarkdown_Link(t *testing.T) {
+	elements := parseInlineMarkdown("visit [Google](https://google.com) now")
+	found := false
+	for _, el := range elements {
+		if el["tag"] == "a" && el["text"] == "Google" && el["href"] == "https://google.com" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected link element, got %v", elements)
+	}
+}
+
+func TestParseInlineMarkdown_Italic(t *testing.T) {
+	elements := parseInlineMarkdown("hello *world*")
+	found := false
+	for _, el := range elements {
+		if styles, ok := el["style"].([]string); ok {
+			for _, s := range styles {
+				if s == "italic" && el["text"] == "world" {
+					found = true
+				}
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected italic element, got %v", elements)
+	}
+}
+
+func TestParseInlineMarkdown_Strikethrough(t *testing.T) {
+	elements := parseInlineMarkdown("hello ~~world~~")
+	found := false
+	for _, el := range elements {
+		if styles, ok := el["style"].([]string); ok {
+			for _, s := range styles {
+				if s == "lineThrough" && el["text"] == "world" {
+					found = true
+				}
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected strikethrough element, got %v", elements)
+	}
+}
+
+func TestPreprocessFeishuMarkdown_NewlineBeforeCodeFence(t *testing.T) {
+	input := "some text```go\ncode\n```"
+	out := preprocessFeishuMarkdown(input)
+	if !strings.Contains(out, "text\n```go") {
+		t.Errorf("expected newline before code fence, got %q", out)
+	}
+}
+
+func TestPreprocessFeishuMarkdown_AlreadyNewline(t *testing.T) {
+	input := "text\n```go\ncode\n```"
+	out := preprocessFeishuMarkdown(input)
+	if out != input {
+		t.Errorf("should not change content that already has newlines, got %q", out)
+	}
+}
+
+func TestPreprocessFeishuMarkdown_PreservesTablesAndHeadings(t *testing.T) {
+	input := "## Title\n| A | B |\n|---|---|\n> quote"
+	out := preprocessFeishuMarkdown(input)
+	if !strings.Contains(out, "## Title") {
+		t.Errorf("heading should be preserved, got %q", out)
+	}
+	if !strings.Contains(out, "| A | B |") {
+		t.Errorf("table should be preserved, got %q", out)
+	}
+	if !strings.Contains(out, "> quote") {
+		t.Errorf("blockquote should be preserved, got %q", out)
+	}
+}
+
+func TestHasComplexMarkdown(t *testing.T) {
+	if !hasComplexMarkdown("text\n```go\ncode\n```") {
+		t.Error("should detect code blocks")
+	}
+	if !hasComplexMarkdown("| A | B |\n|---|---|") {
+		t.Error("should detect tables")
+	}
+	if hasComplexMarkdown("**bold** and *italic*") {
+		t.Error("should not detect simple markdown")
+	}
+}
+
+func TestParseInlineMarkdown_BoldAndCode(t *testing.T) {
+	elements := parseInlineMarkdown("**bold** and `code`")
+	hasBold, hasCode := false, false
+	for _, el := range elements {
+		if styles, ok := el["style"].([]string); ok {
+			for _, s := range styles {
+				if s == "bold" && el["text"] == "bold" {
+					hasBold = true
+				}
+				if s == "code" && el["text"] == "code" {
+					hasCode = true
+				}
+			}
+		}
+	}
+	if !hasBold || !hasCode {
+		t.Errorf("expected bold and code, got %v", elements)
 	}
 }

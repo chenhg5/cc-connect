@@ -363,13 +363,14 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 		return fmt.Errorf("telegram: invalid reply context type %T", rctx)
 	}
 
-	reply := tgbotapi.NewMessage(rc.chatID, content)
+	html := core.MarkdownToTelegramHTML(content)
+	reply := tgbotapi.NewMessage(rc.chatID, html)
 	reply.ReplyToMessageID = rc.messageID
-	reply.ParseMode = tgbotapi.ModeMarkdown
+	reply.ParseMode = tgbotapi.ModeHTML
 
 	if _, err := p.bot.Send(reply); err != nil {
-		// Markdown parse failure → retry as plain text
 		if strings.Contains(err.Error(), "can't parse") {
+			reply.Text = content
 			reply.ParseMode = ""
 			_, err = p.bot.Send(reply)
 		}
@@ -387,12 +388,13 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 		return fmt.Errorf("telegram: invalid reply context type %T", rctx)
 	}
 
-	msg := tgbotapi.NewMessage(rc.chatID, content)
-	msg.ParseMode = tgbotapi.ModeMarkdown
+	html := core.MarkdownToTelegramHTML(content)
+	msg := tgbotapi.NewMessage(rc.chatID, html)
+	msg.ParseMode = tgbotapi.ModeHTML
 
 	if _, err := p.bot.Send(msg); err != nil {
-		// Markdown parse failure → retry as plain text
 		if strings.Contains(err.Error(), "can't parse") {
+			msg.Text = content
 			msg.ParseMode = ""
 			_, err = p.bot.Send(msg)
 		}
@@ -419,12 +421,14 @@ func (p *Platform) SendWithButtons(ctx context.Context, rctx any, content string
 		rows = append(rows, btns)
 	}
 
-	msg := tgbotapi.NewMessage(rc.chatID, content)
-	msg.ParseMode = tgbotapi.ModeMarkdown
+	html := core.MarkdownToTelegramHTML(content)
+	msg := tgbotapi.NewMessage(rc.chatID, html)
+	msg.ParseMode = tgbotapi.ModeHTML
 	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(rows...)
 
 	if _, err := p.bot.Send(msg); err != nil {
 		if strings.Contains(err.Error(), "can't parse") {
+			msg.Text = content
 			msg.ParseMode = ""
 			_, err = p.bot.Send(msg)
 		}

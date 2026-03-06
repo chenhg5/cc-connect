@@ -192,6 +192,32 @@ func (sp *streamPreview) flushLocked(text string) {
 	sp.lastSentAt = time.Now()
 }
 
+// freeze stops the streaming preview permanently: cancels pending timers,
+// updates the preview message in-place with the accumulated text (without
+// the cursor), and marks the preview as degraded so no further updates are
+// sent. Call this when a permission prompt or other interruption occurs.
+func (sp *streamPreview) freeze() {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+
+	sp.cancelTimerLocked()
+
+	if sp.previewMsgID != nil && !sp.degraded {
+		if updater, ok := sp.platform.(MessageUpdater); ok {
+			text := sp.fullText
+			maxChars := sp.cfg.MaxChars
+			if maxChars > 0 && len([]rune(text)) > maxChars {
+				text = string([]rune(text)[:maxChars]) + "…"
+			}
+			if text != "" {
+				_ = updater.UpdateMessage(sp.ctx, sp.previewMsgID, text)
+			}
+		}
+	}
+
+	sp.degraded = true
+}
+
 // finish is called when the agent response is complete. It cancels any pending
 // timer and optionally cleans up the preview message.
 // Returns true if a preview was active and the final message was sent via preview
@@ -201,7 +227,12 @@ func (sp *streamPreview) finish(finalText string) bool {
 	defer sp.mu.Unlock()
 
 	sp.cancelTimerLocked()
-	close(sp.timerStop)
+
+	select {
+	case <-sp.timerStop:
+	default:
+		close(sp.timerStop)
+	}
 
 	if sp.previewMsgID == nil || sp.degraded {
 		return false
@@ -210,10 +241,9 @@ func (sp *streamPreview) finish(finalText string) bool {
 	// If platform wants to delete the preview and send fresh, let it
 	if cleaner, ok := sp.platform.(PreviewCleaner); ok {
 		_ = cleaner.DeletePreviewMessage(sp.ctx, sp.previewMsgID)
-		return false // caller should send the final message normally
+		return false
 	}
 
-	// Otherwise update the preview message in-place with the final text
 	updater, ok := sp.platform.(MessageUpdater)
 	if !ok {
 		return false
@@ -222,7 +252,18 @@ func (sp *streamPreview) finish(finalText string) bool {
 	// For very long responses, we may need chunked sending instead
 	maxChars := sp.cfg.MaxChars
 	if maxChars > 0 && len([]rune(finalText)) > maxChars {
-		// Final text exceeds preview limit; delete preview and let caller handle it
+		// Remove the cursor from the preview before falling back to chunked send
+		if sp.lastSentText != "" {
+			_ = updater.UpdateMessage(sp.ctx, sp.previewMsgID, sp.lastSentText)
+		}
+		return false
+	}
+
+	if finalText == "" {
+		// Empty final text (error path) — remove cursor from preview
+		if sp.lastSentText != "" {
+			_ = updater.UpdateMessage(sp.ctx, sp.previewMsgID, sp.lastSentText)
+		}
 		return false
 	}
 

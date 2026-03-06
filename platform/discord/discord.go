@@ -402,19 +402,8 @@ func (p *Platform) sendInteraction(ictx *interactionReplyCtx, content string) er
 }
 
 func (p *Platform) sendChannelReply(rc replyContext, content string) error {
-	for len(content) > 0 {
-		chunk := content
-		if len(chunk) > maxDiscordLen {
-			cut := maxDiscordLen
-			if idx := lastIndexBefore(content, '\n', cut); idx > 0 {
-				cut = idx + 1
-			}
-			chunk = content[:cut]
-			content = content[cut:]
-		} else {
-			content = ""
-		}
-
+	chunks := core.SplitMessageCodeFenceAware(content, maxDiscordLen)
+	for _, chunk := range chunks {
 		ref := &discordgo.MessageReference{MessageID: rc.messageID}
 		_, err := p.session.ChannelMessageSendReply(rc.channelID, chunk, ref)
 		if err != nil {
@@ -425,19 +414,8 @@ func (p *Platform) sendChannelReply(rc replyContext, content string) error {
 }
 
 func (p *Platform) sendChannel(rc replyContext, content string) error {
-	for len(content) > 0 {
-		chunk := content
-		if len(chunk) > maxDiscordLen {
-			cut := maxDiscordLen
-			if idx := lastIndexBefore(content, '\n', cut); idx > 0 {
-				cut = idx + 1
-			}
-			chunk = content[:cut]
-			content = content[cut:]
-		} else {
-			content = ""
-		}
-
+	chunks := core.SplitMessageCodeFenceAware(content, maxDiscordLen)
+	for _, chunk := range chunks {
 		_, err := p.session.ChannelMessageSend(rc.channelID, chunk)
 		if err != nil {
 			return fmt.Errorf("discord: send: %w", err)
