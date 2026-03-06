@@ -429,13 +429,28 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 }
 
 func (e *Engine) Start() error {
+	var startErrs []error
 	for _, p := range e.platforms {
 		if err := p.Start(e.handleMessage); err != nil {
-			return fmt.Errorf("[%s] start platform %s: %w", e.name, p.Name(), err)
+			slog.Warn("platform start failed", "project", e.name, "platform", p.Name(), "error", err)
+			startErrs = append(startErrs, fmt.Errorf("[%s] start platform %s: %w", e.name, p.Name(), err))
+			continue
 		}
 		slog.Info("platform started", "project", e.name, "platform", p.Name())
 	}
-	slog.Info("engine started", "project", e.name, "agent", e.agent.Name(), "platforms", len(e.platforms))
+
+	// Log summary
+	startedCount := len(e.platforms) - len(startErrs)
+	if len(startErrs) > 0 {
+		slog.Warn("engine started with some failures", "project", e.name, "agent", e.agent.Name(), "started", startedCount, "failed", len(startErrs))
+	} else {
+		slog.Info("engine started", "project", e.name, "agent", e.agent.Name(), "platforms", len(e.platforms))
+	}
+
+	// Only return error if ALL platforms failed
+	if len(startErrs) == len(e.platforms) && len(e.platforms) > 0 {
+		return startErrs[0] // Return first error
+	}
 	return nil
 }
 

@@ -363,11 +363,17 @@ func main() {
 		}
 	}
 
+	var startErrors []error
 	for _, e := range engines {
 		if err := e.Start(); err != nil {
-			slog.Error("failed to start engine", "error", err)
-			os.Exit(1)
+			slog.Warn("engine start partially failed (some platforms may be unavailable)", "error", err)
+			startErrors = append(startErrors, err)
 		}
+	}
+	// Only exit if ALL engines failed to start
+	if len(startErrors) > 0 && len(startErrors) == len(engines) {
+		slog.Error("all engines failed to start, exiting")
+		os.Exit(1)
 	}
 
 	if cronSched != nil {
@@ -438,6 +444,14 @@ func main() {
 		if err != nil {
 			slog.Error("restart: cannot determine executable path", "error", err)
 			os.Exit(1)
+		}
+		// After self-update, os.Executable() may return the .old path on Linux.
+		// Strip the .old suffix to restart from the updated binary.
+		if strings.HasSuffix(execPath, ".old") {
+			newPath := strings.TrimSuffix(execPath, ".old")
+			if _, err := os.Stat(newPath); err == nil {
+				execPath = newPath
+			}
 		}
 		slog.Info("restarting...", "path", execPath, "args", os.Args)
 		if err := restartProcess(execPath); err != nil {

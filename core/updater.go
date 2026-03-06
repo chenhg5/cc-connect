@@ -285,7 +285,9 @@ func replaceBinary(newBinary []byte) error {
 		return fmt.Errorf("install new binary: %w", err)
 	}
 
-	os.Remove(oldPath)
+	// Don't remove .old file on Linux - the running process may still need it
+	// for os.Executable() to work correctly after restart.
+	// The .old file will be overwritten on next update.
 
 	slog.Info("updater: binary replaced successfully", "path", execPath)
 	return nil
