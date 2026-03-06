@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -132,7 +133,7 @@ type Engine struct {
 	providerAddSaveFunc    func(p ProviderConfig) error
 	providerRemoveSaveFunc func(name string) error
 
-	commandSaveAddFunc func(name, description, prompt string) error
+	commandSaveAddFunc func(name, description, prompt, exec, workDir string) error
 	commandSaveDelFunc func(name string) error
 
 	displaySaveFunc  func(thinkingMaxLen, toolMaxLen *int) error
@@ -254,7 +255,7 @@ func (e *Engine) SetCronScheduler(cs *CronScheduler) {
 	e.cronScheduler = cs
 }
 
-func (e *Engine) SetCommandSaveAddFunc(fn func(name, description, prompt string) error) {
+func (e *Engine) SetCommandSaveAddFunc(fn func(name, description, prompt, exec, workDir string) error) {
 	e.commandSaveAddFunc = fn
 }
 
@@ -283,8 +284,8 @@ func (e *Engine) GetAgent() Agent {
 }
 
 // AddCommand registers a custom slash command.
-func (e *Engine) AddCommand(name, description, prompt, source string) {
-	e.commands.Add(name, description, prompt, source)
+func (e *Engine) AddCommand(name, description, prompt, exec, workDir, source string) {
+	e.commands.Add(name, description, prompt, exec, workDir, source)
 }
 
 // ClearCommands removes all commands from the given source.
@@ -1642,11 +1643,9 @@ func (e *Engine) cmdCurrent(p Platform, msg *Message) {
 	s := e.sessions.GetOrCreateActive(msg.SessionKey)
 	agentID := s.AgentSessionID
 	if agentID == "" {
-		agentID = "(new — not yet started)"
+		agentID = e.i18n.T(MsgSessionNotStarted)
 	}
-	e.reply(p, msg.ReplyCtx, fmt.Sprintf(
-		"📌 Current session\nName: %s\nClaude Session: %s\nLocal messages: %d",
-		s.Name, agentID, len(s.History)))
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCurrentSession), s.Name, agentID, len(s.History)))
 }
 
 func (e *Engine) cmdStatus(p Platform, msg *Message) {
@@ -2649,6 +2648,13 @@ func (e *Engine) cmdCronToggle(p Platform, msg *Message, args []string, enable b
 // ──────────────────────────────────────────────────────────────
 
 func (e *Engine) executeCustomCommand(p Platform, msg *Message, cmd *CustomCommand, args []string) {
+	// If this is an exec command, run shell command directly
+	if cmd.Exec != "" {
+		go e.executeShellCommand(p, msg, cmd, args)
+		return
+	}
+
+	// Otherwise, use prompt template
 	prompt := ExpandPrompt(cmd.Prompt, args)
 
 	session := e.sessions.GetOrCreateActive(msg.SessionKey)
@@ -2667,6 +2673,64 @@ func (e *Engine) executeCustomCommand(p Platform, msg *Message, cmd *CustomComma
 	go e.processInteractiveMessage(p, msg, session)
 }
 
+// executeShellCommand runs a shell command and sends the output to the user.
+func (e *Engine) executeShellCommand(p Platform, msg *Message, cmd *CustomCommand, args []string) {
+	slog.Info("executing shell command",
+		"command", cmd.Name,
+		"exec", cmd.Exec,
+		"user", msg.UserName,
+	)
+
+	// Expand placeholders in exec command
+	execCmd := ExpandPrompt(cmd.Exec, args)
+
+	// Determine working directory
+	workDir := cmd.WorkDir
+	if workDir == "" {
+		// Default to agent's work_dir if available
+		if e.agent != nil {
+			if agentOpts, ok := e.agent.(interface{ GetWorkDir() string }); ok {
+				workDir = agentOpts.GetWorkDir()
+			}
+		}
+	}
+	if workDir == "" {
+		workDir, _ = os.Getwd()
+	}
+
+	// Create context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Execute command using shell
+	shellCmd := exec.CommandContext(ctx, "sh", "-c", execCmd)
+	shellCmd.Dir = workDir
+	output, err := shellCmd.CombinedOutput()
+
+	if ctx.Err() == context.DeadlineExceeded {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandExecTimeout), cmd.Name))
+		return
+	}
+
+	if err != nil {
+		errMsg := string(output)
+		if errMsg == "" {
+			errMsg = err.Error()
+		}
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandExecError), cmd.Name, truncateStr(errMsg, 1000)))
+		return
+	}
+
+	result := strings.TrimSpace(string(output))
+	if result == "" {
+		result = e.i18n.T(MsgCommandExecSuccess)
+	} else if len(result) > 4000 {
+		result = result[:3997] + "..."
+	}
+
+	e.reply(p, msg.ReplyCtx, result)
+}
+
 func (e *Engine) cmdCommands(p Platform, msg *Message, args []string) {
 	if len(args) == 0 {
 		e.cmdCommandsList(p, msg)
@@ -2674,13 +2738,15 @@ func (e *Engine) cmdCommands(p Platform, msg *Message, args []string) {
 	}
 
 	sub := matchSubCommand(strings.ToLower(args[0]), []string{
-		"list", "add", "del", "delete", "rm", "remove",
+		"list", "add", "addexec", "del", "delete", "rm", "remove",
 	})
 	switch sub {
 	case "list":
 		e.cmdCommandsList(p, msg)
 	case "add":
 		e.cmdCommandsAdd(p, msg, args[1:])
+	case "addexec":
+		e.cmdCommandsAddExec(p, msg, args[1:])
 	case "del", "delete", "rm", "remove":
 		e.cmdCommandsDel(p, msg, args[1:])
 	default:
@@ -2720,6 +2786,7 @@ func (e *Engine) cmdCommandsAdd(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCommandsAddUsage))
 		return
 	}
+
 	name := strings.ToLower(args[0])
 	prompt := strings.Join(args[1:], " ")
 
@@ -2728,15 +2795,63 @@ func (e *Engine) cmdCommandsAdd(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	e.commands.Add(name, "", prompt, "config")
+	e.commands.Add(name, "", prompt, "", "", "config")
 
 	if e.commandSaveAddFunc != nil {
-		if err := e.commandSaveAddFunc(name, "", prompt); err != nil {
+		if err := e.commandSaveAddFunc(name, "", prompt, "", ""); err != nil {
 			slog.Error("failed to persist command", "error", err)
 		}
 	}
 
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandsAdded), name, truncateStr(prompt, 80)))
+}
+
+func (e *Engine) cmdCommandsAddExec(p Platform, msg *Message, args []string) {
+	// /commands addexec <name> <shell command...>
+	// /commands addexec --work-dir <dir> <name> <shell command...>
+	if len(args) < 2 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCommandsAddExecUsage))
+		return
+	}
+
+	// Parse --work-dir flag
+	workDir := ""
+	i := 0
+	if args[0] == "--work-dir" && len(args) >= 3 {
+		workDir = args[1]
+		i = 2
+	}
+
+	if i >= len(args) {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCommandsAddExecUsage))
+		return
+	}
+
+	name := strings.ToLower(args[i])
+	execCmd := ""
+	if i+1 < len(args) {
+		execCmd = strings.Join(args[i+1:], " ")
+	}
+
+	if execCmd == "" {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCommandsAddExecUsage))
+		return
+	}
+
+	if _, exists := e.commands.Resolve(name); exists {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandsAddExists), name, name))
+		return
+	}
+
+	e.commands.Add(name, "", "", execCmd, workDir, "config")
+
+	if e.commandSaveAddFunc != nil {
+		if err := e.commandSaveAddFunc(name, "", "", execCmd, workDir); err != nil {
+			slog.Error("failed to persist command", "error", err)
+		}
+	}
+
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandsExecAdded), name, truncateStr(execCmd, 80)))
 }
 
 func (e *Engine) cmdCommandsDel(p Platform, msg *Message, args []string) {

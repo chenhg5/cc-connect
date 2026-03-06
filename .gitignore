@@ -11,3 +11,4 @@ dist
 test
 RELEASE.md
 .npmrc
+scripts

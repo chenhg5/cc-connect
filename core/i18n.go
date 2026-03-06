@@ -127,6 +127,7 @@ const (
 	MsgPreviousProcessing   MsgKey = "previous_processing"
 	MsgNoToolsAllowed       MsgKey = "no_tools_allowed"
 	MsgCurrentTools         MsgKey = "current_tools"
+	MsgCurrentSession       MsgKey = "current_session"
 	MsgToolAuthNotSupported MsgKey = "tool_auth_not_supported"
 	MsgToolAllowFailed      MsgKey = "tool_allow_failed"
 	MsgToolAllowedNew       MsgKey = "tool_allowed_new"
@@ -142,6 +143,7 @@ const (
 	MsgModeChanged          MsgKey = "mode_changed"
 	MsgModeNotSupported     MsgKey = "mode_not_supported"
 	MsgSessionRestarting    MsgKey = "session_restarting"
+	MsgSessionNotStarted    MsgKey = "session_not_started"
 	MsgLangChanged          MsgKey = "lang_changed"
 	MsgLangInvalid          MsgKey = "lang_invalid"
 	MsgLangCurrent          MsgKey = "lang_current"
@@ -235,14 +237,20 @@ const (
 
 	MsgCommandsTitle     MsgKey = "commands_title"
 	MsgCommandsEmpty     MsgKey = "commands_empty"
-	MsgCommandsHint      MsgKey = "commands_hint"
-	MsgCommandsUsage     MsgKey = "commands_usage"
-	MsgCommandsAddUsage  MsgKey = "commands_add_usage"
-	MsgCommandsAdded     MsgKey = "commands_added"
-	MsgCommandsAddExists MsgKey = "commands_add_exists"
-	MsgCommandsDelUsage  MsgKey = "commands_del_usage"
-	MsgCommandsDeleted   MsgKey = "commands_deleted"
-	MsgCommandsNotFound  MsgKey = "commands_not_found"
+	MsgCommandsHint         MsgKey = "commands_hint"
+	MsgCommandsUsage        MsgKey = "commands_usage"
+	MsgCommandsAddUsage     MsgKey = "commands_add_usage"
+	MsgCommandsAddExecUsage MsgKey = "commands_addexec_usage"
+	MsgCommandsAdded        MsgKey = "commands_added"
+	MsgCommandsExecAdded    MsgKey = "commands_exec_added"
+	MsgCommandsAddExists    MsgKey = "commands_add_exists"
+	MsgCommandsDelUsage     MsgKey = "commands_del_usage"
+	MsgCommandsDeleted      MsgKey = "commands_deleted"
+	MsgCommandsNotFound     MsgKey = "commands_not_found"
+
+	MsgCommandExecTimeout MsgKey = "command_exec_timeout"
+	MsgCommandExecError   MsgKey = "command_exec_error"
+	MsgCommandExecSuccess MsgKey = "command_exec_success"
 
 	MsgSkillsTitle MsgKey = "skills_title"
 	MsgSkillsEmpty MsgKey = "skills_empty"
@@ -362,6 +370,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "事前許可済みツール: %s",
 		LangSpanish:            "Herramientas pre-autorizadas: %s",
 	},
+	MsgCurrentSession: {
+		LangEnglish:            "📌 Current session\nName: %s\nSession ID: %s\nLocal messages: %d",
+		LangChinese:            "📌 当前会话\n名称: %s\n会话 ID: %s\n本地消息数: %d",
+		LangTraditionalChinese: "📌 目前工作階段\n名稱: %s\n工作階段 ID: %s\n本機訊息數: %d",
+		LangJapanese:           "📌 現在のセッション\n名前: %s\nセッション ID: %s\nローカルメッセージ数: %d",
+		LangSpanish:            "📌 Sesión actual\nNombre: %s\nID de sesión: %s\nMensajes locales: %d",
+	},
 	MsgToolAuthNotSupported: {
 		LangEnglish:            "This agent does not support tool authorization.",
 		LangChinese:            "此代理不支持工具授权。",
@@ -466,6 +481,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "🔄 會話進程已退出，正在重啟...",
 		LangJapanese:           "🔄 セッションプロセスが終了しました。再起動中...",
 		LangSpanish:            "🔄 El proceso de sesión finalizó, reiniciando...",
+	},
+	MsgSessionNotStarted: {
+		LangEnglish:            "(new — not yet started)",
+		LangChinese:            "(新会话 — 尚未开始)",
+		LangTraditionalChinese: "(新會話 — 尚未開始)",
+		LangJapanese:           "(新規 — まだ開始されていません)",
+		LangSpanish:            "(nuevo — aún no iniciado)",
 	},
 	MsgLangChanged: {
 		LangEnglish:            "🌐 Language switched to **%s**.",
@@ -1258,25 +1280,32 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "No hay comandos personalizados configurados.\n\nUse `/commands add <nombre> <prompt>` o agregue `[[commands]]` en config.toml.",
 	},
 	MsgCommandsHint: {
-		LangEnglish:            "Type `/<name> [args]` to use.\n`/commands add <name> <prompt>` to add · `/commands del <name>` to remove",
-		LangChinese:            "输入 `/<名称> [参数]` 使用。\n`/commands add <名称> <prompt>` 添加 · `/commands del <名称>` 删除",
-		LangTraditionalChinese: "輸入 `/<名稱> [參數]` 使用。\n`/commands add <名稱> <prompt>` 新增 · `/commands del <名稱>` 刪除",
-		LangJapanese:           "`/<名前> [引数]` で使用。\n`/commands add <名前> <プロンプト>` で追加 · `/commands del <名前>` で削除",
-		LangSpanish:            "Escriba `/<nombre> [args]` para usar.\n`/commands add <nombre> <prompt>` para agregar · `/commands del <nombre>` para eliminar",
+		LangEnglish:            "Type `/<name> [args]` to use.\n`/commands add <name> <prompt>` to add prompt command\n`/commands addexec <name> <shell>` to add exec command\n`/commands del <name>` to remove",
+		LangChinese:            "输入 `/<名称> [参数]` 使用。\n`/commands add <名称> <prompt>` 添加 prompt 命令\n`/commands addexec <名称> <shell命令>` 添加 exec 命令\n`/commands del <名称>` 删除",
+		LangTraditionalChinese: "輸入 `/<名稱> [參數]` 使用。\n`/commands add <名稱> <prompt>` 新增 prompt 命令\n`/commands addexec <名稱> <shell命令>` 新增 exec 命令\n`/commands del <名稱>` 刪除",
+		LangJapanese:           "`/<名前> [引数]` で使用。\n`/commands add <名前> <プロンプト>` プロンプトコマンド追加\n`/commands addexec <名前> <シェルコマンド>` execコマンド追加\n`/commands del <名前>` 削除",
+		LangSpanish:            "Escriba `/<nombre> [args]` para usar.\n`/commands add <nombre> <prompt>` agregar comando prompt\n`/commands addexec <nombre> <shell>` agregar comando exec\n`/commands del <nombre>` eliminar",
 	},
 	MsgCommandsUsage: {
-		LangEnglish:            "Usage:\n`/commands` — list all custom commands\n`/commands add <name> <prompt>` — add a command\n`/commands del <name>` — remove a command",
-		LangChinese:            "用法：\n`/commands` — 列出所有自定义命令\n`/commands add <名称> <prompt>` — 添加命令\n`/commands del <名称>` — 删除命令",
-		LangTraditionalChinese: "用法：\n`/commands` — 列出所有自訂命令\n`/commands add <名稱> <prompt>` — 新增命令\n`/commands del <名稱>` — 刪除命令",
-		LangJapanese:           "使い方:\n`/commands` — カスタムコマンド一覧\n`/commands add <名前> <プロンプト>` — コマンド追加\n`/commands del <名前>` — コマンド削除",
-		LangSpanish:            "Uso:\n`/commands` — listar comandos personalizados\n`/commands add <nombre> <prompt>` — agregar comando\n`/commands del <nombre>` — eliminar comando",
+		LangEnglish:            "Usage:\n`/commands` — list all custom commands\n`/commands add <name> <prompt>` — add prompt command\n`/commands addexec <name> <shell>` — add exec command\n`/commands del <name>` — remove a command",
+		LangChinese:            "用法：\n`/commands` — 列出所有自定义命令\n`/commands add <名称> <prompt>` — 添加 prompt 命令\n`/commands addexec <名称> <shell命令>` — 添加 exec 命令\n`/commands del <名称>` — 删除命令",
+		LangTraditionalChinese: "用法：\n`/commands` — 列出所有自訂命令\n`/commands add <名稱> <prompt>` — 新增 prompt 命令\n`/commands addexec <名稱> <shell命令>` — 新增 exec 命令\n`/commands del <名稱>` — 刪除命令",
+		LangJapanese:           "使い方:\n`/commands` — カスタムコマンド一覧\n`/commands add <名前> <プロンプト>` — プロンプトコマンド追加\n`/commands addexec <名前> <シェルコマンド>` — execコマンド追加\n`/commands del <名前>` — コマンド削除",
+		LangSpanish:            "Uso:\n`/commands` — listar comandos personalizados\n`/commands add <nombre> <prompt>` — agregar comando prompt\n`/commands addexec <nombre> <shell>` — agregar comando exec\n`/commands del <nombre>` — eliminar comando",
 	},
 	MsgCommandsAddUsage: {
-		LangEnglish:            "Usage: `/commands add <name> <prompt template>`\n\nExample: `/commands add finduser Search the database for user「{{1}}」and return details.`",
-		LangChinese:            "用法：`/commands add <名称> <prompt 模板>`\n\n示例：`/commands add finduser 在数据库中查找用户「{{1}}」，返回详细信息。`",
-		LangTraditionalChinese: "用法：`/commands add <名稱> <prompt 模板>`\n\n範例：`/commands add finduser 在資料庫中查找用戶「{{1}}」，回傳詳細資訊。`",
-		LangJapanese:           "使い方: `/commands add <名前> <プロンプトテンプレート>`\n\n例: `/commands add finduser データベースでユーザー「{{1}}」を検索して詳細を返してください。`",
-		LangSpanish:            "Uso: `/commands add <nombre> <plantilla prompt>`\n\nEjemplo: `/commands add finduser Buscar en la base de datos al usuario「{{1}}」y devolver detalles.`",
+		LangEnglish:            "Usage: `/commands add <name> <prompt template>`\n\nExample: `/commands add finduser Search the database for user「{{1}}」`",
+		LangChinese:            "用法：`/commands add <名称> <prompt 模板>`\n\n示例：`/commands add finduser 在数据库中查找用户「{{1}}」`",
+		LangTraditionalChinese: "用法：`/commands add <名稱> <prompt 模板>`\n\n範例：`/commands add finduser 在資料庫中查找用戶「{{1}}」`",
+		LangJapanese:           "使い方: `/commands add <名前> <プロンプトテンプレート>`\n\n例: `/commands add finduser データベースでユーザー「{{1}}」を検索`",
+		LangSpanish:            "Uso: `/commands add <nombre> <plantilla prompt>`\n\nEjemplo: `/commands add finduser Buscar en la base de datos al usuario「{{1}}」`",
+	},
+	MsgCommandsAddExecUsage: {
+		LangEnglish:            "Usage: `/commands addexec <name> <shell command>`\n         `/commands addexec --work-dir <dir> <name> <shell command>`\n\nExamples:\n`/commands addexec push git push`\n`/commands addexec status git status {{args}}`",
+		LangChinese:            "用法：`/commands addexec <名称> <shell 命令>`\n      `/commands addexec --work-dir <目录> <名称> <shell 命令>`\n\n示例：\n`/commands addexec push git push`\n`/commands addexec status git status {{args}}`",
+		LangTraditionalChinese: "用法：`/commands addexec <名稱> <shell 命令>`\n      `/commands addexec --work-dir <目錄> <名稱> <shell 命令>`\n\n範例：\n`/commands addexec push git push`\n`/commands addexec status git status {{args}}`",
+		LangJapanese:           "使い方: `/commands addexec <名前> <シェルコマンド>`\n         `/commands addexec --work-dir <ディレクトリ> <名前> <シェルコマンド>`\n\n例:\n`/commands addexec push git push`\n`/commands addexec status git status {{args}}`",
+		LangSpanish:            "Uso: `/commands addexec <nombre> <comando shell>`\n      `/commands addexec --work-dir <dir> <nombre> <comando shell>`\n\nEjemplos:\n`/commands addexec push git push`\n`/commands addexec status git status {{args}}`",
 	},
 	MsgCommandsAdded: {
 		LangEnglish:            "✅ Command `/%s` added.\nPrompt: %s",
@@ -1312,6 +1341,34 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 命令 `/%s` 未找到。使用 `/commands` 查看可用命令。",
 		LangJapanese:           "❌ コマンド `/%s` が見つかりません。`/commands` で一覧を確認してください。",
 		LangSpanish:            "❌ Comando `/%s` no encontrado. Use `/commands` para ver los comandos disponibles.",
+	},
+	MsgCommandsExecAdded: {
+		LangEnglish:            "✅ Exec command `/%s` added.\nCommand: %s",
+		LangChinese:            "✅ Exec 命令 `/%s` 已添加。\n命令: %s",
+		LangTraditionalChinese: "✅ Exec 命令 `/%s` 已新增。\n命令: %s",
+		LangJapanese:           "✅ Exec コマンド `/%s` を追加しました。\nコマンド: %s",
+		LangSpanish:            "✅ Comando exec `/%s` agregado.\nComando: %s",
+	},
+	MsgCommandExecTimeout: {
+		LangEnglish:            "⏱️ Command `/%s` timed out (60s limit).",
+		LangChinese:            "⏱️ 命令 `/%s` 超时（60秒限制）。",
+		LangTraditionalChinese: "⏱️ 命令 `/%s` 超時（60秒限制）。",
+		LangJapanese:           "⏱️ コマンド `/%s` がタイムアウトしました（60秒制限）。",
+		LangSpanish:            "⏱️ Comando `/%s` agotó el tiempo (límite 60s).",
+	},
+	MsgCommandExecError: {
+		LangEnglish:            "❌ Command `/%s` failed:\n%s",
+		LangChinese:            "❌ 命令 `/%s` 执行失败：\n%s",
+		LangTraditionalChinese: "❌ 命令 `/%s` 執行失敗：\n%s",
+		LangJapanese:           "❌ コマンド `/%s` が失敗しました：\n%s",
+		LangSpanish:            "❌ Comando `/%s` falló:\n%s",
+	},
+	MsgCommandExecSuccess: {
+		LangEnglish:            "✅ Command executed successfully (no output).",
+		LangChinese:            "✅ 命令执行成功（无输出）。",
+		LangTraditionalChinese: "✅ 命令執行成功（無輸出）。",
+		LangJapanese:           "✅ コマンドが正常に実行されました（出力なし）。",
+		LangSpanish:            "✅ Comando ejecutado exitosamente (sin salida).",
 	},
 	MsgSkillsTitle: {
 		LangEnglish:            "📋 Available Skills (%s) — %d skill(s)\n\n",

@@ -187,12 +187,12 @@ func main() {
 
 		// Wire global custom commands
 		for _, c := range cfg.Commands {
-			engine.AddCommand(c.Name, c.Description, c.Prompt, "config")
+			engine.AddCommand(c.Name, c.Description, c.Prompt, c.Exec, c.WorkDir, "config")
 		}
 
 		// Wire command persistence callbacks
-		engine.SetCommandSaveAddFunc(func(name, description, prompt string) error {
-			return config.AddCommand(config.CommandConfig{Name: name, Description: description, Prompt: prompt})
+		engine.SetCommandSaveAddFunc(func(name, description, prompt, exec, workDir string) error {
+			return config.AddCommand(config.CommandConfig{Name: name, Description: description, Prompt: prompt, Exec: exec, WorkDir: workDir})
 		})
 		engine.SetCommandSaveDelFunc(func(name string) error {
 			return config.RemoveCommand(name)
@@ -651,7 +651,7 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	// Reload custom commands
 	engine.ClearCommands("config")
 	for _, c := range cfg.Commands {
-		engine.AddCommand(c.Name, c.Description, c.Prompt, "config")
+		engine.AddCommand(c.Name, c.Description, c.Prompt, c.Exec, c.WorkDir, "config")
 	}
 	result.CommandsUpdated = len(cfg.Commands)
 

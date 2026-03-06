@@ -114,11 +114,13 @@ type AliasConfig struct {
 	Command string `toml:"command"` // target command (e.g. "/help")
 }
 
-// CommandConfig defines a user-customizable slash command that expands a prompt template.
+// CommandConfig defines a user-customizable slash command that expands a prompt template or executes a shell command.
 type CommandConfig struct {
 	Name        string `toml:"name"`
 	Description string `toml:"description"`
-	Prompt      string `toml:"prompt"`
+	Prompt      string `toml:"prompt"`      // prompt template (mutually exclusive with Exec)
+	Exec        string `toml:"exec"`        // shell command to execute (mutually exclusive with Prompt)
+	WorkDir     string `toml:"work_dir"`    // optional: working directory for exec command
 }
 
 type LogConfig struct {

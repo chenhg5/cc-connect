@@ -128,7 +128,13 @@ level = "info" # debug, info, warn, error
 # Define reusable prompt templates as global slash commands (available in all projects).
 # 定义可复用的 prompt 模板作为全局 slash 命令（所有项目通用）。
 #
-# Placeholders / 占位符:
+# Two types of commands are supported / 支持两种类型的命令：
+#   1. Prompt commands — expand template and send to AI agent
+#      Prompt 命令 — 展开模板后发送给 AI Agent
+#   2. Exec commands — execute shell command directly
+#      Exec 命令 — 直接执行 shell 命令
+#
+# Placeholders (for both prompt and exec) / 占位符（prompt 和 exec 都支持）:
 #   {{1}}, {{2}}        — positional argument / 位置参数
 #   {{1:default}}       — positional with default value / 带默认值的位置参数
 #   {{2*}}              — argument N and everything after / 第 N 个及之后所有参数
@@ -140,8 +146,9 @@ level = "info" # debug, info, warn, error
 # Default values are used when the corresponding argument is not provided.
 # 当对应参数未提供时，使用默认值替代。
 #
-# Usage: /finduser 张三  →  expands prompt with "张三" and sends to agent
-# 用法: /finduser 张三   →  展开模板并发送给 Agent
+# Usage / 用法:
+#   /finduser 张三  →  expands prompt with "张三" and sends to agent
+#   /push           →  executes "git push" directly
 
 # [[commands]]
 # name = "finduser"
@@ -162,10 +169,37 @@ level = "info" # debug, info, warn, error
 # name = "daily"
 # description = "Generate daily progress report / 生成每日进度报告"
 # prompt = "Summarize today's code changes and project progress. Generate a concise daily report."
+
+# Exec commands - execute shell commands directly
+# Exec 命令 — 直接执行 shell 命令
+
+# [[commands]]
+# name = "push"
+# description = "Push to remote / 推送到远程"
+# exec = "git push"
+
+# [[commands]]
+# name = "status"
+# description = "Show git status / 显示 git 状态"
+# exec = "git status {{args}}"
+
+# [[commands]]
+# name = "branch"
+# description = "Create and checkout new branch / 创建并切换到新分支"
+# exec = "git checkout -b {{1}}"
+
+# [[commands]]
+# name = "build"
+# description = "Build the project / 构建项目"
+# exec = "npm run build"
+# work_dir = "/path/to/project"  # Optional: override working directory / 可选：指定工作目录
+
 #
 # You can also add/remove commands at runtime via chat:
 # 也可以在聊天中动态添加/删除命令：
 #   /commands add finduser Search the database for user「{{1}}」
+#   /commands addexec push git push
+#   /commands addexec --work-dir /path/to/project build npm run build
 #   /commands del finduser
 #   /commands         — list all custom commands
 #

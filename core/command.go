@@ -15,6 +15,8 @@ type CustomCommand struct {
 	Name        string // command name without leading "/"
 	Description string
 	Prompt      string // template with {{1}}, {{2}}, {{2*}}, {{args}} placeholders
+	Exec        string // shell command to execute (mutually exclusive with Prompt)
+	WorkDir     string // optional: working directory for exec command
 	Source      string // "config" or "agent" (for display)
 }
 
@@ -32,13 +34,15 @@ func NewCommandRegistry() *CommandRegistry {
 }
 
 // Add registers a custom command.
-func (r *CommandRegistry) Add(name, description, prompt, source string) {
+func (r *CommandRegistry) Add(name, description, prompt, exec, workDir, source string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.commands[strings.ToLower(name)] = &CustomCommand{
 		Name:        name,
 		Description: description,
 		Prompt:      prompt,
+		Exec:        exec,
+		WorkDir:     workDir,
 		Source:      source,
 	}
 }
