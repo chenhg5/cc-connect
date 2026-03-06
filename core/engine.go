@@ -879,6 +879,11 @@ func (e *Engine) cleanupInteractiveState(sessionKey string) {
 	}
 }
 
+// eventIdleTimeout is the maximum time to wait between consecutive agent events
+// before considering the agent session stuck. This prevents infinite hangs when
+// the agent process is alive but unresponsive (e.g. internal deadlock, API timeout).
+const eventIdleTimeout = 5 * time.Minute
+
 func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessionKey string, turnStart time.Time) {
 	var textParts []string
 	toolCount := 0
@@ -889,10 +894,42 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx)
 	state.mu.Unlock()
 
-	for event := range state.agentSession.Events() {
-		if e.ctx.Err() != nil {
+	idleTimer := time.NewTimer(eventIdleTimeout)
+	defer idleTimer.Stop()
+
+	events := state.agentSession.Events()
+	for {
+		var event Event
+		var ok bool
+
+		select {
+		case event, ok = <-events:
+			if !ok {
+				goto channelClosed
+			}
+		case <-idleTimer.C:
+			slog.Error("agent session idle timeout: no events for too long, killing session",
+				"session_key", sessionKey, "timeout", eventIdleTimeout, "elapsed", time.Since(turnStart))
+			sp.finish("")
+			state.mu.Lock()
+			p := state.platform
+			replyCtx := state.replyCtx
+			state.mu.Unlock()
+			e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out (no response)"))
+			e.cleanupInteractiveState(sessionKey)
+			return
+		case <-e.ctx.Done():
 			return
 		}
+
+		// Reset idle timer after receiving an event
+		if !idleTimer.Stop() {
+			select {
+			case <-idleTimer.C:
+			default:
+			}
+		}
+		idleTimer.Reset(eventIdleTimeout)
 
 		if !firstEventLogged {
 			firstEventLogged = true
@@ -1045,6 +1082,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		}
 	}
 
+channelClosed:
 	// Channel closed - process exited unexpectedly
 	slog.Warn("agent process exited", "session_key", sessionKey)
 	e.cleanupInteractiveState(sessionKey)
