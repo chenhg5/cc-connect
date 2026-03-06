@@ -2,6 +2,7 @@ package core
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
@@ -140,12 +141,13 @@ func SelfUpdate(tag string) error {
 		return fmt.Errorf("download failed from all sources: %w", lastErr)
 	}
 
+	var binary []byte
+	var err error
 	if goos == "windows" {
-		return fmt.Errorf("auto-update on Windows is not supported, please download manually: %s/%s",
-			githubDownload, tag)
+		binary, err = extractBinaryFromZip(data)
+	} else {
+		binary, err = extractBinaryFromTarGz(data)
 	}
-
-	binary, err := extractBinaryFromTarGz(data)
 	if err != nil {
 		return fmt.Errorf("extract binary: %w", err)
 	}
@@ -205,6 +207,25 @@ func extractBinaryFromTarGz(data []byte) ([]byte, error) {
 		}
 	}
 	return nil, fmt.Errorf("cc-connect binary not found in archive")
+}
+
+func extractBinaryFromZip(data []byte) ([]byte, error) {
+	r, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return nil, err
+	}
+	for _, f := range r.File {
+		name := filepath.Base(f.Name)
+		if strings.HasPrefix(name, "cc-connect") && !f.FileInfo().IsDir() {
+			rc, err := f.Open()
+			if err != nil {
+				return nil, err
+			}
+			defer rc.Close()
+			return io.ReadAll(rc)
+		}
+	}
+	return nil, fmt.Errorf("cc-connect binary not found in zip archive")
 }
 
 func replaceBinary(newBinary []byte) error {
