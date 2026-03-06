@@ -276,6 +276,16 @@ func main() {
 			return config.SaveDisplayConfig(thinkingMaxLen, toolMaxLen)
 		})
 
+		// Wire idle timeout
+		if cfg.IdleTimeoutMins != nil {
+			mins := *cfg.IdleTimeoutMins
+			if mins <= 0 {
+				engine.SetEventIdleTimeout(0)
+			} else {
+				engine.SetEventIdleTimeout(time.Duration(mins) * time.Minute)
+			}
+		}
+
 		// Wire default quiet mode: project-level overrides global
 		if proj.Quiet != nil {
 			engine.SetDefaultQuiet(*proj.Quiet)

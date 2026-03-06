@@ -45,6 +45,11 @@ level = "info" # debug, info, warn, error
 # thinking_max_len = 300   # Max chars for thinking messages (default: 300) / 思考消息最大字符数（默认 300）
 # tool_max_len = 500       # Max chars for tool use messages (default: 500) / 工具调用消息最大字符数（默认 500）
 
+# Agent idle timeout: max minutes between consecutive agent events before
+# considering the session stuck. Set to 0 to disable the timeout entirely.
+# Agent 空闲超时：两次 agent 事件之间的最大等待分钟数，超时则认为会话卡住。设为 0 禁用。
+# idle_timeout_mins = 120  # default: 120 (2 hours) / 默认 120（2 小时）
+
 # =============================================================================
 # Streaming Preview / 流式预览
 # =============================================================================

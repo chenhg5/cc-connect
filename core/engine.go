@@ -153,9 +153,10 @@ type Engine struct {
 
 	disabledCmds map[string]bool
 
-	rateLimiter   *RateLimiter
-	streamPreview StreamPreviewCfg
-	relayManager  *RelayManager
+	rateLimiter      *RateLimiter
+	streamPreview    StreamPreviewCfg
+	relayManager     *RelayManager
+	eventIdleTimeout time.Duration
 
 	// Interactive agent session management
 	interactiveMu     sync.Mutex
@@ -205,6 +206,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		interactiveStates: make(map[string]*interactiveState),
 		startedAt:         time.Now(),
 		streamPreview:     DefaultStreamPreviewCfg(),
+		eventIdleTimeout:  defaultEventIdleTimeout,
 	}
 
 	if cp, ok := ag.(CommandProvider); ok {
@@ -347,6 +349,12 @@ func (e *Engine) SetRateLimitCfg(cfg RateLimitCfg) {
 // SetStreamPreviewCfg configures the streaming preview behavior.
 func (e *Engine) SetStreamPreviewCfg(cfg StreamPreviewCfg) {
 	e.streamPreview = cfg
+}
+
+// SetEventIdleTimeout sets the maximum time to wait between consecutive agent events.
+// 0 disables the timeout entirely.
+func (e *Engine) SetEventIdleTimeout(d time.Duration) {
+	e.eventIdleTimeout = d
 }
 
 func (e *Engine) SetRelayManager(rm *RelayManager) {
@@ -894,10 +902,7 @@ func (e *Engine) cleanupInteractiveState(sessionKey string) {
 	}
 }
 
-// eventIdleTimeout is the maximum time to wait between consecutive agent events
-// before considering the agent session stuck. This prevents infinite hangs when
-// the agent process is alive but unresponsive (e.g. internal deadlock, API timeout).
-const eventIdleTimeout = 30 * time.Minute
+const defaultEventIdleTimeout = 2 * time.Hour
 
 func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessionKey string, turnStart time.Time) {
 	var textParts []string
@@ -909,8 +914,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx)
 	state.mu.Unlock()
 
-	idleTimer := time.NewTimer(eventIdleTimeout)
-	defer idleTimer.Stop()
+	// Idle timeout: 0 = disabled
+	var idleTimer *time.Timer
+	var idleCh <-chan time.Time
+	if e.eventIdleTimeout > 0 {
+		idleTimer = time.NewTimer(e.eventIdleTimeout)
+		defer idleTimer.Stop()
+		idleCh = idleTimer.C
+	}
 
 	events := state.agentSession.Events()
 	for {
@@ -922,9 +933,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if !ok {
 				goto channelClosed
 			}
-		case <-idleTimer.C:
+		case <-idleCh:
 			slog.Error("agent session idle timeout: no events for too long, killing session",
-				"session_key", sessionKey, "timeout", eventIdleTimeout, "elapsed", time.Since(turnStart))
+				"session_key", sessionKey, "timeout", e.eventIdleTimeout, "elapsed", time.Since(turnStart))
 			sp.finish("")
 			state.mu.Lock()
 			p := state.platform
@@ -938,13 +949,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		}
 
 		// Reset idle timer after receiving an event
-		if !idleTimer.Stop() {
-			select {
-			case <-idleTimer.C:
-			default:
+		if idleTimer != nil {
+			if !idleTimer.Stop() {
+				select {
+				case <-idleTimer.C:
+				default:
+				}
 			}
+			idleTimer.Reset(e.eventIdleTimeout)
 		}
-		idleTimer.Reset(eventIdleTimeout)
 
 		if !firstEventLogged {
 			firstEventLogged = true

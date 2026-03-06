@@ -27,8 +27,9 @@ type Config struct {
 	Display       DisplayConfig       `toml:"display"`
 	StreamPreview StreamPreviewConfig `toml:"stream_preview"` // real-time streaming preview
 	RateLimit     RateLimitConfig     `toml:"rate_limit"`     // per-session rate limiting
-	Quiet         *bool               `toml:"quiet,omitempty"` // global default for quiet mode; project-level overrides this
-	Cron          CronConfig          `toml:"cron"`
+	Quiet            *bool               `toml:"quiet,omitempty"`              // global default for quiet mode; project-level overrides this
+	Cron             CronConfig          `toml:"cron"`
+	IdleTimeoutMins  *int                `toml:"idle_timeout_mins,omitempty"`  // max minutes between agent events; 0 = no timeout; default 120
 }
 
 // CronConfig controls cron job behavior.
