@@ -3202,18 +3202,24 @@ func splitMessage(text string, maxLen int) []string {
 		return []string{text}
 	}
 	var chunks []string
+
 	for len(text) > 0 {
+		if len(text) <= maxLen {
+			chunks = append(chunks, text)
+			break
+		}
+
 		end := maxLen
-		if end > len(text) {
-			end = len(text)
+
+		// Try to split at newline boundary
+		if idx := strings.LastIndex(text[:end], "\n"); idx > 0 && idx >= end/2 {
+			end = idx + 1
 		}
-		if end < len(text) {
-			if idx := strings.LastIndex(text[:end], "\n"); idx > 0 {
-				end = idx + 1
-			}
-		}
-		chunks = append(chunks, text[:end])
+
+		chunk := text[:end]
 		text = text[end:]
+
+		chunks = append(chunks, chunk)
 	}
 	return chunks
 }
