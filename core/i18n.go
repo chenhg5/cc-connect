@@ -283,6 +283,16 @@ const (
 	MsgBannedWordBlocked MsgKey = "banned_word_blocked"
 	MsgCommandDisabled   MsgKey = "command_disabled"
 	MsgRateLimited       MsgKey = "rate_limited"
+
+	MsgRelayNoBinding    MsgKey = "relay_no_binding"
+	MsgRelayBound        MsgKey = "relay_bound"
+	MsgRelayBindOK       MsgKey = "relay_bind_ok"
+	MsgRelayUsage        MsgKey = "relay_usage"
+	MsgRelayNotAvailable MsgKey = "relay_not_available"
+	MsgRelayUnbound      MsgKey = "relay_unbound"
+	MsgRelayBindSelf     MsgKey = "relay_bind_self"
+	MsgRelayNotFound     MsgKey = "relay_not_found"
+	MsgRelayNoTarget     MsgKey = "relay_no_target"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -1544,6 +1554,42 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "⏳ 訊息發送過快，請稍後再試。",
 		LangJapanese:           "⏳ メッセージの送信が速すぎます。しばらくお待ちください。",
 		LangSpanish:            "⏳ Estás enviando mensajes demasiado rápido. Espera un momento.",
+	},
+	MsgRelayNoBinding: {
+		LangEnglish: "No relay binding in this chat.\nUse `/bind <project>` to bind another bot.\nThe <project> is the project name from your config.toml.",
+		LangChinese: "当前群聊没有中继绑定。\n使用 `/bind <项目名>` 绑定另一个机器人。\n<项目名> 是 config.toml 中 [[projects]] 的 name 字段。",
+	},
+	MsgRelayBound: {
+		LangEnglish: "Current relay binding: %s",
+		LangChinese: "当前中继绑定: %s",
+	},
+	MsgRelayBindOK: {
+		LangEnglish: "Relay binding created: %s ↔ %s\n\nYou can now tell either bot to communicate with the other.\nExample: \"Ask %s about ...\"\n\nNote: the relay command uses the exact project name:\n  cc-connect relay send --to %s \"message\"",
+		LangChinese: "中继绑定已创建: %s ↔ %s\n\n你现在可以让任一机器人与对方交流。\n示例：\"帮我问 %s ...\"\n\n注意：relay 命令使用的是精确的项目名:\n  cc-connect relay send --to %s \"message\"",
+	},
+	MsgRelayUsage: {
+		LangEnglish: "Usage:\n  /bind <project>  — bind with another bot in this group\n  /bind remove     — remove binding\n  /bind            — show current binding\n\n<project> is the project name from config.toml [[projects]].",
+		LangChinese: "用法:\n  /bind <项目名>  — 绑定群聊中的另一个机器人\n  /bind remove    — 解除绑定\n  /bind           — 查看当前绑定\n\n<项目名> 是 config.toml 中 [[projects]] 的 name 字段。",
+	},
+	MsgRelayNotAvailable: {
+		LangEnglish: "Relay is not available. Make sure you have multiple projects configured.",
+		LangChinese: "中继功能不可用。请确保配置了多个项目。",
+	},
+	MsgRelayUnbound: {
+		LangEnglish: "Relay binding removed.",
+		LangChinese: "中继绑定已解除。",
+	},
+	MsgRelayBindSelf: {
+		LangEnglish: "Cannot bind to yourself. Specify a different project.",
+		LangChinese: "不能绑定自己，请指定另一个项目。",
+	},
+	MsgRelayNotFound: {
+		LangEnglish: "Project %q not found. Available projects: %s",
+		LangChinese: "项目 %q 不存在。可用的项目: %s",
+	},
+	MsgRelayNoTarget: {
+		LangEnglish: "Project %q not found. No other projects are configured.",
+		LangChinese: "项目 %q 不存在。没有配置其他项目。",
 	},
 }
 

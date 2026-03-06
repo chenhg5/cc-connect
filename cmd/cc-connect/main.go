@@ -61,6 +61,9 @@ func main() {
 		case "cron":
 			runCron(os.Args[2:])
 			return
+		case "relay":
+			runRelay(os.Args[2:])
+			return
 		case "daemon":
 			runDaemon(os.Args[2:])
 			return
@@ -375,8 +378,11 @@ func main() {
 	if err != nil {
 		slog.Warn("api server unavailable", "error", err)
 	} else {
+		relayMgr := core.NewRelayManager()
+		apiSrv.SetRelayManager(relayMgr)
 		for i, e := range engines {
 			apiSrv.RegisterEngine(cfg.Projects[i].Name, e)
+			e.SetRelayManager(relayMgr)
 		}
 		if cronSched != nil {
 			apiSrv.SetCronScheduler(cronSched)

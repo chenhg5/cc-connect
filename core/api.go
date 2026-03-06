@@ -21,6 +21,7 @@ type APIServer struct {
 	mux        *http.ServeMux
 	engines    map[string]*Engine // project name → engine
 	cron       *CronScheduler
+	relay      *RelayManager
 	mu         sync.RWMutex
 }
 
@@ -59,6 +60,9 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 	s.mux.HandleFunc("/cron/add", s.handleCronAdd)
 	s.mux.HandleFunc("/cron/list", s.handleCronList)
 	s.mux.HandleFunc("/cron/del", s.handleCronDel)
+	s.mux.HandleFunc("/relay/send", s.handleRelaySend)
+	s.mux.HandleFunc("/relay/bind", s.handleRelayBind)
+	s.mux.HandleFunc("/relay/binding", s.handleRelayBinding)
 
 	return s, nil
 }
@@ -71,6 +75,17 @@ func (s *APIServer) RegisterEngine(name string, e *Engine) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.engines[name] = e
+	if s.relay != nil {
+		s.relay.RegisterEngine(name, e)
+	}
+}
+
+func (s *APIServer) SetRelayManager(rm *RelayManager) {
+	s.relay = rm
+}
+
+func (s *APIServer) RelayManager() *RelayManager {
+	return s.relay
 }
 
 func (s *APIServer) SetCronScheduler(cs *CronScheduler) {
@@ -280,4 +295,84 @@ func (s *APIServer) handleCronDel(w http.ResponseWriter, r *http.Request) {
 	} else {
 		http.Error(w, fmt.Sprintf("job %q not found", req.ID), http.StatusNotFound)
 	}
+}
+
+// ── Relay API ──────────────────────────────────────────────────
+
+func (s *APIServer) handleRelaySend(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.relay == nil {
+		http.Error(w, "relay not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req RelayRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.To == "" || req.Message == "" || req.SessionKey == "" {
+		http.Error(w, "to, session_key, and message are required", http.StatusBadRequest)
+		return
+	}
+
+	resp, err := s.relay.Send(r.Context(), req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (s *APIServer) handleRelayBind(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.relay == nil {
+		http.Error(w, "relay not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req struct {
+		Platform string            `json:"platform"`
+		ChatID   string            `json:"chat_id"`
+		Bots     map[string]string `json:"bots"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.ChatID == "" || len(req.Bots) < 2 {
+		http.Error(w, "chat_id and at least 2 bots are required", http.StatusBadRequest)
+		return
+	}
+
+	s.relay.Bind(req.Platform, req.ChatID, req.Bots)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func (s *APIServer) handleRelayBinding(w http.ResponseWriter, r *http.Request) {
+	if s.relay == nil {
+		http.Error(w, "relay not available", http.StatusServiceUnavailable)
+		return
+	}
+	chatID := r.URL.Query().Get("chat_id")
+	if chatID == "" {
+		http.Error(w, "chat_id is required", http.StatusBadRequest)
+		return
+	}
+	binding := s.relay.GetBinding(chatID)
+	if binding == nil {
+		http.Error(w, "no binding found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(binding)
 }

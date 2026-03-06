@@ -36,11 +36,12 @@ type streamPreview struct {
 	replyCtx  any
 	ctx       context.Context
 
-	fullText     string // accumulated full text so far
-	lastSentText string // what was last successfully sent to the platform
-	lastSentAt   time.Time
-	previewMsgID any    // platform-specific ID for the preview message (returned by SendPreviewStart)
-	degraded     bool   // if true, stop trying (platform doesn't support it or permanent error)
+	fullText           string // accumulated full text so far
+	lastSentText       string // what was last successfully sent to the platform
+	lastSentAt         time.Time
+	lastSentViaUpdate  bool   // true if lastSentText was delivered via UpdateMessage (not SendPreviewStart)
+	previewMsgID       any    // platform-specific ID for the preview message (returned by SendPreviewStart)
+	degraded           bool   // if true, stop trying (platform doesn't support it or permanent error)
 
 	timer     *time.Timer
 	timerStop chan struct{} // closed when preview ends
@@ -177,6 +178,7 @@ func (sp *streamPreview) flushLocked(text string) {
 			sp.previewMsgID = sp.replyCtx
 		}
 		sp.lastSentText = text
+		sp.lastSentViaUpdate = false
 		sp.lastSentAt = time.Now()
 		return
 	}
@@ -189,6 +191,7 @@ func (sp *streamPreview) flushLocked(text string) {
 		return
 	}
 	sp.lastSentText = text
+	sp.lastSentViaUpdate = true
 	sp.lastSentAt = time.Now()
 }
 
@@ -268,13 +271,21 @@ func (sp *streamPreview) finish(finalText string) bool {
 		return false
 	}
 
-	// Always call UpdateMessage for the final text, even if the raw text matches
-	// what was last sent. The preview may have been sent as plain text (via
-	// SendPreviewStart), while UpdateMessage applies platform-specific formatting
-	// (e.g., Markdown→HTML for Telegram). Platform implementations should treat
-	// "message is not modified" as success to avoid duplicate sends.
+	// If the final text is identical to what was last sent via UpdateMessage,
+	// skip the redundant API call. This prevents duplicate messages on platforms
+	// (e.g. Feishu) where patching with identical content may fail.
+	// Only skip when lastSentViaUpdate is true — if the text was only sent via
+	// SendPreviewStart (first flush), we must still call UpdateMessage because
+	// it may apply different formatting (e.g. Markdown→HTML for Telegram).
+	if finalText == sp.lastSentText && sp.lastSentViaUpdate {
+		slog.Debug("stream preview finish: text unchanged since last UpdateMessage, skipping",
+			"text_len", len(finalText))
+		return true
+	}
+
 	slog.Debug("stream preview finish: sending final UpdateMessage",
-		"text_len", len(finalText), "lastSent_len", len(sp.lastSentText), "same", finalText == sp.lastSentText)
+		"text_len", len(finalText), "lastSent_len", len(sp.lastSentText),
+		"same", finalText == sp.lastSentText, "viaUpdate", sp.lastSentViaUpdate)
 	if err := updater.UpdateMessage(sp.ctx, sp.previewMsgID, finalText); err != nil {
 		slog.Debug("stream preview finish: final update FAILED", "error", err)
 		return false

@@ -53,6 +53,19 @@ Examples:
 You can also list or delete cron jobs:
   cc-connect cron list
   cc-connect cron del <job-id>
+
+### Bot-to-bot relay
+When you need to communicate with another bot (e.g. ask another AI agent a question), use:
+
+  cc-connect relay send --to <target_project> "<message>"
+
+IMPORTANT: <target_project> must be the EXACT project name from the /bind command output.
+Do NOT guess or modify the name — use it exactly as shown (e.g. "gemini", not "gemini-bot").
+
+This sends a message to the target bot and waits for its response (printed to stdout).
+The conversation is visible in the group chat and each bot maintains its own relay session.
+
+Environment variables CC_PROJECT and CC_SESSION_KEY are already set, so the relay knows which group chat to use.
 `
 }
 

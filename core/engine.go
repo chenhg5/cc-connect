@@ -152,6 +152,7 @@ type Engine struct {
 
 	rateLimiter   *RateLimiter
 	streamPreview StreamPreviewCfg
+	relayManager  *RelayManager
 
 	// Interactive agent session management
 	interactiveMu     sync.Mutex
@@ -343,6 +344,14 @@ func (e *Engine) SetRateLimitCfg(cfg RateLimitCfg) {
 // SetStreamPreviewCfg configures the streaming preview behavior.
 func (e *Engine) SetStreamPreviewCfg(cfg StreamPreviewCfg) {
 	e.streamPreview = cfg
+}
+
+func (e *Engine) SetRelayManager(rm *RelayManager) {
+	e.relayManager = rm
+}
+
+func (e *Engine) RelayManager() *RelayManager {
+	return e.relayManager
 }
 
 // RemoveCommand removes a custom command by name. Returns false if not found.
@@ -1079,6 +1088,7 @@ var builtinCommands = []struct {
 	{[]string{"restart"}, "restart"},
 	{[]string{"alias"}, "alias"},
 	{[]string{"delete", "del", "rm"}, "delete"},
+	{[]string{"bind"}, "bind"},
 }
 
 // matchPrefix finds a unique command matching the given prefix.
@@ -1200,6 +1210,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdAlias(p, msg, args)
 	case "delete":
 		e.cmdDelete(p, msg, args)
+	case "bind":
+		e.cmdBind(p, msg, args)
 	default:
 		if custom, ok := e.commands.Resolve(cmd); ok {
 			e.executeCustomCommand(p, msg, custom, args)
@@ -3018,4 +3030,174 @@ func splitMessage(text string, maxLen int) []string {
 		text = text[end:]
 	}
 	return chunks
+}
+
+// ──────────────────────────────────────────────────────────────
+// Bot-to-bot relay
+// ──────────────────────────────────────────────────────────────
+
+// HandleRelay processes a relay message synchronously: starts or resumes a
+// dedicated relay session, sends the message to the agent, and blocks until
+// the complete response is collected.
+func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message string) (string, error) {
+	relaySessionKey := "relay:" + fromProject + ":" + chatID
+	session := e.sessions.GetOrCreateActive(relaySessionKey)
+
+	if inj, ok := e.agent.(SessionEnvInjector); ok {
+		envVars := []string{
+			"CC_PROJECT=" + e.name,
+			"CC_SESSION_KEY=" + relaySessionKey,
+		}
+		if exePath, err := os.Executable(); err == nil {
+			binDir := filepath.Dir(exePath)
+			if curPath := os.Getenv("PATH"); curPath != "" {
+				envVars = append(envVars, "PATH="+binDir+string(filepath.ListSeparator)+curPath)
+			}
+		}
+		inj.SetSessionEnv(envVars)
+	}
+
+	agentSession, err := e.agent.StartSession(ctx, session.AgentSessionID)
+	if err != nil {
+		return "", fmt.Errorf("start relay session: %w", err)
+	}
+
+	if session.AgentSessionID == "" {
+		session.AgentSessionID = agentSession.CurrentSessionID()
+		e.sessions.Save()
+	}
+
+	if err := agentSession.Send(message, nil); err != nil {
+		return "", fmt.Errorf("send relay message: %w", err)
+	}
+
+	var textParts []string
+	for event := range agentSession.Events() {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		switch event.Type {
+		case EventText:
+			if event.Content != "" {
+				textParts = append(textParts, event.Content)
+			}
+			if event.SessionID != "" && session.AgentSessionID == "" {
+				session.AgentSessionID = event.SessionID
+				e.sessions.Save()
+			}
+		case EventResult:
+			if event.SessionID != "" {
+				session.AgentSessionID = event.SessionID
+				e.sessions.Save()
+			}
+			resp := event.Content
+			if resp == "" && len(textParts) > 0 {
+				resp = strings.Join(textParts, "")
+			}
+			if resp == "" {
+				resp = "(empty response)"
+			}
+			slog.Info("relay: turn complete", "from", fromProject, "to", e.name, "response_len", len(resp))
+			return resp, nil
+		case EventError:
+			if event.Error != nil {
+				return "", event.Error
+			}
+			return "", fmt.Errorf("agent error (no details)")
+		case EventPermissionRequest:
+			// Auto-approve all permissions in relay mode
+			_ = agentSession.RespondPermission(event.RequestID, PermissionResult{
+				Behavior:     "allow",
+				UpdatedInput: event.ToolInputRaw,
+			})
+		}
+	}
+
+	if len(textParts) > 0 {
+		return strings.Join(textParts, ""), nil
+	}
+	return "", fmt.Errorf("relay: agent process exited without response")
+}
+
+// cmdBind handles /bind — establishes a relay binding between bots in a group chat.
+//
+// Usage:
+//
+//	/bind <project>           — bind current bot with another project in this group
+//	/bind remove              — remove binding for this group
+//	/bind                     — show current binding status
+//
+// The <project> argument is the project name from config.toml [[projects]].
+// The binding is symmetric: once created, both bots can relay messages to each other.
+func (e *Engine) cmdBind(p Platform, msg *Message, args []string) {
+	if e.relayManager == nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgRelayNotAvailable))
+		return
+	}
+
+	_, chatID, err := parseSessionKeyParts(msg.SessionKey)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgRelayNotAvailable))
+		return
+	}
+
+	if len(args) == 0 {
+		e.cmdBindStatus(p, msg.ReplyCtx, chatID)
+		return
+	}
+
+	switch args[0] {
+	case "remove", "rm", "unbind", "del":
+		e.relayManager.Unbind(chatID)
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgRelayUnbound))
+		return
+	case "help", "-h", "--help":
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgRelayUsage))
+		return
+	}
+
+	otherProject := args[0]
+
+	if otherProject == e.name {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgRelayBindSelf))
+		return
+	}
+
+	// Validate the target project exists
+	if !e.relayManager.HasEngine(otherProject) {
+		available := e.relayManager.ListEngineNames()
+		var others []string
+		for _, n := range available {
+			if n != e.name {
+				others = append(others, n)
+			}
+		}
+		if len(others) == 0 {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgRelayNoTarget), otherProject))
+		} else {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgRelayNotFound), otherProject, strings.Join(others, ", ")))
+		}
+		return
+	}
+
+	bots := map[string]string{
+		e.name:       e.name,
+		otherProject: otherProject,
+	}
+	e.relayManager.Bind(p.Name(), chatID, bots)
+
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgRelayBindOK), e.name, otherProject, otherProject, otherProject))
+}
+
+func (e *Engine) cmdBindStatus(p Platform, replyCtx any, chatID string) {
+	binding := e.relayManager.GetBinding(chatID)
+	if binding == nil {
+		e.reply(p, replyCtx, e.i18n.T(MsgRelayNoBinding))
+		return
+	}
+	var parts []string
+	for proj := range binding.Bots {
+		parts = append(parts, proj)
+	}
+	e.reply(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgRelayBound), strings.Join(parts, " ↔ ")))
 }
