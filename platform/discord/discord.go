@@ -164,6 +164,10 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		if m.Author.Bot || m.Author.ID == p.botID {
 			return
 		}
+		if core.IsOldMessage(m.Timestamp) {
+			slog.Debug("discord: ignoring old message after restart", "timestamp", m.Timestamp)
+			return
+		}
 		if !core.AllowList(p.allowFrom, m.Author.ID) {
 			slog.Debug("discord: message from unauthorized user", "user", m.Author.ID)
 			return

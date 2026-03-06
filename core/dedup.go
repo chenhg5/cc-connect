@@ -7,6 +7,11 @@ import (
 
 const dedupTTL = 60 * time.Second
 
+// StartTime is set once at process startup.
+// Platforms use it to discard messages created before the current process started,
+// preventing replayed/unacknowledged messages from being re-processed after a restart.
+var StartTime = time.Now()
+
 // MessageDedup tracks recently seen message IDs to prevent duplicate processing.
 // Safe for concurrent use.
 type MessageDedup struct {
@@ -36,4 +41,11 @@ func (d *MessageDedup) IsDuplicate(msgID string) bool {
 	}
 	d.seen[msgID] = now
 	return false
+}
+
+// IsOldMessage returns true if msgTime is before the process StartTime.
+// A small grace period (2 seconds) is applied to avoid race conditions
+// with messages sent right at startup.
+func IsOldMessage(msgTime time.Time) bool {
+	return msgTime.Before(StartTime.Add(-2 * time.Second))
 }

@@ -88,6 +88,14 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel) {
 		return
 	}
 
+	if data.CreateAt > 0 {
+		msgTime := time.Unix(data.CreateAt/1000, (data.CreateAt%1000)*int64(time.Millisecond))
+		if core.IsOldMessage(msgTime) {
+			slog.Debug("dingtalk: ignoring old message after restart", "create_at", data.CreateAt)
+			return
+		}
+	}
+
 	if !core.AllowList(p.allowFrom, data.SenderStaffId) {
 		slog.Debug("dingtalk: message from unauthorized user", "user", data.SenderStaffId)
 		return

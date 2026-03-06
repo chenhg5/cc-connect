@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 
@@ -106,6 +107,14 @@ func (p *Platform) webhookHandler(w http.ResponseWriter, r *http.Request) {
 		e, ok := event.(webhook.MessageEvent)
 		if !ok {
 			continue
+		}
+
+		if e.Timestamp > 0 {
+			msgTime := time.Unix(e.Timestamp/1000, (e.Timestamp%1000)*int64(time.Millisecond))
+			if core.IsOldMessage(msgTime) {
+				slog.Debug("line: ignoring old message after restart", "timestamp", e.Timestamp)
+				continue
+			}
 		}
 
 		targetID, targetType, userID := extractSource(e.Source)

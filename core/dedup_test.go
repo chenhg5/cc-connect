@@ -1,6 +1,9 @@
 package core
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestMessageDedup_Basic(t *testing.T) {
 	var d MessageDedup
@@ -36,5 +39,20 @@ func TestMessageDedup_Concurrent(t *testing.T) {
 	}
 	for i := 0; i < 100; i++ {
 		<-done
+	}
+}
+
+func TestIsOldMessage(t *testing.T) {
+	if IsOldMessage(time.Now()) {
+		t.Error("current time should not be considered old")
+	}
+	if IsOldMessage(time.Now().Add(1 * time.Minute)) {
+		t.Error("future time should not be considered old")
+	}
+	if !IsOldMessage(StartTime.Add(-10 * time.Second)) {
+		t.Error("message 10s before startup should be old")
+	}
+	if IsOldMessage(StartTime.Add(-1 * time.Second)) {
+		t.Error("message 1s before startup should be within grace period")
 	}
 }

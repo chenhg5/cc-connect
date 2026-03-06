@@ -6,7 +6,9 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 
@@ -98,6 +100,17 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 			case *slackevents.MessageEvent:
 				if ev.BotID != "" || ev.User == "" {
 					return
+				}
+
+				if ts := ev.TimeStamp; ts != "" {
+					if dotIdx := strings.IndexByte(ts, '.'); dotIdx > 0 {
+						if sec, err := strconv.ParseInt(ts[:dotIdx], 10, 64); err == nil {
+							if core.IsOldMessage(time.Unix(sec, 0)) {
+								slog.Debug("slack: ignoring old message after restart", "ts", ts)
+								return
+							}
+						}
+					}
 				}
 
 				slog.Debug("slack: message received", "user", ev.User, "channel", ev.Channel)

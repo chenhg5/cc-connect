@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 
@@ -205,6 +207,16 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 	if p.dedup.IsDuplicate(messageID) {
 		slog.Debug("feishu: duplicate message ignored", "message_id", messageID)
 		return nil
+	}
+
+	if msg.CreateTime != nil {
+		if ms, err := strconv.ParseInt(*msg.CreateTime, 10, 64); err == nil {
+			msgTime := time.Unix(ms/1000, (ms%1000)*int64(time.Millisecond))
+			if core.IsOldMessage(msgTime) {
+				slog.Debug("feishu: ignoring old message after restart", "create_time", *msg.CreateTime)
+				return nil
+			}
+		}
 	}
 
 	chatType := ""

@@ -276,6 +276,13 @@ func (p *Platform) handleMessage(w http.ResponseWriter, r *http.Request, msgSig,
 		return
 	}
 
+	if msg.CreateTime > 0 {
+		if core.IsOldMessage(time.Unix(msg.CreateTime, 0)) {
+			slog.Debug("wecom: ignoring old message after restart", "create_time", msg.CreateTime)
+			return
+		}
+	}
+
 	if !core.AllowList(p.allowFrom, msg.FromUserName) {
 		slog.Debug("wecom: message from unauthorized user", "user", msg.FromUserName)
 		return

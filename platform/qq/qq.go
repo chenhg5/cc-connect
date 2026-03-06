@@ -35,6 +35,7 @@ type Platform struct {
 	echoCh    sync.Map // echo -> chan json.RawMessage
 	cancel    context.CancelFunc
 	selfID    int64
+	dedup     core.MessageDedup
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -156,6 +157,19 @@ func (p *Platform) handleMessage(payload map[string]any) {
 	messageID := jsonInt64(payload, "message_id")
 
 	if userID == p.selfID {
+		return
+	}
+
+	if ts, ok := payload["time"].(float64); ok && ts > 0 {
+		if core.IsOldMessage(time.Unix(int64(ts), 0)) {
+			slog.Debug("qq: ignoring old message after restart", "time", int64(ts))
+			return
+		}
+	}
+
+	msgIDStr := strconv.FormatInt(messageID, 10)
+	if p.dedup.IsDuplicate(msgIDStr) {
+		slog.Debug("qq: duplicate message ignored", "message_id", messageID)
 		return
 	}
 
