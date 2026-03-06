@@ -44,10 +44,11 @@ type DisplayConfig struct {
 
 // StreamPreviewConfig controls real-time streaming preview in IM.
 type StreamPreviewConfig struct {
-	Enabled       *bool `toml:"enabled"`         // default true
-	IntervalMs    *int  `toml:"interval_ms"`     // min ms between updates; default 1500
-	MinDeltaChars *int  `toml:"min_delta_chars"` // min new chars before update; default 30
-	MaxChars      *int  `toml:"max_chars"`       // max preview length; default 2000
+	Enabled           *bool    `toml:"enabled"`                     // default true
+	DisabledPlatforms []string `toml:"disabled_platforms,omitempty"` // platforms where preview is disabled (e.g. ["feishu"])
+	IntervalMs        *int     `toml:"interval_ms"`                  // min ms between updates; default 1500
+	MinDeltaChars     *int     `toml:"min_delta_chars"`              // min new chars before update; default 30
+	MaxChars          *int     `toml:"max_chars"`                    // max preview length; default 2000
 }
 
 // RateLimitConfig controls per-session message rate limiting.
