@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -326,10 +327,18 @@ func scanSessionMeta(path string) (string, int) {
 			}
 		}
 	}
+	summary = stripXMLTags(summary)
+	summary = strings.TrimSpace(summary)
 	if utf8.RuneCountInString(summary) > 40 {
 		summary = string([]rune(summary)[:40]) + "..."
 	}
 	return summary, count
+}
+
+var xmlTagRe = regexp.MustCompile(`<[^>]+>`)
+
+func stripXMLTags(s string) string {
+	return xmlTagRe.ReplaceAllString(s, "")
 }
 
 // GetSessionHistory reads the Claude Code JSONL transcript and returns user/assistant messages.

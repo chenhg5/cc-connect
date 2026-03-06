@@ -215,6 +215,9 @@ const (
 	MsgStatusMode    MsgKey = "status_mode"
 	MsgStatusSession MsgKey = "status_session"
 	MsgStatusCron    MsgKey = "status_cron"
+	MsgStatusQuiet   MsgKey = "status_quiet"
+	MsgQuietOnShort  MsgKey = "quiet_on_short"
+	MsgQuietOffShort MsgKey = "quiet_off_short"
 
 	MsgModelDefault   MsgKey = "model_default"
 	MsgModelListTitle MsgKey = "model_list_title"
@@ -257,8 +260,8 @@ const (
 	MsgDoctorTitle   MsgKey = "doctor_title"
 	MsgDoctorSummary MsgKey = "doctor_summary"
 
-	MsgRestarting      MsgKey = "restarting"
-	MsgRestartSuccess  MsgKey = "restart_success"
+	MsgRestarting     MsgKey = "restarting"
+	MsgRestartSuccess MsgKey = "restart_success"
 
 	MsgUpgradeChecking    MsgKey = "upgrade_checking"
 	MsgUpgradeUpToDate    MsgKey = "upgrade_up_to_date"
@@ -267,12 +270,12 @@ const (
 	MsgUpgradeSuccess     MsgKey = "upgrade_success"
 	MsgUpgradeDevBuild    MsgKey = "upgrade_dev_build"
 
-	MsgAliasEmpty     MsgKey = "alias_empty"
+	MsgAliasEmpty      MsgKey = "alias_empty"
 	MsgAliasListHeader MsgKey = "alias_list_header"
-	MsgAliasAdded     MsgKey = "alias_added"
-	MsgAliasDeleted   MsgKey = "alias_deleted"
-	MsgAliasNotFound  MsgKey = "alias_not_found"
-	MsgAliasUsage     MsgKey = "alias_usage"
+	MsgAliasAdded      MsgKey = "alias_added"
+	MsgAliasDeleted    MsgKey = "alias_deleted"
+	MsgAliasNotFound   MsgKey = "alias_not_found"
+	MsgAliasUsage      MsgKey = "alias_usage"
 
 	MsgNewSessionCreated     MsgKey = "new_session_created"
 	MsgNewSessionCreatedName MsgKey = "new_session_created_name"
@@ -296,11 +299,11 @@ const (
 	MsgRelayNotFound     MsgKey = "relay_not_found"
 	MsgRelayNoTarget     MsgKey = "relay_no_target"
 
-	MsgSearchUsage     MsgKey = "search_usage"
-	MsgSearchError     MsgKey = "search_error"
-	MsgSearchNoResult  MsgKey = "search_no_result"
-	MsgSearchResult    MsgKey = "search_result"
-	MsgSearchHint      MsgKey = "search_hint"
+	MsgSearchUsage    MsgKey = "search_usage"
+	MsgSearchError    MsgKey = "search_error"
+	MsgSearchNoResult MsgKey = "search_no_result"
+	MsgSearchResult   MsgKey = "search_result"
+	MsgSearchHint     MsgKey = "search_hint"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -316,11 +319,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangChinese: "💭 %s",
 	},
 	MsgTool: {
-		LangEnglish:            "🔧 Tool #%d: **%s**\n`%s`",
-		LangChinese:            "🔧 工具 #%d: **%s**\n`%s`",
-		LangTraditionalChinese: "🔧 工具 #%d: **%s**\n`%s`",
-		LangJapanese:           "🔧 ツール #%d: **%s**\n`%s`",
-		LangSpanish:            "🔧 Herramienta #%d: **%s**\n`%s`",
+		LangEnglish:            "🔧 **Tool #%d: %s**\n---\n%s",
+		LangChinese:            "🔧 **工具 #%d: %s**\n---\n%s",
+		LangTraditionalChinese: "🔧 **工具 #%d: %s**\n---\n%s",
+		LangJapanese:           "🔧 **ツール #%d: %s**\n---\n%s",
+		LangSpanish:            "🔧 **Herramienta #%d: %s**\n---\n%s",
 	},
 	MsgExecutionStopped: {
 		LangEnglish:            "⏹ Execution stopped.",
@@ -1146,6 +1149,27 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "定時任務: %d (啟用: %d)\n",
 		LangJapanese:           "スケジュールタスク: %d (有効: %d)\n",
 		LangSpanish:            "Tareas programadas: %d (habilitadas: %d)\n",
+	},
+	MsgStatusQuiet: {
+		LangEnglish:            "Quiet mode: %s\n",
+		LangChinese:            "安静模式: %s\n",
+		LangTraditionalChinese: "安靜模式: %s\n",
+		LangJapanese:           "出力抑制モード: %s\n",
+		LangSpanish:            "Modo silencioso: %s\n",
+	},
+	MsgQuietOnShort: {
+		LangEnglish:            "ON",
+		LangChinese:            "开启",
+		LangTraditionalChinese: "開啟",
+		LangJapanese:           "ON",
+		LangSpanish:            "Activado",
+	},
+	MsgQuietOffShort: {
+		LangEnglish:            "OFF",
+		LangChinese:            "关闭",
+		LangTraditionalChinese: "關閉",
+		LangJapanese:           "OFF",
+		LangSpanish:            "Desactivado",
 	},
 	MsgModelDefault: {
 		LangEnglish:            "Current model: (not set, using agent default)\n",

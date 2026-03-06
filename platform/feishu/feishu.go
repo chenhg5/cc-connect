@@ -449,13 +449,13 @@ func buildReplyContent(content string) (msgType string, body string) {
 		b, _ := json.Marshal(map[string]string{"text": content})
 		return larkim.MsgTypeText, string(b)
 	}
-	// Dual rendering strategy (aligned with Claude-to-IM / Openclaw):
-	// - Code blocks / tables → interactive card (schema 2.0 markdown), smaller font but renders code properly
-	// - Other markdown → post with md tag, normal chat font size
+	// Dual rendering strategy:
+	// - Code blocks / tables → interactive card (schema 2.0 markdown), renders code/tables properly
+	// - Other markdown → post (rich text), preserves blank-line spacing and supports inline formatting
 	if hasComplexMarkdown(content) {
 		return larkim.MsgTypeInteractive, buildCardJSON(preprocessFeishuMarkdown(content))
 	}
-	return larkim.MsgTypePost, buildPostMdJSON(content)
+	return larkim.MsgTypePost, buildPostJSON(content)
 }
 
 // hasComplexMarkdown detects code blocks or tables that require card rendering.
@@ -473,21 +473,6 @@ func hasComplexMarkdown(s string) bool {
 	return false
 }
 
-// buildPostMdJSON builds a Feishu post message using the md tag,
-// which renders markdown at normal chat font size.
-func buildPostMdJSON(content string) string {
-	post := map[string]any{
-		"zh_cn": map[string]any{
-			"content": [][]map[string]any{
-				{
-					{"tag": "md", "text": content},
-				},
-			},
-		},
-	}
-	b, _ := json.Marshal(post)
-	return string(b)
-}
 
 // preprocessFeishuMarkdown ensures code fences have a newline before them,
 // which prevents rendering issues in Feishu card markdown.
@@ -937,3 +922,4 @@ func (p *Platform) extractPostParts(messageID string, post *postLang) ([]string,
 	}
 	return textParts, images
 }
+
