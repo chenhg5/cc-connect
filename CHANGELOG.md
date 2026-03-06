@@ -1,5 +1,35 @@
 # Changelog
 
+## v1.2.0-beta.3 (2026-03-06)
+
+### New Features
+- **Streaming Preview**: Real-time message preview that updates in-place as the agent streams output; supported on Telegram, Discord, and Feishu with configurable interval, min delta, and max length
+- **Rate Limiting**: Per-session sliding-window rate limiter to prevent message flooding; configurable `max_messages` and `window_secs`
+- **Typing Indicators**: Visual processing feedback — Telegram/Discord show native typing action, Feishu adds emoji reaction (auto-removed on completion)
+- **Command Aliases**: Define shortcut aliases for commands (`[[aliases]]` in config.toml or `/alias add`); e.g. map "帮助" → "/help"
+- **Banned Words Filter**: Block messages containing configured sensitive words (`banned_words` in config.toml)
+- **Project-level Command Disabling**: Disable specific commands per project via `disabled_commands` config
+- **Session Deletion**: Delete sessions with `/del` command
+- **`/switch` Fuzzy Matching**: Switch sessions by name, ID prefix, or summary substring in addition to numeric index
+
+### Improvements
+- **Telegram Markdown→HTML**: Full Markdown-to-HTML conversion with proper escaping, placeholder-based tag nesting, and automatic fallback to plain text on parse errors
+- **Discord Code-Fence-Aware Splitting**: Message chunking now respects code block boundaries, closing and re-opening fences across splits
+- **Feishu Dual Rendering**: Simple markdown uses Post messages (normal font), code blocks/tables use Card messages (native rendering); matches Claude-to-IM's approach
+- **Feishu Permission Interaction**: Confirmed WebSocket mode incompatibility with card button callbacks; uses text-based `/perm` commands (consistent with Claude-to-IM)
+- **Session Creation & Naming**: Improved session naming with last user message as summary
+- **Graceful Shutdown**: Improved context handling and lock release during shutdown
+- **Unit Tests**: Added ~50 new test cases covering markdown conversion, message splitting, session management, and engine logic
+
+### Bug Fixes
+- **Telegram HTML Crossed Tags**: Fixed `<b><i>...</b></i>` nesting issues by using placeholder-based formatting pipeline
+- **Telegram HTML Attribute Escaping**: Fixed `"` in URLs breaking `<a href>` attributes (escape to `&quot;`)
+- **Telegram Duplicate Messages**: Fixed duplicate sends caused by streaming preview optimization skipping final HTML update
+- **Streaming Preview Cursor**: Removed trailing `▍` cursor from final messages
+- **Feishu Message Recall**: Unified preview and final message types to Card, eliminating unnecessary delete-and-resend
+- **Feishu Reaction Cleanup**: Register empty handler for `im.message.reaction.deleted_v1` to suppress error logs
+- **`fmt.Sprintf` Warnings**: Remove non-constant format strings flagged by `go vet`
+
 ## v1.2.0-beta.2 (2026-03-01)
 
 ### New Features
