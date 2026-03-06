@@ -92,7 +92,7 @@ level = "info" # debug, info, warn, error
 
 # [speech]
 # enabled = true
-# provider = "openai"    # "openai" or "groq" / "openai" 或 "groq"
+# provider = "openai"    # "openai", "groq", or "qwen" / "openai"、"groq" 或 "qwen"
 # language = ""          # e.g. "zh", "en"; empty = auto-detect / 如 "zh"、"en"；留空自动检测
 #
 # [speech.openai]

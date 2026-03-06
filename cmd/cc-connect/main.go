@@ -298,6 +298,15 @@ func main() {
 				} else {
 					slog.Warn("speech: groq provider enabled but api_key is empty")
 				}
+			case "qwen":
+				apiKey := cfg.Speech.Qwen.APIKey
+				baseURL := cfg.Speech.Qwen.BaseURL
+				model := cfg.Speech.Qwen.Model
+				if apiKey != "" {
+					speechCfg.STT = core.NewQwenASR(apiKey, baseURL, model)
+				} else {
+					slog.Warn("speech: qwen provider enabled but api_key is empty")
+				}
 			default: // "openai" or unspecified
 				apiKey := cfg.Speech.OpenAI.APIKey
 				baseURL := cfg.Speech.OpenAI.BaseURL
