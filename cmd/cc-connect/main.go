@@ -247,12 +247,15 @@ func main() {
 				spcfg.MinDeltaChars = *cfg.StreamPreview.MinDeltaChars
 			}
 			if cfg.StreamPreview.MaxChars != nil {
-				spcfg.MaxChars = *cfg.StreamPreview.MaxChars
-			}
-			engine.SetStreamPreviewCfg(spcfg)
-		}
+                spcfg.MaxChars = *cfg.StreamPreview.MaxChars
+            }
+            if cfg.StreamPreview.DisabledPlatforms != nil {
+                spcfg.DisabledPlatforms = cfg.StreamPreview.DisabledPlatforms
+            }
+            engine.SetStreamPreviewCfg(spcfg)
+        }
 
-		// Wire rate limiting
+        // Wire rate limiting
 		{
 			maxMsg := 20
 			windowSecs := 60

@@ -449,11 +449,15 @@ func buildReplyContent(content string) (msgType string, body string) {
 		b, _ := json.Marshal(map[string]string{"text": content})
 		return larkim.MsgTypeText, string(b)
 	}
-	// Dual rendering strategy (aligned with Claude-to-IM / Openclaw):
-	// - Code blocks / tables → interactive card (schema 2.0 markdown), smaller font but renders code properly
-	// - Other markdown → post with md tag, normal chat font size
+	// Three-tier rendering strategy:
+	// 1. Code blocks / tables → card (schema 2.0 markdown)
+	// 2. Many \n\n paragraphs (help, status, etc.) → post rich-text (preserves blank lines)
+	// 3. Other markdown → post md tag (best native rendering)
 	if hasComplexMarkdown(content) {
 		return larkim.MsgTypeInteractive, buildCardJSON(preprocessFeishuMarkdown(content))
+	}
+	if strings.Count(content, "\n\n") >= 4 {
+		return larkim.MsgTypePost, buildPostJSON(content)
 	}
 	return larkim.MsgTypePost, buildPostMdJSON(content)
 }
@@ -937,3 +941,4 @@ func (p *Platform) extractPostParts(messageID string, post *postLang) ([]string,
 	}
 	return textParts, images
 }
+

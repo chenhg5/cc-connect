@@ -972,7 +972,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if !quiet {
 				sp.freeze()
 				inputPreview := truncateIf(event.ToolInput, e.display.ToolMaxLen)
-				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgTool), toolCount, event.ToolName, inputPreview))
+				// Use code block if content is long (>5 lines or >200 chars), otherwise inline code
+				lineCount := strings.Count(inputPreview, "\n") + 1
+				var formattedInput string
+				if lineCount > 5 || utf8.RuneCountInString(inputPreview) > 200 {
+					formattedInput = fmt.Sprintf("```\n%s\n```", inputPreview)
+				} else {
+					formattedInput = fmt.Sprintf("`%s`", inputPreview)
+				}
+				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgTool), toolCount, event.ToolName, formattedInput))
 			}
 
 		case EventText:
@@ -1428,7 +1436,7 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 		displayName = matched.Summary
 	}
 	e.reply(p, msg.ReplyCtx,
-		fmt.Sprintf("✅ Switched to: %s (%s, %d msgs)", displayName, shortID, matched.MessageCount))
+		e.i18n.Tf(MsgSwitchSuccess, displayName, shortID, matched.MessageCount))
 }
 
 // matchSession resolves a user query to an agent session. Priority:
@@ -1654,6 +1662,13 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 			modeStr = e.i18n.Tf(MsgStatusMode, mode)
 		}
 	}
+
+	// Quiet mode
+	quietStr := e.i18n.T(MsgQuietOffShort)
+	if state, ok := e.interactiveStates[msg.SessionKey]; ok && state.quiet {
+		quietStr = e.i18n.T(MsgQuietOnShort)
+	}
+	modeStr += e.i18n.Tf(MsgStatusQuiet, quietStr)
 
 	// Session info
 	s := e.sessions.GetOrCreateActive(msg.SessionKey)

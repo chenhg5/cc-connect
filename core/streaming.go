@@ -3,25 +3,28 @@ package core
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 )
 
 // StreamPreviewCfg controls the streaming preview behavior.
 type StreamPreviewCfg struct {
-	Enabled       bool          // global toggle
-	IntervalMs    int           // minimum ms between updates (default 1500)
-	MinDeltaChars int           // minimum new chars before sending an update (default 30)
-	MaxChars      int           // max preview length (default 2000)
+	Enabled           bool     // global toggle
+	DisabledPlatforms []string // platforms where streaming preview is disabled (e.g. "feishu")
+	IntervalMs        int      // minimum ms between updates (default 1500)
+	MinDeltaChars     int      // minimum new chars before sending an update (default 30)
+	MaxChars          int      // max preview length (default 2000)
 }
 
 // DefaultStreamPreviewCfg returns sensible defaults.
 func DefaultStreamPreviewCfg() StreamPreviewCfg {
 	return StreamPreviewCfg{
-		Enabled:       true,
-		IntervalMs:    1500,
-		MinDeltaChars: 30,
-		MaxChars:      2000,
+		Enabled:           true,
+		DisabledPlatforms: nil,
+		IntervalMs:        1500,
+		MinDeltaChars:     30,
+		MaxChars:          2000,
 	}
 }
 
@@ -73,10 +76,17 @@ func newStreamPreview(cfg StreamPreviewCfg, p Platform, replyCtx any, ctx contex
 	}
 }
 
-// canPreview returns true if the platform supports message updating.
+// canPreview returns true if the platform supports message updating and is not disabled.
 func (sp *streamPreview) canPreview() bool {
 	if sp.degraded || !sp.cfg.Enabled {
 		return false
+	}
+	// Check if platform is in disabled list
+	platformName := sp.platform.Name()
+	for _, disabled := range sp.cfg.DisabledPlatforms {
+		if strings.EqualFold(disabled, platformName) {
+			return false
+		}
 	}
 	_, ok := sp.platform.(MessageUpdater)
 	return ok
