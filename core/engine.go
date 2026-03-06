@@ -1436,7 +1436,7 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 		displayName = matched.Summary
 	}
 	e.reply(p, msg.ReplyCtx,
-		fmt.Sprintf("✅ Switched to: %s (%s, %d msgs)", displayName, shortID, matched.MessageCount))
+		e.i18n.Tf(MsgSwitchSuccess, displayName, shortID, matched.MessageCount))
 }
 
 // matchSession resolves a user query to an agent session. Priority:

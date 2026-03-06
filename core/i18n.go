@@ -285,6 +285,8 @@ const (
 	MsgDeleteActiveDenied MsgKey = "delete_active_denied"
 	MsgDeleteNotSupported MsgKey = "delete_not_supported"
 
+	MsgSwitchSuccess MsgKey = "switch_success"
+
 	MsgBannedWordBlocked MsgKey = "banned_word_blocked"
 	MsgCommandDisabled   MsgKey = "command_disabled"
 	MsgRateLimited       MsgKey = "rate_limited"
@@ -1568,6 +1570,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "🗑️ 會話已刪除：%s",
 		LangJapanese:           "🗑️ セッション削除：%s",
 		LangSpanish:            "🗑️ Sesión eliminada: %s",
+	},
+	MsgSwitchSuccess: {
+		LangEnglish:            "✅ Switched to: %s (%s, %d msgs)",
+		LangChinese:            "✅ 已切换到：%s（%s，%d 条消息）",
+		LangTraditionalChinese: "✅ 已切換到：%s（%s，%d 則訊息）",
+		LangJapanese:           "✅ 切り替え：%s（%s、%d件）",
+		LangSpanish:            "✅ Cambiado a: %s (%s, %d mensajes)",
 	},
 	MsgDeleteActiveDenied: {
 		LangEnglish:            "❌ Cannot delete the currently active session. Switch to another session first.",
