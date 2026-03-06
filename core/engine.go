@@ -1214,7 +1214,7 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 	case "new":
 		e.cmdNew(p, msg, args)
 	case "list":
-		e.cmdList(p, msg)
+		e.cmdList(p, msg, args)
 	case "switch":
 		e.cmdSwitch(p, msg, args)
 	case "name":
@@ -1300,7 +1300,9 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 	_ = s
 }
 
-func (e *Engine) cmdList(p Platform, msg *Message) {
+const listPageSize = 20
+
+func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 	agentSessions, err := e.agent.ListSessions(e.ctx)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgListError), err))
@@ -1311,18 +1313,36 @@ func (e *Engine) cmdList(p Platform, msg *Message) {
 		return
 	}
 
+	total := len(agentSessions)
+	totalPages := (total + listPageSize - 1) / listPageSize
+
+	page := 1
+	if len(args) > 0 {
+		if n, err := strconv.Atoi(args[0]); err == nil && n > 0 {
+			page = n
+		}
+	}
+	if page > totalPages {
+		page = totalPages
+	}
+
+	start := (page - 1) * listPageSize
+	end := start + listPageSize
+	if end > total {
+		end = total
+	}
+
 	agentName := e.agent.Name()
 	activeSession := e.sessions.GetOrCreateActive(msg.SessionKey)
 	activeAgentID := activeSession.AgentSessionID
 
-	limit := 20
-	if len(agentSessions) < limit {
-		limit = len(agentSessions)
-	}
-
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf(e.i18n.T(MsgListTitle), agentName, len(agentSessions)))
-	for i := 0; i < limit; i++ {
+	if totalPages > 1 {
+		sb.WriteString(fmt.Sprintf(e.i18n.T(MsgListTitlePaged), agentName, total, page, totalPages))
+	} else {
+		sb.WriteString(fmt.Sprintf(e.i18n.T(MsgListTitle), agentName, total))
+	}
+	for i := start; i < end; i++ {
 		s := agentSessions[i]
 		marker := "◻"
 		if s.ID == activeAgentID {
@@ -1344,8 +1364,8 @@ func (e *Engine) cmdList(p Platform, msg *Message) {
 		sb.WriteString(fmt.Sprintf("%s **%d.** %s · **%d** msgs · %s\n",
 			marker, i+1, displayName, s.MessageCount, s.ModifiedAt.Format("01-02 15:04")))
 	}
-	if len(agentSessions) > limit {
-		sb.WriteString(fmt.Sprintf(e.i18n.T(MsgListMore), len(agentSessions)-limit))
+	if totalPages > 1 {
+		sb.WriteString(fmt.Sprintf(e.i18n.T(MsgListPageHint), page, totalPages))
 	}
 	sb.WriteString(e.i18n.T(MsgListSwitchHint))
 	e.reply(p, msg.ReplyCtx, sb.String())

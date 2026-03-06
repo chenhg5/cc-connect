@@ -148,8 +148,10 @@ const (
 	MsgUnknownCommand       MsgKey = "unknown_command"
 	MsgHelp                 MsgKey = "help"
 	MsgListTitle            MsgKey = "list_title"
+	MsgListTitlePaged       MsgKey = "list_title_paged"
 	MsgListEmpty            MsgKey = "list_empty"
 	MsgListMore             MsgKey = "list_more"
+	MsgListPageHint         MsgKey = "list_page_hint"
 	MsgListSwitchHint       MsgKey = "list_switch_hint"
 	MsgListError            MsgKey = "list_error"
 	MsgHistoryEmpty         MsgKey = "history_empty"
@@ -656,6 +658,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "**%s セッション** (%d)\n\n",
 		LangSpanish:            "**Sesiones de %s** (%d)\n\n",
 	},
+	MsgListTitlePaged: {
+		LangEnglish:            "**%s Sessions** (%d) · Page %d/%d\n\n",
+		LangChinese:            "**%s 会话列表** (%d) · 第 %d/%d 页\n\n",
+		LangTraditionalChinese: "**%s 會話列表** (%d) · 第 %d/%d 頁\n\n",
+		LangJapanese:           "**%s セッション** (%d) · %d/%d ページ\n\n",
+		LangSpanish:            "**Sesiones de %s** (%d) · Página %d/%d\n\n",
+	},
 	MsgListEmpty: {
 		LangEnglish:            "No sessions found for this project.",
 		LangChinese:            "未找到此项目的会话。",
@@ -669,6 +678,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "\n... 還有 %d 條\n",
 		LangJapanese:           "\n... 他 %d 件\n",
 		LangSpanish:            "\n... y %d más\n",
+	},
+	MsgListPageHint: {
+		LangEnglish:            "\n\nPage %d/%d \n\n`/list <page>` for more\n",
+		LangChinese:            "\n\n第 %d/%d 页 \n\n`/list <页码>` 翻页\n",
+		LangTraditionalChinese: "\n\n第 %d/%d 頁 \n\n`/list <頁碼>` 翻頁\n",
+		LangJapanese:           "\n\n%d/%d ページ \n\n`/list <ページ>` で移動\n",
+		LangSpanish:            "\n\nPágina %d/%d \n\n`/list <página>` para más\n",
 	},
 	MsgListSwitchHint: {
 		LangEnglish:            "\n`/switch <number>` to switch session",
