@@ -116,13 +116,13 @@ type RateLimitCfg struct {
 
 // Engine routes messages between platforms and the agent for a single project.
 type Engine struct {
-	name      string
-	agent     Agent
-	platforms []Platform
-	sessions  *SessionManager
-	ctx       context.Context
-	cancel    context.CancelFunc
-	i18n      *I18n
+	name         string
+	agent        Agent
+	platforms    []Platform
+	sessions     *SessionManager
+	ctx          context.Context
+	cancel       context.CancelFunc
+	i18n         *I18n
 	speech       SpeechCfg
 	display      DisplayCfg
 	defaultQuiet bool
@@ -897,7 +897,7 @@ func (e *Engine) cleanupInteractiveState(sessionKey string) {
 // eventIdleTimeout is the maximum time to wait between consecutive agent events
 // before considering the agent session stuck. This prevents infinite hangs when
 // the agent process is alive but unresponsive (e.g. internal deadlock, API timeout).
-const eventIdleTimeout = 5 * time.Minute
+const eventIdleTimeout = 30 * time.Minute
 
 func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessionKey string, turnStart time.Time) {
 	var textParts []string
