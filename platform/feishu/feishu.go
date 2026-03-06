@@ -96,6 +96,9 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		}).
 		OnP2MessageReactionCreatedV1(func(ctx context.Context, event *larkim.P2MessageReactionCreatedV1) error {
 			return nil // ignore reaction events (triggered by our own addReaction)
+		}).
+		OnP2MessageReactionDeletedV1(func(ctx context.Context, event *larkim.P2MessageReactionDeletedV1) error {
+			return nil // ignore reaction removal events (triggered by our own removeReaction)
 		})
 
 	p.wsClient = larkws.NewClient(p.appID, p.appSecret,
