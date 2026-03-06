@@ -59,7 +59,7 @@ type RateLimitConfig struct {
 // SpeechConfig configures speech-to-text for voice messages.
 type SpeechConfig struct {
 	Enabled  bool   `toml:"enabled"`
-	Provider string `toml:"provider"` // "openai" | "groq"
+	Provider string `toml:"provider"` // "openai" | "groq" | "qwen"
 	Language string `toml:"language"` // e.g. "zh", "en"; empty = auto-detect
 	OpenAI   struct {
 		APIKey  string `toml:"api_key"`
@@ -70,6 +70,11 @@ type SpeechConfig struct {
 		APIKey string `toml:"api_key"`
 		Model  string `toml:"model"`
 	} `toml:"groq"`
+	Qwen struct {
+		APIKey  string `toml:"api_key"`
+		BaseURL string `toml:"base_url"`
+		Model   string `toml:"model"`
+	} `toml:"qwen"`
 }
 
 // ProjectConfig binds one agent (with a specific work_dir) to one or more platforms.

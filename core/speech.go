@@ -3,6 +3,7 @@ package core
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -107,6 +108,97 @@ func (w *OpenAIWhisper) Transcribe(ctx context.Context, audio []byte, format str
 	return text, nil
 }
 
+// QwenASR implements SpeechToText using the Qwen ASR model via DashScope's
+// OpenAI-compatible chat completions API. Unlike Whisper, audio is sent as a
+// base64 data URI inside the messages array.
+type QwenASR struct {
+	APIKey  string
+	BaseURL string
+	Model   string
+	Client  *http.Client
+}
+
+func NewQwenASR(apiKey, baseURL, model string) *QwenASR {
+	if baseURL == "" {
+		baseURL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+	}
+	if model == "" {
+		model = "qwen3-asr-flash"
+	}
+	return &QwenASR{
+		APIKey:  apiKey,
+		BaseURL: strings.TrimRight(baseURL, "/"),
+		Model:   model,
+		Client:  &http.Client{Timeout: 60 * time.Second},
+	}
+}
+
+func (q *QwenASR) Transcribe(ctx context.Context, audio []byte, format string, lang string) (string, error) {
+	b64 := base64.StdEncoding.EncodeToString(audio)
+	dataURI := fmt.Sprintf("data:%s;base64,%s", formatToAudioMIME(format), b64)
+
+	reqBody := map[string]any{
+		"model": q.Model,
+		"messages": []map[string]any{
+			{
+				"role": "user",
+				"content": []map[string]any{
+					{
+						"type": "input_audio",
+						"input_audio": map[string]any{
+							"data": dataURI,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("marshal request: %w", err)
+	}
+
+	url := q.BaseURL + "/chat/completions"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(jsonData))
+	if err != nil {
+		return "", fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+q.APIKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := q.Client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("qwen asr request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("qwen asr API %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("parse response: %w", err)
+	}
+	if len(result.Choices) == 0 {
+		return "", fmt.Errorf("qwen asr: empty choices in response")
+	}
+
+	return strings.TrimSpace(result.Choices[0].Message.Content), nil
+}
+
 // ConvertAudioToMP3 uses ffmpeg to convert audio from unsupported formats to mp3.
 // Returns the mp3 bytes. If ffmpeg is not installed, returns an error.
 func ConvertAudioToMP3(audio []byte, srcFormat string) ([]byte, error) {
@@ -115,16 +207,7 @@ func ConvertAudioToMP3(audio []byte, srcFormat string) ([]byte, error) {
 		return nil, fmt.Errorf("ffmpeg not found in PATH: install ffmpeg to enable voice message support")
 	}
 
-	cmd := exec.Command(ffmpegPath,
-		"-i", "pipe:0",
-		"-f", srcFormat,
-		"-f", "mp3",
-		"-ac", "1",
-		"-ar", "16000",
-		"-y",
-		"pipe:1",
-	)
-	// For formats where ffmpeg can't auto-detect from pipe, specify input format
+	var cmd *exec.Cmd
 	if srcFormat == "amr" || srcFormat == "silk" {
 		cmd = exec.Command(ffmpegPath,
 			"-f", srcFormat,
@@ -191,6 +274,23 @@ func formatToExt(format string) string {
 		return "silk"
 	default:
 		return format
+	}
+}
+
+func formatToAudioMIME(format string) string {
+	switch strings.ToLower(format) {
+	case "mp3", "mpeg", "mpga":
+		return "audio/mpeg"
+	case "wav":
+		return "audio/wav"
+	case "ogg", "oga", "opus":
+		return "audio/ogg"
+	case "m4a", "mp4", "aac":
+		return "audio/mp4"
+	case "webm":
+		return "audio/webm"
+	default:
+		return "audio/octet-stream"
 	}
 }
 
