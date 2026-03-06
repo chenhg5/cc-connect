@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -89,6 +90,29 @@ func TestMarkdownToTelegramHTML_LinkWithAmpersand(t *testing.T) {
 	}
 }
 
+func TestMarkdownToTelegramHTML_LinkWithQuotesInURL(t *testing.T) {
+	out := MarkdownToTelegramHTML(`visit [book](https://example.com/q="test")`)
+	if strings.Contains(out, `href="https://example.com/q="`) {
+		t.Errorf("unescaped quote in href attribute, got %q", out)
+	}
+	if !strings.Contains(out, `&quot;`) {
+		t.Errorf("expected escaped quote in URL, got %q", out)
+	}
+	if err := validateHTMLNesting(out); err != nil {
+		t.Errorf("invalid HTML: %v, got %q", err, out)
+	}
+}
+
+func TestMarkdownToTelegramHTML_EscapesQuotesInText(t *testing.T) {
+	out := MarkdownToTelegramHTML(`He said "hello" world`)
+	if strings.Contains(out, `"hello"`) {
+		t.Errorf("quotes in text should be escaped, got %q", out)
+	}
+	if !strings.Contains(out, `&quot;hello&quot;`) {
+		t.Errorf("expected &quot; in output, got %q", out)
+	}
+}
+
 func TestMarkdownToTelegramHTML_CodeBlockEscapesHTML(t *testing.T) {
 	md := "```\nif a < b && c > d {\n}\n```"
 	out := MarkdownToTelegramHTML(md)
@@ -115,6 +139,69 @@ func TestMarkdownToTelegramHTML_MixedFormattingWithSpecialChars(t *testing.T) {
 	if !strings.Contains(out, "&lt;") {
 		t.Errorf("expected escaped <, got %q", out)
 	}
+}
+
+func TestMarkdownToTelegramHTML_NoCrossedTags(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{"bold then italic", "**bold *text***"},
+		{"italic around bold", "*italic **bold** more*"},
+		{"heading with bold", "## **important** heading"},
+		{"heading with italic", "## *weather* report"},
+		{"mixed line", "**北京** *晴天* 25°C"},
+		{"triple star", "***bold italic***"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := MarkdownToTelegramHTML(tt.input)
+			// Check no crossed tags: every <b> must close before enclosing </i> etc.
+			// Simple check: no </b> inside an <i> block or vice versa
+			if err := validateHTMLNesting(out); err != nil {
+				t.Errorf("crossed tags in output %q: %v", out, err)
+			}
+		})
+	}
+}
+
+func validateHTMLNesting(html string) error {
+	var stack []string
+	i := 0
+	for i < len(html) {
+		if html[i] != '<' {
+			i++
+			continue
+		}
+		end := strings.Index(html[i:], ">")
+		if end < 0 {
+			break
+		}
+		tag := html[i+1 : i+end]
+		i += end + 1
+		if strings.HasPrefix(tag, "/") {
+			closing := tag[1:]
+			// strip attributes
+			if sp := strings.IndexByte(closing, ' '); sp > 0 {
+				closing = closing[:sp]
+			}
+			if len(stack) == 0 {
+				return fmt.Errorf("unexpected closing tag </%s>", closing)
+			}
+			top := stack[len(stack)-1]
+			if top != closing {
+				return fmt.Errorf("expected </%s>, found </%s>", top, closing)
+			}
+			stack = stack[:len(stack)-1]
+		} else {
+			name := tag
+			if sp := strings.IndexByte(name, ' '); sp > 0 {
+				name = name[:sp]
+			}
+			stack = append(stack, name)
+		}
+	}
+	return nil
 }
 
 func TestSplitMessageCodeFenceAware_Short(t *testing.T) {

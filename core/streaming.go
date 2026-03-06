@@ -152,6 +152,7 @@ func (sp *streamPreview) flushLocked(text string) {
 
 	updater, ok := sp.platform.(MessageUpdater)
 	if !ok {
+		slog.Debug("stream preview: platform does not support UpdateMessage, degrading")
 		sp.degraded = true
 		return
 	}
@@ -159,6 +160,7 @@ func (sp *streamPreview) flushLocked(text string) {
 	if sp.previewMsgID == nil {
 		// First preview: try to send a new preview message
 		if starter, ok := sp.platform.(PreviewStarter); ok {
+			slog.Debug("stream preview: sending first preview via SendPreviewStart", "text_len", len(text))
 			handle, err := starter.SendPreviewStart(sp.ctx, sp.replyCtx, text)
 			if err != nil {
 				slog.Debug("stream preview: start failed, degrading", "error", err)
@@ -167,14 +169,11 @@ func (sp *streamPreview) flushLocked(text string) {
 			}
 			sp.previewMsgID = handle
 		} else {
-			// Platform supports UpdateMessage but not PreviewStarter;
-			// use Send to create initial message, then update in-place
 			if err := sp.platform.Send(sp.ctx, sp.replyCtx, text); err != nil {
 				slog.Debug("stream preview: initial send failed", "error", err)
 				sp.degraded = true
 				return
 			}
-			// For platforms without PreviewStarter, replyCtx itself serves as the handle
 			sp.previewMsgID = sp.replyCtx
 		}
 		sp.lastSentText = text
@@ -183,6 +182,7 @@ func (sp *streamPreview) flushLocked(text string) {
 	}
 
 	// Update existing preview message
+	slog.Debug("stream preview: updating via UpdateMessage", "text_len", len(text))
 	if err := updater.UpdateMessage(sp.ctx, sp.previewMsgID, text); err != nil {
 		slog.Debug("stream preview: update failed, degrading", "error", err)
 		sp.degraded = true
@@ -235,24 +235,28 @@ func (sp *streamPreview) finish(finalText string) bool {
 	}
 
 	if sp.previewMsgID == nil || sp.degraded {
+		slog.Debug("stream preview finish: no active preview", "hasHandle", sp.previewMsgID != nil, "degraded", sp.degraded)
 		return false
 	}
 
 	// If platform wants to delete the preview and send fresh, let it
 	if cleaner, ok := sp.platform.(PreviewCleaner); ok {
+		slog.Debug("stream preview finish: deleting preview (PreviewCleaner)")
 		_ = cleaner.DeletePreviewMessage(sp.ctx, sp.previewMsgID)
 		return false
 	}
 
 	updater, ok := sp.platform.(MessageUpdater)
 	if !ok {
+		slog.Debug("stream preview finish: no MessageUpdater")
 		return false
 	}
 
 	// For very long responses, we may need chunked sending instead
 	maxChars := sp.cfg.MaxChars
 	if maxChars > 0 && len([]rune(finalText)) > maxChars {
-		// Preview content stays as-is; fall back to chunked send for the full response
+		slog.Debug("stream preview finish: text exceeds maxChars, falling back to chunked send",
+			"text_runes", len([]rune(finalText)), "maxChars", maxChars)
 		if sp.lastSentText != "" {
 			_ = updater.UpdateMessage(sp.ctx, sp.previewMsgID, sp.lastSentText)
 		}
@@ -260,17 +264,22 @@ func (sp *streamPreview) finish(finalText string) bool {
 	}
 
 	if finalText == "" {
-		// Empty final text (error path) — nothing to update
-		if sp.lastSentText != "" {
-			_ = updater.UpdateMessage(sp.ctx, sp.previewMsgID, sp.lastSentText)
-		}
+		slog.Debug("stream preview finish: empty final text")
 		return false
 	}
 
+	// Always call UpdateMessage for the final text, even if the raw text matches
+	// what was last sent. The preview may have been sent as plain text (via
+	// SendPreviewStart), while UpdateMessage applies platform-specific formatting
+	// (e.g., Markdown→HTML for Telegram). Platform implementations should treat
+	// "message is not modified" as success to avoid duplicate sends.
+	slog.Debug("stream preview finish: sending final UpdateMessage",
+		"text_len", len(finalText), "lastSent_len", len(sp.lastSentText), "same", finalText == sp.lastSentText)
 	if err := updater.UpdateMessage(sp.ctx, sp.previewMsgID, finalText); err != nil {
-		slog.Debug("stream preview: final update failed", "error", err)
+		slog.Debug("stream preview finish: final update FAILED", "error", err)
 		return false
 	}
+	slog.Debug("stream preview finish: success via UpdateMessage")
 	return true
 }
 

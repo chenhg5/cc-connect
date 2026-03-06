@@ -93,10 +93,10 @@ var (
 
 // convertInlineHTML converts inline Markdown formatting to Telegram-compatible HTML.
 //
-// Strategy (matches Claude-to-IM): extract code/links into placeholders first,
-// then HTML-escape ALL remaining text, then apply bold/italic/strike regex on
-// the escaped text (their markers **, *, ~~ don't contain HTML special chars),
-// then restore placeholders.
+// Each formatting pass (bold, strikethrough) protects its output as placeholders
+// so that subsequent passes (italic) cannot match across HTML tag boundaries.
+// Without this, input like `**bold *text***` would produce crossed tags
+// `<b>bold <i>text</b></i>` which Telegram rejects.
 func convertInlineHTML(s string) string {
 	type placeholder struct {
 		key  string
@@ -128,15 +128,25 @@ func convertInlineHTML(s string) string {
 	})
 
 	// 3. HTML-escape the entire remaining text.
-	//    Placeholders (\x00PH...\x00) contain no HTML special chars so they survive.
-	//    Markdown markers **, *, ~~, __ also survive since they aren't <, >, or &.
 	s = escapeHTML(s)
 
-	// 4. Apply formatting on the escaped text.
-	s = reBoldAstHTML.ReplaceAllString(s, "<b>$1</b>")
-	s = reBoldUndHTML.ReplaceAllString(s, "<b>$1</b>")
-	s = reStrikeHTML.ReplaceAllString(s, "<s>$1</s>")
+	// 4. Bold → placeholder (so italic regex can't cross bold boundaries)
+	s = reBoldAstHTML.ReplaceAllStringFunc(s, func(m string) string {
+		inner := m[2 : len(m)-2]
+		return nextPH("<b>" + inner + "</b>")
+	})
+	s = reBoldUndHTML.ReplaceAllStringFunc(s, func(m string) string {
+		inner := m[2 : len(m)-2]
+		return nextPH("<b>" + inner + "</b>")
+	})
 
+	// 5. Strikethrough → placeholder
+	s = reStrikeHTML.ReplaceAllStringFunc(s, func(m string) string {
+		inner := m[2 : len(m)-2]
+		return nextPH("<s>" + inner + "</s>")
+	})
+
+	// 6. Italic (applied last, on text with bold/strike already protected)
 	s = reItalicAstHTML.ReplaceAllStringFunc(s, func(m string) string {
 		idx := strings.Index(m, "*")
 		if idx < 0 {
@@ -149,9 +159,18 @@ func convertInlineHTML(s string) string {
 		return m[:idx] + "<i>" + m[idx+1:lastIdx] + "</i>" + m[lastIdx+1:]
 	})
 
-	// 5. Restore placeholders
-	for _, ph := range phs {
-		s = strings.Replace(s, ph.key, ph.html, 1)
+	// 7. Restore all placeholders (may be nested, so iterate until stable)
+	for i := 0; i < 3; i++ {
+		changed := false
+		for _, ph := range phs {
+			if strings.Contains(s, ph.key) {
+				s = strings.Replace(s, ph.key, ph.html, 1)
+				changed = true
+			}
+		}
+		if !changed {
+			break
+		}
 	}
 
 	return s
@@ -161,6 +180,7 @@ func escapeHTML(s string) string {
 	s = strings.ReplaceAll(s, "&", "&amp;")
 	s = strings.ReplaceAll(s, "<", "&lt;")
 	s = strings.ReplaceAll(s, ">", "&gt;")
+	s = strings.ReplaceAll(s, "\"", "&quot;")
 	return s
 }
 

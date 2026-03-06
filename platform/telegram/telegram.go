@@ -496,12 +496,45 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 	if !ok {
 		return fmt.Errorf("telegram: invalid preview handle type %T", previewHandle)
 	}
-	edit := tgbotapi.NewEditMessageText(h.chatID, h.messageID, content)
-	_, err := p.bot.Send(edit)
-	if err != nil {
+
+	html := core.MarkdownToTelegramHTML(content)
+	slog.Debug("telegram: UpdateMessage",
+		"content_len", len(content), "html_len", len(html),
+		"content_prefix", truncateForLog(content, 80),
+		"html_prefix", truncateForLog(html, 80))
+
+	edit := tgbotapi.NewEditMessageText(h.chatID, h.messageID, html)
+	edit.ParseMode = tgbotapi.ModeHTML
+
+	if _, err := p.bot.Send(edit); err != nil {
+		errMsg := err.Error()
+		slog.Debug("telegram: UpdateMessage HTML failed", "error", errMsg)
+		if strings.Contains(errMsg, "not modified") {
+			return nil
+		}
+		if strings.Contains(errMsg, "can't parse") {
+			slog.Debug("telegram: UpdateMessage falling back to plain text", "full_html", html)
+			edit.Text = content
+			edit.ParseMode = ""
+			if _, err2 := p.bot.Send(edit); err2 != nil {
+				if strings.Contains(err2.Error(), "not modified") {
+					return nil
+				}
+				return fmt.Errorf("telegram: edit message: %w", err2)
+			}
+			return nil
+		}
 		return fmt.Errorf("telegram: edit message: %w", err)
 	}
+	slog.Debug("telegram: UpdateMessage HTML success")
 	return nil
+}
+
+func truncateForLog(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
 
 // StartTyping sends a "typing…" chat action and repeats every 5 seconds

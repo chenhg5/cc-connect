@@ -991,8 +991,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 			// If streaming preview was active, try to finalize in-place
 			if sp.finish(fullResponse) {
-				slog.Debug("stream preview: finalized in-place", "response_len", len(fullResponse))
+				slog.Debug("EventResult: finalized via stream preview", "response_len", len(fullResponse))
 			} else {
+				slog.Debug("EventResult: sending via p.Send (preview inactive or failed)", "response_len", len(fullResponse), "chunks", len(splitMessage(fullResponse, maxPlatformMessageLen)))
 				for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
 					if err := p.Send(e.ctx, replyCtx, chunk); err != nil {
 						slog.Error("failed to send reply", "error", err)
@@ -1283,10 +1284,10 @@ func (e *Engine) cmdList(p Platform, msg *Message) {
 
 func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	if len(args) == 0 {
-		e.reply(p, msg.ReplyCtx, "Usage: /switch <number or id_prefix>")
+		e.reply(p, msg.ReplyCtx, "Usage: /switch <number | id_prefix | name>")
 		return
 	}
-	prefix := strings.TrimSpace(args[0])
+	query := strings.TrimSpace(strings.Join(args, " "))
 
 	slog.Info("cmdSwitch: listing agent sessions", "session_key", msg.SessionKey)
 	agentSessions, err := e.agent.ListSessions(e.ctx)
@@ -1295,21 +1296,9 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	var matched *AgentSessionInfo
-
-	// Try numeric index first (1-based, matching /list output)
-	if idx, err := strconv.Atoi(prefix); err == nil && idx >= 1 && idx <= len(agentSessions) {
-		matched = &agentSessions[idx-1]
-	} else {
-		for i := range agentSessions {
-			if strings.HasPrefix(agentSessions[i].ID, prefix) {
-				matched = &agentSessions[i]
-				break
-			}
-		}
-	}
+	matched := e.matchSession(agentSessions, query)
 	if matched == nil {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ No session matching %q", prefix))
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ No session matching %q", query))
 		return
 	}
 
@@ -1333,6 +1322,57 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	}
 	e.reply(p, msg.ReplyCtx,
 		fmt.Sprintf("✅ Switched to: %s (%s, %d msgs)", displayName, shortID, matched.MessageCount))
+}
+
+// matchSession resolves a user query to an agent session. Priority:
+//  1. Numeric index (1-based, matching /list output)
+//  2. Exact custom name match (case-insensitive)
+//  3. Session ID prefix match
+//  4. Custom name prefix match (case-insensitive)
+//  5. Summary substring match (case-insensitive)
+func (e *Engine) matchSession(sessions []AgentSessionInfo, query string) *AgentSessionInfo {
+	if len(sessions) == 0 {
+		return nil
+	}
+
+	// 1. Numeric index
+	if idx, err := strconv.Atoi(query); err == nil && idx >= 1 && idx <= len(sessions) {
+		return &sessions[idx-1]
+	}
+
+	queryLower := strings.ToLower(query)
+
+	// 2. Exact custom name match
+	for i := range sessions {
+		name := e.sessions.GetSessionName(sessions[i].ID)
+		if name != "" && strings.ToLower(name) == queryLower {
+			return &sessions[i]
+		}
+	}
+
+	// 3. Session ID prefix match
+	for i := range sessions {
+		if strings.HasPrefix(sessions[i].ID, query) {
+			return &sessions[i]
+		}
+	}
+
+	// 4. Custom name prefix match
+	for i := range sessions {
+		name := e.sessions.GetSessionName(sessions[i].ID)
+		if name != "" && strings.HasPrefix(strings.ToLower(name), queryLower) {
+			return &sessions[i]
+		}
+	}
+
+	// 5. Summary substring match
+	for i := range sessions {
+		if sessions[i].Summary != "" && strings.Contains(strings.ToLower(sessions[i].Summary), queryLower) {
+			return &sessions[i]
+		}
+	}
+
+	return nil
 }
 
 func (e *Engine) cmdName(p Platform, msg *Message, args []string) {
