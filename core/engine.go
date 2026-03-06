@@ -394,12 +394,18 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		return fmt.Errorf("reconstruct reply context: %w", err)
 	}
 
-	// Notify user that a cron job is executing
-	desc := job.Description
-	if desc == "" {
-		desc = truncateStr(job.Prompt, 40)
+	// Notify user that a cron job is executing (unless silent)
+	silent := false
+	if e.cronScheduler != nil {
+		silent = e.cronScheduler.IsSilent(job)
 	}
-	e.send(targetPlatform, replyCtx, fmt.Sprintf("⏰ %s", desc))
+	if !silent {
+		desc := job.Description
+		if desc == "" {
+			desc = truncateStr(job.Prompt, 40)
+		}
+		e.send(targetPlatform, replyCtx, fmt.Sprintf("⏰ %s", desc))
+	}
 
 	msg := &Message{
 		SessionKey: sessionKey,
@@ -785,6 +791,14 @@ func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, repl
 		return state
 	}
 
+	// Preserve quiet setting from existing state (e.g. set via /quiet before session started)
+	quietMode := e.defaultQuiet
+	if ok && state != nil {
+		state.mu.Lock()
+		quietMode = state.quiet
+		state.mu.Unlock()
+	}
+
 	// Inject per-session env vars so the agent subprocess can call `cc-connect cron add` etc.
 	if inj, ok := e.agent.(SessionEnvInjector); ok {
 		envVars := []string{
@@ -805,7 +819,7 @@ func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, repl
 	// Check if context is already canceled (e.g. during shutdown/restart)
 	if e.ctx.Err() != nil {
 		slog.Debug("skipping session start: context canceled", "session_key", sessionKey)
-		state = &interactiveState{platform: p, replyCtx: replyCtx, quiet: e.defaultQuiet}
+		state = &interactiveState{platform: p, replyCtx: replyCtx, quiet: quietMode}
 		e.interactiveStates[sessionKey] = state
 		return state
 	}
@@ -815,7 +829,7 @@ func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, repl
 	startElapsed := time.Since(startAt)
 	if err != nil {
 		slog.Error("failed to start interactive session", "error", err, "elapsed", startElapsed)
-		state = &interactiveState{platform: p, replyCtx: replyCtx, quiet: e.defaultQuiet}
+		state = &interactiveState{platform: p, replyCtx: replyCtx, quiet: quietMode}
 		e.interactiveStates[sessionKey] = state
 		return state
 	}
@@ -827,7 +841,7 @@ func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, repl
 		agentSession: agentSession,
 		platform:     p,
 		replyCtx:     replyCtx,
-		quiet:        e.defaultQuiet,
+		quiet:        quietMode,
 	}
 	e.interactiveStates[sessionKey] = state
 

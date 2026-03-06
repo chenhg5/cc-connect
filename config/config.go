@@ -28,6 +28,12 @@ type Config struct {
 	StreamPreview StreamPreviewConfig `toml:"stream_preview"` // real-time streaming preview
 	RateLimit     RateLimitConfig     `toml:"rate_limit"`     // per-session rate limiting
 	Quiet         *bool               `toml:"quiet,omitempty"` // global default for quiet mode; project-level overrides this
+	Cron          CronConfig          `toml:"cron"`
+}
+
+// CronConfig controls cron job behavior.
+type CronConfig struct {
+	Silent *bool `toml:"silent"` // suppress cron start notification; default false
 }
 
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.

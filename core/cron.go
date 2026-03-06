@@ -24,6 +24,7 @@ type CronJob struct {
 	Prompt      string    `json:"prompt"`
 	Description string    `json:"description"`
 	Enabled     bool      `json:"enabled"`
+	Silent      *bool     `json:"silent,omitempty"` // suppress start notification; nil = use global default
 	CreatedAt   time.Time `json:"created_at"`
 	LastRun     time.Time `json:"last_run,omitempty"`
 	LastError   string    `json:"last_error,omitempty"`
@@ -158,11 +159,12 @@ func (s *CronStore) Get(id string) *CronJob {
 
 // CronScheduler runs cron jobs by injecting synthetic messages into engines.
 type CronScheduler struct {
-	store   *CronStore
-	cron    *cron.Cron
-	engines map[string]*Engine // project name → engine
-	mu      sync.RWMutex
-	entries map[string]cron.EntryID // job ID → cron entry
+	store         *CronStore
+	cron          *cron.Cron
+	engines       map[string]*Engine // project name → engine
+	mu            sync.RWMutex
+	entries       map[string]cron.EntryID // job ID → cron entry
+	defaultSilent bool                    // global default for suppressing cron start notifications
 }
 
 func NewCronScheduler(store *CronStore) *CronScheduler {
@@ -178,6 +180,18 @@ func (cs *CronScheduler) RegisterEngine(name string, e *Engine) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 	cs.engines[name] = e
+}
+
+func (cs *CronScheduler) SetDefaultSilent(silent bool) {
+	cs.defaultSilent = silent
+}
+
+// IsSilent returns whether the cron job should suppress the start notification.
+func (cs *CronScheduler) IsSilent(job *CronJob) bool {
+	if job.Silent != nil {
+		return *job.Silent
+	}
+	return cs.defaultSilent
 }
 
 func (cs *CronScheduler) Start() error {

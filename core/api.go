@@ -191,6 +191,7 @@ type CronAddRequest struct {
 	CronExpr    string `json:"cron_expr"`
 	Prompt      string `json:"prompt"`
 	Description string `json:"description"`
+	Silent      *bool  `json:"silent,omitempty"`
 }
 
 func (s *APIServer) handleCronAdd(w http.ResponseWriter, r *http.Request) {
@@ -237,6 +238,7 @@ func (s *APIServer) handleCronAdd(w http.ResponseWriter, r *http.Request) {
 		Prompt:      req.Prompt,
 		Description: req.Description,
 		Enabled:     true,
+		Silent:      req.Silent,
 	}
 	job.CreatedAt = time.Now()
 

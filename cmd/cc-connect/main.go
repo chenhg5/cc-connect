@@ -354,6 +354,9 @@ func main() {
 	var cronSched *core.CronScheduler
 	if cronStore != nil {
 		cronSched = core.NewCronScheduler(cronStore)
+		if cfg.Cron.Silent != nil && *cfg.Cron.Silent {
+			cronSched.SetDefaultSilent(true)
+		}
 		for i, e := range engines {
 			cronSched.RegisterEngine(cfg.Projects[i].Name, e)
 			e.SetCronScheduler(cronSched)

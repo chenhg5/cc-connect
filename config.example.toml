@@ -72,6 +72,16 @@ level = "info" # debug, info, warn, error
 # window_secs = 60          # Window size in seconds (default: 60) / 窗口时间秒数（默认 60）
 
 # =============================================================================
+# Cron Settings / 定时任务设置
+# =============================================================================
+# Controls cron job behavior.
+# 控制定时任务行为。
+
+# [cron]
+# silent = false             # Suppress "⏰ task name" notification when cron starts (default: false)
+#                            # 静默模式：不发送定时任务开始执行的通知消息（默认 false）
+
+# =============================================================================
 # Speech-to-Text (Voice Messages) / 语音转文字（语音消息）
 # =============================================================================
 # Enable to transcribe voice messages to text before sending to agents.
