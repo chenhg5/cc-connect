@@ -1,5 +1,29 @@
 # Changelog
 
+## v1.2.0-beta.6 (2026-03-06)
+
+### New Features
+- **Bot-to-Bot Relay**: Forward messages between different messaging platforms via CLI (`cc-connect relay`) and internal API; enables cross-platform bot communication
+- **Session Search**: Search sessions by name, ID prefix, or summary with `/search <keyword>` command
+- **List Pagination**: `/list` now supports pagination with `--page` and `--page-size` flags for large session counts
+- **Per-Platform Streaming Preview Control**: Configure streaming preview per platform via `streaming_preview` setting (Telegram, Discord, Feishu)
+- **Silent Cron Mode**: Suppress cron job notification messages with `silent = true` in cron job config
+- **Voice Qwen Mode**: Voice function now supports Qwen audio model for speech-to-text
+- **Feishu Three-Tier Rendering**: Intelligent markdown rendering strategy — simple text uses plain messages, rich markdown uses Post, code blocks/tables use Card
+
+### Improvements
+- **Status Display**: Improved `/status` command output with better formatting and Feishu message rendering fixes
+- **Self-Update**: Auto-restart after update; added Gitee mirror support for Chinese users
+- **Windows Self-Update**: Full Windows support for in-place binary updates
+- **Message Splitting**: Improved boundary checks for cleaner message chunking
+- **Platform Startup**: Better error handling and logging during platform initialization
+- **Session Switch i18n**: Added translation for session switch success message
+
+### Bug Fixes
+- **Idle Session Timeout**: Added timeout for unresponsive agent sessions to prevent hangs
+- **Streaming Preview**: Removed `maxChars` check that caused premature preview termination
+- **Message Deduplication**: Deduplicate messages by process start time to prevent duplicate processing
+
 ## v1.2.0-beta.5 (2026-03-06)
 
 ### New Features
