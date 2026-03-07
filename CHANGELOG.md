@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.2.0-beta.7 (2026-03-07)
+
+### New Features
+- **Multi-Bot Relay Binding**: `/bind` now supports binding multiple bots in a group chat; use `/bind <project>` to add, `/bind -<project>` to remove specific project
+- **System-level Systemd**: Daemon mode now supports system-level systemd (`/etc/systemd/system/`) when running as root, useful for servers and containers
+- **Config Example Command**: `cc-connect config-example` prints embedded config template for quick reference
+- **Interactive Command Buttons**: `/lang`, `/model`, `/mode` commands now show interactive button menus for easy selection
+- **Exec Commands**: Custom commands can execute shell commands directly with `exec` field in config
+- **Configurable Idle Timeout**: Agent idle timeout can be configured via `idle_timeout_mins` in config
+
+### Improvements
+- **Daemon Error Messages**: Improved systemd detection and error messages for WSL2, containers, and SSH environments
+- **Codex CLI Visibility**: Patched codex session source to make CLI output visible
+
+### Bug Fixes
+- **Streaming Preview**: Fixed stale preview messages when streaming degrades
+
 ## v1.2.0-beta.6 (2026-03-06)
 
 ### New Features
