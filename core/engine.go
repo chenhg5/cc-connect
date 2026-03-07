@@ -446,6 +446,16 @@ func (e *Engine) Start() error {
 			continue
 		}
 		slog.Info("platform started", "project", e.name, "platform", p.Name())
+
+		// Register commands on platforms that support it (e.g. Telegram setMyCommands)
+		if registrar, ok := p.(CommandRegistrar); ok {
+			commands := e.GetAllCommands()
+			if err := registrar.RegisterCommands(commands); err != nil {
+				slog.Error("platform command registration failed", "project", e.name, "platform", p.Name(), "error", err)
+			} else {
+				slog.Debug("platform commands registered", "project", e.name, "platform", p.Name(), "count", len(commands))
+			}
+		}
 	}
 
 	// Log summary
@@ -1872,6 +1882,74 @@ func langDisplayName(lang Language) string {
 
 func (e *Engine) cmdHelp(p Platform, msg *Message) {
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHelp))
+}
+
+// GetAllCommands returns all available commands for bot menu registration.
+// It includes built-in commands (with localized descriptions) and custom commands.
+func (e *Engine) GetAllCommands() []BotCommandInfo {
+	var commands []BotCommandInfo
+
+	// Collect built-in  commands (use primary name, first in names list)
+	seenCmds := make(map[string]bool)
+	for _, c := range builtinCommands {
+		if len(c.names) == 0 {
+			continue
+		}
+		// Use id as primary
+		primaryName := c.id
+		if seenCmds[primaryName] {
+			continue
+		}
+		seenCmds[primaryName] = true
+
+		// Skip disabled commands
+		if e.disabledCmds[c.id] {
+			continue
+		}
+
+		commands = append(commands, BotCommandInfo{
+			Command:     primaryName,
+			Description: e.i18n.T(MsgKey(primaryName)),
+		})
+	}
+
+	// Collect custom commands from CommandRegistry
+	for _, c := range e.commands.ListAll() {
+		if seenCmds[strings.ToLower(c.Name)] {
+			continue
+		}
+		seenCmds[strings.ToLower(c.Name)] = true
+
+		desc := c.Description
+		if desc == "" {
+			desc = "Custom command"
+		}
+
+		commands = append(commands, BotCommandInfo{
+			Command:     c.Name,
+			Description: desc,
+		})
+	}
+
+	// Collect skills
+	for _, s := range e.skills.ListAll() {
+		if seenCmds[strings.ToLower(s.Name)] {
+			continue
+		}
+		seenCmds[strings.ToLower(s.Name)] = true
+
+		desc := s.Description
+		if desc == "" {
+			desc = "Skill"
+		}
+
+		commands = append(commands, BotCommandInfo{
+			Command:     s.Name,
+			Description: desc,
+		})
+	}
+
+	return commands
 }
 
 func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
