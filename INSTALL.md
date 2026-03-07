@@ -52,17 +52,38 @@ make build
 
 ## Step 2: Install your AI Agent
 
-cc-connect currently supports Claude Code. Make sure it is installed:
+cc-connect supports multiple local coding agents. Install at least one:
 
 ```bash
-# Install Claude Code CLI (requires Node.js)
+# Claude Code
 npm install -g @anthropic-ai/claude-code
+
+# Codex
+npm install -g @openai/codex
+
+# Gemini CLI
+npm install -g @google/gemini-cli
+
+# iFlow CLI
+npm install -g @iflow-ai/iflow-cli
+
+# Qoder CLI
+curl -fsSL https://qoder.com/install | bash
 ```
 
-Verify it works:
+For **Cursor Agent** and **OpenCode**, follow their official install docs:
+- Cursor Agent: https://docs.cursor.com/agent
+- OpenCode: https://github.com/opencode-ai/opencode
+
+Verify your selected agent works:
 
 ```bash
 claude --version
+codex --version
+gemini --version
+iflow --version
+opencode --version
+qodercli --version
 ```
 
 ## Step 3: Create config.toml
@@ -103,7 +124,7 @@ level = "info"  # debug, info, warn, error
 name = "my-project"
 
 [projects.agent]
-type = "claudecode"  # or "codex", "cursor", "gemini", "qoder"
+type = "claudecode"  # or "codex", "cursor", "gemini", "qoder", "opencode", "iflow"
 
 [projects.agent.options]
 work_dir = "/absolute/path/to/your/project"
@@ -120,6 +141,10 @@ mode = "default"
 # --- Qoder CLI mode options ---
 # "default", "yolo"
 # model = "auto"  # "auto", "ultimate", "performance", "efficient", "lite"
+
+# --- iFlow CLI mode options ---
+# "default", "auto-edit", "plan", "yolo"
+# model = "Qwen3-Coder"  # optional: specify model
 
 # Add one or more platform sections below
 ```
@@ -403,7 +428,7 @@ cc-connect supports scheduled tasks (cron jobs). You can always create them via 
 
 **Claude Code** handles this automatically via `--append-system-prompt` — no extra setup needed.
 
-**For Codex, Cursor Agent, Qoder CLI, or Gemini CLI**, add the following instructions to the agent's project-level instruction file in your project's `work_dir`:
+**For Codex, Cursor Agent, Qoder CLI, Gemini CLI, OpenCode, or iFlow CLI**, add the following instructions to the agent's project-level instruction file in your project's `work_dir`:
 
 | Agent | File to create/edit |
 |-------|-------------------|
@@ -411,6 +436,8 @@ cc-connect supports scheduled tasks (cron jobs). You can always create them via 
 | Cursor Agent | `.cursorrules` |
 | Qoder CLI | `AGENTS.md` |
 | Gemini CLI | `GEMINI.md` |
+| OpenCode | `OPENCODE.md` |
+| iFlow CLI | `IFLOW.md` |
 
 **Content to add** (copy-paste into the file):
 
@@ -543,6 +570,25 @@ type = "telegram"
 
 [projects.platforms.options]
 token = "xxx"
+
+# Sixth project — using iFlow CLI
+[[projects]]
+name = "my-iflow-project"
+
+[projects.agent]
+type = "iflow"
+
+[projects.agent.options]
+work_dir = "/path/to/iflow-project"
+mode = "default"    # "default" | "auto-edit" | "plan" | "yolo"
+# model = "Qwen3-Coder"
+
+[[projects.platforms]]
+type = "slack"
+
+[projects.platforms.options]
+bot_token = "xoxb-xxx"
+app_token = "xapp-xxx"
 ```
 
 ## Upgrade
@@ -625,6 +671,8 @@ The following additional features are available:
 - **Cursor Agent**: Cursor Agent CLI integration (`agent --print --output-format stream-json`)
 - **Gemini CLI**: Google Gemini CLI integration (`gemini -p --output-format stream-json`)
 - **Qoder CLI**: Qoder CLI integration (`qodercli -p -f stream-json`)
+- **OpenCode**: OpenCode CLI integration (`opencode run --format json`)
+- **iFlow CLI**: iFlow CLI integration (`iflow -p -r -o`)
 - **Voice Messages (STT)**: Speech-to-text via Whisper API (OpenAI / Groq / SiliconFlow). Requires `ffmpeg` and `[speech]` config.
 - **Image Messages**: Send images to Claude Code for multimodal analysis
 - **API Provider Management**: Runtime switching between API providers via `/provider` command or CLI
