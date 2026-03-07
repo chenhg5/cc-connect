@@ -134,6 +134,9 @@ func (cs *codexSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf 
 				}
 			}
 		}
+		if tid := cs.CurrentSessionID(); tid != "" {
+			patchSessionSource(tid)
+		}
 	}()
 
 	scanner := bufio.NewScanner(stdout)

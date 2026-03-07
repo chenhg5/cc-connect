@@ -2,6 +2,7 @@ package codex
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -51,6 +52,7 @@ func listCodexSessions(workDir string) ([]core.AgentSessionInfo, error) {
 	for _, f := range files {
 		info := parseCodexSessionFile(f, absWorkDir)
 		if info != nil {
+			patchSessionSource(info.ID)
 			sessions = append(sessions, *info)
 		}
 	}
@@ -260,6 +262,45 @@ func getSessionHistory(sessionID string, limit int) ([]core.HistoryEntry, error)
 		entries = entries[len(entries)-limit:]
 	}
 	return entries, nil
+}
+
+// patchSessionSource rewrites the session_meta line in a Codex JSONL transcript
+// so that source="cli" and originator="codex_cli_rs", making the session visible
+// in the interactive `codex` terminal.
+func patchSessionSource(sessionID string) {
+	path := findSessionFile(sessionID)
+	if path == "" {
+		return
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+
+	idx := bytes.IndexByte(data, '\n')
+	if idx < 0 {
+		return
+	}
+	firstLine := data[:idx]
+
+	// Only patch if it's actually an exec-sourced session
+	if !bytes.Contains(firstLine, []byte(`"source":"exec"`)) {
+		return
+	}
+
+	patched := bytes.Replace(firstLine, []byte(`"source":"exec"`), []byte(`"source":"cli"`), 1)
+	patched = bytes.Replace(patched, []byte(`"originator":"codex_exec"`), []byte(`"originator":"codex_cli_rs"`), 1)
+
+	if bytes.Equal(patched, firstLine) {
+		return
+	}
+
+	out := make([]byte, 0, len(patched)+len(data)-idx)
+	out = append(out, patched...)
+	out = append(out, data[idx:]...)
+
+	_ = os.WriteFile(path, out, 0o644)
 }
 
 // isUserPrompt returns true if the text looks like an actual user prompt
