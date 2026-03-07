@@ -248,6 +248,12 @@ func (sp *streamPreview) finish(finalText string) bool {
 	}
 
 	if sp.previewMsgID == nil || sp.degraded {
+		if sp.previewMsgID != nil && sp.degraded {
+			if cleaner, ok := sp.platform.(PreviewCleaner); ok {
+				slog.Debug("stream preview finish: deleting stale preview (degraded)")
+				_ = cleaner.DeletePreviewMessage(sp.ctx, sp.previewMsgID)
+			}
+		}
 		slog.Debug("stream preview finish: no active preview", "hasHandle", sp.previewMsgID != nil, "degraded", sp.degraded)
 		return false
 	}

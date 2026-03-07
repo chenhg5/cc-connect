@@ -173,6 +173,49 @@ func TestStreamPreview_FinishInPlace(t *testing.T) {
 	}
 }
 
+// mockCleanerPlatform adds PreviewCleaner to mockUpdaterPlatform.
+type mockCleanerPlatform struct {
+	mockUpdaterPlatform
+	deleted []any
+}
+
+func (m *mockCleanerPlatform) DeletePreviewMessage(_ context.Context, handle any) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.deleted = append(m.deleted, handle)
+	return nil
+}
+
+func TestStreamPreview_FreezeDeletesOnFinish(t *testing.T) {
+	mp := &mockCleanerPlatform{}
+	cfg := StreamPreviewCfg{
+		Enabled:       true,
+		IntervalMs:    50,
+		MinDeltaChars: 1,
+		MaxChars:      500,
+	}
+
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background())
+	sp.appendText("Hello World")
+	time.Sleep(100 * time.Millisecond)
+
+	// Simulate a tool/thinking event → freeze
+	sp.freeze()
+
+	// finish should return false (degraded) and delete the stale preview
+	ok := sp.finish("Hello World Final")
+	if ok {
+		t.Error("finish should return false when degraded")
+	}
+
+	mp.mu.Lock()
+	deletedCount := len(mp.deleted)
+	mp.mu.Unlock()
+	if deletedCount != 1 {
+		t.Errorf("expected 1 delete call, got %d", deletedCount)
+	}
+}
+
 func TestStreamPreview_NonUpdaterPlatform(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	cfg := DefaultStreamPreviewCfg()

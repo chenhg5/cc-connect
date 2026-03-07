@@ -473,6 +473,20 @@ func (p *Platform) SendWithButtons(ctx context.Context, rctx any, content string
 	return nil
 }
 
+// DeletePreviewMessage deletes a stale preview message so the caller can send a fresh one.
+func (p *Platform) DeletePreviewMessage(ctx context.Context, previewHandle any) error {
+	h, ok := previewHandle.(*telegramPreviewHandle)
+	if !ok {
+		return fmt.Errorf("telegram: invalid preview handle type %T", previewHandle)
+	}
+	del := tgbotapi.NewDeleteMessage(h.chatID, h.messageID)
+	_, err := p.bot.Request(del)
+	if err != nil {
+		slog.Debug("telegram: delete preview message failed", "error", err)
+	}
+	return err
+}
+
 func (p *Platform) downloadFile(fileID string) ([]byte, error) {
 	fileConfig := tgbotapi.FileConfig{FileID: fileID}
 	file, err := p.bot.GetFile(fileConfig)
