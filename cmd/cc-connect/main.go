@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	ccconnect "github.com/chenhg5/cc-connect"
 	"github.com/chenhg5/cc-connect/config"
 	"github.com/chenhg5/cc-connect/core"
 	"github.com/chenhg5/cc-connect/daemon"
@@ -46,6 +47,9 @@ func main() {
 	// Handle subcommands before flag parsing
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
+		case "config-example":
+			fmt.Print(ccconnect.ConfigExampleTOML)
+			return
 		case "update":
 			runUpdate()
 			return
@@ -92,6 +96,7 @@ func main() {
 
 	configFlag := flag.String("config", "", "path to config file (default: ./config.toml or ~/.cc-connect/config.toml)")
 	showVersion := flag.Bool("version", false, "print version and exit")
+	flag.Usage = printUsage
 	flag.Parse()
 
 	if *showVersion {
@@ -567,6 +572,79 @@ app_secret = "your-feishu-app-secret"
 # see: https://github.com/chenhg5/cc-connect/blob/main/config.example.toml
 `
 	return os.WriteFile(path, []byte(tmpl), 0o644)
+}
+
+func printUsage() {
+	v := version
+	if v == "" || v == "dev" {
+		v = "dev"
+	}
+	fmt.Fprintf(os.Stderr, `
+                                              _
+  ___ ___        ___ ___  _ __  _ __   ___  ___| |_
+ / __/ __|_____ / __/ _ \| '_ \| '_ \ / _ \/ __| __|
+| (_| (_|_____|  (_| (_) | | | | | | |  __/ (__| |_
+ \___\__|      \___\___/|_| |_|_| |_|\___|\___|\__|  %s
+
+  Bridge your messaging platforms to local AI coding agents.
+  Supports: Claude Code, Codex, Cursor, Gemini CLI, Qoder CLI, OpenCode
+  Platforms: Feishu, Telegram, Slack, DingTalk, Discord, LINE, WeChat Work, QQ
+
+  GitHub:  https://github.com/chenhg5/cc-connect
+  Docs:    https://github.com/chenhg5/cc-connect/blob/main/INSTALL.md
+
+Usage:
+  cc-connect [flags]
+  cc-connect <command> [args]
+
+Flags:
+  --config <path>    Path to config file (default: ./config.toml or ~/.cc-connect/config.toml)
+  --version          Print version and exit
+  --help             Show this help message
+
+Commands:
+  daemon             Manage cc-connect as a background service (systemd/launchd)
+    install          Install and start the daemon service
+    uninstall        Remove the daemon service
+    start            Start the daemon
+    stop             Stop the daemon
+    restart          Restart the daemon
+    status           Show daemon status
+    logs             View daemon logs (-f to follow, -n N for last N lines)
+
+  send               Send a message to an active session via internal API
+                     (-m <text> | --stdin, -p <project>, -s <session>)
+
+  cron               Manage scheduled tasks
+    add              Create a scheduled task (-c <expr> --prompt <text>)
+    list             List scheduled tasks
+    del              Delete a scheduled task by ID
+
+  relay              Cross-project message relay
+    send             Send a message to another project and get the response
+
+  provider           Manage API providers for projects
+    add              Add a provider (--project, --name, --api-key, ...)
+    list             List providers (--project)
+    remove           Remove a provider (--project, --name)
+    import           Import providers from cc-switch
+
+  update             Check for updates and upgrade the binary (--pre for beta)
+  check-update       Check if a newer version is available
+  config-example     Print a complete annotated config.toml example
+
+Examples:
+  cc-connect                          Start with default config
+  cc-connect --config /path/to.toml   Start with a specific config file
+  cc-connect daemon install           Install as a system service
+  cc-connect daemon logs -f           Follow daemon logs
+  cc-connect send -m "hello"          Send a message to the active session
+  cc-connect cron list                List all scheduled tasks
+  cc-connect update                   Update to the latest version
+  cc-connect config-example           Print full config.toml example
+  cc-connect config-example > c.toml  Save example config to a file
+
+`, v)
 }
 
 func setupLogger(level string, w io.Writer) {
