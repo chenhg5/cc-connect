@@ -1887,11 +1887,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Ver/cambiar idioma, arg: [en|zh|zh-TW|ja|es|auto]",
 	},
 	MsgBuiltinCmdQuiet: {
-		LangEnglish:            "Toggle thinking/tool progress",
-		LangChinese:            "开关思考和工具进度消息",
-		LangTraditionalChinese: "開關思考和工具進度訊息",
-		LangJapanese:           "思考/ツール進捗メッセージの表示切替",
-		LangSpanish:            "Alternar mensajes de progreso",
+		LangEnglish:            "Toggle thinking/tool progress, arg: [global]",
+		LangChinese:            "开关思考和工具进度消息, 参数: [global]",
+		LangTraditionalChinese: "開關思考和工具進度訊息, 參數: [global]",
+		LangJapanese:           "思考/ツール進捗メッセージの表示切替, 引数: [global]",
+		LangSpanish:            "Alternar mensajes de progreso, arg: [global]",
 	},
 	MsgBuiltinCmdCompress: {
 		LangEnglish:            "Compress conversation context",
