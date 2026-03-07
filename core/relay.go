@@ -38,7 +38,8 @@ func (rm *RelayManager) RegisterEngine(name string, e *Engine) {
 	rm.engines[name] = e
 }
 
-// Bind establishes a relay binding between two bots in a group chat.
+// Bind establishes a relay binding between bots in a group chat.
+// If a binding already exists, it will be replaced.
 func (rm *RelayManager) Bind(platform, chatID string, bots map[string]string) {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
@@ -48,6 +49,50 @@ func (rm *RelayManager) Bind(platform, chatID string, bots map[string]string) {
 		Bots:     bots,
 	}
 	slog.Info("relay: binding created", "chat_id", chatID, "bots", bots)
+}
+
+// AddToBind adds a project to an existing binding, or creates a new one.
+func (rm *RelayManager) AddToBind(platform, chatID, projectName string) {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+
+	binding := rm.bindings[chatID]
+	if binding == nil {
+		binding = &RelayBinding{
+			Platform: platform,
+			ChatID:   chatID,
+			Bots:     make(map[string]string),
+		}
+		rm.bindings[chatID] = binding
+	}
+
+	binding.Bots[projectName] = projectName
+	slog.Info("relay: project added to binding", "chat_id", chatID, "project", projectName, "bots", binding.Bots)
+}
+
+// RemoveFromBind removes a project from an existing binding.
+// Returns true if the project was removed, false if not found.
+func (rm *RelayManager) RemoveFromBind(chatID, projectName string) bool {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+
+	binding := rm.bindings[chatID]
+	if binding == nil {
+		return false
+	}
+
+	if _, exists := binding.Bots[projectName]; exists {
+		delete(binding.Bots, projectName)
+		slog.Info("relay: project removed from binding", "chat_id", chatID, "project", projectName, "remaining", binding.Bots)
+
+		// If no bots left, remove the entire binding
+		if len(binding.Bots) == 0 {
+			delete(rm.bindings, chatID)
+			slog.Info("relay: binding removed (no bots left)", "chat_id", chatID)
+		}
+		return true
+	}
+	return false
 }
 
 // GetBinding returns the binding for a chat, or nil if none.

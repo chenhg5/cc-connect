@@ -3522,11 +3522,12 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 // Usage:
 //
 //	/bind <project>           — bind current bot with another project in this group
-//	/bind remove              — remove binding for this group
+//	/bind remove              — remove all bindings for this group
+//	/bind -<project>          — remove specific project from binding
 //	/bind                     — show current binding status
 //
 // The <project> argument is the project name from config.toml [[projects]].
-// The binding is symmetric: once created, both bots can relay messages to each other.
+// Multiple projects can be bound together for relay.
 func (e *Engine) cmdBind(p Platform, msg *Message, args []string) {
 	if e.relayManager == nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgRelayNotAvailable))
@@ -3544,17 +3545,30 @@ func (e *Engine) cmdBind(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	switch args[0] {
-	case "remove", "rm", "unbind", "del":
+	otherProject := args[0]
+
+	// Handle removal commands
+	if otherProject == "remove" || otherProject == "rm" || otherProject == "unbind" || otherProject == "del" || otherProject == "clear" {
 		e.relayManager.Unbind(chatID)
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgRelayUnbound))
 		return
-	case "help", "-h", "--help":
+	}
+
+	if otherProject == "help" || otherProject == "-h" || otherProject == "--help" {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgRelayUsage))
 		return
 	}
 
-	otherProject := args[0]
+	// Handle removal with - prefix: /bind -project
+	if strings.HasPrefix(otherProject, "-") {
+		projectToRemove := strings.TrimPrefix(otherProject, "-")
+		if e.relayManager.RemoveFromBind(chatID, projectToRemove) {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("已从绑定中移除 %s", projectToRemove))
+		} else {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("%s 未绑定或绑定不存在", projectToRemove))
+		}
+		return
+	}
 
 	if otherProject == e.name {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgRelayBindSelf))
@@ -3578,13 +3592,18 @@ func (e *Engine) cmdBind(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	bots := map[string]string{
-		e.name:       e.name,
-		otherProject: otherProject,
-	}
-	e.relayManager.Bind(p.Name(), chatID, bots)
+	// Add current project and target project to binding
+	e.relayManager.AddToBind(p.Name(), chatID, e.name)
+	e.relayManager.AddToBind(p.Name(), chatID, otherProject)
 
-	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgRelayBindOK), e.name, otherProject, otherProject, otherProject))
+	// Get all bound projects for status message
+	binding := e.relayManager.GetBinding(chatID)
+	var boundProjects []string
+	for proj := range binding.Bots {
+		boundProjects = append(boundProjects, proj)
+	}
+
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf("绑定成功！当前群组已绑定: %s\n向 %s 发送消息: @%s <消息>", strings.Join(boundProjects, " ↔ "), otherProject, otherProject))
 }
 
 func (e *Engine) cmdBindStatus(p Platform, replyCtx any, chatID string) {

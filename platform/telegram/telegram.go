@@ -130,6 +130,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 
 			// In group chats, filter messages not directed at this bot (unless group_reply_all)
 			if isGroup && !p.groupReplyAll {
+				slog.Debug("telegram: checking group message", "bot", p.bot.Self.UserName, "text", msg.Text, "is_command", msg.IsCommand())
 				if !p.isDirectedAtBot(msg) {
 					continue
 				}
@@ -351,8 +352,10 @@ func (p *Platform) isDirectedAtBot(msg *tgbotapi.Message) bool {
 		}
 		if atIdx > 0 && atIdx < cmdEnd {
 			target := msg.Text[atIdx+1 : cmdEnd]
+			slog.Debug("telegram: command with @suffix", "bot", botName, "target", target, "match", strings.EqualFold(target, botName))
 			return strings.EqualFold(target, botName)
 		}
+		slog.Debug("telegram: command without @suffix, accepting", "bot", botName, "text", msg.Text)
 		return true // /cmd without @suffix — accept
 	}
 
@@ -361,6 +364,7 @@ func (p *Platform) isDirectedAtBot(msg *tgbotapi.Message) bool {
 		for _, e := range msg.Entities {
 			if e.Type == "mention" && e.Offset+e.Length <= len(msg.Text) {
 				mention := msg.Text[e.Offset : e.Offset+e.Length]
+				slog.Debug("telegram: checking mention", "bot", botName, "mention", mention, "match", strings.EqualFold(mention, "@"+botName))
 				if strings.EqualFold(mention, "@"+botName) {
 					return true
 				}
@@ -370,6 +374,7 @@ func (p *Platform) isDirectedAtBot(msg *tgbotapi.Message) bool {
 
 	// Check if replying to a message from this bot
 	if msg.ReplyToMessage != nil && msg.ReplyToMessage.From != nil {
+		slog.Debug("telegram: checking reply", "bot_id", p.bot.Self.ID, "reply_from_id", msg.ReplyToMessage.From.ID)
 		if msg.ReplyToMessage.From.ID == p.bot.Self.ID {
 			return true
 		}
@@ -387,7 +392,7 @@ func (p *Platform) isDirectedAtBot(msg *tgbotapi.Message) bool {
 		}
 	}
 
-	slog.Debug("telegram: ignoring group message not directed at bot", "chat", msg.Chat.ID)
+	slog.Debug("telegram: ignoring group message not directed at bot", "chat", msg.Chat.ID, "bot", botName, "text", msg.Text, "entities", msg.Entities)
 	return false
 }
 
