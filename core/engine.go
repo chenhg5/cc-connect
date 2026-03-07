@@ -162,6 +162,9 @@ type Engine struct {
 	// Interactive agent session management
 	interactiveMu     sync.Mutex
 	interactiveStates map[string]*interactiveState // key = sessionKey
+
+	quietMu sync.RWMutex
+	quiet   bool // when true, suppress thinking and tool progress messages globally
 }
 
 // interactiveState tracks a running interactive agent session and its permission state.
@@ -171,8 +174,8 @@ type interactiveState struct {
 	replyCtx     any
 	mu           sync.Mutex
 	pending      *pendingPermission
-	approveAll   bool // when true, auto-approve all permission requests for this session
-	quiet        bool // when true, suppress thinking and tool progress messages
+	approveAll bool // when true, auto-approve all permission requests for this session
+	quiet      bool // when true, suppress thinking and tool progress for this session
 }
 
 // pendingPermission represents a permission request waiting for user response.
@@ -980,8 +983,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		state.mu.Lock()
 		p := state.platform
 		replyCtx := state.replyCtx
-		quiet := state.quiet
+		sessionQuiet := state.quiet
 		state.mu.Unlock()
+
+		e.quietMu.RLock()
+		globalQuiet := e.quiet
+		e.quietMu.RUnlock()
+
+		quiet := globalQuiet || sessionQuiet
 
 		switch event.Type {
 		case EventThinking:
@@ -1282,7 +1291,7 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 	case "lang":
 		e.cmdLang(p, msg, args)
 	case "quiet":
-		e.cmdQuiet(p, msg)
+		e.cmdQuiet(p, msg, args)
 	case "provider":
 		e.cmdProvider(p, msg, args)
 	case "memory":
@@ -2096,13 +2105,28 @@ func (e *Engine) cmdMode(p Platform, msg *Message, args []string) {
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgModeChanged), displayName))
 }
 
-func (e *Engine) cmdQuiet(p Platform, msg *Message) {
+func (e *Engine) cmdQuiet(p Platform, msg *Message, args []string) {
+	// /quiet global — toggle global quiet for all sessions
+	if len(args) > 0 && args[0] == "global" {
+		e.quietMu.Lock()
+		e.quiet = !e.quiet
+		quiet := e.quiet
+		e.quietMu.Unlock()
+
+		if quiet {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQuietGlobalOn))
+		} else {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQuietGlobalOff))
+		}
+		return
+	}
+
+	// /quiet — toggle per-session quiet
 	e.interactiveMu.Lock()
 	state, ok := e.interactiveStates[msg.SessionKey]
 	e.interactiveMu.Unlock()
 
 	if !ok || state == nil {
-		// No state yet, create one so the flag persists
 		state = &interactiveState{platform: p, replyCtx: msg.ReplyCtx, quiet: true}
 		e.interactiveMu.Lock()
 		e.interactiveStates[msg.SessionKey] = state
