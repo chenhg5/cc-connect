@@ -25,12 +25,15 @@ func (s *stubAgentSession) CurrentSessionID() string                           {
 func (s *stubAgentSession) Alive() bool                                        { return true }
 func (s *stubAgentSession) Close() error                                       { return nil }
 
-type stubPlatformEngine struct{ n string }
+type stubPlatformEngine struct {
+	n    string
+	sent []string
+}
 
 func (p *stubPlatformEngine) Name() string                                           { return p.n }
 func (p *stubPlatformEngine) Start(MessageHandler) error                             { return nil }
-func (p *stubPlatformEngine) Reply(_ context.Context, _ any, _ string) error         { return nil }
-func (p *stubPlatformEngine) Send(_ context.Context, _ any, _ string) error          { return nil }
+func (p *stubPlatformEngine) Reply(_ context.Context, _ any, content string) error   { p.sent = append(p.sent, content); return nil }
+func (p *stubPlatformEngine) Send(_ context.Context, _ any, content string) error    { p.sent = append(p.sent, content); return nil }
 func (p *stubPlatformEngine) Stop() error                                            { return nil }
 
 func newTestEngine() *Engine {
@@ -118,5 +121,160 @@ func TestEngine_DisabledCommandsWithSlash(t *testing.T) {
 
 	if !e.disabledCmds["upgrade"] {
 		t.Error("upgrade should be disabled even when prefixed with /")
+	}
+}
+
+// --- quiet tests ---
+
+func TestQuietSessionToggle(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	// /quiet — per-session toggle on
+	e.cmdQuiet(p, msg, nil)
+
+	e.interactiveMu.Lock()
+	state := e.interactiveStates["test:user1"]
+	e.interactiveMu.Unlock()
+
+	if state == nil {
+		t.Fatal("expected interactiveState to be created")
+	}
+	state.mu.Lock()
+	q := state.quiet
+	state.mu.Unlock()
+	if !q {
+		t.Fatal("expected session quiet to be true")
+	}
+
+	// /quiet — per-session toggle off
+	e.cmdQuiet(p, msg, nil)
+	state.mu.Lock()
+	q = state.quiet
+	state.mu.Unlock()
+	if q {
+		t.Fatal("expected session quiet to be false after second toggle")
+	}
+}
+
+func TestQuietSessionResetsOnNewSession(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	// Enable per-session quiet
+	e.cmdQuiet(p, msg, nil)
+
+	// Simulate /new
+	e.cleanupInteractiveState("test:user1")
+
+	// State should be gone, quiet resets
+	e.interactiveMu.Lock()
+	state := e.interactiveStates["test:user1"]
+	e.interactiveMu.Unlock()
+	if state != nil {
+		t.Fatal("expected interactiveState to be cleaned up")
+	}
+
+	// Global quiet should still be off
+	e.quietMu.RLock()
+	gq := e.quiet
+	e.quietMu.RUnlock()
+	if gq {
+		t.Fatal("expected global quiet to be false")
+	}
+}
+
+func TestQuietGlobalToggle(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	// Default: global quiet is off
+	if e.quiet {
+		t.Fatal("expected global quiet to be false by default")
+	}
+
+	// /quiet global — toggle on
+	e.cmdQuiet(p, msg, []string{"global"})
+	e.quietMu.RLock()
+	q := e.quiet
+	e.quietMu.RUnlock()
+	if !q {
+		t.Fatal("expected global quiet to be true")
+	}
+
+	// /quiet global — toggle off
+	e.cmdQuiet(p, msg, []string{"global"})
+	e.quietMu.RLock()
+	q = e.quiet
+	e.quietMu.RUnlock()
+	if q {
+		t.Fatal("expected global quiet to be false after second toggle")
+	}
+}
+
+func TestQuietGlobalPersistsAcrossSessions(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	// Enable global quiet
+	e.cmdQuiet(p, msg, []string{"global"})
+
+	// Simulate /new
+	e.cleanupInteractiveState("test:user1")
+
+	// Global quiet should still be on
+	e.quietMu.RLock()
+	q := e.quiet
+	e.quietMu.RUnlock()
+	if !q {
+		t.Fatal("expected global quiet to remain true after session cleanup")
+	}
+}
+
+func TestQuietGlobalAndSessionCombined(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	// Only global quiet on — should suppress
+	e.cmdQuiet(p, msg, []string{"global"})
+	e.quietMu.RLock()
+	gq := e.quiet
+	e.quietMu.RUnlock()
+	if !gq {
+		t.Fatal("expected global quiet on")
+	}
+
+	// Session quiet is off (no state yet) — global alone should be enough
+	e.interactiveMu.Lock()
+	state := e.interactiveStates["test:user1"]
+	e.interactiveMu.Unlock()
+	if state != nil {
+		t.Fatal("expected no session state yet")
+	}
+
+	// Turn off global, turn on session
+	e.cmdQuiet(p, msg, []string{"global"}) // global off
+	e.cmdQuiet(p, msg, nil)                // session on
+
+	e.quietMu.RLock()
+	gq = e.quiet
+	e.quietMu.RUnlock()
+	if gq {
+		t.Fatal("expected global quiet off")
+	}
+
+	e.interactiveMu.Lock()
+	state = e.interactiveStates["test:user1"]
+	e.interactiveMu.Unlock()
+	state.mu.Lock()
+	sq := state.quiet
+	state.mu.Unlock()
+	if !sq {
+		t.Fatal("expected session quiet on")
 	}
 }
