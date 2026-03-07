@@ -1811,7 +1811,20 @@ func (e *Engine) cmdLang(p Platform, msg *Message, args []string) {
 	if len(args) == 0 {
 		cur := e.i18n.CurrentLang()
 		name := langDisplayName(cur)
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgLangCurrent, name))
+		text := e.i18n.Tf(MsgLangCurrent, name)
+		buttons := [][]ButtonOption{
+			{
+				{Text: "English", Data: "cmd:/lang en"},
+				{Text: "中文", Data: "cmd:/lang zh"},
+				{Text: "繁體中文", Data: "cmd:/lang zh-TW"},
+			},
+			{
+				{Text: "日本語", Data: "cmd:/lang ja"},
+				{Text: "Español", Data: "cmd:/lang es"},
+				{Text: "Auto", Data: "cmd:/lang auto"},
+			},
+		}
+		e.replyWithButtons(p, msg.ReplyCtx, text, buttons)
 		return
 	}
 
@@ -1896,7 +1909,26 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 		}
 		sb.WriteString("\n")
 		sb.WriteString(e.i18n.T(MsgModelUsage))
-		e.reply(p, msg.ReplyCtx, sb.String())
+
+		// Build button rows (max 3 per row); use numeric index to stay within
+		// Telegram's 64-byte callback_data limit for long model names.
+		var buttons [][]ButtonOption
+		var row []ButtonOption
+		for i, m := range models {
+			label := m.Name
+			if m.Name == current {
+				label = "▶ " + label
+			}
+			row = append(row, ButtonOption{Text: label, Data: fmt.Sprintf("cmd:/model %d", i+1)})
+			if len(row) >= 3 {
+				buttons = append(buttons, row)
+				row = nil
+			}
+		}
+		if len(row) > 0 {
+			buttons = append(buttons, row)
+		}
+		e.replyWithButtons(p, msg.ReplyCtx, sb.String(), buttons)
 		return
 	}
 
@@ -1940,7 +1972,27 @@ func (e *Engine) cmdMode(p Platform, msg *Message, args []string) {
 			}
 		}
 		sb.WriteString(e.i18n.T(MsgModeUsage))
-		e.reply(p, msg.ReplyCtx, sb.String())
+
+		var buttons [][]ButtonOption
+		var row []ButtonOption
+		for _, m := range modes {
+			label := m.Name
+			if zhLike {
+				label = m.NameZh
+			}
+			if m.Key == current {
+				label = "▶ " + label
+			}
+			row = append(row, ButtonOption{Text: label, Data: "cmd:/mode " + m.Key})
+			if len(row) >= 2 {
+				buttons = append(buttons, row)
+				row = nil
+			}
+		}
+		if len(row) > 0 {
+			buttons = append(buttons, row)
+		}
+		e.replyWithButtons(p, msg.ReplyCtx, sb.String(), buttons)
 		return
 	}
 
@@ -2382,6 +2434,17 @@ func (e *Engine) reply(p Platform, replyCtx any, content string) {
 	if elapsed := time.Since(start); elapsed >= slowPlatformSend {
 		slog.Warn("slow platform reply", "platform", p.Name(), "elapsed", elapsed, "content_len", len(content))
 	}
+}
+
+// replyWithButtons sends a reply with inline buttons if the platform supports it,
+// otherwise falls back to plain text reply.
+func (e *Engine) replyWithButtons(p Platform, replyCtx any, content string, buttons [][]ButtonOption) {
+	if bs, ok := p.(InlineButtonSender); ok {
+		if err := bs.SendWithButtons(e.ctx, replyCtx, content, buttons); err == nil {
+			return
+		}
+	}
+	e.reply(p, replyCtx, content)
 }
 
 // ──────────────────────────────────────────────────────────────

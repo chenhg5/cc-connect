@@ -258,7 +258,39 @@ func (p *Platform) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 	answer := tgbotapi.NewCallback(cb.ID, "")
 	p.bot.Request(answer)
 
-	// Map callback data to permission response text
+	userName := cb.From.UserName
+	if userName == "" {
+		userName = strings.TrimSpace(cb.From.FirstName + " " + cb.From.LastName)
+	}
+	sessionKey := fmt.Sprintf("telegram:%d:%d", chatID, cb.From.ID)
+	rctx := replyContext{chatID: chatID, messageID: msgID}
+
+	// Command callbacks (cmd:/lang en, cmd:/mode yolo, etc.)
+	if strings.HasPrefix(data, "cmd:") {
+		command := strings.TrimPrefix(data, "cmd:")
+
+		// Edit original message: append the chosen option and remove buttons
+		origText := cb.Message.Text
+		if origText == "" {
+			origText = ""
+		}
+		edit := tgbotapi.NewEditMessageText(chatID, msgID, origText+"\n\n> "+command)
+		emptyMarkup := tgbotapi.NewInlineKeyboardMarkup()
+		edit.ReplyMarkup = &emptyMarkup
+		p.bot.Send(edit)
+
+		p.handler(p, &core.Message{
+			SessionKey: sessionKey,
+			Platform:   "telegram",
+			UserID:     userID,
+			UserName:   userName,
+			Content:    command,
+			ReplyCtx:   rctx,
+		})
+		return
+	}
+
+	// Permission callbacks (perm:allow, perm:deny, perm:allow_all)
 	var responseText string
 	switch data {
 	case "perm:allow":
@@ -272,7 +304,6 @@ func (p *Platform) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 		return
 	}
 
-	// Edit the original message to show the choice and remove buttons
 	choiceLabel := responseText
 	switch data {
 	case "perm:allow":
@@ -287,29 +318,19 @@ func (p *Platform) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 	if origText == "" {
 		origText = "(permission request)"
 	}
-	editText := origText + "\n\n" + choiceLabel
-	edit := tgbotapi.NewEditMessageText(chatID, msgID, editText)
+	edit := tgbotapi.NewEditMessageText(chatID, msgID, origText+"\n\n"+choiceLabel)
 	emptyMarkup := tgbotapi.NewInlineKeyboardMarkup()
 	edit.ReplyMarkup = &emptyMarkup
 	p.bot.Send(edit)
 
-	// Route as a regular message to the engine's permission handler
-	userName := cb.From.UserName
-	if userName == "" {
-		userName = strings.TrimSpace(cb.From.FirstName + " " + cb.From.LastName)
-	}
-	sessionKey := fmt.Sprintf("telegram:%d:%d", chatID, cb.From.ID)
-	rctx := replyContext{chatID: chatID, messageID: msgID}
-
-	coreMsg := &core.Message{
+	p.handler(p, &core.Message{
 		SessionKey: sessionKey,
 		Platform:   "telegram",
 		UserID:     userID,
 		UserName:   userName,
 		Content:    responseText,
 		ReplyCtx:   rctx,
-	}
-	p.handler(p, coreMsg)
+	})
 }
 
 // isDirectedAtBot checks whether a group message is directed at this bot:
