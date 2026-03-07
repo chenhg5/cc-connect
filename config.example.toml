@@ -649,6 +649,25 @@ app_secret = "your-feishu-app-secret"
 # allow_from = "*"                 # allowed QQ user IDs, e.g. "12345,67890" or "*" for all
 #                                  # 允许的 QQ 号，如 "12345,67890"，"*" 表示所有
 
+# QQ Bot (Official / 官方 QQ 机器人) (uncomment to enable / 取消注释以启用)
+# Uses the official QQ Bot Platform API — no third-party adapter needed.
+# 使用 QQ 官方机器人 API，无需第三方适配器。
+# 1. Register at https://q.qq.com → create bot → get AppID & AppSecret
+#    在 https://q.qq.com 注册 → 创建机器人 → 获取 AppID 和 AppSecret
+# 2. Connection: WebSocket (no public IP needed) / WebSocket 连接（无需公网 IP）
+# 3. In group chats, bot only receives messages when @mentioned
+#    群聊中，机器人仅在被 @ 时收到消息
+
+# [[projects.platforms]]
+# type = "qqbot"
+#
+# [projects.platforms.options]
+# app_id = ""           # Bot AppID / 机器人 AppID
+# app_secret = ""       # Bot AppSecret / 机器人 AppSecret
+# sandbox = false       # Use sandbox API endpoint / 使用沙箱环境
+# allow_from = "*"      # Allowed user openids, e.g. "OPEN_ID_1,OPEN_ID_2"; "*" = all
+#                       # 允许的用户 openid，如 "OPEN_ID_1,OPEN_ID_2"；"*" 表示所有
+
 # =============================================================================
 # Project 5: Using Qoder CLI / 项目 5：使用 Qoder CLI (uncomment to enable / 取消注释以启用)
 # =============================================================================

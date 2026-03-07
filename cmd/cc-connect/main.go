@@ -34,6 +34,7 @@ import (
 	_ "github.com/chenhg5/cc-connect/platform/slack"
 	_ "github.com/chenhg5/cc-connect/platform/telegram"
 	_ "github.com/chenhg5/cc-connect/platform/qq"
+	_ "github.com/chenhg5/cc-connect/platform/qqbot"
 	_ "github.com/chenhg5/cc-connect/platform/wecom"
 )
 
@@ -588,7 +589,7 @@ func printUsage() {
 
   Bridge your messaging platforms to local AI coding agents.
   Supports: Claude Code, Codex, Cursor, Gemini CLI, Qoder CLI, OpenCode
-  Platforms: Feishu, Telegram, Slack, DingTalk, Discord, LINE, WeChat Work, QQ
+  Platforms: Feishu, Telegram, Slack, DingTalk, Discord, LINE, WeChat Work, QQ, QQ Bot
 
   GitHub:  https://github.com/chenhg5/cc-connect
   Docs:    https://github.com/chenhg5/cc-connect/blob/main/INSTALL.md
