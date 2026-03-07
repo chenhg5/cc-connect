@@ -1,6 +1,8 @@
 package iflow
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -69,6 +71,27 @@ func TestIFlowProjectKey(t *testing.T) {
 
 	if got := iflowProjectKey(""); got != "" {
 		t.Fatalf("iflowProjectKey(\"\") = %q, want empty", got)
+	}
+}
+
+func TestIFlowResolvedWorkDir(t *testing.T) {
+	base := t.TempDir()
+	realDir := filepath.Join(base, "real")
+	linkDir := filepath.Join(base, "link")
+	if err := os.Mkdir(realDir, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	want, err := filepath.EvalSymlinks(realDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(realDir): %v", err)
+	}
+
+	if got := iflowResolvedWorkDir(linkDir); got != want {
+		t.Fatalf("iflowResolvedWorkDir(%q) = %q, want %q", linkDir, got, want)
 	}
 }
 

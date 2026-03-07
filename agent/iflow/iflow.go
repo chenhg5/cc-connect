@@ -22,7 +22,8 @@ func init() {
 	core.RegisterAgent("iflow", New)
 }
 
-// Agent drives iFlow CLI in non-interactive mode using `iflow -p`.
+// Agent drives iFlow CLI one turn at a time using interactive `iflow -i`
+// inside a PTY, then reconstructs streaming events from the transcript JSONL.
 //
 // Modes (maps to iFlow CLI flags):
 //   - "default":   manual approval mode (--default)
@@ -140,10 +141,7 @@ func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
 		return fmt.Errorf("iflow: cannot determine home dir: %w", err)
 	}
 
-	absDir, err := filepath.Abs(a.workDir)
-	if err != nil {
-		absDir = a.workDir
-	}
+	absDir := iflowResolvedWorkDir(a.workDir)
 
 	candidates := []string{
 		filepath.Join(homeDir, ".iflow", "projects", iflowProjectKey(absDir), sessionID+".jsonl"),
@@ -295,10 +293,7 @@ func listIFlowSessions(workDir string) ([]core.AgentSessionInfo, error) {
 		return nil, fmt.Errorf("iflow: cannot determine home dir: %w", err)
 	}
 
-	absDir, err := filepath.Abs(workDir)
-	if err != nil {
-		absDir = workDir
-	}
+	absDir := iflowResolvedWorkDir(workDir)
 
 	sessionDir := filepath.Join(homeDir, ".iflow", "projects", iflowProjectKey(absDir))
 	entries, err := os.ReadDir(sessionDir)
@@ -427,4 +422,15 @@ func iflowProjectKey(absDir string) string {
 	key = strings.ReplaceAll(key, "/", "-")
 	key = strings.ReplaceAll(key, ":", "-")
 	return key
+}
+
+func iflowResolvedWorkDir(workDir string) string {
+	absDir, err := filepath.Abs(workDir)
+	if err != nil {
+		absDir = workDir
+	}
+	if resolved, err := filepath.EvalSymlinks(absDir); err == nil && resolved != "" {
+		absDir = resolved
+	}
+	return absDir
 }
