@@ -15,19 +15,40 @@ const (
 	systemdServiceName = ServiceName + ".service"
 )
 
-type systemdManager struct{}
-
-func newPlatformManager() (Manager, error) {
-	if err := checkSystemctlAvailable(); err != nil {
-		return nil, err
-	}
-	return &systemdManager{}, nil
+type systemdManager struct {
+	system bool // true = system-level (/etc/systemd/system), false = user-level (~/.config/systemd/user)
 }
 
-func (*systemdManager) Platform() string { return "systemd (user)" }
+func newPlatformManager() (Manager, error) {
+	if _, err := exec.LookPath("systemctl"); err != nil {
+		return nil, fmt.Errorf("systemctl not found; systemd is required on Linux.\n" +
+			"  If running in a container without systemd, use nohup/tmux/screen instead.")
+	}
+
+	isRoot := os.Getuid() == 0
+
+	if isRoot {
+		if err := checkSystemdRunning(true); err != nil {
+			return nil, err
+		}
+		return &systemdManager{system: true}, nil
+	}
+
+	if err := checkSystemdRunning(false); err != nil {
+		return nil, err
+	}
+	return &systemdManager{system: false}, nil
+}
+
+func (m *systemdManager) Platform() string {
+	if m.system {
+		return "systemd (system)"
+	}
+	return "systemd (user)"
+}
 
 func (m *systemdManager) Install(cfg Config) error {
-	unitPath := systemdUnitPath()
+	unitPath := m.unitPath()
 
 	if err := os.MkdirAll(filepath.Dir(unitPath), 0755); err != nil {
 		return fmt.Errorf("create systemd dir: %w", err)
@@ -36,18 +57,18 @@ func (m *systemdManager) Install(cfg Config) error {
 		return fmt.Errorf("create log dir: %w", err)
 	}
 
-	unit := buildSystemdUnit(cfg)
+	unit := m.buildUnit(cfg)
 	if err := os.WriteFile(unitPath, []byte(unit), 0644); err != nil {
 		return fmt.Errorf("write unit file: %w", err)
 	}
 
-	for _, args := range [][]string{
-		{"--user", "daemon-reload"},
-		{"--user", "enable", systemdServiceName},
-		{"--user", "restart", systemdServiceName},
+	for _, cmdArgs := range [][]string{
+		m.sysArgs("daemon-reload"),
+		m.sysArgs("enable", systemdServiceName),
+		m.sysArgs("restart", systemdServiceName),
 	} {
-		if out, err := runSystemctl(args...); err != nil {
-			return fmt.Errorf("systemctl %s: %s (%w)", strings.Join(args, " "), out, err)
+		if out, err := runSystemctl(cmdArgs...); err != nil {
+			return fmt.Errorf("systemctl %s: %s (%w)", strings.Join(cmdArgs, " "), out, err)
 		}
 	}
 
@@ -55,52 +76,52 @@ func (m *systemdManager) Install(cfg Config) error {
 }
 
 func (m *systemdManager) Uninstall() error {
-	runSystemctl("--user", "disable", "--now", systemdServiceName)
+	runSystemctl(m.sysArgs("disable", "--now", systemdServiceName)...)
 
-	unitPath := systemdUnitPath()
+	unitPath := m.unitPath()
 	if err := os.Remove(unitPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove unit: %w", err)
 	}
 
-	runSystemctl("--user", "daemon-reload")
+	runSystemctl(m.sysArgs("daemon-reload")...)
 	return nil
 }
 
-func (*systemdManager) Start() error {
-	out, err := runSystemctl("--user", "start", systemdServiceName)
+func (m *systemdManager) Start() error {
+	out, err := runSystemctl(m.sysArgs("start", systemdServiceName)...)
 	if err != nil {
 		return fmt.Errorf("start: %s (%w)", out, err)
 	}
 	return nil
 }
 
-func (*systemdManager) Stop() error {
-	out, err := runSystemctl("--user", "stop", systemdServiceName)
+func (m *systemdManager) Stop() error {
+	out, err := runSystemctl(m.sysArgs("stop", systemdServiceName)...)
 	if err != nil {
 		return fmt.Errorf("stop: %s (%w)", out, err)
 	}
 	return nil
 }
 
-func (*systemdManager) Restart() error {
-	out, err := runSystemctl("--user", "restart", systemdServiceName)
+func (m *systemdManager) Restart() error {
+	out, err := runSystemctl(m.sysArgs("restart", systemdServiceName)...)
 	if err != nil {
 		return fmt.Errorf("restart: %s (%w)", out, err)
 	}
 	return nil
 }
 
-func (*systemdManager) Status() (*Status, error) {
-	st := &Status{Platform: "systemd (user)"}
+func (m *systemdManager) Status() (*Status, error) {
+	st := &Status{Platform: m.Platform()}
 
-	unitPath := systemdUnitPath()
+	unitPath := m.unitPath()
 	if _, err := os.Stat(unitPath); err != nil {
 		return st, nil
 	}
 	st.Installed = true
 
-	out, err := runSystemctl("--user", "show", systemdServiceName,
-		"--no-page", "--property", "ActiveState,MainPID")
+	out, err := runSystemctl(m.sysArgs("show", systemdServiceName,
+		"--no-page", "--property", "ActiveState,MainPID")...)
 	if err != nil {
 		return st, nil
 	}
@@ -117,12 +138,23 @@ func (*systemdManager) Status() (*Status, error) {
 
 // ── helpers ─────────────────────────────────────────────────
 
-func systemdUnitPath() string {
+// sysArgs prepends --user flag for user-level managers.
+func (m *systemdManager) sysArgs(args ...string) []string {
+	if m.system {
+		return args
+	}
+	return append([]string{"--user"}, args...)
+}
+
+func (m *systemdManager) unitPath() string {
+	if m.system {
+		return filepath.Join("/etc/systemd/system", systemdServiceName)
+	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".config", "systemd", "user", systemdServiceName)
 }
 
-func buildSystemdUnit(cfg Config) string {
+func (m *systemdManager) buildUnit(cfg Config) string {
 	var sb strings.Builder
 	sb.WriteString("[Unit]\n")
 	sb.WriteString("Description=cc-connect - AI Agent Chat Bridge\n")
@@ -141,7 +173,11 @@ func buildSystemdUnit(cfg Config) string {
 		fmt.Fprintf(&sb, "Environment=PATH=%s\n", cfg.EnvPATH)
 	}
 	sb.WriteString("\n[Install]\n")
-	sb.WriteString("WantedBy=default.target\n")
+	if m.system {
+		sb.WriteString("WantedBy=multi-user.target\n")
+	} else {
+		sb.WriteString("WantedBy=default.target\n")
+	}
 	return sb.String()
 }
 
@@ -151,27 +187,70 @@ func runSystemctl(args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
-func checkSystemctlAvailable() error {
-	if _, err := exec.LookPath("systemctl"); err != nil {
-		return fmt.Errorf("systemctl not found; systemd user services are required on Linux")
+func checkSystemdRunning(system bool) error {
+	var args []string
+	if system {
+		args = []string{"is-system-running"}
+	} else {
+		args = []string{"--user", "is-system-running"}
 	}
-	out, err := runSystemctl("--user", "status")
+
+	out, _ := runSystemctl(args...)
+	state := strings.TrimSpace(strings.ToLower(out))
+
+	// These states all mean systemd is usable for managing services
+	switch state {
+	case "running", "degraded", "starting", "initializing":
+		return nil
+	}
+
+	// "offline" = systemd exists but is not PID 1 (WSL2 without systemd, some containers)
+	// "not been booted" / empty = no systemd at all
+	wsl := isWSL2()
+
+	if system {
+		if wsl {
+			return fmt.Errorf("systemd is not active in this WSL2 instance.\n" +
+				"  Add the following to /etc/wsl.conf and restart WSL (wsl --shutdown):\n" +
+				"    [boot]\n" +
+				"    systemd=true\n" +
+				"  Or use: nohup cc-connect > cc-connect.log 2>&1 &")
+		}
+		if state == "offline" || strings.Contains(state, "not been booted") {
+			return fmt.Errorf("systemd is not active (state: %s).\n"+
+				"  If running in a container, systemd is typically not available.\n"+
+				"  Use nohup, tmux, or screen instead:\n"+
+				"    nohup cc-connect > cc-connect.log 2>&1 &", state)
+		}
+		return fmt.Errorf("systemd check failed (state: %s).\n"+
+			"  Use nohup as alternative: nohup cc-connect > cc-connect.log 2>&1 &", state)
+	}
+
+	// User-level failures
+	if wsl {
+		return fmt.Errorf("systemd user session not available in WSL2.\n" +
+			"  Add the following to /etc/wsl.conf and restart WSL (wsl --shutdown):\n" +
+			"    [boot]\n" +
+			"    systemd=true\n" +
+			"  Or use: nohup cc-connect > cc-connect.log 2>&1 &")
+	}
+
+	user := os.Getenv("USER")
+	return fmt.Errorf("systemd user session not available.\n"+
+		"  This often happens when connecting via SSH without a systemd login session.\n"+
+		"  Try one of:\n"+
+		"    1. Run as root: sudo cc-connect daemon install (uses system-level systemd)\n"+
+		"    2. loginctl enable-linger %s && export XDG_RUNTIME_DIR=/run/user/$(id -u)\n"+
+		"    3. Use nohup/tmux instead: nohup cc-connect > cc-connect.log 2>&1 &", user)
+}
+
+func isWSL2() bool {
+	data, err := os.ReadFile("/proc/version")
 	if err != nil {
-		detail := strings.ToLower(out)
-		if strings.Contains(detail, "failed to connect") ||
-			strings.Contains(detail, "no such file or directory") {
-			return fmt.Errorf("systemd user session not available.\n" +
-				"  If running in WSL2, add [boot]\\nsystemd=true to /etc/wsl.conf and restart WSL.\n" +
-				"  If running via SSH, try: loginctl enable-linger $USER")
-		}
-		if strings.Contains(detail, "not been booted") ||
-			strings.Contains(detail, "not supported") {
-			return fmt.Errorf("systemd not running in this environment.\n" +
-				"  If running in a container, systemd is typically not available.\n" +
-				"  Consider using nohup, tmux, or screen instead.")
-		}
+		return false
 	}
-	return nil
+	lower := strings.ToLower(string(data))
+	return strings.Contains(lower, "microsoft") || strings.Contains(lower, "wsl")
 }
 
 func parseKeyValue(text string) map[string]string {

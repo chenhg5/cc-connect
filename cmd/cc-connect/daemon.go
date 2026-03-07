@@ -156,6 +156,7 @@ func daemonUninstall() {
 
 func daemonStart() {
 	mgr := mustManager()
+	requireInstalled(mgr)
 	if err := mgr.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "Start failed: %v\n", err)
 		os.Exit(1)
@@ -165,6 +166,7 @@ func daemonStart() {
 
 func daemonStop() {
 	mgr := mustManager()
+	requireInstalled(mgr)
 	if err := mgr.Stop(); err != nil {
 		fmt.Fprintf(os.Stderr, "Stop failed: %v\n", err)
 		os.Exit(1)
@@ -174,11 +176,21 @@ func daemonStop() {
 
 func daemonRestart() {
 	mgr := mustManager()
+	requireInstalled(mgr)
 	if err := mgr.Restart(); err != nil {
 		fmt.Fprintf(os.Stderr, "Restart failed: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Println("cc-connect daemon restarted.")
+}
+
+func requireInstalled(mgr daemon.Manager) {
+	st, _ := mgr.Status()
+	if st == nil || !st.Installed {
+		fmt.Fprintln(os.Stderr, "Service is not installed. Run first:")
+		fmt.Fprintln(os.Stderr, "  cc-connect daemon install --work-dir /path/to/config-dir")
+		os.Exit(1)
+	}
 }
 
 // ── status ──────────────────────────────────────────────────
@@ -349,6 +361,7 @@ Logs flags:
   --log-file PATH       Custom log file path
 
 Supported platforms:
-  Linux   - systemd user service
-  macOS   - launchd LaunchAgent`)
+  Linux (root)     - systemd system service (/etc/systemd/system/)
+  Linux (non-root) - systemd user service (~/.config/systemd/user/)
+  macOS            - launchd LaunchAgent`)
 }
