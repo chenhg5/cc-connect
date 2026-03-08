@@ -150,7 +150,7 @@ const (
 	MsgLangInvalid          MsgKey = "lang_invalid"
 	MsgLangCurrent          MsgKey = "lang_current"
 	MsgUnknownCommand       MsgKey = "unknown_command"
-	MsgHelp                 MsgKey = "help"
+	MsgHelp                 MsgKey = "message_help" // change from "help", which is used now for builtin command help
 	MsgListTitle            MsgKey = "list_title"
 	MsgListTitlePaged       MsgKey = "list_title_paged"
 	MsgListEmpty            MsgKey = "list_empty"
@@ -237,8 +237,8 @@ const (
 	MsgPermBtnDeny     MsgKey = "perm_btn_deny"
 	MsgPermBtnAllowAll MsgKey = "perm_btn_allow_all"
 
-	MsgCommandsTitle     MsgKey = "commands_title"
-	MsgCommandsEmpty     MsgKey = "commands_empty"
+	MsgCommandsTitle        MsgKey = "commands_title"
+	MsgCommandsEmpty        MsgKey = "commands_empty"
 	MsgCommandsHint         MsgKey = "commands_hint"
 	MsgCommandsUsage        MsgKey = "commands_usage"
 	MsgCommandsAddUsage     MsgKey = "commands_add_usage"
@@ -316,6 +316,36 @@ const (
 	MsgSearchNoResult MsgKey = "search_no_result"
 	MsgSearchResult   MsgKey = "search_result"
 	MsgSearchHint     MsgKey = "search_hint"
+
+	MsgBuiltinCmdNew      MsgKey = "new"
+	MsgBuiltinCmdList     MsgKey = "list"
+	MsgBuiltinCmdSearch   MsgKey = "search"
+	MsgBuiltinCmdSwitch   MsgKey = "switch"
+	MsgBuiltinCmdDelete   MsgKey = "delete"
+	MsgBuiltinCmdName     MsgKey = "name"
+	MsgBuiltinCmdCurrent  MsgKey = "current"
+	MsgBuiltinCmdHistory  MsgKey = "history"
+	MsgBuiltinCmdProvider MsgKey = "provider"
+	MsgBuiltinCmdMemory   MsgKey = "memory"
+	MsgBuiltinCmdAllow    MsgKey = "allow"
+	MsgBuiltinCmdModel    MsgKey = "model"
+	MsgBuiltinCmdMode     MsgKey = "mode"
+	MsgBuiltinCmdLang     MsgKey = "lang"
+	MsgBuiltinCmdQuiet    MsgKey = "quiet"
+	MsgBuiltinCmdCompress MsgKey = "compress"
+	MsgBuiltinCmdStop     MsgKey = "stop"
+	MsgBuiltinCmdCron     MsgKey = "cron"
+	MsgBuiltinCmdCommands MsgKey = "commands"
+	MsgBuiltinCmdAlias    MsgKey = "alias"
+	MsgBuiltinCmdSkills   MsgKey = "skills"
+	MsgBuiltinCmdConfig   MsgKey = "config"
+	MsgBuiltinCmdDoctor   MsgKey = "doctor"
+	MsgBuiltinCmdUpgrade  MsgKey = "upgrade"
+	MsgBuiltinCmdRestart  MsgKey = "restart"
+	MsgBuiltinCmdStatus   MsgKey = "status"
+	MsgBuiltinCmdVersion  MsgKey = "version"
+	MsgBuiltinCmdHelp     MsgKey = "help"
+	MsgBuiltinCmdBind     MsgKey = "bind"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -1756,6 +1786,210 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "使用 /switch <id> 切換到對應會話。",
 		LangJapanese:           "/switch <id> でセッションを切り替え。",
 		LangSpanish:            "Usa /switch <id> para cambiar a una sesión.",
+	},
+	// Builtin command descriptions
+	MsgBuiltinCmdNew: {
+		LangEnglish:            "Start a new session, arg: [name]",
+		LangChinese:            "创建新会话，参数: [名称]",
+		LangTraditionalChinese: "建立新會話，參數: [名稱]",
+		LangJapanese:           "新しいセッションを開始、引数: [名前]",
+		LangSpanish:            "Iniciar una nueva sesión, arg: [nombre]",
+	},
+	MsgBuiltinCmdList: {
+		LangEnglish:            "List agent sessions",
+		LangChinese:            "列出 Agent 会话列表",
+		LangTraditionalChinese: "列出 Agent 會話列表",
+		LangJapanese:           "エージェントセッション一覧",
+		LangSpanish:            "Listar sesiones del agente",
+	},
+	MsgBuiltinCmdSearch: {
+		LangEnglish:            "Search sessions by name or ID, arg: <keyword>",
+		LangChinese:            "搜索会话名称或 ID，参数: <关键词>",
+		LangTraditionalChinese: "搜尋會話名稱或 ID，參數: <關鍵詞>",
+		LangJapanese:           "セッションを名前またはIDで検索、引数: <キーワード>",
+		LangSpanish:            "Buscar sesiones por nombre o ID, arg: <palabra_clave>",
+	},
+	MsgBuiltinCmdSwitch: {
+		LangEnglish:            "Resume a session by its list number, arg: <number>",
+		LangChinese:            "按列表序号切换会话，参数: <序号>",
+		LangTraditionalChinese: "按列表序號切換會話，參數: <序號>",
+		LangJapanese:           "リスト番号でセッションを切り替え、引数: <番号>",
+		LangSpanish:            "Reanudar sesión por su número en la lista, arg: <número>",
+	},
+	MsgBuiltinCmdDelete: {
+		LangEnglish:            "Delete a session by its list number, arg: <number>",
+		LangChinese:            "按列表序号删除会话，参数: <序号>",
+		LangTraditionalChinese: "按列表序號刪除會話，參數: <序號>",
+		LangJapanese:           "リスト番号でセッションを削除、引数: <番号>",
+		LangSpanish:            "Eliminar sesión por su número en la lista, arg: <número>",
+	},
+	MsgBuiltinCmdName: {
+		LangEnglish:            "Name a session for easy identification, arg: [number] <text>",
+		LangChinese:            "给会话命名，方便识别，参数: [序号] <名称>",
+		LangTraditionalChinese: "為會話命名，方便辨識，參數: [序號] <名稱>",
+		LangJapanese:           "セッションに名前を付ける、引数: [番号] <名前>",
+		LangSpanish:            "Nombrar una sesión para fácil identificación, arg: [número] <texto>",
+	},
+	MsgBuiltinCmdCurrent: {
+		LangEnglish:            "Show current active session",
+		LangChinese:            "查看当前活跃会话",
+		LangTraditionalChinese: "查看當前活躍會話",
+		LangJapanese:           "現在のアクティブセッションを表示",
+		LangSpanish:            "Mostrar sesión activa actual",
+	},
+	MsgBuiltinCmdHistory: {
+		LangEnglish:            "Show last n messages, arg: [n] (default 10)",
+		LangChinese:            "查看最近 n 条消息，参数: [n]（默认 10）",
+		LangTraditionalChinese: "查看最近 n 條訊息，參數: [n]（預設 10）",
+		LangJapanese:           "直近 n 件のメッセージを表示、引数: [n]（デフォルト 10）",
+		LangSpanish:            "Mostrar últimos n mensajes, arg: [n] (por defecto 10)",
+	},
+	MsgBuiltinCmdProvider: {
+		LangEnglish:            "Manage API providers, arg: [list|add|remove|switch|clear]",
+		LangChinese:            "管理 API Provider，参数: [list|add|remove|switch|clear]",
+		LangTraditionalChinese: "管理 API Provider，參數: [list|add|remove|switch|clear]",
+		LangJapanese:           "API プロバイダ管理、引数: [list|add|remove|switch|clear]",
+		LangSpanish:            "Gestionar proveedores API, arg: [list|add|remove|switch|clear]",
+	},
+	MsgBuiltinCmdMemory: {
+		LangEnglish:            "View/edit agent memory files, arg: [add|global|global add]",
+		LangChinese:            "查看/编辑 Agent 记忆文件，参数: [add|global|global add]",
+		LangTraditionalChinese: "查看/編輯 Agent 記憶檔案，參數: [add|global|global add]",
+		LangJapanese:           "エージェントメモリの表示/編集、引数: [add|global|global add]",
+		LangSpanish:            "Ver/editar archivos de memoria del agente, arg: [add|global|global add]",
+	},
+	MsgBuiltinCmdAllow: {
+		LangEnglish:            "Pre-allow a tool (next session), arg: <tool>",
+		LangChinese:            "预授权工具（下次会话生效），参数: <工具名>",
+		LangTraditionalChinese: "預授權工具（下次會話生效），參數: <工具名>",
+		LangJapanese:           "ツールを事前許可（次のセッションで有効）、引数: <ツール>",
+		LangSpanish:            "Pre-autorizar herramienta (próxima sesión), arg: <herramienta>",
+	},
+	MsgBuiltinCmdModel: {
+		LangEnglish:            "View/switch model, arg: [name]",
+		LangChinese:            "查看/切换模型，参数: [名称]",
+		LangTraditionalChinese: "查看/切換模型，參數: [名稱]",
+		LangJapanese:           "モデルの表示/切り替え、引数: [名前]",
+		LangSpanish:            "Ver/cambiar modelo, arg: [nombre]",
+	},
+	MsgBuiltinCmdMode: {
+		LangEnglish:            "View/switch permission mode, arg: [name]",
+		LangChinese:            "查看/切换权限模式，参数: [名称]",
+		LangTraditionalChinese: "查看/切換權限模式，參數: [名稱]",
+		LangJapanese:           "権限モードの表示/切り替え、引数: [名前]",
+		LangSpanish:            "Ver/cambiar modo de permisos, arg: [nombre]",
+	},
+	MsgBuiltinCmdLang: {
+		LangEnglish:            "View/switch language, arg: [en|zh|zh-TW|ja|es|auto]",
+		LangChinese:            "查看/切换语言，参数: [en|zh|zh-TW|ja|es|auto]",
+		LangTraditionalChinese: "查看/切換語言，參數: [en|zh|zh-TW|ja|es|auto]",
+		LangJapanese:           "言語の表示/切り替え、引数: [en|zh|zh-TW|ja|es|auto]",
+		LangSpanish:            "Ver/cambiar idioma, arg: [en|zh|zh-TW|ja|es|auto]",
+	},
+	MsgBuiltinCmdQuiet: {
+		LangEnglish:            "Toggle thinking/tool progress, arg: [global]",
+		LangChinese:            "开关思考和工具进度消息, 参数: [global]",
+		LangTraditionalChinese: "開關思考和工具進度訊息, 參數: [global]",
+		LangJapanese:           "思考/ツール進捗メッセージの表示切替, 引数: [global]",
+		LangSpanish:            "Alternar mensajes de progreso, arg: [global]",
+	},
+	MsgBuiltinCmdCompress: {
+		LangEnglish:            "Compress conversation context",
+		LangChinese:            "压缩会话上下文",
+		LangTraditionalChinese: "壓縮會話上下文",
+		LangJapanese:           "会話コンテキストを圧縮",
+		LangSpanish:            "Comprimir contexto de conversación",
+	},
+	MsgBuiltinCmdStop: {
+		LangEnglish:            "Stop current execution",
+		LangChinese:            "停止当前执行",
+		LangTraditionalChinese: "停止當前執行",
+		LangJapanese:           "現在の実行を停止",
+		LangSpanish:            "Detener ejecución actual",
+	},
+	MsgBuiltinCmdCron: {
+		LangEnglish:            "Manage scheduled tasks, arg: [add|list|del|enable|disable]",
+		LangChinese:            "管理定时任务，参数: [add|list|del|enable|disable]",
+		LangTraditionalChinese: "管理定時任務，參數: [add|list|del|enable|disable]",
+		LangJapanese:           "スケジュールタスク管理、引数: [add|list|del|enable|disable]",
+		LangSpanish:            "Gestionar tareas programadas, arg: [add|list|del|enable|disable]",
+	},
+	MsgBuiltinCmdCommands: {
+		LangEnglish:            "Manage custom slash commands, arg: [add|del]",
+		LangChinese:            "管理自定义命令，参数: [add|del]",
+		LangTraditionalChinese: "管理自訂命令，參數: [add|del]",
+		LangJapanese:           "カスタムコマンド管理、引数: [add|del]",
+		LangSpanish:            "Gestionar comandos personalizados, arg: [add|del]",
+	},
+	MsgBuiltinCmdAlias: {
+		LangEnglish:            "Manage command aliases, arg: [add|del]",
+		LangChinese:            "管理命令别名，参数: [add|del]",
+		LangTraditionalChinese: "管理命令別名，參數: [add|del]",
+		LangJapanese:           "コマンドエイリアス管理、引数: [add|del]",
+		LangSpanish:            "Gestionar alias de comandos, arg: [add|del]",
+	},
+	MsgBuiltinCmdSkills: {
+		LangEnglish:            "List agent skills (from SKILL.md)",
+		LangChinese:            "列出 Agent Skills（来自 SKILL.md）",
+		LangTraditionalChinese: "列出 Agent Skills（來自 SKILL.md）",
+		LangJapanese:           "エージェントスキル一覧（SKILL.md から）",
+		LangSpanish:            "Listar skills del agente (desde SKILL.md)",
+	},
+	MsgBuiltinCmdConfig: {
+		LangEnglish:            "View/update runtime configuration, arg: [get|set|reload] [key] [value]",
+		LangChinese:            "查看/修改运行时配置，参数: [get|set|reload] [键] [值]",
+		LangTraditionalChinese: "查看/修改執行階段配置，參數: [get|set|reload] [鍵] [值]",
+		LangJapanese:           "ランタイム設定の表示/変更、引数: [get|set|reload] [キー] [値]",
+		LangSpanish:            "Ver/actualizar configuración en tiempo de ejecución, arg: [get|set|reload] [clave] [valor]",
+	},
+	MsgBuiltinCmdDoctor: {
+		LangEnglish:            "Run system diagnostics",
+		LangChinese:            "运行系统诊断",
+		LangTraditionalChinese: "執行系統診斷",
+		LangJapanese:           "システム診断を実行",
+		LangSpanish:            "Ejecutar diagnósticos del sistema",
+	},
+	MsgBuiltinCmdUpgrade: {
+		LangEnglish:            "Check for updates and self-update",
+		LangChinese:            "检查更新并自动升级",
+		LangTraditionalChinese: "檢查更新並自動升級",
+		LangJapanese:           "アップデートを確認して自動更新",
+		LangSpanish:            "Buscar actualizaciones y auto-actualizar",
+	},
+	MsgBuiltinCmdRestart: {
+		LangEnglish:            "Restart cc-connect service",
+		LangChinese:            "重启 cc-connect 服务",
+		LangTraditionalChinese: "重啟 cc-connect 服務",
+		LangJapanese:           "cc-connect サービスを再起動",
+		LangSpanish:            "Reiniciar el servicio cc-connect",
+	},
+	MsgBuiltinCmdStatus: {
+		LangEnglish:            "Show system status",
+		LangChinese:            "查看系统状态",
+		LangTraditionalChinese: "查看系統狀態",
+		LangJapanese:           "システム状態を表示",
+		LangSpanish:            "Mostrar estado del sistema",
+	},
+	MsgBuiltinCmdVersion: {
+		LangEnglish:            "Show cc-connect version",
+		LangChinese:            "查看 cc-connect 版本",
+		LangTraditionalChinese: "查看 cc-connect 版本",
+		LangJapanese:           "cc-connect のバージョンを表示",
+		LangSpanish:            "Mostrar versión de cc-connect",
+	},
+	MsgBuiltinCmdHelp: {
+		LangEnglish:            "Show this help",
+		LangChinese:            "显示此帮助",
+		LangTraditionalChinese: "顯示此說明",
+		LangJapanese:           "このヘルプを表示",
+		LangSpanish:            "Mostrar esta ayuda",
+	},
+	MsgBuiltinCmdBind: {
+		LangEnglish:            "Bind current session to a target, arg: <target>",
+		LangChinese:            "绑定当前会话到目标，参数: <目标>",
+		LangTraditionalChinese: "綁定當前會話到目標，參數: <目標>",
+		LangJapanese:           "現在のセッションをターゲットにバインド、引数: <ターゲット>",
+		LangSpanish:            "Vincular sesión actual a un objetivo, arg: <objetivo>",
 	},
 }
 
