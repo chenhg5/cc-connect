@@ -672,7 +672,7 @@ The following additional features are available:
 - **Gemini CLI**: Google Gemini CLI integration (`gemini -p --output-format stream-json`)
 - **Qoder CLI**: Qoder CLI integration (`qodercli -p -f stream-json`)
 - **OpenCode**: OpenCode CLI integration (`opencode run --format json`)
-- **iFlow CLI**: iFlow CLI integration (`iflow -p -r -o`)
+- **iFlow CLI**: iFlow CLI integration (`iflow -i -r -o`)
 - **Voice Messages (STT)**: Speech-to-text via Whisper API (OpenAI / Groq / SiliconFlow). Requires `ffmpeg` and `[speech]` config.
 - **Image Messages**: Send images to Claude Code for multimodal analysis
 - **API Provider Management**: Runtime switching between API providers via `/provider` command or CLI

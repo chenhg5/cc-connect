@@ -346,6 +346,7 @@ const (
 	MsgBuiltinCmdVersion  MsgKey = "version"
 	MsgBuiltinCmdHelp     MsgKey = "help"
 	MsgBuiltinCmdBind     MsgKey = "bind"
+	MsgBuiltinCmdShell    MsgKey = "shell"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -1995,6 +1996,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "綁定當前會話到目標，參數: <目標>",
 		LangJapanese:           "現在のセッションをターゲットにバインド、引数: <ターゲット>",
 		LangSpanish:            "Vincular sesión actual a un objetivo, arg: <objetivo>",
+	},
+	MsgBuiltinCmdShell: {
+		LangEnglish:            "Run a shell command, arg: <command>",
+		LangChinese:            "执行 Shell 命令，参数: <命令>",
+		LangTraditionalChinese: "執行 Shell 命令，參數: <命令>",
+		LangJapanese:           "シェルコマンドを実行、引数: <コマンド>",
+		LangSpanish:            "Ejecutar un comando shell, arg: <comando>",
 	},
 }
 

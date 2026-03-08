@@ -1750,8 +1750,23 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 	}
 
 	// Quiet mode
+	e.quietMu.RLock()
+	globalQuiet := e.quiet
+	e.quietMu.RUnlock()
+
+	e.interactiveMu.Lock()
+	state, hasState := e.interactiveStates[msg.SessionKey]
+	e.interactiveMu.Unlock()
+
+	sessionQuiet := false
+	if hasState && state != nil {
+		state.mu.Lock()
+		sessionQuiet = state.quiet
+		state.mu.Unlock()
+	}
+
 	quietStr := e.i18n.T(MsgQuietOffShort)
-	if state, ok := e.interactiveStates[msg.SessionKey]; ok && state.quiet {
+	if globalQuiet || sessionQuiet {
 		quietStr = e.i18n.T(MsgQuietOnShort)
 	}
 	modeStr += e.i18n.Tf(MsgStatusQuiet, quietStr)
@@ -2215,6 +2230,7 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 	// Cancel pending permission if any
 	state.mu.Lock()
 	pending := state.pending
+	quietMode := state.quiet
 	if pending != nil {
 		state.pending = nil
 	}
@@ -2224,6 +2240,20 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 	}
 
 	e.cleanupInteractiveState(msg.SessionKey)
+
+	// Preserve quiet preference across stop
+	if quietMode {
+		e.interactiveMu.Lock()
+		if s, ok := e.interactiveStates[msg.SessionKey]; ok {
+			s.mu.Lock()
+			s.quiet = quietMode
+			s.mu.Unlock()
+		} else {
+			e.interactiveStates[msg.SessionKey] = &interactiveState{platform: p, replyCtx: msg.ReplyCtx, quiet: quietMode}
+		}
+		e.interactiveMu.Unlock()
+	}
+
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
 }
 

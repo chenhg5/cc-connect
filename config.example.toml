@@ -716,8 +716,8 @@ app_secret = "your-feishu-app-secret"
 # =============================================================================
 # Requires: npm install -g @iflow-ai/iflow-cli
 # 需要安装：npm install -g @iflow-ai/iflow-cli
-# Uses `iflow -p` in non-interactive mode with session resume (`-r`) and execution info output (`-o`).
-# 底层使用 `iflow -p` 非交互模式，结合 `-r` 会话续聊和 `-o` 执行信息输出。
+# Uses `iflow -i` in interactive mode with session resume (`-r`) and execution info output (`-o`).
+# 底层使用 `iflow -i` 交互模式，结合 `-r` 会话续聊和 `-o` 执行信息输出。
 
 # [[projects]]
 # name = "my-iflow-project"

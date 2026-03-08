@@ -585,7 +585,6 @@ func (t *iflowTurn) addPendingTools(tools []iflowToolUse) []iflowToolUse {
 	var added []iflowToolUse
 	for _, tool := range tools {
 		if tool.ID == "" {
-			added = append(added, tool)
 			continue
 		}
 		if _, ok := t.doneToolIDs[tool.ID]; ok {
