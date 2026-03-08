@@ -44,7 +44,7 @@ cc-connect bridges AI agents running on your machine to the messaging platforms 
 
 <p align="center">
   <img src="docs/images/screenshot/cc-connect-lark.JPG" alt="飞书" width="32%" />
-  <img src="docs/images/screenshot/cc-connect-telegram.png" alt="Telegram" width="32%" />
+  <img src="docs/images/screenshot/cc-connect-telegram.JPG" alt="Telegram" width="32%" />
   <img src="docs/images/screenshot/cc-connect-wechat.JPG" alt="微信" width="32%" />
 </p>
 <p align="center">
