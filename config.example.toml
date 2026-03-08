@@ -712,7 +712,51 @@ app_secret = "your-feishu-app-secret"
 # token = "your-telegram-bot-token"
 
 # =============================================================================
-# Project 7: Another example / 项目 7：更多示例 (uncomment to enable / 取消注释以启用)
+# Project 7: Using iFlow CLI / 项目 7：使用 iFlow CLI (uncomment to enable / 取消注释以启用)
+# =============================================================================
+# Requires: npm install -g @iflow-ai/iflow-cli
+# 需要安装：npm install -g @iflow-ai/iflow-cli
+# Uses `iflow -p` in non-interactive mode with session resume (`-r`) and execution info output (`-o`).
+# 底层使用 `iflow -p` 非交互模式，结合 `-r` 会话续聊和 `-o` 执行信息输出。
+
+# [[projects]]
+# name = "my-iflow-project"
+#
+# [projects.agent]
+# type = "iflow"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/project"
+# mode = "default"  # "default" | "auto-edit" | "plan" | "yolo"
+# cmd = "iflow"     # CLI binary name (default: "iflow") / CLI 二进制名称（默认 "iflow"）
+#
+# Mode options / 模式说明:
+# - "default":   Manual approval mode / 手动审批模式
+# - "auto-edit": Auto-edit mode / 自动编辑模式
+# - "plan":      Read-only planning mode / 只读规划模式
+# - "yolo":      Auto-approve all tool calls / 自动批准所有工具调用
+#
+# Optional: specify a model / 可选：指定模型
+# model = "Qwen3-Coder"
+#
+# # Active provider / 当前激活的 provider
+# # provider = "iflow-openai-compatible"
+#
+# [[projects.agent.providers]]
+# name = "iflow-openai-compatible"
+# api_key = "sk-xxx"
+# base_url = "https://api.example.com/v1"
+# model = "Qwen3-Coder"
+# env = { IFLOW_selectedAuthType = "openai-compatible" }
+#
+# [[projects.platforms]]
+# type = "telegram"
+#
+# [projects.platforms.options]
+# token = "your-telegram-bot-token"
+
+# =============================================================================
+# Project 8: Another example / 项目 8：更多示例 (uncomment to enable / 取消注释以启用)
 # =============================================================================
 
 # [[projects]]

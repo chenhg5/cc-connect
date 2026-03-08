@@ -24,6 +24,7 @@ import (
 	_ "github.com/chenhg5/cc-connect/agent/codex"
 	_ "github.com/chenhg5/cc-connect/agent/cursor"
 	_ "github.com/chenhg5/cc-connect/agent/gemini"
+	_ "github.com/chenhg5/cc-connect/agent/iflow"
 	_ "github.com/chenhg5/cc-connect/agent/opencode"
 	_ "github.com/chenhg5/cc-connect/agent/qoder"
 
@@ -31,9 +32,9 @@ import (
 	_ "github.com/chenhg5/cc-connect/platform/discord"
 	_ "github.com/chenhg5/cc-connect/platform/feishu"
 	_ "github.com/chenhg5/cc-connect/platform/line"
+	_ "github.com/chenhg5/cc-connect/platform/qq"
 	_ "github.com/chenhg5/cc-connect/platform/slack"
 	_ "github.com/chenhg5/cc-connect/platform/telegram"
-	_ "github.com/chenhg5/cc-connect/platform/qq"
 	_ "github.com/chenhg5/cc-connect/platform/wecom"
 )
 
@@ -143,13 +144,13 @@ func main() {
 		if ps, ok := agent.(core.ProviderSwitcher); ok && len(proj.Agent.Providers) > 0 {
 			providers := make([]core.ProviderConfig, len(proj.Agent.Providers))
 			for i, p := range proj.Agent.Providers {
-			providers[i] = core.ProviderConfig{
-				Name:     p.Name,
-				APIKey:   p.APIKey,
-				BaseURL:  p.BaseURL,
-				Model:    p.Model,
-				Thinking: p.Thinking,
-				Env:      p.Env,
+				providers[i] = core.ProviderConfig{
+					Name:     p.Name,
+					APIKey:   p.APIKey,
+					BaseURL:  p.BaseURL,
+					Model:    p.Model,
+					Thinking: p.Thinking,
+					Env:      p.Env,
 				}
 			}
 			ps.SetProviders(providers)
@@ -252,15 +253,15 @@ func main() {
 				spcfg.MinDeltaChars = *cfg.StreamPreview.MinDeltaChars
 			}
 			if cfg.StreamPreview.MaxChars != nil {
-                spcfg.MaxChars = *cfg.StreamPreview.MaxChars
-            }
-            if cfg.StreamPreview.DisabledPlatforms != nil {
-                spcfg.DisabledPlatforms = cfg.StreamPreview.DisabledPlatforms
-            }
-            engine.SetStreamPreviewCfg(spcfg)
-        }
+				spcfg.MaxChars = *cfg.StreamPreview.MaxChars
+			}
+			if cfg.StreamPreview.DisabledPlatforms != nil {
+				spcfg.DisabledPlatforms = cfg.StreamPreview.DisabledPlatforms
+			}
+			engine.SetStreamPreviewCfg(spcfg)
+		}
 
-        // Wire rate limiting
+		// Wire rate limiting
 		{
 			maxMsg := 20
 			windowSecs := 60
@@ -551,7 +552,7 @@ level = "info"
 name = "my-project"
 
 [projects.agent]
-type = "claudecode"   # "claudecode", "codex", "cursor", "gemini", or "qoder"
+type = "claudecode"   # "claudecode", "codex", "cursor", "gemini", "qoder", "opencode", or "iflow"
 
 [projects.agent.options]
 work_dir = "/path/to/your/project"
