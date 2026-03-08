@@ -246,11 +246,10 @@ type CommandRegistrar interface {
 type CardStatus string
 
 const (
-	CardStatusThinking  CardStatus = "thinking"  // grey
-	CardStatusWorking   CardStatus = "working"   // blue
-	CardStatusDone      CardStatus = "done"      // green
-	CardStatusError     CardStatus = "error"     // red
-	CardStatusCancelled CardStatus = "cancelled" // grey
+	CardStatusThinking CardStatus = "thinking" // grey
+	CardStatusWorking  CardStatus = "working"  // blue
+	CardStatusDone     CardStatus = "done"     // green
+	CardStatusError    CardStatus = "error"    // red
 )
 
 // PreviewStatusUpdater is an optional interface for platforms that support

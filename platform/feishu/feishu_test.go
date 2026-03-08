@@ -1,8 +1,11 @@
 package feishu
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/chenhg5/cc-connect/core"
 )
 
 func TestExtractPostParts_TextOnly(t *testing.T) {
@@ -130,6 +133,63 @@ func TestPreprocessFeishuMarkdown_PreservesTablesAndHeadings(t *testing.T) {
 	}
 	if !strings.Contains(out, "> quote") {
 		t.Errorf("blockquote should be preserved, got %q", out)
+	}
+}
+
+func TestBuildCardJSON_StatusColors(t *testing.T) {
+	cases := []struct {
+		status   core.CardStatus
+		wantTmpl string
+	}{
+		{core.CardStatusThinking, "grey"},
+		{core.CardStatusWorking, "blue"},
+		{core.CardStatusDone, "green"},
+		{core.CardStatusError, "red"},
+		{"unknown", "grey"}, // unknown status falls back to grey
+	}
+	for _, tc := range cases {
+		raw := buildCardJSON("hello", tc.status)
+		var card map[string]any
+		if err := json.Unmarshal([]byte(raw), &card); err != nil {
+			t.Fatalf("status=%s: invalid JSON: %v", tc.status, err)
+		}
+		header, ok := card["header"].(map[string]any)
+		if !ok {
+			t.Fatalf("status=%s: missing header", tc.status)
+		}
+		got, _ := header["template"].(string)
+		if got != tc.wantTmpl {
+			t.Errorf("status=%s: template=%q, want %q", tc.status, got, tc.wantTmpl)
+		}
+	}
+}
+
+func TestReconstructReplyCtx_Formats(t *testing.T) {
+	p := &Platform{}
+
+	// per-message session: cron not supported
+	if _, err := p.ReconstructReplyCtx("feishu:msg:omsg123:ou_abc"); err == nil {
+		t.Error("expected error for feishu:msg: key")
+	}
+
+	// thread session: cron not supported
+	if _, err := p.ReconstructReplyCtx("feishu:thread:omsg456:ou_abc"); err == nil {
+		t.Error("expected error for feishu:thread: key")
+	}
+
+	// legacy chat session: should succeed
+	rc, err := p.ReconstructReplyCtx("feishu:oc_chatid123:ou_abc")
+	if err != nil {
+		t.Fatalf("unexpected error for legacy key: %v", err)
+	}
+	rctx, ok := rc.(replyContext)
+	if !ok || rctx.chatID != "oc_chatid123" {
+		t.Errorf("legacy key: got chatID=%q, want 'oc_chatid123'", rctx.chatID)
+	}
+
+	// invalid key
+	if _, err := p.ReconstructReplyCtx("slack:foo:bar"); err == nil {
+		t.Error("expected error for non-feishu key")
 	}
 }
 

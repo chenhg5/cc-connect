@@ -1018,6 +1018,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventText:
 			if event.Content != "" {
+				if len(textParts) == 0 {
+					// First text chunk: agent is actively generating output
+					sp.setStatus(CardStatusWorking)
+				}
 				textParts = append(textParts, event.Content)
 				if sp.canPreview() {
 					sp.appendText(event.Content)
@@ -1111,6 +1115,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			replyStart := time.Now()
 
 			// If streaming preview was active, try to finalize in-place
+			sp.setStatus(CardStatusDone)
 			if sp.finish(fullResponse) {
 				slog.Debug("EventResult: finalized via stream preview", "response_len", len(fullResponse))
 			} else {
@@ -1129,7 +1134,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			return
 
 		case EventError:
-			sp.finish("") // clean up preview on error
+			sp.setStatus(CardStatusError)
+			sp.finish(sp.getFullText()) // show error state with whatever was streamed
 			if event.Error != nil {
 				slog.Error("agent error", "error", event.Error)
 				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
@@ -1152,6 +1158,7 @@ channelClosed:
 		fullResponse := strings.Join(textParts, "")
 		session.AddHistory("assistant", fullResponse)
 
+		sp.setStatus(CardStatusDone)
 		if sp.finish(fullResponse) {
 			slog.Debug("stream preview: finalized in-place (process exited)")
 		} else {

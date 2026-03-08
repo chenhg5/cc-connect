@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -26,7 +27,6 @@ func init() {
 type replyContext struct {
 	messageID string
 	chatID    string
-	threadID  string // rootId if message is in a thread; empty for top-level
 }
 
 type Platform struct {
@@ -248,7 +248,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 	} else {
 		sessionKey = fmt.Sprintf("feishu:msg:%s:%s", messageID, userID)
 	}
-	rctx := replyContext{messageID: messageID, chatID: chatID, threadID: rootID}
+	rctx := replyContext{messageID: messageID, chatID: chatID}
 
 	switch msgType {
 	case "text":
@@ -566,7 +566,10 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 }
 
 // feishuPreviewHandle stores the message ID for an editable preview message.
+// mu protects status and lastContent which may be read/written concurrently
+// by UpdateMessage and SetPreviewStatus.
 type feishuPreviewHandle struct {
+	mu          sync.Mutex
 	messageID   string
 	chatID      string
 	status      core.CardStatus
@@ -680,10 +683,14 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 	}
 
 	processed := preprocessFeishuMarkdown(content)
+
+	h.mu.Lock()
 	status := h.status
 	if status == "" {
 		status = core.CardStatusThinking
 	}
+	h.mu.Unlock()
+
 	cardJSON := buildCardJSON(processed, status)
 	resp, err := p.client.Im.Message.Patch(ctx, larkim.NewPatchMessageReqBuilder().
 		MessageId(h.messageID).
@@ -697,7 +704,10 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 	if !resp.Success() {
 		return fmt.Errorf("feishu: patch message code=%d msg=%s", resp.Code, resp.Msg)
 	}
+
+	h.mu.Lock()
 	h.lastContent = processed
+	h.mu.Unlock()
 	return nil
 }
 
@@ -708,12 +718,21 @@ func (p *Platform) SetPreviewStatus(previewHandle any, status core.CardStatus) {
 	if !ok {
 		return
 	}
+
+	h.mu.Lock()
 	h.status = status
-	if h.lastContent == "" {
+	lastContent := h.lastContent
+	h.mu.Unlock()
+
+	if lastContent == "" {
 		return
 	}
-	cardJSON := buildCardJSON(h.lastContent, status)
-	resp, err := p.client.Im.Message.Patch(context.Background(), larkim.NewPatchMessageReqBuilder().
+	cardJSON := buildCardJSON(lastContent, status)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resp, err := p.client.Im.Message.Patch(ctx, larkim.NewPatchMessageReqBuilder().
 		MessageId(h.messageID).
 		Body(larkim.NewPatchMessageReqBodyBuilder().
 			Content(cardJSON).
