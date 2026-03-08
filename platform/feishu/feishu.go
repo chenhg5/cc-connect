@@ -546,20 +546,21 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 		return nil, fmt.Errorf("feishu: invalid session key %q", sessionKey)
 	}
 	switch parts[1] {
-	case "thread":
-		// feishu:thread:{rootId}:{userID}
-		if len(parts) < 4 {
-			return nil, fmt.Errorf("feishu: invalid thread session key %q", sessionKey)
-		}
-		return replyContext{messageID: parts[2], threadID: parts[2]}, nil
 	case "msg":
-		// feishu:msg:{messageID}:{userID}
-		if len(parts) < 4 {
-			return nil, fmt.Errorf("feishu: invalid msg session key %q", sessionKey)
+		// Per-message sessions cannot be reconstructed for cron jobs.
+		// Each top-level message spawns its own independent session.
+		return nil, fmt.Errorf("feishu: cannot reconstruct reply context for per-message session %q (cron not supported)", sessionKey)
+	case "thread":
+		// Thread sessions cannot be reconstructed for cron jobs without an active thread.
+		return nil, fmt.Errorf("feishu: cannot reconstruct reply context for thread session %q (cron not supported)", sessionKey)
+	case "chat":
+		// Legacy: feishu:chat:{chatID}:{userID}
+		if len(parts) < 3 {
+			return nil, fmt.Errorf("feishu: invalid chat session key %q", sessionKey)
 		}
-		return replyContext{messageID: parts[2]}, nil
+		return replyContext{chatID: parts[2]}, nil
 	default:
-		// Legacy: feishu:{chatID}:{userID}
+		// Oldest legacy: feishu:{chatID}:{userID}
 		return replyContext{chatID: parts[1]}, nil
 	}
 }
