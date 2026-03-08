@@ -35,6 +35,7 @@ cc-connect bridges AI coding assistants running on your dev machine to the messa
 
 - **7 AI Agents** — Claude Code, Codex, Cursor Agent, Qoder CLI, Gemini CLI, OpenCode, iFlow CLI. Use whichever fits your workflow, or all of them at once.
 - **8 Chat Platforms** — Feishu, DingTalk, Slack, Telegram, Discord, WeChat Work, LINE, QQ. Most need zero public IP.
+- **Multi-Bot Relay** — Bind multiple bots in a group chat and let them communicate with each other. Ask Claude, get insights from Gemini — all in one conversation.
 - **Full Control from Chat** — Switch models (`/model`), change permission modes (`/mode`), manage sessions, all via slash commands.
 - **Agent Memory** — Read and write agent instruction files (`/memory`) without touching the terminal.
 - **Scheduled Tasks** — Set up cron jobs in natural language. "Every day at 6am, summarize GitHub trending" just works.
@@ -69,7 +70,7 @@ cc-connect bridges AI coding assistants running on your dev machine to the messa
 | Platform | Discord | ✅ Gateway — no public IP needed |
 | Platform | LINE | ✅ Webhook — public URL required |
 | Platform | WeChat Work (企业微信) | ✅ Webhook — public URL required |
-| Platform | QQ (via NapCat/OneBot) | ✅ WebSocket, no public IP needed |
+| Platform | QQ (via NapCat/OneBot) | ✅ WebSocket, no public IP needed — **Beta** |
 | Platform | WhatsApp | 🔜 Planned (Business Cloud API) |
 | Platform | Microsoft Teams | 🔜 Planned (Bot Framework) |
 | Platform | Google Chat | 🔜 Planned (Chat API) |
@@ -79,6 +80,7 @@ cc-connect bridges AI coding assistants running on your dev machine to the messa
 | Feature | Image Messages | ✅ Multimodal (Claude Code) |
 | Feature | API Provider Management | ✅ Runtime provider switching |
 | Feature | CLI Send (`cc-connect send`) | ✅ Send messages to sessions via CLI |
+| Feature | Multi-Bot Relay | ✅ Cross-platform bot communication & group chat binding |
 
 ## Quick Start
 
@@ -681,6 +683,40 @@ Each user gets an independent session with full conversation context. Manage ses
 ```
 
 During a session, the agent may request tool permissions. Reply **allow** / **deny** / **allow all** (auto-approve all remaining requests this session).
+
+## Multi-Bot Relay
+
+cc-connect supports cross-platform bot communication, enabling multiple AI agents to collaborate in a single group chat.
+
+### Group Chat Binding
+
+Bind multiple bots in a group chat so users can interact with all of them in one place:
+
+```
+/bind              Show current bindings
+/bind claudecode   Add claudecode project to this chat
+/bind gemini       Add gemini project to this chat
+/bind -claudecode  Remove claudecode from this chat
+```
+
+After binding, all bound bots receive messages in the group. Users can @mention specific bots or let all of them respond.
+
+### Bot-to-Bot Communication
+
+Use CLI or internal API to send messages between bots:
+
+```bash
+# CLI: Send message to another project and get response
+cc-connect relay send --to gemini "What do you think about this architecture?"
+
+# In chat, ask one bot to consult another
+# The bot can use cc-connect relay to communicate with other agents
+```
+
+This enables powerful workflows like:
+- Ask Claude Code to review code, then ask Gemini for a second opinion
+- Let one agent handle frontend questions while another handles backend
+- Cross-validate solutions from multiple AI models
 
 ## Configuration
 
