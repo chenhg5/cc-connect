@@ -943,12 +943,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
 				if err := p.Send(e.ctx, replyCtx, chunk); err != nil {
 					slog.Error("failed to send reply", "error", err)
+					e.removeReaction(p, replyCtx)
 					return
 				}
 			}
 			if elapsed := time.Since(replyStart); elapsed >= slowPlatformSend {
 				slog.Warn("slow final reply send", "platform", p.Name(), "elapsed", elapsed, "response_len", len(fullResponse))
 			}
+			e.removeReaction(p, replyCtx)
 			return
 
 		case EventError:
@@ -956,6 +958,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				slog.Error("agent error", "error", event.Error)
 				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
 			}
+			e.removeReaction(p, replyCtx)
 			return
 		}
 	}
@@ -975,6 +978,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
 			e.send(p, replyCtx, chunk)
 		}
+		e.removeReaction(p, replyCtx)
 	}
 }
 
@@ -1276,7 +1280,7 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 
 func (e *Engine) cmdName(p Platform, msg *Message, args []string) {
 	if len(args) == 0 {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgNameUsage)))
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNameUsage))
 		return
 	}
 
@@ -1287,7 +1291,7 @@ func (e *Engine) cmdName(p Platform, msg *Message, args []string) {
 	if idx, err := strconv.Atoi(args[0]); err == nil && idx >= 1 {
 		// /name <number> <name...>
 		if len(args) < 2 {
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgNameUsage)))
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNameUsage))
 			return
 		}
 		agentSessions, err := e.agent.ListSessions(e.ctx)
@@ -1314,7 +1318,7 @@ func (e *Engine) cmdName(p Platform, msg *Message, args []string) {
 
 	name = strings.TrimSpace(name)
 	if name == "" {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgNameUsage)))
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNameUsage))
 		return
 	}
 
@@ -2067,6 +2071,14 @@ func (e *Engine) reply(p Platform, replyCtx any, content string) {
 	}
 }
 
+func (e *Engine) removeReaction(p Platform, replyCtx any) {
+	if rc, ok := p.(ReactionCleaner); ok {
+		if err := rc.RemoveReaction(e.ctx, replyCtx); err != nil {
+			slog.Debug("remove reaction failed", "error", err)
+		}
+	}
+}
+
 // ──────────────────────────────────────────────────────────────
 // /memory command
 // ──────────────────────────────────────────────────────────────
@@ -2739,7 +2751,7 @@ func (e *Engine) cmdAlias(p Platform, msg *Message, args []string) {
 	case "del", "delete", "remove":
 		e.cmdAliasDel(p, msg, args[1:])
 	default:
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgAliasUsage)))
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgAliasUsage))
 	}
 }
 

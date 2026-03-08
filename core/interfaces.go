@@ -74,6 +74,12 @@ type InlineButtonSender interface {
 	SendWithButtons(ctx context.Context, replyCtx any, content string, buttons [][]ButtonOption) error
 }
 
+// ReactionCleaner is an optional interface for platforms that add processing
+// indicators (e.g. emoji reactions) and need to remove them when the turn completes.
+type ReactionCleaner interface {
+	RemoveReaction(ctx context.Context, replyCtx any) error
+}
+
 // MessageHandler is called by platforms when a new message arrives.
 type MessageHandler func(p Platform, msg *Message)
 

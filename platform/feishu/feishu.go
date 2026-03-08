@@ -22,8 +22,9 @@ func init() {
 }
 
 type replyContext struct {
-	messageID string
-	chatID    string
+	messageID  string
+	chatID     string
+	reactionID string // set by addReaction, used by RemoveReaction
 }
 
 type Platform struct {
@@ -115,27 +116,52 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	return nil
 }
 
-func (p *Platform) addReaction(messageID string) {
+func (p *Platform) addReaction(messageID string) string {
 	if p.reactionEmoji == "" {
-		return
+		return ""
 	}
 	emojiType := p.reactionEmoji
-	go func() {
-		resp, err := p.client.Im.MessageReaction.Create(context.Background(),
-			larkim.NewCreateMessageReactionReqBuilder().
-				MessageId(messageID).
-				Body(larkim.NewCreateMessageReactionReqBodyBuilder().
-					ReactionType(&larkim.Emoji{EmojiType: &emojiType}).
-					Build()).
-				Build())
-		if err != nil {
-			slog.Debug("feishu: add reaction failed", "error", err)
-			return
-		}
-		if !resp.Success() {
-			slog.Debug("feishu: add reaction failed", "code", resp.Code, "msg", resp.Msg)
-		}
-	}()
+	resp, err := p.client.Im.MessageReaction.Create(context.Background(),
+		larkim.NewCreateMessageReactionReqBuilder().
+			MessageId(messageID).
+			Body(larkim.NewCreateMessageReactionReqBodyBuilder().
+				ReactionType(&larkim.Emoji{EmojiType: &emojiType}).
+				Build()).
+			Build())
+	if err != nil {
+		slog.Debug("feishu: add reaction failed", "error", err)
+		return ""
+	}
+	if !resp.Success() {
+		slog.Debug("feishu: add reaction failed", "code", resp.Code, "msg", resp.Msg)
+		return ""
+	}
+	if resp.Data != nil && resp.Data.ReactionId != nil {
+		return *resp.Data.ReactionId
+	}
+	return ""
+}
+
+func (p *Platform) RemoveReaction(ctx context.Context, rctx any) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("feishu: invalid reply context type %T", rctx)
+	}
+	if rc.reactionID == "" || rc.messageID == "" {
+		return nil
+	}
+	resp, err := p.client.Im.MessageReaction.Delete(ctx,
+		larkim.NewDeleteMessageReactionReqBuilder().
+			MessageId(rc.messageID).
+			ReactionId(rc.reactionID).
+			Build())
+	if err != nil {
+		return fmt.Errorf("feishu: delete reaction: %w", err)
+	}
+	if !resp.Success() {
+		slog.Debug("feishu: delete reaction failed", "code", resp.Code, "msg", resp.Msg)
+	}
+	return nil
 }
 
 func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
@@ -187,12 +213,13 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		return nil
 	}
 
+	var reactionID string
 	if msgType != "" && messageID != "" {
-		p.addReaction(messageID)
+		reactionID = p.addReaction(messageID)
 	}
 
 	sessionKey := fmt.Sprintf("feishu:%s:%s", chatID, userID)
-	rctx := replyContext{messageID: messageID, chatID: chatID}
+	rctx := replyContext{messageID: messageID, chatID: chatID, reactionID: reactionID}
 
 	switch msgType {
 	case "text":
