@@ -1,5 +1,35 @@
 # Changelog
 
+## v1.2.0 (2026-03-08)
+
+This is the first stable release of cc-connect 1.2.0, consolidating all beta changes and adding new features.
+
+### New Features (since beta.7)
+- **Official QQ Bot Platform**: Native integration with Tencent's official QQ Bot Platform via WebSocket, supporting text, image, and document messages
+- **iFlow CLI Agent**: Full support for iFlow CLI agent with interactive tool-call handling and mode switching
+- **Shell Command Execution**: Custom commands can execute shell commands directly with `exec` field in config
+- **Telegram Bot Menu**: Auto-register bot command menu on startup for better discoverability
+- **DingTalk Reply Preprocessing**: Improved markdown content preprocessing for reply messages
+- **Multi-Bot Relay Persistence**: Relay bindings now persist across restarts with improved binding messages
+
+### Improvements
+- **Quiet Mode**: `/quiet` now supports both per-session and global scope modes
+- **Compression Command**: Improved `/compress` command handling and code refactoring
+- **i18n**: Added new message keys and improved command formatting
+
+### All 1.2.0 Highlights (from beta releases)
+- **Bot-to-Bot Relay**: Forward messages between different messaging platforms
+- **Streaming Preview**: Real-time message preview on Telegram, Discord, and Feishu
+- **Typing Indicators**: Visual processing feedback on supported platforms
+- **Session Search**: Search sessions by name, ID prefix, or summary
+- **Custom Slash Commands**: Define reusable prompt templates
+- **Agent Skills Discovery**: Auto-discover and invoke user-defined skills
+- **Daemon Mode**: Run as background service with systemd/launchd support
+- **Rate Limiting**: Per-session sliding-window rate limiter
+- **Command Aliases**: Define shortcut aliases for commands
+- **Self-Update**: In-place binary updates with auto-restart
+- And many more improvements and bug fixes...
+
 ## v1.2.0-beta.7 (2026-03-07)
 
 ### New Features
