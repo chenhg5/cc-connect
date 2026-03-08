@@ -308,7 +308,6 @@ const (
 
 	MsgRelayNoBinding     MsgKey = "relay_no_binding"
 	MsgRelayBound         MsgKey = "relay_bound"
-	MsgRelayBindOK        MsgKey = "relay_bind_ok"
 	MsgRelayBindRemoved   MsgKey = "relay_bind_removed"
 	MsgRelayBindNotFound  MsgKey = "relay_bind_not_found"
 	MsgRelayBindSuccess   MsgKey = "relay_bind_success"
@@ -1766,10 +1765,6 @@ var messages = map[MsgKey]map[Language]string{
 		LangEnglish: "Current relay binding: %s",
 		LangChinese: "当前中继绑定: %s",
 	},
-	MsgRelayBindOK: {
-		LangEnglish: "Relay binding created: %s ↔ %s\n\nYou can now tell either bot to communicate with the other.\nExample: \"Ask %s about ...\"\n\nNote: the relay command uses the exact project name:\n  cc-connect relay send --to %s \"message\"",
-		LangChinese: "中继绑定已创建: %s ↔ %s\n\n你现在可以让任一机器人与对方交流。\n示例：\"帮我问 %s ...\"\n\n注意：relay 命令使用的是精确的项目名:\n  cc-connect relay send --to %s \"message\"",
-	},
 	MsgRelayUsage: {
 		LangEnglish: "Usage:\n  /bind <project>  — bind with another bot in this group\n  /bind remove     — remove binding\n  /bind            — show current binding\n\n<project> is the project name from config.toml [[projects]].",
 		LangChinese: "用法:\n  /bind <项目名>  — 绑定群聊中的另一个机器人\n  /bind remove    — 解除绑定\n  /bind           — 查看当前绑定\n\n<项目名> 是 config.toml 中 [[projects]] 的 name 字段。",
@@ -1809,11 +1804,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "❌ %s no está vinculado o el enlace no existe",
 	},
 	MsgRelayBindSuccess: {
-		LangEnglish:            "✅ Bind successful! Current group bound: %s\nTo send to %s: @%s <message>",
-		LangChinese:            "✅ 绑定成功！当前群组已绑定: %s\n向 %s 发送消息: @%s <消息>",
-		LangTraditionalChinese: "✅ 綁定成功！當前群組已綁定: %s\n向 %s 發送訊息: @%s <訊息>",
-		LangJapanese:           "✅ バインド成功！現在のグループ: %s\n%s に送信: @%s <メッセージ>",
-		LangSpanish:            "✅ ¡Enlace exitoso! Grupo actual: %s\nPara enviar a %s: @%s <mensaje>",
+		LangEnglish:            "✅ Bind successful! Current group bound: %s\n\nYou can now ask this bot to communicate with %s.\nExample: \"Ask %s about ...\"",
+		LangChinese:            "✅ 绑定成功！当前群组已绑定: %s\n\n你现在可以让本机器人去询问 %s。\n示例：\"帮我问一下 %s ...\"",
+		LangTraditionalChinese: "✅ 綁定成功！當前群組已綁定: %s\n\n你現在可以讓本機器人去詢問 %s。\n示例：\"幫我問一下 %s ...\"",
+		LangJapanese:           "✅ バインド成功！現在のグループ: %s\n\nこのボットに %s への問い合わせを依頼できます。\n例：「%s に...を聞いて」",
+		LangSpanish:            "✅ ¡Enlace exitoso! Grupo actual: %s\n\nAhora puede pedir a este bot que consulte a %s.\nEjemplo: \"Pregunta a %s sobre ...\"",
 	},
 	MsgSearchUsage: {
 		LangEnglish:            "Usage: /search <keyword>\nSearch sessions by name or ID.",

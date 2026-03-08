@@ -2,8 +2,11 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -13,23 +16,29 @@ const relayTimeout = 120 * time.Second
 
 // RelayBinding represents a bot-to-bot relay binding in a group chat.
 type RelayBinding struct {
-	Platform string            // e.g. "feishu"
-	ChatID   string            // group chat ID
-	Bots     map[string]string // project name → bot display name
+	Platform string            `json:"platform"`
+	ChatID   string            `json:"chat_id"`
+	Bots     map[string]string `json:"bots"` // project name → bot display name
 }
 
 // RelayManager coordinates bot-to-bot message relay across engines.
 type RelayManager struct {
-	mu       sync.RWMutex
-	engines  map[string]*Engine  // project name → engine
-	bindings map[string]*RelayBinding // chatID → binding
+	mu        sync.RWMutex
+	engines   map[string]*Engine         // project name → engine (runtime only)
+	bindings  map[string]*RelayBinding   // chatID → binding
+	storePath string                     // empty = no persistence
 }
 
-func NewRelayManager() *RelayManager {
-	return &RelayManager{
+func NewRelayManager(dataDir string) *RelayManager {
+	rm := &RelayManager{
 		engines:  make(map[string]*Engine),
 		bindings: make(map[string]*RelayBinding),
 	}
+	if dataDir != "" {
+		rm.storePath = filepath.Join(dataDir, "relay_bindings.json")
+		rm.load()
+	}
+	return rm
 }
 
 func (rm *RelayManager) RegisterEngine(name string, e *Engine) {
@@ -49,6 +58,7 @@ func (rm *RelayManager) Bind(platform, chatID string, bots map[string]string) {
 		Bots:     bots,
 	}
 	slog.Info("relay: binding created", "chat_id", chatID, "bots", bots)
+	rm.saveLocked()
 }
 
 // AddToBind adds a project to an existing binding, or creates a new one.
@@ -68,6 +78,7 @@ func (rm *RelayManager) AddToBind(platform, chatID, projectName string) {
 
 	binding.Bots[projectName] = projectName
 	slog.Info("relay: project added to binding", "chat_id", chatID, "project", projectName, "bots", binding.Bots)
+	rm.saveLocked()
 }
 
 // RemoveFromBind removes a project from an existing binding.
@@ -85,11 +96,11 @@ func (rm *RelayManager) RemoveFromBind(chatID, projectName string) bool {
 		delete(binding.Bots, projectName)
 		slog.Info("relay: project removed from binding", "chat_id", chatID, "project", projectName, "remaining", binding.Bots)
 
-		// If no bots left, remove the entire binding
 		if len(binding.Bots) == 0 {
 			delete(rm.bindings, chatID)
 			slog.Info("relay: binding removed (no bots left)", "chat_id", chatID)
 		}
+		rm.saveLocked()
 		return true
 	}
 	return false
@@ -108,6 +119,7 @@ func (rm *RelayManager) Unbind(chatID string) {
 	defer rm.mu.Unlock()
 	delete(rm.bindings, chatID)
 	slog.Info("relay: binding removed", "chat_id", chatID)
+	rm.saveLocked()
 }
 
 // HasEngine checks if a project engine is registered.
@@ -259,4 +271,47 @@ func parseSessionKeyParts(sessionKey string) (platform, chatID string, err error
 		return "", "", fmt.Errorf("invalid session key format: %q", sessionKey)
 	}
 	return parts[0], parts[1], nil
+}
+
+// ── Persistence ─────────────────────────────────────────────
+
+// saveLocked persists bindings to disk. Caller must hold rm.mu (read or write).
+func (rm *RelayManager) saveLocked() {
+	if rm.storePath == "" {
+		return
+	}
+	data, err := json.MarshalIndent(rm.bindings, "", "  ")
+	if err != nil {
+		slog.Error("relay: failed to marshal bindings", "error", err)
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(rm.storePath), 0o755); err != nil {
+		slog.Error("relay: failed to create dir", "error", err)
+		return
+	}
+	if err := AtomicWriteFile(rm.storePath, data, 0o644); err != nil {
+		slog.Error("relay: failed to write bindings", "path", rm.storePath, "error", err)
+	}
+}
+
+func (rm *RelayManager) load() {
+	if rm.storePath == "" {
+		return
+	}
+	data, err := os.ReadFile(rm.storePath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			slog.Error("relay: failed to read bindings", "path", rm.storePath, "error", err)
+		}
+		return
+	}
+	var bindings map[string]*RelayBinding
+	if err := json.Unmarshal(data, &bindings); err != nil {
+		slog.Error("relay: failed to unmarshal bindings", "path", rm.storePath, "error", err)
+		return
+	}
+	if bindings != nil {
+		rm.bindings = bindings
+		slog.Info("relay: loaded bindings", "count", len(bindings))
+	}
 }

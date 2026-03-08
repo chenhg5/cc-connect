@@ -418,7 +418,7 @@ func main() {
 	if err != nil {
 		slog.Warn("api server unavailable", "error", err)
 	} else {
-		relayMgr := core.NewRelayManager()
+		relayMgr := core.NewRelayManager(cfg.DataDir)
 		apiSrv.SetRelayManager(relayMgr)
 		for i, e := range engines {
 			apiSrv.RegisterEngine(cfg.Projects[i].Name, e)
