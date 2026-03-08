@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -121,6 +122,8 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 		return fmt.Errorf("dingtalk: invalid reply context type %T", rctx)
 	}
 
+	content = preprocessDingTalkMarkdown(content)
+
 	payload := map[string]any{
 		"msgtype":  "markdown",
 		"markdown": map[string]string{"title": "reply", "text": content},
@@ -158,4 +161,40 @@ func (p *Platform) Stop() error {
 		p.streamClient.Close()
 	}
 	return nil
+}
+
+// preprocessDingTalkMarkdown adapts content for DingTalk's markdown renderer:
+//   - Leading spaces → non-breaking spaces (prevents markdown from stripping indentation)
+//   - Single \n between non-empty lines → trailing two-space forced line break
+//   - Code blocks are left untouched
+func preprocessDingTalkMarkdown(s string) string {
+	lines := strings.Split(s, "\n")
+	inCodeBlock := false
+
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
+			inCodeBlock = !inCodeBlock
+		}
+		if inCodeBlock {
+			continue
+		}
+		spaceCount := len(line) - len(strings.TrimLeft(line, " "))
+		if spaceCount > 0 {
+			lines[i] = strings.Repeat("\u00A0", spaceCount) + line[spaceCount:]
+		}
+	}
+
+	var sb strings.Builder
+	for i, line := range lines {
+		sb.WriteString(line)
+		if i < len(lines)-1 {
+			if line != "" && lines[i+1] != "" {
+				sb.WriteString("  \n")
+			} else {
+				sb.WriteString("\n")
+			}
+		}
+	}
+	return sb.String()
 }
