@@ -5,6 +5,7 @@ go 1.24.2
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/bwmarrin/discordgo v0.29.0
+	github.com/creack/pty v1.1.24
 	github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.5.1
 	github.com/gorilla/websocket v1.5.0
 	github.com/larksuite/oapi-sdk-go/v3 v3.5.3

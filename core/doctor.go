@@ -67,6 +67,8 @@ var agentBinMap = map[string]string{
 	"cursor":     "agent",
 	"codex":      "codex",
 	"gemini":     "gemini",
+	"iflow":      "iflow",
+	"opencode":   "opencode",
 	"qoder":      "qodercli",
 }
 
@@ -113,6 +115,10 @@ func checkAgentAuth(ctx context.Context, agent Agent) []DoctorCheckResult {
 		return checkCLIAuth(ctx, "codex", []string{"--version"}, "Codex")
 	case "gemini":
 		return checkCLIAuth(ctx, "gemini", []string{"--version"}, "Gemini")
+	case "iflow":
+		return checkCLIAuth(ctx, "iflow", []string{"--version"}, "iFlow")
+	case "opencode":
+		return checkCLIAuth(ctx, "opencode", []string{"--version"}, "OpenCode")
 	case "cursor":
 		return checkCLIAuth(ctx, "agent", []string{"--version"}, "Cursor Agent")
 	case "qoder":

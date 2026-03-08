@@ -229,3 +229,15 @@ type PermissionModeInfo struct {
 	Desc   string
 	DescZh string
 }
+
+// BotCommandInfo represents a command for bot menu registration (e.g. Telegram setMyCommands).
+type BotCommandInfo struct {
+	Command     string // command name without leading "/"
+	Description string // short description for the menu
+}
+
+// CommandRegistrar is an optional interface for platforms that support
+// registering commands to the platform's native menu (e.g. Telegram's setMyCommands).
+type CommandRegistrar interface {
+	RegisterCommands(commands []BotCommandInfo) error
+}

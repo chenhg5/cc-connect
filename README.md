@@ -25,16 +25,17 @@ cc-connect bridges AI coding assistants running on your dev machine to the messa
               └────────────┘
               ┌─────┼─────┐
               ▼     ▼     ▼
-         Claude  Gemini  Codex  ...6 agents
-          Code    CLI   OpenCode
+         Claude  Gemini  Codex  ...7 agents
+          Code    CLI   OpenCode / iFlow
 ```
 
 ### Why cc-connect?
 
 > Time to uninstall OpenClaw — cc-connect gives you access to the most powerful coding agents available, not just one.
 
-- **6 AI Agents** — Claude Code, Codex, Cursor Agent, Qoder CLI, Gemini CLI, OpenCode. Use whichever fits your workflow, or all of them at once.
+- **7 AI Agents** — Claude Code, Codex, Cursor Agent, Qoder CLI, Gemini CLI, OpenCode, iFlow CLI. Use whichever fits your workflow, or all of them at once.
 - **9 Chat Platforms** — Feishu, DingTalk, Slack, Telegram, Discord, WeChat Work, LINE, QQ, QQ Bot (Official). Most need zero public IP.
+- **Multi-Bot Relay** — Bind multiple bots in a group chat and let them communicate with each other. Ask Claude, get insights from Gemini — all in one conversation.
 - **Full Control from Chat** — Switch models (`/model`), change permission modes (`/mode`), manage sessions, all via slash commands.
 - **Agent Memory** — Read and write agent instruction files (`/memory`) without touching the terminal.
 - **Scheduled Tasks** — Set up cron jobs in natural language. "Every day at 6am, summarize GitHub trending" just works.
@@ -55,6 +56,7 @@ cc-connect bridges AI coding assistants running on your dev machine to the messa
 | Agent | Gemini CLI (Google) | ✅ Supported |
 | Agent | Qoder CLI | ✅ Supported |
 | Agent | OpenCode | ✅ Supported |
+| Agent | iFlow CLI | ✅ Supported |
 | Agent | Crush | 🔜 Planned |
 | Agent | Goose (Block) | 🔜 Planned |
 | Agent | Aider | 🔜 Planned |
@@ -68,7 +70,7 @@ cc-connect bridges AI coding assistants running on your dev machine to the messa
 | Platform | Discord | ✅ Gateway — no public IP needed |
 | Platform | LINE | ✅ Webhook — public URL required |
 | Platform | WeChat Work (企业微信) | ✅ Webhook — public URL required |
-| Platform | QQ (via NapCat/OneBot) | ✅ WebSocket, no public IP needed |
+| Platform | QQ (via NapCat/OneBot) | ✅ WebSocket, no public IP needed — **Beta** |
 | Platform | QQ Bot (Official) | ✅ WebSocket — no public IP needed |
 | Platform | WhatsApp | 🔜 Planned (Business Cloud API) |
 | Platform | Microsoft Teams | 🔜 Planned (Bot Framework) |
@@ -79,6 +81,7 @@ cc-connect bridges AI coding assistants running on your dev machine to the messa
 | Feature | Image Messages | ✅ Multimodal (Claude Code) |
 | Feature | API Provider Management | ✅ Runtime provider switching |
 | Feature | CLI Send (`cc-connect send`) | ✅ Send messages to sessions via CLI |
+| Feature | Multi-Bot Relay | ✅ Cross-platform bot communication & group chat binding |
 
 ## Quick Start
 
@@ -89,7 +92,8 @@ cc-connect bridges AI coding assistants running on your dev machine to the messa
 - **Cursor Agent**: [Cursor Agent CLI](https://docs.cursor.com/agent) installed (`agent --version` to verify), OR
 - **Gemini CLI**: [Gemini CLI](https://github.com/google-gemini/gemini-cli) installed (`npm install -g @google/gemini-cli`), OR
 - **Qoder CLI**: [Qoder CLI](https://qoder.com) installed (`curl -fsSL https://qoder.com/install | bash`), OR
-- **OpenCode**: [OpenCode](https://github.com/opencode-ai/opencode) installed (`opencode --version` to verify)
+- **OpenCode**: [OpenCode](https://github.com/opencode-ai/opencode) installed (`opencode --version` to verify), OR
+- **iFlow CLI**: [iFlow CLI](https://github.com/iflow-ai/iflow-cli) installed (`npm i -g @iflow-ai/iflow-cli` or `iflow --version`)
 
 ### Install & Configure via AI Agent (Recommended)
 
@@ -297,6 +301,15 @@ All agents support permission modes switchable at runtime via `/mode`.
 | **Default** | `default` | Standard mode. |
 | **YOLO** | `yolo` | Auto-approve all tool calls. |
 
+**iFlow CLI** modes:
+
+| Mode | Config Value | Behavior |
+|------|-------------|----------|
+| **Default** | `default` | Manual approval mode. |
+| **Auto Edit** | `auto-edit` | Auto-edit mode. |
+| **Plan** | `plan` | Read-only planning mode. |
+| **YOLO** | `yolo` | Auto-approve all tool calls. |
+
 ```toml
 # Claude Code
 [projects.agent.options]
@@ -321,6 +334,10 @@ mode = "default"
 mode = "default"
 
 # OpenCode
+[projects.agent.options]
+mode = "default"
+
+# iFlow CLI
 [projects.agent.options]
 mode = "default"
 ```
@@ -403,6 +420,7 @@ Adding, removing, and switching providers all persist to `config.toml` automatic
 | Codex | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
 | Gemini CLI | `GEMINI_API_KEY` | — (use `env` map) |
 | OpenCode | `ANTHROPIC_API_KEY` | — (use `env` map) |
+| iFlow CLI | `IFLOW_API_KEY` / `IFLOW_apiKey` | `IFLOW_BASE_URL` / `IFLOW_baseUrl` |
 
 The `env` map in provider config lets you set arbitrary environment variables for any setup (Bedrock, Vertex, Azure, custom proxies, etc.).
 
@@ -592,7 +610,7 @@ cc-connect cron del <job-id>
 
 Claude Code will automatically translate your request into a `cc-connect cron add` command via `--append-system-prompt`.
 
-**For other agents** (Codex, Cursor, Gemini CLI), you need to add instructions to the agent's project-level instruction file so it knows how to create cron jobs. Add the following content to the corresponding file in your project root:
+**For other agents** (Codex, Cursor, Gemini CLI, Qoder CLI, OpenCode, iFlow CLI), you need to add instructions to the agent's project-level instruction file so it knows how to create cron jobs. Add the following content to the corresponding file in your project root:
 
 | Agent | Instruction File |
 |-------|-----------------|
@@ -601,6 +619,7 @@ Claude Code will automatically translate your request into a `cc-connect cron ad
 | Qoder CLI | `AGENTS.md` (project), `~/.qoder/AGENTS.md` (global) |
 | Gemini CLI | `GEMINI.md` |
 | OpenCode | `OPENCODE.md` |
+| iFlow CLI | `IFLOW.md` |
 
 **Content to add:**
 
@@ -673,6 +692,40 @@ Each user gets an independent session with full conversation context. Manage ses
 ```
 
 During a session, the agent may request tool permissions. Reply **allow** / **deny** / **allow all** (auto-approve all remaining requests this session).
+
+## Multi-Bot Relay
+
+cc-connect supports cross-platform bot communication, enabling multiple AI agents to collaborate in a single group chat.
+
+### Group Chat Binding
+
+Bind multiple bots in a group chat so users can interact with all of them in one place:
+
+```
+/bind              Show current bindings
+/bind claudecode   Add claudecode project to this chat
+/bind gemini       Add gemini project to this chat
+/bind -claudecode  Remove claudecode from this chat
+```
+
+After binding, all bound bots receive messages in the group. Users can @mention specific bots or let all of them respond.
+
+### Bot-to-Bot Communication
+
+Use CLI or internal API to send messages between bots:
+
+```bash
+# CLI: Send message to another project and get response
+cc-connect relay send --to gemini "What do you think about this architecture?"
+
+# In chat, ask one bot to consult another
+# The bot can use cc-connect relay to communicate with other agents
+```
+
+This enables powerful workflows like:
+- Ask Claude Code to review code, then ask Gemini for a second opinion
+- Let one agent handle frontend questions while another handles backend
+- Cross-validate solutions from multiple AI models
 
 ## Configuration
 
@@ -779,7 +832,8 @@ cc-connect/
 │   ├── cursor/              # Cursor Agent CLI (--print stream-json)
 │   ├── qoder/               # Qoder CLI (-p -f stream-json)
 │   ├── gemini/              # Gemini CLI (-p --output-format stream-json)
-│   └── opencode/            # OpenCode (run --format json)
+│   ├── opencode/            # OpenCode (run --format json)
+│   └── iflow/               # iFlow CLI (-p, -r, -o)
 ├── docs/                    # Platform setup guides
 ├── config.example.toml      # Config template
 ├── INSTALL.md               # AI-agent-friendly install guide

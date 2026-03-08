@@ -95,21 +95,21 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 			select {
 			case <-ctx.Done():
 				return
-		case update, ok := <-updates:
-			if !ok {
-				return
-			}
-			// Handle inline keyboard button clicks
-			if update.CallbackQuery != nil {
-				p.handleCallbackQuery(update.CallbackQuery)
-				continue
-			}
+			case update, ok := <-updates:
+				if !ok {
+					return
+				}
+				// Handle inline keyboard button clicks
+				if update.CallbackQuery != nil {
+					p.handleCallbackQuery(update.CallbackQuery)
+					continue
+				}
 
-			if update.Message == nil {
-				continue
-			}
+				if update.Message == nil {
+					continue
+				}
 
-			msg := update.Message
+				msg := update.Message
 				msgTime := time.Unix(int64(msg.Date), 0)
 				if core.IsOldMessage(msgTime) {
 					slog.Debug("telegram: ignoring old message after restart", "date", msgTime)
@@ -128,13 +128,13 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 
 				isGroup := msg.Chat.Type == "group" || msg.Chat.Type == "supergroup"
 
-			// In group chats, filter messages not directed at this bot (unless group_reply_all)
-			if isGroup && !p.groupReplyAll {
-				slog.Debug("telegram: checking group message", "bot", p.bot.Self.UserName, "text", msg.Text, "is_command", msg.IsCommand())
-				if !p.isDirectedAtBot(msg) {
-					continue
+				// In group chats, filter messages not directed at this bot (unless group_reply_all)
+				if isGroup && !p.groupReplyAll {
+					slog.Debug("telegram: checking group message", "bot", p.bot.Self.UserName, "text", msg.Text, "is_command", msg.IsCommand())
+					if !p.isDirectedAtBot(msg) {
+						continue
+					}
 				}
-			}
 
 				rctx := replyContext{chatID: msg.Chat.ID, messageID: msg.MessageID}
 
@@ -628,4 +628,72 @@ func (p *Platform) Stop() error {
 		p.bot.StopReceivingUpdates()
 	}
 	return nil
+}
+
+// RegisterCommands registers bot commands with Telegram for the command menu.
+func (p *Platform) RegisterCommands(commands []core.BotCommandInfo) error {
+	if p.bot == nil {
+		return fmt.Errorf("telegram: bot not initialized")
+	}
+
+	// Telegram limits: max 100 commands, description max 256 chars
+	var tgCommands []tgbotapi.BotCommand
+	for _, c := range commands {
+		if !isValidTelegramCommand(c.Command) {
+			slog.Warn("telegram: invalid command, skipping",
+				slog.String("command", c.Command),
+				slog.String("description", c.Description))
+			continue
+		}
+		desc := c.Description
+		if len(desc) > 256 {
+			desc = desc[:253] + "..."
+		}
+		tgCommands = append(tgCommands, tgbotapi.BotCommand{
+			Command:     c.Command,
+			Description: desc,
+		})
+	}
+
+	// Limit to 100 commands
+	if len(tgCommands) > 100 {
+		tgCommands = tgCommands[:100]
+	}
+
+	if len(tgCommands) == 0 {
+		slog.Debug("telegram: no commands to register")
+		return nil
+	}
+
+	cfg := tgbotapi.NewSetMyCommands(tgCommands...)
+	_, err := p.bot.Request(cfg)
+	if err != nil {
+		return fmt.Errorf("telegram: setMyCommands failed: %w", err)
+	}
+
+	slog.Info("telegram: registered bot commands", "count", len(tgCommands))
+	return nil
+}
+
+// isValidTelegramCommand validates if a command string meets Telegram's requirements.
+// Telegram command rules:
+//   - 1-32 characters long
+//   - Only lowercase letters, digits, and underscores
+//   - Must start with a letter
+func isValidTelegramCommand(cmd string) bool {
+	if len(cmd) == 0 || len(cmd) > 32 {
+		return false
+	}
+	// Must start with a letter
+	if cmd[0] < 'a' || cmd[0] > 'z' {
+		return false
+	}
+	// Rest can be letters, digits, or underscores
+	for i := 1; i < len(cmd); i++ {
+		c := cmd[i]
+		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_') {
+			return false
+		}
+	}
+	return true
 }

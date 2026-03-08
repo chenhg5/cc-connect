@@ -162,6 +162,9 @@ type Engine struct {
 	// Interactive agent session management
 	interactiveMu     sync.Mutex
 	interactiveStates map[string]*interactiveState // key = sessionKey
+
+	quietMu sync.RWMutex
+	quiet   bool // when true, suppress thinking and tool progress messages globally
 }
 
 // interactiveState tracks a running interactive agent session and its permission state.
@@ -171,8 +174,8 @@ type interactiveState struct {
 	replyCtx     any
 	mu           sync.Mutex
 	pending      *pendingPermission
-	approveAll   bool // when true, auto-approve all permission requests for this session
-	quiet        bool // when true, suppress thinking and tool progress messages
+	approveAll bool // when true, auto-approve all permission requests for this session
+	quiet      bool // when true, suppress thinking and tool progress for this session
 }
 
 // pendingPermission represents a permission request waiting for user response.
@@ -446,6 +449,16 @@ func (e *Engine) Start() error {
 			continue
 		}
 		slog.Info("platform started", "project", e.name, "platform", p.Name())
+
+		// Register commands on platforms that support it (e.g. Telegram setMyCommands)
+		if registrar, ok := p.(CommandRegistrar); ok {
+			commands := e.GetAllCommands()
+			if err := registrar.RegisterCommands(commands); err != nil {
+				slog.Error("platform command registration failed", "project", e.name, "platform", p.Name(), "error", err)
+			} else {
+				slog.Debug("platform commands registered", "project", e.name, "platform", p.Name(), "count", len(commands))
+			}
+		}
 	}
 
 	// Log summary
@@ -970,8 +983,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		state.mu.Lock()
 		p := state.platform
 		replyCtx := state.replyCtx
-		quiet := state.quiet
+		sessionQuiet := state.quiet
 		state.mu.Unlock()
+
+		e.quietMu.RLock()
+		globalQuiet := e.quiet
+		e.quietMu.RUnlock()
+
+		quiet := globalQuiet || sessionQuiet
 
 		switch event.Type {
 		case EventThinking:
@@ -1182,6 +1201,7 @@ var builtinCommands = []struct {
 	{[]string{"delete", "del", "rm"}, "delete"},
 	{[]string{"bind"}, "bind"},
 	{[]string{"search", "find"}, "search"},
+	{[]string{"shell", "sh", "exec", "run"}, "shell"},
 }
 
 // matchPrefix finds a unique command matching the given prefix.
@@ -1272,7 +1292,7 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 	case "lang":
 		e.cmdLang(p, msg, args)
 	case "quiet":
-		e.cmdQuiet(p, msg)
+		e.cmdQuiet(p, msg, args)
 	case "provider":
 		e.cmdProvider(p, msg, args)
 	case "memory":
@@ -1307,6 +1327,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdBind(p, msg, args)
 	case "search":
 		e.cmdSearch(p, msg, args)
+	case "shell":
+		e.cmdShell(p, msg, raw)
 	default:
 		if custom, ok := e.commands.Resolve(cmd); ok {
 			e.executeCustomCommand(p, msg, custom, args)
@@ -1504,6 +1526,58 @@ func (e *Engine) matchSession(sessions []AgentSessionInfo, query string) *AgentS
 	return nil
 }
 
+func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
+	// Strip the command prefix ("/shell ", "/sh ", "/exec ", "/run ")
+	shellCmd := raw
+	for _, prefix := range []string{"/shell ", "/sh ", "/exec ", "/run "} {
+		if strings.HasPrefix(strings.ToLower(raw), prefix) {
+			shellCmd = raw[len(prefix):]
+			break
+		}
+	}
+	shellCmd = strings.TrimSpace(shellCmd)
+
+	if shellCmd == "" {
+		e.reply(p, msg.ReplyCtx, "Usage: /shell <command>\nExample: /shell ls -la")
+		return
+	}
+
+	go func() {
+		workDir := ""
+		if wd, ok := e.agent.(interface{ GetWorkDir() string }); ok {
+			workDir = wd.GetWorkDir()
+		}
+		if workDir == "" {
+			workDir, _ = os.Getwd()
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		cmd := exec.CommandContext(ctx, "sh", "-c", shellCmd)
+		cmd.Dir = workDir
+		output, err := cmd.CombinedOutput()
+
+		if ctx.Err() == context.DeadlineExceeded {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("Command timed out (60s): `%s`", shellCmd))
+			return
+		}
+
+		result := strings.TrimSpace(string(output))
+		if err != nil && result == "" {
+			result = err.Error()
+		}
+		if result == "" {
+			result = "(no output)"
+		}
+		if len(result) > 4000 {
+			result = result[:3997] + "..."
+		}
+
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("$ %s\n```\n%s\n```", shellCmd, result))
+	}()
+}
+
 // cmdSearch searches sessions by name or message content.
 // Usage: /search <keyword>
 func (e *Engine) cmdSearch(p Platform, msg *Message, args []string) {
@@ -1676,8 +1750,23 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 	}
 
 	// Quiet mode
+	e.quietMu.RLock()
+	globalQuiet := e.quiet
+	e.quietMu.RUnlock()
+
+	e.interactiveMu.Lock()
+	state, hasState := e.interactiveStates[msg.SessionKey]
+	e.interactiveMu.Unlock()
+
+	sessionQuiet := false
+	if hasState && state != nil {
+		state.mu.Lock()
+		sessionQuiet = state.quiet
+		state.mu.Unlock()
+	}
+
 	quietStr := e.i18n.T(MsgQuietOffShort)
-	if state, ok := e.interactiveStates[msg.SessionKey]; ok && state.quiet {
+	if globalQuiet || sessionQuiet {
 		quietStr = e.i18n.T(MsgQuietOnShort)
 	}
 	modeStr += e.i18n.Tf(MsgStatusQuiet, quietStr)
@@ -1874,6 +1963,74 @@ func (e *Engine) cmdHelp(p Platform, msg *Message) {
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHelp))
 }
 
+// GetAllCommands returns all available commands for bot menu registration.
+// It includes built-in commands (with localized descriptions) and custom commands.
+func (e *Engine) GetAllCommands() []BotCommandInfo {
+	var commands []BotCommandInfo
+
+	// Collect built-in  commands (use primary name, first in names list)
+	seenCmds := make(map[string]bool)
+	for _, c := range builtinCommands {
+		if len(c.names) == 0 {
+			continue
+		}
+		// Use id as primary
+		primaryName := c.id
+		if seenCmds[primaryName] {
+			continue
+		}
+		seenCmds[primaryName] = true
+
+		// Skip disabled commands
+		if e.disabledCmds[c.id] {
+			continue
+		}
+
+		commands = append(commands, BotCommandInfo{
+			Command:     primaryName,
+			Description: e.i18n.T(MsgKey(primaryName)),
+		})
+	}
+
+	// Collect custom commands from CommandRegistry
+	for _, c := range e.commands.ListAll() {
+		if seenCmds[strings.ToLower(c.Name)] {
+			continue
+		}
+		seenCmds[strings.ToLower(c.Name)] = true
+
+		desc := c.Description
+		if desc == "" {
+			desc = "Custom command"
+		}
+
+		commands = append(commands, BotCommandInfo{
+			Command:     c.Name,
+			Description: desc,
+		})
+	}
+
+	// Collect skills
+	for _, s := range e.skills.ListAll() {
+		if seenCmds[strings.ToLower(s.Name)] {
+			continue
+		}
+		seenCmds[strings.ToLower(s.Name)] = true
+
+		desc := s.Description
+		if desc == "" {
+			desc = "Skill"
+		}
+
+		commands = append(commands, BotCommandInfo{
+			Command:     s.Name,
+			Description: desc,
+		})
+	}
+
+	return commands
+}
+
 func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 	switcher, ok := e.agent.(ModelSwitcher)
 	if !ok {
@@ -2018,13 +2175,28 @@ func (e *Engine) cmdMode(p Platform, msg *Message, args []string) {
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgModeChanged), displayName))
 }
 
-func (e *Engine) cmdQuiet(p Platform, msg *Message) {
+func (e *Engine) cmdQuiet(p Platform, msg *Message, args []string) {
+	// /quiet global — toggle global quiet for all sessions
+	if len(args) > 0 && args[0] == "global" {
+		e.quietMu.Lock()
+		e.quiet = !e.quiet
+		quiet := e.quiet
+		e.quietMu.Unlock()
+
+		if quiet {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQuietGlobalOn))
+		} else {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQuietGlobalOff))
+		}
+		return
+	}
+
+	// /quiet — toggle per-session quiet
 	e.interactiveMu.Lock()
 	state, ok := e.interactiveStates[msg.SessionKey]
 	e.interactiveMu.Unlock()
 
 	if !ok || state == nil {
-		// No state yet, create one so the flag persists
 		state = &interactiveState{platform: p, replyCtx: msg.ReplyCtx, quiet: true}
 		e.interactiveMu.Lock()
 		e.interactiveStates[msg.SessionKey] = state
@@ -2058,6 +2230,7 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 	// Cancel pending permission if any
 	state.mu.Lock()
 	pending := state.pending
+	quietMode := state.quiet
 	if pending != nil {
 		state.pending = nil
 	}
@@ -2067,6 +2240,20 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 	}
 
 	e.cleanupInteractiveState(msg.SessionKey)
+
+	// Preserve quiet preference across stop
+	if quietMode {
+		e.interactiveMu.Lock()
+		if s, ok := e.interactiveStates[msg.SessionKey]; ok {
+			s.mu.Lock()
+			s.quiet = quietMode
+			s.mu.Unlock()
+		} else {
+			e.interactiveStates[msg.SessionKey] = &interactiveState{platform: p, replyCtx: msg.ReplyCtx, quiet: quietMode}
+		}
+		e.interactiveMu.Unlock()
+	}
+
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
 }
 
