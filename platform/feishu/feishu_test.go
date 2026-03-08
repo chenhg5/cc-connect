@@ -1,8 +1,11 @@
 package feishu
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/chenhg5/cc-connect/core"
 )
 
 func TestExtractPostParts_TextOnly(t *testing.T) {
@@ -103,53 +106,6 @@ func TestParsePostContent_InvalidJSON(t *testing.T) {
 	}
 }
 
-func TestParseInlineMarkdown_Link(t *testing.T) {
-	elements := parseInlineMarkdown("visit [Google](https://google.com) now")
-	found := false
-	for _, el := range elements {
-		if el["tag"] == "a" && el["text"] == "Google" && el["href"] == "https://google.com" {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("expected link element, got %v", elements)
-	}
-}
-
-func TestParseInlineMarkdown_Italic(t *testing.T) {
-	elements := parseInlineMarkdown("hello *world*")
-	found := false
-	for _, el := range elements {
-		if styles, ok := el["style"].([]string); ok {
-			for _, s := range styles {
-				if s == "italic" && el["text"] == "world" {
-					found = true
-				}
-			}
-		}
-	}
-	if !found {
-		t.Errorf("expected italic element, got %v", elements)
-	}
-}
-
-func TestParseInlineMarkdown_Strikethrough(t *testing.T) {
-	elements := parseInlineMarkdown("hello ~~world~~")
-	found := false
-	for _, el := range elements {
-		if styles, ok := el["style"].([]string); ok {
-			for _, s := range styles {
-				if s == "lineThrough" && el["text"] == "world" {
-					found = true
-				}
-			}
-		}
-	}
-	if !found {
-		t.Errorf("expected strikethrough element, got %v", elements)
-	}
-}
-
 func TestPreprocessFeishuMarkdown_NewlineBeforeCodeFence(t *testing.T) {
 	input := "some text```go\ncode\n```"
 	out := preprocessFeishuMarkdown(input)
@@ -180,34 +136,61 @@ func TestPreprocessFeishuMarkdown_PreservesTablesAndHeadings(t *testing.T) {
 	}
 }
 
-func TestHasComplexMarkdown(t *testing.T) {
-	if !hasComplexMarkdown("text\n```go\ncode\n```") {
-		t.Error("should detect code blocks")
+func TestBuildCardJSON_StatusColors(t *testing.T) {
+	cases := []struct {
+		status   core.CardStatus
+		wantTmpl string
+	}{
+		{core.CardStatusThinking, "grey"},
+		{core.CardStatusWorking, "blue"},
+		{core.CardStatusDone, "green"},
+		{core.CardStatusError, "red"},
+		{"unknown", "grey"}, // unknown status falls back to grey
 	}
-	if !hasComplexMarkdown("| A | B |\n|---|---|") {
-		t.Error("should detect tables")
-	}
-	if hasComplexMarkdown("**bold** and *italic*") {
-		t.Error("should not detect simple markdown")
+	for _, tc := range cases {
+		raw := buildCardJSON("hello", tc.status)
+		var card map[string]any
+		if err := json.Unmarshal([]byte(raw), &card); err != nil {
+			t.Fatalf("status=%s: invalid JSON: %v", tc.status, err)
+		}
+		header, ok := card["header"].(map[string]any)
+		if !ok {
+			t.Fatalf("status=%s: missing header", tc.status)
+		}
+		got, _ := header["template"].(string)
+		if got != tc.wantTmpl {
+			t.Errorf("status=%s: template=%q, want %q", tc.status, got, tc.wantTmpl)
+		}
 	}
 }
 
-func TestParseInlineMarkdown_BoldAndCode(t *testing.T) {
-	elements := parseInlineMarkdown("**bold** and `code`")
-	hasBold, hasCode := false, false
-	for _, el := range elements {
-		if styles, ok := el["style"].([]string); ok {
-			for _, s := range styles {
-				if s == "bold" && el["text"] == "bold" {
-					hasBold = true
-				}
-				if s == "code" && el["text"] == "code" {
-					hasCode = true
-				}
-			}
-		}
+func TestReconstructReplyCtx_Formats(t *testing.T) {
+	p := &Platform{}
+
+	// per-message session: cron not supported
+	if _, err := p.ReconstructReplyCtx("feishu:msg:omsg123:ou_abc"); err == nil {
+		t.Error("expected error for feishu:msg: key")
 	}
-	if !hasBold || !hasCode {
-		t.Errorf("expected bold and code, got %v", elements)
+
+	// thread session: cron not supported
+	if _, err := p.ReconstructReplyCtx("feishu:thread:omsg456:ou_abc"); err == nil {
+		t.Error("expected error for feishu:thread: key")
+	}
+
+	// legacy chat session: should succeed
+	rc, err := p.ReconstructReplyCtx("feishu:oc_chatid123:ou_abc")
+	if err != nil {
+		t.Fatalf("unexpected error for legacy key: %v", err)
+	}
+	rctx, ok := rc.(replyContext)
+	if !ok || rctx.chatID != "oc_chatid123" {
+		t.Errorf("legacy key: got chatID=%q, want 'oc_chatid123'", rctx.chatID)
+	}
+
+	// invalid key
+	if _, err := p.ReconstructReplyCtx("slack:foo:bar"); err == nil {
+		t.Error("expected error for non-feishu key")
 	}
 }
+
+
