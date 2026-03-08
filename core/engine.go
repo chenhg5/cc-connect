@@ -1201,6 +1201,7 @@ var builtinCommands = []struct {
 	{[]string{"delete", "del", "rm"}, "delete"},
 	{[]string{"bind"}, "bind"},
 	{[]string{"search", "find"}, "search"},
+	{[]string{"shell", "sh", "exec", "run"}, "shell"},
 }
 
 // matchPrefix finds a unique command matching the given prefix.
@@ -1326,6 +1327,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdBind(p, msg, args)
 	case "search":
 		e.cmdSearch(p, msg, args)
+	case "shell":
+		e.cmdShell(p, msg, raw)
 	default:
 		if custom, ok := e.commands.Resolve(cmd); ok {
 			e.executeCustomCommand(p, msg, custom, args)
@@ -1521,6 +1524,58 @@ func (e *Engine) matchSession(sessions []AgentSessionInfo, query string) *AgentS
 	}
 
 	return nil
+}
+
+func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
+	// Strip the command prefix ("/shell ", "/sh ", "/exec ", "/run ")
+	shellCmd := raw
+	for _, prefix := range []string{"/shell ", "/sh ", "/exec ", "/run "} {
+		if strings.HasPrefix(strings.ToLower(raw), prefix) {
+			shellCmd = raw[len(prefix):]
+			break
+		}
+	}
+	shellCmd = strings.TrimSpace(shellCmd)
+
+	if shellCmd == "" {
+		e.reply(p, msg.ReplyCtx, "Usage: /shell <command>\nExample: /shell ls -la")
+		return
+	}
+
+	go func() {
+		workDir := ""
+		if wd, ok := e.agent.(interface{ GetWorkDir() string }); ok {
+			workDir = wd.GetWorkDir()
+		}
+		if workDir == "" {
+			workDir, _ = os.Getwd()
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		cmd := exec.CommandContext(ctx, "sh", "-c", shellCmd)
+		cmd.Dir = workDir
+		output, err := cmd.CombinedOutput()
+
+		if ctx.Err() == context.DeadlineExceeded {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("Command timed out (60s): `%s`", shellCmd))
+			return
+		}
+
+		result := strings.TrimSpace(string(output))
+		if err != nil && result == "" {
+			result = err.Error()
+		}
+		if result == "" {
+			result = "(no output)"
+		}
+		if len(result) > 4000 {
+			result = result[:3997] + "..."
+		}
+
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("$ %s\n```\n%s\n```", shellCmd, result))
+	}()
 }
 
 // cmdSearch searches sessions by name or message content.
