@@ -456,7 +456,7 @@ func buildReplyContent(content string) (msgType string, body string) {
 	if hasComplexMarkdown(content) {
 		return larkim.MsgTypeInteractive, buildCardJSON(preprocessFeishuMarkdown(content))
 	}
-	if strings.Count(content, "\n\n") >= 4 {
+	if strings.Count(content, "\n\n") >= 2 {
 		return larkim.MsgTypePost, buildPostJSON(content)
 	}
 	return larkim.MsgTypePost, buildPostMdJSON(content)

@@ -1449,7 +1449,7 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 
 	matched := e.matchSession(agentSessions, query)
 	if matched == nil {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ No session matching %q", query))
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgSwitchNoMatch), query))
 		return
 	}
 
@@ -1559,7 +1559,7 @@ func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
 		output, err := cmd.CombinedOutput()
 
 		if ctx.Err() == context.DeadlineExceeded {
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf("Command timed out (60s): `%s`", shellCmd))
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandTimeout), shellCmd))
 			return
 		}
 
@@ -1682,7 +1682,7 @@ func (e *Engine) cmdName(p Platform, msg *Message, args []string) {
 			return
 		}
 		if idx > len(agentSessions) {
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ No session #%d", idx))
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgSwitchNoSession), idx))
 			return
 		}
 		targetID = agentSessions[idx-1].ID
@@ -3015,18 +3015,28 @@ func (e *Engine) cmdCommandsList(p Platform, msg *Message) {
 	sb.WriteString(e.i18n.Tf(MsgCommandsTitle, len(cmds)))
 
 	for _, c := range cmds {
-		desc := c.Description
-		if desc == "" {
-			desc = truncateStr(c.Prompt, 50)
-		}
+		// Tag
 		tag := ""
 		if c.Source == "agent" {
 			tag = " [agent]"
+		} else if c.Exec != "" {
+			tag = " [shell]"
 		}
-		sb.WriteString(fmt.Sprintf("  /%s — %s%s\n", c.Name, desc, tag))
+		sb.WriteString(fmt.Sprintf("/%s%s\n", c.Name, tag))
+
+		// Description or fallback
+		desc := c.Description
+		if desc == "" {
+			if c.Exec != "" {
+				desc = "$ " + truncateStr(c.Exec, 60)
+			} else {
+				desc = truncateStr(c.Prompt, 60)
+			}
+		}
+		sb.WriteString(fmt.Sprintf("  %s\n\n", desc))
 	}
 
-	sb.WriteString("\n" + e.i18n.T(MsgCommandsHint))
+	sb.WriteString(e.i18n.T(MsgCommandsHint))
 	e.reply(p, msg.ReplyCtx, sb.String())
 }
 
@@ -3547,7 +3557,7 @@ func (e *Engine) cmdDelete(p Platform, msg *Message, args []string) {
 	}
 
 	if matched == nil {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ No session matching %q", prefix))
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgSwitchNoMatch), prefix))
 		return
 	}
 
@@ -3750,9 +3760,9 @@ func (e *Engine) cmdBind(p Platform, msg *Message, args []string) {
 	if strings.HasPrefix(otherProject, "-") {
 		projectToRemove := strings.TrimPrefix(otherProject, "-")
 		if e.relayManager.RemoveFromBind(chatID, projectToRemove) {
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf("已从绑定中移除 %s", projectToRemove))
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgRelayBindRemoved), projectToRemove))
 		} else {
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf("%s 未绑定或绑定不存在", projectToRemove))
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgRelayBindNotFound), projectToRemove))
 		}
 		return
 	}
@@ -3790,7 +3800,7 @@ func (e *Engine) cmdBind(p Platform, msg *Message, args []string) {
 		boundProjects = append(boundProjects, proj)
 	}
 
-	e.reply(p, msg.ReplyCtx, fmt.Sprintf("绑定成功！当前群组已绑定: %s\n向 %s 发送消息: @%s <消息>", strings.Join(boundProjects, " ↔ "), otherProject, otherProject))
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgRelayBindSuccess), strings.Join(boundProjects, " ↔ "), otherProject, otherProject))
 }
 
 func (e *Engine) cmdBindStatus(p Platform, replyCtx any, chatID string) {

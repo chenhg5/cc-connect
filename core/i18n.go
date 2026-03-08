@@ -295,21 +295,28 @@ const (
 	MsgDeleteActiveDenied MsgKey = "delete_active_denied"
 	MsgDeleteNotSupported MsgKey = "delete_not_supported"
 
-	MsgSwitchSuccess MsgKey = "switch_success"
+	MsgSwitchSuccess   MsgKey = "switch_success"
+	MsgSwitchNoMatch   MsgKey = "switch_no_match"
+	MsgSwitchNoSession MsgKey = "switch_no_session"
+
+	MsgCommandTimeout MsgKey = "command_timeout"
 
 	MsgBannedWordBlocked MsgKey = "banned_word_blocked"
 	MsgCommandDisabled   MsgKey = "command_disabled"
 	MsgRateLimited       MsgKey = "rate_limited"
 
-	MsgRelayNoBinding    MsgKey = "relay_no_binding"
-	MsgRelayBound        MsgKey = "relay_bound"
-	MsgRelayBindOK       MsgKey = "relay_bind_ok"
-	MsgRelayUsage        MsgKey = "relay_usage"
-	MsgRelayNotAvailable MsgKey = "relay_not_available"
-	MsgRelayUnbound      MsgKey = "relay_unbound"
-	MsgRelayBindSelf     MsgKey = "relay_bind_self"
-	MsgRelayNotFound     MsgKey = "relay_not_found"
-	MsgRelayNoTarget     MsgKey = "relay_no_target"
+	MsgRelayNoBinding     MsgKey = "relay_no_binding"
+	MsgRelayBound         MsgKey = "relay_bound"
+	MsgRelayBindOK        MsgKey = "relay_bind_ok"
+	MsgRelayBindRemoved   MsgKey = "relay_bind_removed"
+	MsgRelayBindNotFound  MsgKey = "relay_bind_not_found"
+	MsgRelayBindSuccess   MsgKey = "relay_bind_success"
+	MsgRelayUsage         MsgKey = "relay_usage"
+	MsgRelayNotAvailable  MsgKey = "relay_not_available"
+	MsgRelayUnbound       MsgKey = "relay_unbound"
+	MsgRelayBindSelf      MsgKey = "relay_bind_self"
+	MsgRelayNotFound      MsgKey = "relay_not_found"
+	MsgRelayNoTarget      MsgKey = "relay_no_target"
 
 	MsgSearchUsage    MsgKey = "search_usage"
 	MsgSearchError    MsgKey = "search_error"
@@ -1687,6 +1694,27 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "✅ 切り替え：%s（%s、%d件）",
 		LangSpanish:            "✅ Cambiado a: %s (%s, %d mensajes)",
 	},
+	MsgSwitchNoMatch: {
+		LangEnglish:            "❌ No session matching %q",
+		LangChinese:            "❌ 没有找到匹配 %q 的会话",
+		LangTraditionalChinese: "❌ 沒有找到匹配 %q 的會話",
+		LangJapanese:           "❌ %q に一致するセッションが見つかりません",
+		LangSpanish:            "❌ No hay sesión que coincida con %q",
+	},
+	MsgSwitchNoSession: {
+		LangEnglish:            "❌ No session #%d",
+		LangChinese:            "❌ 没有第 %d 个会话",
+		LangTraditionalChinese: "❌ 沒有第 %d 個會話",
+		LangJapanese:           "❌ セッション #%d が見つかりません",
+		LangSpanish:            "❌ No hay sesión #%d",
+	},
+	MsgCommandTimeout: {
+		LangEnglish:            "⏰ Command timed out (60s): `%s`",
+		LangChinese:            "⏰ 命令超时 (60秒): `%s`",
+		LangTraditionalChinese: "⏰ 命令逾時 (60秒): `%s`",
+		LangJapanese:           "⏰ コマンドがタイムアウトしました (60秒): `%s`",
+		LangSpanish:            "⏰ Comando agotado (60s): `%s`",
+	},
 	MsgDeleteActiveDenied: {
 		LangEnglish:            "❌ Cannot delete the currently active session. Switch to another session first.",
 		LangChinese:            "❌ 不能删除当前活跃会话，请先切换到其他会话。",
@@ -1757,6 +1785,27 @@ var messages = map[MsgKey]map[Language]string{
 	MsgRelayNoTarget: {
 		LangEnglish: "Project %q not found. No other projects are configured.",
 		LangChinese: "项目 %q 不存在。没有配置其他项目。",
+	},
+	MsgRelayBindRemoved: {
+		LangEnglish:            "✅ Removed %s from binding",
+		LangChinese:            "✅ 已从绑定中移除 %s",
+		LangTraditionalChinese: "✅ 已從綁定中移除 %s",
+		LangJapanese:           "✅ %s をバインドから削除しました",
+		LangSpanish:            "✅ Eliminado %s del enlace",
+	},
+	MsgRelayBindNotFound: {
+		LangEnglish:            "❌ %s is not bound or binding does not exist",
+		LangChinese:            "❌ %s 未绑定或绑定不存在",
+		LangTraditionalChinese: "❌ %s 未綁定或綁定不存在",
+		LangJapanese:           "❌ %s はバインドされていないか、バインドが存在しません",
+		LangSpanish:            "❌ %s no está vinculado o el enlace no existe",
+	},
+	MsgRelayBindSuccess: {
+		LangEnglish:            "✅ Bind successful! Current group bound: %s\nTo send to %s: @%s <message>",
+		LangChinese:            "✅ 绑定成功！当前群组已绑定: %s\n向 %s 发送消息: @%s <消息>",
+		LangTraditionalChinese: "✅ 綁定成功！當前群組已綁定: %s\n向 %s 發送訊息: @%s <訊息>",
+		LangJapanese:           "✅ バインド成功！現在のグループ: %s\n%s に送信: @%s <メッセージ>",
+		LangSpanish:            "✅ ¡Enlace exitoso! Grupo actual: %s\nPara enviar a %s: @%s <mensaje>",
 	},
 	MsgSearchUsage: {
 		LangEnglish:            "Usage: /search <keyword>\nSearch sessions by name or ID.",
