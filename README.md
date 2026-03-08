@@ -7,9 +7,9 @@
 
 English | [中文](./README.zh-CN.md)
 
-**Control your local AI coding agents from any chat app. Anywhere, anytime.**
+**Control your local AI agents from any chat app. Anywhere, anytime.**
 
-cc-connect bridges AI coding assistants running on your dev machine to the messaging platforms you already use — so you can review code on the subway, kick off tasks from your phone, or pair-program from bed.
+cc-connect bridges AI agents running on your machine to the messaging platforms you already use. Code review, research, automation, data analysis — anything an AI agent can do, now accessible from your phone, tablet, or any device with a chat app.
 
 ```
          You (Phone / Laptop / Tablet)
@@ -31,7 +31,7 @@ cc-connect bridges AI coding assistants running on your dev machine to the messa
 
 ### Why cc-connect?
 
-> Time to uninstall OpenClaw — cc-connect gives you access to the most powerful coding agents available, not just one.
+> Time to uninstall OpenClaw — cc-connect gives you access to the most powerful AI agents available, not just one.
 
 - **7 AI Agents** — Claude Code, Codex, Cursor Agent, Qoder CLI, Gemini CLI, OpenCode, iFlow CLI. Use whichever fits your workflow, or all of them at once.
 - **9 Chat Platforms** — Feishu, DingTalk, Slack, Telegram, Discord, WeChat Work, LINE, QQ, QQ Bot (Official). Most need zero public IP.
@@ -55,9 +55,8 @@ cc-connect bridges AI coding assistants running on your dev machine to the messa
 | Agent | Cursor Agent | ✅ Supported |
 | Agent | Gemini CLI (Google) | ✅ Supported |
 | Agent | Qoder CLI | ✅ Supported |
-| Agent | OpenCode | ✅ Supported |
+| Agent | OpenCode (Crush) | ✅ Supported |
 | Agent | iFlow CLI | ✅ Supported |
-| Agent | Crush | 🔜 Planned |
 | Agent | Goose (Block) | 🔜 Planned |
 | Agent | Aider | 🔜 Planned |
 | Agent | Kimi Code (Moonshot) | 🔭 Exploring |
@@ -845,6 +844,14 @@ cc-connect/
 
 - [Discord](https://discord.gg/kHpwgaM4kq)
 - [Telegram](https://t.me/+odGNDhCjbjdmMmZl)
+
+## Contributors
+
+Thanks to all the people who contributed to this project:
+
+<a href="https://github.com/chenhg5/cc-connect/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=chenhg5/cc-connect" />
+</a>
 
 ## License
 
