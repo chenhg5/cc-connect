@@ -2264,7 +2264,6 @@ func (e *Engine) cmdCompress(p Platform, msg *Message) {
 		return
 	}
 
-	// Check for an active interactive session
 	e.interactiveMu.Lock()
 	state, hasState := e.interactiveStates[msg.SessionKey]
 	e.interactiveMu.Unlock()
@@ -2282,8 +2281,103 @@ func (e *Engine) cmdCompress(p Platform, msg *Message) {
 
 	e.send(p, msg.ReplyCtx, e.i18n.T(MsgCompressing))
 
-	msg.Content = compressor.CompressCommand()
-	go e.processInteractiveMessage(p, msg, session)
+	go func() {
+		defer session.Unlock()
+
+		state.mu.Lock()
+		state.platform = p
+		state.replyCtx = msg.ReplyCtx
+		state.mu.Unlock()
+
+		cmd := compressor.CompressCommand()
+		if err := state.agentSession.Send(cmd, nil); err != nil {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+			if !state.agentSession.Alive() {
+				e.cleanupInteractiveState(msg.SessionKey)
+			}
+			return
+		}
+
+		e.processCompressEvents(state, msg.SessionKey, p, msg.ReplyCtx)
+	}()
+}
+
+// processCompressEvents drains agent events after a compress command.
+// Unlike processInteractiveEvents it does NOT record history and treats
+// an empty result as success rather than "(empty response)".
+func (e *Engine) processCompressEvents(state *interactiveState, sessionKey string, p Platform, replyCtx any) {
+	var textParts []string
+	events := state.agentSession.Events()
+
+	var idleTimer *time.Timer
+	var idleCh <-chan time.Time
+	if e.eventIdleTimeout > 0 {
+		idleTimer = time.NewTimer(e.eventIdleTimeout)
+		defer idleTimer.Stop()
+		idleCh = idleTimer.C
+	}
+
+	for {
+		var event Event
+		var ok bool
+
+		select {
+		case event, ok = <-events:
+			if !ok {
+				e.cleanupInteractiveState(sessionKey)
+				if len(textParts) > 0 {
+					e.send(p, replyCtx, strings.Join(textParts, ""))
+				} else {
+					e.reply(p, replyCtx, e.i18n.T(MsgCompressDone))
+				}
+				return
+			}
+		case <-idleCh:
+			e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "compress timed out"))
+			e.cleanupInteractiveState(sessionKey)
+			return
+		case <-e.ctx.Done():
+			return
+		}
+
+		if idleTimer != nil {
+			if !idleTimer.Stop() {
+				select {
+				case <-idleTimer.C:
+				default:
+				}
+			}
+			idleTimer.Reset(e.eventIdleTimeout)
+		}
+
+		switch event.Type {
+		case EventText:
+			if event.Content != "" {
+				textParts = append(textParts, event.Content)
+			}
+		case EventResult:
+			result := event.Content
+			if result == "" && len(textParts) > 0 {
+				result = strings.Join(textParts, "")
+			}
+			if result != "" {
+				e.send(p, replyCtx, result)
+			} else {
+				e.reply(p, replyCtx, e.i18n.T(MsgCompressDone))
+			}
+			return
+		case EventError:
+			if event.Error != nil {
+				e.reply(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
+			}
+			return
+		case EventPermissionRequest:
+			_ = state.agentSession.RespondPermission(event.RequestID, PermissionResult{
+				Behavior:     "allow",
+				UpdatedInput: event.ToolInputRaw,
+			})
+		}
+	}
 }
 
 func (e *Engine) cmdAllow(p Platform, msg *Message, args []string) {

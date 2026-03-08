@@ -206,6 +206,7 @@ const (
 	MsgCompressNotSupported MsgKey = "compress_not_supported"
 	MsgCompressing          MsgKey = "compressing"
 	MsgCompressNoSession    MsgKey = "compress_no_session"
+	MsgCompressDone         MsgKey = "compress_done"
 
 	MsgMemoryNotSupported MsgKey = "memory_not_supported"
 	MsgMemoryShowProject  MsgKey = "memory_show_project"
@@ -1209,6 +1210,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "沒有活躍的會話可以壓縮。請先發送一條訊息。",
 		LangJapanese:           "圧縮するアクティブなセッションがありません。まずメッセージを送信してください。",
 		LangSpanish:            "No hay sesión activa para comprimir. Envíe un mensaje primero.",
+	},
+	MsgCompressDone: {
+		LangEnglish:            "✅ Context compressed.",
+		LangChinese:            "✅ 上下文压缩完成。",
+		LangTraditionalChinese: "✅ 上下文壓縮完成。",
+		LangJapanese:           "✅ コンテキスト圧縮完了。",
+		LangSpanish:            "✅ Contexto comprimido.",
 	},
 
 	// Inline strings for engine.go commands
