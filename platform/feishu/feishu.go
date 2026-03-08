@@ -26,6 +26,7 @@ func init() {
 type replyContext struct {
 	messageID string
 	chatID    string
+	threadID  string // rootId if message is in a thread; empty for top-level
 }
 
 type Platform struct {
@@ -236,8 +237,18 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		return nil
 	}
 
-	sessionKey := fmt.Sprintf("feishu:%s:%s", chatID, userID)
-	rctx := replyContext{messageID: messageID, chatID: chatID}
+	rootID := ""
+	if msg.RootId != nil {
+		rootID = *msg.RootId
+	}
+
+	var sessionKey string
+	if rootID != "" {
+		sessionKey = fmt.Sprintf("feishu:thread:%s:%s", rootID, userID)
+	} else {
+		sessionKey = fmt.Sprintf("feishu:msg:%s:%s", messageID, userID)
+	}
+	rctx := replyContext{messageID: messageID, chatID: chatID, threadID: rootID}
 
 	switch msgType {
 	case "text":
@@ -338,6 +349,7 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 		Body(larkim.NewReplyMessageReqBodyBuilder().
 			MsgType(msgType).
 			Content(msgBody).
+			ReplyInThread(true).
 			Build()).
 		Build())
 	if err != nil {
@@ -356,13 +368,32 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 		return fmt.Errorf("feishu: invalid reply context type %T", rctx)
 	}
 
+	msgType, msgBody := buildReplyContent(content)
+
+	if rc.messageID != "" {
+		// Reply in thread when we have a message ID
+		resp, err := p.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
+			MessageId(rc.messageID).
+			Body(larkim.NewReplyMessageReqBodyBuilder().
+				MsgType(msgType).
+				Content(msgBody).
+				ReplyInThread(true).
+				Build()).
+			Build())
+		if err != nil {
+			return fmt.Errorf("feishu: send reply api call: %w", err)
+		}
+		if !resp.Success() {
+			return fmt.Errorf("feishu: send reply failed code=%d msg=%s", resp.Code, resp.Msg)
+		}
+		return nil
+	}
+
 	if rc.chatID == "" {
 		return fmt.Errorf("feishu: chatID is empty, cannot send new message")
 	}
 
-	msgType, msgBody := buildReplyContent(content)
-
-	// Send a new message to the chat (not a reply)
+	// Fallback: send a new message to the chat
 	resp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
 		ReceiveIdType(larkim.ReceiveIdTypeChatId).
 		Body(larkim.NewCreateMessageReqBodyBuilder().
@@ -445,52 +476,7 @@ func detectMimeType(data []byte) string {
 }
 
 func buildReplyContent(content string) (msgType string, body string) {
-	if !containsMarkdown(content) {
-		b, _ := json.Marshal(map[string]string{"text": content})
-		return larkim.MsgTypeText, string(b)
-	}
-	// Three-tier rendering strategy:
-	// 1. Code blocks / tables → card (schema 2.0 markdown)
-	// 2. Many \n\n paragraphs (help, status, etc.) → post rich-text (preserves blank lines)
-	// 3. Other markdown → post md tag (best native rendering)
-	if hasComplexMarkdown(content) {
-		return larkim.MsgTypeInteractive, buildCardJSON(preprocessFeishuMarkdown(content))
-	}
-	if strings.Count(content, "\n\n") >= 2 {
-		return larkim.MsgTypePost, buildPostJSON(content)
-	}
-	return larkim.MsgTypePost, buildPostMdJSON(content)
-}
-
-// hasComplexMarkdown detects code blocks or tables that require card rendering.
-func hasComplexMarkdown(s string) bool {
-	if strings.Contains(s, "```") {
-		return true
-	}
-	// Table: line starting and ending with |
-	for _, line := range strings.Split(s, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if len(trimmed) > 1 && trimmed[0] == '|' && trimmed[len(trimmed)-1] == '|' {
-			return true
-		}
-	}
-	return false
-}
-
-// buildPostMdJSON builds a Feishu post message using the md tag,
-// which renders markdown at normal chat font size.
-func buildPostMdJSON(content string) string {
-	post := map[string]any{
-		"zh_cn": map[string]any{
-			"content": [][]map[string]any{
-				{
-					{"tag": "md", "text": content},
-				},
-			},
-		},
-	}
-	b, _ := json.Marshal(post)
-	return string(b)
+	return larkim.MsgTypeInteractive, buildCardJSON(preprocessFeishuMarkdown(content), core.CardStatusDone)
 }
 
 // preprocessFeishuMarkdown ensures code fences have a newline before them,
@@ -507,217 +493,6 @@ func preprocessFeishuMarkdown(md string) string {
 		b.WriteByte(md[i])
 	}
 	return b.String()
-}
-
-var markdownIndicators = []string{
-	"```", "**", "~~", "`", "\n- ", "\n* ", "\n1. ", "\n# ", "---",
-}
-
-func containsMarkdown(s string) bool {
-	for _, ind := range markdownIndicators {
-		if strings.Contains(s, ind) {
-			return true
-		}
-	}
-	return false
-}
-
-// buildPostJSON converts markdown content to Feishu post (rich text) format.
-func buildPostJSON(content string) string {
-	lines := strings.Split(content, "\n")
-	var postLines [][]map[string]any
-	inCodeBlock := false
-	var codeLines []string
-	codeLang := ""
-
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-
-		if strings.HasPrefix(trimmed, "```") {
-			if !inCodeBlock {
-				inCodeBlock = true
-				codeLang = strings.TrimPrefix(trimmed, "```")
-				codeLines = nil
-			} else {
-				inCodeBlock = false
-				postLines = append(postLines, []map[string]any{{
-					"tag":      "code_block",
-					"language": codeLang,
-					"text":     strings.Join(codeLines, "\n"),
-				}})
-			}
-			continue
-		}
-
-		if inCodeBlock {
-			codeLines = append(codeLines, line)
-			continue
-		}
-
-		// Convert # headers to bold
-		headerLine := line
-		for level := 6; level >= 1; level-- {
-			prefix := strings.Repeat("#", level) + " "
-			if strings.HasPrefix(line, prefix) {
-				headerLine = "**" + strings.TrimPrefix(line, prefix) + "**"
-				break
-			}
-		}
-
-		elements := parseInlineMarkdown(headerLine)
-		if len(elements) > 0 {
-			postLines = append(postLines, elements)
-		} else {
-			postLines = append(postLines, []map[string]any{{"tag": "text", "text": ""}})
-		}
-	}
-
-	// Handle unclosed code block
-	if inCodeBlock && len(codeLines) > 0 {
-		postLines = append(postLines, []map[string]any{{
-			"tag":      "code_block",
-			"language": codeLang,
-			"text":     strings.Join(codeLines, "\n"),
-		}})
-	}
-
-	post := map[string]any{
-		"zh_cn": map[string]any{
-			"content": postLines,
-		},
-	}
-	b, _ := json.Marshal(post)
-	return string(b)
-}
-
-// parseInlineMarkdown parses a single line of markdown into Feishu post elements.
-// Supports **bold** and `code` inline formatting.
-func parseInlineMarkdown(line string) []map[string]any {
-	type markerDef struct {
-		pattern string
-		tag     string
-		style   string // for text elements with style
-		isLink  bool
-	}
-	markers := []markerDef{
-		{pattern: "**", tag: "text", style: "bold"},
-		{pattern: "~~", tag: "text", style: "lineThrough"},
-		{pattern: "`", tag: "text", style: "code"},
-		{pattern: "*", tag: "text", style: "italic"},
-	}
-
-	var elements []map[string]any
-	remaining := line
-
-	for len(remaining) > 0 {
-		// Check for link [text](url)
-		linkIdx := strings.Index(remaining, "[")
-		if linkIdx >= 0 {
-			parenClose := -1
-			bracketClose := strings.Index(remaining[linkIdx:], "](")
-			if bracketClose >= 0 {
-				bracketClose += linkIdx
-				parenClose = strings.Index(remaining[bracketClose+2:], ")")
-				if parenClose >= 0 {
-					parenClose += bracketClose + 2
-				}
-			}
-			if parenClose >= 0 {
-				// Check if any marker comes before this link
-				foundEarlierMarker := false
-				for _, m := range markers {
-					idx := strings.Index(remaining, m.pattern)
-					if idx >= 0 && idx < linkIdx {
-						foundEarlierMarker = true
-						break
-					}
-				}
-				if !foundEarlierMarker {
-					if linkIdx > 0 {
-						elements = append(elements, map[string]any{"tag": "text", "text": remaining[:linkIdx]})
-					}
-					linkText := remaining[linkIdx+1 : bracketClose]
-					linkURL := remaining[bracketClose+2 : parenClose]
-					elements = append(elements, map[string]any{
-						"tag":  "a",
-						"text": linkText,
-						"href": linkURL,
-					})
-					remaining = remaining[parenClose+1:]
-					continue
-				}
-			}
-		}
-
-		// Find the earliest formatting marker
-		bestIdx := -1
-		var bestMarker markerDef
-		for _, m := range markers {
-			idx := strings.Index(remaining, m.pattern)
-			if idx < 0 {
-				continue
-			}
-			// For single * marker, skip if it's actually ** (bold)
-			if m.pattern == "*" && idx+1 < len(remaining) && remaining[idx+1] == '*' {
-				idx = findSingleAsterisk(remaining)
-				if idx < 0 {
-					continue
-				}
-			}
-			if bestIdx < 0 || idx < bestIdx {
-				bestIdx = idx
-				bestMarker = m
-			}
-		}
-
-		if bestIdx < 0 {
-			if remaining != "" {
-				elements = append(elements, map[string]any{"tag": "text", "text": remaining})
-			}
-			break
-		}
-
-		if bestIdx > 0 {
-			elements = append(elements, map[string]any{"tag": "text", "text": remaining[:bestIdx]})
-		}
-		remaining = remaining[bestIdx+len(bestMarker.pattern):]
-
-		closeIdx := strings.Index(remaining, bestMarker.pattern)
-		// For single *, make sure we don't match ** as close
-		if bestMarker.pattern == "*" {
-			closeIdx = findSingleAsterisk(remaining)
-		}
-		if closeIdx < 0 {
-			elements = append(elements, map[string]any{"tag": "text", "text": bestMarker.pattern + remaining})
-			remaining = ""
-			break
-		}
-
-		inner := remaining[:closeIdx]
-		remaining = remaining[closeIdx+len(bestMarker.pattern):]
-
-		elements = append(elements, map[string]any{
-			"tag":   bestMarker.tag,
-			"text":  inner,
-			"style": []string{bestMarker.style},
-		})
-	}
-
-	return elements
-}
-
-// findSingleAsterisk finds the index of a single '*' not part of '**' in s.
-func findSingleAsterisk(s string) int {
-	for i := 0; i < len(s); i++ {
-		if s[i] == '*' {
-			if i+1 < len(s) && s[i+1] == '*' {
-				i++ // skip **
-				continue
-			}
-			return i
-		}
-	}
-	return -1
 }
 
 // fetchBotOpenID retrieves the bot's open_id via the Feishu bot info API.
@@ -766,28 +541,60 @@ func stripMentions(text string, mentions []*larkim.MentionEvent) string {
 }
 
 func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
-	// feishu:{chatID}:{userID}
-	parts := strings.SplitN(sessionKey, ":", 3)
+	parts := strings.SplitN(sessionKey, ":", 4)
 	if len(parts) < 2 || parts[0] != "feishu" {
 		return nil, fmt.Errorf("feishu: invalid session key %q", sessionKey)
 	}
-	return replyContext{chatID: parts[1]}, nil
+	switch parts[1] {
+	case "thread":
+		// feishu:thread:{rootId}:{userID}
+		if len(parts) < 4 {
+			return nil, fmt.Errorf("feishu: invalid thread session key %q", sessionKey)
+		}
+		return replyContext{messageID: parts[2], threadID: parts[2]}, nil
+	case "msg":
+		// feishu:msg:{messageID}:{userID}
+		if len(parts) < 4 {
+			return nil, fmt.Errorf("feishu: invalid msg session key %q", sessionKey)
+		}
+		return replyContext{messageID: parts[2]}, nil
+	default:
+		// Legacy: feishu:{chatID}:{userID}
+		return replyContext{chatID: parts[1]}, nil
+	}
 }
 
 // feishuPreviewHandle stores the message ID for an editable preview message.
 type feishuPreviewHandle struct {
-	messageID string
-	chatID    string
+	messageID   string
+	chatID      string
+	status      core.CardStatus
+	lastContent string
 }
 
 // buildCardJSON builds a Feishu interactive card JSON string with a markdown element.
 // Uses schema 2.0 which supports code blocks, tables, and inline formatting.
 // Card font is inherently smaller than Post/Text — this is a Feishu platform limitation.
-func buildCardJSON(content string) string {
+func buildCardJSON(content string, status core.CardStatus) string {
+	template := "grey"
+	switch status {
+	case core.CardStatusWorking:
+		template = "blue"
+	case core.CardStatusDone:
+		template = "green"
+	case core.CardStatusError:
+		template = "red"
+	}
 	card := map[string]any{
 		"schema": "2.0",
 		"config": map[string]any{
 			"wide_screen_mode": true,
+		},
+		"header": map[string]any{
+			"template": template,
+			"title": map[string]any{
+				"tag": "plain_text", "content": "",
+			},
 		},
 		"body": map[string]any{
 			"elements": []map[string]any{
@@ -811,36 +618,56 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 		return nil, fmt.Errorf("feishu: invalid reply context type %T", rctx)
 	}
 
-	chatID := rc.chatID
-	if chatID == "" {
-		return nil, fmt.Errorf("feishu: chatID is empty")
-	}
+	processed := preprocessFeishuMarkdown(content)
+	cardJSON := buildCardJSON(processed, core.CardStatusThinking)
 
-	cardJSON := buildCardJSON(content)
-	resp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
-		ReceiveIdType(larkim.ReceiveIdTypeChatId).
-		Body(larkim.NewCreateMessageReqBodyBuilder().
-			ReceiveId(chatID).
-			MsgType(larkim.MsgTypeInteractive).
-			Content(cardJSON).
-			Build()).
-		Build())
-	if err != nil {
-		return nil, fmt.Errorf("feishu: send preview: %w", err)
-	}
-	if !resp.Success() {
-		return nil, fmt.Errorf("feishu: send preview code=%d msg=%s", resp.Code, resp.Msg)
-	}
-
-	msgID := ""
-	if resp.Data != nil && resp.Data.MessageId != nil {
-		msgID = *resp.Data.MessageId
+	var msgID string
+	if rc.messageID != "" {
+		resp, err := p.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
+			MessageId(rc.messageID).
+			Body(larkim.NewReplyMessageReqBodyBuilder().
+				MsgType(larkim.MsgTypeInteractive).
+				Content(cardJSON).
+				ReplyInThread(true).
+				Build()).
+			Build())
+		if err != nil {
+			return nil, fmt.Errorf("feishu: send preview reply: %w", err)
+		}
+		if !resp.Success() {
+			return nil, fmt.Errorf("feishu: send preview reply code=%d msg=%s", resp.Code, resp.Msg)
+		}
+		if resp.Data != nil && resp.Data.MessageId != nil {
+			msgID = *resp.Data.MessageId
+		}
+	} else {
+		chatID := rc.chatID
+		if chatID == "" {
+			return nil, fmt.Errorf("feishu: chatID is empty")
+		}
+		resp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
+			ReceiveIdType(larkim.ReceiveIdTypeChatId).
+			Body(larkim.NewCreateMessageReqBodyBuilder().
+				ReceiveId(chatID).
+				MsgType(larkim.MsgTypeInteractive).
+				Content(cardJSON).
+				Build()).
+			Build())
+		if err != nil {
+			return nil, fmt.Errorf("feishu: send preview: %w", err)
+		}
+		if !resp.Success() {
+			return nil, fmt.Errorf("feishu: send preview code=%d msg=%s", resp.Code, resp.Msg)
+		}
+		if resp.Data != nil && resp.Data.MessageId != nil {
+			msgID = *resp.Data.MessageId
+		}
 	}
 	if msgID == "" {
 		return nil, fmt.Errorf("feishu: send preview: no message ID returned")
 	}
 
-	return &feishuPreviewHandle{messageID: msgID, chatID: chatID}, nil
+	return &feishuPreviewHandle{messageID: msgID, chatID: rc.chatID, lastContent: processed}, nil
 }
 
 // UpdateMessage edits an existing card message identified by previewHandle.
@@ -851,11 +678,12 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 		return fmt.Errorf("feishu: invalid preview handle type %T", previewHandle)
 	}
 
-	processed := content
-	if containsMarkdown(content) {
-		processed = preprocessFeishuMarkdown(content)
+	processed := preprocessFeishuMarkdown(content)
+	status := h.status
+	if status == "" {
+		status = core.CardStatusThinking
 	}
-	cardJSON := buildCardJSON(processed)
+	cardJSON := buildCardJSON(processed, status)
 	resp, err := p.client.Im.Message.Patch(ctx, larkim.NewPatchMessageReqBuilder().
 		MessageId(h.messageID).
 		Body(larkim.NewPatchMessageReqBodyBuilder().
@@ -868,7 +696,35 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 	if !resp.Success() {
 		return fmt.Errorf("feishu: patch message code=%d msg=%s", resp.Code, resp.Msg)
 	}
+	h.lastContent = processed
 	return nil
+}
+
+// SetPreviewStatus updates the card header color of a preview message.
+// Implements core.PreviewStatusUpdater.
+func (p *Platform) SetPreviewStatus(previewHandle any, status core.CardStatus) {
+	h, ok := previewHandle.(*feishuPreviewHandle)
+	if !ok {
+		return
+	}
+	h.status = status
+	if h.lastContent == "" {
+		return
+	}
+	cardJSON := buildCardJSON(h.lastContent, status)
+	resp, err := p.client.Im.Message.Patch(context.Background(), larkim.NewPatchMessageReqBuilder().
+		MessageId(h.messageID).
+		Body(larkim.NewPatchMessageReqBodyBuilder().
+			Content(cardJSON).
+			Build()).
+		Build())
+	if err != nil {
+		slog.Debug("feishu: set preview status patch failed", "error", err)
+		return
+	}
+	if !resp.Success() {
+		slog.Debug("feishu: set preview status patch failed", "code", resp.Code, "msg", resp.Msg)
+	}
 }
 
 func (p *Platform) Stop() error {

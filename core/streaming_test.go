@@ -186,7 +186,7 @@ func (m *mockCleanerPlatform) DeletePreviewMessage(_ context.Context, handle any
 	return nil
 }
 
-func TestStreamPreview_FreezeDeletesOnFinish(t *testing.T) {
+func TestStreamPreview_FreezeRecoveryOnFinish(t *testing.T) {
 	mp := &mockCleanerPlatform{}
 	cfg := StreamPreviewCfg{
 		Enabled:       true,
@@ -202,17 +202,17 @@ func TestStreamPreview_FreezeDeletesOnFinish(t *testing.T) {
 	// Simulate a tool/thinking event → freeze
 	sp.freeze()
 
-	// finish should return false (degraded) and delete the stale preview
+	// finish should return true (recovery via UpdateMessage succeeded)
 	ok := sp.finish("Hello World Final")
-	if ok {
-		t.Error("finish should return false when degraded")
+	if !ok {
+		t.Error("finish should return true when degraded preview is recovered via UpdateMessage")
 	}
 
 	mp.mu.Lock()
 	deletedCount := len(mp.deleted)
 	mp.mu.Unlock()
-	if deletedCount != 1 {
-		t.Errorf("expected 1 delete call, got %d", deletedCount)
+	if deletedCount != 0 {
+		t.Errorf("expected 0 delete calls (recovery succeeded), got %d", deletedCount)
 	}
 }
 
