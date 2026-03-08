@@ -29,9 +29,11 @@ const (
 	// Default intent: GROUP_AND_C2C_EVENT (1 << 25)
 	defaultIntents = 1 << 25
 
-	maxReconnectBackoff = 60 * time.Second
-	tokenRefreshMargin  = 5 * time.Minute
-	messageMaxLen       = 2000
+	maxReconnectBackoff  = 60 * time.Second
+	maxReconnectAttempts = 30
+	tokenRefreshMargin   = 5 * time.Minute
+	messageMaxLen        = 2000
+	msgSeqTTL            = 5 * time.Minute
 )
 
 // WebSocket opcodes for the QQ Bot gateway protocol.
@@ -62,18 +64,26 @@ type Platform struct {
 	tokenMu     sync.RWMutex
 
 	// WebSocket state
-	wsConn      *websocket.Conn
-	wsMu        sync.Mutex
-	sessionID   string
-	lastSeq     atomic.Int64
-	heartbeatMs int
-	heartbeatOK atomic.Bool
+	wsConn       *websocket.Conn
+	wsMu         sync.Mutex
+	sessionID    string
+	lastSeq      atomic.Int64
+	heartbeatMs  int
+	heartbeatOK  atomic.Bool
+	reconnecting atomic.Bool
 
 	// Message dedup
 	dedup core.MessageDedup
 
 	// msg_seq counter per event msg_id (for multiple replies to same event)
-	msgSeqMap sync.Map // msg_id -> *atomic.Int32
+	msgSeqMu  sync.Mutex
+	msgSeqMap map[string]*msgSeqEntry
+}
+
+// msgSeqEntry tracks msg_seq counter with a creation timestamp for TTL eviction.
+type msgSeqEntry struct {
+	seq       atomic.Int32
+	createdAt time.Time
 }
 
 // replyContext carries the information needed to reply to a QQ Bot message.
@@ -374,6 +384,7 @@ func (p *Platform) sendIdentify(conn *websocket.Conn, token string) error {
 		"d": map[string]any{
 			"token":   fmt.Sprintf("QQBot %s", token),
 			"intents": p.intents,
+			"shard":   [2]int{0, 1},
 		},
 	}
 	p.wsMu.Lock()
@@ -500,7 +511,12 @@ func (p *Platform) readLoop(ctx context.Context) {
 }
 
 func (p *Platform) triggerReconnect(ctx context.Context) {
-	go p.reconnectLoop(ctx)
+	if p.reconnecting.CompareAndSwap(false, true) {
+		go func() {
+			defer p.reconnecting.Store(false)
+			p.reconnectLoop(ctx)
+		}()
+	}
 }
 
 func (p *Platform) reconnectLoop(ctx context.Context) {
@@ -513,7 +529,7 @@ func (p *Platform) reconnectLoop(ctx context.Context) {
 	p.wsMu.Unlock()
 
 	backoff := time.Second
-	for {
+	for attempt := 1; attempt <= maxReconnectAttempts; attempt++ {
 		select {
 		case <-ctx.Done():
 			return
@@ -524,7 +540,7 @@ func (p *Platform) reconnectLoop(ctx context.Context) {
 
 		// Refresh token before reconnecting (may have expired)
 		if err := p.refreshToken(); err != nil {
-			slog.Warn("qqbot: token refresh failed during reconnect", "error", err)
+			slog.Warn("qqbot: token refresh failed during reconnect", "error", err, "attempt", attempt)
 			backoff = min(backoff*2, maxReconnectBackoff)
 			continue
 		}
@@ -533,14 +549,14 @@ func (p *Platform) reconnectLoop(ctx context.Context) {
 
 		gatewayURL, err := p.getGatewayURL(token)
 		if err != nil {
-			slog.Warn("qqbot: get gateway failed during reconnect", "error", err)
+			slog.Warn("qqbot: get gateway failed during reconnect", "error", err, "attempt", attempt)
 			backoff = min(backoff*2, maxReconnectBackoff)
 			continue
 		}
 
 		conn, _, err := websocket.DefaultDialer.Dial(gatewayURL, nil)
 		if err != nil {
-			slog.Warn("qqbot: ws reconnect failed", "error", err, "backoff", backoff)
+			slog.Warn("qqbot: ws reconnect failed", "error", err, "attempt", attempt, "backoff", backoff)
 			backoff = min(backoff*2, maxReconnectBackoff)
 			continue
 		}
@@ -590,6 +606,7 @@ func (p *Platform) reconnectLoop(ctx context.Context) {
 		go p.readLoop(ctx)
 		return
 	}
+	slog.Error("qqbot: failed to reconnect after max attempts", "attempts", maxReconnectAttempts)
 }
 
 func (p *Platform) sendResume(conn *websocket.Conn, token string) error {
@@ -626,10 +643,11 @@ func (p *Platform) handleDispatch(eventType string, data json.RawMessage) {
 
 func (p *Platform) handleGroupMessage(data json.RawMessage) {
 	var d struct {
-		ID           string `json:"id"`
-		GroupOpenID  string `json:"group_openid"`
-		Content      string `json:"content"`
-		Timestamp    string `json:"timestamp"`
+		ID           string       `json:"id"`
+		GroupOpenID  string       `json:"group_openid"`
+		Content      string       `json:"content"`
+		Timestamp    string       `json:"timestamp"`
+		Attachments  []attachment `json:"attachments"`
 		Author       struct {
 			MemberOpenID string `json:"member_openid"`
 		} `json:"author"`
@@ -661,7 +679,14 @@ func (p *Platform) handleGroupMessage(data json.RawMessage) {
 	}
 
 	// Strip leading @bot mention (the official API includes it as content prefix)
-	content := strings.TrimSpace(d.Content)
+	content := stripAtMention(d.Content)
+
+	// Download image attachments
+	images := downloadAttachmentImages(d.Attachments)
+
+	if content == "" && len(images) == 0 {
+		return
+	}
 
 	sessionKey := fmt.Sprintf("qqbot:%s:%s", d.GroupOpenID, d.Author.MemberOpenID)
 
@@ -678,19 +703,21 @@ func (p *Platform) handleGroupMessage(data json.RawMessage) {
 		UserID:     d.Author.MemberOpenID,
 		UserName:   d.Author.MemberOpenID, // official API only provides openid, no nickname
 		Content:    content,
+		Images:     images,
 		ReplyCtx:   rctx,
 	}
 
-	slog.Debug("qqbot: group message received", "group", d.GroupOpenID, "user", d.Author.MemberOpenID, "len", len(content))
+	slog.Debug("qqbot: group message received", "group", d.GroupOpenID, "user", d.Author.MemberOpenID, "len", len(content), "images", len(images))
 	p.handler(p, msg)
 }
 
 func (p *Platform) handleC2CMessage(data json.RawMessage) {
 	var d struct {
-		ID        string `json:"id"`
-		Content   string `json:"content"`
-		Timestamp string `json:"timestamp"`
-		Author    struct {
+		ID          string       `json:"id"`
+		Content     string       `json:"content"`
+		Timestamp   string       `json:"timestamp"`
+		Attachments []attachment `json:"attachments"`
+		Author      struct {
 			UserOpenID string `json:"user_openid"`
 		} `json:"author"`
 	}
@@ -721,6 +748,14 @@ func (p *Platform) handleC2CMessage(data json.RawMessage) {
 	}
 
 	content := strings.TrimSpace(d.Content)
+
+	// Download image attachments
+	images := downloadAttachmentImages(d.Attachments)
+
+	if content == "" && len(images) == 0 {
+		return
+	}
+
 	sessionKey := fmt.Sprintf("qqbot:%s", d.Author.UserOpenID)
 
 	rctx := &replyContext{
@@ -735,10 +770,11 @@ func (p *Platform) handleC2CMessage(data json.RawMessage) {
 		UserID:     d.Author.UserOpenID,
 		UserName:   d.Author.UserOpenID,
 		Content:    content,
+		Images:     images,
 		ReplyCtx:   rctx,
 	}
 
-	slog.Debug("qqbot: c2c message received", "user", d.Author.UserOpenID, "len", len(content))
+	slog.Debug("qqbot: c2c message received", "user", d.Author.UserOpenID, "len", len(content), "images", len(images))
 	p.handler(p, msg)
 }
 
@@ -772,9 +808,27 @@ func (p *Platform) sendMessage(rctx *replyContext, content string) error {
 }
 
 func (p *Platform) nextMsgSeq(eventMsgID string) int32 {
-	val, _ := p.msgSeqMap.LoadOrStore(eventMsgID, &atomic.Int32{})
-	counter := val.(*atomic.Int32)
-	return counter.Add(1)
+	p.msgSeqMu.Lock()
+	defer p.msgSeqMu.Unlock()
+
+	if p.msgSeqMap == nil {
+		p.msgSeqMap = make(map[string]*msgSeqEntry)
+	}
+
+	// Evict expired entries
+	now := time.Now()
+	for k, v := range p.msgSeqMap {
+		if now.Sub(v.createdAt) > msgSeqTTL {
+			delete(p.msgSeqMap, k)
+		}
+	}
+
+	entry, ok := p.msgSeqMap[eventMsgID]
+	if !ok {
+		entry = &msgSeqEntry{createdAt: now}
+		p.msgSeqMap[eventMsgID] = entry
+	}
+	return entry.seq.Add(1)
 }
 
 // ---------------------------------------------------------------------------
@@ -850,4 +904,64 @@ func (p *Platform) apiRequest(method, url string, body any) error {
 		return fmt.Errorf("qqbot: api %s %s returned %d: %s", method, url, resp.StatusCode, raw)
 	}
 	return nil
+}
+
+// attachment represents an image/file attachment in the QQ Bot API event payload.
+type attachment struct {
+	ContentType string `json:"content_type"`
+	URL         string `json:"url"`
+	Filename    string `json:"filename"`
+}
+
+// downloadAttachmentImages downloads all image attachments and returns ImageAttachments.
+func downloadAttachmentImages(attachments []attachment) []core.ImageAttachment {
+	var images []core.ImageAttachment
+	for _, att := range attachments {
+		if !strings.HasPrefix(att.ContentType, "image/") {
+			continue
+		}
+		url := att.URL
+		if url == "" {
+			continue
+		}
+		// The official API may omit the https:// prefix
+		if !strings.HasPrefix(url, "http") {
+			url = "https://" + url
+		}
+		resp, err := core.HTTPClient.Get(url)
+		if err != nil {
+			slog.Warn("qqbot: download image failed", "url", url, "error", err)
+			continue
+		}
+		data, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			slog.Warn("qqbot: read image body failed", "error", err)
+			continue
+		}
+		mime := att.ContentType
+		if mime == "" {
+			mime = http.DetectContentType(data)
+		}
+		images = append(images, core.ImageAttachment{
+			MimeType: mime,
+			Data:     data,
+			FileName: att.Filename,
+		})
+	}
+	return images
+}
+
+// stripAtMention removes the leading @bot mention from group message content.
+// The official QQ Bot API prefixes GROUP_AT_MESSAGE_CREATE content with an
+// @mention tag like "<@!botid> " or sometimes just whitespace after the tag.
+func stripAtMention(content string) string {
+	content = strings.TrimSpace(content)
+	// The official API formats the @mention as "<@!{bot_id}>"
+	if strings.HasPrefix(content, "<@!") {
+		if idx := strings.Index(content, ">"); idx >= 0 {
+			content = strings.TrimSpace(content[idx+1:])
+		}
+	}
+	return content
 }

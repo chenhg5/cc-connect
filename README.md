@@ -16,7 +16,7 @@ cc-connect bridges AI coding assistants running on your dev machine to the messa
                     │
     ┌───────────────┼───────────────┐
     ▼               ▼               ▼
- Feishu          Slack          Telegram  ...8 platforms
+ Feishu          Slack          Telegram  ...9 platforms
     │               │               │
     └───────────────┼───────────────┘
                     ▼
@@ -34,7 +34,7 @@ cc-connect bridges AI coding assistants running on your dev machine to the messa
 > Time to uninstall OpenClaw — cc-connect gives you access to the most powerful coding agents available, not just one.
 
 - **6 AI Agents** — Claude Code, Codex, Cursor Agent, Qoder CLI, Gemini CLI, OpenCode. Use whichever fits your workflow, or all of them at once.
-- **8 Chat Platforms** — Feishu, DingTalk, Slack, Telegram, Discord, WeChat Work, LINE, QQ. Most need zero public IP.
+- **9 Chat Platforms** — Feishu, DingTalk, Slack, Telegram, Discord, WeChat Work, LINE, QQ, QQ Bot (Official). Most need zero public IP.
 - **Full Control from Chat** — Switch models (`/model`), change permission modes (`/mode`), manage sessions, all via slash commands.
 - **Agent Memory** — Read and write agent instruction files (`/memory`) without touching the terminal.
 - **Scheduled Tasks** — Set up cron jobs in natural language. "Every day at 6am, summarize GitHub trending" just works.
@@ -69,6 +69,7 @@ cc-connect bridges AI coding assistants running on your dev machine to the messa
 | Platform | LINE | ✅ Webhook — public URL required |
 | Platform | WeChat Work (企业微信) | ✅ Webhook — public URL required |
 | Platform | QQ (via NapCat/OneBot) | ✅ WebSocket, no public IP needed |
+| Platform | QQ Bot (Official) | ✅ WebSocket — no public IP needed |
 | Platform | WhatsApp | 🔜 Planned (Business Cloud API) |
 | Platform | Microsoft Teams | 🔜 Planned (Bot Framework) |
 | Platform | Google Chat | 🔜 Planned (Chat API) |
@@ -169,6 +170,7 @@ Each platform requires creating a bot/app on the platform's developer console. W
 | LINE | [INSTALL.md](./INSTALL.md#line--requires-public-url) | Webhook | Yes |
 | WeChat Work | [docs/wecom.md](docs/wecom.md) | Webhook | Yes |
 | QQ (NapCat) | [docs/qq.md](docs/qq.md) | WebSocket (OneBot v11) | No |
+| QQ Bot (Official) | [docs/qqbot.md](docs/qqbot.md) | WebSocket (Official API) | No |
 
 Quick config examples for each platform:
 
@@ -232,6 +234,13 @@ type = "qq"
 [projects.platforms.options]
 ws_url = "ws://127.0.0.1:3001"
 allow_from = "*"  # QQ user IDs, e.g. "12345,67890" or "*" for all
+
+# QQ Bot Official (no public IP needed, no third-party adapter)
+[[projects.platforms]]
+type = "qqbot"
+[projects.platforms.options]
+app_id = "your-app-id"
+app_secret = "your-app-secret"
 ```
 
 ## Permission Modes
@@ -762,7 +771,8 @@ cc-connect/
 │   ├── discord/             # Discord (Gateway WebSocket)
 │   ├── line/                # LINE (HTTP Webhook)
 │   ├── wecom/               # WeChat Work (HTTP Webhook)
-│   └── qq/                  # QQ (NapCat / OneBot v11 WebSocket)
+│   ├── qq/                  # QQ (NapCat / OneBot v11 WebSocket)
+│   └── qqbot/               # QQ Bot (Official API v2 WebSocket)
 ├── agent/                   # Agent adapters
 │   ├── claudecode/          # Claude Code CLI (interactive sessions)
 │   ├── codex/               # OpenAI Codex CLI (exec --json)
