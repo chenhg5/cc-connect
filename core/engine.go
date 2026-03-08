@@ -1118,6 +1118,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
 					if err := p.Send(e.ctx, replyCtx, chunk); err != nil {
 						slog.Error("failed to send reply", "error", err)
+						e.removeReaction(p, replyCtx)
 						return
 					}
 				}
@@ -1126,6 +1127,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if elapsed := time.Since(replyStart); elapsed >= slowPlatformSend {
 				slog.Warn("slow final reply send", "platform", p.Name(), "elapsed", elapsed, "response_len", len(fullResponse))
 			}
+			e.removeReaction(p, replyCtx)
 			return
 
 		case EventError:
@@ -1134,6 +1136,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				slog.Error("agent error", "error", event.Error)
 				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
 			}
+			e.removeReaction(p, replyCtx)
 			return
 		}
 	}
@@ -1159,6 +1162,7 @@ channelClosed:
 				e.send(p, replyCtx, chunk)
 			}
 		}
+		e.removeReaction(p, replyCtx)
 	}
 }
 
@@ -2726,6 +2730,14 @@ func (e *Engine) replyWithButtons(p Platform, replyCtx any, content string, butt
 		}
 	}
 	e.reply(p, replyCtx, content)
+}
+
+func (e *Engine) removeReaction(p Platform, replyCtx any) {
+	if rc, ok := p.(ReactionCleaner); ok {
+		if err := rc.RemoveReaction(e.ctx, replyCtx); err != nil {
+			slog.Debug("remove reaction failed", "error", err)
+		}
+	}
 }
 
 // ──────────────────────────────────────────────────────────────

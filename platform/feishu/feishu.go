@@ -24,8 +24,9 @@ func init() {
 }
 
 type replyContext struct {
-	messageID string
-	chatID    string
+	messageID  string
+	chatID     string
+	reactionID string // set by addReaction, used by RemoveReaction
 }
 
 type Platform struct {
@@ -175,6 +176,29 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 	return func() {
 		go p.removeReaction(rc.messageID, reactionID)
 	}
+}
+
+// RemoveReaction implements core.ReactionCleaner.
+func (p *Platform) RemoveReaction(ctx context.Context, rctx any) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("feishu: invalid reply context type %T", rctx)
+	}
+	if rc.reactionID == "" || rc.messageID == "" {
+		return nil
+	}
+	resp, err := p.client.Im.MessageReaction.Delete(ctx,
+		larkim.NewDeleteMessageReactionReqBuilder().
+			MessageId(rc.messageID).
+			ReactionId(rc.reactionID).
+			Build())
+	if err != nil {
+		return fmt.Errorf("feishu: delete reaction: %w", err)
+	}
+	if !resp.Success() {
+		slog.Debug("feishu: delete reaction failed", "code", resp.Code, "msg", resp.Msg)
+	}
+	return nil
 }
 
 func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
