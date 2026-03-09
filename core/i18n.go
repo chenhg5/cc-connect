@@ -594,6 +594,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  View/switch language\n\n" +
 			"/quiet [global]\n  Toggle thinking/tool progress (global = all sessions)\n\n" +
 			"/compress\n  Compress conversation context\n\n" +
+			"/tts [always|voice_only]\n  View/switch text-to-speech mode\n\n" +
 			"/shell <command>\n  Run a shell command and return the output\n\n" +
 			"/stop\n  Stop current execution\n\n" +
 			"/cron [add|list|del|enable|disable]\n  Manage scheduled tasks\n\n" +
@@ -629,6 +630,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  查看/切换语言\n\n" +
 			"/quiet [global]\n  开关思考和工具进度消息（global = 全部会话）\n\n" +
 			"/compress\n  压缩会话上下文\n\n" +
+			"/tts [always|voice_only]\n  查看/切换语音合成模式\n\n" +
 			"/shell <命令>\n  执行 Shell 命令并返回结果\n\n" +
 			"/stop\n  停止当前执行\n\n" +
 			"/cron [add|list|del|enable|disable]\n  管理定时任务\n\n" +
@@ -664,6 +666,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  查看/切換語言\n\n" +
 			"/quiet [global]\n  開關思考和工具進度訊息（global = 全部會話）\n\n" +
 			"/compress\n  壓縮會話上下文\n\n" +
+			"/tts [always|voice_only]\n  查看/切換語音合成模式\n\n" +
 			"/shell <命令>\n  執行 Shell 命令並返回結果\n\n" +
 			"/stop\n  停止當前執行\n\n" +
 			"/cron [add|list|del|enable|disable]\n  管理定時任務\n\n" +
@@ -698,6 +701,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  言語の表示/切り替え\n\n" +
 			"/quiet [global]\n  思考/ツール進捗メッセージの表示切替（global = 全セッション）\n\n" +
 			"/compress\n  会話コンテキストを圧縮\n\n" +
+			"/tts [always|voice_only]\n  音声合成モードの表示/切り替え\n\n" +
 			"/shell <コマンド>\n  シェルコマンドを実行して結果を返す\n\n" +
 			"/stop\n  現在の実行を停止\n\n" +
 			"/cron [add|list|del|enable|disable]\n  スケジュールタスク管理\n\n" +
@@ -732,6 +736,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  Ver/cambiar idioma\n\n" +
 			"/quiet [global]\n  Alternar mensajes de progreso (global = todas las sesiones)\n\n" +
 			"/compress\n  Comprimir contexto de conversación\n\n" +
+			"/tts [always|voice_only]\n  Ver/cambiar modo de síntesis de voz\n\n" +
 			"/shell <comando>\n  Ejecutar un comando shell y devolver la salida\n\n" +
 			"/stop\n  Detener ejecución actual\n\n" +
 			"/cron [add|list|del|enable|disable]\n  Gestionar tareas programadas\n\n" +

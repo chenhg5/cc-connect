@@ -347,13 +347,18 @@ func main() {
 
 		// Wire text-to-speech if enabled
 		if cfg.TTS.Enabled {
-			ttsCfg := core.TTSCfg{
+			ttsCfg := &core.TTSCfg{
 				Enabled:    true,
 				Voice:      cfg.TTS.Voice,
 				MaxTextLen: cfg.TTS.MaxTextLen,
 			}
 			initMode := cfg.TTS.TTSMode
-			if initMode == "" {
+			switch initMode {
+			case "always", "voice_only":
+			case "":
+				initMode = "voice_only"
+			default:
+				slog.Warn("tts: invalid tts_mode in config, falling back to voice_only", "tts_mode", initMode)
 				initMode = "voice_only"
 			}
 			ttsCfg.SetTTSMode(initMode)
@@ -363,7 +368,7 @@ func main() {
 				baseURL := cfg.TTS.Qwen.BaseURL
 				model := cfg.TTS.Qwen.Model
 				if apiKey != "" {
-					ttsCfg.TTS = core.NewQwenTTS(apiKey, baseURL, model, core.HTTPClient)
+					ttsCfg.TTS = core.NewQwenTTS(apiKey, baseURL, model, nil)
 					ttsCfg.Provider = "qwen"
 				} else {
 					slog.Warn("tts: qwen provider enabled but api_key is empty")
@@ -373,7 +378,7 @@ func main() {
 				baseURL := cfg.TTS.OpenAI.BaseURL
 				model := cfg.TTS.OpenAI.Model
 				if apiKey != "" {
-					ttsCfg.TTS = core.NewOpenAITTS(apiKey, baseURL, model, core.HTTPClient)
+					ttsCfg.TTS = core.NewOpenAITTS(apiKey, baseURL, model, nil)
 					ttsCfg.Provider = "openai"
 				} else {
 					slog.Warn("tts: openai provider enabled but api_key is empty")

@@ -125,7 +125,7 @@ type Engine struct {
 	cancel       context.CancelFunc
 	i18n         *I18n
 	speech       SpeechCfg
-	tts          TTSCfg
+	tts          *TTSCfg
 	display      DisplayCfg
 	defaultQuiet bool
 	startedAt    time.Time
@@ -233,7 +233,7 @@ func (e *Engine) SetSpeechConfig(cfg SpeechCfg) {
 }
 
 // SetTTSConfig configures the text-to-speech subsystem.
-func (e *Engine) SetTTSConfig(cfg TTSCfg) {
+func (e *Engine) SetTTSConfig(cfg *TTSCfg) {
 	e.tts = cfg
 }
 
@@ -1158,7 +1158,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 			// TTS: async voice reply if enabled
-			if e.tts.Enabled && e.tts.TTS != nil {
+			if e.tts != nil && e.tts.Enabled && e.tts.TTS != nil {
 				state.mu.Lock()
 				fromVoice := state.fromVoice
 				state.mu.Unlock()
@@ -2263,7 +2263,7 @@ func (e *Engine) cmdQuiet(p Platform, msg *Message, args []string) {
 }
 
 func (e *Engine) cmdTTS(p Platform, msg *Message, args []string) {
-	if !e.tts.Enabled || e.tts.TTS == nil {
+	if e.tts == nil || !e.tts.Enabled || e.tts.TTS == nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgTTSNotEnabled))
 		return
 	}
@@ -3797,6 +3797,9 @@ func splitMessage(text string, maxLen int) []string {
 // sendTTSReply synthesizes fullResponse text and sends audio to the platform.
 // Called asynchronously after EventResult; text reply is always sent first.
 func (e *Engine) sendTTSReply(p Platform, replyCtx any, text string) {
+	if e.tts == nil {
+		return
+	}
 	if e.tts.MaxTextLen > 0 && utf8.RuneCountInString(text) > e.tts.MaxTextLen {
 		slog.Warn("tts: text exceeds max_text_len, skipping synthesis", "len", utf8.RuneCountInString(text), "max", e.tts.MaxTextLen)
 		return
