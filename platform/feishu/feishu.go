@@ -596,6 +596,12 @@ func buildPostJSON(content string) string {
 	return string(b)
 }
 
+// isValidFeishuHref checks whether a URL is acceptable as a Feishu post href.
+// Feishu rejects non-HTTP(S) URLs with "invalid href" (code 230001).
+func isValidFeishuHref(u string) bool {
+	return strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://")
+}
+
 // parseInlineMarkdown parses a single line of markdown into Feishu post elements.
 // Supports **bold** and `code` inline formatting.
 func parseInlineMarkdown(line string) []map[string]any {
@@ -639,18 +645,20 @@ func parseInlineMarkdown(line string) []map[string]any {
 					}
 				}
 				if !foundEarlierMarker {
-					if linkIdx > 0 {
-						elements = append(elements, map[string]any{"tag": "text", "text": remaining[:linkIdx]})
-					}
 					linkText := remaining[linkIdx+1 : bracketClose]
 					linkURL := remaining[bracketClose+2 : parenClose]
-					elements = append(elements, map[string]any{
-						"tag":  "a",
-						"text": linkText,
-						"href": linkURL,
-					})
-					remaining = remaining[parenClose+1:]
-					continue
+					if isValidFeishuHref(linkURL) {
+						if linkIdx > 0 {
+							elements = append(elements, map[string]any{"tag": "text", "text": remaining[:linkIdx]})
+						}
+						elements = append(elements, map[string]any{
+							"tag":  "a",
+							"text": linkText,
+							"href": linkURL,
+						})
+						remaining = remaining[parenClose+1:]
+						continue
+					}
 				}
 			}
 		}
