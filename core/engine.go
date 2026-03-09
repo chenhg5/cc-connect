@@ -125,6 +125,7 @@ type Engine struct {
 	cancel       context.CancelFunc
 	i18n         *I18n
 	speech       SpeechCfg
+	tts          TTSCfg
 	display      DisplayCfg
 	defaultQuiet bool
 	startedAt    time.Time
@@ -132,6 +133,8 @@ type Engine struct {
 	providerSaveFunc       func(providerName string) error
 	providerAddSaveFunc    func(p ProviderConfig) error
 	providerRemoveSaveFunc func(name string) error
+
+	ttsSaveFunc func(mode string) error
 
 	commandSaveAddFunc func(name, description, prompt, exec, workDir string) error
 	commandSaveDelFunc func(name string) error
@@ -176,6 +179,7 @@ type interactiveState struct {
 	pending      *pendingPermission
 	approveAll bool // when true, auto-approve all permission requests for this session
 	quiet      bool // when true, suppress thinking and tool progress for this session
+	fromVoice  bool // true if current turn originated from voice transcription
 }
 
 // pendingPermission represents a permission request waiting for user response.
@@ -226,6 +230,16 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 // SetSpeechConfig configures the speech-to-text subsystem.
 func (e *Engine) SetSpeechConfig(cfg SpeechCfg) {
 	e.speech = cfg
+}
+
+// SetTTSConfig configures the text-to-speech subsystem.
+func (e *Engine) SetTTSConfig(cfg TTSCfg) {
+	e.tts = cfg
+}
+
+// SetTTSSaveFunc registers a callback that persists TTS mode changes.
+func (e *Engine) SetTTSSaveFunc(fn func(mode string) error) {
+	e.ttsSaveFunc = fn
 }
 
 // SetDisplayConfig overrides the default truncation settings.
@@ -653,6 +667,7 @@ func (e *Engine) handleVoiceMessage(p Platform, msg *Message) {
 	// Replace audio with transcribed text and re-dispatch
 	msg.Audio = nil
 	msg.Content = text
+	msg.FromVoice = true
 	e.handleMessage(p, msg)
 }
 
@@ -793,6 +808,9 @@ func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Se
 	}()
 
 	sendStart := time.Now()
+	state.mu.Lock()
+	state.fromVoice = msg.FromVoice
+	state.mu.Unlock()
 	if err := state.agentSession.Send(msg.Content, msg.Images); err != nil {
 		slog.Error("failed to send prompt", "error", err)
 
@@ -1138,6 +1156,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if elapsed := time.Since(replyStart); elapsed >= slowPlatformSend {
 				slog.Warn("slow final reply send", "platform", p.Name(), "elapsed", elapsed, "response_len", len(fullResponse))
 			}
+
+			// TTS: async voice reply if enabled
+			if e.tts.Enabled && e.tts.TTS != nil {
+				state.mu.Lock()
+				fromVoice := state.fromVoice
+				state.mu.Unlock()
+				mode := e.tts.GetTTSMode()
+				if mode == "always" || (mode == "voice_only" && fromVoice) {
+					go e.sendTTSReply(p, replyCtx, fullResponse)
+				}
+			}
+
 			return
 
 		case EventError:
@@ -1214,6 +1244,7 @@ var builtinCommands = []struct {
 	{[]string{"bind"}, "bind"},
 	{[]string{"search", "find"}, "search"},
 	{[]string{"shell", "sh", "exec", "run"}, "shell"},
+	{[]string{"tts"}, "tts"},
 }
 
 // matchPrefix finds a unique command matching the given prefix.
@@ -1341,6 +1372,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdSearch(p, msg, args)
 	case "shell":
 		e.cmdShell(p, msg, raw)
+	case "tts":
+		e.cmdTTS(p, msg, args)
 	default:
 		if custom, ok := e.commands.Resolve(cmd); ok {
 			e.executeCustomCommand(p, msg, custom, args)
@@ -2226,6 +2259,34 @@ func (e *Engine) cmdQuiet(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQuietOn))
 	} else {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQuietOff))
+	}
+}
+
+func (e *Engine) cmdTTS(p Platform, msg *Message, args []string) {
+	if !e.tts.Enabled || e.tts.TTS == nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgTTSNotEnabled))
+		return
+	}
+	if len(args) == 0 {
+		providerStr := e.tts.Provider
+		if providerStr == "" {
+			providerStr = "unknown"
+		}
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgTTSStatus), e.tts.GetTTSMode(), providerStr))
+		return
+	}
+	switch args[0] {
+	case "always", "voice_only":
+		mode := args[0]
+		e.tts.SetTTSMode(mode)
+		if e.ttsSaveFunc != nil {
+			if err := e.ttsSaveFunc(mode); err != nil {
+				slog.Warn("tts: failed to persist mode", "error", err)
+			}
+		}
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgTTSSwitched), mode))
+	default:
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgTTSUsage))
 	}
 }
 
@@ -3731,6 +3792,29 @@ func splitMessage(text string, maxLen int) []string {
 		chunks = append(chunks, chunk)
 	}
 	return chunks
+}
+
+// sendTTSReply synthesizes fullResponse text and sends audio to the platform.
+// Called asynchronously after EventResult; text reply is always sent first.
+func (e *Engine) sendTTSReply(p Platform, replyCtx any, text string) {
+	if e.tts.MaxTextLen > 0 && utf8.RuneCountInString(text) > e.tts.MaxTextLen {
+		slog.Warn("tts: text exceeds max_text_len, skipping synthesis", "len", utf8.RuneCountInString(text), "max", e.tts.MaxTextLen)
+		return
+	}
+	opts := TTSSynthesisOpts{Voice: e.tts.Voice}
+	audioData, format, err := e.tts.TTS.Synthesize(e.ctx, text, opts)
+	if err != nil {
+		slog.Error("tts: synthesis failed", "error", err)
+		return
+	}
+	as, ok := p.(AudioSender)
+	if !ok {
+		slog.Debug("tts: platform does not support audio sending", "platform", p.Name())
+		return
+	}
+	if err := as.SendAudio(e.ctx, replyCtx, audioData, format); err != nil {
+		slog.Error("tts: platform audio send failed", "platform", p.Name(), "error", err)
+	}
 }
 
 // ──────────────────────────────────────────────────────────────

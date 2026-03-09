@@ -249,6 +249,30 @@ func ConvertAudioToMP3(audio []byte, srcFormat string) ([]byte, error) {
 	return stdout.Bytes(), nil
 }
 
+// ConvertAudioToOpus uses ffmpeg to convert audio to opus format (ogg container).
+// Returns the opus bytes. If ffmpeg is not installed, returns an error.
+func ConvertAudioToOpus(ctx context.Context, audio []byte, srcFormat string) ([]byte, error) {
+	ffmpegPath, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		return nil, fmt.Errorf("ffmpeg not found in PATH: install ffmpeg to enable audio conversion")
+	}
+
+	args := []string{"-i", "pipe:0", "-c:a", "libopus", "-f", "opus", "-y", "pipe:1"}
+	if srcFormat == "amr" || srcFormat == "silk" {
+		args = append([]string{"-f", srcFormat}, args...)
+	}
+	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
+	cmd.Stdin = bytes.NewReader(audio)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("ffmpeg opus conversion failed: %w (stderr: %s)", err, stderr.String())
+	}
+	return stdout.Bytes(), nil
+}
+
 // NeedsConversion returns true if the audio format is not directly supported by Whisper API.
 func NeedsConversion(format string) bool {
 	switch strings.ToLower(format) {

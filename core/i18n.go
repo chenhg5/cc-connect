@@ -184,6 +184,11 @@ const (
 	MsgVoiceTranscribeFailed MsgKey = "voice_transcribe_failed"
 	MsgVoiceEmpty            MsgKey = "voice_empty"
 
+	MsgTTSNotEnabled MsgKey = "tts_not_enabled"
+	MsgTTSStatus     MsgKey = "tts_status"
+	MsgTTSSwitched   MsgKey = "tts_switched"
+	MsgTTSUsage      MsgKey = "tts_usage"
+
 	MsgCronNotAvailable MsgKey = "cron_not_available"
 	MsgCronUsage        MsgKey = "cron_usage"
 	MsgCronAddUsage     MsgKey = "cron_add_usage"
@@ -977,6 +982,34 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "🎙 語音訊息為空或無法識別。",
 		LangJapanese:           "🎙 音声メッセージが空か、認識できませんでした。",
 		LangSpanish:            "🎙 El mensaje de voz estaba vacío o no se pudo reconocer.",
+	},
+	MsgTTSNotEnabled: {
+		LangEnglish:            "TTS is not enabled. Please configure `[tts]` in config.toml.",
+		LangChinese:            "TTS 未启用，请在 config.toml 中配置 `[tts]` 部分。",
+		LangTraditionalChinese: "TTS 未啟用，請在 config.toml 中配置 `[tts]` 部分。",
+		LangJapanese:           "TTS は有効になっていません。config.toml で `[tts]` を設定してください。",
+		LangSpanish:            "TTS no está habilitado. Configure `[tts]` en config.toml.",
+	},
+	MsgTTSStatus: {
+		LangEnglish:            "TTS status: enabled=true, mode=%s, provider=%s",
+		LangChinese:            "TTS 状态：enabled=true，mode=%s，provider=%s",
+		LangTraditionalChinese: "TTS 狀態：enabled=true，mode=%s，provider=%s",
+		LangJapanese:           "TTS 状態: enabled=true, mode=%s, provider=%s",
+		LangSpanish:            "Estado TTS: enabled=true, mode=%s, provider=%s",
+	},
+	MsgTTSSwitched: {
+		LangEnglish:            "TTS mode switched to: %s",
+		LangChinese:            "TTS 已切换为 %s 模式",
+		LangTraditionalChinese: "TTS 已切換為 %s 模式",
+		LangJapanese:           "TTS モードを %s に切り替えました",
+		LangSpanish:            "Modo TTS cambiado a: %s",
+	},
+	MsgTTSUsage: {
+		LangEnglish:            "Usage: /tts [always|voice_only]",
+		LangChinese:            "用法：/tts [always|voice_only]",
+		LangTraditionalChinese: "用法：/tts [always|voice_only]",
+		LangJapanese:           "使い方: /tts [always|voice_only]",
+		LangSpanish:            "Uso: /tts [always|voice_only]",
 	},
 	MsgCronNotAvailable: {
 		LangEnglish:            "Cron scheduler is not available.",
