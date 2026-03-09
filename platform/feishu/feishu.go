@@ -36,6 +36,7 @@ type Platform struct {
 	allowFrom             string
 	groupReplyAll         bool
 	shareSessionInChannel bool
+	replyInThread         bool
 	client                *lark.Client
 	wsClient              *larkws.Client
 	handler               core.MessageHandler
@@ -60,6 +61,7 @@ func New(opts map[string]any) (core.Platform, error) {
 	allowFrom, _ := opts["allow_from"].(string)
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
+	replyInThread, _ := opts["reply_in_thread"].(bool)
 
 	return &Platform{
 		appID:                 appID,
@@ -68,6 +70,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		allowFrom:             allowFrom,
 		groupReplyAll:         groupReplyAll,
 		shareSessionInChannel: shareSessionInChannel,
+		replyInThread:         replyInThread,
 		client:                lark.NewClient(appID, appSecret),
 	}, nil
 }
@@ -268,6 +271,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		}
 		p.handler(p, &core.Message{
 			SessionKey: sessionKey, Platform: "feishu",
+			MessageID: messageID,
 			UserID: userID, UserName: userName,
 			Content: text, ReplyCtx: rctx,
 		})
@@ -287,6 +291,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		}
 		p.handler(p, &core.Message{
 			SessionKey: sessionKey, Platform: "feishu",
+			MessageID: messageID,
 			UserID: userID, UserName: userName,
 			Images:  []core.ImageAttachment{{MimeType: mimeType, Data: imgData}},
 			ReplyCtx: rctx,
@@ -309,6 +314,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		}
 		p.handler(p, &core.Message{
 			SessionKey: sessionKey, Platform: "feishu",
+			MessageID: messageID,
 			UserID: userID, UserName: userName,
 			Audio: &core.AudioAttachment{
 				MimeType: "audio/opus",
@@ -327,6 +333,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		}
 		p.handler(p, &core.Message{
 			SessionKey: sessionKey, Platform: "feishu",
+			MessageID: messageID,
 			UserID: userID, UserName: userName,
 			Content: text, Images: images,
 			ReplyCtx: rctx,
@@ -363,11 +370,16 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	return nil
 }
 
-// Send sends a new message to the same chat (not a reply to original message)
+// Send sends a new message to the same chat (not a reply to original message).
+// When reply_in_thread is enabled, threads the message to the original message instead.
 func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	rc, ok := rctx.(replyContext)
 	if !ok {
 		return fmt.Errorf("feishu: invalid reply context type %T", rctx)
+	}
+
+	if p.replyInThread && rc.messageID != "" {
+		return p.Reply(ctx, rctx, content)
 	}
 
 	if rc.chatID == "" {
@@ -839,25 +851,45 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 	}
 
 	cardJSON := buildCardJSON(content)
-	resp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
-		ReceiveIdType(larkim.ReceiveIdTypeChatId).
-		Body(larkim.NewCreateMessageReqBodyBuilder().
-			ReceiveId(chatID).
-			MsgType(larkim.MsgTypeInteractive).
-			Content(cardJSON).
-			Build()).
-		Build())
-	if err != nil {
-		return nil, fmt.Errorf("feishu: send preview: %w", err)
-	}
-	if !resp.Success() {
-		return nil, fmt.Errorf("feishu: send preview code=%d msg=%s", resp.Code, resp.Msg)
+
+	var msgID string
+	if p.replyInThread && rc.messageID != "" {
+		resp, err := p.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
+			MessageId(rc.messageID).
+			Body(larkim.NewReplyMessageReqBodyBuilder().
+				MsgType(larkim.MsgTypeInteractive).
+				Content(cardJSON).
+				Build()).
+			Build())
+		if err != nil {
+			return nil, fmt.Errorf("feishu: send preview (reply): %w", err)
+		}
+		if !resp.Success() {
+			return nil, fmt.Errorf("feishu: send preview (reply) code=%d msg=%s", resp.Code, resp.Msg)
+		}
+		if resp.Data != nil && resp.Data.MessageId != nil {
+			msgID = *resp.Data.MessageId
+		}
+	} else {
+		resp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
+			ReceiveIdType(larkim.ReceiveIdTypeChatId).
+			Body(larkim.NewCreateMessageReqBodyBuilder().
+				ReceiveId(chatID).
+				MsgType(larkim.MsgTypeInteractive).
+				Content(cardJSON).
+				Build()).
+			Build())
+		if err != nil {
+			return nil, fmt.Errorf("feishu: send preview: %w", err)
+		}
+		if !resp.Success() {
+			return nil, fmt.Errorf("feishu: send preview code=%d msg=%s", resp.Code, resp.Msg)
+		}
+		if resp.Data != nil && resp.Data.MessageId != nil {
+			msgID = *resp.Data.MessageId
+		}
 	}
 
-	msgID := ""
-	if resp.Data != nil && resp.Data.MessageId != nil {
-		msgID = *resp.Data.MessageId
-	}
 	if msgID == "" {
 		return nil, fmt.Errorf("feishu: send preview: no message ID returned")
 	}

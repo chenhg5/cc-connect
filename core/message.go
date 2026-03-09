@@ -60,6 +60,7 @@ type AudioAttachment struct {
 type Message struct {
 	SessionKey string // unique key for user context, e.g. "feishu:{chatID}:{userID}"
 	Platform   string
+	MessageID  string // platform message ID for tracing
 	UserID     string
 	UserName   string
 	Content    string

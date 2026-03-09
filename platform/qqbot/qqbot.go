@@ -714,6 +714,7 @@ func (p *Platform) handleGroupMessage(data json.RawMessage) {
 	msg := &core.Message{
 		SessionKey: sessionKey,
 		Platform:   "qqbot",
+		MessageID:  d.ID,
 		UserID:     d.Author.MemberOpenID,
 		UserName:   d.Author.MemberOpenID, // official API only provides openid, no nickname
 		Content:    content,
@@ -781,6 +782,7 @@ func (p *Platform) handleC2CMessage(data json.RawMessage) {
 	msg := &core.Message{
 		SessionKey: sessionKey,
 		Platform:   "qqbot",
+		MessageID:  d.ID,
 		UserID:     d.Author.UserOpenID,
 		UserName:   d.Author.UserOpenID,
 		Content:    content,

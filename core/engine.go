@@ -568,6 +568,13 @@ func (e *Engine) resolveAlias(content string) string {
 }
 
 func (e *Engine) handleMessage(p Platform, msg *Message) {
+	slog.Info("message received",
+		"platform", msg.Platform, "msg_id", msg.MessageID,
+		"session", msg.SessionKey, "user", msg.UserName,
+		"content_len", len(msg.Content),
+		"has_images", len(msg.Images) > 0, "has_audio", msg.Audio != nil,
+	)
+
 	// Voice message: transcribe to text first
 	if msg.Audio != nil {
 		e.handleVoiceMessage(p, msg)
@@ -837,7 +844,7 @@ func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Se
 		slog.Warn("slow agent send", "elapsed", elapsed, "session", msg.SessionKey, "content_len", len(msg.Content))
 	}
 
-	e.processInteractiveEvents(state, session, msg.SessionKey, turnStart)
+	e.processInteractiveEvents(state, session, msg.SessionKey, msg.MessageID, turnStart)
 }
 
 func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, replyCtx any, session *Session) *interactiveState {
@@ -936,7 +943,7 @@ func (e *Engine) cleanupInteractiveState(sessionKey string) {
 
 const defaultEventIdleTimeout = 2 * time.Hour
 
-func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessionKey string, turnStart time.Time) {
+func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessionKey string, msgID string, turnStart time.Time) {
 	var textParts []string
 	toolCount := 0
 	waitStart := time.Now()
@@ -1133,6 +1140,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			slog.Info("turn complete",
 				"session", session.ID,
 				"agent_session", session.AgentSessionID,
+				"msg_id", msgID,
 				"tools", toolCount,
 				"response_len", len(fullResponse),
 				"turn_duration", turnDuration,
@@ -1147,7 +1155,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				slog.Debug("EventResult: sending via p.Send (preview inactive or failed)", "response_len", len(fullResponse), "chunks", len(splitMessage(fullResponse, maxPlatformMessageLen)))
 				for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
 					if err := p.Send(e.ctx, replyCtx, chunk); err != nil {
-						slog.Error("failed to send reply", "error", err)
+						slog.Error("failed to send reply", "error", err, "msg_id", msgID)
 						return
 					}
 				}

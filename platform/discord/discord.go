@@ -239,6 +239,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 
 		msg := &core.Message{
 			SessionKey: sessionKey, Platform: "discord",
+			MessageID: m.ID,
 			UserID: m.Author.ID, UserName: m.Author.Username,
 			Content: m.Content, Images: images, Audio: audio, ReplyCtx: rctx,
 		}
@@ -323,6 +324,7 @@ func (p *Platform) handleInteraction(s *discordgo.Session, i *discordgo.Interact
 
 	msg := &core.Message{
 		SessionKey: sessionKey, Platform: "discord",
+		MessageID: i.ID,
 		UserID: userID, UserName: userName,
 		Content: cmdText, ReplyCtx: ictx,
 	}

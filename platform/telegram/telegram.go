@@ -161,9 +161,10 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 					coreMsg := &core.Message{
 						SessionKey: sessionKey, Platform: "telegram",
 						UserID: userID, UserName: userName,
-						Content:  caption,
-						Images:   []core.ImageAttachment{{MimeType: "image/jpeg", Data: imgData}},
-						ReplyCtx: rctx,
+						Content:   caption,
+						MessageID: strconv.Itoa(msg.MessageID),
+						Images:    []core.ImageAttachment{{MimeType: "image/jpeg", Data: imgData}},
+						ReplyCtx:  rctx,
 					}
 					p.handler(p, coreMsg)
 					continue
@@ -180,6 +181,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 					coreMsg := &core.Message{
 						SessionKey: sessionKey, Platform: "telegram",
 						UserID: userID, UserName: userName,
+						MessageID: strconv.Itoa(msg.MessageID),
 						Audio: &core.AudioAttachment{
 							MimeType: msg.Voice.MimeType,
 							Data:     audioData,
@@ -210,6 +212,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 					coreMsg := &core.Message{
 						SessionKey: sessionKey, Platform: "telegram",
 						UserID: userID, UserName: userName,
+						MessageID: strconv.Itoa(msg.MessageID),
 						Audio: &core.AudioAttachment{
 							MimeType: msg.Audio.MimeType,
 							Data:     audioData,
@@ -235,7 +238,9 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 				coreMsg := &core.Message{
 					SessionKey: sessionKey, Platform: "telegram",
 					UserID: userID, UserName: userName,
-					Content: text, ReplyCtx: rctx,
+					Content:   text,
+					MessageID: strconv.Itoa(msg.MessageID),
+					ReplyCtx:  rctx,
 				}
 
 				slog.Debug("telegram: message received", "user", userName, "chat", msg.Chat.ID)
@@ -298,6 +303,7 @@ func (p *Platform) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 			UserID:     userID,
 			UserName:   userName,
 			Content:    command,
+			MessageID:  strconv.Itoa(msgID),
 			ReplyCtx:   rctx,
 		})
 		return
@@ -342,6 +348,7 @@ func (p *Platform) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 		UserID:     userID,
 		UserName:   userName,
 		Content:    responseText,
+		MessageID:  strconv.Itoa(msgID),
 		ReplyCtx:   rctx,
 	})
 }

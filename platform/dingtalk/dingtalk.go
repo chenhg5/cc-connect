@@ -118,6 +118,7 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel) {
 		UserID:     data.SenderStaffId,
 		UserName:   data.SenderNick,
 		Content:    data.Text.Content,
+		MessageID:  data.MsgId,
 		ReplyCtx:   replyContext{sessionWebhook: data.SessionWebhook},
 	}
 

@@ -167,6 +167,7 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					SessionKey: sessionKey, Platform: "slack",
 					UserID: ev.User, UserName: ev.User,
 					Content: ev.Text, Images: images, Audio: audio,
+					MessageID: ts,
 					ReplyCtx: replyContext{channel: ev.Channel, timestamp: ts},
 				}
 				p.handler(p, msg)

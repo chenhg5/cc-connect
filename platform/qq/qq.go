@@ -219,6 +219,7 @@ func (p *Platform) handleMessage(payload map[string]any) {
 	msg := &core.Message{
 		SessionKey: sessionKey,
 		Platform:   "qq",
+		MessageID:  strconv.FormatInt(messageID, 10),
 		UserID:     strconv.FormatInt(userID, 10),
 		UserName:   userName,
 		Content:    text,

@@ -400,6 +400,8 @@ app_secret = "your-feishu-app-secret"
 #                           # 设为 true 时，群聊中无需 @机器人 也会响应所有消息（默认 false）
 # share_session_in_channel = false  # If true, all users in a group share one agent session
 #                                   # 设为 true 时，群聊内所有用户共享同一个 Agent 会话
+# reply_in_thread = false  # If true, all responses are threaded to the original message (helps trace which question triggered which reply)
+#                          # 设为 true 时，所有回复都会引用原消息（方便追踪每条回复对应哪条提问）
 
 # DingTalk / 钉钉 (uncomment to enable / 取消注释以启用)
 # 1. Create an app at https://open-dev.dingtalk.com / 在钉钉开放平台创建应用
