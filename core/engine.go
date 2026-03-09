@@ -1078,8 +1078,20 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.pending = pending
 			state.mu.Unlock()
 
+			// Stop idle timer while waiting for user permission response;
+			// the user may take a long time to decide, and we don't want
+			// the idle timeout to kill the session during that wait.
+			if idleTimer != nil {
+				idleTimer.Stop()
+			}
+
 			<-pending.Resolved
 			slog.Info("permission resolved", "request_id", event.RequestID)
+
+			// Restart idle timer after permission is resolved
+			if idleTimer != nil {
+				idleTimer.Reset(e.eventIdleTimeout)
+			}
 
 		case EventResult:
 			if event.SessionID != "" {
