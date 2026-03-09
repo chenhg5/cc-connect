@@ -192,7 +192,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 	}
 	userID := ""
 	userName := ""
-	if sender.SenderId != nil {
+	if sender.SenderId != nil && sender.SenderId.OpenId != nil {
 		userID = *sender.SenderId.OpenId
 	}
 	if sender.SenderType != nil {
@@ -233,6 +233,11 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 
 	if !core.AllowList(p.allowFrom, userID) {
 		slog.Debug("feishu: message from unauthorized user", "user", userID)
+		return nil
+	}
+
+	if msg.Content == nil {
+		slog.Debug("feishu: message content is nil", "message_id", messageID, "type", msgType)
 		return nil
 	}
 
