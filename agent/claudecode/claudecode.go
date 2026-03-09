@@ -535,6 +535,8 @@ func (a *Agent) GlobalMemoryFile() string {
 	return filepath.Join(homeDir, ".claude", "CLAUDE.md")
 }
 
+func (a *Agent) HasSystemPromptSupport() bool { return true }
+
 // ── ProviderSwitcher implementation ──────────────────────────
 
 func (a *Agent) SetProviders(providers []core.ProviderConfig) {

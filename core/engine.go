@@ -3977,6 +3977,11 @@ func (e *Engine) cmdBind(p Platform, msg *Message, args []string) {
 		return
 	}
 
+	if otherProject == "setup" {
+		e.cmdBindSetup(p, msg)
+		return
+	}
+
 	if otherProject == "help" || otherProject == "-h" || otherProject == "--help" {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgRelayUsage))
 		return
@@ -4026,7 +4031,15 @@ func (e *Engine) cmdBind(p Platform, msg *Message, args []string) {
 		boundProjects = append(boundProjects, proj)
 	}
 
-	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgRelayBindSuccess), strings.Join(boundProjects, " ↔ "), otherProject, otherProject))
+	reply := fmt.Sprintf(e.i18n.T(MsgRelayBindSuccess), strings.Join(boundProjects, " ↔ "), otherProject, otherProject)
+
+	if _, ok := e.agent.(SystemPromptSupporter); !ok {
+		if mp, ok := e.agent.(MemoryFileProvider); ok {
+			reply += fmt.Sprintf(e.i18n.T(MsgRelaySetupHint), filepath.Base(mp.ProjectMemoryFile()))
+		}
+	}
+
+	e.reply(p, msg.ReplyCtx, reply)
 }
 
 func (e *Engine) cmdBindStatus(p Platform, replyCtx any, chatID string) {
@@ -4040,4 +4053,46 @@ func (e *Engine) cmdBindStatus(p Platform, replyCtx any, chatID string) {
 		parts = append(parts, proj)
 	}
 	e.reply(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgRelayBound), strings.Join(parts, " ↔ ")))
+}
+
+const ccConnectInstructionMarker = "<!-- cc-connect-instructions -->"
+
+func (e *Engine) cmdBindSetup(p Platform, msg *Message) {
+	mp, ok := e.agent.(MemoryFileProvider)
+	if !ok {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgRelaySetupNoMemory))
+		return
+	}
+
+	filePath := mp.ProjectMemoryFile()
+	if filePath == "" {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgRelaySetupNoMemory))
+		return
+	}
+
+	existing, _ := os.ReadFile(filePath)
+	if strings.Contains(string(existing), ccConnectInstructionMarker) {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgRelaySetupExists), filepath.Base(filePath)))
+		return
+	}
+
+	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
+		return
+	}
+
+	f, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
+		return
+	}
+	defer f.Close()
+
+	block := "\n" + ccConnectInstructionMarker + "\n" + AgentSystemPrompt() + "\n"
+	if _, err := f.WriteString(block); err != nil {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
+		return
+	}
+
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgRelaySetupOK), filepath.Base(filePath)))
 }
