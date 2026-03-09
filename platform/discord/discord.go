@@ -37,14 +37,15 @@ type interactionReplyCtx struct {
 }
 
 type Platform struct {
-	token         string
-	allowFrom     string
-	guildID       string // optional: per-guild registration (instant) vs global (up to 1h propagation)
-	groupReplyAll bool
-	session       *discordgo.Session
-	handler       core.MessageHandler
-	botID         string
-	appID         string
+	token                 string
+	allowFrom             string
+	guildID               string // optional: per-guild registration (instant) vs global (up to 1h propagation)
+	groupReplyAll         bool
+	shareSessionInChannel bool
+	session               *discordgo.Session
+	handler               core.MessageHandler
+	botID                 string
+	appID                 string
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -55,7 +56,8 @@ func New(opts map[string]any) (core.Platform, error) {
 	allowFrom, _ := opts["allow_from"].(string)
 	guildID, _ := opts["guild_id"].(string)
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
-	return &Platform{token: token, allowFrom: allowFrom, guildID: guildID, groupReplyAll: groupReplyAll}, nil
+	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
+	return &Platform{token: token, allowFrom: allowFrom, guildID: guildID, groupReplyAll: groupReplyAll, shareSessionInChannel: shareSessionInChannel}, nil
 }
 
 func (p *Platform) Name() string { return "discord" }
@@ -142,6 +144,14 @@ var slashNameToEngine = map[string]string{
 	"cc-stop":   "stop",
 }
 
+func (p *Platform) makeSessionKey(channelID string, userID string) string {
+	if p.shareSessionInChannel {
+		return fmt.Sprintf("discord:%s", channelID)
+	} else {
+		return fmt.Sprintf("discord:%s:%s", channelID, userID)
+	}
+}
+
 func (p *Platform) Start(handler core.MessageHandler) error {
 	p.handler = handler
 
@@ -191,7 +201,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 
 		slog.Debug("discord: message received", "user", m.Author.Username, "channel", m.ChannelID)
 
-		sessionKey := fmt.Sprintf("discord:%s:%s", m.ChannelID, m.Author.ID)
+		sessionKey := p.makeSessionKey(m.ChannelID, m.Author.ID)
 		rctx := replyContext{channelID: m.ChannelID, messageID: m.ID}
 
 		var images []core.ImageAttachment
@@ -305,7 +315,7 @@ func (p *Platform) handleInteraction(s *discordgo.Session, i *discordgo.Interact
 
 	slog.Debug("discord: slash command", "user", userName, "command", cmdText, "channel", channelID)
 
-	sessionKey := fmt.Sprintf("discord:%s:%s", channelID, userID)
+	sessionKey := p.makeSessionKey(channelID, userID)
 	ictx := &interactionReplyCtx{
 		interaction: i.Interaction,
 		channelID:   channelID,
