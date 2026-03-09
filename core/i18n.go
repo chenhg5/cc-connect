@@ -317,6 +317,10 @@ const (
 	MsgRelayBindSelf      MsgKey = "relay_bind_self"
 	MsgRelayNotFound      MsgKey = "relay_not_found"
 	MsgRelayNoTarget      MsgKey = "relay_no_target"
+	MsgRelaySetupHint     MsgKey = "relay_setup_hint"
+	MsgRelaySetupOK       MsgKey = "relay_setup_ok"
+	MsgRelaySetupExists   MsgKey = "relay_setup_exists"
+	MsgRelaySetupNoMemory MsgKey = "relay_setup_no_memory"
 
 	MsgSearchUsage    MsgKey = "search_usage"
 	MsgSearchError    MsgKey = "search_error"
@@ -1809,6 +1813,34 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "✅ 綁定成功！當前群組已綁定: %s\n\n你現在可以讓本機器人去詢問 %s。\n示例：\"幫我問一下 %s ...\"",
 		LangJapanese:           "✅ バインド成功！現在のグループ: %s\n\nこのボットに %s への問い合わせを依頼できます。\n例：「%s に...を聞いて」",
 		LangSpanish:            "✅ ¡Enlace exitoso! Grupo actual: %s\n\nAhora puede pedir a este bot que consulte a %s.\nEjemplo: \"Pregunta a %s sobre ...\"",
+	},
+	MsgRelaySetupHint: {
+		LangEnglish:            "\n\n⚠️ This agent does not auto-inject relay instructions.\nPlease run `/bind setup` to write instructions to %s so the agent knows how to relay.",
+		LangChinese:            "\n\n⚠️ 当前 agent 不会自动注入中继指令。\n请运行 `/bind setup` 将指令写入 %s，以便 agent 知道如何中继。",
+		LangTraditionalChinese: "\n\n⚠️ 當前 agent 不會自動注入中繼指令。\n請執行 `/bind setup` 將指令寫入 %s，以便 agent 知道如何中繼。",
+		LangJapanese:           "\n\n⚠️ このエージェントはリレー指示を自動注入しません。\n`/bind setup` を実行して %s に指示を書き込んでください。",
+		LangSpanish:            "\n\n⚠️ Este agente no inyecta instrucciones de relay automáticamente.\nEjecute `/bind setup` para escribir las instrucciones en %s.",
+	},
+	MsgRelaySetupOK: {
+		LangEnglish:            "✅ cc-connect instructions written to %s\nThe agent will now know how to use relay and cron.",
+		LangChinese:            "✅ cc-connect 指令已写入 %s\nagent 现在可以使用中继和定时任务功能了。",
+		LangTraditionalChinese: "✅ cc-connect 指令已寫入 %s\nagent 現在可以使用中繼和定時任務功能了。",
+		LangJapanese:           "✅ cc-connect の指示を %s に書き込みました。\nエージェントがリレーとcronを使用できるようになりました。",
+		LangSpanish:            "✅ Instrucciones de cc-connect escritas en %s\nEl agente ahora puede usar relay y cron.",
+	},
+	MsgRelaySetupExists: {
+		LangEnglish:            "ℹ️ cc-connect instructions already exist in %s — no changes made.",
+		LangChinese:            "ℹ️ cc-connect 指令已存在于 %s 中，无需重复写入。",
+		LangTraditionalChinese: "ℹ️ cc-connect 指令已存在於 %s 中，無需重複寫入。",
+		LangJapanese:           "ℹ️ cc-connect の指示は既に %s に存在します。変更はありません。",
+		LangSpanish:            "ℹ️ Las instrucciones de cc-connect ya existen en %s — sin cambios.",
+	},
+	MsgRelaySetupNoMemory: {
+		LangEnglish:            "❌ This agent does not support instruction files.",
+		LangChinese:            "❌ 当前 agent 不支持指令文件。",
+		LangTraditionalChinese: "❌ 當前 agent 不支持指令檔案。",
+		LangJapanese:           "❌ このエージェントは指示ファイルをサポートしていません。",
+		LangSpanish:            "❌ Este agente no soporta archivos de instrucciones.",
 	},
 	MsgSearchUsage: {
 		LangEnglish:            "Usage: /search <keyword>\nSearch sessions by name or ID.",

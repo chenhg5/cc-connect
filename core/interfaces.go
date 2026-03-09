@@ -69,6 +69,14 @@ Environment variables CC_PROJECT and CC_SESSION_KEY are already set, so the rela
 `
 }
 
+// SystemPromptSupporter is an optional marker interface for agents that
+// natively inject AgentSystemPrompt() (e.g., via --append-system-prompt).
+// Agents that do NOT implement this need the instructions written to their
+// memory/instruction file for relay and cron to work.
+type SystemPromptSupporter interface {
+	HasSystemPromptSupport() bool
+}
+
 // TypingIndicator is an optional interface for platforms that can show a
 // "processing" indicator (typing bubble, emoji reaction, etc.) while the
 // agent is working. StartTyping is called when processing begins and returns
