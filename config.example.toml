@@ -398,6 +398,8 @@ app_secret = "your-feishu-app-secret"
 #                           # 收到消息时添加的表情回复（默认 "OnIt"）；设为 "none" 可禁用
 # group_reply_all = false   # If true, respond to ALL group messages without requiring @mention
 #                           # 设为 true 时，群聊中无需 @机器人 也会响应所有消息（默认 false）
+# share_session_in_channel = false  # If true, all users in a group share one agent session
+#                                   # 设为 true 时，群聊内所有用户共享同一个 Agent 会话
 
 # DingTalk / 钉钉 (uncomment to enable / 取消注释以启用)
 # 1. Create an app at https://open-dev.dingtalk.com / 在钉钉开放平台创建应用
@@ -413,6 +415,7 @@ app_secret = "your-feishu-app-secret"
 # client_id = "your-dingtalk-client-id"
 # client_secret = "your-dingtalk-client-secret"
 # allow_from = "*"  # Allowed staff IDs / 允许的员工 ID
+# share_session_in_channel = false  # If true, all users in a group share one agent session / 群聊共享会话
 
 # Telegram (uncomment to enable / 取消注释以启用)
 # 1. Message @BotFather on Telegram, send /newbot to create a bot
@@ -428,6 +431,7 @@ app_secret = "your-feishu-app-secret"
 # allow_from = "*"  # Allowed Telegram user IDs, e.g. "123456789,987654321"; "*" = all
 #                   # 允许的 Telegram 用户 ID，如 "123456789,987654321"；"*" 表示所有
 # group_reply_all = false  # If true, respond to ALL group messages without @mention / 设为 true 群聊无需 @ 也响应
+# share_session_in_channel = false  # If true, all users in a group share one agent session / 群聊共享会话
 
 # Slack (uncomment to enable / 取消注释以启用)
 # 1. Create an app at https://api.slack.com/apps / 创建应用
@@ -445,6 +449,7 @@ app_secret = "your-feishu-app-secret"
 # bot_token = "xoxb-your-bot-token"
 # app_token = "xapp-your-app-level-token"
 # allow_from = "*"  # Allowed Slack user IDs / 允许的 Slack 用户 ID
+# share_session_in_channel = false  # If true, all users in a channel share one agent session / 频道共享会话
 
 # Discord (uncomment to enable / 取消注释以启用)
 # 1. Create an app at https://discord.com/developers/applications / 创建应用
@@ -474,6 +479,7 @@ app_secret = "your-feishu-app-secret"
 # guild_id = ""     # Optional: set for instant slash command registration (per-guild)
 #                   # 可选：设置后 slash 命令秒级生效（仅该服务器）
 # group_reply_all = false  # If true, respond to ALL guild messages without @mention / 设为 true 群聊无需 @ 也响应
+# share_session_in_channel = false  # If true, all users in a channel share one agent session / 频道共享会话
 
 # LINE (uncomment to enable / 取消注释以启用)
 # 1. Create a channel at https://developers.line.biz/console/ (Messaging API)
@@ -689,6 +695,7 @@ app_secret = "your-feishu-app-secret"
 # token = ""                       # optional: access_token / 可选鉴权 token
 # allow_from = "*"                 # allowed QQ user IDs, e.g. "12345,67890" or "*" for all
 #                                  # 允许的 QQ 号，如 "12345,67890"，"*" 表示所有
+# share_session_in_channel = false  # If true, all users in a group share one agent session / 群聊共享会话
 
 # QQ Bot (Official / 官方 QQ 机器人) (uncomment to enable / 取消注释以启用)
 # Uses the official QQ Bot Platform API — no third-party adapter needed.
@@ -708,6 +715,7 @@ app_secret = "your-feishu-app-secret"
 # sandbox = false       # Use sandbox API endpoint / 使用沙箱环境
 # allow_from = "*"      # Allowed user openids, e.g. "OPEN_ID_1,OPEN_ID_2"; "*" = all
 #                       # 允许的用户 openid，如 "OPEN_ID_1,OPEN_ID_2"；"*" 表示所有
+# share_session_in_channel = false  # If true, all users in a group share one agent session / 群聊共享会话
 
 # =============================================================================
 # Project 5: Using Qoder CLI / 项目 5：使用 Qoder CLI (uncomment to enable / 取消注释以启用)

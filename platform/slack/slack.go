@@ -27,26 +27,29 @@ type replyContext struct {
 }
 
 type Platform struct {
-	botToken  string
-	appToken  string
-	allowFrom string
-	client    *slack.Client
-	socket    *socketmode.Client
-	handler   core.MessageHandler
-	cancel    context.CancelFunc
+	botToken              string
+	appToken              string
+	allowFrom             string
+	shareSessionInChannel bool
+	client                *slack.Client
+	socket                *socketmode.Client
+	handler               core.MessageHandler
+	cancel                context.CancelFunc
 }
 
 func New(opts map[string]any) (core.Platform, error) {
 	botToken, _ := opts["bot_token"].(string)
 	appToken, _ := opts["app_token"].(string)
 	allowFrom, _ := opts["allow_from"].(string)
+	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	if botToken == "" || appToken == "" {
 		return nil, fmt.Errorf("slack: bot_token and app_token are required")
 	}
 	return &Platform{
-		botToken:  botToken,
-		appToken:  appToken,
-		allowFrom: allowFrom,
+		botToken:              botToken,
+		appToken:              appToken,
+		allowFrom:             allowFrom,
+		shareSessionInChannel: shareSessionInChannel,
 	}, nil
 }
 
@@ -120,7 +123,12 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					return
 				}
 
-				sessionKey := fmt.Sprintf("slack:%s:%s", ev.Channel, ev.User)
+				var sessionKey string
+				if p.shareSessionInChannel {
+					sessionKey = fmt.Sprintf("slack:%s", ev.Channel)
+				} else {
+					sessionKey = fmt.Sprintf("slack:%s:%s", ev.Channel, ev.User)
+				}
 				ts := ev.TimeStamp
 
 				var images []core.ImageAttachment

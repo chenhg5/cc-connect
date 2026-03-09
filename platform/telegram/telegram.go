@@ -26,13 +26,14 @@ type replyContext struct {
 }
 
 type Platform struct {
-	token         string
-	allowFrom     string
-	groupReplyAll bool
-	bot           *tgbotapi.BotAPI
-	httpClient    *http.Client
-	handler       core.MessageHandler
-	cancel        context.CancelFunc
+	token                 string
+	allowFrom             string
+	groupReplyAll         bool
+	shareSessionInChannel bool
+	bot                   *tgbotapi.BotAPI
+	httpClient            *http.Client
+	handler               core.MessageHandler
+	cancel                context.CancelFunc
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -59,7 +60,8 @@ func New(opts map[string]any) (core.Platform, error) {
 	}
 
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
-	return &Platform{token: token, allowFrom: allowFrom, groupReplyAll: groupReplyAll, httpClient: httpClient}, nil
+	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
+	return &Platform{token: token, allowFrom: allowFrom, groupReplyAll: groupReplyAll, shareSessionInChannel: shareSessionInChannel, httpClient: httpClient}, nil
 }
 
 func (p *Platform) Name() string { return "telegram" }
@@ -119,7 +121,12 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 				if userName == "" {
 					userName = strings.TrimSpace(msg.From.FirstName + " " + msg.From.LastName)
 				}
-				sessionKey := fmt.Sprintf("telegram:%d:%d", msg.Chat.ID, msg.From.ID)
+				var sessionKey string
+				if p.shareSessionInChannel {
+					sessionKey = fmt.Sprintf("telegram:%d", msg.Chat.ID)
+				} else {
+					sessionKey = fmt.Sprintf("telegram:%d:%d", msg.Chat.ID, msg.From.ID)
+				}
 				userID := strconv.FormatInt(msg.From.ID, 10)
 				if !core.AllowList(p.allowFrom, userID) {
 					slog.Debug("telegram: message from unauthorized user", "user", userID)
@@ -263,7 +270,12 @@ func (p *Platform) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 	if userName == "" {
 		userName = strings.TrimSpace(cb.From.FirstName + " " + cb.From.LastName)
 	}
-	sessionKey := fmt.Sprintf("telegram:%d:%d", chatID, cb.From.ID)
+	var sessionKey string
+	if p.shareSessionInChannel {
+		sessionKey = fmt.Sprintf("telegram:%d", chatID)
+	} else {
+		sessionKey = fmt.Sprintf("telegram:%d:%d", chatID, cb.From.ID)
+	}
 	rctx := replyContext{chatID: chatID, messageID: msgID}
 
 	// Command callbacks (cmd:/lang en, cmd:/mode yolo, etc.)

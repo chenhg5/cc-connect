@@ -25,25 +25,28 @@ type replyContext struct {
 }
 
 type Platform struct {
-	clientID     string
-	clientSecret string
-	allowFrom    string
-	streamClient *dingtalkClient.StreamClient
-	handler      core.MessageHandler
-	dedup        core.MessageDedup
+	clientID              string
+	clientSecret          string
+	allowFrom             string
+	shareSessionInChannel bool
+	streamClient          *dingtalkClient.StreamClient
+	handler               core.MessageHandler
+	dedup                 core.MessageDedup
 }
 
 func New(opts map[string]any) (core.Platform, error) {
 	clientID, _ := opts["client_id"].(string)
 	clientSecret, _ := opts["client_secret"].(string)
 	allowFrom, _ := opts["allow_from"].(string)
+	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	if clientID == "" || clientSecret == "" {
 		return nil, fmt.Errorf("dingtalk: client_id and client_secret are required")
 	}
 	return &Platform{
-		clientID:     clientID,
-		clientSecret: clientSecret,
-		allowFrom:    allowFrom,
+		clientID:              clientID,
+		clientSecret:          clientSecret,
+		allowFrom:             allowFrom,
+		shareSessionInChannel: shareSessionInChannel,
 	}, nil
 }
 
@@ -102,7 +105,12 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel) {
 		return
 	}
 
-	sessionKey := fmt.Sprintf("dingtalk:%s:%s", data.ConversationId, data.SenderStaffId)
+	var sessionKey string
+	if p.shareSessionInChannel {
+		sessionKey = fmt.Sprintf("dingtalk:%s", data.ConversationId)
+	} else {
+		sessionKey = fmt.Sprintf("dingtalk:%s:%s", data.ConversationId, data.SenderStaffId)
+	}
 
 	msg := &core.Message{
 		SessionKey: sessionKey,

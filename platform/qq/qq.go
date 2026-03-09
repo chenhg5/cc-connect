@@ -25,17 +25,18 @@ func init() {
 // via forward WebSocket. It receives message events and sends messages back
 // through the same WS connection.
 type Platform struct {
-	wsURL     string // e.g. "ws://127.0.0.1:3001"
-	token     string // optional access_token
-	allowFrom string // comma-separated user IDs or "*"
-	handler   core.MessageHandler
-	conn      *websocket.Conn
-	mu        sync.Mutex
-	echoSeq   atomic.Int64
-	echoCh    sync.Map // echo -> chan json.RawMessage
-	cancel    context.CancelFunc
-	selfID    int64
-	dedup     core.MessageDedup
+	wsURL                 string // e.g. "ws://127.0.0.1:3001"
+	token                 string // optional access_token
+	allowFrom             string // comma-separated user IDs or "*"
+	shareSessionInChannel bool
+	handler               core.MessageHandler
+	conn                  *websocket.Conn
+	mu                    sync.Mutex
+	echoSeq               atomic.Int64
+	echoCh                sync.Map // echo -> chan json.RawMessage
+	cancel                context.CancelFunc
+	selfID                int64
+	dedup                 core.MessageDedup
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -45,11 +46,13 @@ func New(opts map[string]any) (core.Platform, error) {
 	}
 	token, _ := opts["token"].(string)
 	allowFrom, _ := opts["allow_from"].(string)
+	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 
 	return &Platform{
-		wsURL:     wsURL,
-		token:     token,
-		allowFrom: allowFrom,
+		wsURL:                 wsURL,
+		token:                 token,
+		allowFrom:             allowFrom,
+		shareSessionInChannel: shareSessionInChannel,
 	}, nil
 }
 
@@ -197,7 +200,11 @@ func (p *Platform) handleMessage(payload map[string]any) {
 
 	var sessionKey string
 	if msgType == "group" {
-		sessionKey = fmt.Sprintf("qq:%d:%d", groupID, userID)
+		if p.shareSessionInChannel {
+			sessionKey = fmt.Sprintf("qq:g:%d", groupID)
+		} else {
+			sessionKey = fmt.Sprintf("qq:%d:%d", groupID, userID)
+		}
 	} else {
 		sessionKey = fmt.Sprintf("qq:%d", userID)
 	}
@@ -393,12 +400,16 @@ type replyContext struct {
 }
 
 func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
-	// qq:{userID} or qq:{groupID}:{userID}
+	// qq:{userID}, qq:{groupID}:{userID} or qq:g:{groupID}
 	parts := strings.SplitN(sessionKey, ":", 3)
 	if len(parts) < 2 || parts[0] != "qq" {
 		return nil, fmt.Errorf("qq: invalid session key %q", sessionKey)
 	}
 	if len(parts) == 3 {
+		if parts[1] == "g" {
+			gid, _ := strconv.ParseInt(parts[2], 10, 64)
+			return &replyContext{messageType: "group", groupID: gid}, nil
+		}
 		gid, _ := strconv.ParseInt(parts[1], 10, 64)
 		uid, _ := strconv.ParseInt(parts[2], 10, 64)
 		return &replyContext{messageType: "group", groupID: gid, userID: uid}, nil

@@ -50,13 +50,14 @@ const (
 
 // Platform implements core.Platform for the official QQ Bot API v2.
 type Platform struct {
-	appID     string
-	appSecret string
-	sandbox   bool
-	allowFrom string
-	intents   int
-	handler   core.MessageHandler
-	cancel    context.CancelFunc
+	appID                 string
+	appSecret             string
+	sandbox               bool
+	allowFrom             string
+	shareSessionInChannel bool
+	intents               int
+	handler               core.MessageHandler
+	cancel                context.CancelFunc
 
 	// OAuth2 token management
 	token       string
@@ -107,6 +108,7 @@ func New(opts map[string]any) (core.Platform, error) {
 
 	sandbox, _ := opts["sandbox"].(bool)
 	allowFrom, _ := opts["allow_from"].(string)
+	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 
 	intents := defaultIntents
 	if v, ok := opts["intents"].(int); ok && v > 0 {
@@ -116,11 +118,12 @@ func New(opts map[string]any) (core.Platform, error) {
 	}
 
 	return &Platform{
-		appID:     appID,
-		appSecret: appSecret,
-		sandbox:   sandbox,
-		allowFrom: allowFrom,
-		intents:   intents,
+		appID:                 appID,
+		appSecret:             appSecret,
+		sandbox:               sandbox,
+		allowFrom:             allowFrom,
+		shareSessionInChannel: shareSessionInChannel,
+		intents:               intents,
 	}, nil
 }
 
@@ -182,13 +185,19 @@ func (p *Platform) Stop() error {
 }
 
 // ReconstructReplyCtx implements core.ReplyContextReconstructor.
-// Session key format: "qqbot:{group_openid}:{member_openid}" or "qqbot:{user_openid}"
+// Session key format: "qqbot:{group_openid}:{member_openid}", "qqbot:g:{group_openid}" or "qqbot:{user_openid}"
 func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	parts := strings.SplitN(sessionKey, ":", 3)
 	if len(parts) < 2 || parts[0] != "qqbot" {
 		return nil, fmt.Errorf("qqbot: invalid session key %q", sessionKey)
 	}
 	if len(parts) == 3 {
+		if parts[1] == "g" {
+			return &replyContext{
+				messageType: "group",
+				groupOpenID: parts[2],
+			}, nil
+		}
 		return &replyContext{
 			messageType: "group",
 			groupOpenID: parts[1],
@@ -688,7 +697,12 @@ func (p *Platform) handleGroupMessage(data json.RawMessage) {
 		return
 	}
 
-	sessionKey := fmt.Sprintf("qqbot:%s:%s", d.GroupOpenID, d.Author.MemberOpenID)
+	var sessionKey string
+	if p.shareSessionInChannel {
+		sessionKey = fmt.Sprintf("qqbot:g:%s", d.GroupOpenID)
+	} else {
+		sessionKey = fmt.Sprintf("qqbot:%s:%s", d.GroupOpenID, d.Author.MemberOpenID)
+	}
 
 	rctx := &replyContext{
 		messageType: "group",

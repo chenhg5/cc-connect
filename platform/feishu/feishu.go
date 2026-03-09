@@ -30,17 +30,18 @@ type replyContext struct {
 }
 
 type Platform struct {
-	appID          string
-	appSecret      string
-	reactionEmoji  string
-	allowFrom      string
-	groupReplyAll  bool
-	client         *lark.Client
-	wsClient       *larkws.Client
-	handler        core.MessageHandler
-	cancel         context.CancelFunc
-	dedup          core.MessageDedup
-	botOpenID      string
+	appID                 string
+	appSecret             string
+	reactionEmoji         string
+	allowFrom             string
+	groupReplyAll         bool
+	shareSessionInChannel bool
+	client                *lark.Client
+	wsClient              *larkws.Client
+	handler               core.MessageHandler
+	cancel                context.CancelFunc
+	dedup                 core.MessageDedup
+	botOpenID             string
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -58,14 +59,16 @@ func New(opts map[string]any) (core.Platform, error) {
 	}
 	allowFrom, _ := opts["allow_from"].(string)
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
+	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 
 	return &Platform{
-		appID:         appID,
-		appSecret:     appSecret,
-		reactionEmoji: reactionEmoji,
-		allowFrom:     allowFrom,
-		groupReplyAll: groupReplyAll,
-		client:        lark.NewClient(appID, appSecret),
+		appID:                 appID,
+		appSecret:             appSecret,
+		reactionEmoji:         reactionEmoji,
+		allowFrom:             allowFrom,
+		groupReplyAll:         groupReplyAll,
+		shareSessionInChannel: shareSessionInChannel,
+		client:                lark.NewClient(appID, appSecret),
 	}, nil
 }
 
@@ -242,7 +245,12 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		return nil
 	}
 
-	sessionKey := fmt.Sprintf("feishu:%s:%s", chatID, userID)
+	var sessionKey string
+	if p.shareSessionInChannel {
+		sessionKey = fmt.Sprintf("feishu:%s", chatID)
+	} else {
+		sessionKey = fmt.Sprintf("feishu:%s:%s", chatID, userID)
+	}
 	rctx := replyContext{messageID: messageID, chatID: chatID}
 
 	switch msgType {
