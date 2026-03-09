@@ -16,6 +16,7 @@ import (
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
+	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 )
@@ -40,9 +41,14 @@ type Platform struct {
 	client                *lark.Client
 	wsClient              *larkws.Client
 	handler               core.MessageHandler
+	cardNavHandler        core.CardNavigationHandler
 	cancel                context.CancelFunc
 	dedup                 core.MessageDedup
 	botOpenID             string
+}
+
+func (p *Platform) SetCardNavigationHandler(h core.CardNavigationHandler) {
+	p.cardNavHandler = h
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -108,6 +114,9 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		}).
 		OnP2MessageReactionDeletedV1(func(ctx context.Context, event *larkim.P2MessageReactionDeletedV1) error {
 			return nil // ignore reaction removal events (triggered by our own removeReaction)
+		}).
+		OnP2CardActionTrigger(func(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
+			return p.onCardAction(event)
 		})
 
 	p.wsClient = larkws.NewClient(p.appID, p.appSecret,
@@ -125,6 +134,74 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	}()
 
 	return nil
+}
+
+// onCardAction handles card.action.trigger callbacks via the official SDK event dispatcher.
+// Three prefixes are supported:
+//   - nav:/xxx   — render a card page and update the original card in-place
+//   - act:/xxx   — execute an action, then render and update the card in-place
+//   - cmd:/xxx   — legacy: dispatch as a user command (sends a new message)
+func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
+	if event.Event == nil || event.Event.Action == nil {
+		return nil, nil
+	}
+
+	actionVal, _ := event.Event.Action.Value["action"].(string)
+
+	// select_static callbacks put the chosen value in event.Event.Action.Option
+	if actionVal == "" && event.Event.Action.Option != "" {
+		actionVal = event.Event.Action.Option
+	}
+
+	userID := ""
+	if event.Event.Operator != nil {
+		userID = event.Event.Operator.OpenID
+	}
+	chatID := ""
+	messageID := ""
+	if event.Event.Context != nil {
+		chatID = event.Event.Context.OpenChatID
+		messageID = event.Event.Context.OpenMessageID
+	}
+	if chatID == "" {
+		chatID = userID
+	}
+	sessionKey := fmt.Sprintf("feishu:%s:%s", chatID, userID)
+
+	// nav: / act: — synchronous card update
+	if strings.HasPrefix(actionVal, "nav:") || strings.HasPrefix(actionVal, "act:") {
+		if p.cardNavHandler != nil {
+			card := p.cardNavHandler(actionVal, sessionKey)
+			if card != nil {
+				return &callback.CardActionTriggerResponse{
+					Card: &callback.Card{
+						Type: "raw",
+						Data: renderCardMap(card),
+					},
+				}, nil
+			}
+		}
+		slog.Warn("feishu: card nav returned nil, ignoring", "action", actionVal)
+		return nil, nil
+	}
+
+	// cmd: — async command dispatch
+	if strings.HasPrefix(actionVal, "cmd:") {
+		cmdText := strings.TrimPrefix(actionVal, "cmd:")
+		rctx := replyContext{messageID: messageID, chatID: chatID}
+
+		slog.Info("feishu: card action dispatched as command", "cmd", cmdText, "user", userID)
+
+		go p.handler(p, &core.Message{
+			SessionKey: sessionKey,
+			Platform:   "feishu",
+			UserID:     userID,
+			Content:    cmdText,
+			ReplyCtx:   rctx,
+		})
+	}
+
+	return nil, nil
 }
 
 func (p *Platform) addReaction(messageID string) string {
@@ -402,6 +479,58 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	}
 	if !resp.Success() {
 		return fmt.Errorf("feishu: send failed code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	return nil
+}
+
+// ReplyCard sends a structured card as a reply to the original message.
+func (p *Platform) ReplyCard(ctx context.Context, rctx any, card *core.Card) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("feishu: invalid reply context type %T", rctx)
+	}
+
+	cardJSON := renderCard(card)
+	resp, err := p.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
+		MessageId(rc.messageID).
+		Body(larkim.NewReplyMessageReqBodyBuilder().
+			MsgType(larkim.MsgTypeInteractive).
+			Content(cardJSON).
+			Build()).
+		Build())
+	if err != nil {
+		return fmt.Errorf("feishu: reply card api call: %w", err)
+	}
+	if !resp.Success() {
+		return fmt.Errorf("feishu: reply card failed code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	return nil
+}
+
+// SendCard sends a structured card as a new message to the chat.
+func (p *Platform) SendCard(ctx context.Context, rctx any, card *core.Card) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("feishu: invalid reply context type %T", rctx)
+	}
+	if rc.chatID == "" {
+		return fmt.Errorf("feishu: chatID is empty, cannot send card")
+	}
+
+	cardJSON := renderCard(card)
+	resp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
+		ReceiveIdType(larkim.ReceiveIdTypeChatId).
+		Body(larkim.NewCreateMessageReqBodyBuilder().
+			ReceiveId(rc.chatID).
+			MsgType(larkim.MsgTypeInteractive).
+			Content(cardJSON).
+			Build()).
+		Build())
+	if err != nil {
+		return fmt.Errorf("feishu: send card api call: %w", err)
+	}
+	if !resp.Success() {
+		return fmt.Errorf("feishu: send card failed code=%d msg=%s", resp.Code, resp.Msg)
 	}
 	return nil
 }
