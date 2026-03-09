@@ -53,7 +53,9 @@ func (s *CronStore) load() {
 	if err != nil {
 		return
 	}
-	json.Unmarshal(data, &s.jobs)
+	if err := json.Unmarshal(data, &s.jobs); err != nil {
+		slog.Error("cron: failed to load jobs", "path", s.path, "error", err)
+	}
 }
 
 func (s *CronStore) save() error {
