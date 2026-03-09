@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.2.1 (2026-03-09)
+
+Patch release with bug fixes and minor enhancements.
+
+### Bug Fixes
+- **Engine: Idle Timer During Permission Wait** - Stop idle timer while waiting for user permission response to prevent session termination
+- **Feishu: Nil Pointer Checks** - Add nil checks for `SenderId.OpenId` and `msg.Content` to prevent panics
+- **Feishu: URL Validation** - Validate URLs before creating hyperlinks to prevent rejection of non-HTTP(S) URLs
+- **Cron: Error Logging** - Log `json.Unmarshal` errors instead of silently ignoring when cron file is corrupted
+- **Engine: Stale Event Prevention** - Add `drainEvents` utility to clear buffered events between turns
+
+### New Features
+- **Bind Setup Command** - `/bind setup` writes relay instructions to memory file for better bot-to-bot relay configuration
+
 ## v1.2.0 (2026-03-08)
 
 This is the first stable release of cc-connect 1.2.0, consolidating all beta changes and adding new features.
