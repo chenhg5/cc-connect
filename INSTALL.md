@@ -635,7 +635,13 @@ You can run cc-connect as a daemon managed by the OS init system (Linux systemd 
 cc-connect daemon install --config ~/.cc-connect/config.toml
 ```
 
-Optional flags: `--log-file PATH`, `--log-max-size N` (MB), `--work-dir DIR`, `--force` (overwrite existing unit).
+You can also point the daemon at the directory that contains `config.toml`:
+
+```bash
+cc-connect daemon install --work-dir ~/.cc-connect
+```
+
+Optional flags: `--config PATH`, `--log-file PATH`, `--log-max-size N` (MB), `--work-dir DIR`, `--force` (overwrite existing unit). `--config` points to a config file, while `--work-dir` points to the directory containing `config.toml`.
 
 ### Control the service
 

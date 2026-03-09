@@ -715,6 +715,7 @@ Run cc-connect as a background service managed by the OS init system (Linux syst
 
 ```bash
 cc-connect daemon install --config ~/.cc-connect/config.toml   # install service
+cc-connect daemon install --work-dir ~/.cc-connect             # same, using config dir
 cc-connect daemon start
 cc-connect daemon stop
 cc-connect daemon restart
@@ -723,7 +724,7 @@ cc-connect daemon logs [-f] [-n N] [--log-file PATH]
 cc-connect daemon uninstall
 ```
 
-**Install flags:** `--log-file PATH`, `--log-max-size N` (MB), `--work-dir DIR`, `--force`. Logs auto-rotate at the size limit and keep one backup.
+**Install flags:** `--config PATH`, `--log-file PATH`, `--log-max-size N` (MB), `--work-dir DIR`, `--force`. `--config` points to a config file; `--work-dir` points to the directory containing `config.toml`. Logs auto-rotate at the size limit and keep one backup.
 
 ## Session Management
 
