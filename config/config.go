@@ -82,11 +82,12 @@ type SpeechConfig struct {
 
 // TTSConfig configures text-to-speech output (mirrors SpeechConfig style).
 type TTSConfig struct {
-	Enabled  bool   `toml:"enabled"`
-	Provider string `toml:"provider"` // "qwen" | "openai"
-	Voice    string `toml:"voice"`    // default voice name
-	TTSMode  string `toml:"tts_mode"` // "voice_only" (default) | "always"
-	OpenAI   struct {
+	Enabled     bool   `toml:"enabled"`
+	Provider    string `toml:"provider"`     // "qwen" | "openai"
+	Voice       string `toml:"voice"`        // default voice name
+	TTSMode     string `toml:"tts_mode"`     // "voice_only" (default) | "always"
+	MaxTextLen  int    `toml:"max_text_len"` // max rune count before skipping TTS; 0 = no limit
+	OpenAI      struct {
 		APIKey  string `toml:"api_key"`
 		BaseURL string `toml:"base_url"`
 		Model   string `toml:"model"`
@@ -491,6 +492,25 @@ func SaveDisplayConfig(thinkingMaxLen, toolMaxLen *int) error {
 	if toolMaxLen != nil {
 		cfg.Display.ToolMaxLen = toolMaxLen
 	}
+	return saveConfig(cfg)
+}
+
+// SaveTTSMode persists the TTS mode setting to the config file.
+func SaveTTSMode(mode string) error {
+	configMu.Lock()
+	defer configMu.Unlock()
+	if ConfigPath == "" {
+		return fmt.Errorf("config path not set")
+	}
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+	cfg.TTS.TTSMode = mode
 	return saveConfig(cfg)
 }
 

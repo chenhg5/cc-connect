@@ -1,0 +1,465 @@
+diff --git a/INSTALL.md b/INSTALL.md
+index 8b711fa..6e97f4e 100644
+--- a/INSTALL.md
++++ b/INSTALL.md
+@@ -674,6 +674,7 @@ The following additional features are available:
+ - **OpenCode**: OpenCode CLI integration (`opencode run --format json`)
+ - **iFlow CLI**: iFlow CLI integration (`iflow -i -r -o`)
+ - **Voice Messages (STT)**: Speech-to-text via Whisper API (OpenAI / Groq / SiliconFlow). Requires `ffmpeg` and `[speech]` config.
++- **Voice Reply (TTS)**: Text-to-speech via Qwen TTS / OpenAI TTS. Requires `ffmpeg` and `[tts]` config.
+ - **Image Messages**: Send images to Claude Code for multimodal analysis
+ - **API Provider Management**: Runtime switching between API providers via `/provider` command or CLI
+ - **CLI Send**: `cc-connect send` to inject messages into active sessions from external processes
+diff --git a/README.md b/README.md
+index 77d7f27..dea0837 100644
+--- a/README.md
++++ b/README.md
+@@ -39,7 +39,7 @@ cc-connect bridges AI agents running on your machine to the messaging platforms
+ - **Full Control from Chat** — Switch models (`/model`), change permission modes (`/mode`), manage sessions, all via slash commands.
+ - **Agent Memory** — Read and write agent instruction files (`/memory`) without touching the terminal.
+ - **Scheduled Tasks** — Set up cron jobs in natural language. "Every day at 6am, summarize GitHub trending" just works.
+-- **Voice & Images** — Send voice messages or screenshots; cc-connect handles STT and multimodal forwarding.
++- **Voice & Images** — Send voice messages or screenshots; cc-connect handles STT/TTS and multimodal forwarding.
+ - **Multi-Project** — One process, multiple projects, each with its own agent + platform combo.
+ 
+ <p align="center">
+@@ -81,7 +81,8 @@ cc-connect bridges AI agents running on your machine to the messaging platforms
+ | Platform | Google Chat | 🔜 Planned (Chat API) |
+ | Platform | Mattermost | 🔜 Planned (Webhook + Bot) |
+ | Platform | Matrix (Element) | 🔜 Planned (Client-Server API) |
+-| Feature | Voice Messages (STT) | ✅ Whisper API (OpenAI / Groq) + ffmpeg |
++| Feature | Voice Messages (STT) | ✅ Whisper API (OpenAI / Groq / Qwen) + ffmpeg |
++| Feature | Voice Reply (TTS) | ✅ Qwen TTS / OpenAI TTS + ffmpeg |
+ | Feature | Image Messages | ✅ Multimodal (Claude Code) |
+ | Feature | API Provider Management | ✅ Runtime provider switching |
+ | Feature | CLI Send (`cc-connect send`) | ✅ Send messages to sessions via CLI |
+@@ -577,6 +578,53 @@ brew install ffmpeg
+ apk add ffmpeg
+ ```
+ 
++## Voice Reply (Text-to-Speech)
++
++cc-connect can synthesize AI text replies into voice messages and send them back to users via supported platforms.
++
++**Supported platforms:** Feishu (Lark)
++
++**Prerequisites:**
++- An API key for Qwen (DashScope) or OpenAI TTS
++- `ffmpeg` installed (for audio format conversion — Feishu requires Opus format)
++
++### Configure
++
++```toml
++[tts]
++enabled  = true
++provider = "qwen"        # "qwen" or "openai"
++voice    = "Cherry"      # default voice name
++tts_mode = "voice_only"  # "voice_only" (default) | "always"
++max_text_len = 0         # max rune count before skipping TTS; 0 = no limit
++
++[tts.qwen]
++api_key = "sk-xxx"       # Alibaba DashScope API key
++# base_url = ""          # leave empty for default endpoint
++# model = "qwen3-tts-flash"
++
++# -- OR use OpenAI TTS --
++# [tts.openai]
++# api_key = "sk-xxx"
++# model = "tts-1"
++```
++
++### TTS Modes
++
++| Mode | Behavior |
++|------|----------|
++| `voice_only` | Only reply with voice when the user sends a voice message |
++| `always` | Always send a voice reply, regardless of input type |
++
++Switch mode at runtime: `/tts always` or `/tts voice_only`
++
++### How It Works
++
++1. Agent produces a text reply
++2. cc-connect calls the TTS API to synthesize audio
++3. For Feishu: WAV audio is converted to Opus via `ffmpeg`
++4. Voice message is sent back to the user alongside the text reply
++
+ ## Scheduled Tasks (Cron)
+ 
+ Create scheduled tasks that run automatically — like daily code reviews, periodic trend summaries, or weekly reports. When a cron job fires, cc-connect sends the prompt to the agent in your chat session and delivers the result back to you.
+diff --git a/cmd/cc-connect/main.go b/cmd/cc-connect/main.go
+index 5fa75cf..14c7be6 100644
+--- a/cmd/cc-connect/main.go
++++ b/cmd/cc-connect/main.go
+@@ -348,20 +348,22 @@ func main() {
+ 		// Wire text-to-speech if enabled
+ 		if cfg.TTS.Enabled {
+ 			ttsCfg := core.TTSCfg{
+-				Enabled: true,
+-				Voice:   cfg.TTS.Voice,
+-				TTSMode: cfg.TTS.TTSMode,
++				Enabled:    true,
++				Voice:      cfg.TTS.Voice,
++				MaxTextLen: cfg.TTS.MaxTextLen,
+ 			}
+-			if ttsCfg.TTSMode == "" {
+-				ttsCfg.TTSMode = "voice_only"
++			initMode := cfg.TTS.TTSMode
++			if initMode == "" {
++				initMode = "voice_only"
+ 			}
++			ttsCfg.SetTTSMode(initMode)
+ 			switch cfg.TTS.Provider {
+ 			case "qwen":
+ 				apiKey := cfg.TTS.Qwen.APIKey
+ 				baseURL := cfg.TTS.Qwen.BaseURL
+ 				model := cfg.TTS.Qwen.Model
+ 				if apiKey != "" {
+-					ttsCfg.TTS = core.NewQwenTTS(apiKey, baseURL, model)
++					ttsCfg.TTS = core.NewQwenTTS(apiKey, baseURL, model, core.HTTPClient)
+ 					ttsCfg.Provider = "qwen"
+ 				} else {
+ 					slog.Warn("tts: qwen provider enabled but api_key is empty")
+@@ -371,7 +373,7 @@ func main() {
+ 				baseURL := cfg.TTS.OpenAI.BaseURL
+ 				model := cfg.TTS.OpenAI.Model
+ 				if apiKey != "" {
+-					ttsCfg.TTS = core.NewOpenAITTS(apiKey, baseURL, model)
++					ttsCfg.TTS = core.NewOpenAITTS(apiKey, baseURL, model, core.HTTPClient)
+ 					ttsCfg.Provider = "openai"
+ 				} else {
+ 					slog.Warn("tts: openai provider enabled but api_key is empty")
+@@ -379,7 +381,10 @@ func main() {
+ 			}
+ 			if ttsCfg.TTS != nil {
+ 				engine.SetTTSConfig(ttsCfg)
+-				slog.Info("tts: enabled", "provider", ttsCfg.Provider, "voice", ttsCfg.Voice, "mode", ttsCfg.TTSMode)
++				engine.SetTTSSaveFunc(func(mode string) error {
++					return config.SaveTTSMode(mode)
++				})
++				slog.Info("tts: enabled", "provider", ttsCfg.Provider, "voice", ttsCfg.Voice, "mode", initMode)
+ 			}
+ 		}
+ 
+diff --git a/config.example.toml b/config.example.toml
+index c8a517e..f2e07ce 100644
+--- a/config.example.toml
++++ b/config.example.toml
+@@ -134,6 +134,10 @@ level = "info" # debug, info, warn, error
+ # provider = "qwen"          # "qwen" | "openai"
+ # voice    = "Cherry"        # default voice / 默认音色（千问支持：Cherry/Serena/Ethan/Chelsie 等）
+ # tts_mode = "voice_only"    # "voice_only" (default) | "always"
++# max_text_len = 0           # max rune count before skipping TTS; 0 = no limit
++#                            # 超过此长度则跳过 TTS；0 表示不限制
++#                            # Qwen TTS 建议参考官方文档：https://help.aliyun.com/zh/model-studio/qwen-tts
++#                            # OpenAI TTS 限制请参考：https://platform.openai.com/docs/guides/text-to-speech
+ #
+ # # Qwen TTS (Alibaba DashScope / 阿里百炼)
+ # [tts.qwen]
+diff --git a/config/config.go b/config/config.go
+index d6899f4..4202c6b 100644
+--- a/config/config.go
++++ b/config/config.go
+@@ -82,11 +82,12 @@ type SpeechConfig struct {
+ 
+ // TTSConfig configures text-to-speech output (mirrors SpeechConfig style).
+ type TTSConfig struct {
+-	Enabled  bool   `toml:"enabled"`
+-	Provider string `toml:"provider"` // "qwen" | "openai"
+-	Voice    string `toml:"voice"`    // default voice name
+-	TTSMode  string `toml:"tts_mode"` // "voice_only" (default) | "always"
+-	OpenAI   struct {
++	Enabled     bool   `toml:"enabled"`
++	Provider    string `toml:"provider"`     // "qwen" | "openai"
++	Voice       string `toml:"voice"`        // default voice name
++	TTSMode     string `toml:"tts_mode"`     // "voice_only" (default) | "always"
++	MaxTextLen  int    `toml:"max_text_len"` // max rune count before skipping TTS; 0 = no limit
++	OpenAI      struct {
+ 		APIKey  string `toml:"api_key"`
+ 		BaseURL string `toml:"base_url"`
+ 		Model   string `toml:"model"`
+@@ -494,6 +495,25 @@ func SaveDisplayConfig(thinkingMaxLen, toolMaxLen *int) error {
+ 	return saveConfig(cfg)
+ }
+ 
++// SaveTTSMode persists the TTS mode setting to the config file.
++func SaveTTSMode(mode string) error {
++	configMu.Lock()
++	defer configMu.Unlock()
++	if ConfigPath == "" {
++		return fmt.Errorf("config path not set")
++	}
++	data, err := os.ReadFile(ConfigPath)
++	if err != nil {
++		return fmt.Errorf("read config: %w", err)
++	}
++	cfg := &Config{}
++	if err := toml.Unmarshal(data, cfg); err != nil {
++		return fmt.Errorf("parse config: %w", err)
++	}
++	cfg.TTS.TTSMode = mode
++	return saveConfig(cfg)
++}
++
+ // GetProjectProviders returns providers for a given project.
+ func GetProjectProviders(projectName string) ([]ProviderConfig, string, error) {
+ 	if ConfigPath == "" {
+diff --git a/core/engine.go b/core/engine.go
+index 41d0c03..277ea54 100644
+--- a/core/engine.go
++++ b/core/engine.go
+@@ -134,6 +134,8 @@ type Engine struct {
+ 	providerAddSaveFunc    func(p ProviderConfig) error
+ 	providerRemoveSaveFunc func(name string) error
+ 
++	ttsSaveFunc func(mode string) error
++
+ 	commandSaveAddFunc func(name, description, prompt, exec, workDir string) error
+ 	commandSaveDelFunc func(name string) error
+ 
+@@ -235,6 +237,11 @@ func (e *Engine) SetTTSConfig(cfg TTSCfg) {
+ 	e.tts = cfg
+ }
+ 
++// SetTTSSaveFunc registers a callback that persists TTS mode changes.
++func (e *Engine) SetTTSSaveFunc(fn func(mode string) error) {
++	e.ttsSaveFunc = fn
++}
++
+ // SetDisplayConfig overrides the default truncation settings.
+ func (e *Engine) SetDisplayConfig(cfg DisplayCfg) {
+ 	e.display = cfg
+@@ -1155,7 +1162,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
+ 				state.mu.Lock()
+ 				fromVoice := state.fromVoice
+ 				state.mu.Unlock()
+-				if e.tts.TTSMode == "always" || (e.tts.TTSMode == "voice_only" && fromVoice) {
++				mode := e.tts.GetTTSMode()
++				if mode == "always" || (mode == "voice_only" && fromVoice) {
+ 					go e.sendTTSReply(p, replyCtx, fullResponse)
+ 				}
+ 			}
+@@ -2256,7 +2264,7 @@ func (e *Engine) cmdQuiet(p Platform, msg *Message, args []string) {
+ 
+ func (e *Engine) cmdTTS(p Platform, msg *Message, args []string) {
+ 	if !e.tts.Enabled || e.tts.TTS == nil {
+-		e.reply(p, msg.ReplyCtx, "TTS is not enabled")
++		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgTTSNotEnabled))
+ 		return
+ 	}
+ 	if len(args) == 0 {
+@@ -2264,18 +2272,21 @@ func (e *Engine) cmdTTS(p Platform, msg *Message, args []string) {
+ 		if providerStr == "" {
+ 			providerStr = "unknown"
+ 		}
+-		e.reply(p, msg.ReplyCtx, fmt.Sprintf("TTS status: enabled=true, mode=%s, provider=%s", e.tts.TTSMode, providerStr))
++		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgTTSStatus), e.tts.GetTTSMode(), providerStr))
+ 		return
+ 	}
+ 	switch args[0] {
+-	case "always":
+-		e.tts.TTSMode = "always"
+-		e.reply(p, msg.ReplyCtx, "TTS 已切换为 always 模式")
+-	case "voice_only":
+-		e.tts.TTSMode = "voice_only"
+-		e.reply(p, msg.ReplyCtx, "TTS 已切换为 voice_only 模式")
++	case "always", "voice_only":
++		mode := args[0]
++		e.tts.SetTTSMode(mode)
++		if e.ttsSaveFunc != nil {
++			if err := e.ttsSaveFunc(mode); err != nil {
++				slog.Warn("tts: failed to persist mode", "error", err)
++			}
++		}
++		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgTTSSwitched), mode))
+ 	default:
+-		e.reply(p, msg.ReplyCtx, "Usage: /tts [always|voice_only]")
++		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgTTSUsage))
+ 	}
+ }
+ 
+@@ -3786,10 +3797,14 @@ func splitMessage(text string, maxLen int) []string {
+ // sendTTSReply synthesizes fullResponse text and sends audio to the platform.
+ // Called asynchronously after EventResult; text reply is always sent first.
+ func (e *Engine) sendTTSReply(p Platform, replyCtx any, text string) {
++	if e.tts.MaxTextLen > 0 && utf8.RuneCountInString(text) > e.tts.MaxTextLen {
++		slog.Warn("tts: text exceeds max_text_len, skipping synthesis", "len", utf8.RuneCountInString(text), "max", e.tts.MaxTextLen)
++		return
++	}
+ 	opts := TTSSynthesisOpts{Voice: e.tts.Voice}
+ 	audioData, format, err := e.tts.TTS.Synthesize(e.ctx, text, opts)
+ 	if err != nil {
+-		slog.Error("tts synthesis failed", "error", err)
++		slog.Error("tts: synthesis failed", "error", err)
+ 		return
+ 	}
+ 	as, ok := p.(AudioSender)
+diff --git a/core/i18n.go b/core/i18n.go
+index dcbc3ca..78dc7d8 100644
+--- a/core/i18n.go
++++ b/core/i18n.go
+@@ -184,6 +184,11 @@ const (
+ 	MsgVoiceTranscribeFailed MsgKey = "voice_transcribe_failed"
+ 	MsgVoiceEmpty            MsgKey = "voice_empty"
+ 
++	MsgTTSNotEnabled MsgKey = "tts_not_enabled"
++	MsgTTSStatus     MsgKey = "tts_status"
++	MsgTTSSwitched   MsgKey = "tts_switched"
++	MsgTTSUsage      MsgKey = "tts_usage"
++
+ 	MsgCronNotAvailable MsgKey = "cron_not_available"
+ 	MsgCronUsage        MsgKey = "cron_usage"
+ 	MsgCronAddUsage     MsgKey = "cron_add_usage"
+@@ -978,6 +983,34 @@ var messages = map[MsgKey]map[Language]string{
+ 		LangJapanese:           "🎙 音声メッセージが空か、認識できませんでした。",
+ 		LangSpanish:            "🎙 El mensaje de voz estaba vacío o no se pudo reconocer.",
+ 	},
++	MsgTTSNotEnabled: {
++		LangEnglish:            "TTS is not enabled. Please configure `[tts]` in config.toml.",
++		LangChinese:            "TTS 未启用，请在 config.toml 中配置 `[tts]` 部分。",
++		LangTraditionalChinese: "TTS 未啟用，請在 config.toml 中配置 `[tts]` 部分。",
++		LangJapanese:           "TTS は有効になっていません。config.toml で `[tts]` を設定してください。",
++		LangSpanish:            "TTS no está habilitado. Configure `[tts]` en config.toml.",
++	},
++	MsgTTSStatus: {
++		LangEnglish:            "TTS status: enabled=true, mode=%s, provider=%s",
++		LangChinese:            "TTS 状态：enabled=true，mode=%s，provider=%s",
++		LangTraditionalChinese: "TTS 狀態：enabled=true，mode=%s，provider=%s",
++		LangJapanese:           "TTS 状態: enabled=true, mode=%s, provider=%s",
++		LangSpanish:            "Estado TTS: enabled=true, mode=%s, provider=%s",
++	},
++	MsgTTSSwitched: {
++		LangEnglish:            "TTS mode switched to: %s",
++		LangChinese:            "TTS 已切换为 %s 模式",
++		LangTraditionalChinese: "TTS 已切換為 %s 模式",
++		LangJapanese:           "TTS モードを %s に切り替えました",
++		LangSpanish:            "Modo TTS cambiado a: %s",
++	},
++	MsgTTSUsage: {
++		LangEnglish:            "Usage: /tts [always|voice_only]",
++		LangChinese:            "用法：/tts [always|voice_only]",
++		LangTraditionalChinese: "用法：/tts [always|voice_only]",
++		LangJapanese:           "使い方: /tts [always|voice_only]",
++		LangSpanish:            "Uso: /tts [always|voice_only]",
++	},
+ 	MsgCronNotAvailable: {
+ 		LangEnglish:            "Cron scheduler is not available.",
+ 		LangChinese:            "定时任务调度器未启用。",
+diff --git a/core/tts.go b/core/tts.go
+index 72b1209..85ecb27 100644
+--- a/core/tts.go
++++ b/core/tts.go
+@@ -8,6 +8,7 @@ import (
+ 	"io"
+ 	"net/http"
+ 	"strings"
++	"sync"
+ 	"time"
+ )
+ 
+@@ -25,11 +26,31 @@ type TTSSynthesisOpts struct {
+ 
+ // TTSCfg holds TTS configuration for the engine (mirrors SpeechCfg).
+ type TTSCfg struct {
+-	Enabled  bool
+-	Provider string
+-	Voice    string // default voice used when TTSSynthesisOpts.Voice is empty
+-	TTSMode  string // "voice_only" (default) | "always"
+-	TTS      TextToSpeech
++	Enabled    bool
++	Provider   string
++	Voice      string // default voice used when TTSSynthesisOpts.Voice is empty
++	TTS        TextToSpeech
++	MaxTextLen int // max rune count before skipping TTS; 0 = no limit
++
++	mu      sync.RWMutex
++	ttsMode string // "voice_only" (default) | "always"
++}
++
++// GetTTSMode returns the current TTS mode safely.
++func (c *TTSCfg) GetTTSMode() string {
++	c.mu.RLock()
++	defer c.mu.RUnlock()
++	if c.ttsMode == "" {
++		return "voice_only"
++	}
++	return c.ttsMode
++}
++
++// SetTTSMode updates the TTS mode safely.
++func (c *TTSCfg) SetTTSMode(mode string) {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	c.ttsMode = mode
+ }
+ 
+ // AudioSender is implemented by platforms that support sending voice/audio messages.
+@@ -50,18 +71,21 @@ type QwenTTS struct {
+ }
+ 
+ // NewQwenTTS creates a new QwenTTS instance.
+-func NewQwenTTS(apiKey, baseURL, model string) *QwenTTS {
++func NewQwenTTS(apiKey, baseURL, model string, client *http.Client) *QwenTTS {
+ 	if baseURL == "" {
+ 		baseURL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+ 	}
+ 	if model == "" {
+ 		model = "qwen3-tts-flash"
+ 	}
++	if client == nil {
++		client = &http.Client{Timeout: 60 * time.Second}
++	}
+ 	return &QwenTTS{
+ 		APIKey:  apiKey,
+ 		BaseURL: baseURL,
+ 		Model:   model,
+-		Client:  &http.Client{Timeout: 60 * time.Second},
++		Client:  client,
+ 	}
+ }
+ 
+@@ -106,7 +130,9 @@ func (q *QwenTTS) Synthesize(ctx context.Context, text string, opts TTSSynthesis
+ 	}
+ 
+ 	var result struct {
+-		Output struct {
++		Code    string `json:"code"`
++		Message string `json:"message"`
++		Output  struct {
+ 			Audio struct {
+ 				URL string `json:"url"`
+ 			} `json:"audio"`
+@@ -115,6 +141,9 @@ func (q *QwenTTS) Synthesize(ctx context.Context, text string, opts TTSSynthesis
+ 	if err := json.Unmarshal(body, &result); err != nil {
+ 		return nil, "", fmt.Errorf("qwen tts: parse response: %w", err)
+ 	}
++	if result.Code != "" {
++		return nil, "", fmt.Errorf("qwen tts API error %s: %s", result.Code, result.Message)
++	}
+ 	if result.Output.Audio.URL == "" {
+ 		return nil, "", fmt.Errorf("qwen tts: empty audio URL in response")
+ 	}
+@@ -150,18 +179,21 @@ type OpenAITTS struct {
+ }
+ 
+ // NewOpenAITTS creates a new OpenAITTS instance.
+-func NewOpenAITTS(apiKey, baseURL, model string) *OpenAITTS {
++func NewOpenAITTS(apiKey, baseURL, model string, client *http.Client) *OpenAITTS {
+ 	if baseURL == "" {
+ 		baseURL = "https://api.openai.com/v1"
+ 	}
+ 	if model == "" {
+ 		model = "tts-1"
+ 	}
++	if client == nil {
++		client = &http.Client{Timeout: 60 * time.Second}
++	}
+ 	return &OpenAITTS{
+ 		APIKey:  apiKey,
+ 		BaseURL: baseURL,
+ 		Model:   model,
+-		Client:  &http.Client{Timeout: 60 * time.Second},
++		Client:  client,
+ 	}
+ }
+ 

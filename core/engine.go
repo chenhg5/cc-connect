@@ -134,6 +134,8 @@ type Engine struct {
 	providerAddSaveFunc    func(p ProviderConfig) error
 	providerRemoveSaveFunc func(name string) error
 
+	ttsSaveFunc func(mode string) error
+
 	commandSaveAddFunc func(name, description, prompt, exec, workDir string) error
 	commandSaveDelFunc func(name string) error
 
@@ -233,6 +235,11 @@ func (e *Engine) SetSpeechConfig(cfg SpeechCfg) {
 // SetTTSConfig configures the text-to-speech subsystem.
 func (e *Engine) SetTTSConfig(cfg TTSCfg) {
 	e.tts = cfg
+}
+
+// SetTTSSaveFunc registers a callback that persists TTS mode changes.
+func (e *Engine) SetTTSSaveFunc(fn func(mode string) error) {
+	e.ttsSaveFunc = fn
 }
 
 // SetDisplayConfig overrides the default truncation settings.
@@ -1155,7 +1162,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				state.mu.Lock()
 				fromVoice := state.fromVoice
 				state.mu.Unlock()
-				if e.tts.TTSMode == "always" || (e.tts.TTSMode == "voice_only" && fromVoice) {
+				mode := e.tts.GetTTSMode()
+				if mode == "always" || (mode == "voice_only" && fromVoice) {
 					go e.sendTTSReply(p, replyCtx, fullResponse)
 				}
 			}
@@ -2256,7 +2264,7 @@ func (e *Engine) cmdQuiet(p Platform, msg *Message, args []string) {
 
 func (e *Engine) cmdTTS(p Platform, msg *Message, args []string) {
 	if !e.tts.Enabled || e.tts.TTS == nil {
-		e.reply(p, msg.ReplyCtx, "TTS is not enabled")
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgTTSNotEnabled))
 		return
 	}
 	if len(args) == 0 {
@@ -2264,18 +2272,21 @@ func (e *Engine) cmdTTS(p Platform, msg *Message, args []string) {
 		if providerStr == "" {
 			providerStr = "unknown"
 		}
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf("TTS status: enabled=true, mode=%s, provider=%s", e.tts.TTSMode, providerStr))
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgTTSStatus), e.tts.GetTTSMode(), providerStr))
 		return
 	}
 	switch args[0] {
-	case "always":
-		e.tts.TTSMode = "always"
-		e.reply(p, msg.ReplyCtx, "TTS 已切换为 always 模式")
-	case "voice_only":
-		e.tts.TTSMode = "voice_only"
-		e.reply(p, msg.ReplyCtx, "TTS 已切换为 voice_only 模式")
+	case "always", "voice_only":
+		mode := args[0]
+		e.tts.SetTTSMode(mode)
+		if e.ttsSaveFunc != nil {
+			if err := e.ttsSaveFunc(mode); err != nil {
+				slog.Warn("tts: failed to persist mode", "error", err)
+			}
+		}
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgTTSSwitched), mode))
 	default:
-		e.reply(p, msg.ReplyCtx, "Usage: /tts [always|voice_only]")
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgTTSUsage))
 	}
 }
 
@@ -3786,10 +3797,14 @@ func splitMessage(text string, maxLen int) []string {
 // sendTTSReply synthesizes fullResponse text and sends audio to the platform.
 // Called asynchronously after EventResult; text reply is always sent first.
 func (e *Engine) sendTTSReply(p Platform, replyCtx any, text string) {
+	if e.tts.MaxTextLen > 0 && utf8.RuneCountInString(text) > e.tts.MaxTextLen {
+		slog.Warn("tts: text exceeds max_text_len, skipping synthesis", "len", utf8.RuneCountInString(text), "max", e.tts.MaxTextLen)
+		return
+	}
 	opts := TTSSynthesisOpts{Voice: e.tts.Voice}
 	audioData, format, err := e.tts.TTS.Synthesize(e.ctx, text, opts)
 	if err != nil {
-		slog.Error("tts synthesis failed", "error", err)
+		slog.Error("tts: synthesis failed", "error", err)
 		return
 	}
 	as, ok := p.(AudioSender)

@@ -39,7 +39,7 @@ cc-connect bridges AI agents running on your machine to the messaging platforms 
 - **Full Control from Chat** — Switch models (`/model`), change permission modes (`/mode`), manage sessions, all via slash commands.
 - **Agent Memory** — Read and write agent instruction files (`/memory`) without touching the terminal.
 - **Scheduled Tasks** — Set up cron jobs in natural language. "Every day at 6am, summarize GitHub trending" just works.
-- **Voice & Images** — Send voice messages or screenshots; cc-connect handles STT and multimodal forwarding.
+- **Voice & Images** — Send voice messages or screenshots; cc-connect handles STT/TTS and multimodal forwarding.
 - **Multi-Project** — One process, multiple projects, each with its own agent + platform combo.
 
 <p align="center">
@@ -81,7 +81,8 @@ cc-connect bridges AI agents running on your machine to the messaging platforms 
 | Platform | Google Chat | 🔜 Planned (Chat API) |
 | Platform | Mattermost | 🔜 Planned (Webhook + Bot) |
 | Platform | Matrix (Element) | 🔜 Planned (Client-Server API) |
-| Feature | Voice Messages (STT) | ✅ Whisper API (OpenAI / Groq) + ffmpeg |
+| Feature | Voice Messages (STT) | ✅ Whisper API (OpenAI / Groq / Qwen) + ffmpeg |
+| Feature | Voice Reply (TTS) | ✅ Qwen TTS / OpenAI TTS + ffmpeg |
 | Feature | Image Messages | ✅ Multimodal (Claude Code) |
 | Feature | API Provider Management | ✅ Runtime provider switching |
 | Feature | CLI Send (`cc-connect send`) | ✅ Send messages to sessions via CLI |
@@ -576,6 +577,53 @@ brew install ffmpeg
 # Alpine
 apk add ffmpeg
 ```
+
+## Voice Reply (Text-to-Speech)
+
+cc-connect can synthesize AI text replies into voice messages and send them back to users via supported platforms.
+
+**Supported platforms:** Feishu (Lark)
+
+**Prerequisites:**
+- An API key for Qwen (DashScope) or OpenAI TTS
+- `ffmpeg` installed (for audio format conversion — Feishu requires Opus format)
+
+### Configure
+
+```toml
+[tts]
+enabled  = true
+provider = "qwen"        # "qwen" or "openai"
+voice    = "Cherry"      # default voice name
+tts_mode = "voice_only"  # "voice_only" (default) | "always"
+max_text_len = 0         # max rune count before skipping TTS; 0 = no limit
+
+[tts.qwen]
+api_key = "sk-xxx"       # Alibaba DashScope API key
+# base_url = ""          # leave empty for default endpoint
+# model = "qwen3-tts-flash"
+
+# -- OR use OpenAI TTS --
+# [tts.openai]
+# api_key = "sk-xxx"
+# model = "tts-1"
+```
+
+### TTS Modes
+
+| Mode | Behavior |
+|------|----------|
+| `voice_only` | Only reply with voice when the user sends a voice message |
+| `always` | Always send a voice reply, regardless of input type |
+
+Switch mode at runtime: `/tts always` or `/tts voice_only`
+
+### How It Works
+
+1. Agent produces a text reply
+2. cc-connect calls the TTS API to synthesize audio
+3. For Feishu: WAV audio is converted to Opus via `ffmpeg`
+4. Voice message is sent back to the user alongside the text reply
 
 ## Scheduled Tasks (Cron)
 

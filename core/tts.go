@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -25,11 +26,31 @@ type TTSSynthesisOpts struct {
 
 // TTSCfg holds TTS configuration for the engine (mirrors SpeechCfg).
 type TTSCfg struct {
-	Enabled  bool
-	Provider string
-	Voice    string // default voice used when TTSSynthesisOpts.Voice is empty
-	TTSMode  string // "voice_only" (default) | "always"
-	TTS      TextToSpeech
+	Enabled    bool
+	Provider   string
+	Voice      string // default voice used when TTSSynthesisOpts.Voice is empty
+	TTS        TextToSpeech
+	MaxTextLen int // max rune count before skipping TTS; 0 = no limit
+
+	mu      sync.RWMutex
+	ttsMode string // "voice_only" (default) | "always"
+}
+
+// GetTTSMode returns the current TTS mode safely.
+func (c *TTSCfg) GetTTSMode() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.ttsMode == "" {
+		return "voice_only"
+	}
+	return c.ttsMode
+}
+
+// SetTTSMode updates the TTS mode safely.
+func (c *TTSCfg) SetTTSMode(mode string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ttsMode = mode
 }
 
 // AudioSender is implemented by platforms that support sending voice/audio messages.
@@ -50,18 +71,21 @@ type QwenTTS struct {
 }
 
 // NewQwenTTS creates a new QwenTTS instance.
-func NewQwenTTS(apiKey, baseURL, model string) *QwenTTS {
+func NewQwenTTS(apiKey, baseURL, model string, client *http.Client) *QwenTTS {
 	if baseURL == "" {
 		baseURL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
 	}
 	if model == "" {
 		model = "qwen3-tts-flash"
 	}
+	if client == nil {
+		client = &http.Client{Timeout: 60 * time.Second}
+	}
 	return &QwenTTS{
 		APIKey:  apiKey,
 		BaseURL: baseURL,
 		Model:   model,
-		Client:  &http.Client{Timeout: 60 * time.Second},
+		Client:  client,
 	}
 }
 
@@ -106,7 +130,9 @@ func (q *QwenTTS) Synthesize(ctx context.Context, text string, opts TTSSynthesis
 	}
 
 	var result struct {
-		Output struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+		Output  struct {
 			Audio struct {
 				URL string `json:"url"`
 			} `json:"audio"`
@@ -114,6 +140,9 @@ func (q *QwenTTS) Synthesize(ctx context.Context, text string, opts TTSSynthesis
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
 		return nil, "", fmt.Errorf("qwen tts: parse response: %w", err)
+	}
+	if result.Code != "" {
+		return nil, "", fmt.Errorf("qwen tts API error %s: %s", result.Code, result.Message)
 	}
 	if result.Output.Audio.URL == "" {
 		return nil, "", fmt.Errorf("qwen tts: empty audio URL in response")
@@ -150,18 +179,21 @@ type OpenAITTS struct {
 }
 
 // NewOpenAITTS creates a new OpenAITTS instance.
-func NewOpenAITTS(apiKey, baseURL, model string) *OpenAITTS {
+func NewOpenAITTS(apiKey, baseURL, model string, client *http.Client) *OpenAITTS {
 	if baseURL == "" {
 		baseURL = "https://api.openai.com/v1"
 	}
 	if model == "" {
 		model = "tts-1"
 	}
+	if client == nil {
+		client = &http.Client{Timeout: 60 * time.Second}
+	}
 	return &OpenAITTS{
 		APIKey:  apiKey,
 		BaseURL: baseURL,
 		Model:   model,
-		Client:  &http.Client{Timeout: 60 * time.Second},
+		Client:  client,
 	}
 }
 

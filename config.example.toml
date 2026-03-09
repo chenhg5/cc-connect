@@ -134,6 +134,10 @@ level = "info" # debug, info, warn, error
 # provider = "qwen"          # "qwen" | "openai"
 # voice    = "Cherry"        # default voice / 默认音色（千问支持：Cherry/Serena/Ethan/Chelsie 等）
 # tts_mode = "voice_only"    # "voice_only" (default) | "always"
+# max_text_len = 0           # max rune count before skipping TTS; 0 = no limit
+#                            # 超过此长度则跳过 TTS；0 表示不限制
+#                            # Qwen TTS 建议参考官方文档：https://help.aliyun.com/zh/model-studio/qwen-tts
+#                            # OpenAI TTS 限制请参考：https://platform.openai.com/docs/guides/text-to-speech
 #
 # # Qwen TTS (Alibaba DashScope / 阿里百炼)
 # [tts.qwen]
