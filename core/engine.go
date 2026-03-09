@@ -792,6 +792,11 @@ func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Se
 		}
 	}()
 
+	// Drain any stale events left in the channel from a previous turn.
+	// This prevents the next processInteractiveEvents from reading an old
+	// EventResult that was pushed after the previous turn already returned.
+	drainEvents(state.agentSession.Events())
+
 	sendStart := time.Now()
 	if err := state.agentSession.Send(msg.Content, msg.Images); err != nil {
 		slog.Error("failed to send prompt", "error", err)
@@ -2301,6 +2306,8 @@ func (e *Engine) cmdCompress(p Platform, msg *Message) {
 		state.replyCtx = msg.ReplyCtx
 		state.mu.Unlock()
 
+		drainEvents(state.agentSession.Events())
+
 		cmd := compressor.CompressCommand()
 		if err := state.agentSession.Send(cmd, nil); err != nil {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
@@ -2715,6 +2722,24 @@ func (e *Engine) send(p Platform, replyCtx any, content string) {
 	}
 	if elapsed := time.Since(start); elapsed >= slowPlatformSend {
 		slog.Warn("slow platform send", "platform", p.Name(), "elapsed", elapsed, "content_len", len(content))
+	}
+}
+
+// drainEvents discards any buffered events from the channel.
+// Called before a new turn to prevent stale events from a previous turn's
+// agent process from being mistaken for the new turn's response.
+func drainEvents(ch <-chan Event) {
+	drained := 0
+	for {
+		select {
+		case <-ch:
+			drained++
+		default:
+			if drained > 0 {
+				slog.Warn("drained stale events from previous turn", "count", drained)
+			}
+			return
+		}
 	}
 }
 
