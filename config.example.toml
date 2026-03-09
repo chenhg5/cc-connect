@@ -112,6 +112,43 @@ level = "info" # debug, info, warn, error
 # model = "whisper-large-v3-turbo"
 
 # =============================================================================
+# Text-to-Speech (Voice Reply) / 文字转语音（语音回复）
+# =============================================================================
+# Enable to synthesize AI replies into voice messages sent back to users.
+# 启用后，AI 的文字回复会合成为语音消息发送给用户。
+#
+# tts_mode:
+#   "voice_only" (default) - only reply with voice when user sends a voice message
+#                            仅当用户发送语音消息时，AI 才用语音回复
+#   "always"               - always send a voice reply regardless of input type
+#                            无论用户发文字还是语音，AI 始终额外发一条语音回复
+#
+# Runtime command: /tts [always|voice_only]
+# 运行时命令：/tts [always|voice_only]
+#
+# Requires ffmpeg for WAV → Opus conversion (needed by Feishu audio messages).
+# 需要安装 ffmpeg 进行 WAV → Opus 转换（飞书语音消息要求 Opus 格式）。
+
+# [tts]
+# enabled  = true
+# provider = "qwen"          # "qwen" | "openai"
+# voice    = "Cherry"        # default voice / 默认音色（千问支持：Cherry/Serena/Ethan/Chelsie 等）
+# tts_mode = "voice_only"    # "voice_only" (default) | "always"
+#
+# # Qwen TTS (Alibaba DashScope / 阿里百炼)
+# [tts.qwen]
+# api_key  = "sk-xxx"        # DashScope API key / 阿里百炼 API Key
+# base_url = ""              # optional: leave empty for default endpoint / 留空使用默认地址
+# model    = "qwen3-tts-flash"   # "qwen3-tts-flash" | "qwen3-tts-instruct-flash"
+#
+# # Alternative: OpenAI TTS (OpenAI-compatible)
+# # 备选：OpenAI TTS（兼容 OpenAI 接口）
+# [tts.openai]
+# api_key  = "sk-xxx"
+# base_url = ""              # optional: custom endpoint / 可选：自定义端点
+# model    = "tts-1"         # "tts-1" | "tts-1-hd"
+
+# =============================================================================
 # Daemon Mode / 守护进程模式
 # =============================================================================
 # Run cc-connect as a background service (systemd user / launchd LaunchAgent).

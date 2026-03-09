@@ -1,6 +1,7 @@
 package feishu
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -879,6 +880,72 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 func (p *Platform) Stop() error {
 	if p.cancel != nil {
 		p.cancel()
+	}
+	return nil
+}
+
+// SendAudio uploads audio bytes to Feishu and sends a voice message.
+// Implements core.AudioSender interface.
+// Feishu audio messages require opus format; non-opus input is converted via ffmpeg.
+func (p *Platform) SendAudio(ctx context.Context, rctx any, audio []byte, format string) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("feishu: SendAudio: invalid reply context type %T", rctx)
+	}
+
+	// Feishu only supports opus for audio messages; convert if needed
+	if format != "opus" {
+		converted, err := core.ConvertAudioToOpus(ctx, audio, format)
+		if err != nil {
+			return fmt.Errorf("feishu: convert to opus: %w", err)
+		}
+		audio = converted
+		format = "opus"
+	}
+
+	// Upload file to Feishu as opus
+	uploadResp, err := p.client.Im.File.Create(ctx,
+		larkim.NewCreateFileReqBuilder().
+			Body(larkim.NewCreateFileReqBodyBuilder().
+				FileType(larkim.FileTypeOpus).
+				FileName("tts_audio.opus").
+				File(bytes.NewReader(audio)).
+				Build()).
+			Build())
+	if err != nil {
+		return fmt.Errorf("feishu: upload audio: %w", err)
+	}
+	if !uploadResp.Success() {
+		return fmt.Errorf("feishu: upload audio code=%d msg=%s", uploadResp.Code, uploadResp.Msg)
+	}
+	if uploadResp.Data == nil || uploadResp.Data.FileKey == nil {
+		return fmt.Errorf("feishu: upload audio: no file_key returned")
+	}
+	fileKey := *uploadResp.Data.FileKey
+
+	slog.Debug("feishu: audio uploaded", "file_key", fileKey, "format", format, "size", len(audio))
+
+	// Build audio message content
+	audioMsg := larkim.MessageAudio{FileKey: fileKey}
+	audioContent, err := audioMsg.String()
+	if err != nil {
+		return fmt.Errorf("feishu: build audio message: %w", err)
+	}
+
+	// Send audio message to chat
+	sendResp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
+		ReceiveIdType(larkim.ReceiveIdTypeChatId).
+		Body(larkim.NewCreateMessageReqBodyBuilder().
+			ReceiveId(rc.chatID).
+			MsgType(larkim.MsgTypeAudio).
+			Content(audioContent).
+			Build()).
+		Build())
+	if err != nil {
+		return fmt.Errorf("feishu: send audio message: %w", err)
+	}
+	if !sendResp.Success() {
+		return fmt.Errorf("feishu: send audio message code=%d msg=%s", sendResp.Code, sendResp.Msg)
 	}
 	return nil
 }

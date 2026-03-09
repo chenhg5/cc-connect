@@ -345,6 +345,44 @@ func main() {
 			}
 		}
 
+		// Wire text-to-speech if enabled
+		if cfg.TTS.Enabled {
+			ttsCfg := core.TTSCfg{
+				Enabled: true,
+				Voice:   cfg.TTS.Voice,
+				TTSMode: cfg.TTS.TTSMode,
+			}
+			if ttsCfg.TTSMode == "" {
+				ttsCfg.TTSMode = "voice_only"
+			}
+			switch cfg.TTS.Provider {
+			case "qwen":
+				apiKey := cfg.TTS.Qwen.APIKey
+				baseURL := cfg.TTS.Qwen.BaseURL
+				model := cfg.TTS.Qwen.Model
+				if apiKey != "" {
+					ttsCfg.TTS = core.NewQwenTTS(apiKey, baseURL, model)
+					ttsCfg.Provider = "qwen"
+				} else {
+					slog.Warn("tts: qwen provider enabled but api_key is empty")
+				}
+			default: // "openai" or unspecified
+				apiKey := cfg.TTS.OpenAI.APIKey
+				baseURL := cfg.TTS.OpenAI.BaseURL
+				model := cfg.TTS.OpenAI.Model
+				if apiKey != "" {
+					ttsCfg.TTS = core.NewOpenAITTS(apiKey, baseURL, model)
+					ttsCfg.Provider = "openai"
+				} else {
+					slog.Warn("tts: openai provider enabled but api_key is empty")
+				}
+			}
+			if ttsCfg.TTS != nil {
+				engine.SetTTSConfig(ttsCfg)
+				slog.Info("tts: enabled", "provider", ttsCfg.Provider, "voice", ttsCfg.Voice, "mode", ttsCfg.TTSMode)
+			}
+		}
+
 		// Set up save callback for auto-detected language
 		if lang == core.LangAuto {
 			engine.SetLanguageSaveFunc(func(l core.Language) error {

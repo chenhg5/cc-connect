@@ -24,6 +24,7 @@ type Config struct {
 	Log         LogConfig       `toml:"log"`
 	Language    string          `toml:"language"` // "en" or "zh", default is "en"
 	Speech      SpeechConfig    `toml:"speech"`
+	TTS         TTSConfig       `toml:"tts"`
 	Display       DisplayConfig       `toml:"display"`
 	StreamPreview StreamPreviewConfig `toml:"stream_preview"` // real-time streaming preview
 	RateLimit     RateLimitConfig     `toml:"rate_limit"`     // per-session rate limiting
@@ -72,6 +73,24 @@ type SpeechConfig struct {
 		APIKey string `toml:"api_key"`
 		Model  string `toml:"model"`
 	} `toml:"groq"`
+	Qwen struct {
+		APIKey  string `toml:"api_key"`
+		BaseURL string `toml:"base_url"`
+		Model   string `toml:"model"`
+	} `toml:"qwen"`
+}
+
+// TTSConfig configures text-to-speech output (mirrors SpeechConfig style).
+type TTSConfig struct {
+	Enabled  bool   `toml:"enabled"`
+	Provider string `toml:"provider"` // "qwen" | "openai"
+	Voice    string `toml:"voice"`    // default voice name
+	TTSMode  string `toml:"tts_mode"` // "voice_only" (default) | "always"
+	OpenAI   struct {
+		APIKey  string `toml:"api_key"`
+		BaseURL string `toml:"base_url"`
+		Model   string `toml:"model"`
+	} `toml:"openai"`
 	Qwen struct {
 		APIKey  string `toml:"api_key"`
 		BaseURL string `toml:"base_url"`
