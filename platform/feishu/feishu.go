@@ -36,8 +36,7 @@ type Platform struct {
 	allowFrom             string
 	groupReplyAll         bool
 	shareSessionInChannel bool
-	replyInThread         bool
-	client                *lark.Client
+	client *lark.Client
 	wsClient              *larkws.Client
 	handler               core.MessageHandler
 	cancel                context.CancelFunc
@@ -61,8 +60,6 @@ func New(opts map[string]any) (core.Platform, error) {
 	allowFrom, _ := opts["allow_from"].(string)
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
-	replyInThread, _ := opts["reply_in_thread"].(bool)
-
 	return &Platform{
 		appID:                 appID,
 		appSecret:             appSecret,
@@ -70,8 +67,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		allowFrom:             allowFrom,
 		groupReplyAll:         groupReplyAll,
 		shareSessionInChannel: shareSessionInChannel,
-		replyInThread:         replyInThread,
-		client:                lark.NewClient(appID, appSecret),
+		client: lark.NewClient(appID, appSecret),
 	}, nil
 }
 
@@ -370,15 +366,16 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	return nil
 }
 
-// Send sends a new message to the same chat (not a reply to original message).
-// When reply_in_thread is enabled, threads the message to the original message instead.
+// Send sends a message. When the original message ID is available, the message
+// is sent as a reply (quoting the original) so the conversation stays threaded.
+// Falls back to creating a standalone message when no message ID exists.
 func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	rc, ok := rctx.(replyContext)
 	if !ok {
 		return fmt.Errorf("feishu: invalid reply context type %T", rctx)
 	}
 
-	if p.replyInThread && rc.messageID != "" {
+	if rc.messageID != "" {
 		return p.Reply(ctx, rctx, content)
 	}
 
@@ -853,7 +850,7 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 	cardJSON := buildCardJSON(content)
 
 	var msgID string
-	if p.replyInThread && rc.messageID != "" {
+	if rc.messageID != "" {
 		resp, err := p.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
 			MessageId(rc.messageID).
 			Body(larkim.NewReplyMessageReqBodyBuilder().
@@ -980,7 +977,24 @@ func (p *Platform) SendAudio(ctx context.Context, rctx any, audio []byte, format
 		return fmt.Errorf("feishu: build audio message: %w", err)
 	}
 
-	// Send audio message to chat
+	// Send audio message — reply to original message when possible
+	if rc.messageID != "" {
+		sendResp, err := p.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
+			MessageId(rc.messageID).
+			Body(larkim.NewReplyMessageReqBodyBuilder().
+				MsgType(larkim.MsgTypeAudio).
+				Content(audioContent).
+				Build()).
+			Build())
+		if err != nil {
+			return fmt.Errorf("feishu: send audio reply: %w", err)
+		}
+		if !sendResp.Success() {
+			return fmt.Errorf("feishu: send audio reply code=%d msg=%s", sendResp.Code, sendResp.Msg)
+		}
+		return nil
+	}
+
 	sendResp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
 		ReceiveIdType(larkim.ReceiveIdTypeChatId).
 		Body(larkim.NewCreateMessageReqBodyBuilder().
