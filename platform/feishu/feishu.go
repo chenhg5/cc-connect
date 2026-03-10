@@ -641,6 +641,13 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		return nil
 	}
 
+	// Capture content before going async — the SDK may reuse the event object.
+	content := ""
+	if msg.Content != nil {
+		content = *msg.Content
+	}
+	mentions := msg.Mentions
+
 	sessionKey := p.makeSessionKey(msg, chatID, userID)
 	rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
 	slog.Debug(p.tag()+": routed inbound message",
@@ -649,23 +656,36 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		"reply_in_thread", p.shouldReplyInThread(rctx),
 	)
 
+	// Dispatch message handling asynchronously so the SDK event loop is not
+	// blocked by IO-heavy operations (image/audio download, handler HTTP calls).
+	// The dedup and old-message checks above remain synchronous to guarantee
+	// correctness before spawning the goroutine.
+	go p.dispatchMessage(msgType, content, mentions, messageID, sessionKey, userID, userName, chatName, rctx)
+
+	return nil
+}
+
+// dispatchMessage handles the message content parsing, media download, and
+// handler invocation. It runs in its own goroutine so that onMessage returns
+// quickly and does not block the SDK event loop.
+func (p *Platform) dispatchMessage(msgType, content string, mentions []*larkim.MentionEvent, messageID, sessionKey, userID, userName, chatName string, rctx replyContext) {
 	switch msgType {
 	case "text":
 		var textBody struct {
 			Text string `json:"text"`
 		}
-		if err := json.Unmarshal([]byte(*msg.Content), &textBody); err != nil {
+		if err := json.Unmarshal([]byte(content), &textBody); err != nil {
 			slog.Error(p.tag()+": failed to parse text content", "error", err)
-			return nil
+			return
 		}
-		text := stripMentions(textBody.Text, msg.Mentions, p.botOpenID)
+		text := stripMentions(textBody.Text, mentions, p.botOpenID)
 		if text == "" {
 			slog.Debug(p.tag()+": dropping empty text after mention stripping",
 				"message_id", messageID,
 				"raw_text_len", len(textBody.Text),
-				"mentions", mentionCount,
+				"mentions", len(mentions),
 			)
-			return nil
+			return
 		}
 		p.handler(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
@@ -678,14 +698,14 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		var imgBody struct {
 			ImageKey string `json:"image_key"`
 		}
-		if err := json.Unmarshal([]byte(*msg.Content), &imgBody); err != nil {
+		if err := json.Unmarshal([]byte(content), &imgBody); err != nil {
 			slog.Error(p.tag()+": failed to parse image content", "error", err)
-			return nil
+			return
 		}
 		imgData, mimeType, err := p.downloadImage(messageID, imgBody.ImageKey)
 		if err != nil {
 			slog.Error(p.tag()+": download image failed", "error", err)
-			return nil
+			return
 		}
 		p.handler(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
@@ -700,15 +720,15 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 			FileKey  string `json:"file_key"`
 			Duration int    `json:"duration"` // milliseconds
 		}
-		if err := json.Unmarshal([]byte(*msg.Content), &audioBody); err != nil {
+		if err := json.Unmarshal([]byte(content), &audioBody); err != nil {
 			slog.Error(p.tag()+": failed to parse audio content", "error", err)
-			return nil
+			return
 		}
 		slog.Debug(p.tag()+": audio received", "user", userID, "file_key", audioBody.FileKey)
 		audioData, err := p.downloadResource(messageID, audioBody.FileKey, "file")
 		if err != nil {
 			slog.Error(p.tag()+": download audio failed", "error", err)
-			return nil
+			return
 		}
 		p.handler(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
@@ -724,10 +744,10 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		})
 
 	case "post":
-		textParts, images := p.parsePostContent(messageID, *msg.Content)
-		text := stripMentions(strings.Join(textParts, "\n"), msg.Mentions, p.botOpenID)
+		textParts, images := p.parsePostContent(messageID, content)
+		text := stripMentions(strings.Join(textParts, "\n"), mentions, p.botOpenID)
 		if text == "" && len(images) == 0 {
-			return nil
+			return
 		}
 		p.handler(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
@@ -742,15 +762,15 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 			FileKey  string `json:"file_key"`
 			FileName string `json:"file_name"`
 		}
-		if err := json.Unmarshal([]byte(*msg.Content), &fileBody); err != nil {
+		if err := json.Unmarshal([]byte(content), &fileBody); err != nil {
 			slog.Error(p.tag()+": failed to parse file content", "error", err)
-			return nil
+			return
 		}
 		slog.Info(p.tag()+": file received", "user", userID, "file_key", fileBody.FileKey, "file_name", fileBody.FileName)
 		fileData, err := p.downloadResource(messageID, fileBody.FileKey, "file")
 		if err != nil {
 			slog.Error(p.tag()+": download file failed", "error", err)
-			return nil
+			return
 		}
 		slog.Debug(p.tag()+": file downloaded", "file_name", fileBody.FileName, "size", len(fileData))
 		mimeType := detectMimeType(fileData)
@@ -770,7 +790,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		text, images, files := p.parseMergeForward(messageID)
 		if text == "" && len(images) == 0 && len(files) == 0 {
 			slog.Warn(p.tag()+": merge_forward produced no content", "message_id", messageID)
-			return nil
+			return
 		}
 		coreMsg := &core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
@@ -786,8 +806,6 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 	default:
 		slog.Debug(p.tag()+": ignoring unsupported message type", "type", msgType)
 	}
-
-	return nil
 }
 
 // resolveUserName fetches a user's display name via the Contact API, with caching.
