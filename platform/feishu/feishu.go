@@ -16,6 +16,7 @@ import (
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
+	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 )
@@ -32,6 +33,8 @@ type replyContext struct {
 type Platform struct {
 	appID                 string
 	appSecret             string
+	useInteractiveCard    bool
+	self                  core.Platform
 	reactionEmoji         string
 	allowFrom             string
 	groupReplyAll         bool
@@ -40,9 +43,18 @@ type Platform struct {
 	client                *lark.Client
 	wsClient              *larkws.Client
 	handler               core.MessageHandler
+	cardNavHandler        core.CardNavigationHandler
 	cancel                context.CancelFunc
 	dedup                 core.MessageDedup
 	botOpenID             string
+}
+
+type interactivePlatform struct {
+	*Platform
+}
+
+func (p *Platform) SetCardNavigationHandler(h core.CardNavigationHandler) {
+	p.cardNavHandler = h
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -62,20 +74,39 @@ func New(opts map[string]any) (core.Platform, error) {
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	replyInThread, _ := opts["reply_in_thread"].(bool)
+	useInteractiveCard := true
+	if v, ok := opts["enable_feishu_card"].(bool); ok {
+		useInteractiveCard = v
+	}
 
-	return &Platform{
+	base := &Platform{
 		appID:                 appID,
 		appSecret:             appSecret,
+		useInteractiveCard:    useInteractiveCard,
 		reactionEmoji:         reactionEmoji,
 		allowFrom:             allowFrom,
 		groupReplyAll:         groupReplyAll,
 		shareSessionInChannel: shareSessionInChannel,
 		replyInThread:         replyInThread,
 		client:                lark.NewClient(appID, appSecret),
-	}, nil
+	}
+	if !useInteractiveCard {
+		base.self = base
+		return base, nil
+	}
+	wrapped := &interactivePlatform{Platform: base}
+	base.self = wrapped
+	return wrapped, nil
 }
 
 func (p *Platform) Name() string { return "feishu" }
+
+func (p *Platform) dispatchPlatform() core.Platform {
+	if p.self != nil {
+		return p.self
+	}
+	return p
+}
 
 func (p *Platform) Start(handler core.MessageHandler) error {
 	p.handler = handler
@@ -108,6 +139,9 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		}).
 		OnP2MessageReactionDeletedV1(func(ctx context.Context, event *larkim.P2MessageReactionDeletedV1) error {
 			return nil // ignore reaction removal events (triggered by our own removeReaction)
+		}).
+		OnP2CardActionTrigger(func(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
+			return p.onCardAction(event)
 		})
 
 	p.wsClient = larkws.NewClient(p.appID, p.appSecret,
@@ -125,6 +159,74 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	}()
 
 	return nil
+}
+
+// onCardAction handles card.action.trigger callbacks via the official SDK event dispatcher.
+// Three prefixes are supported:
+//   - nav:/xxx   — render a card page and update the original card in-place
+//   - act:/xxx   — execute an action, then render and update the card in-place
+//   - cmd:/xxx   — legacy: dispatch as a user command (sends a new message)
+func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
+	if event.Event == nil || event.Event.Action == nil {
+		return nil, nil
+	}
+
+	actionVal, _ := event.Event.Action.Value["action"].(string)
+
+	// select_static callbacks put the chosen value in event.Event.Action.Option
+	if actionVal == "" && event.Event.Action.Option != "" {
+		actionVal = event.Event.Action.Option
+	}
+
+	userID := ""
+	if event.Event.Operator != nil {
+		userID = event.Event.Operator.OpenID
+	}
+	chatID := ""
+	messageID := ""
+	if event.Event.Context != nil {
+		chatID = event.Event.Context.OpenChatID
+		messageID = event.Event.Context.OpenMessageID
+	}
+	if chatID == "" {
+		chatID = userID
+	}
+	sessionKey := fmt.Sprintf("feishu:%s:%s", chatID, userID)
+
+	// nav: / act: — synchronous card update
+	if strings.HasPrefix(actionVal, "nav:") || strings.HasPrefix(actionVal, "act:") {
+		if p.cardNavHandler != nil {
+			card := p.cardNavHandler(actionVal, sessionKey)
+			if card != nil {
+				return &callback.CardActionTriggerResponse{
+					Card: &callback.Card{
+						Type: "raw",
+						Data: renderCardMap(card),
+					},
+				}, nil
+			}
+		}
+		slog.Warn("feishu: card nav returned nil, ignoring", "action", actionVal)
+		return nil, nil
+	}
+
+	// cmd: — async command dispatch
+	if strings.HasPrefix(actionVal, "cmd:") {
+		cmdText := strings.TrimPrefix(actionVal, "cmd:")
+		rctx := replyContext{messageID: messageID, chatID: chatID}
+
+		slog.Info("feishu: card action dispatched as command", "cmd", cmdText, "user", userID)
+
+		go p.handler(p.dispatchPlatform(), &core.Message{
+			SessionKey: sessionKey,
+			Platform:   "feishu",
+			UserID:     userID,
+			Content:    cmdText,
+			ReplyCtx:   rctx,
+		})
+	}
+
+	return nil, nil
 }
 
 func (p *Platform) addReaction(messageID string) string {
@@ -269,10 +371,10 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		if text == "" {
 			return nil
 		}
-		p.handler(p, &core.Message{
+		p.handler(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey, Platform: "feishu",
 			MessageID: messageID,
-			UserID: userID, UserName: userName,
+			UserID:    userID, UserName: userName,
 			Content: text, ReplyCtx: rctx,
 		})
 
@@ -289,11 +391,11 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 			slog.Error("feishu: download image failed", "error", err)
 			return nil
 		}
-		p.handler(p, &core.Message{
+		p.handler(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey, Platform: "feishu",
 			MessageID: messageID,
-			UserID: userID, UserName: userName,
-			Images:  []core.ImageAttachment{{MimeType: mimeType, Data: imgData}},
+			UserID:    userID, UserName: userName,
+			Images:   []core.ImageAttachment{{MimeType: mimeType, Data: imgData}},
 			ReplyCtx: rctx,
 		})
 
@@ -312,10 +414,10 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 			slog.Error("feishu: download audio failed", "error", err)
 			return nil
 		}
-		p.handler(p, &core.Message{
+		p.handler(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey, Platform: "feishu",
 			MessageID: messageID,
-			UserID: userID, UserName: userName,
+			UserID:    userID, UserName: userName,
 			Audio: &core.AudioAttachment{
 				MimeType: "audio/opus",
 				Data:     audioData,
@@ -331,10 +433,10 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		if text == "" && len(images) == 0 {
 			return nil
 		}
-		p.handler(p, &core.Message{
+		p.handler(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey, Platform: "feishu",
 			MessageID: messageID,
-			UserID: userID, UserName: userName,
+			UserID:    userID, UserName: userName,
 			Content: text, Images: images,
 			ReplyCtx: rctx,
 		})
@@ -1061,4 +1163,3 @@ func (p *Platform) extractPostParts(messageID string, post *postLang) ([]string,
 	}
 	return textParts, images
 }
-
