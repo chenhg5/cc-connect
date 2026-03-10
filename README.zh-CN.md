@@ -666,6 +666,7 @@ For short single-line messages:
 
 ```bash
 cc-connect daemon install --config ~/.cc-connect/config.toml   # 安装服务
+cc-connect daemon install --work-dir ~/.cc-connect             # 等价写法：指定配置目录
 cc-connect daemon start
 cc-connect daemon stop
 cc-connect daemon restart
@@ -674,7 +675,7 @@ cc-connect daemon logs [-f] [-n N] [--log-file PATH]
 cc-connect daemon uninstall
 ```
 
-**install 参数：** `--log-file PATH`、`--log-max-size N`（MB）、`--work-dir DIR`、`--force`。日志在达到大小限制时自动轮转，保留 1 个备份。
+**install 参数：** `--config PATH`、`--log-file PATH`、`--log-max-size N`（MB）、`--work-dir DIR`、`--force`。`--config` 传入配置文件路径，`--work-dir` 传入包含 `config.toml` 的目录。日志在达到大小限制时自动轮转，保留 1 个备份。
 
 ## 会话管理
 
