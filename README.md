@@ -190,6 +190,7 @@ type = "feishu"
 [projects.platforms.options]
 app_id = "cli_xxxx"
 app_secret = "xxxx"
+# enable_feishu_card = true
 
 # DingTalk
 [[projects.platforms]]
@@ -928,3 +929,4 @@ Thanks to all the people who contributed to this project:
 ## License
 
 MIT
+

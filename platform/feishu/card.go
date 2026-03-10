@@ -1,13 +1,68 @@
 package feishu
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 
 	"github.com/chenhg5/cc-connect/core"
+	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
 func plainText(content string) map[string]any {
 	return map[string]any{"tag": "plain_text", "content": content}
+}
+
+// ReplyCard sends a structured card as a reply to the original message.
+func (p *interactivePlatform) ReplyCard(ctx context.Context, rctx any, card *core.Card) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("feishu: invalid reply context type %T", rctx)
+	}
+
+	cardJSON := renderCard(card)
+	resp, err := p.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
+		MessageId(rc.messageID).
+		Body(larkim.NewReplyMessageReqBodyBuilder().
+			MsgType(larkim.MsgTypeInteractive).
+			Content(cardJSON).
+			Build()).
+		Build())
+	if err != nil {
+		return fmt.Errorf("feishu: reply card api call: %w", err)
+	}
+	if !resp.Success() {
+		return fmt.Errorf("feishu: reply card failed code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	return nil
+}
+
+// SendCard sends a structured card as a new message to the chat.
+func (p *interactivePlatform) SendCard(ctx context.Context, rctx any, card *core.Card) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("feishu: invalid reply context type %T", rctx)
+	}
+	if rc.chatID == "" {
+		return fmt.Errorf("feishu: chatID is empty, cannot send card")
+	}
+
+	cardJSON := renderCard(card)
+	resp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
+		ReceiveIdType(larkim.ReceiveIdTypeChatId).
+		Body(larkim.NewCreateMessageReqBodyBuilder().
+			ReceiveId(rc.chatID).
+			MsgType(larkim.MsgTypeInteractive).
+			Content(cardJSON).
+			Build()).
+		Build())
+	if err != nil {
+		return fmt.Errorf("feishu: send card api call: %w", err)
+	}
+	if !resp.Success() {
+		return fmt.Errorf("feishu: send card failed code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	return nil
 }
 
 // renderCardMap converts a core.Card into the Feishu Interactive Card map
@@ -50,12 +105,12 @@ func renderCardMap(card *core.Card) map[string]any {
 				if btnType == "" {
 					btnType = "default"
 				}
-			action := map[string]any{
-				"tag":   "button",
-				"text":  plainText(btn.Text),
-				"type":  btnType,
-				"value": map[string]string{"action": btn.Value},
-			}
+				action := map[string]any{
+					"tag":   "button",
+					"text":  plainText(btn.Text),
+					"type":  btnType,
+					"value": map[string]string{"action": btn.Value},
+				}
 				if e.Layout == core.CardActionLayoutEqualColumns {
 					action["width"] = "fill"
 				}
@@ -115,29 +170,29 @@ func renderCardMap(card *core.Card) map[string]any {
 						"width":          "auto",
 						"vertical_align": "center",
 						"elements": []map[string]any{
-					{
-							"tag":   "button",
-							"text":  plainText(e.BtnText),
-							"type":  btnType,
-							"value": map[string]string{"action": e.BtnValue},
-						},
+							{
+								"tag":   "button",
+								"text":  plainText(e.BtnText),
+								"type":  btnType,
+								"value": map[string]string{"action": e.BtnValue},
+							},
 						},
 					},
 				},
 			})
 		case core.CardSelect:
-		var options []map[string]any
-		for _, opt := range e.Options {
-			options = append(options, map[string]any{
-				"text":  plainText(opt.Text),
-				"value": opt.Value,
-			})
-		}
-		selectElem := map[string]any{
-			"tag":         "select_static",
-			"placeholder": plainText(e.Placeholder),
-			"options":     options,
-		}
+			var options []map[string]any
+			for _, opt := range e.Options {
+				options = append(options, map[string]any{
+					"text":  plainText(opt.Text),
+					"value": opt.Value,
+				})
+			}
+			selectElem := map[string]any{
+				"tag":         "select_static",
+				"placeholder": plainText(e.Placeholder),
+				"options":     options,
+			}
 			if e.InitValue != "" {
 				selectElem["initial_option"] = e.InitValue
 			}
@@ -146,10 +201,10 @@ func renderCardMap(card *core.Card) map[string]any {
 				"actions": []map[string]any{selectElem},
 			})
 		case core.CardNote:
-		elements = append(elements, map[string]any{
-			"tag":      "note",
-			"elements": []map[string]any{plainText(e.Text)},
-		})
+			elements = append(elements, map[string]any{
+				"tag":      "note",
+				"elements": []map[string]any{plainText(e.Text)},
+			})
 		}
 	}
 

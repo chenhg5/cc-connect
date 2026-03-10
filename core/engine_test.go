@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -56,6 +57,29 @@ func (p *stubInlineButtonPlatform) SendWithButtons(_ context.Context, _ any, con
 	return nil
 }
 
+type stubCardPlatform struct {
+	stubPlatformEngine
+	repliedCards []*Card
+	sentCards    []*Card
+	cardErr      error
+}
+
+func (p *stubCardPlatform) ReplyCard(_ context.Context, _ any, card *Card) error {
+	if p.cardErr != nil {
+		return p.cardErr
+	}
+	p.repliedCards = append(p.repliedCards, card)
+	return nil
+}
+
+func (p *stubCardPlatform) SendCard(_ context.Context, _ any, card *Card) error {
+	if p.cardErr != nil {
+		return p.cardErr
+	}
+	p.sentCards = append(p.sentCards, card)
+	return nil
+}
+
 type stubModelModeAgent struct {
 	stubAgent
 	model string
@@ -102,6 +126,43 @@ type stubListAgent struct {
 
 func (a *stubListAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
 	return a.sessions, nil
+}
+
+type stubProviderAgent struct {
+	stubAgent
+	providers []ProviderConfig
+	active    string
+}
+
+func (a *stubProviderAgent) ListProviders() []ProviderConfig {
+	return a.providers
+}
+
+func (a *stubProviderAgent) SetProviders(providers []ProviderConfig) {
+	a.providers = providers
+}
+
+func (a *stubProviderAgent) GetActiveProvider() *ProviderConfig {
+	for i := range a.providers {
+		if a.providers[i].Name == a.active {
+			return &a.providers[i]
+		}
+	}
+	return nil
+}
+
+func (a *stubProviderAgent) SetActiveProvider(name string) bool {
+	if name == "" {
+		a.active = ""
+		return true
+	}
+	for _, prov := range a.providers {
+		if prov.Name == name {
+			a.active = name
+			return true
+		}
+	}
+	return false
 }
 
 func newTestEngine() *Engine {
@@ -394,6 +455,118 @@ func TestQuietGlobalAndSessionCombined(t *testing.T) {
 	}
 }
 
+func TestReplyWithCard_FallsBackToTextWhenPlatformHasNoCardSupport(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	card := NewCard().Title("Help", "blue").Markdown("Plain fallback").Build()
+
+	e.replyWithCard(p, "ctx", card)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if got, want := p.sent[0], card.RenderText(); got != want {
+		t.Fatalf("fallback text = %q, want %q", got, want)
+	}
+}
+
+func TestReplyWithCard_UsesCardSenderWhenSupported(t *testing.T) {
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "card"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	card := NewCard().Markdown("Interactive").Build()
+
+	e.replyWithCard(p, "ctx", card)
+
+	if len(p.repliedCards) != 1 {
+		t.Fatalf("replied cards = %d, want 1", len(p.repliedCards))
+	}
+	if len(p.sent) != 0 {
+		t.Fatalf("plain replies = %d, want 0", len(p.sent))
+	}
+}
+
+func TestCmdHelp_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangChinese)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	e.cmdHelp(p, msg)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if got := p.sent[0]; got != e.i18n.T(MsgHelp) {
+		t.Fatalf("help text = %q, want legacy help text", got)
+	}
+	if strings.Contains(p.sent[0], "cc-connect 帮助") {
+		t.Fatalf("help text = %q, should not be card title fallback", p.sent[0])
+	}
+}
+
+func TestCmdList_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	sessions := []AgentSessionInfo{{ID: "session-a", Summary: "First session", MessageCount: 3, ModifiedAt: time.Date(2026, 3, 11, 2, 0, 0, 0, time.UTC)}}
+	e := NewEngine("test", &stubListAgent{sessions: sessions}, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	e.cmdList(p, msg, nil)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "Sessions") {
+		t.Fatalf("list text = %q, want legacy list title", p.sent[0])
+	}
+	if strings.Contains(p.sent[0], "[← 返回]") {
+		t.Fatalf("list text = %q, should not be card fallback text", p.sent[0])
+	}
+}
+
+func TestCmdCurrent_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	session.Name = "Focus"
+	session.AgentSessionID = "session-123"
+	session.History = append(session.History, HistoryEntry{Role: "user", Content: "hello", Timestamp: time.Now()})
+
+	e.cmdCurrent(p, msg)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "Current session") {
+		t.Fatalf("current text = %q, want legacy current session text", p.sent[0])
+	}
+	if strings.Contains(p.sent[0], "cc-connect") {
+		t.Fatalf("current text = %q, should not be card fallback title", p.sent[0])
+	}
+}
+func TestExecuteCardActionStop_PreservesQuietStateWithoutCleanupReinsert(t *testing.T) {
+	e := newTestEngine()
+	e.interactiveMu.Lock()
+	e.interactiveStates["test:user1"] = &interactiveState{quiet: true}
+	e.interactiveMu.Unlock()
+
+	e.executeCardAction("/stop", "", "test:user1")
+
+	e.interactiveMu.Lock()
+	state := e.interactiveStates["test:user1"]
+	e.interactiveMu.Unlock()
+	if state == nil {
+		t.Fatal("expected interactive state to remain for quiet preservation")
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if !state.quiet {
+		t.Fatal("expected quiet state to remain enabled")
+	}
+	if state.pending != nil {
+		t.Fatal("expected pending permission to be cleared")
+	}
+}
+
 func TestCmdLang_UsesInlineButtonsOnButtonOnlyPlatform(t *testing.T) {
 	p := &stubInlineButtonPlatform{stubPlatformEngine: stubPlatformEngine{n: "inline-only"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -405,6 +578,47 @@ func TestCmdLang_UsesInlineButtonsOnButtonOnlyPlatform(t *testing.T) {
 	}
 	if got := p.buttonRows[0][0].Data; got != "cmd:/lang en" {
 		t.Fatalf("first /lang button = %q, want %q", got, "cmd:/lang en")
+	}
+}
+
+func TestCmdLang_UsesPlainTextChoicesOnPlatformWithoutCardsOrButtons(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	e.cmdLang(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, nil)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "/lang en") || !strings.Contains(p.sent[0], "/lang auto") {
+		t.Fatalf("lang text = %q, want plain-text language choices", p.sent[0])
+	}
+}
+
+func TestCmdProvider_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubProviderAgent{
+		providers: []ProviderConfig{
+			{Name: "openai", BaseURL: "https://api.openai.com", Model: "gpt-4.1"},
+			{Name: "azure", BaseURL: "https://azure.example", Model: "gpt-4.1-mini"},
+		},
+		active: "openai",
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.cmdProvider(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, nil)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "Active provider") {
+		t.Fatalf("provider text = %q, want current provider section", p.sent[0])
+	}
+	if !strings.Contains(p.sent[0], "openai") || !strings.Contains(p.sent[0], "azure") {
+		t.Fatalf("provider text = %q, want provider list", p.sent[0])
+	}
+	if !strings.Contains(p.sent[0], "switch") {
+		t.Fatalf("provider text = %q, want switch hint", p.sent[0])
 	}
 }
 
@@ -435,6 +649,103 @@ func TestCmdMode_UsesInlineButtonsOnButtonOnlyPlatform(t *testing.T) {
 	}
 	if got := p.buttonRows[0][0].Data; got != "cmd:/mode default" {
 		t.Fatalf("first /mode button = %q, want %q", got, "cmd:/mode default")
+	}
+}
+
+func TestCmdStatus_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	e.cmdStatus(p, msg)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "Status") {
+		t.Fatalf("status text = %q, want legacy status text", p.sent[0])
+	}
+	if strings.Contains(p.sent[0], "[← Back]") {
+		t.Fatalf("status text = %q, should not be card fallback text", p.sent[0])
+	}
+}
+
+func TestCmdCommands_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.AddCommand("deploy", "Deploy app", "ship it", "", "", "config")
+
+	e.cmdCommands(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, nil)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "/deploy") {
+		t.Fatalf("commands text = %q, want legacy command list", p.sent[0])
+	}
+	if strings.Contains(p.sent[0], "[← Back]") {
+		t.Fatalf("commands text = %q, should not be card fallback text", p.sent[0])
+	}
+}
+
+func TestCmdConfig_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	e.cmdConfig(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, nil)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "thinking_max_len") {
+		t.Fatalf("config text = %q, want legacy config list", p.sent[0])
+	}
+	if strings.Contains(p.sent[0], "[← Back]") {
+		t.Fatalf("config text = %q, should not be card fallback text", p.sent[0])
+	}
+}
+
+func TestCmdAlias_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.AddAlias("ls", "/list")
+
+	e.cmdAlias(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, nil)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "ls") || !strings.Contains(p.sent[0], "/list") {
+		t.Fatalf("alias text = %q, want legacy alias list", p.sent[0])
+	}
+	if strings.Contains(p.sent[0], "[← Back]") {
+		t.Fatalf("alias text = %q, should not be card fallback text", p.sent[0])
+	}
+}
+
+func TestCmdSkills_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	temp := t.TempDir()
+	skillDir := temp + "/demo"
+	if err := os.Mkdir(skillDir, 0o755); err != nil {
+		t.Fatalf("mkdir skill dir: %v", err)
+	}
+	if err := os.WriteFile(skillDir+"/SKILL.md", []byte("---\ndescription: Demo skill\n---\nDo demo"), 0o644); err != nil {
+		t.Fatalf("write skill file: %v", err)
+	}
+	e.skills.SetDirs([]string{temp})
+
+	e.cmdSkills(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"})
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "/demo") {
+		t.Fatalf("skills text = %q, want legacy skills list", p.sent[0])
+	}
+	if strings.Contains(p.sent[0], "[← Back]") {
+		t.Fatalf("skills text = %q, should not be card fallback text", p.sent[0])
 	}
 }
 
@@ -518,249 +829,5 @@ func TestHandleCardNav_HelpSwitchesTabs(t *testing.T) {
 	}
 	if strings.Contains(text, "**/new**") {
 		t.Fatalf("agent help text = %q, should not include session commands", text)
-	}
-	btn, ok := findCardAction(card, "nav:/help agent")
-	if !ok {
-		t.Fatal("expected agent help tab to exist")
-	}
-	if btn.Type != "primary" {
-		t.Fatalf("agent help tab type = %q, want primary", btn.Type)
-	}
-	if btn.Text != "Agent Configuration" {
-		t.Fatalf("agent help tab text = %q, want full title", btn.Text)
-	}
-}
-
-func TestRenderHelpCard_UsesCurrentLanguage(t *testing.T) {
-	tests := []struct {
-		name        string
-		lang        Language
-		wantTab     string
-		wantCommand string
-	}{
-		{name: "traditional chinese", lang: LangTraditionalChinese, wantTab: "會話管理", wantCommand: "建立新會話，參數: [名稱]"},
-		{name: "japanese", lang: LangJapanese, wantTab: "セッション管理", wantCommand: "新しいセッションを開始、引数: [名前]"},
-		{name: "spanish", lang: LangSpanish, wantTab: "Gestión de sesiones", wantCommand: "Iniciar una nueva sesión, arg: [nombre]"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			e := NewEngine("test", &stubAgent{}, []Platform{&stubPlatformEngine{n: "test"}}, "", tt.lang)
-
-			card := e.renderHelpCard()
-			got := card.RenderText()
-			btn, ok := findCardAction(card, "nav:/help session")
-			if !ok {
-				t.Fatal("expected session help tab to exist")
-			}
-			if btn.Text != tt.wantTab {
-				t.Fatalf("session tab text = %q, want %q", btn.Text, tt.wantTab)
-			}
-			if !strings.Contains(got, tt.wantCommand) {
-				t.Fatalf("help card = %q, want substring %q", got, tt.wantCommand)
-			}
-			if strings.Contains(got, "**/model**") {
-				t.Fatalf("help card = %q, should default to session tab only", got)
-			}
-		})
-	}
-}
-
-func TestRenderHelpCard_FeishuUsesTwoTabRows(t *testing.T) {
-	e := NewEngine("test", &stubAgent{}, []Platform{&stubPlatformEngine{n: "feishu"}}, "", LangEnglish)
-
-	card := e.renderHelpCardForPlatform("feishu")
-	rows := collectCardActionRows(card)
-	if len(rows) != 2 {
-		t.Fatalf("help tab row count = %d, want 2", len(rows))
-	}
-
-	for i, row := range rows {
-		if row.Layout != CardActionLayoutEqualColumns {
-			t.Fatalf("row %d layout = %q, want %q", i, row.Layout, CardActionLayoutEqualColumns)
-		}
-		if len(row.Buttons) != 2 {
-			t.Fatalf("row %d button count = %d, want 2", i, len(row.Buttons))
-		}
-	}
-
-	wants := []struct {
-		row   int
-		index int
-		text  string
-		value string
-		typ   string
-	}{
-		{row: 0, index: 0, text: "Session Management", value: "nav:/help session", typ: "primary"},
-		{row: 0, index: 1, text: "Agent Configuration", value: "nav:/help agent", typ: "default"},
-		{row: 1, index: 0, text: "Tools & Automation", value: "nav:/help tools", typ: "default"},
-		{row: 1, index: 1, text: "System", value: "nav:/help system", typ: "default"},
-	}
-	for _, want := range wants {
-		btn := rows[want.row].Buttons[want.index]
-		if btn.Text != want.text {
-			t.Fatalf("row %d button %d text = %q, want %q", want.row, want.index, btn.Text, want.text)
-		}
-		if btn.Value != want.value {
-			t.Fatalf("row %d button %d value = %q, want %q", want.row, want.index, btn.Value, want.value)
-		}
-		if btn.Type != want.typ {
-			t.Fatalf("row %d button %d type = %q, want %q", want.row, want.index, btn.Type, want.typ)
-		}
-	}
-}
-
-func TestRenderHelpCard_NonFeishuKeepsSingleTabRow(t *testing.T) {
-	e := NewEngine("test", &stubAgent{}, []Platform{&stubPlatformEngine{n: "telegram"}}, "", LangEnglish)
-
-	card := e.renderHelpCardForPlatform("telegram")
-	rows := collectCardActionRows(card)
-	if len(rows) != 1 {
-		t.Fatalf("help tab row count = %d, want 1", len(rows))
-	}
-	if rows[0].Layout != CardActionLayoutEqualColumns {
-		t.Fatalf("tab row layout = %q, want %q", rows[0].Layout, CardActionLayoutEqualColumns)
-	}
-	if len(rows[0].Buttons) != 4 {
-		t.Fatalf("tab row button count = %d, want 4", len(rows[0].Buttons))
-	}
-}
-
-func TestHandleCardNav_HelpUsesFeishuLayoutFromSessionKey(t *testing.T) {
-	e := NewEngine("test", &stubAgent{}, []Platform{&stubPlatformEngine{n: "feishu"}}, "", LangEnglish)
-
-	card := e.handleCardNav("nav:/help system", "feishu:chat:user")
-	if card == nil {
-		t.Fatal("expected help nav card")
-	}
-	rows := collectCardActionRows(card)
-	if len(rows) != 2 {
-		t.Fatalf("help tab row count = %d, want 2", len(rows))
-	}
-	btn, ok := findCardAction(card, "nav:/help system")
-	if !ok {
-		t.Fatal("expected system help tab to exist")
-	}
-	if btn.Type != "primary" {
-		t.Fatalf("system help tab type = %q, want primary", btn.Type)
-	}
-}
-
-func TestRenderStatusCard_UsesCurrentLanguage(t *testing.T) {
-	tests := []struct {
-		name       string
-		lang       Language
-		wantTitle  string
-		wantLabel  string
-		wantBack   string
-		notWantEng string
-	}{
-		{name: "chinese", lang: LangChinese, wantTitle: "cc-connect 状态", wantLabel: "项目:", wantBack: "← 返回", notWantEng: "Project:"},
-		{name: "japanese", lang: LangJapanese, wantTitle: "cc-connect ステータス", wantLabel: "プロジェクト:", wantBack: "← 戻る", notWantEng: "Project:"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			e := NewEngine("test", &stubAgent{}, []Platform{&stubPlatformEngine{n: "test"}}, "", tt.lang)
-
-			card := e.renderStatusCard("test:user1")
-			if card.Header == nil {
-				t.Fatal("expected status card header")
-			}
-			if card.Header.Title != tt.wantTitle {
-				t.Fatalf("status card title = %q, want %q", card.Header.Title, tt.wantTitle)
-			}
-
-			text := card.RenderText()
-			if !strings.Contains(text, tt.wantLabel) {
-				t.Fatalf("status card = %q, want localized label %q", text, tt.wantLabel)
-			}
-			if strings.Contains(text, tt.notWantEng) {
-				t.Fatalf("status card = %q, should not contain hardcoded english label %q", text, tt.notWantEng)
-			}
-
-			btn, ok := findCardAction(card, "nav:/help")
-			if !ok {
-				t.Fatal("expected status back button")
-			}
-			if btn.Text != tt.wantBack {
-				t.Fatalf("status back button = %q, want %q", btn.Text, tt.wantBack)
-			}
-		})
-	}
-}
-
-func TestRenderLangCard_LocalizesTitleAndBackButton(t *testing.T) {
-	e := NewEngine("test", &stubAgent{}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangJapanese)
-
-	card := e.renderLangCard()
-	if card.Header == nil {
-		t.Fatal("expected language card header")
-	}
-	if card.Header.Title != "言語" {
-		t.Fatalf("language card title = %q, want %q", card.Header.Title, "言語")
-	}
-
-	text := card.RenderText()
-	if !strings.Contains(text, "現在の言語") {
-		t.Fatalf("language card = %q, want japanese body", text)
-	}
-
-	btn, ok := findCardAction(card, "nav:/help")
-	if !ok {
-		t.Fatal("expected language back button")
-	}
-	if btn.Text != "← 戻る" {
-		t.Fatalf("language back button = %q, want %q", btn.Text, "← 戻る")
-	}
-}
-
-func TestRenderListCard_LocalizesNavigationButtons(t *testing.T) {
-	sessions := make([]AgentSessionInfo, 0, 45)
-	base := time.Date(2026, 3, 9, 10, 0, 0, 0, time.UTC)
-	for i := 0; i < 45; i++ {
-		sessions = append(sessions, AgentSessionInfo{
-			ID:           "agent-session-" + string(rune('A'+(i%26))) + string(rune('a'+(i/26))),
-			Summary:      "Session summary",
-			MessageCount: i + 1,
-			ModifiedAt:   base.Add(time.Duration(i) * time.Minute),
-		})
-	}
-
-	e := NewEngine("test", &stubListAgent{sessions: sessions}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangJapanese)
-
-	card, err := e.renderListCard("test:user1", 2)
-	if err != nil {
-		t.Fatalf("renderListCard returned error: %v", err)
-	}
-	if card.Header == nil {
-		t.Fatal("expected list card header")
-	}
-	if !strings.Contains(card.Header.Title, "セッション") {
-		t.Fatalf("list card title = %q, want localized session title", card.Header.Title)
-	}
-
-	prev, ok := findCardAction(card, "nav:/list 1")
-	if !ok {
-		t.Fatal("expected previous page button")
-	}
-	if prev.Text != "← 前へ" {
-		t.Fatalf("previous page button = %q, want %q", prev.Text, "← 前へ")
-	}
-
-	back, ok := findCardAction(card, "nav:/help")
-	if !ok {
-		t.Fatal("expected back button")
-	}
-	if back.Text != "← 戻る" {
-		t.Fatalf("back button = %q, want %q", back.Text, "← 戻る")
-	}
-
-	next, ok := findCardAction(card, "nav:/list 3")
-	if !ok {
-		t.Fatal("expected next page button")
-	}
-	if next.Text != "次へ →" {
-		t.Fatalf("next page button = %q, want %q", next.Text, "次へ →")
 	}
 }

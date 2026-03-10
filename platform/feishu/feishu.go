@@ -33,6 +33,8 @@ type replyContext struct {
 type Platform struct {
 	appID                 string
 	appSecret             string
+	useInteractiveCard    bool
+	self                  core.Platform
 	reactionEmoji         string
 	allowFrom             string
 	groupReplyAll         bool
@@ -45,6 +47,10 @@ type Platform struct {
 	cancel                context.CancelFunc
 	dedup                 core.MessageDedup
 	botOpenID             string
+}
+
+type interactivePlatform struct {
+	*Platform
 }
 
 func (p *Platform) SetCardNavigationHandler(h core.CardNavigationHandler) {
@@ -68,20 +74,39 @@ func New(opts map[string]any) (core.Platform, error) {
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	replyInThread, _ := opts["reply_in_thread"].(bool)
+	useInteractiveCard := true
+	if v, ok := opts["enable_feishu_card"].(bool); ok {
+		useInteractiveCard = v
+	}
 
-	return &Platform{
+	base := &Platform{
 		appID:                 appID,
 		appSecret:             appSecret,
+		useInteractiveCard:    useInteractiveCard,
 		reactionEmoji:         reactionEmoji,
 		allowFrom:             allowFrom,
 		groupReplyAll:         groupReplyAll,
 		shareSessionInChannel: shareSessionInChannel,
 		replyInThread:         replyInThread,
 		client:                lark.NewClient(appID, appSecret),
-	}, nil
+	}
+	if !useInteractiveCard {
+		base.self = base
+		return base, nil
+	}
+	wrapped := &interactivePlatform{Platform: base}
+	base.self = wrapped
+	return wrapped, nil
 }
 
 func (p *Platform) Name() string { return "feishu" }
+
+func (p *Platform) dispatchPlatform() core.Platform {
+	if p.self != nil {
+		return p.self
+	}
+	return p
+}
 
 func (p *Platform) Start(handler core.MessageHandler) error {
 	p.handler = handler
@@ -192,7 +217,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 
 		slog.Info("feishu: card action dispatched as command", "cmd", cmdText, "user", userID)
 
-		go p.handler(p, &core.Message{
+		go p.handler(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey,
 			Platform:   "feishu",
 			UserID:     userID,
@@ -346,10 +371,10 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		if text == "" {
 			return nil
 		}
-		p.handler(p, &core.Message{
+		p.handler(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey, Platform: "feishu",
 			MessageID: messageID,
-			UserID: userID, UserName: userName,
+			UserID:    userID, UserName: userName,
 			Content: text, ReplyCtx: rctx,
 		})
 
@@ -366,11 +391,11 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 			slog.Error("feishu: download image failed", "error", err)
 			return nil
 		}
-		p.handler(p, &core.Message{
+		p.handler(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey, Platform: "feishu",
 			MessageID: messageID,
-			UserID: userID, UserName: userName,
-			Images:  []core.ImageAttachment{{MimeType: mimeType, Data: imgData}},
+			UserID:    userID, UserName: userName,
+			Images:   []core.ImageAttachment{{MimeType: mimeType, Data: imgData}},
 			ReplyCtx: rctx,
 		})
 
@@ -389,10 +414,10 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 			slog.Error("feishu: download audio failed", "error", err)
 			return nil
 		}
-		p.handler(p, &core.Message{
+		p.handler(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey, Platform: "feishu",
 			MessageID: messageID,
-			UserID: userID, UserName: userName,
+			UserID:    userID, UserName: userName,
 			Audio: &core.AudioAttachment{
 				MimeType: "audio/opus",
 				Data:     audioData,
@@ -408,10 +433,10 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		if text == "" && len(images) == 0 {
 			return nil
 		}
-		p.handler(p, &core.Message{
+		p.handler(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey, Platform: "feishu",
 			MessageID: messageID,
-			UserID: userID, UserName: userName,
+			UserID:    userID, UserName: userName,
 			Content: text, Images: images,
 			ReplyCtx: rctx,
 		})
@@ -479,58 +504,6 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	}
 	if !resp.Success() {
 		return fmt.Errorf("feishu: send failed code=%d msg=%s", resp.Code, resp.Msg)
-	}
-	return nil
-}
-
-// ReplyCard sends a structured card as a reply to the original message.
-func (p *Platform) ReplyCard(ctx context.Context, rctx any, card *core.Card) error {
-	rc, ok := rctx.(replyContext)
-	if !ok {
-		return fmt.Errorf("feishu: invalid reply context type %T", rctx)
-	}
-
-	cardJSON := renderCard(card)
-	resp, err := p.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
-		MessageId(rc.messageID).
-		Body(larkim.NewReplyMessageReqBodyBuilder().
-			MsgType(larkim.MsgTypeInteractive).
-			Content(cardJSON).
-			Build()).
-		Build())
-	if err != nil {
-		return fmt.Errorf("feishu: reply card api call: %w", err)
-	}
-	if !resp.Success() {
-		return fmt.Errorf("feishu: reply card failed code=%d msg=%s", resp.Code, resp.Msg)
-	}
-	return nil
-}
-
-// SendCard sends a structured card as a new message to the chat.
-func (p *Platform) SendCard(ctx context.Context, rctx any, card *core.Card) error {
-	rc, ok := rctx.(replyContext)
-	if !ok {
-		return fmt.Errorf("feishu: invalid reply context type %T", rctx)
-	}
-	if rc.chatID == "" {
-		return fmt.Errorf("feishu: chatID is empty, cannot send card")
-	}
-
-	cardJSON := renderCard(card)
-	resp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
-		ReceiveIdType(larkim.ReceiveIdTypeChatId).
-		Body(larkim.NewCreateMessageReqBodyBuilder().
-			ReceiveId(rc.chatID).
-			MsgType(larkim.MsgTypeInteractive).
-			Content(cardJSON).
-			Build()).
-		Build())
-	if err != nil {
-		return fmt.Errorf("feishu: send card api call: %w", err)
-	}
-	if !resp.Success() {
-		return fmt.Errorf("feishu: send card failed code=%d msg=%s", resp.Code, resp.Msg)
 	}
 	return nil
 }
@@ -1190,4 +1163,3 @@ func (p *Platform) extractPostParts(messageID string, post *postLang) ([]string,
 	}
 	return textParts, images
 }
-
