@@ -248,6 +248,10 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		return nil
 	}
 
+	// Capture content before going async — the SDK may reuse the event object.
+	content := *msg.Content
+	mentions := msg.Mentions
+
 	var sessionKey string
 	if p.shareSessionInChannel {
 		sessionKey = fmt.Sprintf("feishu:%s", chatID)
@@ -256,18 +260,31 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 	}
 	rctx := replyContext{messageID: messageID, chatID: chatID}
 
+	// Dispatch message handling asynchronously so the SDK event loop is not
+	// blocked by IO-heavy operations (image/audio download, handler HTTP calls).
+	// The dedup and old-message checks above remain synchronous to guarantee
+	// correctness before spawning the goroutine.
+	go p.dispatchMessage(msgType, content, mentions, messageID, sessionKey, userID, userName, rctx)
+
+	return nil
+}
+
+// dispatchMessage handles the message content parsing, media download, and
+// handler invocation. It runs in its own goroutine so that onMessage returns
+// quickly and does not block the SDK event loop.
+func (p *Platform) dispatchMessage(msgType, content string, mentions []*larkim.MentionEvent, messageID, sessionKey, userID, userName string, rctx replyContext) {
 	switch msgType {
 	case "text":
 		var textBody struct {
 			Text string `json:"text"`
 		}
-		if err := json.Unmarshal([]byte(*msg.Content), &textBody); err != nil {
+		if err := json.Unmarshal([]byte(content), &textBody); err != nil {
 			slog.Error("feishu: failed to parse text content", "error", err)
-			return nil
+			return
 		}
-		text := stripMentions(textBody.Text, msg.Mentions)
+		text := stripMentions(textBody.Text, mentions)
 		if text == "" {
-			return nil
+			return
 		}
 		p.handler(p, &core.Message{
 			SessionKey: sessionKey, Platform: "feishu",
@@ -280,14 +297,14 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		var imgBody struct {
 			ImageKey string `json:"image_key"`
 		}
-		if err := json.Unmarshal([]byte(*msg.Content), &imgBody); err != nil {
+		if err := json.Unmarshal([]byte(content), &imgBody); err != nil {
 			slog.Error("feishu: failed to parse image content", "error", err)
-			return nil
+			return
 		}
 		imgData, mimeType, err := p.downloadImage(messageID, imgBody.ImageKey)
 		if err != nil {
 			slog.Error("feishu: download image failed", "error", err)
-			return nil
+			return
 		}
 		p.handler(p, &core.Message{
 			SessionKey: sessionKey, Platform: "feishu",
@@ -302,15 +319,15 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 			FileKey  string `json:"file_key"`
 			Duration int    `json:"duration"` // milliseconds
 		}
-		if err := json.Unmarshal([]byte(*msg.Content), &audioBody); err != nil {
+		if err := json.Unmarshal([]byte(content), &audioBody); err != nil {
 			slog.Error("feishu: failed to parse audio content", "error", err)
-			return nil
+			return
 		}
 		slog.Debug("feishu: audio received", "user", userID, "file_key", audioBody.FileKey)
 		audioData, err := p.downloadResource(messageID, audioBody.FileKey, "file")
 		if err != nil {
 			slog.Error("feishu: download audio failed", "error", err)
-			return nil
+			return
 		}
 		p.handler(p, &core.Message{
 			SessionKey: sessionKey, Platform: "feishu",
@@ -326,10 +343,10 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		})
 
 	case "post":
-		textParts, images := p.parsePostContent(messageID, *msg.Content)
-		text := stripMentions(strings.Join(textParts, "\n"), msg.Mentions)
+		textParts, images := p.parsePostContent(messageID, content)
+		text := stripMentions(strings.Join(textParts, "\n"), mentions)
 		if text == "" && len(images) == 0 {
-			return nil
+			return
 		}
 		p.handler(p, &core.Message{
 			SessionKey: sessionKey, Platform: "feishu",
@@ -342,8 +359,6 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 	default:
 		slog.Debug("feishu: ignoring unsupported message type", "type", msgType)
 	}
-
-	return nil
 }
 
 func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
