@@ -695,12 +695,15 @@ func summarizeInput(tool string, input any) string {
 func findProjectDir(homeDir, absWorkDir string) string {
 	projectsBase := filepath.Join(homeDir, ".claude", "projects")
 
-	// Build candidate keys: different ways Claude Code might encode the path
+	// Build candidate keys: different ways Claude Code might encode the path.
+	// Claude Code replaces path separators, colons, and underscores with "-".
 	candidates := []string{
 		// Unix-style: replace OS separator with "-"
 		strings.ReplaceAll(absWorkDir, string(filepath.Separator), "-"),
 		// Windows: replace both "\" and ":" with "-"
 		strings.NewReplacer("/", "-", "\\", "-", ":", "-").Replace(absWorkDir),
+		// Claude Code also replaces underscores with "-"
+		strings.NewReplacer("/", "-", "\\", "-", ":", "-", "_", "-").Replace(absWorkDir),
 	}
 	// Also try with forward slashes (config might use forward slashes on Windows)
 	fwd := strings.ReplaceAll(absWorkDir, "\\", "/")
@@ -720,7 +723,7 @@ func findProjectDir(homeDir, absWorkDir string) string {
 		return ""
 	}
 
-	normWork := strings.ToLower(strings.NewReplacer("/", "-", "\\", "-", ":", "-").Replace(absWorkDir))
+	normWork := strings.ToLower(strings.NewReplacer("/", "-", "\\", "-", ":", "-", "_", "-").Replace(absWorkDir))
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue

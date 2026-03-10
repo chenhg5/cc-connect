@@ -34,6 +34,8 @@ type geminiSession struct {
 	cancel   context.CancelFunc
 	wg       sync.WaitGroup
 	alive    atomic.Bool
+
+	pendingMsgs []string // buffered assistant messages awaiting classification
 }
 
 func newGeminiSession(ctx context.Context, cmd, workDir, model, mode, resumeID string, extraEnv []string) (*geminiSession, error) {
@@ -176,6 +178,8 @@ func (gs *geminiSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf
 			continue
 		}
 
+		slog.Debug("geminiSession: raw", "line", truncate(line, 500))
+
 		var raw map[string]any
 		if err := json.Unmarshal([]byte(line), &raw); err != nil {
 			slog.Debug("geminiSession: non-JSON line", "line", line)
@@ -244,25 +248,17 @@ func (gs *geminiSession) handleInit(raw map[string]any) {
 func (gs *geminiSession) handleMessage(raw map[string]any) {
 	role, _ := raw["role"].(string)
 	content, _ := raw["content"].(string)
-	delta, _ := raw["delta"].(bool)
 
-	if role == "user" {
+	if role == "user" || content == "" {
 		return
 	}
 
-	// assistant message (may be delta or full)
-	if content != "" {
-		_ = delta // both delta and full messages are streamed as text events
-		evt := core.Event{Type: core.EventText, Content: content}
-		select {
-		case gs.events <- evt:
-		case <-gs.ctx.Done():
-			return
-		}
-	}
+	gs.pendingMsgs = append(gs.pendingMsgs, content)
 }
 
 func (gs *geminiSession) handleToolUse(raw map[string]any) {
+	gs.flushPendingAsThinking()
+
 	toolName, _ := raw["tool_name"].(string)
 	toolID, _ := raw["tool_id"].(string)
 	params, _ := raw["parameters"].(map[string]any)
@@ -321,6 +317,8 @@ func (gs *geminiSession) handleError(raw map[string]any) {
 }
 
 func (gs *geminiSession) handleResult(raw map[string]any) {
+	gs.flushPendingAsText()
+
 	status, _ := raw["status"].(string)
 
 	var errMsg string
@@ -346,6 +344,36 @@ func (gs *geminiSession) handleResult(raw map[string]any) {
 		case gs.events <- evt:
 		case <-gs.ctx.Done():
 			return
+		}
+	}
+}
+
+func (gs *geminiSession) flushPendingAsThinking() {
+	if len(gs.pendingMsgs) == 0 {
+		return
+	}
+	text := strings.Join(gs.pendingMsgs, "")
+	gs.pendingMsgs = gs.pendingMsgs[:0]
+	if text != "" {
+		evt := core.Event{Type: core.EventThinking, Content: text}
+		select {
+		case gs.events <- evt:
+		case <-gs.ctx.Done():
+		}
+	}
+}
+
+func (gs *geminiSession) flushPendingAsText() {
+	if len(gs.pendingMsgs) == 0 {
+		return
+	}
+	text := strings.Join(gs.pendingMsgs, "")
+	gs.pendingMsgs = gs.pendingMsgs[:0]
+	if text != "" {
+		evt := core.Event{Type: core.EventText, Content: text}
+		select {
+		case gs.events <- evt:
+		case <-gs.ctx.Done():
 		}
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -43,34 +44,10 @@ func runDaemon(args []string) {
 // ── install ─────────────────────────────────────────────────
 
 func daemonInstall(args []string) {
-	var cfg daemon.Config
-	var force bool
-
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--log-file":
-			i++
-			if i < len(args) {
-				cfg.LogFile = args[i]
-			}
-		case "--log-max-size":
-			i++
-			if i < len(args) {
-				if mb, err := strconv.Atoi(args[i]); err == nil {
-					cfg.LogMaxSize = int64(mb) * 1024 * 1024
-				}
-			}
-		case "--work-dir":
-			i++
-			if i < len(args) {
-				cfg.WorkDir = args[i]
-			}
-		case "--force":
-			force = true
-		default:
-			fmt.Fprintf(os.Stderr, "Unknown flag: %s\n", args[i])
-			os.Exit(1)
-		}
+	cfg, force, err := parseDaemonInstallArgs(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 
 	if err := daemon.Resolve(&cfg); err != nil {
@@ -81,7 +58,7 @@ func daemonInstall(args []string) {
 	configPath := cfg.WorkDir + "/config.toml"
 	if _, err := os.Stat(configPath); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: config.toml not found in %s\n", cfg.WorkDir)
-		fmt.Fprintf(os.Stderr, "  Use --work-dir to specify the directory containing config.toml\n")
+		fmt.Fprintf(os.Stderr, "  Use --work-dir to specify the config directory or --config to point to the config file\n")
 		os.Exit(1)
 	}
 
@@ -126,6 +103,78 @@ func daemonInstall(args []string) {
 	fmt.Println("  cc-connect daemon restart   - Restart")
 	fmt.Println("  cc-connect daemon stop      - Stop")
 	fmt.Println("  cc-connect daemon uninstall - Remove")
+}
+
+func parseDaemonInstallArgs(args []string) (daemon.Config, bool, error) {
+	var cfg daemon.Config
+	var force bool
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--force":
+			force = true
+		case arg == "--log-file":
+			value, next, err := daemonInstallFlagValue(args, i, "--log-file")
+			if err != nil {
+				return daemon.Config{}, false, err
+			}
+			cfg.LogFile = value
+			i = next
+		case strings.HasPrefix(arg, "--log-file="):
+			cfg.LogFile = strings.TrimPrefix(arg, "--log-file=")
+		case arg == "--log-max-size":
+			value, next, err := daemonInstallFlagValue(args, i, "--log-max-size")
+			if err != nil {
+				return daemon.Config{}, false, err
+			}
+			mb, err := strconv.Atoi(value)
+			if err != nil {
+				return daemon.Config{}, false, fmt.Errorf("invalid value for --log-max-size: %s", value)
+			}
+			cfg.LogMaxSize = int64(mb) * 1024 * 1024
+			i = next
+		case strings.HasPrefix(arg, "--log-max-size="):
+			value := strings.TrimPrefix(arg, "--log-max-size=")
+			mb, err := strconv.Atoi(value)
+			if err != nil {
+				return daemon.Config{}, false, fmt.Errorf("invalid value for --log-max-size: %s", value)
+			}
+			cfg.LogMaxSize = int64(mb) * 1024 * 1024
+		case arg == "--work-dir":
+			value, next, err := daemonInstallFlagValue(args, i, "--work-dir")
+			if err != nil {
+				return daemon.Config{}, false, err
+			}
+			cfg.WorkDir = value
+			i = next
+		case strings.HasPrefix(arg, "--work-dir="):
+			cfg.WorkDir = strings.TrimPrefix(arg, "--work-dir=")
+		case arg == "--config" || arg == "-config":
+			value, next, err := daemonInstallFlagValue(args, i, arg)
+			if err != nil {
+				return daemon.Config{}, false, err
+			}
+			cfg.WorkDir = filepath.Dir(value)
+			i = next
+		case strings.HasPrefix(arg, "--config="):
+			cfg.WorkDir = filepath.Dir(strings.TrimPrefix(arg, "--config="))
+		case strings.HasPrefix(arg, "-config="):
+			cfg.WorkDir = filepath.Dir(strings.TrimPrefix(arg, "-config="))
+		default:
+			return daemon.Config{}, false, fmt.Errorf("Unknown flag: %s", arg)
+		}
+	}
+
+	return cfg, force, nil
+}
+
+func daemonInstallFlagValue(args []string, index int, flagName string) (string, int, error) {
+	next := index + 1
+	if next >= len(args) {
+		return "", index, fmt.Errorf("missing value for %s", flagName)
+	}
+	return args[next], next, nil
 }
 
 // ── uninstall ───────────────────────────────────────────────
@@ -350,6 +399,7 @@ Commands:
   logs        View log output
 
 Install flags:
+  --config PATH         Path to config.toml (uses its parent as work dir)
   --log-file PATH       Log file path (default: ~/.cc-connect/logs/cc-connect.log)
   --log-max-size N      Max log file size in MB (default: 10)
   --work-dir DIR        Directory containing config.toml (default: current dir)

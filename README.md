@@ -715,6 +715,7 @@ Run cc-connect as a background service managed by the OS init system (Linux syst
 
 ```bash
 cc-connect daemon install --config ~/.cc-connect/config.toml   # install service
+cc-connect daemon install --work-dir ~/.cc-connect             # same, using config dir
 cc-connect daemon start
 cc-connect daemon stop
 cc-connect daemon restart
@@ -723,7 +724,7 @@ cc-connect daemon logs [-f] [-n N] [--log-file PATH]
 cc-connect daemon uninstall
 ```
 
-**Install flags:** `--log-file PATH`, `--log-max-size N` (MB), `--work-dir DIR`, `--force`. Logs auto-rotate at the size limit and keep one backup.
+**Install flags:** `--config PATH`, `--log-file PATH`, `--log-max-size N` (MB), `--work-dir DIR`, `--force`. `--config` points to a config file; `--work-dir` points to the directory containing `config.toml`. Logs auto-rotate at the size limit and keep one backup.
 
 ## Session Management
 
@@ -748,6 +749,14 @@ During a session, the agent may request tool permissions. Reply **allow** / **de
 ## Multi-Bot Relay
 
 cc-connect supports cross-platform bot communication, enabling multiple AI agents to collaborate in a single group chat.
+
+<p align="center">
+  <img src="docs/images/screenshot/claudecode_to_cursor_discord_1.png" alt="Multi-Bot Relay Demo 1" width="45%" />
+  <img src="docs/images/screenshot/claudecode_to_cursor_discord_2.png" alt="Multi-Bot Relay Demo 2" width="45%" />
+</p>
+<p align="center">
+  <em>Claude Code & Cursor Agent chatting in Discord — Multi-Agent Collaboration</em>
+</p>
 
 ### Group Chat Binding
 
@@ -904,6 +913,16 @@ Thanks to all the people who contributed to this project:
 
 <a href="https://github.com/chenhg5/cc-connect/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=chenhg5/cc-connect" />
+</a>
+
+## Star History
+
+<a href="https://www.star-history.com/#chenhg5/cc-connect&Date">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=chenhg5/cc-connect&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=chenhg5/cc-connect&type=Date" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=chenhg5/cc-connect&type=Date" />
+ </picture>
 </a>
 
 ## License
