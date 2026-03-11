@@ -409,6 +409,7 @@ Once running, send messages to your bot on the configured platform. Available sl
 /switch <id>     — Resume an existing session
 /current         — Show current active session
 /history [n]     — Show last n messages (default 10)
+/reasoning [level] — View/switch reasoning effort (Codex)
 /mode [name]     — View/switch permission mode (default/edit/plan/yolo)
 /quiet           — Toggle thinking/tool progress messages
 /allow <tool>    — Pre-allow a tool (next session)

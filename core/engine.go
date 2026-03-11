@@ -1240,6 +1240,7 @@ var builtinCommands = []struct {
 	{[]string{"history"}, "history"},
 	{[]string{"allow"}, "allow"},
 	{[]string{"model"}, "model"},
+	{[]string{"reasoning", "effort"}, "reasoning"},
 	{[]string{"mode"}, "mode"},
 	{[]string{"lang"}, "lang"},
 	{[]string{"quiet"}, "quiet"},
@@ -1347,6 +1348,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdAllow(p, msg, args)
 	case "model":
 		e.cmdModel(p, msg, args)
+	case "reasoning":
+		e.cmdReasoning(p, msg, args)
 	case "mode":
 		e.cmdMode(p, msg, args)
 	case "lang":
@@ -2224,6 +2227,7 @@ func helpCardGroups() []helpCardGroup {
 			titleKey: MsgHelpAgentSection,
 			items: []helpCardItem{
 				{command: "/model", action: "nav:/model"},
+				{command: "/reasoning", action: "nav:/reasoning"},
 				{command: "/mode", action: "nav:/mode"},
 				{command: "/lang", action: "nav:/lang"},
 				{command: "/provider", action: "nav:/provider"},
@@ -2469,6 +2473,87 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 	e.sessions.Save()
 
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChanged, target))
+}
+
+func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
+	switcher, ok := e.agent.(ReasoningEffortSwitcher)
+	if !ok {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReasoningNotSupported))
+		return
+	}
+
+	if len(args) == 0 {
+		if !supportsCards(p) {
+			efforts := switcher.AvailableReasoningEfforts()
+
+			var sb strings.Builder
+			current := switcher.GetReasoningEffort()
+			if current == "" {
+				sb.WriteString(e.i18n.T(MsgReasoningDefault))
+			} else {
+				sb.WriteString(e.i18n.Tf(MsgReasoningCurrent, current))
+				sb.WriteString("\n")
+			}
+			sb.WriteString("\n")
+			sb.WriteString(e.i18n.T(MsgReasoningListTitle))
+			var buttons [][]ButtonOption
+			var row []ButtonOption
+			for i, effort := range efforts {
+				marker := "  "
+				if effort == current {
+					marker = "> "
+				}
+				sb.WriteString(fmt.Sprintf("%s%d. %s\n", marker, i+1, effort))
+
+				label := effort
+				if effort == current {
+					label = "▶ " + label
+				}
+				row = append(row, ButtonOption{Text: label, Data: fmt.Sprintf("cmd:/reasoning %d", i+1)})
+				if len(row) >= 3 {
+					buttons = append(buttons, row)
+					row = nil
+				}
+			}
+			if len(row) > 0 {
+				buttons = append(buttons, row)
+			}
+			sb.WriteString("\n")
+			sb.WriteString(e.i18n.T(MsgReasoningUsage))
+			e.replyWithButtons(p, msg.ReplyCtx, sb.String(), buttons)
+			return
+		}
+		e.replyWithCard(p, msg.ReplyCtx, e.renderReasoningCard())
+		return
+	}
+
+	efforts := switcher.AvailableReasoningEfforts()
+	target := strings.ToLower(strings.TrimSpace(args[0]))
+	if idx, err := strconv.Atoi(target); err == nil && idx >= 1 && idx <= len(efforts) {
+		target = efforts[idx-1]
+	}
+
+	valid := false
+	for _, effort := range efforts {
+		if effort == target {
+			valid = true
+			break
+		}
+	}
+	if !valid {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReasoningUsage))
+		return
+	}
+
+	switcher.SetReasoningEffort(target)
+	e.cleanupInteractiveState(msg.SessionKey)
+
+	s := e.sessions.GetOrCreateActive(msg.SessionKey)
+	s.AgentSessionID = ""
+	s.ClearHistory()
+	e.sessions.Save()
+
+	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgReasoningChanged, target))
 }
 
 func (e *Engine) cmdMode(p Platform, msg *Message, args []string) {
@@ -3222,6 +3307,8 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 		return e.renderHelpGroupCardForPlatform(platform, args)
 	case "/model":
 		return e.renderModelCard()
+	case "/reasoning":
+		return e.renderReasoningCard()
 	case "/mode":
 		return e.renderModeCard()
 	case "/lang":
@@ -3295,6 +3382,31 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		s.AgentSessionID = ""
 		s.ClearHistory()
 		e.sessions.Save()
+
+	case "/reasoning":
+		if args == "" {
+			return
+		}
+		switcher, ok := e.agent.(ReasoningEffortSwitcher)
+		if !ok {
+			return
+		}
+		efforts := switcher.AvailableReasoningEfforts()
+		target := strings.ToLower(strings.TrimSpace(args))
+		if idx, err := strconv.Atoi(target); err == nil && idx >= 1 && idx <= len(efforts) {
+			target = efforts[idx-1]
+		}
+		for _, effort := range efforts {
+			if effort == target {
+				switcher.SetReasoningEffort(target)
+				e.cleanupInteractiveState(sessionKey)
+				s := e.sessions.GetOrCreateActive(sessionKey)
+				s.AgentSessionID = ""
+				s.ClearHistory()
+				e.sessions.Save()
+				return
+			}
+		}
 
 	case "/mode":
 		if args == "" {
@@ -3477,6 +3589,40 @@ func (e *Engine) renderModelCard() *Card {
 		Select(e.i18n.T(MsgModelSelectPlaceholder), opts, initVal).
 		Buttons(e.cardBackButton())
 	cb.Note(e.i18n.T(MsgModelUsage))
+	return cb.Build()
+}
+
+func (e *Engine) renderReasoningCard() *Card {
+	switcher, ok := e.agent.(ReasoningEffortSwitcher)
+	if !ok {
+		return e.simpleCard(e.i18n.T(MsgCardTitleReasoning), "orange", e.i18n.T(MsgReasoningNotSupported))
+	}
+
+	efforts := switcher.AvailableReasoningEfforts()
+	current := switcher.GetReasoningEffort()
+
+	var sb strings.Builder
+	if current == "" {
+		sb.WriteString(e.i18n.T(MsgReasoningDefault))
+	} else {
+		sb.WriteString(e.i18n.Tf(MsgReasoningCurrent, current))
+	}
+
+	var opts []CardSelectOption
+	initVal := ""
+	for i, effort := range efforts {
+		val := fmt.Sprintf("act:/reasoning %d", i+1)
+		opts = append(opts, CardSelectOption{Text: effort, Value: val})
+		if effort == current {
+			initVal = val
+		}
+	}
+
+	cb := NewCard().Title(e.i18n.T(MsgCardTitleReasoning), "orange").
+		Markdown(sb.String()).
+		Select(e.i18n.T(MsgReasoningSelectPlaceholder), opts, initVal).
+		Buttons(e.cardBackButton())
+	cb.Note(e.i18n.T(MsgReasoningUsage))
 	return cb.Build()
 }
 

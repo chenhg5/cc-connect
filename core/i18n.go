@@ -210,9 +210,12 @@ const (
 
 	MsgStatusTitle MsgKey = "status_title"
 
-	MsgModelCurrent      MsgKey = "model_current"
-	MsgModelChanged      MsgKey = "model_changed"
-	MsgModelNotSupported MsgKey = "model_not_supported"
+	MsgModelCurrent          MsgKey = "model_current"
+	MsgModelChanged          MsgKey = "model_changed"
+	MsgModelNotSupported     MsgKey = "model_not_supported"
+	MsgReasoningCurrent      MsgKey = "reasoning_current"
+	MsgReasoningChanged      MsgKey = "reasoning_changed"
+	MsgReasoningNotSupported MsgKey = "reasoning_not_supported"
 
 	MsgCompressNotSupported MsgKey = "compress_not_supported"
 	MsgCompressing          MsgKey = "compressing"
@@ -235,9 +238,13 @@ const (
 	MsgQuietOnShort  MsgKey = "quiet_on_short"
 	MsgQuietOffShort MsgKey = "quiet_off_short"
 
-	MsgModelDefault   MsgKey = "model_default"
-	MsgModelListTitle MsgKey = "model_list_title"
-	MsgModelUsage     MsgKey = "model_usage"
+	MsgModelDefault               MsgKey = "model_default"
+	MsgModelListTitle             MsgKey = "model_list_title"
+	MsgModelUsage                 MsgKey = "model_usage"
+	MsgReasoningDefault           MsgKey = "reasoning_default"
+	MsgReasoningListTitle         MsgKey = "reasoning_list_title"
+	MsgReasoningUsage             MsgKey = "reasoning_usage"
+	MsgReasoningSelectPlaceholder MsgKey = "reasoning_select_placeholder"
 
 	MsgModeUsage                 MsgKey = "mode_usage"
 	MsgLangSelectPlaceholder     MsgKey = "lang_select_placeholder"
@@ -250,6 +257,7 @@ const (
 	MsgCardTitleStatus           MsgKey = "card_title_status"
 	MsgCardTitleLanguage         MsgKey = "card_title_language"
 	MsgCardTitleModel            MsgKey = "card_title_model"
+	MsgCardTitleReasoning        MsgKey = "card_title_reasoning"
 	MsgCardTitleMode             MsgKey = "card_title_mode"
 	MsgCardTitleSessions         MsgKey = "card_title_sessions"
 	MsgCardTitleSessionsPaged    MsgKey = "card_title_sessions_paged"
@@ -371,36 +379,37 @@ const (
 	MsgSearchResult   MsgKey = "search_result"
 	MsgSearchHint     MsgKey = "search_hint"
 
-	MsgBuiltinCmdNew      MsgKey = "new"
-	MsgBuiltinCmdList     MsgKey = "list"
-	MsgBuiltinCmdSearch   MsgKey = "search"
-	MsgBuiltinCmdSwitch   MsgKey = "switch"
-	MsgBuiltinCmdDelete   MsgKey = "delete"
-	MsgBuiltinCmdName     MsgKey = "name"
-	MsgBuiltinCmdCurrent  MsgKey = "current"
-	MsgBuiltinCmdHistory  MsgKey = "history"
-	MsgBuiltinCmdProvider MsgKey = "provider"
-	MsgBuiltinCmdMemory   MsgKey = "memory"
-	MsgBuiltinCmdAllow    MsgKey = "allow"
-	MsgBuiltinCmdModel    MsgKey = "model"
-	MsgBuiltinCmdMode     MsgKey = "mode"
-	MsgBuiltinCmdLang     MsgKey = "lang"
-	MsgBuiltinCmdQuiet    MsgKey = "quiet"
-	MsgBuiltinCmdCompress MsgKey = "compress"
-	MsgBuiltinCmdStop     MsgKey = "stop"
-	MsgBuiltinCmdCron     MsgKey = "cron"
-	MsgBuiltinCmdCommands MsgKey = "commands"
-	MsgBuiltinCmdAlias    MsgKey = "alias"
-	MsgBuiltinCmdSkills   MsgKey = "skills"
-	MsgBuiltinCmdConfig   MsgKey = "config"
-	MsgBuiltinCmdDoctor   MsgKey = "doctor"
-	MsgBuiltinCmdUpgrade  MsgKey = "upgrade"
-	MsgBuiltinCmdRestart  MsgKey = "restart"
-	MsgBuiltinCmdStatus   MsgKey = "status"
-	MsgBuiltinCmdVersion  MsgKey = "version"
-	MsgBuiltinCmdHelp     MsgKey = "help"
-	MsgBuiltinCmdBind     MsgKey = "bind"
-	MsgBuiltinCmdShell    MsgKey = "shell"
+	MsgBuiltinCmdNew       MsgKey = "new"
+	MsgBuiltinCmdList      MsgKey = "list"
+	MsgBuiltinCmdSearch    MsgKey = "search"
+	MsgBuiltinCmdSwitch    MsgKey = "switch"
+	MsgBuiltinCmdDelete    MsgKey = "delete"
+	MsgBuiltinCmdName      MsgKey = "name"
+	MsgBuiltinCmdCurrent   MsgKey = "current"
+	MsgBuiltinCmdHistory   MsgKey = "history"
+	MsgBuiltinCmdProvider  MsgKey = "provider"
+	MsgBuiltinCmdMemory    MsgKey = "memory"
+	MsgBuiltinCmdAllow     MsgKey = "allow"
+	MsgBuiltinCmdModel     MsgKey = "model"
+	MsgBuiltinCmdReasoning MsgKey = "reasoning"
+	MsgBuiltinCmdMode      MsgKey = "mode"
+	MsgBuiltinCmdLang      MsgKey = "lang"
+	MsgBuiltinCmdQuiet     MsgKey = "quiet"
+	MsgBuiltinCmdCompress  MsgKey = "compress"
+	MsgBuiltinCmdStop      MsgKey = "stop"
+	MsgBuiltinCmdCron      MsgKey = "cron"
+	MsgBuiltinCmdCommands  MsgKey = "commands"
+	MsgBuiltinCmdAlias     MsgKey = "alias"
+	MsgBuiltinCmdSkills    MsgKey = "skills"
+	MsgBuiltinCmdConfig    MsgKey = "config"
+	MsgBuiltinCmdDoctor    MsgKey = "doctor"
+	MsgBuiltinCmdUpgrade   MsgKey = "upgrade"
+	MsgBuiltinCmdRestart   MsgKey = "restart"
+	MsgBuiltinCmdStatus    MsgKey = "status"
+	MsgBuiltinCmdVersion   MsgKey = "version"
+	MsgBuiltinCmdHelp      MsgKey = "help"
+	MsgBuiltinCmdBind      MsgKey = "bind"
+	MsgBuiltinCmdShell     MsgKey = "shell"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -1382,6 +1391,27 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "このエージェントはモデルの切り替えをサポートしていません。",
 		LangSpanish:            "Este agente no soporta el cambio de modelo.",
 	},
+	MsgReasoningCurrent: {
+		LangEnglish:            "Current reasoning effort: %s",
+		LangChinese:            "当前推理强度: %s",
+		LangTraditionalChinese: "當前推理強度: %s",
+		LangJapanese:           "現在の推論強度: %s",
+		LangSpanish:            "Esfuerzo de razonamiento actual: %s",
+	},
+	MsgReasoningChanged: {
+		LangEnglish:            "Reasoning effort switched to `%s`. New sessions will use this setting.",
+		LangChinese:            "推理强度已切换为 `%s`，新会话将使用此设置。",
+		LangTraditionalChinese: "推理強度已切換為 `%s`，新會話將使用此設定。",
+		LangJapanese:           "推論強度を `%s` に切り替えました。新しいセッションで使用されます。",
+		LangSpanish:            "Esfuerzo de razonamiento cambiado a `%s`. Las nuevas sesiones usarán esta configuración.",
+	},
+	MsgReasoningNotSupported: {
+		LangEnglish:            "This agent does not support reasoning effort switching.",
+		LangChinese:            "当前 Agent 不支持推理强度切换。",
+		LangTraditionalChinese: "當前 Agent 不支援推理強度切換。",
+		LangJapanese:           "このエージェントは推論強度の切り替えをサポートしていません。",
+		LangSpanish:            "Este agente no soporta el cambio de esfuerzo de razonamiento.",
+	},
 	MsgMemoryNotSupported: {
 		LangEnglish:            "This agent does not support memory files.",
 		LangChinese:            "当前 Agent 不支持记忆文件。",
@@ -1544,6 +1574,27 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "使い方: `/model <番号>` または `/model <モデル名>`",
 		LangSpanish:            "Uso: `/model <número>` o `/model <nombre_modelo>`",
 	},
+	MsgReasoningDefault: {
+		LangEnglish:            "Current reasoning effort: (not set, using Codex default)\n",
+		LangChinese:            "当前推理强度: (未设置，使用 Codex 默认值)\n",
+		LangTraditionalChinese: "當前推理強度: (未設置，使用 Codex 預設值)\n",
+		LangJapanese:           "現在の推論強度: (未設定、Codex のデフォルトを使用)\n",
+		LangSpanish:            "Esfuerzo de razonamiento actual: (no configurado, usando el valor predeterminado de Codex)\n",
+	},
+	MsgReasoningListTitle: {
+		LangEnglish:            "Available reasoning levels:\n",
+		LangChinese:            "可用推理强度:\n",
+		LangTraditionalChinese: "可用推理強度:\n",
+		LangJapanese:           "利用可能な推論強度:\n",
+		LangSpanish:            "Niveles de razonamiento disponibles:\n",
+	},
+	MsgReasoningUsage: {
+		LangEnglish:            "Usage: `/reasoning <number>` or `/reasoning <low|medium|high|xhigh>`",
+		LangChinese:            "用法: `/reasoning <序号>` 或 `/reasoning <low|medium|high|xhigh>`",
+		LangTraditionalChinese: "用法: `/reasoning <序號>` 或 `/reasoning <low|medium|high|xhigh>`",
+		LangJapanese:           "使い方: `/reasoning <番号>` または `/reasoning <low|medium|high|xhigh>`",
+		LangSpanish:            "Uso: `/reasoning <número>` o `/reasoning <low|medium|high|xhigh>`",
+	},
 	MsgModeUsage: {
 		LangEnglish:            "\nUse `/mode <name>` to switch.\nAvailable: `default` / `edit` / `plan` / `yolo`",
 		LangChinese:            "\n使用 `/mode <名称>` 切换模式\n可用值: `default` / `edit` / `plan` / `yolo`",
@@ -1558,6 +1609,10 @@ var messages = map[MsgKey]map[Language]string{
 	MsgModelSelectPlaceholder: {
 		LangEnglish: "Select model", LangChinese: "选择模型", LangTraditionalChinese: "選擇模型",
 		LangJapanese: "モデルを選択", LangSpanish: "Seleccionar modelo",
+	},
+	MsgReasoningSelectPlaceholder: {
+		LangEnglish: "Select reasoning level", LangChinese: "选择推理强度", LangTraditionalChinese: "選擇推理強度",
+		LangJapanese: "推論強度を選択", LangSpanish: "Seleccionar nivel de razonamiento",
 	},
 	MsgModeSelectPlaceholder: {
 		LangEnglish: "Select mode", LangChinese: "选择模式", LangTraditionalChinese: "選擇模式",
@@ -1590,6 +1645,10 @@ var messages = map[MsgKey]map[Language]string{
 	MsgCardTitleModel: {
 		LangEnglish: "Model", LangChinese: "模型", LangTraditionalChinese: "模型",
 		LangJapanese: "モデル", LangSpanish: "Modelo",
+	},
+	MsgCardTitleReasoning: {
+		LangEnglish: "Reasoning", LangChinese: "推理强度", LangTraditionalChinese: "推理強度",
+		LangJapanese: "推論強度", LangSpanish: "Razonamiento",
 	},
 	MsgCardTitleMode: {
 		LangEnglish: "Permission Mode", LangChinese: "权限模式", LangTraditionalChinese: "權限模式",
@@ -2350,6 +2409,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "查看/切換模型，參數: [名稱]",
 		LangJapanese:           "モデルの表示/切り替え、引数: [名前]",
 		LangSpanish:            "Ver/cambiar modelo, arg: [nombre]",
+	},
+	MsgBuiltinCmdReasoning: {
+		LangEnglish:            "View/switch reasoning effort, arg: [level]",
+		LangChinese:            "查看/切换推理强度，参数: [等级]",
+		LangTraditionalChinese: "查看/切換推理強度，參數: [等級]",
+		LangJapanese:           "推論強度の表示/切り替え、引数: [レベル]",
+		LangSpanish:            "Ver/cambiar esfuerzo de razonamiento, arg: [nivel]",
 	},
 	MsgBuiltinCmdMode: {
 		LangEnglish:            "View/switch permission mode, arg: [name]",

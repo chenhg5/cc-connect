@@ -36,7 +36,7 @@ cc-connect bridges AI agents running on your machine to the messaging platforms 
 - **7 AI Agents** — Claude Code, Codex, Cursor Agent, Qoder CLI, Gemini CLI, OpenCode, iFlow CLI. Use whichever fits your workflow, or all of them at once.
 - **9 Chat Platforms** — Feishu, DingTalk, Slack, Telegram, Discord, WeChat Work, LINE, QQ, QQ Bot (Official). Most need zero public IP.
 - **Multi-Bot Relay** — Bind multiple bots in a group chat and let them communicate with each other. Ask Claude, get insights from Gemini — all in one conversation.
-- **Full Control from Chat** — Switch models (`/model`), change permission modes (`/mode`), manage sessions, all via slash commands.
+- **Full Control from Chat** — Switch models (`/model`), tune reasoning (`/reasoning`), change permission modes (`/mode`), manage sessions, all via slash commands.
 - **Agent Memory** — Read and write agent instruction files (`/memory`) without touching the terminal.
 - **Scheduled Tasks** — Set up cron jobs in natural language. "Every day at 6am, summarize GitHub trending" just works.
 - **Voice & Images** — Send voice messages or screenshots; cc-connect handles STT/TTS and multimodal forwarding.
@@ -326,6 +326,7 @@ mode = "default"
 [projects.agent.options]
 mode = "full-auto"
 # model = "o3"
+# reasoning_effort = "high"
 
 # Cursor Agent
 [projects.agent.options]
@@ -354,6 +355,14 @@ Switch mode at runtime from the chat:
 /mode          # show current mode and all available modes
 /mode yolo     # switch to YOLO mode
 /mode default  # switch back to default
+```
+
+For Codex, you can also switch reasoning effort at runtime:
+
+```
+/reasoning         # show current reasoning effort and available levels
+/reasoning high    # switch to high reasoning effort
+/reasoning 3       # quick-select by number
 ```
 
 ## API Provider Management
@@ -739,6 +748,7 @@ Each user gets an independent session with full conversation context. Manage ses
 /history [n]      Show last n messages (default 10)
 /provider [...]   Manage API providers (list/add/remove/switch)
 /allow <tool>     Pre-allow a tool (takes effect on next session)
+/reasoning [level] View or switch reasoning effort (Codex)
 /mode [name]      View or switch permission mode
 /quiet            Toggle thinking/tool progress messages
 /stop             Stop current execution
@@ -929,4 +939,3 @@ Thanks to all the people who contributed to this project:
 ## License
 
 MIT
-
