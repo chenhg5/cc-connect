@@ -357,6 +357,7 @@ const (
 	MsgDeleteModeBackButton     MsgKey = "delete_mode_back_button"
 	MsgDeleteModeEmptySelection MsgKey = "delete_mode_empty_selection"
 	MsgDeleteModeResultTitle    MsgKey = "delete_mode_result_title"
+	MsgDeleteModeMissingSession MsgKey = "delete_mode_missing_session"
 
 	MsgSwitchSuccess   MsgKey = "switch_success"
 	MsgSwitchNoMatch   MsgKey = "switch_no_match"
@@ -2275,6 +2276,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "刪除結果",
 		LangJapanese:           "削除結果",
 		LangSpanish:            "Resultado de eliminación",
+	},
+	MsgDeleteModeMissingSession: {
+		LangEnglish:            "❌ Missing selected session: %s",
+		LangChinese:            "❌ 已选会话不存在：%s",
+		LangTraditionalChinese: "❌ 已選會話不存在：%s",
+		LangJapanese:           "❌ 選択したセッションが見つかりません: %s",
+		LangSpanish:            "❌ Falta la sesión seleccionada: %s",
 	},
 	MsgBannedWordBlocked: {
 		LangEnglish:            "⚠️ Your message was blocked because it contains a prohibited word.",

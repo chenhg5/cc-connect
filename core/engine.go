@@ -3793,14 +3793,27 @@ func (e *Engine) submitDeleteModeSelection(sessionKey string, dm *deleteModeStat
 	if err != nil {
 		return []string{fmt.Sprintf("❌ %v", err)}
 	}
+	seen := make(map[string]struct{}, len(agentSessions))
 	lines := make([]string, 0, len(dm.selectedIDs))
 	for i := range agentSessions {
+		seen[agentSessions[i].ID] = struct{}{}
 		if _, ok := dm.selectedIDs[agentSessions[i].ID]; !ok {
 			continue
 		}
 		if line := e.deleteSingleSessionReply(&Message{SessionKey: sessionKey}, deleter, &agentSessions[i]); line != "" {
 			lines = append(lines, line)
 		}
+	}
+	missingIDs := make([]string, 0)
+	for id := range dm.selectedIDs {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		missingIDs = append(missingIDs, id)
+	}
+	sort.Strings(missingIDs)
+	for _, id := range missingIDs {
+		lines = append(lines, fmt.Sprintf(e.i18n.T(MsgDeleteModeMissingSession), id))
 	}
 	if len(lines) == 0 {
 		lines = append(lines, e.i18n.T(MsgDeleteModeEmptySelection))

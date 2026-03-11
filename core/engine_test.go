@@ -781,6 +781,38 @@ func TestDeleteMode_ConfirmAndSubmitDeletesSelectedSessions(t *testing.T) {
 	}
 }
 
+func TestDeleteMode_SubmitReportsMissingSelectedSessions(t *testing.T) {
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	agent := &stubDeleteAgent{stubListAgent: stubListAgent{sessions: []AgentSessionInfo{
+		{ID: "session-1", Summary: "One"},
+		{ID: "session-2", Summary: "Two"},
+		{ID: "session-3", Summary: "Three"},
+	}}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "feishu:user1", ReplyCtx: "ctx"}
+
+	e.cmdDelete(p, msg, nil)
+	_ = e.handleCardNav("act:/delete-mode toggle session-1", msg.SessionKey)
+	_ = e.handleCardNav("act:/delete-mode toggle session-3", msg.SessionKey)
+
+	agent.sessions = []AgentSessionInfo{
+		{ID: "session-1", Summary: "One"},
+		{ID: "session-2", Summary: "Two"},
+	}
+
+	resultCard := e.handleCardNav("act:/delete-mode submit", msg.SessionKey)
+	if resultCard == nil {
+		t.Fatal("expected result card after submit")
+	}
+	resultText := resultCard.RenderText()
+	if !strings.Contains(resultText, "Session deleted: One") {
+		t.Fatalf("result text = %q, want deleted session line", resultText)
+	}
+	if !strings.Contains(resultText, "Missing selected session") || !strings.Contains(resultText, "session-3") {
+		t.Fatalf("result text = %q, want missing selected session to be reported", resultText)
+	}
+}
+
 func TestDeleteMode_CancelReturnsListCard(t *testing.T) {
 	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
 	agent := &stubDeleteAgent{stubListAgent: stubListAgent{sessions: []AgentSessionInfo{
