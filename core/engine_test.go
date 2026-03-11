@@ -82,8 +82,9 @@ func (p *stubCardPlatform) SendCard(_ context.Context, _ any, card *Card) error 
 
 type stubModelModeAgent struct {
 	stubAgent
-	model string
-	mode  string
+	model           string
+	mode            string
+	reasoningEffort string
 }
 
 func (a *stubModelModeAgent) SetModel(model string) {
@@ -117,6 +118,18 @@ func (a *stubModelModeAgent) PermissionModes() []PermissionModeInfo {
 		{Key: "default", Name: "Default", NameZh: "默认", Desc: "Ask before risky actions", DescZh: "危险操作前询问"},
 		{Key: "yolo", Name: "YOLO", NameZh: "放手做", Desc: "Skip confirmations", DescZh: "跳过确认"},
 	}
+}
+
+func (a *stubModelModeAgent) SetReasoningEffort(effort string) {
+	a.reasoningEffort = effort
+}
+
+func (a *stubModelModeAgent) GetReasoningEffort() string {
+	return a.reasoningEffort
+}
+
+func (a *stubModelModeAgent) AvailableReasoningEfforts() []string {
+	return []string{"minimal", "low", "medium", "high", "xhigh"}
 }
 
 type stubListAgent struct {
@@ -634,6 +647,47 @@ func TestCmdModel_UsesInlineButtonsOnButtonOnlyPlatform(t *testing.T) {
 	}
 	if got := p.buttonRows[0][0].Data; got != "cmd:/model 1" {
 		t.Fatalf("first /model button = %q, want %q", got, "cmd:/model 1")
+	}
+}
+
+func TestCmdReasoning_UsesInlineButtonsOnButtonOnlyPlatform(t *testing.T) {
+	p := &stubInlineButtonPlatform{stubPlatformEngine: stubPlatformEngine{n: "inline-only"}}
+	agent := &stubModelModeAgent{}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.cmdReasoning(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, nil)
+
+	if len(p.buttonRows) == 0 {
+		t.Fatal("expected /reasoning to send inline buttons on button-only platform")
+	}
+	if got := p.buttonRows[0][0].Data; got != "cmd:/reasoning 1" {
+		t.Fatalf("first /reasoning button = %q, want %q", got, "cmd:/reasoning 1")
+	}
+}
+
+func TestCmdReasoning_SwitchesEffortAndResetsSession(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubModelModeAgent{}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	s := e.sessions.GetOrCreateActive(msg.SessionKey)
+	s.AgentSessionID = "existing-session"
+	s.AddHistory("user", "hello")
+
+	e.cmdReasoning(p, msg, []string{"4"})
+
+	if agent.reasoningEffort != "high" {
+		t.Fatalf("reasoning effort = %q, want high", agent.reasoningEffort)
+	}
+	if s.AgentSessionID != "" {
+		t.Fatalf("AgentSessionID = %q, want cleared", s.AgentSessionID)
+	}
+	if len(s.History) != 0 {
+		t.Fatalf("history length = %d, want 0", len(s.History))
+	}
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "Reasoning effort switched to `high`") {
+		t.Fatalf("sent = %v, want reasoning changed message", p.sent)
 	}
 }
 

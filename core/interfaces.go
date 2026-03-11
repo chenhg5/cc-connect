@@ -207,6 +207,14 @@ type ModelSwitcher interface {
 	AvailableModels(ctx context.Context) []ModelOption
 }
 
+// ReasoningEffortSwitcher is an optional interface for agents that support
+// runtime switching of reasoning effort.
+type ReasoningEffortSwitcher interface {
+	SetReasoningEffort(effort string)
+	GetReasoningEffort() string
+	AvailableReasoningEfforts() []string
+}
+
 // ModelOption describes a selectable model.
 type ModelOption struct {
 	Name string // model identifier passed to CLI

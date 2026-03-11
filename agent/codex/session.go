@@ -24,6 +24,7 @@ import (
 type codexSession struct {
 	workDir  string
 	model    string
+	effort   string
 	mode     string
 	extraEnv []string
 	events   chan core.Event
@@ -36,12 +37,13 @@ type codexSession struct {
 	pendingMsgs []string // buffered agent_message texts awaiting classification
 }
 
-func newCodexSession(ctx context.Context, workDir, model, mode, resumeID string, extraEnv []string) (*codexSession, error) {
+func newCodexSession(ctx context.Context, workDir, model, effort, mode, resumeID string, extraEnv []string) (*codexSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	cs := &codexSession{
 		workDir:  workDir,
 		model:    model,
+		effort:   effort,
 		mode:     mode,
 		extraEnv: extraEnv,
 		events:   make(chan core.Event, 64),
@@ -68,32 +70,8 @@ func (cs *codexSession) Send(prompt string, images []core.ImageAttachment) error
 		return fmt.Errorf("session is closed")
 	}
 
-	tid := cs.CurrentSessionID()
-	isResume := tid != ""
-
-	var args []string
-	if isResume {
-		args = []string{"exec", "resume", "--json", "--skip-git-repo-check"}
-	} else {
-		args = []string{"exec", "--json", "--skip-git-repo-check"}
-	}
-
-	switch cs.mode {
-	case "auto-edit", "full-auto":
-		args = append(args, "--full-auto")
-	case "yolo":
-		args = append(args, "--dangerously-bypass-approvals-and-sandbox")
-	}
-
-	if cs.model != "" {
-		args = append(args, "--model", cs.model)
-	}
-
-	if isResume {
-		args = append(args, tid, prompt)
-	} else {
-		args = append(args, "--cd", cs.workDir, prompt)
-	}
+	isResume := cs.CurrentSessionID() != ""
+	args := cs.buildExecArgs(prompt)
 
 	slog.Debug("codexSession: launching", "resume", isResume, "args", core.RedactArgs(args))
 
@@ -119,6 +97,39 @@ func (cs *codexSession) Send(prompt string, images []core.ImageAttachment) error
 	go cs.readLoop(cmd, stdout, &stderrBuf)
 
 	return nil
+}
+
+func (cs *codexSession) buildExecArgs(prompt string) []string {
+	tid := cs.CurrentSessionID()
+	isResume := tid != ""
+
+	var args []string
+	if isResume {
+		args = []string{"exec", "resume", "--json", "--skip-git-repo-check"}
+	} else {
+		args = []string{"exec", "--json", "--skip-git-repo-check"}
+	}
+
+	switch cs.mode {
+	case "auto-edit", "full-auto":
+		args = append(args, "--full-auto")
+	case "yolo":
+		args = append(args, "--dangerously-bypass-approvals-and-sandbox")
+	}
+
+	if cs.model != "" {
+		args = append(args, "--model", cs.model)
+	}
+	if cs.effort != "" {
+		args = append(args, "-c", fmt.Sprintf("model_reasoning_effort=%q", cs.effort))
+	}
+
+	if isResume {
+		args = append(args, tid, prompt)
+	} else {
+		args = append(args, "--cd", cs.workDir, prompt)
+	}
+	return args
 }
 
 func (cs *codexSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
