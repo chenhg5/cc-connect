@@ -18,7 +18,7 @@ func plainText(content string) map[string]any {
 func (p *interactivePlatform) ReplyCard(ctx context.Context, rctx any, card *core.Card) error {
 	rc, ok := rctx.(replyContext)
 	if !ok {
-		return fmt.Errorf("feishu: invalid reply context type %T", rctx)
+		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
 	}
 
 	cardJSON := renderCard(card)
@@ -30,10 +30,10 @@ func (p *interactivePlatform) ReplyCard(ctx context.Context, rctx any, card *cor
 			Build()).
 		Build())
 	if err != nil {
-		return fmt.Errorf("feishu: reply card api call: %w", err)
+		return fmt.Errorf("%s: reply card api call: %w", p.tag(), err)
 	}
 	if !resp.Success() {
-		return fmt.Errorf("feishu: reply card failed code=%d msg=%s", resp.Code, resp.Msg)
+		return fmt.Errorf("%s: reply card failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
 	}
 	return nil
 }
@@ -42,10 +42,10 @@ func (p *interactivePlatform) ReplyCard(ctx context.Context, rctx any, card *cor
 func (p *interactivePlatform) SendCard(ctx context.Context, rctx any, card *core.Card) error {
 	rc, ok := rctx.(replyContext)
 	if !ok {
-		return fmt.Errorf("feishu: invalid reply context type %T", rctx)
+		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
 	}
 	if rc.chatID == "" {
-		return fmt.Errorf("feishu: chatID is empty, cannot send card")
+		return fmt.Errorf("%s: chatID is empty, cannot send card", p.tag())
 	}
 
 	cardJSON := renderCard(card)
@@ -58,10 +58,10 @@ func (p *interactivePlatform) SendCard(ctx context.Context, rctx any, card *core
 			Build()).
 		Build())
 	if err != nil {
-		return fmt.Errorf("feishu: send card api call: %w", err)
+		return fmt.Errorf("%s: send card api call: %w", p.tag(), err)
 	}
 	if !resp.Success() {
-		return fmt.Errorf("feishu: send card failed code=%d msg=%s", resp.Code, resp.Msg)
+		return fmt.Errorf("%s: send card failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
 	}
 	return nil
 }
