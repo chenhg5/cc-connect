@@ -122,15 +122,12 @@ func (gs *geminiSession) Send(prompt string, images []core.ImageAttachment) (err
 
 	args = append(args, "-p", fullPrompt)
 
-	slog.Debug("geminiSession: launching", "resume", isResume, "args", core.RedactArgs(args))
-
 	// Add timeout for each turn to prevent hanging processes
-	var ctx context.Context
 	var cancel context.CancelFunc
 	if gs.timeout > 0 {
-		ctx, cancel = context.WithTimeout(gs.ctx, gs.timeout)
+		gs.ctx, cancel = context.WithTimeout(gs.ctx, gs.timeout)
 	} else {
-		ctx, cancel = context.WithCancel(gs.ctx)
+		gs.ctx, cancel = context.WithCancel(gs.ctx)
 	}
 
 	// ensure cancel is called on early return errors
@@ -141,7 +138,10 @@ func (gs *geminiSession) Send(prompt string, images []core.ImageAttachment) (err
 		}
 	}()
 
-	cmd := exec.CommandContext(ctx, gs.cmd, args...)
+	slog.Debug("geminiSession: launching", "resume", isResume, "args", core.RedactArgs(args))
+	cmd := exec.CommandContext(gs.ctx, gs.cmd, args...)
+	// Set a short WaitDelay to ensure I/O goroutines don't block for long after the context is done
+	cmd.WaitDelay = 1 * time.Second
 	cmd.Dir = gs.workDir
 	env := os.Environ()
 	if len(gs.extraEnv) > 0 {
@@ -192,6 +192,12 @@ func (gs *geminiSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf
 		}
 	}()
 
+	// Unblock scanner if context is canceled
+	go func() {
+		<-gs.ctx.Done()
+		stdout.Close()
+	}()
+
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
@@ -224,12 +230,13 @@ func (gs *geminiSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf
 }
 
 // Gemini CLI stream-json event types:
-//   init       — session_id, model
-//   message    — role (user/assistant), content, delta
-//   tool_use   — tool_name, tool_id, parameters
-//   tool_result — tool_id, status, output, error
-//   error      — severity, message
-//   result     — status, stats (final event)
+//
+//	init       — session_id, model
+//	message    — role (user/assistant), content, delta
+//	tool_use   — tool_name, tool_id, parameters
+//	tool_result — tool_id, status, output, error
+//	error      — severity, message
+//	result     — status, stats (final event)
 func (gs *geminiSession) handleEvent(raw map[string]any) {
 	eventType, _ := raw["type"].(string)
 
