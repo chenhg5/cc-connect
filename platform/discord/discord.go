@@ -54,6 +54,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		return nil, fmt.Errorf("discord: token is required")
 	}
 	allowFrom, _ := opts["allow_from"].(string)
+	core.CheckAllowFrom("discord", allowFrom)
 	guildID, _ := opts["guild_id"].(string)
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)

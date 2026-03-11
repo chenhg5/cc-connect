@@ -38,6 +38,7 @@ func New(opts map[string]any) (core.Platform, error) {
 	clientID, _ := opts["client_id"].(string)
 	clientSecret, _ := opts["client_secret"].(string)
 	allowFrom, _ := opts["allow_from"].(string)
+	core.CheckAllowFrom("dingtalk", allowFrom)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	if clientID == "" || clientSecret == "" {
 		return nil, fmt.Errorf("dingtalk: client_id and client_secret are required")

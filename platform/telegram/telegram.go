@@ -42,6 +42,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		return nil, fmt.Errorf("telegram: token is required")
 	}
 	allowFrom, _ := opts["allow_from"].(string)
+	core.CheckAllowFrom("telegram", allowFrom)
 
 	// Build HTTP client with optional proxy support
 	httpClient := &http.Client{Timeout: 60 * time.Second}
@@ -521,7 +522,9 @@ func (p *Platform) downloadFile(fileID string) ([]byte, error) {
 
 	resp, err := p.httpClient.Get(link)
 	if err != nil {
-		return nil, fmt.Errorf("download: %w", err)
+		// Redact bot token from error message to prevent token leakage in logs
+		errMsg := strings.ReplaceAll(err.Error(), p.bot.Token, "[REDACTED]")
+		return nil, fmt.Errorf("download file %s: %s", fileID, errMsg)
 	}
 	defer resp.Body.Close()
 	return io.ReadAll(resp.Body)
