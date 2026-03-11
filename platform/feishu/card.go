@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 
 	"github.com/chenhg5/cc-connect/core"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
@@ -73,6 +74,9 @@ func renderCardMap(card *core.Card) map[string]any {
 		"config": map[string]any{
 			"wide_screen_mode": true,
 		},
+	}
+	if card == nil {
+		return result
 	}
 
 	if card.Header != nil && card.Header.Title != "" {
@@ -218,6 +222,10 @@ func renderCardMap(card *core.Card) map[string]any {
 
 // renderCard converts a core.Card into the Feishu Interactive Card JSON string.
 func renderCard(card *core.Card) string {
-	b, _ := json.Marshal(renderCardMap(card))
+	b, err := json.Marshal(renderCardMap(card))
+	if err != nil {
+		slog.Error("feishu: renderCard marshal failed", "error", err)
+		return `{"config":{"wide_screen_mode":true},"elements":[]}`
+	}
 	return string(b)
 }

@@ -36,6 +36,15 @@ func CheckAllowFrom(platform, allowFrom string) {
 	}
 }
 
+// RedactToken replaces a secret token in text with [REDACTED] to prevent
+// token leakage in logs or error messages.
+func RedactToken(text, token string) string {
+	if token == "" || text == "" {
+		return text
+	}
+	return strings.ReplaceAll(text, token, "[REDACTED]")
+}
+
 // AllowList checks whether a user ID is permitted based on a comma-separated
 // allow_from string. Returns true if allowFrom is empty or "*" (allow all),
 // or if the userID is in the list. Comparison is case-insensitive.

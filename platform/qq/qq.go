@@ -48,6 +48,7 @@ func New(opts map[string]any) (core.Platform, error) {
 	allowFrom, _ := opts["allow_from"].(string)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 
+	core.CheckAllowFrom("qq", allowFrom)
 	return &Platform{
 		wsURL:                 wsURL,
 		token:                 token,

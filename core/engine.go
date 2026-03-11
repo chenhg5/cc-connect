@@ -3260,6 +3260,10 @@ func supportsCards(p Platform) bool {
 // replyWithCard sends a structured card via CardSender.
 // For platforms without card support, renders as plain text (no intermediate fallback).
 func (e *Engine) replyWithCard(p Platform, replyCtx any, card *Card) {
+	if card == nil {
+		slog.Error("replyWithCard: nil card", "platform", p.Name())
+		return
+	}
 	if cs, ok := p.(CardSender); ok {
 		if err := cs.ReplyCard(e.ctx, replyCtx, card); err != nil {
 			slog.Error("card reply failed", "platform", p.Name(), "error", err)
@@ -3271,6 +3275,10 @@ func (e *Engine) replyWithCard(p Platform, replyCtx any, card *Card) {
 
 // sendWithCard sends a card as a new message (not a reply).
 func (e *Engine) sendWithCard(p Platform, replyCtx any, card *Card) {
+	if card == nil {
+		slog.Error("sendWithCard: nil card", "platform", p.Name())
+		return
+	}
 	if cs, ok := p.(CardSender); ok {
 		if err := cs.SendCard(e.ctx, replyCtx, card); err != nil {
 			slog.Error("card send failed", "platform", p.Name(), "error", err)
@@ -3559,13 +3567,15 @@ func (e *Engine) getOrCreateDeleteModeState(sessionKey string, p Platform, reply
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	if state.deleteMode == nil {
-		state.deleteMode = &deleteModeState{
-			page:        1,
-			selectedIDs: make(map[string]struct{}),
-			phase:       "select",
-		}
+		state.deleteMode = &deleteModeState{}
 	}
-	return state.deleteMode
+	dm := state.deleteMode
+	dm.page = 1
+	dm.phase = "select"
+	dm.hint = ""
+	dm.result = ""
+	dm.selectedIDs = make(map[string]struct{})
+	return dm
 }
 
 func (e *Engine) getDeleteModeState(sessionKey string) *deleteModeState {
@@ -5269,12 +5279,7 @@ func (e *Engine) cmdDelete(p Platform, msg *Message, args []string) {
 
 	if len(args) == 0 {
 		if supportsCards(p) {
-			dm := e.getOrCreateDeleteModeState(msg.SessionKey, p, msg.ReplyCtx)
-			dm.page = 1
-			dm.phase = "select"
-			dm.hint = ""
-			dm.result = ""
-			dm.selectedIDs = make(map[string]struct{})
+			_ = e.getOrCreateDeleteModeState(msg.SessionKey, p, msg.ReplyCtx)
 			e.replyWithCard(p, msg.ReplyCtx, e.renderDeleteModeCard(msg.SessionKey))
 			return
 		}

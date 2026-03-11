@@ -265,7 +265,7 @@ func (p *Platform) downloadSlackFile(url string) ([]byte, error) {
 	req.Header.Set("Authorization", "Bearer "+p.botToken)
 	resp, err := core.HTTPClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s", core.RedactToken(err.Error(), p.botToken))
 	}
 	defer resp.Body.Close()
 	return io.ReadAll(resp.Body)

@@ -522,8 +522,7 @@ func (p *Platform) downloadFile(fileID string) ([]byte, error) {
 
 	resp, err := p.httpClient.Get(link)
 	if err != nil {
-		// Redact bot token from error message to prevent token leakage in logs
-		errMsg := strings.ReplaceAll(err.Error(), p.bot.Token, "[REDACTED]")
+		errMsg := core.RedactToken(err.Error(), p.bot.Token)
 		return nil, fmt.Errorf("download file %s: %s", fileID, errMsg)
 	}
 	defer resp.Body.Close()

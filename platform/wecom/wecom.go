@@ -157,6 +157,7 @@ func New(opts map[string]any) (core.Platform, error) {
 
 	enableMarkdown, _ := opts["enable_markdown"].(bool)
 	allowFrom, _ := opts["allow_from"].(string)
+	core.CheckAllowFrom("wecom", allowFrom)
 
 	return &Platform{
 		corpID:         corpID,

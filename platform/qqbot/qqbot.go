@@ -117,6 +117,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		intents = int(v)
 	}
 
+	core.CheckAllowFrom("qqbot", allowFrom)
 	return &Platform{
 		appID:                 appID,
 		appSecret:             appSecret,

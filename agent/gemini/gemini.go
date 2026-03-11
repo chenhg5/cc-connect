@@ -54,9 +54,18 @@ func New(opts map[string]any) (core.Agent, error) {
 		cmd = "gemini"
 	}
 
-	timeoutMins, ok := opts["timeout_mins"].(int64)
-	if v, ok2 := opts["timeout_mins"]; ok && !ok2 {
-		slog.Debug("gemini: timeout_mins should be int64, got %T", v)
+	var timeoutMins int64
+	switch v := opts["timeout_mins"].(type) {
+	case int64:
+		timeoutMins = v
+	case int:
+		timeoutMins = int64(v)
+	case float64:
+		timeoutMins = int64(v)
+	default:
+		if v != nil {
+			slog.Debug("gemini: timeout_mins has unexpected type", "type", fmt.Sprintf("%T", v))
+		}
 	}
 	var timeout time.Duration
 	if timeoutMins > 0 {

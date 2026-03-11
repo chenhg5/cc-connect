@@ -225,6 +225,10 @@ func (s *iflowSession) readLoop(turn *iflowTurn, cmd *exec.Cmd, ptmx *os.File) {
 	<-watchDone
 	turn.stopResultTimer()
 
+	// Clear busy state before emitting events so callers can Send() immediately
+	// after receiving the event. The defer above serves as a safety net.
+	s.turnActive.Store(false)
+
 	termText := strings.TrimSpace(stripANSI(termBuf.String()))
 	if turn.readyForResult() {
 		turn.markResultSent()

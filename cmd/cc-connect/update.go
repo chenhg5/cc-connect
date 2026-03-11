@@ -74,7 +74,7 @@ func runUpdate() {
 
 		archiveTmp, archiveErr := downloadToTemp(archiveURL)
 		if archiveErr != nil {
-			fmt.Fprintf(os.Stderr, "Download failed: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Download failed: %v\n", archiveErr)
 			os.Exit(1)
 		}
 		defer os.Remove(archiveTmp)
