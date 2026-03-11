@@ -124,10 +124,11 @@ func (gs *geminiSession) Send(prompt string, images []core.ImageAttachment) (err
 
 	// Add timeout for each turn to prevent hanging processes
 	var cancel context.CancelFunc
+	var ctx context.Context
 	if gs.timeout > 0 {
-		gs.ctx, cancel = context.WithTimeout(gs.ctx, gs.timeout)
+		ctx, cancel = context.WithTimeout(gs.ctx, gs.timeout)
 	} else {
-		gs.ctx, cancel = context.WithCancel(gs.ctx)
+		ctx, cancel = context.WithCancel(gs.ctx)
 	}
 
 	// ensure cancel is called on early return errors
@@ -139,7 +140,7 @@ func (gs *geminiSession) Send(prompt string, images []core.ImageAttachment) (err
 	}()
 
 	slog.Debug("geminiSession: launching", "resume", isResume, "args", core.RedactArgs(args))
-	cmd := exec.CommandContext(gs.ctx, gs.cmd, args...)
+	cmd := exec.CommandContext(ctx, gs.cmd, args...)
 	// Set a short WaitDelay to ensure I/O goroutines don't block for long after the context is done
 	cmd.WaitDelay = 1 * time.Second
 	cmd.Dir = gs.workDir
@@ -165,13 +166,13 @@ func (gs *geminiSession) Send(prompt string, images []core.ImageAttachment) (err
 	gs.wg.Add(1)
 	go func() {
 		defer cancel()
-		gs.readLoop(cmd, stdout, &stderrBuf, imageRefs)
+		gs.readLoop(ctx, cmd, stdout, &stderrBuf, imageRefs)
 	}()
 
 	return nil
 }
 
-func (gs *geminiSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer, tempImages []string) {
+func (gs *geminiSession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer, tempImages []string) {
 	defer gs.wg.Done()
 	defer func() {
 		// Clean up temp image files
@@ -194,7 +195,7 @@ func (gs *geminiSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf
 
 	// Unblock scanner if context is canceled
 	go func() {
-		<-gs.ctx.Done()
+		<-ctx.Done()
 		stdout.Close()
 	}()
 
