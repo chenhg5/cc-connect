@@ -633,7 +633,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/list\n  List agent sessions\n\n" +
 			"/search <keyword>\n  Search sessions by name or ID\n\n" +
 			"/switch <number>\n  Resume a session by its list number\n\n" +
-			"/delete <number>\n  Delete a session by its list number\n\n" +
+			"/delete <number>|1,2,3|3-7|1,3-5,8\n  Delete sessions by list number(s)\n\n" +
 			"/name [number] <text>\n  Name a session for easy identification\n\n" +
 			"/current\n  Show current active session\n\n" +
 			"/history [n]\n  Show last n messages (default 10)\n\n" +
@@ -669,7 +669,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/list\n  列出 Agent 会话列表\n\n" +
 			"/search <关键词>\n  搜索会话名称或 ID\n\n" +
 			"/switch <序号>\n  按列表序号切换会话\n\n" +
-			"/delete <序号>\n  按列表序号删除会话\n\n" +
+			"/delete <序号>|1,2,3|3-7|1,3-5,8\n  按列表序号批量/单个删除会话\n\n" +
 			"/name [序号] <名称>\n  给会话命名，方便识别\n\n" +
 			"/current\n  查看当前活跃会话\n\n" +
 			"/history [n]\n  查看最近 n 条消息（默认 10）\n\n" +
@@ -705,7 +705,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/list\n  列出 Agent 會話列表\n\n" +
 			"/search <關鍵詞>\n  搜尋會話名稱或 ID\n\n" +
 			"/switch <序號>\n  按列表序號切換會話\n\n" +
-			"/delete <序號>\n  按列表序號刪除會話\n\n" +
+			"/delete <序號>|1,2,3|3-7|1,3-5,8\n  按列表序號批量/單筆刪除會話\n\n" +
 			"/name [序號] <名稱>\n  為會話命名，方便辨識\n\n" +
 			"/current\n  查看當前活躍會話\n\n" +
 			"/history [n]\n  查看最近 n 條訊息（預設 10）\n\n" +
@@ -740,7 +740,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/new [名前]\n  新しいセッションを開始\n\n" +
 			"/list\n  エージェントセッション一覧\n\n" +
 			"/switch <番号>\n  リスト番号でセッションを切り替え\n\n" +
-			"/delete <番号>\n  リスト番号でセッションを削除\n\n" +
+			"/delete <番号>|1,2,3|3-7|1,3-5,8\n  リスト番号でセッションを単体/複数削除\n\n" +
 			"/name [番号] <名前>\n  セッションに名前を付ける\n\n" +
 			"/current\n  現在のアクティブセッションを表示\n\n" +
 			"/history [n]\n  直近 n 件のメッセージを表示（デフォルト 10）\n\n" +
@@ -775,7 +775,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/new [nombre]\n  Iniciar una nueva sesión\n\n" +
 			"/list\n  Listar sesiones del agente\n\n" +
 			"/switch <número>\n  Reanudar sesión por su número en la lista\n\n" +
-			"/delete <número>\n  Eliminar sesión por su número en la lista\n\n" +
+			"/delete <número>|1,2,3|3-7|1,3-5,8\n  Eliminar una o varias sesiones por número de lista\n\n" +
 			"/name [número] <texto>\n  Nombrar una sesión para fácil identificación\n\n" +
 			"/current\n  Mostrar sesión activa actual\n\n" +
 			"/history [n]\n  Mostrar últimos n mensajes (por defecto 10)\n\n" +
@@ -820,7 +820,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/list — List agent sessions\n" +
 			"/search <keyword> — Search sessions\n" +
 			"/switch <number> — Resume a session\n" +
-			"/delete <number> — Delete a session\n" +
+			"/delete <number>|1,2,3|3-7|1,3-5,8 — Delete session(s)\n" +
 			"/name [number] <text> — Name a session\n" +
 			"/current — Show active session\n" +
 			"/history [n] — Show last n messages",
@@ -829,7 +829,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/list — 列出会话列表\n" +
 			"/search <关键词> — 搜索会话\n" +
 			"/switch <序号> — 切换会话\n" +
-			"/delete <序号> — 删除会话\n" +
+			"/delete <序号>|1,2,3|3-7|1,3-5,8 — 删除会话\n" +
 			"/name [序号] <名称> — 命名会话\n" +
 			"/current — 查看当前会话\n" +
 			"/history [n] — 查看最近 n 条消息",
@@ -838,7 +838,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/list — 列出會話列表\n" +
 			"/search <關鍵詞> — 搜尋會話\n" +
 			"/switch <序號> — 切換會話\n" +
-			"/delete <序號> — 刪除會話\n" +
+			"/delete <序號>|1,2,3|3-7|1,3-5,8 — 刪除會話\n" +
 			"/name [序號] <名稱> — 命名會話\n" +
 			"/current — 查看當前會話\n" +
 			"/history [n] — 查看最近 n 條訊息",
@@ -847,7 +847,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/list — セッション一覧\n" +
 			"/search <キーワード> — セッション検索\n" +
 			"/switch <番号> — セッション切り替え\n" +
-			"/delete <番号> — セッション削除\n" +
+			"/delete <番号>|1,2,3|3-7|1,3-5,8 — セッション削除\n" +
 			"/name [番号] <名前> — セッションに名前を付ける\n" +
 			"/current — 現在のセッションを表示\n" +
 			"/history [n] — 直近 n 件のメッセージを表示",
@@ -856,7 +856,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/list — Listar sesiones\n" +
 			"/search <keyword> — Buscar sesiones\n" +
 			"/switch <número> — Reanudar sesión\n" +
-			"/delete <número> — Eliminar sesión\n" +
+			"/delete <número>|1,2,3|3-7|1,3-5,8 — Eliminar sesión(es)\n" +
 			"/name [número] <texto> — Nombrar sesión\n" +
 			"/current — Mostrar sesión activa\n" +
 			"/history [n] — Mostrar últimos n mensajes",
@@ -2133,11 +2133,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "✅ Nueva sesión creada: **%s**",
 	},
 	MsgDeleteUsage: {
-		LangEnglish:            "Usage: `/delete <number>` — delete a session by its list number.\nUse `/list` to see session numbers.",
-		LangChinese:            "用法：`/delete <序号>` — 按列表序号删除会话。\n使用 `/list` 查看会话序号。",
-		LangTraditionalChinese: "用法：`/delete <序號>` — 按列表序號刪除會話。\n使用 `/list` 查看會話序號。",
-		LangJapanese:           "使い方：`/delete <番号>` — リスト番号でセッションを削除。\n`/list` で番号を確認できます。",
-		LangSpanish:            "Uso: `/delete <número>` — eliminar sesión por número de lista.\nUse `/list` para ver los números.",
+		LangEnglish:            "Usage: `/delete <number>` or `/delete 1,2,3` or `/delete 3-7` or `/delete 1,3-5,8`.\nUse `/list` to see session numbers.",
+		LangChinese:            "用法：`/delete <序号>`，或 `/delete 1,2,3`，或 `/delete 3-7`，或 `/delete 1,3-5,8`。\n使用 `/list` 查看会话序号。",
+		LangTraditionalChinese: "用法：`/delete <序號>`，或 `/delete 1,2,3`，或 `/delete 3-7`，或 `/delete 1,3-5,8`。\n使用 `/list` 查看會話序號。",
+		LangJapanese:           "使い方：`/delete <番号>`、または `/delete 1,2,3`、または `/delete 3-7`、または `/delete 1,3-5,8`。\n`/list` で番号を確認できます。",
+		LangSpanish:            "Uso: `/delete <número>` o `/delete 1,2,3` o `/delete 3-7` o `/delete 1,3-5,8`.\nUse `/list` para ver los números.",
 	},
 	MsgDeleteSuccess: {
 		LangEnglish:            "🗑️ Session deleted: %s",
@@ -2355,11 +2355,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Reanudar sesión por su número en la lista, arg: <número>",
 	},
 	MsgBuiltinCmdDelete: {
-		LangEnglish:            "Delete a session by its list number, arg: <number>",
-		LangChinese:            "按列表序号删除会话，参数: <序号>",
-		LangTraditionalChinese: "按列表序號刪除會話，參數: <序號>",
-		LangJapanese:           "リスト番号でセッションを削除、引数: <番号>",
-		LangSpanish:            "Eliminar sesión por su número en la lista, arg: <número>",
+		LangEnglish:            "Delete session(s) by list number, args: <number> | 1,2,3 | 3-7 | 1,3-5,8",
+		LangChinese:            "按列表序号删除会话，参数: <序号> | 1,2,3 | 3-7 | 1,3-5,8",
+		LangTraditionalChinese: "按列表序號刪除會話，參數: <序號> | 1,2,3 | 3-7 | 1,3-5,8",
+		LangJapanese:           "リスト番号でセッションを削除、引数: <番号> | 1,2,3 | 3-7 | 1,3-5,8",
+		LangSpanish:            "Eliminar sesión(es) por número de lista, args: <número> | 1,2,3 | 3-7 | 1,3-5,8",
 	},
 	MsgBuiltinCmdName: {
 		LangEnglish:            "Name a session for easy identification, arg: [number] <text>",

@@ -141,6 +141,20 @@ func (a *stubListAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, err
 	return a.sessions, nil
 }
 
+type stubDeleteAgent struct {
+	stubListAgent
+	deleted []string
+	errByID map[string]error
+}
+
+func (a *stubDeleteAgent) DeleteSession(_ context.Context, sessionID string) error {
+	if err := a.errByID[sessionID]; err != nil {
+		return err
+	}
+	a.deleted = append(a.deleted, sessionID)
+	return nil
+}
+
 type stubProviderAgent struct {
 	stubAgent
 	providers []ProviderConfig
@@ -554,6 +568,130 @@ func TestCmdCurrent_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	}
 	if strings.Contains(p.sent[0], "cc-connect") {
 		t.Fatalf("current text = %q, should not be card fallback title", p.sent[0])
+	}
+}
+
+func TestCmdDelete_BatchCommaList(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubDeleteAgent{stubListAgent: stubListAgent{sessions: []AgentSessionInfo{
+		{ID: "session-1", Summary: "One"},
+		{ID: "session-2", Summary: "Two"},
+		{ID: "session-3", Summary: "Three"},
+		{ID: "session-4", Summary: "Four"},
+	}}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	e.cmdDelete(p, msg, []string{"1,2,3"})
+
+	if got, want := strings.Join(agent.deleted, ","), "session-1,session-2,session-3"; got != want {
+		t.Fatalf("deleted = %q, want %q", got, want)
+	}
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "Session deleted: One") || !strings.Contains(p.sent[0], "Session deleted: Three") {
+		t.Fatalf("reply = %q, want combined delete summary", p.sent[0])
+	}
+}
+
+func TestCmdDelete_BatchRange(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubDeleteAgent{stubListAgent: stubListAgent{sessions: []AgentSessionInfo{
+		{ID: "session-1", Summary: "One"},
+		{ID: "session-2", Summary: "Two"},
+		{ID: "session-3", Summary: "Three"},
+		{ID: "session-4", Summary: "Four"},
+		{ID: "session-5", Summary: "Five"},
+		{ID: "session-6", Summary: "Six"},
+		{ID: "session-7", Summary: "Seven"},
+		{ID: "session-8", Summary: "Eight"},
+	}}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	e.cmdDelete(p, msg, []string{"3-7"})
+
+	if got, want := strings.Join(agent.deleted, ","), "session-3,session-4,session-5,session-6,session-7"; got != want {
+		t.Fatalf("deleted = %q, want %q", got, want)
+	}
+}
+
+func TestCmdDelete_BatchMixedSyntax(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubDeleteAgent{stubListAgent: stubListAgent{sessions: []AgentSessionInfo{
+		{ID: "session-1", Summary: "One"},
+		{ID: "session-2", Summary: "Two"},
+		{ID: "session-3", Summary: "Three"},
+		{ID: "session-4", Summary: "Four"},
+		{ID: "session-5", Summary: "Five"},
+		{ID: "session-6", Summary: "Six"},
+		{ID: "session-7", Summary: "Seven"},
+		{ID: "session-8", Summary: "Eight"},
+	}}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	e.cmdDelete(p, msg, []string{"1,3-5,8"})
+
+	if got, want := strings.Join(agent.deleted, ","), "session-1,session-3,session-4,session-5,session-8"; got != want {
+		t.Fatalf("deleted = %q, want %q", got, want)
+	}
+}
+
+func TestCmdDelete_InvalidExplicitBatchSyntaxShowsUsage(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubDeleteAgent{stubListAgent: stubListAgent{sessions: []AgentSessionInfo{
+		{ID: "session-1", Summary: "One"},
+		{ID: "session-2", Summary: "Two"},
+		{ID: "session-3", Summary: "Three"},
+	}}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	e.cmdDelete(p, msg, []string{"1,3-a,8"})
+
+	if len(agent.deleted) != 0 {
+		t.Fatalf("deleted = %v, want none", agent.deleted)
+	}
+	if len(p.sent) != 1 || p.sent[0] != e.i18n.T(MsgDeleteUsage) {
+		t.Fatalf("sent = %v, want usage", p.sent)
+	}
+}
+
+func TestCmdDelete_WhitespaceSeparatedArgsAreRejected(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubDeleteAgent{stubListAgent: stubListAgent{sessions: []AgentSessionInfo{
+		{ID: "session-1", Summary: "One"},
+		{ID: "session-2", Summary: "Two"},
+		{ID: "session-3", Summary: "Three"},
+	}}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	e.cmdDelete(p, msg, []string{"1", "2", "3"})
+
+	if len(agent.deleted) != 0 {
+		t.Fatalf("deleted = %v, want none", agent.deleted)
+	}
+	if len(p.sent) != 1 || p.sent[0] != e.i18n.T(MsgDeleteUsage) {
+		t.Fatalf("sent = %v, want usage", p.sent)
+	}
+}
+
+func TestCmdDelete_SingleSessionPrefixStillWorks(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubDeleteAgent{stubListAgent: stubListAgent{sessions: []AgentSessionInfo{
+		{ID: "abc123456789", Summary: "One"},
+		{ID: "def987654321", Summary: "Two"},
+	}}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	e.cmdDelete(p, msg, []string{"abc123"})
+
+	if got, want := strings.Join(agent.deleted, ","), "abc123456789"; got != want {
+		t.Fatalf("deleted = %q, want %q", got, want)
 	}
 }
 func TestExecuteCardActionStop_PreservesQuietStateWithoutCleanupReinsert(t *testing.T) {

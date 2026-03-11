@@ -4977,6 +4977,10 @@ func (e *Engine) cmdDelete(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDeleteUsage))
 		return
 	}
+	if len(args) > 1 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDeleteUsage))
+		return
+	}
 
 	agentSessions, err := e.agent.ListSessions(e.ctx)
 	if err != nil {
@@ -4985,6 +4989,15 @@ func (e *Engine) cmdDelete(p Platform, msg *Message, args []string) {
 	}
 
 	prefix := strings.TrimSpace(args[0])
+	if isExplicitDeleteBatchArg(prefix) {
+		indices, err := parseDeleteBatchIndices(prefix, len(agentSessions))
+		if err != nil {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDeleteUsage))
+			return
+		}
+		e.cmdDeleteBatch(p, msg, deleter, agentSessions, indices)
+		return
+	}
 	var matched *AgentSessionInfo
 
 	if idx, err := strconv.Atoi(prefix); err == nil && idx >= 1 && idx <= len(agentSessions) {
@@ -5003,13 +5016,122 @@ func (e *Engine) cmdDelete(p Platform, msg *Message, args []string) {
 		return
 	}
 
+	e.deleteSingleSession(p, msg, deleter, matched)
+}
+
+func isExplicitDeleteBatchArg(arg string) bool {
+	if strings.Contains(arg, ",") {
+		return true
+	}
+	if !strings.Contains(arg, "-") {
+		return false
+	}
+	for _, r := range arg {
+		if (r < '0' || r > '9') && r != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func parseDeleteBatchIndices(spec string, max int) ([]int, error) {
+	parts := strings.Split(spec, ",")
+	if len(parts) == 0 {
+		return nil, fmt.Errorf("empty batch spec")
+	}
+	seen := make(map[int]struct{}, len(parts))
+	indices := make([]int, 0, len(parts))
+
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return nil, fmt.Errorf("empty batch item")
+		}
+
+		if strings.Contains(part, "-") {
+			bounds := strings.Split(part, "-")
+			if len(bounds) != 2 || bounds[0] == "" || bounds[1] == "" {
+				return nil, fmt.Errorf("invalid range %q", part)
+			}
+			start, err := strconv.Atoi(bounds[0])
+			if err != nil {
+				return nil, err
+			}
+			end, err := strconv.Atoi(bounds[1])
+			if err != nil {
+				return nil, err
+			}
+			if start < 1 || end < 1 || start > end || end > max {
+				return nil, fmt.Errorf("range %q out of bounds", part)
+			}
+			for idx := start; idx <= end; idx++ {
+				if _, ok := seen[idx]; ok {
+					continue
+				}
+				seen[idx] = struct{}{}
+				indices = append(indices, idx)
+			}
+			continue
+		}
+
+		idx, err := strconv.Atoi(part)
+		if err != nil {
+			return nil, err
+		}
+		if idx < 1 || idx > max {
+			return nil, fmt.Errorf("index %d out of bounds", idx)
+		}
+		if _, ok := seen[idx]; ok {
+			continue
+		}
+		seen[idx] = struct{}{}
+		indices = append(indices, idx)
+	}
+
+	return indices, nil
+}
+
+func (e *Engine) cmdDeleteBatch(p Platform, msg *Message, deleter SessionDeleter, sessions []AgentSessionInfo, indices []int) {
+	lines := make([]string, 0, len(indices))
+	for _, idx := range indices {
+		matched := &sessions[idx-1]
+		if line := e.deleteSingleSessionReply(msg, deleter, matched); line != "" {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) == 0 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDeleteUsage))
+		return
+	}
+	e.reply(p, msg.ReplyCtx, strings.Join(lines, "\n"))
+}
+
+func (e *Engine) deleteSingleSession(p Platform, msg *Message, deleter SessionDeleter, matched *AgentSessionInfo) {
+	e.reply(p, msg.ReplyCtx, e.deleteSingleSessionReply(msg, deleter, matched))
+}
+
+func (e *Engine) deleteSingleSessionReply(msg *Message, deleter SessionDeleter, matched *AgentSessionInfo) string {
+	if matched == nil {
+		return ""
+	}
+
 	// Prevent deleting the currently active session
 	activeSession := e.sessions.GetOrCreateActive(msg.SessionKey)
 	if activeSession.AgentSessionID == matched.ID {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDeleteActiveDenied))
-		return
+		return e.i18n.T(MsgDeleteActiveDenied)
 	}
 
+	displayName := e.deleteSessionDisplayName(matched)
+
+	if err := deleter.DeleteSession(e.ctx, matched.ID); err != nil {
+		return fmt.Sprintf("❌ %s: %v", displayName, err)
+	}
+
+	e.sessions.SetSessionName(matched.ID, "")
+	return fmt.Sprintf(e.i18n.T(MsgDeleteSuccess), displayName)
+}
+
+func (e *Engine) deleteSessionDisplayName(matched *AgentSessionInfo) string {
 	displayName := e.sessions.GetSessionName(matched.ID)
 	if displayName == "" {
 		displayName = matched.Summary
@@ -5021,14 +5143,7 @@ func (e *Engine) cmdDelete(p Platform, msg *Message, args []string) {
 		}
 		displayName = shortID
 	}
-
-	if err := deleter.DeleteSession(e.ctx, matched.ID); err != nil {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
-		return
-	}
-
-	e.sessions.SetSessionName(matched.ID, "")
-	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgDeleteSuccess), displayName))
+	return displayName
 }
 
 // truncateIf truncates s to maxLen runes. 0 means no truncation.
