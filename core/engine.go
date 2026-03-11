@@ -180,6 +180,15 @@ type interactiveState struct {
 	approveAll   bool // when true, auto-approve all permission requests for this session
 	quiet        bool // when true, suppress thinking and tool progress for this session
 	fromVoice    bool // true if current turn originated from voice transcription
+	deleteMode   *deleteModeState
+}
+
+type deleteModeState struct {
+	page        int
+	selectedIDs map[string]struct{}
+	phase       string
+	hint        string
+	result      string
 }
 
 // pendingPermission represents a permission request waiting for user response.
@@ -3349,6 +3358,11 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 		return e.renderStatusCard(sessionKey)
 	case "/switch":
 		return e.renderListCardSafe(sessionKey, 1)
+	case "/delete-mode":
+		if strings.HasPrefix(args, "cancel") {
+			return e.renderListCardSafe(sessionKey, 1)
+		}
+		return e.renderDeleteModeCard(sessionKey)
 	case "/stop":
 		return e.renderStatusCard(sessionKey)
 	case "/upgrade":
@@ -3462,6 +3476,9 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		e.cleanupInteractiveState(sessionKey)
 		e.sessions.NewSession(sessionKey, "")
 
+	case "/delete-mode":
+		e.executeDeleteModeAction(sessionKey, args)
+
 	case "/quiet":
 		e.interactiveMu.Lock()
 		state, ok := e.interactiveStates[sessionKey]
@@ -3525,6 +3542,270 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 			go agentSession.Close()
 		}
 	}
+}
+
+func (e *Engine) getOrCreateDeleteModeState(sessionKey string, p Platform, replyCtx any) *deleteModeState {
+	e.interactiveMu.Lock()
+	state, ok := e.interactiveStates[sessionKey]
+	if !ok || state == nil {
+		state = &interactiveState{platform: p, replyCtx: replyCtx}
+		e.interactiveStates[sessionKey] = state
+	} else {
+		state.platform = p
+		state.replyCtx = replyCtx
+	}
+	e.interactiveMu.Unlock()
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.deleteMode == nil {
+		state.deleteMode = &deleteModeState{
+			page:        1,
+			selectedIDs: make(map[string]struct{}),
+			phase:       "select",
+		}
+	}
+	return state.deleteMode
+}
+
+func (e *Engine) getDeleteModeState(sessionKey string) *deleteModeState {
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[sessionKey]
+	e.interactiveMu.Unlock()
+	if state == nil {
+		return nil
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.deleteMode == nil {
+		return nil
+	}
+	cp := &deleteModeState{
+		page:        state.deleteMode.page,
+		selectedIDs: make(map[string]struct{}, len(state.deleteMode.selectedIDs)),
+		phase:       state.deleteMode.phase,
+		hint:        state.deleteMode.hint,
+		result:      state.deleteMode.result,
+	}
+	for id := range state.deleteMode.selectedIDs {
+		cp.selectedIDs[id] = struct{}{}
+	}
+	return cp
+}
+
+func (e *Engine) clearDeleteModeState(sessionKey string) {
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[sessionKey]
+	e.interactiveMu.Unlock()
+	if state == nil {
+		return
+	}
+	state.mu.Lock()
+	state.deleteMode = nil
+	state.mu.Unlock()
+}
+
+func (e *Engine) renderDeleteModeCard(sessionKey string) *Card {
+	agentSessions, err := e.agent.ListSessions(e.ctx)
+	if err != nil {
+		return e.simpleCard(e.i18n.T(MsgDeleteModeTitle), "red", err.Error())
+	}
+	dm := e.getDeleteModeState(sessionKey)
+	if dm == nil {
+		return e.simpleCard(e.i18n.T(MsgDeleteModeTitle), "red", e.i18n.T(MsgDeleteUsage))
+	}
+	switch dm.phase {
+	case "confirm":
+		return e.renderDeleteModeConfirmCard(dm, agentSessions)
+	case "result":
+		return e.renderDeleteModeResultCard(dm)
+	default:
+		return e.renderDeleteModeSelectCard(sessionKey, dm, agentSessions)
+	}
+}
+
+func (e *Engine) renderDeleteModeSelectCard(sessionKey string, dm *deleteModeState, agentSessions []AgentSessionInfo) *Card {
+	if len(agentSessions) == 0 {
+		return e.simpleCard(e.i18n.T(MsgDeleteModeTitle), "red", e.i18n.T(MsgListEmpty))
+	}
+	total := len(agentSessions)
+	totalPages := (total + listPageSize - 1) / listPageSize
+	page := dm.page
+	if page < 1 {
+		page = 1
+	}
+	if page > totalPages {
+		page = totalPages
+	}
+	start := (page - 1) * listPageSize
+	end := start + listPageSize
+	if end > total {
+		end = total
+	}
+
+	cb := NewCard().Title(e.i18n.T(MsgDeleteModeTitle), "carmine")
+	for i := start; i < end; i++ {
+		s := agentSessions[i]
+		marker := "◻"
+		if _, ok := dm.selectedIDs[s.ID]; ok {
+			marker = "☑"
+		}
+		if active := e.sessions.GetOrCreateActive(sessionKey).AgentSessionID; active == s.ID {
+			marker += " ▶"
+		}
+		btnText := e.i18n.T(MsgDeleteModeSelect)
+		btnType := "default"
+		if _, ok := dm.selectedIDs[s.ID]; ok {
+			btnText = e.i18n.T(MsgDeleteModeSelected)
+			btnType = "primary"
+		}
+		cb.ListItemBtn(
+			e.i18n.Tf(MsgListItem, marker, i+1, e.deleteSessionDisplayName(&s), s.MessageCount, s.ModifiedAt.Format("01-02 15:04")),
+			btnText,
+			btnType,
+			fmt.Sprintf("act:/delete-mode toggle %s", s.ID),
+		)
+	}
+	cb.Note(e.i18n.Tf(MsgDeleteModeSelectedCount, len(dm.selectedIDs)))
+	if dm.hint != "" {
+		cb.Note(dm.hint)
+	}
+	cb.Buttons(
+		DangerBtn(e.i18n.T(MsgDeleteModeDeleteSelected), "act:/delete-mode confirm"),
+		DefaultBtn(e.i18n.T(MsgDeleteModeCancel), "act:/delete-mode cancel"),
+	)
+
+	var navBtns []CardButton
+	if page > 1 {
+		navBtns = append(navBtns, DefaultBtn(e.i18n.T(MsgCardPrev), fmt.Sprintf("act:/delete-mode page %d", page-1)))
+	}
+	if page < totalPages {
+		navBtns = append(navBtns, DefaultBtn(e.i18n.T(MsgCardNext), fmt.Sprintf("act:/delete-mode page %d", page+1)))
+	}
+	if len(navBtns) > 0 {
+		cb.Buttons(navBtns...)
+	}
+	return cb.Build()
+}
+
+func (e *Engine) renderDeleteModeConfirmCard(dm *deleteModeState, agentSessions []AgentSessionInfo) *Card {
+	selectedNames := e.deleteModeSelectionNames(dm, agentSessions)
+	body := strings.Join(selectedNames, "\n")
+	if body == "" {
+		body = e.i18n.T(MsgDeleteModeEmptySelection)
+	}
+	return NewCard().
+		Title(e.i18n.T(MsgDeleteModeConfirmTitle), "carmine").
+		Markdown(body).
+		Buttons(
+			DangerBtn(e.i18n.T(MsgDeleteModeConfirmButton), "act:/delete-mode submit"),
+			DefaultBtn(e.i18n.T(MsgDeleteModeBackButton), "act:/delete-mode back"),
+		).
+		Build()
+}
+
+func (e *Engine) renderDeleteModeResultCard(dm *deleteModeState) *Card {
+	return NewCard().
+		Title(e.i18n.T(MsgDeleteModeResultTitle), "turquoise").
+		Markdown(dm.result).
+		Buttons(DefaultBtn(e.i18n.T(MsgCardBack), "nav:/list 1")).
+		Build()
+}
+
+func (e *Engine) deleteModeSelectionNames(dm *deleteModeState, agentSessions []AgentSessionInfo) []string {
+	names := make([]string, 0, len(dm.selectedIDs))
+	for i := range agentSessions {
+		if _, ok := dm.selectedIDs[agentSessions[i].ID]; ok {
+			names = append(names, "- "+e.deleteSessionDisplayName(&agentSessions[i]))
+		}
+	}
+	return names
+}
+
+func (e *Engine) executeDeleteModeAction(sessionKey, args string) {
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[sessionKey]
+	e.interactiveMu.Unlock()
+	if state == nil {
+		return
+	}
+
+	fields := strings.Fields(args)
+	if len(fields) == 0 {
+		return
+	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.deleteMode == nil {
+		return
+	}
+
+	dm := state.deleteMode
+	switch fields[0] {
+	case "toggle":
+		if len(fields) < 2 {
+			return
+		}
+		id := fields[1]
+		if _, ok := dm.selectedIDs[id]; ok {
+			delete(dm.selectedIDs, id)
+		} else {
+			dm.selectedIDs[id] = struct{}{}
+		}
+		dm.phase = "select"
+		dm.hint = ""
+	case "page":
+		if len(fields) < 2 {
+			return
+		}
+		if n, err := strconv.Atoi(fields[1]); err == nil && n > 0 {
+			dm.page = n
+		}
+		dm.phase = "select"
+	case "confirm":
+		if len(dm.selectedIDs) == 0 {
+			dm.phase = "select"
+			dm.hint = e.i18n.T(MsgDeleteModeEmptySelection)
+			return
+		}
+		dm.phase = "confirm"
+		dm.hint = ""
+	case "back":
+		dm.phase = "select"
+	case "submit":
+		lines := e.submitDeleteModeSelection(sessionKey, dm)
+		dm.selectedIDs = make(map[string]struct{})
+		dm.result = strings.Join(lines, "\n")
+		dm.hint = ""
+		dm.phase = "result"
+	case "cancel":
+		state.deleteMode = nil
+	}
+}
+
+func (e *Engine) submitDeleteModeSelection(sessionKey string, dm *deleteModeState) []string {
+	deleter, ok := e.agent.(SessionDeleter)
+	if !ok {
+		return []string{e.i18n.T(MsgDeleteNotSupported)}
+	}
+	agentSessions, err := e.agent.ListSessions(e.ctx)
+	if err != nil {
+		return []string{fmt.Sprintf("❌ %v", err)}
+	}
+	lines := make([]string, 0, len(dm.selectedIDs))
+	for i := range agentSessions {
+		if _, ok := dm.selectedIDs[agentSessions[i].ID]; !ok {
+			continue
+		}
+		if line := e.deleteSingleSessionReply(&Message{SessionKey: sessionKey}, deleter, &agentSessions[i]); line != "" {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) == 0 {
+		lines = append(lines, e.i18n.T(MsgDeleteModeEmptySelection))
+	}
+	return lines
 }
 
 func (e *Engine) renderLangCard() *Card {
@@ -4974,6 +5255,16 @@ func (e *Engine) cmdDelete(p Platform, msg *Message, args []string) {
 	}
 
 	if len(args) == 0 {
+		if supportsCards(p) {
+			dm := e.getOrCreateDeleteModeState(msg.SessionKey, p, msg.ReplyCtx)
+			dm.page = 1
+			dm.phase = "select"
+			dm.hint = ""
+			dm.result = ""
+			dm.selectedIDs = make(map[string]struct{})
+			e.replyWithCard(p, msg.ReplyCtx, e.renderDeleteModeCard(msg.SessionKey))
+			return
+		}
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDeleteUsage))
 		return
 	}

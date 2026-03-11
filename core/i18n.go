@@ -342,10 +342,21 @@ const (
 	MsgNewSessionCreated     MsgKey = "new_session_created"
 	MsgNewSessionCreatedName MsgKey = "new_session_created_name"
 
-	MsgDeleteUsage        MsgKey = "delete_usage"
-	MsgDeleteSuccess      MsgKey = "delete_success"
-	MsgDeleteActiveDenied MsgKey = "delete_active_denied"
-	MsgDeleteNotSupported MsgKey = "delete_not_supported"
+	MsgDeleteUsage              MsgKey = "delete_usage"
+	MsgDeleteSuccess            MsgKey = "delete_success"
+	MsgDeleteActiveDenied       MsgKey = "delete_active_denied"
+	MsgDeleteNotSupported       MsgKey = "delete_not_supported"
+	MsgDeleteModeTitle          MsgKey = "delete_mode_title"
+	MsgDeleteModeSelect         MsgKey = "delete_mode_select"
+	MsgDeleteModeSelected       MsgKey = "delete_mode_selected"
+	MsgDeleteModeSelectedCount  MsgKey = "delete_mode_selected_count"
+	MsgDeleteModeDeleteSelected MsgKey = "delete_mode_delete_selected"
+	MsgDeleteModeCancel         MsgKey = "delete_mode_cancel"
+	MsgDeleteModeConfirmTitle   MsgKey = "delete_mode_confirm_title"
+	MsgDeleteModeConfirmButton  MsgKey = "delete_mode_confirm_button"
+	MsgDeleteModeBackButton     MsgKey = "delete_mode_back_button"
+	MsgDeleteModeEmptySelection MsgKey = "delete_mode_empty_selection"
+	MsgDeleteModeResultTitle    MsgKey = "delete_mode_result_title"
 
 	MsgSwitchSuccess   MsgKey = "switch_success"
 	MsgSwitchNoMatch   MsgKey = "switch_no_match"
@@ -2187,6 +2198,83 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 當前 Agent 不支持刪除會話。",
 		LangJapanese:           "❌ このエージェントはセッション削除をサポートしていません。",
 		LangSpanish:            "❌ Este agente no admite la eliminación de sesiones.",
+	},
+	MsgDeleteModeTitle: {
+		LangEnglish:            "Delete Sessions",
+		LangChinese:            "删除会话",
+		LangTraditionalChinese: "刪除會話",
+		LangJapanese:           "セッション削除",
+		LangSpanish:            "Eliminar sesiones",
+	},
+	MsgDeleteModeSelect: {
+		LangEnglish:            "Select",
+		LangChinese:            "选择",
+		LangTraditionalChinese: "選擇",
+		LangJapanese:           "選択",
+		LangSpanish:            "Seleccionar",
+	},
+	MsgDeleteModeSelected: {
+		LangEnglish:            "Selected",
+		LangChinese:            "已选",
+		LangTraditionalChinese: "已選",
+		LangJapanese:           "選択済み",
+		LangSpanish:            "Seleccionado",
+	},
+	MsgDeleteModeSelectedCount: {
+		LangEnglish:            "%d selected",
+		LangChinese:            "已选 %d 项",
+		LangTraditionalChinese: "已選 %d 項",
+		LangJapanese:           "%d 件を選択中",
+		LangSpanish:            "%d seleccionadas",
+	},
+	MsgDeleteModeDeleteSelected: {
+		LangEnglish:            "Delete Selected",
+		LangChinese:            "删除已选",
+		LangTraditionalChinese: "刪除已選",
+		LangJapanese:           "選択項目を削除",
+		LangSpanish:            "Eliminar seleccionadas",
+	},
+	MsgDeleteModeCancel: {
+		LangEnglish:            "Cancel",
+		LangChinese:            "取消",
+		LangTraditionalChinese: "取消",
+		LangJapanese:           "キャンセル",
+		LangSpanish:            "Cancelar",
+	},
+	MsgDeleteModeConfirmTitle: {
+		LangEnglish:            "Confirm Delete",
+		LangChinese:            "确认删除",
+		LangTraditionalChinese: "確認刪除",
+		LangJapanese:           "削除確認",
+		LangSpanish:            "Confirmar eliminación",
+	},
+	MsgDeleteModeConfirmButton: {
+		LangEnglish:            "Confirm Delete",
+		LangChinese:            "确认删除",
+		LangTraditionalChinese: "確認刪除",
+		LangJapanese:           "削除を確認",
+		LangSpanish:            "Confirmar eliminación",
+	},
+	MsgDeleteModeBackButton: {
+		LangEnglish:            "Back",
+		LangChinese:            "返回继续选择",
+		LangTraditionalChinese: "返回繼續選擇",
+		LangJapanese:           "選択に戻る",
+		LangSpanish:            "Volver",
+	},
+	MsgDeleteModeEmptySelection: {
+		LangEnglish:            "Select at least one session.",
+		LangChinese:            "请至少选择一个会话。",
+		LangTraditionalChinese: "請至少選擇一個會話。",
+		LangJapanese:           "少なくとも 1 つのセッションを選択してください。",
+		LangSpanish:            "Seleccione al menos una sesión.",
+	},
+	MsgDeleteModeResultTitle: {
+		LangEnglish:            "Delete Result",
+		LangChinese:            "删除结果",
+		LangTraditionalChinese: "刪除結果",
+		LangJapanese:           "削除結果",
+		LangSpanish:            "Resultado de eliminación",
 	},
 	MsgBannedWordBlocked: {
 		LangEnglish:            "⚠️ Your message was blocked because it contains a prohibited word.",
