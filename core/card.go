@@ -71,9 +71,10 @@ func (CardSelect) cardElement()   {}
 
 // CardButton represents a clickable button inside a CardActions element.
 type CardButton struct {
-	Text  string // display label
-	Type  string // "primary", "default", "danger"
-	Value string // callback data, e.g. "cmd:/new", "cmd:/switch 3"
+	Text  string            // display label
+	Type  string            // "primary", "default", "danger"
+	Value string            // callback data, e.g. "cmd:/new", "cmd:/switch 3"
+	Extra map[string]string // additional key-value pairs carried in the callback (platform-specific)
 }
 
 // CardActionLayout controls how a CardActions row should be rendered by

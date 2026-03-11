@@ -1145,8 +1145,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if permLimit > 0 {
 				permLimit = permLimit * 8 / 5 // permission prompts get ~1.6x more room
 			}
-			prompt := fmt.Sprintf(e.i18n.T(MsgPermissionPrompt), event.ToolName, truncateIf(event.ToolInput, permLimit))
-			e.sendPermissionPrompt(p, replyCtx, prompt)
+			toolInput := truncateIf(event.ToolInput, permLimit)
+			prompt := fmt.Sprintf(e.i18n.T(MsgPermissionPrompt), event.ToolName, toolInput)
+			e.sendPermissionPrompt(p, replyCtx, prompt, event.ToolName, toolInput)
 
 			pending := &pendingPermission{
 				RequestID:    event.RequestID,
@@ -3217,8 +3218,10 @@ func (e *Engine) SendToSession(sessionKey, message string) error {
 	return p.Send(e.ctx, replyCtx, message)
 }
 
-// sendPermissionPrompt sends a permission prompt, using inline buttons when the platform supports them.
-func (e *Engine) sendPermissionPrompt(p Platform, replyCtx any, prompt string) {
+// sendPermissionPrompt sends a permission prompt with interactive buttons when
+// the platform supports them. Fallback chain: InlineButtonSender → CardSender → plain text.
+func (e *Engine) sendPermissionPrompt(p Platform, replyCtx any, prompt, toolName, toolInput string) {
+	// Try inline buttons first (Telegram)
 	if bs, ok := p.(InlineButtonSender); ok {
 		buttons := [][]ButtonOption{
 			{
@@ -3232,8 +3235,36 @@ func (e *Engine) sendPermissionPrompt(p Platform, replyCtx any, prompt string) {
 		if err := bs.SendWithButtons(e.ctx, replyCtx, prompt, buttons); err == nil {
 			return
 		}
-		slog.Warn("sendPermissionPrompt: inline buttons failed, falling back to text")
+		slog.Warn("sendPermissionPrompt: inline buttons failed, falling back")
 	}
+
+	// Try card with buttons (Feishu/Lark)
+	if supportsCards(p) {
+		body := fmt.Sprintf(e.i18n.T(MsgPermCardBody), toolName, toolInput)
+		extra := func(label, color string) map[string]string {
+			return map[string]string{
+				"perm_label": label,
+				"perm_color": color,
+				"perm_body":  body,
+			}
+		}
+		allowBtn := CardButton{Text: e.i18n.T(MsgPermBtnAllow), Type: "primary", Value: "perm:allow",
+			Extra: extra("✅ "+e.i18n.T(MsgPermBtnAllow), "green")}
+		denyBtn := CardButton{Text: e.i18n.T(MsgPermBtnDeny), Type: "danger", Value: "perm:deny",
+			Extra: extra("❌ "+e.i18n.T(MsgPermBtnDeny), "red")}
+		allowAllBtn := CardButton{Text: e.i18n.T(MsgPermBtnAllowAll), Type: "default", Value: "perm:allow_all",
+			Extra: extra("✅ "+e.i18n.T(MsgPermBtnAllowAll), "green")}
+
+		card := NewCard().
+			Title(e.i18n.T(MsgPermCardTitle), "orange").
+			Markdown(body).
+			ButtonsEqual(allowBtn, denyBtn).
+			Buttons(allowAllBtn).
+			Build()
+		e.sendWithCard(p, replyCtx, card)
+		return
+	}
+
 	e.send(p, replyCtx, prompt)
 }
 

@@ -109,11 +109,15 @@ func renderCardMap(card *core.Card) map[string]any {
 				if btnType == "" {
 					btnType = "default"
 				}
+				valMap := map[string]string{"action": btn.Value}
+				for k, v := range btn.Extra {
+					valMap[k] = v
+				}
 				action := map[string]any{
 					"tag":   "button",
 					"text":  plainText(btn.Text),
 					"type":  btnType,
-					"value": map[string]string{"action": btn.Value},
+					"value": valMap,
 				}
 				if e.Layout == core.CardActionLayoutEqualColumns {
 					action["width"] = "fill"

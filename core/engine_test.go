@@ -461,6 +461,100 @@ func TestEngine_AdminFrom_AdminCanRunShell(t *testing.T) {
 	}
 }
 
+// --- permission prompt card tests ---
+
+func TestSendPermissionPrompt_CardPlatform(t *testing.T) {
+	e := newTestEngine()
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+
+	e.sendPermissionPrompt(p, "ctx", "full prompt text", "write_file", "/tmp/test.txt")
+
+	if len(p.sentCards) != 1 {
+		t.Fatalf("expected 1 sent card, got %d", len(p.sentCards))
+	}
+	card := p.sentCards[0]
+	if card.Header == nil || card.Header.Color != "orange" {
+		t.Errorf("expected orange header, got %+v", card.Header)
+	}
+	if !card.HasButtons() {
+		t.Error("expected card to have buttons")
+	}
+	buttons := card.CollectButtons()
+	if len(buttons) < 2 {
+		t.Fatalf("expected at least 2 button rows, got %d", len(buttons))
+	}
+	if buttons[0][0].Data != "perm:allow" {
+		t.Errorf("expected first button data=perm:allow, got %s", buttons[0][0].Data)
+	}
+	if buttons[0][1].Data != "perm:deny" {
+		t.Errorf("expected second button data=perm:deny, got %s", buttons[0][1].Data)
+	}
+	if buttons[1][0].Data != "perm:allow_all" {
+		t.Errorf("expected third button data=perm:allow_all, got %s", buttons[1][0].Data)
+	}
+	if len(p.sent) != 0 {
+		t.Errorf("plain text should not be sent when card is used, got %v", p.sent)
+	}
+
+	// Verify Extra fields carry i18n labels and body for card callback updates
+	var allowBtn, denyBtn CardButton
+	for _, elem := range card.Elements {
+		if actions, ok := elem.(CardActions); ok {
+			for _, btn := range actions.Buttons {
+				switch btn.Value {
+				case "perm:allow":
+					allowBtn = btn
+				case "perm:deny":
+					denyBtn = btn
+				}
+			}
+		}
+	}
+	if allowBtn.Extra == nil {
+		t.Fatal("allow button should have Extra map")
+	}
+	if allowBtn.Extra["perm_color"] != "green" {
+		t.Errorf("allow button perm_color should be green, got %s", allowBtn.Extra["perm_color"])
+	}
+	if allowBtn.Extra["perm_body"] == "" {
+		t.Error("allow button perm_body should not be empty")
+	}
+	if !strings.Contains(allowBtn.Extra["perm_label"], "Allow") {
+		t.Errorf("allow button perm_label should contain 'Allow', got %s", allowBtn.Extra["perm_label"])
+	}
+	if denyBtn.Extra["perm_color"] != "red" {
+		t.Errorf("deny button perm_color should be red, got %s", denyBtn.Extra["perm_color"])
+	}
+}
+
+func TestSendPermissionPrompt_InlineButtonPlatform(t *testing.T) {
+	e := newTestEngine()
+	p := &stubInlineButtonPlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
+
+	e.sendPermissionPrompt(p, "ctx", "full prompt text", "write_file", "/tmp/test.txt")
+
+	if p.buttonContent != "full prompt text" {
+		t.Errorf("expected button content to be prompt, got %s", p.buttonContent)
+	}
+	if len(p.buttonRows) < 2 {
+		t.Fatalf("expected at least 2 button rows, got %d", len(p.buttonRows))
+	}
+	if p.buttonRows[0][0].Data != "perm:allow" {
+		t.Errorf("expected perm:allow, got %s", p.buttonRows[0][0].Data)
+	}
+}
+
+func TestSendPermissionPrompt_PlainPlatform(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "plain"}
+
+	e.sendPermissionPrompt(p, "ctx", "full prompt text", "write_file", "/tmp/test.txt")
+
+	if len(p.sent) != 1 || p.sent[0] != "full prompt text" {
+		t.Errorf("expected plain text fallback, got %v", p.sent)
+	}
+}
+
 // --- quiet tests ---
 
 func TestQuietSessionToggle(t *testing.T) {

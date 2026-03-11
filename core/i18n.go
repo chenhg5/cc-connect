@@ -288,6 +288,8 @@ const (
 	MsgPermBtnAllow    MsgKey = "perm_btn_allow"
 	MsgPermBtnDeny     MsgKey = "perm_btn_deny"
 	MsgPermBtnAllowAll MsgKey = "perm_btn_allow_all"
+	MsgPermCardTitle   MsgKey = "perm_card_title"
+	MsgPermCardBody    MsgKey = "perm_card_body"
 
 	MsgCommandsTitle        MsgKey = "commands_title"
 	MsgCommandsEmpty        MsgKey = "commands_empty"
@@ -1795,6 +1797,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "允許所有 (本次會話)",
 		LangJapanese:           "すべて許可 (このセッション)",
 		LangSpanish:            "Permitir todo (esta sesión)",
+	},
+	MsgPermCardTitle: {
+		LangEnglish:            "Permission Request",
+		LangChinese:            "权限请求",
+		LangTraditionalChinese: "權限請求",
+		LangJapanese:           "権限リクエスト",
+		LangSpanish:            "Solicitud de permiso",
+	},
+	MsgPermCardBody: {
+		LangEnglish:            "Agent wants to use **%s**:\n\n```\n%s\n```",
+		LangChinese:            "Agent 想要使用 **%s**:\n\n```\n%s\n```",
+		LangTraditionalChinese: "Agent 想要使用 **%s**:\n\n```\n%s\n```",
+		LangJapanese:           "エージェントが **%s** を使用しようとしています:\n\n```\n%s\n```",
+		LangSpanish:            "El agente quiere usar **%s**:\n\n```\n%s\n```",
 	},
 	MsgCommandsTitle: {
 		LangEnglish:            "🔧 **Custom Commands** (%d)\n\n",
