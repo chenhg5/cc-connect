@@ -41,6 +41,7 @@ func New(opts map[string]any) (core.Platform, error) {
 	botToken, _ := opts["bot_token"].(string)
 	appToken, _ := opts["app_token"].(string)
 	allowFrom, _ := opts["allow_from"].(string)
+	core.CheckAllowFrom("slack", allowFrom)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	if botToken == "" || appToken == "" {
 		return nil, fmt.Errorf("slack: bot_token and app_token are required")

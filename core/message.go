@@ -1,6 +1,7 @@
 package core
 
 import (
+	"log/slog"
 	"strings"
 	"time"
 )
@@ -23,6 +24,16 @@ func MergeEnv(base, extra []string) []string {
 		merged = append(merged, e)
 	}
 	return append(merged, extra...)
+}
+
+// CheckAllowFrom logs a security warning at startup when allow_from is not
+// configured (defaults to permit-all). Platforms should call this during init.
+func CheckAllowFrom(platform, allowFrom string) {
+	if strings.TrimSpace(allowFrom) == "" {
+		slog.Warn("allow_from is not set — all users are permitted. "+
+			"Set allow_from in config to restrict access.",
+			"platform", platform)
+	}
 }
 
 // AllowList checks whether a user ID is permitted based on a comma-separated
