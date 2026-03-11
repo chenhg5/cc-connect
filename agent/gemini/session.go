@@ -27,6 +27,7 @@ type geminiSession struct {
 	workDir  string
 	model    string
 	mode     string
+	timeout  time.Duration
 	extraEnv []string
 	events   chan core.Event
 	chatID   atomic.Value // stores string — Gemini session ID
@@ -38,7 +39,7 @@ type geminiSession struct {
 	pendingMsgs []string // buffered assistant messages awaiting classification
 }
 
-func newGeminiSession(ctx context.Context, cmd, workDir, model, mode, resumeID string, extraEnv []string) (*geminiSession, error) {
+func newGeminiSession(ctx context.Context, cmd, workDir, model, mode, resumeID string, extraEnv []string, timeout time.Duration) (*geminiSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	gs := &geminiSession{
@@ -46,6 +47,7 @@ func newGeminiSession(ctx context.Context, cmd, workDir, model, mode, resumeID s
 		workDir:  workDir,
 		model:    model,
 		mode:     mode,
+		timeout:  timeout,
 		extraEnv: extraEnv,
 		events:   make(chan core.Event, 64),
 		ctx:      sessionCtx,
@@ -60,7 +62,7 @@ func newGeminiSession(ctx context.Context, cmd, workDir, model, mode, resumeID s
 	return gs, nil
 }
 
-func (gs *geminiSession) Send(prompt string, images []core.ImageAttachment) error {
+func (gs *geminiSession) Send(prompt string, images []core.ImageAttachment) (err error) {
 	if !gs.alive.Load() {
 		return fmt.Errorf("session is closed")
 	}
@@ -122,7 +124,18 @@ func (gs *geminiSession) Send(prompt string, images []core.ImageAttachment) erro
 
 	slog.Debug("geminiSession: launching", "resume", isResume, "args", core.RedactArgs(args))
 
-	cmd := exec.CommandContext(gs.ctx, gs.cmd, args...)
+	// Add timeout for each turn to prevent hanging processes
+	ctx, cancel := context.WithTimeout(gs.ctx, gs.timeout)
+
+	// ensure cancel is called on early return errors
+	started := false
+	defer func() {
+		if !started {
+			cancel()
+		}
+	}()
+
+	cmd := exec.CommandContext(ctx, gs.cmd, args...)
 	cmd.Dir = gs.workDir
 	env := os.Environ()
 	if len(gs.extraEnv) > 0 {
@@ -142,8 +155,12 @@ func (gs *geminiSession) Send(prompt string, images []core.ImageAttachment) erro
 		return fmt.Errorf("geminiSession: start: %w", err)
 	}
 
+	started = true
 	gs.wg.Add(1)
-	go gs.readLoop(cmd, stdout, &stderrBuf, imageRefs)
+	go func() {
+		defer cancel()
+		gs.readLoop(cmd, stdout, &stderrBuf, imageRefs)
+	}()
 
 	return nil
 }

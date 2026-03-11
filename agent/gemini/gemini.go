@@ -34,6 +34,7 @@ type Agent struct {
 	model      string
 	mode       string
 	cmd        string // CLI binary name, default "gemini"
+	timeout    time.Duration
 	providers  []core.ProviderConfig
 	activeIdx  int
 	sessionEnv []string
@@ -53,6 +54,12 @@ func New(opts map[string]any) (core.Agent, error) {
 		cmd = "gemini"
 	}
 
+	timeoutMins, _ := opts["timeout_mins"].(int64)
+	timeout := 30 * time.Minute
+	if timeoutMins > 0 {
+		timeout = time.Duration(timeoutMins) * time.Minute
+	}
+
 	if _, err := exec.LookPath(cmd); err != nil {
 		return nil, fmt.Errorf("gemini: %q CLI not found in PATH, install with: npm i -g @google/gemini-cli", cmd)
 	}
@@ -62,6 +69,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		model:     model,
 		mode:      mode,
 		cmd:       cmd,
+		timeout:   timeout,
 		activeIdx: -1,
 	}, nil
 }
@@ -165,6 +173,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	mode := a.mode
 	cmd := a.cmd
 	workDir := a.workDir
+	timeout := a.timeout
 	extraEnv := a.providerEnvLocked()
 	extraEnv = append(extraEnv, a.sessionEnv...)
 	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
@@ -174,7 +183,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 	a.mu.Unlock()
 
-	return newGeminiSession(ctx, cmd, workDir, model, mode, sessionID, extraEnv)
+	return newGeminiSession(ctx, cmd, workDir, model, mode, sessionID, extraEnv, timeout)
 }
 
 // ListSessions reads sessions from ~/.gemini/tmp/<project_hash>/chats/.
