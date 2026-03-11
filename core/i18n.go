@@ -367,6 +367,7 @@ const (
 
 	MsgBannedWordBlocked MsgKey = "banned_word_blocked"
 	MsgCommandDisabled   MsgKey = "command_disabled"
+	MsgAdminRequired     MsgKey = "admin_required"
 	MsgRateLimited       MsgKey = "rate_limited"
 
 	MsgRelayNoBinding     MsgKey = "relay_no_binding"
@@ -2297,6 +2298,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "🚫 命令 `%s` 在當前專案中已被停用。",
 		LangJapanese:           "🚫 コマンド `%s` はこのプロジェクトで無効化されています。",
 		LangSpanish:            "🚫 El comando `%s` está deshabilitado para este proyecto.",
+	},
+	MsgAdminRequired: {
+		LangEnglish:            "🔒 Command `%s` requires admin privilege. Set `admin_from` in config to authorize users.",
+		LangChinese:            "🔒 命令 `%s` 需要管理员权限。请在配置中设置 `admin_from` 来授权用户。",
+		LangTraditionalChinese: "🔒 命令 `%s` 需要管理員權限。請在配置中設定 `admin_from` 來授權使用者。",
+		LangJapanese:           "🔒 コマンド `%s` には管理者権限が必要です。設定で `admin_from` を設定してユーザーを承認してください。",
+		LangSpanish:            "🔒 El comando `%s` requiere privilegios de administrador. Configure `admin_from` en la configuración.",
 	},
 	MsgRateLimited: {
 		LangEnglish:            "⏳ You are sending messages too fast. Please wait a moment.",

@@ -301,6 +301,23 @@ name = "my-backend"
 # quiet = true  # Override global quiet for this project / 覆盖全局静默模式
 # disabled_commands = ["restart", "upgrade", "cron"]  # Disable specific commands for this project
 #                                                     # 禁用该项目的指定命令
+#
+# admin_from controls who can run privileged commands (/shell, /restart, /upgrade, /commands addexec).
+# admin_from 控制谁可以执行特权命令（/shell, /restart, /upgrade, /commands addexec）。
+#
+# Not set (default): privileged commands are blocked for all users.
+# 未设置（默认）：所有用户均无法使用特权命令。
+#
+# Explicit user list: only these users can run privileged commands.
+# 指定用户列表：仅这些用户可执行特权命令。
+# admin_from = "user_id_1,user_id_2"
+#
+# ⚠️ RISK WARNING / 风险提示:
+# Setting admin_from = "*" grants ALL allowed users full shell access to the host machine.
+# Only use this for personal single-user deployments where you trust every allowed user.
+# 设置 admin_from = "*" 将授予所有已允许的用户对主机的完整 shell 访问权限。
+# 仅在个人单用户部署中使用此配置，确保所有允许的用户均可信任。
+# admin_from = "*"
 
 [projects.agent]
 type = "claudecode"

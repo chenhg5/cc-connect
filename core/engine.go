@@ -156,6 +156,7 @@ type Engine struct {
 	bannedMu    sync.RWMutex
 
 	disabledCmds map[string]bool
+	adminFrom    string // comma-separated user IDs for privileged commands; "*" = all allowed users; "" = deny
 
 	rateLimiter      *RateLimiter
 	streamPreview    StreamPreviewCfg
@@ -355,6 +356,43 @@ func (e *Engine) SetDisabledCommands(cmds []string) {
 		}
 	}
 	e.disabledCmds = m
+}
+
+// SetAdminFrom sets the admin allowlist for privileged commands.
+// "*" means all users who pass allow_from are admins.
+// Empty string means privileged commands are denied for everyone.
+func (e *Engine) SetAdminFrom(adminFrom string) {
+	e.adminFrom = strings.TrimSpace(adminFrom)
+	if e.adminFrom == "" && !e.disabledCmds["shell"] {
+		slog.Warn("admin_from is not set — privileged commands (/shell, /restart, /upgrade) are blocked. "+
+			"Set admin_from in config to enable them, or use disabled_commands to hide them.",
+			"project", e.name)
+	}
+}
+
+// privilegedCommands are commands that require admin_from authorization.
+var privilegedCommands = map[string]bool{
+	"shell":   true,
+	"restart": true,
+	"upgrade": true,
+}
+
+// isAdmin checks whether the given user ID is authorized for privileged commands.
+// Unlike AllowList, empty adminFrom means deny-all (fail-closed).
+func (e *Engine) isAdmin(userID string) bool {
+	af := strings.TrimSpace(e.adminFrom)
+	if af == "" {
+		return false
+	}
+	if af == "*" {
+		return true
+	}
+	for _, id := range strings.Split(af, ",") {
+		if strings.EqualFold(strings.TrimSpace(id), userID) {
+			return true
+		}
+	}
+	return false
 }
 
 // SetBannedWords replaces the banned words list.
@@ -1335,6 +1373,11 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 
 	if cmdID != "" && e.disabledCmds[cmdID] {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandDisabled), "/"+cmdID))
+		return true
+	}
+
+	if cmdID != "" && privilegedCommands[cmdID] && !e.isAdmin(msg.UserID) {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgAdminRequired), "/"+cmdID))
 		return true
 	}
 
@@ -4627,6 +4670,10 @@ func (e *Engine) cmdCronToggle(p Platform, msg *Message, args []string, enable b
 // ──────────────────────────────────────────────────────────────
 
 func (e *Engine) executeCustomCommand(p Platform, msg *Message, cmd *CustomCommand, args []string) {
+	if cmd.Exec != "" && !e.isAdmin(msg.UserID) {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgAdminRequired), "/"+cmd.Name))
+		return
+	}
 	// If this is an exec command, run shell command directly
 	if cmd.Exec != "" {
 		go e.executeShellCommand(p, msg, cmd, args)
@@ -4800,6 +4847,10 @@ func (e *Engine) cmdCommandsAdd(p Platform, msg *Message, args []string) {
 }
 
 func (e *Engine) cmdCommandsAddExec(p Platform, msg *Message, args []string) {
+	if !e.isAdmin(msg.UserID) {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgAdminRequired), "/commands addexec"))
+		return
+	}
 	// /commands addexec <name> <shell command...>
 	// /commands addexec --work-dir <dir> <name> <shell command...>
 	if len(args) < 2 {

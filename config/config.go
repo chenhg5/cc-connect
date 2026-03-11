@@ -106,6 +106,7 @@ type ProjectConfig struct {
 	Platforms        []PlatformConfig `toml:"platforms"`
 	Quiet            *bool            `toml:"quiet,omitempty"`             // project-level quiet mode; overrides global setting
 	DisabledCommands []string         `toml:"disabled_commands,omitempty"` // commands to disable for this project (e.g. ["restart", "upgrade"])
+	AdminFrom        string           `toml:"admin_from,omitempty"`        // comma-separated user IDs allowed to run privileged commands; "*" = all allowed users
 }
 
 type AgentConfig struct {

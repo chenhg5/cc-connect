@@ -328,6 +328,139 @@ func TestEngine_DisabledCommandsWithSlash(t *testing.T) {
 	}
 }
 
+// --- admin_from tests ---
+
+func TestEngine_AdminFrom_DenyByDefault(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "test"}
+
+	msg := &Message{SessionKey: "test:u1", UserID: "user1", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, "/shell echo hi")
+
+	if len(p.sent) != 1 {
+		t.Fatalf("expected 1 reply, got %d", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "admin") {
+		t.Errorf("expected admin required message, got: %s", p.sent[0])
+	}
+}
+
+func TestEngine_AdminFrom_ExplicitUser(t *testing.T) {
+	e := newTestEngine()
+	e.SetAdminFrom("admin1,admin2")
+	p := &stubPlatformEngine{n: "test"}
+
+	if !e.isAdmin("admin1") {
+		t.Error("admin1 should be admin")
+	}
+	if !e.isAdmin("admin2") {
+		t.Error("admin2 should be admin")
+	}
+	if e.isAdmin("user3") {
+		t.Error("user3 should not be admin")
+	}
+
+	// non-admin user tries /shell
+	msg := &Message{SessionKey: "test:u3", UserID: "user3", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, "/shell echo hi")
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "admin") {
+		t.Errorf("non-admin should be blocked from /shell, got: %v", p.sent)
+	}
+}
+
+func TestEngine_AdminFrom_Wildcard(t *testing.T) {
+	e := newTestEngine()
+	e.SetAdminFrom("*")
+
+	if !e.isAdmin("anyone") {
+		t.Error("wildcard admin_from should allow any user")
+	}
+	if !e.isAdmin("12345") {
+		t.Error("wildcard admin_from should allow any user ID")
+	}
+}
+
+func TestEngine_AdminFrom_GatesRestart(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "test"}
+
+	msg := &Message{SessionKey: "test:u1", UserID: "user1", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, "/restart")
+
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "admin") {
+		t.Errorf("non-admin should be blocked from /restart, got: %v", p.sent)
+	}
+}
+
+func TestEngine_AdminFrom_GatesUpgrade(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "test"}
+
+	msg := &Message{SessionKey: "test:u1", UserID: "user1", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, "/upgrade")
+
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "admin") {
+		t.Errorf("non-admin should be blocked from /upgrade, got: %v", p.sent)
+	}
+}
+
+func TestEngine_AdminFrom_AllowsNonPrivileged(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "test"}
+
+	msg := &Message{SessionKey: "test:u1", UserID: "user1", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, "/help")
+
+	if len(p.sent) == 0 {
+		t.Fatal("expected /help to produce a reply")
+	}
+	if strings.Contains(p.sent[0], "admin") {
+		t.Errorf("/help should not require admin, got: %s", p.sent[0])
+	}
+}
+
+func TestEngine_AdminFrom_GatesCommandsAddExec(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "test"}
+
+	msg := &Message{SessionKey: "test:u1", UserID: "user1", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, "/commands addexec mysh echo hello")
+
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "admin") {
+		t.Errorf("non-admin should be blocked from /commands addexec, got: %v", p.sent)
+	}
+}
+
+func TestEngine_AdminFrom_GatesCustomExecCommand(t *testing.T) {
+	e := newTestEngine()
+	e.commands.Add("deploy", "", "", "echo deploying", "", "config")
+	p := &stubPlatformEngine{n: "test"}
+
+	msg := &Message{SessionKey: "test:u1", UserID: "user1", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, "/deploy")
+
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "admin") {
+		t.Errorf("non-admin should be blocked from custom exec command, got: %v", p.sent)
+	}
+}
+
+func TestEngine_AdminFrom_AdminCanRunShell(t *testing.T) {
+	e := newTestEngine()
+	e.SetAdminFrom("admin1")
+	p := &stubPlatformEngine{n: "test"}
+
+	msg := &Message{SessionKey: "test:a1", UserID: "admin1", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, "/shell echo hello")
+
+	// Shell runs async in a goroutine, so the command should be accepted (not blocked).
+	// No "admin" error should be in replies.
+	for _, s := range p.sent {
+		if strings.Contains(s, "admin") {
+			t.Errorf("admin user should not be blocked, got: %s", s)
+		}
+	}
+}
+
 // --- quiet tests ---
 
 func TestQuietSessionToggle(t *testing.T) {
