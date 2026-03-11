@@ -259,6 +259,7 @@ func TestIFlowTurnPendingToolTimeoutReleasesTurn(t *testing.T) {
 
 	turn := &iflowTurn{
 		cancel:         func() {},
+		pendingTimeout: iflowPendingToolTimeout,
 		pendingToolIDs: make(map[string]struct{}),
 		pendingTools:   make(map[string]iflowToolUse),
 		seenToolIDs:    make(map[string]struct{}),
@@ -286,6 +287,72 @@ func TestIFlowTurnPendingToolTimeoutReleasesTurn(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("pending tool timeout did not release turn")
+}
+
+func TestIFlowTurnTimerResetsOnPartialToolCompletion(t *testing.T) {
+	timeout := 100 * time.Millisecond
+
+	cancelled := false
+	turn := &iflowTurn{
+		cancel:         func() { cancelled = true },
+		pendingTimeout: timeout,
+		pendingToolIDs: make(map[string]struct{}),
+		pendingTools:   make(map[string]iflowToolUse),
+		seenToolIDs:    make(map[string]struct{}),
+		doneToolIDs:    make(map[string]struct{}),
+	}
+	defer turn.stopResultTimer()
+
+	turn.addPendingTools([]iflowToolUse{
+		{ID: "write_file:1", Name: "write_file"},
+		{ID: "run_shell_command:2", Name: "run_shell_command"},
+	})
+
+	// Wait 70ms (>50% of timeout), then complete one tool
+	time.Sleep(70 * time.Millisecond)
+	turn.completeTools([]iflowToolResult{{ID: "write_file:1", Output: "ok"}})
+
+	// Timer was reset — wait another 70ms; should NOT have timed out yet
+	time.Sleep(70 * time.Millisecond)
+	if turn.readyForResult() {
+		t.Fatal("timer should have been reset; should not be ready yet")
+	}
+
+	// Now wait for the full reset timeout to expire
+	time.Sleep(50 * time.Millisecond)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if turn.readyForResult() {
+			if !cancelled {
+				t.Fatal("expected cancel to be called")
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("timer did not fire after reset")
+}
+
+func TestIFlowSessionCustomToolTimeout(t *testing.T) {
+	sess, err := newIFlowSession(context.Background(), "echo", "/tmp", "", "yolo", "", nil, 300)
+	if err != nil {
+		t.Fatalf("newIFlowSession: %v", err)
+	}
+	defer sess.Close()
+	if got := sess.pendingToolTimeout(); got != 300*time.Second {
+		t.Fatalf("pendingToolTimeout = %v, want 300s", got)
+	}
+}
+
+func TestIFlowSessionDefaultToolTimeout(t *testing.T) {
+	sess, err := newIFlowSession(context.Background(), "echo", "/tmp", "", "yolo", "", nil, 0)
+	if err != nil {
+		t.Fatalf("newIFlowSession: %v", err)
+	}
+	defer sess.Close()
+	if got := sess.pendingToolTimeout(); got != iflowPendingToolTimeout {
+		t.Fatalf("pendingToolTimeout = %v, want %v", got, iflowPendingToolTimeout)
+	}
 }
 
 func TestIFlowSessionPendingToolTimeoutClearsBusyState(t *testing.T) {
@@ -324,7 +391,7 @@ while :; do sleep 1; done
 		t.Fatalf("WriteFile fake iflow: %v", err)
 	}
 
-	sess, err := newIFlowSession(context.Background(), cmdPath, workDir, "", "default", "", nil)
+	sess, err := newIFlowSession(context.Background(), cmdPath, workDir, "", "default", "", nil, 0)
 	if err != nil {
 		t.Fatalf("newIFlowSession: %v", err)
 	}
