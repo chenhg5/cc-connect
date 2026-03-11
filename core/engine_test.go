@@ -129,7 +129,7 @@ func (a *stubModelModeAgent) GetReasoningEffort() string {
 }
 
 func (a *stubModelModeAgent) AvailableReasoningEfforts() []string {
-	return []string{"minimal", "low", "medium", "high", "xhigh"}
+	return []string{"low", "medium", "high", "xhigh"}
 }
 
 type stubListAgent struct {
@@ -663,6 +663,9 @@ func TestCmdReasoning_UsesInlineButtonsOnButtonOnlyPlatform(t *testing.T) {
 	if got := p.buttonRows[0][0].Data; got != "cmd:/reasoning 1" {
 		t.Fatalf("first /reasoning button = %q, want %q", got, "cmd:/reasoning 1")
 	}
+	if got := p.buttonRows[0][0].Text; got != "low" {
+		t.Fatalf("first /reasoning button text = %q, want low", got)
+	}
 }
 
 func TestCmdReasoning_SwitchesEffortAndResetsSession(t *testing.T) {
@@ -675,7 +678,7 @@ func TestCmdReasoning_SwitchesEffortAndResetsSession(t *testing.T) {
 	s.AgentSessionID = "existing-session"
 	s.AddHistory("user", "hello")
 
-	e.cmdReasoning(p, msg, []string{"4"})
+	e.cmdReasoning(p, msg, []string{"3"})
 
 	if agent.reasoningEffort != "high" {
 		t.Fatalf("reasoning effort = %q, want high", agent.reasoningEffort)
@@ -688,6 +691,22 @@ func TestCmdReasoning_SwitchesEffortAndResetsSession(t *testing.T) {
 	}
 	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "Reasoning effort switched to `high`") {
 		t.Fatalf("sent = %v, want reasoning changed message", p.sent)
+	}
+}
+
+func TestCmdReasoning_RejectsMinimal(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubModelModeAgent{}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	e.cmdReasoning(p, msg, []string{"minimal"})
+
+	if agent.reasoningEffort != "" {
+		t.Fatalf("reasoning effort = %q, want unchanged empty", agent.reasoningEffort)
+	}
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "/reasoning <number>") || strings.Contains(p.sent[0], "minimal") {
+		t.Fatalf("sent = %v, want usage without minimal", p.sent)
 	}
 }
 

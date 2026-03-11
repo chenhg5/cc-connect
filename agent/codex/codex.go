@@ -78,8 +78,6 @@ func normalizeReasoningEffort(raw string) string {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "":
 		return ""
-	case "minimal", "min":
-		return "minimal"
 	case "low":
 		return "low"
 	case "medium", "med":
@@ -122,7 +120,7 @@ func (a *Agent) GetReasoningEffort() string {
 }
 
 func (a *Agent) AvailableReasoningEfforts() []string {
-	return []string{"minimal", "low", "medium", "high", "xhigh"}
+	return []string{"low", "medium", "high", "xhigh"}
 }
 
 func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {

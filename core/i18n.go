@@ -1589,11 +1589,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Niveles de razonamiento disponibles:\n",
 	},
 	MsgReasoningUsage: {
-		LangEnglish:            "Usage: `/reasoning <number>` or `/reasoning <minimal|low|medium|high|xhigh>`",
-		LangChinese:            "用法: `/reasoning <序号>` 或 `/reasoning <minimal|low|medium|high|xhigh>`",
-		LangTraditionalChinese: "用法: `/reasoning <序號>` 或 `/reasoning <minimal|low|medium|high|xhigh>`",
-		LangJapanese:           "使い方: `/reasoning <番号>` または `/reasoning <minimal|low|medium|high|xhigh>`",
-		LangSpanish:            "Uso: `/reasoning <número>` o `/reasoning <minimal|low|medium|high|xhigh>`",
+		LangEnglish:            "Usage: `/reasoning <number>` or `/reasoning <low|medium|high|xhigh>`",
+		LangChinese:            "用法: `/reasoning <序号>` 或 `/reasoning <low|medium|high|xhigh>`",
+		LangTraditionalChinese: "用法: `/reasoning <序號>` 或 `/reasoning <low|medium|high|xhigh>`",
+		LangJapanese:           "使い方: `/reasoning <番号>` または `/reasoning <low|medium|high|xhigh>`",
+		LangSpanish:            "Uso: `/reasoning <número>` o `/reasoning <low|medium|high|xhigh>`",
 	},
 	MsgModeUsage: {
 		LangEnglish:            "\nUse `/mode <name>` to switch.\nAvailable: `default` / `edit` / `plan` / `yolo`",
