@@ -76,7 +76,12 @@ func (r *SkillRegistry) ListAll() []*Skill {
 			continue
 		}
 		for _, entry := range entries {
-			if !entry.IsDir() {
+			fullPath := filepath.Join(dir, entry.Name())
+			info, err := os.Stat(fullPath)
+			if err != nil {
+				continue
+			}
+			if !info.IsDir() {
 				continue
 			}
 			skillName := entry.Name()

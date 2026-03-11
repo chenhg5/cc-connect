@@ -188,6 +188,7 @@ type = "feishu"
 [projects.platforms.options]
 app_id = "cli_xxxx"
 app_secret = "xxxx"
+# enable_feishu_card = true
 
 # 钉钉
 [[projects.platforms]]
@@ -864,3 +865,4 @@ cc-connect/
 ## License
 
 MIT
+

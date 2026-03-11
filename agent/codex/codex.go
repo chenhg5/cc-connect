@@ -90,6 +90,9 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	if models := a.fetchModelsFromAPI(ctx); len(models) > 0 {
 		return models
 	}
+	if models := readCodexCachedModels(); len(models) > 0 {
+		return models
+	}
 	return []core.ModelOption{
 		{Name: "o4-mini", Desc: "O4 Mini (fast reasoning)"},
 		{Name: "o3", Desc: "O3 (most capable reasoning)"},
@@ -163,6 +166,61 @@ func (a *Agent) fetchModelsFromAPI(ctx context.Context) []core.ModelOption {
 		}
 	}
 	sort.Slice(models, func(i, j int) bool { return models[i].Name < models[j].Name })
+	return models
+}
+
+func readCodexCachedModels() []core.ModelOption {
+	codexHome := os.Getenv("CODEX_HOME")
+	if codexHome == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil
+		}
+		codexHome = filepath.Join(home, ".codex")
+	}
+	path := filepath.Join(codexHome, "models_cache.json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var payload struct {
+		Models []struct {
+			Slug           string `json:"slug"`
+			DisplayName    string `json:"display_name"`
+			Description    string `json:"description"`
+			Visibility     string `json:"visibility"`
+			SupportedInAPI bool   `json:"supported_in_api"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(b, &payload); err != nil {
+		return nil
+	}
+
+	var models []core.ModelOption
+	seen := make(map[string]struct{}, len(payload.Models))
+	for _, m := range payload.Models {
+		name := strings.TrimSpace(m.Slug)
+		if name == "" {
+			name = strings.TrimSpace(m.DisplayName)
+		}
+		if name == "" {
+			continue
+		}
+		if m.Visibility != "" && m.Visibility != "list" {
+			continue
+		}
+		if !m.SupportedInAPI {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		models = append(models, core.ModelOption{
+			Name: name,
+			Desc: strings.TrimSpace(m.Description),
+		})
+	}
 	return models
 }
 
