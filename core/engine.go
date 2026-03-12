@@ -162,6 +162,14 @@ type Engine struct {
 	relayManager     *RelayManager
 	eventIdleTimeout time.Duration
 
+	// Multi-workspace mode
+	multiWorkspace    bool
+	baseDir           string
+	workspaceBindings *WorkspaceBindingManager
+	workspacePool     *workspacePool
+	initFlows         map[string]*workspaceInitFlow // channelID → init state
+	initFlowsMu       sync.Mutex
+
 	// Interactive agent session management
 	interactiveMu     sync.Mutex
 	interactiveStates map[string]*interactiveState // key = sessionKey
@@ -170,11 +178,20 @@ type Engine struct {
 	quiet   bool // when true, suppress thinking and tool progress messages globally
 }
 
+// workspaceInitFlow tracks a channel that is being onboarded to a workspace.
+type workspaceInitFlow struct {
+	state       string // "awaiting_url", "awaiting_confirm"
+	repoURL     string
+	cloneTo     string
+	channelName string
+}
+
 // interactiveState tracks a running interactive agent session and its permission state.
 type interactiveState struct {
 	agentSession AgentSession
 	platform     Platform
 	replyCtx     any
+	workspaceDir string
 	mu           sync.Mutex
 	pending      *pendingPermission
 	approveAll   bool // when true, auto-approve all permission requests for this session
@@ -225,6 +242,45 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 	}
 
 	return e
+}
+
+// SetMultiWorkspace enables multi-workspace mode for the engine.
+func (e *Engine) SetMultiWorkspace(baseDir, bindingStorePath string) {
+	e.multiWorkspace = true
+	e.baseDir = baseDir
+	e.workspaceBindings = NewWorkspaceBindingManager(bindingStorePath)
+	e.workspacePool = newWorkspacePool(15 * time.Minute)
+	e.initFlows = make(map[string]*workspaceInitFlow)
+	go e.runIdleReaper()
+}
+
+func (e *Engine) runIdleReaper() {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-e.ctx.Done():
+			return
+		case <-ticker.C:
+			if e.workspacePool == nil {
+				continue
+			}
+			reaped := e.workspacePool.ReapIdle()
+			for _, ws := range reaped {
+				e.interactiveMu.Lock()
+				for key, state := range e.interactiveStates {
+					if state.workspaceDir == ws {
+						if state.agentSession != nil {
+							state.agentSession.Close()
+						}
+						delete(e.interactiveStates, key)
+					}
+				}
+				e.interactiveMu.Unlock()
+				slog.Info("workspace idle-reaped", "workspace", ws)
+			}
+		}
+	}
 }
 
 // SetSpeechConfig configures the speech-to-text subsystem.
