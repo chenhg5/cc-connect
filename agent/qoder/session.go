@@ -61,7 +61,8 @@ func (qs *qoderSession) Send(prompt string, images []core.ImageAttachment, files
 		slog.Warn("qoderSession: images not supported, ignoring")
 	}
 	if len(files) > 0 {
-		slog.Warn("qoderSession: files not supported, ignoring")
+		filePaths := core.SaveFilesToDisk(qs.workDir, files)
+		prompt = core.AppendFileRefs(prompt, filePaths)
 	}
 	if !qs.alive.Load() {
 		return fmt.Errorf("session is closed")

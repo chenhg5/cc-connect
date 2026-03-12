@@ -64,7 +64,8 @@ func (cs *cursorSession) Send(prompt string, images []core.ImageAttachment, file
 		slog.Warn("cursorSession: images not yet supported in CLI mode, ignoring")
 	}
 	if len(files) > 0 {
-		slog.Warn("cursorSession: files not yet supported in CLI mode, ignoring")
+		filePaths := core.SaveFilesToDisk(cs.workDir, files)
+		prompt = core.AppendFileRefs(prompt, filePaths)
 	}
 	if !cs.alive.Load() {
 		return fmt.Errorf("session is closed")

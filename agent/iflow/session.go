@@ -121,7 +121,8 @@ func (s *iflowSession) Send(prompt string, images []core.ImageAttachment, files 
 		slog.Warn("iflowSession: images are not supported, ignoring")
 	}
 	if len(files) > 0 {
-		slog.Warn("iflowSession: files are not supported, ignoring")
+		filePaths := core.SaveFilesToDisk(s.workDir, files)
+		prompt = core.AppendFileRefs(prompt, filePaths)
 	}
 	if !s.alive.Load() {
 		return fmt.Errorf("session is closed")

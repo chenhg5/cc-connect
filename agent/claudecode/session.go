@@ -370,20 +370,7 @@ func (cs *claudeSession) Send(prompt string, images []core.ImageAttachment, file
 	}
 
 	// Save files to disk so Claude Code can read them
-	var filePaths []string
-	for i, f := range files {
-		fname := f.FileName
-		if fname == "" {
-			fname = fmt.Sprintf("file_%d_%d", time.Now().UnixMilli(), i)
-		}
-		fpath := filepath.Join(attachDir, fname)
-		if err := os.WriteFile(fpath, f.Data, 0o644); err != nil {
-			slog.Error("claudeSession: save file failed", "error", err)
-			continue
-		}
-		filePaths = append(filePaths, fpath)
-		slog.Debug("claudeSession: file saved", "path", fpath, "name", f.FileName, "mime", f.MimeType, "size", len(f.Data))
-	}
+	filePaths := core.SaveFilesToDisk(cs.workDir, files)
 
 	// Build text part: user prompt + file path references
 	textPart := prompt

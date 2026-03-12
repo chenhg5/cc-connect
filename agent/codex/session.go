@@ -65,7 +65,8 @@ func newCodexSession(ctx context.Context, workDir, model, effort, mode, resumeID
 // Otherwise uses `codex exec <prompt>` to start a new conversation.
 func (cs *codexSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	if len(files) > 0 {
-		slog.Warn("codexSession: files not supported by Codex, ignoring")
+		filePaths := core.SaveFilesToDisk(cs.workDir, files)
+		prompt = core.AppendFileRefs(prompt, filePaths)
 	}
 	if !cs.alive.Load() {
 		return fmt.Errorf("session is closed")
