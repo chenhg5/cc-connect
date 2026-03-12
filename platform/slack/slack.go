@@ -141,9 +141,12 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 				msg := &core.Message{
 					SessionKey: sessionKey, Platform: "slack",
 					UserID: ev.User, UserName: ev.User,
-					Content: ev.Text,
+					Content:   stripAppMentionText(ev.Text),
 					MessageID: ev.TimeStamp,
 					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: ev.TimeStamp},
+				}
+				if msg.Content == "" {
+					return
 				}
 				p.handler(p, msg)
 
@@ -215,56 +218,7 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					UserID: ev.User, UserName: ev.User,
 					Content: ev.Text, Images: images, Audio: audio,
 					MessageID: ts,
-					ReplyCtx: replyContext{channel: ev.Channel, timestamp: ts},
-				}
-				p.handler(p, msg)
-
-			case *slackevents.AppMentionEvent:
-				if ev.BotID != "" || ev.User == "" {
-					return
-				}
-
-				if ts := ev.TimeStamp; ts != "" {
-					if dotIdx := strings.IndexByte(ts, '.'); dotIdx > 0 {
-						if sec, err := strconv.ParseInt(ts[:dotIdx], 10, 64); err == nil {
-							if core.IsOldMessage(time.Unix(sec, 0)) {
-								slog.Debug("slack: ignoring old app_mention after restart", "ts", ts)
-								return
-							}
-						}
-					}
-				}
-
-				slog.Debug("slack: app_mention received", "user", ev.User, "channel", ev.Channel)
-
-				if !core.AllowList(p.allowFrom, ev.User) {
-					slog.Debug("slack: app_mention from unauthorized user", "user", ev.User)
-					return
-				}
-
-				var sessionKey string
-				if p.shareSessionInChannel {
-					sessionKey = fmt.Sprintf("slack:%s", ev.Channel)
-				} else {
-					sessionKey = fmt.Sprintf("slack:%s:%s", ev.Channel, ev.User)
-				}
-
-				// Strip the bot mention prefix (e.g. "<@U0BOT123> ") from app_mention text
-				text := ev.Text
-				if idx := strings.Index(text, "> "); idx != -1 && strings.HasPrefix(text, "<@") {
-					text = strings.TrimSpace(text[idx+2:])
-				}
-
-				if text == "" {
-					return
-				}
-
-				msg := &core.Message{
-					SessionKey: sessionKey, Platform: "slack",
-					UserID: ev.User, UserName: ev.User,
-					Content: text,
-					MessageID: ev.TimeStamp,
-					ReplyCtx: replyContext{channel: ev.Channel, timestamp: ev.TimeStamp},
+					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: ts},
 				}
 				p.handler(p, msg)
 			}
@@ -277,6 +231,13 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 	case socketmode.EventTypeConnectionError:
 		slog.Error("slack: connection error")
 	}
+}
+
+func stripAppMentionText(text string) string {
+	if idx := strings.Index(text, "> "); idx != -1 && strings.HasPrefix(text, "<@") {
+		return strings.TrimSpace(text[idx+2:])
+	}
+	return text
 }
 
 func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
