@@ -1319,6 +1319,7 @@ var builtinCommands = []struct {
 	{[]string{"search", "find"}, "search"},
 	{[]string{"shell", "sh", "exec", "run"}, "shell"},
 	{[]string{"tts"}, "tts"},
+	{[]string{"workspace", "ws"}, "workspace"},
 }
 
 // matchPrefix finds a unique command matching the given prefix.
@@ -5448,4 +5449,115 @@ func (e *Engine) resolveWorkspace(p Platform, channelID string) (string, string,
 	}
 
 	return "", channelName, nil
+}
+
+// handleWorkspaceInitFlow manages the conversational workspace setup.
+// Returns true if the message was consumed by the init flow.
+func (e *Engine) handleWorkspaceInitFlow(p Platform, msg *Message, channelID, channelName string) bool {
+	e.initFlowsMu.Lock()
+	flow, exists := e.initFlows[channelID]
+	e.initFlowsMu.Unlock()
+
+	content := strings.TrimSpace(msg.Content)
+
+	if !exists {
+		if strings.HasPrefix(content, "/") {
+			return false
+		}
+		e.initFlowsMu.Lock()
+		e.initFlows[channelID] = &workspaceInitFlow{
+			state:       "awaiting_url",
+			channelName: channelName,
+		}
+		e.initFlowsMu.Unlock()
+		e.reply(p, msg.ReplyCtx, "No workspace found for this channel. Send me a git repo URL to clone, or use `/workspace init <url>`.")
+		return true
+	}
+
+	switch flow.state {
+	case "awaiting_url":
+		if !looksLikeGitURL(content) {
+			e.reply(p, msg.ReplyCtx, "That doesn't look like a git URL. Please provide a URL like `https://github.com/org/repo` or `git@github.com:org/repo.git`.")
+			return true
+		}
+		repoName := extractRepoName(content)
+		cloneTo := filepath.Join(e.baseDir, repoName)
+
+		e.initFlowsMu.Lock()
+		flow.repoURL = content
+		flow.cloneTo = cloneTo
+		flow.state = "awaiting_confirm"
+		e.initFlowsMu.Unlock()
+
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(
+			"I'll clone `%s` to `%s` and bind it to this channel. OK? (yes/no)", content, cloneTo))
+		return true
+
+	case "awaiting_confirm":
+		lower := strings.ToLower(content)
+		if lower != "yes" && lower != "y" {
+			e.initFlowsMu.Lock()
+			delete(e.initFlows, channelID)
+			e.initFlowsMu.Unlock()
+			e.reply(p, msg.ReplyCtx, "Cancelled. Send a repo URL anytime to try again.")
+			return true
+		}
+
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("Cloning `%s` to `%s`...", flow.repoURL, flow.cloneTo))
+
+		if err := gitClone(flow.repoURL, flow.cloneTo); err != nil {
+			e.initFlowsMu.Lock()
+			delete(e.initFlows, channelID)
+			e.initFlowsMu.Unlock()
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("Clone failed: %v\nSend a repo URL to try again.", err))
+			return true
+		}
+
+		projectKey := "project:" + e.name
+		e.workspaceBindings.Bind(projectKey, channelID, flow.channelName, flow.cloneTo)
+
+		e.initFlowsMu.Lock()
+		delete(e.initFlows, channelID)
+		e.initFlowsMu.Unlock()
+
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(
+			"Clone complete. Bound workspace `%s` to this channel. Ready.", flow.cloneTo))
+		return true
+	}
+
+	return false
+}
+
+func looksLikeGitURL(s string) bool {
+	return strings.HasPrefix(s, "https://") ||
+		strings.HasPrefix(s, "http://") ||
+		strings.HasPrefix(s, "git@") ||
+		strings.HasPrefix(s, "ssh://")
+}
+
+func extractRepoName(url string) string {
+	url = strings.TrimSuffix(url, ".git")
+	// Handle git@host:org/repo format
+	if idx := strings.LastIndex(url, ":"); idx != -1 && strings.HasPrefix(url, "git@") {
+		remainder := url[idx+1:]
+		parts := strings.Split(remainder, "/")
+		if len(parts) > 0 {
+			return parts[len(parts)-1]
+		}
+	}
+	// Handle https://host/org/repo format
+	parts := strings.Split(url, "/")
+	if len(parts) > 0 {
+		return parts[len(parts)-1]
+	}
+	return "workspace"
+}
+
+func gitClone(repoURL, dest string) error {
+	cmd := exec.Command("git", "clone", repoURL, dest)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)
+	}
+	return nil
 }
