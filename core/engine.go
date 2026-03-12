@@ -1451,6 +1451,13 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdShell(p, msg, raw)
 	case "tts":
 		e.cmdTTS(p, msg, args)
+	case "workspace":
+		if !e.multiWorkspace {
+			e.reply(p, msg.ReplyCtx, "Workspace commands are only available in multi-workspace mode.")
+			return true
+		}
+		e.handleWorkspaceCommand(p, msg, args)
+		return true
 	default:
 		if custom, ok := e.commands.Resolve(cmd); ok {
 			e.executeCustomCommand(p, msg, custom, args)
@@ -1465,6 +1472,92 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		return false
 	}
 	return true
+}
+
+func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string) {
+	channelID := extractChannelID(msg.SessionKey)
+	projectKey := "project:" + e.name
+
+	subCmd := ""
+	if len(args) > 0 {
+		subCmd = matchSubCommand(args[0], []string{"init", "unbind", "list"})
+	}
+
+	switch subCmd {
+	case "":
+		b := e.workspaceBindings.Lookup(projectKey, channelID)
+		if b == nil {
+			e.reply(p, msg.ReplyCtx, "No workspace bound to this channel.")
+		} else {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("Workspace: `%s`\nBound: %s",
+				b.Workspace, b.BoundAt.Format(time.RFC3339)))
+		}
+
+	case "init":
+		if len(args) < 2 {
+			e.reply(p, msg.ReplyCtx, "Usage: `/workspace init <git-url>`")
+			return
+		}
+		repoURL := args[1]
+		if !looksLikeGitURL(repoURL) {
+			e.reply(p, msg.ReplyCtx, "That doesn't look like a git URL.")
+			return
+		}
+
+		repoName := extractRepoName(repoURL)
+		cloneTo := filepath.Join(e.baseDir, repoName)
+
+		if _, err := os.Stat(cloneTo); err == nil {
+			channelName := ""
+			if resolver, ok := p.(ChannelNameResolver); ok {
+				channelName, _ = resolver.ResolveChannelName(channelID)
+			}
+			e.workspaceBindings.Bind(projectKey, channelID, channelName, cloneTo)
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(
+				"Directory `%s` already exists. Bound workspace to this channel. Ready.", cloneTo))
+			return
+		}
+
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("Cloning `%s` to `%s`...", repoURL, cloneTo))
+
+		if err := gitClone(repoURL, cloneTo); err != nil {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("Clone failed: %v", err))
+			return
+		}
+
+		channelName := ""
+		if resolver, ok := p.(ChannelNameResolver); ok {
+			channelName, _ = resolver.ResolveChannelName(channelID)
+		}
+		e.workspaceBindings.Bind(projectKey, channelID, channelName, cloneTo)
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(
+			"Clone complete. Bound workspace `%s` to this channel. Ready.", cloneTo))
+
+	case "unbind":
+		e.workspaceBindings.Unbind(projectKey, channelID)
+		e.reply(p, msg.ReplyCtx, "Workspace unbound from this channel.")
+
+	case "list":
+		bindings := e.workspaceBindings.ListByProject(projectKey)
+		if len(bindings) == 0 {
+			e.reply(p, msg.ReplyCtx, "No workspaces bound.")
+			return
+		}
+		var sb strings.Builder
+		sb.WriteString("Bound workspaces:\n")
+		for chID, b := range bindings {
+			name := b.ChannelName
+			if name == "" {
+				name = chID
+			}
+			sb.WriteString(fmt.Sprintf("• #%s → `%s`\n", name, b.Workspace))
+		}
+		e.reply(p, msg.ReplyCtx, sb.String())
+
+	default:
+		e.reply(p, msg.ReplyCtx,
+			"Usage: `/workspace [init <url> | unbind | list]`")
+	}
 }
 
 func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
