@@ -18,6 +18,7 @@ import (
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
+	larkcontact "github.com/larksuite/oapi-sdk-go/v3/service/contact/v3"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 )
@@ -412,7 +413,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		return nil
 	}
 
-	if msg.Content == nil {
+	if msg.Content == nil && msgType != "merge_forward" {
 		slog.Debug(p.tag()+": message content is nil", "message_id", messageID, "type", msgType)
 		return nil
 	}
@@ -561,6 +562,35 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 	return nil
 }
 
+// resolveUserName fetches a user's display name via the Contact API.
+func (p *Platform) resolveUserName(openID string) string {
+	resp, err := p.client.Contact.User.Get(context.Background(),
+		larkcontact.NewGetUserReqBuilder().
+			UserId(openID).
+			UserIdType("open_id").
+			Build())
+	if err != nil {
+		slog.Debug(p.tag()+": resolve user name failed", "open_id", openID, "error", err)
+		return openID
+	}
+	if !resp.Success() || resp.Data == nil || resp.Data.User == nil || resp.Data.User.Name == nil {
+		slog.Debug(p.tag()+": resolve user name: no data", "open_id", openID, "code", resp.Code)
+		return openID
+	}
+	return *resp.Data.User.Name
+}
+
+// resolveUserNames batch-resolves open_ids to display names.
+func (p *Platform) resolveUserNames(openIDs []string) map[string]string {
+	names := make(map[string]string, len(openIDs))
+	for _, id := range openIDs {
+		if _, ok := names[id]; !ok {
+			names[id] = p.resolveUserName(id)
+		}
+	}
+	return names
+}
+
 // parseMergeForward fetches sub-messages of a merge_forward message via the
 // GET /open-apis/im/v1/messages/{message_id} API, then formats them into
 // readable text. Returns combined text, images, and files from the sub-messages.
@@ -585,8 +615,9 @@ func (p *Platform) parseMergeForward(rootMessageID string) (string, []core.Image
 	items := resp.Data.Items
 	slog.Info(p.tag()+": merge_forward sub-messages fetched", "message_id", rootMessageID, "count", len(items))
 
-	// Build tree: group children by upper_message_id
+	// Build tree: group children by upper_message_id, collect sender IDs
 	childrenMap := make(map[string][]*larkim.Message)
+	senderIDs := make(map[string]struct{})
 	for _, item := range items {
 		if item.MessageId != nil && *item.MessageId == rootMessageID {
 			continue // skip root container
@@ -599,20 +630,40 @@ func (p *Platform) parseMergeForward(rootMessageID string) (string, []core.Image
 			parentID = rootMessageID
 		}
 		childrenMap[parentID] = append(childrenMap[parentID], item)
+		if item.Sender != nil && item.Sender.Id != nil {
+			senderIDs[*item.Sender.Id] = struct{}{}
+		}
 	}
+
+	// Resolve sender IDs to display names
+	uniqueIDs := make([]string, 0, len(senderIDs))
+	for id := range senderIDs {
+		uniqueIDs = append(uniqueIDs, id)
+	}
+	nameMap := p.resolveUserNames(uniqueIDs)
 
 	var allImages []core.ImageAttachment
 	var allFiles []core.FileAttachment
 	var sb strings.Builder
 	sb.WriteString("<forwarded_messages>\n")
-	p.formatMergeForwardTree(rootMessageID, childrenMap, &sb, &allImages, &allFiles, 0)
+	p.formatMergeForwardTree(rootMessageID, childrenMap, nameMap, &sb, &allImages, &allFiles, 0)
 	sb.WriteString("</forwarded_messages>")
 
 	return sb.String(), allImages, allFiles
 }
 
+// replaceMentions replaces @_user_N placeholders with real names from the Mentions list.
+func replaceMentions(text string, mentions []*larkim.Mention) string {
+	for _, m := range mentions {
+		if m.Key != nil && m.Name != nil {
+			text = strings.ReplaceAll(text, *m.Key, "@"+*m.Name)
+		}
+	}
+	return text
+}
+
 // formatMergeForwardTree recursively formats the sub-message tree.
-func (p *Platform) formatMergeForwardTree(parentID string, childrenMap map[string][]*larkim.Message, sb *strings.Builder, images *[]core.ImageAttachment, files *[]core.FileAttachment, depth int) {
+func (p *Platform) formatMergeForwardTree(parentID string, childrenMap map[string][]*larkim.Message, nameMap map[string]string, sb *strings.Builder, images *[]core.ImageAttachment, files *[]core.FileAttachment, depth int) {
 	children := childrenMap[parentID]
 	indent := strings.Repeat("    ", depth)
 
@@ -628,6 +679,10 @@ func (p *Platform) formatMergeForwardTree(parentID string, childrenMap map[strin
 		senderID := ""
 		if item.Sender != nil && item.Sender.Id != nil {
 			senderID = *item.Sender.Id
+		}
+		senderName := senderID
+		if name, ok := nameMap[senderID]; ok {
+			senderName = name
 		}
 
 		// Format timestamp
@@ -649,8 +704,9 @@ func (p *Platform) formatMergeForwardTree(parentID string, childrenMap map[strin
 				Text string `json:"text"`
 			}
 			if err := json.Unmarshal([]byte(content), &textBody); err == nil && textBody.Text != "" {
-				sb.WriteString(fmt.Sprintf("%s[%s] %s:\n", indent, ts, senderID))
-				for _, line := range strings.Split(textBody.Text, "\n") {
+				msgText := replaceMentions(textBody.Text, item.Mentions)
+				sb.WriteString(fmt.Sprintf("%s[%s] %s:\n", indent, ts, senderName))
+				for _, line := range strings.Split(msgText, "\n") {
 					sb.WriteString(fmt.Sprintf("%s    %s\n", indent, line))
 				}
 			}
@@ -658,9 +714,9 @@ func (p *Platform) formatMergeForwardTree(parentID string, childrenMap map[strin
 		case "post":
 			textParts, postImages := p.parsePostContent(msgID, content)
 			*images = append(*images, postImages...)
-			text := strings.Join(textParts, "\n")
+			text := replaceMentions(strings.Join(textParts, "\n"), item.Mentions)
 			if text != "" {
-				sb.WriteString(fmt.Sprintf("%s[%s] %s:\n", indent, ts, senderID))
+				sb.WriteString(fmt.Sprintf("%s[%s] %s:\n", indent, ts, senderName))
 				for _, line := range strings.Split(text, "\n") {
 					sb.WriteString(fmt.Sprintf("%s    %s\n", indent, line))
 				}
@@ -674,10 +730,10 @@ func (p *Platform) formatMergeForwardTree(parentID string, childrenMap map[strin
 				imgData, mimeType, err := p.downloadImage(msgID, imgBody.ImageKey)
 				if err != nil {
 					slog.Error(p.tag()+": download merge_forward image failed", "error", err)
-					sb.WriteString(fmt.Sprintf("%s[%s] %s: [image - download failed]\n", indent, ts, senderID))
+					sb.WriteString(fmt.Sprintf("%s[%s] %s: [image - download failed]\n", indent, ts, senderName))
 				} else {
 					*images = append(*images, core.ImageAttachment{MimeType: mimeType, Data: imgData})
-					sb.WriteString(fmt.Sprintf("%s[%s] %s: [image]\n", indent, ts, senderID))
+					sb.WriteString(fmt.Sprintf("%s[%s] %s: [image]\n", indent, ts, senderName))
 				}
 			}
 
@@ -690,20 +746,20 @@ func (p *Platform) formatMergeForwardTree(parentID string, childrenMap map[strin
 				fileData, err := p.downloadResource(msgID, fileBody.FileKey, "file")
 				if err != nil {
 					slog.Error(p.tag()+": download merge_forward file failed", "error", err)
-					sb.WriteString(fmt.Sprintf("%s[%s] %s: [file: %s - download failed]\n", indent, ts, senderID, fileBody.FileName))
+					sb.WriteString(fmt.Sprintf("%s[%s] %s: [file: %s - download failed]\n", indent, ts, senderName, fileBody.FileName))
 				} else {
 					mt := detectMimeType(fileData)
 					*files = append(*files, core.FileAttachment{MimeType: mt, Data: fileData, FileName: fileBody.FileName})
-					sb.WriteString(fmt.Sprintf("%s[%s] %s: [file: %s]\n", indent, ts, senderID, fileBody.FileName))
+					sb.WriteString(fmt.Sprintf("%s[%s] %s: [file: %s]\n", indent, ts, senderName, fileBody.FileName))
 				}
 			}
 
 		case "merge_forward":
-			sb.WriteString(fmt.Sprintf("%s[%s] %s: [forwarded messages]\n", indent, ts, senderID))
-			p.formatMergeForwardTree(msgID, childrenMap, sb, images, files, depth+1)
+			sb.WriteString(fmt.Sprintf("%s[%s] %s: [forwarded messages]\n", indent, ts, senderName))
+			p.formatMergeForwardTree(msgID, childrenMap, nameMap, sb, images, files, depth+1)
 
 		default:
-			sb.WriteString(fmt.Sprintf("%s[%s] %s: [%s message]\n", indent, ts, senderID, msgType))
+			sb.WriteString(fmt.Sprintf("%s[%s] %s: [%s message]\n", indent, ts, senderName, msgType))
 		}
 	}
 }
