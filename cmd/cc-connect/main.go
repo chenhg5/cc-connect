@@ -322,8 +322,8 @@ func main() {
 		}
 
 		// Wire sender injection
-		if proj.InjectSender != nil && *proj.InjectSender {
-			engine.SetInjectSender(true)
+		if proj.InjectSender != nil {
+			engine.SetInjectSender(*proj.InjectSender)
 		}
 
 		// Wire speech-to-text if enabled
