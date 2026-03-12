@@ -5394,3 +5394,58 @@ func (e *Engine) cmdBindSetup(p Platform, msg *Message) {
 
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgRelaySetupOK), filepath.Base(filePath)))
 }
+
+func extractChannelID(sessionKey string) string {
+	// Format: "platform:channelID:userID" or "platform:channelID"
+	parts := strings.SplitN(sessionKey, ":", 3)
+	if len(parts) >= 2 {
+		return parts[1]
+	}
+	return ""
+}
+
+// resolveWorkspace resolves a channel to a workspace directory.
+// Returns (workspacePath, channelName, error).
+// If workspacePath is empty, the init flow should be triggered.
+func (e *Engine) resolveWorkspace(p Platform, channelID string) (string, string, error) {
+	projectKey := "project:" + e.name
+
+	// Step 1: Check existing binding
+	if b := e.workspaceBindings.Lookup(projectKey, channelID); b != nil {
+		// Verify workspace directory still exists
+		if _, err := os.Stat(b.Workspace); err != nil {
+			slog.Warn("bound workspace directory missing, removing binding",
+				"workspace", b.Workspace, "channel", channelID)
+			e.workspaceBindings.Unbind(projectKey, channelID)
+			return "", b.ChannelName, nil
+		}
+		return b.Workspace, b.ChannelName, nil
+	}
+
+	// Step 2: Resolve channel name for convention match
+	channelName := ""
+	if resolver, ok := p.(ChannelNameResolver); ok {
+		name, err := resolver.ResolveChannelName(channelID)
+		if err != nil {
+			slog.Warn("failed to resolve channel name", "channel", channelID, "err", err)
+		} else {
+			channelName = name
+		}
+	}
+
+	if channelName == "" {
+		return "", "", nil
+	}
+
+	// Step 3: Convention match — check if base_dir/<channel-name> exists
+	candidate := filepath.Join(e.baseDir, channelName)
+	if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+		// Auto-bind
+		e.workspaceBindings.Bind(projectKey, channelID, channelName, candidate)
+		slog.Info("workspace auto-bound by convention",
+			"channel", channelName, "workspace", candidate)
+		return candidate, channelName, nil
+	}
+
+	return "", channelName, nil
+}
