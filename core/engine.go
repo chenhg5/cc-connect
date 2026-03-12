@@ -2,6 +2,8 @@ package core
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -666,6 +668,47 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		}
 	}
 
+	// Multi-workspace resolution
+	var wsAgent Agent
+	var wsSessions *SessionManager
+	var resolvedWorkspace string
+	if e.multiWorkspace {
+		channelID := extractChannelID(msg.SessionKey)
+		workspace, channelName, err := e.resolveWorkspace(p, channelID)
+		if err != nil {
+			slog.Error("workspace resolution failed", "err", err)
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("Workspace resolution error: %v", err))
+			return
+		}
+		if workspace == "" {
+			// No workspace — handle init flow (unless it's a /workspace command)
+			if !strings.HasPrefix(content, "/workspace") && !strings.HasPrefix(content, "/ws") {
+				if e.handleWorkspaceInitFlow(p, msg, channelID, channelName) {
+					return
+				}
+			}
+			// If init flow didn't consume, only workspace commands work
+			if !strings.HasPrefix(content, "/") {
+				return
+			}
+		} else {
+			resolvedWorkspace = workspace
+
+			// Touch for idle tracking
+			if ws := e.workspacePool.Get(workspace); ws != nil {
+				ws.Touch()
+			}
+
+			// Get or create the workspace's agent and session manager
+			wsAgent, wsSessions, err = e.getOrCreateWorkspaceAgent(workspace)
+			if err != nil {
+				slog.Error("failed to create workspace agent", "workspace", workspace, "err", err)
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf("Failed to initialize workspace: %v", err))
+				return
+			}
+		}
+	}
+
 	if len(msg.Images) == 0 && strings.HasPrefix(content, "/") {
 		if e.handleCommand(p, msg, content) {
 			return
@@ -678,7 +721,17 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		return
 	}
 
-	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	// Select session manager and agent based on workspace mode
+	sessions := e.sessions
+	agent := e.agent
+	interactiveKey := msg.SessionKey
+	if e.multiWorkspace && wsSessions != nil {
+		sessions = wsSessions
+		agent = wsAgent
+		interactiveKey = resolvedWorkspace + ":" + msg.SessionKey
+	}
+
+	session := sessions.GetOrCreateActive(msg.SessionKey)
 	if !session.TryLock() {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
 		return
@@ -690,7 +743,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		"session", session.ID,
 	)
 
-	go e.processInteractiveMessage(p, msg, session)
+	go e.processInteractiveMessageWith(p, msg, session, agent, interactiveKey, resolvedWorkspace)
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -839,6 +892,13 @@ func isDenyResponse(s string) bool {
 // ──────────────────────────────────────────────────────────────
 
 func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Session) {
+	e.processInteractiveMessageWith(p, msg, session, e.agent, msg.SessionKey, "")
+}
+
+// processInteractiveMessageWith is the core interactive processing loop.
+// It accepts an explicit agent, interactiveKey (for the interactiveStates map),
+// and workspaceDir so that multi-workspace mode can route to per-workspace agents.
+func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session *Session, agent Agent, interactiveKey string, workspaceDir string) {
 	defer session.Unlock()
 
 	if e.ctx.Err() != nil {
@@ -850,7 +910,19 @@ func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Se
 	e.i18n.DetectAndSet(msg.Content)
 	session.AddHistory("user", msg.Content)
 
-	state := e.getOrCreateInteractiveState(msg.SessionKey, p, msg.ReplyCtx, session)
+	// Use the agent override when available (multi-workspace mode)
+	var agentOverride Agent
+	if agent != e.agent {
+		agentOverride = agent
+	}
+	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, agentOverride)
+
+	// Set workspaceDir on the state for idle reaper identification
+	if workspaceDir != "" {
+		state.mu.Lock()
+		state.workspaceDir = workspaceDir
+		state.mu.Unlock()
+	}
 
 	// Update reply context for this turn
 	state.mu.Lock()
@@ -887,10 +959,15 @@ func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Se
 		slog.Error("failed to send prompt", "error", err)
 
 		if !state.agentSession.Alive() {
-			e.cleanupInteractiveState(msg.SessionKey)
+			e.cleanupInteractiveState(interactiveKey)
 			e.send(p, msg.ReplyCtx, e.i18n.T(MsgSessionRestarting))
 
-			state = e.getOrCreateInteractiveState(msg.SessionKey, p, msg.ReplyCtx, session)
+			state = e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, agentOverride)
+			if workspaceDir != "" {
+				state.mu.Lock()
+				state.workspaceDir = workspaceDir
+				state.mu.Unlock()
+			}
 			if state.agentSession == nil {
 				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), "failed to restart agent session"))
 				return
@@ -909,10 +986,67 @@ func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Se
 		slog.Warn("slow agent send", "elapsed", elapsed, "session", msg.SessionKey, "content_len", len(msg.Content))
 	}
 
-	e.processInteractiveEvents(state, session, msg.SessionKey, msg.MessageID, turnStart)
+	e.processInteractiveEvents(state, session, interactiveKey, msg.MessageID, turnStart)
+}
+
+// getOrCreateWorkspaceAgent returns (or creates) a per-workspace agent and session manager.
+func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionManager, error) {
+	ws := e.workspacePool.GetOrCreate(workspace)
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
+	if ws.agent != nil {
+		return ws.agent, ws.sessions, nil
+	}
+
+	// Create a new agent instance with this workspace's work_dir
+	opts := make(map[string]any)
+	opts["work_dir"] = workspace
+
+	// Copy model from original agent if possible
+	if ma, ok := e.agent.(interface{ GetModel() string }); ok {
+		if m := ma.GetModel(); m != "" {
+			opts["model"] = m
+		}
+	}
+	// Copy permission mode
+	if ma, ok := e.agent.(interface{ GetMode() string }); ok {
+		if m := ma.GetMode(); m != "" {
+			opts["mode"] = m
+		}
+	}
+
+	agent, err := CreateAgent("claudecode", opts)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create workspace agent for %s: %w", workspace, err)
+	}
+
+	// Wire providers if original agent has them
+	if ps, ok := e.agent.(ProviderSwitcher); ok {
+		if ps2, ok2 := agent.(ProviderSwitcher); ok2 {
+			ps2.SetProviders(ps.ListProviders())
+		}
+	}
+
+	// Create per-workspace session manager
+	h := sha256.Sum256([]byte(workspace))
+	sessionFile := filepath.Join(filepath.Dir(e.sessions.StorePath()),
+		fmt.Sprintf("%s_ws_%s.json", e.name, hex.EncodeToString(h[:4])))
+	sessions := NewSessionManager(sessionFile)
+
+	ws.agent = agent
+	ws.sessions = sessions
+	return agent, sessions, nil
 }
 
 func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, replyCtx any, session *Session) *interactiveState {
+	return e.getOrCreateInteractiveStateWith(sessionKey, p, replyCtx, session, nil)
+}
+
+// getOrCreateInteractiveStateWith is like getOrCreateInteractiveState but accepts
+// an optional agent override for multi-workspace mode. When agentOverride is non-nil
+// it is used instead of e.agent to start the session.
+func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, agentOverride Agent) *interactiveState {
 	e.interactiveMu.Lock()
 	defer e.interactiveMu.Unlock()
 
@@ -929,8 +1063,14 @@ func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, repl
 		state.mu.Unlock()
 	}
 
+	// Select the agent to use for this session
+	agent := e.agent
+	if agentOverride != nil {
+		agent = agentOverride
+	}
+
 	// Inject per-session env vars so the agent subprocess can call `cc-connect cron add` etc.
-	if inj, ok := e.agent.(SessionEnvInjector); ok {
+	if inj, ok := agent.(SessionEnvInjector); ok {
 		envVars := []string{
 			"CC_PROJECT=" + e.name,
 			"CC_SESSION_KEY=" + sessionKey,
@@ -955,7 +1095,7 @@ func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, repl
 	}
 
 	startAt := time.Now()
-	agentSession, err := e.agent.StartSession(e.ctx, session.AgentSessionID)
+	agentSession, err := agent.StartSession(e.ctx, session.AgentSessionID)
 	startElapsed := time.Since(startAt)
 	if err != nil {
 		slog.Error("failed to start interactive session", "error", err, "elapsed", startElapsed)
@@ -964,7 +1104,7 @@ func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, repl
 		return state
 	}
 	if startElapsed >= slowAgentStart {
-		slog.Warn("slow agent session start", "elapsed", startElapsed, "agent", e.agent.Name(), "session_id", session.AgentSessionID)
+		slog.Warn("slow agent session start", "elapsed", startElapsed, "agent", agent.Name(), "session_id", session.AgentSessionID)
 	}
 
 	state = &interactiveState{

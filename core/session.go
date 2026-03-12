@@ -104,6 +104,11 @@ func NewSessionManager(storePath string) *SessionManager {
 	return sm
 }
 
+// StorePath returns the file path used for session persistence.
+func (sm *SessionManager) StorePath() string {
+	return sm.storePath
+}
+
 func (sm *SessionManager) nextID() string {
 	sm.counter++
 	return fmt.Sprintf("s%d", sm.counter)
