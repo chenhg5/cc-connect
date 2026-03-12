@@ -226,6 +226,31 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 					continue
 				}
 
+				// Handle document (file) messages
+				if msg.Document != nil {
+					slog.Debug("telegram: document received", "user", userName, "file_name", msg.Document.FileName, "mime", msg.Document.MimeType)
+					fileData, err := p.downloadFile(msg.Document.FileID)
+					if err != nil {
+						slog.Error("telegram: download document failed", "error", err)
+						continue
+					}
+					caption := msg.Caption
+					if p.bot.Self.UserName != "" {
+						caption = strings.ReplaceAll(caption, "@"+p.bot.Self.UserName, "")
+						caption = strings.TrimSpace(caption)
+					}
+					coreMsg := &core.Message{
+						SessionKey: sessionKey, Platform: "telegram",
+						UserID: userID, UserName: userName,
+						Content:   caption,
+						MessageID: strconv.Itoa(msg.MessageID),
+						Files:     []core.FileAttachment{{MimeType: msg.Document.MimeType, Data: fileData, FileName: msg.Document.FileName}},
+						ReplyCtx:  rctx,
+					}
+					p.handler(p, coreMsg)
+					continue
+				}
+
 				if msg.Text == "" {
 					continue
 				}
