@@ -293,6 +293,29 @@ level = "info" # debug, info, warn, error
 #
 
 # =============================================================================
+# Multi-workspace Mode / 多工作区模式
+# =============================================================================
+# Single bot, multiple workspaces. Channel name maps to ~/workspace/<channel-name>
+# automatically. Use /workspace init <url> to clone and bind a new repo.
+# 单个 bot 服务多个工作区。频道名称自动映射到 ~/workspace/<频道名>。
+# 使用 /workspace init <url> 克隆并绑定新仓库。
+#
+# [[projects]]
+# name = "claude-multi"
+# mode = "multi-workspace"
+# base_dir = "~/workspace"
+#
+# [projects.agent]
+# type = "claudecode"
+# permission_mode = "yolo"
+#
+# [[projects.platforms]]
+# type = "slack"
+# [projects.platforms.options]
+# bot_token = "xoxb-..."
+# app_token = "xapp-..."
+
+# =============================================================================
 # Project 1 / 项目 1
 # =============================================================================
 

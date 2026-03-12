@@ -1,0 +1,90 @@
+package core
+
+import (
+	"sync"
+	"time"
+)
+
+// workspaceState holds the runtime state for a single workspace.
+type workspaceState struct {
+	mu           sync.Mutex
+	workspace    string
+	sessions     *SessionManager
+	agent        Agent
+	lastActivity time.Time
+}
+
+func newWorkspaceState(workspace string) *workspaceState {
+	return &workspaceState{
+		workspace:    workspace,
+		lastActivity: time.Now(),
+	}
+}
+
+func (ws *workspaceState) Touch() {
+	ws.mu.Lock()
+	ws.lastActivity = time.Now()
+	ws.mu.Unlock()
+}
+
+func (ws *workspaceState) LastActivity() time.Time {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	return ws.lastActivity
+}
+
+// workspacePool manages a set of workspace states with idle reaping.
+type workspacePool struct {
+	mu          sync.RWMutex
+	states      map[string]*workspaceState // workspace path -> state
+	idleTimeout time.Duration
+}
+
+func newWorkspacePool(idleTimeout time.Duration) *workspacePool {
+	return &workspacePool{
+		states:      make(map[string]*workspaceState),
+		idleTimeout: idleTimeout,
+	}
+}
+
+func (p *workspacePool) Get(workspace string) *workspaceState {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.states[workspace]
+}
+
+func (p *workspacePool) GetOrCreate(workspace string) *workspaceState {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if s, ok := p.states[workspace]; ok {
+		return s
+	}
+	s := newWorkspaceState(workspace)
+	p.states[workspace] = s
+	return s
+}
+
+// ReapIdle removes and returns workspace paths that have been idle longer than idleTimeout.
+func (p *workspacePool) ReapIdle() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	cutoff := time.Now().Add(-p.idleTimeout)
+	var reaped []string
+	for path, state := range p.states {
+		if state.LastActivity().Before(cutoff) {
+			reaped = append(reaped, path)
+			delete(p.states, path)
+		}
+	}
+	return reaped
+}
+
+func (p *workspacePool) All() map[string]*workspaceState {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	result := make(map[string]*workspaceState, len(p.states))
+	for k, v := range p.states {
+		result[k] = v
+	}
+	return result
+}

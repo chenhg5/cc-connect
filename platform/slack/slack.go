@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -35,6 +36,8 @@ type Platform struct {
 	socket                *socketmode.Client
 	handler               core.MessageHandler
 	cancel                context.CancelFunc
+	channelNameCache      map[string]string
+	channelCacheMu        sync.RWMutex
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -51,6 +54,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		appToken:              appToken,
 		allowFrom:             allowFrom,
 		shareSessionInChannel: shareSessionInChannel,
+		channelNameCache:      make(map[string]string),
 	}, nil
 }
 
@@ -89,12 +93,15 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 }
 
 func (p *Platform) handleEvent(evt socketmode.Event) {
+	slog.Debug("slack: raw event received", "type", evt.Type)
 	switch evt.Type {
 	case socketmode.EventTypeEventsAPI:
 		data, ok := evt.Data.(slackevents.EventsAPIEvent)
 		if !ok {
+			slog.Debug("slack: EventsAPI type assertion failed")
 			return
 		}
+		slog.Debug("slack: EventsAPI event", "outer_type", data.Type, "inner_type", data.InnerEvent.Type)
 		if evt.Request != nil {
 			p.socket.Ack(*evt.Request)
 		}
@@ -211,6 +218,55 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					ReplyCtx: replyContext{channel: ev.Channel, timestamp: ts},
 				}
 				p.handler(p, msg)
+
+			case *slackevents.AppMentionEvent:
+				if ev.BotID != "" || ev.User == "" {
+					return
+				}
+
+				if ts := ev.TimeStamp; ts != "" {
+					if dotIdx := strings.IndexByte(ts, '.'); dotIdx > 0 {
+						if sec, err := strconv.ParseInt(ts[:dotIdx], 10, 64); err == nil {
+							if core.IsOldMessage(time.Unix(sec, 0)) {
+								slog.Debug("slack: ignoring old app_mention after restart", "ts", ts)
+								return
+							}
+						}
+					}
+				}
+
+				slog.Debug("slack: app_mention received", "user", ev.User, "channel", ev.Channel)
+
+				if !core.AllowList(p.allowFrom, ev.User) {
+					slog.Debug("slack: app_mention from unauthorized user", "user", ev.User)
+					return
+				}
+
+				var sessionKey string
+				if p.shareSessionInChannel {
+					sessionKey = fmt.Sprintf("slack:%s", ev.Channel)
+				} else {
+					sessionKey = fmt.Sprintf("slack:%s:%s", ev.Channel, ev.User)
+				}
+
+				// Strip the bot mention prefix (e.g. "<@U0BOT123> ") from app_mention text
+				text := ev.Text
+				if idx := strings.Index(text, "> "); idx != -1 && strings.HasPrefix(text, "<@") {
+					text = strings.TrimSpace(text[idx+2:])
+				}
+
+				if text == "" {
+					return
+				}
+
+				msg := &core.Message{
+					SessionKey: sessionKey, Platform: "slack",
+					UserID: ev.User, UserName: ev.User,
+					Content: text,
+					MessageID: ev.TimeStamp,
+					ReplyCtx: replyContext{channel: ev.Channel, timestamp: ev.TimeStamp},
+				}
+				p.handler(p, msg)
 			}
 		}
 
@@ -278,6 +334,28 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 		return nil, fmt.Errorf("slack: invalid session key %q", sessionKey)
 	}
 	return replyContext{channel: parts[1]}, nil
+}
+
+func (p *Platform) ResolveChannelName(channelID string) (string, error) {
+	p.channelCacheMu.RLock()
+	if name, ok := p.channelNameCache[channelID]; ok {
+		p.channelCacheMu.RUnlock()
+		return name, nil
+	}
+	p.channelCacheMu.RUnlock()
+
+	info, err := p.client.GetConversationInfo(&slack.GetConversationInfoInput{
+		ChannelID: channelID,
+	})
+	if err != nil {
+		return "", fmt.Errorf("slack: resolve channel name for %s: %w", channelID, err)
+	}
+
+	p.channelCacheMu.Lock()
+	p.channelNameCache[channelID] = info.Name
+	p.channelCacheMu.Unlock()
+
+	return info.Name, nil
 }
 
 func (p *Platform) Stop() error {

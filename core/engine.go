@@ -2,6 +2,8 @@ package core
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -163,6 +165,14 @@ type Engine struct {
 	relayManager     *RelayManager
 	eventIdleTimeout time.Duration
 
+	// Multi-workspace mode
+	multiWorkspace    bool
+	baseDir           string
+	workspaceBindings *WorkspaceBindingManager
+	workspacePool     *workspacePool
+	initFlows         map[string]*workspaceInitFlow // channelID → init state
+	initFlowsMu       sync.Mutex
+
 	// Interactive agent session management
 	interactiveMu     sync.Mutex
 	interactiveStates map[string]*interactiveState // key = sessionKey
@@ -171,11 +181,20 @@ type Engine struct {
 	quiet   bool // when true, suppress thinking and tool progress messages globally
 }
 
+// workspaceInitFlow tracks a channel that is being onboarded to a workspace.
+type workspaceInitFlow struct {
+	state       string // "awaiting_url", "awaiting_confirm"
+	repoURL     string
+	cloneTo     string
+	channelName string
+}
+
 // interactiveState tracks a running interactive agent session and its permission state.
 type interactiveState struct {
 	agentSession AgentSession
 	platform     Platform
 	replyCtx     any
+	workspaceDir string
 	mu           sync.Mutex
 	pending      *pendingPermission
 	approveAll   bool // when true, auto-approve all permission requests for this session
@@ -235,6 +254,45 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 	}
 
 	return e
+}
+
+// SetMultiWorkspace enables multi-workspace mode for the engine.
+func (e *Engine) SetMultiWorkspace(baseDir, bindingStorePath string) {
+	e.multiWorkspace = true
+	e.baseDir = baseDir
+	e.workspaceBindings = NewWorkspaceBindingManager(bindingStorePath)
+	e.workspacePool = newWorkspacePool(15 * time.Minute)
+	e.initFlows = make(map[string]*workspaceInitFlow)
+	go e.runIdleReaper()
+}
+
+func (e *Engine) runIdleReaper() {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-e.ctx.Done():
+			return
+		case <-ticker.C:
+			if e.workspacePool == nil {
+				continue
+			}
+			reaped := e.workspacePool.ReapIdle()
+			for _, ws := range reaped {
+				e.interactiveMu.Lock()
+				for key, state := range e.interactiveStates {
+					if state.workspaceDir == ws {
+						if state.agentSession != nil {
+							state.agentSession.Close()
+						}
+						delete(e.interactiveStates, key)
+					}
+				}
+				e.interactiveMu.Unlock()
+				slog.Info("workspace idle-reaped", "workspace", ws)
+			}
+		}
+	}
 }
 
 // SetSpeechConfig configures the speech-to-text subsystem.
@@ -657,6 +715,47 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		}
 	}
 
+	// Multi-workspace resolution
+	var wsAgent Agent
+	var wsSessions *SessionManager
+	var resolvedWorkspace string
+	if e.multiWorkspace {
+		channelID := extractChannelID(msg.SessionKey)
+		workspace, channelName, err := e.resolveWorkspace(p, channelID)
+		if err != nil {
+			slog.Error("workspace resolution failed", "err", err)
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("Workspace resolution error: %v", err))
+			return
+		}
+		if workspace == "" {
+			// No workspace — handle init flow (unless it's a /workspace command)
+			if !strings.HasPrefix(content, "workspace") && !strings.HasPrefix(content, "ws ") {
+				if e.handleWorkspaceInitFlow(p, msg, channelID, channelName) {
+					return
+				}
+			}
+			// If init flow didn't consume, only workspace commands work
+			if !strings.HasPrefix(content, "/") {
+				return
+			}
+		} else {
+			resolvedWorkspace = workspace
+
+			// Touch for idle tracking
+			if ws := e.workspacePool.Get(workspace); ws != nil {
+				ws.Touch()
+			}
+
+			// Get or create the workspace's agent and session manager
+			wsAgent, wsSessions, err = e.getOrCreateWorkspaceAgent(workspace)
+			if err != nil {
+				slog.Error("failed to create workspace agent", "workspace", workspace, "err", err)
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf("Failed to initialize workspace: %v", err))
+				return
+			}
+		}
+	}
+
 	if len(msg.Images) == 0 && strings.HasPrefix(content, "/") {
 		if e.handleCommand(p, msg, content) {
 			return
@@ -669,7 +768,17 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		return
 	}
 
-	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	// Select session manager and agent based on workspace mode
+	sessions := e.sessions
+	agent := e.agent
+	interactiveKey := msg.SessionKey
+	if e.multiWorkspace && wsSessions != nil {
+		sessions = wsSessions
+		agent = wsAgent
+		interactiveKey = resolvedWorkspace + ":" + msg.SessionKey
+	}
+
+	session := sessions.GetOrCreateActive(msg.SessionKey)
 	if !session.TryLock() {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
 		return
@@ -681,7 +790,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		"session", session.ID,
 	)
 
-	go e.processInteractiveMessage(p, msg, session)
+	go e.processInteractiveMessageWith(p, msg, session, agent, interactiveKey, resolvedWorkspace)
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -830,6 +939,13 @@ func isDenyResponse(s string) bool {
 // ──────────────────────────────────────────────────────────────
 
 func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Session) {
+	e.processInteractiveMessageWith(p, msg, session, e.agent, msg.SessionKey, "")
+}
+
+// processInteractiveMessageWith is the core interactive processing loop.
+// It accepts an explicit agent, interactiveKey (for the interactiveStates map),
+// and workspaceDir so that multi-workspace mode can route to per-workspace agents.
+func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session *Session, agent Agent, interactiveKey string, workspaceDir string) {
 	defer session.Unlock()
 
 	if e.ctx.Err() != nil {
@@ -841,7 +957,19 @@ func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Se
 	e.i18n.DetectAndSet(msg.Content)
 	session.AddHistory("user", msg.Content)
 
-	state := e.getOrCreateInteractiveState(msg.SessionKey, p, msg.ReplyCtx, session)
+	// Use the agent override when available (multi-workspace mode)
+	var agentOverride Agent
+	if agent != e.agent {
+		agentOverride = agent
+	}
+	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, agentOverride)
+
+	// Set workspaceDir on the state for idle reaper identification
+	if workspaceDir != "" {
+		state.mu.Lock()
+		state.workspaceDir = workspaceDir
+		state.mu.Unlock()
+	}
 
 	// Update reply context for this turn
 	state.mu.Lock()
@@ -878,10 +1006,15 @@ func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Se
 		slog.Error("failed to send prompt", "error", err)
 
 		if !state.agentSession.Alive() {
-			e.cleanupInteractiveState(msg.SessionKey)
+			e.cleanupInteractiveState(interactiveKey)
 			e.send(p, msg.ReplyCtx, e.i18n.T(MsgSessionRestarting))
 
-			state = e.getOrCreateInteractiveState(msg.SessionKey, p, msg.ReplyCtx, session)
+			state = e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, agentOverride)
+			if workspaceDir != "" {
+				state.mu.Lock()
+				state.workspaceDir = workspaceDir
+				state.mu.Unlock()
+			}
 			if state.agentSession == nil {
 				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), "failed to restart agent session"))
 				return
@@ -900,10 +1033,67 @@ func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Se
 		slog.Warn("slow agent send", "elapsed", elapsed, "session", msg.SessionKey, "content_len", len(msg.Content))
 	}
 
-	e.processInteractiveEvents(state, session, msg.SessionKey, msg.MessageID, turnStart)
+	e.processInteractiveEvents(state, session, interactiveKey, msg.MessageID, turnStart)
+}
+
+// getOrCreateWorkspaceAgent returns (or creates) a per-workspace agent and session manager.
+func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionManager, error) {
+	ws := e.workspacePool.GetOrCreate(workspace)
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
+	if ws.agent != nil {
+		return ws.agent, ws.sessions, nil
+	}
+
+	// Create a new agent instance with this workspace's work_dir
+	opts := make(map[string]any)
+	opts["work_dir"] = workspace
+
+	// Copy model from original agent if possible
+	if ma, ok := e.agent.(interface{ GetModel() string }); ok {
+		if m := ma.GetModel(); m != "" {
+			opts["model"] = m
+		}
+	}
+	// Copy permission mode
+	if ma, ok := e.agent.(interface{ GetMode() string }); ok {
+		if m := ma.GetMode(); m != "" {
+			opts["mode"] = m
+		}
+	}
+
+	agent, err := CreateAgent("claudecode", opts)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create workspace agent for %s: %w", workspace, err)
+	}
+
+	// Wire providers if original agent has them
+	if ps, ok := e.agent.(ProviderSwitcher); ok {
+		if ps2, ok2 := agent.(ProviderSwitcher); ok2 {
+			ps2.SetProviders(ps.ListProviders())
+		}
+	}
+
+	// Create per-workspace session manager
+	h := sha256.Sum256([]byte(workspace))
+	sessionFile := filepath.Join(filepath.Dir(e.sessions.StorePath()),
+		fmt.Sprintf("%s_ws_%s.json", e.name, hex.EncodeToString(h[:4])))
+	sessions := NewSessionManager(sessionFile)
+
+	ws.agent = agent
+	ws.sessions = sessions
+	return agent, sessions, nil
 }
 
 func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, replyCtx any, session *Session) *interactiveState {
+	return e.getOrCreateInteractiveStateWith(sessionKey, p, replyCtx, session, nil)
+}
+
+// getOrCreateInteractiveStateWith is like getOrCreateInteractiveState but accepts
+// an optional agent override for multi-workspace mode. When agentOverride is non-nil
+// it is used instead of e.agent to start the session.
+func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, agentOverride Agent) *interactiveState {
 	e.interactiveMu.Lock()
 	defer e.interactiveMu.Unlock()
 
@@ -920,8 +1110,14 @@ func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, repl
 		state.mu.Unlock()
 	}
 
+	// Select the agent to use for this session
+	agent := e.agent
+	if agentOverride != nil {
+		agent = agentOverride
+	}
+
 	// Inject per-session env vars so the agent subprocess can call `cc-connect cron add` etc.
-	if inj, ok := e.agent.(SessionEnvInjector); ok {
+	if inj, ok := agent.(SessionEnvInjector); ok {
 		envVars := []string{
 			"CC_PROJECT=" + e.name,
 			"CC_SESSION_KEY=" + sessionKey,
@@ -946,7 +1142,7 @@ func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, repl
 	}
 
 	startAt := time.Now()
-	agentSession, err := e.agent.StartSession(e.ctx, session.AgentSessionID)
+	agentSession, err := agent.StartSession(e.ctx, session.AgentSessionID)
 	startElapsed := time.Since(startAt)
 	if err != nil {
 		slog.Error("failed to start interactive session", "error", err, "elapsed", startElapsed)
@@ -955,7 +1151,7 @@ func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, repl
 		return state
 	}
 	if startElapsed >= slowAgentStart {
-		slog.Warn("slow agent session start", "elapsed", startElapsed, "agent", e.agent.Name(), "session_id", session.AgentSessionID)
+		slog.Warn("slow agent session start", "elapsed", startElapsed, "agent", agent.Name(), "session_id", session.AgentSessionID)
 	}
 
 	state = &interactiveState{
@@ -1311,6 +1507,7 @@ var builtinCommands = []struct {
 	{[]string{"search", "find"}, "search"},
 	{[]string{"shell", "sh", "exec", "run"}, "shell"},
 	{[]string{"tts"}, "tts"},
+	{[]string{"workspace", "ws"}, "workspace"},
 }
 
 // matchPrefix finds a unique command matching the given prefix.
@@ -1447,6 +1644,13 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdShell(p, msg, raw)
 	case "tts":
 		e.cmdTTS(p, msg, args)
+	case "workspace":
+		if !e.multiWorkspace {
+			e.reply(p, msg.ReplyCtx, "Workspace commands are only available in multi-workspace mode.")
+			return true
+		}
+		e.handleWorkspaceCommand(p, msg, args)
+		return true
 	default:
 		if custom, ok := e.commands.Resolve(cmd); ok {
 			e.executeCustomCommand(p, msg, custom, args)
@@ -1461,6 +1665,92 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		return false
 	}
 	return true
+}
+
+func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string) {
+	channelID := extractChannelID(msg.SessionKey)
+	projectKey := "project:" + e.name
+
+	subCmd := ""
+	if len(args) > 0 {
+		subCmd = matchSubCommand(args[0], []string{"init", "unbind", "list"})
+	}
+
+	switch subCmd {
+	case "":
+		b := e.workspaceBindings.Lookup(projectKey, channelID)
+		if b == nil {
+			e.reply(p, msg.ReplyCtx, "No workspace bound to this channel.")
+		} else {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("Workspace: `%s`\nBound: %s",
+				b.Workspace, b.BoundAt.Format(time.RFC3339)))
+		}
+
+	case "init":
+		if len(args) < 2 {
+			e.reply(p, msg.ReplyCtx, "Usage: `workspace init <git-url>`")
+			return
+		}
+		repoURL := args[1]
+		if !looksLikeGitURL(repoURL) {
+			e.reply(p, msg.ReplyCtx, "That doesn't look like a git URL.")
+			return
+		}
+
+		repoName := extractRepoName(repoURL)
+		cloneTo := filepath.Join(e.baseDir, repoName)
+
+		if _, err := os.Stat(cloneTo); err == nil {
+			channelName := ""
+			if resolver, ok := p.(ChannelNameResolver); ok {
+				channelName, _ = resolver.ResolveChannelName(channelID)
+			}
+			e.workspaceBindings.Bind(projectKey, channelID, channelName, cloneTo)
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(
+				"Directory `%s` already exists. Bound workspace to this channel. Ready.", cloneTo))
+			return
+		}
+
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("Cloning `%s` to `%s`...", repoURL, cloneTo))
+
+		if err := gitClone(repoURL, cloneTo); err != nil {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("Clone failed: %v", err))
+			return
+		}
+
+		channelName := ""
+		if resolver, ok := p.(ChannelNameResolver); ok {
+			channelName, _ = resolver.ResolveChannelName(channelID)
+		}
+		e.workspaceBindings.Bind(projectKey, channelID, channelName, cloneTo)
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(
+			"Clone complete. Bound workspace `%s` to this channel. Ready.", cloneTo))
+
+	case "unbind":
+		e.workspaceBindings.Unbind(projectKey, channelID)
+		e.reply(p, msg.ReplyCtx, "Workspace unbound from this channel.")
+
+	case "list":
+		bindings := e.workspaceBindings.ListByProject(projectKey)
+		if len(bindings) == 0 {
+			e.reply(p, msg.ReplyCtx, "No workspaces bound.")
+			return
+		}
+		var sb strings.Builder
+		sb.WriteString("Bound workspaces:\n")
+		for chID, b := range bindings {
+			name := b.ChannelName
+			if name == "" {
+				name = chID
+			}
+			sb.WriteString(fmt.Sprintf("• #%s → `%s`\n", name, b.Workspace))
+		}
+		e.reply(p, msg.ReplyCtx, sb.String())
+
+	default:
+		e.reply(p, msg.ReplyCtx,
+			"Usage: `workspace [init <url> | unbind | list]`")
+	}
 }
 
 func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
@@ -5844,4 +6134,170 @@ func (e *Engine) cmdBindSetup(p Platform, msg *Message) {
 	}
 
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgRelaySetupOK), filepath.Base(filePath)))
+}
+
+func extractChannelID(sessionKey string) string {
+	// Format: "platform:channelID:userID" or "platform:channelID"
+	parts := strings.SplitN(sessionKey, ":", 3)
+	if len(parts) >= 2 {
+		return parts[1]
+	}
+	return ""
+}
+
+// resolveWorkspace resolves a channel to a workspace directory.
+// Returns (workspacePath, channelName, error).
+// If workspacePath is empty, the init flow should be triggered.
+func (e *Engine) resolveWorkspace(p Platform, channelID string) (string, string, error) {
+	projectKey := "project:" + e.name
+
+	// Step 1: Check existing binding
+	if b := e.workspaceBindings.Lookup(projectKey, channelID); b != nil {
+		// Verify workspace directory still exists
+		if _, err := os.Stat(b.Workspace); err != nil {
+			slog.Warn("bound workspace directory missing, removing binding",
+				"workspace", b.Workspace, "channel", channelID)
+			e.workspaceBindings.Unbind(projectKey, channelID)
+			return "", b.ChannelName, nil
+		}
+		return b.Workspace, b.ChannelName, nil
+	}
+
+	// Step 2: Resolve channel name for convention match
+	channelName := ""
+	if resolver, ok := p.(ChannelNameResolver); ok {
+		name, err := resolver.ResolveChannelName(channelID)
+		if err != nil {
+			slog.Warn("failed to resolve channel name", "channel", channelID, "err", err)
+		} else {
+			channelName = name
+		}
+	}
+
+	if channelName == "" {
+		return "", "", nil
+	}
+
+	// Step 3: Convention match — check if base_dir/<channel-name> exists
+	candidate := filepath.Join(e.baseDir, channelName)
+	if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+		// Auto-bind
+		e.workspaceBindings.Bind(projectKey, channelID, channelName, candidate)
+		slog.Info("workspace auto-bound by convention",
+			"channel", channelName, "workspace", candidate)
+		return candidate, channelName, nil
+	}
+
+	return "", channelName, nil
+}
+
+// handleWorkspaceInitFlow manages the conversational workspace setup.
+// Returns true if the message was consumed by the init flow.
+func (e *Engine) handleWorkspaceInitFlow(p Platform, msg *Message, channelID, channelName string) bool {
+	e.initFlowsMu.Lock()
+	flow, exists := e.initFlows[channelID]
+	e.initFlowsMu.Unlock()
+
+	content := strings.TrimSpace(msg.Content)
+
+	if !exists {
+		if strings.HasPrefix(content, "/") {
+			return false
+		}
+		e.initFlowsMu.Lock()
+		e.initFlows[channelID] = &workspaceInitFlow{
+			state:       "awaiting_url",
+			channelName: channelName,
+		}
+		e.initFlowsMu.Unlock()
+		e.reply(p, msg.ReplyCtx, "No workspace found for this channel. Send me a git repo URL to clone, or use `workspace init <url>`.")
+		return true
+	}
+
+	switch flow.state {
+	case "awaiting_url":
+		if !looksLikeGitURL(content) {
+			e.reply(p, msg.ReplyCtx, "That doesn't look like a git URL. Please provide a URL like `https://github.com/org/repo` or `git@github.com:org/repo.git`.")
+			return true
+		}
+		repoName := extractRepoName(content)
+		cloneTo := filepath.Join(e.baseDir, repoName)
+
+		e.initFlowsMu.Lock()
+		flow.repoURL = content
+		flow.cloneTo = cloneTo
+		flow.state = "awaiting_confirm"
+		e.initFlowsMu.Unlock()
+
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(
+			"I'll clone `%s` to `%s` and bind it to this channel. OK? (yes/no)", content, cloneTo))
+		return true
+
+	case "awaiting_confirm":
+		lower := strings.ToLower(content)
+		if lower != "yes" && lower != "y" {
+			e.initFlowsMu.Lock()
+			delete(e.initFlows, channelID)
+			e.initFlowsMu.Unlock()
+			e.reply(p, msg.ReplyCtx, "Cancelled. Send a repo URL anytime to try again.")
+			return true
+		}
+
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("Cloning `%s` to `%s`...", flow.repoURL, flow.cloneTo))
+
+		if err := gitClone(flow.repoURL, flow.cloneTo); err != nil {
+			e.initFlowsMu.Lock()
+			delete(e.initFlows, channelID)
+			e.initFlowsMu.Unlock()
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("Clone failed: %v\nSend a repo URL to try again.", err))
+			return true
+		}
+
+		projectKey := "project:" + e.name
+		e.workspaceBindings.Bind(projectKey, channelID, flow.channelName, flow.cloneTo)
+
+		e.initFlowsMu.Lock()
+		delete(e.initFlows, channelID)
+		e.initFlowsMu.Unlock()
+
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(
+			"Clone complete. Bound workspace `%s` to this channel. Ready.", flow.cloneTo))
+		return true
+	}
+
+	return false
+}
+
+func looksLikeGitURL(s string) bool {
+	return strings.HasPrefix(s, "https://") ||
+		strings.HasPrefix(s, "http://") ||
+		strings.HasPrefix(s, "git@") ||
+		strings.HasPrefix(s, "ssh://")
+}
+
+func extractRepoName(url string) string {
+	url = strings.TrimSuffix(url, ".git")
+	// Handle git@host:org/repo format
+	if idx := strings.LastIndex(url, ":"); idx != -1 && strings.HasPrefix(url, "git@") {
+		remainder := url[idx+1:]
+		parts := strings.Split(remainder, "/")
+		if len(parts) > 0 {
+			return parts[len(parts)-1]
+		}
+	}
+	// Handle https://host/org/repo format
+	parts := strings.Split(url, "/")
+	if len(parts) > 0 {
+		return parts[len(parts)-1]
+	}
+	return "workspace"
+}
+
+func gitClone(repoURL, dest string) error {
+	cmd := exec.Command("git", "clone", repoURL, dest)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)
+	}
+	return nil
 }

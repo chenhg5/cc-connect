@@ -102,6 +102,8 @@ type TTSConfig struct {
 // ProjectConfig binds one agent (with a specific work_dir) to one or more platforms.
 type ProjectConfig struct {
 	Name             string           `toml:"name"`
+	Mode             string           `toml:"mode,omitempty"`     // "" or "multi-workspace"
+	BaseDir          string           `toml:"base_dir,omitempty"` // parent dir for workspaces
 	Agent            AgentConfig      `toml:"agent"`
 	Platforms        []PlatformConfig `toml:"platforms"`
 	Quiet            *bool            `toml:"quiet,omitempty"`             // project-level quiet mode; overrides global setting
@@ -193,6 +195,14 @@ func (c *Config) validate() error {
 		for j, p := range proj.Platforms {
 			if p.Type == "" {
 				return fmt.Errorf("config: %s.platforms[%d].type is required", prefix, j)
+			}
+		}
+		if proj.Mode == "multi-workspace" {
+			if proj.BaseDir == "" {
+				return fmt.Errorf("project %q: multi-workspace mode requires base_dir", proj.Name)
+			}
+			if _, ok := proj.Agent.Options["work_dir"]; ok {
+				return fmt.Errorf("project %q: multi-workspace mode conflicts with agent work_dir (use base_dir instead)", proj.Name)
 			}
 		}
 	}
