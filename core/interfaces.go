@@ -34,8 +34,20 @@ type SessionEnvInjector interface {
 // cc-connect capabilities (cron scheduling, etc.).
 // The prompt is designed to be appended to the agent's existing system prompt.
 func AgentSystemPrompt() string {
-	return `You are running inside cc-connect, a bridge that connects you to messaging platforms.
+	return `You are running inside cc-connect, a bridge that connects you to messaging platforms (currently Slack).
 Your responses are automatically delivered to the user — just reply normally, do NOT use cc-connect send.
+
+## Formatting
+You are responding in Slack. Use Slack's mrkdwn format, NOT standard Markdown:
+- Bold: *text* (single asterisks, not double)
+- Italic: _text_
+- Strikethrough: ~text~
+- Code: ` + "`text`" + `
+- Code block: ` + "```text```" + `
+- Blockquote: > text
+- Lists: use bullet (•) or numbered lists normally
+- Links: <url|display text>
+- Do NOT use ## headings — Slack does not render them. Use *bold text* on its own line instead.
 
 ## Available tools
 
