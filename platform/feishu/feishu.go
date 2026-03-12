@@ -537,11 +537,175 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 			ReplyCtx: rctx,
 		})
 
+	case "merge_forward":
+		text, images, files := p.parseMergeForward(messageID)
+		if text == "" && len(images) == 0 && len(files) == 0 {
+			slog.Warn(p.tag()+": merge_forward produced no content", "message_id", messageID)
+			return nil
+		}
+		coreMsg := &core.Message{
+			SessionKey: sessionKey, Platform: p.platformName,
+			MessageID: messageID,
+			UserID:    userID, UserName: userName,
+			Content:  text,
+			Images:   images,
+			Files:    files,
+			ReplyCtx: rctx,
+		}
+		p.handler(p.dispatchPlatform(), coreMsg)
+
 	default:
 		slog.Debug(p.tag()+": ignoring unsupported message type", "type", msgType)
 	}
 
 	return nil
+}
+
+// parseMergeForward fetches sub-messages of a merge_forward message via the
+// GET /open-apis/im/v1/messages/{message_id} API, then formats them into
+// readable text. Returns combined text, images, and files from the sub-messages.
+func (p *Platform) parseMergeForward(rootMessageID string) (string, []core.ImageAttachment, []core.FileAttachment) {
+	resp, err := p.client.Im.Message.Get(context.Background(),
+		larkim.NewGetMessageReqBuilder().
+			MessageId(rootMessageID).
+			Build())
+	if err != nil {
+		slog.Error(p.tag()+": fetch merge_forward sub-messages failed", "error", err)
+		return "", nil, nil
+	}
+	if !resp.Success() {
+		slog.Error(p.tag()+": fetch merge_forward sub-messages failed", "code", resp.Code, "msg", resp.Msg)
+		return "", nil, nil
+	}
+	if resp.Data == nil || len(resp.Data.Items) == 0 {
+		slog.Warn(p.tag()+": merge_forward has no sub-messages", "message_id", rootMessageID)
+		return "", nil, nil
+	}
+
+	items := resp.Data.Items
+	slog.Info(p.tag()+": merge_forward sub-messages fetched", "message_id", rootMessageID, "count", len(items))
+
+	// Build tree: group children by upper_message_id
+	childrenMap := make(map[string][]*larkim.Message)
+	for _, item := range items {
+		if item.MessageId != nil && *item.MessageId == rootMessageID {
+			continue // skip root container
+		}
+		parentID := ""
+		if item.UpperMessageId != nil {
+			parentID = *item.UpperMessageId
+		}
+		if parentID == "" || parentID == rootMessageID {
+			parentID = rootMessageID
+		}
+		childrenMap[parentID] = append(childrenMap[parentID], item)
+	}
+
+	var allImages []core.ImageAttachment
+	var allFiles []core.FileAttachment
+	var sb strings.Builder
+	sb.WriteString("<forwarded_messages>\n")
+	p.formatMergeForwardTree(rootMessageID, childrenMap, &sb, &allImages, &allFiles, 0)
+	sb.WriteString("</forwarded_messages>")
+
+	return sb.String(), allImages, allFiles
+}
+
+// formatMergeForwardTree recursively formats the sub-message tree.
+func (p *Platform) formatMergeForwardTree(parentID string, childrenMap map[string][]*larkim.Message, sb *strings.Builder, images *[]core.ImageAttachment, files *[]core.FileAttachment, depth int) {
+	children := childrenMap[parentID]
+	indent := strings.Repeat("    ", depth)
+
+	for _, item := range children {
+		msgID := ""
+		if item.MessageId != nil {
+			msgID = *item.MessageId
+		}
+		msgType := ""
+		if item.MsgType != nil {
+			msgType = *item.MsgType
+		}
+		senderID := ""
+		if item.Sender != nil && item.Sender.Id != nil {
+			senderID = *item.Sender.Id
+		}
+
+		// Format timestamp
+		ts := ""
+		if item.CreateTime != nil {
+			if ms, err := strconv.ParseInt(*item.CreateTime, 10, 64); err == nil {
+				ts = time.Unix(ms/1000, 0).Format("2006-01-02 15:04:05")
+			}
+		}
+
+		content := ""
+		if item.Body != nil && item.Body.Content != nil {
+			content = *item.Body.Content
+		}
+
+		switch msgType {
+		case "text":
+			var textBody struct {
+				Text string `json:"text"`
+			}
+			if err := json.Unmarshal([]byte(content), &textBody); err == nil && textBody.Text != "" {
+				sb.WriteString(fmt.Sprintf("%s[%s] %s:\n", indent, ts, senderID))
+				for _, line := range strings.Split(textBody.Text, "\n") {
+					sb.WriteString(fmt.Sprintf("%s    %s\n", indent, line))
+				}
+			}
+
+		case "post":
+			textParts, postImages := p.parsePostContent(msgID, content)
+			*images = append(*images, postImages...)
+			text := strings.Join(textParts, "\n")
+			if text != "" {
+				sb.WriteString(fmt.Sprintf("%s[%s] %s:\n", indent, ts, senderID))
+				for _, line := range strings.Split(text, "\n") {
+					sb.WriteString(fmt.Sprintf("%s    %s\n", indent, line))
+				}
+			}
+
+		case "image":
+			var imgBody struct {
+				ImageKey string `json:"image_key"`
+			}
+			if err := json.Unmarshal([]byte(content), &imgBody); err == nil && imgBody.ImageKey != "" {
+				imgData, mimeType, err := p.downloadImage(msgID, imgBody.ImageKey)
+				if err != nil {
+					slog.Error(p.tag()+": download merge_forward image failed", "error", err)
+					sb.WriteString(fmt.Sprintf("%s[%s] %s: [image - download failed]\n", indent, ts, senderID))
+				} else {
+					*images = append(*images, core.ImageAttachment{MimeType: mimeType, Data: imgData})
+					sb.WriteString(fmt.Sprintf("%s[%s] %s: [image]\n", indent, ts, senderID))
+				}
+			}
+
+		case "file":
+			var fileBody struct {
+				FileKey  string `json:"file_key"`
+				FileName string `json:"file_name"`
+			}
+			if err := json.Unmarshal([]byte(content), &fileBody); err == nil && fileBody.FileKey != "" {
+				fileData, err := p.downloadResource(msgID, fileBody.FileKey, "file")
+				if err != nil {
+					slog.Error(p.tag()+": download merge_forward file failed", "error", err)
+					sb.WriteString(fmt.Sprintf("%s[%s] %s: [file: %s - download failed]\n", indent, ts, senderID, fileBody.FileName))
+				} else {
+					mt := detectMimeType(fileData)
+					*files = append(*files, core.FileAttachment{MimeType: mt, Data: fileData, FileName: fileBody.FileName})
+					sb.WriteString(fmt.Sprintf("%s[%s] %s: [file: %s]\n", indent, ts, senderID, fileBody.FileName))
+				}
+			}
+
+		case "merge_forward":
+			sb.WriteString(fmt.Sprintf("%s[%s] %s: [forwarded messages]\n", indent, ts, senderID))
+			p.formatMergeForwardTree(msgID, childrenMap, sb, images, files, depth+1)
+
+		default:
+			sb.WriteString(fmt.Sprintf("%s[%s] %s: [%s message]\n", indent, ts, senderID, msgType))
+		}
+	}
 }
 
 func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
