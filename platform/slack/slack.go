@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -35,6 +36,8 @@ type Platform struct {
 	socket                *socketmode.Client
 	handler               core.MessageHandler
 	cancel                context.CancelFunc
+	channelNameCache      map[string]string
+	channelCacheMu        sync.RWMutex
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -50,6 +53,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		appToken:              appToken,
 		allowFrom:             allowFrom,
 		shareSessionInChannel: shareSessionInChannel,
+		channelNameCache:      make(map[string]string),
 	}, nil
 }
 
@@ -238,6 +242,28 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 		return nil, fmt.Errorf("slack: invalid session key %q", sessionKey)
 	}
 	return replyContext{channel: parts[1]}, nil
+}
+
+func (p *Platform) ResolveChannelName(channelID string) (string, error) {
+	p.channelCacheMu.RLock()
+	if name, ok := p.channelNameCache[channelID]; ok {
+		p.channelCacheMu.RUnlock()
+		return name, nil
+	}
+	p.channelCacheMu.RUnlock()
+
+	info, err := p.client.GetConversationInfo(&slack.GetConversationInfoInput{
+		ChannelID: channelID,
+	})
+	if err != nil {
+		return "", fmt.Errorf("slack: resolve channel name for %s: %w", channelID, err)
+	}
+
+	p.channelCacheMu.Lock()
+	p.channelNameCache[channelID] = info.Name
+	p.channelCacheMu.Unlock()
+
+	return info.Name, nil
 }
 
 func (p *Platform) Stop() error {

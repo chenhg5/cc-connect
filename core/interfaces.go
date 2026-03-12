@@ -276,3 +276,9 @@ type BotCommandInfo struct {
 type CommandRegistrar interface {
 	RegisterCommands(commands []BotCommandInfo) error
 }
+
+// ChannelNameResolver is an optional interface for platforms that can resolve
+// channel IDs to human-readable names.
+type ChannelNameResolver interface {
+	ResolveChannelName(channelID string) (string, error)
+}
