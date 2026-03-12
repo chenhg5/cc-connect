@@ -586,6 +586,25 @@ app_secret = "your-feishu-app-secret"
 # proxy_username = ""  # optional: proxy authentication username / 代理认证用户名
 # proxy_password = ""  # optional: proxy authentication password / 代理认证密码
 
+# WeChat Work WebSocket / 企业微信长连接模式 (uncomment to enable / 取消注释以启用)
+# No public URL, no message encryption, no IP allowlist needed!
+# 无需公网 URL、无需消息加解密、无需 IP 白名单！
+# 1. Create a "智能机器人" (AI Bot) in WeChat Work admin console
+#    在企业微信管理后台创建「智能机器人」
+# 2. Get BotID and Secret / 获取 BotID 和 Secret
+# 3. Fill in config below / 填入下方配置
+# Connection: WebSocket long-connection (client-initiated, no public URL needed)
+# 连接方式：WebSocket 长连接（客户端主动连接，无需公网 URL）
+
+# [[projects.platforms]]
+# type = "wecom"
+#
+# [projects.platforms.options]
+# mode = "websocket"
+# bot_id = "your-bot-id"
+# bot_secret = "your-bot-secret"
+# allow_from = "*"  # Allowed user IDs / 允许的用户 ID
+
 # =============================================================================
 # Project 2: Using Cursor Agent / 项目 2：使用 Cursor Agent (uncomment to enable / 取消注释以启用)
 # =============================================================================
