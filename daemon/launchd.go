@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -90,7 +91,20 @@ func (*launchdManager) Restart() error {
 	runLaunchctl("bootout", target)
 
 	plistPath := launchdPlistPath()
-	out, err := runLaunchctl("bootstrap", domain, plistPath)
+
+	// launchd bootout is asynchronous; retry bootstrap with backoff
+	// to avoid "Bootstrap failed: 5" race condition.
+	var out string
+	var err error
+	for i := 0; i < 3; i++ {
+		if i > 0 {
+			time.Sleep(500 * time.Millisecond)
+		}
+		out, err = runLaunchctl("bootstrap", domain, plistPath)
+		if err == nil {
+			break
+		}
+	}
 	if err != nil {
 		return fmt.Errorf("restart: %s (%w)", out, err)
 	}
