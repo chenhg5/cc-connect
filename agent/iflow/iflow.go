@@ -366,7 +366,7 @@ func parseIFlowSessionFile(path string) (sid, summary string, msgCount int, modi
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 1024*64), 1024*1024)
+	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
