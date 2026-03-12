@@ -54,6 +54,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		return nil, fmt.Errorf("discord: token is required")
 	}
 	allowFrom, _ := opts["allow_from"].(string)
+	core.CheckAllowFrom("discord", allowFrom)
 	guildID, _ := opts["guild_id"].(string)
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
@@ -97,6 +98,9 @@ func builtinSlashCommands() []*discordgo.ApplicationCommand {
 		}},
 		{Name: "model", Description: "View or switch model", Options: []*discordgo.ApplicationCommandOption{
 			optStr("name", "Model name or number", false),
+		}},
+		{Name: "reasoning", Description: "View or switch reasoning effort", Options: []*discordgo.ApplicationCommandOption{
+			optStr("level", "Reasoning level or number", false),
 		}},
 		{Name: "mode", Description: "View or switch permission mode", Options: []*discordgo.ApplicationCommandOption{
 			optStr("name", "Mode: default / edit / plan / yolo", false),
@@ -240,7 +244,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		msg := &core.Message{
 			SessionKey: sessionKey, Platform: "discord",
 			MessageID: m.ID,
-			UserID: m.Author.ID, UserName: m.Author.Username,
+			UserID:    m.Author.ID, UserName: m.Author.Username,
 			Content: m.Content, Images: images, Audio: audio, ReplyCtx: rctx,
 		}
 		p.handler(p, msg)
@@ -325,7 +329,7 @@ func (p *Platform) handleInteraction(s *discordgo.Session, i *discordgo.Interact
 	msg := &core.Message{
 		SessionKey: sessionKey, Platform: "discord",
 		MessageID: i.ID,
-		UserID: userID, UserName: userName,
+		UserID:    userID, UserName: userName,
 		Content: cmdText, ReplyCtx: ictx,
 	}
 	p.handler(p, msg)

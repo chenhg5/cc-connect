@@ -28,13 +28,14 @@ func init() {
 //   - "full-auto": --full-auto (sandbox-protected auto execution)
 //   - "yolo":      --dangerously-bypass-approvals-and-sandbox
 type Agent struct {
-	workDir    string
-	model      string
-	mode       string // "suggest" | "auto-edit" | "full-auto" | "yolo"
-	providers  []core.ProviderConfig
-	activeIdx  int // -1 = no provider set
-	sessionEnv []string
-	mu         sync.Mutex
+	workDir         string
+	model           string
+	reasoningEffort string
+	mode            string // "suggest" | "auto-edit" | "full-auto" | "yolo"
+	providers       []core.ProviderConfig
+	activeIdx       int // -1 = no provider set
+	sessionEnv      []string
+	mu              sync.Mutex
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -43,6 +44,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		workDir = "."
 	}
 	model, _ := opts["model"].(string)
+	reasoningEffort, _ := opts["reasoning_effort"].(string)
 	mode, _ := opts["mode"].(string)
 	mode = normalizeMode(mode)
 
@@ -51,10 +53,11 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 
 	return &Agent{
-		workDir:   workDir,
-		model:     model,
-		mode:      mode,
-		activeIdx: -1,
+		workDir:         workDir,
+		model:           model,
+		reasoningEffort: normalizeReasoningEffort(reasoningEffort),
+		mode:            mode,
+		activeIdx:       -1,
 	}, nil
 }
 
@@ -68,6 +71,23 @@ func normalizeMode(raw string) string {
 		return "yolo"
 	default:
 		return "suggest"
+	}
+}
+
+func normalizeReasoningEffort(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "":
+		return ""
+	case "low":
+		return "low"
+	case "medium", "med":
+		return "medium"
+	case "high":
+		return "high"
+	case "xhigh", "x-high", "very-high":
+		return "xhigh"
+	default:
+		return ""
 	}
 }
 
@@ -86,8 +106,28 @@ func (a *Agent) GetModel() string {
 	return a.model
 }
 
+func (a *Agent) SetReasoningEffort(effort string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.reasoningEffort = normalizeReasoningEffort(effort)
+	slog.Info("codex: reasoning effort changed", "reasoning_effort", a.reasoningEffort)
+}
+
+func (a *Agent) GetReasoningEffort() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.reasoningEffort
+}
+
+func (a *Agent) AvailableReasoningEfforts() []string {
+	return []string{"low", "medium", "high", "xhigh"}
+}
+
 func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	if models := a.fetchModelsFromAPI(ctx); len(models) > 0 {
+		return models
+	}
+	if models := readCodexCachedModels(); len(models) > 0 {
 		return models
 	}
 	return []core.ModelOption{
@@ -166,6 +206,61 @@ func (a *Agent) fetchModelsFromAPI(ctx context.Context) []core.ModelOption {
 	return models
 }
 
+func readCodexCachedModels() []core.ModelOption {
+	codexHome := os.Getenv("CODEX_HOME")
+	if codexHome == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil
+		}
+		codexHome = filepath.Join(home, ".codex")
+	}
+	path := filepath.Join(codexHome, "models_cache.json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var payload struct {
+		Models []struct {
+			Slug           string `json:"slug"`
+			DisplayName    string `json:"display_name"`
+			Description    string `json:"description"`
+			Visibility     string `json:"visibility"`
+			SupportedInAPI bool   `json:"supported_in_api"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(b, &payload); err != nil {
+		return nil
+	}
+
+	var models []core.ModelOption
+	seen := make(map[string]struct{}, len(payload.Models))
+	for _, m := range payload.Models {
+		name := strings.TrimSpace(m.Slug)
+		if name == "" {
+			name = strings.TrimSpace(m.DisplayName)
+		}
+		if name == "" {
+			continue
+		}
+		if m.Visibility != "" && m.Visibility != "list" {
+			continue
+		}
+		if !m.SupportedInAPI {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		models = append(models, core.ModelOption{
+			Name: name,
+			Desc: strings.TrimSpace(m.Description),
+		})
+	}
+	return models
+}
+
 func (a *Agent) SetSessionEnv(env []string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -176,6 +271,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	a.mu.Lock()
 	mode := a.mode
 	model := a.model
+	reasoningEffort := a.reasoningEffort
 	extraEnv := a.providerEnvLocked()
 	extraEnv = append(extraEnv, a.sessionEnv...)
 	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
@@ -185,7 +281,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 	a.mu.Unlock()
 
-	return newCodexSession(ctx, a.workDir, model, mode, sessionID, extraEnv)
+	return newCodexSession(ctx, a.workDir, model, reasoningEffort, mode, sessionID, extraEnv)
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {

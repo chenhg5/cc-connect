@@ -117,6 +117,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		intents = int(v)
 	}
 
+	core.CheckAllowFrom("qqbot", allowFrom)
 	return &Platform{
 		appID:                 appID,
 		appSecret:             appSecret,
@@ -375,7 +376,9 @@ func (p *Platform) waitForHello(conn *websocket.Conn) error {
 	var hello struct {
 		HeartbeatInterval int `json:"heartbeat_interval"`
 	}
-	json.Unmarshal(msg.D, &hello)
+	if err := json.Unmarshal(msg.D, &hello); err != nil {
+		slog.Warn("qqbot: failed to parse Hello payload", "error", err)
+	}
 	if hello.HeartbeatInterval > 0 {
 		p.heartbeatMs = hello.HeartbeatInterval
 	} else {
@@ -417,7 +420,9 @@ func (p *Platform) waitForReady(conn *websocket.Conn) error {
 	var ready struct {
 		SessionID string `json:"session_id"`
 	}
-	json.Unmarshal(msg.D, &ready)
+	if err := json.Unmarshal(msg.D, &ready); err != nil {
+		slog.Warn("qqbot: failed to parse READY payload", "error", err)
+	}
 	p.sessionID = ready.SessionID
 	if msg.S != nil {
 		p.lastSeq.Store(*msg.S)
@@ -459,7 +464,9 @@ func (p *Platform) sendHeartbeat() {
 	p.wsMu.Lock()
 	defer p.wsMu.Unlock()
 	if p.wsConn != nil {
-		p.wsConn.WriteJSON(wsPayload{Op: opHeartbeat, D: d})
+		if err := p.wsConn.WriteJSON(wsPayload{Op: opHeartbeat, D: d}); err != nil {
+			slog.Debug("qqbot: heartbeat send failed", "error", err)
+		}
 	}
 }
 
@@ -504,7 +511,9 @@ func (p *Platform) readLoop(ctx context.Context) {
 			return
 		case opInvalidSession:
 			var resumable bool
-			json.Unmarshal(msg.D, &resumable)
+			if err := json.Unmarshal(msg.D, &resumable); err != nil {
+				slog.Warn("qqbot: failed to parse InvalidSession payload", "error", err)
+			}
 			if resumable {
 				slog.Info("qqbot: invalid session (resumable), attempting resume")
 			} else {

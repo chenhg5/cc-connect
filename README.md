@@ -36,7 +36,7 @@ cc-connect bridges AI agents running on your machine to the messaging platforms 
 - **7 AI Agents** — Claude Code, Codex, Cursor Agent, Qoder CLI, Gemini CLI, OpenCode, iFlow CLI. Use whichever fits your workflow, or all of them at once.
 - **9 Chat Platforms** — Feishu, DingTalk, Slack, Telegram, Discord, WeChat Work, LINE, QQ, QQ Bot (Official). Most need zero public IP.
 - **Multi-Bot Relay** — Bind multiple bots in a group chat and let them communicate with each other. Ask Claude, get insights from Gemini — all in one conversation.
-- **Full Control from Chat** — Switch models (`/model`), change permission modes (`/mode`), manage sessions, all via slash commands.
+- **Full Control from Chat** — Switch models (`/model`), tune reasoning (`/reasoning`), change permission modes (`/mode`), manage sessions, all via slash commands.
 - **Agent Memory** — Read and write agent instruction files (`/memory`) without touching the terminal.
 - **Scheduled Tasks** — Set up cron jobs in natural language. "Every day at 6am, summarize GitHub trending" just works.
 - **Voice & Images** — Send voice messages or screenshots; cc-connect handles STT/TTS and multimodal forwarding.
@@ -190,6 +190,7 @@ type = "feishu"
 [projects.platforms.options]
 app_id = "cli_xxxx"
 app_secret = "xxxx"
+# enable_feishu_card = true
 
 # DingTalk
 [[projects.platforms]]
@@ -325,6 +326,7 @@ mode = "default"
 [projects.agent.options]
 mode = "full-auto"
 # model = "o3"
+# reasoning_effort = "high"
 
 # Cursor Agent
 [projects.agent.options]
@@ -353,6 +355,14 @@ Switch mode at runtime from the chat:
 /mode          # show current mode and all available modes
 /mode yolo     # switch to YOLO mode
 /mode default  # switch back to default
+```
+
+For Codex, you can also switch reasoning effort at runtime:
+
+```
+/reasoning         # show current reasoning effort and available levels
+/reasoning high    # switch to high reasoning effort
+/reasoning 3       # quick-select by number
 ```
 
 ## API Provider Management
@@ -738,6 +748,7 @@ Each user gets an independent session with full conversation context. Manage ses
 /history [n]      Show last n messages (default 10)
 /provider [...]   Manage API providers (list/add/remove/switch)
 /allow <tool>     Pre-allow a tool (takes effect on next session)
+/reasoning [level] View or switch reasoning effort (Codex)
 /mode [name]      View or switch permission mode
 /quiet            Toggle thinking/tool progress messages
 /stop             Stop current execution
@@ -749,6 +760,14 @@ During a session, the agent may request tool permissions. Reply **allow** / **de
 ## Multi-Bot Relay
 
 cc-connect supports cross-platform bot communication, enabling multiple AI agents to collaborate in a single group chat.
+
+<p align="center">
+  <img src="docs/images/screenshot/claudecode_to_cursor_discord_1.png" alt="Multi-Bot Relay Demo 1" width="45%" />
+  <img src="docs/images/screenshot/claudecode_to_cursor_discord_2.png" alt="Multi-Bot Relay Demo 2" width="45%" />
+</p>
+<p align="center">
+  <em>Claude Code & Cursor Agent chatting in Discord — Multi-Agent Collaboration</em>
+</p>
 
 ### Group Chat Binding
 
@@ -905,6 +924,16 @@ Thanks to all the people who contributed to this project:
 
 <a href="https://github.com/chenhg5/cc-connect/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=chenhg5/cc-connect" />
+</a>
+
+## Star History
+
+<a href="https://www.star-history.com/#chenhg5/cc-connect&Date">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=chenhg5/cc-connect&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=chenhg5/cc-connect&type=Date" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=chenhg5/cc-connect&type=Date" />
+ </picture>
 </a>
 
 ## License

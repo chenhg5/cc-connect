@@ -1,6 +1,9 @@
 package main
 
 import (
+	"archive/tar"
+	"archive/zip"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -64,8 +67,23 @@ func runUpdate() {
 
 	tmpFile, err := downloadToTemp(url)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Download failed: %v\n", err)
-		os.Exit(1)
+		// Fallback: try archive format (.tar.gz or .zip)
+		archiveAsset := archiveAssetName(latest)
+		archiveURL := fmt.Sprintf("%s/%s/%s", downloadBase, latest, archiveAsset)
+		fmt.Printf("Bare binary not found, trying archive %s ...\n", archiveURL)
+
+		archiveTmp, archiveErr := downloadToTemp(archiveURL)
+		if archiveErr != nil {
+			fmt.Fprintf(os.Stderr, "Download failed: %v\n", archiveErr)
+			os.Exit(1)
+		}
+		defer os.Remove(archiveTmp)
+
+		tmpFile, err = extractBinaryFromArchive(archiveTmp, archiveAsset)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Extract failed: %v\n", err)
+			os.Exit(1)
+		}
 	}
 	defer os.Remove(tmpFile)
 
@@ -171,6 +189,99 @@ func binaryAssetName(tag string) string {
 		name += ".exe"
 	}
 	return name
+}
+
+func archiveAssetName(tag string) string {
+	goos := runtime.GOOS
+	goarch := runtime.GOARCH
+	base := fmt.Sprintf("cc-connect-%s-%s-%s", tag, goos, goarch)
+	if goos == "windows" {
+		return base + ".zip"
+	}
+	return base + ".tar.gz"
+}
+
+// extractBinaryFromArchive extracts the cc-connect binary from a .tar.gz or .zip archive.
+func extractBinaryFromArchive(archivePath, archiveName string) (string, error) {
+	if strings.HasSuffix(archiveName, ".zip") {
+		return extractFromZip(archivePath)
+	}
+	return extractFromTarGz(archivePath)
+}
+
+func extractFromTarGz(archivePath string) (string, error) {
+	f, err := os.Open(archivePath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return "", fmt.Errorf("gzip: %w", err)
+	}
+	defer gz.Close()
+
+	tr := tar.NewReader(gz)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", fmt.Errorf("tar: %w", err)
+		}
+		if hdr.Typeflag != tar.TypeReg {
+			continue
+		}
+		if strings.HasPrefix(hdr.Name, "cc-connect") {
+			tmp, err := os.CreateTemp("", "cc-connect-update-*")
+			if err != nil {
+				return "", err
+			}
+			if _, err := io.Copy(tmp, tr); err != nil {
+				tmp.Close()
+				os.Remove(tmp.Name())
+				return "", fmt.Errorf("extract: %w", err)
+			}
+			tmp.Close()
+			return tmp.Name(), nil
+		}
+	}
+	return "", fmt.Errorf("binary not found in archive")
+}
+
+func extractFromZip(archivePath string) (string, error) {
+	r, err := zip.OpenReader(archivePath)
+	if err != nil {
+		return "", fmt.Errorf("zip: %w", err)
+	}
+	defer r.Close()
+
+	for _, f := range r.File {
+		if !strings.HasPrefix(f.Name, "cc-connect") {
+			continue
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return "", err
+		}
+		tmp, err := os.CreateTemp("", "cc-connect-update-*")
+		if err != nil {
+			rc.Close()
+			return "", err
+		}
+		if _, err := io.Copy(tmp, rc); err != nil {
+			tmp.Close()
+			rc.Close()
+			os.Remove(tmp.Name())
+			return "", fmt.Errorf("extract: %w", err)
+		}
+		rc.Close()
+		tmp.Close()
+		return tmp.Name(), nil
+	}
+	return "", fmt.Errorf("binary not found in archive")
 }
 
 func downloadToTemp(url string) (string, error) {

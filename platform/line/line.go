@@ -55,6 +55,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		path = "/callback"
 	}
 
+	core.CheckAllowFrom("line", allowFrom)
 	return &Platform{
 		channelSecret: secret,
 		channelToken:  token,

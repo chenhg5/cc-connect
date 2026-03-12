@@ -301,6 +301,23 @@ name = "my-backend"
 # quiet = true  # Override global quiet for this project / 覆盖全局静默模式
 # disabled_commands = ["restart", "upgrade", "cron"]  # Disable specific commands for this project
 #                                                     # 禁用该项目的指定命令
+#
+# admin_from controls who can run privileged commands (/shell, /restart, /upgrade, /commands addexec).
+# admin_from 控制谁可以执行特权命令（/shell, /restart, /upgrade, /commands addexec）。
+#
+# Not set (default): privileged commands are blocked for all users.
+# 未设置（默认）：所有用户均无法使用特权命令。
+#
+# Explicit user list: only these users can run privileged commands.
+# 指定用户列表：仅这些用户可执行特权命令。
+# admin_from = "user_id_1,user_id_2"
+#
+# ⚠️ RISK WARNING / 风险提示:
+# Setting admin_from = "*" grants ALL allowed users full shell access to the host machine.
+# Only use this for personal single-user deployments where you trust every allowed user.
+# 设置 admin_from = "*" 将授予所有已允许的用户对主机的完整 shell 访问权限。
+# 仅在个人单用户部署中使用此配置，确保所有允许的用户均可信任。
+# admin_from = "*"
 
 [projects.agent]
 type = "claudecode"
@@ -393,6 +410,8 @@ type = "feishu"
 [projects.platforms.options]
 app_id = "your-feishu-app-id"
 app_secret = "your-feishu-app-secret"
+# enable_feishu_card = true  # Enable Feishu interactive cards (default: true); set false to force plain-text replies
+#                              # 启用飞书交互式卡片（默认 true）；设为 false 时强制回退纯文本回复
 # allow_from = "*"          # Allowed user open_ids, comma-separated; "*" = all (default) / 允许的用户 open_id，逗号分隔；"*" 表示所有（默认）
 # reaction_emoji = "OnIt"  # Emoji reaction on incoming messages (default: "OnIt"); set to "none" to disable
 #                           # 收到消息时添加的表情回复（默认 "OnIt"）；设为 "none" 可禁用
@@ -602,6 +621,7 @@ app_secret = "your-feishu-app-secret"
 # work_dir = "/path/to/project"
 # mode = "yolo"  # "default" | "auto_edit" | "yolo" | "plan"
 # cmd = "gemini" # CLI binary name (default: "gemini") / CLI 二进制名称（默认 "gemini"）
+# timeout_mins = 30  # 每次对话超时时间（分钟），0 表示不限制
 #
 # Mode options / 模式说明:
 # - "default":   Prompt for approval on each tool use / 每次工具调用都需要确认
@@ -655,6 +675,9 @@ app_secret = "your-feishu-app-secret"
 #
 # Optional: specify a model / 可选：指定模型
 # model = "o3"
+#
+# Optional: specify Codex reasoning effort / 可选：指定 Codex 推理强度
+# reasoning_effort = "high"  # "minimal" | "low" | "medium" | "high" | "xhigh"
 #
 # # Active provider / 当前激活的 provider
 # # provider = "openai"
