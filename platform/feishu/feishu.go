@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -645,7 +646,7 @@ func buildReplyContent(content string) (msgType string, body string) {
 	// 2. Many \n\n paragraphs (help, status, etc.) → post rich-text (preserves blank lines)
 	// 3. Other markdown → post md tag (best native rendering)
 	if hasComplexMarkdown(content) {
-		return larkim.MsgTypeInteractive, buildCardJSON(preprocessFeishuMarkdown(content))
+		return larkim.MsgTypeInteractive, buildCardJSON(sanitizeMarkdownURLs(preprocessFeishuMarkdown(content)))
 	}
 	if strings.Count(content, "\n\n") >= 2 {
 		return larkim.MsgTypePost, buildPostJSON(content)
@@ -671,6 +672,7 @@ func hasComplexMarkdown(s string) bool {
 // buildPostMdJSON builds a Feishu post message using the md tag,
 // which renders markdown at normal chat font size.
 func buildPostMdJSON(content string) string {
+	content = sanitizeMarkdownURLs(content)
 	post := map[string]any{
 		"zh_cn": map[string]any{
 			"content": [][]map[string]any{
@@ -785,6 +787,24 @@ func buildPostJSON(content string) string {
 // Feishu rejects non-HTTP(S) URLs with "invalid href" (code 230001).
 func isValidFeishuHref(u string) bool {
 	return strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://")
+}
+
+var mdLinkRe = regexp.MustCompile(`\[([^\]]*)\]\(([^)]+)\)`)
+
+// sanitizeMarkdownURLs rewrites markdown links with non-HTTP(S) schemes
+// to plain text, preventing Feishu API rejection (code 230001).
+func sanitizeMarkdownURLs(md string) string {
+	return mdLinkRe.ReplaceAllStringFunc(md, func(match string) string {
+		parts := mdLinkRe.FindStringSubmatch(match)
+		if len(parts) < 3 {
+			return match
+		}
+		if isValidFeishuHref(parts[2]) {
+			return match
+		}
+		// Convert invalid-scheme link to "text (url)" plain text
+		return parts[1] + " (" + parts[2] + ")"
+	})
 }
 
 // parseInlineMarkdown parses a single line of markdown into Feishu post elements.
@@ -1015,7 +1035,7 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 		return nil, fmt.Errorf("%s: chatID is empty", p.tag())
 	}
 
-	cardJSON := buildCardJSON(content)
+	cardJSON := buildCardJSON(sanitizeMarkdownURLs(content))
 
 	var msgID string
 	if p.replyInThread && rc.messageID != "" {
@@ -1074,7 +1094,7 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 	if containsMarkdown(content) {
 		processed = preprocessFeishuMarkdown(content)
 	}
-	cardJSON := buildCardJSON(processed)
+	cardJSON := buildCardJSON(sanitizeMarkdownURLs(processed))
 	resp, err := p.client.Im.Message.Patch(ctx, larkim.NewPatchMessageReqBuilder().
 		MessageId(h.messageID).
 		Body(larkim.NewPatchMessageReqBodyBuilder().

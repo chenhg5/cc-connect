@@ -262,6 +262,58 @@ func TestLark_ReconstructReplyCtx(t *testing.T) {
 	}
 }
 
+func TestSanitizeMarkdownURLs(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "http link kept",
+			input: "see [docs](http://example.com)",
+			want:  "see [docs](http://example.com)",
+		},
+		{
+			name:  "https link kept",
+			input: "see [docs](https://example.com/path)",
+			want:  "see [docs](https://example.com/path)",
+		},
+		{
+			name:  "file scheme removed",
+			input: "open [file](file:///tmp/foo.txt)",
+			want:  "open file (file:///tmp/foo.txt)",
+		},
+		{
+			name:  "data scheme removed",
+			input: "img [pic](data:image/png;base64,abc)",
+			want:  "img pic (data:image/png;base64,abc)",
+		},
+		{
+			name:  "mixed links",
+			input: "[ok](https://x.com) and [bad](file:///etc/passwd)",
+			want:  "[ok](https://x.com) and bad (file:///etc/passwd)",
+		},
+		{
+			name:  "no links unchanged",
+			input: "plain text without links",
+			want:  "plain text without links",
+		},
+		{
+			name:  "ftp scheme removed",
+			input: "[dl](ftp://files.example.com/f.zip)",
+			want:  "dl (ftp://files.example.com/f.zip)",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sanitizeMarkdownURLs(tt.input)
+			if got != tt.want {
+				t.Errorf("sanitizeMarkdownURLs(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestLark_ErrorMessagePrefix(t *testing.T) {
 	_, err := newPlatform("lark", lark.LarkBaseUrl, map[string]any{})
 	if err == nil {
