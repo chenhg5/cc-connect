@@ -73,7 +73,7 @@ cc-connect bridges AI agents running on your machine to the messaging platforms 
 | Platform | Slack | ✅ Socket Mode — no public IP needed |
 | Platform | Discord | ✅ Gateway — no public IP needed |
 | Platform | LINE | ✅ Webhook — public URL required |
-| Platform | WeChat Work (企业微信) | ✅ Webhook — public URL required |
+| Platform | WeChat Work (企业微信) | ✅ Webhook — public URL required; ✅ WebSocket — no public IP needed |
 | Platform | QQ (via NapCat/OneBot) | ✅ WebSocket, no public IP needed — **Beta** |
 | Platform | QQ Bot (Official) | ✅ WebSocket — no public IP needed |
 | Platform | WhatsApp | 🔜 Planned (Business Cloud API) |
@@ -177,7 +177,7 @@ Each platform requires creating a bot/app on the platform's developer console. W
 | Slack | [docs/slack.md](docs/slack.md) | Socket Mode | No |
 | Discord | [docs/discord.md](docs/discord.md) | Gateway | No |
 | LINE | [INSTALL.md](./INSTALL.md#line--requires-public-url) | Webhook | Yes |
-| WeChat Work | [docs/wecom.md](docs/wecom.md) | Webhook | Yes |
+| WeChat Work | [docs/wecom.md](docs/wecom.md) | WebSocket / Webhook | No (WebSocket) / Yes (Webhook) |
 | QQ (NapCat) | [docs/qq.md](docs/qq.md) | WebSocket (OneBot v11) | No |
 | QQ Bot (Official) | [docs/qqbot.md](docs/qqbot.md) | WebSocket (Official API) | No |
 
@@ -226,7 +226,16 @@ channel_secret = "xxx"
 channel_token = "xxx"
 port = "8080"
 
-# WeChat Work (requires public URL)
+# WeChat Work — WebSocket long connection (no public IP needed, recommended)
+[[projects.platforms]]
+type = "wecom"
+[projects.platforms.options]
+mode = "websocket"
+bot_id = "aibXXX"
+bot_secret = "YOUR_BOT_SECRET"
+allow_from = "*"  # user IDs, e.g. "zhangsan,lisi" or "*" for all
+
+# WeChat Work — Webhook (requires public URL)
 [[projects.platforms]]
 type = "wecom"
 [projects.platforms.options]
@@ -896,7 +905,7 @@ cc-connect/
 │   ├── slack/               # Slack (Socket Mode)
 │   ├── discord/             # Discord (Gateway WebSocket)
 │   ├── line/                # LINE (HTTP Webhook)
-│   ├── wecom/               # WeChat Work (HTTP Webhook)
+│   ├── wecom/               # WeChat Work (WebSocket / HTTP Webhook)
 │   ├── qq/                  # QQ (NapCat / OneBot v11 WebSocket)
 │   └── qqbot/               # QQ Bot (Official API v2 WebSocket)
 ├── agent/                   # Agent adapters
