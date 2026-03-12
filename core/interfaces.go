@@ -233,6 +233,47 @@ type ModelOption struct {
 	Desc string // short description (display_name or empty)
 }
 
+// UsageReporter is an optional interface for agents that can report account or
+// model quota usage from their backing provider.
+type UsageReporter interface {
+	GetUsage(ctx context.Context) (*UsageReport, error)
+}
+
+// UsageReport is a provider-neutral quota snapshot returned by UsageReporter.
+type UsageReport struct {
+	Provider  string
+	AccountID string
+	UserID    string
+	Email     string
+	Plan      string
+	Buckets   []UsageBucket
+	Credits   *UsageCredits
+}
+
+// UsageBucket groups one logical quota, such as standard requests or code review.
+type UsageBucket struct {
+	Name         string
+	Allowed      bool
+	LimitReached bool
+	Windows      []UsageWindow
+}
+
+// UsageWindow describes a single quota window.
+type UsageWindow struct {
+	Name              string
+	UsedPercent       int
+	WindowSeconds     int
+	ResetAfterSeconds int
+	ResetAtUnix       int64
+}
+
+// UsageCredits contains optional credit/balance metadata.
+type UsageCredits struct {
+	HasCredits bool
+	Unlimited  bool
+	Balance    string
+}
+
 // ContextCompressor is an optional interface for agents that support
 // compressing/compacting the conversation context within a running session.
 // CompressCommand returns the native slash command (e.g. "/compact", "/compress")

@@ -697,6 +697,7 @@ cc-connect daemon uninstall
 /switch <id>           切换到指定会话
 /current               查看当前活跃会话
 /history [n]           查看最近 n 条消息（默认 10）
+/usage                 查看账号/模型限额使用情况（当前 Agent 支持时）
 /provider [list|add|remove|switch] 管理 API Provider
 /allow <工具名>         预授权工具（下次会话生效）
 /reasoning [等级]      查看或切换推理强度（Codex）

@@ -1481,6 +1481,7 @@ var builtinCommands = []struct {
 	{[]string{"name", "rename"}, "name"},
 	{[]string{"current"}, "current"},
 	{[]string{"status"}, "status"},
+	{[]string{"usage", "quota"}, "usage"},
 	{[]string{"history"}, "history"},
 	{[]string{"allow"}, "allow"},
 	{[]string{"model"}, "model"},
@@ -1592,6 +1593,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdCurrent(p, msg)
 	case "status":
 		e.cmdStatus(p, msg)
+	case "usage":
+		e.cmdUsage(p, msg)
 	case "history":
 		e.cmdHistory(p, msg, args)
 	case "allow":
@@ -2233,6 +2236,274 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 	e.replyWithCard(p, msg.ReplyCtx, e.renderStatusCard(msg.SessionKey))
 }
 
+func (e *Engine) cmdUsage(p Platform, msg *Message) {
+	reporter, ok := e.agent.(UsageReporter)
+	if !ok {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgUsageNotSupported))
+		return
+	}
+
+	fetchCtx, cancel := context.WithTimeout(e.ctx, 10*time.Second)
+	defer cancel()
+
+	report, err := reporter.GetUsage(fetchCtx)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgUsageFetchFailed, err))
+		return
+	}
+
+	if p.Name() == "feishu" && supportsCards(p) {
+		e.replyWithCard(p, msg.ReplyCtx, e.renderUsageCard(report))
+		return
+	}
+
+	e.reply(p, msg.ReplyCtx, formatUsageReport(report, e.i18n.CurrentLang()))
+}
+
+func formatUsageReport(report *UsageReport, lang Language) string {
+	if report == nil {
+		return usageUnavailableText(lang)
+	}
+
+	var sb strings.Builder
+	sb.WriteString(usageAccountLabel(lang))
+	sb.WriteString(accountDisplay(report))
+	sb.WriteString(formatUsageBlocks(report, lang))
+
+	return strings.TrimSpace(sb.String())
+}
+
+func formatUsageBlocks(report *UsageReport, lang Language) string {
+	primary, secondary := selectUsageWindows(report)
+	var sections []string
+	if primary != nil {
+		sections = append(sections, formatUsageBlock(lang, primary))
+	}
+	if secondary != nil {
+		sections = append(sections, formatUsageBlock(lang, secondary))
+	}
+	if len(sections) == 0 {
+		return ""
+	}
+	return "\n\n" + strings.Join(sections, "\n\n")
+}
+
+func accountDisplay(report *UsageReport) string {
+	var base string
+	if report.Email != "" {
+		base = report.Email
+	} else if report.AccountID != "" {
+		base = report.AccountID
+	} else if report.UserID != "" {
+		base = report.UserID
+	} else {
+		base = "-"
+	}
+	if report.Plan != "" {
+		return fmt.Sprintf("%s (%s)", base, report.Plan)
+	}
+	return base
+}
+
+func selectUsageWindows(report *UsageReport) (*UsageWindow, *UsageWindow) {
+	for _, bucket := range report.Buckets {
+		if len(bucket.Windows) == 0 {
+			continue
+		}
+		var primary, secondary *UsageWindow
+		for i := range bucket.Windows {
+			window := &bucket.Windows[i]
+			switch window.WindowSeconds {
+			case 18000:
+				primary = window
+			case 604800:
+				if secondary == nil {
+					secondary = window
+				}
+			}
+		}
+		if primary == nil && len(bucket.Windows) > 0 {
+			primary = &bucket.Windows[0]
+		}
+		if secondary == nil && len(bucket.Windows) > 1 {
+			secondary = &bucket.Windows[1]
+		}
+		if primary != nil || secondary != nil {
+			return primary, secondary
+		}
+	}
+	return nil, nil
+}
+
+func formatUsageBlock(lang Language, window *UsageWindow) string {
+	remaining := 100 - window.UsedPercent
+	if remaining < 0 {
+		remaining = 0
+	}
+	var sb strings.Builder
+	sb.WriteString(usageWindowLabel(lang, window.WindowSeconds))
+	sb.WriteString("\n")
+	sb.WriteString(usageRemainingLabel(lang))
+	sb.WriteString(usageColon(lang))
+	sb.WriteString(fmt.Sprintf("%d%%", remaining))
+	sb.WriteString("\n")
+	sb.WriteString(usageResetLabel(lang))
+	sb.WriteString(usageColon(lang))
+	sb.WriteString(formatUsageResetTime(lang, window.ResetAfterSeconds))
+	return sb.String()
+}
+
+func (e *Engine) renderUsageCard(report *UsageReport) *Card {
+	lang := e.i18n.CurrentLang()
+	return NewCard().
+		Title(usageCardTitle(lang), "indigo").
+		Markdown(strings.TrimSpace(formatUsageReport(report, lang))).
+		Buttons(e.cardBackButton()).
+		Build()
+}
+
+func formatUsageResetTime(lang Language, resetAfterSeconds int) string {
+	if resetAfterSeconds <= 0 {
+		switch lang {
+		case LangChinese, LangTraditionalChinese:
+			return "-"
+		case LangJapanese:
+			return "-"
+		case LangSpanish:
+			return "-"
+		default:
+			return "-"
+		}
+	}
+	return formatDurationI18n(time.Duration(resetAfterSeconds)*time.Second, lang)
+}
+
+func usageAccountLabel(lang Language) string {
+	switch lang {
+	case LangChinese:
+		return "账号："
+	case LangTraditionalChinese:
+		return "帳號："
+	case LangJapanese:
+		return "アカウント: "
+	case LangSpanish:
+		return "Cuenta: "
+	default:
+		return "Account: "
+	}
+}
+
+func usageWindowLabel(lang Language, seconds int) string {
+	switch seconds {
+	case 18000:
+		switch lang {
+		case LangChinese:
+			return "5小时限额"
+		case LangTraditionalChinese:
+			return "5小時限額"
+		case LangJapanese:
+			return "5時間枠"
+		case LangSpanish:
+			return "Límite 5h"
+		default:
+			return "5h limit"
+		}
+	case 604800:
+		switch lang {
+		case LangChinese:
+			return "7日限额"
+		case LangTraditionalChinese:
+			return "7日限額"
+		case LangJapanese:
+			return "7日枠"
+		case LangSpanish:
+			return "Límite 7d"
+		default:
+			return "7d limit"
+		}
+	default:
+		switch lang {
+		case LangChinese, LangTraditionalChinese:
+			return formatDurationI18n(time.Duration(seconds)*time.Second, lang) + "限额"
+		case LangJapanese:
+			return formatDurationI18n(time.Duration(seconds)*time.Second, lang) + "枠"
+		case LangSpanish:
+			return "Límite " + formatDurationI18n(time.Duration(seconds)*time.Second, lang)
+		default:
+			return formatDurationI18n(time.Duration(seconds)*time.Second, lang) + " limit"
+		}
+	}
+}
+
+func usageRemainingLabel(lang Language) string {
+	switch lang {
+	case LangChinese:
+		return "剩余"
+	case LangTraditionalChinese:
+		return "剩餘"
+	case LangJapanese:
+		return "残り"
+	case LangSpanish:
+		return "restante"
+	default:
+		return "Remaining"
+	}
+}
+
+func usageResetLabel(lang Language) string {
+	switch lang {
+	case LangChinese:
+		return "重置"
+	case LangTraditionalChinese:
+		return "重置"
+	case LangJapanese:
+		return "リセット"
+	case LangSpanish:
+		return "Reinicio"
+	default:
+		return "Resets"
+	}
+}
+
+func usageColon(lang Language) string {
+	switch lang {
+	case LangChinese, LangTraditionalChinese:
+		return "："
+	default:
+		return ": "
+	}
+}
+
+func usageCardTitle(lang Language) string {
+	switch lang {
+	case LangChinese:
+		return "Usage"
+	case LangTraditionalChinese:
+		return "Usage"
+	case LangJapanese:
+		return "Usage"
+	case LangSpanish:
+		return "Usage"
+	default:
+		return "Usage"
+	}
+}
+
+func usageUnavailableText(lang Language) string {
+	switch lang {
+	case LangChinese:
+		return "暂无 usage 信息。"
+	case LangTraditionalChinese:
+		return "暫無 usage 資訊。"
+	case LangJapanese:
+		return "usage 情報はありません。"
+	case LangSpanish:
+		return "No hay datos de usage."
+	default:
+		return "Usage unavailable."
+	}
+}
+
 func splitCardTitleBody(content string) (string, string) {
 	content = strings.TrimSpace(content)
 	parts := strings.SplitN(content, "\n\n", 2)
@@ -2596,6 +2867,7 @@ func helpCardGroups() []helpCardGroup {
 			items: []helpCardItem{
 				{command: "/status", action: "nav:/status"},
 				{command: "/doctor", action: "nav:/doctor"},
+				{command: "/usage", action: "cmd:/usage"},
 				{command: "/config", action: "nav:/config"},
 				{command: "/version", action: "nav:/version"},
 				{command: "/upgrade", action: "nav:/upgrade"},

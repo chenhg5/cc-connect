@@ -229,6 +229,8 @@ const (
 	MsgMemoryAdded        MsgKey = "memory_added"
 	MsgMemoryAddFailed    MsgKey = "memory_add_failed"
 	MsgMemoryAddUsage     MsgKey = "memory_add_usage"
+	MsgUsageNotSupported  MsgKey = "usage_not_supported"
+	MsgUsageFetchFailed   MsgKey = "usage_fetch_failed"
 
 	// Inline strings previously hardcoded in engine.go
 	MsgStatusMode    MsgKey = "status_mode"
@@ -288,9 +290,9 @@ const (
 	MsgPermBtnAllow    MsgKey = "perm_btn_allow"
 	MsgPermBtnDeny     MsgKey = "perm_btn_deny"
 	MsgPermBtnAllowAll MsgKey = "perm_btn_allow_all"
-	MsgPermCardTitle MsgKey = "perm_card_title"
-	MsgPermCardBody  MsgKey = "perm_card_body"
-	MsgPermCardNote  MsgKey = "perm_card_note"
+	MsgPermCardTitle   MsgKey = "perm_card_title"
+	MsgPermCardBody    MsgKey = "perm_card_body"
+	MsgPermCardNote    MsgKey = "perm_card_note"
 
 	MsgCommandsTitle        MsgKey = "commands_title"
 	MsgCommandsEmpty        MsgKey = "commands_empty"
@@ -422,6 +424,7 @@ const (
 	MsgBuiltinCmdUpgrade   MsgKey = "upgrade"
 	MsgBuiltinCmdRestart   MsgKey = "restart"
 	MsgBuiltinCmdStatus    MsgKey = "status"
+	MsgBuiltinCmdUsage     MsgKey = "usage"
 	MsgBuiltinCmdVersion   MsgKey = "version"
 	MsgBuiltinCmdHelp      MsgKey = "help"
 	MsgBuiltinCmdBind      MsgKey = "bind"
@@ -670,6 +673,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/skills\n  List agent skills (from SKILL.md)\n\n" +
 			"/config [get|set|reload] [key] [value]\n  View/update runtime configuration\n\n" +
 			"/doctor\n  Run system diagnostics\n\n" +
+			"/usage\n  Show account/model quota usage\n\n" +
 			"/upgrade\n  Check for updates and self-update\n\n" +
 			"/restart\n  Restart cc-connect service\n\n" +
 			"/status\n  Show system status\n\n" +
@@ -706,6 +710,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/skills\n  列出 Agent Skills（来自 SKILL.md）\n\n" +
 			"/config [get|set|reload] [key] [value]\n  查看/修改运行时配置\n\n" +
 			"/doctor\n  运行系统诊断\n\n" +
+			"/usage\n  查看账号/模型限额使用情况\n\n" +
 			"/upgrade\n  检查更新并自动升级\n\n" +
 			"/restart\n  重启 cc-connect 服务\n\n" +
 			"/status\n  查看系统状态\n\n" +
@@ -742,6 +747,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/skills\n  列出 Agent Skills（來自 SKILL.md）\n\n" +
 			"/config [get|set|reload] [key] [value]\n  查看/修改執行階段配置\n\n" +
 			"/doctor\n  執行系統診斷\n\n" +
+			"/usage\n  查看帳號/模型限額使用情況\n\n" +
 			"/upgrade\n  檢查更新並自動升級\n\n" +
 			"/restart\n  重啟 cc-connect 服務\n\n" +
 			"/status\n  查看系統狀態\n\n" +
@@ -777,6 +783,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/skills\n  エージェントスキル一覧（SKILL.md から）\n\n" +
 			"/config [get|set|reload] [key] [value]\n  ランタイム設定の表示/変更\n\n" +
 			"/doctor\n  システム診断を実行\n\n" +
+			"/usage\n  アカウント/モデル使用量を表示\n\n" +
 			"/upgrade\n  アップデートを確認して自動更新\n\n" +
 			"/restart\n  cc-connect サービスを再起動\n\n" +
 			"/status\n  システム状態を表示\n\n" +
@@ -812,6 +819,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/skills\n  Listar skills del agente (desde SKILL.md)\n\n" +
 			"/config [get|set|reload] [key] [value]\n  Ver/actualizar configuración en tiempo de ejecución\n\n" +
 			"/doctor\n  Ejecutar diagnósticos del sistema\n\n" +
+			"/usage\n  Mostrar uso de cuota de cuenta/modelo\n\n" +
 			"/upgrade\n  Buscar actualizaciones y auto-actualizar\n\n" +
 			"/restart\n  Reiniciar el servicio cc-connect\n\n" +
 			"/status\n  Mostrar estado del sistema\n\n" +
@@ -965,6 +973,7 @@ var messages = map[MsgKey]map[Language]string{
 		LangEnglish: "**System**\n" +
 			"/config [get|set|reload] — Runtime configuration\n" +
 			"/doctor — System diagnostics\n" +
+			"/usage — Account/model quota usage\n" +
 			"/upgrade — Check for updates\n" +
 			"/restart — Restart service\n" +
 			"/status — System status\n" +
@@ -972,6 +981,7 @@ var messages = map[MsgKey]map[Language]string{
 		LangChinese: "**系统**\n" +
 			"/config [get|set|reload] — 运行时配置\n" +
 			"/doctor — 系统诊断\n" +
+			"/usage — 账号/模型限额\n" +
 			"/upgrade — 检查更新\n" +
 			"/restart — 重启服务\n" +
 			"/status — 系统状态\n" +
@@ -979,6 +989,7 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "**系統**\n" +
 			"/config [get|set|reload] — 執行階段配置\n" +
 			"/doctor — 系統診斷\n" +
+			"/usage — 帳號/模型限額\n" +
 			"/upgrade — 檢查更新\n" +
 			"/restart — 重啟服務\n" +
 			"/status — 系統狀態\n" +
@@ -986,6 +997,7 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese: "**システム**\n" +
 			"/config [get|set|reload] — ランタイム設定\n" +
 			"/doctor — システム診断\n" +
+			"/usage — アカウント/モデル使用量\n" +
 			"/upgrade — アップデート確認\n" +
 			"/restart — サービス再起動\n" +
 			"/status — システム状態\n" +
@@ -993,6 +1005,7 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish: "**Sistema**\n" +
 			"/config [get|set|reload] — Configuración\n" +
 			"/doctor — Diagnósticos del sistema\n" +
+			"/usage — Uso de cuota de cuenta/modelo\n" +
 			"/upgrade — Buscar actualizaciones\n" +
 			"/restart — Reiniciar servicio\n" +
 			"/status — Estado del sistema\n" +
@@ -1469,6 +1482,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 寫入記憶檔案失敗: %v",
 		LangJapanese:           "❌ メモリファイルの書き込みに失敗しました: %v",
 		LangSpanish:            "❌ Error al escribir archivo de memoria: %v",
+	},
+	MsgUsageNotSupported: {
+		LangEnglish:            "Current agent does not support `/usage`.",
+		LangChinese:            "当前 Agent 不支持 `/usage`。",
+		LangTraditionalChinese: "目前 Agent 不支援 `/usage`。",
+		LangJapanese:           "現在のエージェントは `/usage` をサポートしていません。",
+		LangSpanish:            "El agente actual no admite `/usage`.",
+	},
+	MsgUsageFetchFailed: {
+		LangEnglish:            "Failed to fetch usage: %v",
+		LangChinese:            "获取 usage 失败：%v",
+		LangTraditionalChinese: "取得 usage 失敗：%v",
+		LangJapanese:           "usage の取得に失敗しました: %v",
+		LangSpanish:            "No se pudo obtener usage: %v",
 	},
 	MsgMemoryAddUsage: {
 		LangEnglish: "Usage:\n" +
@@ -2642,6 +2669,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "查看系統狀態",
 		LangJapanese:           "システム状態を表示",
 		LangSpanish:            "Mostrar estado del sistema",
+	},
+	MsgBuiltinCmdUsage: {
+		LangEnglish:            "Show account/model quota usage",
+		LangChinese:            "查看账号/模型限额使用情况",
+		LangTraditionalChinese: "查看帳號/模型限額使用情況",
+		LangJapanese:           "アカウント/モデル使用量を表示",
+		LangSpanish:            "Mostrar uso de cuota de cuenta/modelo",
 	},
 	MsgBuiltinCmdVersion: {
 		LangEnglish:            "Show cc-connect version",

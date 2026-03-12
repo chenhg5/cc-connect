@@ -746,6 +746,7 @@ Each user gets an independent session with full conversation context. Manage ses
 /switch <id>      Switch to a different session
 /current          Show current session info
 /history [n]      Show last n messages (default 10)
+/usage            Show account/model quota usage (if supported by the current agent)
 /provider [...]   Manage API providers (list/add/remove/switch)
 /allow <tool>     Pre-allow a tool (takes effect on next session)
 /reasoning [level] View or switch reasoning effort (Codex)
