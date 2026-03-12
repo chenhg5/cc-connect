@@ -5,6 +5,7 @@
 Beta release with major new features and security improvements.
 
 ### New Features
+- **`/usage` Command**: Add a built-in quota usage command with a generic agent usage-reporting interface; Codex now supports ChatGPT OAuth usage lookup via `~/.codex/auth.json`
 - **Feishu Interactive Cards**: Beautiful card-based UI for slash commands (/help, /list, /status, etc.) with tabbed navigation and in-place updates
 - **Lark Platform Support**: Added support for Lark (飞书国际版) with proper domain handling
 - **Codex Reasoning Effort**: New `/reasoning` command to switch reasoning effort levels (low/medium/high)

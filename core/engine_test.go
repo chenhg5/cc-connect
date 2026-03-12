@@ -193,6 +193,16 @@ func (a *stubProviderAgent) SetActiveProvider(name string) bool {
 	return false
 }
 
+type stubUsageAgent struct {
+	stubAgent
+	report *UsageReport
+	err    error
+}
+
+func (a *stubUsageAgent) GetUsage(_ context.Context) (*UsageReport, error) {
+	return a.report, a.err
+}
+
 func newTestEngine() *Engine {
 	return NewEngine("test", &stubAgent{}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
 }
@@ -1318,6 +1328,173 @@ func TestCmdStatus_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	}
 	if strings.Contains(p.sent[0], "[← Back]") {
 		t.Fatalf("status text = %q, should not be card fallback text", p.sent[0])
+	}
+}
+
+func TestCmdUsage_UnsupportedAgent(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	e.handleCommand(p, msg, "/usage")
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(strings.ToLower(p.sent[0]), "does not support") {
+		t.Fatalf("sent = %q, want unsupported usage message", p.sent[0])
+	}
+}
+
+func TestCmdUsage_Success(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubUsageAgent{
+		report: &UsageReport{
+			Provider: "codex",
+			Email:    "dev@example.com",
+			Plan:     "team",
+			Buckets: []UsageBucket{
+				{
+					Name:         "Rate limit",
+					Allowed:      true,
+					LimitReached: false,
+					Windows: []UsageWindow{
+						{Name: "Primary", UsedPercent: 23, WindowSeconds: 18000, ResetAfterSeconds: 6665},
+						{Name: "Secondary", UsedPercent: 42, WindowSeconds: 604800, ResetAfterSeconds: 512698},
+					},
+				},
+				{
+					Name:         "Code review",
+					Allowed:      true,
+					LimitReached: false,
+					Windows: []UsageWindow{
+						{Name: "Primary", UsedPercent: 0, WindowSeconds: 604800, ResetAfterSeconds: 604800},
+					},
+				},
+			},
+			Credits: &UsageCredits{
+				HasCredits: false,
+				Unlimited:  false,
+			},
+		},
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	e.handleCommand(p, msg, "/usage")
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	got := p.sent[0]
+	for _, want := range []string{
+		"Account: dev@example.com (team)",
+		"5h limit",
+		"Remaining: 77%",
+		"Resets: 1h 51m",
+		"5h limit",
+		"7d limit",
+		"Remaining: 58%",
+		"Resets: 5d 22h 24m",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("usage text = %q, want substring %q", got, want)
+		}
+	}
+	if strings.Contains(got, "```") {
+		t.Fatalf("usage text = %q, should not use code block on plain platform", got)
+	}
+}
+
+func TestCmdUsage_UsesCardOnCardPlatform(t *testing.T) {
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	agent := &stubUsageAgent{
+		report: &UsageReport{
+			Email: "dev@example.com",
+			Plan:  "team",
+			Buckets: []UsageBucket{
+				{
+					Name:         "Rate limit",
+					Allowed:      true,
+					LimitReached: false,
+					Windows: []UsageWindow{
+						{Name: "Primary", UsedPercent: 23, WindowSeconds: 18000, ResetAfterSeconds: 6665},
+						{Name: "Secondary", UsedPercent: 42, WindowSeconds: 604800, ResetAfterSeconds: 512698},
+					},
+				},
+			},
+		},
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangChinese)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	e.handleCommand(p, msg, "/usage")
+
+	if len(p.repliedCards) != 1 {
+		t.Fatalf("replied cards = %d, want 1", len(p.repliedCards))
+	}
+	if len(p.sent) != 0 {
+		t.Fatalf("sent text = %v, want no plain text fallback", p.sent)
+	}
+	text := p.repliedCards[0].RenderText()
+	for _, want := range []string{
+		"账号：dev@example.com (team)",
+		"5小时限额",
+		"剩余：77%",
+		"重置：1小时 51分钟",
+		"7日限额",
+		"剩余：58%",
+		"重置：5天 22小时 24分钟",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("card text = %q, want substring %q", text, want)
+		}
+	}
+}
+
+func TestCmdUsage_LocalizedChinese(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubUsageAgent{
+		report: &UsageReport{
+			Email: "dev@example.com",
+			Plan:  "team",
+			Buckets: []UsageBucket{
+				{
+					Name:         "Rate limit",
+					Allowed:      true,
+					LimitReached: false,
+					Windows: []UsageWindow{
+						{Name: "Primary", UsedPercent: 23, WindowSeconds: 18000, ResetAfterSeconds: 6665},
+						{Name: "Secondary", UsedPercent: 42, WindowSeconds: 604800, ResetAfterSeconds: 512698},
+					},
+				},
+			},
+		},
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangChinese)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	e.handleCommand(p, msg, "/usage")
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	got := p.sent[0]
+	for _, want := range []string{
+		"账号：dev@example.com (team)",
+		"5小时限额",
+		"剩余：77%",
+		"重置：1小时 51分钟",
+		"7日限额",
+		"剩余：58%",
+		"重置：5天 22小时 24分钟",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("usage text = %q, want substring %q", got, want)
+		}
+	}
+	if strings.Contains(got, "```") {
+		t.Fatalf("usage text = %q, should not use code block on plain platform", got)
 	}
 }
 
