@@ -210,9 +210,12 @@ const (
 
 	MsgStatusTitle MsgKey = "status_title"
 
-	MsgModelCurrent      MsgKey = "model_current"
-	MsgModelChanged      MsgKey = "model_changed"
-	MsgModelNotSupported MsgKey = "model_not_supported"
+	MsgModelCurrent          MsgKey = "model_current"
+	MsgModelChanged          MsgKey = "model_changed"
+	MsgModelNotSupported     MsgKey = "model_not_supported"
+	MsgReasoningCurrent      MsgKey = "reasoning_current"
+	MsgReasoningChanged      MsgKey = "reasoning_changed"
+	MsgReasoningNotSupported MsgKey = "reasoning_not_supported"
 
 	MsgCompressNotSupported MsgKey = "compress_not_supported"
 	MsgCompressing          MsgKey = "compressing"
@@ -235,9 +238,13 @@ const (
 	MsgQuietOnShort  MsgKey = "quiet_on_short"
 	MsgQuietOffShort MsgKey = "quiet_off_short"
 
-	MsgModelDefault   MsgKey = "model_default"
-	MsgModelListTitle MsgKey = "model_list_title"
-	MsgModelUsage     MsgKey = "model_usage"
+	MsgModelDefault               MsgKey = "model_default"
+	MsgModelListTitle             MsgKey = "model_list_title"
+	MsgModelUsage                 MsgKey = "model_usage"
+	MsgReasoningDefault           MsgKey = "reasoning_default"
+	MsgReasoningListTitle         MsgKey = "reasoning_list_title"
+	MsgReasoningUsage             MsgKey = "reasoning_usage"
+	MsgReasoningSelectPlaceholder MsgKey = "reasoning_select_placeholder"
 
 	MsgModeUsage                 MsgKey = "mode_usage"
 	MsgLangSelectPlaceholder     MsgKey = "lang_select_placeholder"
@@ -250,6 +257,7 @@ const (
 	MsgCardTitleStatus           MsgKey = "card_title_status"
 	MsgCardTitleLanguage         MsgKey = "card_title_language"
 	MsgCardTitleModel            MsgKey = "card_title_model"
+	MsgCardTitleReasoning        MsgKey = "card_title_reasoning"
 	MsgCardTitleMode             MsgKey = "card_title_mode"
 	MsgCardTitleSessions         MsgKey = "card_title_sessions"
 	MsgCardTitleSessionsPaged    MsgKey = "card_title_sessions_paged"
@@ -280,6 +288,9 @@ const (
 	MsgPermBtnAllow    MsgKey = "perm_btn_allow"
 	MsgPermBtnDeny     MsgKey = "perm_btn_deny"
 	MsgPermBtnAllowAll MsgKey = "perm_btn_allow_all"
+	MsgPermCardTitle MsgKey = "perm_card_title"
+	MsgPermCardBody  MsgKey = "perm_card_body"
+	MsgPermCardNote  MsgKey = "perm_card_note"
 
 	MsgCommandsTitle        MsgKey = "commands_title"
 	MsgCommandsEmpty        MsgKey = "commands_empty"
@@ -334,10 +345,22 @@ const (
 	MsgNewSessionCreated     MsgKey = "new_session_created"
 	MsgNewSessionCreatedName MsgKey = "new_session_created_name"
 
-	MsgDeleteUsage        MsgKey = "delete_usage"
-	MsgDeleteSuccess      MsgKey = "delete_success"
-	MsgDeleteActiveDenied MsgKey = "delete_active_denied"
-	MsgDeleteNotSupported MsgKey = "delete_not_supported"
+	MsgDeleteUsage              MsgKey = "delete_usage"
+	MsgDeleteSuccess            MsgKey = "delete_success"
+	MsgDeleteActiveDenied       MsgKey = "delete_active_denied"
+	MsgDeleteNotSupported       MsgKey = "delete_not_supported"
+	MsgDeleteModeTitle          MsgKey = "delete_mode_title"
+	MsgDeleteModeSelect         MsgKey = "delete_mode_select"
+	MsgDeleteModeSelected       MsgKey = "delete_mode_selected"
+	MsgDeleteModeSelectedCount  MsgKey = "delete_mode_selected_count"
+	MsgDeleteModeDeleteSelected MsgKey = "delete_mode_delete_selected"
+	MsgDeleteModeCancel         MsgKey = "delete_mode_cancel"
+	MsgDeleteModeConfirmTitle   MsgKey = "delete_mode_confirm_title"
+	MsgDeleteModeConfirmButton  MsgKey = "delete_mode_confirm_button"
+	MsgDeleteModeBackButton     MsgKey = "delete_mode_back_button"
+	MsgDeleteModeEmptySelection MsgKey = "delete_mode_empty_selection"
+	MsgDeleteModeResultTitle    MsgKey = "delete_mode_result_title"
+	MsgDeleteModeMissingSession MsgKey = "delete_mode_missing_session"
 
 	MsgSwitchSuccess   MsgKey = "switch_success"
 	MsgSwitchNoMatch   MsgKey = "switch_no_match"
@@ -347,6 +370,7 @@ const (
 
 	MsgBannedWordBlocked MsgKey = "banned_word_blocked"
 	MsgCommandDisabled   MsgKey = "command_disabled"
+	MsgAdminRequired     MsgKey = "admin_required"
 	MsgRateLimited       MsgKey = "rate_limited"
 
 	MsgRelayNoBinding     MsgKey = "relay_no_binding"
@@ -371,36 +395,37 @@ const (
 	MsgSearchResult   MsgKey = "search_result"
 	MsgSearchHint     MsgKey = "search_hint"
 
-	MsgBuiltinCmdNew      MsgKey = "new"
-	MsgBuiltinCmdList     MsgKey = "list"
-	MsgBuiltinCmdSearch   MsgKey = "search"
-	MsgBuiltinCmdSwitch   MsgKey = "switch"
-	MsgBuiltinCmdDelete   MsgKey = "delete"
-	MsgBuiltinCmdName     MsgKey = "name"
-	MsgBuiltinCmdCurrent  MsgKey = "current"
-	MsgBuiltinCmdHistory  MsgKey = "history"
-	MsgBuiltinCmdProvider MsgKey = "provider"
-	MsgBuiltinCmdMemory   MsgKey = "memory"
-	MsgBuiltinCmdAllow    MsgKey = "allow"
-	MsgBuiltinCmdModel    MsgKey = "model"
-	MsgBuiltinCmdMode     MsgKey = "mode"
-	MsgBuiltinCmdLang     MsgKey = "lang"
-	MsgBuiltinCmdQuiet    MsgKey = "quiet"
-	MsgBuiltinCmdCompress MsgKey = "compress"
-	MsgBuiltinCmdStop     MsgKey = "stop"
-	MsgBuiltinCmdCron     MsgKey = "cron"
-	MsgBuiltinCmdCommands MsgKey = "commands"
-	MsgBuiltinCmdAlias    MsgKey = "alias"
-	MsgBuiltinCmdSkills   MsgKey = "skills"
-	MsgBuiltinCmdConfig   MsgKey = "config"
-	MsgBuiltinCmdDoctor   MsgKey = "doctor"
-	MsgBuiltinCmdUpgrade  MsgKey = "upgrade"
-	MsgBuiltinCmdRestart  MsgKey = "restart"
-	MsgBuiltinCmdStatus   MsgKey = "status"
-	MsgBuiltinCmdVersion  MsgKey = "version"
-	MsgBuiltinCmdHelp     MsgKey = "help"
-	MsgBuiltinCmdBind     MsgKey = "bind"
-	MsgBuiltinCmdShell    MsgKey = "shell"
+	MsgBuiltinCmdNew       MsgKey = "new"
+	MsgBuiltinCmdList      MsgKey = "list"
+	MsgBuiltinCmdSearch    MsgKey = "search"
+	MsgBuiltinCmdSwitch    MsgKey = "switch"
+	MsgBuiltinCmdDelete    MsgKey = "delete"
+	MsgBuiltinCmdName      MsgKey = "name"
+	MsgBuiltinCmdCurrent   MsgKey = "current"
+	MsgBuiltinCmdHistory   MsgKey = "history"
+	MsgBuiltinCmdProvider  MsgKey = "provider"
+	MsgBuiltinCmdMemory    MsgKey = "memory"
+	MsgBuiltinCmdAllow     MsgKey = "allow"
+	MsgBuiltinCmdModel     MsgKey = "model"
+	MsgBuiltinCmdReasoning MsgKey = "reasoning"
+	MsgBuiltinCmdMode      MsgKey = "mode"
+	MsgBuiltinCmdLang      MsgKey = "lang"
+	MsgBuiltinCmdQuiet     MsgKey = "quiet"
+	MsgBuiltinCmdCompress  MsgKey = "compress"
+	MsgBuiltinCmdStop      MsgKey = "stop"
+	MsgBuiltinCmdCron      MsgKey = "cron"
+	MsgBuiltinCmdCommands  MsgKey = "commands"
+	MsgBuiltinCmdAlias     MsgKey = "alias"
+	MsgBuiltinCmdSkills    MsgKey = "skills"
+	MsgBuiltinCmdConfig    MsgKey = "config"
+	MsgBuiltinCmdDoctor    MsgKey = "doctor"
+	MsgBuiltinCmdUpgrade   MsgKey = "upgrade"
+	MsgBuiltinCmdRestart   MsgKey = "restart"
+	MsgBuiltinCmdStatus    MsgKey = "status"
+	MsgBuiltinCmdVersion   MsgKey = "version"
+	MsgBuiltinCmdHelp      MsgKey = "help"
+	MsgBuiltinCmdBind      MsgKey = "bind"
+	MsgBuiltinCmdShell     MsgKey = "shell"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -624,7 +649,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/list\n  List agent sessions\n\n" +
 			"/search <keyword>\n  Search sessions by name or ID\n\n" +
 			"/switch <number>\n  Resume a session by its list number\n\n" +
-			"/delete <number>\n  Delete a session by its list number\n\n" +
+			"/delete <number>|1,2,3|3-7|1,3-5,8\n  Delete sessions by list number(s)\n\n" +
 			"/name [number] <text>\n  Name a session for easy identification\n\n" +
 			"/current\n  Show current active session\n\n" +
 			"/history [n]\n  Show last n messages (default 10)\n\n" +
@@ -660,7 +685,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/list\n  列出 Agent 会话列表\n\n" +
 			"/search <关键词>\n  搜索会话名称或 ID\n\n" +
 			"/switch <序号>\n  按列表序号切换会话\n\n" +
-			"/delete <序号>\n  按列表序号删除会话\n\n" +
+			"/delete <序号>|1,2,3|3-7|1,3-5,8\n  按列表序号批量/单个删除会话\n\n" +
 			"/name [序号] <名称>\n  给会话命名，方便识别\n\n" +
 			"/current\n  查看当前活跃会话\n\n" +
 			"/history [n]\n  查看最近 n 条消息（默认 10）\n\n" +
@@ -696,7 +721,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/list\n  列出 Agent 會話列表\n\n" +
 			"/search <關鍵詞>\n  搜尋會話名稱或 ID\n\n" +
 			"/switch <序號>\n  按列表序號切換會話\n\n" +
-			"/delete <序號>\n  按列表序號刪除會話\n\n" +
+			"/delete <序號>|1,2,3|3-7|1,3-5,8\n  按列表序號批量/單筆刪除會話\n\n" +
 			"/name [序號] <名稱>\n  為會話命名，方便辨識\n\n" +
 			"/current\n  查看當前活躍會話\n\n" +
 			"/history [n]\n  查看最近 n 條訊息（預設 10）\n\n" +
@@ -731,7 +756,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/new [名前]\n  新しいセッションを開始\n\n" +
 			"/list\n  エージェントセッション一覧\n\n" +
 			"/switch <番号>\n  リスト番号でセッションを切り替え\n\n" +
-			"/delete <番号>\n  リスト番号でセッションを削除\n\n" +
+			"/delete <番号>|1,2,3|3-7|1,3-5,8\n  リスト番号でセッションを単体/複数削除\n\n" +
 			"/name [番号] <名前>\n  セッションに名前を付ける\n\n" +
 			"/current\n  現在のアクティブセッションを表示\n\n" +
 			"/history [n]\n  直近 n 件のメッセージを表示（デフォルト 10）\n\n" +
@@ -766,7 +791,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/new [nombre]\n  Iniciar una nueva sesión\n\n" +
 			"/list\n  Listar sesiones del agente\n\n" +
 			"/switch <número>\n  Reanudar sesión por su número en la lista\n\n" +
-			"/delete <número>\n  Eliminar sesión por su número en la lista\n\n" +
+			"/delete <número>|1,2,3|3-7|1,3-5,8\n  Eliminar una o varias sesiones por número de lista\n\n" +
 			"/name [número] <texto>\n  Nombrar una sesión para fácil identificación\n\n" +
 			"/current\n  Mostrar sesión activa actual\n\n" +
 			"/history [n]\n  Mostrar últimos n mensajes (por defecto 10)\n\n" +
@@ -811,7 +836,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/list — List agent sessions\n" +
 			"/search <keyword> — Search sessions\n" +
 			"/switch <number> — Resume a session\n" +
-			"/delete <number> — Delete a session\n" +
+			"/delete <number>|1,2,3|3-7|1,3-5,8 — Delete session(s)\n" +
 			"/name [number] <text> — Name a session\n" +
 			"/current — Show active session\n" +
 			"/history [n] — Show last n messages",
@@ -820,7 +845,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/list — 列出会话列表\n" +
 			"/search <关键词> — 搜索会话\n" +
 			"/switch <序号> — 切换会话\n" +
-			"/delete <序号> — 删除会话\n" +
+			"/delete <序号>|1,2,3|3-7|1,3-5,8 — 删除会话\n" +
 			"/name [序号] <名称> — 命名会话\n" +
 			"/current — 查看当前会话\n" +
 			"/history [n] — 查看最近 n 条消息",
@@ -829,7 +854,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/list — 列出會話列表\n" +
 			"/search <關鍵詞> — 搜尋會話\n" +
 			"/switch <序號> — 切換會話\n" +
-			"/delete <序號> — 刪除會話\n" +
+			"/delete <序號>|1,2,3|3-7|1,3-5,8 — 刪除會話\n" +
 			"/name [序號] <名稱> — 命名會話\n" +
 			"/current — 查看當前會話\n" +
 			"/history [n] — 查看最近 n 條訊息",
@@ -838,7 +863,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/list — セッション一覧\n" +
 			"/search <キーワード> — セッション検索\n" +
 			"/switch <番号> — セッション切り替え\n" +
-			"/delete <番号> — セッション削除\n" +
+			"/delete <番号>|1,2,3|3-7|1,3-5,8 — セッション削除\n" +
 			"/name [番号] <名前> — セッションに名前を付ける\n" +
 			"/current — 現在のセッションを表示\n" +
 			"/history [n] — 直近 n 件のメッセージを表示",
@@ -847,7 +872,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/list — Listar sesiones\n" +
 			"/search <keyword> — Buscar sesiones\n" +
 			"/switch <número> — Reanudar sesión\n" +
-			"/delete <número> — Eliminar sesión\n" +
+			"/delete <número>|1,2,3|3-7|1,3-5,8 — Eliminar sesión(es)\n" +
 			"/name [número] <texto> — Nombrar sesión\n" +
 			"/current — Mostrar sesión activa\n" +
 			"/history [n] — Mostrar últimos n mensajes",
@@ -1382,6 +1407,27 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "このエージェントはモデルの切り替えをサポートしていません。",
 		LangSpanish:            "Este agente no soporta el cambio de modelo.",
 	},
+	MsgReasoningCurrent: {
+		LangEnglish:            "Current reasoning effort: %s",
+		LangChinese:            "当前推理强度: %s",
+		LangTraditionalChinese: "當前推理強度: %s",
+		LangJapanese:           "現在の推論強度: %s",
+		LangSpanish:            "Esfuerzo de razonamiento actual: %s",
+	},
+	MsgReasoningChanged: {
+		LangEnglish:            "Reasoning effort switched to `%s`. New sessions will use this setting.",
+		LangChinese:            "推理强度已切换为 `%s`，新会话将使用此设置。",
+		LangTraditionalChinese: "推理強度已切換為 `%s`，新會話將使用此設定。",
+		LangJapanese:           "推論強度を `%s` に切り替えました。新しいセッションで使用されます。",
+		LangSpanish:            "Esfuerzo de razonamiento cambiado a `%s`. Las nuevas sesiones usarán esta configuración.",
+	},
+	MsgReasoningNotSupported: {
+		LangEnglish:            "This agent does not support reasoning effort switching.",
+		LangChinese:            "当前 Agent 不支持推理强度切换。",
+		LangTraditionalChinese: "當前 Agent 不支援推理強度切換。",
+		LangJapanese:           "このエージェントは推論強度の切り替えをサポートしていません。",
+		LangSpanish:            "Este agente no soporta el cambio de esfuerzo de razonamiento.",
+	},
 	MsgMemoryNotSupported: {
 		LangEnglish:            "This agent does not support memory files.",
 		LangChinese:            "当前 Agent 不支持记忆文件。",
@@ -1544,6 +1590,27 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "使い方: `/model <番号>` または `/model <モデル名>`",
 		LangSpanish:            "Uso: `/model <número>` o `/model <nombre_modelo>`",
 	},
+	MsgReasoningDefault: {
+		LangEnglish:            "Current reasoning effort: (not set, using Codex default)\n",
+		LangChinese:            "当前推理强度: (未设置，使用 Codex 默认值)\n",
+		LangTraditionalChinese: "當前推理強度: (未設置，使用 Codex 預設值)\n",
+		LangJapanese:           "現在の推論強度: (未設定、Codex のデフォルトを使用)\n",
+		LangSpanish:            "Esfuerzo de razonamiento actual: (no configurado, usando el valor predeterminado de Codex)\n",
+	},
+	MsgReasoningListTitle: {
+		LangEnglish:            "Available reasoning levels:\n",
+		LangChinese:            "可用推理强度:\n",
+		LangTraditionalChinese: "可用推理強度:\n",
+		LangJapanese:           "利用可能な推論強度:\n",
+		LangSpanish:            "Niveles de razonamiento disponibles:\n",
+	},
+	MsgReasoningUsage: {
+		LangEnglish:            "Usage: `/reasoning <number>` or `/reasoning <low|medium|high|xhigh>`",
+		LangChinese:            "用法: `/reasoning <序号>` 或 `/reasoning <low|medium|high|xhigh>`",
+		LangTraditionalChinese: "用法: `/reasoning <序號>` 或 `/reasoning <low|medium|high|xhigh>`",
+		LangJapanese:           "使い方: `/reasoning <番号>` または `/reasoning <low|medium|high|xhigh>`",
+		LangSpanish:            "Uso: `/reasoning <número>` o `/reasoning <low|medium|high|xhigh>`",
+	},
 	MsgModeUsage: {
 		LangEnglish:            "\nUse `/mode <name>` to switch.\nAvailable: `default` / `edit` / `plan` / `yolo`",
 		LangChinese:            "\n使用 `/mode <名称>` 切换模式\n可用值: `default` / `edit` / `plan` / `yolo`",
@@ -1558,6 +1625,10 @@ var messages = map[MsgKey]map[Language]string{
 	MsgModelSelectPlaceholder: {
 		LangEnglish: "Select model", LangChinese: "选择模型", LangTraditionalChinese: "選擇模型",
 		LangJapanese: "モデルを選択", LangSpanish: "Seleccionar modelo",
+	},
+	MsgReasoningSelectPlaceholder: {
+		LangEnglish: "Select reasoning level", LangChinese: "选择推理强度", LangTraditionalChinese: "選擇推理強度",
+		LangJapanese: "推論強度を選択", LangSpanish: "Seleccionar nivel de razonamiento",
 	},
 	MsgModeSelectPlaceholder: {
 		LangEnglish: "Select mode", LangChinese: "选择模式", LangTraditionalChinese: "選擇模式",
@@ -1590,6 +1661,10 @@ var messages = map[MsgKey]map[Language]string{
 	MsgCardTitleModel: {
 		LangEnglish: "Model", LangChinese: "模型", LangTraditionalChinese: "模型",
 		LangJapanese: "モデル", LangSpanish: "Modelo",
+	},
+	MsgCardTitleReasoning: {
+		LangEnglish: "Reasoning", LangChinese: "推理强度", LangTraditionalChinese: "推理強度",
+		LangJapanese: "推論強度", LangSpanish: "Razonamiento",
 	},
 	MsgCardTitleMode: {
 		LangEnglish: "Permission Mode", LangChinese: "权限模式", LangTraditionalChinese: "權限模式",
@@ -1723,6 +1798,27 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "允許所有 (本次會話)",
 		LangJapanese:           "すべて許可 (このセッション)",
 		LangSpanish:            "Permitir todo (esta sesión)",
+	},
+	MsgPermCardTitle: {
+		LangEnglish:            "Permission Request",
+		LangChinese:            "权限请求",
+		LangTraditionalChinese: "權限請求",
+		LangJapanese:           "権限リクエスト",
+		LangSpanish:            "Solicitud de permiso",
+	},
+	MsgPermCardBody: {
+		LangEnglish:            "Agent wants to use **%s**:\n\n```\n%s\n```",
+		LangChinese:            "Agent 想要使用 **%s**:\n\n```\n%s\n```",
+		LangTraditionalChinese: "Agent 想要使用 **%s**:\n\n```\n%s\n```",
+		LangJapanese:           "エージェントが **%s** を使用しようとしています:\n\n```\n%s\n```",
+		LangSpanish:            "El agente quiere usar **%s**:\n\n```\n%s\n```",
+	},
+	MsgPermCardNote: {
+		LangEnglish:            "If buttons are unresponsive, reply: allow / deny / allow all",
+		LangChinese:            "如果按钮无响应，请直接回复：允许 / 拒绝 / 允许所有",
+		LangTraditionalChinese: "若按鈕無回應，請直接回覆：允許 / 拒絕 / 允許所有",
+		LangJapanese:           "ボタンが反応しない場合は直接返信: allow / deny / allow all",
+		LangSpanish:            "Si los botones no responden, responda: allow / deny / allow all",
 	},
 	MsgCommandsTitle: {
 		LangEnglish:            "🔧 **Custom Commands** (%d)\n\n",
@@ -2074,11 +2170,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "✅ Nueva sesión creada: **%s**",
 	},
 	MsgDeleteUsage: {
-		LangEnglish:            "Usage: `/delete <number>` — delete a session by its list number.\nUse `/list` to see session numbers.",
-		LangChinese:            "用法：`/delete <序号>` — 按列表序号删除会话。\n使用 `/list` 查看会话序号。",
-		LangTraditionalChinese: "用法：`/delete <序號>` — 按列表序號刪除會話。\n使用 `/list` 查看會話序號。",
-		LangJapanese:           "使い方：`/delete <番号>` — リスト番号でセッションを削除。\n`/list` で番号を確認できます。",
-		LangSpanish:            "Uso: `/delete <número>` — eliminar sesión por número de lista.\nUse `/list` para ver los números.",
+		LangEnglish:            "Usage: `/delete <number>` or `/delete 1,2,3` or `/delete 3-7` or `/delete 1,3-5,8`.\nUse `/list` to see session numbers.",
+		LangChinese:            "用法：`/delete <序号>`，或 `/delete 1,2,3`，或 `/delete 3-7`，或 `/delete 1,3-5,8`。\n使用 `/list` 查看会话序号。",
+		LangTraditionalChinese: "用法：`/delete <序號>`，或 `/delete 1,2,3`，或 `/delete 3-7`，或 `/delete 1,3-5,8`。\n使用 `/list` 查看會話序號。",
+		LangJapanese:           "使い方：`/delete <番号>`、または `/delete 1,2,3`、または `/delete 3-7`、または `/delete 1,3-5,8`。\n`/list` で番号を確認できます。",
+		LangSpanish:            "Uso: `/delete <número>` o `/delete 1,2,3` o `/delete 3-7` o `/delete 1,3-5,8`.\nUse `/list` para ver los números.",
 	},
 	MsgDeleteSuccess: {
 		LangEnglish:            "🗑️ Session deleted: %s",
@@ -2129,6 +2225,90 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "❌ このエージェントはセッション削除をサポートしていません。",
 		LangSpanish:            "❌ Este agente no admite la eliminación de sesiones.",
 	},
+	MsgDeleteModeTitle: {
+		LangEnglish:            "Delete Sessions",
+		LangChinese:            "删除会话",
+		LangTraditionalChinese: "刪除會話",
+		LangJapanese:           "セッション削除",
+		LangSpanish:            "Eliminar sesiones",
+	},
+	MsgDeleteModeSelect: {
+		LangEnglish:            "Select",
+		LangChinese:            "选择",
+		LangTraditionalChinese: "選擇",
+		LangJapanese:           "選択",
+		LangSpanish:            "Seleccionar",
+	},
+	MsgDeleteModeSelected: {
+		LangEnglish:            "Selected",
+		LangChinese:            "已选",
+		LangTraditionalChinese: "已選",
+		LangJapanese:           "選択済み",
+		LangSpanish:            "Seleccionado",
+	},
+	MsgDeleteModeSelectedCount: {
+		LangEnglish:            "%d selected",
+		LangChinese:            "已选 %d 项",
+		LangTraditionalChinese: "已選 %d 項",
+		LangJapanese:           "%d 件を選択中",
+		LangSpanish:            "%d seleccionadas",
+	},
+	MsgDeleteModeDeleteSelected: {
+		LangEnglish:            "Delete Selected",
+		LangChinese:            "删除已选",
+		LangTraditionalChinese: "刪除已選",
+		LangJapanese:           "選択項目を削除",
+		LangSpanish:            "Eliminar seleccionadas",
+	},
+	MsgDeleteModeCancel: {
+		LangEnglish:            "Cancel",
+		LangChinese:            "取消",
+		LangTraditionalChinese: "取消",
+		LangJapanese:           "キャンセル",
+		LangSpanish:            "Cancelar",
+	},
+	MsgDeleteModeConfirmTitle: {
+		LangEnglish:            "Confirm Delete",
+		LangChinese:            "确认删除",
+		LangTraditionalChinese: "確認刪除",
+		LangJapanese:           "削除確認",
+		LangSpanish:            "Confirmar eliminación",
+	},
+	MsgDeleteModeConfirmButton: {
+		LangEnglish:            "Confirm Delete",
+		LangChinese:            "确认删除",
+		LangTraditionalChinese: "確認刪除",
+		LangJapanese:           "削除を確認",
+		LangSpanish:            "Confirmar eliminación",
+	},
+	MsgDeleteModeBackButton: {
+		LangEnglish:            "Back",
+		LangChinese:            "返回继续选择",
+		LangTraditionalChinese: "返回繼續選擇",
+		LangJapanese:           "選択に戻る",
+		LangSpanish:            "Volver",
+	},
+	MsgDeleteModeEmptySelection: {
+		LangEnglish:            "Select at least one session.",
+		LangChinese:            "请至少选择一个会话。",
+		LangTraditionalChinese: "請至少選擇一個會話。",
+		LangJapanese:           "少なくとも 1 つのセッションを選択してください。",
+		LangSpanish:            "Seleccione al menos una sesión.",
+	},
+	MsgDeleteModeResultTitle: {
+		LangEnglish:            "Delete Result",
+		LangChinese:            "删除结果",
+		LangTraditionalChinese: "刪除結果",
+		LangJapanese:           "削除結果",
+		LangSpanish:            "Resultado de eliminación",
+	},
+	MsgDeleteModeMissingSession: {
+		LangEnglish:            "❌ Missing selected session: %s",
+		LangChinese:            "❌ 已选会话不存在：%s",
+		LangTraditionalChinese: "❌ 已選會話不存在：%s",
+		LangJapanese:           "❌ 選択したセッションが見つかりません: %s",
+		LangSpanish:            "❌ Falta la sesión seleccionada: %s",
+	},
 	MsgBannedWordBlocked: {
 		LangEnglish:            "⚠️ Your message was blocked because it contains a prohibited word.",
 		LangChinese:            "⚠️ 消息已被拦截，包含违禁词。",
@@ -2142,6 +2322,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "🚫 命令 `%s` 在當前專案中已被停用。",
 		LangJapanese:           "🚫 コマンド `%s` はこのプロジェクトで無効化されています。",
 		LangSpanish:            "🚫 El comando `%s` está deshabilitado para este proyecto.",
+	},
+	MsgAdminRequired: {
+		LangEnglish:            "🔒 Command `%s` requires admin privilege. Set `admin_from` in config to authorize users.",
+		LangChinese:            "🔒 命令 `%s` 需要管理员权限。请在配置中设置 `admin_from` 来授权用户。",
+		LangTraditionalChinese: "🔒 命令 `%s` 需要管理員權限。請在配置中設定 `admin_from` 來授權使用者。",
+		LangJapanese:           "🔒 コマンド `%s` には管理者権限が必要です。設定で `admin_from` を設定してユーザーを承認してください。",
+		LangSpanish:            "🔒 El comando `%s` requiere privilegios de administrador. Configure `admin_from` en la configuración.",
 	},
 	MsgRateLimited: {
 		LangEnglish:            "⏳ You are sending messages too fast. Please wait a moment.",
@@ -2296,11 +2483,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Reanudar sesión por su número en la lista, arg: <número>",
 	},
 	MsgBuiltinCmdDelete: {
-		LangEnglish:            "Delete a session by its list number, arg: <number>",
-		LangChinese:            "按列表序号删除会话，参数: <序号>",
-		LangTraditionalChinese: "按列表序號刪除會話，參數: <序號>",
-		LangJapanese:           "リスト番号でセッションを削除、引数: <番号>",
-		LangSpanish:            "Eliminar sesión por su número en la lista, arg: <número>",
+		LangEnglish:            "Delete session(s) by list number, args: <number> | 1,2,3 | 3-7 | 1,3-5,8",
+		LangChinese:            "按列表序号删除会话，参数: <序号> | 1,2,3 | 3-7 | 1,3-5,8",
+		LangTraditionalChinese: "按列表序號刪除會話，參數: <序號> | 1,2,3 | 3-7 | 1,3-5,8",
+		LangJapanese:           "リスト番号でセッションを削除、引数: <番号> | 1,2,3 | 3-7 | 1,3-5,8",
+		LangSpanish:            "Eliminar sesión(es) por número de lista, args: <número> | 1,2,3 | 3-7 | 1,3-5,8",
 	},
 	MsgBuiltinCmdName: {
 		LangEnglish:            "Name a session for easy identification, arg: [number] <text>",
@@ -2350,6 +2537,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "查看/切換模型，參數: [名稱]",
 		LangJapanese:           "モデルの表示/切り替え、引数: [名前]",
 		LangSpanish:            "Ver/cambiar modelo, arg: [nombre]",
+	},
+	MsgBuiltinCmdReasoning: {
+		LangEnglish:            "View/switch reasoning effort, arg: [level]",
+		LangChinese:            "查看/切换推理强度，参数: [等级]",
+		LangTraditionalChinese: "查看/切換推理強度，參數: [等級]",
+		LangJapanese:           "推論強度の表示/切り替え、引数: [レベル]",
+		LangSpanish:            "Ver/cambiar esfuerzo de razonamiento, arg: [nivel]",
 	},
 	MsgBuiltinCmdMode: {
 		LangEnglish:            "View/switch permission mode, arg: [name]",

@@ -1,5 +1,35 @@
 # Changelog
 
+## v1.2.2-beta.1 (2026-03-12)
+
+Beta release with major new features and security improvements.
+
+### New Features
+- **Feishu Interactive Cards**: Beautiful card-based UI for slash commands (/help, /list, /status, etc.) with tabbed navigation and in-place updates
+- **Lark Platform Support**: Added support for Lark (飞书国际版) with proper domain handling
+- **Codex Reasoning Effort**: New `/reasoning` command to switch reasoning effort levels (low/medium/high)
+- **Codex Model Cache Fallback**: `/model` command now falls back to local `~/.codex/models_cache.json` when API is unavailable
+- **Gemini Timeout Config**: New `timeout_mins` option to configure per-turn timeout for Gemini agent
+- **Batch Session Deletion**: `/delete` now supports comma lists, ranges, and mixed forms for batch deletion
+- **TTS Support**: Text-to-speech with Qwen and OpenAI providers
+- **Admin Privilege System**: Admin-only commands for privileged operations
+- **iFlow Tool Timeout**: Configurable tool timeout and reset timer on partial completion
+- **Card-based Permission Prompts**: Permission requests now use interactive cards with callback support
+- **Shared Session Support**: Share sessions across all platforms with `share_session_in_channel` option
+
+### Bug Fixes
+- **Security Hardening**: Socket permissions tightened (0600), token redaction in logs, warning for open `allow_from`
+- **Slack @mention Support**: Fixed AppMentionEvent handling for channel @mentions
+- **Update Fallback**: Self-update now falls back to .tar.gz/.zip archive when bare binary returns 404
+- **Skill Symlink**: Fixed skill directory scanning to follow symbolic links
+- **QQBot Error Handling**: Added error logging for json.Unmarshal and WriteJSON calls
+- **Claude Code Path**: Fixed underscore handling in findProjectDir path matching
+
+### Improvements
+- **Daemon Config Flag**: Support daemon install with config file path
+- **Message Tracing**: Added message tracing and threaded replies
+- **Scanner Buffer**: Optimized scanner buffer sizes for large outputs
+
 ## v1.2.1 (2026-03-09)
 
 Patch release with bug fixes and minor enhancements.

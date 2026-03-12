@@ -33,26 +33,27 @@ const (
 	iflowTranscriptPoll = 200 * time.Millisecond
 )
 
-var iflowPendingToolTimeout = 45 * time.Second
+var iflowPendingToolTimeout = 180 * time.Second
 var iflowPendingToolTimeoutDefaultMode = 6 * time.Second
 
 // iflowSession manages multi-turn conversations with iFlow CLI.
 // Each Send() launches a fresh interactive `iflow -i` process inside a PTY,
 // then tails the transcript JSONL to recover structured assistant/tool events.
 type iflowSession struct {
-	cmd        string
-	workDir    string
-	model      string
-	mode       string
-	extraEnv   []string
-	events     chan core.Event
-	sessionID  atomic.Value // stores string
-	sentOnce   atomic.Bool
-	ctx        context.Context
-	cancel     context.CancelFunc
-	wg         sync.WaitGroup
-	alive      atomic.Bool
-	turnActive atomic.Bool
+	cmd            string
+	workDir        string
+	model          string
+	mode           string
+	toolTimeoutSec int
+	extraEnv       []string
+	events         chan core.Event
+	sessionID      atomic.Value // stores string
+	sentOnce       atomic.Bool
+	ctx            context.Context
+	cancel         context.CancelFunc
+	wg             sync.WaitGroup
+	alive          atomic.Bool
+	turnActive     atomic.Bool
 }
 
 type iflowTurn struct {
@@ -91,18 +92,19 @@ type iflowToolResult struct {
 	Output string
 }
 
-func newIFlowSession(ctx context.Context, cmd, workDir, model, mode, resumeID string, extraEnv []string) (*iflowSession, error) {
+func newIFlowSession(ctx context.Context, cmd, workDir, model, mode, resumeID string, extraEnv []string, toolTimeoutSec int) (*iflowSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	s := &iflowSession{
-		cmd:      cmd,
-		workDir:  workDir,
-		model:    model,
-		mode:     mode,
-		extraEnv: extraEnv,
-		events:   make(chan core.Event, 64),
-		ctx:      sessionCtx,
-		cancel:   cancel,
+		cmd:            cmd,
+		workDir:        workDir,
+		model:          model,
+		mode:           mode,
+		toolTimeoutSec: toolTimeoutSec,
+		extraEnv:       extraEnv,
+		events:         make(chan core.Event, 64),
+		ctx:            sessionCtx,
+		cancel:         cancel,
 	}
 	s.alive.Store(true)
 
@@ -225,6 +227,10 @@ func (s *iflowSession) readLoop(turn *iflowTurn, cmd *exec.Cmd, ptmx *os.File) {
 	<-watchDone
 	turn.stopResultTimer()
 
+	// Clear busy state before emitting events so callers can Send() immediately
+	// after receiving the event. The defer above serves as a safety net.
+	s.turnActive.Store(false)
+
 	termText := strings.TrimSpace(stripANSI(termBuf.String()))
 	if turn.readyForResult() {
 		turn.markResultSent()
@@ -297,6 +303,9 @@ func (s *iflowSession) watchTranscript(turn *iflowTurn) {
 }
 
 func (s *iflowSession) pendingToolTimeout() time.Duration {
+	if s.toolTimeoutSec > 0 {
+		return time.Duration(s.toolTimeoutSec) * time.Second
+	}
 	if strings.EqualFold(s.mode, "default") {
 		return iflowPendingToolTimeoutDefaultMode
 	}
@@ -667,6 +676,7 @@ func (t *iflowTurn) completeTools(results []iflowToolResult) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
+	changed := false
 	for _, result := range results {
 		if _, ok := t.doneToolIDs[result.ID]; ok {
 			continue
@@ -677,10 +687,13 @@ func (t *iflowTurn) completeTools(results []iflowToolResult) bool {
 		if result.Output != "" {
 			t.toolFallback = append(t.toolFallback, result.Output)
 		}
+		changed = true
 	}
 	if len(t.pendingToolIDs) == 0 && t.pendingTimer != nil {
 		t.pendingTimer.Stop()
 		t.pendingTimer = nil
+	} else if changed && len(t.pendingToolIDs) > 0 && t.pendingTimer != nil {
+		t.pendingTimer.Reset(t.pendingTimeout)
 	}
 	if len(results) == 0 || len(t.pendingToolIDs) > 0 {
 		return false

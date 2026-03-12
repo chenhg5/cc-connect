@@ -41,6 +41,7 @@ func New(opts map[string]any) (core.Platform, error) {
 	botToken, _ := opts["bot_token"].(string)
 	appToken, _ := opts["app_token"].(string)
 	allowFrom, _ := opts["allow_from"].(string)
+	core.CheckAllowFrom("slack", allowFrom)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	if botToken == "" || appToken == "" {
 		return nil, fmt.Errorf("slack: bot_token and app_token are required")
@@ -100,6 +101,45 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 
 		if data.Type == slackevents.CallbackEvent {
 			switch ev := data.InnerEvent.Data.(type) {
+			case *slackevents.AppMentionEvent:
+				if ev.BotID != "" || ev.User == "" {
+					return
+				}
+
+				if ts := ev.TimeStamp; ts != "" {
+					if dotIdx := strings.IndexByte(ts, '.'); dotIdx > 0 {
+						if sec, err := strconv.ParseInt(ts[:dotIdx], 10, 64); err == nil {
+							if core.IsOldMessage(time.Unix(sec, 0)) {
+								slog.Debug("slack: ignoring old app_mention after restart", "ts", ts)
+								return
+							}
+						}
+					}
+				}
+
+				slog.Debug("slack: app_mention received", "user", ev.User, "channel", ev.Channel)
+
+				if !core.AllowList(p.allowFrom, ev.User) {
+					slog.Debug("slack: app_mention from unauthorized user", "user", ev.User)
+					return
+				}
+
+				var sessionKey string
+				if p.shareSessionInChannel {
+					sessionKey = fmt.Sprintf("slack:%s", ev.Channel)
+				} else {
+					sessionKey = fmt.Sprintf("slack:%s:%s", ev.Channel, ev.User)
+				}
+
+				msg := &core.Message{
+					SessionKey: sessionKey, Platform: "slack",
+					UserID: ev.User, UserName: ev.User,
+					Content: ev.Text,
+					MessageID: ev.TimeStamp,
+					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: ev.TimeStamp},
+				}
+				p.handler(p, msg)
+
 			case *slackevents.MessageEvent:
 				if ev.BotID != "" || ev.User == "" {
 					return
@@ -225,7 +265,7 @@ func (p *Platform) downloadSlackFile(url string) ([]byte, error) {
 	req.Header.Set("Authorization", "Bearer "+p.botToken)
 	resp, err := core.HTTPClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s", core.RedactToken(err.Error(), p.botToken))
 	}
 	defer resp.Body.Close()
 	return io.ReadAll(resp.Body)

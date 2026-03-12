@@ -31,14 +31,15 @@ func init() {
 //   - "plan":      read-only planning mode (--plan)
 //   - "yolo":      auto-approve all tool calls (--yolo)
 type Agent struct {
-	workDir    string
-	model      string
-	mode       string
-	cmd        string
-	providers  []core.ProviderConfig
-	activeIdx  int
-	sessionEnv []string
-	mu         sync.Mutex
+	workDir        string
+	model          string
+	mode           string
+	cmd            string
+	toolTimeoutSec int
+	providers      []core.ProviderConfig
+	activeIdx      int
+	sessionEnv     []string
+	mu             sync.Mutex
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -58,12 +59,23 @@ func New(opts map[string]any) (core.Agent, error) {
 		return nil, fmt.Errorf("iflow: %q CLI not found in PATH, install with: npm i -g @iflow-ai/iflow-cli", cmd)
 	}
 
+	var toolTimeoutSec int
+	switch v := opts["tool_timeout_secs"].(type) {
+	case int64:
+		toolTimeoutSec = int(v)
+	case int:
+		toolTimeoutSec = v
+	case float64:
+		toolTimeoutSec = int(v)
+	}
+
 	return &Agent{
-		workDir:   workDir,
-		model:     model,
-		mode:      mode,
-		cmd:       cmd,
-		activeIdx: -1,
+		workDir:        workDir,
+		model:          model,
+		mode:           mode,
+		cmd:            cmd,
+		toolTimeoutSec: toolTimeoutSec,
+		activeIdx:      -1,
 	}, nil
 }
 
@@ -115,6 +127,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	mode := a.mode
 	cmd := a.cmd
 	workDir := a.workDir
+	toolTimeoutSec := a.toolTimeoutSec
 	extraEnv := a.providerEnvLocked()
 	extraEnv = append(extraEnv, a.sessionEnv...)
 	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
@@ -124,7 +137,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 	a.mu.Unlock()
 
-	return newIFlowSession(ctx, cmd, workDir, model, mode, sessionID, extraEnv)
+	return newIFlowSession(ctx, cmd, workDir, model, mode, sessionID, extraEnv, toolTimeoutSec)
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {

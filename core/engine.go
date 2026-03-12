@@ -156,6 +156,7 @@ type Engine struct {
 	bannedMu    sync.RWMutex
 
 	disabledCmds map[string]bool
+	adminFrom    string // comma-separated user IDs for privileged commands; "*" = all allowed users; "" = deny
 
 	rateLimiter      *RateLimiter
 	streamPreview    StreamPreviewCfg
@@ -180,6 +181,15 @@ type interactiveState struct {
 	approveAll   bool // when true, auto-approve all permission requests for this session
 	quiet        bool // when true, suppress thinking and tool progress for this session
 	fromVoice    bool // true if current turn originated from voice transcription
+	deleteMode   *deleteModeState
+}
+
+type deleteModeState struct {
+	page        int
+	selectedIDs map[string]struct{}
+	phase       string
+	hint        string
+	result      string
 }
 
 // pendingPermission represents a permission request waiting for user response.
@@ -346,6 +356,43 @@ func (e *Engine) SetDisabledCommands(cmds []string) {
 		}
 	}
 	e.disabledCmds = m
+}
+
+// SetAdminFrom sets the admin allowlist for privileged commands.
+// "*" means all users who pass allow_from are admins.
+// Empty string means privileged commands are denied for everyone.
+func (e *Engine) SetAdminFrom(adminFrom string) {
+	e.adminFrom = strings.TrimSpace(adminFrom)
+	if e.adminFrom == "" && !e.disabledCmds["shell"] {
+		slog.Warn("admin_from is not set — privileged commands (/shell, /restart, /upgrade) are blocked. "+
+			"Set admin_from in config to enable them, or use disabled_commands to hide them.",
+			"project", e.name)
+	}
+}
+
+// privilegedCommands are commands that require admin_from authorization.
+var privilegedCommands = map[string]bool{
+	"shell":   true,
+	"restart": true,
+	"upgrade": true,
+}
+
+// isAdmin checks whether the given user ID is authorized for privileged commands.
+// Unlike AllowList, empty adminFrom means deny-all (fail-closed).
+func (e *Engine) isAdmin(userID string) bool {
+	af := strings.TrimSpace(e.adminFrom)
+	if af == "" {
+		return false
+	}
+	if af == "*" {
+		return true
+	}
+	for _, id := range strings.Split(af, ",") {
+		if strings.EqualFold(strings.TrimSpace(id), userID) {
+			return true
+		}
+	}
+	return false
 }
 
 // SetBannedWords replaces the banned words list.
@@ -1098,8 +1145,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if permLimit > 0 {
 				permLimit = permLimit * 8 / 5 // permission prompts get ~1.6x more room
 			}
-			prompt := fmt.Sprintf(e.i18n.T(MsgPermissionPrompt), event.ToolName, truncateIf(event.ToolInput, permLimit))
-			e.sendPermissionPrompt(p, replyCtx, prompt)
+			toolInput := truncateIf(event.ToolInput, permLimit)
+			prompt := fmt.Sprintf(e.i18n.T(MsgPermissionPrompt), event.ToolName, toolInput)
+			e.sendPermissionPrompt(p, replyCtx, prompt, event.ToolName, toolInput)
 
 			pending := &pendingPermission{
 				RequestID:    event.RequestID,
@@ -1240,6 +1288,7 @@ var builtinCommands = []struct {
 	{[]string{"history"}, "history"},
 	{[]string{"allow"}, "allow"},
 	{[]string{"model"}, "model"},
+	{[]string{"reasoning", "effort"}, "reasoning"},
 	{[]string{"mode"}, "mode"},
 	{[]string{"lang"}, "lang"},
 	{[]string{"quiet"}, "quiet"},
@@ -1328,6 +1377,11 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		return true
 	}
 
+	if cmdID != "" && privilegedCommands[cmdID] && !e.isAdmin(msg.UserID) {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgAdminRequired), "/"+cmdID))
+		return true
+	}
+
 	switch cmdID {
 	case "new":
 		e.cmdNew(p, msg, args)
@@ -1347,6 +1401,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdAllow(p, msg, args)
 	case "model":
 		e.cmdModel(p, msg, args)
+	case "reasoning":
+		e.cmdReasoning(p, msg, args)
 	case "mode":
 		e.cmdMode(p, msg, args)
 	case "lang":
@@ -2224,6 +2280,7 @@ func helpCardGroups() []helpCardGroup {
 			titleKey: MsgHelpAgentSection,
 			items: []helpCardItem{
 				{command: "/model", action: "nav:/model"},
+				{command: "/reasoning", action: "nav:/reasoning"},
 				{command: "/mode", action: "nav:/mode"},
 				{command: "/lang", action: "nav:/lang"},
 				{command: "/provider", action: "nav:/provider"},
@@ -2469,6 +2526,87 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 	e.sessions.Save()
 
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChanged, target))
+}
+
+func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
+	switcher, ok := e.agent.(ReasoningEffortSwitcher)
+	if !ok {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReasoningNotSupported))
+		return
+	}
+
+	if len(args) == 0 {
+		if !supportsCards(p) {
+			efforts := switcher.AvailableReasoningEfforts()
+
+			var sb strings.Builder
+			current := switcher.GetReasoningEffort()
+			if current == "" {
+				sb.WriteString(e.i18n.T(MsgReasoningDefault))
+			} else {
+				sb.WriteString(e.i18n.Tf(MsgReasoningCurrent, current))
+				sb.WriteString("\n")
+			}
+			sb.WriteString("\n")
+			sb.WriteString(e.i18n.T(MsgReasoningListTitle))
+			var buttons [][]ButtonOption
+			var row []ButtonOption
+			for i, effort := range efforts {
+				marker := "  "
+				if effort == current {
+					marker = "> "
+				}
+				sb.WriteString(fmt.Sprintf("%s%d. %s\n", marker, i+1, effort))
+
+				label := effort
+				if effort == current {
+					label = "▶ " + label
+				}
+				row = append(row, ButtonOption{Text: label, Data: fmt.Sprintf("cmd:/reasoning %d", i+1)})
+				if len(row) >= 3 {
+					buttons = append(buttons, row)
+					row = nil
+				}
+			}
+			if len(row) > 0 {
+				buttons = append(buttons, row)
+			}
+			sb.WriteString("\n")
+			sb.WriteString(e.i18n.T(MsgReasoningUsage))
+			e.replyWithButtons(p, msg.ReplyCtx, sb.String(), buttons)
+			return
+		}
+		e.replyWithCard(p, msg.ReplyCtx, e.renderReasoningCard())
+		return
+	}
+
+	efforts := switcher.AvailableReasoningEfforts()
+	target := strings.ToLower(strings.TrimSpace(args[0]))
+	if idx, err := strconv.Atoi(target); err == nil && idx >= 1 && idx <= len(efforts) {
+		target = efforts[idx-1]
+	}
+
+	valid := false
+	for _, effort := range efforts {
+		if effort == target {
+			valid = true
+			break
+		}
+	}
+	if !valid {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReasoningUsage))
+		return
+	}
+
+	switcher.SetReasoningEffort(target)
+	e.cleanupInteractiveState(msg.SessionKey)
+
+	s := e.sessions.GetOrCreateActive(msg.SessionKey)
+	s.AgentSessionID = ""
+	s.ClearHistory()
+	e.sessions.Save()
+
+	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgReasoningChanged, target))
 }
 
 func (e *Engine) cmdMode(p Platform, msg *Message, args []string) {
@@ -3080,8 +3218,10 @@ func (e *Engine) SendToSession(sessionKey, message string) error {
 	return p.Send(e.ctx, replyCtx, message)
 }
 
-// sendPermissionPrompt sends a permission prompt, using inline buttons when the platform supports them.
-func (e *Engine) sendPermissionPrompt(p Platform, replyCtx any, prompt string) {
+// sendPermissionPrompt sends a permission prompt with interactive buttons when
+// the platform supports them. Fallback chain: InlineButtonSender → CardSender → plain text.
+func (e *Engine) sendPermissionPrompt(p Platform, replyCtx any, prompt, toolName, toolInput string) {
+	// Try inline buttons first (Telegram)
 	if bs, ok := p.(InlineButtonSender); ok {
 		buttons := [][]ButtonOption{
 			{
@@ -3095,8 +3235,37 @@ func (e *Engine) sendPermissionPrompt(p Platform, replyCtx any, prompt string) {
 		if err := bs.SendWithButtons(e.ctx, replyCtx, prompt, buttons); err == nil {
 			return
 		}
-		slog.Warn("sendPermissionPrompt: inline buttons failed, falling back to text")
+		slog.Warn("sendPermissionPrompt: inline buttons failed, falling back")
 	}
+
+	// Try card with buttons (Feishu/Lark)
+	if supportsCards(p) {
+		body := fmt.Sprintf(e.i18n.T(MsgPermCardBody), toolName, toolInput)
+		extra := func(label, color string) map[string]string {
+			return map[string]string{
+				"perm_label": label,
+				"perm_color": color,
+				"perm_body":  body,
+			}
+		}
+		allowBtn := CardButton{Text: e.i18n.T(MsgPermBtnAllow), Type: "primary", Value: "perm:allow",
+			Extra: extra("✅ "+e.i18n.T(MsgPermBtnAllow), "green")}
+		denyBtn := CardButton{Text: e.i18n.T(MsgPermBtnDeny), Type: "danger", Value: "perm:deny",
+			Extra: extra("❌ "+e.i18n.T(MsgPermBtnDeny), "red")}
+		allowAllBtn := CardButton{Text: e.i18n.T(MsgPermBtnAllowAll), Type: "default", Value: "perm:allow_all",
+			Extra: extra("✅ "+e.i18n.T(MsgPermBtnAllowAll), "green")}
+
+		card := NewCard().
+			Title(e.i18n.T(MsgPermCardTitle), "orange").
+			Markdown(body).
+			ButtonsEqual(allowBtn, denyBtn).
+			Buttons(allowAllBtn).
+			Note(e.i18n.T(MsgPermCardNote)).
+			Build()
+		e.sendWithCard(p, replyCtx, card)
+		return
+	}
+
 	e.send(p, replyCtx, prompt)
 }
 
@@ -3166,6 +3335,10 @@ func supportsCards(p Platform) bool {
 // replyWithCard sends a structured card via CardSender.
 // For platforms without card support, renders as plain text (no intermediate fallback).
 func (e *Engine) replyWithCard(p Platform, replyCtx any, card *Card) {
+	if card == nil {
+		slog.Error("replyWithCard: nil card", "platform", p.Name())
+		return
+	}
 	if cs, ok := p.(CardSender); ok {
 		if err := cs.ReplyCard(e.ctx, replyCtx, card); err != nil {
 			slog.Error("card reply failed", "platform", p.Name(), "error", err)
@@ -3177,6 +3350,10 @@ func (e *Engine) replyWithCard(p Platform, replyCtx any, card *Card) {
 
 // sendWithCard sends a card as a new message (not a reply).
 func (e *Engine) sendWithCard(p Platform, replyCtx any, card *Card) {
+	if card == nil {
+		slog.Error("sendWithCard: nil card", "platform", p.Name())
+		return
+	}
 	if cs, ok := p.(CardSender); ok {
 		if err := cs.SendCard(e.ctx, replyCtx, card); err != nil {
 			slog.Error("card send failed", "platform", p.Name(), "error", err)
@@ -3222,6 +3399,8 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 		return e.renderHelpGroupCardForPlatform(platform, args)
 	case "/model":
 		return e.renderModelCard()
+	case "/reasoning":
+		return e.renderReasoningCard()
 	case "/mode":
 		return e.renderModeCard()
 	case "/lang":
@@ -3262,6 +3441,11 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 		return e.renderStatusCard(sessionKey)
 	case "/switch":
 		return e.renderListCardSafe(sessionKey, 1)
+	case "/delete-mode":
+		if strings.HasPrefix(args, "cancel") {
+			return e.renderListCardSafe(sessionKey, 1)
+		}
+		return e.renderDeleteModeCard(sessionKey)
 	case "/stop":
 		return e.renderStatusCard(sessionKey)
 	case "/upgrade":
@@ -3295,6 +3479,31 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		s.AgentSessionID = ""
 		s.ClearHistory()
 		e.sessions.Save()
+
+	case "/reasoning":
+		if args == "" {
+			return
+		}
+		switcher, ok := e.agent.(ReasoningEffortSwitcher)
+		if !ok {
+			return
+		}
+		efforts := switcher.AvailableReasoningEfforts()
+		target := strings.ToLower(strings.TrimSpace(args))
+		if idx, err := strconv.Atoi(target); err == nil && idx >= 1 && idx <= len(efforts) {
+			target = efforts[idx-1]
+		}
+		for _, effort := range efforts {
+			if effort == target {
+				switcher.SetReasoningEffort(target)
+				e.cleanupInteractiveState(sessionKey)
+				s := e.sessions.GetOrCreateActive(sessionKey)
+				s.AgentSessionID = ""
+				s.ClearHistory()
+				e.sessions.Save()
+				return
+			}
+		}
 
 	case "/mode":
 		if args == "" {
@@ -3349,6 +3558,9 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 	case "/new":
 		e.cleanupInteractiveState(sessionKey)
 		e.sessions.NewSession(sessionKey, "")
+
+	case "/delete-mode":
+		e.executeDeleteModeAction(sessionKey, args)
 
 	case "/quiet":
 		e.interactiveMu.Lock()
@@ -3415,6 +3627,285 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 	}
 }
 
+func (e *Engine) getOrCreateDeleteModeState(sessionKey string, p Platform, replyCtx any) *deleteModeState {
+	e.interactiveMu.Lock()
+	state, ok := e.interactiveStates[sessionKey]
+	if !ok || state == nil {
+		state = &interactiveState{platform: p, replyCtx: replyCtx}
+		e.interactiveStates[sessionKey] = state
+	} else {
+		state.platform = p
+		state.replyCtx = replyCtx
+	}
+	e.interactiveMu.Unlock()
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.deleteMode == nil {
+		state.deleteMode = &deleteModeState{}
+	}
+	dm := state.deleteMode
+	dm.page = 1
+	dm.phase = "select"
+	dm.hint = ""
+	dm.result = ""
+	dm.selectedIDs = make(map[string]struct{})
+	return dm
+}
+
+func (e *Engine) getDeleteModeState(sessionKey string) *deleteModeState {
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[sessionKey]
+	e.interactiveMu.Unlock()
+	if state == nil {
+		return nil
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.deleteMode == nil {
+		return nil
+	}
+	cp := &deleteModeState{
+		page:        state.deleteMode.page,
+		selectedIDs: make(map[string]struct{}, len(state.deleteMode.selectedIDs)),
+		phase:       state.deleteMode.phase,
+		hint:        state.deleteMode.hint,
+		result:      state.deleteMode.result,
+	}
+	for id := range state.deleteMode.selectedIDs {
+		cp.selectedIDs[id] = struct{}{}
+	}
+	return cp
+}
+
+func (e *Engine) clearDeleteModeState(sessionKey string) {
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[sessionKey]
+	e.interactiveMu.Unlock()
+	if state == nil {
+		return
+	}
+	state.mu.Lock()
+	state.deleteMode = nil
+	state.mu.Unlock()
+}
+
+func (e *Engine) renderDeleteModeCard(sessionKey string) *Card {
+	agentSessions, err := e.agent.ListSessions(e.ctx)
+	if err != nil {
+		return e.simpleCard(e.i18n.T(MsgDeleteModeTitle), "red", err.Error())
+	}
+	dm := e.getDeleteModeState(sessionKey)
+	if dm == nil {
+		return e.simpleCard(e.i18n.T(MsgDeleteModeTitle), "red", e.i18n.T(MsgDeleteUsage))
+	}
+	switch dm.phase {
+	case "confirm":
+		return e.renderDeleteModeConfirmCard(dm, agentSessions)
+	case "result":
+		return e.renderDeleteModeResultCard(dm)
+	default:
+		return e.renderDeleteModeSelectCard(sessionKey, dm, agentSessions)
+	}
+}
+
+func (e *Engine) renderDeleteModeSelectCard(sessionKey string, dm *deleteModeState, agentSessions []AgentSessionInfo) *Card {
+	if len(agentSessions) == 0 {
+		return e.simpleCard(e.i18n.T(MsgDeleteModeTitle), "red", e.i18n.T(MsgListEmpty))
+	}
+	total := len(agentSessions)
+	totalPages := (total + listPageSize - 1) / listPageSize
+	page := dm.page
+	if page < 1 {
+		page = 1
+	}
+	if page > totalPages {
+		page = totalPages
+	}
+	start := (page - 1) * listPageSize
+	end := start + listPageSize
+	if end > total {
+		end = total
+	}
+
+	cb := NewCard().Title(e.i18n.T(MsgDeleteModeTitle), "carmine")
+	for i := start; i < end; i++ {
+		s := agentSessions[i]
+		marker := "◻"
+		if _, ok := dm.selectedIDs[s.ID]; ok {
+			marker = "☑"
+		}
+		if active := e.sessions.GetOrCreateActive(sessionKey).AgentSessionID; active == s.ID {
+			marker += " ▶"
+		}
+		btnText := e.i18n.T(MsgDeleteModeSelect)
+		btnType := "default"
+		if _, ok := dm.selectedIDs[s.ID]; ok {
+			btnText = e.i18n.T(MsgDeleteModeSelected)
+			btnType = "primary"
+		}
+		cb.ListItemBtn(
+			e.i18n.Tf(MsgListItem, marker, i+1, e.deleteSessionDisplayName(&s), s.MessageCount, s.ModifiedAt.Format("01-02 15:04")),
+			btnText,
+			btnType,
+			fmt.Sprintf("act:/delete-mode toggle %s", s.ID),
+		)
+	}
+	cb.Note(e.i18n.Tf(MsgDeleteModeSelectedCount, len(dm.selectedIDs)))
+	if dm.hint != "" {
+		cb.Note(dm.hint)
+	}
+	cb.Buttons(
+		DangerBtn(e.i18n.T(MsgDeleteModeDeleteSelected), "act:/delete-mode confirm"),
+		DefaultBtn(e.i18n.T(MsgDeleteModeCancel), "act:/delete-mode cancel"),
+	)
+
+	var navBtns []CardButton
+	if page > 1 {
+		navBtns = append(navBtns, DefaultBtn(e.i18n.T(MsgCardPrev), fmt.Sprintf("act:/delete-mode page %d", page-1)))
+	}
+	if page < totalPages {
+		navBtns = append(navBtns, DefaultBtn(e.i18n.T(MsgCardNext), fmt.Sprintf("act:/delete-mode page %d", page+1)))
+	}
+	if len(navBtns) > 0 {
+		cb.Buttons(navBtns...)
+	}
+	return cb.Build()
+}
+
+func (e *Engine) renderDeleteModeConfirmCard(dm *deleteModeState, agentSessions []AgentSessionInfo) *Card {
+	selectedNames := e.deleteModeSelectionNames(dm, agentSessions)
+	body := strings.Join(selectedNames, "\n")
+	if body == "" {
+		body = e.i18n.T(MsgDeleteModeEmptySelection)
+	}
+	return NewCard().
+		Title(e.i18n.T(MsgDeleteModeConfirmTitle), "carmine").
+		Markdown(body).
+		Buttons(
+			DangerBtn(e.i18n.T(MsgDeleteModeConfirmButton), "act:/delete-mode submit"),
+			DefaultBtn(e.i18n.T(MsgDeleteModeBackButton), "act:/delete-mode back"),
+		).
+		Build()
+}
+
+func (e *Engine) renderDeleteModeResultCard(dm *deleteModeState) *Card {
+	return NewCard().
+		Title(e.i18n.T(MsgDeleteModeResultTitle), "turquoise").
+		Markdown(dm.result).
+		Buttons(DefaultBtn(e.i18n.T(MsgCardBack), "nav:/list 1")).
+		Build()
+}
+
+func (e *Engine) deleteModeSelectionNames(dm *deleteModeState, agentSessions []AgentSessionInfo) []string {
+	names := make([]string, 0, len(dm.selectedIDs))
+	for i := range agentSessions {
+		if _, ok := dm.selectedIDs[agentSessions[i].ID]; ok {
+			names = append(names, "- "+e.deleteSessionDisplayName(&agentSessions[i]))
+		}
+	}
+	return names
+}
+
+func (e *Engine) executeDeleteModeAction(sessionKey, args string) {
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[sessionKey]
+	e.interactiveMu.Unlock()
+	if state == nil {
+		return
+	}
+
+	fields := strings.Fields(args)
+	if len(fields) == 0 {
+		return
+	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.deleteMode == nil {
+		return
+	}
+
+	dm := state.deleteMode
+	switch fields[0] {
+	case "toggle":
+		if len(fields) < 2 {
+			return
+		}
+		id := fields[1]
+		if _, ok := dm.selectedIDs[id]; ok {
+			delete(dm.selectedIDs, id)
+		} else {
+			dm.selectedIDs[id] = struct{}{}
+		}
+		dm.phase = "select"
+		dm.hint = ""
+	case "page":
+		if len(fields) < 2 {
+			return
+		}
+		if n, err := strconv.Atoi(fields[1]); err == nil && n > 0 {
+			dm.page = n
+		}
+		dm.phase = "select"
+	case "confirm":
+		if len(dm.selectedIDs) == 0 {
+			dm.phase = "select"
+			dm.hint = e.i18n.T(MsgDeleteModeEmptySelection)
+			return
+		}
+		dm.phase = "confirm"
+		dm.hint = ""
+	case "back":
+		dm.phase = "select"
+	case "submit":
+		lines := e.submitDeleteModeSelection(sessionKey, dm)
+		dm.selectedIDs = make(map[string]struct{})
+		dm.result = strings.Join(lines, "\n")
+		dm.hint = ""
+		dm.phase = "result"
+	case "cancel":
+		state.deleteMode = nil
+	}
+}
+
+func (e *Engine) submitDeleteModeSelection(sessionKey string, dm *deleteModeState) []string {
+	deleter, ok := e.agent.(SessionDeleter)
+	if !ok {
+		return []string{e.i18n.T(MsgDeleteNotSupported)}
+	}
+	agentSessions, err := e.agent.ListSessions(e.ctx)
+	if err != nil {
+		return []string{fmt.Sprintf("❌ %v", err)}
+	}
+	seen := make(map[string]struct{}, len(agentSessions))
+	lines := make([]string, 0, len(dm.selectedIDs))
+	for i := range agentSessions {
+		seen[agentSessions[i].ID] = struct{}{}
+		if _, ok := dm.selectedIDs[agentSessions[i].ID]; !ok {
+			continue
+		}
+		if line := e.deleteSingleSessionReply(&Message{SessionKey: sessionKey}, deleter, &agentSessions[i]); line != "" {
+			lines = append(lines, line)
+		}
+	}
+	missingIDs := make([]string, 0)
+	for id := range dm.selectedIDs {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		missingIDs = append(missingIDs, id)
+	}
+	sort.Strings(missingIDs)
+	for _, id := range missingIDs {
+		lines = append(lines, fmt.Sprintf(e.i18n.T(MsgDeleteModeMissingSession), id))
+	}
+	if len(lines) == 0 {
+		lines = append(lines, e.i18n.T(MsgDeleteModeEmptySelection))
+	}
+	return lines
+}
+
 func (e *Engine) renderLangCard() *Card {
 	cur := e.i18n.CurrentLang()
 	name := langDisplayName(cur)
@@ -3477,6 +3968,40 @@ func (e *Engine) renderModelCard() *Card {
 		Select(e.i18n.T(MsgModelSelectPlaceholder), opts, initVal).
 		Buttons(e.cardBackButton())
 	cb.Note(e.i18n.T(MsgModelUsage))
+	return cb.Build()
+}
+
+func (e *Engine) renderReasoningCard() *Card {
+	switcher, ok := e.agent.(ReasoningEffortSwitcher)
+	if !ok {
+		return e.simpleCard(e.i18n.T(MsgCardTitleReasoning), "orange", e.i18n.T(MsgReasoningNotSupported))
+	}
+
+	efforts := switcher.AvailableReasoningEfforts()
+	current := switcher.GetReasoningEffort()
+
+	var sb strings.Builder
+	if current == "" {
+		sb.WriteString(e.i18n.T(MsgReasoningDefault))
+	} else {
+		sb.WriteString(e.i18n.Tf(MsgReasoningCurrent, current))
+	}
+
+	var opts []CardSelectOption
+	initVal := ""
+	for i, effort := range efforts {
+		val := fmt.Sprintf("act:/reasoning %d", i+1)
+		opts = append(opts, CardSelectOption{Text: effort, Value: val})
+		if effort == current {
+			initVal = val
+		}
+	}
+
+	cb := NewCard().Title(e.i18n.T(MsgCardTitleReasoning), "orange").
+		Markdown(sb.String()).
+		Select(e.i18n.T(MsgReasoningSelectPlaceholder), opts, initVal).
+		Buttons(e.cardBackButton())
+	cb.Note(e.i18n.T(MsgReasoningUsage))
 	return cb.Build()
 }
 
@@ -4177,6 +4702,10 @@ func (e *Engine) cmdCronToggle(p Platform, msg *Message, args []string, enable b
 // ──────────────────────────────────────────────────────────────
 
 func (e *Engine) executeCustomCommand(p Platform, msg *Message, cmd *CustomCommand, args []string) {
+	if cmd.Exec != "" && !e.isAdmin(msg.UserID) {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgAdminRequired), "/"+cmd.Name))
+		return
+	}
 	// If this is an exec command, run shell command directly
 	if cmd.Exec != "" {
 		go e.executeShellCommand(p, msg, cmd, args)
@@ -4350,6 +4879,10 @@ func (e *Engine) cmdCommandsAdd(p Platform, msg *Message, args []string) {
 }
 
 func (e *Engine) cmdCommandsAddExec(p Platform, msg *Message, args []string) {
+	if !e.isAdmin(msg.UserID) {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgAdminRequired), "/commands addexec"))
+		return
+	}
 	// /commands addexec <name> <shell command...>
 	// /commands addexec --work-dir <dir> <name> <shell command...>
 	if len(args) < 2 {
@@ -4828,6 +5361,15 @@ func (e *Engine) cmdDelete(p Platform, msg *Message, args []string) {
 	}
 
 	if len(args) == 0 {
+		if supportsCards(p) {
+			_ = e.getOrCreateDeleteModeState(msg.SessionKey, p, msg.ReplyCtx)
+			e.replyWithCard(p, msg.ReplyCtx, e.renderDeleteModeCard(msg.SessionKey))
+			return
+		}
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDeleteUsage))
+		return
+	}
+	if len(args) > 1 {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDeleteUsage))
 		return
 	}
@@ -4839,6 +5381,15 @@ func (e *Engine) cmdDelete(p Platform, msg *Message, args []string) {
 	}
 
 	prefix := strings.TrimSpace(args[0])
+	if isExplicitDeleteBatchArg(prefix) {
+		indices, err := parseDeleteBatchIndices(prefix, len(agentSessions))
+		if err != nil {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDeleteUsage))
+			return
+		}
+		e.cmdDeleteBatch(p, msg, deleter, agentSessions, indices)
+		return
+	}
 	var matched *AgentSessionInfo
 
 	if idx, err := strconv.Atoi(prefix); err == nil && idx >= 1 && idx <= len(agentSessions) {
@@ -4857,13 +5408,122 @@ func (e *Engine) cmdDelete(p Platform, msg *Message, args []string) {
 		return
 	}
 
+	e.deleteSingleSession(p, msg, deleter, matched)
+}
+
+func isExplicitDeleteBatchArg(arg string) bool {
+	if strings.Contains(arg, ",") {
+		return true
+	}
+	if !strings.Contains(arg, "-") {
+		return false
+	}
+	for _, r := range arg {
+		if (r < '0' || r > '9') && r != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func parseDeleteBatchIndices(spec string, max int) ([]int, error) {
+	parts := strings.Split(spec, ",")
+	if len(parts) == 0 {
+		return nil, fmt.Errorf("empty batch spec")
+	}
+	seen := make(map[int]struct{}, len(parts))
+	indices := make([]int, 0, len(parts))
+
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return nil, fmt.Errorf("empty batch item")
+		}
+
+		if strings.Contains(part, "-") {
+			bounds := strings.Split(part, "-")
+			if len(bounds) != 2 || bounds[0] == "" || bounds[1] == "" {
+				return nil, fmt.Errorf("invalid range %q", part)
+			}
+			start, err := strconv.Atoi(bounds[0])
+			if err != nil {
+				return nil, err
+			}
+			end, err := strconv.Atoi(bounds[1])
+			if err != nil {
+				return nil, err
+			}
+			if start < 1 || end < 1 || start > end || end > max {
+				return nil, fmt.Errorf("range %q out of bounds", part)
+			}
+			for idx := start; idx <= end; idx++ {
+				if _, ok := seen[idx]; ok {
+					continue
+				}
+				seen[idx] = struct{}{}
+				indices = append(indices, idx)
+			}
+			continue
+		}
+
+		idx, err := strconv.Atoi(part)
+		if err != nil {
+			return nil, err
+		}
+		if idx < 1 || idx > max {
+			return nil, fmt.Errorf("index %d out of bounds", idx)
+		}
+		if _, ok := seen[idx]; ok {
+			continue
+		}
+		seen[idx] = struct{}{}
+		indices = append(indices, idx)
+	}
+
+	return indices, nil
+}
+
+func (e *Engine) cmdDeleteBatch(p Platform, msg *Message, deleter SessionDeleter, sessions []AgentSessionInfo, indices []int) {
+	lines := make([]string, 0, len(indices))
+	for _, idx := range indices {
+		matched := &sessions[idx-1]
+		if line := e.deleteSingleSessionReply(msg, deleter, matched); line != "" {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) == 0 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDeleteUsage))
+		return
+	}
+	e.reply(p, msg.ReplyCtx, strings.Join(lines, "\n"))
+}
+
+func (e *Engine) deleteSingleSession(p Platform, msg *Message, deleter SessionDeleter, matched *AgentSessionInfo) {
+	e.reply(p, msg.ReplyCtx, e.deleteSingleSessionReply(msg, deleter, matched))
+}
+
+func (e *Engine) deleteSingleSessionReply(msg *Message, deleter SessionDeleter, matched *AgentSessionInfo) string {
+	if matched == nil {
+		return ""
+	}
+
 	// Prevent deleting the currently active session
 	activeSession := e.sessions.GetOrCreateActive(msg.SessionKey)
 	if activeSession.AgentSessionID == matched.ID {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDeleteActiveDenied))
-		return
+		return e.i18n.T(MsgDeleteActiveDenied)
 	}
 
+	displayName := e.deleteSessionDisplayName(matched)
+
+	if err := deleter.DeleteSession(e.ctx, matched.ID); err != nil {
+		return fmt.Sprintf("❌ %s: %v", displayName, err)
+	}
+
+	e.sessions.SetSessionName(matched.ID, "")
+	return fmt.Sprintf(e.i18n.T(MsgDeleteSuccess), displayName)
+}
+
+func (e *Engine) deleteSessionDisplayName(matched *AgentSessionInfo) string {
 	displayName := e.sessions.GetSessionName(matched.ID)
 	if displayName == "" {
 		displayName = matched.Summary
@@ -4875,14 +5535,7 @@ func (e *Engine) cmdDelete(p Platform, msg *Message, args []string) {
 		}
 		displayName = shortID
 	}
-
-	if err := deleter.DeleteSession(e.ctx, matched.ID); err != nil {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
-		return
-	}
-
-	e.sessions.SetSessionName(matched.ID, "")
-	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgDeleteSuccess), displayName))
+	return displayName
 }
 
 // truncateIf truncates s to maxLen runes. 0 means no truncation.

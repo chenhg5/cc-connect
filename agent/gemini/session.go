@@ -27,6 +27,7 @@ type geminiSession struct {
 	workDir  string
 	model    string
 	mode     string
+	timeout  time.Duration
 	extraEnv []string
 	events   chan core.Event
 	chatID   atomic.Value // stores string — Gemini session ID
@@ -38,7 +39,7 @@ type geminiSession struct {
 	pendingMsgs []string // buffered assistant messages awaiting classification
 }
 
-func newGeminiSession(ctx context.Context, cmd, workDir, model, mode, resumeID string, extraEnv []string) (*geminiSession, error) {
+func newGeminiSession(ctx context.Context, cmd, workDir, model, mode, resumeID string, extraEnv []string, timeout time.Duration) (*geminiSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	gs := &geminiSession{
@@ -46,6 +47,7 @@ func newGeminiSession(ctx context.Context, cmd, workDir, model, mode, resumeID s
 		workDir:  workDir,
 		model:    model,
 		mode:     mode,
+		timeout:  timeout,
 		extraEnv: extraEnv,
 		events:   make(chan core.Event, 64),
 		ctx:      sessionCtx,
@@ -60,7 +62,7 @@ func newGeminiSession(ctx context.Context, cmd, workDir, model, mode, resumeID s
 	return gs, nil
 }
 
-func (gs *geminiSession) Send(prompt string, images []core.ImageAttachment) error {
+func (gs *geminiSession) Send(prompt string, images []core.ImageAttachment) (err error) {
 	if !gs.alive.Load() {
 		return fmt.Errorf("session is closed")
 	}
@@ -120,9 +122,27 @@ func (gs *geminiSession) Send(prompt string, images []core.ImageAttachment) erro
 
 	args = append(args, "-p", fullPrompt)
 
-	slog.Debug("geminiSession: launching", "resume", isResume, "args", core.RedactArgs(args))
+	// Add timeout for each turn to prevent hanging processes
+	var cancel context.CancelFunc
+	var ctx context.Context
+	if gs.timeout > 0 {
+		ctx, cancel = context.WithTimeout(gs.ctx, gs.timeout)
+	} else {
+		ctx, cancel = context.WithCancel(gs.ctx)
+	}
 
-	cmd := exec.CommandContext(gs.ctx, gs.cmd, args...)
+	// ensure cancel is called on early return errors
+	started := false
+	defer func() {
+		if !started {
+			cancel()
+		}
+	}()
+
+	slog.Debug("geminiSession: launching", "resume", isResume, "args", core.RedactArgs(args))
+	cmd := exec.CommandContext(ctx, gs.cmd, args...)
+	// Set a short WaitDelay to ensure I/O goroutines don't block for long after the context is done
+	cmd.WaitDelay = 1 * time.Second
 	cmd.Dir = gs.workDir
 	env := os.Environ()
 	if len(gs.extraEnv) > 0 {
@@ -142,13 +162,17 @@ func (gs *geminiSession) Send(prompt string, images []core.ImageAttachment) erro
 		return fmt.Errorf("geminiSession: start: %w", err)
 	}
 
+	started = true
 	gs.wg.Add(1)
-	go gs.readLoop(cmd, stdout, &stderrBuf, imageRefs)
+	go func() {
+		defer cancel()
+		gs.readLoop(ctx, cmd, stdout, &stderrBuf, imageRefs)
+	}()
 
 	return nil
 }
 
-func (gs *geminiSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer, tempImages []string) {
+func (gs *geminiSession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer, tempImages []string) {
 	defer gs.wg.Done()
 	defer func() {
 		// Clean up temp image files
@@ -169,8 +193,14 @@ func (gs *geminiSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf
 		}
 	}()
 
+	// Unblock scanner if context is canceled
+	go func() {
+		<-ctx.Done()
+		stdout.Close()
+	}()
+
 	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -201,12 +231,13 @@ func (gs *geminiSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf
 }
 
 // Gemini CLI stream-json event types:
-//   init       — session_id, model
-//   message    — role (user/assistant), content, delta
-//   tool_use   — tool_name, tool_id, parameters
-//   tool_result — tool_id, status, output, error
-//   error      — severity, message
-//   result     — status, stats (final event)
+//
+//	init       — session_id, model
+//	message    — role (user/assistant), content, delta
+//	tool_use   — tool_name, tool_id, parameters
+//	tool_result — tool_id, status, output, error
+//	error      — severity, message
+//	result     — status, stats (final event)
 func (gs *geminiSession) handleEvent(raw map[string]any) {
 	eventType, _ := raw["type"].(string)
 

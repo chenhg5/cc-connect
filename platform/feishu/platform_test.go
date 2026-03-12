@@ -2,9 +2,12 @@ package feishu
 
 import (
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	lark "github.com/larksuite/oapi-sdk-go/v3"
 
 	"github.com/chenhg5/cc-connect/core"
 	callback "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
@@ -146,5 +149,125 @@ func TestInteractivePlatform_CardActionPassesCardSenderToHandler(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("expected card action message")
+	}
+}
+
+func TestNewLark_PlatformNameAndDomain(t *testing.T) {
+	p, err := newPlatform("lark", lark.LarkBaseUrl, map[string]any{
+		"app_id": "cli_xxx", "app_secret": "secret",
+	})
+	if err != nil {
+		t.Fatalf("newPlatform(lark) error = %v", err)
+	}
+	if p.Name() != "lark" {
+		t.Fatalf("Name() = %q, want lark", p.Name())
+	}
+	ip, ok := p.(*interactivePlatform)
+	if !ok {
+		t.Fatalf("type = %T, want *interactivePlatform", p)
+	}
+	if ip.domain != lark.LarkBaseUrl {
+		t.Fatalf("domain = %q, want %q", ip.domain, lark.LarkBaseUrl)
+	}
+}
+
+func TestNewFeishu_PlatformNameAndDomain(t *testing.T) {
+	p, err := New(map[string]any{
+		"app_id": "cli_xxx", "app_secret": "secret",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if p.Name() != "feishu" {
+		t.Fatalf("Name() = %q, want feishu", p.Name())
+	}
+}
+
+func TestLark_SessionKeyPrefix(t *testing.T) {
+	p, err := newPlatform("lark", lark.LarkBaseUrl, map[string]any{
+		"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true,
+	})
+	if err != nil {
+		t.Fatalf("newPlatform(lark) error = %v", err)
+	}
+	ip := p.(*interactivePlatform)
+
+	messageID := "om_test"
+	chatID := "oc_test"
+	openID := "ou_test"
+	msgType := "text"
+	chatType := "p2p"
+	senderType := "user"
+	content := `{"text":"hello"}`
+	createText := strconv.FormatInt(time.Now().UnixMilli(), 10)
+
+	var receivedMsg *core.Message
+	var wg sync.WaitGroup
+	wg.Add(1)
+	ip.handler = func(_ core.Platform, msg *core.Message) {
+		defer wg.Done()
+		receivedMsg = msg
+	}
+
+	_ = ip.onMessage(&larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId:   &larkim.UserId{OpenId: &openID},
+				SenderType: &senderType,
+			},
+			Message: &larkim.EventMessage{
+				MessageId:   &messageID,
+				ChatId:      &chatID,
+				ChatType:    &chatType,
+				MessageType: &msgType,
+				Content:     &content,
+				CreateTime:  &createText,
+			},
+		},
+	})
+	wg.Wait()
+
+	if receivedMsg == nil {
+		t.Fatal("handler not called")
+	}
+	if !strings.HasPrefix(receivedMsg.SessionKey, "lark:") {
+		t.Fatalf("SessionKey = %q, want lark: prefix", receivedMsg.SessionKey)
+	}
+	if receivedMsg.Platform != "lark" {
+		t.Fatalf("Platform = %q, want lark", receivedMsg.Platform)
+	}
+}
+
+func TestLark_ReconstructReplyCtx(t *testing.T) {
+	p, err := newPlatform("lark", lark.LarkBaseUrl, map[string]any{
+		"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": false,
+	})
+	if err != nil {
+		t.Fatalf("newPlatform(lark) error = %v", err)
+	}
+	base := p.(*Platform)
+
+	rctx, err := base.ReconstructReplyCtx("lark:oc_chat123:ou_user456")
+	if err != nil {
+		t.Fatalf("ReconstructReplyCtx() error = %v", err)
+	}
+	rc := rctx.(replyContext)
+	if rc.chatID != "oc_chat123" {
+		t.Fatalf("chatID = %q, want oc_chat123", rc.chatID)
+	}
+
+	_, err = base.ReconstructReplyCtx("feishu:oc_chat:ou_user")
+	if err == nil {
+		t.Fatal("expected error for feishu-prefixed key on lark platform")
+	}
+}
+
+func TestLark_ErrorMessagePrefix(t *testing.T) {
+	_, err := newPlatform("lark", lark.LarkBaseUrl, map[string]any{})
+	if err == nil {
+		t.Fatal("expected error for missing credentials")
+	}
+	if !strings.HasPrefix(err.Error(), "lark:") {
+		t.Fatalf("error = %q, want lark: prefix", err.Error())
 	}
 }
