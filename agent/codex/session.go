@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -63,15 +64,17 @@ func newCodexSession(ctx context.Context, workDir, model, effort, mode, resumeID
 // If a threadID exists (from a prior turn or resume), uses `codex exec resume <id> <prompt>`.
 // Otherwise uses `codex exec <prompt>` to start a new conversation.
 func (cs *codexSession) Send(prompt string, images []core.ImageAttachment) error {
-	if len(images) > 0 {
-		slog.Warn("codexSession: images not supported by Codex, ignoring")
-	}
 	if !cs.alive.Load() {
 		return fmt.Errorf("session is closed")
 	}
 
+	prompt, imagePaths, err := cs.stageImages(prompt, images)
+	if err != nil {
+		return err
+	}
+
 	isResume := cs.CurrentSessionID() != ""
-	args := cs.buildExecArgs(prompt)
+	args := cs.buildExecArgs(prompt, imagePaths)
 
 	slog.Debug("codexSession: launching", "resume", isResume, "args", core.RedactArgs(args))
 
@@ -99,7 +102,35 @@ func (cs *codexSession) Send(prompt string, images []core.ImageAttachment) error
 	return nil
 }
 
-func (cs *codexSession) buildExecArgs(prompt string) []string {
+func (cs *codexSession) stageImages(prompt string, images []core.ImageAttachment) (string, []string, error) {
+	if len(images) == 0 {
+		return prompt, nil, nil
+	}
+
+	imgDir := filepath.Join(cs.workDir, ".cc-connect", "images")
+	if err := os.MkdirAll(imgDir, 0o755); err != nil {
+		return "", nil, fmt.Errorf("codexSession: create image dir: %w", err)
+	}
+
+	imagePaths := make([]string, 0, len(images))
+	for i, img := range images {
+		ext := codexImageExt(img.MimeType)
+		fname := fmt.Sprintf("img_%d_%d%s", time.Now().UnixMilli(), i, ext)
+		fpath := filepath.Join(imgDir, fname)
+		if err := os.WriteFile(fpath, img.Data, 0o644); err != nil {
+			return "", nil, fmt.Errorf("codexSession: save image: %w", err)
+		}
+		imagePaths = append(imagePaths, fpath)
+	}
+
+	if strings.TrimSpace(prompt) == "" {
+		prompt = "Please analyze the attached image(s)."
+	}
+
+	return prompt, imagePaths, nil
+}
+
+func (cs *codexSession) buildExecArgs(prompt string, imagePaths []string) []string {
 	tid := cs.CurrentSessionID()
 	isResume := tid != ""
 
@@ -125,11 +156,31 @@ func (cs *codexSession) buildExecArgs(prompt string) []string {
 	}
 
 	if isResume {
-		args = append(args, tid, prompt)
+		args = append(args, tid)
+		for _, imagePath := range imagePaths {
+			args = append(args, "--image", imagePath)
+		}
+		args = append(args, prompt)
 	} else {
+		for _, imagePath := range imagePaths {
+			args = append(args, "--image", imagePath)
+		}
 		args = append(args, "--cd", cs.workDir, prompt)
 	}
 	return args
+}
+
+func codexImageExt(mime string) string {
+	switch mime {
+	case "image/jpeg":
+		return ".jpg"
+	case "image/gif":
+		return ".gif"
+	case "image/webp":
+		return ".webp"
+	default:
+		return ".png"
+	}
 }
 
 func (cs *codexSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
