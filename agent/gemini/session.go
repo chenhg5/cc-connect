@@ -122,11 +122,9 @@ func (gs *geminiSession) Send(prompt string, images []core.ImageAttachment) (err
 
 	args = append(args, "-p", fullPrompt)
 
-	slog.Debug("geminiSession: launching", "resume", isResume, "args", core.RedactArgs(args))
-
 	// Add timeout for each turn to prevent hanging processes
-	var ctx context.Context
 	var cancel context.CancelFunc
+	var ctx context.Context
 	if gs.timeout > 0 {
 		ctx, cancel = context.WithTimeout(gs.ctx, gs.timeout)
 	} else {
@@ -141,7 +139,10 @@ func (gs *geminiSession) Send(prompt string, images []core.ImageAttachment) (err
 		}
 	}()
 
+	slog.Debug("geminiSession: launching", "resume", isResume, "args", core.RedactArgs(args))
 	cmd := exec.CommandContext(ctx, gs.cmd, args...)
+	// Set a short WaitDelay to ensure I/O goroutines don't block for long after the context is done
+	cmd.WaitDelay = 1 * time.Second
 	cmd.Dir = gs.workDir
 	env := os.Environ()
 	if len(gs.extraEnv) > 0 {
@@ -165,13 +166,13 @@ func (gs *geminiSession) Send(prompt string, images []core.ImageAttachment) (err
 	gs.wg.Add(1)
 	go func() {
 		defer cancel()
-		gs.readLoop(cmd, stdout, &stderrBuf, imageRefs)
+		gs.readLoop(ctx, cmd, stdout, &stderrBuf, imageRefs)
 	}()
 
 	return nil
 }
 
-func (gs *geminiSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer, tempImages []string) {
+func (gs *geminiSession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer, tempImages []string) {
 	defer gs.wg.Done()
 	defer func() {
 		// Clean up temp image files
@@ -190,6 +191,12 @@ func (gs *geminiSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf
 				}
 			}
 		}
+	}()
+
+	// Unblock scanner if context is canceled
+	go func() {
+		<-ctx.Done()
+		stdout.Close()
 	}()
 
 	scanner := bufio.NewScanner(stdout)
@@ -224,12 +231,13 @@ func (gs *geminiSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf
 }
 
 // Gemini CLI stream-json event types:
-//   init       — session_id, model
-//   message    — role (user/assistant), content, delta
-//   tool_use   — tool_name, tool_id, parameters
-//   tool_result — tool_id, status, output, error
-//   error      — severity, message
-//   result     — status, stats (final event)
+//
+//	init       — session_id, model
+//	message    — role (user/assistant), content, delta
+//	tool_use   — tool_name, tool_id, parameters
+//	tool_result — tool_id, status, output, error
+//	error      — severity, message
+//	result     — status, stats (final event)
 func (gs *geminiSession) handleEvent(raw map[string]any) {
 	eventType, _ := raw["type"].(string)
 
