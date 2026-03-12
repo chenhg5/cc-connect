@@ -682,7 +682,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		}
 		if workspace == "" {
 			// No workspace — handle init flow (unless it's a /workspace command)
-			if !strings.HasPrefix(content, "/workspace") && !strings.HasPrefix(content, "/ws") {
+			if !strings.HasPrefix(content, "workspace") && !strings.HasPrefix(content, "ws ") {
 				if e.handleWorkspaceInitFlow(p, msg, channelID, channelName) {
 					return
 				}
@@ -1635,7 +1635,7 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 
 	case "init":
 		if len(args) < 2 {
-			e.reply(p, msg.ReplyCtx, "Usage: `/workspace init <git-url>`")
+			e.reply(p, msg.ReplyCtx, "Usage: `workspace init <git-url>`")
 			return
 		}
 		repoURL := args[1]
@@ -1696,7 +1696,7 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 
 	default:
 		e.reply(p, msg.ReplyCtx,
-			"Usage: `/workspace [init <url> | unbind | list]`")
+			"Usage: `workspace [init <url> | unbind | list]`")
 	}
 }
 
@@ -5703,7 +5703,7 @@ func (e *Engine) handleWorkspaceInitFlow(p Platform, msg *Message, channelID, ch
 			channelName: channelName,
 		}
 		e.initFlowsMu.Unlock()
-		e.reply(p, msg.ReplyCtx, "No workspace found for this channel. Send me a git repo URL to clone, or use `/workspace init <url>`.")
+		e.reply(p, msg.ReplyCtx, "No workspace found for this channel. Send me a git repo URL to clone, or use `workspace init <url>`.")
 		return true
 	}
 
