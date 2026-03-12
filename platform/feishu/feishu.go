@@ -517,12 +517,13 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 			slog.Error(p.tag()+": failed to parse file content", "error", err)
 			return nil
 		}
-		slog.Debug(p.tag()+": file received", "user", userID, "file_key", fileBody.FileKey, "file_name", fileBody.FileName)
+		slog.Info(p.tag()+": file received", "user", userID, "file_key", fileBody.FileKey, "file_name", fileBody.FileName)
 		fileData, err := p.downloadResource(messageID, fileBody.FileKey, "file")
 		if err != nil {
 			slog.Error(p.tag()+": download file failed", "error", err)
 			return nil
 		}
+		slog.Info(p.tag()+": file downloaded", "file_name", fileBody.FileName, "size", len(fileData))
 		mimeType := detectMimeType(fileData)
 		p.handler(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
@@ -642,7 +643,7 @@ func (p *Platform) downloadResource(messageID, fileKey, resType string) ([]byte,
 	if err != nil {
 		return nil, fmt.Errorf("%s: read resource: %w", p.tag(), err)
 	}
-	slog.Debug(p.tag()+": downloaded resource", "key", fileKey, "type", resType, "size", len(data))
+	slog.Info(p.tag()+": downloaded resource", "key", fileKey, "type", resType, "size", len(data))
 	return data, nil
 }
 

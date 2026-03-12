@@ -694,7 +694,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		"platform", msg.Platform, "msg_id", msg.MessageID,
 		"session", msg.SessionKey, "user", msg.UserName,
 		"content_len", len(msg.Content),
-		"has_images", len(msg.Images) > 0, "has_audio", msg.Audio != nil,
+		"has_images", len(msg.Images) > 0, "has_audio", msg.Audio != nil, "has_files", len(msg.Files) > 0,
 	)
 
 	// Voice message: transcribe to text first
@@ -704,7 +704,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	}
 
 	content := strings.TrimSpace(msg.Content)
-	if content == "" && len(msg.Images) == 0 {
+	if content == "" && len(msg.Images) == 0 && len(msg.Files) == 0 {
 		return
 	}
 

@@ -228,7 +228,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 
 				// Handle document (file) messages
 				if msg.Document != nil {
-					slog.Debug("telegram: document received", "user", userName, "file_name", msg.Document.FileName, "mime", msg.Document.MimeType)
+					slog.Info("telegram: document received", "user", userName, "file_name", msg.Document.FileName, "mime", msg.Document.MimeType, "file_id", msg.Document.FileID)
 					fileData, err := p.downloadFile(msg.Document.FileID)
 					if err != nil {
 						slog.Error("telegram: download document failed", "error", err)
