@@ -63,7 +63,10 @@ func newCodexSession(ctx context.Context, workDir, model, effort, mode, resumeID
 // Send launches a codex subprocess.
 // If a threadID exists (from a prior turn or resume), uses `codex exec resume <id> <prompt>`.
 // Otherwise uses `codex exec <prompt>` to start a new conversation.
-func (cs *codexSession) Send(prompt string, images []core.ImageAttachment) error {
+func (cs *codexSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
+	if len(files) > 0 {
+		slog.Warn("codexSession: files not supported by Codex, ignoring")
+	}
 	if !cs.alive.Load() {
 		return fmt.Errorf("session is closed")
 	}

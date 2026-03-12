@@ -59,9 +59,12 @@ func newCursorSession(ctx context.Context, cmd, workDir, model, mode, resumeID s
 	return cs, nil
 }
 
-func (cs *cursorSession) Send(prompt string, images []core.ImageAttachment) error {
+func (cs *cursorSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	if len(images) > 0 {
 		slog.Warn("cursorSession: images not yet supported in CLI mode, ignoring")
+	}
+	if len(files) > 0 {
+		slog.Warn("cursorSession: files not yet supported in CLI mode, ignoring")
 	}
 	if !cs.alive.Load() {
 		return fmt.Errorf("session is closed")

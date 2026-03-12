@@ -31,7 +31,7 @@ func TestIFlowSessionIntegration(t *testing.T) {
 	}
 	defer sess.Close()
 
-	if err := sess.Send("Reply exactly READY", nil); err != nil {
+	if err := sess.Send("Reply exactly READY", nil, nil); err != nil {
 		t.Fatalf("Send #1: %v", err)
 	}
 	res1 := waitForResult(t, sess.Events())
@@ -43,7 +43,7 @@ func TestIFlowSessionIntegration(t *testing.T) {
 		t.Fatal("expected session id after first send")
 	}
 
-	if err := sess.Send("Reply exactly RESUMED", nil); err != nil {
+	if err := sess.Send("Reply exactly RESUMED", nil, nil); err != nil {
 		t.Fatalf("Send #2: %v", err)
 	}
 	res2 := waitForResult(t, sess.Events())
@@ -59,7 +59,7 @@ func TestIFlowSessionIntegration(t *testing.T) {
 		t.Fatalf("StartSession resume: %v", err)
 	}
 	defer resumed.Close()
-	if err := resumed.Send("Reply exactly CONTINUED", nil); err != nil {
+	if err := resumed.Send("Reply exactly CONTINUED", nil, nil); err != nil {
 		t.Fatalf("Send resume: %v", err)
 	}
 	res3 := waitForResult(t, resumed.Events())

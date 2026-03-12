@@ -57,7 +57,7 @@ func newOpencodeSession(ctx context.Context, cmd, workDir, model, mode, resumeID
 	return s, nil
 }
 
-func (s *opencodeSession) Send(prompt string, images []core.ImageAttachment) error {
+func (s *opencodeSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	if !s.alive.Load() {
 		return fmt.Errorf("session is closed")
 	}

@@ -68,6 +68,13 @@ type ImageAttachment struct {
 	FileName string // original filename (optional)
 }
 
+// FileAttachment represents a file (PDF, doc, spreadsheet, etc.) sent by the user.
+type FileAttachment struct {
+	MimeType string // e.g. "application/pdf", "text/plain"
+	Data     []byte // raw file bytes
+	FileName string // original filename
+}
+
 // AudioAttachment represents a voice/audio message sent by the user.
 type AudioAttachment struct {
 	MimeType string // e.g. "audio/amr", "audio/ogg", "audio/mp4"
@@ -85,6 +92,7 @@ type Message struct {
 	UserName   string
 	Content    string
 	Images     []ImageAttachment // attached images (if any)
+	Files      []FileAttachment  // attached files (if any)
 	Audio      *AudioAttachment  // voice message (if any)
 	ReplyCtx   any               // platform-specific context needed for replying
 	FromVoice  bool              // true if message originated from voice transcription

@@ -508,6 +508,34 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 			ReplyCtx: rctx,
 		})
 
+	case "file":
+		var fileBody struct {
+			FileKey  string `json:"file_key"`
+			FileName string `json:"file_name"`
+		}
+		if err := json.Unmarshal([]byte(*msg.Content), &fileBody); err != nil {
+			slog.Error(p.tag()+": failed to parse file content", "error", err)
+			return nil
+		}
+		slog.Debug(p.tag()+": file received", "user", userID, "file_key", fileBody.FileKey, "file_name", fileBody.FileName)
+		fileData, err := p.downloadResource(messageID, fileBody.FileKey, "file")
+		if err != nil {
+			slog.Error(p.tag()+": download file failed", "error", err)
+			return nil
+		}
+		mimeType := detectMimeType(fileData)
+		p.handler(p.dispatchPlatform(), &core.Message{
+			SessionKey: sessionKey, Platform: p.platformName,
+			MessageID: messageID,
+			UserID:    userID, UserName: userName,
+			Files: []core.FileAttachment{{
+				MimeType: mimeType,
+				Data:     fileData,
+				FileName: fileBody.FileName,
+			}},
+			ReplyCtx: rctx,
+		})
+
 	default:
 		slog.Debug(p.tag()+": ignoring unsupported message type", "type", msgType)
 	}

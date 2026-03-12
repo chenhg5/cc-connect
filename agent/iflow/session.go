@@ -116,9 +116,12 @@ func newIFlowSession(ctx context.Context, cmd, workDir, model, mode, resumeID st
 	return s, nil
 }
 
-func (s *iflowSession) Send(prompt string, images []core.ImageAttachment) error {
+func (s *iflowSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	if len(images) > 0 {
 		slog.Warn("iflowSession: images are not supported, ignoring")
+	}
+	if len(files) > 0 {
+		slog.Warn("iflowSession: files are not supported, ignoring")
 	}
 	if !s.alive.Load() {
 		return fmt.Errorf("session is closed")

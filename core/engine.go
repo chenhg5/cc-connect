@@ -1032,7 +1032,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.mu.Lock()
 	state.fromVoice = msg.FromVoice
 	state.mu.Unlock()
-	if err := state.agentSession.Send(promptContent, msg.Images); err != nil {
+	if err := state.agentSession.Send(promptContent, msg.Images, msg.Files); err != nil {
 		slog.Error("failed to send prompt", "error", err)
 
 		if !state.agentSession.Alive() {
@@ -1050,7 +1050,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 				return
 			}
 			sendStart = time.Now()
-			if err := state.agentSession.Send(promptContent, msg.Images); err != nil {
+			if err := state.agentSession.Send(promptContent, msg.Images, msg.Files); err != nil {
 				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
 				return
 			}
@@ -3493,7 +3493,7 @@ func (e *Engine) cmdCompress(p Platform, msg *Message) {
 		drainEvents(state.agentSession.Events())
 
 		cmd := compressor.CompressCommand()
-		if err := state.agentSession.Send(cmd, nil); err != nil {
+		if err := state.agentSession.Send(cmd, nil, nil); err != nil {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
 			if !state.agentSession.Alive() {
 				e.cleanupInteractiveState(msg.SessionKey)
@@ -6318,7 +6318,7 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 		e.sessions.Save()
 	}
 
-	if err := agentSession.Send(message, nil); err != nil {
+	if err := agentSession.Send(message, nil, nil); err != nil {
 		return "", fmt.Errorf("send relay message: %w", err)
 	}
 
