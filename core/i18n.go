@@ -288,8 +288,9 @@ const (
 	MsgPermBtnAllow    MsgKey = "perm_btn_allow"
 	MsgPermBtnDeny     MsgKey = "perm_btn_deny"
 	MsgPermBtnAllowAll MsgKey = "perm_btn_allow_all"
-	MsgPermCardTitle   MsgKey = "perm_card_title"
-	MsgPermCardBody    MsgKey = "perm_card_body"
+	MsgPermCardTitle MsgKey = "perm_card_title"
+	MsgPermCardBody  MsgKey = "perm_card_body"
+	MsgPermCardNote  MsgKey = "perm_card_note"
 
 	MsgCommandsTitle        MsgKey = "commands_title"
 	MsgCommandsEmpty        MsgKey = "commands_empty"
@@ -1811,6 +1812,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "Agent 想要使用 **%s**:\n\n```\n%s\n```",
 		LangJapanese:           "エージェントが **%s** を使用しようとしています:\n\n```\n%s\n```",
 		LangSpanish:            "El agente quiere usar **%s**:\n\n```\n%s\n```",
+	},
+	MsgPermCardNote: {
+		LangEnglish:            "If buttons are unresponsive, reply: allow / deny / allow all",
+		LangChinese:            "如果按钮无响应，请直接回复：允许 / 拒绝 / 允许所有",
+		LangTraditionalChinese: "若按鈕無回應，請直接回覆：允許 / 拒絕 / 允許所有",
+		LangJapanese:           "ボタンが反応しない場合は直接返信: allow / deny / allow all",
+		LangSpanish:            "Si los botones no responden, responda: allow / deny / allow all",
 	},
 	MsgCommandsTitle: {
 		LangEnglish:            "🔧 **Custom Commands** (%d)\n\n",

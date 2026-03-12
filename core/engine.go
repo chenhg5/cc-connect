@@ -3260,6 +3260,7 @@ func (e *Engine) sendPermissionPrompt(p Platform, replyCtx any, prompt, toolName
 			Markdown(body).
 			ButtonsEqual(allowBtn, denyBtn).
 			Buttons(allowAllBtn).
+			Note(e.i18n.T(MsgPermCardNote)).
 			Build()
 		e.sendWithCard(p, replyCtx, card)
 		return
