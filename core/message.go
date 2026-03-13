@@ -152,6 +152,20 @@ const (
 	EventThinking          EventType = "thinking"           // thinking/processing status
 )
 
+// UserQuestion represents a structured question from AskUserQuestion.
+type UserQuestion struct {
+	Question    string             `json:"question"`
+	Header      string             `json:"header"`
+	Options     []UserQuestionOption `json:"options"`
+	MultiSelect bool               `json:"multiSelect"`
+}
+
+// UserQuestionOption is one choice in a UserQuestion.
+type UserQuestionOption struct {
+	Label       string `json:"label"`
+	Description string `json:"description"`
+}
+
 // Event represents a single piece of agent output streamed back to the engine.
 type Event struct {
 	Type         EventType
@@ -162,6 +176,7 @@ type Event struct {
 	ToolResult   string         // populated for EventToolResult
 	SessionID    string         // agent-managed session ID for conversation continuity
 	RequestID    string         // unique request ID for EventPermissionRequest
+	Questions    []UserQuestion // populated when ToolName == "AskUserQuestion"
 	Done         bool
 	Error        error
 }

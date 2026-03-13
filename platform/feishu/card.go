@@ -157,6 +157,10 @@ func renderCardMap(card *core.Card) map[string]any {
 			if btnType == "" {
 				btnType = "default"
 			}
+			valMap := map[string]string{"action": e.BtnValue}
+			for k, v := range e.Extra {
+				valMap[k] = v
+			}
 			elements = append(elements, map[string]any{
 				"tag":       "column_set",
 				"flex_mode": "none",
@@ -182,7 +186,7 @@ func renderCardMap(card *core.Card) map[string]any {
 								"tag":   "button",
 								"text":  plainText(e.BtnText),
 								"type":  btnType,
-								"value": map[string]string{"action": e.BtnValue},
+								"value": valMap,
 							},
 						},
 					},

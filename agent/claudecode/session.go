@@ -211,6 +211,9 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 		switch contentType {
 		case "tool_use":
 			toolName, _ := item["name"].(string)
+			if toolName == "AskUserQuestion" {
+				continue
+			}
 			inputSummary := summarizeInput(toolName, item["input"])
 			evt := core.Event{Type: core.EventToolUse, ToolName: toolName, ToolInput: inputSummary}
 			select {
@@ -314,6 +317,11 @@ func (cs *claudeSession) handleControlRequest(raw map[string]any) {
 		ToolInput:    summarizeInput(toolName, input),
 		ToolInputRaw: input,
 	}
+
+	if toolName == "AskUserQuestion" {
+		evt.Questions = parseUserQuestions(input)
+	}
+
 	select {
 	case cs.events <- evt:
 	case <-cs.ctx.Done():

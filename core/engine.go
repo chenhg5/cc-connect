@@ -214,12 +214,15 @@ type deleteModeState struct {
 
 // pendingPermission represents a permission request waiting for user response.
 type pendingPermission struct {
-	RequestID    string
-	ToolName     string
-	ToolInput    map[string]any
-	InputPreview string
-	Resolved     chan struct{} // closed when user responds
-	resolveOnce  sync.Once
+	RequestID       string
+	ToolName        string
+	ToolInput       map[string]any
+	InputPreview    string
+	Questions       []UserQuestion // non-nil for AskUserQuestion
+	Answers         map[int]string // collected answers keyed by question index
+	CurrentQuestion int            // index of the question currently being asked
+	Resolved        chan struct{}  // closed when user responds
+	resolveOnce     sync.Once
 }
 
 // resolve safely closes the Resolved channel exactly once.
@@ -880,6 +883,45 @@ func (e *Engine) handlePendingPermission(p Platform, msg *Message, content strin
 		return false
 	}
 
+	// AskUserQuestion: interpret user response as an answer, not a permission decision
+	if len(pending.Questions) > 0 {
+		curIdx := pending.CurrentQuestion
+		q := pending.Questions[curIdx]
+		answer := e.resolveAskQuestionAnswer(q, content)
+
+		if pending.Answers == nil {
+			pending.Answers = make(map[int]string)
+		}
+		pending.Answers[curIdx] = answer
+
+		// More questions remaining — advance to next and send new card
+		if curIdx+1 < len(pending.Questions) {
+			pending.CurrentQuestion = curIdx + 1
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("✅ %s: **%s**", q.Question, answer))
+			e.sendAskQuestionPrompt(p, msg.ReplyCtx, pending.Questions, curIdx+1)
+			return true
+		}
+
+		// All questions answered — build response and resolve
+		updatedInput := buildAskQuestionResponse(pending.ToolInput, pending.Questions, pending.Answers)
+
+		if err := state.agentSession.RespondPermission(pending.RequestID, PermissionResult{
+			Behavior:     "allow",
+			UpdatedInput: updatedInput,
+		}); err != nil {
+			slog.Error("failed to send AskUserQuestion response", "error", err)
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+		} else {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("✅ %s: **%s**", q.Question, answer))
+		}
+
+		state.mu.Lock()
+		state.pending = nil
+		state.mu.Unlock()
+		pending.resolve()
+		return true
+	}
+
 	lower := strings.ToLower(strings.TrimSpace(content))
 
 	if isApproveAllResponse(lower) {
@@ -925,6 +967,67 @@ func (e *Engine) handlePendingPermission(p Platform, msg *Message, content strin
 	pending.resolve()
 
 	return true
+}
+
+// resolveAskQuestionAnswer converts user input into answer text.
+// It handles button callbacks ("askq:qIdx:optIdx"), numeric selections ("1", "1,3"), and free text.
+func (e *Engine) resolveAskQuestionAnswer(q UserQuestion, input string) string {
+	input = strings.TrimSpace(input)
+
+	// Handle card button callback: "askq:qIdx:optIdx"
+	if strings.HasPrefix(input, "askq:") {
+		parts := strings.SplitN(input, ":", 3)
+		if len(parts) == 3 {
+			if idx, err := strconv.Atoi(parts[2]); err == nil && idx >= 1 && idx <= len(q.Options) {
+				return q.Options[idx-1].Label
+			}
+		}
+		// Legacy format "askq:N"
+		if len(parts) == 2 {
+			if idx, err := strconv.Atoi(parts[1]); err == nil && idx >= 1 && idx <= len(q.Options) {
+				return q.Options[idx-1].Label
+			}
+		}
+	}
+
+	// Try numeric index(es)
+	if q.MultiSelect {
+		parts := strings.FieldsFunc(input, func(r rune) bool { return r == ',' || r == '，' || r == ' ' })
+		var labels []string
+		allNumeric := true
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			idx, err := strconv.Atoi(p)
+			if err != nil || idx < 1 || idx > len(q.Options) {
+				allNumeric = false
+				break
+			}
+			labels = append(labels, q.Options[idx-1].Label)
+		}
+		if allNumeric && len(labels) > 0 {
+			return strings.Join(labels, ", ")
+		}
+	} else {
+		if idx, err := strconv.Atoi(input); err == nil && idx >= 1 && idx <= len(q.Options) {
+			return q.Options[idx-1].Label
+		}
+	}
+
+	return input
+}
+
+// buildAskQuestionResponse constructs the updatedInput for AskUserQuestion control_response.
+func buildAskQuestionResponse(originalInput map[string]any, questions []UserQuestion, collected map[int]string) map[string]any {
+	result := make(map[string]any)
+	for k, v := range originalInput {
+		result[k] = v
+	}
+	answers := make(map[string]any)
+	for idx, ans := range collected {
+		answers[strconv.Itoa(idx)] = ans
+	}
+	result["answers"] = answers
+	return result
 }
 
 func isApproveAllResponse(s string) bool {
@@ -1346,11 +1449,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventPermissionRequest:
+			isAskQuestion := event.ToolName == "AskUserQuestion" && len(event.Questions) > 0
+
 			state.mu.Lock()
 			autoApprove := state.approveAll
 			state.mu.Unlock()
 
-			if autoApprove {
+			if autoApprove && !isAskQuestion {
 				slog.Debug("auto-approving (approve-all)", "request_id", event.RequestID, "tool", event.ToolName)
 				_ = state.agentSession.RespondPermission(event.RequestID, PermissionResult{
 					Behavior:     "allow",
@@ -1359,7 +1464,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				continue
 			}
 
-			// Stop streaming preview before sending permission prompt
+			// Stop streaming preview before sending prompt
 			sp.freeze()
 
 			slog.Info("permission request",
@@ -1367,19 +1472,24 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				"tool", event.ToolName,
 			)
 
-			permLimit := e.display.ToolMaxLen
-			if permLimit > 0 {
-				permLimit = permLimit * 8 / 5 // permission prompts get ~1.6x more room
+			if isAskQuestion {
+				e.sendAskQuestionPrompt(p, replyCtx, event.Questions, 0)
+			} else {
+				permLimit := e.display.ToolMaxLen
+				if permLimit > 0 {
+					permLimit = permLimit * 8 / 5
+				}
+				toolInput := truncateIf(event.ToolInput, permLimit)
+				prompt := fmt.Sprintf(e.i18n.T(MsgPermissionPrompt), event.ToolName, toolInput)
+				e.sendPermissionPrompt(p, replyCtx, prompt, event.ToolName, toolInput)
 			}
-			toolInput := truncateIf(event.ToolInput, permLimit)
-			prompt := fmt.Sprintf(e.i18n.T(MsgPermissionPrompt), event.ToolName, toolInput)
-			e.sendPermissionPrompt(p, replyCtx, prompt, event.ToolName, toolInput)
 
 			pending := &pendingPermission{
 				RequestID:    event.RequestID,
 				ToolName:     event.ToolName,
 				ToolInput:    event.ToolInputRaw,
 				InputPreview: event.ToolInput,
+				Questions:    event.Questions,
 				Resolved:     make(chan struct{}),
 			}
 			state.mu.Lock()
@@ -3932,6 +4042,108 @@ func (e *Engine) sendPermissionPrompt(p Platform, replyCtx any, prompt, toolName
 	}
 
 	e.send(p, replyCtx, prompt)
+}
+
+// sendAskQuestionPrompt renders one question (by index) from the AskUserQuestion list.
+// qIdx is the 0-based index of the question to display.
+func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []UserQuestion, qIdx int) {
+	if qIdx >= len(questions) {
+		return
+	}
+	q := questions[qIdx]
+	total := len(questions)
+
+	titleSuffix := ""
+	if total > 1 {
+		titleSuffix = fmt.Sprintf(" (%d/%d)", qIdx+1, total)
+	}
+
+	headerText := q.Header
+	if headerText == "" {
+		headerText = q.Question
+	}
+
+	// Try card (Feishu/Lark)
+	if supportsCards(p) {
+		cb := NewCard().Title(e.i18n.T(MsgAskQuestionTitle)+titleSuffix, "blue")
+		body := "**" + q.Question + "**"
+		if q.MultiSelect {
+			body += e.i18n.T(MsgAskQuestionMulti)
+		}
+		cb.Markdown(body)
+		for i, opt := range q.Options {
+			desc := opt.Label
+			if opt.Description != "" {
+				desc += " — " + opt.Description
+			}
+			answerData := fmt.Sprintf("askq:%d:%d", qIdx, i+1)
+			cb.ListItemBtnExtra(desc, opt.Label, "default", answerData, map[string]string{
+				"askq_label":    opt.Label,
+				"askq_question": q.Question,
+			})
+		}
+		cb.Note(e.i18n.T(MsgAskQuestionNote))
+		e.sendWithCard(p, replyCtx, cb.Build())
+		return
+	}
+
+	// Try inline buttons (Telegram)
+	if bs, ok := p.(InlineButtonSender); ok {
+		var textBuf strings.Builder
+		textBuf.WriteString("❓ *")
+		textBuf.WriteString(q.Question)
+		textBuf.WriteString("*")
+		textBuf.WriteString(titleSuffix)
+		if q.MultiSelect {
+			textBuf.WriteString(e.i18n.T(MsgAskQuestionMulti))
+		}
+		hasDesc := false
+		for _, opt := range q.Options {
+			if opt.Description != "" {
+				hasDesc = true
+				break
+			}
+		}
+		if hasDesc {
+			textBuf.WriteString("\n")
+			for i, opt := range q.Options {
+				textBuf.WriteString(fmt.Sprintf("\n*%d. %s*", i+1, opt.Label))
+				if opt.Description != "" {
+					textBuf.WriteString(" — ")
+					textBuf.WriteString(opt.Description)
+				}
+			}
+			textBuf.WriteString("\n")
+		}
+		var rows [][]ButtonOption
+		for i, opt := range q.Options {
+			rows = append(rows, []ButtonOption{{Text: opt.Label, Data: fmt.Sprintf("askq:%d:%d", qIdx, i+1)}})
+		}
+		if err := bs.SendWithButtons(e.ctx, replyCtx, textBuf.String(), rows); err == nil {
+			return
+		}
+	}
+
+	// Plain text fallback
+	var sb strings.Builder
+	sb.WriteString("❓ **")
+	sb.WriteString(q.Question)
+	sb.WriteString("**")
+	sb.WriteString(titleSuffix)
+	if q.MultiSelect {
+		sb.WriteString(e.i18n.T(MsgAskQuestionMulti))
+	}
+	sb.WriteString("\n\n")
+	for i, opt := range q.Options {
+		sb.WriteString(fmt.Sprintf("%d. **%s**", i+1, opt.Label))
+		if opt.Description != "" {
+			sb.WriteString(" — ")
+			sb.WriteString(opt.Description)
+		}
+		sb.WriteString("\n")
+	}
+	sb.WriteString(fmt.Sprintf("\n%s", e.i18n.T(MsgAskQuestionNote)))
+	e.send(p, replyCtx, sb.String())
 }
 
 // send wraps p.Send with error logging and slow-operation warnings.

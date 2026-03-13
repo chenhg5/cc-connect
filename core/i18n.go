@@ -294,6 +294,12 @@ const (
 	MsgPermCardBody    MsgKey = "perm_card_body"
 	MsgPermCardNote    MsgKey = "perm_card_note"
 
+	MsgAskQuestionTitle    MsgKey = "ask_question_title"
+	MsgAskQuestionNote     MsgKey = "ask_question_note"
+	MsgAskQuestionMulti    MsgKey = "ask_question_multi"
+	MsgAskQuestionPrompt   MsgKey = "ask_question_prompt"
+	MsgAskQuestionAnswered MsgKey = "ask_question_answered"
+
 	MsgCommandsTitle        MsgKey = "commands_title"
 	MsgCommandsEmpty        MsgKey = "commands_empty"
 	MsgCommandsHint         MsgKey = "commands_hint"
@@ -1863,6 +1869,41 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "若按鈕無回應，請直接回覆：允許 / 拒絕 / 允許所有",
 		LangJapanese:           "ボタンが反応しない場合は直接返信: allow / deny / allow all",
 		LangSpanish:            "Si los botones no responden, responda: allow / deny / allow all",
+	},
+	MsgAskQuestionTitle: {
+		LangEnglish:            "Agent Question",
+		LangChinese:            "Agent 提问",
+		LangTraditionalChinese: "Agent 提問",
+		LangJapanese:           "エージェントの質問",
+		LangSpanish:            "Pregunta del agente",
+	},
+	MsgAskQuestionNote: {
+		LangEnglish:            "If buttons are unresponsive, reply with the option number (e.g. 1) or type your answer",
+		LangChinese:            "如果按钮无响应，请回复选项编号（如 1）或直接输入你的回答",
+		LangTraditionalChinese: "若按鈕無回應，請回覆選項編號（如 1）或直接輸入你的回答",
+		LangJapanese:           "ボタンが反応しない場合は、番号（例: 1）で返信するか、直接回答を入力してください",
+		LangSpanish:            "Si los botones no responden, responda con el número de opción (ej. 1) o escriba su respuesta",
+	},
+	MsgAskQuestionMulti: {
+		LangEnglish:            " (multiple selections allowed, separate with commas)",
+		LangChinese:            "（可多选，用逗号分隔）",
+		LangTraditionalChinese: "（可多選，用逗號分隔）",
+		LangJapanese:           "（複数選択可、カンマで区切る）",
+		LangSpanish:            " (selección múltiple permitida, separe con comas)",
+	},
+	MsgAskQuestionPrompt: {
+		LangEnglish:            "❓ **%s**\n\n%s\n\nReply with the option number or type your answer.",
+		LangChinese:            "❓ **%s**\n\n%s\n\n请回复选项编号或直接输入你的回答。",
+		LangTraditionalChinese: "❓ **%s**\n\n%s\n\n請回覆選項編號或直接輸入你的回答。",
+		LangJapanese:           "❓ **%s**\n\n%s\n\n番号で返信するか、回答を直接入力してください。",
+		LangSpanish:            "❓ **%s**\n\n%s\n\nResponda con el número de opción o escriba su respuesta.",
+	},
+	MsgAskQuestionAnswered: {
+		LangEnglish:            "Answer",
+		LangChinese:            "已回答",
+		LangTraditionalChinese: "已回答",
+		LangJapanese:           "回答済み",
+		LangSpanish:            "Respondido",
 	},
 	MsgCommandsTitle: {
 		LangEnglish:            "🔧 **Custom Commands** (%d)\n\n",

@@ -335,6 +335,43 @@ func (p *Platform) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 		return
 	}
 
+	// AskUserQuestion callbacks (askq:qIdx:optIdx)
+	if strings.HasPrefix(data, "askq:") {
+		// Extract label from after the last colon for display
+		parts := strings.SplitN(data, ":", 3)
+		choiceLabel := data
+		if len(parts) == 3 {
+			// Try to find the option label from the original message buttons
+			for _, row := range cb.Message.ReplyMarkup.InlineKeyboard {
+				for _, btn := range row {
+					if btn.CallbackData != nil && *btn.CallbackData == data {
+						choiceLabel = "✅ " + btn.Text
+					}
+				}
+			}
+		}
+
+		origText := cb.Message.Text
+		if origText == "" {
+			origText = "(question)"
+		}
+		edit := tgbotapi.NewEditMessageText(chatID, msgID, origText+"\n\n"+choiceLabel)
+		emptyMarkup := tgbotapi.NewInlineKeyboardMarkup()
+		edit.ReplyMarkup = &emptyMarkup
+		p.bot.Send(edit)
+
+		p.handler(p, &core.Message{
+			SessionKey: sessionKey,
+			Platform:   "telegram",
+			UserID:     userID,
+			UserName:   userName,
+			Content:    data,
+			MessageID:  strconv.Itoa(msgID),
+			ReplyCtx:   rctx,
+		})
+		return
+	}
+
 	// Permission callbacks (perm:allow, perm:deny, perm:allow_all)
 	var responseText string
 	switch data {

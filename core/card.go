@@ -42,10 +42,11 @@ type CardNote struct{ Text string }
 // CardListItem renders a row with description text on the left and a button on the right.
 // On Feishu this maps to div+extra; on other platforms it degrades to a text line.
 type CardListItem struct {
-	Text     string // left-side description
-	BtnText  string // button label
-	BtnType  string // "primary", "default", "danger"
-	BtnValue string // callback data
+	Text     string            // left-side description
+	BtnText  string            // button label
+	BtnType  string            // "primary", "default", "danger"
+	BtnValue string            // callback data
+	Extra    map[string]string // additional key-value pairs carried in the callback
 }
 
 // CardSelect renders a dropdown selector.
@@ -172,6 +173,14 @@ func (b *CardBuilder) ListItem(desc, btnText, btnValue string) *CardBuilder {
 func (b *CardBuilder) ListItemBtn(desc, btnText, btnType, btnValue string) *CardBuilder {
 	b.card.Elements = append(b.card.Elements, CardListItem{
 		Text: desc, BtnText: btnText, BtnType: btnType, BtnValue: btnValue,
+	})
+	return b
+}
+
+// ListItemBtnExtra is like ListItemBtn but with extra callback data.
+func (b *CardBuilder) ListItemBtnExtra(desc, btnText, btnType, btnValue string, extra map[string]string) *CardBuilder {
+	b.card.Elements = append(b.card.Elements, CardListItem{
+		Text: desc, BtnText: btnText, BtnType: btnType, BtnValue: btnValue, Extra: extra,
 	})
 	return b
 }

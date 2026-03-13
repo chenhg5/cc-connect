@@ -1774,3 +1774,338 @@ func TestHandleCardNav_HelpSwitchesTabs(t *testing.T) {
 		t.Fatalf("agent help text = %q, should not include session commands", text)
 	}
 }
+
+// --- AskUserQuestion tests ---
+
+func testQuestions() []UserQuestion {
+	return []UserQuestion{{
+		Question: "Which database?",
+		Header:   "Setup",
+		Options: []UserQuestionOption{
+			{Label: "PostgreSQL", Description: "Recommended for production"},
+			{Label: "SQLite", Description: "Lightweight, file-based"},
+			{Label: "MySQL", Description: "Popular open-source"},
+		},
+		MultiSelect: false,
+	}}
+}
+
+func testMultiQuestions() []UserQuestion {
+	return []UserQuestion{
+		{
+			Question: "Which database?",
+			Header:   "Database",
+			Options: []UserQuestionOption{
+				{Label: "PostgreSQL"},
+				{Label: "SQLite"},
+			},
+		},
+		{
+			Question: "Which framework?",
+			Header:   "Framework",
+			Options: []UserQuestionOption{
+				{Label: "Gin"},
+				{Label: "Echo"},
+			},
+		},
+	}
+}
+
+func TestResolveAskQuestionAnswer_NumericIndex(t *testing.T) {
+	e := newTestEngine()
+	q := testQuestions()[0]
+	got := e.resolveAskQuestionAnswer(q, "2")
+	if got != "SQLite" {
+		t.Errorf("expected SQLite, got %s", got)
+	}
+}
+
+func TestResolveAskQuestionAnswer_ButtonCallback(t *testing.T) {
+	e := newTestEngine()
+	q := testQuestions()[0]
+	got := e.resolveAskQuestionAnswer(q, "askq:0:1")
+	if got != "PostgreSQL" {
+		t.Errorf("expected PostgreSQL, got %s", got)
+	}
+}
+
+func TestResolveAskQuestionAnswer_FreeText(t *testing.T) {
+	e := newTestEngine()
+	q := testQuestions()[0]
+	got := e.resolveAskQuestionAnswer(q, "Redis")
+	if got != "Redis" {
+		t.Errorf("expected Redis, got %s", got)
+	}
+}
+
+func TestResolveAskQuestionAnswer_MultiSelect(t *testing.T) {
+	e := newTestEngine()
+	q := testQuestions()[0]
+	q.MultiSelect = true
+	got := e.resolveAskQuestionAnswer(q, "1,3")
+	if got != "PostgreSQL, MySQL" {
+		t.Errorf("expected 'PostgreSQL, MySQL', got %s", got)
+	}
+}
+
+func TestResolveAskQuestionAnswer_OutOfRange(t *testing.T) {
+	e := newTestEngine()
+	q := testQuestions()[0]
+	got := e.resolveAskQuestionAnswer(q, "99")
+	if got != "99" {
+		t.Errorf("expected raw '99' for out-of-range, got %s", got)
+	}
+}
+
+func TestBuildAskQuestionResponse(t *testing.T) {
+	input := map[string]any{
+		"questions": []any{map[string]any{"question": "Which?"}},
+	}
+	collected := map[int]string{0: "PostgreSQL", 1: "Gin"}
+	result := buildAskQuestionResponse(input, testQuestions(), collected)
+	answers, ok := result["answers"].(map[string]any)
+	if !ok {
+		t.Fatal("expected answers map")
+	}
+	if answers["0"] != "PostgreSQL" {
+		t.Errorf("expected answer[0]=PostgreSQL, got %v", answers["0"])
+	}
+	if answers["1"] != "Gin" {
+		t.Errorf("expected answer[1]=Gin, got %v", answers["1"])
+	}
+	if _, ok := result["questions"]; !ok {
+		t.Error("expected original questions to be preserved")
+	}
+}
+
+func TestSendAskQuestionPrompt_CardPlatform(t *testing.T) {
+	e := newTestEngine()
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	e.sendAskQuestionPrompt(p, "ctx", testQuestions(), 0)
+
+	if len(p.sentCards) != 1 {
+		t.Fatalf("expected 1 card, got %d", len(p.sentCards))
+	}
+	card := p.sentCards[0]
+	if card.Header == nil || card.Header.Color != "blue" {
+		t.Errorf("expected blue header, got %+v", card.Header)
+	}
+	askqCount := countCardActionValues(card, "askq:")
+	if askqCount != 3 {
+		t.Errorf("expected 3 askq buttons, got %d", askqCount)
+	}
+}
+
+func TestSendAskQuestionPrompt_CardPlatform_MultiQuestion_ShowsIndex(t *testing.T) {
+	e := newTestEngine()
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	qs := testMultiQuestions()
+	e.sendAskQuestionPrompt(p, "ctx", qs, 0)
+
+	if len(p.sentCards) != 1 {
+		t.Fatalf("expected 1 card, got %d", len(p.sentCards))
+	}
+	card := p.sentCards[0]
+	if !strings.Contains(card.Header.Title, "(1/2)") {
+		t.Errorf("expected (1/2) in title, got %s", card.Header.Title)
+	}
+}
+
+func TestSendAskQuestionPrompt_InlineButtonPlatform(t *testing.T) {
+	e := newTestEngine()
+	p := &stubInlineButtonPlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
+	e.sendAskQuestionPrompt(p, "ctx", testQuestions(), 0)
+
+	if len(p.buttonRows) != 3 {
+		t.Fatalf("expected 3 button rows, got %d", len(p.buttonRows))
+	}
+	if p.buttonRows[0][0].Data != "askq:0:1" {
+		t.Errorf("expected askq:0:1, got %s", p.buttonRows[0][0].Data)
+	}
+}
+
+func TestSendAskQuestionPrompt_PlainPlatform(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "plain"}
+	e.sendAskQuestionPrompt(p, "ctx", testQuestions(), 0)
+
+	if len(p.sent) != 1 {
+		t.Fatal("expected 1 message")
+	}
+	msg := p.sent[0]
+	if !strings.Contains(msg, "Which database?") {
+		t.Errorf("expected question text, got %s", msg)
+	}
+	if !strings.Contains(msg, "1. **PostgreSQL**") {
+		t.Errorf("expected numbered options, got %s", msg)
+	}
+}
+
+func TestHandlePendingPermission_AskUserQuestion_SingleQuestion(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "test"}
+	rec := &recordingAgentSession{}
+
+	state := &interactiveState{
+		agentSession: rec,
+		platform:     p,
+		replyCtx:     "ctx",
+		pending: &pendingPermission{
+			RequestID: "req-1",
+			ToolName:  "AskUserQuestion",
+			ToolInput: map[string]any{
+				"questions": []any{map[string]any{"question": "Which?"}},
+			},
+			Questions: testQuestions(),
+			Resolved:  make(chan struct{}),
+		},
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates["test:chat:user1"] = state
+	e.interactiveMu.Unlock()
+
+	handled := e.handlePendingPermission(p, &Message{
+		SessionKey: "test:chat:user1",
+		UserID:     "user1",
+		Content:    "2",
+		ReplyCtx:   "ctx",
+	}, "2")
+
+	if !handled {
+		t.Fatal("expected handlePendingPermission to return true")
+	}
+	if rec.calls != 1 {
+		t.Fatalf("expected 1 RespondPermission call, got %d", rec.calls)
+	}
+	answers, ok := rec.lastResult.UpdatedInput["answers"].(map[string]any)
+	if !ok {
+		t.Fatal("expected answers in updatedInput")
+	}
+	if answers["0"] != "SQLite" {
+		t.Errorf("expected answer=SQLite, got %v", answers["0"])
+	}
+
+	state.mu.Lock()
+	if state.pending != nil {
+		t.Error("expected pending to be cleared after response")
+	}
+	state.mu.Unlock()
+}
+
+func TestHandlePendingPermission_AskUserQuestion_MultiQuestion_Sequential(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "test"}
+	rec := &recordingAgentSession{}
+
+	qs := testMultiQuestions()
+	state := &interactiveState{
+		agentSession: rec,
+		platform:     p,
+		replyCtx:     "ctx",
+		pending: &pendingPermission{
+			RequestID: "req-1",
+			ToolName:  "AskUserQuestion",
+			ToolInput: map[string]any{"questions": []any{}},
+			Questions: qs,
+			Resolved:  make(chan struct{}),
+		},
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates["test:chat:user1"] = state
+	e.interactiveMu.Unlock()
+
+	// Answer question 0 — should NOT resolve yet
+	handled := e.handlePendingPermission(p, &Message{
+		SessionKey: "test:chat:user1",
+		UserID:     "user1",
+		Content:    "1",
+		ReplyCtx:   "ctx",
+	}, "1")
+	if !handled {
+		t.Fatal("expected handled=true for question 0")
+	}
+	if rec.calls != 0 {
+		t.Fatalf("should not have called RespondPermission yet, got %d calls", rec.calls)
+	}
+	state.mu.Lock()
+	if state.pending == nil {
+		t.Fatal("pending should still exist (more questions)")
+	}
+	if state.pending.CurrentQuestion != 1 {
+		t.Errorf("expected CurrentQuestion=1, got %d", state.pending.CurrentQuestion)
+	}
+	state.mu.Unlock()
+
+	// Answer question 1 — should resolve
+	handled = e.handlePendingPermission(p, &Message{
+		SessionKey: "test:chat:user1",
+		UserID:     "user1",
+		Content:    "2",
+		ReplyCtx:   "ctx",
+	}, "2")
+	if !handled {
+		t.Fatal("expected handled=true for question 1")
+	}
+	if rec.calls != 1 {
+		t.Fatalf("expected 1 RespondPermission call, got %d", rec.calls)
+	}
+	answers, ok := rec.lastResult.UpdatedInput["answers"].(map[string]any)
+	if !ok {
+		t.Fatal("expected answers in updatedInput")
+	}
+	if answers["0"] != "PostgreSQL" {
+		t.Errorf("expected answer[0]=PostgreSQL, got %v", answers["0"])
+	}
+	if answers["1"] != "Echo" {
+		t.Errorf("expected answer[1]=Echo, got %v", answers["1"])
+	}
+
+	state.mu.Lock()
+	if state.pending != nil {
+		t.Error("expected pending to be cleared after all questions answered")
+	}
+	state.mu.Unlock()
+}
+
+func TestHandlePendingPermission_AskUserQuestion_SkipsPermFlow(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "test"}
+	rec := &recordingAgentSession{}
+
+	state := &interactiveState{
+		agentSession: rec,
+		platform:     p,
+		replyCtx:     "ctx",
+		pending: &pendingPermission{
+			RequestID: "req-1",
+			ToolName:  "AskUserQuestion",
+			ToolInput: map[string]any{
+				"questions": []any{map[string]any{"question": "Which?"}},
+			},
+			Questions: testQuestions(),
+			Resolved:  make(chan struct{}),
+		},
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates["test:chat:user1"] = state
+	e.interactiveMu.Unlock()
+
+	// "allow" should NOT be interpreted as permission allow; should be treated as free text answer
+	handled := e.handlePendingPermission(p, &Message{
+		SessionKey: "test:chat:user1",
+		UserID:     "user1",
+		Content:    "allow",
+		ReplyCtx:   "ctx",
+	}, "allow")
+
+	if !handled {
+		t.Fatal("expected handled=true")
+	}
+	answers, ok := rec.lastResult.UpdatedInput["answers"].(map[string]any)
+	if !ok {
+		t.Fatal("expected answers in updatedInput")
+	}
+	if answers["0"] != "allow" {
+		t.Errorf("expected free text 'allow' as answer, got %v", answers["0"])
+	}
+}

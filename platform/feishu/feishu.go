@@ -280,6 +280,35 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		}, nil
 	}
 
+	// askq: — AskUserQuestion option selected, forward as user message
+	if strings.HasPrefix(actionVal, "askq:") {
+		rctx := replyContext{messageID: messageID, chatID: chatID}
+		go p.handler(p.dispatchPlatform(), &core.Message{
+			SessionKey: sessionKey,
+			Platform:   p.platformName,
+			UserID:     userID,
+			Content:    actionVal,
+			ReplyCtx:   rctx,
+		})
+
+		answerLabel, _ := event.Event.Action.Value["askq_label"].(string)
+		askqQuestion, _ := event.Event.Action.Value["askq_question"].(string)
+		if answerLabel == "" {
+			answerLabel = actionVal
+		}
+		cb := core.NewCard().Title("✅ "+answerLabel, "green")
+		if askqQuestion != "" {
+			cb.Markdown(askqQuestion)
+		}
+		cb.Markdown("**→ " + answerLabel + "**")
+		return &callback.CardActionTriggerResponse{
+			Card: &callback.Card{
+				Type: "raw",
+				Data: renderCardMap(cb.Build()),
+			},
+		}, nil
+	}
+
 	// cmd: — async command dispatch
 	if strings.HasPrefix(actionVal, "cmd:") {
 		cmdText := strings.TrimPrefix(actionVal, "cmd:")
