@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -56,6 +57,7 @@ type Platform struct {
 	cancel                context.CancelFunc
 	dedup                 core.MessageDedup
 	botOpenID             string
+	userNameCache         sync.Map // open_id -> display name
 }
 
 type interactivePlatform struct {
@@ -524,7 +526,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 			slog.Error(p.tag()+": download file failed", "error", err)
 			return nil
 		}
-		slog.Info(p.tag()+": file downloaded", "file_name", fileBody.FileName, "size", len(fileData))
+		slog.Debug(p.tag()+": file downloaded", "file_name", fileBody.FileName, "size", len(fileData))
 		mimeType := detectMimeType(fileData)
 		p.handler(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
@@ -562,8 +564,11 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 	return nil
 }
 
-// resolveUserName fetches a user's display name via the Contact API.
+// resolveUserName fetches a user's display name via the Contact API, with caching.
 func (p *Platform) resolveUserName(openID string) string {
+	if cached, ok := p.userNameCache.Load(openID); ok {
+		return cached.(string)
+	}
 	resp, err := p.client.Contact.User.Get(context.Background(),
 		larkcontact.NewGetUserReqBuilder().
 			UserId(openID).
@@ -577,7 +582,9 @@ func (p *Platform) resolveUserName(openID string) string {
 		slog.Debug(p.tag()+": resolve user name: no data", "open_id", openID, "code", resp.Code)
 		return openID
 	}
-	return *resp.Data.User.Name
+	name := *resp.Data.User.Name
+	p.userNameCache.Store(openID, name)
+	return name
 }
 
 // resolveUserNames batch-resolves open_ids to display names.
@@ -664,6 +671,10 @@ func replaceMentions(text string, mentions []*larkim.Mention) string {
 
 // formatMergeForwardTree recursively formats the sub-message tree.
 func (p *Platform) formatMergeForwardTree(parentID string, childrenMap map[string][]*larkim.Message, nameMap map[string]string, sb *strings.Builder, images *[]core.ImageAttachment, files *[]core.FileAttachment, depth int) {
+	if depth > 10 {
+		sb.WriteString(strings.Repeat("    ", depth) + "[nested forwarding truncated]\n")
+		return
+	}
 	children := childrenMap[parentID]
 	indent := strings.Repeat("    ", depth)
 
@@ -863,7 +874,7 @@ func (p *Platform) downloadResource(messageID, fileKey, resType string) ([]byte,
 	if err != nil {
 		return nil, fmt.Errorf("%s: read resource: %w", p.tag(), err)
 	}
-	slog.Info(p.tag()+": downloaded resource", "key", fileKey, "type", resType, "size", len(data))
+	slog.Debug(p.tag()+": downloaded resource", "key", fileKey, "type", resType, "size", len(data))
 	return data, nil
 }
 
