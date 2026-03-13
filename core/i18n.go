@@ -429,6 +429,23 @@ const (
 	MsgBuiltinCmdHelp      MsgKey = "help"
 	MsgBuiltinCmdBind      MsgKey = "bind"
 	MsgBuiltinCmdShell     MsgKey = "shell"
+
+	// Multi-workspace messages
+	MsgWsNotEnabled        MsgKey = "ws_not_enabled"
+	MsgWsNoBinding         MsgKey = "ws_no_binding"
+	MsgWsInfo              MsgKey = "ws_info"
+	MsgWsInitUsage         MsgKey = "ws_init_usage"
+	MsgWsBindUsage         MsgKey = "ws_bind_usage"
+	MsgWsBindSuccess       MsgKey = "ws_bind_success"
+	MsgWsBindNotFound      MsgKey = "ws_bind_not_found"
+	MsgWsUnbindSuccess     MsgKey = "ws_unbind_success"
+	MsgWsListEmpty         MsgKey = "ws_list_empty"
+	MsgWsListTitle         MsgKey = "ws_list_title"
+	MsgWsNotFoundHint      MsgKey = "ws_not_found_hint"
+	MsgWsResolutionError   MsgKey = "ws_resolution_error"
+	MsgWsCloneProgress     MsgKey = "ws_clone_progress"
+	MsgWsCloneSuccess      MsgKey = "ws_clone_success"
+	MsgWsCloneFailed       MsgKey = "ws_clone_failed"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -2704,6 +2721,113 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "執行 Shell 命令，參數: <命令>",
 		LangJapanese:           "シェルコマンドを実行、引数: <コマンド>",
 		LangSpanish:            "Ejecutar un comando shell, arg: <comando>",
+	},
+
+	// Multi-workspace messages
+	MsgWsNotEnabled: {
+		LangEnglish:            "Workspace commands are only available in multi-workspace mode.",
+		LangChinese:            "工作区命令仅在多工作区模式下可用。",
+		LangTraditionalChinese: "工作區命令僅在多工作區模式下可用。",
+		LangJapanese:           "ワークスペースコマンドはマルチワークスペースモードでのみ使用できます。",
+		LangSpanish:            "Los comandos de workspace solo están disponibles en modo multi-workspace.",
+	},
+	MsgWsNoBinding: {
+		LangEnglish:            "No workspace bound to this channel.",
+		LangChinese:            "此频道未绑定工作区。",
+		LangTraditionalChinese: "此頻道未綁定工作區。",
+		LangJapanese:           "このチャンネルにワークスペースがバインドされていません。",
+		LangSpanish:            "No hay workspace vinculado a este canal.",
+	},
+	MsgWsInfo: {
+		LangEnglish:            "Workspace: `%s`\nBound: %s",
+		LangChinese:            "工作区: `%s`\n绑定时间: %s",
+		LangTraditionalChinese: "工作區: `%s`\n綁定時間: %s",
+		LangJapanese:           "ワークスペース: `%s`\nバインド: %s",
+		LangSpanish:            "Workspace: `%s`\nVinculado: %s",
+	},
+	MsgWsInitUsage: {
+		LangEnglish:            "Usage: `/workspace init <git-url>`",
+		LangChinese:            "用法: `/workspace init <git仓库地址>`",
+		LangTraditionalChinese: "用法: `/workspace init <git倉庫地址>`",
+		LangJapanese:           "使い方: `/workspace init <git-url>`",
+		LangSpanish:            "Uso: `/workspace init <git-url>`",
+	},
+	MsgWsBindUsage: {
+		LangEnglish:            "Usage: `/workspace bind <workspace-name>`",
+		LangChinese:            "用法: `/workspace bind <工作区名称>`",
+		LangTraditionalChinese: "用法: `/workspace bind <工作區名稱>`",
+		LangJapanese:           "使い方: `/workspace bind <ワークスペース名>`",
+		LangSpanish:            "Uso: `/workspace bind <nombre-workspace>`",
+	},
+	MsgWsBindSuccess: {
+		LangEnglish:            "✅ Workspace bound: `%s`",
+		LangChinese:            "✅ 工作区绑定成功: `%s`",
+		LangTraditionalChinese: "✅ 工作區綁定成功: `%s`",
+		LangJapanese:           "✅ ワークスペースをバインドしました: `%s`",
+		LangSpanish:            "✅ Workspace vinculado: `%s`",
+	},
+	MsgWsBindNotFound: {
+		LangEnglish:            "Workspace not found: `%s`",
+		LangChinese:            "工作区不存在: `%s`",
+		LangTraditionalChinese: "工作區不存在: `%s`",
+		LangJapanese:           "ワークスペースが見つかりません: `%s`",
+		LangSpanish:            "Workspace no encontrado: `%s`",
+	},
+	MsgWsUnbindSuccess: {
+		LangEnglish:            "✅ Workspace unbound.",
+		LangChinese:            "✅ 已解除工作区绑定。",
+		LangTraditionalChinese: "✅ 已解除工作區綁定。",
+		LangJapanese:           "✅ ワークスペースのバインドを解除しました。",
+		LangSpanish:            "✅ Workspace desvinculado.",
+	},
+	MsgWsListEmpty: {
+		LangEnglish:            "No workspaces bound.",
+		LangChinese:            "没有绑定的工作区。",
+		LangTraditionalChinese: "沒有綁定的工作區。",
+		LangJapanese:           "バインドされたワークスペースがありません。",
+		LangSpanish:            "No hay workspaces vinculados.",
+	},
+	MsgWsListTitle: {
+		LangEnglish:            "Bound workspaces:",
+		LangChinese:            "已绑定的工作区：",
+		LangTraditionalChinese: "已綁定的工作區：",
+		LangJapanese:           "バインドされたワークスペース：",
+		LangSpanish:            "Workspaces vinculados:",
+	},
+	MsgWsNotFoundHint: {
+		LangEnglish:            "No workspace found for this channel. Send me a git repo URL to clone, or use `/workspace init <url>`.",
+		LangChinese:            "此频道未找到工作区。请发送 git 仓库地址进行克隆，或使用 `/workspace init <仓库地址>`。",
+		LangTraditionalChinese: "此頻道未找到工作區。請發送 git 倉庫地址進行克隆，或使用 `/workspace init <倉庫地址>`。",
+		LangJapanese:           "このチャンネルにワークスペースが見つかりません。gitリポジトリURLを送信するか、`/workspace init <url>` を使用してください。",
+		LangSpanish:            "No se encontró workspace para este canal. Envía una URL de repo git para clonar, o usa `/workspace init <url>`.",
+	},
+	MsgWsResolutionError: {
+		LangEnglish:            "Workspace resolution error: %v",
+		LangChinese:            "工作区解析错误: %v",
+		LangTraditionalChinese: "工作區解析錯誤: %v",
+		LangJapanese:           "ワークスペース解決エラー: %v",
+		LangSpanish:            "Error de resolución de workspace: %v",
+	},
+	MsgWsCloneProgress: {
+		LangEnglish:            "🔄 Cloning repository: %s",
+		LangChinese:            "🔄 正在克隆仓库: %s",
+		LangTraditionalChinese: "🔄 正在克隆倉庫: %s",
+		LangJapanese:           "🔄 リポジトリをクローン中: %s",
+		LangSpanish:            "🔄 Clonando repositorio: %s",
+	},
+	MsgWsCloneSuccess: {
+		LangEnglish:            "✅ Repository cloned successfully: `%s`",
+		LangChinese:            "✅ 仓库克隆成功: `%s`",
+		LangTraditionalChinese: "✅ 倉庫克隆成功: `%s`",
+		LangJapanese:           "✅ リポジトリのクローンに成功しました: `%s`",
+		LangSpanish:            "✅ Repositorio clonado exitosamente: `%s`",
+	},
+	MsgWsCloneFailed: {
+		LangEnglish:            "❌ Failed to clone repository: %v",
+		LangChinese:            "❌ 克隆仓库失败: %v",
+		LangTraditionalChinese: "❌ 克隆倉庫失敗: %v",
+		LangJapanese:           "❌ リポジトリのクローンに失敗しました: %v",
+		LangSpanish:            "❌ Error al clonar repositorio: %v",
 	},
 }
 
