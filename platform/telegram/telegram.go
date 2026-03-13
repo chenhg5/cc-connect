@@ -484,7 +484,7 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 		return fmt.Errorf("telegram: invalid reply context type %T", rctx)
 	}
 
-	html := core.MarkdownToTelegramHTML(content)
+	html := core.MarkdownToSimpleHTML(content)
 	reply := tgbotapi.NewMessage(rc.chatID, html)
 	reply.ReplyToMessageID = rc.messageID
 	reply.ParseMode = tgbotapi.ModeHTML
@@ -509,7 +509,7 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 		return fmt.Errorf("telegram: invalid reply context type %T", rctx)
 	}
 
-	html := core.MarkdownToTelegramHTML(content)
+	html := core.MarkdownToSimpleHTML(content)
 	msg := tgbotapi.NewMessage(rc.chatID, html)
 	msg.ParseMode = tgbotapi.ModeHTML
 
@@ -542,7 +542,7 @@ func (p *Platform) SendWithButtons(ctx context.Context, rctx any, content string
 		rows = append(rows, btns)
 	}
 
-	html := core.MarkdownToTelegramHTML(content)
+	html := core.MarkdownToSimpleHTML(content)
 	msg := tgbotapi.NewMessage(rc.chatID, html)
 	msg.ParseMode = tgbotapi.ModeHTML
 	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(rows...)
@@ -633,7 +633,7 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 		return fmt.Errorf("telegram: invalid preview handle type %T", previewHandle)
 	}
 
-	html := core.MarkdownToTelegramHTML(content)
+	html := core.MarkdownToSimpleHTML(content)
 	slog.Debug("telegram: UpdateMessage",
 		"content_len", len(content), "html_len", len(html),
 		"content_prefix", truncateForLog(content, 80),

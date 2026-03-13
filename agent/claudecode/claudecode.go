@@ -101,7 +101,9 @@ func normalizePermissionMode(raw string) string {
 	}
 }
 
-func (a *Agent) Name() string { return "claudecode" }
+func (a *Agent) Name() string           { return "claudecode" }
+func (a *Agent) CLIBinaryName() string  { return "claude" }
+func (a *Agent) CLIDisplayName() string { return "Claude" }
 
 func (a *Agent) SetModel(model string) {
 	a.mu.Lock()
