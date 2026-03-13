@@ -434,7 +434,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 			slog.Error(p.tag()+": failed to parse text content", "error", err)
 			return nil
 		}
-		text := stripMentions(textBody.Text, msg.Mentions)
+		text := stripMentions(textBody.Text, msg.Mentions, p.botOpenID)
 		if text == "" {
 			return nil
 		}
@@ -496,7 +496,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 
 	case "post":
 		textParts, images := p.parsePostContent(messageID, *msg.Content)
-		text := stripMentions(strings.Join(textParts, "\n"), msg.Mentions)
+		text := stripMentions(strings.Join(textParts, "\n"), msg.Mentions, p.botOpenID)
 		if text == "" && len(images) == 0 {
 			return nil
 		}
@@ -970,14 +970,22 @@ func isBotMentioned(mentions []*larkim.MentionEvent, botOpenID string) bool {
 	return false
 }
 
-// stripMentions removes @mention placeholders (e.g. @_user_1) from text
-// so that group-chat messages like "@Bot /help" become "/help".
-func stripMentions(text string, mentions []*larkim.MentionEvent) string {
+// stripMentions processes @mention placeholders (e.g. @_user_1) in text.
+// The bot's own mention is removed; other user mentions are replaced with
+// their display name so the agent can see who was referenced.
+func stripMentions(text string, mentions []*larkim.MentionEvent, botOpenID string) string {
 	if len(mentions) == 0 {
 		return text
 	}
 	for _, m := range mentions {
-		if m.Key != nil {
+		if m.Key == nil {
+			continue
+		}
+		if botOpenID != "" && m.Id != nil && m.Id.OpenId != nil && *m.Id.OpenId == botOpenID {
+			text = strings.ReplaceAll(text, *m.Key, "")
+		} else if m.Name != nil && *m.Name != "" {
+			text = strings.ReplaceAll(text, *m.Key, "@"+*m.Name)
+		} else {
 			text = strings.ReplaceAll(text, *m.Key, "")
 		}
 	}
