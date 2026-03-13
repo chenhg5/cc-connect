@@ -32,8 +32,6 @@ cc-connect bridges AI agents running on your machine to the messaging platforms 
 
 ### Why cc-connect?
 
-> Time to uninstall OpenClaw — cc-connect gives you access to the most powerful AI agents available, not just one.
-
 - **7 AI Agents** — Claude Code, Codex, Cursor Agent, Qoder CLI, Gemini CLI, OpenCode, iFlow CLI. Use whichever fits your workflow, or all of them at once.
 - **9 Chat Platforms** — Feishu, DingTalk, Slack, Telegram, Discord, WeChat Work, LINE, QQ, QQ Bot (Official). Most need zero public IP.
 - **Multi-Bot Relay** — Bind multiple bots in a group chat and let them communicate with each other. Ask Claude, get insights from Gemini — all in one conversation.
