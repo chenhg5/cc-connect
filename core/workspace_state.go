@@ -1,9 +1,27 @@
 package core
 
 import (
+	"log/slog"
+	"path/filepath"
 	"sync"
 	"time"
 )
+
+// normalizeWorkspacePath cleans and resolves a workspace path to prevent
+// mismatches caused by trailing slashes, symlinks, or relative segments.
+// If the path cannot be resolved (e.g. doesn't exist yet), falls back to
+// filepath.Clean only.
+func normalizeWorkspacePath(path string) string {
+	cleaned := filepath.Clean(path)
+	resolved, err := filepath.EvalSymlinks(cleaned)
+	if err != nil {
+		return cleaned
+	}
+	if resolved != path {
+		slog.Debug("workspace path normalized", "original", path, "normalized", resolved)
+	}
+	return resolved
+}
 
 // workspaceState holds the runtime state for a single workspace.
 type workspaceState struct {

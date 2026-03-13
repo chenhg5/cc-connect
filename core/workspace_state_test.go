@@ -1,6 +1,8 @@
 package core
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -47,6 +49,39 @@ func TestWorkspacePool_ReapIdle(t *testing.T) {
 
 	if s := pool.Get("/workspace/a"); s != nil {
 		t.Error("expected workspace removed after reap")
+	}
+}
+
+func TestNormalizeWorkspacePath(t *testing.T) {
+	tmp := t.TempDir()
+	realDir := filepath.Join(tmp, "real-project")
+	if err := os.Mkdir(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	symlink := filepath.Join(tmp, "link-project")
+	if err := os.Symlink(realDir, symlink); err != nil {
+		t.Skip("symlinks not supported")
+	}
+
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"trailing slash", realDir + "/", realDir},
+		{"double slash", filepath.Join(tmp, "real-project") + "//", realDir},
+		{"dot segment", filepath.Join(tmp, ".", "real-project"), realDir},
+		{"dotdot segment", filepath.Join(tmp, "real-project", "subdir", ".."), realDir},
+		{"symlink resolved", symlink, realDir},
+		{"nonexistent uses Clean only", "/nonexistent/path/./foo/../bar", "/nonexistent/path/bar"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeWorkspacePath(tt.input)
+			if got != tt.want {
+				t.Errorf("normalizeWorkspacePath(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
 	}
 }
 
