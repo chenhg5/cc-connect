@@ -3,6 +3,8 @@ package feishu
 import (
 	"strings"
 	"testing"
+
+	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
 func TestExtractPostParts_TextOnly(t *testing.T) {
@@ -209,5 +211,89 @@ func TestParseInlineMarkdown_BoldAndCode(t *testing.T) {
 	}
 	if !hasBold || !hasCode {
 		t.Errorf("expected bold and code, got %v", elements)
+	}
+}
+
+func strPtr(s string) *string { return &s }
+
+func TestStripMentions(t *testing.T) {
+	tests := []struct {
+		name      string
+		text      string
+		mentions  []*larkim.MentionEvent
+		botOpenID string
+		expected  string
+	}{
+		{
+			name:      "no mentions",
+			text:      "hello",
+			mentions:  nil,
+			botOpenID: "",
+			expected:  "hello",
+		},
+		{
+			name: "bot mention removed",
+			text: "@_user_1 /help",
+			mentions: []*larkim.MentionEvent{
+				{Key: strPtr("@_user_1"), Id: &larkim.UserId{OpenId: strPtr("bot123")}, Name: strPtr("Bot")},
+			},
+			botOpenID: "bot123",
+			expected:  "/help",
+		},
+		{
+			name: "non-bot mention replaced with name",
+			text: "assign to @_user_2",
+			mentions: []*larkim.MentionEvent{
+				{Key: strPtr("@_user_2"), Id: &larkim.UserId{OpenId: strPtr("user456")}, Name: strPtr("张三")},
+			},
+			botOpenID: "bot123",
+			expected:  "assign to @张三",
+		},
+		{
+			name: "bot removed and other preserved",
+			text: "@_user_1 assign to @_user_2",
+			mentions: []*larkim.MentionEvent{
+				{Key: strPtr("@_user_1"), Id: &larkim.UserId{OpenId: strPtr("bot123")}, Name: strPtr("Bot")},
+				{Key: strPtr("@_user_2"), Id: &larkim.UserId{OpenId: strPtr("user456")}, Name: strPtr("张三")},
+			},
+			botOpenID: "bot123",
+			expected:  "assign to @张三",
+		},
+		{
+			name: "mention with nil key skipped",
+			text: "@_user_1 hello",
+			mentions: []*larkim.MentionEvent{
+				{Key: nil, Id: &larkim.UserId{OpenId: strPtr("bot123")}},
+			},
+			botOpenID: "bot123",
+			expected:  "@_user_1 hello",
+		},
+		{
+			name: "mention with no name fallback removed",
+			text: "text @_user_3",
+			mentions: []*larkim.MentionEvent{
+				{Key: strPtr("@_user_3"), Id: &larkim.UserId{OpenId: strPtr("user789")}, Name: nil},
+			},
+			botOpenID: "bot123",
+			expected:  "text",
+		},
+		{
+			name: "empty botOpenID all non-named removed",
+			text: "@_user_1 hello",
+			mentions: []*larkim.MentionEvent{
+				{Key: strPtr("@_user_1"), Id: &larkim.UserId{OpenId: strPtr("someone")}},
+			},
+			botOpenID: "",
+			expected:  "hello",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := stripMentions(tt.text, tt.mentions, tt.botOpenID)
+			if got != tt.expected {
+				t.Errorf("stripMentions() = %q, want %q", got, tt.expected)
+			}
+		})
 	}
 }
