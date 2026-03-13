@@ -46,6 +46,7 @@ type Platform struct {
 	handler               core.MessageHandler
 	botID                 string
 	appID                 string
+	readyCh               chan struct{}
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -58,7 +59,14 @@ func New(opts map[string]any) (core.Platform, error) {
 	guildID, _ := opts["guild_id"].(string)
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
-	return &Platform{token: token, allowFrom: allowFrom, guildID: guildID, groupReplyAll: groupReplyAll, shareSessionInChannel: shareSessionInChannel}, nil
+	return &Platform{
+		token:                 token,
+		allowFrom:             allowFrom,
+		guildID:               guildID,
+		groupReplyAll:         groupReplyAll,
+		shareSessionInChannel: shareSessionInChannel,
+		readyCh:               make(chan struct{}),
+	}, nil
 }
 
 func (p *Platform) Name() string { return "discord" }
@@ -156,6 +164,69 @@ func (p *Platform) makeSessionKey(channelID string, userID string) string {
 	}
 }
 
+// RegisterCommands registers bot commands with Telegram for the command menu.
+func (p *Platform) RegisterCommands(commands []core.BotCommandInfo) error {
+	// Wait for Ready event to ensure appID is populated
+	select {
+	case <-p.readyCh:
+	case <-time.After(15 * time.Second):
+		return fmt.Errorf("discord: timed out waiting for Ready event")
+	}
+
+	var cmds []*discordgo.ApplicationCommand
+	for _, c := range commands {
+		if len(c.Command) > 32 {
+			slog.Warn("discord: command name > 32 skip " + c.Command)
+			continue
+		}
+		desc := c.Description
+		if len(desc) > 100 {
+			desc = desc[:97] + "..."
+		}
+		cmds = append(cmds, &discordgo.ApplicationCommand{
+			Name:        c.Command,
+			Description: desc,
+			// A trick to be able to input any args
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionString,
+					Description: "optional args",
+					Name:        "args",
+					Required:    false,
+				},
+			},
+		})
+	}
+
+	// Limit to 200 commands
+	if len(cmds) > 200 {
+		cmds = cmds[:200]
+		slog.Warn("discord: commands > 200, truncate")
+	}
+
+	if len(cmds) == 0 {
+		slog.Debug("discord: no commands to register")
+		return nil
+	}
+
+	registered, err := p.session.ApplicationCommandBulkOverwrite(p.appID, p.guildID, cmds)
+	if err != nil {
+		slog.Error("discord: failed to register slash commands — "+
+			"make sure the bot was invited with BOTH 'bot' AND 'applications.commands' OAuth2 scopes. "+
+			"Re-invite URL: https://discord.com/oauth2/authorize?client_id="+p.appID+
+			"&scope=bot+applications.commands&permissions=2147485696",
+			"error", err, "guild_id", p.guildID)
+		return err
+	}
+	scope := "global (may take up to 1h to appear — set guild_id for instant)"
+	if p.guildID != "" {
+		scope = "guild:" + p.guildID
+	}
+	slog.Info("discord: registered slash commands", "count", len(registered), "scope", scope)
+
+	return nil
+}
+
 func (p *Platform) Start(handler core.MessageHandler) error {
 	p.handler = handler
 
@@ -171,7 +242,11 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		p.botID = r.User.ID
 		p.appID = r.User.ID
 		slog.Info("discord: connected", "bot", r.User.Username+"#"+r.User.Discriminator)
-		go p.registerSlashCommands()
+		select {
+		case <-p.readyCh:
+		default:
+			close(p.readyCh)
+		}
 	})
 
 	session.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
