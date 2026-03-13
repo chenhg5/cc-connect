@@ -1,45 +1,134 @@
-# cc-connect
+<p align="center">
+  <img src="./docs/images/banner.svg" alt="CC-Connect Banner" width="800"/>
+</p>
 
-[![CI](https://github.com/chenhg5/cc-connect/actions/workflows/ci.yml/badge.svg)](https://github.com/chenhg5/cc-connect/actions/workflows/ci.yml)
-[![GitHub release](https://img.shields.io/github/v/release/chenhg5/cc-connect?include_prereleases)](https://github.com/chenhg5/cc-connect/releases)
-[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord)](https://discord.gg/kHpwgaM4kq)
-[![Telegram](https://img.shields.io/badge/Telegram-Group-26A5E4?logo=telegram)](https://t.me/+odGNDhCjbjdmMmZl)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+<p align="center">
+  <a href="https://github.com/chenhg5/cc-connect/actions/workflows/ci.yml">
+    <img src="https://github.com/chenhg5/cc-connect/actions/workflows/ci.yml/badge.svg" alt="CI Status"/>
+  </a>
+  <a href="https://github.com/chenhg5/cc-connect/releases">
+    <img src="https://img.shields.io/github/v/release/chenhg5/cc-connect?include_prereleases" alt="Release"/>
+  </a>
+  <a href="https://www.npmjs.com/package/cc-connect">
+    <img src="https://img.shields.io/npm/dm/cc-connect?logo=npm" alt="npm downloads"/>
+  </a>
+  <a href="https://github.com/chenhg5/cc-connect/blob/main/LICENSE">
+    <img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License"/>
+  </a>
+  <a href="https://goreportcard.com/report/github.com/chenhg5/cc-connect">
+    <img src="https://goreportcard.com/badge/github.com/chenhg5/cc-connect" alt="Go Report Card"/>
+  </a>
+</p>
 
-English | [中文](./README.zh-CN.md)
+<p align="center">
+  <a href="https://discord.gg/kHpwgaM4kq">
+    <img src="https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white" alt="Discord"/>
+  </a>
+  <a href="https://t.me/+odGNDhCjbjdmMmZl">
+    <img src="https://img.shields.io/badge/Telegram-Group-26A5E4?logo=telegram&logoColor=white" alt="Telegram"/>
+  </a>
+</p>
 
-**Control your local AI agents from any chat app. Anywhere, anytime.**
+<p align="center">
+  <a href="./README.md">English</a> | <a href="./README.zh-CN.md">中文</a>
+</p>
 
-cc-connect bridges AI agents running on your machine to the messaging platforms you already use. Code review, research, automation, data analysis — anything an AI agent can do, now accessible from your phone, tablet, or any device with a chat app.
+---
 
+<p align="center">
+  <b>Control your local AI agents from any chat app. Anywhere, anytime.</b>
+</p>
+
+<p align="center">
+  cc-connect bridges AI agents running on your machine to the messaging platforms you already use.<br/>
+  Code review, research, automation, data analysis — anything an AI agent can do,<br/>
+  now accessible from your phone, tablet, or any device with a chat app.
+</p>
+
+```mermaid
+graph TD
+    User[👤 You - Phone / Laptop / Tablet]
+
+    subgraph Platforms["📱 Chat Platforms - 9 Supported"]
+        Feishu["Feishu/Lark"]
+        Slack["Slack"]
+        Telegram["Telegram"]
+        Discord["Discord"]
+        DingTalk["DingTalk"]
+        WeCom["WeChat Work"]
+        LINE["LINE"]
+        QQ["QQ"]
+    end
+
+    CC[cc-connect<br/>Your Dev Machine]
+
+    subgraph Agents["🤖 AI Agents - 7 Supported"]
+        Claude["Claude Code"]
+        Gemini["Gemini CLI"]
+        Codex["Codex"]
+        Cursor["Cursor"]
+        Qoder["Qoder"]
+        OpenCode["OpenCode"]
+        iFlow["iFlow CLI"]
+    end
+
+    User --> Feishu
+    User --> Slack
+    User --> Telegram
+    User --> Discord
+    User --> DingTalk
+    User --> WeCom
+
+    Feishu --> CC
+    Slack --> CC
+    Telegram --> CC
+    Discord --> CC
+    DingTalk --> CC
+    WeCom --> CC
+
+    CC --> Claude
+    CC --> Gemini
+    CC --> Codex
+    CC --> Cursor
+    CC --> Qoder
+
+    style CC fill:#0ea5e9,stroke:#0284c7,color:#fff
+    style Platforms fill:#1e293b,stroke:#334155,color:#94a3b8
+    style Agents fill:#1e293b,stroke:#334155,color:#94a3b8
 ```
-         You (Phone / Laptop / Tablet)
-                    │
-    ┌───────────────┼───────────────┐
-    ▼               ▼               ▼
- Feishu          Slack          Telegram  ...9 platforms
-    │               │               │
-    └───────────────┼───────────────┘
-                    ▼
-              ┌────────────┐
-              │ cc-connect │  ← your dev machine
-              └────────────┘
-              ┌─────┼─────┐
-              ▼     ▼     ▼
-         Claude  Gemini  Codex  ...7 agents
-          Code    CLI   OpenCode / iFlow
-```
 
-### Why cc-connect?
+---
 
-- **7 AI Agents** — Claude Code, Codex, Cursor Agent, Qoder CLI, Gemini CLI, OpenCode, iFlow CLI. Use whichever fits your workflow, or all of them at once.
-- **9 Chat Platforms** — Feishu, DingTalk, Slack, Telegram, Discord, WeChat Work, LINE, QQ, QQ Bot (Official). Most need zero public IP.
-- **Multi-Bot Relay** — Bind multiple bots in a group chat and let them communicate with each other. Ask Claude, get insights from Gemini — all in one conversation.
-- **Full Control from Chat** — Switch models (`/model`), tune reasoning (`/reasoning`), change permission modes (`/mode`), manage sessions, all via slash commands.
-- **Agent Memory** — Read and write agent instruction files (`/memory`) without touching the terminal.
-- **Scheduled Tasks** — Set up cron jobs in natural language. "Every day at 6am, summarize GitHub trending" just works.
-- **Voice & Images** — Send voice messages or screenshots; cc-connect handles STT/TTS and multimodal forwarding.
-- **Multi-Project** — One process, multiple projects, each with its own agent + platform combo.
+## ✨ Why cc-connect?
+
+### 🤖 Universal Agent Support
+**7 AI Agents** — Claude Code, Codex, Cursor Agent, Qoder CLI, Gemini CLI, OpenCode, iFlow CLI. Use whichever fits your workflow, or all of them at once.
+
+### 📱 Platform Flexibility
+**9 Chat Platforms** — Feishu, DingTalk, Slack, Telegram, Discord, WeChat Work, LINE, QQ, QQ Bot (Official). Most need **zero public IP**.
+
+### 🔄 Multi-Agent Orchestration
+**Multi-Bot Relay** — Bind multiple bots in a group chat and let them communicate with each other. Ask Claude, get insights from Gemini — all in one conversation.
+
+### 🎮 Complete Chat Control
+**Full Control from Chat** — Switch models (`/model`), tune reasoning (`/reasoning`), change permission modes (`/mode`), manage sessions, all via slash commands.
+
+### 🧠 Persistent Memory
+**Agent Memory** — Read and write agent instruction files (`/memory`) without touching the terminal.
+
+### ⏰ Intelligent Scheduling
+**Scheduled Tasks** — Set up cron jobs in natural language. *"Every day at 6am, summarize GitHub trending"* just works.
+
+### 🎤 Multimodal Support
+**Voice & Images** — Send voice messages or screenshots; cc-connect handles STT/TTS and multimodal forwarding.
+
+### 📦 Multi-Project Architecture
+**Multi-Project** — One process, multiple projects, each with its own agent + platform combo.
+
+### 🌍 Multilingual Interface
+**5 Languages** — Native support for English, Chinese (Simplified & Traditional), Japanese, and Spanish. Built-in i18n ensures everyone feels at home.
+
+---
 
 <p align="center">
   <img src="docs/images/screenshot/cc-connect-lark.JPG" alt="飞书" width="32%" />
@@ -50,17 +139,29 @@ cc-connect bridges AI agents running on your machine to the messaging platforms 
   <em>Left：Lark &nbsp;|&nbsp; Telegram &nbsp;|&nbsp; Right：Wechat</em>
 </p>
 
-## Quick Start
+---
 
-### Install & Configure via AI Agent (Recommended)
+## 🚀 Quick Start
 
-Send this to Claude Code or any AI coding agent, and it will handle the entire installation and configuration for you:
+### 🤖 Install & Configure via AI Agent (Recommended)
 
+> **The easiest way** — Send this to Claude Code or any AI coding agent, and it will handle the entire installation and configuration for you:
+
+```bash
+Follow https://raw.githubusercontent.com/chenhg5/cc-connect/refs/heads/main/INSTALL.md to install and configure cc-connect.
+
+IMPORTANT: Use interactive tools (like AskUserQuestion) to guide me through configuration choices:
+- Agent selection (Claude Code, Cursor, Gemini, etc.)
+- Platform selection (Feishu, Telegram, Discord, etc.)
+- API keys and authentication tokens
+- Project paths and preferences
+
+Don't guess values—always ask me to choose via interactive prompts.
 ```
-Please refer to https://raw.githubusercontent.com/chenhg5/cc-connect/refs/heads/main/INSTALL.md to help me install and configure cc-connect
-```
 
-### Manual Install
+---
+
+### 📦 Manual Install
 
 **Via npm:**
 
@@ -92,7 +193,9 @@ cd cc-connect
 make build
 ```
 
-### Configure
+---
+
+### ⚙️ Configure
 
 ```bash
 mkdir -p ~/.cc-connect
@@ -100,13 +203,17 @@ cp config.example.toml ~/.cc-connect/config.toml
 vim ~/.cc-connect/config.toml
 ```
 
-### Run
+---
+
+### ▶️ Run
 
 ```bash
 ./cc-connect
 ```
 
-### Upgrade
+---
+
+### 🔄 Upgrade
 
 ```bash
 # npm
@@ -117,7 +224,9 @@ cc-connect update           # Stable
 cc-connect update --pre     # Beta (includes pre-releases)
 ```
 
-## Support Matrix
+---
+
+## 📊 Support Matrix
 
 | Component | Type | Status |
 |-----------|------|--------|
@@ -140,7 +249,9 @@ cc-connect update --pre     # Beta (includes pre-releases)
 | Platform | QQ (NapCat/OneBot) | ✅ WebSocket — Beta |
 | Platform | QQ Bot (Official) | ✅ WebSocket — no public IP needed |
 
-## Platform Setup Guides
+---
+
+## 📖 Platform Setup Guides
 
 | Platform | Guide | Connection | Public IP? |
 |----------|-------|------------|------------|
@@ -152,9 +263,11 @@ cc-connect update --pre     # Beta (includes pre-releases)
 | WeChat Work | [docs/wecom.md](docs/wecom.md) | WebSocket / Webhook | No (WS) / Yes (Webhook) |
 | QQ / QQ Bot | [docs/qq.md](docs/qq.md) | WebSocket | No |
 
-## Key Features
+---
 
-### Session Management
+## 🎯 Key Features
+
+### 💬 Session Management
 
 ```
 /new [name]       Start a new session
@@ -163,7 +276,9 @@ cc-connect update --pre     # Beta (includes pre-releases)
 /current          Show current session
 ```
 
-### Permission Modes
+---
+
+### 🔐 Permission Modes
 
 ```
 /mode             Show available modes
@@ -171,39 +286,51 @@ cc-connect update --pre     # Beta (includes pre-releases)
 /mode default     # Ask for each tool
 ```
 
-### Provider Management
+---
+
+### 🔄 Provider Management
 
 ```
 /provider list              List providers
 /provider switch <name>     Switch API provider at runtime
 ```
 
-### Scheduled Tasks
+---
 
-```
+### ⏰ Scheduled Tasks
+
+```bash
 /cron add 0 6 * * * Summarize GitHub trending
 ```
 
 📖 **Full documentation:** [docs/usage.md](docs/usage.md)
 
-## Documentation
+---
+
+## 📚 Documentation
 
 - [Usage Guide](docs/usage.md) — Complete feature documentation
 - [INSTALL.md](INSTALL.md) — AI-agent-friendly installation guide
 - [config.example.toml](config.example.toml) — Configuration template
 
-## Community
+---
+
+## 👥 Community
 
 - [Discord](https://discord.gg/kHpwgaM4kq)
 - [Telegram](https://t.me/+odGNDhCjbjdmMmZl)
 
-## Contributors
+---
+
+## 🙏 Contributors
 
 <a href="https://github.com/chenhg5/cc-connect/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=chenhg5/cc-connect" />
+  <img src="https://contrib.rocks/image?repo=chenhg5/cc-connect&v=20250313" />
 </a>
 
-## Star History
+---
+
+## ⭐ Star History
 
 <a href="https://www.star-history.com/#chenhg5/cc-connect&Date">
  <picture>
@@ -213,6 +340,14 @@ cc-connect update --pre     # Beta (includes pre-releases)
  </picture>
 </a>
 
-## License
+---
 
-MIT
+## 📄 License
+
+MIT License
+
+---
+
+<p align="center">
+  <sub>Built with ❤️ by the cc-connect community</sub>
+</p>

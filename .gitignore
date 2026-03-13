@@ -1,14 +1,124 @@
+# ============================================================================
+# Binary outputs
+# ============================================================================
 /cc-connect
-config.toml
-.cc-connect/
 *.exe
+*.exe~
 *.dll
 *.so
 *.dylib
+*.test
+*.out
+
+# ============================================================================
+# Go workspace & tooling
+# ============================================================================
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+coverage.html
+coverage.txt
+*.out
+
+# Go workspace files (go.work)
+go.work
+go.work.sum
+
+# Go module environment (local proxy settings)
+go.env
+
+# Dependency directories
+vendor/
+
+# ============================================================================
+# Project-specific
+# ============================================================================
+# Runtime configuration (contains secrets)
+config.toml
 .env
-.DS_Store
-dist
-test
-RELEASE.md
+*.local.toml
+
+# CC-Connect runtime state
+.cc-connect/
+
+# npm (for npm package distribution)
 .npmrc
-scripts
+package-lock.json
+
+# ============================================================================
+# Build & distribution
+# ============================================================================
+dist/
+build/
+bin/
+release/
+
+# ============================================================================
+# Testing & temporary files
+# ============================================================================
+test/
+scripts/
+tmp/
+temp/
+*.tmp
+*.swp
+*.swo
+*~
+*.pid
+*.log
+
+# ============================================================================
+# IDE & Editor
+# ============================================================================
+.vscode/
+.idea/
+*.iml
+*.ipr
+*.iws
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Emacs
+*~
+\#*\#
+.\#*
+
+# Vim
+*.swp
+*.swo
+*.swn
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# ============================================================================
+# Documentation (drafts)
+# ============================================================================
+RELEASE.md
+DRAFTS.md
+NOTES.md
+
+# ============================================================================
+# System
+# ============================================================================
+# Thumbs.db on Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ============================================================================
+# Security
+# ============================================================================
+# Never commit secrets or credentials
+*.key
+*.pem
+*.p12
+*.pfx
+secrets/
+credentials/
