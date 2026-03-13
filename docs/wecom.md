@@ -4,14 +4,108 @@
 
 > 💡 **特色功能**：配置完成后，**个人微信用户也可以直接对话** —— 只需在企业微信管理后台关联微信插件即可。
 
-## 前置要求
+企业微信支持两种接入模式：
+
+| 模式 | 优势 | 要求 |
+|------|------|------|
+| **WebSocket 长连接**（推荐） | 无需公网 URL、无需消息加解密、无需 IP 白名单 | 创建「智能机器人」 |
+| **Webhook 回调** | 支持图片/语音消息、Markdown 格式 | 公网 URL + 可信 IP |
+
+---
+
+## 模式一：WebSocket 长连接（推荐）
+
+企业微信「智能机器人」支持 WebSocket 长连接模式，cc-connect 主动连接企业微信服务器，无需公网 URL、无需消息加解密、无需 IP 白名单，配置最简单。
+
+### 前置要求
+
+- 企业微信管理员权限
+- 一台可运行 cc-connect 的服务器（**无需公网 IP**）
+- Claude Code 已安装并配置完成
+
+### 第一步：创建智能机器人
+
+1. 登录 [企业微信管理后台](https://work.weixin.qq.com/wework_admin/frame)
+2. 进入 **应用管理** → **智能机器人** → **创建智能机器人**
+3. 填写机器人信息（名称、头像等）
+4. 创建完成后，记录以下凭证：
+
+```
+BotID:  xxxxxxxxxxxxxxxx
+Secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+> ⚠️ Secret 只会显示一次，请立即保存！
+
+### 第二步：配置 cc-connect
+
+将凭证配置到 `config.toml` 中：
+
+```toml
+[[projects]]
+name = "my-project"
+
+[projects.agent]
+type = "claudecode"
+
+[projects.agent.options]
+work_dir = "/path/to/your/project"
+mode = "default"
+
+[[projects.platforms]]
+type = "wecom"
+
+[projects.platforms.options]
+mode = "websocket"
+bot_id = "your-bot-id"
+bot_secret = "your-bot-secret"
+allow_from = "*"
+```
+
+#### 配置项说明
+
+| 配置项 | 必填 | 说明 |
+|--------|------|------|
+| `mode` | ✅ | 必须为 `"websocket"` |
+| `bot_id` | ✅ | 智能机器人 BotID |
+| `bot_secret` | ✅ | 智能机器人 Secret |
+| `allow_from` | ❌ | 允许的用户 ID（默认 `"*"` 允许所有） |
+
+### 第三步：启动并验证
+
+```bash
+cc-connect
+```
+
+你应该看到类似日志：
+
+```
+level=INFO msg="wecom-ws: connecting" endpoint=wss://openws.work.weixin.qq.com
+level=INFO msg="wecom-ws: subscribed successfully" bot_id=your-bot-id
+```
+
+在企业微信中找到你的机器人，发送一条消息测试即可。
+
+### 技术细节
+
+- **连接地址**：`wss://openws.work.weixin.qq.com`
+- **认证方式**：连接后发送 `aibot_subscribe`（bot_id + secret）
+- **心跳**：每 30 秒发送 `ping`
+- **自动重连**：连接断开后指数退避重连（1s → 2s → 4s → ... → 30s max）
+- **限制**：同一机器人仅支持 1 个长连接；30 条/分钟、1000 条/小时
+
+---
+
+## 模式二：Webhook 回调
+
+> 💡 如果你不需要图片/语音消息或 Markdown 格式，推荐使用上方的 WebSocket 长连接模式，配置更简单。
+
+### 前置要求
 
 - 企业微信管理员权限
 - 一台可运行 cc-connect 的服务器
 - **公网可访问的 URL**（用于接收企业微信回调）
 - Claude Code 已安装并配置完成
-
-> ⚠️ **注意**：企业微信不支持长连接模式，需要公网可访问的回调 URL。推荐使用 cloudflared tunnel 或 ngrok。
 
 ---
 

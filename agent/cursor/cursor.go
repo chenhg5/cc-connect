@@ -94,7 +94,61 @@ func (a *Agent) GetModel() string {
 	return a.model
 }
 
-func (a *Agent) AvailableModels(_ context.Context) []core.ModelOption {
+func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
+	a.mu.Lock()
+	cmd := a.cmd
+	extraEnv := a.providerEnvLocked()
+	extraEnv = append(extraEnv, a.sessionEnv...)
+	a.mu.Unlock()
+
+	if models := fetchModelsFromAgentCLI(ctx, cmd, extraEnv); len(models) > 0 {
+		return models
+	}
+	return cursorFallbackModels()
+}
+
+// fetchModelsFromAgentCLI runs `agent models` and parses the output.
+// Output format: "model-id - Display Name  (current)" or "model-id - Display Name"
+func fetchModelsFromAgentCLI(ctx context.Context, cmd string, extraEnv []string) []core.ModelOption {
+	c := exec.CommandContext(ctx, cmd, "models")
+	c.Env = append(os.Environ(), extraEnv...)
+	out, err := c.Output()
+	if err != nil {
+		slog.Debug("cursor: agent models failed", "error", err)
+		return nil
+	}
+
+	var models []core.ModelOption
+	seen := make(map[string]struct{})
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || line == "Available models" || strings.HasPrefix(line, "Tip:") {
+			continue
+		}
+		idx := strings.Index(line, " - ")
+		if idx < 0 {
+			continue
+		}
+		name := strings.TrimSpace(line[:idx])
+		desc := strings.TrimSpace(line[idx+3:])
+		if name == "" {
+			continue
+		}
+		// Remove trailing markers like "(current)", "(default)"
+		desc = strings.TrimSuffix(desc, " (current)")
+		desc = strings.TrimSuffix(desc, " (default)")
+		desc = strings.TrimSpace(desc)
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		models = append(models, core.ModelOption{Name: name, Desc: desc})
+	}
+	sort.Slice(models, func(i, j int) bool { return models[i].Name < models[j].Name })
+	return models
+}
+
+func cursorFallbackModels() []core.ModelOption {
 	return []core.ModelOption{
 		{Name: "claude-sonnet-4-20250514", Desc: "Claude Sonnet 4"},
 		{Name: "claude-opus-4-20250514", Desc: "Claude Opus 4"},
