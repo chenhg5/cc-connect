@@ -78,6 +78,10 @@ This sends a message to the target bot and waits for its response (printed to st
 The conversation is visible in the group chat and each bot maintains its own relay session.
 
 Environment variables CC_PROJECT and CC_SESSION_KEY are already set, so the relay knows which group chat to use.
+
+## Context awareness
+At the end of every message you send, append your estimate of your context window consumption as: [ctx: ~XX%]
+This helps the user decide when to run /compact. Be honest — if you're unsure, estimate conservatively.
 `
 }
 
