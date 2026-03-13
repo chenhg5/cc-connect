@@ -1196,7 +1196,7 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 		}
 	}
 
-	agent, err := CreateAgent("claudecode", opts)
+	agent, err := CreateAgent(e.agent.Name(), opts)
 	if err != nil {
 		return nil, nil, fmt.Errorf("create workspace agent for %s: %w", workspace, err)
 	}
@@ -2458,7 +2458,7 @@ func (e *Engine) cmdUsage(p Platform, msg *Message) {
 		return
 	}
 
-	if p.Name() == "feishu" && supportsCards(p) {
+	if supportsCards(p) {
 		e.replyWithCard(p, msg.ReplyCtx, e.renderUsageCard(report))
 		return
 	}
@@ -3017,7 +3017,7 @@ func (e *Engine) cmdHelp(p Platform, msg *Message) {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHelp))
 		return
 	}
-	e.replyWithCard(p, msg.ReplyCtx, e.renderHelpCardForPlatform(p.Name()))
+	e.replyWithCard(p, msg.ReplyCtx, e.renderHelpCard())
 }
 
 const defaultHelpGroup = "session"
@@ -3091,15 +3091,13 @@ func helpCardGroups() []helpCardGroup {
 }
 
 func (e *Engine) renderHelpCard() *Card {
-	return e.renderHelpCardForPlatform("")
+	return e.renderHelpGroupCard(defaultHelpGroup)
 }
 
-func (e *Engine) renderHelpCardForPlatform(platform string) *Card {
-	return e.renderHelpGroupCardForPlatform(platform, defaultHelpGroup)
-}
-
-func splitHelpTabRows(platform string, tabs []CardButton) [][]CardButton {
-	if strings.EqualFold(strings.TrimSpace(platform), "feishu") {
+// splitHelpTabRows splits tab buttons into rows. Card-based platforms
+// get 2 buttons per row for better layout; others get all in one row.
+func splitHelpTabRows(useMultiRow bool, tabs []CardButton) [][]CardButton {
+	if useMultiRow {
 		rows := make([][]CardButton, 0, (len(tabs)+1)/2)
 		for i := 0; i < len(tabs); i += 2 {
 			end := i + 2
@@ -3113,7 +3111,7 @@ func splitHelpTabRows(platform string, tabs []CardButton) [][]CardButton {
 	return [][]CardButton{tabs}
 }
 
-func (e *Engine) renderHelpGroupCardForPlatform(platform string, groupKey string) *Card {
+func (e *Engine) renderHelpGroupCard(groupKey string) *Card {
 	sectionTitle := func(key MsgKey) string {
 		section := e.i18n.T(key)
 		if idx := strings.IndexByte(section, '\n'); idx >= 0 {
@@ -3147,7 +3145,7 @@ func (e *Engine) renderHelpGroupCardForPlatform(platform string, groupKey string
 		}
 		tabs = append(tabs, Btn(tabLabel(group.titleKey), btnType, "nav:/help "+group.key))
 	}
-	for _, row := range splitHelpTabRows(platform, tabs) {
+	for _, row := range splitHelpTabRows(true, tabs) {
 		cb.ButtonsEqual(row...)
 	}
 	for _, item := range current.items {
@@ -4267,13 +4265,7 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 
 	switch cmd {
 	case "/help":
-		platform := ""
-		if sessionKey != "" {
-			if p, _, err := parseSessionKeyParts(sessionKey); err == nil {
-				platform = p
-			}
-		}
-		return e.renderHelpGroupCardForPlatform(platform, args)
+		return e.renderHelpGroupCard(args)
 	case "/model":
 		return e.renderModelCard()
 	case "/reasoning":

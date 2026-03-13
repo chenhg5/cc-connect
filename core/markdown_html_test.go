@@ -6,37 +6,37 @@ import (
 	"testing"
 )
 
-func TestMarkdownToTelegramHTML_Bold(t *testing.T) {
-	out := MarkdownToTelegramHTML("hello **world**")
+func TestMarkdownToSimpleHTML_Bold(t *testing.T) {
+	out := MarkdownToSimpleHTML("hello **world**")
 	if !strings.Contains(out, "<b>world</b>") {
 		t.Errorf("expected <b>world</b>, got %q", out)
 	}
 }
 
-func TestMarkdownToTelegramHTML_Italic(t *testing.T) {
-	out := MarkdownToTelegramHTML("hello *world*")
+func TestMarkdownToSimpleHTML_Italic(t *testing.T) {
+	out := MarkdownToSimpleHTML("hello *world*")
 	if !strings.Contains(out, "<i>world</i>") {
 		t.Errorf("expected <i>world</i>, got %q", out)
 	}
 }
 
-func TestMarkdownToTelegramHTML_Strikethrough(t *testing.T) {
-	out := MarkdownToTelegramHTML("hello ~~world~~")
+func TestMarkdownToSimpleHTML_Strikethrough(t *testing.T) {
+	out := MarkdownToSimpleHTML("hello ~~world~~")
 	if !strings.Contains(out, "<s>world</s>") {
 		t.Errorf("expected <s>world</s>, got %q", out)
 	}
 }
 
-func TestMarkdownToTelegramHTML_InlineCode(t *testing.T) {
-	out := MarkdownToTelegramHTML("run `echo hello`")
+func TestMarkdownToSimpleHTML_InlineCode(t *testing.T) {
+	out := MarkdownToSimpleHTML("run `echo hello`")
 	if !strings.Contains(out, "<code>echo hello</code>") {
 		t.Errorf("expected <code>echo hello</code>, got %q", out)
 	}
 }
 
-func TestMarkdownToTelegramHTML_CodeBlock(t *testing.T) {
+func TestMarkdownToSimpleHTML_CodeBlock(t *testing.T) {
 	md := "```go\nfmt.Println()\n```"
-	out := MarkdownToTelegramHTML(md)
+	out := MarkdownToSimpleHTML(md)
 	if !strings.Contains(out, `<pre><code class="language-go">`) {
 		t.Errorf("expected language-go code block, got %q", out)
 	}
@@ -45,43 +45,43 @@ func TestMarkdownToTelegramHTML_CodeBlock(t *testing.T) {
 	}
 }
 
-func TestMarkdownToTelegramHTML_Link(t *testing.T) {
-	out := MarkdownToTelegramHTML("visit [Google](https://google.com)")
+func TestMarkdownToSimpleHTML_Link(t *testing.T) {
+	out := MarkdownToSimpleHTML("visit [Google](https://google.com)")
 	if !strings.Contains(out, `<a href="https://google.com">Google</a>`) {
 		t.Errorf("expected link HTML, got %q", out)
 	}
 }
 
-func TestMarkdownToTelegramHTML_Heading(t *testing.T) {
-	out := MarkdownToTelegramHTML("## Section Title")
+func TestMarkdownToSimpleHTML_Heading(t *testing.T) {
+	out := MarkdownToSimpleHTML("## Section Title")
 	if !strings.Contains(out, "<b>Section Title</b>") {
 		t.Errorf("expected heading as bold, got %q", out)
 	}
 }
 
-func TestMarkdownToTelegramHTML_Blockquote(t *testing.T) {
-	out := MarkdownToTelegramHTML("> quoted text")
+func TestMarkdownToSimpleHTML_Blockquote(t *testing.T) {
+	out := MarkdownToSimpleHTML("> quoted text")
 	if !strings.Contains(out, "<blockquote>quoted text</blockquote>") {
 		t.Errorf("expected blockquote, got %q", out)
 	}
 }
 
-func TestMarkdownToTelegramHTML_EscapesHTML(t *testing.T) {
-	out := MarkdownToTelegramHTML("x < y && y > z")
+func TestMarkdownToSimpleHTML_EscapesHTML(t *testing.T) {
+	out := MarkdownToSimpleHTML("x < y && y > z")
 	if !strings.Contains(out, "&lt;") || !strings.Contains(out, "&gt;") || !strings.Contains(out, "&amp;") {
 		t.Errorf("HTML special chars should be escaped, got %q", out)
 	}
 }
 
-func TestMarkdownToTelegramHTML_EscapesInsideBold(t *testing.T) {
-	out := MarkdownToTelegramHTML("**x < y**")
+func TestMarkdownToSimpleHTML_EscapesInsideBold(t *testing.T) {
+	out := MarkdownToSimpleHTML("**x < y**")
 	if !strings.Contains(out, "<b>x &lt; y</b>") {
 		t.Errorf("expected escaped content inside bold, got %q", out)
 	}
 }
 
-func TestMarkdownToTelegramHTML_LinkWithAmpersand(t *testing.T) {
-	out := MarkdownToTelegramHTML("click [here](https://example.com?a=1&b=2)")
+func TestMarkdownToSimpleHTML_LinkWithAmpersand(t *testing.T) {
+	out := MarkdownToSimpleHTML("click [here](https://example.com?a=1&b=2)")
 	if !strings.Contains(out, "&amp;b=2") {
 		t.Errorf("URL ampersand should be escaped, got %q", out)
 	}
@@ -90,8 +90,8 @@ func TestMarkdownToTelegramHTML_LinkWithAmpersand(t *testing.T) {
 	}
 }
 
-func TestMarkdownToTelegramHTML_LinkWithQuotesInURL(t *testing.T) {
-	out := MarkdownToTelegramHTML(`visit [book](https://example.com/q="test")`)
+func TestMarkdownToSimpleHTML_LinkWithQuotesInURL(t *testing.T) {
+	out := MarkdownToSimpleHTML(`visit [book](https://example.com/q="test")`)
 	if strings.Contains(out, `href="https://example.com/q="`) {
 		t.Errorf("unescaped quote in href attribute, got %q", out)
 	}
@@ -103,8 +103,8 @@ func TestMarkdownToTelegramHTML_LinkWithQuotesInURL(t *testing.T) {
 	}
 }
 
-func TestMarkdownToTelegramHTML_EscapesQuotesInText(t *testing.T) {
-	out := MarkdownToTelegramHTML(`He said "hello" world`)
+func TestMarkdownToSimpleHTML_EscapesQuotesInText(t *testing.T) {
+	out := MarkdownToSimpleHTML(`He said "hello" world`)
 	if strings.Contains(out, `"hello"`) {
 		t.Errorf("quotes in text should be escaped, got %q", out)
 	}
@@ -113,23 +113,23 @@ func TestMarkdownToTelegramHTML_EscapesQuotesInText(t *testing.T) {
 	}
 }
 
-func TestMarkdownToTelegramHTML_CodeBlockEscapesHTML(t *testing.T) {
+func TestMarkdownToSimpleHTML_CodeBlockEscapesHTML(t *testing.T) {
 	md := "```\nif a < b && c > d {\n}\n```"
-	out := MarkdownToTelegramHTML(md)
+	out := MarkdownToSimpleHTML(md)
 	if !strings.Contains(out, "&lt;") || !strings.Contains(out, "&gt;") {
 		t.Errorf("code block content should be HTML-escaped, got %q", out)
 	}
 }
 
-func TestMarkdownToTelegramHTML_InlineCodeEscapesHTML(t *testing.T) {
-	out := MarkdownToTelegramHTML("run `x<y>z`")
+func TestMarkdownToSimpleHTML_InlineCodeEscapesHTML(t *testing.T) {
+	out := MarkdownToSimpleHTML("run `x<y>z`")
 	if !strings.Contains(out, "<code>x&lt;y&gt;z</code>") {
 		t.Errorf("inline code should escape HTML, got %q", out)
 	}
 }
 
-func TestMarkdownToTelegramHTML_MixedFormattingWithSpecialChars(t *testing.T) {
-	out := MarkdownToTelegramHTML("**bold** & *italic* < normal")
+func TestMarkdownToSimpleHTML_MixedFormattingWithSpecialChars(t *testing.T) {
+	out := MarkdownToSimpleHTML("**bold** & *italic* < normal")
 	if !strings.Contains(out, "<b>bold</b>") {
 		t.Errorf("expected bold tag, got %q", out)
 	}
@@ -141,7 +141,7 @@ func TestMarkdownToTelegramHTML_MixedFormattingWithSpecialChars(t *testing.T) {
 	}
 }
 
-func TestMarkdownToTelegramHTML_NoCrossedTags(t *testing.T) {
+func TestMarkdownToSimpleHTML_NoCrossedTags(t *testing.T) {
 	tests := []struct {
 		name  string
 		input string
@@ -155,7 +155,7 @@ func TestMarkdownToTelegramHTML_NoCrossedTags(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			out := MarkdownToTelegramHTML(tt.input)
+			out := MarkdownToSimpleHTML(tt.input)
 			// Check no crossed tags: every <b> must close before enclosing </i> etc.
 			// Simple check: no </b> inside an <i> block or vice versa
 			if err := validateHTMLNesting(out); err != nil {

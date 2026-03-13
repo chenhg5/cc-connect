@@ -55,7 +55,9 @@ func normalizeMode(raw string) string {
 	}
 }
 
-func (a *Agent) Name() string { return "qoder" }
+func (a *Agent) Name() string           { return "qoder" }
+func (a *Agent) CLIBinaryName() string  { return "qodercli" }
+func (a *Agent) CLIDisplayName() string { return "Qoder" }
 
 func (a *Agent) SetModel(model string) {
 	a.mu.Lock()

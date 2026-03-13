@@ -44,6 +44,14 @@ type DoctorChecker interface {
 	DoctorChecks(ctx context.Context) []DoctorCheckResult
 }
 
+// AgentDoctorInfo is an optional interface agents can implement to provide
+// CLI binary name and display label for doctor checks, avoiding hardcoded
+// agent-specific knowledge in core.
+type AgentDoctorInfo interface {
+	CLIBinaryName() string // e.g. "claude", "codex"
+	CLIDisplayName() string // e.g. "Claude", "Codex" (for display in doctor output)
+}
+
 // RunDoctorChecks performs all diagnostic checks.
 func RunDoctorChecks(ctx context.Context, agent Agent, platforms []Platform) []DoctorCheckResult {
 	var results []DoctorCheckResult
@@ -62,22 +70,22 @@ func RunDoctorChecks(ctx context.Context, agent Agent, platforms []Platform) []D
 	return results
 }
 
-var agentBinMap = map[string]string{
-	"claudecode": "claude",
-	"cursor":     "agent",
-	"codex":      "codex",
-	"gemini":     "gemini",
-	"iflow":      "iflow",
-	"opencode":   "opencode",
-	"qoder":      "qodercli",
+func agentCLIInfo(agent Agent) (bin, label string) {
+	if info, ok := agent.(AgentDoctorInfo); ok {
+		bin = info.CLIBinaryName()
+		label = info.CLIDisplayName()
+	}
+	if bin == "" {
+		bin = agent.Name()
+	}
+	if label == "" {
+		label = bin
+	}
+	return bin, label
 }
 
 func checkAgentBinary(ctx context.Context, agent Agent) []DoctorCheckResult {
-	name := agent.Name()
-	bin, ok := agentBinMap[name]
-	if !ok {
-		bin = name
-	}
+	bin, _ := agentCLIInfo(agent)
 
 	path, err := exec.LookPath(bin)
 	if err != nil {
@@ -106,25 +114,8 @@ func checkAgentBinary(ctx context.Context, agent Agent) []DoctorCheckResult {
 }
 
 func checkAgentAuth(ctx context.Context, agent Agent) []DoctorCheckResult {
-	name := agent.Name()
-
-	switch name {
-	case "claudecode":
-		return checkCLIAuth(ctx, "claude", []string{"--version"}, "Claude")
-	case "codex":
-		return checkCLIAuth(ctx, "codex", []string{"--version"}, "Codex")
-	case "gemini":
-		return checkCLIAuth(ctx, "gemini", []string{"--version"}, "Gemini")
-	case "iflow":
-		return checkCLIAuth(ctx, "iflow", []string{"--version"}, "iFlow")
-	case "opencode":
-		return checkCLIAuth(ctx, "opencode", []string{"--version"}, "OpenCode")
-	case "cursor":
-		return checkCLIAuth(ctx, "agent", []string{"--version"}, "Cursor Agent")
-	case "qoder":
-		return checkCLIAuth(ctx, "qodercli", []string{"--version"}, "Qoder")
-	}
-	return nil
+	bin, label := agentCLIInfo(agent)
+	return checkCLIAuth(ctx, bin, []string{"--version"}, label)
 }
 
 func checkCLIAuth(ctx context.Context, bin string, args []string, label string) []DoctorCheckResult {

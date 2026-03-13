@@ -5,11 +5,10 @@ import (
 	"strings"
 )
 
-// MarkdownToTelegramHTML converts common Markdown to Telegram-compatible HTML.
-// Telegram supports: <b>, <i>, <s>, <code>, <pre>, <a href="">, <blockquote>.
-// This is more reliable than Telegram's native Markdown parser which frequently
-// fails on content with underscores, asterisks in code, etc.
-func MarkdownToTelegramHTML(md string) string {
+// MarkdownToSimpleHTML converts common Markdown to a simplified HTML subset.
+// Supported tags: <b>, <i>, <s>, <code>, <pre>, <a href="">, <blockquote>.
+// Useful for platforms that accept a limited set of HTML (e.g. Telegram).
+func MarkdownToSimpleHTML(md string) string {
 	var b strings.Builder
 	b.Grow(len(md) + len(md)/4)
 
