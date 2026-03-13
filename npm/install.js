@@ -122,6 +122,30 @@ function extractZip(buffer, destDir, binaryName) {
   }
 }
 
+// parseVersion splits "1.2.3-beta.1" into { nums: [1,2,3], pre: "beta.1" }
+function parseVersion(v) {
+  v = v.replace(/^v/, "").trim();
+  const [base, ...rest] = v.split("-");
+  const nums = base.split(".").map(Number);
+  return { nums, pre: rest.join("-") };
+}
+
+// isNewerOrEqual returns true if installed >= expected
+function isNewerOrEqual(installed, expected) {
+  const a = parseVersion(installed);
+  const b = parseVersion(expected);
+  const len = Math.max(a.nums.length, b.nums.length);
+  for (let i = 0; i < len; i++) {
+    const av = a.nums[i] || 0;
+    const bv = b.nums[i] || 0;
+    if (av > bv) return true;
+    if (av < bv) return false;
+  }
+  if (!a.pre && b.pre) return true;
+  if (a.pre && !b.pre) return false;
+  return a.pre >= b.pre;
+}
+
 async function main() {
   const { platform, arch, ext, filename } = getPlatformInfo();
   console.log(`[cc-connect] Platform: ${platform}/${arch}`);
@@ -135,8 +159,15 @@ async function main() {
   if (fs.existsSync(binaryPath)) {
     try {
       const out = execSync(`"${binaryPath}" --version`, { encoding: "utf8", timeout: 5000 });
-      if (out.includes(VERSION.slice(1))) {
+      const expectedVer = VERSION.slice(1); // remove leading "v"
+      if (out.includes(expectedVer)) {
         console.log(`[cc-connect] Binary ${VERSION} already installed, skipping.`);
+        return;
+      }
+      // Don't downgrade: if existing binary is newer, keep it
+      const match = out.match(/(\d+\.\d+\.\d+[^\s]*)/);
+      if (match && isNewerOrEqual(match[1], expectedVer)) {
+        console.log(`[cc-connect] Binary ${match[1]} is newer than ${VERSION}, skipping.`);
         return;
       }
       console.log(`[cc-connect] Existing binary is outdated, upgrading to ${VERSION}...`);
