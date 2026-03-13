@@ -206,6 +206,20 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 	if actionVal == "" && event.Event.Action.Option != "" {
 		actionVal = event.Event.Action.Option
 	}
+	if actionVal == "" {
+		switch event.Event.Action.Name {
+		case "delete_mode_submit":
+			actionVal = "act:/delete-mode form-submit"
+		case "delete_mode_cancel":
+			actionVal = "act:/delete-mode cancel"
+		}
+	}
+	if actionVal == "act:/delete-mode form-submit" {
+		ids := collectDeleteModeSelectedFromFormValue(event.Event.Action.FormValue)
+		if len(ids) > 0 {
+			actionVal += " " + strings.Join(ids, ",")
+		}
+	}
 
 	userID := ""
 	if event.Event.Operator != nil {
@@ -234,6 +248,18 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 					},
 				}, nil
 			}
+		}
+		if strings.HasPrefix(actionVal, "act:") {
+			if strings.HasPrefix(actionVal, "act:/delete-mode toggle ") {
+				return &callback.CardActionTriggerResponse{
+					Toast: &callback.Toast{
+						Type:    "info",
+						Content: "已记录选择（Selection recorded）",
+					},
+				}, nil
+			}
+			slog.Debug(p.tag()+": card action produced no card update", "action", actionVal)
+			return nil, nil
 		}
 		slog.Warn(p.tag()+": card nav returned nil, ignoring", "action", actionVal)
 		return nil, nil

@@ -2,6 +2,7 @@ package feishu
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -166,5 +167,63 @@ func TestRenderCardMap_DefaultActionsStayActionRow(t *testing.T) {
 		if !ok || value["action"] != want.Value {
 			t.Fatalf("button %d value = %#v, want %q", i, btn["value"], want.Value)
 		}
+	}
+}
+
+func TestRenderCardMap_DeleteModeUsesCheckerForm(t *testing.T) {
+	card := core.NewCard().
+		Title("删除会话", "carmine").
+		ListItemBtn("☑ **1.** One · **10** msgs · 03-13 20:00", "已选择", "primary", "act:/delete-mode toggle session-1").
+		ListItemBtn("▶ **2.** Active · **30** msgs · 03-13 20:01", "当前会话", "primary", "act:/delete-mode noop session-2").
+		ListItemBtn("◻ **3.** Three · **20** msgs · 03-13 20:02", "选择", "default", "act:/delete-mode toggle session-3").
+		Note("2 selected").
+		Buttons(
+			core.DangerBtn("删除已选", "act:/delete-mode confirm"),
+			core.DefaultBtn("取消", "act:/delete-mode cancel"),
+		).
+		Buttons(core.DefaultBtn("下一页 →", "act:/delete-mode page 2")).
+		Build()
+
+	got := decodeRenderedCard(t, card)
+	raw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshal rendered card failed: %v", err)
+	}
+	s := string(raw)
+	if !strings.Contains(s, `"tag":"form"`) || !strings.Contains(s, `"tag":"checker"`) {
+		t.Fatalf("expected form+checker rendering, got %s", s)
+	}
+	if got := strings.Count(s, `"tag":"checker"`); got != 2 {
+		t.Fatalf("checker count = %d, want 2, got %s", got, s)
+	}
+	if !strings.Contains(s, deleteModeCheckerName("session-1")) {
+		t.Fatalf("selectable session checker missing, got %s", s)
+	}
+	if strings.Contains(s, deleteModeCheckerName("session-2")) {
+		t.Fatalf("active session should not render checker, got %s", s)
+	}
+	if !strings.Contains(s, deleteModeCheckerName("session-3")) {
+		t.Fatalf("second selectable session checker missing, got %s", s)
+	}
+	activeIdx := strings.Index(s, `▶ **2.** Active`)
+	firstIdx := strings.Index(s, deleteModeCheckerName("session-1"))
+	thirdIdx := strings.Index(s, deleteModeCheckerName("session-3"))
+	if activeIdx < 0 || firstIdx < 0 || thirdIdx < 0 {
+		t.Fatalf("missing expected order markers in rendered card: %s", s)
+	}
+	if !(firstIdx < activeIdx && activeIdx < thirdIdx) {
+		t.Fatalf("row order changed unexpectedly, got %s", s)
+	}
+	if !strings.Contains(s, `"name":"delete_mode_form"`) {
+		t.Fatalf("expected form name for feishu validation, got %s", s)
+	}
+	if !strings.Contains(s, `"name":"delete_mode_submit"`) || !strings.Contains(s, `"name":"delete_mode_cancel"`) {
+		t.Fatalf("expected button names inside form, got %s", s)
+	}
+	if !strings.Contains(s, `"form_action_type":"submit"`) || !strings.Contains(s, `act:/delete-mode form-submit`) {
+		t.Fatalf("expected form submit action, got %s", s)
+	}
+	if strings.Contains(s, `act:/delete-mode toggle`) {
+		t.Fatalf("expected no toggle buttons in rendered card, got %s", s)
 	}
 }
