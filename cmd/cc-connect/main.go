@@ -321,6 +321,11 @@ func main() {
 			engine.SetDefaultQuiet(*cfg.Quiet)
 		}
 
+		// Wire sender injection
+		if proj.InjectSender != nil {
+			engine.SetInjectSender(*proj.InjectSender)
+		}
+
 		// Wire speech-to-text if enabled
 		if cfg.Speech.Enabled {
 			speechCfg := core.SpeechCfg{
@@ -779,6 +784,9 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	} else {
 		engine.SetDefaultQuiet(false)
 	}
+
+	// Reload sender injection
+	engine.SetInjectSender(proj.InjectSender != nil && *proj.InjectSender)
 
 	// Reload providers
 	if ps, ok := engine.GetAgent().(core.ProviderSwitcher); ok {

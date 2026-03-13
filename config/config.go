@@ -106,9 +106,10 @@ type ProjectConfig struct {
 	BaseDir          string           `toml:"base_dir,omitempty"` // parent dir for workspaces
 	Agent            AgentConfig      `toml:"agent"`
 	Platforms        []PlatformConfig `toml:"platforms"`
-	Quiet            *bool            `toml:"quiet,omitempty"`             // project-level quiet mode; overrides global setting
-	DisabledCommands []string         `toml:"disabled_commands,omitempty"` // commands to disable for this project (e.g. ["restart", "upgrade"])
-	AdminFrom        string           `toml:"admin_from,omitempty"`        // comma-separated user IDs allowed to run privileged commands; "*" = all allowed users
+	Quiet            *bool            `toml:"quiet,omitempty"`              // project-level quiet mode; overrides global setting
+	InjectSender     *bool            `toml:"inject_sender,omitempty"`      // prepend sender identity (platform + user ID) to each message sent to the agent
+	DisabledCommands []string         `toml:"disabled_commands,omitempty"`  // commands to disable for this project (e.g. ["restart", "upgrade"])
+	AdminFrom        string           `toml:"admin_from,omitempty"`         // comma-separated user IDs allowed to run privileged commands; "*" = all allowed users
 }
 
 type AgentConfig struct {

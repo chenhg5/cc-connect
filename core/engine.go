@@ -129,8 +129,9 @@ type Engine struct {
 	speech       SpeechCfg
 	tts          *TTSCfg
 	display      DisplayCfg
-	defaultQuiet bool
-	startedAt    time.Time
+	defaultQuiet   bool
+	injectSender   bool
+	startedAt      time.Time
 
 	providerSaveFunc       func(providerName string) error
 	providerAddSaveFunc    func(p ProviderConfig) error
@@ -318,6 +319,18 @@ func (e *Engine) SetDisplayConfig(cfg DisplayCfg) {
 // SetDefaultQuiet sets whether new sessions start in quiet mode.
 func (e *Engine) SetDefaultQuiet(q bool) {
 	e.defaultQuiet = q
+}
+
+// SetInjectSender controls whether sender identity (platform and user ID) is
+// prepended to each message before forwarding it to the agent. When enabled,
+// the agent receives a preamble line like:
+//
+//	[cc-connect sender_id=ou_abc123 platform=feishu]
+//
+// This allows the agent to identify who sent the message and adjust behavior
+// accordingly (e.g. personal task views, role-based access control).
+func (e *Engine) SetInjectSender(v bool) {
+	e.injectSender = v
 }
 
 func (e *Engine) SetLanguageSaveFunc(fn func(Language) error) {
@@ -1008,11 +1021,18 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	// EventResult that was pushed after the previous turn already returned.
 	drainEvents(state.agentSession.Events())
 
+	// Prepend sender identity when enabled, so the agent knows who sent the message.
+	promptContent := msg.Content
+	if e.injectSender && msg.UserID != "" {
+		chatID := extractChannelID(msg.SessionKey)
+		promptContent = fmt.Sprintf("[cc-connect sender_id=%s platform=%s chat_id=%s]\n%s", msg.UserID, msg.Platform, chatID, msg.Content)
+	}
+
 	sendStart := time.Now()
 	state.mu.Lock()
 	state.fromVoice = msg.FromVoice
 	state.mu.Unlock()
-	if err := state.agentSession.Send(msg.Content, msg.Images); err != nil {
+	if err := state.agentSession.Send(promptContent, msg.Images); err != nil {
 		slog.Error("failed to send prompt", "error", err)
 
 		if !state.agentSession.Alive() {
@@ -1030,7 +1050,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 				return
 			}
 			sendStart = time.Now()
-			if err := state.agentSession.Send(msg.Content, msg.Images); err != nil {
+			if err := state.agentSession.Send(promptContent, msg.Images); err != nil {
 				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
 				return
 			}
