@@ -1014,7 +1014,8 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	// Prepend sender identity when enabled, so the agent knows who sent the message.
 	promptContent := msg.Content
 	if e.injectSender && msg.UserID != "" {
-		promptContent = fmt.Sprintf("[cc-connect sender_id=%s platform=%s]\n%s", msg.UserID, msg.Platform, msg.Content)
+		chatID := extractChannelID(msg.SessionKey)
+		promptContent = fmt.Sprintf("[cc-connect sender_id=%s platform=%s chat_id=%s]\n%s", msg.UserID, msg.Platform, chatID, msg.Content)
 	}
 
 	sendStart := time.Now()
