@@ -22,6 +22,9 @@ jobs:
 
       - name: Download dependencies
         run: go mod download
+        env:
+          GOPROXY: https://proxy.golang.org,direct
+          GOSUMDB: sum.golang.org
 
       - name: Build
         run: go build ./...
