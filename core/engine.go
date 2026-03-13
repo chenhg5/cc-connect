@@ -2182,8 +2182,8 @@ func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
 		if result == "" {
 			result = "(no output)"
 		}
-		if len(result) > 4000 {
-			result = result[:3997] + "..."
+		if runes := []rune(result); len(runes) > 4000 {
+			result = string(runes[:3997]) + "..."
 		}
 
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf("$ %s\n```\n%s\n```", shellCmd, result))
