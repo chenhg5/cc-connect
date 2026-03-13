@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -292,9 +293,9 @@ func TestIFlowTurnPendingToolTimeoutReleasesTurn(t *testing.T) {
 func TestIFlowTurnTimerResetsOnPartialToolCompletion(t *testing.T) {
 	timeout := 100 * time.Millisecond
 
-	cancelled := false
+	var cancelled atomic.Bool
 	turn := &iflowTurn{
-		cancel:         func() { cancelled = true },
+		cancel:         func() { cancelled.Store(true) },
 		pendingTimeout: timeout,
 		pendingToolIDs: make(map[string]struct{}),
 		pendingTools:   make(map[string]iflowToolUse),
@@ -323,7 +324,7 @@ func TestIFlowTurnTimerResetsOnPartialToolCompletion(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if turn.readyForResult() {
-			if !cancelled {
+			if !cancelled.Load() {
 				t.Fatal("expected cancel to be called")
 			}
 			return
