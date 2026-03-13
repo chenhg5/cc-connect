@@ -1539,6 +1539,8 @@ var builtinCommands = []struct {
 	{[]string{"shell", "sh", "exec", "run"}, "shell"},
 	{[]string{"tts"}, "tts"},
 	{[]string{"workspace", "ws"}, "workspace"},
+	{[]string{"suspend", "pause"}, "suspend"},
+	{[]string{"resume", "restore"}, "resume"},
 }
 
 // matchPrefix finds a unique command matching the given prefix.
@@ -1683,6 +1685,10 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 			return true
 		}
 		e.handleWorkspaceCommand(p, msg, args)
+	case "suspend":
+		e.cmdSuspend(p, msg, args)
+	case "resume":
+		e.cmdResume(p, msg, args)
 		return true
 	default:
 		if custom, ok := e.commands.Resolve(cmd); ok {
@@ -1825,6 +1831,96 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNewSessionCreated))
 	}
 	_ = s
+}
+
+// cmdSuspend pauses the current session and saves its state for later resume.
+// This allows the user to switch to another platform and resume later.
+func (e *Engine) cmdSuspend(p Platform, msg *Message, args []string) {
+	_, sessions, interactiveKey, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+
+	session := sessions.GetOrCreateActive(msg.SessionKey)
+
+	// Check if there's an active agent session
+	if session.AgentSessionID == "" {
+		e.reply(p, msg.ReplyCtx, "No active session to suspend. Start a conversation first.")
+		return
+	}
+
+	// Get the suspend info
+	agentID := session.AgentSessionID
+	displayName := sessions.GetSessionName(agentID)
+	if displayName == "" {
+		displayName = session.Name
+		if displayName == "" {
+			displayName = agentID
+			if len(displayName) > 12 {
+				displayName = displayName[:12]
+			}
+		}
+	}
+
+	// Mark session as suspended (store in session name with special prefix)
+	suspendedName := "[suspended] " + displayName
+	session.Name = suspendedName
+	sessions.Save()
+
+	// Clean up interactive state
+	slog.Info("cmdSuspend: cleaning up session", "session_key", msg.SessionKey)
+	e.cleanupInteractiveState(interactiveKey)
+
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(
+		"Session suspended. Use /resume to continue this session later.\n\nSession: %s\nAgent ID: %s",
+		displayName, agentID,
+	))
+}
+
+// cmdResume resumes a previously suspended session.
+func (e *Engine) cmdResume(p Platform, msg *Message, args []string) {
+	_, sessions, _, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+
+	session := sessions.GetOrCreateActive(msg.SessionKey)
+
+	// Check if current session is already active
+	if session.AgentSessionID != "" && !strings.HasPrefix(session.Name, "[suspended]") {
+		e.reply(p, msg.ReplyCtx, "Current session is already active. Use /new to start a new session or /switch to switch to another session.")
+		return
+	}
+
+	// Find suspended session for this user
+	userSessions := sessions.ListSessions(msg.SessionKey)
+	var suspendedSession *Session
+	var suspendedAgentID string
+
+	for _, s := range userSessions {
+		if strings.HasPrefix(s.Name, "[suspended]") {
+			suspendedSession = s
+			suspendedAgentID = s.AgentSessionID
+			break
+		}
+	}
+
+	if suspendedSession == nil {
+		e.reply(p, msg.ReplyCtx, "No suspended session found. Use /new to start a new conversation.")
+		return
+	}
+
+	// Resume the suspended session
+	session.AgentSessionID = suspendedAgentID
+	session.Name = strings.TrimPrefix(suspendedSession.Name, "[suspended] ")
+	sessions.Save()
+
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(
+		"Session resumed! You can now continue the conversation.\n\nAgent ID: %s",
+		suspendedAgentID,
+	))
 }
 
 const listPageSize = 20
