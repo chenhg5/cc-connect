@@ -85,6 +85,25 @@ func TestNormalizeWorkspacePath(t *testing.T) {
 	}
 }
 
+func TestWorkspacePoolNormalizesKeys(t *testing.T) {
+	tmp := t.TempDir()
+	realDir := filepath.Join(tmp, "project")
+	if err := os.Mkdir(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := newWorkspacePool(15 * time.Minute)
+
+	// Access with trailing slash
+	ws1 := pool.GetOrCreate(realDir + "/")
+	// Access without trailing slash
+	ws2 := pool.GetOrCreate(realDir)
+
+	if ws1 != ws2 {
+		t.Error("trailing slash created a different workspace state")
+	}
+}
+
 func TestWorkspacePool_ReapIdle_KeepsActive(t *testing.T) {
 	pool := newWorkspacePool(200 * time.Millisecond)
 	state := pool.GetOrCreate("/workspace/active")

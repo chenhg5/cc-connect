@@ -66,12 +66,14 @@ func newWorkspacePool(idleTimeout time.Duration) *workspacePool {
 }
 
 func (p *workspacePool) Get(workspace string) *workspaceState {
+	workspace = normalizeWorkspacePath(workspace)
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.states[workspace]
 }
 
 func (p *workspacePool) GetOrCreate(workspace string) *workspaceState {
+	workspace = normalizeWorkspacePath(workspace)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if s, ok := p.states[workspace]; ok {

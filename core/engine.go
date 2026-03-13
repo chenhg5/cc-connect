@@ -420,7 +420,7 @@ func (e *Engine) ClearAliases() {
 func (e *Engine) SetDisabledCommands(cmds []string) {
 	m := make(map[string]bool, len(cmds))
 	for _, c := range cmds {
-		c = strings.ToLower(strings.TrimPrefix(c, "/"))
+		c = strings.ToLower(strings.TrimPrefix(c, "!"))
 		// Resolve alias names to canonical IDs
 		id := matchPrefix(c, builtinCommands)
 		if id != "" {
@@ -722,8 +722,8 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		return
 	}
 
-	// Banned words check (skip for slash commands)
-	if !strings.HasPrefix(content, "/") {
+	// Banned words check (skip for bot commands)
+	if !strings.HasPrefix(content, "!") {
 		if word := e.matchBannedWord(content); word != "" {
 			slog.Info("message blocked by banned word", "word", word, "user", msg.UserName)
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgBannedWordBlocked))
@@ -745,13 +745,13 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		}
 		if workspace == "" {
 			// No workspace — handle init flow (unless it's a /workspace command)
-			if !strings.HasPrefix(content, "workspace") && !strings.HasPrefix(content, "ws ") {
+			if !strings.HasPrefix(content, "!workspace") && !strings.HasPrefix(content, "!ws ") {
 				if e.handleWorkspaceInitFlow(p, msg, channelID, channelName) {
 					return
 				}
 			}
 			// If init flow didn't consume, only workspace commands work
-			if !strings.HasPrefix(content, "/") {
+			if !strings.HasPrefix(content, "!") {
 				return
 			}
 		} else {
@@ -772,7 +772,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		}
 	}
 
-	if len(msg.Images) == 0 && strings.HasPrefix(content, "/") {
+	if len(msg.Images) == 0 && strings.HasPrefix(content, "!") {
 		if e.handleCommand(p, msg, content) {
 			return
 		}
@@ -1748,13 +1748,13 @@ func matchSubCommand(input string, candidates []string) string {
 
 func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 	parts := strings.Fields(raw)
-	cmd := strings.ToLower(strings.TrimPrefix(parts[0], "/"))
+	cmd := strings.ToLower(strings.TrimPrefix(parts[0], "!"))
 	args := parts[1:]
 
 	cmdID := matchPrefix(cmd, builtinCommands)
 
 	if cmdID != "" && e.disabledCmds[cmdID] {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandDisabled), "/"+cmdID))
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandDisabled), "!"+cmdID))
 		return true
 	}
 
@@ -2981,14 +2981,14 @@ func (e *Engine) cmdLang(p Platform, msg *Message, args []string) {
 		text := e.i18n.Tf(MsgLangCurrent, name)
 		buttons := [][]ButtonOption{
 			{
-				{Text: "English", Data: "cmd:/lang en"},
-				{Text: "中文", Data: "cmd:/lang zh"},
-				{Text: "繁體中文", Data: "cmd:/lang zh-TW"},
+				{Text: "English", Data: "cmd:!lang en"},
+				{Text: "中文", Data: "cmd:!lang zh"},
+				{Text: "繁體中文", Data: "cmd:!lang zh-TW"},
 			},
 			{
-				{Text: "日本語", Data: "cmd:/lang ja"},
-				{Text: "Español", Data: "cmd:/lang es"},
-				{Text: "Auto", Data: "cmd:/lang auto"},
+				{Text: "日本語", Data: "cmd:!lang ja"},
+				{Text: "Español", Data: "cmd:!lang es"},
+				{Text: "Auto", Data: "cmd:!lang auto"},
 			},
 		}
 		if supportsCards(p) {
@@ -3081,39 +3081,39 @@ func helpCardGroups() []helpCardGroup {
 			key:      "session",
 			titleKey: MsgHelpSessionSection,
 			items: []helpCardItem{
-				{command: "/new", action: "act:/new"},
-				{command: "/list", action: "nav:/list"},
-				{command: "/current", action: "nav:/current"},
-				{command: "/switch", action: "nav:/list"},
-				{command: "/search", action: "cmd:/search"},
-				{command: "/history", action: "nav:/history"},
-				{command: "/delete", action: "cmd:/delete"},
-				{command: "/name", action: "cmd:/name"},
+				{command: "!new", action: "act:/new"},
+				{command: "!list", action: "nav:/list"},
+				{command: "!current", action: "nav:/current"},
+				{command: "!switch", action: "nav:/list"},
+				{command: "!search", action: "cmd:!search"},
+				{command: "!history", action: "nav:/history"},
+				{command: "!delete", action: "cmd:!delete"},
+				{command: "!name", action: "cmd:!name"},
 			},
 		},
 		{
 			key:      "agent",
 			titleKey: MsgHelpAgentSection,
 			items: []helpCardItem{
-				{command: "/model", action: "nav:/model"},
-				{command: "/reasoning", action: "nav:/reasoning"},
-				{command: "/mode", action: "nav:/mode"},
-				{command: "/lang", action: "nav:/lang"},
-				{command: "/provider", action: "nav:/provider"},
-				{command: "/memory", action: "cmd:/memory"},
-				{command: "/quiet", action: "act:/quiet"},
+				{command: "!model", action: "nav:/model"},
+				{command: "!reasoning", action: "nav:/reasoning"},
+				{command: "!mode", action: "nav:/mode"},
+				{command: "!lang", action: "nav:/lang"},
+				{command: "!provider", action: "nav:/provider"},
+				{command: "!memory", action: "cmd:!memory"},
+				{command: "!quiet", action: "act:/quiet"},
 			},
 		},
 		{
 			key:      "tools",
 			titleKey: MsgHelpToolsSection,
 			items: []helpCardItem{
-				{command: "/cron", action: "nav:/cron"},
-				{command: "/commands", action: "nav:/commands"},
-				{command: "/alias", action: "nav:/alias"},
-				{command: "/skills", action: "nav:/skills"},
-				{command: "/compress", action: "cmd:/compress"},
-				{command: "/stop", action: "act:/stop"},
+				{command: "!cron", action: "nav:/cron"},
+				{command: "!commands", action: "nav:/commands"},
+				{command: "!alias", action: "nav:/alias"},
+				{command: "!skills", action: "nav:/skills"},
+				{command: "!compress", action: "cmd:!compress"},
+				{command: "!stop", action: "act:/stop"},
 			},
 		},
 		{
@@ -3165,7 +3165,7 @@ func (e *Engine) renderHelpGroupCard(groupKey string) *Card {
 		return strings.Trim(sectionTitle(key), "* ")
 	}
 	commandText := func(command string) string {
-		return "**" + command + "**  " + e.i18n.T(MsgKey(strings.TrimPrefix(command, "/")))
+		return "**" + command + "**  " + e.i18n.T(MsgKey(strings.TrimPrefix(command, "!")))
 	}
 
 	groups := helpCardGroups()
@@ -3305,7 +3305,7 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 				if m.Name == current {
 					label = "▶ " + label
 				}
-				row = append(row, ButtonOption{Text: label, Data: fmt.Sprintf("cmd:/model %d", i+1)})
+				row = append(row, ButtonOption{Text: label, Data: fmt.Sprintf("cmd:!model %d", i+1)})
 				if len(row) >= 3 {
 					buttons = append(buttons, row)
 					row = nil
@@ -3377,7 +3377,7 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 				if effort == current {
 					label = "▶ " + label
 				}
-				row = append(row, ButtonOption{Text: label, Data: fmt.Sprintf("cmd:/reasoning %d", i+1)})
+				row = append(row, ButtonOption{Text: label, Data: fmt.Sprintf("cmd:!reasoning %d", i+1)})
 				if len(row) >= 3 {
 					buttons = append(buttons, row)
 					row = nil
@@ -3460,7 +3460,7 @@ func (e *Engine) cmdMode(p Platform, msg *Message, args []string) {
 				if m.Key == current {
 					label = "▶ " + label
 				}
-				row = append(row, ButtonOption{Text: label, Data: "cmd:/mode " + m.Key})
+				row = append(row, ButtonOption{Text: label, Data: "cmd:!mode " + m.Key})
 				if len(row) >= 2 {
 					buttons = append(buttons, row)
 					row = nil
@@ -6896,7 +6896,7 @@ func (e *Engine) resolveWorkspace(p Platform, channelID string) (string, string,
 			e.workspaceBindings.Unbind(projectKey, channelID)
 			return "", b.ChannelName, nil
 		}
-		return b.Workspace, b.ChannelName, nil
+		return normalizeWorkspacePath(b.Workspace), b.ChannelName, nil
 	}
 
 	// Step 2: Resolve channel name for convention match
@@ -6918,10 +6918,11 @@ func (e *Engine) resolveWorkspace(p Platform, channelID string) (string, string,
 	candidate := filepath.Join(e.baseDir, channelName)
 	if info, err := os.Stat(candidate); err == nil && info.IsDir() {
 		// Auto-bind
-		e.workspaceBindings.Bind(projectKey, channelID, channelName, candidate)
+		normalized := normalizeWorkspacePath(candidate)
+		e.workspaceBindings.Bind(projectKey, channelID, channelName, normalized)
 		slog.Info("workspace auto-bound by convention",
-			"channel", channelName, "workspace", candidate)
-		return candidate, channelName, nil
+			"channel", channelName, "workspace", normalized)
+		return normalized, channelName, nil
 	}
 
 	return "", channelName, nil
@@ -6937,7 +6938,7 @@ func (e *Engine) handleWorkspaceInitFlow(p Platform, msg *Message, channelID, ch
 	content := strings.TrimSpace(msg.Content)
 
 	if !exists {
-		if strings.HasPrefix(content, "/") {
+		if strings.HasPrefix(content, "!") {
 			return false
 		}
 		e.initFlowsMu.Lock()
