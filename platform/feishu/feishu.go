@@ -1259,22 +1259,20 @@ type feishuPreviewHandle struct {
 	chatID    string
 }
 
-// buildCardJSON builds a Feishu interactive card JSON string with a markdown element.
+// buildCardJSON builds a Feishu interactive card JSON string.
 // Uses schema 2.0 which supports code blocks, tables, and inline formatting.
+// Markdown tables are automatically converted to native table components
+// with page_size for reliable pagination (see mdtable.go).
 // Card font is inherently smaller than Post/Text — this is a Feishu platform limitation.
 func buildCardJSON(content string) string {
+	elements := mdTableToCardElements(content)
 	card := map[string]any{
 		"schema": "2.0",
 		"config": map[string]any{
 			"wide_screen_mode": true,
 		},
 		"body": map[string]any{
-			"elements": []map[string]any{
-				{
-					"tag":     "markdown",
-					"content": content,
-				},
-			},
+			"elements": elements,
 		},
 	}
 	b, _ := json.Marshal(card)
