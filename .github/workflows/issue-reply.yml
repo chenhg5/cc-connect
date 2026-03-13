@@ -1,0 +1,49 @@
+name: Issue Reply
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  greet:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Greet new issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const author = issue.user.login;
+
+            // 检查是否是首次提 issue
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              creator: author,
+              state: 'all'
+            });
+
+            const isFirstIssue = issues.length === 1;
+
+            let comment;
+            if (isFirstIssue) {
+              comment = `👋 Hi @${author}! Thanks for opening your first issue here!
+
+We'll review it as soon as possible. While waiting, please make sure:
+- You've provided enough details about the issue
+- Any error messages are included in full
+- For feature requests, describe your use case
+
+Thanks for your feedback!`;
+            } else {
+              comment = `👋 Thanks @${author} for opening this issue! We'll take a look soon.`;
+            }
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              body: comment
+            });
