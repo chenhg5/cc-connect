@@ -6,6 +6,9 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +16,7 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/gorilla/websocket"
 )
 
 func init() {
@@ -159,10 +163,37 @@ func (p *Platform) makeSessionKey(channelID string, userID string) string {
 func (p *Platform) Start(handler core.MessageHandler) error {
 	p.handler = handler
 
+	// 配置代理
+	proxyURL := "http://127.0.0.1:7890"
+	httpClient := &http.Client{
+		Transport: &http.Transport{
+			Proxy: func(req *http.Request) (*url.URL, error) {
+				return url.Parse(proxyURL)
+			},
+		},
+	}
+
 	session, err := discordgo.New("Bot " + p.token)
 	if err != nil {
 		return fmt.Errorf("discord: create session: %w", err)
 	}
+	
+	// 设置 HTTP 代理
+	session.Client = httpClient
+	session.Client.Transport = &http.Transport{
+		Proxy: func(req *http.Request) (*url.URL, error) {
+			return url.Parse(proxyURL)
+		},
+	}
+	
+	// 设置 WebSocket 代理（通过 Dialer）
+	if session.Dialer == nil {
+		session.Dialer = &websocket.Dialer{}
+	}
+	session.Dialer.Proxy = func(req *http.Request) (*url.URL, error) {
+		return url.Parse(proxyURL)
+	}
+	
 	p.session = session
 
 	session.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentMessageContent
@@ -209,6 +240,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		rctx := replyContext{channelID: m.ChannelID, messageID: m.ID}
 
 		var images []core.ImageAttachment
+		var files []core.FileAttachment
 		var audio *core.AudioAttachment
 		for _, att := range m.Attachments {
 			ct := strings.ToLower(att.ContentType)
@@ -226,6 +258,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 					MimeType: ct, Data: data, Format: format,
 				}
 			} else if att.Width > 0 && att.Height > 0 {
+				// 图片
 				data, err := downloadURL(att.URL)
 				if err != nil {
 					slog.Error("discord: download attachment failed", "url", att.URL, "error", err)
@@ -234,10 +267,28 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 				images = append(images, core.ImageAttachment{
 					MimeType: att.ContentType, Data: data, FileName: att.Filename,
 				})
+			} else {
+				// 文件（PDF、DOC 等）
+				data, err := downloadURL(att.URL)
+				if err != nil {
+					slog.Error("discord: download file failed", "url", att.URL, "error", err)
+					continue
+				}
+				// 检测 MimeType
+				mimeType := att.ContentType
+				if mimeType == "" {
+					mimeType = detectMimeTypeFromFilename(att.Filename)
+				}
+				files = append(files, core.FileAttachment{
+					MimeType: mimeType,
+					Data:     data,
+					FileName: att.Filename,
+				})
+				slog.Debug("discord: file received", "filename", att.Filename, "size", len(data), "mime", mimeType)
 			}
 		}
 
-		if m.Content == "" && len(images) == 0 && audio == nil {
+		if m.Content == "" && len(images) == 0 && len(files) == 0 && audio == nil {
 			return
 		}
 
@@ -245,7 +296,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 			SessionKey: sessionKey, Platform: "discord",
 			MessageID: m.ID,
 			UserID:    m.Author.ID, UserName: m.Author.Username,
-			Content: m.Content, Images: images, Audio: audio, ReplyCtx: rctx,
+			Content: m.Content, Images: images, Files: files, Audio: audio, ReplyCtx: rctx,
 		}
 		p.handler(p, msg)
 	})
@@ -357,6 +408,7 @@ func reconstructCommand(data discordgo.ApplicationCommandInteractionData) string
 }
 
 func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
+	content = formatContentForDiscord(content)
 	switch rc := rctx.(type) {
 	case *interactionReplyCtx:
 		return p.sendInteraction(rc, content)
@@ -369,6 +421,7 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 
 // Send sends a new message (not a reply).
 func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
+	content = formatContentForDiscord(content)
 	switch rc := rctx.(type) {
 	case *interactionReplyCtx:
 		return p.sendInteraction(rc, content)
@@ -377,6 +430,47 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	default:
 		return fmt.Errorf("discord: invalid reply context type %T", rctx)
 	}
+}
+
+// tableSeparator matches markdown table separator line (e.g. |------|------| or |:---|:---:|---:|)
+var tableSeparator = regexp.MustCompile(`^\|([\-:\s]*\|)+[\-:\s]*$`)
+
+// isTableRow returns true if the line looks like a markdown table row (starts and ends with |)
+func isTableRow(line string) bool {
+	s := strings.TrimSpace(line)
+	return len(s) >= 2 && s[0] == '|' && s[len(s)-1] == '|'
+}
+
+// formatContentForDiscord 将 Markdown 表格包在代码块中，Discord 不原生支持表格，用等宽字体显示可改善对齐
+func formatContentForDiscord(content string) string {
+	lines := strings.Split(content, "\n")
+	var out strings.Builder
+	i := 0
+	for i < len(lines) {
+		line := lines[i]
+		// 检测表格：当前行是表头（含 |），下一行是分隔线，再下一行起是数据行
+		if isTableRow(line) && i+1 < len(lines) && tableSeparator.MatchString(strings.TrimSpace(lines[i+1])) {
+			tableStart := i
+			i += 2 // 跳过表头和分隔线
+			for i < len(lines) && isTableRow(lines[i]) {
+				i++
+			}
+			// 把整段表格包在 ``` 代码块里
+			out.WriteString("```\n")
+			for j := tableStart; j < i; j++ {
+				out.WriteString(lines[j])
+				out.WriteByte('\n')
+			}
+			out.WriteString("```\n")
+			continue
+		}
+		out.WriteString(line)
+		if i < len(lines)-1 {
+			out.WriteByte('\n')
+		}
+		i++
+	}
+	return out.String()
 }
 
 // sendInteraction delivers a message through the Discord interaction response
@@ -556,11 +650,28 @@ func stripDiscordMention(text, botID string) string {
 }
 
 func downloadURL(u string) ([]byte, error) {
-	resp, err := core.HTTPClient.Get(u)
+	req, err := http.NewRequest("GET", u, nil)
+	if err != nil {
+		return nil, err
+	}
+	// Discord CDN 需要 User-Agent
+	req.Header.Set("User-Agent", "DiscordBot (https://github.com/chenhg5/cc-connect, 1.0.0)")
+	
+	resp, err := core.HTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	
+	// Discord CDN 有时会返回 303 重定向
+	if resp.StatusCode == http.StatusSeeOther || resp.StatusCode == http.StatusFound {
+		// 获取重定向 URL
+		redirectURL := resp.Header.Get("Location")
+		if redirectURL != "" {
+			return downloadURL(redirectURL)
+		}
+	}
+	
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("download %s: status %d", u, resp.StatusCode)
 	}
@@ -574,4 +685,73 @@ func lastIndexBefore(s string, b byte, before int) int {
 		}
 	}
 	return -1
+}
+
+// detectMimeTypeFromFilename 根据文件名猜测 MimeType
+func detectMimeTypeFromFilename(filename string) string {
+	ext := strings.ToLower(filepath.Ext(filename))
+	switch ext {
+	case ".pdf":
+		return "application/pdf"
+	case ".doc":
+		return "application/msword"
+	case ".docx":
+		return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+	case ".xls":
+		return "application/vnd.ms-excel"
+	case ".xlsx":
+		return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+	case ".ppt":
+		return "application/vnd.ms-powerpoint"
+	case ".pptx":
+		return "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+	case ".txt":
+		return "text/plain"
+	case ".csv":
+		return "text/csv"
+	case ".json":
+		return "application/json"
+	case ".xml":
+		return "application/xml"
+	case ".zip":
+		return "application/zip"
+	case ".rar":
+		return "application/x-rar-compressed"
+	case ".7z":
+		return "application/x-7z-compressed"
+	case ".tar":
+		return "application/x-tar"
+	case ".gz":
+		return "application/gzip"
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".gif":
+		return "image/gif"
+	case ".webp":
+		return "image/webp"
+	case ".bmp":
+		return "image/bmp"
+	case ".svg":
+		return "image/svg+xml"
+	case ".mp4":
+		return "video/mp4"
+	case ".mov":
+		return "video/quicktime"
+	case ".avi":
+		return "video/x-msvideo"
+	case ".webm":
+		return "video/webm"
+	case ".mp3":
+		return "audio/mpeg"
+	case ".wav":
+		return "audio/wav"
+	case ".ogg":
+		return "audio/ogg"
+	case ".flac":
+		return "audio/flac"
+	default:
+		return "application/octet-stream"
+	}
 }
