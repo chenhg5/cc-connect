@@ -2109,3 +2109,335 @@ func TestHandlePendingPermission_AskUserQuestion_SkipsPermFlow(t *testing.T) {
 		t.Errorf("expected free text 'allow' as answer, got %v", answers["0"])
 	}
 }
+
+// ──────────────────────────────────────────────────────────────
+// Session routing / cleanup CAS tests
+// ──────────────────────────────────────────────────────────────
+
+// controllableAgentSession is an AgentSession stub whose session ID, liveness,
+// and events channel can be controlled by the test.
+type controllableAgentSession struct {
+	sessionID string
+	alive     bool
+	events    chan Event
+	closed    chan struct{} // closed when Close() is called
+}
+
+func newControllableSession(id string) *controllableAgentSession {
+	return &controllableAgentSession{
+		sessionID: id,
+		alive:     true,
+		events:    make(chan Event, 8),
+		closed:    make(chan struct{}),
+	}
+}
+
+func (s *controllableAgentSession) Send(_ string, _ []ImageAttachment, _ []FileAttachment) error {
+	return nil
+}
+func (s *controllableAgentSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
+func (s *controllableAgentSession) Events() <-chan Event                                 { return s.events }
+func (s *controllableAgentSession) CurrentSessionID() string                             { return s.sessionID }
+func (s *controllableAgentSession) Alive() bool                                          { return s.alive }
+func (s *controllableAgentSession) Close() error {
+	s.alive = false
+	close(s.events)
+	select {
+	case <-s.closed:
+	default:
+		close(s.closed)
+	}
+	return nil
+}
+
+// controllableAgent lets tests control which session is returned by StartSession.
+type controllableAgent struct {
+	nextSession AgentSession
+}
+
+func (a *controllableAgent) Name() string { return "controllable" }
+func (a *controllableAgent) StartSession(_ context.Context, _ string) (AgentSession, error) {
+	if a.nextSession != nil {
+		return a.nextSession, nil
+	}
+	return newControllableSession("default"), nil
+}
+func (a *controllableAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
+	return nil, nil
+}
+func (a *controllableAgent) Stop() error { return nil }
+
+// TestCleanupCAS_SkipsWhenStateReplaced verifies that cleanupInteractiveState
+// with an expected state pointer is a no-op when the map entry has been replaced.
+// This is the core of the /new race fix: old goroutine's cleanup must not delete
+// a replacement state created by a new turn.
+func TestCleanupCAS_SkipsWhenStateReplaced(t *testing.T) {
+	e := newTestEngine()
+	key := "test:user1"
+
+	oldState := &interactiveState{agentSession: newControllableSession("old")}
+	newState := &interactiveState{agentSession: newControllableSession("new")}
+
+	// Place the NEW state in the map (simulating: /new already cleaned up and
+	// a new turn created a replacement state).
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = newState
+	e.interactiveMu.Unlock()
+
+	// Old goroutine calls cleanup with the OLD state pointer — should be skipped.
+	e.cleanupInteractiveState(key, oldState)
+
+	e.interactiveMu.Lock()
+	current := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+
+	if current != newState {
+		t.Fatal("CAS cleanup deleted the replacement state — race not prevented")
+	}
+}
+
+// TestCleanupCAS_DeletesWhenStateMatches verifies that cleanup proceeds normally
+// when the expected state matches the current map entry.
+func TestCleanupCAS_DeletesWhenStateMatches(t *testing.T) {
+	e := newTestEngine()
+	key := "test:user1"
+
+	state := &interactiveState{agentSession: newControllableSession("s1")}
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	e.cleanupInteractiveState(key, state)
+
+	e.interactiveMu.Lock()
+	current := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+
+	if current != nil {
+		t.Fatal("expected state to be deleted when expected pointer matches")
+	}
+}
+
+// TestCleanupCAS_UnconditionalWithoutExpected verifies that cleanup without an
+// expected pointer always deletes (backward compat for command handlers).
+func TestCleanupCAS_UnconditionalWithoutExpected(t *testing.T) {
+	e := newTestEngine()
+	key := "test:user1"
+
+	state := &interactiveState{agentSession: newControllableSession("s1")}
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	// No expected pointer — unconditional cleanup (used by /new, /switch).
+	e.cleanupInteractiveState(key)
+
+	e.interactiveMu.Lock()
+	current := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+
+	if current != nil {
+		t.Fatal("expected unconditional cleanup to delete state")
+	}
+}
+
+// TestSessionMismatch_RecyclesStaleAgent verifies that getOrCreateInteractiveStateWith
+// detects when the running agent session ID differs from the active Session's
+// AgentSessionID and creates a fresh agent instead of reusing the stale one.
+func TestSessionMismatch_RecyclesStaleAgent(t *testing.T) {
+	newSess := newControllableSession("new-agent-id")
+	agent := &controllableAgent{nextSession: newSess}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+
+	// Seed a live agent session with ID "old-agent-id".
+	oldSess := newControllableSession("old-agent-id")
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{
+		agentSession: oldSess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Unlock()
+
+	// The active Session now wants a DIFFERENT agent session ID.
+	session := &Session{AgentSessionID: "new-agent-id"}
+
+	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, nil)
+
+	if state.agentSession == oldSess {
+		t.Fatal("expected stale agent session to be replaced")
+	}
+	if state.agentSession != newSess {
+		t.Fatal("expected new agent session from StartSession")
+	}
+
+	// Old session should be closed asynchronously.
+	select {
+	case <-oldSess.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("old agent session was not closed after mismatch")
+	}
+}
+
+// TestSessionMismatch_DoesNotLeakQuiet verifies that after a session mismatch,
+// the new state gets defaultQuiet instead of inheriting quiet from the stale state.
+func TestSessionMismatch_DoesNotLeakQuiet(t *testing.T) {
+	agent := &controllableAgent{nextSession: newControllableSession("new-id")}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+
+	// Seed a stale state with quiet=true.
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{
+		agentSession: newControllableSession("old-id"),
+		platform:     p,
+		replyCtx:     "ctx",
+		quiet:        true,
+	}
+	e.interactiveMu.Unlock()
+
+	// Active session wants "new-id", which mismatches "old-id".
+	session := &Session{AgentSessionID: "new-id"}
+
+	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, nil)
+
+	state.mu.Lock()
+	q := state.quiet
+	state.mu.Unlock()
+	if q {
+		t.Fatal("quiet leaked from stale state into replacement — ok=false fix not working")
+	}
+}
+
+// TestSessionMismatch_ReusesWhenIDsMatch verifies that getOrCreateInteractiveStateWith
+// returns the existing state when agent session IDs match (no unnecessary recycling).
+func TestSessionMismatch_ReusesWhenIDsMatch(t *testing.T) {
+	agent := &controllableAgent{}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+
+	existingSess := newControllableSession("matching-id")
+	existingState := &interactiveState{
+		agentSession: existingSess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = existingState
+	e.interactiveMu.Unlock()
+
+	session := &Session{AgentSessionID: "matching-id"}
+
+	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, nil)
+	if state != existingState {
+		t.Fatal("expected existing state to be reused when session IDs match")
+	}
+}
+
+// TestSessionIDWriteback_ImmediateAfterStartSession verifies that after
+// StartSession, the agent's CurrentSessionID is immediately written back
+// to the Session's AgentSessionID when it was previously empty.
+func TestSessionIDWriteback_ImmediateAfterStartSession(t *testing.T) {
+	sess := newControllableSession("agent-uuid-123")
+	agent := &controllableAgent{nextSession: sess}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	session := &Session{AgentSessionID: ""} // empty — no prior binding
+
+	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, nil)
+
+	session.mu.Lock()
+	got := session.AgentSessionID
+	session.mu.Unlock()
+
+	if got != "agent-uuid-123" {
+		t.Fatalf("AgentSessionID = %q, want %q — immediate writeback not working", got, "agent-uuid-123")
+	}
+}
+
+// TestSessionIDWriteback_DoesNotOverwriteExisting verifies that immediate
+// writeback does not clobber an existing AgentSessionID (e.g. from --resume).
+func TestSessionIDWriteback_DoesNotOverwriteExisting(t *testing.T) {
+	sess := newControllableSession("new-uuid")
+	agent := &controllableAgent{nextSession: sess}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	session := &Session{AgentSessionID: "existing-uuid"}
+
+	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, nil)
+
+	session.mu.Lock()
+	got := session.AgentSessionID
+	session.mu.Unlock()
+
+	if got != "existing-uuid" {
+		t.Fatalf("AgentSessionID = %q, want %q — writeback should not overwrite", got, "existing-uuid")
+	}
+}
+
+// TestStaleGoroutineCleanup_RaceSimulation simulates the full race scenario:
+// old turn still processing → /new creates new Session → new turn starts →
+// old turn exits and calls cleanup. Verifies the new state survives.
+func TestStaleGoroutineCleanup_RaceSimulation(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	newSess := newControllableSession("new-agent")
+	agent := &controllableAgent{nextSession: newSess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+
+	// Step 1: Old turn created state S1 with old agent.
+	oldSess := newControllableSession("old-agent")
+	oldState := &interactiveState{
+		agentSession: oldSess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = oldState
+	e.interactiveMu.Unlock()
+
+	// Step 2: /new runs — unconditional cleanup deletes S1.
+	e.cleanupInteractiveState(key)
+
+	// Step 3: New turn creates Session B and calls getOrCreateInteractiveStateWith.
+	sessionB := &Session{AgentSessionID: ""}
+	newState := e.getOrCreateInteractiveStateWith(key, p, "ctx", sessionB, nil)
+
+	// Verify S2 is in the map.
+	e.interactiveMu.Lock()
+	current := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	if current != newState {
+		t.Fatal("new state not in map")
+	}
+
+	// Step 4: Old goroutine exits and calls cleanup with OLD state pointer.
+	// This simulates processInteractiveEvents channelClosed path.
+	e.cleanupInteractiveState(key, oldState)
+
+	// Verify: new state must survive.
+	e.interactiveMu.Lock()
+	afterCleanup := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+
+	if afterCleanup != newState {
+		t.Fatal("stale goroutine's cleanup deleted the replacement state — CAS not working")
+	}
+	if newState.agentSession.Alive() != true {
+		t.Fatal("replacement agent session was killed by stale cleanup")
+	}
+}

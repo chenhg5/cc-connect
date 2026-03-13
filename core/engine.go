@@ -1139,7 +1139,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		slog.Error("failed to send prompt", "error", err)
 
 		if !state.agentSession.Alive() {
-			e.cleanupInteractiveState(interactiveKey)
+			e.cleanupInteractiveState(interactiveKey, state)
 			e.send(p, msg.ReplyCtx, e.i18n.T(MsgSessionRestarting))
 
 			state = e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, agentOverride)
@@ -1232,7 +1232,27 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 
 	state, ok := e.interactiveStates[sessionKey]
 	if ok && state.agentSession != nil && state.agentSession.Alive() {
-		return state
+		// Verify the running agent session matches the current active session.
+		// After /new or /switch the active session changes, but the old agent
+		// process may still be alive. Reusing it would send messages to the
+		// wrong conversation context.
+		session.mu.Lock()
+		wantID := session.AgentSessionID
+		session.mu.Unlock()
+		currentID := state.agentSession.CurrentSessionID()
+		if wantID == "" || currentID == "" || wantID == currentID {
+			return state
+		}
+		// Active session has changed — tear down the stale agent so we can
+		// start a new one that matches the current session below.
+		slog.Info("interactive session mismatch, recycling",
+			"session_key", sessionKey,
+			"want_agent_session", wantID,
+			"have_agent_session", currentID,
+		)
+		go state.agentSession.Close()
+		delete(e.interactiveStates, sessionKey)
+		ok = false // prevent reading stale settings below
 	}
 
 	// Preserve quiet setting from existing state (e.g. set via /quiet before session started)
@@ -1287,6 +1307,19 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		slog.Warn("slow agent session start", "elapsed", startElapsed, "agent", agent.Name(), "session_id", session.AgentSessionID)
 	}
 
+	// Immediately capture the agent-side session ID so that if the agent
+	// process crashes before emitting its first session_id event we still
+	// have the binding. The relay path already does this (see HandleRelay);
+	// the interactive path was missing it, leaving a window where the local
+	// session could lose its agent binding.
+	if newID := agentSession.CurrentSessionID(); newID != "" {
+		session.mu.Lock()
+		if session.AgentSessionID == "" {
+			session.AgentSessionID = newID
+		}
+		session.mu.Unlock()
+	}
+
 	state = &interactiveState{
 		agentSession: agentSession,
 		platform:     p,
@@ -1299,9 +1332,19 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	return state
 }
 
-func (e *Engine) cleanupInteractiveState(sessionKey string) {
+// cleanupInteractiveState removes the interactive state for the given session key
+// and closes its agent session. When an expected state is provided, cleanup is
+// skipped if the map entry has been replaced by a different state — this prevents
+// a stale goroutine (still running after /new created a fresh Session object and
+// a new turn started on it) from accidentally destroying the replacement state.
+func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interactiveState) {
 	e.interactiveMu.Lock()
 	state, ok := e.interactiveStates[sessionKey]
+	if len(expected) > 0 && expected[0] != nil && state != expected[0] {
+		// Another turn has already replaced the state — skip cleanup.
+		e.interactiveMu.Unlock()
+		return
+	}
 	delete(e.interactiveStates, sessionKey)
 	e.interactiveMu.Unlock()
 
@@ -1366,7 +1409,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			replyCtx := state.replyCtx
 			state.mu.Unlock()
 			e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out (no response)"))
-			e.cleanupInteractiveState(sessionKey)
+			e.cleanupInteractiveState(sessionKey, state)
 			return
 		case <-e.ctx.Done():
 			return
@@ -1584,7 +1627,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 channelClosed:
 	// Channel closed - process exited unexpectedly
 	slog.Warn("agent process exited", "session_key", sessionKey)
-	e.cleanupInteractiveState(sessionKey)
+	e.cleanupInteractiveState(sessionKey, state)
 
 	if len(textParts) > 0 {
 		state.mu.Lock()
@@ -3635,7 +3678,7 @@ func (e *Engine) processCompressEvents(state *interactiveState, sessionKey strin
 		select {
 		case event, ok = <-events:
 			if !ok {
-				e.cleanupInteractiveState(sessionKey)
+				e.cleanupInteractiveState(sessionKey, state)
 				if len(textParts) > 0 {
 					e.send(p, replyCtx, strings.Join(textParts, ""))
 				} else {
@@ -3645,7 +3688,7 @@ func (e *Engine) processCompressEvents(state *interactiveState, sessionKey strin
 			}
 		case <-idleCh:
 			e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "compress timed out"))
-			e.cleanupInteractiveState(sessionKey)
+			e.cleanupInteractiveState(sessionKey, state)
 			return
 		case <-e.ctx.Done():
 			return
