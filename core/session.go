@@ -50,6 +50,33 @@ func (s *Session) AddHistory(role, content string) {
 	})
 }
 
+// SetAgentInfo atomically sets the agent session ID and name.
+func (s *Session) SetAgentInfo(agentSessionID, name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.AgentSessionID = agentSessionID
+	s.Name = name
+}
+
+// SetAgentSessionID atomically sets the agent session ID.
+func (s *Session) SetAgentSessionID(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.AgentSessionID = id
+}
+
+// CompareAndSetAgentSessionID sets the agent session ID only if it is currently empty.
+// Returns true if the value was set, false if it was already non-empty.
+func (s *Session) CompareAndSetAgentSessionID(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.AgentSessionID != "" {
+		return false
+	}
+	s.AgentSessionID = id
+	return true
+}
+
 func (s *Session) ClearHistory() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
