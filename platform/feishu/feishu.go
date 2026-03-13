@@ -1342,6 +1342,10 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 
 // UpdateMessage edits an existing card message identified by previewHandle.
 // Uses the Patch API (HTTP PATCH) which is required for interactive card messages.
+//
+// Feishu's Patch API does not properly render native table components with
+// pagination. When the card contains table elements, this method deletes the
+// existing message and creates a new one via the Create API instead.
 func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content string) error {
 	h, ok := previewHandle.(*feishuPreviewHandle)
 	if !ok {
@@ -1353,6 +1357,12 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 		processed = preprocessFeishuMarkdown(content)
 	}
 	cardJSON := buildCardJSON(sanitizeMarkdownURLs(processed))
+
+	// Native table components require Create API for proper pagination rendering.
+	if strings.Contains(cardJSON, `"tag":"table"`) {
+		return p.recreateCardMessage(ctx, h, cardJSON)
+	}
+
 	resp, err := p.client.Im.Message.Patch(ctx, larkim.NewPatchMessageReqBuilder().
 		MessageId(h.messageID).
 		Body(larkim.NewPatchMessageReqBodyBuilder().
@@ -1364,6 +1374,35 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 	}
 	if !resp.Success() {
 		return fmt.Errorf("%s: patch message code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+	}
+	return nil
+}
+
+// recreateCardMessage deletes an existing card message and creates a new one.
+// This works around Feishu's Patch API not rendering native table components
+// with pagination. The handle's messageID is updated to the new message.
+func (p *Platform) recreateCardMessage(ctx context.Context, h *feishuPreviewHandle, cardJSON string) error {
+	// Delete old message (best effort — may already be gone).
+	_, _ = p.client.Im.Message.Delete(ctx, larkim.NewDeleteMessageReqBuilder().
+		MessageId(h.messageID).
+		Build())
+
+	resp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
+		ReceiveIdType(larkim.ReceiveIdTypeChatId).
+		Body(larkim.NewCreateMessageReqBodyBuilder().
+			ReceiveId(h.chatID).
+			MsgType(larkim.MsgTypeInteractive).
+			Content(cardJSON).
+			Build()).
+		Build())
+	if err != nil {
+		return fmt.Errorf("%s: recreate card: %w", p.tag(), err)
+	}
+	if !resp.Success() {
+		return fmt.Errorf("%s: recreate card code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+	}
+	if resp.Data != nil && resp.Data.MessageId != nil {
+		h.messageID = *resp.Data.MessageId
 	}
 	return nil
 }

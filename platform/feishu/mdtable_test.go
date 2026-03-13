@@ -198,6 +198,27 @@ func TestMdTableToCardElements_HeaderOnlyTable(t *testing.T) {
 	}
 }
 
+func TestBuildCardJSON_FullOutput(t *testing.T) {
+	content := "**翻页测试**\n\n| 成员 | 领域 | 待办 | 处理中 | 完成 | 高优 |\n|------|------|------|--------|------|------|\n| 张三 | 结构 | 5 | 3 | 2 | 1 |\n| 李四 | 软件 | 8 | 4 | 1 | 2 |\n| 王五 | 测试 | 3 | 2 | 3 | 0 |\n| 赵六 | 硬件 | 6 | 5 | 0 | 3 |\n| 陈七 | 结构 | 4 | 1 | 4 | 0 |\n| 刘八 | 软件 | 7 | 3 | 2 | 2 |\n| 孙九 | 测试 | 2 | 6 | 1 | 1 |\n| 周十 | 硬件 | 9 | 2 | 3 | 4 |"
+	result := buildCardJSON(content)
+	t.Logf("Full card JSON:\n%s", result)
+
+	var card map[string]any
+	if err := json.Unmarshal([]byte(result), &card); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	body := card["body"].(map[string]any)
+	elements := body["elements"].([]any)
+	if len(elements) != 2 {
+		t.Fatalf("expected 2 elements (markdown + table), got %d", len(elements))
+	}
+	table := elements[1].(map[string]any)
+	rows := table["rows"].([]any)
+	if len(rows) != 8 {
+		t.Errorf("expected 8 rows, got %d", len(rows))
+	}
+}
+
 func TestBuildCardJSON_WithTable(t *testing.T) {
 	content := "**Results**\n\n| X | Y |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |"
 	result := buildCardJSON(content)
