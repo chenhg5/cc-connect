@@ -202,6 +202,7 @@ type interactiveState struct {
 	quiet        bool // when true, suppress thinking and tool progress for this session
 	fromVoice    bool // true if current turn originated from voice transcription
 	deleteMode   *deleteModeState
+	inputTokens  int  // last known input_tokens from result event (context size proxy)
 }
 
 type deleteModeState struct {
@@ -210,6 +211,16 @@ type deleteModeState struct {
 	phase       string
 	hint        string
 	result      string
+}
+
+// contextIndicator returns a short suffix like "\n[ctx: 42%]" showing how much
+// of the 200k context window has been consumed, or "" if unknown.
+func contextIndicator(inputTokens int) string {
+	if inputTokens <= 0 {
+		return ""
+	}
+	pct := inputTokens * 100 / 200_000
+	return fmt.Sprintf("\n[ctx: %d%%]", pct)
 }
 
 // pendingPermission represents a permission request waiting for user response.
@@ -1450,7 +1461,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if !quiet && event.Content != "" {
 				sp.freeze()
 				preview := truncateIf(event.Content, e.display.ThinkingMaxLen)
-				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgThinking), preview))
+				state.mu.Lock()
+				tokens := state.inputTokens
+				state.mu.Unlock()
+				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgThinking), preview)+contextIndicator(tokens))
 			}
 
 		case EventToolUse:
@@ -1466,7 +1480,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				} else {
 					formattedInput = fmt.Sprintf("`%s`", inputPreview)
 				}
-				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgTool), toolCount, event.ToolName, formattedInput))
+				state.mu.Lock()
+				tokens := state.inputTokens
+				state.mu.Unlock()
+				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgTool), toolCount, event.ToolName, formattedInput)+contextIndicator(tokens))
 			}
 
 		case EventText:
@@ -1561,6 +1578,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				session.mu.Unlock()
 			}
 
+			// Track context consumption
+			if event.InputTokens > 0 {
+				state.mu.Lock()
+				state.inputTokens = event.InputTokens
+				state.mu.Unlock()
+			}
+
 			fullResponse := event.Content
 			if fullResponse == "" && len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")
@@ -1568,6 +1592,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if fullResponse == "" {
 				fullResponse = e.i18n.T(MsgEmptyResponse)
 			}
+
+			// Append context indicator
+			fullResponse += contextIndicator(event.InputTokens)
 
 			session.AddHistory("assistant", fullResponse)
 			e.sessions.Save()
