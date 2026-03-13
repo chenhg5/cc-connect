@@ -71,91 +71,6 @@ func New(opts map[string]any) (core.Platform, error) {
 
 func (p *Platform) Name() string { return "discord" }
 
-// builtinSlashCommands defines the Application Commands registered with Discord.
-func builtinSlashCommands() []*discordgo.ApplicationCommand {
-	optStr := func(name, desc string, required bool) *discordgo.ApplicationCommandOption {
-		return &discordgo.ApplicationCommandOption{
-			Type: discordgo.ApplicationCommandOptionString, Name: name, Description: desc, Required: required,
-		}
-	}
-	optInt := func(name, desc string) *discordgo.ApplicationCommandOption {
-		return &discordgo.ApplicationCommandOption{
-			Type: discordgo.ApplicationCommandOptionInteger, Name: name, Description: desc, Required: false,
-		}
-	}
-
-	return []*discordgo.ApplicationCommand{
-		{Name: "help", Description: "Show available commands"},
-		{Name: "new", Description: "Start a new session", Options: []*discordgo.ApplicationCommandOption{
-			optStr("name", "Session name", false),
-		}},
-		{Name: "list", Description: "List agent sessions"},
-		{Name: "cc-switch", Description: "Resume an existing session", Options: []*discordgo.ApplicationCommandOption{
-			optStr("id", "Session number or ID prefix", true),
-		}},
-		{Name: "delete", Description: "Delete a session by list number", Options: []*discordgo.ApplicationCommandOption{
-			optStr("target", "Session number or ID prefix", true),
-		}},
-		{Name: "name", Description: "Name a session for easy identification", Options: []*discordgo.ApplicationCommandOption{
-			optStr("args", "e.g. my-project, or: 2 my-project", true),
-		}},
-		{Name: "current", Description: "Show current active session"},
-		{Name: "status", Description: "Show system status"},
-		{Name: "history", Description: "Show recent messages", Options: []*discordgo.ApplicationCommandOption{
-			optInt("count", "Number of messages (default 10)"),
-		}},
-		{Name: "model", Description: "View or switch model", Options: []*discordgo.ApplicationCommandOption{
-			optStr("name", "Model name or number", false),
-		}},
-		{Name: "reasoning", Description: "View or switch reasoning effort", Options: []*discordgo.ApplicationCommandOption{
-			optStr("level", "Reasoning level or number", false),
-		}},
-		{Name: "mode", Description: "View or switch permission mode", Options: []*discordgo.ApplicationCommandOption{
-			optStr("name", "Mode: default / edit / plan / yolo", false),
-		}},
-		{Name: "lang", Description: "View or switch language", Options: []*discordgo.ApplicationCommandOption{
-			optStr("language", "en / zh / zh-TW / ja / es / auto", false),
-		}},
-		{Name: "quiet", Description: "Toggle thinking/tool progress messages"},
-		{Name: "compress", Description: "Compress conversation context"},
-		{Name: "cc-stop", Description: "Stop current execution"},
-		{Name: "version", Description: "Show cc-connect version"},
-		{Name: "doctor", Description: "Run system diagnostics"},
-		{Name: "upgrade", Description: "Check for updates and self-update", Options: []*discordgo.ApplicationCommandOption{
-			optStr("action", "confirm to install update", false),
-		}},
-		{Name: "restart", Description: "Restart cc-connect service"},
-		{Name: "skills", Description: "List agent skills"},
-		{Name: "allow", Description: "Pre-allow a tool for next session", Options: []*discordgo.ApplicationCommandOption{
-			optStr("tool", "Tool name (e.g. Bash)", false),
-		}},
-		{Name: "config", Description: "View or update runtime configuration", Options: []*discordgo.ApplicationCommandOption{
-			optStr("args", "e.g. thinking_max_len 200", false),
-		}},
-		{Name: "provider", Description: "Manage API providers", Options: []*discordgo.ApplicationCommandOption{
-			optStr("args", "e.g. list, switch <name>, add ...", false),
-		}},
-		{Name: "memory", Description: "View or edit agent memory files", Options: []*discordgo.ApplicationCommandOption{
-			optStr("args", "e.g. add <text>, global, global add <text>", false),
-		}},
-		{Name: "cron", Description: "Manage scheduled tasks", Options: []*discordgo.ApplicationCommandOption{
-			optStr("args", "e.g. list, add 0 6 * * * <prompt>", false),
-		}},
-		{Name: "commands", Description: "Manage custom slash commands", Options: []*discordgo.ApplicationCommandOption{
-			optStr("args", "e.g. list, add <name> <prompt>, del <name>", false),
-		}},
-		{Name: "alias", Description: "Manage command aliases", Options: []*discordgo.ApplicationCommandOption{
-			optStr("args", "e.g. list, add 帮助 /help, del 帮助", false),
-		}},
-	}
-}
-
-// slashNameToEngine maps Discord command names that differ from engine names.
-var slashNameToEngine = map[string]string{
-	"cc-switch": "switch",
-	"cc-stop":   "stop",
-}
-
 func (p *Platform) makeSessionKey(channelID string, userID string) string {
 	if p.shareSessionInChannel {
 		return fmt.Sprintf("discord:%s", channelID)
@@ -336,25 +251,6 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	return nil
 }
 
-// registerSlashCommands registers all built-in commands with the Discord API.
-func (p *Platform) registerSlashCommands() {
-	cmds := builtinSlashCommands()
-	registered, err := p.session.ApplicationCommandBulkOverwrite(p.appID, p.guildID, cmds)
-	if err != nil {
-		slog.Error("discord: failed to register slash commands — "+
-			"make sure the bot was invited with BOTH 'bot' AND 'applications.commands' OAuth2 scopes. "+
-			"Re-invite URL: https://discord.com/oauth2/authorize?client_id="+p.appID+
-			"&scope=bot+applications.commands&permissions=2147485696",
-			"error", err, "guild_id", p.guildID)
-		return
-	}
-	scope := "global (may take up to 1h to appear — set guild_id for instant)"
-	if p.guildID != "" {
-		scope = "guild:" + p.guildID
-	}
-	slog.Info("discord: registered slash commands", "count", len(registered), "scope", scope)
-}
-
 // handleInteraction processes an incoming Discord slash command interaction.
 func (p *Platform) handleInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	if i.Type != discordgo.InteractionApplicationCommand {
@@ -414,10 +310,6 @@ func (p *Platform) handleInteraction(s *discordgo.Session, i *discordgo.Interact
 // (e.g. "/config thinking_max_len 200") that the engine can parse.
 func reconstructCommand(data discordgo.ApplicationCommandInteractionData) string {
 	name := data.Name
-	if engineName, ok := slashNameToEngine[name]; ok {
-		name = engineName
-	}
-
 	var parts []string
 	parts = append(parts, "/"+name)
 	for _, opt := range data.Options {
