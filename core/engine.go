@@ -2060,8 +2060,10 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	slog.Info("cmdSwitch: cleanup done", "session_key", msg.SessionKey)
 
 	session := sessions.GetOrCreateActive(msg.SessionKey)
+	session.mu.Lock()
 	session.AgentSessionID = matched.ID
 	session.Name = matched.Summary
+	session.mu.Unlock()
 	session.ClearHistory()
 	sessions.Save()
 
@@ -4463,8 +4465,10 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 		e.cleanupInteractiveState(interactiveKey)
 		session := sessions.GetOrCreateActive(sessionKey)
+		session.mu.Lock()
 		session.AgentSessionID = matched.ID
 		session.Name = matched.Summary
+		session.mu.Unlock()
 		session.ClearHistory()
 		sessions.Save()
 
@@ -6517,9 +6521,13 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 		return "", fmt.Errorf("start relay session: %w", err)
 	}
 
+	session.mu.Lock()
 	if session.AgentSessionID == "" {
 		session.AgentSessionID = agentSession.CurrentSessionID()
+		session.mu.Unlock()
 		e.sessions.Save()
+	} else {
+		session.mu.Unlock()
 	}
 
 	if err := agentSession.Send(message, nil, nil); err != nil {
@@ -6536,13 +6544,21 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 			if event.Content != "" {
 				textParts = append(textParts, event.Content)
 			}
-			if event.SessionID != "" && session.AgentSessionID == "" {
-				session.AgentSessionID = event.SessionID
-				e.sessions.Save()
+			if event.SessionID != "" {
+				session.mu.Lock()
+				if session.AgentSessionID == "" {
+					session.AgentSessionID = event.SessionID
+					session.mu.Unlock()
+					e.sessions.Save()
+				} else {
+					session.mu.Unlock()
+				}
 			}
 		case EventResult:
 			if event.SessionID != "" {
+				session.mu.Lock()
 				session.AgentSessionID = event.SessionID
+				session.mu.Unlock()
 				e.sessions.Save()
 			}
 			resp := event.Content
