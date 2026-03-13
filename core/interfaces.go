@@ -34,20 +34,8 @@ type SessionEnvInjector interface {
 // cc-connect capabilities (cron scheduling, etc.).
 // The prompt is designed to be appended to the agent's existing system prompt.
 func AgentSystemPrompt() string {
-	return `You are running inside cc-connect, a bridge that connects you to messaging platforms (currently Slack).
+	return `You are running inside cc-connect, a bridge that connects you to messaging platforms.
 Your responses are automatically delivered to the user — just reply normally, do NOT use cc-connect send.
-
-## Formatting
-You are responding in Slack. Use Slack's mrkdwn format, NOT standard Markdown:
-- Bold: *text* (single asterisks, not double)
-- Italic: _text_
-- Strikethrough: ~text~
-- Code: ` + "`text`" + `
-- Code block: ` + "```text```" + `
-- Blockquote: > text
-- Lists: use bullet (•) or numbered lists normally
-- Links: <url|display text>
-- Do NOT use ## headings — Slack does not render them. Use *bold text* on its own line instead.
 
 ## Available tools
 
@@ -78,6 +66,24 @@ This sends a message to the target bot and waits for its response (printed to st
 The conversation is visible in the group chat and each bot maintains its own relay session.
 
 Environment variables CC_PROJECT and CC_SESSION_KEY are already set, so the relay knows which group chat to use.
+
+### Group chat history
+When the user asks you to summarize, review, or recall recent group chat messages (e.g. "总结群聊", "summarize the chat", "大家聊了什么"), use:
+
+  cc-connect chatlog
+
+This prints all recorded group chat messages. Options:
+  cc-connect chatlog -n 100    # last 100 messages
+
+Environment variables CC_PROJECT and CC_SESSION_KEY are already set.
+Use this output to summarize or answer questions about recent group discussions.
+
+IMPORTANT: After providing a summary, always ask the user whether they want to clear the chat history.
+If the user confirms, run:
+
+  cc-connect chatlog-clear
+
+This clears all recorded messages for the current group chat.
 `
 }
 
@@ -233,47 +239,6 @@ type ModelOption struct {
 	Desc string // short description (display_name or empty)
 }
 
-// UsageReporter is an optional interface for agents that can report account or
-// model quota usage from their backing provider.
-type UsageReporter interface {
-	GetUsage(ctx context.Context) (*UsageReport, error)
-}
-
-// UsageReport is a provider-neutral quota snapshot returned by UsageReporter.
-type UsageReport struct {
-	Provider  string
-	AccountID string
-	UserID    string
-	Email     string
-	Plan      string
-	Buckets   []UsageBucket
-	Credits   *UsageCredits
-}
-
-// UsageBucket groups one logical quota, such as standard requests or code review.
-type UsageBucket struct {
-	Name         string
-	Allowed      bool
-	LimitReached bool
-	Windows      []UsageWindow
-}
-
-// UsageWindow describes a single quota window.
-type UsageWindow struct {
-	Name              string
-	UsedPercent       int
-	WindowSeconds     int
-	ResetAfterSeconds int
-	ResetAtUnix       int64
-}
-
-// UsageCredits contains optional credit/balance metadata.
-type UsageCredits struct {
-	HasCredits bool
-	Unlimited  bool
-	Balance    string
-}
-
 // ContextCompressor is an optional interface for agents that support
 // compressing/compacting the conversation context within a running session.
 // CompressCommand returns the native slash command (e.g. "/compact", "/compress")
@@ -328,10 +293,4 @@ type BotCommandInfo struct {
 // registering commands to the platform's native menu (e.g. Telegram's setMyCommands).
 type CommandRegistrar interface {
 	RegisterCommands(commands []BotCommandInfo) error
-}
-
-// ChannelNameResolver is an optional interface for platforms that can resolve
-// channel IDs to human-readable names.
-type ChannelNameResolver interface {
-	ResolveChannelName(channelID string) (string, error)
 }

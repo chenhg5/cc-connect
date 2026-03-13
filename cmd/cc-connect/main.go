@@ -72,6 +72,12 @@ func main() {
 		case "relay":
 			runRelay(os.Args[2:])
 			return
+		case "chatlog":
+			runChatlog(os.Args[2:])
+			return
+		case "chatlog-clear":
+			runChatlogClear(os.Args[2:])
+			return
 		case "daemon":
 			runDaemon(os.Args[2:])
 			return
@@ -194,22 +200,6 @@ func main() {
 
 		engine := core.NewEngine(proj.Name, agent, platforms, sessionFile, lang)
 
-		// Wire multi-workspace mode
-		if proj.Mode == "multi-workspace" {
-			baseDir := proj.BaseDir
-			if strings.HasPrefix(baseDir, "~/") {
-				home, _ := os.UserHomeDir()
-				baseDir = filepath.Join(home, baseDir[2:])
-			}
-			if err := os.MkdirAll(baseDir, 0o755); err != nil {
-				slog.Error("failed to create base_dir", "path", baseDir, "err", err)
-				continue
-			}
-			bindingStore := filepath.Join(cfg.DataDir, "workspace_bindings.json")
-			engine.SetMultiWorkspace(baseDir, bindingStore)
-			slog.Info("multi-workspace mode enabled", "project", proj.Name, "base_dir", baseDir)
-		}
-
 		// Wire global custom commands
 		for _, c := range cfg.Commands {
 			engine.AddCommand(c.Name, c.Description, c.Prompt, c.Exec, c.WorkDir, "config")
@@ -319,11 +309,6 @@ func main() {
 			engine.SetDefaultQuiet(*proj.Quiet)
 		} else if cfg.Quiet != nil {
 			engine.SetDefaultQuiet(*cfg.Quiet)
-		}
-
-		// Wire sender injection
-		if proj.InjectSender != nil {
-			engine.SetInjectSender(*proj.InjectSender)
 		}
 
 		// Wire speech-to-text if enabled
@@ -784,9 +769,6 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	} else {
 		engine.SetDefaultQuiet(false)
 	}
-
-	// Reload sender injection
-	engine.SetInjectSender(proj.InjectSender != nil && *proj.InjectSender)
 
 	// Reload providers
 	if ps, ok := engine.GetAgent().(core.ProviderSwitcher); ok {

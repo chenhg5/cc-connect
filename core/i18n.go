@@ -229,8 +229,6 @@ const (
 	MsgMemoryAdded        MsgKey = "memory_added"
 	MsgMemoryAddFailed    MsgKey = "memory_add_failed"
 	MsgMemoryAddUsage     MsgKey = "memory_add_usage"
-	MsgUsageNotSupported  MsgKey = "usage_not_supported"
-	MsgUsageFetchFailed   MsgKey = "usage_fetch_failed"
 
 	// Inline strings previously hardcoded in engine.go
 	MsgStatusMode    MsgKey = "status_mode"
@@ -290,9 +288,9 @@ const (
 	MsgPermBtnAllow    MsgKey = "perm_btn_allow"
 	MsgPermBtnDeny     MsgKey = "perm_btn_deny"
 	MsgPermBtnAllowAll MsgKey = "perm_btn_allow_all"
-	MsgPermCardTitle   MsgKey = "perm_card_title"
-	MsgPermCardBody    MsgKey = "perm_card_body"
-	MsgPermCardNote    MsgKey = "perm_card_note"
+	MsgPermCardTitle MsgKey = "perm_card_title"
+	MsgPermCardBody  MsgKey = "perm_card_body"
+	MsgPermCardNote  MsgKey = "perm_card_note"
 
 	MsgCommandsTitle        MsgKey = "commands_title"
 	MsgCommandsEmpty        MsgKey = "commands_empty"
@@ -424,28 +422,10 @@ const (
 	MsgBuiltinCmdUpgrade   MsgKey = "upgrade"
 	MsgBuiltinCmdRestart   MsgKey = "restart"
 	MsgBuiltinCmdStatus    MsgKey = "status"
-	MsgBuiltinCmdUsage     MsgKey = "usage"
 	MsgBuiltinCmdVersion   MsgKey = "version"
 	MsgBuiltinCmdHelp      MsgKey = "help"
 	MsgBuiltinCmdBind      MsgKey = "bind"
 	MsgBuiltinCmdShell     MsgKey = "shell"
-
-	// Multi-workspace messages
-	MsgWsNotEnabled        MsgKey = "ws_not_enabled"
-	MsgWsNoBinding         MsgKey = "ws_no_binding"
-	MsgWsInfo              MsgKey = "ws_info"
-	MsgWsInitUsage         MsgKey = "ws_init_usage"
-	MsgWsBindUsage         MsgKey = "ws_bind_usage"
-	MsgWsBindSuccess       MsgKey = "ws_bind_success"
-	MsgWsBindNotFound      MsgKey = "ws_bind_not_found"
-	MsgWsUnbindSuccess     MsgKey = "ws_unbind_success"
-	MsgWsListEmpty         MsgKey = "ws_list_empty"
-	MsgWsListTitle         MsgKey = "ws_list_title"
-	MsgWsNotFoundHint      MsgKey = "ws_not_found_hint"
-	MsgWsResolutionError   MsgKey = "ws_resolution_error"
-	MsgWsCloneProgress     MsgKey = "ws_clone_progress"
-	MsgWsCloneSuccess      MsgKey = "ws_clone_success"
-	MsgWsCloneFailed       MsgKey = "ws_clone_failed"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -681,6 +661,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  View/switch language\n\n" +
 			"/quiet [global]\n  Toggle thinking/tool progress (global = all sessions)\n\n" +
 			"/compress\n  Compress conversation context\n\n" +
+			"/summary [n|duration]\n  Summarize recent group chat messages\n\n" +
 			"/tts [always|voice_only]\n  View/switch text-to-speech mode\n\n" +
 			"/shell <command>\n  Run a shell command and return the output\n\n" +
 			"/stop\n  Stop current execution\n\n" +
@@ -690,7 +671,6 @@ var messages = map[MsgKey]map[Language]string{
 			"/skills\n  List agent skills (from SKILL.md)\n\n" +
 			"/config [get|set|reload] [key] [value]\n  View/update runtime configuration\n\n" +
 			"/doctor\n  Run system diagnostics\n\n" +
-			"/usage\n  Show account/model quota usage\n\n" +
 			"/upgrade\n  Check for updates and self-update\n\n" +
 			"/restart\n  Restart cc-connect service\n\n" +
 			"/status\n  Show system status\n\n" +
@@ -718,6 +698,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  查看/切换语言\n\n" +
 			"/quiet [global]\n  开关思考和工具进度消息（global = 全部会话）\n\n" +
 			"/compress\n  压缩会话上下文\n\n" +
+			"/summary [n|时长]\n  总结最近的群聊消息\n\n" +
 			"/tts [always|voice_only]\n  查看/切换语音合成模式\n\n" +
 			"/shell <命令>\n  执行 Shell 命令并返回结果\n\n" +
 			"/stop\n  停止当前执行\n\n" +
@@ -727,7 +708,6 @@ var messages = map[MsgKey]map[Language]string{
 			"/skills\n  列出 Agent Skills（来自 SKILL.md）\n\n" +
 			"/config [get|set|reload] [key] [value]\n  查看/修改运行时配置\n\n" +
 			"/doctor\n  运行系统诊断\n\n" +
-			"/usage\n  查看账号/模型限额使用情况\n\n" +
 			"/upgrade\n  检查更新并自动升级\n\n" +
 			"/restart\n  重启 cc-connect 服务\n\n" +
 			"/status\n  查看系统状态\n\n" +
@@ -755,6 +735,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  查看/切換語言\n\n" +
 			"/quiet [global]\n  開關思考和工具進度訊息（global = 全部會話）\n\n" +
 			"/compress\n  壓縮會話上下文\n\n" +
+			"/summary [n|時長]\n  總結最近的群聊訊息\n\n" +
 			"/tts [always|voice_only]\n  查看/切換語音合成模式\n\n" +
 			"/shell <命令>\n  執行 Shell 命令並返回結果\n\n" +
 			"/stop\n  停止當前執行\n\n" +
@@ -764,7 +745,6 @@ var messages = map[MsgKey]map[Language]string{
 			"/skills\n  列出 Agent Skills（來自 SKILL.md）\n\n" +
 			"/config [get|set|reload] [key] [value]\n  查看/修改執行階段配置\n\n" +
 			"/doctor\n  執行系統診斷\n\n" +
-			"/usage\n  查看帳號/模型限額使用情況\n\n" +
 			"/upgrade\n  檢查更新並自動升級\n\n" +
 			"/restart\n  重啟 cc-connect 服務\n\n" +
 			"/status\n  查看系統狀態\n\n" +
@@ -791,6 +771,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  言語の表示/切り替え\n\n" +
 			"/quiet [global]\n  思考/ツール進捗メッセージの表示切替（global = 全セッション）\n\n" +
 			"/compress\n  会話コンテキストを圧縮\n\n" +
+			"/summary [n|期間]\n  最近のグループチャットメッセージを要約\n\n" +
 			"/tts [always|voice_only]\n  音声合成モードの表示/切り替え\n\n" +
 			"/shell <コマンド>\n  シェルコマンドを実行して結果を返す\n\n" +
 			"/stop\n  現在の実行を停止\n\n" +
@@ -800,7 +781,6 @@ var messages = map[MsgKey]map[Language]string{
 			"/skills\n  エージェントスキル一覧（SKILL.md から）\n\n" +
 			"/config [get|set|reload] [key] [value]\n  ランタイム設定の表示/変更\n\n" +
 			"/doctor\n  システム診断を実行\n\n" +
-			"/usage\n  アカウント/モデル使用量を表示\n\n" +
 			"/upgrade\n  アップデートを確認して自動更新\n\n" +
 			"/restart\n  cc-connect サービスを再起動\n\n" +
 			"/status\n  システム状態を表示\n\n" +
@@ -827,6 +807,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  Ver/cambiar idioma\n\n" +
 			"/quiet [global]\n  Alternar mensajes de progreso (global = todas las sesiones)\n\n" +
 			"/compress\n  Comprimir contexto de conversación\n\n" +
+			"/summary [n|duración]\n  Resumir mensajes recientes del chat grupal\n\n" +
 			"/tts [always|voice_only]\n  Ver/cambiar modo de síntesis de voz\n\n" +
 			"/shell <comando>\n  Ejecutar un comando shell y devolver la salida\n\n" +
 			"/stop\n  Detener ejecución actual\n\n" +
@@ -836,7 +817,6 @@ var messages = map[MsgKey]map[Language]string{
 			"/skills\n  Listar skills del agente (desde SKILL.md)\n\n" +
 			"/config [get|set|reload] [key] [value]\n  Ver/actualizar configuración en tiempo de ejecución\n\n" +
 			"/doctor\n  Ejecutar diagnósticos del sistema\n\n" +
-			"/usage\n  Mostrar uso de cuota de cuenta/modelo\n\n" +
 			"/upgrade\n  Buscar actualizaciones y auto-actualizar\n\n" +
 			"/restart\n  Reiniciar el servicio cc-connect\n\n" +
 			"/status\n  Mostrar estado del sistema\n\n" +
@@ -952,6 +932,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/alias [add|del] — Command aliases\n" +
 			"/skills — List agent skills\n" +
 			"/compress — Compress context\n" +
+			"/summary — Summarize group chat\n" +
 			"/stop — Stop current execution",
 		LangChinese: "**工具与自动化**\n" +
 			"/shell <命令> — 执行 Shell 命令\n" +
@@ -960,6 +941,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/alias [add|del] — 命令别名\n" +
 			"/skills — 列出 Agent Skills\n" +
 			"/compress — 压缩上下文\n" +
+			"/summary — 总结群聊\n" +
 			"/stop — 停止当前执行",
 		LangTraditionalChinese: "**工具與自動化**\n" +
 			"/shell <命令> — 執行 Shell 命令\n" +
@@ -968,6 +950,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/alias [add|del] — 命令別名\n" +
 			"/skills — 列出 Agent Skills\n" +
 			"/compress — 壓縮上下文\n" +
+			"/summary — 總結群聊\n" +
 			"/stop — 停止當前執行",
 		LangJapanese: "**ツール・自動化**\n" +
 			"/shell <コマンド> — シェルコマンド実行\n" +
@@ -976,6 +959,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/alias [add|del] — コマンドエイリアス\n" +
 			"/skills — エージェントスキル一覧\n" +
 			"/compress — コンテキスト圧縮\n" +
+			"/summary — グループチャット要約\n" +
 			"/stop — 現在の実行を停止",
 		LangSpanish: "**Herramientas y automatización**\n" +
 			"/shell <comando> — Ejecutar comando shell\n" +
@@ -984,13 +968,13 @@ var messages = map[MsgKey]map[Language]string{
 			"/alias [add|del] — Alias de comandos\n" +
 			"/skills — Listar skills del agente\n" +
 			"/compress — Comprimir contexto\n" +
+			"/summary — Resumir chat grupal\n" +
 			"/stop — Detener ejecución actual",
 	},
 	MsgHelpSystemSection: {
 		LangEnglish: "**System**\n" +
 			"/config [get|set|reload] — Runtime configuration\n" +
 			"/doctor — System diagnostics\n" +
-			"/usage — Account/model quota usage\n" +
 			"/upgrade — Check for updates\n" +
 			"/restart — Restart service\n" +
 			"/status — System status\n" +
@@ -998,7 +982,6 @@ var messages = map[MsgKey]map[Language]string{
 		LangChinese: "**系统**\n" +
 			"/config [get|set|reload] — 运行时配置\n" +
 			"/doctor — 系统诊断\n" +
-			"/usage — 账号/模型限额\n" +
 			"/upgrade — 检查更新\n" +
 			"/restart — 重启服务\n" +
 			"/status — 系统状态\n" +
@@ -1006,7 +989,6 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "**系統**\n" +
 			"/config [get|set|reload] — 執行階段配置\n" +
 			"/doctor — 系統診斷\n" +
-			"/usage — 帳號/模型限額\n" +
 			"/upgrade — 檢查更新\n" +
 			"/restart — 重啟服務\n" +
 			"/status — 系統狀態\n" +
@@ -1014,7 +996,6 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese: "**システム**\n" +
 			"/config [get|set|reload] — ランタイム設定\n" +
 			"/doctor — システム診断\n" +
-			"/usage — アカウント/モデル使用量\n" +
 			"/upgrade — アップデート確認\n" +
 			"/restart — サービス再起動\n" +
 			"/status — システム状態\n" +
@@ -1022,7 +1003,6 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish: "**Sistema**\n" +
 			"/config [get|set|reload] — Configuración\n" +
 			"/doctor — Diagnósticos del sistema\n" +
-			"/usage — Uso de cuota de cuenta/modelo\n" +
 			"/upgrade — Buscar actualizaciones\n" +
 			"/restart — Reiniciar servicio\n" +
 			"/status — Estado del sistema\n" +
@@ -1499,20 +1479,6 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 寫入記憶檔案失敗: %v",
 		LangJapanese:           "❌ メモリファイルの書き込みに失敗しました: %v",
 		LangSpanish:            "❌ Error al escribir archivo de memoria: %v",
-	},
-	MsgUsageNotSupported: {
-		LangEnglish:            "Current agent does not support `/usage`.",
-		LangChinese:            "当前 Agent 不支持 `/usage`。",
-		LangTraditionalChinese: "目前 Agent 不支援 `/usage`。",
-		LangJapanese:           "現在のエージェントは `/usage` をサポートしていません。",
-		LangSpanish:            "El agente actual no admite `/usage`.",
-	},
-	MsgUsageFetchFailed: {
-		LangEnglish:            "Failed to fetch usage: %v",
-		LangChinese:            "获取 usage 失败：%v",
-		LangTraditionalChinese: "取得 usage 失敗：%v",
-		LangJapanese:           "usage の取得に失敗しました: %v",
-		LangSpanish:            "No se pudo obtener usage: %v",
 	},
 	MsgMemoryAddUsage: {
 		LangEnglish: "Usage:\n" +
@@ -2687,13 +2653,6 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "システム状態を表示",
 		LangSpanish:            "Mostrar estado del sistema",
 	},
-	MsgBuiltinCmdUsage: {
-		LangEnglish:            "Show account/model quota usage",
-		LangChinese:            "查看账号/模型限额使用情况",
-		LangTraditionalChinese: "查看帳號/模型限額使用情況",
-		LangJapanese:           "アカウント/モデル使用量を表示",
-		LangSpanish:            "Mostrar uso de cuota de cuenta/modelo",
-	},
 	MsgBuiltinCmdVersion: {
 		LangEnglish:            "Show cc-connect version",
 		LangChinese:            "查看 cc-connect 版本",
@@ -2722,112 +2681,12 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "シェルコマンドを実行、引数: <コマンド>",
 		LangSpanish:            "Ejecutar un comando shell, arg: <comando>",
 	},
-
-	// Multi-workspace messages
-	MsgWsNotEnabled: {
-		LangEnglish:            "Workspace commands are only available in multi-workspace mode.",
-		LangChinese:            "工作区命令仅在多工作区模式下可用。",
-		LangTraditionalChinese: "工作區命令僅在多工作區模式下可用。",
-		LangJapanese:           "ワークスペースコマンドはマルチワークスペースモードでのみ使用できます。",
-		LangSpanish:            "Los comandos de workspace solo están disponibles en modo multi-workspace.",
-	},
-	MsgWsNoBinding: {
-		LangEnglish:            "No workspace bound to this channel.",
-		LangChinese:            "此频道未绑定工作区。",
-		LangTraditionalChinese: "此頻道未綁定工作區。",
-		LangJapanese:           "このチャンネルにワークスペースがバインドされていません。",
-		LangSpanish:            "No hay workspace vinculado a este canal.",
-	},
-	MsgWsInfo: {
-		LangEnglish:            "Workspace: `%s`\nBound: %s",
-		LangChinese:            "工作区: `%s`\n绑定时间: %s",
-		LangTraditionalChinese: "工作區: `%s`\n綁定時間: %s",
-		LangJapanese:           "ワークスペース: `%s`\nバインド: %s",
-		LangSpanish:            "Workspace: `%s`\nVinculado: %s",
-	},
-	MsgWsInitUsage: {
-		LangEnglish:            "Usage: `/workspace init <git-url>`",
-		LangChinese:            "用法: `/workspace init <git仓库地址>`",
-		LangTraditionalChinese: "用法: `/workspace init <git倉庫地址>`",
-		LangJapanese:           "使い方: `/workspace init <git-url>`",
-		LangSpanish:            "Uso: `/workspace init <git-url>`",
-	},
-	MsgWsBindUsage: {
-		LangEnglish:            "Usage: `/workspace bind <workspace-name>`",
-		LangChinese:            "用法: `/workspace bind <工作区名称>`",
-		LangTraditionalChinese: "用法: `/workspace bind <工作區名稱>`",
-		LangJapanese:           "使い方: `/workspace bind <ワークスペース名>`",
-		LangSpanish:            "Uso: `/workspace bind <nombre-workspace>`",
-	},
-	MsgWsBindSuccess: {
-		LangEnglish:            "✅ Workspace bound: `%s`",
-		LangChinese:            "✅ 工作区绑定成功: `%s`",
-		LangTraditionalChinese: "✅ 工作區綁定成功: `%s`",
-		LangJapanese:           "✅ ワークスペースをバインドしました: `%s`",
-		LangSpanish:            "✅ Workspace vinculado: `%s`",
-	},
-	MsgWsBindNotFound: {
-		LangEnglish:            "Workspace not found: `%s`",
-		LangChinese:            "工作区不存在: `%s`",
-		LangTraditionalChinese: "工作區不存在: `%s`",
-		LangJapanese:           "ワークスペースが見つかりません: `%s`",
-		LangSpanish:            "Workspace no encontrado: `%s`",
-	},
-	MsgWsUnbindSuccess: {
-		LangEnglish:            "✅ Workspace unbound.",
-		LangChinese:            "✅ 已解除工作区绑定。",
-		LangTraditionalChinese: "✅ 已解除工作區綁定。",
-		LangJapanese:           "✅ ワークスペースのバインドを解除しました。",
-		LangSpanish:            "✅ Workspace desvinculado.",
-	},
-	MsgWsListEmpty: {
-		LangEnglish:            "No workspaces bound.",
-		LangChinese:            "没有绑定的工作区。",
-		LangTraditionalChinese: "沒有綁定的工作區。",
-		LangJapanese:           "バインドされたワークスペースがありません。",
-		LangSpanish:            "No hay workspaces vinculados.",
-	},
-	MsgWsListTitle: {
-		LangEnglish:            "Bound workspaces:",
-		LangChinese:            "已绑定的工作区：",
-		LangTraditionalChinese: "已綁定的工作區：",
-		LangJapanese:           "バインドされたワークスペース：",
-		LangSpanish:            "Workspaces vinculados:",
-	},
-	MsgWsNotFoundHint: {
-		LangEnglish:            "No workspace found for this channel. Send me a git repo URL to clone, or use `/workspace init <url>`.",
-		LangChinese:            "此频道未找到工作区。请发送 git 仓库地址进行克隆，或使用 `/workspace init <仓库地址>`。",
-		LangTraditionalChinese: "此頻道未找到工作區。請發送 git 倉庫地址進行克隆，或使用 `/workspace init <倉庫地址>`。",
-		LangJapanese:           "このチャンネルにワークスペースが見つかりません。gitリポジトリURLを送信するか、`/workspace init <url>` を使用してください。",
-		LangSpanish:            "No se encontró workspace para este canal. Envía una URL de repo git para clonar, o usa `/workspace init <url>`.",
-	},
-	MsgWsResolutionError: {
-		LangEnglish:            "Workspace resolution error: %v",
-		LangChinese:            "工作区解析错误: %v",
-		LangTraditionalChinese: "工作區解析錯誤: %v",
-		LangJapanese:           "ワークスペース解決エラー: %v",
-		LangSpanish:            "Error de resolución de workspace: %v",
-	},
-	MsgWsCloneProgress: {
-		LangEnglish:            "🔄 Cloning repository: %s",
-		LangChinese:            "🔄 正在克隆仓库: %s",
-		LangTraditionalChinese: "🔄 正在克隆倉庫: %s",
-		LangJapanese:           "🔄 リポジトリをクローン中: %s",
-		LangSpanish:            "🔄 Clonando repositorio: %s",
-	},
-	MsgWsCloneSuccess: {
-		LangEnglish:            "✅ Repository cloned successfully: `%s`",
-		LangChinese:            "✅ 仓库克隆成功: `%s`",
-		LangTraditionalChinese: "✅ 倉庫克隆成功: `%s`",
-		LangJapanese:           "✅ リポジトリのクローンに成功しました: `%s`",
-		LangSpanish:            "✅ Repositorio clonado exitosamente: `%s`",
-	},
-	MsgWsCloneFailed: {
-		LangEnglish:            "❌ Failed to clone repository: %v",
-		LangChinese:            "❌ 克隆仓库失败: %v",
-		LangTraditionalChinese: "❌ 克隆倉庫失敗: %v",
-		LangJapanese:           "❌ リポジトリのクローンに失敗しました: %v",
-		LangSpanish:            "❌ Error al clonar repositorio: %v",
+	MsgBuiltinCmdTTS: {
+		LangEnglish:            "Text-to-speech settings",
+		LangChinese:            "语音合成设置",
+		LangTraditionalChinese: "語音合成設定",
+		LangJapanese:           "テキスト読み上げ設定",
+		LangSpanish:            "Configuración de texto a voz",
 	},
 }
 

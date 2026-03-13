@@ -57,6 +57,8 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 	}
 	s.mux.HandleFunc("/send", s.handleSend)
 	s.mux.HandleFunc("/sessions", s.handleSessions)
+	s.mux.HandleFunc("/chatlog", s.handleChatlog)
+	s.mux.HandleFunc("/clear_chatlog", s.handleClearChatlog)
 	s.mux.HandleFunc("/cron/add", s.handleCronAdd)
 	s.mux.HandleFunc("/cron/list", s.handleCronList)
 	s.mux.HandleFunc("/cron/del", s.handleCronDel)
@@ -377,4 +379,88 @@ func (s *APIServer) handleRelayBinding(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(binding)
+}
+
+// ── Chatlog API ────────────────────────────────────────────────
+
+func (s *APIServer) resolveEngine(project string) (*Engine, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	engine, ok := s.engines[project]
+	if !ok && len(s.engines) == 1 {
+		for _, e := range s.engines {
+			return e, true
+		}
+	}
+	return engine, ok
+}
+
+func (s *APIServer) handleChatlog(w http.ResponseWriter, r *http.Request) {
+	project := r.URL.Query().Get("project")
+	sessionKey := r.URL.Query().Get("session_key")
+	nStr := r.URL.Query().Get("n")
+
+	n := 0 // default: return all messages
+	if nStr != "" {
+		if parsed, err := fmt.Sscanf(nStr, "%d", &n); err != nil || parsed != 1 || n <= 0 {
+			n = 0
+		}
+	}
+
+	engine, ok := s.resolveEngine(project)
+	if !ok {
+		http.Error(w, fmt.Sprintf("project %q not found", project), http.StatusNotFound)
+		return
+	}
+
+	chatKey := extractChatKey(sessionKey)
+	entries := engine.ChatLog().GetRecent(chatKey, n)
+
+	type chatlogEntry struct {
+		UserID    string `json:"user_id"`
+		UserName  string `json:"user_name"`
+		Content   string `json:"content"`
+		Timestamp string `json:"timestamp"`
+	}
+	result := make([]chatlogEntry, len(entries))
+	for i, e := range entries {
+		result[i] = chatlogEntry{
+			UserID:   e.UserID,
+			UserName: e.UserName,
+			Content:  e.Content,
+			Timestamp: e.Timestamp.Format("2006-01-02 15:04:05"),
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
+func (s *APIServer) handleClearChatlog(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Project    string `json:"project"`
+		SessionKey string `json:"session_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	engine, ok := s.resolveEngine(req.Project)
+	if !ok {
+		http.Error(w, fmt.Sprintf("project %q not found", req.Project), http.StatusNotFound)
+		return
+	}
+
+	chatKey := extractChatKey(req.SessionKey)
+	engine.ChatLog().Clear(chatKey)
+	slog.Info("chatlog cleared", "chat_key", chatKey)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }

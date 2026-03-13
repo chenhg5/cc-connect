@@ -2,8 +2,6 @@ package core
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -129,9 +127,8 @@ type Engine struct {
 	speech       SpeechCfg
 	tts          *TTSCfg
 	display      DisplayCfg
-	defaultQuiet   bool
-	injectSender   bool
-	startedAt      time.Time
+	defaultQuiet bool
+	startedAt    time.Time
 
 	providerSaveFunc       func(providerName string) error
 	providerAddSaveFunc    func(p ProviderConfig) error
@@ -165,14 +162,7 @@ type Engine struct {
 	streamPreview    StreamPreviewCfg
 	relayManager     *RelayManager
 	eventIdleTimeout time.Duration
-
-	// Multi-workspace mode
-	multiWorkspace    bool
-	baseDir           string
-	workspaceBindings *WorkspaceBindingManager
-	workspacePool     *workspacePool
-	initFlows         map[string]*workspaceInitFlow // channelID → init state
-	initFlowsMu       sync.Mutex
+	chatLog          *ChatLog
 
 	// Interactive agent session management
 	interactiveMu     sync.Mutex
@@ -182,20 +172,11 @@ type Engine struct {
 	quiet   bool // when true, suppress thinking and tool progress messages globally
 }
 
-// workspaceInitFlow tracks a channel that is being onboarded to a workspace.
-type workspaceInitFlow struct {
-	state       string // "awaiting_url", "awaiting_confirm"
-	repoURL     string
-	cloneTo     string
-	channelName string
-}
-
 // interactiveState tracks a running interactive agent session and its permission state.
 type interactiveState struct {
 	agentSession AgentSession
 	platform     Platform
 	replyCtx     any
-	workspaceDir string
 	mu           sync.Mutex
 	pending      *pendingPermission
 	approveAll   bool // when true, auto-approve all permission requests for this session
@@ -245,6 +226,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		startedAt:         time.Now(),
 		streamPreview:     DefaultStreamPreviewCfg(),
 		eventIdleTimeout:  defaultEventIdleTimeout,
+		chatLog:           NewChatLog(500),
 	}
 
 	if cp, ok := ag.(CommandProvider); ok {
@@ -255,45 +237,6 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 	}
 
 	return e
-}
-
-// SetMultiWorkspace enables multi-workspace mode for the engine.
-func (e *Engine) SetMultiWorkspace(baseDir, bindingStorePath string) {
-	e.multiWorkspace = true
-	e.baseDir = baseDir
-	e.workspaceBindings = NewWorkspaceBindingManager(bindingStorePath)
-	e.workspacePool = newWorkspacePool(15 * time.Minute)
-	e.initFlows = make(map[string]*workspaceInitFlow)
-	go e.runIdleReaper()
-}
-
-func (e *Engine) runIdleReaper() {
-	ticker := time.NewTicker(1 * time.Minute)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-e.ctx.Done():
-			return
-		case <-ticker.C:
-			if e.workspacePool == nil {
-				continue
-			}
-			reaped := e.workspacePool.ReapIdle()
-			for _, ws := range reaped {
-				e.interactiveMu.Lock()
-				for key, state := range e.interactiveStates {
-					if state.workspaceDir == ws {
-						if state.agentSession != nil {
-							state.agentSession.Close()
-						}
-						delete(e.interactiveStates, key)
-					}
-				}
-				e.interactiveMu.Unlock()
-				slog.Info("workspace idle-reaped", "workspace", ws)
-			}
-		}
-	}
 }
 
 // SetSpeechConfig configures the speech-to-text subsystem.
@@ -319,18 +262,6 @@ func (e *Engine) SetDisplayConfig(cfg DisplayCfg) {
 // SetDefaultQuiet sets whether new sessions start in quiet mode.
 func (e *Engine) SetDefaultQuiet(q bool) {
 	e.defaultQuiet = q
-}
-
-// SetInjectSender controls whether sender identity (platform and user ID) is
-// prepended to each message before forwarding it to the agent. When enabled,
-// the agent receives a preamble line like:
-//
-//	[cc-connect sender_id=ou_abc123 platform=feishu]
-//
-// This allows the agent to identify who sent the message and adjust behavior
-// accordingly (e.g. personal task views, role-based access control).
-func (e *Engine) SetInjectSender(v bool) {
-	e.injectSender = v
 }
 
 func (e *Engine) SetLanguageSaveFunc(fn func(Language) error) {
@@ -379,6 +310,11 @@ func (e *Engine) SetConfigReloadFunc(fn func() (*ConfigReloadResult, error)) {
 // GetAgent returns the engine's agent (for type assertions like ProviderSwitcher).
 func (e *Engine) GetAgent() Agent {
 	return e.agent
+}
+
+// ChatLog returns the engine's chat log for API access.
+func (e *Engine) ChatLog() *ChatLog {
+	return e.chatLog
 }
 
 // AddCommand registers a custom slash command.
@@ -689,6 +625,17 @@ func (e *Engine) resolveAlias(content string) string {
 	return content
 }
 
+// extractChatKey extracts the chat identifier from a session key.
+// SessionKey format: "platform:chatID:userID" or "platform:chatID"
+// Returns "platform:chatID".
+func extractChatKey(sessionKey string) string {
+	parts := strings.SplitN(sessionKey, ":", 3)
+	if len(parts) >= 2 {
+		return parts[0] + ":" + parts[1]
+	}
+	return sessionKey
+}
+
 func (e *Engine) handleMessage(p Platform, msg *Message) {
 	slog.Info("message received",
 		"platform", msg.Platform, "msg_id", msg.MessageID,
@@ -700,6 +647,23 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	// Voice message: transcribe to text first
 	if msg.Audio != nil {
 		e.handleVoiceMessage(p, msg)
+		return
+	}
+
+	// Record all group chat messages for chatlog summarization.
+	if msg.IsGroup && msg.Content != "" {
+		chatKey := extractChatKey(msg.SessionKey)
+		e.chatLog.Record(chatKey, ChatLogEntry{
+			UserID:    msg.UserID,
+			UserName:  msg.UserName,
+			Content:   msg.Content,
+			Timestamp: time.Now(),
+		})
+		slog.Debug("group message recorded", "chat_key", chatKey, "user", msg.UserName, "passive", msg.Passive)
+	}
+
+	// Passive group messages: already recorded above, don't trigger agent
+	if msg.Passive {
 		return
 	}
 
@@ -728,47 +692,6 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		}
 	}
 
-	// Multi-workspace resolution
-	var wsAgent Agent
-	var wsSessions *SessionManager
-	var resolvedWorkspace string
-	if e.multiWorkspace {
-		channelID := extractChannelID(msg.SessionKey)
-		workspace, channelName, err := e.resolveWorkspace(p, channelID)
-		if err != nil {
-			slog.Error("workspace resolution failed", "err", err)
-			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
-			return
-		}
-		if workspace == "" {
-			// No workspace — handle init flow (unless it's a /workspace command)
-			if !strings.HasPrefix(content, "workspace") && !strings.HasPrefix(content, "ws ") {
-				if e.handleWorkspaceInitFlow(p, msg, channelID, channelName) {
-					return
-				}
-			}
-			// If init flow didn't consume, only workspace commands work
-			if !strings.HasPrefix(content, "/") {
-				return
-			}
-		} else {
-			resolvedWorkspace = workspace
-
-			// Touch for idle tracking
-			if ws := e.workspacePool.Get(workspace); ws != nil {
-				ws.Touch()
-			}
-
-			// Get or create the workspace's agent and session manager
-			wsAgent, wsSessions, err = e.getOrCreateWorkspaceAgent(workspace)
-			if err != nil {
-				slog.Error("failed to create workspace agent", "workspace", workspace, "err", err)
-				e.reply(p, msg.ReplyCtx, fmt.Sprintf("Failed to initialize workspace: %v", err))
-				return
-			}
-		}
-	}
-
 	if len(msg.Images) == 0 && strings.HasPrefix(content, "/") {
 		if e.handleCommand(p, msg, content) {
 			return
@@ -781,17 +704,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		return
 	}
 
-	// Select session manager and agent based on workspace mode
-	sessions := e.sessions
-	agent := e.agent
-	interactiveKey := msg.SessionKey
-	if e.multiWorkspace && wsSessions != nil {
-		sessions = wsSessions
-		agent = wsAgent
-		interactiveKey = resolvedWorkspace + ":" + msg.SessionKey
-	}
-
-	session := sessions.GetOrCreateActive(msg.SessionKey)
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
 	if !session.TryLock() {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
 		return
@@ -803,7 +716,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		"session", session.ID,
 	)
 
-	go e.processInteractiveMessageWith(p, msg, session, agent, interactiveKey, resolvedWorkspace)
+	go e.processInteractiveMessage(p, msg, session)
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -858,16 +771,6 @@ func (e *Engine) handleVoiceMessage(p Platform, msg *Message) {
 func (e *Engine) handlePendingPermission(p Platform, msg *Message, content string) bool {
 	e.interactiveMu.Lock()
 	state, ok := e.interactiveStates[msg.SessionKey]
-	if (!ok || state == nil) && e.multiWorkspace {
-		suffix := ":" + msg.SessionKey
-		for key, s := range e.interactiveStates {
-			if strings.HasSuffix(key, suffix) {
-				state = s
-				ok = true
-				break
-			}
-		}
-	}
 	e.interactiveMu.Unlock()
 	if !ok || state == nil {
 		return false
@@ -962,13 +865,6 @@ func isDenyResponse(s string) bool {
 // ──────────────────────────────────────────────────────────────
 
 func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Session) {
-	e.processInteractiveMessageWith(p, msg, session, e.agent, msg.SessionKey, "")
-}
-
-// processInteractiveMessageWith is the core interactive processing loop.
-// It accepts an explicit agent, interactiveKey (for the interactiveStates map),
-// and workspaceDir so that multi-workspace mode can route to per-workspace agents.
-func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session *Session, agent Agent, interactiveKey string, workspaceDir string) {
 	defer session.Unlock()
 
 	if e.ctx.Err() != nil {
@@ -980,19 +876,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	e.i18n.DetectAndSet(msg.Content)
 	session.AddHistory("user", msg.Content)
 
-	// Use the agent override when available (multi-workspace mode)
-	var agentOverride Agent
-	if agent != e.agent {
-		agentOverride = agent
-	}
-	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, agentOverride)
-
-	// Set workspaceDir on the state for idle reaper identification
-	if workspaceDir != "" {
-		state.mu.Lock()
-		state.workspaceDir = workspaceDir
-		state.mu.Unlock()
-	}
+	state := e.getOrCreateInteractiveState(msg.SessionKey, p, msg.ReplyCtx, session)
 
 	// Update reply context for this turn
 	state.mu.Lock()
@@ -1021,36 +905,24 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	// EventResult that was pushed after the previous turn already returned.
 	drainEvents(state.agentSession.Events())
 
-	// Prepend sender identity when enabled, so the agent knows who sent the message.
-	promptContent := msg.Content
-	if e.injectSender && msg.UserID != "" {
-		chatID := extractChannelID(msg.SessionKey)
-		promptContent = fmt.Sprintf("[cc-connect sender_id=%s platform=%s chat_id=%s]\n%s", msg.UserID, msg.Platform, chatID, msg.Content)
-	}
-
 	sendStart := time.Now()
 	state.mu.Lock()
 	state.fromVoice = msg.FromVoice
 	state.mu.Unlock()
-	if err := state.agentSession.Send(promptContent, msg.Images); err != nil {
+	if err := state.agentSession.Send(msg.Content, msg.Images); err != nil {
 		slog.Error("failed to send prompt", "error", err)
 
 		if !state.agentSession.Alive() {
-			e.cleanupInteractiveState(interactiveKey)
+			e.cleanupInteractiveState(msg.SessionKey)
 			e.send(p, msg.ReplyCtx, e.i18n.T(MsgSessionRestarting))
 
-			state = e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, agentOverride)
-			if workspaceDir != "" {
-				state.mu.Lock()
-				state.workspaceDir = workspaceDir
-				state.mu.Unlock()
-			}
+			state = e.getOrCreateInteractiveState(msg.SessionKey, p, msg.ReplyCtx, session)
 			if state.agentSession == nil {
 				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), "failed to restart agent session"))
 				return
 			}
 			sendStart = time.Now()
-			if err := state.agentSession.Send(promptContent, msg.Images); err != nil {
+			if err := state.agentSession.Send(msg.Content, msg.Images); err != nil {
 				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
 				return
 			}
@@ -1063,67 +935,10 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		slog.Warn("slow agent send", "elapsed", elapsed, "session", msg.SessionKey, "content_len", len(msg.Content))
 	}
 
-	e.processInteractiveEvents(state, session, interactiveKey, msg.MessageID, turnStart)
-}
-
-// getOrCreateWorkspaceAgent returns (or creates) a per-workspace agent and session manager.
-func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionManager, error) {
-	ws := e.workspacePool.GetOrCreate(workspace)
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
-
-	if ws.agent != nil {
-		return ws.agent, ws.sessions, nil
-	}
-
-	// Create a new agent instance with this workspace's work_dir
-	opts := make(map[string]any)
-	opts["work_dir"] = workspace
-
-	// Copy model from original agent if possible
-	if ma, ok := e.agent.(interface{ GetModel() string }); ok {
-		if m := ma.GetModel(); m != "" {
-			opts["model"] = m
-		}
-	}
-	// Copy permission mode
-	if ma, ok := e.agent.(interface{ GetMode() string }); ok {
-		if m := ma.GetMode(); m != "" {
-			opts["mode"] = m
-		}
-	}
-
-	agent, err := CreateAgent("claudecode", opts)
-	if err != nil {
-		return nil, nil, fmt.Errorf("create workspace agent for %s: %w", workspace, err)
-	}
-
-	// Wire providers if original agent has them
-	if ps, ok := e.agent.(ProviderSwitcher); ok {
-		if ps2, ok2 := agent.(ProviderSwitcher); ok2 {
-			ps2.SetProviders(ps.ListProviders())
-		}
-	}
-
-	// Create per-workspace session manager
-	h := sha256.Sum256([]byte(workspace))
-	sessionFile := filepath.Join(filepath.Dir(e.sessions.StorePath()),
-		fmt.Sprintf("%s_ws_%s.json", e.name, hex.EncodeToString(h[:4])))
-	sessions := NewSessionManager(sessionFile)
-
-	ws.agent = agent
-	ws.sessions = sessions
-	return agent, sessions, nil
+	e.processInteractiveEvents(state, session, msg.SessionKey, msg.MessageID, turnStart)
 }
 
 func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, replyCtx any, session *Session) *interactiveState {
-	return e.getOrCreateInteractiveStateWith(sessionKey, p, replyCtx, session, nil)
-}
-
-// getOrCreateInteractiveStateWith is like getOrCreateInteractiveState but accepts
-// an optional agent override for multi-workspace mode. When agentOverride is non-nil
-// it is used instead of e.agent to start the session.
-func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, agentOverride Agent) *interactiveState {
 	e.interactiveMu.Lock()
 	defer e.interactiveMu.Unlock()
 
@@ -1140,14 +955,8 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		state.mu.Unlock()
 	}
 
-	// Select the agent to use for this session
-	agent := e.agent
-	if agentOverride != nil {
-		agent = agentOverride
-	}
-
 	// Inject per-session env vars so the agent subprocess can call `cc-connect cron add` etc.
-	if inj, ok := agent.(SessionEnvInjector); ok {
+	if inj, ok := e.agent.(SessionEnvInjector); ok {
 		envVars := []string{
 			"CC_PROJECT=" + e.name,
 			"CC_SESSION_KEY=" + sessionKey,
@@ -1172,7 +981,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	}
 
 	startAt := time.Now()
-	agentSession, err := agent.StartSession(e.ctx, session.AgentSessionID)
+	agentSession, err := e.agent.StartSession(e.ctx, session.AgentSessionID)
 	startElapsed := time.Since(startAt)
 	if err != nil {
 		slog.Error("failed to start interactive session", "error", err, "elapsed", startElapsed)
@@ -1181,7 +990,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		return state
 	}
 	if startElapsed >= slowAgentStart {
-		slog.Warn("slow agent session start", "elapsed", startElapsed, "agent", agent.Name(), "session_id", session.AgentSessionID)
+		slog.Warn("slow agent session start", "elapsed", startElapsed, "agent", e.agent.Name(), "session_id", session.AgentSessionID)
 	}
 
 	state = &interactiveState{
@@ -1511,7 +1320,6 @@ var builtinCommands = []struct {
 	{[]string{"name", "rename"}, "name"},
 	{[]string{"current"}, "current"},
 	{[]string{"status"}, "status"},
-	{[]string{"usage", "quota"}, "usage"},
 	{[]string{"history"}, "history"},
 	{[]string{"allow"}, "allow"},
 	{[]string{"model"}, "model"},
@@ -1538,7 +1346,6 @@ var builtinCommands = []struct {
 	{[]string{"search", "find"}, "search"},
 	{[]string{"shell", "sh", "exec", "run"}, "shell"},
 	{[]string{"tts"}, "tts"},
-	{[]string{"workspace", "ws"}, "workspace"},
 }
 
 // matchPrefix finds a unique command matching the given prefix.
@@ -1623,8 +1430,6 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdCurrent(p, msg)
 	case "status":
 		e.cmdStatus(p, msg)
-	case "usage":
-		e.cmdUsage(p, msg)
 	case "history":
 		e.cmdHistory(p, msg, args)
 	case "allow":
@@ -1677,13 +1482,6 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdShell(p, msg, raw)
 	case "tts":
 		e.cmdTTS(p, msg, args)
-	case "workspace":
-		if !e.multiWorkspace {
-			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsNotEnabled))
-			return true
-		}
-		e.handleWorkspaceCommand(p, msg, args)
-		return true
 	default:
 		if custom, ok := e.commands.Resolve(cmd); ok {
 			e.executeCustomCommand(p, msg, custom, args)
@@ -1700,125 +1498,15 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 	return true
 }
 
-func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string) {
-	channelID := extractChannelID(msg.SessionKey)
-	projectKey := "project:" + e.name
-
-	subCmd := ""
-	if len(args) > 0 {
-		subCmd = matchSubCommand(args[0], []string{"init", "bind", "unbind", "list"})
-	}
-
-	switch subCmd {
-	case "":
-		b := e.workspaceBindings.Lookup(projectKey, channelID)
-		if b == nil {
-			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsNoBinding))
-		} else {
-			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsInfo, b.Workspace, b.BoundAt.Format(time.RFC3339)))
-		}
-
-	case "bind":
-		if len(args) < 2 {
-			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsBindUsage))
-			return
-		}
-		wsName := args[1]
-		wsPath := filepath.Join(e.baseDir, wsName)
-
-		// Check if workspace directory exists
-		if _, err := os.Stat(wsPath); os.IsNotExist(err) {
-			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsBindNotFound, wsName))
-			return
-		}
-
-		channelName := ""
-		if resolver, ok := p.(ChannelNameResolver); ok {
-			channelName, _ = resolver.ResolveChannelName(channelID)
-		}
-		e.workspaceBindings.Bind(projectKey, channelID, channelName, wsPath)
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsBindSuccess, wsName))
-
-	case "init":
-		if len(args) < 2 {
-			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsInitUsage))
-			return
-		}
-		repoURL := args[1]
-		if !looksLikeGitURL(repoURL) {
-			e.reply(p, msg.ReplyCtx, "That doesn't look like a git URL.")
-			return
-		}
-
-		repoName := extractRepoName(repoURL)
-		cloneTo := filepath.Join(e.baseDir, repoName)
-
-		if _, err := os.Stat(cloneTo); err == nil {
-			channelName := ""
-			if resolver, ok := p.(ChannelNameResolver); ok {
-				channelName, _ = resolver.ResolveChannelName(channelID)
-			}
-			e.workspaceBindings.Bind(projectKey, channelID, channelName, cloneTo)
-			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsCloneSuccess, cloneTo))
-			return
-		}
-
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsCloneProgress, repoURL))
-
-		if err := gitClone(repoURL, cloneTo); err != nil {
-			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsCloneFailed, err))
-			return
-		}
-
-		channelName := ""
-		if resolver, ok := p.(ChannelNameResolver); ok {
-			channelName, _ = resolver.ResolveChannelName(channelID)
-		}
-		e.workspaceBindings.Bind(projectKey, channelID, channelName, cloneTo)
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsCloneSuccess, cloneTo))
-
-	case "unbind":
-		e.workspaceBindings.Unbind(projectKey, channelID)
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsUnbindSuccess))
-
-	case "list":
-		bindings := e.workspaceBindings.ListByProject(projectKey)
-		if len(bindings) == 0 {
-			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsListEmpty))
-			return
-		}
-		var sb strings.Builder
-		sb.WriteString(e.i18n.T(MsgWsListTitle) + "\n")
-		for chID, b := range bindings {
-			name := b.ChannelName
-			if name == "" {
-				name = chID
-			}
-			sb.WriteString(fmt.Sprintf("• #%s → `%s`\n", name, b.Workspace))
-		}
-		e.reply(p, msg.ReplyCtx, sb.String())
-
-	default:
-		e.reply(p, msg.ReplyCtx,
-			"Usage: `/workspace [bind <name> | init <url> | unbind | list]`")
-	}
-}
-
 func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
-	_, sessions, interactiveKey, err := e.commandContext(p, msg)
-	if err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
-		return
-	}
-
 	slog.Info("cmdNew: cleaning up old session", "session_key", msg.SessionKey)
-	e.cleanupInteractiveState(interactiveKey)
+	e.cleanupInteractiveState(msg.SessionKey)
 	slog.Info("cmdNew: cleanup done, creating new session", "session_key", msg.SessionKey)
 	name := ""
 	if len(args) > 0 {
 		name = strings.Join(args, " ")
 	}
-	s := sessions.NewSession(msg.SessionKey, name)
+	s := e.sessions.NewSession(msg.SessionKey, name)
 	if name != "" {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgNewSessionCreatedName), name))
 	} else {
@@ -1830,14 +1518,8 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 const listPageSize = 20
 
 func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
-	agent, sessions, _, err := e.commandContext(p, msg)
-	if err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
-		return
-	}
-
 	if !supportsCards(p) {
-		agentSessions, err := agent.ListSessions(e.ctx)
+		agentSessions, err := e.agent.ListSessions(e.ctx)
 		if err != nil {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgListError), err))
 			return
@@ -1866,8 +1548,8 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 			end = total
 		}
 
-		agentName := agent.Name()
-		activeSession := sessions.GetOrCreateActive(msg.SessionKey)
+		agentName := e.agent.Name()
+		activeSession := e.sessions.GetOrCreateActive(msg.SessionKey)
 		activeAgentID := activeSession.AgentSessionID
 
 		var sb strings.Builder
@@ -1882,7 +1564,7 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 			if s.ID == activeAgentID {
 				marker = "▶"
 			}
-			displayName := sessions.GetSessionName(s.ID)
+			displayName := e.sessions.GetSessionName(s.ID)
 			if displayName != "" {
 				displayName = "📌 " + displayName
 			} else {
@@ -1928,38 +1610,33 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	query := strings.TrimSpace(strings.Join(args, " "))
 
 	slog.Info("cmdSwitch: listing agent sessions", "session_key", msg.SessionKey)
-	agent, sessions, interactiveKey, err := e.commandContext(p, msg)
-	if err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
-		return
-	}
-	agentSessions, err := agent.ListSessions(e.ctx)
+	agentSessions, err := e.agent.ListSessions(e.ctx)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
 		return
 	}
 
-	matched := e.matchSession(agentSessions, sessions, query)
+	matched := e.matchSession(agentSessions, query)
 	if matched == nil {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgSwitchNoMatch), query))
 		return
 	}
 
 	slog.Info("cmdSwitch: cleaning up old session", "session_key", msg.SessionKey)
-	e.cleanupInteractiveState(interactiveKey)
+	e.cleanupInteractiveState(msg.SessionKey)
 	slog.Info("cmdSwitch: cleanup done", "session_key", msg.SessionKey)
 
-	session := sessions.GetOrCreateActive(msg.SessionKey)
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
 	session.AgentSessionID = matched.ID
 	session.Name = matched.Summary
 	session.ClearHistory()
-	sessions.Save()
+	e.sessions.Save()
 
 	shortID := matched.ID
 	if len(shortID) > 12 {
 		shortID = shortID[:12]
 	}
-	displayName := sessions.GetSessionName(matched.ID)
+	displayName := e.sessions.GetSessionName(matched.ID)
 	if displayName == "" {
 		displayName = matched.Summary
 	}
@@ -1973,7 +1650,7 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 //  3. Session ID prefix match
 //  4. Custom name prefix match (case-insensitive)
 //  5. Summary substring match (case-insensitive)
-func (e *Engine) matchSession(sessions []AgentSessionInfo, manager *SessionManager, query string) *AgentSessionInfo {
+func (e *Engine) matchSession(sessions []AgentSessionInfo, query string) *AgentSessionInfo {
 	if len(sessions) == 0 {
 		return nil
 	}
@@ -1987,7 +1664,7 @@ func (e *Engine) matchSession(sessions []AgentSessionInfo, manager *SessionManag
 
 	// 2. Exact custom name match
 	for i := range sessions {
-		name := manager.GetSessionName(sessions[i].ID)
+		name := e.sessions.GetSessionName(sessions[i].ID)
 		if name != "" && strings.ToLower(name) == queryLower {
 			return &sessions[i]
 		}
@@ -2002,7 +1679,7 @@ func (e *Engine) matchSession(sessions []AgentSessionInfo, manager *SessionManag
 
 	// 4. Custom name prefix match
 	for i := range sessions {
-		name := manager.GetSessionName(sessions[i].ID)
+		name := e.sessions.GetSessionName(sessions[i].ID)
 		if name != "" && strings.HasPrefix(strings.ToLower(name), queryLower) {
 			return &sessions[i]
 		}
@@ -2034,25 +1711,15 @@ func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
 		return
 	}
 
-	// In multi-workspace mode, resolve workspace directory for this channel
-	var workDir string
-	if e.multiWorkspace {
-		channelID := extractChannelID(msg.SessionKey)
-		projectKey := "project:" + e.name
-		if b := e.workspaceBindings.Lookup(projectKey, channelID); b != nil {
-			workDir = b.Workspace
-		}
-	}
-	if workDir == "" {
+	go func() {
+		workDir := ""
 		if wd, ok := e.agent.(interface{ GetWorkDir() string }); ok {
 			workDir = wd.GetWorkDir()
 		}
-	}
-	if workDir == "" {
-		workDir, _ = os.Getwd()
-	}
+		if workDir == "" {
+			workDir, _ = os.Getwd()
+		}
 
-	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 
@@ -2091,12 +1758,7 @@ func (e *Engine) cmdSearch(p Platform, msg *Message, args []string) {
 	keyword := strings.ToLower(strings.Join(args, " "))
 
 	// Get all agent sessions
-	agent, sessions, _, err := e.commandContext(p, msg)
-	if err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
-		return
-	}
-	agentSessions, err := agent.ListSessions(e.ctx)
+	agentSessions, err := e.agent.ListSessions(e.ctx)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgSearchError), err))
 		return
@@ -2114,7 +1776,7 @@ func (e *Engine) cmdSearch(p Platform, msg *Message, args []string) {
 
 	for _, s := range agentSessions {
 		// Check session name (custom name or summary)
-		customName := sessions.GetSessionName(s.ID)
+		customName := e.sessions.GetSessionName(s.ID)
 		displayName := customName
 		if displayName == "" {
 			displayName = s.Summary
@@ -2173,12 +1835,6 @@ func (e *Engine) cmdName(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	agent, sessions, _, err := e.commandContext(p, msg)
-	if err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
-		return
-	}
-
 	// Check if first arg is a number → naming a specific session by list index
 	var targetID string
 	var name string
@@ -2189,7 +1845,7 @@ func (e *Engine) cmdName(p Platform, msg *Message, args []string) {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNameUsage))
 			return
 		}
-		agentSessions, err := agent.ListSessions(e.ctx)
+		agentSessions, err := e.agent.ListSessions(e.ctx)
 		if err != nil {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
 			return
@@ -2202,7 +1858,7 @@ func (e *Engine) cmdName(p Platform, msg *Message, args []string) {
 		name = strings.Join(args[1:], " ")
 	} else {
 		// /name <name...> → current session
-		session := sessions.GetOrCreateActive(msg.SessionKey)
+		session := e.sessions.GetOrCreateActive(msg.SessionKey)
 		targetID = session.AgentSessionID
 		if targetID == "" {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNameNoSession))
@@ -2217,7 +1873,7 @@ func (e *Engine) cmdName(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	sessions.SetSessionName(targetID, name)
+	e.sessions.SetSessionName(targetID, name)
 
 	shortID := targetID
 	if len(shortID) > 12 {
@@ -2228,12 +1884,7 @@ func (e *Engine) cmdName(p Platform, msg *Message, args []string) {
 
 func (e *Engine) cmdCurrent(p Platform, msg *Message) {
 	if !supportsCards(p) {
-		_, sessions, _, err := e.commandContext(p, msg)
-		if err != nil {
-			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
-			return
-		}
-		s := sessions.GetOrCreateActive(msg.SessionKey)
+		s := e.sessions.GetOrCreateActive(msg.SessionKey)
 		agentID := s.AgentSessionID
 		if agentID == "" {
 			agentID = e.i18n.T(MsgSessionNotStarted)
@@ -2247,11 +1898,6 @@ func (e *Engine) cmdCurrent(p Platform, msg *Message) {
 
 func (e *Engine) cmdStatus(p Platform, msg *Message) {
 	if !supportsCards(p) {
-		agent, sessions, _, err := e.commandContext(p, msg)
-		if err != nil {
-			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
-			return
-		}
 		platNames := make([]string, len(e.platforms))
 		for i, pl := range e.platforms {
 			platNames[i] = pl.Name()
@@ -2267,7 +1913,7 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 		langStr := fmt.Sprintf("%s (%s)", string(cur), langDisplayName(cur))
 
 		var modeStr string
-		if ms, ok := agent.(ModeSwitcher); ok {
+		if ms, ok := e.agent.(ModeSwitcher); ok {
 			mode := ms.GetMode()
 			if mode != "" {
 				modeStr = e.i18n.Tf(MsgStatusMode, mode)
@@ -2295,8 +1941,8 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 		}
 		modeStr += e.i18n.Tf(MsgStatusQuiet, quietStr)
 
-		s := sessions.GetOrCreateActive(msg.SessionKey)
-		sessionDisplayName := sessions.GetSessionName(s.AgentSessionID)
+		s := e.sessions.GetOrCreateActive(msg.SessionKey)
+		sessionDisplayName := e.sessions.GetSessionName(s.AgentSessionID)
 		if sessionDisplayName == "" {
 			sessionDisplayName = s.Name
 		}
@@ -2318,7 +1964,7 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgStatusTitle,
 			e.name,
-			agent.Name(),
+			e.agent.Name(),
 			platformStr,
 			uptimeStr,
 			langStr,
@@ -2330,274 +1976,6 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 	}
 
 	e.replyWithCard(p, msg.ReplyCtx, e.renderStatusCard(msg.SessionKey))
-}
-
-func (e *Engine) cmdUsage(p Platform, msg *Message) {
-	reporter, ok := e.agent.(UsageReporter)
-	if !ok {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgUsageNotSupported))
-		return
-	}
-
-	fetchCtx, cancel := context.WithTimeout(e.ctx, 10*time.Second)
-	defer cancel()
-
-	report, err := reporter.GetUsage(fetchCtx)
-	if err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgUsageFetchFailed, err))
-		return
-	}
-
-	if p.Name() == "feishu" && supportsCards(p) {
-		e.replyWithCard(p, msg.ReplyCtx, e.renderUsageCard(report))
-		return
-	}
-
-	e.reply(p, msg.ReplyCtx, formatUsageReport(report, e.i18n.CurrentLang()))
-}
-
-func formatUsageReport(report *UsageReport, lang Language) string {
-	if report == nil {
-		return usageUnavailableText(lang)
-	}
-
-	var sb strings.Builder
-	sb.WriteString(usageAccountLabel(lang))
-	sb.WriteString(accountDisplay(report))
-	sb.WriteString(formatUsageBlocks(report, lang))
-
-	return strings.TrimSpace(sb.String())
-}
-
-func formatUsageBlocks(report *UsageReport, lang Language) string {
-	primary, secondary := selectUsageWindows(report)
-	var sections []string
-	if primary != nil {
-		sections = append(sections, formatUsageBlock(lang, primary))
-	}
-	if secondary != nil {
-		sections = append(sections, formatUsageBlock(lang, secondary))
-	}
-	if len(sections) == 0 {
-		return ""
-	}
-	return "\n\n" + strings.Join(sections, "\n\n")
-}
-
-func accountDisplay(report *UsageReport) string {
-	var base string
-	if report.Email != "" {
-		base = report.Email
-	} else if report.AccountID != "" {
-		base = report.AccountID
-	} else if report.UserID != "" {
-		base = report.UserID
-	} else {
-		base = "-"
-	}
-	if report.Plan != "" {
-		return fmt.Sprintf("%s (%s)", base, report.Plan)
-	}
-	return base
-}
-
-func selectUsageWindows(report *UsageReport) (*UsageWindow, *UsageWindow) {
-	for _, bucket := range report.Buckets {
-		if len(bucket.Windows) == 0 {
-			continue
-		}
-		var primary, secondary *UsageWindow
-		for i := range bucket.Windows {
-			window := &bucket.Windows[i]
-			switch window.WindowSeconds {
-			case 18000:
-				primary = window
-			case 604800:
-				if secondary == nil {
-					secondary = window
-				}
-			}
-		}
-		if primary == nil && len(bucket.Windows) > 0 {
-			primary = &bucket.Windows[0]
-		}
-		if secondary == nil && len(bucket.Windows) > 1 {
-			secondary = &bucket.Windows[1]
-		}
-		if primary != nil || secondary != nil {
-			return primary, secondary
-		}
-	}
-	return nil, nil
-}
-
-func formatUsageBlock(lang Language, window *UsageWindow) string {
-	remaining := 100 - window.UsedPercent
-	if remaining < 0 {
-		remaining = 0
-	}
-	var sb strings.Builder
-	sb.WriteString(usageWindowLabel(lang, window.WindowSeconds))
-	sb.WriteString("\n")
-	sb.WriteString(usageRemainingLabel(lang))
-	sb.WriteString(usageColon(lang))
-	sb.WriteString(fmt.Sprintf("%d%%", remaining))
-	sb.WriteString("\n")
-	sb.WriteString(usageResetLabel(lang))
-	sb.WriteString(usageColon(lang))
-	sb.WriteString(formatUsageResetTime(lang, window.ResetAfterSeconds))
-	return sb.String()
-}
-
-func (e *Engine) renderUsageCard(report *UsageReport) *Card {
-	lang := e.i18n.CurrentLang()
-	return NewCard().
-		Title(usageCardTitle(lang), "indigo").
-		Markdown(strings.TrimSpace(formatUsageReport(report, lang))).
-		Buttons(e.cardBackButton()).
-		Build()
-}
-
-func formatUsageResetTime(lang Language, resetAfterSeconds int) string {
-	if resetAfterSeconds <= 0 {
-		switch lang {
-		case LangChinese, LangTraditionalChinese:
-			return "-"
-		case LangJapanese:
-			return "-"
-		case LangSpanish:
-			return "-"
-		default:
-			return "-"
-		}
-	}
-	return formatDurationI18n(time.Duration(resetAfterSeconds)*time.Second, lang)
-}
-
-func usageAccountLabel(lang Language) string {
-	switch lang {
-	case LangChinese:
-		return "账号："
-	case LangTraditionalChinese:
-		return "帳號："
-	case LangJapanese:
-		return "アカウント: "
-	case LangSpanish:
-		return "Cuenta: "
-	default:
-		return "Account: "
-	}
-}
-
-func usageWindowLabel(lang Language, seconds int) string {
-	switch seconds {
-	case 18000:
-		switch lang {
-		case LangChinese:
-			return "5小时限额"
-		case LangTraditionalChinese:
-			return "5小時限額"
-		case LangJapanese:
-			return "5時間枠"
-		case LangSpanish:
-			return "Límite 5h"
-		default:
-			return "5h limit"
-		}
-	case 604800:
-		switch lang {
-		case LangChinese:
-			return "7日限额"
-		case LangTraditionalChinese:
-			return "7日限額"
-		case LangJapanese:
-			return "7日枠"
-		case LangSpanish:
-			return "Límite 7d"
-		default:
-			return "7d limit"
-		}
-	default:
-		switch lang {
-		case LangChinese, LangTraditionalChinese:
-			return formatDurationI18n(time.Duration(seconds)*time.Second, lang) + "限额"
-		case LangJapanese:
-			return formatDurationI18n(time.Duration(seconds)*time.Second, lang) + "枠"
-		case LangSpanish:
-			return "Límite " + formatDurationI18n(time.Duration(seconds)*time.Second, lang)
-		default:
-			return formatDurationI18n(time.Duration(seconds)*time.Second, lang) + " limit"
-		}
-	}
-}
-
-func usageRemainingLabel(lang Language) string {
-	switch lang {
-	case LangChinese:
-		return "剩余"
-	case LangTraditionalChinese:
-		return "剩餘"
-	case LangJapanese:
-		return "残り"
-	case LangSpanish:
-		return "restante"
-	default:
-		return "Remaining"
-	}
-}
-
-func usageResetLabel(lang Language) string {
-	switch lang {
-	case LangChinese:
-		return "重置"
-	case LangTraditionalChinese:
-		return "重置"
-	case LangJapanese:
-		return "リセット"
-	case LangSpanish:
-		return "Reinicio"
-	default:
-		return "Resets"
-	}
-}
-
-func usageColon(lang Language) string {
-	switch lang {
-	case LangChinese, LangTraditionalChinese:
-		return "："
-	default:
-		return ": "
-	}
-}
-
-func usageCardTitle(lang Language) string {
-	switch lang {
-	case LangChinese:
-		return "Usage"
-	case LangTraditionalChinese:
-		return "Usage"
-	case LangJapanese:
-		return "Usage"
-	case LangSpanish:
-		return "Usage"
-	default:
-		return "Usage"
-	}
-}
-
-func usageUnavailableText(lang Language) string {
-	switch lang {
-	case LangChinese:
-		return "暂无 usage 信息。"
-	case LangTraditionalChinese:
-		return "暫無 usage 資訊。"
-	case LangJapanese:
-		return "usage 情報はありません。"
-	case LangSpanish:
-		return "No hay datos de usage."
-	default:
-		return "Usage unavailable."
-	}
 }
 
 func splitCardTitleBody(content string) (string, string) {
@@ -2632,14 +2010,12 @@ func (e *Engine) simpleCard(title, color, content string) *Card {
 func (e *Engine) renderListCardSafe(sessionKey string, page int) *Card {
 	card, err := e.renderListCard(sessionKey, page)
 	if err != nil {
-		agent, _ := e.sessionContextForKey(sessionKey)
-		return e.simpleCard(e.i18n.Tf(MsgCardTitleSessions, agent.Name(), 0), "red", err.Error())
+		return e.simpleCard(e.i18n.Tf(MsgCardTitleSessions, e.agent.Name(), 0), "red", err.Error())
 	}
 	return card
 }
 
 func (e *Engine) renderStatusCard(sessionKey string) *Card {
-	agent, sessions := e.sessionContextForKey(sessionKey)
 	platNames := make([]string, len(e.platforms))
 	for i, pl := range e.platforms {
 		platNames[i] = pl.Name()
@@ -2655,7 +2031,7 @@ func (e *Engine) renderStatusCard(sessionKey string) *Card {
 	langStr := fmt.Sprintf("%s (%s)", string(cur), langDisplayName(cur))
 
 	var modeStr string
-	if ms, ok := agent.(ModeSwitcher); ok {
+	if ms, ok := e.agent.(ModeSwitcher); ok {
 		mode := ms.GetMode()
 		if mode != "" {
 			modeStr = e.i18n.Tf(MsgStatusMode, mode)
@@ -2683,8 +2059,8 @@ func (e *Engine) renderStatusCard(sessionKey string) *Card {
 	}
 	modeStr += e.i18n.Tf(MsgStatusQuiet, quietStr)
 
-	s := sessions.GetOrCreateActive(sessionKey)
-	sessionDisplayName := sessions.GetSessionName(s.AgentSessionID)
+	s := e.sessions.GetOrCreateActive(sessionKey)
+	sessionDisplayName := e.sessions.GetSessionName(s.AgentSessionID)
 	if sessionDisplayName == "" {
 		sessionDisplayName = s.Name
 	}
@@ -2706,7 +2082,7 @@ func (e *Engine) renderStatusCard(sessionKey string) *Card {
 
 	statusText := e.i18n.Tf(MsgStatusTitle,
 		e.name,
-		agent.Name(),
+		e.agent.Name(),
 		platformStr,
 		uptimeStr,
 		langStr,
@@ -2781,12 +2157,7 @@ func (e *Engine) cmdHistory(p Platform, msg *Message, args []string) {
 		args = []string{"10"}
 	}
 
-	agent, sessions, _, err := e.commandContext(p, msg)
-	if err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
-		return
-	}
-	s := sessions.GetOrCreateActive(msg.SessionKey)
+	s := e.sessions.GetOrCreateActive(msg.SessionKey)
 	n := 10
 	if v, err := strconv.Atoi(args[0]); err == nil && v > 0 {
 		n = v
@@ -2794,7 +2165,7 @@ func (e *Engine) cmdHistory(p Platform, msg *Message, args []string) {
 
 	entries := s.GetHistory(n)
 	if len(entries) == 0 && s.AgentSessionID != "" {
-		if hp, ok := agent.(HistoryProvider); ok {
+		if hp, ok := e.agent.(HistoryProvider); ok {
 			if agentEntries, err := hp.GetSessionHistory(e.ctx, s.AgentSessionID, n); err == nil {
 				entries = agentEntries
 			}
@@ -2970,7 +2341,6 @@ func helpCardGroups() []helpCardGroup {
 			items: []helpCardItem{
 				{command: "/status", action: "nav:/status"},
 				{command: "/doctor", action: "nav:/doctor"},
-				{command: "/usage", action: "cmd:/usage"},
 				{command: "/config", action: "nav:/config"},
 				{command: "/version", action: "nav:/version"},
 				{command: "/upgrade", action: "nav:/upgrade"},
@@ -4221,10 +3591,8 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		}
 
 	case "/new":
-		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
-		_, sessions := e.sessionContextForKey(sessionKey)
-		e.cleanupInteractiveState(interactiveKey)
-		sessions.NewSession(sessionKey, "")
+		e.cleanupInteractiveState(sessionKey)
+		e.sessions.NewSession(sessionKey, "")
 
 	case "/delete-mode":
 		e.executeDeleteModeAction(sessionKey, args)
@@ -4247,25 +3615,22 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		if args == "" {
 			return
 		}
-		agent, sessions := e.sessionContextForKey(sessionKey)
-		agentSessions, err := agent.ListSessions(e.ctx)
+		agentSessions, err := e.agent.ListSessions(e.ctx)
 		if err != nil || len(agentSessions) == 0 {
 			return
 		}
-		matched := e.matchSession(agentSessions, sessions, args)
+		matched := e.matchSession(agentSessions, args)
 		if matched == nil {
 			return
 		}
-		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
-		e.cleanupInteractiveState(interactiveKey)
-		session := sessions.GetOrCreateActive(sessionKey)
+		e.cleanupInteractiveState(sessionKey)
+		session := e.sessions.GetOrCreateActive(sessionKey)
 		session.AgentSessionID = matched.ID
 		session.Name = matched.Summary
 		session.ClearHistory()
-		sessions.Save()
+		e.sessions.Save()
 
 	case "/stop":
-		sessionKey = e.interactiveKeyForSessionKey(sessionKey)
 		e.interactiveMu.Lock()
 		state, ok := e.interactiveStates[sessionKey]
 		if !ok || state == nil {
@@ -4361,8 +3726,7 @@ func (e *Engine) clearDeleteModeState(sessionKey string) {
 }
 
 func (e *Engine) renderDeleteModeCard(sessionKey string) *Card {
-	agent, sessions := e.sessionContextForKey(sessionKey)
-	agentSessions, err := agent.ListSessions(e.ctx)
+	agentSessions, err := e.agent.ListSessions(e.ctx)
 	if err != nil {
 		return e.simpleCard(e.i18n.T(MsgDeleteModeTitle), "red", err.Error())
 	}
@@ -4372,15 +3736,15 @@ func (e *Engine) renderDeleteModeCard(sessionKey string) *Card {
 	}
 	switch dm.phase {
 	case "confirm":
-		return e.renderDeleteModeConfirmCard(sessions, dm, agentSessions)
+		return e.renderDeleteModeConfirmCard(dm, agentSessions)
 	case "result":
 		return e.renderDeleteModeResultCard(dm)
 	default:
-		return e.renderDeleteModeSelectCard(sessionKey, sessions, dm, agentSessions)
+		return e.renderDeleteModeSelectCard(sessionKey, dm, agentSessions)
 	}
 }
 
-func (e *Engine) renderDeleteModeSelectCard(sessionKey string, sessions *SessionManager, dm *deleteModeState, agentSessions []AgentSessionInfo) *Card {
+func (e *Engine) renderDeleteModeSelectCard(sessionKey string, dm *deleteModeState, agentSessions []AgentSessionInfo) *Card {
 	if len(agentSessions) == 0 {
 		return e.simpleCard(e.i18n.T(MsgDeleteModeTitle), "red", e.i18n.T(MsgListEmpty))
 	}
@@ -4406,7 +3770,7 @@ func (e *Engine) renderDeleteModeSelectCard(sessionKey string, sessions *Session
 		if _, ok := dm.selectedIDs[s.ID]; ok {
 			marker = "☑"
 		}
-		if active := sessions.GetOrCreateActive(sessionKey).AgentSessionID; active == s.ID {
+		if active := e.sessions.GetOrCreateActive(sessionKey).AgentSessionID; active == s.ID {
 			marker += " ▶"
 		}
 		btnText := e.i18n.T(MsgDeleteModeSelect)
@@ -4416,7 +3780,7 @@ func (e *Engine) renderDeleteModeSelectCard(sessionKey string, sessions *Session
 			btnType = "primary"
 		}
 		cb.ListItemBtn(
-			e.i18n.Tf(MsgListItem, marker, i+1, e.deleteSessionDisplayName(sessions, &s), s.MessageCount, s.ModifiedAt.Format("01-02 15:04")),
+			e.i18n.Tf(MsgListItem, marker, i+1, e.deleteSessionDisplayName(&s), s.MessageCount, s.ModifiedAt.Format("01-02 15:04")),
 			btnText,
 			btnType,
 			fmt.Sprintf("act:/delete-mode toggle %s", s.ID),
@@ -4444,8 +3808,8 @@ func (e *Engine) renderDeleteModeSelectCard(sessionKey string, sessions *Session
 	return cb.Build()
 }
 
-func (e *Engine) renderDeleteModeConfirmCard(sessions *SessionManager, dm *deleteModeState, agentSessions []AgentSessionInfo) *Card {
-	selectedNames := e.deleteModeSelectionNames(sessions, dm, agentSessions)
+func (e *Engine) renderDeleteModeConfirmCard(dm *deleteModeState, agentSessions []AgentSessionInfo) *Card {
+	selectedNames := e.deleteModeSelectionNames(dm, agentSessions)
 	body := strings.Join(selectedNames, "\n")
 	if body == "" {
 		body = e.i18n.T(MsgDeleteModeEmptySelection)
@@ -4468,11 +3832,11 @@ func (e *Engine) renderDeleteModeResultCard(dm *deleteModeState) *Card {
 		Build()
 }
 
-func (e *Engine) deleteModeSelectionNames(sessions *SessionManager, dm *deleteModeState, agentSessions []AgentSessionInfo) []string {
+func (e *Engine) deleteModeSelectionNames(dm *deleteModeState, agentSessions []AgentSessionInfo) []string {
 	names := make([]string, 0, len(dm.selectedIDs))
 	for i := range agentSessions {
 		if _, ok := dm.selectedIDs[agentSessions[i].ID]; ok {
-			names = append(names, "- "+e.deleteSessionDisplayName(sessions, &agentSessions[i]))
+			names = append(names, "- "+e.deleteSessionDisplayName(&agentSessions[i]))
 		}
 	}
 	return names
@@ -4541,12 +3905,11 @@ func (e *Engine) executeDeleteModeAction(sessionKey, args string) {
 }
 
 func (e *Engine) submitDeleteModeSelection(sessionKey string, dm *deleteModeState) []string {
-	agent, _ := e.sessionContextForKey(sessionKey)
-	deleter, ok := agent.(SessionDeleter)
+	deleter, ok := e.agent.(SessionDeleter)
 	if !ok {
 		return []string{e.i18n.T(MsgDeleteNotSupported)}
 	}
-	agentSessions, err := agent.ListSessions(e.ctx)
+	agentSessions, err := e.agent.ListSessions(e.ctx)
 	if err != nil {
 		return []string{fmt.Sprintf("❌ %v", err)}
 	}
@@ -4723,13 +4086,12 @@ func (e *Engine) renderModeCard() *Card {
 }
 
 func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
-	agent, sessions := e.sessionContextForKey(sessionKey)
-	agentSessions, err := agent.ListSessions(e.ctx)
+	agentSessions, err := e.agent.ListSessions(e.ctx)
 	if err != nil {
 		return nil, fmt.Errorf(e.i18n.T(MsgListError), err)
 	}
 	if len(agentSessions) == 0 {
-		return e.simpleCard(e.i18n.Tf(MsgCardTitleSessions, agent.Name(), 0), "turquoise", e.i18n.T(MsgListEmpty)), nil
+		return e.simpleCard(e.i18n.Tf(MsgCardTitleSessions, e.agent.Name(), 0), "turquoise", e.i18n.T(MsgListEmpty)), nil
 	}
 
 	total := len(agentSessions)
@@ -4744,8 +4106,8 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 		end = total
 	}
 
-	agentName := agent.Name()
-	activeSession := sessions.GetOrCreateActive(sessionKey)
+	agentName := e.agent.Name()
+	activeSession := e.sessions.GetOrCreateActive(sessionKey)
 	activeAgentID := activeSession.AgentSessionID
 
 	var titleStr string
@@ -4762,7 +4124,7 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 		if s.ID == activeAgentID {
 			marker = "▶"
 		}
-		displayName := sessions.GetSessionName(s.ID)
+		displayName := e.sessions.GetSessionName(s.ID)
 		if displayName != "" {
 			displayName = "📌 " + displayName
 		} else {
@@ -4809,8 +4171,7 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 // ──────────────────────────────────────────────────────────────
 
 func (e *Engine) renderCurrentCard(sessionKey string) *Card {
-	_, sessions := e.sessionContextForKey(sessionKey)
-	s := sessions.GetOrCreateActive(sessionKey)
+	s := e.sessions.GetOrCreateActive(sessionKey)
 	agentID := s.AgentSessionID
 	if agentID == "" {
 		agentID = e.i18n.T(MsgSessionNotStarted)
@@ -4824,12 +4185,11 @@ func (e *Engine) renderCurrentCard(sessionKey string) *Card {
 }
 
 func (e *Engine) renderHistoryCard(sessionKey string) *Card {
-	agent, sessions := e.sessionContextForKey(sessionKey)
-	s := sessions.GetOrCreateActive(sessionKey)
+	s := e.sessions.GetOrCreateActive(sessionKey)
 	entries := s.GetHistory(10)
 
 	if len(entries) == 0 && s.AgentSessionID != "" {
-		if hp, ok := agent.(HistoryProvider); ok {
+		if hp, ok := e.agent.(HistoryProvider); ok {
 			if agentEntries, err := hp.GetSessionHistory(e.ctx, s.AgentSessionID, 10); err == nil {
 				entries = agentEntries
 			}
@@ -6029,12 +5389,7 @@ func (e *Engine) cmdAliasDel(p Platform, msg *Message, args []string) {
 }
 
 func (e *Engine) cmdDelete(p Platform, msg *Message, args []string) {
-	agent, _, _, err := e.commandContext(p, msg)
-	if err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
-		return
-	}
-	deleter, ok := agent.(SessionDeleter)
+	deleter, ok := e.agent.(SessionDeleter)
 	if !ok {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDeleteNotSupported))
 		return
@@ -6054,7 +5409,7 @@ func (e *Engine) cmdDelete(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	agentSessions, err := agent.ListSessions(e.ctx)
+	agentSessions, err := e.agent.ListSessions(e.ctx)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
 		return
@@ -6188,24 +5543,23 @@ func (e *Engine) deleteSingleSessionReply(msg *Message, deleter SessionDeleter, 
 	}
 
 	// Prevent deleting the currently active session
-	_, sessions := e.sessionContextForKey(msg.SessionKey)
-	activeSession := sessions.GetOrCreateActive(msg.SessionKey)
+	activeSession := e.sessions.GetOrCreateActive(msg.SessionKey)
 	if activeSession.AgentSessionID == matched.ID {
 		return e.i18n.T(MsgDeleteActiveDenied)
 	}
 
-	displayName := e.deleteSessionDisplayName(sessions, matched)
+	displayName := e.deleteSessionDisplayName(matched)
 
 	if err := deleter.DeleteSession(e.ctx, matched.ID); err != nil {
 		return fmt.Sprintf("❌ %s: %v", displayName, err)
 	}
 
-	sessions.SetSessionName(matched.ID, "")
+	e.sessions.SetSessionName(matched.ID, "")
 	return fmt.Sprintf(e.i18n.T(MsgDeleteSuccess), displayName)
 }
 
-func (e *Engine) deleteSessionDisplayName(sessions *SessionManager, matched *AgentSessionInfo) string {
-	displayName := sessions.GetSessionName(matched.ID)
+func (e *Engine) deleteSessionDisplayName(matched *AgentSessionInfo) string {
+	displayName := e.sessions.GetSessionName(matched.ID)
 	if displayName == "" {
 		displayName = matched.Summary
 	}
@@ -6525,230 +5879,4 @@ func (e *Engine) cmdBindSetup(p Platform, msg *Message) {
 	}
 
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgRelaySetupOK), filepath.Base(filePath)))
-}
-
-func extractChannelID(sessionKey string) string {
-	// Format: "platform:channelID:userID" or "platform:channelID"
-	parts := strings.SplitN(sessionKey, ":", 3)
-	if len(parts) >= 2 {
-		return parts[1]
-	}
-	return ""
-}
-
-// commandContext resolves the appropriate agent, session manager, and interactive key
-// for a command. In multi-workspace mode, it routes to the bound workspace if present.
-func (e *Engine) commandContext(p Platform, msg *Message) (Agent, *SessionManager, string, error) {
-	if !e.multiWorkspace {
-		return e.agent, e.sessions, msg.SessionKey, nil
-	}
-	channelID := extractChannelID(msg.SessionKey)
-	if channelID == "" {
-		return e.agent, e.sessions, msg.SessionKey, nil
-	}
-	workspace, _, err := e.resolveWorkspace(p, channelID)
-	if err != nil {
-		return nil, nil, "", err
-	}
-	if workspace == "" {
-		return e.agent, e.sessions, msg.SessionKey, nil
-	}
-	wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(workspace)
-	if err != nil {
-		return nil, nil, "", err
-	}
-	return wsAgent, wsSessions, workspace + ":" + msg.SessionKey, nil
-}
-
-// sessionContextForKey resolves the agent and session manager for a sessionKey.
-// It uses existing workspace bindings and falls back to global context if unresolved.
-func (e *Engine) sessionContextForKey(sessionKey string) (Agent, *SessionManager) {
-	if !e.multiWorkspace || e.workspaceBindings == nil {
-		return e.agent, e.sessions
-	}
-	channelID := extractChannelID(sessionKey)
-	if channelID == "" {
-		return e.agent, e.sessions
-	}
-	projectKey := "project:" + e.name
-	if b := e.workspaceBindings.Lookup(projectKey, channelID); b != nil {
-		if wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(b.Workspace); err == nil {
-			return wsAgent, wsSessions
-		}
-	}
-	return e.agent, e.sessions
-}
-
-// interactiveKeyForSessionKey returns the interactive state key for a sessionKey.
-// In multi-workspace mode, it prefixes with the bound workspace path when available.
-func (e *Engine) interactiveKeyForSessionKey(sessionKey string) string {
-	if !e.multiWorkspace || e.workspaceBindings == nil {
-		return sessionKey
-	}
-	channelID := extractChannelID(sessionKey)
-	if channelID == "" {
-		return sessionKey
-	}
-	projectKey := "project:" + e.name
-	if b := e.workspaceBindings.Lookup(projectKey, channelID); b != nil {
-		return b.Workspace + ":" + sessionKey
-	}
-	return sessionKey
-}
-
-// resolveWorkspace resolves a channel to a workspace directory.
-// Returns (workspacePath, channelName, error).
-// If workspacePath is empty, the init flow should be triggered.
-func (e *Engine) resolveWorkspace(p Platform, channelID string) (string, string, error) {
-	projectKey := "project:" + e.name
-
-	// Step 1: Check existing binding
-	if b := e.workspaceBindings.Lookup(projectKey, channelID); b != nil {
-		// Verify workspace directory still exists
-		if _, err := os.Stat(b.Workspace); err != nil {
-			slog.Warn("bound workspace directory missing, removing binding",
-				"workspace", b.Workspace, "channel", channelID)
-			e.workspaceBindings.Unbind(projectKey, channelID)
-			return "", b.ChannelName, nil
-		}
-		return b.Workspace, b.ChannelName, nil
-	}
-
-	// Step 2: Resolve channel name for convention match
-	channelName := ""
-	if resolver, ok := p.(ChannelNameResolver); ok {
-		name, err := resolver.ResolveChannelName(channelID)
-		if err != nil {
-			slog.Warn("failed to resolve channel name", "channel", channelID, "err", err)
-		} else {
-			channelName = name
-		}
-	}
-
-	if channelName == "" {
-		return "", "", nil
-	}
-
-	// Step 3: Convention match — check if base_dir/<channel-name> exists
-	candidate := filepath.Join(e.baseDir, channelName)
-	if info, err := os.Stat(candidate); err == nil && info.IsDir() {
-		// Auto-bind
-		e.workspaceBindings.Bind(projectKey, channelID, channelName, candidate)
-		slog.Info("workspace auto-bound by convention",
-			"channel", channelName, "workspace", candidate)
-		return candidate, channelName, nil
-	}
-
-	return "", channelName, nil
-}
-
-// handleWorkspaceInitFlow manages the conversational workspace setup.
-// Returns true if the message was consumed by the init flow.
-func (e *Engine) handleWorkspaceInitFlow(p Platform, msg *Message, channelID, channelName string) bool {
-	e.initFlowsMu.Lock()
-	flow, exists := e.initFlows[channelID]
-	e.initFlowsMu.Unlock()
-
-	content := strings.TrimSpace(msg.Content)
-
-	if !exists {
-		if strings.HasPrefix(content, "/") {
-			return false
-		}
-		e.initFlowsMu.Lock()
-		e.initFlows[channelID] = &workspaceInitFlow{
-			state:       "awaiting_url",
-			channelName: channelName,
-		}
-		e.initFlowsMu.Unlock()
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsNotFoundHint))
-		return true
-	}
-
-	switch flow.state {
-	case "awaiting_url":
-		if !looksLikeGitURL(content) {
-			e.reply(p, msg.ReplyCtx, "That doesn't look like a git URL. Please provide a URL like `https://github.com/org/repo` or `git@github.com:org/repo.git`.")
-			return true
-		}
-		repoName := extractRepoName(content)
-		cloneTo := filepath.Join(e.baseDir, repoName)
-
-		e.initFlowsMu.Lock()
-		flow.repoURL = content
-		flow.cloneTo = cloneTo
-		flow.state = "awaiting_confirm"
-		e.initFlowsMu.Unlock()
-
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(
-			"I'll clone `%s` to `%s` and bind it to this channel. OK? (yes/no)", content, cloneTo))
-		return true
-
-	case "awaiting_confirm":
-		lower := strings.ToLower(content)
-		if lower != "yes" && lower != "y" {
-			e.initFlowsMu.Lock()
-			delete(e.initFlows, channelID)
-			e.initFlowsMu.Unlock()
-			e.reply(p, msg.ReplyCtx, "Cancelled. Send a repo URL anytime to try again.")
-			return true
-		}
-
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf("Cloning `%s` to `%s`...", flow.repoURL, flow.cloneTo))
-
-		if err := gitClone(flow.repoURL, flow.cloneTo); err != nil {
-			e.initFlowsMu.Lock()
-			delete(e.initFlows, channelID)
-			e.initFlowsMu.Unlock()
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf("Clone failed: %v\nSend a repo URL to try again.", err))
-			return true
-		}
-
-		projectKey := "project:" + e.name
-		e.workspaceBindings.Bind(projectKey, channelID, flow.channelName, flow.cloneTo)
-
-		e.initFlowsMu.Lock()
-		delete(e.initFlows, channelID)
-		e.initFlowsMu.Unlock()
-
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(
-			"Clone complete. Bound workspace `%s` to this channel. Ready.", flow.cloneTo))
-		return true
-	}
-
-	return false
-}
-
-func looksLikeGitURL(s string) bool {
-	return strings.HasPrefix(s, "https://") ||
-		strings.HasPrefix(s, "http://") ||
-		strings.HasPrefix(s, "git@") ||
-		strings.HasPrefix(s, "ssh://")
-}
-
-func extractRepoName(url string) string {
-	url = strings.TrimSuffix(url, ".git")
-	// Handle git@host:org/repo format
-	if idx := strings.LastIndex(url, ":"); idx != -1 && strings.HasPrefix(url, "git@") {
-		remainder := url[idx+1:]
-		parts := strings.Split(remainder, "/")
-		if len(parts) > 0 {
-			return parts[len(parts)-1]
-		}
-	}
-	// Handle https://host/org/repo format
-	parts := strings.Split(url, "/")
-	if len(parts) > 0 {
-		return parts[len(parts)-1]
-	}
-	return "workspace"
-}
-
-func gitClone(repoURL, dest string) error {
-	cmd := exec.Command("git", "clone", repoURL, dest)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)
-	}
-	return nil
 }
