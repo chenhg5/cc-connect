@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -221,6 +222,19 @@ func contextIndicator(inputTokens int) string {
 	}
 	pct := inputTokens * 100 / 200_000
 	return fmt.Sprintf("\n[ctx: %d%%]", pct)
+}
+
+var ctxSelfReportRe = regexp.MustCompile(`\[ctx:\s*~?(\d+)%\]`)
+
+// parseSelfReportedCtx extracts the self-reported context percentage from a response.
+// Returns -1 if not found.
+func parseSelfReportedCtx(response string) int {
+	m := ctxSelfReportRe.FindStringSubmatch(response)
+	if m == nil {
+		return -1
+	}
+	v, _ := strconv.Atoi(m[1])
+	return v
 }
 
 // pendingPermission represents a permission request waiting for user response.
@@ -1592,6 +1606,23 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if fullResponse == "" {
 				fullResponse = e.i18n.T(MsgEmptyResponse)
 			}
+
+			// Dual-track context logging: compare SDK vs self-reported
+			if event.InputTokens > 0 {
+				sdkPct := event.InputTokens * 100 / 200_000
+				selfPct := parseSelfReportedCtx(fullResponse)
+				slog.Info("context_usage",
+					"session_key", sessionKey,
+					"sdk_pct", sdkPct,
+					"self_reported_pct", selfPct,
+					"input_tokens", event.InputTokens,
+					"output_tokens", event.OutputTokens,
+				)
+			}
+
+			// Strip self-reported indicator (we replace it with the accurate SDK one)
+			fullResponse = ctxSelfReportRe.ReplaceAllString(fullResponse, "")
+			fullResponse = strings.TrimRight(fullResponse, "\n ")
 
 			// Append context indicator
 			fullResponse += contextIndicator(event.InputTokens)

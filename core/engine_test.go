@@ -346,10 +346,10 @@ func TestEngine_DisabledCommands(t *testing.T) {
 
 func TestEngine_DisabledCommandsWithSlash(t *testing.T) {
 	e := newTestEngine()
-	e.SetDisabledCommands([]string{"/upgrade"})
+	e.SetDisabledCommands([]string{"!upgrade"})
 
 	if !e.disabledCmds["upgrade"] {
-		t.Error("upgrade should be disabled even when prefixed with /")
+		t.Error("upgrade should be disabled even when prefixed with !")
 	}
 }
 
@@ -1356,8 +1356,8 @@ func TestCmdLang_UsesInlineButtonsOnButtonOnlyPlatform(t *testing.T) {
 	if len(p.buttonRows) == 0 {
 		t.Fatal("expected /lang to send inline buttons on button-only platform")
 	}
-	if got := p.buttonRows[0][0].Data; got != "cmd:/lang en" {
-		t.Fatalf("first /lang button = %q, want %q", got, "cmd:/lang en")
+	if got := p.buttonRows[0][0].Data; got != "cmd:!lang en" {
+		t.Fatalf("first !lang button = %q, want %q", got, "cmd:!lang en")
 	}
 }
 
@@ -1412,8 +1412,8 @@ func TestCmdModel_UsesInlineButtonsOnButtonOnlyPlatform(t *testing.T) {
 	if len(p.buttonRows) == 0 {
 		t.Fatal("expected /model to send inline buttons on button-only platform")
 	}
-	if got := p.buttonRows[0][0].Data; got != "cmd:/model 1" {
-		t.Fatalf("first /model button = %q, want %q", got, "cmd:/model 1")
+	if got := p.buttonRows[0][0].Data; got != "cmd:!model 1" {
+		t.Fatalf("first !model button = %q, want %q", got, "cmd:!model 1")
 	}
 }
 
@@ -1427,8 +1427,8 @@ func TestCmdReasoning_UsesInlineButtonsOnButtonOnlyPlatform(t *testing.T) {
 	if len(p.buttonRows) == 0 {
 		t.Fatal("expected /reasoning to send inline buttons on button-only platform")
 	}
-	if got := p.buttonRows[0][0].Data; got != "cmd:/reasoning 1" {
-		t.Fatalf("first /reasoning button = %q, want %q", got, "cmd:/reasoning 1")
+	if got := p.buttonRows[0][0].Data; got != "cmd:!reasoning 1" {
+		t.Fatalf("first !reasoning button = %q, want %q", got, "cmd:!reasoning 1")
 	}
 	if got := p.buttonRows[0][0].Text; got != "low" {
 		t.Fatalf("first /reasoning button text = %q, want low", got)
@@ -1472,7 +1472,7 @@ func TestCmdReasoning_RejectsMinimal(t *testing.T) {
 	if agent.reasoningEffort != "" {
 		t.Fatalf("reasoning effort = %q, want unchanged empty", agent.reasoningEffort)
 	}
-	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "/reasoning <number>") || strings.Contains(p.sent[0], "minimal") {
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "!reasoning <number>") || strings.Contains(p.sent[0], "minimal") {
 		t.Fatalf("sent = %v, want usage without minimal", p.sent)
 	}
 }
@@ -1487,8 +1487,8 @@ func TestCmdMode_UsesInlineButtonsOnButtonOnlyPlatform(t *testing.T) {
 	if len(p.buttonRows) == 0 {
 		t.Fatal("expected /mode to send inline buttons on button-only platform")
 	}
-	if got := p.buttonRows[0][0].Data; got != "cmd:/mode default" {
-		t.Fatalf("first /mode button = %q, want %q", got, "cmd:/mode default")
+	if got := p.buttonRows[0][0].Data; got != "cmd:!mode default" {
+		t.Fatalf("first !mode button = %q, want %q", got, "cmd:!mode default")
 	}
 }
 
@@ -1756,6 +1756,26 @@ func TestCmdSkills_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	}
 }
 
+func TestParseSelfReportedCtx(t *testing.T) {
+	tests := []struct {
+		input string
+		want  int
+	}{
+		{"some response\n[ctx: ~45%]", 45},
+		{"response [ctx: 80%]", 80},
+		{"no indicator", -1},
+		{"[ctx: ~100%] mid-text", 100},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := parseSelfReportedCtx(tt.input)
+			if got != tt.want {
+				t.Errorf("parseSelfReportedCtx(%q) = %d, want %d", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRenderListCard_MakesEveryVisibleSessionClickable(t *testing.T) {
 	sessions := make([]AgentSessionInfo, 0, 7)
 	base := time.Date(2026, 3, 9, 10, 0, 0, 0, time.UTC)
@@ -1808,13 +1828,13 @@ func TestRenderHelpCard_DefaultsToSessionTab(t *testing.T) {
 	if btn.Text != "Session Management" {
 		t.Fatalf("session help tab text = %q, want full title", btn.Text)
 	}
-	if !strings.Contains(text, "**/new**") {
+	if !strings.Contains(text, "**!new**") {
 		t.Fatalf("default help text = %q, want session commands", text)
 	}
 	if strings.Contains(text, "**Session Management**") {
 		t.Fatalf("default help text = %q, should not repeat tab title in body", text)
 	}
-	if strings.Contains(text, "**/model**") {
+	if strings.Contains(text, "**!model**") {
 		t.Fatalf("default help text = %q, should not include agent commands", text)
 	}
 }
@@ -1828,13 +1848,13 @@ func TestHandleCardNav_HelpSwitchesTabs(t *testing.T) {
 	}
 	text := card.RenderText()
 
-	if !strings.Contains(text, "**/model**") {
+	if !strings.Contains(text, "**!model**") {
 		t.Fatalf("agent help text = %q, want agent commands", text)
 	}
 	if strings.Contains(text, "**Agent Configuration**") {
 		t.Fatalf("agent help text = %q, should not repeat tab title in body", text)
 	}
-	if strings.Contains(text, "**/new**") {
+	if strings.Contains(text, "**!new**") {
 		t.Fatalf("agent help text = %q, should not include session commands", text)
 	}
 }
