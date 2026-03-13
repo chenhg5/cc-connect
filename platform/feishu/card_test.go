@@ -12,7 +12,7 @@ func decodeRenderedCard(t *testing.T, card *core.Card) map[string]any {
 	t.Helper()
 
 	var got map[string]any
-	if err := json.Unmarshal([]byte(renderCard(card)), &got); err != nil {
+	if err := json.Unmarshal([]byte(renderCard(card, "")), &got); err != nil {
 		t.Fatalf("renderCard JSON decode failed: %v", err)
 	}
 	return got
@@ -225,5 +225,43 @@ func TestRenderCardMap_DeleteModeUsesCheckerForm(t *testing.T) {
 	}
 	if strings.Contains(s, `act:/delete-mode toggle`) {
 		t.Fatalf("expected no toggle buttons in rendered card, got %s", s)
+	}
+}
+
+func TestRenderCardMap_InjectsSessionKeyIntoCallbacks(t *testing.T) {
+	card := core.NewCard().
+		Buttons(core.PrimaryBtn("Open", "nav:/help session")).
+		ListItem("Choose", "Confirm", "act:/confirm").
+		Select("Pick one", []core.CardSelectOption{{Text: "A", Value: "askq:0:1"}}, "").
+		Build()
+
+	got := renderCardMap(card, "feishu:oc_chat:root:om_root")
+	elements, ok := got["elements"].([]map[string]any)
+	if !ok || len(elements) != 3 {
+		t.Fatalf("elements = %#v, want 3 elements", got["elements"])
+	}
+
+	actionRow := elements[0]
+	actions := actionRow["actions"].([]map[string]any)
+	firstButton := actions[0]
+	value := firstButton["value"].(map[string]string)
+	if value["session_key"] != "feishu:oc_chat:root:om_root" {
+		t.Fatalf("button session_key = %#v, want thread session key", value["session_key"])
+	}
+
+	listRow := elements[1]
+	columns := listRow["columns"].([]map[string]any)
+	actionCol := columns[1]
+	listBtn := actionCol["elements"].([]map[string]any)[0]
+	listValue := listBtn["value"].(map[string]string)
+	if listValue["session_key"] != "feishu:oc_chat:root:om_root" {
+		t.Fatalf("list item session_key = %#v, want thread session key", listValue["session_key"])
+	}
+
+	selectRow := elements[2]
+	selectActions := selectRow["actions"].([]map[string]any)
+	selectValue := selectActions[0]["value"].(map[string]string)
+	if selectValue["session_key"] != "feishu:oc_chat:root:om_root" {
+		t.Fatalf("select session_key = %#v, want thread session key", selectValue["session_key"])
 	}
 }

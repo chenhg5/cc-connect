@@ -74,9 +74,11 @@ type = "feishu"
 app_id = "cli_axxxxxxxxxxxx"
 app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 # enable_feishu_card = true  # 可选：关闭后统一回退纯文本回复
+# thread_isolation = true    # 可选：按飞书 thread/root 隔离群聊会话
 ```
 
 > 如果应用没有交互卡片权限，或后台未配置卡片回调，可将 `enable_feishu_card = false`，让所有命令统一走纯文本回复，避免卡片发送失败后用户看不到内容。
+> 如果开启 `thread_isolation = true`，群聊里每个根消息 / reply thread 会对应一个独立 agent session；私聊行为保持原样。
 
 ---
 
@@ -303,4 +305,3 @@ cc-connect 内置了自动重连机制，断开后会自动尝试重新连接。
 - [接入 Slack](./slack.md)
 - [接入 Discord](./discord.md)
 - [返回首页](../README.md)
-

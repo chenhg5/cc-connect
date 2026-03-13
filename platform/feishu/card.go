@@ -22,13 +22,10 @@ func (p *interactivePlatform) ReplyCard(ctx context.Context, rctx any, card *cor
 		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
 	}
 
-	cardJSON := renderCard(card)
+	cardJSON := renderCard(card, rc.sessionKey)
 	resp, err := p.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
 		MessageId(rc.messageID).
-		Body(larkim.NewReplyMessageReqBodyBuilder().
-			MsgType(larkim.MsgTypeInteractive).
-			Content(cardJSON).
-			Build()).
+		Body(p.buildReplyMessageReqBody(rc, larkim.MsgTypeInteractive, cardJSON)).
 		Build())
 	if err != nil {
 		return fmt.Errorf("%s: reply card api call: %w", p.tag(), err)
@@ -49,7 +46,11 @@ func (p *interactivePlatform) SendCard(ctx context.Context, rctx any, card *core
 		return fmt.Errorf("%s: chatID is empty, cannot send card", p.tag())
 	}
 
-	cardJSON := renderCard(card)
+	if p.shouldReplyInThread(rc) {
+		return p.ReplyCard(ctx, rctx, card)
+	}
+
+	cardJSON := renderCard(card, rc.sessionKey)
 	resp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
 		ReceiveIdType(larkim.ReceiveIdTypeChatId).
 		Body(larkim.NewCreateMessageReqBodyBuilder().
@@ -70,7 +71,7 @@ func (p *interactivePlatform) SendCard(ctx context.Context, rctx any, card *core
 // renderCardMap converts a core.Card into the Feishu Interactive Card map
 // using the v1 format. Used both for message API (via renderCard) and
 // callback responses (CardActionTriggerResponse).
-func renderCardMap(card *core.Card) map[string]any {
+func renderCardMap(card *core.Card, sessionKey string) map[string]any {
 	result := map[string]any{
 		"config": map[string]any{
 			"wide_screen_mode": true,
@@ -114,6 +115,9 @@ func renderCardMap(card *core.Card) map[string]any {
 					btnType = "default"
 				}
 				valMap := map[string]string{"action": btn.Value}
+				if sessionKey != "" {
+					valMap["session_key"] = sessionKey
+				}
 				for k, v := range btn.Extra {
 					valMap[k] = v
 				}
@@ -162,6 +166,9 @@ func renderCardMap(card *core.Card) map[string]any {
 				btnType = "default"
 			}
 			valMap := map[string]string{"action": e.BtnValue}
+			if sessionKey != "" {
+				valMap["session_key"] = sessionKey
+			}
 			for k, v := range e.Extra {
 				valMap[k] = v
 			}
@@ -208,6 +215,9 @@ func renderCardMap(card *core.Card) map[string]any {
 				"tag":         "select_static",
 				"placeholder": plainText(e.Placeholder),
 				"options":     options,
+			}
+			if sessionKey != "" {
+				selectElem["value"] = map[string]string{"session_key": sessionKey}
 			}
 			if e.InitValue != "" {
 				selectElem["initial_option"] = e.InitValue
@@ -428,10 +438,9 @@ func parseDeleteModeListItemAction(action string) (id string, selectable bool, o
 	}
 }
 
-
 // renderCard converts a core.Card into the Feishu Interactive Card JSON string.
-func renderCard(card *core.Card) string {
-	b, err := json.Marshal(renderCardMap(card))
+func renderCard(card *core.Card, sessionKey string) string {
+	b, err := json.Marshal(renderCardMap(card, sessionKey))
 	if err != nil {
 		slog.Error("feishu: renderCard marshal failed", "error", err)
 		return `{"config":{"wide_screen_mode":true},"elements":[]}`
