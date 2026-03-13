@@ -172,6 +172,40 @@ go test -race ./...
 - Test card rendering by inspecting the returned `*Card` struct, not JSON
 - For agent session tests, simulate event streams via channels
 
+## Selective Compilation
+
+Each agent and platform is imported via a separate `plugin_*.go` file with a
+build tag (e.g. `//go:build !no_feishu`). By default **all** agents and
+platforms are compiled in.
+
+### Include only specific agents/platforms
+
+```bash
+# Only Claude Code agent + Feishu and Telegram platforms
+make build AGENTS=claudecode PLATFORMS_INCLUDE=feishu,telegram
+
+# Multiple agents
+make build AGENTS=claudecode,codex PLATFORMS_INCLUDE=feishu,telegram,discord
+```
+
+### Exclude specific agents/platforms
+
+```bash
+# Exclude some platforms you don't need
+make build EXCLUDE=discord,dingtalk,qq,qqbot,line
+```
+
+### Direct build tag usage (without Make)
+
+```bash
+go build -tags 'no_discord no_dingtalk no_qq no_qqbot no_line' ./cmd/cc-connect
+```
+
+Available tags: `no_claudecode`, `no_codex`, `no_cursor`, `no_gemini`,
+`no_iflow`, `no_opencode`, `no_qoder`, `no_feishu`, `no_telegram`,
+`no_discord`, `no_slack`, `no_dingtalk`, `no_wecom`, `no_qq`, `no_qqbot`,
+`no_line`.
+
 ## Pre-Commit Checklist
 
 1. **Build passes**: `go build ./...`
@@ -185,16 +219,18 @@ go test -race ./...
 1. Create `platform/newplatform/newplatform.go`
 2. Implement `core.Platform` interface (and optional interfaces as needed)
 3. Register in `init()`: `core.RegisterPlatform("newplatform", factory)`
-4. Import in `cmd/cc-connect/main.go`: `_ "github.com/.../platform/newplatform"`
-5. Add config example in `config.example.toml`
-6. Add unit tests
+4. Create `cmd/cc-connect/plugin_platform_newplatform.go` with `//go:build !no_newplatform` tag
+5. Add `newplatform` to `ALL_PLATFORMS` in `Makefile`
+6. Add config example in `config.example.toml`
+7. Add unit tests
 
 ## Adding a New Agent
 
 1. Create `agent/newagent/newagent.go`
 2. Implement `core.Agent` and `core.AgentSession` interfaces
 3. Register in `init()`: `core.RegisterAgent("newagent", factory)`
-4. Import in `cmd/cc-connect/main.go`: `_ "github.com/.../agent/newagent"`
-5. Optionally implement `AgentDoctorInfo` for `cc-connect doctor` support
-6. Add config example in `config.example.toml`
-7. Add unit tests
+4. Create `cmd/cc-connect/plugin_agent_newagent.go` with `//go:build !no_newagent` tag
+5. Add `newagent` to `ALL_AGENTS` in `Makefile`
+6. Optionally implement `AgentDoctorInfo` for `cc-connect doctor` support
+7. Add config example in `config.example.toml`
+8. Add unit tests

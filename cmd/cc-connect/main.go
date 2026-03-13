@@ -20,25 +20,8 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 	"github.com/chenhg5/cc-connect/daemon"
 
-	_ "github.com/chenhg5/cc-connect/agent/claudecode"
-	_ "github.com/chenhg5/cc-connect/agent/codex"
-	_ "github.com/chenhg5/cc-connect/agent/cursor"
-	_ "github.com/chenhg5/cc-connect/agent/gemini"
-	_ "github.com/chenhg5/cc-connect/agent/iflow"
-	_ "github.com/chenhg5/cc-connect/agent/opencode"
-	_ "github.com/chenhg5/cc-connect/agent/qoder"
-
-	_ "github.com/chenhg5/cc-connect/platform/dingtalk"
-	_ "github.com/chenhg5/cc-connect/platform/discord"
-	_ "github.com/chenhg5/cc-connect/platform/feishu"
-	_ "github.com/chenhg5/cc-connect/platform/line"
-	_ "github.com/chenhg5/cc-connect/platform/qq"
-	_ "github.com/chenhg5/cc-connect/platform/slack"
-	_ "github.com/chenhg5/cc-connect/platform/telegram"
-	_ "github.com/chenhg5/cc-connect/platform/wecom"
-
-	_ "github.com/chenhg5/cc-connect/platform/qq"
-	_ "github.com/chenhg5/cc-connect/platform/qqbot"
+	// Agent and platform imports are in separate plugin_*.go files
+	// controlled by build tags. See Makefile for selective compilation.
 )
 
 var (

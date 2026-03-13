@@ -20,10 +20,50 @@ PLATFORMS := \
   windows/amd64 \
   windows/arm64
 
+# ---------------------------------------------------------------------------
+# Selective compilation via build tags.
+#
+# By default all agents and platforms are included. To build with only
+# specific ones, set AGENTS and/or PLATFORMS_INCLUDE:
+#
+#   make build AGENTS=claudecode PLATFORMS_INCLUDE=feishu,telegram
+#
+# You can also exclude specific ones:
+#
+#   make build EXCLUDE=discord,dingtalk,qq,qqbot,line
+# ---------------------------------------------------------------------------
+
+ALL_AGENTS    := claudecode codex cursor gemini iflow opencode qoder
+ALL_PLATFORMS := feishu telegram discord slack dingtalk wecom qq qqbot line
+
+COMMA := ,
+
+# Compute exclusion tags from AGENTS / PLATFORMS_INCLUDE / EXCLUDE variables
+_EXCLUDE_TAGS :=
+
+ifdef AGENTS
+  _WANTED_AGENTS := $(subst $(COMMA), ,$(AGENTS))
+  _EXCLUDE_AGENTS := $(filter-out $(_WANTED_AGENTS),$(ALL_AGENTS))
+  _EXCLUDE_TAGS += $(addprefix no_,$(_EXCLUDE_AGENTS))
+endif
+
+ifdef PLATFORMS_INCLUDE
+  _WANTED_PLATFORMS := $(subst $(COMMA), ,$(PLATFORMS_INCLUDE))
+  _EXCLUDE_PLATFORMS := $(filter-out $(_WANTED_PLATFORMS),$(ALL_PLATFORMS))
+  _EXCLUDE_TAGS += $(addprefix no_,$(_EXCLUDE_PLATFORMS))
+endif
+
+ifdef EXCLUDE
+  _EXCLUDE_TAGS += $(addprefix no_,$(subst $(COMMA), ,$(EXCLUDE)))
+endif
+
+_BUILD_TAGS := $(strip $(_EXCLUDE_TAGS))
+_TAGS_FLAG  := $(if $(_BUILD_TAGS),-tags '$(_BUILD_TAGS)',)
+
 .PHONY: build run clean test lint release release-all
 
 build:
-	go build -ldflags "$(LDFLAGS)" -o $(APP) $(CMD)
+	go build $(_TAGS_FLAG) -ldflags "$(LDFLAGS)" -o $(APP) $(CMD)
 
 run: build
 	./$(APP)
@@ -47,7 +87,7 @@ release-all: clean
 		$(eval OUT    := $(DIST)/$(APP)-$(VERSION)-$(GOOS)-$(GOARCH)$(EXT)) \
 		echo "Building $(OUT)" && \
 		GOOS=$(GOOS) GOARCH=$(GOARCH) CGO_ENABLED=0 \
-			go build -ldflags "$(LDFLAGS)" -o $(OUT) $(CMD) && \
+			go build $(_TAGS_FLAG) -ldflags "$(LDFLAGS)" -o $(OUT) $(CMD) && \
 	) true
 	@echo "Packaging archives..."
 	@cd $(DIST) && for f in $(APP)-*; do \
@@ -72,5 +112,5 @@ release:
 	$(eval EXT    := $(if $(filter windows,$(GOOS)),.exe,))
 	$(eval OUT    := $(DIST)/$(APP)-$(VERSION)-$(GOOS)-$(GOARCH)$(EXT))
 	GOOS=$(GOOS) GOARCH=$(GOARCH) CGO_ENABLED=0 \
-		go build -ldflags "$(LDFLAGS)" -o $(OUT) $(CMD)
+		go build $(_TAGS_FLAG) -ldflags "$(LDFLAGS)" -o $(OUT) $(CMD)
 	@echo "Built: $(OUT)"
