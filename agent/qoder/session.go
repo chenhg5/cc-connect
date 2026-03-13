@@ -56,9 +56,13 @@ func newQoderSession(ctx context.Context, workDir, model, mode, resumeID string,
 	return qs, nil
 }
 
-func (qs *qoderSession) Send(prompt string, images []core.ImageAttachment) error {
+func (qs *qoderSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	if len(images) > 0 {
 		slog.Warn("qoderSession: images not supported, ignoring")
+	}
+	if len(files) > 0 {
+		filePaths := core.SaveFilesToDisk(qs.workDir, files)
+		prompt = core.AppendFileRefs(prompt, filePaths)
 	}
 	if !qs.alive.Load() {
 		return fmt.Errorf("session is closed")

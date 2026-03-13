@@ -1,7 +1,10 @@
 package core
 
 import (
+	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -68,6 +71,51 @@ type ImageAttachment struct {
 	FileName string // original filename (optional)
 }
 
+// FileAttachment represents a file (PDF, doc, spreadsheet, etc.) sent by the user.
+type FileAttachment struct {
+	MimeType string // e.g. "application/pdf", "text/plain"
+	Data     []byte // raw file bytes
+	FileName string // original filename
+}
+
+// SaveFilesToDisk saves file attachments to workDir/.cc-connect/attachments/
+// and returns the list of absolute file paths. Agents can reference these paths
+// in their prompts so the CLI can read them with built-in tools.
+func SaveFilesToDisk(workDir string, files []FileAttachment) []string {
+	if len(files) == 0 {
+		return nil
+	}
+	attachDir := filepath.Join(workDir, ".cc-connect", "attachments")
+	os.MkdirAll(attachDir, 0o755)
+
+	var paths []string
+	for i, f := range files {
+		fname := f.FileName
+		if fname == "" {
+			fname = fmt.Sprintf("file_%d_%d", time.Now().UnixMilli(), i)
+		}
+		fpath := filepath.Join(attachDir, fname)
+		if err := os.WriteFile(fpath, f.Data, 0o644); err != nil {
+			slog.Error("SaveFilesToDisk: write failed", "error", err)
+			continue
+		}
+		paths = append(paths, fpath)
+		slog.Debug("SaveFilesToDisk: file saved", "path", fpath, "name", f.FileName, "mime", f.MimeType, "size", len(f.Data))
+	}
+	return paths
+}
+
+// AppendFileRefs appends file path references to a prompt string.
+func AppendFileRefs(prompt string, filePaths []string) string {
+	if len(filePaths) == 0 {
+		return prompt
+	}
+	if prompt == "" {
+		prompt = "Please analyze the attached file(s)."
+	}
+	return prompt + "\n\n(Files saved locally, please read them: " + strings.Join(filePaths, ", ") + ")"
+}
+
 // AudioAttachment represents a voice/audio message sent by the user.
 type AudioAttachment struct {
 	MimeType string // e.g. "audio/amr", "audio/ogg", "audio/mp4"
@@ -85,6 +133,7 @@ type Message struct {
 	UserName   string
 	Content    string
 	Images     []ImageAttachment // attached images (if any)
+	Files      []FileAttachment  // attached files (if any)
 	Audio      *AudioAttachment  // voice message (if any)
 	ReplyCtx   any               // platform-specific context needed for replying
 	FromVoice  bool              // true if message originated from voice transcription

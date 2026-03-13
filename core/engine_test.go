@@ -23,7 +23,7 @@ func (a *stubAgent) Stop() error                                                
 
 type stubAgentSession struct{}
 
-func (s *stubAgentSession) Send(_ string, _ []ImageAttachment) error             { return nil }
+func (s *stubAgentSession) Send(_ string, _ []ImageAttachment, _ []FileAttachment) error { return nil }
 func (s *stubAgentSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
 func (s *stubAgentSession) Events() <-chan Event                                 { return make(chan Event) }
 func (s *stubAgentSession) CurrentSessionID() string                             { return "stub-session" }

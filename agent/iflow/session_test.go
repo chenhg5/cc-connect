@@ -398,7 +398,7 @@ while :; do sleep 1; done
 	}
 	defer sess.Close()
 
-	if err := sess.Send("执行ls", nil); err != nil {
+	if err := sess.Send("执行ls", nil, nil); err != nil {
 		t.Fatalf("Send #1: %v", err)
 	}
 
@@ -419,7 +419,7 @@ while :; do sleep 1; done
 		}
 	}
 
-	if err := sess.Send("第二条消息", nil); err != nil {
+	if err := sess.Send("第二条消息", nil, nil); err != nil {
 		if strings.Contains(err.Error(), "busy") {
 			t.Fatalf("session still busy after timeout result: %v", err)
 		}

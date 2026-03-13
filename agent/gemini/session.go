@@ -62,15 +62,15 @@ func newGeminiSession(ctx context.Context, cmd, workDir, model, mode, resumeID s
 	return gs, nil
 }
 
-func (gs *geminiSession) Send(prompt string, images []core.ImageAttachment) (err error) {
+func (gs *geminiSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) (err error) {
 	if !gs.alive.Load() {
 		return fmt.Errorf("session is closed")
 	}
 
-	// Gemini CLI supports @file references for images; save to temp files
+	// Gemini CLI supports @file references for images and files; save to temp files
 	var imageRefs []string
+	tmpDir := os.TempDir()
 	if len(images) > 0 {
-		tmpDir := os.TempDir()
 		for i, img := range images {
 			ext := ".png"
 			switch img.MimeType {
@@ -89,6 +89,20 @@ func (gs *geminiSession) Send(prompt string, images []core.ImageAttachment) (err
 			}
 			imageRefs = append(imageRefs, fpath)
 		}
+	}
+	// Save files to temp and include as references
+	var fileRefs []string
+	for i, f := range files {
+		fname := f.FileName
+		if fname == "" {
+			fname = fmt.Sprintf("cc-connect-file-%d", i)
+		}
+		fpath := fmt.Sprintf("%s/%s", tmpDir, fname)
+		if err := os.WriteFile(fpath, f.Data, 0o644); err != nil {
+			slog.Warn("geminiSession: failed to save file", "error", err)
+			continue
+		}
+		fileRefs = append(fileRefs, fpath)
 	}
 
 	chatID := gs.CurrentSessionID()
@@ -114,10 +128,13 @@ func (gs *geminiSession) Send(prompt string, images []core.ImageAttachment) (err
 		args = append(args, "-m", gs.model)
 	}
 
-	// Build the prompt with image file references
+	// Build the prompt with image and file references
 	fullPrompt := prompt
 	if len(imageRefs) > 0 {
-		fullPrompt = strings.Join(imageRefs, " ") + " " + prompt
+		fullPrompt = strings.Join(imageRefs, " ") + " " + fullPrompt
+	}
+	if len(fileRefs) > 0 {
+		fullPrompt = strings.Join(fileRefs, " ") + " " + fullPrompt
 	}
 
 	args = append(args, "-p", fullPrompt)
@@ -166,7 +183,7 @@ func (gs *geminiSession) Send(prompt string, images []core.ImageAttachment) (err
 	gs.wg.Add(1)
 	go func() {
 		defer cancel()
-		gs.readLoop(ctx, cmd, stdout, &stderrBuf, imageRefs)
+		gs.readLoop(ctx, cmd, stdout, &stderrBuf, append(imageRefs, fileRefs...))
 	}()
 
 	return nil

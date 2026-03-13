@@ -96,7 +96,7 @@ func TestSend_WithImages_PassesImageArgsAndDefaultPrompt(t *testing.T) {
 		Data:     []byte("png-bytes"),
 		FileName: "sample.png",
 	}
-	if err := cs.Send("", []core.ImageAttachment{img}); err != nil {
+	if err := cs.Send("", []core.ImageAttachment{img}, nil); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
@@ -148,7 +148,7 @@ func TestSend_ResumeWithImages_PlacesSessionBeforeImageFlags(t *testing.T) {
 	}
 	defer cs.Close()
 
-	if err := cs.Send("describe this", []core.ImageAttachment{{MimeType: "image/jpeg", Data: []byte("jpg")}}); err != nil {
+	if err := cs.Send("describe this", []core.ImageAttachment{{MimeType: "image/jpeg", Data: []byte("jpg")}}, nil); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
