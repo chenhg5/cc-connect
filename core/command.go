@@ -77,37 +77,58 @@ func (r *CommandRegistry) SetAgentDirs(dirs []string) {
 
 // Resolve looks up a command by name. Config commands take priority, then
 // agent command directories are scanned for a matching .md file.
+// Hyphens and underscores are treated as equivalent so that Telegram-sanitized
+// names (e.g. "my_cmd") match original command names ("my-cmd").
 func (r *CommandRegistry) Resolve(name string) (*CustomCommand, bool) {
 	lower := strings.ToLower(name)
+	norm := normalizeCommandName(name)
 
 	r.mu.RLock()
+	// Exact match first
 	if c, ok := r.commands[lower]; ok {
 		r.mu.RUnlock()
 		return c, true
 	}
+	// Normalized match (hyphen ↔ underscore)
+	for key, c := range r.commands {
+		if normalizeCommandName(key) == norm {
+			r.mu.RUnlock()
+			return c, true
+		}
+	}
 	r.mu.RUnlock()
 
+	// Scan agent command directories; try both original name and hyphenated variant
+	candidates := []string{name}
+	if alt := strings.ReplaceAll(name, "_", "-"); alt != name {
+		candidates = append(candidates, alt)
+	}
 	for _, dir := range r.agentDirs {
-		mdPath := filepath.Join(dir, name+".md")
-		absDir, err1 := filepath.Abs(dir)
-		absPath, err2 := filepath.Abs(mdPath)
-		if err1 != nil || err2 != nil || !strings.HasPrefix(absPath, absDir+string(filepath.Separator)) {
-			continue
-		}
-		data, err := os.ReadFile(mdPath)
+		absDir, err := filepath.Abs(dir)
 		if err != nil {
 			continue
 		}
-		content := strings.TrimSpace(string(data))
-		if content == "" {
-			continue
+		for _, candidate := range candidates {
+			mdPath := filepath.Join(dir, candidate+".md")
+			absPath, err := filepath.Abs(mdPath)
+			if err != nil || !strings.HasPrefix(absPath, absDir+string(filepath.Separator)) {
+				continue
+			}
+			data, err := os.ReadFile(mdPath)
+			if err != nil {
+				continue
+			}
+			content := strings.TrimSpace(string(data))
+			if content == "" {
+				continue
+			}
+			slog.Debug("command: loaded agent command file", "path", mdPath)
+			return &CustomCommand{
+				Name:   candidate,
+				Prompt: content,
+				Source: "agent",
+			}, true
 		}
-		slog.Debug("command: loaded agent command file", "path", mdPath)
-		return &CustomCommand{
-			Name:   name,
-			Prompt: content,
-			Source: "agent",
-		}, true
 	}
 
 	return nil, false

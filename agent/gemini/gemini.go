@@ -118,10 +118,13 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	if models := a.fetchModelsFromAPI(ctx); len(models) > 0 {
 		return models
 	}
+	// Matches Gemini CLI's own "Select Model" list.
 	return []core.ModelOption{
-		{Name: "gemini-2.5-pro", Desc: "Gemini 2.5 Pro (most capable)"},
-		{Name: "gemini-2.5-flash", Desc: "Gemini 2.5 Flash (fast)"},
-		{Name: "gemini-2.0-flash", Desc: "Gemini 2.0 Flash (lightweight)"},
+		{Name: "gemini-3.1-pro-preview", Desc: "Gemini 3.1 Pro Preview"},
+		{Name: "gemini-3-flash-preview", Desc: "Gemini 3 Flash Preview"},
+		{Name: "gemini-2.5-pro", Desc: "Gemini 2.5 Pro"},
+		{Name: "gemini-2.5-flash", Desc: "Gemini 2.5 Flash"},
+		{Name: "gemini-2.5-flash-lite", Desc: "Gemini 2.5 Flash Lite"},
 	}
 }
 
@@ -208,12 +211,30 @@ func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
 	if err != nil {
 		return fmt.Errorf("gemini: cannot determine home dir: %w", err)
 	}
-	projName := geminiProjectHash(a.workDir)
-	path := filepath.Join(homeDir, ".gemini", "tmp", projName, "chats", sessionID+".json")
-	if _, err := os.Stat(path); os.IsNotExist(err) {
+	chatsDir := filepath.Join(homeDir, ".gemini", "tmp", geminiProjectSlug(a.workDir), "chats")
+	// Session files are named session-<timestamp>-<uuid_prefix>.json, not <uuid>.json.
+	// Scan the directory to find the file containing the matching sessionId.
+	entries, err := os.ReadDir(chatsDir)
+	if err != nil {
 		return fmt.Errorf("session file not found: %s", sessionID)
 	}
-	return os.Remove(path)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		fpath := filepath.Join(chatsDir, entry.Name())
+		data, err := os.ReadFile(fpath)
+		if err != nil {
+			continue
+		}
+		var sf struct {
+			SessionID string `json:"sessionId"`
+		}
+		if json.Unmarshal(data, &sf) == nil && sf.SessionID == sessionID {
+			return os.Remove(fpath)
+		}
+	}
+	return fmt.Errorf("session file not found: %s", sessionID)
 }
 
 func (a *Agent) Stop() error { return nil }
@@ -271,8 +292,11 @@ func (a *Agent) SkillDirs() []string {
 }
 
 // ── ContextCompressor implementation ──────────────────────────
+// Gemini CLI has no interactive compress/compact command.
+// Return "" so engine reports "not supported" instead of sending
+// a bogus "/compress" prompt to the model.
 
-func (a *Agent) CompressCommand() string { return "/compress" }
+func (a *Agent) CompressCommand() string { return "" }
 
 // ── MemoryFileProvider implementation ─────────────────────────
 
@@ -353,14 +377,61 @@ func (a *Agent) providerEnvLocked() []string {
 
 // ── Session listing ─────────────────────────────────────────────
 
-// geminiProjectHash computes the directory name Gemini CLI uses under ~/.gemini/tmp/.
-// Gemini uses a hash of the absolute project path.
-func geminiProjectHash(workDir string) string {
+// geminiProjectSlug looks up the directory name Gemini CLI uses under ~/.gemini/tmp/
+// for a given project path. It reads ~/.gemini/projects.json (the CLI's slug registry)
+// and falls back to a slugified basename if the project isn't registered.
+func geminiProjectSlug(workDir string) string {
 	abs, err := filepath.Abs(workDir)
 	if err != nil {
 		abs = workDir
 	}
-	return filepath.Base(abs)
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return slugify(filepath.Base(abs))
+	}
+
+	// Read the Gemini CLI project registry
+	data, err := os.ReadFile(filepath.Join(homeDir, ".gemini", "projects.json"))
+	if err == nil {
+		var registry struct {
+			Projects map[string]string `json:"projects"`
+		}
+		if json.Unmarshal(data, &registry) == nil {
+			// Normalize path for lookup (Gemini CLI uses path.normalize)
+			normalized := filepath.Clean(abs)
+			if slug, ok := registry.Projects[normalized]; ok {
+				return slug
+			}
+		}
+	}
+
+	// Fallback: replicate Gemini CLI's slugify logic
+	return slugify(filepath.Base(abs))
+}
+
+// slugify replicates the Gemini CLI's slug generation:
+// lowercase, replace non-alphanumeric with hyphens, collapse consecutive hyphens.
+func slugify(s string) string {
+	s = strings.ToLower(s)
+	var b strings.Builder
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('-')
+		}
+	}
+	// Collapse consecutive hyphens and trim
+	result := b.String()
+	for strings.Contains(result, "--") {
+		result = strings.ReplaceAll(result, "--", "-")
+	}
+	result = strings.Trim(result, "-")
+	if result == "" {
+		result = "project"
+	}
+	return result
 }
 
 // sessionFile represents the JSON structure of a Gemini CLI session file.
@@ -369,13 +440,42 @@ type sessionFile struct {
 	ProjectHash string    `json:"projectHash"`
 	StartTime   time.Time `json:"startTime"`
 	LastUpdated time.Time `json:"lastUpdated"`
-	Messages    []struct {
-		Type    string `json:"type"`
-		Content []struct {
-			Text string `json:"text"`
-		} `json:"content"`
-	} `json:"messages"`
-	Kind string `json:"kind"`
+	Messages    []sessionMessage `json:"messages"`
+	Kind        string    `json:"kind"`
+}
+
+// sessionMessage represents a message in the Gemini session file.
+// The Content field is flexible: Gemini CLI can serialize it as either
+// a plain string or an array of {text: "..."} parts.
+type sessionMessage struct {
+	Type       string          `json:"type"`
+	RawContent json.RawMessage `json:"content"`
+}
+
+// textContent extracts text from the flexible content field.
+func (m *sessionMessage) textContent() string {
+	if len(m.RawContent) == 0 {
+		return ""
+	}
+	// Try as plain string first
+	var s string
+	if json.Unmarshal(m.RawContent, &s) == nil {
+		return s
+	}
+	// Try as array of {text: "..."} parts
+	var parts []struct {
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(m.RawContent, &parts) == nil {
+		var texts []string
+		for _, p := range parts {
+			if p.Text != "" {
+				texts = append(texts, p.Text)
+			}
+		}
+		return strings.Join(texts, "\n")
+	}
+	return ""
 }
 
 func listGeminiSessions(workDir string) ([]core.AgentSessionInfo, error) {
@@ -384,8 +484,8 @@ func listGeminiSessions(workDir string) ([]core.AgentSessionInfo, error) {
 		return nil, fmt.Errorf("gemini: cannot determine home dir: %w", err)
 	}
 
-	projName := geminiProjectHash(workDir)
-	chatsDir := filepath.Join(homeDir, ".gemini", "tmp", projName, "chats")
+	slug := geminiProjectSlug(workDir)
+	chatsDir := filepath.Join(homeDir, ".gemini", "tmp", slug, "chats")
 
 	entries, err := os.ReadDir(chatsDir)
 	if err != nil {
@@ -408,6 +508,23 @@ func listGeminiSessions(workDir string) ([]core.AgentSessionInfo, error) {
 
 		var sf sessionFile
 		if json.Unmarshal(data, &sf) != nil || sf.SessionID == "" {
+			continue
+		}
+
+		// Skip subagent sessions (internal agent-spawned sessions)
+		if sf.Kind == "subagent" {
+			continue
+		}
+
+		// Skip sessions with no user messages
+		hasUserMsg := false
+		for _, msg := range sf.Messages {
+			if msg.Type == "user" {
+				hasUserMsg = true
+				break
+			}
+		}
+		if !hasUserMsg {
 			continue
 		}
 
@@ -443,21 +560,19 @@ func extractSessionSummary(sf *sessionFile) string {
 		if msg.Type != "user" {
 			continue
 		}
-		for _, c := range msg.Content {
-			text := strings.TrimSpace(c.Text)
-			if text == "" {
+		text := strings.TrimSpace(msg.textContent())
+		if text == "" {
+			continue
+		}
+		for _, line := range strings.Split(text, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
 				continue
 			}
-			for _, line := range strings.Split(text, "\n") {
-				line = strings.TrimSpace(line)
-				if line == "" {
-					continue
-				}
-				if strings.HasPrefix(line, "{") && strings.HasSuffix(line, "}") {
-					continue
-				}
-				return line
+			if strings.HasPrefix(line, "{") && strings.HasSuffix(line, "}") {
+				continue
 			}
+			return line
 		}
 	}
 	if len(sf.SessionID) > 12 {

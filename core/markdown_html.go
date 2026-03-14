@@ -16,12 +16,67 @@ func MarkdownToSimpleHTML(md string) string {
 	inCodeBlock := false
 	codeLang := ""
 	var codeLines []string
+	inBlockquote := false
+	var bqLines []string
+	inTable := false
+	var tblLines []string
+
+	// flushBlockquote merges buffered blockquote lines into a single <blockquote>.
+	flushBlockquote := func() {
+		if len(bqLines) == 0 {
+			return
+		}
+		b.WriteString("<blockquote>")
+		for j, ql := range bqLines {
+			if j > 0 {
+				b.WriteByte('\n')
+			}
+			b.WriteString(convertInlineHTML(ql))
+		}
+		b.WriteString("</blockquote>")
+		bqLines = bqLines[:0]
+		inBlockquote = false
+	}
+
+	// flushTable renders buffered table rows as readable text.
+	flushTable := func() {
+		if len(tblLines) == 0 {
+			return
+		}
+		for j, tl := range tblLines {
+			if j > 0 {
+				b.WriteByte('\n')
+			}
+			tl = strings.TrimSpace(tl)
+			if reTableSep.MatchString(tl) {
+				b.WriteString("——————————")
+			} else {
+				inner := tl[1 : len(tl)-1]
+				cells := strings.Split(inner, "|")
+				for k := range cells {
+					cells[k] = strings.TrimSpace(cells[k])
+				}
+				row := strings.Join(cells, " | ")
+				b.WriteString(convertInlineHTML(row))
+			}
+		}
+		tblLines = tblLines[:0]
+		inTable = false
+	}
 
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
 
 		if strings.HasPrefix(trimmed, "```") {
 			if !inCodeBlock {
+				if inBlockquote {
+					flushBlockquote()
+					b.WriteByte('\n')
+				}
+				if inTable {
+					flushTable()
+					b.WriteByte('\n')
+				}
 				inCodeBlock = true
 				codeLang = strings.TrimPrefix(trimmed, "```")
 				codeLines = nil
@@ -46,22 +101,54 @@ func MarkdownToSimpleHTML(md string) string {
 			continue
 		}
 
+		// Determine line type for blockquote/table buffering
+		isQuote := strings.HasPrefix(trimmed, "> ") || trimmed == ">"
+		isTable := len(trimmed) > 2 && trimmed[0] == '|' && trimmed[len(trimmed)-1] == '|'
+
+		// Flush blockquote when leaving
+		if !isQuote && inBlockquote {
+			flushBlockquote()
+			b.WriteByte('\n')
+		}
+		// Flush table when leaving
+		if !isTable && inTable {
+			flushTable()
+			b.WriteByte('\n')
+		}
+
+		// Buffer blockquote lines into a single block
+		if isQuote {
+			quoteContent := strings.TrimPrefix(trimmed, "> ")
+			if trimmed == ">" {
+				quoteContent = ""
+			}
+			bqLines = append(bqLines, quoteContent)
+			inBlockquote = true
+			continue
+		}
+
+		// Buffer table lines
+		if isTable {
+			tblLines = append(tblLines, trimmed)
+			inTable = true
+			continue
+		}
+
 		// Headings → bold
 		if heading := reHeading.FindString(line); heading != "" {
 			rest := strings.TrimPrefix(line, heading)
 			b.WriteString("<b>")
 			b.WriteString(convertInlineHTML(rest))
 			b.WriteString("</b>")
-		} else if strings.HasPrefix(trimmed, "> ") || trimmed == ">" {
-			quote := strings.TrimPrefix(line, "> ")
-			if quote == ">" {
-				quote = ""
-			}
-			b.WriteString("<blockquote>")
-			b.WriteString(convertInlineHTML(quote))
-			b.WriteString("</blockquote>")
 		} else if reHorizontal.MatchString(trimmed) {
-			b.WriteString("———")
+			b.WriteString("——————————")
+		} else if m := reUnorderedList.FindStringSubmatch(line); m != nil {
+			indent := strings.Repeat("  ", len(m[1])/2)
+			b.WriteString(indent + "• " + convertInlineHTML(m[2]))
+		} else if m := reOrderedList.FindStringSubmatch(line); m != nil {
+			indent := strings.Repeat("  ", len(m[1])/2)
+			numDot := strings.TrimSpace(line[:len(line)-len(m[2])])
+			b.WriteString(indent + escapeHTML(numDot) + " " + convertInlineHTML(m[2]))
 		} else {
 			b.WriteString(convertInlineHTML(line))
 		}
@@ -71,7 +158,13 @@ func MarkdownToSimpleHTML(md string) string {
 		}
 	}
 
-	// Handle unclosed code block
+	// Flush any remaining buffered state
+	if inBlockquote {
+		flushBlockquote()
+	}
+	if inTable {
+		flushTable()
+	}
 	if inCodeBlock && len(codeLines) > 0 {
 		b.WriteString("<pre><code>")
 		b.WriteString(escapeHTML(strings.Join(codeLines, "\n")))
@@ -88,14 +181,15 @@ var (
 	reItalicAstHTML  = regexp.MustCompile(`(?:^|[^*])\*([^*]+?)\*(?:[^*]|$)`)
 	reStrikeHTML     = regexp.MustCompile(`~~(.+?)~~`)
 	reLinkHTML       = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
+	reUnorderedList  = regexp.MustCompile(`^(\s*)[-*]\s+(.*)$`)
+	reOrderedList    = regexp.MustCompile(`^(\s*)\d+\.\s+(.*)$`)
+	reTableSep       = regexp.MustCompile(`^\|[\s:|-]+\|$`)
 )
 
 // convertInlineHTML converts inline Markdown formatting to Telegram-compatible HTML.
 //
 // Each formatting pass (bold, strikethrough) protects its output as placeholders
 // so that subsequent passes (italic) cannot match across HTML tag boundaries.
-// Without this, input like `**bold *text***` would produce crossed tags
-// `<b>bold <i>text</b></i>` which Telegram rejects.
 func convertInlineHTML(s string) string {
 	type placeholder struct {
 		key  string
@@ -158,8 +252,8 @@ func convertInlineHTML(s string) string {
 		return m[:idx] + "<i>" + m[idx+1:lastIdx] + "</i>" + m[lastIdx+1:]
 	})
 
-	// 7. Restore all placeholders (may be nested, so iterate until stable)
-	for i := 0; i < 3; i++ {
+	// 7. Restore all placeholders (may be nested, so iterate until stable).
+	for i := 0; i <= len(phs); i++ {
 		changed := false
 		for _, ph := range phs {
 			if strings.Contains(s, ph.key) {

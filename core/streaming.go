@@ -307,6 +307,15 @@ func (sp *streamPreview) finish(finalText string) bool {
 	return true
 }
 
+// detachPreview clears the preview message handle so that finish() won't
+// delete it. Call this after freeze() when the frozen preview should remain
+// visible as a permanent message (e.g. text before the first tool call).
+func (sp *streamPreview) detachPreview() {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	sp.previewMsgID = nil
+}
+
 // getFullText returns the accumulated text so far.
 func (sp *streamPreview) getFullText() string {
 	sp.mu.Lock()
