@@ -29,14 +29,16 @@ jobs:
 
             let comment;
             if (isFirstIssue) {
-              comment = `👋 Hi @${author}! Thanks for opening your first issue here!
-
-We'll review it as soon as possible. While waiting, please make sure:
-- You've provided enough details about the issue
-- Any error messages are included in full
-- For feature requests, describe your use case
-
-Thanks for your feedback!`;
+              comment = [
+                `👋 Hi @${author}! Thanks for opening your first issue here!`,
+                ``,
+                `We'll review it as soon as possible. While waiting, please make sure:`,
+                `- You've provided enough details about the issue`,
+                `- Any error messages are included in full`,
+                `- For feature requests, describe your use case`,
+                ``,
+                `Thanks for your feedback!`,
+              ].join('\n');
             } else {
               comment = `👋 Thanks @${author} for opening this issue! We'll take a look soon.`;
             }

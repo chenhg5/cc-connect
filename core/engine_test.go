@@ -24,11 +24,11 @@ func (a *stubAgent) Stop() error                                                
 type stubAgentSession struct{}
 
 func (s *stubAgentSession) Send(_ string, _ []ImageAttachment, _ []FileAttachment) error { return nil }
-func (s *stubAgentSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
-func (s *stubAgentSession) Events() <-chan Event                                 { return make(chan Event) }
-func (s *stubAgentSession) CurrentSessionID() string                             { return "stub-session" }
-func (s *stubAgentSession) Alive() bool                                          { return true }
-func (s *stubAgentSession) Close() error                                         { return nil }
+func (s *stubAgentSession) RespondPermission(_ string, _ PermissionResult) error         { return nil }
+func (s *stubAgentSession) Events() <-chan Event                                         { return make(chan Event) }
+func (s *stubAgentSession) CurrentSessionID() string                                     { return "stub-session" }
+func (s *stubAgentSession) Alive() bool                                                  { return true }
+func (s *stubAgentSession) Close() error                                                 { return nil }
 
 type recordingAgentSession struct {
 	stubAgentSession
@@ -1071,7 +1071,7 @@ func TestCmdDelete_NoArgsOnCardPlatformShowsDeleteModeCard(t *testing.T) {
 	}
 }
 
-func TestDeleteMode_ToggleSelectionUpdatesCard(t *testing.T) {
+func TestDeleteMode_ToggleSelectionDoesNotReturnCardButPersistsSelection(t *testing.T) {
 	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
 	agent := &stubDeleteAgent{stubListAgent: stubListAgent{sessions: []AgentSessionInfo{
 		{ID: "session-1", Summary: "One"},
@@ -1082,19 +1082,16 @@ func TestDeleteMode_ToggleSelectionUpdatesCard(t *testing.T) {
 
 	e.cmdDelete(p, msg, nil)
 	card := e.handleCardNav("act:/delete-mode toggle session-2", msg.SessionKey)
-	if card == nil {
-		t.Fatal("expected delete mode card after toggle")
+	if card != nil {
+		t.Fatal("expected no card update after toggle")
 	}
 
-	btn, ok := findCardAction(card, "act:/delete-mode toggle session-2")
-	if !ok {
-		t.Fatal("expected toggle action for selected session")
+	confirmCard := e.handleCardNav("act:/delete-mode confirm", msg.SessionKey)
+	if confirmCard == nil {
+		t.Fatal("expected confirmation card")
 	}
-	if btn.Type != "primary" {
-		t.Fatalf("selected toggle type = %q, want primary", btn.Type)
-	}
-	if !strings.Contains(card.RenderText(), "1 selected") {
-		t.Fatalf("card text = %q, want selected count", card.RenderText())
+	if !strings.Contains(confirmCard.RenderText(), "Two") {
+		t.Fatalf("confirmation text = %q, want selected session", confirmCard.RenderText())
 	}
 }
 
@@ -1256,6 +1253,70 @@ func TestDeleteMode_SubmitBlocksActiveSession(t *testing.T) {
 	}
 	if !strings.Contains(resultCard.RenderText(), "Cannot delete the currently active session") {
 		t.Fatalf("result text = %q, want active-session warning", resultCard.RenderText())
+	}
+}
+
+func TestDeleteMode_ActiveSessionMarkedWithArrowAndNotSelectable(t *testing.T) {
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	agent := &stubDeleteAgent{stubListAgent: stubListAgent{sessions: []AgentSessionInfo{
+		{ID: "session-1", Summary: "One"},
+		{ID: "session-2", Summary: "Two"},
+	}}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "feishu:user1", ReplyCtx: "ctx"}
+	e.sessions.GetOrCreateActive(msg.SessionKey).AgentSessionID = "session-1"
+
+	e.cmdDelete(p, msg, nil)
+	if len(p.repliedCards) != 1 {
+		t.Fatalf("replied cards = %d, want 1", len(p.repliedCards))
+	}
+	card := p.repliedCards[0]
+	if _, ok := findCardAction(card, "act:/delete-mode toggle session-1"); ok {
+		t.Fatal("active session should not be toggle-selectable")
+	}
+	if _, ok := findCardAction(card, "act:/delete-mode noop session-1"); !ok {
+		t.Fatal("expected noop action for active session")
+	}
+	if got := countCardActionValues(card, "act:/delete-mode toggle "); got != 1 {
+		t.Fatalf("toggle action count = %d, want 1", got)
+	}
+	if !strings.Contains(card.RenderText(), "▶ **1.**") {
+		t.Fatalf("card text = %q, want arrow marker for active session", card.RenderText())
+	}
+}
+
+func TestDeleteMode_FormSubmitShowsConfirmThenDeletes(t *testing.T) {
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	agent := &stubDeleteAgent{stubListAgent: stubListAgent{sessions: []AgentSessionInfo{
+		{ID: "session-1", Summary: "One"},
+		{ID: "session-2", Summary: "Two"},
+		{ID: "session-3", Summary: "Three"},
+	}}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "feishu:user1", ReplyCtx: "ctx"}
+
+	e.cmdDelete(p, msg, nil)
+	confirmCard := e.handleCardNav("act:/delete-mode form-submit session-1,session-3", msg.SessionKey)
+	if confirmCard == nil {
+		t.Fatal("expected confirm card after form-submit")
+	}
+	if len(agent.deleted) != 0 {
+		t.Fatalf("deleted = %v, want none before confirm", agent.deleted)
+	}
+	confirmText := confirmCard.RenderText()
+	if !strings.Contains(confirmText, "One") || !strings.Contains(confirmText, "Three") {
+		t.Fatalf("confirm text = %q, want selected sessions", confirmText)
+	}
+
+	resultCard := e.handleCardNav("act:/delete-mode submit", msg.SessionKey)
+	if resultCard == nil {
+		t.Fatal("expected result card after submit")
+	}
+	if got, want := strings.Join(agent.deleted, ","), "session-1,session-3"; got != want {
+		t.Fatalf("deleted = %q, want %q", got, want)
+	}
+	if !strings.Contains(resultCard.RenderText(), "Session deleted: One") {
+		t.Fatalf("result text = %q, want delete result", resultCard.RenderText())
 	}
 }
 

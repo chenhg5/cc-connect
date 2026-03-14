@@ -129,9 +129,9 @@ type Engine struct {
 	speech       SpeechCfg
 	tts          *TTSCfg
 	display      DisplayCfg
-	defaultQuiet   bool
-	injectSender   bool
-	startedAt      time.Time
+	defaultQuiet bool
+	injectSender bool
+	startedAt    time.Time
 
 	providerSaveFunc       func(providerName string) error
 	providerAddSaveFunc    func(p ProviderConfig) error
@@ -4353,6 +4353,11 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 	case "/switch":
 		return e.renderListCardSafe(sessionKey, 1)
 	case "/delete-mode":
+		if prefix == "act" {
+			if fields := strings.Fields(args); len(fields) > 0 && fields[0] == "toggle" {
+				return nil
+			}
+		}
 		if strings.HasPrefix(args, "cancel") {
 			return e.renderListCardSafe(sessionKey, 1)
 		}
@@ -4645,18 +4650,30 @@ func (e *Engine) renderDeleteModeSelectCard(sessionKey string, sessions *Session
 	}
 
 	cb := NewCard().Title(e.i18n.T(MsgDeleteModeTitle), "carmine")
+	activeAgentID := sessions.GetOrCreateActive(sessionKey).AgentSessionID
+	selectedCount := 0
 	for i := start; i < end; i++ {
 		s := agentSessions[i]
-		marker := "◻"
-		if _, ok := dm.selectedIDs[s.ID]; ok {
-			marker = "☑"
+		isActive := activeAgentID == s.ID
+		isSelected := false
+		if !isActive {
+			_, isSelected = dm.selectedIDs[s.ID]
 		}
-		if active := sessions.GetOrCreateActive(sessionKey).AgentSessionID; active == s.ID {
-			marker += " ▶"
+		marker := "◻"
+		if isActive {
+			marker = "▶"
+		} else if isSelected {
+			marker = "☑"
+			selectedCount++
 		}
 		btnText := e.i18n.T(MsgDeleteModeSelect)
 		btnType := "default"
-		if _, ok := dm.selectedIDs[s.ID]; ok {
+		action := fmt.Sprintf("act:/delete-mode toggle %s", s.ID)
+		if isActive {
+			btnText = e.i18n.T(MsgCardTitleCurrentSession)
+			btnType = "primary"
+			action = fmt.Sprintf("act:/delete-mode noop %s", s.ID)
+		} else if isSelected {
 			btnText = e.i18n.T(MsgDeleteModeSelected)
 			btnType = "primary"
 		}
@@ -4664,10 +4681,10 @@ func (e *Engine) renderDeleteModeSelectCard(sessionKey string, sessions *Session
 			e.i18n.Tf(MsgListItem, marker, i+1, e.deleteSessionDisplayName(sessions, &s), s.MessageCount, s.ModifiedAt.Format("01-02 15:04")),
 			btnText,
 			btnType,
-			fmt.Sprintf("act:/delete-mode toggle %s", s.ID),
+			action,
 		)
 	}
-	cb.Note(e.i18n.Tf(MsgDeleteModeSelectedCount, len(dm.selectedIDs)))
+	cb.Note(e.i18n.Tf(MsgDeleteModeSelectedCount, selectedCount))
 	if dm.hint != "" {
 		cb.Note(dm.hint)
 	}
@@ -4780,9 +4797,32 @@ func (e *Engine) executeDeleteModeAction(sessionKey, args string) {
 		dm.result = strings.Join(lines, "\n")
 		dm.hint = ""
 		dm.phase = "result"
+	case "form-submit":
+		dm.selectedIDs = parseDeleteModeSelectedIDs(fields[1:])
+		if len(dm.selectedIDs) == 0 {
+			dm.phase = "select"
+			dm.hint = e.i18n.T(MsgDeleteModeEmptySelection)
+			return
+		}
+		dm.phase = "confirm"
+		dm.hint = ""
 	case "cancel":
 		state.deleteMode = nil
 	}
+}
+
+func parseDeleteModeSelectedIDs(args []string) map[string]struct{} {
+	ids := make(map[string]struct{})
+	for _, arg := range args {
+		for _, id := range strings.Split(arg, ",") {
+			id = strings.TrimSpace(id)
+			if id == "" {
+				continue
+			}
+			ids[id] = struct{}{}
+		}
+	}
+	return ids
 }
 
 func (e *Engine) submitDeleteModeSelection(sessionKey string, dm *deleteModeState) []string {

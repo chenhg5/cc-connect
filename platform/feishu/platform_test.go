@@ -1,6 +1,8 @@
 package feishu
 
 import (
+	"bytes"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
@@ -149,6 +151,176 @@ func TestInteractivePlatform_CardActionPassesCardSenderToHandler(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("expected card action message")
+	}
+}
+
+func TestInteractivePlatform_CardActionActWithoutCardResponseDoesNotWarn(t *testing.T) {
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip, ok := platformAny.(*interactivePlatform)
+	if !ok {
+		t.Fatalf("platform type = %T, want *interactivePlatform", platformAny)
+	}
+	ip.cardNavHandler = func(action string, sessionKey string) *core.Card {
+		return nil
+	}
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(orig) })
+
+	resp, err := ip.onCardAction(&callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: "ou_test_user"},
+			Action:   &callback.CallBackAction{Value: map[string]any{"action": "act:/delete-mode toggle session-1"}},
+			Context:  &callback.Context{OpenChatID: "oc_test_chat", OpenMessageID: "om_test_message"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("onCardAction() error = %v", err)
+	}
+	if resp == nil || resp.Toast == nil {
+		t.Fatalf("expected toast response for silent toggle, got %#v", resp)
+	}
+	if resp.Card != nil {
+		t.Fatalf("expected no card update on toggle, got %#v", resp.Card)
+	}
+
+	logs := buf.String()
+	if strings.Contains(logs, "level=WARN") && strings.Contains(logs, "card nav returned nil, ignoring") {
+		t.Fatalf("unexpected warning logs: %s", logs)
+	}
+}
+
+func TestInteractivePlatform_CardActionFormSubmitPassesSelectedIDs(t *testing.T) {
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip, ok := platformAny.(*interactivePlatform)
+	if !ok {
+		t.Fatalf("platform type = %T, want *interactivePlatform", platformAny)
+	}
+
+	actionCh := make(chan string, 1)
+	ip.cardNavHandler = func(action string, sessionKey string) *core.Card {
+		actionCh <- action
+		return core.NewCard().Markdown("ok").Build()
+	}
+
+	_, err = ip.onCardAction(&callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: "ou_test_user"},
+			Action: &callback.CallBackAction{
+				Value: map[string]any{"action": "act:/delete-mode form-submit"},
+				FormValue: map[string]any{
+					deleteModeCheckerName("session-2"): true,
+					deleteModeCheckerName("session-1"): true,
+					deleteModeCheckerName("session-3"): false,
+				},
+			},
+			Context: &callback.Context{OpenChatID: "oc_test_chat", OpenMessageID: "om_test_message"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("onCardAction() error = %v", err)
+	}
+
+	select {
+	case got := <-actionCh:
+		want := "act:/delete-mode form-submit session-1,session-2"
+		if got != want {
+			t.Fatalf("action = %q, want %q", got, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected card nav handler invocation")
+	}
+}
+
+func TestInteractivePlatform_CardActionFormSubmitUsesActionNameFallback(t *testing.T) {
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip, ok := platformAny.(*interactivePlatform)
+	if !ok {
+		t.Fatalf("platform type = %T, want *interactivePlatform", platformAny)
+	}
+
+	actionCh := make(chan string, 1)
+	ip.cardNavHandler = func(action string, sessionKey string) *core.Card {
+		actionCh <- action
+		return core.NewCard().Markdown("ok").Build()
+	}
+
+	_, err = ip.onCardAction(&callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: "ou_test_user"},
+			Action: &callback.CallBackAction{
+				Name: "delete_mode_submit",
+				FormValue: map[string]any{
+					deleteModeCheckerName("session-2"): true,
+					deleteModeCheckerName("session-1"): true,
+				},
+			},
+			Context: &callback.Context{OpenChatID: "oc_test_chat", OpenMessageID: "om_test_message"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("onCardAction() error = %v", err)
+	}
+
+	select {
+	case got := <-actionCh:
+		want := "act:/delete-mode form-submit session-1,session-2"
+		if got != want {
+			t.Fatalf("action = %q, want %q", got, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected card nav handler invocation")
+	}
+}
+
+func TestInteractivePlatform_CardActionFormCancelUsesActionNameFallback(t *testing.T) {
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip, ok := platformAny.(*interactivePlatform)
+	if !ok {
+		t.Fatalf("platform type = %T, want *interactivePlatform", platformAny)
+	}
+
+	actionCh := make(chan string, 1)
+	ip.cardNavHandler = func(action string, sessionKey string) *core.Card {
+		actionCh <- action
+		return core.NewCard().Markdown("ok").Build()
+	}
+
+	_, err = ip.onCardAction(&callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: "ou_test_user"},
+			Action: &callback.CallBackAction{
+				Name: "delete_mode_cancel",
+			},
+			Context: &callback.Context{OpenChatID: "oc_test_chat", OpenMessageID: "om_test_message"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("onCardAction() error = %v", err)
+	}
+
+	select {
+	case got := <-actionCh:
+		want := "act:/delete-mode cancel"
+		if got != want {
+			t.Fatalf("action = %q, want %q", got, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected card nav handler invocation")
 	}
 }
 

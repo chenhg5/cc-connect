@@ -26,6 +26,11 @@ jobs:
           GOPROXY: https://proxy.golang.org,direct
           GOSUMDB: sum.golang.org
 
+      - name: Lint GitHub workflows
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.8
+          "$(go env GOPATH)/bin/actionlint" -color
+
       - name: Build
         run: go build ./...
 
