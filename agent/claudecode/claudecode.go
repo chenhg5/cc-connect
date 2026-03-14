@@ -222,6 +222,32 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 	a.mu.Unlock()
 
+	if sessionID != "" {
+		homeDir, _ := os.UserHomeDir()
+		absWorkDir, _ := filepath.Abs(a.workDir)
+		if homeDir != "" {
+			projectDir := findProjectDir(homeDir, absWorkDir)
+			if projectDir != "" {
+				sessionFile := filepath.Join(projectDir, sessionID+".jsonl")
+				if info, err := os.Stat(sessionFile); err == nil {
+					slog.Info("session resume attempt",
+						"session_id", sessionID,
+						"jsonl_path", sessionFile,
+						"jsonl_size_bytes", info.Size(),
+						"work_dir", absWorkDir,
+					)
+				} else {
+					slog.Warn("session file not found for resume",
+						"session_id", sessionID,
+						"expected_path", sessionFile,
+						"work_dir", absWorkDir,
+						"error", err,
+					)
+				}
+			}
+		}
+	}
+
 	return newClaudeSession(ctx, a.workDir, model, sessionID, a.mode, tools, extraEnv)
 }
 

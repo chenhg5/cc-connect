@@ -311,6 +311,15 @@ func (e *Engine) runIdleReaper() {
 				e.interactiveMu.Lock()
 				for key, state := range e.interactiveStates {
 					if state.workspaceDir == ws {
+						state.mu.Lock()
+						tokenCount := state.inputTokens
+						state.mu.Unlock()
+						slog.Info("session idle-reaped",
+							"session_key", key,
+							"workspace", ws,
+							"last_ctx_pct", tokenCount*100/200_000,
+							"input_tokens", tokenCount,
+						)
 						if state.agentSession != nil {
 							state.agentSession.Close()
 						}
@@ -318,7 +327,6 @@ func (e *Engine) runIdleReaper() {
 					}
 				}
 				e.interactiveMu.Unlock()
-				slog.Info("workspace idle-reaped", "workspace", ws)
 			}
 		}
 	}
@@ -1353,7 +1361,12 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	}
 	e.interactiveStates[sessionKey] = state
 
-	slog.Info("interactive session started", "session_key", sessionKey, "agent_session", session.AgentSessionID, "elapsed", startElapsed)
+	slog.Info("session spawned",
+		"session_key", sessionKey,
+		"agent_session", session.AgentSessionID,
+		"is_resume", session.AgentSessionID != "",
+		"elapsed", startElapsed,
+	)
 	return state
 }
 

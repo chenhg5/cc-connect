@@ -122,7 +122,12 @@ func (cs *claudeSession) readLoop(stdout io.ReadCloser, stderrBuf *bytes.Buffer)
 		if err := cs.cmd.Wait(); err != nil {
 			stderrMsg := strings.TrimSpace(stderrBuf.String())
 			if stderrMsg != "" {
-				slog.Error("claudeSession: process failed", "error", err, "stderr", stderrMsg)
+				slog.Error("claudeSession: process failed",
+					"error", err,
+					"stderr", stderrMsg,
+					"work_dir", cs.workDir,
+					"session_id", cs.CurrentSessionID(),
+				)
 				evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
 				select {
 				case cs.events <- evt:
