@@ -227,3 +227,30 @@ func TestRenderCardMap_DeleteModeUsesCheckerForm(t *testing.T) {
 		t.Fatalf("expected no toggle buttons in rendered card, got %s", s)
 	}
 }
+
+func TestRenderCardMap_DeleteModeWithMarkdownHintStillUsesCheckerForm(t *testing.T) {
+	card := core.NewCard().
+		Title("删除会话", "carmine").
+		Markdown("请选择需要删除的会话").
+		ListItemBtn("◻ **1.** One · **10** msgs · 03-13 20:00", "选择", "default", "act:/delete-mode toggle session-1").
+		ListItemBtn("▶ **2.** Active · **30** msgs · 03-13 20:01", "当前会话", "primary", "act:/delete-mode noop session-2").
+		Buttons(
+			core.DangerBtn("删除已选", "act:/delete-mode confirm"),
+			core.DefaultBtn("取消", "act:/delete-mode cancel"),
+		).
+		Build()
+
+	got := decodeRenderedCard(t, card)
+	raw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshal rendered card failed: %v", err)
+	}
+	s := string(raw)
+
+	if !strings.Contains(s, `"tag":"form"`) || !strings.Contains(s, `"tag":"checker"`) {
+		t.Fatalf("expected checker form even with markdown hint, got %s", s)
+	}
+	if strings.Contains(s, `act:/delete-mode toggle`) {
+		t.Fatalf("expected no right-side toggle buttons, got %s", s)
+	}
+}

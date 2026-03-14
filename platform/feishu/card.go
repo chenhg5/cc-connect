@@ -243,9 +243,8 @@ func renderDeleteModeCheckerCard(card *core.Card, base map[string]any) (map[stri
 		return nil, false
 	}
 
-	rows := make([]deleteModeCheckerRow, 0)
 	formRowElements := make([]map[string]any, 0)
-	notes := make([]core.CardNote, 0)
+	preludeElements := make([]map[string]any, 0)
 	navRows := make([]core.CardActions, 0)
 	submitText := ""
 	cancelText := ""
@@ -270,7 +269,6 @@ func renderDeleteModeCheckerCard(card *core.Card, base map[string]any) (map[stri
 				text:    text,
 				checked: strings.Contains(e.Text, "☑"),
 			}
-			rows = append(rows, row)
 			formRowElements = append(formRowElements, map[string]any{
 				"tag":     "checker",
 				"name":    deleteModeCheckerName(row.id),
@@ -281,7 +279,25 @@ func renderDeleteModeCheckerCard(card *core.Card, base map[string]any) (map[stri
 				},
 			})
 		case core.CardNote:
-			notes = append(notes, e)
+			if e.Text == "" || e.Tag == "delete-mode-selected-count" {
+				continue
+			}
+			preludeElements = append(preludeElements, map[string]any{
+				"tag":      "note",
+				"elements": []map[string]any{plainText(e.Text)},
+			})
+		case core.CardMarkdown:
+			if e.Content == "" {
+				continue
+			}
+			preludeElements = append(preludeElements, map[string]any{
+				"tag":     "markdown",
+				"content": e.Content,
+			})
+		case core.CardDivider:
+			preludeElements = append(preludeElements, map[string]any{
+				"tag": "hr",
+			})
 		case core.CardActions:
 			remaining := make([]core.CardButton, 0, len(e.Buttons))
 			for _, btn := range e.Buttons {
@@ -297,7 +313,7 @@ func renderDeleteModeCheckerCard(card *core.Card, base map[string]any) (map[stri
 			if len(remaining) > 0 {
 				navRows = append(navRows, core.CardActions{Buttons: remaining, Layout: e.Layout})
 			}
-		case core.CardMarkdown, core.CardDivider, core.CardSelect:
+		case core.CardSelect:
 			return nil, false
 		}
 	}
@@ -306,19 +322,8 @@ func renderDeleteModeCheckerCard(card *core.Card, base map[string]any) (map[stri
 		return nil, false
 	}
 
-	elements := make([]map[string]any, 0, len(notes)+1+len(navRows))
-	for _, n := range notes {
-		if n.Text == "" {
-			continue
-		}
-		if n.Tag == "delete-mode-selected-count" {
-			continue
-		}
-		elements = append(elements, map[string]any{
-			"tag":      "note",
-			"elements": []map[string]any{plainText(n.Text)},
-		})
-	}
+	elements := make([]map[string]any, 0, len(preludeElements)+1+len(navRows))
+	elements = append(elements, preludeElements...)
 	formElements := append([]map[string]any{}, formRowElements...)
 
 	buttonColumns := []map[string]any{
