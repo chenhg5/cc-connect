@@ -3215,14 +3215,18 @@ func helpCardGroups() []helpCardGroup {
 				{command: "/lang", action: "nav:/lang"},
 				{command: "/provider", action: "nav:/provider"},
 				{command: "/memory", action: "cmd:/memory"},
+				{command: "/allow", action: "cmd:/allow"},
 				{command: "/quiet", action: "act:/quiet"},
+				{command: "/tts", action: "cmd:/tts"},
 			},
 		},
 		{
 			key:      "tools",
 			titleKey: MsgHelpToolsSection,
 			items: []helpCardItem{
+				{command: "/shell", action: "cmd:/shell"},
 				{command: "/cron", action: "nav:/cron"},
+				{command: "/heartbeat", action: "nav:/heartbeat"},
 				{command: "/commands", action: "nav:/commands"},
 				{command: "/alias", action: "nav:/alias"},
 				{command: "/skills", action: "nav:/skills"},
@@ -3238,6 +3242,8 @@ func helpCardGroups() []helpCardGroup {
 				{command: "/doctor", action: "nav:/doctor"},
 				{command: "/usage", action: "cmd:/usage"},
 				{command: "/config", action: "nav:/config"},
+				{command: "/bind", action: "cmd:/bind"},
+				{command: "/workspace", action: "cmd:/workspace"},
 				{command: "/version", action: "nav:/version"},
 				{command: "/upgrade", action: "nav:/upgrade"},
 				{command: "/restart", action: "cmd:/restart"},
@@ -4448,6 +4454,8 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 		return e.renderProviderCard()
 	case "/cron":
 		return e.renderCronCard(sessionKey)
+	case "/heartbeat":
+		return e.renderHeartbeatCard()
 	case "/commands":
 		return e.renderCommandsCard()
 	case "/alias":
@@ -4652,6 +4660,19 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		if agentSession != nil {
 			slog.Debug("cleanupInteractiveState: closing agent session", "session", sessionKey)
 			go agentSession.Close()
+		}
+
+	case "/heartbeat":
+		if e.heartbeatScheduler == nil {
+			return
+		}
+		switch args {
+		case "pause", "stop":
+			e.heartbeatScheduler.Pause(e.name)
+		case "resume", "start":
+			e.heartbeatScheduler.Resume(e.name)
+		case "run", "trigger":
+			e.heartbeatScheduler.TriggerNow(e.name)
 		}
 	}
 }
@@ -5834,13 +5855,25 @@ func (e *Engine) cmdHeartbeat(p Platform, msg *Message, args []string) {
 
 	switch sub {
 	case "status", "":
-		e.cmdHeartbeatStatus(p, msg, status)
+		if supportsCards(p) {
+			e.replyWithCard(p, msg.ReplyCtx, e.renderHeartbeatCard())
+			return
+		}
+		e.cmdHeartbeatStatusText(p, msg, status)
 	case "pause", "stop":
 		e.heartbeatScheduler.Pause(e.name)
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHeartbeatPaused))
+		if supportsCards(p) {
+			e.replyWithCard(p, msg.ReplyCtx, e.renderHeartbeatCard())
+		} else {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHeartbeatPaused))
+		}
 	case "resume", "start":
 		e.heartbeatScheduler.Resume(e.name)
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHeartbeatResumed))
+		if supportsCards(p) {
+			e.replyWithCard(p, msg.ReplyCtx, e.renderHeartbeatCard())
+		} else {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHeartbeatResumed))
+		}
 	case "run", "trigger":
 		e.heartbeatScheduler.TriggerNow(e.name)
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHeartbeatTriggered))
@@ -5855,30 +5888,56 @@ func (e *Engine) cmdHeartbeat(p Platform, msg *Message, args []string) {
 			return
 		}
 		e.heartbeatScheduler.SetInterval(e.name, mins)
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgHeartbeatInterval), mins))
+		if supportsCards(p) {
+			e.replyWithCard(p, msg.ReplyCtx, e.renderHeartbeatCard())
+		} else {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgHeartbeatInterval), mins))
+		}
 	default:
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHeartbeatUsage))
 	}
 }
 
-func (e *Engine) cmdHeartbeatStatus(p Platform, msg *Message, st *HeartbeatStatus) {
-	stateStr := "▶️ running"
-	if st.Paused {
-		stateStr = "⏸ paused"
+func (e *Engine) cmdHeartbeatStatusText(p Platform, msg *Message, st *HeartbeatStatus) {
+	stateStr, yesNo := e.heartbeatLocalizedHelpers()
+
+	lastRunStr := ""
+	if !st.LastRun.IsZero() {
+		lang := e.i18n.CurrentLang()
+		switch lang {
+		case LangChinese, LangTraditionalChinese:
+			lastRunStr = "上次执行: " + st.LastRun.Format("01-02 15:04:05") + "\n"
+		case LangJapanese:
+			lastRunStr = "最終実行: " + st.LastRun.Format("01-02 15:04:05") + "\n"
+		default:
+			lastRunStr = "Last run: " + st.LastRun.Format("01-02 15:04:05") + "\n"
+		}
+		if st.LastError != "" {
+			lastRunStr += "⚠️ " + truncateStr(st.LastError, 80) + "\n"
+		}
 	}
 
-	yesNo := func(b bool) string {
-		if b {
-			return "yes"
-		}
-		return "no"
-	}
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgHeartbeatStatus),
+		stateStr(st.Paused),
+		st.IntervalMins,
+		yesNo(st.OnlyWhenIdle),
+		yesNo(st.Silent),
+		st.RunCount,
+		st.ErrorCount,
+		st.SkippedBusy,
+		lastRunStr,
+	))
+}
+
+func (e *Engine) heartbeatLocalizedHelpers() (stateStr func(paused bool) string, yesNo func(bool) string) {
 	lang := e.i18n.CurrentLang()
-	if lang == LangChinese || lang == LangTraditionalChinese {
-		if st.Paused {
-			stateStr = "⏸ 已暂停"
-		} else {
-			stateStr = "▶️ 运行中"
+	switch lang {
+	case LangChinese, LangTraditionalChinese:
+		stateStr = func(paused bool) string {
+			if paused {
+				return "⏸ 已暂停"
+			}
+			return "▶️ 运行中"
 		}
 		yesNo = func(b bool) string {
 			if b {
@@ -5886,11 +5945,12 @@ func (e *Engine) cmdHeartbeatStatus(p Platform, msg *Message, st *HeartbeatStatu
 			}
 			return "否"
 		}
-	} else if lang == LangJapanese {
-		if st.Paused {
-			stateStr = "⏸ 一時停止"
-		} else {
-			stateStr = "▶️ 実行中"
+	case LangJapanese:
+		stateStr = func(paused bool) string {
+			if paused {
+				return "⏸ 一時停止"
+			}
+			return "▶️ 実行中"
 		}
 		yesNo = func(b bool) string {
 			if b {
@@ -5898,7 +5958,34 @@ func (e *Engine) cmdHeartbeatStatus(p Platform, msg *Message, st *HeartbeatStatu
 			}
 			return "いいえ"
 		}
+	default:
+		stateStr = func(paused bool) string {
+			if paused {
+				return "⏸ paused"
+			}
+			return "▶️ running"
+		}
+		yesNo = func(b bool) string {
+			if b {
+				return "yes"
+			}
+			return "no"
+		}
 	}
+	return
+}
+
+func (e *Engine) renderHeartbeatCard() *Card {
+	if e.heartbeatScheduler == nil {
+		return e.simpleCard(e.i18n.T(MsgCardTitleHeartbeat), "purple", e.i18n.T(MsgHeartbeatNotAvailable))
+	}
+	st := e.heartbeatScheduler.Status(e.name)
+	if st == nil {
+		return e.simpleCard(e.i18n.T(MsgCardTitleHeartbeat), "purple", e.i18n.T(MsgHeartbeatNotAvailable))
+	}
+
+	stateStr, yesNo := e.heartbeatLocalizedHelpers()
+	lang := e.i18n.CurrentLang()
 
 	lastRunStr := ""
 	if !st.LastRun.IsZero() {
@@ -5915,8 +6002,8 @@ func (e *Engine) cmdHeartbeatStatus(p Platform, msg *Message, st *HeartbeatStatu
 		}
 	}
 
-	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgHeartbeatStatus),
-		stateStr,
+	body := fmt.Sprintf(e.i18n.T(MsgHeartbeatStatus),
+		stateStr(st.Paused),
 		st.IntervalMins,
 		yesNo(st.OnlyWhenIdle),
 		yesNo(st.Silent),
@@ -5924,7 +6011,22 @@ func (e *Engine) cmdHeartbeatStatus(p Platform, msg *Message, st *HeartbeatStatu
 		st.ErrorCount,
 		st.SkippedBusy,
 		lastRunStr,
-	))
+	)
+
+	cb := NewCard().Title(e.i18n.T(MsgCardTitleHeartbeat), "purple").Markdown(body)
+
+	var actionBtns []CardButton
+	if st.Paused {
+		actionBtns = append(actionBtns, PrimaryBtn("▶️ Resume", "act:/heartbeat resume"))
+	} else {
+		actionBtns = append(actionBtns, DefaultBtn("⏸ Pause", "act:/heartbeat pause"))
+	}
+	actionBtns = append(actionBtns, DefaultBtn("💓 Run Now", "act:/heartbeat run"))
+	cb.Buttons(actionBtns...)
+
+	cb.Buttons(e.cardBackButton())
+
+	return cb.Build()
 }
 
 // ──────────────────────────────────────────────────────────────

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -36,12 +37,19 @@ type HeartbeatStatus struct {
 	LastError    string
 }
 
+// heartbeatPersisted is the JSON-serialisable per-project state.
+type heartbeatPersisted struct {
+	Paused       bool `json:"paused"`
+	IntervalMins int  `json:"interval_mins,omitempty"`
+}
+
 // HeartbeatScheduler manages periodic heartbeat execution across projects.
 type HeartbeatScheduler struct {
-	mu      sync.Mutex
-	entries map[string]*heartbeatEntry // project name → entry
-	stopCh  chan struct{}
-	stopped bool
+	mu        sync.Mutex
+	entries   map[string]*heartbeatEntry // project name → entry
+	stopCh    chan struct{}
+	stopped   bool
+	stateFile string // path to heartbeat_state.json; empty = no persistence
 }
 
 type heartbeatEntry struct {
@@ -53,6 +61,8 @@ type heartbeatEntry struct {
 	stopCh  chan struct{}
 	paused  bool
 
+	origIntervalMins int // interval from config, for detecting overrides
+
 	// Runtime stats
 	runCount    int
 	errorCount  int
@@ -61,11 +71,15 @@ type heartbeatEntry struct {
 	lastError   string
 }
 
-func NewHeartbeatScheduler() *HeartbeatScheduler {
-	return &HeartbeatScheduler{
+func NewHeartbeatScheduler(dataDir string) *HeartbeatScheduler {
+	hs := &HeartbeatScheduler{
 		entries: make(map[string]*heartbeatEntry),
 		stopCh:  make(chan struct{}),
 	}
+	if dataDir != "" {
+		hs.stateFile = filepath.Join(dataDir, "heartbeat_state.json")
+	}
+	return hs
 }
 
 // Register adds a heartbeat entry for a project. Call before Start().
@@ -81,13 +95,25 @@ func (hs *HeartbeatScheduler) Register(project string, cfg HeartbeatConfig, engi
 	}
 	hs.mu.Lock()
 	defer hs.mu.Unlock()
-	hs.entries[project] = &heartbeatEntry{
-		project: project,
-		config:  cfg,
-		engine:  engine,
-		workDir: workDir,
-		stopCh:  make(chan struct{}),
+
+	entry := &heartbeatEntry{
+		project:          project,
+		config:           cfg,
+		engine:           engine,
+		workDir:          workDir,
+		stopCh:           make(chan struct{}),
+		origIntervalMins: cfg.IntervalMins,
 	}
+
+	// Restore persisted overrides
+	if saved := hs.loadProjectState(project); saved != nil {
+		entry.paused = saved.Paused
+		if saved.IntervalMins > 0 {
+			entry.config.IntervalMins = saved.IntervalMins
+		}
+	}
+
+	hs.entries[project] = entry
 }
 
 // Start begins all registered heartbeat tickers.
@@ -106,9 +132,14 @@ func (hs *HeartbeatScheduler) startEntry(entry *heartbeatEntry) {
 	interval := time.Duration(entry.config.IntervalMins) * time.Minute
 	entry.ticker = time.NewTicker(interval)
 	go hs.run(entry)
+	state := "running"
+	if entry.paused {
+		state = "paused"
+	}
 	slog.Info("heartbeat: started",
 		"project", entry.project,
 		"interval", interval,
+		"state", state,
 		"session_key", entry.config.SessionKey,
 		"only_when_idle", entry.config.OnlyWhenIdle,
 	)
@@ -174,6 +205,7 @@ func (hs *HeartbeatScheduler) Pause(project string) bool {
 		entry.ticker.Stop()
 	}
 	slog.Info("heartbeat: paused", "project", project)
+	hs.persistLocked()
 	return true
 }
 
@@ -194,6 +226,7 @@ func (hs *HeartbeatScheduler) Resume(project string) bool {
 		entry.ticker.Reset(interval)
 	}
 	slog.Info("heartbeat: resumed", "project", project, "interval", interval)
+	hs.persistLocked()
 	return true
 }
 
@@ -214,6 +247,7 @@ func (hs *HeartbeatScheduler) SetInterval(project string, mins int) bool {
 		entry.ticker.Reset(interval)
 	}
 	slog.Info("heartbeat: interval changed", "project", project, "interval", interval)
+	hs.persistLocked()
 	return true
 }
 
@@ -228,6 +262,59 @@ func (hs *HeartbeatScheduler) TriggerNow(project string) bool {
 	go hs.execute(entry)
 	return true
 }
+
+// ── persistence ──────────────────────────────────────────────
+
+// loadProjectState reads persisted state for a single project.
+// Must NOT hold hs.mu when reading the file (called during Register which already holds it,
+// but file I/O here is acceptable because Register is called sequentially at startup).
+func (hs *HeartbeatScheduler) loadProjectState(project string) *heartbeatPersisted {
+	if hs.stateFile == "" {
+		return nil
+	}
+	data, err := os.ReadFile(hs.stateFile)
+	if err != nil {
+		return nil
+	}
+	var states map[string]*heartbeatPersisted
+	if err := json.Unmarshal(data, &states); err != nil {
+		return nil
+	}
+	return states[project]
+}
+
+// persistLocked saves all project overrides to disk. Caller must hold hs.mu.
+func (hs *HeartbeatScheduler) persistLocked() {
+	if hs.stateFile == "" {
+		return
+	}
+	states := make(map[string]*heartbeatPersisted, len(hs.entries))
+	needSave := false
+	for name, entry := range hs.entries {
+		p := &heartbeatPersisted{Paused: entry.paused}
+		if entry.config.IntervalMins != entry.origIntervalMins {
+			p.IntervalMins = entry.config.IntervalMins
+		}
+		if p.Paused || p.IntervalMins > 0 {
+			states[name] = p
+			needSave = true
+		}
+	}
+	if !needSave {
+		os.Remove(hs.stateFile)
+		return
+	}
+	data, err := json.MarshalIndent(states, "", "  ")
+	if err != nil {
+		slog.Error("heartbeat: persist state failed", "error", err)
+		return
+	}
+	if err := os.WriteFile(hs.stateFile, data, 0o644); err != nil {
+		slog.Error("heartbeat: write state file failed", "error", err)
+	}
+}
+
+// ── ticker loop ──────────────────────────────────────────────
 
 func (hs *HeartbeatScheduler) run(entry *heartbeatEntry) {
 	for {

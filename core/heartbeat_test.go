@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -38,7 +39,7 @@ func TestReadHeartbeatMD_LowerCase(t *testing.T) {
 }
 
 func TestHeartbeatScheduler_RegisterSkipsDisabled(t *testing.T) {
-	hs := NewHeartbeatScheduler()
+	hs := NewHeartbeatScheduler("")
 	hs.Register("test", HeartbeatConfig{Enabled: false, SessionKey: "tg:1:1"}, nil, "")
 	if len(hs.entries) != 0 {
 		t.Errorf("expected 0 entries for disabled config, got %d", len(hs.entries))
@@ -46,7 +47,7 @@ func TestHeartbeatScheduler_RegisterSkipsDisabled(t *testing.T) {
 }
 
 func TestHeartbeatScheduler_RegisterSkipsEmptySessionKey(t *testing.T) {
-	hs := NewHeartbeatScheduler()
+	hs := NewHeartbeatScheduler("")
 	hs.Register("test", HeartbeatConfig{Enabled: true, SessionKey: ""}, nil, "")
 	if len(hs.entries) != 0 {
 		t.Errorf("expected 0 entries for empty session_key, got %d", len(hs.entries))
@@ -54,7 +55,7 @@ func TestHeartbeatScheduler_RegisterSkipsEmptySessionKey(t *testing.T) {
 }
 
 func TestHeartbeatScheduler_RegisterDefaults(t *testing.T) {
-	hs := NewHeartbeatScheduler()
+	hs := NewHeartbeatScheduler("")
 	hs.Register("test", HeartbeatConfig{
 		Enabled:    true,
 		SessionKey: "telegram:123:123",
@@ -76,7 +77,7 @@ func TestHeartbeatScheduler_RegisterDefaults(t *testing.T) {
 }
 
 func TestHeartbeatScheduler_Status(t *testing.T) {
-	hs := NewHeartbeatScheduler()
+	hs := NewHeartbeatScheduler("")
 	hs.Register("proj", HeartbeatConfig{
 		Enabled:      true,
 		SessionKey:   "tg:1:1",
@@ -104,7 +105,7 @@ func TestHeartbeatScheduler_Status(t *testing.T) {
 }
 
 func TestHeartbeatScheduler_PauseResume(t *testing.T) {
-	hs := NewHeartbeatScheduler()
+	hs := NewHeartbeatScheduler("")
 	hs.Register("proj", HeartbeatConfig{
 		Enabled:    true,
 		SessionKey: "tg:1:1",
@@ -132,7 +133,7 @@ func TestHeartbeatScheduler_PauseResume(t *testing.T) {
 }
 
 func TestHeartbeatScheduler_SetInterval(t *testing.T) {
-	hs := NewHeartbeatScheduler()
+	hs := NewHeartbeatScheduler("")
 	hs.Register("proj", HeartbeatConfig{
 		Enabled:    true,
 		SessionKey: "tg:1:1",
@@ -151,5 +152,71 @@ func TestHeartbeatScheduler_SetInterval(t *testing.T) {
 	}
 	if hs.SetInterval("nonexistent", 5) {
 		t.Error("set interval nonexistent should fail")
+	}
+}
+
+func TestHeartbeatScheduler_Persistence(t *testing.T) {
+	dataDir := t.TempDir()
+
+	// Create scheduler, register, pause, change interval
+	hs1 := NewHeartbeatScheduler(dataDir)
+	hs1.Register("proj-a", HeartbeatConfig{
+		Enabled:      true,
+		SessionKey:   "tg:1:1",
+		IntervalMins: 30,
+	}, nil, "")
+	hs1.Register("proj-b", HeartbeatConfig{
+		Enabled:      true,
+		SessionKey:   "tg:2:2",
+		IntervalMins: 15,
+	}, nil, "")
+
+	hs1.Pause("proj-a")
+	hs1.SetInterval("proj-b", 60)
+
+	// Verify state file exists
+	stateFile := filepath.Join(dataDir, "heartbeat_state.json")
+	data, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("state file should exist: %v", err)
+	}
+	var states map[string]*heartbeatPersisted
+	if err := json.Unmarshal(data, &states); err != nil {
+		t.Fatalf("parse state file: %v", err)
+	}
+	if !states["proj-a"].Paused {
+		t.Error("proj-a should be paused in state file")
+	}
+	if states["proj-b"].IntervalMins != 60 {
+		t.Errorf("proj-b interval should be 60, got %d", states["proj-b"].IntervalMins)
+	}
+
+	// Create new scheduler from same dataDir → should restore state
+	hs2 := NewHeartbeatScheduler(dataDir)
+	hs2.Register("proj-a", HeartbeatConfig{
+		Enabled:      true,
+		SessionKey:   "tg:1:1",
+		IntervalMins: 30,
+	}, nil, "")
+	hs2.Register("proj-b", HeartbeatConfig{
+		Enabled:      true,
+		SessionKey:   "tg:2:2",
+		IntervalMins: 15,
+	}, nil, "")
+
+	stA := hs2.Status("proj-a")
+	if !stA.Paused {
+		t.Error("proj-a should be paused after restore")
+	}
+	stB := hs2.Status("proj-b")
+	if stB.IntervalMins != 60 {
+		t.Errorf("proj-b interval should be 60 after restore, got %d", stB.IntervalMins)
+	}
+
+	// Resume proj-a and reset proj-b interval → no overrides → state file removed
+	hs2.Resume("proj-a")
+	hs2.SetInterval("proj-b", 15) // back to original
+	if _, err := os.Stat(stateFile); !os.IsNotExist(err) {
+		t.Error("state file should be removed when no overrides remain")
 	}
 }

@@ -450,7 +450,7 @@ func main() {
 	}
 
 	// Start heartbeat scheduler
-	heartbeatSched := core.NewHeartbeatScheduler()
+	heartbeatSched := core.NewHeartbeatScheduler(cfg.DataDir)
 	for i, proj := range cfg.Projects {
 		hbCfg := buildHeartbeatConfig(proj.Heartbeat)
 		if hbCfg.Enabled {
