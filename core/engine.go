@@ -1478,6 +1478,7 @@ const defaultEventIdleTimeout = 2 * time.Hour
 
 func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessionKey string, msgID string, turnStart time.Time) {
 	var textParts []string
+	var segmentStart int // index into textParts: text before this has been sent/displayed
 	toolCount := 0
 	waitStart := time.Now()
 	firstEventLogged := false
@@ -1553,7 +1554,23 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		switch event.Type {
 		case EventThinking:
 			if !quiet && event.Content != "" {
+				// Flush accumulated text segment before thinking display
+				previewActive := sp.canPreview()
+				if len(textParts) > segmentStart {
+					if !previewActive {
+						segment := strings.Join(textParts[segmentStart:], "")
+						if segment != "" {
+							for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
+								e.send(p, replyCtx, chunk)
+							}
+						}
+					}
+					segmentStart = len(textParts)
+				}
 				sp.freeze()
+				if previewActive {
+					sp.detachPreview() // keep frozen preview visible as permanent message
+				}
 				preview := truncateIf(event.Content, e.display.ThinkingMaxLen)
 				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgThinking), preview))
 			}
@@ -1561,17 +1578,45 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case EventToolUse:
 			toolCount++
 			if !quiet {
-				sp.freeze()
-				inputPreview := truncateIf(event.ToolInput, e.display.ToolMaxLen)
-				// Use code block if content is long (>5 lines or >200 chars), otherwise inline code
-				lineCount := strings.Count(inputPreview, "\n") + 1
-				var formattedInput string
-				if lineCount > 5 || utf8.RuneCountInString(inputPreview) > 200 {
-					formattedInput = fmt.Sprintf("```\n%s\n```", inputPreview)
-				} else {
-					formattedInput = fmt.Sprintf("`%s`", inputPreview)
+				// Flush accumulated text segment before tool display
+				previewActive := sp.canPreview()
+				if len(textParts) > segmentStart {
+					if !previewActive {
+						segment := strings.Join(textParts[segmentStart:], "")
+						if segment != "" {
+							for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
+								e.send(p, replyCtx, chunk)
+							}
+						}
+					}
+					segmentStart = len(textParts)
 				}
-				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgTool), toolCount, event.ToolName, formattedInput))
+				sp.freeze()
+				if previewActive {
+					sp.detachPreview() // keep frozen preview visible as permanent message
+				}
+				toolInput := event.ToolInput
+				var formattedInput string
+				if toolInput == "" {
+					formattedInput = ""
+				} else if strings.Contains(toolInput, "```") {
+					// Already contains code blocks (pre-formatted by agent) — use as-is
+					formattedInput = toolInput
+				} else if strings.Contains(toolInput, "\n") || utf8.RuneCountInString(toolInput) > 200 {
+					lang := toolCodeLang(event.ToolName, toolInput)
+					formattedInput = fmt.Sprintf("```%s\n%s\n```", lang, toolInput)
+				} else {
+					switch event.ToolName {
+					case "shell", "run_shell_command", "Bash":
+						formattedInput = fmt.Sprintf("```bash\n%s\n```", toolInput)
+					default:
+						formattedInput = fmt.Sprintf("`%s`", toolInput)
+					}
+				}
+				toolMsg := fmt.Sprintf(e.i18n.T(MsgTool), toolCount, event.ToolName, formattedInput)
+				for _, chunk := range SplitMessageCodeFenceAware(toolMsg, maxPlatformMessageLen) {
+					e.send(p, replyCtx, chunk)
+				}
 			}
 
 		case EventText:
@@ -1612,8 +1657,23 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				continue
 			}
 
-			// Stop streaming preview before sending prompt
+			// Flush accumulated text segment before permission prompt
+			previewActive := sp.canPreview()
+			if len(textParts) > segmentStart {
+				if !previewActive {
+					segment := strings.Join(textParts[segmentStart:], "")
+					if segment != "" {
+						for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
+							e.send(p, replyCtx, chunk)
+						}
+					}
+				}
+				segmentStart = len(textParts)
+			}
 			sp.freeze()
+			if previewActive {
+				sp.detachPreview() // keep frozen preview visible as permanent message
+			}
 
 			slog.Info("permission request",
 				"request_id", event.RequestID,
@@ -1689,8 +1749,21 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 			replyStart := time.Now()
 
-			// If streaming preview was active, try to finalize in-place
-			if sp.finish(fullResponse) {
+			// When tool calls happened, text was sent in segments; only send remainder.
+			if toolCount > 0 {
+				sp.finish("") // cleanup preview
+				if segmentStart < len(textParts) {
+					unsent := strings.Join(textParts[segmentStart:], "")
+					if unsent != "" {
+						for _, chunk := range splitMessage(unsent, maxPlatformMessageLen) {
+							if err := p.Send(e.ctx, replyCtx, chunk); err != nil {
+								slog.Error("failed to send reply", "error", err, "msg_id", msgID)
+								return
+							}
+						}
+					}
+				}
+			} else if sp.finish(fullResponse) {
 				slog.Debug("EventResult: finalized via stream preview", "response_len", len(fullResponse))
 			} else {
 				slog.Debug("EventResult: sending via p.Send (preview inactive or failed)", "response_len", len(fullResponse), "chunks", len(splitMessage(fullResponse, maxPlatformMessageLen)))
@@ -1743,7 +1816,17 @@ channelClosed:
 		fullResponse := strings.Join(textParts, "")
 		session.AddHistory("assistant", fullResponse)
 
-		if sp.finish(fullResponse) {
+		if toolCount > 0 {
+			sp.finish("")
+			if segmentStart < len(textParts) {
+				unsent := strings.Join(textParts[segmentStart:], "")
+				if unsent != "" {
+					for _, chunk := range splitMessage(unsent, maxPlatformMessageLen) {
+						e.send(p, replyCtx, chunk)
+					}
+				}
+			}
+		} else if sp.finish(fullResponse) {
 			slog.Debug("stream preview: finalized in-place (process exited)")
 		} else {
 			for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
@@ -6874,6 +6957,23 @@ func (e *Engine) deleteSessionDisplayName(sessions *SessionManager, matched *Age
 		displayName = shortID
 	}
 	return displayName
+}
+
+// toolCodeLang picks the code block language hint for tool display.
+func toolCodeLang(toolName, input string) string {
+	switch toolName {
+	case "shell", "run_shell_command", "Bash":
+		return "bash"
+	case "write_file", "WriteFile", "replace", "ReplaceInFile":
+		if strings.Contains(input, "\n- ") || strings.Contains(input, "\n+ ") {
+			return "diff"
+		}
+	}
+	// Fallback: detect diff-like content
+	if strings.Contains(input, "\n- ") && strings.Contains(input, "\n+ ") {
+		return "diff"
+	}
+	return ""
 }
 
 // truncateIf truncates s to maxLen runes. 0 means no truncation.

@@ -40,14 +40,21 @@ func (r *SkillRegistry) SetDirs(dirs []string) {
 }
 
 // Resolve looks up a skill by name. Returns nil if not found.
+// Hyphens and underscores are treated as equivalent so that Telegram-sanitized
+// names (e.g. "calendar_scheduler") match original skill names ("calendar-scheduler").
 func (r *SkillRegistry) Resolve(name string) *Skill {
-	lower := strings.ToLower(name)
+	norm := normalizeCommandName(name)
 	for _, s := range r.ListAll() {
-		if strings.ToLower(s.Name) == lower {
+		if normalizeCommandName(s.Name) == norm {
 			return s
 		}
 	}
 	return nil
+}
+
+// normalizeCommandName folds case and treats hyphens/underscores as equivalent.
+func normalizeCommandName(s string) string {
+	return strings.ToLower(strings.ReplaceAll(s, "-", "_"))
 }
 
 // ListAll returns all discovered skills. Results are cached after first scan.
@@ -175,11 +182,13 @@ func parseSkillMD(skillName, raw, sourceDir string) *Skill {
 }
 
 // parseFrontmatter extracts simple key: value pairs from a YAML-like block.
-// Handles quoted and unquoted values. Does not support nested structures.
+// Handles quoted values, and YAML block scalar indicators (>-, |-, >, |)
+// by reading the following indented lines as the value.
 func parseFrontmatter(block string) map[string]string {
 	m := make(map[string]string)
-	for _, line := range strings.Split(block, "\n") {
-		line = strings.TrimSpace(line)
+	lines := strings.Split(block, "\n")
+	for i := 0; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
@@ -189,6 +198,22 @@ func parseFrontmatter(block string) map[string]string {
 		}
 		key = strings.TrimSpace(key)
 		val = strings.TrimSpace(val)
+
+		// Handle YAML block scalar indicators: >-, |-, >, |
+		if val == ">-" || val == "|-" || val == ">" || val == "|" {
+			var blockLines []string
+			for i+1 < len(lines) {
+				next := lines[i+1]
+				// Block continues while lines are indented (start with space/tab)
+				if len(next) == 0 || (next[0] != ' ' && next[0] != '\t') {
+					break
+				}
+				i++
+				blockLines = append(blockLines, strings.TrimSpace(next))
+			}
+			val = strings.Join(blockLines, " ")
+		}
+
 		val = strings.Trim(val, `"'`)
 		if key != "" {
 			m[strings.ToLower(key)] = val

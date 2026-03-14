@@ -61,6 +61,13 @@ Add the token to your `config.toml`:
 [[projects]]
 name = "my-project"
 
+# ── Project-level settings ──────────────────────────────────
+# admin_from: who can run privileged commands (/shell, /restart, /upgrade).
+#   Not set (default) → privileged commands are blocked for everyone.
+#   "*" → all allowed users get admin access (only for personal single-user setups).
+#   "id1,id2" → only these Telegram user IDs can run privileged commands.
+admin_from = "*"
+
 [projects.agent]
 type = "claudecode"
 
@@ -73,7 +80,18 @@ type = "telegram"
 
 [projects.platforms.options]
 token = "1234567890:ABCdefGHIjklMNOpqrsTUVwxyz-123456"
+
+# ── Platform-level settings ─────────────────────────────────
+# allow_from: who can use this bot.
+#   Not set (default) → all users are permitted (a WARN will be logged).
+#   "*" → same as not set, but explicit (no WARN).
+#   "id1,id2" → only these Telegram user IDs can interact with the bot.
+# allow_from = "123456789"
 ```
+
+> **Common mistake:** `admin_from` goes under `[[projects]]` (project level), NOT inside `[projects.platforms.options]`. If placed in the wrong section, it will be silently ignored.
+>
+> To find your Telegram user ID, send any message to **@userinfobot**.
 
 ---
 

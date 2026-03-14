@@ -156,8 +156,6 @@ func TestMarkdownToSimpleHTML_NoCrossedTags(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			out := MarkdownToSimpleHTML(tt.input)
-			// Check no crossed tags: every <b> must close before enclosing </i> etc.
-			// Simple check: no </b> inside an <i> block or vice versa
 			if err := validateHTMLNesting(out); err != nil {
 				t.Errorf("crossed tags in output %q: %v", out, err)
 			}
@@ -181,7 +179,6 @@ func validateHTMLNesting(html string) error {
 		i += end + 1
 		if strings.HasPrefix(tag, "/") {
 			closing := tag[1:]
-			// strip attributes
 			if sp := strings.IndexByte(closing, ' '); sp > 0 {
 				closing = closing[:sp]
 			}
@@ -202,6 +199,178 @@ func validateHTMLNesting(html string) error {
 		}
 	}
 	return nil
+}
+
+func TestMarkdownToSimpleHTML_UnorderedList(t *testing.T) {
+	md := "Items:\n- first item\n- second item\n- third item"
+	out := MarkdownToSimpleHTML(md)
+	if !strings.Contains(out, "• first item") {
+		t.Errorf("expected bullet for unordered list, got %q", out)
+	}
+	if !strings.Contains(out, "• second item") {
+		t.Errorf("expected bullet for second item, got %q", out)
+	}
+}
+
+func TestMarkdownToSimpleHTML_UnorderedListAsterisk(t *testing.T) {
+	md := "* one\n* two"
+	out := MarkdownToSimpleHTML(md)
+	if !strings.Contains(out, "• one") {
+		t.Errorf("expected bullet for asterisk list, got %q", out)
+	}
+}
+
+func TestMarkdownToSimpleHTML_OrderedList(t *testing.T) {
+	md := "Steps:\n1. first\n2. second\n3. third"
+	out := MarkdownToSimpleHTML(md)
+	if !strings.Contains(out, "1.") || !strings.Contains(out, "first") {
+		t.Errorf("expected ordered list items, got %q", out)
+	}
+	if !strings.Contains(out, "2.") || !strings.Contains(out, "second") {
+		t.Errorf("expected ordered list items, got %q", out)
+	}
+}
+
+func TestMarkdownToSimpleHTML_ListWithInlineFormatting(t *testing.T) {
+	md := "- **bold item**\n- `code item`\n- *italic item*"
+	out := MarkdownToSimpleHTML(md)
+	if !strings.Contains(out, "• <b>bold item</b>") {
+		t.Errorf("expected bold in list item, got %q", out)
+	}
+	if !strings.Contains(out, "• <code>code item</code>") {
+		t.Errorf("expected code in list item, got %q", out)
+	}
+	if err := validateHTMLNesting(out); err != nil {
+		t.Errorf("invalid HTML nesting: %v, got %q", err, out)
+	}
+}
+
+func TestMarkdownToSimpleHTML_NestedList(t *testing.T) {
+	md := "- top\n  - nested\n    - deep"
+	out := MarkdownToSimpleHTML(md)
+	if !strings.Contains(out, "• top") {
+		t.Errorf("expected top-level bullet, got %q", out)
+	}
+	if !strings.Contains(out, "  • nested") {
+		t.Errorf("expected indented nested bullet, got %q", out)
+	}
+	if !strings.Contains(out, "    • deep") {
+		t.Errorf("expected double-indented deep bullet, got %q", out)
+	}
+}
+
+func TestMarkdownToSimpleHTML_GeminiTypicalOutput(t *testing.T) {
+	md := `## Analysis Results
+
+Here are the findings:
+
+- **File structure**: The project has 3 main directories
+- **Dependencies**: All up to date
+- **Tests**: 15 passing, 0 failing
+
+### Recommendations
+
+1. Update the ` + "`README.md`" + ` file
+2. Add **error handling** to the main function
+3. Consider using ~~deprecated~~ updated API
+
+> Note: This is an automated analysis
+
+For more info, visit [docs](https://example.com).`
+
+	out := MarkdownToSimpleHTML(md)
+
+	if !strings.Contains(out, "<b>Analysis Results</b>") {
+		t.Error("heading should be bold")
+	}
+	if !strings.Contains(out, "• <b>File structure</b>") {
+		t.Errorf("list item with bold not converted properly, got %q", out)
+	}
+	if !strings.Contains(out, "<blockquote>") {
+		t.Error("blockquote should be present")
+	}
+	if !strings.Contains(out, `<a href=`) {
+		t.Error("link should be present")
+	}
+	if err := validateHTMLNesting(out); err != nil {
+		t.Errorf("invalid HTML nesting: %v\nfull output: %q", err, out)
+	}
+}
+
+func TestMarkdownToSimpleHTML_CodeBlockWithHTMLTags(t *testing.T) {
+	md := "```html\n<div class=\"test\">\n  <p>Hello</p>\n</div>\n```"
+	out := MarkdownToSimpleHTML(md)
+	if !strings.Contains(out, "&lt;div") {
+		t.Errorf("HTML tags in code block should be escaped, got %q", out)
+	}
+	if err := validateHTMLNesting(out); err != nil {
+		t.Errorf("invalid HTML: %v, got %q", err, out)
+	}
+}
+
+func TestMarkdownToSimpleHTML_HorizontalRule(t *testing.T) {
+	out := MarkdownToSimpleHTML("before\n---\nafter")
+	if !strings.Contains(out, "——————————") {
+		t.Errorf("expected wide horizontal rule, got %q", out)
+	}
+}
+
+func TestMarkdownToSimpleHTML_UnclosedCodeBlock(t *testing.T) {
+	md := "```python\nprint('hello')\nprint('world')"
+	out := MarkdownToSimpleHTML(md)
+	if !strings.Contains(out, "print") {
+		t.Errorf("unclosed code block content should still appear, got %q", out)
+	}
+	if !strings.Contains(out, "<pre><code>") {
+		t.Errorf("unclosed code block should still get code tags, got %q", out)
+	}
+}
+
+func TestMarkdownToSimpleHTML_MultiLineBlockquote(t *testing.T) {
+	md := "> line 1\n> line 2\n> line 3"
+	out := MarkdownToSimpleHTML(md)
+	if strings.Count(out, "<blockquote>") != 1 {
+		t.Errorf("expected single blockquote, got %q", out)
+	}
+	if !strings.Contains(out, "line 1\nline 2\nline 3") {
+		t.Errorf("expected all lines joined in blockquote, got %q", out)
+	}
+}
+
+func TestMarkdownToSimpleHTML_BlockquoteBreaksOnBlankLine(t *testing.T) {
+	md := "> quote 1\n\n> quote 2"
+	out := MarkdownToSimpleHTML(md)
+	if strings.Count(out, "<blockquote>") != 2 {
+		t.Errorf("blank line should create separate blockquotes, got %q", out)
+	}
+}
+
+func TestMarkdownToSimpleHTML_Table(t *testing.T) {
+	md := "| Name | Age |\n|------|-----|\n| Alice | 30 |\n| Bob | 25 |"
+	out := MarkdownToSimpleHTML(md)
+	if !strings.Contains(out, "Name | Age") {
+		t.Errorf("expected table header cells, got %q", out)
+	}
+	if !strings.Contains(out, "——————————") {
+		t.Errorf("expected separator as rule, got %q", out)
+	}
+	if !strings.Contains(out, "Alice | 30") {
+		t.Errorf("expected table data cells, got %q", out)
+	}
+}
+
+func TestMarkdownToSimpleHTML_TableWithFormatting(t *testing.T) {
+	md := "| **Header** | `code` |\n|---|---|\n| *italic* | normal |"
+	out := MarkdownToSimpleHTML(md)
+	if !strings.Contains(out, "<b>Header</b>") {
+		t.Errorf("expected bold in table cell, got %q", out)
+	}
+	if !strings.Contains(out, "<code>code</code>") {
+		t.Errorf("expected code in table cell, got %q", out)
+	}
+	if err := validateHTMLNesting(out); err != nil {
+		t.Errorf("invalid HTML nesting: %v, got %q", err, out)
+	}
 }
 
 func TestSplitMessageCodeFenceAware_Short(t *testing.T) {
@@ -225,15 +394,6 @@ func TestSplitMessageCodeFenceAware_PreservesCodeBlock(t *testing.T) {
 	chunks := SplitMessageCodeFenceAware(text, 30)
 	if len(chunks) < 2 {
 		t.Fatalf("expected multiple chunks, got %d", len(chunks))
-	}
-
-	// When a chunk breaks inside a code block, it should close with ```
-	for i, c := range chunks {
-		opens := strings.Count(c, "```python") + strings.Count(c, "```\n")
-		closes := strings.Count(c, "```")
-		_ = opens
-		_ = closes
-		_ = i
 	}
 
 	full := strings.Join(chunks, "")

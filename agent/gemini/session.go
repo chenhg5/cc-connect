@@ -301,6 +301,20 @@ func (gs *geminiSession) handleMessage(raw map[string]any) {
 		return
 	}
 
+	// Delta messages are incremental streaming fragments — emit immediately
+	// as EventText so engine's stream preview can update in real time.
+	// Non-delta messages (complete text) are buffered for later classification
+	// (thinking vs final text) based on what event follows.
+	delta, _ := raw["delta"].(bool)
+	if delta {
+		evt := core.Event{Type: core.EventText, Content: content}
+		select {
+		case gs.events <- evt:
+		case <-gs.ctx.Done():
+		}
+		return
+	}
+
 	gs.pendingMsgs = append(gs.pendingMsgs, content)
 }
 
@@ -468,29 +482,173 @@ func formatToolParams(toolName string, params map[string]any) string {
 	}
 
 	switch toolName {
-	case "shell", "run_shell_command":
+	case "shell", "run_shell_command", "Bash":
 		if cmd, ok := params["command"].(string); ok {
 			return cmd
 		}
-	case "write_file", "read_file", "replace":
+	case "write_file", "WriteFile":
+		fp, _ := params["file_path"].(string)
+		if fp == "" {
+			fp, _ = params["path"].(string)
+		}
+		if fp != "" {
+			if content, ok := params["content"].(string); ok && content != "" {
+				return "`" + fp + "`\n```\n" + content + "\n```"
+			}
+			return fp
+		}
+	case "replace", "ReplaceInFile":
+		fp, _ := params["file_path"].(string)
+		if fp == "" {
+			fp, _ = params["path"].(string)
+		}
+		if fp != "" {
+			old, _ := params["old_string"].(string)
+			new_, _ := params["new_string"].(string)
+			if old == "" {
+				old, _ = params["old_str"].(string)
+				new_, _ = params["new_str"].(string)
+			}
+			if old != "" || new_ != "" {
+				diff := computeLineDiff(old, new_)
+				return "`" + fp + "`\n```\n" + diff + "\n```"
+			}
+			return fp
+		}
+	case "read_file", "ReadFile":
 		if p, ok := params["file_path"].(string); ok {
 			return p
 		}
 		if p, ok := params["path"].(string); ok {
 			return p
 		}
-	case "web_fetch":
+	case "list_directory", "ListDirectory":
+		if p, ok := params["path"].(string); ok {
+			return p
+		}
+		if p, ok := params["directory"].(string); ok {
+			return p
+		}
+	case "web_fetch", "WebFetch":
 		if u, ok := params["url"].(string); ok {
 			return u
 		}
-	case "google_web_search":
+	case "google_web_search", "GoogleWebSearch":
 		if q, ok := params["query"].(string); ok {
 			return q
 		}
+	case "activate_skill":
+		if n, ok := params["name"].(string); ok {
+			return n
+		}
+	case "search_code", "SearchCode", "Glob", "Grep":
+		if q, ok := params["query"].(string); ok {
+			return q
+		}
+		if p, ok := params["pattern"].(string); ok {
+			return p
+		}
 	}
 
-	b, _ := json.Marshal(params)
-	return string(b)
+	// Fallback: format as key: value pairs for readability
+	var parts []string
+	for k, v := range params {
+		switch val := v.(type) {
+		case string:
+			parts = append(parts, k+": "+val)
+		default:
+			j, _ := json.Marshal(val)
+			parts = append(parts, k+": "+string(j))
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+// computeLineDiff computes a minimal unified-style diff between old and new text.
+// It finds common prefix/suffix lines and shows only the changed lines with
+// up to 1 line of surrounding context. Unchanged context lines are prefixed
+// with "  ", removed lines with "- ", and added lines with "+ ".
+func computeLineDiff(old, new_ string) string {
+	oldLines := strings.Split(old, "\n")
+	newLines := strings.Split(new_, "\n")
+
+	// Find common prefix lines
+	prefixLen := 0
+	minLen := len(oldLines)
+	if len(newLines) < minLen {
+		minLen = len(newLines)
+	}
+	for prefixLen < minLen && oldLines[prefixLen] == newLines[prefixLen] {
+		prefixLen++
+	}
+
+	// Find common suffix lines (not overlapping with prefix)
+	suffixLen := 0
+	for suffixLen < len(oldLines)-prefixLen && suffixLen < len(newLines)-prefixLen {
+		oi := len(oldLines) - 1 - suffixLen
+		ni := len(newLines) - 1 - suffixLen
+		if oldLines[oi] != newLines[ni] {
+			break
+		}
+		suffixLen++
+	}
+
+	// No actual changes
+	if prefixLen+suffixLen >= len(oldLines) && prefixLen+suffixLen >= len(newLines) {
+		return ""
+	}
+
+	// If everything differs (no common lines), show full old/new
+	if prefixLen == 0 && suffixLen == 0 {
+		var sb strings.Builder
+		for _, l := range oldLines {
+			sb.WriteString("- " + l + "\n")
+		}
+		for _, l := range newLines {
+			sb.WriteString("+ " + l + "\n")
+		}
+		return strings.TrimRight(sb.String(), "\n")
+	}
+
+	var sb strings.Builder
+	const contextN = 1
+
+	// Context: tail of common prefix
+	ctxStart := prefixLen - contextN
+	if ctxStart < 0 {
+		ctxStart = 0
+	}
+	if ctxStart > 0 {
+		sb.WriteString("  ...\n")
+	}
+	for i := ctxStart; i < prefixLen; i++ {
+		sb.WriteString("  " + oldLines[i] + "\n")
+	}
+
+	// Removed lines
+	for i := prefixLen; i < len(oldLines)-suffixLen; i++ {
+		sb.WriteString("- " + oldLines[i] + "\n")
+	}
+
+	// Added lines
+	for i := prefixLen; i < len(newLines)-suffixLen; i++ {
+		sb.WriteString("+ " + newLines[i] + "\n")
+	}
+
+	// Context: head of common suffix
+	suffStart := len(oldLines) - suffixLen
+	suffEnd := suffStart + contextN
+	if suffEnd > len(oldLines) {
+		suffEnd = len(oldLines)
+	}
+	for i := suffStart; i < suffEnd; i++ {
+		sb.WriteString("  " + oldLines[i] + "\n")
+	}
+	if suffEnd < len(oldLines) {
+		sb.WriteString("  ...")
+	}
+
+	return strings.TrimRight(sb.String(), "\n")
 }
 
 func truncate(s string, maxRunes int) string {

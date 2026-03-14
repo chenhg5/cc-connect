@@ -612,17 +612,28 @@ type telegramPreviewHandle struct {
 }
 
 // SendPreviewStart sends a new message and returns a handle for subsequent edits.
+// Uses HTML mode to match UpdateMessage formatting, falling back to plain text
+// if Telegram rejects the HTML (reduces visible format "jump" during streaming).
 func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content string) (any, error) {
 	rc, ok := rctx.(replyContext)
 	if !ok {
 		return nil, fmt.Errorf("telegram: invalid reply context type %T", rctx)
 	}
 
-	msg := tgbotapi.NewMessage(rc.chatID, content)
-	msg.ParseMode = ""
+	html := core.MarkdownToSimpleHTML(content)
+	msg := tgbotapi.NewMessage(rc.chatID, html)
+	msg.ParseMode = tgbotapi.ModeHTML
+
 	sent, err := p.bot.Send(msg)
 	if err != nil {
-		return nil, fmt.Errorf("telegram: send preview: %w", err)
+		if strings.Contains(err.Error(), "can't parse") {
+			msg.Text = content
+			msg.ParseMode = ""
+			sent, err = p.bot.Send(msg)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("telegram: send preview: %w", err)
+		}
 	}
 	return &telegramPreviewHandle{chatID: rc.chatID, messageID: sent.MessageID}, nil
 }
@@ -722,19 +733,19 @@ func (p *Platform) RegisterCommands(commands []core.BotCommandInfo) error {
 
 	// Telegram limits: max 100 commands, description max 256 chars
 	var tgCommands []tgbotapi.BotCommand
+	seen := make(map[string]bool)
 	for _, c := range commands {
-		if !isValidTelegramCommand(c.Command) {
-			slog.Warn("telegram: invalid command, skipping",
-				slog.String("command", c.Command),
-				slog.String("description", c.Description))
+		cmd := sanitizeTelegramCommand(c.Command)
+		if cmd == "" || seen[cmd] {
 			continue
 		}
+		seen[cmd] = true
 		desc := c.Description
 		if len(desc) > 256 {
 			desc = desc[:253] + "..."
 		}
 		tgCommands = append(tgCommands, tgbotapi.BotCommand{
-			Command:     c.Command,
+			Command:     cmd,
 			Description: desc,
 		})
 	}
@@ -781,11 +792,9 @@ func isValidTelegramCommand(cmd string) bool {
 	if len(cmd) == 0 || len(cmd) > 32 {
 		return false
 	}
-	// Must start with a letter
 	if cmd[0] < 'a' || cmd[0] > 'z' {
 		return false
 	}
-	// Rest can be letters, digits, or underscores
 	for i := 1; i < len(cmd); i++ {
 		c := cmd[i]
 		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_') {
@@ -793,4 +802,34 @@ func isValidTelegramCommand(cmd string) bool {
 		}
 	}
 	return true
+}
+
+// sanitizeTelegramCommand converts a command name to Telegram-compatible format.
+// Telegram rules: 1-32 chars, lowercase letters/digits/underscores, must start with a letter.
+// Returns "" if the command cannot be sanitized (e.g. empty or no letter to start with).
+func sanitizeTelegramCommand(cmd string) string {
+	cmd = strings.ToLower(cmd)
+	var b strings.Builder
+	for _, c := range cmd {
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+			b.WriteRune(c)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	result := b.String()
+	// Collapse consecutive underscores
+	for strings.Contains(result, "__") {
+		result = strings.ReplaceAll(result, "__", "_")
+	}
+	result = strings.Trim(result, "_")
+	// Must start with a letter
+	if len(result) == 0 || result[0] < 'a' || result[0] > 'z' {
+		return ""
+	}
+	if len(result) > 32 {
+		result = result[:32]
+	}
+	return result
 }
