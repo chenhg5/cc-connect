@@ -3,12 +3,54 @@ package gemini
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
+
+// sanitizeFileName mirrors the logic in geminiSession.Send for file name sanitization.
+func sanitizeFileName(fileName string, index int) string {
+	fname := filepath.Base(fileName)
+	if fname == "" || fname == "." || fname == ".." {
+		fname = fmt.Sprintf("cc-connect-file-%d", index)
+	}
+	return fname
+}
+
+func TestSanitizeFileName(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		index    int
+		wantSafe bool
+		want     string
+	}{
+		{"normal file", "report.pdf", 0, true, "report.pdf"},
+		{"path traversal", "../../etc/passwd", 0, true, "passwd"},
+		{"deep traversal", "../../../tmp/evil.sh", 1, true, "evil.sh"},
+		{"absolute path", "/etc/shadow", 0, true, "shadow"},
+		{"empty name", "", 2, true, "cc-connect-file-2"},
+		{"dot only", ".", 3, true, "cc-connect-file-3"},
+		{"double dot", "..", 4, true, "cc-connect-file-4"},
+		{"subdir file", "subdir/file.txt", 0, true, "file.txt"},
+		{"slash path", "dir/subdir/evil.dll", 0, true, "evil.dll"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sanitizeFileName(tt.input, tt.index)
+			if tt.want != "" && got != tt.want {
+				t.Errorf("sanitizeFileName(%q, %d) = %q, want %q", tt.input, tt.index, got, tt.want)
+			}
+			if strings.Contains(got, "..") || strings.Contains(got, "/") {
+				t.Errorf("sanitizeFileName(%q, %d) = %q — still contains path traversal chars", tt.input, tt.index, got)
+			}
+		})
+	}
+}
 
 // drainEvents reads all events from the channel until it blocks for the given timeout.
 func drainEvents(ch <-chan core.Event, timeout time.Duration) []core.Event {

@@ -54,6 +54,13 @@ func TestExtractEntityText(t *testing.T) {
 			length: 3,
 			want:   "",
 		},
+		{
+			name:   "negative length returns empty",
+			text:   "hello",
+			offset: 0,
+			length: -1,
+			want:   "",
+		},
 	}
 
 	for _, tt := range tests {

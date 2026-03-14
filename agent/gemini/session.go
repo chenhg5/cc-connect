@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -82,8 +83,8 @@ func (gs *geminiSession) Send(prompt string, images []core.ImageAttachment, file
 				ext = ".webp"
 			}
 			fname := fmt.Sprintf("cc-connect-img-%d%s", i, ext)
-			fpath := fmt.Sprintf("%s/%s", tmpDir, fname)
-			if err := os.WriteFile(fpath, img.Data, 0o644); err != nil {
+		fpath := filepath.Join(tmpDir, fname)
+		if err := os.WriteFile(fpath, img.Data, 0o644); err != nil {
 				slog.Warn("geminiSession: failed to save image", "error", err)
 				continue
 			}
@@ -93,11 +94,11 @@ func (gs *geminiSession) Send(prompt string, images []core.ImageAttachment, file
 	// Save files to temp and include as references
 	var fileRefs []string
 	for i, f := range files {
-		fname := f.FileName
-		if fname == "" {
+		fname := filepath.Base(f.FileName)
+		if fname == "" || fname == "." || fname == ".." {
 			fname = fmt.Sprintf("cc-connect-file-%d", i)
 		}
-		fpath := fmt.Sprintf("%s/%s", tmpDir, fname)
+		fpath := filepath.Join(tmpDir, fname)
 		if err := os.WriteFile(fpath, f.Data, 0o644); err != nil {
 			slog.Warn("geminiSession: failed to save file", "error", err)
 			continue

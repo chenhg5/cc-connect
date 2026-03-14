@@ -192,3 +192,41 @@ func TestSession_ConcurrentHistory(t *testing.T) {
 		t.Errorf("expected 50 entries, got %d", len(h))
 	}
 }
+
+func TestSession_GetAgentSessionID(t *testing.T) {
+	s := &Session{}
+	if got := s.GetAgentSessionID(); got != "" {
+		t.Errorf("initial GetAgentSessionID = %q, want empty", got)
+	}
+	s.SetAgentSessionID("sess-1")
+	if got := s.GetAgentSessionID(); got != "sess-1" {
+		t.Errorf("GetAgentSessionID = %q, want %q", got, "sess-1")
+	}
+}
+
+func TestSession_GetName(t *testing.T) {
+	s := &Session{Name: "test-session"}
+	if got := s.GetName(); got != "test-session" {
+		t.Errorf("GetName = %q, want %q", got, "test-session")
+	}
+}
+
+func TestSession_ConcurrentGetSet(t *testing.T) {
+	s := &Session{}
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			s.SetAgentSessionID("id")
+		}()
+		go func() {
+			defer wg.Done()
+			_ = s.GetAgentSessionID()
+		}()
+	}
+	wg.Wait()
+	if got := s.GetAgentSessionID(); got != "id" {
+		t.Errorf("final GetAgentSessionID = %q, want %q", got, "id")
+	}
+}

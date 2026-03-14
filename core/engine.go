@@ -1341,9 +1341,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		// After /new or /switch the active session changes, but the old agent
 		// process may still be alive. Reusing it would send messages to the
 		// wrong conversation context.
-		session.mu.Lock()
-		wantID := session.AgentSessionID
-		session.mu.Unlock()
+		wantID := session.GetAgentSessionID()
 		currentID := state.agentSession.CurrentSessionID()
 		if wantID == "" || currentID == "" || wantID == currentID {
 			return state
@@ -1399,8 +1397,9 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		return state
 	}
 
+	agentSID := session.GetAgentSessionID()
 	startAt := time.Now()
-	agentSession, err := agent.StartSession(e.ctx, session.AgentSessionID)
+	agentSession, err := agent.StartSession(e.ctx, agentSID)
 	startElapsed := time.Since(startAt)
 	if err != nil {
 		slog.Error("failed to start interactive session", "error", err, "elapsed", startElapsed)
@@ -1409,20 +1408,11 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		return state
 	}
 	if startElapsed >= slowAgentStart {
-		slog.Warn("slow agent session start", "elapsed", startElapsed, "agent", agent.Name(), "session_id", session.AgentSessionID)
+		slog.Warn("slow agent session start", "elapsed", startElapsed, "agent", agent.Name(), "session_id", agentSID)
 	}
 
-	// Immediately capture the agent-side session ID so that if the agent
-	// process crashes before emitting its first session_id event we still
-	// have the binding. The relay path already does this (see HandleRelay);
-	// the interactive path was missing it, leaving a window where the local
-	// session could lose its agent binding.
 	if newID := agentSession.CurrentSessionID(); newID != "" {
-		session.mu.Lock()
-		if session.AgentSessionID == "" {
-			session.AgentSessionID = newID
-		}
-		session.mu.Unlock()
+		session.CompareAndSetAgentSessionID(newID)
 	}
 
 	state = &interactiveState{
@@ -1433,7 +1423,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	}
 	e.interactiveStates[sessionKey] = state
 
-	slog.Info("interactive session started", "session_key", sessionKey, "agent_session", session.AgentSessionID, "elapsed", startElapsed)
+	slog.Info("interactive session started", "session_key", sessionKey, "agent_session", session.GetAgentSessionID(), "elapsed", startElapsed)
 	return state
 }
 
@@ -1627,17 +1617,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			}
 			if event.SessionID != "" {
-				session.mu.Lock()
-				if session.AgentSessionID == "" {
-					session.AgentSessionID = event.SessionID
-					pendingName := session.Name
-					session.mu.Unlock()
+				if session.CompareAndSetAgentSessionID(event.SessionID) {
+					pendingName := session.GetName()
 					if pendingName != "" && pendingName != "session" && pendingName != "default" {
 						e.sessions.SetSessionName(event.SessionID, pendingName)
 					}
 					e.sessions.Save()
-				} else {
-					session.mu.Unlock()
 				}
 			}
 
@@ -1721,9 +1706,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventResult:
 			if event.SessionID != "" {
-				session.mu.Lock()
-				session.AgentSessionID = event.SessionID
-				session.mu.Unlock()
+				session.SetAgentSessionID(event.SessionID)
 			}
 
 			fullResponse := event.Content
@@ -1740,7 +1723,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			turnDuration := time.Since(turnStart)
 			slog.Info("turn complete",
 				"session", session.ID,
-				"agent_session", session.AgentSessionID,
+				"agent_session", session.GetAgentSessionID(),
 				"msg_id", msgID,
 				"tools", toolCount,
 				"response_len", len(fullResponse),
@@ -2212,7 +2195,7 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 
 		agentName := agent.Name()
 		activeSession := sessions.GetOrCreateActive(msg.SessionKey)
-		activeAgentID := activeSession.AgentSessionID
+		activeAgentID := activeSession.GetAgentSessionID()
 
 		var sb strings.Builder
 		if totalPages > 1 {
@@ -2546,7 +2529,7 @@ func (e *Engine) cmdName(p Platform, msg *Message, args []string) {
 	} else {
 		// /name <name...> → current session
 		session := sessions.GetOrCreateActive(msg.SessionKey)
-		targetID = session.AgentSessionID
+		targetID = session.GetAgentSessionID()
 		if targetID == "" {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNameNoSession))
 			return
@@ -2577,7 +2560,7 @@ func (e *Engine) cmdCurrent(p Platform, msg *Message) {
 			return
 		}
 		s := sessions.GetOrCreateActive(msg.SessionKey)
-		agentID := s.AgentSessionID
+		agentID := s.GetAgentSessionID()
 		if agentID == "" {
 			agentID = e.i18n.T(MsgSessionNotStarted)
 		}
@@ -2639,7 +2622,7 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 		modeStr += e.i18n.Tf(MsgStatusQuiet, quietStr)
 
 		s := sessions.GetOrCreateActive(msg.SessionKey)
-		sessionDisplayName := sessions.GetSessionName(s.AgentSessionID)
+		sessionDisplayName := sessions.GetSessionName(s.GetAgentSessionID())
 		if sessionDisplayName == "" {
 			sessionDisplayName = s.Name
 		}
@@ -3030,9 +3013,9 @@ func (e *Engine) renderStatusCard(sessionKey string) *Card {
 	modeStr += e.i18n.Tf(MsgStatusQuiet, quietStr)
 
 	s := sessions.GetOrCreateActive(sessionKey)
-	sessionDisplayName := sessions.GetSessionName(s.AgentSessionID)
+	sessionDisplayName := sessions.GetSessionName(s.GetAgentSessionID())
 	if sessionDisplayName == "" {
-		sessionDisplayName = s.Name
+		sessionDisplayName = s.GetName()
 	}
 	sessionStr := e.i18n.Tf(MsgStatusSession, sessionDisplayName, len(s.History))
 
@@ -3142,9 +3125,10 @@ func (e *Engine) cmdHistory(p Platform, msg *Message, args []string) {
 	}
 
 	entries := s.GetHistory(n)
-	if len(entries) == 0 && s.AgentSessionID != "" {
+	agentSID := s.GetAgentSessionID()
+	if len(entries) == 0 && agentSID != "" {
 		if hp, ok := agent.(HistoryProvider); ok {
-			if agentEntries, err := hp.GetSessionHistory(e.ctx, s.AgentSessionID, n); err == nil {
+			if agentEntries, err := hp.GetSessionHistory(e.ctx, agentSID, n); err == nil {
 				entries = agentEntries
 			}
 		}
@@ -4863,7 +4847,7 @@ func (e *Engine) renderDeleteModeSelectCard(sessionKey string, sessions *Session
 	}
 
 	cb := NewCard().Title(e.i18n.T(MsgDeleteModeTitle), "carmine")
-	activeAgentID := sessions.GetOrCreateActive(sessionKey).AgentSessionID
+	activeAgentID := sessions.GetOrCreateActive(sessionKey).GetAgentSessionID()
 	selectedCount := 0
 	for i := start; i < end; i++ {
 		s := agentSessions[i]
@@ -5244,7 +5228,7 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 
 	agentName := agent.Name()
 	activeSession := sessions.GetOrCreateActive(sessionKey)
-	activeAgentID := activeSession.AgentSessionID
+	activeAgentID := activeSession.GetAgentSessionID()
 
 	var titleStr string
 	if totalPages > 1 {
@@ -5309,7 +5293,7 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 func (e *Engine) renderCurrentCard(sessionKey string) *Card {
 	_, sessions := e.sessionContextForKey(sessionKey)
 	s := sessions.GetOrCreateActive(sessionKey)
-	agentID := s.AgentSessionID
+	agentID := s.GetAgentSessionID()
 	if agentID == "" {
 		agentID = e.i18n.T(MsgSessionNotStarted)
 	}
@@ -5326,9 +5310,10 @@ func (e *Engine) renderHistoryCard(sessionKey string) *Card {
 	s := sessions.GetOrCreateActive(sessionKey)
 	entries := s.GetHistory(10)
 
-	if len(entries) == 0 && s.AgentSessionID != "" {
+	agentSID := s.GetAgentSessionID()
+	if len(entries) == 0 && agentSID != "" {
 		if hp, ok := agent.(HistoryProvider); ok {
-			if agentEntries, err := hp.GetSessionHistory(e.ctx, s.AgentSessionID, 10); err == nil {
+			if agentEntries, err := hp.GetSessionHistory(e.ctx, agentSID, 10); err == nil {
 				entries = agentEntries
 			}
 		}
@@ -6930,7 +6915,7 @@ func (e *Engine) deleteSingleSessionReply(msg *Message, deleter SessionDeleter, 
 	// Prevent deleting the currently active session
 	_, sessions := e.sessionContextForKey(msg.SessionKey)
 	activeSession := sessions.GetOrCreateActive(msg.SessionKey)
-	if activeSession.AgentSessionID == matched.ID {
+	if activeSession.GetAgentSessionID() == matched.ID {
 		return e.i18n.T(MsgDeleteActiveDenied)
 	}
 
@@ -7070,7 +7055,7 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 		inj.SetSessionEnv(envVars)
 	}
 
-	agentSession, err := e.agent.StartSession(ctx, session.AgentSessionID)
+	agentSession, err := e.agent.StartSession(ctx, session.GetAgentSessionID())
 	if err != nil {
 		return "", fmt.Errorf("start relay session: %w", err)
 	}

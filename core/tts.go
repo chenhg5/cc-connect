@@ -328,6 +328,11 @@ func (m *MiniMaxTTS) Synthesize(ctx context.Context, text string, opts TTSSynthe
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
 	for scanner.Scan() {
+		select {
+		case <-ctx.Done():
+			return nil, "", ctx.Err()
+		default:
+		}
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data:") {
 			continue

@@ -908,7 +908,7 @@ func TestCmdCurrent_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
 	session := e.sessions.GetOrCreateActive(msg.SessionKey)
 	session.Name = "Focus"
-	session.AgentSessionID = "session-123"
+	session.SetAgentSessionID("session-123")
 	session.History = append(session.History, HistoryEntry{Role: "user", Content: "hello", Timestamp: time.Now()})
 
 	e.cmdCurrent(p, msg)
@@ -1243,7 +1243,7 @@ func TestDeleteMode_SubmitBlocksActiveSession(t *testing.T) {
 	}}}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 	msg := &Message{SessionKey: "feishu:user1", ReplyCtx: "ctx"}
-	e.sessions.GetOrCreateActive(msg.SessionKey).AgentSessionID = "session-1"
+	e.sessions.GetOrCreateActive(msg.SessionKey).SetAgentSessionID("session-1")
 
 	e.cmdDelete(p, msg, nil)
 	_ = e.handleCardNav("act:/delete-mode toggle session-1", msg.SessionKey)
@@ -1267,7 +1267,7 @@ func TestDeleteMode_ActiveSessionMarkedWithArrowAndNotSelectable(t *testing.T) {
 	}}}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 	msg := &Message{SessionKey: "feishu:user1", ReplyCtx: "ctx"}
-	e.sessions.GetOrCreateActive(msg.SessionKey).AgentSessionID = "session-1"
+	e.sessions.GetOrCreateActive(msg.SessionKey).SetAgentSessionID("session-1")
 
 	e.cmdDelete(p, msg, nil)
 	if len(p.repliedCards) != 1 {
@@ -1442,7 +1442,7 @@ func TestCmdReasoning_SwitchesEffortAndResetsSession(t *testing.T) {
 	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
 
 	s := e.sessions.GetOrCreateActive(msg.SessionKey)
-	s.AgentSessionID = "existing-session"
+	s.SetAgentSessionID("existing-session")
 	s.AddHistory("user", "hello")
 
 	e.cmdReasoning(p, msg, []string{"3"})
@@ -1450,8 +1450,8 @@ func TestCmdReasoning_SwitchesEffortAndResetsSession(t *testing.T) {
 	if agent.reasoningEffort != "high" {
 		t.Fatalf("reasoning effort = %q, want high", agent.reasoningEffort)
 	}
-	if s.AgentSessionID != "" {
-		t.Fatalf("AgentSessionID = %q, want cleared", s.AgentSessionID)
+	if s.GetAgentSessionID() != "" {
+		t.Fatalf("AgentSessionID = %q, want cleared", s.GetAgentSessionID())
 	}
 	if len(s.History) != 0 {
 		t.Fatalf("history length = %d, want 0", len(s.History))
@@ -1769,7 +1769,7 @@ func TestRenderListCard_MakesEveryVisibleSessionClickable(t *testing.T) {
 	}
 
 	e := NewEngine("test", &stubListAgent{sessions: sessions}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
-	e.sessions.GetOrCreateActive("test:user1").AgentSessionID = sessions[5].ID
+	e.sessions.GetOrCreateActive("test:user1").SetAgentSessionID(sessions[5].ID)
 
 	card, err := e.renderListCard("test:user1", 1)
 	if err != nil {
@@ -2421,9 +2421,7 @@ func TestSessionIDWriteback_ImmediateAfterStartSession(t *testing.T) {
 
 	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, nil)
 
-	session.mu.Lock()
-	got := session.AgentSessionID
-	session.mu.Unlock()
+	got := session.GetAgentSessionID()
 
 	if got != "agent-uuid-123" {
 		t.Fatalf("AgentSessionID = %q, want %q — immediate writeback not working", got, "agent-uuid-123")
@@ -2443,9 +2441,7 @@ func TestSessionIDWriteback_DoesNotOverwriteExisting(t *testing.T) {
 
 	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, nil)
 
-	session.mu.Lock()
-	got := session.AgentSessionID
-	session.mu.Unlock()
+	got := session.GetAgentSessionID()
 
 	if got != "existing-uuid" {
 		t.Fatalf("AgentSessionID = %q, want %q — writeback should not overwrite", got, "existing-uuid")

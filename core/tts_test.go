@@ -311,3 +311,35 @@ func TestTTSCfg_MaxTextLen(t *testing.T) {
 		t.Error("expected text to exceed MaxTextLen")
 	}
 }
+
+// ──────────────────────────────────────────────────────────────
+// Context cancellation test
+// ──────────────────────────────────────────────────────────────
+
+func TestMiniMaxTTS_ContextCancelled(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("server does not support flushing")
+		}
+		// Send one chunk then hang to let the client cancel
+		chunk := `{"data":{"audio":"48656c6c6f","status":1},"base_resp":{"status_code":0}}`
+		fmt.Fprintf(w, "data: %s\n\n", chunk)
+		flusher.Flush()
+		// Block until client disconnects
+		<-r.Context().Done()
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	tts := NewMiniMaxTTS("test-key", srv.URL, "", nil)
+	_, _, err := tts.Synthesize(ctx, "hello", TTSSynthesisOpts{})
+	if err == nil {
+		t.Fatal("expected error when context is cancelled")
+	}
+}

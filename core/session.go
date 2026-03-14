@@ -58,6 +58,20 @@ func (s *Session) SetAgentInfo(agentSessionID, name string) {
 	s.Name = name
 }
 
+// GetAgentSessionID atomically reads the agent session ID.
+func (s *Session) GetAgentSessionID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.AgentSessionID
+}
+
+// GetName atomically reads the session name.
+func (s *Session) GetName() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.Name
+}
+
 // SetAgentSessionID atomically sets the agent session ID.
 func (s *Session) SetAgentSessionID(id string) {
 	s.mu.Lock()

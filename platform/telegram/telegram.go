@@ -777,7 +777,7 @@ func (p *Platform) RegisterCommands(commands []core.BotCommandInfo) error {
 func extractEntityText(text string, offsetUTF16, lengthUTF16 int) string {
 	encoded := utf16.Encode([]rune(text))
 	endUTF16 := offsetUTF16 + lengthUTF16
-	if offsetUTF16 < 0 || endUTF16 > len(encoded) {
+	if offsetUTF16 < 0 || lengthUTF16 < 0 || endUTF16 > len(encoded) {
 		return ""
 	}
 	return string(utf16.Decode(encoded[offsetUTF16:endUTF16]))
