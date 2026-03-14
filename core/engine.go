@@ -183,12 +183,19 @@ type Engine struct {
 	quiet   bool // when true, suppress thinking and tool progress messages globally
 }
 
+// Init flow states for workspace onboarding.
+const (
+	initFlowAwaitingURL     = "awaiting_url"
+	initFlowAwaitingConfirm = "awaiting_confirm"
+)
+
 // workspaceInitFlow tracks a channel that is being onboarded to a workspace.
 type workspaceInitFlow struct {
-	state       string // "awaiting_url", "awaiting_confirm"
+	state       string // initFlowAwaitingURL or initFlowAwaitingConfirm
 	repoURL     string
 	cloneTo     string
 	channelName string
+	createdAt   time.Time
 }
 
 // interactiveState tracks a running interactive agent session and its permission state.
@@ -212,6 +219,12 @@ type deleteModeState struct {
 	phase       string
 	hint        string
 	result      string
+}
+
+func (s *interactiveState) InputTokens() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.inputTokens
 }
 
 // modelContextWindow is the assumed context window size for percentage calculations.
@@ -314,14 +327,12 @@ func (e *Engine) runIdleReaper() {
 				e.interactiveMu.Lock()
 				for key, state := range e.interactiveStates {
 					if state.workspaceDir == ws {
-						state.mu.Lock()
-						tokenCount := state.inputTokens
-						state.mu.Unlock()
+						tokens := state.InputTokens()
 						slog.Info("session idle-reaped",
 							"session_key", key,
 							"workspace", ws,
-							"last_ctx_pct", tokenCount*100/modelContextWindow,
-							"input_tokens", tokenCount,
+							"last_ctx_pct", tokens*100/modelContextWindow,
+							"input_tokens", tokens,
 						)
 						if state.agentSession != nil {
 							state.agentSession.Close()
@@ -331,9 +342,21 @@ func (e *Engine) runIdleReaper() {
 				}
 				e.interactiveMu.Unlock()
 			}
+
+			// Reap abandoned init flows (no activity for 10 minutes)
+			e.initFlowsMu.Lock()
+			for chID, flow := range e.initFlows {
+				if time.Since(flow.createdAt) > 10*time.Minute {
+					slog.Debug("init flow expired", "channel", chID)
+					delete(e.initFlows, chID)
+				}
+			}
+			e.initFlowsMu.Unlock()
 		}
 	}
 }
+
+func (e *Engine) projectKey() string { return "project:" + e.name }
 
 // SetSpeechConfig configures the speech-to-text subsystem.
 func (e *Engine) SetSpeechConfig(cfg SpeechCfg) {
@@ -1539,10 +1562,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if !quiet && event.Content != "" {
 				sp.freeze()
 				preview := truncateIf(event.Content, e.display.ThinkingMaxLen)
-				state.mu.Lock()
-				tokens := state.inputTokens
-				state.mu.Unlock()
-				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgThinking), preview)+contextIndicator(tokens))
+				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgThinking), preview)+contextIndicator(state.InputTokens()))
 			}
 
 		case EventToolUse:
@@ -1558,10 +1578,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				} else {
 					formattedInput = fmt.Sprintf("`%s`", inputPreview)
 				}
-				state.mu.Lock()
-				tokens := state.inputTokens
-				state.mu.Unlock()
-				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgTool), toolCount, event.ToolName, formattedInput)+contextIndicator(tokens))
+				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgTool), toolCount, event.ToolName, formattedInput)+contextIndicator(state.InputTokens()))
 			}
 
 		case EventText:
@@ -1978,7 +1995,7 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 
 func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string) {
 	channelID := extractChannelID(msg.SessionKey)
-	projectKey := "project:" + e.name
+	projectKey := e.projectKey()
 
 	subCmd := ""
 	if len(args) > 0 {
@@ -7008,7 +7025,7 @@ func (e *Engine) interactiveKeyForSessionKey(sessionKey string) string {
 // Returns (workspacePath, channelName, error).
 // If workspacePath is empty, the init flow should be triggered.
 func (e *Engine) resolveWorkspace(p Platform, channelID string) (string, string, error) {
-	projectKey := "project:" + e.name
+	projectKey := e.projectKey()
 
 	// Step 1: Check existing binding
 	if b := e.workspaceBindings.Lookup(projectKey, channelID); b != nil {
@@ -7066,8 +7083,9 @@ func (e *Engine) handleWorkspaceInitFlow(p Platform, msg *Message, channelID, ch
 		}
 		e.initFlowsMu.Lock()
 		e.initFlows[channelID] = &workspaceInitFlow{
-			state:       "awaiting_url",
+			state:       initFlowAwaitingURL,
 			channelName: channelName,
+			createdAt:   time.Now(),
 		}
 		e.initFlowsMu.Unlock()
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsNotFoundHint))
@@ -7075,7 +7093,7 @@ func (e *Engine) handleWorkspaceInitFlow(p Platform, msg *Message, channelID, ch
 	}
 
 	switch flow.state {
-	case "awaiting_url":
+	case initFlowAwaitingURL:
 		if !looksLikeGitURL(content) {
 			e.reply(p, msg.ReplyCtx, "That doesn't look like a git URL. Please provide a URL like `https://github.com/org/repo` or `git@github.com:org/repo.git`.")
 			return true
@@ -7086,14 +7104,14 @@ func (e *Engine) handleWorkspaceInitFlow(p Platform, msg *Message, channelID, ch
 		e.initFlowsMu.Lock()
 		flow.repoURL = content
 		flow.cloneTo = cloneTo
-		flow.state = "awaiting_confirm"
+		flow.state = initFlowAwaitingConfirm
 		e.initFlowsMu.Unlock()
 
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(
 			"I'll clone `%s` to `%s` and bind it to this channel. OK? (yes/no)", content, cloneTo))
 		return true
 
-	case "awaiting_confirm":
+	case initFlowAwaitingConfirm:
 		lower := strings.ToLower(content)
 		if lower != "yes" && lower != "y" {
 			e.initFlowsMu.Lock()
@@ -7113,7 +7131,7 @@ func (e *Engine) handleWorkspaceInitFlow(p Platform, msg *Message, channelID, ch
 			return true
 		}
 
-		projectKey := "project:" + e.name
+		projectKey := e.projectKey()
 		e.workspaceBindings.Bind(projectKey, channelID, flow.channelName, flow.cloneTo)
 
 		e.initFlowsMu.Lock()

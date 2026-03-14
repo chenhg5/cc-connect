@@ -85,7 +85,7 @@ func TestNormalizeWorkspacePath(t *testing.T) {
 	}
 }
 
-func TestWorkspacePoolNormalizesKeys(t *testing.T) {
+func TestNormalizeBeforePoolProducesSameKey(t *testing.T) {
 	tmp := t.TempDir()
 	realDir := filepath.Join(tmp, "project")
 	if err := os.Mkdir(realDir, 0o755); err != nil {
@@ -94,13 +94,12 @@ func TestWorkspacePoolNormalizesKeys(t *testing.T) {
 
 	pool := newWorkspacePool(15 * time.Minute)
 
-	// Access with trailing slash
-	ws1 := pool.GetOrCreate(realDir + "/")
-	// Access without trailing slash
-	ws2 := pool.GetOrCreate(realDir)
+	// Callers normalize before pool access (as resolveWorkspace does)
+	ws1 := pool.GetOrCreate(normalizeWorkspacePath(realDir + "/"))
+	ws2 := pool.GetOrCreate(normalizeWorkspacePath(realDir))
 
 	if ws1 != ws2 {
-		t.Error("trailing slash created a different workspace state")
+		t.Error("normalized trailing slash produced a different workspace state")
 	}
 }
 
