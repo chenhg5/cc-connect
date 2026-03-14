@@ -299,14 +299,28 @@ func (p *Platform) getAccessToken() (string, error) {
 		return p.accessToken, nil
 	}
 
-	// Request new access token using DingTalk's legacy API (oapi.dingtalk.com/gettoken)
-	// This is the stable, widely-used endpoint for enterprise internal apps
-	url := fmt.Sprintf("https://oapi.dingtalk.com/gettoken?appkey=%s&appsecret=%s",
-		p.clientID, p.clientSecret)
+	// Request new access token using DingTalk's new API (api.dingtalk.com/v1.0/oauth2/accessToken)
+	// This requires POST request with JSON body
+	url := "https://api.dingtalk.com/v1.0/oauth2/accessToken"
 
-	resp, err := p.httpClient.Get(url)
+	reqBody := map[string]string{
+		"appKey":    p.clientID,
+		"appSecret": p.clientSecret,
+	}
+	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
-		return "", fmt.Errorf("http get: %w", err)
+		return "", fmt.Errorf("marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("do request: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -316,26 +330,20 @@ func (p *Platform) getAccessToken() (string, error) {
 	}
 
 	var tokenResp struct {
-		AccessToken string `json:"access_token"`
-		ExpiresIn   int    `json:"expires_in"`
-		ErrCode     int    `json:"errcode"`
-		ErrMsg      string `json:"errmsg"`
+		AccessToken string `json:"accessToken"`
+		ExpireIn    int    `json:"expireIn"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
 		return "", fmt.Errorf("decode response: %w", err)
 	}
 
-	if tokenResp.ErrCode != 0 {
-		return "", fmt.Errorf("api error %d: %s", tokenResp.ErrCode, tokenResp.ErrMsg)
-	}
-
 	if tokenResp.AccessToken == "" {
-		return "", fmt.Errorf("empty access_token in response")
+		return "", fmt.Errorf("empty accessToken in response")
 	}
 
 	// Cache token with 5 minutes buffer before expiry
 	p.accessToken = tokenResp.AccessToken
-	expiry := tokenResp.ExpiresIn
+	expiry := tokenResp.ExpireIn
 	if expiry > 300 {
 		expiry -= 300 // 5 minute buffer
 	}
