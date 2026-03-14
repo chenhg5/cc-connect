@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -46,18 +47,30 @@ func (s *recordingAgentSession) RespondPermission(id string, res PermissionResul
 
 type stubPlatformEngine struct {
 	n    string
+	mu   sync.Mutex
 	sent []string
 }
 
 func (p *stubPlatformEngine) Name() string               { return p.n }
 func (p *stubPlatformEngine) Start(MessageHandler) error { return nil }
 func (p *stubPlatformEngine) Reply(_ context.Context, _ any, content string) error {
+	p.mu.Lock()
 	p.sent = append(p.sent, content)
+	p.mu.Unlock()
 	return nil
 }
 func (p *stubPlatformEngine) Send(_ context.Context, _ any, content string) error {
+	p.mu.Lock()
 	p.sent = append(p.sent, content)
+	p.mu.Unlock()
 	return nil
+}
+func (p *stubPlatformEngine) Sent() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	cp := make([]string, len(p.sent))
+	copy(cp, p.sent)
+	return cp
 }
 func (p *stubPlatformEngine) Stop() error { return nil }
 
@@ -2664,18 +2677,19 @@ func TestResumeFailureFallbackToFreshSession(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Verify a notification was sent to the platform
-	if len(p.sent) == 0 {
+	msgs := p.Sent()
+	if len(msgs) == 0 {
 		t.Fatal("expected a notification message to be sent to the platform")
 	}
 	found := false
-	for _, msg := range p.sent {
+	for _, msg := range msgs {
 		if strings.Contains(msg, "starting fresh") {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatalf("notification messages = %v, want message about starting fresh", p.sent)
+		t.Fatalf("notification messages = %v, want message about starting fresh", msgs)
 	}
 }
 
