@@ -319,6 +319,85 @@ func (p *Platform) ResolveChannelName(channelID string) (string, error) {
 	return info.Name, nil
 }
 
+// StartTyping adds emoji reactions to the user's message as a heartbeat
+// indicator so the user knows the bot is still working.
+//
+// Timeline:
+//   - Immediately: eyes
+//   - After 2 minutes: clock
+//   - Every 5 minutes after that: one more random emoji
+//
+// All reactions are removed when the returned stop function is called.
+func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
+	rc, ok := rctx.(replyContext)
+	if !ok || rc.channel == "" || rc.timestamp == "" {
+		return func() {}
+	}
+
+	ref := slack.ItemRef{Channel: rc.channel, Timestamp: rc.timestamp}
+	var mu sync.Mutex
+	var added []string
+
+	addReaction := func(emoji string) {
+		if err := p.client.AddReaction(emoji, ref); err != nil {
+			slog.Debug("slack: add reaction failed", "emoji", emoji, "error", err)
+			return
+		}
+		mu.Lock()
+		added = append(added, emoji)
+		mu.Unlock()
+	}
+
+	// Immediately add eyes
+	addReaction("eyes")
+
+	extras := []string{
+		"hourglass_flowing_sand", "hourglass", "gear", "hammer_and_wrench",
+		"mag", "bulb", "rocket", "zap", "fire", "sparkles",
+		"brain", "crystal_ball", "jigsaw", "microscope", "satellite",
+	}
+
+	done := make(chan struct{})
+	go func() {
+		// After 2 minutes, add clock
+		select {
+		case <-time.After(2 * time.Minute):
+			addReaction("clock1")
+		case <-done:
+			return
+		}
+
+		// Every 5 minutes, add a random extra emoji
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		idx := 0
+		for {
+			select {
+			case <-ticker.C:
+				if idx < len(extras) {
+					addReaction(extras[idx])
+					idx++
+				}
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	return func() {
+		close(done)
+		mu.Lock()
+		emojis := make([]string, len(added))
+		copy(emojis, added)
+		mu.Unlock()
+		for _, emoji := range emojis {
+			if err := p.client.RemoveReaction(emoji, ref); err != nil {
+				slog.Debug("slack: remove reaction failed", "emoji", emoji, "error", err)
+			}
+		}
+	}
+}
+
 func (p *Platform) Stop() error {
 	if p.cancel != nil {
 		p.cancel()
