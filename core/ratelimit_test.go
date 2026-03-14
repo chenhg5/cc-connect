@@ -75,3 +75,23 @@ func TestRateLimiter_Concurrent(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestRateLimiter_Stop(t *testing.T) {
+	rl := NewRateLimiter(5, time.Minute)
+	rl.Allow("user1")
+
+	// Stop should not panic and should be idempotent
+	rl.Stop()
+	rl.Stop() // second call should be safe
+
+	// Allow should still work after Stop (just no background cleanup)
+	if !rl.Allow("user2") {
+		t.Error("Allow should still work after Stop")
+	}
+}
+
+func TestRateLimiter_StopDisabled(t *testing.T) {
+	// A disabled limiter (maxMessages=0) should also handle Stop gracefully
+	rl := NewRateLimiter(0, time.Minute)
+	rl.Stop()
+}
