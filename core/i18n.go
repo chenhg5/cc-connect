@@ -184,6 +184,7 @@ const (
 	MsgProviderRemoveFailed MsgKey = "provider_remove_failed"
 
 	MsgVoiceNotEnabled       MsgKey = "voice_not_enabled"
+	MsgVoiceUsingPlatformRecognition MsgKey = "voice_using_platform_recognition"
 	MsgVoiceNoFFmpeg         MsgKey = "voice_no_ffmpeg"
 	MsgVoiceTranscribing     MsgKey = "voice_transcribing"
 	MsgVoiceTranscribed      MsgKey = "voice_transcribed"
@@ -1270,6 +1271,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "🎙 語音訊息未啟用，請在 config.toml 中配置 `[speech]` 部分。",
 		LangJapanese:           "🎙 音声メッセージは有効になっていません。config.toml で `[speech]` を設定してください。",
 		LangSpanish:            "🎙 Los mensajes de voz no están habilitados. Configure `[speech]` en config.toml.",
+	},
+	MsgVoiceUsingPlatformRecognition: {
+		LangEnglish:            "(Using platform-provided transcription)",
+		LangChinese:            "(使用平台提供的语音识别)",
+		LangTraditionalChinese: "(使用平台提供的語音識別)",
+		LangJapanese:           "(プラットフォーム提供の文字起こしを使用)",
+		LangSpanish:            "(Usando transcripción de la plataforma)",
 	},
 	MsgVoiceNoFFmpeg: {
 		LangEnglish:            "🎙 Voice message requires `ffmpeg` for format conversion. Please install ffmpeg.",

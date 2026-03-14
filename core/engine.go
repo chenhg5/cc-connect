@@ -806,10 +806,23 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	)
 
 	// Voice message: transcribe to text first
-	// Skip transcription if Content is already provided (platform-side recognition)
-	if msg.Audio != nil && msg.Content == "" {
-		e.handleVoiceMessage(p, msg)
-		return
+	if msg.Audio != nil {
+		// If STT is configured, use it for transcription (more accurate)
+		if e.speech.Enabled && e.speech.STT != nil {
+			e.handleVoiceMessage(p, msg)
+			return
+		}
+		// Fallback: use platform-provided recognition text if available
+		if msg.Content == "" {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgVoiceNotEnabled))
+			return
+		}
+		// Use platform recognition with a hint
+		slog.Info("using platform-provided voice recognition",
+			"platform", msg.Platform, "content_len", len(msg.Content))
+		if msg.FromVoice {
+			e.send(p, msg.ReplyCtx, fmt.Sprintf("🎙 %s", e.i18n.T(MsgVoiceUsingPlatformRecognition)))
+		}
 	}
 
 	content := strings.TrimSpace(msg.Content)
