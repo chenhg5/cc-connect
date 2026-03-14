@@ -92,7 +92,7 @@ type SpeechConfig struct {
 // TTSConfig configures text-to-speech output (mirrors SpeechConfig style).
 type TTSConfig struct {
 	Enabled     bool   `toml:"enabled"`
-	Provider    string `toml:"provider"`     // "qwen" | "openai"
+	Provider    string `toml:"provider"`     // "qwen" | "openai" | "minimax"
 	Voice       string `toml:"voice"`        // default voice name
 	TTSMode     string `toml:"tts_mode"`     // "voice_only" (default) | "always"
 	MaxTextLen  int    `toml:"max_text_len"` // max rune count before skipping TTS; 0 = no limit
@@ -106,6 +106,11 @@ type TTSConfig struct {
 		BaseURL string `toml:"base_url"`
 		Model   string `toml:"model"`
 	} `toml:"qwen"`
+	MiniMax struct {
+		APIKey  string `toml:"api_key"`
+		BaseURL string `toml:"base_url"`
+		Model   string `toml:"model"`
+	} `toml:"minimax"`
 }
 
 // HeartbeatConfig controls periodic heartbeat for a project.

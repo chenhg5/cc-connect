@@ -380,6 +380,16 @@ func main() {
 				} else {
 					slog.Warn("tts: qwen provider enabled but api_key is empty")
 				}
+			case "minimax":
+				apiKey := cfg.TTS.MiniMax.APIKey
+				baseURL := cfg.TTS.MiniMax.BaseURL
+				model := cfg.TTS.MiniMax.Model
+				if apiKey != "" {
+					ttsCfg.TTS = core.NewMiniMaxTTS(apiKey, baseURL, model, nil)
+					ttsCfg.Provider = "minimax"
+				} else {
+					slog.Warn("tts: minimax provider enabled but api_key is empty")
+				}
 			default: // "openai" or unspecified
 				apiKey := cfg.TTS.OpenAI.APIKey
 				baseURL := cfg.TTS.OpenAI.BaseURL

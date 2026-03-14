@@ -1,8 +1,10 @@
 package core
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -240,4 +242,129 @@ func (o *OpenAITTS) Synthesize(ctx context.Context, text string, opts TTSSynthes
 		return nil, "", fmt.Errorf("openai tts: read audio: %w", err)
 	}
 	return mp3Data, "mp3", nil
+}
+
+// ──────────────────────────────────────────────────────────────
+// MiniMaxTTS — MiniMax T2A v2 TTS implementation
+// ──────────────────────────────────────────────────────────────
+
+// MiniMaxTTS implements TextToSpeech using the MiniMax T2A v2 API.
+type MiniMaxTTS struct {
+	APIKey  string
+	BaseURL string
+	Model   string
+	Client  *http.Client
+}
+
+// NewMiniMaxTTS creates a new MiniMaxTTS instance.
+func NewMiniMaxTTS(apiKey, baseURL, model string, client *http.Client) *MiniMaxTTS {
+	if baseURL == "" {
+		baseURL = "https://api.minimax.io"
+	}
+	if model == "" {
+		model = "speech-2.8-hd"
+	}
+	if client == nil {
+		client = &http.Client{Timeout: 60 * time.Second}
+	}
+	return &MiniMaxTTS{
+		APIKey:  apiKey,
+		BaseURL: baseURL,
+		Model:   model,
+		Client:  client,
+	}
+}
+
+// Synthesize sends text to MiniMax T2A v2 API and returns MP3 audio bytes.
+func (m *MiniMaxTTS) Synthesize(ctx context.Context, text string, opts TTSSynthesisOpts) ([]byte, string, error) {
+	voice := opts.Voice
+	if voice == "" {
+		voice = "English_Graceful_Lady"
+	}
+	speed := opts.Speed
+	if speed <= 0 {
+		speed = 1.0
+	}
+
+	reqBody := map[string]any{
+		"model":        m.Model,
+		"text":         text,
+		"stream":       true,
+		"voice_setting": map[string]any{
+			"voice_id": voice,
+			"speed":    speed,
+		},
+		"audio_setting": map[string]any{
+			"format":      "mp3",
+			"sample_rate": 32000,
+		},
+	}
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, "", fmt.Errorf("minimax tts: marshal request: %w", err)
+	}
+
+	url := strings.TrimRight(m.BaseURL, "/") + "/v1/t2a_v2"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(jsonData))
+	if err != nil {
+		return nil, "", fmt.Errorf("minimax tts: create request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+m.APIKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := m.Client.Do(req)
+	if err != nil {
+		return nil, "", fmt.Errorf("minimax tts: request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, "", fmt.Errorf("minimax tts API %d: %s", resp.StatusCode, body)
+	}
+
+	// Parse SSE stream: each line is "data: {...}" with hex-encoded audio chunks.
+	var audioBuf bytes.Buffer
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if data == "" {
+			continue
+		}
+		var chunk struct {
+			Data struct {
+				Audio  string `json:"audio"`
+				Status int    `json:"status"`
+			} `json:"data"`
+			BaseResp struct {
+				StatusCode int    `json:"status_code"`
+				StatusMsg  string `json:"status_msg"`
+			} `json:"base_resp"`
+		}
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			continue
+		}
+		if chunk.BaseResp.StatusCode != 0 {
+			return nil, "", fmt.Errorf("minimax tts API error %d: %s", chunk.BaseResp.StatusCode, chunk.BaseResp.StatusMsg)
+		}
+		if chunk.Data.Audio != "" {
+			audioBytes, err := hex.DecodeString(chunk.Data.Audio)
+			if err != nil {
+				return nil, "", fmt.Errorf("minimax tts: decode audio hex: %w", err)
+			}
+			audioBuf.Write(audioBytes)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, "", fmt.Errorf("minimax tts: read SSE stream: %w", err)
+	}
+	if audioBuf.Len() == 0 {
+		return nil, "", fmt.Errorf("minimax tts: no audio data received")
+	}
+	return audioBuf.Bytes(), "mp3", nil
 }

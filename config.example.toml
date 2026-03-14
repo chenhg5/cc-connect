@@ -166,7 +166,7 @@ level = "info" # debug, info, warn, error
 
 # [tts]
 # enabled  = true
-# provider = "qwen"          # "qwen" | "openai"
+# provider = "qwen"          # "qwen" | "openai" | "minimax"
 # voice    = "Cherry"        # default voice / 默认音色（千问支持：Cherry/Serena/Ethan/Chelsie 等）
 # tts_mode = "voice_only"    # "voice_only" (default) | "always"
 # max_text_len = 0           # max rune count before skipping TTS; 0 = no limit
@@ -186,6 +186,14 @@ level = "info" # debug, info, warn, error
 # api_key  = "sk-xxx"
 # base_url = ""              # optional: custom endpoint / 可选：自定义端点
 # model    = "tts-1"         # "tts-1" | "tts-1-hd"
+#
+# # Alternative: MiniMax TTS (T2A v2 streaming API)
+# # 备选：MiniMax TTS（T2A v2 流式 API）
+# # Docs: https://platform.minimaxi.com/document/T2A%20V2
+# [tts.minimax]
+# api_key  = "your-minimax-api-key"
+# base_url = ""              # optional: default "https://api.minimax.io" / 留空使用默认地址
+# model    = "speech-2.8-hd" # "speech-2.8-hd" | "speech-2.8"
 
 # =============================================================================
 # Daemon Mode / 守护进程模式
@@ -471,6 +479,17 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "bypassPermission
 # api_key = "sk-xxx"
 # base_url = "https://api.siliconflow.cn"
 # model = "deepseek-ai/DeepSeek-V3"
+# thinking = "disabled"
+#
+# # MiniMax — OpenAI-compatible provider with 204K context window
+# # MiniMax — 兼容 OpenAI 接口的大模型，支持 204K 超长上下文
+# # Models: MiniMax-M2.5 (flagship), MiniMax-M2.5-highspeed (faster)
+# # Docs: https://platform.minimaxi.com
+# [[projects.agent.providers]]
+# name = "minimax"
+# api_key = "your-minimax-api-key"
+# base_url = "https://api.minimax.io/v1"
+# model = "MiniMax-M2.5"
 # thinking = "disabled"
 #
 # # For special setups (Bedrock, Vertex, etc.), use the env map:
@@ -794,6 +813,14 @@ app_secret = "your-feishu-app-secret"
 # api_key = "sk-xxx"
 # base_url = "https://custom-api.com/v1"
 # model = "gpt-4o"
+#
+# # MiniMax — OpenAI-compatible, works natively with Codex
+# # MiniMax — 兼容 OpenAI 接口，可直接用于 Codex
+# [[projects.agent.providers]]
+# name = "minimax"
+# api_key = "your-minimax-api-key"
+# base_url = "https://api.minimax.io/v1"
+# model = "MiniMax-M2.5"
 #
 # [[projects.platforms]]
 # type = "telegram"
