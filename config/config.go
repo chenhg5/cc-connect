@@ -31,6 +31,7 @@ type Config struct {
 	Quiet            *bool               `toml:"quiet,omitempty"`              // global default for quiet mode; project-level overrides this
 	Cron             CronConfig          `toml:"cron"`
 	Webhook          WebhookConfig       `toml:"webhook"`
+	Bridge           BridgeConfig        `toml:"bridge"`
 	IdleTimeoutMins  *int                `toml:"idle_timeout_mins,omitempty"`  // max minutes between agent events; 0 = no timeout; default 120
 }
 
@@ -45,6 +46,14 @@ type WebhookConfig struct {
 	Port    int    `toml:"port,omitempty"`     // listen port; default 9111
 	Token   string `toml:"token,omitempty"`    // shared secret for authentication; empty = no auth
 	Path    string `toml:"path,omitempty"`     // URL path prefix; default "/hook"
+}
+
+// BridgeConfig controls the WebSocket bridge for external platform adapters.
+type BridgeConfig struct {
+	Enabled *bool  `toml:"enabled"`        // default false
+	Port    int    `toml:"port,omitempty"`  // listen port; default 9810
+	Token   string `toml:"token,omitempty"` // shared secret for authentication; required
+	Path    string `toml:"path,omitempty"`  // URL path; default "/bridge/ws"
 }
 
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.

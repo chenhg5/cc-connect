@@ -122,6 +122,21 @@ level = "info" # debug, info, warn, error
 #   #   -d "{\"session_key\":\"telegram:123:123\",\"event\":\"git:commit\",\"prompt\":\"New commit: $MSG. Review it briefly.\"}"
 
 # =============================================================================
+# Bridge Platform (External Adapters via WebSocket)
+# Bridge 平台（通过 WebSocket 接入外部适配器）
+# =============================================================================
+# Allow external adapters written in any language to connect at runtime.
+# 允许使用任何语言编写的外部适配器在运行时动态接入。
+# See docs/bridge-protocol.md for the full protocol specification.
+# 完整协议规范请参阅 docs/bridge-protocol.md。
+#
+# [bridge]
+# enabled = true
+# port = 9810                         # WebSocket listen port (default: 9810) / 监听端口
+# token = "your-bridge-secret"        # Auth token (required) / 认证密钥（必填）
+# path = "/bridge/ws"                 # URL path (default: "/bridge/ws") / URL 路径
+
+# =============================================================================
 # Speech-to-Text (Voice Messages) / 语音转文字（语音消息）
 # =============================================================================
 # Enable to transcribe voice messages to text before sending to agents.

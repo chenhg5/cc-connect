@@ -353,6 +353,13 @@ func (e *Engine) SetProviderRemoveSaveFunc(fn func(string) error) {
 	e.providerRemoveSaveFunc = fn
 }
 
+// AddPlatform appends a platform to the engine after construction.
+// The platform is started and wired during the next Engine.Start call,
+// or if the engine is already running, it is started immediately.
+func (e *Engine) AddPlatform(p Platform) {
+	e.platforms = append(e.platforms, p)
+}
+
 func (e *Engine) SetCronScheduler(cs *CronScheduler) {
 	e.cronScheduler = cs
 }

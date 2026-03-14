@@ -491,6 +491,26 @@ func main() {
 
 	heartbeatSched.Start()
 
+	// Start bridge server if enabled
+	var bridgeSrv *core.BridgeServer
+	if cfg.Bridge.Enabled != nil && *cfg.Bridge.Enabled {
+		port := cfg.Bridge.Port
+		if port <= 0 {
+			port = 9810
+		}
+		path := cfg.Bridge.Path
+		if path == "" {
+			path = "/bridge/ws"
+		}
+		bridgeSrv = core.NewBridgeServer(port, cfg.Bridge.Token, path)
+		for i, e := range engines {
+			bp := bridgeSrv.NewPlatform(cfg.Projects[i].Name)
+			bridgeSrv.RegisterEngine(cfg.Projects[i].Name, e, bp)
+			e.AddPlatform(bp)
+		}
+		bridgeSrv.Start()
+	}
+
 	// Start webhook server if enabled
 	var webhookSrv *core.WebhookServer
 	if cfg.Webhook.Enabled != nil && *cfg.Webhook.Enabled {
@@ -548,6 +568,9 @@ func main() {
 	}
 
 	slog.Info("shutting down...")
+	if bridgeSrv != nil {
+		bridgeSrv.Stop()
+	}
 	if webhookSrv != nil {
 		webhookSrv.Stop()
 	}
