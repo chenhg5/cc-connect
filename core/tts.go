@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -372,4 +374,211 @@ func (m *MiniMaxTTS) Synthesize(ctx context.Context, text string, opts TTSSynthe
 		return nil, "", fmt.Errorf("minimax tts: no audio data received")
 	}
 	return audioBuf.Bytes(), "mp3", nil
+}
+
+// ──────────────────────────────────────────────────────────────
+// EspeakTTS — Local eSpeak text-to-speech implementation
+// ──────────────────────────────────────────────────────────────
+
+// EspeakTTS implements TextToSpeech using the local espeak command.
+type EspeakTTS struct {
+	Path   string // path to espeak executable (empty = "espeak")
+	Voice  string // default voice (e.g. "zh", "en", "zh+f3")
+	Client *http.Client
+}
+
+// NewEspeakTTS creates a new EspeakTTS instance.
+func NewEspeakTTS(path, voice string, client *http.Client) *EspeakTTS {
+	if path == "" {
+		path = "espeak"
+	}
+	if voice == "" {
+		voice = "zh" // default to Chinese
+	}
+	if client == nil {
+		client = &http.Client{Timeout: 60 * time.Second}
+	}
+	return &EspeakTTS{
+		Path:   path,
+		Voice:  voice,
+		Client: client,
+	}
+}
+
+// Synthesize uses espeak to convert text to WAV audio bytes.
+func (e *EspeakTTS) Synthesize(ctx context.Context, text string, opts TTSSynthesisOpts) ([]byte, string, error) {
+	voice := opts.Voice
+	if voice == "" {
+		voice = e.Voice
+	}
+
+	// Build espeak command
+	args := []string{
+		"-v", voice,
+		"-w", "/dev/stdout", // write WAV to stdout
+	}
+
+	// Add speed option if specified
+	if opts.Speed > 0 {
+		// espeak speed is in words per minute, default 160
+		// Convert speed multiplier (0.5-2.0) to wpm
+		wpm := int(160 * opts.Speed)
+		args = append(args, "-s", fmt.Sprintf("%d", wpm))
+	}
+
+	// Add text as argument
+	args = append(args, text)
+
+	// Execute espeak command
+	// Use Output() instead of CombinedOutput() to avoid mixing stderr warnings with audio data
+	cmd := exec.Command(e.Path, args...)
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, "", fmt.Errorf("espeak: %w", err)
+	}
+
+	return output, "wav", nil
+}
+
+// ──────────────────────────────────────────────────────────────
+// PicoTTS — Google Pico TTS (better quality than espeak, offline)
+// ──────────────────────────────────────────────────────────────
+
+// PicoTTS implements TextToSpeech using pico2wave (Google Pico TTS).
+type PicoTTS struct {
+	Path   string // path to pico2wave executable (empty = "pico2wave")
+	Voice  string // default voice language (e.g. "zh-CN", "en-US")
+	Client *http.Client
+}
+
+// NewPicoTTS creates a new PicoTTS instance.
+func NewPicoTTS(path, voice string, client *http.Client) *PicoTTS {
+	if path == "" {
+		path = "pico2wave"
+	}
+	if voice == "" {
+		voice = "zh-CN" // default to Chinese
+	}
+	if client == nil {
+		client = &http.Client{Timeout: 60 * time.Second}
+	}
+	return &PicoTTS{
+		Path:   path,
+		Voice:  voice,
+		Client: client,
+	}
+}
+
+// Synthesize uses pico2wave to convert text to WAV audio bytes.
+// pico2wave produces much better quality than espeak.
+func (p *PicoTTS) Synthesize(ctx context.Context, text string, opts TTSSynthesisOpts) ([]byte, string, error) {
+	voice := opts.Voice
+	if voice == "" {
+		voice = p.Voice
+	}
+
+	// pico2wave requires writing to a file, then reading it back
+	tmpFile := "/tmp/pico_tts_" + fmt.Sprintf("%d", time.Now().UnixNano()) + ".wav"
+
+	// Build pico2wave command
+	// --lang: language code (zh-CN for Chinese, en-US for English)
+	// --wave: output WAV file path
+	args := []string{
+		"--lang=" + voice,
+		"--wave=" + tmpFile,
+		text,
+	}
+
+	// Execute pico2wave command
+	cmd := exec.Command(p.Path, args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, "", fmt.Errorf("pico2wave: %w, output: %s", err, string(output))
+	}
+
+	// Read the generated WAV file
+	audioData, err := os.ReadFile(tmpFile)
+	if err != nil {
+		return nil, "", fmt.Errorf("pico2wave: read output file: %w", err)
+	}
+
+	// Clean up temp file
+	os.Remove(tmpFile)
+
+	if len(audioData) == 0 {
+		return nil, "", fmt.Errorf("pico2wave: produced empty audio file")
+	}
+
+	return audioData, "wav", nil
+}
+
+// ──────────────────────────────────────────────────────────────
+// EdgeTTS — Microsoft Edge TTS (free, high quality, requires network)
+// ──────────────────────────────────────────────────────────────
+
+// EdgeTTS implements TextToSpeech using Microsoft Edge's free TTS API.
+// This uses the edge-tts Python package under the hood.
+type EdgeTTS struct {
+	Voice  string // default voice (e.g. "zh-CN-XiaoxiaoNeural")
+	Client *http.Client
+}
+
+// NewEdgeTTS creates a new EdgeTTS instance.
+func NewEdgeTTS(voice string, client *http.Client) *EdgeTTS {
+	if voice == "" {
+		voice = "zh-CN-XiaoxiaoNeural" // default Chinese voice
+	}
+	if client == nil {
+		client = &http.Client{Timeout: 60 * time.Second}
+	}
+	return &EdgeTTS{
+		Voice:  voice,
+		Client: client,
+	}
+}
+
+// Synthesize uses edge-tts Python package to convert text to MP3 audio bytes.
+// EdgeTTS provides high-quality neural voices but requires network connection.
+func (e *EdgeTTS) Synthesize(ctx context.Context, text string, opts TTSSynthesisOpts) ([]byte, string, error) {
+	voice := opts.Voice
+	if voice == "" {
+		voice = e.Voice
+	}
+
+	// Create temporary file for edge-tts output
+	tmpFile := "/tmp/edge_tts_" + fmt.Sprintf("%d", time.Now().UnixNano()) + ".mp3"
+
+	// Build Python command to call edge-tts
+	pythonCode := fmt.Sprintf(`
+import edge_tts
+import asyncio
+
+async def synthesize():
+    communicate = edge_tts.Communicate(text=%q, voice=%q)
+    await communicate.save(%q)
+
+asyncio.run(synthesize())
+`, text, voice, tmpFile)
+
+	// Execute Python script
+	cmd := exec.CommandContext(ctx, "python3", "-c", pythonCode)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, "", fmt.Errorf("edge-tts: %w, output: %s", err, string(output))
+	}
+
+	// Read the generated MP3 file
+	audioData, err := os.ReadFile(tmpFile)
+	if err != nil {
+		return nil, "", fmt.Errorf("edge-tts: read output file: %w", err)
+	}
+
+	// Clean up temp file
+	os.Remove(tmpFile)
+
+	if len(audioData) == 0 {
+		return nil, "", fmt.Errorf("edge-tts: produced empty audio file")
+	}
+
+	return audioData, "mp3", nil
 }
