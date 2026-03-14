@@ -479,7 +479,7 @@ func (e *Engine) ClearAliases() {
 func (e *Engine) SetDisabledCommands(cmds []string) {
 	m := make(map[string]bool, len(cmds))
 	for _, c := range cmds {
-		c = strings.ToLower(strings.TrimPrefix(c, "!"))
+		c = strings.ToLower(strings.TrimPrefix(strings.TrimPrefix(c, "!"), "/"))
 		// Resolve alias names to canonical IDs
 		id := matchPrefix(c, builtinCommands)
 		if id != "" {
@@ -1367,10 +1367,11 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 				"elapsed", startElapsed,
 			)
 
-			// Clear the stale session ID
+			// Clear the stale session ID and persist so a crash won't retry the bad session.
 			session.mu.Lock()
 			session.AgentSessionID = ""
 			session.mu.Unlock()
+			e.sessions.Save()
 
 			// Notify user via platform
 			if p != nil {
@@ -7095,8 +7096,16 @@ func (e *Engine) handleWorkspaceInitFlow(p Platform, msg *Message, channelID, ch
 
 	switch flow.state {
 	case initFlowAwaitingURL:
+		lower := strings.ToLower(content)
+		if lower == "cancel" || lower == "no" || lower == "exit" {
+			e.initFlowsMu.Lock()
+			delete(e.initFlows, channelID)
+			e.initFlowsMu.Unlock()
+			e.reply(p, msg.ReplyCtx, "Cancelled. Send a repo URL anytime to try again, or use `!workspace init <url>`.")
+			return true
+		}
 		if !looksLikeGitURL(content) {
-			e.reply(p, msg.ReplyCtx, "That doesn't look like a git URL. Please provide a URL like `https://github.com/org/repo` or `git@github.com:org/repo.git`.")
+			e.reply(p, msg.ReplyCtx, "That doesn't look like a git URL. Please provide a URL like `https://github.com/org/repo` or `git@github.com:org/repo.git`, or say `cancel` to exit.")
 			return true
 		}
 		repoName := extractRepoName(content)
