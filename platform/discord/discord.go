@@ -24,6 +24,7 @@ const maxDiscordLen = 2000
 type replyContext struct {
 	channelID string
 	messageID string
+	threadID  string
 }
 
 // interactionReplyCtx handles Discord slash command (Application Command)
@@ -42,6 +43,7 @@ type Platform struct {
 	guildID               string // optional: per-guild registration (instant) vs global (up to 1h propagation)
 	groupReplyAll         bool
 	shareSessionInChannel bool
+	threadIsolation       bool
 	session               *discordgo.Session
 	handler               core.MessageHandler
 	botID                 string
@@ -59,6 +61,7 @@ func New(opts map[string]any) (core.Platform, error) {
 	guildID, _ := opts["guild_id"].(string)
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
+	threadIsolation, _ := opts["thread_isolation"].(bool)
 	return &Platform{
 		token:                 token,
 		allowFrom:             allowFrom,
@@ -66,17 +69,157 @@ func New(opts map[string]any) (core.Platform, error) {
 		groupReplyAll:         groupReplyAll,
 		shareSessionInChannel: shareSessionInChannel,
 		readyCh:               make(chan struct{}),
+		threadIsolation:       threadIsolation,
 	}, nil
 }
 
 func (p *Platform) Name() string { return "discord" }
 
 func (p *Platform) makeSessionKey(channelID string, userID string) string {
-	if p.shareSessionInChannel {
+	return buildSessionKey(channelID, userID, p.shareSessionInChannel)
+}
+
+func buildSessionKey(channelID string, userID string, shareSessionInChannel bool) string {
+	if shareSessionInChannel {
 		return fmt.Sprintf("discord:%s", channelID)
-	} else {
-		return fmt.Sprintf("discord:%s:%s", channelID, userID)
 	}
+	return fmt.Sprintf("discord:%s:%s", channelID, userID)
+}
+
+// TODO: thread_isolation currently keys each Discord thread as one shared session, so share_session_in_channel=false does not further isolate users within the same thread.
+func buildThreadSessionKey(threadID string) string {
+	return fmt.Sprintf("discord:%s", threadID)
+}
+
+func (rc replyContext) targetChannelID() string {
+	if rc.threadID != "" {
+		return rc.threadID
+	}
+	return rc.channelID
+}
+
+func (rc replyContext) useThreadChannel() bool {
+	return rc.threadID != "" && rc.threadID == rc.channelID
+}
+
+type discordThreadOps interface {
+	ResolveChannel(channelID string) (*discordgo.Channel, error)
+	StartThread(channelID, messageID, name string, archiveDuration int) (*discordgo.Channel, error)
+	JoinThread(threadID string) error
+}
+
+type sessionThreadOps struct {
+	session *discordgo.Session
+}
+
+func (o sessionThreadOps) ResolveChannel(channelID string) (*discordgo.Channel, error) {
+	if o.session == nil {
+		return nil, fmt.Errorf("discord: session not initialized")
+	}
+	if ch, err := o.session.State.Channel(channelID); err == nil && ch != nil {
+		return ch, nil
+	}
+	return o.session.Channel(channelID)
+}
+
+func (o sessionThreadOps) StartThread(channelID, messageID, name string, archiveDuration int) (*discordgo.Channel, error) {
+	if o.session == nil {
+		return nil, fmt.Errorf("discord: session not initialized")
+	}
+	return o.session.MessageThreadStart(channelID, messageID, name, archiveDuration)
+}
+
+func (o sessionThreadOps) JoinThread(threadID string) error {
+	if o.session == nil {
+		return fmt.Errorf("discord: session not initialized")
+	}
+	return o.session.ThreadJoin(threadID)
+}
+
+func isThreadChannelType(t discordgo.ChannelType) bool {
+	switch t {
+	case discordgo.ChannelTypeGuildNewsThread,
+		discordgo.ChannelTypeGuildPublicThread,
+		discordgo.ChannelTypeGuildPrivateThread:
+		return true
+	default:
+		return false
+	}
+}
+
+func truncateDiscordThreadName(s string, maxRunes int) string {
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+	return string(runes[:maxRunes])
+}
+
+func threadNameForMessage(m *discordgo.MessageCreate, botID string) string {
+	name := stripDiscordMention(m.Content, botID)
+	name = strings.Join(strings.Fields(strings.ReplaceAll(name, "\n", " ")), " ")
+	if name == "" && m.Author != nil {
+		name = "cc " + m.Author.Username
+	}
+	if name == "" {
+		name = "cc session"
+	}
+	return truncateDiscordThreadName(name, 90)
+}
+
+func resolveSessionKeyForChannel(channelID, userID string, shareSessionInChannel bool, threadIsolation bool, ops discordThreadOps) string {
+	if !threadIsolation {
+		return buildSessionKey(channelID, userID, shareSessionInChannel)
+	}
+	ch, err := ops.ResolveChannel(channelID)
+	if err != nil {
+		slog.Warn("discord: resolve channel for session key failed, falling back", "channel", channelID, "error", err)
+		return buildSessionKey(channelID, userID, shareSessionInChannel)
+	}
+	if isThreadChannelType(ch.Type) {
+		return buildThreadSessionKey(channelID)
+	}
+	return buildSessionKey(channelID, userID, shareSessionInChannel)
+}
+
+func resolveThreadReplyContext(m *discordgo.MessageCreate, botID string, ops discordThreadOps) (string, replyContext, error) {
+	ch, err := ops.ResolveChannel(m.ChannelID)
+	if err != nil {
+		return "", replyContext{}, fmt.Errorf("resolve channel %s: %w", m.ChannelID, err)
+	}
+	if isThreadChannelType(ch.Type) {
+		if err := ops.JoinThread(m.ChannelID); err != nil {
+			slog.Debug("discord: join existing thread failed", "thread", m.ChannelID, "error", err)
+		}
+		rc := replyContext{channelID: m.ChannelID, messageID: m.ID, threadID: m.ChannelID}
+		return buildThreadSessionKey(m.ChannelID), rc, nil
+	}
+	if m.Message != nil && m.Message.Thread != nil && m.Message.Thread.ID != "" {
+		threadID := m.Message.Thread.ID
+		if err := ops.JoinThread(threadID); err != nil {
+			slog.Debug("discord: join attached thread failed", "thread", threadID, "error", err)
+		}
+		rc := replyContext{channelID: threadID, messageID: m.ID, threadID: threadID}
+		return buildThreadSessionKey(threadID), rc, nil
+	}
+	if m.Flags&discordgo.MessageFlagsHasThread != 0 {
+		threadID := m.ID
+		if err := ops.JoinThread(threadID); err != nil {
+			slog.Debug("discord: join message thread failed", "thread", threadID, "error", err)
+		}
+		rc := replyContext{channelID: threadID, messageID: m.ID, threadID: threadID}
+		return buildThreadSessionKey(threadID), rc, nil
+	}
+
+	thread, err := ops.StartThread(m.ChannelID, m.ID, threadNameForMessage(m, botID), 1440)
+	if err != nil {
+		return "", replyContext{}, fmt.Errorf("start thread for message %s: %w", m.ID, err)
+	}
+	if err := ops.JoinThread(thread.ID); err != nil {
+		slog.Debug("discord: join new thread failed", "thread", thread.ID, "error", err)
+	}
+	rc := replyContext{channelID: thread.ID, messageID: m.ID, threadID: thread.ID}
+	return buildThreadSessionKey(thread.ID), rc, nil
 }
 
 // RegisterCommands registers bot commands with Discord for the slash command menu.
@@ -197,6 +340,15 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 
 		sessionKey := p.makeSessionKey(m.ChannelID, m.Author.ID)
 		rctx := replyContext{channelID: m.ChannelID, messageID: m.ID}
+		if p.threadIsolation && m.GuildID != "" {
+			threadSessionKey, threadCtx, err := resolveThreadReplyContext(m, p.botID, sessionThreadOps{session: p.session})
+			if err != nil {
+				slog.Warn("discord: thread isolation setup failed, falling back", "message", m.ID, "channel", m.ChannelID, "error", err)
+			} else {
+				sessionKey = threadSessionKey
+				rctx = threadCtx
+			}
+		}
 
 		var images []core.ImageAttachment
 		var audio *core.AudioAttachment
@@ -291,7 +443,7 @@ func (p *Platform) handleInteraction(s *discordgo.Session, i *discordgo.Interact
 
 	slog.Debug("discord: slash command", "user", userName, "command", cmdText, "channel", channelID)
 
-	sessionKey := p.makeSessionKey(channelID, userID)
+	sessionKey := resolveSessionKeyForChannel(channelID, userID, p.shareSessionInChannel, p.threadIsolation, sessionThreadOps{session: p.session})
 	ictx := &interactionReplyCtx{
 		interaction: i.Interaction,
 		channelID:   channelID,
@@ -392,8 +544,13 @@ func (p *Platform) sendInteraction(ictx *interactionReplyCtx, content string) er
 func (p *Platform) sendChannelReply(rc replyContext, content string) error {
 	chunks := core.SplitMessageCodeFenceAware(content, maxDiscordLen)
 	for _, chunk := range chunks {
-		ref := &discordgo.MessageReference{MessageID: rc.messageID}
-		_, err := p.session.ChannelMessageSendReply(rc.channelID, chunk, ref)
+		var err error
+		if rc.useThreadChannel() {
+			_, err = p.session.ChannelMessageSend(rc.targetChannelID(), chunk)
+		} else {
+			ref := &discordgo.MessageReference{MessageID: rc.messageID}
+			_, err = p.session.ChannelMessageSendReply(rc.channelID, chunk, ref)
+		}
 		if err != nil {
 			return fmt.Errorf("discord: send: %w", err)
 		}
@@ -404,7 +561,7 @@ func (p *Platform) sendChannelReply(rc replyContext, content string) error {
 func (p *Platform) sendChannel(rc replyContext, content string) error {
 	chunks := core.SplitMessageCodeFenceAware(content, maxDiscordLen)
 	for _, chunk := range chunks {
-		_, err := p.session.ChannelMessageSend(rc.channelID, chunk)
+		_, err := p.session.ChannelMessageSend(rc.targetChannelID(), chunk)
 		if err != nil {
 			return fmt.Errorf("discord: send: %w", err)
 		}
@@ -413,12 +570,16 @@ func (p *Platform) sendChannel(rc replyContext, content string) error {
 }
 
 func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
-	// discord:{channelID}:{userID}
+	// discord:{channelID}:{userID} or discord:{threadID}
 	parts := strings.SplitN(sessionKey, ":", 3)
 	if len(parts) < 2 || parts[0] != "discord" {
 		return nil, fmt.Errorf("discord: invalid session key %q", sessionKey)
 	}
-	return replyContext{channelID: parts[1]}, nil
+	rc := replyContext{channelID: parts[1]}
+	if len(parts) == 2 {
+		rc.threadID = parts[1]
+	}
+	return rc, nil
 }
 
 // discordPreviewHandle stores the IDs needed to edit or delete a preview message.
@@ -432,7 +593,7 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 	var channelID string
 	switch rc := rctx.(type) {
 	case replyContext:
-		channelID = rc.channelID
+		channelID = rc.targetChannelID()
 	case *interactionReplyCtx:
 		channelID = rc.channelID
 	default:
@@ -483,6 +644,9 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 		return func() {}
 	}
 	channelID := rc.channelID
+	if rc.targetChannelID() != "" {
+		channelID = rc.targetChannelID()
+	}
 	if channelID == "" {
 		return func() {}
 	}

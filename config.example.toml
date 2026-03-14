@@ -552,6 +552,8 @@ app_secret = "your-feishu-app-secret"
 #                           # 设为 true 时，群聊中无需 @机器人 也会响应所有消息（默认 false）
 # share_session_in_channel = false  # If true, all users in a group share one agent session
 #                                   # 设为 true 时，群聊内所有用户共享同一个 Agent 会话
+# thread_isolation = false  # If true, group messages use Feishu reply threads as session boundaries (one thread/root = one agent session)
+#                           # 设为 true 时，群聊按飞书话题/根消息隔离会话（一个 thread/root 对应一个 Agent 会话）
 # reply_in_thread = false  # If true, all responses are threaded to the original message (helps trace which question triggered which reply)
 #                          # 设为 true 时，所有回复都会引用原消息（方便追踪每条回复对应哪条提问）
 
@@ -634,6 +636,8 @@ app_secret = "your-feishu-app-secret"
 #                   # 可选：设置后 slash 命令秒级生效（仅该服务器）
 # group_reply_all = false  # If true, respond to ALL guild messages without @mention / 设为 true 群聊无需 @ 也响应
 # share_session_in_channel = false  # If true, all users in a channel share one agent session / 频道共享会话
+# thread_isolation = false  # If true, cc-connect creates/uses Discord threads as session boundaries when the channel supports threads
+#                           # 设为 true 时，cc-connect 会在支持 thread 的 Discord 频道内按 thread 隔离会话
 
 # LINE (uncomment to enable / 取消注释以启用)
 # 1. Create a channel at https://developers.line.biz/console/ (Messaging API)

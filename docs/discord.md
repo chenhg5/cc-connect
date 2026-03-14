@@ -109,9 +109,11 @@ type = "discord"
 
 [projects.platforms.options]
 token = "MTk4NjIyNDgzNDcOTY3NDUxMg.G8vKqh.xxx..."
+# thread_isolation = true  # Optional: isolate each agent session in its own Discord thread
 ```
 
 > cc-connect automatically configures the required Intents (MESSAGE_CONTENT, GUILD_MESSAGES, DIRECT_MESSAGES).
+> With `thread_isolation = true`, cc-connect creates or reuses a Discord thread for each session and routes follow-up messages by thread channel ID.
 
 ---
 
@@ -134,6 +136,7 @@ Under "Bot Permissions", check:
 |------------|---------|
 | Read Messages/View Channels | Read messages |
 | Send Messages | Send messages |
+| Create Public Threads | Create a new thread for a fresh agent session |
 | Send Messages in Threads | Send messages in threads |
 | Read Message History | Read message history |
 
