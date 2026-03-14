@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	"github.com/chenhg5/cc-connect/core"
 
@@ -444,8 +445,8 @@ func (p *Platform) isDirectedAtBot(msg *tgbotapi.Message) bool {
 	// Non-command: check @mention
 	if msg.Entities != nil {
 		for _, e := range msg.Entities {
-			if e.Type == "mention" && e.Offset+e.Length <= len(msg.Text) {
-				mention := msg.Text[e.Offset : e.Offset+e.Length]
+			if e.Type == "mention" {
+				mention := extractEntityText(msg.Text, e.Offset, e.Length)
 				slog.Debug("telegram: checking mention", "bot", botName, "mention", mention, "match", strings.EqualFold(mention, "@"+botName))
 				if strings.EqualFold(mention, "@"+botName) {
 					return true
@@ -465,8 +466,8 @@ func (p *Platform) isDirectedAtBot(msg *tgbotapi.Message) bool {
 	// Also check caption entities (for photos with captions)
 	if msg.CaptionEntities != nil {
 		for _, e := range msg.CaptionEntities {
-			if e.Type == "mention" && e.Offset+e.Length <= len(msg.Caption) {
-				mention := msg.Caption[e.Offset : e.Offset+e.Length]
+			if e.Type == "mention" {
+				mention := extractEntityText(msg.Caption, e.Offset, e.Length)
 				if strings.EqualFold(mention, "@"+botName) {
 					return true
 				}
@@ -756,6 +757,19 @@ func (p *Platform) RegisterCommands(commands []core.BotCommandInfo) error {
 
 	slog.Info("telegram: registered bot commands", "count", len(tgCommands))
 	return nil
+}
+
+// extractEntityText extracts a substring from text using Telegram's UTF-16 code unit
+// offset and length. Telegram Bot API entity offsets are measured in UTF-16 code units,
+// not bytes or Unicode code points, so direct byte slicing produces wrong results
+// when the text contains non-ASCII characters (e.g. Chinese, emoji).
+func extractEntityText(text string, offsetUTF16, lengthUTF16 int) string {
+	encoded := utf16.Encode([]rune(text))
+	endUTF16 := offsetUTF16 + lengthUTF16
+	if offsetUTF16 < 0 || endUTF16 > len(encoded) {
+		return ""
+	}
+	return string(utf16.Decode(encoded[offsetUTF16:endUTF16]))
 }
 
 // isValidTelegramCommand validates if a command string meets Telegram's requirements.
