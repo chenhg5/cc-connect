@@ -4353,11 +4353,6 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 	case "/switch":
 		return e.renderListCardSafe(sessionKey, 1)
 	case "/delete-mode":
-		if prefix == "act" {
-			if fields := strings.Fields(args); len(fields) > 0 && fields[0] == "toggle" {
-				return nil
-			}
-		}
 		if strings.HasPrefix(args, "cancel") {
 			return e.renderListCardSafe(sessionKey, 1)
 		}
@@ -4684,7 +4679,7 @@ func (e *Engine) renderDeleteModeSelectCard(sessionKey string, sessions *Session
 			action,
 		)
 	}
-	cb.Note(e.i18n.Tf(MsgDeleteModeSelectedCount, selectedCount))
+	cb.TaggedNote("delete-mode-selected-count", e.i18n.Tf(MsgDeleteModeSelectedCount, selectedCount))
 	if dm.hint != "" {
 		cb.Note(dm.hint)
 	}
