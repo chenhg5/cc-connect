@@ -480,6 +480,24 @@ func main() {
 
 	heartbeatSched.Start()
 
+	// Start webhook server if enabled
+	var webhookSrv *core.WebhookServer
+	if cfg.Webhook.Enabled != nil && *cfg.Webhook.Enabled {
+		port := cfg.Webhook.Port
+		if port <= 0 {
+			port = 9111
+		}
+		path := cfg.Webhook.Path
+		if path == "" {
+			path = "/hook"
+		}
+		webhookSrv = core.NewWebhookServer(port, cfg.Webhook.Token, path)
+		for i, e := range engines {
+			webhookSrv.RegisterEngine(cfg.Projects[i].Name, e)
+		}
+		webhookSrv.Start()
+	}
+
 	// Start internal API server for CLI send
 	apiSrv, err := core.NewAPIServer(cfg.DataDir)
 	if err != nil {
@@ -519,6 +537,9 @@ func main() {
 	}
 
 	slog.Info("shutting down...")
+	if webhookSrv != nil {
+		webhookSrv.Stop()
+	}
 	heartbeatSched.Stop()
 	if cronSched != nil {
 		cronSched.Stop()

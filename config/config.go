@@ -30,12 +30,21 @@ type Config struct {
 	RateLimit     RateLimitConfig     `toml:"rate_limit"`     // per-session rate limiting
 	Quiet            *bool               `toml:"quiet,omitempty"`              // global default for quiet mode; project-level overrides this
 	Cron             CronConfig          `toml:"cron"`
+	Webhook          WebhookConfig       `toml:"webhook"`
 	IdleTimeoutMins  *int                `toml:"idle_timeout_mins,omitempty"`  // max minutes between agent events; 0 = no timeout; default 120
 }
 
 // CronConfig controls cron job behavior.
 type CronConfig struct {
 	Silent *bool `toml:"silent"` // suppress cron start notification; default false
+}
+
+// WebhookConfig controls the external HTTP webhook endpoint.
+type WebhookConfig struct {
+	Enabled *bool  `toml:"enabled"`           // default false
+	Port    int    `toml:"port,omitempty"`     // listen port; default 9111
+	Token   string `toml:"token,omitempty"`    // shared secret for authentication; empty = no auth
+	Path    string `toml:"path,omitempty"`     // URL path prefix; default "/hook"
 }
 
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
