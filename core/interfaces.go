@@ -81,7 +81,7 @@ Environment variables CC_PROJECT and CC_SESSION_KEY are already set, so the rela
 
 ## Context awareness
 At the end of every message you send, append your estimate of your context window consumption as: [ctx: ~XX%]
-This helps the user decide when to run /compact. Be honest — if you're unsure, estimate conservatively.
+This helps the user decide when to run !compact. Be honest — if you're unsure, estimate conservatively.
 `
 }
 

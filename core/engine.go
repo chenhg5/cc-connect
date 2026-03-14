@@ -214,13 +214,16 @@ type deleteModeState struct {
 	result      string
 }
 
+// modelContextWindow is the assumed context window size for percentage calculations.
+const modelContextWindow = 200_000
+
 // contextIndicator returns a short suffix like "\n[ctx: 42%]" showing how much
-// of the 200k context window has been consumed, or "" if unknown.
+// of the context window has been consumed, or "" if unknown.
 func contextIndicator(inputTokens int) string {
 	if inputTokens <= 0 {
 		return ""
 	}
-	pct := inputTokens * 100 / 200_000
+	pct := inputTokens * 100 / modelContextWindow
 	return fmt.Sprintf("\n[ctx: %d%%]", pct)
 }
 
@@ -317,7 +320,7 @@ func (e *Engine) runIdleReaper() {
 						slog.Info("session idle-reaped",
 							"session_key", key,
 							"workspace", ws,
-							"last_ctx_pct", tokenCount*100/200_000,
+							"last_ctx_pct", tokenCount*100/modelContextWindow,
 							"input_tokens", tokenCount,
 						)
 						if state.agentSession != nil {
@@ -1670,7 +1673,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 			// Dual-track context logging: compare SDK vs self-reported
 			if event.InputTokens > 0 {
-				sdkPct := event.InputTokens * 100 / 200_000
+				sdkPct := event.InputTokens * 100 / modelContextWindow
 				selfPct := parseSelfReportedCtx(fullResponse)
 				slog.Info("context_usage",
 					"session_key", sessionKey,
@@ -1685,10 +1688,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			fullResponse = ctxSelfReportRe.ReplaceAllString(fullResponse, "")
 			fullResponse = strings.TrimRight(fullResponse, "\n ")
 
-			// Append context indicator
-			fullResponse += contextIndicator(event.InputTokens)
-
+			// Save history WITHOUT the context indicator (avoid polluting stored history)
 			session.AddHistory("assistant", fullResponse)
+
+			// Append context indicator for display only
+			fullResponse += contextIndicator(event.InputTokens)
 			e.sessions.Save()
 
 			turnDuration := time.Since(turnStart)
