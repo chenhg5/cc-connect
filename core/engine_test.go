@@ -2441,3 +2441,77 @@ func TestStaleGoroutineCleanup_RaceSimulation(t *testing.T) {
 		t.Fatal("replacement agent session was killed by stale cleanup")
 	}
 }
+
+func TestSplitMessageUTF8Safety(t *testing.T) {
+	t.Run("ASCII short", func(t *testing.T) {
+		result := splitMessage("hello", 10)
+		if len(result) != 1 || result[0] != "hello" {
+			t.Fatalf("expected single chunk 'hello', got %v", result)
+		}
+	})
+
+	t.Run("CJK characters split at rune boundary", func(t *testing.T) {
+		// 10 CJK characters (each 3 bytes in UTF-8), total 30 bytes
+		input := "你好世界测试一二三四"
+		if len([]rune(input)) != 10 {
+			t.Fatalf("expected 10 runes, got %d", len([]rune(input)))
+		}
+		// maxLen=5 runes should split into 2 chunks of 5 runes each
+		chunks := splitMessage(input, 5)
+		if len(chunks) != 2 {
+			t.Fatalf("expected 2 chunks, got %d: %v", len(chunks), chunks)
+		}
+		if chunks[0] != "你好世界测" {
+			t.Errorf("chunk[0] = %q, want %q", chunks[0], "你好世界测")
+		}
+		if chunks[1] != "试一二三四" {
+			t.Errorf("chunk[1] = %q, want %q", chunks[1], "试一二三四")
+		}
+	})
+
+	t.Run("emoji split at rune boundary", func(t *testing.T) {
+		// Emoji: 4 bytes each in UTF-8
+		input := "😀😁😂🤣😄😅"
+		runes := []rune(input)
+		if len(runes) != 6 {
+			t.Fatalf("expected 6 runes, got %d", len(runes))
+		}
+		chunks := splitMessage(input, 3)
+		if len(chunks) != 2 {
+			t.Fatalf("expected 2 chunks, got %d: %v", len(chunks), chunks)
+		}
+		if chunks[0] != "😀😁😂" {
+			t.Errorf("chunk[0] = %q, want %q", chunks[0], "😀😁😂")
+		}
+		if chunks[1] != "🤣😄😅" {
+			t.Errorf("chunk[1] = %q, want %q", chunks[1], "🤣😄😅")
+		}
+	})
+
+	t.Run("prefers newline split", func(t *testing.T) {
+		input := "abcde\nfghij"
+		chunks := splitMessage(input, 8)
+		if len(chunks) != 2 {
+			t.Fatalf("expected 2 chunks, got %d: %v", len(chunks), chunks)
+		}
+		// Should split at newline (rune index 5), which is >= 8/2=4
+		if chunks[0] != "abcde\n" {
+			t.Errorf("chunk[0] = %q, want %q", chunks[0], "abcde\n")
+		}
+		if chunks[1] != "fghij" {
+			t.Errorf("chunk[1] = %q, want %q", chunks[1], "fghij")
+		}
+	})
+
+	t.Run("CJK with newline split", func(t *testing.T) {
+		input := "你好\n世界测试一二三四"
+		chunks := splitMessage(input, 5)
+		if len(chunks) < 2 {
+			t.Fatalf("expected at least 2 chunks, got %d: %v", len(chunks), chunks)
+		}
+		// First chunk should split at the newline
+		if chunks[0] != "你好\n" {
+			t.Errorf("chunk[0] = %q, want %q", chunks[0], "你好\n")
+		}
+	})
+}

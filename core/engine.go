@@ -6476,28 +6476,33 @@ func truncateIf(s string, maxLen int) string {
 }
 
 func splitMessage(text string, maxLen int) []string {
-	if len(text) <= maxLen {
+	runes := []rune(text)
+	if len(runes) <= maxLen {
 		return []string{text}
 	}
 	var chunks []string
 
-	for len(text) > 0 {
-		if len(text) <= maxLen {
-			chunks = append(chunks, text)
+	for len(runes) > 0 {
+		if len(runes) <= maxLen {
+			chunks = append(chunks, string(runes))
 			break
 		}
 
 		end := maxLen
 
-		// Try to split at newline boundary
-		if idx := strings.LastIndex(text[:end], "\n"); idx > 0 && idx >= end/2 {
-			end = idx + 1
+		// Try to split at newline boundary within the rune window.
+		// Convert the candidate chunk back to a string for newline search.
+		candidate := string(runes[:end])
+		if idx := strings.LastIndex(candidate, "\n"); idx > 0 {
+			// idx is a byte offset within candidate; convert to rune offset.
+			runeIdx := utf8.RuneCountInString(candidate[:idx])
+			if runeIdx >= end/2 {
+				end = runeIdx + 1
+			}
 		}
 
-		chunk := text[:end]
-		text = text[end:]
-
-		chunks = append(chunks, chunk)
+		chunks = append(chunks, string(runes[:end]))
+		runes = runes[end:]
 	}
 	return chunks
 }
