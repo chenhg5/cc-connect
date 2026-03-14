@@ -159,6 +159,14 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 			return
 		}
 	}
+
+	// Emit EventResult after all steps are done and the process has finished writing.
+	sid := s.CurrentSessionID()
+	evt := core.Event{Type: core.EventResult, SessionID: sid, Done: true}
+	select {
+	case s.events <- evt:
+	case <-s.ctx.Done():
+	}
 }
 
 // OpenCode NDJSON event structure:
@@ -179,8 +187,11 @@ func (s *opencodeSession) handleEvent(raw map[string]any) {
 		s.handleStepStart(raw)
 	case "step_finish":
 		s.handleStepFinish(raw)
+	case "error":
+		s.handleError(raw)
 	default:
-		slog.Debug("opencodeSession: unhandled event", "type", eventType)
+		b, _ := json.Marshal(raw)
+		slog.Debug("opencodeSession: unhandled event", "type", eventType, "raw", string(b))
 	}
 }
 
@@ -208,40 +219,32 @@ func (s *opencodeSession) handleToolUse(raw map[string]any) {
 
 	toolName, _ := part["tool"].(string)
 
-	// Check state for status
 	state, _ := part["state"].(map[string]any)
 	status := ""
 	if state != nil {
 		status, _ = state["status"].(string)
 	}
 
+	// Extract tool input summary for display
+	input := extractToolInput(state)
+
 	if status == "completed" {
-		// Tool result
-		output := ""
-		if state != nil {
-			output, _ = state["output"].(string)
-		}
-		evt := core.Event{Type: core.EventToolResult, ToolName: toolName, Content: truncate(output, 500)}
+		// OpenCode bundles call + result in one event; emit both for UI.
+		useEvt := core.Event{Type: core.EventToolUse, ToolName: toolName, ToolInput: input}
 		select {
-		case s.events <- evt:
+		case s.events <- useEvt:
+		case <-s.ctx.Done():
+			return
+		}
+
+		output, _ := state["output"].(string)
+		resultEvt := core.Event{Type: core.EventToolResult, ToolName: toolName, Content: truncate(output, 500)}
+		select {
+		case s.events <- resultEvt:
 		case <-s.ctx.Done():
 			return
 		}
 	} else {
-		// Tool use (running or starting)
-		input := ""
-		if state != nil {
-			inputVal, _ := state["input"].(string)
-			if inputVal != "" {
-				input = inputVal
-			} else {
-				// Try to marshal input as JSON summary
-				if inputMap, ok := state["input"].(map[string]any); ok {
-					b, _ := json.Marshal(inputMap)
-					input = truncate(string(b), 200)
-				}
-			}
-		}
 		evt := core.Event{Type: core.EventToolUse, ToolName: toolName, ToolInput: input}
 		select {
 		case s.events <- evt:
@@ -249,6 +252,31 @@ func (s *opencodeSession) handleToolUse(raw map[string]any) {
 			return
 		}
 	}
+}
+
+func extractToolInput(state map[string]any) string {
+	if state == nil {
+		return ""
+	}
+	// Prefer title as a concise description (e.g. "List files in current directory")
+	if title, ok := state["title"].(string); ok && title != "" {
+		return title
+	}
+	switch input := state["input"].(type) {
+	case string:
+		return input
+	case map[string]any:
+		// Use "description" or "command" fields if available
+		if desc, ok := input["description"].(string); ok && desc != "" {
+			return desc
+		}
+		if cmd, ok := input["command"].(string); ok && cmd != "" {
+			return cmd
+		}
+		b, _ := json.Marshal(input)
+		return truncate(string(b), 200)
+	}
+	return ""
 }
 
 func (s *opencodeSession) handleReasoning(raw map[string]any) {
@@ -267,6 +295,58 @@ func (s *opencodeSession) handleReasoning(raw map[string]any) {
 	}
 }
 
+func (s *opencodeSession) handleError(raw map[string]any) {
+	errMsg := extractErrorMessage(raw)
+	slog.Error("opencodeSession: agent error", "error", errMsg)
+	evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg)}
+	select {
+	case s.events <- evt:
+	case <-s.ctx.Done():
+		return
+	}
+}
+
+// extractErrorMessage tries to pull a human-readable message from various
+// OpenCode error JSON shapes.
+func extractErrorMessage(raw map[string]any) string {
+	// Shape: {"error": {"data": {"message": "..."}, "name": "..."}}
+	if errObj, ok := raw["error"].(map[string]any); ok {
+		if data, ok := errObj["data"].(map[string]any); ok {
+			if msg, ok := data["message"].(string); ok && msg != "" {
+				name, _ := errObj["name"].(string)
+				if name != "" {
+					return name + ": " + msg
+				}
+				return msg
+			}
+		}
+		if msg, ok := errObj["message"].(string); ok && msg != "" {
+			return msg
+		}
+		if name, ok := errObj["name"].(string); ok && name != "" {
+			return name
+		}
+	}
+	// Shape: {"error": "string message"}
+	if errStr, ok := raw["error"].(string); ok && errStr != "" {
+		return errStr
+	}
+	// Shape: {"part": {"error": "...", "message": "..."}}
+	if part, ok := raw["part"].(map[string]any); ok {
+		if msg, ok := part["error"].(string); ok && msg != "" {
+			return msg
+		}
+		if msg, ok := part["message"].(string); ok && msg != "" {
+			return msg
+		}
+	}
+	if msg, ok := raw["message"].(string); ok && msg != "" {
+		return msg
+	}
+	b, _ := json.Marshal(raw)
+	return string(b)
+}
+
 func (s *opencodeSession) handleStepStart(raw map[string]any) {
 	part, _ := raw["part"].(map[string]any)
 	if part == nil {
@@ -279,14 +359,10 @@ func (s *opencodeSession) handleStepStart(raw map[string]any) {
 	}
 }
 
-func (s *opencodeSession) handleStepFinish(_ map[string]any) {
-	sid := s.CurrentSessionID()
-	evt := core.Event{Type: core.EventResult, SessionID: sid, Done: true}
-	select {
-	case s.events <- evt:
-	case <-s.ctx.Done():
-		return
-	}
+func (s *opencodeSession) handleStepFinish(raw map[string]any) {
+	part, _ := raw["part"].(map[string]any)
+	reason, _ := part["reason"].(string)
+	slog.Debug("opencodeSession: step finished", "reason", reason, "session_id", s.CurrentSessionID())
 }
 
 // RespondPermission is a no-op — OpenCode handles permissions internally.

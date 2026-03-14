@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -233,7 +234,8 @@ func (a *Agent) providerEnvLocked() []string {
 type opencodeSessionEntry struct {
 	ID      string `json:"id"`
 	Title   string `json:"title"`
-	Updated string `json:"updated"`
+	Updated int64  `json:"updated"` // Unix timestamp in milliseconds
+	Created int64  `json:"created"`
 }
 
 func listOpencodeSessions(cmd, workDir string) ([]core.AgentSessionInfo, error) {
@@ -250,13 +252,63 @@ func listOpencodeSessions(cmd, workDir string) ([]core.AgentSessionInfo, error) 
 		return nil, fmt.Errorf("opencode: parse session list: %w", err)
 	}
 
+	msgCounts := querySessionMessageCounts()
+
 	var sessions []core.AgentSessionInfo
 	for _, e := range entries {
 		sessions = append(sessions, core.AgentSessionInfo{
-			ID:      e.ID,
-			Summary: e.Title,
+			ID:           e.ID,
+			Summary:      e.Title,
+			MessageCount: msgCounts[e.ID],
+			ModifiedAt:   time.UnixMilli(e.Updated),
 		})
 	}
 
 	return sessions, nil
+}
+
+// querySessionMessageCounts uses the sqlite3 CLI to read message counts from
+// OpenCode's local database. Returns an empty map on any failure.
+func querySessionMessageCounts() map[string]int {
+	dbPath := opencodeDBPath()
+	if dbPath == "" {
+		return nil
+	}
+	if _, err := os.Stat(dbPath); err != nil {
+		return nil
+	}
+	sqlite3, err := exec.LookPath("sqlite3")
+	if err != nil {
+		return nil
+	}
+
+	out, err := exec.Command(sqlite3, dbPath,
+		"SELECT session_id, COUNT(*) FROM message GROUP BY session_id").Output()
+	if err != nil {
+		return nil
+	}
+
+	counts := make(map[string]int)
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		parts := strings.SplitN(line, "|", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		var n int
+		if _, err := fmt.Sscanf(parts[1], "%d", &n); err == nil {
+			counts[parts[0]] = n
+		}
+	}
+	return counts
+}
+
+func opencodeDBPath() string {
+	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
+		return filepath.Join(xdg, "opencode", "opencode.db")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".local", "share", "opencode", "opencode.db")
 }
