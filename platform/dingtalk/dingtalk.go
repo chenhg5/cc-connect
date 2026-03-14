@@ -299,8 +299,9 @@ func (p *Platform) getAccessToken() (string, error) {
 		return p.accessToken, nil
 	}
 
-	// Request new access token
-	url := fmt.Sprintf("https://api.dingtalk.com/v1.0/oauth2/accessToken?appKey=%s&appSecret=%s",
+	// Request new access token using DingTalk's legacy API (oapi.dingtalk.com/gettoken)
+	// This is the stable, widely-used endpoint for enterprise internal apps
+	url := fmt.Sprintf("https://oapi.dingtalk.com/gettoken?appkey=%s&appsecret=%s",
 		p.clientID, p.clientSecret)
 
 	resp, err := p.httpClient.Get(url)
@@ -310,24 +311,31 @@ func (p *Platform) getAccessToken() (string, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("api returned status %d", resp.StatusCode)
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("api returned status %d: %s", resp.StatusCode, body)
 	}
 
 	var tokenResp struct {
-		AccessToken string `json:"accessToken"`
-		ExpireIn    int    `json:"expireIn"`
+		AccessToken string `json:"access_token"`
+		ExpiresIn   int    `json:"expires_in"`
+		ErrCode     int    `json:"errcode"`
+		ErrMsg      string `json:"errmsg"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
 		return "", fmt.Errorf("decode response: %w", err)
 	}
 
+	if tokenResp.ErrCode != 0 {
+		return "", fmt.Errorf("api error %d: %s", tokenResp.ErrCode, tokenResp.ErrMsg)
+	}
+
 	if tokenResp.AccessToken == "" {
-		return "", fmt.Errorf("empty accessToken in response")
+		return "", fmt.Errorf("empty access_token in response")
 	}
 
 	// Cache token with 5 minutes buffer before expiry
 	p.accessToken = tokenResp.AccessToken
-	expiry := tokenResp.ExpireIn
+	expiry := tokenResp.ExpiresIn
 	if expiry > 300 {
 		expiry -= 300 // 5 minute buffer
 	}
