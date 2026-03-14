@@ -35,7 +35,7 @@ func init() {
 type Agent struct {
 	workDir      string
 	model        string
-	mode         string // "default" | "acceptEdits" | "plan" | "bypassPermissions"
+	mode         string // "default" | "acceptEdits" | "plan" | "bypassPermissions" | "dontAsk"
 	allowedTools []string
 	providers    []core.ProviderConfig
 	activeIdx    int // -1 = no provider set
@@ -96,6 +96,8 @@ func normalizePermissionMode(raw string) string {
 	case "bypasspermissions", "bypass-permissions", "bypass_permissions",
 		"yolo", "auto":
 		return "bypassPermissions"
+	case "dontask", "dont-ask", "dont_ask":
+		return "dontAsk"
 	default:
 		return "default"
 	}
@@ -456,6 +458,7 @@ func (a *Agent) PermissionModes() []core.PermissionModeInfo {
 		{Key: "acceptEdits", Name: "Accept Edits", NameZh: "接受编辑", Desc: "Auto-approve file edits, ask for others", DescZh: "自动允许文件编辑，其他需确认"},
 		{Key: "plan", Name: "Plan Mode", NameZh: "计划模式", Desc: "Plan only, no execution until approved", DescZh: "只做规划不执行，审批后再执行"},
 		{Key: "bypassPermissions", Name: "YOLO", NameZh: "YOLO 模式", Desc: "Auto-approve everything", DescZh: "全部自动通过"},
+		{Key: "dontAsk", Name: "Don't Ask", NameZh: "静默拒绝", Desc: "Auto-deny tools unless pre-approved via allowed_tools or settings.json allow rules", DescZh: "未预授权的工具自动拒绝，不弹确认"},
 	}
 }
 

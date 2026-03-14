@@ -453,6 +453,7 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "bypassPermission
 # - "acceptEdits" (edit): File edit tools auto-approved; other tools still ask. / 文件编辑自动通过，其他仍需确认。
 # - "plan":               Claude only plans — no execution until you approve. / 只做规划不执行，审批后再执行。
 # - "bypassPermissions" (yolo): All tool calls auto-approved. Use with caution. / 全部自动通过，请谨慎使用。
+# - "dontAsk" (dont-ask): Auto-deny tools unless pre-approved via allowed_tools or settings allow rules. / 未预授权的工具自动拒绝，安全推荐。
 #
 # When using IM platforms, you can reply "允许"/"allow" to grant permission.
 # 在 IM 平台中，可回复"允许"或"allow"来授权操作。
