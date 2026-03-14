@@ -390,6 +390,13 @@ func main() {
 				} else {
 					slog.Warn("tts: minimax provider enabled but api_key is empty")
 				}
+			case "espeak":
+				voice := cfg.TTS.Voice
+				if voice == "" {
+					voice = "zh" // default to Chinese
+				}
+				ttsCfg.TTS = core.NewEspeakTTS("", voice, nil)
+				ttsCfg.Provider = "espeak"
 			default: // "openai" or unspecified
 				apiKey := cfg.TTS.OpenAI.APIKey
 				baseURL := cfg.TTS.OpenAI.BaseURL

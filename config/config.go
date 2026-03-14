@@ -92,8 +92,8 @@ type SpeechConfig struct {
 // TTSConfig configures text-to-speech output (mirrors SpeechConfig style).
 type TTSConfig struct {
 	Enabled     bool   `toml:"enabled"`
-	Provider    string `toml:"provider"`     // "qwen" | "openai" | "minimax"
-	Voice       string `toml:"voice"`        // default voice name
+	Provider    string `toml:"provider"`     // "qwen" | "openai" | "minimax" | "espeak"
+	Voice       string `toml:"voice"`        // default voice name (for espeak: "zh", "en", "zh+f3", etc.)
 	TTSMode     string `toml:"tts_mode"`     // "voice_only" (default) | "always"
 	MaxTextLen  int    `toml:"max_text_len"` // max rune count before skipping TTS; 0 = no limit
 	OpenAI      struct {

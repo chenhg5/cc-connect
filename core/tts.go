@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -372,4 +373,66 @@ func (m *MiniMaxTTS) Synthesize(ctx context.Context, text string, opts TTSSynthe
 		return nil, "", fmt.Errorf("minimax tts: no audio data received")
 	}
 	return audioBuf.Bytes(), "mp3", nil
+}
+
+// ──────────────────────────────────────────────────────────────
+// EspeakTTS — Local eSpeak text-to-speech implementation
+// ──────────────────────────────────────────────────────────────
+
+// EspeakTTS implements TextToSpeech using the local espeak command.
+type EspeakTTS struct {
+	Path   string // path to espeak executable (empty = "espeak")
+	Voice  string // default voice (e.g. "zh", "en", "zh+f3")
+	Client *http.Client
+}
+
+// NewEspeakTTS creates a new EspeakTTS instance.
+func NewEspeakTTS(path, voice string, client *http.Client) *EspeakTTS {
+	if path == "" {
+		path = "espeak"
+	}
+	if voice == "" {
+		voice = "zh" // default to Chinese
+	}
+	if client == nil {
+		client = &http.Client{Timeout: 60 * time.Second}
+	}
+	return &EspeakTTS{
+		Path:   path,
+		Voice:  voice,
+		Client: client,
+	}
+}
+
+// Synthesize uses espeak to convert text to WAV audio bytes.
+func (e *EspeakTTS) Synthesize(ctx context.Context, text string, opts TTSSynthesisOpts) ([]byte, string, error) {
+	voice := opts.Voice
+	if voice == "" {
+		voice = e.Voice
+	}
+
+	// Build espeak command with speed option
+	args := []string{
+		"-v", voice,
+		"-w", "/dev/stdout", // write to stdout
+	}
+
+	// Add speed option if specified
+	if opts.Speed > 0 {
+		// espeak speed is in words per minute, default 160
+		// Convert speed multiplier (0.5-2.0) to wpm
+		wpm := int(160 * opts.Speed)
+		args = append(args, "-s", fmt.Sprintf("%d", wpm))
+	}
+
+	args = append(args, text)
+
+	// Execute espeak command
+	cmd := exec.Command("sh", "-c", fmt.Sprintf("%s '%s'", e.Path, strings.ReplaceAll(text, "'", "'\\''")))
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, "", fmt.Errorf("espeak: %w: %s", err, output)
+	}
+
+	return output, "wav", nil
 }
