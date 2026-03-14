@@ -1282,6 +1282,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 }
 
 // getOrCreateWorkspaceAgent returns (or creates) a per-workspace agent and session manager.
+// workspace must be a normalized path (from resolveWorkspace or normalizeWorkspacePath).
 func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionManager, error) {
 	ws := e.workspacePool.GetOrCreate(workspace)
 	ws.mu.Lock()
@@ -2070,7 +2071,7 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 		if resolver, ok := p.(ChannelNameResolver); ok {
 			channelName, _ = resolver.ResolveChannelName(channelID)
 		}
-		e.workspaceBindings.Bind(projectKey, channelID, channelName, wsPath)
+		e.workspaceBindings.Bind(projectKey, channelID, channelName, normalizeWorkspacePath(wsPath))
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsBindSuccess, wsName))
 
 	case "init":
@@ -2092,7 +2093,7 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 			if resolver, ok := p.(ChannelNameResolver); ok {
 				channelName, _ = resolver.ResolveChannelName(channelID)
 			}
-			e.workspaceBindings.Bind(projectKey, channelID, channelName, cloneTo)
+			e.workspaceBindings.Bind(projectKey, channelID, channelName, normalizeWorkspacePath(cloneTo))
 			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsCloneSuccess, cloneTo))
 			return
 		}
@@ -2108,7 +2109,7 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 		if resolver, ok := p.(ChannelNameResolver); ok {
 			channelName, _ = resolver.ResolveChannelName(channelID)
 		}
-		e.workspaceBindings.Bind(projectKey, channelID, channelName, cloneTo)
+		e.workspaceBindings.Bind(projectKey, channelID, channelName, normalizeWorkspacePath(cloneTo))
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsCloneSuccess, cloneTo))
 
 	case "unbind":
@@ -7366,7 +7367,7 @@ func (e *Engine) resolveWorkspace(p Platform, channelID string) (string, string,
 			e.workspaceBindings.Unbind(projectKey, channelID)
 			return "", b.ChannelName, nil
 		}
-		return b.Workspace, b.ChannelName, nil
+		return normalizeWorkspacePath(b.Workspace), b.ChannelName, nil
 	}
 
 	// Step 2: Resolve channel name for convention match
@@ -7388,10 +7389,11 @@ func (e *Engine) resolveWorkspace(p Platform, channelID string) (string, string,
 	candidate := filepath.Join(e.baseDir, channelName)
 	if info, err := os.Stat(candidate); err == nil && info.IsDir() {
 		// Auto-bind
-		e.workspaceBindings.Bind(projectKey, channelID, channelName, candidate)
+		normalized := normalizeWorkspacePath(candidate)
+		e.workspaceBindings.Bind(projectKey, channelID, channelName, normalized)
 		slog.Info("workspace auto-bound by convention",
-			"channel", channelName, "workspace", candidate)
-		return candidate, channelName, nil
+			"channel", channelName, "workspace", normalized)
+		return normalized, channelName, nil
 	}
 
 	return "", channelName, nil
@@ -7460,7 +7462,7 @@ func (e *Engine) handleWorkspaceInitFlow(p Platform, msg *Message, channelID, ch
 		}
 
 		projectKey := "project:" + e.name
-		e.workspaceBindings.Bind(projectKey, channelID, flow.channelName, flow.cloneTo)
+		e.workspaceBindings.Bind(projectKey, channelID, flow.channelName, normalizeWorkspacePath(flow.cloneTo))
 
 		e.initFlowsMu.Lock()
 		delete(e.initFlows, channelID)
