@@ -1229,6 +1229,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 }
 
 // getOrCreateWorkspaceAgent returns (or creates) a per-workspace agent and session manager.
+// workspace must be a normalized path (from resolveWorkspace or normalizeWorkspacePath).
 func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionManager, error) {
 	ws := e.workspacePool.GetOrCreate(workspace)
 	ws.mu.Lock()
@@ -2051,7 +2052,7 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 			if resolver, ok := p.(ChannelNameResolver); ok {
 				channelName, _ = resolver.ResolveChannelName(channelID)
 			}
-			e.workspaceBindings.Bind(projectKey, channelID, channelName, cloneTo)
+			e.workspaceBindings.Bind(projectKey, channelID, channelName, normalizeWorkspacePath(cloneTo))
 			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsCloneSuccess, cloneTo))
 			return
 		}
@@ -2067,7 +2068,7 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 		if resolver, ok := p.(ChannelNameResolver); ok {
 			channelName, _ = resolver.ResolveChannelName(channelID)
 		}
-		e.workspaceBindings.Bind(projectKey, channelID, channelName, cloneTo)
+		e.workspaceBindings.Bind(projectKey, channelID, channelName, normalizeWorkspacePath(cloneTo))
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsCloneSuccess, cloneTo))
 
 	case "unbind":
@@ -7132,7 +7133,7 @@ func (e *Engine) handleWorkspaceInitFlow(p Platform, msg *Message, channelID, ch
 		}
 
 		projectKey := e.projectKey()
-		e.workspaceBindings.Bind(projectKey, channelID, flow.channelName, flow.cloneTo)
+		e.workspaceBindings.Bind(projectKey, channelID, flow.channelName, normalizeWorkspacePath(flow.cloneTo))
 
 		e.initFlowsMu.Lock()
 		delete(e.initFlows, channelID)
