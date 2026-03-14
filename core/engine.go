@@ -1890,7 +1890,7 @@ func matchSubCommand(input string, candidates []string) string {
 
 func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 	parts := strings.Fields(raw)
-	cmd := strings.ToLower(strings.TrimPrefix(parts[0], "!"))
+	cmd := strings.ToLower(strings.TrimPrefix(strings.TrimPrefix(parts[0], "!"), "/"))
 	args := parts[1:]
 
 	cmdID := matchPrefix(cmd, builtinCommands)

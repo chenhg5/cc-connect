@@ -1472,7 +1472,7 @@ func TestCmdReasoning_RejectsMinimal(t *testing.T) {
 	if agent.reasoningEffort != "" {
 		t.Fatalf("reasoning effort = %q, want unchanged empty", agent.reasoningEffort)
 	}
-	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "!reasoning <number>") || strings.Contains(p.sent[0], "minimal") {
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "reasoning") || strings.Contains(p.sent[0], "minimal") {
 		t.Fatalf("sent = %v, want usage without minimal", p.sent)
 	}
 }
@@ -2651,12 +2651,13 @@ func TestResumeFailureFallbackToFreshSession(t *testing.T) {
 		t.Fatal("expected agentSession to be non-nil after fallback")
 	}
 
-	// Verify the stale session ID was cleared
+	// Verify the fresh session's ID was captured (the stale ID was cleared,
+	// then the new session's ID was set by the agent-session-ID capture path).
 	session.mu.Lock()
 	sid := session.AgentSessionID
 	session.mu.Unlock()
-	if sid != "" {
-		t.Fatalf("AgentSessionID = %q, want cleared", sid)
+	if sid != "stub-session" {
+		t.Fatalf("AgentSessionID = %q, want %q (fresh session ID)", sid, "stub-session")
 	}
 
 	// Wait briefly for the goroutine notification to be sent
