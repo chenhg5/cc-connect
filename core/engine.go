@@ -493,7 +493,11 @@ func (e *Engine) SetBannedWords(words []string) {
 }
 
 // SetRateLimitCfg configures per-session message rate limiting.
+// It stops the previous rate limiter's background goroutine before replacing it.
 func (e *Engine) SetRateLimitCfg(cfg RateLimitCfg) {
+	if e.rateLimiter != nil {
+		e.rateLimiter.Stop()
+	}
 	e.rateLimiter = NewRateLimiter(cfg.MaxMessages, cfg.Window)
 }
 
@@ -752,6 +756,10 @@ func (e *Engine) Stop() error {
 			slog.Debug("engine.Stop: closing agent session", "session", key)
 			state.agentSession.Close()
 		}
+	}
+
+	if e.rateLimiter != nil {
+		e.rateLimiter.Stop()
 	}
 
 	if err := e.agent.Stop(); err != nil {
