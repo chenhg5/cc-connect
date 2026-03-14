@@ -75,6 +75,7 @@ Under "Scopes" → "Bot Token Scopes", add:
 | `channels:history` | Read channel messages (optional) |
 | `groups:history` | Read private channel messages (optional) |
 | `users:read` | Get user info |
+| `reactions:write` | Add/remove emoji reactions (processing indicator) |
 
 ---
 

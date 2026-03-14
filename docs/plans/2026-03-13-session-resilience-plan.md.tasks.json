@@ -1,15 +1,15 @@
 {
   "planPath": "docs/plans/2026-03-13-session-resilience-plan.md",
   "tasks": [
-    {"id": 7, "subject": "Task 1: Add normalizeWorkspacePath helper", "status": "pending"},
-    {"id": 8, "subject": "Task 2: Apply path normalization at entry points", "status": "pending", "blockedBy": [7]},
-    {"id": 9, "subject": "Task 3: Add token usage fields to Event and parse in session", "status": "pending"},
-    {"id": 10, "subject": "Task 4: Track context % on interactiveState and append to messages", "status": "pending", "blockedBy": [9]},
-    {"id": 11, "subject": "Task 5: Add system prompt instruction for self-reporting", "status": "pending"},
-    {"id": 12, "subject": "Task 6: Add dual-track context logging", "status": "pending", "blockedBy": [10, 11]},
-    {"id": 13, "subject": "Task 7: Add diagnostic logging to session lifecycle", "status": "pending"},
-    {"id": 14, "subject": "Task 8: Resume failure fallback with user notification", "status": "pending"},
-    {"id": 15, "subject": "Task 9: Final integration verification", "status": "pending", "blockedBy": [8, 12, 13, 14]}
+    {"id": 7, "subject": "Task 1: Add normalizeWorkspacePath helper", "status": "completed"},
+    {"id": 8, "subject": "Task 2: Apply path normalization at entry points", "status": "completed", "blockedBy": [7]},
+    {"id": 9, "subject": "Task 3: Add token usage fields to Event and parse in session", "status": "completed"},
+    {"id": 10, "subject": "Task 4: Track context % on interactiveState and append to messages", "status": "completed", "blockedBy": [9]},
+    {"id": 11, "subject": "Task 5: Add system prompt instruction for self-reporting", "status": "completed"},
+    {"id": 12, "subject": "Task 6: Add dual-track context logging", "status": "completed", "blockedBy": [10, 11]},
+    {"id": 13, "subject": "Task 7: Add diagnostic logging to session lifecycle", "status": "completed"},
+    {"id": 14, "subject": "Task 8: Resume failure fallback with user notification", "status": "completed"},
+    {"id": 15, "subject": "Task 9: Final integration verification", "status": "completed", "blockedBy": [8, 12, 13, 14]}
   ],
-  "lastUpdated": "2026-03-13T00:00:00Z"
+  "lastUpdated": "2026-03-14T00:00:00Z"
 }

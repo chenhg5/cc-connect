@@ -186,7 +186,7 @@ func (rm *RelayManager) Send(ctx context.Context, req RelayRequest) (*RelayRespo
 	rm.mu.RUnlock()
 
 	if binding == nil {
-		return nil, fmt.Errorf("relay: no binding for this chat. Use /bind <project> first")
+		return nil, fmt.Errorf("relay: no binding for this chat. Use !bind <project> first")
 	}
 	if _, ok := binding.Bots[req.To]; !ok {
 		var bound []string
