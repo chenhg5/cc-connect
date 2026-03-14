@@ -290,6 +290,16 @@ func TestEngine_Alias(t *testing.T) {
 	if got != "random text" {
 		t.Errorf("resolveAlias should not modify unmatched content, got %q", got)
 	}
+
+	got = e.resolveAlias("/帮助")
+	if got != "/help" {
+		t.Errorf("resolveAlias('/帮助') = %q, want /help", got)
+	}
+
+	got = e.resolveAlias("/新建 my-session")
+	if got != "/new my-session" {
+		t.Errorf("resolveAlias('/新建 my-session') = %q, want '/new my-session'", got)
+	}
 }
 
 func TestEngine_ClearAliases(t *testing.T) {
