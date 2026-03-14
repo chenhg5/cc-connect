@@ -52,7 +52,12 @@ func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode strin
 	if mode != "" && mode != "default" {
 		args = append(args, "--permission-mode", mode)
 	}
-	if sessionID != "" {
+	switch sessionID {
+	case "":
+		// Truly fresh session — no resume, no continue.
+	case core.ContinueSession:
+		args = append(args, "--continue")
+	default:
 		args = append(args, "--resume", sessionID)
 	}
 	if model != "" {

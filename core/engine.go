@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
@@ -130,9 +131,10 @@ type Engine struct {
 	speech       SpeechCfg
 	tts          *TTSCfg
 	display      DisplayCfg
-	defaultQuiet bool
-	injectSender bool
-	startedAt    time.Time
+	defaultQuiet     bool
+	injectSender     bool
+	hasConnectedOnce atomic.Bool // first session uses --continue
+	startedAt        time.Time
 
 	providerSaveFunc       func(providerName string) error
 	providerAddSaveFunc    func(p ProviderConfig) error
@@ -1354,15 +1356,25 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		return state
 	}
 
+	// On the first session creation after engine startup, always use
+	// --continue to pick up the most recent CLI session. This bridges
+	// sessions created outside cc-connect (e.g. direct CLI usage) so the
+	// agent picks up where the user left off. Subsequent reconnects within
+	// the same engine lifetime use the tracked agent session ID.
+	startSessionID := session.AgentSessionID
+	if startSessionID == "" || !e.hasConnectedOnce.Swap(true) {
+		startSessionID = ContinueSession
+	}
+
 	startAt := time.Now()
-	agentSession, err := agent.StartSession(e.ctx, session.AgentSessionID)
+	agentSession, err := agent.StartSession(e.ctx, startSessionID)
 	startElapsed := time.Since(startAt)
 	if err != nil {
-		if session.AgentSessionID != "" {
-			// Resume failed — log diagnostics and retry with fresh session
+		if startSessionID != "" {
+			// Resume/continue failed — log diagnostics and retry with fresh session
 			slog.Error("session resume failed, falling back to fresh session",
 				"session_key", sessionKey,
-				"failed_session_id", session.AgentSessionID,
+				"failed_session_id", startSessionID,
 				"error", err,
 				"elapsed", startElapsed,
 			)

@@ -2648,12 +2648,13 @@ func TestResumeFailureFallbackToFreshSession(t *testing.T) {
 
 	state := e.getOrCreateInteractiveState("test:user1", p, "ctx", session)
 
-	// Verify StartSession was called twice: first with old ID, then with ""
+	// Verify StartSession was called twice: first with --continue (engine
+	// always uses ContinueSession on first connection), then with ""
 	if len(calls) != 2 {
 		t.Fatalf("StartSession call count = %d, want 2", len(calls))
 	}
-	if calls[0] != "old-session-id" {
-		t.Fatalf("first StartSession call = %q, want %q", calls[0], "old-session-id")
+	if calls[0] != ContinueSession {
+		t.Fatalf("first StartSession call = %q, want %q", calls[0], ContinueSession)
 	}
 	if calls[1] != "" {
 		t.Fatalf("second StartSession call = %q, want empty string", calls[1])

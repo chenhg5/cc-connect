@@ -10,6 +10,12 @@ import (
 	"time"
 )
 
+// ContinueSession is a sentinel value for Agent.StartSession that tells the
+// agent to resume the most recent session (e.g. --continue in Claude Code)
+// rather than starting a blank session. This bridges sessions created outside
+// cc-connect (e.g. direct CLI usage).
+const ContinueSession = "__continue__"
+
 // Session tracks one conversation between a user and the agent.
 type Session struct {
 	ID             string         `json:"id"`
