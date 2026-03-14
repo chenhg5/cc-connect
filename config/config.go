@@ -32,6 +32,7 @@ type Config struct {
 	Cron             CronConfig          `toml:"cron"`
 	Webhook          WebhookConfig       `toml:"webhook"`
 	Bridge           BridgeConfig        `toml:"bridge"`
+	Management       ManagementConfig    `toml:"management"`
 	IdleTimeoutMins  *int                `toml:"idle_timeout_mins,omitempty"`  // max minutes between agent events; 0 = no timeout; default 120
 }
 
@@ -54,6 +55,14 @@ type BridgeConfig struct {
 	Port    int    `toml:"port,omitempty"`  // listen port; default 9810
 	Token   string `toml:"token,omitempty"` // shared secret for authentication; required
 	Path    string `toml:"path,omitempty"`  // URL path; default "/bridge/ws"
+}
+
+// ManagementConfig controls the HTTP Management API for external tools.
+type ManagementConfig struct {
+	Enabled     *bool    `toml:"enabled"`                  // default false
+	Port        int      `toml:"port,omitempty"`           // listen port; default 9820
+	Token       string   `toml:"token,omitempty"`          // shared secret for authentication; required
+	CORSOrigins []string `toml:"cors_origins,omitempty"`   // allowed CORS origins; empty = no CORS
 }
 
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.

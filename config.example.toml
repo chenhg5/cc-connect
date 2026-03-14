@@ -137,6 +137,21 @@ level = "info" # debug, info, warn, error
 # path = "/bridge/ws"                 # URL path (default: "/bridge/ws") / URL 路径
 
 # =============================================================================
+# Management API (External Management Tools)
+# 管理 API（外部管理工具）
+# =============================================================================
+# HTTP REST API for external apps (web dashboards, TUI, GUI, Mac tray apps).
+# 为外部应用（Web 管理面板、TUI、GUI、Mac 托盘应用）提供 HTTP REST API。
+# See docs/management-api.md for the full API specification.
+# 完整 API 规范请参阅 docs/management-api.md。
+#
+# [management]
+# enabled = true
+# port = 9820                           # HTTP listen port (default: 9820) / 监听端口
+# token = "your-mgmt-secret"            # Auth token (required) / 认证密钥（必填）
+# cors_origins = ["http://localhost:3000"]  # Allowed CORS origins / 允许的 CORS 来源
+
+# =============================================================================
 # Speech-to-Text (Voice Messages) / 语音转文字（语音消息）
 # =============================================================================
 # Enable to transcribe voice messages to text before sending to agents.

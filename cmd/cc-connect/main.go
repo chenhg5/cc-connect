@@ -529,6 +529,27 @@ func main() {
 		webhookSrv.Start()
 	}
 
+	// Start management API server if enabled
+	var mgmtSrv *core.ManagementServer
+	if cfg.Management.Enabled != nil && *cfg.Management.Enabled {
+		port := cfg.Management.Port
+		if port <= 0 {
+			port = 9820
+		}
+		mgmtSrv = core.NewManagementServer(port, cfg.Management.Token, cfg.Management.CORSOrigins)
+		for i, e := range engines {
+			mgmtSrv.RegisterEngine(cfg.Projects[i].Name, e)
+		}
+		if cronSched != nil {
+			mgmtSrv.SetCronScheduler(cronSched)
+		}
+		mgmtSrv.SetHeartbeatScheduler(heartbeatSched)
+		if bridgeSrv != nil {
+			mgmtSrv.SetBridgeServer(bridgeSrv)
+		}
+		mgmtSrv.Start()
+	}
+
 	// Start internal API server for CLI send
 	apiSrv, err := core.NewAPIServer(cfg.DataDir)
 	if err != nil {
@@ -568,6 +589,9 @@ func main() {
 	}
 
 	slog.Info("shutting down...")
+	if mgmtSrv != nil {
+		mgmtSrv.Stop()
+	}
 	if bridgeSrv != nil {
 		bridgeSrv.Stop()
 	}

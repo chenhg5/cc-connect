@@ -244,6 +244,47 @@ func (sm *SessionManager) GetSessionName(agentSessionID string) string {
 	return sm.sessionNames[agentSessionID]
 }
 
+// AllSessions returns all sessions across all user keys.
+func (sm *SessionManager) AllSessions() []*Session {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	out := make([]*Session, 0, len(sm.sessions))
+	for _, s := range sm.sessions {
+		out = append(out, s)
+	}
+	return out
+}
+
+// FindByID looks up a session by its internal ID across all users.
+func (sm *SessionManager) FindByID(id string) *Session {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return sm.sessions[id]
+}
+
+// DeleteByID removes a session by its internal ID from all tracking structures.
+func (sm *SessionManager) DeleteByID(id string) bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if _, ok := sm.sessions[id]; !ok {
+		return false
+	}
+	delete(sm.sessions, id)
+	for userKey, ids := range sm.userSessions {
+		for i, sid := range ids {
+			if sid == id {
+				sm.userSessions[userKey] = append(ids[:i], ids[i+1:]...)
+				break
+			}
+		}
+		if sm.activeSession[userKey] == id {
+			delete(sm.activeSession, userKey)
+		}
+	}
+	sm.saveLocked()
+	return true
+}
+
 // Save persists current state to disk. Safe to call from outside (e.g. after message processing).
 func (sm *SessionManager) Save() {
 	sm.mu.RLock()
