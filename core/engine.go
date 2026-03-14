@@ -821,7 +821,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		slog.Info("using platform-provided voice recognition",
 			"platform", msg.Platform, "content_len", len(msg.Content))
 		if msg.FromVoice {
-			e.send(p, msg.ReplyCtx, fmt.Sprintf("🎙 %s", e.i18n.T(MsgVoiceUsingPlatformRecognition)))
+			e.send(p, msg.ReplyCtx, e.i18n.T(MsgVoiceUsingPlatformRecognition))
 		}
 	}
 
