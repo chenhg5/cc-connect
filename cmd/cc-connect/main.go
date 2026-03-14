@@ -457,6 +457,7 @@ func main() {
 			workDir, _ := proj.Agent.Options["work_dir"].(string)
 			heartbeatSched.Register(proj.Name, hbCfg, engines[i], workDir)
 		}
+		engines[i].SetHeartbeatScheduler(heartbeatSched)
 	}
 
 	var startErrors []error

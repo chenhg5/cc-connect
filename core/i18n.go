@@ -195,6 +195,15 @@ const (
 	MsgTTSSwitched   MsgKey = "tts_switched"
 	MsgTTSUsage      MsgKey = "tts_usage"
 
+	MsgHeartbeatNotAvailable MsgKey = "heartbeat_not_available"
+	MsgHeartbeatStatus       MsgKey = "heartbeat_status"
+	MsgHeartbeatPaused       MsgKey = "heartbeat_paused"
+	MsgHeartbeatResumed      MsgKey = "heartbeat_resumed"
+	MsgHeartbeatInterval     MsgKey = "heartbeat_interval"
+	MsgHeartbeatTriggered    MsgKey = "heartbeat_triggered"
+	MsgHeartbeatUsage        MsgKey = "heartbeat_usage"
+	MsgHeartbeatInvalidMins  MsgKey = "heartbeat_invalid_mins"
+
 	MsgCronNotAvailable MsgKey = "cron_not_available"
 	MsgCronUsage        MsgKey = "cron_usage"
 	MsgCronAddUsage     MsgKey = "cron_add_usage"
@@ -1303,6 +1312,102 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "用法：/tts [always|voice_only]",
 		LangJapanese:           "使い方: /tts [always|voice_only]",
 		LangSpanish:            "Uso: /tts [always|voice_only]",
+	},
+	MsgHeartbeatNotAvailable: {
+		LangEnglish:            "Heartbeat is not configured for this project.",
+		LangChinese:            "当前项目未配置心跳。",
+		LangTraditionalChinese: "當前項目未配置心跳。",
+		LangJapanese:           "このプロジェクトにはハートビートが設定されていません。",
+		LangSpanish:            "El heartbeat no está configurado para este proyecto.",
+	},
+	MsgHeartbeatStatus: {
+		LangEnglish: "💓 Heartbeat Status\n\n" +
+			"State: %s\n" +
+			"Interval: %d min\n" +
+			"Only when idle: %s\n" +
+			"Silent: %s\n" +
+			"Runs: %d\n" +
+			"Errors: %d\n" +
+			"Skipped (busy): %d\n" +
+			"%s",
+		LangChinese: "💓 心跳状态\n\n" +
+			"状态: %s\n" +
+			"间隔: %d 分钟\n" +
+			"仅空闲时: %s\n" +
+			"静默: %s\n" +
+			"执行次数: %d\n" +
+			"失败次数: %d\n" +
+			"跳过 (忙碌): %d\n" +
+			"%s",
+		LangTraditionalChinese: "💓 心跳狀態\n\n" +
+			"狀態: %s\n" +
+			"間隔: %d 分鐘\n" +
+			"僅空閒時: %s\n" +
+			"靜默: %s\n" +
+			"執行次數: %d\n" +
+			"失敗次數: %d\n" +
+			"跳過 (忙碌): %d\n" +
+			"%s",
+		LangJapanese: "💓 ハートビート状態\n\n" +
+			"状態: %s\n" +
+			"間隔: %d 分\n" +
+			"アイドル時のみ: %s\n" +
+			"サイレント: %s\n" +
+			"実行回数: %d\n" +
+			"エラー: %d\n" +
+			"スキップ (ビジー): %d\n" +
+			"%s",
+		LangSpanish: "💓 Estado del Heartbeat\n\n" +
+			"Estado: %s\n" +
+			"Intervalo: %d min\n" +
+			"Solo cuando inactivo: %s\n" +
+			"Silencioso: %s\n" +
+			"Ejecuciones: %d\n" +
+			"Errores: %d\n" +
+			"Omitidos (ocupado): %d\n" +
+			"%s",
+	},
+	MsgHeartbeatPaused: {
+		LangEnglish:            "💓 Heartbeat paused.",
+		LangChinese:            "💓 心跳已暂停。",
+		LangTraditionalChinese: "💓 心跳已暫停。",
+		LangJapanese:           "💓 ハートビートを一時停止しました。",
+		LangSpanish:            "💓 Heartbeat pausado.",
+	},
+	MsgHeartbeatResumed: {
+		LangEnglish:            "💓 Heartbeat resumed.",
+		LangChinese:            "💓 心跳已恢复。",
+		LangTraditionalChinese: "💓 心跳已恢復。",
+		LangJapanese:           "💓 ハートビートを再開しました。",
+		LangSpanish:            "💓 Heartbeat reanudado.",
+	},
+	MsgHeartbeatInterval: {
+		LangEnglish:            "💓 Heartbeat interval changed to %d minutes.",
+		LangChinese:            "💓 心跳间隔已调整为 %d 分钟。",
+		LangTraditionalChinese: "💓 心跳間隔已調整為 %d 分鐘。",
+		LangJapanese:           "💓 ハートビート間隔を %d 分に変更しました。",
+		LangSpanish:            "💓 Intervalo del heartbeat cambiado a %d minutos.",
+	},
+	MsgHeartbeatTriggered: {
+		LangEnglish:            "💓 Heartbeat triggered.",
+		LangChinese:            "💓 心跳已触发。",
+		LangTraditionalChinese: "💓 心跳已觸發。",
+		LangJapanese:           "💓 ハートビートをトリガーしました。",
+		LangSpanish:            "💓 Heartbeat activado.",
+	},
+	MsgHeartbeatUsage: {
+		LangEnglish:            "Usage: /heartbeat [status|pause|resume|run|interval <mins>]",
+		LangChinese:            "用法: /heartbeat [status|pause|resume|run|interval <分钟>]",
+		LangTraditionalChinese: "用法: /heartbeat [status|pause|resume|run|interval <分鐘>]",
+		LangJapanese:           "使い方: /heartbeat [status|pause|resume|run|interval <分>]",
+		LangSpanish:            "Uso: /heartbeat [status|pause|resume|run|interval <minutos>]",
+	},
+	MsgHeartbeatInvalidMins: {
+		LangEnglish:            "Invalid interval. Please provide a positive number of minutes.",
+		LangChinese:            "无效的间隔。请输入正整数的分钟数。",
+		LangTraditionalChinese: "無效的間隔。請輸入正整數的分鐘數。",
+		LangJapanese:           "無効な間隔です。正の整数を分で指定してください。",
+		LangSpanish:            "Intervalo inválido. Proporcione un número positivo de minutos.",
 	},
 	MsgCronNotAvailable: {
 		LangEnglish:            "Cron scheduler is not available.",

@@ -145,7 +145,8 @@ type Engine struct {
 	displaySaveFunc  func(thinkingMaxLen, toolMaxLen *int) error
 	configReloadFunc func() (*ConfigReloadResult, error)
 
-	cronScheduler *CronScheduler
+	cronScheduler      *CronScheduler
+	heartbeatScheduler *HeartbeatScheduler
 
 	commands *CommandRegistry
 	skills   *SkillRegistry
@@ -354,6 +355,10 @@ func (e *Engine) SetProviderRemoveSaveFunc(fn func(string) error) {
 
 func (e *Engine) SetCronScheduler(cs *CronScheduler) {
 	e.cronScheduler = cs
+}
+
+func (e *Engine) SetHeartbeatScheduler(hs *HeartbeatScheduler) {
+	e.heartbeatScheduler = hs
 }
 
 func (e *Engine) SetCommandSaveAddFunc(fn func(name, description, prompt, exec, workDir string) error) {
@@ -1775,6 +1780,7 @@ var builtinCommands = []struct {
 	{[]string{"provider"}, "provider"},
 	{[]string{"memory"}, "memory"},
 	{[]string{"cron"}, "cron"},
+	{[]string{"heartbeat", "hb"}, "heartbeat"},
 	{[]string{"compress", "compact"}, "compress"},
 	{[]string{"stop"}, "stop"},
 	{[]string{"help"}, "help"},
@@ -1898,6 +1904,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdMemory(p, msg, args)
 	case "cron":
 		e.cmdCron(p, msg, args)
+	case "heartbeat":
+		e.cmdHeartbeat(p, msg, args)
 	case "compress":
 		e.cmdCompress(p, msg)
 	case "stop":
@@ -5799,6 +5807,124 @@ func (e *Engine) cmdCronToggle(p Platform, msg *Message, args []string, enable b
 	} else {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronDisabled), id))
 	}
+}
+
+// ──────────────────────────────────────────────────────────────
+// Heartbeat management commands
+// ──────────────────────────────────────────────────────────────
+
+func (e *Engine) cmdHeartbeat(p Platform, msg *Message, args []string) {
+	if e.heartbeatScheduler == nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHeartbeatNotAvailable))
+		return
+	}
+
+	status := e.heartbeatScheduler.Status(e.name)
+	if status == nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHeartbeatNotAvailable))
+		return
+	}
+
+	sub := "status"
+	if len(args) > 0 {
+		sub = matchSubCommand(strings.ToLower(args[0]), []string{
+			"status", "pause", "stop", "resume", "start", "run", "trigger", "interval",
+		})
+	}
+
+	switch sub {
+	case "status", "":
+		e.cmdHeartbeatStatus(p, msg, status)
+	case "pause", "stop":
+		e.heartbeatScheduler.Pause(e.name)
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHeartbeatPaused))
+	case "resume", "start":
+		e.heartbeatScheduler.Resume(e.name)
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHeartbeatResumed))
+	case "run", "trigger":
+		e.heartbeatScheduler.TriggerNow(e.name)
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHeartbeatTriggered))
+	case "interval":
+		if len(args) < 2 {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHeartbeatUsage))
+			return
+		}
+		mins, err := strconv.Atoi(args[1])
+		if err != nil || mins <= 0 {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHeartbeatInvalidMins))
+			return
+		}
+		e.heartbeatScheduler.SetInterval(e.name, mins)
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgHeartbeatInterval), mins))
+	default:
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHeartbeatUsage))
+	}
+}
+
+func (e *Engine) cmdHeartbeatStatus(p Platform, msg *Message, st *HeartbeatStatus) {
+	stateStr := "▶️ running"
+	if st.Paused {
+		stateStr = "⏸ paused"
+	}
+
+	yesNo := func(b bool) string {
+		if b {
+			return "yes"
+		}
+		return "no"
+	}
+	lang := e.i18n.CurrentLang()
+	if lang == LangChinese || lang == LangTraditionalChinese {
+		if st.Paused {
+			stateStr = "⏸ 已暂停"
+		} else {
+			stateStr = "▶️ 运行中"
+		}
+		yesNo = func(b bool) string {
+			if b {
+				return "是"
+			}
+			return "否"
+		}
+	} else if lang == LangJapanese {
+		if st.Paused {
+			stateStr = "⏸ 一時停止"
+		} else {
+			stateStr = "▶️ 実行中"
+		}
+		yesNo = func(b bool) string {
+			if b {
+				return "はい"
+			}
+			return "いいえ"
+		}
+	}
+
+	lastRunStr := ""
+	if !st.LastRun.IsZero() {
+		switch lang {
+		case LangChinese, LangTraditionalChinese:
+			lastRunStr = "上次执行: " + st.LastRun.Format("01-02 15:04:05") + "\n"
+		case LangJapanese:
+			lastRunStr = "最終実行: " + st.LastRun.Format("01-02 15:04:05") + "\n"
+		default:
+			lastRunStr = "Last run: " + st.LastRun.Format("01-02 15:04:05") + "\n"
+		}
+		if st.LastError != "" {
+			lastRunStr += "⚠️ " + truncateStr(st.LastError, 80) + "\n"
+		}
+	}
+
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgHeartbeatStatus),
+		stateStr,
+		st.IntervalMins,
+		yesNo(st.OnlyWhenIdle),
+		yesNo(st.Silent),
+		st.RunCount,
+		st.ErrorCount,
+		st.SkippedBusy,
+		lastRunStr,
+	))
 }
 
 // ──────────────────────────────────────────────────────────────
