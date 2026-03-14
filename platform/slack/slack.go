@@ -225,6 +225,45 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 			}
 		}
 
+	case socketmode.EventTypeSlashCommand:
+		cmd, ok := evt.Data.(slack.SlashCommand)
+		if !ok {
+			slog.Debug("slack: slash command type assertion failed")
+			return
+		}
+		if evt.Request != nil {
+			p.socket.Ack(*evt.Request)
+		}
+
+		if !core.AllowList(p.allowFrom, cmd.UserID) {
+			slog.Debug("slack: slash command from unauthorized user", "user", cmd.UserID)
+			return
+		}
+
+		// Convert slash command to a regular message with ! prefix so the
+		// engine's command handling picks it up (e.g. /cc-btw → !cc-btw).
+		cmdName := strings.TrimPrefix(cmd.Command, "/")
+		content := "!" + cmdName
+		if cmd.Text != "" {
+			content += " " + cmd.Text
+		}
+
+		var sessionKey string
+		if p.shareSessionInChannel {
+			sessionKey = fmt.Sprintf("slack:%s", cmd.ChannelID)
+		} else {
+			sessionKey = fmt.Sprintf("slack:%s:%s", cmd.ChannelID, cmd.UserID)
+		}
+
+		msg := &core.Message{
+			SessionKey: sessionKey, Platform: "slack",
+			UserID: cmd.UserID, UserName: cmd.UserName,
+			Content:  content,
+			ReplyCtx: replyContext{channel: cmd.ChannelID},
+		}
+		slog.Debug("slack: slash command", "command", cmd.Command, "text", cmd.Text, "user", cmd.UserID)
+		p.handler(p, msg)
+
 	case socketmode.EventTypeConnecting:
 		slog.Debug("slack: connecting...")
 	case socketmode.EventTypeConnected:
