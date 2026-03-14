@@ -3456,7 +3456,7 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 	e.cleanupInteractiveState(msg.SessionKey)
 
 	s := e.sessions.GetOrCreateActive(msg.SessionKey)
-	s.AgentSessionID = ""
+	s.SetAgentSessionID("")
 	s.ClearHistory()
 	e.sessions.Save()
 
@@ -3537,7 +3537,7 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 	e.cleanupInteractiveState(msg.SessionKey)
 
 	s := e.sessions.GetOrCreateActive(msg.SessionKey)
-	s.AgentSessionID = ""
+	s.SetAgentSessionID("")
 	s.ClearHistory()
 	e.sessions.Save()
 
@@ -4509,7 +4509,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		switcher.SetModel(target)
 		e.cleanupInteractiveState(sessionKey)
 		s := e.sessions.GetOrCreateActive(sessionKey)
-		s.AgentSessionID = ""
+		s.SetAgentSessionID("")
 		s.ClearHistory()
 		e.sessions.Save()
 
@@ -4531,7 +4531,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 				switcher.SetReasoningEffort(target)
 				e.cleanupInteractiveState(sessionKey)
 				s := e.sessions.GetOrCreateActive(sessionKey)
-				s.AgentSessionID = ""
+				s.SetAgentSessionID("")
 				s.ClearHistory()
 				e.sessions.Save()
 				return
