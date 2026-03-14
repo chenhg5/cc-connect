@@ -806,7 +806,8 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	)
 
 	// Voice message: transcribe to text first
-	if msg.Audio != nil {
+	// Skip transcription if Content is already provided (platform-side recognition)
+	if msg.Audio != nil && msg.Content == "" {
 		e.handleVoiceMessage(p, msg)
 		return
 	}
