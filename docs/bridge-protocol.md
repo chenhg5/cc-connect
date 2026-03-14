@@ -583,6 +583,184 @@ The adapter is responsible for constructing consistent session keys.
 
 ---
 
+## Session Management REST API
+
+In addition to the WebSocket protocol for real-time messaging, the Bridge Server exposes HTTP REST endpoints on the same port for session management. This allows adapters to list, create, switch, and delete sessions without requiring the separate Management API.
+
+### Authentication
+
+The same token used for WebSocket connections applies to REST endpoints:
+
+| Method | Example |
+|--------|---------|
+| Header | `Authorization: Bearer your-secret` |
+| Query param | `?token=your-secret` |
+
+### Response Format
+
+All responses use the same envelope as the Management API:
+
+```json
+{"ok": true, "data": { ... }}
+{"ok": false, "error": "message"}
+```
+
+### Endpoints
+
+All endpoints are relative to the Bridge Server base URL (e.g., `http://localhost:9810`).
+
+#### GET /bridge/sessions
+
+Lists sessions for a given session key prefix (typically `platform:chatId`).
+
+**Query parameters:**
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `session_key` | string | yes | The session key to list sessions for (e.g., `wechat:user123:user123`). |
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "sessions": [
+      {
+        "id": "s1",
+        "name": "default",
+        "history_count": 12
+      },
+      {
+        "id": "s2",
+        "name": "work",
+        "history_count": 5
+      }
+    ],
+    "active_session_id": "s1"
+  }
+}
+```
+
+---
+
+#### POST /bridge/sessions
+
+Creates a new named session.
+
+**Request body:**
+
+```json
+{
+  "session_key": "wechat:user123:user123",
+  "name": "work"
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `session_key` | string | yes | Session key for the user. |
+| `name` | string | no | Human-readable session name. Defaults to `"default"`. |
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "id": "s3",
+    "name": "work",
+    "message": "session created"
+  }
+}
+```
+
+---
+
+#### GET /bridge/sessions/{id}
+
+Returns session detail with message history.
+
+**Query parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `session_key` | string | (required) | Session key to identify the project context. |
+| `history_limit` | int | 50 | Max history entries to return. |
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "id": "s1",
+    "name": "default",
+    "history": [
+      {"role": "user", "content": "Hello"},
+      {"role": "assistant", "content": "Hi! How can I help?"}
+    ]
+  }
+}
+```
+
+---
+
+#### DELETE /bridge/sessions/{id}
+
+Deletes a session and its history.
+
+**Query parameters:**
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `session_key` | string | yes | Session key to identify the project context. |
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "message": "session deleted"
+  }
+}
+```
+
+---
+
+#### POST /bridge/sessions/switch
+
+Switches the active session for a session key.
+
+**Request body:**
+
+```json
+{
+  "session_key": "wechat:user123:user123",
+  "target": "s2"
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `session_key` | string | yes | Session key. |
+| `target` | string | yes | Session ID or name to switch to. |
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "message": "session switched",
+    "active_session_id": "s2"
+  }
+}
+```
+
+---
+
 ## Error Handling
 
 ### Reconnection

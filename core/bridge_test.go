@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -379,5 +380,278 @@ func TestSerializeCard(t *testing.T) {
 	}
 	if len(data) == 0 {
 		t.Fatal("serialized card is empty")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Session Management REST API tests
+// ---------------------------------------------------------------------------
+
+// startTestBridgeWithREST creates a bridge server with both WS and REST endpoints.
+func startTestBridgeWithREST(t *testing.T, token string) (*BridgeServer, string) {
+	t.Helper()
+	bs := NewBridgeServer(0, token, "/bridge/ws")
+
+	agent := &stubAgent{}
+	sm := NewSessionManager("")
+	engine := NewEngine("test-proj", agent, nil, "", LangEnglish)
+	engine.sessions = sm
+
+	bp := bs.NewPlatform("test-proj")
+	bs.RegisterEngine("test-proj", engine, bp)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/bridge/ws", bs.handleWS)
+	mux.HandleFunc("/bridge/sessions", bs.authHTTP(bs.handleSessions))
+	mux.HandleFunc("/bridge/sessions/", bs.authHTTP(bs.handleSessionRoutes))
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	return bs, srv.URL
+}
+
+type bridgeAPIResponse struct {
+	OK    bool            `json:"ok"`
+	Data  json.RawMessage `json:"data,omitempty"`
+	Error string          `json:"error,omitempty"`
+}
+
+func bridgeGet(t *testing.T, url, token string) bridgeAPIResponse {
+	t.Helper()
+	req, _ := http.NewRequest("GET", url, nil)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	var r bridgeAPIResponse
+	json.NewDecoder(resp.Body).Decode(&r)
+	return r
+}
+
+func bridgePost(t *testing.T, url, token string, body any) bridgeAPIResponse {
+	t.Helper()
+	var buf bytes.Buffer
+	if body != nil {
+		json.NewEncoder(&buf).Encode(body)
+	}
+	req, _ := http.NewRequest("POST", url, &buf)
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	var r bridgeAPIResponse
+	json.NewDecoder(resp.Body).Decode(&r)
+	return r
+}
+
+func bridgeDel(t *testing.T, url, token string) bridgeAPIResponse {
+	t.Helper()
+	req, _ := http.NewRequest("DELETE", url, nil)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("DELETE %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	var r bridgeAPIResponse
+	json.NewDecoder(resp.Body).Decode(&r)
+	return r
+}
+
+func TestBridge_SessionList(t *testing.T) {
+	_, baseURL := startTestBridgeWithREST(t, "tok")
+
+	// List sessions for a new key — should create a default session
+	r := bridgeGet(t, baseURL+"/bridge/sessions?session_key=test:u1:u1&token=tok", "")
+	if !r.OK {
+		// No sessions yet, that's fine — list returns empty
+	}
+
+	// Create a session first
+	r = bridgePost(t, baseURL+"/bridge/sessions", "tok", map[string]string{
+		"session_key": "test:u1:u1",
+		"name":        "work",
+	})
+	if !r.OK {
+		t.Fatalf("create session failed: %s", r.Error)
+	}
+	var created struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	json.Unmarshal(r.Data, &created)
+	if created.ID == "" {
+		t.Fatal("expected session ID")
+	}
+	if created.Name != "work" {
+		t.Fatalf("expected name 'work', got %q", created.Name)
+	}
+
+	// Now list — should have 1 session
+	r = bridgeGet(t, baseURL+"/bridge/sessions?session_key=test:u1:u1", "tok")
+	if !r.OK {
+		t.Fatalf("list sessions failed: %s", r.Error)
+	}
+	var listData struct {
+		Sessions []map[string]any `json:"sessions"`
+	}
+	json.Unmarshal(r.Data, &listData)
+	if len(listData.Sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(listData.Sessions))
+	}
+}
+
+func TestBridge_SessionCreateAndDetail(t *testing.T) {
+	_, baseURL := startTestBridgeWithREST(t, "tok")
+
+	// Create
+	r := bridgePost(t, baseURL+"/bridge/sessions", "tok", map[string]string{
+		"session_key": "test:u1:u1",
+		"name":        "dev",
+	})
+	if !r.OK {
+		t.Fatalf("create failed: %s", r.Error)
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	json.Unmarshal(r.Data, &created)
+
+	// Get detail
+	r = bridgeGet(t, baseURL+"/bridge/sessions/"+created.ID+"?session_key=test:u1:u1", "tok")
+	if !r.OK {
+		t.Fatalf("get detail failed: %s", r.Error)
+	}
+	var detail struct {
+		ID      string           `json:"id"`
+		Name    string           `json:"name"`
+		History []map[string]any `json:"history"`
+	}
+	json.Unmarshal(r.Data, &detail)
+	if detail.ID != created.ID {
+		t.Fatalf("expected id %q, got %q", created.ID, detail.ID)
+	}
+	if detail.Name != "dev" {
+		t.Fatalf("expected name 'dev', got %q", detail.Name)
+	}
+}
+
+func TestBridge_SessionDelete(t *testing.T) {
+	_, baseURL := startTestBridgeWithREST(t, "tok")
+
+	r := bridgePost(t, baseURL+"/bridge/sessions", "tok", map[string]string{
+		"session_key": "test:u1:u1",
+		"name":        "temp",
+	})
+	if !r.OK {
+		t.Fatalf("create failed: %s", r.Error)
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	json.Unmarshal(r.Data, &created)
+
+	// Delete
+	r = bridgeDel(t, baseURL+"/bridge/sessions/"+created.ID+"?session_key=test:u1:u1", "tok")
+	if !r.OK {
+		t.Fatalf("delete failed: %s", r.Error)
+	}
+
+	// Verify deleted
+	r = bridgeGet(t, baseURL+"/bridge/sessions/"+created.ID+"?session_key=test:u1:u1", "tok")
+	if r.OK {
+		t.Fatal("expected 404 after deletion")
+	}
+}
+
+func TestBridge_SessionSwitch(t *testing.T) {
+	_, baseURL := startTestBridgeWithREST(t, "tok")
+
+	// Create two sessions
+	r := bridgePost(t, baseURL+"/bridge/sessions", "tok", map[string]string{
+		"session_key": "test:u1:u1",
+		"name":        "first",
+	})
+	if !r.OK {
+		t.Fatalf("create first failed: %s", r.Error)
+	}
+
+	r = bridgePost(t, baseURL+"/bridge/sessions", "tok", map[string]string{
+		"session_key": "test:u1:u1",
+		"name":        "second",
+	})
+	if !r.OK {
+		t.Fatalf("create second failed: %s", r.Error)
+	}
+	var second struct {
+		ID string `json:"id"`
+	}
+	json.Unmarshal(r.Data, &second)
+
+	// Switch to second
+	r = bridgePost(t, baseURL+"/bridge/sessions/switch", "tok", map[string]string{
+		"session_key": "test:u1:u1",
+		"target":      second.ID,
+	})
+	if !r.OK {
+		t.Fatalf("switch failed: %s", r.Error)
+	}
+	var switched struct {
+		ActiveSessionID string `json:"active_session_id"`
+	}
+	json.Unmarshal(r.Data, &switched)
+	if switched.ActiveSessionID != second.ID {
+		t.Fatalf("expected active=%s, got %s", second.ID, switched.ActiveSessionID)
+	}
+}
+
+func TestBridge_SessionAuthRequired(t *testing.T) {
+	_, baseURL := startTestBridgeWithREST(t, "secret")
+
+	r := bridgeGet(t, baseURL+"/bridge/sessions?session_key=test:u1:u1", "")
+	if r.OK {
+		t.Fatal("expected auth failure without token")
+	}
+
+	r = bridgeGet(t, baseURL+"/bridge/sessions?session_key=test:u1:u1", "secret")
+	if !r.OK {
+		t.Fatalf("expected success with token, got: %s", r.Error)
+	}
+}
+
+func TestBridge_SessionMissingParams(t *testing.T) {
+	_, baseURL := startTestBridgeWithREST(t, "tok")
+
+	// Missing session_key
+	r := bridgeGet(t, baseURL+"/bridge/sessions", "tok")
+	if r.OK {
+		t.Fatal("expected error without session_key")
+	}
+
+	// Missing session_key in POST
+	r = bridgePost(t, baseURL+"/bridge/sessions", "tok", map[string]string{
+		"name": "test",
+	})
+	if r.OK {
+		t.Fatal("expected error without session_key in POST")
+	}
+
+	// Missing params in switch
+	r = bridgePost(t, baseURL+"/bridge/sessions/switch", "tok", map[string]string{
+		"session_key": "test:u1:u1",
+	})
+	if r.OK {
+		t.Fatal("expected error without target in switch")
 	}
 }

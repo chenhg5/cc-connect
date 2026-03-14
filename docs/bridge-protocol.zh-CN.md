@@ -583,6 +583,184 @@ Session key 遵循以下格式：
 
 ---
 
+## 会话管理 REST API
+
+除了用于实时消息的 WebSocket 协议外，Bridge Server 还在同一端口上暴露 HTTP REST 端点用于会话管理。适配器可以通过这些接口列出、创建、切换和删除会话，无需单独配置管理 API。
+
+### 认证
+
+使用与 WebSocket 连接相同的 token：
+
+| 方式 | 示例 |
+|------|------|
+| Header | `Authorization: Bearer your-secret` |
+| Query 参数 | `?token=your-secret` |
+
+### 响应格式
+
+所有响应使用统一的信封格式：
+
+```json
+{"ok": true, "data": { ... }}
+{"ok": false, "error": "错误信息"}
+```
+
+### 端点
+
+所有端点相对于 Bridge Server 基础 URL（如 `http://localhost:9810`）。
+
+#### GET /bridge/sessions
+
+列出指定 session key 的所有会话。
+
+**Query 参数：**
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `session_key` | string | 是 | 要查询会话的 session key（如 `wechat:user123:user123`）。 |
+
+**响应：**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "sessions": [
+      {
+        "id": "s1",
+        "name": "default",
+        "history_count": 12
+      },
+      {
+        "id": "s2",
+        "name": "work",
+        "history_count": 5
+      }
+    ],
+    "active_session_id": "s1"
+  }
+}
+```
+
+---
+
+#### POST /bridge/sessions
+
+创建新的命名会话。
+
+**请求体：**
+
+```json
+{
+  "session_key": "wechat:user123:user123",
+  "name": "work"
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `session_key` | string | 是 | 用户的 session key。 |
+| `name` | string | 否 | 人类可读的会话名称。默认为 `"default"`。 |
+
+**响应：**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "id": "s3",
+    "name": "work",
+    "message": "session created"
+  }
+}
+```
+
+---
+
+#### GET /bridge/sessions/{id}
+
+获取会话详情及消息历史。
+
+**Query 参数：**
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `session_key` | string | （必填） | 用于定位项目上下文的 session key。 |
+| `history_limit` | int | 50 | 返回的最大历史条数。 |
+
+**响应：**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "id": "s1",
+    "name": "default",
+    "history": [
+      {"role": "user", "content": "你好"},
+      {"role": "assistant", "content": "你好！有什么可以帮你的？"}
+    ]
+  }
+}
+```
+
+---
+
+#### DELETE /bridge/sessions/{id}
+
+删除会话及其历史记录。
+
+**Query 参数：**
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `session_key` | string | 是 | 用于定位项目上下文的 session key。 |
+
+**响应：**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "message": "session deleted"
+  }
+}
+```
+
+---
+
+#### POST /bridge/sessions/switch
+
+切换指定 session key 的活跃会话。
+
+**请求体：**
+
+```json
+{
+  "session_key": "wechat:user123:user123",
+  "target": "s2"
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `session_key` | string | 是 | Session key。 |
+| `target` | string | 是 | 要切换到的会话 ID 或名称。 |
+
+**响应：**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "message": "session switched",
+    "active_session_id": "s2"
+  }
+}
+```
+
+---
+
 ## 错误处理
 
 ### 断线重连

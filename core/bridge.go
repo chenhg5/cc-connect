@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -156,6 +157,10 @@ func (bs *BridgeServer) RegisterEngine(projectName string, engine *Engine, bp *B
 func (bs *BridgeServer) Start() {
 	mux := http.NewServeMux()
 	mux.HandleFunc(bs.path, bs.handleWS)
+
+	// Session management REST endpoints
+	mux.HandleFunc("/bridge/sessions", bs.authHTTP(bs.handleSessions))
+	mux.HandleFunc("/bridge/sessions/", bs.authHTTP(bs.handleSessionRoutes))
 
 	addr := fmt.Sprintf(":%d", bs.port)
 	bs.server = &http.Server{Addr: addr, Handler: mux}
@@ -677,6 +682,205 @@ func (a *bridgeAdapter) handlePreviewAck(raw json.RawMessage) {
 	if ok {
 		ch <- ack.PreviewHandle
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Session management REST API (on BridgeServer)
+// ---------------------------------------------------------------------------
+
+// authHTTP wraps an HTTP handler with token authentication.
+func (bs *BridgeServer) authHTTP(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !bs.authenticate(r) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "unauthorized"})
+			return
+		}
+		handler(w, r)
+	}
+}
+
+func bridgeJSON(w http.ResponseWriter, status int, data any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]any{"ok": true, "data": data})
+}
+
+func bridgeError(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": msg})
+}
+
+// resolveEngineForSessionKey returns the engine ref for a given session key.
+func (bs *BridgeServer) resolveEngineForSessionKey(sessionKey string) *bridgeEngineRef {
+	return bs.resolveEngine(sessionKey)
+}
+
+// handleSessions handles GET /bridge/sessions and POST /bridge/sessions.
+func (bs *BridgeServer) handleSessions(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		sessionKey := r.URL.Query().Get("session_key")
+		if sessionKey == "" {
+			bridgeError(w, http.StatusBadRequest, "session_key query parameter is required")
+			return
+		}
+		ref := bs.resolveEngineForSessionKey(sessionKey)
+		if ref == nil {
+			bridgeError(w, http.StatusNotFound, "no engine found for session key")
+			return
+		}
+
+		sessions := ref.engine.sessions.ListSessions(sessionKey)
+		activeID := ref.engine.sessions.ActiveSessionID(sessionKey)
+
+		list := make([]map[string]any, len(sessions))
+		for i, s := range sessions {
+			list[i] = map[string]any{
+				"id":            s.ID,
+				"name":          s.GetName(),
+				"history_count": len(s.History),
+			}
+		}
+
+		bridgeJSON(w, http.StatusOK, map[string]any{
+			"sessions":          list,
+			"active_session_id": activeID,
+		})
+
+	case http.MethodPost:
+		var body struct {
+			SessionKey string `json:"session_key"`
+			Name       string `json:"name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			bridgeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+		if body.SessionKey == "" {
+			bridgeError(w, http.StatusBadRequest, "session_key is required")
+			return
+		}
+		ref := bs.resolveEngineForSessionKey(body.SessionKey)
+		if ref == nil {
+			bridgeError(w, http.StatusNotFound, "no engine found for session key")
+			return
+		}
+		name := body.Name
+		if name == "" {
+			name = "default"
+		}
+		s := ref.engine.sessions.NewSession(body.SessionKey, name)
+		bridgeJSON(w, http.StatusOK, map[string]any{
+			"id":      s.ID,
+			"name":    s.GetName(),
+			"message": "session created",
+		})
+
+	default:
+		bridgeError(w, http.StatusMethodNotAllowed, "GET or POST only")
+	}
+}
+
+// handleSessionRoutes dispatches /bridge/sessions/{sub} routes.
+func (bs *BridgeServer) handleSessionRoutes(w http.ResponseWriter, r *http.Request) {
+	sub := strings.TrimPrefix(r.URL.Path, "/bridge/sessions/")
+	if sub == "" {
+		bridgeError(w, http.StatusBadRequest, "session id required")
+		return
+	}
+
+	// POST /bridge/sessions/switch
+	if sub == "switch" {
+		bs.handleSessionSwitch(w, r)
+		return
+	}
+
+	// GET or DELETE /bridge/sessions/{id}
+	sessionKey := r.URL.Query().Get("session_key")
+	if sessionKey == "" {
+		bridgeError(w, http.StatusBadRequest, "session_key query parameter is required")
+		return
+	}
+	ref := bs.resolveEngineForSessionKey(sessionKey)
+	if ref == nil {
+		bridgeError(w, http.StatusNotFound, "no engine found for session key")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		s := ref.engine.sessions.FindByID(sub)
+		if s == nil {
+			bridgeError(w, http.StatusNotFound, "session not found")
+			return
+		}
+		histLimit := 50
+		if v := r.URL.Query().Get("history_limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				histLimit = n
+			}
+		}
+		hist := s.GetHistory(histLimit)
+		histJSON := make([]map[string]any, len(hist))
+		for i, h := range hist {
+			histJSON[i] = map[string]any{
+				"role":    h.Role,
+				"content": h.Content,
+			}
+		}
+		bridgeJSON(w, http.StatusOK, map[string]any{
+			"id":      s.ID,
+			"name":    s.GetName(),
+			"history": histJSON,
+		})
+
+	case http.MethodDelete:
+		if ref.engine.sessions.DeleteByID(sub) {
+			bridgeJSON(w, http.StatusOK, map[string]string{"message": "session deleted"})
+		} else {
+			bridgeError(w, http.StatusNotFound, "session not found")
+		}
+
+	default:
+		bridgeError(w, http.StatusMethodNotAllowed, "GET or DELETE only")
+	}
+}
+
+// handleSessionSwitch handles POST /bridge/sessions/switch.
+func (bs *BridgeServer) handleSessionSwitch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		bridgeError(w, http.StatusMethodNotAllowed, "POST only")
+		return
+	}
+	var body struct {
+		SessionKey string `json:"session_key"`
+		Target     string `json:"target"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		bridgeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if body.SessionKey == "" || body.Target == "" {
+		bridgeError(w, http.StatusBadRequest, "session_key and target are required")
+		return
+	}
+	ref := bs.resolveEngineForSessionKey(body.SessionKey)
+	if ref == nil {
+		bridgeError(w, http.StatusNotFound, "no engine found for session key")
+		return
+	}
+	s, err := ref.engine.sessions.SwitchSession(body.SessionKey, body.Target)
+	if err != nil {
+		bridgeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	bridgeJSON(w, http.StatusOK, map[string]any{
+		"message":           "session switched",
+		"active_session_id": s.ID,
+	})
 }
 
 // ---------------------------------------------------------------------------
