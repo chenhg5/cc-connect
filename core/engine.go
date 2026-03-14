@@ -6557,6 +6557,7 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 	if err != nil {
 		return "", fmt.Errorf("start relay session: %w", err)
 	}
+	defer agentSession.Close()
 
 	if session.CompareAndSetAgentSessionID(agentSession.CurrentSessionID()) {
 		e.sessions.Save()
