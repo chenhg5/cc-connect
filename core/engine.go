@@ -1869,6 +1869,7 @@ var builtinCommands = []struct {
 	{[]string{"bind"}, "bind"},
 	{[]string{"search", "find"}, "search"},
 	{[]string{"shell", "sh", "exec", "run"}, "shell"},
+	{[]string{"cd", "chdir", "workdir"}, "cd"},
 	{[]string{"tts"}, "tts"},
 	{[]string{"workspace", "ws"}, "workspace"},
 }
@@ -2009,6 +2010,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdSearch(p, msg, args)
 	case "shell":
 		e.cmdShell(p, msg, raw)
+	case "cd":
+		e.cmdCd(p, msg, args)
 	case "tts":
 		e.cmdTTS(p, msg, args)
 	case "workspace":
@@ -2411,6 +2414,49 @@ func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
 
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf("$ %s\n```\n%s\n```", shellCmd, result))
 	}()
+}
+
+func (e *Engine) cmdCd(p Platform, msg *Message, args []string) {
+	agent, sessions, interactiveKey, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+	switcher, ok := agent.(WorkDirSwitcher)
+	if !ok {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCdNotSupported))
+		return
+	}
+
+	if len(args) == 0 {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgCdCurrent, switcher.GetWorkDir()))
+		return
+	}
+
+	newDir := filepath.Clean(strings.Join(args, " "))
+	if !filepath.IsAbs(newDir) {
+		baseDir := switcher.GetWorkDir()
+		if baseDir == "" {
+			baseDir, _ = os.Getwd()
+		}
+		newDir = filepath.Join(baseDir, newDir)
+	}
+
+	info, err := os.Stat(newDir)
+	if err != nil || !info.IsDir() {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgCdInvalidPath, newDir))
+		return
+	}
+
+	switcher.SetWorkDir(newDir)
+	e.cleanupInteractiveState(interactiveKey)
+
+	s := sessions.GetOrCreateActive(msg.SessionKey)
+	s.SetAgentSessionID("")
+	s.ClearHistory()
+	sessions.Save()
+
+	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgCdChanged, newDir))
 }
 
 // cmdSearch searches sessions by name or message content.
