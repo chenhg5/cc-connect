@@ -469,10 +469,10 @@ func (gs *geminiSession) Close() error {
 	}()
 	select {
 	case <-done:
+		close(gs.events)
 	case <-time.After(8 * time.Second):
 		slog.Warn("geminiSession: close timed out, abandoning wg.Wait")
 	}
-	close(gs.events)
 	return nil
 }
 

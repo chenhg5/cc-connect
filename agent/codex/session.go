@@ -497,10 +497,10 @@ func (cs *codexSession) Close() error {
 	}()
 	select {
 	case <-done:
+		close(cs.events)
 	case <-time.After(8 * time.Second):
 		slog.Warn("codexSession: close timed out, abandoning wg.Wait")
 	}
-	close(cs.events)
 	return nil
 }
 
