@@ -198,7 +198,7 @@ func TestSession_GetAgentSessionID(t *testing.T) {
 	if got := s.GetAgentSessionID(); got != "" {
 		t.Errorf("initial GetAgentSessionID = %q, want empty", got)
 	}
-	s.SetAgentSessionID("sess-1")
+	s.SetAgentSessionID("sess-1", "test")
 	if got := s.GetAgentSessionID(); got != "sess-1" {
 		t.Errorf("GetAgentSessionID = %q, want %q", got, "sess-1")
 	}
@@ -218,7 +218,7 @@ func TestSession_ConcurrentGetSet(t *testing.T) {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			s.SetAgentSessionID("id")
+			s.SetAgentSessionID("id", "test")
 		}()
 		go func() {
 			defer wg.Done()

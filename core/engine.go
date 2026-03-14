@@ -251,6 +251,10 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		eventIdleTimeout:  defaultEventIdleTimeout,
 	}
 
+	if ag != nil {
+		e.sessions.InvalidateForAgent(ag.Name())
+	}
+
 	if cp, ok := ag.(CommandProvider); ok {
 		e.commands.SetAgentDirs(cp.CommandDirs())
 	}
@@ -1419,7 +1423,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	}
 
 	if newID := agentSession.CurrentSessionID(); newID != "" {
-		session.CompareAndSetAgentSessionID(newID)
+		session.CompareAndSetAgentSessionID(newID, agent.Name())
 	}
 
 	state = &interactiveState{
@@ -1624,7 +1628,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			}
 			if event.SessionID != "" {
-				if session.CompareAndSetAgentSessionID(event.SessionID) {
+				if session.CompareAndSetAgentSessionID(event.SessionID, e.agent.Name()) {
 					pendingName := session.GetName()
 					if pendingName != "" && pendingName != "session" && pendingName != "default" {
 						e.sessions.SetSessionName(event.SessionID, pendingName)
@@ -1713,7 +1717,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventResult:
 			if event.SessionID != "" {
-				session.SetAgentSessionID(event.SessionID)
+				session.SetAgentSessionID(event.SessionID, e.agent.Name())
 			}
 
 			fullResponse := event.Content
@@ -2284,7 +2288,7 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	slog.Info("cmdSwitch: cleanup done", "session_key", msg.SessionKey)
 
 	session := sessions.GetOrCreateActive(msg.SessionKey)
-	session.SetAgentInfo(matched.ID, matched.Summary)
+	session.SetAgentInfo(matched.ID, agent.Name(), matched.Summary)
 	session.ClearHistory()
 	sessions.Save()
 
@@ -3530,7 +3534,7 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 	e.cleanupInteractiveState(msg.SessionKey)
 
 	s := e.sessions.GetOrCreateActive(msg.SessionKey)
-	s.SetAgentSessionID("")
+	s.SetAgentSessionID("", "")
 	s.ClearHistory()
 	e.sessions.Save()
 
@@ -3611,7 +3615,7 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 	e.cleanupInteractiveState(msg.SessionKey)
 
 	s := e.sessions.GetOrCreateActive(msg.SessionKey)
-	s.SetAgentSessionID("")
+	s.SetAgentSessionID("", "")
 	s.ClearHistory()
 	e.sessions.Save()
 
@@ -4583,7 +4587,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		switcher.SetModel(target)
 		e.cleanupInteractiveState(sessionKey)
 		s := e.sessions.GetOrCreateActive(sessionKey)
-		s.SetAgentSessionID("")
+		s.SetAgentSessionID("", "")
 		s.ClearHistory()
 		e.sessions.Save()
 
@@ -4605,7 +4609,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 				switcher.SetReasoningEffort(target)
 				e.cleanupInteractiveState(sessionKey)
 				s := e.sessions.GetOrCreateActive(sessionKey)
-				s.SetAgentSessionID("")
+				s.SetAgentSessionID("", "")
 				s.ClearHistory()
 				e.sessions.Save()
 				return
@@ -4701,7 +4705,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 		e.cleanupInteractiveState(interactiveKey)
 		session := sessions.GetOrCreateActive(sessionKey)
-		session.SetAgentInfo(matched.ID, matched.Summary)
+		session.SetAgentInfo(matched.ID, agent.Name(), matched.Summary)
 		session.ClearHistory()
 		sessions.Save()
 
@@ -7068,7 +7072,7 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 	}
 	defer agentSession.Close()
 
-	if session.CompareAndSetAgentSessionID(agentSession.CurrentSessionID()) {
+	if session.CompareAndSetAgentSessionID(agentSession.CurrentSessionID(), e.agent.Name()) {
 		e.sessions.Save()
 	}
 
@@ -7087,13 +7091,13 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 				textParts = append(textParts, event.Content)
 			}
 			if event.SessionID != "" {
-				if session.CompareAndSetAgentSessionID(event.SessionID) {
+				if session.CompareAndSetAgentSessionID(event.SessionID, e.agent.Name()) {
 					e.sessions.Save()
 				}
 			}
 		case EventResult:
 			if event.SessionID != "" {
-				session.SetAgentSessionID(event.SessionID)
+				session.SetAgentSessionID(event.SessionID, e.agent.Name())
 				e.sessions.Save()
 			}
 			resp := event.Content
