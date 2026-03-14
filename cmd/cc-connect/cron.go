@@ -35,7 +35,7 @@ func runCron(args []string) {
 }
 
 func runCronAdd(args []string) {
-	var project, sessionKey, cronExpr, prompt, desc, dataDir string
+	var project, sessionKey, cronExpr, prompt, execCmd, desc, dataDir string
 
 	var positional []string
 	for i := 0; i < len(args); i++ {
@@ -59,6 +59,11 @@ func runCronAdd(args []string) {
 			if i+1 < len(args) {
 				i++
 				prompt = args[i]
+			}
+		case "--exec":
+			if i+1 < len(args) {
+				i++
+				execCmd = args[i]
 			}
 		case "--desc", "--description":
 			if i+1 < len(args) {
@@ -86,19 +91,23 @@ func runCronAdd(args []string) {
 		sessionKey = os.Getenv("CC_SESSION_KEY")
 	}
 
-	// If cron expr not provided via --cron, try positional: first 5 fields are cron, rest is prompt
+	// If cron expr not provided via --cron, try positional: first 5 fields are cron, rest is prompt/exec
 	if cronExpr == "" && len(positional) >= 6 {
 		cronExpr = strings.Join(positional[:5], " ")
-		if prompt == "" {
+		if prompt == "" && execCmd == "" {
 			prompt = strings.Join(positional[5:], " ")
 		}
-	} else if prompt == "" && len(positional) > 0 {
+	} else if prompt == "" && execCmd == "" && len(positional) > 0 {
 		prompt = strings.Join(positional, " ")
 	}
 
-	if cronExpr == "" || prompt == "" {
-		fmt.Fprintln(os.Stderr, "Error: cron expression and prompt are required")
+	if cronExpr == "" || (prompt == "" && execCmd == "") {
+		fmt.Fprintln(os.Stderr, "Error: cron expression and either --prompt or --exec are required")
 		printCronAddUsage()
+		os.Exit(1)
+	}
+	if prompt != "" && execCmd != "" {
+		fmt.Fprintln(os.Stderr, "Error: --prompt and --exec are mutually exclusive")
 		os.Exit(1)
 	}
 
@@ -113,6 +122,7 @@ func runCronAdd(args []string) {
 		"session_key": sessionKey,
 		"cron_expr":   cronExpr,
 		"prompt":      prompt,
+		"exec":        execCmd,
 		"description": desc,
 	})
 
@@ -133,7 +143,11 @@ func runCronAdd(args []string) {
 	json.Unmarshal(body, &result)
 	fmt.Printf("Cron job created: %s\n", result["id"])
 	fmt.Printf("Schedule: %s\n", result["cron_expr"])
-	fmt.Printf("Prompt: %s\n", result["prompt"])
+	if execCmd != "" {
+		fmt.Printf("Command: %s\n", result["exec"])
+	} else {
+		fmt.Printf("Prompt: %s\n", result["prompt"])
+	}
 }
 
 func runCronList(args []string) {
@@ -206,10 +220,15 @@ func runCronList(args []string) {
 		id, _ := j["id"].(string)
 		expr, _ := j["cron_expr"].(string)
 		prompt, _ := j["prompt"].(string)
+		execCmd, _ := j["exec"].(string)
 		desc, _ := j["description"].(string)
 		display := desc
 		if display == "" {
-			display = prompt
+			if execCmd != "" {
+				display = "🖥 " + execCmd
+			} else {
+				display = prompt
+			}
 			if len(display) > 60 {
 				display = display[:60] + "..."
 			}
@@ -287,18 +306,20 @@ Run 'cc-connect cron <command> --help' for details.`)
 func printCronAddUsage() {
 	fmt.Println(`Usage: cc-connect cron add [options] [<min> <hour> <day> <month> <weekday> <prompt>]
 
-Create a new scheduled task.
+Create a new scheduled task (agent prompt or shell command).
 
 Options:
   -p, --project <name>       Target project (auto-detected from CC_PROJECT env)
   -s, --session-key <key>    Target session (auto-detected from CC_SESSION_KEY env)
   -c, --cron <expr>          Cron expression, e.g. "0 6 * * *"
-      --prompt <text>        Task prompt
+      --prompt <text>        Task prompt (runs through agent)
+      --exec <command>       Shell command (runs directly, mutually exclusive with --prompt)
       --desc <text>          Short description
       --data-dir <path>      Data directory (default: ~/.cc-connect)
   -h, --help                 Show this help
 
 Examples:
   cc-connect cron add --cron "0 6 * * *" --prompt "Collect GitHub trending data" --desc "Daily Trending"
+  cc-connect cron add --cron "*/30 * * * *" --exec "df -h" --desc "Disk usage check"
   cc-connect cron add 0 6 * * * Collect GitHub trending data and send me a summary`)
 }

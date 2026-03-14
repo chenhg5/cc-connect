@@ -22,12 +22,19 @@ type CronJob struct {
 	SessionKey  string    `json:"session_key"`
 	CronExpr    string    `json:"cron_expr"`
 	Prompt      string    `json:"prompt"`
+	Exec        string    `json:"exec,omitempty"`    // shell command; mutually exclusive with Prompt
+	WorkDir     string    `json:"work_dir,omitempty"` // working directory for exec; empty = agent work_dir
 	Description string    `json:"description"`
 	Enabled     bool      `json:"enabled"`
 	Silent      *bool     `json:"silent,omitempty"` // suppress start notification; nil = use global default
 	CreatedAt   time.Time `json:"created_at"`
 	LastRun     time.Time `json:"last_run,omitempty"`
 	LastError   string    `json:"last_error,omitempty"`
+}
+
+// IsShellJob returns true if the job runs a shell command directly.
+func (j *CronJob) IsShellJob() bool {
+	return j.Exec != ""
 }
 
 // CronStore persists cron jobs to a JSON file.

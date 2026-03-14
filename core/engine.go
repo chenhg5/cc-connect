@@ -552,9 +552,17 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 	if !silent {
 		desc := job.Description
 		if desc == "" {
-			desc = truncateStr(job.Prompt, 40)
+			if job.IsShellJob() {
+				desc = truncateStr(job.Exec, 40)
+			} else {
+				desc = truncateStr(job.Prompt, 40)
+			}
 		}
 		e.send(targetPlatform, replyCtx, fmt.Sprintf("⏰ %s", desc))
+	}
+
+	if job.IsShellJob() {
+		return e.executeCronShell(targetPlatform, replyCtx, job)
 	}
 
 	msg := &Message{
@@ -572,6 +580,47 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 	}
 
 	e.processInteractiveMessage(targetPlatform, msg, session)
+	return nil
+}
+
+// executeCronShell runs a shell command for a cron job and sends the output.
+func (e *Engine) executeCronShell(p Platform, replyCtx any, job *CronJob) error {
+	workDir := job.WorkDir
+	if workDir == "" {
+		if wd, ok := e.agent.(interface{ GetWorkDir() string }); ok {
+			workDir = wd.GetWorkDir()
+		}
+	}
+	if workDir == "" {
+		workDir, _ = os.Getwd()
+	}
+
+	ctx, cancel := context.WithTimeout(e.ctx, cronJobTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "sh", "-c", job.Exec)
+	cmd.Dir = workDir
+	output, err := cmd.CombinedOutput()
+
+	if ctx.Err() == context.DeadlineExceeded {
+		e.send(p, replyCtx, fmt.Sprintf("⏰ ⚠️ timeout: `%s`", truncateStr(job.Exec, 60)))
+		return fmt.Errorf("shell command timed out")
+	}
+
+	result := strings.TrimSpace(string(output))
+	if err != nil {
+		if result != "" {
+			e.send(p, replyCtx, fmt.Sprintf("⏰ ❌ `%s`\n\n%s\n\nerror: %v", truncateStr(job.Exec, 60), truncateStr(result, 3000), err))
+		} else {
+			e.send(p, replyCtx, fmt.Sprintf("⏰ ❌ `%s`\nerror: %v", truncateStr(job.Exec, 60), err))
+		}
+		return fmt.Errorf("shell: %w", err)
+	}
+
+	if result == "" {
+		result = "(no output)"
+	}
+	e.send(p, replyCtx, fmt.Sprintf("⏰ ✅ `%s`\n\n%s", truncateStr(job.Exec, 60), truncateStr(result, 3000)))
 	return nil
 }
 
@@ -5262,7 +5311,11 @@ func (e *Engine) renderCronCard(sessionKey string) *Card {
 		}
 		desc := j.Description
 		if desc == "" {
-			desc = truncateStr(j.Prompt, 60)
+			if j.IsShellJob() {
+				desc = "🖥 " + truncateStr(j.Exec, 60)
+			} else {
+				desc = truncateStr(j.Prompt, 60)
+			}
 		}
 		sb.WriteString(fmt.Sprintf("%s %s\n", status, desc))
 		sb.WriteString(e.i18n.Tf(MsgCronIDLabel, j.ID))
@@ -5573,11 +5626,13 @@ func (e *Engine) cmdCron(p Platform, msg *Message, args []string) {
 	}
 
 	sub := matchSubCommand(strings.ToLower(args[0]), []string{
-		"add", "list", "del", "delete", "rm", "remove", "enable", "disable",
+		"add", "addexec", "list", "del", "delete", "rm", "remove", "enable", "disable",
 	})
 	switch sub {
 	case "add":
 		e.cmdCronAdd(p, msg, args[1:])
+	case "addexec":
+		e.cmdCronAddExec(p, msg, args[1:])
 	case "list":
 		e.cmdCronList(p, msg)
 	case "del", "delete", "rm", "remove":
@@ -5619,6 +5674,39 @@ func (e *Engine) cmdCronAdd(p Platform, msg *Message, args []string) {
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronAdded), job.ID, cronExpr, truncateStr(prompt, 60)))
 }
 
+func (e *Engine) cmdCronAddExec(p Platform, msg *Message, args []string) {
+	if !e.isAdmin(msg.UserID) {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgAdminRequired), "/cron addexec"))
+		return
+	}
+
+	// /cron addexec <min> <hour> <day> <month> <weekday> <shell command...>
+	if len(args) < 6 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCronAddExecUsage))
+		return
+	}
+
+	cronExpr := strings.Join(args[:5], " ")
+	shellCmd := strings.Join(args[5:], " ")
+
+	job := &CronJob{
+		ID:         GenerateCronID(),
+		Project:    e.name,
+		SessionKey: msg.SessionKey,
+		CronExpr:   cronExpr,
+		Exec:       shellCmd,
+		Enabled:    true,
+		CreatedAt:  time.Now(),
+	}
+
+	if err := e.cronScheduler.AddJob(job); err != nil {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
+		return
+	}
+
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronAddedExec), job.ID, cronExpr, truncateStr(shellCmd, 60)))
+}
+
 func (e *Engine) cmdCronList(p Platform, msg *Message) {
 	jobs := e.cronScheduler.Store().ListBySessionKey(msg.SessionKey)
 	if len(jobs) == 0 {
@@ -5644,7 +5732,11 @@ func (e *Engine) cmdCronList(p Platform, msg *Message) {
 		}
 		desc := j.Description
 		if desc == "" {
-			desc = truncateStr(j.Prompt, 60)
+			if j.IsShellJob() {
+				desc = "🖥 " + truncateStr(j.Exec, 60)
+			} else {
+				desc = truncateStr(j.Prompt, 60)
+			}
 		}
 		sb.WriteString(fmt.Sprintf("%s %s\n", status, desc))
 

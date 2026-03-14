@@ -190,6 +190,8 @@ type CronAddRequest struct {
 	SessionKey  string `json:"session_key"`
 	CronExpr    string `json:"cron_expr"`
 	Prompt      string `json:"prompt"`
+	Exec        string `json:"exec"`
+	WorkDir     string `json:"work_dir"`
 	Description string `json:"description"`
 	Silent      *bool  `json:"silent,omitempty"`
 }
@@ -209,8 +211,16 @@ func (s *APIServer) handleCronAdd(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.CronExpr == "" || req.Prompt == "" {
-		http.Error(w, "cron_expr and prompt are required", http.StatusBadRequest)
+	if req.CronExpr == "" {
+		http.Error(w, "cron_expr is required", http.StatusBadRequest)
+		return
+	}
+	if req.Prompt == "" && req.Exec == "" {
+		http.Error(w, "either prompt or exec is required", http.StatusBadRequest)
+		return
+	}
+	if req.Prompt != "" && req.Exec != "" {
+		http.Error(w, "prompt and exec are mutually exclusive", http.StatusBadRequest)
 		return
 	}
 
@@ -236,6 +246,8 @@ func (s *APIServer) handleCronAdd(w http.ResponseWriter, r *http.Request) {
 		SessionKey:  req.SessionKey,
 		CronExpr:    req.CronExpr,
 		Prompt:      req.Prompt,
+		Exec:        req.Exec,
+		WorkDir:     req.WorkDir,
 		Description: req.Description,
 		Enabled:     true,
 		Silent:      req.Silent,

@@ -199,6 +199,8 @@ const (
 	MsgCronUsage        MsgKey = "cron_usage"
 	MsgCronAddUsage     MsgKey = "cron_add_usage"
 	MsgCronAdded        MsgKey = "cron_added"
+	MsgCronAddedExec    MsgKey = "cron_added_exec"
+	MsgCronAddExecUsage MsgKey = "cron_addexec_usage"
 	MsgCronEmpty        MsgKey = "cron_empty"
 	MsgCronListTitle    MsgKey = "cron_list_title"
 	MsgCronListFooter   MsgKey = "cron_list_footer"
@@ -1329,6 +1331,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "✅ 定時任務已建立\nID: `%s`\n調度: `%s`\n內容: %s",
 		LangJapanese:           "✅ スケジュールタスクを作成しました\nID: `%s`\nスケジュール: `%s`\n内容: %s",
 		LangSpanish:            "✅ Tarea programada creada\nID: `%s`\nProgramación: `%s`\nContenido: %s",
+	},
+	MsgCronAddedExec: {
+		LangEnglish:            "✅ Shell cron job created\nID: `%s`\nSchedule: `%s`\nCommand: `%s`",
+		LangChinese:            "✅ Shell 定时任务已创建\nID: `%s`\n调度: `%s`\n命令: `%s`",
+		LangTraditionalChinese: "✅ Shell 定時任務已建立\nID: `%s`\n調度: `%s`\n命令: `%s`",
+		LangJapanese:           "✅ Shell スケジュールタスクを作成しました\nID: `%s`\nスケジュール: `%s`\nコマンド: `%s`",
+		LangSpanish:            "✅ Tarea shell programada creada\nID: `%s`\nProgramación: `%s`\nComando: `%s`",
+	},
+	MsgCronAddExecUsage: {
+		LangEnglish:            "Usage: /cron addexec <min> <hour> <day> <month> <weekday> <shell command>\nExample: /cron addexec 0 6 * * * df -h",
+		LangChinese:            "用法：/cron addexec <分> <时> <日> <月> <周> <shell 命令>\n示例：/cron addexec 0 6 * * * df -h",
+		LangTraditionalChinese: "用法：/cron addexec <分> <時> <日> <月> <週> <shell 命令>\n範例：/cron addexec 0 6 * * * df -h",
+		LangJapanese:           "使い方: /cron addexec <分> <時> <日> <月> <曜日> <シェルコマンド>\n例: /cron addexec 0 6 * * * df -h",
+		LangSpanish:            "Uso: /cron addexec <min> <hora> <día> <mes> <día_semana> <comando shell>\nEjemplo: /cron addexec 0 6 * * * df -h",
 	},
 	MsgCronEmpty: {
 		LangEnglish:            "No scheduled tasks.",
