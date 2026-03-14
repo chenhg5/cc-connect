@@ -377,6 +377,116 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	return p.Reply(ctx, rctx, content)
 }
 
+// SendAudio uploads audio bytes to DingTalk and sends a voice message.
+// Implements core.AudioSender interface.
+func (p *Platform) SendAudio(ctx context.Context, rctx any, audio []byte, format string) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("dingtalk: SendAudio: invalid reply context type %T", rctx)
+	}
+
+	// Upload audio to DingTalk media API
+	mediaID, err := p.uploadMedia(ctx, audio, format)
+	if err != nil {
+		return fmt.Errorf("dingtalk: upload audio: %w", err)
+	}
+
+	slog.Debug("dingtalk: audio uploaded", "media_id", mediaID, "format", format, "size", len(audio))
+
+	// Send audio message using session webhook
+	payload := map[string]any{
+		"msgtype": "audio",
+		"audio": map[string]string{
+			"mediaId": mediaID,
+			"duration": "0", // DingTalk requires duration, but 0 is acceptable
+		},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("dingtalk: marshal audio message: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rc.sessionWebhook, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("dingtalk: create audio request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := core.HTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("dingtalk: send audio: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("dingtalk: send audio returned status %d", resp.StatusCode)
+	}
+
+	slog.Info("dingtalk: audio message sent successfully", "media_id", mediaID)
+	return nil
+}
+
+// uploadMedia uploads audio file to DingTalk and returns the media ID.
+func (p *Platform) uploadMedia(ctx context.Context, audio []byte, format string) (string, error) {
+	token, err := p.getAccessToken()
+	if err != nil {
+		return "", fmt.Errorf("get access token: %w", err)
+	}
+
+	// Determine MIME type from format
+	mimeType := "audio/amr"
+	switch format {
+	case "mp3", "mpeg":
+		mimeType = "audio/mpeg"
+	case "wav", "wave":
+		mimeType = "audio/wav"
+	case "opus":
+		mimeType = "audio/opus"
+	case "m4a":
+		mimeType = "audio/mp4"
+	case "aac":
+		mimeType = "audio/aac"
+	}
+
+	uploadURL := "https://api.dingtalk.com/v1.0/media/upload"
+
+	// Create multipart form data
+	var buf bytes.Buffer
+	buf.Write(audio)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, uploadURL, &buf)
+	if err != nil {
+		return "", fmt.Errorf("create upload request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", mimeType)
+	req.Header.Set("x-acs-dingtalk-access-token", token)
+
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("upload request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("upload returned status %d: %s", resp.StatusCode, respBody)
+	}
+
+	var uploadResp struct {
+		MediaID string `json:"media_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&uploadResp); err != nil {
+		return "", fmt.Errorf("decode upload response: %w", err)
+	}
+
+	if uploadResp.MediaID == "" {
+		return "", fmt.Errorf("empty media_id in upload response")
+	}
+
+	return uploadResp.MediaID, nil
+}
+
 func (p *Platform) Stop() error {
 	if p.streamClient != nil {
 		p.streamClient.Close()
