@@ -464,10 +464,10 @@ func (cs *cursorSession) Close() error {
 	}()
 	select {
 	case <-done:
+		close(cs.events)
 	case <-time.After(8 * time.Second):
 		slog.Warn("cursorSession: close timed out, abandoning wg.Wait")
 	}
-	close(cs.events)
 	return nil
 }
 

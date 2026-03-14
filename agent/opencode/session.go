@@ -393,10 +393,10 @@ func (s *opencodeSession) Close() error {
 	}()
 	select {
 	case <-done:
+		close(s.events)
 	case <-time.After(8 * time.Second):
 		slog.Warn("opencodeSession: close timed out, abandoning wg.Wait")
 	}
-	close(s.events)
 	return nil
 }
 

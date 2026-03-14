@@ -288,10 +288,10 @@ func (qs *qoderSession) Close() error {
 	}()
 	select {
 	case <-done:
+		close(qs.events)
 	case <-time.After(8 * time.Second):
 		slog.Warn("qoderSession: close timed out, abandoning wg.Wait")
 	}
-	close(qs.events)
 	return nil
 }
 
