@@ -529,6 +529,19 @@ func (e *Engine) ProjectName() string {
 	return e.name
 }
 
+// ActiveSessionKeys returns the session keys of all active interactive sessions.
+func (e *Engine) ActiveSessionKeys() []string {
+	e.interactiveMu.Lock()
+	defer e.interactiveMu.Unlock()
+	var keys []string
+	for key, state := range e.interactiveStates {
+		if state.platform != nil {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
 // ExecuteCronJob runs a cron job by injecting a synthetic message into the engine.
 // It finds the platform that owns the session key, reconstructs a reply context,
 // and processes the message as if the user sent it.
