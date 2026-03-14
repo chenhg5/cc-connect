@@ -363,6 +363,37 @@ func TestSaveImagesToDisk_Empty(t *testing.T) {
 	}
 }
 
+// ── cleanAttachments ─────────────────────────────────────────
+
+func TestCleanAttachments(t *testing.T) {
+	tmpDir := t.TempDir()
+	attachDir := filepath.Join(tmpDir, ".cc-connect", "attachments")
+	os.MkdirAll(attachDir, 0o755)
+
+	// Create some files.
+	os.WriteFile(filepath.Join(attachDir, "old1.png"), []byte("data"), 0o644)
+	os.WriteFile(filepath.Join(attachDir, "old2.jpg"), []byte("data"), 0o644)
+
+	// Verify files exist.
+	entries, _ := os.ReadDir(attachDir)
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 files, got %d", len(entries))
+	}
+
+	cleanAttachments(tmpDir)
+
+	// Files should be removed.
+	entries, _ = os.ReadDir(attachDir)
+	if len(entries) != 0 {
+		t.Errorf("expected 0 files after clean, got %d", len(entries))
+	}
+}
+
+func TestCleanAttachments_NonexistentDir(t *testing.T) {
+	// Should not panic or error on non-existent directory.
+	cleanAttachments("/nonexistent/path/xyz")
+}
+
 // ── handleEvent ──────────────────────────────────────────────
 
 func newTestSession() *piSession {

@@ -21,7 +21,7 @@ import (
 )
 
 // piSession manages a multi-turn pi coding agent conversation.
-// Each Send() spawns `pi --mode json --no-input <prompt>`.
+// Each Send() spawns `pi --mode json -p <prompt>`.
 // Subsequent turns use `--session <sessionID>` to resume.
 type piSession struct {
 	cmd       string
@@ -62,6 +62,9 @@ func newPiSession(ctx context.Context, cmd, workDir, model, mode, resumeID strin
 }
 
 func (s *piSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
+	// Clean up attachments from previous turns.
+	cleanAttachments(s.workDir)
+
 	// Save all attachments to disk — pi reads them via @file syntax.
 	var atFiles []string
 	if len(images) > 0 {
@@ -83,6 +86,10 @@ func (s *piSession) Send(prompt string, images []core.ImageAttachment, files []c
 
 	if s.model != "" {
 		args = append(args, "--model", s.model)
+	}
+
+	if s.mode == "yolo" {
+		args = append(args, "--auto-approve")
 	}
 
 	// Pass attachments as @file arguments
@@ -138,6 +145,9 @@ func (s *piSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *byt
 		}
 	}()
 
+	// Pi's JSON events are small (typically <1KB each). A 10MB Scanner buffer
+	// is more than sufficient — no need for the bufio.Reader approach used by
+	// adapters that may receive very large single-line responses.
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 
@@ -388,11 +398,29 @@ func (s *piSession) Close() error {
 	return nil
 }
 
+// cleanAttachments removes files from the attachments directory to avoid
+// accumulating files across turns.
+func cleanAttachments(workDir string) {
+	attachDir := filepath.Join(workDir, ".cc-connect", "attachments")
+	entries, err := os.ReadDir(attachDir)
+	if err != nil {
+		return // directory may not exist yet
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			os.Remove(filepath.Join(attachDir, e.Name()))
+		}
+	}
+}
+
 // saveImagesToDisk saves image attachments to workDir/.cc-connect/attachments/
 // and returns the list of absolute file paths.
 func saveImagesToDisk(workDir string, images []core.ImageAttachment) []string {
 	attachDir := filepath.Join(workDir, ".cc-connect", "attachments")
-	os.MkdirAll(attachDir, 0o755)
+	if err := os.MkdirAll(attachDir, 0o755); err != nil {
+		slog.Error("piSession: failed to create attachments dir", "error", err)
+		return nil
+	}
 
 	var paths []string
 	for i, img := range images {
