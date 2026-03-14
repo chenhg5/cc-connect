@@ -908,6 +908,25 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 
 	session := sessions.GetOrCreateActive(msg.SessionKey)
 	if !session.TryLock() {
+		// Check for /btw — inject into the running session mid-turn
+		trimmed := strings.TrimSpace(content)
+		if isBtwCommand(trimmed) {
+			btw := strings.TrimSpace(trimmed[len(matchBtwPrefix(trimmed)):])
+			if btw != "" {
+				e.interactiveMu.Lock()
+				state, ok := e.interactiveStates[msg.SessionKey]
+				e.interactiveMu.Unlock()
+				if ok && state.agentSession != nil && state.agentSession.Alive() {
+					if err := state.agentSession.Send(btw, nil, nil); err != nil {
+						slog.Error("btw: send failed", "error", err)
+						e.reply(p, msg.ReplyCtx, "Failed to send btw message.")
+					} else {
+						e.reply(p, msg.ReplyCtx, "btw sent")
+					}
+					return
+				}
+			}
+		}
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
 		return
 	}
@@ -1871,6 +1890,26 @@ var builtinCommands = []struct {
 	{[]string{"shell", "sh", "exec", "run"}, "shell"},
 	{[]string{"tts"}, "tts"},
 	{[]string{"workspace", "ws"}, "workspace"},
+}
+
+// isBtwCommand checks if a trimmed message starts with a /btw command.
+func isBtwCommand(trimmed string) bool {
+	return matchBtwPrefix(trimmed) != ""
+}
+
+// matchBtwPrefix returns the prefix portion (e.g. "/btw ") if the
+// message starts with a btw command, or "" if it doesn't match.
+func matchBtwPrefix(trimmed string) string {
+	lower := strings.ToLower(trimmed)
+	for _, prefix := range []string{"/btw"} {
+		if strings.HasPrefix(lower, prefix) {
+			rest := trimmed[len(prefix):]
+			if rest == "" || rest[0] == ' ' {
+				return trimmed[:len(prefix)]
+			}
+		}
+	}
+	return ""
 }
 
 // matchPrefix finds a unique command matching the given prefix.
