@@ -1,0 +1,18 @@
+{
+  "planPath": "docs/plans/2026-03-12-multi-workspace-plan.md",
+  "tasks": [
+    {"id": 1, "subject": "Task 1: Add config fields", "status": "pending"},
+    {"id": 2, "subject": "Task 2: Workspace binding persistence", "status": "pending", "blockedBy": [1]},
+    {"id": 3, "subject": "Task 3: Workspace state and idle reaper", "status": "pending", "blockedBy": [1]},
+    {"id": 4, "subject": "Task 4: Channel name resolution in Slack platform", "status": "pending"},
+    {"id": 5, "subject": "Task 5: Engine multi-workspace fields and constructor", "status": "pending", "blockedBy": [2, 3]},
+    {"id": 6, "subject": "Task 6: Workspace resolution logic", "status": "pending", "blockedBy": [4, 5]},
+    {"id": 7, "subject": "Task 7: Init flow conversation handler", "status": "pending", "blockedBy": [6]},
+    {"id": 8, "subject": "Task 8: Wire multi-workspace routing into handleMessage", "status": "pending", "blockedBy": [6, 7]},
+    {"id": 9, "subject": "Task 9: Workspace commands", "status": "pending", "blockedBy": [6]},
+    {"id": 10, "subject": "Task 10: Wire multi-workspace in main.go", "status": "pending", "blockedBy": [5]},
+    {"id": 11, "subject": "Task 11: Integration testing", "status": "pending", "blockedBy": [8, 9, 10]},
+    {"id": 12, "subject": "Task 12: Update config.example.toml and verify build", "status": "pending", "blockedBy": [11]}
+  ],
+  "lastUpdated": "2026-03-12T01:30:00Z"
+}
