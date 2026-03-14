@@ -233,10 +233,11 @@ const (
 	MsgUsageFetchFailed   MsgKey = "usage_fetch_failed"
 
 	// Inline strings previously hardcoded in engine.go
-	MsgStatusMode    MsgKey = "status_mode"
-	MsgStatusSession MsgKey = "status_session"
-	MsgStatusCron    MsgKey = "status_cron"
-	MsgStatusQuiet   MsgKey = "status_quiet"
+	MsgStatusMode       MsgKey = "status_mode"
+	MsgStatusSession    MsgKey = "status_session"
+	MsgStatusCron       MsgKey = "status_cron"
+	MsgStatusQuiet      MsgKey = "status_quiet"
+	MsgStatusSessionKey MsgKey = "status_session_key"
 	MsgQuietOnShort  MsgKey = "quiet_on_short"
 	MsgQuietOffShort MsgKey = "quiet_off_short"
 
@@ -1392,35 +1393,35 @@ var messages = map[MsgKey]map[Language]string{
 			"Platforms: %s\n" +
 			"Uptime: %s\n" +
 			"Language: %s\n" +
-			"%s" + "%s" + "%s",
+			"%s" + "%s" + "%s" + "%s",
 		LangChinese: "cc-connect 状态\n\n" +
 			"项目: %s\n" +
 			"Agent: %s\n" +
 			"平台: %s\n" +
 			"运行时间: %s\n" +
 			"语言: %s\n" +
-			"%s" + "%s" + "%s",
+			"%s" + "%s" + "%s" + "%s",
 		LangTraditionalChinese: "cc-connect 狀態\n\n" +
 			"項目: %s\n" +
 			"Agent: %s\n" +
 			"平台: %s\n" +
 			"運行時間: %s\n" +
 			"語言: %s\n" +
-			"%s" + "%s" + "%s",
+			"%s" + "%s" + "%s" + "%s",
 		LangJapanese: "cc-connect ステータス\n\n" +
 			"プロジェクト: %s\n" +
 			"エージェント: %s\n" +
 			"プラットフォーム: %s\n" +
 			"稼働時間: %s\n" +
 			"言語: %s\n" +
-			"%s" + "%s" + "%s",
+			"%s" + "%s" + "%s" + "%s",
 		LangSpanish: "Estado de cc-connect\n\n" +
 			"Proyecto: %s\n" +
 			"Agente: %s\n" +
 			"Plataformas: %s\n" +
 			"Tiempo activo: %s\n" +
 			"Idioma: %s\n" +
-			"%s" + "%s" + "%s",
+			"%s" + "%s" + "%s" + "%s",
 	},
 	MsgModelCurrent: {
 		LangEnglish:            "Current model: %s",
@@ -1604,6 +1605,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "安靜模式: %s\n",
 		LangJapanese:           "出力抑制モード: %s\n",
 		LangSpanish:            "Modo silencioso: %s\n",
+	},
+	MsgStatusSessionKey: {
+		LangEnglish:            "Session Key: `%s`\n",
+		LangChinese:            "会话 Key: `%s`\n",
+		LangTraditionalChinese: "會話 Key: `%s`\n",
+		LangJapanese:           "セッションキー: `%s`\n",
+		LangSpanish:            "Clave de sesión: `%s`\n",
 	},
 	MsgQuietOnShort: {
 		LangEnglish:            "ON",

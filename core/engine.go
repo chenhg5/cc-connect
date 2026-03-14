@@ -575,6 +575,57 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 	return nil
 }
 
+// ExecuteHeartbeat runs a heartbeat check by injecting a synthetic message
+// into the main session, similar to cron but designed for periodic awareness.
+func (e *Engine) ExecuteHeartbeat(sessionKey, prompt string, silent bool) error {
+	platformName := ""
+	if idx := strings.Index(sessionKey, ":"); idx > 0 {
+		platformName = sessionKey[:idx]
+	}
+
+	var targetPlatform Platform
+	for _, p := range e.platforms {
+		if p.Name() == platformName {
+			targetPlatform = p
+			break
+		}
+	}
+	if targetPlatform == nil {
+		return fmt.Errorf("platform %q not found for session %q", platformName, sessionKey)
+	}
+
+	rc, ok := targetPlatform.(ReplyContextReconstructor)
+	if !ok {
+		return fmt.Errorf("platform %q does not support proactive messaging (heartbeat)", platformName)
+	}
+
+	replyCtx, err := rc.ReconstructReplyCtx(sessionKey)
+	if err != nil {
+		return fmt.Errorf("reconstruct reply context: %w", err)
+	}
+
+	if !silent {
+		e.send(targetPlatform, replyCtx, "💓 heartbeat")
+	}
+
+	msg := &Message{
+		SessionKey: sessionKey,
+		Platform:   platformName,
+		UserID:     "heartbeat",
+		UserName:   "heartbeat",
+		Content:    prompt,
+		ReplyCtx:   replyCtx,
+	}
+
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	if !session.TryLock() {
+		return fmt.Errorf("session %q is busy", sessionKey)
+	}
+
+	e.processInteractiveMessage(targetPlatform, msg, session)
+	return nil
+}
+
 func (e *Engine) Start() error {
 	var startErrs []error
 	for _, p := range e.platforms {
@@ -2468,6 +2519,8 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 			}
 		}
 
+		sessionKeyStr := e.i18n.Tf(MsgStatusSessionKey, msg.SessionKey)
+
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgStatusTitle,
 			e.name,
 			agent.Name(),
@@ -2477,6 +2530,7 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 			modeStr,
 			sessionStr,
 			cronStr,
+			sessionKeyStr,
 		))
 		return
 	}
@@ -2856,6 +2910,8 @@ func (e *Engine) renderStatusCard(sessionKey string) *Card {
 		}
 	}
 
+	sessionKeyStr := e.i18n.Tf(MsgStatusSessionKey, sessionKey)
+
 	statusText := e.i18n.Tf(MsgStatusTitle,
 		e.name,
 		agent.Name(),
@@ -2865,6 +2921,7 @@ func (e *Engine) renderStatusCard(sessionKey string) *Card {
 		modeStr,
 		sessionStr,
 		cronStr,
+		sessionKeyStr,
 	)
 	title, body := splitCardTitleBody(statusText)
 

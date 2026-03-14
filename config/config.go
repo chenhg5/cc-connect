@@ -99,6 +99,17 @@ type TTSConfig struct {
 	} `toml:"qwen"`
 }
 
+// HeartbeatConfig controls periodic heartbeat for a project.
+type HeartbeatConfig struct {
+	Enabled      *bool  `toml:"enabled"`                 // default false
+	IntervalMins *int   `toml:"interval_mins,omitempty"` // minutes between heartbeats; default 30
+	OnlyWhenIdle *bool  `toml:"only_when_idle,omitempty"`// only fire when the session is not busy; default true
+	SessionKey   string `toml:"session_key,omitempty"`   // target session key (e.g. "telegram:123:123"); required
+	Prompt       string `toml:"prompt,omitempty"`        // explicit prompt; if empty, reads HEARTBEAT.md from work_dir
+	Silent       *bool  `toml:"silent,omitempty"`        // suppress heartbeat notification; default true
+	TimeoutMins  *int   `toml:"timeout_mins,omitempty"`  // max execution time; default 30
+}
+
 // ProjectConfig binds one agent (with a specific work_dir) to one or more platforms.
 type ProjectConfig struct {
 	Name             string           `toml:"name"`
@@ -106,6 +117,7 @@ type ProjectConfig struct {
 	BaseDir          string           `toml:"base_dir,omitempty"` // parent dir for workspaces
 	Agent            AgentConfig      `toml:"agent"`
 	Platforms        []PlatformConfig `toml:"platforms"`
+	Heartbeat        HeartbeatConfig  `toml:"heartbeat"`
 	Quiet            *bool            `toml:"quiet,omitempty"`              // project-level quiet mode; overrides global setting
 	InjectSender     *bool            `toml:"inject_sender,omitempty"`      // prepend sender identity (platform + user ID) to each message sent to the agent
 	DisabledCommands []string         `toml:"disabled_commands,omitempty"`  // commands to disable for this project (e.g. ["restart", "upgrade"])

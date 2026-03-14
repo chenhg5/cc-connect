@@ -342,6 +342,32 @@ name = "my-backend"
 # 仅在个人单用户部署中使用此配置，确保所有允许的用户均可信任。
 # admin_from = "*"
 
+# Heartbeat — periodic awareness check / 心跳 — 周期性巡检
+# The agent wakes up at a fixed interval to check the environment.
+# Agent 会按固定间隔唤醒，检查环境状态。
+#
+# Unlike cron (precise scheduling, isolated tasks), heartbeat runs in the
+# main session with full context — ideal for status monitoring and continuing
+# unfinished work.
+# 与 cron（精确调度、独立任务）不同，heartbeat 在主会话中运行并共享上下文
+# —— 适合状态监控和继续未完成的工作。
+#
+# [projects.heartbeat]
+# enabled = true
+# interval_mins = 30             # Interval in minutes (default: 30) / 间隔分钟数（默认 30）
+# session_key = "telegram:123:123"  # Target session key (required) / 目标会话 key（必填）
+# only_when_idle = true          # Skip if session is busy (default: true) / 会话忙碌时跳过（默认 true）
+# silent = true                  # Suppress "💓" notification (default: true) / 不发送心跳通知（默认 true）
+# timeout_mins = 30              # Max execution time (default: 30) / 最大执行时间（默认 30 分钟）
+# prompt = "check inbox and tasks"  # Explicit prompt; if empty, reads HEARTBEAT.md from work_dir
+#                                    # 显式提示词；为空时从 work_dir 读取 HEARTBEAT.md
+#
+# HEARTBEAT.md example / HEARTBEAT.md 示例:
+#   On heartbeat:
+#   - check inbox
+#   - check background tasks
+#   - continue unfinished work
+
 [projects.agent]
 type = "claudecode"
 

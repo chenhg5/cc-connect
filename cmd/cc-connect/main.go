@@ -449,6 +449,16 @@ func main() {
 		}
 	}
 
+	// Start heartbeat scheduler
+	heartbeatSched := core.NewHeartbeatScheduler()
+	for i, proj := range cfg.Projects {
+		hbCfg := buildHeartbeatConfig(proj.Heartbeat)
+		if hbCfg.Enabled {
+			workDir, _ := proj.Agent.Options["work_dir"].(string)
+			heartbeatSched.Register(proj.Name, hbCfg, engines[i], workDir)
+		}
+	}
+
 	var startErrors []error
 	for _, e := range engines {
 		if err := e.Start(); err != nil {
@@ -467,6 +477,8 @@ func main() {
 			slog.Error("cron scheduler start failed", "error", err)
 		}
 	}
+
+	heartbeatSched.Start()
 
 	// Start internal API server for CLI send
 	apiSrv, err := core.NewAPIServer(cfg.DataDir)
@@ -507,6 +519,7 @@ func main() {
 	}
 
 	slog.Info("shutting down...")
+	heartbeatSched.Stop()
 	if cronSched != nil {
 		cronSched.Stop()
 	}
@@ -812,4 +825,31 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 
 	slog.Info("config reloaded", "project", projName)
 	return result, nil
+}
+
+func buildHeartbeatConfig(hc config.HeartbeatConfig) core.HeartbeatConfig {
+	cfg := core.HeartbeatConfig{
+		IntervalMins: 30,
+		OnlyWhenIdle: true,
+		Silent:       true,
+		TimeoutMins:  30,
+		SessionKey:   hc.SessionKey,
+		Prompt:       hc.Prompt,
+	}
+	if hc.Enabled != nil {
+		cfg.Enabled = *hc.Enabled
+	}
+	if hc.IntervalMins != nil {
+		cfg.IntervalMins = *hc.IntervalMins
+	}
+	if hc.OnlyWhenIdle != nil {
+		cfg.OnlyWhenIdle = *hc.OnlyWhenIdle
+	}
+	if hc.Silent != nil {
+		cfg.Silent = *hc.Silent
+	}
+	if hc.TimeoutMins != nil {
+		cfg.TimeoutMins = *hc.TimeoutMins
+	}
+	return cfg
 }

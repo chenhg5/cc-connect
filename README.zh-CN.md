@@ -45,57 +45,9 @@
   都能通过手机、平板或任何有聊天应用的设备来完成。
 </p>
 
-```mermaid
-graph TD
-    User[👤 你 - 手机 / 电脑 / 平板]
-
-    subgraph Platforms["📱 聊天平台 - 支持 9 个"]
-        Feishu["飞书/Lark"]
-        Slack["Slack"]
-        Telegram["Telegram"]
-        Discord["Discord"]
-        DingTalk["钉钉"]
-        WeCom["企业微信"]
-        LINE["LINE"]
-        QQ["QQ"]
-    end
-
-    CC[cc-connect<br/>你的开发机]
-
-    subgraph Agents["🤖 AI Agent - 支持 7 个"]
-        Claude["Claude Code"]
-        Gemini["Gemini CLI"]
-        Codex["Codex"]
-        Cursor["Cursor"]
-        Qoder["Qoder"]
-        OpenCode["OpenCode"]
-        iFlow["iFlow CLI"]
-    end
-
-    User --> Feishu
-    User --> Slack
-    User --> Telegram
-    User --> Discord
-    User --> DingTalk
-    User --> WeCom
-
-    Feishu --> CC
-    Slack --> CC
-    Telegram --> CC
-    Discord --> CC
-    DingTalk --> CC
-    WeCom --> CC
-
-    CC --> Claude
-    CC --> Gemini
-    CC --> Codex
-    CC --> Cursor
-    CC --> Qoder
-
-    style CC fill:#0ea5e9,stroke:#0284c7,color:#fff
-    style Platforms fill:#1e293b,stroke:#334155,color:#94a3b8
-    style Agents fill:#1e293b,stroke:#334155,color:#94a3b8
-```
+<p align="center">
+  <img src="docs/images/connector.png" alt="CC-Connect 架构图" width="90%"/>
+</p>
 
 ---
 
