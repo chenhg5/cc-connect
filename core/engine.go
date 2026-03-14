@@ -1331,10 +1331,58 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	agentSession, err := agent.StartSession(e.ctx, session.AgentSessionID)
 	startElapsed := time.Since(startAt)
 	if err != nil {
-		slog.Error("failed to start interactive session", "error", err, "elapsed", startElapsed)
-		state = &interactiveState{platform: p, replyCtx: replyCtx, quiet: quietMode}
-		e.interactiveStates[sessionKey] = state
-		return state
+		if session.AgentSessionID != "" {
+			// Resume failed — log diagnostics and retry with fresh session
+			slog.Error("session resume failed, falling back to fresh session",
+				"session_key", sessionKey,
+				"failed_session_id", session.AgentSessionID,
+				"error", err,
+				"elapsed", startElapsed,
+			)
+
+			// Clear the stale session ID
+			session.mu.Lock()
+			session.AgentSessionID = ""
+			session.mu.Unlock()
+
+			// Notify user via platform
+			if p != nil {
+				notifyP := p
+				notifyCtx := replyCtx
+				go func() {
+					_ = notifyP.Send(context.Background(), notifyCtx,
+						"⚠️ Session context was too large to resume — starting fresh. Project context is preserved in CLAUDE.md.")
+				}()
+			}
+
+			// Retry with fresh session
+			freshStart := time.Now()
+			agentSession, err = agent.StartSession(e.ctx, "")
+			freshElapsed := time.Since(freshStart)
+			if err != nil {
+				slog.Error("fresh session also failed",
+					"session_key", sessionKey,
+					"error", err,
+					"elapsed", freshElapsed,
+				)
+				state = &interactiveState{platform: p, replyCtx: replyCtx, quiet: quietMode}
+				e.interactiveStates[sessionKey] = state
+				return state
+			}
+			slog.Info("fresh session started after resume failure",
+				"session_key", sessionKey,
+				"elapsed", freshElapsed,
+			)
+		} else {
+			slog.Error("failed to start interactive session",
+				"session_key", sessionKey,
+				"error", err,
+				"elapsed", startElapsed,
+			)
+			state = &interactiveState{platform: p, replyCtx: replyCtx, quiet: quietMode}
+			e.interactiveStates[sessionKey] = state
+			return state
+		}
 	}
 	if startElapsed >= slowAgentStart {
 		slog.Warn("slow agent session start", "elapsed", startElapsed, "agent", agent.Name(), "session_id", session.AgentSessionID)

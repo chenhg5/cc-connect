@@ -2599,3 +2599,82 @@ func TestSplitMessageUTF8Safety(t *testing.T) {
 		}
 	})
 }
+
+// --- resume failure fallback tests ---
+
+type stubStartSessionAgent struct {
+	startSessionFunc func(ctx context.Context, sessionID string) (AgentSession, error)
+}
+
+func (a *stubStartSessionAgent) Name() string { return "stub-start" }
+func (a *stubStartSessionAgent) StartSession(ctx context.Context, sessionID string) (AgentSession, error) {
+	return a.startSessionFunc(ctx, sessionID)
+}
+func (a *stubStartSessionAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
+	return nil, nil
+}
+func (a *stubStartSessionAgent) Stop() error { return nil }
+
+func TestResumeFailureFallbackToFreshSession(t *testing.T) {
+	var calls []string
+	agent := &stubStartSessionAgent{
+		startSessionFunc: func(_ context.Context, sessionID string) (AgentSession, error) {
+			calls = append(calls, sessionID)
+			if sessionID != "" {
+				return nil, fmt.Errorf("Prompt is too long")
+			}
+			return &stubAgentSession{}, nil
+		},
+	}
+
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	session := e.sessions.GetOrCreateActive("test:user1")
+	session.AgentSessionID = "old-session-id"
+
+	state := e.getOrCreateInteractiveState("test:user1", p, "ctx", session)
+
+	// Verify StartSession was called twice: first with old ID, then with ""
+	if len(calls) != 2 {
+		t.Fatalf("StartSession call count = %d, want 2", len(calls))
+	}
+	if calls[0] != "old-session-id" {
+		t.Fatalf("first StartSession call = %q, want %q", calls[0], "old-session-id")
+	}
+	if calls[1] != "" {
+		t.Fatalf("second StartSession call = %q, want empty string", calls[1])
+	}
+
+	// Verify state has a non-nil agentSession
+	if state.agentSession == nil {
+		t.Fatal("expected agentSession to be non-nil after fallback")
+	}
+
+	// Verify the stale session ID was cleared
+	session.mu.Lock()
+	sid := session.AgentSessionID
+	session.mu.Unlock()
+	if sid != "" {
+		t.Fatalf("AgentSessionID = %q, want cleared", sid)
+	}
+
+	// Wait briefly for the goroutine notification to be sent
+	time.Sleep(50 * time.Millisecond)
+
+	// Verify a notification was sent to the platform
+	if len(p.sent) == 0 {
+		t.Fatal("expected a notification message to be sent to the platform")
+	}
+	found := false
+	for _, msg := range p.sent {
+		if strings.Contains(msg, "starting fresh") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("notification messages = %v, want message about starting fresh", p.sent)
+	}
+}
+
