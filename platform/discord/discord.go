@@ -49,6 +49,7 @@ type Platform struct {
 	botID                 string
 	appID                 string
 	readyCh               chan struct{}
+	seenMsgs              sync.Map // message ID dedup: prevents duplicate MessageCreate events
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -308,6 +309,13 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	})
 
 	session.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
+		// Deduplicate: Discord gateway may deliver the same event twice
+		if _, loaded := p.seenMsgs.LoadOrStore(m.ID, struct{}{}); loaded {
+			slog.Debug("discord: ignoring duplicate message", "msg_id", m.ID)
+			return
+		}
+		time.AfterFunc(2*time.Minute, func() { p.seenMsgs.Delete(m.ID) })
+
 		if m.Author.Bot || m.Author.ID == p.botID {
 			return
 		}
