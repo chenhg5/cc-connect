@@ -37,7 +37,12 @@ type CardActions struct {
 }
 
 // CardNote renders small footnote text at the bottom.
-type CardNote struct{ Text string }
+// Tag is an optional machine-readable identifier (not displayed) used by
+// platform renderers to recognize and handle specific notes programmatically.
+type CardNote struct {
+	Text string
+	Tag  string
+}
 
 // CardListItem renders a row with description text on the left and a button on the right.
 // On Feishu this maps to div+extra; on other platforms it degrades to a text line.
@@ -199,6 +204,13 @@ func (b *CardBuilder) Select(placeholder string, options []CardSelectOption, ini
 func (b *CardBuilder) Note(text string) *CardBuilder {
 	if text != "" {
 		b.card.Elements = append(b.card.Elements, CardNote{Text: text})
+	}
+	return b
+}
+
+func (b *CardBuilder) TaggedNote(tag, text string) *CardBuilder {
+	if text != "" {
+		b.card.Elements = append(b.card.Elements, CardNote{Text: text, Tag: tag})
 	}
 	return b
 }

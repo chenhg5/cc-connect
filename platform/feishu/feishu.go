@@ -238,6 +238,16 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 
 	// nav: / act: — synchronous card update
 	if strings.HasPrefix(actionVal, "nav:") || strings.HasPrefix(actionVal, "act:") {
+		// Feishu uses native form checker for delete-mode toggle,
+		// so return a toast without calling cardNavHandler to avoid a full card refresh.
+		if strings.HasPrefix(actionVal, "act:/delete-mode toggle ") {
+			return &callback.CardActionTriggerResponse{
+				Toast: &callback.Toast{
+					Type:    "info",
+					Content: "已记录选择（Selection recorded）",
+				},
+			}, nil
+		}
 		if p.cardNavHandler != nil {
 			card := p.cardNavHandler(actionVal, sessionKey)
 			if card != nil {
@@ -250,14 +260,6 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 			}
 		}
 		if strings.HasPrefix(actionVal, "act:") {
-			if strings.HasPrefix(actionVal, "act:/delete-mode toggle ") {
-				return &callback.CardActionTriggerResponse{
-					Toast: &callback.Toast{
-						Type:    "info",
-						Content: "已记录选择（Selection recorded）",
-					},
-				}, nil
-			}
 			slog.Debug(p.tag()+": card action produced no card update", "action", actionVal)
 			return nil, nil
 		}

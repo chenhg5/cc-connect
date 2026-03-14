@@ -1071,7 +1071,7 @@ func TestCmdDelete_NoArgsOnCardPlatformShowsDeleteModeCard(t *testing.T) {
 	}
 }
 
-func TestDeleteMode_ToggleSelectionDoesNotReturnCardButPersistsSelection(t *testing.T) {
+func TestDeleteMode_ToggleSelectionReturnsUpdatedCard(t *testing.T) {
 	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
 	agent := &stubDeleteAgent{stubListAgent: stubListAgent{sessions: []AgentSessionInfo{
 		{ID: "session-1", Summary: "One"},
@@ -1082,8 +1082,11 @@ func TestDeleteMode_ToggleSelectionDoesNotReturnCardButPersistsSelection(t *test
 
 	e.cmdDelete(p, msg, nil)
 	card := e.handleCardNav("act:/delete-mode toggle session-2", msg.SessionKey)
-	if card != nil {
-		t.Fatal("expected no card update after toggle")
+	if card == nil {
+		t.Fatal("expected card update after toggle")
+	}
+	if !strings.Contains(card.RenderText(), "1 selected") {
+		t.Fatalf("card text = %q, want selected count", card.RenderText())
 	}
 
 	confirmCard := e.handleCardNav("act:/delete-mode confirm", msg.SessionKey)

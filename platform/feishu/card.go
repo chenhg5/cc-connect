@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"regexp"
 	"strings"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -246,7 +245,7 @@ func renderDeleteModeCheckerCard(card *core.Card, base map[string]any) (map[stri
 
 	rows := make([]deleteModeCheckerRow, 0)
 	formRowElements := make([]map[string]any, 0)
-	notes := make([]string, 0)
+	notes := make([]core.CardNote, 0)
 	navRows := make([]core.CardActions, 0)
 	submitText := ""
 	cancelText := ""
@@ -282,7 +281,7 @@ func renderDeleteModeCheckerCard(card *core.Card, base map[string]any) (map[stri
 				},
 			})
 		case core.CardNote:
-			notes = append(notes, e.Text)
+			notes = append(notes, e)
 		case core.CardActions:
 			remaining := make([]core.CardButton, 0, len(e.Buttons))
 			for _, btn := range e.Buttons {
@@ -309,15 +308,15 @@ func renderDeleteModeCheckerCard(card *core.Card, base map[string]any) (map[stri
 
 	elements := make([]map[string]any, 0, len(notes)+1+len(navRows))
 	for _, n := range notes {
-		if n == "" {
+		if n.Text == "" {
 			continue
 		}
-		if isDeleteModeSelectedCountNote(n) {
+		if n.Tag == "delete-mode-selected-count" {
 			continue
 		}
 		elements = append(elements, map[string]any{
 			"tag":      "note",
-			"elements": []map[string]any{plainText(n)},
+			"elements": []map[string]any{plainText(n.Text)},
 		})
 	}
 	formElements := append([]map[string]any{}, formRowElements...)
@@ -429,22 +428,6 @@ func parseDeleteModeListItemAction(action string) (id string, selectable bool, o
 	}
 }
 
-func isDeleteModeSelectedCountNote(text string) bool {
-	t := strings.TrimSpace(text)
-	return regexpDeleteModeSelectedCountEn.MatchString(t) ||
-		regexpDeleteModeSelectedCountZh.MatchString(t) ||
-		regexpDeleteModeSelectedCountZhTW.MatchString(t) ||
-		regexpDeleteModeSelectedCountJa.MatchString(t) ||
-		regexpDeleteModeSelectedCountEs.MatchString(t)
-}
-
-var (
-	regexpDeleteModeSelectedCountEn   = regexp.MustCompile(`^\d+\s+selected$`)
-	regexpDeleteModeSelectedCountZh   = regexp.MustCompile(`^已选\s+\d+\s+项$`)
-	regexpDeleteModeSelectedCountZhTW = regexp.MustCompile(`^已選\s+\d+\s+項$`)
-	regexpDeleteModeSelectedCountJa   = regexp.MustCompile(`^\d+\s+件を選択中$`)
-	regexpDeleteModeSelectedCountEs   = regexp.MustCompile(`^\d+\s+seleccionadas$`)
-)
 
 // renderCard converts a core.Card into the Feishu Interactive Card JSON string.
 func renderCard(card *core.Card) string {

@@ -79,7 +79,7 @@ func (p *Platform) makeSessionKey(channelID string, userID string) string {
 	}
 }
 
-// RegisterCommands registers bot commands with Telegram for the command menu.
+// RegisterCommands registers bot commands with Discord for the slash command menu.
 func (p *Platform) RegisterCommands(commands []core.BotCommandInfo) error {
 	// Wait for Ready event to ensure appID is populated
 	select {
@@ -95,8 +95,8 @@ func (p *Platform) RegisterCommands(commands []core.BotCommandInfo) error {
 			continue
 		}
 		desc := c.Description
-		if len(desc) > 100 {
-			desc = desc[:97] + "..."
+		if runes := []rune(desc); len(runes) > 100 {
+			desc = string(runes[:97]) + "..."
 		}
 		cmds = append(cmds, &discordgo.ApplicationCommand{
 			Name:        c.Command,
