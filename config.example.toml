@@ -473,6 +473,17 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "bypassPermission
 # model = "deepseek-ai/DeepSeek-V3"
 # thinking = "disabled"
 #
+# # MiniMax — OpenAI-compatible provider with 204K context window
+# # MiniMax — 兼容 OpenAI 接口的大模型，支持 204K 超长上下文
+# # Models: MiniMax-M2.5 (flagship), MiniMax-M2.5-highspeed (faster)
+# # Docs: https://platform.minimaxi.com
+# [[projects.agent.providers]]
+# name = "minimax"
+# api_key = "your-minimax-api-key"
+# base_url = "https://api.minimax.io/v1"
+# model = "MiniMax-M2.5"
+# thinking = "disabled"
+#
 # # For special setups (Bedrock, Vertex, etc.), use the env map:
 # # 特殊环境（Bedrock、Vertex 等）使用 env 字段：
 # [[projects.agent.providers]]
@@ -794,6 +805,14 @@ app_secret = "your-feishu-app-secret"
 # api_key = "sk-xxx"
 # base_url = "https://custom-api.com/v1"
 # model = "gpt-4o"
+#
+# # MiniMax — OpenAI-compatible, works natively with Codex
+# # MiniMax — 兼容 OpenAI 接口，可直接用于 Codex
+# [[projects.agent.providers]]
+# name = "minimax"
+# api_key = "your-minimax-api-key"
+# base_url = "https://api.minimax.io/v1"
+# model = "MiniMax-M2.5"
 #
 # [[projects.platforms]]
 # type = "telegram"

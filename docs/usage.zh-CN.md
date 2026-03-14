@@ -127,6 +127,13 @@ api_key = "sk-xxx"
 base_url = "https://api.relay-service.com"
 model = "claude-sonnet-4-20250514"
 
+# MiniMax — 兼容 OpenAI 接口，204K 超长上下文
+[[projects.agent.providers]]
+name = "minimax"
+api_key = "your-minimax-api-key"
+base_url = "https://api.minimax.io/v1"
+model = "MiniMax-M2.5"
+
 # Bedrock、Vertex 等
 [[projects.agent.providers]]
 name = "bedrock"
