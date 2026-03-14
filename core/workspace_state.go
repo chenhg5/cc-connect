@@ -1,9 +1,27 @@
 package core
 
 import (
+	"log/slog"
+	"path/filepath"
 	"sync"
 	"time"
 )
+
+// normalizeWorkspacePath cleans and resolves a workspace path to prevent
+// mismatches caused by trailing slashes, symlinks, or relative segments.
+// If the path cannot be resolved (e.g. doesn't exist yet), falls back to
+// filepath.Clean only.
+func normalizeWorkspacePath(path string) string {
+	cleaned := filepath.Clean(path)
+	resolved, err := filepath.EvalSymlinks(cleaned)
+	if err != nil {
+		return cleaned
+	}
+	if resolved != path {
+		slog.Debug("workspace path normalized", "original", path, "normalized", resolved)
+	}
+	return resolved
+}
 
 // workspaceState holds the runtime state for a single workspace.
 type workspaceState struct {
@@ -47,12 +65,16 @@ func newWorkspacePool(idleTimeout time.Duration) *workspacePool {
 	}
 }
 
+// Get returns the state for a workspace. Callers must pass a normalized path
+// (use normalizeWorkspacePath or resolveWorkspace which normalizes on return).
 func (p *workspacePool) Get(workspace string) *workspaceState {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.states[workspace]
 }
 
+// GetOrCreate returns or creates state for a workspace. Callers must pass a
+// normalized path (see Get).
 func (p *workspacePool) GetOrCreate(workspace string) *workspaceState {
 	p.mu.Lock()
 	defer p.mu.Unlock()
