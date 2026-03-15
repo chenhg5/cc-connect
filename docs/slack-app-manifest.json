@@ -1,0 +1,243 @@
+{
+  "_metadata": {
+    "major_version": 2,
+    "minor_version": 1
+  },
+  "display_information": {
+    "name": "CC-Connect",
+    "description": "Bridge between AI coding agents and Slack",
+    "background_color": "#1a1a2e"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "CC-Connect",
+      "always_online": true
+    },
+    "slash_commands": [
+      {
+        "command": "/btw",
+        "description": "Send additional context to agent while it's busy",
+        "usage_hint": "[message]",
+        "should_escape": false
+      },
+      {
+        "command": "/new",
+        "description": "Start a new session",
+        "usage_hint": "[name]",
+        "should_escape": false
+      },
+      {
+        "command": "/list",
+        "description": "List agent sessions",
+        "should_escape": false
+      },
+      {
+        "command": "/switch",
+        "description": "Resume a session by its list number",
+        "usage_hint": "<number>",
+        "should_escape": false
+      },
+      {
+        "command": "/delete",
+        "description": "Delete sessions by list number(s)",
+        "usage_hint": "<number>|1,2,3|3-7|1,3-5,8",
+        "should_escape": false
+      },
+      {
+        "command": "/name",
+        "description": "Name a session for easy identification",
+        "usage_hint": "[number] <text>",
+        "should_escape": false
+      },
+      {
+        "command": "/current",
+        "description": "Show current active session",
+        "should_escape": false
+      },
+      {
+        "command": "/search",
+        "description": "Search sessions by name or ID",
+        "usage_hint": "<keyword>",
+        "should_escape": false
+      },
+      {
+        "command": "/history",
+        "description": "Show last n messages",
+        "usage_hint": "[n]",
+        "should_escape": false
+      },
+      {
+        "command": "/model",
+        "description": "View or switch model",
+        "usage_hint": "[name]",
+        "should_escape": false
+      },
+      {
+        "command": "/mode",
+        "description": "View or switch permission mode",
+        "usage_hint": "[default|edit|plan|yolo]",
+        "should_escape": false
+      },
+      {
+        "command": "/stop",
+        "description": "Stop current execution",
+        "should_escape": false
+      },
+      {
+        "command": "/compress",
+        "description": "Compress conversation context",
+        "should_escape": false
+      },
+      {
+        "command": "/quiet",
+        "description": "Toggle thinking and tool progress display",
+        "usage_hint": "[global]",
+        "should_escape": false
+      },
+      {
+        "command": "/status",
+        "description": "Show system status",
+        "should_escape": false
+      },
+      {
+        "command": "/usage",
+        "description": "Show account and model quota usage",
+        "should_escape": false
+      },
+      {
+        "command": "/help",
+        "description": "Show available commands",
+        "should_escape": false
+      },
+      {
+        "command": "/version",
+        "description": "Show cc-connect version",
+        "should_escape": false
+      },
+      {
+        "command": "/shell",
+        "description": "Run a shell command and return the output",
+        "usage_hint": "<command>",
+        "should_escape": false
+      },
+      {
+        "command": "/provider",
+        "description": "Manage API providers",
+        "usage_hint": "[list|add|remove|switch|clear]",
+        "should_escape": false
+      },
+      {
+        "command": "/memory",
+        "description": "View or edit agent memory files",
+        "usage_hint": "[add|global|global add]",
+        "should_escape": false
+      },
+      {
+        "command": "/allow",
+        "description": "Pre-allow a tool for next session",
+        "usage_hint": "<tool>",
+        "should_escape": false
+      },
+      {
+        "command": "/lang",
+        "description": "View or switch language",
+        "usage_hint": "[en|zh|zh-TW|ja|es|auto]",
+        "should_escape": false
+      },
+      {
+        "command": "/cron",
+        "description": "Manage scheduled tasks",
+        "usage_hint": "[add|list|del|enable|disable]",
+        "should_escape": false
+      },
+      {
+        "command": "/commands",
+        "description": "Manage custom slash commands",
+        "usage_hint": "[add|del]",
+        "should_escape": false
+      },
+      {
+        "command": "/alias",
+        "description": "Manage command aliases",
+        "usage_hint": "[add|del]",
+        "should_escape": false
+      },
+      {
+        "command": "/skills",
+        "description": "List agent skills",
+        "should_escape": false
+      },
+      {
+        "command": "/config",
+        "description": "View or update runtime configuration",
+        "usage_hint": "[get|set|reload] [key] [value]",
+        "should_escape": false
+      },
+      {
+        "command": "/doctor",
+        "description": "Run system diagnostics",
+        "should_escape": false
+      },
+      {
+        "command": "/upgrade",
+        "description": "Check for updates and self-update",
+        "should_escape": false
+      },
+      {
+        "command": "/restart",
+        "description": "Restart cc-connect service",
+        "should_escape": false
+      },
+      {
+        "command": "/reasoning",
+        "description": "View or switch reasoning effort level",
+        "usage_hint": "[low|medium|high]",
+        "should_escape": false
+      },
+      {
+        "command": "/bind",
+        "description": "Manage bot-to-bot relay bindings",
+        "usage_hint": "[project|-project|remove]",
+        "should_escape": false
+      },
+      {
+        "command": "/workspace",
+        "description": "Manage workspaces",
+        "usage_hint": "[list|switch|add|remove]",
+        "should_escape": false
+      }
+    ]
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "app_mentions:read",
+        "channels:history",
+        "channels:read",
+        "chat:write",
+        "commands",
+        "groups:history",
+        "groups:read",
+        "im:history",
+        "im:read",
+        "im:write",
+        "reactions:write",
+        "users:read"
+      ]
+    }
+  },
+  "settings": {
+    "event_subscriptions": {
+      "bot_events": [
+        "app_mention",
+        "message.im"
+      ]
+    },
+    "interactivity": {
+      "is_enabled": true
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": true,
+    "token_rotation_enabled": false
+  }
+}
