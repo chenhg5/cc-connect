@@ -101,14 +101,6 @@
 
 ```bash
 请参考 https://raw.githubusercontent.com/chenhg5/cc-connect/refs/heads/main/INSTALL.md 帮我安装和配置 cc-connect
-
-重要提示：请使用交互式工具（如 AskUserQuestion）引导我完成配置选择：
-- Agent 选择（Claude Code、Cursor、Gemini 等）
-- 平台选择（飞书、Telegram、Discord 等）
-- API 密钥和认证令牌
-- 项目路径和个人偏好配置
-
-不要猜测值——始终通过交互式提示让我选择或提供相关配置。
 ```
 
 ---

@@ -101,14 +101,6 @@
 
 ```bash
 Follow https://raw.githubusercontent.com/chenhg5/cc-connect/refs/heads/main/INSTALL.md to install and configure cc-connect.
-
-IMPORTANT: Use interactive tools (like AskUserQuestion) to guide me through configuration choices:
-- Agent selection (Claude Code, Cursor, Gemini, etc.)
-- Platform selection (Feishu, Telegram, Discord, etc.)
-- API keys and authentication tokens
-- Project paths and preferences
-
-Don't guess values—always ask me to choose via interactive prompts.
 ```
 
 ---

@@ -8,6 +8,14 @@ cc-connect bridges local AI coding assistants to messaging platforms (Feishu, Di
 
 GitHub: https://github.com/chenhg5/cc-connect
 
+**IMPORTANT: If you are an AI agent helping a user install cc-connect, use interactive tools (like AskUserQuestion) to guide them through configuration choices:**
+- Agent selection (Claude Code, Cursor, Gemini, etc.)
+- Platform selection (Feishu, Telegram, Discord, etc.)
+- API keys and authentication tokens
+- Project paths and preferences
+
+Don't guess values—always ask the user to choose via interactive prompts.
+
 ## Step 1: Install cc-connect
 
 ### Option A: npm (recommended for most users)
