@@ -323,3 +323,34 @@ type CommandRegistrar interface {
 type ChannelNameResolver interface {
 	ResolveChannelName(channelID string) (string, error)
 }
+
+// MenuState holds current agent state for rendering the menu header.
+type MenuState struct {
+	Model   string
+	Mode    string
+	Project string
+}
+
+// MenuPage is the fully rendered menu content returned by MenuNavigationHandler.
+type MenuPage struct {
+	Title    string         // main message text (supports HTML)
+	Subtitle string         // secondary info line
+	Buttons  [][]ButtonOption // inline keyboard rows; empty = no buttons
+}
+
+// MenuNavigationHandler is called by the platform when a menu: callback arrives.
+// action is the callback data string (e.g. "menu:main", "menu:cat:ai").
+// sessionKey identifies the chat session for state lookup.
+// Returns nil to suppress any message update (e.g. for menu:noop).
+type MenuNavigationHandler func(action string, sessionKey string) *MenuPage
+
+// MenuNavigable is an optional interface for platforms that support
+// the interactive /menu panel with in-place message updates.
+type MenuNavigable interface {
+	// SetMenuNavigationHandler registers the handler called on menu: callbacks.
+	SetMenuNavigationHandler(h MenuNavigationHandler)
+	// SendMenuPage sends (or edits) the menu message for the given chat context.
+	// On first call per chat, sends a new message and remembers its ID.
+	// On subsequent calls (callback-triggered), edits the existing message.
+	SendMenuPage(ctx context.Context, replyCtx any, page *MenuPage) error
+}
