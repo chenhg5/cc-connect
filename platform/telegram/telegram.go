@@ -27,12 +27,6 @@ type replyContext struct {
 	messageID int
 }
 
-// pendingInputState records a one-shot user input request (e.g. editing a command description).
-type pendingInputState struct {
-	kind    string    // e.g. "cmd_desc_edit:menu"
-	expires time.Time // auto-expire after 60 seconds
-}
-
 type Platform struct {
 	token                 string
 	allowFrom             string
@@ -44,7 +38,6 @@ type Platform struct {
 	cancel                context.CancelFunc
 	menuMsgIDs            sync.Map // key: int64(chatID) → int(messageID)
 	menuHandler           core.MenuNavigationHandler
-	pendingInputs         sync.Map // key: int64(chatID) → pendingInputState
 	dataDir               string   // path for config file persistence
 	menuConfigs           sync.Map // key: int64(chatID) → *MenuConfig
 }

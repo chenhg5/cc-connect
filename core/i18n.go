@@ -249,8 +249,8 @@ const (
 	MsgStatusCron       MsgKey = "status_cron"
 	MsgStatusQuiet      MsgKey = "status_quiet"
 	MsgStatusSessionKey MsgKey = "status_session_key"
-	MsgQuietOnShort  MsgKey = "quiet_on_short"
-	MsgQuietOffShort MsgKey = "quiet_off_short"
+	MsgQuietOnShort     MsgKey = "quiet_on_short"
+	MsgQuietOffShort    MsgKey = "quiet_off_short"
 
 	MsgModelDefault               MsgKey = "model_default"
 	MsgModelListTitle             MsgKey = "model_list_title"
@@ -453,83 +453,82 @@ const (
 	MsgBuiltinCmdMenu      MsgKey = "menu"
 
 	// Multi-workspace messages
-	MsgWsNotEnabled        MsgKey = "ws_not_enabled"
-	MsgWsNoBinding         MsgKey = "ws_no_binding"
-	MsgWsInfo              MsgKey = "ws_info"
-	MsgWsInitUsage         MsgKey = "ws_init_usage"
-	MsgWsBindUsage         MsgKey = "ws_bind_usage"
-	MsgWsBindSuccess       MsgKey = "ws_bind_success"
-	MsgWsBindNotFound      MsgKey = "ws_bind_not_found"
-	MsgWsUnbindSuccess     MsgKey = "ws_unbind_success"
-	MsgWsListEmpty         MsgKey = "ws_list_empty"
-	MsgWsListTitle         MsgKey = "ws_list_title"
-	MsgWsNotFoundHint      MsgKey = "ws_not_found_hint"
-	MsgWsResolutionError   MsgKey = "ws_resolution_error"
-	MsgWsCloneProgress     MsgKey = "ws_clone_progress"
-	MsgWsCloneSuccess      MsgKey = "ws_clone_success"
-	MsgWsCloneFailed       MsgKey = "ws_clone_failed"
+	MsgWsNotEnabled      MsgKey = "ws_not_enabled"
+	MsgWsNoBinding       MsgKey = "ws_no_binding"
+	MsgWsInfo            MsgKey = "ws_info"
+	MsgWsInitUsage       MsgKey = "ws_init_usage"
+	MsgWsBindUsage       MsgKey = "ws_bind_usage"
+	MsgWsBindSuccess     MsgKey = "ws_bind_success"
+	MsgWsBindNotFound    MsgKey = "ws_bind_not_found"
+	MsgWsUnbindSuccess   MsgKey = "ws_unbind_success"
+	MsgWsListEmpty       MsgKey = "ws_list_empty"
+	MsgWsListTitle       MsgKey = "ws_list_title"
+	MsgWsNotFoundHint    MsgKey = "ws_not_found_hint"
+	MsgWsResolutionError MsgKey = "ws_resolution_error"
+	MsgWsCloneProgress   MsgKey = "ws_clone_progress"
+	MsgWsCloneSuccess    MsgKey = "ws_clone_success"
+	MsgWsCloneFailed     MsgKey = "ws_clone_failed"
 
 	// Interactive menu (/menu panel)
-	MsgMenuTitle             MsgKey = "menu_title"
-	MsgMenuSubtitle          MsgKey = "menu_subtitle"
-	MsgMenuCatSession        MsgKey = "menu_cat_session"
-	MsgMenuCatAI             MsgKey = "menu_cat_ai"
-	MsgMenuCatTask           MsgKey = "menu_cat_task"
-	MsgMenuCatSystem         MsgKey = "menu_cat_system"
-	MsgMenuCatAdvanced       MsgKey = "menu_cat_advanced"
-	MsgMenuCatCustom         MsgKey = "menu_cat_custom"
-	MsgMenuBack              MsgKey = "menu_back"
-	MsgMenuPageInfo          MsgKey = "menu_page_info"
-	MsgMenuPagePrev          MsgKey = "menu_page_prev"
-	MsgMenuPageNext          MsgKey = "menu_page_next"
-	MsgMenuSelectModel       MsgKey = "menu_select_model"
-	MsgMenuSelectSession     MsgKey = "menu_select_session"
-	MsgMenuSelectProvider    MsgKey = "menu_select_provider"
-	MsgMenuSelectMode        MsgKey = "menu_select_mode"
-	MsgMenuSelectLang        MsgKey = "menu_select_lang"
-	MsgMenuSelectReasoning   MsgKey = "menu_select_reasoning"
-	MsgMenuEmpty             MsgKey = "menu_empty"
-	MsgMenuCustomTitle       MsgKey = "menu_custom_title"
-	MsgMenuCustomPin         MsgKey = "menu_custom_pin"
-	MsgMenuCustomHide        MsgKey = "menu_custom_hide"
-	MsgMenuCustomAdd         MsgKey = "menu_custom_add"
-	MsgMenuCustomDesc        MsgKey = "menu_custom_desc"
-	MsgMenuCustomReset       MsgKey = "menu_custom_reset"
-	MsgMenuCmdNew            MsgKey = "menu_cmd_new"
-	MsgMenuCmdList           MsgKey = "menu_cmd_list"
-	MsgMenuCmdSwitch         MsgKey = "menu_cmd_switch"
-	MsgMenuCmdDelete         MsgKey = "menu_cmd_delete"
-	MsgMenuCmdSearch         MsgKey = "menu_cmd_search"
-	MsgMenuCmdRename         MsgKey = "menu_cmd_rename"
-	MsgMenuCmdCurrent        MsgKey = "menu_cmd_current"
-	MsgMenuCmdHistory        MsgKey = "menu_cmd_history"
-	MsgMenuCmdModel          MsgKey = "menu_cmd_model"
-	MsgMenuCmdMode           MsgKey = "menu_cmd_mode"
-	MsgMenuCmdLang           MsgKey = "menu_cmd_lang"
-	MsgMenuCmdReasoning      MsgKey = "menu_cmd_reasoning"
-	MsgMenuCmdProvider       MsgKey = "menu_cmd_provider"
-	MsgMenuCmdQuiet          MsgKey = "menu_cmd_quiet"
-	MsgMenuCmdMemory         MsgKey = "menu_cmd_memory"
-	MsgMenuCmdCron           MsgKey = "menu_cmd_cron"
-	MsgMenuCmdCompress       MsgKey = "menu_cmd_compress"
-	MsgMenuCmdTTS            MsgKey = "menu_cmd_tts"
-	MsgMenuCmdStop           MsgKey = "menu_cmd_stop"
-	MsgMenuCmdStatus         MsgKey = "menu_cmd_status"
-	MsgMenuCmdUsage          MsgKey = "menu_cmd_usage"
-	MsgMenuCmdHelp           MsgKey = "menu_cmd_help"
-	MsgMenuCmdVersion        MsgKey = "menu_cmd_version"
-	MsgMenuCmdConfig         MsgKey = "menu_cmd_config"
-	MsgMenuCmdDoctor         MsgKey = "menu_cmd_doctor"
-	MsgMenuCmdUpgrade        MsgKey = "menu_cmd_upgrade"
-	MsgMenuCmdRestart        MsgKey = "menu_cmd_restart"
-	MsgMenuCmdShell          MsgKey = "menu_cmd_shell"
-	MsgMenuCmdBind           MsgKey = "menu_cmd_bind"
-	MsgMenuCmdWorkspace      MsgKey = "menu_cmd_workspace"
-	MsgMenuCmdSkills         MsgKey = "menu_cmd_skills"
-	MsgMenuCmdCommands       MsgKey = "menu_cmd_commands"
-	MsgMenuCmdAlias          MsgKey = "menu_cmd_alias"
-	MsgMenuCmdAllow          MsgKey = "menu_cmd_allow"
-	MsgMenuCmdHeartbeat      MsgKey = "menu_cmd_heartbeat"
+	MsgMenuTitle           MsgKey = "menu_title"
+	MsgMenuSubtitle        MsgKey = "menu_subtitle"
+	MsgMenuCatSession      MsgKey = "menu_cat_session"
+	MsgMenuCatAI           MsgKey = "menu_cat_ai"
+	MsgMenuCatTask         MsgKey = "menu_cat_task"
+	MsgMenuCatSystem       MsgKey = "menu_cat_system"
+	MsgMenuCatAdvanced     MsgKey = "menu_cat_advanced"
+	MsgMenuCatCustom       MsgKey = "menu_cat_custom"
+	MsgMenuBack            MsgKey = "menu_back"
+	MsgMenuPageInfo        MsgKey = "menu_page_info"
+	MsgMenuPagePrev        MsgKey = "menu_page_prev"
+	MsgMenuPageNext        MsgKey = "menu_page_next"
+	MsgMenuSelectModel     MsgKey = "menu_select_model"
+	MsgMenuSelectSession   MsgKey = "menu_select_session"
+	MsgMenuSelectProvider  MsgKey = "menu_select_provider"
+	MsgMenuSelectMode      MsgKey = "menu_select_mode"
+	MsgMenuSelectLang      MsgKey = "menu_select_lang"
+	MsgMenuSelectReasoning MsgKey = "menu_select_reasoning"
+	MsgMenuEmpty           MsgKey = "menu_empty"
+	MsgMenuCustomTitle     MsgKey = "menu_custom_title"
+	MsgMenuCustomPin       MsgKey = "menu_custom_pin"
+	MsgMenuCustomHide      MsgKey = "menu_custom_hide"
+	MsgMenuCustomAdd       MsgKey = "menu_custom_add"
+	MsgMenuCustomDesc      MsgKey = "menu_custom_desc"
+	MsgMenuCustomReset     MsgKey = "menu_custom_reset"
+	MsgMenuCmdNew          MsgKey = "menu_cmd_new"
+	MsgMenuCmdSwitch       MsgKey = "menu_cmd_switch"
+	MsgMenuCmdDelete       MsgKey = "menu_cmd_delete"
+	MsgMenuCmdSearch       MsgKey = "menu_cmd_search"
+	MsgMenuCmdRename       MsgKey = "menu_cmd_rename"
+	MsgMenuCmdCurrent      MsgKey = "menu_cmd_current"
+	MsgMenuCmdHistory      MsgKey = "menu_cmd_history"
+	MsgMenuCmdModel        MsgKey = "menu_cmd_model"
+	MsgMenuCmdMode         MsgKey = "menu_cmd_mode"
+	MsgMenuCmdLang         MsgKey = "menu_cmd_lang"
+	MsgMenuCmdReasoning    MsgKey = "menu_cmd_reasoning"
+	MsgMenuCmdProvider     MsgKey = "menu_cmd_provider"
+	MsgMenuCmdQuiet        MsgKey = "menu_cmd_quiet"
+	MsgMenuCmdMemory       MsgKey = "menu_cmd_memory"
+	MsgMenuCmdCron         MsgKey = "menu_cmd_cron"
+	MsgMenuCmdCompress     MsgKey = "menu_cmd_compress"
+	MsgMenuCmdTTS          MsgKey = "menu_cmd_tts"
+	MsgMenuCmdStop         MsgKey = "menu_cmd_stop"
+	MsgMenuCmdStatus       MsgKey = "menu_cmd_status"
+	MsgMenuCmdUsage        MsgKey = "menu_cmd_usage"
+	MsgMenuCmdHelp         MsgKey = "menu_cmd_help"
+	MsgMenuCmdVersion      MsgKey = "menu_cmd_version"
+	MsgMenuCmdConfig       MsgKey = "menu_cmd_config"
+	MsgMenuCmdDoctor       MsgKey = "menu_cmd_doctor"
+	MsgMenuCmdUpgrade      MsgKey = "menu_cmd_upgrade"
+	MsgMenuCmdRestart      MsgKey = "menu_cmd_restart"
+	MsgMenuCmdShell        MsgKey = "menu_cmd_shell"
+	MsgMenuCmdBind         MsgKey = "menu_cmd_bind"
+	MsgMenuCmdWorkspace    MsgKey = "menu_cmd_workspace"
+	MsgMenuCmdSkills       MsgKey = "menu_cmd_skills"
+	MsgMenuCmdCommands     MsgKey = "menu_cmd_commands"
+	MsgMenuCmdAlias        MsgKey = "menu_cmd_alias"
+	MsgMenuCmdAllow        MsgKey = "menu_cmd_allow"
+	MsgMenuCmdHeartbeat    MsgKey = "menu_cmd_heartbeat"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -3124,64 +3123,63 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "モデル：%s · モード：%s",
 		LangSpanish:            "Modelo: %s · Modo: %s",
 	},
-	MsgMenuCatSession:  {LangEnglish: "💬 Sessions", LangChinese: "💬 会话", LangTraditionalChinese: "💬 對話", LangJapanese: "💬 セッション", LangSpanish: "💬 Sesiones"},
-	MsgMenuCatAI:       {LangEnglish: "🤖 AI Settings", LangChinese: "🤖 AI设置", LangTraditionalChinese: "🤖 AI設定", LangJapanese: "🤖 AI設定", LangSpanish: "🤖 Ajustes IA"},
-	MsgMenuCatTask:     {LangEnglish: "📋 Tasks", LangChinese: "📋 任务", LangTraditionalChinese: "📋 任務", LangJapanese: "📋 タスク", LangSpanish: "📋 Tareas"},
-	MsgMenuCatSystem:   {LangEnglish: "🔧 System", LangChinese: "🔧 系统", LangTraditionalChinese: "🔧 系統", LangJapanese: "🔧 システム", LangSpanish: "🔧 Sistema"},
-	MsgMenuCatAdvanced: {LangEnglish: "⚡ Advanced", LangChinese: "⚡ 高级功能", LangTraditionalChinese: "⚡ 進階功能", LangJapanese: "⚡ 高度な機能", LangSpanish: "⚡ Avanzado"},
-	MsgMenuCatCustom:   {LangEnglish: "⚙️ Customize", LangChinese: "⚙️ 自定义菜单", LangTraditionalChinese: "⚙️ 自訂選單", LangJapanese: "⚙️ カスタマイズ", LangSpanish: "⚙️ Personalizar"},
-	MsgMenuBack:        {LangEnglish: "◀ Back", LangChinese: "◀ 返回主菜单", LangTraditionalChinese: "◀ 返回主選單", LangJapanese: "◀ メインメニューへ", LangSpanish: "◀ Menú Principal"},
-	MsgMenuPageInfo:    {LangEnglish: "Page %d/%d", LangChinese: "第 %d/%d 页", LangTraditionalChinese: "第 %d/%d 頁", LangJapanese: "%d/%d ページ", LangSpanish: "Pág. %d/%d"},
-	MsgMenuPagePrev:    {LangEnglish: "◀ Prev", LangChinese: "◀ 上页", LangTraditionalChinese: "◀ 上頁", LangJapanese: "◀ 前へ", LangSpanish: "◀ Anterior"},
-	MsgMenuPageNext:    {LangEnglish: "Next ▶", LangChinese: "下页 ▶", LangTraditionalChinese: "下頁 ▶", LangJapanese: "次へ ▶", LangSpanish: "Siguiente ▶"},
-	MsgMenuEmpty:       {LangEnglish: "(no items)", LangChinese: "（暂无可选项）", LangTraditionalChinese: "（暫無選項）", LangJapanese: "（項目なし）", LangSpanish: "(sin opciones)"},
+	MsgMenuCatSession:      {LangEnglish: "💬 Sessions", LangChinese: "💬 会话", LangTraditionalChinese: "💬 對話", LangJapanese: "💬 セッション", LangSpanish: "💬 Sesiones"},
+	MsgMenuCatAI:           {LangEnglish: "🤖 AI Settings", LangChinese: "🤖 AI设置", LangTraditionalChinese: "🤖 AI設定", LangJapanese: "🤖 AI設定", LangSpanish: "🤖 Ajustes IA"},
+	MsgMenuCatTask:         {LangEnglish: "📋 Tasks", LangChinese: "📋 任务", LangTraditionalChinese: "📋 任務", LangJapanese: "📋 タスク", LangSpanish: "📋 Tareas"},
+	MsgMenuCatSystem:       {LangEnglish: "🔧 System", LangChinese: "🔧 系统", LangTraditionalChinese: "🔧 系統", LangJapanese: "🔧 システム", LangSpanish: "🔧 Sistema"},
+	MsgMenuCatAdvanced:     {LangEnglish: "⚡ Advanced", LangChinese: "⚡ 高级功能", LangTraditionalChinese: "⚡ 進階功能", LangJapanese: "⚡ 高度な機能", LangSpanish: "⚡ Avanzado"},
+	MsgMenuCatCustom:       {LangEnglish: "⚙️ Customize", LangChinese: "⚙️ 自定义菜单", LangTraditionalChinese: "⚙️ 自訂選單", LangJapanese: "⚙️ カスタマイズ", LangSpanish: "⚙️ Personalizar"},
+	MsgMenuBack:            {LangEnglish: "◀ Back", LangChinese: "◀ 返回主菜单", LangTraditionalChinese: "◀ 返回主選單", LangJapanese: "◀ メインメニューへ", LangSpanish: "◀ Menú Principal"},
+	MsgMenuPageInfo:        {LangEnglish: "Page %d/%d", LangChinese: "第 %d/%d 页", LangTraditionalChinese: "第 %d/%d 頁", LangJapanese: "%d/%d ページ", LangSpanish: "Pág. %d/%d"},
+	MsgMenuPagePrev:        {LangEnglish: "◀ Prev", LangChinese: "◀ 上页", LangTraditionalChinese: "◀ 上頁", LangJapanese: "◀ 前へ", LangSpanish: "◀ Anterior"},
+	MsgMenuPageNext:        {LangEnglish: "Next ▶", LangChinese: "下页 ▶", LangTraditionalChinese: "下頁 ▶", LangJapanese: "次へ ▶", LangSpanish: "Siguiente ▶"},
+	MsgMenuEmpty:           {LangEnglish: "(no items)", LangChinese: "（暂无可选项）", LangTraditionalChinese: "（暫無選項）", LangJapanese: "（項目なし）", LangSpanish: "(sin opciones)"},
 	MsgMenuSelectModel:     {LangEnglish: "🧠 Select Model", LangChinese: "🧠 选择模型", LangTraditionalChinese: "🧠 選擇模型", LangJapanese: "🧠 モデル選択", LangSpanish: "🧠 Seleccionar Modelo"},
 	MsgMenuSelectSession:   {LangEnglish: "🔀 Select Session", LangChinese: "🔀 选择会话", LangTraditionalChinese: "🔀 選擇對話", LangJapanese: "🔀 セッション選択", LangSpanish: "🔀 Seleccionar Sesión"},
 	MsgMenuSelectProvider:  {LangEnglish: "🔌 Select Provider", LangChinese: "🔌 选择提供商", LangTraditionalChinese: "🔌 選擇提供商", LangJapanese: "🔌 プロバイダー選択", LangSpanish: "🔌 Seleccionar Proveedor"},
 	MsgMenuSelectMode:      {LangEnglish: "🔒 Select Mode", LangChinese: "🔒 选择权限模式", LangTraditionalChinese: "🔒 選擇權限模式", LangJapanese: "🔒 モード選択", LangSpanish: "🔒 Seleccionar Modo"},
 	MsgMenuSelectLang:      {LangEnglish: "🌐 Select Language", LangChinese: "🌐 选择语言", LangTraditionalChinese: "🌐 選擇語言", LangJapanese: "🌐 言語選択", LangSpanish: "🌐 Seleccionar Idioma"},
 	MsgMenuSelectReasoning: {LangEnglish: "💡 Select Reasoning Effort", LangChinese: "💡 选择推理强度", LangTraditionalChinese: "💡 選擇推理強度", LangJapanese: "💡 推論強度選択", LangSpanish: "💡 Nivel de Razonamiento"},
-	MsgMenuCustomTitle:  {LangEnglish: "⚙️ Customize Menu", LangChinese: "⚙️ 自定义菜单", LangTraditionalChinese: "⚙️ 自訂選單", LangJapanese: "⚙️ メニュー設定", LangSpanish: "⚙️ Personalizar Menú"},
-	MsgMenuCustomPin:    {LangEnglish: "📌 Pin Shortcuts", LangChinese: "📌 固定快捷命令", LangTraditionalChinese: "📌 固定捷徑", LangJapanese: "📌 ショートカット固定", LangSpanish: "📌 Anclar Accesos"},
-	MsgMenuCustomHide:   {LangEnglish: "👁️ Show/Hide Categories", LangChinese: "👁️ 显示/隐藏分类", LangTraditionalChinese: "👁️ 顯示/隱藏分類", LangJapanese: "👁️ カテゴリ表示切替", LangSpanish: "👁️ Mostrar/Ocultar"},
-	MsgMenuCustomAdd:    {LangEnglish: "➕ Show Custom Commands", LangChinese: "➕ 展示自定义命令", LangTraditionalChinese: "➕ 顯示自訂命令", LangJapanese: "➕ カスタムコマンド", LangSpanish: "➕ Mostrar Comandos"},
-	MsgMenuCustomDesc:   {LangEnglish: "🔤 Edit Command Descriptions", LangChinese: "🔤 修改命令列表描述", LangTraditionalChinese: "🔤 修改命令描述", LangJapanese: "🔤 コマンド説明編集", LangSpanish: "🔤 Editar Descripciones"},
-	MsgMenuCustomReset:  {LangEnglish: "↺ Reset to Defaults", LangChinese: "↺ 恢复默认设置", LangTraditionalChinese: "↺ 恢復預設", LangJapanese: "↺ デフォルトに戻す", LangSpanish: "↺ Restablecer"},
-	MsgMenuCmdNew:       {LangEnglish: "➕ New Session",     LangChinese: "➕ 新建会话",     LangTraditionalChinese: "➕ 新建對話",     LangJapanese: "➕ 新しいセッション", LangSpanish: "➕ Nueva Sesión"},
-	MsgMenuCmdList:      {LangEnglish: "📋 Session List",    LangChinese: "📋 会话列表",     LangTraditionalChinese: "📋 對話列表",     LangJapanese: "📋 セッション一覧",   LangSpanish: "📋 Lista Sesiones"},
-	MsgMenuCmdSwitch:    {LangEnglish: "🔀 Switch Session",  LangChinese: "🔀 切换会话",     LangTraditionalChinese: "🔀 切換對話",     LangJapanese: "🔀 セッション切替",   LangSpanish: "🔀 Cambiar Sesión"},
-	MsgMenuCmdDelete:    {LangEnglish: "🗑️ Delete Session",  LangChinese: "🗑️ 删除会话",     LangTraditionalChinese: "🗑️ 刪除對話",     LangJapanese: "🗑️ セッション削除",   LangSpanish: "🗑️ Eliminar Sesión"},
-	MsgMenuCmdSearch:    {LangEnglish: "🔍 Search",          LangChinese: "🔍 搜索会话",     LangTraditionalChinese: "🔍 搜尋對話",     LangJapanese: "🔍 検索",             LangSpanish: "🔍 Buscar"},
-	MsgMenuCmdRename:    {LangEnglish: "✏️ Rename Session",  LangChinese: "✏️ 重命名会话",   LangTraditionalChinese: "✏️ 重新命名",     LangJapanese: "✏️ 名前変更",         LangSpanish: "✏️ Renombrar"},
-	MsgMenuCmdCurrent:   {LangEnglish: "📍 Current Session", LangChinese: "📍 当前会话",     LangTraditionalChinese: "📍 目前對話",     LangJapanese: "📍 現在のセッション", LangSpanish: "📍 Sesión Actual"},
-	MsgMenuCmdHistory:   {LangEnglish: "📜 History",         LangChinese: "📜 对话历史",     LangTraditionalChinese: "📜 對話記錄",     LangJapanese: "📜 履歴",             LangSpanish: "📜 Historial"},
-	MsgMenuCmdModel:     {LangEnglish: "🧠 Switch Model",    LangChinese: "🧠 切换模型",     LangTraditionalChinese: "🧠 切換模型",     LangJapanese: "🧠 モデル切替",       LangSpanish: "🧠 Cambiar Modelo"},
-	MsgMenuCmdMode:      {LangEnglish: "🔒 Permission Mode", LangChinese: "🔒 权限模式",     LangTraditionalChinese: "🔒 權限模式",     LangJapanese: "🔒 権限モード",       LangSpanish: "🔒 Modo Permiso"},
-	MsgMenuCmdLang:      {LangEnglish: "🌐 Language",        LangChinese: "🌐 切换语言",     LangTraditionalChinese: "🌐 切換語言",     LangJapanese: "🌐 言語",             LangSpanish: "🌐 Idioma"},
-	MsgMenuCmdReasoning: {LangEnglish: "💡 Reasoning",       LangChinese: "💡 推理强度",     LangTraditionalChinese: "💡 推理強度",     LangJapanese: "💡 推論強度",         LangSpanish: "💡 Razonamiento"},
-	MsgMenuCmdProvider:  {LangEnglish: "🔌 Provider",        LangChinese: "🔌 切换提供商",   LangTraditionalChinese: "🔌 切換提供商",   LangJapanese: "🔌 プロバイダー",     LangSpanish: "🔌 Proveedor"},
-	MsgMenuCmdQuiet:     {LangEnglish: "🔕 Quiet Mode",      LangChinese: "🔕 静默模式",     LangTraditionalChinese: "🔕 靜音模式",     LangJapanese: "🔕 静音モード",       LangSpanish: "🔕 Modo Silencio"},
-	MsgMenuCmdMemory:    {LangEnglish: "🧠 Memory File",     LangChinese: "🧠 记忆文件",     LangTraditionalChinese: "🧠 記憶檔案",     LangJapanese: "🧠 メモリファイル",   LangSpanish: "🧠 Archivo Memoria"},
-	MsgMenuCmdCron:      {LangEnglish: "⏰ Cron Tasks",      LangChinese: "⏰ 定时任务",     LangTraditionalChinese: "⏰ 定時任務",     LangJapanese: "⏰ 定期タスク",       LangSpanish: "⏰ Tareas Cron"},
-	MsgMenuCmdCompress:  {LangEnglish: "🗜️ Compress",        LangChinese: "🗜️ 压缩上下文",   LangTraditionalChinese: "🗜️ 壓縮上下文",   LangJapanese: "🗜️ コンテキスト圧縮", LangSpanish: "🗜️ Comprimir"},
-	MsgMenuCmdTTS:       {LangEnglish: "🔊 TTS",             LangChinese: "🔊 语音合成",     LangTraditionalChinese: "🔊 語音合成",     LangJapanese: "🔊 音声合成",         LangSpanish: "🔊 Texto a Voz"},
-	MsgMenuCmdStop:      {LangEnglish: "⏹ Stop",             LangChinese: "⏹ 停止执行",     LangTraditionalChinese: "⏹ 停止執行",     LangJapanese: "⏹ 停止",             LangSpanish: "⏹ Detener"},
-	MsgMenuCmdStatus:    {LangEnglish: "📊 Status",          LangChinese: "📊 当前状态",     LangTraditionalChinese: "📊 目前狀態",     LangJapanese: "📊 ステータス",       LangSpanish: "📊 Estado"},
-	MsgMenuCmdUsage:     {LangEnglish: "📈 Usage",           LangChinese: "📈 用量统计",     LangTraditionalChinese: "📈 用量統計",     LangJapanese: "📈 使用量",           LangSpanish: "📈 Uso"},
-	MsgMenuCmdHelp:      {LangEnglish: "❓ Help",            LangChinese: "❓ 帮助说明",     LangTraditionalChinese: "❓ 說明",         LangJapanese: "❓ ヘルプ",           LangSpanish: "❓ Ayuda"},
-	MsgMenuCmdVersion:   {LangEnglish: "🏷️ Version",         LangChinese: "🏷️ 版本信息",     LangTraditionalChinese: "🏷️ 版本資訊",     LangJapanese: "🏷️ バージョン",       LangSpanish: "🏷️ Versión"},
-	MsgMenuCmdConfig:    {LangEnglish: "⚙️ Config",          LangChinese: "⚙️ 配置管理",     LangTraditionalChinese: "⚙️ 組態管理",     LangJapanese: "⚙️ 設定",             LangSpanish: "⚙️ Configuración"},
-	MsgMenuCmdDoctor:    {LangEnglish: "🩺 Doctor",          LangChinese: "🩺 健康诊断",     LangTraditionalChinese: "🩺 健康診斷",     LangJapanese: "🩺 診断",             LangSpanish: "🩺 Diagnóstico"},
-	MsgMenuCmdUpgrade:   {LangEnglish: "⬆️ Upgrade",         LangChinese: "⬆️ 升级更新",     LangTraditionalChinese: "⬆️ 升級更新",     LangJapanese: "⬆️ アップグレード",   LangSpanish: "⬆️ Actualizar"},
-	MsgMenuCmdRestart:   {LangEnglish: "🔄 Restart",         LangChinese: "🔄 重启服务",     LangTraditionalChinese: "🔄 重新啟動",     LangJapanese: "🔄 再起動",           LangSpanish: "🔄 Reiniciar"},
-	MsgMenuCmdShell:     {LangEnglish: "💻 Shell",           LangChinese: "💻 Shell 命令",   LangTraditionalChinese: "💻 Shell 指令",   LangJapanese: "💻 シェル",           LangSpanish: "💻 Shell"},
-	MsgMenuCmdBind:      {LangEnglish: "🔗 Bind Relay",      LangChinese: "🔗 绑定中继",     LangTraditionalChinese: "🔗 綁定中繼",     LangJapanese: "🔗 リレーバインド",   LangSpanish: "🔗 Enlazar Relay"},
-	MsgMenuCmdWorkspace: {LangEnglish: "📁 Workspace",       LangChinese: "📁 工作区",       LangTraditionalChinese: "📁 工作區",       LangJapanese: "📁 ワークスペース",   LangSpanish: "📁 Espacio Trabajo"},
-	MsgMenuCmdSkills:    {LangEnglish: "🎯 Skills",          LangChinese: "🎯 技能列表",     LangTraditionalChinese: "🎯 技能列表",     LangJapanese: "🎯 スキル",           LangSpanish: "🎯 Habilidades"},
-	MsgMenuCmdCommands:  {LangEnglish: "📝 Commands",        LangChinese: "📝 自定义命令",   LangTraditionalChinese: "📝 自訂命令",     LangJapanese: "📝 カスタムコマンド", LangSpanish: "📝 Comandos"},
-	MsgMenuCmdAlias:     {LangEnglish: "🏷️ Aliases",         LangChinese: "🏷️ 命令别名",     LangTraditionalChinese: "🏷️ 命令別名",     LangJapanese: "🏷️ エイリアス",       LangSpanish: "🏷️ Alias"},
-	MsgMenuCmdAllow:     {LangEnglish: "✅ Allow Tool",       LangChinese: "✅ 允许工具",     LangTraditionalChinese: "✅ 允許工具",     LangJapanese: "✅ ツール許可",       LangSpanish: "✅ Permitir Tool"},
-	MsgMenuCmdHeartbeat: {LangEnglish: "💓 Heartbeat",       LangChinese: "💓 心跳配置",     LangTraditionalChinese: "💓 心跳設定",     LangJapanese: "💓 ハートビート",     LangSpanish: "💓 Latido"},
+	MsgMenuCustomTitle:     {LangEnglish: "⚙️ Customize Menu", LangChinese: "⚙️ 自定义菜单", LangTraditionalChinese: "⚙️ 自訂選單", LangJapanese: "⚙️ メニュー設定", LangSpanish: "⚙️ Personalizar Menú"},
+	MsgMenuCustomPin:       {LangEnglish: "📌 Pin Shortcuts", LangChinese: "📌 固定快捷命令", LangTraditionalChinese: "📌 固定捷徑", LangJapanese: "📌 ショートカット固定", LangSpanish: "📌 Anclar Accesos"},
+	MsgMenuCustomHide:      {LangEnglish: "👁️ Show/Hide Categories", LangChinese: "👁️ 显示/隐藏分类", LangTraditionalChinese: "👁️ 顯示/隱藏分類", LangJapanese: "👁️ カテゴリ表示切替", LangSpanish: "👁️ Mostrar/Ocultar"},
+	MsgMenuCustomAdd:       {LangEnglish: "➕ Show Custom Commands", LangChinese: "➕ 展示自定义命令", LangTraditionalChinese: "➕ 顯示自訂命令", LangJapanese: "➕ カスタムコマンド", LangSpanish: "➕ Mostrar Comandos"},
+	MsgMenuCustomDesc:      {LangEnglish: "🔤 Edit Command Descriptions", LangChinese: "🔤 修改命令列表描述", LangTraditionalChinese: "🔤 修改命令描述", LangJapanese: "🔤 コマンド説明編集", LangSpanish: "🔤 Editar Descripciones"},
+	MsgMenuCustomReset:     {LangEnglish: "↺ Reset to Defaults", LangChinese: "↺ 恢复默认设置", LangTraditionalChinese: "↺ 恢復預設", LangJapanese: "↺ デフォルトに戻す", LangSpanish: "↺ Restablecer"},
+	MsgMenuCmdNew:          {LangEnglish: "➕ New Session", LangChinese: "➕ 新建会话", LangTraditionalChinese: "➕ 新建對話", LangJapanese: "➕ 新しいセッション", LangSpanish: "➕ Nueva Sesión"},
+	MsgMenuCmdSwitch:       {LangEnglish: "🔀 Switch Session", LangChinese: "🔀 切换会话", LangTraditionalChinese: "🔀 切換對話", LangJapanese: "🔀 セッション切替", LangSpanish: "🔀 Cambiar Sesión"},
+	MsgMenuCmdDelete:       {LangEnglish: "🗑️ Delete Session", LangChinese: "🗑️ 删除会话", LangTraditionalChinese: "🗑️ 刪除對話", LangJapanese: "🗑️ セッション削除", LangSpanish: "🗑️ Eliminar Sesión"},
+	MsgMenuCmdSearch:       {LangEnglish: "🔍 Search", LangChinese: "🔍 搜索会话", LangTraditionalChinese: "🔍 搜尋對話", LangJapanese: "🔍 検索", LangSpanish: "🔍 Buscar"},
+	MsgMenuCmdRename:       {LangEnglish: "✏️ Rename Session", LangChinese: "✏️ 重命名会话", LangTraditionalChinese: "✏️ 重新命名", LangJapanese: "✏️ 名前変更", LangSpanish: "✏️ Renombrar"},
+	MsgMenuCmdCurrent:      {LangEnglish: "📍 Current Session", LangChinese: "📍 当前会话", LangTraditionalChinese: "📍 目前對話", LangJapanese: "📍 現在のセッション", LangSpanish: "📍 Sesión Actual"},
+	MsgMenuCmdHistory:      {LangEnglish: "📜 History", LangChinese: "📜 对话历史", LangTraditionalChinese: "📜 對話記錄", LangJapanese: "📜 履歴", LangSpanish: "📜 Historial"},
+	MsgMenuCmdModel:        {LangEnglish: "🧠 Switch Model", LangChinese: "🧠 切换模型", LangTraditionalChinese: "🧠 切換模型", LangJapanese: "🧠 モデル切替", LangSpanish: "🧠 Cambiar Modelo"},
+	MsgMenuCmdMode:         {LangEnglish: "🔒 Permission Mode", LangChinese: "🔒 权限模式", LangTraditionalChinese: "🔒 權限模式", LangJapanese: "🔒 権限モード", LangSpanish: "🔒 Modo Permiso"},
+	MsgMenuCmdLang:         {LangEnglish: "🌐 Language", LangChinese: "🌐 切换语言", LangTraditionalChinese: "🌐 切換語言", LangJapanese: "🌐 言語", LangSpanish: "🌐 Idioma"},
+	MsgMenuCmdReasoning:    {LangEnglish: "💡 Reasoning", LangChinese: "💡 推理强度", LangTraditionalChinese: "💡 推理強度", LangJapanese: "💡 推論強度", LangSpanish: "💡 Razonamiento"},
+	MsgMenuCmdProvider:     {LangEnglish: "🔌 Provider", LangChinese: "🔌 切换提供商", LangTraditionalChinese: "🔌 切換提供商", LangJapanese: "🔌 プロバイダー", LangSpanish: "🔌 Proveedor"},
+	MsgMenuCmdQuiet:        {LangEnglish: "🔕 Quiet Mode", LangChinese: "🔕 静默模式", LangTraditionalChinese: "🔕 靜音模式", LangJapanese: "🔕 静音モード", LangSpanish: "🔕 Modo Silencio"},
+	MsgMenuCmdMemory:       {LangEnglish: "🧠 Memory File", LangChinese: "🧠 记忆文件", LangTraditionalChinese: "🧠 記憶檔案", LangJapanese: "🧠 メモリファイル", LangSpanish: "🧠 Archivo Memoria"},
+	MsgMenuCmdCron:         {LangEnglish: "⏰ Cron Tasks", LangChinese: "⏰ 定时任务", LangTraditionalChinese: "⏰ 定時任務", LangJapanese: "⏰ 定期タスク", LangSpanish: "⏰ Tareas Cron"},
+	MsgMenuCmdCompress:     {LangEnglish: "🗜️ Compress", LangChinese: "🗜️ 压缩上下文", LangTraditionalChinese: "🗜️ 壓縮上下文", LangJapanese: "🗜️ コンテキスト圧縮", LangSpanish: "🗜️ Comprimir"},
+	MsgMenuCmdTTS:          {LangEnglish: "🔊 TTS", LangChinese: "🔊 语音合成", LangTraditionalChinese: "🔊 語音合成", LangJapanese: "🔊 音声合成", LangSpanish: "🔊 Texto a Voz"},
+	MsgMenuCmdStop:         {LangEnglish: "⏹ Stop", LangChinese: "⏹ 停止执行", LangTraditionalChinese: "⏹ 停止執行", LangJapanese: "⏹ 停止", LangSpanish: "⏹ Detener"},
+	MsgMenuCmdStatus:       {LangEnglish: "📊 Status", LangChinese: "📊 当前状态", LangTraditionalChinese: "📊 目前狀態", LangJapanese: "📊 ステータス", LangSpanish: "📊 Estado"},
+	MsgMenuCmdUsage:        {LangEnglish: "📈 Usage", LangChinese: "📈 用量统计", LangTraditionalChinese: "📈 用量統計", LangJapanese: "📈 使用量", LangSpanish: "📈 Uso"},
+	MsgMenuCmdHelp:         {LangEnglish: "❓ Help", LangChinese: "❓ 帮助说明", LangTraditionalChinese: "❓ 說明", LangJapanese: "❓ ヘルプ", LangSpanish: "❓ Ayuda"},
+	MsgMenuCmdVersion:      {LangEnglish: "🏷️ Version", LangChinese: "🏷️ 版本信息", LangTraditionalChinese: "🏷️ 版本資訊", LangJapanese: "🏷️ バージョン", LangSpanish: "🏷️ Versión"},
+	MsgMenuCmdConfig:       {LangEnglish: "⚙️ Config", LangChinese: "⚙️ 配置管理", LangTraditionalChinese: "⚙️ 組態管理", LangJapanese: "⚙️ 設定", LangSpanish: "⚙️ Configuración"},
+	MsgMenuCmdDoctor:       {LangEnglish: "🩺 Doctor", LangChinese: "🩺 健康诊断", LangTraditionalChinese: "🩺 健康診斷", LangJapanese: "🩺 診断", LangSpanish: "🩺 Diagnóstico"},
+	MsgMenuCmdUpgrade:      {LangEnglish: "⬆️ Upgrade", LangChinese: "⬆️ 升级更新", LangTraditionalChinese: "⬆️ 升級更新", LangJapanese: "⬆️ アップグレード", LangSpanish: "⬆️ Actualizar"},
+	MsgMenuCmdRestart:      {LangEnglish: "🔄 Restart", LangChinese: "🔄 重启服务", LangTraditionalChinese: "🔄 重新啟動", LangJapanese: "🔄 再起動", LangSpanish: "🔄 Reiniciar"},
+	MsgMenuCmdShell:        {LangEnglish: "💻 Shell", LangChinese: "💻 Shell 命令", LangTraditionalChinese: "💻 Shell 指令", LangJapanese: "💻 シェル", LangSpanish: "💻 Shell"},
+	MsgMenuCmdBind:         {LangEnglish: "🔗 Bind Relay", LangChinese: "🔗 绑定中继", LangTraditionalChinese: "🔗 綁定中繼", LangJapanese: "🔗 リレーバインド", LangSpanish: "🔗 Enlazar Relay"},
+	MsgMenuCmdWorkspace:    {LangEnglish: "📁 Workspace", LangChinese: "📁 工作区", LangTraditionalChinese: "📁 工作區", LangJapanese: "📁 ワークスペース", LangSpanish: "📁 Espacio Trabajo"},
+	MsgMenuCmdSkills:       {LangEnglish: "🎯 Skills", LangChinese: "🎯 技能列表", LangTraditionalChinese: "🎯 技能列表", LangJapanese: "🎯 スキル", LangSpanish: "🎯 Habilidades"},
+	MsgMenuCmdCommands:     {LangEnglish: "📝 Commands", LangChinese: "📝 自定义命令", LangTraditionalChinese: "📝 自訂命令", LangJapanese: "📝 カスタムコマンド", LangSpanish: "📝 Comandos"},
+	MsgMenuCmdAlias:        {LangEnglish: "🏷️ Aliases", LangChinese: "🏷️ 命令别名", LangTraditionalChinese: "🏷️ 命令別名", LangJapanese: "🏷️ エイリアス", LangSpanish: "🏷️ Alias"},
+	MsgMenuCmdAllow:        {LangEnglish: "✅ Allow Tool", LangChinese: "✅ 允许工具", LangTraditionalChinese: "✅ 允許工具", LangJapanese: "✅ ツール許可", LangSpanish: "✅ Permitir Tool"},
+	MsgMenuCmdHeartbeat:    {LangEnglish: "💓 Heartbeat", LangChinese: "💓 心跳配置", LangTraditionalChinese: "💓 心跳設定", LangJapanese: "💓 ハートビート", LangSpanish: "💓 Latido"},
 }
 
 func (i *I18n) T(key MsgKey) string {
