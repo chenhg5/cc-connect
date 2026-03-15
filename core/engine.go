@@ -9346,6 +9346,8 @@ func (e *Engine) handleModelCardAction(args, sessionKey string) *Card {
 // executeCardAction performs the side-effect for act: prefixed actions
 // (e.g. switching model/mode/lang) before the card is re-rendered.
 func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
+	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
+
 	switch cmd {
 	case "/model":
 		if args == "" {
@@ -9368,7 +9370,6 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 			target = resolveModelSwitchTarget(target, models)
 		}
 		cancel()
-		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 		e.cleanupInteractiveState(interactiveKey)
 		e.interactiveMu.Lock()
 		state := e.interactiveStates[interactiveKey]
@@ -9398,7 +9399,6 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		for _, effort := range efforts {
 			if effort == target {
 				switcher.SetReasoningEffort(target)
-				interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 				e.cleanupInteractiveState(interactiveKey)
 				s := e.sessions.GetOrCreateActive(sessionKey)
 				s.SetAgentSessionID("", "")
@@ -9418,7 +9418,6 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		}
 		newMode := strings.ToLower(args)
 		switcher.SetMode(newMode)
-		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 		if e.applyLiveModeChange(sessionKey, switcher.GetMode()) {
 			e.cleanupInteractiveState(interactiveKey)
 			return
@@ -9467,7 +9466,6 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 			provName = ""
 		}
 		if switcher.SetActiveProvider(provName) {
-			interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 			e.cleanupInteractiveState(interactiveKey)
 			s := e.sessions.GetOrCreateActive(sessionKey)
 			s.SetAgentSessionID("", "")
@@ -9522,7 +9520,6 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		e.executeProviderLink(sessionKey, args)
 
 	case "/new":
-		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 		_, sessions := e.sessionContextForKey(sessionKey)
 		e.cleanupInteractiveState(interactiveKey)
 		sessions.NewSession(sessionKey, "")
@@ -9544,7 +9541,6 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		if matched == nil {
 			return
 		}
-		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 		e.cleanupInteractiveState(interactiveKey)
 		session := sessions.SwitchToAgentSession(sessionKey, matched.ID, agent.Name(), matched.Summary)
 		session.ClearHistory()
@@ -9576,8 +9572,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		}
 
 	case "/stop":
-		sessionKey = e.interactiveKeyForSessionKey(sessionKey)
-		e.stopInteractiveSession(sessionKey, nil, nil)
+		e.stopInteractiveSession(interactiveKey, nil, nil)
 
 	case "/heartbeat":
 		if e.heartbeatScheduler == nil {
