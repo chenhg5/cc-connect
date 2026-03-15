@@ -2799,6 +2799,46 @@ func TestResumeFailureFallbackToFreshSession(t *testing.T) {
 	}
 }
 
+func TestFreshSessionRespectedAfterFirstConnection(t *testing.T) {
+	agent := &stubStartSessionAgent{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	e := &Engine{
+		agent:             agent,
+		sessions:          NewSessionManager(""),
+		ctx:               ctx,
+		i18n:              NewI18n("en"),
+		interactiveStates: make(map[string]*interactiveState),
+		display:           DisplayCfg{},
+	}
+	// Simulate first connection already happened
+	e.hasConnectedOnce.Store(true)
+
+	// Create a session with no saved agent session ID (fresh session via /new)
+	session := e.sessions.GetOrCreateActive("test:user2")
+
+	p := &stubPlatformEngine{n: "test"}
+	state := e.getOrCreateInteractiveState("test:user2", p, "ctx", session)
+
+	if state.agentSession == nil {
+		t.Fatal("expected agentSession to be non-nil")
+	}
+
+	agent.mu.Lock()
+	calls := append([]string{}, agent.calls...)
+	agent.mu.Unlock()
+
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 StartSession call, got %d: %v", len(calls), calls)
+	}
+	// Should be empty string (fresh session), NOT ContinueSession
+	if calls[0] != "" {
+		t.Fatalf("StartSession call = %q, want empty string (fresh session)", calls[0])
+	}
+}
+
 func TestParseSelfReportedCtx(t *testing.T) {
 	tests := []struct {
 		input string

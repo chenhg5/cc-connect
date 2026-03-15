@@ -1416,10 +1416,11 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		return state
 	}
 
-	// On first connection after engine startup, always use --continue to
-	// pick up the most recent CLI session (bridges direct CLI and cc-connect usage).
+	// On first connection after engine startup, use --continue to pick up
+	// the most recent CLI session (bridges direct CLI and cc-connect usage).
+	// Subsequent connections respect the stored session ID (or "" for fresh).
 	startSessionID := session.GetAgentSessionID()
-	if startSessionID == "" || !e.hasConnectedOnce.Swap(true) {
+	if !e.hasConnectedOnce.Swap(true) {
 		startSessionID = ContinueSession
 	}
 
