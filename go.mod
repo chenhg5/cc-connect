@@ -16,6 +16,7 @@ require (
 )
 
 require (
+	github.com/braheezy/shine-mp3 v0.1.0 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/google/uuid v1.3.0 // indirect
 	golang.org/x/crypto v0.48.0 // indirect
