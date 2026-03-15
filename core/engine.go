@@ -7926,7 +7926,7 @@ func (e *Engine) buildListPage(cmd string, page int, sessionKey string) *MenuPag
 				if s.ID == active {
 					label = "✅ " + label
 				}
-				items = append(items, listItem{label, fmt.Sprintf("menu:sel:session:%d", i+1)})
+				items = append(items, listItem{label, fmt.Sprintf("menu:sel:switch:%d", i+1)})
 			}
 		}
 
