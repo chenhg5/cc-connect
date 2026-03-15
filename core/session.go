@@ -15,6 +15,7 @@ type Session struct {
 	ID             string         `json:"id"`
 	Name           string         `json:"name"`
 	AgentSessionID string         `json:"agent_session_id"`
+	AgentType      string         `json:"agent_type,omitempty"`
 	History        []HistoryEntry `json:"history"`
 	CreatedAt      time.Time      `json:"created_at"`
 	UpdatedAt      time.Time      `json:"updated_at"`
@@ -50,11 +51,12 @@ func (s *Session) AddHistory(role, content string) {
 	})
 }
 
-// SetAgentInfo atomically sets the agent session ID and name.
-func (s *Session) SetAgentInfo(agentSessionID, name string) {
+// SetAgentInfo atomically sets the agent session ID, agent type, and name.
+func (s *Session) SetAgentInfo(agentSessionID, agentType, name string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.AgentSessionID = agentSessionID
+	s.AgentType = agentType
 	s.Name = name
 }
 
@@ -72,22 +74,24 @@ func (s *Session) GetName() string {
 	return s.Name
 }
 
-// SetAgentSessionID atomically sets the agent session ID.
-func (s *Session) SetAgentSessionID(id string) {
+// SetAgentSessionID atomically sets the agent session ID and agent type.
+func (s *Session) SetAgentSessionID(id, agentType string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.AgentSessionID = id
+	s.AgentType = agentType
 }
 
 // CompareAndSetAgentSessionID sets the agent session ID only if it is currently empty.
 // Returns true if the value was set, false if it was already non-empty.
-func (s *Session) CompareAndSetAgentSessionID(id string) bool {
+func (s *Session) CompareAndSetAgentSessionID(id, agentType string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.AgentSessionID != "" {
 		return false
 	}
 	s.AgentSessionID = id
+	s.AgentType = agentType
 	return true
 }
 
@@ -305,6 +309,7 @@ func (sm *SessionManager) saveLocked() {
 			ID:             s.ID,
 			Name:           s.Name,
 			AgentSessionID: s.AgentSessionID,
+			AgentType:      s.AgentType,
 			History:        append([]HistoryEntry(nil), s.History...),
 			CreatedAt:      s.CreatedAt,
 			UpdatedAt:      s.UpdatedAt,
@@ -366,4 +371,33 @@ func (sm *SessionManager) load() {
 	}
 
 	slog.Info("session: loaded from disk", "path", sm.storePath, "sessions", len(sm.sessions))
+}
+
+// InvalidateForAgent clears AgentSessionID on all sessions whose AgentType
+// does not match the current agent. This handles the case where the user
+// switches agent types (e.g. opencode → pi) and stale session IDs from the
+// old agent would cause errors.
+func (sm *SessionManager) InvalidateForAgent(agentType string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	invalidated := 0
+	for _, s := range sm.sessions {
+		s.mu.Lock()
+		if s.AgentSessionID != "" && s.AgentType != "" && s.AgentType != agentType {
+			slog.Info("session: invalidating stale agent session",
+				"session", s.ID,
+				"old_agent", s.AgentType,
+				"new_agent", agentType,
+				"old_agent_session_id", s.AgentSessionID,
+			)
+			s.AgentSessionID = ""
+			s.AgentType = agentType
+			invalidated++
+		}
+		s.mu.Unlock()
+	}
+	if invalidated > 0 {
+		sm.saveLocked()
+	}
 }

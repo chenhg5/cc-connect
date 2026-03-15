@@ -198,7 +198,7 @@ func TestSession_GetAgentSessionID(t *testing.T) {
 	if got := s.GetAgentSessionID(); got != "" {
 		t.Errorf("initial GetAgentSessionID = %q, want empty", got)
 	}
-	s.SetAgentSessionID("sess-1")
+	s.SetAgentSessionID("sess-1", "test")
 	if got := s.GetAgentSessionID(); got != "sess-1" {
 		t.Errorf("GetAgentSessionID = %q, want %q", got, "sess-1")
 	}
@@ -211,6 +211,53 @@ func TestSession_GetName(t *testing.T) {
 	}
 }
 
+func TestSessionManager_InvalidateForAgent(t *testing.T) {
+	sm := NewSessionManager("")
+
+	// Create sessions with different agent types
+	s1 := sm.NewSession("user1", "sess1")
+	s1.SetAgentSessionID("old-id-1", "opencode")
+
+	s2 := sm.NewSession("user2", "sess2")
+	s2.SetAgentSessionID("old-id-2", "claudecode")
+
+	s3 := sm.NewSession("user3", "sess3")
+	s3.SetAgentSessionID("old-id-3", "") // pre-migration, no agent type
+
+	s4 := sm.NewSession("user4", "sess4") // no agent session ID at all
+
+	sm.InvalidateForAgent("claudecode")
+
+	// s1: opencode → should be invalidated
+	if got := s1.GetAgentSessionID(); got != "" {
+		t.Errorf("s1 (opencode) AgentSessionID = %q, want empty (should be invalidated)", got)
+	}
+	if s1.AgentType != "claudecode" {
+		t.Errorf("s1 AgentType = %q, want %q after invalidation", s1.AgentType, "claudecode")
+	}
+
+	// s2: claudecode → should be untouched
+	if got := s2.GetAgentSessionID(); got != "old-id-2" {
+		t.Errorf("s2 (claudecode) AgentSessionID = %q, want %q (should be preserved)", got, "old-id-2")
+	}
+	if s2.AgentType != "claudecode" {
+		t.Errorf("s2 AgentType = %q, want %q", s2.AgentType, "claudecode")
+	}
+
+	// s3: empty agent type → should be untouched (backward compat)
+	if got := s3.GetAgentSessionID(); got != "old-id-3" {
+		t.Errorf("s3 (empty type) AgentSessionID = %q, want %q (migration-safe)", got, "old-id-3")
+	}
+	if s3.AgentType != "" {
+		t.Errorf("s3 AgentType = %q, want empty (pre-migration should be untouched)", s3.AgentType)
+	}
+
+	// s4: no agent session ID → should be untouched
+	if got := s4.GetAgentSessionID(); got != "" {
+		t.Errorf("s4 (no session ID) AgentSessionID = %q, want empty", got)
+	}
+}
+
 func TestSession_ConcurrentGetSet(t *testing.T) {
 	s := &Session{}
 	var wg sync.WaitGroup
@@ -218,7 +265,7 @@ func TestSession_ConcurrentGetSet(t *testing.T) {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			s.SetAgentSessionID("id")
+			s.SetAgentSessionID("id", "test")
 		}()
 		go func() {
 			defer wg.Done()
