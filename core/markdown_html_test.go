@@ -414,3 +414,69 @@ func TestSplitMessageCodeFenceAware_NoCodeBlock(t *testing.T) {
 		}
 	}
 }
+
+func TestMarkdownToSimpleHTML_BoldItalic(t *testing.T) {
+	out := MarkdownToSimpleHTML("this is ***bold italic*** text")
+	if !strings.Contains(out, "<b><i>bold italic</i></b>") {
+		t.Errorf("expected <b><i>bold italic</i></b>, got %q", out)
+	}
+	if err := validateHTMLNesting(out); err != nil {
+		t.Errorf("invalid HTML nesting: %v, got %q", err, out)
+	}
+}
+
+func TestMarkdownToSimpleHTML_Wikilink(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"simple wikilink", "see [[MyPage]]", "MyPage"},
+		{"wikilink with display text", "see [[MyPage|Display Text]]", "Display Text"},
+		{"wikilink escapes html", "see [[Page<script>]]", "Page&lt;script&gt;"},  // escapeHTML in step 3 handles this
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := MarkdownToSimpleHTML(tt.input)
+			if !strings.Contains(out, tt.want) {
+				t.Errorf("expected %q in output, got %q", tt.want, out)
+			}
+			// Should not contain [[ or ]] in output
+			if strings.Contains(out, "[[") || strings.Contains(out, "]]") {
+				t.Errorf("wikilink brackets should be removed, got %q", out)
+			}
+		})
+	}
+}
+
+func TestMarkdownToSimpleHTML_Callout(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			"callout with title",
+			"> [!info] Important Note\n> This is the content",
+			"<blockquote><b>info: Important Note</b>\nThis is the content</blockquote>",
+		},
+		{
+			"callout without title",
+			"> [!warn]\n> Be careful",
+			"<blockquote><b>warn</b>\nBe careful</blockquote>",
+		},
+		{
+			"normal blockquote unchanged",
+			"> just a quote",
+			"<blockquote>just a quote</blockquote>",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := MarkdownToSimpleHTML(tt.input)
+			if !strings.Contains(out, tt.want) {
+				t.Errorf("expected %q in output, got %q", tt.want, out)
+			}
+		})
+	}
+}

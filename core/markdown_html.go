@@ -22,16 +22,34 @@ func MarkdownToSimpleHTML(md string) string {
 	var tblLines []string
 
 	// flushBlockquote merges buffered blockquote lines into a single <blockquote>.
+	// Supports Obsidian-style callouts: > [!type] Title
 	flushBlockquote := func() {
 		if len(bqLines) == 0 {
 			return
 		}
 		b.WriteString("<blockquote>")
-		for j, ql := range bqLines {
-			if j > 0 {
+		startIdx := 0
+		// Check for callout syntax in the first line
+		if len(bqLines) > 0 {
+			if m := reCallout.FindStringSubmatch(bqLines[0]); m != nil {
+				calloutType := m[1]
+				calloutTitle := m[2]
+				if calloutTitle != "" {
+					b.WriteString("<b>" + escapeHTML(calloutType) + ": " + escapeHTML(calloutTitle) + "</b>")
+				} else {
+					b.WriteString("<b>" + escapeHTML(calloutType) + "</b>")
+				}
+				startIdx = 1
+				if startIdx < len(bqLines) {
+					b.WriteByte('\n')
+				}
+			}
+		}
+		for j := startIdx; j < len(bqLines); j++ {
+			if j > startIdx {
 				b.WriteByte('\n')
 			}
-			b.WriteString(convertInlineHTML(ql))
+			b.WriteString(convertInlineHTML(bqLines[j]))
 		}
 		b.WriteString("</blockquote>")
 		bqLines = bqLines[:0]
@@ -175,15 +193,18 @@ func MarkdownToSimpleHTML(md string) string {
 }
 
 var (
-	reInlineCodeHTML = regexp.MustCompile("`([^`]+)`")
-	reBoldAstHTML    = regexp.MustCompile(`\*\*(.+?)\*\*`)
-	reBoldUndHTML    = regexp.MustCompile(`__(.+?)__`)
-	reItalicAstHTML  = regexp.MustCompile(`(?:^|[^*])\*([^*]+?)\*(?:[^*]|$)`)
-	reStrikeHTML     = regexp.MustCompile(`~~(.+?)~~`)
-	reLinkHTML       = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
-	reUnorderedList  = regexp.MustCompile(`^(\s*)[-*]\s+(.*)$`)
-	reOrderedList    = regexp.MustCompile(`^(\s*)\d+\.\s+(.*)$`)
-	reTableSep       = regexp.MustCompile(`^\|[\s:|-]+\|$`)
+	reInlineCodeHTML  = regexp.MustCompile("`([^`]+)`")
+	reBoldItalicHTML  = regexp.MustCompile(`\*\*\*(.+?)\*\*\*`)
+	reBoldAstHTML     = regexp.MustCompile(`\*\*(.+?)\*\*`)
+	reBoldUndHTML     = regexp.MustCompile(`__(.+?)__`)
+	reItalicAstHTML   = regexp.MustCompile(`(?:^|[^*])\*([^*]+?)\*(?:[^*]|$)`)
+	reStrikeHTML      = regexp.MustCompile(`~~(.+?)~~`)
+	reLinkHTML        = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
+	reWikilinkHTML    = regexp.MustCompile(`\[\[([^\]|]+)\|([^\]]+)\]\]|\[\[([^\]]+)\]\]`)
+	reUnorderedList   = regexp.MustCompile(`^(\s*)[-*]\s+(.*)$`)
+	reOrderedList     = regexp.MustCompile(`^(\s*)\d+\.\s+(.*)$`)
+	reTableSep        = regexp.MustCompile(`^\|[\s:|-]+\|$`)
+	reCallout         = regexp.MustCompile(`^\[!(\w+)\]\s*(.*)$`)
 )
 
 // convertInlineHTML converts inline Markdown formatting to Telegram-compatible HTML.
@@ -220,10 +241,29 @@ func convertInlineHTML(s string) string {
 		return nextPH(`<a href="` + escapeHTML(sm[2]) + `">` + escapeHTML(sm[1]) + `</a>`)
 	})
 
+	// 2b. Wikilinks: [[Link|Text]] → Text, [[Link]] → Link
+	// Don't escape here — step 3 will HTML-escape the whole remaining text.
+	s = reWikilinkHTML.ReplaceAllStringFunc(s, func(m string) string {
+		sm := reWikilinkHTML.FindStringSubmatch(m)
+		if sm[1] != "" && sm[2] != "" {
+			return sm[2]
+		}
+		if sm[3] != "" {
+			return sm[3]
+		}
+		return m
+	})
+
 	// 3. HTML-escape the entire remaining text.
 	s = escapeHTML(s)
 
-	// 4. Bold → placeholder (so italic regex can't cross bold boundaries)
+	// 4. Bold-italic (***text***) → placeholder (must be before bold)
+	s = reBoldItalicHTML.ReplaceAllStringFunc(s, func(m string) string {
+		inner := m[3 : len(m)-3]
+		return nextPH("<b><i>" + inner + "</i></b>")
+	})
+
+	// 5. Bold → placeholder (so italic regex can't cross bold boundaries)
 	s = reBoldAstHTML.ReplaceAllStringFunc(s, func(m string) string {
 		inner := m[2 : len(m)-2]
 		return nextPH("<b>" + inner + "</b>")
@@ -233,13 +273,13 @@ func convertInlineHTML(s string) string {
 		return nextPH("<b>" + inner + "</b>")
 	})
 
-	// 5. Strikethrough → placeholder
+	// 6. Strikethrough → placeholder
 	s = reStrikeHTML.ReplaceAllStringFunc(s, func(m string) string {
 		inner := m[2 : len(m)-2]
 		return nextPH("<s>" + inner + "</s>")
 	})
 
-	// 6. Italic (applied last, on text with bold/strike already protected)
+	// 7. Italic (applied last, on text with bold/strike already protected)
 	s = reItalicAstHTML.ReplaceAllStringFunc(s, func(m string) string {
 		idx := strings.Index(m, "*")
 		if idx < 0 {
@@ -252,7 +292,7 @@ func convertInlineHTML(s string) string {
 		return m[:idx] + "<i>" + m[idx+1:lastIdx] + "</i>" + m[lastIdx+1:]
 	})
 
-	// 7. Restore all placeholders (may be nested, so iterate until stable).
+	// 8. Restore all placeholders (may be nested, so iterate until stable).
 	for i := 0; i <= len(phs); i++ {
 		changed := false
 		for _, ph := range phs {

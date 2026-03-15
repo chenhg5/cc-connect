@@ -512,7 +512,7 @@ func formatToolParams(toolName string, params map[string]any) string {
 			}
 			if old != "" || new_ != "" {
 				diff := computeLineDiff(old, new_)
-				return "`" + fp + "`\n```\n" + diff + "\n```"
+				return "`" + fp + "`\n```diff\n" + diff + "\n```"
 			}
 			return fp
 		}
@@ -524,6 +524,9 @@ func formatToolParams(toolName string, params map[string]any) string {
 			return p
 		}
 	case "list_directory", "ListDirectory":
+		if p, ok := params["dir_path"].(string); ok {
+			return p
+		}
 		if p, ok := params["path"].(string); ok {
 			return p
 		}
@@ -531,6 +534,9 @@ func formatToolParams(toolName string, params map[string]any) string {
 			return p
 		}
 	case "web_fetch", "WebFetch":
+		if p, ok := params["prompt"].(string); ok {
+			return p
+		}
 		if u, ok := params["url"].(string); ok {
 			return u
 		}
@@ -542,11 +548,31 @@ func formatToolParams(toolName string, params map[string]any) string {
 		if n, ok := params["name"].(string); ok {
 			return n
 		}
-	case "search_code", "SearchCode", "Glob", "Grep":
+	case "search_code", "SearchCode", "Glob", "glob", "Grep", "grep_search":
 		if q, ok := params["query"].(string); ok {
 			return q
 		}
 		if p, ok := params["pattern"].(string); ok {
+			return p
+		}
+	case "save_memory":
+		if f, ok := params["fact"].(string); ok {
+			return f
+		}
+	case "ask_user":
+		if qs, ok := params["questions"].([]any); ok && len(qs) > 0 {
+			if q0, ok := qs[0].(map[string]any); ok {
+				if question, ok := q0["question"].(string); ok {
+					return question
+				}
+			}
+		}
+	case "enter_plan_mode":
+		if r, ok := params["reason"].(string); ok {
+			return r
+		}
+	case "exit_plan_mode":
+		if p, ok := params["plan_path"].(string); ok {
 			return p
 		}
 	}
