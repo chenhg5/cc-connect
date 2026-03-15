@@ -333,8 +333,8 @@ type MenuState struct {
 
 // MenuPage is the fully rendered menu content returned by MenuNavigationHandler.
 type MenuPage struct {
-	Title    string         // main message text (supports HTML)
-	Subtitle string         // secondary info line
+	Title    string           // main message text (supports HTML)
+	Subtitle string           // secondary info line
 	Buttons  [][]ButtonOption // inline keyboard rows; empty = no buttons
 }
 
