@@ -409,6 +409,8 @@ const (
 	MsgRelaySetupOK       MsgKey = "relay_setup_ok"
 	MsgRelaySetupExists   MsgKey = "relay_setup_exists"
 	MsgRelaySetupNoMemory MsgKey = "relay_setup_no_memory"
+	MsgSetupNative        MsgKey = "setup_native"
+	MsgCronSetupOK        MsgKey = "cron_setup_ok"
 
 	MsgSearchUsage    MsgKey = "search_usage"
 	MsgSearchError    MsgKey = "search_error"
@@ -1438,11 +1440,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "El programador de tareas no está disponible.",
 	},
 	MsgCronUsage: {
-		LangEnglish:            "Usage:\n/cron add <min> <hour> <day> <month> <weekday> <prompt>\n/cron list\n/cron del <id>\n/cron enable <id>\n/cron disable <id>",
-		LangChinese:            "用法：\n/cron add <分> <时> <日> <月> <周> <任务描述>\n/cron list\n/cron del <id>\n/cron enable <id>\n/cron disable <id>",
-		LangTraditionalChinese: "用法：\n/cron add <分> <時> <日> <月> <週> <任務描述>\n/cron list\n/cron del <id>\n/cron enable <id>\n/cron disable <id>",
-		LangJapanese:           "使い方:\n/cron add <分> <時> <日> <月> <曜日> <タスク内容>\n/cron list\n/cron del <id>\n/cron enable <id>\n/cron disable <id>",
-		LangSpanish:            "Uso:\n/cron add <min> <hora> <día> <mes> <día_semana> <tarea>\n/cron list\n/cron del <id>\n/cron enable <id>\n/cron disable <id>",
+		LangEnglish:            "Usage:\n/cron add <min> <hour> <day> <month> <weekday> <prompt>\n/cron list\n/cron del <id>\n/cron enable <id>\n/cron disable <id>\n/cron setup — write cron instructions to agent memory file",
+		LangChinese:            "用法：\n/cron add <分> <时> <日> <月> <周> <任务描述>\n/cron list\n/cron del <id>\n/cron enable <id>\n/cron disable <id>\n/cron setup — 将定时任务指令写入 agent 记忆文件",
+		LangTraditionalChinese: "用法：\n/cron add <分> <時> <日> <月> <週> <任務描述>\n/cron list\n/cron del <id>\n/cron enable <id>\n/cron disable <id>\n/cron setup — 將定時任務指令寫入 agent 記憶檔案",
+		LangJapanese:           "使い方:\n/cron add <分> <時> <日> <月> <曜日> <タスク内容>\n/cron list\n/cron del <id>\n/cron enable <id>\n/cron disable <id>\n/cron setup — cronの指示をエージェントのメモリファイルに書き込む",
+		LangSpanish:            "Uso:\n/cron add <min> <hora> <día> <mes> <día_semana> <tarea>\n/cron list\n/cron del <id>\n/cron enable <id>\n/cron disable <id>\n/cron setup — escribir instrucciones de cron en el archivo de memoria del agente",
 	},
 	MsgCronAddUsage: {
 		LangEnglish:            "Usage: /cron add <min> <hour> <day> <month> <weekday> <prompt>\nExample: /cron add 0 6 * * * Collect GitHub trending data and send me a summary",
@@ -2630,11 +2632,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "✅ ¡Enlace exitoso! Grupo actual: %s\n\nAhora puede pedir a este bot que consulte a %s.\nEjemplo: \"Pregunta a %s sobre ...\"",
 	},
 	MsgRelaySetupHint: {
-		LangEnglish:            "\n\n⚠️ This agent does not auto-inject relay instructions.\nPlease run `/bind setup` to write instructions to %s so the agent knows how to relay.",
-		LangChinese:            "\n\n⚠️ 当前 agent 不会自动注入中继指令。\n请运行 `/bind setup` 将指令写入 %s，以便 agent 知道如何中继。",
-		LangTraditionalChinese: "\n\n⚠️ 當前 agent 不會自動注入中繼指令。\n請執行 `/bind setup` 將指令寫入 %s，以便 agent 知道如何中繼。",
-		LangJapanese:           "\n\n⚠️ このエージェントはリレー指示を自動注入しません。\n`/bind setup` を実行して %s に指示を書き込んでください。",
-		LangSpanish:            "\n\n⚠️ Este agente no inyecta instrucciones de relay automáticamente.\nEjecute `/bind setup` para escribir las instrucciones en %s.",
+		LangEnglish:            "\n\n⚠️ This agent does not auto-inject relay instructions.\nPlease run `/bind setup` or `/cron setup` to write instructions to %s.",
+		LangChinese:            "\n\n⚠️ 当前 agent 不会自动注入中继指令。\n请运行 `/bind setup` 或 `/cron setup` 将指令写入 %s。",
+		LangTraditionalChinese: "\n\n⚠️ 當前 agent 不會自動注入中繼指令。\n請執行 `/bind setup` 或 `/cron setup` 將指令寫入 %s。",
+		LangJapanese:           "\n\n⚠️ このエージェントはリレー指示を自動注入しません。\n`/bind setup` または `/cron setup` を実行して %s に指示を書き込んでください。",
+		LangSpanish:            "\n\n⚠️ Este agente no inyecta instrucciones de relay automáticamente.\nEjecute `/bind setup` o `/cron setup` para escribir las instrucciones en %s.",
 	},
 	MsgRelaySetupOK: {
 		LangEnglish:            "✅ cc-connect instructions written to %s\nThe agent will now know how to use relay and cron.",
@@ -2656,6 +2658,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 當前 agent 不支持指令檔案。",
 		LangJapanese:           "❌ このエージェントは指示ファイルをサポートしていません。",
 		LangSpanish:            "❌ Este agente no soporta archivos de instrucciones.",
+	},
+	MsgSetupNative: {
+		LangEnglish:            "✅ This agent natively supports cc-connect instructions — no setup needed.",
+		LangChinese:            "✅ 当前 agent 已原生支持 cc-connect 指令，无需额外配置。",
+		LangTraditionalChinese: "✅ 當前 agent 已原生支持 cc-connect 指令，無需額外配置。",
+		LangJapanese:           "✅ このエージェントは cc-connect の指示をネイティブサポートしています。セットアップ不要です。",
+		LangSpanish:            "✅ Este agente soporta nativamente las instrucciones de cc-connect — no se necesita configuración.",
+	},
+	MsgCronSetupOK: {
+		LangEnglish:            "✅ Cron instructions written to %s\nYou can now tell the agent to create scheduled tasks in natural language.",
+		LangChinese:            "✅ 定时任务指令已写入 %s\n你现在可以用自然语言让 agent 创建定时任务了。",
+		LangTraditionalChinese: "✅ 定時任務指令已寫入 %s\n你現在可以用自然語言讓 agent 建立定時任務了。",
+		LangJapanese:           "✅ cron の指示を %s に書き込みました。\n自然言語でエージェントにスケジュールタスクの作成を依頼できるようになりました。",
+		LangSpanish:            "✅ Instrucciones de cron escritas en %s\nAhora puede decirle al agente que cree tareas programadas en lenguaje natural.",
 	},
 	MsgSearchUsage: {
 		LangEnglish:            "Usage: /search <keyword>\nSearch sessions by name or ID.",

@@ -5738,7 +5738,7 @@ func (e *Engine) cmdCron(p Platform, msg *Message, args []string) {
 	}
 
 	sub := matchSubCommand(strings.ToLower(args[0]), []string{
-		"add", "addexec", "list", "del", "delete", "rm", "remove", "enable", "disable",
+		"add", "addexec", "list", "del", "delete", "rm", "remove", "enable", "disable", "setup",
 	})
 	switch sub {
 	case "add":
@@ -5753,6 +5753,8 @@ func (e *Engine) cmdCron(p Platform, msg *Message, args []string) {
 		e.cmdCronToggle(p, msg, args[1:], true)
 	case "disable":
 		e.cmdCronToggle(p, msg, args[1:], false)
+	case "setup":
+		e.cmdCronSetup(p, msg)
 	default:
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCronUsage))
 	}
@@ -5910,6 +5912,22 @@ func (e *Engine) cmdCronToggle(p Platform, msg *Message, args []string, enable b
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronEnabled), id))
 	} else {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronDisabled), id))
+	}
+}
+
+func (e *Engine) cmdCronSetup(p Platform, msg *Message) {
+	result, baseName, err := e.setupMemoryFile()
+	switch result {
+	case setupNative:
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSetupNative))
+	case setupNoMemory:
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgRelaySetupNoMemory))
+	case setupExists:
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgRelaySetupExists), baseName))
+	case setupError:
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
+	case setupOK:
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronSetupOK), baseName))
 	}
 }
 
@@ -7250,44 +7268,72 @@ func (e *Engine) cmdBindStatus(p Platform, replyCtx any, chatID string) {
 
 const ccConnectInstructionMarker = "<!-- cc-connect-instructions -->"
 
-func (e *Engine) cmdBindSetup(p Platform, msg *Message) {
+type setupResult int
+
+const (
+	setupOK       setupResult = iota // instructions written successfully
+	setupExists                      // instructions already present
+	setupNative                      // agent supports system prompt natively
+	setupNoMemory                    // agent has no memory file support
+	setupError                       // write error
+)
+
+// setupMemoryFile appends AgentSystemPrompt() to the agent's project memory
+// file. It returns the result, the filename (for messages), and any error.
+func (e *Engine) setupMemoryFile() (setupResult, string, error) {
+	if _, ok := e.agent.(SystemPromptSupporter); ok {
+		return setupNative, "", nil
+	}
+
 	mp, ok := e.agent.(MemoryFileProvider)
 	if !ok {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgRelaySetupNoMemory))
-		return
+		return setupNoMemory, "", nil
 	}
 
 	filePath := mp.ProjectMemoryFile()
 	if filePath == "" {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgRelaySetupNoMemory))
-		return
+		return setupNoMemory, "", nil
 	}
+
+	baseName := filepath.Base(filePath)
 
 	existing, _ := os.ReadFile(filePath)
 	if strings.Contains(string(existing), ccConnectInstructionMarker) {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgRelaySetupExists), filepath.Base(filePath)))
-		return
+		return setupExists, baseName, nil
 	}
 
 	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
-		return
+		return setupError, baseName, err
 	}
 
 	f, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
-		return
+		return setupError, baseName, err
 	}
 	defer f.Close()
 
 	block := "\n" + ccConnectInstructionMarker + "\n" + AgentSystemPrompt() + "\n"
 	if _, err := f.WriteString(block); err != nil {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
-		return
+		return setupError, baseName, err
 	}
 
-	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgRelaySetupOK), filepath.Base(filePath)))
+	return setupOK, baseName, nil
+}
+
+func (e *Engine) cmdBindSetup(p Platform, msg *Message) {
+	result, baseName, err := e.setupMemoryFile()
+	switch result {
+	case setupNative:
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSetupNative))
+	case setupNoMemory:
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgRelaySetupNoMemory))
+	case setupExists:
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgRelaySetupExists), baseName))
+	case setupError:
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
+	case setupOK:
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgRelaySetupOK), baseName))
+	}
 }
 
 func extractChannelID(sessionKey string) string {
