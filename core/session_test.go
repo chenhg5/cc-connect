@@ -258,6 +258,56 @@ func TestSessionManager_InvalidateForAgent(t *testing.T) {
 	}
 }
 
+func TestSessionManager_UserMeta(t *testing.T) {
+	sm := NewSessionManager("")
+	sm.GetOrCreateActive("feishu:oc_abc:ou_xyz")
+
+	// Set UserName
+	sm.UpdateUserMeta("feishu:oc_abc:ou_xyz", "Zhang San", "")
+	meta := sm.GetUserMeta("feishu:oc_abc:ou_xyz")
+	if meta == nil || meta.UserName != "Zhang San" {
+		t.Errorf("expected UserName='Zhang San', got %+v", meta)
+	}
+	if meta.ChatName != "" {
+		t.Errorf("expected empty ChatName, got %q", meta.ChatName)
+	}
+
+	// Merge: add ChatName without losing UserName
+	sm.UpdateUserMeta("feishu:oc_abc:ou_xyz", "", "Test Group")
+	meta = sm.GetUserMeta("feishu:oc_abc:ou_xyz")
+	if meta.UserName != "Zhang San" || meta.ChatName != "Test Group" {
+		t.Errorf("expected merge, got %+v", meta)
+	}
+
+	// No-op for empty values
+	sm.UpdateUserMeta("feishu:oc_abc:ou_xyz", "", "")
+	meta = sm.GetUserMeta("feishu:oc_abc:ou_xyz")
+	if meta.UserName != "Zhang San" || meta.ChatName != "Test Group" {
+		t.Errorf("expected no change, got %+v", meta)
+	}
+
+	// Unknown key returns nil
+	if m := sm.GetUserMeta("nonexistent"); m != nil {
+		t.Errorf("expected nil for unknown key, got %+v", m)
+	}
+}
+
+func TestSessionManager_UserMetaPersistence(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+
+	sm1 := NewSessionManager(path)
+	sm1.NewSession("feishu:oc_abc:ou_xyz", "test")
+	sm1.UpdateUserMeta("feishu:oc_abc:ou_xyz", "Zhang San", "Group Name")
+	sm1.Save()
+
+	sm2 := NewSessionManager(path)
+	meta := sm2.GetUserMeta("feishu:oc_abc:ou_xyz")
+	if meta == nil || meta.UserName != "Zhang San" || meta.ChatName != "Group Name" {
+		t.Errorf("expected persisted meta, got %+v", meta)
+	}
+}
+
 func TestSession_ConcurrentGetSet(t *testing.T) {
 	s := &Session{}
 	var wg sync.WaitGroup

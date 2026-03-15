@@ -55,6 +55,9 @@ func main() {
 		case "relay":
 			runRelay(os.Args[2:])
 			return
+		case "sessions":
+			runSessions(os.Args[2:])
+			return
 		case "daemon":
 			runDaemon(os.Args[2:])
 			return
@@ -770,6 +773,10 @@ Commands:
     add              Create a scheduled task (-c <expr> --prompt <text>)
     list             List scheduled tasks
     del              Delete a scheduled task by ID
+
+  sessions           Browse session history
+    list             List all sessions (pipe-friendly)
+    show <id>        Show session messages (-n N for last N)
 
   relay              Cross-project message relay
     send             Send a message to another project and get the response

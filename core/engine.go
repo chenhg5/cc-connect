@@ -932,6 +932,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	}
 
 	session := sessions.GetOrCreateActive(msg.SessionKey)
+	sessions.UpdateUserMeta(msg.SessionKey, msg.UserName, msg.ChatName)
 	if !session.TryLock() {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
 		return

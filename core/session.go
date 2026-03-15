@@ -114,13 +114,20 @@ func (s *Session) GetHistory(n int) []HistoryEntry {
 	return out
 }
 
+// UserMeta stores human-readable display info for a session key.
+type UserMeta struct {
+	UserName string `json:"user_name,omitempty"`
+	ChatName string `json:"chat_name,omitempty"`
+}
+
 // sessionSnapshot is the JSON-serializable state of the SessionManager.
 type sessionSnapshot struct {
-	Sessions      map[string]*Session `json:"sessions"`
-	ActiveSession map[string]string   `json:"active_session"`
-	UserSessions  map[string][]string `json:"user_sessions"`
-	Counter       int64               `json:"counter"`
-	SessionNames  map[string]string   `json:"session_names,omitempty"` // agent session ID → custom name
+	Sessions      map[string]*Session  `json:"sessions"`
+	ActiveSession map[string]string    `json:"active_session"`
+	UserSessions  map[string][]string  `json:"user_sessions"`
+	Counter       int64                `json:"counter"`
+	SessionNames  map[string]string    `json:"session_names,omitempty"`  // agent session ID → custom name
+	UserMeta      map[string]*UserMeta `json:"user_meta,omitempty"`     // sessionKey → display info
 }
 
 // SessionManager supports multiple named sessions per user with active-session tracking.
@@ -130,7 +137,8 @@ type SessionManager struct {
 	sessions      map[string]*Session
 	activeSession map[string]string
 	userSessions  map[string][]string
-	sessionNames  map[string]string // agent session ID → custom name
+	sessionNames  map[string]string    // agent session ID → custom name
+	userMeta      map[string]*UserMeta // sessionKey → display info
 	counter       int64
 	storePath     string // empty = no persistence
 }
@@ -141,6 +149,7 @@ func NewSessionManager(storePath string) *SessionManager {
 		activeSession: make(map[string]string),
 		userSessions:  make(map[string][]string),
 		sessionNames:  make(map[string]string),
+		userMeta:      make(map[string]*UserMeta),
 		storePath:     storePath,
 	}
 	if storePath != "" {
@@ -248,6 +257,39 @@ func (sm *SessionManager) GetSessionName(agentSessionID string) string {
 	return sm.sessionNames[agentSessionID]
 }
 
+// UpdateUserMeta updates the human-readable metadata for a session key.
+// Only non-empty fields are applied (merge behavior).
+func (sm *SessionManager) UpdateUserMeta(sessionKey, userName, chatName string) {
+	if userName == "" && chatName == "" {
+		return
+	}
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	meta, ok := sm.userMeta[sessionKey]
+	if !ok {
+		meta = &UserMeta{}
+		sm.userMeta[sessionKey] = meta
+	}
+	if userName != "" {
+		meta.UserName = userName
+	}
+	if chatName != "" {
+		meta.ChatName = chatName
+	}
+}
+
+// GetUserMeta returns a copy of the stored metadata for a session key, or nil.
+func (sm *SessionManager) GetUserMeta(sessionKey string) *UserMeta {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	m := sm.userMeta[sessionKey]
+	if m == nil {
+		return nil
+	}
+	cp := *m
+	return &cp
+}
+
 // AllSessions returns all sessions across all user keys.
 func (sm *SessionManager) AllSessions() []*Session {
 	sm.mu.RLock()
@@ -323,6 +365,7 @@ func (sm *SessionManager) saveLocked() {
 		UserSessions:  sm.userSessions,
 		Counter:       sm.counter,
 		SessionNames:  sm.sessionNames,
+		UserMeta:      sm.userMeta,
 	}
 	data, err := json.MarshalIndent(snap, "", "  ")
 	if err != nil {
@@ -355,6 +398,7 @@ func (sm *SessionManager) load() {
 	sm.activeSession = snap.ActiveSession
 	sm.userSessions = snap.UserSessions
 	sm.sessionNames = snap.SessionNames
+	sm.userMeta = snap.UserMeta
 	sm.counter = snap.Counter
 
 	if sm.sessions == nil {
@@ -368,6 +412,9 @@ func (sm *SessionManager) load() {
 	}
 	if sm.sessionNames == nil {
 		sm.sessionNames = make(map[string]string)
+	}
+	if sm.userMeta == nil {
+		sm.userMeta = make(map[string]*UserMeta)
 	}
 
 	slog.Info("session: loaded from disk", "path", sm.storePath, "sessions", len(sm.sessions))
