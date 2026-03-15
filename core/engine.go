@@ -13,7 +13,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"regexp"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
@@ -181,6 +183,8 @@ type Engine struct {
 
 	quietMu sync.RWMutex
 	quiet   bool // when true, suppress thinking and tool progress messages globally
+
+	hasConnectedOnce atomic.Bool // first connection uses --continue
 }
 
 // workspaceInitFlow tracks a channel that is being onboarded to a workspace.
@@ -1412,18 +1416,40 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		return state
 	}
 
-	agentSID := session.GetAgentSessionID()
+	// On first connection after engine startup, use --continue to pick up
+	// the most recent CLI session (bridges direct CLI and cc-connect usage).
+	// Subsequent connections respect the stored session ID (or "" for fresh).
+	startSessionID := session.GetAgentSessionID()
+	if !e.hasConnectedOnce.Swap(true) {
+		startSessionID = ContinueSession
+	}
+
 	startAt := time.Now()
-	agentSession, err := agent.StartSession(e.ctx, agentSID)
+	agentSession, err := agent.StartSession(e.ctx, startSessionID)
 	startElapsed := time.Since(startAt)
 	if err != nil {
-		slog.Error("failed to start interactive session", "error", err, "elapsed", startElapsed)
-		state = &interactiveState{platform: p, replyCtx: replyCtx, quiet: quietMode}
-		e.interactiveStates[sessionKey] = state
-		return state
+		// If resume/continue failed, try a fresh session as fallback.
+		if startSessionID != "" {
+			slog.Error("session resume failed, falling back to fresh session",
+				"session_key", sessionKey, "failed_session_id", startSessionID,
+				"error", err, "elapsed", startElapsed)
+			startAt = time.Now()
+			agentSession, err = agent.StartSession(e.ctx, "")
+			startElapsed = time.Since(startAt)
+			if err == nil {
+				slog.Info("fresh session started after resume failure",
+					"session_key", sessionKey, "elapsed", startElapsed)
+			}
+		}
+		if err != nil {
+			slog.Error("failed to start interactive session", "error", err, "elapsed", startElapsed)
+			state = &interactiveState{platform: p, replyCtx: replyCtx, quiet: quietMode}
+			e.interactiveStates[sessionKey] = state
+			return state
+		}
 	}
 	if startElapsed >= slowAgentStart {
-		slog.Warn("slow agent session start", "elapsed", startElapsed, "agent", agent.Name(), "session_id", agentSID)
+		slog.Warn("slow agent session start", "elapsed", startElapsed, "agent", agent.Name(), "session_id", startSessionID)
 	}
 
 	if newID := agentSession.CurrentSessionID(); newID != "" {
@@ -1438,7 +1464,11 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	}
 	e.interactiveStates[sessionKey] = state
 
-	slog.Info("interactive session started", "session_key", sessionKey, "agent_session", session.GetAgentSessionID(), "elapsed", startElapsed)
+	slog.Info("session spawned",
+		"session_key", sessionKey,
+		"agent_session", agentSession.CurrentSessionID(),
+		"is_resume", session.GetAgentSessionID() != "",
+		"elapsed", startElapsed)
 	return state
 }
 
@@ -1732,8 +1762,21 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				fullResponse = e.i18n.T(MsgEmptyResponse)
 			}
 
-			session.AddHistory("assistant", fullResponse)
+			// Context usage indicator: prefer SDK tokens, fall back to self-reported.
+			sdkPlausible := event.InputTokens >= 100
+			selfPct := parseSelfReportedCtx(fullResponse)
+			cleanResponse := ctxSelfReportRe.ReplaceAllString(fullResponse, "")
+			cleanResponse = strings.TrimRight(cleanResponse, "\n ")
+
+			session.AddHistory("assistant", cleanResponse)
 			e.sessions.Save()
+
+			if sdkPlausible {
+				cleanResponse += contextIndicator(event.InputTokens)
+			} else if selfPct > 0 {
+				cleanResponse += fmt.Sprintf("\n[ctx: ~%d%%]", selfPct)
+			}
+			fullResponse = cleanResponse
 
 			turnDuration := time.Since(turnStart)
 			slog.Info("turn complete",
@@ -1743,6 +1786,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				"tools", toolCount,
 				"response_len", len(fullResponse),
 				"turn_duration", turnDuration,
+				"input_tokens", event.InputTokens,
+				"output_tokens", event.OutputTokens,
 			)
 
 			replyStart := time.Now()
@@ -7560,4 +7605,38 @@ func gitClone(repoURL, dest string) error {
 		return fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)
 	}
 	return nil
+}
+
+// ── Context usage indicator ──────────────────────────────────
+
+const modelContextWindow = 200_000 // Claude's context window size in tokens
+
+// contextIndicator returns a suffix like "\n[ctx: ~42%]" based on SDK-reported input tokens.
+func contextIndicator(inputTokens int) string {
+	if inputTokens <= 0 {
+		return ""
+	}
+	pct := inputTokens * 100 / modelContextWindow
+	if pct > 100 {
+		pct = 100
+	}
+	return fmt.Sprintf("\n[ctx: ~%d%%]", pct)
+}
+
+// ctxSelfReportRe matches agent self-reported context lines like "[ctx: ~42%]".
+var ctxSelfReportRe = regexp.MustCompile(`(?m)\n?\[ctx: ~\d+%\]`)
+
+// parseSelfReportedCtx extracts the percentage from a self-reported "[ctx: ~XX%]" line.
+func parseSelfReportedCtx(s string) int {
+	m := ctxSelfReportRe.FindString(s)
+	if m == "" {
+		return 0
+	}
+	start := strings.Index(m, "~") + 1
+	end := strings.Index(m, "%")
+	if start <= 0 || end <= start {
+		return 0
+	}
+	v, _ := strconv.Atoi(m[start:end])
+	return v
 }

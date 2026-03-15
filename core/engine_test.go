@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -2724,5 +2725,135 @@ func TestCmdBindSetup_UsesSharedLogic(t *testing.T) {
 	content, _ := os.ReadFile(memFile)
 	if !strings.Contains(string(content), ccConnectInstructionMarker) {
 		t.Error("expected instructions written to file")
+	}
+}
+
+// --- session resilience tests ---
+
+// stubStartSessionAgent records StartSession calls and can fail on specific session IDs.
+type stubStartSessionAgent struct {
+	calls    []string
+	failIDs  map[string]error // session IDs that should fail
+	mu       sync.Mutex
+}
+
+func (a *stubStartSessionAgent) Name() string { return "stub" }
+func (a *stubStartSessionAgent) StartSession(_ context.Context, sessionID string) (AgentSession, error) {
+	a.mu.Lock()
+	a.calls = append(a.calls, sessionID)
+	a.mu.Unlock()
+
+	if err, ok := a.failIDs[sessionID]; ok {
+		return nil, err
+	}
+	return &stubAgentSession{}, nil
+}
+func (a *stubStartSessionAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
+	return nil, nil
+}
+func (a *stubStartSessionAgent) Stop() error { return nil }
+
+func TestResumeFailureFallbackToFreshSession(t *testing.T) {
+	agent := &stubStartSessionAgent{
+		failIDs: map[string]error{
+			ContinueSession: fmt.Errorf("Prompt is too long"),
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	e := &Engine{
+		agent:             agent,
+		sessions:          NewSessionManager(""),
+		ctx:               ctx,
+		i18n:              NewI18n("en"),
+		interactiveStates: make(map[string]*interactiveState),
+		display:           DisplayCfg{},
+	}
+
+	session := e.sessions.GetOrCreateActive("test:user1")
+	session.SetAgentSessionID("old-session-id")
+
+	p := &stubPlatformEngine{n: "test"}
+	state := e.getOrCreateInteractiveState("test:user1", p, "ctx", session)
+
+	if state.agentSession == nil {
+		t.Fatal("expected agentSession to be non-nil after fallback")
+	}
+
+	agent.mu.Lock()
+	calls := append([]string{}, agent.calls...)
+	agent.mu.Unlock()
+
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 StartSession calls, got %d: %v", len(calls), calls)
+	}
+	// First call should be ContinueSession (first connection uses --continue)
+	if calls[0] != ContinueSession {
+		t.Fatalf("first StartSession call = %q, want %q", calls[0], ContinueSession)
+	}
+	// Second call should be empty string (fresh session fallback)
+	if calls[1] != "" {
+		t.Fatalf("second StartSession call = %q, want empty string", calls[1])
+	}
+}
+
+func TestFreshSessionRespectedAfterFirstConnection(t *testing.T) {
+	agent := &stubStartSessionAgent{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	e := &Engine{
+		agent:             agent,
+		sessions:          NewSessionManager(""),
+		ctx:               ctx,
+		i18n:              NewI18n("en"),
+		interactiveStates: make(map[string]*interactiveState),
+		display:           DisplayCfg{},
+	}
+	// Simulate first connection already happened
+	e.hasConnectedOnce.Store(true)
+
+	// Create a session with no saved agent session ID (fresh session via /new)
+	session := e.sessions.GetOrCreateActive("test:user2")
+
+	p := &stubPlatformEngine{n: "test"}
+	state := e.getOrCreateInteractiveState("test:user2", p, "ctx", session)
+
+	if state.agentSession == nil {
+		t.Fatal("expected agentSession to be non-nil")
+	}
+
+	agent.mu.Lock()
+	calls := append([]string{}, agent.calls...)
+	agent.mu.Unlock()
+
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 StartSession call, got %d: %v", len(calls), calls)
+	}
+	// Should be empty string (fresh session), NOT ContinueSession
+	if calls[0] != "" {
+		t.Fatalf("StartSession call = %q, want empty string (fresh session)", calls[0])
+	}
+}
+
+func TestParseSelfReportedCtx(t *testing.T) {
+	tests := []struct {
+		input string
+		want  int
+	}{
+		{"here is my response\n[ctx: ~42%]", 42},
+		{"no context here", 0},
+		{"response\n[ctx: ~100%]", 100},
+		{"response\n[ctx: ~5%]", 5},
+		{"", 0},
+	}
+	for _, tt := range tests {
+		got := parseSelfReportedCtx(tt.input)
+		if got != tt.want {
+			t.Errorf("parseSelfReportedCtx(%q) = %d, want %d", tt.input, got, tt.want)
+		}
 	}
 }

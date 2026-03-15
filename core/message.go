@@ -179,6 +179,8 @@ type Event struct {
 	Questions    []UserQuestion // populated when ToolName == "AskUserQuestion"
 	Done         bool
 	Error        error
+	InputTokens  int // token usage from agent result events
+	OutputTokens int
 }
 
 // HistoryEntry is one turn in a conversation.
