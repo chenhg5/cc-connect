@@ -28,6 +28,7 @@ type piSession struct {
 	workDir   string
 	model     string
 	mode      string
+	thinking  string // reasoning effort level for --thinking flag
 	extraEnv  []string
 	events    chan core.Event
 	sessionID atomic.Value // stores string
@@ -39,7 +40,7 @@ type piSession struct {
 	thinkingBuf strings.Builder // accumulates thinking_delta chunks
 }
 
-func newPiSession(ctx context.Context, cmd, workDir, model, mode, resumeID string, extraEnv []string) (*piSession, error) {
+func newPiSession(ctx context.Context, cmd, workDir, model, mode, thinking, resumeID string, extraEnv []string) (*piSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	s := &piSession{
@@ -47,6 +48,7 @@ func newPiSession(ctx context.Context, cmd, workDir, model, mode, resumeID strin
 		workDir:  workDir,
 		model:    model,
 		mode:     mode,
+		thinking: thinking,
 		extraEnv: extraEnv,
 		events:   make(chan core.Event, 64),
 		ctx:      sessionCtx,
@@ -90,6 +92,10 @@ func (s *piSession) Send(prompt string, images []core.ImageAttachment, files []c
 
 	if s.mode == "yolo" {
 		args = append(args, "--auto-approve")
+	}
+
+	if s.thinking != "" {
+		args = append(args, "--thinking", s.thinking)
 	}
 
 	// Pass attachments as @file arguments
