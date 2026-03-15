@@ -17,11 +17,17 @@ import (
 // sessionFileData mirrors the unexported sessionSnapshot in core/session.go
 // for JSON deserialization of session files.
 type sessionFileData struct {
-	Sessions      map[string]*sessionData `json:"sessions"`
-	ActiveSession map[string]string       `json:"active_session"`
-	UserSessions  map[string][]string     `json:"user_sessions"`
-	Counter       int64                   `json:"counter"`
-	SessionNames  map[string]string       `json:"session_names,omitempty"`
+	Sessions      map[string]*sessionData    `json:"sessions"`
+	ActiveSession map[string]string          `json:"active_session"`
+	UserSessions  map[string][]string        `json:"user_sessions"`
+	Counter       int64                      `json:"counter"`
+	SessionNames  map[string]string          `json:"session_names,omitempty"`
+	UserMeta      map[string]*userMetaData   `json:"user_meta,omitempty"`
+}
+
+type userMetaData struct {
+	UserName string `json:"user_name,omitempty"`
+	ChatName string `json:"chat_name,omitempty"`
 }
 
 type sessionData struct {
@@ -41,6 +47,8 @@ type sessionRecord struct {
 	Name       string
 	Platform   string
 	GroupUser  string
+	UserName   string // human-readable user name (from UserMeta)
+	ChatName   string // human-readable chat/group name (from UserMeta)
 	Messages   int
 	LastActive time.Time
 	History    []core.HistoryEntry
@@ -159,8 +167,15 @@ func loadAllSessions(dataDir string) ([]sessionRecord, error) {
 				continue
 			}
 			platform, groupUser := "", ""
+			var userName, chatName string
 			if userKey, ok := sessionToUserKey[s.ID]; ok {
 				platform, groupUser = parseSessionKey(userKey)
+				if fileData.UserMeta != nil {
+					if meta := fileData.UserMeta[userKey]; meta != nil {
+						userName = meta.UserName
+						chatName = meta.ChatName
+					}
+				}
 			}
 
 			records = append(records, sessionRecord{
@@ -170,6 +185,8 @@ func loadAllSessions(dataDir string) ([]sessionRecord, error) {
 				Name:       s.Name,
 				Platform:   platform,
 				GroupUser:  groupUser,
+				UserName:   userName,
+				ChatName:   chatName,
 				Messages:   len(s.History),
 				LastActive: s.UpdatedAt,
 				History:    s.History,
@@ -204,17 +221,14 @@ func runSessionsList(dataDir string) {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "#\tProject\tPlatform\tGroup/User\tMsgs\tLast Activity")
+	fmt.Fprintln(w, "#\tProject\tPlatform\tUser\tGroup/Chat\tMsgs\tLast Activity")
 	for i, r := range records {
-		groupUser := r.GroupUser
-		if len(groupUser) > 30 {
-			groupUser = groupUser[:27] + "..."
-		}
-		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%d\t%s\n",
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%d\t%s\n",
 			i+1,
 			r.Project,
 			r.Platform,
-			groupUser,
+			displayUser(r),
+			displayGroupTrunc(r, 30),
 			r.Messages,
 			r.LastActive.Format("2006-01-02 15:04"),
 		)
@@ -257,8 +271,8 @@ func runSessionsShow(dataDir, id string, limit int) {
 
 	// Print header
 	fmt.Printf("Session: %s (%s)\n", record.GlobalID, record.Name)
-	fmt.Printf("Platform: %s | Group/User: %s | Messages: %d\n\n",
-		record.Platform, record.GroupUser, record.Messages)
+	fmt.Printf("Platform: %s | User: %s | Group: %s | Messages: %d\n\n",
+		record.Platform, displayUser(*record), displayGroup(*record), record.Messages)
 
 	history := record.History
 	if limit > 0 && limit < len(history) {
@@ -285,14 +299,37 @@ func runSessionsShow(dataDir, id string, limit int) {
 	}
 }
 
+func displayUser(r sessionRecord) string {
+	if r.UserName != "" {
+		return r.UserName
+	}
+	return "-"
+}
+
+func displayGroup(r sessionRecord) string {
+	if r.ChatName != "" {
+		return r.ChatName
+	}
+	if r.GroupUser != "" {
+		return r.GroupUser
+	}
+	return "-"
+}
+
+func displayGroupTrunc(r sessionRecord, maxLen int) string {
+	s := displayGroup(r)
+	return truncate(s, maxLen)
+}
+
 func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
 		return s
 	}
 	if maxLen <= 3 {
-		return s[:maxLen]
+		return string(runes[:maxLen])
 	}
-	return s[:maxLen-3] + "..."
+	return string(runes[:maxLen-3]) + "..."
 }
 
 func printSessionsUsage() {

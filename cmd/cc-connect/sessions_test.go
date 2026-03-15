@@ -62,6 +62,9 @@ func TestLoadAllSessions(t *testing.T) {
 		UserSessions: map[string][]string{
 			"feishu:oc_test:ou_user1": {"s1"},
 		},
+		UserMeta: map[string]*userMetaData{
+			"feishu:oc_test:ou_user1": {UserName: "Alice", ChatName: "Test Group"},
+		},
 	}
 
 	file2 := sessionFileData{
@@ -139,6 +142,12 @@ func TestLoadAllSessions(t *testing.T) {
 	}
 	if projectARecord.Messages != 2 {
 		t.Errorf("project_a Messages = %d, want 2", projectARecord.Messages)
+	}
+	if projectARecord.UserName != "Alice" {
+		t.Errorf("project_a UserName = %q, want %q", projectARecord.UserName, "Alice")
+	}
+	if projectARecord.ChatName != "Test Group" {
+		t.Errorf("project_a ChatName = %q, want %q", projectARecord.ChatName, "Test Group")
 	}
 
 	// Check empty session (project_b:s2)

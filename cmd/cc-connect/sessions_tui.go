@@ -137,8 +137,8 @@ func (m sessionsModel) viewDetail() string {
 	var b strings.Builder
 	b.WriteString(headerStyle.Render(fmt.Sprintf("Session: %s (%s)", record.GlobalID, record.Name)))
 	b.WriteString("\n")
-	b.WriteString(dimStyle.Render(fmt.Sprintf("Platform: %s | Group/User: %s | Messages: %d",
-		record.Platform, record.GroupUser, record.Messages)))
+	b.WriteString(dimStyle.Render(fmt.Sprintf("Platform: %s | User: %s | Group: %s | Messages: %d",
+		record.Platform, displayUser(record), displayGroup(record), record.Messages)))
 	b.WriteString("\n")
 	b.WriteString(dimStyle.Render(strings.Repeat("─", m.width)))
 	b.WriteString("\n")
@@ -156,16 +156,12 @@ func (m sessionsModel) buildTable() table.Model {
 
 	rows := make([]table.Row, len(m.records))
 	for i, r := range m.records {
-		groupUser := r.GroupUser
-		maxGU := columns[3].Width
-		if maxGU > 3 && len(groupUser) > maxGU {
-			groupUser = groupUser[:maxGU-3] + "..."
-		}
 		rows[i] = table.Row{
 			fmt.Sprintf("%d", i+1),
 			truncate(r.Project, columns[1].Width),
 			truncate(r.Platform, columns[2].Width),
-			groupUser,
+			truncate(displayUser(r), columns[3].Width),
+			truncate(displayGroup(r), columns[4].Width),
 			fmt.Sprintf("%d", r.Messages),
 			r.LastActive.Format("2006-01-02 15:04"),
 		}
@@ -205,18 +201,19 @@ func (m sessionsModel) calcColumns() []table.Column {
 		colMsgs      = 6
 		colLastTime  = 19
 		fixedTotal   = colNum + colMsgs + colLastTime // 29
-		separators   = 6                               // padding between 6 columns
+		separators   = 7                               // padding between 7 columns
 	)
 
 	remaining := m.width - fixedTotal - separators
-	if remaining < 15 {
-		remaining = 15
+	if remaining < 20 {
+		remaining = 20
 	}
 
-	// Distribute: Project 35%, Platform 15%, Group/User 50%
-	colProject := remaining * 35 / 100
-	colPlatform := remaining * 15 / 100
-	colGroupUser := remaining - colProject - colPlatform
+	// Distribute: Project 28%, Platform 12%, User 20%, Group/Chat 40%
+	colProject := remaining * 28 / 100
+	colPlatform := remaining * 12 / 100
+	colUser := remaining * 20 / 100
+	colGroupChat := remaining - colProject - colPlatform - colUser
 
 	if colProject < 8 {
 		colProject = 8
@@ -224,15 +221,19 @@ func (m sessionsModel) calcColumns() []table.Column {
 	if colPlatform < 8 {
 		colPlatform = 8
 	}
-	if colGroupUser < 8 {
-		colGroupUser = 8
+	if colUser < 6 {
+		colUser = 6
+	}
+	if colGroupChat < 8 {
+		colGroupChat = 8
 	}
 
 	return []table.Column{
 		{Title: "#", Width: colNum},
 		{Title: "Project", Width: colProject},
 		{Title: "Platform", Width: colPlatform},
-		{Title: "Group/User", Width: colGroupUser},
+		{Title: "User", Width: colUser},
+		{Title: "Group/Chat", Width: colGroupChat},
 		{Title: "Msgs", Width: colMsgs},
 		{Title: "Last Activity", Width: colLastTime},
 	}

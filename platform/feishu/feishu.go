@@ -435,8 +435,8 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 	if sender.SenderId != nil && sender.SenderId.OpenId != nil {
 		userID = *sender.SenderId.OpenId
 	}
-	if sender.SenderType != nil {
-		userName = *sender.SenderType
+	if userID != "" {
+		userName = p.resolveUserName(userID)
 	}
 
 	messageID := ""

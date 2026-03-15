@@ -131,6 +131,7 @@ type Message struct {
 	MessageID  string // platform message ID for tracing
 	UserID     string
 	UserName   string
+	ChatName   string // human-readable chat/group name (optional)
 	Content    string
 	Images     []ImageAttachment // attached images (if any)
 	Files      []FileAttachment  // attached files (if any)
