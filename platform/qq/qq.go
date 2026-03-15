@@ -37,6 +37,7 @@ type Platform struct {
 	cancel                context.CancelFunc
 	selfID                int64
 	dedup                 core.MessageDedup
+	groupNameCache        sync.Map // groupID -> group name
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -217,12 +218,18 @@ func (p *Platform) handleMessage(payload map[string]any) {
 		messageID:   int32(messageID),
 	}
 
+	var chatName string
+	if msgType == "group" {
+		chatName = p.resolveGroupName(groupID)
+	}
+
 	msg := &core.Message{
 		SessionKey: sessionKey,
 		Platform:   "qq",
 		MessageID:  strconv.FormatInt(messageID, 10),
 		UserID:     strconv.FormatInt(userID, 10),
 		UserName:   userName,
+		ChatName:   chatName,
 		Content:    text,
 		Images:     images,
 		Audio:      audio,
@@ -338,6 +345,27 @@ func (p *Platform) Stop() error {
 		return p.conn.Close()
 	}
 	return nil
+}
+
+func (p *Platform) resolveGroupName(groupID int64) string {
+	if groupID == 0 {
+		return ""
+	}
+	fallback := strconv.FormatInt(groupID, 10)
+	if cached, ok := p.groupNameCache.Load(fallback); ok {
+		return cached.(string)
+	}
+	result, err := p.callAPI("get_group_info", map[string]any{"group_id": groupID})
+	if err != nil {
+		slog.Debug("qq: resolve group name failed", "group_id", groupID, "error", err)
+		return fallback
+	}
+	name, _ := result["group_name"].(string)
+	if name != "" {
+		p.groupNameCache.Store(fallback, name)
+		return name
+	}
+	return fallback
 }
 
 // ── OneBot API call via WebSocket ───────────────────────────────

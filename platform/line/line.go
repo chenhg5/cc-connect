@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -36,6 +37,8 @@ type Platform struct {
 	bot           *messaging_api.MessagingApiAPI
 	server        *http.Server
 	handler       core.MessageHandler
+	userNameCache sync.Map // userID -> display name
+	groupNameCache sync.Map // groupID -> group name
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -126,13 +129,19 @@ func (p *Platform) webhookHandler(w http.ResponseWriter, r *http.Request) {
 		sessionKey := fmt.Sprintf("line:%s", targetID)
 		rctx := replyContext{targetID: targetID, targetType: targetType}
 
+		chatName := ""
+		if targetType == "group" {
+			chatName = p.resolveGroupName(targetID)
+		}
+
 		switch m := e.Message.(type) {
 		case webhook.TextMessageContent:
 			slog.Debug("line: message received", "user", userID, "text_len", len(m.Text))
 			p.handler(p, &core.Message{
 				SessionKey: sessionKey, Platform: "line",
 				MessageID: m.Id,
-				UserID: userID, UserName: userID,
+				UserID: userID, UserName: p.resolveUserName(userID),
+				ChatName: chatName,
 				Content: m.Text, ReplyCtx: rctx,
 			})
 
@@ -146,7 +155,8 @@ func (p *Platform) webhookHandler(w http.ResponseWriter, r *http.Request) {
 			p.handler(p, &core.Message{
 				SessionKey: sessionKey, Platform: "line",
 				MessageID: m.Id,
-				UserID: userID, UserName: userID,
+				UserID: userID, UserName: p.resolveUserName(userID),
+				ChatName: chatName,
 				Images:  []core.ImageAttachment{{MimeType: "image/jpeg", Data: imgData}},
 				ReplyCtx: rctx,
 			})
@@ -165,7 +175,8 @@ func (p *Platform) webhookHandler(w http.ResponseWriter, r *http.Request) {
 			p.handler(p, &core.Message{
 				SessionKey: sessionKey, Platform: "line",
 				MessageID: m.Id,
-				UserID: userID, UserName: userID,
+				UserID: userID, UserName: p.resolveUserName(userID),
+				ChatName: chatName,
 				Audio: &core.AudioAttachment{
 					MimeType: "audio/m4a",
 					Data:     audioData,
@@ -179,6 +190,40 @@ func (p *Platform) webhookHandler(w http.ResponseWriter, r *http.Request) {
 			slog.Debug("line: ignoring unsupported message type")
 		}
 	}
+}
+
+func (p *Platform) resolveUserName(userID string) string {
+	if cached, ok := p.userNameCache.Load(userID); ok {
+		return cached.(string)
+	}
+	profile, err := p.bot.GetProfile(userID)
+	if err != nil {
+		slog.Debug("line: resolve user name failed", "user", userID, "error", err)
+		return userID
+	}
+	name := profile.DisplayName
+	if name == "" {
+		name = userID
+	}
+	p.userNameCache.Store(userID, name)
+	return name
+}
+
+func (p *Platform) resolveGroupName(groupID string) string {
+	if cached, ok := p.groupNameCache.Load(groupID); ok {
+		return cached.(string)
+	}
+	summary, err := p.bot.GetGroupSummary(groupID)
+	if err != nil {
+		slog.Debug("line: resolve group name failed", "group_id", groupID, "error", err)
+		return groupID
+	}
+	name := summary.GroupName
+	if name == "" {
+		return groupID
+	}
+	p.groupNameCache.Store(groupID, name)
+	return name
 }
 
 func extractSource(src webhook.SourceInterface) (targetID, targetType, userID string) {

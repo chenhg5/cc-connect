@@ -136,6 +136,10 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 				}
 
 				isGroup := msg.Chat.Type == "group" || msg.Chat.Type == "supergroup"
+				chatName := ""
+				if isGroup {
+					chatName = msg.Chat.Title
+				}
 
 				// In group chats, filter messages not directed at this bot (unless group_reply_all)
 				if isGroup && !p.groupReplyAll {
@@ -162,7 +166,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 					}
 					coreMsg := &core.Message{
 						SessionKey: sessionKey, Platform: "telegram",
-						UserID: userID, UserName: userName,
+						UserID: userID, UserName: userName, ChatName: chatName,
 						Content:   caption,
 						MessageID: strconv.Itoa(msg.MessageID),
 						Images:    []core.ImageAttachment{{MimeType: "image/jpeg", Data: imgData}},
@@ -182,7 +186,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 					}
 					coreMsg := &core.Message{
 						SessionKey: sessionKey, Platform: "telegram",
-						UserID: userID, UserName: userName,
+						UserID: userID, UserName: userName, ChatName: chatName,
 						MessageID: strconv.Itoa(msg.MessageID),
 						Audio: &core.AudioAttachment{
 							MimeType: msg.Voice.MimeType,
@@ -213,7 +217,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 					}
 					coreMsg := &core.Message{
 						SessionKey: sessionKey, Platform: "telegram",
-						UserID: userID, UserName: userName,
+						UserID: userID, UserName: userName, ChatName: chatName,
 						MessageID: strconv.Itoa(msg.MessageID),
 						Audio: &core.AudioAttachment{
 							MimeType: msg.Audio.MimeType,
@@ -242,7 +246,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 					}
 					coreMsg := &core.Message{
 						SessionKey: sessionKey, Platform: "telegram",
-						UserID: userID, UserName: userName,
+						UserID: userID, UserName: userName, ChatName: chatName,
 						Content:   caption,
 						MessageID: strconv.Itoa(msg.MessageID),
 						Files:     []core.FileAttachment{{MimeType: msg.Document.MimeType, Data: fileData, FileName: msg.Document.FileName}},
@@ -264,7 +268,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 
 				coreMsg := &core.Message{
 					SessionKey: sessionKey, Platform: "telegram",
-					UserID: userID, UserName: userName,
+					UserID: userID, UserName: userName, ChatName: chatName,
 					Content:   text,
 					MessageID: strconv.Itoa(msg.MessageID),
 					ReplyCtx:  rctx,
@@ -308,6 +312,11 @@ func (p *Platform) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 	} else {
 		sessionKey = fmt.Sprintf("telegram:%d:%d", chatID, cb.From.ID)
 	}
+	isGroup := cb.Message.Chat.Type == "group" || cb.Message.Chat.Type == "supergroup"
+	chatName := ""
+	if isGroup {
+		chatName = cb.Message.Chat.Title
+	}
 	rctx := replyContext{chatID: chatID, messageID: msgID}
 
 	// Command callbacks (cmd:/lang en, cmd:/mode yolo, etc.)
@@ -329,6 +338,7 @@ func (p *Platform) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 			Platform:   "telegram",
 			UserID:     userID,
 			UserName:   userName,
+			ChatName:   chatName,
 			Content:    command,
 			MessageID:  strconv.Itoa(msgID),
 			ReplyCtx:   rctx,
@@ -366,6 +376,7 @@ func (p *Platform) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 			Platform:   "telegram",
 			UserID:     userID,
 			UserName:   userName,
+			ChatName:   chatName,
 			Content:    data,
 			MessageID:  strconv.Itoa(msgID),
 			ReplyCtx:   rctx,
@@ -411,6 +422,7 @@ func (p *Platform) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 		Platform:   "telegram",
 		UserID:     userID,
 		UserName:   userName,
+		ChatName:   chatName,
 		Content:    responseText,
 		MessageID:  strconv.Itoa(msgID),
 		ReplyCtx:   rctx,

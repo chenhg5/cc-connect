@@ -726,6 +726,7 @@ func (p *Platform) handleGroupMessage(data json.RawMessage) {
 		MessageID:  d.ID,
 		UserID:     d.Author.MemberOpenID,
 		UserName:   d.Author.MemberOpenID, // official API only provides openid, no nickname
+		ChatName:   d.GroupOpenID,          // group openid as fallback (no group name API)
 		Content:    content,
 		Images:     images,
 		ReplyCtx:   rctx,

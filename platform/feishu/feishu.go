@@ -60,6 +60,7 @@ type Platform struct {
 	dedup                 core.MessageDedup
 	botOpenID             string
 	userNameCache         sync.Map // open_id -> display name
+	chatNameCache         sync.Map // chat_id -> chat name
 }
 
 type interactivePlatform struct {
@@ -290,6 +291,8 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 			SessionKey: sessionKey,
 			Platform:   p.platformName,
 			UserID:     userID,
+			UserName:   p.resolveUserName(userID),
+			ChatName:   p.resolveChatName(chatID),
 			Content:    responseText,
 			ReplyCtx:   rctx,
 		})
@@ -319,6 +322,8 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 			SessionKey: sessionKey,
 			Platform:   p.platformName,
 			UserID:     userID,
+			UserName:   p.resolveUserName(userID),
+			ChatName:   p.resolveChatName(chatID),
 			Content:    actionVal,
 			ReplyCtx:   rctx,
 		})
@@ -352,6 +357,8 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 			SessionKey: sessionKey,
 			Platform:   p.platformName,
 			UserID:     userID,
+			UserName:   p.resolveUserName(userID),
+			ChatName:   p.resolveChatName(chatID),
 			Content:    cmdText,
 			ReplyCtx:   rctx,
 		})
@@ -435,9 +442,10 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 	if sender.SenderId != nil && sender.SenderId.OpenId != nil {
 		userID = *sender.SenderId.OpenId
 	}
-	if sender.SenderType != nil {
-		userName = *sender.SenderType
+	if userID != "" {
+		userName = p.resolveUserName(userID)
 	}
+	chatName := p.resolveChatName(chatID)
 
 	messageID := ""
 	if msg.MessageId != nil {
@@ -522,7 +530,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		p.handler(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
-			UserID:    userID, UserName: userName,
+			UserID: userID, UserName: userName, ChatName: chatName,
 			Content: text, ReplyCtx: rctx,
 		})
 
@@ -542,7 +550,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		p.handler(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
-			UserID:    userID, UserName: userName,
+			UserID: userID, UserName: userName, ChatName: chatName,
 			Images:   []core.ImageAttachment{{MimeType: mimeType, Data: imgData}},
 			ReplyCtx: rctx,
 		})
@@ -565,7 +573,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		p.handler(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
-			UserID:    userID, UserName: userName,
+			UserID: userID, UserName: userName, ChatName: chatName,
 			Audio: &core.AudioAttachment{
 				MimeType: "audio/opus",
 				Data:     audioData,
@@ -584,7 +592,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		p.handler(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
-			UserID:    userID, UserName: userName,
+			UserID: userID, UserName: userName, ChatName: chatName,
 			Content: text, Images: images,
 			ReplyCtx: rctx,
 		})
@@ -609,7 +617,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		p.handler(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
-			UserID:    userID, UserName: userName,
+			UserID: userID, UserName: userName, ChatName: chatName,
 			Files: []core.FileAttachment{{
 				MimeType: mimeType,
 				Data:     fileData,
@@ -627,7 +635,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		coreMsg := &core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
-			UserID:    userID, UserName: userName,
+			UserID: userID, UserName: userName, ChatName: chatName,
 			Content:  text,
 			Images:   images,
 			Files:    files,
@@ -674,6 +682,32 @@ func (p *Platform) resolveUserNames(openIDs []string) map[string]string {
 		}
 	}
 	return names
+}
+
+// resolveChatName fetches a chat/group name via the IM API, with caching.
+func (p *Platform) resolveChatName(chatID string) string {
+	if chatID == "" {
+		return ""
+	}
+	if cached, ok := p.chatNameCache.Load(chatID); ok {
+		return cached.(string)
+	}
+	resp, err := p.client.Im.Chat.Get(context.Background(),
+		larkim.NewGetChatReqBuilder().ChatId(chatID).Build())
+	if err != nil {
+		slog.Debug(p.tag()+": resolve chat name failed", "chat_id", chatID, "error", err)
+		return chatID
+	}
+	if !resp.Success() || resp.Data == nil || resp.Data.Name == nil {
+		slog.Debug(p.tag()+": resolve chat name: no data", "chat_id", chatID, "code", resp.Code)
+		return chatID
+	}
+	name := *resp.Data.Name
+	if name == "" {
+		return chatID
+	}
+	p.chatNameCache.Store(chatID, name)
+	return name
 }
 
 // parseMergeForward fetches sub-messages of a merge_forward message via the

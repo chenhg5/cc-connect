@@ -38,6 +38,7 @@ type Platform struct {
 	cancel                context.CancelFunc
 	channelNameCache      map[string]string
 	channelCacheMu        sync.RWMutex
+	userNameCache         sync.Map // userID -> display name
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -140,7 +141,8 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 
 				msg := &core.Message{
 					SessionKey: sessionKey, Platform: "slack",
-					UserID: ev.User, UserName: ev.User,
+					UserID: ev.User, UserName: p.resolveUserName(ev.User),
+					ChatName: p.resolveChannelNameForMsg(ev.Channel),
 					Content:   stripAppMentionText(ev.Text),
 					MessageID: ev.TimeStamp,
 					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: ev.TimeStamp},
@@ -215,7 +217,8 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 
 				msg := &core.Message{
 					SessionKey: sessionKey, Platform: "slack",
-					UserID: ev.User, UserName: ev.User,
+					UserID: ev.User, UserName: p.resolveUserName(ev.User),
+					ChatName: p.resolveChannelNameForMsg(ev.Channel),
 					Content: ev.Text, Images: images, Audio: audio,
 					MessageID: ts,
 					ReplyCtx: replyContext{channel: ev.Channel, timestamp: ts},
@@ -295,6 +298,34 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 		return nil, fmt.Errorf("slack: invalid session key %q", sessionKey)
 	}
 	return replyContext{channel: parts[1]}, nil
+}
+
+func (p *Platform) resolveUserName(userID string) string {
+	if cached, ok := p.userNameCache.Load(userID); ok {
+		return cached.(string)
+	}
+	user, err := p.client.GetUserInfo(userID)
+	if err != nil {
+		slog.Debug("slack: resolve user name failed", "user", userID, "error", err)
+		return userID
+	}
+	name := user.RealName
+	if name == "" {
+		name = user.Profile.DisplayName
+	}
+	if name == "" {
+		name = userID
+	}
+	p.userNameCache.Store(userID, name)
+	return name
+}
+
+func (p *Platform) resolveChannelNameForMsg(channelID string) string {
+	name, err := p.ResolveChannelName(channelID)
+	if err != nil || name == "" {
+		return channelID
+	}
+	return name
 }
 
 func (p *Platform) ResolveChannelName(channelID string) (string, error) {
