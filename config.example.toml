@@ -415,6 +415,29 @@ name = "my-backend"
 # 仅在个人单用户部署中使用此配置，确保所有允许的用户均可信任。
 # admin_from = "*"
 
+# Multi-user mode — per-user rate limits and role-based command ACL
+# 多用户模式 — 按用户速率限制和基于角色的命令权限控制
+#
+# When [projects.users] is configured, each user is matched to a role.
+# Roles control which commands are available and the rate limit for that user.
+# If not configured, behavior is unchanged (backward compatible).
+#
+# 配置 [projects.users] 后，每个用户会被分配到一个角色。
+# 角色控制该用户可用的命令和速率限制。未配置时行为不变（向后兼容）。
+#
+# [projects.users]
+# default_role = "member"
+#
+# [projects.users.roles.admin]
+# user_ids = ["platform_user_id_1", "platform_user_id_2"]
+# disabled_commands = []                                     # no restrictions
+# rate_limit = { max_messages = 50, window_secs = 60 }
+#
+# [projects.users.roles.member]
+# user_ids = ["*"]                                           # matches all unassigned users
+# disabled_commands = ["*"]                                  # disable all built-in commands
+# rate_limit = { max_messages = 10, window_secs = 60 }
+
 # Heartbeat — periodic awareness check / 心跳 — 周期性巡检
 # The agent wakes up at a fixed interval to check the environment.
 # Agent 会按固定间隔唤醒，检查环境状态。

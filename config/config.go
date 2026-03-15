@@ -86,6 +86,19 @@ type RateLimitConfig struct {
 	WindowSecs  *int `toml:"window_secs"`  // window size in seconds; default 60
 }
 
+// UsersConfig controls per-user role assignments and policies within a project.
+type UsersConfig struct {
+	DefaultRole string                `toml:"default_role,omitempty"` // role for unmatched users; default "member"
+	Roles       map[string]RoleConfig `toml:"roles,omitempty"`
+}
+
+// RoleConfig defines policies for a user role.
+type RoleConfig struct {
+	UserIDs          []string         `toml:"user_ids"`
+	DisabledCommands []string         `toml:"disabled_commands,omitempty"`
+	RateLimit        *RateLimitConfig `toml:"rate_limit,omitempty"` // nil = inherit global
+}
+
 // SpeechConfig configures speech-to-text for voice messages.
 type SpeechConfig struct {
 	Enabled  bool   `toml:"enabled"`
@@ -154,6 +167,7 @@ type ProjectConfig struct {
 	InjectSender     *bool            `toml:"inject_sender,omitempty"`      // prepend sender identity (platform + user ID) to each message sent to the agent
 	DisabledCommands []string         `toml:"disabled_commands,omitempty"`  // commands to disable for this project (e.g. ["restart", "upgrade"])
 	AdminFrom        string           `toml:"admin_from,omitempty"`         // comma-separated user IDs allowed to run privileged commands; "*" = all allowed users
+	Users            *UsersConfig     `toml:"users,omitempty"`              // per-user role config; nil = legacy behavior
 }
 
 type AgentConfig struct {
@@ -249,6 +263,45 @@ func (c *Config) validate() error {
 			if _, ok := proj.Agent.Options["work_dir"]; ok {
 				return fmt.Errorf("project %q: multi-workspace mode conflicts with agent work_dir (use base_dir instead)", proj.Name)
 			}
+		}
+		if err := validateUsersConfig(prefix, proj.Users); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateUsersConfig checks the [projects.users] section for consistency.
+func validateUsersConfig(prefix string, u *UsersConfig) error {
+	if u == nil {
+		return nil
+	}
+	if len(u.Roles) == 0 {
+		return fmt.Errorf("config: %s.users has no roles defined", prefix)
+	}
+	wildcardCount := 0
+	seenUserIDs := make(map[string]string) // userID → role name
+	for roleName, rc := range u.Roles {
+		if len(rc.UserIDs) == 0 {
+			return fmt.Errorf("config: %s.users.roles.%s has empty user_ids", prefix, roleName)
+		}
+		for _, uid := range rc.UserIDs {
+			if uid == "*" {
+				wildcardCount++
+				continue
+			}
+			if prev, dup := seenUserIDs[uid]; dup {
+				return fmt.Errorf("config: %s.users: user %q appears in both role %q and %q", prefix, uid, prev, roleName)
+			}
+			seenUserIDs[uid] = roleName
+		}
+	}
+	if wildcardCount > 1 {
+		return fmt.Errorf("config: %s.users: wildcard user_ids=[\"*\"] appears in multiple roles", prefix)
+	}
+	if u.DefaultRole != "" {
+		if _, ok := u.Roles[u.DefaultRole]; !ok {
+			return fmt.Errorf("config: %s.users.default_role %q does not match any defined role", prefix, u.DefaultRole)
 		}
 	}
 	return nil
