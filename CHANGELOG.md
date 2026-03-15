@@ -220,7 +220,7 @@ This is the first stable release of cc-connect 1.2.0, consolidating all beta cha
 - **Cron list display**: Multi-line card-style formatting with human-readable schedule translations and next execution time
 - **Model switch resets session**: Switching model via `/model` now starts a fresh agent session instead of resuming the old one, preventing stale context from affecting the new model
 - **Permission modes docs**: README now documents permission modes for all four agents (Claude Code, Codex, Cursor Agent, Gemini CLI)
-- **Natural language scheduling docs**: INSTALL.md now explains how to enable cron job creation via natural language for non-Claude agents
+- **Natural language scheduling docs**: INSTALL.md now explains how to enable cron job creation via natural language for agents without built-in prompt injection
 - **README revamp**: Redesigned project header with architecture diagram, feature highlights, and multi-agent positioning
 
 ### Bug Fixes

@@ -308,11 +308,11 @@ cc-connect cron list
 cc-connect cron del <job-id>
 ```
 
-### Natural Language (Claude Code)
+### Natural Language (Claude Code / Codex)
 
 > "Every day at 6am, summarize GitHub trending"
 
-Claude Code auto-creates the cron job.
+Claude Code and Codex auto-create the cron job.
 
 ---
 

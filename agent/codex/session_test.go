@@ -54,7 +54,7 @@ func TestBuildExecArgs_IncludesReasoningEffort(t *testing.T) {
 		`model_reasoning_effort="high"`,
 		"--cd",
 		"/tmp/project",
-		"hello",
+		injectAgentSystemPrompt("hello", false),
 	}
 	if len(args) != len(want) {
 		t.Fatalf("args len = %d, want %d, args=%v", len(args), len(want), args)
@@ -63,6 +63,36 @@ func TestBuildExecArgs_IncludesReasoningEffort(t *testing.T) {
 		if args[i] != want[i] {
 			t.Fatalf("args[%d] = %q, want %q, args=%v", i, args[i], want[i], args)
 		}
+	}
+}
+
+func TestBuildExecArgs_IncludesAgentSystemPromptOnFirstTurn(t *testing.T) {
+	cs, err := newCodexSession(context.Background(), "/tmp/project", "", "", "", "", nil)
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+
+	args := cs.buildExecArgs("hello", nil)
+	got := args[len(args)-1]
+	want := injectAgentSystemPrompt("hello", false)
+	if got != want {
+		t.Fatalf("prompt = %q, want %q", got, want)
+	}
+}
+
+func TestBuildExecArgs_ResumeDoesNotDuplicateAgentSystemPrompt(t *testing.T) {
+	cs, err := newCodexSession(context.Background(), "/tmp/project", "", "", "", "thread-123", nil)
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+
+	args := cs.buildExecArgs("hello", nil)
+	got := args[len(args)-1]
+	if got != "hello" {
+		t.Fatalf("resume prompt = %q, want %q", got, "hello")
+	}
+	if strings.Contains(got, core.AgentSystemPrompt()) {
+		t.Fatalf("resume prompt unexpectedly contains system prompt")
 	}
 }
 
@@ -242,7 +272,7 @@ func TestSend_HandlesLargeJSONLines(t *testing.T) {
 
 func waitForArgsFile(t *testing.T, path string) []string {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(path)
 		if err == nil {

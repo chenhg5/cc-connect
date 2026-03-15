@@ -431,17 +431,16 @@ During a session, Claude may ask for tool permissions. Reply:
 - `deny` or `拒绝` — reject this request
 - `allow all` or `允许所有` — auto-approve all remaining requests this session
 
-## Step 7: Enable Natural Language Scheduling (Non-Claude-Code Agents)
+## Step 7: Enable Natural Language Scheduling (Agents Without Built-In Injection)
 
 cc-connect supports scheduled tasks (cron jobs). You can always create them via slash commands (`/cron add ...`) or CLI (`cc-connect cron add ...`), but to let the agent **understand natural language** like "every day at 6am, summarize trending repos", the agent needs to know about cc-connect's cron CLI.
 
-**Claude Code** handles this automatically via `--append-system-prompt` — no extra setup needed.
+**Claude Code and Codex** handle this automatically via built-in system-prompt injection — no extra setup needed.
 
-**For Codex, Cursor Agent, Qoder CLI, Gemini CLI, OpenCode, or iFlow CLI**, add the following instructions to the agent's project-level instruction file in your project's `work_dir`:
+**For Cursor Agent, Qoder CLI, Gemini CLI, OpenCode, or iFlow CLI**, add the following instructions to the agent's project-level instruction file in your project's `work_dir`:
 
 | Agent | File to create/edit |
 |-------|-------------------|
-| Codex | `AGENTS.md` |
 | Cursor Agent | `.cursorrules` |
 | Qoder CLI | `AGENTS.md` |
 | Gemini CLI | `GEMINI.md` |

@@ -305,11 +305,11 @@ cc-connect cron list
 cc-connect cron del <job-id>
 ```
 
-### 自然语言（Claude Code）
+### 自然语言（Claude Code / Codex）
 
 > "每天早上6点帮我总结 GitHub trending"
 
-Claude Code 会自动创建定时任务。
+Claude Code 和 Codex 都会自动创建定时任务。
 
 ---
 

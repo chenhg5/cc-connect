@@ -138,6 +138,7 @@ func (cs *codexSession) stageImages(prompt string, images []core.ImageAttachment
 func (cs *codexSession) buildExecArgs(prompt string, imagePaths []string) []string {
 	tid := cs.CurrentSessionID()
 	isResume := tid != ""
+	prompt = injectAgentSystemPrompt(prompt, isResume)
 
 	var args []string
 	if isResume {
@@ -173,6 +174,20 @@ func (cs *codexSession) buildExecArgs(prompt string, imagePaths []string) []stri
 		args = append(args, "--cd", cs.workDir, prompt)
 	}
 	return args
+}
+
+func injectAgentSystemPrompt(prompt string, isResume bool) string {
+	if isResume {
+		return prompt
+	}
+	sysPrompt := strings.TrimSpace(core.AgentSystemPrompt())
+	if sysPrompt == "" {
+		return prompt
+	}
+	if strings.TrimSpace(prompt) == "" {
+		return sysPrompt
+	}
+	return sysPrompt + "\n\n" + prompt
 }
 
 func codexImageExt(mime string) string {

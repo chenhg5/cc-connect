@@ -368,6 +368,8 @@ func (a *Agent) GlobalMemoryFile() string {
 	return filepath.Join(codexHome, "AGENTS.md")
 }
 
+func (a *Agent) HasSystemPromptSupport() bool { return true }
+
 // ── ProviderSwitcher implementation ──────────────────────────
 
 func (a *Agent) SetProviders(providers []core.ProviderConfig) {
