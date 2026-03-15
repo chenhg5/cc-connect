@@ -4423,7 +4423,11 @@ func drainEvents(ch <-chan Event) {
 	drained := 0
 	for {
 		select {
-		case <-ch:
+		case _, ok := <-ch:
+			if !ok {
+				// Channel is closed; stop immediately to avoid an infinite loop.
+				return
+			}
 			drained++
 		default:
 			if drained > 0 {
