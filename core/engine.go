@@ -4777,11 +4777,12 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 }
 
 func (e *Engine) getOrCreateDeleteModeState(sessionKey string, p Platform, replyCtx any) *deleteModeState {
+	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 	e.interactiveMu.Lock()
-	state, ok := e.interactiveStates[sessionKey]
+	state, ok := e.interactiveStates[interactiveKey]
 	if !ok || state == nil {
 		state = &interactiveState{platform: p, replyCtx: replyCtx}
-		e.interactiveStates[sessionKey] = state
+		e.interactiveStates[interactiveKey] = state
 	} else {
 		state.platform = p
 		state.replyCtx = replyCtx
@@ -4803,8 +4804,9 @@ func (e *Engine) getOrCreateDeleteModeState(sessionKey string, p Platform, reply
 }
 
 func (e *Engine) getDeleteModeState(sessionKey string) *deleteModeState {
+	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 	e.interactiveMu.Lock()
-	state := e.interactiveStates[sessionKey]
+	state := e.interactiveStates[interactiveKey]
 	e.interactiveMu.Unlock()
 	if state == nil {
 		return nil
@@ -4828,8 +4830,9 @@ func (e *Engine) getDeleteModeState(sessionKey string) *deleteModeState {
 }
 
 func (e *Engine) clearDeleteModeState(sessionKey string) {
+	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 	e.interactiveMu.Lock()
-	state := e.interactiveStates[sessionKey]
+	state := e.interactiveStates[interactiveKey]
 	e.interactiveMu.Unlock()
 	if state == nil {
 		return
@@ -4970,8 +4973,9 @@ func (e *Engine) deleteModeSelectionNames(sessions *SessionManager, dm *deleteMo
 }
 
 func (e *Engine) executeDeleteModeAction(sessionKey, args string) {
+	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 	e.interactiveMu.Lock()
-	state := e.interactiveStates[sessionKey]
+	state := e.interactiveStates[interactiveKey]
 	e.interactiveMu.Unlock()
 	if state == nil {
 		return
