@@ -3438,6 +3438,14 @@ func (e *Engine) GetAllCommands() []BotCommandInfo {
 
 	// Collect built-in  commands (use primary name, first in names list)
 	seenCmds := make(map[string]bool)
+
+	// /menu always comes first
+	commands = append(commands, BotCommandInfo{
+		Command:     "menu",
+		Description: e.i18n.T(MsgBuiltinCmdMenu),
+	})
+	seenCmds["menu"] = true
+
 	for _, c := range builtinCommands {
 		if len(c.names) == 0 {
 			continue

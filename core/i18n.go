@@ -450,6 +450,7 @@ const (
 	MsgBuiltinCmdHelp      MsgKey = "help"
 	MsgBuiltinCmdBind      MsgKey = "bind"
 	MsgBuiltinCmdShell     MsgKey = "shell"
+	MsgBuiltinCmdMenu      MsgKey = "menu"
 
 	// Multi-workspace messages
 	MsgWsNotEnabled        MsgKey = "ws_not_enabled"
@@ -2994,6 +2995,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "執行 Shell 命令，參數: <命令>",
 		LangJapanese:           "シェルコマンドを実行、引数: <コマンド>",
 		LangSpanish:            "Ejecutar un comando shell, arg: <comando>",
+	},
+	MsgBuiltinCmdMenu: {
+		LangEnglish:            "Open control panel",
+		LangChinese:            "打开控制面板",
+		LangTraditionalChinese: "開啟控制面板",
+		LangJapanese:           "コントロールパネルを開く",
+		LangSpanish:            "Abrir panel de control",
 	},
 
 	// Multi-workspace messages
