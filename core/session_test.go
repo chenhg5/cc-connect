@@ -308,6 +308,45 @@ func TestSessionManager_UserMetaPersistence(t *testing.T) {
 	}
 }
 
+func TestSessionManager_DeleteByAgentSessionID(t *testing.T) {
+	sm := NewSessionManager("")
+
+	s1 := sm.NewSession("user1", "one")
+	s1.SetAgentSessionID("agent-1", "codex")
+
+	s2 := sm.NewSession("user2", "two")
+	s2.SetAgentSessionID("agent-2", "codex")
+
+	s3 := sm.NewSession("user3", "three")
+	s3.SetAgentSessionID("agent-1", "codex")
+
+	if removed := sm.DeleteByAgentSessionID("agent-1"); removed != 2 {
+		t.Fatalf("removed = %d, want 2", removed)
+	}
+	if got := sm.FindByID(s1.ID); got != nil {
+		t.Fatalf("expected s1 removed, got %+v", got)
+	}
+	if got := sm.FindByID(s3.ID); got != nil {
+		t.Fatalf("expected s3 removed, got %+v", got)
+	}
+	if got := sm.FindByID(s2.ID); got == nil {
+		t.Fatal("expected s2 preserved")
+	}
+	if got := sm.ActiveSessionID("user1"); got != "" {
+		t.Fatalf("user1 active session = %q, want empty", got)
+	}
+	if got := sm.ActiveSessionID("user3"); got != "" {
+		t.Fatalf("user3 active session = %q, want empty", got)
+	}
+	if list := sm.ListSessions("user2"); len(list) != 1 || list[0].ID != s2.ID {
+		t.Fatalf("user2 sessions = %+v, want only s2", list)
+	}
+
+	if removed := sm.DeleteByAgentSessionID("missing"); removed != 0 {
+		t.Fatalf("removed missing = %d, want 0", removed)
+	}
+}
+
 func TestSession_ConcurrentGetSet(t *testing.T) {
 	s := &Session{}
 	var wg sync.WaitGroup
