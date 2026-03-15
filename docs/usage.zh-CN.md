@@ -7,6 +7,7 @@ cc-connect 完整功能使用指南。
 - [会话管理](#会话管理)
 - [权限模式](#权限模式)
 - [API Provider 管理](#api-provider-管理)
+- [飞书配置 CLI](#飞书配置-cli)
 - [Claude Code Router 集成](#claude-code-router-集成)
 - [语音消息（语音转文字）](#语音消息语音转文字)
 - [语音回复（文字转语音）](#语音回复文字转语音)
@@ -169,6 +170,34 @@ cc-connect provider import --project my-backend  # 从 cc-switch 导入
 | Gemini CLI | `GEMINI_API_KEY` | 使用 `env` 字段 |
 | OpenCode | `ANTHROPIC_API_KEY` | 使用 `env` 字段 |
 | iFlow CLI | `IFLOW_API_KEY` | `IFLOW_BASE_URL` |
+
+---
+
+## 飞书配置 CLI
+
+可以直接通过 CLI 完成飞书/Lark 机器人创建或关联，并自动写回 `config.toml`：
+
+```bash
+# 推荐：统一入口
+cc-connect feishu setup --project my-project
+cc-connect feishu setup --project my-project --app cli_xxx:sec_xxx
+
+# 强制模式（一般不需要）
+cc-connect feishu new --project my-project
+cc-connect feishu bind --project my-project --app cli_xxx:sec_xxx
+```
+
+区别说明：
+- `setup`：统一入口。没传凭证时等价 `new`，传了 `--app` 时等价 `bind`。
+- `new`：强制二维码新建，不接受 `--app`。
+- `bind`：强制关联已有机器人，必须提供凭证。
+
+行为说明（通用）：
+- `setup` 默认走二维码新建；传入 `--app` 时自动切换到关联已有机器人。
+- `--project` 不存在会自动创建。
+- 项目存在但没有 `feishu/lark` 平台时会自动补一个平台配置。
+- 命令会回填凭证（`app_id` / `app_secret`）；扫码新建场景下飞书通常会预配权限和事件订阅。
+- 建议在飞书开放平台再核验一次发布状态与可用范围。
 
 ---
 

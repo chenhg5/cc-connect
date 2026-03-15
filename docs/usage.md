@@ -7,6 +7,7 @@ Complete guide to using cc-connect features.
 - [Session Management](#session-management)
 - [Permission Modes](#permission-modes)
 - [API Provider Management](#api-provider-management)
+- [Feishu Setup CLI](#feishu-setup-cli)
 - [Claude Code Router Integration](#claude-code-router-integration)
 - [Voice Messages (STT)](#voice-messages-speech-to-text)
 - [Voice Reply (TTS)](#voice-reply-text-to-speech)
@@ -169,6 +170,34 @@ cc-connect provider import --project my-backend  # from cc-switch
 | Gemini CLI | `GEMINI_API_KEY` | use `env` map |
 | OpenCode | `ANTHROPIC_API_KEY` | use `env` map |
 | iFlow CLI | `IFLOW_API_KEY` | `IFLOW_BASE_URL` |
+
+---
+
+## Feishu Setup CLI
+
+Use CLI to create or bind Feishu/Lark bot credentials and write them back to `config.toml`.
+
+```bash
+# Recommended: unified entry
+cc-connect feishu setup --project my-project
+cc-connect feishu setup --project my-project --app cli_xxx:sec_xxx
+
+# Force modes (usually unnecessary)
+cc-connect feishu new --project my-project
+cc-connect feishu bind --project my-project --app cli_xxx:sec_xxx
+```
+
+Differences:
+- `setup`: unified entry. No credentials => behaves like `new`; with `--app` => behaves like `bind`.
+- `new`: force QR onboarding flow; rejects `--app`.
+- `bind`: force credential binding flow; requires credentials.
+
+Behavior:
+- `setup` uses QR onboarding by default, or bind mode when `--app` is provided.
+- If `--project` does not exist, it is created automatically.
+- If project exists but has no `feishu/lark` platform, one is added automatically.
+- The command writes credentials (`app_id`, `app_secret`); in QR onboarding flow, Feishu usually pre-configures permissions and event subscriptions.
+- Still verify app publish status and availability scope in Feishu Open Platform.
 
 ---
 

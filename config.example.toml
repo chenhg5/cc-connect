@@ -535,6 +535,9 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "bypassPermission
 # 3. Add im.message.receive_v1 event, select WebSocket long-connection mode
 #    添加 im.message.receive_v1 事件，选择 WebSocket 长连接模式
 # 4. Fill in app_id and app_secret below / 填入下方 app_id 和 app_secret
+# Quick setup via CLI:
+#   cc-connect feishu setup --project <project_name>
+# （可通过 CLI 快速配置：cc-connect feishu setup --project <project_name>）
 # Note: No WebSocket URL needed — the SDK auto-negotiates the connection.
 # 注意：无需配置 WebSocket URL，SDK 会自动通过凭证建立连接。
 
