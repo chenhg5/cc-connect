@@ -731,6 +731,9 @@ func (e *Engine) Start() error {
 		if nav, ok := p.(CardNavigable); ok {
 			nav.SetCardNavigationHandler(e.handleCardNav)
 		}
+		if mn, ok := p.(MenuNavigable); ok {
+			mn.SetMenuNavigationHandler(e.handleMenuNavigation)
+		}
 	}
 
 	// Log summary
@@ -1897,6 +1900,7 @@ var builtinCommands = []struct {
 	{[]string{"shell", "sh", "exec", "run"}, "shell"},
 	{[]string{"tts"}, "tts"},
 	{[]string{"workspace", "ws"}, "workspace"},
+	{[]string{"menu"}, "menu"},
 }
 
 // matchPrefix finds a unique command matching the given prefix.
@@ -2043,6 +2047,16 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 			return true
 		}
 		e.handleWorkspaceCommand(p, msg, args)
+		return true
+	case "menu":
+		if mn, ok := p.(MenuNavigable); ok {
+			page := e.handleMenuNavigation("menu:main", msg.SessionKey)
+			if err := mn.SendMenuPage(e.ctx, msg.ReplyCtx, page); err != nil {
+				slog.Warn("menu: failed to send menu page", "error", err)
+			}
+		} else {
+			e.cmdHelp(p, msg)
+		}
 		return true
 	default:
 		if custom, ok := e.commands.Resolve(cmd); ok {
@@ -7586,4 +7600,410 @@ func gitClone(repoURL, dest string) error {
 		return fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)
 	}
 	return nil
+}
+
+// ── Interactive Menu (/menu panel) ──────────────────────────────────────────
+
+// menuCategory defines a category in the /menu panel.
+type menuCategory struct {
+	key      string // used in callback data: "session", "ai", "task", "system", "advanced"
+	labelKey MsgKey // i18n label for the category button
+}
+
+// menuCategories is the ordered list of categories shown in the main menu.
+var menuCategories = []menuCategory{
+	{"session", MsgMenuCatSession},
+	{"ai", MsgMenuCatAI},
+	{"task", MsgMenuCatTask},
+	{"system", MsgMenuCatSystem},
+	{"advanced", MsgMenuCatAdvanced},
+}
+
+// menuCategoryCommands maps category key → ordered list of (callbackSuffix, labelKey).
+// callbackSuffix is appended to "menu:exec:" or "menu:list:" depending on command type.
+var menuCategoryCommands = map[string][]struct {
+	action   string // full callback data: "menu:exec:new" or "menu:list:session:0"
+	labelKey MsgKey
+}{
+	"session": {
+		{"menu:list:session:0", MsgMenuCmdSwitch},
+		{"menu:exec:new", MsgMenuCmdNew},
+		{"menu:exec:current", MsgMenuCmdCurrent},
+		{"menu:exec:history", MsgMenuCmdHistory},
+		{"menu:exec:name", MsgMenuCmdRename},
+		{"menu:exec:delete", MsgMenuCmdDelete},
+		{"menu:exec:search", MsgMenuCmdSearch},
+	},
+	"ai": {
+		{"menu:list:model:0", MsgMenuCmdModel},
+		{"menu:list:mode:0", MsgMenuCmdMode},
+		{"menu:list:lang:0", MsgMenuCmdLang},
+		{"menu:list:reasoning:0", MsgMenuCmdReasoning},
+		{"menu:list:provider:0", MsgMenuCmdProvider},
+		{"menu:exec:quiet", MsgMenuCmdQuiet},
+	},
+	"task": {
+		{"menu:exec:memory", MsgMenuCmdMemory},
+		{"menu:exec:cron", MsgMenuCmdCron},
+		{"menu:exec:compress", MsgMenuCmdCompress},
+		{"menu:exec:tts", MsgMenuCmdTTS},
+		{"menu:exec:stop", MsgMenuCmdStop},
+	},
+	"system": {
+		{"menu:exec:status", MsgMenuCmdStatus},
+		{"menu:exec:usage", MsgMenuCmdUsage},
+		{"menu:exec:help", MsgMenuCmdHelp},
+		{"menu:exec:version", MsgMenuCmdVersion},
+		{"menu:exec:config", MsgMenuCmdConfig},
+		{"menu:exec:doctor", MsgMenuCmdDoctor},
+		{"menu:exec:upgrade", MsgMenuCmdUpgrade},
+		{"menu:exec:restart", MsgMenuCmdRestart},
+	},
+	"advanced": {
+		{"menu:exec:shell", MsgMenuCmdShell},
+		{"menu:exec:bind", MsgMenuCmdBind},
+		{"menu:exec:workspace", MsgMenuCmdWorkspace},
+		{"menu:exec:skills", MsgMenuCmdSkills},
+		{"menu:exec:commands", MsgMenuCmdCommands},
+		{"menu:exec:alias", MsgMenuCmdAlias},
+		{"menu:exec:allow", MsgMenuCmdAllow},
+		{"menu:exec:heartbeat", MsgMenuCmdHeartbeat},
+	},
+}
+
+// menuPageSize is the number of items per page in list-type menus.
+const menuPageSize = 5
+
+// buildMenuButtons arranges a flat list of ButtonOption into rows of 2,
+// with a back button as the final single-item row.
+func buildMenuButtons(items []ButtonOption, backAction string, backLabel string) [][]ButtonOption {
+	var rows [][]ButtonOption
+	for i := 0; i < len(items); i += 2 {
+		if i+1 < len(items) {
+			rows = append(rows, []ButtonOption{items[i], items[i+1]})
+		} else {
+			rows = append(rows, []ButtonOption{items[i]})
+		}
+	}
+	rows = append(rows, []ButtonOption{{Text: backLabel, Data: backAction}})
+	return rows
+}
+
+// handleMenuNavigation is the MenuNavigationHandler registered with MenuNavigable platforms.
+// It receives a menu: action and returns the MenuPage to display.
+func (e *Engine) handleMenuNavigation(action string, sessionKey string) *MenuPage {
+	switch {
+	case action == "menu:noop":
+		return nil
+
+	case action == "menu:main":
+		return e.buildMainMenuPage(sessionKey)
+
+	case strings.HasPrefix(action, "menu:cat:"):
+		cat := strings.TrimPrefix(action, "menu:cat:")
+		if cat == "custom" {
+			return e.buildCustomMenuPage()
+		}
+		return e.buildCategoryPage(cat)
+
+	case strings.HasPrefix(action, "menu:list:"):
+		// format: menu:list:{cmd}:{page}
+		parts := strings.SplitN(strings.TrimPrefix(action, "menu:list:"), ":", 2)
+		if len(parts) != 2 {
+			return e.buildMainMenuPage(sessionKey)
+		}
+		cmd := parts[0]
+		page, _ := strconv.Atoi(parts[1])
+		return e.buildListPage(cmd, page, sessionKey)
+
+	case strings.HasPrefix(action, "menu:sel:"):
+		// format: menu:sel:{cmd}:{idx}  (idx is 1-based global index, or code for lang)
+		parts := strings.SplitN(strings.TrimPrefix(action, "menu:sel:"), ":", 2)
+		if len(parts) != 2 {
+			return e.buildMainMenuPage(sessionKey)
+		}
+		cmd := parts[0]
+		idxStr := parts[1]
+		e.executeCardAction("/"+cmd, idxStr, sessionKey)
+		return e.buildMainMenuPage(sessionKey)
+
+	case strings.HasPrefix(action, "menu:custom:"):
+		return e.buildCustomSubPage(strings.TrimPrefix(action, "menu:custom:"), sessionKey)
+	}
+	return e.buildMainMenuPage(sessionKey)
+}
+
+// buildMainMenuPage constructs the top-level /menu page.
+func (e *Engine) buildMainMenuPage(sessionKey string) *MenuPage {
+	agent, _ := e.sessionContextForKey(sessionKey)
+	state := MenuState{Project: e.name}
+	if ms, ok := agent.(ModelSwitcher); ok {
+		state.Model = ms.GetModel()
+	}
+	if ms, ok := agent.(ModeSwitcher); ok {
+		state.Mode = ms.GetMode()
+	}
+
+	title := e.i18n.T(MsgMenuTitle)
+	subtitle := ""
+	if state.Model != "" || state.Mode != "" {
+		model := state.Model
+		if model == "" {
+			model = "default"
+		}
+		mode := state.Mode
+		if mode == "" {
+			mode = "default"
+		}
+		subtitle = e.i18n.Tf(MsgMenuSubtitle, model, mode)
+	}
+
+	// Build category buttons (2 per row)
+	var catBtns []ButtonOption
+	for _, cat := range menuCategories {
+		catBtns = append(catBtns, ButtonOption{
+			Text: e.i18n.T(cat.labelKey),
+			Data: "menu:cat:" + cat.key,
+		})
+	}
+	var rows [][]ButtonOption
+	for i := 0; i+1 < len(catBtns); i += 2 {
+		rows = append(rows, []ButtonOption{catBtns[i], catBtns[i+1]})
+	}
+	if len(catBtns)%2 != 0 {
+		rows = append(rows, []ButtonOption{catBtns[len(catBtns)-1]})
+	}
+	// Custom button as its own row
+	rows = append(rows, []ButtonOption{{
+		Text: e.i18n.T(MsgMenuCatCustom),
+		Data: "menu:cat:custom",
+	}})
+
+	return &MenuPage{Title: title, Subtitle: subtitle, Buttons: rows}
+}
+
+// buildCategoryPage constructs a sub-menu page for the given category key.
+func (e *Engine) buildCategoryPage(cat string) *MenuPage {
+	cmds, ok := menuCategoryCommands[cat]
+	if !ok {
+		return e.buildMainMenuPage("")
+	}
+
+	var labelKey MsgKey
+	for _, c := range menuCategories {
+		if c.key == cat {
+			labelKey = c.labelKey
+			break
+		}
+	}
+
+	var items []ButtonOption
+	for _, c := range cmds {
+		items = append(items, ButtonOption{
+			Text: e.i18n.T(c.labelKey),
+			Data: c.action,
+		})
+	}
+	rows := buildMenuButtons(items, "menu:main", e.i18n.T(MsgMenuBack))
+
+	title := e.i18n.T(labelKey)
+	return &MenuPage{Title: title, Buttons: rows}
+}
+
+// buildListPage constructs a paginated list page for list-type commands.
+// page is 0-based.
+func (e *Engine) buildListPage(cmd string, page int, sessionKey string) *MenuPage {
+	type listItem struct{ label, selAction string }
+
+	var items []listItem
+	var titleKey MsgKey
+	var backAction string
+
+	fetchCtx, cancel := context.WithTimeout(e.ctx, 3*time.Second)
+	defer cancel()
+
+	switch cmd {
+	case "model":
+		titleKey = MsgMenuSelectModel
+		backAction = "menu:cat:ai"
+		agent, _ := e.sessionContextForKey(sessionKey)
+		if sw, ok := agent.(ModelSwitcher); ok {
+			models := sw.AvailableModels(fetchCtx)
+			current := sw.GetModel()
+			for i, m := range models {
+				label := m.Name
+				if m.Name == current {
+					label = "✅ " + label
+				}
+				items = append(items, listItem{label, fmt.Sprintf("menu:sel:model:%d", i+1)})
+			}
+		}
+
+	case "mode":
+		titleKey = MsgMenuSelectMode
+		backAction = "menu:cat:ai"
+		agent, _ := e.sessionContextForKey(sessionKey)
+		if sw, ok := agent.(ModeSwitcher); ok {
+			current := sw.GetMode()
+			for i, m := range sw.PermissionModes() {
+				label := m.Name
+				if m.NameZh != "" && e.i18n.CurrentLang() == LangChinese {
+					label = m.NameZh
+				}
+				if m.Key == current {
+					label = "✅ " + label
+				}
+				items = append(items, listItem{label, fmt.Sprintf("menu:sel:mode:%d", i+1)})
+			}
+		}
+
+	case "reasoning":
+		titleKey = MsgMenuSelectReasoning
+		backAction = "menu:cat:ai"
+		agent, _ := e.sessionContextForKey(sessionKey)
+		if sw, ok := agent.(ReasoningEffortSwitcher); ok {
+			current := sw.GetReasoningEffort()
+			for i, effort := range sw.AvailableReasoningEfforts() {
+				label := effort
+				if effort == current {
+					label = "✅ " + label
+				}
+				items = append(items, listItem{label, fmt.Sprintf("menu:sel:reasoning:%d", i+1)})
+			}
+		}
+
+	case "lang":
+		titleKey = MsgMenuSelectLang
+		backAction = "menu:cat:ai"
+		langs := []struct{ code, name string }{
+			{"zh", "🇨🇳 中文"},
+			{"en", "🇺🇸 English"},
+			{"zh-TW", "🇹🇼 繁體中文"},
+			{"ja", "🇯🇵 日本語"},
+			{"es", "🇪🇸 Español"},
+		}
+		current := string(e.i18n.CurrentLang())
+		for _, l := range langs {
+			label := l.name
+			if l.code == current {
+				label = "✅ " + label
+			}
+			// Use language code directly as selector arg (not integer index)
+			items = append(items, listItem{label, "menu:sel:lang:" + l.code})
+		}
+
+	case "provider":
+		titleKey = MsgMenuSelectProvider
+		backAction = "menu:cat:ai"
+		agent, _ := e.sessionContextForKey(sessionKey)
+		if sw, ok := agent.(ProviderSwitcher); ok {
+			active := sw.GetActiveProvider()
+			for i, p := range sw.ListProviders() {
+				label := p.Name
+				if active != nil && p.Name == active.Name {
+					label = "✅ " + label
+				}
+				items = append(items, listItem{label, fmt.Sprintf("menu:sel:provider:%d", i+1)})
+			}
+		}
+
+	case "session":
+		titleKey = MsgMenuSelectSession
+		backAction = "menu:cat:session"
+		agent, sessions := e.sessionContextForKey(sessionKey)
+		agentSessions, err := agent.ListSessions(fetchCtx)
+		if err == nil {
+			active := sessions.ActiveSessionID(sessionKey)
+			for i, s := range agentSessions {
+				name := sessions.GetSessionName(s.ID)
+				if name == "" {
+					name = s.ID
+				}
+				if len(name) > 20 {
+					name = name[:20] + "…"
+				}
+				label := name
+				if s.ID == active {
+					label = "✅ " + label
+				}
+				items = append(items, listItem{label, fmt.Sprintf("menu:sel:session:%d", i+1)})
+			}
+		}
+
+	default:
+		return e.buildMainMenuPage(sessionKey)
+	}
+
+	// Paginate
+	total := len(items)
+	if total == 0 {
+		emptyBtn := ButtonOption{Text: e.i18n.T(MsgMenuEmpty), Data: "menu:noop"}
+		backBtn := ButtonOption{Text: e.i18n.T(MsgMenuBack), Data: backAction}
+		title := e.i18n.T(titleKey)
+		return &MenuPage{Title: title, Buttons: [][]ButtonOption{{emptyBtn}, {backBtn}}}
+	}
+
+	totalPages := (total + menuPageSize - 1) / menuPageSize
+	if page < 0 {
+		page = 0
+	}
+	if page >= totalPages {
+		page = totalPages - 1
+	}
+	start := page * menuPageSize
+	end := start + menuPageSize
+	if end > total {
+		end = total
+	}
+	pageItems := items[start:end]
+
+	pageInfo := e.i18n.Tf(MsgMenuPageInfo, page+1, totalPages)
+	title := e.i18n.T(titleKey) + "  " + pageInfo
+
+	var rows [][]ButtonOption
+	for _, item := range pageItems {
+		rows = append(rows, []ButtonOption{{Text: item.label, Data: item.selAction}})
+	}
+
+	// Navigation row: prev | back | next
+	prevData := "menu:noop"
+	if page > 0 {
+		prevData = fmt.Sprintf("menu:list:%s:%d", cmd, page-1)
+	}
+	nextData := "menu:noop"
+	if page < totalPages-1 {
+		nextData = fmt.Sprintf("menu:list:%s:%d", cmd, page+1)
+	}
+	rows = append(rows, []ButtonOption{
+		{Text: e.i18n.T(MsgMenuPagePrev), Data: prevData},
+		{Text: e.i18n.T(MsgMenuBack), Data: backAction},
+		{Text: e.i18n.T(MsgMenuPageNext), Data: nextData},
+	})
+
+	return &MenuPage{Title: title, Buttons: rows}
+}
+
+// buildCustomMenuPage constructs the customize panel.
+func (e *Engine) buildCustomMenuPage() *MenuPage {
+	items := []ButtonOption{
+		{Text: e.i18n.T(MsgMenuCustomPin), Data: "menu:custom:pin"},
+		{Text: e.i18n.T(MsgMenuCustomHide), Data: "menu:custom:hide"},
+		{Text: e.i18n.T(MsgMenuCustomAdd), Data: "menu:custom:add"},
+		{Text: e.i18n.T(MsgMenuCustomDesc), Data: "menu:custom:desc"},
+		{Text: e.i18n.T(MsgMenuCustomReset), Data: "menu:custom:reset"},
+	}
+	rows := buildMenuButtons(items, "menu:main", e.i18n.T(MsgMenuBack))
+	return &MenuPage{Title: e.i18n.T(MsgMenuCustomTitle), Buttons: rows}
+}
+
+// buildCustomSubPage handles sub-pages of the custom panel.
+// Actual sub-page implementations (pin/hide) are done in Task 9.
+// This stub returns to the custom menu for unimplemented sub-pages.
+func (e *Engine) buildCustomSubPage(sub string, sessionKey string) *MenuPage {
+	_ = sessionKey
+	switch sub {
+	// "pin" and "hide" cases will be fully implemented in Task 9 (platform layer handles them)
+	default:
+		return e.buildCustomMenuPage()
+	}
 }
