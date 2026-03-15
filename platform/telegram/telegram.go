@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf16"
 
@@ -26,6 +27,12 @@ type replyContext struct {
 	messageID int
 }
 
+// pendingInputState records a one-shot user input request (e.g. editing a command description).
+type pendingInputState struct {
+	kind    string    // e.g. "cmd_desc_edit:menu"
+	expires time.Time // auto-expire after 60 seconds
+}
+
 type Platform struct {
 	token                 string
 	allowFrom             string
@@ -35,6 +42,9 @@ type Platform struct {
 	httpClient            *http.Client
 	handler               core.MessageHandler
 	cancel                context.CancelFunc
+	menuMsgIDs            sync.Map // key: int64(chatID) → int(messageID)
+	menuHandler           core.MenuNavigationHandler
+	pendingInputs         sync.Map // key: int64(chatID) → pendingInputState
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -318,6 +328,12 @@ func (p *Platform) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 		chatName = cb.Message.Chat.Title
 	}
 	rctx := replyContext{chatID: chatID, messageID: msgID}
+
+	// Menu callbacks (menu:main, menu:cat:ai, menu:list:model:0, etc.)
+	if strings.HasPrefix(data, "menu:") {
+		p.handleMenuCallback(data, chatID, msgID, userID, userName, chatName, sessionKey)
+		return
+	}
 
 	// Command callbacks (cmd:/lang en, cmd:/mode yolo, etc.)
 	if strings.HasPrefix(data, "cmd:") {
@@ -780,6 +796,116 @@ func (p *Platform) RegisterCommands(commands []core.BotCommandInfo) error {
 
 	slog.Info("telegram: registered bot commands", "count", len(tgCommands))
 	return nil
+}
+
+// SetMenuNavigationHandler implements core.MenuNavigable.
+func (p *Platform) SetMenuNavigationHandler(h core.MenuNavigationHandler) {
+	p.menuHandler = h
+}
+
+// SendMenuPage implements core.MenuNavigable.
+// On first call for a chat, sends a new message and remembers its ID.
+// On subsequent callback-triggered calls, edits the existing message.
+func (p *Platform) SendMenuPage(ctx context.Context, rctx any, page *core.MenuPage) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("telegram: SendMenuPage: unexpected replyCtx type %T", rctx)
+	}
+	chatID := rc.chatID
+	text := menuMessageText(page)
+	keyboard := menuPageToKeyboard(page)
+
+	// Try to edit existing menu message
+	if rawID, ok := p.menuMsgIDs.Load(chatID); ok {
+		msgID := rawID.(int)
+		edit := tgbotapi.NewEditMessageText(chatID, msgID, text)
+		edit.ParseMode = tgbotapi.ModeHTML
+		edit.ReplyMarkup = &keyboard
+		if _, err := p.bot.Send(edit); err != nil {
+			// If edit fails (message deleted), fall through to send new
+			if !strings.Contains(err.Error(), "message to edit not found") &&
+				!strings.Contains(err.Error(), "message is not modified") {
+				slog.Warn("telegram: menu edit failed, sending new", "error", err)
+			}
+			p.menuMsgIDs.Delete(chatID)
+		} else {
+			return nil
+		}
+	}
+
+	// Send new message
+	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ParseMode = tgbotapi.ModeHTML
+	msg.ReplyMarkup = keyboard
+	sent, err := p.bot.Send(msg)
+	if err != nil {
+		// Fallback: plain text
+		msg.Text = page.Title
+		if page.Subtitle != "" {
+			msg.Text += "\n" + page.Subtitle
+		}
+		msg.ParseMode = ""
+		sent, err = p.bot.Send(msg)
+	}
+	if err != nil {
+		return fmt.Errorf("telegram: SendMenuPage send: %w", err)
+	}
+	p.menuMsgIDs.Store(chatID, sent.MessageID)
+	return nil
+}
+
+// handleMenuCallback processes menu: prefixed callback data.
+func (p *Platform) handleMenuCallback(data string, chatID int64, msgID int, userID, userName, chatName, sessionKey string) {
+	rctx := replyContext{chatID: chatID, messageID: 0} // messageID=0: replies go as new messages
+
+	// menu:exec:{cmd} — build synthetic message and dispatch to engine
+	if strings.HasPrefix(data, "menu:exec:") {
+		cmd := "/" + strings.TrimPrefix(data, "menu:exec:")
+		p.handler(p, &core.Message{
+			SessionKey: sessionKey,
+			Platform:   "telegram",
+			UserID:     userID,
+			UserName:   userName,
+			ChatName:   chatName,
+			Content:    cmd,
+			MessageID:  strconv.Itoa(msgID),
+			ReplyCtx:   rctx,
+		})
+		// After executing, refresh the main menu
+		p.refreshMenuPage(chatID, "menu:main", sessionKey)
+		return
+	}
+
+	// All other menu: actions (navigation + selection) go through the engine handler
+	if p.menuHandler == nil {
+		return
+	}
+	page := p.menuHandler(data, sessionKey)
+	if page == nil {
+		return // menu:noop — do nothing
+	}
+	menuRctx := replyContext{chatID: chatID, messageID: msgID}
+	if err := p.SendMenuPage(context.Background(), menuRctx, page); err != nil {
+		slog.Warn("telegram: menu update failed", "error", err)
+	}
+}
+
+// refreshMenuPage calls the menu handler for the given action and updates the menu message.
+func (p *Platform) refreshMenuPage(chatID int64, action, sessionKey string) {
+	if p.menuHandler == nil {
+		return
+	}
+	page := p.menuHandler(action, sessionKey)
+	if page == nil {
+		return
+	}
+	rctx := replyContext{chatID: chatID, messageID: 0}
+	if rawID, ok := p.menuMsgIDs.Load(chatID); ok {
+		rctx.messageID = rawID.(int)
+	}
+	if err := p.SendMenuPage(context.Background(), rctx, page); err != nil {
+		slog.Warn("telegram: menu refresh failed", "error", err)
+	}
 }
 
 // extractEntityText extracts a substring from text using Telegram's UTF-16 code unit
