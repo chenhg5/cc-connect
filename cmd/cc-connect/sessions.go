@@ -322,6 +322,9 @@ func displayGroupTrunc(r sessionRecord, maxLen int) string {
 }
 
 func truncate(s string, maxLen int) string {
+	if maxLen <= 0 {
+		return ""
+	}
 	runes := []rune(s)
 	if len(runes) <= maxLen {
 		return s

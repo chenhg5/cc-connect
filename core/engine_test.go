@@ -2772,3 +2772,67 @@ func TestDrainEventsOpenChannel(t *testing.T) {
 	default:
 	}
 }
+
+// ── executeCardAction interactiveKey tests ───────────────────
+
+func TestExecuteCardAction_QuietUsesInteractiveKey(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	sessionKey := "feishu:channel1:user1"
+
+	e.executeCardAction("/quiet", "", sessionKey)
+
+	e.interactiveMu.Lock()
+	_, ok := e.interactiveStates[sessionKey]
+	e.interactiveMu.Unlock()
+	if !ok {
+		t.Error("expected interactive state to be stored under sessionKey (non-multi-workspace)")
+	}
+}
+
+func TestExecuteCardAction_ModelCleansUpWithInteractiveKey(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubModelModeAgent{model: "old"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	sessionKey := "feishu:channel1:user1"
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[sessionKey] = &interactiveState{}
+	e.interactiveMu.Unlock()
+
+	e.executeCardAction("/model", "new-model", sessionKey)
+
+	if agent.model != "new-model" {
+		t.Errorf("model = %q, want new-model", agent.model)
+	}
+
+	e.interactiveMu.Lock()
+	_, exists := e.interactiveStates[sessionKey]
+	e.interactiveMu.Unlock()
+	if exists {
+		t.Error("expected interactive state to be cleaned up after /model")
+	}
+}
+
+func TestExecuteCardAction_ModeCleansUpWithInteractiveKey(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubModelModeAgent{mode: "default"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	sessionKey := "feishu:channel1:user1"
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[sessionKey] = &interactiveState{}
+	e.interactiveMu.Unlock()
+
+	e.executeCardAction("/mode", "yolo", sessionKey)
+
+	e.interactiveMu.Lock()
+	_, exists := e.interactiveStates[sessionKey]
+	e.interactiveMu.Unlock()
+	if exists {
+		t.Error("expected interactive state to be cleaned up after /mode")
+	}
+}

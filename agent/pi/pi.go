@@ -97,10 +97,10 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	a.mu.Lock()
 	mode := a.mode
 	model := a.model
+	thinking := a.thinking
 	extraEnv := append([]string{}, a.sessionEnv...)
 	a.mu.Unlock()
 
-	thinking := a.thinking
 	return newPiSession(ctx, a.cmd, a.workDir, model, mode, thinking, sessionID, extraEnv)
 }
 
