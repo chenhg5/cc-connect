@@ -865,7 +865,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		}
 		if workspace == "" {
 			// No workspace — handle init flow (unless it's a /workspace command)
-			if !strings.HasPrefix(content, "workspace") && !strings.HasPrefix(content, "ws ") {
+			if !strings.HasPrefix(content, "/workspace") && !strings.HasPrefix(content, "/ws ") {
 				if e.handleWorkspaceInitFlow(p, msg, channelID, channelName) {
 					return
 				}
@@ -4572,6 +4572,8 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 // executeCardAction performs the side-effect for act: prefixed actions
 // (e.g. switching model/mode/lang) before the card is re-rendered.
 func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
+	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
+
 	switch cmd {
 	case "/model":
 		if args == "" {
@@ -4589,7 +4591,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 			target = models[idx-1].Name
 		}
 		switcher.SetModel(target)
-		e.cleanupInteractiveState(sessionKey)
+		e.cleanupInteractiveState(interactiveKey)
 		s := e.sessions.GetOrCreateActive(sessionKey)
 		s.SetAgentSessionID("")
 		s.ClearHistory()
@@ -4611,7 +4613,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		for _, effort := range efforts {
 			if effort == target {
 				switcher.SetReasoningEffort(target)
-				e.cleanupInteractiveState(sessionKey)
+				e.cleanupInteractiveState(interactiveKey)
 				s := e.sessions.GetOrCreateActive(sessionKey)
 				s.SetAgentSessionID("")
 				s.ClearHistory()
@@ -4629,7 +4631,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 			return
 		}
 		switcher.SetMode(strings.ToLower(args))
-		e.cleanupInteractiveState(sessionKey)
+		e.cleanupInteractiveState(interactiveKey)
 
 	case "/lang":
 		if args == "" {
@@ -4664,14 +4666,13 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 			return
 		}
 		if switcher.SetActiveProvider(args) {
-			e.cleanupInteractiveState(sessionKey)
+			e.cleanupInteractiveState(interactiveKey)
 			if e.providerSaveFunc != nil {
 				_ = e.providerSaveFunc(args)
 			}
 		}
 
 	case "/new":
-		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 		_, sessions := e.sessionContextForKey(sessionKey)
 		e.cleanupInteractiveState(interactiveKey)
 		sessions.NewSession(sessionKey, "")
@@ -4681,10 +4682,10 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 
 	case "/quiet":
 		e.interactiveMu.Lock()
-		state, ok := e.interactiveStates[sessionKey]
+		state, ok := e.interactiveStates[interactiveKey]
 		if !ok || state == nil {
 			state = &interactiveState{quiet: true}
-			e.interactiveStates[sessionKey] = state
+			e.interactiveStates[interactiveKey] = state
 			e.interactiveMu.Unlock()
 		} else {
 			e.interactiveMu.Unlock()
@@ -4706,7 +4707,6 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		if matched == nil {
 			return
 		}
-		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 		e.cleanupInteractiveState(interactiveKey)
 		session := sessions.GetOrCreateActive(sessionKey)
 		session.SetAgentInfo(matched.ID, matched.Summary)
@@ -4714,9 +4714,8 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		sessions.Save()
 
 	case "/stop":
-		sessionKey = e.interactiveKeyForSessionKey(sessionKey)
 		e.interactiveMu.Lock()
-		state, ok := e.interactiveStates[sessionKey]
+		state, ok := e.interactiveStates[interactiveKey]
 		if !ok || state == nil {
 			e.interactiveMu.Unlock()
 			return
@@ -4731,16 +4730,16 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		state.agentSession = nil
 		state.mu.Unlock()
 		if quietMode {
-			e.interactiveStates[sessionKey] = &interactiveState{quiet: true}
+			e.interactiveStates[interactiveKey] = &interactiveState{quiet: true}
 		} else {
-			delete(e.interactiveStates, sessionKey)
+			delete(e.interactiveStates, interactiveKey)
 		}
 		e.interactiveMu.Unlock()
 		if pending != nil {
 			pending.resolve()
 		}
 		if agentSession != nil {
-			slog.Debug("cleanupInteractiveState: closing agent session", "session", sessionKey)
+			slog.Debug("cleanupInteractiveState: closing agent session", "session", interactiveKey)
 			go agentSession.Close()
 		}
 
