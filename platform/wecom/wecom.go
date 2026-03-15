@@ -75,6 +75,7 @@ type Platform struct {
 	apiClient      *http.Client // HTTP client for outbound API calls (may use proxy)
 	tokenCache     tokenCache
 	dedup          msgDedup
+	userNameCache  sync.Map // userID -> display name
 }
 
 // msgDedup tracks recently processed MsgIds to avoid WeChat Work retry duplicates.
@@ -304,7 +305,7 @@ func (p *Platform) handleMessage(w http.ResponseWriter, r *http.Request, msgSig,
 		go p.handler(p, &core.Message{
 			SessionKey: sessionKey, Platform: "wecom",
 			MessageID: strconv.FormatInt(msg.MsgId, 10),
-			UserID: msg.FromUserName, UserName: msg.FromUserName,
+			UserID: msg.FromUserName, UserName: p.resolveUserName(msg.FromUserName),
 			Content: msg.Content, ReplyCtx: rctx,
 		})
 
@@ -319,7 +320,7 @@ func (p *Platform) handleMessage(w http.ResponseWriter, r *http.Request, msgSig,
 			p.handler(p, &core.Message{
 				SessionKey: sessionKey, Platform: "wecom",
 				MessageID: strconv.FormatInt(msg.MsgId, 10),
-				UserID: msg.FromUserName, UserName: msg.FromUserName,
+				UserID: msg.FromUserName, UserName: p.resolveUserName(msg.FromUserName),
 				Images:  []core.ImageAttachment{{MimeType: "image/jpeg", Data: imgData}},
 				ReplyCtx: rctx,
 			})
@@ -340,7 +341,7 @@ func (p *Platform) handleMessage(w http.ResponseWriter, r *http.Request, msgSig,
 			p.handler(p, &core.Message{
 				SessionKey: sessionKey, Platform: "wecom",
 				MessageID: strconv.FormatInt(msg.MsgId, 10),
-				UserID: msg.FromUserName, UserName: msg.FromUserName,
+				UserID: msg.FromUserName, UserName: p.resolveUserName(msg.FromUserName),
 				Audio:    &core.AudioAttachment{MimeType: "audio/" + format, Data: audioData, Format: format},
 				ReplyCtx: rctx,
 			})
@@ -585,6 +586,37 @@ func pkcs7Unpad(data []byte) []byte {
 }
 
 // downloadMedia fetches a temporary media file from WeChat Work by media_id.
+func (p *Platform) resolveUserName(userID string) string {
+	if cached, ok := p.userNameCache.Load(userID); ok {
+		return cached.(string)
+	}
+	accessToken, err := p.getAccessToken()
+	if err != nil {
+		slog.Debug("wecom: resolve user name: get token failed", "error", err)
+		return userID
+	}
+	apiURL := fmt.Sprintf("https://qyapi.weixin.qq.com/cgi-bin/user/get?access_token=%s&userid=%s", accessToken, url.QueryEscape(userID))
+	resp, err := p.apiClient.Get(apiURL)
+	if err != nil {
+		slog.Debug("wecom: resolve user name failed", "user", userID, "error", err)
+		return userID
+	}
+	defer resp.Body.Close()
+	var result struct {
+		ErrCode int    `json:"errcode"`
+		Name    string `json:"name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || result.ErrCode != 0 {
+		slog.Debug("wecom: resolve user name: api error", "user", userID, "errcode", result.ErrCode)
+		return userID
+	}
+	if result.Name != "" {
+		p.userNameCache.Store(userID, result.Name)
+		return result.Name
+	}
+	return userID
+}
+
 func (p *Platform) downloadMedia(mediaID string) ([]byte, error) {
 	accessToken, err := p.getAccessToken()
 	if err != nil {
