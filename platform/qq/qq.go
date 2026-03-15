@@ -351,20 +351,21 @@ func (p *Platform) resolveGroupName(groupID int64) string {
 	if groupID == 0 {
 		return ""
 	}
-	key := strconv.FormatInt(groupID, 10)
-	if cached, ok := p.groupNameCache.Load(key); ok {
+	fallback := strconv.FormatInt(groupID, 10)
+	if cached, ok := p.groupNameCache.Load(fallback); ok {
 		return cached.(string)
 	}
 	result, err := p.callAPI("get_group_info", map[string]any{"group_id": groupID})
 	if err != nil {
 		slog.Debug("qq: resolve group name failed", "group_id", groupID, "error", err)
-		return ""
+		return fallback
 	}
 	name, _ := result["group_name"].(string)
 	if name != "" {
-		p.groupNameCache.Store(key, name)
+		p.groupNameCache.Store(fallback, name)
+		return name
 	}
-	return name
+	return fallback
 }
 
 // ── OneBot API call via WebSocket ───────────────────────────────

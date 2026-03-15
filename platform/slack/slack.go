@@ -322,8 +322,8 @@ func (p *Platform) resolveUserName(userID string) string {
 
 func (p *Platform) resolveChannelNameForMsg(channelID string) string {
 	name, err := p.ResolveChannelName(channelID)
-	if err != nil {
-		return ""
+	if err != nil || name == "" {
+		return channelID
 	}
 	return name
 }

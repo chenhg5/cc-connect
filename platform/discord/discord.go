@@ -690,10 +690,14 @@ func (p *Platform) resolveChannelName(channelID string) string {
 	ch, err := p.session.Channel(channelID)
 	if err != nil {
 		slog.Debug("discord: resolve channel name failed", "channel", channelID, "error", err)
-		return ""
+		return channelID
 	}
-	p.channelNameCache.Store(channelID, ch.Name)
-	return ch.Name
+	name := ch.Name
+	if name == "" {
+		return channelID
+	}
+	p.channelNameCache.Store(channelID, name)
+	return name
 }
 
 func (p *Platform) Stop() error {

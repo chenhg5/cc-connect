@@ -333,6 +333,9 @@ func (p *WSPlatform) handleMsgCallback(frame wsFrame) {
 		userID:   body.From.UserID,
 	}
 
+	// WS mode does not provide display names; the protocol only carries userID.
+	// Name resolution would require a separate HTTP API call with corpSecret,
+	// which is unavailable in WebSocket-only mode.
 	switch body.MsgType {
 	case "text":
 		slog.Debug("wecom-ws: text received", "user", body.From.UserID, "len", len(body.Text.Content))
