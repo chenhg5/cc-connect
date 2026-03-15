@@ -45,6 +45,8 @@ type Platform struct {
 	menuMsgIDs            sync.Map // key: int64(chatID) → int(messageID)
 	menuHandler           core.MenuNavigationHandler
 	pendingInputs         sync.Map // key: int64(chatID) → pendingInputState
+	dataDir               string   // path for config file persistence
+	menuConfigs           sync.Map // key: int64(chatID) → *MenuConfig
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -73,7 +75,8 @@ func New(opts map[string]any) (core.Platform, error) {
 
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
-	return &Platform{token: token, allowFrom: allowFrom, groupReplyAll: groupReplyAll, shareSessionInChannel: shareSessionInChannel, httpClient: httpClient}, nil
+	dataDir, _ := opts["data_dir"].(string)
+	return &Platform{token: token, allowFrom: allowFrom, groupReplyAll: groupReplyAll, shareSessionInChannel: shareSessionInChannel, httpClient: httpClient, dataDir: dataDir}, nil
 }
 
 func (p *Platform) Name() string { return "telegram" }
@@ -798,6 +801,16 @@ func (p *Platform) RegisterCommands(commands []core.BotCommandInfo) error {
 	return nil
 }
 
+// getMenuConfig returns the cached MenuConfig for a chatID, loading from disk if needed.
+func (p *Platform) getMenuConfig(chatID int64) *MenuConfig {
+	if v, ok := p.menuConfigs.Load(chatID); ok {
+		return v.(*MenuConfig)
+	}
+	cfg := LoadMenuConfig(chatID, p.dataDir)
+	p.menuConfigs.Store(chatID, cfg)
+	return cfg
+}
+
 // SetMenuNavigationHandler implements core.MenuNavigable.
 func (p *Platform) SetMenuNavigationHandler(h core.MenuNavigationHandler) {
 	p.menuHandler = h
@@ -876,6 +889,35 @@ func (p *Platform) handleMenuCallback(data string, chatID int64, msgID int, user
 		return
 	}
 
+	// menu:custom:reset — confirm and reset
+	if data == "menu:custom:reset" {
+		cfg := p.getMenuConfig(chatID)
+		cfg.Reset()
+		_ = cfg.Save()
+		p.refreshMenuPage(chatID, "menu:cat:custom", sessionKey)
+		return
+	}
+
+	// menu:pin:toggle:{cmd}
+	if strings.HasPrefix(data, "menu:pin:toggle:") {
+		cmd := strings.TrimPrefix(data, "menu:pin:toggle:")
+		cfg := p.getMenuConfig(chatID)
+		cfg.TogglePinned(cmd)
+		_ = cfg.Save()
+		p.refreshMenuPage(chatID, "menu:custom:pin", sessionKey)
+		return
+	}
+
+	// menu:hide:toggle:{cat}
+	if strings.HasPrefix(data, "menu:hide:toggle:") {
+		cat := strings.TrimPrefix(data, "menu:hide:toggle:")
+		cfg := p.getMenuConfig(chatID)
+		cfg.ToggleHiddenCat(cat)
+		_ = cfg.Save()
+		p.refreshMenuPage(chatID, "menu:custom:hide", sessionKey)
+		return
+	}
+
 	// All other menu: actions (navigation + selection) go through the engine handler
 	if p.menuHandler == nil {
 		return
@@ -884,10 +926,52 @@ func (p *Platform) handleMenuCallback(data string, chatID int64, msgID int, user
 	if page == nil {
 		return // menu:noop — do nothing
 	}
+	page = p.applyMenuConfig(chatID, data, page) // apply hide/pin customization
 	menuRctx := replyContext{chatID: chatID, messageID: msgID}
 	if err := p.SendMenuPage(context.Background(), menuRctx, page); err != nil {
 		slog.Warn("telegram: menu update failed", "error", err)
 	}
+}
+
+// applyMenuConfig filters and augments menu page buttons based on user's MenuConfig.
+// action is the callback data that produced this page (used to detect main menu).
+func (p *Platform) applyMenuConfig(chatID int64, action string, page *core.MenuPage) *core.MenuPage {
+	cfg := p.getMenuConfig(chatID)
+	if len(cfg.HiddenCats) == 0 && len(cfg.Pinned) == 0 {
+		return page // no customization, fast path
+	}
+
+	// Filter out hidden category buttons
+	var filtered [][]core.ButtonOption
+	for _, row := range page.Buttons {
+		var newRow []core.ButtonOption
+		for _, btn := range row {
+			if strings.HasPrefix(btn.Data, "menu:cat:") {
+				cat := strings.TrimPrefix(btn.Data, "menu:cat:")
+				if cfg.IsCatHidden(cat) {
+					continue
+				}
+			}
+			newRow = append(newRow, btn)
+		}
+		if len(newRow) > 0 {
+			filtered = append(filtered, newRow)
+		}
+	}
+
+	// On main menu, prepend pinned shortcuts row
+	if action == "menu:main" && len(cfg.Pinned) > 0 {
+		var pinnedRow []core.ButtonOption
+		for _, cmd := range cfg.Pinned {
+			pinnedRow = append(pinnedRow, core.ButtonOption{
+				Text: "📌 " + cmd,
+				Data: "menu:exec:" + cmd,
+			})
+		}
+		filtered = append([][]core.ButtonOption{pinnedRow}, filtered...)
+	}
+
+	return &core.MenuPage{Title: page.Title, Subtitle: page.Subtitle, Buttons: filtered}
 }
 
 // refreshMenuPage calls the menu handler for the given action and updates the menu message.

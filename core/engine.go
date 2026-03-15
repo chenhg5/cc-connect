@@ -8005,12 +8005,46 @@ func (e *Engine) buildCustomMenuPage() *MenuPage {
 }
 
 // buildCustomSubPage handles sub-pages of the custom panel.
-// Actual sub-page implementations (pin/hide) are done in Task 9.
-// This stub returns to the custom menu for unimplemented sub-pages.
 func (e *Engine) buildCustomSubPage(sub string, sessionKey string) *MenuPage {
 	_ = sessionKey
 	switch sub {
-	// "pin" and "hide" cases will be fully implemented in Task 9 (platform layer handles them)
+	case "hide":
+		// Show toggle buttons for each category (except session)
+		var items []ButtonOption
+		for _, cat := range menuCategories {
+			if cat.key == "session" {
+				continue // session cannot be hidden
+			}
+			label := "⬜ " + e.i18n.T(cat.labelKey)
+			items = append(items, ButtonOption{
+				Text: label,
+				Data: "menu:hide:toggle:" + cat.key,
+			})
+		}
+		rows := buildMenuButtons(items, "menu:cat:custom", e.i18n.T(MsgMenuBack))
+		return &MenuPage{Title: e.i18n.T(MsgMenuCustomHide), Buttons: rows}
+
+	case "pin":
+		// Show toggle buttons for key commands
+		pinnable := []struct{ cmd, label string }{
+			{"new", "➕ " + e.i18n.T(MsgMenuCmdNew)},
+			{"stop", "⏹ " + e.i18n.T(MsgMenuCmdStop)},
+			{"status", "📊 " + e.i18n.T(MsgMenuCmdStatus)},
+			{"model", "🧠 " + e.i18n.T(MsgMenuCmdModel)},
+			{"mode", "🔒 " + e.i18n.T(MsgMenuCmdMode)},
+			{"history", "📜 " + e.i18n.T(MsgMenuCmdHistory)},
+			{"compress", "🗜️ " + e.i18n.T(MsgMenuCmdCompress)},
+		}
+		var items []ButtonOption
+		for _, p := range pinnable {
+			items = append(items, ButtonOption{
+				Text: p.label,
+				Data: "menu:pin:toggle:" + p.cmd,
+			})
+		}
+		rows := buildMenuButtons(items, "menu:cat:custom", e.i18n.T(MsgMenuBack))
+		return &MenuPage{Title: e.i18n.T(MsgMenuCustomPin), Buttons: rows}
+
 	default:
 		return e.buildCustomMenuPage()
 	}
