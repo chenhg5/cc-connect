@@ -319,13 +319,27 @@ func (p *Platform) ResolveChannelName(channelID string) (string, error) {
 	return info.Name, nil
 }
 
+// FormattingInstructions returns Slack mrkdwn formatting guidance for the agent.
+func (p *Platform) FormattingInstructions() string {
+	return `You are responding in Slack. Use Slack's mrkdwn format, NOT standard Markdown:
+- Bold: *text* (single asterisks, not double)
+- Italic: _text_
+- Strikethrough: ~text~
+- Code: ` + "`text`" + `
+- Code block: ` + "```text```" + `
+- Blockquote: > text
+- Lists: use bullet (•) or numbered lists normally
+- Links: <url|display text>
+- Do NOT use ## headings — Slack does not render them. Use *bold text* on its own line instead.`
+}
+
 // StartTyping adds emoji reactions to the user's message as a heartbeat
 // indicator so the user knows the bot is still working.
 //
 // Timeline:
 //   - Immediately: eyes
 //   - After 2 minutes: clock
-//   - Every 5 minutes after that: one more random emoji
+//   - Every 5 minutes after that: one more emoji (sequential from extras list)
 //
 // All reactions are removed when the returned stop function is called.
 func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {

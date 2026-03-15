@@ -30,24 +30,26 @@ type SessionEnvInjector interface {
 	SetSessionEnv(env []string)
 }
 
+// FormattingInstructionProvider is an optional interface for platforms that
+// provide platform-specific formatting instructions for the agent system prompt
+// (e.g., Slack mrkdwn vs standard Markdown).
+type FormattingInstructionProvider interface {
+	FormattingInstructions() string
+}
+
+// PlatformPromptInjector is an optional interface for agents that can receive
+// platform-specific prompt fragments (e.g., formatting instructions).
+// The engine calls this before StartSession when the platform provides formatting.
+type PlatformPromptInjector interface {
+	SetPlatformPrompt(prompt string)
+}
+
 // AgentSystemPrompt returns the system prompt fragment that informs agents about
 // cc-connect capabilities (cron scheduling, etc.).
 // The prompt is designed to be appended to the agent's existing system prompt.
 func AgentSystemPrompt() string {
-	return `You are running inside cc-connect, a bridge that connects you to messaging platforms (currently Slack).
+	return `You are running inside cc-connect, a bridge that connects you to messaging platforms.
 Your responses are automatically delivered to the user — just reply normally, do NOT use cc-connect send.
-
-## Formatting
-You are responding in Slack. Use Slack's mrkdwn format, NOT standard Markdown:
-- Bold: *text* (single asterisks, not double)
-- Italic: _text_
-- Strikethrough: ~text~
-- Code: ` + "`text`" + `
-- Code block: ` + "```text```" + `
-- Blockquote: > text
-- Lists: use bullet (•) or numbered lists normally
-- Links: <url|display text>
-- Do NOT use ## headings — Slack does not render them. Use *bold text* on its own line instead.
 
 ## Available tools
 
