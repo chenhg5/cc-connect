@@ -12,6 +12,40 @@
 
 ---
 
+## 快速配置（推荐）
+
+如果你已经装好 `cc-connect`，可以直接用内置命令完成“新建机器人/关联已有机器人”，并自动写回 `config.toml`：
+
+```bash
+# 推荐：统一入口
+cc-connect feishu setup --project my-project
+cc-connect feishu setup --project my-project --app cli_xxx:sec_xxx
+
+# 强制模式（一般不需要）
+cc-connect feishu new --project my-project
+cc-connect feishu bind --project my-project --app cli_xxx:sec_xxx
+```
+
+三者区别：
+
+| 命令 | 作用 | 何时用 |
+|------|------|--------|
+| `setup` | 统一入口：无凭证走 `new`，有凭证走 `bind` | **默认就用这个** |
+| `new` | 强制二维码新建（不接受 `--app`） | 明确要重走扫码新建 |
+| `bind` | 强制关联已有凭证（必须 `app_id/app_secret`） | 明确只做凭证关联 |
+
+补充：
+
+- `setup --app ...` 与 `bind --app ...` 功能等价。
+
+- `setup/new` 会在终端打印二维码和 URL，使用飞书/Lark 手机 App 扫码完成创建。
+- `--project` 不存在时会自动创建该项目；若项目存在但没有 `feishu/lark` 平台，也会自动补一个。
+- 写回配置时仅定点更新目标字段（`app_id`、`app_secret`、`allow_from` 等），尽量保留原有注释与排版。
+- 该流程会回填凭证；通过扫码新建时，飞书通常会同时预配权限与事件订阅。
+- 仍建议在开放平台核验：应用已发布、权限状态正常、可用范围符合预期。
+
+---
+
 ## 第一步：创建飞书企业自建应用
 
 ### 1.1 进入飞书开放平台
@@ -279,6 +313,10 @@ cc-connect 内置了自动重连机制，断开后会自动尝试重新连接。
 ### Q: 提示权限不足？
 
 确保已在「权限管理」中申请并获得了所有必要权限，并发布了新版本。
+
+### Q: 扫码页显示 OpenClaw 文案，是不是配置错了？
+
+通常是飞书注册模板侧的展示文案，不影响返回 `app_id/app_secret` 和接入 cc-connect。
 
 ### Q: 如何调试消息？
 
