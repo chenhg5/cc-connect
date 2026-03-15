@@ -380,6 +380,58 @@ func TestEngine_DisabledCommandsWithSlash(t *testing.T) {
 	}
 }
 
+func TestResolveDisabledCmds_Wildcard(t *testing.T) {
+	m := resolveDisabledCmds([]string{"*"})
+	for _, bc := range builtinCommands {
+		if !m[bc.id] {
+			t.Errorf("wildcard should disable %q", bc.id)
+		}
+	}
+}
+
+func TestResolveDisabledCmds_Specific(t *testing.T) {
+	m := resolveDisabledCmds([]string{"upgrade", "/restart", "Help"})
+	if !m["upgrade"] {
+		t.Error("upgrade should be disabled")
+	}
+	if !m["restart"] {
+		t.Error("restart should be disabled (slash stripped)")
+	}
+	if !m["help"] {
+		t.Error("help should be disabled (case insensitive)")
+	}
+	if m["shell"] {
+		t.Error("shell should not be disabled")
+	}
+}
+
+func TestResolveDisabledCmds_Empty(t *testing.T) {
+	m1 := resolveDisabledCmds(nil)
+	if len(m1) != 0 {
+		t.Errorf("nil input should produce empty map, got %d entries", len(m1))
+	}
+	m2 := resolveDisabledCmds([]string{})
+	if len(m2) != 0 {
+		t.Errorf("empty input should produce empty map, got %d entries", len(m2))
+	}
+}
+
+func TestEngine_DisabledCommandsWildcard(t *testing.T) {
+	e := newTestEngine()
+	e.SetDisabledCommands([]string{"*"})
+
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "test:u1", UserID: "user1", ReplyCtx: "ctx"}
+
+	e.handleCommand(p, msg, "/help")
+	if len(p.sent) != 1 {
+		t.Fatalf("expected 1 reply, got %d", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "disabled") && !strings.Contains(p.sent[0], "禁用") {
+		t.Errorf("expected disabled message, got: %s", p.sent[0])
+	}
+}
+
 // --- admin_from tests ---
 
 func TestEngine_AdminFrom_DenyByDefault(t *testing.T) {
@@ -511,6 +563,172 @@ func TestEngine_AdminFrom_AdminCanRunShell(t *testing.T) {
 		if strings.Contains(s, "admin") {
 			t.Errorf("admin user should not be blocked, got: %s", s)
 		}
+	}
+}
+
+// --- role-based ACL tests ---
+
+func TestEngine_RoleBasedACL_AdminCanRunAll(t *testing.T) {
+	e := newTestEngine()
+	e.SetDisabledCommands([]string{"help", "status"}) // project-level disables
+
+	urm := NewUserRoleManager()
+	urm.Configure("member", []RoleInput{
+		{Name: "admin", UserIDs: []string{"admin1"}, DisabledCommands: []string{}},
+		{Name: "member", UserIDs: []string{"*"}, DisabledCommands: []string{"*"}},
+	})
+	e.SetUserRoles(urm)
+
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "test:a1", UserID: "admin1", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, "/help")
+
+	// Admin role has disabled_commands=[], so /help should NOT be blocked
+	for _, s := range p.sent {
+		if strings.Contains(s, "disabled") || strings.Contains(s, "禁用") {
+			t.Errorf("admin should not have /help disabled, got: %s", s)
+		}
+	}
+}
+
+func TestEngine_RoleBasedACL_MemberBlocked(t *testing.T) {
+	e := newTestEngine()
+
+	urm := NewUserRoleManager()
+	urm.Configure("member", []RoleInput{
+		{Name: "admin", UserIDs: []string{"admin1"}, DisabledCommands: []string{}},
+		{Name: "member", UserIDs: []string{"*"}, DisabledCommands: []string{"*"}},
+	})
+	e.SetUserRoles(urm)
+
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "test:u1", UserID: "user1", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, "/help")
+
+	if len(p.sent) != 1 {
+		t.Fatalf("expected 1 reply, got %d", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "disabled") && !strings.Contains(p.sent[0], "禁用") {
+		t.Errorf("member should have /help disabled, got: %s", p.sent[0])
+	}
+}
+
+func TestEngine_RoleBasedACL_NoUserID_Fallback(t *testing.T) {
+	e := newTestEngine()
+	e.SetDisabledCommands([]string{"help"}) // project-level disables /help
+
+	urm := NewUserRoleManager()
+	urm.Configure("member", []RoleInput{
+		{Name: "member", UserIDs: []string{"*"}, DisabledCommands: []string{}},
+	})
+	e.SetUserRoles(urm)
+
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "test:anon", UserID: "", ReplyCtx: "ctx"} // no UserID
+	e.handleCommand(p, msg, "/help")
+
+	// No UserID → falls back to project-level disabledCmds which has /help disabled
+	if len(p.sent) != 1 || (!strings.Contains(p.sent[0], "disabled") && !strings.Contains(p.sent[0], "禁用")) {
+		t.Errorf("empty UserID should use project-level disabled_commands, got: %v", p.sent)
+	}
+}
+
+func TestEngine_RoleBasedACL_NoUsersConfig_Legacy(t *testing.T) {
+	e := newTestEngine()
+	e.SetDisabledCommands([]string{"help"})
+	// No SetUserRoles — legacy mode
+
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "test:u1", UserID: "user1", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, "/help")
+
+	if len(p.sent) != 1 || (!strings.Contains(p.sent[0], "disabled") && !strings.Contains(p.sent[0], "禁用")) {
+		t.Errorf("legacy mode should use project-level disabled_commands, got: %v", p.sent)
+	}
+}
+
+// --- role-based rate limit tests ---
+
+func TestEngine_RateLimit_RoleSpecific(t *testing.T) {
+	e := newTestEngine()
+
+	urm := NewUserRoleManager()
+	urm.Configure("member", []RoleInput{
+		{Name: "admin", UserIDs: []string{"admin1"}, DisabledCommands: []string{},
+			RateLimit: &RateLimitCfg{MaxMessages: 50, Window: time.Minute}},
+		{Name: "member", UserIDs: []string{"*"}, DisabledCommands: []string{},
+			RateLimit: &RateLimitCfg{MaxMessages: 2, Window: time.Minute}},
+	})
+	e.SetUserRoles(urm)
+
+	// Member should be limited after 2 messages
+	msg := &Message{SessionKey: "test:u1", UserID: "user1"}
+	if !e.checkRateLimit(msg) {
+		t.Error("1st message should be allowed")
+	}
+	if !e.checkRateLimit(msg) {
+		t.Error("2nd message should be allowed")
+	}
+	if e.checkRateLimit(msg) {
+		t.Error("3rd message should be rate-limited")
+	}
+
+	// Admin should still be allowed
+	adminMsg := &Message{SessionKey: "test:a1", UserID: "admin1"}
+	if !e.checkRateLimit(adminMsg) {
+		t.Error("admin should not be rate-limited")
+	}
+}
+
+func TestEngine_RateLimit_NoUsersConfig_Legacy(t *testing.T) {
+	e := newTestEngine()
+	e.SetRateLimitCfg(RateLimitCfg{MaxMessages: 2, Window: time.Minute})
+
+	msg := &Message{SessionKey: "test:session1", UserID: "user1"}
+	if !e.checkRateLimit(msg) {
+		t.Error("1st should be allowed")
+	}
+	if !e.checkRateLimit(msg) {
+		t.Error("2nd should be allowed")
+	}
+	if e.checkRateLimit(msg) {
+		t.Error("3rd should be rate-limited")
+	}
+
+	// Different session key should be independent (legacy keying)
+	msg2 := &Message{SessionKey: "test:session2", UserID: "user1"}
+	if !e.checkRateLimit(msg2) {
+		t.Error("different session key should have independent bucket in legacy mode")
+	}
+}
+
+func TestEngine_RateLimit_GlobalFallback(t *testing.T) {
+	e := newTestEngine()
+	e.SetRateLimitCfg(RateLimitCfg{MaxMessages: 2, Window: time.Minute})
+
+	// User roles configured but role has no rate_limit
+	urm := NewUserRoleManager()
+	urm.Configure("member", []RoleInput{
+		{Name: "member", UserIDs: []string{"*"}, DisabledCommands: []string{}},
+		// No RateLimit on this role
+	})
+	e.SetUserRoles(urm)
+
+	msg := &Message{SessionKey: "test:s1", UserID: "user1"}
+	if !e.checkRateLimit(msg) {
+		t.Error("1st should be allowed")
+	}
+	if !e.checkRateLimit(msg) {
+		t.Error("2nd should be allowed")
+	}
+	if e.checkRateLimit(msg) {
+		t.Error("3rd should be rate-limited by global limiter")
+	}
+
+	// Same user, different session → should share limit (keyed by userID when users config active)
+	msg2 := &Message{SessionKey: "test:s2", UserID: "user1"}
+	if e.checkRateLimit(msg2) {
+		t.Error("same user from different session should still be rate-limited")
 	}
 }
 
