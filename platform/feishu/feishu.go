@@ -291,6 +291,8 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 			SessionKey: sessionKey,
 			Platform:   p.platformName,
 			UserID:     userID,
+			UserName:   p.resolveUserName(userID),
+			ChatName:   p.resolveChatName(chatID),
 			Content:    responseText,
 			ReplyCtx:   rctx,
 		})
@@ -320,6 +322,8 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 			SessionKey: sessionKey,
 			Platform:   p.platformName,
 			UserID:     userID,
+			UserName:   p.resolveUserName(userID),
+			ChatName:   p.resolveChatName(chatID),
 			Content:    actionVal,
 			ReplyCtx:   rctx,
 		})
@@ -353,6 +357,8 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 			SessionKey: sessionKey,
 			Platform:   p.platformName,
 			UserID:     userID,
+			UserName:   p.resolveUserName(userID),
+			ChatName:   p.resolveChatName(chatID),
 			Content:    cmdText,
 			ReplyCtx:   rctx,
 		})
