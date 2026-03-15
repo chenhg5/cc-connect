@@ -2726,3 +2726,49 @@ func TestCmdBindSetup_UsesSharedLogic(t *testing.T) {
 		t.Error("expected instructions written to file")
 	}
 }
+
+func TestDrainEventsClosedChannel(t *testing.T) {
+	ch := make(chan Event, 2)
+	ch <- Event{Type: EventToolUse, Content: "a"}
+	ch <- Event{Type: EventToolUse, Content: "b"}
+	close(ch)
+
+	done := make(chan struct{})
+	go func() {
+		drainEvents(ch)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// ok — returned promptly
+	case <-time.After(2 * time.Second):
+		t.Fatal("drainEvents did not return on closed channel (infinite loop)")
+	}
+}
+
+func TestDrainEventsOpenChannel(t *testing.T) {
+	ch := make(chan Event, 3)
+	ch <- Event{Type: EventToolUse, Content: "a"}
+	ch <- Event{Type: EventToolUse, Content: "b"}
+
+	done := make(chan struct{})
+	go func() {
+		drainEvents(ch)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// ok
+	case <-time.After(2 * time.Second):
+		t.Fatal("drainEvents did not return on open channel with buffered events")
+	}
+
+	// Channel should now be empty.
+	select {
+	case <-ch:
+		t.Fatal("expected channel to be drained")
+	default:
+	}
+}
