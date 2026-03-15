@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/chenhg5/cc-connect/core"
 
@@ -59,6 +60,13 @@ func New(opts map[string]any) (core.Platform, error) {
 }
 
 func (p *Platform) Name() string { return "slack" }
+
+func (p *Platform) makeSessionKey(channelID, userID string) string {
+	if p.shareSessionInChannel {
+		return fmt.Sprintf("slack:%s", channelID)
+	}
+	return fmt.Sprintf("slack:%s:%s", channelID, userID)
+}
 
 func (p *Platform) Start(handler core.MessageHandler) error {
 	p.handler = handler
@@ -131,15 +139,8 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					return
 				}
 
-				var sessionKey string
-				if p.shareSessionInChannel {
-					sessionKey = fmt.Sprintf("slack:%s", ev.Channel)
-				} else {
-					sessionKey = fmt.Sprintf("slack:%s:%s", ev.Channel, ev.User)
-				}
-
 				msg := &core.Message{
-					SessionKey: sessionKey, Platform: "slack",
+					SessionKey: p.makeSessionKey(ev.Channel, ev.User), Platform: "slack",
 					UserID: ev.User, UserName: ev.User,
 					Content:   stripAppMentionText(ev.Text),
 					MessageID: ev.TimeStamp,
@@ -173,12 +174,6 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					return
 				}
 
-				var sessionKey string
-				if p.shareSessionInChannel {
-					sessionKey = fmt.Sprintf("slack:%s", ev.Channel)
-				} else {
-					sessionKey = fmt.Sprintf("slack:%s:%s", ev.Channel, ev.User)
-				}
 				ts := ev.TimeStamp
 
 				var images []core.ImageAttachment
@@ -214,15 +209,48 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 				}
 
 				msg := &core.Message{
-					SessionKey: sessionKey, Platform: "slack",
+					SessionKey: p.makeSessionKey(ev.Channel, ev.User), Platform: "slack",
 					UserID: ev.User, UserName: ev.User,
 					Content: ev.Text, Images: images, Audio: audio,
 					MessageID: ts,
-					ReplyCtx: replyContext{channel: ev.Channel, timestamp: ts},
+					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: ts},
 				}
 				p.handler(p, msg)
 			}
 		}
+
+	case socketmode.EventTypeSlashCommand:
+		cmd, ok := evt.Data.(slack.SlashCommand)
+		if !ok {
+			slog.Debug("slack: slash command type assertion failed")
+			return
+		}
+		if evt.Request != nil && p.socket != nil {
+			p.socket.Ack(*evt.Request)
+		}
+
+		slog.Debug("slack: slash command received", "user", cmd.UserID, "channel", cmd.ChannelID, "command", cmd.Command)
+
+		if !core.AllowList(p.allowFrom, cmd.UserID) {
+			slog.Debug("slack: slash command from unauthorized user", "user", cmd.UserID)
+			return
+		}
+
+		content, ok := normalizeSlashCommandText(cmd)
+		if !ok || content == "" {
+			return
+		}
+
+		msg := &core.Message{
+			SessionKey: p.makeSessionKey(cmd.ChannelID, cmd.UserID),
+			Platform:   "slack",
+			UserID:     cmd.UserID,
+			UserName:   cmd.UserName,
+			Content:    content,
+			MessageID:  cmd.TriggerID,
+			ReplyCtx:   replyContext{channel: cmd.ChannelID},
+		}
+		p.handler(p, msg)
 
 	case socketmode.EventTypeConnecting:
 		slog.Debug("slack: connecting...")
@@ -234,10 +262,27 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 }
 
 func stripAppMentionText(text string) string {
-	if idx := strings.Index(text, "> "); idx != -1 && strings.HasPrefix(text, "<@") {
-		return strings.TrimSpace(text[idx+2:])
+	if strings.HasPrefix(text, "<@") {
+		if idx := strings.IndexByte(text, '>'); idx != -1 {
+			return strings.TrimLeftFunc(text[idx+1:], unicode.IsSpace)
+		}
 	}
 	return text
+}
+
+func normalizeSlashCommandText(cmd slack.SlashCommand) (string, bool) {
+	if cmd.Command != "/cc" {
+		return "", false
+	}
+
+	text := strings.TrimSpace(cmd.Text)
+	if text == "" {
+		return "/help", true
+	}
+	if strings.HasPrefix(text, "/") {
+		return text, true
+	}
+	return "/" + text, true
 }
 
 func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {

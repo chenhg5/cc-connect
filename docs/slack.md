@@ -69,6 +69,7 @@ Under "Scopes" → "Bot Token Scopes", add:
 |-------|---------|
 | `app_mentions:read` | Read @mention messages |
 | `chat:write` | Send messages |
+| `commands` | Receive native Slack slash commands like `/cc` |
 | `im:history` | Read DM history |
 | `im:read` | Read DM list |
 | `im:write` | Send DMs |
@@ -127,6 +128,25 @@ Under "Subscribe to bot events", add:
 ### 5.4 Save Changes
 
 Click "Save Changes".
+
+### 5.5 Configure a Native Slash Command (Optional but Recommended)
+
+If you want to run cc-connect commands directly from Slack's slash-command UI, create a gateway command named `/cc`.
+
+1. In the left sidebar, click "Slash Commands"
+2. Click "Create New Command"
+3. Fill in:
+
+| Field | Suggested Value |
+|-------|----------------|
+| Command | `/cc` |
+| Request URL | Not required with Socket Mode |
+| Short Description | `Run cc-connect commands` |
+| Usage Hint | `help`, `model`, `status`, `mycustom` |
+
+4. Click "Save"
+
+> 💡 With Socket Mode, Slack can deliver slash command payloads over the WebSocket connection, so a public Request URL is not required.
 
 ---
 
@@ -208,17 +228,41 @@ level=INFO msg="cc-connect is running" projects=1
 
 ## Step 9: Start Chatting
 
+cc-connect supports three Slack input styles:
+
+1. Native Slack slash-command gateway: `/cc model`
+2. Channel mention: `@cc_connect /model`
+3. DM plain-text fallback: ` /model` (leading space so Slack does not treat it as a native Slack command)
+
 ### 9.1 Direct Message
 
 1. Search for your bot name in Slack
 2. Open a DM conversation
 3. Send a message
 
+Example:
+
+```
+ /model
+```
+
 ### 9.2 Channel Usage
 
 1. Add the bot to a channel (`/invite @cc_connect`)
 2. @mention the bot: `@cc_connect help me analyze the code`
 3. The bot will respond
+
+For commands, you can either use:
+
+```text
+/cc model
+```
+
+or:
+
+```text
+@cc_connect /model
+```
 
 ---
 
@@ -303,6 +347,18 @@ Make sure:
 1. You've subscribed to the `app_mention` event
 2. The bot has been added to the channel
 3. You @mentioned the bot in your message
+
+### Q: `/model is not a valid command`?
+
+That message comes from Slack itself. Native Slack slash commands now go through the `/cc` gateway:
+
+1. Use `/cc model` for native slash-command input
+2. Or mention the bot: `@cc_connect /model`
+3. Or in a DM, send ` /model` with a leading space
+
+### Q: Do I need a public webhook URL for `/cc`?
+
+No. When Socket Mode is enabled, Slack sends slash-command payloads over the WebSocket connection instead of requiring a public HTTP endpoint.
 
 ---
 

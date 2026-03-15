@@ -804,6 +804,11 @@ func (e *Engine) resolveAlias(content string) string {
 	if cmd, ok := e.aliases[content]; ok {
 		return cmd
 	}
+	if strings.HasPrefix(content, "/") {
+		if cmd, ok := e.aliases[strings.TrimPrefix(content, "/")]; ok {
+			return cmd
+		}
+	}
 
 	// Match first word, append remaining args
 	parts := strings.SplitN(content, " ", 2)
@@ -812,6 +817,14 @@ func (e *Engine) resolveAlias(content string) string {
 			return cmd + " " + parts[1]
 		}
 		return cmd
+	}
+	if strings.HasPrefix(parts[0], "/") {
+		if cmd, ok := e.aliases[strings.TrimPrefix(parts[0], "/")]; ok {
+			if len(parts) > 1 {
+				return cmd + " " + parts[1]
+			}
+			return cmd
+		}
 	}
 	return content
 }
