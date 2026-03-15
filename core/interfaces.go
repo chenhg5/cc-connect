@@ -103,6 +103,13 @@ type InlineButtonSender interface {
 	SendWithButtons(ctx context.Context, replyCtx any, content string, buttons [][]ButtonOption) error
 }
 
+// ImageSender is an optional interface for platforms that support sending
+// images. The imagePath is an absolute local file path; the platform is
+// responsible for uploading and delivering it.
+type ImageSender interface {
+	SendImage(ctx context.Context, replyCtx any, imagePath string) error
+}
+
 // CardSender is an optional interface for platforms that support sending
 // structured rich cards (e.g. Feishu Interactive Card). Platforms that do not
 // implement this interface will receive a plain-text fallback via Card.RenderText().

@@ -30,6 +30,7 @@ type SendRequest struct {
 	Project    string `json:"project"`
 	SessionKey string `json:"session_key"`
 	Message    string `json:"message"`
+	ImagePath  string `json:"image_path,omitempty"`
 }
 
 // NewAPIServer creates an API server on a Unix socket.
@@ -118,8 +119,8 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.Message == "" {
-		http.Error(w, "message is required", http.StatusBadRequest)
+	if req.Message == "" && req.ImagePath == "" {
+		http.Error(w, "message or image_path is required", http.StatusBadRequest)
 		return
 	}
 
@@ -144,9 +145,20 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := engine.SendToSession(req.SessionKey, req.Message); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	// Send image if image_path is provided.
+	if req.ImagePath != "" {
+		if err := engine.SendImageToSession(req.SessionKey, req.ImagePath); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// Send text message if provided.
+	if req.Message != "" {
+		if err := engine.SendToSession(req.SessionKey, req.Message); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")

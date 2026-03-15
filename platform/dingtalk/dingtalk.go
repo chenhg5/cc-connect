@@ -5,9 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -32,6 +37,11 @@ type Platform struct {
 	streamClient          *dingtalkClient.StreamClient
 	handler               core.MessageHandler
 	dedup                 core.MessageDedup
+
+	// access token cache
+	tokenMu      sync.Mutex
+	accessToken  string
+	tokenExpires time.Time
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -207,4 +217,155 @@ func preprocessDingTalkMarkdown(s string) string {
 		}
 	}
 	return sb.String()
+}
+
+// ── Image sending (implements core.ImageSender) ────────────────
+
+// SendImage uploads a local image file to DingTalk and sends it via sessionWebhook.
+func (p *Platform) SendImage(ctx context.Context, rctx any, imagePath string) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("dingtalk: invalid reply context type %T", rctx)
+	}
+
+	mediaID, err := p.uploadMedia(ctx, imagePath, "image")
+	if err != nil {
+		return fmt.Errorf("dingtalk: upload image: %w", err)
+	}
+
+	// DingTalk sessionWebhook does not support mediaId-based image messages.
+	// Use markdown with the DingTalk media URL instead.
+	downloadURL := fmt.Sprintf("https://oapi.dingtalk.com/media/download?access_token=%s&media_id=%s", p.cachedToken(), mediaID)
+	payload := map[string]any{
+		"msgtype":  "markdown",
+		"markdown": map[string]string{"title": "image", "text": fmt.Sprintf("![](%s)", downloadURL)},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("dingtalk: marshal image message: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rc.sessionWebhook, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("dingtalk: create image request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := core.HTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("dingtalk: send image: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("dingtalk: send image returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
+// getAccessToken returns a valid access token, fetching a new one if expired.
+func (p *Platform) getAccessToken(ctx context.Context) (string, error) {
+	p.tokenMu.Lock()
+	defer p.tokenMu.Unlock()
+
+	if p.accessToken != "" && time.Now().Before(p.tokenExpires) {
+		return p.accessToken, nil
+	}
+
+	payload, _ := json.Marshal(map[string]string{
+		"appKey":    p.clientID,
+		"appSecret": p.clientSecret,
+	})
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		"https://api.dingtalk.com/v1.0/oauth2/accessToken",
+		bytes.NewReader(payload))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := core.HTTPClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("fetch access token: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		AccessToken string `json:"accessToken"`
+		ExpireIn    int64  `json:"expireIn"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("decode access token response: %w", err)
+	}
+	if result.AccessToken == "" {
+		return "", fmt.Errorf("empty access token returned")
+	}
+
+	p.accessToken = result.AccessToken
+	// Refresh 5 minutes before actual expiry.
+	p.tokenExpires = time.Now().Add(time.Duration(result.ExpireIn)*time.Second - 5*time.Minute)
+	slog.Debug("dingtalk: access token refreshed", "expires_in", result.ExpireIn)
+	return p.accessToken, nil
+}
+
+// cachedToken returns the cached token (best-effort, no refresh).
+func (p *Platform) cachedToken() string {
+	p.tokenMu.Lock()
+	defer p.tokenMu.Unlock()
+	return p.accessToken
+}
+
+// uploadMedia uploads a local file to DingTalk and returns the media_id.
+func (p *Platform) uploadMedia(ctx context.Context, filePath, fileType string) (string, error) {
+	token, err := p.getAccessToken(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	f, err := os.Open(filePath)
+	if err != nil {
+		return "", fmt.Errorf("open file: %w", err)
+	}
+	defer f.Close()
+
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	_ = w.WriteField("type", fileType)
+	part, err := w.CreateFormFile("media", filepath.Base(filePath))
+	if err != nil {
+		return "", fmt.Errorf("create form file: %w", err)
+	}
+	if _, err := io.Copy(part, f); err != nil {
+		return "", fmt.Errorf("copy file data: %w", err)
+	}
+	w.Close()
+
+	uploadURL := fmt.Sprintf("https://oapi.dingtalk.com/media/upload?access_token=%s", token)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, uploadURL, &buf)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", w.FormDataContentType())
+
+	resp, err := core.HTTPClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("upload request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		ErrCode  int    `json:"errcode"`
+		ErrMsg   string `json:"errmsg"`
+		MediaID  string `json:"media_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("decode upload response: %w", err)
+	}
+	if result.ErrCode != 0 {
+		return "", fmt.Errorf("upload failed: %s (code %d)", result.ErrMsg, result.ErrCode)
+	}
+	slog.Debug("dingtalk: media uploaded", "media_id", result.MediaID, "file", filePath)
+	return result.MediaID, nil
 }
