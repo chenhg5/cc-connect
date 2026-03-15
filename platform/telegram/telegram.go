@@ -893,7 +893,9 @@ func (p *Platform) handleMenuCallback(data string, chatID int64, msgID int, user
 	if data == "menu:custom:reset" {
 		cfg := p.getMenuConfig(chatID)
 		cfg.Reset()
-		_ = cfg.Save()
+		if err := cfg.Save(); err != nil {
+			slog.Warn("telegram: menu config save failed", "error", err)
+		}
 		p.refreshMenuPage(chatID, "menu:cat:custom", sessionKey)
 		return
 	}
@@ -902,8 +904,13 @@ func (p *Platform) handleMenuCallback(data string, chatID int64, msgID int, user
 	if strings.HasPrefix(data, "menu:pin:toggle:") {
 		cmd := strings.TrimPrefix(data, "menu:pin:toggle:")
 		cfg := p.getMenuConfig(chatID)
-		cfg.TogglePinned(cmd)
-		_ = cfg.Save()
+		if _, err := cfg.TogglePinned(cmd); err != nil {
+			slog.Warn("telegram: pin toggle failed", "cmd", cmd, "error", err)
+			return
+		}
+		if err := cfg.Save(); err != nil {
+			slog.Warn("telegram: menu config save failed", "error", err)
+		}
 		p.refreshMenuPage(chatID, "menu:custom:pin", sessionKey)
 		return
 	}
@@ -913,7 +920,9 @@ func (p *Platform) handleMenuCallback(data string, chatID int64, msgID int, user
 		cat := strings.TrimPrefix(data, "menu:hide:toggle:")
 		cfg := p.getMenuConfig(chatID)
 		cfg.ToggleHiddenCat(cat)
-		_ = cfg.Save()
+		if err := cfg.Save(); err != nil {
+			slog.Warn("telegram: menu config save failed", "error", err)
+		}
 		p.refreshMenuPage(chatID, "menu:custom:hide", sessionKey)
 		return
 	}
@@ -971,6 +980,38 @@ func (p *Platform) applyMenuConfig(chatID int64, action string, page *core.MenuP
 		filtered = append([][]core.ButtonOption{pinnedRow}, filtered...)
 	}
 
+	// On hide sub-page, mark currently-hidden categories
+	if action == "menu:custom:hide" {
+		for i, row := range filtered {
+			for j, btn := range row {
+				if strings.HasPrefix(btn.Data, "menu:hide:toggle:") {
+					cat := strings.TrimPrefix(btn.Data, "menu:hide:toggle:")
+					if cfg.IsCatHidden(cat) {
+						filtered[i][j].Text = strings.Replace(btn.Text, "⬜ ", "✅ ", 1)
+					}
+				}
+			}
+		}
+	}
+
+	// On pin sub-page, mark currently-pinned commands
+	if action == "menu:custom:pin" {
+		pinSet := make(map[string]bool, len(cfg.Pinned))
+		for _, cmd := range cfg.Pinned {
+			pinSet[cmd] = true
+		}
+		for i, row := range filtered {
+			for j, btn := range row {
+				if strings.HasPrefix(btn.Data, "menu:pin:toggle:") {
+					cmd := strings.TrimPrefix(btn.Data, "menu:pin:toggle:")
+					if pinSet[cmd] {
+						filtered[i][j].Text = "📌 " + btn.Text
+					}
+				}
+			}
+		}
+	}
+
 	return &core.MenuPage{Title: page.Title, Subtitle: page.Subtitle, Buttons: filtered}
 }
 
@@ -983,6 +1024,7 @@ func (p *Platform) refreshMenuPage(chatID int64, action, sessionKey string) {
 	if page == nil {
 		return
 	}
+	page = p.applyMenuConfig(chatID, action, page)
 	rctx := replyContext{chatID: chatID, messageID: 0}
 	if rawID, ok := p.menuMsgIDs.Load(chatID); ok {
 		rctx.messageID = rawID.(int)
