@@ -1404,6 +1404,13 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		inj.SetSessionEnv(envVars)
 	}
 
+	// Inject platform-specific formatting instructions into the agent's system prompt.
+	if fip, ok := p.(FormattingInstructionProvider); ok {
+		if ppi, ok := agent.(PlatformPromptInjector); ok {
+			ppi.SetPlatformPrompt(fip.FormattingInstructions())
+		}
+	}
+
 	// Check if context is already canceled (e.g. during shutdown/restart)
 	if e.ctx.Err() != nil {
 		slog.Debug("skipping session start: context canceled", "session_key", sessionKey)
