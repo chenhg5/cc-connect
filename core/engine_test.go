@@ -162,6 +162,19 @@ func (a *stubModelModeAgent) AvailableReasoningEfforts() []string {
 	return []string{"low", "medium", "high", "xhigh"}
 }
 
+type stubWorkDirAgent struct {
+	stubAgent
+	workDir string
+}
+
+func (a *stubWorkDirAgent) SetWorkDir(dir string) {
+	a.workDir = dir
+}
+
+func (a *stubWorkDirAgent) GetWorkDir() string {
+	return a.workDir
+}
+
 type stubListAgent struct {
 	stubAgent
 	sessions []AgentSessionInfo
@@ -1429,6 +1442,123 @@ func TestCmdModel_UsesInlineButtonsOnButtonOnlyPlatform(t *testing.T) {
 	}
 	if got := p.buttonRows[0][0].Data; got != "cmd:/model 1" {
 		t.Fatalf("first /model button = %q, want %q", got, "cmd:/model 1")
+	}
+}
+
+func TestCmdDir_ShowsCurrentDirectory(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubWorkDirAgent{workDir: "/tmp/project-a"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.cmdDir(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, nil)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "/tmp/project-a") {
+		t.Fatalf("sent = %q, want current work dir", p.sent[0])
+	}
+}
+
+func TestCmdDir_SwitchesDirectoryAndResetsSession(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	tempDir := t.TempDir()
+	nextDir := filepath.Join(tempDir, "next")
+	if err := os.Mkdir(nextDir, 0o755); err != nil {
+		t.Fatalf("mkdir next dir: %v", err)
+	}
+
+	agent := &stubWorkDirAgent{workDir: tempDir}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	s := e.sessions.GetOrCreateActive(msg.SessionKey)
+	s.SetAgentSessionID("existing-session", "test")
+	s.AddHistory("user", "hello")
+
+	e.cmdDir(p, msg, []string{"next"})
+
+	if agent.workDir != nextDir {
+		t.Fatalf("workDir = %q, want %q", agent.workDir, nextDir)
+	}
+	if s.GetAgentSessionID() != "" {
+		t.Fatalf("AgentSessionID = %q, want cleared", s.GetAgentSessionID())
+	}
+	if len(s.History) != 0 {
+		t.Fatalf("history length = %d, want 0", len(s.History))
+	}
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], nextDir) {
+		t.Fatalf("sent = %v, want directory changed message", p.sent)
+	}
+}
+
+func TestCmdDir_RejectsMissingDirectory(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	tempDir := t.TempDir()
+	missingDir := filepath.Join(tempDir, "missing")
+	agent := &stubWorkDirAgent{workDir: tempDir}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.cmdDir(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, []string{"missing"})
+
+	if agent.workDir != tempDir {
+		t.Fatalf("workDir = %q, want unchanged %q", agent.workDir, tempDir)
+	}
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], missingDir) {
+		t.Fatalf("sent = %v, want invalid path message", p.sent)
+	}
+}
+
+func TestCmdDir_AliasCdStillWorks(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	tempDir := t.TempDir()
+	nextDir := filepath.Join(tempDir, "next")
+	if err := os.Mkdir(nextDir, 0o755); err != nil {
+		t.Fatalf("mkdir next dir: %v", err)
+	}
+	agent := &stubWorkDirAgent{workDir: tempDir}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetAdminFrom("admin1")
+
+	e.handleCommand(p, &Message{SessionKey: "test:user1", UserID: "admin1", ReplyCtx: "ctx"}, "/cd next")
+
+	if agent.workDir != nextDir {
+		t.Fatalf("workDir = %q, want %q", agent.workDir, nextDir)
+	}
+}
+
+func TestCmdDir_HelpShowsUsage(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubWorkDirAgent{workDir: "/tmp/project-a"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.cmdDir(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, []string{"help"})
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "/dir <path>") {
+		t.Fatalf("sent = %q, want /dir usage", p.sent[0])
+	}
+}
+
+func TestEngine_AdminFrom_GatesDir(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	tempDir := t.TempDir()
+	agent := &stubWorkDirAgent{workDir: tempDir}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	msg := &Message{SessionKey: "test:u1", UserID: "user1", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, "/dir .")
+
+	if len(p.sent) != 1 {
+		t.Fatalf("expected 1 reply, got %d", len(p.sent))
+	}
+	if !strings.Contains(strings.ToLower(p.sent[0]), "admin") {
+		t.Fatalf("expected admin required message, got: %s", p.sent[0])
+	}
+	if agent.workDir != tempDir {
+		t.Fatalf("workDir = %q, want unchanged %q", agent.workDir, tempDir)
 	}
 }
 

@@ -454,7 +454,7 @@ func (e *Engine) SetDisabledCommands(cmds []string) {
 func (e *Engine) SetAdminFrom(adminFrom string) {
 	e.adminFrom = strings.TrimSpace(adminFrom)
 	if e.adminFrom == "" && !e.disabledCmds["shell"] {
-		slog.Warn("admin_from is not set — privileged commands (/shell, /restart, /upgrade) are blocked. "+
+		slog.Warn("admin_from is not set — privileged commands (/shell, /dir, /restart, /upgrade) are blocked. "+
 			"Set admin_from in config to enable them, or use disabled_commands to hide them.",
 			"project", e.name)
 	}
@@ -463,6 +463,7 @@ func (e *Engine) SetAdminFrom(adminFrom string) {
 // privilegedCommands are commands that require admin_from authorization.
 var privilegedCommands = map[string]bool{
 	"shell":   true,
+	"dir":     true,
 	"restart": true,
 	"upgrade": true,
 }
@@ -1895,6 +1896,7 @@ var builtinCommands = []struct {
 	{[]string{"bind"}, "bind"},
 	{[]string{"search", "find"}, "search"},
 	{[]string{"shell", "sh", "exec", "run"}, "shell"},
+	{[]string{"dir", "cd", "chdir", "workdir"}, "dir"},
 	{[]string{"tts"}, "tts"},
 	{[]string{"workspace", "ws"}, "workspace"},
 }
@@ -2035,6 +2037,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdSearch(p, msg, args)
 	case "shell":
 		e.cmdShell(p, msg, raw)
+	case "dir":
+		e.cmdDir(p, msg, args)
 	case "tts":
 		e.cmdTTS(p, msg, args)
 	case "workspace":
@@ -2437,6 +2441,56 @@ func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
 
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf("$ %s\n```\n%s\n```", shellCmd, result))
 	}()
+}
+
+func (e *Engine) cmdDir(p Platform, msg *Message, args []string) {
+	agent, sessions, interactiveKey, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+	switcher, ok := agent.(WorkDirSwitcher)
+	if !ok {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDirNotSupported))
+		return
+	}
+
+	if len(args) == 0 {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgDirCurrent, switcher.GetWorkDir()))
+		return
+	}
+	if len(args) == 1 {
+		switch strings.ToLower(strings.TrimSpace(args[0])) {
+		case "help", "-h", "--help":
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDirUsage))
+			return
+		}
+	}
+
+	newDir := filepath.Clean(strings.Join(args, " "))
+	if !filepath.IsAbs(newDir) {
+		baseDir := switcher.GetWorkDir()
+		if baseDir == "" {
+			baseDir, _ = os.Getwd()
+		}
+		newDir = filepath.Join(baseDir, newDir)
+	}
+
+	info, err := os.Stat(newDir)
+	if err != nil || !info.IsDir() {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgDirInvalidPath, newDir))
+		return
+	}
+
+	switcher.SetWorkDir(newDir)
+	e.cleanupInteractiveState(interactiveKey)
+
+	s := sessions.GetOrCreateActive(msg.SessionKey)
+	s.SetAgentSessionID("", "")
+	s.ClearHistory()
+	sessions.Save()
+
+	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgDirChanged, newDir))
 }
 
 // cmdSearch searches sessions by name or message content.
