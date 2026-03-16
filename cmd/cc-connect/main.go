@@ -131,6 +131,9 @@ func main() {
 	effectiveWorkDirs := make([]string, 0, len(cfg.Projects))
 
 	for _, proj := range cfg.Projects {
+		if proj.Mode == "multi-workspace" {
+			proj.Agent.Options["work_dir"] = proj.BaseDir
+		}
 		agent, err := core.CreateAgent(proj.Agent.Type, proj.Agent.Options)
 		if err != nil {
 			slog.Error("failed to create agent", "project", proj.Name, "error", err)
