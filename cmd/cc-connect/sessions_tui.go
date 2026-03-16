@@ -132,6 +132,9 @@ func (m sessionsModel) viewList() string {
 }
 
 func (m sessionsModel) viewDetail() string {
+	if m.selected < 0 || m.selected >= len(m.records) {
+		return "No session selected."
+	}
 	record := m.records[m.selected]
 
 	var b strings.Builder

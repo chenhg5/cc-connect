@@ -4611,7 +4611,8 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 			target = models[idx-1].Name
 		}
 		switcher.SetModel(target)
-		e.cleanupInteractiveState(sessionKey)
+		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
+		e.cleanupInteractiveState(interactiveKey)
 		s := e.sessions.GetOrCreateActive(sessionKey)
 		s.SetAgentSessionID("", "")
 		s.ClearHistory()
@@ -4633,7 +4634,8 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		for _, effort := range efforts {
 			if effort == target {
 				switcher.SetReasoningEffort(target)
-				e.cleanupInteractiveState(sessionKey)
+				interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
+				e.cleanupInteractiveState(interactiveKey)
 				s := e.sessions.GetOrCreateActive(sessionKey)
 				s.SetAgentSessionID("", "")
 				s.ClearHistory()
@@ -4651,7 +4653,8 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 			return
 		}
 		switcher.SetMode(strings.ToLower(args))
-		e.cleanupInteractiveState(sessionKey)
+		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
+		e.cleanupInteractiveState(interactiveKey)
 
 	case "/lang":
 		if args == "" {
@@ -4686,7 +4689,8 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 			return
 		}
 		if switcher.SetActiveProvider(args) {
-			e.cleanupInteractiveState(sessionKey)
+			interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
+			e.cleanupInteractiveState(interactiveKey)
 			if e.providerSaveFunc != nil {
 				_ = e.providerSaveFunc(args)
 			}
@@ -4702,11 +4706,12 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		e.executeDeleteModeAction(sessionKey, args)
 
 	case "/quiet":
+		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 		e.interactiveMu.Lock()
-		state, ok := e.interactiveStates[sessionKey]
+		state, ok := e.interactiveStates[interactiveKey]
 		if !ok || state == nil {
 			state = &interactiveState{quiet: true}
-			e.interactiveStates[sessionKey] = state
+			e.interactiveStates[interactiveKey] = state
 			e.interactiveMu.Unlock()
 		} else {
 			e.interactiveMu.Unlock()

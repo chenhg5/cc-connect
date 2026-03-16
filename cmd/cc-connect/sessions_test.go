@@ -236,3 +236,30 @@ func writeSessionFile(t *testing.T, dir, name string, data sessionFileData) {
 		t.Fatal(err)
 	}
 }
+
+func TestTruncate(t *testing.T) {
+	tests := []struct {
+		in     string
+		maxLen int
+		want   string
+	}{
+		{"hello", 10, "hello"},
+		{"hello", 5, "hello"},
+		{"hello world", 8, "hello..."},
+		{"hello", 3, "hel"},
+		{"hello", 1, "h"},
+		{"hello", 0, ""},
+		{"hello", -1, ""},
+		{"日本語テスト", 4, "日..."},
+		{"日本語テスト", 3, "日本語"},
+		{"日本語テスト", 6, "日本語テスト"},
+		{"ab", 4, "ab"},
+		{"", 5, ""},
+	}
+	for _, tt := range tests {
+		got := truncate(tt.in, tt.maxLen)
+		if got != tt.want {
+			t.Errorf("truncate(%q, %d) = %q, want %q", tt.in, tt.maxLen, got, tt.want)
+		}
+	}
+}
