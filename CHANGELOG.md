@@ -1,5 +1,56 @@
 # Changelog
 
+## v1.2.2-beta.2 (2026-03-16)
+
+Beta release with significant improvements to agent stability, platform onboarding, and user experience.
+
+### New Features
+- **Feishu/Lark CLI Onboarding**: New `cc-connect feishu setup` command with QR code terminal display for quick bot configuration, supporting both new bot creation and existing bot binding
+- **Pi Agent**: Added support for Pi coding agent with full session management and tool handling
+- **Session TUI Browser**: New `cc-connect sessions` subcommand with terminal UI for browsing session history
+- **Multi-Workspace Mode**: Channel-based workspace resolution with auto-binding by convention and interactive init flow
+- **Design Documentation**: Added comprehensive design plans for multi-workspace and session resilience features
+- **Slack Enhancements**: Typing indicator via emoji reactions, mrkdwn formatting guidance in system prompt
+- **Session Resilience**: Automatic `--continue` on first connection, resume-failure fallback, and context usage indicators
+- **Management API**: HTTP REST API endpoints for external management tools with WebSocket bridge support
+- **Cron Setup Command**: `/cron setup` for easy cron job configuration with memory file integration
+
+### Bug Fixes
+- **RateLimiter Goroutine Leak**: Fixed cleanup goroutine not stopped on replacement and engine shutdown
+- **DrainEvents Infinite Loop**: Fixed infinite loop when channel is closed in `drainEvents`
+- **InteractiveKey Consistency**: Fixed `executeCardAction` using wrong key for `interactiveStates` lookup in multi-workspace mode
+- **Workspace Command Prefix**: Fixed missing leading slash in workspace command prefix check
+- **Agent Session Close**: Always close events channel on session timeout to prevent goroutine leaks
+- **Pi Agent Mutex**: Move thinking field read inside mutex in `StartSession` to prevent race condition
+- **Session AgentID Protection**: Protect `Session.AgentSessionID` writes with mutex to prevent data races
+- **Session Routing Race**: Prevent session routing race when `/new` runs during active turn
+- **Discord Duplicate Messages**: Deduplicate gateway `MessageCreate` events causing duplicate responses
+- **Codex JSON Lines**: Handle large stdout JSON lines without scanner buffer overflow
+- **UTF-8 Safety**: Use rune-based splitting in `splitMessage` to prevent invalid UTF-8 sequences
+
+### Improvements
+- **Gemini Display**: Enhanced tool display with diff syntax highlighting and improved Telegram markdown rendering
+- **Thread Safety**: Added comprehensive thread-safe accessors for Session fields
+- **Test Engine**: Thread safety improvements to test engine and fixed test assertions
+- **Input Validation**: Consolidated interactive state cleanup and added input validation
+- **i18n**: Updated rate limit messages to mention `/btw` command for adding context during processing
+
+### Contributors
+
+Special thanks to all contributors who made this release possible:
+
+- **kevinWangSheng** - Multiple critical bug fixes (RateLimiter, drainEvents, UTF-8 safety, session routing)
+- **q107580018** - Feishu CLI onboarding with QR code integration
+- **sean2077** - Session TUI browser and sessions management
+- **quabug** - Pi agent implementation and Discord fixes
+- **AtticusZeller** - Gemini tool display and Telegram markdown enhancements
+- **leighstillard** - Multi-workspace design, session resilience, and Slack improvements
+- **Shawn** - Thread safety fixes and test improvements
+- **zhuguanqi** - Session management and data race fixes
+- **Steve-Rye** - JSON lines handling improvements
+- **Xihui He** - iFlow and agent enhancements
+- **Mr.QiuW** - Various platform improvements
+
 ## v1.2.2-beta.1 (2026-03-12)
 
 Beta release with major new features and security improvements.
