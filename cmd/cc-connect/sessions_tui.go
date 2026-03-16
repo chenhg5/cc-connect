@@ -278,7 +278,11 @@ func renderDetailContent(record sessionRecord) string {
 		var roleTag string
 		switch entry.Role {
 		case "user":
-			roleTag = userStyle.Render(" user ")
+			name := record.UserName
+			if name == "" {
+				name = "user"
+			}
+			roleTag = userStyle.Render(" " + name + " ")
 		case "assistant":
 			roleTag = assistantStyle.Render(" assistant ")
 		default:
@@ -287,8 +291,8 @@ func renderDetailContent(record sessionRecord) string {
 
 		// Wrap content lines
 		content := entry.Content
-		// Indent continuation lines (time=5 + space=2 + role≈12 + space=2 ≈ 21)
-		const indent = 21
+		// Indent continuation lines: time(5) + sep(2) + roleTag visual width + sep(2)
+		indent := 5 + 2 + lipgloss.Width(roleTag) + 2
 		lines := strings.Split(content, "\n")
 		prefix := strings.Repeat(" ", indent)
 
