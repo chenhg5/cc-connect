@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -47,19 +48,32 @@ func (s *recordingAgentSession) RespondPermission(id string, res PermissionResul
 type stubPlatformEngine struct {
 	n    string
 	sent []string
+	mu   sync.Mutex
 }
 
 func (p *stubPlatformEngine) Name() string               { return p.n }
 func (p *stubPlatformEngine) Start(MessageHandler) error { return nil }
 func (p *stubPlatformEngine) Reply(_ context.Context, _ any, content string) error {
+	p.mu.Lock()
 	p.sent = append(p.sent, content)
+	p.mu.Unlock()
 	return nil
 }
 func (p *stubPlatformEngine) Send(_ context.Context, _ any, content string) error {
+	p.mu.Lock()
 	p.sent = append(p.sent, content)
+	p.mu.Unlock()
 	return nil
 }
 func (p *stubPlatformEngine) Stop() error { return nil }
+
+func (p *stubPlatformEngine) getSent() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	cp := make([]string, len(p.sent))
+	copy(cp, p.sent)
+	return cp
+}
 
 type stubInlineButtonPlatform struct {
 	stubPlatformEngine
@@ -477,9 +491,10 @@ func TestEngine_AdminFrom_AdminCanRunShell(t *testing.T) {
 	msg := &Message{SessionKey: "test:a1", UserID: "admin1", ReplyCtx: "ctx"}
 	e.handleCommand(p, msg, "/shell echo hello")
 
-	// Shell runs async in a goroutine, so the command should be accepted (not blocked).
-	// No "admin" error should be in replies.
-	for _, s := range p.sent {
+	// Shell runs async in a goroutine; wait for it to complete.
+	time.Sleep(500 * time.Millisecond)
+
+	for _, s := range p.getSent() {
 		if strings.Contains(s, "admin") {
 			t.Errorf("admin user should not be blocked, got: %s", s)
 		}
