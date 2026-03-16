@@ -746,6 +746,25 @@ app_secret = "your-feishu-app-secret"
 # bot_secret = "your-bot-secret"
 # allow_from = "*"  # Allowed user IDs / 允许的用户 ID
 
+# Ruliu 自定义机器人 (Webhook)
+# 1. 在如流企业群添加机器人，复制生成的 Webhook 地址
+# 2. 在「接收消息服务器」设置页填写 URL/Token/EncodingAESKey，保存前先启动 cc-connect
+# 3. 确保如流系统能访问你暴露出去的回调 URL，并转发到本地 `http://127.0.0.1:8082/ruliu/callback`
+# Connection: HTTP Webhook — requires public URL or enterprise gateway
+# 连接方式：HTTP Webhook — 需要公网 URL 或企业网关
+
+# [[projects.platforms]]
+# type = "ruliu"
+#
+# [projects.platforms.options]
+# webhook = "https://openapi.im.baidu.com/your-ruliu-robot-webhook"
+# token = "your-callback-token"
+# encoding_aes_key = "your-22-char-encoding-aes-key"
+# port = "8082"
+# callback_path = "/ruliu/callback"
+# allow_from = "*"  # Allowed user IDs to interact with the robot / 允许的用户 ID
+# share_session_in_group = false  # If true, all users in a group share one agent session / 设为 true 时，群内所有用户共享同一个 Agent 会话（机器人能感知群聊上下文）
+
 # =============================================================================
 # Project 2: Using Cursor Agent / 项目 2：使用 Cursor Agent (uncomment to enable / 取消注释以启用)
 # =============================================================================
