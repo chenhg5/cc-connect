@@ -39,6 +39,24 @@
   <b>在任何聊天工具里，远程操控你的本地 AI Agent。随时随地，随心所欲。</b>
 </p>
 
+```
+         你（手机 / 电脑 / 平板）
+                    │
+    ┌───────────────┼───────────────┐
+    ▼               ▼               ▼
+   飞书           Slack         Telegram  ...10 个平台
+    │               │               │
+    └───────────────┼───────────────┘
+                    ▼
+              ┌────────────┐
+              │ cc-connect │  ← 你的开发机
+              └────────────┘
+              ┌─────┼─────┐
+              ▼     ▼     ▼
+         Claude  Gemini  Codex  ...7 个 Agent
+          Code    CLI   OpenCode / iFlow
+```
+
 <p align="center">
   cc-connect 把运行在你机器上的 AI Agent 桥接到你日常使用的即时通讯工具。<br/>
   代码审查、资料研究、自动化任务、数据分析 —— 只要 AI Agent 能做的事，<br/>
@@ -57,7 +75,7 @@
 **7 大 AI Agent** — Claude Code、Codex、Cursor Agent、Qoder CLI、Gemini CLI、OpenCode、iFlow CLI。按需选用，或同时使用全部。
 
 ### 📱 平台灵活性
-**9 大聊天平台** — 飞书、钉钉、Slack、Telegram、Discord、企业微信、LINE、QQ、QQ 官方机器人。大部分**无需公网 IP**。
+**10 大聊天平台** — 飞书、钉钉、Slack、Telegram、Discord、企业微信、如流、LINE、QQ、QQ 官方机器人。大部分**无需公网 IP**。
 
 ### 🔄 多 Agent 编排
 **多机器人中继** — 在群聊中绑定多个机器人，让它们相互协作。问 Claude，再听 Gemini 的见解 — 同一个对话搞定。
@@ -204,14 +222,602 @@ cc-connect update --pre     # Beta 版（含 pre-release）
 | Telegram | [docs/telegram.md](docs/telegram.md) | Long Polling | 不需要 |
 | Slack | [docs/slack.md](docs/slack.md) | Socket Mode | 不需要 |
 | Discord | [docs/discord.md](docs/discord.md) | Gateway | 不需要 |
+| LINE | [INSTALL.md](./INSTALL.md#line--requires-public-url) | Webhook | 需要 |
 | 企业微信 | [docs/wecom.md](docs/wecom.md) | WebSocket / Webhook | 不需要 (WS) / 需要 (Webhook) |
-| QQ / QQ 机器人 | [docs/qq.md](docs/qq.md) | WebSocket | 不需要 |
+| 如流 (企业自研) | [docs/ruliu.md](docs/ruliu.md) | Webhook（公网/企业网关） | 需要 |
+| QQ (NapCat) | [docs/qq.md](docs/qq.md) | WebSocket (OneBot v11) | 不需要 |
+| QQ 官方机器人 | [docs/qqbot.md](docs/qqbot.md) | WebSocket (官方 API) | 不需要 |
+
+### 如流多机器人配置（同一群聊接入多个机器人）
+
+如流每个机器人都需要独立的公网回调地址。如果你在同一群聊中运行两个机器人（如 Codex + Claude Code），可以使用内置的 `proxy.go` 将两个回调路径汇聚到同一端口，再通过 ngrok 或反向代理对外暴露。
+
+**第一步 — 在 config.toml 中配置两个项目，使用不同端口：**
+
+```toml
+# Codex 机器人 — 监听 :8082/ruliu/callback
+[[projects]]
+name = "codex-ruliu"
+[projects.agent]
+type = "codex"
+[projects.agent.options]
+work_dir = "/path/to/project"
+mode = "full-auto"
+
+[[projects.platforms]]
+type = "ruliu"
+[projects.platforms.options]
+webhook = "https://openapi.im.baidu.com/你的-codex-机器人-webhook"
+token = "your-codex-token"
+encoding_aes_key = "your-22-char-key"
+port = "8082"
+share_session_in_group = true
+
+# Claude Code 机器人 — 监听 :8083/ruliu/callback
+[[projects]]
+name = "claudecode-ruliu"
+[projects.agent]
+type = "claudecode"
+[projects.agent.options]
+work_dir = "/path/to/project"
+mode = "default"
+
+[[projects.platforms]]
+type = "ruliu"
+[projects.platforms.options]
+webhook = "https://openapi.im.baidu.com/你的-claude-机器人-webhook"
+token = "your-claude-token"
+encoding_aes_key = "your-22-char-key"
+port = "8083"
+share_session_in_group = true
+```
+
+**第二步 — 启动 cc-connect 和内置反向代理：**
+
+```bash
+# 启动 cc-connect
+./cc-connect
+
+# 启动内置代理（将 /ruliu/codex/* → :8082，/ruliu/cc/* → :8083）
+go run proxy.go
+```
+
+**第三步 — 用 ngrok 暴露 8080 端口（免费静态域名）：**
+
+```bash
+ngrok http 8080
+# 或使用你分配的固定域名：
+ngrok http --url=your-static-domain.ngrok-free.dev 8080
+```
+
+**第四步 — 在如流后台配置两个机器人的回调地址：**
+
+| 机器人 | 回调 URL |
+|--------|---------|
+| Codex | `https://your-domain.ngrok-free.dev/ruliu/codex/callback` |
+| Claude Code | `https://your-domain.ngrok-free.dev/ruliu/cc/callback` |
 
 ---
 
 ## 🎯 核心功能
 
 ### 💬 会话管理
+
+各平台快速配置示例：
+
+```toml
+# 钉钉
+[[projects.platforms]]
+type = "dingtalk"
+[projects.platforms.options]
+client_id = "dingxxxx"
+client_secret = "xxxx"
+
+# Telegram
+[[projects.platforms]]
+type = "telegram"
+[projects.platforms.options]
+token = "123456:ABC-xxx"
+
+# Slack
+[[projects.platforms]]
+type = "slack"
+[projects.platforms.options]
+bot_token = "xoxb-xxx"
+app_token = "xapp-xxx"
+
+# Discord
+[[projects.platforms]]
+type = "discord"
+[projects.platforms.options]
+token = "your-discord-bot-token"
+
+# LINE（需要公网 URL）
+[[projects.platforms]]
+type = "line"
+[projects.platforms.options]
+channel_secret = "xxx"
+channel_token = "xxx"
+port = "8080"
+
+# 企业微信（需要公网 URL）
+[[projects.platforms]]
+type = "wecom"
+[projects.platforms.options]
+corp_id = "wwxxx"
+corp_secret = "xxx"
+agent_id = "1000002"
+callback_token = "xxx"
+callback_aes_key = "xxx"
+port = "8081"
+enable_markdown = false  # 设为 true 则发送 Markdown 消息（仅企业微信应用内可渲染，个人微信显示"暂不支持"）
+
+# 如流（企业自定义机器人）
+[[projects.platforms]]
+type = "ruliu"
+[projects.platforms.options]
+webhook = "https://openapi.im.baidu.com/你的如流机器人Webhook"
+token = "你设置的回调 Token"
+encoding_aes_key = "你的 22 位 EncodingAESKey"
+# port = "8082"
+# callback_path = "/ruliu/callback"
+# allow_from = "user1,user2"
+# share_session_in_group = false  # true = 群内所有用户共享同一 Agent 会话
+
+# QQ（通过 NapCat/OneBot v11，无需公网 IP）
+[[projects.platforms]]
+type = "qq"
+[projects.platforms.options]
+ws_url = "ws://127.0.0.1:3001"
+allow_from = "*"  # 允许的 QQ 号，如 "12345,67890"，"*" 表示所有
+
+# QQ 官方机器人（无需公网 IP，无需第三方适配器）
+[[projects.platforms]]
+type = "qqbot"
+[projects.platforms.options]
+app_id = "your-app-id"
+app_secret = "your-app-secret"
+```
+
+## 权限模式
+
+所有 Agent 均支持权限模式，可在运行时通过 `/mode` 命令切换。
+
+**Claude Code** 模式（对应 `--permission-mode`）：
+
+| 模式 | 配置值 | 行为 |
+|------|--------|------|
+| **默认** | `default` | 每次工具调用都需要用户确认，完全掌控。 |
+| **接受编辑** | `acceptEdits`（别名: `edit`）| 文件编辑类工具自动通过，其他工具仍需确认。 |
+| **计划模式** | `plan` | Claude 只做规划不执行，审批计划后再执行。 |
+| **YOLO 模式** | `bypassPermissions`（别名: `yolo`）| 所有工具调用自动通过。适用于可信/沙箱环境。 |
+
+**Codex** 模式（对应 `--ask-for-approval`）：
+
+| 模式 | 配置值 | 行为 |
+|------|--------|------|
+| **建议** | `suggest` | 仅受信命令（ls、cat...）自动执行，其余需确认。 |
+| **自动编辑** | `auto-edit` | 模型自行决定何时请求批准，沙箱保护。 |
+| **全自动** | `full-auto` | 自动通过，工作区沙箱。推荐日常使用。 |
+| **YOLO 模式** | `yolo` | 跳过所有审批和沙箱。 |
+
+**Cursor Agent** 模式（对应 `--force` / `--mode`）：
+
+| 模式 | 配置值 | 行为 |
+|------|--------|------|
+| **默认** | `default` | 信任工作区，工具调用前询问。 |
+| **强制执行** | `force`（别名: `yolo`）| 自动批准所有工具调用。 |
+| **规划模式** | `plan` | 只读分析，不做修改。 |
+| **问答模式** | `ask` | 问答风格，只读。 |
+
+**Gemini CLI** 模式（对应 `-y` / `--approval-mode`）：
+
+| 模式 | 配置值 | 行为 |
+|------|--------|------|
+| **默认** | `default` | 每次工具调用都需要确认。 |
+| **自动编辑** | `auto_edit`（别名: `edit`）| 编辑工具自动通过，其他仍需确认。 |
+| **全自动** | `yolo` | 自动批准所有工具调用。 |
+| **规划模式** | `plan` | 只读规划模式，不做修改。 |
+
+**Qoder CLI** 模式：
+
+| 模式 | 配置值 | 行为 |
+|------|--------|------|
+| **标准权限** | `default` | 标准权限，每次工具调用需确认。 |
+| **YOLO 模式** | `yolo` | 跳过所有权限检查，自动批准。 |
+
+**OpenCode** 模式：
+
+| 模式 | 配置值 | 行为 |
+|------|--------|------|
+| **默认** | `default` | 标准模式。 |
+| **全自动** | `yolo` | 自动批准所有工具调用。 |
+
+**iFlow CLI** 模式：
+
+| 模式 | 配置值 | 行为 |
+|------|--------|------|
+| **默认** | `default` | 手动审批模式。 |
+| **自动编辑** | `auto-edit` | 自动编辑模式。 |
+| **规划模式** | `plan` | 只读规划模式。 |
+| **全自动** | `yolo` | 自动批准所有工具调用。 |
+
+```toml
+# Claude Code
+[projects.agent.options]
+mode = "default"
+# allowed_tools = ["Read", "Grep", "Glob"]
+
+# Codex
+[projects.agent.options]
+mode = "full-auto"
+# model = "o3"
+# reasoning_effort = "high"
+
+# Cursor Agent
+[projects.agent.options]
+mode = "default"
+
+# Gemini CLI
+[projects.agent.options]
+mode = "default"
+
+# Qoder CLI
+[projects.agent.options]
+mode = "default"
+
+# OpenCode
+[projects.agent.options]
+mode = "default"
+
+# iFlow CLI
+[projects.agent.options]
+mode = "default"
+```
+
+在聊天中切换模式：
+
+```
+/mode          # 查看当前模式和所有可用模式
+/mode yolo     # 切换到 YOLO 模式
+/mode default  # 切换回默认模式
+```
+
+对于 Codex，也可以在聊天中切换推理强度：
+
+```
+/reasoning        # 查看当前推理强度和可用等级
+/reasoning high   # 切换到 high 推理强度
+/reasoning 3      # 用序号快速选择
+```
+
+## API Provider 管理
+
+支持在运行时切换不同的 API Provider（如 Anthropic 直连、中转服务、AWS Bedrock 等），无需重启服务。Provider 凭证通过环境变量注入 Agent 子进程，不会修改本地配置文件。
+
+### 配置 Provider
+
+**在 `config.toml` 中：**
+
+```toml
+[projects.agent.options]
+work_dir = "/path/to/project"
+provider = "anthropic"   # 当前激活的 provider 名称
+
+[[projects.agent.providers]]
+name = "anthropic"
+api_key = "sk-ant-xxx"
+
+[[projects.agent.providers]]
+name = "relay"
+api_key = "sk-xxx"
+base_url = "https://api.relay-service.com"
+model = "claude-sonnet-4-20250514"
+
+# 特殊环境（Bedrock、Vertex 等）使用 env 字段：
+[[projects.agent.providers]]
+name = "bedrock"
+env = { CLAUDE_CODE_USE_BEDROCK = "1", AWS_PROFILE = "bedrock" }
+```
+
+**通过 CLI 命令：**
+
+```bash
+cc-connect provider add --project my-backend --name relay --api-key sk-xxx --base-url https://api.relay.com
+cc-connect provider add --project my-backend --name bedrock --env CLAUDE_CODE_USE_BEDROCK=1,AWS_PROFILE=bedrock
+cc-connect provider list --project my-backend
+cc-connect provider remove --project my-backend --name relay
+```
+
+**从 [cc-switch](https://github.com/SaladDay/cc-switch-cli) 导入：**
+
+如果你已经使用 cc-switch 管理 Provider，一条命令即可导入（需要 `sqlite3`）：
+
+```bash
+cc-connect provider import --project my-backend
+cc-connect provider import --project my-backend --type claude     # 仅 Claude Provider
+cc-connect provider import --db-path ~/.cc-switch/cc-switch.db    # 指定数据库路径
+```
+
+### 在聊天中管理 Provider
+
+```
+/provider                   查看当前 Provider
+/provider list              列出所有可用 Provider
+/provider add <名称> <key> [url] [model]   添加 Provider
+/provider add {"name":"relay","api_key":"sk-xxx","base_url":"https://..."}
+/provider remove <名称>     移除 Provider
+/provider switch <名称>     切换 Provider
+/provider <名称>            switch 的快捷方式
+```
+
+添加、移除、切换操作均自动持久化到 `config.toml`。切换时会自动重启 Agent 会话并加载新凭证。
+
+**各 Agent 的环境变量映射：**
+
+| Agent | api_key → | base_url → |
+|-------|-----------|------------|
+| Claude Code | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
+| Codex | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
+| Gemini CLI | `GEMINI_API_KEY` | —（使用 `env` 字段）|
+| OpenCode | `ANTHROPIC_API_KEY` | —（使用 `env` 字段）|
+| iFlow CLI | `IFLOW_API_KEY` / `IFLOW_apiKey` | `IFLOW_BASE_URL` / `IFLOW_baseUrl` |
+
+Provider 配置中的 `env` 字段支持设置任意环境变量，可用于 Bedrock、Vertex、Azure、自定义代理等各种场景。
+
+## Claude Code Router 集成
+
+[Claude Code Router](https://github.com/musistudio/claude-code-router) 是一个强大的工具，可以将 Claude Code 请求路由到不同的模型提供商（OpenRouter、DeepSeek、Gemini 等），并支持自定义请求转换。cc-connect 现已支持与 Claude Code Router 无缝集成。
+
+### 为什么使用 Claude Code Router？
+
+- **多提供商支持**：路由请求到 OpenRouter、DeepSeek、Ollama、Gemini、火山引擎、SiliconFlow 等
+- **模型路由**：针对不同任务使用不同模型（后台任务、思考、长上下文、网络搜索）
+- **请求/响应转换**：自动适配不同提供商的 API
+- **动态模型切换**：无需重启即可切换模型
+
+### 安装配置
+
+1. **安装 Claude Code Router**：
+
+```bash
+npm install -g @musistudio/claude-code-router
+```
+
+2. **配置 Router**（创建 `~/.claude-code-router/config.json`）：
+
+```json
+{
+  "APIKEY": "your-secret-key",
+  "Providers": [
+    {
+      "name": "openrouter",
+      "api_base_url": "https://openrouter.ai/api/v1/chat/completions",
+      "api_key": "sk-xxx",
+      "models": ["anthropic/claude-sonnet-4", "google/gemini-2.5-pro-preview"],
+      "transformer": { "use": ["openrouter"] }
+    },
+    {
+      "name": "deepseek",
+      "api_base_url": "https://api.deepseek.com/chat/completions",
+      "api_key": "sk-xxx",
+      "models": ["deepseek-chat", "deepseek-reasoner"],
+      "transformer": { "use": ["deepseek"] }
+    }
+  ],
+  "Router": {
+    "default": "deepseek,deepseek-chat",
+    "think": "deepseek,deepseek-reasoner",
+    "longContext": "openrouter,google/gemini-2.5-pro-preview"
+  }
+}
+```
+
+3. **启动 Router**：
+
+```bash
+ccr start
+```
+
+4. **配置 cc-connect**（在 `config.toml` 中）：
+
+```toml
+[projects.agent.options]
+work_dir = "/path/to/project"
+mode = "default"
+
+# Router 集成
+router_url = "http://127.0.0.1:3456"        # Router URL（默认端口）
+router_api_key = "your-secret-key"          # 可选：如果 router 需要认证
+```
+
+### 工作原理
+
+配置 `router_url` 后，cc-connect 会自动：
+
+- 设置 `ANTHROPIC_BASE_URL` 为 router URL
+- 设置 `NO_PROXY=127.0.0.1` 防止代理干扰
+- 禁用遥测和成本警告以获得更清洁的集成
+
+所有 Claude Code 请求都会通过 router 路由，由 router 处理模型选择和提供商通信。
+
+### 使用方式
+
+配置完成后，像往常一样使用 cc-connect。Router 会透明地处理模型路由：
+
+```
+你：帮我重构这段代码
+Router → DeepSeek（默认模型）
+
+你：思考一下这个架构决策
+Router → DeepSeek Reasoner（思考模型）
+
+你：分析这个大型代码库
+Router → Gemini Pro（长上下文模型）
+```
+
+### 重要说明
+
+- **Provider 设置被忽略**：使用 router 时，`[[projects.agent.providers]]` 设置会被绕过，因为 router 管理模型选择
+- **Router 必须运行**：确保在启动 cc-connect 之前执行 `ccr start`
+- **配置更改**：修改 router 配置后，需要重启：`ccr restart`
+
+更多详情请参考 [Claude Code Router 文档](https://github.com/musistudio/claude-code-router)。
+
+## 语音消息（语音转文字）
+
+直接发送语音消息 — cc-connect 自动将语音转为文字，再将文字转发给 Agent 处理。
+
+**支持平台：** 飞书、企业微信、Telegram、LINE、Discord、Slack
+
+**前置条件：**
+- OpenAI 或 Groq 的 API Key（用于 Whisper 语音识别）
+- 安装 `ffmpeg`（用于音频格式转换 — 大部分平台语音格式为 AMR/OGG，Whisper 不直接支持）
+
+### 配置
+
+```toml
+[speech]
+enabled = true
+provider = "openai"    # "openai" 或 "groq"
+language = ""          # 如 "zh"、"en"；留空自动检测
+
+[speech.openai]
+api_key = "sk-xxx"     # OpenAI API Key
+# base_url = ""        # 自定义端点（可选，兼容 OpenAI 接口的服务）
+# model = "whisper-1"  # 默认模型
+
+# -- 或使用 Groq（更快更便宜） --
+# [speech.groq]
+# api_key = "gsk_xxx"
+# model = "whisper-large-v3-turbo"
+```
+
+### 工作原理
+
+1. 用户在任何支持的平台发送语音消息
+2. cc-connect 从平台下载音频文件
+3. 如需格式转换（AMR、OGG → MP3），由 `ffmpeg` 处理
+4. 音频发送至 Whisper API 进行转录
+5. 转录文字展示给用户，并转发给 Agent
+
+### 安装 ffmpeg
+
+```bash
+# Ubuntu / Debian
+sudo apt install ffmpeg
+
+# macOS
+brew install ffmpeg
+
+# Alpine
+apk add ffmpeg
+```
+
+## 定时任务 (Cron)
+
+创建定时任务，自动执行 — 比如每日代码审查、定期趋势汇总、每周报告等。定时任务触发时，cc-connect 将 prompt 发送给 Agent，并将结果回传到你的聊天会话中。
+
+### 通过斜杠命令管理
+
+```
+/cron                                          列出所有定时任务
+/cron add <分> <时> <日> <月> <周> <任务描述>      创建定时任务
+/cron del <id>                                 删除定时任务
+/cron enable <id>                              启用任务
+/cron disable <id>                             禁用任务
+```
+
+示例：
+
+```
+/cron add 0 6 * * * 帮我收集 GitHub trending 并发送总结
+```
+
+### 通过 CLI 管理
+
+```bash
+cc-connect cron add --cron "0 6 * * *" --prompt "总结 GitHub trending" --desc "每日趋势"
+cc-connect cron list
+cc-connect cron del <job-id>
+```
+
+### 自然语言创建定时任务（通过 Agent）
+
+**Claude Code** 开箱即用 — 直接用自然语言告诉它：
+
+> "每天早上6点帮我总结 GitHub trending"
+> "每周一早上9点，生成周报"
+
+Claude Code 会通过 `--append-system-prompt` 自动将你的请求转为 `cc-connect cron add` 命令。
+
+**其他 Agent**（Codex、Cursor、Gemini CLI、Qoder CLI、OpenCode、iFlow CLI）需要在项目根目录的 Agent 指令文件中添加说明，让 Agent 知道如何创建定时任务。将以下内容添加到对应文件中：
+
+| Agent | 指令文件 |
+|-------|---------|
+| Codex | `AGENTS.md` |
+| Cursor | `.cursorrules` |
+| Qoder CLI | `AGENTS.md`（项目级）、`~/.qoder/AGENTS.md`（全局） |
+| Gemini CLI | `GEMINI.md` |
+| OpenCode | `OPENCODE.md` |
+| iFlow CLI | `IFLOW.md` |
+
+**需要添加的内容：**
+
+```markdown
+# cc-connect Integration
+
+This project is managed via cc-connect, a bridge to messaging platforms.
+
+## Scheduled tasks (cron)
+When the user asks you to do something on a schedule (e.g. "every day at 6am",
+"每天早上6点"), use the Bash/shell tool to run:
+
+  cc-connect cron add --cron "<min> <hour> <day> <month> <weekday>" --prompt "<task description>" --desc "<short label>"
+
+Environment variables CC_PROJECT and CC_SESSION_KEY are already set — do NOT
+specify --project or --session-key.
+
+Examples:
+  cc-connect cron add --cron "0 6 * * *" --prompt "Collect GitHub trending repos and send a summary" --desc "Daily GitHub Trending"
+  cc-connect cron add --cron "0 9 * * 1" --prompt "Generate a weekly project status report" --desc "Weekly Report"
+
+To list or delete cron jobs:
+  cc-connect cron list
+  cc-connect cron del <job-id>
+
+## Send message to current chat
+To proactively send a message back to the user's chat session (use --stdin heredoc for long/multi-line messages):
+
+  cc-connect send --stdin <<'CCEOF'
+  your message here (any special characters are safe)
+  CCEOF
+
+For short single-line messages:
+
+  cc-connect send -m "short message"
+```
+
+## 守护进程模式
+
+将 cc-connect 作为后台服务运行，由系统 init 管理（Linux systemd 用户服务，macOS launchd LaunchAgent）。
+
+```bash
+cc-connect daemon install --config ~/.cc-connect/config.toml   # 安装服务
+cc-connect daemon install --work-dir ~/.cc-connect             # 等价写法：指定配置目录
+cc-connect daemon start
+cc-connect daemon stop
+cc-connect daemon restart
+cc-connect daemon status
+cc-connect daemon logs [-f] [-n N] [--log-file PATH]
+cc-connect daemon uninstall
+```
+
+**install 参数：** `--config PATH`、`--log-file PATH`、`--log-max-size N`（MB）、`--work-dir DIR`、`--force`。`--config` 传入配置文件路径，`--work-dir` 传入包含 `config.toml` 的目录。日志在达到大小限制时自动轮转，保留 1 个备份。
+
+## 会话管理
+
+每个用户拥有独立的会话和完整的对话上下文。通过斜杠命令管理会话：
 
 ```
 /new [名称]            创建新会话
@@ -258,6 +864,78 @@ cc-connect update --pre     # Beta 版（含 pre-release）
 - [config.example.toml](config.example.toml) — 配置模板
 
 ---
+
+## 扩展开发
+
+### 添加新平台
+
+实现 `core.Platform` 接口并注册：
+
+```go
+package myplatform
+
+import "github.com/chenhg5/cc-connect/core"
+
+func init() {
+    core.RegisterPlatform("myplatform", New)
+}
+
+func New(opts map[string]any) (core.Platform, error) {
+    return &MyPlatform{}, nil
+}
+
+// 实现 Name(), Start(), Reply(), Send(), Stop() 方法
+```
+
+然后在 `cmd/cc-connect/main.go` 中添加空导入：
+
+```go
+_ "github.com/chenhg5/cc-connect/platform/myplatform"
+```
+
+### 添加新 Agent
+
+实现 `core.Agent` 接口并注册，方式与平台相同。
+
+## 项目结构
+
+```
+cc-connect/
+├── cmd/cc-connect/          # 程序入口
+│   └── main.go
+├── core/                    # 核心抽象层
+│   ├── interfaces.go        # Platform + Agent 接口定义
+│   ├── registry.go          # 工厂注册表（插件化）
+│   ├── message.go           # 统一消息/事件类型
+│   ├── session.go           # 多会话管理
+│   ├── i18n.go              # 国际化（中/英）
+│   ├── speech.go            # 语音转文字（Whisper API + ffmpeg）
+│   └── engine.go            # 路由引擎 + 斜杠命令
+├── platform/                # 平台适配器
+│   ├── feishu/              # 飞书（WebSocket 长连接）
+│   ├── dingtalk/            # 钉钉（Stream 模式）
+│   ├── telegram/            # Telegram（Long Polling）
+│   ├── slack/               # Slack（Socket Mode）
+│   ├── discord/             # Discord（Gateway WebSocket）
+│   ├── line/                # LINE（HTTP Webhook）
+│   ├── wecom/               # 企业微信（HTTP Webhook）
+│   ├── ruliu/               # 如流（企业自定义机器人 Webhook）
+│   ├── qq/                  # QQ（NapCat / OneBot v11 WebSocket）
+│   └── qqbot/               # QQ 官方机器人（Official API v2 WebSocket）
+├── agent/                   # AI 助手适配器
+│   ├── claudecode/          # Claude Code CLI（交互式会话）
+│   ├── codex/               # OpenAI Codex CLI（exec --json）
+│   ├── cursor/              # Cursor Agent CLI（--print stream-json）
+│   ├── qoder/               # Qoder CLI（-p -f stream-json）
+│   ├── gemini/              # Gemini CLI（-p --output-format stream-json）
+│   ├── opencode/            # OpenCode（run --format json）
+│   └── iflow/               # iFlow CLI（-p, -r, -o）
+├── docs/                    # 平台接入指南
+├── config.example.toml      # 配置模板
+├── INSTALL.md               # AI agent 友好的安装配置指南
+├── Makefile
+└── README.md
+```
 
 ## 👥 社区
 

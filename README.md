@@ -57,7 +57,7 @@
 **7 AI Agents** — Claude Code, Codex, Cursor Agent, Qoder CLI, Gemini CLI, OpenCode, iFlow CLI. Use whichever fits your workflow, or all of them at once.
 
 ### 📱 Platform Flexibility
-**9 Chat Platforms** — Feishu, DingTalk, Slack, Telegram, Discord, WeChat Work, LINE, QQ, QQ Bot (Official). Most need **zero public IP**.
+**10 Chat Platforms** — Feishu, DingTalk, Slack, Telegram, Discord, WeChat Work, Ruliu, LINE, QQ, QQ Bot (Official). Most need **zero public IP**.
 
 ### 🔄 Multi-Agent Orchestration
 **Multi-Bot Relay** — Bind multiple bots in a group chat and let them communicate with each other. Ask Claude, get insights from Gemini — all in one conversation.
@@ -190,6 +190,7 @@ cc-connect update --pre     # Beta (includes pre-releases)
 | Platform | Discord | ✅ Gateway — no public IP needed |
 | Platform | LINE | ✅ Webhook — public URL required |
 | Platform | WeChat Work | ✅ WebSocket / Webhook |
+| Platform | Ruliu (Hi Enterprise) | ✅ Webhook — public URL or enterprise gateway required |
 | Platform | QQ (NapCat/OneBot) | ✅ WebSocket — Beta |
 | Platform | QQ Bot (Official) | ✅ WebSocket — no public IP needed |
 
@@ -204,8 +205,80 @@ cc-connect update --pre     # Beta (includes pre-releases)
 | Telegram | [docs/telegram.md](docs/telegram.md) | Long Polling | No |
 | Slack | [docs/slack.md](docs/slack.md) | Socket Mode | No |
 | Discord | [docs/discord.md](docs/discord.md) | Gateway | No |
+| LINE | [INSTALL.md](./INSTALL.md#line--requires-public-url) | Webhook | Yes |
 | WeChat Work | [docs/wecom.md](docs/wecom.md) | WebSocket / Webhook | No (WS) / Yes (Webhook) |
-| QQ / QQ Bot | [docs/qq.md](docs/qq.md) | WebSocket | No |
+| Ruliu (Hi Enterprise) | [docs/ruliu.md](docs/ruliu.md) | Webhook | Yes |
+| QQ (NapCat) | [docs/qq.md](docs/qq.md) | WebSocket (OneBot v11) | No |
+| QQ Bot (Official) | [docs/qqbot.md](docs/qqbot.md) | WebSocket (Official API) | No |
+
+### Ruliu Multi-Bot Setup (Multiple Robots in One Group)
+
+Ruliu requires a public callback URL per robot. If you run two robots (e.g. Codex + Claude Code) in the same group, use the built-in `proxy.go` to route both callback paths through a single port, then expose that port via ngrok or a reverse proxy.
+
+**Step 1 — Configure two projects with different ports and callback paths:**
+
+```toml
+# codex bot — listens on :8082/ruliu/callback
+[[projects]]
+name = "codex-ruliu"
+[projects.agent]
+type = "codex"
+[projects.agent.options]
+work_dir = "/path/to/project"
+mode = "full-auto"
+
+[[projects.platforms]]
+type = "ruliu"
+[projects.platforms.options]
+webhook = "https://openapi.im.baidu.com/your-codex-robot-webhook"
+token = "your-codex-token"
+encoding_aes_key = "your-22-char-key"
+port = "8082"
+share_session_in_group = true
+
+# claude code bot — listens on :8083/ruliu/callback
+[[projects]]
+name = "claudecode-ruliu"
+[projects.agent]
+type = "claudecode"
+[projects.agent.options]
+work_dir = "/path/to/project"
+mode = "default"
+
+[[projects.platforms]]
+type = "ruliu"
+[projects.platforms.options]
+webhook = "https://openapi.im.baidu.com/your-claude-robot-webhook"
+token = "your-claude-token"
+encoding_aes_key = "your-22-char-key"
+port = "8083"
+share_session_in_group = true
+```
+
+**Step 2 — Start cc-connect and the reverse proxy:**
+
+```bash
+# Start cc-connect
+./cc-connect
+
+# Start the built-in proxy (routes /ruliu/codex/* → :8082, /ruliu/cc/* → :8083)
+go run proxy.go
+```
+
+**Step 3 — Expose port 8080 via ngrok (free static domain):**
+
+```bash
+ngrok http 8080
+# or with your reserved static domain:
+ngrok http --url=your-static-domain.ngrok-free.dev 8080
+```
+
+**Step 4 — Set callback URLs in Ruliu admin console:**
+
+| Robot | Callback URL |
+|-------|-------------|
+| Codex | `https://your-domain.ngrok-free.dev/ruliu/codex/callback` |
+| Claude Code | `https://your-domain.ngrok-free.dev/ruliu/cc/callback` |
 
 ---
 
