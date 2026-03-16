@@ -1589,8 +1589,8 @@ app_secret = "your-feishu-app-secret"
 # ws_url     = "wss://bot-wss.yuanbao.tencent.com/wss/connection"         # optional / 可选
 # route_env  = "prod"                                                    # optional X-Route-Env / 可选路由头
 # allow_from = "*"                                                       # or "open_id_1,open_id_2"
-# Ruliu 自定义机器人 (Webhook)
 
+# Ruliu 自定义机器人 (Webhook)
 # 1. 在如流企业群添加机器人，复制生成的 Webhook 地址
 # 2. 在「接收消息服务器」设置页填写 URL/Token/EncodingAESKey，保存前先启动 cc-connect
 # 3. 确保如流系统能访问你暴露出去的回调 URL，并转发到本地 `http://127.0.0.1:8082/ruliu/callback`
