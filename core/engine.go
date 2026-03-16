@@ -2138,10 +2138,23 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		return true
 	default:
 		if custom, ok := e.commands.Resolve(cmd); ok {
+			if disabledCmds[strings.ToLower(custom.Name)] {
+				slog.Info("audit: command_blocked",
+					"user_id", msg.UserID, "platform", msg.Platform,
+					"project", e.name, "command", custom.Name, "reason", "disabled")
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandDisabled), "/"+custom.Name))
+				return true
+			}
+			slog.Info("audit: command_executed",
+				"user_id", msg.UserID, "platform", msg.Platform,
+				"project", e.name, "command", custom.Name, "type", "custom")
 			e.executeCustomCommand(p, msg, custom, args)
 			return true
 		}
 		if skill := e.skills.Resolve(cmd); skill != nil {
+			slog.Info("audit: command_executed",
+				"user_id", msg.UserID, "platform", msg.Platform,
+				"project", e.name, "command", skill.Name, "type", "skill")
 			e.executeSkill(p, msg, skill, args)
 			return true
 		}

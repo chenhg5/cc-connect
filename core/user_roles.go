@@ -218,10 +218,11 @@ func ValidateRoleInputs(defaultRole string, roles []RoleInput) error {
 				wildcardCount++
 				continue
 			}
-			if prev, dup := seenUserIDs[uid]; dup {
+			lower := strings.ToLower(uid)
+			if prev, dup := seenUserIDs[lower]; dup {
 				return fmt.Errorf("user %q appears in both role %q and %q", uid, prev, ri.Name)
 			}
-			seenUserIDs[uid] = ri.Name
+			seenUserIDs[lower] = ri.Name
 		}
 	}
 	if wildcardCount > 1 {

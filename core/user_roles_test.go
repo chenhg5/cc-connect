@@ -265,6 +265,16 @@ func TestValidateRoleInputs_EmptyUserIDs(t *testing.T) {
 	}
 }
 
+func TestValidateRoleInputs_CaseInsensitiveDuplicate(t *testing.T) {
+	err := ValidateRoleInputs("admin", []RoleInput{
+		{Name: "admin", UserIDs: []string{"User1"}},
+		{Name: "member", UserIDs: []string{"user1"}},
+	})
+	if err == nil {
+		t.Error("expected error for case-insensitive duplicate user IDs")
+	}
+}
+
 func TestValidateRoleInputs_Valid(t *testing.T) {
 	err := ValidateRoleInputs("member", testRoles())
 	if err != nil {

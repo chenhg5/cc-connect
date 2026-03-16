@@ -649,6 +649,36 @@ func TestEngine_RoleBasedACL_NoUsersConfig_Legacy(t *testing.T) {
 	}
 }
 
+func TestEngine_CustomCommand_DisabledByRole(t *testing.T) {
+	e := newTestEngine()
+	e.commands.Add("deploy", "deploy command", "deploy it", "", "", "test")
+
+	urm := NewUserRoleManager()
+	urm.Configure("member", []RoleInput{
+		{Name: "admin", UserIDs: []string{"admin1"}, DisabledCommands: []string{}},
+		{Name: "member", UserIDs: []string{"*"}, DisabledCommands: []string{"deploy"}},
+	})
+	e.SetUserRoles(urm)
+
+	// Member should be blocked from custom command
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "test:u1", UserID: "user1", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, "/deploy")
+
+	if len(p.sent) != 1 || (!strings.Contains(p.sent[0], "disabled") && !strings.Contains(p.sent[0], "禁用")) {
+		t.Errorf("custom command should be blocked for member, got: %v", p.sent)
+	}
+
+	// Admin should be allowed
+	p2 := &stubPlatformEngine{n: "test"}
+	msg2 := &Message{SessionKey: "test:a1", UserID: "admin1", ReplyCtx: "ctx"}
+	e.handleCommand(p2, msg2, "/deploy")
+
+	if len(p2.sent) > 0 && (strings.Contains(p2.sent[0], "disabled") || strings.Contains(p2.sent[0], "禁用")) {
+		t.Errorf("custom command should be allowed for admin, got: %v", p2.sent)
+	}
+}
+
 // --- role-based rate limit tests ---
 
 func TestEngine_RateLimit_RoleSpecific(t *testing.T) {

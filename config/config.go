@@ -292,10 +292,11 @@ func validateUsersConfig(prefix string, u *UsersConfig) error {
 				wildcardCount++
 				continue
 			}
-			if prev, dup := seenUserIDs[uid]; dup {
+			lower := strings.ToLower(uid)
+			if prev, dup := seenUserIDs[lower]; dup {
 				return fmt.Errorf("config: %s.users: user %q appears in both role %q and %q", prefix, uid, prev, roleName)
 			}
-			seenUserIDs[uid] = roleName
+			seenUserIDs[lower] = roleName
 		}
 	}
 	if wildcardCount > 1 {
