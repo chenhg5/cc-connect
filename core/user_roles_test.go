@@ -215,3 +215,59 @@ func TestUserRoleManager_Snapshot_Nil(t *testing.T) {
 		t.Error("nil manager snapshot should have configured=false")
 	}
 }
+
+func TestUserRoleManager_ResolveRole_EmptyUserID(t *testing.T) {
+	m := NewUserRoleManager()
+	m.Configure("member", testRoles())
+
+	// Empty userID should still resolve to default/wildcard role
+	role := m.ResolveRole("")
+	if role == nil || role.Name != "member" {
+		t.Errorf("empty userID should resolve to default role, got %+v", role)
+	}
+}
+
+func TestValidateRoleInputs_DuplicateUserIDs(t *testing.T) {
+	err := ValidateRoleInputs("admin", []RoleInput{
+		{Name: "admin", UserIDs: []string{"user1"}},
+		{Name: "member", UserIDs: []string{"user1"}},
+	})
+	if err == nil {
+		t.Error("expected error for duplicate user IDs")
+	}
+}
+
+func TestValidateRoleInputs_MultipleWildcards(t *testing.T) {
+	err := ValidateRoleInputs("admin", []RoleInput{
+		{Name: "admin", UserIDs: []string{"*"}},
+		{Name: "member", UserIDs: []string{"*"}},
+	})
+	if err == nil {
+		t.Error("expected error for multiple wildcards")
+	}
+}
+
+func TestValidateRoleInputs_InvalidDefaultRole(t *testing.T) {
+	err := ValidateRoleInputs("nonexistent", []RoleInput{
+		{Name: "admin", UserIDs: []string{"user1"}},
+	})
+	if err == nil {
+		t.Error("expected error for invalid default_role")
+	}
+}
+
+func TestValidateRoleInputs_EmptyUserIDs(t *testing.T) {
+	err := ValidateRoleInputs("admin", []RoleInput{
+		{Name: "admin", UserIDs: []string{}},
+	})
+	if err == nil {
+		t.Error("expected error for empty user_ids")
+	}
+}
+
+func TestValidateRoleInputs_Valid(t *testing.T) {
+	err := ValidateRoleInputs("member", testRoles())
+	if err != nil {
+		t.Errorf("expected no error for valid config, got %v", err)
+	}
+}

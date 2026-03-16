@@ -237,36 +237,7 @@ func main() {
 
 		// Wire per-user role-based policies
 		if proj.Users != nil {
-			urm := core.NewUserRoleManager()
-			var roles []core.RoleInput
-			for name, rc := range proj.Users.Roles {
-				var rlCfg *core.RateLimitCfg
-				if rc.RateLimit != nil {
-					maxMsg, windowSecs := 20, 60
-					if rc.RateLimit.MaxMessages != nil {
-						maxMsg = *rc.RateLimit.MaxMessages
-					}
-					if rc.RateLimit.WindowSecs != nil {
-						windowSecs = *rc.RateLimit.WindowSecs
-					}
-					rlCfg = &core.RateLimitCfg{
-						MaxMessages: maxMsg,
-						Window:      time.Duration(windowSecs) * time.Second,
-					}
-				}
-				roles = append(roles, core.RoleInput{
-					Name:             name,
-					UserIDs:          rc.UserIDs,
-					DisabledCommands: rc.DisabledCommands,
-					RateLimit:        rlCfg,
-				})
-			}
-			defaultRole := "member"
-			if proj.Users.DefaultRole != "" {
-				defaultRole = proj.Users.DefaultRole
-			}
-			urm.Configure(defaultRole, roles)
-			engine.SetUserRoles(urm)
+			engine.SetUserRoles(buildUserRoleManager(proj.Users))
 		}
 
 		// Wire display truncation settings
@@ -953,42 +924,46 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 
 	// Reload per-user role-based policies
 	if proj.Users != nil {
-		urm := core.NewUserRoleManager()
-		var roles []core.RoleInput
-		for name, rc := range proj.Users.Roles {
-			var rlCfg *core.RateLimitCfg
-			if rc.RateLimit != nil {
-				maxMsg, windowSecs := 20, 60
-				if rc.RateLimit.MaxMessages != nil {
-					maxMsg = *rc.RateLimit.MaxMessages
-				}
-				if rc.RateLimit.WindowSecs != nil {
-					windowSecs = *rc.RateLimit.WindowSecs
-				}
-				rlCfg = &core.RateLimitCfg{
-					MaxMessages: maxMsg,
-					Window:      time.Duration(windowSecs) * time.Second,
-				}
-			}
-			roles = append(roles, core.RoleInput{
-				Name:             name,
-				UserIDs:          rc.UserIDs,
-				DisabledCommands: rc.DisabledCommands,
-				RateLimit:        rlCfg,
-			})
-		}
-		defaultRole := "member"
-		if proj.Users.DefaultRole != "" {
-			defaultRole = proj.Users.DefaultRole
-		}
-		urm.Configure(defaultRole, roles)
-		engine.SetUserRoles(urm)
+		engine.SetUserRoles(buildUserRoleManager(proj.Users))
 	} else {
 		engine.SetUserRoles(nil)
 	}
 
 	slog.Info("config reloaded", "project", projName)
 	return result, nil
+}
+
+func buildUserRoleManager(uc *config.UsersConfig) *core.UserRoleManager {
+	var roles []core.RoleInput
+	for name, rc := range uc.Roles {
+		var rlCfg *core.RateLimitCfg
+		if rc.RateLimit != nil {
+			maxMsg, windowSecs := 20, 60
+			if rc.RateLimit.MaxMessages != nil {
+				maxMsg = *rc.RateLimit.MaxMessages
+			}
+			if rc.RateLimit.WindowSecs != nil {
+				windowSecs = *rc.RateLimit.WindowSecs
+			}
+			rlCfg = &core.RateLimitCfg{
+				MaxMessages: maxMsg,
+				Window:      time.Duration(windowSecs) * time.Second,
+			}
+		}
+		roles = append(roles, core.RoleInput{
+			Name:             name,
+			UserIDs:          rc.UserIDs,
+			DisabledCommands: rc.DisabledCommands,
+			RateLimit:        rlCfg,
+		})
+	}
+	defaultRole := "member"
+	if uc.DefaultRole != "" {
+		defaultRole = uc.DefaultRole
+	}
+	urm := core.NewUserRoleManager()
+	urm.Configure(defaultRole, roles)
+	return urm
 }
 
 func buildHeartbeatConfig(hc config.HeartbeatConfig) core.HeartbeatConfig {

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -196,6 +197,42 @@ func (m *UserRoleManager) Snapshot() map[string]any {
 		"default_role": m.defaultRole,
 		"roles":        roles,
 	}
+}
+
+// ValidateRoleInputs checks role inputs for consistency: duplicate user IDs,
+// multiple wildcards, empty user_ids, and default_role existence.
+func ValidateRoleInputs(defaultRole string, roles []RoleInput) error {
+	if len(roles) == 0 {
+		return fmt.Errorf("no roles defined")
+	}
+	wildcardCount := 0
+	seenUserIDs := make(map[string]string) // userID → role name
+	roleNames := make(map[string]bool, len(roles))
+	for _, ri := range roles {
+		roleNames[ri.Name] = true
+		if len(ri.UserIDs) == 0 {
+			return fmt.Errorf("role %q has empty user_ids", ri.Name)
+		}
+		for _, uid := range ri.UserIDs {
+			if uid == "*" {
+				wildcardCount++
+				continue
+			}
+			if prev, dup := seenUserIDs[uid]; dup {
+				return fmt.Errorf("user %q appears in both role %q and %q", uid, prev, ri.Name)
+			}
+			seenUserIDs[uid] = ri.Name
+		}
+	}
+	if wildcardCount > 1 {
+		return fmt.Errorf("wildcard user_ids=[\"*\"] appears in multiple roles")
+	}
+	if defaultRole != "" {
+		if !roleNames[defaultRole] {
+			return fmt.Errorf("default_role %q does not match any defined role", defaultRole)
+		}
+	}
+	return nil
 }
 
 // Stop terminates all per-role rate limiter goroutines. Nil-receiver safe.

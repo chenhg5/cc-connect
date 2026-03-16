@@ -613,13 +613,15 @@ func TestEngine_RoleBasedACL_MemberBlocked(t *testing.T) {
 	}
 }
 
-func TestEngine_RoleBasedACL_NoUserID_Fallback(t *testing.T) {
+func TestEngine_RoleBasedACL_NoUserID_UsesDefaultRole(t *testing.T) {
 	e := newTestEngine()
 	e.SetDisabledCommands([]string{"help"}) // project-level disables /help
 
+	// Default role "member" has wildcard with disabled_commands=["*"]
 	urm := NewUserRoleManager()
 	urm.Configure("member", []RoleInput{
-		{Name: "member", UserIDs: []string{"*"}, DisabledCommands: []string{}},
+		{Name: "admin", UserIDs: []string{"admin1"}, DisabledCommands: []string{}},
+		{Name: "member", UserIDs: []string{"*"}, DisabledCommands: []string{"*"}},
 	})
 	e.SetUserRoles(urm)
 
@@ -627,9 +629,9 @@ func TestEngine_RoleBasedACL_NoUserID_Fallback(t *testing.T) {
 	msg := &Message{SessionKey: "test:anon", UserID: "", ReplyCtx: "ctx"} // no UserID
 	e.handleCommand(p, msg, "/help")
 
-	// No UserID → falls back to project-level disabledCmds which has /help disabled
+	// Empty UserID resolves to default/wildcard role, which disables all commands
 	if len(p.sent) != 1 || (!strings.Contains(p.sent[0], "disabled") && !strings.Contains(p.sent[0], "禁用")) {
-		t.Errorf("empty UserID should use project-level disabled_commands, got: %v", p.sent)
+		t.Errorf("empty UserID should resolve to default role ACL, got: %v", p.sent)
 	}
 }
 

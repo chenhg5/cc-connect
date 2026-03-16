@@ -468,7 +468,10 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 func (m *ManagementServer) handleProjectUsers(w http.ResponseWriter, r *http.Request, e *Engine) {
 	switch r.Method {
 	case http.MethodGet:
-		mgmtJSON(w, http.StatusOK, e.userRoles.Snapshot())
+		e.userRolesMu.RLock()
+		urm := e.userRoles
+		e.userRolesMu.RUnlock()
+		mgmtJSON(w, http.StatusOK, urm.Snapshot())
 
 	case http.MethodPatch:
 		var body struct {
@@ -511,6 +514,11 @@ func (m *ManagementServer) handleProjectUsers(w http.ResponseWriter, r *http.Req
 		defaultRole := body.DefaultRole
 		if defaultRole == "" {
 			defaultRole = "member"
+		}
+
+		if err := ValidateRoleInputs(defaultRole, roles); err != nil {
+			mgmtError(w, http.StatusBadRequest, "invalid users config: "+err.Error())
+			return
 		}
 
 		urm := NewUserRoleManager()
