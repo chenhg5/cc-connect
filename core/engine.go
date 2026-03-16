@@ -170,6 +170,7 @@ type Engine struct {
 	// Multi-workspace mode
 	multiWorkspace    bool
 	baseDir           string
+	skipGit           bool
 	workspaceBindings *WorkspaceBindingManager
 	workspacePool     *workspacePool
 	initFlows         map[string]*workspaceInitFlow // channelID → init state
@@ -327,6 +328,10 @@ func (e *Engine) SetDisplayConfig(cfg DisplayCfg) {
 // SetDefaultQuiet sets whether new sessions start in quiet mode.
 func (e *Engine) SetDefaultQuiet(q bool) {
 	e.defaultQuiet = q
+}
+
+func (e *Engine) SetSkipGit(skipGit bool) {
+	e.skipGit = skipGit
 }
 
 // SetInjectSender controls whether sender identity (platform and user ID) is
@@ -7490,13 +7495,24 @@ func (e *Engine) handleWorkspaceInitFlow(p Platform, msg *Message, channelID, ch
 		if strings.HasPrefix(content, "/") {
 			return false
 		}
+		replyMessage := e.i18n.T(MsgWsNotFoundHint)
 		e.initFlowsMu.Lock()
-		e.initFlows[channelID] = &workspaceInitFlow{
-			state:       "awaiting_url",
-			channelName: channelName,
+		if e.skipGit {
+			cloneTo := filepath.Join(e.baseDir, channelName)
+			e.initFlows[channelID] = &workspaceInitFlow{
+				state:       "awaiting_confirm",
+				channelName: channelName,
+				cloneTo:     cloneTo,
+			}
+			replyMessage = fmt.Sprintf("I'll mkdir `%s` and bind it to this channel. OK? (yes/no)", channelName)
+		} else {
+			e.initFlows[channelID] = &workspaceInitFlow{
+				state:       "awaiting_url",
+				channelName: channelName,
+			}
 		}
 		e.initFlowsMu.Unlock()
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsNotFoundHint))
+		e.reply(p, msg.ReplyCtx, replyMessage)
 		return true
 	}
 
@@ -7529,13 +7545,21 @@ func (e *Engine) handleWorkspaceInitFlow(p Platform, msg *Message, channelID, ch
 			return true
 		}
 
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf("Cloning `%s` to `%s`...", flow.repoURL, flow.cloneTo))
-
-		if err := gitClone(flow.repoURL, flow.cloneTo); err != nil {
+		var err error
+		var message string
+		if e.skipGit {
+			err = os.MkdirAll(flow.cloneTo, 0o755)
+			message = fmt.Sprintf("mkdir failed: %v", err)
+		} else {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("Cloning `%s` to `%s`...", flow.repoURL, flow.cloneTo))
+			err = gitClone(flow.repoURL, flow.cloneTo)
+			message = fmt.Sprintf("Clone failed: %v\nSend a repo URL to try again.", err)
+		}
+		if err != nil {
 			e.initFlowsMu.Lock()
 			delete(e.initFlows, channelID)
 			e.initFlowsMu.Unlock()
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf("Clone failed: %v\nSend a repo URL to try again.", err))
+			e.reply(p, msg.ReplyCtx, message)
 			return true
 		}
 
