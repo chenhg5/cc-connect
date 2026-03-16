@@ -394,10 +394,11 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 
 		msg := &core.Message{
 			SessionKey: sessionKey, Platform: "discord",
+			ChannelID: m.ChannelID,
 			MessageID: m.ID,
 			UserID:    m.Author.ID, UserName: m.Author.Username,
 			ChatName: p.resolveChannelName(m.ChannelID),
-			Content: m.Content, Images: images, Audio: audio, ReplyCtx: rctx,
+			Content:  m.Content, Images: images, Audio: audio, ReplyCtx: rctx,
 		}
 		p.handler(p, msg)
 	})
@@ -462,9 +463,10 @@ func (p *Platform) handleInteraction(s *discordgo.Session, i *discordgo.Interact
 	msg := &core.Message{
 		SessionKey: sessionKey, Platform: "discord",
 		MessageID: i.ID,
+		ChannelID: i.ChannelID,
 		UserID:    userID, UserName: userName,
 		ChatName: p.resolveChannelName(channelID),
-		Content: cmdText, ReplyCtx: ictx,
+		Content:  cmdText, ReplyCtx: ictx,
 	}
 	p.handler(p, msg)
 }
