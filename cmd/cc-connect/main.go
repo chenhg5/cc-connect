@@ -165,9 +165,17 @@ func main() {
 			}
 			opts["cc_data_dir"] = cfg.DataDir
 			opts["cc_project"] = proj.Name
-			// Add proxy config if present
+			// Add proxy config if present - convert to map[string]any
 			if pc.Proxy != nil {
-				opts["proxy"] = pc.Proxy
+				slog.Info("main: adding proxy to opts", "platform", pc.Type, "proxy_type", pc.Proxy.Type, "proxy_addr", pc.Proxy.Addr)
+				opts["proxy"] = map[string]any{
+					"type":     pc.Proxy.Type,
+					"addr":     pc.Proxy.Addr,
+					"username": pc.Proxy.Username,
+					"password": pc.Proxy.Password,
+				}
+			} else {
+				slog.Info("main: no proxy config for platform", "platform", pc.Type)
 			}
 			p, err := core.CreatePlatform(pc.Type, opts)
 			if err != nil {
