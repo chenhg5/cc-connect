@@ -72,12 +72,9 @@ jobs:
           echo "=== Building for ${{ matrix.display }} ==="
 
           BINARY_NAME="cc-connect"
-          if [ "$GOOS" = "windows" ]; then
-            BINARY_NAME="cc-connect.exe"
-          fi
-
           OUTPUT_NAME="cc-connect-${VERSION_NO_V}-${GOOS}-${GOARCH}"
           if [ "$GOOS" = "windows" ]; then
+            BINARY_NAME="cc-connect.exe"
             OUTPUT_NAME="${OUTPUT_NAME}.exe"
           fi
 
@@ -86,26 +83,18 @@ jobs:
             -X main.commit=${COMMIT} \
             -X main.buildTime=${BUILD_TIME}"
 
-          go build -ldflags "$LDFLAGS" -o "$OUTPUT_NAME" ./cmd/cc-connect
-          ls -lh "$OUTPUT_NAME"
+          go build -ldflags "$LDFLAGS" -o "$BINARY_NAME" ./cmd/cc-connect
 
-          # 打包
-          if [ "$GOOS" = "windows" ]; then
-            zip "${OUTPUT_NAME}.zip" "$OUTPUT_NAME"
-            echo "Created: ${OUTPUT_NAME}.zip"
-            ls -lh "${OUTPUT_NAME}.zip"
-          else
-            tar czf "${OUTPUT_NAME}.tar.gz" "$OUTPUT_NAME"
-            echo "Created: ${OUTPUT_NAME}.tar.gz"
-            ls -lh "${OUTPUT_NAME}.tar.gz"
-          fi
+          # 统一使用 zip 格式打包
+          zip "${OUTPUT_NAME}.zip" "$BINARY_NAME"
+          echo "Created: ${OUTPUT_NAME}.zip"
+          ls -lh "${OUTPUT_NAME}.zip"
 
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v1
         with:
-          files: |
-            ${{ matrix.goos == 'windows' && 'cc-connect-*.zip' || 'cc-connect-*.tar.gz' }}
-          generate_release_notes: false
-          fail_on_unmatched_files: true
+          files: cc-connect-*.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
