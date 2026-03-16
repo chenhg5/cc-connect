@@ -42,23 +42,23 @@ type interactionReplyCtx struct {
 }
 
 type Platform struct {
-	token                 string
-	allowFrom             string
-	guildID               string // optional: per-guild registration (instant) vs global (up to 1h propagation)
-	groupReplyAll         bool
-	shareSessionInChannel bool
-	threadIsolation       bool
+	token                      string
+	allowFrom                  string
+	guildID                    string // optional: per-guild registration (instant) vs global (up to 1h propagation)
+	groupReplyAll              bool
+	shareSessionInChannel      bool
+	threadIsolation            bool
 	respondToAtEveryoneAndHere bool
-	httpClient            *http.Client      // optional HTTP client for proxy
-	proxyConfig           *core.ProxyConfig // proxy configuration for WebSocket dialer
-	session               *discordgo.Session
-	handler               core.MessageHandler
-	botID                 string
-	appID                 string
-	channelNameCache      sync.Map // channelID -> name
-	botRoleIDs            sync.Map // guildID -> bot managed role ID
-	readyCh               chan struct{}
-	seenMsgs              sync.Map // message ID dedup: prevents duplicate MessageCreate events
+	httpClient                 *http.Client      // optional HTTP client for proxy
+	proxyConfig                *core.ProxyConfig // proxy configuration for WebSocket dialer
+	session                    *discordgo.Session
+	handler                    core.MessageHandler
+	botID                      string
+	appID                      string
+	channelNameCache           sync.Map // channelID -> name
+	botRoleIDs                 sync.Map // guildID -> bot managed role ID
+	readyCh                    chan struct{}
+	seenMsgs                   sync.Map // message ID dedup: prevents duplicate MessageCreate events
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -106,16 +106,16 @@ func New(opts map[string]any) (core.Platform, error) {
 	}
 
 	return &Platform{
-		token:                 token,
-		allowFrom:             allowFrom,
-		guildID:               guildID,
-		groupReplyAll:         groupReplyAll,
-		shareSessionInChannel: shareSessionInChannel,
+		token:                      token,
+		allowFrom:                  allowFrom,
+		guildID:                    guildID,
+		groupReplyAll:              groupReplyAll,
+		shareSessionInChannel:      shareSessionInChannel,
 		respondToAtEveryoneAndHere: respondToAtEveryoneAndHere,
-		httpClient:            httpClient,
-		proxyConfig:           proxyConfig,
-		readyCh:               make(chan struct{}),
-		threadIsolation:       threadIsolation,
+		httpClient:                 httpClient,
+		proxyConfig:                proxyConfig,
+		readyCh:                    make(chan struct{}),
+		threadIsolation:            threadIsolation,
 	}, nil
 }
 
@@ -494,7 +494,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		for _, att := range m.Attachments {
 			ct := strings.ToLower(att.ContentType)
 			if strings.HasPrefix(ct, "audio/") {
-				data, err := downloadURL(att.URL)
+				data, err := p.downloadURL(att.URL)
 				if err != nil {
 					slog.Error("discord: download audio failed", "url", att.URL, "error", err)
 					continue
@@ -507,7 +507,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 					MimeType: ct, Data: data, Format: format,
 				}
 			} else if att.Width > 0 && att.Height > 0 {
-				data, err := downloadURL(att.URL)
+				data, err := p.downloadURL(att.URL)
 				if err != nil {
 					slog.Error("discord: download attachment failed", "url", att.URL, "error", err)
 					continue
@@ -1000,8 +1000,12 @@ func (p *Platform) resolveBotRoleIDForGuild(s *discordgo.Session, guildID string
 	return "", nil
 }
 
-func downloadURL(u string) ([]byte, error) {
-	resp, err := core.HTTPClient.Get(u)
+func (p *Platform) downloadURL(u string) ([]byte, error) {
+	client := core.HTTPClient
+	if p.httpClient != nil {
+		client = p.httpClient
+	}
+	resp, err := client.Get(u)
 	if err != nil {
 		return nil, err
 	}
@@ -1011,4 +1015,3 @@ func downloadURL(u string) ([]byte, error) {
 	}
 	return io.ReadAll(resp.Body)
 }
-

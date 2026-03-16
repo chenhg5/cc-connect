@@ -116,11 +116,11 @@ type Platform struct {
 	userNameCache         sync.Map // open_id -> display name
 	chatNameCache         sync.Map // chat_id -> chat name
 	// Webhook mode fields (for Lark international version)
-	server         *http.Server
-	port           string
-	callbackPath   string
-	encryptKey     string
-	eventHandler   *dispatcher.EventDispatcher
+	server       *http.Server
+	port         string
+	callbackPath string
+	encryptKey   string
+	eventHandler *dispatcher.EventDispatcher
 }
 
 type interactivePlatform struct {

@@ -33,7 +33,7 @@ type Platform struct {
 	appToken              string
 	allowFrom             string
 	shareSessionInChannel bool
-	httpClient           *http.Client // optional HTTP client for proxy
+	httpClient            *http.Client // optional HTTP client for proxy
 	client                *slack.Client
 	socket                *socketmode.Client
 	handler               core.MessageHandler
@@ -71,7 +71,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		appToken:              appToken,
 		allowFrom:             allowFrom,
 		shareSessionInChannel: shareSessionInChannel,
-		httpClient:           httpClient,
+		httpClient:            httpClient,
 		channelNameCache:      make(map[string]string),
 	}, nil
 }
@@ -184,7 +184,7 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 				msg := &core.Message{
 					SessionKey: sessionKey, Platform: "slack",
 					UserID: ev.User, UserName: p.resolveUserName(ev.User),
-					ChatName: p.resolveChannelNameForMsg(ev.Channel),
+					ChatName:  p.resolveChannelNameForMsg(ev.Channel),
 					Content:   stripAppMentionText(ev.Text),
 					MessageID: ev.TimeStamp,
 					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: ev.TimeStamp},
@@ -271,9 +271,9 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					SessionKey: sessionKey, Platform: "slack",
 					UserID: ev.User, UserName: p.resolveUserName(ev.User),
 					ChatName: p.resolveChannelNameForMsg(ev.Channel),
-					Content: ev.Text, Images: images, Audio: audio,
+					Content:  ev.Text, Images: images, Audio: audio,
 					MessageID: ts,
-					ReplyCtx: replyContext{channel: ev.Channel, timestamp: ts},
+					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: ts},
 				}
 				p.handler(p, msg)
 			}
@@ -382,10 +382,10 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 	}
 
 	_, err := p.client.UploadFileV2Context(ctx, slack.UploadFileV2Parameters{
-		Reader:         bytes.NewReader(img.Data),
-		FileSize:       len(img.Data),
-		Filename:       name,
-		Channel:        rc.channel,
+		Reader:          bytes.NewReader(img.Data),
+		FileSize:        len(img.Data),
+		Filename:        name,
+		Channel:         rc.channel,
 		ThreadTimestamp: rc.timestamp,
 	})
 	if err != nil {
