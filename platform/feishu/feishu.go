@@ -238,7 +238,7 @@ func (p *Platform) startWebhookMode() error {
 		Handler: mux,
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	_, cancel := context.WithCancel(context.Background())
 	p.cancel = cancel
 
 	go func() {
