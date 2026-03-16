@@ -195,6 +195,7 @@ type Engine struct {
 	// Multi-workspace mode
 	multiWorkspace    bool
 	baseDir           string
+	skipGit           bool
 	workspaceBindings *WorkspaceBindingManager
 	workspacePool     *workspacePool
 	initFlows         map[string]*workspaceInitFlow // workspace channel key → init state
@@ -381,6 +382,7 @@ func (e *Engine) SetDefaultQuiet(q bool) {
 	e.defaultQuiet = q
 }
 
+<<<<<<< HEAD
 // estimateTokens provides a rough token estimate for a set of history entries.
 func estimateTokens(entries []HistoryEntry) int {
 	return estimateTokensWithPendingAssistant(entries, "")
@@ -416,6 +418,10 @@ func (e *Engine) SetAutoCompressConfig(enabled bool, maxTokens int, minGap time.
 // SetShowContextIndicator controls whether assistant replies include the [ctx: ~N%] suffix.
 func (e *Engine) SetShowContextIndicator(show bool) {
 	e.showContextIndicator = show
+}
+
+func (e *Engine) SetSkipGit(skipGit bool) {
+	e.skipGit = skipGit
 }
 
 // SetInjectSender controls whether sender identity (platform and user ID) is
@@ -9297,13 +9303,30 @@ func (e *Engine) handleWorkspaceInitFlow(p Platform, msg *Message, channelName s
 		if strings.HasPrefix(content, "/") {
 			return false
 		}
+		replyMessage := e.i18n.T(MsgWsNotFoundHint)
 		e.initFlowsMu.Lock()
+<<<<<<< HEAD
 		e.initFlows[channelKey] = &workspaceInitFlow{
 			state:       "awaiting_url",
 			channelName: channelName,
+=======
+		if e.skipGit {
+			cloneTo := filepath.Join(e.baseDir, channelName)
+			e.initFlows[channelID] = &workspaceInitFlow{
+				state:       "awaiting_confirm",
+				channelName: channelName,
+				cloneTo:     cloneTo,
+			}
+			replyMessage = fmt.Sprintf("I'll mkdir `%s` and bind it to this channel. OK? (yes/no)", channelName)
+		} else {
+			e.initFlows[channelID] = &workspaceInitFlow{
+				state:       "awaiting_url",
+				channelName: channelName,
+			}
+>>>>>>> feat: mulit workspace mode add skip_git flag
 		}
 		e.initFlowsMu.Unlock()
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsNotFoundHint))
+		e.reply(p, msg.ReplyCtx, replyMessage)
 		return true
 	}
 
@@ -9346,13 +9369,21 @@ func (e *Engine) handleWorkspaceInitFlow(p Platform, msg *Message, channelName s
 			return true
 		}
 
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf("Cloning `%s` to `%s`...", flow.repoURL, flow.cloneTo))
-
-		if err := gitClone(flow.repoURL, flow.cloneTo); err != nil {
+		var err error
+		var message string
+		if e.skipGit {
+			err = os.MkdirAll(flow.cloneTo, 0o755)
+			message = fmt.Sprintf("mkdir failed: %v", err)
+		} else {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("Cloning `%s` to `%s`...", flow.repoURL, flow.cloneTo))
+			err = gitClone(flow.repoURL, flow.cloneTo)
+			message = fmt.Sprintf("Clone failed: %v\nSend a repo URL to try again.", err)
+		}
+		if err != nil {
 			e.initFlowsMu.Lock()
 			delete(e.initFlows, channelKey)
 			e.initFlowsMu.Unlock()
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf("Clone failed: %v\nSend a repo URL to try again.", err))
+			e.reply(p, msg.ReplyCtx, message)
 			return true
 		}
 

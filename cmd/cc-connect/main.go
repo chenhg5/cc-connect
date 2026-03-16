@@ -218,6 +218,9 @@ func main() {
 			}
 			bindingStore := filepath.Join(cfg.DataDir, "workspace_bindings.json")
 			engine.SetMultiWorkspace(baseDir, bindingStore)
+			if proj.SkipGit != nil {
+				engine.SetSkipGit(*proj.SkipGit)
+			}
 			slog.Info("multi-workspace mode enabled", "project", proj.Name, "base_dir", baseDir)
 		}
 
