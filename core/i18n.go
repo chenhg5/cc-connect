@@ -125,6 +125,7 @@ const (
 	MsgExecutionStopped     MsgKey = "execution_stopped"
 	MsgNoExecution          MsgKey = "no_execution"
 	MsgPreviousProcessing   MsgKey = "previous_processing"
+	MsgMessageQueued        MsgKey = "message_queued"
 	MsgNoToolsAllowed       MsgKey = "no_tools_allowed"
 	MsgCurrentTools         MsgKey = "current_tools"
 	MsgCurrentSession       MsgKey = "current_session"
@@ -508,6 +509,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "⏳ 上一個請求仍在處理中，請稍候...",
 		LangJapanese:           "⏳ 前のリクエストを処理中です。お待ちください...",
 		LangSpanish:            "⏳ La solicitud anterior aún se está procesando, por favor espere...",
+	},
+	MsgMessageQueued: {
+		LangEnglish:            "📬 Message received — will process after the current task finishes.",
+		LangChinese:            "📬 消息已收到，将在当前任务完成后处理。",
+		LangTraditionalChinese: "📬 訊息已收到，將在目前任務完成後處理。",
+		LangJapanese:           "📬 メッセージを受信しました。現在のタスク完了後に処理します。",
+		LangSpanish:            "📬 Mensaje recibido — se procesará después de que termine la tarea actual.",
 	},
 	MsgNoToolsAllowed: {
 		LangEnglish:            "No tools pre-allowed.\nUsage: `/allow <tool_name>`\nExample: `/allow Bash`",
