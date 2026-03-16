@@ -47,13 +47,17 @@ jobs:
 
       - name: Get version
         id: version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "VERSION_NO_V=${VERSION#v}" >> $GITHUB_OUTPUT
 
       - name: Build binary
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           VERSION: ${{ steps.version.outputs.VERSION }}
+          VERSION_NO_V: ${{ steps.version.outputs.VERSION_NO_V }}
           COMMIT: ${{ github.sha }}
           BUILD_TIME: ${{ github.event.head_commit.timestamp }}
         run: |
@@ -62,7 +66,7 @@ jobs:
             BINARY_NAME="cc-connect.exe"
           fi
 
-          OUTPUT_NAME="cc-connect-${VERSION#${v}}-${GOOS}-${GOARCH}"
+          OUTPUT_NAME="cc-connect-${VERSION_NO_V}-${GOOS}-${GOARCH}"
           if [ "$GOOS" = "windows" ]; then
             OUTPUT_NAME="${OUTPUT_NAME}.exe"
           fi
