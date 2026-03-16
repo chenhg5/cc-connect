@@ -63,10 +63,11 @@ _TAGS_FLAG  := $(if $(_BUILD_TAGS),-tags '$(_BUILD_TAGS)',)
 .PHONY: build run clean test lint release release-all
 
 build:
-	go build $(_TAGS_FLAG) -ldflags "$(LDFLAGS)" -o $(APP) $(CMD)
+	@mkdir -p $(DIST)
+	go build $(_TAGS_FLAG) -ldflags "$(LDFLAGS)" -o $(DIST)/$(APP) $(CMD)
 
 run: build
-	./$(APP)
+	./$(DIST)/$(APP)
 
 clean:
 	rm -f $(APP)
