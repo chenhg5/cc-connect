@@ -363,6 +363,8 @@ func (m *ManagementServer) handleProjectRoutes(w http.ResponseWriter, r *http.Re
 		m.handleProjectModel(w, r, engine)
 	case "heartbeat":
 		m.handleProjectHeartbeat(w, r, projName, rest)
+	case "users":
+		m.handleProjectUsers(w, r, engine)
 	default:
 		mgmtError(w, http.StatusNotFound, "not found")
 	}
@@ -459,6 +461,75 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 	}
 
 	mgmtError(w, http.StatusMethodNotAllowed, "GET or PATCH only")
+}
+
+// ── Users endpoints ──────────────────────────────────────────
+
+func (m *ManagementServer) handleProjectUsers(w http.ResponseWriter, r *http.Request, e *Engine) {
+	switch r.Method {
+	case http.MethodGet:
+		e.userRolesMu.RLock()
+		urm := e.userRoles
+		e.userRolesMu.RUnlock()
+		mgmtJSON(w, http.StatusOK, urm.Snapshot())
+
+	case http.MethodPatch:
+		var body struct {
+			DefaultRole string                     `json:"default_role"`
+			Roles       map[string]json.RawMessage `json:"roles"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			mgmtError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+
+		var roles []RoleInput
+		for name, raw := range body.Roles {
+			var rc struct {
+				UserIDs          []string `json:"user_ids"`
+				DisabledCommands []string `json:"disabled_commands"`
+				RateLimit        *struct {
+					MaxMessages int `json:"max_messages"`
+					WindowSecs  int `json:"window_secs"`
+				} `json:"rate_limit"`
+			}
+			if err := json.Unmarshal(raw, &rc); err != nil {
+				mgmtError(w, http.StatusBadRequest, fmt.Sprintf("invalid role %q: %s", name, err))
+				return
+			}
+			ri := RoleInput{
+				Name:             name,
+				UserIDs:          rc.UserIDs,
+				DisabledCommands: rc.DisabledCommands,
+			}
+			if rc.RateLimit != nil {
+				ri.RateLimit = &RateLimitCfg{
+					MaxMessages: rc.RateLimit.MaxMessages,
+					Window:      time.Duration(rc.RateLimit.WindowSecs) * time.Second,
+				}
+			}
+			roles = append(roles, ri)
+		}
+
+		defaultRole := body.DefaultRole
+		if defaultRole == "" {
+			defaultRole = "member"
+		}
+
+		if err := ValidateRoleInputs(defaultRole, roles); err != nil {
+			mgmtError(w, http.StatusBadRequest, "invalid users config: "+err.Error())
+			return
+		}
+
+		urm := NewUserRoleManager()
+		urm.Configure(defaultRole, roles)
+		e.SetUserRoles(urm)
+
+		mgmtOK(w, "users config updated")
+
+	default:
+		mgmtError(w, http.StatusMethodNotAllowed, "GET or PATCH only")
+	}
 }
 
 // ── Session endpoints ─────────────────────────────────────────
