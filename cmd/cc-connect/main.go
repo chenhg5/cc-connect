@@ -150,7 +150,17 @@ func main() {
 
 		var platforms []core.Platform
 		for _, pc := range proj.Platforms {
-			p, err := core.CreatePlatform(pc.Type, pc.Options)
+			// Copy platform options
+			opts := make(map[string]any)
+			for k, v := range pc.Options {
+				opts[k] = v
+			}
+			// Add proxy config if present
+			if pc.Proxy != nil {
+				opts["proxy"] = pc.Proxy
+			}
+
+			p, err := core.CreatePlatform(pc.Type, opts)
 			if err != nil {
 				slog.Error("failed to create platform", "project", proj.Name, "type", pc.Type, "error", err)
 				os.Exit(1)

@@ -32,6 +32,7 @@ type Platform struct {
 	appToken              string
 	allowFrom             string
 	shareSessionInChannel bool
+	httpClient           *http.Client // optional HTTP client for proxy
 	client                *slack.Client
 	socket                *socketmode.Client
 	handler               core.MessageHandler
@@ -50,13 +51,47 @@ func New(opts map[string]any) (core.Platform, error) {
 	if botToken == "" || appToken == "" {
 		return nil, fmt.Errorf("slack: bot_token and app_token are required")
 	}
+
+	// Build HTTP client with proxy support if configured
+	var httpClient *http.Client
+	if proxyCfg, ok := opts["proxy"].(map[string]any); ok {
+		proxyConfig := parseProxyConfig(proxyCfg)
+		if proxyConfig != nil {
+			var err error
+			httpClient, err = core.BuildHTTPClient(proxyConfig, 60*time.Second)
+			if err != nil {
+				return nil, fmt.Errorf("slack: failed to create proxy client: %w", err)
+			}
+		}
+	}
+
 	return &Platform{
 		botToken:              botToken,
 		appToken:              appToken,
 		allowFrom:             allowFrom,
 		shareSessionInChannel: shareSessionInChannel,
+		httpClient:           httpClient,
 		channelNameCache:      make(map[string]string),
 	}, nil
+}
+
+// parseProxyConfig converts map[string]any to core.ProxyConfig
+func parseProxyConfig(cfg map[string]any) *core.ProxyConfig {
+	typ, _ := cfg["type"].(string)
+	addr, _ := cfg["addr"].(string)
+	username, _ := cfg["username"].(string)
+	password, _ := cfg["password"].(string)
+
+	if typ == "" || addr == "" {
+		return nil
+	}
+
+	return &core.ProxyConfig{
+		Type:     typ,
+		Addr:     addr,
+		Username: username,
+		Password: password,
+	}
 }
 
 func (p *Platform) Name() string { return "slack" }
@@ -64,9 +99,15 @@ func (p *Platform) Name() string { return "slack" }
 func (p *Platform) Start(handler core.MessageHandler) error {
 	p.handler = handler
 
-	p.client = slack.New(p.botToken,
+	// Build client options
+	slackOpts := []slack.Option{
 		slack.OptionAppLevelToken(p.appToken),
-	)
+	}
+	if p.httpClient != nil {
+		slackOpts = append(slackOpts, slack.OptionHTTPClient(p.httpClient))
+	}
+
+	p.client = slack.New(p.botToken, slackOpts...)
 	p.socket = socketmode.New(p.client)
 
 	ctx, cancel := context.WithCancel(context.Background())

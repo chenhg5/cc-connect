@@ -1,8 +1,14 @@
 # CC-Connect Development Guide
 
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 ## Project Overview
 
-CC-Connect is a bridge that connects AI coding agents (Claude Code, Codex, Gemini CLI, Cursor, etc.) with messaging platforms (Feishu/Lark, Telegram, Discord, Slack, DingTalk, WeChat Work, QQ, LINE). Users interact with their coding agent through their preferred messaging app.
+CC-Connect is a bridge that connects AI coding agents (Claude Code, Codex, Gemini CLI, Cursor, Pi, Qoder, OpenCode, iFlow) with messaging platforms (Feishu/Lark, Telegram, Discord, Slack, DingTalk, WeChat Work, QQ, LINE). Users interact with their coding agent through their preferred messaging app.
+
+## Requirements
+
+- Go 1.25.0+
 
 ## Architecture
 
@@ -22,8 +28,8 @@ CC-Connect is a bridge that connects AI coding agents (Claude Code, Codex, Gemin
 │  ├── gemini/         │  ├── slack/              │
 │  ├── iflow/          │  ├── dingtalk/           │
 │  ├── opencode/       │  ├── wecom/              │
-│  └── qoder/          │  ├── qq/                 │
-│                      │  ├── qqbot/              │
+│  ├── pi/             │  ├── qq/                 │
+│  └── qoder/          │  ├── qqbot/              │
 │                      │  └── line/               │
 ├──────────────────────┴──────────────────────────┤
 │                     daemon/                     │  ← systemd/launchd service
@@ -164,6 +170,9 @@ go test ./core/ -run TestHandlePendingPermission -v
 
 # With race detector (CI)
 go test -race ./...
+
+# With coverage
+go test ./... -coverprofile=coverage.out -covermode=atomic
 ```
 
 ### Test Patterns
@@ -202,7 +211,7 @@ go build -tags 'no_discord no_dingtalk no_qq no_qqbot no_line' ./cmd/cc-connect
 ```
 
 Available tags: `no_claudecode`, `no_codex`, `no_cursor`, `no_gemini`,
-`no_iflow`, `no_opencode`, `no_qoder`, `no_feishu`, `no_telegram`,
+`no_iflow`, `no_opencode`, `no_pi`, `no_qoder`, `no_feishu`, `no_telegram`,
 `no_discord`, `no_slack`, `no_dingtalk`, `no_wecom`, `no_qq`, `no_qqbot`,
 `no_line`.
 

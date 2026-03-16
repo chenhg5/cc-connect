@@ -558,6 +558,12 @@ app_secret = "your-feishu-app-secret"
 # reply_in_thread = false  # If true, all responses are threaded to the original message (helps trace which question triggered which reply)
 #                          # 设为 true 时，所有回复都会引用原消息（方便追踪每条回复对应哪条提问）
 
+# [projects.platforms.proxy]
+# type = "http"             # Proxy type: "http", "https", or "socks5" / 代理类型
+# addr = "127.0.0.1:7890"  # Proxy address / 代理地址
+# username = ""            # Optional proxy username / 可选的代理用户名
+# password = ""            # Optional proxy password / 可选的代理密码
+
 # DingTalk / 钉钉 (uncomment to enable / 取消注释以启用)
 # 1. Create an app at https://open-dev.dingtalk.com / 在钉钉开放平台创建应用
 # 2. Under "App Features > Bot", enable bot and select Stream mode
@@ -589,6 +595,12 @@ app_secret = "your-feishu-app-secret"
 #                   # 允许的 Telegram 用户 ID，如 "123456789,987654321"；"*" 表示所有
 # group_reply_all = false  # If true, respond to ALL group messages without @mention / 设为 true 群聊无需 @ 也响应
 # share_session_in_channel = false  # If true, all users in a group share one agent session / 群聊共享会话
+#
+# [projects.platforms.proxy]
+# type = "socks5"           # Proxy type: "http", "https", or "socks5" / 代理类型
+# addr = "127.0.0.1:1080"   # Proxy address / 代理地址
+# username = ""             # Optional proxy username / 可选的代理用户名
+# password = ""             # Optional proxy password / 可选的代理密码
 
 # Slack (uncomment to enable / 取消注释以启用)
 # 1. Create an app at https://api.slack.com/apps / 创建应用

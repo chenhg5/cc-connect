@@ -44,6 +44,7 @@ type Platform struct {
 	groupReplyAll         bool
 	shareSessionInChannel bool
 	threadIsolation       bool
+	httpClient           *http.Client // optional HTTP client for proxy
 	session               *discordgo.Session
 	handler               core.MessageHandler
 	botID                 string
@@ -64,15 +65,49 @@ func New(opts map[string]any) (core.Platform, error) {
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	threadIsolation, _ := opts["thread_isolation"].(bool)
+
+	// Build HTTP client with proxy support if configured
+	var httpClient *http.Client
+	if proxyCfg, ok := opts["proxy"].(map[string]any); ok {
+		proxyConfig := parseProxyConfig(proxyCfg)
+		if proxyConfig != nil {
+			var err error
+			httpClient, err = core.BuildHTTPClient(proxyConfig, 60*time.Second)
+			if err != nil {
+				return nil, fmt.Errorf("discord: failed to create proxy client: %w", err)
+			}
+		}
+	}
+
 	return &Platform{
 		token:                 token,
 		allowFrom:             allowFrom,
 		guildID:               guildID,
 		groupReplyAll:         groupReplyAll,
 		shareSessionInChannel: shareSessionInChannel,
+		httpClient:           httpClient,
 		readyCh:               make(chan struct{}),
 		threadIsolation:       threadIsolation,
 	}, nil
+}
+
+// parseProxyConfig converts map[string]any to core.ProxyConfig
+func parseProxyConfig(cfg map[string]any) *core.ProxyConfig {
+	typ, _ := cfg["type"].(string)
+	addr, _ := cfg["addr"].(string)
+	username, _ := cfg["username"].(string)
+	password, _ := cfg["password"].(string)
+
+	if typ == "" || addr == "" {
+		return nil
+	}
+
+	return &core.ProxyConfig{
+		Type:     typ,
+		Addr:     addr,
+		Username: username,
+		Password: password,
+	}
 }
 
 func (p *Platform) Name() string { return "discord" }
@@ -295,6 +330,11 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		return fmt.Errorf("discord: create session: %w", err)
 	}
 	p.session = session
+
+	// Set custom HTTP client if proxy is configured
+	if p.httpClient != nil {
+		session.Client = p.httpClient
+	}
 
 	session.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentMessageContent
 

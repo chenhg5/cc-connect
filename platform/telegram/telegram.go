@@ -46,11 +46,57 @@ func New(opts map[string]any) (core.Platform, error) {
 	core.CheckAllowFrom("telegram", allowFrom)
 
 	// Build HTTP client with optional proxy support
+	// Priority: new proxy config (map) > legacy proxy (string)
+	httpClient, err := buildHTTPClient(opts)
+	if err != nil {
+		return nil, fmt.Errorf("telegram: failed to create HTTP client: %w", err)
+	}
+
+	groupReplyAll, _ := opts["group_reply_all"].(bool)
+	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
+	return &Platform{token: token, allowFrom: allowFrom, groupReplyAll: groupReplyAll, shareSessionInChannel: shareSessionInChannel, httpClient: httpClient}, nil
+}
+
+// buildHTTPClient creates an HTTP client with proxy support
+func buildHTTPClient(opts map[string]any) (*http.Client, error) {
+	// Try new proxy config format first
+	if proxyCfg, ok := opts["proxy"].(map[string]any); ok {
+		proxyConfig := parseProxyConfig(proxyCfg)
+		if proxyConfig != nil {
+			return core.BuildHTTPClient(proxyConfig, 60*time.Second)
+		}
+	}
+
+	// Fall back to legacy proxy format
+	return buildLegacyHTTPClient(opts)
+}
+
+// parseProxyConfig converts map[string]any to core.ProxyConfig
+func parseProxyConfig(cfg map[string]any) *core.ProxyConfig {
+	typ, _ := cfg["type"].(string)
+	addr, _ := cfg["addr"].(string)
+	username, _ := cfg["username"].(string)
+	password, _ := cfg["password"].(string)
+
+	if typ == "" || addr == "" {
+		return nil
+	}
+
+	return &core.ProxyConfig{
+		Type:     typ,
+		Addr:     addr,
+		Username: username,
+		Password: password,
+	}
+}
+
+// buildLegacyHTTPClient creates HTTP client using legacy proxy options
+func buildLegacyHTTPClient(opts map[string]any) (*http.Client, error) {
 	httpClient := &http.Client{Timeout: 60 * time.Second}
 	if proxyURL, _ := opts["proxy"].(string); proxyURL != "" {
 		u, err := url.Parse(proxyURL)
 		if err != nil {
-			return nil, fmt.Errorf("telegram: invalid proxy URL %q: %w", proxyURL, err)
+			return nil, fmt.Errorf("invalid proxy URL %q: %w", proxyURL, err)
 		}
 		proxyUser, _ := opts["proxy_username"].(string)
 		proxyPass, _ := opts["proxy_password"].(string)
@@ -58,12 +104,9 @@ func New(opts map[string]any) (core.Platform, error) {
 			u.User = url.UserPassword(proxyUser, proxyPass)
 		}
 		httpClient.Transport = &http.Transport{Proxy: http.ProxyURL(u)}
-		slog.Info("telegram: using proxy", "proxy", u.Host, "auth", proxyUser != "")
+		slog.Info("telegram: using legacy proxy config", "proxy", u.Host, "auth", proxyUser != "")
 	}
-
-	groupReplyAll, _ := opts["group_reply_all"].(bool)
-	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
-	return &Platform{token: token, allowFrom: allowFrom, groupReplyAll: groupReplyAll, shareSessionInChannel: shareSessionInChannel, httpClient: httpClient}, nil
+	return httpClient, nil
 }
 
 func (p *Platform) Name() string { return "telegram" }
