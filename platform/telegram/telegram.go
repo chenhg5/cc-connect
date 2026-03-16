@@ -539,6 +539,40 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	return nil
 }
 
+func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttachment) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("telegram: invalid reply context type %T", rctx)
+	}
+
+	name := img.FileName
+	if name == "" {
+		name = "image"
+	}
+	msg := tgbotapi.NewPhoto(rc.chatID, tgbotapi.FileBytes{Name: name, Bytes: img.Data})
+	if _, err := p.bot.Send(msg); err != nil {
+		return fmt.Errorf("telegram: send image: %w", err)
+	}
+	return nil
+}
+
+func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachment) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("telegram: invalid reply context type %T", rctx)
+	}
+
+	name := file.FileName
+	if name == "" {
+		name = "attachment"
+	}
+	msg := tgbotapi.NewDocument(rc.chatID, tgbotapi.FileBytes{Name: name, Bytes: file.Data})
+	if _, err := p.bot.Send(msg); err != nil {
+		return fmt.Errorf("telegram: send file: %w", err)
+	}
+	return nil
+}
+
 // SendWithButtons sends a message with an inline keyboard.
 func (p *Platform) SendWithButtons(ctx context.Context, rctx any, content string, buttons [][]core.ButtonOption) error {
 	rc, ok := rctx.(replyContext)

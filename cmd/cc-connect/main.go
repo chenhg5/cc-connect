@@ -181,6 +181,7 @@ func main() {
 		}
 
 		engine := core.NewEngine(proj.Name, agent, platforms, sessionFile, lang)
+		engine.SetAttachmentSendEnabled(cfg.AttachmentSend != "off")
 
 		// Wire multi-workspace mode
 		if proj.Mode == "multi-workspace" {
@@ -886,6 +887,9 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 
 	// Reload sender injection
 	engine.SetInjectSender(proj.InjectSender != nil && *proj.InjectSender)
+
+	// Reload attachment send-back switch
+	engine.SetAttachmentSendEnabled(cfg.AttachmentSend != "off")
 
 	// Reload providers
 	if ps, ok := engine.GetAgent().(core.ProviderSwitcher); ok {

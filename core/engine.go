@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -40,6 +41,9 @@ var VersionInfo string
 
 // CurrentVersion is the semver tag (e.g. "v1.2.0-beta.1"), set by main.
 var CurrentVersion string
+
+// ErrAttachmentSendDisabled indicates that side-channel image/file delivery is disabled by config.
+var ErrAttachmentSendDisabled = errors.New("attachment send is disabled by config")
 
 // RestartRequest carries info needed to send a post-restart notification.
 type RestartRequest struct {
@@ -119,19 +123,20 @@ type RateLimitCfg struct {
 
 // Engine routes messages between platforms and the agent for a single project.
 type Engine struct {
-	name         string
-	agent        Agent
-	platforms    []Platform
-	sessions     *SessionManager
-	ctx          context.Context
-	cancel       context.CancelFunc
-	i18n         *I18n
-	speech       SpeechCfg
-	tts          *TTSCfg
-	display      DisplayCfg
-	defaultQuiet bool
-	injectSender bool
-	startedAt    time.Time
+	name                  string
+	agent                 Agent
+	platforms             []Platform
+	sessions              *SessionManager
+	ctx                   context.Context
+	cancel                context.CancelFunc
+	i18n                  *I18n
+	speech                SpeechCfg
+	tts                   *TTSCfg
+	display               DisplayCfg
+	defaultQuiet          bool
+	injectSender          bool
+	attachmentSendEnabled bool
+	startedAt             time.Time
 
 	providerSaveFunc       func(providerName string) error
 	providerAddSaveFunc    func(p ProviderConfig) error
@@ -160,9 +165,9 @@ type Engine struct {
 	bannedMu    sync.RWMutex
 
 	disabledCmds map[string]bool
-	adminFrom    string // comma-separated user IDs for privileged commands; "*" = all allowed users; "" = deny
+	adminFrom    string           // comma-separated user IDs for privileged commands; "*" = all allowed users; "" = deny
 	userRoles    *UserRoleManager // nil = legacy mode (no per-user policies)
-	userRolesMu  sync.RWMutex    // protects userRoles, disabledCmds, and adminFrom
+	userRolesMu  sync.RWMutex     // protects userRoles, disabledCmds, and adminFrom
 
 	rateLimiter      *RateLimiter
 	streamPreview    StreamPreviewCfg
@@ -204,6 +209,7 @@ type interactiveState struct {
 	approveAll   bool // when true, auto-approve all permission requests for this session
 	quiet        bool // when true, suppress thinking and tool progress for this session
 	fromVoice    bool // true if current turn originated from voice transcription
+	sideText     string
 	deleteMode   *deleteModeState
 }
 
@@ -236,21 +242,22 @@ func (pp *pendingPermission) resolve() {
 func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath string, lang Language) *Engine {
 	ctx, cancel := context.WithCancel(context.Background())
 	e := &Engine{
-		name:              name,
-		agent:             ag,
-		platforms:         platforms,
-		sessions:          NewSessionManager(sessionStorePath),
-		ctx:               ctx,
-		cancel:            cancel,
-		i18n:              NewI18n(lang),
-		display:           DisplayCfg{ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen},
-		commands:          NewCommandRegistry(),
-		skills:            NewSkillRegistry(),
-		aliases:           make(map[string]string),
-		interactiveStates: make(map[string]*interactiveState),
-		startedAt:         time.Now(),
-		streamPreview:     DefaultStreamPreviewCfg(),
-		eventIdleTimeout:  defaultEventIdleTimeout,
+		name:                  name,
+		agent:                 ag,
+		platforms:             platforms,
+		sessions:              NewSessionManager(sessionStorePath),
+		ctx:                   ctx,
+		cancel:                cancel,
+		i18n:                  NewI18n(lang),
+		attachmentSendEnabled: true,
+		display:               DisplayCfg{ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen},
+		commands:              NewCommandRegistry(),
+		skills:                NewSkillRegistry(),
+		aliases:               make(map[string]string),
+		interactiveStates:     make(map[string]*interactiveState),
+		startedAt:             time.Now(),
+		streamPreview:         DefaultStreamPreviewCfg(),
+		eventIdleTimeout:      defaultEventIdleTimeout,
 	}
 
 	if ag != nil {
@@ -341,6 +348,11 @@ func (e *Engine) SetDefaultQuiet(q bool) {
 // accordingly (e.g. personal task views, role-based access control).
 func (e *Engine) SetInjectSender(v bool) {
 	e.injectSender = v
+}
+
+// SetAttachmentSendEnabled controls whether side-channel image/file delivery is allowed.
+func (e *Engine) SetAttachmentSendEnabled(v bool) {
+	e.attachmentSendEnabled = v
 }
 
 func (e *Engine) SetLanguageSaveFunc(fn func(Language) error) {
@@ -1341,6 +1353,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	sendStart := time.Now()
 	state.mu.Lock()
 	state.fromVoice = msg.FromVoice
+	state.sideText = ""
 	state.mu.Unlock()
 	if err := state.agentSession.Send(promptContent, msg.Images, msg.Files); err != nil {
 		slog.Error("failed to send prompt", "error", err)
@@ -1360,6 +1373,10 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 				return
 			}
 			sendStart = time.Now()
+			state.mu.Lock()
+			state.fromVoice = msg.FromVoice
+			state.sideText = ""
+			state.mu.Unlock()
 			if err := state.agentSession.Send(promptContent, msg.Images, msg.Files); err != nil {
 				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
 				return
@@ -1833,6 +1850,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			)
 
 			replyStart := time.Now()
+			normalizedResponse := strings.TrimSpace(fullResponse)
+			state.mu.Lock()
+			suppressDuplicate := normalizedResponse != "" && normalizedResponse == state.sideText
+			state.sideText = ""
+			state.mu.Unlock()
 
 			// When tool calls happened, text was sent in segments; only send remainder.
 			if toolCount > 0 {
@@ -1848,6 +1870,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						}
 					}
 				}
+			} else if suppressDuplicate {
+				sp.finish("")
+				slog.Debug("EventResult: suppressed duplicate side-channel text", "response_len", len(fullResponse))
 			} else if sp.finish(fullResponse) {
 				slog.Debug("EventResult: finalized via stream preview", "response_len", len(fullResponse))
 			} else {
@@ -4385,8 +4410,11 @@ func (e *Engine) switchProvider(p Platform, msg *Message, switcher ProviderSwitc
 // SendToSession sends a message to an active session from an external caller (API/CLI).
 // If sessionKey is empty, it picks the first active session.
 func (e *Engine) SendToSession(sessionKey, message string) error {
+	return e.SendToSessionWithAttachments(sessionKey, message, nil, nil)
+}
+
+func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images []ImageAttachment, files []FileAttachment) error {
 	e.interactiveMu.Lock()
-	defer e.interactiveMu.Unlock()
 
 	var state *interactiveState
 	if sessionKey != "" {
@@ -4398,6 +4426,7 @@ func (e *Engine) SendToSession(sessionKey, message string) error {
 			break
 		}
 	}
+	e.interactiveMu.Unlock()
 
 	if state == nil {
 		return fmt.Errorf("no active session found (key=%q)", sessionKey)
@@ -4412,7 +4441,52 @@ func (e *Engine) SendToSession(sessionKey, message string) error {
 		return fmt.Errorf("no active session found (key=%q)", sessionKey)
 	}
 
-	return p.Send(e.ctx, replyCtx, message)
+	if message == "" && len(images) == 0 && len(files) == 0 {
+		return fmt.Errorf("message or attachment is required")
+	}
+	if (len(images) > 0 || len(files) > 0) && !e.attachmentSendEnabled {
+		return ErrAttachmentSendDisabled
+	}
+
+	var imageSender ImageSender
+	if len(images) > 0 {
+		var ok bool
+		imageSender, ok = p.(ImageSender)
+		if !ok {
+			return fmt.Errorf("platform %s: %w", p.Name(), ErrNotSupported)
+		}
+	}
+
+	var fileSender FileSender
+	if len(files) > 0 {
+		var ok bool
+		fileSender, ok = p.(FileSender)
+		if !ok {
+			return fmt.Errorf("platform %s: %w", p.Name(), ErrNotSupported)
+		}
+	}
+
+	if message != "" {
+		if err := p.Send(e.ctx, replyCtx, message); err != nil {
+			return err
+		}
+		if len(images) > 0 || len(files) > 0 {
+			state.mu.Lock()
+			state.sideText = strings.TrimSpace(message)
+			state.mu.Unlock()
+		}
+	}
+	for _, img := range images {
+		if err := imageSender.SendImage(e.ctx, replyCtx, img); err != nil {
+			return err
+		}
+	}
+	for _, file := range files {
+		if err := fileSender.SendFile(e.ctx, replyCtx, file); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // sendPermissionPrompt sends a permission prompt with interactive buttons when
@@ -7493,8 +7567,17 @@ func (e *Engine) setupMemoryFile() (setupResult, string, error) {
 	baseName := filepath.Base(filePath)
 
 	existing, _ := os.ReadFile(filePath)
-	if strings.Contains(string(existing), ccConnectInstructionMarker) {
-		return setupExists, baseName, nil
+	existingText := string(existing)
+	block := "\n" + ccConnectInstructionMarker + "\n" + AgentSystemPrompt() + "\n"
+	if idx := strings.Index(existingText, ccConnectInstructionMarker); idx >= 0 {
+		if strings.Contains(existingText[idx:], AgentSystemPrompt()) {
+			return setupExists, baseName, nil
+		}
+		updated := strings.TrimRight(existingText[:idx], "\n") + block
+		if err := os.WriteFile(filePath, []byte(updated), 0o644); err != nil {
+			return setupError, baseName, err
+		}
+		return setupOK, baseName, nil
 	}
 
 	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
@@ -7507,7 +7590,6 @@ func (e *Engine) setupMemoryFile() (setupResult, string, error) {
 	}
 	defer f.Close()
 
-	block := "\n" + ccConnectInstructionMarker + "\n" + AgentSystemPrompt() + "\n"
 	if _, err := f.WriteString(block); err != nil {
 		return setupError, baseName, err
 	}

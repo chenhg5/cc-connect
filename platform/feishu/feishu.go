@@ -613,7 +613,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		p.handler(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
-			UserID: userID, UserName: userName, ChatName: chatName,
+			UserID:    userID, UserName: userName, ChatName: chatName,
 			Content: text, ReplyCtx: rctx,
 		})
 
@@ -633,7 +633,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		p.handler(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
-			UserID: userID, UserName: userName, ChatName: chatName,
+			UserID:    userID, UserName: userName, ChatName: chatName,
 			Images:   []core.ImageAttachment{{MimeType: mimeType, Data: imgData}},
 			ReplyCtx: rctx,
 		})
@@ -656,7 +656,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		p.handler(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
-			UserID: userID, UserName: userName, ChatName: chatName,
+			UserID:    userID, UserName: userName, ChatName: chatName,
 			Audio: &core.AudioAttachment{
 				MimeType: "audio/opus",
 				Data:     audioData,
@@ -675,7 +675,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		p.handler(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
-			UserID: userID, UserName: userName, ChatName: chatName,
+			UserID:    userID, UserName: userName, ChatName: chatName,
 			Content: text, Images: images,
 			ReplyCtx: rctx,
 		})
@@ -700,7 +700,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		p.handler(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
-			UserID: userID, UserName: userName, ChatName: chatName,
+			UserID:    userID, UserName: userName, ChatName: chatName,
 			Files: []core.FileAttachment{{
 				MimeType: mimeType,
 				Data:     fileData,
@@ -718,7 +718,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		coreMsg := &core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
-			UserID: userID, UserName: userName, ChatName: chatName,
+			UserID:    userID, UserName: userName, ChatName: chatName,
 			Content:  text,
 			Images:   images,
 			Files:    files,
@@ -1024,6 +1024,126 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 		return fmt.Errorf("%s: send failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
 	}
 	return nil
+}
+
+func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttachment) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("%s: SendImage: invalid reply context type %T", p.tag(), rctx)
+	}
+
+	uploadResp, err := p.client.Im.Image.Create(ctx,
+		larkim.NewCreateImageReqBuilder().
+			Body(larkim.NewCreateImageReqBodyBuilder().
+				ImageType("message").
+				Image(bytes.NewReader(img.Data)).
+				Build()).
+			Build())
+	if err != nil {
+		return fmt.Errorf("%s: upload image: %w", p.tag(), err)
+	}
+	if !uploadResp.Success() {
+		return fmt.Errorf("%s: upload image code=%d msg=%s", p.tag(), uploadResp.Code, uploadResp.Msg)
+	}
+	if uploadResp.Data == nil || uploadResp.Data.ImageKey == nil {
+		return fmt.Errorf("%s: upload image: no image_key returned", p.tag())
+	}
+
+	imageContent, err := (&larkim.MessageImage{ImageKey: *uploadResp.Data.ImageKey}).String()
+	if err != nil {
+		return fmt.Errorf("%s: build image message: %w", p.tag(), err)
+	}
+
+	return p.sendMediaMessage(ctx, rc, larkim.MsgTypeImage, imageContent)
+}
+
+func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachment) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("%s: SendFile: invalid reply context type %T", p.tag(), rctx)
+	}
+
+	fileName := file.FileName
+	if fileName == "" {
+		fileName = "attachment"
+	}
+	fileType := detectFeishuFileType(file.MimeType, fileName)
+	uploadResp, err := p.client.Im.File.Create(ctx,
+		larkim.NewCreateFileReqBuilder().
+			Body(larkim.NewCreateFileReqBodyBuilder().
+				FileType(fileType).
+				FileName(fileName).
+				File(bytes.NewReader(file.Data)).
+				Build()).
+			Build())
+	if err != nil {
+		return fmt.Errorf("%s: upload file: %w", p.tag(), err)
+	}
+	if !uploadResp.Success() {
+		return fmt.Errorf("%s: upload file code=%d msg=%s", p.tag(), uploadResp.Code, uploadResp.Msg)
+	}
+	if uploadResp.Data == nil || uploadResp.Data.FileKey == nil {
+		return fmt.Errorf("%s: upload file: no file_key returned", p.tag())
+	}
+
+	fileContent, err := (&larkim.MessageFile{FileKey: *uploadResp.Data.FileKey}).String()
+	if err != nil {
+		return fmt.Errorf("%s: build file message: %w", p.tag(), err)
+	}
+
+	return p.sendMediaMessage(ctx, rc, larkim.MsgTypeFile, fileContent)
+}
+
+func (p *Platform) sendMediaMessage(ctx context.Context, rc replyContext, msgType, content string) error {
+	if p.shouldReplyInThread(rc) {
+		replyResp, err := p.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
+			MessageId(rc.messageID).
+			Body(p.buildReplyMessageReqBody(rc, msgType, content)).
+			Build())
+		if err != nil {
+			return fmt.Errorf("%s: send media message: %w", p.tag(), err)
+		}
+		if !replyResp.Success() {
+			return fmt.Errorf("%s: send media message code=%d msg=%s", p.tag(), replyResp.Code, replyResp.Msg)
+		}
+		return nil
+	}
+
+	sendResp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
+		ReceiveIdType(larkim.ReceiveIdTypeChatId).
+		Body(larkim.NewCreateMessageReqBodyBuilder().
+			ReceiveId(rc.chatID).
+			MsgType(msgType).
+			Content(content).
+			Build()).
+		Build())
+	if err != nil {
+		return fmt.Errorf("%s: send media message: %w", p.tag(), err)
+	}
+	if !sendResp.Success() {
+		return fmt.Errorf("%s: send media message code=%d msg=%s", p.tag(), sendResp.Code, sendResp.Msg)
+	}
+	return nil
+}
+
+func detectFeishuFileType(mimeType, fileName string) string {
+	name := strings.ToLower(fileName)
+	switch {
+	case mimeType == "application/pdf" || strings.HasSuffix(name, ".pdf"):
+		return larkim.FileTypePdf
+	case strings.HasSuffix(name, ".doc") || strings.HasSuffix(name, ".docx"):
+		return larkim.FileTypeDoc
+	case strings.HasSuffix(name, ".xls") || strings.HasSuffix(name, ".xlsx") || strings.HasSuffix(name, ".csv"):
+		return larkim.FileTypeXls
+	case strings.HasSuffix(name, ".ppt") || strings.HasSuffix(name, ".pptx"):
+		return larkim.FileTypePpt
+	case mimeType == "video/mp4" || strings.HasSuffix(name, ".mp4"):
+		return larkim.FileTypeMp4
+	case mimeType == "audio/ogg" || mimeType == "audio/opus" || strings.HasSuffix(name, ".opus"):
+		return larkim.FileTypeOpus
+	default:
+		return larkim.FileTypeStream
+	}
 }
 
 func (p *Platform) downloadImage(messageID, imageKey string) ([]byte, string, error) {
