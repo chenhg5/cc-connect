@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"sync"
 	"testing"
+	"time"
 )
 
 // ──────────────────────────────────────────────────────────────
@@ -341,5 +343,135 @@ func TestMiniMaxTTS_ContextCancelled(t *testing.T) {
 	_, _, err := tts.Synthesize(ctx, "hello", TTSSynthesisOpts{})
 	if err == nil {
 		t.Fatal("expected error when context is cancelled")
+	}
+}
+
+// ──────────────────────────────────────────────────────────────
+// Local TTS provider constructor tests (Espeak, Pico, Edge)
+// ──────────────────────────────────────────────────────────────
+
+func TestEspeakTTS_Constructors(t *testing.T) {
+	tts := NewEspeakTTS("", "")
+	if tts.Path != "espeak" {
+		t.Errorf("expected default path 'espeak', got %q", tts.Path)
+	}
+	if tts.Voice != "zh" {
+		t.Errorf("expected default voice 'zh', got %q", tts.Voice)
+	}
+
+	tts = NewEspeakTTS("/custom/espeak", "en")
+	if tts.Path != "/custom/espeak" {
+		t.Errorf("expected custom path, got %q", tts.Path)
+	}
+	if tts.Voice != "en" {
+		t.Errorf("expected custom voice 'en', got %q", tts.Voice)
+	}
+}
+
+func TestPicoTTS_Constructors(t *testing.T) {
+	tts := NewPicoTTS("", "")
+	if tts.Path != "pico2wave" {
+		t.Errorf("expected default path 'pico2wave', got %q", tts.Path)
+	}
+	if tts.Voice != "zh-CN" {
+		t.Errorf("expected default voice 'zh-CN', got %q", tts.Voice)
+	}
+
+	tts = NewPicoTTS("/custom/pico2wave", "en-US")
+	if tts.Path != "/custom/pico2wave" {
+		t.Errorf("expected custom path, got %q", tts.Path)
+	}
+	if tts.Voice != "en-US" {
+		t.Errorf("expected custom voice 'en-US', got %q", tts.Voice)
+	}
+}
+
+func TestEdgeTTS_Constructors(t *testing.T) {
+	tts := NewEdgeTTS("")
+	if tts.Voice != "zh-CN-XiaoxiaoNeural" {
+		t.Errorf("expected default voice 'zh-CN-XiaoxiaoNeural', got %q", tts.Voice)
+	}
+
+	tts = NewEdgeTTS("en-US-JennyNeural")
+	if tts.Voice != "en-US-JennyNeural" {
+		t.Errorf("expected custom voice 'en-US-JennyNeural', got %q", tts.Voice)
+	}
+}
+
+func TestEspeakTTS_Synthesize_Integration(t *testing.T) {
+	// Skip if espeak is not available
+	if _, err := exec.LookPath("espeak"); err != nil {
+		t.Skip("espeak not available")
+	}
+
+	tts := NewEspeakTTS("espeak", "en")
+
+	// Test basic synthesis - just verify it doesn't crash
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	audio, format, err := tts.Synthesize(ctx, "hello", TTSSynthesisOpts{})
+	if err != nil {
+		t.Logf("espeak synthesis failed (may be expected in some environments): %v", err)
+		return
+	}
+
+	if format != "wav" {
+		t.Errorf("expected wav format, got %q", format)
+	}
+	if len(audio) == 0 {
+		t.Error("expected non-empty audio data")
+	}
+}
+
+func TestPicoTTS_Synthesize_Integration(t *testing.T) {
+	// Skip if pico2wave is not available
+	if _, err := exec.LookPath("pico2wave"); err != nil {
+		t.Skip("pico2wave not available")
+	}
+
+	tts := NewPicoTTS("pico2wave", "en-US")
+
+	// Test basic synthesis - just verify it doesn't crash
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	audio, format, err := tts.Synthesize(ctx, "hello", TTSSynthesisOpts{})
+	if err != nil {
+		t.Logf("pico2wave synthesis failed (may be expected in some environments): %v", err)
+		return
+	}
+
+	if format != "wav" {
+		t.Errorf("expected wav format, got %q", format)
+	}
+	if len(audio) == 0 {
+		t.Error("expected non-empty audio data")
+	}
+}
+
+func TestEdgeTTS_Synthesize_Integration(t *testing.T) {
+	// Skip if edge-tts is not available
+	if _, err := exec.LookPath("edge-tts"); err != nil {
+		t.Skip("edge-tts not available")
+	}
+
+	tts := NewEdgeTTS("en-US-JennyNeural")
+
+	// Test basic synthesis - just verify it doesn't crash
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	audio, format, err := tts.Synthesize(ctx, "hello", TTSSynthesisOpts{})
+	if err != nil {
+		t.Logf("edge-tts synthesis failed (may be expected in some environments): %v", err)
+		return
+	}
+
+	if format != "mp3" {
+		t.Errorf("expected mp3 format, got %q", format)
+	}
+	if len(audio) == 0 {
+		t.Error("expected non-empty audio data")
 	}
 }

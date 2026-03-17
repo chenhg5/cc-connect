@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -372,4 +374,197 @@ func (m *MiniMaxTTS) Synthesize(ctx context.Context, text string, opts TTSSynthe
 		return nil, "", fmt.Errorf("minimax tts: no audio data received")
 	}
 	return audioBuf.Bytes(), "mp3", nil
+}
+
+// ──────────────────────────────────────────────────────────────
+// EspeakTTS — Local eSpeak text-to-speech implementation
+// ──────────────────────────────────────────────────────────────
+
+// EspeakTTS implements TextToSpeech using the local espeak command.
+type EspeakTTS struct {
+	Path  string // path to espeak executable (empty = "espeak")
+	Voice string // default voice (e.g. "zh", "en", "zh+f3")
+}
+
+// NewEspeakTTS creates a new EspeakTTS instance.
+func NewEspeakTTS(path, voice string) *EspeakTTS {
+	if path == "" {
+		path = "espeak"
+	}
+	if voice == "" {
+		voice = "zh" // default to Chinese
+	}
+	return &EspeakTTS{
+		Path:  path,
+		Voice: voice,
+	}
+}
+
+// Synthesize uses espeak to convert text to WAV audio bytes.
+func (e *EspeakTTS) Synthesize(ctx context.Context, text string, opts TTSSynthesisOpts) ([]byte, string, error) {
+	voice := opts.Voice
+	if voice == "" {
+		voice = e.Voice
+	}
+
+	// Build espeak command
+	args := []string{
+		"-v", voice,
+		"-w", "/dev/stdout", // write WAV to stdout (Unix-only; not supported on Windows)
+	}
+
+	// Add speed option if specified
+	if opts.Speed > 0 {
+		// espeak speed is in words per minute, default 160
+		// Convert speed multiplier (0.5-2.0) to wpm
+		wpm := int(160 * opts.Speed)
+		args = append(args, "-s", fmt.Sprintf("%d", wpm))
+	}
+
+	// Add text as argument
+	args = append(args, text)
+
+	// Execute espeak command
+	// Use Output() instead of CombinedOutput() to avoid mixing stderr warnings with audio data
+	cmd := exec.Command(e.Path, args...)
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, "", fmt.Errorf("espeak: voice=%s text=%q: %w", voice, text, err)
+	}
+
+	return output, "wav", nil
+}
+
+// ──────────────────────────────────────────────────────────────
+// PicoTTS — Google Pico TTS (better quality than espeak, offline)
+// ──────────────────────────────────────────────────────────────
+
+// PicoTTS implements TextToSpeech using pico2wave (Google Pico TTS).
+type PicoTTS struct {
+	Path  string // path to pico2wave executable (empty = "pico2wave")
+	Voice string // default voice language (e.g. "zh-CN", "en-US")
+}
+
+// NewPicoTTS creates a new PicoTTS instance.
+func NewPicoTTS(path, voice string) *PicoTTS {
+	if path == "" {
+		path = "pico2wave"
+	}
+	if voice == "" {
+		voice = "zh-CN" // default to Chinese
+	}
+	return &PicoTTS{
+		Path:  path,
+		Voice: voice,
+	}
+}
+
+// Synthesize uses pico2wave to convert text to WAV audio bytes.
+// pico2wave produces much better quality than espeak.
+func (p *PicoTTS) Synthesize(ctx context.Context, text string, opts TTSSynthesisOpts) ([]byte, string, error) {
+	voice := opts.Voice
+	if voice == "" {
+		voice = p.Voice
+	}
+
+	// Create secure temp file for pico2wave output
+	tmpFile, err := os.CreateTemp("", "pico_tts_*.wav")
+	if err != nil {
+		return nil, "", fmt.Errorf("pico2wave: create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	tmpFile.Close()
+	defer os.Remove(tmpPath)
+
+	// Build pico2wave command
+	// --lang: language code (zh-CN for Chinese, en-US for English)
+	// --wave: output WAV file path
+	args := []string{
+		"--lang=" + voice,
+		"--wave=" + tmpPath,
+		text,
+	}
+
+	// Execute pico2wave command
+	cmd := exec.Command(p.Path, args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, "", fmt.Errorf("pico2wave: voice=%s text=%q: %w, output: %s", voice, text, err, string(output))
+	}
+
+	// Read the generated WAV file
+	audioData, err := os.ReadFile(tmpPath)
+	if err != nil {
+		return nil, "", fmt.Errorf("pico2wave: read output file: %w", err)
+	}
+
+	if len(audioData) == 0 {
+		return nil, "", fmt.Errorf("pico2wave: produced empty audio file")
+	}
+
+	return audioData, "wav", nil
+}
+
+// ──────────────────────────────────────────────────────────────
+// EdgeTTS — Microsoft Edge TTS (free, high quality, requires network)
+// ──────────────────────────────────────────────────────────────
+
+// EdgeTTS implements TextToSpeech using Microsoft Edge's free TTS API.
+// This uses the edge-tts CLI command under the hood.
+type EdgeTTS struct {
+	Voice string // default voice (e.g. "zh-CN-XiaoxiaoNeural")
+}
+
+// NewEdgeTTS creates a new EdgeTTS instance.
+func NewEdgeTTS(voice string) *EdgeTTS {
+	if voice == "" {
+		voice = "zh-CN-XiaoxiaoNeural" // default Chinese voice
+	}
+	return &EdgeTTS{
+		Voice: voice,
+	}
+}
+
+// Synthesize uses edge-tts CLI to convert text to MP3 audio bytes.
+// EdgeTTS provides high-quality neural voices but requires network connection.
+func (e *EdgeTTS) Synthesize(ctx context.Context, text string, opts TTSSynthesisOpts) ([]byte, string, error) {
+	voice := opts.Voice
+	if voice == "" {
+		voice = e.Voice
+	}
+
+	// Create secure temp file for edge-tts output
+	tmpFile, err := os.CreateTemp("", "edge_tts_*.mp3")
+	if err != nil {
+		return nil, "", fmt.Errorf("edge-tts: create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	tmpFile.Close()
+	defer os.Remove(tmpPath)
+
+	// Use edge-tts CLI directly to avoid code injection risks
+	// Pass text via --text argument, not via embedded code
+	args := []string{
+		"--voice", voice,
+		"--text", text,
+		"--write-media", tmpPath,
+	}
+
+	cmd := exec.CommandContext(ctx, "edge-tts", args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, "", fmt.Errorf("edge-tts: voice=%s text=%q: %w, output: %s", voice, text, err, string(output))
+	}
+
+	// Read the generated MP3 file
+	audioData, err := os.ReadFile(tmpPath)
+	if err != nil {
+		return nil, "", fmt.Errorf("edge-tts: read output file: %w", err)
+	}
+
+	if len(audioData) == 0 {
+		return nil, "", fmt.Errorf("edge-tts: produced empty audio file")
+	}
+
+	return audioData, "mp3", nil
 }
