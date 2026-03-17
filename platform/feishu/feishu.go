@@ -956,6 +956,9 @@ func (p *Platform) downloadImage(messageID, imageKey string) ([]byte, string, er
 	if !resp.Success() {
 		return nil, "", fmt.Errorf("%s: image API code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
 	}
+	if resp.File == nil {
+		return nil, "", fmt.Errorf("%s: image API returned nil file body", p.tag())
+	}
 	data, err := io.ReadAll(resp.File)
 	if err != nil {
 		return nil, "", fmt.Errorf("%s: read image: %w", p.tag(), err)
@@ -978,6 +981,9 @@ func (p *Platform) downloadResource(messageID, fileKey, resType string) ([]byte,
 	}
 	if !resp.Success() {
 		return nil, fmt.Errorf("%s: resource API code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+	}
+	if resp.File == nil {
+		return nil, fmt.Errorf("%s: resource API returned nil file body", p.tag())
 	}
 	data, err := io.ReadAll(resp.File)
 	if err != nil {
