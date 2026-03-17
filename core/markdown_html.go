@@ -325,6 +325,8 @@ func SplitMessageCodeFenceAware(text string, maxLen int) []string {
 		return []string{text}
 	}
 
+	const closingFence = "\n```" // 4 bytes appended when splitting inside a code block
+
 	lines := strings.Split(text, "\n")
 	var chunks []string
 	var current []string
@@ -334,10 +336,17 @@ func SplitMessageCodeFenceAware(text string, maxLen int) []string {
 	for _, line := range lines {
 		lineLen := len(line) + 1 // +1 for newline
 
-		if currentLen+lineLen > maxLen && len(current) > 0 {
+		// Reserve space for the closing fence when inside a code block,
+		// so the final chunk length stays within maxLen.
+		limit := maxLen
+		if openFence != "" {
+			limit -= len(closingFence)
+		}
+
+		if currentLen+lineLen > limit && len(current) > 0 {
 			chunk := strings.Join(current, "\n")
 			if openFence != "" {
-				chunk += "\n```"
+				chunk += closingFence
 			}
 			chunks = append(chunks, chunk)
 
