@@ -30,6 +30,20 @@ type SessionEnvInjector interface {
 	SetSessionEnv(env []string)
 }
 
+// FormattingInstructionProvider is an optional interface for platforms that
+// provide platform-specific formatting instructions for the agent system prompt
+// (e.g., Slack mrkdwn vs standard Markdown).
+type FormattingInstructionProvider interface {
+	FormattingInstructions() string
+}
+
+// PlatformPromptInjector is an optional interface for agents that can receive
+// platform-specific prompt fragments (e.g., formatting instructions).
+// The engine calls this before StartSession when the platform provides formatting.
+type PlatformPromptInjector interface {
+	SetPlatformPrompt(prompt string)
+}
+
 // AgentSystemPrompt returns the system prompt fragment that informs agents about
 // cc-connect capabilities (cron scheduling, etc.).
 // The prompt is designed to be appended to the agent's existing system prompt.
