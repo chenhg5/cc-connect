@@ -537,10 +537,55 @@ func isNewer(latest, current string) bool {
 	if cPre == "" && lPre != "" {
 		return false
 	}
-	// Both have pre-release: compare lexicographically (beta.2 > beta.1, rc.1 > beta.9)
+	// Both have pre-release: split on "." and compare each segment
+	// numerically where possible so beta.10 > beta.2.
 	if lPre != "" && cPre != "" {
-		return lPre > cPre
+		return comparePreRelease(lPre, cPre) > 0
 	}
 
 	return false
+}
+
+// comparePreRelease compares two pre-release strings segment by segment.
+// Numeric segments are compared as integers; non-numeric segments are
+// compared lexicographically. Returns >0 if a is greater, <0 if b is
+// greater, 0 if equal.
+func comparePreRelease(a, b string) int {
+	aParts := strings.Split(a, ".")
+	bParts := strings.Split(b, ".")
+
+	max := len(aParts)
+	if len(bParts) > max {
+		max = len(bParts)
+	}
+	for i := 0; i < max; i++ {
+		var ap, bp string
+		if i < len(aParts) {
+			ap = aParts[i]
+		}
+		if i < len(bParts) {
+			bp = bParts[i]
+		}
+
+		var an, bn int
+		aN, _ := fmt.Sscanf(ap, "%d", &an)
+		bN, _ := fmt.Sscanf(bp, "%d", &bn)
+		aIsNum := aN == 1 && fmt.Sprintf("%d", an) == ap
+		bIsNum := bN == 1 && fmt.Sprintf("%d", bn) == bp
+
+		if aIsNum && bIsNum {
+			if an != bn {
+				return an - bn
+			}
+			continue
+		}
+		// Non-numeric: lexicographic
+		if ap < bp {
+			return -1
+		}
+		if ap > bp {
+			return 1
+		}
+	}
+	return 0
 }
