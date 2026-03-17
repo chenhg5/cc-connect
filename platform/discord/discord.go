@@ -513,19 +513,8 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 // mechanism. The first call edits the deferred "thinking" response; subsequent
 // calls create followup messages.
 func (p *Platform) sendInteraction(ictx *interactionReplyCtx, content string) error {
-	for len(content) > 0 {
-		chunk := content
-		if len(chunk) > maxDiscordLen {
-			cut := maxDiscordLen
-			if idx := lastIndexBefore(content, '\n', cut); idx > 0 {
-				cut = idx + 1
-			}
-			chunk = content[:cut]
-			content = content[cut:]
-		} else {
-			content = ""
-		}
-
+	chunks := core.SplitMessageCodeFenceAware(content, maxDiscordLen)
+	for _, chunk := range chunks {
 		ictx.mu.Lock()
 		first := !ictx.firstDone
 		if first {
@@ -726,11 +715,3 @@ func downloadURL(u string) ([]byte, error) {
 	return io.ReadAll(resp.Body)
 }
 
-func lastIndexBefore(s string, b byte, before int) int {
-	for i := before - 1; i >= 0; i-- {
-		if s[i] == b {
-			return i
-		}
-	}
-	return -1
-}
