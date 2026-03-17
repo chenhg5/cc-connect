@@ -510,11 +510,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "No hay ejecución en progreso.",
 	},
 	MsgPreviousProcessing: {
-		LangEnglish:            "⏳ Previous request still processing, please wait...",
-		LangChinese:            "⏳ 上一个请求仍在处理中，请稍候...",
-		LangTraditionalChinese: "⏳ 上一個請求仍在處理中，請稍候...",
-		LangJapanese:           "⏳ 前のリクエストを処理中です。お待ちください...",
-		LangSpanish:            "⏳ La solicitud anterior aún se está procesando, por favor espere...",
+		LangEnglish:            "⏳ Previous request still processing. Use `/btw <message>` to add context to the current turn.",
+		LangChinese:            "⏳ 上一个请求仍在处理中。使用 `/btw <消息>` 可向当前轮次追加上下文。",
+		LangTraditionalChinese: "⏳ 上一個請求仍在處理中。使用 `/btw <訊息>` 可向當前輪次追加上下文。",
+		LangJapanese:           "⏳ 前のリクエストを処理中です。`/btw <メッセージ>` で現在のターンにコンテキストを追加できます。",
+		LangSpanish:            "⏳ La solicitud anterior aún se está procesando. Use `/btw <mensaje>` para agregar contexto al turno actual.",
 	},
 	MsgNoToolsAllowed: {
 		LangEnglish:            "No tools pre-allowed.\nUsage: `/allow <tool_name>`\nExample: `/allow Bash`",
