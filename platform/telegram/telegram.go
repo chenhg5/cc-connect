@@ -79,14 +79,6 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 
 	slog.Info("telegram: connected", "bot", bot.Self.UserName)
 
-	// Drain pending updates from previous session to avoid re-processing old messages.
-	// offset -1 tells Telegram to mark all pending updates as confirmed, returning only the latest one.
-	drain := tgbotapi.NewUpdate(-1)
-	drain.Timeout = 0
-	if _, err := bot.GetUpdates(drain); err != nil {
-		slog.Warn("telegram: failed to drain old updates", "error", err)
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	p.cancel = cancel
 

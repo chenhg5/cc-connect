@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -13,6 +14,138 @@ import (
 
 	"github.com/chenhg5/cc-connect/core"
 )
+
+type codexThreadMeta struct {
+	DisplayName string
+	Title       string
+}
+
+func codexHomeDir() string {
+	if codexHome := os.Getenv("CODEX_HOME"); codexHome != "" {
+		return codexHome
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+
+	return filepath.Join(homeDir, ".codex")
+}
+
+func loadCodexThreadMeta(codexHome, workDir string) map[string]codexThreadMeta {
+	threadMeta := make(map[string]codexThreadMeta)
+	indexPath := filepath.Join(codexHome, "session_index.jsonl")
+	titlesPath := filepath.Join(codexHome, "state_5.sqlite")
+
+	for id, title := range loadCodexThreadTitles(titlesPath, workDir) {
+		meta := threadMeta[id]
+		meta.Title = normalizeCodexSessionLabel(title)
+		threadMeta[id] = meta
+	}
+
+	for id, threadName := range loadCodexThreadNames(indexPath) {
+		meta := threadMeta[id]
+		meta.DisplayName = normalizeCodexSessionLabel(threadName)
+		threadMeta[id] = meta
+	}
+
+	return threadMeta
+}
+
+func loadCodexThreadNames(path string) map[string]string {
+	threadNames := make(map[string]string)
+	if path == "" {
+		return threadNames
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return threadNames
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+
+		var entry struct {
+			ID         string `json:"id"`
+			ThreadName string `json:"thread_name"`
+		}
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue
+		}
+		if entry.ID == "" || strings.TrimSpace(entry.ThreadName) == "" {
+			continue
+		}
+
+		threadNames[entry.ID] = strings.TrimSpace(entry.ThreadName)
+	}
+
+	return threadNames
+}
+
+func loadCodexThreadTitles(dbPath, workDir string) map[string]string {
+	titles := make(map[string]string)
+	if dbPath == "" {
+		return titles
+	}
+	if _, err := os.Stat(dbPath); err != nil {
+		return titles
+	}
+
+	sqlite3, err := exec.LookPath("sqlite3")
+	if err != nil {
+		return titles
+	}
+
+	escapedWorkDir := strings.ReplaceAll(workDir, "'", "''")
+	query := fmt.Sprintf(
+		"SELECT id, substr(title, 1, 512) AS title FROM threads WHERE cwd = '%s'",
+		escapedWorkDir,
+	)
+	output, err := exec.Command(sqlite3, dbPath, "-json", query).Output()
+	if err != nil {
+		return titles
+	}
+
+	var rows []struct {
+		ID    string `json:"id"`
+		Title string `json:"title"`
+	}
+	if err := json.Unmarshal(output, &rows); err != nil {
+		return titles
+	}
+
+	for _, row := range rows {
+		if row.ID == "" || strings.TrimSpace(row.Title) == "" {
+			continue
+		}
+		titles[row.ID] = row.Title
+	}
+
+	return titles
+}
+
+func normalizeCodexSessionLabel(text string) string {
+	text = strings.ReplaceAll(text, "\n", " ")
+	text = strings.Join(strings.Fields(text), " ")
+	return strings.TrimSpace(text)
+}
+
+func resolveCodexDisplayName(meta codexThreadMeta) string {
+	displayName := normalizeCodexSessionLabel(meta.DisplayName)
+	if displayName != "" {
+		return displayName
+	}
+	return normalizeCodexSessionLabel(meta.Title)
+}
 
 // listCodexSessions scans ~/.codex/sessions/ for JSONL transcript files
 // whose cwd matches workDir.
@@ -22,16 +155,12 @@ func listCodexSessions(workDir string) ([]core.AgentSessionInfo, error) {
 		absWorkDir = workDir
 	}
 
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return nil, err
-	}
-
-	codexHome := os.Getenv("CODEX_HOME")
+	codexHome := codexHomeDir()
 	if codexHome == "" {
-		codexHome = filepath.Join(homeDir, ".codex")
+		return nil, fmt.Errorf("resolve CODEX_HOME: empty path")
 	}
 	sessionsDir := filepath.Join(codexHome, "sessions")
+	threadMeta := loadCodexThreadMeta(codexHome, absWorkDir)
 
 	var files []string
 	_ = filepath.Walk(sessionsDir, func(path string, info os.FileInfo, err error) error {
@@ -50,7 +179,7 @@ func listCodexSessions(workDir string) ([]core.AgentSessionInfo, error) {
 
 	var sessions []core.AgentSessionInfo
 	for _, f := range files {
-		info := parseCodexSessionFile(f, absWorkDir)
+		info := parseCodexSessionFile(f, absWorkDir, threadMeta)
 		if info != nil {
 			patchSessionSource(info.ID)
 			sessions = append(sessions, *info)
@@ -66,7 +195,7 @@ func listCodexSessions(workDir string) ([]core.AgentSessionInfo, error) {
 
 // parseCodexSessionFile reads a Codex JSONL transcript.
 // Returns nil if the session's cwd doesn't match filterCwd.
-func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
+func parseCodexSessionFile(path, filterCwd string, threadMeta map[string]codexThreadMeta) *core.AgentSessionInfo {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil
@@ -82,7 +211,6 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 	var sessionCwd string
 	var summary string
 	var msgCount int
-	userMsgSeen := 0
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 256*1024), 256*1024)
@@ -103,13 +231,17 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 
 		switch entry.Type {
 		case "session_meta":
-			var meta struct {
+			if sessionID != "" {
+				continue
+			}
+
+			var sessionMeta struct {
 				ID  string `json:"id"`
 				Cwd string `json:"cwd"`
 			}
-			if json.Unmarshal(entry.Payload, &meta) == nil {
-				sessionID = meta.ID
-				sessionCwd = meta.Cwd
+			if json.Unmarshal(entry.Payload, &sessionMeta) == nil {
+				sessionID = sessionMeta.ID
+				sessionCwd = sessionMeta.Cwd
 			}
 
 		case "response_item":
@@ -122,7 +254,6 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 			}
 			if json.Unmarshal(entry.Payload, &item) == nil {
 				if item.Role == "user" {
-					userMsgSeen++
 					msgCount++
 					// The actual user prompt is the last user response_item
 					// (earlier ones are system/AGENTS.md instructions).
@@ -152,8 +283,10 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 		summary = string([]rune(summary)[:60]) + "..."
 	}
 
+	meta := threadMeta[sessionID]
 	return &core.AgentSessionInfo{
 		ID:           sessionID,
+		DisplayName:  resolveCodexDisplayName(meta),
 		Summary:      summary,
 		MessageCount: msgCount,
 		ModifiedAt:   stat.ModTime(),
@@ -162,13 +295,9 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 
 // findSessionFile locates the JSONL transcript for a given session ID.
 func findSessionFile(sessionID string) string {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	codexHome := os.Getenv("CODEX_HOME")
+	codexHome := codexHomeDir()
 	if codexHome == "" {
-		codexHome = filepath.Join(homeDir, ".codex")
+		return ""
 	}
 	sessionsDir := filepath.Join(codexHome, "sessions")
 
