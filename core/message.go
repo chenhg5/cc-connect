@@ -129,6 +129,7 @@ type Message struct {
 	SessionKey string // unique key for user context, e.g. "feishu:{chatID}:{userID}"
 	Platform   string
 	MessageID  string // platform message ID for tracing
+	ChannelID  string
 	UserID     string
 	UserName   string
 	ChatName   string // human-readable chat/group name (optional)
@@ -155,10 +156,10 @@ const (
 
 // UserQuestion represents a structured question from AskUserQuestion.
 type UserQuestion struct {
-	Question    string             `json:"question"`
-	Header      string             `json:"header"`
+	Question    string               `json:"question"`
+	Header      string               `json:"header"`
 	Options     []UserQuestionOption `json:"options"`
-	MultiSelect bool               `json:"multiSelect"`
+	MultiSelect bool                 `json:"multiSelect"`
 }
 
 // UserQuestionOption is one choice in a UserQuestion.

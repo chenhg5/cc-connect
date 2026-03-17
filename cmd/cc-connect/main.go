@@ -125,6 +125,9 @@ func main() {
 	engines := make([]*core.Engine, 0, len(cfg.Projects))
 
 	for _, proj := range cfg.Projects {
+		if proj.Mode == "multi-workspace" {
+			proj.Agent.Options["work_dir"] = proj.BaseDir
+		}
 		agent, err := core.CreateAgent(proj.Agent.Type, proj.Agent.Options)
 		if err != nil {
 			slog.Error("failed to create agent", "project", proj.Name, "error", err)
@@ -195,6 +198,9 @@ func main() {
 			}
 			bindingStore := filepath.Join(cfg.DataDir, "workspace_bindings.json")
 			engine.SetMultiWorkspace(baseDir, bindingStore)
+			if proj.SkipGit != nil {
+				engine.SetSkipGit(*proj.SkipGit)
+			}
 			slog.Info("multi-workspace mode enabled", "project", proj.Name, "base_dir", baseDir)
 		}
 

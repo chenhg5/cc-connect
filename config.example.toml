@@ -376,6 +376,7 @@ level = "info" # debug, info, warn, error
 # [[projects]]
 # name = "claude-multi"
 # mode = "multi-workspace"
+# skip_git = true # skip bind git repo, create a dir directly
 # base_dir = "~/workspace"
 #
 # [projects.agent]
