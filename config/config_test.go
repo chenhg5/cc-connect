@@ -297,6 +297,25 @@ func TestTTSConfig_SaveMode(t *testing.T) {
 	}
 }
 
+const attachmentSendConfigFixture = `
+attachment_send = "off"
+
+[[projects]]
+name = "alpha"
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/alpha"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+bot_token = "token_xxx"
+`
+
 func TestSaveFeishuPlatformCredentials_UpdateFirstCandidateAndAllowFrom(t *testing.T) {
 	configPath := writeConfigFixture(t, feishuConfigFixture)
 	patchConfigPath(t, configPath)
@@ -494,6 +513,30 @@ func TestSaveFeishuPlatformCredentials_PreservesCommentsAndUnknownFields(t *test
 	}
 	if !strings.Contains(text, "keep inline comment") {
 		t.Fatalf("expected inline comment to be preserved, got:\n%s", text)
+	}
+}
+
+func TestLoad_DefaultsAttachmentSendToOn(t *testing.T) {
+	configPath := writeConfigFixture(t, projectWithoutFeishuFixture)
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.AttachmentSend != "on" {
+		t.Fatalf("cfg.AttachmentSend = %q, want %q", cfg.AttachmentSend, "on")
+	}
+}
+
+func TestLoad_ParsesAttachmentSendOff(t *testing.T) {
+	configPath := writeConfigFixture(t, attachmentSendConfigFixture)
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.AttachmentSend != "off" {
+		t.Fatalf("cfg.AttachmentSend = %q, want %q", cfg.AttachmentSend, "off")
 	}
 }
 

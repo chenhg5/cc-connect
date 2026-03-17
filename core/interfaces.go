@@ -49,9 +49,19 @@ type PlatformPromptInjector interface {
 // The prompt is designed to be appended to the agent's existing system prompt.
 func AgentSystemPrompt() string {
 	return `You are running inside cc-connect, a bridge that connects you to messaging platforms.
-Your responses are automatically delivered to the user — just reply normally, do NOT use cc-connect send.
+Your normal text responses are automatically delivered to the user — just reply normally, do NOT use cc-connect send for ordinary text replies.
 
 ## Available tools
+
+### Send generated images or files back to the user
+When you generate a local image or file that should be sent to the user, use:
+
+  cc-connect send --image /absolute/path/to/image.png
+  cc-connect send --file /absolute/path/to/report.pdf
+  cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/chart.png
+
+You may repeat --image / --file multiple times. Use this only for generated attachments that need to be delivered to the user.
+If you include --message, do not repeat the exact same sentence again in your normal reply, because your normal reply is also delivered automatically.
 
 ### Scheduled tasks (cron)
 When the user asks you to do something on a schedule (e.g. "每天早上6点帮我总结GitHub trending"), use the Bash tool to run:
@@ -97,6 +107,16 @@ type SystemPromptSupporter interface {
 // a stop function that the caller must invoke when processing ends.
 type TypingIndicator interface {
 	StartTyping(ctx context.Context, replyCtx any) (stop func())
+}
+
+// ImageSender is an optional interface for platforms that support sending images.
+type ImageSender interface {
+	SendImage(ctx context.Context, replyCtx any, img ImageAttachment) error
+}
+
+// FileSender is an optional interface for platforms that support sending files.
+type FileSender interface {
+	SendFile(ctx context.Context, replyCtx any, file FileAttachment) error
 }
 
 // MessageUpdater is an optional interface for platforms that support updating messages.

@@ -24,6 +24,14 @@
 # 会话数据存储目录（默认 ~/.cc-connect），以 JSON 文件保存对话历史和会话状态。
 # data_dir = "/path/to/custom/dir"
 
+# Attachment send-back switch for `cc-connect send --image/--file`.
+# Independent from the agent's /mode. Set to "off" to block IM image/file send-back.
+# `cc-connect send --message` without attachments is unaffected.
+# 附件回传开关，用于控制 `cc-connect send --image/--file`。
+# 它与 agent 的 /mode 独立；设为 "off" 会禁用通过 IM 回传图片/文件。
+# 不带附件的 `cc-connect send --message` 不受影响。
+# attachment_send = "on"
+
 # Default quiet mode (suppress thinking/tool progress messages) / 默认静默模式（隐藏思考和工具进度消息）
 # Can be overridden per-project. Users can still toggle with /quiet command.
 # 可被项目级配置覆盖。用户仍可通过 /quiet 命令切换。

@@ -11,6 +11,7 @@ Complete guide to using cc-connect features.
 - [Claude Code Router Integration](#claude-code-router-integration)
 - [Voice Messages (STT)](#voice-messages-speech-to-text)
 - [Voice Reply (TTS)](#voice-reply-text-to-speech)
+- [Image and File Send-Back](#image-and-file-send-back)
 - [Scheduled Tasks (Cron)](#scheduled-tasks-cron)
 - [Multi-Bot Relay](#multi-bot-relay)
 - [Daemon Mode](#daemon-mode)
@@ -310,6 +311,75 @@ Switch: `/tts always` or `/tts voice_only`
 
 ---
 
+## Image and File Send-Back
+
+When an agent generates a local image, PDF, report, bundle, or other file and needs to deliver it directly to the current chat, use attachment mode in `cc-connect send`.
+
+**Currently supported platforms:**
+- Feishu
+- Telegram
+
+### When to run setup first
+
+If the current agent does not natively inject the system prompt, run this once in chat after upgrading:
+
+```text
+/bind setup
+```
+
+or:
+
+```text
+/cron setup
+```
+
+These two commands write the same cc-connect instructions. Either one is enough. After that, the agent knows:
+- normal text replies should be returned normally
+- generated attachments should be sent back with `cc-connect send --image/--file`
+
+If you have run setup before, run it again after upgrading so the instructions are refreshed to the latest version.
+
+### Config switch
+
+Add this to `config.toml` if you want to disable agent-driven attachment send-back:
+
+```toml
+attachment_send = "off"
+```
+
+The default is `on`. This switch is independent from the agent's `/mode` and only affects `cc-connect send --image/--file`.
+
+### CLI examples
+
+```bash
+cc-connect send --image /absolute/path/to/chart.png
+cc-connect send --file /absolute/path/to/report.pdf
+cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/chart.png
+```
+
+Notes:
+- `--image` is for image attachments.
+- `--file` is for any file attachment.
+- `--message` is optional and sends a text note before the attachments.
+- `--image` and `--file` can both be repeated.
+- Absolute paths are recommended so the command does not depend on the agent's current working directory.
+- With `attachment_send = "off"`, image/file send-back is blocked but ordinary text replies still work.
+
+### Typical use cases
+
+1. The agent generates a screenshot or chart and should send it directly to the user.
+2. The agent generates a PDF, Markdown export, log bundle, or patch file that should be delivered as an attachment.
+3. The agent wants to send a short status message together with one or more generated files.
+
+### Important notes
+
+- This command is for attachment delivery, not ordinary text replies.
+- The files must exist on the local machine where the agent runs.
+- There must be an active session; otherwise the command fails because cc-connect has no chat context to deliver to.
+- Platform-specific file size and file type limits still apply.
+
+---
+
 ## Scheduled Tasks (Cron)
 
 Create scheduled tasks that run automatically.
@@ -341,7 +411,7 @@ cc-connect cron del <job-id>
 
 > "Every day at 6am, summarize GitHub trending"
 
-Claude Code auto-creates the cron job.
+Claude Code auto-creates the cron job. For other agents that rely on memory files, run `/cron setup` or `/bind setup` once first; both write the same instructions.
 
 ---
 
