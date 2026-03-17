@@ -160,9 +160,9 @@ type Engine struct {
 	bannedMu    sync.RWMutex
 
 	disabledCmds map[string]bool
-	adminFrom    string // comma-separated user IDs for privileged commands; "*" = all allowed users; "" = deny
+	adminFrom    string           // comma-separated user IDs for privileged commands; "*" = all allowed users; "" = deny
 	userRoles    *UserRoleManager // nil = legacy mode (no per-user policies)
-	userRolesMu  sync.RWMutex    // protects userRoles, disabledCmds, and adminFrom
+	userRolesMu  sync.RWMutex     // protects userRoles, disabledCmds, and adminFrom
 
 	rateLimiter      *RateLimiter
 	streamPreview    StreamPreviewCfg
@@ -1933,7 +1933,7 @@ var builtinCommands = []struct {
 }{
 	{[]string{"new"}, "new"},
 	{[]string{"list", "sessions"}, "list"},
-	{[]string{"switch"}, "switch"},
+	{[]string{"switch", "swich"}, "switch"},
 	{[]string{"name", "rename"}, "name"},
 	{[]string{"current"}, "current"},
 	{[]string{"status"}, "status"},
@@ -1967,6 +1967,14 @@ var builtinCommands = []struct {
 	{[]string{"dir", "cd", "chdir", "workdir"}, "dir"},
 	{[]string{"tts"}, "tts"},
 	{[]string{"workspace", "ws"}, "workspace"},
+}
+
+var attachedArgCommands = map[string]bool{
+	"delete": true,
+	"list":   true,
+	"name":   true,
+	"search": true,
+	"switch": true,
 }
 
 // matchPrefix finds a unique command matching the given prefix.
@@ -2021,10 +2029,52 @@ func matchSubCommand(input string, candidates []string) string {
 	return input
 }
 
-func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
+func splitCommandAndArgs(raw string) (string, []string) {
 	parts := strings.Fields(raw)
+	if len(parts) == 0 {
+		return "", nil
+	}
+
 	cmd := strings.ToLower(strings.TrimPrefix(parts[0], "/"))
 	args := parts[1:]
+	if len(args) > 0 || !strings.HasPrefix(parts[0], "/") {
+		return cmd, args
+	}
+
+	body := strings.TrimPrefix(parts[0], "/")
+	var matchedID string
+	var matchedRest string
+	var matchedLen int
+
+	for _, candidate := range builtinCommands {
+		if !attachedArgCommands[candidate.id] {
+			continue
+		}
+		for _, name := range candidate.names {
+			if !strings.HasPrefix(body, name) || len(body) <= len(name) {
+				continue
+			}
+			if len(name) <= matchedLen {
+				continue
+			}
+			matchedID = candidate.id
+			matchedRest = strings.TrimSpace(body[len(name):])
+			matchedLen = len(name)
+		}
+	}
+
+	if matchedID != "" && matchedRest != "" {
+		return matchedID, []string{matchedRest}
+	}
+
+	return cmd, args
+}
+
+func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
+	cmd, args := splitCommandAndArgs(raw)
+	if cmd == "" {
+		return false
+	}
 
 	cmdID := matchPrefix(cmd, builtinCommands)
 
@@ -2297,6 +2347,97 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 
 const listPageSize = 20
 
+func normalizeSessionLabel(text string) string {
+	text = strings.ReplaceAll(text, "\n", " ")
+	text = strings.Join(strings.Fields(text), " ")
+	return strings.TrimSpace(text)
+}
+
+func truncateSessionLabel(text string, limit int) string {
+	if limit <= 0 || utf8.RuneCountInString(text) <= limit {
+		return text
+	}
+
+	runes := []rune(text)
+	return string(runes[:limit]) + "…"
+}
+
+func customSessionName(manager *SessionManager, sessionID string) string {
+	if manager == nil || sessionID == "" {
+		return ""
+	}
+	return normalizeSessionLabel(manager.GetSessionName(sessionID))
+}
+
+func nativeSessionDisplayName(info AgentSessionInfo) string {
+	return normalizeSessionLabel(info.DisplayName)
+}
+
+func (e *Engine) resolveAgentSessionDisplayName(manager *SessionManager, info AgentSessionInfo) string {
+	if name := customSessionName(manager, info.ID); name != "" {
+		return name
+	}
+	if name := nativeSessionDisplayName(info); name != "" {
+		return name
+	}
+	return normalizeSessionLabel(info.Summary)
+}
+
+func (e *Engine) resolveAgentSessionListLabel(manager *SessionManager, info AgentSessionInfo, emptyLabel string) string {
+	if name := customSessionName(manager, info.ID); name != "" {
+		return "📌 " + truncateSessionLabel(name, 40)
+	}
+	if name := nativeSessionDisplayName(info); name != "" {
+		return truncateSessionLabel(name, 40)
+	}
+
+	label := normalizeSessionLabel(info.Summary)
+	if label == "" {
+		label = emptyLabel
+	}
+	return truncateSessionLabel(label, 40)
+}
+
+func (e *Engine) findAgentSessionInfo(agent Agent, sessionID string) *AgentSessionInfo {
+	if agent == nil || sessionID == "" {
+		return nil
+	}
+
+	agentSessions, err := agent.ListSessions(e.ctx)
+	if err != nil {
+		return nil
+	}
+
+	for i := range agentSessions {
+		if agentSessions[i].ID == sessionID {
+			return &agentSessions[i]
+		}
+	}
+
+	return nil
+}
+
+func (e *Engine) resolveSessionDisplayNameByID(agent Agent, manager *SessionManager, sessionID, fallback string) string {
+	if name := customSessionName(manager, sessionID); name != "" {
+		return name
+	}
+	if info := e.findAgentSessionInfo(agent, sessionID); info != nil {
+		if name := e.resolveAgentSessionDisplayName(manager, *info); name != "" {
+			return name
+		}
+	}
+
+	fallback = normalizeSessionLabel(fallback)
+	if fallback != "" {
+		return fallback
+	}
+
+	if len(sessionID) > 12 {
+		return sessionID[:12]
+	}
+	return sessionID
+}
+
 func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 	agent, sessions, _, err := e.commandContext(p, msg)
 	if err != nil {
@@ -2350,19 +2491,7 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 			if s.ID == activeAgentID {
 				marker = "▶"
 			}
-			displayName := sessions.GetSessionName(s.ID)
-			if displayName != "" {
-				displayName = "📌 " + displayName
-			} else {
-				displayName = strings.ReplaceAll(s.Summary, "\n", " ")
-				displayName = strings.Join(strings.Fields(displayName), " ")
-				if displayName == "" {
-					displayName = "(empty)"
-				}
-				if len([]rune(displayName)) > 40 {
-					displayName = string([]rune(displayName)[:40]) + "…"
-				}
-			}
+			displayName := e.resolveAgentSessionListLabel(sessions, s, "(empty)")
 			sb.WriteString(fmt.Sprintf("%s **%d.** %s · **%d** msgs · %s\n",
 				marker, i+1, displayName, s.MessageCount, s.ModifiedAt.Format("01-02 15:04")))
 		}
@@ -2395,7 +2524,6 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	}
 	query := strings.TrimSpace(strings.Join(args, " "))
 
-	slog.Info("cmdSwitch: listing agent sessions", "session_key", msg.SessionKey)
 	agent, sessions, interactiveKey, err := e.commandContext(p, msg)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
@@ -2413,12 +2541,11 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	slog.Info("cmdSwitch: cleaning up old session", "session_key", msg.SessionKey)
 	e.cleanupInteractiveState(interactiveKey)
-	slog.Info("cmdSwitch: cleanup done", "session_key", msg.SessionKey)
 
+	displayName := e.resolveAgentSessionDisplayName(sessions, *matched)
 	session := sessions.GetOrCreateActive(msg.SessionKey)
-	session.SetAgentInfo(matched.ID, agent.Name(), matched.Summary)
+	session.SetAgentInfo(matched.ID, agent.Name(), displayName)
 	session.ClearHistory()
 	sessions.Save()
 
@@ -2426,9 +2553,8 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	if len(shortID) > 12 {
 		shortID = shortID[:12]
 	}
-	displayName := sessions.GetSessionName(matched.ID)
 	if displayName == "" {
-		displayName = matched.Summary
+		displayName = shortID
 	}
 	e.reply(p, msg.ReplyCtx,
 		e.i18n.Tf(MsgSwitchSuccess, displayName, shortID, matched.MessageCount))
@@ -2439,7 +2565,10 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 //  2. Exact custom name match (case-insensitive)
 //  3. Session ID prefix match
 //  4. Custom name prefix match (case-insensitive)
-//  5. Summary substring match (case-insensitive)
+//  5. Exact native display name match (case-insensitive)
+//  6. Native display name prefix match (case-insensitive)
+//  7. Native display name substring match (case-insensitive)
+//  8. Summary substring match (case-insensitive)
 func (e *Engine) matchSession(sessions []AgentSessionInfo, manager *SessionManager, query string) *AgentSessionInfo {
 	if len(sessions) == 0 {
 		return nil
@@ -2454,8 +2583,8 @@ func (e *Engine) matchSession(sessions []AgentSessionInfo, manager *SessionManag
 
 	// 2. Exact custom name match
 	for i := range sessions {
-		name := manager.GetSessionName(sessions[i].ID)
-		if name != "" && strings.ToLower(name) == queryLower {
+		name := customSessionName(manager, sessions[i].ID)
+		if name != "" && strings.EqualFold(name, query) {
 			return &sessions[i]
 		}
 	}
@@ -2469,15 +2598,39 @@ func (e *Engine) matchSession(sessions []AgentSessionInfo, manager *SessionManag
 
 	// 4. Custom name prefix match
 	for i := range sessions {
-		name := manager.GetSessionName(sessions[i].ID)
+		name := customSessionName(manager, sessions[i].ID)
 		if name != "" && strings.HasPrefix(strings.ToLower(name), queryLower) {
 			return &sessions[i]
 		}
 	}
 
-	// 5. Summary substring match
+	// 5. Exact native display name match
 	for i := range sessions {
-		if sessions[i].Summary != "" && strings.Contains(strings.ToLower(sessions[i].Summary), queryLower) {
+		name := nativeSessionDisplayName(sessions[i])
+		if name != "" && strings.EqualFold(name, query) {
+			return &sessions[i]
+		}
+	}
+
+	// 6. Native display name prefix match
+	for i := range sessions {
+		name := nativeSessionDisplayName(sessions[i])
+		if name != "" && strings.HasPrefix(strings.ToLower(name), queryLower) {
+			return &sessions[i]
+		}
+	}
+
+	// 7. Native display name substring match
+	for i := range sessions {
+		name := nativeSessionDisplayName(sessions[i])
+		if name != "" && strings.Contains(strings.ToLower(name), queryLower) {
+			return &sessions[i]
+		}
+	}
+
+	// 8. Summary substring match
+	for i := range sessions {
+		if summary := normalizeSessionLabel(sessions[i].Summary); summary != "" && strings.Contains(strings.ToLower(summary), queryLower) {
 			return &sessions[i]
 		}
 	}
@@ -2630,20 +2783,27 @@ func (e *Engine) cmdSearch(p Platform, msg *Message, args []string) {
 	var results []searchResult
 
 	for _, s := range agentSessions {
-		// Check session name (custom name or summary)
-		customName := sessions.GetSessionName(s.ID)
-		displayName := customName
-		if displayName == "" {
-			displayName = s.Summary
-		}
+		displayName := e.resolveAgentSessionDisplayName(sessions, s)
 
-		// Match by name/summary
+		// Match by display name
 		if strings.Contains(strings.ToLower(displayName), keyword) {
 			results = append(results, searchResult{
 				id:           s.ID,
 				name:         displayName,
 				summary:      s.Summary,
 				matchType:    "name",
+				messageCount: s.MessageCount,
+			})
+			continue
+		}
+
+		// Match by summary even if a custom/native name exists.
+		if summary := normalizeSessionLabel(s.Summary); summary != "" && strings.Contains(strings.ToLower(summary), keyword) {
+			results = append(results, searchResult{
+				id:           s.ID,
+				name:         displayName,
+				summary:      s.Summary,
+				matchType:    "message",
 				messageCount: s.MessageCount,
 			})
 			continue
@@ -2745,7 +2905,7 @@ func (e *Engine) cmdName(p Platform, msg *Message, args []string) {
 
 func (e *Engine) cmdCurrent(p Platform, msg *Message) {
 	if !supportsCards(p) {
-		_, sessions, _, err := e.commandContext(p, msg)
+		agent, sessions, _, err := e.commandContext(p, msg)
 		if err != nil {
 			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
 			return
@@ -2755,7 +2915,8 @@ func (e *Engine) cmdCurrent(p Platform, msg *Message) {
 		if agentID == "" {
 			agentID = e.i18n.T(MsgSessionNotStarted)
 		}
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCurrentSession), s.Name, agentID, len(s.History)))
+		displayName := e.resolveSessionDisplayNameByID(agent, sessions, s.GetAgentSessionID(), s.GetName())
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCurrentSession), displayName, agentID, len(s.History)))
 		return
 	}
 
@@ -2813,10 +2974,7 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 		modeStr += e.i18n.Tf(MsgStatusQuiet, quietStr)
 
 		s := sessions.GetOrCreateActive(msg.SessionKey)
-		sessionDisplayName := sessions.GetSessionName(s.GetAgentSessionID())
-		if sessionDisplayName == "" {
-			sessionDisplayName = s.Name
-		}
+		sessionDisplayName := e.resolveSessionDisplayNameByID(agent, sessions, s.GetAgentSessionID(), s.GetName())
 		sessionStr := e.i18n.Tf(MsgStatusSession, sessionDisplayName, len(s.History))
 
 		var cronStr string
@@ -3204,10 +3362,7 @@ func (e *Engine) renderStatusCard(sessionKey string) *Card {
 	modeStr += e.i18n.Tf(MsgStatusQuiet, quietStr)
 
 	s := sessions.GetOrCreateActive(sessionKey)
-	sessionDisplayName := sessions.GetSessionName(s.GetAgentSessionID())
-	if sessionDisplayName == "" {
-		sessionDisplayName = s.GetName()
-	}
+	sessionDisplayName := e.resolveSessionDisplayNameByID(agent, sessions, s.GetAgentSessionID(), s.GetName())
 	sessionStr := e.i18n.Tf(MsgStatusSession, sessionDisplayName, len(s.History))
 
 	var cronStr string
@@ -4898,7 +5053,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 		e.cleanupInteractiveState(interactiveKey)
 		session := sessions.GetOrCreateActive(sessionKey)
-		session.SetAgentInfo(matched.ID, agent.Name(), matched.Summary)
+		session.SetAgentInfo(matched.ID, agent.Name(), e.resolveAgentSessionDisplayName(sessions, *matched))
 		session.ClearHistory()
 		sessions.Save()
 
@@ -5452,19 +5607,7 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 		if s.ID == activeAgentID {
 			marker = "▶"
 		}
-		displayName := sessions.GetSessionName(s.ID)
-		if displayName != "" {
-			displayName = "📌 " + displayName
-		} else {
-			displayName = strings.ReplaceAll(s.Summary, "\n", " ")
-			displayName = strings.Join(strings.Fields(displayName), " ")
-			if displayName == "" {
-				displayName = e.i18n.T(MsgListEmptySummary)
-			}
-			if len([]rune(displayName)) > 40 {
-				displayName = string([]rune(displayName)[:40]) + "…"
-			}
-		}
+		displayName := e.resolveAgentSessionListLabel(sessions, s, e.i18n.T(MsgListEmptySummary))
 		btnType := "default"
 		if s.ID == activeAgentID {
 			btnType = "primary"
@@ -5499,13 +5642,14 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 // ──────────────────────────────────────────────────────────────
 
 func (e *Engine) renderCurrentCard(sessionKey string) *Card {
-	_, sessions := e.sessionContextForKey(sessionKey)
+	agent, sessions := e.sessionContextForKey(sessionKey)
 	s := sessions.GetOrCreateActive(sessionKey)
 	agentID := s.GetAgentSessionID()
 	if agentID == "" {
 		agentID = e.i18n.T(MsgSessionNotStarted)
 	}
-	content := fmt.Sprintf(e.i18n.T(MsgCurrentSession), s.Name, agentID, len(s.History))
+	displayName := e.resolveSessionDisplayNameByID(agent, sessions, s.GetAgentSessionID(), s.GetName())
+	content := fmt.Sprintf(e.i18n.T(MsgCurrentSession), displayName, agentID, len(s.History))
 	return NewCard().
 		Title(e.i18n.T(MsgCardTitleCurrentSession), "turquoise").
 		Markdown(content).
@@ -7158,10 +7302,7 @@ func (e *Engine) deleteSingleSessionReply(msg *Message, deleter SessionDeleter, 
 }
 
 func (e *Engine) deleteSessionDisplayName(sessions *SessionManager, matched *AgentSessionInfo) string {
-	displayName := sessions.GetSessionName(matched.ID)
-	if displayName == "" {
-		displayName = matched.Summary
-	}
+	displayName := e.resolveAgentSessionDisplayName(sessions, *matched)
 	if displayName == "" {
 		shortID := matched.ID
 		if len(shortID) > 12 {

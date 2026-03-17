@@ -155,10 +155,10 @@ const (
 
 // UserQuestion represents a structured question from AskUserQuestion.
 type UserQuestion struct {
-	Question    string             `json:"question"`
-	Header      string             `json:"header"`
+	Question    string               `json:"question"`
+	Header      string               `json:"header"`
 	Options     []UserQuestionOption `json:"options"`
-	MultiSelect bool               `json:"multiSelect"`
+	MultiSelect bool                 `json:"multiSelect"`
 }
 
 // UserQuestionOption is one choice in a UserQuestion.
@@ -192,6 +192,7 @@ type HistoryEntry struct {
 // AgentSessionInfo describes one session as reported by the agent backend.
 type AgentSessionInfo struct {
 	ID           string
+	DisplayName  string
 	Summary      string
 	MessageCount int
 	ModifiedAt   time.Time

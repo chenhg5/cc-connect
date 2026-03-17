@@ -249,6 +249,10 @@ func newTestEngine() *Engine {
 	return NewEngine("test", &stubAgent{}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
 }
 
+func newTestEngineWithAgent(agent Agent) *Engine {
+	return NewEngine("test", agent, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
+}
+
 func countCardActionValues(card *Card, prefix string) int {
 	count := 0
 	for _, elem := range card.Elements {
@@ -3256,5 +3260,189 @@ func TestExecuteCardAction_ModeCleansUpWithInteractiveKey(t *testing.T) {
 	e.interactiveMu.Unlock()
 	if exists {
 		t.Error("expected interactive state to be cleaned up after /mode")
+	}
+}
+
+func TestEngine_ListUsesNativeDisplayName(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubListAgent{sessions: []AgentSessionInfo{
+		{
+			ID:           "session-1",
+			DisplayName:  "服务器运维",
+			Summary:      "PLEASE IMPLEMENT THIS PLAN",
+			MessageCount: 118,
+			ModifiedAt:   time.Date(2026, 3, 17, 9, 45, 0, 0, time.UTC),
+		},
+	}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	msg := &Message{SessionKey: "telegram:1", ReplyCtx: "ctx"}
+	e.cmdList(p, msg, nil)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "服务器运维") {
+		t.Fatalf("list text = %q, want native display name", p.sent[0])
+	}
+	if strings.Contains(p.sent[0], "PLEASE IMPLEMENT THIS PLAN") {
+		t.Fatalf("list text = %q, should not fall back to summary when native display name exists", p.sent[0])
+	}
+}
+
+func TestEngine_ListCustomNameOverridesNativeDisplayName(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubListAgent{sessions: []AgentSessionInfo{
+		{
+			ID:           "session-1",
+			DisplayName:  "服务器运维",
+			Summary:      "PLEASE IMPLEMENT THIS PLAN",
+			MessageCount: 118,
+			ModifiedAt:   time.Date(2026, 3, 17, 9, 45, 0, 0, time.UTC),
+		},
+	}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.sessions.SetSessionName("session-1", "外部命名")
+
+	msg := &Message{SessionKey: "telegram:1", ReplyCtx: "ctx"}
+	e.cmdList(p, msg, nil)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "📌 外部命名") {
+		t.Fatalf("list text = %q, want pinned custom name", p.sent[0])
+	}
+	if strings.Contains(p.sent[0], "服务器运维") {
+		t.Fatalf("list text = %q, should prefer custom name over native display name", p.sent[0])
+	}
+}
+
+func TestEngine_SearchMatchesNativeDisplayName(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubListAgent{sessions: []AgentSessionInfo{
+		{
+			ID:           "session-1",
+			DisplayName:  "服务器运维",
+			Summary:      "PLEASE IMPLEMENT THIS PLAN",
+			MessageCount: 118,
+			ModifiedAt:   time.Date(2026, 3, 17, 9, 45, 0, 0, time.UTC),
+		},
+	}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	msg := &Message{SessionKey: "telegram:1", ReplyCtx: "ctx"}
+	e.cmdSearch(p, msg, []string{"服务器运维"})
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "服务器运维") {
+		t.Fatalf("search text = %q, want native display name", p.sent[0])
+	}
+}
+
+func TestEngine_SwitchByNativeDisplayNameKeepsCurrentAndStatusConsistent(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubListAgent{sessions: []AgentSessionInfo{
+		{
+			ID:           "session-1",
+			DisplayName:  "服务器运维",
+			Summary:      "PLEASE IMPLEMENT THIS PLAN",
+			MessageCount: 118,
+			ModifiedAt:   time.Date(2026, 3, 17, 9, 45, 0, 0, time.UTC),
+		},
+	}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "telegram:1", ReplyCtx: "ctx"}
+
+	e.cmdSwitch(p, msg, []string{"服务器运维"})
+	if len(p.sent) != 1 {
+		t.Fatalf("switch sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "服务器运维") {
+		t.Fatalf("switch text = %q, want native display name", p.sent[0])
+	}
+
+	p.sent = nil
+	e.cmdCurrent(p, msg)
+	if len(p.sent) != 1 {
+		t.Fatalf("current sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "服务器运维") {
+		t.Fatalf("current text = %q, want native display name", p.sent[0])
+	}
+
+	p.sent = nil
+	e.cmdStatus(p, msg)
+	if len(p.sent) != 1 {
+		t.Fatalf("status sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "服务器运维") {
+		t.Fatalf("status text = %q, want native display name", p.sent[0])
+	}
+	if strings.Contains(p.sent[0], "PLEASE IMPLEMENT THIS PLAN") {
+		t.Fatalf("status text = %q, should not fall back to summary", p.sent[0])
+	}
+}
+
+func TestEngine_HandleCommandSwitchWithoutSpaceUsesAttachedArg(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubListAgent{sessions: []AgentSessionInfo{
+		{
+			ID:           "session-1",
+			DisplayName:  "服务器运维",
+			Summary:      "PLEASE IMPLEMENT THIS PLAN",
+			MessageCount: 118,
+			ModifiedAt:   time.Date(2026, 3, 17, 9, 45, 0, 0, time.UTC),
+		},
+	}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "telegram:1", ReplyCtx: "ctx", UserID: "u1", Platform: "telegram"}
+
+	if !e.handleCommand(p, msg, "/switch服务器运维") {
+		t.Fatal("handleCommand should recognize /switch without an explicit space")
+	}
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "服务器运维") {
+		t.Fatalf("switch text = %q, want native display name", p.sent[0])
+	}
+}
+
+func TestEngine_HandleCommandSwichAliasMapsToSwitch(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubListAgent{sessions: []AgentSessionInfo{
+		{
+			ID:           "session-1",
+			DisplayName:  "服务器运维",
+			Summary:      "PLEASE IMPLEMENT THIS PLAN",
+			MessageCount: 118,
+			ModifiedAt:   time.Date(2026, 3, 17, 9, 45, 0, 0, time.UTC),
+		},
+	}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "telegram:1", ReplyCtx: "ctx", UserID: "u1", Platform: "telegram"}
+
+	if !e.handleCommand(p, msg, "/swich 服务器运维") {
+		t.Fatal("handleCommand should recognize /swich as switch")
+	}
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "服务器运维") {
+		t.Fatalf("switch text = %q, want native display name", p.sent[0])
+	}
+}
+
+func TestSplitCommandAndArgsDoesNotAttachUnsupportedCurrentCommand(t *testing.T) {
+	cmd, args := splitCommandAndArgs("/current服务器运维")
+
+	if cmd != "current服务器运维" {
+		t.Fatalf("cmd = %q, want raw merged command", cmd)
+	}
+	if len(args) != 0 {
+		t.Fatalf("args = %#v, want empty", args)
 	}
 }
