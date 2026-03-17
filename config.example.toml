@@ -584,6 +584,29 @@ app_secret = "your-feishu-app-secret"
 # reply_in_thread = false  # If true, all responses are threaded to the original message (helps trace which question triggered which reply)
 #                          # 设为 true 时，所有回复都会引用原消息（方便追踪每条回复对应哪条提问）
 
+# Lark (International Version) / Lark 国际版
+# Lark uses Webhook mode instead of WebSocket long-connection.
+# Lark 使用 Webhook 模式而非 WebSocket 长连接。
+# 1. Create an app at https://open.larksuite.com / 在 https://open.larksuite.com 创建应用
+# 2. Enable Bot capability / 开启机器人能力
+# 3. Add im.message.receive_v1 event, configure Webhook URL (requires public IP)
+#    添加 im.message.receive_v1 事件，配置 Webhook URL（需要公网 IP）
+# 4. Fill in app_id, app_secret, port, callback_path below
+#    填入下方 app_id、app_secret、port、callback_path
+
+# [[projects.platforms]]
+# type = "lark"
+#
+# [projects.platforms.options]
+# app_id = "your-lark-app-id"
+# app_secret = "your-lark-app-secret"
+# port = "8080"                  # Webhook server port / Webhook 服务器端口
+# callback_path = "/feishu/webhook"  # Webhook callback path / Webhook 回调路径
+# encrypt_key = ""               # Event encrypt key (optional) / 事件加密密钥（可选）
+# enable_feishu_card = true
+# allow_from = "*"
+# reaction_emoji = "OnIt"
+
 # DingTalk / 钉钉 (uncomment to enable / 取消注释以启用)
 # 1. Create an app at https://open-dev.dingtalk.com / 在钉钉开放平台创建应用
 # 2. Under "App Features > Bot", enable bot and select Stream mode
