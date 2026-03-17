@@ -955,6 +955,7 @@ app_secret = "your-feishu-app-secret"
 # allow_from = "*"      # Allowed user openids, e.g. "OPEN_ID_1,OPEN_ID_2"; "*" = all
 #                       # 允许的用户 openid，如 "OPEN_ID_1,OPEN_ID_2"；"*" 表示所有
 # share_session_in_channel = false  # If true, all users in a group share one agent session / 群聊共享会话
+# markdown_support = false  # Enable Markdown messages (msg_type: 2). Requires bot permission. / 启用 Markdown 消息（msg_type: 2）。需要机器人具备该权限。
 
 # =============================================================================
 # Project 5: Using Qoder CLI / 项目 5：使用 Qoder CLI (uncomment to enable / 取消注释以启用)

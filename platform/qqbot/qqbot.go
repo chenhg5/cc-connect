@@ -24,7 +24,7 @@ func init() {
 const (
 	apiBaseProduction = "https://api.sgroup.qq.com"
 	apiBaseSandbox    = "https://sandbox.api.sgroup.qq.com"
-	tokenURL         = "https://bots.qq.com/app/getAppAccessToken"
+	tokenURL          = "https://bots.qq.com/app/getAppAccessToken"
 
 	// Default intent: GROUP_AND_C2C_EVENT (1 << 25)
 	defaultIntents = 1 << 25
@@ -38,14 +38,14 @@ const (
 
 // WebSocket opcodes for the QQ Bot gateway protocol.
 const (
-	opDispatch        = 0
-	opHeartbeat       = 1
-	opIdentify        = 2
-	opResume          = 6
-	opReconnect       = 7
-	opInvalidSession  = 9
-	opHello           = 10
-	opHeartbeatACK    = 11
+	opDispatch       = 0
+	opHeartbeat      = 1
+	opIdentify       = 2
+	opResume         = 6
+	opReconnect      = 7
+	opInvalidSession = 9
+	opHello          = 10
+	opHeartbeatACK   = 11
 )
 
 // Platform implements core.Platform for the official QQ Bot API v2.
@@ -56,6 +56,7 @@ type Platform struct {
 	allowFrom             string
 	shareSessionInChannel bool
 	intents               int
+	markdownSupport       bool // enable markdown messages (msg_type: 2)
 	handler               core.MessageHandler
 	cancel                context.CancelFunc
 
@@ -109,6 +110,7 @@ func New(opts map[string]any) (core.Platform, error) {
 	sandbox, _ := opts["sandbox"].(bool)
 	allowFrom, _ := opts["allow_from"].(string)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
+	markdownSupport, _ := opts["markdown_support"].(bool)
 
 	intents := defaultIntents
 	if v, ok := opts["intents"].(int); ok && v > 0 {
@@ -125,6 +127,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		allowFrom:             allowFrom,
 		shareSessionInChannel: shareSessionInChannel,
 		intents:               intents,
+		markdownSupport:       markdownSupport,
 	}, nil
 }
 
@@ -661,12 +664,12 @@ func (p *Platform) handleDispatch(eventType string, data json.RawMessage) {
 
 func (p *Platform) handleGroupMessage(data json.RawMessage) {
 	var d struct {
-		ID           string       `json:"id"`
-		GroupOpenID  string       `json:"group_openid"`
-		Content      string       `json:"content"`
-		Timestamp    string       `json:"timestamp"`
-		Attachments  []attachment `json:"attachments"`
-		Author       struct {
+		ID          string       `json:"id"`
+		GroupOpenID string       `json:"group_openid"`
+		Content     string       `json:"content"`
+		Timestamp   string       `json:"timestamp"`
+		Attachments []attachment `json:"attachments"`
+		Author      struct {
 			MemberOpenID string `json:"member_openid"`
 		} `json:"author"`
 	}
@@ -726,7 +729,7 @@ func (p *Platform) handleGroupMessage(data json.RawMessage) {
 		MessageID:  d.ID,
 		UserID:     d.Author.MemberOpenID,
 		UserName:   d.Author.MemberOpenID, // official API only provides openid, no nickname
-		ChatName:   d.GroupOpenID,          // group openid as fallback (no group name API)
+		ChatName:   d.GroupOpenID,         // group openid as fallback (no group name API)
 		Content:    content,
 		Images:     images,
 		ReplyCtx:   rctx,
@@ -819,9 +822,23 @@ func (p *Platform) sendMessage(rctx *replyContext, content string) error {
 		return fmt.Errorf("qqbot: unknown message type %q", rctx.messageType)
 	}
 
-	body := map[string]any{
-		"content":  content,
-		"msg_type": 0, // text
+	var body map[string]any
+	if p.markdownSupport {
+		// Markdown format (msg_type: 2)
+		body = map[string]any{
+			"markdown": map[string]any{
+				"content": content,
+			},
+			"msg_type": 2,
+		}
+		slog.Debug("qqbot: sending markdown message", "content_len", len(content), "msg_type", 2)
+	} else {
+		// Plain text format (msg_type: 0)
+		body = map[string]any{
+			"content":  content,
+			"msg_type": 0,
+		}
+		slog.Debug("qqbot: sending text message", "content_len", len(content), "msg_type", 0)
 	}
 
 	// Include msg_id for passive reply if available
