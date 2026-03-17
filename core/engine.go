@@ -162,7 +162,7 @@ type Engine struct {
 	disabledCmds map[string]bool
 	adminFrom    string // comma-separated user IDs for privileged commands; "*" = all allowed users; "" = deny
 	userRoles    *UserRoleManager // nil = legacy mode (no per-user policies)
-	userRolesMu  sync.RWMutex    // protects userRoles and disabledCmds
+	userRolesMu  sync.RWMutex    // protects userRoles, disabledCmds, and adminFrom
 
 	rateLimiter      *RateLimiter
 	streamPreview    StreamPreviewCfg
@@ -476,11 +476,12 @@ func (e *Engine) SetUserRoles(urm *UserRoleManager) {
 // "*" means all users who pass allow_from are admins.
 // Empty string means privileged commands are denied for everyone.
 func (e *Engine) SetAdminFrom(adminFrom string) {
+	e.userRolesMu.Lock()
 	e.adminFrom = strings.TrimSpace(adminFrom)
-	e.userRolesMu.RLock()
+	af := e.adminFrom
 	shellDisabled := e.disabledCmds["shell"]
-	e.userRolesMu.RUnlock()
-	if e.adminFrom == "" && !shellDisabled {
+	e.userRolesMu.Unlock()
+	if af == "" && !shellDisabled {
 		slog.Warn("admin_from is not set — privileged commands (/shell, /dir, /restart, /upgrade) are blocked. "+
 			"Set admin_from in config to enable them, or use disabled_commands to hide them.",
 			"project", e.name)
@@ -498,7 +499,9 @@ var privilegedCommands = map[string]bool{
 // isAdmin checks whether the given user ID is authorized for privileged commands.
 // Unlike AllowList, empty adminFrom means deny-all (fail-closed).
 func (e *Engine) isAdmin(userID string) bool {
-	af := strings.TrimSpace(e.adminFrom)
+	e.userRolesMu.RLock()
+	af := e.adminFrom
+	e.userRolesMu.RUnlock()
 	if af == "" {
 		return false
 	}
