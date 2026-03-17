@@ -7148,6 +7148,8 @@ func (e *Engine) deleteSingleSessionReply(msg *Message, deleter SessionDeleter, 
 		return fmt.Sprintf("❌ %s: %v", displayName, err)
 	}
 
+	// Keep local session snapshot aligned with agent-side deletion.
+	sessions.DeleteByAgentSessionID(matched.ID)
 	sessions.SetSessionName(matched.ID, "")
 	return fmt.Sprintf(e.i18n.T(MsgDeleteSuccess), displayName)
 }

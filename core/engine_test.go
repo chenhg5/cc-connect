@@ -1326,6 +1326,33 @@ func TestCmdDelete_SingleSessionPrefixStillWorks(t *testing.T) {
 	}
 }
 
+func TestCmdDelete_SyncsLocalSessionSnapshot(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubDeleteAgent{stubListAgent: stubListAgent{sessions: []AgentSessionInfo{
+		{ID: "session-1", Summary: "One"},
+		{ID: "session-2", Summary: "Two"},
+	}}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	victim := e.sessions.NewSession("test:user2", "victim")
+	victim.SetAgentSessionID("session-1", "stub")
+	keep := e.sessions.NewSession("test:user3", "keep")
+	keep.SetAgentSessionID("session-2", "stub")
+
+	e.cmdDelete(p, msg, []string{"1"})
+
+	if got, want := strings.Join(agent.deleted, ","), "session-1"; got != want {
+		t.Fatalf("deleted = %q, want %q", got, want)
+	}
+	if got := e.sessions.FindByID(victim.ID); got != nil {
+		t.Fatalf("victim session should be removed, got %+v", got)
+	}
+	if got := e.sessions.FindByID(keep.ID); got == nil {
+		t.Fatal("keep session should remain")
+	}
+}
+
 func TestCmdDelete_NoArgsOnCardPlatformShowsDeleteModeCard(t *testing.T) {
 	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
 	agent := &stubDeleteAgent{stubListAgent: stubListAgent{sessions: []AgentSessionInfo{

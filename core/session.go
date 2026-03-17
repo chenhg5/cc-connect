@@ -315,6 +315,39 @@ func (sm *SessionManager) DeleteByID(id string) bool {
 	if _, ok := sm.sessions[id]; !ok {
 		return false
 	}
+	sm.deleteByIDLocked(id)
+	sm.saveLocked()
+	return true
+}
+
+// DeleteByAgentSessionID removes all local sessions mapped to the given
+// agent session ID. It returns the number of removed local sessions.
+func (sm *SessionManager) DeleteByAgentSessionID(agentSessionID string) int {
+	if agentSessionID == "" {
+		return 0
+	}
+
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	removed := 0
+	for id, s := range sm.sessions {
+		s.mu.Lock()
+		matched := s.AgentSessionID == agentSessionID
+		s.mu.Unlock()
+		if !matched {
+			continue
+		}
+		sm.deleteByIDLocked(id)
+		removed++
+	}
+	if removed > 0 {
+		sm.saveLocked()
+	}
+	return removed
+}
+
+func (sm *SessionManager) deleteByIDLocked(id string) {
 	delete(sm.sessions, id)
 	for userKey, ids := range sm.userSessions {
 		for i, sid := range ids {
@@ -327,8 +360,6 @@ func (sm *SessionManager) DeleteByID(id string) bool {
 			delete(sm.activeSession, userKey)
 		}
 	}
-	sm.saveLocked()
-	return true
 }
 
 // Save persists current state to disk. Safe to call from outside (e.g. after message processing).
