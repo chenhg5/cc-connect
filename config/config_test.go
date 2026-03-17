@@ -214,8 +214,8 @@ func TestEnsureProjectWithFeishuPlatform_CreatesMissingProject(t *testing.T) {
 	if proj.Platforms[0].Type != "lark" {
 		t.Fatalf("platform type = %q, want %q", proj.Platforms[0].Type, "lark")
 	}
-	if got := stringMapValue(proj.Agent.Options, "work_dir"); got != "/tmp/alpha" {
-		t.Fatalf("work_dir = %q, want cloned source %q", got, "/tmp/alpha")
+	if got := stringMapValue(proj.Agent.Options, "work_dir"); got != "/tmp/gamma" {
+		t.Fatalf("work_dir = %q, want explicit override %q", got, "/tmp/gamma")
 	}
 }
 

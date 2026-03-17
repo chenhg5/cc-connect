@@ -773,9 +773,7 @@ func EnsureProjectWithFeishuPlatform(opts EnsureProjectWithFeishuOptions) (*Ensu
 	}
 	workDir := strings.TrimSpace(opts.WorkDir)
 	if workDir != "" {
-		if _, ok := proj.Agent.Options["work_dir"]; !ok {
-			proj.Agent.Options["work_dir"] = workDir
-		}
+		proj.Agent.Options["work_dir"] = workDir
 	}
 
 	lines, hadTrailing := splitConfigLines(raw)
