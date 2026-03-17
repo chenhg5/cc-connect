@@ -244,8 +244,8 @@ func Load(path string) (*Config, error) {
 }
 
 func (c *Config) validate() error {
-	switch c.AttachmentSend {
-	case "on", "off":
+	switch strings.ToLower(strings.TrimSpace(c.AttachmentSend)) {
+	case "", "on", "off":
 	default:
 		return fmt.Errorf("config: attachment_send must be \"on\" or \"off\"")
 	}
