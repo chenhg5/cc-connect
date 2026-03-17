@@ -14,7 +14,7 @@ import (
 )
 
 func runSend(args []string) {
-	var project, sessionKey, dataDir, message string
+	var project, sessionKey, dataDir, message, imagePath string
 	var useStdin bool
 
 	var positional []string
@@ -34,6 +34,11 @@ func runSend(args []string) {
 			if i+1 < len(args) {
 				i++
 				message = args[i]
+			}
+		case "--image":
+			if i+1 < len(args) {
+				i++
+				imagePath = args[i]
 			}
 		case "--stdin":
 			useStdin = true
@@ -61,8 +66,23 @@ func runSend(args []string) {
 	if message == "" {
 		message = strings.Join(positional, " ")
 	}
-	if message == "" {
-		fmt.Fprintln(os.Stderr, "Error: message is required")
+
+	// Resolve image path to absolute.
+	if imagePath != "" {
+		abs, err := filepath.Abs(imagePath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: invalid image path: %v\n", err)
+			os.Exit(1)
+		}
+		if _, err := os.Stat(abs); os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "Error: image file not found: %s\n", abs)
+			os.Exit(1)
+		}
+		imagePath = abs
+	}
+
+	if message == "" && imagePath == "" {
+		fmt.Fprintln(os.Stderr, "Error: message or --image is required")
 		printSendUsage()
 		os.Exit(1)
 	}
@@ -73,11 +93,17 @@ func runSend(args []string) {
 		os.Exit(1)
 	}
 
-	payload, _ := json.Marshal(map[string]string{
+	reqBody := map[string]string{
 		"project":     project,
 		"session_key": sessionKey,
-		"message":     message,
-	})
+	}
+	if message != "" {
+		reqBody["message"] = message
+	}
+	if imagePath != "" {
+		reqBody["image_path"] = imagePath
+	}
+	payload, _ := json.Marshal(reqBody)
 
 	client := &http.Client{
 		Transport: &http.Transport{
@@ -100,7 +126,13 @@ func runSend(args []string) {
 		os.Exit(1)
 	}
 
-	fmt.Println("Message sent successfully.")
+	if imagePath != "" && message != "" {
+		fmt.Println("Image and message sent successfully.")
+	} else if imagePath != "" {
+		fmt.Println("Image sent successfully.")
+	} else {
+		fmt.Println("Message sent successfully.")
+	}
 }
 
 func resolveSocketPath(dataDir string) string {
@@ -116,13 +148,15 @@ func resolveSocketPath(dataDir string) string {
 func printSendUsage() {
 	fmt.Println(`Usage: cc-connect send [options] <message>
        cc-connect send [options] -m <message>
+       cc-connect send [options] --image <path>
        cc-connect send [options] --stdin < file
        echo "msg" | cc-connect send [options] --stdin
 
-Send a message to an active cc-connect session.
+Send a message or image to an active cc-connect session.
 
 Options:
   -m, --message <text>     Message to send (preferred over positional args)
+      --image <path>       Send a local image file (platform must support images)
       --stdin              Read message from stdin (best for long/special-char messages)
   -p, --project <name>     Target project (optional if only one project)
   -s, --session <key>      Target session key (optional, picks first active)
@@ -132,6 +166,8 @@ Options:
 Examples:
   cc-connect send "Daily summary: ..."
   cc-connect send -m "Build completed successfully"
+  cc-connect send --image /tmp/screenshot.png
+  cc-connect send --image /tmp/chart.png -m "Here's the latest chart"
   cc-connect send --stdin <<'EOF'
     Long message with "special" chars, $variables, and newlines
   EOF`)
