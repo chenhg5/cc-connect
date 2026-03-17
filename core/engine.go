@@ -2520,7 +2520,7 @@ func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
 	}
 
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		ctx, cancel := context.WithTimeout(e.ctx, 60*time.Second)
 		defer cancel()
 
 		cmd := exec.CommandContext(ctx, "sh", "-c", shellCmd)
@@ -6383,7 +6383,7 @@ func (e *Engine) executeShellCommand(p Platform, msg *Message, cmd *CustomComman
 	}
 
 	// Create context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(e.ctx, 60*time.Second)
 	defer cancel()
 
 	// Execute command using shell
