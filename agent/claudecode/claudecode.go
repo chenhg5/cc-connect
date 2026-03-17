@@ -139,15 +139,7 @@ func (a *Agent) configuredModels() []core.ModelOption {
 	if a.activeIdx < 0 || a.activeIdx >= len(a.providers) {
 		return nil
 	}
-	ms := a.providers[a.activeIdx].Models
-	if len(ms) == 0 {
-		return nil
-	}
-	opts := make([]core.ModelOption, len(ms))
-	for i, m := range ms {
-		opts[i] = core.ModelOption{Name: m}
-	}
-	return opts
+	return a.providers[a.activeIdx].Models
 }
 
 func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {

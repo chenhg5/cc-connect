@@ -178,14 +178,21 @@ type AgentConfig struct {
 	Providers []ProviderConfig `toml:"providers"`
 }
 
+// ProviderModelConfig defines a selectable model entry for a provider,
+// with an optional short alias used by the /model command.
+type ProviderModelConfig struct {
+	Model string `toml:"model"`
+	Alias string `toml:"alias,omitempty"`
+}
+
 type ProviderConfig struct {
-	Name     string            `toml:"name"`
-	APIKey   string            `toml:"api_key"`
-	BaseURL  string            `toml:"base_url,omitempty"`
-	Model    string            `toml:"model,omitempty"`
-	Models   []string          `toml:"models,omitempty"`
-	Thinking string            `toml:"thinking,omitempty"`
-	Env      map[string]string `toml:"env,omitempty"`
+	Name     string                `toml:"name"`
+	APIKey   string                `toml:"api_key"`
+	BaseURL  string                `toml:"base_url,omitempty"`
+	Model    string                `toml:"model,omitempty"`
+	Models   []ProviderModelConfig `toml:"models,omitempty"`
+	Thinking string                `toml:"thinking,omitempty"`
+	Env      map[string]string     `toml:"env,omitempty"`
 }
 
 type PlatformConfig struct {
@@ -1008,7 +1015,7 @@ func cloneAgentConfig(in AgentConfig) AgentConfig {
 				APIKey:   in.Providers[i].APIKey,
 				BaseURL:  in.Providers[i].BaseURL,
 				Model:    in.Providers[i].Model,
-				Models:   append([]string(nil), in.Providers[i].Models...),
+				Models:   append([]ProviderModelConfig(nil), in.Providers[i].Models...),
 				Thinking: in.Providers[i].Thinking,
 				Env:      cloneStringMap(in.Providers[i].Env),
 			}
