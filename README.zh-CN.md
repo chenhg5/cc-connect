@@ -63,7 +63,7 @@
 **多机器人中继** — 在群聊中绑定多个机器人，让它们相互协作。问 Claude，再听 Gemini 的见解 — 同一个对话搞定。
 
 ### 🎮 完整的聊天控制
-**聊天即控制** — 切换模型 (`/model`)、切换推理强度 (`/reasoning`)、切换权限模式 (`/mode`)、管理会话，全部通过斜杠命令完成。
+**聊天即控制** — 切换模型 (`/model`)、切换推理强度 (`/reasoning`)、切换权限模式 (`/mode`)、切换当前会话的 Agent/路径 (`/agent`、`/path`)、管理会话，全部通过斜杠命令完成。
 
 ### 🧠 持久化记忆
 **Agent 记忆** — 在聊天中直接读写 Agent 指令文件 (`/memory`)，无需回到终端。
@@ -218,6 +218,8 @@ cc-connect update --pre     # Beta 版（含 pre-release）
 /list                  列出所有会话
 /switch <id>           切换会话
 /current               查看当前会话
+/agent <名称>          切换当前会话 Agent
+/path <绝对路径>       切换当前会话路径
 ```
 
 ---
@@ -228,6 +230,11 @@ cc-connect update --pre     # Beta 版（含 pre-release）
 /mode             查看可用模式
 /mode yolo        # 自动批准所有工具
 /mode default     # 每次工具调用前询问
+/agent codex      # 当前会话切到 Codex
+/agent claude     # 当前会话切到 Claude Code
+/agent codex /data/project-a   # 同时切 Agent 和路径
+/path /data/project-b          # 只修改当前会话路径
+/path reset       # 恢复到项目默认路径
 ```
 
 ---

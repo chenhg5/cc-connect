@@ -438,6 +438,8 @@ Once running, send messages to your bot on the configured platform. Available sl
 /list            — List agent sessions
 /switch <id>     — Resume an existing session
 /current         — Show current active session
+/agent [...]     — View/switch current session agent
+/path [...]      — View/switch current session path
 /history [n]     — Show last n messages (default 10)
 /reasoning [level] — View/switch reasoning effort (Codex)
 /mode [name]     — View/switch permission mode (default/edit/plan/yolo)
@@ -447,6 +449,14 @@ Once running, send messages to your bot on the configured platform. Available sl
 /stop            — Stop current execution
 /help            — Show available commands
 ```
+
+Examples:
+
+- `/agent codex`
+- `/agent claude`
+- `/agent codex /data/project-a`
+- `/path /data/project-b`
+- `/path reset`
 
 During a session, Claude may ask for tool permissions. Reply:
 - `allow` or `允许` — approve this request

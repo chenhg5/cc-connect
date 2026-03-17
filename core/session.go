@@ -12,13 +12,15 @@ import (
 
 // Session tracks one conversation between a user and the agent.
 type Session struct {
-	ID             string         `json:"id"`
-	Name           string         `json:"name"`
-	AgentSessionID string         `json:"agent_session_id"`
-	AgentType      string         `json:"agent_type,omitempty"`
-	History        []HistoryEntry `json:"history"`
-	CreatedAt      time.Time      `json:"created_at"`
-	UpdatedAt      time.Time      `json:"updated_at"`
+	ID              string         `json:"id"`
+	Name            string         `json:"name"`
+	AgentSessionID  string         `json:"agent_session_id"`
+	AgentType       string         `json:"agent_type,omitempty"`
+	AgentOverride   string         `json:"agent_override,omitempty"`
+	WorkDirOverride string         `json:"work_dir_override,omitempty"`
+	History         []HistoryEntry `json:"history"`
+	CreatedAt       time.Time      `json:"created_at"`
+	UpdatedAt       time.Time      `json:"updated_at"`
 
 	mu   sync.Mutex `json:"-"`
 	busy bool       `json:"-"`
@@ -74,6 +76,34 @@ func (s *Session) GetName() string {
 	return s.Name
 }
 
+// SetAgentOverride atomically sets the session agent override.
+func (s *Session) SetAgentOverride(agentType string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.AgentOverride = agentType
+}
+
+// GetAgentOverride atomically reads the session agent override.
+func (s *Session) GetAgentOverride() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.AgentOverride
+}
+
+// SetWorkDirOverride atomically sets the session work_dir override.
+func (s *Session) SetWorkDirOverride(workDir string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.WorkDirOverride = workDir
+}
+
+// GetWorkDirOverride atomically reads the session work_dir override.
+func (s *Session) GetWorkDirOverride() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.WorkDirOverride
+}
+
 // SetAgentSessionID atomically sets the agent session ID and agent type.
 func (s *Session) SetAgentSessionID(id, agentType string) {
 	s.mu.Lock()
@@ -126,7 +156,7 @@ type sessionSnapshot struct {
 	ActiveSession map[string]string    `json:"active_session"`
 	UserSessions  map[string][]string  `json:"user_sessions"`
 	Counter       int64                `json:"counter"`
-	SessionNames  map[string]string    `json:"session_names,omitempty"`  // agent session ID → custom name
+	SessionNames  map[string]string    `json:"session_names,omitempty"` // agent session ID → custom name
 	UserMeta      map[string]*UserMeta `json:"user_meta,omitempty"`     // sessionKey → display info
 }
 
@@ -308,6 +338,30 @@ func (sm *SessionManager) FindByID(id string) *Session {
 	return sm.sessions[id]
 }
 
+// FindByAgentSessionID looks up a local session for a user by agent session ID.
+func (sm *SessionManager) FindByAgentSessionID(userKey, agentSessionID string) *Session {
+	if agentSessionID == "" {
+		return nil
+	}
+
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	for _, sid := range sm.userSessions[userKey] {
+		s := sm.sessions[sid]
+		if s == nil {
+			continue
+		}
+		s.mu.Lock()
+		matched := s.AgentSessionID == agentSessionID
+		s.mu.Unlock()
+		if matched {
+			return s
+		}
+	}
+	return nil
+}
+
 // DeleteByID removes a session by its internal ID from all tracking structures.
 func (sm *SessionManager) DeleteByID(id string) bool {
 	sm.mu.Lock()
@@ -379,13 +433,15 @@ func (sm *SessionManager) saveLocked() {
 	for id, s := range sm.sessions {
 		s.mu.Lock()
 		snapSessions[id] = &Session{
-			ID:             s.ID,
-			Name:           s.Name,
-			AgentSessionID: s.AgentSessionID,
-			AgentType:      s.AgentType,
-			History:        append([]HistoryEntry(nil), s.History...),
-			CreatedAt:      s.CreatedAt,
-			UpdatedAt:      s.UpdatedAt,
+			ID:              s.ID,
+			Name:            s.Name,
+			AgentSessionID:  s.AgentSessionID,
+			AgentType:       s.AgentType,
+			AgentOverride:   s.AgentOverride,
+			WorkDirOverride: s.WorkDirOverride,
+			History:         append([]HistoryEntry(nil), s.History...),
+			CreatedAt:       s.CreatedAt,
+			UpdatedAt:       s.UpdatedAt,
 		}
 		s.mu.Unlock()
 	}

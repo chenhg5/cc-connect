@@ -63,7 +63,7 @@
 **Multi-Bot Relay** — Bind multiple bots in a group chat and let them communicate with each other. Ask Claude, get insights from Gemini — all in one conversation.
 
 ### 🎮 Complete Chat Control
-**Full Control from Chat** — Switch models (`/model`), tune reasoning (`/reasoning`), change permission modes (`/mode`), manage sessions, all via slash commands.
+**Full Control from Chat** — Switch models (`/model`), tune reasoning (`/reasoning`), change permission modes (`/mode`), switch the current session's agent/path (`/agent`, `/path`), manage sessions, all via slash commands.
 
 ### 🧠 Persistent Memory
 **Agent Memory** — Read and write agent instruction files (`/memory`) without touching the terminal.
@@ -218,6 +218,8 @@ cc-connect update --pre     # Beta (includes pre-releases)
 /list             List all sessions
 /switch <id>      Switch session
 /current          Show current session
+/agent <name>     Switch current session agent
+/path <abs-path>  Switch current session path
 ```
 
 ---
@@ -228,6 +230,11 @@ cc-connect update --pre     # Beta (includes pre-releases)
 /mode             Show available modes
 /mode yolo        # Auto-approve all tools
 /mode default     # Ask for each tool
+/agent codex      # Use Codex in current session
+/agent claude     # Use Claude Code in current session
+/agent codex /data/project-a   # Switch agent and path together
+/path /data/project-b          # Change only current session path
+/path reset       # Reset to project default path
 ```
 
 ---

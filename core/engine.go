@@ -160,9 +160,9 @@ type Engine struct {
 	bannedMu    sync.RWMutex
 
 	disabledCmds map[string]bool
-	adminFrom    string // comma-separated user IDs for privileged commands; "*" = all allowed users; "" = deny
+	adminFrom    string           // comma-separated user IDs for privileged commands; "*" = all allowed users; "" = deny
 	userRoles    *UserRoleManager // nil = legacy mode (no per-user policies)
-	userRolesMu  sync.RWMutex    // protects userRoles, disabledCmds, and adminFrom
+	userRolesMu  sync.RWMutex     // protects userRoles, disabledCmds, and adminFrom
 
 	rateLimiter      *RateLimiter
 	streamPreview    StreamPreviewCfg
@@ -183,6 +183,11 @@ type Engine struct {
 
 	quietMu sync.RWMutex
 	quiet   bool // when true, suppress thinking and tool progress messages globally
+
+	defaultAgentType      string
+	defaultAgentOptions   map[string]any
+	defaultAgentProviders []ProviderConfig
+	defaultActiveProvider string
 }
 
 // workspaceInitFlow tracks a channel that is being onboarded to a workspace.
@@ -254,6 +259,10 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 	}
 
 	if ag != nil {
+		e.defaultAgentType = ag.Name()
+		if wd, ok := ag.(interface{ GetWorkDir() string }); ok && wd.GetWorkDir() != "" {
+			e.defaultAgentOptions = map[string]any{"work_dir": wd.GetWorkDir()}
+		}
 		e.sessions.InvalidateForAgent(ag.Name())
 	}
 
@@ -265,6 +274,191 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 	}
 
 	return e
+}
+
+// SetDefaultAgentConfig stores the project-level agent config so session-scoped
+// overrides can derive effective agent/path settings later.
+func (e *Engine) SetDefaultAgentConfig(agentType string, options map[string]any, providers []ProviderConfig, activeProvider string) {
+	e.defaultAgentType = normalizeAgentName(agentType)
+	if len(options) > 0 {
+		e.defaultAgentOptions = make(map[string]any, len(options))
+		for k, v := range options {
+			e.defaultAgentOptions[k] = v
+		}
+	} else {
+		e.defaultAgentOptions = nil
+	}
+	if len(providers) > 0 {
+		e.defaultAgentProviders = append([]ProviderConfig(nil), providers...)
+	} else {
+		e.defaultAgentProviders = nil
+	}
+	e.defaultActiveProvider = activeProvider
+}
+
+func normalizeAgentName(name string) string {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "claude":
+		return "claudecode"
+	default:
+		return strings.ToLower(strings.TrimSpace(name))
+	}
+}
+
+func agentWorkDir(agent Agent) string {
+	if agent == nil {
+		return ""
+	}
+	if wd, ok := agent.(interface{ GetWorkDir() string }); ok {
+		return wd.GetWorkDir()
+	}
+	return ""
+}
+
+func (e *Engine) defaultWorkDirFor(agent Agent) string {
+	if wd := agentWorkDir(agent); wd != "" {
+		return wd
+	}
+	if wd, ok := e.defaultAgentOptions["work_dir"].(string); ok && wd != "" {
+		return wd
+	}
+	return ""
+}
+
+func (e *Engine) defaultWorkDir() string {
+	return e.defaultWorkDirFor(e.agent)
+}
+
+func (e *Engine) effectiveAgentTypeFor(agent Agent, s *Session) string {
+	if s != nil {
+		if override := normalizeAgentName(s.GetAgentOverride()); override != "" {
+			return override
+		}
+	}
+	if agent != nil {
+		if agentType := normalizeAgentName(agent.Name()); agentType != "" {
+			return agentType
+		}
+	}
+	if agentType := normalizeAgentName(e.defaultAgentType); agentType != "" {
+		return agentType
+	}
+	return ""
+}
+
+func (e *Engine) effectiveAgentType(s *Session) string {
+	return e.effectiveAgentTypeFor(e.agent, s)
+}
+
+func (e *Engine) effectiveWorkDirFor(agent Agent, s *Session) string {
+	if s != nil {
+		if override := strings.TrimSpace(s.GetWorkDirOverride()); override != "" {
+			return override
+		}
+	}
+	return e.defaultWorkDirFor(agent)
+}
+
+func (e *Engine) effectiveWorkDir(s *Session) string {
+	return e.effectiveWorkDirFor(e.agent, s)
+}
+
+func cloneAgentOptions(opts map[string]any) map[string]any {
+	if len(opts) == 0 {
+		return make(map[string]any)
+	}
+	cloned := make(map[string]any, len(opts))
+	for k, v := range opts {
+		cloned[k] = v
+	}
+	return cloned
+}
+
+func cloneProviders(providers []ProviderConfig) []ProviderConfig {
+	if len(providers) == 0 {
+		return nil
+	}
+	return append([]ProviderConfig(nil), providers...)
+}
+
+func liveAgentOptions(agent Agent) map[string]any {
+	opts := make(map[string]any)
+	if workDir := agentWorkDir(agent); workDir != "" {
+		opts["work_dir"] = workDir
+	}
+	if ms, ok := agent.(interface{ GetModel() string }); ok {
+		if model := ms.GetModel(); model != "" {
+			opts["model"] = model
+		}
+	}
+	if rs, ok := agent.(interface{ GetReasoningEffort() string }); ok {
+		if effort := rs.GetReasoningEffort(); effort != "" {
+			opts["reasoning_effort"] = effort
+		}
+	}
+	if ms, ok := agent.(interface{ GetMode() string }); ok {
+		if mode := ms.GetMode(); mode != "" {
+			opts["mode"] = mode
+		}
+	}
+	return opts
+}
+
+func activeProviderName(agent Agent) string {
+	if ps, ok := agent.(ProviderSwitcher); ok {
+		if active := ps.GetActiveProvider(); active != nil {
+			return active.Name
+		}
+	}
+	return ""
+}
+
+func (e *Engine) buildSessionAgentFrom(baseAgent Agent, s *Session) (Agent, error) {
+	if s == nil {
+		return baseAgent, nil
+	}
+	agentOverride := normalizeAgentName(s.GetAgentOverride())
+	workDirOverride := strings.TrimSpace(s.GetWorkDirOverride())
+	if agentOverride == "" && workDirOverride == "" {
+		return baseAgent, nil
+	}
+
+	agentType := e.effectiveAgentTypeFor(baseAgent, s)
+	opts := cloneAgentOptions(e.defaultAgentOptions)
+	for k, v := range liveAgentOptions(baseAgent) {
+		opts[k] = v
+	}
+	if workDir := e.effectiveWorkDirFor(baseAgent, s); workDir != "" {
+		opts["work_dir"] = workDir
+	}
+
+	agent, err := CreateAgent(agentType, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	if ps, ok := agent.(ProviderSwitcher); ok {
+		switch {
+		case baseAgent != nil:
+			if baseSwitcher, ok := baseAgent.(ProviderSwitcher); ok {
+				ps.SetProviders(cloneProviders(baseSwitcher.ListProviders()))
+				if active := activeProviderName(baseAgent); active != "" {
+					ps.SetActiveProvider(active)
+				}
+			}
+		case len(e.defaultAgentProviders) > 0:
+			ps.SetProviders(cloneProviders(e.defaultAgentProviders))
+			if e.defaultActiveProvider != "" {
+				ps.SetActiveProvider(e.defaultActiveProvider)
+			}
+		}
+	}
+
+	return agent, nil
+}
+
+func (e *Engine) buildSessionAgent(s *Session) (Agent, error) {
+	return e.buildSessionAgentFrom(e.agent, s)
 }
 
 // SetMultiWorkspace enables multi-workspace mode for the engine.
@@ -1386,22 +1580,9 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 		return ws.agent, ws.sessions, nil
 	}
 
-	// Create a new agent instance with this workspace's work_dir
-	opts := make(map[string]any)
+	// Create a new agent instance with this workspace's work_dir and live runtime settings.
+	opts := liveAgentOptions(e.agent)
 	opts["work_dir"] = workspace
-
-	// Copy model from original agent if possible
-	if ma, ok := e.agent.(interface{ GetModel() string }); ok {
-		if m := ma.GetModel(); m != "" {
-			opts["model"] = m
-		}
-	}
-	// Copy permission mode
-	if ma, ok := e.agent.(interface{ GetMode() string }); ok {
-		if m := ma.GetMode(); m != "" {
-			opts["mode"] = m
-		}
-	}
 
 	agent, err := CreateAgent(e.agent.Name(), opts)
 	if err != nil {
@@ -1411,7 +1592,10 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 	// Wire providers if original agent has them
 	if ps, ok := e.agent.(ProviderSwitcher); ok {
 		if ps2, ok2 := agent.(ProviderSwitcher); ok2 {
-			ps2.SetProviders(ps.ListProviders())
+			ps2.SetProviders(cloneProviders(ps.ListProviders()))
+			if active := activeProviderName(e.agent); active != "" {
+				ps2.SetActiveProvider(active)
+			}
 		}
 	}
 
@@ -1431,8 +1615,8 @@ func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, repl
 }
 
 // getOrCreateInteractiveStateWith is like getOrCreateInteractiveState but accepts
-// an optional agent override for multi-workspace mode. When agentOverride is non-nil
-// it is used instead of e.agent to start the session.
+// an optional base agent override for multi-workspace mode. Session-level
+// overrides are derived from that base agent when present.
 func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, agentOverride Agent) *interactiveState {
 	e.interactiveMu.Lock()
 	defer e.interactiveMu.Unlock()
@@ -1468,10 +1652,17 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		state.mu.Unlock()
 	}
 
-	// Select the agent to use for this session
-	agent := e.agent
+	// Select the agent to use for this session.
+	baseAgent := e.agent
 	if agentOverride != nil {
-		agent = agentOverride
+		baseAgent = agentOverride
+	}
+	agent, err := e.buildSessionAgentFrom(baseAgent, session)
+	if err != nil {
+		slog.Error("failed to build session agent", "error", err, "session_key", sessionKey)
+		state = &interactiveState{platform: p, replyCtx: replyCtx, quiet: quietMode}
+		e.interactiveStates[sessionKey] = state
+		return state
 	}
 
 	// Inject per-session env vars so the agent subprocess can call `cc-connect cron add` etc.
@@ -1946,6 +2137,8 @@ var builtinCommands = []struct {
 	{[]string{"lang"}, "lang"},
 	{[]string{"quiet"}, "quiet"},
 	{[]string{"provider"}, "provider"},
+	{[]string{"agent"}, "agent"},
+	{[]string{"path"}, "path"},
 	{[]string{"memory"}, "memory"},
 	{[]string{"cron"}, "cron"},
 	{[]string{"heartbeat", "hb"}, "heartbeat"},
@@ -2092,6 +2285,10 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdQuiet(p, msg, args)
 	case "provider":
 		e.cmdProvider(p, msg, args)
+	case "agent":
+		e.cmdAgent(p, msg, args)
+	case "path":
+		e.cmdPath(p, msg, args)
 	case "memory":
 		e.cmdMemory(p, msg, args)
 	case "cron":
@@ -2298,9 +2495,9 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 const listPageSize = 20
 
 func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
-	agent, sessions, _, err := e.commandContext(p, msg)
+	agent, sessions, _, _, err := e.commandSessionContext(p, msg)
 	if err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgListError), err))
 		return
 	}
 
@@ -2396,9 +2593,9 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	query := strings.TrimSpace(strings.Join(args, " "))
 
 	slog.Info("cmdSwitch: listing agent sessions", "session_key", msg.SessionKey)
-	agent, sessions, interactiveKey, err := e.commandContext(p, msg)
+	agent, sessions, _, interactiveKey, err := e.commandSessionContext(p, msg)
 	if err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
 		return
 	}
 	agentSessions, err := agent.ListSessions(e.ctx)
@@ -2417,10 +2614,7 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	e.cleanupInteractiveState(interactiveKey)
 	slog.Info("cmdSwitch: cleanup done", "session_key", msg.SessionKey)
 
-	session := sessions.GetOrCreateActive(msg.SessionKey)
-	session.SetAgentInfo(matched.ID, agent.Name(), matched.Summary)
-	session.ClearHistory()
-	sessions.Save()
+	session := e.switchToAgentSession(sessions, msg.SessionKey, agent.Name(), matched)
 
 	shortID := matched.ID
 	if len(shortID) > 12 {
@@ -2428,10 +2622,32 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	}
 	displayName := sessions.GetSessionName(matched.ID)
 	if displayName == "" {
+		displayName = session.GetName()
+	}
+	if displayName == "" {
 		displayName = matched.Summary
 	}
 	e.reply(p, msg.ReplyCtx,
 		e.i18n.Tf(MsgSwitchSuccess, displayName, shortID, matched.MessageCount))
+}
+
+func (e *Engine) switchToAgentSession(sessions *SessionManager, sessionKey, agentType string, matched *AgentSessionInfo) *Session {
+	if sessions == nil || matched == nil {
+		return nil
+	}
+
+	if existing := sessions.FindByAgentSessionID(sessionKey, matched.ID); existing != nil {
+		if _, err := sessions.SwitchSession(sessionKey, existing.ID); err == nil {
+			existing.SetAgentSessionID(matched.ID, agentType)
+			sessions.Save()
+			return existing
+		}
+	}
+
+	session := sessions.NewSession(sessionKey, matched.Summary)
+	session.SetAgentSessionID(matched.ID, agentType)
+	sessions.Save()
+	return session
 }
 
 // matchSession resolves a user query to an agent session. Priority:
@@ -2597,6 +2813,131 @@ func (e *Engine) cmdDir(p Platform, msg *Message, args []string) {
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgDirChanged, newDir))
 }
 
+func (e *Engine) cmdAgent(p Platform, msg *Message, args []string) {
+	baseAgent, sessions, interactiveKey, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+	s := sessions.GetOrCreateActive(msg.SessionKey)
+	if len(args) == 0 {
+		currentPath := e.effectiveWorkDirFor(baseAgent, s)
+		if currentPath == "" {
+			currentPath = "-"
+		}
+		defaultPath := e.defaultWorkDirFor(baseAgent)
+		if defaultPath == "" {
+			defaultPath = "-"
+		}
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(
+			MsgAgentStatus,
+			e.effectiveAgentTypeFor(baseAgent, s),
+			currentPath,
+			normalizeAgentName(baseAgent.Name()),
+			defaultPath,
+		))
+		return
+	}
+	if len(args) > 2 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgAgentUsage))
+		return
+	}
+
+	target := normalizeAgentName(args[0])
+	newPath := ""
+	if len(args) == 2 {
+		newPath, err = validateSessionWorkDirPath(args[1])
+		if err != nil {
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgDirInvalidPath, args[1]))
+			return
+		}
+	}
+
+	switch target {
+	case "reset":
+		target = ""
+	case "codex", "claudecode":
+	default:
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgAgentInvalid, args[0]))
+		return
+	}
+
+	s.SetAgentOverride(target)
+	if newPath != "" {
+		s.SetWorkDirOverride(newPath)
+	}
+
+	e.cleanupInteractiveState(interactiveKey)
+	s.SetAgentSessionID("", "")
+	s.ClearHistory()
+	sessions.Save()
+
+	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgAgentChanged, e.effectiveAgentTypeFor(baseAgent, s)))
+}
+
+func (e *Engine) cmdPath(p Platform, msg *Message, args []string) {
+	baseAgent, sessions, interactiveKey, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+	s := sessions.GetOrCreateActive(msg.SessionKey)
+	if len(args) == 0 {
+		currentPath := e.effectiveWorkDirFor(baseAgent, s)
+		if currentPath == "" {
+			currentPath = "-"
+		}
+		defaultPath := e.defaultWorkDirFor(baseAgent)
+		if defaultPath == "" {
+			defaultPath = "-"
+		}
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgPathStatus, currentPath, defaultPath))
+		return
+	}
+	if len(args) != 1 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPathUsage))
+		return
+	}
+
+	switch strings.ToLower(strings.TrimSpace(args[0])) {
+	case "reset":
+		s.SetWorkDirOverride("")
+	default:
+		path, err := validateSessionWorkDirPath(args[0])
+		if err != nil {
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgDirInvalidPath, args[0]))
+			return
+		}
+		s.SetWorkDirOverride(path)
+	}
+
+	e.cleanupInteractiveState(interactiveKey)
+	s.SetAgentSessionID("", "")
+	s.ClearHistory()
+	sessions.Save()
+
+	currentPath := e.effectiveWorkDirFor(baseAgent, s)
+	if currentPath == "" {
+		currentPath = e.defaultWorkDirFor(baseAgent)
+	}
+	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgPathChanged, currentPath))
+}
+
+func validateSessionWorkDirPath(input string) (string, error) {
+	path := strings.TrimSpace(input)
+	if !filepath.IsAbs(path) {
+		return "", fmt.Errorf("path must be absolute")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("path is not a directory")
+	}
+	return filepath.Clean(path), nil
+}
+
 // cmdSearch searches sessions by name or message content.
 // Usage: /search <keyword>
 func (e *Engine) cmdSearch(p Platform, msg *Message, args []string) {
@@ -2608,9 +2949,9 @@ func (e *Engine) cmdSearch(p Platform, msg *Message, args []string) {
 	keyword := strings.ToLower(strings.Join(args, " "))
 
 	// Get all agent sessions
-	agent, sessions, _, err := e.commandContext(p, msg)
+	agent, sessions, _, _, err := e.commandSessionContext(p, msg)
 	if err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgSearchError), err))
 		return
 	}
 	agentSessions, err := agent.ListSessions(e.ctx)
@@ -2690,9 +3031,9 @@ func (e *Engine) cmdName(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	agent, sessions, _, err := e.commandContext(p, msg)
+	agent, sessions, _, _, err := e.commandSessionContext(p, msg)
 	if err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
 		return
 	}
 
@@ -2745,7 +3086,7 @@ func (e *Engine) cmdName(p Platform, msg *Message, args []string) {
 
 func (e *Engine) cmdCurrent(p Platform, msg *Message) {
 	if !supportsCards(p) {
-		_, sessions, _, err := e.commandContext(p, msg)
+		baseAgent, sessions, _, err := e.commandContext(p, msg)
 		if err != nil {
 			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
 			return
@@ -2755,7 +3096,11 @@ func (e *Engine) cmdCurrent(p Platform, msg *Message) {
 		if agentID == "" {
 			agentID = e.i18n.T(MsgSessionNotStarted)
 		}
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCurrentSession), s.Name, agentID, len(s.History)))
+		path := e.effectiveWorkDirFor(baseAgent, s)
+		if path == "" {
+			path = "-"
+		}
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCurrentSession), s.Name, agentID, len(s.History), e.effectiveAgentTypeFor(baseAgent, s), path))
 		return
 	}
 
@@ -2764,9 +3109,9 @@ func (e *Engine) cmdCurrent(p Platform, msg *Message) {
 
 func (e *Engine) cmdStatus(p Platform, msg *Message) {
 	if !supportsCards(p) {
-		agent, sessions, _, err := e.commandContext(p, msg)
+		agent, sessions, _, interactiveKey, err := e.commandSessionContext(p, msg)
 		if err != nil {
-			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
 			return
 		}
 		platNames := make([]string, len(e.platforms))
@@ -2796,7 +3141,7 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 		e.quietMu.RUnlock()
 
 		e.interactiveMu.Lock()
-		state, hasState := e.interactiveStates[msg.SessionKey]
+		state, hasState := e.interactiveStates[interactiveKey]
 		e.interactiveMu.Unlock()
 
 		sessionQuiet := false
@@ -3152,14 +3497,20 @@ func (e *Engine) simpleCard(title, color, content string) *Card {
 func (e *Engine) renderListCardSafe(sessionKey string, page int) *Card {
 	card, err := e.renderListCard(sessionKey, page)
 	if err != nil {
-		agent, _ := e.sessionContextForKey(sessionKey)
+		agent, _, _, ctxErr := e.sessionAgentContextForKey(sessionKey)
+		if ctxErr != nil {
+			return e.simpleCard(e.i18n.Tf(MsgCardTitleSessions, e.effectiveAgentType(nil), 0), "red", err.Error())
+		}
 		return e.simpleCard(e.i18n.Tf(MsgCardTitleSessions, agent.Name(), 0), "red", err.Error())
 	}
 	return card
 }
 
 func (e *Engine) renderStatusCard(sessionKey string) *Card {
-	agent, sessions := e.sessionContextForKey(sessionKey)
+	agent, sessions, _, err := e.sessionAgentContextForKey(sessionKey)
+	if err != nil {
+		return e.simpleCard(e.i18n.T(MsgCardTitleStatus), "turquoise", err.Error())
+	}
 	platNames := make([]string, len(e.platforms))
 	for i, pl := range e.platforms {
 		platNames[i] = pl.Name()
@@ -3304,9 +3655,9 @@ func (e *Engine) cmdHistory(p Platform, msg *Message, args []string) {
 		args = []string{"10"}
 	}
 
-	agent, sessions, _, err := e.commandContext(p, msg)
+	agent, sessions, _, _, err := e.commandSessionContext(p, msg)
 	if err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
 		return
 	}
 	s := sessions.GetOrCreateActive(msg.SessionKey)
@@ -3648,7 +3999,12 @@ func (e *Engine) GetAllCommands() []BotCommandInfo {
 }
 
 func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
-	switcher, ok := e.agent.(ModelSwitcher)
+	agent, sessions, s, interactiveKey, err := e.commandSessionContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+		return
+	}
+	switcher, ok := agent.(ModelSwitcher)
 	if !ok {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgModelNotSupported))
 		return
@@ -3701,7 +4057,7 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 			e.replyWithButtons(p, msg.ReplyCtx, sb.String(), buttons)
 			return
 		}
-		e.replyWithCard(p, msg.ReplyCtx, e.renderModelCard())
+		e.replyWithCard(p, msg.ReplyCtx, e.renderModelCard(msg.SessionKey))
 		return
 	}
 
@@ -3715,18 +4071,21 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 	}
 
 	switcher.SetModel(target)
-	e.cleanupInteractiveState(msg.SessionKey)
-
-	s := e.sessions.GetOrCreateActive(msg.SessionKey)
+	e.cleanupInteractiveState(interactiveKey)
 	s.SetAgentSessionID("", "")
 	s.ClearHistory()
-	e.sessions.Save()
+	sessions.Save()
 
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChanged, target))
 }
 
 func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
-	switcher, ok := e.agent.(ReasoningEffortSwitcher)
+	agent, sessions, s, interactiveKey, err := e.commandSessionContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+		return
+	}
+	switcher, ok := agent.(ReasoningEffortSwitcher)
 	if !ok {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReasoningNotSupported))
 		return
@@ -3773,7 +4132,7 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 			e.replyWithButtons(p, msg.ReplyCtx, sb.String(), buttons)
 			return
 		}
-		e.replyWithCard(p, msg.ReplyCtx, e.renderReasoningCard())
+		e.replyWithCard(p, msg.ReplyCtx, e.renderReasoningCard(msg.SessionKey))
 		return
 	}
 
@@ -3796,18 +4155,21 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 	}
 
 	switcher.SetReasoningEffort(target)
-	e.cleanupInteractiveState(msg.SessionKey)
-
-	s := e.sessions.GetOrCreateActive(msg.SessionKey)
+	e.cleanupInteractiveState(interactiveKey)
 	s.SetAgentSessionID("", "")
 	s.ClearHistory()
-	e.sessions.Save()
+	sessions.Save()
 
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgReasoningChanged, target))
 }
 
 func (e *Engine) cmdMode(p Platform, msg *Message, args []string) {
-	switcher, ok := e.agent.(ModeSwitcher)
+	agent, sessions, s, interactiveKey, err := e.commandSessionContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+		return
+	}
+	switcher, ok := agent.(ModeSwitcher)
 	if !ok {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgModeNotSupported))
 		return
@@ -3854,7 +4216,7 @@ func (e *Engine) cmdMode(p Platform, msg *Message, args []string) {
 			e.replyWithButtons(p, msg.ReplyCtx, sb.String(), buttons)
 			return
 		}
-		e.replyWithCard(p, msg.ReplyCtx, e.renderModeCard())
+		e.replyWithCard(p, msg.ReplyCtx, e.renderModeCard(msg.SessionKey))
 		return
 	}
 
@@ -3862,7 +4224,10 @@ func (e *Engine) cmdMode(p Platform, msg *Message, args []string) {
 	switcher.SetMode(target)
 	newMode := switcher.GetMode()
 
-	e.cleanupInteractiveState(msg.SessionKey)
+	e.cleanupInteractiveState(interactiveKey)
+	s.SetAgentSessionID("", "")
+	s.ClearHistory()
+	sessions.Save()
 
 	modes := switcher.PermissionModes()
 	displayName := newMode
@@ -4143,7 +4508,12 @@ func (e *Engine) cmdAllow(p Platform, msg *Message, args []string) {
 }
 
 func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
-	switcher, ok := e.agent.(ProviderSwitcher)
+	agent, _, _, _, err := e.commandSessionContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+		return
+	}
+	switcher, ok := agent.(ProviderSwitcher)
 	if !ok {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgProviderNotSupported))
 		return
@@ -4151,7 +4521,7 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 
 	if len(args) == 0 {
 		if supportsCards(p) {
-			e.replyWithCard(p, msg.ReplyCtx, e.renderProviderCard())
+			e.replyWithCard(p, msg.ReplyCtx, e.renderProviderCard(msg.SessionKey))
 			return
 		}
 
@@ -4240,7 +4610,11 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 
 	case "clear", "reset", "none":
 		switcher.SetActiveProvider("")
-		e.cleanupInteractiveState(msg.SessionKey)
+		if _, _, interactiveKey, err := e.commandContext(p, msg); err == nil {
+			e.cleanupInteractiveState(interactiveKey)
+		} else {
+			e.cleanupInteractiveState(msg.SessionKey)
+		}
 		if e.providerSaveFunc != nil {
 			if err := e.providerSaveFunc(""); err != nil {
 				slog.Error("failed to save provider", "error", err)
@@ -4367,7 +4741,11 @@ func (e *Engine) switchProvider(p Platform, msg *Message, switcher ProviderSwitc
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgProviderNotFound), name))
 		return
 	}
-	e.cleanupInteractiveState(msg.SessionKey)
+	if _, _, interactiveKey, err := e.commandContext(p, msg); err == nil {
+		e.cleanupInteractiveState(interactiveKey)
+	} else {
+		e.cleanupInteractiveState(msg.SessionKey)
+	}
 
 	if e.providerSaveFunc != nil {
 		if err := e.providerSaveFunc(name); err != nil {
@@ -4695,11 +5073,11 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 	case "/help":
 		return e.renderHelpGroupCard(args)
 	case "/model":
-		return e.renderModelCard()
+		return e.renderModelCard(sessionKey)
 	case "/reasoning":
-		return e.renderReasoningCard()
+		return e.renderReasoningCard(sessionKey)
 	case "/mode":
-		return e.renderModeCard()
+		return e.renderModeCard(sessionKey)
 	case "/lang":
 		return e.renderLangCard()
 	case "/status":
@@ -4717,7 +5095,7 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 	case "/history":
 		return e.renderHistoryCard(sessionKey)
 	case "/provider":
-		return e.renderProviderCard()
+		return e.renderProviderCard(sessionKey)
 	case "/cron":
 		return e.renderCronCard(sessionKey)
 	case "/heartbeat":
@@ -4761,7 +5139,11 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		if args == "" {
 			return
 		}
-		switcher, ok := e.agent.(ModelSwitcher)
+		agent, sessions, s, err := e.sessionAgentContextForKey(sessionKey)
+		if err != nil {
+			return
+		}
+		switcher, ok := agent.(ModelSwitcher)
 		if !ok {
 			return
 		}
@@ -4775,16 +5157,19 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		switcher.SetModel(target)
 		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 		e.cleanupInteractiveState(interactiveKey)
-		s := e.sessions.GetOrCreateActive(sessionKey)
 		s.SetAgentSessionID("", "")
 		s.ClearHistory()
-		e.sessions.Save()
+		sessions.Save()
 
 	case "/reasoning":
 		if args == "" {
 			return
 		}
-		switcher, ok := e.agent.(ReasoningEffortSwitcher)
+		agent, sessions, s, err := e.sessionAgentContextForKey(sessionKey)
+		if err != nil {
+			return
+		}
+		switcher, ok := agent.(ReasoningEffortSwitcher)
 		if !ok {
 			return
 		}
@@ -4798,10 +5183,9 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 				switcher.SetReasoningEffort(target)
 				interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 				e.cleanupInteractiveState(interactiveKey)
-				s := e.sessions.GetOrCreateActive(sessionKey)
 				s.SetAgentSessionID("", "")
 				s.ClearHistory()
-				e.sessions.Save()
+				sessions.Save()
 				return
 			}
 		}
@@ -4810,13 +5194,20 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		if args == "" {
 			return
 		}
-		switcher, ok := e.agent.(ModeSwitcher)
+		agent, sessions, s, err := e.sessionAgentContextForKey(sessionKey)
+		if err != nil {
+			return
+		}
+		switcher, ok := agent.(ModeSwitcher)
 		if !ok {
 			return
 		}
 		switcher.SetMode(strings.ToLower(args))
 		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 		e.cleanupInteractiveState(interactiveKey)
+		s.SetAgentSessionID("", "")
+		s.ClearHistory()
+		sessions.Save()
 
 	case "/lang":
 		if args == "" {
@@ -4846,7 +5237,11 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		if args == "" {
 			return
 		}
-		switcher, ok := e.agent.(ProviderSwitcher)
+		agent, _, _, err := e.sessionAgentContextForKey(sessionKey)
+		if err != nil {
+			return
+		}
+		switcher, ok := agent.(ProviderSwitcher)
 		if !ok {
 			return
 		}
@@ -4886,7 +5281,10 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		if args == "" {
 			return
 		}
-		agent, sessions := e.sessionContextForKey(sessionKey)
+		agent, sessions, _, err := e.sessionAgentContextForKey(sessionKey)
+		if err != nil {
+			return
+		}
 		agentSessions, err := agent.ListSessions(e.ctx)
 		if err != nil || len(agentSessions) == 0 {
 			return
@@ -4897,10 +5295,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		}
 		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 		e.cleanupInteractiveState(interactiveKey)
-		session := sessions.GetOrCreateActive(sessionKey)
-		session.SetAgentInfo(matched.ID, agent.Name(), matched.Summary)
-		session.ClearHistory()
-		sessions.Save()
+		e.switchToAgentSession(sessions, sessionKey, agent.Name(), matched)
 
 	case "/stop":
 		sessionKey = e.interactiveKeyForSessionKey(sessionKey)
@@ -5015,7 +5410,10 @@ func (e *Engine) clearDeleteModeState(sessionKey string) {
 }
 
 func (e *Engine) renderDeleteModeCard(sessionKey string) *Card {
-	agent, sessions := e.sessionContextForKey(sessionKey)
+	agent, sessions, _, err := e.sessionAgentContextForKey(sessionKey)
+	if err != nil {
+		return e.simpleCard(e.i18n.T(MsgDeleteModeTitle), "red", err.Error())
+	}
 	agentSessions, err := agent.ListSessions(e.ctx)
 	if err != nil {
 		return e.simpleCard(e.i18n.T(MsgDeleteModeTitle), "red", err.Error())
@@ -5231,7 +5629,10 @@ func parseDeleteModeSelectedIDs(args []string) map[string]struct{} {
 }
 
 func (e *Engine) submitDeleteModeSelection(sessionKey string, dm *deleteModeState) []string {
-	agent, _ := e.sessionContextForKey(sessionKey)
+	agent, _, _, err := e.sessionAgentContextForKey(sessionKey)
+	if err != nil {
+		return []string{fmt.Sprintf("❌ %v", err)}
+	}
 	deleter, ok := agent.(SessionDeleter)
 	if !ok {
 		return []string{e.i18n.T(MsgDeleteNotSupported)}
@@ -5293,8 +5694,12 @@ func (e *Engine) renderLangCard() *Card {
 		Build()
 }
 
-func (e *Engine) renderModelCard() *Card {
-	switcher, ok := e.agent.(ModelSwitcher)
+func (e *Engine) renderModelCard(sessionKey string) *Card {
+	agent, _, _, err := e.sessionAgentContextForKey(sessionKey)
+	if err != nil {
+		return e.simpleCard(e.i18n.T(MsgCardTitleModel), "indigo", err.Error())
+	}
+	switcher, ok := agent.(ModelSwitcher)
 	if !ok {
 		return e.simpleCard(e.i18n.T(MsgCardTitleModel), "indigo", e.i18n.T(MsgModelNotSupported))
 	}
@@ -5333,8 +5738,12 @@ func (e *Engine) renderModelCard() *Card {
 	return cb.Build()
 }
 
-func (e *Engine) renderReasoningCard() *Card {
-	switcher, ok := e.agent.(ReasoningEffortSwitcher)
+func (e *Engine) renderReasoningCard(sessionKey string) *Card {
+	agent, _, _, err := e.sessionAgentContextForKey(sessionKey)
+	if err != nil {
+		return e.simpleCard(e.i18n.T(MsgCardTitleReasoning), "orange", err.Error())
+	}
+	switcher, ok := agent.(ReasoningEffortSwitcher)
 	if !ok {
 		return e.simpleCard(e.i18n.T(MsgCardTitleReasoning), "orange", e.i18n.T(MsgReasoningNotSupported))
 	}
@@ -5367,8 +5776,12 @@ func (e *Engine) renderReasoningCard() *Card {
 	return cb.Build()
 }
 
-func (e *Engine) renderModeCard() *Card {
-	switcher, ok := e.agent.(ModeSwitcher)
+func (e *Engine) renderModeCard(sessionKey string) *Card {
+	agent, _, _, err := e.sessionAgentContextForKey(sessionKey)
+	if err != nil {
+		return e.simpleCard(e.i18n.T(MsgCardTitleMode), "violet", err.Error())
+	}
+	switcher, ok := agent.(ModeSwitcher)
 	if !ok {
 		return e.simpleCard(e.i18n.T(MsgCardTitleMode), "violet", e.i18n.T(MsgModeNotSupported))
 	}
@@ -5413,7 +5826,10 @@ func (e *Engine) renderModeCard() *Card {
 }
 
 func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
-	agent, sessions := e.sessionContextForKey(sessionKey)
+	agent, sessions, _, err := e.sessionAgentContextForKey(sessionKey)
+	if err != nil {
+		return nil, fmt.Errorf(e.i18n.T(MsgListError), err)
+	}
 	agentSessions, err := agent.ListSessions(e.ctx)
 	if err != nil {
 		return nil, fmt.Errorf(e.i18n.T(MsgListError), err)
@@ -5499,13 +5915,17 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 // ──────────────────────────────────────────────────────────────
 
 func (e *Engine) renderCurrentCard(sessionKey string) *Card {
-	_, sessions := e.sessionContextForKey(sessionKey)
+	agent, sessions := e.sessionContextForKey(sessionKey)
 	s := sessions.GetOrCreateActive(sessionKey)
 	agentID := s.GetAgentSessionID()
 	if agentID == "" {
 		agentID = e.i18n.T(MsgSessionNotStarted)
 	}
-	content := fmt.Sprintf(e.i18n.T(MsgCurrentSession), s.Name, agentID, len(s.History))
+	path := e.effectiveWorkDirFor(agent, s)
+	if path == "" {
+		path = "-"
+	}
+	content := fmt.Sprintf(e.i18n.T(MsgCurrentSession), s.Name, agentID, len(s.History), e.effectiveAgentTypeFor(agent, s), path)
 	return NewCard().
 		Title(e.i18n.T(MsgCardTitleCurrentSession), "turquoise").
 		Markdown(content).
@@ -5514,8 +5934,10 @@ func (e *Engine) renderCurrentCard(sessionKey string) *Card {
 }
 
 func (e *Engine) renderHistoryCard(sessionKey string) *Card {
-	agent, sessions := e.sessionContextForKey(sessionKey)
-	s := sessions.GetOrCreateActive(sessionKey)
+	agent, _, s, err := e.sessionAgentContextForKey(sessionKey)
+	if err != nil {
+		return e.simpleCard(e.i18n.T(MsgCardTitleHistory), "turquoise", err.Error())
+	}
 	entries := s.GetHistory(10)
 
 	agentSID := s.GetAgentSessionID()
@@ -5551,8 +5973,12 @@ func (e *Engine) renderHistoryCard(sessionKey string) *Card {
 		Build()
 }
 
-func (e *Engine) renderProviderCard() *Card {
-	switcher, ok := e.agent.(ProviderSwitcher)
+func (e *Engine) renderProviderCard(sessionKey string) *Card {
+	agent, _, _, err := e.sessionAgentContextForKey(sessionKey)
+	if err != nil {
+		return e.simpleCard(e.i18n.T(MsgCardTitleProvider), "indigo", err.Error())
+	}
+	switcher, ok := agent.(ProviderSwitcher)
 	if !ok {
 		return e.simpleCard(e.i18n.T(MsgCardTitleProvider), "indigo", e.i18n.T(MsgProviderNotSupported))
 	}
@@ -6980,9 +7406,9 @@ func (e *Engine) cmdAliasDel(p Platform, msg *Message, args []string) {
 }
 
 func (e *Engine) cmdDelete(p Platform, msg *Message, args []string) {
-	agent, _, _, err := e.commandContext(p, msg)
+	agent, _, _, _, err := e.commandSessionContext(p, msg)
 	if err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
 		return
 	}
 	deleter, ok := agent.(SessionDeleter)
@@ -7564,6 +7990,19 @@ func (e *Engine) commandContext(p Platform, msg *Message) (Agent, *SessionManage
 	return wsAgent, wsSessions, workspace + ":" + msg.SessionKey, nil
 }
 
+func (e *Engine) commandSessionContext(p Platform, msg *Message) (Agent, *SessionManager, *Session, string, error) {
+	baseAgent, sessions, interactiveKey, err := e.commandContext(p, msg)
+	if err != nil {
+		return nil, nil, nil, "", err
+	}
+	session := sessions.GetOrCreateActive(msg.SessionKey)
+	agent, err := e.buildSessionAgentFrom(baseAgent, session)
+	if err != nil {
+		return nil, nil, nil, "", err
+	}
+	return agent, sessions, session, interactiveKey, nil
+}
+
 // sessionContextForKey resolves the agent and session manager for a sessionKey.
 // It uses existing workspace bindings and falls back to global context if unresolved.
 func (e *Engine) sessionContextForKey(sessionKey string) (Agent, *SessionManager) {
@@ -7581,6 +8020,16 @@ func (e *Engine) sessionContextForKey(sessionKey string) (Agent, *SessionManager
 		}
 	}
 	return e.agent, e.sessions
+}
+
+func (e *Engine) sessionAgentContextForKey(sessionKey string) (Agent, *SessionManager, *Session, error) {
+	baseAgent, sessions := e.sessionContextForKey(sessionKey)
+	session := sessions.GetOrCreateActive(sessionKey)
+	agent, err := e.buildSessionAgentFrom(baseAgent, session)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return agent, sessions, session, nil
 }
 
 // interactiveKeyForSessionKey returns the interactive state key for a sessionKey.

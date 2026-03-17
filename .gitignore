@@ -41,6 +41,7 @@ config.toml
 
 # CC-Connect runtime state
 .cc-connect/
+.worktrees/
 
 # npm (for npm package distribution)
 .npmrc

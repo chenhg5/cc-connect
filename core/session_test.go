@@ -86,6 +86,22 @@ func TestSessionManager_SwitchNotFound(t *testing.T) {
 	}
 }
 
+func TestSessionManager_FindByAgentSessionID(t *testing.T) {
+	sm := NewSessionManager("")
+	s1 := sm.NewSession("user1", "first")
+	s1.SetAgentSessionID("agent-1", "codex")
+	s2 := sm.NewSession("user2", "second")
+	s2.SetAgentSessionID("agent-1", "claudecode")
+
+	got := sm.FindByAgentSessionID("user1", "agent-1")
+	if got == nil {
+		t.Fatal("expected matched session")
+	}
+	if got.ID != s1.ID {
+		t.Fatalf("matched session = %q, want %q", got.ID, s1.ID)
+	}
+}
+
 func TestSessionManager_ListSessions(t *testing.T) {
 	sm := NewSessionManager("")
 	sm.NewSession("user1", "a")
@@ -135,6 +151,29 @@ func TestSessionManager_Persistence(t *testing.T) {
 	}
 	if got := sm2.GetSessionName("agent-x"); got != "custom-name" {
 		t.Errorf("session name after reload = %q, want custom-name", got)
+	}
+}
+
+func TestSessionOverridePersistence(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+
+	sm1 := NewSessionManager(path)
+	s1 := sm1.NewSession("user1", "override-session")
+	s1.SetAgentOverride("codex")
+	s1.SetWorkDirOverride("/tmp/project-a")
+	sm1.Save()
+
+	sm2 := NewSessionManager(path)
+	list := sm2.ListSessions("user1")
+	if len(list) != 1 {
+		t.Fatalf("expected 1 session after reload, got %d", len(list))
+	}
+	if got := list[0].GetAgentOverride(); got != "codex" {
+		t.Errorf("agent override after reload = %q, want %q", got, "codex")
+	}
+	if got := list[0].GetWorkDirOverride(); got != "/tmp/project-a" {
+		t.Errorf("work dir override after reload = %q, want %q", got, "/tmp/project-a")
 	}
 }
 

@@ -182,6 +182,13 @@ const (
 	MsgProviderAddFailed    MsgKey = "provider_add_failed"
 	MsgProviderRemoved      MsgKey = "provider_removed"
 	MsgProviderRemoveFailed MsgKey = "provider_remove_failed"
+	MsgAgentStatus          MsgKey = "agent_status"
+	MsgAgentChanged         MsgKey = "agent_changed"
+	MsgAgentUsage           MsgKey = "agent_usage"
+	MsgAgentInvalid         MsgKey = "agent_invalid"
+	MsgPathStatus           MsgKey = "path_status"
+	MsgPathChanged          MsgKey = "path_changed"
+	MsgPathUsage            MsgKey = "path_usage"
 
 	MsgVoiceNotEnabled       MsgKey = "voice_not_enabled"
 	MsgVoiceNoFFmpeg         MsgKey = "voice_no_ffmpeg"
@@ -249,8 +256,8 @@ const (
 	MsgStatusCron       MsgKey = "status_cron"
 	MsgStatusQuiet      MsgKey = "status_quiet"
 	MsgStatusSessionKey MsgKey = "status_session_key"
-	MsgQuietOnShort  MsgKey = "quiet_on_short"
-	MsgQuietOffShort MsgKey = "quiet_off_short"
+	MsgQuietOnShort     MsgKey = "quiet_on_short"
+	MsgQuietOffShort    MsgKey = "quiet_off_short"
 
 	MsgModelDefault               MsgKey = "model_default"
 	MsgModelListTitle             MsgKey = "model_list_title"
@@ -459,21 +466,21 @@ const (
 	MsgDirInvalidPath  MsgKey = "dir_invalid_path"
 
 	// Multi-workspace messages
-	MsgWsNotEnabled        MsgKey = "ws_not_enabled"
-	MsgWsNoBinding         MsgKey = "ws_no_binding"
-	MsgWsInfo              MsgKey = "ws_info"
-	MsgWsInitUsage         MsgKey = "ws_init_usage"
-	MsgWsBindUsage         MsgKey = "ws_bind_usage"
-	MsgWsBindSuccess       MsgKey = "ws_bind_success"
-	MsgWsBindNotFound      MsgKey = "ws_bind_not_found"
-	MsgWsUnbindSuccess     MsgKey = "ws_unbind_success"
-	MsgWsListEmpty         MsgKey = "ws_list_empty"
-	MsgWsListTitle         MsgKey = "ws_list_title"
-	MsgWsNotFoundHint      MsgKey = "ws_not_found_hint"
-	MsgWsResolutionError   MsgKey = "ws_resolution_error"
-	MsgWsCloneProgress     MsgKey = "ws_clone_progress"
-	MsgWsCloneSuccess      MsgKey = "ws_clone_success"
-	MsgWsCloneFailed       MsgKey = "ws_clone_failed"
+	MsgWsNotEnabled      MsgKey = "ws_not_enabled"
+	MsgWsNoBinding       MsgKey = "ws_no_binding"
+	MsgWsInfo            MsgKey = "ws_info"
+	MsgWsInitUsage       MsgKey = "ws_init_usage"
+	MsgWsBindUsage       MsgKey = "ws_bind_usage"
+	MsgWsBindSuccess     MsgKey = "ws_bind_success"
+	MsgWsBindNotFound    MsgKey = "ws_bind_not_found"
+	MsgWsUnbindSuccess   MsgKey = "ws_unbind_success"
+	MsgWsListEmpty       MsgKey = "ws_list_empty"
+	MsgWsListTitle       MsgKey = "ws_list_title"
+	MsgWsNotFoundHint    MsgKey = "ws_not_found_hint"
+	MsgWsResolutionError MsgKey = "ws_resolution_error"
+	MsgWsCloneProgress   MsgKey = "ws_clone_progress"
+	MsgWsCloneSuccess    MsgKey = "ws_clone_success"
+	MsgWsCloneFailed     MsgKey = "ws_clone_failed"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -531,11 +538,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Herramientas pre-autorizadas: %s",
 	},
 	MsgCurrentSession: {
-		LangEnglish:            "📌 Current session\nName: %s\nSession ID: %s\nLocal messages: %d",
-		LangChinese:            "📌 当前会话\n名称: %s\n会话 ID: %s\n本地消息数: %d",
-		LangTraditionalChinese: "📌 目前工作階段\n名稱: %s\n工作階段 ID: %s\n本機訊息數: %d",
-		LangJapanese:           "📌 現在のセッション\n名前: %s\nセッション ID: %s\nローカルメッセージ数: %d",
-		LangSpanish:            "📌 Sesión actual\nNombre: %s\nID de sesión: %s\nMensajes locales: %d",
+		LangEnglish:            "📌 Current session\nName: %s\nSession ID: %s\nLocal messages: %d\nAgent: %s\nPath: %s",
+		LangChinese:            "📌 当前会话\n名称: %s\n会话 ID: %s\n本地消息数: %d\nAgent: %s\n路径: %s",
+		LangTraditionalChinese: "📌 目前工作階段\n名稱: %s\n工作階段 ID: %s\n本機訊息數: %d\nAgent: %s\n路徑: %s",
+		LangJapanese:           "📌 現在のセッション\n名前: %s\nセッション ID: %s\nローカルメッセージ数: %d\nAgent: %s\nパス: %s",
+		LangSpanish:            "📌 Sesión actual\nNombre: %s\nID de sesión: %s\nMensajes locales: %d\nAgent: %s\nRuta: %s",
 	},
 	MsgToolAuthNotSupported: {
 		LangEnglish:            "This agent does not support tool authorization.",
@@ -705,6 +712,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/memory [add|global|global add]\n  View/edit agent memory files\n\n" +
 			"/allow <tool>\n  Pre-allow a tool (next session)\n\n" +
 			"/model [name]\n  View/switch model\n\n" +
+			"/agent [name] [absolute-path]\n  View/switch session agent\n\n" +
 			"/reasoning [level]\n  View/switch reasoning effort\n\n" +
 			"/mode [name]\n  View/switch permission mode\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  View/switch language\n\n" +
@@ -712,6 +720,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/compress\n  Compress conversation context\n\n" +
 			"/tts [always|voice_only]\n  View/switch text-to-speech mode\n\n" +
 			"/shell <command>\n  Run a shell command and return the output\n\n" +
+			"/path [absolute-path|reset]\n  View/switch session path\n\n" +
 			"/dir [path]\n  Show or switch agent working directory\n\n" +
 			"/stop\n  Stop current execution\n\n" +
 			"/cron [add|list|del|enable|disable]\n  Manage scheduled tasks\n\n" +
@@ -747,6 +756,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/memory [add|global|global add]\n  查看/编辑 Agent 记忆文件\n\n" +
 			"/allow <工具名>\n  预授权工具（下次会话生效）\n\n" +
 			"/model [名称]\n  查看/切换模型\n\n" +
+			"/agent [名称] [绝对路径]\n  查看/切换当前会话 Agent\n\n" +
 			"/reasoning [级别]\n  查看/切换推理强度\n\n" +
 			"/mode [名称]\n  查看/切换权限模式\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  查看/切换语言\n\n" +
@@ -754,6 +764,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/compress\n  压缩会话上下文\n\n" +
 			"/tts [always|voice_only]\n  查看/切换语音合成模式\n\n" +
 			"/shell <命令>\n  执行 Shell 命令并返回结果\n\n" +
+			"/path [绝对路径|reset]\n  查看/切换当前会话路径\n\n" +
 			"/dir [路径]\n  查看或切换 Agent 工作目录\n\n" +
 			"/stop\n  停止当前执行\n\n" +
 			"/cron [add|list|del|enable|disable]\n  管理定时任务\n\n" +
@@ -2991,6 +3002,55 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 目錄不存在: `%s`",
 		LangJapanese:           "❌ ディレクトリが存在しません: `%s`",
 		LangSpanish:            "❌ El directorio no existe: `%s`",
+	},
+	MsgAgentStatus: {
+		LangEnglish:            "🤖 Current agent: `%s`\n📂 Current path: `%s`\nDefault agent: `%s`\nDefault path: `%s`",
+		LangChinese:            "🤖 当前 Agent: `%s`\n📂 当前路径: `%s`\n默认 Agent: `%s`\n默认路径: `%s`",
+		LangTraditionalChinese: "🤖 當前 Agent: `%s`\n📂 當前路徑: `%s`\n預設 Agent: `%s`\n預設路徑: `%s`",
+		LangJapanese:           "🤖 現在のエージェント: `%s`\n📂 現在のパス: `%s`\nデフォルト Agent: `%s`\nデフォルトパス: `%s`",
+		LangSpanish:            "🤖 Agente actual: `%s`\n📂 Ruta actual: `%s`\nAgente por defecto: `%s`\nRuta por defecto: `%s`",
+	},
+	MsgAgentChanged: {
+		LangEnglish:            "✅ Session agent set to: `%s`",
+		LangChinese:            "✅ 当前会话 Agent 已切换为: `%s`",
+		LangTraditionalChinese: "✅ 目前會話 Agent 已切換為: `%s`",
+		LangJapanese:           "✅ セッション Agent を `%s` に切り替えました",
+		LangSpanish:            "✅ El agente de la sesión cambió a: `%s`",
+	},
+	MsgAgentUsage: {
+		LangEnglish:            "Usage: `/agent <codex|claude|claudecode|reset> [absolute-path]`",
+		LangChinese:            "用法: `/agent <codex|claude|claudecode|reset> [绝对路径]`",
+		LangTraditionalChinese: "用法: `/agent <codex|claude|claudecode|reset> [絕對路徑]`",
+		LangJapanese:           "使い方: `/agent <codex|claude|claudecode|reset> [絶対パス]`",
+		LangSpanish:            "Uso: `/agent <codex|claude|claudecode|reset> [ruta-absoluta]`",
+	},
+	MsgAgentInvalid: {
+		LangEnglish:            "❌ Invalid agent: `%s`. Allowed: `codex`, `claude`, `claudecode`, `reset`",
+		LangChinese:            "❌ 无效的 Agent: `%s`。可用值: `codex`、`claude`、`claudecode`、`reset`",
+		LangTraditionalChinese: "❌ 無效的 Agent: `%s`。可用值: `codex`、`claude`、`claudecode`、`reset`",
+		LangJapanese:           "❌ 無効な Agent: `%s`。利用可能: `codex`, `claude`, `claudecode`, `reset`",
+		LangSpanish:            "❌ Agente inválido: `%s`. Permitidos: `codex`, `claude`, `claudecode`, `reset`",
+	},
+	MsgPathStatus: {
+		LangEnglish:            "📂 Current session path: `%s`\nDefault path: `%s`",
+		LangChinese:            "📂 当前会话路径: `%s`\n默认路径: `%s`",
+		LangTraditionalChinese: "📂 當前會話路徑: `%s`\n預設路徑: `%s`",
+		LangJapanese:           "📂 現在のセッションパス: `%s`\nデフォルトパス: `%s`",
+		LangSpanish:            "📂 Ruta actual de la sesión: `%s`\nRuta por defecto: `%s`",
+	},
+	MsgPathChanged: {
+		LangEnglish:            "✅ Session path set to: `%s`",
+		LangChinese:            "✅ 当前会话路径已切换为: `%s`",
+		LangTraditionalChinese: "✅ 目前會話路徑已切換為: `%s`",
+		LangJapanese:           "✅ セッションパスを `%s` に切り替えました",
+		LangSpanish:            "✅ La ruta de la sesión cambió a: `%s`",
+	},
+	MsgPathUsage: {
+		LangEnglish:            "Usage: `/path <absolute-path|reset>`",
+		LangChinese:            "用法: `/path <绝对路径|reset>`",
+		LangTraditionalChinese: "用法: `/path <絕對路徑|reset>`",
+		LangJapanese:           "使い方: `/path <絶対パス|reset>`",
+		LangSpanish:            "Uso: `/path <ruta-absoluta|reset>`",
 	},
 
 	// Multi-workspace messages
