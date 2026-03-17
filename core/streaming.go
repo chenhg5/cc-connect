@@ -78,7 +78,10 @@ func newStreamPreview(cfg StreamPreviewCfg, p Platform, replyCtx any, ctx contex
 
 // canPreview returns true if the platform supports message updating and is not disabled.
 func (sp *streamPreview) canPreview() bool {
-	if sp.degraded || !sp.cfg.Enabled {
+	sp.mu.Lock()
+	degraded := sp.degraded
+	sp.mu.Unlock()
+	if degraded || !sp.cfg.Enabled {
 		return false
 	}
 	// Check if platform is in disabled list
