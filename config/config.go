@@ -31,6 +31,7 @@ type Config struct {
 	Display         DisplayConfig       `toml:"display"`
 	StreamPreview   StreamPreviewConfig `toml:"stream_preview"`  // real-time streaming preview
 	RateLimit       RateLimitConfig     `toml:"rate_limit"`      // per-session rate limiting
+	Relay           RelayConfig         `toml:"relay"`           // bot-to-bot relay behavior
 	Quiet           *bool               `toml:"quiet,omitempty"` // global default for quiet mode; project-level overrides this
 	Cron            CronConfig          `toml:"cron"`
 	Webhook         WebhookConfig       `toml:"webhook"`
@@ -100,6 +101,11 @@ type RoleConfig struct {
 	UserIDs          []string         `toml:"user_ids"`
 	DisabledCommands []string         `toml:"disabled_commands,omitempty"`
 	RateLimit        *RateLimitConfig `toml:"rate_limit,omitempty"` // nil = inherit global
+}
+
+// RelayConfig controls bot-to-bot relay behavior.
+type RelayConfig struct {
+	TimeoutSecs *int `toml:"timeout_secs"` // max seconds to wait for relay response; 0 = disabled; default 120
 }
 
 // SpeechConfig configures speech-to-text for voice messages.
@@ -248,6 +254,9 @@ func (c *Config) validate() error {
 	case "", "on", "off":
 	default:
 		return fmt.Errorf("config: attachment_send must be \"on\" or \"off\"")
+	}
+	if c.Relay.TimeoutSecs != nil && *c.Relay.TimeoutSecs < 0 {
+		return fmt.Errorf("config: relay.timeout_secs must be >= 0")
 	}
 	if len(c.Projects) == 0 {
 		return fmt.Errorf("config: at least one [[projects]] entry is required")

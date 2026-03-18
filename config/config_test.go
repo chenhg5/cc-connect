@@ -316,6 +316,46 @@ type = "telegram"
 bot_token = "token_xxx"
 `
 
+const relayConfigFixture = `
+[relay]
+timeout_secs = 300
+
+[[projects]]
+name = "alpha"
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/alpha"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+bot_token = "token_xxx"
+`
+
+const relayConfigNegativeFixture = `
+[relay]
+timeout_secs = -1
+
+[[projects]]
+name = "alpha"
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/alpha"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+bot_token = "token_xxx"
+`
+
 func TestSaveFeishuPlatformCredentials_UpdateFirstCandidateAndAllowFrom(t *testing.T) {
 	configPath := writeConfigFixture(t, feishuConfigFixture)
 	patchConfigPath(t, configPath)
@@ -595,6 +635,32 @@ func readTestConfig(t *testing.T) Config {
 	return cfg
 }
 
+func TestLoadRelayTimeoutConfig(t *testing.T) {
+	configPath := writeConfigFixture(t, relayConfigFixture)
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Relay.TimeoutSecs == nil {
+		t.Fatal("cfg.Relay.TimeoutSecs = nil, want non-nil")
+	}
+	if *cfg.Relay.TimeoutSecs != 300 {
+		t.Fatalf("cfg.Relay.TimeoutSecs = %d, want 300", *cfg.Relay.TimeoutSecs)
+	}
+}
+
+func TestLoadRejectsNegativeRelayTimeout(t *testing.T) {
+	configPath := writeConfigFixture(t, relayConfigNegativeFixture)
+
+	_, err := Load(configPath)
+	if err == nil {
+		t.Fatal("expected error for negative relay timeout, got nil")
+	}
+	if !strings.Contains(err.Error(), "relay.timeout_secs must be >= 0") {
+		t.Fatalf("error = %q, want contains %q", err.Error(), "relay.timeout_secs must be >= 0")
+	}
+}
 func writeConfigFixture(t *testing.T, content string) string {
 	t.Helper()
 	dir := t.TempDir()

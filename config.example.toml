@@ -85,6 +85,16 @@ level = "info" # debug, info, warn, error
 # window_secs = 60          # Window size in seconds (default: 60) / 窗口时间秒数（默认 60）
 
 # =============================================================================
+# Relay Settings / Relay 设置
+# =============================================================================
+# Bot-to-bot relay timeout. Controls how long cc-connect waits for the target
+# bot to finish responding during `cc-connect relay send`.
+# Bot 间 relay 超时。控制 `cc-connect relay send` 时等待目标 bot 完成回复的最长时间。
+
+# [relay]
+# timeout_secs = 120        # Max relay wait in seconds; 0 = disabled (default: 120) / relay 最大等待秒数；0 = 禁用（默认 120）
+
+# =============================================================================
 # Cron Settings / 定时任务设置
 # =============================================================================
 # Controls cron job behavior.
