@@ -58,7 +58,8 @@ type BridgeConfig struct {
 	Enabled *bool  `toml:"enabled"`         // default false
 	Port    int    `toml:"port,omitempty"`  // listen port; default 9810
 	Token   string `toml:"token,omitempty"` // shared secret for authentication; required
-	Path    string `toml:"path,omitempty"`  // URL path; default "/bridge/ws"
+	Path        string   `toml:"path,omitempty"`         // URL path; default "/bridge/ws"
+	CORSOrigins []string `toml:"cors_origins,omitempty"` // allowed CORS origins; empty = no CORS
 }
 
 // ManagementConfig controls the HTTP Management API for external tools.
