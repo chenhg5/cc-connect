@@ -2824,7 +2824,7 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	}
 	agentSessions, err := agent.ListSessions(e.ctx)
 	if err != nil {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 		return
 	}
 
@@ -3129,7 +3129,7 @@ func (e *Engine) cmdName(p Platform, msg *Message, args []string) {
 		}
 		agentSessions, err := agent.ListSessions(e.ctx)
 		if err != nil {
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 			return
 		}
 		if idx > len(agentSessions) {
@@ -5791,7 +5791,7 @@ func (e *Engine) submitDeleteModeSelection(sessionKey string, dm *deleteModeStat
 	}
 	agentSessions, err := agent.ListSessions(e.ctx)
 	if err != nil {
-		return []string{fmt.Sprintf("❌ %v", err)}
+		return []string{e.i18n.Tf(MsgError, err)}
 	}
 	seen := make(map[string]struct{}, len(agentSessions))
 	lines := make([]string, 0, len(dm.selectedIDs))
@@ -6357,7 +6357,7 @@ func (e *Engine) renderUpgradeCard() *Card {
 	select {
 	case res := <-ch:
 		if res.err != nil {
-			content = fmt.Sprintf("❌ %s", res.err)
+			content = e.i18n.Tf(MsgError, res.err)
 		} else if res.release == nil {
 			content = fmt.Sprintf(e.i18n.T(MsgUpgradeUpToDate), cur)
 		} else {
@@ -6552,7 +6552,7 @@ func (e *Engine) cmdCronAdd(p Platform, msg *Message, args []string) {
 	}
 
 	if err := e.cronScheduler.AddJob(job); err != nil {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 		return
 	}
 
@@ -6585,7 +6585,7 @@ func (e *Engine) cmdCronAddExec(p Platform, msg *Message, args []string) {
 	}
 
 	if err := e.cronScheduler.AddJob(job); err != nil {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 		return
 	}
 
@@ -6679,7 +6679,7 @@ func (e *Engine) cmdCronToggle(p Platform, msg *Message, args []string, enable b
 		err = e.cronScheduler.DisableJob(id)
 	}
 	if err != nil {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 		return
 	}
 	if enable {
@@ -6716,7 +6716,7 @@ func (e *Engine) cmdCronSetup(p Platform, msg *Message) {
 	case setupExists:
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgRelaySetupExists), baseName))
 	case setupError:
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 	case setupOK:
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronSetupOK), baseName))
 	}
@@ -7339,7 +7339,7 @@ func (e *Engine) cmdConfig(p Platform, msg *Message, args []string) {
 		for _, item := range items {
 			if item.key == key {
 				if err := item.setFunc(value); err != nil {
-					e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
+					e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 					return
 				}
 				e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgConfigUpdated, key, item.getFunc()))
@@ -7354,7 +7354,7 @@ func (e *Engine) cmdConfig(p Platform, msg *Message, args []string) {
 			if item.key == key {
 				if len(args) >= 2 {
 					if err := item.setFunc(args[1]); err != nil {
-						e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
+						e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 						return
 					}
 					e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgConfigUpdated, key, item.getFunc()))
@@ -7399,7 +7399,7 @@ func (e *Engine) cmdUpgrade(p Platform, msg *Message, args []string) {
 	useGitee := e.i18n.IsZhLike()
 	release, err := CheckForUpdate(cur, useGitee)
 	if err != nil {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %s", err))
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 		return
 	}
 	if release == nil {
@@ -7425,7 +7425,7 @@ func (e *Engine) cmdUpgradeConfirm(p Platform, msg *Message) {
 	useGitee := e.i18n.IsZhLike()
 	release, err := CheckForUpdate(cur, useGitee)
 	if err != nil {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %s", err))
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 		return
 	}
 	if release == nil {
@@ -7436,7 +7436,7 @@ func (e *Engine) cmdUpgradeConfirm(p Platform, msg *Message) {
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgUpgradeDownloading), release.TagName))
 
 	if err := SelfUpdate(release.TagName, useGitee); err != nil {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %s", err))
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 		return
 	}
 
@@ -7459,7 +7459,7 @@ func (e *Engine) cmdConfigReload(p Platform, msg *Message) {
 	}
 	result, err := e.configReloadFunc()
 	if err != nil {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 		return
 	}
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgConfigReloaded),
@@ -7605,7 +7605,7 @@ func (e *Engine) cmdDelete(p Platform, msg *Message, args []string) {
 
 	agentSessions, err := agent.ListSessions(e.ctx)
 	if err != nil {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 		return
 	}
 
@@ -7746,7 +7746,7 @@ func (e *Engine) deleteSingleSessionReply(msg *Message, deleter SessionDeleter, 
 	displayName := e.deleteSessionDisplayName(sessions, matched)
 
 	if err := deleter.DeleteSession(e.ctx, matched.ID); err != nil {
-		return fmt.Sprintf("❌ %s: %v", displayName, err)
+		return e.i18n.Tf(MsgFailedToDeleteSession, displayName, err)
 	}
 
 	// Keep local session snapshot aligned with agent-side deletion.
@@ -8160,7 +8160,7 @@ func (e *Engine) cmdBindSetup(p Platform, msg *Message) {
 	case setupExists:
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgRelaySetupExists), baseName))
 	case setupError:
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 	case setupOK:
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgRelaySetupOK), baseName))
 	}
