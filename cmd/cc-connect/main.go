@@ -183,6 +183,12 @@ func main() {
 		}
 
 		engine := core.NewEngine(proj.Name, agent, platforms, sessionFile, lang)
+		engine.SetDefaultAgentConfig(
+			proj.Agent.Type,
+			proj.Agent.Options,
+			toCoreProviders(proj.Agent.Providers),
+			optionString(proj.Agent.Options, "provider"),
+		)
 		engine.SetAttachmentSendEnabled(cfg.AttachmentSend != "off")
 
 		// Wire multi-workspace mode
@@ -685,6 +691,29 @@ func sessionStorePath(dataDir, name, workDir string) string {
 	return filepath.Join(dataDir, "sessions", filename)
 }
 
+func toCoreProviders(in []config.ProviderConfig) []core.ProviderConfig {
+	out := make([]core.ProviderConfig, len(in))
+	for i, p := range in {
+		out[i] = core.ProviderConfig{
+			Name:     p.Name,
+			APIKey:   p.APIKey,
+			BaseURL:  p.BaseURL,
+			Model:    p.Model,
+			Thinking: p.Thinking,
+			Env:      p.Env,
+		}
+	}
+	return out
+}
+
+func optionString(opts map[string]any, key string) string {
+	if opts == nil {
+		return ""
+	}
+	v, _ := opts[key].(string)
+	return v
+}
+
 // resolveConfigPath determines which config file to use.
 // Priority: explicit flag → ./config.toml → ~/.cc-connect/config.toml
 func resolveConfigPath(explicit string) string {
@@ -895,13 +924,7 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 
 	// Reload providers
 	if ps, ok := engine.GetAgent().(core.ProviderSwitcher); ok {
-		providers := make([]core.ProviderConfig, len(proj.Agent.Providers))
-		for i, p := range proj.Agent.Providers {
-			providers[i] = core.ProviderConfig{
-				Name: p.Name, APIKey: p.APIKey, BaseURL: p.BaseURL,
-				Model: p.Model, Thinking: p.Thinking, Env: p.Env,
-			}
-		}
+		providers := toCoreProviders(proj.Agent.Providers)
 		ps.SetProviders(providers)
 		result.ProvidersUpdated = len(providers)
 
@@ -909,6 +932,12 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 			ps.SetActiveProvider(active)
 		}
 	}
+	engine.SetDefaultAgentConfig(
+		proj.Agent.Type,
+		proj.Agent.Options,
+		toCoreProviders(proj.Agent.Providers),
+		optionString(proj.Agent.Options, "provider"),
+	)
 
 	// Reload custom commands
 	engine.ClearCommands("config")

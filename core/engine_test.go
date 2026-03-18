@@ -252,6 +252,69 @@ func (a *stubProviderAgent) SetActiveProvider(name string) bool {
 	return false
 }
 
+type liveConfigAgent struct {
+	stubAgent
+	workDir         string
+	model           string
+	mode            string
+	reasoningEffort string
+	providers       []ProviderConfig
+	active          string
+}
+
+func (a *liveConfigAgent) Name() string { return "live-config" }
+func (a *liveConfigAgent) SetWorkDir(dir string) {
+	a.workDir = dir
+}
+func (a *liveConfigAgent) GetWorkDir() string {
+	return a.workDir
+}
+func (a *liveConfigAgent) SetModel(model string) {
+	a.model = model
+}
+func (a *liveConfigAgent) GetModel() string {
+	return a.model
+}
+func (a *liveConfigAgent) AvailableModels(_ context.Context) []ModelOption {
+	return []ModelOption{{Name: a.model}}
+}
+func (a *liveConfigAgent) SetMode(mode string) {
+	a.mode = mode
+}
+func (a *liveConfigAgent) GetMode() string {
+	return a.mode
+}
+func (a *liveConfigAgent) PermissionModes() []PermissionModeInfo {
+	return []PermissionModeInfo{{Key: a.mode, Name: a.mode, NameZh: a.mode}}
+}
+func (a *liveConfigAgent) SetReasoningEffort(effort string) {
+	a.reasoningEffort = effort
+}
+func (a *liveConfigAgent) GetReasoningEffort() string {
+	return a.reasoningEffort
+}
+func (a *liveConfigAgent) AvailableReasoningEfforts() []string {
+	return []string{a.reasoningEffort}
+}
+func (a *liveConfigAgent) SetProviders(providers []ProviderConfig) {
+	a.providers = append([]ProviderConfig(nil), providers...)
+}
+func (a *liveConfigAgent) ListProviders() []ProviderConfig {
+	return append([]ProviderConfig(nil), a.providers...)
+}
+func (a *liveConfigAgent) SetActiveProvider(name string) bool {
+	a.active = name
+	return true
+}
+func (a *liveConfigAgent) GetActiveProvider() *ProviderConfig {
+	for i := range a.providers {
+		if a.providers[i].Name == a.active {
+			return &a.providers[i]
+		}
+	}
+	return nil
+}
+
 type stubUsageAgent struct {
 	stubAgent
 	report *UsageReport
@@ -1136,6 +1199,108 @@ func TestCmdList_MultiWorkspaceUsesWorkspaceSessions(t *testing.T) {
 	}
 }
 
+func TestCmdList_UsesSessionOverrideAgent(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	defaultAgent := &stubListAgent{
+		sessions: []AgentSessionInfo{{ID: "g1", Summary: "Global One", MessageCount: 1}},
+	}
+	agentName := fmt.Sprintf("list-override-%d", time.Now().UnixNano())
+	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) {
+		return &stubListAgent{
+			sessions: []AgentSessionInfo{{ID: "o1", Summary: "Override One", MessageCount: 2}},
+		}, nil
+	})
+
+	e := NewEngine("test", defaultAgent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	s := e.sessions.GetOrCreateActive(msg.SessionKey)
+	s.SetAgentOverride(agentName)
+
+	e.cmdList(p, msg, nil)
+
+	if len(p.sent) == 0 {
+		t.Fatal("expected /list response")
+	}
+	if strings.Contains(p.sent[0], "Global One") {
+		t.Fatalf("expected override agent sessions, got global list: %q", p.sent[0])
+	}
+	if !strings.Contains(p.sent[0], "Override One") {
+		t.Fatalf("expected override agent session summary, got %q", p.sent[0])
+	}
+}
+
+func TestCmdAgentAndPath_MultiWorkspaceUseWorkspaceSessionContext(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubWorkDirAgent{workDir: "/data/global"}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindingPath)
+
+	wsDir := filepath.Join(baseDir, "ws1")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	channelID := "C321"
+	sessionKey := "slack:" + channelID + ":U1"
+	interactiveKey := wsDir + ":" + sessionKey
+	e.workspaceBindings.Bind("project:test", channelID, "chan", wsDir)
+
+	ws := e.workspacePool.GetOrCreate(wsDir)
+	ws.agent = &stubWorkDirAgent{workDir: wsDir}
+	ws.sessions = NewSessionManager("")
+
+	globalSession := e.sessions.GetOrCreateActive(sessionKey)
+	globalSession.SetAgentOverride("claudecode")
+	globalSession.SetWorkDirOverride("/data/global-override")
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[interactiveKey] = &interactiveState{}
+	e.interactiveStates[sessionKey] = &interactiveState{}
+	e.interactiveMu.Unlock()
+
+	msg := &Message{SessionKey: sessionKey, ReplyCtx: "ctx"}
+	e.cmdAgent(p, msg, []string{"codex"})
+
+	wsSession := ws.sessions.GetOrCreateActive(sessionKey)
+	if got := wsSession.GetAgentOverride(); got != "codex" {
+		t.Fatalf("workspace agent override = %q, want %q", got, "codex")
+	}
+	if got := globalSession.GetAgentOverride(); got != "claudecode" {
+		t.Fatalf("global agent override = %q, want unchanged %q", got, "claudecode")
+	}
+	e.interactiveMu.Lock()
+	_, wsExists := e.interactiveStates[interactiveKey]
+	_, globalExists := e.interactiveStates[sessionKey]
+	e.interactiveMu.Unlock()
+	if wsExists {
+		t.Fatal("workspace interactive state should be cleared by /agent")
+	}
+	if !globalExists {
+		t.Fatal("global interactive state should remain untouched by workspace /agent")
+	}
+
+	targetDir := t.TempDir()
+	e.interactiveMu.Lock()
+	e.interactiveStates[interactiveKey] = &interactiveState{}
+	e.interactiveMu.Unlock()
+
+	e.cmdPath(p, msg, []string{targetDir})
+
+	if got := wsSession.GetWorkDirOverride(); got != targetDir {
+		t.Fatalf("workspace work dir override = %q, want %q", got, targetDir)
+	}
+	if got := globalSession.GetWorkDirOverride(); got != "/data/global-override" {
+		t.Fatalf("global work dir override = %q, want unchanged %q", got, "/data/global-override")
+	}
+	e.interactiveMu.Lock()
+	_, wsExists = e.interactiveStates[interactiveKey]
+	e.interactiveMu.Unlock()
+	if wsExists {
+		t.Fatal("workspace interactive state should be cleared by /path")
+	}
+}
+
 func TestHandlePendingPermission_MultiWorkspaceLookup(t *testing.T) {
 	e := newTestEngine()
 	e.multiWorkspace = true
@@ -1418,11 +1583,14 @@ func TestCmdList_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 
 func TestCmdCurrent_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
-	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e := NewEngine("test", &stubWorkDirAgent{workDir: "/data/default"}, []Platform{p}, "", LangEnglish)
+	e.SetDefaultAgentConfig("codex", map[string]any{"work_dir": "/data/default"}, nil, "")
 	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
 	session := e.sessions.GetOrCreateActive(msg.SessionKey)
 	session.Name = "Focus"
 	session.SetAgentSessionID("session-123", "test")
+	session.SetAgentOverride("claudecode")
+	session.SetWorkDirOverride("/data/custom")
 	session.History = append(session.History, HistoryEntry{Role: "user", Content: "hello", Timestamp: time.Now()})
 
 	e.cmdCurrent(p, msg)
@@ -1432,6 +1600,12 @@ func TestCmdCurrent_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	}
 	if !strings.Contains(p.sent[0], "Current session") {
 		t.Fatalf("current text = %q, want legacy current session text", p.sent[0])
+	}
+	if !strings.Contains(p.sent[0], "claudecode") {
+		t.Fatalf("current text = %q, want effective agent", p.sent[0])
+	}
+	if !strings.Contains(p.sent[0], "/data/custom") {
+		t.Fatalf("current text = %q, want effective path", p.sent[0])
 	}
 	if strings.Contains(p.sent[0], "cc-connect") {
 		t.Fatalf("current text = %q, should not be card fallback title", p.sent[0])
@@ -2052,6 +2226,265 @@ func TestCmdDir_HelpShowsUsage(t *testing.T) {
 	}
 	if !strings.Contains(p.sent[0], "/dir <path>") {
 		t.Fatalf("sent = %q, want /dir usage", p.sent[0])
+	}
+}
+
+func TestResolveEffectiveAgent_DefaultsToEngineAgent(t *testing.T) {
+	e := NewEngine("test", &stubAgent{}, nil, "", LangEnglish)
+	s := &Session{}
+
+	if got := e.effectiveAgentType(s); got != "stub" {
+		t.Fatalf("effectiveAgentType = %q, want %q", got, "stub")
+	}
+}
+
+func TestResolveEffectiveAgent_UsesOverrideAndNormalizesClaude(t *testing.T) {
+	e := NewEngine("test", &stubAgent{}, nil, "", LangEnglish)
+	e.SetDefaultAgentConfig("codex", map[string]any{"work_dir": "/data/default"}, nil, "")
+	s := &Session{}
+	s.SetAgentOverride("claude")
+
+	if got := e.effectiveAgentType(s); got != "claudecode" {
+		t.Fatalf("effectiveAgentType = %q, want %q", got, "claudecode")
+	}
+}
+
+func TestResolveEffectiveWorkDir_UsesSessionOverride(t *testing.T) {
+	e := NewEngine("test", &stubWorkDirAgent{workDir: "/data/default"}, nil, "", LangEnglish)
+	e.SetDefaultAgentConfig("codex", map[string]any{"work_dir": "/data/default"}, nil, "")
+	s := &Session{}
+	s.SetWorkDirOverride("/data/override")
+
+	if got := e.effectiveWorkDir(s); got != "/data/override" {
+		t.Fatalf("effectiveWorkDir = %q, want %q", got, "/data/override")
+	}
+}
+
+func TestResolveEffectiveWorkDir_FallsBackToDefault(t *testing.T) {
+	e := NewEngine("test", &stubWorkDirAgent{workDir: "/data/default"}, nil, "", LangEnglish)
+	e.SetDefaultAgentConfig("codex", map[string]any{"work_dir": "/data/default"}, nil, "")
+	s := &Session{}
+
+	if got := e.effectiveWorkDir(s); got != "/data/default" {
+		t.Fatalf("effectiveWorkDir = %q, want %q", got, "/data/default")
+	}
+}
+
+func TestCmdAgent_SetsOverrideAndClearsInteractiveState(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDefaultAgentConfig("codex", map[string]any{"work_dir": "/data/default"}, nil, "")
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[msg.SessionKey] = &interactiveState{}
+	e.interactiveMu.Unlock()
+
+	e.cmdAgent(p, msg, []string{"claude"})
+
+	s := e.sessions.GetOrCreateActive(msg.SessionKey)
+	if got := s.GetAgentOverride(); got != "claudecode" {
+		t.Fatalf("agent override = %q, want %q", got, "claudecode")
+	}
+	e.interactiveMu.Lock()
+	_, exists := e.interactiveStates[msg.SessionKey]
+	e.interactiveMu.Unlock()
+	if exists {
+		t.Fatal("expected interactive state to be cleared after /agent")
+	}
+}
+
+func TestCmdAgent_ResetClearsOverrideOnly(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDefaultAgentConfig("codex", map[string]any{"work_dir": "/data/default"}, nil, "")
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	s := e.sessions.GetOrCreateActive(msg.SessionKey)
+	s.SetAgentOverride("claudecode")
+	s.SetWorkDirOverride("/data/custom")
+
+	e.cmdAgent(p, msg, []string{"reset"})
+
+	if got := s.GetAgentOverride(); got != "" {
+		t.Fatalf("agent override = %q, want empty", got)
+	}
+	if got := s.GetWorkDirOverride(); got != "/data/custom" {
+		t.Fatalf("work dir override = %q, want %q", got, "/data/custom")
+	}
+}
+
+func TestCmdAgent_SetsAgentAndPathTogether(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDefaultAgentConfig("codex", map[string]any{"work_dir": "/data/default"}, nil, "")
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	targetDir := t.TempDir()
+
+	e.cmdAgent(p, msg, []string{"codex", targetDir})
+
+	s := e.sessions.GetOrCreateActive(msg.SessionKey)
+	if got := s.GetAgentOverride(); got != "codex" {
+		t.Fatalf("agent override = %q, want %q", got, "codex")
+	}
+	if got := s.GetWorkDirOverride(); got != targetDir {
+		t.Fatalf("work dir override = %q, want %q", got, targetDir)
+	}
+}
+
+func TestCmdAgent_InvalidPathDoesNotMutateSession(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	s := e.sessions.GetOrCreateActive(msg.SessionKey)
+	s.SetAgentSessionID("existing-session", "codex")
+	s.SetAgentOverride("codex")
+	s.AddHistory("user", "keep")
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[msg.SessionKey] = &interactiveState{}
+	e.interactiveMu.Unlock()
+
+	e.cmdAgent(p, msg, []string{"claude", "/path/does/not/exist"})
+
+	if got := s.GetAgentOverride(); got != "codex" {
+		t.Fatalf("agent override = %q, want unchanged %q", got, "codex")
+	}
+	if got := s.GetAgentSessionID(); got != "existing-session" {
+		t.Fatalf("AgentSessionID = %q, want unchanged %q", got, "existing-session")
+	}
+	if got := len(s.GetHistory(0)); got != 1 {
+		t.Fatalf("history length = %d, want preserved 1", got)
+	}
+	e.interactiveMu.Lock()
+	_, exists := e.interactiveStates[msg.SessionKey]
+	e.interactiveMu.Unlock()
+	if !exists {
+		t.Fatal("interactive state should remain when /agent validation fails")
+	}
+}
+
+func TestCmdPath_SetsOverrideAndClearsInteractiveState(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDefaultAgentConfig("codex", map[string]any{"work_dir": "/data/default"}, nil, "")
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	targetDir := t.TempDir()
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[msg.SessionKey] = &interactiveState{}
+	e.interactiveMu.Unlock()
+
+	e.cmdPath(p, msg, []string{targetDir})
+
+	s := e.sessions.GetOrCreateActive(msg.SessionKey)
+	if got := s.GetWorkDirOverride(); got != targetDir {
+		t.Fatalf("work dir override = %q, want %q", got, targetDir)
+	}
+	e.interactiveMu.Lock()
+	_, exists := e.interactiveStates[msg.SessionKey]
+	e.interactiveMu.Unlock()
+	if exists {
+		t.Fatal("expected interactive state to be cleared after /path")
+	}
+}
+
+func TestCmdPath_ResetClearsOverride(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	s := e.sessions.GetOrCreateActive(msg.SessionKey)
+	s.SetWorkDirOverride("/data/custom")
+
+	e.cmdPath(p, msg, []string{"reset"})
+
+	if got := s.GetWorkDirOverride(); got != "" {
+		t.Fatalf("work dir override = %q, want empty", got)
+	}
+}
+
+func TestCmdPath_RejectsRelativeMissingAndFilePath(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	tempDir := t.TempDir()
+	filePath := filepath.Join(tempDir, "file.txt")
+	if err := os.WriteFile(filePath, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	e.cmdPath(p, msg, []string{"relative/path"})
+	e.cmdPath(p, msg, []string{filepath.Join(tempDir, "missing")})
+	e.cmdPath(p, msg, []string{filePath})
+
+	if len(p.sent) != 3 {
+		t.Fatalf("sent messages = %d, want 3", len(p.sent))
+	}
+	s := e.sessions.GetOrCreateActive(msg.SessionKey)
+	if got := s.GetWorkDirOverride(); got != "" {
+		t.Fatalf("work dir override = %q, want empty after invalid inputs", got)
+	}
+}
+
+func TestCmdSwitch_ActivatesExistingLocalSessionAndPreservesOverrides(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubListAgent{
+		sessions: []AgentSessionInfo{
+			{ID: "agent-a", Summary: "Session A", MessageCount: 1},
+			{ID: "agent-b", Summary: "Session B", MessageCount: 2},
+		},
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	s1 := e.sessions.NewSession(msg.SessionKey, "local-a")
+	s1.SetAgentSessionID("agent-a", "codex")
+	s1.AddHistory("user", "old")
+	s2 := e.sessions.NewSession(msg.SessionKey, "local-b")
+	s2.SetAgentSessionID("agent-b", "claudecode")
+	s2.SetAgentOverride("claudecode")
+	s2.SetWorkDirOverride("/data/project-b")
+	s2.AddHistory("user", "keep")
+
+	if _, err := e.sessions.SwitchSession(msg.SessionKey, s1.ID); err != nil {
+		t.Fatalf("switch to seed active session: %v", err)
+	}
+
+	oldSession := newControllableSession("agent-a")
+	e.interactiveMu.Lock()
+	e.interactiveStates[msg.SessionKey] = &interactiveState{agentSession: oldSession}
+	e.interactiveMu.Unlock()
+
+	e.cmdSwitch(p, msg, []string{"2"})
+
+	active := e.sessions.GetOrCreateActive(msg.SessionKey)
+	if active.ID != s2.ID {
+		t.Fatalf("active session = %q, want %q", active.ID, s2.ID)
+	}
+	if got := active.GetAgentOverride(); got != "claudecode" {
+		t.Fatalf("agent override = %q, want %q", got, "claudecode")
+	}
+	if got := active.GetWorkDirOverride(); got != "/data/project-b" {
+		t.Fatalf("work dir override = %q, want %q", got, "/data/project-b")
+	}
+	if got := len(active.GetHistory(0)); got != 1 {
+		t.Fatalf("history length = %d, want preserved 1", got)
+	}
+	if got := len(e.sessions.ListSessions(msg.SessionKey)); got != 2 {
+		t.Fatalf("local session count = %d, want unchanged 2", got)
+	}
+	e.interactiveMu.Lock()
+	_, exists := e.interactiveStates[msg.SessionKey]
+	e.interactiveMu.Unlock()
+	if exists {
+		t.Fatal("interactive state should be cleared after /switch")
+	}
+	select {
+	case <-oldSession.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("old interactive session was not closed")
 	}
 }
 
@@ -2889,6 +3322,65 @@ func (a *controllableAgent) ListSessions(_ context.Context) ([]AgentSessionInfo,
 }
 func (a *controllableAgent) Stop() error { return nil }
 
+type derivedTrackingAgent struct {
+	stubAgent
+	opts      map[string]any
+	providers []ProviderConfig
+	active    string
+	session   AgentSession
+}
+
+func (a *derivedTrackingAgent) Name() string { return "derived-tracking" }
+func (a *derivedTrackingAgent) StartSession(_ context.Context, _ string) (AgentSession, error) {
+	if a.session != nil {
+		return a.session, nil
+	}
+	return newControllableSession("derived-session"), nil
+}
+func (a *derivedTrackingAgent) SetProviders(providers []ProviderConfig) {
+	a.providers = append([]ProviderConfig(nil), providers...)
+}
+func (a *derivedTrackingAgent) ListProviders() []ProviderConfig {
+	return append([]ProviderConfig(nil), a.providers...)
+}
+func (a *derivedTrackingAgent) SetActiveProvider(name string) bool {
+	a.active = name
+	return true
+}
+func (a *derivedTrackingAgent) GetActiveProvider() *ProviderConfig {
+	for i := range a.providers {
+		if a.providers[i].Name == a.active {
+			return &a.providers[i]
+		}
+	}
+	return nil
+}
+
+type defaultProviderAgent struct {
+	controllableAgent
+	providers []ProviderConfig
+	active    string
+}
+
+func (a *defaultProviderAgent) SetProviders(providers []ProviderConfig) {
+	a.providers = append([]ProviderConfig(nil), providers...)
+}
+func (a *defaultProviderAgent) ListProviders() []ProviderConfig {
+	return append([]ProviderConfig(nil), a.providers...)
+}
+func (a *defaultProviderAgent) SetActiveProvider(name string) bool {
+	a.active = name
+	return true
+}
+func (a *defaultProviderAgent) GetActiveProvider() *ProviderConfig {
+	for i := range a.providers {
+		if a.providers[i].Name == a.active {
+			return &a.providers[i]
+		}
+	}
+	return nil
+}
+
 // TestCleanupCAS_SkipsWhenStateReplaced verifies that cleanupInteractiveState
 // with an expected state pointer is a no-op when the map entry has been replaced.
 // This is the core of the /new race fix: old goroutine's cleanup must not delete
@@ -3062,6 +3554,143 @@ func TestSessionMismatch_ReusesWhenIDsMatch(t *testing.T) {
 	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, nil)
 	if state != existingState {
 		t.Fatal("expected existing state to be reused when session IDs match")
+	}
+}
+
+func TestBuildSessionAgent_UsesDerivedAgentForOverrides(t *testing.T) {
+	agentName := fmt.Sprintf("derived-agent-%d", time.Now().UnixNano())
+	var created *derivedTrackingAgent
+	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) {
+		cloned := make(map[string]any, len(opts))
+		for k, v := range opts {
+			cloned[k] = v
+		}
+		created = &derivedTrackingAgent{opts: cloned}
+		return created, nil
+	})
+
+	defaultAgent := &defaultProviderAgent{}
+	defaultAgent.SetProviders([]ProviderConfig{{Name: "openai", Model: "gpt-5"}})
+	defaultAgent.SetActiveProvider("openai")
+
+	e := NewEngine("test", defaultAgent, nil, "", LangEnglish)
+	e.SetDefaultAgentConfig(agentName, map[string]any{
+		"work_dir": "/data/default",
+		"mode":     "suggest",
+	}, []ProviderConfig{{Name: "openai", Model: "gpt-5"}}, "openai")
+
+	s := &Session{}
+	s.SetAgentOverride(agentName)
+	s.SetWorkDirOverride("/data/override")
+
+	got, err := e.buildSessionAgent(s)
+	if err != nil {
+		t.Fatalf("buildSessionAgent error: %v", err)
+	}
+	if got == defaultAgent {
+		t.Fatal("expected derived agent instead of default agent")
+	}
+	if created == nil {
+		t.Fatal("expected derived agent factory to be called")
+	}
+	if created.opts["work_dir"] != "/data/override" {
+		t.Fatalf("work_dir = %#v, want %q", created.opts["work_dir"], "/data/override")
+	}
+	if created.opts["mode"] != "suggest" {
+		t.Fatalf("mode = %#v, want %q", created.opts["mode"], "suggest")
+	}
+	if created.active != "openai" {
+		t.Fatalf("active provider = %q, want %q", created.active, "openai")
+	}
+	if len(created.providers) != 1 || created.providers[0].Name != "openai" {
+		t.Fatalf("providers = %#v, want copied provider config", created.providers)
+	}
+}
+
+func TestBuildSessionAgentFrom_UsesLiveBaseAgentSettings(t *testing.T) {
+	agentName := fmt.Sprintf("derived-live-%d", time.Now().UnixNano())
+	var created *derivedTrackingAgent
+	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) {
+		cloned := make(map[string]any, len(opts))
+		for k, v := range opts {
+			cloned[k] = v
+		}
+		created = &derivedTrackingAgent{opts: cloned}
+		return created, nil
+	})
+
+	baseAgent := &liveConfigAgent{
+		workDir:         "/data/live",
+		model:           "gpt-live",
+		mode:            "yolo",
+		reasoningEffort: "high",
+		providers:       []ProviderConfig{{Name: "relay", Model: "gpt-live"}},
+		active:          "relay",
+	}
+
+	e := NewEngine("test", baseAgent, nil, "", LangEnglish)
+	e.SetDefaultAgentConfig("codex", map[string]any{
+		"work_dir":         "/data/default",
+		"model":            "gpt-default",
+		"mode":             "default",
+		"reasoning_effort": "low",
+	}, []ProviderConfig{{Name: "openai", Model: "gpt-default"}}, "openai")
+
+	s := &Session{}
+	s.SetAgentOverride(agentName)
+
+	got, err := e.buildSessionAgentFrom(baseAgent, s)
+	if err != nil {
+		t.Fatalf("buildSessionAgentFrom error: %v", err)
+	}
+	if got == baseAgent {
+		t.Fatal("expected derived agent instead of base agent")
+	}
+	if created == nil {
+		t.Fatal("expected derived agent factory to be called")
+	}
+	if created.opts["work_dir"] != "/data/live" {
+		t.Fatalf("work_dir = %#v, want %q", created.opts["work_dir"], "/data/live")
+	}
+	if created.opts["model"] != "gpt-live" {
+		t.Fatalf("model = %#v, want %q", created.opts["model"], "gpt-live")
+	}
+	if created.opts["mode"] != "yolo" {
+		t.Fatalf("mode = %#v, want %q", created.opts["mode"], "yolo")
+	}
+	if created.opts["reasoning_effort"] != "high" {
+		t.Fatalf("reasoning_effort = %#v, want %q", created.opts["reasoning_effort"], "high")
+	}
+	if created.active != "relay" {
+		t.Fatalf("active provider = %q, want %q", created.active, "relay")
+	}
+	if len(created.providers) != 1 || created.providers[0].Name != "relay" {
+		t.Fatalf("providers = %#v, want live provider config", created.providers)
+	}
+}
+
+func TestGetOrCreateInteractiveStateUsesDerivedAgentForSessionOverride(t *testing.T) {
+	agentName := fmt.Sprintf("derived-interactive-%d", time.Now().UnixNano())
+	derivedSession := newControllableSession("derived-override-session")
+	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) {
+		return &derivedTrackingAgent{
+			opts:    opts,
+			session: derivedSession,
+		}, nil
+	})
+
+	defaultAgent := &controllableAgent{nextSession: newControllableSession("default-session")}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", defaultAgent, []Platform{p}, "", LangEnglish)
+	e.SetDefaultAgentConfig(agentName, map[string]any{"work_dir": "/data/default"}, nil, "")
+
+	session := &Session{}
+	session.SetAgentOverride(agentName)
+	session.SetWorkDirOverride("/data/override")
+
+	state := e.getOrCreateInteractiveStateWith("test:user1", p, "ctx", session, nil)
+	if state.agentSession != derivedSession {
+		t.Fatal("expected interactive state to start from derived override agent session")
 	}
 }
 
