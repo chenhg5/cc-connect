@@ -1151,60 +1151,13 @@ func (e *Engine) drainOrphanedQueue(session *Session, interactiveKey string, age
 	e.interactiveMu.Unlock()
 
 	if !hasState || state == nil || state.agentSession == nil || !state.agentSession.Alive() {
-		// State disappeared — notify any queued senders that their messages are lost.
 		if hasState && state != nil {
 			e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent session ended"))
 		}
 		return
 	}
 
-	for {
-		state.mu.Lock()
-		if len(state.pendingMessages) == 0 {
-			session.Unlock()
-			unlocked = true
-			state.mu.Unlock()
-			return
-		}
-		queued := state.pendingMessages[0]
-		state.pendingMessages = state.pendingMessages[1:]
-		state.platform = queued.platform
-		state.replyCtx = queued.replyCtx
-		state.fromVoice = queued.fromVoice
-		state.mu.Unlock()
-
-		e.i18n.DetectAndSet(queued.content)
-
-		queuedPrompt := queued.content
-		if e.injectSender && queued.userID != "" {
-			chatID := extractChannelID(queued.msgSessionKey)
-			queuedPrompt = fmt.Sprintf("[cc-connect sender_id=%s platform=%s chat_id=%s]\n%s", queued.userID, queued.msgPlatform, chatID, queued.content)
-		}
-
-		if state.agentSession == nil || !state.agentSession.Alive() {
-			e.send(queued.platform, queued.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session ended"))
-			e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent session ended"))
-			return
-		}
-
-		drainEvents(state.agentSession.Events())
-
-		if err := state.agentSession.Send(queuedPrompt, queued.images, queued.files); err != nil {
-			slog.Error("failed to send orphaned queued message", "error", err, "session", interactiveKey)
-			e.send(queued.platform, queued.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
-			e.notifyDroppedQueuedMessages(state, err)
-			return
-		}
-		session.AddHistory("user", queued.content)
-
-		var stopTyping func()
-		if ti, ok := queued.platform.(TypingIndicator); ok {
-			stopTyping = ti.StartTyping(e.ctx, queued.replyCtx)
-		}
-
-		slog.Info("processing orphaned queued message", "session", interactiveKey)
-		e.processInteractiveEvents(state, session, interactiveKey, "", time.Now(), stopTyping)
-	}
+	unlocked = e.drainPendingMessages(state, session, interactiveKey)
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -1535,12 +1488,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	// EventResult that was pushed after the previous turn already returned.
 	drainEvents(state.agentSession.Events())
 
-	// Prepend sender identity when enabled, so the agent knows who sent the message.
-	promptContent := msg.Content
-	if e.injectSender && msg.UserID != "" {
-		chatID := extractChannelID(msg.SessionKey)
-		promptContent = fmt.Sprintf("[cc-connect sender_id=%s platform=%s chat_id=%s]\n%s", msg.UserID, msg.Platform, chatID, msg.Content)
-	}
+	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.Platform, msg.SessionKey)
 
 	sendStart := time.Now()
 	state.mu.Lock()
@@ -1602,56 +1550,8 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	// processInteractiveEvents observing an empty queue and returning here
 	// (session is still locked, so handleMessage's TryLock fails and routes
 	// the message to queueMessageForBusySession). Drain any such orphans.
-	//
-	// When the queue is empty we unlock the session while still holding
-	// state.mu so that any message arriving after this point will find
-	// TryLock() succeeds and goes through the normal handleMessage path.
-	for {
-		state.mu.Lock()
-		if len(state.pendingMessages) == 0 {
-			session.Unlock()
-			unlocked = true
-			state.mu.Unlock()
-			return
-		}
-		queued := state.pendingMessages[0]
-		state.pendingMessages = state.pendingMessages[1:]
-		state.platform = queued.platform
-		state.replyCtx = queued.replyCtx
-		state.fromVoice = queued.fromVoice
-		state.mu.Unlock()
-
-		e.i18n.DetectAndSet(queued.content)
-
-		queuedPrompt := queued.content
-		if e.injectSender && queued.userID != "" {
-			chatID := extractChannelID(queued.msgSessionKey)
-			queuedPrompt = fmt.Sprintf("[cc-connect sender_id=%s platform=%s chat_id=%s]\n%s", queued.userID, queued.msgPlatform, chatID, queued.content)
-		}
-
-		// Abort if the agent process has exited — notify remaining queued senders.
-		if state.agentSession == nil || !state.agentSession.Alive() {
-			e.send(queued.platform, queued.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session ended"))
-			e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent session ended"))
-			return
-		}
-
-		// Drain stale events before starting a new turn (same as processInteractiveMessageWith).
-		drainEvents(state.agentSession.Events())
-
-		if err := state.agentSession.Send(queuedPrompt, queued.images, queued.files); err != nil {
-			slog.Error("failed to send orphaned queued message", "error", err, "session", interactiveKey)
-			e.send(queued.platform, queued.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
-			e.notifyDroppedQueuedMessages(state, err)
-			return
-		}
-		session.AddHistory("user", queued.content)
-
-		var newStopTyping func()
-		if ti, ok := queued.platform.(TypingIndicator); ok {
-			newStopTyping = ti.StartTyping(e.ctx, queued.replyCtx)
-		}
-		e.processInteractiveEvents(state, session, interactiveKey, msg.MessageID, time.Now(), newStopTyping)
+	if e.drainPendingMessages(state, session, interactiveKey) {
+		unlocked = true
 	}
 }
 
@@ -2213,12 +2113,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// stale leftovers (e.g. a deferred EventError from cmd.Wait()).
 				drainEvents(state.agentSession.Events())
 
-				// Build prompt content for the queued message
-				queuedPrompt := queued.content
-				if e.injectSender && queued.userID != "" {
-					chatID := extractChannelID(queued.msgSessionKey)
-					queuedPrompt = fmt.Sprintf("[cc-connect sender_id=%s platform=%s chat_id=%s]\n%s", queued.userID, queued.msgPlatform, chatID, queued.content)
-				}
+				queuedPrompt := e.buildSenderPrompt(queued.content, queued.userID, queued.msgPlatform, queued.msgSessionKey)
 
 				// NOW send the queued message to agent stdin (not at queue time).
 				if err := state.agentSession.Send(queuedPrompt, queued.images, queued.files); err != nil {
@@ -2342,6 +2237,54 @@ func (e *Engine) notifyDroppedQueuedMessages(state *interactiveState, reason err
 	state.mu.Unlock()
 	for _, q := range remaining {
 		e.send(q.platform, q.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), reason))
+	}
+}
+
+// drainPendingMessages processes all queued messages in the state's pendingMessages
+// queue. It atomically unlocks the session when the queue is empty (while holding
+// state.mu) to close the race window between "queue empty" and "session unlocked".
+// Returns true if the session was unlocked by this call.
+func (e *Engine) drainPendingMessages(state *interactiveState, session *Session, sessionKey string) bool {
+	for {
+		state.mu.Lock()
+		if len(state.pendingMessages) == 0 {
+			session.Unlock()
+			state.mu.Unlock()
+			return true
+		}
+		queued := state.pendingMessages[0]
+		state.pendingMessages = state.pendingMessages[1:]
+		state.platform = queued.platform
+		state.replyCtx = queued.replyCtx
+		state.fromVoice = queued.fromVoice
+		state.mu.Unlock()
+
+		e.i18n.DetectAndSet(queued.content)
+		prompt := e.buildSenderPrompt(queued.content, queued.userID, queued.msgPlatform, queued.msgSessionKey)
+
+		if state.agentSession == nil || !state.agentSession.Alive() {
+			e.send(queued.platform, queued.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session ended"))
+			e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent session ended"))
+			return false
+		}
+
+		drainEvents(state.agentSession.Events())
+
+		if err := state.agentSession.Send(prompt, queued.images, queued.files); err != nil {
+			slog.Error("failed to send queued message", "error", err, "session", sessionKey)
+			e.send(queued.platform, queued.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+			e.notifyDroppedQueuedMessages(state, err)
+			return false
+		}
+		session.AddHistory("user", queued.content)
+
+		var stopTyping func()
+		if ti, ok := queued.platform.(TypingIndicator); ok {
+			stopTyping = ti.StartTyping(e.ctx, queued.replyCtx)
+		}
+
+		slog.Info("processing queued message", "session", sessionKey)
+		e.processInteractiveEvents(state, session, sessionKey, "", time.Now(), stopTyping)
 	}
 }
 
@@ -4615,48 +4558,8 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 // during a /compress operation. It sends each one to the agent and runs the
 // full interactive event loop for it.
 func (e *Engine) drainQueuedMessagesAfterCompress(state *interactiveState, session *Session, sessionKey string, unlocked *bool) {
-	for {
-		state.mu.Lock()
-		if len(state.pendingMessages) == 0 {
-			// Unlock session while holding state.mu to close the race window.
-			session.Unlock()
-			*unlocked = true
-			state.mu.Unlock()
-			return
-		}
-		queued := state.pendingMessages[0]
-		state.pendingMessages = state.pendingMessages[1:]
-		state.platform = queued.platform
-		state.replyCtx = queued.replyCtx
-		state.fromVoice = queued.fromVoice
-		state.mu.Unlock()
-
-		// Drain stale events from the previous turn (compress or prior queued
-		// turn) to avoid feeding leftover EventError/exit events into this turn.
-		drainEvents(state.agentSession.Events())
-
-		// Build prompt
-		queuedPrompt := queued.content
-		if e.injectSender && queued.userID != "" {
-			chatID := extractChannelID(queued.msgSessionKey)
-			queuedPrompt = fmt.Sprintf("[cc-connect sender_id=%s platform=%s chat_id=%s]\n%s", queued.userID, queued.msgPlatform, chatID, queued.content)
-		}
-
-		if err := state.agentSession.Send(queuedPrompt, queued.images, queued.files); err != nil {
-			slog.Error("failed to send queued message after compress", "error", err, "session", sessionKey)
-			e.send(queued.platform, queued.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
-			e.notifyDroppedQueuedMessages(state, err)
-			return
-		}
-
-		session.AddHistory("user", queued.content)
-
-		slog.Info("processing queued message after compress",
-			"session", sessionKey,
-		)
-
-		// Run the full event loop for this queued turn.
-		e.processInteractiveEvents(state, session, sessionKey, "", time.Now(), nil)
+	if e.drainPendingMessages(state, session, sessionKey) {
+		*unlocked = true
 	}
 }
 
@@ -8219,6 +8122,16 @@ func (e *Engine) cmdBindSetup(p Platform, msg *Message) {
 	case setupOK:
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgRelaySetupOK), baseName))
 	}
+}
+
+// buildSenderPrompt prepends a sender identity header to content when
+// injectSender is enabled and userID is non-empty.
+func (e *Engine) buildSenderPrompt(content, userID, platform, sessionKey string) string {
+	if !e.injectSender || userID == "" {
+		return content
+	}
+	chatID := extractChannelID(sessionKey)
+	return fmt.Sprintf("[cc-connect sender_id=%s platform=%s chat_id=%s]\n%s", userID, platform, chatID, content)
 }
 
 func extractChannelID(sessionKey string) string {
