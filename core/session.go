@@ -177,7 +177,9 @@ func (sm *SessionManager) GetOrCreateActive(userKey string) *Session {
 			return s
 		}
 	}
-	return sm.createLocked(userKey, "default")
+	s := sm.createLocked(userKey, "default")
+	sm.saveLocked()
+	return s
 }
 
 func (sm *SessionManager) NewSession(userKey, name string) *Session {

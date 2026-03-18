@@ -369,7 +369,7 @@ func TestProcessInteractiveEvents_SuppressesDuplicateSideChannelText(t *testing.
 	}
 
 	agentSession.events <- Event{Type: EventResult, Content: sideText, Done: true}
-	e.processInteractiveEvents(state, session, sessionKey, "m1", time.Now(), nil)
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil)
 
 	if got := p.getSent(); len(got) != 1 || got[0] != sideText {
 		t.Fatalf("sent text = %#v, want one side-channel message", got)
@@ -399,7 +399,7 @@ func TestProcessInteractiveEvents_DoesNotSuppressDifferentFinalText(t *testing.T
 
 	finalText := "文件已发出，另外我也把使用方法整理好了。"
 	agentSession.events <- Event{Type: EventResult, Content: finalText, Done: true}
-	e.processInteractiveEvents(state, session, sessionKey, "m1", time.Now(), nil)
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil)
 
 	if got := p.getSent(); len(got) != 2 || got[0] == got[1] {
 		t.Fatalf("sent text = %#v, want side-channel and final reply", got)
@@ -1111,10 +1111,12 @@ func TestCmdList_MultiWorkspaceUsesWorkspaceSessions(t *testing.T) {
 	if err := os.MkdirAll(wsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// Normalize the path so it matches what resolveWorkspace/getOrCreateWorkspaceAgent will use
+	normalizedWsDir := normalizeWorkspacePath(wsDir)
 	channelID := "C123"
-	e.workspaceBindings.Bind("project:test", channelID, "chan", wsDir)
+	e.workspaceBindings.Bind("project:test", channelID, "chan", normalizedWsDir)
 
-	ws := e.workspacePool.GetOrCreate(wsDir)
+	ws := e.workspacePool.GetOrCreate(normalizedWsDir)
 	ws.agent = &stubListAgent{
 		sessions: []AgentSessionInfo{
 			{ID: "w1", Summary: "Workspace One", MessageCount: 2},
@@ -1138,10 +1140,18 @@ func TestCmdList_MultiWorkspaceUsesWorkspaceSessions(t *testing.T) {
 
 func TestHandlePendingPermission_MultiWorkspaceLookup(t *testing.T) {
 	e := newTestEngine()
-	e.multiWorkspace = true
 
-	sessionKey := "slack:C123:U1"
-	interactiveKey := "/tmp/ws:" + sessionKey
+	// Set up multi-workspace with proper bindings so interactiveKeyForSessionKey works
+	wsDir := t.TempDir()
+	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(t.TempDir(), bindingPath)
+
+	channelID := "C123"
+	e.workspaceBindings.Bind("project:test", channelID, "chan", wsDir)
+
+	sessionKey := "slack:" + channelID + ":U1"
+	// interactiveKeyForSessionKey resolves symlinks, so use the normalized path
+	interactiveKey := normalizeWorkspacePath(wsDir) + ":" + sessionKey
 
 	pending := &pendingPermission{
 		RequestID: "req-1",
@@ -2989,7 +2999,7 @@ func TestSessionMismatch_RecyclesStaleAgent(t *testing.T) {
 	// The active Session now wants a DIFFERENT agent session ID.
 	session := &Session{AgentSessionID: "new-agent-id"}
 
-	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, nil)
+	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil)
 
 	if state.agentSession == oldSess {
 		t.Fatal("expected stale agent session to be replaced")
@@ -3028,7 +3038,7 @@ func TestSessionMismatch_DoesNotLeakQuiet(t *testing.T) {
 	// Active session wants "new-id", which mismatches "old-id".
 	session := &Session{AgentSessionID: "new-id"}
 
-	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, nil)
+	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil)
 
 	state.mu.Lock()
 	q := state.quiet
@@ -3059,7 +3069,7 @@ func TestSessionMismatch_ReusesWhenIDsMatch(t *testing.T) {
 
 	session := &Session{AgentSessionID: "matching-id"}
 
-	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, nil)
+	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil)
 	if state != existingState {
 		t.Fatal("expected existing state to be reused when session IDs match")
 	}
@@ -3077,7 +3087,7 @@ func TestSessionIDWriteback_ImmediateAfterStartSession(t *testing.T) {
 	key := "test:user1"
 	session := &Session{AgentSessionID: ""} // empty — no prior binding
 
-	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, nil)
+	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil)
 
 	got := session.GetAgentSessionID()
 
@@ -3097,7 +3107,7 @@ func TestSessionIDWriteback_DoesNotOverwriteExisting(t *testing.T) {
 	key := "test:user1"
 	session := &Session{AgentSessionID: "existing-uuid"}
 
-	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, nil)
+	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil)
 
 	got := session.GetAgentSessionID()
 
@@ -3133,7 +3143,7 @@ func TestStaleGoroutineCleanup_RaceSimulation(t *testing.T) {
 
 	// Step 3: New turn creates Session B and calls getOrCreateInteractiveStateWith.
 	sessionB := &Session{AgentSessionID: ""}
-	newState := e.getOrCreateInteractiveStateWith(key, p, "ctx", sessionB, nil)
+	newState := e.getOrCreateInteractiveStateWith(key, p, "ctx", sessionB, e.sessions, nil)
 
 	// Verify S2 is in the map.
 	e.interactiveMu.Lock()
@@ -3581,7 +3591,7 @@ func TestProcessInteractiveEvents_DrainsQueuedMessages(t *testing.T) {
 	// processInteractiveEvents should handle both turns.
 	done := make(chan struct{})
 	go func() {
-		e.processInteractiveEvents(state, session, key, "msg1", time.Now(), nil)
+		e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), nil)
 		close(done)
 	}()
 
@@ -3621,6 +3631,85 @@ func TestProcessInteractiveEvents_DrainsQueuedMessages(t *testing.T) {
 	}
 	if len(userMsgs) < 2 {
 		t.Fatalf("user history entries = %d, want >= 2", len(userMsgs))
+	}
+}
+
+// TestDrainOrphanedQueue_UsesWorkspaceSessionManager verifies that
+// drainOrphanedQueue saves session history through the passed sessions
+// manager (workspace-specific) rather than e.sessions (global).
+func TestDrainOrphanedQueue_UsesWorkspaceSessionManager(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("qs-orphan")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	// Create a separate "workspace" session manager that drainOrphanedQueue should use.
+	wsSessionsPath := filepath.Join(t.TempDir(), "ws_sessions.json")
+	wsSessions := NewSessionManager(wsSessionsPath)
+
+	key := "ws1:test:user1"
+	session := wsSessions.GetOrCreateActive("test:user1")
+	if !session.TryLock() {
+		t.Fatal("expected TryLock to succeed")
+	}
+
+	// Set up interactive state with a queued message.
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+		pendingMessages: []queuedMessage{
+			{platform: p, replyCtx: "ctx-q", content: "queued-orphan"},
+		},
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	// Push events so the drain completes.
+	go func() {
+		sess.sendMu.Lock()
+		for len(sess.sendCalls) == 0 {
+			sess.sendMu.Unlock()
+			time.Sleep(5 * time.Millisecond)
+			sess.sendMu.Lock()
+		}
+		sess.sendMu.Unlock()
+		sess.events <- Event{Type: EventResult, Content: "orphan-response", Done: true}
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		e.drainOrphanedQueue(session, wsSessions, key, agent, "")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("drainOrphanedQueue did not complete in time")
+	}
+
+	// The assistant response should be saved in the workspace session manager,
+	// NOT in e.sessions (global).
+	wsHistory := wsSessions.GetOrCreateActive("test:user1").GetHistory(0)
+	var wsAssistant []string
+	for _, h := range wsHistory {
+		if h.Role == "assistant" {
+			wsAssistant = append(wsAssistant, h.Content)
+		}
+	}
+	if len(wsAssistant) == 0 {
+		t.Fatal("expected assistant history in workspace session manager, got none")
+	}
+
+	// Verify e.sessions (global) does NOT have this history.
+	globalSession := e.sessions.GetOrCreateActive("test:user1")
+	globalHistory := globalSession.GetHistory(0)
+	for _, h := range globalHistory {
+		if h.Role == "assistant" && h.Content == "orphan-response" {
+			t.Fatal("orphan response was saved to global e.sessions instead of workspace sessions")
+		}
 	}
 }
 

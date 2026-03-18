@@ -1017,10 +1017,16 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		}
 		if workspace == "" {
 			// No workspace — handle init flow (unless it's a /workspace command)
-			if !strings.HasPrefix(content, "workspace") && !strings.HasPrefix(content, "ws ") {
+			if !strings.HasPrefix(content, "workspace") && !strings.HasPrefix(content, "/workspace") && !strings.HasPrefix(content, "ws ") {
 				if e.handleWorkspaceInitFlow(p, msg, channelID, channelName) {
 					return
 				}
+			} else {
+				// Workspace command bypassed the init flow; clean up any stale flow
+				// so it doesn't interfere if the channel becomes unbound again later.
+				e.initFlowsMu.Lock()
+				delete(e.initFlows, channelID)
+				e.initFlowsMu.Unlock()
 			}
 			// If init flow didn't consume, only workspace commands work
 			if !strings.HasPrefix(content, "/") {
@@ -1096,7 +1102,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 			// and the queue append. Re-try TryLock — if it succeeds, no one is
 			// draining the queue so we must start a processor ourselves.
 			if session.TryLock() {
-				go e.drainOrphanedQueue(session, interactiveKey, agent, resolvedWorkspace)
+				go e.drainOrphanedQueue(session, sessions, interactiveKey, agent, resolvedWorkspace)
 			}
 			return
 		}
@@ -1110,7 +1116,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		"session", session.ID,
 	)
 
-	go e.processInteractiveMessageWith(p, msg, session, agent, interactiveKey, resolvedWorkspace)
+	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, resolvedWorkspace)
 }
 
 // queueMessageForBusySession queues a message for later delivery when the
@@ -1163,7 +1169,7 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 // has already exited. It processes all pending messages in the state, similar
 // to the drain loop in processInteractiveMessageWith but as a standalone
 // goroutine.
-func (e *Engine) drainOrphanedQueue(session *Session, interactiveKey string, agent Agent, workspaceDir string) {
+func (e *Engine) drainOrphanedQueue(session *Session, sessions *SessionManager, interactiveKey string, agent Agent, workspaceDir string) {
 	unlocked := false
 	defer func() {
 		if !unlocked {
@@ -1182,7 +1188,7 @@ func (e *Engine) drainOrphanedQueue(session *Session, interactiveKey string, age
 		return
 	}
 
-	unlocked = e.drainPendingMessages(state, session, interactiveKey)
+	unlocked = e.drainPendingMessages(state, session, sessions, interactiveKey)
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -1235,18 +1241,9 @@ func (e *Engine) handleVoiceMessage(p Platform, msg *Message) {
 // ──────────────────────────────────────────────────────────────
 
 func (e *Engine) handlePendingPermission(p Platform, msg *Message, content string) bool {
+	iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
 	e.interactiveMu.Lock()
-	state, ok := e.interactiveStates[msg.SessionKey]
-	if (!ok || state == nil) && e.multiWorkspace {
-		suffix := ":" + msg.SessionKey
-		for key, s := range e.interactiveStates {
-			if strings.HasSuffix(key, suffix) {
-				state = s
-				ok = true
-				break
-			}
-		}
-	}
+	state, ok := e.interactiveStates[iKey]
 	e.interactiveMu.Unlock()
 	if !ok || state == nil {
 		return false
@@ -1441,13 +1438,13 @@ func isDenyResponse(s string) bool {
 // ──────────────────────────────────────────────────────────────
 
 func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Session) {
-	e.processInteractiveMessageWith(p, msg, session, e.agent, msg.SessionKey, "")
+	e.processInteractiveMessageWith(p, msg, session, e.agent, e.sessions, msg.SessionKey, "")
 }
 
 // processInteractiveMessageWith is the core interactive processing loop.
 // It accepts an explicit agent, interactiveKey (for the interactiveStates map),
 // and workspaceDir so that multi-workspace mode can route to per-workspace agents.
-func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session *Session, agent Agent, interactiveKey string, workspaceDir string) {
+func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session *Session, agent Agent, sessions *SessionManager, interactiveKey string, workspaceDir string) {
 	// session.Unlock() is NOT deferred here — it is called explicitly in
 	// the drain loop below while holding state.mu to close the race window
 	// between "queue is empty" and "session unlocked". A deferred fallback
@@ -1473,7 +1470,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	if agent != e.agent {
 		agentOverride = agent
 	}
-	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, agentOverride)
+	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride)
 
 	// Set workspaceDir on the state for idle reaper identification
 	if workspaceDir != "" {
@@ -1534,7 +1531,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 			e.cleanupInteractiveState(interactiveKey, state)
 			e.send(p, msg.ReplyCtx, e.i18n.T(MsgSessionRestarting))
 
-			state = e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, agentOverride)
+			state = e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride)
 			if workspaceDir != "" {
 				state.mu.Lock()
 				state.workspaceDir = workspaceDir
@@ -1568,14 +1565,14 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		slog.Warn("slow agent send", "elapsed", elapsed, "session", msg.SessionKey, "content_len", len(msg.Content))
 	}
 
-	e.processInteractiveEvents(state, session, interactiveKey, msg.MessageID, turnStart, stopTyping)
+	e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping)
 	stopTyping = nil // ownership transferred; prevent defer from double-stopping
 
 	// Guard against a narrow race: a message may have been queued between
 	// processInteractiveEvents observing an empty queue and returning here
 	// (session is still locked, so handleMessage's TryLock fails and routes
 	// the message to queueMessageForBusySession). Drain any such orphans.
-	if e.drainPendingMessages(state, session, interactiveKey) {
+	if e.drainPendingMessages(state, session, sessions, interactiveKey) {
 		unlocked = true
 	}
 }
@@ -1632,13 +1629,13 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 }
 
 func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, replyCtx any, session *Session) *interactiveState {
-	return e.getOrCreateInteractiveStateWith(sessionKey, p, replyCtx, session, nil)
+	return e.getOrCreateInteractiveStateWith(sessionKey, p, replyCtx, session, e.sessions, nil)
 }
 
 // getOrCreateInteractiveStateWith is like getOrCreateInteractiveState but accepts
 // an optional agent override for multi-workspace mode. When agentOverride is non-nil
 // it is used instead of e.agent to start the session.
-func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, agentOverride Agent) *interactiveState {
+func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent) *interactiveState {
 	e.interactiveMu.Lock()
 	defer e.interactiveMu.Unlock()
 
@@ -1728,7 +1725,9 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	}
 
 	if newID := agentSession.CurrentSessionID(); newID != "" {
-		session.CompareAndSetAgentSessionID(newID, agent.Name())
+		if session.CompareAndSetAgentSessionID(newID, agent.Name()) {
+			sessions.Save()
+		}
 	}
 
 	state = &interactiveState{
@@ -1787,7 +1786,7 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 
 const defaultEventIdleTimeout = 2 * time.Hour
 
-func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func()) {
+func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func()) {
 	var textParts []string
 	var segmentStart int // index into textParts: text before this has been sent/displayed
 	toolCount := 0
@@ -1950,9 +1949,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if session.CompareAndSetAgentSessionID(event.SessionID, e.agent.Name()) {
 					pendingName := session.GetName()
 					if pendingName != "" && pendingName != "session" && pendingName != "default" {
-						e.sessions.SetSessionName(event.SessionID, pendingName)
+						sessions.SetSessionName(event.SessionID, pendingName)
 					}
-					e.sessions.Save()
+					sessions.Save()
 				}
 			}
 
@@ -2048,7 +2047,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 			session.AddHistory("assistant", fullResponse)
-			e.sessions.Save()
+			sessions.Save()
 
 			turnDuration := time.Since(turnStart)
 			slog.Info("turn complete",
@@ -2272,7 +2271,7 @@ func (e *Engine) notifyDroppedQueuedMessages(state *interactiveState, reason err
 // queue. It atomically unlocks the session when the queue is empty (while holding
 // state.mu) to close the race window between "queue empty" and "session unlocked".
 // Returns true if the session was unlocked by this call.
-func (e *Engine) drainPendingMessages(state *interactiveState, session *Session, sessionKey string) bool {
+func (e *Engine) drainPendingMessages(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string) bool {
 	for {
 		state.mu.Lock()
 		if len(state.pendingMessages) == 0 {
@@ -2312,7 +2311,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		}
 
 		slog.Info("processing queued message", "session", sessionKey)
-		e.processInteractiveEvents(state, session, sessionKey, "", time.Now(), stopTyping)
+		e.processInteractiveEvents(state, session, sessions, sessionKey, "", time.Now(), stopTyping)
 	}
 }
 
@@ -3217,8 +3216,9 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 		globalQuiet := e.quiet
 		e.quietMu.RUnlock()
 
+		iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
 		e.interactiveMu.Lock()
-		state, hasState := e.interactiveStates[msg.SessionKey]
+		state, hasState := e.interactiveStates[iKey]
 		e.interactiveMu.Unlock()
 
 		sessionQuiet := false
@@ -4148,7 +4148,7 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 	}
 
 	switcher.SetModel(target)
-	e.cleanupInteractiveState(msg.SessionKey)
+	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
 
 	s := e.sessions.GetOrCreateActive(msg.SessionKey)
 	s.SetAgentSessionID("", "")
@@ -4241,7 +4241,7 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 	}
 
 	switcher.SetReasoningEffort(target)
-	e.cleanupInteractiveState(msg.SessionKey)
+	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
 
 	s := e.sessions.GetOrCreateActive(msg.SessionKey)
 	s.SetAgentSessionID("", "")
@@ -4307,7 +4307,7 @@ func (e *Engine) cmdMode(p Platform, msg *Message, args []string) {
 	switcher.SetMode(target)
 	newMode := switcher.GetMode()
 
-	e.cleanupInteractiveState(msg.SessionKey)
+	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
 
 	modes := switcher.PermissionModes()
 	displayName := newMode
@@ -4342,14 +4342,15 @@ func (e *Engine) cmdQuiet(p Platform, msg *Message, args []string) {
 	}
 
 	// /quiet — toggle per-session quiet
+	iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
 	e.interactiveMu.Lock()
-	state, ok := e.interactiveStates[msg.SessionKey]
+	state, ok := e.interactiveStates[iKey]
 	e.interactiveMu.Unlock()
 
 	if !ok || state == nil {
 		state = &interactiveState{platform: p, replyCtx: msg.ReplyCtx, quiet: true}
 		e.interactiveMu.Lock()
-		e.interactiveStates[msg.SessionKey] = state
+		e.interactiveStates[iKey] = state
 		e.interactiveMu.Unlock()
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQuietOn))
 		return
@@ -4396,8 +4397,9 @@ func (e *Engine) cmdTTS(p Platform, msg *Message, args []string) {
 }
 
 func (e *Engine) cmdStop(p Platform, msg *Message) {
+	iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
 	e.interactiveMu.Lock()
-	state, ok := e.interactiveStates[msg.SessionKey]
+	state, ok := e.interactiveStates[iKey]
 	e.interactiveMu.Unlock()
 
 	if !ok || state == nil {
@@ -4417,17 +4419,17 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 		pending.resolve()
 	}
 
-	e.cleanupInteractiveState(msg.SessionKey)
+	e.cleanupInteractiveState(iKey)
 
 	// Preserve quiet preference across stop
 	if quietMode {
 		e.interactiveMu.Lock()
-		if s, ok := e.interactiveStates[msg.SessionKey]; ok {
+		if s, ok := e.interactiveStates[iKey]; ok {
 			s.mu.Lock()
 			s.quiet = quietMode
 			s.mu.Unlock()
 		} else {
-			e.interactiveStates[msg.SessionKey] = &interactiveState{platform: p, replyCtx: msg.ReplyCtx, quiet: quietMode}
+			e.interactiveStates[iKey] = &interactiveState{platform: p, replyCtx: msg.ReplyCtx, quiet: quietMode}
 		}
 		e.interactiveMu.Unlock()
 	}
@@ -4442,8 +4444,9 @@ func (e *Engine) cmdCompress(p Platform, msg *Message) {
 		return
 	}
 
+	iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
 	e.interactiveMu.Lock()
-	state, hasState := e.interactiveStates[msg.SessionKey]
+	state, hasState := e.interactiveStates[iKey]
 	e.interactiveMu.Unlock()
 
 	if !hasState || state == nil || state.agentSession == nil || !state.agentSession.Alive() {
@@ -4451,7 +4454,8 @@ func (e *Engine) cmdCompress(p Platform, msg *Message) {
 		return
 	}
 
-	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	_, sessions := e.sessionContextForKey(msg.SessionKey)
+	session := sessions.GetOrCreateActive(msg.SessionKey)
 	if !session.TryLock() {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
 		return
@@ -4481,19 +4485,19 @@ func (e *Engine) cmdCompress(p Platform, msg *Message) {
 		if err := state.agentSession.Send(cmd, nil, nil); err != nil {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
 			if !state.agentSession.Alive() {
-				e.cleanupInteractiveState(msg.SessionKey)
+				e.cleanupInteractiveState(iKey)
 			}
 			return
 		}
 
-		e.processCompressEvents(state, session, msg.SessionKey, p, msg.ReplyCtx, &compressUnlocked)
+		e.processCompressEvents(state, session, sessions, iKey, p, msg.ReplyCtx, &compressUnlocked)
 	}()
 }
 
 // processCompressEvents drains agent events after a compress command.
 // Unlike processInteractiveEvents it does NOT record history and treats
 // an empty result as success rather than "(empty response)".
-func (e *Engine) processCompressEvents(state *interactiveState, session *Session, sessionKey string, p Platform, replyCtx any, unlocked *bool) {
+func (e *Engine) processCompressEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, p Platform, replyCtx any, unlocked *bool) {
 
 	var textParts []string
 	events := state.agentSession.Events()
@@ -4558,7 +4562,7 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 			}
 
 			// After compress succeeds, process any queued messages instead of dropping them.
-			e.drainQueuedMessagesAfterCompress(state, session, sessionKey, unlocked)
+			e.drainQueuedMessagesAfterCompress(state, session, sessions, sessionKey, unlocked)
 			return
 		case EventError:
 			if event.Error != nil {
@@ -4570,7 +4574,7 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 				e.notifyDroppedQueuedMessages(state, event.Error)
 			} else {
 				// Agent survived — try to process queued messages.
-				e.drainQueuedMessagesAfterCompress(state, session, sessionKey, unlocked)
+				e.drainQueuedMessagesAfterCompress(state, session, sessions, sessionKey, unlocked)
 			}
 			return
 		case EventPermissionRequest:
@@ -4585,8 +4589,8 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 // drainQueuedMessagesAfterCompress processes any messages that were queued
 // during a /compress operation. It sends each one to the agent and runs the
 // full interactive event loop for it.
-func (e *Engine) drainQueuedMessagesAfterCompress(state *interactiveState, session *Session, sessionKey string, unlocked *bool) {
-	if e.drainPendingMessages(state, session, sessionKey) {
+func (e *Engine) drainQueuedMessagesAfterCompress(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, unlocked *bool) {
+	if e.drainPendingMessages(state, session, sessions, sessionKey) {
 		*unlocked = true
 	}
 }
@@ -4716,7 +4720,7 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 
 	case "clear", "reset", "none":
 		switcher.SetActiveProvider("")
-		e.cleanupInteractiveState(msg.SessionKey)
+		e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
 		if e.providerSaveFunc != nil {
 			if err := e.providerSaveFunc(""); err != nil {
 				slog.Error("failed to save provider", "error", err)
@@ -4843,7 +4847,7 @@ func (e *Engine) switchProvider(p Platform, msg *Message, switcher ProviderSwitc
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgProviderNotFound), name))
 		return
 	}
-	e.cleanupInteractiveState(msg.SessionKey)
+	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
 
 	if e.providerSaveFunc != nil {
 		if err := e.providerSaveFunc(name); err != nil {
@@ -8309,6 +8313,16 @@ func (e *Engine) handleWorkspaceInitFlow(p Platform, msg *Message, channelID, ch
 		e.initFlowsMu.Unlock()
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsNotFoundHint))
 		return true
+	}
+
+	// Slash commands always take priority over the init flow — let them
+	// pass through to handleCommand. Clean up the stale flow since the
+	// user is issuing explicit commands instead of following the clone guide.
+	if strings.HasPrefix(content, "/") {
+		e.initFlowsMu.Lock()
+		delete(e.initFlows, channelID)
+		e.initFlowsMu.Unlock()
+		return false
 	}
 
 	switch flow.state {
