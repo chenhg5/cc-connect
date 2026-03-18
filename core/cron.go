@@ -434,6 +434,18 @@ func isZhLikeLang(lang Language) bool {
 	return lang == LangChinese || lang == LangTraditionalChinese || lang == LangJapanese
 }
 
+// parseStep parses a cron step field like "*/5" and returns (5, true).
+func parseStep(field string) (int, bool) {
+	if !strings.HasPrefix(field, "*/") {
+		return 0, false
+	}
+	var n int
+	if _, err := fmt.Sscanf(field[2:], "%d", &n); err == nil && n > 0 {
+		return n, true
+	}
+	return 0, false
+}
+
 // CronExprToHuman converts a standard 5-field cron expression to a human-readable string.
 func CronExprToHuman(expr string, lang Language) string {
 	fields := strings.Fields(expr)
@@ -443,6 +455,43 @@ func CronExprToHuman(expr string, lang Language) string {
 	minute, hour, dom, month, dow := fields[0], fields[1], fields[2], fields[3], fields[4]
 	weekdays, months := cronLangNames(lang)
 	cjk := isZhLikeLang(lang)
+	allWild := dom == "*" && month == "*" && dow == "*"
+
+	// Pure interval: */N * * * * → "Every N minutes"
+	if minStep, ok := parseStep(minute); ok && hour == "*" && allWild {
+		switch lang {
+		case LangChinese:
+			return fmt.Sprintf("每%d分钟", minStep)
+		case LangTraditionalChinese:
+			return fmt.Sprintf("每%d分鐘", minStep)
+		case LangJapanese:
+			return fmt.Sprintf("%d分ごと", minStep)
+		case LangSpanish:
+			return fmt.Sprintf("Cada %d min", minStep)
+		default:
+			return fmt.Sprintf("Every %d min", minStep)
+		}
+	}
+
+	// Hour interval: M */N * * * → "Every N hours (:MM)"
+	if hourStep, ok := parseStep(hour); ok && allWild {
+		m := padZero(minute)
+		if minute == "*" {
+			m = "00"
+		}
+		switch lang {
+		case LangChinese:
+			return fmt.Sprintf("每%d小时 (:%s)", hourStep, m)
+		case LangTraditionalChinese:
+			return fmt.Sprintf("每%d小時 (:%s)", hourStep, m)
+		case LangJapanese:
+			return fmt.Sprintf("%d時間ごと (:%s)", hourStep, m)
+		case LangSpanish:
+			return fmt.Sprintf("Cada %d h (:%s)", hourStep, m)
+		default:
+			return fmt.Sprintf("Every %d h (:%s)", hourStep, m)
+		}
+	}
 
 	var parts []string
 
@@ -485,7 +534,18 @@ func CronExprToHuman(expr string, lang Language) string {
 
 	// Time
 	if hour != "*" && minute != "*" {
-		parts = append(parts, fmt.Sprintf("%s:%s", padZero(hour), padZero(minute)))
+		if minStep, ok := parseStep(minute); ok {
+			switch lang {
+			case LangChinese, LangTraditionalChinese:
+				parts = append(parts, fmt.Sprintf("%s时 每%d分钟", padZero(hour), minStep))
+			case LangJapanese:
+				parts = append(parts, fmt.Sprintf("%s時 %d分ごと", padZero(hour), minStep))
+			default:
+				parts = append(parts, fmt.Sprintf("hour %s every %d min", padZero(hour), minStep))
+			}
+		} else {
+			parts = append(parts, fmt.Sprintf("%s:%s", padZero(hour), padZero(minute)))
+		}
 	} else if hour != "*" {
 		if cjk {
 			parts = append(parts, hour+"時")
@@ -493,25 +553,38 @@ func CronExprToHuman(expr string, lang Language) string {
 			parts = append(parts, "hour "+hour)
 		}
 	} else if minute != "*" {
-		switch lang {
-		case LangChinese, LangTraditionalChinese:
-			parts = append(parts, "每小时第"+minute+"分")
-		case LangJapanese:
-			parts = append(parts, "毎時"+minute+"分")
-		default:
-			parts = append(parts, "minute "+minute+" of every hour")
+		if minStep, ok := parseStep(minute); ok {
+			switch lang {
+			case LangChinese:
+				parts = append(parts, fmt.Sprintf("每%d分钟", minStep))
+			case LangTraditionalChinese:
+				parts = append(parts, fmt.Sprintf("每%d分鐘", minStep))
+			case LangJapanese:
+				parts = append(parts, fmt.Sprintf("%d分ごと", minStep))
+			default:
+				parts = append(parts, fmt.Sprintf("every %d min", minStep))
+			}
+		} else {
+			switch lang {
+			case LangChinese, LangTraditionalChinese:
+				parts = append(parts, "每小时第"+minute+"分")
+			case LangJapanese:
+				parts = append(parts, "毎時"+minute+"分")
+			default:
+				parts = append(parts, "minute "+minute+" of every hour")
+			}
 		}
 	}
 
 	// Frequency hint
-	if dow == "*" && month == "*" && dom == "*" {
+	if allWild {
 		switch lang {
 		case LangChinese, LangTraditionalChinese:
 			return "每天 " + strings.Join(parts, " ")
 		case LangJapanese:
 			return "毎日 " + strings.Join(parts, " ")
 		case LangSpanish:
-			return "Diario a las " + strings.Join(parts, " ")
+			return "Diario " + strings.Join(parts, " ")
 		default:
 			return "Daily at " + strings.Join(parts, " ")
 		}

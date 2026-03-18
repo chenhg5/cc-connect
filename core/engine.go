@@ -5775,9 +5775,6 @@ func (e *Engine) renderCronCard(sessionKey string) *Card {
 		if !j.Enabled {
 			status = "⏸"
 		}
-		if j.Mute {
-			status = "🔇"
-		}
 
 		desc := j.Description
 		if desc == "" {
@@ -5787,11 +5784,15 @@ func (e *Engine) renderCronCard(sessionKey string) *Card {
 				desc = truncateStr(j.Prompt, 60)
 			}
 		}
+		if j.Mute {
+			desc += " [mute]"
+		}
+
+		human := CronExprToHuman(j.CronExpr, lang)
 
 		var sb strings.Builder
 		sb.WriteString(fmt.Sprintf("%s %s\n", status, desc))
 		sb.WriteString(e.i18n.Tf(MsgCronIDLabel, j.ID))
-		human := CronExprToHuman(j.CronExpr, lang)
 		sb.WriteString(e.i18n.Tf(MsgCronScheduleLabel, human, j.CronExpr))
 		nextRun := e.cronScheduler.NextRun(j.ID)
 		if !nextRun.IsZero() {
@@ -5804,22 +5805,23 @@ func (e *Engine) renderCronCard(sessionKey string) *Card {
 			if j.LastError != "" {
 				sb.WriteString(e.i18n.Tf(MsgCronFailedSuffix, truncateStr(j.LastError, 40)))
 			}
+			sb.WriteString("\n")
 		}
 		cb.Markdown(sb.String())
 
 		var btns []CardButton
 		if j.Enabled {
-			btns = append(btns, DefaultBtn("⏸ Disable", fmt.Sprintf("act:/cron disable %s", j.ID)))
+			btns = append(btns, DefaultBtn(e.i18n.T(MsgCronBtnDisable), fmt.Sprintf("act:/cron disable %s", j.ID)))
 		} else {
-			btns = append(btns, PrimaryBtn("▶️ Enable", fmt.Sprintf("act:/cron enable %s", j.ID)))
+			btns = append(btns, PrimaryBtn(e.i18n.T(MsgCronBtnEnable), fmt.Sprintf("act:/cron enable %s", j.ID)))
 		}
 		if j.Mute {
-			btns = append(btns, DefaultBtn("🔔 Unmute", fmt.Sprintf("act:/cron unmute %s", j.ID)))
+			btns = append(btns, DefaultBtn(e.i18n.T(MsgCronBtnUnmute), fmt.Sprintf("act:/cron unmute %s", j.ID)))
 		} else {
-			btns = append(btns, DefaultBtn("🔇 Mute", fmt.Sprintf("act:/cron mute %s", j.ID)))
+			btns = append(btns, DefaultBtn(e.i18n.T(MsgCronBtnMute), fmt.Sprintf("act:/cron mute %s", j.ID)))
 		}
-		btns = append(btns, DangerBtn("🗑 Delete", fmt.Sprintf("act:/cron delete %s", j.ID)))
-		cb.Buttons(btns...)
+		btns = append(btns, DangerBtn(e.i18n.T(MsgCronBtnDelete), fmt.Sprintf("act:/cron delete %s", j.ID)))
+		cb.ButtonsEqual(btns...)
 	}
 
 	cb.Divider()
@@ -6222,9 +6224,6 @@ func (e *Engine) cmdCronList(p Platform, msg *Message) {
 		if !j.Enabled {
 			status = "⏸"
 		}
-		if j.Mute {
-			status = "🔇"
-		}
 		desc := j.Description
 		if desc == "" {
 			if j.IsShellJob() {
@@ -6232,6 +6231,9 @@ func (e *Engine) cmdCronList(p Platform, msg *Message) {
 			} else {
 				desc = truncateStr(j.Prompt, 60)
 			}
+		}
+		if j.Mute {
+			desc += " [mute]"
 		}
 		sb.WriteString(fmt.Sprintf("%s %s\n", status, desc))
 

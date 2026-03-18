@@ -128,6 +128,17 @@ func TestCronExprToHuman_BasicCases(t *testing.T) {
 		{"0 6 * * *", LangEnglish, "Daily at 06:00"},
 		{"0 6 * * *", LangChinese, "每天 06:00"},
 		{"30 14 * * 1", LangEnglish, "Every Monday at 14:30"},
+		// Step expressions
+		{"*/5 * * * *", LangEnglish, "Every 5 min"},
+		{"*/5 * * * *", LangChinese, "每5分钟"},
+		{"*/30 * * * *", LangChinese, "每30分钟"},
+		{"*/15 * * * *", LangJapanese, "15分ごと"},
+		{"0 */2 * * *", LangEnglish, "Every 2 h (:00)"},
+		{"0 */2 * * *", LangChinese, "每2小时 (:00)"},
+		{"30 */6 * * *", LangEnglish, "Every 6 h (:30)"},
+		// Regular cases still work
+		{"0 0 1 * *", LangEnglish, "Monthly, day 1, 00:00"},
+		{"0 0 1 * *", LangChinese, "每月1日 00:00"},
 	}
 	for _, tt := range tests {
 		got := CronExprToHuman(tt.expr, tt.lang)
@@ -200,8 +211,8 @@ func TestRenderCronCard_WithButtons(t *testing.T) {
 	}
 
 	text := card.RenderText()
-	if !strings.Contains(text, "🔇") {
-		t.Error("muted job should show 🔇 icon in card text")
+	if !strings.Contains(text, "[mute]") {
+		t.Error("muted job should show [mute] tag in card text")
 	}
 }
 

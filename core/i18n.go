@@ -221,6 +221,13 @@ const (
 	MsgCronMuted        MsgKey = "cron_muted"
 	MsgCronUnmuted      MsgKey = "cron_unmuted"
 	MsgCronCardHint     MsgKey = "cron_card_hint"
+	MsgCronNextShort    MsgKey = "cron_next_short"
+	MsgCronLastShort    MsgKey = "cron_last_short"
+	MsgCronBtnEnable    MsgKey = "cron_btn_enable"
+	MsgCronBtnDisable   MsgKey = "cron_btn_disable"
+	MsgCronBtnMute      MsgKey = "cron_btn_mute"
+	MsgCronBtnUnmute    MsgKey = "cron_btn_unmute"
+	MsgCronBtnDelete    MsgKey = "cron_btn_delete"
 
 	MsgStatusTitle MsgKey = "status_title"
 
@@ -1573,6 +1580,55 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "💡 `/cron add` 追加 · `/cron del <id>` 削除 · `/cron enable/disable <id>` 切替 · `/cron mute/unmute <id>` ミュート",
 		LangSpanish:            "💡 `/cron add` · `/cron del <id>` · `/cron enable/disable <id>` · `/cron mute/unmute <id>`",
 	},
+	MsgCronBtnEnable: {
+		LangEnglish:            "Enable",
+		LangChinese:            "启用",
+		LangTraditionalChinese: "啟用",
+		LangJapanese:           "有効",
+		LangSpanish:            "Activar",
+	},
+	MsgCronBtnDisable: {
+		LangEnglish:            "Disable",
+		LangChinese:            "暂停",
+		LangTraditionalChinese: "暫停",
+		LangJapanese:           "無効",
+		LangSpanish:            "Desactivar",
+	},
+	MsgCronBtnMute: {
+		LangEnglish:            "Mute",
+		LangChinese:            "静音",
+		LangTraditionalChinese: "靜音",
+		LangJapanese:           "ミュート",
+		LangSpanish:            "Silenciar",
+	},
+	MsgCronBtnUnmute: {
+		LangEnglish:            "Unmute",
+		LangChinese:            "取消静音",
+		LangTraditionalChinese: "取消靜音",
+		LangJapanese:           "ミュート解除",
+		LangSpanish:            "Reactivar",
+	},
+	MsgCronBtnDelete: {
+		LangEnglish:            "Delete",
+		LangChinese:            "删除",
+		LangTraditionalChinese: "刪除",
+		LangJapanese:           "削除",
+		LangSpanish:            "Eliminar",
+	},
+	MsgCronNextShort: {
+		LangEnglish:            "Next",
+		LangChinese:            "下次",
+		LangTraditionalChinese: "下次",
+		LangJapanese:           "次回",
+		LangSpanish:            "Prox",
+	},
+	MsgCronLastShort: {
+		LangEnglish:            "Last",
+		LangChinese:            "上次",
+		LangTraditionalChinese: "上次",
+		LangJapanese:           "前回",
+		LangSpanish:            "Últ",
+	},
 	MsgStatusTitle: {
 		LangEnglish: "cc-connect Status\n\n" +
 			"Project: %s\n" +
@@ -2007,11 +2063,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese: "（タイムアウト）", LangSpanish: " (tiempo de espera agotado)",
 	},
 	MsgCronScheduleLabel: {
-		LangEnglish:            "Schedule: %s (%s)\n",
-		LangChinese:            "调度: %s (%s)\n",
-		LangTraditionalChinese: "調度: %s (%s)\n",
-		LangJapanese:           "スケジュール: %s (%s)\n",
-		LangSpanish:            "Programación: %s (%s)\n",
+		LangEnglish:            "Schedule: %s `%s`\n",
+		LangChinese:            "调度: %s `%s`\n",
+		LangTraditionalChinese: "調度: %s `%s`\n",
+		LangJapanese:           "スケジュール: %s `%s`\n",
+		LangSpanish:            "Programación: %s `%s`\n",
 	},
 	MsgCronNextRunLabel: {
 		LangEnglish:            "Next run: %s\n",
