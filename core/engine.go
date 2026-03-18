@@ -948,8 +948,33 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 
 	// Voice message: transcribe to text first
 	if msg.Audio != nil {
-		e.handleVoiceMessage(p, msg)
-		return
+		// If STT is configured, use it for transcription (more accurate)
+		if e.speech.Enabled && e.speech.STT != nil {
+			e.handleVoiceMessage(p, msg)
+			return
+		}
+		// Fallback: use platform-provided recognition text if available
+		if msg.Content == "" {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgVoiceNotEnabled))
+			return
+		}
+		// Use platform recognition with a hint, then continue processing
+		slog.Info("using platform-provided voice recognition",
+			"platform", msg.Platform, "content_len", len(msg.Content))
+		if msg.FromVoice {
+			// Use platform name as parameter for the message
+			// Capitalize first letter for better presentation
+			if platformName := msg.Platform; len(platformName) > 0 {
+				// Safe capitalization that handles multi-word names
+				r := []rune(platformName)
+				if len(r) > 0 {
+					r[0] = []rune(strings.ToUpper(string(r[0])))[0]
+				}
+				platformName = string(r)
+				e.send(p, msg.ReplyCtx, e.i18n.Tf(MsgVoiceUsingPlatformRecognition, platformName))
+			}
+		}
+		// Continue processing with the platform-provided text content
 	}
 
 	content := strings.TrimSpace(msg.Content)
@@ -2081,9 +2106,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				fromVoice := state.fromVoice
 				state.mu.Unlock()
 				mode := e.tts.GetTTSMode()
+				slog.Debug("tts: checking conditions", "mode", mode, "fromVoice", fromVoice, "will_send", mode == "always" || (mode == "voice_only" && fromVoice))
 				if mode == "always" || (mode == "voice_only" && fromVoice) {
 					go e.sendTTSReply(p, replyCtx, fullResponse)
 				}
+			} else {
+				slog.Debug("tts: not enabled", "tts_nil", e.tts == nil, "enabled", e.tts != nil && e.tts.Enabled, "tts_obj_nil", e.tts == nil || e.tts.TTS == nil)
 			}
 
 			// Check for queued messages — if present, continue the event loop
@@ -7801,27 +7829,37 @@ func splitMessage(text string, maxLen int) []string {
 // sendTTSReply synthesizes fullResponse text and sends audio to the platform.
 // Called asynchronously after EventResult; text reply is always sent first.
 func (e *Engine) sendTTSReply(p Platform, replyCtx any, text string) {
+	slog.Debug("tts: sendTTSReply called", "platform", p.Name(), "text_len", len(text))
 	if e.tts == nil {
+		slog.Warn("tts: e.tts is nil, skipping")
+		return
+	}
+	if e.tts.TTS == nil {
+		slog.Warn("tts: e.tts.TTS is nil, skipping")
 		return
 	}
 	if e.tts.MaxTextLen > 0 && utf8.RuneCountInString(text) > e.tts.MaxTextLen {
 		slog.Warn("tts: text exceeds max_text_len, skipping synthesis", "len", utf8.RuneCountInString(text), "max", e.tts.MaxTextLen)
 		return
 	}
+	slog.Info("tts: starting synthesis", "voice", e.tts.Voice, "text_len", len(text))
 	opts := TTSSynthesisOpts{Voice: e.tts.Voice}
 	audioData, format, err := e.tts.TTS.Synthesize(e.ctx, text, opts)
 	if err != nil {
 		slog.Error("tts: synthesis failed", "error", err)
 		return
 	}
+	slog.Info("tts: synthesis successful", "format", format, "audio_size", len(audioData))
 	as, ok := p.(AudioSender)
 	if !ok {
-		slog.Debug("tts: platform does not support audio sending", "platform", p.Name())
+		slog.Warn("tts: platform does not support audio sending", "platform", p.Name())
 		return
 	}
 	if err := as.SendAudio(e.ctx, replyCtx, audioData, format); err != nil {
 		slog.Error("tts: platform audio send failed", "platform", p.Name(), "error", err)
+		return
 	}
+	slog.Info("tts: audio sent successfully", "platform", p.Name())
 }
 
 // ──────────────────────────────────────────────────────────────

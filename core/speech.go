@@ -264,6 +264,67 @@ func ConvertAudioToOpus(ctx context.Context, audio []byte, srcFormat string) ([]
 	return stdout.Bytes(), nil
 }
 
+// ConvertMP3ToOGG converts MP3 audio to OGG format using ffmpeg with stdin/stdout pipes.
+// Optimized for voice: Opus codec, 16kHz mono, 32kbps, voip application.
+func ConvertMP3ToOGG(ctx context.Context, mp3Data []byte) ([]byte, error) {
+	ffmpegPath, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		return nil, fmt.Errorf("ffmpeg not found in PATH: %w", err)
+	}
+
+	args := []string{
+		"-i", "pipe:0",
+		"-c:a", "libopus",
+		"-ar", "16000",       // 16kHz sample rate for voice
+		"-ac", "1",           // mono
+		"-b:a", "32k",        // 32 kbps bitrate (voice quality)
+		"-application", "voip", // optimize for voice
+		"-f", "ogg",
+		"-y",
+		"pipe:1",
+	}
+	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
+	cmd.Stdin = bytes.NewReader(mp3Data)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("ffmpeg MP3 to OGG conversion failed: %w (stderr: %s)", err, stderr.String())
+	}
+	return stdout.Bytes(), nil
+}
+
+// ConvertMP3ToAMR converts MP3 audio to AMR format using ffmpeg with stdin/stdout pipes.
+// AMR format is smaller but lower quality than OGG (AMR-NB codec, 8kHz mono, 12.2kbps).
+func ConvertMP3ToAMR(ctx context.Context, mp3Data []byte) ([]byte, error) {
+	ffmpegPath, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		return nil, fmt.Errorf("ffmpeg not found in PATH: %w", err)
+	}
+
+	args := []string{
+		"-i", "pipe:0",
+		"-c:a", "amr_nb",
+		"-ar", "8000",     // 8kHz sample rate (AMR-NB standard)
+		"-ac", "1",        // mono
+		"-b:a", "12.2k",   // 12.2 kbps bitrate (AMR-NB max)
+		"-f", "amr",
+		"-y",
+		"pipe:1",
+	}
+	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
+	cmd.Stdin = bytes.NewReader(mp3Data)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("ffmpeg MP3 to AMR conversion failed: %w (stderr: %s)", err, stderr.String())
+	}
+	return stdout.Bytes(), nil
+}
+
 // NeedsConversion returns true if the audio format is not directly supported by Whisper API.
 func NeedsConversion(format string) bool {
 	switch strings.ToLower(format) {
