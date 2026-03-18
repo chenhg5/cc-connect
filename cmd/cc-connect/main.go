@@ -663,8 +663,8 @@ func main() {
 }
 
 // sessionStorePath builds a unique filename from project name + work_dir.
-// It checks the local .cc-connect/ directory first for backward compatibility;
-// if the file exists there, it is used. Otherwise falls back to dataDir/sessions/.
+// It checks for legacy session files (without the sessions/ subdirectory) in dataDir
+// for backward compatibility; if found, uses that path. Otherwise uses dataDir/sessions/.
 func sessionStorePath(dataDir, name, workDir string) string {
 	var filename string
 	if workDir == "" {
@@ -679,13 +679,14 @@ func sessionStorePath(dataDir, name, workDir string) string {
 		filename = fmt.Sprintf("%s_%s.json", name, short)
 	}
 
-	// Check legacy local path: .cc-connect/<name>.json or .cc-connect/<name>.sessions.json
+	// Check legacy path in dataDir (without sessions/ subdirectory) for backward compatibility.
+	// Also check for the older .sessions.json naming convention.
 	for _, legacy := range []string{
-		filepath.Join(".cc-connect", filename),
-		filepath.Join(".cc-connect", strings.TrimSuffix(filename, ".json")+".sessions.json"),
+		filepath.Join(dataDir, filename),
+		filepath.Join(dataDir, strings.TrimSuffix(filename, ".json")+".sessions.json"),
 	} {
 		if _, err := os.Stat(legacy); err == nil {
-			slog.Info("session: using local file", "path", legacy)
+			slog.Info("session: using legacy file in dataDir", "path", legacy)
 			return legacy
 		}
 	}
