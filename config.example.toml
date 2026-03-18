@@ -24,6 +24,14 @@
 # 会话数据存储目录（默认 ~/.cc-connect），以 JSON 文件保存对话历史和会话状态。
 # data_dir = "/path/to/custom/dir"
 
+# Attachment send-back switch for `cc-connect send --image/--file`.
+# Independent from the agent's /mode. Set to "off" to block IM image/file send-back.
+# `cc-connect send --message` without attachments is unaffected.
+# 附件回传开关，用于控制 `cc-connect send --image/--file`。
+# 它与 agent 的 /mode 独立；设为 "off" 会禁用通过 IM 回传图片/文件。
+# 不带附件的 `cc-connect send --message` 不受影响。
+# attachment_send = "on"
+
 # Default quiet mode (suppress thinking/tool progress messages) / 默认静默模式（隐藏思考和工具进度消息）
 # Can be overridden per-project. Users can still toggle with /quiet command.
 # 可被项目级配置覆盖。用户仍可通过 /quiet 命令切换。
@@ -75,6 +83,16 @@ level = "info" # debug, info, warn, error
 # [rate_limit]
 # max_messages = 20         # Max messages per window; 0 = disabled (default: 20) / 窗口内最大消息数；0 = 禁用（默认 20）
 # window_secs = 60          # Window size in seconds (default: 60) / 窗口时间秒数（默认 60）
+
+# =============================================================================
+# Relay Settings / Relay 设置
+# =============================================================================
+# Bot-to-bot relay timeout. Controls how long cc-connect waits for the target
+# bot to finish responding during `cc-connect relay send`.
+# Bot 间 relay 超时。控制 `cc-connect relay send` 时等待目标 bot 完成回复的最长时间。
+
+# [relay]
+# timeout_secs = 120        # Max relay wait in seconds; 0 = disabled (default: 120) / relay 最大等待秒数；0 = 禁用（默认 120）
 
 # =============================================================================
 # Cron Settings / 定时任务设置
@@ -522,6 +540,19 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "bypassPermission
 # api_key = "sk-xxx"
 # base_url = "https://api.relay-service.com"
 # model = "claude-sonnet-4-20250514"
+# # Optional: pre-configure available models shown by /model command (alias - model)
+# # /model [alias] switches to the model; omit to auto-fetch from the API.
+# # 可选：预先配置 /model 命令显示的可用模型列表，格式为 alias - model
+# # 使用 /model [alias] 切换模型；留空则自动从 API 获取
+# [[projects.agent.providers.models]]
+# model = "claude-sonnet-4-20250514"
+# alias = "sonnet"
+# [[projects.agent.providers.models]]
+# model = "claude-opus-4-20250514"
+# alias = "opus"
+# [[projects.agent.providers.models]]
+# model = "claude-haiku-3-5-20241022"
+# alias = "haiku"
 #
 # # Third-party provider with thinking override / 第三方 Provider 并覆盖 thinking 参数
 # # Some providers (e.g. SiliconFlow) don't support Claude's adaptive thinking.

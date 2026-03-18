@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -40,6 +41,9 @@ var VersionInfo string
 
 // CurrentVersion is the semver tag (e.g. "v1.2.0-beta.1"), set by main.
 var CurrentVersion string
+
+// ErrAttachmentSendDisabled indicates that side-channel image/file delivery is disabled by config.
+var ErrAttachmentSendDisabled = errors.New("attachment send is disabled by config")
 
 // RestartRequest carries info needed to send a post-restart notification.
 type RestartRequest struct {
@@ -119,19 +123,20 @@ type RateLimitCfg struct {
 
 // Engine routes messages between platforms and the agent for a single project.
 type Engine struct {
-	name         string
-	agent        Agent
-	platforms    []Platform
-	sessions     *SessionManager
-	ctx          context.Context
-	cancel       context.CancelFunc
-	i18n         *I18n
-	speech       SpeechCfg
-	tts          *TTSCfg
-	display      DisplayCfg
-	defaultQuiet bool
-	injectSender bool
-	startedAt    time.Time
+	name                  string
+	agent                 Agent
+	platforms             []Platform
+	sessions              *SessionManager
+	ctx                   context.Context
+	cancel                context.CancelFunc
+	i18n                  *I18n
+	speech                SpeechCfg
+	tts                   *TTSCfg
+	display               DisplayCfg
+	defaultQuiet          bool
+	injectSender          bool
+	attachmentSendEnabled bool
+	startedAt             time.Time
 
 	providerSaveFunc       func(providerName string) error
 	providerAddSaveFunc    func(p ProviderConfig) error
@@ -160,9 +165,9 @@ type Engine struct {
 	bannedMu    sync.RWMutex
 
 	disabledCmds map[string]bool
-	adminFrom    string // comma-separated user IDs for privileged commands; "*" = all allowed users; "" = deny
+	adminFrom    string           // comma-separated user IDs for privileged commands; "*" = all allowed users; "" = deny
 	userRoles    *UserRoleManager // nil = legacy mode (no per-user policies)
-	userRolesMu  sync.RWMutex    // protects userRoles, disabledCmds, and adminFrom
+	userRolesMu  sync.RWMutex     // protects userRoles, disabledCmds, and adminFrom
 
 	rateLimiter      *RateLimiter
 	streamPreview    StreamPreviewCfg
@@ -204,6 +209,7 @@ type interactiveState struct {
 	approveAll   bool // when true, auto-approve all permission requests for this session
 	quiet        bool // when true, suppress thinking and tool progress for this session
 	fromVoice    bool // true if current turn originated from voice transcription
+	sideText     string
 	deleteMode   *deleteModeState
 }
 
@@ -236,21 +242,22 @@ func (pp *pendingPermission) resolve() {
 func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath string, lang Language) *Engine {
 	ctx, cancel := context.WithCancel(context.Background())
 	e := &Engine{
-		name:              name,
-		agent:             ag,
-		platforms:         platforms,
-		sessions:          NewSessionManager(sessionStorePath),
-		ctx:               ctx,
-		cancel:            cancel,
-		i18n:              NewI18n(lang),
-		display:           DisplayCfg{ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen},
-		commands:          NewCommandRegistry(),
-		skills:            NewSkillRegistry(),
-		aliases:           make(map[string]string),
-		interactiveStates: make(map[string]*interactiveState),
-		startedAt:         time.Now(),
-		streamPreview:     DefaultStreamPreviewCfg(),
-		eventIdleTimeout:  defaultEventIdleTimeout,
+		name:                  name,
+		agent:                 ag,
+		platforms:             platforms,
+		sessions:              NewSessionManager(sessionStorePath),
+		ctx:                   ctx,
+		cancel:                cancel,
+		i18n:                  NewI18n(lang),
+		attachmentSendEnabled: true,
+		display:               DisplayCfg{ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen},
+		commands:              NewCommandRegistry(),
+		skills:                NewSkillRegistry(),
+		aliases:               make(map[string]string),
+		interactiveStates:     make(map[string]*interactiveState),
+		startedAt:             time.Now(),
+		streamPreview:         DefaultStreamPreviewCfg(),
+		eventIdleTimeout:      defaultEventIdleTimeout,
 	}
 
 	if ag != nil {
@@ -341,6 +348,11 @@ func (e *Engine) SetDefaultQuiet(q bool) {
 // accordingly (e.g. personal task views, role-based access control).
 func (e *Engine) SetInjectSender(v bool) {
 	e.injectSender = v
+}
+
+// SetAttachmentSendEnabled controls whether side-channel image/file delivery is allowed.
+func (e *Engine) SetAttachmentSendEnabled(v bool) {
+	e.attachmentSendEnabled = v
 }
 
 func (e *Engine) SetLanguageSaveFunc(fn func(Language) error) {
@@ -545,10 +557,14 @@ func (e *Engine) checkRateLimit(msg *Message) bool {
 
 	// Try role-specific rate limit first
 	if urm != nil {
-		// Use userID if available, else fall back to sessionKey for unidentified users
+		// Use userID if available, else fall back to sessionKey for unidentified users.
+		// NOTE: sessionKey fallback means anonymous users get separate buckets per
+		// session, which is less strict than per-user limiting. Platforms should
+		// provide UserID for effective rate limiting.
 		rateKey := msg.UserID
 		if rateKey == "" {
 			rateKey = msg.SessionKey
+			slog.Debug("rate limit: no UserID, falling back to sessionKey", "session_key", msg.SessionKey)
 		}
 		allowed, handled := urm.AllowRate(rateKey)
 		if handled {
@@ -640,25 +656,33 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		return fmt.Errorf("reconstruct reply context: %w", err)
 	}
 
-	// Notify user that a cron job is executing (unless silent)
-	silent := false
-	if e.cronScheduler != nil {
-		silent = e.cronScheduler.IsSilent(job)
+	// Wrap platform to discard all outgoing messages when muted
+	effectivePlatform := targetPlatform
+	if job.Mute {
+		effectivePlatform = &mutePlatform{targetPlatform}
 	}
-	if !silent {
-		desc := job.Description
-		if desc == "" {
-			if job.IsShellJob() {
-				desc = truncateStr(job.Exec, 40)
-			} else {
-				desc = truncateStr(job.Prompt, 40)
-			}
+
+	// Notify user that a cron job is executing (unless silent/muted)
+	if !job.Mute {
+		silent := false
+		if e.cronScheduler != nil {
+			silent = e.cronScheduler.IsSilent(job)
 		}
-		e.send(targetPlatform, replyCtx, fmt.Sprintf("⏰ %s", desc))
+		if !silent {
+			desc := job.Description
+			if desc == "" {
+				if job.IsShellJob() {
+					desc = truncateStr(job.Exec, 40)
+				} else {
+					desc = truncateStr(job.Prompt, 40)
+				}
+			}
+			e.send(targetPlatform, replyCtx, fmt.Sprintf("⏰ %s", desc))
+		}
 	}
 
 	if job.IsShellJob() {
-		return e.executeCronShell(targetPlatform, replyCtx, job)
+		return e.executeCronShell(effectivePlatform, replyCtx, job)
 	}
 
 	msg := &Message{
@@ -675,7 +699,7 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		return fmt.Errorf("session %q is busy", sessionKey)
 	}
 
-	e.processInteractiveMessage(targetPlatform, msg, session)
+	e.processInteractiveMessage(effectivePlatform, msg, session)
 	return nil
 }
 
@@ -1003,6 +1027,25 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	session := sessions.GetOrCreateActive(msg.SessionKey)
 	sessions.UpdateUserMeta(msg.SessionKey, msg.UserName, msg.ChatName)
 	if !session.TryLock() {
+		// Check for /btw — inject into the running session mid-turn
+		trimmed := strings.TrimSpace(content)
+		if isBtwCommand(trimmed) {
+			btw := strings.TrimSpace(trimmed[len(matchBtwPrefix(trimmed)):])
+			if btw != "" {
+				e.interactiveMu.Lock()
+				state, ok := e.interactiveStates[interactiveKey]
+				e.interactiveMu.Unlock()
+				if ok && state.agentSession != nil && state.agentSession.Alive() {
+					if err := state.agentSession.Send(btw, nil, nil); err != nil {
+						slog.Error("btw: send failed", "error", err)
+						e.reply(p, msg.ReplyCtx, e.i18n.T(MsgBtwSendFailed))
+					} else {
+						e.reply(p, msg.ReplyCtx, e.i18n.T(MsgBtwSent))
+					}
+					return
+				}
+			}
+		}
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
 		return
 	}
@@ -1341,6 +1384,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	sendStart := time.Now()
 	state.mu.Lock()
 	state.fromVoice = msg.FromVoice
+	state.sideText = ""
 	state.mu.Unlock()
 	if err := state.agentSession.Send(promptContent, msg.Images, msg.Files); err != nil {
 		slog.Error("failed to send prompt", "error", err)
@@ -1360,6 +1404,10 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 				return
 			}
 			sendStart = time.Now()
+			state.mu.Lock()
+			state.fromVoice = msg.FromVoice
+			state.sideText = ""
+			state.mu.Unlock()
 			if err := state.agentSession.Send(promptContent, msg.Images, msg.Files); err != nil {
 				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
 				return
@@ -1377,6 +1425,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 }
 
 // getOrCreateWorkspaceAgent returns (or creates) a per-workspace agent and session manager.
+// workspace must be a normalized path (from resolveWorkspace or normalizeWorkspacePath).
 func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionManager, error) {
 	ws := e.workspacePool.GetOrCreate(workspace)
 	ws.mu.Lock()
@@ -1489,6 +1538,15 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 			}
 		}
 		inj.SetSessionEnv(envVars)
+	}
+
+	// Inject platform-specific formatting instructions into the agent's system prompt.
+	if ppi, ok := agent.(PlatformPromptInjector); ok {
+		if fip, ok := p.(FormattingInstructionProvider); ok {
+			ppi.SetPlatformPrompt(fip.FormattingInstructions())
+		} else {
+			ppi.SetPlatformPrompt("")
+		}
 	}
 
 	// Check if context is already canceled (e.g. during shutdown/restart)
@@ -1833,6 +1891,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			)
 
 			replyStart := time.Now()
+			normalizedResponse := strings.TrimSpace(fullResponse)
+			state.mu.Lock()
+			suppressDuplicate := normalizedResponse != "" && normalizedResponse == state.sideText
+			state.sideText = ""
+			state.mu.Unlock()
 
 			// When tool calls happened, text was sent in segments; only send remainder.
 			if toolCount > 0 {
@@ -1848,6 +1911,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						}
 					}
 				}
+			} else if suppressDuplicate {
+				sp.finish("")
+				slog.Debug("EventResult: suppressed duplicate side-channel text", "response_len", len(fullResponse))
 			} else if sp.finish(fullResponse) {
 				slog.Debug("EventResult: finalized via stream preview", "response_len", len(fullResponse))
 			} else {
@@ -1967,6 +2033,26 @@ var builtinCommands = []struct {
 	{[]string{"dir", "cd", "chdir", "workdir"}, "dir"},
 	{[]string{"tts"}, "tts"},
 	{[]string{"workspace", "ws"}, "workspace"},
+}
+
+// isBtwCommand checks if a trimmed message starts with a /btw command.
+func isBtwCommand(trimmed string) bool {
+	return matchBtwPrefix(trimmed) != ""
+}
+
+// matchBtwPrefix returns the prefix portion (e.g. "/btw ") if the
+// message starts with a btw command, or "" if it doesn't match.
+func matchBtwPrefix(trimmed string) string {
+	lower := strings.ToLower(trimmed)
+	for _, prefix := range []string{"/btw"} {
+		if strings.HasPrefix(lower, prefix) {
+			rest := trimmed[len(prefix):]
+			if rest == "" || rest[0] == ' ' {
+				return trimmed[:len(prefix)]
+			}
+		}
+	}
+	return ""
 }
 
 // matchPrefix finds a unique command matching the given prefix.
@@ -2155,6 +2241,13 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 			return true
 		}
 		if skill := e.skills.Resolve(cmd); skill != nil {
+			if disabledCmds[strings.ToLower(skill.Name)] {
+				slog.Info("audit: command_blocked",
+					"user_id", msg.UserID, "platform", msg.Platform,
+					"project", e.name, "command", skill.Name, "reason", "disabled")
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandDisabled), "/"+skill.Name))
+				return true
+			}
 			slog.Info("audit: command_executed",
 				"user_id", msg.UserID, "platform", msg.Platform,
 				"project", e.name, "command", skill.Name, "type", "skill")
@@ -2204,7 +2297,7 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 		if resolver, ok := p.(ChannelNameResolver); ok {
 			channelName, _ = resolver.ResolveChannelName(channelID)
 		}
-		e.workspaceBindings.Bind(projectKey, channelID, channelName, wsPath)
+		e.workspaceBindings.Bind(projectKey, channelID, channelName, normalizeWorkspacePath(wsPath))
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsBindSuccess, wsName))
 
 	case "init":
@@ -2226,7 +2319,7 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 			if resolver, ok := p.(ChannelNameResolver); ok {
 				channelName, _ = resolver.ResolveChannelName(channelID)
 			}
-			e.workspaceBindings.Bind(projectKey, channelID, channelName, cloneTo)
+			e.workspaceBindings.Bind(projectKey, channelID, channelName, normalizeWorkspacePath(cloneTo))
 			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsCloneSuccess, cloneTo))
 			return
 		}
@@ -2242,7 +2335,7 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 		if resolver, ok := p.(ChannelNameResolver); ok {
 			channelName, _ = resolver.ResolveChannelName(channelID)
 		}
-		e.workspaceBindings.Bind(projectKey, channelID, channelName, cloneTo)
+		e.workspaceBindings.Bind(projectKey, channelID, channelName, normalizeWorkspacePath(cloneTo))
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsCloneSuccess, cloneTo))
 
 	case "unbind":
@@ -2520,7 +2613,7 @@ func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
 	}
 
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		ctx, cancel := context.WithTimeout(e.ctx, 60*time.Second)
 		defer cancel()
 
 		cmd := exec.CommandContext(ctx, "sh", "-c", shellCmd)
@@ -3677,13 +3770,22 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 				if m.Name == current {
 					marker = "> "
 				}
-				desc := m.Desc
-				if desc != "" {
-					desc = " — " + desc
+				var line string
+				if m.Alias != "" {
+					line = fmt.Sprintf("%s%d. %s - %s\n", marker, i+1, m.Alias, m.Name)
+				} else {
+					desc := m.Desc
+					if desc != "" {
+						desc = " — " + desc
+					}
+					line = fmt.Sprintf("%s%d. %s%s\n", marker, i+1, m.Name, desc)
 				}
-				sb.WriteString(fmt.Sprintf("%s%d. %s%s\n", marker, i+1, m.Name, desc))
+				sb.WriteString(line)
 
 				label := m.Name
+				if m.Alias != "" {
+					label = m.Alias
+				}
 				if m.Name == current {
 					label = "▶ " + label
 				}
@@ -3712,6 +3814,8 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 	target := args[0]
 	if idx, err := strconv.Atoi(target); err == nil && idx >= 1 && idx <= len(models) {
 		target = models[idx-1].Name
+	} else {
+		target = resolveModelAlias(models, target)
 	}
 
 	switcher.SetModel(target)
@@ -3723,6 +3827,18 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 	e.sessions.Save()
 
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChanged, target))
+}
+
+// resolveModelAlias resolves a user-supplied string to a model name.
+// It first checks for an exact alias match, then falls back to the original value
+// (which may be a direct model name).
+func resolveModelAlias(models []ModelOption, input string) string {
+	for _, m := range models {
+		if m.Alias != "" && strings.EqualFold(m.Alias, input) {
+			return m.Name
+		}
+	}
+	return input
 }
 
 func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
@@ -4397,8 +4513,11 @@ func (e *Engine) switchProvider(p Platform, msg *Message, switcher ProviderSwitc
 // SendToSession sends a message to an active session from an external caller (API/CLI).
 // If sessionKey is empty, it picks the first active session.
 func (e *Engine) SendToSession(sessionKey, message string) error {
+	return e.SendToSessionWithAttachments(sessionKey, message, nil, nil)
+}
+
+func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images []ImageAttachment, files []FileAttachment) error {
 	e.interactiveMu.Lock()
-	defer e.interactiveMu.Unlock()
 
 	var state *interactiveState
 	if sessionKey != "" {
@@ -4410,6 +4529,7 @@ func (e *Engine) SendToSession(sessionKey, message string) error {
 			break
 		}
 	}
+	e.interactiveMu.Unlock()
 
 	if state == nil {
 		return fmt.Errorf("no active session found (key=%q)", sessionKey)
@@ -4424,7 +4544,52 @@ func (e *Engine) SendToSession(sessionKey, message string) error {
 		return fmt.Errorf("no active session found (key=%q)", sessionKey)
 	}
 
-	return p.Send(e.ctx, replyCtx, message)
+	if message == "" && len(images) == 0 && len(files) == 0 {
+		return fmt.Errorf("message or attachment is required")
+	}
+	if (len(images) > 0 || len(files) > 0) && !e.attachmentSendEnabled {
+		return ErrAttachmentSendDisabled
+	}
+
+	var imageSender ImageSender
+	if len(images) > 0 {
+		var ok bool
+		imageSender, ok = p.(ImageSender)
+		if !ok {
+			return fmt.Errorf("platform %s: %w", p.Name(), ErrNotSupported)
+		}
+	}
+
+	var fileSender FileSender
+	if len(files) > 0 {
+		var ok bool
+		fileSender, ok = p.(FileSender)
+		if !ok {
+			return fmt.Errorf("platform %s: %w", p.Name(), ErrNotSupported)
+		}
+	}
+
+	if message != "" {
+		if err := p.Send(e.ctx, replyCtx, message); err != nil {
+			return err
+		}
+		if len(images) > 0 || len(files) > 0 {
+			state.mu.Lock()
+			state.sideText = strings.TrimSpace(message)
+			state.mu.Unlock()
+		}
+	}
+	for _, img := range images {
+		if err := imageSender.SendImage(e.ctx, replyCtx, img); err != nil {
+			return err
+		}
+	}
+	for _, file := range files {
+		if err := fileSender.SendFile(e.ctx, replyCtx, file); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // sendPermissionPrompt sends a permission prompt with interactive buttons when
@@ -4783,6 +4948,8 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		target := args
 		if idx, err := strconv.Atoi(target); err == nil && idx >= 1 && idx <= len(models) {
 			target = models[idx-1].Name
+		} else {
+			target = resolveModelAlias(models, target)
 		}
 		switcher.SetModel(target)
 		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
@@ -4956,6 +5123,28 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 			e.heartbeatScheduler.Resume(e.name)
 		case "run", "trigger":
 			e.heartbeatScheduler.TriggerNow(e.name)
+		}
+
+	case "/cron":
+		if e.cronScheduler == nil || args == "" {
+			return
+		}
+		subArgs := strings.Fields(args)
+		if len(subArgs) < 2 {
+			return
+		}
+		sub, id := subArgs[0], subArgs[1]
+		switch sub {
+		case "enable":
+			_ = e.cronScheduler.EnableJob(id)
+		case "disable":
+			_ = e.cronScheduler.DisableJob(id)
+		case "delete":
+			e.cronScheduler.RemoveJob(id)
+		case "mute":
+			e.cronScheduler.Store().SetMute(id, true)
+		case "unmute":
+			e.cronScheduler.Store().SetMute(id, false)
 		}
 	}
 }
@@ -5327,7 +5516,9 @@ func (e *Engine) renderModelCard() *Card {
 	initVal := ""
 	for i, m := range models {
 		label := m.Name
-		if m.Desc != "" {
+		if m.Alias != "" {
+			label = m.Alias + " - " + m.Name
+		} else if m.Desc != "" {
 			label += " — " + m.Desc
 		}
 		val := fmt.Sprintf("act:/model %d", i+1)
@@ -5614,18 +5805,16 @@ func (e *Engine) renderCronCard(sessionKey string) *Card {
 
 	lang := e.i18n.CurrentLang()
 	now := time.Now()
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf(e.i18n.T(MsgCronListTitle), len(jobs)))
-	sb.WriteString("\n\n")
 
-	for i, j := range jobs {
-		if i > 0 {
-			sb.WriteString("\n")
-		}
+	cb := NewCard().Title(e.i18n.T(MsgCardTitleCron), "orange")
+	cb.Markdown(fmt.Sprintf(e.i18n.T(MsgCronListTitle), len(jobs)))
+
+	for _, j := range jobs {
 		status := "✅"
 		if !j.Enabled {
 			status = "⏸"
 		}
+
 		desc := j.Description
 		if desc == "" {
 			if j.IsShellJob() {
@@ -5634,9 +5823,15 @@ func (e *Engine) renderCronCard(sessionKey string) *Card {
 				desc = truncateStr(j.Prompt, 60)
 			}
 		}
+		if j.Mute {
+			desc += " [mute]"
+		}
+
+		human := CronExprToHuman(j.CronExpr, lang)
+
+		var sb strings.Builder
 		sb.WriteString(fmt.Sprintf("%s %s\n", status, desc))
 		sb.WriteString(e.i18n.Tf(MsgCronIDLabel, j.ID))
-		human := CronExprToHuman(j.CronExpr, lang)
 		sb.WriteString(e.i18n.Tf(MsgCronScheduleLabel, human, j.CronExpr))
 		nextRun := e.cronScheduler.NextRun(j.ID)
 		if !nextRun.IsZero() {
@@ -5651,12 +5846,27 @@ func (e *Engine) renderCronCard(sessionKey string) *Card {
 			}
 			sb.WriteString("\n")
 		}
+		cb.Markdown(sb.String())
+
+		var btns []CardButton
+		if j.Enabled {
+			btns = append(btns, DefaultBtn(e.i18n.T(MsgCronBtnDisable), fmt.Sprintf("act:/cron disable %s", j.ID)))
+		} else {
+			btns = append(btns, PrimaryBtn(e.i18n.T(MsgCronBtnEnable), fmt.Sprintf("act:/cron enable %s", j.ID)))
+		}
+		if j.Mute {
+			btns = append(btns, DefaultBtn(e.i18n.T(MsgCronBtnUnmute), fmt.Sprintf("act:/cron unmute %s", j.ID)))
+		} else {
+			btns = append(btns, DefaultBtn(e.i18n.T(MsgCronBtnMute), fmt.Sprintf("act:/cron mute %s", j.ID)))
+		}
+		btns = append(btns, DangerBtn(e.i18n.T(MsgCronBtnDelete), fmt.Sprintf("act:/cron delete %s", j.ID)))
+		cb.ButtonsEqual(btns...)
 	}
 
-	return NewCard().Title(e.i18n.T(MsgCardTitleCron), "orange").
-		Markdown(sb.String()).
-		Buttons(e.cardBackButton()).
-		Build()
+	cb.Divider()
+	cb.Note(e.i18n.T(MsgCronCardHint))
+	cb.Buttons(e.cardBackButton())
+	return cb.Build()
 }
 
 func (e *Engine) renderCommandsCard() *Card {
@@ -5943,7 +6153,7 @@ func (e *Engine) cmdCron(p Platform, msg *Message, args []string) {
 	}
 
 	sub := matchSubCommand(strings.ToLower(args[0]), []string{
-		"add", "addexec", "list", "del", "delete", "rm", "remove", "enable", "disable", "setup",
+		"add", "addexec", "list", "del", "delete", "rm", "remove", "enable", "disable", "mute", "unmute", "setup",
 	})
 	switch sub {
 	case "add":
@@ -5958,6 +6168,10 @@ func (e *Engine) cmdCron(p Platform, msg *Message, args []string) {
 		e.cmdCronToggle(p, msg, args[1:], true)
 	case "disable":
 		e.cmdCronToggle(p, msg, args[1:], false)
+	case "mute":
+		e.cmdCronMute(p, msg, args[1:], true)
+	case "unmute":
+		e.cmdCronMute(p, msg, args[1:], false)
 	case "setup":
 		e.cmdCronSetup(p, msg)
 	default:
@@ -6057,6 +6271,9 @@ func (e *Engine) cmdCronList(p Platform, msg *Message) {
 				desc = truncateStr(j.Prompt, 60)
 			}
 		}
+		if j.Mute {
+			desc += " [mute]"
+		}
 		sb.WriteString(fmt.Sprintf("%s %s\n", status, desc))
 
 		sb.WriteString(fmt.Sprintf("ID: %s\n", j.ID))
@@ -6117,6 +6334,23 @@ func (e *Engine) cmdCronToggle(p Platform, msg *Message, args []string, enable b
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronEnabled), id))
 	} else {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronDisabled), id))
+	}
+}
+
+func (e *Engine) cmdCronMute(p Platform, msg *Message, args []string, mute bool) {
+	if len(args) == 0 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCronDelUsage))
+		return
+	}
+	id := args[0]
+	if !e.cronScheduler.Store().SetMute(id, mute) {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronNotFound), id))
+		return
+	}
+	if mute {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronMuted), id))
+	} else {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronUnmuted), id))
 	}
 }
 
@@ -6395,7 +6629,7 @@ func (e *Engine) executeShellCommand(p Platform, msg *Message, cmd *CustomComman
 	}
 
 	// Create context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(e.ctx, 60*time.Second)
 	defer cancel()
 
 	// Execute command using shell
@@ -7312,7 +7546,7 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 	var textParts []string
 	for event := range agentSession.Events() {
 		if ctx.Err() != nil {
-			return "", ctx.Err()
+			return relayPartialResponseOrError(ctx.Err(), textParts, fromProject, e.name)
 		}
 		switch event.Type {
 		case EventText:
@@ -7352,10 +7586,29 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 		}
 	}
 
+	if ctx.Err() != nil {
+		return relayPartialResponseOrError(ctx.Err(), textParts, fromProject, e.name)
+	}
+
 	if len(textParts) > 0 {
 		return strings.Join(textParts, ""), nil
 	}
 	return "", fmt.Errorf("relay: agent process exited without response")
+}
+
+func relayPartialResponseOrError(ctxErr error, textParts []string, fromProject, toProject string) (string, error) {
+	if len(textParts) == 0 {
+		return "", ctxErr
+	}
+
+	resp := strings.Join(textParts, "")
+	slog.Warn("relay: context done before final result; returning partial response",
+		"from", fromProject,
+		"to", toProject,
+		"error", ctxErr,
+		"response_len", len(resp),
+	)
+	return resp, nil
 }
 
 // cmdBind handles /bind — establishes a relay binding between bots in a group chat.
@@ -7505,8 +7758,17 @@ func (e *Engine) setupMemoryFile() (setupResult, string, error) {
 	baseName := filepath.Base(filePath)
 
 	existing, _ := os.ReadFile(filePath)
-	if strings.Contains(string(existing), ccConnectInstructionMarker) {
-		return setupExists, baseName, nil
+	existingText := string(existing)
+	block := "\n" + ccConnectInstructionMarker + "\n" + AgentSystemPrompt() + "\n"
+	if idx := strings.Index(existingText, ccConnectInstructionMarker); idx >= 0 {
+		if strings.Contains(existingText[idx:], AgentSystemPrompt()) {
+			return setupExists, baseName, nil
+		}
+		updated := strings.TrimRight(existingText[:idx], "\n") + block
+		if err := os.WriteFile(filePath, []byte(updated), 0o644); err != nil {
+			return setupError, baseName, err
+		}
+		return setupOK, baseName, nil
 	}
 
 	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
@@ -7519,7 +7781,6 @@ func (e *Engine) setupMemoryFile() (setupResult, string, error) {
 	}
 	defer f.Close()
 
-	block := "\n" + ccConnectInstructionMarker + "\n" + AgentSystemPrompt() + "\n"
 	if _, err := f.WriteString(block); err != nil {
 		return setupError, baseName, err
 	}
@@ -7588,7 +7849,7 @@ func (e *Engine) sessionContextForKey(sessionKey string) (Agent, *SessionManager
 	}
 	projectKey := "project:" + e.name
 	if b := e.workspaceBindings.Lookup(projectKey, channelID); b != nil {
-		if wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(b.Workspace); err == nil {
+		if wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(normalizeWorkspacePath(b.Workspace)); err == nil {
 			return wsAgent, wsSessions
 		}
 	}
@@ -7607,7 +7868,7 @@ func (e *Engine) interactiveKeyForSessionKey(sessionKey string) string {
 	}
 	projectKey := "project:" + e.name
 	if b := e.workspaceBindings.Lookup(projectKey, channelID); b != nil {
-		return b.Workspace + ":" + sessionKey
+		return normalizeWorkspacePath(b.Workspace) + ":" + sessionKey
 	}
 	return sessionKey
 }
@@ -7627,7 +7888,7 @@ func (e *Engine) resolveWorkspace(p Platform, channelID string) (string, string,
 			e.workspaceBindings.Unbind(projectKey, channelID)
 			return "", b.ChannelName, nil
 		}
-		return b.Workspace, b.ChannelName, nil
+		return normalizeWorkspacePath(b.Workspace), b.ChannelName, nil
 	}
 
 	// Step 2: Resolve channel name for convention match
@@ -7649,10 +7910,11 @@ func (e *Engine) resolveWorkspace(p Platform, channelID string) (string, string,
 	candidate := filepath.Join(e.baseDir, channelName)
 	if info, err := os.Stat(candidate); err == nil && info.IsDir() {
 		// Auto-bind
-		e.workspaceBindings.Bind(projectKey, channelID, channelName, candidate)
+		normalized := normalizeWorkspacePath(candidate)
+		e.workspaceBindings.Bind(projectKey, channelID, channelName, normalized)
 		slog.Info("workspace auto-bound by convention",
-			"channel", channelName, "workspace", candidate)
-		return candidate, channelName, nil
+			"channel", channelName, "workspace", normalized)
+		return normalized, channelName, nil
 	}
 
 	return "", channelName, nil
@@ -7721,7 +7983,7 @@ func (e *Engine) handleWorkspaceInitFlow(p Platform, msg *Message, channelID, ch
 		}
 
 		projectKey := "project:" + e.name
-		e.workspaceBindings.Bind(projectKey, channelID, flow.channelName, flow.cloneTo)
+		e.workspaceBindings.Bind(projectKey, channelID, flow.channelName, normalizeWorkspacePath(flow.cloneTo))
 
 		e.initFlowsMu.Lock()
 		delete(e.initFlows, channelID)

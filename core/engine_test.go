@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -73,6 +74,22 @@ func (p *stubPlatformEngine) getSent() []string {
 	cp := make([]string, len(p.sent))
 	copy(cp, p.sent)
 	return cp
+}
+
+type stubMediaPlatform struct {
+	stubPlatformEngine
+	images []ImageAttachment
+	files  []FileAttachment
+}
+
+func (p *stubMediaPlatform) SendImage(_ context.Context, _ any, img ImageAttachment) error {
+	p.images = append(p.images, img)
+	return nil
+}
+
+func (p *stubMediaPlatform) SendFile(_ context.Context, _ any, file FileAttachment) error {
+	p.files = append(p.files, file)
+	return nil
 }
 
 type stubInlineButtonPlatform struct {
@@ -247,6 +264,159 @@ func (a *stubUsageAgent) GetUsage(_ context.Context) (*UsageReport, error) {
 
 func newTestEngine() *Engine {
 	return NewEngine("test", &stubAgent{}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
+}
+
+func TestEngineSendToSessionWithAttachments(t *testing.T) {
+	p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.interactiveStates["session-1"] = &interactiveState{
+		platform: p,
+		replyCtx: "ctx-1",
+	}
+
+	err := e.SendToSessionWithAttachments(
+		"session-1",
+		"delivery ready",
+		[]ImageAttachment{{MimeType: "image/png", Data: []byte("img"), FileName: "chart.png"}},
+		[]FileAttachment{{MimeType: "text/plain", Data: []byte("doc"), FileName: "report.txt"}},
+	)
+	if err != nil {
+		t.Fatalf("SendToSessionWithAttachments returned error: %v", err)
+	}
+
+	if got := p.getSent(); len(got) != 1 || got[0] != "delivery ready" {
+		t.Fatalf("sent text = %#v, want one message", got)
+	}
+	if len(p.images) != 1 || p.images[0].FileName != "chart.png" {
+		t.Fatalf("images = %#v", p.images)
+	}
+	if len(p.files) != 1 || p.files[0].FileName != "report.txt" {
+		t.Fatalf("files = %#v", p.files)
+	}
+}
+
+func TestEngineSendToSessionWithAttachments_UnsupportedPlatform(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.interactiveStates["session-1"] = &interactiveState{
+		platform: p,
+		replyCtx: "ctx-1",
+	}
+
+	err := e.SendToSessionWithAttachments(
+		"session-1",
+		"delivery ready",
+		[]ImageAttachment{{MimeType: "image/png", Data: []byte("img"), FileName: "chart.png"}},
+		nil,
+	)
+	if err == nil {
+		t.Fatal("expected unsupported attachment send to fail")
+	}
+	if got := p.getSent(); len(got) != 0 {
+		t.Fatalf("sent text = %#v, want no sends on failure", got)
+	}
+}
+
+func TestEngineSendToSessionWithAttachments_DisabledByConfig(t *testing.T) {
+	p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetAttachmentSendEnabled(false)
+	e.interactiveStates["session-1"] = &interactiveState{
+		platform: p,
+		replyCtx: "ctx-1",
+	}
+
+	err := e.SendToSessionWithAttachments(
+		"session-1",
+		"delivery ready",
+		nil,
+		[]FileAttachment{{MimeType: "text/plain", Data: []byte("doc"), FileName: "report.txt"}},
+	)
+	if err == nil {
+		t.Fatal("expected attachment send to be blocked")
+	}
+	if !errors.Is(err, ErrAttachmentSendDisabled) {
+		t.Fatalf("err = %v, want ErrAttachmentSendDisabled", err)
+	}
+	if got := p.getSent(); len(got) != 0 {
+		t.Fatalf("sent text = %#v, want no sends when disabled", got)
+	}
+	if len(p.files) != 0 {
+		t.Fatalf("files = %#v, want no files sent when disabled", p.files)
+	}
+}
+
+func TestProcessInteractiveEvents_SuppressesDuplicateSideChannelText(t *testing.T) {
+	p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-1",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	sideText := "已发送 AGENTS.md 文件给你。"
+	if err := e.SendToSessionWithAttachments(sessionKey, sideText, nil, []FileAttachment{{
+		MimeType: "text/markdown",
+		Data:     []byte("body"),
+		FileName: "AGENTS.md",
+	}}); err != nil {
+		t.Fatalf("SendToSessionWithAttachments returned error: %v", err)
+	}
+
+	agentSession.events <- Event{Type: EventResult, Content: sideText, Done: true}
+	e.processInteractiveEvents(state, session, sessionKey, "m1", time.Now())
+
+	if got := p.getSent(); len(got) != 1 || got[0] != sideText {
+		t.Fatalf("sent text = %#v, want one side-channel message", got)
+	}
+}
+
+func TestProcessInteractiveEvents_DoesNotSuppressDifferentFinalText(t *testing.T) {
+	p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-1",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	if err := e.SendToSessionWithAttachments(sessionKey, "已发送 AGENTS.md 文件给你。", nil, []FileAttachment{{
+		MimeType: "text/markdown",
+		Data:     []byte("body"),
+		FileName: "AGENTS.md",
+	}}); err != nil {
+		t.Fatalf("SendToSessionWithAttachments returned error: %v", err)
+	}
+
+	finalText := "文件已发出，另外我也把使用方法整理好了。"
+	agentSession.events <- Event{Type: EventResult, Content: finalText, Done: true}
+	e.processInteractiveEvents(state, session, sessionKey, "m1", time.Now())
+
+	if got := p.getSent(); len(got) != 2 || got[0] == got[1] {
+		t.Fatalf("sent text = %#v, want side-channel and final reply", got)
+	}
+	if got := p.getSent()[1]; got != finalText {
+		t.Fatalf("final sent text = %q, want %q", got, finalText)
+	}
+}
+
+func TestAgentSystemPrompt_MentionsAttachmentSend(t *testing.T) {
+	prompt := AgentSystemPrompt()
+	if !strings.Contains(prompt, "cc-connect send --image") {
+		t.Fatalf("prompt missing image send instructions: %q", prompt)
+	}
+	if !strings.Contains(prompt, "cc-connect send --file") {
+		t.Fatalf("prompt missing file send instructions: %q", prompt)
+	}
 }
 
 func countCardActionValues(card *Card, prefix string) int {
@@ -676,6 +846,72 @@ func TestEngine_CustomCommand_DisabledByRole(t *testing.T) {
 
 	if len(p2.sent) > 0 && (strings.Contains(p2.sent[0], "disabled") || strings.Contains(p2.sent[0], "禁用")) {
 		t.Errorf("custom command should be allowed for admin, got: %v", p2.sent)
+	}
+}
+
+func TestEngine_SkillCommand_DisabledByRole(t *testing.T) {
+	e := newTestEngine()
+
+	// Create a temporary skill directory with a SKILL.md
+	dir := t.TempDir()
+	skillDir := filepath.Join(dir, "deploy-prod")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("deploy to production"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e.skills.SetDirs([]string{dir})
+
+	urm := NewUserRoleManager()
+	urm.Configure("member", []RoleInput{
+		{Name: "admin", UserIDs: []string{"admin1"}, DisabledCommands: []string{}},
+		{Name: "member", UserIDs: []string{"*"}, DisabledCommands: []string{"deploy-prod"}},
+	})
+	e.SetUserRoles(urm)
+
+	// Member should be blocked from skill command
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "test:u1", UserID: "user1", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, "/deploy-prod")
+
+	if len(p.sent) != 1 || (!strings.Contains(p.sent[0], "disabled") && !strings.Contains(p.sent[0], "禁用")) {
+		t.Errorf("skill should be blocked for member, got: %v", p.sent)
+	}
+
+	// Admin should NOT be blocked (but may fail at session level — that's fine,
+	// we only check that the "disabled" message is NOT returned)
+	p2 := &stubPlatformEngine{n: "test"}
+	msg2 := &Message{SessionKey: "test:a1", UserID: "admin1", ReplyCtx: "ctx"}
+	e.handleCommand(p2, msg2, "/deploy-prod")
+
+	for _, s := range p2.sent {
+		if strings.Contains(s, "disabled") || strings.Contains(s, "禁用") {
+			t.Errorf("skill should be allowed for admin, got: %v", p2.sent)
+		}
+	}
+}
+
+func TestEngine_SkillCommand_DisabledByProjectLevel(t *testing.T) {
+	e := newTestEngine()
+
+	dir := t.TempDir()
+	skillDir := filepath.Join(dir, "my-skill")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("a skill"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e.skills.SetDirs([]string{dir})
+	e.SetDisabledCommands([]string{"my-skill"})
+
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "test:u1", UserID: "user1", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, "/my-skill")
+
+	if len(p.sent) != 1 || (!strings.Contains(p.sent[0], "disabled") && !strings.Contains(p.sent[0], "禁用")) {
+		t.Errorf("skill should be blocked by project-level disabled_commands, got: %v", p.sent)
 	}
 }
 
@@ -3058,6 +3294,32 @@ func TestSetupMemoryFile_Idempotent(t *testing.T) {
 	}
 }
 
+func TestSetupMemoryFile_RefreshesLegacyInstructions(t *testing.T) {
+	tmpDir := t.TempDir()
+	memFile := filepath.Join(tmpDir, "AGENTS.md")
+	legacy := "\n" + ccConnectInstructionMarker + "\nlegacy instructions\n"
+	if err := os.WriteFile(memFile, []byte(legacy), 0o644); err != nil {
+		t.Fatalf("write legacy mem file: %v", err)
+	}
+
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubMemoryAgent{memFile: memFile}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	result, _, err := e.setupMemoryFile()
+	if result != setupOK {
+		t.Fatalf("result = %d, want setupOK; err = %v", result, err)
+	}
+
+	content, _ := os.ReadFile(memFile)
+	if strings.Contains(string(content), "legacy instructions") {
+		t.Fatalf("legacy instructions should be refreshed, got %q", string(content))
+	}
+	if !strings.Contains(string(content), "cc-connect send --image") {
+		t.Fatalf("expected refreshed attachment instructions, got %q", string(content))
+	}
+}
+
 func TestSetupMemoryFile_NativeAgent(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	agent := &stubNativePromptAgent{}
@@ -3098,8 +3360,8 @@ func TestCmdCronSetup_WritesAndReplies(t *testing.T) {
 	if !strings.Contains(p.sent[0], "AGENTS.md") {
 		t.Errorf("reply = %q, want to contain filename", p.sent[0])
 	}
-	if !strings.Contains(p.sent[0], "natural language") {
-		t.Errorf("reply = %q, want cron-specific success message", p.sent[0])
+	if !strings.Contains(p.sent[0], "attachment send-back") {
+		t.Errorf("reply = %q, want unified cc-connect setup success message", p.sent[0])
 	}
 
 	content, _ := os.ReadFile(memFile)

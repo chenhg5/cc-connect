@@ -588,9 +588,21 @@ func (p *Platform) reconnectLoop(ctx context.Context) {
 
 		if err := p.waitForHello(conn); err != nil {
 			slog.Warn("qqbot: hello failed during reconnect", "error", err)
+			p.wsMu.Lock()
+			p.wsConn = nil
+			p.wsMu.Unlock()
 			conn.Close()
 			backoff = min(backoff*2, maxReconnectBackoff)
 			continue
+		}
+
+		// closeAndNil closes the conn and clears p.wsConn so Stop()
+		// and other code paths don't operate on a stale reference.
+		closeAndNil := func() {
+			p.wsMu.Lock()
+			p.wsConn = nil
+			p.wsMu.Unlock()
+			conn.Close()
 		}
 
 		// Try Resume if we have a session_id, otherwise Identify
@@ -599,24 +611,24 @@ func (p *Platform) reconnectLoop(ctx context.Context) {
 				slog.Warn("qqbot: resume failed, falling back to identify", "error", err)
 				p.sessionID = ""
 				if err := p.sendIdentify(conn, token); err != nil {
-					conn.Close()
+					closeAndNil()
 					backoff = min(backoff*2, maxReconnectBackoff)
 					continue
 				}
 				if err := p.waitForReady(conn); err != nil {
-					conn.Close()
+					closeAndNil()
 					backoff = min(backoff*2, maxReconnectBackoff)
 					continue
 				}
 			}
 		} else {
 			if err := p.sendIdentify(conn, token); err != nil {
-				conn.Close()
+				closeAndNil()
 				backoff = min(backoff*2, maxReconnectBackoff)
 				continue
 			}
 			if err := p.waitForReady(conn); err != nil {
-				conn.Close()
+				closeAndNil()
 				backoff = min(backoff*2, maxReconnectBackoff)
 				continue
 			}

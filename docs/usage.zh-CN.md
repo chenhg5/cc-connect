@@ -7,10 +7,12 @@ cc-connect 完整功能使用指南。
 - [会话管理](#会话管理)
 - [权限模式](#权限模式)
 - [API Provider 管理](#api-provider-管理)
+- [模型选择](#模型选择)
 - [飞书配置 CLI](#飞书配置-cli)
 - [Claude Code Router 集成](#claude-code-router-集成)
 - [语音消息（语音转文字）](#语音消息语音转文字)
 - [语音回复（文字转语音）](#语音回复文字转语音)
+- [图片与文件回传](#图片与文件回传)
 - [定时任务 (Cron)](#定时任务-cron)
 - [多机器人中继](#多机器人中继)
 - [守护进程模式](#守护进程模式)
@@ -32,6 +34,7 @@ cc-connect 完整功能使用指南。
 | `/history [n]` | 查看最近 n 条消息 |
 | `/usage` | 查看账号/模型限额使用情况 |
 | `/provider [...]` | 管理 API Provider |
+| `/model [alias]` | 列出可用模型或按别名切换 |
 | `/allow <工具名>` | 预授权工具 |
 | `/reasoning [等级]` | 查看或切换推理强度（Codex）|
 | `/mode [名称]` | 查看或切换权限模式 |
@@ -128,6 +131,18 @@ api_key = "sk-xxx"
 base_url = "https://api.relay-service.com"
 model = "claude-sonnet-4-20250514"
 
+[[projects.agent.providers.models]]
+model = "claude-sonnet-4-20250514"
+alias = "sonnet"
+
+[[projects.agent.providers.models]]
+model = "claude-opus-4-20250514"
+alias = "opus"
+
+[[projects.agent.providers.models]]
+model = "claude-haiku-3-5-20241022"
+alias = "haiku"
+
 # MiniMax — 兼容 OpenAI 接口，204K 超长上下文
 [[projects.agent.providers]]
 name = "minimax"
@@ -170,6 +185,42 @@ cc-connect provider import --project my-backend  # 从 cc-switch 导入
 | Gemini CLI | `GEMINI_API_KEY` | 使用 `env` 字段 |
 | OpenCode | `ANTHROPIC_API_KEY` | 使用 `env` 字段 |
 | iFlow CLI | `IFLOW_API_KEY` | `IFLOW_BASE_URL` |
+
+---
+
+## 模型选择
+
+通过 `[[providers.models]]` 为每个 Provider 预配置可选模型列表。每个条目包含 `model`（模型标识符）和可选的 `alias`（别名，显示在 `/model` 中）。
+
+### 配置模型
+
+```toml
+[[projects.agent.providers]]
+name = "openai"
+api_key = "sk-xxx"
+
+[[projects.agent.providers.models]]
+model = "gpt-5.3-codex"
+alias = "codex"
+
+[[projects.agent.providers.models]]
+model = "gpt-5.4"
+alias = "gpt"
+
+[[projects.agent.providers.models]]
+model = "gpt-5.3-codex-spark"
+alias = "spark"
+```
+
+### 聊天命令
+
+```
+/model              列出可用模型（格式：alias - model）
+/model <alias>      按别名切换模型
+/model <name>       按完整名称切换模型
+```
+
+配置了 `models` 时，`/model` 直接显示该列表，不发起 API 请求。未配置时，自动从 Provider API 获取或使用内置备选列表。
 
 ---
 
@@ -307,6 +358,75 @@ api_key = "sk-xxx"
 
 ---
 
+## 图片与文件回传
+
+当 Agent 在本地生成了图片、PDF、日志包、报表等文件，需要把结果直接发回当前聊天时，可以使用 `cc-connect send` 的附件模式。
+
+**当前支持平台：**
+- 飞书
+- Telegram
+
+### 什么时候需要先执行 setup
+
+如果当前 Agent 不是“原生 system prompt 注入”类型，升级到包含该功能的版本后，建议先在聊天里执行一次：
+
+```text
+/bind setup
+```
+
+或者：
+
+```text
+/cron setup
+```
+
+这两个命令写入的是同一份 cc-connect 指令。执行任意一个即可。这样 Agent 才会知道：
+- 普通文本回复直接正常输出
+- 生成附件后用 `cc-connect send --image/--file` 回传
+
+如果你以前已经执行过 setup，也建议升级后重新执行一次，以刷新到最新指令。
+
+### 配置开关
+
+如果你想禁用 agent 主动回传附件，可以在 `config.toml` 里加入：
+
+```toml
+attachment_send = "off"
+```
+
+默认值是 `on`。这个开关与 agent 的 `/mode` 独立，只影响 `cc-connect send --image/--file` 这条图片/文件回传路径。
+
+### CLI 用法
+
+```bash
+cc-connect send --image /absolute/path/to/chart.png
+cc-connect send --file /absolute/path/to/report.pdf
+cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/chart.png
+```
+
+说明：
+- `--image` 用于图片附件。
+- `--file` 用于任意文件附件。
+- `--message` 可选，用于先发一段说明文字，再发附件。
+- `--image` 和 `--file` 都可以重复多次。
+- 建议使用绝对路径，避免 Agent 当前工作目录变化导致找不到文件。
+- 如果设置了 `attachment_send = "off"`，图片/文件回传会被拒绝，但普通文本回复仍然正常。
+
+### 典型场景
+
+1. Agent 生成了截图或图表，需要直接发给用户。
+2. Agent 生成了 PDF、Markdown 导出、日志包或补丁文件，需要作为附件交付。
+3. Agent 想告诉用户“结果已生成”，同时附上一个或多个文件。
+
+### 注意事项
+
+- 这个命令是给“附件回传”用的，不要拿它代替普通文本回复。
+- 只能发送本机上 Agent 可访问到的文件。
+- 必须存在活跃会话；如果当前项目没有活动聊天上下文，命令会失败。
+- 平台本身仍可能有文件大小或文件类型限制。
+
+---
+
 ## 定时任务 (Cron)
 
 创建自动执行的定时任务。
@@ -338,7 +458,7 @@ cc-connect cron del <job-id>
 
 > "每天早上6点帮我总结 GitHub trending"
 
-Claude Code 会自动创建定时任务。
+Claude Code 会自动创建定时任务。对依赖记忆文件的其他 Agent，先执行一次 `/cron setup` 或 `/bind setup`，效果相同。
 
 ---
 

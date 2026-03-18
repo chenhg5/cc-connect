@@ -39,7 +39,7 @@ type claudeSession struct {
 	alive       atomic.Bool
 }
 
-func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode string, allowedTools []string, extraEnv []string) (*claudeSession, error) {
+func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode string, allowedTools []string, extraEnv []string, platformPrompt string) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	args := []string{
@@ -63,6 +63,9 @@ func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode strin
 	}
 
 	if sysPrompt := core.AgentSystemPrompt(); sysPrompt != "" {
+		if platformPrompt != "" {
+			sysPrompt += "\n## Formatting\n" + platformPrompt + "\n"
+		}
 		args = append(args, "--append-system-prompt", sysPrompt)
 	}
 

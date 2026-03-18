@@ -169,6 +169,25 @@ func (p *WSPlatform) runConnection() error {
 		p.conn = nil
 		p.mu.Unlock()
 		conn.Close()
+
+		// Drain pending ACK channels so waiting goroutines are unblocked
+		// and stale entries do not accumulate across reconnections.
+		// Collect keys first, then delete — Range+Delete in callback is
+		// not guaranteed safe by the sync.Map contract.
+		var staleKeys []any
+		p.pendingAcks.Range(func(key, value any) bool {
+			if ch, ok := value.(chan error); ok {
+				select {
+				case ch <- fmt.Errorf("wecom-ws: connection closed"):
+				default:
+				}
+			}
+			staleKeys = append(staleKeys, key)
+			return true
+		})
+		for _, k := range staleKeys {
+			p.pendingAcks.Delete(k)
+		}
 	}()
 
 	// Send subscribe (auth) frame

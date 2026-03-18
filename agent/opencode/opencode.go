@@ -98,7 +98,19 @@ func (a *Agent) GetModel() string {
 	return a.model
 }
 
+func (a *Agent) configuredModels() []core.ModelOption {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.activeIdx < 0 || a.activeIdx >= len(a.providers) {
+		return nil
+	}
+	return a.providers[a.activeIdx].Models
+}
+
 func (a *Agent) AvailableModels(_ context.Context) []core.ModelOption {
+	if models := a.configuredModels(); len(models) > 0 {
+		return models
+	}
 	return []core.ModelOption{
 		{Name: "anthropic/claude-sonnet-4-20250514", Desc: "Claude Sonnet 4 (default)"},
 		{Name: "anthropic/claude-opus-4-20250514", Desc: "Claude Opus 4"},

@@ -30,6 +30,8 @@ var (
 )
 
 func main() {
+	checkUpdateAsync()
+
 	// Handle subcommands before flag parsing
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
@@ -140,6 +142,7 @@ func main() {
 					APIKey:   p.APIKey,
 					BaseURL:  p.BaseURL,
 					Model:    p.Model,
+					Models:   convertProviderModels(p.Models),
 					Thinking: p.Thinking,
 					Env:      p.Env,
 				}
@@ -181,6 +184,7 @@ func main() {
 		}
 
 		engine := core.NewEngine(proj.Name, agent, platforms, sessionFile, lang)
+		engine.SetAttachmentSendEnabled(cfg.AttachmentSend != "off")
 
 		// Wire multi-workspace mode
 		if proj.Mode == "multi-workspace" {
@@ -435,7 +439,7 @@ func main() {
 		engine.SetProviderAddSaveFunc(func(p core.ProviderConfig) error {
 			return config.AddProviderToConfig(projName, config.ProviderConfig{
 				Name: p.Name, APIKey: p.APIKey, BaseURL: p.BaseURL,
-				Model: p.Model, Thinking: p.Thinking, Env: p.Env,
+				Model: p.Model, Models: convertCoreModels(p.Models), Thinking: p.Thinking, Env: p.Env,
 			})
 		})
 		engine.SetProviderRemoveSaveFunc(func(name string) error {
@@ -566,6 +570,14 @@ func main() {
 		slog.Warn("api server unavailable", "error", err)
 	} else {
 		relayMgr := core.NewRelayManager(cfg.DataDir)
+		if cfg.Relay.TimeoutSecs != nil {
+			secs := *cfg.Relay.TimeoutSecs
+			if secs <= 0 {
+				relayMgr.SetTimeout(0)
+			} else {
+				relayMgr.SetTimeout(time.Duration(secs) * time.Second)
+			}
+		}
 		apiSrv.SetRelayManager(relayMgr)
 		for i, e := range engines {
 			apiSrv.RegisterEngine(cfg.Projects[i].Name, e)
@@ -652,8 +664,8 @@ func main() {
 }
 
 // sessionStorePath builds a unique filename from project name + work_dir.
-// It checks the local .cc-connect/ directory first for backward compatibility;
-// if the file exists there, it is used. Otherwise falls back to dataDir/sessions/.
+// It checks for legacy session files (without the sessions/ subdirectory) in dataDir
+// for backward compatibility; if found, uses that path. Otherwise uses dataDir/sessions/.
 func sessionStorePath(dataDir, name, workDir string) string {
 	var filename string
 	if workDir == "" {
@@ -668,13 +680,14 @@ func sessionStorePath(dataDir, name, workDir string) string {
 		filename = fmt.Sprintf("%s_%s.json", name, short)
 	}
 
-	// Check legacy local path: .cc-connect/<name>.json or .cc-connect/<name>.sessions.json
+	// Check legacy path in dataDir (without sessions/ subdirectory) for backward compatibility.
+	// Also check for the older .sessions.json naming convention.
 	for _, legacy := range []string{
-		filepath.Join(".cc-connect", filename),
-		filepath.Join(".cc-connect", strings.TrimSuffix(filename, ".json")+".sessions.json"),
+		filepath.Join(dataDir, filename),
+		filepath.Join(dataDir, strings.TrimSuffix(filename, ".json")+".sessions.json"),
 	} {
 		if _, err := os.Stat(legacy); err == nil {
-			slog.Info("session: using local file", "path", legacy)
+			slog.Info("session: using legacy file in dataDir", "path", legacy)
 			return legacy
 		}
 	}
@@ -887,13 +900,16 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	// Reload sender injection
 	engine.SetInjectSender(proj.InjectSender != nil && *proj.InjectSender)
 
+	// Reload attachment send-back switch
+	engine.SetAttachmentSendEnabled(cfg.AttachmentSend != "off")
+
 	// Reload providers
 	if ps, ok := engine.GetAgent().(core.ProviderSwitcher); ok {
 		providers := make([]core.ProviderConfig, len(proj.Agent.Providers))
 		for i, p := range proj.Agent.Providers {
 			providers[i] = core.ProviderConfig{
 				Name: p.Name, APIKey: p.APIKey, BaseURL: p.BaseURL,
-				Model: p.Model, Thinking: p.Thinking, Env: p.Env,
+				Model: p.Model, Models: convertProviderModels(p.Models), Thinking: p.Thinking, Env: p.Env,
 			}
 		}
 		ps.SetProviders(providers)
@@ -968,6 +984,28 @@ func buildUserRoleManager(uc *config.UsersConfig) *core.UserRoleManager {
 	urm := core.NewUserRoleManager()
 	urm.Configure(defaultRole, roles)
 	return urm
+}
+
+func convertProviderModels(ms []config.ProviderModelConfig) []core.ModelOption {
+	if len(ms) == 0 {
+		return nil
+	}
+	opts := make([]core.ModelOption, len(ms))
+	for i, m := range ms {
+		opts[i] = core.ModelOption{Name: m.Model, Alias: m.Alias}
+	}
+	return opts
+}
+
+func convertCoreModels(ms []core.ModelOption) []config.ProviderModelConfig {
+	if len(ms) == 0 {
+		return nil
+	}
+	out := make([]config.ProviderModelConfig, len(ms))
+	for i, m := range ms {
+		out[i] = config.ProviderModelConfig{Model: m.Name, Alias: m.Alias}
+	}
+	return out
 }
 
 func buildHeartbeatConfig(hc config.HeartbeatConfig) core.HeartbeatConfig {
