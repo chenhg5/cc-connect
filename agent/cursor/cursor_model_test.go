@@ -3,16 +3,44 @@ package cursor
 import (
 	"context"
 	"os/exec"
+	"strings"
 	"testing"
+	"time"
 )
 
-func TestFetchModelsFromAgentCLI(t *testing.T) {
-	// Skip if agent CLI not available
+func shortTestContext(t *testing.T) (context.Context, context.CancelFunc) {
+	t.Helper()
+	timeout := 2 * time.Second
+	if deadline, ok := t.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			timeout = 100 * time.Millisecond
+		} else if remaining < timeout {
+			timeout = remaining
+		}
+	}
+	return context.WithTimeout(context.Background(), timeout)
+}
+
+func requireWorkingAgentCLI(t *testing.T) {
+	t.Helper()
 	if _, err := exec.LookPath("agent"); err != nil {
 		t.Skip("agent CLI not in PATH")
 	}
+	ctx, cancel := shortTestContext(t)
+	defer cancel()
 
-	ctx := context.Background()
+	out, err := exec.CommandContext(ctx, "agent", "models").CombinedOutput()
+	if err != nil {
+		t.Skipf("agent CLI is not runnable in this environment: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+}
+
+func TestFetchModelsFromAgentCLI(t *testing.T) {
+	ctx, cancel := shortTestContext(t)
+	defer cancel()
+	requireWorkingAgentCLI(t)
+
 	models := fetchModelsFromAgentCLI(ctx, "agent", nil)
 	if len(models) == 0 {
 		t.Fatal("expected models from agent models, got none")
@@ -32,7 +60,8 @@ func TestFetchModelsFromAgentCLI(t *testing.T) {
 }
 
 func TestFetchModelsFromAgentCLI_FailsGracefully(t *testing.T) {
-	ctx := context.Background()
+	ctx, cancel := shortTestContext(t)
+	defer cancel()
 	models := fetchModelsFromAgentCLI(ctx, "nonexistent-agent-xyz", nil)
 	if len(models) != 0 {
 		t.Errorf("expected empty when command fails, got %d models", len(models))
@@ -41,7 +70,8 @@ func TestFetchModelsFromAgentCLI_FailsGracefully(t *testing.T) {
 
 func TestAvailableModels_Fallback(t *testing.T) {
 	// When agent models fails, should fall back to hardcoded list
-	ctx := context.Background()
+	ctx, cancel := shortTestContext(t)
+	defer cancel()
 	a := &Agent{cmd: "nonexistent-cmd-that-will-fail"}
 	models := a.AvailableModels(ctx)
 	fallback := cursorFallbackModels()
@@ -56,11 +86,10 @@ func TestAvailableModels_Fallback(t *testing.T) {
 }
 
 func TestAvailableModels_FetchFromAgent(t *testing.T) {
-	if _, err := exec.LookPath("agent"); err != nil {
-		t.Skip("agent CLI not in PATH")
-	}
+	requireWorkingAgentCLI(t)
+	ctx, cancel := shortTestContext(t)
+	defer cancel()
 
-	ctx := context.Background()
 	a := &Agent{cmd: "agent"}
 	models := a.AvailableModels(ctx)
 	if len(models) == 0 {

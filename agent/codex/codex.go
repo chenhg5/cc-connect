@@ -35,7 +35,7 @@ type Agent struct {
 	providers       []core.ProviderConfig
 	activeIdx       int // -1 = no provider set
 	sessionEnv      []string
-	mu              sync.Mutex
+	mu              sync.RWMutex
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -137,12 +137,9 @@ func (a *Agent) AvailableReasoningEfforts() []string {
 }
 
 func (a *Agent) configuredModels() []core.ModelOption {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.activeIdx < 0 || a.activeIdx >= len(a.providers) {
-		return nil
-	}
-	return a.providers[a.activeIdx].Models
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return core.GetProviderModels(a.providers, a.activeIdx)
 }
 
 func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
