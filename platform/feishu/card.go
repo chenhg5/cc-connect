@@ -73,6 +73,7 @@ func (p *interactivePlatform) SendCard(ctx context.Context, rctx any, card *core
 // callback responses (CardActionTriggerResponse).
 func renderCardMap(card *core.Card, sessionKey string) map[string]any {
 	result := map[string]any{
+		"schema": "2.0",
 		"config": map[string]any{
 			"wide_screen_mode": true,
 		},
@@ -238,7 +239,7 @@ func renderCardMap(card *core.Card, sessionKey string) map[string]any {
 		elements = []map[string]any{{"tag": "markdown", "content": " "}}
 	}
 
-	result["elements"] = elements
+	result["body"] = map[string]any{"elements": elements}
 	return result
 }
 
@@ -406,7 +407,7 @@ func renderDeleteModeCheckerCard(card *core.Card, base map[string]any) (map[stri
 		}
 	}
 
-	base["elements"] = elements
+	base["body"] = map[string]any{"elements": elements}
 	return base, true
 }
 

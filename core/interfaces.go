@@ -145,6 +145,13 @@ type CardSender interface {
 	ReplyCard(ctx context.Context, replyCtx any, card *Card) error
 }
 
+// CardMessageUpdater is an optional interface for platforms that can update
+// an existing message with a rich Card (including buttons). This is used to
+// embed permission prompts directly into the streaming preview card.
+type CardMessageUpdater interface {
+	UpdateMessageWithCard(ctx context.Context, previewHandle any, card *Card) error
+}
+
 // CardNavigationHandler is called by platforms to render a card for in-place
 // card updates (e.g. Feishu card.action.trigger callback). The action string
 // uses prefixes like "nav:/model" or "act:/model 3".

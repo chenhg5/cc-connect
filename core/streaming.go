@@ -46,6 +46,9 @@ type streamPreview struct {
 	previewMsgID       any    // platform-specific ID for the preview message (returned by SendPreviewStart)
 	degraded           bool   // if true, stop trying (platform doesn't support it or permanent error)
 
+	headerTitle string // current header title (empty = no header)
+	headerColor string // current header color (blue, green, orange, etc.)
+
 	timer     *time.Timer
 	timerStop chan struct{} // closed when preview ends
 }
@@ -106,7 +109,7 @@ func (sp *streamPreview) appendText(text string) {
 
 	sp.fullText += text
 
-	displayText := sp.fullText
+	displayText := strings.TrimLeft(sp.fullText, "\n")
 	maxChars := sp.cfg.MaxChars
 	if maxChars > 0 && len([]rune(displayText)) > maxChars {
 		displayText = string([]rune(displayText)[:maxChars]) + "…"
@@ -142,7 +145,7 @@ func (sp *streamPreview) scheduleFlushLocked(delay time.Duration) {
 		if sp.degraded {
 			return
 		}
-		displayText := sp.fullText
+		displayText := strings.TrimLeft(sp.fullText, "\n")
 		maxChars := sp.cfg.MaxChars
 		if maxChars > 0 && len([]rune(displayText)) > maxChars {
 			displayText = string([]rune(displayText)[:maxChars]) + "…"
@@ -156,6 +159,37 @@ func (sp *streamPreview) cancelTimerLocked() {
 		sp.timer.Stop()
 		sp.timer = nil
 	}
+}
+
+// setHeader sets the card header title and color. The header will be applied
+// on the next flush. Does not trigger an immediate flush — the next
+// appendText/replaceFullText call will naturally include it.
+func (sp *streamPreview) setHeader(title, color string) {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	sp.headerTitle = title
+	sp.headerColor = color
+}
+
+// flushCardLocked attempts to send/update using a Card with header + markdown body.
+// Returns true if successful, false if not applicable (no header or platform doesn't support it).
+func (sp *streamPreview) flushCardLocked(text string) bool {
+	if sp.headerTitle == "" || sp.previewMsgID == nil {
+		return false
+	}
+	cmu, ok := sp.platform.(CardMessageUpdater)
+	if !ok {
+		return false
+	}
+	card := NewCard().Title(sp.headerTitle, sp.headerColor).Markdown(text).Build()
+	if err := cmu.UpdateMessageWithCard(sp.ctx, sp.previewMsgID, card); err != nil {
+		slog.Debug("stream preview: flushCardLocked failed, falling back to text", "error", err)
+		return false
+	}
+	sp.lastSentText = text
+	sp.lastSentViaUpdate = true
+	sp.lastSentAt = time.Now()
+	return true
 }
 
 // flushLocked sends the current preview text to the platform. Must hold sp.mu.
@@ -193,10 +227,20 @@ func (sp *streamPreview) flushLocked(text string) {
 		sp.lastSentText = text
 		sp.lastSentViaUpdate = false
 		sp.lastSentAt = time.Now()
+		// If we have a header and the initial message was just created,
+		// immediately upgrade to a card with header.
+		if sp.headerTitle != "" {
+			sp.flushCardLocked(text)
+		}
 		return
 	}
 
-	// Update existing preview message
+	// Try card-based update (with header) first
+	if sp.flushCardLocked(text) {
+		return
+	}
+
+	// Update existing preview message with plain text
 	slog.Debug("stream preview: updating via UpdateMessage", "text_len", len(text))
 	if err := updater.UpdateMessage(sp.ctx, sp.previewMsgID, text); err != nil {
 		slog.Debug("stream preview: update failed, degrading", "error", err)
@@ -219,14 +263,16 @@ func (sp *streamPreview) freeze() {
 	sp.cancelTimerLocked()
 
 	if sp.previewMsgID != nil && !sp.degraded {
-		if updater, ok := sp.platform.(MessageUpdater); ok {
-			text := sp.fullText
-			maxChars := sp.cfg.MaxChars
-			if maxChars > 0 && len([]rune(text)) > maxChars {
-				text = string([]rune(text)[:maxChars]) + "…"
-			}
-			if text != "" {
-				_ = updater.UpdateMessage(sp.ctx, sp.previewMsgID, text)
+		text := sp.fullText
+		maxChars := sp.cfg.MaxChars
+		if maxChars > 0 && len([]rune(text)) > maxChars {
+			text = string([]rune(text)[:maxChars]) + "…"
+		}
+		if text != "" {
+			if !sp.flushCardLocked(text) {
+				if updater, ok := sp.platform.(MessageUpdater); ok {
+					_ = updater.UpdateMessage(sp.ctx, sp.previewMsgID, text)
+				}
 			}
 		}
 	}
@@ -274,6 +320,7 @@ func (sp *streamPreview) finish(finalText string) bool {
 		return false
 	}
 
+	finalText = strings.TrimLeft(finalText, "\n")
 	if finalText == "" {
 		slog.Debug("stream preview finish: empty final text")
 		return false
@@ -288,6 +335,12 @@ func (sp *streamPreview) finish(finalText string) bool {
 	if finalText == sp.lastSentText && sp.lastSentViaUpdate {
 		slog.Debug("stream preview finish: text unchanged since last UpdateMessage, skipping",
 			"text_len", len(finalText))
+		return true
+	}
+
+	// Try card-based final update (with header) first
+	if sp.flushCardLocked(finalText) {
+		slog.Debug("stream preview finish: success via card update")
 		return true
 	}
 
@@ -313,10 +366,30 @@ func (sp *streamPreview) finish(finalText string) bool {
 // detachPreview clears the preview message handle so that finish() won't
 // delete it. Call this after freeze() when the frozen preview should remain
 // visible as a permanent message (e.g. text before the first tool call).
-func (sp *streamPreview) detachPreview() {
+// Returns the detached handle so it can be reattached later.
+func (sp *streamPreview) detachPreview() any {
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
+	handle := sp.previewMsgID
 	sp.previewMsgID = nil
+	return handle
+}
+
+// reattach restores a previously detached preview handle, allowing subsequent
+// content to be appended to the same card. Call this after a permission request
+// is resolved to continue updating the same consolidated card.
+func (sp *streamPreview) reattach(handle any, currentText string) {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	if handle == nil {
+		return
+	}
+	sp.previewMsgID = handle
+	sp.degraded = false
+	sp.fullText = currentText
+	sp.lastSentText = currentText
+	sp.lastSentViaUpdate = true
+	sp.lastSentAt = time.Now()
 }
 
 // getFullText returns the accumulated text so far.
@@ -324,4 +397,89 @@ func (sp *streamPreview) getFullText() string {
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
 	return sp.fullText
+}
+
+// replaceFullText replaces the entire accumulated text and triggers a throttled flush.
+// Used by consolidated card mode to inject tool-call summaries into the preview
+// without freezing/detaching it.
+func (sp *streamPreview) replaceFullText(newText string) {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+
+	if sp.degraded || !sp.cfg.Enabled {
+		return
+	}
+
+	sp.fullText = newText
+
+	// For consolidated updates, skip maxChars truncation — the engine manages length.
+	displayText := newText
+
+	delta := len([]rune(displayText)) - len([]rune(sp.lastSentText))
+	elapsed := time.Since(sp.lastSentAt)
+	interval := time.Duration(sp.cfg.IntervalMs) * time.Millisecond
+
+	if delta < sp.cfg.MinDeltaChars && !sp.lastSentAt.IsZero() {
+		sp.scheduleFlushLocked(interval)
+		return
+	}
+
+	if elapsed < interval && !sp.lastSentAt.IsZero() {
+		remaining := interval - elapsed
+		sp.scheduleFlushLocked(remaining)
+		return
+	}
+
+	sp.cancelTimerLocked()
+	sp.flushLocked(displayText)
+}
+
+// replaceWithCard updates the preview message with a rich Card (including
+// buttons). Returns true if the card was successfully sent, false if the
+// platform doesn't support it or the preview is not active.
+func (sp *streamPreview) replaceWithCard(card *Card) bool {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	if sp.previewMsgID == nil || sp.degraded {
+		return false
+	}
+	cmu, ok := sp.platform.(CardMessageUpdater)
+	if !ok {
+		return false
+	}
+	sp.cancelTimerLocked()
+	if err := cmu.UpdateMessageWithCard(sp.ctx, sp.previewMsgID, card); err != nil {
+		slog.Error("stream preview: replaceWithCard failed", "error", err)
+		return false
+	}
+	// Mark lastSentText as a sentinel so the next flushLocked/forceFlush
+	// won't skip the update due to text equality check.
+	sp.lastSentText = "\x00card"
+	sp.lastSentViaUpdate = true
+	sp.lastSentAt = time.Now()
+	return true
+}
+
+// forceFlush immediately updates the preview with the given text, bypassing
+// throttling and delta checks. Used to restore the preview after an embedded
+// permission card is resolved.
+func (sp *streamPreview) forceFlush(text string) {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	if sp.previewMsgID == nil || sp.degraded {
+		return
+	}
+	sp.cancelTimerLocked()
+	sp.fullText = text
+	// Try card update first (preserves header), fall back to plain text
+	if !sp.flushCardLocked(text) {
+		sp.flushLocked(text)
+	}
+}
+
+// isActive returns true if the preview has been started and is not degraded.
+func (sp *streamPreview) isActive() bool {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	return sp.previewMsgID != nil && !sp.degraded
 }

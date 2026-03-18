@@ -433,6 +433,34 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 			ReplyCtx:   rctx,
 		})
 
+		// For embedded permissions (integrated into the streaming preview card),
+		// immediately restore the card to its previous content with header
+		// (no buttons). The engine will later overwrite this via forceFlush
+		// with the up-to-date content once the permission is resolved.
+		permEmbedded, _ := event.Event.Action.Value["perm_embedded"].(string)
+		if permEmbedded == "true" {
+			display, _ := event.Event.Action.Value["perm_display"].(string)
+			if display == "" {
+				display = "⏳"
+			}
+			headerTitle, _ := event.Event.Action.Value["perm_header_title"].(string)
+			headerColor, _ := event.Event.Action.Value["perm_header_color"].(string)
+			var cardData json.RawMessage
+			if headerTitle != "" {
+				cb := core.NewCard().Title(headerTitle, headerColor).Markdown(display)
+				cardData = json.RawMessage(renderCard(cb.Build(), sessionKey))
+			} else {
+				cardData = json.RawMessage(buildCardJSON(display))
+			}
+			return &callback.CardActionTriggerResponse{
+				Card: &callback.Card{
+					Type: "raw",
+					Data: cardData,
+				},
+			}, nil
+		}
+
+		// Standalone permission card: replace with a resolved status card.
 		permLabel, _ := event.Event.Action.Value["perm_label"].(string)
 		permColor, _ := event.Event.Action.Value["perm_color"].(string)
 		permBody, _ := event.Event.Action.Value["perm_body"].(string)
@@ -1719,12 +1747,13 @@ func isThreadSessionKey(sessionKey string) bool {
 
 // feishuPreviewHandle stores the message ID for an editable preview message.
 type feishuPreviewHandle struct {
-	messageID string
-	chatID    string
+	messageID  string
+	chatID     string
+	sessionKey string // for renderCard callback routing (e.g. permission buttons)
 }
 
 // buildCardJSON builds a Feishu interactive card JSON string with a markdown element.
-// Uses schema 2.0 which supports code blocks, tables, and inline formatting.
+// Uses schema 2.0 format which supports headings, tables, and rich markdown rendering.
 // Card font is inherently smaller than Post/Text — this is a Feishu platform limitation.
 func buildCardJSON(content string) string {
 	card := map[string]any{
@@ -1800,7 +1829,7 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 		return nil, fmt.Errorf("%s: send preview: no message ID returned", p.tag())
 	}
 
-	return &feishuPreviewHandle{messageID: msgID, chatID: chatID}, nil
+	return &feishuPreviewHandle{messageID: msgID, chatID: chatID, sessionKey: rc.sessionKey}, nil
 }
 
 // UpdateMessage edits an existing card message identified by previewHandle.
@@ -1827,6 +1856,28 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 	}
 	if !resp.Success() {
 		return fmt.Errorf("%s: patch message code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+	}
+	return nil
+}
+
+// UpdateMessageWithCard updates an existing preview message with a rich Card
+// (e.g. to embed permission buttons into the streaming preview).
+// Implements core.CardMessageUpdater.
+func (p *Platform) UpdateMessageWithCard(ctx context.Context, previewHandle any, card *core.Card) error {
+	h, ok := previewHandle.(*feishuPreviewHandle)
+	if !ok {
+		return fmt.Errorf("%s: invalid preview handle type %T", p.tag(), previewHandle)
+	}
+	cardJSON := renderCard(card, h.sessionKey)
+	resp, err := p.client.Im.Message.Patch(ctx, larkim.NewPatchMessageReqBuilder().
+		MessageId(h.messageID).
+		Body(larkim.NewPatchMessageReqBodyBuilder().Content(cardJSON).Build()).
+		Build())
+	if err != nil {
+		return fmt.Errorf("%s: patch card: %w", p.tag(), err)
+	}
+	if !resp.Success() {
+		return fmt.Errorf("%s: patch card code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
 	}
 	return nil
 }

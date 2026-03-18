@@ -490,6 +490,11 @@ const (
 	MsgWsCloneProgress   MsgKey = "ws_clone_progress"
 	MsgWsCloneSuccess    MsgKey = "ws_clone_success"
 	MsgWsCloneFailed     MsgKey = "ws_clone_failed"
+
+	MsgHeaderThinking   MsgKey = "header_thinking"
+	MsgHeaderToolUse    MsgKey = "header_tool_use"
+	MsgHeaderPermission MsgKey = "header_permission"
+	MsgHeaderDone       MsgKey = "header_done"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -505,11 +510,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangChinese: "💭 %s",
 	},
 	MsgTool: {
-		LangEnglish:            "🔧 **Tool #%d: %s**\n---\n%s",
-		LangChinese:            "🔧 **工具 #%d: %s**\n---\n%s",
-		LangTraditionalChinese: "🔧 **工具 #%d: %s**\n---\n%s",
-		LangJapanese:           "🔧 **ツール #%d: %s**\n---\n%s",
-		LangSpanish:            "🔧 **Herramienta #%d: %s**\n---\n%s",
+		LangEnglish:            "✅ **%s** %s",
+		LangChinese:            "✅ **%s** %s",
+		LangTraditionalChinese: "✅ **%s** %s",
+		LangJapanese:           "✅ **%s** %s",
+		LangSpanish:            "✅ **%s** %s",
 	},
 	MsgExecutionStopped: {
 		LangEnglish:            "⏹ Execution stopped.",
@@ -3226,6 +3231,34 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 克隆倉庫失敗: %v",
 		LangJapanese:           "❌ リポジトリのクローンに失敗しました: %v",
 		LangSpanish:            "❌ Error al clonar repositorio: %v",
+	},
+	MsgHeaderThinking: {
+		LangEnglish:            "💭 Thinking...",
+		LangChinese:            "💭 思考中...",
+		LangTraditionalChinese: "💭 思考中...",
+		LangJapanese:           "💭 思考中...",
+		LangSpanish:            "💭 Pensando...",
+	},
+	MsgHeaderToolUse: {
+		LangEnglish:            "🔧 Calling Tool...",
+		LangChinese:            "🔧 调用工具...",
+		LangTraditionalChinese: "🔧 調用工具...",
+		LangJapanese:           "🔧 ツール呼び出し中...",
+		LangSpanish:            "🔧 Llamando herramienta...",
+	},
+	MsgHeaderPermission: {
+		LangEnglish:            "🔒 Permission Request",
+		LangChinese:            "🔒 权限请求",
+		LangTraditionalChinese: "🔒 權限請求",
+		LangJapanese:           "🔒 権限リクエスト",
+		LangSpanish:            "🔒 Solicitud de permiso",
+	},
+	MsgHeaderDone: {
+		LangEnglish:            "✅ Done",
+		LangChinese:            "✅ 完成",
+		LangTraditionalChinese: "✅ 完成",
+		LangJapanese:           "✅ 完了",
+		LangSpanish:            "✅ Hecho",
 	},
 }
 

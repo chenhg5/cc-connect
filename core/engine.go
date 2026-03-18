@@ -247,6 +247,7 @@ type pendingPermission struct {
 	Questions       []UserQuestion // non-nil for AskUserQuestion
 	Answers         map[int]string // collected answers keyed by question index
 	CurrentQuestion int            // index of the question currently being asked
+	Embedded        bool           // true if permission UI is embedded in the preview card
 	Resolved        chan struct{}  // closed when user responds
 	resolveOnce     sync.Once
 }
@@ -1308,7 +1309,7 @@ func (e *Engine) handlePendingPermission(p Platform, msg *Message, content strin
 		}); err != nil {
 			slog.Error("failed to send permission response", "error", err)
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
-		} else {
+		} else if !pending.Embedded {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPermissionApproveAll))
 		}
 	} else if isAllowResponse(lower) {
@@ -1318,7 +1319,7 @@ func (e *Engine) handlePendingPermission(p Platform, msg *Message, content strin
 		}); err != nil {
 			slog.Error("failed to send permission response", "error", err)
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
-		} else {
+		} else if !pending.Embedded {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPermissionAllowed))
 		}
 	} else if isDenyResponse(lower) {
@@ -1328,7 +1329,9 @@ func (e *Engine) handlePendingPermission(p Platform, msg *Message, content strin
 		}); err != nil {
 			slog.Error("failed to send deny response", "error", err)
 		}
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPermissionDenied))
+		if !pending.Embedded {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPermissionDenied))
+		}
 	} else {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPermissionHint))
 		return true
@@ -1808,6 +1811,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx)
 	state.mu.Unlock()
 
+	// consolidatedParts accumulates ALL content (text + tool summaries) for
+	// a single consolidated card when streaming preview is active. When the
+	// preview is not available we fall back to the original per-segment send.
+	var consolidatedParts []string
+	var textOnlyParts []string // text-only parts for final result (no tool info)
+	headerSet := false         // tracks whether sp.setHeader has been called this turn
+
 	// Idle timeout: 0 = disabled
 	var idleTimer *time.Timer
 	var idleCh <-chan time.Time
@@ -1874,77 +1884,102 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		switch event.Type {
 		case EventThinking:
+			sp.setHeader(e.i18n.T(MsgHeaderThinking), "blue")
+			headerSet = true
 			if !quiet && event.Content != "" {
-				// Flush accumulated text segment before thinking display
-				previewActive := sp.canPreview()
-				if len(textParts) > segmentStart {
-					if !previewActive {
+				previewActive := sp.canPreview() || sp.isActive()
+				if previewActive {
+					// Consolidated mode: append thinking to the card
+					preview := truncateIf(event.Content, e.display.ThinkingMaxLen)
+					thinkingMsg := strings.TrimRight(fmt.Sprintf(e.i18n.T(MsgThinking), preview), "\n\r ")
+					consolidatedParts = append(consolidatedParts, thinkingMsg)
+					sp.replaceFullText(strings.Join(consolidatedParts, "\n"))
+					segmentStart = len(textParts)
+				} else {
+					// Fallback: original behavior
+					if len(textParts) > segmentStart {
 						segment := strings.Join(textParts[segmentStart:], "")
 						if segment != "" {
 							for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
 								e.send(p, replyCtx, chunk)
 							}
 						}
+						segmentStart = len(textParts)
 					}
-					segmentStart = len(textParts)
+					sp.freeze()
+					preview := truncateIf(event.Content, e.display.ThinkingMaxLen)
+					e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgThinking), preview))
 				}
-				sp.freeze()
-				if previewActive {
-					sp.detachPreview() // keep frozen preview visible as permanent message
-				}
-				preview := truncateIf(event.Content, e.display.ThinkingMaxLen)
-				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgThinking), preview))
 			}
 
 		case EventToolUse:
+			sp.setHeader(e.i18n.T(MsgHeaderToolUse), "orange")
+			headerSet = true
 			toolCount++
 			if !quiet {
-				// Flush accumulated text segment before tool display
-				previewActive := sp.canPreview()
-				if len(textParts) > segmentStart {
-					if !previewActive {
+				// Format tool input as a short summary for checkbox display
+				toolSummary := toolCheckboxSummary(event.ToolName, event.ToolInput)
+				toolMsg := strings.TrimRight(fmt.Sprintf(e.i18n.T(MsgTool), event.ToolName, toolSummary), "\n\r ")
+
+				previewActive := sp.canPreview() || sp.isActive()
+				if previewActive {
+					// Consolidated mode: append unsent text + tool info to the card
+					if len(textParts) > segmentStart {
+						segment := strings.Trim(strings.Join(textParts[segmentStart:], ""), "\n\r ")
+						if segment != "" {
+							consolidatedParts = append(consolidatedParts, segment)
+							textOnlyParts = append(textOnlyParts, segment)
+						}
+						segmentStart = len(textParts)
+					}
+					consolidatedParts = append(consolidatedParts, toolMsg)
+					sp.replaceFullText(strings.Join(consolidatedParts, "\n"))
+				} else {
+					// Fallback: original behavior — flush text then send tool msg
+					if len(textParts) > segmentStart {
 						segment := strings.Join(textParts[segmentStart:], "")
 						if segment != "" {
 							for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
 								e.send(p, replyCtx, chunk)
 							}
 						}
+						segmentStart = len(textParts)
 					}
-					segmentStart = len(textParts)
-				}
-				sp.freeze()
-				if previewActive {
-					sp.detachPreview() // keep frozen preview visible as permanent message
-				}
-				toolInput := event.ToolInput
-				var formattedInput string
-				if toolInput == "" {
-					formattedInput = ""
-				} else if strings.Contains(toolInput, "```") {
-					// Already contains code blocks (pre-formatted by agent) — use as-is
-					formattedInput = toolInput
-				} else if strings.Contains(toolInput, "\n") || utf8.RuneCountInString(toolInput) > 200 {
-					lang := toolCodeLang(event.ToolName, toolInput)
-					formattedInput = fmt.Sprintf("```%s\n%s\n```", lang, toolInput)
-				} else {
-					switch event.ToolName {
-					case "shell", "run_shell_command", "Bash":
-						formattedInput = fmt.Sprintf("```bash\n%s\n```", toolInput)
-					default:
-						formattedInput = fmt.Sprintf("`%s`", toolInput)
+					sp.freeze()
+					for _, chunk := range SplitMessageCodeFenceAware(toolMsg, maxPlatformMessageLen) {
+						e.send(p, replyCtx, chunk)
 					}
-				}
-				toolMsg := fmt.Sprintf(e.i18n.T(MsgTool), toolCount, event.ToolName, formattedInput)
-				for _, chunk := range SplitMessageCodeFenceAware(toolMsg, maxPlatformMessageLen) {
-					e.send(p, replyCtx, chunk)
 				}
 			}
 
 		case EventText:
+			if !headerSet {
+				sp.setHeader(e.i18n.T(MsgHeaderThinking), "blue")
+				headerSet = true
+			}
 			if event.Content != "" {
 				textParts = append(textParts, event.Content)
-				if sp.canPreview() {
-					sp.appendText(event.Content)
+				previewActive := sp.canPreview() || sp.isActive()
+				if previewActive {
+					if toolCount > 0 {
+						// After tool calls, text goes into consolidated card
+						// Build the display: consolidatedParts + unsent text
+						unsent := strings.Join(textParts[segmentStart:], "")
+						display := strings.Join(consolidatedParts, "\n")
+						if unsent != "" {
+							display += "\n\n" + unsent
+						}
+						sp.replaceFullText(display)
+					} else {
+						// No tool calls yet, normal streaming.
+						// If thinking was displayed earlier via replaceFullText,
+						// replace the full content with text-only to clear thinking.
+						if len(consolidatedParts) > 0 {
+							sp.replaceFullText(strings.Join(textParts, ""))
+						} else {
+							sp.appendText(event.Content)
+						}
+					}
 				}
 			}
 			if event.SessionID != "" {
@@ -1973,39 +2008,121 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				continue
 			}
 
-			// Flush accumulated text segment before permission prompt
-			previewActive := sp.canPreview()
-			if len(textParts) > segmentStart {
-				if !previewActive {
-					segment := strings.Join(textParts[segmentStart:], "")
+			// Set header to permission request state
+			sp.setHeader(e.i18n.T(MsgHeaderPermission), "orange")
+
+			// Try to embed permission buttons directly into the active preview card.
+			// This avoids freezing/detaching the preview and sending a separate card.
+			permEmbedded := false
+			var savedPreviewHandle any
+			previewActive := sp.canPreview() || sp.isActive()
+			if previewActive && !isAskQuestion && sp.isActive() {
+				// Flush unsent text into consolidated parts
+				if len(textParts) > segmentStart {
+					segment := strings.Trim(strings.Join(textParts[segmentStart:], ""), "\n\r ")
 					if segment != "" {
-						for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
-							e.send(p, replyCtx, chunk)
-						}
+						consolidatedParts = append(consolidatedParts, segment)
+						textOnlyParts = append(textOnlyParts, segment)
 					}
 				}
 				segmentStart = len(textParts)
-			}
-			sp.freeze()
-			if previewActive {
-				sp.detachPreview() // keep frozen preview visible as permanent message
-			}
 
-			slog.Info("permission request",
-				"request_id", event.RequestID,
-				"tool", event.ToolName,
-			)
-
-			if isAskQuestion {
-				e.sendAskQuestionPrompt(p, replyCtx, event.Questions, 0)
-			} else {
+				// Build the permission card body
 				permLimit := e.display.ToolMaxLen
 				if permLimit > 0 {
 					permLimit = permLimit * 8 / 5
 				}
 				toolInput := truncateIf(event.ToolInput, permLimit)
-				prompt := fmt.Sprintf(e.i18n.T(MsgPermissionPrompt), event.ToolName, toolInput)
-				e.sendPermissionPrompt(p, replyCtx, prompt, event.ToolName, toolInput)
+				permBody := fmt.Sprintf(e.i18n.T(MsgPermCardBody), event.ToolName, toolInput)
+
+				// Build a card: consolidated content + divider + permission prompt + buttons
+				display := strings.Join(consolidatedParts, "\n")
+				// Remember the current header so the feishu callback can restore it
+				// after the user responds to the permission prompt.
+				prevHeaderTitle := e.i18n.T(MsgHeaderThinking)
+				prevHeaderColor := "blue"
+				if toolCount > 0 {
+					prevHeaderTitle = e.i18n.T(MsgHeaderToolUse)
+					prevHeaderColor = "orange"
+				}
+				extra := func(label, color string) map[string]string {
+					return map[string]string{
+						"perm_label":        label,
+						"perm_color":        color,
+						"perm_body":         permBody,
+						"perm_embedded":     "true",
+						"perm_display":      display,
+						"perm_header_title": prevHeaderTitle,
+						"perm_header_color": prevHeaderColor,
+					}
+				}
+				allowBtn := CardButton{Text: e.i18n.T(MsgPermBtnAllow), Type: "primary", Value: "perm:allow",
+					Extra: extra("✅ "+e.i18n.T(MsgPermBtnAllow), "green")}
+				denyBtn := CardButton{Text: e.i18n.T(MsgPermBtnDeny), Type: "danger", Value: "perm:deny",
+					Extra: extra("❌ "+e.i18n.T(MsgPermBtnDeny), "red")}
+				allowAllBtn := CardButton{Text: e.i18n.T(MsgPermBtnAllowAll), Type: "default", Value: "perm:allow_all",
+					Extra: extra("✅ "+e.i18n.T(MsgPermBtnAllowAll), "green")}
+
+				cb := NewCard()
+				cb.Title(e.i18n.T(MsgHeaderPermission), "orange")
+				cb.Markdown(display)
+				cb.Divider()
+				cb.Markdown("🔒 **" + e.i18n.T(MsgPermCardTitle) + "**\n\n" + permBody)
+				cb.ButtonsEqual(allowBtn, denyBtn)
+				cb.Buttons(allowAllBtn)
+				cb.Note(e.i18n.T(MsgPermCardNote))
+
+				if sp.replaceWithCard(cb.Build()) {
+					permEmbedded = true
+					slog.Info("permission embedded in preview card",
+						"request_id", event.RequestID,
+						"tool", event.ToolName,
+					)
+				}
+			}
+
+			if !permEmbedded {
+				// Fallback: original logic — freeze preview, send separate permission card
+				if len(textParts) > segmentStart {
+					if previewActive {
+						// Flush unsent text into consolidated parts before freezing
+						segment := strings.Trim(strings.Join(textParts[segmentStart:], ""), "\n\r ")
+						if segment != "" {
+							consolidatedParts = append(consolidatedParts, segment)
+							textOnlyParts = append(textOnlyParts, segment)
+							sp.replaceFullText(strings.Join(consolidatedParts, "\n"))
+						}
+					} else {
+						segment := strings.Join(textParts[segmentStart:], "")
+						if segment != "" {
+							for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
+								e.send(p, replyCtx, chunk)
+							}
+						}
+					}
+					segmentStart = len(textParts)
+				}
+				sp.freeze()
+				if previewActive {
+					savedPreviewHandle = sp.detachPreview()
+				}
+
+				slog.Info("permission request",
+					"request_id", event.RequestID,
+					"tool", event.ToolName,
+				)
+
+				if isAskQuestion {
+					e.sendAskQuestionPrompt(p, replyCtx, event.Questions, 0)
+				} else {
+					permLimit := e.display.ToolMaxLen
+					if permLimit > 0 {
+						permLimit = permLimit * 8 / 5
+					}
+					toolInput := truncateIf(event.ToolInput, permLimit)
+					prompt := fmt.Sprintf(e.i18n.T(MsgPermissionPrompt), event.ToolName, toolInput)
+					e.sendPermissionPrompt(p, replyCtx, prompt, event.ToolName, toolInput)
+				}
 			}
 
 			pending := &pendingPermission{
@@ -2014,6 +2131,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				ToolInput:    event.ToolInputRaw,
 				InputPreview: event.ToolInput,
 				Questions:    event.Questions,
+				Embedded:     permEmbedded,
 				Resolved:     make(chan struct{}),
 			}
 			state.mu.Lock()
@@ -2030,12 +2148,30 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			<-pending.Resolved
 			slog.Info("permission resolved", "request_id", event.RequestID)
 
+			if permEmbedded {
+				// Integrated mode: restore the preview by replacing the card
+				// content back to just the consolidated text (removing buttons).
+				// Use forceFlush to bypass throttling — the text may be identical
+				// to what was last "sent" but the card content has changed.
+				currentText := strings.Join(consolidatedParts, "\n")
+				sp.forceFlush(currentText)
+				slog.Debug("restored preview after embedded permission resolved",
+					"consolidated_parts", len(consolidatedParts))
+			} else if savedPreviewHandle != nil {
+				// Fallback mode: reattach the detached preview handle
+				currentText := strings.Join(consolidatedParts, "\n")
+				sp.reattach(savedPreviewHandle, currentText)
+				slog.Debug("reattached preview after permission resolved",
+					"consolidated_parts", len(consolidatedParts))
+			}
+
 			// Restart idle timer after permission is resolved
 			if idleTimer != nil {
 				idleTimer.Reset(e.eventIdleTimeout)
 			}
 
 		case EventResult:
+			sp.setHeader(e.i18n.T(MsgHeaderDone), "green")
 			if event.SessionID != "" {
 				session.SetAgentSessionID(event.SessionID, e.agent.Name())
 			}
@@ -2068,16 +2204,43 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.sideText = ""
 			state.mu.Unlock()
 
-			// When tool calls happened, text was sent in segments; only send remainder.
+			// When tool calls happened, try to finalize via consolidated card.
 			if toolCount > 0 {
-				sp.finish("") // cleanup preview
-				if segmentStart < len(textParts) {
-					unsent := strings.Join(textParts[segmentStart:], "")
-					if unsent != "" {
-						for _, chunk := range splitMessage(unsent, maxPlatformMessageLen) {
+				if sp.isActive() {
+					// Consolidated mode: collect remaining text and finalize
+					if segmentStart < len(textParts) {
+						unsent := strings.Trim(strings.Join(textParts[segmentStart:], ""), "\n\r ")
+						if unsent != "" {
+							textOnlyParts = append(textOnlyParts, unsent)
+						}
+					}
+					// Use textOnlyParts for final content (no tool info)
+					finalContent := strings.Join(textOnlyParts, "\n\n")
+					if finalContent == "" {
+						finalContent = fullResponse // fallback to agent's result
+					}
+					if !sp.finish(finalContent) {
+						// finish failed — send as new message
+						for _, chunk := range splitMessage(finalContent, maxPlatformMessageLen) {
 							if err := p.Send(e.ctx, replyCtx, chunk); err != nil {
 								slog.Error("failed to send reply", "error", err, "msg_id", msgID)
 								return
+							}
+						}
+					} else {
+						slog.Debug("EventResult: finalized consolidated card", "response_len", len(finalContent))
+					}
+				} else {
+					// Fallback: original behavior — send unsent segments
+					sp.finish("") // cleanup preview
+					if segmentStart < len(textParts) {
+						unsent := strings.Join(textParts[segmentStart:], "")
+						if unsent != "" {
+							for _, chunk := range splitMessage(unsent, maxPlatformMessageLen) {
+								if err := p.Send(e.ctx, replyCtx, chunk); err != nil {
+									slog.Error("failed to send reply", "error", err, "msg_id", msgID)
+									return
+								}
 							}
 						}
 					}
@@ -2177,6 +2340,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				textParts = nil
 				segmentStart = 0
 				toolCount = 0
+				headerSet = false
+				consolidatedParts = nil
+				textOnlyParts = nil
 				turnStart = time.Now()
 				firstEventLogged = false
 				waitStart = time.Now()
@@ -2236,12 +2402,31 @@ channelClosed:
 		session.AddHistory("assistant", fullResponse)
 
 		if toolCount > 0 {
-			sp.finish("")
-			if segmentStart < len(textParts) {
-				unsent := strings.Join(textParts[segmentStart:], "")
-				if unsent != "" {
-					for _, chunk := range splitMessage(unsent, maxPlatformMessageLen) {
+			if sp.isActive() {
+				// Consolidated mode — use textOnlyParts (no thinking/tool info)
+				if segmentStart < len(textParts) {
+					unsent := strings.Trim(strings.Join(textParts[segmentStart:], ""), "\n\r ")
+					if unsent != "" {
+						textOnlyParts = append(textOnlyParts, unsent)
+					}
+				}
+				finalContent := strings.Join(textOnlyParts, "\n\n")
+				if finalContent == "" {
+					finalContent = fullResponse
+				}
+				if !sp.finish(finalContent) {
+					for _, chunk := range splitMessage(finalContent, maxPlatformMessageLen) {
 						e.send(p, replyCtx, chunk)
+					}
+				}
+			} else {
+				sp.finish("")
+				if segmentStart < len(textParts) {
+					unsent := strings.Join(textParts[segmentStart:], "")
+					if unsent != "" {
+						for _, chunk := range splitMessage(unsent, maxPlatformMessageLen) {
+							e.send(p, replyCtx, chunk)
+						}
 					}
 				}
 			}
@@ -7772,21 +7957,39 @@ func (e *Engine) deleteSessionDisplayName(sessions *SessionManager, matched *Age
 	return displayName
 }
 
-// toolCodeLang picks the code block language hint for tool display.
-func toolCodeLang(toolName, input string) string {
-	switch toolName {
-	case "shell", "run_shell_command", "Bash":
-		return "bash"
-	case "write_file", "WriteFile", "replace", "ReplaceInFile":
-		if strings.Contains(input, "\n- ") || strings.Contains(input, "\n+ ") {
-			return "diff"
+
+// toolCheckboxSummary returns a short one-line summary of the tool input
+// suitable for tool-use display (e.g. "✅ **Read** `/path/to/file`").
+func toolCheckboxSummary(toolName, toolInput string) string {
+	if toolInput == "" {
+		return ""
+	}
+	// Extract the most meaningful short summary based on tool type
+	summary := toolInput
+	// Strip code fences if present
+	summary = strings.TrimSpace(summary)
+	if strings.HasPrefix(summary, "```") {
+		if idx := strings.Index(summary, "\n"); idx >= 0 {
+			summary = summary[idx+1:]
 		}
+		if idx := strings.LastIndex(summary, "```"); idx >= 0 {
+			summary = summary[:idx]
+		}
+		summary = strings.TrimSpace(summary)
 	}
-	// Fallback: detect diff-like content
-	if strings.Contains(input, "\n- ") && strings.Contains(input, "\n+ ") {
-		return "diff"
+	// Take only the first line
+	if idx := strings.IndexByte(summary, '\n'); idx >= 0 {
+		summary = summary[:idx]
 	}
-	return ""
+	// Truncate to keep it short
+	const maxSummaryLen = 80
+	if utf8.RuneCountInString(summary) > maxSummaryLen {
+		summary = string([]rune(summary)[:maxSummaryLen]) + "…"
+	}
+	if summary == "" {
+		return ""
+	}
+	return "`" + summary + "`"
 }
 
 // truncateIf truncates s to maxLen runes. 0 means no truncation.
