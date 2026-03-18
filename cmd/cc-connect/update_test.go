@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestIsNewer(t *testing.T) {
 	tests := []struct {
@@ -37,5 +40,69 @@ func TestIsNewer(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("isNewer(%q, %q) = %v, want %v", tt.latest, tt.current, got, tt.want)
 		}
+	}
+}
+
+func TestGetUpdateHintIfAvailable_NeverBlocks(t *testing.T) {
+	origVersion := version
+	defer func() { version = origVersion }()
+	version = "v1.0.0"
+
+	// Clear cache to force cache miss
+	cachedLatestVersion.mu.Lock()
+	cachedLatestVersion.version = ""
+	cachedLatestVersion.timestamp = time.Time{}
+	cachedLatestVersion.mu.Unlock()
+
+	// getUpdateHintIfAvailable should return "" immediately on cache miss
+	// (async fetch is kicked off in background but does not block)
+	start := time.Now()
+	hint := getUpdateHintIfAvailable()
+	elapsed := time.Since(start)
+
+	if hint != "" {
+		t.Errorf("expected empty hint on cache miss, got: %q", hint)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("getUpdateHintIfAvailable blocked for %v, should return immediately", elapsed)
+	}
+}
+
+func TestGetUpdateHintIfAvailable_UsesCache(t *testing.T) {
+	origVersion := version
+	defer func() { version = origVersion }()
+	version = "v1.0.0"
+
+	// Populate cache with a newer version
+	cachedLatestVersion.mu.Lock()
+	cachedLatestVersion.version = "v2.0.0"
+	cachedLatestVersion.timestamp = time.Now()
+	cachedLatestVersion.mu.Unlock()
+
+	hint := getUpdateHintIfAvailable()
+	if hint == "" {
+		t.Error("expected update hint when cache has newer version")
+	}
+
+	// Populate cache with same version — should return empty
+	cachedLatestVersion.mu.Lock()
+	cachedLatestVersion.version = "v1.0.0"
+	cachedLatestVersion.timestamp = time.Now()
+	cachedLatestVersion.mu.Unlock()
+
+	hint = getUpdateHintIfAvailable()
+	if hint != "" {
+		t.Errorf("expected no hint when versions match, got: %q", hint)
+	}
+}
+
+func TestGetUpdateHintIfAvailable_DevSkipped(t *testing.T) {
+	origVersion := version
+	defer func() { version = origVersion }()
+	version = "dev"
+
+	hint := getUpdateHintIfAvailable()
+	if hint != "" {
+		t.Errorf("expected empty hint for dev version, got: %q", hint)
 	}
 }

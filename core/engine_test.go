@@ -849,6 +849,72 @@ func TestEngine_CustomCommand_DisabledByRole(t *testing.T) {
 	}
 }
 
+func TestEngine_SkillCommand_DisabledByRole(t *testing.T) {
+	e := newTestEngine()
+
+	// Create a temporary skill directory with a SKILL.md
+	dir := t.TempDir()
+	skillDir := filepath.Join(dir, "deploy-prod")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("deploy to production"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e.skills.SetDirs([]string{dir})
+
+	urm := NewUserRoleManager()
+	urm.Configure("member", []RoleInput{
+		{Name: "admin", UserIDs: []string{"admin1"}, DisabledCommands: []string{}},
+		{Name: "member", UserIDs: []string{"*"}, DisabledCommands: []string{"deploy-prod"}},
+	})
+	e.SetUserRoles(urm)
+
+	// Member should be blocked from skill command
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "test:u1", UserID: "user1", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, "/deploy-prod")
+
+	if len(p.sent) != 1 || (!strings.Contains(p.sent[0], "disabled") && !strings.Contains(p.sent[0], "禁用")) {
+		t.Errorf("skill should be blocked for member, got: %v", p.sent)
+	}
+
+	// Admin should NOT be blocked (but may fail at session level — that's fine,
+	// we only check that the "disabled" message is NOT returned)
+	p2 := &stubPlatformEngine{n: "test"}
+	msg2 := &Message{SessionKey: "test:a1", UserID: "admin1", ReplyCtx: "ctx"}
+	e.handleCommand(p2, msg2, "/deploy-prod")
+
+	for _, s := range p2.sent {
+		if strings.Contains(s, "disabled") || strings.Contains(s, "禁用") {
+			t.Errorf("skill should be allowed for admin, got: %v", p2.sent)
+		}
+	}
+}
+
+func TestEngine_SkillCommand_DisabledByProjectLevel(t *testing.T) {
+	e := newTestEngine()
+
+	dir := t.TempDir()
+	skillDir := filepath.Join(dir, "my-skill")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("a skill"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e.skills.SetDirs([]string{dir})
+	e.SetDisabledCommands([]string{"my-skill"})
+
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "test:u1", UserID: "user1", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, "/my-skill")
+
+	if len(p.sent) != 1 || (!strings.Contains(p.sent[0], "disabled") && !strings.Contains(p.sent[0], "禁用")) {
+		t.Errorf("skill should be blocked by project-level disabled_commands, got: %v", p.sent)
+	}
+}
+
 // --- role-based rate limit tests ---
 
 func TestEngine_RateLimit_RoleSpecific(t *testing.T) {

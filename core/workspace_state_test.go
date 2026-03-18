@@ -119,3 +119,36 @@ func TestWorkspacePool_ReapIdle_KeepsActive(t *testing.T) {
 		t.Error("expected active workspace to still exist")
 	}
 }
+
+func TestInteractiveKeyForSessionKey_NormalizesWorkspace(t *testing.T) {
+	tmp := t.TempDir()
+	wsDir := filepath.Join(tmp, "ws1")
+	if err := os.Mkdir(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	e := NewEngine("test", &stubAgent{}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
+	e.multiWorkspace = true
+	e.baseDir = tmp
+	e.workspaceBindings = NewWorkspaceBindingManager(filepath.Join(tmp, "bindings.json"))
+
+	channelID := "chan123"
+	sessionKey := "test:" + channelID
+
+	// Bind with trailing slash (unnormalized)
+	e.workspaceBindings.Bind("project:test", channelID, "chan", wsDir+"/")
+
+	key := e.interactiveKeyForSessionKey(sessionKey)
+	expected := normalizeWorkspacePath(wsDir) + ":" + sessionKey
+
+	if key != expected {
+		t.Errorf("interactiveKeyForSessionKey should normalize workspace path\ngot:  %s\nwant: %s", key, expected)
+	}
+
+	// Also verify it matches what we'd get with the clean path
+	e.workspaceBindings.Bind("project:test", channelID, "chan", wsDir)
+	key2 := e.interactiveKeyForSessionKey(sessionKey)
+	if key != key2 {
+		t.Errorf("keys should be identical regardless of trailing slash\nslash:   %s\nclean:   %s", key, key2)
+	}
+}

@@ -1021,7 +1021,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 			btw := strings.TrimSpace(trimmed[len(matchBtwPrefix(trimmed)):])
 			if btw != "" {
 				e.interactiveMu.Lock()
-				state, ok := e.interactiveStates[msg.SessionKey]
+				state, ok := e.interactiveStates[interactiveKey]
 				e.interactiveMu.Unlock()
 				if ok && state.agentSession != nil && state.agentSession.Alive() {
 					if err := state.agentSession.Send(btw, nil, nil); err != nil {
@@ -2227,6 +2227,13 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 			return true
 		}
 		if skill := e.skills.Resolve(cmd); skill != nil {
+			if disabledCmds[strings.ToLower(skill.Name)] {
+				slog.Info("audit: command_blocked",
+					"user_id", msg.UserID, "platform", msg.Platform,
+					"project", e.name, "command", skill.Name, "reason", "disabled")
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandDisabled), "/"+skill.Name))
+				return true
+			}
 			slog.Info("audit: command_executed",
 				"user_id", msg.UserID, "platform", msg.Platform,
 				"project", e.name, "command", skill.Name, "type", "skill")
@@ -7705,7 +7712,7 @@ func (e *Engine) sessionContextForKey(sessionKey string) (Agent, *SessionManager
 	}
 	projectKey := "project:" + e.name
 	if b := e.workspaceBindings.Lookup(projectKey, channelID); b != nil {
-		if wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(b.Workspace); err == nil {
+		if wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(normalizeWorkspacePath(b.Workspace)); err == nil {
 			return wsAgent, wsSessions
 		}
 	}
@@ -7724,7 +7731,7 @@ func (e *Engine) interactiveKeyForSessionKey(sessionKey string) string {
 	}
 	projectKey := "project:" + e.name
 	if b := e.workspaceBindings.Lookup(projectKey, channelID); b != nil {
-		return b.Workspace + ":" + sessionKey
+		return normalizeWorkspacePath(b.Workspace) + ":" + sessionKey
 	}
 	return sessionKey
 }

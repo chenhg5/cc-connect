@@ -95,9 +95,9 @@ func checkUpdateAsync() {
 	fetchLatestStableReleaseAsync()
 }
 
-// getUpdateHintIfAvailable 如果有新版本可用，返回更新提示字符串
+// getUpdateHintIfAvailable returns an update hint only from cache (never blocks on network).
+// Call checkUpdateAsync() early to populate the cache in the background.
 func getUpdateHintIfAvailable() string {
-	// dev版本不提示
 	if version == "dev" || version == "" {
 		return ""
 	}
@@ -107,25 +107,14 @@ func getUpdateHintIfAvailable() string {
 	cachedTime := cachedLatestVersion.timestamp
 	cachedLatestVersion.mu.RUnlock()
 
-	// 如果缓存过期或为空，尝试同步获取（快速超时）
 	if cachedVer == "" || time.Since(cachedTime) > versionCheckTTL {
-		release, err := fetchLatestStableFromGitee()
-		if err != nil || release == nil || release.TagName == "" {
-			release, err = fetchLatestStableRelease()
-			if err != nil || release == nil {
-				return ""
-			}
-		}
-		cachedVer = release.TagName
-		// 更新缓存
-		cachedLatestVersion.mu.Lock()
-		cachedLatestVersion.version = cachedVer
-		cachedLatestVersion.timestamp = time.Now()
-		cachedLatestVersion.mu.Unlock()
+		// Cache miss or expired — trigger async refresh, don't block
+		fetchLatestStableReleaseAsync()
+		return ""
 	}
 
-	if cachedVer != "" && isNewer(cachedVer, version) {
-		return fmt.Sprintf("\n📦 新版本可用: %s → %s  (运行: cc-connect update 升级)\n", version, cachedVer)
+	if isNewer(cachedVer, version) {
+		return fmt.Sprintf("\n📦 Update available: %s → %s  (run: cc-connect update)\n", version, cachedVer)
 	}
 	return ""
 }
