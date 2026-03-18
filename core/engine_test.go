@@ -3634,6 +3634,85 @@ func TestProcessInteractiveEvents_DrainsQueuedMessages(t *testing.T) {
 	}
 }
 
+// TestDrainOrphanedQueue_UsesWorkspaceSessionManager verifies that
+// drainOrphanedQueue saves session history through the passed sessions
+// manager (workspace-specific) rather than e.sessions (global).
+func TestDrainOrphanedQueue_UsesWorkspaceSessionManager(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("qs-orphan")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	// Create a separate "workspace" session manager that drainOrphanedQueue should use.
+	wsSessionsPath := filepath.Join(t.TempDir(), "ws_sessions.json")
+	wsSessions := NewSessionManager(wsSessionsPath)
+
+	key := "ws1:test:user1"
+	session := wsSessions.GetOrCreateActive("test:user1")
+	if !session.TryLock() {
+		t.Fatal("expected TryLock to succeed")
+	}
+
+	// Set up interactive state with a queued message.
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+		pendingMessages: []queuedMessage{
+			{platform: p, replyCtx: "ctx-q", content: "queued-orphan"},
+		},
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	// Push events so the drain completes.
+	go func() {
+		sess.sendMu.Lock()
+		for len(sess.sendCalls) == 0 {
+			sess.sendMu.Unlock()
+			time.Sleep(5 * time.Millisecond)
+			sess.sendMu.Lock()
+		}
+		sess.sendMu.Unlock()
+		sess.events <- Event{Type: EventResult, Content: "orphan-response", Done: true}
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		e.drainOrphanedQueue(session, wsSessions, key, agent, "")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("drainOrphanedQueue did not complete in time")
+	}
+
+	// The assistant response should be saved in the workspace session manager,
+	// NOT in e.sessions (global).
+	wsHistory := wsSessions.GetOrCreateActive("test:user1").GetHistory(0)
+	var wsAssistant []string
+	for _, h := range wsHistory {
+		if h.Role == "assistant" {
+			wsAssistant = append(wsAssistant, h.Content)
+		}
+	}
+	if len(wsAssistant) == 0 {
+		t.Fatal("expected assistant history in workspace session manager, got none")
+	}
+
+	// Verify e.sessions (global) does NOT have this history.
+	globalSession := e.sessions.GetOrCreateActive("test:user1")
+	globalHistory := globalSession.GetHistory(0)
+	for _, h := range globalHistory {
+		if h.Role == "assistant" && h.Content == "orphan-response" {
+			t.Fatal("orphan response was saved to global e.sessions instead of workspace sessions")
+		}
+	}
+}
+
 // ── executeCardAction interactiveKey tests ───────────────────
 
 func TestExecuteCardAction_QuietUsesInteractiveKey(t *testing.T) {
