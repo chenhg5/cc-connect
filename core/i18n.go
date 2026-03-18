@@ -132,8 +132,9 @@ const (
 	MsgToolAuthNotSupported MsgKey = "tool_auth_not_supported"
 	MsgToolAllowFailed      MsgKey = "tool_allow_failed"
 	MsgToolAllowedNew       MsgKey = "tool_allowed_new"
-	MsgError                MsgKey = "error"
-	MsgEmptyResponse        MsgKey = "empty_response"
+	MsgError                     MsgKey = "error"
+	MsgFailedToStartAgentSession MsgKey = "failed_to_start_agent_session"
+	MsgEmptyResponse             MsgKey = "empty_response"
 	MsgPermissionPrompt     MsgKey = "permission_prompt"
 	MsgPermissionAllowed    MsgKey = "permission_allowed"
 	MsgPermissionApproveAll MsgKey = "permission_approve_all"
@@ -585,6 +586,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 錯誤: %v",
 		LangJapanese:           "❌ エラー: %v",
 		LangSpanish:            "❌ Error: %v",
+	},
+	MsgFailedToStartAgentSession: {
+		LangEnglish:            "❌ Error: failed to start agent session",
+		LangChinese:            "❌ 错误: 启动 Agent 会话失败",
+		LangTraditionalChinese: "❌ 錯誤: 啟動 Agent 會話失敗",
+		LangJapanese:           "❌ エラー: Agentセッションの起動に失敗しました",
+		LangSpanish:            "❌ Error: error al iniciar la sesión del agente",
 	},
 	MsgEmptyResponse: {
 		LangEnglish:            "(empty response)",
