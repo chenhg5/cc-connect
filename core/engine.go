@@ -3951,8 +3951,11 @@ func (e *Engine) cmdTTS(p Platform, msg *Message, args []string) {
 }
 
 func (e *Engine) cmdStop(p Platform, msg *Message) {
+	// Use interactiveKeyForSessionKey to match the key used when creating state
+	interactiveKey := e.interactiveKeyForSessionKey(msg.SessionKey)
+
 	e.interactiveMu.Lock()
-	state, ok := e.interactiveStates[msg.SessionKey]
+	state, ok := e.interactiveStates[interactiveKey]
 	e.interactiveMu.Unlock()
 
 	if !ok || state == nil {
@@ -3972,17 +3975,26 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 		pending.resolve()
 	}
 
-	e.cleanupInteractiveState(msg.SessionKey)
+	// Force kill the agent session if it supports immediate termination
+	// This is faster than graceful Close() when agent is stuck in a loop
+	if state.agentSession != nil {
+		if ft, ok := state.agentSession.(ForceTerminator); ok {
+			slog.Debug("cmdStop: force killing agent session", "session", msg.SessionKey)
+			_ = ft.ForceKill()
+		}
+	}
+
+	e.cleanupInteractiveState(interactiveKey)
 
 	// Preserve quiet preference across stop
 	if quietMode {
 		e.interactiveMu.Lock()
-		if s, ok := e.interactiveStates[msg.SessionKey]; ok {
+		if s, ok := e.interactiveStates[interactiveKey]; ok {
 			s.mu.Lock()
 			s.quiet = quietMode
 			s.mu.Unlock()
 		} else {
-			e.interactiveStates[msg.SessionKey] = &interactiveState{platform: p, replyCtx: msg.ReplyCtx, quiet: quietMode}
+			e.interactiveStates[interactiveKey] = &interactiveState{platform: p, replyCtx: msg.ReplyCtx, quiet: quietMode}
 		}
 		e.interactiveMu.Unlock()
 	}

@@ -481,6 +481,19 @@ func (cs *claudeSession) Alive() bool {
 	return cs.alive.Load()
 }
 
+// ForceKill immediately terminates the underlying Claude Code process
+// without waiting for graceful shutdown. This is used when the agent
+// is stuck in a thinking loop or unresponsive state.
+func (cs *claudeSession) ForceKill() error {
+	cs.cancel()
+	if cs.cmd != nil && cs.cmd.Process != nil {
+		slog.Debug("claudeSession: force killing process", "pid", cs.cmd.Process.Pid)
+		_ = cs.cmd.Process.Kill()
+	}
+	<-cs.done
+	return nil
+}
+
 func (cs *claudeSession) Close() error {
 	cs.cancel()
 

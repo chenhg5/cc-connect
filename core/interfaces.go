@@ -331,3 +331,11 @@ type CommandRegistrar interface {
 type ChannelNameResolver interface {
 	ResolveChannelName(channelID string) (string, error)
 }
+
+// ForceTerminator is an optional interface for agent sessions that support
+// immediate process termination without waiting for graceful shutdown.
+// This is useful when the agent is stuck in a loop or unresponsive state.
+// Close() should still be called after ForceKill() for cleanup.
+type ForceTerminator interface {
+	ForceKill() error
+}

@@ -1,8 +1,35 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 # CC-Connect Development Guide
 
 ## Project Overview
 
 CC-Connect is a bridge that connects AI coding agents (Claude Code, Codex, Gemini CLI, Cursor, etc.) with messaging platforms (Feishu/Lark, Telegram, Discord, Slack, DingTalk, WeChat Work, QQ, LINE). Users interact with their coding agent through their preferred messaging app.
+
+## Quick Reference
+
+**Module:** `github.com/chenhg5/cc-connect`
+**Go Version:** 1.25.0
+**Package Manager:** Go modules
+
+**Build & Test:**
+```bash
+make build                    # Build with all agents/platforms
+make build AGENTS=claudecode PLATFORMS_INCLUDE=feishu,telegram  # Selective build
+make test                     # Run all tests
+make test ARGS="-race"        # Run with race detector
+make lint                     # Run golangci-lint
+make clean                    # Remove build artifacts
+make release TARGET=linux/amd64  # Cross-compile for specific platform
+```
+
+**Run:**
+```bash
+./cc-connect                  # Run with ~/.cc-connect/config.toml
+./cc-connect --config /path/to/config.toml
+```
 
 ## Architecture
 
@@ -156,14 +183,18 @@ All user-facing strings must go through `core/i18n.go`:
 # Full test suite
 go test ./...
 
+# With race detector (CI)
+go test -race ./...
+
 # Specific package
 go test ./core/ -v
 
 # Run specific test
 go test ./core/ -run TestHandlePendingPermission -v
 
-# With race detector (CI)
-go test -race ./...
+# Using make
+make test                     # Run all tests
+make test ARGS="-race"        # Run with race detector
 ```
 
 ### Test Patterns
@@ -208,11 +239,35 @@ Available tags: `no_claudecode`, `no_codex`, `no_cursor`, `no_gemini`,
 
 ## Pre-Commit Checklist
 
-1. **Build passes**: `go build ./...`
-2. **Tests pass**: `go test ./...`
-3. **No new hardcoded platform/agent names in core**: grep for platform names in `core/*.go`
-4. **i18n complete**: all new user-facing strings have translations for all languages
+1. **Build passes**: `make build` or `go build ./...`
+2. **Tests pass**: `make test` or `go test ./...`
+3. **No new hardcoded platform/agent names in core**: `grep -r "feishu\|telegram\|claudecode" core/*.go`
+4. **i18n complete**: all new user-facing strings have translations for all languages (EN, ZH, ZH-TW, JA, ES)
 5. **No secrets in code**: no API keys, tokens, or credentials in source files
+
+---
+
+## Key Dependencies
+
+| Package | Purpose |
+|---------|---------|
+| `github.com/larksuite/oapi-sdk-go/v3` | Feishu/Lark bot SDK |
+| `github.com/go-telegram-bot-api/telegram-bot-api/v5` | Telegram bot API |
+| `github.com/bwmarrin/discordgo` | Discord gateway |
+| `github.com/slack-go/slack` | Slack Events API & Socket Mode |
+| `github.com/open-dingtalk/dingtalk-stream-sdk-go` | DingTalk streaming |
+| `github.com/line/line-bot-sdk-go/v8` | LINE bot API |
+| `github.com/creack/pty` | PTY for agent process management |
+| `github.com/robfig/cron/v3` | Scheduled task scheduling |
+| `github.com/BurntSushi/toml` | Configuration parsing |
+
+---
+
+## Windows Development Notes
+
+- Use Git Bash or WSL for running `make` commands
+- Unix-style paths in code (`/dev/null`), not Windows paths
+- Executables have `.exe` extension when built for Windows
 
 ## Adding a New Platform
 
