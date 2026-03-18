@@ -184,12 +184,24 @@ func loadFileAttachments(paths []string) ([]core.FileAttachment, error) {
 	return files, nil
 }
 
+const maxAttachmentSize = 50 << 20 // 50 MB
+
 func readAttachment(path string) ([]byte, string, string, error) {
-	data, err := os.ReadFile(path)
+	cleaned := filepath.Clean(path)
+
+	info, err := os.Stat(cleaned)
 	if err != nil {
 		return nil, "", "", fmt.Errorf("read attachment %s: %w", path, err)
 	}
-	fileName := filepath.Base(path)
+	if info.Size() > maxAttachmentSize {
+		return nil, "", "", fmt.Errorf("attachment %s exceeds size limit (%d MB)", path, maxAttachmentSize>>20)
+	}
+
+	data, err := os.ReadFile(cleaned)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("read attachment %s: %w", path, err)
+	}
+	fileName := filepath.Base(cleaned)
 	return data, fileName, detectAttachmentMimeType(fileName, data), nil
 }
 

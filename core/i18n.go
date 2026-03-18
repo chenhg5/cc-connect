@@ -393,6 +393,8 @@ const (
 	MsgCommandDisabled   MsgKey = "command_disabled"
 	MsgAdminRequired     MsgKey = "admin_required"
 	MsgRateLimited       MsgKey = "rate_limited"
+	MsgBtwSent           MsgKey = "btw_sent"
+	MsgBtwSendFailed     MsgKey = "btw_send_failed"
 
 	MsgRelayNoBinding     MsgKey = "relay_no_binding"
 	MsgRelayBound         MsgKey = "relay_bound"
@@ -2594,6 +2596,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "⏳ 訊息發送過快，請稍後再試。",
 		LangJapanese:           "⏳ メッセージの送信が速すぎます。しばらくお待ちください。",
 		LangSpanish:            "⏳ Estás enviando mensajes demasiado rápido. Espera un momento.",
+	},
+	MsgBtwSent: {
+		LangEnglish:            "✅ Message injected into the current session.",
+		LangChinese:            "✅ 消息已注入当前会话。",
+		LangTraditionalChinese: "✅ 訊息已注入目前會話。",
+		LangJapanese:           "✅ メッセージを現在のセッションに注入しました。",
+		LangSpanish:            "✅ Mensaje inyectado en la sesión actual.",
+	},
+	MsgBtwSendFailed: {
+		LangEnglish:            "❌ Failed to inject message into the current session.",
+		LangChinese:            "❌ 消息注入当前会话失败。",
+		LangTraditionalChinese: "❌ 訊息注入目前會話失敗。",
+		LangJapanese:           "❌ 現在のセッションへのメッセージ注入に失敗しました。",
+		LangSpanish:            "❌ Error al inyectar el mensaje en la sesión actual.",
 	},
 	MsgRelayNoBinding: {
 		LangEnglish: "No relay binding in this chat.\nUse `/bind <project>` to bind another bot.\nThe <project> is the project name from your config.toml.",

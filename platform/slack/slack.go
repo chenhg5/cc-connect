@@ -442,10 +442,16 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 	}
 
 	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
+
 		// After 2 minutes, add clock
+		timer := time.NewTimer(2 * time.Minute)
+		defer timer.Stop()
 		select {
-		case <-time.After(2 * time.Minute):
+		case <-timer.C:
 			addReaction("clock1")
 		case <-done:
 			return
@@ -470,6 +476,7 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 
 	return func() {
 		close(done)
+		wg.Wait()
 		mu.Lock()
 		emojis := make([]string, len(added))
 		copy(emojis, added)

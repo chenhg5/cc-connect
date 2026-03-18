@@ -172,6 +172,9 @@ func (p *WSPlatform) runConnection() error {
 
 		// Drain pending ACK channels so waiting goroutines are unblocked
 		// and stale entries do not accumulate across reconnections.
+		// Collect keys first, then delete — Range+Delete in callback is
+		// not guaranteed safe by the sync.Map contract.
+		var staleKeys []any
 		p.pendingAcks.Range(func(key, value any) bool {
 			if ch, ok := value.(chan error); ok {
 				select {
@@ -179,9 +182,12 @@ func (p *WSPlatform) runConnection() error {
 				default:
 				}
 			}
-			p.pendingAcks.Delete(key)
+			staleKeys = append(staleKeys, key)
 			return true
 		})
+		for _, k := range staleKeys {
+			p.pendingAcks.Delete(k)
+		}
 	}()
 
 	// Send subscribe (auth) frame

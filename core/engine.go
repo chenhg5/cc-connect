@@ -557,10 +557,14 @@ func (e *Engine) checkRateLimit(msg *Message) bool {
 
 	// Try role-specific rate limit first
 	if urm != nil {
-		// Use userID if available, else fall back to sessionKey for unidentified users
+		// Use userID if available, else fall back to sessionKey for unidentified users.
+		// NOTE: sessionKey fallback means anonymous users get separate buckets per
+		// session, which is less strict than per-user limiting. Platforms should
+		// provide UserID for effective rate limiting.
 		rateKey := msg.UserID
 		if rateKey == "" {
 			rateKey = msg.SessionKey
+			slog.Debug("rate limit: no UserID, falling back to sessionKey", "session_key", msg.SessionKey)
 		}
 		allowed, handled := urm.AllowRate(rateKey)
 		if handled {
@@ -1026,9 +1030,9 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 				if ok && state.agentSession != nil && state.agentSession.Alive() {
 					if err := state.agentSession.Send(btw, nil, nil); err != nil {
 						slog.Error("btw: send failed", "error", err)
-						e.reply(p, msg.ReplyCtx, "Failed to send btw message.")
+						e.reply(p, msg.ReplyCtx, e.i18n.T(MsgBtwSendFailed))
 					} else {
-						e.reply(p, msg.ReplyCtx, "btw sent")
+						e.reply(p, msg.ReplyCtx, e.i18n.T(MsgBtwSent))
 					}
 					return
 				}
@@ -1529,9 +1533,11 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	}
 
 	// Inject platform-specific formatting instructions into the agent's system prompt.
-	if fip, ok := p.(FormattingInstructionProvider); ok {
-		if ppi, ok := agent.(PlatformPromptInjector); ok {
+	if ppi, ok := agent.(PlatformPromptInjector); ok {
+		if fip, ok := p.(FormattingInstructionProvider); ok {
 			ppi.SetPlatformPrompt(fip.FormattingInstructions())
+		} else {
+			ppi.SetPlatformPrompt("")
 		}
 	}
 
