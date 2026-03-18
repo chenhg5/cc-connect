@@ -7428,7 +7428,7 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 	var textParts []string
 	for event := range agentSession.Events() {
 		if ctx.Err() != nil {
-			return "", ctx.Err()
+			return relayPartialResponseOrError(ctx.Err(), textParts, fromProject, e.name)
 		}
 		switch event.Type {
 		case EventText:
@@ -7468,10 +7468,29 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 		}
 	}
 
+	if ctx.Err() != nil {
+		return relayPartialResponseOrError(ctx.Err(), textParts, fromProject, e.name)
+	}
+
 	if len(textParts) > 0 {
 		return strings.Join(textParts, ""), nil
 	}
 	return "", fmt.Errorf("relay: agent process exited without response")
+}
+
+func relayPartialResponseOrError(ctxErr error, textParts []string, fromProject, toProject string) (string, error) {
+	if len(textParts) == 0 {
+		return "", ctxErr
+	}
+
+	resp := strings.Join(textParts, "")
+	slog.Warn("relay: context done before final result; returning partial response",
+		"from", fromProject,
+		"to", toProject,
+		"error", ctxErr,
+		"response_len", len(resp),
+	)
+	return resp, nil
 }
 
 // cmdBind handles /bind — establishes a relay binding between bots in a group chat.
