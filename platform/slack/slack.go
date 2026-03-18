@@ -1,6 +1,7 @@
 package slack
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -186,10 +187,20 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 				var images []core.ImageAttachment
 				var audio *core.AudioAttachment
 				for _, f := range ev.Files {
+					// Prefer URLPrivateDownload, fall back to URLPrivate
+					fileURL := f.URLPrivateDownload
+					if fileURL == "" {
+						fileURL = f.URLPrivate
+					}
+					if fileURL == "" {
+						slog.Warn("slack: file has no download URL", "file_id", f.ID, "name", f.Name)
+						continue
+					}
+
 					if f.Mimetype != "" && strings.HasPrefix(f.Mimetype, "audio/") {
-						data, err := p.downloadSlackFile(f.URLPrivateDownload)
+						data, err := p.downloadSlackFile(fileURL)
 						if err != nil {
-							slog.Error("slack: download audio failed", "error", err)
+							slog.Error("slack: download audio failed", "error", err, "url", core.RedactToken(fileURL, p.botToken))
 							continue
 						}
 						format := "mp3"
@@ -200,9 +211,9 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 							MimeType: f.Mimetype, Data: data, Format: format,
 						}
 					} else if f.Mimetype != "" && strings.HasPrefix(f.Mimetype, "image/") {
-						imgData, err := p.downloadSlackFile(f.URLPrivateDownload)
+						imgData, err := p.downloadSlackFile(fileURL)
 						if err != nil {
-							slog.Error("slack: download file failed", "error", err)
+							slog.Error("slack: download file failed", "error", err, "url", core.RedactToken(fileURL, p.botToken))
 							continue
 						}
 						images = append(images, core.ImageAttachment{
@@ -327,7 +338,24 @@ func (p *Platform) downloadSlackFile(url string) ([]byte, error) {
 		return nil, fmt.Errorf("%s", core.RedactToken(err.Error(), p.botToken))
 	}
 	defer resp.Body.Close()
-	return io.ReadAll(resp.Body)
+
+	// Check if we got an unexpected status code (e.g., redirect to login page)
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("download failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response body: %w", err)
+	}
+
+	// Basic sanity check: detect if we received HTML instead of binary data
+	if len(data) > 0 && (bytes.HasPrefix(data, []byte("<!DOCTYPE")) || bytes.HasPrefix(data, []byte("<html"))) {
+		return nil, fmt.Errorf("received HTML response (likely missing auth); first 100 bytes: %s", string(data[:min(100, len(data))]))
+	}
+
+	return data, nil
 }
 
 func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
