@@ -569,6 +569,14 @@ func main() {
 		slog.Warn("api server unavailable", "error", err)
 	} else {
 		relayMgr := core.NewRelayManager(cfg.DataDir)
+		if cfg.Relay.TimeoutSecs != nil {
+			secs := *cfg.Relay.TimeoutSecs
+			if secs <= 0 {
+				relayMgr.SetTimeout(0)
+			} else {
+				relayMgr.SetTimeout(time.Duration(secs) * time.Second)
+			}
+		}
 		apiSrv.SetRelayManager(relayMgr)
 		for i, e := range engines {
 			apiSrv.RegisterEngine(cfg.Projects[i].Name, e)
