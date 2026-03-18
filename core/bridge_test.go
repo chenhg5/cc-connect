@@ -18,7 +18,7 @@ import (
 
 func startTestBridge(t *testing.T, token string) (*BridgeServer, string) {
 	t.Helper()
-	bs := NewBridgeServer(0, token, "/bridge/ws")
+	bs := NewBridgeServer(0, token, "/bridge/ws", nil)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/bridge/ws", bs.handleWS)
@@ -134,14 +134,14 @@ func TestBridge_MessageRouting(t *testing.T) {
 	var receivedMu sync.Mutex
 
 	bp := bs.NewPlatform("test-proj")
+
+	e := NewEngine("test-proj", &stubAgent{}, []Platform{bp}, "", LangEnglish)
+	bs.RegisterEngine("test-proj", e, bp)
 	bp.handler = func(p Platform, msg *Message) {
 		receivedMu.Lock()
 		received = msg
 		receivedMu.Unlock()
 	}
-
-	e := NewEngine("test-proj", &stubAgent{}, []Platform{bp}, "", LangEnglish)
-	bs.RegisterEngine("test-proj", e, bp)
 
 	conn := dialWS(t, wsURL, nil)
 	register(t, conn, "mychat", []string{"text"})
@@ -188,12 +188,12 @@ func TestBridge_ReplyRouting(t *testing.T) {
 	bs, wsURL := startTestBridge(t, "")
 
 	bp := bs.NewPlatform("test-proj")
-	bp.handler = func(p Platform, msg *Message) {
-		p.Reply(nil, msg.ReplyCtx, "pong")
-	}
 
 	e := NewEngine("test-proj", &stubAgent{}, []Platform{bp}, "", LangEnglish)
 	bs.RegisterEngine("test-proj", e, bp)
+	bp.handler = func(p Platform, msg *Message) {
+		p.Reply(nil, msg.ReplyCtx, "pong")
+	}
 
 	conn := dialWS(t, wsURL, nil)
 	register(t, conn, "rc", []string{"text"})
@@ -223,6 +223,9 @@ func TestBridge_CardFallback(t *testing.T) {
 	bs, wsURL := startTestBridge(t, "")
 
 	bp := bs.NewPlatform("test-proj")
+
+	e := NewEngine("test-proj", &stubAgent{}, []Platform{bp}, "", LangEnglish)
+	bs.RegisterEngine("test-proj", e, bp)
 	bp.handler = func(p Platform, msg *Message) {
 		cs, ok := p.(CardSender)
 		if !ok {
@@ -231,9 +234,6 @@ func TestBridge_CardFallback(t *testing.T) {
 		card := NewCard().Title("Test", "blue").Markdown("hello").Build()
 		cs.SendCard(nil, msg.ReplyCtx, card)
 	}
-
-	e := NewEngine("test-proj", &stubAgent{}, []Platform{bp}, "", LangEnglish)
-	bs.RegisterEngine("test-proj", e, bp)
 
 	// Adapter declares NO card capability → should get text fallback
 	conn := dialWS(t, wsURL, nil)
@@ -262,14 +262,14 @@ func TestBridge_CardNative(t *testing.T) {
 	bs, wsURL := startTestBridge(t, "")
 
 	bp := bs.NewPlatform("test-proj")
+
+	e := NewEngine("test-proj", &stubAgent{}, []Platform{bp}, "", LangEnglish)
+	bs.RegisterEngine("test-proj", e, bp)
 	bp.handler = func(p Platform, msg *Message) {
 		cs := p.(CardSender)
 		card := NewCard().Title("Test", "blue").Markdown("hello").Build()
 		cs.SendCard(nil, msg.ReplyCtx, card)
 	}
-
-	e := NewEngine("test-proj", &stubAgent{}, []Platform{bp}, "", LangEnglish)
-	bs.RegisterEngine("test-proj", e, bp)
 
 	// Adapter declares card capability → should get card
 	conn := dialWS(t, wsURL, nil)
@@ -390,7 +390,7 @@ func TestSerializeCard(t *testing.T) {
 // startTestBridgeWithREST creates a bridge server with both WS and REST endpoints.
 func startTestBridgeWithREST(t *testing.T, token string) (*BridgeServer, string) {
 	t.Helper()
-	bs := NewBridgeServer(0, token, "/bridge/ws")
+	bs := NewBridgeServer(0, token, "/bridge/ws", nil)
 
 	agent := &stubAgent{}
 	sm := NewSessionManager("")
