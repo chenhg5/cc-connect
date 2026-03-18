@@ -2,7 +2,10 @@ package core
 
 import (
 	"log/slog"
+	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"time"
 )
@@ -16,6 +19,12 @@ func normalizeWorkspacePath(path string) string {
 	resolved, err := filepath.EvalSymlinks(cleaned)
 	if err != nil {
 		return cleaned
+	}
+	if runtime.GOOS == "darwin" && strings.HasPrefix(resolved, "/private/") {
+		aliased := strings.TrimPrefix(resolved, "/private")
+		if _, err := os.Stat(aliased); err == nil {
+			resolved = aliased
+		}
 	}
 	if resolved != path {
 		slog.Debug("workspace path normalized", "original", path, "normalized", resolved)
@@ -65,17 +74,17 @@ func newWorkspacePool(idleTimeout time.Duration) *workspacePool {
 	}
 }
 
-// Get returns the state for a workspace. Callers must pass a normalized path
-// (use normalizeWorkspacePath or resolveWorkspace which normalizes on return).
+// Get returns the state for a workspace.
 func (p *workspacePool) Get(workspace string) *workspaceState {
+	workspace = normalizeWorkspacePath(workspace)
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.states[workspace]
 }
 
-// GetOrCreate returns or creates state for a workspace. Callers must pass a
-// normalized path (see Get).
+// GetOrCreate returns or creates state for a workspace.
 func (p *workspacePool) GetOrCreate(workspace string) *workspaceState {
+	workspace = normalizeWorkspacePath(workspace)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if s, ok := p.states[workspace]; ok {

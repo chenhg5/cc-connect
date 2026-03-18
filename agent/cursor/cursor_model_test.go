@@ -3,14 +3,23 @@ package cursor
 import (
 	"context"
 	"os/exec"
+	"strings"
 	"testing"
 )
 
-func TestFetchModelsFromAgentCLI(t *testing.T) {
-	// Skip if agent CLI not available
+func requireWorkingAgentCLI(t *testing.T) {
+	t.Helper()
 	if _, err := exec.LookPath("agent"); err != nil {
 		t.Skip("agent CLI not in PATH")
 	}
+	out, err := exec.Command("agent", "models").CombinedOutput()
+	if err != nil {
+		t.Skipf("agent CLI is not runnable in this environment: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+}
+
+func TestFetchModelsFromAgentCLI(t *testing.T) {
+	requireWorkingAgentCLI(t)
 
 	ctx := context.Background()
 	models := fetchModelsFromAgentCLI(ctx, "agent", nil)
@@ -56,9 +65,7 @@ func TestAvailableModels_Fallback(t *testing.T) {
 }
 
 func TestAvailableModels_FetchFromAgent(t *testing.T) {
-	if _, err := exec.LookPath("agent"); err != nil {
-		t.Skip("agent CLI not in PATH")
-	}
+	requireWorkingAgentCLI(t)
 
 	ctx := context.Background()
 	a := &Agent{cmd: "agent"}
