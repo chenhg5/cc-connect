@@ -1138,10 +1138,18 @@ func TestCmdList_MultiWorkspaceUsesWorkspaceSessions(t *testing.T) {
 
 func TestHandlePendingPermission_MultiWorkspaceLookup(t *testing.T) {
 	e := newTestEngine()
-	e.multiWorkspace = true
 
-	sessionKey := "slack:C123:U1"
-	interactiveKey := "/tmp/ws:" + sessionKey
+	// Set up multi-workspace with proper bindings so interactiveKeyForSessionKey works
+	wsDir := t.TempDir()
+	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(t.TempDir(), bindingPath)
+
+	channelID := "C123"
+	e.workspaceBindings.Bind("project:test", channelID, "chan", wsDir)
+
+	sessionKey := "slack:" + channelID + ":U1"
+	// interactiveKeyForSessionKey resolves symlinks, so use the normalized path
+	interactiveKey := normalizeWorkspacePath(wsDir) + ":" + sessionKey
 
 	pending := &pendingPermission{
 		RequestID: "req-1",

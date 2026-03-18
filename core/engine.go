@@ -1210,18 +1210,9 @@ func (e *Engine) handleVoiceMessage(p Platform, msg *Message) {
 // ──────────────────────────────────────────────────────────────
 
 func (e *Engine) handlePendingPermission(p Platform, msg *Message, content string) bool {
+	iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
 	e.interactiveMu.Lock()
-	state, ok := e.interactiveStates[msg.SessionKey]
-	if (!ok || state == nil) && e.multiWorkspace {
-		suffix := ":" + msg.SessionKey
-		for key, s := range e.interactiveStates {
-			if strings.HasSuffix(key, suffix) {
-				state = s
-				ok = true
-				break
-			}
-		}
-	}
+	state, ok := e.interactiveStates[iKey]
 	e.interactiveMu.Unlock()
 	if !ok || state == nil {
 		return false
@@ -3189,8 +3180,9 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 		globalQuiet := e.quiet
 		e.quietMu.RUnlock()
 
+		iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
 		e.interactiveMu.Lock()
-		state, hasState := e.interactiveStates[msg.SessionKey]
+		state, hasState := e.interactiveStates[iKey]
 		e.interactiveMu.Unlock()
 
 		sessionQuiet := false
@@ -4120,7 +4112,7 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 	}
 
 	switcher.SetModel(target)
-	e.cleanupInteractiveState(msg.SessionKey)
+	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
 
 	s := e.sessions.GetOrCreateActive(msg.SessionKey)
 	s.SetAgentSessionID("", "")
@@ -4213,7 +4205,7 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 	}
 
 	switcher.SetReasoningEffort(target)
-	e.cleanupInteractiveState(msg.SessionKey)
+	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
 
 	s := e.sessions.GetOrCreateActive(msg.SessionKey)
 	s.SetAgentSessionID("", "")
@@ -4279,7 +4271,7 @@ func (e *Engine) cmdMode(p Platform, msg *Message, args []string) {
 	switcher.SetMode(target)
 	newMode := switcher.GetMode()
 
-	e.cleanupInteractiveState(msg.SessionKey)
+	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
 
 	modes := switcher.PermissionModes()
 	displayName := newMode
@@ -4314,14 +4306,15 @@ func (e *Engine) cmdQuiet(p Platform, msg *Message, args []string) {
 	}
 
 	// /quiet — toggle per-session quiet
+	iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
 	e.interactiveMu.Lock()
-	state, ok := e.interactiveStates[msg.SessionKey]
+	state, ok := e.interactiveStates[iKey]
 	e.interactiveMu.Unlock()
 
 	if !ok || state == nil {
 		state = &interactiveState{platform: p, replyCtx: msg.ReplyCtx, quiet: true}
 		e.interactiveMu.Lock()
-		e.interactiveStates[msg.SessionKey] = state
+		e.interactiveStates[iKey] = state
 		e.interactiveMu.Unlock()
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQuietOn))
 		return
@@ -4368,8 +4361,9 @@ func (e *Engine) cmdTTS(p Platform, msg *Message, args []string) {
 }
 
 func (e *Engine) cmdStop(p Platform, msg *Message) {
+	iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
 	e.interactiveMu.Lock()
-	state, ok := e.interactiveStates[msg.SessionKey]
+	state, ok := e.interactiveStates[iKey]
 	e.interactiveMu.Unlock()
 
 	if !ok || state == nil {
@@ -4389,17 +4383,17 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 		pending.resolve()
 	}
 
-	e.cleanupInteractiveState(msg.SessionKey)
+	e.cleanupInteractiveState(iKey)
 
 	// Preserve quiet preference across stop
 	if quietMode {
 		e.interactiveMu.Lock()
-		if s, ok := e.interactiveStates[msg.SessionKey]; ok {
+		if s, ok := e.interactiveStates[iKey]; ok {
 			s.mu.Lock()
 			s.quiet = quietMode
 			s.mu.Unlock()
 		} else {
-			e.interactiveStates[msg.SessionKey] = &interactiveState{platform: p, replyCtx: msg.ReplyCtx, quiet: quietMode}
+			e.interactiveStates[iKey] = &interactiveState{platform: p, replyCtx: msg.ReplyCtx, quiet: quietMode}
 		}
 		e.interactiveMu.Unlock()
 	}
@@ -4414,8 +4408,9 @@ func (e *Engine) cmdCompress(p Platform, msg *Message) {
 		return
 	}
 
+	iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
 	e.interactiveMu.Lock()
-	state, hasState := e.interactiveStates[msg.SessionKey]
+	state, hasState := e.interactiveStates[iKey]
 	e.interactiveMu.Unlock()
 
 	if !hasState || state == nil || state.agentSession == nil || !state.agentSession.Alive() {
@@ -4453,12 +4448,12 @@ func (e *Engine) cmdCompress(p Platform, msg *Message) {
 		if err := state.agentSession.Send(cmd, nil, nil); err != nil {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
 			if !state.agentSession.Alive() {
-				e.cleanupInteractiveState(msg.SessionKey)
+				e.cleanupInteractiveState(iKey)
 			}
 			return
 		}
 
-		e.processCompressEvents(state, session, msg.SessionKey, p, msg.ReplyCtx, &compressUnlocked)
+		e.processCompressEvents(state, session, iKey, p, msg.ReplyCtx, &compressUnlocked)
 	}()
 }
 
@@ -4688,7 +4683,7 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 
 	case "clear", "reset", "none":
 		switcher.SetActiveProvider("")
-		e.cleanupInteractiveState(msg.SessionKey)
+		e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
 		if e.providerSaveFunc != nil {
 			if err := e.providerSaveFunc(""); err != nil {
 				slog.Error("failed to save provider", "error", err)
@@ -4815,7 +4810,7 @@ func (e *Engine) switchProvider(p Platform, msg *Message, switcher ProviderSwitc
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgProviderNotFound), name))
 		return
 	}
-	e.cleanupInteractiveState(msg.SessionKey)
+	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
 
 	if e.providerSaveFunc != nil {
 		if err := e.providerSaveFunc(name); err != nil {
