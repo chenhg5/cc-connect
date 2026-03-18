@@ -49,6 +49,7 @@ type Platform struct {
 	botID                 string
 	appID                 string
 	channelNameCache      sync.Map // channelID -> name
+	botRoleIDs            sync.Map // guildID -> bot managed role ID
 	readyCh               chan struct{}
 	seenMsgs              sync.Map // message ID dedup: prevents duplicate MessageCreate events
 }
@@ -296,17 +297,32 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	}
 	p.session = session
 
-	session.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentMessageContent
+	session.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentMessageContent
 
 	session.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
 		p.botID = r.User.ID
 		p.appID = r.User.ID
 		slog.Info("discord: connected", "bot", r.User.Username+"#"+r.User.Discriminator)
+		// Signal readiness before guild role lookups so RegisterCommands
+		// is not blocked by slow API calls when there are many guilds.
 		select {
 		case <-p.readyCh:
 		default:
 			close(p.readyCh)
 		}
+		for _, g := range r.Guilds {
+			if g == nil || g.ID == "" || g.Unavailable {
+				continue
+			}
+			p.cacheBotRoleIDForGuild(s, g.ID, g.Roles)
+		}
+	})
+
+	session.AddHandler(func(s *discordgo.Session, g *discordgo.GuildCreate) {
+		if g == nil || g.Guild == nil || g.ID == "" || g.Unavailable {
+			return
+		}
+		p.cacheBotRoleIDForGuild(s, g.ID, g.Roles)
 	})
 
 	session.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
@@ -329,20 +345,20 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 			return
 		}
 
-		// In guild channels, only respond when the bot is @mentioned (unless group_reply_all)
+		// In guild channels, only respond when the bot is @mentioned (unless group_reply_all).
+		// Check both user mentions and role mentions (Discord auto-creates a managed role
+		// for each bot; users may @ the role instead of the user).
+		botRoleID := p.botRoleIDForGuild(m.GuildID)
+		if botRoleID == "" && m.GuildID != "" {
+			p.cacheBotRoleIDForGuild(s, m.GuildID, nil)
+			botRoleID = p.botRoleIDForGuild(m.GuildID)
+		}
 		if m.GuildID != "" && !p.groupReplyAll {
-			mentioned := false
-			for _, u := range m.Mentions {
-				if u.ID == p.botID {
-					mentioned = true
-					break
-				}
-			}
-			if !mentioned {
+			if !isDiscordBotMention(m, p.botID, botRoleID) {
 				slog.Debug("discord: ignoring guild message without bot mention", "channel", m.ChannelID)
 				return
 			}
-			m.Content = stripDiscordMention(m.Content, p.botID)
+			m.Content = stripDiscordMentionWithRole(m.Content, p.botID, botRoleID)
 		}
 
 		slog.Debug("discord: message received", "user", m.Author.Username, "channel", m.ChannelID)
@@ -707,9 +723,97 @@ func (p *Platform) Stop() error {
 
 // stripDiscordMention removes <@botID> and <@!botID> (nick mention) from text.
 func stripDiscordMention(text, botID string) string {
+	return stripDiscordMentionWithRole(text, botID, "")
+}
+
+func stripDiscordMentionWithRole(text, botID string, botRoleID string) string {
 	text = strings.ReplaceAll(text, "<@!"+botID+">", "")
 	text = strings.ReplaceAll(text, "<@"+botID+">", "")
+	if botRoleID != "" {
+		text = strings.ReplaceAll(text, "<@&"+botRoleID+">", "")
+	}
 	return strings.TrimSpace(text)
+}
+
+// isDiscordBotMention checks if the message mentions the bot by user ID or managed role ID.
+func isDiscordBotMention(m *discordgo.MessageCreate, botID string, botRoleID string) bool {
+	for _, u := range m.Mentions {
+		if u != nil && u.ID == botID {
+			return true
+		}
+	}
+	if strings.Contains(m.Content, "<@"+botID+">") || strings.Contains(m.Content, "<@!"+botID+">") {
+		return true
+	}
+	for _, roleID := range m.MentionRoles {
+		if roleID == botRoleID && roleID != "" {
+			return true
+		}
+	}
+	return botRoleID != "" && strings.Contains(m.Content, "<@&"+botRoleID+">")
+}
+
+func (p *Platform) botRoleIDForGuild(guildID string) string {
+	if guildID == "" {
+		return ""
+	}
+	v, ok := p.botRoleIDs.Load(guildID)
+	if !ok {
+		return ""
+	}
+	roleID, _ := v.(string)
+	return roleID
+}
+
+func (p *Platform) cacheBotRoleIDForGuild(s *discordgo.Session, guildID string, guildRoles []*discordgo.Role) {
+	if s == nil || guildID == "" || p.botID == "" {
+		return
+	}
+	roleID, err := p.resolveBotRoleIDForGuild(s, guildID, guildRoles)
+	if err != nil {
+		slog.Debug("discord: resolve bot managed role failed", "guild", guildID, "error", err)
+		return
+	}
+	if roleID == "" {
+		return
+	}
+	p.botRoleIDs.Store(guildID, roleID)
+}
+
+func (p *Platform) resolveBotRoleIDForGuild(s *discordgo.Session, guildID string, guildRoles []*discordgo.Role) (string, error) {
+	member, err := s.GuildMember(guildID, p.botID)
+	if err != nil {
+		return "", fmt.Errorf("fetch bot member: %w", err)
+	}
+	if member == nil || len(member.Roles) == 0 {
+		return "", nil
+	}
+
+	memberRoleSet := make(map[string]struct{}, len(member.Roles))
+	for _, roleID := range member.Roles {
+		memberRoleSet[roleID] = struct{}{}
+	}
+
+	roles := guildRoles
+	if len(roles) == 0 {
+		roles, err = s.GuildRoles(guildID)
+		if err != nil {
+			return "", fmt.Errorf("fetch guild roles: %w", err)
+		}
+	}
+
+	for _, role := range roles {
+		if role == nil {
+			continue
+		}
+		if _, ok := memberRoleSet[role.ID]; !ok {
+			continue
+		}
+		if role.Managed {
+			return role.ID, nil
+		}
+	}
+	return "", nil
 }
 
 func downloadURL(u string) ([]byte, error) {
