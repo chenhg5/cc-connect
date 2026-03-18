@@ -254,6 +254,50 @@ cc-connect update --pre     # Beta (includes pre-releases)
 /cron add 0 6 * * * Summarize GitHub trending
 ```
 
+### 📎 Agent Attachment Send-Back
+
+When an agent generates a local screenshot, chart, PDF, bundle, or other file, it can send that attachment back to the current chat.
+
+First release supports:
+- Feishu
+- Telegram
+
+If your agent does not natively inject the system prompt, run this once in chat after upgrading:
+
+```text
+/bind setup
+```
+
+or:
+
+```text
+/cron setup
+```
+
+This refreshes the cc-connect instructions in the project memory file so the agent knows how to send attachments back.
+
+You can control this feature globally in `config.toml`:
+
+```toml
+attachment_send = "on"  # default: "on"; set to "off" to block image/file send-back
+```
+
+This switch is independent from the agent's `/mode`. It only controls `cc-connect send --image/--file`.
+
+Examples:
+
+```bash
+cc-connect send --image /absolute/path/to/chart.png
+cc-connect send --file /absolute/path/to/report.pdf
+cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/chart.png
+```
+
+Notes:
+- Absolute paths are the safest option.
+- `--image` and `--file` can both be repeated.
+- `attachment_send = "off"` disables only attachment send-back; ordinary text replies still work.
+- This command is for generated attachments, not ordinary text replies.
+
 📖 **Full documentation:** [docs/usage.md](docs/usage.md)
 
 ---

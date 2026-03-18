@@ -19,6 +19,7 @@ var ConfigPath string
 
 type Config struct {
 	DataDir         string              `toml:"data_dir"` // session store directory, default ~/.cc-connect
+	AttachmentSend  string              `toml:"attachment_send"`
 	Projects        []ProjectConfig     `toml:"projects"`
 	Commands        []CommandConfig     `toml:"commands"`     // global custom slash commands
 	Aliases         []AliasConfig       `toml:"aliases"`      // global command aliases
@@ -231,6 +232,10 @@ func Load(path string) (*Config, error) {
 			cfg.DataDir = ".cc-connect"
 		}
 	}
+	cfg.AttachmentSend = strings.ToLower(strings.TrimSpace(cfg.AttachmentSend))
+	if cfg.AttachmentSend == "" {
+		cfg.AttachmentSend = "on"
+	}
 
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -239,6 +244,11 @@ func Load(path string) (*Config, error) {
 }
 
 func (c *Config) validate() error {
+	switch strings.ToLower(strings.TrimSpace(c.AttachmentSend)) {
+	case "", "on", "off":
+	default:
+		return fmt.Errorf("config: attachment_send must be \"on\" or \"off\"")
+	}
 	if len(c.Projects) == 0 {
 		return fmt.Errorf("config: at least one [[projects]] entry is required")
 	}

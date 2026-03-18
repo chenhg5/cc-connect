@@ -227,6 +227,45 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 			}
 		}
 
+	case socketmode.EventTypeSlashCommand:
+		cmd, ok := evt.Data.(slack.SlashCommand)
+		if !ok {
+			slog.Debug("slack: slash command type assertion failed")
+			return
+		}
+		if evt.Request != nil {
+			p.socket.Ack(*evt.Request)
+		}
+
+		if !core.AllowList(p.allowFrom, cmd.UserID) {
+			slog.Debug("slack: slash command from unauthorized user", "user", cmd.UserID)
+			return
+		}
+
+		// Convert slash command to a regular message with / prefix so the
+		// engine's command handling picks it up.
+		cmdName := strings.TrimPrefix(cmd.Command, "/")
+		content := "/" + cmdName
+		if cmd.Text != "" {
+			content += " " + cmd.Text
+		}
+
+		var sessionKey string
+		if p.shareSessionInChannel {
+			sessionKey = fmt.Sprintf("slack:%s", cmd.ChannelID)
+		} else {
+			sessionKey = fmt.Sprintf("slack:%s:%s", cmd.ChannelID, cmd.UserID)
+		}
+
+		msg := &core.Message{
+			SessionKey: sessionKey, Platform: "slack",
+			UserID: cmd.UserID, UserName: cmd.UserName,
+			Content:  content,
+			ReplyCtx: replyContext{channel: cmd.ChannelID},
+		}
+		slog.Debug("slack: slash command", "command", cmd.Command, "text", cmd.Text, "user", cmd.UserID)
+		p.handler(p, msg)
+
 	case socketmode.EventTypeConnecting:
 		slog.Debug("slack: connecting...")
 	case socketmode.EventTypeConnected:
@@ -348,6 +387,99 @@ func (p *Platform) ResolveChannelName(channelID string) (string, error) {
 	p.channelCacheMu.Unlock()
 
 	return info.Name, nil
+}
+
+// FormattingInstructions returns Slack mrkdwn formatting guidance for the agent.
+func (p *Platform) FormattingInstructions() string {
+	return `You are responding in Slack. Use Slack's mrkdwn format, NOT standard Markdown:
+- Bold: *text* (single asterisks, not double)
+- Italic: _text_
+- Strikethrough: ~text~
+- Code: ` + "`text`" + `
+- Code block: ` + "```text```" + `
+- Blockquote: > text
+- Lists: use bullet (•) or numbered lists normally
+- Links: <url|display text>
+- Do NOT use ## headings — Slack does not render them. Use *bold text* on its own line instead.`
+}
+
+// StartTyping adds emoji reactions to the user's message as a heartbeat
+// indicator so the user knows the bot is still working.
+//
+// Timeline:
+//   - Immediately: eyes
+//   - After 2 minutes: clock
+//   - Every 5 minutes after that: one more emoji (sequential from extras list)
+//
+// All reactions are removed when the returned stop function is called.
+func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
+	rc, ok := rctx.(replyContext)
+	if !ok || rc.channel == "" || rc.timestamp == "" {
+		return func() {}
+	}
+
+	ref := slack.ItemRef{Channel: rc.channel, Timestamp: rc.timestamp}
+	var mu sync.Mutex
+	var added []string
+
+	addReaction := func(emoji string) {
+		if err := p.client.AddReaction(emoji, ref); err != nil {
+			slog.Debug("slack: add reaction failed", "emoji", emoji, "error", err)
+			return
+		}
+		mu.Lock()
+		added = append(added, emoji)
+		mu.Unlock()
+	}
+
+	// Immediately add eyes
+	addReaction("eyes")
+
+	extras := []string{
+		"hourglass_flowing_sand", "hourglass", "gear", "hammer_and_wrench",
+		"mag", "bulb", "rocket", "zap", "fire", "sparkles",
+		"brain", "crystal_ball", "jigsaw", "microscope", "satellite",
+	}
+
+	done := make(chan struct{})
+	go func() {
+		// After 2 minutes, add clock
+		select {
+		case <-time.After(2 * time.Minute):
+			addReaction("clock1")
+		case <-done:
+			return
+		}
+
+		// Every 5 minutes, add a random extra emoji
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		idx := 0
+		for {
+			select {
+			case <-ticker.C:
+				if idx < len(extras) {
+					addReaction(extras[idx])
+					idx++
+				}
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	return func() {
+		close(done)
+		mu.Lock()
+		emojis := make([]string, len(added))
+		copy(emojis, added)
+		mu.Unlock()
+		for _, emoji := range emojis {
+			if err := p.client.RemoveReaction(emoji, ref); err != nil {
+				slog.Debug("slack: remove reaction failed", "emoji", emoji, "error", err)
+			}
+		}
+	}
 }
 
 func (p *Platform) Stop() error {

@@ -254,6 +254,50 @@ cc-connect update --pre     # Beta 版（含 pre-release）
 /cron add 0 6 * * * 帮我总结 GitHub trending
 ```
 
+### 📎 Agent 回传图片和文件
+
+当 Agent 在本地生成了截图、图表、PDF、日志包等文件时，可以主动把附件发回当前聊天。
+
+首版支持：
+- 飞书
+- Telegram
+
+如果当前 Agent 不是原生注入 system prompt 的类型，升级后请先在聊天里执行一次：
+
+```text
+/bind setup
+```
+
+或：
+
+```text
+/cron setup
+```
+
+这样会把最新的 cc-connect 指令写入项目记忆文件，Agent 才会知道如何回传附件。
+
+你也可以在 `config.toml` 里全局控制这项能力：
+
+```toml
+attachment_send = "on"  # 默认 "on"；设为 "off" 会禁用图片/文件回传
+```
+
+这个开关与 agent 的 `/mode` 独立，只控制 `cc-connect send --image/--file` 这条附件回传路径。
+
+回传方式：
+
+```bash
+cc-connect send --image /absolute/path/to/chart.png
+cc-connect send --file /absolute/path/to/report.pdf
+cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/chart.png
+```
+
+要点：
+- 使用绝对路径最稳妥。
+- `--image` 和 `--file` 都可以重复传多个。
+- `attachment_send = "off"` 只会关闭附件回传，普通文本回复仍然正常。
+- 这个命令是给“生成后的附件回传”用的，不是给普通文本回复用的。
+
 📖 **完整文档：** [docs/usage.zh-CN.md](docs/usage.zh-CN.md)
 
 ---

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -40,6 +41,9 @@ var VersionInfo string
 
 // CurrentVersion is the semver tag (e.g. "v1.2.0-beta.1"), set by main.
 var CurrentVersion string
+
+// ErrAttachmentSendDisabled indicates that side-channel image/file delivery is disabled by config.
+var ErrAttachmentSendDisabled = errors.New("attachment send is disabled by config")
 
 // RestartRequest carries info needed to send a post-restart notification.
 type RestartRequest struct {
@@ -119,19 +123,20 @@ type RateLimitCfg struct {
 
 // Engine routes messages between platforms and the agent for a single project.
 type Engine struct {
-	name         string
-	agent        Agent
-	platforms    []Platform
-	sessions     *SessionManager
-	ctx          context.Context
-	cancel       context.CancelFunc
-	i18n         *I18n
-	speech       SpeechCfg
-	tts          *TTSCfg
-	display      DisplayCfg
-	defaultQuiet bool
-	injectSender bool
-	startedAt    time.Time
+	name                  string
+	agent                 Agent
+	platforms             []Platform
+	sessions              *SessionManager
+	ctx                   context.Context
+	cancel                context.CancelFunc
+	i18n                  *I18n
+	speech                SpeechCfg
+	tts                   *TTSCfg
+	display               DisplayCfg
+	defaultQuiet          bool
+	injectSender          bool
+	attachmentSendEnabled bool
+	startedAt             time.Time
 
 	providerSaveFunc       func(providerName string) error
 	providerAddSaveFunc    func(p ProviderConfig) error
@@ -209,6 +214,7 @@ type interactiveState struct {
 	approveAll   bool // when true, auto-approve all permission requests for this session
 	quiet        bool // when true, suppress thinking and tool progress for this session
 	fromVoice    bool // true if current turn originated from voice transcription
+	sideText     string
 	deleteMode   *deleteModeState
 }
 
@@ -241,21 +247,22 @@ func (pp *pendingPermission) resolve() {
 func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath string, lang Language) *Engine {
 	ctx, cancel := context.WithCancel(context.Background())
 	e := &Engine{
-		name:              name,
-		agent:             ag,
-		platforms:         platforms,
-		sessions:          NewSessionManager(sessionStorePath),
-		ctx:               ctx,
-		cancel:            cancel,
-		i18n:              NewI18n(lang),
-		display:           DisplayCfg{ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen},
-		commands:          NewCommandRegistry(),
-		skills:            NewSkillRegistry(),
-		aliases:           make(map[string]string),
-		interactiveStates: make(map[string]*interactiveState),
-		startedAt:         time.Now(),
-		streamPreview:     DefaultStreamPreviewCfg(),
-		eventIdleTimeout:  defaultEventIdleTimeout,
+		name:                  name,
+		agent:                 ag,
+		platforms:             platforms,
+		sessions:              NewSessionManager(sessionStorePath),
+		ctx:                   ctx,
+		cancel:                cancel,
+		i18n:                  NewI18n(lang),
+		attachmentSendEnabled: true,
+		display:               DisplayCfg{ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen},
+		commands:              NewCommandRegistry(),
+		skills:                NewSkillRegistry(),
+		aliases:               make(map[string]string),
+		interactiveStates:     make(map[string]*interactiveState),
+		startedAt:             time.Now(),
+		streamPreview:         DefaultStreamPreviewCfg(),
+		eventIdleTimeout:      defaultEventIdleTimeout,
 	}
 
 	if ag != nil {
@@ -535,6 +542,11 @@ func (e *Engine) SetDefaultQuiet(q bool) {
 // accordingly (e.g. personal task views, role-based access control).
 func (e *Engine) SetInjectSender(v bool) {
 	e.injectSender = v
+}
+
+// SetAttachmentSendEnabled controls whether side-channel image/file delivery is allowed.
+func (e *Engine) SetAttachmentSendEnabled(v bool) {
+	e.attachmentSendEnabled = v
 }
 
 func (e *Engine) SetLanguageSaveFunc(fn func(Language) error) {
@@ -1197,6 +1209,25 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	session := sessions.GetOrCreateActive(msg.SessionKey)
 	sessions.UpdateUserMeta(msg.SessionKey, msg.UserName, msg.ChatName)
 	if !session.TryLock() {
+		// Check for /btw — inject into the running session mid-turn
+		trimmed := strings.TrimSpace(content)
+		if isBtwCommand(trimmed) {
+			btw := strings.TrimSpace(trimmed[len(matchBtwPrefix(trimmed)):])
+			if btw != "" {
+				e.interactiveMu.Lock()
+				state, ok := e.interactiveStates[interactiveKey]
+				e.interactiveMu.Unlock()
+				if ok && state.agentSession != nil && state.agentSession.Alive() {
+					if err := state.agentSession.Send(btw, nil, nil); err != nil {
+						slog.Error("btw: send failed", "error", err)
+						e.reply(p, msg.ReplyCtx, "Failed to send btw message.")
+					} else {
+						e.reply(p, msg.ReplyCtx, "btw sent")
+					}
+					return
+				}
+			}
+		}
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
 		return
 	}
@@ -1535,6 +1566,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	sendStart := time.Now()
 	state.mu.Lock()
 	state.fromVoice = msg.FromVoice
+	state.sideText = ""
 	state.mu.Unlock()
 	if err := state.agentSession.Send(promptContent, msg.Images, msg.Files); err != nil {
 		slog.Error("failed to send prompt", "error", err)
@@ -1554,6 +1586,10 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 				return
 			}
 			sendStart = time.Now()
+			state.mu.Lock()
+			state.fromVoice = msg.FromVoice
+			state.sideText = ""
+			state.mu.Unlock()
 			if err := state.agentSession.Send(promptContent, msg.Images, msg.Files); err != nil {
 				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
 				return
@@ -1571,6 +1607,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 }
 
 // getOrCreateWorkspaceAgent returns (or creates) a per-workspace agent and session manager.
+// workspace must be a normalized path (from resolveWorkspace or normalizeWorkspacePath).
 func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionManager, error) {
 	ws := e.workspacePool.GetOrCreate(workspace)
 	ws.mu.Lock()
@@ -1680,6 +1717,13 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 			}
 		}
 		inj.SetSessionEnv(envVars)
+	}
+
+	// Inject platform-specific formatting instructions into the agent's system prompt.
+	if fip, ok := p.(FormattingInstructionProvider); ok {
+		if ppi, ok := agent.(PlatformPromptInjector); ok {
+			ppi.SetPlatformPrompt(fip.FormattingInstructions())
+		}
 	}
 
 	// Check if context is already canceled (e.g. during shutdown/restart)
@@ -2024,6 +2068,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			)
 
 			replyStart := time.Now()
+			normalizedResponse := strings.TrimSpace(fullResponse)
+			state.mu.Lock()
+			suppressDuplicate := normalizedResponse != "" && normalizedResponse == state.sideText
+			state.sideText = ""
+			state.mu.Unlock()
 
 			// When tool calls happened, text was sent in segments; only send remainder.
 			if toolCount > 0 {
@@ -2039,6 +2088,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						}
 					}
 				}
+			} else if suppressDuplicate {
+				sp.finish("")
+				slog.Debug("EventResult: suppressed duplicate side-channel text", "response_len", len(fullResponse))
 			} else if sp.finish(fullResponse) {
 				slog.Debug("EventResult: finalized via stream preview", "response_len", len(fullResponse))
 			} else {
@@ -2160,6 +2212,26 @@ var builtinCommands = []struct {
 	{[]string{"dir", "cd", "chdir", "workdir"}, "dir"},
 	{[]string{"tts"}, "tts"},
 	{[]string{"workspace", "ws"}, "workspace"},
+}
+
+// isBtwCommand checks if a trimmed message starts with a /btw command.
+func isBtwCommand(trimmed string) bool {
+	return matchBtwPrefix(trimmed) != ""
+}
+
+// matchBtwPrefix returns the prefix portion (e.g. "/btw ") if the
+// message starts with a btw command, or "" if it doesn't match.
+func matchBtwPrefix(trimmed string) string {
+	lower := strings.ToLower(trimmed)
+	for _, prefix := range []string{"/btw"} {
+		if strings.HasPrefix(lower, prefix) {
+			rest := trimmed[len(prefix):]
+			if rest == "" || rest[0] == ' ' {
+				return trimmed[:len(prefix)]
+			}
+		}
+	}
+	return ""
 }
 
 // matchPrefix finds a unique command matching the given prefix.
@@ -2352,6 +2424,13 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 			return true
 		}
 		if skill := e.skills.Resolve(cmd); skill != nil {
+			if disabledCmds[strings.ToLower(skill.Name)] {
+				slog.Info("audit: command_blocked",
+					"user_id", msg.UserID, "platform", msg.Platform,
+					"project", e.name, "command", skill.Name, "reason", "disabled")
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandDisabled), "/"+skill.Name))
+				return true
+			}
 			slog.Info("audit: command_executed",
 				"user_id", msg.UserID, "platform", msg.Platform,
 				"project", e.name, "command", skill.Name, "type", "skill")
@@ -2401,7 +2480,7 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 		if resolver, ok := p.(ChannelNameResolver); ok {
 			channelName, _ = resolver.ResolveChannelName(channelID)
 		}
-		e.workspaceBindings.Bind(projectKey, channelID, channelName, wsPath)
+		e.workspaceBindings.Bind(projectKey, channelID, channelName, normalizeWorkspacePath(wsPath))
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsBindSuccess, wsName))
 
 	case "init":
@@ -2423,7 +2502,7 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 			if resolver, ok := p.(ChannelNameResolver); ok {
 				channelName, _ = resolver.ResolveChannelName(channelID)
 			}
-			e.workspaceBindings.Bind(projectKey, channelID, channelName, cloneTo)
+			e.workspaceBindings.Bind(projectKey, channelID, channelName, normalizeWorkspacePath(cloneTo))
 			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsCloneSuccess, cloneTo))
 			return
 		}
@@ -2439,7 +2518,7 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 		if resolver, ok := p.(ChannelNameResolver); ok {
 			channelName, _ = resolver.ResolveChannelName(channelID)
 		}
-		e.workspaceBindings.Bind(projectKey, channelID, channelName, cloneTo)
+		e.workspaceBindings.Bind(projectKey, channelID, channelName, normalizeWorkspacePath(cloneTo))
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsCloneSuccess, cloneTo))
 
 	case "unbind":
@@ -4763,8 +4842,11 @@ func (e *Engine) switchProvider(p Platform, msg *Message, switcher ProviderSwitc
 // SendToSession sends a message to an active session from an external caller (API/CLI).
 // If sessionKey is empty, it picks the first active session.
 func (e *Engine) SendToSession(sessionKey, message string) error {
+	return e.SendToSessionWithAttachments(sessionKey, message, nil, nil)
+}
+
+func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images []ImageAttachment, files []FileAttachment) error {
 	e.interactiveMu.Lock()
-	defer e.interactiveMu.Unlock()
 
 	var state *interactiveState
 	if sessionKey != "" {
@@ -4776,6 +4858,7 @@ func (e *Engine) SendToSession(sessionKey, message string) error {
 			break
 		}
 	}
+	e.interactiveMu.Unlock()
 
 	if state == nil {
 		return fmt.Errorf("no active session found (key=%q)", sessionKey)
@@ -4790,7 +4873,52 @@ func (e *Engine) SendToSession(sessionKey, message string) error {
 		return fmt.Errorf("no active session found (key=%q)", sessionKey)
 	}
 
-	return p.Send(e.ctx, replyCtx, message)
+	if message == "" && len(images) == 0 && len(files) == 0 {
+		return fmt.Errorf("message or attachment is required")
+	}
+	if (len(images) > 0 || len(files) > 0) && !e.attachmentSendEnabled {
+		return ErrAttachmentSendDisabled
+	}
+
+	var imageSender ImageSender
+	if len(images) > 0 {
+		var ok bool
+		imageSender, ok = p.(ImageSender)
+		if !ok {
+			return fmt.Errorf("platform %s: %w", p.Name(), ErrNotSupported)
+		}
+	}
+
+	var fileSender FileSender
+	if len(files) > 0 {
+		var ok bool
+		fileSender, ok = p.(FileSender)
+		if !ok {
+			return fmt.Errorf("platform %s: %w", p.Name(), ErrNotSupported)
+		}
+	}
+
+	if message != "" {
+		if err := p.Send(e.ctx, replyCtx, message); err != nil {
+			return err
+		}
+		if len(images) > 0 || len(files) > 0 {
+			state.mu.Lock()
+			state.sideText = strings.TrimSpace(message)
+			state.mu.Unlock()
+		}
+	}
+	for _, img := range images {
+		if err := imageSender.SendImage(e.ctx, replyCtx, img); err != nil {
+			return err
+		}
+	}
+	for _, file := range files {
+		if err := fileSender.SendFile(e.ctx, replyCtx, file); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // sendPermissionPrompt sends a permission prompt with interactive buttons when
@@ -7919,8 +8047,17 @@ func (e *Engine) setupMemoryFile() (setupResult, string, error) {
 	baseName := filepath.Base(filePath)
 
 	existing, _ := os.ReadFile(filePath)
-	if strings.Contains(string(existing), ccConnectInstructionMarker) {
-		return setupExists, baseName, nil
+	existingText := string(existing)
+	block := "\n" + ccConnectInstructionMarker + "\n" + AgentSystemPrompt() + "\n"
+	if idx := strings.Index(existingText, ccConnectInstructionMarker); idx >= 0 {
+		if strings.Contains(existingText[idx:], AgentSystemPrompt()) {
+			return setupExists, baseName, nil
+		}
+		updated := strings.TrimRight(existingText[:idx], "\n") + block
+		if err := os.WriteFile(filePath, []byte(updated), 0o644); err != nil {
+			return setupError, baseName, err
+		}
+		return setupOK, baseName, nil
 	}
 
 	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
@@ -7933,7 +8070,6 @@ func (e *Engine) setupMemoryFile() (setupResult, string, error) {
 	}
 	defer f.Close()
 
-	block := "\n" + ccConnectInstructionMarker + "\n" + AgentSystemPrompt() + "\n"
 	if _, err := f.WriteString(block); err != nil {
 		return setupError, baseName, err
 	}
@@ -8015,7 +8151,7 @@ func (e *Engine) sessionContextForKey(sessionKey string) (Agent, *SessionManager
 	}
 	projectKey := "project:" + e.name
 	if b := e.workspaceBindings.Lookup(projectKey, channelID); b != nil {
-		if wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(b.Workspace); err == nil {
+		if wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(normalizeWorkspacePath(b.Workspace)); err == nil {
 			return wsAgent, wsSessions
 		}
 	}
@@ -8044,7 +8180,7 @@ func (e *Engine) interactiveKeyForSessionKey(sessionKey string) string {
 	}
 	projectKey := "project:" + e.name
 	if b := e.workspaceBindings.Lookup(projectKey, channelID); b != nil {
-		return b.Workspace + ":" + sessionKey
+		return normalizeWorkspacePath(b.Workspace) + ":" + sessionKey
 	}
 	return sessionKey
 }
@@ -8064,7 +8200,7 @@ func (e *Engine) resolveWorkspace(p Platform, channelID string) (string, string,
 			e.workspaceBindings.Unbind(projectKey, channelID)
 			return "", b.ChannelName, nil
 		}
-		return b.Workspace, b.ChannelName, nil
+		return normalizeWorkspacePath(b.Workspace), b.ChannelName, nil
 	}
 
 	// Step 2: Resolve channel name for convention match
@@ -8086,10 +8222,11 @@ func (e *Engine) resolveWorkspace(p Platform, channelID string) (string, string,
 	candidate := filepath.Join(e.baseDir, channelName)
 	if info, err := os.Stat(candidate); err == nil && info.IsDir() {
 		// Auto-bind
-		e.workspaceBindings.Bind(projectKey, channelID, channelName, candidate)
+		normalized := normalizeWorkspacePath(candidate)
+		e.workspaceBindings.Bind(projectKey, channelID, channelName, normalized)
 		slog.Info("workspace auto-bound by convention",
-			"channel", channelName, "workspace", candidate)
-		return candidate, channelName, nil
+			"channel", channelName, "workspace", normalized)
+		return normalized, channelName, nil
 	}
 
 	return "", channelName, nil
@@ -8158,7 +8295,7 @@ func (e *Engine) handleWorkspaceInitFlow(p Platform, msg *Message, channelID, ch
 		}
 
 		projectKey := "project:" + e.name
-		e.workspaceBindings.Bind(projectKey, channelID, flow.channelName, flow.cloneTo)
+		e.workspaceBindings.Bind(projectKey, channelID, flow.channelName, normalizeWorkspacePath(flow.cloneTo))
 
 		e.initFlowsMu.Lock()
 		delete(e.initFlows, channelID)

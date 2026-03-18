@@ -169,6 +169,19 @@ func (p *WSPlatform) runConnection() error {
 		p.conn = nil
 		p.mu.Unlock()
 		conn.Close()
+
+		// Drain pending ACK channels so waiting goroutines are unblocked
+		// and stale entries do not accumulate across reconnections.
+		p.pendingAcks.Range(func(key, value any) bool {
+			if ch, ok := value.(chan error); ok {
+				select {
+				case ch <- fmt.Errorf("wecom-ws: connection closed"):
+				default:
+				}
+			}
+			p.pendingAcks.Delete(key)
+			return true
+		})
 	}()
 
 	// Send subscribe (auth) frame

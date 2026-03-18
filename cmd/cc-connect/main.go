@@ -30,6 +30,8 @@ var (
 )
 
 func main() {
+	checkUpdateAsync()
+
 	// Handle subcommands before flag parsing
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
@@ -187,6 +189,7 @@ func main() {
 			toCoreProviders(proj.Agent.Providers),
 			optionString(proj.Agent.Options, "provider"),
 		)
+		engine.SetAttachmentSendEnabled(cfg.AttachmentSend != "off")
 
 		// Wire multi-workspace mode
 		if proj.Mode == "multi-workspace" {
@@ -769,12 +772,16 @@ func printUsage() {
 	if v == "" || v == "dev" {
 		v = "dev"
 	}
+
+	// 检查是否有新版本可用并显示提示
+	updateHint := getUpdateHintIfAvailable()
+
 	fmt.Fprintf(os.Stderr, `
                                               _
   ___ ___        ___ ___  _ __  _ __   ___  ___| |_
  / __/ __|_____ / __/ _ \| '_ \| '_ \ / _ \/ __| __|
 | (_| (_|_____|  (_| (_) | | | | | | |  __/ (__| |_
- \___\__|      \___\___/|_| |_|_| |_|\___|\___|\__|  %s
+ \___\__|      \___\___/|_| |_|_| |_|\___|\___|\__|  %s%s
 
   Bridge your messaging platforms to local AI coding agents.
   Supports: Claude Code, Codex, Cursor, Gemini CLI, Qoder CLI, OpenCode
@@ -844,7 +851,7 @@ Examples:
   cc-connect config-example           Print full config.toml example
   cc-connect config-example > c.toml  Save example config to a file
 
-`, v)
+`, v, updateHint)
 }
 
 func setupLogger(level string, w io.Writer) {
@@ -911,6 +918,9 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 
 	// Reload sender injection
 	engine.SetInjectSender(proj.InjectSender != nil && *proj.InjectSender)
+
+	// Reload attachment send-back switch
+	engine.SetAttachmentSendEnabled(cfg.AttachmentSend != "off")
 
 	// Reload providers
 	if ps, ok := engine.GetAgent().(core.ProviderSwitcher); ok {
