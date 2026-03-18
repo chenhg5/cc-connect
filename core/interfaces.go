@@ -211,6 +211,7 @@ type ProviderConfig struct {
 	APIKey   string
 	BaseURL  string
 	Model    string
+	Models   []ModelOption     // pre-configured list of available models for this provider
 	Thinking string            // override thinking type sent to this provider ("disabled", "enabled", or "" for no rewrite)
 	Env      map[string]string // arbitrary extra env vars (e.g. CLAUDE_CODE_USE_BEDROCK=1)
 }
@@ -251,8 +252,9 @@ type ReasoningEffortSwitcher interface {
 
 // ModelOption describes a selectable model.
 type ModelOption struct {
-	Name string // model identifier passed to CLI
-	Desc string // short description (display_name or empty)
+	Name  string // model identifier passed to CLI
+	Desc  string // short description (display_name or empty)
+	Alias string // optional short alias for the /model command (e.g. "codex" for "gpt-5.3-codex")
 }
 
 // UsageReporter is an optional interface for agents that can report account or

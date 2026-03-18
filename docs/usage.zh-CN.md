@@ -7,6 +7,7 @@ cc-connect 完整功能使用指南。
 - [会话管理](#会话管理)
 - [权限模式](#权限模式)
 - [API Provider 管理](#api-provider-管理)
+- [模型选择](#模型选择)
 - [飞书配置 CLI](#飞书配置-cli)
 - [Claude Code Router 集成](#claude-code-router-集成)
 - [语音消息（语音转文字）](#语音消息语音转文字)
@@ -33,6 +34,7 @@ cc-connect 完整功能使用指南。
 | `/history [n]` | 查看最近 n 条消息 |
 | `/usage` | 查看账号/模型限额使用情况 |
 | `/provider [...]` | 管理 API Provider |
+| `/model [alias]` | 列出可用模型或按别名切换 |
 | `/allow <工具名>` | 预授权工具 |
 | `/reasoning [等级]` | 查看或切换推理强度（Codex）|
 | `/mode [名称]` | 查看或切换权限模式 |
@@ -129,6 +131,18 @@ api_key = "sk-xxx"
 base_url = "https://api.relay-service.com"
 model = "claude-sonnet-4-20250514"
 
+[[projects.agent.providers.models]]
+model = "claude-sonnet-4-20250514"
+alias = "sonnet"
+
+[[projects.agent.providers.models]]
+model = "claude-opus-4-20250514"
+alias = "opus"
+
+[[projects.agent.providers.models]]
+model = "claude-haiku-3-5-20241022"
+alias = "haiku"
+
 # MiniMax — 兼容 OpenAI 接口，204K 超长上下文
 [[projects.agent.providers]]
 name = "minimax"
@@ -171,6 +185,42 @@ cc-connect provider import --project my-backend  # 从 cc-switch 导入
 | Gemini CLI | `GEMINI_API_KEY` | 使用 `env` 字段 |
 | OpenCode | `ANTHROPIC_API_KEY` | 使用 `env` 字段 |
 | iFlow CLI | `IFLOW_API_KEY` | `IFLOW_BASE_URL` |
+
+---
+
+## 模型选择
+
+通过 `[[providers.models]]` 为每个 Provider 预配置可选模型列表。每个条目包含 `model`（模型标识符）和可选的 `alias`（别名，显示在 `/model` 中）。
+
+### 配置模型
+
+```toml
+[[projects.agent.providers]]
+name = "openai"
+api_key = "sk-xxx"
+
+[[projects.agent.providers.models]]
+model = "gpt-5.3-codex"
+alias = "codex"
+
+[[projects.agent.providers.models]]
+model = "gpt-5.4"
+alias = "gpt"
+
+[[projects.agent.providers.models]]
+model = "gpt-5.3-codex-spark"
+alias = "spark"
+```
+
+### 聊天命令
+
+```
+/model              列出可用模型（格式：alias - model）
+/model <alias>      按别名切换模型
+/model <name>       按完整名称切换模型
+```
+
+配置了 `models` 时，`/model` 直接显示该列表，不发起 API 请求。未配置时，自动从 Provider API 获取或使用内置备选列表。
 
 ---
 

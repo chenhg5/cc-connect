@@ -241,6 +241,15 @@ cc-connect update --pre     # Beta (includes pre-releases)
 
 ---
 
+### 🤖 Model Selection
+
+```
+/model                      List available models (format: alias - model)
+/model <alias>              Switch to model by alias
+```
+
+---
+
 ### ⏰ Scheduled Tasks
 
 ```bash

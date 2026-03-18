@@ -241,6 +241,15 @@ cc-connect update --pre     # Beta 版（含 pre-release）
 
 ---
 
+### 🤖 模型选择
+
+```
+/model                      列出可用模型（格式：alias - model）
+/model <alias>              按别名切换模型
+```
+
+---
+
 ### ⏰ 定时任务
 
 ```bash

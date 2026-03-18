@@ -3770,13 +3770,22 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 				if m.Name == current {
 					marker = "> "
 				}
-				desc := m.Desc
-				if desc != "" {
-					desc = " — " + desc
+				var line string
+				if m.Alias != "" {
+					line = fmt.Sprintf("%s%d. %s - %s\n", marker, i+1, m.Alias, m.Name)
+				} else {
+					desc := m.Desc
+					if desc != "" {
+						desc = " — " + desc
+					}
+					line = fmt.Sprintf("%s%d. %s%s\n", marker, i+1, m.Name, desc)
 				}
-				sb.WriteString(fmt.Sprintf("%s%d. %s%s\n", marker, i+1, m.Name, desc))
+				sb.WriteString(line)
 
 				label := m.Name
+				if m.Alias != "" {
+					label = m.Alias
+				}
 				if m.Name == current {
 					label = "▶ " + label
 				}
@@ -3805,6 +3814,8 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 	target := args[0]
 	if idx, err := strconv.Atoi(target); err == nil && idx >= 1 && idx <= len(models) {
 		target = models[idx-1].Name
+	} else {
+		target = resolveModelAlias(models, target)
 	}
 
 	switcher.SetModel(target)
@@ -3816,6 +3827,18 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 	e.sessions.Save()
 
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChanged, target))
+}
+
+// resolveModelAlias resolves a user-supplied string to a model name.
+// It first checks for an exact alias match, then falls back to the original value
+// (which may be a direct model name).
+func resolveModelAlias(models []ModelOption, input string) string {
+	for _, m := range models {
+		if m.Alias != "" && strings.EqualFold(m.Alias, input) {
+			return m.Name
+		}
+	}
+	return input
 }
 
 func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
@@ -4913,6 +4936,8 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		target := args
 		if idx, err := strconv.Atoi(target); err == nil && idx >= 1 && idx <= len(models) {
 			target = models[idx-1].Name
+		} else {
+			target = resolveModelAlias(models, target)
 		}
 		switcher.SetModel(target)
 		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
@@ -5479,7 +5504,9 @@ func (e *Engine) renderModelCard() *Card {
 	initVal := ""
 	for i, m := range models {
 		label := m.Name
-		if m.Desc != "" {
+		if m.Alias != "" {
+			label = m.Alias + " - " + m.Name
+		} else if m.Desc != "" {
 			label += " — " + m.Desc
 		}
 		val := fmt.Sprintf("act:/model %d", i+1)

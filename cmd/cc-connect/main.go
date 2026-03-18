@@ -142,6 +142,7 @@ func main() {
 					APIKey:   p.APIKey,
 					BaseURL:  p.BaseURL,
 					Model:    p.Model,
+					Models:   convertProviderModels(p.Models),
 					Thinking: p.Thinking,
 					Env:      p.Env,
 				}
@@ -438,7 +439,7 @@ func main() {
 		engine.SetProviderAddSaveFunc(func(p core.ProviderConfig) error {
 			return config.AddProviderToConfig(projName, config.ProviderConfig{
 				Name: p.Name, APIKey: p.APIKey, BaseURL: p.BaseURL,
-				Model: p.Model, Thinking: p.Thinking, Env: p.Env,
+				Model: p.Model, Models: convertCoreModels(p.Models), Thinking: p.Thinking, Env: p.Env,
 			})
 		})
 		engine.SetProviderRemoveSaveFunc(func(name string) error {
@@ -908,7 +909,7 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		for i, p := range proj.Agent.Providers {
 			providers[i] = core.ProviderConfig{
 				Name: p.Name, APIKey: p.APIKey, BaseURL: p.BaseURL,
-				Model: p.Model, Thinking: p.Thinking, Env: p.Env,
+				Model: p.Model, Models: convertProviderModels(p.Models), Thinking: p.Thinking, Env: p.Env,
 			}
 		}
 		ps.SetProviders(providers)
@@ -983,6 +984,28 @@ func buildUserRoleManager(uc *config.UsersConfig) *core.UserRoleManager {
 	urm := core.NewUserRoleManager()
 	urm.Configure(defaultRole, roles)
 	return urm
+}
+
+func convertProviderModels(ms []config.ProviderModelConfig) []core.ModelOption {
+	if len(ms) == 0 {
+		return nil
+	}
+	opts := make([]core.ModelOption, len(ms))
+	for i, m := range ms {
+		opts[i] = core.ModelOption{Name: m.Model, Alias: m.Alias}
+	}
+	return opts
+}
+
+func convertCoreModels(ms []core.ModelOption) []config.ProviderModelConfig {
+	if len(ms) == 0 {
+		return nil
+	}
+	out := make([]config.ProviderModelConfig, len(ms))
+	for i, m := range ms {
+		out[i] = config.ProviderModelConfig{Model: m.Name, Alias: m.Alias}
+	}
+	return out
 }
 
 func buildHeartbeatConfig(hc config.HeartbeatConfig) core.HeartbeatConfig {

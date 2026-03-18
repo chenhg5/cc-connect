@@ -7,6 +7,7 @@ Complete guide to using cc-connect features.
 - [Session Management](#session-management)
 - [Permission Modes](#permission-modes)
 - [API Provider Management](#api-provider-management)
+- [Model Selection](#model-selection)
 - [Feishu Setup CLI](#feishu-setup-cli)
 - [Claude Code Router Integration](#claude-code-router-integration)
 - [Voice Messages (STT)](#voice-messages-speech-to-text)
@@ -33,6 +34,7 @@ Each user gets an independent session with full conversation context. Manage ses
 | `/history [n]` | Show last n messages (default 10) |
 | `/usage` | Show account/model quota usage (if supported) |
 | `/provider [...]` | Manage API providers |
+| `/model [alias]` | List available models or switch by alias |
 | `/allow <tool>` | Pre-allow a tool (next session) |
 | `/reasoning [level]` | View or switch reasoning effort (Codex) |
 | `/mode [name]` | View or switch permission mode |
@@ -129,6 +131,18 @@ api_key = "sk-xxx"
 base_url = "https://api.relay-service.com"
 model = "claude-sonnet-4-20250514"
 
+[[projects.agent.providers.models]]
+model = "claude-sonnet-4-20250514"
+alias = "sonnet"
+
+[[projects.agent.providers.models]]
+model = "claude-opus-4-20250514"
+alias = "opus"
+
+[[projects.agent.providers.models]]
+model = "claude-haiku-3-5-20241022"
+alias = "haiku"
+
 # MiniMax — OpenAI-compatible, 204K context
 [[projects.agent.providers]]
 name = "minimax"
@@ -171,6 +185,42 @@ cc-connect provider import --project my-backend  # from cc-switch
 | Gemini CLI | `GEMINI_API_KEY` | use `env` map |
 | OpenCode | `ANTHROPIC_API_KEY` | use `env` map |
 | iFlow CLI | `IFLOW_API_KEY` | `IFLOW_BASE_URL` |
+
+---
+
+## Model Selection
+
+Pre-configure a list of selectable models per provider using `[[providers.models]]`. Each entry has a `model` identifier and an optional `alias` (short name shown in `/model`).
+
+### Configure Models
+
+```toml
+[[projects.agent.providers]]
+name = "openai"
+api_key = "sk-xxx"
+
+[[projects.agent.providers.models]]
+model = "gpt-5.3-codex"
+alias = "codex"
+
+[[projects.agent.providers.models]]
+model = "gpt-5.4"
+alias = "gpt"
+
+[[projects.agent.providers.models]]
+model = "gpt-5.3-codex-spark"
+alias = "spark"
+```
+
+### Chat Commands
+
+```
+/model              List available models (format: alias - model)
+/model <alias>      Switch to the model matching the alias
+/model <name>       Switch to the model by its full name
+```
+
+When `models` is configured, `/model` shows exactly that list without making an API round-trip. When omitted, models are fetched from the provider API or fall back to a built-in list.
 
 ---
 
