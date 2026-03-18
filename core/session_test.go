@@ -138,6 +138,27 @@ func TestSessionManager_Persistence(t *testing.T) {
 	}
 }
 
+func TestSessionManager_GetOrCreateActive_Persists(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+
+	sm1 := NewSessionManager(path)
+	s := sm1.GetOrCreateActive("user1")
+	if s == nil {
+		t.Fatal("expected non-nil session")
+	}
+
+	// Reload from disk — session should survive
+	sm2 := NewSessionManager(path)
+	list := sm2.ListSessions("user1")
+	if len(list) != 1 {
+		t.Fatalf("expected 1 session after reload, got %d", len(list))
+	}
+	if list[0].ID != s.ID {
+		t.Errorf("reloaded session ID = %q, want %q", list[0].ID, s.ID)
+	}
+}
+
 func TestSession_TryLockUnlock(t *testing.T) {
 	s := &Session{}
 	if !s.TryLock() {
