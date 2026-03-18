@@ -656,25 +656,33 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		return fmt.Errorf("reconstruct reply context: %w", err)
 	}
 
-	// Notify user that a cron job is executing (unless silent)
-	silent := false
-	if e.cronScheduler != nil {
-		silent = e.cronScheduler.IsSilent(job)
+	// Wrap platform to discard all outgoing messages when muted
+	effectivePlatform := targetPlatform
+	if job.Mute {
+		effectivePlatform = &mutePlatform{targetPlatform}
 	}
-	if !silent {
-		desc := job.Description
-		if desc == "" {
-			if job.IsShellJob() {
-				desc = truncateStr(job.Exec, 40)
-			} else {
-				desc = truncateStr(job.Prompt, 40)
-			}
+
+	// Notify user that a cron job is executing (unless silent/muted)
+	if !job.Mute {
+		silent := false
+		if e.cronScheduler != nil {
+			silent = e.cronScheduler.IsSilent(job)
 		}
-		e.send(targetPlatform, replyCtx, fmt.Sprintf("⏰ %s", desc))
+		if !silent {
+			desc := job.Description
+			if desc == "" {
+				if job.IsShellJob() {
+					desc = truncateStr(job.Exec, 40)
+				} else {
+					desc = truncateStr(job.Prompt, 40)
+				}
+			}
+			e.send(targetPlatform, replyCtx, fmt.Sprintf("⏰ %s", desc))
+		}
 	}
 
 	if job.IsShellJob() {
-		return e.executeCronShell(targetPlatform, replyCtx, job)
+		return e.executeCronShell(effectivePlatform, replyCtx, job)
 	}
 
 	msg := &Message{
@@ -691,7 +699,7 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		return fmt.Errorf("session %q is busy", sessionKey)
 	}
 
-	e.processInteractiveMessage(targetPlatform, msg, session)
+	e.processInteractiveMessage(effectivePlatform, msg, session)
 	return nil
 }
 
@@ -5079,6 +5087,28 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		case "run", "trigger":
 			e.heartbeatScheduler.TriggerNow(e.name)
 		}
+
+	case "/cron":
+		if e.cronScheduler == nil || args == "" {
+			return
+		}
+		subArgs := strings.Fields(args)
+		if len(subArgs) < 2 {
+			return
+		}
+		sub, id := subArgs[0], subArgs[1]
+		switch sub {
+		case "enable":
+			_ = e.cronScheduler.EnableJob(id)
+		case "disable":
+			_ = e.cronScheduler.DisableJob(id)
+		case "delete":
+			e.cronScheduler.RemoveJob(id)
+		case "mute":
+			e.cronScheduler.Store().SetMute(id, true)
+		case "unmute":
+			e.cronScheduler.Store().SetMute(id, false)
+		}
 	}
 }
 
@@ -5736,18 +5766,19 @@ func (e *Engine) renderCronCard(sessionKey string) *Card {
 
 	lang := e.i18n.CurrentLang()
 	now := time.Now()
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf(e.i18n.T(MsgCronListTitle), len(jobs)))
-	sb.WriteString("\n\n")
 
-	for i, j := range jobs {
-		if i > 0 {
-			sb.WriteString("\n")
-		}
+	cb := NewCard().Title(e.i18n.T(MsgCardTitleCron), "orange")
+	cb.Markdown(fmt.Sprintf(e.i18n.T(MsgCronListTitle), len(jobs)))
+
+	for _, j := range jobs {
 		status := "✅"
 		if !j.Enabled {
 			status = "⏸"
 		}
+		if j.Mute {
+			status = "🔇"
+		}
+
 		desc := j.Description
 		if desc == "" {
 			if j.IsShellJob() {
@@ -5756,6 +5787,8 @@ func (e *Engine) renderCronCard(sessionKey string) *Card {
 				desc = truncateStr(j.Prompt, 60)
 			}
 		}
+
+		var sb strings.Builder
 		sb.WriteString(fmt.Sprintf("%s %s\n", status, desc))
 		sb.WriteString(e.i18n.Tf(MsgCronIDLabel, j.ID))
 		human := CronExprToHuman(j.CronExpr, lang)
@@ -5771,14 +5804,28 @@ func (e *Engine) renderCronCard(sessionKey string) *Card {
 			if j.LastError != "" {
 				sb.WriteString(e.i18n.Tf(MsgCronFailedSuffix, truncateStr(j.LastError, 40)))
 			}
-			sb.WriteString("\n")
 		}
+		cb.Markdown(sb.String())
+
+		var btns []CardButton
+		if j.Enabled {
+			btns = append(btns, DefaultBtn("⏸ Disable", fmt.Sprintf("act:/cron disable %s", j.ID)))
+		} else {
+			btns = append(btns, PrimaryBtn("▶️ Enable", fmt.Sprintf("act:/cron enable %s", j.ID)))
+		}
+		if j.Mute {
+			btns = append(btns, DefaultBtn("🔔 Unmute", fmt.Sprintf("act:/cron unmute %s", j.ID)))
+		} else {
+			btns = append(btns, DefaultBtn("🔇 Mute", fmt.Sprintf("act:/cron mute %s", j.ID)))
+		}
+		btns = append(btns, DangerBtn("🗑 Delete", fmt.Sprintf("act:/cron delete %s", j.ID)))
+		cb.Buttons(btns...)
 	}
 
-	return NewCard().Title(e.i18n.T(MsgCardTitleCron), "orange").
-		Markdown(sb.String()).
-		Buttons(e.cardBackButton()).
-		Build()
+	cb.Divider()
+	cb.Note(e.i18n.T(MsgCronCardHint))
+	cb.Buttons(e.cardBackButton())
+	return cb.Build()
 }
 
 func (e *Engine) renderCommandsCard() *Card {
@@ -6065,7 +6112,7 @@ func (e *Engine) cmdCron(p Platform, msg *Message, args []string) {
 	}
 
 	sub := matchSubCommand(strings.ToLower(args[0]), []string{
-		"add", "addexec", "list", "del", "delete", "rm", "remove", "enable", "disable", "setup",
+		"add", "addexec", "list", "del", "delete", "rm", "remove", "enable", "disable", "mute", "unmute", "setup",
 	})
 	switch sub {
 	case "add":
@@ -6080,6 +6127,10 @@ func (e *Engine) cmdCron(p Platform, msg *Message, args []string) {
 		e.cmdCronToggle(p, msg, args[1:], true)
 	case "disable":
 		e.cmdCronToggle(p, msg, args[1:], false)
+	case "mute":
+		e.cmdCronMute(p, msg, args[1:], true)
+	case "unmute":
+		e.cmdCronMute(p, msg, args[1:], false)
 	case "setup":
 		e.cmdCronSetup(p, msg)
 	default:
@@ -6171,6 +6222,9 @@ func (e *Engine) cmdCronList(p Platform, msg *Message) {
 		if !j.Enabled {
 			status = "⏸"
 		}
+		if j.Mute {
+			status = "🔇"
+		}
 		desc := j.Description
 		if desc == "" {
 			if j.IsShellJob() {
@@ -6239,6 +6293,23 @@ func (e *Engine) cmdCronToggle(p Platform, msg *Message, args []string, enable b
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronEnabled), id))
 	} else {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronDisabled), id))
+	}
+}
+
+func (e *Engine) cmdCronMute(p Platform, msg *Message, args []string, mute bool) {
+	if len(args) == 0 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCronDelUsage))
+		return
+	}
+	id := args[0]
+	if !e.cronScheduler.Store().SetMute(id, mute) {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronNotFound), id))
+		return
+	}
+	if mute {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronMuted), id))
+	} else {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronUnmuted), id))
 	}
 }
 

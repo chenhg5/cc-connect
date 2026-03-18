@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -27,6 +28,7 @@ type CronJob struct {
 	Description string    `json:"description"`
 	Enabled     bool      `json:"enabled"`
 	Silent      *bool     `json:"silent,omitempty"` // suppress start notification; nil = use global default
+	Mute        bool      `json:"mute,omitempty"`   // suppress ALL messages (start + result); job runs silently
 	CreatedAt   time.Time `json:"created_at"`
 	LastRun     time.Time `json:"last_run,omitempty"`
 	LastError   string    `json:"last_error,omitempty"`
@@ -104,6 +106,32 @@ func (s *CronStore) SetEnabled(id string, enabled bool) bool {
 		}
 	}
 	return false
+}
+
+func (s *CronStore) SetMute(id string, mute bool) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, j := range s.jobs {
+		if j.ID == id {
+			j.Mute = mute
+			s.save()
+			return true
+		}
+	}
+	return false
+}
+
+func (s *CronStore) ToggleMute(id string) (newState bool, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, j := range s.jobs {
+		if j.ID == id {
+			j.Mute = !j.Mute
+			s.save()
+			return j.Mute, true
+		}
+	}
+	return false, false
 }
 
 func (s *CronStore) MarkRun(id string, err error) {
@@ -348,6 +376,15 @@ func (cs *CronScheduler) executeJob(jobID string) {
 		slog.Info("cron: job completed", "id", jobID)
 	}
 }
+
+// mutePlatform wraps a Platform and discards all outgoing messages.
+// Used for muted cron jobs that should execute without sending chat messages.
+type mutePlatform struct {
+	Platform
+}
+
+func (m *mutePlatform) Reply(_ context.Context, _ any, _ string) error { return nil }
+func (m *mutePlatform) Send(_ context.Context, _ any, _ string) error  { return nil }
 
 func GenerateCronID() string {
 	b := make([]byte, 4)
