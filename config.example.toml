@@ -566,16 +566,25 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "bypassPermission
 # model = "deepseek-ai/DeepSeek-V3"
 # thinking = "disabled"
 #
-# # MiniMax — OpenAI-compatible provider with 204K context window
-# # MiniMax — 兼容 OpenAI 接口的大模型，支持 204K 超长上下文
-# # Models: MiniMax-M2.5 (flagship), MiniMax-M2.5-highspeed (faster)
+# # MiniMax — OpenAI-compatible provider with 1M context window
+# # MiniMax — 兼容 OpenAI 接口的大模型，支持 1M 超长上下文
+# # Models: MiniMax-M2.7 (flagship, 1M context), MiniMax-M2.5, MiniMax-M2.5-highspeed
 # # Docs: https://platform.minimaxi.com
 # [[projects.agent.providers]]
 # name = "minimax"
 # api_key = "your-minimax-api-key"
 # base_url = "https://api.minimax.io/v1"
-# model = "MiniMax-M2.5"
+# model = "MiniMax-M2.7"
 # thinking = "disabled"
+# [[projects.agent.providers.models]]
+# model = "MiniMax-M2.7"
+# alias = "m27"
+# [[projects.agent.providers.models]]
+# model = "MiniMax-M2.5"
+# alias = "m25"
+# [[projects.agent.providers.models]]
+# model = "MiniMax-M2.5-highspeed"
+# alias = "m25fast"
 #
 # # For special setups (Bedrock, Vertex, etc.), use the env map:
 # # 特殊环境（Bedrock、Vertex 等）使用 env 字段：
@@ -935,7 +944,7 @@ app_secret = "your-feishu-app-secret"
 # name = "minimax"
 # api_key = "your-minimax-api-key"
 # base_url = "https://api.minimax.io/v1"
-# model = "MiniMax-M2.5"
+# model = "MiniMax-M2.7"
 #
 # [[projects.platforms]]
 # type = "telegram"
