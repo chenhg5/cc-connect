@@ -63,16 +63,23 @@ func TestNormalizeWorkspacePath(t *testing.T) {
 		t.Skip("symlinks not supported")
 	}
 
+	// Resolve the expected path through EvalSymlinks so that the test works
+	// on macOS where /var is a symlink to /private/var.
+	resolvedRealDir, err := filepath.EvalSymlinks(realDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	tests := []struct {
 		name  string
 		input string
 		want  string
 	}{
-		{"trailing slash", realDir + "/", realDir},
-		{"double slash", filepath.Join(tmp, "real-project") + "//", realDir},
-		{"dot segment", filepath.Join(tmp, ".", "real-project"), realDir},
-		{"dotdot segment", filepath.Join(tmp, "real-project", "subdir", ".."), realDir},
-		{"symlink resolved", symlink, realDir},
+		{"trailing slash", realDir + "/", resolvedRealDir},
+		{"double slash", filepath.Join(tmp, "real-project") + "//", resolvedRealDir},
+		{"dot segment", filepath.Join(tmp, ".", "real-project"), resolvedRealDir},
+		{"dotdot segment", filepath.Join(tmp, "real-project", "subdir", ".."), resolvedRealDir},
+		{"symlink resolved", symlink, resolvedRealDir},
 		{"nonexistent uses Clean only", "/nonexistent/path/./foo/../bar", "/nonexistent/path/bar"},
 	}
 	for _, tt := range tests {

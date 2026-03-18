@@ -1077,7 +1077,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 			// and the queue append. Re-try TryLock — if it succeeds, no one is
 			// draining the queue so we must start a processor ourselves.
 			if session.TryLock() {
-				go e.drainOrphanedQueue(session, interactiveKey, agent, resolvedWorkspace)
+				go e.drainOrphanedQueue(session, sessions, interactiveKey, agent, resolvedWorkspace)
 			}
 			return
 		}
@@ -1144,7 +1144,7 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 // has already exited. It processes all pending messages in the state, similar
 // to the drain loop in processInteractiveMessageWith but as a standalone
 // goroutine.
-func (e *Engine) drainOrphanedQueue(session *Session, interactiveKey string, agent Agent, workspaceDir string) {
+func (e *Engine) drainOrphanedQueue(session *Session, sessions *SessionManager, interactiveKey string, agent Agent, workspaceDir string) {
 	unlocked := false
 	defer func() {
 		if !unlocked {
@@ -1163,7 +1163,7 @@ func (e *Engine) drainOrphanedQueue(session *Session, interactiveKey string, age
 		return
 	}
 
-	unlocked = e.drainPendingMessages(state, session, e.sessions, interactiveKey)
+	unlocked = e.drainPendingMessages(state, session, sessions, interactiveKey)
 }
 
 // ──────────────────────────────────────────────────────────────

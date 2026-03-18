@@ -54,7 +54,8 @@ func TestMultiWorkspaceResolution_ConventionMatch(t *testing.T) {
 	if name != channelName {
 		t.Errorf("expected channel name %q, got %q", channelName, name)
 	}
-	expectedWS := filepath.Join(baseDir, channelName)
+	// resolveWorkspace returns normalizeWorkspacePath'd result; use it for comparison
+	expectedWS := normalizeWorkspacePath(filepath.Join(baseDir, channelName))
 	if ws != expectedWS {
 		t.Errorf("expected workspace %q, got %q", expectedWS, ws)
 	}
@@ -108,8 +109,10 @@ func TestMultiWorkspaceResolution_ExistingBinding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if ws != wsDir {
-		t.Errorf("expected workspace %q, got %q", wsDir, ws)
+	// resolveWorkspace normalizes the path
+	expectedWS := normalizeWorkspacePath(wsDir)
+	if ws != expectedWS {
+		t.Errorf("expected workspace %q, got %q", expectedWS, ws)
 	}
 	if name != channelName {
 		t.Errorf("expected channel name %q, got %q", channelName, name)

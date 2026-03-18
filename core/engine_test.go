@@ -1111,10 +1111,12 @@ func TestCmdList_MultiWorkspaceUsesWorkspaceSessions(t *testing.T) {
 	if err := os.MkdirAll(wsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// Normalize the path so it matches what resolveWorkspace/getOrCreateWorkspaceAgent will use
+	normalizedWsDir := normalizeWorkspacePath(wsDir)
 	channelID := "C123"
-	e.workspaceBindings.Bind("project:test", channelID, "chan", wsDir)
+	e.workspaceBindings.Bind("project:test", channelID, "chan", normalizedWsDir)
 
-	ws := e.workspacePool.GetOrCreate(wsDir)
+	ws := e.workspacePool.GetOrCreate(normalizedWsDir)
 	ws.agent = &stubListAgent{
 		sessions: []AgentSessionInfo{
 			{ID: "w1", Summary: "Workspace One", MessageCount: 2},
