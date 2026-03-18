@@ -76,20 +76,46 @@ func newWorkspacePool(idleTimeout time.Duration) *workspacePool {
 
 // Get returns the state for a workspace.
 func (p *workspacePool) Get(workspace string) *workspaceState {
-	workspace = normalizeWorkspacePath(workspace)
+	p.mu.RLock()
+	state := p.states[workspace]
+	p.mu.RUnlock()
+	if state != nil {
+		return state
+	}
+
+	normalized := normalizeWorkspacePath(workspace)
+	if normalized == workspace {
+		return nil
+	}
+
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.states[workspace]
+	return p.states[normalized]
 }
 
 // GetOrCreate returns or creates state for a workspace.
 func (p *workspacePool) GetOrCreate(workspace string) *workspaceState {
-	workspace = normalizeWorkspacePath(workspace)
+	p.mu.Lock()
+	if s, ok := p.states[workspace]; ok {
+		p.mu.Unlock()
+		return s
+	}
+	p.mu.Unlock()
+
+	normalized := normalizeWorkspacePath(workspace)
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if s, ok := p.states[workspace]; ok {
 		return s
 	}
+	if normalized != workspace {
+		if s, ok := p.states[normalized]; ok {
+			return s
+		}
+		workspace = normalized
+	}
+
 	s := newWorkspaceState(workspace)
 	p.states[workspace] = s
 	return s
