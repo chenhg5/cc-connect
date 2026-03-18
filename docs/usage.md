@@ -143,12 +143,12 @@ alias = "opus"
 model = "claude-haiku-3-5-20241022"
 alias = "haiku"
 
-# MiniMax — OpenAI-compatible, 204K context
+# MiniMax — OpenAI-compatible, 1M context
 [[projects.agent.providers]]
 name = "minimax"
 api_key = "your-minimax-api-key"
 base_url = "https://api.minimax.io/v1"
-model = "MiniMax-M2.5"
+model = "MiniMax-M2.7"
 
 # For Bedrock, Vertex, etc.
 [[projects.agent.providers]]
