@@ -194,3 +194,35 @@ func TestLooksLikeGitURL(t *testing.T) {
 		}
 	}
 }
+
+func TestWorkspaceInitFlow_SlashCommandCleansUpExistingFlow(t *testing.T) {
+	baseDir := t.TempDir()
+	e := newTestEngineWithMultiWorkspace(t, baseDir)
+	p := &mockChannelResolver{names: map[string]string{"C010": "test-channel"}}
+
+	channelID := "C010"
+
+	// Seed a flow in "awaiting_url" state to simulate a prior regular message
+	// that triggered the init flow.
+	e.initFlowsMu.Lock()
+	e.initFlows[channelID] = &workspaceInitFlow{
+		state:       "awaiting_url",
+		channelName: "test-channel",
+	}
+	e.initFlowsMu.Unlock()
+
+	msg := &Message{Content: "/workspace bind my-project"}
+
+	consumed := e.handleWorkspaceInitFlow(p, msg, channelID, "test-channel")
+	if consumed {
+		t.Fatal("expected handleWorkspaceInitFlow to return false for slash command, but it returned true")
+	}
+
+	// Verify the flow was cleaned up.
+	e.initFlowsMu.Lock()
+	_, stillExists := e.initFlows[channelID]
+	e.initFlowsMu.Unlock()
+	if stillExists {
+		t.Error("expected init flow to be deleted after slash command, but it still exists")
+	}
+}

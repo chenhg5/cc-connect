@@ -672,6 +672,15 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 	return func() { close(done) }
 }
 
+// ResolveChannelName implements core.ChannelNameResolver.
+func (p *Platform) ResolveChannelName(channelID string) (string, error) {
+	name := p.resolveChannelName(channelID)
+	if name == channelID {
+		return "", fmt.Errorf("discord: channel name not found for %s", channelID)
+	}
+	return name, nil
+}
+
 func (p *Platform) resolveChannelName(channelID string) string {
 	if cached, ok := p.channelNameCache.Load(channelID); ok {
 		return cached.(string)

@@ -992,10 +992,16 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		}
 		if workspace == "" {
 			// No workspace — handle init flow (unless it's a /workspace command)
-			if !strings.HasPrefix(content, "workspace") && !strings.HasPrefix(content, "ws ") {
+			if !strings.HasPrefix(content, "workspace") && !strings.HasPrefix(content, "/workspace") && !strings.HasPrefix(content, "ws ") {
 				if e.handleWorkspaceInitFlow(p, msg, channelID, channelName) {
 					return
 				}
+			} else {
+				// Workspace command bypassed the init flow; clean up any stale flow
+				// so it doesn't interfere if the channel becomes unbound again later.
+				e.initFlowsMu.Lock()
+				delete(e.initFlows, channelID)
+				e.initFlowsMu.Unlock()
 			}
 			// If init flow didn't consume, only workspace commands work
 			if !strings.HasPrefix(content, "/") {
@@ -8266,6 +8272,16 @@ func (e *Engine) handleWorkspaceInitFlow(p Platform, msg *Message, channelID, ch
 		e.initFlowsMu.Unlock()
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsNotFoundHint))
 		return true
+	}
+
+	// Slash commands always take priority over the init flow — let them
+	// pass through to handleCommand. Clean up the stale flow since the
+	// user is issuing explicit commands instead of following the clone guide.
+	if strings.HasPrefix(content, "/") {
+		e.initFlowsMu.Lock()
+		delete(e.initFlows, channelID)
+		e.initFlowsMu.Unlock()
+		return false
 	}
 
 	switch flow.state {
