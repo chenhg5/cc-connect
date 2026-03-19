@@ -56,7 +56,9 @@ type RestartRequest struct {
 // a "restart successful" message after startup.
 func SaveRestartNotify(dataDir string, req RestartRequest) error {
 	dir := filepath.Join(dataDir, "run")
-	os.MkdirAll(dir, 0o755)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create run dir: %w", err)
+	}
 	data, _ := json.Marshal(req)
 	return os.WriteFile(filepath.Join(dir, "restart_notify"), data, 0o644)
 }
@@ -1628,11 +1630,7 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 	return agent, sessions, nil
 }
 
-func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, replyCtx any, session *Session) *interactiveState {
-	return e.getOrCreateInteractiveStateWith(sessionKey, p, replyCtx, session, e.sessions, nil)
-}
-
-// getOrCreateInteractiveStateWith is like getOrCreateInteractiveState but accepts
+// getOrCreateInteractiveStateWith accepts
 // an optional agent override for multi-workspace mode. When agentOverride is non-nil
 // it is used instead of e.agent to start the session.
 func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent) *interactiveState {
@@ -5149,13 +5147,6 @@ func (e *Engine) replyWithButtons(p Platform, replyCtx any, content string, butt
 	e.reply(p, replyCtx, content)
 }
 
-func isInlineButtonOnlyPlatform(p Platform) bool {
-	if _, ok := p.(InlineButtonSender); !ok {
-		return false
-	}
-	return !supportsCards(p)
-}
-
 func supportsCards(p Platform) bool {
 	_, ok := p.(CardSender)
 	return ok
@@ -5549,19 +5540,6 @@ func (e *Engine) getDeleteModeState(sessionKey string) *deleteModeState {
 		cp.selectedIDs[id] = struct{}{}
 	}
 	return cp
-}
-
-func (e *Engine) clearDeleteModeState(sessionKey string) {
-	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
-	e.interactiveMu.Lock()
-	state := e.interactiveStates[interactiveKey]
-	e.interactiveMu.Unlock()
-	if state == nil {
-		return
-	}
-	state.mu.Lock()
-	state.deleteMode = nil
-	state.mu.Unlock()
 }
 
 func (e *Engine) renderDeleteModeCard(sessionKey string) *Card {

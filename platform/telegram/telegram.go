@@ -300,7 +300,9 @@ func (p *Platform) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 
 	// Answer the callback to clear the loading indicator
 	answer := tgbotapi.NewCallback(cb.ID, "")
-	p.bot.Request(answer)
+	if _, err := p.bot.Request(answer); err != nil {
+		slog.Warn("telegram: failed to answer callback", "error", err)
+	}
 
 	userName := cb.From.UserName
 	if userName == "" {
@@ -331,7 +333,9 @@ func (p *Platform) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 		edit := tgbotapi.NewEditMessageText(chatID, msgID, origText+"\n\n> "+command)
 		emptyMarkup := tgbotapi.NewInlineKeyboardMarkup()
 		edit.ReplyMarkup = &emptyMarkup
-		p.bot.Send(edit)
+		if _, err := p.bot.Send(edit); err != nil {
+			slog.Warn("telegram: failed to edit callback message", "error", err)
+		}
 
 		p.handler(p, &core.Message{
 			SessionKey: sessionKey,

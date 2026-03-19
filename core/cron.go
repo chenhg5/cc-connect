@@ -88,7 +88,7 @@ func (s *CronStore) Remove(id string) bool {
 	for i, j := range s.jobs {
 		if j.ID == id {
 			s.jobs = append(s.jobs[:i], s.jobs[i+1:]...)
-			s.save()
+			_ = s.save()
 			return true
 		}
 	}
@@ -101,7 +101,7 @@ func (s *CronStore) SetEnabled(id string, enabled bool) bool {
 	for _, j := range s.jobs {
 		if j.ID == id {
 			j.Enabled = enabled
-			s.save()
+			_ = s.save()
 			return true
 		}
 	}
@@ -114,7 +114,7 @@ func (s *CronStore) SetMute(id string, mute bool) bool {
 	for _, j := range s.jobs {
 		if j.ID == id {
 			j.Mute = mute
-			s.save()
+			_ = s.save()
 			return true
 		}
 	}
@@ -388,7 +388,7 @@ func (m *mutePlatform) Send(_ context.Context, _ any, _ string) error  { return 
 
 func GenerateCronID() string {
 	b := make([]byte, 4)
-	rand.Read(b)
+	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }
 
@@ -499,7 +499,7 @@ func CronExprToHuman(expr string, lang Language) string {
 	if dow != "*" {
 		if d, err := fmt.Sscanf(dow, "%d", new(int)); err == nil && d == 1 {
 			var n int
-			fmt.Sscanf(dow, "%d", &n)
+			_, _ = fmt.Sscanf(dow, "%d", &n)
 			if n >= 0 && n <= 6 {
 				if cjk {
 					parts = append(parts, weekdays[n])

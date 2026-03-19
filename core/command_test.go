@@ -102,7 +102,7 @@ func TestCommandRegistry_ConfigOverridesAgent(t *testing.T) {
 func TestCommandRegistry_PathTraversal(t *testing.T) {
 	dir := t.TempDir()
 	parent := filepath.Dir(dir)
-	os.WriteFile(filepath.Join(parent, "secret.md"), []byte("secret"), 0644)
+	_ = os.WriteFile(filepath.Join(parent, "secret.md"), []byte("secret"), 0644)
 
 	r := NewCommandRegistry()
 	r.SetAgentDirs([]string{dir})

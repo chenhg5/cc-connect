@@ -281,7 +281,7 @@ func replaceBinary(newBinary []byte) error {
 
 	if err := os.Rename(tmpPath, execPath); err != nil {
 		// Try to restore
-		os.Rename(oldPath, execPath)
+		_ = os.Rename(oldPath, execPath)
 		return fmt.Errorf("install new binary: %w", err)
 	}
 

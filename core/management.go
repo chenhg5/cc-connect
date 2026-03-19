@@ -1116,10 +1116,8 @@ func (m *ManagementServer) listBridgeAdapters() []map[string]any {
 // ── Log ring buffer ───────────────────────────────────────────
 
 type logRingBuffer struct {
-	mu      sync.Mutex
 	entries []logEntry
 	size    int
-	pos     int
 }
 
 type logEntry struct {
