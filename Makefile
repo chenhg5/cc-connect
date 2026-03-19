@@ -60,7 +60,7 @@ endif
 _BUILD_TAGS := $(strip $(_EXCLUDE_TAGS))
 _TAGS_FLAG  := $(if $(_BUILD_TAGS),-tags '$(_BUILD_TAGS)',)
 
-.PHONY: build run clean test test-fast test-full test-smoke test-e2e test-release pre-test lint release release-all
+.PHONY: build run clean test test-fast test-full test-smoke test-e2e test-release test-performance pre-test lint release release-all
 
 build:
 	go build $(_TAGS_FLAG) -ldflags "$(LDFLAGS)" -o $(APP) $(CMD)
@@ -106,13 +106,16 @@ test-smoke: pre-test
 test-e2e: pre-test
 	go test -v -tags=regression ./tests/e2e/...
 
+# Performance benchmarks only
+test-performance: pre-test
+	go test -bench=. -benchmem -tags=performance ./tests/performance/...
+
 # Release test: full + performance benchmarks
 test-release: pre-test
 	go test -parallel=4 -race ./...
 	go test -parallel=4 -tags=smoke ./tests/e2e/...
 	go test -parallel=2 -tags=regression ./tests/e2e/...
-	@echo "Consider running: go test -bench=. -benchmem ./..."
-	@echo "Performance baselines should be reviewed before proceeding."
+	go test -bench=. -benchmem -tags=performance ./tests/performance/...
 
 # Legacy: runs unit tests only
 test:

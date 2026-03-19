@@ -158,11 +158,12 @@ func (s *FakeAgentSession) GetPrompts() []string {
 
 // FakeAgent is a fake implementation of Agent for testing.
 type FakeAgent struct {
-	name        string
-	sessionID   string
-	session     *FakeAgentSession
-	sessions    []core.AgentSessionInfo
-	stopped     bool
+	name                 string
+	sessionID            string
+	session              *FakeAgentSession
+	preConfiguredSession *FakeAgentSession // session from NewFakeAgentWithSession
+	sessions             []core.AgentSessionInfo
+	stopped              bool
 }
 
 func NewFakeAgent(name string) *FakeAgent {
@@ -181,6 +182,13 @@ func (a *FakeAgent) Name() string {
 
 func (a *FakeAgent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
 	a.sessionID = sessionID
+	// Return pre-configured session on first call (from NewFakeAgentWithSession)
+	// then create fresh sessions for subsequent calls
+	if a.preConfiguredSession != nil {
+		a.session = a.preConfiguredSession
+		a.preConfiguredSession = nil
+		return a.session, nil
+	}
 	a.session = NewFakeAgentSession(sessionID)
 	return a.session, nil
 }
@@ -203,11 +211,13 @@ func (a *FakeAgent) GetSession() *FakeAgentSession {
 }
 
 // NewFakeAgentWithSession creates a fake agent with a pre-configured session.
+// The pre-configured session is returned on the first StartSession call.
+// Subsequent StartSession calls create fresh sessions (simulating real agent behavior).
 func NewFakeAgentWithSession(name, sessionID string, session *FakeAgentSession) *FakeAgent {
 	return &FakeAgent{
-		name:     name,
-		session:  session,
-		sessionID: sessionID,
+		name:                 name,
+		preConfiguredSession: session,
+		sessionID:            sessionID,
 		sessions: []core.AgentSessionInfo{
 			{ID: sessionID, Summary: "Test session"},
 		},
