@@ -120,7 +120,8 @@ func (s *FakeAgentSession) Events() <-chan core.Event {
 	// Reset index for fresh consumption
 	s.eventIndex = 0
 
-	ch := make(chan core.Event, len(s.events))
+	// Buffer size is len(events) + 1 for the done event
+	ch := make(chan core.Event, len(s.events)+1)
 	for _, e := range s.events {
 		ch <- e
 	}
