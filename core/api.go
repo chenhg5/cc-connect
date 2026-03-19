@@ -50,7 +50,7 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listen unix socket: %w", err)
 	}
-	os.Chmod(sockPath, 0o600)
+	_ = os.Chmod(sockPath, 0o600)
 
 	s := &APIServer{
 		socketPath: sockPath,
@@ -154,7 +154,7 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 func (s *APIServer) handleSessions(w http.ResponseWriter, r *http.Request) {
@@ -183,7 +183,7 @@ func (s *APIServer) handleSessions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
+	_ = json.NewEncoder(w).Encode(result)
 }
 
 // ── Cron API ───────────────────────────────────────────────────
@@ -283,7 +283,7 @@ func (s *APIServer) handleCronAdd(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(job)
+	_ = json.NewEncoder(w).Encode(job)
 }
 
 func (s *APIServer) handleCronList(w http.ResponseWriter, r *http.Request) {
@@ -301,7 +301,7 @@ func (s *APIServer) handleCronList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(jobs)
+	_ = json.NewEncoder(w).Encode(jobs)
 }
 
 func (s *APIServer) handleCronDel(w http.ResponseWriter, r *http.Request) {
@@ -328,7 +328,7 @@ func (s *APIServer) handleCronDel(w http.ResponseWriter, r *http.Request) {
 
 	if s.cron.RemoveJob(req.ID) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	} else {
 		http.Error(w, fmt.Sprintf("job %q not found", req.ID), http.StatusNotFound)
 	}
@@ -363,7 +363,7 @@ func (s *APIServer) handleRelaySend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func (s *APIServer) handleRelayBind(w http.ResponseWriter, r *http.Request) {
