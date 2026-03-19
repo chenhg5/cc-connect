@@ -21,6 +21,7 @@ import (
 	larkevent "github.com/larksuite/oapi-sdk-go/v3/event"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
+	larkapplication "github.com/larksuite/oapi-sdk-go/v3/service/application/v6"
 	larkcontact "github.com/larksuite/oapi-sdk-go/v3/service/contact/v3"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
@@ -246,6 +247,9 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		}).
 		OnP2CardActionTrigger(func(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
 			return p.onCardAction(event)
+		}).
+		OnP2BotMenuV6(func(ctx context.Context, event *larkapplication.P2BotMenuV6) error {
+			return p.onBotMenu(event)
 		})
 
 	// Lark international version uses Webhook mode, not WebSocket long connection
@@ -1985,4 +1989,49 @@ func (p *Platform) extractPostParts(messageID string, post *postLang) ([]string,
 		}
 	}
 	return textParts, images
+}
+
+// onBotMenu handles bot custom menu click events. When a menu item's
+// event_key starts with "/", it is dispatched as a slash command.
+// This allows users to configure menu items in the Feishu developer
+// console with event_key set to commands like "/help", "/status", etc.
+func (p *Platform) onBotMenu(event *larkapplication.P2BotMenuV6) error {
+	if event == nil || event.Event == nil || event.Event.EventKey == nil {
+		return nil
+	}
+	eventKey := *event.Event.EventKey
+
+	userID := ""
+	if event.Event.Operator != nil && event.Event.Operator.OperatorId != nil && event.Event.Operator.OperatorId.OpenId != nil {
+		userID = *event.Event.Operator.OperatorId.OpenId
+	}
+	if userID == "" {
+		slog.Debug(p.tag()+": bot menu event without user id", "event_key", eventKey)
+		return nil
+	}
+
+	if !core.AllowList(p.allowFrom, userID) {
+		slog.Debug(p.tag()+": menu event from unauthorized user", "user", userID, "event_key", eventKey)
+		return nil
+	}
+
+	slog.Info(p.tag()+": bot menu clicked", "event_key", eventKey, "user", userID)
+
+	content := eventKey
+	if !strings.HasPrefix(content, "/") {
+		content = "/" + content
+	}
+
+	userName := p.resolveUserName(userID)
+	sessionKey := p.platformName + ":" + userID + ":" + userID
+
+	p.handler(p.dispatchPlatform(), &core.Message{
+		SessionKey: sessionKey,
+		Platform:   p.platformName,
+		Content:    content,
+		UserID:     userID,
+		UserName:   userName,
+		ReplyCtx:   replyContext{chatID: userID, sessionKey: sessionKey},
+	})
+	return nil
 }
