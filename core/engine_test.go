@@ -530,7 +530,9 @@ func TestEngine_LifecycleCallbacksIgnoredAfterStopBegins(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	e.Stop()
+	if err := e.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
 	e.OnPlatformReady(p)
 	e.OnPlatformUnavailable(p, errors.New("late"))
 
