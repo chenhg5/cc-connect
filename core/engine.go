@@ -1694,12 +1694,14 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	}
 
 	// Inject platform-specific formatting instructions into the agent's system prompt.
+	// Clear the prompt first so instructions from a previous platform don't leak
+	// into sessions for platforms that don't provide their own instructions.
 	if ppi, ok := agent.(PlatformPromptInjector); ok {
+		prompt := ""
 		if fip, ok := p.(FormattingInstructionProvider); ok {
-			ppi.SetPlatformPrompt(fip.FormattingInstructions())
-		} else {
-			ppi.SetPlatformPrompt("")
+			prompt = fip.FormattingInstructions()
 		}
+		ppi.SetPlatformPrompt(prompt)
 	}
 
 	// Check if context is already canceled (e.g. during shutdown/restart)
