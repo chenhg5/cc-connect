@@ -349,7 +349,7 @@ func (p *Platform) handleUpdate(bot telegramBot, update tgbotapi.Update) {
 	rctx := replyContext{chatID: msg.Chat.ID, messageID: msg.MessageID}
 	botName := bot.SelfUser().UserName
 
-	if msg.Photo != nil && len(msg.Photo) > 0 {
+	if len(msg.Photo) > 0 {
 		best := msg.Photo[len(msg.Photo)-1]
 		imgData, err := p.downloadFile(bot, best.FileID)
 		if err != nil {
