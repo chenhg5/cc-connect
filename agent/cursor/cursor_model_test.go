@@ -2,6 +2,7 @@ package cursor
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -24,6 +25,9 @@ func shortTestContext(t *testing.T) (context.Context, context.CancelFunc) {
 
 func requireWorkingAgentCLI(t *testing.T) {
 	t.Helper()
+	if os.Getenv("CI") != "" {
+		t.Skip("skipping agent CLI test in CI (no real cursor agent available)")
+	}
 	if _, err := exec.LookPath("agent"); err != nil {
 		t.Skip("agent CLI not in PATH")
 	}
