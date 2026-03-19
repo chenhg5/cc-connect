@@ -5280,3 +5280,48 @@ func TestCmdStatus_ShowsUserID(t *testing.T) {
 		t.Errorf("expected status to contain user ID 'myuser123', got: %s", p.sent[0])
 	}
 }
+
+func TestCmdWhoami_CardPlatform(t *testing.T) {
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	agent := &stubModelModeAgent{model: "gpt-4.1", mode: "default"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangChinese)
+
+	msg := &Message{
+		SessionKey: "feishu:chat999:ou_abc123",
+		Platform:   "feishu",
+		UserID:     "ou_abc123",
+		UserName:   "张三",
+		ReplyCtx:   "ctx",
+		Content:    "/whoami",
+	}
+	e.handleCommand(p, msg, msg.Content)
+
+	if len(p.repliedCards) == 0 && len(p.sentCards) == 0 {
+		t.Fatal("expected /whoami to produce a card")
+	}
+
+	var card *Card
+	if len(p.repliedCards) > 0 {
+		card = p.repliedCards[0]
+	} else {
+		card = p.sentCards[0]
+	}
+
+	if card.Header == nil || card.Header.Title == "" {
+		t.Fatal("expected card to have a header title")
+	}
+
+	text := card.RenderText()
+	if !strings.Contains(text, "ou_abc123") {
+		t.Errorf("expected card to contain user ID, got: %s", text)
+	}
+	if !strings.Contains(text, "张三") {
+		t.Errorf("expected card to contain user name, got: %s", text)
+	}
+	if !strings.Contains(text, "feishu") {
+		t.Errorf("expected card to contain platform, got: %s", text)
+	}
+	if !strings.Contains(text, "chat999") {
+		t.Errorf("expected card to contain chat ID, got: %s", text)
+	}
+}

@@ -411,8 +411,11 @@ const (
 	MsgBtwSent           MsgKey = "btw_sent"
 	MsgBtwSendFailed     MsgKey = "btw_send_failed"
 
-	MsgWhoamiTitle MsgKey = "whoami_title"
-	MsgWhoamiUsage MsgKey = "whoami_usage"
+	MsgWhoamiTitle     MsgKey = "whoami_title"
+	MsgWhoamiCardTitle MsgKey = "whoami_card_title"
+	MsgWhoamiName      MsgKey = "whoami_name"
+	MsgWhoamiPlatform  MsgKey = "whoami_platform"
+	MsgWhoamiUsage     MsgKey = "whoami_usage"
 
 	MsgRelayNoBinding     MsgKey = "relay_no_binding"
 	MsgRelayBound         MsgKey = "relay_bound"
@@ -2750,6 +2753,27 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "🪪 **你的身分資訊**",
 		LangJapanese:           "🪪 **あなたの身元情報**",
 		LangSpanish:            "🪪 **Tu identidad**",
+	},
+	MsgWhoamiCardTitle: {
+		LangEnglish:            "Your Identity",
+		LangChinese:            "你的身份信息",
+		LangTraditionalChinese: "你的身分資訊",
+		LangJapanese:           "あなたの身元情報",
+		LangSpanish:            "Tu identidad",
+	},
+	MsgWhoamiName: {
+		LangEnglish:            "Name",
+		LangChinese:            "名称",
+		LangTraditionalChinese: "名稱",
+		LangJapanese:           "名前",
+		LangSpanish:            "Nombre",
+	},
+	MsgWhoamiPlatform: {
+		LangEnglish:            "Platform",
+		LangChinese:            "平台",
+		LangTraditionalChinese: "平台",
+		LangJapanese:           "プラットフォーム",
+		LangSpanish:            "Plataforma",
 	},
 	MsgWhoamiUsage: {
 		LangEnglish:            "💡 Use the `User ID` above for `allow_from` and `admin_from` in your `config.toml`.",

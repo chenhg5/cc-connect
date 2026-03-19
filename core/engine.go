@@ -5278,6 +5278,12 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 		return e.renderSkillsCard()
 	case "/doctor":
 		return e.renderDoctorCard()
+	case "/whoami":
+		return e.renderWhoamiCard(&Message{
+			SessionKey: sessionKey,
+			UserID:     extractUserID(sessionKey),
+			Platform:   extractPlatformName(sessionKey),
+		})
 	case "/version":
 		return e.renderVersionCard()
 	case "/new":
@@ -7388,6 +7394,14 @@ func (e *Engine) cmdConfig(p Platform, msg *Message, args []string) {
 // ── /whoami command ─────────────────────────────────────────
 
 func (e *Engine) cmdWhoami(p Platform, msg *Message) {
+	if supportsCards(p) {
+		e.replyWithCard(p, msg.ReplyCtx, e.renderWhoamiCard(msg))
+		return
+	}
+	e.reply(p, msg.ReplyCtx, e.formatWhoamiText(msg))
+}
+
+func (e *Engine) formatWhoamiText(msg *Message) string {
 	var sb strings.Builder
 	sb.WriteString(e.i18n.T(MsgWhoamiTitle))
 	sb.WriteString("\n")
@@ -7412,8 +7426,36 @@ func (e *Engine) cmdWhoami(p Platform, msg *Message) {
 
 	sb.WriteString("\n")
 	sb.WriteString(e.i18n.T(MsgWhoamiUsage))
+	return sb.String()
+}
 
-	e.reply(p, msg.ReplyCtx, sb.String())
+func (e *Engine) renderWhoamiCard(msg *Message) *Card {
+	userID := msg.UserID
+	if userID == "" {
+		userID = "(unknown)"
+	}
+
+	var body strings.Builder
+	body.WriteString(fmt.Sprintf("**User ID:**  `%s`\n", userID))
+	if msg.UserName != "" {
+		body.WriteString(fmt.Sprintf("**%s:**  %s\n", e.i18n.T(MsgWhoamiName), msg.UserName))
+	}
+	if msg.Platform != "" {
+		body.WriteString(fmt.Sprintf("**%s:**  %s\n", e.i18n.T(MsgWhoamiPlatform), msg.Platform))
+	}
+	chatID := extractChannelID(msg.SessionKey)
+	if chatID != "" {
+		body.WriteString(fmt.Sprintf("**Chat ID:**  `%s`\n", chatID))
+	}
+	body.WriteString(fmt.Sprintf("**Session Key:**  `%s`\n", msg.SessionKey))
+
+	return NewCard().
+		Title(e.i18n.T(MsgWhoamiCardTitle), "blue").
+		Markdown(body.String()).
+		Divider().
+		Note(e.i18n.T(MsgWhoamiUsage)).
+		Buttons(e.cardBackButton()).
+		Build()
 }
 
 // ── /doctor command ─────────────────────────────────────────
@@ -8239,6 +8281,13 @@ func extractUserID(sessionKey string) string {
 		return parts[2]
 	}
 	return ""
+}
+
+func extractPlatformName(sessionKey string) string {
+	if i := strings.IndexByte(sessionKey, ':'); i >= 0 {
+		return sessionKey[:i]
+	}
+	return sessionKey
 }
 
 // commandContext resolves the appropriate agent, session manager, and interactive key
