@@ -239,8 +239,29 @@ func renderCardMap(card *core.Card, sessionKey string) map[string]any {
 		elements = []map[string]any{{"tag": "markdown", "content": " "}}
 	}
 
-	result["body"] = map[string]any{"elements": elements}
+	// Use schema 2.0 for better markdown rendering (headings, etc.) when
+	// the card has no interactive components. Fall back to v1 when buttons,
+	// forms, or selects are present — v1 action/button tags are not fully
+	// compatible with 2.0's body.elements structure.
+	if hasInteractiveElements(elements) {
+		result["elements"] = elements
+		delete(result, "schema")
+	} else {
+		result["body"] = map[string]any{"elements": elements}
+	}
 	return result
+}
+
+// hasInteractiveElements returns true if any element is an interactive component
+// (action, button, form, select, column_set with buttons) that requires v1 format.
+func hasInteractiveElements(elements []map[string]any) bool {
+	for _, e := range elements {
+		switch e["tag"] {
+		case "action", "form", "select_static", "column_set":
+			return true
+		}
+	}
+	return false
 }
 
 type deleteModeCheckerRow struct {
@@ -407,7 +428,8 @@ func renderDeleteModeCheckerCard(card *core.Card, base map[string]any) (map[stri
 		}
 	}
 
-	base["body"] = map[string]any{"elements": elements}
+	base["elements"] = elements
+	delete(base, "schema")
 	return base, true
 }
 
