@@ -82,6 +82,75 @@ func (p *stubPlatformEngine) clearSent() {
 	p.mu.Unlock()
 }
 
+type stubLifecyclePlatform struct {
+	stubPlatformEngine
+	handler         PlatformLifecycleHandler
+	registerCalls   int
+	cardNavSetCalls int
+	startCalls      int
+	stopCalls       int
+}
+
+func (p *stubLifecyclePlatform) Start(MessageHandler) error {
+	p.startCalls++
+	return nil
+}
+
+func (p *stubLifecyclePlatform) Stop() error {
+	p.stopCalls++
+	return nil
+}
+
+func (p *stubLifecyclePlatform) SetLifecycleHandler(h PlatformLifecycleHandler) {
+	p.handler = h
+}
+
+func (p *stubLifecyclePlatform) RegisterCommands([]BotCommandInfo) error {
+	p.registerCalls++
+	return nil
+}
+
+func (p *stubLifecyclePlatform) SetCardNavigationHandler(CardNavigationHandler) {
+	p.cardNavSetCalls++
+}
+
+type blockingRegisterPlatform struct {
+	stubLifecyclePlatform
+	registerStarted chan struct{}
+	allowRegister   chan struct{}
+	stopCalled      chan struct{}
+	registerOnce    sync.Once
+	stopOnce        sync.Once
+}
+
+func newBlockingRegisterPlatform(name string) *blockingRegisterPlatform {
+	return &blockingRegisterPlatform{
+		stubLifecyclePlatform: stubLifecyclePlatform{
+			stubPlatformEngine: stubPlatformEngine{n: name},
+		},
+		registerStarted: make(chan struct{}),
+		allowRegister:   make(chan struct{}),
+		stopCalled:      make(chan struct{}),
+	}
+}
+
+func (p *blockingRegisterPlatform) RegisterCommands([]BotCommandInfo) error {
+	p.registerOnce.Do(func() {
+		close(p.registerStarted)
+	})
+	<-p.allowRegister
+	p.registerCalls++
+	return nil
+}
+
+func (p *blockingRegisterPlatform) Stop() error {
+	p.stopCalls++
+	p.stopOnce.Do(func() {
+		close(p.stopCalled)
+	})
+	return nil
+}
+
 type stubMediaPlatform struct {
 	stubPlatformEngine
 	images []ImageAttachment
@@ -384,6 +453,139 @@ func TestEngineSendToSessionWithAttachments_DisabledByConfig(t *testing.T) {
 	}
 	if len(p.files) != 0 {
 		t.Fatalf("files = %#v, want no files sent when disabled", p.files)
+	}
+}
+
+func TestEngineStart_DefersAsyncPlatformReadyInitialization(t *testing.T) {
+	p := &stubLifecyclePlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.AddCommand("help", "help", "", "", "", "test")
+
+	if err := e.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if p.handler == nil {
+		t.Fatal("lifecycle handler not installed")
+	}
+	if p.registerCalls != 0 {
+		t.Fatalf("registerCalls = %d, want 0 before ready", p.registerCalls)
+	}
+	if p.cardNavSetCalls != 0 {
+		t.Fatalf("cardNavSetCalls = %d, want 0 before ready", p.cardNavSetCalls)
+	}
+}
+
+func TestEngine_OnPlatformReady_IsIdempotentUntilUnavailable(t *testing.T) {
+	p := &stubLifecyclePlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.AddCommand("help", "help", "", "", "", "test")
+
+	if err := e.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	e.OnPlatformReady(p)
+	e.OnPlatformReady(p)
+
+	if p.registerCalls != 1 {
+		t.Fatalf("registerCalls = %d, want 1", p.registerCalls)
+	}
+	if p.cardNavSetCalls != 1 {
+		t.Fatalf("cardNavSetCalls = %d, want 1", p.cardNavSetCalls)
+	}
+
+	e.OnPlatformUnavailable(p, errors.New("lost"))
+	e.OnPlatformReady(p)
+
+	if p.registerCalls != 2 {
+		t.Fatalf("registerCalls after recover = %d, want 2", p.registerCalls)
+	}
+}
+
+func TestEngine_OnPlatformUnavailable_IsIdempotent(t *testing.T) {
+	p := &stubLifecyclePlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.AddCommand("help", "help", "", "", "", "test")
+
+	if err := e.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	e.OnPlatformReady(p)
+	e.OnPlatformUnavailable(p, errors.New("lost"))
+	e.OnPlatformUnavailable(p, errors.New("lost-again"))
+	e.OnPlatformReady(p)
+
+	if p.registerCalls != 2 {
+		t.Fatalf("registerCalls after duplicate unavailable = %d, want 2", p.registerCalls)
+	}
+}
+
+func TestEngine_LifecycleCallbacksIgnoredAfterStopBegins(t *testing.T) {
+	p := &stubLifecyclePlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.AddCommand("help", "help", "", "", "", "test")
+
+	if err := e.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	e.Stop()
+	e.OnPlatformReady(p)
+	e.OnPlatformUnavailable(p, errors.New("late"))
+
+	if p.registerCalls != 0 {
+		t.Fatalf("registerCalls = %d, want 0 after stop", p.registerCalls)
+	}
+}
+
+func TestEngine_StopDoesNotWaitForBlockedPlatformCapabilityInit(t *testing.T) {
+	p := newBlockingRegisterPlatform("telegram")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.AddCommand("help", "help", "", "", "", "test")
+
+	if err := e.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	readyDone := make(chan struct{})
+	go func() {
+		e.OnPlatformReady(p)
+		close(readyDone)
+	}()
+
+	select {
+	case <-p.registerStarted:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("RegisterCommands was not called")
+	}
+
+	stopDone := make(chan error, 1)
+	go func() {
+		stopDone <- e.Stop()
+	}()
+
+	select {
+	case err := <-stopDone:
+		if err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("Stop blocked on platform capability initialization")
+	}
+
+	select {
+	case <-p.stopCalled:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("platform Stop was not called while RegisterCommands was blocked")
+	}
+
+	close(p.allowRegister)
+
+	select {
+	case <-readyDone:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("OnPlatformReady did not finish after RegisterCommands was released")
 	}
 }
 

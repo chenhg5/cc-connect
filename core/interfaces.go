@@ -162,6 +162,27 @@ type CardNavigable interface {
 	SetCardNavigationHandler(h CardNavigationHandler)
 }
 
+// PlatformLifecycleHandler receives readiness state transitions from async
+// recoverable platforms.
+type PlatformLifecycleHandler interface {
+	OnPlatformReady(p Platform)
+	OnPlatformUnavailable(p Platform, err error)
+}
+
+// AsyncRecoverablePlatform is an optional interface for platforms that start
+// a background recovery loop and later report readiness or unavailability.
+//
+// Platforms implementing this interface may return from Start() before they are
+// actually ready to receive traffic. Callers must treat OnPlatformReady as the
+// signal that deferred platform capabilities may be initialized and the
+// platform is usable. A nil Start() return therefore means the recovery loop
+// was launched successfully, not necessarily that an initial connection was
+// established.
+type AsyncRecoverablePlatform interface {
+	Platform
+	SetLifecycleHandler(h PlatformLifecycleHandler)
+}
+
 // MessageHandler is called by platforms when a new message arrives.
 type MessageHandler func(p Platform, msg *Message)
 

@@ -199,7 +199,10 @@ type Engine struct {
 	quietMu sync.RWMutex
 	quiet   bool // when true, suppress thinking and tool progress messages globally
 
-	hasConnectedOnce atomic.Bool // first connection uses --continue to bridge CLI usage
+	hasConnectedOnce    atomic.Bool // first connection uses --continue to bridge CLI usage
+	platformLifecycleMu sync.Mutex
+	platformReady       map[Platform]bool
+	stopping            bool
 }
 
 // workspaceInitFlow tracks a channel that is being onboarded to a workspace.
@@ -285,6 +288,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		skills:                NewSkillRegistry(),
 		aliases:               make(map[string]string),
 		interactiveStates:     make(map[string]*interactiveState),
+		platformReady:         make(map[Platform]bool),
 		startedAt:             time.Now(),
 		streamPreview:         DefaultStreamPreviewCfg(),
 		eventIdleTimeout:      defaultEventIdleTimeout,
@@ -880,33 +884,35 @@ func (e *Engine) ExecuteHeartbeat(sessionKey, prompt string, silent bool) error 
 
 func (e *Engine) Start() error {
 	var startErrs []error
+	readyCount := 0
+	pendingCount := 0
 	for _, p := range e.platforms {
+		_, isAsync := p.(AsyncRecoverablePlatform)
+		if async, ok := p.(AsyncRecoverablePlatform); ok {
+			async.SetLifecycleHandler(e)
+		}
 		if err := p.Start(e.handleMessage); err != nil {
 			slog.Warn("platform start failed", "project", e.name, "platform", p.Name(), "error", err)
 			startErrs = append(startErrs, fmt.Errorf("[%s] start platform %s: %w", e.name, p.Name(), err))
 			continue
 		}
-		slog.Info("platform started", "project", e.name, "platform", p.Name())
-
-		// Register commands on platforms that support it (e.g. Telegram setMyCommands)
-		if registrar, ok := p.(CommandRegistrar); ok {
-			commands := e.GetAllCommands()
-			if err := registrar.RegisterCommands(commands); err != nil {
-				slog.Error("platform command registration failed", "project", e.name, "platform", p.Name(), "error", err)
-			} else {
-				slog.Debug("platform commands registered", "project", e.name, "platform", p.Name(), "count", len(commands))
-			}
+		if isAsync {
+			pendingCount++
+			slog.Info("platform recovery loop started", "project", e.name, "platform", p.Name())
+			continue
 		}
-
-		if nav, ok := p.(CardNavigable); ok {
-			nav.SetCardNavigationHandler(e.handleCardNav)
-		}
+		e.onPlatformReady(p)
+		readyCount++
 	}
 
 	// Log summary
-	startedCount := len(e.platforms) - len(startErrs)
-	if len(startErrs) > 0 {
-		slog.Warn("engine started with some failures", "project", e.name, "agent", e.agent.Name(), "started", startedCount, "failed", len(startErrs))
+	if len(startErrs) > 0 || pendingCount > 0 {
+		slog.Warn("engine started with partial readiness",
+			"project", e.name,
+			"agent", e.agent.Name(),
+			"ready", readyCount,
+			"pending", pendingCount,
+			"failed", len(startErrs))
 	} else {
 		slog.Info("engine started", "project", e.name, "agent", e.agent.Name(), "platforms", len(e.platforms))
 	}
@@ -919,16 +925,20 @@ func (e *Engine) Start() error {
 }
 
 func (e *Engine) Stop() error {
-	// Stop platforms first to prevent new incoming messages
+	e.platformLifecycleMu.Lock()
+	e.stopping = true
+	e.platformLifecycleMu.Unlock()
+
+	// Cancel first so late lifecycle callbacks observe shutdown immediately.
+	e.cancel()
+
+	// Stop platforms after cancellation so they can unwind against the closed context.
 	var errs []error
 	for _, p := range e.platforms {
 		if err := p.Stop(); err != nil {
 			errs = append(errs, fmt.Errorf("stop platform %s: %w", p.Name(), err))
 		}
 	}
-
-	// Now cancel context and clean up sessions
-	e.cancel()
 
 	e.interactiveMu.Lock()
 	states := make(map[string]*interactiveState, len(e.interactiveStates))
@@ -961,6 +971,71 @@ func (e *Engine) Stop() error {
 		return fmt.Errorf("engine stop errors: %v", errs)
 	}
 	return nil
+}
+
+// OnPlatformReady marks an async platform as ready and initializes platform-level
+// capabilities once per ready cycle.
+func (e *Engine) OnPlatformReady(p Platform) {
+	e.onPlatformReady(p)
+}
+
+// OnPlatformUnavailable marks an async platform as unavailable.
+func (e *Engine) OnPlatformUnavailable(p Platform, err error) {
+	if !e.markPlatformUnavailable(p) {
+		return
+	}
+	slog.Warn("platform unavailable", "project", e.name, "platform", p.Name(), "error", err)
+}
+
+func (e *Engine) onPlatformReady(p Platform) {
+	if !e.markPlatformReady(p) {
+		return
+	}
+	slog.Info("platform ready", "project", e.name, "platform", p.Name())
+	e.initPlatformCapabilities(p)
+}
+
+func (e *Engine) markPlatformReady(p Platform) bool {
+	e.platformLifecycleMu.Lock()
+	defer e.platformLifecycleMu.Unlock()
+
+	if e.stopping || e.ctx.Err() != nil {
+		return false
+	}
+	if e.platformReady[p] {
+		return false
+	}
+	e.platformReady[p] = true
+	return true
+}
+
+func (e *Engine) markPlatformUnavailable(p Platform) bool {
+	e.platformLifecycleMu.Lock()
+	defer e.platformLifecycleMu.Unlock()
+
+	if e.stopping || e.ctx.Err() != nil {
+		return false
+	}
+	if !e.platformReady[p] {
+		return false
+	}
+	e.platformReady[p] = false
+	return true
+}
+
+func (e *Engine) initPlatformCapabilities(p Platform) {
+	if registrar, ok := p.(CommandRegistrar); ok {
+		commands := e.GetAllCommands()
+		if err := registrar.RegisterCommands(commands); err != nil {
+			slog.Error("platform command registration failed", "project", e.name, "platform", p.Name(), "error", err)
+		} else {
+			slog.Debug("platform commands registered", "project", e.name, "platform", p.Name(), "count", len(commands))
+		}
+	}
+
+	if nav, ok := p.(CardNavigable); ok {
+		nav.SetCardNavigationHandler(e.handleCardNav)
+	}
 }
 
 // matchBannedWord returns the first banned word found in content, or "".
