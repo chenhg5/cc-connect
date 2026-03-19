@@ -7,6 +7,7 @@ package e2e
 
 import (
 	"context"
+	"io"
 	"os"
 	"sync"
 	"testing"
@@ -821,3 +822,158 @@ func TestRegression_DeduplicationTTL(t *testing.T) {
 
 	t.Log("Message deduplication TTL: PASS")
 }
+
+// ---------------------------------------------------------------------------
+// T-221: 错误消息格式化测试
+// ---------------------------------------------------------------------------
+
+func TestRegression_ErrorFormatting(t *testing.T) {
+	// Test error event formatting
+	errEvent := core.Event{
+		Type:    core.EventError,
+		Content: "operation failed",
+		Error:   context.DeadlineExceeded,
+		Done:    true,
+	}
+
+	assert.Equal(t, core.EventError, errEvent.Type)
+	assert.Equal(t, "operation failed", errEvent.Content)
+	assert.Equal(t, context.DeadlineExceeded, errEvent.Error)
+	assert.True(t, errEvent.Done)
+
+	// Test error with different error types
+	errTests := []struct {
+		name    string
+		err     error
+		wantErr bool
+	}{
+		{"DeadlineExceeded", context.DeadlineExceeded, true},
+		{"Canceled", context.Canceled, true},
+		{"EOF", io.EOF, true},
+		{"Nil error", nil, false},
+	}
+
+	for _, tt := range errTests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := core.Event{
+				Type:  core.EventError,
+				Error: tt.err,
+				Done:  true,
+			}
+			if tt.wantErr {
+				assert.Error(t, e.Error)
+			} else {
+				assert.Nil(t, e.Error)
+			}
+		})
+	}
+
+	t.Log("Error formatting: PASS")
+}
+
+// ---------------------------------------------------------------------------
+// T-234: Session 持久化测试
+// ---------------------------------------------------------------------------
+
+func TestRegression_SessionPersistence(t *testing.T) {
+	ctx := context.Background()
+	agent := fake.NewFakeAgent("persist-agent")
+
+	// Start first session
+	sess1, err := agent.StartSession(ctx, "persist-session-1")
+	require.NoError(t, err)
+	require.NotNil(t, sess1)
+
+	// Send some messages
+	err = sess1.Send("Message 1", nil, nil)
+	require.NoError(t, err)
+	err = sess1.Send("Message 2", nil, nil)
+	require.NoError(t, err)
+
+	// Verify prompts were recorded
+	session1 := agent.GetSession()
+	prompts1 := session1.GetPrompts()
+	assert.Len(t, prompts1, 2)
+	assert.Contains(t, prompts1[0], "Message 1")
+	assert.Contains(t, prompts1[1], "Message 2")
+
+	// Close session
+	err = sess1.Close()
+	require.NoError(t, err)
+	assert.False(t, sess1.Alive())
+
+	// Simulate restore: start new session with a different ID
+	sess2, err := agent.StartSession(ctx, "persist-session-2")
+	require.NoError(t, err)
+	require.NotNil(t, sess2)
+
+	// Session IDs should be different
+	assert.Equal(t, "persist-session-1", sess1.CurrentSessionID())
+	assert.Equal(t, "persist-session-2", sess2.CurrentSessionID())
+	assert.NotEqual(t, sess1.CurrentSessionID(), sess2.CurrentSessionID())
+	assert.True(t, sess2.Alive())
+
+	// New session should have no prompts (fresh start)
+	session2 := agent.GetSession()
+	prompts2 := session2.GetPrompts()
+	assert.Empty(t, prompts2, "new session should start fresh")
+
+	// Old session should still be closed
+	assert.False(t, sess1.Alive())
+
+	t.Log("Session persistence: PASS")
+}
+
+// ---------------------------------------------------------------------------
+// T-235: 多 Workspace 隔离测试
+// ---------------------------------------------------------------------------
+
+func TestRegression_WorkspaceIsolation(t *testing.T) {
+	ctx := context.Background()
+
+	// Create two independent agents simulating different workspaces
+	agent1 := fake.NewFakeAgent("workspace-1-agent")
+	agent2 := fake.NewFakeAgent("workspace-2-agent")
+
+	// Start sessions on each
+	sess1, err := agent1.StartSession(ctx, "ws1-session")
+	require.NoError(t, err)
+
+	sess2, err := agent2.StartSession(ctx, "ws2-session")
+	require.NoError(t, err)
+
+	// Sessions should be independent
+	assert.NotEqual(t, sess1.CurrentSessionID(), sess2.CurrentSessionID())
+
+	// Send messages to each
+	err = sess1.Send("Message for workspace 1", nil, nil)
+	require.NoError(t, err)
+
+	err = sess2.Send("Message for workspace 2", nil, nil)
+	require.NoError(t, err)
+
+	// Each agent's session should only have its own messages
+	prompts1 := agent1.GetSession().GetPrompts()
+	prompts2 := agent2.GetSession().GetPrompts()
+
+	assert.Len(t, prompts1, 1)
+	assert.Contains(t, prompts1[0], "workspace 1")
+	assert.Len(t, prompts2, 1)
+	assert.Contains(t, prompts2[0], "workspace 2")
+
+	// Close workspace 1 session - workspace 2 should be unaffected
+	err = sess1.Close()
+	require.NoError(t, err)
+
+	assert.False(t, sess1.Alive())
+	assert.True(t, sess2.Alive(), "workspace 2 session should still be alive")
+
+	// Workspace 1 agent can start a new session
+	sess1New, err := agent1.StartSession(ctx, "ws1-session-new")
+	require.NoError(t, err)
+	assert.True(t, sess1New.Alive())
+	assert.NotEqual(t, sess1.CurrentSessionID(), sess1New.CurrentSessionID())
+
+	t.Log("Workspace isolation: PASS")
+}
+

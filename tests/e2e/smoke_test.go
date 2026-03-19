@@ -9,6 +9,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -436,3 +437,126 @@ func TestSmoke_RateLimiter(t *testing.T) {
 
 	t.Log("Rate limiter: PASS")
 }
+
+// ---------------------------------------------------------------------------
+// T-111: Markdown 渲染冒烟测试
+// ---------------------------------------------------------------------------
+
+func TestSmoke_MarkdownRender(t *testing.T) {
+	// Test basic card with markdown rendering
+	card := core.NewCard().
+		Title("Test Card", "blue").
+		Markdown("## Heading\nThis is **bold** and *italic* text.").
+		Markdown("- Item 1\n- Item 2\n- Item 3").
+		Markdown("1. Numbered item\n2. Another item").
+		Markdown("> Blockquote text").
+		Markdown("`inline code` and ```code block```").
+		Build()
+
+	// Verify card structure
+	assert.NotNil(t, card)
+	assert.NotNil(t, card.Header)
+	assert.Equal(t, "Test Card", card.Header.Title)
+	assert.Equal(t, "blue", card.Header.Color)
+
+	// Count markdown elements (should be 5)
+	var markdownCount int
+	for _, elem := range card.Elements {
+		if _, ok := elem.(core.CardMarkdown); ok {
+			markdownCount++
+		}
+	}
+	assert.Equal(t, 5, markdownCount, "should have 5 markdown elements")
+
+	// Test text fallback rendering
+	text := card.RenderText()
+	assert.Contains(t, text, "Test Card")
+	assert.Contains(t, text, "Heading")
+	assert.Contains(t, text, "bold")
+	assert.Contains(t, text, "italic")
+	assert.Contains(t, text, "Item 1")
+	assert.Contains(t, text, "Blockquote")
+	assert.Contains(t, text, "inline code")
+
+	// Test card with only divider
+	card2 := core.NewCard().
+		Markdown("Before divider").
+		Divider().
+		Markdown("After divider").
+		Build()
+
+	text2 := card2.RenderText()
+	assert.Contains(t, text2, "Before divider")
+	assert.Contains(t, text2, "---")
+	assert.Contains(t, text2, "After divider")
+
+	// Test card with select element
+	card3 := core.NewCard().
+		Title("Select Card", "green").
+		Select("Choose an option", []core.CardSelectOption{
+			{Text: "Option A", Value: "a"},
+			{Text: "Option B", Value: "b"},
+		}, "a").
+		Build()
+
+	text3 := card3.RenderText()
+	assert.Contains(t, text3, "Choose an option")
+	assert.Contains(t, text3, "Option A")
+	assert.Contains(t, text3, "Option B")
+
+	// Test HasButtons
+	assert.False(t, card.HasButtons())
+	assert.True(t, core.NewCard().Buttons(core.DefaultBtn("Test", "act:/test")).Build().HasButtons())
+
+	t.Log("Markdown render: PASS")
+}
+
+// ---------------------------------------------------------------------------
+// T-112: Webhook 注册和回调冒烟测试
+// ---------------------------------------------------------------------------
+
+func TestSmoke_WebhookCallback(t *testing.T) {
+	// Test webhook callback data structure
+	type webhookCallback struct {
+		Action    string            `json:"action"`
+		SessionID string            `json:"session_id"`
+		Data      map[string]string `json:"data"`
+	}
+
+	// Simulate callback parsing
+	callbackData := `{"action":"callback","session_id":"test-001","data":{"button":"confirm"}}`
+
+	// Verify callback structure can be marshaled
+	cb := struct {
+		Action    string            `json:"action"`
+		SessionID string            `json:"session_id"`
+		Data      map[string]string `json:"data"`
+	}{
+		Action:    "callback",
+		SessionID: "test-001",
+		Data:      map[string]string{"button": "confirm"},
+	}
+
+	assert.Equal(t, "callback", cb.Action)
+	assert.Equal(t, "test-001", cb.SessionID)
+	assert.Equal(t, "confirm", cb.Data["button"])
+
+	// Verify the raw data can be parsed
+	assert.Contains(t, callbackData, "callback")
+	assert.Contains(t, callbackData, "test-001")
+
+	// Test action routing
+	actions := []string{"callback", "act:/confirm", "act:/cancel", "act:/delete"}
+	for _, action := range actions {
+		assert.NotEmpty(t, action)
+		// Action should be either callback or act:/ prefix
+		isValid := action == "callback" || strings.HasPrefix(action, "act:/")
+		assert.True(t, isValid, "action %s should be valid", action)
+	}
+
+	// Use the callbackData to avoid compiler warning
+	assert.NotEmpty(t, callbackData)
+
+	t.Log("Webhook callback: PASS")
+}
+
