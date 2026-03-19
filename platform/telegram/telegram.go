@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -591,7 +592,7 @@ func (p *Platform) SendAudio(ctx context.Context, rctx any, audio []byte, format
 
 	switch sendFormat {
 	case "ogg", "opus", "mp3", "m4a":
-		// Telegram accepts these directly for sendVoice.
+		// Attempt these formats directly with sendVoice first.
 	default:
 		converted, err := telegramConvertAudioToOpus(ctx, audio, sendFormat)
 		if err != nil {
@@ -606,7 +607,13 @@ func (p *Platform) SendAudio(ctx context.Context, rctx any, audio []byte, format
 			if fallbackErr := p.sendAudio(rc.chatID, sendData, sendFormat); fallbackErr == nil {
 				return nil
 			} else {
-				return fmt.Errorf("telegram: SendAudio: sendVoice failed: %w; sendAudio fallback failed: %v", err, fallbackErr)
+				return fmt.Errorf(
+					"telegram: SendAudio: %w",
+					errors.Join(
+						fmt.Errorf("sendVoice failed: %w", err),
+						fmt.Errorf("sendAudio fallback failed: %w", fallbackErr),
+					),
+				)
 			}
 		}
 		return fmt.Errorf("telegram: SendAudio: sendVoice: %w", err)
