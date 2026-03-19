@@ -76,6 +76,12 @@ func (p *stubPlatformEngine) getSent() []string {
 	return cp
 }
 
+func (p *stubPlatformEngine) clearSent() {
+	p.mu.Lock()
+	p.sent = nil
+	p.mu.Unlock()
+}
+
 type stubMediaPlatform struct {
 	stubPlatformEngine
 	images []ImageAttachment
@@ -4404,5 +4410,773 @@ func TestCmdStop_UsesInteractiveKeyForMultiWorkspace(t *testing.T) {
 
 	if exists {
 		t.Error("expected interactive state to be cleaned up by /stop using interactiveKey")
+	}
+}
+
+// ===========================================================================
+// Beta pre-release tests: inject_sender, idle_timeout, /shell, /workspace,
+//                         /switch, /memory
+// ===========================================================================
+
+// --- 1. inject_sender ---
+
+func TestBuildSenderPrompt_Enabled(t *testing.T) {
+	e := newTestEngine()
+	e.SetInjectSender(true)
+
+	result := e.buildSenderPrompt("hello world", "user123", "feishu", "feishu:channel42:user123")
+	expected := "[cc-connect sender_id=user123 platform=feishu chat_id=channel42]\nhello world"
+	if result != expected {
+		t.Fatalf("got %q, want %q", result, expected)
+	}
+}
+
+func TestBuildSenderPrompt_Disabled(t *testing.T) {
+	e := newTestEngine()
+	e.SetInjectSender(false)
+
+	result := e.buildSenderPrompt("hello", "user1", "feishu", "feishu:ch:user1")
+	if result != "hello" {
+		t.Fatalf("expected raw content when disabled, got %q", result)
+	}
+}
+
+func TestBuildSenderPrompt_EmptyUserID(t *testing.T) {
+	e := newTestEngine()
+	e.SetInjectSender(true)
+
+	result := e.buildSenderPrompt("hello", "", "telegram", "telegram:ch:user1")
+	if result != "hello" {
+		t.Fatalf("expected raw content when userID is empty, got %q", result)
+	}
+}
+
+func TestExtractChannelID(t *testing.T) {
+	tests := []struct {
+		key  string
+		want string
+	}{
+		{"feishu:channel42:user1", "channel42"},
+		{"telegram:group123:user2", "group123"},
+		{"plain", ""},
+		{"a:b", "b"},
+		{"a:b:c:d", "b"},
+	}
+	for _, tt := range tests {
+		got := extractChannelID(tt.key)
+		if got != tt.want {
+			t.Errorf("extractChannelID(%q) = %q, want %q", tt.key, got, tt.want)
+		}
+	}
+}
+
+func TestBuildSenderPrompt_DifferentPlatforms(t *testing.T) {
+	e := newTestEngine()
+	e.SetInjectSender(true)
+
+	platforms := []struct {
+		platform   string
+		sessionKey string
+		wantChat   string
+	}{
+		{"telegram", "telegram:group99:alice", "group99"},
+		{"discord", "discord:server1:bob", "server1"},
+		{"slack", "slack:C012345:carol", "C012345"},
+	}
+	for _, tc := range platforms {
+		result := e.buildSenderPrompt("msg", "uid", tc.platform, tc.sessionKey)
+		if !strings.Contains(result, "platform="+tc.platform) {
+			t.Errorf("missing platform=%s in %q", tc.platform, result)
+		}
+		if !strings.Contains(result, "chat_id="+tc.wantChat) {
+			t.Errorf("missing chat_id=%s in %q", tc.wantChat, result)
+		}
+	}
+}
+
+// --- 2. idle_timeout ---
+
+func TestEventIdleTimeout_CleansUpSession(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newControllableSession("idle-test")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetEventIdleTimeout(100 * time.Millisecond)
+
+	key := "test:idle-user"
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	session := e.sessions.GetOrCreateActive(key)
+	session.TryLock()
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, key, "", time.Now(), nil)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("processInteractiveEvents did not return after idle timeout")
+	}
+
+	sent := p.getSent()
+	foundTimeout := false
+	for _, s := range sent {
+		if strings.Contains(s, "timed out") {
+			foundTimeout = true
+		}
+	}
+	if !foundTimeout {
+		t.Fatalf("expected timeout error message, got %v", sent)
+	}
+}
+
+func TestEventIdleTimeout_ResetOnEvent(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newControllableSession("idle-reset")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetEventIdleTimeout(200 * time.Millisecond)
+
+	key := "test:idle-reset"
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	session := e.sessions.GetOrCreateActive(key)
+	session.TryLock()
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, key, "", time.Now(), nil)
+		close(done)
+	}()
+
+	// Send a text event at 100ms (before the 200ms timeout), resetting the timer.
+	time.Sleep(100 * time.Millisecond)
+	sess.events <- Event{Type: EventText, Content: "thinking..."}
+
+	// Then send the result at 150ms after the text event (within the reset 200ms window).
+	time.Sleep(150 * time.Millisecond)
+	sess.events <- Event{Type: EventResult, Content: "done", Done: true}
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("processInteractiveEvents did not complete after events")
+	}
+
+	sent := p.getSent()
+	foundTimeout := false
+	for _, s := range sent {
+		if strings.Contains(s, "timed out") {
+			foundTimeout = true
+		}
+	}
+	if foundTimeout {
+		t.Error("should NOT have timed out — events should have reset the timer")
+	}
+}
+
+func TestEventIdleTimeout_DisabledWhenZero(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newControllableSession("idle-zero")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetEventIdleTimeout(0)
+
+	key := "test:idle-zero"
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	session := e.sessions.GetOrCreateActive(key)
+	session.TryLock()
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, key, "", time.Now(), nil)
+		close(done)
+	}()
+
+	// With timeout disabled, it should block until we send a result.
+	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-done:
+		t.Fatal("should not have returned yet — timeout is disabled and no events sent")
+	default:
+	}
+
+	sess.events <- Event{Type: EventResult, Content: "ok", Done: true}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not return after result event")
+	}
+}
+
+// --- 3. /shell command ---
+
+func TestCmdShell_BlockedWithoutAdmin(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	msg := &Message{
+		SessionKey: "test:ch:user1",
+		Content:    "/shell ls -la",
+		ReplyCtx:   "ctx",
+		UserID:     "user1",
+		Platform:   "test",
+	}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	foundAdmin := false
+	for _, s := range sent {
+		if strings.Contains(s, e.i18n.T(MsgAdminRequired)[:10]) || strings.Contains(s, "admin") {
+			foundAdmin = true
+		}
+	}
+	if !foundAdmin {
+		t.Fatalf("expected admin required reply, got %v", sent)
+	}
+}
+
+func TestCmdShell_AllowedForAdmin(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetAdminFrom("admin-user")
+
+	msg := &Message{
+		SessionKey: "test:ch:admin-user",
+		Content:    "/shell echo hello",
+		ReplyCtx:   "ctx",
+		UserID:     "admin-user",
+		Platform:   "test",
+	}
+	e.handleCommand(p, msg, msg.Content)
+
+	// Give the async goroutine time to complete.
+	time.Sleep(500 * time.Millisecond)
+
+	sent := p.getSent()
+	foundAdmin := false
+	for _, s := range sent {
+		if strings.Contains(s, "admin") && strings.Contains(s, "privilege") {
+			foundAdmin = true
+		}
+	}
+	if foundAdmin {
+		t.Fatalf("admin user should not be blocked, got %v", sent)
+	}
+}
+
+func TestCmdShell_EmptyCommand_ShowsUsage(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetAdminFrom("admin")
+
+	// Call cmdShell directly with empty command to test usage path.
+	msg := &Message{
+		SessionKey: "test:ch:admin",
+		Content:    "/shell",
+		ReplyCtx:   "ctx",
+		UserID:     "admin",
+		Platform:   "test",
+	}
+	e.cmdShell(p, msg, "/shell ")
+
+	sent := p.getSent()
+	foundUsage := false
+	for _, s := range sent {
+		if strings.Contains(s, "Usage") || strings.Contains(s, "/shell") {
+			foundUsage = true
+		}
+	}
+	if !foundUsage {
+		t.Fatalf("expected usage message, got %v", sent)
+	}
+}
+
+// --- 4. /workspace subcommands ---
+
+func TestWorkspace_NotEnabled_RepliesDisabled(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	msg := &Message{SessionKey: "test:ch1:user1", Content: "/workspace list", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("expected a reply")
+	}
+}
+
+func TestWorkspace_Bind_Unbind_List(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "my-project")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	// Bind
+	msg := &Message{SessionKey: "test:ch1:user1", Content: "/workspace bind my-project", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	foundBind := false
+	for _, s := range sent {
+		if strings.Contains(s, "my-project") || strings.Contains(s, e.i18n.T(MsgWsBindSuccess)[:5]) {
+			foundBind = true
+		}
+	}
+	if !foundBind {
+		t.Fatalf("expected bind success, got %v", sent)
+	}
+
+	// List
+	p.clearSent()
+	msg = &Message{SessionKey: "test:ch1:user1", Content: "/workspace list", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent = p.getSent()
+	foundList := false
+	for _, s := range sent {
+		if strings.Contains(s, "my-project") {
+			foundList = true
+		}
+	}
+	if !foundList {
+		t.Fatalf("expected list to show binding, got %v", sent)
+	}
+
+	// Unbind
+	p.clearSent()
+	msg = &Message{SessionKey: "test:ch1:user1", Content: "/workspace unbind", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent = p.getSent()
+	foundUnbind := false
+	for _, s := range sent {
+		if strings.Contains(s, e.i18n.T(MsgWsUnbindSuccess)[:5]) {
+			foundUnbind = true
+		}
+	}
+	if !foundUnbind {
+		t.Fatalf("expected unbind success, got %v", sent)
+	}
+
+	// List again — should be empty
+	p.clearSent()
+	msg = &Message{SessionKey: "test:ch1:user1", Content: "/workspace list", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent = p.getSent()
+	foundEmpty := false
+	for _, s := range sent {
+		if strings.Contains(s, e.i18n.T(MsgWsListEmpty)[:5]) {
+			foundEmpty = true
+		}
+	}
+	if !foundEmpty {
+		t.Fatalf("expected empty list, got %v", sent)
+	}
+}
+
+func TestWorkspace_Bind_NonexistentDir(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	msg := &Message{SessionKey: "test:ch1:user1", Content: "/workspace bind nonexistent", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	found := false
+	for _, s := range sent {
+		if strings.Contains(s, "nonexistent") || strings.Contains(s, "not found") || strings.Contains(s, "Not found") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected not-found reply, got %v", sent)
+	}
+}
+
+func TestWorkspace_NoArgs_ShowsCurrent(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	// No binding yet — should show "no binding"
+	msg := &Message{SessionKey: "test:ch1:user1", Content: "/workspace", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("expected a reply")
+	}
+}
+
+// --- 5. /switch ---
+
+type switchableAgent struct {
+	stubAgent
+	sessions []AgentSessionInfo
+}
+
+func (a *switchableAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
+	return a.sessions, nil
+}
+
+func TestCmdSwitch_NoArgs_ShowsUsage(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	msg := &Message{SessionKey: "test:ch:user1", Content: "/switch", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	foundUsage := false
+	for _, s := range sent {
+		if strings.Contains(s, "Usage") || strings.Contains(s, "/switch") {
+			foundUsage = true
+		}
+	}
+	if !foundUsage {
+		t.Fatalf("expected usage reply, got %v", sent)
+	}
+}
+
+func TestCmdSwitch_ByIndex_SetsSession(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agent := &switchableAgent{
+		sessions: []AgentSessionInfo{
+			{ID: "sess-aaa", Summary: "First session", MessageCount: 5},
+			{ID: "sess-bbb", Summary: "Second session", MessageCount: 3},
+		},
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:ch:user1"
+
+	// Pre-create an interactive state to verify cleanup.
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{agentSession: newControllableSession("old")}
+	e.interactiveMu.Unlock()
+
+	msg := &Message{SessionKey: key, Content: "/switch 2", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	foundSwitch := false
+	for _, s := range sent {
+		if strings.Contains(s, "Second session") || strings.Contains(s, "sess-bbb") {
+			foundSwitch = true
+		}
+	}
+	if !foundSwitch {
+		t.Fatalf("expected switch success reply referencing session 2, got %v", sent)
+	}
+
+	// Verify old interactive state was cleaned up.
+	e.interactiveMu.Lock()
+	_, exists := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	if exists {
+		t.Error("expected old interactive state to be cleaned up after /switch")
+	}
+
+	// Verify session was updated.
+	session := e.sessions.GetOrCreateActive(key)
+	if id := session.GetAgentSessionID(); id != "sess-bbb" {
+		t.Errorf("expected session ID sess-bbb, got %q", id)
+	}
+}
+
+func TestCmdSwitch_ByIDPrefix(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agent := &switchableAgent{
+		sessions: []AgentSessionInfo{
+			{ID: "abc-123-def", Summary: "Target session"},
+		},
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	msg := &Message{SessionKey: "test:ch:user1", Content: "/switch abc-123", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	foundSwitch := false
+	for _, s := range sent {
+		if strings.Contains(s, "Target session") || strings.Contains(s, "abc-123") {
+			foundSwitch = true
+		}
+	}
+	if !foundSwitch {
+		t.Fatalf("expected switch by prefix to succeed, got %v", sent)
+	}
+}
+
+func TestCmdSwitch_NoMatch(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agent := &switchableAgent{
+		sessions: []AgentSessionInfo{
+			{ID: "sess-111", Summary: "Only session"},
+		},
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	msg := &Message{SessionKey: "test:ch:user1", Content: "/switch nonexistent", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	foundNoMatch := false
+	for _, s := range sent {
+		if strings.Contains(s, "nonexistent") {
+			foundNoMatch = true
+		}
+	}
+	if !foundNoMatch {
+		t.Fatalf("expected no-match reply, got %v", sent)
+	}
+}
+
+func TestCmdSwitch_ByName(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agent := &switchableAgent{
+		sessions: []AgentSessionInfo{
+			{ID: "sess-named-1", Summary: "Unnamed"},
+			{ID: "sess-named-2", Summary: "My Feature"},
+		},
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:ch:user1"
+	// Set a custom name for the second session.
+	e.sessions.SetSessionName("sess-named-2", "feature-branch")
+
+	msg := &Message{SessionKey: key, Content: "/switch feature-branch", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	foundSwitch := false
+	for _, s := range sent {
+		if strings.Contains(s, "My Feature") || strings.Contains(s, "feature-branch") || strings.Contains(s, "sess-named-2") {
+			foundSwitch = true
+		}
+	}
+	if !foundSwitch {
+		t.Fatalf("expected switch by name to succeed, got %v", sent)
+	}
+}
+
+// --- 6. /memory ---
+
+type stubMemoryAgentFull struct {
+	stubAgent
+	projectFile string
+	globalFile  string
+}
+
+func (a *stubMemoryAgentFull) ProjectMemoryFile() string { return a.projectFile }
+func (a *stubMemoryAgentFull) GlobalMemoryFile() string  { return a.globalFile }
+
+func TestCmdMemory_NotSupported(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	msg := &Message{SessionKey: "test:ch:user1", Content: "/memory", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	found := false
+	for _, s := range sent {
+		if strings.Contains(s, e.i18n.T(MsgMemoryNotSupported)) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected MsgMemoryNotSupported, got %v", sent)
+	}
+}
+
+func TestCmdMemory_ShowEmpty(t *testing.T) {
+	tmpDir := t.TempDir()
+	projectFile := filepath.Join(tmpDir, "MEMORY.md")
+
+	p := &stubPlatformEngine{n: "test"}
+	agent := &stubMemoryAgentFull{projectFile: projectFile, globalFile: ""}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	msg := &Message{SessionKey: "test:ch:user1", Content: "/memory", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	found := false
+	for _, s := range sent {
+		if strings.Contains(s, projectFile) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected empty memory reply with file path, got %v", sent)
+	}
+}
+
+func TestCmdMemory_Add_And_Show(t *testing.T) {
+	tmpDir := t.TempDir()
+	projectFile := filepath.Join(tmpDir, "MEMORY.md")
+
+	p := &stubPlatformEngine{n: "test"}
+	agent := &stubMemoryAgentFull{projectFile: projectFile, globalFile: ""}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	// Add memory entry.
+	msg := &Message{SessionKey: "test:ch:user1", Content: "/memory add always use gofmt", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	foundAdded := false
+	for _, s := range sent {
+		if strings.Contains(s, projectFile) {
+			foundAdded = true
+		}
+	}
+	if !foundAdded {
+		t.Fatalf("expected memory added confirmation, got %v", sent)
+	}
+
+	// Verify file content.
+	data, err := os.ReadFile(projectFile)
+	if err != nil {
+		t.Fatalf("failed to read memory file: %v", err)
+	}
+	if !strings.Contains(string(data), "always use gofmt") {
+		t.Fatalf("memory file should contain entry, got %q", string(data))
+	}
+
+	// Show memory.
+	p.clearSent()
+	msg = &Message{SessionKey: "test:ch:user1", Content: "/memory show", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent = p.getSent()
+	foundShow := false
+	for _, s := range sent {
+		if strings.Contains(s, "always use gofmt") {
+			foundShow = true
+		}
+	}
+	if !foundShow {
+		t.Fatalf("expected memory show to contain the entry, got %v", sent)
+	}
+}
+
+func TestCmdMemory_Add_EmptyText_ShowsUsage(t *testing.T) {
+	tmpDir := t.TempDir()
+	p := &stubPlatformEngine{n: "test"}
+	agent := &stubMemoryAgentFull{projectFile: filepath.Join(tmpDir, "M.md")}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	msg := &Message{SessionKey: "test:ch:user1", Content: "/memory add", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	found := false
+	for _, s := range sent {
+		if strings.Contains(s, e.i18n.T(MsgMemoryAddUsage)[:10]) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected add usage reply, got %v", sent)
+	}
+}
+
+func TestCmdMemory_Global_Add_And_Show(t *testing.T) {
+	tmpDir := t.TempDir()
+	globalFile := filepath.Join(tmpDir, "GLOBAL.md")
+
+	p := &stubPlatformEngine{n: "test"}
+	agent := &stubMemoryAgentFull{projectFile: "", globalFile: globalFile}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	// Add global memory.
+	msg := &Message{SessionKey: "test:ch:user1", Content: "/memory global add prefer structured logging", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	foundAdded := false
+	for _, s := range sent {
+		if strings.Contains(s, globalFile) {
+			foundAdded = true
+		}
+	}
+	if !foundAdded {
+		t.Fatalf("expected global memory added, got %v", sent)
+	}
+
+	// Show global memory.
+	p.clearSent()
+	msg = &Message{SessionKey: "test:ch:user1", Content: "/memory global", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent = p.getSent()
+	foundShow := false
+	for _, s := range sent {
+		if strings.Contains(s, "prefer structured logging") {
+			foundShow = true
+		}
+	}
+	if !foundShow {
+		t.Fatalf("expected global show to contain entry, got %v", sent)
+	}
+}
+
+func TestCmdMemory_Help(t *testing.T) {
+	tmpDir := t.TempDir()
+	p := &stubPlatformEngine{n: "test"}
+	agent := &stubMemoryAgentFull{projectFile: filepath.Join(tmpDir, "M.md")}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	msg := &Message{SessionKey: "test:ch:user1", Content: "/memory help", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("expected help reply")
 	}
 }
