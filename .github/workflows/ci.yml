@@ -7,12 +7,33 @@ on:
     branches: [main]
 
 jobs:
-  build-and-test:
+  lint:
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Lint code
+        run: |
+          go install github.com/golangci-lint/golangci-lint/cmd/golangci-lint@v1.62.0
+          "$(go env GOPATH)/bin/golangci-lint" run ./...
+
+      - name: Lint GitHub workflows
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.8
+          "$(go env GOPATH)/bin/actionlint" -color
+
+  unit-test:
+    runs-on: ubuntu-latest
+    needs: lint
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -26,11 +47,6 @@ jobs:
           GOPROXY: https://proxy.golang.org,direct
           GOSUMDB: sum.golang.org
 
-      - name: Lint GitHub workflows
-        run: |
-          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.8
-          "$(go env GOPATH)/bin/actionlint" -color
-
       - name: Build
         run: go build ./...
 
@@ -40,9 +56,41 @@ jobs:
       - name: Run tests with coverage
         run: go test ./... -coverprofile=coverage.out -covermode=atomic
 
-      - name: Upload coverage to Codecov (optional)
+      - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
         if: github.event_name == 'push'
         with:
           files: ./coverage.out
           fail_ci_if_error: false
+
+  smoke-test:
+    runs-on: ubuntu-latest
+    needs: unit-test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Run smoke tests
+        run: go test -v -tags=smoke ./tests/e2e/...
+
+  regression-test:
+    runs-on: ubuntu-latest
+    needs: smoke-test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Run regression tests
+        run: go test -v -tags=regression ./tests/e2e/...
