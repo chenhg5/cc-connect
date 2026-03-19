@@ -3776,3 +3776,633 @@ func TestExecuteCardAction_ModeCleansUpWithInteractiveKey(t *testing.T) {
 		t.Error("expected interactive state to be cleaned up after /mode")
 	}
 }
+
+// ===========================================================================
+// P0 Beta release tests
+// ===========================================================================
+
+// --- 1. Message queue overflow ---
+
+func TestQueueMessageOverflow_DropsOldestAndReturnsfalse(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("qs-overflow")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:overflow-user"
+
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	// Fill the queue to maxQueuedMessages (5).
+	for i := 0; i < maxQueuedMessages; i++ {
+		msg := &Message{SessionKey: key, Content: fmt.Sprintf("msg-%d", i), ReplyCtx: fmt.Sprintf("ctx-%d", i)}
+		ok := e.queueMessageForBusySession(p, msg, key)
+		if !ok {
+			t.Fatalf("expected msg-%d to be queued, got false", i)
+		}
+	}
+
+	state.mu.Lock()
+	if len(state.pendingMessages) != maxQueuedMessages {
+		t.Fatalf("queue depth = %d, want %d", len(state.pendingMessages), maxQueuedMessages)
+	}
+	state.mu.Unlock()
+
+	// The 6th message should be rejected (returns false).
+	overflow := &Message{SessionKey: key, Content: "msg-overflow", ReplyCtx: "ctx-overflow"}
+	ok := e.queueMessageForBusySession(p, overflow, key)
+	if ok {
+		t.Fatal("expected 6th message to be rejected (queue full)")
+	}
+
+	// Queue should still have exactly maxQueuedMessages items (the original 5).
+	state.mu.Lock()
+	if len(state.pendingMessages) != maxQueuedMessages {
+		t.Fatalf("queue depth after overflow = %d, want %d", len(state.pendingMessages), maxQueuedMessages)
+	}
+	// First message should still be msg-0 (FIFO preserved, no silent drop).
+	if state.pendingMessages[0].content != "msg-0" {
+		t.Fatalf("first queued = %q, want msg-0", state.pendingMessages[0].content)
+	}
+	state.mu.Unlock()
+
+	// Platform should have received the MsgMessageQueued replies for the 5 accepted + nothing for rejected.
+	sent := p.getSent()
+	if len(sent) != maxQueuedMessages {
+		t.Fatalf("platform replies = %d, want %d (one per accepted queue)", len(sent), maxQueuedMessages)
+	}
+}
+
+func TestQueueMessage_NoState_ReturnsFalse(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := newTestEngine()
+
+	msg := &Message{SessionKey: "nonexistent:key", Content: "hello"}
+	ok := e.queueMessageForBusySession(p, msg, "nonexistent:key")
+	if ok {
+		t.Fatal("expected false when no interactive state exists")
+	}
+}
+
+func TestQueueMessage_DeadSession_ReturnsFalse(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("dead")
+	sess.alive = false
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:dead-session"
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	msg := &Message{SessionKey: key, Content: "hello"}
+	ok := e.queueMessageForBusySession(p, msg, key)
+	if ok {
+		t.Fatal("expected false for dead session")
+	}
+}
+
+// --- 2. /compress flow ---
+
+type stubCompressorAgent struct {
+	stubAgent
+	cmd string
+}
+
+func (a *stubCompressorAgent) CompressCommand() string { return a.cmd }
+
+func TestCmdCompress_NoCompressor_RepliesNotSupported(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	msg := &Message{SessionKey: "test:user1", Content: "/compress", ReplyCtx: "ctx"}
+	e.cmdCompress(p, msg)
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("expected a reply")
+	}
+	if !strings.Contains(sent[0], e.i18n.T(MsgCompressNotSupported)) {
+		t.Fatalf("expected MsgCompressNotSupported, got %q", sent[0])
+	}
+}
+
+func TestCmdCompress_NoSession_RepliesNoSession(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agent := &stubCompressorAgent{cmd: "/compact"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	msg := &Message{SessionKey: "test:user1", Content: "/compress", ReplyCtx: "ctx"}
+	e.cmdCompress(p, msg)
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("expected a reply")
+	}
+	if !strings.Contains(sent[0], e.i18n.T(MsgCompressNoSession)) {
+		t.Fatalf("expected MsgCompressNoSession, got %q", sent[0])
+	}
+}
+
+func TestCmdCompress_SessionBusy_RepliesPreviousProcessing(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("compress-busy")
+	agent := &stubCompressorAgent{cmd: "/compact"}
+	agent.stubAgent = stubAgent{}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	// Lock the session to simulate busy.
+	session := e.sessions.GetOrCreateActive(key)
+	if !session.TryLock() {
+		t.Fatal("expected TryLock to succeed")
+	}
+
+	msg := &Message{SessionKey: key, Content: "/compress", ReplyCtx: "ctx"}
+	e.cmdCompress(p, msg)
+
+	sent := p.getSent()
+	found := false
+	for _, s := range sent {
+		if strings.Contains(s, e.i18n.T(MsgPreviousProcessing)) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected MsgPreviousProcessing reply, got %v", sent)
+	}
+	session.Unlock()
+}
+
+func TestCmdCompress_Success_SendsCompressDone(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("compress-ok")
+	agent := &stubCompressorAgent{cmd: "/compact"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	msg := &Message{SessionKey: key, Content: "/compress", ReplyCtx: "ctx"}
+	e.cmdCompress(p, msg)
+
+	// Wait for Send to be called (happens after drainEvents), then inject the result event.
+	deadline := time.After(3 * time.Second)
+	for {
+		sess.sendMu.Lock()
+		n := len(sess.sendCalls)
+		sess.sendMu.Unlock()
+		if n > 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for compress Send call")
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	sess.events <- Event{Type: EventResult, Content: "", Done: true}
+
+	for {
+		sent := p.getSent()
+		foundDone := false
+		for _, s := range sent {
+			if strings.Contains(s, e.i18n.T(MsgCompressDone)) {
+				foundDone = true
+			}
+		}
+		if foundDone {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for MsgCompressDone, sent = %v", p.getSent())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
+func TestCmdCompress_WithText_SendsResult(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("compress-text")
+	agent := &stubCompressorAgent{cmd: "/compact"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	msg := &Message{SessionKey: key, Content: "/compress", ReplyCtx: "ctx"}
+	e.cmdCompress(p, msg)
+
+	// Wait for Send to be called (happens after drainEvents).
+	deadline := time.After(3 * time.Second)
+	for {
+		sess.sendMu.Lock()
+		n := len(sess.sendCalls)
+		sess.sendMu.Unlock()
+		if n > 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for compress Send call")
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	sess.events <- Event{Type: EventText, Content: "Compressed to 50%"}
+	sess.events <- Event{Type: EventResult, Content: "Compression complete", Done: true}
+
+	for {
+		sent := p.getSent()
+		foundResult := false
+		for _, s := range sent {
+			if strings.Contains(s, "Compression complete") {
+				foundResult = true
+			}
+		}
+		if foundResult {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for compress result, sent = %v", p.getSent())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
+func TestCmdCompress_DrainsQueueAfterSuccess(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("compress-drain")
+	agent := &stubCompressorAgent{cmd: "/compact"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+		pendingMessages: []queuedMessage{
+			{platform: p, replyCtx: "ctx-q1", content: "queued-after-compress"},
+		},
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	msg := &Message{SessionKey: key, Content: "/compress", ReplyCtx: "ctx"}
+	e.cmdCompress(p, msg)
+
+	// Complete compress.
+	sess.events <- Event{Type: EventResult, Content: "", Done: true}
+
+	// Wait for Send to be called (drain of queued message).
+	deadline := time.After(3 * time.Second)
+	for {
+		sess.sendMu.Lock()
+		n := len(sess.sendCalls)
+		sess.sendMu.Unlock()
+		if n > 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for queued message to be sent after compress")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	// Provide events for the drained turn so processInteractiveEvents completes.
+	sess.events <- Event{Type: EventResult, Content: "drain-done", Done: true}
+
+	// Verify the queued message was actually sent.
+	time.Sleep(100 * time.Millisecond)
+	sess.sendMu.Lock()
+	calls := make([]string, len(sess.sendCalls))
+	copy(calls, sess.sendCalls)
+	sess.sendMu.Unlock()
+
+	if len(calls) == 0 {
+		t.Fatal("expected at least one Send call for the queued message")
+	}
+	found := false
+	for _, c := range calls {
+		if strings.Contains(c, "queued-after-compress") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("queued message not found in send calls: %v", calls)
+	}
+}
+
+// --- 3. executeCardAction routing ---
+
+func TestExecuteCardAction_CronEnable(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = store.Add(&CronJob{ID: "job1", CronExpr: "0 9 * * *", Enabled: false})
+	scheduler := NewCronScheduler(store)
+	e.cronScheduler = scheduler
+
+	e.executeCardAction("/cron", "enable job1", "test:user1")
+
+	job := store.Get("job1")
+	if job == nil {
+		t.Fatal("job not found")
+	}
+	if !job.Enabled {
+		t.Error("expected job to be enabled after card action")
+	}
+}
+
+func TestExecuteCardAction_CronDisable(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = store.Add(&CronJob{ID: "job1", CronExpr: "0 9 * * *", Enabled: true})
+	scheduler := NewCronScheduler(store)
+	e.cronScheduler = scheduler
+
+	e.executeCardAction("/cron", "disable job1", "test:user1")
+
+	job := store.Get("job1")
+	if job == nil {
+		t.Fatal("job not found")
+	}
+	if job.Enabled {
+		t.Error("expected job to be disabled after card action")
+	}
+}
+
+func TestExecuteCardAction_CronDelete(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = store.Add(&CronJob{ID: "del-job", CronExpr: "0 9 * * *", Enabled: true})
+	scheduler := NewCronScheduler(store)
+	e.cronScheduler = scheduler
+
+	e.executeCardAction("/cron", "delete del-job", "test:user1")
+
+	job := store.Get("del-job")
+	if job != nil {
+		t.Error("expected job to be deleted after card action")
+	}
+}
+
+func TestExecuteCardAction_CronMuteUnmute(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = store.Add(&CronJob{ID: "mute-job", CronExpr: "0 9 * * *", Enabled: true})
+	scheduler := NewCronScheduler(store)
+	e.cronScheduler = scheduler
+
+	e.executeCardAction("/cron", "mute mute-job", "test:user1")
+	job := store.Get("mute-job")
+	if job == nil || !job.Mute {
+		t.Error("expected job to be muted")
+	}
+
+	e.executeCardAction("/cron", "unmute mute-job", "test:user1")
+	job = store.Get("mute-job")
+	if job == nil || job.Mute {
+		t.Error("expected job to be unmuted")
+	}
+}
+
+func TestExecuteCardAction_CronNoScheduler_NoPanic(t *testing.T) {
+	e := newTestEngine()
+	// cronScheduler is nil — should not panic.
+	e.executeCardAction("/cron", "enable job1", "test:user1")
+}
+
+func TestExecuteCardAction_CronBadArgs_NoPanic(t *testing.T) {
+	store, _ := NewCronStore(t.TempDir())
+	scheduler := NewCronScheduler(store)
+	e := newTestEngine()
+	e.cronScheduler = scheduler
+
+	// Missing ID.
+	e.executeCardAction("/cron", "enable", "test:user1")
+	// Empty args.
+	e.executeCardAction("/cron", "", "test:user1")
+}
+
+func TestExecuteCardAction_StopCleansUp(t *testing.T) {
+	sess := newControllableSession("stop-test")
+	e := newTestEngine()
+	key := "test:user1"
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{agentSession: sess}
+	e.interactiveMu.Unlock()
+
+	e.executeCardAction("/stop", "", key)
+
+	e.interactiveMu.Lock()
+	_, exists := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+
+	if exists {
+		t.Error("expected interactive state to be removed after /stop")
+	}
+}
+
+func TestExecuteCardAction_StopPreservesQuiet(t *testing.T) {
+	sess := newControllableSession("stop-quiet")
+	e := newTestEngine()
+	key := "test:user1"
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{agentSession: sess, quiet: true}
+	e.interactiveMu.Unlock()
+
+	e.executeCardAction("/stop", "", key)
+
+	e.interactiveMu.Lock()
+	state, exists := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+
+	if !exists {
+		t.Fatal("expected interactive state to persist (quiet mode)")
+	}
+	if !state.quiet {
+		t.Error("expected quiet flag to be preserved")
+	}
+	if state.agentSession != nil {
+		t.Error("expected agentSession to be nil after /stop")
+	}
+}
+
+func TestExecuteCardAction_NewCleansUpAndCreatesSession(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	key := "test:user1"
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{agentSession: newControllableSession("old")}
+	e.interactiveMu.Unlock()
+
+	e.executeCardAction("/new", "", key)
+
+	e.interactiveMu.Lock()
+	_, exists := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+
+	if exists {
+		t.Error("expected old interactive state to be cleaned up after /new")
+	}
+}
+
+func TestExecuteCardAction_LangSwitch(t *testing.T) {
+	e := newTestEngine()
+
+	e.executeCardAction("/lang", "zh", "test:user1")
+	if e.i18n.CurrentLang() != LangChinese {
+		t.Errorf("expected LangChinese, got %v", e.i18n.CurrentLang())
+	}
+
+	e.executeCardAction("/lang", "en", "test:user1")
+	if e.i18n.CurrentLang() != LangEnglish {
+		t.Errorf("expected LangEnglish, got %v", e.i18n.CurrentLang())
+	}
+
+	e.executeCardAction("/lang", "ja", "test:user1")
+	if e.i18n.CurrentLang() != LangJapanese {
+		t.Errorf("expected LangJapanese, got %v", e.i18n.CurrentLang())
+	}
+}
+
+func TestExecuteCardAction_UnknownCommand_NoPanic(t *testing.T) {
+	e := newTestEngine()
+	// Should not panic for unrecognized commands.
+	e.executeCardAction("/nonexistent", "args", "test:user1")
+	e.executeCardAction("", "", "test:user1")
+}
+
+// --- 4. Multi-workspace command handlers use interactiveKey ---
+
+func TestCmdStatus_UsesInteractiveKeyForMultiWorkspace(t *testing.T) {
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "card"}}
+	agent := &stubModelModeAgent{model: "gpt-4.1", mode: "default"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	wsDir := t.TempDir()
+	rawKey := "feishu:ch1:user1"
+	wsKey := wsDir + ":" + rawKey
+
+	state := &interactiveState{
+		agentSession: newControllableSession("ws-status-test"),
+		platform:     p,
+		quiet:        true,
+	}
+	iKey := e.interactiveKeyForSessionKey(wsKey)
+	e.interactiveMu.Lock()
+	e.interactiveStates[iKey] = state
+	e.interactiveMu.Unlock()
+
+	msg := &Message{SessionKey: wsKey, Content: "/status", ReplyCtx: "ctx"}
+	e.cmdStatus(p, msg)
+
+	// The status card should include the quiet state from the correct
+	// interactive key (normalized workspace path), not from a raw lookup.
+	if len(p.repliedCards) == 0 && len(p.sentCards) == 0 {
+		sent := p.getSent()
+		found := false
+		for _, s := range sent {
+			if strings.Contains(s, "Quiet") || strings.Contains(s, "quiet") || strings.Contains(s, "ON") {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("expected status to reflect quiet=true, got %v", sent)
+		}
+	}
+}
+
+func TestCmdStop_UsesInteractiveKeyForMultiWorkspace(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newControllableSession("ws-stop-test")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	wsDir := t.TempDir()
+	rawKey := "feishu:ch1:user1"
+	wsKey := wsDir + ":" + rawKey
+
+	iKey := e.interactiveKeyForSessionKey(wsKey)
+	e.interactiveMu.Lock()
+	e.interactiveStates[iKey] = &interactiveState{agentSession: sess}
+	e.interactiveMu.Unlock()
+
+	msg := &Message{SessionKey: wsKey, Content: "/stop", ReplyCtx: "ctx"}
+	e.cmdStop(p, msg)
+
+	e.interactiveMu.Lock()
+	_, exists := e.interactiveStates[iKey]
+	e.interactiveMu.Unlock()
+
+	if exists {
+		t.Error("expected interactive state to be cleaned up by /stop using interactiveKey")
+	}
+}
