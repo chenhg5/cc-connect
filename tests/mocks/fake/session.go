@@ -120,13 +120,19 @@ func (s *FakeAgentSession) Events() <-chan core.Event {
 	// Reset index for fresh consumption
 	s.eventIndex = 0
 
-	// Buffer size is len(events) + 1 for the done event
-	ch := make(chan core.Event, len(s.events)+1)
+	// Determine buffer size: +1 only if last event doesn't already have Done=true
+	bufSize := len(s.events)
+	if bufSize > 0 && !s.events[bufSize-1].Done {
+		bufSize++
+	}
+	ch := make(chan core.Event, bufSize)
 	for _, e := range s.events {
 		ch <- e
 	}
-	// Send a done event if not already present
-	ch <- core.Event{Type: core.EventResult, Done: true}
+	// Send a done event only if last event doesn't already have Done=true
+	if bufSize == len(s.events) {
+		ch <- core.Event{Type: core.EventResult, Done: true}
+	}
 	close(ch)
 	return ch
 }

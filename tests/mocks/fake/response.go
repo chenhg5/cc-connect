@@ -2,6 +2,7 @@ package fake
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -128,8 +129,8 @@ func TestAgentSessionInfoList(count int) []core.AgentSessionInfo {
 	sessions := make([]core.AgentSessionInfo, count)
 	for i := 0; i < count; i++ {
 		sessions[i] = core.AgentSessionInfo{
-			ID:           "session-" + string(rune('0'+i)),
-			Summary:      "Test session " + string(rune('0'+i)),
+			ID:           fmt.Sprintf("session-%d", i),
+			Summary:      fmt.Sprintf("Test session %d", i),
 			MessageCount: (i + 1) * 10,
 			ModifiedAt:   time.Now().Add(-time.Duration(i) * time.Hour),
 		}

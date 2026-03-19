@@ -1,6 +1,8 @@
 package fake
 
 import (
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -69,7 +71,7 @@ func TestLongMessage(length int) *core.Message {
 		Platform:   "test",
 		MessageID:  "msg-test-long",
 		UserID:    "user-test",
-		Content:    string(make([]byte, length)),
+		Content:    strings.Repeat("x", length),
 	}
 }
 
@@ -220,7 +222,7 @@ func TestModelOption(name, desc, alias string) core.ModelOption {
 func BatchTestMessages(count int) []*core.Message {
 	messages := make([]*core.Message, count)
 	for i := 0; i < count; i++ {
-		messages[i] = TestMessageWithContent("Test message " + string(rune('A'+i)))
+		messages[i] = TestMessageWithContent(fmt.Sprintf("Test message %d", i))
 	}
 	return messages
 }
