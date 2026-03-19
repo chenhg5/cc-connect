@@ -327,6 +327,34 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	return nil
 }
 
+// SendImage uploads and sends an image to the channel.
+// Implements core.ImageSender.
+func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttachment) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("slack: SendImage: invalid reply context type %T", rctx)
+	}
+
+	name := img.FileName
+	if name == "" {
+		name = "image.png"
+	}
+
+	_, err := p.client.UploadFileV2Context(ctx, slack.UploadFileV2Parameters{
+		Reader:         bytes.NewReader(img.Data),
+		FileSize:       len(img.Data),
+		Filename:       name,
+		Channel:        rc.channel,
+		ThreadTimestamp: rc.timestamp,
+	})
+	if err != nil {
+		return fmt.Errorf("slack: send image: %w", err)
+	}
+	return nil
+}
+
+var _ core.ImageSender = (*Platform)(nil)
+
 func (p *Platform) downloadSlackFile(url string) ([]byte, error) {
 	if url == "" {
 		return nil, fmt.Errorf("empty URL")

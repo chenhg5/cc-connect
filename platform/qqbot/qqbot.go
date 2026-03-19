@@ -3,6 +3,7 @@ package qqbot
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -174,6 +175,152 @@ func (p *Platform) Send(ctx context.Context, replyCtx any, content string) error
 	}
 	return nil
 }
+
+// SendImage uploads and sends an image via QQ Bot rich media API.
+// Implements core.ImageSender.
+func (p *Platform) SendImage(ctx context.Context, replyCtx any, img core.ImageAttachment) error {
+	rctx, ok := replyCtx.(*replyContext)
+	if !ok {
+		return fmt.Errorf("qqbot: SendImage: invalid reply context type %T", replyCtx)
+	}
+
+	fileInfo, err := p.uploadRichMedia(rctx, 1, img.Data)
+	if err != nil {
+		return fmt.Errorf("qqbot: upload image: %w", err)
+	}
+
+	var url string
+	switch rctx.messageType {
+	case "group":
+		url = fmt.Sprintf("%s/v2/groups/%s/messages", p.apiBase(), rctx.groupOpenID)
+	case "c2c":
+		url = fmt.Sprintf("%s/v2/users/%s/messages", p.apiBase(), rctx.userOpenID)
+	default:
+		return fmt.Errorf("qqbot: unknown message type %q", rctx.messageType)
+	}
+
+	body := map[string]any{
+		"msg_type": 7,
+		"media":    map[string]any{"file_info": fileInfo},
+	}
+	if rctx.eventMsgID != "" {
+		body["msg_id"] = rctx.eventMsgID
+		body["msg_seq"] = p.nextMsgSeq(rctx.eventMsgID)
+	}
+
+	return p.apiRequest("POST", url, body)
+}
+
+// uploadRichMedia uploads a file to QQ Bot rich media API and returns the file_info.
+// fileType: 1=image, 2=video, 3=audio, 4=file.
+func (p *Platform) uploadRichMedia(rctx *replyContext, fileType int, data []byte) (string, error) {
+	var url string
+	switch rctx.messageType {
+	case "group":
+		url = fmt.Sprintf("%s/v2/groups/%s/files", p.apiBase(), rctx.groupOpenID)
+	case "c2c":
+		url = fmt.Sprintf("%s/v2/users/%s/files", p.apiBase(), rctx.userOpenID)
+	default:
+		return "", fmt.Errorf("qqbot: unknown message type %q", rctx.messageType)
+	}
+
+	b64 := base64.StdEncoding.EncodeToString(data)
+	reqBody := map[string]any{
+		"file_type":    fileType,
+		"file_data":    b64,
+		"srv_send_msg": false,
+	}
+
+	var result struct {
+		FileInfo string `json:"file_info"`
+	}
+	if err := p.apiRequestJSON("POST", url, reqBody, &result); err != nil {
+		return "", err
+	}
+	if result.FileInfo == "" {
+		return "", fmt.Errorf("qqbot: upload rich media: empty file_info")
+	}
+	return result.FileInfo, nil
+}
+
+// apiRequestJSON is like apiRequest but also decodes the response body into result.
+func (p *Platform) apiRequestJSON(method, url string, body any, result any) error {
+	var bodyReader io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return fmt.Errorf("qqbot: marshal body: %w", err)
+		}
+		bodyReader = bytes.NewReader(data)
+	}
+
+	token, err := p.getAccessToken()
+	if err != nil {
+		return fmt.Errorf("qqbot: get token: %w", err)
+	}
+
+	req, err := http.NewRequest(method, url, bodyReader)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "QQBot "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := core.HTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("qqbot: api request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Retry once on 401
+	if resp.StatusCode == http.StatusUnauthorized {
+		if err := p.refreshToken(); err != nil {
+			return fmt.Errorf("qqbot: token refresh on 401: %w", err)
+		}
+		token, _ = p.getAccessToken()
+
+		if body != nil {
+			data, _ := json.Marshal(body)
+			bodyReader = bytes.NewReader(data)
+		}
+		req2, err := http.NewRequest(method, url, bodyReader)
+		if err != nil {
+			return fmt.Errorf("qqbot: build retry request: %w", err)
+		}
+		req2.Header.Set("Authorization", "QQBot "+token)
+		req2.Header.Set("Content-Type", "application/json")
+
+		resp2, err := core.HTTPClient.Do(req2)
+		if err != nil {
+			return fmt.Errorf("qqbot: api retry failed: %w", err)
+		}
+		defer resp2.Body.Close()
+
+		if resp2.StatusCode >= 300 {
+			raw, _ := io.ReadAll(resp2.Body)
+			return fmt.Errorf("qqbot: api %s %s returned %d (after retry): %s", method, url, resp2.StatusCode, raw)
+		}
+		if result != nil {
+			if err := json.NewDecoder(resp2.Body).Decode(result); err != nil {
+				return fmt.Errorf("qqbot: decode response: %w", err)
+			}
+		}
+		return nil
+	}
+
+	if resp.StatusCode >= 300 {
+		raw, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("qqbot: api %s %s returned %d: %s", method, url, resp.StatusCode, raw)
+	}
+	if result != nil {
+		if err := json.NewDecoder(resp.Body).Decode(result); err != nil {
+			return fmt.Errorf("qqbot: decode response: %w", err)
+		}
+	}
+	return nil
+}
+
+var _ core.ImageSender = (*Platform)(nil)
 
 // Stop shuts down the platform.
 func (p *Platform) Stop() error {

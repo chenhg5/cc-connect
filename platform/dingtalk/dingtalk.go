@@ -438,6 +438,72 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	return p.Reply(ctx, rctx, content)
 }
 
+// SendImage uploads and sends an image via DingTalk oToMessages API.
+// Implements core.ImageSender.
+func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttachment) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("dingtalk: SendImage: invalid reply context type %T", rctx)
+	}
+
+	name := img.FileName
+	if name == "" {
+		name = "image.png"
+	}
+
+	mediaID, err := p.uploadMedia(ctx, img.Data, name, "image")
+	if err != nil {
+		return fmt.Errorf("dingtalk: upload image: %w", err)
+	}
+
+	slog.Debug("dingtalk: image uploaded", "media_id", mediaID, "size", len(img.Data))
+
+	token, err := p.getAccessToken()
+	if err != nil {
+		return fmt.Errorf("dingtalk: get access token: %w", err)
+	}
+
+	msgParamBytes, _ := json.Marshal(map[string]string{"photoURL": mediaID})
+	requestBody := map[string]any{
+		"robotCode": p.robotCode,
+		"userIds":   []string{rc.senderStaffId},
+		"msgKey":    "sampleImageMsg",
+		"msgParam":  string(msgParamBytes),
+	}
+
+	body, err := json.Marshal(requestBody)
+	if err != nil {
+		return fmt.Errorf("dingtalk: marshal image message: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		"https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend",
+		bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("dingtalk: create image request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-acs-dingtalk-access-token", token)
+
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("dingtalk: send image request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	slog.Debug("dingtalk: oToMessages image response", "status", resp.StatusCode, "body", string(respBody))
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("dingtalk: send image failed: status=%d, body=%s", resp.StatusCode, string(respBody))
+	}
+
+	slog.Info("dingtalk: image message sent", "media_id", mediaID, "user", rc.senderStaffId)
+	return nil
+}
+
+var _ core.ImageSender = (*Platform)(nil)
+
 // SendAudio uploads audio bytes to DingTalk and sends a voice message.
 // Implements core.AudioSender interface.
 // Uses DingTalk oToMessages API with msgKey: "sampleAudio" (voice messages).
@@ -485,7 +551,7 @@ func (p *Platform) SendAudio(ctx context.Context, rctx any, audio []byte, format
 	}
 
 	// Upload audio to DingTalk media API
-	mediaID, err := p.uploadMedia(ctx, audio, format)
+	mediaID, err := p.uploadMedia(ctx, audio, fmt.Sprintf("audio.%s", format), "voice")
 	if err != nil {
 		return fmt.Errorf("dingtalk: upload audio: %w", err)
 	}
@@ -602,34 +668,26 @@ func (p *Platform) compressAudioWithFFmpeg(ctx context.Context, audio []byte, fo
 	return stdout.Bytes(), "mp3", nil
 }
 
-// uploadMedia uploads audio file to DingTalk and returns the media ID.
-func (p *Platform) uploadMedia(ctx context.Context, audio []byte, format string) (string, error) {
-	// Check audio size limit (DingTalk limit is typically 2MB for voice messages)
-	const maxAudioSize = 2 * 1024 * 1024 // 2MB
-	if len(audio) > maxAudioSize {
-		return "", fmt.Errorf("audio file too large: %d bytes (max %d bytes)", len(audio), maxAudioSize)
-	}
-
+// uploadMedia uploads a file to DingTalk media API and returns the media ID.
+// mediaType should be "voice" or "image".
+func (p *Platform) uploadMedia(ctx context.Context, data []byte, fileName, mediaType string) (string, error) {
 	token, err := p.getAccessToken()
 	if err != nil {
 		return "", fmt.Errorf("get access token: %w", err)
 	}
 
-	// Use legacy API for media upload: oapi.dingtalk.com/media/upload
-	uploadURL := fmt.Sprintf("https://oapi.dingtalk.com/media/upload?access_token=%s&type=voice", token)
+	uploadURL := fmt.Sprintf("https://oapi.dingtalk.com/media/upload?access_token=%s&type=%s", token, mediaType)
 
-	// Create multipart form data with field name "media"
 	body := bytes.NewBuffer(nil)
 	writer := multipart.NewWriter(body)
 
-	// Create form file with field name "media" (required by DingTalk)
-	part, err := writer.CreateFormFile("media", fmt.Sprintf("audio.%s", format))
+	part, err := writer.CreateFormFile("media", fileName)
 	if err != nil {
 		return "", fmt.Errorf("create form file: %w", err)
 	}
 
-	if _, err := part.Write(audio); err != nil {
-		return "", fmt.Errorf("write audio data: %w", err)
+	if _, err := part.Write(data); err != nil {
+		return "", fmt.Errorf("write media data: %w", err)
 	}
 
 	if err := writer.Close(); err != nil {
@@ -649,7 +707,6 @@ func (p *Platform) uploadMedia(ctx context.Context, audio []byte, format string)
 	}
 	defer resp.Body.Close()
 
-	// Read response body once
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", fmt.Errorf("read upload response: %w", err)
@@ -659,14 +716,13 @@ func (p *Platform) uploadMedia(ctx context.Context, audio []byte, format string)
 		return "", fmt.Errorf("upload returned status %d: %s", resp.StatusCode, respBody)
 	}
 
-	// Log response for debugging
 	slog.Debug("dingtalk: media upload response", "status", resp.StatusCode, "body", string(respBody))
 
 	var uploadResp struct {
-		ErrCode  int    `json:"errcode"`
-		ErrMsg   string `json:"errmsg"`
-		MediaID  string `json:"media_id"`
-		Type     string `json:"type"`
+		ErrCode int    `json:"errcode"`
+		ErrMsg  string `json:"errmsg"`
+		MediaID string `json:"media_id"`
+		Type    string `json:"type"`
 	}
 	if err := json.Unmarshal(respBody, &uploadResp); err != nil {
 		return "", fmt.Errorf("decode upload response: %w, body: %s", err, respBody)
@@ -680,7 +736,7 @@ func (p *Platform) uploadMedia(ctx context.Context, audio []byte, format string)
 		return "", fmt.Errorf("empty media_id in upload response: %s", respBody)
 	}
 
-	slog.Debug("dingtalk: media uploaded successfully", "media_id", uploadResp.MediaID, "size", len(audio))
+	slog.Debug("dingtalk: media uploaded successfully", "media_id", uploadResp.MediaID, "type", mediaType, "size", len(data))
 	return uploadResp.MediaID, nil
 }
 
