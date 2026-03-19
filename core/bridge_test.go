@@ -2,6 +2,7 @@ package core
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -60,7 +61,7 @@ func register(t *testing.T, conn *websocket.Conn, platform string, caps []string
 
 func readMsg(t *testing.T, conn *websocket.Conn) map[string]any {
 	t.Helper()
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	var m map[string]any
 	if err := conn.ReadJSON(&m); err != nil {
 		t.Fatalf("read message: %v", err)
@@ -121,7 +122,7 @@ func TestBridge_RegisterMissingPlatform(t *testing.T) {
 	}
 
 	var ack map[string]any
-	conn.ReadJSON(&ack)
+	_ = conn.ReadJSON(&ack)
 	if ack["ok"] == true {
 		t.Fatal("expected registration to fail for empty platform")
 	}
@@ -192,13 +193,13 @@ func TestBridge_ReplyRouting(t *testing.T) {
 	e := NewEngine("test-proj", &stubAgent{}, []Platform{bp}, "", LangEnglish)
 	bs.RegisterEngine("test-proj", e, bp)
 	bp.handler = func(p Platform, msg *Message) {
-		p.Reply(nil, msg.ReplyCtx, "pong")
+		_ = p.Reply(context.Background(), msg.ReplyCtx, "pong")
 	}
 
 	conn := dialWS(t, wsURL, nil)
 	register(t, conn, "rc", []string{"text"})
 
-	conn.WriteJSON(map[string]any{
+	_ = conn.WriteJSON(map[string]any{
 		"type":        "message",
 		"msg_id":      "m1",
 		"session_key": "rc:u1:u1",
@@ -232,7 +233,7 @@ func TestBridge_CardFallback(t *testing.T) {
 			t.Fatal("BridgePlatform should implement CardSender")
 		}
 		card := NewCard().Title("Test", "blue").Markdown("hello").Build()
-		cs.SendCard(nil, msg.ReplyCtx, card)
+		cs.SendCard(context.Background(), msg.ReplyCtx, card)
 	}
 
 	// Adapter declares NO card capability → should get text fallback
@@ -268,7 +269,7 @@ func TestBridge_CardNative(t *testing.T) {
 	bp.handler = func(p Platform, msg *Message) {
 		cs := p.(CardSender)
 		card := NewCard().Title("Test", "blue").Markdown("hello").Build()
-		cs.SendCard(nil, msg.ReplyCtx, card)
+		cs.SendCard(context.Background(), msg.ReplyCtx, card)
 	}
 
 	// Adapter declares card capability → should get card

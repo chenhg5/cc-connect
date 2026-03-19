@@ -299,6 +299,13 @@ func (a *Agent) CommandDirs() []string {
 	return dirs
 }
 
+// CommandFileExts restricts command discovery to .toml files only.
+// Gemini CLI commands are defined as .toml files; .md files in the
+// commands directory are documentation, not commands.
+func (a *Agent) CommandFileExts() []string {
+	return []string{".toml"}
+}
+
 // ── SkillProvider implementation ──────────────────────────────
 
 func (a *Agent) SkillDirs() []string {

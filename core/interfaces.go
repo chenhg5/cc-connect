@@ -307,10 +307,20 @@ type ContextCompressor interface {
 }
 
 // CommandProvider is an optional interface for agents that expose custom slash
-// commands via local files (e.g. .claude/commands/*.md). The engine scans the
-// returned directories for *.md files and registers them as slash commands.
+// commands via local files (e.g. .claude/commands/*.md, .gemini/commands/*.toml).
+// The engine scans the returned directories for command files and registers them
+// as slash commands.
 type CommandProvider interface {
 	CommandDirs() []string
+}
+
+// CommandFileFilter is an optional interface that agents can implement alongside
+// CommandProvider to restrict which file extensions are treated as commands.
+// For example, Gemini CLI only uses .toml files, so it returns []string{".toml"}
+// to prevent .md documentation files from being falsely detected as commands.
+// If an agent does not implement this, both .md and .toml are accepted.
+type CommandFileFilter interface {
+	CommandFileExts() []string // e.g. [".toml"] or [".md"]
 }
 
 // SkillProvider is an optional interface for agents that expose skills via

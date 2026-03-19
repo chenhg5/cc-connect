@@ -283,6 +283,9 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 
 	if cp, ok := ag.(CommandProvider); ok {
 		e.commands.SetAgentDirs(cp.CommandDirs())
+		if cf, ok2 := ag.(CommandFileFilter); ok2 {
+			e.commands.SetAcceptedExts(cf.CommandFileExts())
+		}
 	}
 	if sp, ok := ag.(SkillProvider); ok {
 		e.skills.SetDirs(sp.SkillDirs())
@@ -2786,8 +2789,14 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 					displayName = string([]rune(displayName)[:40]) + "…"
 				}
 			}
+			// Use active session's History length for the current session's message count
+			// This ensures accurate count when multiple groups share the same sessionKey
+			msgCount := s.MessageCount
+			if s.ID == activeAgentID {
+				msgCount = len(activeSession.History)
+			}
 			sb.WriteString(fmt.Sprintf("%s **%d.** %s · **%d** msgs · %s\n",
-				marker, i+1, displayName, s.MessageCount, s.ModifiedAt.Format("01-02 15:04")))
+				marker, i+1, displayName, msgCount, s.ModifiedAt.Format("01-02 15:04")))
 		}
 		if totalPages > 1 {
 			sb.WriteString(fmt.Sprintf(e.i18n.T(MsgListPageHint), page, totalPages))
@@ -2842,8 +2851,15 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 
 	session := sessions.GetOrCreateActive(msg.SessionKey)
 	session.SetAgentInfo(matched.ID, agent.Name(), matched.Summary)
-	session.ClearHistory()
-	sessions.Save()
+
+	// Don't clear history for group shared sessions (shareSessionInChannel=true)
+	// Group chats share the same sessionKey, so clearing history would delete
+	// messages from other groups. Individual users (with :userID suffix)
+	// have separate sessionKeys and should clear history on switch.
+	if !strings.Contains(msg.SessionKey, ":") {
+		session.ClearHistory()
+		sessions.Save()
+	}
 
 	shortID := matched.ID
 	if len(shortID) > 12 {
@@ -2853,8 +2869,14 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	if displayName == "" {
 		displayName = matched.Summary
 	}
+	// For shared group sessions (sessionKey without ":"), use History length
+	// For individual sessions (sessionKey with ":"), use MessageCount from agent
+	historyCount := matched.MessageCount
+	if !strings.Contains(msg.SessionKey, ":") {
+		historyCount = len(session.History)
+	}
 	e.reply(p, msg.ReplyCtx,
-		e.i18n.Tf(MsgSwitchSuccess, displayName, shortID, matched.MessageCount))
+		e.i18n.Tf(MsgSwitchSuccess, displayName, shortID, historyCount))
 }
 
 // matchSession resolves a user query to an agent session. Priority:
@@ -3178,7 +3200,11 @@ func (e *Engine) cmdCurrent(p Platform, msg *Message) {
 		if agentID == "" {
 			agentID = e.i18n.T(MsgSessionNotStarted)
 		}
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCurrentSession), s.Name, agentID, len(s.History)))
+
+		// For shared group sessions, use the full History length
+		// Individual sessions use AgentSessionID, but groups share sessionKey
+		historyCount := len(s.History)
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCurrentSession), s.Name, agentID, historyCount))
 		return
 	}
 
@@ -4046,7 +4072,7 @@ func (e *Engine) GetAllCommands() []BotCommandInfo {
 
 		commands = append(commands, BotCommandInfo{
 			Command:     c.Name,
-			Description: desc,
+			Description: "[Cmd] " + desc,
 		})
 	}
 
@@ -4064,7 +4090,7 @@ func (e *Engine) GetAllCommands() []BotCommandInfo {
 
 		commands = append(commands, BotCommandInfo{
 			Command:     s.Name,
-			Description: desc,
+			Description: "[Skill] " + desc,
 		})
 	}
 

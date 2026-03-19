@@ -152,7 +152,7 @@ func (bs *BridgeServer) NewPlatform(projectName string) *BridgePlatform {
 func (bs *BridgeServer) RegisterEngine(projectName string, engine *Engine, bp *BridgePlatform) {
 	bs.enginesMu.Lock()
 	defer bs.enginesMu.Unlock()
-	bp.Start(engine.handleMessage)
+	_ = bp.Start(engine.handleMessage)
 	bp.SetCardNavigationHandler(engine.handleCardNav)
 	bs.engines[projectName] = &bridgeEngineRef{engine: engine, platform: bp}
 }
@@ -218,7 +218,7 @@ func (bs *BridgeServer) Stop() {
 	if bs.server != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		bs.server.Shutdown(ctx)
+		_ = bs.server.Shutdown(ctx)
 	}
 }
 
@@ -496,9 +496,9 @@ func (bs *BridgeServer) handleWS(w http.ResponseWriter, r *http.Request) {
 func (bs *BridgeServer) handleConnection(conn *websocket.Conn) {
 	defer conn.Close()
 
-	conn.SetReadDeadline(time.Now().Add(90 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(90 * time.Second))
 	conn.SetPongHandler(func(string) error {
-		conn.SetReadDeadline(time.Now().Add(90 * time.Second))
+		_ = conn.SetReadDeadline(time.Now().Add(90 * time.Second))
 		return nil
 	})
 
@@ -555,7 +555,7 @@ func (bs *BridgeServer) handleConnection(conn *websocket.Conn) {
 	}()
 
 	for {
-		conn.SetReadDeadline(time.Now().Add(90 * time.Second))
+		_ = conn.SetReadDeadline(time.Now().Add(90 * time.Second))
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {

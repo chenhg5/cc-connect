@@ -138,6 +138,112 @@ func TestCommandRegistry_ListAll(t *testing.T) {
 	}
 }
 
+func TestCommandRegistry_TomlResolve(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "review.toml"), []byte("prompt = \"Review the code\"\ndescription = \"Code review command\"\n"), 0644)
+
+	r := NewCommandRegistry()
+	r.SetAgentDirs([]string{dir})
+
+	cmd, ok := r.Resolve("review")
+	if !ok {
+		t.Fatal("expected to resolve 'review' from toml file")
+	}
+	if cmd.Prompt != "Review the code" {
+		t.Errorf("Prompt = %q, want 'Review the code'", cmd.Prompt)
+	}
+	if cmd.Description != "Code review command" {
+		t.Errorf("Description = %q, want 'Code review command'", cmd.Description)
+	}
+	if cmd.Source != "agent" {
+		t.Errorf("Source = %q, want 'agent'", cmd.Source)
+	}
+}
+
+func TestCommandRegistry_TomlNamespaced(t *testing.T) {
+	dir := t.TempDir()
+	subDir := filepath.Join(dir, "git")
+	os.MkdirAll(subDir, 0755)
+	os.WriteFile(filepath.Join(subDir, "commit.toml"), []byte("prompt = \"Generate a commit message\"\ndescription = \"Git commit helper\"\n"), 0644)
+
+	r := NewCommandRegistry()
+	r.SetAgentDirs([]string{dir})
+
+	// Resolve via colon-namespaced name
+	cmd, ok := r.Resolve("git:commit")
+	if !ok {
+		t.Fatal("expected to resolve 'git:commit' from git/commit.toml")
+	}
+	if cmd.Name != "git:commit" {
+		t.Errorf("Name = %q, want 'git:commit'", cmd.Name)
+	}
+	if cmd.Prompt != "Generate a commit message" {
+		t.Errorf("Prompt = %q", cmd.Prompt)
+	}
+}
+
+func TestCommandRegistry_TomlListAll(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "review.toml"), []byte("prompt = \"Review\"\ndescription = \"Code review\"\n"), 0644)
+	os.WriteFile(filepath.Join(dir, "build.md"), []byte("Build project"), 0644)
+	subDir := filepath.Join(dir, "git")
+	os.MkdirAll(subDir, 0755)
+	os.WriteFile(filepath.Join(subDir, "commit.toml"), []byte("prompt = \"Commit\"\n"), 0644)
+
+	r := NewCommandRegistry()
+	r.SetAgentDirs([]string{dir})
+
+	all := r.ListAll()
+	names := map[string]bool{}
+	for _, c := range all {
+		names[c.Name] = true
+	}
+	if !names["review"] {
+		t.Error("missing 'review' toml command")
+	}
+	if !names["build"] {
+		t.Error("missing 'build' md command")
+	}
+	if !names["git:commit"] {
+		t.Error("missing 'git:commit' namespaced toml command")
+	}
+}
+
+func TestCommandRegistry_MdOverridesToml(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "deploy.md"), []byte("MD deploy prompt"), 0644)
+	os.WriteFile(filepath.Join(dir, "deploy.toml"), []byte("prompt = \"TOML deploy prompt\"\n"), 0644)
+
+	r := NewCommandRegistry()
+	r.SetAgentDirs([]string{dir})
+
+	cmd, ok := r.Resolve("deploy")
+	if !ok {
+		t.Fatal("expected to resolve 'deploy'")
+	}
+	// .md should take priority over .toml
+	if cmd.Prompt != "MD deploy prompt" {
+		t.Errorf("Prompt = %q, want 'MD deploy prompt' (.md should override .toml)", cmd.Prompt)
+	}
+}
+
+func TestNameFromRelPath(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"deploy", "deploy"},
+		{filepath.Join("git", "commit"), "git:commit"},
+		{filepath.Join("refactor", "pure"), "refactor:pure"},
+	}
+	for _, tt := range tests {
+		got := nameFromRelPath(tt.input)
+		if got != tt.want {
+			t.Errorf("nameFromRelPath(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
 func TestExpandPrompt_NoPlaceholders(t *testing.T) {
 	got := ExpandPrompt("Do the thing", []string{"arg1"})
 	if got != "Do the thing\n\narg1" {

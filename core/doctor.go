@@ -344,7 +344,7 @@ func checkNetwork(ctx context.Context) []DoctorCheckResult {
 		results = append(results, DoctorCheckResult{
 			Name:    ep.label,
 			Status:  status,
-			Detail:  fmt.Sprintf("TCP connect OK"),
+			Detail:  "TCP connect OK",
 			Latency: latency,
 		})
 	}

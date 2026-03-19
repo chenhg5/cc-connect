@@ -239,10 +239,8 @@ func (rm *RelayManager) Send(ctx context.Context, req RelayRequest) (*RelayRespo
 	}
 
 	// Post the response to the group chat for visibility
-	if targetEngine != nil {
-		label := fmt.Sprintf("[%s] %s", toName, truncateRelay(response, 2000))
-		rm.sendToGroup(ctx, targetEngine, platform, groupSessionKey, label)
-	}
+	label := fmt.Sprintf("[%s] %s", toName, truncateRelay(response, 2000))
+	rm.sendToGroup(ctx, targetEngine, platform, groupSessionKey, label)
 
 	return &RelayResponse{Response: response}, nil
 }
