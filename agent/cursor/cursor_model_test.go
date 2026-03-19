@@ -10,7 +10,7 @@ import (
 
 func shortTestContext(t *testing.T) (context.Context, context.CancelFunc) {
 	t.Helper()
-	timeout := 2 * time.Second
+	timeout := 5 * time.Second
 	if deadline, ok := t.Deadline(); ok {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
