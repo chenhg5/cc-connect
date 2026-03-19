@@ -12,16 +12,15 @@ import (
 // FakeAgentSession is a fake implementation of AgentSession for testing.
 // It simulates agent behavior without calling real CLI tools.
 type FakeAgentSession struct {
-	mu           sync.RWMutex
-	sessionID    string
-	promptQueue  []string
-	events       []core.Event
-	eventIndex   int
-	closed       bool
-	alive        bool
+	mu            sync.RWMutex
+	sessionID     string
+	promptQueue   []string
+	events        []core.Event
+	closed        bool
+	alive         bool
 	responseDelay time.Duration
-	responses    []string
-	responseIdx  int
+	responses     []string
+	responseIdx   int
 }
 
 func NewFakeAgentSession(sessionID string) *FakeAgentSession {
@@ -77,19 +76,13 @@ func (s *FakeAgentSession) AddPermissionRequest(requestID, toolName, toolInput s
 
 func (s *FakeAgentSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if s.closed {
+		s.mu.Unlock()
 		return io.ErrClosedPipe
 	}
 
 	s.promptQueue = append(s.promptQueue, prompt)
 
-	if s.responseDelay > 0 {
-		time.Sleep(s.responseDelay)
-	}
-
-	// Auto-generate events if not already set
 	if len(s.events) == 0 {
 		if len(s.responses) > 0 && s.responseIdx < len(s.responses) {
 			resp := s.responses[s.responseIdx]
@@ -98,6 +91,12 @@ func (s *FakeAgentSession) Send(prompt string, images []core.ImageAttachment, fi
 		} else {
 			s.events = append(s.events, TestTextEvent("Processing: "+prompt), TestResultEvent("Done"))
 		}
+	}
+	delay := s.responseDelay
+	s.mu.Unlock()
+
+	if delay > 0 {
+		time.Sleep(delay)
 	}
 
 	return nil
@@ -117,20 +116,16 @@ func (s *FakeAgentSession) Events() <-chan core.Event {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	// Reset index for fresh consumption
-	s.eventIndex = 0
-
-	// Determine buffer size: +1 only if last event doesn't already have Done=true
+	needsDone := len(s.events) == 0 || !s.events[len(s.events)-1].Done
 	bufSize := len(s.events)
-	if bufSize > 0 && !s.events[bufSize-1].Done {
+	if needsDone {
 		bufSize++
 	}
 	ch := make(chan core.Event, bufSize)
 	for _, e := range s.events {
 		ch <- e
 	}
-	// Send a done event only if last event doesn't already have Done=true
-	if bufSize == len(s.events) {
+	if needsDone {
 		ch <- core.Event{Type: core.EventResult, Done: true}
 	}
 	close(ch)

@@ -3,6 +3,7 @@ package fake
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -72,6 +73,7 @@ func TestCardWithButtons(buttons ...core.CardButton) *core.Card {
 
 // TestMessageHandler is a simple message handler for testing.
 type TestMessageHandler struct {
+	mu       sync.Mutex
 	Messages []*core.Message
 }
 
@@ -82,14 +84,22 @@ func NewTestMessageHandler() *TestMessageHandler {
 }
 
 func (h *TestMessageHandler) Handle(p core.Platform, msg *core.Message) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.Messages = append(h.Messages, msg)
 }
 
 func (h *TestMessageHandler) GetMessages() []*core.Message {
-	return h.Messages
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	cp := make([]*core.Message, len(h.Messages))
+	copy(cp, h.Messages)
+	return cp
 }
 
 func (h *TestMessageHandler) Clear() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.Messages = h.Messages[:0]
 }
 
