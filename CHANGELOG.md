@@ -1,5 +1,47 @@
 # Changelog
 
+## v1.2.2-beta.3 (2026-03-19)
+
+Beta release with major multi-user mode, improved workspace stability, and platform enhancements.
+
+### New Features
+- **Multi-User Mode**: Per-user rate limits, role-based ACL (allow_from/admin_from), and audit logging
+- **ImageSender**: Unified image sending support for 6 platforms (Feishu, Telegram, Discord, Slack, DingTalk, QQ)
+- **MiniMax M2.7**: Upgraded default model from M2.5 to M2.7 for improved reasoning
+- **/whoami Command**: Display user ID for allow_from/admin_from configuration
+- **/btw Command**: Inject messages into busy sessions without interrupting
+- **/dir Command**: Dynamic runtime work directory switching
+- **Cron Muting**: Mute/unmute cron jobs with platform wrapper and UI integration
+- **Interrupt Support**: Send interrupt signal to agent sessions (Ctrl+C equivalent)
+- **CORS Support**: Cross-origin requests enabled for Bridge API
+- **Message Queuing**: Queue messages when agent is busy instead of discarding
+- **QQ Bot Markdown**: Full Markdown message support for QQ Bot
+
+### Bug Fixes
+- **Workspace Session Persistence**: Sessions now persist to disk in multi-workspace mode
+- **Race Conditions**: Multiple data race fixes (adminFrom, degraded field, userRolesMu)
+- **Memory Leaks**: Fixed pendingAcks leak on WeCom WebSocket disconnect, goroutine leaks
+- **i18n**: Complete translation coverage for error messages
+- **Relay Timeout**: Return partial text after timeout instead of error
+- **QQ Bot Reconnect**: Handle nil wsConn on failed reconnect
+
+### Improvements
+- **Message Queue**: Extracted message queue handling into dedicated method
+- **Cron UX**: Improved human-readable cron expressions
+- **Slack**: Typing indicator, file download error handling, auth diagnostics
+- **Provider Config**: `models` list for per-provider model selection via alias
+- **Build**: Test infrastructure with P0/P1分层测试targets
+
+### Contributors
+
+Special thanks to all contributors who made this release possible:
+
+- **sean2077** - Multi-user mode, ACL, and audit logging
+- **0xsegfaulted** - Multi-workspace fixes and interrupt support
+- **octo-patch** - MiniMax M2.7 upgrade
+- **windli2018** - Bridge CORS support
+- **jenvan** - CORS fixes
+
 ## v1.2.2-beta.2 (2026-03-16)
 
 Beta release with significant improvements to agent stability, platform onboarding, and user experience.
