@@ -119,7 +119,7 @@ func runRelaySend(args []string) {
 	var result struct {
 		Response string `json:"response"`
 	}
-	json.Unmarshal(body, &result)
+	_ = json.Unmarshal(body, &result)
 	fmt.Print(result.Response)
 }
 

@@ -349,7 +349,7 @@ func (cs *claudeSession) Send(prompt string, images []core.ImageAttachment, file
 	}
 
 	attachDir := filepath.Join(cs.workDir, ".cc-connect", "attachments")
-	os.MkdirAll(attachDir, 0o755)
+	_ = os.MkdirAll(attachDir, 0o755)
 
 	var parts []map[string]any
 	var savedPaths []string

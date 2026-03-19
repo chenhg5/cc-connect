@@ -54,20 +54,20 @@ func TestGetAccessToken_ConcurrentAccess(t *testing.T) {
 
 func TestGetAccessToken_MutexExists(t *testing.T) {
 	// Verify that the tokenMu mutex field exists and works
-	p := &Platform{
-		clientID:    "test_client",
-		clientSecret: "test_secret",
-	}
+	p := &Platform{}
 
-	// Test that we can lock/unlock the mutex
 	p.tokenMu.Lock()
+	// Set a value under the lock to avoid empty critical section.
+	p.accessToken = "test"
 	p.tokenMu.Unlock()
 
-	// Test with defer
 	p.tokenMu.Lock()
-	defer p.tokenMu.Unlock()
+	got := p.accessToken
+	p.tokenMu.Unlock()
 
-	t.Log("tokenMu mutex is functional")
+	if got != "test" {
+		t.Fatalf("expected %q, got %q", "test", got)
+	}
 }
 
 func TestGetAccessToken_CachedTokenAccess(t *testing.T) {
@@ -107,14 +107,17 @@ func TestGetAccessToken_CachedTokenAccess(t *testing.T) {
 }
 
 func TestPlatform_MutexFieldExists(t *testing.T) {
-	// Verify the Platform struct has the tokenMu field
+	// Verify the Platform struct has the tokenMu field.
+	// This test will fail to compile if tokenMu doesn't exist.
 	p := &Platform{}
 
-	// This test will fail to compile if tokenMu doesn't exist
 	p.tokenMu.Lock()
+	p.accessToken = "mutex-test"
 	p.tokenMu.Unlock()
 
-	t.Log("Platform.tokenMu field exists")
+	if p.accessToken != "mutex-test" {
+		t.Fatal("unexpected accessToken value")
+	}
 }
 
 func TestPlatform_AccessTokenFieldsExist(t *testing.T) {

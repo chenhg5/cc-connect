@@ -30,11 +30,6 @@ type replyContext struct {
 	senderStaffId   string
 }
 
-type audioContent struct {
-	DownloadCode string `json:"downloadCode"`
-	Recognition  string `json:"recognition"`
-}
-
 type downloadResponse struct {
 	DownloadUrl string `json:"downloadUrl"`
 }
@@ -586,12 +581,12 @@ func (p *Platform) SendAudio(ctx context.Context, rctx any, audio []byte, format
 
 	// Build oToMessages API request with sampleAudio msgKey
 	// msgParam must be a JSON string, not an object
-	msgParamJSON := fmt.Sprintf(`{"mediaId":"%s","duration":"%d"}`, mediaID, durationMs)
-	requestBody := map[string]interface{}{
+	msgParamBytes, _ := json.Marshal(map[string]any{"mediaId": mediaID, "duration": fmt.Sprintf("%d", durationMs)})
+	requestBody := map[string]any{
 		"robotCode": p.robotCode,
 		"userIds":   []string{rc.senderStaffId},
 		"msgKey":    "sampleAudio",
-		"msgParam":  msgParamJSON,
+		"msgParam":  string(msgParamBytes),
 	}
 
 	body, err := json.Marshal(requestBody)

@@ -449,7 +449,7 @@ func (p *Platform) callAPI(action string, params map[string]any) (map[string]any
 			return nil, fmt.Errorf("qq: API %s failed (retcode=%d)", action, resp.RetCode)
 		}
 		var result map[string]any
-		json.Unmarshal(resp.Data, &result)
+		_ = json.Unmarshal(resp.Data, &result)
 		return result, nil
 
 	case <-time.After(15 * time.Second):

@@ -144,13 +144,13 @@ func (m *ManagementServer) setCORS(w http.ResponseWriter, r *http.Request) {
 func mgmtJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]any{"ok": true, "data": data})
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "data": data})
 }
 
 func mgmtError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": msg})
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": msg})
 }
 
 func mgmtOK(w http.ResponseWriter, msg string) {
@@ -202,7 +202,7 @@ func (m *ManagementServer) handleRestart(w http.ResponseWriter, r *http.Request)
 		SessionKey string `json:"session_key"`
 		Platform   string `json:"platform"`
 	}
-	json.NewDecoder(r.Body).Decode(&body)
+	_ = json.NewDecoder(r.Body).Decode(&body)
 
 	select {
 	case RestartCh <- RestartRequest{SessionKey: body.SessionKey, Platform: body.Platform}:
@@ -1116,11 +1116,8 @@ func (m *ManagementServer) listBridgeAdapters() []map[string]any {
 // ── Log ring buffer ───────────────────────────────────────────
 
 type logRingBuffer struct {
-	mu      sync.Mutex
 	entries []logEntry
 	size    int
-	pos     int
-	full    bool
 }
 
 type logEntry struct {

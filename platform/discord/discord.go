@@ -632,9 +632,13 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 		}
 		return nil
 	case replyContext:
-		_, err := p.session.ChannelMessageSendComplex(rc.targetChannelID(), &discordgo.MessageSend{
+		send := &discordgo.MessageSend{
 			Files: []*discordgo.File{newFile()},
-		})
+		}
+		if rc.messageID != "" && !rc.useThreadChannel() {
+			send.Reference = &discordgo.MessageReference{MessageID: rc.messageID}
+		}
+		_, err := p.session.ChannelMessageSendComplex(rc.targetChannelID(), send)
 		if err != nil {
 			return fmt.Errorf("discord: send image: %w", err)
 		}

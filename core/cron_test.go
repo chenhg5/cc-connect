@@ -72,7 +72,7 @@ func TestCronStore_MutePersistence(t *testing.T) {
 		ID: "persist1", Project: "proj", SessionKey: "test:ch1",
 		CronExpr: "0 6 * * *", Prompt: "hello", Enabled: true, CreatedAt: time.Now(),
 	}
-	store.Add(job)
+	_ = store.Add(job)
 	store.SetMute("persist1", true)
 
 	store2, err := NewCronStore(dir)
@@ -155,12 +155,12 @@ func TestRenderCronCard_WithButtons(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store.Add(&CronJob{
+	_ = store.Add(&CronJob{
 		ID: "j1", Project: "test", SessionKey: "test:ch1",
 		CronExpr: "0 6 * * *", Prompt: "daily task", Enabled: true,
 		CreatedAt: time.Now(),
 	})
-	store.Add(&CronJob{
+	_ = store.Add(&CronJob{
 		ID: "j2", Project: "test", SessionKey: "test:ch1",
 		CronExpr: "0 12 * * *", Prompt: "noon task", Enabled: false, Mute: true,
 		CreatedAt: time.Now(),
@@ -223,7 +223,7 @@ func TestRenderCronCard_HasHint(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store.Add(&CronJob{
+	_ = store.Add(&CronJob{
 		ID: "h1", Project: "test", SessionKey: "test:ch1",
 		CronExpr: "0 6 * * *", Prompt: "task", Enabled: true,
 		CreatedAt: time.Now(),
@@ -248,7 +248,7 @@ func TestExecuteCardAction_CronActions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store.Add(&CronJob{
+	_ = store.Add(&CronJob{
 		ID: "act1", Project: "test", SessionKey: "test:ch1",
 		CronExpr: "0 6 * * *", Prompt: "task", Enabled: true,
 		CreatedAt: time.Now(),
@@ -259,7 +259,7 @@ func TestExecuteCardAction_CronActions(t *testing.T) {
 	scheduler := NewCronScheduler(store)
 	e.cronScheduler = scheduler
 	scheduler.RegisterEngine("test", e)
-	scheduler.Start()
+	_ = scheduler.Start()
 	defer scheduler.Stop()
 
 	e.executeCardAction("/cron", "disable act1", "test:ch1")
@@ -299,7 +299,7 @@ func TestCmdCronMute_TextCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store.Add(&CronJob{
+	_ = store.Add(&CronJob{
 		ID: "txt1", Project: "test", SessionKey: "test:ch1",
 		CronExpr: "0 6 * * *", Prompt: "task", Enabled: true,
 		CreatedAt: time.Now(),

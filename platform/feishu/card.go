@@ -253,7 +253,6 @@ func renderDeleteModeCheckerCard(card *core.Card, base map[string]any) (map[stri
 		return nil, false
 	}
 
-	rows := make([]deleteModeCheckerRow, 0)
 	formRowElements := make([]map[string]any, 0)
 	notes := make([]core.CardNote, 0)
 	navRows := make([]core.CardActions, 0)
@@ -280,7 +279,6 @@ func renderDeleteModeCheckerCard(card *core.Card, base map[string]any) (map[stri
 				text:    text,
 				checked: strings.Contains(e.Text, "☑"),
 			}
-			rows = append(rows, row)
 			formRowElements = append(formRowElements, map[string]any{
 				"tag":     "checker",
 				"name":    deleteModeCheckerName(row.id),

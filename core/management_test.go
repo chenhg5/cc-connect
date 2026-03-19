@@ -55,9 +55,9 @@ func mgmtGet(t *testing.T, url, token string) mgmtResponse {
 	if err != nil {
 		t.Fatalf("GET %s: %v", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var r mgmtResponse
-	json.NewDecoder(resp.Body).Decode(&r)
+	_ = json.NewDecoder(resp.Body).Decode(&r)
 	return r
 }
 
@@ -65,7 +65,7 @@ func mgmtPost(t *testing.T, url, token string, body any) mgmtResponse {
 	t.Helper()
 	var buf bytes.Buffer
 	if body != nil {
-		json.NewEncoder(&buf).Encode(body)
+		_ = json.NewEncoder(&buf).Encode(body)
 	}
 	req, _ := http.NewRequest("POST", url, &buf)
 	req.Header.Set("Content-Type", "application/json")
@@ -76,9 +76,9 @@ func mgmtPost(t *testing.T, url, token string, body any) mgmtResponse {
 	if err != nil {
 		t.Fatalf("POST %s: %v", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var r mgmtResponse
-	json.NewDecoder(resp.Body).Decode(&r)
+	_ = json.NewDecoder(resp.Body).Decode(&r)
 	return r
 }
 
@@ -86,7 +86,7 @@ func mgmtPatch(t *testing.T, url, token string, body any) mgmtResponse {
 	t.Helper()
 	var buf bytes.Buffer
 	if body != nil {
-		json.NewEncoder(&buf).Encode(body)
+		_ = json.NewEncoder(&buf).Encode(body)
 	}
 	req, _ := http.NewRequest("PATCH", url, &buf)
 	req.Header.Set("Content-Type", "application/json")
@@ -97,9 +97,9 @@ func mgmtPatch(t *testing.T, url, token string, body any) mgmtResponse {
 	if err != nil {
 		t.Fatalf("PATCH %s: %v", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var r mgmtResponse
-	json.NewDecoder(resp.Body).Decode(&r)
+	_ = json.NewDecoder(resp.Body).Decode(&r)
 	return r
 }
 
@@ -113,9 +113,9 @@ func mgmtDelete(t *testing.T, url, token string) mgmtResponse {
 	if err != nil {
 		t.Fatalf("DELETE %s: %v", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var r mgmtResponse
-	json.NewDecoder(resp.Body).Decode(&r)
+	_ = json.NewDecoder(resp.Body).Decode(&r)
 	return r
 }
 
@@ -168,7 +168,7 @@ func TestMgmt_Status(t *testing.T) {
 	}
 
 	var data map[string]any
-	json.Unmarshal(r.Data, &data)
+	_ = json.Unmarshal(r.Data, &data)
 	if data["projects_count"] != float64(1) {
 		t.Fatalf("expected 1 project, got %v", data["projects_count"])
 	}
@@ -185,7 +185,7 @@ func TestMgmt_Projects(t *testing.T) {
 	var data struct {
 		Projects []map[string]any `json:"projects"`
 	}
-	json.Unmarshal(r.Data, &data)
+	_ = json.Unmarshal(r.Data, &data)
 	if len(data.Projects) != 1 {
 		t.Fatalf("expected 1 project, got %d", len(data.Projects))
 	}
@@ -203,7 +203,7 @@ func TestMgmt_ProjectDetail(t *testing.T) {
 	}
 
 	var data map[string]any
-	json.Unmarshal(r.Data, &data)
+	_ = json.Unmarshal(r.Data, &data)
 	if data["name"] != "test-project" {
 		t.Fatalf("expected test-project, got %v", data["name"])
 	}
@@ -261,7 +261,7 @@ func TestMgmt_SessionDetail(t *testing.T) {
 	var data struct {
 		History []map[string]any `json:"history"`
 	}
-	json.Unmarshal(r.Data, &data)
+	_ = json.Unmarshal(r.Data, &data)
 	if len(data.History) != 2 {
 		t.Fatalf("expected 2 history entries, got %d", len(data.History))
 	}
@@ -295,7 +295,7 @@ func TestMgmt_Config(t *testing.T) {
 	var data struct {
 		Projects []map[string]any `json:"projects"`
 	}
-	json.Unmarshal(r.Data, &data)
+	_ = json.Unmarshal(r.Data, &data)
 	if len(data.Projects) != 1 {
 		t.Fatalf("expected 1 project in config, got %d", len(data.Projects))
 	}
@@ -334,7 +334,7 @@ func TestMgmt_HeartbeatNotConfigured(t *testing.T) {
 	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/heartbeat", "tok")
 	if r.OK {
 		var data map[string]any
-		json.Unmarshal(r.Data, &data)
+		_ = json.Unmarshal(r.Data, &data)
 		// heartbeat scheduler is nil, so we expect service unavailable
 	}
 }
@@ -350,7 +350,7 @@ func TestMgmt_HeartbeatWithScheduler(t *testing.T) {
 	}
 
 	var data map[string]any
-	json.Unmarshal(r.Data, &data)
+	_ = json.Unmarshal(r.Data, &data)
 	if data["enabled"] != false {
 		t.Fatalf("expected heartbeat disabled, got %v", data["enabled"])
 	}
@@ -394,7 +394,7 @@ func TestMgmt_CronWithScheduler(t *testing.T) {
 	}
 
 	var job CronJob
-	json.Unmarshal(r.Data, &job)
+	_ = json.Unmarshal(r.Data, &job)
 	if job.ID == "" {
 		t.Fatal("expected cron job ID")
 	}
@@ -455,5 +455,5 @@ func TestMgmt_MethodNotAllowed(t *testing.T) {
 	resp.Body.Close()
 
 	var r mgmtResponse
-	json.NewDecoder(resp.Body).Decode(&r)
+	_ = json.NewDecoder(resp.Body).Decode(&r)
 }

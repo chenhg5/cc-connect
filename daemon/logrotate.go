@@ -60,7 +60,7 @@ func (w *RotatingWriter) rotate() {
 
 	backup := w.path + ".1"
 	os.Remove(backup)
-	os.Rename(w.path, backup)
+	_ = os.Rename(w.path, backup)
 
 	f, err := os.OpenFile(w.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {

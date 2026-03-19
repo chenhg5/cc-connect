@@ -80,7 +80,7 @@ func (ws *WebhookServer) Stop() {
 	if ws.server != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		ws.server.Shutdown(ctx)
+		_ = ws.server.Shutdown(ctx)
 	}
 }
 
@@ -146,7 +146,7 @@ func (ws *WebhookServer) handleHook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
+	_ = json.NewEncoder(w).Encode(map[string]string{
 		"status": "accepted",
 		"event":  eventName,
 	})

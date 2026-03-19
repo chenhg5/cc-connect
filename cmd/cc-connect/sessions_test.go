@@ -169,7 +169,7 @@ func TestLoadAllSessions(t *testing.T) {
 func TestLoadAllSessionsSkipsMalformed(t *testing.T) {
 	tmpDir := t.TempDir()
 	sessionsDir := filepath.Join(tmpDir, "sessions")
-	os.MkdirAll(sessionsDir, 0o755)
+	_ = os.MkdirAll(sessionsDir, 0o755)
 
 	// Write one valid file
 	valid := sessionFileData{
@@ -183,7 +183,7 @@ func TestLoadAllSessionsSkipsMalformed(t *testing.T) {
 	writeSessionFile(t, sessionsDir, "valid.json", valid)
 
 	// Write one malformed file
-	os.WriteFile(filepath.Join(sessionsDir, "bad.json"), []byte("{invalid json"), 0o644)
+	_ = os.WriteFile(filepath.Join(sessionsDir, "bad.json"), []byte("{invalid json"), 0o644)
 
 	records, err := loadAllSessions(tmpDir)
 	if err != nil {
@@ -202,7 +202,7 @@ func TestLoadAllSessionsSkipsMalformed(t *testing.T) {
 func TestLoadAllSessionsEmpty(t *testing.T) {
 	tmpDir := t.TempDir()
 	sessionsDir := filepath.Join(tmpDir, "sessions")
-	os.MkdirAll(sessionsDir, 0o755)
+	_ = os.MkdirAll(sessionsDir, 0o755)
 
 	records, err := loadAllSessions(tmpDir)
 	if err != nil {

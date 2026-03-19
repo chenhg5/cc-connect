@@ -86,7 +86,9 @@ func SaveFilesToDisk(workDir string, files []FileAttachment) []string {
 		return nil
 	}
 	attachDir := filepath.Join(workDir, ".cc-connect", "attachments")
-	os.MkdirAll(attachDir, 0o755)
+	if err := os.MkdirAll(attachDir, 0o755); err != nil {
+		return nil
+	}
 
 	var paths []string
 	for i, f := range files {

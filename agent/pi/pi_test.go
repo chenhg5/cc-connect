@@ -368,11 +368,11 @@ func TestSaveImagesToDisk_Empty(t *testing.T) {
 func TestCleanAttachments(t *testing.T) {
 	tmpDir := t.TempDir()
 	attachDir := filepath.Join(tmpDir, ".cc-connect", "attachments")
-	os.MkdirAll(attachDir, 0o755)
+	_ = os.MkdirAll(attachDir, 0o755)
 
 	// Create some files.
-	os.WriteFile(filepath.Join(attachDir, "old1.png"), []byte("data"), 0o644)
-	os.WriteFile(filepath.Join(attachDir, "old2.jpg"), []byte("data"), 0o644)
+	_ = os.WriteFile(filepath.Join(attachDir, "old1.png"), []byte("data"), 0o644)
+	_ = os.WriteFile(filepath.Join(attachDir, "old2.jpg"), []byte("data"), 0o644)
 
 	// Verify files exist.
 	entries, _ := os.ReadDir(attachDir)

@@ -152,7 +152,7 @@ func (bs *BridgeServer) NewPlatform(projectName string) *BridgePlatform {
 func (bs *BridgeServer) RegisterEngine(projectName string, engine *Engine, bp *BridgePlatform) {
 	bs.enginesMu.Lock()
 	defer bs.enginesMu.Unlock()
-	bp.Start(engine.handleMessage)
+	_ = bp.Start(engine.handleMessage)
 	bp.SetCardNavigationHandler(engine.handleCardNav)
 	bs.engines[projectName] = &bridgeEngineRef{engine: engine, platform: bp}
 }
@@ -210,7 +210,7 @@ func (bs *BridgeServer) setCORS(w http.ResponseWriter, r *http.Request) {
 func (bs *BridgeServer) Stop() {
 	bs.mu.Lock()
 	for _, a := range bs.adapters {
-		a.conn.Close()
+		_ = a.conn.Close()
 	}
 	bs.adapters = make(map[string]*bridgeAdapter)
 	bs.mu.Unlock()
@@ -218,7 +218,7 @@ func (bs *BridgeServer) Stop() {
 	if bs.server != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		bs.server.Shutdown(ctx)
+		_ = bs.server.Shutdown(ctx)
 	}
 }
 
@@ -494,11 +494,11 @@ func (bs *BridgeServer) handleWS(w http.ResponseWriter, r *http.Request) {
 }
 
 func (bs *BridgeServer) handleConnection(conn *websocket.Conn) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
-	conn.SetReadDeadline(time.Now().Add(90 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(90 * time.Second))
 	conn.SetPongHandler(func(string) error {
-		conn.SetReadDeadline(time.Now().Add(90 * time.Second))
+		_ = conn.SetReadDeadline(time.Now().Add(90 * time.Second))
 		return nil
 	})
 
@@ -511,12 +511,12 @@ func (bs *BridgeServer) handleConnection(conn *websocket.Conn) {
 
 	var reg bridgeRegister
 	if err := json.Unmarshal(raw, &reg); err != nil || reg.Type != "register" {
-		writeJSON(conn, nil, map[string]any{"type": "register_ack", "ok": false, "error": "first message must be register"})
+		_ = writeJSON(conn, nil, map[string]any{"type": "register_ack", "ok": false, "error": "first message must be register"})
 		return
 	}
 
 	if reg.Platform == "" {
-		writeJSON(conn, nil, map[string]any{"type": "register_ack", "ok": false, "error": "platform name is required"})
+		_ = writeJSON(conn, nil, map[string]any{"type": "register_ack", "ok": false, "error": "platform name is required"})
 		return
 	}
 
@@ -536,13 +536,13 @@ func (bs *BridgeServer) handleConnection(conn *websocket.Conn) {
 
 	bs.mu.Lock()
 	if old, exists := bs.adapters[reg.Platform]; exists {
-		old.conn.Close()
+		_ = old.conn.Close()
 		slog.Info("bridge: replaced existing adapter", "platform", reg.Platform)
 	}
 	bs.adapters[reg.Platform] = adapter
 	bs.mu.Unlock()
 
-	writeJSON(conn, &adapter.writeMu, map[string]any{"type": "register_ack", "ok": true})
+	_ = writeJSON(conn, &adapter.writeMu, map[string]any{"type": "register_ack", "ok": true})
 	slog.Info("bridge: adapter registered", "platform", reg.Platform, "capabilities", reg.Capabilities)
 
 	defer func() {
@@ -555,7 +555,7 @@ func (bs *BridgeServer) handleConnection(conn *websocket.Conn) {
 	}()
 
 	for {
-		conn.SetReadDeadline(time.Now().Add(90 * time.Second))
+		_ = conn.SetReadDeadline(time.Now().Add(90 * time.Second))
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
@@ -578,7 +578,7 @@ func (bs *BridgeServer) handleConnection(conn *websocket.Conn) {
 		case "preview_ack":
 			adapter.handlePreviewAck(raw)
 		case "ping":
-			writeJSON(conn, &adapter.writeMu, map[string]any{"type": "pong", "ts": time.Now().UnixMilli()})
+			_ = writeJSON(conn, &adapter.writeMu, map[string]any{"type": "pong", "ts": time.Now().UnixMilli()})
 		default:
 			slog.Debug("bridge: unknown message type", "platform", reg.Platform, "type", base.Type)
 		}
@@ -727,7 +727,7 @@ func (bs *BridgeServer) authHTTP(handler http.HandlerFunc) http.HandlerFunc {
 		if !bs.authenticate(r) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
-			json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "unauthorized"})
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "unauthorized"})
 			return
 		}
 		handler(w, r)
@@ -737,13 +737,13 @@ func (bs *BridgeServer) authHTTP(handler http.HandlerFunc) http.HandlerFunc {
 func bridgeJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]any{"ok": true, "data": data})
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "data": data})
 }
 
 func bridgeError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": msg})
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": msg})
 }
 
 // resolveEngineForSessionKey returns the engine ref for a given session key.

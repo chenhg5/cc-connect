@@ -328,7 +328,7 @@ func (p *Platform) webhookHandler(w http.ResponseWriter, r *http.Request) {
 		w.Header()[k] = v
 	}
 	w.WriteHeader(resp.StatusCode)
-	w.Write(resp.Body)
+	_, _ = w.Write(resp.Body)
 }
 
 // onCardAction handles card.action.trigger callbacks via the official SDK event dispatcher.
@@ -1445,7 +1445,6 @@ func parseInlineMarkdown(line string) []map[string]any {
 		pattern string
 		tag     string
 		style   string // for text elements with style
-		isLink  bool
 	}
 	markers := []markerDef{
 		{pattern: "**", tag: "text", style: "bold"},

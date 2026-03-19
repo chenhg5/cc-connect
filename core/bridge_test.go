@@ -2,6 +2,7 @@ package core
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -35,7 +36,7 @@ func dialWS(t *testing.T, url string, headers http.Header) *websocket.Conn {
 	if err != nil {
 		t.Fatalf("dial websocket: %v", err)
 	}
-	t.Cleanup(func() { conn.Close() })
+	t.Cleanup(func() { _ = conn.Close() })
 	return conn
 }
 
@@ -60,7 +61,7 @@ func register(t *testing.T, conn *websocket.Conn, platform string, caps []string
 
 func readMsg(t *testing.T, conn *websocket.Conn) map[string]any {
 	t.Helper()
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	var m map[string]any
 	if err := conn.ReadJSON(&m); err != nil {
 		t.Fatalf("read message: %v", err)
@@ -121,7 +122,7 @@ func TestBridge_RegisterMissingPlatform(t *testing.T) {
 	}
 
 	var ack map[string]any
-	conn.ReadJSON(&ack)
+	_ = conn.ReadJSON(&ack)
 	if ack["ok"] == true {
 		t.Fatal("expected registration to fail for empty platform")
 	}
@@ -192,13 +193,13 @@ func TestBridge_ReplyRouting(t *testing.T) {
 	e := NewEngine("test-proj", &stubAgent{}, []Platform{bp}, "", LangEnglish)
 	bs.RegisterEngine("test-proj", e, bp)
 	bp.handler = func(p Platform, msg *Message) {
-		p.Reply(nil, msg.ReplyCtx, "pong")
+		_ = p.Reply(context.TODO(), msg.ReplyCtx, "pong")
 	}
 
 	conn := dialWS(t, wsURL, nil)
 	register(t, conn, "rc", []string{"text"})
 
-	conn.WriteJSON(map[string]any{
+	_ = conn.WriteJSON(map[string]any{
 		"type":        "message",
 		"msg_id":      "m1",
 		"session_key": "rc:u1:u1",
@@ -232,14 +233,14 @@ func TestBridge_CardFallback(t *testing.T) {
 			t.Fatal("BridgePlatform should implement CardSender")
 		}
 		card := NewCard().Title("Test", "blue").Markdown("hello").Build()
-		cs.SendCard(nil, msg.ReplyCtx, card)
+		_ = cs.SendCard(context.TODO(), msg.ReplyCtx, card)
 	}
 
 	// Adapter declares NO card capability → should get text fallback
 	conn := dialWS(t, wsURL, nil)
 	register(t, conn, "nocards", []string{"text"})
 
-	conn.WriteJSON(map[string]any{
+	_ = conn.WriteJSON(map[string]any{
 		"type":        "message",
 		"msg_id":      "m1",
 		"session_key": "nocards:u1:u1",
@@ -268,14 +269,14 @@ func TestBridge_CardNative(t *testing.T) {
 	bp.handler = func(p Platform, msg *Message) {
 		cs := p.(CardSender)
 		card := NewCard().Title("Test", "blue").Markdown("hello").Build()
-		cs.SendCard(nil, msg.ReplyCtx, card)
+		_ = cs.SendCard(context.TODO(), msg.ReplyCtx, card)
 	}
 
 	// Adapter declares card capability → should get card
 	conn := dialWS(t, wsURL, nil)
 	register(t, conn, "withcards", []string{"text", "card"})
 
-	conn.WriteJSON(map[string]any{
+	_ = conn.WriteJSON(map[string]any{
 		"type":        "message",
 		"msg_id":      "m1",
 		"session_key": "withcards:u1:u1",
@@ -303,7 +304,7 @@ func TestBridge_Ping(t *testing.T) {
 	conn := dialWS(t, wsURL, nil)
 	register(t, conn, "pingtest", []string{"text"})
 
-	conn.WriteJSON(map[string]any{"type": "ping", "ts": time.Now().UnixMilli()})
+	_ = conn.WriteJSON(map[string]any{"type": "ping", "ts": time.Now().UnixMilli()})
 	pong := readMsg(t, conn)
 	if pong["type"] != "pong" {
 		t.Fatalf("expected pong, got %q", pong["type"])
@@ -426,9 +427,9 @@ func bridgeGet(t *testing.T, url, token string) bridgeAPIResponse {
 	if err != nil {
 		t.Fatalf("GET %s: %v", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var r bridgeAPIResponse
-	json.NewDecoder(resp.Body).Decode(&r)
+	_ = json.NewDecoder(resp.Body).Decode(&r)
 	return r
 }
 
@@ -436,7 +437,7 @@ func bridgePost(t *testing.T, url, token string, body any) bridgeAPIResponse {
 	t.Helper()
 	var buf bytes.Buffer
 	if body != nil {
-		json.NewEncoder(&buf).Encode(body)
+		_ = json.NewEncoder(&buf).Encode(body)
 	}
 	req, _ := http.NewRequest("POST", url, &buf)
 	req.Header.Set("Content-Type", "application/json")
@@ -447,9 +448,9 @@ func bridgePost(t *testing.T, url, token string, body any) bridgeAPIResponse {
 	if err != nil {
 		t.Fatalf("POST %s: %v", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var r bridgeAPIResponse
-	json.NewDecoder(resp.Body).Decode(&r)
+	_ = json.NewDecoder(resp.Body).Decode(&r)
 	return r
 }
 
@@ -463,9 +464,9 @@ func bridgeDel(t *testing.T, url, token string) bridgeAPIResponse {
 	if err != nil {
 		t.Fatalf("DELETE %s: %v", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var r bridgeAPIResponse
-	json.NewDecoder(resp.Body).Decode(&r)
+	_ = json.NewDecoder(resp.Body).Decode(&r)
 	return r
 }
 
@@ -473,13 +474,11 @@ func TestBridge_SessionList(t *testing.T) {
 	_, baseURL := startTestBridgeWithREST(t, "tok")
 
 	// List sessions for a new key — should create a default session
-	r := bridgeGet(t, baseURL+"/bridge/sessions?session_key=test:u1:u1&token=tok", "")
-	if !r.OK {
-		// No sessions yet, that's fine — list returns empty
-	}
+	_ = bridgeGet(t, baseURL+"/bridge/sessions?session_key=test:u1:u1&token=tok", "")
+	// r.OK may be false if no sessions exist yet — that's expected.
 
 	// Create a session first
-	r = bridgePost(t, baseURL+"/bridge/sessions", "tok", map[string]string{
+	r := bridgePost(t, baseURL+"/bridge/sessions", "tok", map[string]string{
 		"session_key": "test:u1:u1",
 		"name":        "work",
 	})
@@ -490,7 +489,7 @@ func TestBridge_SessionList(t *testing.T) {
 		ID   string `json:"id"`
 		Name string `json:"name"`
 	}
-	json.Unmarshal(r.Data, &created)
+	_ = json.Unmarshal(r.Data, &created)
 	if created.ID == "" {
 		t.Fatal("expected session ID")
 	}
@@ -506,7 +505,7 @@ func TestBridge_SessionList(t *testing.T) {
 	var listData struct {
 		Sessions []map[string]any `json:"sessions"`
 	}
-	json.Unmarshal(r.Data, &listData)
+	_ = json.Unmarshal(r.Data, &listData)
 	if len(listData.Sessions) != 1 {
 		t.Fatalf("expected 1 session, got %d", len(listData.Sessions))
 	}
@@ -526,7 +525,7 @@ func TestBridge_SessionCreateAndDetail(t *testing.T) {
 	var created struct {
 		ID string `json:"id"`
 	}
-	json.Unmarshal(r.Data, &created)
+	_ = json.Unmarshal(r.Data, &created)
 
 	// Get detail
 	r = bridgeGet(t, baseURL+"/bridge/sessions/"+created.ID+"?session_key=test:u1:u1", "tok")
@@ -538,7 +537,7 @@ func TestBridge_SessionCreateAndDetail(t *testing.T) {
 		Name    string           `json:"name"`
 		History []map[string]any `json:"history"`
 	}
-	json.Unmarshal(r.Data, &detail)
+	_ = json.Unmarshal(r.Data, &detail)
 	if detail.ID != created.ID {
 		t.Fatalf("expected id %q, got %q", created.ID, detail.ID)
 	}
@@ -560,7 +559,7 @@ func TestBridge_SessionDelete(t *testing.T) {
 	var created struct {
 		ID string `json:"id"`
 	}
-	json.Unmarshal(r.Data, &created)
+	_ = json.Unmarshal(r.Data, &created)
 
 	// Delete
 	r = bridgeDel(t, baseURL+"/bridge/sessions/"+created.ID+"?session_key=test:u1:u1", "tok")
@@ -597,7 +596,7 @@ func TestBridge_SessionSwitch(t *testing.T) {
 	var second struct {
 		ID string `json:"id"`
 	}
-	json.Unmarshal(r.Data, &second)
+	_ = json.Unmarshal(r.Data, &second)
 
 	// Switch to second
 	r = bridgePost(t, baseURL+"/bridge/sessions/switch", "tok", map[string]string{
@@ -610,7 +609,7 @@ func TestBridge_SessionSwitch(t *testing.T) {
 	var switched struct {
 		ActiveSessionID string `json:"active_session_id"`
 	}
-	json.Unmarshal(r.Data, &switched)
+	_ = json.Unmarshal(r.Data, &switched)
 	if switched.ActiveSessionID != second.ID {
 		t.Fatalf("expected active=%s, got %s", second.ID, switched.ActiveSessionID)
 	}

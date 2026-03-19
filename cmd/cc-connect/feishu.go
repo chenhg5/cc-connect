@@ -115,7 +115,7 @@ func runFeishuSetup(args []string, requestedMode string) {
 	timeout := fs.Int("timeout", 600, "QR onboarding timeout in seconds")
 	setAllowFromEmpty := fs.Bool("set-allow-from-empty", true, "fill allow_from with owner open_id when it is empty")
 	debug := fs.Bool("debug", false, "print debug logs for onboarding requests")
-	fs.Parse(args)
+	_ = fs.Parse(args)
 
 	initConfigPath(*configFile)
 

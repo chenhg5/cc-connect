@@ -44,7 +44,7 @@ func TestDownloadSlackFile_HTMLDetection(t *testing.T) {
 		// Simulate Slack returning HTML login page when auth is missing
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("<!DOCTYPE html><html><body>Please login</body></html>"))
+		_, _ = w.Write([]byte("<!DOCTYPE html><html><body>Please login</body></html>"))
 	}))
 	defer ts.Close()
 
@@ -63,7 +63,7 @@ func TestDownloadSlackFile_MissingAuth(t *testing.T) {
 	// Test that we return an error for non-200 status codes
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte("unauthorized"))
+		_, _ = w.Write([]byte("unauthorized"))
 	}))
 	defer ts.Close()
 
@@ -84,7 +84,7 @@ func TestDownloadSlackFile_Success(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "image/png")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("\x89PNG\r\n\x1a\n")) // PNG magic bytes
+		_, _ = w.Write([]byte("\x89PNG\r\n\x1a\n")) // PNG magic bytes
 	}))
 	defer ts.Close()
 

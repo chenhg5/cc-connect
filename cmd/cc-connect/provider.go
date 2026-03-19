@@ -68,7 +68,7 @@ func runProviderAdd(args []string) {
 	baseURL := fs.String("base-url", "", "API base URL (optional)")
 	model := fs.String("model", "", "model name override (optional)")
 	envStr := fs.String("env", "", "extra env vars as KEY=VAL,KEY2=VAL2 (optional)")
-	fs.Parse(args)
+	_ = fs.Parse(args)
 
 	if *project == "" || *name == "" {
 		fmt.Fprintln(os.Stderr, "Error: --project and --name are required")
@@ -110,7 +110,7 @@ func runProviderList(args []string) {
 	fs := flag.NewFlagSet("provider list", flag.ExitOnError)
 	configFile := fs.String("config", "", "path to config file")
 	project := fs.String("project", "", "project name (lists all projects if empty)")
-	fs.Parse(args)
+	_ = fs.Parse(args)
 
 	initConfigPath(*configFile)
 
@@ -173,7 +173,7 @@ func runProviderRemove(args []string) {
 	configFile := fs.String("config", "", "path to config file")
 	project := fs.String("project", "", "project name (required)")
 	name := fs.String("name", "", "provider name (required)")
-	fs.Parse(args)
+	_ = fs.Parse(args)
 
 	if *project == "" || *name == "" {
 		fmt.Fprintln(os.Stderr, "Error: --project and --name are required")
@@ -199,7 +199,7 @@ func runProviderImport(args []string) {
 	project := fs.String("project", "", "target project name (auto-detect if only one)")
 	dbPath := fs.String("db-path", "", "path to cc-switch database (auto-detect)")
 	appType := fs.String("type", "", "filter by agent type: claude or codex (imports all if empty)")
-	fs.Parse(args)
+	_ = fs.Parse(args)
 
 	initConfigPath(*configFile)
 

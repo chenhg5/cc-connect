@@ -140,7 +140,7 @@ func runCronAdd(args []string) {
 	}
 
 	var result map[string]any
-	json.Unmarshal(body, &result)
+	_ = json.Unmarshal(body, &result)
 	fmt.Printf("Cron job created: %s\n", result["id"])
 	fmt.Printf("Schedule: %s\n", result["cron_expr"])
 	if execCmd != "" {
@@ -204,7 +204,7 @@ func runCronList(args []string) {
 	}
 
 	var jobs []map[string]any
-	json.Unmarshal(body, &jobs)
+	_ = json.Unmarshal(body, &jobs)
 
 	if len(jobs) == 0 {
 		fmt.Println("No scheduled tasks.")
