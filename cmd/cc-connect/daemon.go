@@ -355,7 +355,7 @@ func followFile(path string) {
 	}
 	defer f.Close()
 
-	f.Seek(0, io.SeekEnd)
+	_, _ = f.Seek(0, io.SeekEnd)
 	reader := bufio.NewReader(f)
 
 	for {

@@ -189,9 +189,9 @@ func checkSystem(ctx context.Context) []DoctorCheckResult {
 			var totalKB, availKB uint64
 			for _, line := range strings.Split(string(data), "\n") {
 				if strings.HasPrefix(line, "MemTotal:") {
-					fmt.Sscanf(line, "MemTotal: %d kB", &totalKB)
+					_, _ = fmt.Sscanf(line, "MemTotal: %d kB", &totalKB)
 				} else if strings.HasPrefix(line, "MemAvailable:") {
-					fmt.Sscanf(line, "MemAvailable: %d kB", &availKB)
+					_, _ = fmt.Sscanf(line, "MemAvailable: %d kB", &availKB)
 				}
 			}
 			if totalKB > 0 {
@@ -229,7 +229,7 @@ func checkSystem(ctx context.Context) []DoctorCheckResult {
 				detail := fmt.Sprintf("load avg: %s %s %s", parts[0], parts[1], parts[2])
 				// Rough check: if 1-min load > 2x CPU count, warn
 				var load1 float64
-				fmt.Sscanf(parts[0], "%f", &load1)
+				_, _ = fmt.Sscanf(parts[0], "%f", &load1)
 				if load1 > float64(runtime.NumCPU()*2) {
 					status = DoctorWarn
 				}
@@ -254,7 +254,7 @@ func checkSystem(ctx context.Context) []DoctorCheckResult {
 					status := DoctorPass
 					usePct := strings.TrimSuffix(fields[4], "%")
 					var pct int
-					fmt.Sscanf(usePct, "%d", &pct)
+					_, _ = fmt.Sscanf(usePct, "%d", &pct)
 					if pct > 95 {
 						status = DoctorFail
 					} else if pct > 85 {
@@ -344,7 +344,7 @@ func checkNetwork(ctx context.Context) []DoctorCheckResult {
 		results = append(results, DoctorCheckResult{
 			Name:    ep.label,
 			Status:  status,
-			Detail:  fmt.Sprintf("TCP connect OK"),
+			Detail:  "TCP connect OK",
 			Latency: latency,
 		})
 	}

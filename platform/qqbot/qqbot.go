@@ -394,7 +394,7 @@ func (p *Platform) refreshToken() error {
 	}
 
 	var expiresSec int
-	fmt.Sscanf(result.ExpiresIn, "%d", &expiresSec)
+	_, _ = fmt.Sscanf(result.ExpiresIn, "%d", &expiresSec)
 	if expiresSec <= 0 {
 		expiresSec = 7200
 	}
@@ -512,8 +512,8 @@ type wsPayload struct {
 }
 
 func (p *Platform) waitForHello(conn *websocket.Conn) error {
-	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
-	defer conn.SetReadDeadline(time.Time{})
+	_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
 
 	var msg wsPayload
 	if err := conn.ReadJSON(&msg); err != nil {
@@ -556,8 +556,8 @@ func (p *Platform) sendIdentify(conn *websocket.Conn, token string) error {
 }
 
 func (p *Platform) waitForReady(conn *websocket.Conn) error {
-	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
-	defer conn.SetReadDeadline(time.Time{})
+	_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
 
 	var msg wsPayload
 	if err := conn.ReadJSON(&msg); err != nil {

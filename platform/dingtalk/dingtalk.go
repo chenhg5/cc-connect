@@ -30,11 +30,6 @@ type replyContext struct {
 	senderStaffId   string
 }
 
-type audioContent struct {
-	DownloadCode string `json:"downloadCode"`
-	Recognition  string `json:"recognition"`
-}
-
 type downloadResponse struct {
 	DownloadUrl string `json:"downloadUrl"`
 }

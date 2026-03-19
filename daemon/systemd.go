@@ -4,6 +4,7 @@ package daemon
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -76,14 +77,18 @@ func (m *systemdManager) Install(cfg Config) error {
 }
 
 func (m *systemdManager) Uninstall() error {
-	runSystemctl(m.sysArgs("disable", "--now", systemdServiceName)...)
+	if _, err := runSystemctl(m.sysArgs("disable", "--now", systemdServiceName)...); err != nil {
+		slog.Warn("systemd: disable failed", "error", err)
+	}
 
 	unitPath := m.unitPath()
 	if err := os.Remove(unitPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove unit: %w", err)
 	}
 
-	runSystemctl(m.sysArgs("daemon-reload")...)
+	if _, err := runSystemctl(m.sysArgs("daemon-reload")...); err != nil {
+		slog.Warn("systemd: daemon-reload failed", "error", err)
+	}
 	return nil
 }
 

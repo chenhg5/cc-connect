@@ -318,10 +318,3 @@ func (sp *streamPreview) detachPreview() {
 	defer sp.mu.Unlock()
 	sp.previewMsgID = nil
 }
-
-// getFullText returns the accumulated text so far.
-func (sp *streamPreview) getFullText() string {
-	sp.mu.Lock()
-	defer sp.mu.Unlock()
-	return sp.fullText
-}

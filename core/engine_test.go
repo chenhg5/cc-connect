@@ -462,16 +462,6 @@ func findCardAction(card *Card, value string) (CardButton, bool) {
 	return CardButton{}, false
 }
 
-func collectCardActionRows(card *Card) []CardActions {
-	rows := make([]CardActions, 0)
-	for _, elem := range card.Elements {
-		if row, ok := elem.(CardActions); ok {
-			rows = append(rows, row)
-		}
-	}
-	return rows
-}
-
 // --- alias tests ---
 
 func TestEngine_Alias(t *testing.T) {

@@ -2,6 +2,7 @@ package core
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -192,7 +193,7 @@ func TestBridge_ReplyRouting(t *testing.T) {
 	e := NewEngine("test-proj", &stubAgent{}, []Platform{bp}, "", LangEnglish)
 	bs.RegisterEngine("test-proj", e, bp)
 	bp.handler = func(p Platform, msg *Message) {
-		p.Reply(nil, msg.ReplyCtx, "pong")
+		p.Reply(context.TODO(), msg.ReplyCtx, "pong")
 	}
 
 	conn := dialWS(t, wsURL, nil)
@@ -232,7 +233,7 @@ func TestBridge_CardFallback(t *testing.T) {
 			t.Fatal("BridgePlatform should implement CardSender")
 		}
 		card := NewCard().Title("Test", "blue").Markdown("hello").Build()
-		cs.SendCard(nil, msg.ReplyCtx, card)
+		cs.SendCard(context.TODO(), msg.ReplyCtx, card)
 	}
 
 	// Adapter declares NO card capability → should get text fallback
@@ -268,7 +269,7 @@ func TestBridge_CardNative(t *testing.T) {
 	bp.handler = func(p Platform, msg *Message) {
 		cs := p.(CardSender)
 		card := NewCard().Title("Test", "blue").Markdown("hello").Build()
-		cs.SendCard(nil, msg.ReplyCtx, card)
+		cs.SendCard(context.TODO(), msg.ReplyCtx, card)
 	}
 
 	// Adapter declares card capability → should get card
@@ -475,7 +476,7 @@ func TestBridge_SessionList(t *testing.T) {
 	// List sessions for a new key — should create a default session
 	r := bridgeGet(t, baseURL+"/bridge/sessions?session_key=test:u1:u1&token=tok", "")
 	if !r.OK {
-		// No sessions yet, that's fine — list returns empty
+		t.Logf("no sessions yet: %s", r.Error)
 	}
 
 	// Create a session first

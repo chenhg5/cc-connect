@@ -152,7 +152,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 				rctx := replyContext{chatID: msg.Chat.ID, messageID: msg.MessageID}
 
 				// Handle photo messages
-				if msg.Photo != nil && len(msg.Photo) > 0 {
+				if len(msg.Photo) > 0 {
 					best := msg.Photo[len(msg.Photo)-1]
 					imgData, err := p.downloadFile(best.FileID)
 					if err != nil {
@@ -300,7 +300,9 @@ func (p *Platform) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 
 	// Answer the callback to clear the loading indicator
 	answer := tgbotapi.NewCallback(cb.ID, "")
-	p.bot.Request(answer)
+	if _, err := p.bot.Request(answer); err != nil {
+		slog.Warn("telegram: callback answer failed", "error", err)
+	}
 
 	userName := cb.From.UserName
 	if userName == "" {
@@ -331,7 +333,9 @@ func (p *Platform) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 		edit := tgbotapi.NewEditMessageText(chatID, msgID, origText+"\n\n> "+command)
 		emptyMarkup := tgbotapi.NewInlineKeyboardMarkup()
 		edit.ReplyMarkup = &emptyMarkup
-		p.bot.Send(edit)
+		if _, err := p.bot.Send(edit); err != nil {
+			slog.Warn("telegram: edit message failed", "error", err)
+		}
 
 		p.handler(p, &core.Message{
 			SessionKey: sessionKey,
@@ -369,7 +373,9 @@ func (p *Platform) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 		edit := tgbotapi.NewEditMessageText(chatID, msgID, origText+"\n\n"+choiceLabel)
 		emptyMarkup := tgbotapi.NewInlineKeyboardMarkup()
 		edit.ReplyMarkup = &emptyMarkup
-		p.bot.Send(edit)
+		if _, err := p.bot.Send(edit); err != nil {
+			slog.Warn("telegram: edit message failed", "error", err)
+		}
 
 		p.handler(p, &core.Message{
 			SessionKey: sessionKey,
@@ -415,7 +421,9 @@ func (p *Platform) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 	edit := tgbotapi.NewEditMessageText(chatID, msgID, origText+"\n\n"+choiceLabel)
 	emptyMarkup := tgbotapi.NewInlineKeyboardMarkup()
 	edit.ReplyMarkup = &emptyMarkup
-	p.bot.Send(edit)
+	if _, err := p.bot.Send(edit); err != nil {
+		slog.Warn("telegram: edit message failed", "error", err)
+	}
 
 	p.handler(p, &core.Message{
 		SessionKey: sessionKey,
@@ -740,7 +748,7 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 	}
 
 	action := tgbotapi.NewChatAction(rc.chatID, tgbotapi.ChatTyping)
-	p.bot.Send(action)
+	_, _ = p.bot.Send(action)
 
 	done := make(chan struct{})
 	go func() {
@@ -753,7 +761,7 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				p.bot.Send(action)
+				_, _ = p.bot.Send(action)
 			}
 		}
 	}()
@@ -827,27 +835,6 @@ func extractEntityText(text string, offsetUTF16, lengthUTF16 int) string {
 		return ""
 	}
 	return string(utf16.Decode(encoded[offsetUTF16:endUTF16]))
-}
-
-// isValidTelegramCommand validates if a command string meets Telegram's requirements.
-// Telegram command rules:
-//   - 1-32 characters long
-//   - Only lowercase letters, digits, and underscores
-//   - Must start with a letter
-func isValidTelegramCommand(cmd string) bool {
-	if len(cmd) == 0 || len(cmd) > 32 {
-		return false
-	}
-	if cmd[0] < 'a' || cmd[0] > 'z' {
-		return false
-	}
-	for i := 1; i < len(cmd); i++ {
-		c := cmd[i]
-		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_') {
-			return false
-		}
-	}
-	return true
 }
 
 // sanitizeTelegramCommand converts a command name to Telegram-compatible format.

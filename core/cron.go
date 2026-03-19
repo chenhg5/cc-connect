@@ -88,7 +88,9 @@ func (s *CronStore) Remove(id string) bool {
 	for i, j := range s.jobs {
 		if j.ID == id {
 			s.jobs = append(s.jobs[:i], s.jobs[i+1:]...)
-			s.save()
+			if err := s.save(); err != nil {
+				slog.Warn("cron: failed to save after remove", "error", err)
+			}
 			return true
 		}
 	}
@@ -101,7 +103,9 @@ func (s *CronStore) SetEnabled(id string, enabled bool) bool {
 	for _, j := range s.jobs {
 		if j.ID == id {
 			j.Enabled = enabled
-			s.save()
+			if err := s.save(); err != nil {
+				slog.Warn("cron: failed to save after set enabled", "error", err)
+			}
 			return true
 		}
 	}
@@ -114,7 +118,9 @@ func (s *CronStore) SetMute(id string, mute bool) bool {
 	for _, j := range s.jobs {
 		if j.ID == id {
 			j.Mute = mute
-			s.save()
+			if err := s.save(); err != nil {
+				slog.Warn("cron: save after mute toggle", "error", err)
+			}
 			return true
 		}
 	}
@@ -127,7 +133,9 @@ func (s *CronStore) ToggleMute(id string) (newState bool, ok bool) {
 	for _, j := range s.jobs {
 		if j.ID == id {
 			j.Mute = !j.Mute
-			s.save()
+			if err := s.save(); err != nil {
+				slog.Warn("cron: failed to save after toggle mute", "error", err)
+			}
 			return j.Mute, true
 		}
 	}
@@ -145,7 +153,9 @@ func (s *CronStore) MarkRun(id string, err error) {
 			} else {
 				j.LastError = ""
 			}
-			s.save()
+			if saveErr := s.save(); saveErr != nil {
+				slog.Warn("cron: failed to save after mark run", "error", saveErr)
+			}
 			return
 		}
 	}
@@ -388,7 +398,7 @@ func (m *mutePlatform) Send(_ context.Context, _ any, _ string) error  { return 
 
 func GenerateCronID() string {
 	b := make([]byte, 4)
-	rand.Read(b)
+	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }
 
@@ -497,9 +507,9 @@ func CronExprToHuman(expr string, lang Language) string {
 
 	// Weekday
 	if dow != "*" {
-		if d, err := fmt.Sscanf(dow, "%d", new(int)); err == nil && d == 1 {
-			var n int
-			fmt.Sscanf(dow, "%d", &n)
+	if d, err := fmt.Sscanf(dow, "%d", new(int)); err == nil && d == 1 {
+		var n int
+		_, _ = fmt.Sscanf(dow, "%d", &n)
 			if n >= 0 && n <= 6 {
 				if cjk {
 					parts = append(parts, weekdays[n])
@@ -514,9 +524,9 @@ func CronExprToHuman(expr string, lang Language) string {
 
 	// Month
 	if month != "*" {
-		if m, err := fmt.Sscanf(month, "%d", new(int)); err == nil && m == 1 {
-			var n int
-			fmt.Sscanf(month, "%d", &n)
+	if m, err := fmt.Sscanf(month, "%d", new(int)); err == nil && m == 1 {
+		var n int
+		_, _ = fmt.Sscanf(month, "%d", &n)
 			if n >= 1 && n <= 12 {
 				parts = append(parts, months[n])
 			}

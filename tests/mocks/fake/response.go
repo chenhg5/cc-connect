@@ -117,10 +117,7 @@ func NewTestDedupeItem(key string, ttl time.Duration) *TestDedupeItem {
 }
 
 // TestRateLimiterToken creates a test rate limiter token bucket state.
-type TestRateLimiterToken struct {
-	tokens    float64
-	lastCheck time.Time
-}
+type TestRateLimiterToken struct{}
 
 // TestCronJob creates a test cron job.
 func TestCronJob(id, desc, prompt string, cronExpr string) *core.CronJob {

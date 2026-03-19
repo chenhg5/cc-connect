@@ -118,7 +118,7 @@ func runFeishuSetup(args []string, requestedMode string) {
 	qrImage := fs.String("qr-image", "", "save QR code as PNG image to this path (e.g. qr.png)")
 	setAllowFromEmpty := fs.Bool("set-allow-from-empty", false, "fill allow_from with owner open_id when it is empty (may be inaccurate)")
 	debug := fs.Bool("debug", false, "print debug logs for onboarding requests")
-	fs.Parse(args)
+	_ = fs.Parse(args)
 
 	initConfigPath(*configFile)
 

@@ -140,7 +140,10 @@ func runCronAdd(args []string) {
 	}
 
 	var result map[string]any
-	json.Unmarshal(body, &result)
+	if err := json.Unmarshal(body, &result); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: invalid response: %v\n", err)
+		os.Exit(1)
+	}
 	fmt.Printf("Cron job created: %s\n", result["id"])
 	fmt.Printf("Schedule: %s\n", result["cron_expr"])
 	if execCmd != "" {
@@ -204,7 +207,10 @@ func runCronList(args []string) {
 	}
 
 	var jobs []map[string]any
-	json.Unmarshal(body, &jobs)
+	if err := json.Unmarshal(body, &jobs); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: invalid response: %v\n", err)
+		os.Exit(1)
+	}
 
 	if len(jobs) == 0 {
 		fmt.Println("No scheduled tasks.")

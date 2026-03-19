@@ -59,8 +59,9 @@ func TestGetAccessToken_MutexExists(t *testing.T) {
 		clientSecret: "test_secret",
 	}
 
-	// Test that we can lock/unlock the mutex
+	// Test that we can lock/unlock the mutex (verify no panic under lock)
 	p.tokenMu.Lock()
+	_ = p.clientID // SA2001: intentional empty section to verify Lock/Unlock work
 	p.tokenMu.Unlock()
 
 	// Test with defer
@@ -110,8 +111,9 @@ func TestPlatform_MutexFieldExists(t *testing.T) {
 	// Verify the Platform struct has the tokenMu field
 	p := &Platform{}
 
-	// This test will fail to compile if tokenMu doesn't exist
+	// Verify no panic under lock (test will fail to compile if tokenMu doesn't exist)
 	p.tokenMu.Lock()
+	_ = p.clientID // SA2001: intentional empty section to verify Lock/Unlock work
 	p.tokenMu.Unlock()
 
 	t.Log("Platform.tokenMu field exists")
