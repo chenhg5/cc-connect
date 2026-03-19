@@ -2,10 +2,7 @@ package core
 
 import (
 	"log/slog"
-	"os"
 	"path/filepath"
-	"runtime"
-	"strings"
 	"sync"
 	"time"
 )
@@ -19,12 +16,6 @@ func normalizeWorkspacePath(path string) string {
 	resolved, err := filepath.EvalSymlinks(cleaned)
 	if err != nil {
 		return cleaned
-	}
-	if runtime.GOOS == "darwin" && strings.HasPrefix(resolved, "/private/") {
-		aliased := strings.TrimPrefix(resolved, "/private")
-		if _, err := os.Stat(aliased); err == nil {
-			resolved = aliased
-		}
 	}
 	if resolved != path {
 		slog.Debug("workspace path normalized", "original", path, "normalized", resolved)
