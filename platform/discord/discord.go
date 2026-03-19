@@ -577,21 +577,38 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 	if name == "" {
 		name = "image.png"
 	}
-	file := &discordgo.File{
-		Name:        name,
-		ContentType: img.MimeType,
-		Reader:      bytes.NewReader(img.Data),
+
+	newFile := func() *discordgo.File {
+		return &discordgo.File{
+			Name:        name,
+			ContentType: img.MimeType,
+			Reader:      bytes.NewReader(img.Data),
+		}
 	}
 
 	switch rc := rctx.(type) {
 	case *interactionReplyCtx:
-		_, err := p.session.FollowupMessageCreate(rc.interaction, true, &discordgo.WebhookParams{
-			Files: []*discordgo.File{file},
-		})
+		rc.mu.Lock()
+		first := !rc.firstDone
+		if first {
+			rc.firstDone = true
+		}
+		rc.mu.Unlock()
+
+		var err error
+		if first {
+			_, err = p.session.InteractionResponseEdit(rc.interaction, &discordgo.WebhookEdit{
+				Files: []*discordgo.File{newFile()},
+			})
+		} else {
+			_, err = p.session.FollowupMessageCreate(rc.interaction, true, &discordgo.WebhookParams{
+				Files: []*discordgo.File{newFile()},
+			})
+		}
 		if err != nil {
 			slog.Warn("discord: interaction image failed, falling back to channel message", "error", err)
 			_, err = p.session.ChannelMessageSendComplex(rc.channelID, &discordgo.MessageSend{
-				Files: []*discordgo.File{file},
+				Files: []*discordgo.File{newFile()},
 			})
 			if err != nil {
 				return fmt.Errorf("discord: send image fallback: %w", err)
@@ -600,7 +617,7 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 		return nil
 	case replyContext:
 		_, err := p.session.ChannelMessageSendComplex(rc.targetChannelID(), &discordgo.MessageSend{
-			Files: []*discordgo.File{file},
+			Files: []*discordgo.File{newFile()},
 		})
 		if err != nil {
 			return fmt.Errorf("discord: send image: %w", err)

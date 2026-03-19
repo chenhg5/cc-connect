@@ -283,7 +283,10 @@ func (p *Platform) apiRequestJSON(method, url string, body any, result any) erro
 			data, _ := json.Marshal(body)
 			bodyReader = bytes.NewReader(data)
 		}
-		req2, _ := http.NewRequest(method, url, bodyReader)
+		req2, err := http.NewRequest(method, url, bodyReader)
+		if err != nil {
+			return fmt.Errorf("qqbot: build retry request: %w", err)
+		}
 		req2.Header.Set("Authorization", "QQBot "+token)
 		req2.Header.Set("Content-Type", "application/json")
 

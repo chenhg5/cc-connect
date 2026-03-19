@@ -463,12 +463,12 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 		return fmt.Errorf("dingtalk: get access token: %w", err)
 	}
 
-	msgParamJSON := fmt.Sprintf(`{"photoURL":"%s"}`, mediaID)
+	msgParamBytes, _ := json.Marshal(map[string]string{"photoURL": mediaID})
 	requestBody := map[string]any{
 		"robotCode": p.robotCode,
 		"userIds":   []string{rc.senderStaffId},
 		"msgKey":    "sampleImageMsg",
-		"msgParam":  msgParamJSON,
+		"msgParam":  string(msgParamBytes),
 	}
 
 	body, err := json.Marshal(requestBody)
@@ -491,8 +491,10 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 	}
 	defer resp.Body.Close()
 
+	respBody, _ := io.ReadAll(resp.Body)
+	slog.Debug("dingtalk: oToMessages image response", "status", resp.StatusCode, "body", string(respBody))
+
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("dingtalk: send image failed: status=%d, body=%s", resp.StatusCode, string(respBody))
 	}
 
