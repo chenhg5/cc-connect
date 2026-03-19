@@ -694,7 +694,7 @@ func TestEngine_AdminFrom_AllowsNonPrivileged(t *testing.T) {
 	if len(p.sent) == 0 {
 		t.Fatal("expected /help to produce a reply")
 	}
-	if strings.Contains(p.sent[0], "admin") {
+	if strings.Contains(p.sent[0], "requires admin") {
 		t.Errorf("/help should not require admin, got: %s", p.sent[0])
 	}
 }
@@ -5178,5 +5178,105 @@ func TestCmdMemory_Help(t *testing.T) {
 	sent := p.getSent()
 	if len(sent) == 0 {
 		t.Fatal("expected help reply")
+	}
+}
+
+// ── /whoami tests ───────────────────────────────────────────
+
+func TestCmdWhoami_ShowsUserID(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "telegram"}
+
+	msg := &Message{
+		SessionKey: "telegram:chat123:user456",
+		Platform:   "telegram",
+		UserID:     "user456",
+		UserName:   "Alice",
+		ReplyCtx:   "ctx",
+		Content:    "/whoami",
+	}
+	e.handleCommand(p, msg, msg.Content)
+
+	if len(p.sent) == 0 {
+		t.Fatal("expected /whoami to produce a reply")
+	}
+	reply := p.sent[0]
+	if !strings.Contains(reply, "user456") {
+		t.Errorf("expected reply to contain user ID 'user456', got: %s", reply)
+	}
+	if !strings.Contains(reply, "Alice") {
+		t.Errorf("expected reply to contain user name 'Alice', got: %s", reply)
+	}
+	if !strings.Contains(reply, "telegram") {
+		t.Errorf("expected reply to contain platform 'telegram', got: %s", reply)
+	}
+	if !strings.Contains(reply, "chat123") {
+		t.Errorf("expected reply to contain chat ID 'chat123', got: %s", reply)
+	}
+	if !strings.Contains(reply, "allow_from") {
+		t.Errorf("expected reply to mention allow_from usage, got: %s", reply)
+	}
+}
+
+func TestCmdWhoami_EmptyUserID(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "test"}
+
+	msg := &Message{
+		SessionKey: "test:ch1",
+		Platform:   "test",
+		UserID:     "",
+		ReplyCtx:   "ctx",
+		Content:    "/whoami",
+	}
+	e.handleCommand(p, msg, msg.Content)
+
+	if len(p.sent) == 0 {
+		t.Fatal("expected /whoami to produce a reply")
+	}
+	if !strings.Contains(p.sent[0], "(unknown)") {
+		t.Errorf("expected '(unknown)' for empty UserID, got: %s", p.sent[0])
+	}
+}
+
+func TestCmdWhoami_AliasMyID(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "test"}
+
+	msg := &Message{
+		SessionKey: "test:ch1:u1",
+		Platform:   "test",
+		UserID:     "u1",
+		ReplyCtx:   "ctx",
+		Content:    "/myid",
+	}
+	e.handleCommand(p, msg, msg.Content)
+
+	if len(p.sent) == 0 {
+		t.Fatal("expected /myid alias to produce a reply")
+	}
+	if !strings.Contains(p.sent[0], "u1") {
+		t.Errorf("expected reply to contain user ID, got: %s", p.sent[0])
+	}
+}
+
+func TestCmdStatus_ShowsUserID(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "test"}
+
+	msg := &Message{
+		SessionKey: "test:ch1:myuser123",
+		Platform:   "test",
+		UserID:     "myuser123",
+		ReplyCtx:   "ctx",
+		Content:    "/status",
+	}
+	e.handleCommand(p, msg, msg.Content)
+
+	if len(p.sent) == 0 {
+		t.Fatal("expected /status to produce a reply")
+	}
+	if !strings.Contains(p.sent[0], "myuser123") {
+		t.Errorf("expected status to contain user ID 'myuser123', got: %s", p.sent[0])
 	}
 }

@@ -263,6 +263,7 @@ const (
 	MsgStatusCron       MsgKey = "status_cron"
 	MsgStatusQuiet      MsgKey = "status_quiet"
 	MsgStatusSessionKey MsgKey = "status_session_key"
+	MsgStatusUserID     MsgKey = "status_user_id"
 	MsgQuietOnShort     MsgKey = "quiet_on_short"
 	MsgQuietOffShort    MsgKey = "quiet_off_short"
 
@@ -409,6 +410,9 @@ const (
 	MsgRateLimited       MsgKey = "rate_limited"
 	MsgBtwSent           MsgKey = "btw_sent"
 	MsgBtwSendFailed     MsgKey = "btw_send_failed"
+
+	MsgWhoamiTitle MsgKey = "whoami_title"
+	MsgWhoamiUsage MsgKey = "whoami_usage"
 
 	MsgRelayNoBinding     MsgKey = "relay_no_binding"
 	MsgRelayBound         MsgKey = "relay_bound"
@@ -765,6 +769,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/restart\n  Restart cc-connect service\n\n" +
 			"/status\n  Show system status\n\n" +
 			"/version\n  Show cc-connect version\n\n" +
+			"/whoami\n  Show your User ID (for allow_from / admin_from)\n\n" +
 			"/help\n  Show this help\n\n" +
 			"Tip: Commands support prefix matching, e.g. `/pro l` = `/provider list`, `/sw 2` = `/switch 2`.\n\n" +
 			"Custom commands: define via `/commands add` or `[[commands]]` in config.toml.\n\n" +
@@ -807,6 +812,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/restart\n  重启 cc-connect 服务\n\n" +
 			"/status\n  查看系统状态\n\n" +
 			"/version\n  查看 cc-connect 版本\n\n" +
+			"/whoami\n  查看你的 User ID（用于 allow_from / admin_from 配置）\n\n" +
 			"/help\n  显示此帮助\n\n" +
 			"提示：命令支持前缀匹配，如 `/pro l` = `/provider list`，`/sw 2` = `/switch 2`。\n\n" +
 			"自定义命令：通过 `/commands add` 添加，或在 config.toml 中配置 `[[commands]]`。\n\n" +
@@ -849,6 +855,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/restart\n  重啟 cc-connect 服務\n\n" +
 			"/status\n  查看系統狀態\n\n" +
 			"/version\n  查看 cc-connect 版本\n\n" +
+			"/whoami\n  查看你的 User ID（用於 allow_from / admin_from 設定）\n\n" +
 			"/help\n  顯示此說明\n\n" +
 			"提示：命令支持前綴匹配，如 `/pro l` = `/provider list`，`/sw 2` = `/switch 2`。\n\n" +
 			"自訂命令：透過 `/commands add` 新增，或在 config.toml 中配置 `[[commands]]`。\n\n" +
@@ -890,6 +897,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/restart\n  cc-connect サービスを再起動\n\n" +
 			"/status\n  システム状態を表示\n\n" +
 			"/version\n  cc-connect のバージョンを表示\n\n" +
+			"/whoami\n  あなたの User ID を表示（allow_from / admin_from 設定用）\n\n" +
 			"/help\n  このヘルプを表示\n\n" +
 			"ヒント：コマンドはプレフィックスマッチに対応しています。例: `/pro l` = `/provider list`、`/sw 2` = `/switch 2`。\n\n" +
 			"カスタムコマンド: `/commands add` または config.toml の `[[commands]]` で定義。\n\n" +
@@ -931,6 +939,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/restart\n  Reiniciar el servicio cc-connect\n\n" +
 			"/status\n  Mostrar estado del sistema\n\n" +
 			"/version\n  Mostrar versión de cc-connect\n\n" +
+			"/whoami\n  Mostrar tu User ID (para allow_from / admin_from)\n\n" +
 			"/help\n  Mostrar esta ayuda\n\n" +
 			"Consejo: Los comandos admiten coincidencia por prefijo, ej. `/pro l` = `/provider list`, `/sw 2` = `/switch 2`.\n\n" +
 			"Comandos personalizados: use `/commands add` o defina `[[commands]]` en config.toml.\n\n" +
@@ -1086,6 +1095,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/config [get|set|reload] — Runtime configuration\n" +
 			"/doctor — System diagnostics\n" +
 			"/usage — Account/model quota usage\n" +
+			"/whoami — Show your User ID\n" +
 			"/upgrade — Check for updates\n" +
 			"/restart — Restart service\n" +
 			"/status — System status\n" +
@@ -1094,6 +1104,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/config [get|set|reload] — 运行时配置\n" +
 			"/doctor — 系统诊断\n" +
 			"/usage — 账号/模型限额\n" +
+			"/whoami — 查看你的 User ID\n" +
 			"/upgrade — 检查更新\n" +
 			"/restart — 重启服务\n" +
 			"/status — 系统状态\n" +
@@ -1102,6 +1113,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/config [get|set|reload] — 執行階段配置\n" +
 			"/doctor — 系統診斷\n" +
 			"/usage — 帳號/模型限額\n" +
+			"/whoami — 查看你的 User ID\n" +
 			"/upgrade — 檢查更新\n" +
 			"/restart — 重啟服務\n" +
 			"/status — 系統狀態\n" +
@@ -1110,6 +1122,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/config [get|set|reload] — ランタイム設定\n" +
 			"/doctor — システム診断\n" +
 			"/usage — アカウント/モデル使用量\n" +
+			"/whoami — User ID を表示\n" +
 			"/upgrade — アップデート確認\n" +
 			"/restart — サービス再起動\n" +
 			"/status — システム状態\n" +
@@ -1118,6 +1131,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/config [get|set|reload] — Configuración\n" +
 			"/doctor — Diagnósticos del sistema\n" +
 			"/usage — Uso de cuota de cuenta/modelo\n" +
+			"/whoami — Mostrar tu User ID\n" +
 			"/upgrade — Buscar actualizaciones\n" +
 			"/restart — Reiniciar servicio\n" +
 			"/status — Estado del sistema\n" +
@@ -1668,35 +1682,35 @@ var messages = map[MsgKey]map[Language]string{
 			"Platforms: %s\n" +
 			"Uptime: %s\n" +
 			"Language: %s\n" +
-			"%s" + "%s" + "%s" + "%s",
+			"%s" + "%s" + "%s" + "%s" + "%s",
 		LangChinese: "cc-connect 状态\n\n" +
 			"项目: %s\n" +
 			"Agent: %s\n" +
 			"平台: %s\n" +
 			"运行时间: %s\n" +
 			"语言: %s\n" +
-			"%s" + "%s" + "%s" + "%s",
+			"%s" + "%s" + "%s" + "%s" + "%s",
 		LangTraditionalChinese: "cc-connect 狀態\n\n" +
 			"項目: %s\n" +
 			"Agent: %s\n" +
 			"平台: %s\n" +
 			"運行時間: %s\n" +
 			"語言: %s\n" +
-			"%s" + "%s" + "%s" + "%s",
+			"%s" + "%s" + "%s" + "%s" + "%s",
 		LangJapanese: "cc-connect ステータス\n\n" +
 			"プロジェクト: %s\n" +
 			"エージェント: %s\n" +
 			"プラットフォーム: %s\n" +
 			"稼働時間: %s\n" +
 			"言語: %s\n" +
-			"%s" + "%s" + "%s" + "%s",
+			"%s" + "%s" + "%s" + "%s" + "%s",
 		LangSpanish: "Estado de cc-connect\n\n" +
 			"Proyecto: %s\n" +
 			"Agente: %s\n" +
 			"Plataformas: %s\n" +
 			"Tiempo activo: %s\n" +
 			"Idioma: %s\n" +
-			"%s" + "%s" + "%s" + "%s",
+			"%s" + "%s" + "%s" + "%s" + "%s",
 	},
 	MsgModelCurrent: {
 		LangEnglish:            "Current model: %s",
@@ -1887,6 +1901,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "會話 Key: `%s`\n",
 		LangJapanese:           "セッションキー: `%s`\n",
 		LangSpanish:            "Clave de sesión: `%s`\n",
+	},
+	MsgStatusUserID: {
+		LangEnglish:            "User ID: `%s`\n",
+		LangChinese:            "User ID: `%s`\n",
+		LangTraditionalChinese: "User ID: `%s`\n",
+		LangJapanese:           "ユーザーID: `%s`\n",
+		LangSpanish:            "ID de usuario: `%s`\n",
 	},
 	MsgQuietOnShort: {
 		LangEnglish:            "ON",
@@ -2722,6 +2743,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 訊息注入目前會話失敗。",
 		LangJapanese:           "❌ 現在のセッションへのメッセージ注入に失敗しました。",
 		LangSpanish:            "❌ Error al inyectar el mensaje en la sesión actual.",
+	},
+	MsgWhoamiTitle: {
+		LangEnglish:            "🪪 **Your Identity**",
+		LangChinese:            "🪪 **你的身份信息**",
+		LangTraditionalChinese: "🪪 **你的身分資訊**",
+		LangJapanese:           "🪪 **あなたの身元情報**",
+		LangSpanish:            "🪪 **Tu identidad**",
+	},
+	MsgWhoamiUsage: {
+		LangEnglish:            "💡 Use the `User ID` above for `allow_from` and `admin_from` in your `config.toml`.",
+		LangChinese:            "💡 可将上方 `User ID` 填入 `config.toml` 的 `allow_from` 或 `admin_from` 中。",
+		LangTraditionalChinese: "💡 可將上方 `User ID` 填入 `config.toml` 的 `allow_from` 或 `admin_from` 中。",
+		LangJapanese:           "💡 上記の `User ID` を `config.toml` の `allow_from` や `admin_from` に設定してください。",
+		LangSpanish:            "💡 Usa el `User ID` de arriba para `allow_from` y `admin_from` en tu `config.toml`.",
 	},
 	MsgRelayNoBinding: {
 		LangEnglish: "No relay binding in this chat.\nUse `/bind <project>` to bind another bot.\nThe <project> is the project name from your config.toml.",

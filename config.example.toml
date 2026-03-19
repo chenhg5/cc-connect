@@ -419,6 +419,9 @@ name = "my-backend"
 # admin_from controls who can run privileged commands (/shell, /restart, /upgrade, /commands addexec).
 # admin_from 控制谁可以执行特权命令（/shell, /restart, /upgrade, /commands addexec）。
 #
+# 💡 TIP: Send /whoami or /status to the bot to get your User ID for allow_from / admin_from.
+# 💡 提示：向机器人发送 /whoami 或者 /status  即可获取你的 User ID，用于填写 allow_from / admin_from。
+#
 # Not set (default): privileged commands are blocked for all users.
 # 未设置（默认）：所有用户均无法使用特权命令。
 #
@@ -612,7 +615,8 @@ app_id = "your-feishu-app-id"
 app_secret = "your-feishu-app-secret"
 # enable_feishu_card = true  # Enable Feishu interactive cards (default: true); set false to force plain-text replies
 #                              # 启用飞书交互式卡片（默认 true）；设为 false 时强制回退纯文本回复
-# allow_from = "*"          # Allowed user open_ids, comma-separated; "*" = all (default) / 允许的用户 open_id，逗号分隔；"*" 表示所有（默认）
+# allow_from = "*"          # Allowed user open_ids, comma-separated; "*" = all (default). Use /whoami to get your open_id.
+#                              # 允许的用户 open_id，逗号分隔；"*" 表示所有（默认）。发送 /whoami 获取你的 open_id。
 # reaction_emoji = "OnIt"  # Emoji reaction on incoming messages (default: "OnIt"); set to "none" to disable
 #                           # 收到消息时添加的表情回复（默认 "OnIt"）；设为 "none" 可禁用
 # group_reply_all = false   # If true, respond to ALL group messages without requiring @mention

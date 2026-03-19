@@ -2363,6 +2363,7 @@ var builtinCommands = []struct {
 	{[]string{"dir", "cd", "chdir", "workdir"}, "dir"},
 	{[]string{"tts"}, "tts"},
 	{[]string{"workspace", "ws"}, "workspace"},
+	{[]string{"whoami", "myid"}, "whoami"},
 }
 
 // isBtwCommand checks if a trimmed message starts with a /btw command.
@@ -2555,6 +2556,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		}
 		e.handleWorkspaceCommand(p, msg, args)
 		return true
+	case "whoami":
+		e.cmdWhoami(p, msg)
 	default:
 		if custom, ok := e.commands.Resolve(cmd); ok {
 			if disabledCmds[strings.ToLower(custom.Name)] {
@@ -3259,6 +3262,11 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 
 		sessionKeyStr := e.i18n.Tf(MsgStatusSessionKey, msg.SessionKey)
 
+		userIDStr := ""
+		if msg.UserID != "" {
+			userIDStr = e.i18n.Tf(MsgStatusUserID, msg.UserID)
+		}
+
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgStatusTitle,
 			e.name,
 			agent.Name(),
@@ -3269,11 +3277,12 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 			sessionStr,
 			cronStr,
 			sessionKeyStr,
+			userIDStr,
 		))
 		return
 	}
 
-	e.replyWithCard(p, msg.ReplyCtx, e.renderStatusCard(msg.SessionKey))
+	e.replyWithCard(p, msg.ReplyCtx, e.renderStatusCard(msg.SessionKey, msg.UserID))
 }
 
 func (e *Engine) cmdUsage(p Platform, msg *Message) {
@@ -3582,7 +3591,7 @@ func (e *Engine) renderListCardSafe(sessionKey string, page int) *Card {
 	return card
 }
 
-func (e *Engine) renderStatusCard(sessionKey string) *Card {
+func (e *Engine) renderStatusCard(sessionKey string, userID string) *Card {
 	agent, sessions := e.sessionContextForKey(sessionKey)
 	platNames := make([]string, len(e.platforms))
 	for i, pl := range e.platforms {
@@ -3650,6 +3659,11 @@ func (e *Engine) renderStatusCard(sessionKey string) *Card {
 
 	sessionKeyStr := e.i18n.Tf(MsgStatusSessionKey, sessionKey)
 
+	userIDStr := ""
+	if userID != "" {
+		userIDStr = e.i18n.Tf(MsgStatusUserID, userID)
+	}
+
 	statusText := e.i18n.Tf(MsgStatusTitle,
 		e.name,
 		agent.Name(),
@@ -3660,6 +3674,7 @@ func (e *Engine) renderStatusCard(sessionKey string) *Card {
 		sessionStr,
 		cronStr,
 		sessionKeyStr,
+		userIDStr,
 	)
 	title, body := splitCardTitleBody(statusText)
 
@@ -5234,7 +5249,7 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 	case "/lang":
 		return e.renderLangCard()
 	case "/status":
-		return e.renderStatusCard(sessionKey)
+		return e.renderStatusCard(sessionKey, extractUserID(sessionKey))
 	case "/list":
 		page := 1
 		if args != "" {
@@ -5268,7 +5283,7 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 	case "/new":
 		return e.renderCurrentCard(sessionKey)
 	case "/quiet":
-		return e.renderStatusCard(sessionKey)
+		return e.renderStatusCard(sessionKey, extractUserID(sessionKey))
 	case "/switch":
 		return e.renderListCardSafe(sessionKey, 1)
 	case "/delete-mode":
@@ -5277,7 +5292,7 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 		}
 		return e.renderDeleteModeCard(sessionKey)
 	case "/stop":
-		return e.renderStatusCard(sessionKey)
+		return e.renderStatusCard(sessionKey, extractUserID(sessionKey))
 	case "/upgrade":
 		return e.renderUpgradeCard()
 	}
@@ -7370,6 +7385,37 @@ func (e *Engine) cmdConfig(p Platform, msg *Message, args []string) {
 	}
 }
 
+// ── /whoami command ─────────────────────────────────────────
+
+func (e *Engine) cmdWhoami(p Platform, msg *Message) {
+	var sb strings.Builder
+	sb.WriteString(e.i18n.T(MsgWhoamiTitle))
+	sb.WriteString("\n")
+
+	if msg.UserID != "" {
+		sb.WriteString(fmt.Sprintf("User ID: `%s`\n", msg.UserID))
+	} else {
+		sb.WriteString("User ID: (unknown)\n")
+	}
+	if msg.UserName != "" {
+		sb.WriteString(fmt.Sprintf("Name: %s\n", msg.UserName))
+	}
+	if msg.Platform != "" {
+		sb.WriteString(fmt.Sprintf("Platform: %s\n", msg.Platform))
+	}
+
+	chatID := extractChannelID(msg.SessionKey)
+	if chatID != "" {
+		sb.WriteString(fmt.Sprintf("Chat ID: `%s`\n", chatID))
+	}
+	sb.WriteString(fmt.Sprintf("Session Key: `%s`\n", msg.SessionKey))
+
+	sb.WriteString("\n")
+	sb.WriteString(e.i18n.T(MsgWhoamiUsage))
+
+	e.reply(p, msg.ReplyCtx, sb.String())
+}
+
 // ── /doctor command ─────────────────────────────────────────
 
 func (e *Engine) cmdDoctor(p Platform, msg *Message) {
@@ -8183,6 +8229,14 @@ func extractChannelID(sessionKey string) string {
 	parts := strings.SplitN(sessionKey, ":", 3)
 	if len(parts) >= 2 {
 		return parts[1]
+	}
+	return ""
+}
+
+func extractUserID(sessionKey string) string {
+	parts := strings.SplitN(sessionKey, ":", 3)
+	if len(parts) >= 3 {
+		return parts[2]
 	}
 	return ""
 }
