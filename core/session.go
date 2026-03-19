@@ -19,6 +19,7 @@ type Session struct {
 	ID             string         `json:"id"`
 	Name           string         `json:"name"`
 	AgentSessionID string         `json:"agent_session_id"`
+	AgentType      string         `json:"agent_type,omitempty"`
 	History        []HistoryEntry `json:"history"`
 	CreatedAt      time.Time      `json:"created_at"`
 	UpdatedAt      time.Time      `json:"updated_at"`
@@ -54,11 +55,12 @@ func (s *Session) AddHistory(role, content string) {
 	})
 }
 
-// SetAgentInfo atomically sets the agent session ID and name.
-func (s *Session) SetAgentInfo(agentSessionID, name string) {
+// SetAgentInfo atomically sets the agent session ID, agent type, and name.
+func (s *Session) SetAgentInfo(agentSessionID, agentType, name string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.AgentSessionID = agentSessionID
+	s.AgentType = agentType
 	s.Name = name
 }
 
@@ -76,22 +78,24 @@ func (s *Session) GetName() string {
 	return s.Name
 }
 
-// SetAgentSessionID atomically sets the agent session ID.
-func (s *Session) SetAgentSessionID(id string) {
+// SetAgentSessionID atomically sets the agent session ID and agent type.
+func (s *Session) SetAgentSessionID(id, agentType string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.AgentSessionID = id
+	s.AgentType = agentType
 }
 
 // CompareAndSetAgentSessionID sets the agent session ID only if it is currently empty.
 // Returns true if the value was set, false if it was already non-empty.
-func (s *Session) CompareAndSetAgentSessionID(id string) bool {
+func (s *Session) CompareAndSetAgentSessionID(id, agentType string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.AgentSessionID != "" {
 		return false
 	}
 	s.AgentSessionID = id
+	s.AgentType = agentType
 	return true
 }
 
@@ -114,13 +118,20 @@ func (s *Session) GetHistory(n int) []HistoryEntry {
 	return out
 }
 
+// UserMeta stores human-readable display info for a session key.
+type UserMeta struct {
+	UserName string `json:"user_name,omitempty"`
+	ChatName string `json:"chat_name,omitempty"`
+}
+
 // sessionSnapshot is the JSON-serializable state of the SessionManager.
 type sessionSnapshot struct {
-	Sessions      map[string]*Session `json:"sessions"`
-	ActiveSession map[string]string   `json:"active_session"`
-	UserSessions  map[string][]string `json:"user_sessions"`
-	Counter       int64               `json:"counter"`
-	SessionNames  map[string]string   `json:"session_names,omitempty"` // agent session ID → custom name
+	Sessions      map[string]*Session  `json:"sessions"`
+	ActiveSession map[string]string    `json:"active_session"`
+	UserSessions  map[string][]string  `json:"user_sessions"`
+	Counter       int64                `json:"counter"`
+	SessionNames  map[string]string    `json:"session_names,omitempty"`  // agent session ID → custom name
+	UserMeta      map[string]*UserMeta `json:"user_meta,omitempty"`     // sessionKey → display info
 }
 
 // SessionManager supports multiple named sessions per user with active-session tracking.
@@ -130,7 +141,8 @@ type SessionManager struct {
 	sessions      map[string]*Session
 	activeSession map[string]string
 	userSessions  map[string][]string
-	sessionNames  map[string]string // agent session ID → custom name
+	sessionNames  map[string]string    // agent session ID → custom name
+	userMeta      map[string]*UserMeta // sessionKey → display info
 	counter       int64
 	storePath     string // empty = no persistence
 }
@@ -141,6 +153,7 @@ func NewSessionManager(storePath string) *SessionManager {
 		activeSession: make(map[string]string),
 		userSessions:  make(map[string][]string),
 		sessionNames:  make(map[string]string),
+		userMeta:      make(map[string]*UserMeta),
 		storePath:     storePath,
 	}
 	if storePath != "" {
@@ -168,7 +181,9 @@ func (sm *SessionManager) GetOrCreateActive(userKey string) *Session {
 			return s
 		}
 	}
-	return sm.createLocked(userKey, "default")
+	s := sm.createLocked(userKey, "default")
+	sm.saveLocked()
+	return s
 }
 
 func (sm *SessionManager) NewSession(userKey, name string) *Session {
@@ -248,6 +263,39 @@ func (sm *SessionManager) GetSessionName(agentSessionID string) string {
 	return sm.sessionNames[agentSessionID]
 }
 
+// UpdateUserMeta updates the human-readable metadata for a session key.
+// Only non-empty fields are applied (merge behavior).
+func (sm *SessionManager) UpdateUserMeta(sessionKey, userName, chatName string) {
+	if userName == "" && chatName == "" {
+		return
+	}
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	meta, ok := sm.userMeta[sessionKey]
+	if !ok {
+		meta = &UserMeta{}
+		sm.userMeta[sessionKey] = meta
+	}
+	if userName != "" {
+		meta.UserName = userName
+	}
+	if chatName != "" {
+		meta.ChatName = chatName
+	}
+}
+
+// GetUserMeta returns a copy of the stored metadata for a session key, or nil.
+func (sm *SessionManager) GetUserMeta(sessionKey string) *UserMeta {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	m := sm.userMeta[sessionKey]
+	if m == nil {
+		return nil
+	}
+	cp := *m
+	return &cp
+}
+
 // AllSessions returns all sessions across all user keys.
 func (sm *SessionManager) AllSessions() []*Session {
 	sm.mu.RLock()
@@ -273,6 +321,39 @@ func (sm *SessionManager) DeleteByID(id string) bool {
 	if _, ok := sm.sessions[id]; !ok {
 		return false
 	}
+	sm.deleteByIDLocked(id)
+	sm.saveLocked()
+	return true
+}
+
+// DeleteByAgentSessionID removes all local sessions mapped to the given
+// agent session ID. It returns the number of removed local sessions.
+func (sm *SessionManager) DeleteByAgentSessionID(agentSessionID string) int {
+	if agentSessionID == "" {
+		return 0
+	}
+
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	removed := 0
+	for id, s := range sm.sessions {
+		s.mu.Lock()
+		matched := s.AgentSessionID == agentSessionID
+		s.mu.Unlock()
+		if !matched {
+			continue
+		}
+		sm.deleteByIDLocked(id)
+		removed++
+	}
+	if removed > 0 {
+		sm.saveLocked()
+	}
+	return removed
+}
+
+func (sm *SessionManager) deleteByIDLocked(id string) {
 	delete(sm.sessions, id)
 	for userKey, ids := range sm.userSessions {
 		for i, sid := range ids {
@@ -285,8 +366,6 @@ func (sm *SessionManager) DeleteByID(id string) bool {
 			delete(sm.activeSession, userKey)
 		}
 	}
-	sm.saveLocked()
-	return true
 }
 
 // Save persists current state to disk. Safe to call from outside (e.g. after message processing).
@@ -309,6 +388,7 @@ func (sm *SessionManager) saveLocked() {
 			ID:             s.ID,
 			Name:           s.Name,
 			AgentSessionID: s.AgentSessionID,
+			AgentType:      s.AgentType,
 			History:        append([]HistoryEntry(nil), s.History...),
 			CreatedAt:      s.CreatedAt,
 			UpdatedAt:      s.UpdatedAt,
@@ -322,6 +402,7 @@ func (sm *SessionManager) saveLocked() {
 		UserSessions:  sm.userSessions,
 		Counter:       sm.counter,
 		SessionNames:  sm.sessionNames,
+		UserMeta:      sm.userMeta,
 	}
 	data, err := json.MarshalIndent(snap, "", "  ")
 	if err != nil {
@@ -354,6 +435,7 @@ func (sm *SessionManager) load() {
 	sm.activeSession = snap.ActiveSession
 	sm.userSessions = snap.UserSessions
 	sm.sessionNames = snap.SessionNames
+	sm.userMeta = snap.UserMeta
 	sm.counter = snap.Counter
 
 	if sm.sessions == nil {
@@ -368,6 +450,38 @@ func (sm *SessionManager) load() {
 	if sm.sessionNames == nil {
 		sm.sessionNames = make(map[string]string)
 	}
+	if sm.userMeta == nil {
+		sm.userMeta = make(map[string]*UserMeta)
+	}
 
 	slog.Info("session: loaded from disk", "path", sm.storePath, "sessions", len(sm.sessions))
+}
+
+// InvalidateForAgent clears AgentSessionID on all sessions whose AgentType
+// does not match the current agent. This handles the case where the user
+// switches agent types (e.g. opencode → pi) and stale session IDs from the
+// old agent would cause errors.
+func (sm *SessionManager) InvalidateForAgent(agentType string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	invalidated := 0
+	for _, s := range sm.sessions {
+		s.mu.Lock()
+		if s.AgentSessionID != "" && s.AgentType != "" && s.AgentType != agentType {
+			slog.Info("session: invalidating stale agent session",
+				"session", s.ID,
+				"old_agent", s.AgentType,
+				"new_agent", agentType,
+				"old_agent_session_id", s.AgentSessionID,
+			)
+			s.AgentSessionID = ""
+			s.AgentType = agentType
+			invalidated++
+		}
+		s.mu.Unlock()
+	}
+	if invalidated > 0 {
+		sm.saveLocked()
+	}
 }

@@ -240,18 +240,49 @@ func TestSend_HandlesLargeJSONLines(t *testing.T) {
 	}
 }
 
+func TestWaitForArgsFile_WaitsForNonEmptyContent(t *testing.T) {
+	workDir := t.TempDir()
+	argsFile := filepath.Join(workDir, "args.txt")
+
+	if err := os.WriteFile(argsFile, []byte(""), 0o644); err != nil {
+		t.Fatalf("write empty args file: %v", err)
+	}
+
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		_ = os.WriteFile(argsFile, []byte("exec\n--json\n"), 0o644)
+	}()
+
+	args := waitForArgsFile(t, argsFile)
+	if !containsSequence(args, []string{"exec", "--json"}) {
+		t.Fatalf("expected non-empty args sequence, got: %v", args)
+	}
+}
+
 func waitForArgsFile(t *testing.T, path string) []string {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(path)
 		if err == nil {
-			lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
-			return lines
+			text := strings.TrimSpace(string(data))
+			if text != "" {
+				lines := strings.Split(text, "\n")
+				args := make([]string, 0, len(lines))
+				for _, line := range lines {
+					line = strings.TrimSpace(line)
+					if line != "" {
+						args = append(args, line)
+					}
+				}
+				if len(args) > 0 {
+					return args
+				}
+			}
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for args file: %s", path)
+	t.Fatalf("timed out waiting for non-empty args file: %s", path)
 	return nil
 }
 

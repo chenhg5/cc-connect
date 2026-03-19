@@ -136,6 +136,10 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 				}
 
 				isGroup := msg.Chat.Type == "group" || msg.Chat.Type == "supergroup"
+				chatName := ""
+				if isGroup {
+					chatName = msg.Chat.Title
+				}
 
 				// In group chats, filter messages not directed at this bot (unless group_reply_all)
 				if isGroup && !p.groupReplyAll {
@@ -148,7 +152,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 				rctx := replyContext{chatID: msg.Chat.ID, messageID: msg.MessageID}
 
 				// Handle photo messages
-				if msg.Photo != nil && len(msg.Photo) > 0 {
+				if len(msg.Photo) > 0 {
 					best := msg.Photo[len(msg.Photo)-1]
 					imgData, err := p.downloadFile(best.FileID)
 					if err != nil {
@@ -162,7 +166,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 					}
 					coreMsg := &core.Message{
 						SessionKey: sessionKey, Platform: "telegram",
-						UserID: userID, UserName: userName,
+						UserID: userID, UserName: userName, ChatName: chatName,
 						Content:   caption,
 						MessageID: strconv.Itoa(msg.MessageID),
 						Images:    []core.ImageAttachment{{MimeType: "image/jpeg", Data: imgData}},
@@ -182,7 +186,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 					}
 					coreMsg := &core.Message{
 						SessionKey: sessionKey, Platform: "telegram",
-						UserID: userID, UserName: userName,
+						UserID: userID, UserName: userName, ChatName: chatName,
 						MessageID: strconv.Itoa(msg.MessageID),
 						Audio: &core.AudioAttachment{
 							MimeType: msg.Voice.MimeType,
@@ -213,7 +217,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 					}
 					coreMsg := &core.Message{
 						SessionKey: sessionKey, Platform: "telegram",
-						UserID: userID, UserName: userName,
+						UserID: userID, UserName: userName, ChatName: chatName,
 						MessageID: strconv.Itoa(msg.MessageID),
 						Audio: &core.AudioAttachment{
 							MimeType: msg.Audio.MimeType,
@@ -242,7 +246,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 					}
 					coreMsg := &core.Message{
 						SessionKey: sessionKey, Platform: "telegram",
-						UserID: userID, UserName: userName,
+						UserID: userID, UserName: userName, ChatName: chatName,
 						Content:   caption,
 						MessageID: strconv.Itoa(msg.MessageID),
 						Files:     []core.FileAttachment{{MimeType: msg.Document.MimeType, Data: fileData, FileName: msg.Document.FileName}},
@@ -264,7 +268,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 
 				coreMsg := &core.Message{
 					SessionKey: sessionKey, Platform: "telegram",
-					UserID: userID, UserName: userName,
+					UserID: userID, UserName: userName, ChatName: chatName,
 					Content:   text,
 					MessageID: strconv.Itoa(msg.MessageID),
 					ReplyCtx:  rctx,
@@ -296,7 +300,9 @@ func (p *Platform) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 
 	// Answer the callback to clear the loading indicator
 	answer := tgbotapi.NewCallback(cb.ID, "")
-	p.bot.Request(answer)
+	if _, err := p.bot.Request(answer); err != nil {
+		slog.Warn("telegram: callback answer failed", "error", err)
+	}
 
 	userName := cb.From.UserName
 	if userName == "" {
@@ -307,6 +313,11 @@ func (p *Platform) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 		sessionKey = fmt.Sprintf("telegram:%d", chatID)
 	} else {
 		sessionKey = fmt.Sprintf("telegram:%d:%d", chatID, cb.From.ID)
+	}
+	isGroup := cb.Message.Chat.Type == "group" || cb.Message.Chat.Type == "supergroup"
+	chatName := ""
+	if isGroup {
+		chatName = cb.Message.Chat.Title
 	}
 	rctx := replyContext{chatID: chatID, messageID: msgID}
 
@@ -322,13 +333,16 @@ func (p *Platform) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 		edit := tgbotapi.NewEditMessageText(chatID, msgID, origText+"\n\n> "+command)
 		emptyMarkup := tgbotapi.NewInlineKeyboardMarkup()
 		edit.ReplyMarkup = &emptyMarkup
-		p.bot.Send(edit)
+		if _, err := p.bot.Send(edit); err != nil {
+			slog.Warn("telegram: edit message failed", "error", err)
+		}
 
 		p.handler(p, &core.Message{
 			SessionKey: sessionKey,
 			Platform:   "telegram",
 			UserID:     userID,
 			UserName:   userName,
+			ChatName:   chatName,
 			Content:    command,
 			MessageID:  strconv.Itoa(msgID),
 			ReplyCtx:   rctx,
@@ -359,13 +373,16 @@ func (p *Platform) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 		edit := tgbotapi.NewEditMessageText(chatID, msgID, origText+"\n\n"+choiceLabel)
 		emptyMarkup := tgbotapi.NewInlineKeyboardMarkup()
 		edit.ReplyMarkup = &emptyMarkup
-		p.bot.Send(edit)
+		if _, err := p.bot.Send(edit); err != nil {
+			slog.Warn("telegram: edit message failed", "error", err)
+		}
 
 		p.handler(p, &core.Message{
 			SessionKey: sessionKey,
 			Platform:   "telegram",
 			UserID:     userID,
 			UserName:   userName,
+			ChatName:   chatName,
 			Content:    data,
 			MessageID:  strconv.Itoa(msgID),
 			ReplyCtx:   rctx,
@@ -404,13 +421,16 @@ func (p *Platform) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 	edit := tgbotapi.NewEditMessageText(chatID, msgID, origText+"\n\n"+choiceLabel)
 	emptyMarkup := tgbotapi.NewInlineKeyboardMarkup()
 	edit.ReplyMarkup = &emptyMarkup
-	p.bot.Send(edit)
+	if _, err := p.bot.Send(edit); err != nil {
+		slog.Warn("telegram: edit message failed", "error", err)
+	}
 
 	p.handler(p, &core.Message{
 		SessionKey: sessionKey,
 		Platform:   "telegram",
 		UserID:     userID,
 		UserName:   userName,
+		ChatName:   chatName,
 		Content:    responseText,
 		MessageID:  strconv.Itoa(msgID),
 		ReplyCtx:   rctx,
@@ -523,6 +543,40 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 		if err != nil {
 			return fmt.Errorf("telegram: send: %w", err)
 		}
+	}
+	return nil
+}
+
+func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttachment) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("telegram: invalid reply context type %T", rctx)
+	}
+
+	name := img.FileName
+	if name == "" {
+		name = "image"
+	}
+	msg := tgbotapi.NewPhoto(rc.chatID, tgbotapi.FileBytes{Name: name, Bytes: img.Data})
+	if _, err := p.bot.Send(msg); err != nil {
+		return fmt.Errorf("telegram: send image: %w", err)
+	}
+	return nil
+}
+
+func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachment) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("telegram: invalid reply context type %T", rctx)
+	}
+
+	name := file.FileName
+	if name == "" {
+		name = "attachment"
+	}
+	msg := tgbotapi.NewDocument(rc.chatID, tgbotapi.FileBytes{Name: name, Bytes: file.Data})
+	if _, err := p.bot.Send(msg); err != nil {
+		return fmt.Errorf("telegram: send file: %w", err)
 	}
 	return nil
 }
@@ -694,7 +748,7 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 	}
 
 	action := tgbotapi.NewChatAction(rc.chatID, tgbotapi.ChatTyping)
-	p.bot.Send(action)
+	_, _ = p.bot.Send(action)
 
 	done := make(chan struct{})
 	go func() {
@@ -707,7 +761,7 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				p.bot.Send(action)
+				_, _ = p.bot.Send(action)
 			}
 		}
 	}()
@@ -781,27 +835,6 @@ func extractEntityText(text string, offsetUTF16, lengthUTF16 int) string {
 		return ""
 	}
 	return string(utf16.Decode(encoded[offsetUTF16:endUTF16]))
-}
-
-// isValidTelegramCommand validates if a command string meets Telegram's requirements.
-// Telegram command rules:
-//   - 1-32 characters long
-//   - Only lowercase letters, digits, and underscores
-//   - Must start with a letter
-func isValidTelegramCommand(cmd string) bool {
-	if len(cmd) == 0 || len(cmd) > 32 {
-		return false
-	}
-	if cmd[0] < 'a' || cmd[0] > 'z' {
-		return false
-	}
-	for i := 1; i < len(cmd); i++ {
-		c := cmd[i]
-		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_') {
-			return false
-		}
-	}
-	return true
 }
 
 // sanitizeTelegramCommand converts a command name to Telegram-compatible format.

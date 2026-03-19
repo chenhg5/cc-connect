@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -27,6 +28,7 @@ type CronJob struct {
 	Description string    `json:"description"`
 	Enabled     bool      `json:"enabled"`
 	Silent      *bool     `json:"silent,omitempty"` // suppress start notification; nil = use global default
+	Mute        bool      `json:"mute,omitempty"`   // suppress ALL messages (start + result); job runs silently
 	CreatedAt   time.Time `json:"created_at"`
 	LastRun     time.Time `json:"last_run,omitempty"`
 	LastError   string    `json:"last_error,omitempty"`
@@ -86,7 +88,9 @@ func (s *CronStore) Remove(id string) bool {
 	for i, j := range s.jobs {
 		if j.ID == id {
 			s.jobs = append(s.jobs[:i], s.jobs[i+1:]...)
-			s.save()
+			if err := s.save(); err != nil {
+				slog.Warn("cron: failed to save after remove", "error", err)
+			}
 			return true
 		}
 	}
@@ -99,11 +103,43 @@ func (s *CronStore) SetEnabled(id string, enabled bool) bool {
 	for _, j := range s.jobs {
 		if j.ID == id {
 			j.Enabled = enabled
-			s.save()
+			if err := s.save(); err != nil {
+				slog.Warn("cron: failed to save after set enabled", "error", err)
+			}
 			return true
 		}
 	}
 	return false
+}
+
+func (s *CronStore) SetMute(id string, mute bool) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, j := range s.jobs {
+		if j.ID == id {
+			j.Mute = mute
+			if err := s.save(); err != nil {
+				slog.Warn("cron: save after mute toggle", "error", err)
+			}
+			return true
+		}
+	}
+	return false
+}
+
+func (s *CronStore) ToggleMute(id string) (newState bool, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, j := range s.jobs {
+		if j.ID == id {
+			j.Mute = !j.Mute
+			if err := s.save(); err != nil {
+				slog.Warn("cron: failed to save after toggle mute", "error", err)
+			}
+			return j.Mute, true
+		}
+	}
+	return false, false
 }
 
 func (s *CronStore) MarkRun(id string, err error) {
@@ -117,7 +153,9 @@ func (s *CronStore) MarkRun(id string, err error) {
 			} else {
 				j.LastError = ""
 			}
-			s.save()
+			if saveErr := s.save(); saveErr != nil {
+				slog.Warn("cron: failed to save after mark run", "error", saveErr)
+			}
 			return
 		}
 	}
@@ -349,9 +387,18 @@ func (cs *CronScheduler) executeJob(jobID string) {
 	}
 }
 
+// mutePlatform wraps a Platform and discards all outgoing messages.
+// Used for muted cron jobs that should execute without sending chat messages.
+type mutePlatform struct {
+	Platform
+}
+
+func (m *mutePlatform) Reply(_ context.Context, _ any, _ string) error { return nil }
+func (m *mutePlatform) Send(_ context.Context, _ any, _ string) error  { return nil }
+
 func GenerateCronID() string {
 	b := make([]byte, 4)
-	rand.Read(b)
+	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }
 
@@ -397,6 +444,18 @@ func isZhLikeLang(lang Language) bool {
 	return lang == LangChinese || lang == LangTraditionalChinese || lang == LangJapanese
 }
 
+// parseStep parses a cron step field like "*/5" and returns (5, true).
+func parseStep(field string) (int, bool) {
+	if !strings.HasPrefix(field, "*/") {
+		return 0, false
+	}
+	var n int
+	if _, err := fmt.Sscanf(field[2:], "%d", &n); err == nil && n > 0 {
+		return n, true
+	}
+	return 0, false
+}
+
 // CronExprToHuman converts a standard 5-field cron expression to a human-readable string.
 func CronExprToHuman(expr string, lang Language) string {
 	fields := strings.Fields(expr)
@@ -406,14 +465,51 @@ func CronExprToHuman(expr string, lang Language) string {
 	minute, hour, dom, month, dow := fields[0], fields[1], fields[2], fields[3], fields[4]
 	weekdays, months := cronLangNames(lang)
 	cjk := isZhLikeLang(lang)
+	allWild := dom == "*" && month == "*" && dow == "*"
+
+	// Pure interval: */N * * * * → "Every N minutes"
+	if minStep, ok := parseStep(minute); ok && hour == "*" && allWild {
+		switch lang {
+		case LangChinese:
+			return fmt.Sprintf("每%d分钟", minStep)
+		case LangTraditionalChinese:
+			return fmt.Sprintf("每%d分鐘", minStep)
+		case LangJapanese:
+			return fmt.Sprintf("%d分ごと", minStep)
+		case LangSpanish:
+			return fmt.Sprintf("Cada %d min", minStep)
+		default:
+			return fmt.Sprintf("Every %d min", minStep)
+		}
+	}
+
+	// Hour interval: M */N * * * → "Every N hours (:MM)"
+	if hourStep, ok := parseStep(hour); ok && allWild {
+		m := padZero(minute)
+		if minute == "*" {
+			m = "00"
+		}
+		switch lang {
+		case LangChinese:
+			return fmt.Sprintf("每%d小时 (:%s)", hourStep, m)
+		case LangTraditionalChinese:
+			return fmt.Sprintf("每%d小時 (:%s)", hourStep, m)
+		case LangJapanese:
+			return fmt.Sprintf("%d時間ごと (:%s)", hourStep, m)
+		case LangSpanish:
+			return fmt.Sprintf("Cada %d h (:%s)", hourStep, m)
+		default:
+			return fmt.Sprintf("Every %d h (:%s)", hourStep, m)
+		}
+	}
 
 	var parts []string
 
 	// Weekday
 	if dow != "*" {
-		if d, err := fmt.Sscanf(dow, "%d", new(int)); err == nil && d == 1 {
-			var n int
-			fmt.Sscanf(dow, "%d", &n)
+	if d, err := fmt.Sscanf(dow, "%d", new(int)); err == nil && d == 1 {
+		var n int
+		_, _ = fmt.Sscanf(dow, "%d", &n)
 			if n >= 0 && n <= 6 {
 				if cjk {
 					parts = append(parts, weekdays[n])
@@ -428,9 +524,9 @@ func CronExprToHuman(expr string, lang Language) string {
 
 	// Month
 	if month != "*" {
-		if m, err := fmt.Sscanf(month, "%d", new(int)); err == nil && m == 1 {
-			var n int
-			fmt.Sscanf(month, "%d", &n)
+	if m, err := fmt.Sscanf(month, "%d", new(int)); err == nil && m == 1 {
+		var n int
+		_, _ = fmt.Sscanf(month, "%d", &n)
 			if n >= 1 && n <= 12 {
 				parts = append(parts, months[n])
 			}
@@ -448,7 +544,18 @@ func CronExprToHuman(expr string, lang Language) string {
 
 	// Time
 	if hour != "*" && minute != "*" {
-		parts = append(parts, fmt.Sprintf("%s:%s", padZero(hour), padZero(minute)))
+		if minStep, ok := parseStep(minute); ok {
+			switch lang {
+			case LangChinese, LangTraditionalChinese:
+				parts = append(parts, fmt.Sprintf("%s时 每%d分钟", padZero(hour), minStep))
+			case LangJapanese:
+				parts = append(parts, fmt.Sprintf("%s時 %d分ごと", padZero(hour), minStep))
+			default:
+				parts = append(parts, fmt.Sprintf("hour %s every %d min", padZero(hour), minStep))
+			}
+		} else {
+			parts = append(parts, fmt.Sprintf("%s:%s", padZero(hour), padZero(minute)))
+		}
 	} else if hour != "*" {
 		if cjk {
 			parts = append(parts, hour+"時")
@@ -456,25 +563,38 @@ func CronExprToHuman(expr string, lang Language) string {
 			parts = append(parts, "hour "+hour)
 		}
 	} else if minute != "*" {
-		switch lang {
-		case LangChinese, LangTraditionalChinese:
-			parts = append(parts, "每小时第"+minute+"分")
-		case LangJapanese:
-			parts = append(parts, "毎時"+minute+"分")
-		default:
-			parts = append(parts, "minute "+minute+" of every hour")
+		if minStep, ok := parseStep(minute); ok {
+			switch lang {
+			case LangChinese:
+				parts = append(parts, fmt.Sprintf("每%d分钟", minStep))
+			case LangTraditionalChinese:
+				parts = append(parts, fmt.Sprintf("每%d分鐘", minStep))
+			case LangJapanese:
+				parts = append(parts, fmt.Sprintf("%d分ごと", minStep))
+			default:
+				parts = append(parts, fmt.Sprintf("every %d min", minStep))
+			}
+		} else {
+			switch lang {
+			case LangChinese, LangTraditionalChinese:
+				parts = append(parts, "每小时第"+minute+"分")
+			case LangJapanese:
+				parts = append(parts, "毎時"+minute+"分")
+			default:
+				parts = append(parts, "minute "+minute+" of every hour")
+			}
 		}
 	}
 
 	// Frequency hint
-	if dow == "*" && month == "*" && dom == "*" {
+	if allWild {
 		switch lang {
 		case LangChinese, LangTraditionalChinese:
 			return "每天 " + strings.Join(parts, " ")
 		case LangJapanese:
 			return "毎日 " + strings.Join(parts, " ")
 		case LangSpanish:
-			return "Diario a las " + strings.Join(parts, " ")
+			return "Diario " + strings.Join(parts, " ")
 		default:
 			return "Daily at " + strings.Join(parts, " ")
 		}

@@ -7,10 +7,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -19,12 +21,103 @@ const (
 	githubAPI    = "https://api.github.com/repos/" + githubRepo + "/releases/latest"
 	githubAllAPI = "https://api.github.com/repos/" + githubRepo + "/releases"
 	downloadBase = "https://github.com/" + githubRepo + "/releases/download"
+	giteeAPI     = "https://gitee.com/api/v5/repos/cg33/cc-connect/releases/latest"
 )
+
+// cachedLatestVersion 缓存最新版本信息，避免频繁请求API
+var cachedLatestVersion struct {
+	version   string
+	timestamp time.Time
+	mu        sync.RWMutex
+}
+
+// versionCheckTTL 缓存有效期（1小时）
+const versionCheckTTL = time.Hour
 
 type githubRelease struct {
 	TagName    string `json:"tag_name"`
 	HTMLURL    string `json:"html_url"`
 	Prerelease bool   `json:"prerelease"`
+}
+
+// fetchLatestStableReleaseAsync 异步获取最新稳定版本（非pre-release）
+// 优先使用Gitee，如果失败则回退到GitHub
+func fetchLatestStableReleaseAsync() {
+	go func() {
+		release, err := fetchLatestStableFromGitee()
+		if err != nil || release == nil || release.TagName == "" {
+			// Gitee失败，尝试GitHub
+			release, err = fetchLatestStableRelease()
+			if err != nil || release == nil {
+				return
+			}
+		}
+		// 缓存结果
+		cachedLatestVersion.mu.Lock()
+		cachedLatestVersion.version = release.TagName
+		cachedLatestVersion.timestamp = time.Now()
+		cachedLatestVersion.mu.Unlock()
+	}()
+}
+
+// fetchLatestStableFromGitee 从Gitee获取最新稳定版本
+func fetchLatestStableFromGitee() (*githubRelease, error) {
+	client := &http.Client{Timeout: 3 * time.Second}
+	req, _ := http.NewRequest("GET", giteeAPI, nil)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("Gitee API returned HTTP %d", resp.StatusCode)
+	}
+
+	var release githubRelease
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		return nil, err
+	}
+	// Gitee的latest通常就是稳定版，但检查Prerelease以防万一
+	if release.Prerelease {
+		return nil, nil
+	}
+	return &release, nil
+}
+
+// checkUpdateAsync 启动异步版本检查（不阻塞）
+func checkUpdateAsync() {
+	// dev版本不检查
+	if version == "dev" || version == "" {
+		return
+	}
+	fetchLatestStableReleaseAsync()
+}
+
+// getUpdateHintIfAvailable returns an update hint only from cache (never blocks on network).
+// Call checkUpdateAsync() early to populate the cache in the background.
+func getUpdateHintIfAvailable() string {
+	if version == "dev" || version == "" {
+		return ""
+	}
+
+	cachedLatestVersion.mu.RLock()
+	cachedVer := cachedLatestVersion.version
+	cachedTime := cachedLatestVersion.timestamp
+	cachedLatestVersion.mu.RUnlock()
+
+	if cachedVer == "" || time.Since(cachedTime) > versionCheckTTL {
+		// Cache miss or expired — trigger async refresh, don't block
+		fetchLatestStableReleaseAsync()
+		return ""
+	}
+
+	if isNewer(cachedVer, version) {
+		return fmt.Sprintf("\n📦 Update available: %s → %s  (run: cc-connect update)\n", version, cachedVer)
+	}
+	return ""
 }
 
 func runUpdate() {
@@ -338,7 +431,9 @@ func replaceExecutable(target, src string) error {
 
 	if err := copyFile(src, target); err != nil {
 		// Attempt to restore
-		os.Rename(backup, target)
+		if restoreErr := os.Rename(backup, target); restoreErr != nil {
+			slog.Warn("update: failed to restore old binary after copy error", "error", restoreErr)
+		}
 		return fmt.Errorf("install new binary: %w", err)
 	}
 
@@ -413,10 +508,10 @@ func isNewer(latest, current string) bool {
 	for i := 0; i < len(lParts) || i < len(cParts); i++ {
 		var lv, cv int
 		if i < len(lParts) {
-			fmt.Sscanf(lParts[i], "%d", &lv)
+			_, _ = fmt.Sscanf(lParts[i], "%d", &lv)
 		}
 		if i < len(cParts) {
-			fmt.Sscanf(cParts[i], "%d", &cv)
+			_, _ = fmt.Sscanf(cParts[i], "%d", &cv)
 		}
 		if lv > cv {
 			return true
@@ -434,10 +529,55 @@ func isNewer(latest, current string) bool {
 	if cPre == "" && lPre != "" {
 		return false
 	}
-	// Both have pre-release: compare lexicographically (beta.2 > beta.1, rc.1 > beta.9)
+	// Both have pre-release: split on "." and compare each segment
+	// numerically where possible so beta.10 > beta.2.
 	if lPre != "" && cPre != "" {
-		return lPre > cPre
+		return comparePreRelease(lPre, cPre) > 0
 	}
 
 	return false
+}
+
+// comparePreRelease compares two pre-release strings segment by segment.
+// Numeric segments are compared as integers; non-numeric segments are
+// compared lexicographically. Returns >0 if a is greater, <0 if b is
+// greater, 0 if equal.
+func comparePreRelease(a, b string) int {
+	aParts := strings.Split(a, ".")
+	bParts := strings.Split(b, ".")
+
+	max := len(aParts)
+	if len(bParts) > max {
+		max = len(bParts)
+	}
+	for i := 0; i < max; i++ {
+		var ap, bp string
+		if i < len(aParts) {
+			ap = aParts[i]
+		}
+		if i < len(bParts) {
+			bp = bParts[i]
+		}
+
+		var an, bn int
+		aN, _ := fmt.Sscanf(ap, "%d", &an)
+		bN, _ := fmt.Sscanf(bp, "%d", &bn)
+		aIsNum := aN == 1 && fmt.Sprintf("%d", an) == ap
+		bIsNum := bN == 1 && fmt.Sprintf("%d", bn) == bp
+
+		if aIsNum && bIsNum {
+			if an != bn {
+				return an - bn
+			}
+			continue
+		}
+		// Non-numeric: lexicographic
+		if ap < bp {
+			return -1
+		}
+		if ap > bp {
+			return 1
+		}
+	}
+	return 0
 }

@@ -138,6 +138,27 @@ func TestSessionManager_Persistence(t *testing.T) {
 	}
 }
 
+func TestSessionManager_GetOrCreateActive_Persists(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+
+	sm1 := NewSessionManager(path)
+	s := sm1.GetOrCreateActive("user1")
+	if s == nil {
+		t.Fatal("expected non-nil session")
+	}
+
+	// Reload from disk — session should survive
+	sm2 := NewSessionManager(path)
+	list := sm2.ListSessions("user1")
+	if len(list) != 1 {
+		t.Fatalf("expected 1 session after reload, got %d", len(list))
+	}
+	if list[0].ID != s.ID {
+		t.Errorf("reloaded session ID = %q, want %q", list[0].ID, s.ID)
+	}
+}
+
 func TestSession_TryLockUnlock(t *testing.T) {
 	s := &Session{}
 	if !s.TryLock() {
@@ -198,7 +219,7 @@ func TestSession_GetAgentSessionID(t *testing.T) {
 	if got := s.GetAgentSessionID(); got != "" {
 		t.Errorf("initial GetAgentSessionID = %q, want empty", got)
 	}
-	s.SetAgentSessionID("sess-1")
+	s.SetAgentSessionID("sess-1", "test")
 	if got := s.GetAgentSessionID(); got != "sess-1" {
 		t.Errorf("GetAgentSessionID = %q, want %q", got, "sess-1")
 	}
@@ -211,6 +232,142 @@ func TestSession_GetName(t *testing.T) {
 	}
 }
 
+func TestSessionManager_InvalidateForAgent(t *testing.T) {
+	sm := NewSessionManager("")
+
+	// Create sessions with different agent types
+	s1 := sm.NewSession("user1", "sess1")
+	s1.SetAgentSessionID("old-id-1", "opencode")
+
+	s2 := sm.NewSession("user2", "sess2")
+	s2.SetAgentSessionID("old-id-2", "claudecode")
+
+	s3 := sm.NewSession("user3", "sess3")
+	s3.SetAgentSessionID("old-id-3", "") // pre-migration, no agent type
+
+	s4 := sm.NewSession("user4", "sess4") // no agent session ID at all
+
+	sm.InvalidateForAgent("claudecode")
+
+	// s1: opencode → should be invalidated
+	if got := s1.GetAgentSessionID(); got != "" {
+		t.Errorf("s1 (opencode) AgentSessionID = %q, want empty (should be invalidated)", got)
+	}
+	if s1.AgentType != "claudecode" {
+		t.Errorf("s1 AgentType = %q, want %q after invalidation", s1.AgentType, "claudecode")
+	}
+
+	// s2: claudecode → should be untouched
+	if got := s2.GetAgentSessionID(); got != "old-id-2" {
+		t.Errorf("s2 (claudecode) AgentSessionID = %q, want %q (should be preserved)", got, "old-id-2")
+	}
+	if s2.AgentType != "claudecode" {
+		t.Errorf("s2 AgentType = %q, want %q", s2.AgentType, "claudecode")
+	}
+
+	// s3: empty agent type → should be untouched (backward compat)
+	if got := s3.GetAgentSessionID(); got != "old-id-3" {
+		t.Errorf("s3 (empty type) AgentSessionID = %q, want %q (migration-safe)", got, "old-id-3")
+	}
+	if s3.AgentType != "" {
+		t.Errorf("s3 AgentType = %q, want empty (pre-migration should be untouched)", s3.AgentType)
+	}
+
+	// s4: no agent session ID → should be untouched
+	if got := s4.GetAgentSessionID(); got != "" {
+		t.Errorf("s4 (no session ID) AgentSessionID = %q, want empty", got)
+	}
+}
+
+func TestSessionManager_UserMeta(t *testing.T) {
+	sm := NewSessionManager("")
+	sm.GetOrCreateActive("feishu:oc_abc:ou_xyz")
+
+	// Set UserName
+	sm.UpdateUserMeta("feishu:oc_abc:ou_xyz", "Zhang San", "")
+	meta := sm.GetUserMeta("feishu:oc_abc:ou_xyz")
+	if meta == nil || meta.UserName != "Zhang San" {
+		t.Errorf("expected UserName='Zhang San', got %+v", meta)
+	}
+	if meta.ChatName != "" {
+		t.Errorf("expected empty ChatName, got %q", meta.ChatName)
+	}
+
+	// Merge: add ChatName without losing UserName
+	sm.UpdateUserMeta("feishu:oc_abc:ou_xyz", "", "Test Group")
+	meta = sm.GetUserMeta("feishu:oc_abc:ou_xyz")
+	if meta.UserName != "Zhang San" || meta.ChatName != "Test Group" {
+		t.Errorf("expected merge, got %+v", meta)
+	}
+
+	// No-op for empty values
+	sm.UpdateUserMeta("feishu:oc_abc:ou_xyz", "", "")
+	meta = sm.GetUserMeta("feishu:oc_abc:ou_xyz")
+	if meta.UserName != "Zhang San" || meta.ChatName != "Test Group" {
+		t.Errorf("expected no change, got %+v", meta)
+	}
+
+	// Unknown key returns nil
+	if m := sm.GetUserMeta("nonexistent"); m != nil {
+		t.Errorf("expected nil for unknown key, got %+v", m)
+	}
+}
+
+func TestSessionManager_UserMetaPersistence(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+
+	sm1 := NewSessionManager(path)
+	sm1.NewSession("feishu:oc_abc:ou_xyz", "test")
+	sm1.UpdateUserMeta("feishu:oc_abc:ou_xyz", "Zhang San", "Group Name")
+	sm1.Save()
+
+	sm2 := NewSessionManager(path)
+	meta := sm2.GetUserMeta("feishu:oc_abc:ou_xyz")
+	if meta == nil || meta.UserName != "Zhang San" || meta.ChatName != "Group Name" {
+		t.Errorf("expected persisted meta, got %+v", meta)
+	}
+}
+
+func TestSessionManager_DeleteByAgentSessionID(t *testing.T) {
+	sm := NewSessionManager("")
+
+	s1 := sm.NewSession("user1", "one")
+	s1.SetAgentSessionID("agent-1", "codex")
+
+	s2 := sm.NewSession("user2", "two")
+	s2.SetAgentSessionID("agent-2", "codex")
+
+	s3 := sm.NewSession("user3", "three")
+	s3.SetAgentSessionID("agent-1", "codex")
+
+	if removed := sm.DeleteByAgentSessionID("agent-1"); removed != 2 {
+		t.Fatalf("removed = %d, want 2", removed)
+	}
+	if got := sm.FindByID(s1.ID); got != nil {
+		t.Fatalf("expected s1 removed, got %+v", got)
+	}
+	if got := sm.FindByID(s3.ID); got != nil {
+		t.Fatalf("expected s3 removed, got %+v", got)
+	}
+	if got := sm.FindByID(s2.ID); got == nil {
+		t.Fatal("expected s2 preserved")
+	}
+	if got := sm.ActiveSessionID("user1"); got != "" {
+		t.Fatalf("user1 active session = %q, want empty", got)
+	}
+	if got := sm.ActiveSessionID("user3"); got != "" {
+		t.Fatalf("user3 active session = %q, want empty", got)
+	}
+	if list := sm.ListSessions("user2"); len(list) != 1 || list[0].ID != s2.ID {
+		t.Fatalf("user2 sessions = %+v, want only s2", list)
+	}
+
+	if removed := sm.DeleteByAgentSessionID("missing"); removed != 0 {
+		t.Fatalf("removed missing = %d, want 0", removed)
+	}
+}
+
 func TestSession_ConcurrentGetSet(t *testing.T) {
 	s := &Session{}
 	var wg sync.WaitGroup
@@ -218,7 +375,7 @@ func TestSession_ConcurrentGetSet(t *testing.T) {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			s.SetAgentSessionID("id")
+			s.SetAgentSessionID("id", "test")
 		}()
 		go func() {
 			defer wg.Done()

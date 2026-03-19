@@ -43,10 +43,11 @@ type Agent struct {
 	routerURL    string // Claude Code Router URL (e.g., "http://127.0.0.1:3456")
 	routerAPIKey string // Claude Code Router API key (optional)
 
-	providerProxy *core.ProviderProxy // local proxy for third-party providers
-	proxyLocalURL string              // local URL of the proxy
+	providerProxy  *core.ProviderProxy // local proxy for third-party providers
+	proxyLocalURL  string              // local URL of the proxy
+	platformPrompt string              // platform-specific formatting instructions
 
-	mu sync.Mutex
+	mu sync.RWMutex
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -107,6 +108,19 @@ func (a *Agent) Name() string           { return "claudecode" }
 func (a *Agent) CLIBinaryName() string  { return "claude" }
 func (a *Agent) CLIDisplayName() string { return "Claude" }
 
+func (a *Agent) SetWorkDir(dir string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.workDir = dir
+	slog.Info("claudecode: work_dir changed", "work_dir", dir)
+}
+
+func (a *Agent) GetWorkDir() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.workDir
+}
+
 func (a *Agent) SetModel(model string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -120,7 +134,16 @@ func (a *Agent) GetModel() string {
 	return a.model
 }
 
+func (a *Agent) configuredModels() []core.ModelOption {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return core.GetProviderModels(a.providers, a.activeIdx)
+}
+
 func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
+	if models := a.configuredModels(); len(models) > 0 {
+		return models
+	}
 	if models := a.fetchModelsFromAPI(ctx); len(models) > 0 {
 		return models
 	}
@@ -195,6 +218,12 @@ func (a *Agent) SetSessionEnv(env []string) {
 	a.sessionEnv = env
 }
 
+func (a *Agent) SetPlatformPrompt(prompt string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.platformPrompt = prompt
+}
+
 // StartSession creates a persistent interactive Claude Code session.
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
 	a.mu.Lock()
@@ -222,9 +251,10 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 			model = m
 		}
 	}
+	platformPrompt := a.platformPrompt
 	a.mu.Unlock()
 
-	return newClaudeSession(ctx, a.workDir, model, sessionID, a.mode, tools, extraEnv)
+	return newClaudeSession(ctx, a.workDir, model, sessionID, a.mode, tools, extraEnv, platformPrompt)
 }
 
 func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {

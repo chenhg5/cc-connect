@@ -86,7 +86,9 @@ func SaveFilesToDisk(workDir string, files []FileAttachment) []string {
 		return nil
 	}
 	attachDir := filepath.Join(workDir, ".cc-connect", "attachments")
-	os.MkdirAll(attachDir, 0o755)
+	if err := os.MkdirAll(attachDir, 0o755); err != nil {
+		slog.Warn("SaveFilesToDisk: mkdir failed", "dir", attachDir, "error", err)
+	}
 
 	var paths []string
 	for i, f := range files {
@@ -131,6 +133,7 @@ type Message struct {
 	MessageID  string // platform message ID for tracing
 	UserID     string
 	UserName   string
+	ChatName   string // human-readable chat/group name (optional)
 	Content    string
 	Images     []ImageAttachment // attached images (if any)
 	Files      []FileAttachment  // attached files (if any)

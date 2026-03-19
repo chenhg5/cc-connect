@@ -903,7 +903,7 @@ func TestHandleMessageEnd_UserRole(t *testing.T) {
 // ── piSession lifecycle ──────────────────────────────────────
 
 func TestPiSession_NewWithResumeID(t *testing.T) {
-	s, err := newPiSession(context.Background(), "echo", "/tmp", "model", "default", "resume-id", nil)
+	s, err := newPiSession(context.Background(), "echo", "/tmp", "model", "default", "", "resume-id", nil)
 	if err != nil {
 		t.Fatalf("newPiSession: %v", err)
 	}
@@ -915,7 +915,7 @@ func TestPiSession_NewWithResumeID(t *testing.T) {
 }
 
 func TestPiSession_NewWithoutResumeID(t *testing.T) {
-	s, err := newPiSession(context.Background(), "echo", "/tmp", "", "default", "", nil)
+	s, err := newPiSession(context.Background(), "echo", "/tmp", "", "default", "", "", nil)
 	if err != nil {
 		t.Fatalf("newPiSession: %v", err)
 	}
@@ -927,7 +927,7 @@ func TestPiSession_NewWithoutResumeID(t *testing.T) {
 }
 
 func TestPiSession_SendWhenClosed(t *testing.T) {
-	s, _ := newPiSession(context.Background(), "echo", "/tmp", "", "default", "", nil)
+	s, _ := newPiSession(context.Background(), "echo", "/tmp", "", "default", "", "", nil)
 	s.Close()
 
 	err := s.Send("hello", nil, nil)
@@ -956,7 +956,7 @@ func TestPiSession_Events(t *testing.T) {
 }
 
 func TestPiSession_Close(t *testing.T) {
-	s, _ := newPiSession(context.Background(), "echo", "/tmp", "", "default", "", nil)
+	s, _ := newPiSession(context.Background(), "echo", "/tmp", "", "default", "", "", nil)
 
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
@@ -1064,7 +1064,7 @@ func TestPiSession_ReadLoopWithEcho(t *testing.T) {
 	line1, _ := json.Marshal(sessionEvent)
 	line2, _ := json.Marshal(textEvent)
 
-	s, err := newPiSession(context.Background(), "sh", "/tmp", "", "default", "", nil)
+	s, err := newPiSession(context.Background(), "sh", "/tmp", "", "default", "", "", nil)
 	if err != nil {
 		t.Fatalf("newPiSession: %v", err)
 	}

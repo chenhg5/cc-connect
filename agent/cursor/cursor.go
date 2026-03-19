@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -12,7 +13,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"encoding/json"
 	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -37,7 +37,7 @@ type Agent struct {
 	providers  []core.ProviderConfig
 	activeIdx  int
 	sessionEnv []string
-	mu         sync.Mutex
+	mu         sync.RWMutex
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -83,6 +83,19 @@ func (a *Agent) Name() string           { return "cursor" }
 func (a *Agent) CLIBinaryName() string  { return "agent" }
 func (a *Agent) CLIDisplayName() string { return "Cursor Agent" }
 
+func (a *Agent) SetWorkDir(dir string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.workDir = dir
+	slog.Info("cursor: work_dir changed", "work_dir", dir)
+}
+
+func (a *Agent) GetWorkDir() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.workDir
+}
+
 func (a *Agent) SetModel(model string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -96,7 +109,16 @@ func (a *Agent) GetModel() string {
 	return a.model
 }
 
+func (a *Agent) configuredModels() []core.ModelOption {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return core.GetProviderModels(a.providers, a.activeIdx)
+}
+
 func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
+	if models := a.configuredModels(); len(models) > 0 {
+		return models
+	}
 	a.mu.Lock()
 	cmd := a.cmd
 	extraEnv := a.providerEnvLocked()

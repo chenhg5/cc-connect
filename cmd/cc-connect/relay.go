@@ -119,7 +119,10 @@ func runRelaySend(args []string) {
 	var result struct {
 		Response string `json:"response"`
 	}
-	json.Unmarshal(body, &result)
+	if err := json.Unmarshal(body, &result); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: decode response: %v\n", err)
+		os.Exit(1)
+	}
 	fmt.Print(result.Response)
 }
 

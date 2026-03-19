@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -60,7 +61,9 @@ func (w *RotatingWriter) rotate() {
 
 	backup := w.path + ".1"
 	os.Remove(backup)
-	os.Rename(w.path, backup)
+	if err := os.Rename(w.path, backup); err != nil {
+		slog.Warn("logrotate: rename failed", "error", err, "path", w.path, "backup", backup)
+	}
 
 	f, err := os.OpenFile(w.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {

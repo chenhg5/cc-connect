@@ -39,7 +39,7 @@ type claudeSession struct {
 	alive       atomic.Bool
 }
 
-func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode string, allowedTools []string, extraEnv []string) (*claudeSession, error) {
+func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode string, allowedTools []string, extraEnv []string, platformPrompt string) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	args := []string{
@@ -68,6 +68,9 @@ func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode strin
 	}
 
 	if sysPrompt := core.AgentSystemPrompt(); sysPrompt != "" {
+		if platformPrompt != "" {
+			sysPrompt += "\n## Formatting\n" + platformPrompt + "\n"
+		}
 		args = append(args, "--append-system-prompt", sysPrompt)
 	}
 
@@ -369,7 +372,9 @@ func (cs *claudeSession) Send(prompt string, images []core.ImageAttachment, file
 	}
 
 	attachDir := filepath.Join(cs.workDir, ".cc-connect", "attachments")
-	os.MkdirAll(attachDir, 0o755)
+	if err := os.MkdirAll(attachDir, 0o755); err != nil {
+		slog.Warn("claudeSession: mkdir attachments failed", "error", err, "path", attachDir)
+	}
 
 	var parts []map[string]any
 	var savedPaths []string

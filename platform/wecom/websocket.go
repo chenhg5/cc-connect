@@ -169,6 +169,25 @@ func (p *WSPlatform) runConnection() error {
 		p.conn = nil
 		p.mu.Unlock()
 		conn.Close()
+
+		// Drain pending ACK channels so waiting goroutines are unblocked
+		// and stale entries do not accumulate across reconnections.
+		// Collect keys first, then delete — Range+Delete in callback is
+		// not guaranteed safe by the sync.Map contract.
+		var staleKeys []any
+		p.pendingAcks.Range(func(key, value any) bool {
+			if ch, ok := value.(chan error); ok {
+				select {
+				case ch <- fmt.Errorf("wecom-ws: connection closed"):
+				default:
+				}
+			}
+			staleKeys = append(staleKeys, key)
+			return true
+		})
+		for _, k := range staleKeys {
+			p.pendingAcks.Delete(k)
+		}
 	}()
 
 	// Send subscribe (auth) frame
@@ -333,6 +352,14 @@ func (p *WSPlatform) handleMsgCallback(frame wsFrame) {
 		userID:   body.From.UserID,
 	}
 
+	// WS mode does not provide display names; the protocol only carries userID.
+	// Name resolution would require a separate HTTP API call with corpSecret,
+	// which is unavailable in WebSocket-only mode.
+	chatName := ""
+	if body.ChatType == "group" {
+		chatName = body.ChatID
+	}
+
 	switch body.MsgType {
 	case "text":
 		slog.Debug("wecom-ws: text received", "user", body.From.UserID, "len", len(body.Text.Content))
@@ -340,6 +367,7 @@ func (p *WSPlatform) handleMsgCallback(frame wsFrame) {
 			SessionKey: sessionKey, Platform: "wecom",
 			MessageID: body.MsgID,
 			UserID: body.From.UserID, UserName: body.From.UserID,
+			ChatName: chatName,
 			Content: body.Text.Content, ReplyCtx: rctx,
 		})
 
@@ -355,6 +383,7 @@ func (p *WSPlatform) handleMsgCallback(frame wsFrame) {
 			SessionKey: sessionKey, Platform: "wecom",
 			MessageID: body.MsgID,
 			UserID: body.From.UserID, UserName: body.From.UserID,
+			ChatName: chatName,
 			Content: text, ReplyCtx: rctx, FromVoice: true,
 		})
 

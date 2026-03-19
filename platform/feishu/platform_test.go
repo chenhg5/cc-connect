@@ -577,31 +577,31 @@ func TestLark_GroupReplyAllWithThreadIsolationUsesRootSessionKeyWithoutMention(t
 func TestBuildReplyMessageReqBody_SetsReplyInThreadFlag(t *testing.T) {
 	tests := []struct {
 		name          string
-		platform      Platform
+		platform      *Platform
 		replyCtx      replyContext
 		wantThreading bool
 	}{
 		{
 			name:          "thread isolation enabled",
-			platform:      Platform{threadIsolation: true},
+			platform:      &Platform{threadIsolation: true},
 			replyCtx:      replyContext{messageID: "om_reply", sessionKey: "feishu:oc_chat:root:om_root"},
 			wantThreading: true,
 		},
 		{
 			name:          "thread isolation does not affect p2p session",
-			platform:      Platform{threadIsolation: true},
+			platform:      &Platform{threadIsolation: true},
 			replyCtx:      replyContext{messageID: "om_reply", sessionKey: "feishu:oc_chat:ou_user"},
 			wantThreading: false,
 		},
 		{
 			name:          "reply_in_thread enabled",
-			platform:      Platform{replyInThread: true},
+			platform:      &Platform{replyInThread: true},
 			replyCtx:      replyContext{messageID: "om_reply"},
 			wantThreading: true,
 		},
 		{
 			name:          "plain reply remains non-threaded",
-			platform:      Platform{},
+			platform:      &Platform{},
 			replyCtx:      replyContext{messageID: "om_reply"},
 			wantThreading: false,
 		},

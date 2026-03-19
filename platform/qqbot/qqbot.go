@@ -3,6 +3,7 @@ package qqbot
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -24,7 +25,7 @@ func init() {
 const (
 	apiBaseProduction = "https://api.sgroup.qq.com"
 	apiBaseSandbox    = "https://sandbox.api.sgroup.qq.com"
-	tokenURL         = "https://bots.qq.com/app/getAppAccessToken"
+	tokenURL          = "https://bots.qq.com/app/getAppAccessToken"
 
 	// Default intent: GROUP_AND_C2C_EVENT (1 << 25)
 	defaultIntents = 1 << 25
@@ -38,14 +39,14 @@ const (
 
 // WebSocket opcodes for the QQ Bot gateway protocol.
 const (
-	opDispatch        = 0
-	opHeartbeat       = 1
-	opIdentify        = 2
-	opResume          = 6
-	opReconnect       = 7
-	opInvalidSession  = 9
-	opHello           = 10
-	opHeartbeatACK    = 11
+	opDispatch       = 0
+	opHeartbeat      = 1
+	opIdentify       = 2
+	opResume         = 6
+	opReconnect      = 7
+	opInvalidSession = 9
+	opHello          = 10
+	opHeartbeatACK   = 11
 )
 
 // Platform implements core.Platform for the official QQ Bot API v2.
@@ -56,6 +57,7 @@ type Platform struct {
 	allowFrom             string
 	shareSessionInChannel bool
 	intents               int
+	markdownSupport       bool // enable markdown messages (msg_type: 2)
 	handler               core.MessageHandler
 	cancel                context.CancelFunc
 
@@ -109,6 +111,7 @@ func New(opts map[string]any) (core.Platform, error) {
 	sandbox, _ := opts["sandbox"].(bool)
 	allowFrom, _ := opts["allow_from"].(string)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
+	markdownSupport, _ := opts["markdown_support"].(bool)
 
 	intents := defaultIntents
 	if v, ok := opts["intents"].(int); ok && v > 0 {
@@ -125,6 +128,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		allowFrom:             allowFrom,
 		shareSessionInChannel: shareSessionInChannel,
 		intents:               intents,
+		markdownSupport:       markdownSupport,
 	}, nil
 }
 
@@ -171,6 +175,152 @@ func (p *Platform) Send(ctx context.Context, replyCtx any, content string) error
 	}
 	return nil
 }
+
+// SendImage uploads and sends an image via QQ Bot rich media API.
+// Implements core.ImageSender.
+func (p *Platform) SendImage(ctx context.Context, replyCtx any, img core.ImageAttachment) error {
+	rctx, ok := replyCtx.(*replyContext)
+	if !ok {
+		return fmt.Errorf("qqbot: SendImage: invalid reply context type %T", replyCtx)
+	}
+
+	fileInfo, err := p.uploadRichMedia(rctx, 1, img.Data)
+	if err != nil {
+		return fmt.Errorf("qqbot: upload image: %w", err)
+	}
+
+	var url string
+	switch rctx.messageType {
+	case "group":
+		url = fmt.Sprintf("%s/v2/groups/%s/messages", p.apiBase(), rctx.groupOpenID)
+	case "c2c":
+		url = fmt.Sprintf("%s/v2/users/%s/messages", p.apiBase(), rctx.userOpenID)
+	default:
+		return fmt.Errorf("qqbot: unknown message type %q", rctx.messageType)
+	}
+
+	body := map[string]any{
+		"msg_type": 7,
+		"media":    map[string]any{"file_info": fileInfo},
+	}
+	if rctx.eventMsgID != "" {
+		body["msg_id"] = rctx.eventMsgID
+		body["msg_seq"] = p.nextMsgSeq(rctx.eventMsgID)
+	}
+
+	return p.apiRequest("POST", url, body)
+}
+
+// uploadRichMedia uploads a file to QQ Bot rich media API and returns the file_info.
+// fileType: 1=image, 2=video, 3=audio, 4=file.
+func (p *Platform) uploadRichMedia(rctx *replyContext, fileType int, data []byte) (string, error) {
+	var url string
+	switch rctx.messageType {
+	case "group":
+		url = fmt.Sprintf("%s/v2/groups/%s/files", p.apiBase(), rctx.groupOpenID)
+	case "c2c":
+		url = fmt.Sprintf("%s/v2/users/%s/files", p.apiBase(), rctx.userOpenID)
+	default:
+		return "", fmt.Errorf("qqbot: unknown message type %q", rctx.messageType)
+	}
+
+	b64 := base64.StdEncoding.EncodeToString(data)
+	reqBody := map[string]any{
+		"file_type":    fileType,
+		"file_data":    b64,
+		"srv_send_msg": false,
+	}
+
+	var result struct {
+		FileInfo string `json:"file_info"`
+	}
+	if err := p.apiRequestJSON("POST", url, reqBody, &result); err != nil {
+		return "", err
+	}
+	if result.FileInfo == "" {
+		return "", fmt.Errorf("qqbot: upload rich media: empty file_info")
+	}
+	return result.FileInfo, nil
+}
+
+// apiRequestJSON is like apiRequest but also decodes the response body into result.
+func (p *Platform) apiRequestJSON(method, url string, body any, result any) error {
+	var bodyReader io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return fmt.Errorf("qqbot: marshal body: %w", err)
+		}
+		bodyReader = bytes.NewReader(data)
+	}
+
+	token, err := p.getAccessToken()
+	if err != nil {
+		return fmt.Errorf("qqbot: get token: %w", err)
+	}
+
+	req, err := http.NewRequest(method, url, bodyReader)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "QQBot "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := core.HTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("qqbot: api request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Retry once on 401
+	if resp.StatusCode == http.StatusUnauthorized {
+		if err := p.refreshToken(); err != nil {
+			return fmt.Errorf("qqbot: token refresh on 401: %w", err)
+		}
+		token, _ = p.getAccessToken()
+
+		if body != nil {
+			data, _ := json.Marshal(body)
+			bodyReader = bytes.NewReader(data)
+		}
+		req2, err := http.NewRequest(method, url, bodyReader)
+		if err != nil {
+			return fmt.Errorf("qqbot: build retry request: %w", err)
+		}
+		req2.Header.Set("Authorization", "QQBot "+token)
+		req2.Header.Set("Content-Type", "application/json")
+
+		resp2, err := core.HTTPClient.Do(req2)
+		if err != nil {
+			return fmt.Errorf("qqbot: api retry failed: %w", err)
+		}
+		defer resp2.Body.Close()
+
+		if resp2.StatusCode >= 300 {
+			raw, _ := io.ReadAll(resp2.Body)
+			return fmt.Errorf("qqbot: api %s %s returned %d (after retry): %s", method, url, resp2.StatusCode, raw)
+		}
+		if result != nil {
+			if err := json.NewDecoder(resp2.Body).Decode(result); err != nil {
+				return fmt.Errorf("qqbot: decode response: %w", err)
+			}
+		}
+		return nil
+	}
+
+	if resp.StatusCode >= 300 {
+		raw, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("qqbot: api %s %s returned %d: %s", method, url, resp.StatusCode, raw)
+	}
+	if result != nil {
+		if err := json.NewDecoder(resp.Body).Decode(result); err != nil {
+			return fmt.Errorf("qqbot: decode response: %w", err)
+		}
+	}
+	return nil
+}
+
+var _ core.ImageSender = (*Platform)(nil)
 
 // Stop shuts down the platform.
 func (p *Platform) Stop() error {
@@ -244,7 +394,7 @@ func (p *Platform) refreshToken() error {
 	}
 
 	var expiresSec int
-	fmt.Sscanf(result.ExpiresIn, "%d", &expiresSec)
+	_, _ = fmt.Sscanf(result.ExpiresIn, "%d", &expiresSec)
 	if expiresSec <= 0 {
 		expiresSec = 7200
 	}
@@ -362,8 +512,8 @@ type wsPayload struct {
 }
 
 func (p *Platform) waitForHello(conn *websocket.Conn) error {
-	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
-	defer conn.SetReadDeadline(time.Time{})
+	_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
 
 	var msg wsPayload
 	if err := conn.ReadJSON(&msg); err != nil {
@@ -406,8 +556,8 @@ func (p *Platform) sendIdentify(conn *websocket.Conn, token string) error {
 }
 
 func (p *Platform) waitForReady(conn *websocket.Conn) error {
-	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
-	defer conn.SetReadDeadline(time.Time{})
+	_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
 
 	var msg wsPayload
 	if err := conn.ReadJSON(&msg); err != nil {
@@ -585,9 +735,21 @@ func (p *Platform) reconnectLoop(ctx context.Context) {
 
 		if err := p.waitForHello(conn); err != nil {
 			slog.Warn("qqbot: hello failed during reconnect", "error", err)
+			p.wsMu.Lock()
+			p.wsConn = nil
+			p.wsMu.Unlock()
 			conn.Close()
 			backoff = min(backoff*2, maxReconnectBackoff)
 			continue
+		}
+
+		// closeAndNil closes the conn and clears p.wsConn so Stop()
+		// and other code paths don't operate on a stale reference.
+		closeAndNil := func() {
+			p.wsMu.Lock()
+			p.wsConn = nil
+			p.wsMu.Unlock()
+			conn.Close()
 		}
 
 		// Try Resume if we have a session_id, otherwise Identify
@@ -596,24 +758,24 @@ func (p *Platform) reconnectLoop(ctx context.Context) {
 				slog.Warn("qqbot: resume failed, falling back to identify", "error", err)
 				p.sessionID = ""
 				if err := p.sendIdentify(conn, token); err != nil {
-					conn.Close()
+					closeAndNil()
 					backoff = min(backoff*2, maxReconnectBackoff)
 					continue
 				}
 				if err := p.waitForReady(conn); err != nil {
-					conn.Close()
+					closeAndNil()
 					backoff = min(backoff*2, maxReconnectBackoff)
 					continue
 				}
 			}
 		} else {
 			if err := p.sendIdentify(conn, token); err != nil {
-				conn.Close()
+				closeAndNil()
 				backoff = min(backoff*2, maxReconnectBackoff)
 				continue
 			}
 			if err := p.waitForReady(conn); err != nil {
-				conn.Close()
+				closeAndNil()
 				backoff = min(backoff*2, maxReconnectBackoff)
 				continue
 			}
@@ -661,12 +823,12 @@ func (p *Platform) handleDispatch(eventType string, data json.RawMessage) {
 
 func (p *Platform) handleGroupMessage(data json.RawMessage) {
 	var d struct {
-		ID           string       `json:"id"`
-		GroupOpenID  string       `json:"group_openid"`
-		Content      string       `json:"content"`
-		Timestamp    string       `json:"timestamp"`
-		Attachments  []attachment `json:"attachments"`
-		Author       struct {
+		ID          string       `json:"id"`
+		GroupOpenID string       `json:"group_openid"`
+		Content     string       `json:"content"`
+		Timestamp   string       `json:"timestamp"`
+		Attachments []attachment `json:"attachments"`
+		Author      struct {
 			MemberOpenID string `json:"member_openid"`
 		} `json:"author"`
 	}
@@ -726,6 +888,7 @@ func (p *Platform) handleGroupMessage(data json.RawMessage) {
 		MessageID:  d.ID,
 		UserID:     d.Author.MemberOpenID,
 		UserName:   d.Author.MemberOpenID, // official API only provides openid, no nickname
+		ChatName:   d.GroupOpenID,         // group openid as fallback (no group name API)
 		Content:    content,
 		Images:     images,
 		ReplyCtx:   rctx,
@@ -818,9 +981,23 @@ func (p *Platform) sendMessage(rctx *replyContext, content string) error {
 		return fmt.Errorf("qqbot: unknown message type %q", rctx.messageType)
 	}
 
-	body := map[string]any{
-		"content":  content,
-		"msg_type": 0, // text
+	var body map[string]any
+	if p.markdownSupport {
+		// Markdown format (msg_type: 2)
+		body = map[string]any{
+			"markdown": map[string]any{
+				"content": content,
+			},
+			"msg_type": 2,
+		}
+		slog.Debug("qqbot: sending markdown message", "content_len", len(content), "msg_type", 2)
+	} else {
+		// Plain text format (msg_type: 0)
+		body = map[string]any{
+			"content":  content,
+			"msg_type": 0,
+		}
+		slog.Debug("qqbot: sending text message", "content_len", len(content), "msg_type", 0)
 	}
 
 	// Include msg_id for passive reply if available
@@ -907,7 +1084,10 @@ func (p *Platform) apiRequest(method, url string, body any) error {
 			data, _ := json.Marshal(body)
 			bodyReader = bytes.NewReader(data)
 		}
-		req2, _ := http.NewRequest(method, url, bodyReader)
+		req2, err := http.NewRequest(method, url, bodyReader)
+		if err != nil {
+			return fmt.Errorf("qqbot: build retry request: %w", err)
+		}
 		req2.Header.Set("Authorization", "QQBot "+token)
 		req2.Header.Set("Content-Type", "application/json")
 

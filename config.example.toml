@@ -24,6 +24,14 @@
 # 会话数据存储目录（默认 ~/.cc-connect），以 JSON 文件保存对话历史和会话状态。
 # data_dir = "/path/to/custom/dir"
 
+# Attachment send-back switch for `cc-connect send --image/--file`.
+# Independent from the agent's /mode. Set to "off" to block IM image/file send-back.
+# `cc-connect send --message` without attachments is unaffected.
+# 附件回传开关，用于控制 `cc-connect send --image/--file`。
+# 它与 agent 的 /mode 独立；设为 "off" 会禁用通过 IM 回传图片/文件。
+# 不带附件的 `cc-connect send --message` 不受影响。
+# attachment_send = "on"
+
 # Default quiet mode (suppress thinking/tool progress messages) / 默认静默模式（隐藏思考和工具进度消息）
 # Can be overridden per-project. Users can still toggle with /quiet command.
 # 可被项目级配置覆盖。用户仍可通过 /quiet 命令切换。
@@ -75,6 +83,16 @@ level = "info" # debug, info, warn, error
 # [rate_limit]
 # max_messages = 20         # Max messages per window; 0 = disabled (default: 20) / 窗口内最大消息数；0 = 禁用（默认 20）
 # window_secs = 60          # Window size in seconds (default: 60) / 窗口时间秒数（默认 60）
+
+# =============================================================================
+# Relay Settings / Relay 设置
+# =============================================================================
+# Bot-to-bot relay timeout. Controls how long cc-connect waits for the target
+# bot to finish responding during `cc-connect relay send`.
+# Bot 间 relay 超时。控制 `cc-connect relay send` 时等待目标 bot 完成回复的最长时间。
+
+# [relay]
+# timeout_secs = 120        # Max relay wait in seconds; 0 = disabled (default: 120) / relay 最大等待秒数；0 = 禁用（默认 120）
 
 # =============================================================================
 # Cron Settings / 定时任务设置
@@ -401,6 +419,9 @@ name = "my-backend"
 # admin_from controls who can run privileged commands (/shell, /restart, /upgrade, /commands addexec).
 # admin_from 控制谁可以执行特权命令（/shell, /restart, /upgrade, /commands addexec）。
 #
+# 💡 TIP: Send /whoami or /status to the bot to get your User ID for allow_from / admin_from.
+# 💡 提示：向机器人发送 /whoami 或者 /status  即可获取你的 User ID，用于填写 allow_from / admin_from。
+#
 # Not set (default): privileged commands are blocked for all users.
 # 未设置（默认）：所有用户均无法使用特权命令。
 #
@@ -414,6 +435,29 @@ name = "my-backend"
 # 设置 admin_from = "*" 将授予所有已允许的用户对主机的完整 shell 访问权限。
 # 仅在个人单用户部署中使用此配置，确保所有允许的用户均可信任。
 # admin_from = "*"
+
+# Multi-user mode — per-user rate limits and role-based command ACL
+# 多用户模式 — 按用户速率限制和基于角色的命令权限控制
+#
+# When [projects.users] is configured, each user is matched to a role.
+# Roles control which commands are available and the rate limit for that user.
+# If not configured, behavior is unchanged (backward compatible).
+#
+# 配置 [projects.users] 后，每个用户会被分配到一个角色。
+# 角色控制该用户可用的命令和速率限制。未配置时行为不变（向后兼容）。
+#
+# [projects.users]
+# default_role = "member"
+#
+# [projects.users.roles.admin]
+# user_ids = ["platform_user_id_1", "platform_user_id_2"]
+# disabled_commands = []                                     # no restrictions
+# rate_limit = { max_messages = 50, window_secs = 60 }
+#
+# [projects.users.roles.member]
+# user_ids = ["*"]                                           # matches all unassigned users
+# disabled_commands = ["*"]                                  # disable all built-in commands
+# rate_limit = { max_messages = 10, window_secs = 60 }
 
 # Heartbeat — periodic awareness check / 心跳 — 周期性巡检
 # The agent wakes up at a fixed interval to check the environment.
@@ -499,6 +543,19 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "bypassPermission
 # api_key = "sk-xxx"
 # base_url = "https://api.relay-service.com"
 # model = "claude-sonnet-4-20250514"
+# # Optional: pre-configure available models shown by /model command (alias - model)
+# # /model [alias] switches to the model; omit to auto-fetch from the API.
+# # 可选：预先配置 /model 命令显示的可用模型列表，格式为 alias - model
+# # 使用 /model [alias] 切换模型；留空则自动从 API 获取
+# [[projects.agent.providers.models]]
+# model = "claude-sonnet-4-20250514"
+# alias = "sonnet"
+# [[projects.agent.providers.models]]
+# model = "claude-opus-4-20250514"
+# alias = "opus"
+# [[projects.agent.providers.models]]
+# model = "claude-haiku-3-5-20241022"
+# alias = "haiku"
 #
 # # Third-party provider with thinking override / 第三方 Provider 并覆盖 thinking 参数
 # # Some providers (e.g. SiliconFlow) don't support Claude's adaptive thinking.
@@ -512,16 +569,25 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "bypassPermission
 # model = "deepseek-ai/DeepSeek-V3"
 # thinking = "disabled"
 #
-# # MiniMax — OpenAI-compatible provider with 204K context window
-# # MiniMax — 兼容 OpenAI 接口的大模型，支持 204K 超长上下文
-# # Models: MiniMax-M2.5 (flagship), MiniMax-M2.5-highspeed (faster)
+# # MiniMax — OpenAI-compatible provider with 1M context window
+# # MiniMax — 兼容 OpenAI 接口的大模型，支持 1M 超长上下文
+# # Models: MiniMax-M2.7 (flagship, 1M context), MiniMax-M2.5, MiniMax-M2.5-highspeed
 # # Docs: https://platform.minimaxi.com
 # [[projects.agent.providers]]
 # name = "minimax"
 # api_key = "your-minimax-api-key"
 # base_url = "https://api.minimax.io/v1"
-# model = "MiniMax-M2.5"
+# model = "MiniMax-M2.7"
 # thinking = "disabled"
+# [[projects.agent.providers.models]]
+# model = "MiniMax-M2.7"
+# alias = "m27"
+# [[projects.agent.providers.models]]
+# model = "MiniMax-M2.5"
+# alias = "m25"
+# [[projects.agent.providers.models]]
+# model = "MiniMax-M2.5-highspeed"
+# alias = "m25fast"
 #
 # # For special setups (Bedrock, Vertex, etc.), use the env map:
 # # 特殊环境（Bedrock、Vertex 等）使用 env 字段：
@@ -535,6 +601,9 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "bypassPermission
 # 3. Add im.message.receive_v1 event, select WebSocket long-connection mode
 #    添加 im.message.receive_v1 事件，选择 WebSocket 长连接模式
 # 4. Fill in app_id and app_secret below / 填入下方 app_id 和 app_secret
+# Quick setup via CLI:
+#   cc-connect feishu setup --project <project_name>
+# （可通过 CLI 快速配置：cc-connect feishu setup --project <project_name>）
 # Note: No WebSocket URL needed — the SDK auto-negotiates the connection.
 # 注意：无需配置 WebSocket URL，SDK 会自动通过凭证建立连接。
 
@@ -546,7 +615,8 @@ app_id = "your-feishu-app-id"
 app_secret = "your-feishu-app-secret"
 # enable_feishu_card = true  # Enable Feishu interactive cards (default: true); set false to force plain-text replies
 #                              # 启用飞书交互式卡片（默认 true）；设为 false 时强制回退纯文本回复
-# allow_from = "*"          # Allowed user open_ids, comma-separated; "*" = all (default) / 允许的用户 open_id，逗号分隔；"*" 表示所有（默认）
+# allow_from = "*"          # Allowed user open_ids, comma-separated; "*" = all (default). Use /whoami to get your open_id.
+#                              # 允许的用户 open_id，逗号分隔；"*" 表示所有（默认）。发送 /whoami 获取你的 open_id。
 # reaction_emoji = "OnIt"  # Emoji reaction on incoming messages (default: "OnIt"); set to "none" to disable
 #                           # 收到消息时添加的表情回复（默认 "OnIt"）；设为 "none" 可禁用
 # group_reply_all = false   # If true, respond to ALL group messages without requiring @mention
@@ -557,6 +627,29 @@ app_secret = "your-feishu-app-secret"
 #                           # 设为 true 时，群聊按飞书话题/根消息隔离会话（一个 thread/root 对应一个 Agent 会话）
 # reply_in_thread = false  # If true, all responses are threaded to the original message (helps trace which question triggered which reply)
 #                          # 设为 true 时，所有回复都会引用原消息（方便追踪每条回复对应哪条提问）
+
+# Lark (International Version) / Lark 国际版
+# Lark uses Webhook mode instead of WebSocket long-connection.
+# Lark 使用 Webhook 模式而非 WebSocket 长连接。
+# 1. Create an app at https://open.larksuite.com / 在 https://open.larksuite.com 创建应用
+# 2. Enable Bot capability / 开启机器人能力
+# 3. Add im.message.receive_v1 event, configure Webhook URL (requires public IP)
+#    添加 im.message.receive_v1 事件，配置 Webhook URL（需要公网 IP）
+# 4. Fill in app_id, app_secret, port, callback_path below
+#    填入下方 app_id、app_secret、port、callback_path
+
+# [[projects.platforms]]
+# type = "lark"
+#
+# [projects.platforms.options]
+# app_id = "your-lark-app-id"
+# app_secret = "your-lark-app-secret"
+# port = "8080"                  # Webhook server port / Webhook 服务器端口
+# callback_path = "/feishu/webhook"  # Webhook callback path / Webhook 回调路径
+# encrypt_key = ""               # Event encrypt key (optional) / 事件加密密钥（可选）
+# enable_feishu_card = true
+# allow_from = "*"
+# reaction_emoji = "OnIt"
 
 # DingTalk / 钉钉 (uncomment to enable / 取消注释以启用)
 # 1. Create an app at https://open-dev.dingtalk.com / 在钉钉开放平台创建应用
@@ -855,7 +948,7 @@ app_secret = "your-feishu-app-secret"
 # name = "minimax"
 # api_key = "your-minimax-api-key"
 # base_url = "https://api.minimax.io/v1"
-# model = "MiniMax-M2.5"
+# model = "MiniMax-M2.7"
 #
 # [[projects.platforms]]
 # type = "telegram"
@@ -906,6 +999,7 @@ app_secret = "your-feishu-app-secret"
 # allow_from = "*"      # Allowed user openids, e.g. "OPEN_ID_1,OPEN_ID_2"; "*" = all
 #                       # 允许的用户 openid，如 "OPEN_ID_1,OPEN_ID_2"；"*" 表示所有
 # share_session_in_channel = false  # If true, all users in a group share one agent session / 群聊共享会话
+# markdown_support = false  # Enable Markdown messages (msg_type: 2). Requires bot permission. / 启用 Markdown 消息（msg_type: 2）。需要机器人具备该权限。
 
 # =============================================================================
 # Project 5: Using Qoder CLI / 项目 5：使用 Qoder CLI (uncomment to enable / 取消注释以启用)

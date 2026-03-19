@@ -39,7 +39,7 @@ type Agent struct {
 	providers      []core.ProviderConfig
 	activeIdx      int
 	sessionEnv     []string
-	mu             sync.Mutex
+	mu             sync.RWMutex
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -94,6 +94,19 @@ func normalizeMode(raw string) string {
 
 func (a *Agent) Name() string { return "iflow" }
 
+func (a *Agent) SetWorkDir(dir string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.workDir = dir
+	slog.Info("iflow: work_dir changed", "work_dir", dir)
+}
+
+func (a *Agent) GetWorkDir() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.workDir
+}
+
 func (a *Agent) SetModel(model string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -107,7 +120,16 @@ func (a *Agent) GetModel() string {
 	return a.model
 }
 
+func (a *Agent) configuredModels() []core.ModelOption {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return core.GetProviderModels(a.providers, a.activeIdx)
+}
+
 func (a *Agent) AvailableModels(_ context.Context) []core.ModelOption {
+	if models := a.configuredModels(); len(models) > 0 {
+		return models
+	}
 	return []core.ModelOption{
 		{Name: "Qwen3-Coder", Desc: "Qwen3 Coder"},
 		{Name: "Kimi-K2.5", Desc: "Kimi K2.5"},

@@ -3,6 +3,7 @@ package core
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -27,9 +28,11 @@ type APIServer struct {
 
 // SendRequest is the JSON body for POST /send.
 type SendRequest struct {
-	Project    string `json:"project"`
-	SessionKey string `json:"session_key"`
-	Message    string `json:"message"`
+	Project    string            `json:"project"`
+	SessionKey string            `json:"session_key"`
+	Message    string            `json:"message"`
+	Images     []ImageAttachment `json:"images,omitempty"`
+	Files      []FileAttachment  `json:"files,omitempty"`
 }
 
 // NewAPIServer creates an API server on a Unix socket.
@@ -47,7 +50,9 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listen unix socket: %w", err)
 	}
-	os.Chmod(sockPath, 0o600)
+	if err := os.Chmod(sockPath, 0o600); err != nil {
+		slog.Warn("api: chmod socket failed", "path", sockPath, "error", err)
+	}
 
 	s := &APIServer{
 		socketPath: sockPath,
@@ -113,13 +118,14 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	const maxSendBody = 52 << 20 // 52 MB (slightly above max attachment to account for base64 overhead)
 	var req SendRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxSendBody)).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.Message == "" {
-		http.Error(w, "message is required", http.StatusBadRequest)
+	if req.Message == "" && len(req.Images) == 0 && len(req.Files) == 0 {
+		http.Error(w, "message or attachment is required", http.StatusBadRequest)
 		return
 	}
 
@@ -144,13 +150,15 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := engine.SendToSession(req.SessionKey, req.Message); err != nil {
+	if err := engine.SendToSessionWithAttachments(req.SessionKey, req.Message, req.Images, req.Files); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	if err := json.NewEncoder(w).Encode(map[string]string{"status": "ok"}); err != nil {
+		slog.Error("api: failed to encode response", "error", err)
+	}
 }
 
 func (s *APIServer) handleSessions(w http.ResponseWriter, r *http.Request) {
@@ -179,7 +187,9 @@ func (s *APIServer) handleSessions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
+	if err := json.NewEncoder(w).Encode(result); err != nil {
+		slog.Error("api: failed to encode response", "error", err)
+	}
 }
 
 // ── Cron API ───────────────────────────────────────────────────
@@ -240,10 +250,29 @@ func (s *APIServer) handleCronAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolve session_key: use provided, or auto-detect from active sessions
+	sessionKey := req.SessionKey
+	if sessionKey == "" {
+		s.mu.RLock()
+		engine := s.engines[project]
+		s.mu.RUnlock()
+		if engine != nil {
+			keys := engine.ActiveSessionKeys()
+			if len(keys) == 1 {
+				sessionKey = keys[0]
+				slog.Debug("auto-detected session_key for cron job", "session_key", sessionKey)
+			}
+		}
+	}
+	if sessionKey == "" {
+		http.Error(w, "session_key is required: set CC_SESSION_KEY env, pass --session-key, or ensure exactly one active session exists", http.StatusBadRequest)
+		return
+	}
+
 	job := &CronJob{
 		ID:          GenerateCronID(),
 		Project:     project,
-		SessionKey:  req.SessionKey,
+		SessionKey:  sessionKey,
 		CronExpr:    req.CronExpr,
 		Prompt:      req.Prompt,
 		Exec:        req.Exec,
@@ -260,7 +289,9 @@ func (s *APIServer) handleCronAdd(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(job)
+	if err := json.NewEncoder(w).Encode(job); err != nil {
+		slog.Error("api: failed to encode response", "error", err)
+	}
 }
 
 func (s *APIServer) handleCronList(w http.ResponseWriter, r *http.Request) {
@@ -278,7 +309,7 @@ func (s *APIServer) handleCronList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(jobs)
+	_ = json.NewEncoder(w).Encode(jobs)
 }
 
 func (s *APIServer) handleCronDel(w http.ResponseWriter, r *http.Request) {
@@ -305,7 +336,7 @@ func (s *APIServer) handleCronDel(w http.ResponseWriter, r *http.Request) {
 
 	if s.cron.RemoveJob(req.ID) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	} else {
 		http.Error(w, fmt.Sprintf("job %q not found", req.ID), http.StatusNotFound)
 	}
@@ -340,7 +371,7 @@ func (s *APIServer) handleRelaySend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func (s *APIServer) handleRelayBind(w http.ResponseWriter, r *http.Request) {
@@ -369,7 +400,7 @@ func (s *APIServer) handleRelayBind(w http.ResponseWriter, r *http.Request) {
 
 	s.relay.Bind(req.Platform, req.ChatID, req.Bots)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 func (s *APIServer) handleRelayBinding(w http.ResponseWriter, r *http.Request) {
@@ -388,5 +419,5 @@ func (s *APIServer) handleRelayBinding(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(binding)
+	_ = json.NewEncoder(w).Encode(binding)
 }

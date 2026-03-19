@@ -59,6 +59,19 @@ func (a *Agent) Name() string           { return "qoder" }
 func (a *Agent) CLIBinaryName() string  { return "qodercli" }
 func (a *Agent) CLIDisplayName() string { return "Qoder" }
 
+func (a *Agent) SetWorkDir(dir string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.workDir = dir
+	slog.Info("qoder: work_dir changed", "work_dir", dir)
+}
+
+func (a *Agent) GetWorkDir() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.workDir
+}
+
 func (a *Agent) SetModel(model string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()

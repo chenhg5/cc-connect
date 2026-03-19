@@ -34,7 +34,7 @@ func TestI18n_MissingKey(t *testing.T) {
 	i := NewI18n(LangEnglish)
 	got := i.T(MsgKey("totally_missing_key"))
 	if got != "[totally_missing_key]" && got != "" {
-		// acceptable: either placeholder or empty
+		t.Logf("missing key returned %q (acceptable: placeholder or empty)", got)
 	}
 }
 
