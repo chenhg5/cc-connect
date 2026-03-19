@@ -16,6 +16,7 @@ import (
 
 	"github.com/chenhg5/cc-connect/config"
 	qrterminal "github.com/mdp/qrterminal/v3"
+	"rsc.io/qr"
 )
 
 const (
@@ -71,6 +72,7 @@ type registrationClient struct {
 
 type registrationFlowOptions struct {
 	TimeoutSeconds int
+	QRImagePath    string
 	Debug          bool
 }
 
@@ -113,6 +115,7 @@ func runFeishuSetup(args []string, requestedMode string) {
 	appID := fs.String("app-id", "", "existing bot app_id")
 	appSecret := fs.String("app-secret", "", "existing bot app_secret")
 	timeout := fs.Int("timeout", 600, "QR onboarding timeout in seconds")
+	qrImage := fs.String("qr-image", "", "save QR code as PNG image to this path (e.g. qr.png)")
 	setAllowFromEmpty := fs.Bool("set-allow-from-empty", false, "fill allow_from with owner open_id when it is empty (may be inaccurate)")
 	debug := fs.Bool("debug", false, "print debug logs for onboarding requests")
 	fs.Parse(args)
@@ -160,6 +163,7 @@ func runFeishuSetup(args []string, requestedMode string) {
 	case feishuSetupModeNew:
 		result, err := runRegistrationFlow(registrationFlowOptions{
 			TimeoutSeconds: *timeout,
+			QRImagePath:    *qrImage,
 			Debug:          *debug,
 		})
 		if err != nil {
@@ -357,6 +361,7 @@ Options:
   --app-id <id>               Existing app_id
   --app-secret <secret>       Existing app_secret
   --timeout <seconds>         QR onboarding timeout (default: 600)
+  --qr-image <path>           Save QR code as PNG image file (e.g. --qr-image qr.png)
   --set-allow-from-empty      Fill allow_from with owner open_id if empty (default: true)
   --debug                     Print onboarding debug logs
 
@@ -566,6 +571,13 @@ func runRegistrationFlow(opts registrationFlowOptions) (*registrationFlowResult,
 	fmt.Println("请使用飞书/Lark 手机 App 扫码完成机器人创建与授权：")
 	fmt.Printf("URL: %s\n\n", beginRes.VerificationURIComplete)
 	tryPrintTerminalQRCode(beginRes.VerificationURIComplete)
+	if opts.QRImagePath != "" {
+		if err := saveQRCodeImage(beginRes.VerificationURIComplete, opts.QRImagePath); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to save QR image: %v\n", err)
+		} else {
+			fmt.Printf("QR code saved to: %s\n\n", opts.QRImagePath)
+		}
+	}
 
 	interval := beginRes.Interval
 	if interval <= 0 {
@@ -674,7 +686,6 @@ func tryPrintTerminalQRCode(content string) {
 	if content == "" {
 		return
 	}
-	// Render a larger high-contrast QR for better scan success in terminals.
 	qrterminal.GenerateWithConfig(content, qrterminal.Config{
 		Level:      qrterminal.M,
 		Writer:     os.Stdout,
@@ -686,4 +697,13 @@ func tryPrintTerminalQRCode(content string) {
 	if _, err := fmt.Fprintln(os.Stdout); err != nil {
 		return
 	}
+}
+
+func saveQRCodeImage(content, path string) error {
+	code, err := qr.Encode(content, qr.M)
+	if err != nil {
+		return fmt.Errorf("encode QR: %w", err)
+	}
+	code.Scale = 8
+	return os.WriteFile(path, code.PNG(), 0644)
 }

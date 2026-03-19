@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestResolveFeishuSetupInputs_AutoModeWithoutCredentialsUsesNew(t *testing.T) {
 	mode, appID, appSecret, err := resolveFeishuSetupInputs(feishuSetupModeAuto, "", "", "")
@@ -49,5 +53,33 @@ func TestParseAppPair_SecretCanContainColon(t *testing.T) {
 	}
 	if appID != "cli_xxx" || appSecret != "sec:yyy" {
 		t.Fatalf("result = (%q, %q), want (%q, %q)", appID, appSecret, "cli_xxx", "sec:yyy")
+	}
+}
+
+func TestSaveQRCodeImage_CreatesPNG(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test-qr.png")
+
+	if err := saveQRCodeImage("https://example.com/test", path); err != nil {
+		t.Fatalf("saveQRCodeImage failed: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("failed to read output file: %v", err)
+	}
+	if len(data) < 100 {
+		t.Fatalf("PNG file too small: %d bytes", len(data))
+	}
+	// PNG magic bytes
+	if data[0] != 0x89 || data[1] != 'P' || data[2] != 'N' || data[3] != 'G' {
+		t.Fatal("output file is not a valid PNG")
+	}
+}
+
+func TestSaveQRCodeImage_InvalidPath(t *testing.T) {
+	err := saveQRCodeImage("https://example.com", "/nonexistent/dir/qr.png")
+	if err == nil {
+		t.Fatal("expected error for invalid path, got nil")
 	}
 }
