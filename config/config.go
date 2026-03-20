@@ -72,8 +72,9 @@ type ManagementConfig struct {
 
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
 type DisplayConfig struct {
-	ThinkingMaxLen *int `toml:"thinking_max_len"` // max chars for thinking messages; 0 = no truncation; default 300
-	ToolMaxLen     *int `toml:"tool_max_len"`     // max chars for tool use messages; 0 = no truncation; default 500
+	ThinkingMaxLen *int     `toml:"thinking_max_len"` // max chars for thinking messages; 0 = no truncation; default 300
+	ToolMaxLen     *int     `toml:"tool_max_len"`     // max chars for tool use messages; 0 = no truncation; default 500
+	HiddenTools    []string `toml:"hidden_tools"`     // tool names to hide from progress display; permission prompts are unaffected
 }
 
 // StreamPreviewConfig controls real-time streaming preview in IM.

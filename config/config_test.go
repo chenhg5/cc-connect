@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -815,3 +816,22 @@ app_id = "old_app" # keep inline comment
 app_secret = "old_secret"
 custom_option = "still_here"
 `
+
+
+func TestLoad_DisplayHiddenTools(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	cfgText := baseConfigTOML + "\n[display]\nhidden_tools = [\"Read\", \"Grep\", \"TodoWrite\"]\n"
+	if err := os.WriteFile(configPath, []byte(cfgText), 0o644); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	got := cfg.Display.HiddenTools
+	want := []string{"Read", "Grep", "TodoWrite"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("HiddenTools = %#v, want %#v", got, want)
+	}
+}

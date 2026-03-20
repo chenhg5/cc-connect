@@ -114,8 +114,9 @@ var RestartCh = make(chan RestartRequest, 1)
 // DisplayCfg controls truncation of intermediate messages.
 // A value of -1 means "use default", 0 means "no truncation".
 type DisplayCfg struct {
-	ThinkingMaxLen int // max runes for thinking preview; 0 = no truncation
-	ToolMaxLen     int // max runes for tool use preview; 0 = no truncation
+	ThinkingMaxLen int               // max runes for thinking preview; 0 = no truncation
+	ToolMaxLen     int               // max runes for tool use preview; 0 = no truncation
+	HiddenTools    map[string]struct{} // tool names to hide from progress display only
 }
 
 // RateLimitCfg controls per-session message rate limiting.
@@ -349,6 +350,9 @@ func (e *Engine) SetTTSSaveFunc(fn func(mode string) error) {
 
 // SetDisplayConfig overrides the default truncation settings.
 func (e *Engine) SetDisplayConfig(cfg DisplayCfg) {
+	if cfg.HiddenTools == nil {
+		cfg.HiddenTools = map[string]struct{}{}
+	}
 	e.display = cfg
 }
 
@@ -1896,7 +1900,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventToolUse:
 			if !quiet {
-				if shouldHideToolUse(event.ToolName) {
+				if shouldHideToolUse(e.display.HiddenTools, event.ToolName) {
 					continue
 				}
 
@@ -7862,13 +7866,12 @@ func toolCodeLang(toolName, input string) string {
 	return ""
 }
 
-func shouldHideToolUse(toolName string) bool {
-	switch toolName {
-	case "Read", "Grep":
-		return true
-	default:
+func shouldHideToolUse(hiddenTools map[string]struct{}, toolName string) bool {
+	if len(hiddenTools) == 0 {
 		return false
 	}
+	_, ok := hiddenTools[strings.ToLower(strings.TrimSpace(toolName))]
+	return ok
 }
 
 type todoWriteInput struct {
@@ -7911,7 +7914,6 @@ func formatTodoToolInput(toolInput string, i18n *I18n) string {
 		case "pending":
 			icon = "⬜"
 		}
-		text = localizeTodoText(text, i18n)
 		if text == "" {
 			continue
 		}
@@ -7923,52 +7925,6 @@ func formatTodoToolInput(toolInput string, i18n *I18n) string {
 	return strings.Join(lines, "\n")
 }
 
-func localizeTodoText(text string, i18n *I18n) string {
-	text = strings.TrimSpace(text)
-	if text == "" || i18n == nil {
-		return text
-	}
-	type todoPhrase struct {
-		en   string
-		zh   string
-		zhtw string
-		ja   string
-		es   string
-	}
-	phrases := []todoPhrase{
-		{en: "Change TodoWrite rendering to send the latest formatted status as a normal message", zh: "把 TodoWrite 渲染改成发送最新格式化状态的普通消息", zhtw: "把 TodoWrite 渲染改成傳送最新格式化狀態的一般訊息", ja: "TodoWrite の表示を、最新の整形済み状態を通常メッセージとして送る方式に変更", es: "Cambiar el renderizado de TodoWrite para enviar el estado formateado más reciente como un mensaje normal"},
-		{en: "Update tests to match non-editing Todo behavior", zh: "更新测试以匹配非编辑式 Todo 行为", zhtw: "更新測試以符合非編輯式 Todo 行為", ja: "非編集型 Todo の挙動に合わせてテストを更新", es: "Actualizar las pruebas para que coincidan con el comportamiento de Todo sin edición"},
-		{en: "Updating tests to match non-editing Todo behavior", zh: "正在更新测试以匹配非编辑式 Todo 行为", zhtw: "正在更新測試以符合非編輯式 Todo 行為", ja: "非編集型 Todo の挙動に合わせてテストを更新中", es: "Actualizando las pruebas para que coincidan con el comportamiento de Todo sin edición"},
-		{en: "Rebuild and restart cc-connect safely", zh: "安全地重新构建并重启 cc-connect", zhtw: "安全地重新建置並重啟 cc-connect", ja: "cc-connect を安全に再ビルドして再起動", es: "Reconstruir y reiniciar cc-connect de forma segura"},
-		{en: "Verify the fix and report the result", zh: "验证修复并汇报结果", zhtw: "驗證修復並回報結果", ja: "修正を検証して結果を報告", es: "Verificar la corrección e informar el resultado"},
-		{en: "Verifying the fix and report the result", zh: "正在验证修复并汇报结果", zhtw: "正在驗證修復並回報結果", ja: "修正を検証して結果を報告中", es: "Verificando la corrección e informando el resultado"},
-		{en: "Updating TodoWrite rendering to add a localized title and localize item text", zh: "更新 TodoWrite 渲染，加入本地化标题并本地化条目文本", zhtw: "更新 TodoWrite 渲染，加入在地化標題並在地化條目文字", ja: "TodoWrite の表示を更新し、ローカライズ済みタイトルと項目テキストを追加", es: "Actualizar el renderizado de TodoWrite para añadir un título localizado y localizar el texto de los elementos"},
-		{en: "Run targeted tests for the Todo rendering changes", zh: "运行针对 Todo 渲染改动的定向测试", zhtw: "執行 Todo 渲染變更的針對性測試", ja: "Todo 表示変更に対する対象テストを実行", es: "Ejecutar pruebas específicas para los cambios de renderizado de Todo"},
-		{en: "Running targeted tests for the Todo rendering changes", zh: "正在运行针对 Todo 渲染改动的定向测试", zhtw: "正在執行 Todo 渲染變更的針對性測試", ja: "Todo 表示変更に対する対象テストを実行中", es: "Ejecutando pruebas específicas para los cambios de renderizado de Todo"},
-		{en: "Fork the repository, create a branch, and commit the changes", zh: "fork 仓库、创建分支并提交改动", zhtw: "fork 倉庫、建立分支並提交變更", ja: "リポジトリを fork し、ブランチを作成して変更をコミット", es: "Hacer fork del repositorio, crear una rama y confirmar los cambios"},
-		{en: "Forking the repository, creating a branch, and committing the changes", zh: "正在 fork 仓库、创建分支并提交改动", zhtw: "正在 fork 倉庫、建立分支並提交變更", ja: "リポジトリを fork し、ブランチを作成して変更をコミット中", es: "Haciendo fork del repositorio, creando una rama y confirmando los cambios"},
-		{en: "Report the branch and fork details", zh: "汇报分支和 fork 详情", zhtw: "回報分支與 fork 詳情", ja: "ブランチと fork の詳細を報告", es: "Informar los detalles de la rama y del fork"},
-		{en: "Reporting the branch and fork details", zh: "正在汇报分支和 fork 详情", zhtw: "正在回報分支與 fork 詳情", ja: "ブランチと fork の詳細を報告中", es: "Informando los detalles de la rama y del fork"},
-	}
-	for _, p := range phrases {
-		if text != p.en {
-			continue
-		}
-		switch i18n.currentLang() {
-		case LangChinese:
-			return p.zh
-		case LangTraditionalChinese:
-			return p.zhtw
-		case LangJapanese:
-			return p.ja
-		case LangSpanish:
-			return p.es
-		default:
-			return p.en
-		}
-	}
-	return text
-}
 
 // truncateIf truncates s to maxLen runes. 0 means no truncation.
 func truncateIf(s string, maxLen int) string {
