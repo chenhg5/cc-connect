@@ -6253,3 +6253,65 @@ func TestExtractSessionKeyParts(t *testing.T) {
 		})
 	}
 }
+
+func TestProcessInteractiveEvents_HidesReadGrepAndFormatsTodoWrite(t *testing.T) {
+	p := &stubPlatformEngine{n: "telegram"}
+	sess := newControllableSession("todo-test")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangChinese)
+
+	key := "test:todo-user"
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	session := e.sessions.GetOrCreateActive(key)
+	session.TryLock()
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, key, "", time.Now(), nil)
+		close(done)
+	}()
+
+	sess.events <- Event{Type: EventToolUse, ToolName: "Read", ToolInput: "/tmp/x.txt"}
+	sess.events <- Event{Type: EventToolUse, ToolName: "Grep", ToolInput: "avatar|logo"}
+	sess.events <- Event{Type: EventToolUse, ToolName: "TodoWrite", ToolInput: `{"todos":[{"content":"Change TodoWrite rendering to send the latest formatted status as a normal message","status":"completed","activeForm":"Changing TodoWrite rendering to send the latest formatted status as a normal message"},{"content":"Update tests to match non-editing Todo behavior","status":"in_progress","activeForm":"Updating tests to match non-editing Todo behavior"},{"content":"Rebuild and restart cc-connect safely","status":"pending","activeForm":"Rebuilding and restarting cc-connect safely"}]}`}
+	sess.events <- Event{Type: EventToolUse, ToolName: "TodoWrite", ToolInput: `{"todos":[{"content":"Change TodoWrite rendering to send the latest formatted status as a normal message","status":"completed","activeForm":"Changing TodoWrite rendering to send the latest formatted status as a normal message"},{"content":"Update tests to match non-editing Todo behavior","status":"completed","activeForm":"Updating tests to match non-editing Todo behavior"},{"content":"Verify the fix and report the result","status":"in_progress","activeForm":"Verifying the fix and report the result"}]}`}
+	sess.events <- Event{Type: EventResult, Content: "完成", Done: true}
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("processInteractiveEvents did not complete in time")
+	}
+
+	sent := p.getSent()
+	joined := strings.Join(sent, "\n")
+	if strings.Contains(joined, "Tool #") || strings.Contains(joined, "Read") || strings.Contains(joined, "Grep") {
+		t.Fatalf("expected Read/Grep tool messages to be hidden, got %v", sent)
+	}
+	if !strings.Contains(joined, "📝 当前任务") {
+		t.Fatalf("expected localized todo title, got %v", sent)
+	}
+	if !strings.Contains(joined, "✅ 把 TodoWrite 渲染改成发送最新格式化状态的普通消息") {
+		t.Fatalf("expected localized completed todo item, got %v", sent)
+	}
+	if !strings.Contains(joined, "⏳ 正在更新测试以匹配非编辑式 Todo 行为") {
+		t.Fatalf("expected localized in-progress todo item, got %v", sent)
+	}
+	if !strings.Contains(joined, "⬜ 安全地重新构建并重启 cc-connect") {
+		t.Fatalf("expected localized pending todo item, got %v", sent)
+	}
+	if !strings.Contains(joined, "✅ 更新测试以匹配非编辑式 Todo 行为") {
+		t.Fatalf("expected localized latest completed todo item, got %v", sent)
+	}
+	if !strings.Contains(joined, "⏳ 正在验证修复并汇报结果") {
+		t.Fatalf("expected latest localized todo status message to be sent, got sent=%v", sent)
+	}
+}
