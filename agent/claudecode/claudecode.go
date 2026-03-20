@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -694,25 +695,106 @@ func summarizeInput(tool string, input any) string {
 	}
 
 	switch tool {
-	case "Read", "Edit", "Write":
-		if fp, ok := m["file_path"].(string); ok {
+	case "Read":
+		fp, _ := m["file_path"].(string)
+		if fp == "" {
+			fp, _ = m["path"].(string)
+		}
+		return fp
+
+	case "Write":
+		fp, _ := m["file_path"].(string)
+		if fp == "" {
+			fp, _ = m["path"].(string)
+		}
+		if fp != "" {
+			if content, ok := m["content"].(string); ok && content != "" {
+				// Return full content - let engine's chunking handle long messages
+				return "`" + fp + "`\n```\n" + content + "\n```"
+			}
 			return fp
 		}
+
+	case "Edit":
+		fp, _ := m["file_path"].(string)
+		if fp == "" {
+			fp, _ = m["path"].(string)
+		}
+		if fp != "" {
+			old, _ := m["old_str"].(string)
+			new_, _ := m["new_str"].(string)
+			if old == "" {
+				old, _ = m["old_string"].(string)
+			}
+			if new_ == "" {
+				new_, _ = m["new_string"].(string)
+			}
+			if old != "" || new_ != "" {
+				// Compute diff for display - let engine's chunking handle long messages
+				if diff := computeLineDiff(old, new_); diff != "" {
+					return "`" + fp + "`\n```diff\n" + diff + "\n```"
+				}
+			}
+			return fp
+		}
+
 	case "Bash":
-		if cmd, ok := m["command"].(string); ok {
+		cmd, _ := m["command"].(string)
+		if cmd != "" {
 			return cmd
 		}
+
 	case "Grep":
-		if p, ok := m["pattern"].(string); ok {
+		p, _ := m["pattern"].(string)
+		if p != "" {
 			return p
 		}
+
 	case "Glob":
-		if p, ok := m["pattern"].(string); ok {
-			return p
+		p, _ := m["pattern"].(string)
+		if p == "" {
+			p, _ = m["glob_pattern"].(string)
 		}
-		if p, ok := m["glob_pattern"].(string); ok {
-			return p
+		return p
+
+	case "WebSearch":
+		if q, ok := m["query"].(string); ok {
+			return q
 		}
+
+	case "AskUserQuestion":
+		if qs, ok := m["questions"].([]any); ok && len(qs) > 0 {
+			if q0, ok := qs[0].(map[string]any); ok {
+				if question, ok := q0["question"].(string); ok {
+					return question
+				}
+			}
+		}
+
+	case "WebFetch":
+		if u, ok := m["url"].(string); ok {
+			return u
+		}
+	}
+
+	// Fallback: format as key: value pairs for readability
+	var parts []string
+	for k, v := range m {
+		switch val := v.(type) {
+		case string:
+			// Skip long content fields
+			if (k == "content" || k == "old_str" || k == "old_string" || k == "new_str" || k == "new_string") && len(val) > 100 {
+				parts = append(parts, k+": <"+strconv.Itoa(len(val))+" bytes>")
+			} else {
+				parts = append(parts, k+": "+val)
+			}
+		default:
+			j, _ := json.Marshal(val)
+			parts = append(parts, k+": "+string(j))
+		}
+	}
+	if len(parts) > 0 {
+		return strings.Join(parts, ", ")
 	}
 
 	b, err := json.Marshal(m)
@@ -720,6 +802,93 @@ func summarizeInput(tool string, input any) string {
 		return ""
 	}
 	return string(b)
+}
+
+// computeLineDiff computes a minimal unified-style diff between old and new text.
+// It finds common prefix/suffix lines and shows only changed lines with
+// up to 1 line of surrounding context. Unchanged context lines are prefixed
+// with "  ", removed lines with "- ", and added lines with "+ ".
+func computeLineDiff(old, new_ string) string {
+	oldLines := strings.Split(old, "\n")
+	newLines := strings.Split(new_, "\n")
+
+	// Find common prefix lines
+	prefixLen := 0
+	minLen := len(oldLines)
+	if len(newLines) < minLen {
+		minLen = len(newLines)
+	}
+	for prefixLen < minLen && oldLines[prefixLen] == newLines[prefixLen] {
+		prefixLen++
+	}
+
+	// Find common suffix lines (not overlapping with prefix)
+	suffixLen := 0
+	for suffixLen < len(oldLines)-prefixLen && suffixLen < len(newLines)-prefixLen {
+		oi := len(oldLines) - 1 - suffixLen
+		ni := len(newLines) - 1 - suffixLen
+		if oldLines[oi] != newLines[ni] {
+			break
+		}
+		suffixLen++
+	}
+
+	// No actual changes
+	if prefixLen+suffixLen >= len(oldLines) && prefixLen+suffixLen >= len(newLines) {
+		return ""
+	}
+
+	// If everything differs (no common lines), show full old/new
+	if prefixLen == 0 && suffixLen == 0 {
+		var sb strings.Builder
+		for _, l := range oldLines {
+			sb.WriteString("- " + l + "\n")
+		}
+		for _, l := range newLines {
+			sb.WriteString("+ " + l + "\n")
+		}
+		return strings.TrimRight(sb.String(), "\n")
+	}
+
+	var sb strings.Builder
+	const contextN = 1
+
+	// Context: tail of common prefix
+	ctxStart := prefixLen - contextN
+	if ctxStart < 0 {
+		ctxStart = 0
+	}
+	if ctxStart > 0 {
+		sb.WriteString("  ...\n")
+	}
+	for i := ctxStart; i < prefixLen; i++ {
+		sb.WriteString("  " + oldLines[i] + "\n")
+	}
+
+	// Removed lines
+	for i := prefixLen; i < len(oldLines)-suffixLen; i++ {
+		sb.WriteString("- " + oldLines[i] + "\n")
+	}
+
+	// Added lines
+	for i := prefixLen; i < len(newLines)-suffixLen; i++ {
+		sb.WriteString("+ " + newLines[i] + "\n")
+	}
+
+	// Context: head of common suffix
+	suffStart := len(oldLines) - suffixLen
+	suffEnd := suffStart + contextN
+	if suffEnd > len(oldLines) {
+		suffEnd = len(oldLines)
+	}
+	for i := suffStart; i < suffEnd; i++ {
+		sb.WriteString("  " + oldLines[i] + "\n")
+	}
+	if suffEnd < len(oldLines) {
+		sb.WriteString("  ...")
+	}
+
+	return strings.TrimRight(sb.String(), "\n")
 }
 
 // parseUserQuestions extracts structured questions from AskUserQuestion input.

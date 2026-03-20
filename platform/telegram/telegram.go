@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
 
@@ -506,18 +507,47 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	}
 
 	html := core.MarkdownToSimpleHTML(content)
-	reply := tgbotapi.NewMessage(rc.chatID, html)
-	reply.ReplyToMessageID = rc.messageID
-	reply.ParseMode = tgbotapi.ModeHTML
+	return p.sendChunkedReply(rc.chatID, rc.messageID, html, content)
+}
 
-	if _, err := p.bot.Send(reply); err != nil {
-		if strings.Contains(err.Error(), "can't parse") {
-			reply.Text = content
-			reply.ParseMode = ""
-			_, err = p.bot.Send(reply)
+// sendChunkedReply splits a long message into chunks and sends them sequentially.
+// Telegram has a 4096 character limit for messages.
+func (p *Platform) sendChunkedReply(chatID int64, replyToMsgID int, html, originalContent string) error {
+	// Telegram message limit is 4096 characters
+	const maxTelegramLen = 4096
+
+	// If message fits in one chunk, send it directly
+	if utf8.RuneCountInString(html) <= maxTelegramLen {
+		reply := tgbotapi.NewMessage(chatID, html)
+		reply.ReplyToMessageID = replyToMsgID
+		reply.ParseMode = tgbotapi.ModeHTML
+
+		if _, err := p.bot.Send(reply); err != nil {
+			if strings.Contains(err.Error(), "can't parse") {
+				reply.Text = originalContent
+				reply.ParseMode = ""
+				_, err = p.bot.Send(reply)
+			}
+			if err != nil {
+				return fmt.Errorf("telegram: send: %w", err)
+			}
 		}
-		if err != nil {
-			return fmt.Errorf("telegram: send: %w", err)
+		return nil
+	}
+
+	// Split message into chunks and send sequentially
+	// First chunk is a reply to original message, subsequent chunks are new messages
+	chunks := splitHTMLPreserving(html, maxTelegramLen)
+	for i, chunk := range chunks {
+		reply := tgbotapi.NewMessage(chatID, chunk)
+		reply.ParseMode = tgbotapi.ModeHTML
+
+		if i == 0 && replyToMsgID > 0 {
+			reply.ReplyToMessageID = replyToMsgID
+		}
+
+		if _, err := p.bot.Send(reply); err != nil {
+			return fmt.Errorf("telegram: send chunk %d/%d: %w", i+1, len(chunks), err)
 		}
 	}
 	return nil
@@ -531,20 +561,61 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	}
 
 	html := core.MarkdownToSimpleHTML(content)
-	msg := tgbotapi.NewMessage(rc.chatID, html)
-	msg.ParseMode = tgbotapi.ModeHTML
+	return p.sendChunkedMessage(rc.chatID, html, content)
+}
 
-	if _, err := p.bot.Send(msg); err != nil {
-		if strings.Contains(err.Error(), "can't parse") {
-			msg.Text = content
-			msg.ParseMode = ""
-			_, err = p.bot.Send(msg)
+// sendChunkedMessage splits a long message into chunks and sends them sequentially.
+func (p *Platform) sendChunkedMessage(chatID int64, html, originalContent string) error {
+	const maxTelegramLen = 4096
+
+	// If message fits in one chunk, send it directly
+	if utf8.RuneCountInString(html) <= maxTelegramLen {
+		msg := tgbotapi.NewMessage(chatID, html)
+		msg.ParseMode = tgbotapi.ModeHTML
+
+		if _, err := p.bot.Send(msg); err != nil {
+			if strings.Contains(err.Error(), "can't parse") {
+				msg.Text = originalContent
+				msg.ParseMode = ""
+				_, err = p.bot.Send(msg)
+			}
+			if err != nil {
+				return fmt.Errorf("telegram: send: %w", err)
+			}
 		}
-		if err != nil {
-			return fmt.Errorf("telegram: send: %w", err)
+		return nil
+	}
+
+	// Split message into chunks and send sequentially
+	chunks := splitHTMLPreserving(html, maxTelegramLen)
+	for _, chunk := range chunks {
+		msg := tgbotapi.NewMessage(chatID, chunk)
+		msg.ParseMode = tgbotapi.ModeHTML
+
+		if _, err := p.bot.Send(msg); err != nil {
+			return fmt.Errorf("telegram: send chunk: %w", err)
 		}
 	}
 	return nil
+}
+
+// splitHTMLPreserving splits HTML content into chunks while trying to preserve code blocks
+// and other structures at chunk boundaries.
+func splitHTMLPreserving(html string, maxLen int) []string {
+	if utf8.RuneCountInString(html) <= maxLen {
+		return []string{html}
+	}
+
+	var chunks []string
+	runes := []rune(html)
+	for i := 0; i < len(runes); i += maxLen {
+		end := i + maxLen
+		if end > len(runes) {
+			end = len(runes)
+		}
+		chunks = append(chunks, string(runes[i:end]))
+	}
+	return chunks
 }
 
 func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttachment) error {

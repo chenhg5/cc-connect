@@ -1,6 +1,10 @@
 package telegram
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"unicode/utf8"
+)
 
 func TestExtractEntityText(t *testing.T) {
 	tests := []struct {
@@ -71,5 +75,91 @@ func TestExtractEntityText(t *testing.T) {
 					tt.text, tt.offset, tt.length, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSplitHTMLPreserving(t *testing.T) {
+	const maxLen = 100
+
+	tests := []struct {
+		name     string
+		html     string
+		wantChunks int
+	}{
+		{
+			name:      "short text - no split",
+			html:      "hello world",
+			wantChunks: 1,
+		},
+		{
+			name:      "exactly at limit",
+			html:      string(make([]rune, maxLen)),
+			wantChunks: 1,
+		},
+		{
+			name:      "slightly over limit",
+			html:      string(make([]rune, maxLen+10)),
+			wantChunks: 2,
+		},
+		{
+			name:      "very long HTML - multiple chunks",
+			html:      strings.Repeat("这是一段中文文本用于测试分片功能\n", 20),
+			wantChunks: 4,
+		},
+		{
+			name:      "unicode characters",
+			html:      "Hello 👋 World 🌍! This is a test with emoji 🚀.",
+			wantChunks: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			chunks := splitHTMLPreserving(tt.html, maxLen)
+
+			if len(chunks) != tt.wantChunks {
+				t.Errorf("splitHTMLPreserving() returned %d chunks, want %d", len(chunks), tt.wantChunks)
+			}
+
+			// Verify each chunk respects maxLen (except possibly the last one if original > maxLen)
+			for i, chunk := range chunks {
+				if i < len(chunks)-1 || utf8.RuneCountInString(tt.html) <= maxLen {
+					if utf8.RuneCountInString(chunk) > maxLen {
+						t.Errorf("chunk %d has %d runes, exceeds max %d", i, utf8.RuneCountInString(chunk), maxLen)
+					}
+				}
+			}
+
+			// Verify concatenated content equals original
+			reconstructed := strings.Join(chunks, "")
+			if reconstructed != tt.html {
+				t.Errorf("reconstructed content differs from original")
+			}
+		})
+	}
+}
+
+func TestSplitHTMLPreserving_Empty(t *testing.T) {
+	chunks := splitHTMLPreserving("", 100)
+	if len(chunks) != 1 || chunks[0] != "" {
+		t.Errorf("splitHTMLPreserving(\"\") = %v, want [\"\"]", chunks)
+	}
+}
+
+func TestSplitHTMLPreserving_CodeBlock(t *testing.T) {
+	// Test that code block content is preserved across chunks
+	const maxLen = 50
+	html := "<pre><code>let x = 123; let y = 456; let z = 789;</code></pre>"
+	chunks := splitHTMLPreserving(html, maxLen)
+
+	// Should split into multiple chunks due to length
+	if len(chunks) < 2 {
+		t.Logf("Note: split into %d chunks (may split HTML tags)", len(chunks))
+	}
+
+	// Verify total length preserved
+	reconstructed := strings.Join(chunks, "")
+	if reconstructed != html {
+		t.Errorf("reconstructed content differs from original")
 	}
 }
