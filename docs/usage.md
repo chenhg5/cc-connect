@@ -457,6 +457,8 @@ cc-connect cron list
 cc-connect cron del <job-id>
 ```
 
+Optional: `--session-mode new-per-run` starts a fresh agent session on each run (default is `reuse`, same as before). `--timeout-mins N` sets how long the scheduler waits per run (`0` = no limit; omit = 30 minutes).
+
 ### Natural Language (Claude Code)
 
 > "Every day at 6am, summarize GitHub trending"

@@ -890,6 +890,8 @@ GET /api/v1/status?token=mgmt-secret
 | `work_dir`    | string  | 否   | exec 的工作目录                             |
 | `description` | string  | 否   | 人类可读的标签                              |
 | `silent`      | boolean | 否   | 是否隐藏启动通知                            |
+| `session_mode` | string | 否   | `reuse`（默认）或 `new_per_run`：每次运行新建 agent 会话 |
+| `timeout_mins` | int    | 否   | 单次调度最长等待：省略=30 分钟，`0`=不限制 |
 
 **响应：**
 

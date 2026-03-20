@@ -713,6 +713,16 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		ReplyCtx:   replyCtx,
 	}
 
+	if job.UsesNewSessionPerRun() {
+		session := e.sessions.NewSession(sessionKey, "cron-"+job.ID)
+		if !session.TryLock() {
+			return fmt.Errorf("session %q is busy", sessionKey)
+		}
+		iKey := fmt.Sprintf("%s#cron:%s", sessionKey, session.ID)
+		e.processInteractiveMessageWith(effectivePlatform, msg, session, e.agent, e.sessions, iKey, "", sessionKey)
+		return nil
+	}
+
 	session := e.sessions.GetOrCreateActive(sessionKey)
 	if !session.TryLock() {
 		return fmt.Errorf("session %q is busy", sessionKey)
@@ -734,7 +744,14 @@ func (e *Engine) executeCronShell(p Platform, replyCtx any, job *CronJob) error 
 		workDir, _ = os.Getwd()
 	}
 
-	ctx, cancel := context.WithTimeout(e.ctx, cronJobTimeout)
+	timeout := job.ExecutionTimeout()
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(e.ctx, timeout)
+	} else {
+		ctx, cancel = context.WithCancel(e.ctx)
+	}
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", job.Exec)
@@ -1118,7 +1135,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		"session", session.ID,
 	)
 
-	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, resolvedWorkspace)
+	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, resolvedWorkspace, "")
 }
 
 // queueMessageForBusySession queues a message for later delivery when the
@@ -1440,13 +1457,14 @@ func isDenyResponse(s string) bool {
 // ──────────────────────────────────────────────────────────────
 
 func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Session) {
-	e.processInteractiveMessageWith(p, msg, session, e.agent, e.sessions, msg.SessionKey, "")
+	e.processInteractiveMessageWith(p, msg, session, e.agent, e.sessions, msg.SessionKey, "", "")
 }
 
 // processInteractiveMessageWith is the core interactive processing loop.
 // It accepts an explicit agent, interactiveKey (for the interactiveStates map),
 // and workspaceDir so that multi-workspace mode can route to per-workspace agents.
-func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session *Session, agent Agent, sessions *SessionManager, interactiveKey string, workspaceDir string) {
+// ccSessionKey, when non-empty, is used for CC_SESSION_KEY in the agent env; otherwise interactiveKey is used.
+func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session *Session, agent Agent, sessions *SessionManager, interactiveKey string, workspaceDir string, ccSessionKey string) {
 	// session.Unlock() is NOT deferred here — it is called explicitly in
 	// the drain loop below while holding state.mu to close the race window
 	// between "queue is empty" and "session unlocked". A deferred fallback
@@ -1472,7 +1490,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	if agent != e.agent {
 		agentOverride = agent
 	}
-	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride)
+	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey)
 
 	// Set workspaceDir on the state for idle reaper identification
 	if workspaceDir != "" {
@@ -1533,7 +1551,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 			e.cleanupInteractiveState(interactiveKey, state)
 			e.send(p, msg.ReplyCtx, e.i18n.T(MsgSessionRestarting))
 
-			state = e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride)
+			state = e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey)
 			if workspaceDir != "" {
 				state.mu.Lock()
 				state.workspaceDir = workspaceDir
@@ -1633,7 +1651,8 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 // getOrCreateInteractiveStateWith accepts
 // an optional agent override for multi-workspace mode. When agentOverride is non-nil
 // it is used instead of e.agent to start the session.
-func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent) *interactiveState {
+// ccSessionKey, when non-empty, is used for CC_SESSION_KEY env injection; otherwise sessionKey is used.
+func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string) *interactiveState {
 	e.interactiveMu.Lock()
 	defer e.interactiveMu.Unlock()
 
@@ -1674,11 +1693,16 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		agent = agentOverride
 	}
 
+	ccKey := sessionKey
+	if ccSessionKey != "" {
+		ccKey = ccSessionKey
+	}
+
 	// Inject per-session env vars so the agent subprocess can call `cc-connect cron add` etc.
 	if inj, ok := agent.(SessionEnvInjector); ok {
 		envVars := []string{
 			"CC_PROJECT=" + e.name,
-			"CC_SESSION_KEY=" + sessionKey,
+			"CC_SESSION_KEY=" + ccKey,
 		}
 		if exePath, err := os.Executable(); err == nil {
 			binDir := filepath.Dir(exePath)

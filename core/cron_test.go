@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -346,5 +347,101 @@ func TestCronStore_JobsPath(t *testing.T) {
 	expected := filepath.Join(dir, "crons", "jobs.json")
 	if store.path != expected {
 		t.Errorf("store path = %q, want %q", store.path, expected)
+	}
+}
+
+func TestCronJob_ExecutionTimeout(t *testing.T) {
+	j := &CronJob{}
+	if got := j.ExecutionTimeout(); got != defaultCronJobTimeout {
+		t.Errorf("nil TimeoutMins: got %v, want %v", got, defaultCronJobTimeout)
+	}
+	zero := 0
+	j.TimeoutMins = &zero
+	if got := j.ExecutionTimeout(); got != 0 {
+		t.Errorf("TimeoutMins=0: got %v, want 0", got)
+	}
+	five := 5
+	j.TimeoutMins = &five
+	if got := j.ExecutionTimeout(); got != 5*time.Minute {
+		t.Errorf("TimeoutMins=5: got %v", got)
+	}
+}
+
+func TestCronScheduler_AddJob_InvalidSessionMode(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := NewCronScheduler(store)
+	err = cs.AddJob(&CronJob{
+		ID: "x1", Project: "p", SessionKey: "test:1:1",
+		CronExpr: "0 6 * * *", Prompt: "hi", SessionMode: "bogus",
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid session_mode")
+	}
+}
+
+func TestCronJob_UsesNewSessionPerRun(t *testing.T) {
+	for _, mode := range []string{"new_per_run", "new-per-run", "NEW_PER_RUN"} {
+		j := &CronJob{SessionMode: mode}
+		if !j.UsesNewSessionPerRun() {
+			t.Errorf("UsesNewSessionPerRun(%q) = false", mode)
+		}
+	}
+	j := &CronJob{SessionMode: "reuse"}
+	if j.UsesNewSessionPerRun() {
+		t.Error("reuse should not use new session per run")
+	}
+}
+
+func TestCronJob_JSONLegacyUnmarshal(t *testing.T) {
+	raw := `{"id":"1","project":"p","session_key":"t:1:1","cron_expr":"0 6 * * *","prompt":"x","enabled":true}`
+	var j CronJob
+	if err := json.Unmarshal([]byte(raw), &j); err != nil {
+		t.Fatal(err)
+	}
+	if j.SessionMode != "" {
+		t.Errorf("legacy JSON: SessionMode = %q, want empty", j.SessionMode)
+	}
+	if j.TimeoutMins != nil {
+		t.Errorf("legacy JSON: TimeoutMins = %v, want nil", j.TimeoutMins)
+	}
+}
+
+func TestCronScheduler_AddJob_NegativeTimeoutMins(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := NewCronScheduler(store)
+	n := -1
+	err = cs.AddJob(&CronJob{
+		ID: "t1", Project: "p", SessionKey: "test:1:1",
+		CronExpr: "0 6 * * *", Prompt: "hi", TimeoutMins: &n,
+	})
+	if err == nil {
+		t.Fatal("expected error for negative timeout_mins")
+	}
+}
+
+func TestCronScheduler_AddJob_NormalizesSessionMode(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := NewCronScheduler(store)
+	job := &CronJob{
+		ID: "n1", Project: "p", SessionKey: "test:1:1",
+		CronExpr: "0 6 * * *", Prompt: "hi", SessionMode: "new-per-run",
+	}
+	if err := cs.AddJob(job); err != nil {
+		t.Fatal(err)
+	}
+	if job.SessionMode != "new_per_run" {
+		t.Errorf("SessionMode = %q, want new_per_run", job.SessionMode)
 	}
 }

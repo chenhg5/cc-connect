@@ -454,6 +454,8 @@ cc-connect cron list
 cc-connect cron del <job-id>
 ```
 
+可选：`--session-mode new-per-run` 每次触发使用新的 agent 会话（默认 `reuse` 与旧行为一致）。`--timeout-mins N` 设置单次调度最长等待分钟数（`0` 表示不限制；省略为 30 分钟）。
+
 ### 自然语言（Claude Code）
 
 > "每天早上6点帮我总结 GitHub trending"
