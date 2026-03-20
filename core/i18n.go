@@ -122,6 +122,7 @@ const (
 	MsgStarting             MsgKey = "starting"
 	MsgThinking             MsgKey = "thinking"
 	MsgTool                 MsgKey = "tool"
+	MsgTodoTitle            MsgKey = "todo_title"
 	MsgExecutionStopped     MsgKey = "execution_stopped"
 	MsgNoExecution          MsgKey = "no_execution"
 	MsgPreviousProcessing   MsgKey = "previous_processing"
@@ -517,6 +518,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "🔧 **工具 #%d: %s**\n---\n%s",
 		LangJapanese:           "🔧 **ツール #%d: %s**\n---\n%s",
 		LangSpanish:            "🔧 **Herramienta #%d: %s**\n---\n%s",
+	},
+	MsgTodoTitle: {
+		LangEnglish:            "📝 Current tasks",
+		LangChinese:            "📝 当前任务",
+		LangTraditionalChinese: "📝 當前任務",
+		LangJapanese:           "📝 現在のタスク",
+		LangSpanish:            "📝 Tareas actuales",
 	},
 	MsgExecutionStopped: {
 		LangEnglish:            "⏹ Execution stopped.",
