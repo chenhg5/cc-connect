@@ -13,12 +13,14 @@ const binDir = path.join(__dirname, "bin");
 const ext = process.platform === "win32" ? ".exe" : "";
 const binaryPath = path.join(binDir, NAME + ext);
 
-// parseVersion splits "1.2.3-beta.1" into { nums: [1,2,3], pre: "beta.1" }
+// parseVersion splits "1.2.3-beta.1" into { nums: [1,2,3], preTag: "beta", preNum: 1 }
 function parseVersion(v) {
   v = v.replace(/^v/, "").trim();
   const [base, ...rest] = v.split("-");
   const nums = base.split(".").map(Number);
-  return { nums, pre: rest.join("-") };
+  const pre = rest.join("-");
+  const m = pre.match(/^([a-zA-Z]+)\.?(\d+)?$/);
+  return { nums, preTag: m ? m[1] : pre, preNum: m && m[2] ? parseInt(m[2], 10) : 0, hasPre: pre !== "" };
 }
 
 // isNewerOrEqual returns true if installed >= expected
@@ -33,10 +35,12 @@ function isNewerOrEqual(installed, expected) {
     if (av < bv) return false;
   }
   // Same base: no pre-release >= any pre-release (1.2.3 >= 1.2.3-beta.1)
-  if (!a.pre && b.pre) return true;
-  if (a.pre && !b.pre) return false;
-  // Both have pre-release or both don't
-  return a.pre >= b.pre;
+  if (!a.hasPre && b.hasPre) return true;
+  if (a.hasPre && !b.hasPre) return false;
+  if (!a.hasPre && !b.hasPre) return true;
+  // Both pre-release: compare tag then number (rc > beta, beta.10 > beta.9)
+  if (a.preTag !== b.preTag) return a.preTag > b.preTag;
+  return a.preNum >= b.preNum;
 }
 
 function needsReinstall() {
