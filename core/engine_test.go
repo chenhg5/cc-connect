@@ -6259,6 +6259,7 @@ func TestProcessInteractiveEvents_HidesReadGrepAndFormatsTodoWrite(t *testing.T)
 	sess := newControllableSession("todo-test")
 	agent := &controllableAgent{nextSession: sess}
 	e := NewEngine("test", agent, []Platform{p}, "", LangChinese)
+	e.SetDisplayConfig(DisplayCfg{ThinkingMaxLen: 300, ToolMaxLen: 500, HiddenTools: map[string]struct{}{"read": {}, "grep": {}}})
 
 	key := "test:todo-user"
 	state := &interactiveState{
@@ -6299,19 +6300,19 @@ func TestProcessInteractiveEvents_HidesReadGrepAndFormatsTodoWrite(t *testing.T)
 	if !strings.Contains(joined, "📝 当前任务") {
 		t.Fatalf("expected localized todo title, got %v", sent)
 	}
-	if !strings.Contains(joined, "✅ 把 TodoWrite 渲染改成发送最新格式化状态的普通消息") {
-		t.Fatalf("expected localized completed todo item, got %v", sent)
+	if !strings.Contains(joined, "✅ Change TodoWrite rendering to send the latest formatted status as a normal message") {
+		t.Fatalf("expected completed todo item text to remain untranslated, got %v", sent)
 	}
-	if !strings.Contains(joined, "⏳ 正在更新测试以匹配非编辑式 Todo 行为") {
-		t.Fatalf("expected localized in-progress todo item, got %v", sent)
+	if !strings.Contains(joined, "⏳ Updating tests to match non-editing Todo behavior") {
+		t.Fatalf("expected in-progress todo item text to remain untranslated, got %v", sent)
 	}
-	if !strings.Contains(joined, "⬜ 安全地重新构建并重启 cc-connect") {
-		t.Fatalf("expected localized pending todo item, got %v", sent)
+	if !strings.Contains(joined, "⬜ Rebuild and restart cc-connect safely") {
+		t.Fatalf("expected pending todo item text to remain untranslated, got %v", sent)
 	}
-	if !strings.Contains(joined, "✅ 更新测试以匹配非编辑式 Todo 行为") {
-		t.Fatalf("expected localized latest completed todo item, got %v", sent)
+	if !strings.Contains(joined, "✅ Update tests to match non-editing Todo behavior") {
+		t.Fatalf("expected latest completed todo item text to remain untranslated, got %v", sent)
 	}
-	if !strings.Contains(joined, "⏳ 正在验证修复并汇报结果") {
-		t.Fatalf("expected latest localized todo status message to be sent, got sent=%v", sent)
+	if !strings.Contains(joined, "⏳ Verifying the fix and report the result") {
+		t.Fatalf("expected latest todo status message to be sent without translating body text, got sent=%v", sent)
 	}
 }
