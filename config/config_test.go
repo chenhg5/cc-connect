@@ -568,6 +568,21 @@ func TestLoad_DefaultsAttachmentSendToOn(t *testing.T) {
 	}
 }
 
+func TestLoad_DefaultsAutoCompressDisabled(t *testing.T) {
+	configPath := writeConfigFixture(t, projectWithoutFeishuFixture)
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if len(cfg.Projects) == 0 {
+		t.Fatalf("expected at least one project")
+	}
+	if cfg.Projects[0].AutoCompress.Enabled != nil {
+		t.Fatalf("expected auto_compress.enabled to default to nil")
+	}
+}
+
 func TestLoad_ParsesAttachmentSendOff(t *testing.T) {
 	configPath := writeConfigFixture(t, attachmentSendConfigFixture)
 

@@ -177,6 +177,11 @@ type Engine struct {
 	relayManager     *RelayManager
 	eventIdleTimeout time.Duration
 
+	// Auto-compress settings
+	autoCompressEnabled   bool
+	autoCompressMaxTokens int
+	autoCompressMinGap    time.Duration
+
 	// Multi-workspace mode
 	multiWorkspace    bool
 	baseDir           string
@@ -218,18 +223,20 @@ type queuedMessage struct {
 
 // interactiveState tracks a running interactive agent session and its permission state.
 type interactiveState struct {
-	agentSession    AgentSession
-	platform        Platform
-	replyCtx        any
-	workspaceDir    string
-	mu              sync.Mutex
-	pending         *pendingPermission
-	pendingMessages []queuedMessage // messages queued while session was busy
-	approveAll      bool            // when true, auto-approve all permission requests for this session
-	quiet           bool            // when true, suppress thinking and tool progress for this session
-	fromVoice       bool            // true if current turn originated from voice transcription
-	sideText        string
-	deleteMode      *deleteModeState
+	agentSession          AgentSession
+	platform              Platform
+	replyCtx              any
+	workspaceDir          string
+	mu                    sync.Mutex
+	pending               *pendingPermission
+	pendingMessages       []queuedMessage // messages queued while session was busy
+	approveAll            bool            // when true, auto-approve all permission requests for this session
+	quiet                 bool            // when true, suppress thinking and tool progress for this session
+	fromVoice             bool            // true if current turn originated from voice transcription
+	sideText              string
+	deleteMode            *deleteModeState
+	lastAutoCompressAt    time.Time
+	lastAutoCompressTokens int
 }
 
 type deleteModeState struct {
@@ -355,6 +362,29 @@ func (e *Engine) SetDisplayConfig(cfg DisplayCfg) {
 // SetDefaultQuiet sets whether new sessions start in quiet mode.
 func (e *Engine) SetDefaultQuiet(q bool) {
 	e.defaultQuiet = q
+}
+
+// estimateTokens provides a rough token estimate for a set of history entries.
+func estimateTokens(entries []HistoryEntry) int {
+	// Heuristic: ~1 token per 4 characters in mixed English/Chinese.
+	count := 0
+	for _, h := range entries {
+		count += len([]rune(h.Content))
+	}
+	if count == 0 {
+		return 0
+	}
+	return (count + 3) / 4
+}
+
+// SetAutoCompressConfig configures automatic context compression.
+func (e *Engine) SetAutoCompressConfig(enabled bool, maxTokens int, minGap time.Duration) {
+	e.autoCompressEnabled = enabled
+	e.autoCompressMaxTokens = maxTokens
+	if minGap <= 0 {
+		minGap = 30 * time.Minute
+	}
+	e.autoCompressMinGap = minGap
 }
 
 // SetInjectSender controls whether sender identity (platform and user ID) is
@@ -1792,6 +1822,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	toolCount := 0
 	waitStart := time.Now()
 	firstEventLogged := false
+	triggerAutoCompress := false
 
 	// stopTyping tracks the current turn's typing indicator so it can be
 	// stopped when a queued message starts a new turn.
@@ -2046,6 +2077,21 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				fullResponse = e.i18n.T(MsgEmptyResponse)
 			}
 
+			// Evaluate auto-compress trigger (token estimate on user+assistant text)
+			if e.autoCompressEnabled && e.autoCompressMaxTokens > 0 {
+				estimate := estimateTokens(session.GetHistory(0))
+				now := time.Now()
+				state.mu.Lock()
+				last := state.lastAutoCompressAt
+				state.mu.Unlock()
+				if estimate >= e.autoCompressMaxTokens && (last.IsZero() || now.Sub(last) >= e.autoCompressMinGap) {
+					triggerAutoCompress = true
+					state.mu.Lock()
+					state.lastAutoCompressTokens = estimate
+					state.mu.Unlock()
+				}
+			}
+
 			session.AddHistory("assistant", fullResponse)
 			sessions.Save()
 
@@ -2111,6 +2157,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			} else {
 				slog.Debug("tts: not enabled", "tts_nil", e.tts == nil, "enabled", e.tts != nil && e.tts.Enabled, "tts_obj_nil", e.tts == nil || e.tts.TTS == nil)
+			}
+
+			// Auto-compress after finishing a turn, before sending any queued messages.
+			if triggerAutoCompress {
+				state.mu.Lock()
+				state.lastAutoCompressAt = time.Now()
+				state.mu.Unlock()
+				slog.Info("auto-compress: triggering", "session", sessionKey)
+
+				// Run compress inline while the session is still locked.
+				e.runCompress(state, session, sessions, sessionKey, state.platform, state.replyCtx, true)
+				return
 			}
 
 			// Check for queued messages — if present, continue the event loop
@@ -4478,41 +4536,55 @@ func (e *Engine) cmdCompress(p Platform, msg *Message) {
 
 	e.send(p, msg.ReplyCtx, e.i18n.T(MsgCompressing))
 
-	go func() {
-		// session.Unlock() is called inside drainQueuedMessagesAfterCompress
-		// while holding state.mu to close the race window. Deferred fallback
-		// ensures the lock is released on early-return paths.
-		compressUnlocked := false
-		defer func() {
-			if !compressUnlocked {
-				session.Unlock()
-			}
-		}()
+	go e.runCompress(state, session, sessions, iKey, p, msg.ReplyCtx, false)
+}
 
-		state.mu.Lock()
-		state.platform = p
-		state.replyCtx = msg.ReplyCtx
-		state.mu.Unlock()
-
-		drainEvents(state.agentSession.Events())
-
-		cmd := compressor.CompressCommand()
-		if err := state.agentSession.Send(cmd, nil, nil); err != nil {
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
-			if !state.agentSession.Alive() {
-				e.cleanupInteractiveState(iKey)
-			}
-			return
+// runCompress sends the agent's compress command and handles results.
+// If autoTriggered is true, suppress user-visible "compressing" and completion messages.
+func (e *Engine) runCompress(state *interactiveState, session *Session, sessions *SessionManager, iKey string, p Platform, replyCtx any, auto bool) {
+	// session.Unlock() is called inside drainQueuedMessagesAfterCompress
+	// while holding state.mu to close the race window. Deferred fallback
+	// ensures the lock is released on early-return paths.
+	compressUnlocked := false
+	defer func() {
+		if !compressUnlocked {
+			session.Unlock()
 		}
-
-		e.processCompressEvents(state, session, sessions, iKey, p, msg.ReplyCtx, &compressUnlocked)
 	}()
+
+	state.mu.Lock()
+	state.platform = p
+	state.replyCtx = replyCtx
+	state.mu.Unlock()
+
+	drainEvents(state.agentSession.Events())
+
+	compressor, ok := e.agent.(ContextCompressor)
+	if !ok || compressor.CompressCommand() == "" {
+		if !auto {
+			e.reply(p, replyCtx, e.i18n.T(MsgCompressNotSupported))
+		}
+		return
+	}
+
+	cmd := compressor.CompressCommand()
+	if err := state.agentSession.Send(cmd, nil, nil); err != nil {
+		if !auto {
+			e.reply(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+		}
+		if !state.agentSession.Alive() {
+			e.cleanupInteractiveState(iKey)
+		}
+		return
+	}
+
+	e.processCompressEvents(state, session, sessions, iKey, p, replyCtx, &compressUnlocked, auto)
 }
 
 // processCompressEvents drains agent events after a compress command.
 // Unlike processInteractiveEvents it does NOT record history and treats
 // an empty result as success rather than "(empty response)".
-func (e *Engine) processCompressEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, p Platform, replyCtx any, unlocked *bool) {
+func (e *Engine) processCompressEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, p Platform, replyCtx any, unlocked *bool, auto bool) {
 
 	var textParts []string
 	events := state.agentSession.Events()
@@ -4533,16 +4605,20 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 		case event, ok = <-events:
 			if !ok {
 				e.cleanupInteractiveState(sessionKey, state)
-				if len(textParts) > 0 {
-					e.send(p, replyCtx, strings.Join(textParts, ""))
-				} else {
-					e.reply(p, replyCtx, e.i18n.T(MsgCompressDone))
+				if !auto {
+					if len(textParts) > 0 {
+						e.send(p, replyCtx, strings.Join(textParts, ""))
+					} else {
+						e.reply(p, replyCtx, e.i18n.T(MsgCompressDone))
+					}
 				}
 				e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent process exited during compress"))
 				return
 			}
 		case <-idleCh:
-			e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "compress timed out"))
+			if !auto {
+				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "compress timed out"))
+			}
 			e.cleanupInteractiveState(sessionKey, state)
 			e.notifyDroppedQueuedMessages(state, fmt.Errorf("compress timed out"))
 			return
@@ -4562,7 +4638,7 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 
 		switch event.Type {
 		case EventText:
-			if event.Content != "" {
+			if !auto && event.Content != "" {
 				textParts = append(textParts, event.Content)
 			}
 		case EventResult:
@@ -4570,17 +4646,19 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 			if result == "" && len(textParts) > 0 {
 				result = strings.Join(textParts, "")
 			}
-			if result != "" {
-				e.send(p, replyCtx, result)
-			} else {
-				e.reply(p, replyCtx, e.i18n.T(MsgCompressDone))
+			if !auto {
+				if result != "" {
+					e.send(p, replyCtx, result)
+				} else {
+					e.reply(p, replyCtx, e.i18n.T(MsgCompressDone))
+				}
 			}
 
 			// After compress succeeds, process any queued messages instead of dropping them.
 			e.drainQueuedMessagesAfterCompress(state, session, sessions, sessionKey, unlocked)
 			return
 		case EventError:
-			if event.Error != nil {
+			if !auto && event.Error != nil {
 				e.reply(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
 			}
 			// Only drop queued messages if the agent is dead; some agents

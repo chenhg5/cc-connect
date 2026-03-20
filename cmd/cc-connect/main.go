@@ -318,6 +318,19 @@ func main() {
 			engine.SetDefaultQuiet(*cfg.Quiet)
 		}
 
+		// Wire auto-compress settings
+		if proj.AutoCompress.Enabled != nil && *proj.AutoCompress.Enabled {
+			minGap := 30 * time.Minute
+			if proj.AutoCompress.MinGapMins != nil {
+				minGap = time.Duration(*proj.AutoCompress.MinGapMins) * time.Minute
+			}
+			maxTokens := derefInt(proj.AutoCompress.MaxTokens)
+			if maxTokens <= 0 {
+				maxTokens = 12000
+			}
+			engine.SetAutoCompressConfig(true, maxTokens, minGap)
+		}
+
 		// Wire sender injection
 		if proj.InjectSender != nil {
 			engine.SetInjectSender(*proj.InjectSender)
@@ -918,6 +931,21 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		engine.SetDefaultQuiet(false)
 	}
 
+	// Reload auto-compress settings
+	if proj.AutoCompress.Enabled != nil && *proj.AutoCompress.Enabled {
+		minGap := 30 * time.Minute
+		if proj.AutoCompress.MinGapMins != nil {
+			minGap = time.Duration(*proj.AutoCompress.MinGapMins) * time.Minute
+		}
+		maxTokens := derefInt(proj.AutoCompress.MaxTokens)
+		if maxTokens <= 0 {
+			maxTokens = 12000
+		}
+		engine.SetAutoCompressConfig(true, maxTokens, minGap)
+	} else {
+		engine.SetAutoCompressConfig(false, 0, 0)
+	}
+
 	// Reload sender injection
 	engine.SetInjectSender(proj.InjectSender != nil && *proj.InjectSender)
 
@@ -1054,4 +1082,11 @@ func buildHeartbeatConfig(hc config.HeartbeatConfig) core.HeartbeatConfig {
 		cfg.TimeoutMins = *hc.TimeoutMins
 	}
 	return cfg
+}
+
+func derefInt(v *int) int {
+	if v == nil {
+		return 0
+	}
+	return *v
 }
