@@ -5092,8 +5092,18 @@ func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images
 	var state *interactiveState
 	if sessionKey != "" {
 		state = e.interactiveStates[sessionKey]
+	} else if len(e.interactiveStates) == 1 {
+		// Single session: use it when no sessionKey is provided (backward compatible)
+		for _, s := range e.interactiveStates {
+			state = s
+			break
+		}
+	} else if len(e.interactiveStates) > 1 && (len(images) > 0 || len(files) > 0) {
+		// Multiple sessions with attachments but no explicit sessionKey: ambiguous
+		e.interactiveMu.Unlock()
+		return fmt.Errorf("multiple active sessions; must specify --session to send attachments")
 	} else {
-		// Pick the first active session
+		// Multiple sessions but text-only: pick the first (legacy behavior)
 		for _, s := range e.interactiveStates {
 			state = s
 			break

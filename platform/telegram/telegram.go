@@ -560,6 +560,7 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 	if name == "" {
 		name = "image"
 	}
+	slog.Debug("telegram: sending image", "chat_id", rc.chatID, "name", name, "size", len(img.Data))
 	msg := tgbotapi.NewPhoto(rc.chatID, tgbotapi.FileBytes{Name: name, Bytes: img.Data})
 	if _, err := p.bot.Send(msg); err != nil {
 		return fmt.Errorf("telegram: send image: %w", err)
