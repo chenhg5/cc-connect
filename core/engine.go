@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
@@ -192,6 +193,8 @@ type Engine struct {
 
 	quietMu sync.RWMutex
 	quiet   bool // when true, suppress thinking and tool progress messages globally
+
+	hasConnectedOnce atomic.Bool // first connection uses --continue to bridge CLI usage
 }
 
 // workspaceInitFlow tracks a channel that is being onboarded to a workspace.
@@ -1739,9 +1742,17 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		return state
 	}
 
-	agentSID := session.GetAgentSessionID()
+	// On first connection after engine startup, use --continue to pick up
+	// the most recent CLI session (bridges direct CLI and cc-connect usage).
+	// Subsequent connections respect the stored session ID (or "" for fresh).
+	startSessionID := session.GetAgentSessionID()
+	if !e.hasConnectedOnce.Swap(true) {
+		startSessionID = ContinueSession
+	}
+
+	isResume := startSessionID != ""
 	startAt := time.Now()
-	agentSession, err := agent.StartSession(e.ctx, agentSID)
+	agentSession, err := agent.StartSession(e.ctx, startSessionID)
 	startElapsed := time.Since(startAt)
 	if err != nil {
 		slog.Error("failed to start interactive session", "error", err, "elapsed", startElapsed)
@@ -1750,7 +1761,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		return state
 	}
 	if startElapsed >= slowAgentStart {
-		slog.Warn("slow agent session start", "elapsed", startElapsed, "agent", agent.Name(), "session_id", agentSID)
+		slog.Warn("slow agent session start", "elapsed", startElapsed, "agent", agent.Name(), "session_id", startSessionID)
 	}
 
 	if newID := agentSession.CurrentSessionID(); newID != "" {
@@ -1767,7 +1778,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	}
 	e.interactiveStates[sessionKey] = state
 
-	slog.Info("interactive session started", "session_key", sessionKey, "agent_session", session.GetAgentSessionID(), "elapsed", startElapsed)
+	slog.Info("session spawned", "session_key", sessionKey, "agent_session", session.GetAgentSessionID(), "is_resume", isResume, "elapsed", startElapsed)
 	return state
 }
 
