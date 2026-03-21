@@ -167,7 +167,8 @@ func (cs *codexSession) buildExecArgs(prompt string, imagePaths []string) []stri
 		for _, imagePath := range imagePaths {
 			args = append(args, "--image", imagePath)
 		}
-		args = append(args, "--json", "--cd", cs.workDir, prompt)
+		// codex exec resume does not support --cd; cmd.Dir handles cwd instead.
+		args = append(args, "--json", prompt)
 	} else {
 		for _, imagePath := range imagePaths {
 			args = append(args, "--image", imagePath)
