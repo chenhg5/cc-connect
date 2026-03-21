@@ -126,7 +126,7 @@ type sessionSnapshot struct {
 	ActiveSession map[string]string    `json:"active_session"`
 	UserSessions  map[string][]string  `json:"user_sessions"`
 	Counter       int64                `json:"counter"`
-	SessionNames  map[string]string    `json:"session_names,omitempty"`  // agent session ID → custom name
+	SessionNames  map[string]string    `json:"session_names,omitempty"` // agent session ID → custom name
 	UserMeta      map[string]*UserMeta `json:"user_meta,omitempty"`     // sessionKey → display info
 }
 
@@ -186,6 +186,26 @@ func (sm *SessionManager) NewSession(userKey, name string) *Session {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	s := sm.createLocked(userKey, name)
+	sm.saveLocked()
+	return s
+}
+
+// NewSideSession registers a new session for userKey without changing the active
+// session. Used for isolated one-off runs (e.g. cron with session_mode=new_per_run)
+// so the user's current chat remains the default target for normal messages.
+func (sm *SessionManager) NewSideSession(userKey, name string) *Session {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	id := sm.nextID()
+	now := time.Now()
+	s := &Session{
+		ID:        id,
+		Name:      name,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	sm.sessions[id] = s
+	sm.userSessions[userKey] = append(sm.userSessions[userKey], id)
 	sm.saveLocked()
 	return s
 }

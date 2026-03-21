@@ -41,6 +41,23 @@ func TestSessionManager_NewSession(t *testing.T) {
 	}
 }
 
+func TestSessionManager_NewSideSession(t *testing.T) {
+	sm := NewSessionManager("")
+	main := sm.GetOrCreateActive("user1")
+	side := sm.NewSideSession("user1", "cron-job")
+
+	if side.ID == main.ID {
+		t.Fatal("side session should be a new record")
+	}
+	if sm.ActiveSessionID("user1") != main.ID {
+		t.Errorf("active session should stay main %q, got %q", main.ID, sm.ActiveSessionID("user1"))
+	}
+	list := sm.ListSessions("user1")
+	if len(list) != 2 {
+		t.Fatalf("want 2 sessions for user1, got %d", len(list))
+	}
+}
+
 func TestSessionManager_SwitchSession(t *testing.T) {
 	sm := NewSessionManager("")
 	s1 := sm.NewSession("user1", "first")

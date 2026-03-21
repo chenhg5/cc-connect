@@ -227,19 +227,19 @@ type queuedMessage struct {
 
 // interactiveState tracks a running interactive agent session and its permission state.
 type interactiveState struct {
-	agentSession          AgentSession
-	platform              Platform
-	replyCtx              any
-	workspaceDir          string
-	mu                    sync.Mutex
-	pending               *pendingPermission
-	pendingMessages       []queuedMessage // messages queued while session was busy
-	approveAll            bool            // when true, auto-approve all permission requests for this session
-	quiet                 bool            // when true, suppress thinking and tool progress for this session
-	fromVoice             bool            // true if current turn originated from voice transcription
-	sideText              string
-	deleteMode            *deleteModeState
-	lastAutoCompressAt    time.Time
+	agentSession           AgentSession
+	platform               Platform
+	replyCtx               any
+	workspaceDir           string
+	mu                     sync.Mutex
+	pending                *pendingPermission
+	pendingMessages        []queuedMessage // messages queued while session was busy
+	approveAll             bool            // when true, auto-approve all permission requests for this session
+	quiet                  bool            // when true, suppress thinking and tool progress for this session
+	fromVoice              bool            // true if current turn originated from voice transcription
+	sideText               string
+	deleteMode             *deleteModeState
+	lastAutoCompressAt     time.Time
 	lastAutoCompressTokens int
 }
 
@@ -370,10 +370,19 @@ func (e *Engine) SetDefaultQuiet(q bool) {
 
 // estimateTokens provides a rough token estimate for a set of history entries.
 func estimateTokens(entries []HistoryEntry) int {
+	return estimateTokensWithPendingAssistant(entries, "")
+}
+
+// estimateTokensWithPendingAssistant is like estimateTokens but includes an assistant
+// message not yet written to history (used at EventResult before AddHistory).
+func estimateTokensWithPendingAssistant(entries []HistoryEntry, pendingAssistant string) int {
 	// Heuristic: ~1 token per 4 characters in mixed English/Chinese.
 	count := 0
 	for _, h := range entries {
 		count += len([]rune(h.Content))
+	}
+	if pendingAssistant != "" {
+		count += len([]rune(pendingAssistant))
 	}
 	if count == 0 {
 		return 0
@@ -752,7 +761,7 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 	}
 
 	if job.UsesNewSessionPerRun() {
-		session := e.sessions.NewSession(sessionKey, "cron-"+job.ID)
+		session := e.sessions.NewSideSession(sessionKey, "cron-"+job.ID)
 		if !session.TryLock() {
 			return fmt.Errorf("session %q is busy", sessionKey)
 		}
@@ -2117,9 +2126,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				fullResponse = e.i18n.T(MsgEmptyResponse)
 			}
 
-			// Evaluate auto-compress trigger (token estimate on user+assistant text)
+			// Evaluate auto-compress trigger (token estimate on user+assistant text,
+			// including this turn's assistant reply before it is appended to history).
 			if e.autoCompressEnabled && e.autoCompressMaxTokens > 0 {
-				estimate := estimateTokens(session.GetHistory(0))
+				estimate := estimateTokensWithPendingAssistant(session.GetHistory(0), fullResponse)
 				now := time.Now()
 				state.mu.Lock()
 				last := state.lastAutoCompressAt
