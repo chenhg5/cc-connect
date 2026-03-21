@@ -33,15 +33,16 @@ func init() {
 //   - "plan":              plan only, no execution until approved
 //   - "bypassPermissions": auto-approve everything (YOLO mode)
 type Agent struct {
-	workDir      string
-	model        string
-	mode         string // "default" | "acceptEdits" | "plan" | "bypassPermissions" | "dontAsk"
-	allowedTools []string
-	providers    []core.ProviderConfig
-	activeIdx    int // -1 = no provider set
-	sessionEnv   []string
-	routerURL    string // Claude Code Router URL (e.g., "http://127.0.0.1:3456")
-	routerAPIKey string // Claude Code Router API key (optional)
+	workDir         string
+	model           string
+	mode            string // "default" | "acceptEdits" | "plan" | "bypassPermissions" | "dontAsk"
+	allowedTools    []string
+	disallowedTools []string
+	providers       []core.ProviderConfig
+	activeIdx       int // -1 = no provider set
+	sessionEnv      []string
+	routerURL       string // Claude Code Router URL (e.g., "http://127.0.0.1:3456")
+	routerAPIKey    string // Claude Code Router API key (optional)
 
 	providerProxy  *core.ProviderProxy // local proxy for third-party providers
 	proxyLocalURL  string              // local URL of the proxy
@@ -68,6 +69,15 @@ func New(opts map[string]any) (core.Agent, error) {
 		}
 	}
 
+	var disallowedTools []string
+	if tools, ok := opts["disallowed_tools"].([]any); ok {
+		for _, t := range tools {
+			if s, ok := t.(string); ok {
+				disallowedTools = append(disallowedTools, s)
+			}
+		}
+	}
+
 	// Claude Code Router support
 	routerURL, _ := opts["router_url"].(string)
 	routerAPIKey, _ := opts["router_api_key"].(string)
@@ -77,13 +87,14 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 
 	return &Agent{
-		workDir:      workDir,
-		model:        model,
-		mode:         mode,
-		allowedTools: allowedTools,
-		activeIdx:    -1,
-		routerURL:    routerURL,
-		routerAPIKey: routerAPIKey,
+		workDir:         workDir,
+		model:           model,
+		mode:            mode,
+		allowedTools:    allowedTools,
+		disallowedTools: disallowedTools,
+		activeIdx:       -1,
+		routerURL:       routerURL,
+		routerAPIKey:    routerAPIKey,
 	}, nil
 }
 
@@ -229,6 +240,8 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	a.mu.Lock()
 	tools := make([]string, len(a.allowedTools))
 	copy(tools, a.allowedTools)
+	disTools := make([]string, len(a.disallowedTools))
+	copy(disTools, a.disallowedTools)
 	model := a.model
 	extraEnv := a.providerEnvLocked()
 	extraEnv = append(extraEnv, a.sessionEnv...)
@@ -254,7 +267,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	platformPrompt := a.platformPrompt
 	a.mu.Unlock()
 
-	return newClaudeSession(ctx, a.workDir, model, sessionID, a.mode, tools, extraEnv, platformPrompt)
+	return newClaudeSession(ctx, a.workDir, model, sessionID, a.mode, tools, disTools, extraEnv, platformPrompt)
 }
 
 func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {
@@ -517,6 +530,15 @@ func (a *Agent) GetAllowedTools() []string {
 	defer a.mu.Unlock()
 	result := make([]string, len(a.allowedTools))
 	copy(result, a.allowedTools)
+	return result
+}
+
+// GetDisallowedTools returns the current list of disallowed tools.
+func (a *Agent) GetDisallowedTools() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	result := make([]string, len(a.disallowedTools))
+	copy(result, a.disallowedTools)
 	return result
 }
 

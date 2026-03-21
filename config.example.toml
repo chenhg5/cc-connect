@@ -506,6 +506,10 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "bypassPermission
 # 在 default/acceptEdits 模式下，可预授权特定工具：
 # allowed_tools = ["Read", "Grep", "Glob", "Bash", "Edit", "Write"]
 
+# You can also disallow specific tools (passed to --disallowedTools):
+# 也可以禁用特定工具（传递给 --disallowedTools）：
+# disallowed_tools = ["WebSearch", "WebFetch"]
+
 # Optional: specify a model / 可选：指定模型
 # model = "claude-sonnet-4-20250514"
 
