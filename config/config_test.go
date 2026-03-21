@@ -846,3 +846,308 @@ app_id = "old_app" # keep inline comment
 app_secret = "old_secret"
 custom_option = "still_here"
 `
+
+// --- validateUsersConfig tests ---
+
+func TestValidateUsersConfig(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     Config
+		wantErr string
+	}{
+		{
+			name: "nil users is valid",
+			cfg: Config{
+				Projects: []ProjectConfig{{
+					Name: "p1",
+					Agent: AgentConfig{Type: "codex"},
+					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
+					Users: nil,
+				}},
+			},
+			wantErr: "",
+		},
+		{
+			name: "empty roles",
+			cfg: Config{
+				Projects: []ProjectConfig{{
+					Name: "p1",
+					Agent: AgentConfig{Type: "codex"},
+					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
+					Users: &UsersConfig{Roles: map[string]RoleConfig{}},
+				}},
+			},
+			wantErr: `no roles defined`,
+		},
+		{
+			name: "empty user_ids in role",
+			cfg: Config{
+				Projects: []ProjectConfig{{
+					Name: "p1",
+					Agent: AgentConfig{Type: "codex"},
+					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
+					Users: &UsersConfig{
+						Roles: map[string]RoleConfig{
+							"admin": {UserIDs: []string{}},
+						},
+					},
+				}},
+			},
+			wantErr: `empty user_ids`,
+		},
+		{
+			name: "duplicate user in different roles",
+			cfg: Config{
+				Projects: []ProjectConfig{{
+					Name: "p1",
+					Agent: AgentConfig{Type: "codex"},
+					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
+					Users: &UsersConfig{
+						Roles: map[string]RoleConfig{
+							"admin":   {UserIDs: []string{"user1"}},
+							"member":  {UserIDs: []string{"user1"}},
+						},
+					},
+				}},
+			},
+			wantErr: `appears in both role`,
+		},
+		{
+			name: "wildcard in multiple roles",
+			cfg: Config{
+				Projects: []ProjectConfig{{
+					Name: "p1",
+					Agent: AgentConfig{Type: "codex"},
+					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
+					Users: &UsersConfig{
+						Roles: map[string]RoleConfig{
+							"admin":  {UserIDs: []string{"*"}},
+							"member": {UserIDs: []string{"*"}},
+						},
+					},
+				}},
+			},
+			wantErr: `wildcard`,
+		},
+		{
+			name: "default_role not matching any role",
+			cfg: Config{
+				Projects: []ProjectConfig{{
+					Name: "p1",
+					Agent: AgentConfig{Type: "codex"},
+					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
+					Users: &UsersConfig{
+						DefaultRole: "superadmin",
+						Roles: map[string]RoleConfig{
+							"admin": {UserIDs: []string{"u1"}},
+						},
+					},
+				}},
+			},
+			wantErr: `default_role`,
+		},
+		{
+			name: "valid users config",
+			cfg: Config{
+				Projects: []ProjectConfig{{
+					Name: "p1",
+					Agent: AgentConfig{Type: "codex"},
+					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
+					Users: &UsersConfig{
+						DefaultRole: "member",
+						Roles: map[string]RoleConfig{
+							"admin":  {UserIDs: []string{"admin1"}},
+							"member": {UserIDs: []string{"*"}},
+						},
+					},
+				}},
+			},
+			wantErr: "",
+		},
+		{
+			name: "valid with wildcard in one role only",
+			cfg: Config{
+				Projects: []ProjectConfig{{
+					Name: "p1",
+					Agent: AgentConfig{Type: "codex"},
+					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
+					Users: &UsersConfig{
+						Roles: map[string]RoleConfig{
+							"admin":  {UserIDs: []string{"u1"}},
+							"member": {UserIDs: []string{"*", "u2"}},
+						},
+					},
+				}},
+			},
+			wantErr: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateUsersConfig("projects[0]", tt.cfg.Projects[0].Users)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+				}
+			} else {
+				if err == nil {
+					t.Error("expected error, got nil")
+				} else if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("error = %q, want substring %q", err.Error(), tt.wantErr)
+				}
+			}
+		})
+	}
+}
+
+// --- cloneStringMap tests ---
+
+func TestCloneStringMap(t *testing.T) {
+	// nil map
+	if got := cloneStringMap(nil); got != nil {
+		t.Errorf("cloneStringMap(nil) = %v, want nil", got)
+	}
+
+	// empty map
+	empty := cloneStringMap(map[string]string{})
+	if got := cloneStringMap(empty); got == nil || len(got) != 0 {
+		t.Errorf("cloneStringMap(empty) = %v, want empty non-nil map", got)
+	}
+
+	// populated map
+	orig := map[string]string{"key1": "val1", "key2": "val2"}
+	cloned := cloneStringMap(orig)
+	if len(cloned) != len(orig) {
+		t.Errorf("length mismatch: got %d, want %d", len(cloned), len(orig))
+	}
+	for k, v := range orig {
+		if cloned[k] != v {
+			t.Errorf("cloneStringMap[%q] = %q, want %q", k, cloned[k], v)
+		}
+	}
+	// verify it's a deep copy
+	delete(cloned, "key1")
+	if _, ok := orig["key1"]; !ok {
+		t.Error("cloneStringMap returned same map reference, not a copy")
+	}
+}
+
+// --- pickAgentTemplateForNewProject tests ---
+
+func TestPickAgentTemplateForNewProject(t *testing.T) {
+	baseProj := ProjectConfig{
+		Name: "base",
+		Agent: AgentConfig{
+			Type:    "claudecode",
+			Options: map[string]any{"mode": "yolo"},
+			Providers: []ProviderConfig{{
+				Name:   "openai",
+				APIKey: "sk-test",
+				Model:  "gpt-4",
+			}},
+		},
+		Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
+	}
+
+	t.Run("clone from existing project", func(t *testing.T) {
+		cfg := &Config{Projects: []ProjectConfig{baseProj}}
+		opts := EnsureProjectWithFeishuOptions{CloneFromProject: "base"}
+		got := pickAgentTemplateForNewProject(cfg, opts)
+		if got.Type != "claudecode" {
+			t.Errorf("Type = %q, want claudecode", got.Type)
+		}
+		if len(got.Providers) != 1 || got.Providers[0].APIKey != "sk-test" {
+			t.Errorf("Providers not cloned correctly")
+		}
+	})
+
+	t.Run("no clone but has projects", func(t *testing.T) {
+		cfg := &Config{Projects: []ProjectConfig{baseProj}}
+		opts := EnsureProjectWithFeishuOptions{}
+		got := pickAgentTemplateForNewProject(cfg, opts)
+		if got.Type != "claudecode" {
+			t.Errorf("Type = %q, want claudecode", got.Type)
+		}
+	})
+
+	t.Run("no projects uses default codex", func(t *testing.T) {
+		cfg := &Config{Projects: []ProjectConfig{}}
+		opts := EnsureProjectWithFeishuOptions{}
+		got := pickAgentTemplateForNewProject(cfg, opts)
+		if got.Type != "codex" {
+			t.Errorf("Type = %q, want codex", got.Type)
+		}
+		if got.Options == nil {
+			t.Error("Options should not be nil")
+		}
+	})
+
+	t.Run("no projects with explicit agent type", func(t *testing.T) {
+		cfg := &Config{Projects: []ProjectConfig{}}
+		opts := EnsureProjectWithFeishuOptions{AgentType: "gemini"}
+		got := pickAgentTemplateForNewProject(cfg, opts)
+		if got.Type != "gemini" {
+			t.Errorf("Type = %q, want gemini", got.Type)
+		}
+	})
+}
+
+// --- cloneAgentConfig tests ---
+
+func TestCloneAgentConfig(t *testing.T) {
+	t.Run("without providers", func(t *testing.T) {
+		in := AgentConfig{
+			Type:    "codex",
+			Options: map[string]any{"mode": "default"},
+		}
+		got := cloneAgentConfig(in)
+		if got.Type != "codex" {
+			t.Errorf("Type = %q, want codex", got.Type)
+		}
+		if got.Options["mode"] != "default" {
+			t.Errorf("Options not cloned")
+		}
+		if len(got.Providers) != 0 {
+			t.Errorf("Providers length = %d, want 0", len(got.Providers))
+		}
+	})
+
+	t.Run("with providers", func(t *testing.T) {
+		in := AgentConfig{
+			Type:    "claudecode",
+			Options: map[string]any{"work_dir": "/tmp/test"},
+			Providers: []ProviderConfig{
+				{
+					Name:     "openai",
+					APIKey:   "sk-test",
+					BaseURL:  "https://api.openai.com",
+					Model:    "gpt-4",
+					Thinking: "on",
+					Env:      map[string]string{"DEBUG": "1"},
+				},
+			},
+		}
+		got := cloneAgentConfig(in)
+		if len(got.Providers) != 1 {
+			t.Fatalf("Providers length = %d, want 1", len(got.Providers))
+		}
+		p := got.Providers[0]
+		if p.Name != "openai" || p.APIKey != "sk-test" || p.BaseURL != "https://api.openai.com" || p.Model != "gpt-4"  {
+			t.Errorf("Provider fields not cloned correctly: %+v", p)
+		}
+		if p.Env["DEBUG"] != "1" {
+			t.Errorf("Provider Env not cloned correctly")
+		}
+		// Verify deep copy of Options
+		got.Options["mode"] = "changed"
+		if in.Options["mode"] == "changed" {
+			t.Error("Options is same reference, not a deep copy")
+		}
+		// Verify deep copy of Provider Env
+		delete(got.Providers[0].Env, "DEBUG")
+		if in.Providers[0].Env["DEBUG"] == "" {
+			t.Error("Provider Env is same reference, not a deep copy")
+		}
+	})
+}
