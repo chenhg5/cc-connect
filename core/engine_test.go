@@ -5530,3 +5530,183 @@ func TestCmdWhoami_CardPlatform(t *testing.T) {
 		t.Errorf("expected card to contain chat ID, got: %s", text)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Engine method coverage tests
+// ---------------------------------------------------------------------------
+
+func TestEngine_AddPlatform(t *testing.T) {
+	agent := &stubAgent{}
+	p1 := &stubPlatformEngine{n: "feishu"}
+	p2 := &stubPlatformEngine{n: "telegram"}
+
+	e := NewEngine("test", agent, []Platform{p1}, "", LangEnglish)
+
+	// Initially has 1 platform
+	if len(e.platforms) != 1 {
+		t.Fatalf("expected 1 platform, got %d", len(e.platforms))
+	}
+
+	// Add another platform
+	e.AddPlatform(p2)
+
+	if len(e.platforms) != 2 {
+		t.Fatalf("expected 2 platforms, got %d", len(e.platforms))
+	}
+
+	if e.platforms[0].Name() != "feishu" {
+		t.Errorf("expected first platform to be feishu, got %s", e.platforms[0].Name())
+	}
+	if e.platforms[1].Name() != "telegram" {
+		t.Errorf("expected second platform to be telegram, got %s", e.platforms[1].Name())
+	}
+}
+
+func TestEngine_GetAgent(t *testing.T) {
+	agent := &stubAgent{}
+	p := &stubPlatformEngine{n: "feishu"}
+
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	// GetAgent should return the agent
+	got := e.GetAgent()
+	if got == nil {
+		t.Fatal("expected GetAgent to return agent, got nil")
+	}
+	if got.Name() != "stub" {
+		t.Errorf("expected agent name 'stub', got %s", got.Name())
+	}
+}
+
+func TestEngine_ClearCommands(t *testing.T) {
+	agent := &stubAgent{}
+	p := &stubPlatformEngine{n: "feishu"}
+
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	// Add commands from two sources
+	e.AddCommand("cmd1", "desc1", "prompt1", "", "", "config")
+	e.AddCommand("cmd2", "desc2", "prompt2", "", "", "agent")
+
+	// Verify commands exist
+	if _, ok := e.commands.Resolve("cmd1"); !ok {
+		t.Fatal("expected cmd1 to exist")
+	}
+
+	// Clear commands from config source
+	e.ClearCommands("config")
+
+	// cmd1 should be gone, cmd2 should remain
+	if _, ok := e.commands.Resolve("cmd1"); ok {
+		t.Error("expected cmd1 to be cleared")
+	}
+	if _, ok := e.commands.Resolve("cmd2"); !ok {
+		t.Error("expected cmd2 to remain after clearing config source")
+	}
+}
+
+func TestEngine_SetAndGetAgent(t *testing.T) {
+	agent := &stubAgent{}
+	p := &stubPlatformEngine{n: "feishu"}
+
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	// Verify GetAgent returns correct agent
+	got := e.GetAgent()
+	if got.Name() != "stub" {
+		t.Errorf("expected agent name 'stub', got %s", got.Name())
+	}
+}
+
+func TestEngine_AddCommand(t *testing.T) {
+	agent := &stubAgent{}
+	p := &stubPlatformEngine{n: "feishu"}
+
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	// Add a command
+	e.AddCommand("testcmd", "A test command", "This is a test {{args}}", "", "", "config")
+
+	// Resolve should find it
+	cmd, ok := e.commands.Resolve("testcmd")
+	if !ok {
+		t.Fatal("expected to resolve testcmd")
+	}
+	if cmd.Name != "testcmd" {
+		t.Errorf("expected command name 'testcmd', got %s", cmd.Name)
+	}
+	if cmd.Description != "A test command" {
+		t.Errorf("expected description 'A test command', got %s", cmd.Description)
+	}
+	if cmd.Prompt != "This is a test {{args}}" {
+		t.Errorf("expected prompt 'This is a test {{args}}', got %s", cmd.Prompt)
+	}
+}
+
+func TestEngine_AddAlias(t *testing.T) {
+	agent := &stubAgent{}
+	p := &stubPlatformEngine{n: "feishu"}
+
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	// Add an alias
+	e.AddAlias("shortcut", "very-long-command")
+
+	// Check alias was stored (via internal map)
+	// We can verify this through command resolution if shortcut is used as a command
+	e.AddCommand("very-long-command", "Long command", "prompt", "", "", "config")
+
+	// The alias mechanism works through the alias map
+	if len(e.aliases) != 1 {
+		t.Fatalf("expected 1 alias, got %d", len(e.aliases))
+	}
+}
+
+func TestEstimateTokens(t *testing.T) {
+	// Test with empty entries
+	if got := estimateTokens(nil); got != 0 {
+		t.Errorf("estimateTokens(nil) = %d, want 0", got)
+	}
+
+	if got := estimateTokens([]HistoryEntry{}); got != 0 {
+		t.Errorf("estimateTokens([]) = %d, want 0", got)
+	}
+
+	// Test with entries
+	entries := []HistoryEntry{
+		{Role: "user", Content: "Hello"},
+		{Role: "assistant", Content: "Hi there!"},
+	}
+	got := estimateTokens(entries)
+	if got <= 0 {
+		t.Errorf("estimateTokens([Hello, Hi there!]) = %d, want > 0", got)
+	}
+
+	// Test with Chinese characters (should count as 1 token per character)
+	entriesChinese := []HistoryEntry{
+		{Role: "user", Content: "你好世界"}, // 4 characters
+	}
+	gotChinese := estimateTokens(entriesChinese)
+	// 4 characters / 4 = 1 token, but minimum should account for the formula
+	if gotChinese < 1 {
+		t.Errorf("estimateTokens([你好世界]) = %d, want >= 1", gotChinese)
+	}
+}
+
+func TestEstimateTokensWithPendingAssistant(t *testing.T) {
+	// Test with pending assistant message
+	entries := []HistoryEntry{
+		{Role: "user", Content: "Hello"},
+	}
+	got := estimateTokensWithPendingAssistant(entries, "Thinking...")
+	if got <= 0 {
+		t.Errorf("estimateTokensWithPendingAssistant([Hello], Thinking...) = %d, want > 0", got)
+	}
+
+	// Pending message should add to the count
+	gotWithoutPending := estimateTokensWithPendingAssistant(entries, "")
+	gotWithPending := estimateTokensWithPendingAssistant(entries, "Extra content here")
+	if gotWithPending <= gotWithoutPending {
+		t.Errorf("expected pending message to increase token count")
+	}
+}

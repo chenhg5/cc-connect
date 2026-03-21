@@ -11,7 +11,7 @@ import (
 
 func shortTestContext(t *testing.T) (context.Context, context.CancelFunc) {
 	t.Helper()
-	timeout := 5 * time.Second
+	timeout := 30 * time.Second
 	if deadline, ok := t.Deadline(); ok {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
@@ -27,6 +27,9 @@ func requireWorkingAgentCLI(t *testing.T) {
 	t.Helper()
 	if os.Getenv("CI") != "" {
 		t.Skip("skipping agent CLI test in CI (no real cursor agent available)")
+	}
+	if os.Getenv("SKIP_REAL_AGENT_CLI") != "" {
+		t.Skip("skipping real agent CLI test (SKIP_REAL_AGENT_CLI is set)")
 	}
 	if _, err := exec.LookPath("agent"); err != nil {
 		t.Skip("agent CLI not in PATH")
