@@ -2987,6 +2987,78 @@ func (a *controllableAgent) ListSessions(_ context.Context) ([]AgentSessionInfo,
 }
 func (a *controllableAgent) Stop() error { return nil }
 
+// recordingStartAgent records each StartSession session-id argument (for testing
+// the one-time ContinueSession bridge).
+type recordingStartAgent struct {
+	startIDs []string
+	mu       sync.Mutex
+}
+
+func (a *recordingStartAgent) Name() string { return "recording-start" }
+
+func (a *recordingStartAgent) StartSession(_ context.Context, id string) (AgentSession, error) {
+	a.mu.Lock()
+	a.startIDs = append(a.startIDs, id)
+	a.mu.Unlock()
+	return newControllableSession("agent-id"), nil
+}
+
+func (a *recordingStartAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
+	return nil, nil
+}
+
+func (a *recordingStartAgent) Stop() error { return nil }
+
+func (a *recordingStartAgent) startArgs() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := make([]string, len(a.startIDs))
+	copy(out, a.startIDs)
+	return out
+}
+
+func TestMessageConsumesFirstContinueBridge(t *testing.T) {
+	if !messageConsumesFirstContinueBridge(&Message{UserID: "u1"}) {
+		t.Fatal("expected true for normal user")
+	}
+	if messageConsumesFirstContinueBridge(&Message{UserID: "cron"}) {
+		t.Fatal("expected false for cron")
+	}
+	if messageConsumesFirstContinueBridge(&Message{UserID: "heartbeat"}) {
+		t.Fatal("expected false for heartbeat")
+	}
+}
+
+func TestFirstContinueBridge_SyntheticDoesNotConsume(t *testing.T) {
+	ag := &recordingStartAgent{}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", ag, []Platform{p}, "", LangEnglish)
+	key := "test:user1"
+	sess := e.sessions.GetOrCreateActive(key)
+	if !sess.TryLock() {
+		t.Fatal("TryLock")
+	}
+
+	e.getOrCreateInteractiveStateWith(key, p, "ctx", sess, e.sessions, nil, "", false)
+	if got := ag.startArgs(); len(got) != 1 || got[0] != "" {
+		t.Fatalf("synthetic start ids = %#v want [\"\"]", got)
+	}
+	if e.hasConnectedOnce.Load() {
+		t.Fatal("hasConnectedOnce should stay false after synthetic start")
+	}
+
+	e.cleanupInteractiveState(key)
+
+	e.getOrCreateInteractiveStateWith(key, p, "ctx", sess, e.sessions, nil, "", true)
+	got := ag.startArgs()
+	if len(got) != 2 {
+		t.Fatalf("want 2 StartSession calls, got %#v", got)
+	}
+	if got[1] != ContinueSession {
+		t.Fatalf("user start id = %q want %q", got[1], ContinueSession)
+	}
+}
+
 // TestCleanupCAS_SkipsWhenStateReplaced verifies that cleanupInteractiveState
 // with an expected state pointer is a no-op when the map entry has been replaced.
 // This is the core of the /new race fix: old goroutine's cleanup must not delete
@@ -3087,7 +3159,7 @@ func TestSessionMismatch_RecyclesStaleAgent(t *testing.T) {
 	// The active Session now wants a DIFFERENT agent session ID.
 	session := &Session{AgentSessionID: "new-agent-id"}
 
-	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "", true)
 
 	if state.agentSession == oldSess {
 		t.Fatal("expected stale agent session to be replaced")
@@ -3126,7 +3198,7 @@ func TestSessionMismatch_DoesNotLeakQuiet(t *testing.T) {
 	// Active session wants "new-id", which mismatches "old-id".
 	session := &Session{AgentSessionID: "new-id"}
 
-	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "", true)
 
 	state.mu.Lock()
 	q := state.quiet
@@ -3157,7 +3229,7 @@ func TestSessionMismatch_ReusesWhenIDsMatch(t *testing.T) {
 
 	session := &Session{AgentSessionID: "matching-id"}
 
-	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "", true)
 	if state != existingState {
 		t.Fatal("expected existing state to be reused when session IDs match")
 	}
@@ -3175,7 +3247,7 @@ func TestSessionIDWriteback_ImmediateAfterStartSession(t *testing.T) {
 	key := "test:user1"
 	session := &Session{AgentSessionID: ""} // empty — no prior binding
 
-	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "", true)
 
 	got := session.GetAgentSessionID()
 
@@ -3195,7 +3267,7 @@ func TestSessionIDWriteback_DoesNotOverwriteExisting(t *testing.T) {
 	key := "test:user1"
 	session := &Session{AgentSessionID: "existing-uuid"}
 
-	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "", true)
 
 	got := session.GetAgentSessionID()
 
@@ -3231,7 +3303,7 @@ func TestStaleGoroutineCleanup_RaceSimulation(t *testing.T) {
 
 	// Step 3: New turn creates Session B and calls getOrCreateInteractiveStateWith.
 	sessionB := &Session{AgentSessionID: ""}
-	newState := e.getOrCreateInteractiveStateWith(key, p, "ctx", sessionB, e.sessions, nil, "")
+	newState := e.getOrCreateInteractiveStateWith(key, p, "ctx", sessionB, e.sessions, nil, "", true)
 
 	// Verify S2 is in the map.
 	e.interactiveMu.Lock()

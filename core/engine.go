@@ -1537,7 +1537,8 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	if agent != e.agent {
 		agentOverride = agent
 	}
-	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey)
+	consumeBridge := messageConsumesFirstContinueBridge(msg)
+	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey, consumeBridge)
 
 	// Set workspaceDir on the state for idle reaper identification
 	if workspaceDir != "" {
@@ -1598,7 +1599,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 			e.cleanupInteractiveState(interactiveKey, state)
 			e.send(p, msg.ReplyCtx, e.i18n.T(MsgSessionRestarting))
 
-			state = e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey)
+			state = e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey, consumeBridge)
 			if workspaceDir != "" {
 				state.mu.Lock()
 				state.workspaceDir = workspaceDir
@@ -1695,11 +1696,29 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 	return agent, sessions, nil
 }
 
+// messageConsumesFirstContinueBridge reports whether this message may trigger the
+// one-time --continue bridge to the latest CLI session. Synthetic injectors (cron,
+// heartbeat) must not flip hasConnectedOnce so a real user's first message still
+// receives the bridge if nothing else has connected yet.
+func messageConsumesFirstContinueBridge(msg *Message) bool {
+	if msg == nil {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(msg.UserID)) {
+	case "cron", "heartbeat":
+		return false
+	default:
+		return true
+	}
+}
+
 // getOrCreateInteractiveStateWith accepts
 // an optional agent override for multi-workspace mode. When agentOverride is non-nil
 // it is used instead of e.agent to start the session.
 // ccSessionKey, when non-empty, is used for CC_SESSION_KEY env injection; otherwise sessionKey is used.
-func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string) *interactiveState {
+// consumeFirstUserContinueBridge controls whether this start may use the global
+// one-time ContinueSession bridge (see messageConsumesFirstContinueBridge).
+func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string, consumeFirstUserContinueBridge bool) *interactiveState {
 	e.interactiveMu.Lock()
 	defer e.interactiveMu.Unlock()
 
@@ -1781,11 +1800,11 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		return state
 	}
 
-	// On first connection after engine startup, use --continue to pick up
+	// On first real-user connection after engine startup, use --continue to pick up
 	// the most recent CLI session (bridges direct CLI and cc-connect usage).
 	// Subsequent connections respect the stored session ID (or "" for fresh).
 	startSessionID := session.GetAgentSessionID()
-	if !e.hasConnectedOnce.Swap(true) {
+	if consumeFirstUserContinueBridge && !e.hasConnectedOnce.Swap(true) {
 		startSessionID = ContinueSession
 	}
 

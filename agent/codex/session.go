@@ -141,8 +141,8 @@ func (cs *codexSession) buildExecArgs(prompt string, imagePaths []string) []stri
 
 	var args []string
 	if isResume {
-		// For resume: codex exec resume <thread_id> --json [other flags] <prompt>
-		// --json must come AFTER the subcommand but BEFORE positional args
+		// For resume: codex exec resume ... <thread_id> [--image ...] --json --cd <dir> <prompt>
+		// The codex CLI requires --json after the thread_id positional argument.
 		args = []string{"exec", "resume", "--skip-git-repo-check"}
 	} else {
 		args = []string{"exec", "--skip-git-repo-check"}
@@ -162,13 +162,11 @@ func (cs *codexSession) buildExecArgs(prompt string, imagePaths []string) []stri
 		args = append(args, "-c", fmt.Sprintf("model_reasoning_effort=%q", cs.effort))
 	}
 
-	// Add --json flag right before the prompt to ensure correct position
 	if isResume {
 		args = append(args, tid)
 		for _, imagePath := range imagePaths {
 			args = append(args, "--image", imagePath)
 		}
-		// --json must be after the thread_id positional arg for resume to work
 		args = append(args, "--json", "--cd", cs.workDir, prompt)
 	} else {
 		for _, imagePath := range imagePaths {
