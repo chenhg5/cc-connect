@@ -5456,6 +5456,11 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		switcher.SetMode(strings.ToLower(args))
 		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 		e.cleanupInteractiveState(interactiveKey)
+		// Mode change requires a new session to take effect
+		s := e.sessions.GetOrCreateActive(sessionKey)
+		s.SetAgentSessionID("", "")
+		s.ClearHistory()
+		e.sessions.Save()
 
 	case "/lang":
 		if args == "" {
