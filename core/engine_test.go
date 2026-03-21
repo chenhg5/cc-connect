@@ -5710,3 +5710,175 @@ func TestEstimateTokensWithPendingAssistant(t *testing.T) {
 		t.Errorf("expected pending message to increase token count")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Engine setter method coverage tests
+// ---------------------------------------------------------------------------
+
+func TestEngine_SetterMethods(t *testing.T) {
+	agent := &stubAgent{}
+	p := &stubPlatformEngine{n: "feishu"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	// Test SetSpeechConfig
+	e.SetSpeechConfig(SpeechCfg{Enabled: true})
+
+	// Test SetTTSConfig
+	e.SetTTSConfig(&TTSCfg{Voice: "voice-1"})
+
+	// Test SetTTSSaveFunc (just verify it doesn't panic)
+	e.SetTTSSaveFunc(func(text string) error {
+		return nil
+	})
+
+	// Test SetLanguageSaveFunc
+	e.SetLanguageSaveFunc(func(lang Language) error {
+		return nil
+	})
+
+	// Test SetProviderSaveFunc
+	e.SetProviderSaveFunc(func(providerName string) error {
+		return nil
+	})
+
+	// Test SetProviderAddSaveFunc
+	e.SetProviderAddSaveFunc(func(cfg ProviderConfig) error {
+		return nil
+	})
+
+	// Test SetProviderRemoveSaveFunc
+	e.SetProviderRemoveSaveFunc(func(name string) error {
+		return nil
+	})
+
+	// Test SetCommandSaveAddFunc
+	e.SetCommandSaveAddFunc(func(name, desc, prompt, exec, workDir string) error {
+		return nil
+	})
+
+	// Test SetCommandSaveDelFunc
+	e.SetCommandSaveDelFunc(func(name string) error {
+		return nil
+	})
+
+	// Test SetDisplaySaveFunc
+	e.SetDisplaySaveFunc(func(thinkMax, toolMax *int) error {
+		return nil
+	})
+
+	// Test SetConfigReloadFunc
+	e.SetConfigReloadFunc(func() (*ConfigReloadResult, error) {
+		return nil, nil
+	})
+
+	// Test SetAliasSaveAddFunc
+	e.SetAliasSaveAddFunc(func(alias, cmd string) error {
+		return nil
+	})
+
+	// Test SetAliasSaveDelFunc
+	e.SetAliasSaveDelFunc(func(alias string) error {
+		return nil
+	})
+
+	// Test SetStreamPreviewCfg
+	e.SetStreamPreviewCfg(StreamPreviewCfg{Enabled: true})
+
+	// Verify setters didn't break core functionality
+	if e.GetAgent() == nil {
+		t.Error("GetAgent should still work after setters")
+	}
+}
+
+func TestEngine_SetUserRoles(t *testing.T) {
+	agent := &stubAgent{}
+	p := &stubPlatformEngine{n: "feishu"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	mgr := NewUserRoleManager()
+	mgr.Configure("member", []RoleInput{
+		{Name: "admin", UserIDs: []string{"admin1"}, DisabledCommands: []string{}},
+		{Name: "member", UserIDs: []string{"*"}, DisabledCommands: []string{}},
+	})
+
+	e.SetUserRoles(mgr)
+
+	// Verify the manager was stored
+	e.userRolesMu.RLock()
+	stored := e.userRoles
+	e.userRolesMu.RUnlock()
+	if stored == nil {
+		t.Error("userRoles manager should be set")
+	}
+	if stored != mgr {
+		t.Error("stored manager should be the same as configured manager")
+	}
+}
+
+func TestEngine_SetStreamPreviewCfg(t *testing.T) {
+	agent := &stubAgent{}
+	p := &stubPlatformEngine{n: "feishu"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	cfg := StreamPreviewCfg{Enabled: true, IntervalMs: 1000, MinDeltaChars: 10}
+	e.SetStreamPreviewCfg(cfg)
+
+	if e.streamPreview.Enabled != true {
+		t.Error("streamPreview.Enabled should be true")
+	}
+	if e.streamPreview.IntervalMs != 1000 {
+		t.Error("streamPreview.IntervalMs mismatch")
+	}
+}
+
+func TestEngine_AddPlatform_Multiple(t *testing.T) {
+	agent := &stubAgent{}
+	p1 := &stubPlatformEngine{n: "feishu"}
+	e := NewEngine("test", agent, []Platform{p1}, "", LangEnglish)
+
+	p2 := &stubPlatformEngine{n: "telegram"}
+	p3 := &stubPlatformEngine{n: "discord"}
+
+	e.AddPlatform(p2)
+	e.AddPlatform(p3)
+
+	if len(e.platforms) != 3 {
+		t.Fatalf("expected 3 platforms, got %d", len(e.platforms))
+	}
+}
+
+func TestExtractSessionKeyParts(t *testing.T) {
+	tests := []struct {
+		name         string
+		sessionKey   string
+		wantPlatform string
+		wantChannel  string
+		wantUser     string
+	}{
+		{"full format", "feishu:channel123:user456", "feishu", "channel123", "user456"},
+		{"platform and channel only", "telegram:987654321", "telegram", "987654321", ""},
+		{"no colons", "simplekey", "simplekey", "", ""},
+		{"single colon", "discord:channel1", "discord", "channel1", ""},
+		{"empty string", "", "", "", ""},
+		{"just platform colon user", "line::user1", "line", "", "user1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotPlatform := extractPlatformName(tt.sessionKey)
+			if gotPlatform != tt.wantPlatform {
+				t.Errorf("extractPlatformName(%q) = %q, want %q", tt.sessionKey, gotPlatform, tt.wantPlatform)
+			}
+
+			gotChannel := extractChannelID(tt.sessionKey)
+			if gotChannel != tt.wantChannel {
+				t.Errorf("extractChannelID(%q) = %q, want %q", tt.sessionKey, gotChannel, tt.wantChannel)
+			}
+
+			gotUser := extractUserID(tt.sessionKey)
+			if gotUser != tt.wantUser {
+				t.Errorf("extractUserID(%q) = %q, want %q", tt.sessionKey, gotUser, tt.wantUser)
+			}
+		})
+	}
+}

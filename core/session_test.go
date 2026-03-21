@@ -404,3 +404,15 @@ func TestSession_ConcurrentGetSet(t *testing.T) {
 		t.Errorf("final GetAgentSessionID = %q, want %q", got, "id")
 	}
 }
+
+func TestSessionManager_StorePath(t *testing.T) {
+	sm := NewSessionManager("/var/data/sessions")
+	if got := sm.StorePath(); got != "/var/data/sessions" {
+		t.Errorf("StorePath() = %q, want %q", got, "/var/data/sessions")
+	}
+
+	sm2 := NewSessionManager("")
+	if got := sm2.StorePath(); got != "" {
+		t.Errorf("StorePath() empty = %q, want empty string", got)
+	}
+}

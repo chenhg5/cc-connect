@@ -445,3 +445,72 @@ func TestCronScheduler_AddJob_NormalizesSessionMode(t *testing.T) {
 		t.Errorf("SessionMode = %q, want new_per_run", job.SessionMode)
 	}
 }
+
+func TestCronStore_MarkRun(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	job := &CronJob{
+		ID:         "markrun-test",
+		Project:    "proj",
+		SessionKey: "test:ch1",
+		CronExpr:   "0 6 * * *",
+		Prompt:     "hello",
+		Enabled:    true,
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatal(err)
+	}
+
+	// MarkRun should update LastRun
+	before := time.Now()
+	store.MarkRun("markrun-test", nil)
+	after := time.Now()
+
+	updated := store.Get("markrun-test")
+	if updated.LastRun.IsZero() {
+		t.Error("LastRun should be set after MarkRun")
+	}
+	if updated.LastRun.Before(before) || updated.LastRun.After(after) {
+		t.Error("LastRun should be between before and after MarkRun call")
+	}
+}
+
+func TestCronStore_ListByProject(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Add jobs for different projects
+	jobs := []*CronJob{
+		{ID: "j1", Project: "proj1", SessionKey: "s1", CronExpr: "0 6 * * *", Prompt: "p1"},
+		{ID: "j2", Project: "proj1", SessionKey: "s2", CronExpr: "0 7 * * *", Prompt: "p2"},
+		{ID: "j3", Project: "proj2", SessionKey: "s3", CronExpr: "0 8 * * *", Prompt: "p3"},
+	}
+	for _, j := range jobs {
+		j.Enabled = true
+		if err := store.Add(j); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	list := store.ListByProject("proj1")
+	if len(list) != 2 {
+		t.Errorf("ListByProject(proj1) = %d jobs, want 2", len(list))
+	}
+
+	list2 := store.ListByProject("proj2")
+	if len(list2) != 1 {
+		t.Errorf("ListByProject(proj2) = %d jobs, want 1", len(list2))
+	}
+
+	list3 := store.ListByProject("nonexistent")
+	if len(list3) != 0 {
+		t.Errorf("ListByProject(nonexistent) = %d jobs, want 0", len(list3))
+	}
+}
