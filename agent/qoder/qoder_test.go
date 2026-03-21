@@ -64,3 +64,73 @@ func TestQoderSession(t *testing.T) {
 	}
 	fmt.Printf("Session ID: %s\n", sid)
 }
+
+// Unit tests that don't require real CLI
+
+func TestNormalizeMode(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"yolo", "yolo"},
+		{"YOLO", "yolo"},
+		{"bypass", "yolo"},
+		{"dangerously-skip-permissions", "yolo"},
+		{"default", "default"},
+		{"", "default"},
+		{"unknown", "default"},
+		{"  yolo  ", "yolo"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := normalizeMode(tt.input)
+			if got != tt.expected {
+				t.Errorf("normalizeMode(%q) = %q, want %q", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestAgent_Name(t *testing.T) {
+	a := &Agent{}
+	if got := a.Name(); got != "qoder" {
+		t.Errorf("Name() = %q, want %q", got, "qoder")
+	}
+}
+
+func TestAgent_CLIBinaryName(t *testing.T) {
+	a := &Agent{}
+	if got := a.CLIBinaryName(); got != "qodercli" {
+		t.Errorf("CLIBinaryName() = %q, want %q", got, "qodercli")
+	}
+}
+
+func TestAgent_CLIDisplayName(t *testing.T) {
+	a := &Agent{}
+	if got := a.CLIDisplayName(); got != "Qoder" {
+		t.Errorf("CLIDisplayName() = %q, want %q", got, "Qoder")
+	}
+}
+
+func TestAgent_SetWorkDir(t *testing.T) {
+	a := &Agent{}
+	a.SetWorkDir("/tmp/test")
+	if got := a.GetWorkDir(); got != "/tmp/test" {
+		t.Errorf("GetWorkDir() = %q, want %q", got, "/tmp/test")
+	}
+}
+
+func TestAgent_SetModel(t *testing.T) {
+	a := &Agent{}
+	a.SetModel("gpt-4")
+	a.mu.Lock()
+	got := a.model
+	a.mu.Unlock()
+	if got != "gpt-4" {
+		t.Errorf("model = %q, want %q", got, "gpt-4")
+	}
+}
+
+// verify Agent implements core.Agent
+var _ core.Agent = (*Agent)(nil)
