@@ -95,6 +95,17 @@ level = "info" # debug, info, warn, error
 # timeout_secs = 120        # Max relay wait in seconds; 0 = disabled (default: 120) / relay 最大等待秒数；0 = 禁用（默认 120）
 
 # =============================================================================
+# Auto-Compress / 自动压缩
+# =============================================================================
+# Automatically trigger /compress when estimated token usage exceeds threshold.
+# 当估算 token 超过阈值时自动触发 /compress。
+#
+# [projects.auto_compress]
+# enabled = true
+# max_tokens = 12000     # estimated token threshold to trigger compression
+# min_gap_mins = 30      # minimum minutes between auto-compress runs (default 30)
+
+# =============================================================================
 # Cron Settings / 定时任务设置
 # =============================================================================
 # Controls cron job behavior.

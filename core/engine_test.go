@@ -4004,6 +4004,57 @@ func TestCmdCompress_NoSession_RepliesNoSession(t *testing.T) {
 	}
 }
 
+func TestAutoCompress_TriggerAfterResult(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("auto-compress")
+	agent := &stubCompressorAgent{cmd: "/compact"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetAutoCompressConfig(true, 4, 0) // tiny threshold
+
+	key := "test:user1"
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	// Seed history so estimate crosses threshold after assistant response.
+	session := e.sessions.GetOrCreateActive(key)
+	session.AddHistory("user", "hello world")
+
+	// Simulate a full turn.
+	go e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), func() {})
+
+	sess.events <- Event{Type: EventResult, Content: "response", Done: true}
+
+	// The auto-compress should send /compact to the agent session.
+	deadline := time.After(2 * time.Second)
+	for {
+		sess.sendMu.Lock()
+		n := len(sess.sendCalls)
+		sess.sendMu.Unlock()
+		if n > 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for auto-compress send")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	sess.sendMu.Lock()
+	last := sess.sendCalls[len(sess.sendCalls)-1]
+	sess.sendMu.Unlock()
+	if last != "/compact" {
+		t.Fatalf("expected /compact auto-compress, got %q", last)
+	}
+}
+
 func TestCmdCompress_SessionBusy_RepliesPreviousProcessing(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newQueuingSession("compress-busy")
