@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -16,6 +17,8 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
+
+var telegramConvertAudioToOpus = core.ConvertAudioToOpus
 
 func init() {
 	core.RegisterPlatform("telegram", New)
@@ -581,6 +584,84 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 	return nil
 }
 
+// SendAudio sends synthesized audio back to Telegram.
+// It prefers voice messages and falls back to audio files for mp3/m4a on sendVoice failure.
+func (p *Platform) SendAudio(ctx context.Context, rctx any, audio []byte, format string) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("telegram: SendAudio: invalid reply context type %T", rctx)
+	}
+
+	sendData := audio
+	sendFormat := strings.ToLower(strings.TrimSpace(format))
+	if sendFormat == "" {
+		sendFormat = "ogg"
+	}
+
+	switch sendFormat {
+	case "ogg", "opus", "mp3", "m4a":
+		// Attempt these formats directly with sendVoice first.
+	default:
+		converted, err := telegramConvertAudioToOpus(ctx, audio, sendFormat)
+		if err != nil {
+			return fmt.Errorf("telegram: SendAudio: convert %s to opus: %w", sendFormat, err)
+		}
+		sendData = converted
+		sendFormat = "opus"
+	}
+
+	if err := p.sendVoice(rc.chatID, sendData, sendFormat); err != nil {
+		if sendFormat == "mp3" || sendFormat == "m4a" {
+			if fallbackErr := p.sendAudio(rc.chatID, sendData, sendFormat); fallbackErr == nil {
+				return nil
+			} else {
+				return fmt.Errorf(
+					"telegram: SendAudio: %w",
+					errors.Join(
+						fmt.Errorf("sendVoice failed: %w", err),
+						fmt.Errorf("sendAudio fallback failed: %w", fallbackErr),
+					),
+				)
+			}
+		}
+		return fmt.Errorf("telegram: SendAudio: sendVoice: %w", err)
+	}
+	return nil
+}
+
+func (p *Platform) sendVoice(chatID int64, audio []byte, format string) error {
+	msg := tgbotapi.NewVoice(chatID, tgbotapi.FileBytes{
+		Name:  "tts_audio." + telegramAudioFileExt(format),
+		Bytes: audio,
+	})
+	if _, err := p.bot.Send(msg); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (p *Platform) sendAudio(chatID int64, audio []byte, format string) error {
+	msg := tgbotapi.NewAudio(chatID, tgbotapi.FileBytes{
+		Name:  "tts_audio." + telegramAudioFileExt(format),
+		Bytes: audio,
+	})
+	if _, err := p.bot.Send(msg); err != nil {
+		return err
+	}
+	return nil
+}
+
+func telegramAudioFileExt(format string) string {
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "oga":
+		return "ogg"
+	case "":
+		return "bin"
+	default:
+		return strings.ToLower(strings.TrimSpace(format))
+	}
+}
+
 // SendWithButtons sends a message with an inline keyboard.
 func (p *Platform) SendWithButtons(ctx context.Context, rctx any, content string, buttons [][]core.ButtonOption) error {
 	rc, ok := rctx.(replyContext)
@@ -866,3 +947,5 @@ func sanitizeTelegramCommand(cmd string) string {
 	}
 	return result
 }
+
+var _ core.AudioSender = (*Platform)(nil)

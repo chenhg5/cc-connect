@@ -13,6 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -22,8 +24,20 @@ jobs:
 
       - name: Lint code
         run: |
+          set -euo pipefail
           go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.62.0
-          "$(go env GOPATH)/bin/golangci-lint" run ./...
+          LINT_BIN="$(go env GOPATH)/bin/golangci-lint"
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch --no-tags origin "${{ github.base_ref }}"
+            "$LINT_BIN" run --new-from-rev "origin/${{ github.base_ref }}" ./...
+          elif [ "${{ github.event_name }}" = "push" ] && [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
+            "$LINT_BIN" run --new-from-rev "${{ github.event.before }}" ./...
+          elif git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+            "$LINT_BIN" run --new-from-rev "$(git rev-parse HEAD^)" ./...
+          else
+            "$LINT_BIN" run ./...
+          fi
 
       - name: Lint GitHub workflows
         run: |
