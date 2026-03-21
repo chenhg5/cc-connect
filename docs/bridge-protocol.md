@@ -327,8 +327,8 @@ Send a structured card to the user. Only sent if the adapter declared `"card"` c
       {
         "type": "actions",
         "buttons": [
-          {"text": "GPT-4", "btn_type": "primary", "value": "cmd:/model gpt-4"},
-          {"text": "Claude", "btn_type": "default", "value": "cmd:/model claude"}
+          {"text": "GPT-4", "btn_type": "primary", "value": "cmd:/model switch gpt-4"},
+          {"text": "Claude", "btn_type": "default", "value": "cmd:/model switch claude"}
         ],
         "layout": "row"
       },
@@ -534,7 +534,7 @@ A card consists of an optional header and a list of elements:
   "text": "GPT-4 — Most capable model",
   "btn_text": "Select",
   "btn_type": "primary",
-  "btn_value": "cmd:/model gpt-4"
+  "btn_value": "cmd:/model switch gpt-4"
 }
 ```
 
@@ -544,10 +544,10 @@ A card consists of an optional header and a list of elements:
   "type": "select",
   "placeholder": "Choose a model",
   "options": [
-    {"text": "GPT-4", "value": "cmd:/model gpt-4"},
-    {"text": "Claude", "value": "cmd:/model claude"}
+    {"text": "GPT-4", "value": "cmd:/model switch gpt-4"},
+    {"text": "Claude", "value": "cmd:/model switch claude"}
   ],
-  "init_value": "cmd:/model gpt-4"
+  "init_value": "cmd:/model switch gpt-4"
 }
 ```
 

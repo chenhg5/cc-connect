@@ -55,9 +55,9 @@ type WebhookConfig struct {
 
 // BridgeConfig controls the WebSocket bridge for external platform adapters.
 type BridgeConfig struct {
-	Enabled *bool  `toml:"enabled"`         // default false
-	Port    int    `toml:"port,omitempty"`  // listen port; default 9810
-	Token   string `toml:"token,omitempty"` // shared secret for authentication; required
+	Enabled     *bool    `toml:"enabled"`                // default false
+	Port        int      `toml:"port,omitempty"`         // listen port; default 9810
+	Token       string   `toml:"token,omitempty"`        // shared secret for authentication; required
 	Path        string   `toml:"path,omitempty"`         // URL path; default "/bridge/ws"
 	CORSOrigins []string `toml:"cors_origins,omitempty"` // allowed CORS origins; empty = no CORS
 }
@@ -132,12 +132,12 @@ type SpeechConfig struct {
 
 // TTSConfig configures text-to-speech output (mirrors SpeechConfig style).
 type TTSConfig struct {
-	Enabled     bool   `toml:"enabled"`
-	Provider    string `toml:"provider"`     // "qwen" | "openai" | "minimax" | "espeak" | "pico" | "edge"
-	Voice       string `toml:"voice"`        // default voice name (for edge: "zh-CN-XiaoxiaoNeural"; for pico: "zh-CN"; for espeak: "zh")
-	TTSMode     string `toml:"tts_mode"`     // "voice_only" (default) | "always"
-	MaxTextLen  int    `toml:"max_text_len"` // max rune count before skipping TTS; 0 = no limit
-	OpenAI      struct {
+	Enabled    bool   `toml:"enabled"`
+	Provider   string `toml:"provider"`     // "qwen" | "openai" | "minimax" | "espeak" | "pico" | "edge"
+	Voice      string `toml:"voice"`        // default voice name (for edge: "zh-CN-XiaoxiaoNeural"; for pico: "zh-CN"; for espeak: "zh")
+	TTSMode    string `toml:"tts_mode"`     // "voice_only" (default) | "always"
+	MaxTextLen int    `toml:"max_text_len"` // max rune count before skipping TTS; 0 = no limit
+	OpenAI     struct {
 		APIKey  string `toml:"api_key"`
 		BaseURL string `toml:"base_url"`
 		Model   string `toml:"model"`
@@ -363,6 +363,37 @@ func SaveActiveProvider(projectName, providerName string) error {
 		}
 	}
 	return saveConfig(cfg)
+}
+
+// SaveProviderModel persists the selected model for a provider in a project.
+func SaveProviderModel(projectName, providerName, model string) error {
+	configMu.Lock()
+	defer configMu.Unlock()
+	if ConfigPath == "" {
+		return fmt.Errorf("config path not set")
+	}
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+
+	for i := range cfg.Projects {
+		if cfg.Projects[i].Name != projectName {
+			continue
+		}
+		for j := range cfg.Projects[i].Agent.Providers {
+			if cfg.Projects[i].Agent.Providers[j].Name == providerName {
+				cfg.Projects[i].Agent.Providers[j].Model = model
+				return saveConfig(cfg)
+			}
+		}
+		return fmt.Errorf("provider %q not found in project %q", providerName, projectName)
+	}
+	return fmt.Errorf("project %q not found in config", projectName)
 }
 
 // AddProviderToConfig adds a provider to a project's agent config and saves.

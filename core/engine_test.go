@@ -138,6 +138,8 @@ type stubModelModeAgent struct {
 	model           string
 	mode            string
 	reasoningEffort string
+	providers       []ProviderConfig
+	active          string
 }
 
 func (a *stubModelModeAgent) SetModel(model string) {
@@ -150,9 +152,42 @@ func (a *stubModelModeAgent) GetModel() string {
 
 func (a *stubModelModeAgent) AvailableModels(_ context.Context) []ModelOption {
 	return []ModelOption{
-		{Name: "gpt-4.1", Desc: "Balanced"},
+		{Name: "gpt-4.1", Desc: "Balanced", Alias: "gpt"},
 		{Name: "gpt-4.1-mini", Desc: "Fast"},
 	}
+}
+
+func (a *stubModelModeAgent) SetProviders(providers []ProviderConfig) {
+	a.providers = providers
+}
+
+func (a *stubModelModeAgent) GetActiveProvider() *ProviderConfig {
+	for i := range a.providers {
+		if a.providers[i].Name == a.active {
+			return &a.providers[i]
+		}
+	}
+	return nil
+}
+
+func (a *stubModelModeAgent) ListProviders() []ProviderConfig {
+	result := make([]ProviderConfig, len(a.providers))
+	copy(result, a.providers)
+	return result
+}
+
+func (a *stubModelModeAgent) SetActiveProvider(name string) bool {
+	if name == "" {
+		a.active = ""
+		return true
+	}
+	for _, prov := range a.providers {
+		if prov.Name == name {
+			a.active = name
+			return true
+		}
+	}
+	return false
 }
 
 func (a *stubModelModeAgent) SetMode(mode string) {
@@ -1959,8 +1994,65 @@ func TestCmdModel_UsesInlineButtonsOnButtonOnlyPlatform(t *testing.T) {
 	if len(p.buttonRows) == 0 {
 		t.Fatal("expected /model to send inline buttons on button-only platform")
 	}
-	if got := p.buttonRows[0][0].Data; got != "cmd:/model 1" {
-		t.Fatalf("first /model button = %q, want %q", got, "cmd:/model 1")
+	if got := p.buttonRows[0][0].Data; got != "cmd:/model switch 1" {
+		t.Fatalf("first /model button = %q, want %q", got, "cmd:/model switch 1")
+	}
+}
+
+func TestCmdModel_UpdatesActiveProviderModel(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubModelModeAgent{
+		model: "gpt-4.1-mini",
+		providers: []ProviderConfig{
+			{
+				Name:   "openai",
+				Model:  "gpt-4.1-mini",
+				Models: []ModelOption{{Name: "gpt-4.1", Alias: "gpt"}, {Name: "gpt-4.1-mini", Alias: "mini"}},
+			},
+		},
+		active: "openai",
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	var savedProvider, savedModel string
+	e.SetProviderModelSaveFunc(func(providerName, model string) error {
+		savedProvider = providerName
+		savedModel = model
+		return nil
+	})
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	s := e.sessions.GetOrCreateActive(msg.SessionKey)
+	s.SetAgentSessionID("existing-session", "test")
+
+	e.cmdModel(p, msg, []string{"switch", "gpt"})
+
+	if agent.model != "gpt-4.1" {
+		t.Fatalf("agent model = %q, want gpt-4.1", agent.model)
+	}
+	if got := agent.GetActiveProvider(); got == nil || got.Model != "gpt-4.1" {
+		t.Fatalf("active provider model = %#v, want gpt-4.1", got)
+	}
+	if got := agent.GetModel(); got != "gpt-4.1" {
+		t.Fatalf("GetModel() = %q, want gpt-4.1", got)
+	}
+	if savedProvider != "openai" || savedModel != "gpt-4.1" {
+		t.Fatalf("saved provider/model = %q/%q, want openai/gpt-4.1", savedProvider, savedModel)
+	}
+	if active := e.sessions.GetOrCreateActive(msg.SessionKey); active.AgentSessionID != "" {
+		t.Fatalf("session id = %q, want cleared after model switch", active.AgentSessionID)
+	}
+}
+
+func TestCmdModel_LegacySyntaxStillWorks(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubModelModeAgent{}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	e.cmdModel(p, msg, []string{"gpt"})
+
+	if agent.model != "gpt-4.1" {
+		t.Fatalf("agent model = %q, want gpt-4.1", agent.model)
 	}
 }
 

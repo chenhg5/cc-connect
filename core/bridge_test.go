@@ -338,7 +338,7 @@ func TestSerializeCard(t *testing.T) {
 	card := NewCard().
 		Title("Model", "blue").
 		Markdown("Choose:").
-		Buttons(PrimaryBtn("GPT-4", "cmd:/model gpt-4"), DefaultBtn("Claude", "cmd:/model claude")).
+		Buttons(PrimaryBtn("GPT-4", "cmd:/model switch gpt-4"), DefaultBtn("Claude", "cmd:/model switch claude")).
 		Divider().
 		Note("tip").
 		Build()
@@ -371,7 +371,7 @@ func TestSerializeCard(t *testing.T) {
 	if len(btns) != 2 {
 		t.Fatalf("buttons count = %d", len(btns))
 	}
-	if btns[0]["text"] != "GPT-4" || btns[0]["value"] != "cmd:/model gpt-4" {
+	if btns[0]["text"] != "GPT-4" || btns[0]["value"] != "cmd:/model switch gpt-4" {
 		t.Fatalf("button[0] = %v", btns[0])
 	}
 

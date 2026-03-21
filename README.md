@@ -245,7 +245,7 @@ cc-connect update --pre     # Beta (includes pre-releases)
 
 ```
 /model                      List available models (format: alias - model)
-/model <alias>              Switch to model by alias
+/model switch <alias>       Switch to model by alias
 ```
 
 ---

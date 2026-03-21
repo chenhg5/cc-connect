@@ -206,6 +206,22 @@ func TestProviderConfig_AddAndRemove(t *testing.T) {
 	}
 }
 
+func TestProviderConfig_SaveProviderModel(t *testing.T) {
+	writeTestConfig(t, providerConfigTOML)
+
+	if err := SaveProviderModel("demo", "primary", "gpt-5.4"); err != nil {
+		t.Fatalf("SaveProviderModel() error: %v", err)
+	}
+
+	cfg := readTestConfig(t)
+	if got := cfg.Projects[0].Agent.Providers[0].Model; got != "gpt-5.4" {
+		t.Fatalf("provider model = %q, want gpt-5.4", got)
+	}
+	if err := SaveProviderModel("demo", "missing", "gpt-4.1"); err == nil {
+		t.Fatal("SaveProviderModel() missing provider: expected error")
+	}
+}
+
 func TestCommandConfig_AddAndRemove(t *testing.T) {
 	writeTestConfig(t, baseConfigTOML)
 
