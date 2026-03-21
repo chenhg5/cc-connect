@@ -204,6 +204,8 @@ type CronAddRequest struct {
 	WorkDir     string `json:"work_dir"`
 	Description string `json:"description"`
 	Silent      *bool  `json:"silent,omitempty"`
+	SessionMode string `json:"session_mode,omitempty"`
+	TimeoutMins *int   `json:"timeout_mins,omitempty"`
 }
 
 func (s *APIServer) handleCronAdd(w http.ResponseWriter, r *http.Request) {
@@ -280,6 +282,8 @@ func (s *APIServer) handleCronAdd(w http.ResponseWriter, r *http.Request) {
 		Description: req.Description,
 		Enabled:     true,
 		Silent:      req.Silent,
+		SessionMode: NormalizeCronSessionMode(req.SessionMode),
+		TimeoutMins: req.TimeoutMins,
 	}
 	job.CreatedAt = time.Now()
 

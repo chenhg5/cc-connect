@@ -1038,6 +1038,8 @@ func (m *ManagementServer) handleCron(w http.ResponseWriter, r *http.Request) {
 			Description: req.Description,
 			Enabled:     true,
 			Silent:      req.Silent,
+			SessionMode: NormalizeCronSessionMode(req.SessionMode),
+			TimeoutMins: req.TimeoutMins,
 			CreatedAt:   time.Now(),
 		}
 		if err := m.cronScheduler.AddJob(job); err != nil {

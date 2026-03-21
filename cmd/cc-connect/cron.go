@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -35,7 +36,8 @@ func runCron(args []string) {
 }
 
 func runCronAdd(args []string) {
-	var project, sessionKey, cronExpr, prompt, execCmd, desc, dataDir string
+	var project, sessionKey, cronExpr, prompt, execCmd, desc, dataDir, sessionMode string
+	var timeoutMins *int
 
 	var positional []string
 	for i := 0; i < len(args); i++ {
@@ -74,6 +76,21 @@ func runCronAdd(args []string) {
 			if i+1 < len(args) {
 				i++
 				dataDir = args[i]
+			}
+		case "--session-mode":
+			if i+1 < len(args) {
+				i++
+				sessionMode = args[i]
+			}
+		case "--timeout-mins":
+			if i+1 < len(args) {
+				i++
+				n, err := strconv.Atoi(args[i])
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error: invalid --timeout-mins: %v\n", err)
+					os.Exit(1)
+				}
+				timeoutMins = &n
 			}
 		case "--help", "-h":
 			printCronAddUsage()
@@ -117,14 +134,21 @@ func runCronAdd(args []string) {
 		os.Exit(1)
 	}
 
-	payload, _ := json.Marshal(map[string]string{
+	body := map[string]any{
 		"project":     project,
 		"session_key": sessionKey,
 		"cron_expr":   cronExpr,
 		"prompt":      prompt,
 		"exec":        execCmd,
 		"description": desc,
-	})
+	}
+	if sessionMode != "" {
+		body["session_mode"] = sessionMode
+	}
+	if timeoutMins != nil {
+		body["timeout_mins"] = *timeoutMins
+	}
+	payload, _ := json.Marshal(body)
 
 	resp, err := apiPost(sockPath, "/cron/add", payload)
 	if err != nil {
@@ -133,14 +157,14 @@ func runCronAdd(args []string) {
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		fmt.Fprintf(os.Stderr, "Error: %s\n", strings.TrimSpace(string(body)))
+		fmt.Fprintf(os.Stderr, "Error: %s\n", strings.TrimSpace(string(respBody)))
 		os.Exit(1)
 	}
 
 	var result map[string]any
-	if err := json.Unmarshal(body, &result); err != nil {
+	if err := json.Unmarshal(respBody, &result); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: invalid response: %v\n", err)
 		os.Exit(1)
 	}
@@ -321,6 +345,8 @@ Options:
       --prompt <text>        Task prompt (runs through agent)
       --exec <command>       Shell command (runs directly, mutually exclusive with --prompt)
       --desc <text>          Short description
+      --session-mode <mode>  reuse (default) or new-per-run — fresh agent session each run
+      --timeout-mins <n>     Max minutes to wait per run (0 = no limit; default 30 if omitted)
       --data-dir <path>      Data directory (default: ~/.cc-connect)
   -h, --help                 Show this help
 
