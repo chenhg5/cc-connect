@@ -45,6 +45,7 @@ type Platform struct {
 	groupReplyAll         bool
 	shareSessionInChannel bool
 	threadIsolation       bool
+	respondToEveryone     bool
 	session               *discordgo.Session
 	handler               core.MessageHandler
 	botID                 string
@@ -66,6 +67,7 @@ func New(opts map[string]any) (core.Platform, error) {
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	threadIsolation, _ := opts["thread_isolation"].(bool)
+	respondToEveryone, _ := opts["respond_to_everyone"].(bool)
 	return &Platform{
 		token:                 token,
 		allowFrom:             allowFrom,
@@ -74,6 +76,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		shareSessionInChannel: shareSessionInChannel,
 		readyCh:               make(chan struct{}),
 		threadIsolation:       threadIsolation,
+		respondToEveryone:     respondToEveryone,
 	}, nil
 }
 
@@ -355,7 +358,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 			botRoleID = p.botRoleIDForGuild(m.GuildID)
 		}
 		if m.GuildID != "" && !p.groupReplyAll {
-			if !isDiscordBotMention(m, p.botID, botRoleID) {
+			if !isDiscordBotMention(m, p.botID, botRoleID, p.respondToEveryone) {
 				slog.Debug("discord: ignoring guild message without bot mention", "channel", m.ChannelID)
 				return
 			}
@@ -797,7 +800,10 @@ func stripDiscordMentionWithRole(text, botID string, botRoleID string) string {
 }
 
 // isDiscordBotMention checks if the message mentions the bot by user ID or managed role ID.
-func isDiscordBotMention(m *discordgo.MessageCreate, botID string, botRoleID string) bool {
+func isDiscordBotMention(m *discordgo.MessageCreate, botID string, botRoleID string, respondToEveryone bool) bool {
+	if respondToEveryone && m.MentionEveryone {
+		return true
+	}
 	for _, u := range m.Mentions {
 		if u != nil && u.ID == botID {
 			return true

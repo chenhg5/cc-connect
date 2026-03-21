@@ -750,6 +750,8 @@ app_secret = "your-feishu-app-secret"
 # share_session_in_channel = false  # If true, all users in a channel share one agent session / 频道共享会话
 # thread_isolation = false  # If true, cc-connect creates/uses Discord threads as session boundaries when the channel supports threads
 #                           # 设为 true 时，cc-connect 会在支持 thread 的 Discord 频道内按 thread 隔离会话
+# respond_to_everyone = false  # If true, treat @everyone/@here as a direct mention so the bot responds
+#                              # 设为 true 时，将 @everyone/@here 视为直接 @ 机器人，使机器人响应
 
 # LINE (uncomment to enable / 取消注释以启用)
 # 1. Create a channel at https://developers.line.biz/console/ (Messaging API)
