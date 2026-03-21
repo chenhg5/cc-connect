@@ -119,80 +119,80 @@ func (i *I18n) SetLang(lang Language) {
 type MsgKey string
 
 const (
-	MsgStarting             MsgKey = "starting"
-	MsgThinking             MsgKey = "thinking"
-	MsgTool                 MsgKey = "tool"
-	MsgExecutionStopped     MsgKey = "execution_stopped"
-	MsgNoExecution          MsgKey = "no_execution"
-	MsgPreviousProcessing   MsgKey = "previous_processing"
-	MsgMessageQueued        MsgKey = "message_queued"
-	MsgNoToolsAllowed       MsgKey = "no_tools_allowed"
-	MsgCurrentTools         MsgKey = "current_tools"
-	MsgCurrentSession       MsgKey = "current_session"
-	MsgToolAuthNotSupported MsgKey = "tool_auth_not_supported"
-	MsgToolAllowFailed      MsgKey = "tool_allow_failed"
-	MsgToolAllowedNew       MsgKey = "tool_allowed_new"
+	MsgStarting                  MsgKey = "starting"
+	MsgThinking                  MsgKey = "thinking"
+	MsgTool                      MsgKey = "tool"
+	MsgExecutionStopped          MsgKey = "execution_stopped"
+	MsgNoExecution               MsgKey = "no_execution"
+	MsgPreviousProcessing        MsgKey = "previous_processing"
+	MsgMessageQueued             MsgKey = "message_queued"
+	MsgNoToolsAllowed            MsgKey = "no_tools_allowed"
+	MsgCurrentTools              MsgKey = "current_tools"
+	MsgCurrentSession            MsgKey = "current_session"
+	MsgToolAuthNotSupported      MsgKey = "tool_auth_not_supported"
+	MsgToolAllowFailed           MsgKey = "tool_allow_failed"
+	MsgToolAllowedNew            MsgKey = "tool_allowed_new"
 	MsgError                     MsgKey = "error"
 	MsgFailedToStartAgentSession MsgKey = "failed_to_start_agent_session"
-	MsgFailedToDeleteSession    MsgKey = "failed_to_delete_session"
-	MsgEmptyResponse           MsgKey = "empty_response"
-	MsgPermissionPrompt     MsgKey = "permission_prompt"
-	MsgPermissionAllowed    MsgKey = "permission_allowed"
-	MsgPermissionApproveAll MsgKey = "permission_approve_all"
-	MsgPermissionDenied     MsgKey = "permission_denied_msg"
-	MsgPermissionHint       MsgKey = "permission_hint"
-	MsgQuietOn              MsgKey = "quiet_on"
-	MsgQuietOff             MsgKey = "quiet_off"
-	MsgQuietGlobalOn        MsgKey = "quiet_global_on"
-	MsgQuietGlobalOff       MsgKey = "quiet_global_off"
-	MsgModeChanged          MsgKey = "mode_changed"
-	MsgModeNotSupported     MsgKey = "mode_not_supported"
-	MsgSessionRestarting    MsgKey = "session_restarting"
-	MsgSessionNotStarted    MsgKey = "session_not_started"
-	MsgLangChanged          MsgKey = "lang_changed"
-	MsgLangInvalid          MsgKey = "lang_invalid"
-	MsgLangCurrent          MsgKey = "lang_current"
-	MsgUnknownCommand       MsgKey = "unknown_command"
-	MsgHelp                 MsgKey = "message_help" // change from "help", which is used now for builtin command help
-	MsgHelpTitle            MsgKey = "help_title"
-	MsgHelpSessionSection   MsgKey = "help_session_section"
-	MsgHelpAgentSection     MsgKey = "help_agent_section"
-	MsgHelpToolsSection     MsgKey = "help_tools_section"
-	MsgHelpSystemSection    MsgKey = "help_system_section"
-	MsgHelpTip              MsgKey = "help_tip"
-	MsgListTitle            MsgKey = "list_title"
-	MsgListTitlePaged       MsgKey = "list_title_paged"
-	MsgListEmpty            MsgKey = "list_empty"
-	MsgListMore             MsgKey = "list_more"
-	MsgListPageHint         MsgKey = "list_page_hint"
-	MsgListSwitchHint       MsgKey = "list_switch_hint"
-	MsgListError            MsgKey = "list_error"
-	MsgHistoryEmpty         MsgKey = "history_empty"
-	MsgNameUsage            MsgKey = "name_usage"
-	MsgNameSet              MsgKey = "name_set"
-	MsgNameNoSession        MsgKey = "name_no_session"
-	MsgProviderNotSupported MsgKey = "provider_not_supported"
-	MsgProviderNone         MsgKey = "provider_none"
-	MsgProviderCurrent      MsgKey = "provider_current"
-	MsgProviderListTitle    MsgKey = "provider_list_title"
-	MsgProviderListEmpty    MsgKey = "provider_list_empty"
-	MsgProviderSwitchHint   MsgKey = "provider_switch_hint"
-	MsgProviderNotFound     MsgKey = "provider_not_found"
-	MsgProviderSwitched     MsgKey = "provider_switched"
-	MsgProviderCleared      MsgKey = "provider_cleared"
-	MsgProviderAdded        MsgKey = "provider_added"
-	MsgProviderAddUsage     MsgKey = "provider_add_usage"
-	MsgProviderAddFailed    MsgKey = "provider_add_failed"
-	MsgProviderRemoved      MsgKey = "provider_removed"
-	MsgProviderRemoveFailed MsgKey = "provider_remove_failed"
+	MsgFailedToDeleteSession     MsgKey = "failed_to_delete_session"
+	MsgEmptyResponse             MsgKey = "empty_response"
+	MsgPermissionPrompt          MsgKey = "permission_prompt"
+	MsgPermissionAllowed         MsgKey = "permission_allowed"
+	MsgPermissionApproveAll      MsgKey = "permission_approve_all"
+	MsgPermissionDenied          MsgKey = "permission_denied_msg"
+	MsgPermissionHint            MsgKey = "permission_hint"
+	MsgQuietOn                   MsgKey = "quiet_on"
+	MsgQuietOff                  MsgKey = "quiet_off"
+	MsgQuietGlobalOn             MsgKey = "quiet_global_on"
+	MsgQuietGlobalOff            MsgKey = "quiet_global_off"
+	MsgModeChanged               MsgKey = "mode_changed"
+	MsgModeNotSupported          MsgKey = "mode_not_supported"
+	MsgSessionRestarting         MsgKey = "session_restarting"
+	MsgSessionNotStarted         MsgKey = "session_not_started"
+	MsgLangChanged               MsgKey = "lang_changed"
+	MsgLangInvalid               MsgKey = "lang_invalid"
+	MsgLangCurrent               MsgKey = "lang_current"
+	MsgUnknownCommand            MsgKey = "unknown_command"
+	MsgHelp                      MsgKey = "message_help" // change from "help", which is used now for builtin command help
+	MsgHelpTitle                 MsgKey = "help_title"
+	MsgHelpSessionSection        MsgKey = "help_session_section"
+	MsgHelpAgentSection          MsgKey = "help_agent_section"
+	MsgHelpToolsSection          MsgKey = "help_tools_section"
+	MsgHelpSystemSection         MsgKey = "help_system_section"
+	MsgHelpTip                   MsgKey = "help_tip"
+	MsgListTitle                 MsgKey = "list_title"
+	MsgListTitlePaged            MsgKey = "list_title_paged"
+	MsgListEmpty                 MsgKey = "list_empty"
+	MsgListMore                  MsgKey = "list_more"
+	MsgListPageHint              MsgKey = "list_page_hint"
+	MsgListSwitchHint            MsgKey = "list_switch_hint"
+	MsgListError                 MsgKey = "list_error"
+	MsgHistoryEmpty              MsgKey = "history_empty"
+	MsgNameUsage                 MsgKey = "name_usage"
+	MsgNameSet                   MsgKey = "name_set"
+	MsgNameNoSession             MsgKey = "name_no_session"
+	MsgProviderNotSupported      MsgKey = "provider_not_supported"
+	MsgProviderNone              MsgKey = "provider_none"
+	MsgProviderCurrent           MsgKey = "provider_current"
+	MsgProviderListTitle         MsgKey = "provider_list_title"
+	MsgProviderListEmpty         MsgKey = "provider_list_empty"
+	MsgProviderSwitchHint        MsgKey = "provider_switch_hint"
+	MsgProviderNotFound          MsgKey = "provider_not_found"
+	MsgProviderSwitched          MsgKey = "provider_switched"
+	MsgProviderCleared           MsgKey = "provider_cleared"
+	MsgProviderAdded             MsgKey = "provider_added"
+	MsgProviderAddUsage          MsgKey = "provider_add_usage"
+	MsgProviderAddFailed         MsgKey = "provider_add_failed"
+	MsgProviderRemoved           MsgKey = "provider_removed"
+	MsgProviderRemoveFailed      MsgKey = "provider_remove_failed"
 
-	MsgVoiceNotEnabled       MsgKey = "voice_not_enabled"
+	MsgVoiceNotEnabled               MsgKey = "voice_not_enabled"
 	MsgVoiceUsingPlatformRecognition MsgKey = "voice_using_platform_recognition"
-	MsgVoiceNoFFmpeg         MsgKey = "voice_no_ffmpeg"
-	MsgVoiceTranscribing     MsgKey = "voice_transcribing"
-	MsgVoiceTranscribed      MsgKey = "voice_transcribed"
-	MsgVoiceTranscribeFailed MsgKey = "voice_transcribe_failed"
-	MsgVoiceEmpty            MsgKey = "voice_empty"
+	MsgVoiceNoFFmpeg                 MsgKey = "voice_no_ffmpeg"
+	MsgVoiceTranscribing             MsgKey = "voice_transcribing"
+	MsgVoiceTranscribed              MsgKey = "voice_transcribed"
+	MsgVoiceTranscribeFailed         MsgKey = "voice_transcribe_failed"
+	MsgVoiceEmpty                    MsgKey = "voice_empty"
 
 	MsgTTSNotEnabled MsgKey = "tts_not_enabled"
 	MsgTTSStatus     MsgKey = "tts_status"
@@ -748,7 +748,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/provider [list|add|remove|switch|clear]\n  Manage API providers\n\n" +
 			"/memory [add|global|global add]\n  View/edit agent memory files\n\n" +
 			"/allow <tool>\n  Pre-allow a tool (next session)\n\n" +
-			"/model [name]\n  View/switch model\n\n" +
+			"/model [switch <name>]\n  View/switch model\n\n" +
 			"/reasoning [level]\n  View/switch reasoning effort\n\n" +
 			"/mode [name]\n  View/switch permission mode\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  View/switch language\n\n" +
@@ -791,7 +791,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/provider [list|add|remove|switch|clear]\n  管理 API Provider\n\n" +
 			"/memory [add|global|global add]\n  查看/编辑 Agent 记忆文件\n\n" +
 			"/allow <工具名>\n  预授权工具（下次会话生效）\n\n" +
-			"/model [名称]\n  查看/切换模型\n\n" +
+			"/model [switch <名称>]\n  查看/切换模型\n\n" +
 			"/reasoning [级别]\n  查看/切换推理强度\n\n" +
 			"/mode [名称]\n  查看/切换权限模式\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  查看/切换语言\n\n" +
@@ -834,7 +834,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/provider [list|add|remove|switch|clear]\n  管理 API Provider\n\n" +
 			"/memory [add|global|global add]\n  查看/編輯 Agent 記憶檔案\n\n" +
 			"/allow <工具名>\n  預授權工具（下次會話生效）\n\n" +
-			"/model [名稱]\n  查看/切換模型\n\n" +
+			"/model [switch <名稱>]\n  查看/切換模型\n\n" +
 			"/reasoning [級別]\n  查看/切換推理強度\n\n" +
 			"/mode [名稱]\n  查看/切換權限模式\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  查看/切換語言\n\n" +
@@ -876,7 +876,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/provider [list|add|remove|switch|clear]\n  API プロバイダ管理\n\n" +
 			"/memory [add|global|global add]\n  エージェントメモリの表示/編集\n\n" +
 			"/allow <ツール名>\n  ツールを事前許可（次のセッションで有効）\n\n" +
-			"/model [名前]\n  モデルの表示/切り替え\n\n" +
+			"/model [switch <名前>]\n  モデルの表示/切り替え\n\n" +
 			"/reasoning [レベル]\n  推論レベルの表示/切り替え\n\n" +
 			"/mode [名前]\n  権限モードの表示/切り替え\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  言語の表示/切り替え\n\n" +
@@ -918,7 +918,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/provider [list|add|remove|switch|clear]\n  Gestionar proveedores API\n\n" +
 			"/memory [add|global|global add]\n  Ver/editar archivos de memoria del agente\n\n" +
 			"/allow <herramienta>\n  Pre-autorizar herramienta (próxima sesión)\n\n" +
-			"/model [nombre]\n  Ver/cambiar modelo\n\n" +
+			"/model [switch <nombre>]\n  Ver/cambiar modelo\n\n" +
 			"/reasoning [nivel]\n  Ver/cambiar nivel de razonamiento\n\n" +
 			"/mode [nombre]\n  Ver/cambiar modo de permisos\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  Ver/cambiar idioma\n\n" +
@@ -1006,7 +1006,7 @@ var messages = map[MsgKey]map[Language]string{
 	},
 	MsgHelpAgentSection: {
 		LangEnglish: "**Agent Configuration**\n" +
-			"/model [name] — View/switch model\n" +
+			"/model [switch <name>] — View/switch model\n" +
 			"/mode [name] — View/switch permission mode\n" +
 			"/provider [list|add|...] — Manage API providers\n" +
 			"/memory [add|global|...] — View/edit memory files\n" +
@@ -1014,7 +1014,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|...] — View/switch language\n" +
 			"/quiet [global] — Toggle progress messages",
 		LangChinese: "**Agent 配置**\n" +
-			"/model [名称] — 查看/切换模型\n" +
+			"/model [switch <名称>] — 查看/切换模型\n" +
 			"/mode [名称] — 查看/切换权限模式\n" +
 			"/provider [list|add|...] — 管理 API Provider\n" +
 			"/memory [add|global|...] — 查看/编辑记忆文件\n" +
@@ -1022,7 +1022,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|...] — 查看/切换语言\n" +
 			"/quiet [global] — 开关进度消息",
 		LangTraditionalChinese: "**Agent 配置**\n" +
-			"/model [名稱] — 查看/切換模型\n" +
+			"/model [switch <名稱>] — 查看/切換模型\n" +
 			"/mode [名稱] — 查看/切換權限模式\n" +
 			"/provider [list|add|...] — 管理 API Provider\n" +
 			"/memory [add|global|...] — 查看/編輯記憶檔案\n" +
@@ -1030,7 +1030,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|...] — 查看/切換語言\n" +
 			"/quiet [global] — 開關進度訊息",
 		LangJapanese: "**エージェント設定**\n" +
-			"/model [名前] — モデルの表示/切り替え\n" +
+			"/model [switch <名前>] — モデルの表示/切り替え\n" +
 			"/mode [名前] — 権限モードの表示/切り替え\n" +
 			"/provider [list|add|...] — API プロバイダ管理\n" +
 			"/memory [add|global|...] — メモリの表示/編集\n" +
@@ -1038,7 +1038,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|...] — 言語の表示/切り替え\n" +
 			"/quiet [global] — 進捗メッセージの表示切替",
 		LangSpanish: "**Configuración del agente**\n" +
-			"/model [nombre] — Ver/cambiar modelo\n" +
+			"/model [switch <nombre>] — Ver/cambiar modelo\n" +
 			"/mode [nombre] — Ver/cambiar modo de permisos\n" +
 			"/provider [list|add|...] — Gestionar proveedores\n" +
 			"/memory [add|global|...] — Ver/editar memoria\n" +
@@ -1941,11 +1941,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Modelos disponibles:\n",
 	},
 	MsgModelUsage: {
-		LangEnglish:            "Usage: `/model <number>` or `/model <model_name>`",
-		LangChinese:            "用法: `/model <序号>` 或 `/model <模型名>`",
-		LangTraditionalChinese: "用法: `/model <序號>` 或 `/model <模型名>`",
-		LangJapanese:           "使い方: `/model <番号>` または `/model <モデル名>`",
-		LangSpanish:            "Uso: `/model <número>` o `/model <nombre_modelo>`",
+		LangEnglish:            "Usage: `/model switch <number>` or `/model switch <model_name>`",
+		LangChinese:            "用法: `/model switch <序号>` 或 `/model switch <模型名>`",
+		LangTraditionalChinese: "用法: `/model switch <序號>` 或 `/model switch <模型名>`",
+		LangJapanese:           "使い方: `/model switch <番号>` または `/model switch <モデル名>`",
+		LangSpanish:            "Uso: `/model switch <número>` o `/model switch <nombre_modelo>`",
 	},
 	MsgReasoningDefault: {
 		LangEnglish:            "Current reasoning effort: (not set, using Codex default)\n",

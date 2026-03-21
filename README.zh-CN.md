@@ -245,7 +245,7 @@ cc-connect update --pre     # Beta 版（含 pre-release）
 
 ```
 /model                      列出可用模型（格式：alias - model）
-/model <alias>              按别名切换模型
+/model switch <alias>       按别名切换模型
 ```
 
 ---

@@ -41,3 +41,17 @@ func TestConfiguredModels_BoundaryConditions(t *testing.T) {
 		})
 	}
 }
+
+func TestGetModel_PrefersActiveProviderModel(t *testing.T) {
+	a := &Agent{
+		model: "sonnet",
+		providers: []core.ProviderConfig{
+			{Name: "anthropic", Model: "opus"},
+		},
+		activeIdx: 0,
+	}
+
+	if got := a.GetModel(); got != "opus" {
+		t.Fatalf("GetModel() = %q, want opus", got)
+	}
+}

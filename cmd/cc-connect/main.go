@@ -466,6 +466,9 @@ func main() {
 		engine.SetProviderRemoveSaveFunc(func(name string) error {
 			return config.RemoveProviderFromConfig(projName, name)
 		})
+		engine.SetProviderModelSaveFunc(func(providerName, model string) error {
+			return config.SaveProviderModel(projName, providerName, model)
+		})
 
 		// Wire config reload
 		capturedEngine := engine

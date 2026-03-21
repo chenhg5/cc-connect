@@ -144,6 +144,7 @@ type Engine struct {
 	providerSaveFunc       func(providerName string) error
 	providerAddSaveFunc    func(p ProviderConfig) error
 	providerRemoveSaveFunc func(name string) error
+	providerModelSaveFunc  func(providerName, model string) error
 
 	ttsSaveFunc func(mode string) error
 
@@ -388,6 +389,10 @@ func (e *Engine) SetProviderAddSaveFunc(fn func(ProviderConfig) error) {
 
 func (e *Engine) SetProviderRemoveSaveFunc(fn func(string) error) {
 	e.providerRemoveSaveFunc = fn
+}
+
+func (e *Engine) SetProviderModelSaveFunc(fn func(providerName, model string) error) {
+	e.providerModelSaveFunc = fn
 }
 
 // AddPlatform appends a platform to the engine after construction.
@@ -4133,7 +4138,7 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 				if m.Name == current {
 					label = "▶ " + label
 				}
-				row = append(row, ButtonOption{Text: label, Data: fmt.Sprintf("cmd:/model %d", i+1)})
+				row = append(row, ButtonOption{Text: label, Data: fmt.Sprintf("cmd:/model switch %d", i+1)})
 				if len(row) >= 3 {
 					buttons = append(buttons, row)
 					row = nil
@@ -4151,18 +4156,24 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 		return
 	}
 
+	targetInput, ok := parseModelSwitchArgs(args)
+	if !ok {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgModelUsage))
+		return
+	}
+
 	fetchCtx, cancel := context.WithTimeout(e.ctx, 10*time.Second)
 	defer cancel()
 	models := switcher.AvailableModels(fetchCtx)
 
-	target := args[0]
+	target := targetInput
 	if idx, err := strconv.Atoi(target); err == nil && idx >= 1 && idx <= len(models) {
 		target = models[idx-1].Name
 	} else {
 		target = resolveModelAlias(models, target)
 	}
 
-	switcher.SetModel(target)
+	target = e.switchModel(target)
 	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
 
 	s := e.sessions.GetOrCreateActive(msg.SessionKey)
@@ -4183,6 +4194,56 @@ func resolveModelAlias(models []ModelOption, input string) string {
 		}
 	}
 	return input
+}
+
+func parseModelSwitchArgs(args []string) (string, bool) {
+	if len(args) == 0 {
+		return "", false
+	}
+	if len(args) == 1 {
+		if strings.EqualFold(strings.TrimSpace(args[0]), "switch") {
+			return "", false
+		}
+		return args[0], true
+	}
+	if strings.EqualFold(strings.TrimSpace(args[0]), "switch") && len(args) >= 2 {
+		return strings.TrimSpace(args[1]), true
+	}
+	return "", false
+}
+
+// switchModel applies a runtime model selection. When an active provider exists,
+// its configured model is updated so new sessions use the selected model instead
+// of the provider's previous fixed model.
+func (e *Engine) switchModel(target string) string {
+	switcher, ok := e.agent.(ModelSwitcher)
+	if !ok {
+		return target
+	}
+	switcher.SetModel(target)
+
+	providerSwitcher, ok := e.agent.(ProviderSwitcher)
+	if !ok {
+		return target
+	}
+	active := providerSwitcher.GetActiveProvider()
+	if active == nil {
+		return target
+	}
+
+	providers := providerSwitcher.ListProviders()
+	updated, found := SetProviderModel(providers, active.Name, target)
+	if !found {
+		return target
+	}
+	providerSwitcher.SetProviders(updated)
+	providerSwitcher.SetActiveProvider(active.Name)
+	if e.providerModelSaveFunc != nil {
+		if err := e.providerModelSaveFunc(active.Name, target); err != nil {
+			slog.Error("failed to save provider model", "provider", active.Name, "model", target, "error", err)
+		}
+	}
+	return target
 }
 
 func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
@@ -5306,13 +5367,16 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		fetchCtx, cancel := context.WithTimeout(e.ctx, 3*time.Second)
 		defer cancel()
 		models := switcher.AvailableModels(fetchCtx)
-		target := args
+		target, ok := parseModelSwitchArgs(strings.Fields(args))
+		if !ok {
+			return
+		}
 		if idx, err := strconv.Atoi(target); err == nil && idx >= 1 && idx <= len(models) {
 			target = models[idx-1].Name
 		} else {
 			target = resolveModelAlias(models, target)
 		}
-		switcher.SetModel(target)
+		e.switchModel(target)
 		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 		e.cleanupInteractiveState(interactiveKey)
 		s := e.sessions.GetOrCreateActive(sessionKey)
@@ -5869,7 +5933,7 @@ func (e *Engine) renderModelCard() *Card {
 		} else if m.Desc != "" {
 			label += " — " + m.Desc
 		}
-		val := fmt.Sprintf("act:/model %d", i+1)
+		val := fmt.Sprintf("act:/model switch %d", i+1)
 		opts = append(opts, CardSelectOption{Text: label, Value: val})
 		if m.Name == current {
 			initVal = val
