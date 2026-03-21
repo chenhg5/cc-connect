@@ -5294,6 +5294,8 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 // executeCardAction performs the side-effect for act: prefixed actions
 // (e.g. switching model/mode/lang) before the card is re-rendered.
 func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
+	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
+
 	switch cmd {
 	case "/model":
 		if args == "" {
@@ -5313,7 +5315,6 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 			target = resolveModelAlias(models, target)
 		}
 		switcher.SetModel(target)
-		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 		e.cleanupInteractiveState(interactiveKey)
 		s := e.sessions.GetOrCreateActive(sessionKey)
 		s.SetAgentSessionID("", "")
@@ -5336,7 +5337,6 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		for _, effort := range efforts {
 			if effort == target {
 				switcher.SetReasoningEffort(target)
-				interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 				e.cleanupInteractiveState(interactiveKey)
 				s := e.sessions.GetOrCreateActive(sessionKey)
 				s.SetAgentSessionID("", "")
@@ -5355,7 +5355,6 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 			return
 		}
 		switcher.SetMode(strings.ToLower(args))
-		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 		e.cleanupInteractiveState(interactiveKey)
 
 	case "/lang":
@@ -5391,7 +5390,6 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 			return
 		}
 		if switcher.SetActiveProvider(args) {
-			interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 			e.cleanupInteractiveState(interactiveKey)
 			if e.providerSaveFunc != nil {
 				_ = e.providerSaveFunc(args)
@@ -5399,7 +5397,6 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		}
 
 	case "/new":
-		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 		_, sessions := e.sessionContextForKey(sessionKey)
 		e.cleanupInteractiveState(interactiveKey)
 		sessions.NewSession(sessionKey, "")
@@ -5408,7 +5405,6 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		e.executeDeleteModeAction(sessionKey, args)
 
 	case "/quiet":
-		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 		e.interactiveMu.Lock()
 		state, ok := e.interactiveStates[interactiveKey]
 		if !ok || state == nil {
@@ -5435,7 +5431,6 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		if matched == nil {
 			return
 		}
-		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 		e.cleanupInteractiveState(interactiveKey)
 		session := sessions.GetOrCreateActive(sessionKey)
 		session.SetAgentInfo(matched.ID, agent.Name(), matched.Summary)
@@ -5443,9 +5438,8 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		sessions.Save()
 
 	case "/stop":
-		sessionKey = e.interactiveKeyForSessionKey(sessionKey)
 		e.interactiveMu.Lock()
-		state, ok := e.interactiveStates[sessionKey]
+		state, ok := e.interactiveStates[interactiveKey]
 		if !ok || state == nil {
 			e.interactiveMu.Unlock()
 			return
@@ -5460,16 +5454,16 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		state.agentSession = nil
 		state.mu.Unlock()
 		if quietMode {
-			e.interactiveStates[sessionKey] = &interactiveState{quiet: true}
+			e.interactiveStates[interactiveKey] = &interactiveState{quiet: true}
 		} else {
-			delete(e.interactiveStates, sessionKey)
+			delete(e.interactiveStates, interactiveKey)
 		}
 		e.interactiveMu.Unlock()
 		if pending != nil {
 			pending.resolve()
 		}
 		if agentSession != nil {
-			slog.Debug("cleanupInteractiveState: closing agent session", "session", sessionKey)
+			slog.Debug("cleanupInteractiveState: closing agent session", "session", interactiveKey)
 			go agentSession.Close()
 		}
 
