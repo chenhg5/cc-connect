@@ -311,7 +311,7 @@ func TestDuplicateMessage_MultipleDuplicateBursts(t *testing.T) {
 func TestIsDiscordBotMention_Everyone(t *testing.T) {
 	tests := []struct {
 		name               string
-		respondToEveryone  bool
+		respondToAtEveryoneAndHere  bool
 		mentionEveryone    bool
 		want               bool
 	}{
@@ -328,10 +328,10 @@ func TestIsDiscordBotMention_Everyone(t *testing.T) {
 					Author:          &discordgo.User{ID: "user1"},
 				},
 			}
-			got := isDiscordBotMention(m, "bot1", "", tt.respondToEveryone)
+			got := isDiscordBotMention(m, "bot1", "", tt.respondToAtEveryoneAndHere)
 			if got != tt.want {
-				t.Errorf("isDiscordBotMention(respondToEveryone=%v, MentionEveryone=%v) = %v, want %v",
-					tt.respondToEveryone, tt.mentionEveryone, got, tt.want)
+				t.Errorf("isDiscordBotMention(respondToAtEveryoneAndHere=%v, MentionEveryone=%v) = %v, want %v",
+					tt.respondToAtEveryoneAndHere, tt.mentionEveryone, got, tt.want)
 			}
 		})
 	}
