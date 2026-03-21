@@ -327,3 +327,15 @@ func indexOf(args []string, target string) int {
 	}
 	return -1
 }
+
+func TestCodexSession_ContinueSessionTreatedAsFresh(t *testing.T) {
+	s, err := newCodexSession(context.Background(), "/tmp", "", "", "full-auto", core.ContinueSession, nil)
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+	defer s.Close()
+
+	if got := s.CurrentSessionID(); got != "" {
+		t.Errorf("ContinueSession should be treated as fresh: threadID = %q, want empty", got)
+	}
+}

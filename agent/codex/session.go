@@ -54,7 +54,7 @@ func newCodexSession(ctx context.Context, workDir, model, effort, mode, resumeID
 	}
 	cs.alive.Store(true)
 
-	if resumeID != "" {
+	if resumeID != "" && resumeID != core.ContinueSession {
 		cs.threadID.Store(resumeID)
 	}
 

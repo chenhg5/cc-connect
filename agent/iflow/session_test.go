@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/chenhg5/cc-connect/core"
 )
 
 func TestReadExecutionInfoSessionID(t *testing.T) {
@@ -424,5 +426,17 @@ while :; do sleep 1; done
 			t.Fatalf("session still busy after timeout result: %v", err)
 		}
 		t.Fatalf("Send #2 failed: %v", err)
+	}
+}
+
+func TestIFlowSession_ContinueSessionTreatedAsFresh(t *testing.T) {
+	s, err := newIFlowSession(context.Background(), "echo", "/tmp", "", "default", core.ContinueSession, nil, 0)
+	if err != nil {
+		t.Fatalf("newIFlowSession: %v", err)
+	}
+	defer s.Close()
+
+	if got := s.CurrentSessionID(); got != "" {
+		t.Errorf("ContinueSession should be treated as fresh: sessionID = %q, want empty", got)
 	}
 }

@@ -50,7 +50,7 @@ func newOpencodeSession(ctx context.Context, cmd, workDir, model, mode, resumeID
 	}
 	s.alive.Store(true)
 
-	if resumeID != "" {
+	if resumeID != "" && resumeID != core.ContinueSession {
 		s.chatID.Store(resumeID)
 	}
 
