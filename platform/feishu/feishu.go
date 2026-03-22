@@ -105,7 +105,6 @@ type Platform struct {
 	allowFrom             string
 	groupReplyAll         bool
 	shareSessionInChannel bool
-	replyInThread         bool
 	threadIsolation       bool
 	client                *lark.Client
 	wsClient              *larkws.Client
@@ -153,7 +152,6 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	core.CheckAllowFrom(name, allowFrom)
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
-	replyInThread, _ := opts["reply_in_thread"].(bool)
 	threadIsolation, _ := opts["thread_isolation"].(bool)
 	useInteractiveCard := true
 	if v, ok := opts["enable_feishu_card"].(bool); ok {
@@ -186,7 +184,6 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		allowFrom:             allowFrom,
 		groupReplyAll:         groupReplyAll,
 		shareSessionInChannel: shareSessionInChannel,
-		replyInThread:         replyInThread,
 		threadIsolation:       threadIsolation,
 		client:                lark.NewClient(appID, appSecret, clientOpts...),
 		port:                  port,
@@ -1066,15 +1063,16 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	return nil
 }
 
-// Send sends a new message to the same chat (not a reply to original message).
-// When reply_in_thread is enabled, threads the message to the original message instead.
+// Send sends a message. When the original message ID is available, the message
+// is sent as a reply (quoting the original) so the conversation stays threaded.
+// Falls back to creating a standalone message when no message ID exists.
 func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	rc, ok := rctx.(replyContext)
 	if !ok {
 		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
 	}
 
-	if p.shouldReplyInThread(rc) {
+	if rc.messageID != "" {
 		return p.Reply(ctx, rctx, content)
 	}
 
@@ -1170,7 +1168,7 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 }
 
 func (p *Platform) sendMediaMessage(ctx context.Context, rc replyContext, msgType, content string) error {
-	if p.shouldReplyInThread(rc) {
+	if rc.messageID != "" {
 		replyResp, err := p.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
 			MessageId(rc.messageID).
 			Body(p.buildReplyMessageReqBody(rc, msgType, content)).
@@ -1678,9 +1676,6 @@ func (p *Platform) shouldReplyInThread(rc replyContext) bool {
 	if rc.messageID == "" {
 		return false
 	}
-	if p.replyInThread {
-		return true
-	}
 	return p.threadIsolation && isThreadSessionKey(rc.sessionKey)
 }
 
@@ -1783,7 +1778,7 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 	cardJSON := buildCardJSON(sanitizeMarkdownURLs(content))
 
 	var msgID string
-	if p.shouldReplyInThread(rc) {
+	if rc.messageID != "" {
 		resp, err := p.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
 			MessageId(rc.messageID).
 			Body(p.buildReplyMessageReqBody(rc, larkim.MsgTypeInteractive, cardJSON)).
@@ -1912,8 +1907,8 @@ func (p *Platform) SendAudio(ctx context.Context, rctx any, audio []byte, format
 		return fmt.Errorf("%s: build audio message: %w", p.tag(), err)
 	}
 
-	// Send audio message to chat or thread.
-	if p.shouldReplyInThread(rc) {
+	// Send audio message — reply to original message when possible.
+	if rc.messageID != "" {
 		replyResp, err := p.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
 			MessageId(rc.messageID).
 			Body(p.buildReplyMessageReqBody(rc, larkim.MsgTypeAudio, audioContent)).

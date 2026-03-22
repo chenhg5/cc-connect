@@ -594,12 +594,6 @@ func TestBuildReplyMessageReqBody_SetsReplyInThreadFlag(t *testing.T) {
 			wantThreading: false,
 		},
 		{
-			name:          "reply_in_thread enabled",
-			platform:      &Platform{replyInThread: true},
-			replyCtx:      replyContext{messageID: "om_reply"},
-			wantThreading: true,
-		},
-		{
 			name:          "plain reply remains non-threaded",
 			platform:      &Platform{},
 			replyCtx:      replyContext{messageID: "om_reply"},
