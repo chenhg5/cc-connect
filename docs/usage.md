@@ -9,6 +9,7 @@ Complete guide to using cc-connect features.
 - [API Provider Management](#api-provider-management)
 - [Model Selection](#model-selection)
 - [Feishu Setup CLI](#feishu-setup-cli)
+- [Weixin (personal) Setup CLI](#weixin-personal-setup-cli)
 - [Claude Code Router Integration](#claude-code-router-integration)
 - [Voice Messages (STT)](#voice-messages-speech-to-text)
 - [Voice Reply (TTS)](#voice-reply-text-to-speech)
@@ -250,6 +251,26 @@ Behavior:
 - If project exists but has no `feishu/lark` platform, one is added automatically.
 - The command writes credentials (`app_id`, `app_secret`); in QR onboarding flow, Feishu usually pre-configures permissions and event subscriptions.
 - Still verify app publish status and availability scope in Feishu Open Platform.
+
+---
+
+## Weixin (personal) Setup CLI
+
+Weixin personal chat uses the **ilink bot HTTP API** (long polling + `sendMessage`, same family as OpenClaw `openclaw-weixin`). Use the CLI to scan a QR code or bind an existing Bearer token and write `config.toml`.
+
+**Full walkthrough (Chinese): [docs/weixin.md](./weixin.md).**
+
+```bash
+cc-connect weixin setup --project my-project
+cc-connect weixin bind --project my-project --token '<token>'
+cc-connect weixin new --project my-project
+```
+
+Notes:
+- `setup` without `--token` runs QR login; with `--token` behaves like bind.
+- Auto-creates the project and/or a `weixin` platform block when missing.
+- After login, send a message from WeChat once so `context_token` is cached.
+- See `cc-connect weixin help` for flags (`--api-url`, `--cdn-url`, `--route-tag`, etc.).
 
 ---
 
@@ -557,7 +578,7 @@ mode = "default"
 provider = "anthropic"
 
 [[projects.platforms]]
-type = "feishu"  # or dingtalk, telegram, slack, discord, wecom, line, qq, qqbot
+type = "feishu"  # or dingtalk, telegram, slack, discord, wecom, weixin, line, qq, qqbot
 
 [projects.platforms.options]
 # platform-specific options

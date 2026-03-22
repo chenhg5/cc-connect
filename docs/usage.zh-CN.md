@@ -9,6 +9,7 @@ cc-connect 完整功能使用指南。
 - [API Provider 管理](#api-provider-管理)
 - [模型选择](#模型选择)
 - [飞书配置 CLI](#飞书配置-cli)
+- [微信个人号配置 CLI](#微信个人号配置-cli)
 - [Claude Code Router 集成](#claude-code-router-集成)
 - [语音消息（语音转文字）](#语音消息语音转文字)
 - [语音回复（文字转语音）](#语音回复文字转语音)
@@ -250,6 +251,42 @@ cc-connect feishu bind --project my-project --app cli_xxx:sec_xxx
 - 项目存在但没有 `feishu/lark` 平台时会自动补一个平台配置。
 - 命令会回填凭证（`app_id` / `app_secret`）；扫码新建场景下飞书通常会预配权限和事件订阅。
 - 建议在飞书开放平台再核验一次发布状态与可用范围。
+
+---
+
+## 微信个人号配置 CLI
+
+个人微信走 **ilink 机器人网关**（HTTP 长轮询，与 OpenClaw `openclaw-weixin` 同类）。可直接用 CLI 扫码登录或绑定已有 Token，并写回 `config.toml`。
+
+**完整图文流程与配置项说明见：[docs/weixin.md](./weixin.md)。**
+
+```bash
+# 推荐：终端展示二维码 + URL，微信扫码确认后自动写配置
+cc-connect weixin setup --project my-project
+
+# 已有 Bearer Token（例如从 OpenClaw 导出）
+cc-connect weixin bind --project my-project --token '<token>'
+cc-connect weixin setup --project my-project --token '<token>'
+
+# 强制只走扫码（不接受 --token）
+cc-connect weixin new --project my-project
+```
+
+区别说明：
+
+- `setup`：未传 `--token` 时走扫码；传了 `--token` 时等同绑定并可选校验。
+- `new`：强制扫码。
+- `bind`：强制绑定，必须 `--token`。
+
+行为说明：
+
+- `--project` 不存在时会自动创建项目；项目里没有 `weixin` 平台时会自动追加一块 `[[projects.platforms]]`。
+- 扫码成功后会写入 `token`，以及网关返回的 `base_url`（若有）、`ilink_bot_id` → `account_id` 等。
+- 默认 `--set-allow-from-empty=true`：若 `allow_from` 为空，会用扫码用户的 ilink ID 预填，便于收紧权限。
+- 绑定时默认调用 `getUpdates` 校验 Token；可用 `--skip-verify` 跳过。
+- 首次使用后请在微信里 **先发一条消息**，以便缓存 `context_token`，否则可能无法回复。
+
+常用参数：`--api-url`、`--cdn-url`、`--timeout`、`--qr-image`、`--route-tag`、`--bot-type`、`--debug`（详见 `cc-connect weixin help` 或 [weixin.md](./weixin.md)）。
 
 ---
 
@@ -554,7 +591,7 @@ mode = "default"
 provider = "anthropic"
 
 [[projects.platforms]]
-type = "feishu"  # 或 dingtalk, telegram, slack, discord, wecom, line, qq, qqbot
+type = "feishu"  # 或 dingtalk, telegram, slack, discord, wecom, weixin, line, qq, qqbot
 
 [projects.platforms.options]
 # 平台特定配置

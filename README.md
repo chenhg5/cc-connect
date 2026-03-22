@@ -57,7 +57,7 @@
 **7 AI Agents** — Claude Code, Codex, Cursor Agent, Qoder CLI, Gemini CLI, OpenCode, iFlow CLI. Use whichever fits your workflow, or all of them at once.
 
 ### 📱 Platform Flexibility
-**9 Chat Platforms** — Feishu, DingTalk, Slack, Telegram, Discord, WeChat Work, LINE, QQ, QQ Bot (Official). Most need **zero public IP**.
+**10 Chat Platforms** — Feishu, DingTalk, Slack, Telegram, Discord, WeChat Work, Weixin (personal ilink), LINE, QQ, QQ Bot (Official). Most need **zero public IP**.
 
 ### 🔄 Multi-Agent Orchestration
 **Multi-Bot Relay** — Bind multiple bots in a group chat and let them communicate with each other. Ask Claude, get insights from Gemini — all in one conversation.
@@ -190,6 +190,7 @@ cc-connect update --pre     # Beta (includes pre-releases)
 | Platform | Discord | ✅ Gateway — no public IP needed |
 | Platform | LINE | ✅ Webhook — public URL required |
 | Platform | WeChat Work | ✅ WebSocket / Webhook |
+| Platform | Weixin (personal, ilink) | ✅ HTTP long polling — no public IP needed |
 | Platform | QQ (NapCat/OneBot) | ✅ WebSocket — Beta |
 | Platform | QQ Bot (Official) | ✅ WebSocket — no public IP needed |
 
@@ -205,6 +206,7 @@ cc-connect update --pre     # Beta (includes pre-releases)
 | Slack | [docs/slack.md](docs/slack.md) | Socket Mode | No |
 | Discord | [docs/discord.md](docs/discord.md) | Gateway | No |
 | WeChat Work | [docs/wecom.md](docs/wecom.md) | WebSocket / Webhook | No (WS) / Yes (Webhook) |
+| Weixin (personal) | [docs/weixin.md](docs/weixin.md) | HTTP long polling (ilink) | No |
 | QQ / QQ Bot | [docs/qq.md](docs/qq.md) | WebSocket | No |
 
 ---

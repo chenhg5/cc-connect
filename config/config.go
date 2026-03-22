@@ -174,18 +174,18 @@ type AutoCompressConfig struct {
 
 // ProjectConfig binds one agent (with a specific work_dir) to one or more platforms.
 type ProjectConfig struct {
-	Name             string              `toml:"name"`
-	Mode             string              `toml:"mode,omitempty"`     // "" or "multi-workspace"
-	BaseDir          string              `toml:"base_dir,omitempty"` // parent dir for workspaces
-	Agent            AgentConfig         `toml:"agent"`
-	Platforms        []PlatformConfig    `toml:"platforms"`
-	Heartbeat        HeartbeatConfig     `toml:"heartbeat"`
-	AutoCompress     AutoCompressConfig  `toml:"auto_compress"`
-	Quiet            *bool               `toml:"quiet,omitempty"`             // project-level quiet mode; overrides global setting
-	InjectSender     *bool               `toml:"inject_sender,omitempty"`     // prepend sender identity (platform + user ID) to each message sent to the agent
-	DisabledCommands []string            `toml:"disabled_commands,omitempty"` // commands to disable for this project (e.g. ["restart", "upgrade"])
-	AdminFrom        string              `toml:"admin_from,omitempty"`        // comma-separated user IDs allowed to run privileged commands; "*" = all allowed users
-	Users            *UsersConfig        `toml:"users,omitempty"`             // per-user role config; nil = legacy behavior
+	Name             string             `toml:"name"`
+	Mode             string             `toml:"mode,omitempty"`     // "" or "multi-workspace"
+	BaseDir          string             `toml:"base_dir,omitempty"` // parent dir for workspaces
+	Agent            AgentConfig        `toml:"agent"`
+	Platforms        []PlatformConfig   `toml:"platforms"`
+	Heartbeat        HeartbeatConfig    `toml:"heartbeat"`
+	AutoCompress     AutoCompressConfig `toml:"auto_compress"`
+	Quiet            *bool              `toml:"quiet,omitempty"`             // project-level quiet mode; overrides global setting
+	InjectSender     *bool              `toml:"inject_sender,omitempty"`     // prepend sender identity (platform + user ID) to each message sent to the agent
+	DisabledCommands []string           `toml:"disabled_commands,omitempty"` // commands to disable for this project (e.g. ["restart", "upgrade"])
+	AdminFrom        string             `toml:"admin_from,omitempty"`        // comma-separated user IDs allowed to run privileged commands; "*" = all allowed users
+	Users            *UsersConfig       `toml:"users,omitempty"`             // per-user role config; nil = legacy behavior
 }
 
 type AgentConfig struct {
@@ -1036,6 +1036,312 @@ func firstFeishuPlatformIndex(platforms []PlatformConfig) int {
 		}
 	}
 	return -1
+}
+
+func firstWeixinPlatformIndex(platforms []PlatformConfig) int {
+	for i := range platforms {
+		t := strings.ToLower(strings.TrimSpace(platforms[i].Type))
+		if t == "weixin" {
+			return i
+		}
+	}
+	return -1
+}
+
+// EnsureProjectWithWeixinOptions controls project auto-provisioning for Weixin (ilink) setup.
+type EnsureProjectWithWeixinOptions struct {
+	ProjectName      string
+	CloneFromProject string
+	WorkDir          string
+	AgentType        string
+}
+
+// EnsureProjectWithWeixinResult describes whether project provisioning created a new project or platform block.
+type EnsureProjectWithWeixinResult struct {
+	Created          bool
+	AddedPlatform    bool
+	ProjectIndex     int
+	PlatformAbsIndex int
+}
+
+// WeixinCredentialUpdateOptions updates token (and optional URLs) for a project's Weixin platform.
+type WeixinCredentialUpdateOptions struct {
+	ProjectName       string
+	PlatformIndex     int // 1-based index among weixin platforms; 0 = first
+	Token             string
+	BaseURL           string // optional; empty = do not change in TOML
+	CDNBaseURL        string // optional; empty = do not change
+	AccountID         string // optional ilink_bot_id → options.account_id
+	ScannedUserID     string // optional ilink_user_id for allow_from when SetAllowFromEmpty
+	SetAllowFromEmpty bool
+}
+
+// WeixinCredentialUpdateResult describes where credentials were written.
+type WeixinCredentialUpdateResult struct {
+	ProjectName      string
+	ProjectIndex     int
+	PlatformAbsIndex int
+	AllowFrom        string
+}
+
+// EnsureProjectWithWeixinPlatform ensures the target project exists and has a weixin platform entry.
+func EnsureProjectWithWeixinPlatform(opts EnsureProjectWithWeixinOptions) (*EnsureProjectWithWeixinResult, error) {
+	configMu.Lock()
+	defer configMu.Unlock()
+
+	if ConfigPath == "" {
+		return nil, fmt.Errorf("config path not set")
+	}
+	projectName := strings.TrimSpace(opts.ProjectName)
+	if projectName == "" {
+		return nil, fmt.Errorf("project name is required")
+	}
+
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return nil, fmt.Errorf("read config: %w", err)
+	}
+	raw := string(data)
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+
+	for i := range cfg.Projects {
+		if cfg.Projects[i].Name != projectName {
+			continue
+		}
+		platformIdx := firstWeixinPlatformIndex(cfg.Projects[i].Platforms)
+		added := false
+		if platformIdx < 0 {
+			lines, hadTrailing := splitConfigLines(raw)
+			spans := buildRawProjectSpans(lines)
+			if i >= len(spans) {
+				return nil, fmt.Errorf("project %q located in parsed config but not raw file", projectName)
+			}
+			insertAt := spans[i].end + 1
+			block := make([]string, 0, 7)
+			if insertAt > 0 && strings.TrimSpace(lines[insertAt-1]) != "" {
+				block = append(block, "")
+			}
+			block = append(block, "[[projects.platforms]]")
+			block = append(block, `type = "weixin"`)
+			block = append(block, "")
+			block = append(block, "[projects.platforms.options]")
+			if insertAt < len(lines) && strings.TrimSpace(lines[insertAt]) != "" {
+				block = append(block, "")
+			}
+			lines = insertLines(lines, insertAt, block)
+			if err := writeRawConfig(joinConfigLines(lines, hadTrailing)); err != nil {
+				return nil, err
+			}
+			platformIdx = len(cfg.Projects[i].Platforms)
+			added = true
+		}
+		return &EnsureProjectWithWeixinResult{
+			Created:          false,
+			AddedPlatform:    added,
+			ProjectIndex:     i,
+			PlatformAbsIndex: platformIdx,
+		}, nil
+	}
+
+	proj := ProjectConfig{
+		Name:      projectName,
+		Agent:     pickAgentTemplateForNewProject(cfg, EnsureProjectWithFeishuOptions{CloneFromProject: opts.CloneFromProject, WorkDir: opts.WorkDir, AgentType: opts.AgentType}),
+		Platforms: []PlatformConfig{{Type: "weixin", Options: map[string]any{}}},
+	}
+	if proj.Agent.Type == "" {
+		proj.Agent.Type = "codex"
+	}
+	if proj.Agent.Options == nil {
+		proj.Agent.Options = map[string]any{}
+	}
+	workDir := strings.TrimSpace(opts.WorkDir)
+	if workDir != "" {
+		proj.Agent.Options["work_dir"] = workDir
+	}
+
+	lines, hadTrailing := splitConfigLines(raw)
+	if len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) != "" {
+		lines = append(lines, "")
+	}
+	lines = append(lines, "[[projects]]")
+	lines = append(lines, fmt.Sprintf("name = %s", quoteTomlString(proj.Name)))
+	lines = append(lines, "")
+	lines = append(lines, "[projects.agent]")
+	lines = append(lines, fmt.Sprintf("type = %s", quoteTomlString(proj.Agent.Type)))
+	lines = append(lines, "")
+	lines = append(lines, "[projects.agent.options]")
+	if wd, ok := proj.Agent.Options["work_dir"].(string); ok && strings.TrimSpace(wd) != "" {
+		lines = append(lines, fmt.Sprintf("work_dir = %s", quoteTomlString(wd)))
+	}
+	if mode, ok := proj.Agent.Options["mode"].(string); ok && strings.TrimSpace(mode) != "" {
+		lines = append(lines, fmt.Sprintf("mode = %s", quoteTomlString(mode)))
+	}
+	lines = append(lines, "")
+	lines = append(lines, "[[projects.platforms]]")
+	lines = append(lines, `type = "weixin"`)
+	lines = append(lines, "")
+	lines = append(lines, "[projects.platforms.options]")
+	if err := writeRawConfig(joinConfigLines(lines, hadTrailing)); err != nil {
+		return nil, err
+	}
+
+	return &EnsureProjectWithWeixinResult{
+		Created:          true,
+		AddedPlatform:    false,
+		ProjectIndex:     len(cfg.Projects),
+		PlatformAbsIndex: 0,
+	}, nil
+}
+
+// SaveWeixinPlatformCredentials updates token (and optional fields) for a project's Weixin platform.
+func SaveWeixinPlatformCredentials(opts WeixinCredentialUpdateOptions) (*WeixinCredentialUpdateResult, error) {
+	configMu.Lock()
+	defer configMu.Unlock()
+
+	if ConfigPath == "" {
+		return nil, fmt.Errorf("config path not set")
+	}
+	if strings.TrimSpace(opts.ProjectName) == "" {
+		return nil, fmt.Errorf("project name is required")
+	}
+	if strings.TrimSpace(opts.Token) == "" {
+		return nil, fmt.Errorf("token is required")
+	}
+	if opts.PlatformIndex < 0 {
+		return nil, fmt.Errorf("platform index must be >= 0")
+	}
+
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return nil, fmt.Errorf("read config: %w", err)
+	}
+	raw := string(data)
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+
+	projectIdx := -1
+	for i := range cfg.Projects {
+		if cfg.Projects[i].Name == opts.ProjectName {
+			projectIdx = i
+			break
+		}
+	}
+	if projectIdx < 0 {
+		return nil, fmt.Errorf("project %q not found", opts.ProjectName)
+	}
+
+	proj := &cfg.Projects[projectIdx]
+	candidates := make([]int, 0, len(proj.Platforms))
+	for i := range proj.Platforms {
+		t := strings.ToLower(strings.TrimSpace(proj.Platforms[i].Type))
+		if t == "weixin" {
+			candidates = append(candidates, i)
+		}
+	}
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("project %q has no weixin platform", opts.ProjectName)
+	}
+
+	targetPos := 0
+	if opts.PlatformIndex > 0 {
+		targetPos = opts.PlatformIndex - 1
+	}
+	if targetPos < 0 || targetPos >= len(candidates) {
+		return nil, fmt.Errorf(
+			"platform index %d out of range: project %q has %d weixin platform(s)",
+			opts.PlatformIndex, opts.ProjectName, len(candidates),
+		)
+	}
+
+	absIdx := candidates[targetPos]
+	platform := &proj.Platforms[absIdx]
+	if platform.Options == nil {
+		platform.Options = map[string]any{}
+	}
+
+	token := strings.TrimSpace(opts.Token)
+	platform.Options["token"] = token
+
+	if u := strings.TrimSpace(opts.BaseURL); u != "" {
+		platform.Options["base_url"] = u
+	}
+	if u := strings.TrimSpace(opts.CDNBaseURL); u != "" {
+		platform.Options["cdn_base_url"] = u
+	}
+	if id := strings.TrimSpace(opts.AccountID); id != "" {
+		platform.Options["account_id"] = id
+	}
+
+	allowFrom := strings.TrimSpace(stringOption(platform.Options["allow_from"]))
+	if opts.SetAllowFromEmpty && allowFrom == "" && strings.TrimSpace(opts.ScannedUserID) != "" {
+		allowFrom = strings.TrimSpace(opts.ScannedUserID)
+		platform.Options["allow_from"] = allowFrom
+	}
+
+	lines, hadTrailing := splitConfigLines(raw)
+	spans := buildRawProjectSpans(lines)
+	if projectIdx >= len(spans) {
+		return nil, fmt.Errorf("project %q located in parsed config but not raw file", opts.ProjectName)
+	}
+	if absIdx >= len(spans[projectIdx].platforms) {
+		return nil, fmt.Errorf("weixin platform located in parsed config but not raw file")
+	}
+
+	reloadSpan := func() rawPlatformSpan {
+		spans = buildRawProjectSpans(lines)
+		return spans[projectIdx].platforms[absIdx]
+	}
+	span := spans[projectIdx].platforms[absIdx]
+
+	if span.optionsStart < 0 {
+		insertAt := span.end + 1
+		block := make([]string, 0, 4)
+		if insertAt > 0 && strings.TrimSpace(lines[insertAt-1]) != "" {
+			block = append(block, "")
+		}
+		block = append(block, "[projects.platforms.options]")
+		if insertAt < len(lines) && strings.TrimSpace(lines[insertAt]) != "" {
+			block = append(block, "")
+		}
+		lines = insertLines(lines, insertAt, block)
+		span = reloadSpan()
+	}
+
+	lines = upsertTomlStringKey(lines, span.optionsStart+1, span.optionsEnd, "token", token)
+	span = reloadSpan()
+
+	if u := strings.TrimSpace(opts.BaseURL); u != "" {
+		lines = upsertTomlStringKey(lines, span.optionsStart+1, span.optionsEnd, "base_url", u)
+		span = reloadSpan()
+	}
+	if u := strings.TrimSpace(opts.CDNBaseURL); u != "" {
+		lines = upsertTomlStringKey(lines, span.optionsStart+1, span.optionsEnd, "cdn_base_url", u)
+		span = reloadSpan()
+	}
+	if id := strings.TrimSpace(opts.AccountID); id != "" {
+		lines = upsertTomlStringKey(lines, span.optionsStart+1, span.optionsEnd, "account_id", id)
+		span = reloadSpan()
+	}
+	if opts.SetAllowFromEmpty && strings.TrimSpace(opts.ScannedUserID) != "" {
+		lines = upsertTomlStringKey(lines, span.optionsStart+1, span.optionsEnd, "allow_from", allowFrom)
+		span = reloadSpan()
+	}
+
+	if err := writeRawConfig(joinConfigLines(lines, hadTrailing)); err != nil {
+		return nil, err
+	}
+
+	return &WeixinCredentialUpdateResult{
+		ProjectName:      opts.ProjectName,
+		ProjectIndex:     projectIdx,
+		PlatformAbsIndex: absIdx,
+		AllowFrom:        allowFrom,
+	}, nil
 }
 
 func pickAgentTemplateForNewProject(cfg *Config, opts EnsureProjectWithFeishuOptions) AgentConfig {

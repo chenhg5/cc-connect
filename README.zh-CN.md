@@ -57,7 +57,7 @@
 **7 大 AI Agent** — Claude Code、Codex、Cursor Agent、Qoder CLI、Gemini CLI、OpenCode、iFlow CLI。按需选用，或同时使用全部。
 
 ### 📱 平台灵活性
-**9 大聊天平台** — 飞书、钉钉、Slack、Telegram、Discord、企业微信、LINE、QQ、QQ 官方机器人。大部分**无需公网 IP**。
+**10 大聊天平台** — 飞书、钉钉、Slack、Telegram、Discord、企业微信、微信个人号（ilink）、LINE、QQ、QQ 官方机器人。大部分**无需公网 IP**。
 
 ### 🔄 多 Agent 编排
 **多机器人中继** — 在群聊中绑定多个机器人，让它们相互协作。问 Claude，再听 Gemini 的见解 — 同一个对话搞定。
@@ -190,6 +190,7 @@ cc-connect update --pre     # Beta 版（含 pre-release）
 | Platform | Discord | ✅ Gateway — 无需公网 IP |
 | Platform | LINE | ✅ Webhook — 需要公网 URL |
 | Platform | 企业微信 | ✅ WebSocket / Webhook |
+| Platform | 微信个人号（ilink） | ✅ HTTP 长轮询 — 无需公网 IP |
 | Platform | QQ (NapCat/OneBot) | ✅ WebSocket — Beta |
 | Platform | QQ 官方机器人 | ✅ WebSocket — 无需公网 IP |
 
@@ -205,6 +206,7 @@ cc-connect update --pre     # Beta 版（含 pre-release）
 | Slack | [docs/slack.md](docs/slack.md) | Socket Mode | 不需要 |
 | Discord | [docs/discord.md](docs/discord.md) | Gateway | 不需要 |
 | 企业微信 | [docs/wecom.md](docs/wecom.md) | WebSocket / Webhook | 不需要 (WS) / 需要 (Webhook) |
+| 微信个人号（ilink） | [docs/weixin.md](docs/weixin.md) | HTTP 长轮询（ilink） | 不需要 |
 | QQ / QQ 机器人 | [docs/qq.md](docs/qq.md) | WebSocket | 不需要 |
 
 ---

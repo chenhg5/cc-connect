@@ -34,7 +34,7 @@ PLATFORMS := \
 # ---------------------------------------------------------------------------
 
 ALL_AGENTS    := claudecode codex cursor gemini iflow opencode pi qoder
-ALL_PLATFORMS := feishu telegram discord slack dingtalk wecom qq qqbot line
+ALL_PLATFORMS := feishu telegram discord slack dingtalk wecom weixin qq qqbot line
 
 COMMA := ,
 

@@ -833,6 +833,37 @@ app_secret = "your-feishu-app-secret"
 # bot_secret = "your-bot-secret"
 # allow_from = "*"  # Allowed user IDs / 允许的用户 ID
 
+# Weixin personal (ilink bot) / 微信个人号（ilink 机器人网关）
+# Same HTTP API as OpenClaw @tencent-weixin/openclaw-weixin: long-poll getUpdates + sendMessage.
+# 与 OpenClaw 插件 openclaw-weixin 使用同一套网关：长轮询收消息 + sendMessage 下发。
+#
+# 1. Easiest: run `cc-connect weixin setup --project <name>` — terminal shows a QR; scan with WeChat to obtain token.
+#    Or: `cc-connect weixin bind --project <name> --token <bearer>` if you already have a token (e.g. from OpenClaw).
+# 2. Manual: set token below. Optional: base_url (default https://ilinkai.weixin.qq.com).
+# 3. allow_from: comma-separated Weixin user IDs (e.g. user@im.wechat) or "*".
+# State files (get_updates cursor + context_token cache) live under:
+#   <data_dir>/weixin/<project>/<account_id>/
+#
+# Inbound images / files / video / raw voice (SILK) are downloaded from Weixin CDN and AES-128-ECB decrypted
+# when encrypt_query_param + aes_key are present (aligned with OpenClaw openclaw-weixin).
+# 入站图片、文件、视频、无转写文字时的语音会从微信 CDN 拉取并按 AES-128-ECB 解密（与 OpenClaw 插件一致）。
+
+# [[projects.platforms]]
+# type = "weixin"
+#
+# [projects.platforms.options]
+# token = "your-ilink-bot-bearer-token"
+# base_url = "https://ilinkai.weixin.qq.com"   # optional / 可选
+# cdn_base_url = "https://novac2c.cdn.weixin.qq.com/c2c"   # optional; CDN download/upload / 可选 CDN 根路径
+# allow_from = "*"                             # or "user1@im.wechat,user2@im.wechat"
+# account_id = "default"                       # optional: isolate state dirs / 可选：区分多账号状态目录
+# route_tag = ""                               # optional SKRouteTag header / 可选路由头
+# long_poll_timeout_ms = 35000                 # optional / 可选
+# state_dir = ""                               # optional: override persistence directory / 可选覆盖状态目录
+# proxy = ""                                   # optional HTTP proxy / 可选代理
+# proxy_username = ""
+# proxy_password = ""
+
 # =============================================================================
 # Project 2: Using Cursor Agent / 项目 2：使用 Cursor Agent (uncomment to enable / 取消注释以启用)
 # =============================================================================

@@ -372,6 +372,24 @@ enable_markdown = false  # true = Markdown messages (WeChat Work app only; perso
 
 **Detailed guide:** [docs/wecom.md](docs/wecom.md)
 
+### Weixin (personal, ilink) — No public IP needed
+
+Personal WeChat uses Tencent’s **ilink bot HTTP API** (same family as OpenClaw `openclaw-weixin`). The recommended flow is CLI QR login, which writes `token` (and related fields) into `config.toml`.
+
+1. Run:
+
+   ```bash
+   cc-connect weixin setup --project my-project
+   ```
+
+2. Scan the QR code (or open the printed URL) in WeChat and confirm.
+
+3. Restart cc-connect, then send a message from WeChat once so `context_token` is cached.
+
+If you already have a Bearer token, use `cc-connect weixin bind --project my-project --token '<token>'`.
+
+**Detailed guide (Chinese):** [docs/weixin.md](docs/weixin.md)
+
 ### QQ (via NapCat / OneBot v11) — No public IP needed
 
 QQ integration requires a third-party OneBot v11 implementation (e.g., NapCat) as a bridge.
