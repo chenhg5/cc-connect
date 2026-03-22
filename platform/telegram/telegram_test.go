@@ -747,7 +747,7 @@ func TestSendAudioReturnsConversionErrorForWAV(t *testing.T) {
 		return nil, errors.New("mock conversion failure")
 	}
 
-	p := &Platform{bot: &tgbotapi.BotAPI{}}
+	p := &Platform{bot: &botAPIWrapper{BotAPI: &tgbotapi.BotAPI{}}}
 	err := p.SendAudio(context.Background(), replyContext{chatID: 123}, []byte("wav-data"), "wav")
 	if err == nil {
 		t.Fatal("expected conversion error")
@@ -777,5 +777,5 @@ func newTelegramTestPlatform(t *testing.T, handler func(http.ResponseWriter, *ht
 		t.Fatalf("NewBotAPIWithClient returned error: %v", err)
 	}
 
-	return &Platform{bot: bot}
+	return &Platform{bot: &botAPIWrapper{BotAPI: bot}}
 }
