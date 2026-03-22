@@ -736,9 +736,31 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		return fmt.Errorf("platform %q does not support proactive messaging (cron)", platformName)
 	}
 
-	replyCtx, err := rc.ReconstructReplyCtx(sessionKey)
-	if err != nil {
-		return fmt.Errorf("reconstruct reply context: %w", err)
+	runSessionKey := sessionKey
+	var replyCtx any
+	var err error
+	if !job.Mute {
+		if resolver, ok := targetPlatform.(CronReplyTargetResolver); ok {
+			resolvedSessionKey, resolvedReplyCtx, err := resolver.ResolveCronReplyTarget(sessionKey, cronRunTitle(job))
+			if err != nil {
+				if !errors.Is(err, ErrNotSupported) {
+					return fmt.Errorf("resolve cron reply target: %w", err)
+				}
+			} else {
+				if resolvedSessionKey != "" {
+					runSessionKey = resolvedSessionKey
+				}
+				if resolvedReplyCtx != nil {
+					replyCtx = resolvedReplyCtx
+				}
+			}
+		}
+	}
+	if replyCtx == nil {
+		replyCtx, err = rc.ReconstructReplyCtx(runSessionKey)
+		if err != nil {
+			return fmt.Errorf("reconstruct reply context: %w", err)
+		}
 	}
 
 	// Wrap platform to discard all outgoing messages when muted
@@ -780,12 +802,13 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 	}
 
 	if job.UsesNewSessionPerRun() {
-		session := e.sessions.NewSideSession(sessionKey, "cron-"+job.ID)
+		msg.SessionKey = runSessionKey
+		session := e.sessions.NewSideSession(runSessionKey, "cron-"+job.ID)
 		if !session.TryLock() {
-			return fmt.Errorf("session %q is busy", sessionKey)
+			return fmt.Errorf("session %q is busy", runSessionKey)
 		}
-		iKey := fmt.Sprintf("%s#cron:%s", sessionKey, session.ID)
-		e.processInteractiveMessageWith(effectivePlatform, msg, session, e.agent, e.sessions, iKey, "", sessionKey)
+		iKey := fmt.Sprintf("%s#cron:%s", runSessionKey, session.ID)
+		e.processInteractiveMessageWith(effectivePlatform, msg, session, e.agent, e.sessions, iKey, "", runSessionKey)
 		return nil
 	}
 
@@ -794,8 +817,27 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		return fmt.Errorf("session %q is busy", sessionKey)
 	}
 
-	e.processInteractiveMessage(effectivePlatform, msg, session)
+	e.processInteractiveMessageWith(effectivePlatform, msg, session, e.agent, e.sessions, sessionKey, "", sessionKey)
 	return nil
+}
+
+func cronRunTitle(job *CronJob) string {
+	if job == nil {
+		return "cron"
+	}
+	if desc := strings.TrimSpace(job.Description); desc != "" {
+		return truncateStr(desc, 60)
+	}
+	if job.IsShellJob() {
+		if cmd := strings.TrimSpace(job.Exec); cmd != "" {
+			return truncateStr(cmd, 60)
+		}
+		return "cron"
+	}
+	if prompt := strings.TrimSpace(job.Prompt); prompt != "" {
+		return truncateStr(prompt, 60)
+	}
+	return "cron"
 }
 
 // executeCronShell runs a shell command for a cron job and sends the output.
@@ -3562,8 +3604,7 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 
 		var cronStr string
 		if e.cronScheduler != nil {
-			jobs := e.cronScheduler.Store().ListBySessionKey(msg.SessionKey)
-			if len(jobs) > 0 {
+			if jobs := e.cronScheduler.Store().ListBySessionKey(msg.SessionKey); len(jobs) > 0 {
 				enabledCount := 0
 				for _, j := range jobs {
 					if j.Enabled {
@@ -3959,8 +4000,7 @@ func (e *Engine) renderStatusCard(sessionKey string, userID string) *Card {
 
 	var cronStr string
 	if e.cronScheduler != nil {
-		jobs := e.cronScheduler.Store().ListBySessionKey(sessionKey)
-		if len(jobs) > 0 {
+		if jobs := e.cronScheduler.Store().ListBySessionKey(sessionKey); len(jobs) > 0 {
 			enabledCount := 0
 			for _, j := range jobs {
 				if j.Enabled {
@@ -5643,7 +5683,7 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 	case "/provider":
 		return e.renderProviderCard()
 	case "/cron":
-		return e.renderCronCard(sessionKey)
+		return e.renderCronCard(sessionKey, extractUserID(sessionKey))
 	case "/heartbeat":
 		return e.renderHeartbeatCard()
 	case "/commands":
@@ -6541,7 +6581,7 @@ func (e *Engine) renderProviderCard() *Card {
 	return cb.Buttons(e.cardBackButton()).Build()
 }
 
-func (e *Engine) renderCronCard(sessionKey string) *Card {
+func (e *Engine) renderCronCard(sessionKey string, userID string) *Card {
 	if e.cronScheduler == nil {
 		return e.simpleCard(e.i18n.T(MsgCardTitleCron), "orange", e.i18n.T(MsgCronNotAvailable))
 	}
@@ -6896,7 +6936,7 @@ func (e *Engine) cmdCron(p Platform, msg *Message, args []string) {
 			e.cmdCronList(p, msg)
 			return
 		}
-		e.replyWithCard(p, msg.ReplyCtx, e.renderCronCard(msg.SessionKey))
+		e.replyWithCard(p, msg.ReplyCtx, e.renderCronCard(msg.SessionKey, msg.UserID))
 		return
 	}
 

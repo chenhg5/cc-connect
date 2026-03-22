@@ -28,8 +28,8 @@ type CronJob struct {
 	WorkDir     string    `json:"work_dir,omitempty"` // working directory for exec; empty = agent work_dir
 	Description string    `json:"description"`
 	Enabled     bool      `json:"enabled"`
-	Silent      *bool     `json:"silent,omitempty"` // suppress start notification; nil = use global default
-	Mute        bool      `json:"mute,omitempty"`   // suppress ALL messages (start + result); job runs silently
+	Silent      *bool     `json:"silent,omitempty"`       // suppress start notification; nil = use global default
+	Mute        bool      `json:"mute,omitempty"`         // suppress ALL messages (start + result); job runs silently
 	SessionMode string    `json:"session_mode,omitempty"` // "" or "reuse" = share active session; "new_per_run" = fresh session each run
 	TimeoutMins *int      `json:"timeout_mins,omitempty"` // nil = default 30m wait; 0 = no limit; >0 = minutes
 	CreatedAt   time.Time `json:"created_at"`

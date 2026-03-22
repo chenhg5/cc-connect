@@ -13,9 +13,10 @@ import (
 // ── Thread tests (upstream) ──────────────────────────────────
 
 type fakeThreadOps struct {
-	resolveChannel func(channelID string) (*discordgo.Channel, error)
-	startThread    func(channelID, messageID, name string, archiveDuration int) (*discordgo.Channel, error)
-	joinThread     func(threadID string) error
+	resolveChannel        func(channelID string) (*discordgo.Channel, error)
+	startThread           func(channelID, messageID, name string, archiveDuration int) (*discordgo.Channel, error)
+	startStandaloneThread func(channelID, name string, typ discordgo.ChannelType, archiveDuration int) (*discordgo.Channel, error)
+	joinThread            func(threadID string) error
 }
 
 func (f fakeThreadOps) ResolveChannel(channelID string) (*discordgo.Channel, error) {
@@ -30,6 +31,13 @@ func (f fakeThreadOps) StartThread(channelID, messageID, name string, archiveDur
 		return nil, nil
 	}
 	return f.startThread(channelID, messageID, name, archiveDuration)
+}
+
+func (f fakeThreadOps) StartStandaloneThread(channelID, name string, typ discordgo.ChannelType, archiveDuration int) (*discordgo.Channel, error) {
+	if f.startStandaloneThread == nil {
+		return nil, nil
+	}
+	return f.startStandaloneThread(channelID, name, typ, archiveDuration)
 }
 
 func (f fakeThreadOps) JoinThread(threadID string) error {
@@ -156,6 +164,93 @@ func TestReconstructReplyCtx_ThreadSessionKey(t *testing.T) {
 	rc := rctx.(replyContext)
 	if rc.channelID != "thread-7" || rc.threadID != "thread-7" {
 		t.Fatalf("replyContext = %#v, want thread reply context", rc)
+	}
+}
+
+func TestResolveCronReplyTarget_CreatesStandaloneThread(t *testing.T) {
+	ops := fakeThreadOps{
+		resolveChannel: func(channelID string) (*discordgo.Channel, error) {
+			return &discordgo.Channel{ID: channelID, Type: discordgo.ChannelTypeGuildText}, nil
+		},
+	}
+
+	var (
+		startChannelID string
+		startName      string
+		startType      discordgo.ChannelType
+		joinedThread   string
+	)
+	ops.startStandaloneThread = func(channelID, name string, typ discordgo.ChannelType, archiveDuration int) (*discordgo.Channel, error) {
+		startChannelID = channelID
+		startName = name
+		startType = typ
+		if archiveDuration != 1440 {
+			t.Fatalf("archiveDuration = %d, want 1440", archiveDuration)
+		}
+		return &discordgo.Channel{ID: "thread-fresh", Type: discordgo.ChannelTypeGuildPublicThread}, nil
+	}
+	ops.joinThread = func(threadID string) error {
+		joinedThread = threadID
+		return nil
+	}
+
+	sessionKey, rc, err := resolveCronReplyTarget("discord:channel-1:user-1", "Daily sync", ops)
+	if err != nil {
+		t.Fatalf("resolveCronReplyTarget() error = %v", err)
+	}
+	if sessionKey != "discord:thread-fresh" {
+		t.Fatalf("sessionKey = %q, want discord:thread-fresh", sessionKey)
+	}
+	if rc.channelID != "thread-fresh" || rc.threadID != "thread-fresh" {
+		t.Fatalf("replyContext = %#v, want fresh thread routing", rc)
+	}
+	if startChannelID != "channel-1" {
+		t.Fatalf("startChannelID = %q, want channel-1", startChannelID)
+	}
+	if startName != "Daily sync" {
+		t.Fatalf("thread name = %q, want Daily sync", startName)
+	}
+	if startType != discordgo.ChannelTypeGuildPublicThread {
+		t.Fatalf("thread type = %v, want public thread", startType)
+	}
+	if joinedThread != "thread-fresh" {
+		t.Fatalf("joinedThread = %q, want thread-fresh", joinedThread)
+	}
+}
+
+func TestResolveCronReplyTarget_ReusesExistingThreadKey(t *testing.T) {
+	ops := fakeThreadOps{
+		resolveChannel: func(channelID string) (*discordgo.Channel, error) {
+			switch channelID {
+			case "thread-1":
+				return &discordgo.Channel{ID: "thread-1", Type: discordgo.ChannelTypeGuildPublicThread, ParentID: "channel-1"}, nil
+			case "channel-1":
+				return &discordgo.Channel{ID: "channel-1", Type: discordgo.ChannelTypeGuildText}, nil
+			default:
+				t.Fatalf("unexpected channel lookup %q", channelID)
+				return nil, nil
+			}
+		},
+	}
+
+	startChannelID := ""
+	ops.startStandaloneThread = func(channelID, name string, typ discordgo.ChannelType, archiveDuration int) (*discordgo.Channel, error) {
+		startChannelID = channelID
+		return &discordgo.Channel{ID: "thread-fresh-2", Type: discordgo.ChannelTypeGuildPublicThread}, nil
+	}
+
+	sessionKey, rc, err := resolveCronReplyTarget("discord:thread-1", "cron", ops)
+	if err != nil {
+		t.Fatalf("resolveCronReplyTarget() error = %v", err)
+	}
+	if sessionKey != "discord:thread-fresh-2" {
+		t.Fatalf("sessionKey = %q, want discord:thread-fresh-2", sessionKey)
+	}
+	if rc.threadID != "thread-fresh-2" {
+		t.Fatalf("replyContext = %#v, want thread-fresh-2", rc)
+	}
+	if startChannelID != "channel-1" {
+		t.Fatalf("startChannelID = %q, want channel-1", startChannelID)
 	}
 }
 
@@ -310,10 +405,10 @@ func TestDuplicateMessage_MultipleDuplicateBursts(t *testing.T) {
 
 func TestIsDiscordBotMention_Everyone(t *testing.T) {
 	tests := []struct {
-		name               string
-		respondToAtEveryoneAndHere  bool
-		mentionEveryone    bool
-		want               bool
+		name                       string
+		respondToAtEveryoneAndHere bool
+		mentionEveryone            bool
+		want                       bool
 	}{
 		{"enabled + @everyone", true, true, true},
 		{"disabled + @everyone", false, true, false},
