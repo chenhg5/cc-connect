@@ -1978,6 +1978,38 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 
 const defaultEventIdleTimeout = 2 * time.Hour
 
+// cardToolEntry stores a tool call record for card content rendering.
+type cardToolEntry struct {
+	Index int
+	Name  string
+	Input string
+}
+
+// buildCardContent constructs the full markdown for the streaming card.
+func buildCardContent(thinking string, tools []cardToolEntry, answer string) string {
+	var sb strings.Builder
+	if thinking != "" {
+		sb.WriteString("💭 **Thinking**\n\n")
+		sb.WriteString(thinking)
+		sb.WriteString("\n\n---\n\n")
+	}
+	for _, t := range tools {
+		sb.WriteString(fmt.Sprintf("🔧 **Tool #%d**: `%s`\n", t.Index, t.Name))
+		if t.Input != "" {
+			sb.WriteString(t.Input)
+			sb.WriteString("\n")
+		}
+		sb.WriteString("\n")
+	}
+	if answer != "" {
+		if len(tools) > 0 || thinking != "" {
+			sb.WriteString("---\n\n")
+		}
+		sb.WriteString(answer)
+	}
+	return sb.String()
+}
+
 func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func()) {
 	var textParts []string
 	var segmentStart int // index into textParts: text before this has been sent/displayed
@@ -1997,6 +2029,21 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 	state.mu.Lock()
 	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx)
+
+	// Streaming card: aggregate entire turn into a single updatable card.
+	var streamCard StreamingCard
+	var cardToolCalls []cardToolEntry // track tool calls for card content
+	var cardThinkingText string       // latest thinking text
+	var cardAnswerText strings.Builder // accumulated answer text
+
+	if scp, ok := state.platform.(StreamingCardPlatform); ok {
+		if sc, err := scp.CreateStreamingCard(e.ctx, state.replyCtx); err != nil {
+			slog.Warn("streaming card creation failed, falling back to normal messages", "error", err)
+		} else {
+			streamCard = sc
+			slog.Info("streaming card created for turn", "session", sessionKey)
+		}
+	}
 	state.mu.Unlock()
 
 	// Idle timeout: 0 = disabled
@@ -2066,6 +2113,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		switch event.Type {
 		case EventThinking:
 			if !quiet && event.Content != "" {
+				// --- StreamingCard path ---
+				if streamCard != nil && !streamCard.Failed() {
+					cardThinkingText = truncateIf(event.Content, e.display.ThinkingMaxLen)
+					_ = streamCard.Update(e.ctx, buildCardContent(cardThinkingText, cardToolCalls, cardAnswerText.String()))
+					continue // skip original independent message sending
+				}
+				// --- Original path (fallback) ---
 				// Flush accumulated text segment before thinking display
 				previewActive := sp.canPreview()
 				if len(textParts) > segmentStart {
@@ -2090,6 +2144,34 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case EventToolUse:
 			toolCount++
 			if !quiet {
+				// --- StreamingCard path ---
+				if streamCard != nil && !streamCard.Failed() {
+					toolInput := event.ToolInput
+					var formattedInput string
+					if toolInput == "" {
+						formattedInput = ""
+					} else if strings.Contains(toolInput, "```") {
+						formattedInput = toolInput
+					} else if strings.Contains(toolInput, "\n") || utf8.RuneCountInString(toolInput) > 200 {
+						lang := toolCodeLang(event.ToolName, toolInput)
+						formattedInput = fmt.Sprintf("```%s\n%s\n```", lang, toolInput)
+					} else {
+						switch event.ToolName {
+						case "shell", "run_shell_command", "Bash":
+							formattedInput = fmt.Sprintf("```bash\n%s\n```", toolInput)
+						default:
+							formattedInput = fmt.Sprintf("`%s`", toolInput)
+						}
+					}
+					cardToolCalls = append(cardToolCalls, cardToolEntry{
+						Index: toolCount,
+						Name:  event.ToolName,
+						Input: formattedInput,
+					})
+					_ = streamCard.Update(e.ctx, buildCardContent(cardThinkingText, cardToolCalls, cardAnswerText.String()))
+					continue // skip original independent message sending
+				}
+				// --- Original path (fallback) ---
 				// Flush accumulated text segment before tool display
 				previewActive := sp.canPreview()
 				if len(textParts) > segmentStart {
@@ -2133,8 +2215,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventText:
 			if event.Content != "" {
-				textParts = append(textParts, event.Content)
-				if sp.canPreview() {
+				textParts = append(textParts, event.Content) // always accumulate for history
+				if streamCard != nil && !streamCard.Failed() {
+					cardAnswerText.WriteString(event.Content)
+					_ = streamCard.Update(e.ctx, buildCardContent(cardThinkingText, cardToolCalls, cardAnswerText.String()))
+				} else if sp.canPreview() {
 					sp.appendText(event.Content)
 				}
 			}
@@ -2269,37 +2354,56 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			)
 
 			replyStart := time.Now()
-			normalizedResponse := strings.TrimSpace(fullResponse)
-			state.mu.Lock()
-			suppressDuplicate := normalizedResponse != "" && normalizedResponse == state.sideText
-			state.sideText = ""
-			state.mu.Unlock()
 
-			// When tool calls happened, text was sent in segments; only send remainder.
-			if toolCount > 0 {
-				sp.finish("") // cleanup preview
-				if segmentStart < len(textParts) {
-					unsent := strings.Join(textParts[segmentStart:], "")
-					if unsent != "" {
-						for _, chunk := range splitMessage(unsent, maxPlatformMessageLen) {
-							if err := p.Send(e.ctx, replyCtx, chunk); err != nil {
-								slog.Error("failed to send reply", "error", err, "msg_id", msgID)
-								return
-							}
+			// --- StreamingCard path ---
+			if streamCard != nil && !streamCard.Failed() {
+				sp.finish("") // cleanup preview (should be no-op if card was active)
+				// Build final card content with full response
+				finalContent := buildCardContent(cardThinkingText, cardToolCalls, fullResponse)
+				if err := streamCard.Finalize(e.ctx, finalContent); err != nil {
+					slog.Error("streaming card finalize failed, sending fallback", "error", err)
+					// Fallback: send the response as a normal message
+					for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
+						if err := p.Send(e.ctx, replyCtx, chunk); err != nil {
+							slog.Error("failed to send reply", "error", err, "msg_id", msgID)
+							return
 						}
 					}
 				}
-			} else if suppressDuplicate {
-				sp.finish("")
-				slog.Debug("EventResult: suppressed duplicate side-channel text", "response_len", len(fullResponse))
-			} else if sp.finish(fullResponse) {
-				slog.Debug("EventResult: finalized via stream preview", "response_len", len(fullResponse))
 			} else {
-				slog.Debug("EventResult: sending via p.Send (preview inactive or failed)", "response_len", len(fullResponse), "chunks", len(splitMessage(fullResponse, maxPlatformMessageLen)))
-				for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
-					if err := p.Send(e.ctx, replyCtx, chunk); err != nil {
-						slog.Error("failed to send reply", "error", err, "msg_id", msgID)
-						return
+				// --- Original path (fallback) ---
+				normalizedResponse := strings.TrimSpace(fullResponse)
+				state.mu.Lock()
+				suppressDuplicate := normalizedResponse != "" && normalizedResponse == state.sideText
+				state.sideText = ""
+				state.mu.Unlock()
+
+				// When tool calls happened, text was sent in segments; only send remainder.
+				if toolCount > 0 {
+					sp.finish("") // cleanup preview
+					if segmentStart < len(textParts) {
+						unsent := strings.Join(textParts[segmentStart:], "")
+						if unsent != "" {
+							for _, chunk := range splitMessage(unsent, maxPlatformMessageLen) {
+								if err := p.Send(e.ctx, replyCtx, chunk); err != nil {
+									slog.Error("failed to send reply", "error", err, "msg_id", msgID)
+									return
+								}
+							}
+						}
+					}
+				} else if suppressDuplicate {
+					sp.finish("")
+					slog.Debug("EventResult: suppressed duplicate side-channel text", "response_len", len(fullResponse))
+				} else if sp.finish(fullResponse) {
+					slog.Debug("EventResult: finalized via stream preview", "response_len", len(fullResponse))
+				} else {
+					slog.Debug("EventResult: sending via p.Send (preview inactive or failed)", "response_len", len(fullResponse), "chunks", len(splitMessage(fullResponse, maxPlatformMessageLen)))
+					for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
+						if err := p.Send(e.ctx, replyCtx, chunk); err != nil {
+							slog.Error("failed to send reply", "error", err, "msg_id", msgID)
+							return
+						}
 					}
 				}
 			}
@@ -2400,6 +2504,21 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				firstEventLogged = false
 				waitStart = time.Now()
 				sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx)
+
+				// Reset streaming card state for the next turn
+				streamCard = nil
+				cardToolCalls = nil
+				cardThinkingText = ""
+				cardAnswerText.Reset()
+
+				// Try to create a new streaming card for the queued turn
+				if scp, ok := queued.platform.(StreamingCardPlatform); ok {
+					if sc, err := scp.CreateStreamingCard(e.ctx, queued.replyCtx); err != nil {
+						slog.Warn("streaming card creation failed for queued turn", "error", err)
+					} else {
+						streamCard = sc
+					}
+				}
 
 				session.AddHistory("user", queued.content)
 

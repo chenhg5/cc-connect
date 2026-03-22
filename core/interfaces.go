@@ -394,3 +394,25 @@ type CommandRegistrar interface {
 type ChannelNameResolver interface {
 	ResolveChannelName(channelID string) (string, error)
 }
+
+// StreamingCard represents an active streaming card that aggregates
+// an entire agent turn (tool calls, thinking, text) into a single
+// updatable message.
+type StreamingCard interface {
+	// Update replaces the card content with the given markdown.
+	// Implementations should throttle calls internally.
+	Update(ctx context.Context, content string) error
+	// Finalize sends the final content and marks the card as complete.
+	Finalize(ctx context.Context, content string) error
+	// Failed returns true if the card has entered a failed state.
+	Failed() bool
+}
+
+// StreamingCardPlatform is an optional interface for platforms that support
+// aggregating an entire agent turn into a single updatable card message
+// (e.g. DingTalk AI Card). When the engine detects this interface, it
+// creates a streaming card at the start of each turn and routes all
+// events through it instead of sending individual messages.
+type StreamingCardPlatform interface {
+	CreateStreamingCard(ctx context.Context, replyCtx any) (StreamingCard, error)
+}

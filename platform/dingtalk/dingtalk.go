@@ -28,6 +28,7 @@ type replyContext struct {
 	sessionWebhook  string
 	conversationId  string
 	senderStaffId   string
+	isGroup         bool
 }
 
 type downloadResponse struct {
@@ -48,6 +49,12 @@ type Platform struct {
 	tokenMu               sync.Mutex
 	accessToken           string
 	tokenExpiry           time.Time
+	// AI Card configuration
+	cardTemplateID  string
+	cardTemplateKey string
+	cardThrottleMs  int
+	degradeUntil    time.Time
+	degradeMu       sync.Mutex
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -80,6 +87,21 @@ func New(opts map[string]any) (core.Platform, error) {
 	}
 	// agent_id can be 0 for testing, but will fail in production
 
+	// AI Card configuration
+	cardTemplateID, _ := opts["card_template_id"].(string)
+	cardTemplateKey, _ := opts["card_template_key"].(string)
+	if cardTemplateKey == "" {
+		cardTemplateKey = "content"
+	}
+	cardThrottleMs := 300
+	if v, ok := opts["card_throttle_ms"].(float64); ok && v > 0 {
+		cardThrottleMs = int(v)
+	} else if v, ok := opts["card_throttle_ms"].(int64); ok && v > 0 {
+		cardThrottleMs = int(v)
+	} else if v, ok := opts["card_throttle_ms"].(int); ok && v > 0 {
+		cardThrottleMs = v
+	}
+
 	return &Platform{
 		clientID:              clientID,
 		clientSecret:          clientSecret,
@@ -88,6 +110,9 @@ func New(opts map[string]any) (core.Platform, error) {
 		allowFrom:             allowFrom,
 		shareSessionInChannel: shareSessionInChannel,
 		httpClient:            &http.Client{Timeout: 30 * time.Second},
+		cardTemplateID:        cardTemplateID,
+		cardTemplateKey:       cardTemplateKey,
+		cardThrottleMs:        cardThrottleMs,
 	}, nil
 }
 
@@ -172,6 +197,7 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel) {
 			sessionWebhook:  data.SessionWebhook,
 			conversationId:  data.ConversationId,
 			senderStaffId:   data.SenderStaffId,
+			isGroup:         data.ConversationType == "2",
 		},
 	}
 
@@ -213,6 +239,7 @@ func (p *Platform) handleAudioMessage(data *chatbot.BotCallbackDataModel, sessio
 					sessionWebhook:  data.SessionWebhook,
 					conversationId:  data.ConversationId,
 					senderStaffId:   data.SenderStaffId,
+					isGroup:         data.ConversationType == "2",
 				},
 				FromVoice:  true,
 			}
@@ -235,6 +262,7 @@ func (p *Platform) handleAudioMessage(data *chatbot.BotCallbackDataModel, sessio
 			sessionWebhook:  data.SessionWebhook,
 			conversationId:  data.ConversationId,
 			senderStaffId:   data.SenderStaffId,
+			isGroup:         data.ConversationType == "2",
 		},
 		FromVoice:  true,
 		Audio: &core.AudioAttachment{
@@ -498,6 +526,23 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 }
 
 var _ core.ImageSender = (*Platform)(nil)
+var _ core.StreamingCardPlatform = (*Platform)(nil)
+
+// CreateStreamingCard creates a new streaming card for the given reply context.
+// Implements core.StreamingCardPlatform.
+func (p *Platform) CreateStreamingCard(ctx context.Context, replyCtx any) (core.StreamingCard, error) {
+	if p.cardTemplateID == "" {
+		return nil, fmt.Errorf("dingtalk: card_template_id not configured")
+	}
+	if p.isCardDegraded() {
+		return nil, fmt.Errorf("dingtalk: card API temporarily degraded")
+	}
+	rc, ok := replyCtx.(replyContext)
+	if !ok {
+		return nil, fmt.Errorf("dingtalk: invalid reply context type %T", replyCtx)
+	}
+	return p.createAICard(ctx, rc)
+}
 
 // SendAudio uploads audio bytes to DingTalk and sends a voice message.
 // Implements core.AudioSender interface.
