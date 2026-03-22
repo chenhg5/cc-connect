@@ -153,7 +153,7 @@ func (bs *BridgeServer) RegisterEngine(projectName string, engine *Engine, bp *B
 	bs.enginesMu.Lock()
 	defer bs.enginesMu.Unlock()
 	if err := bp.Start(engine.handleMessage); err != nil {
-		slog.Error("bridge: failed to start platform", "project", projectName, "error", err)
+		slog.Warn("bridge: platform start failed", "project", projectName, "error", err)
 	}
 	bp.SetCardNavigationHandler(engine.handleCardNav)
 	bs.engines[projectName] = &bridgeEngineRef{engine: engine, platform: bp}
@@ -220,7 +220,9 @@ func (bs *BridgeServer) Stop() {
 	if bs.server != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = bs.server.Shutdown(ctx)
+		if err := bs.server.Shutdown(ctx); err != nil && err != http.ErrServerClosed {
+			slog.Debug("bridge: server shutdown failed", "error", err)
+		}
 	}
 }
 
@@ -498,10 +500,12 @@ func (bs *BridgeServer) handleWS(w http.ResponseWriter, r *http.Request) {
 func (bs *BridgeServer) handleConnection(conn *websocket.Conn) {
 	defer conn.Close()
 
-	_ = conn.SetReadDeadline(time.Now().Add(90 * time.Second))
+	if err := conn.SetReadDeadline(time.Now().Add(90 * time.Second)); err != nil {
+		slog.Debug("bridge: set read deadline failed", "error", err)
+		return
+	}
 	conn.SetPongHandler(func(string) error {
-		_ = conn.SetReadDeadline(time.Now().Add(90 * time.Second))
-		return nil
+		return conn.SetReadDeadline(time.Now().Add(90 * time.Second))
 	})
 
 	// First message must be "register"
@@ -513,12 +517,16 @@ func (bs *BridgeServer) handleConnection(conn *websocket.Conn) {
 
 	var reg bridgeRegister
 	if err := json.Unmarshal(raw, &reg); err != nil || reg.Type != "register" {
-		_ = writeJSON(conn, nil, map[string]any{"type": "register_ack", "ok": false, "error": "first message must be register"})
+		if err := writeJSON(conn, nil, map[string]any{"type": "register_ack", "ok": false, "error": "first message must be register"}); err != nil {
+			slog.Debug("bridge: write register ack failed", "error", err)
+		}
 		return
 	}
 
 	if reg.Platform == "" {
-		_ = writeJSON(conn, nil, map[string]any{"type": "register_ack", "ok": false, "error": "platform name is required"})
+		if err := writeJSON(conn, nil, map[string]any{"type": "register_ack", "ok": false, "error": "platform name is required"}); err != nil {
+			slog.Debug("bridge: write register ack failed", "error", err)
+		}
 		return
 	}
 
@@ -544,7 +552,10 @@ func (bs *BridgeServer) handleConnection(conn *websocket.Conn) {
 	bs.adapters[reg.Platform] = adapter
 	bs.mu.Unlock()
 
-	_ = writeJSON(conn, &adapter.writeMu, map[string]any{"type": "register_ack", "ok": true})
+	if err := writeJSON(conn, &adapter.writeMu, map[string]any{"type": "register_ack", "ok": true}); err != nil {
+		slog.Debug("bridge: write register ack failed", "error", err)
+		return
+	}
 	slog.Info("bridge: adapter registered", "platform", reg.Platform, "capabilities", reg.Capabilities)
 
 	defer func() {
@@ -557,7 +568,10 @@ func (bs *BridgeServer) handleConnection(conn *websocket.Conn) {
 	}()
 
 	for {
-		_ = conn.SetReadDeadline(time.Now().Add(90 * time.Second))
+		if err := conn.SetReadDeadline(time.Now().Add(90 * time.Second)); err != nil {
+			slog.Debug("bridge: set read deadline failed", "platform", reg.Platform, "error", err)
+			return
+		}
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
@@ -580,7 +594,10 @@ func (bs *BridgeServer) handleConnection(conn *websocket.Conn) {
 		case "preview_ack":
 			adapter.handlePreviewAck(raw)
 		case "ping":
-			_ = writeJSON(conn, &adapter.writeMu, map[string]any{"type": "pong", "ts": time.Now().UnixMilli()})
+			if err := writeJSON(conn, &adapter.writeMu, map[string]any{"type": "pong", "ts": time.Now().UnixMilli()}); err != nil {
+				slog.Debug("bridge: write pong failed", "platform", reg.Platform, "error", err)
+				return
+			}
 		default:
 			slog.Debug("bridge: unknown message type", "platform", reg.Platform, "type", base.Type)
 		}
@@ -727,9 +744,7 @@ func (a *bridgeAdapter) handlePreviewAck(raw json.RawMessage) {
 func (bs *BridgeServer) authHTTP(handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !bs.authenticate(r) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
-			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "unauthorized"})
+			bridgeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
 		handler(w, r)
@@ -739,13 +754,17 @@ func (bs *BridgeServer) authHTTP(handler http.HandlerFunc) http.HandlerFunc {
 func bridgeJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "data": data})
+	if err := json.NewEncoder(w).Encode(map[string]any{"ok": true, "data": data}); err != nil {
+		slog.Debug("bridge: write JSON failed", "error", err)
+	}
 }
 
 func bridgeError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": msg})
+	if err := json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": msg}); err != nil {
+		slog.Debug("bridge: write JSON failed", "error", err)
+	}
 }
 
 // resolveEngineForSessionKey returns the engine ref for a given session key.

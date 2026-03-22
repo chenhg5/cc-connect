@@ -51,7 +51,8 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 		return nil, fmt.Errorf("listen unix socket: %w", err)
 	}
 	if err := os.Chmod(sockPath, 0o600); err != nil {
-		slog.Warn("api: chmod socket failed", "path", sockPath, "error", err)
+		_ = listener.Close()
+		return nil, fmt.Errorf("chmod socket: %w", err)
 	}
 
 	s := &APIServer{
@@ -108,8 +109,22 @@ func (s *APIServer) Start() {
 }
 
 func (s *APIServer) Stop() {
-	s.server.Close()
-	os.Remove(s.socketPath)
+	if s.server != nil {
+		if err := s.server.Close(); err != nil && err != http.ErrServerClosed {
+			slog.Debug("api server close failed", "error", err)
+		}
+	}
+	if err := os.Remove(s.socketPath); err != nil && !os.IsNotExist(err) {
+		slog.Debug("api server remove socket failed", "error", err)
+	}
+}
+
+func apiJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		slog.Error("api server: write JSON failed", "error", err)
+	}
 }
 
 func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
@@ -155,10 +170,7 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(map[string]string{"status": "ok"}); err != nil {
-		slog.Error("api: failed to encode response", "error", err)
-	}
+	apiJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (s *APIServer) handleSessions(w http.ResponseWriter, r *http.Request) {
@@ -186,10 +198,7 @@ func (s *APIServer) handleSessions(w http.ResponseWriter, r *http.Request) {
 		e.interactiveMu.Unlock()
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(result); err != nil {
-		slog.Error("api: failed to encode response", "error", err)
-	}
+	apiJSON(w, http.StatusOK, result)
 }
 
 // ── Cron API ───────────────────────────────────────────────────
@@ -292,10 +301,7 @@ func (s *APIServer) handleCronAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(job); err != nil {
-		slog.Error("api: failed to encode response", "error", err)
-	}
+	apiJSON(w, http.StatusOK, job)
 }
 
 func (s *APIServer) handleCronList(w http.ResponseWriter, r *http.Request) {
@@ -312,8 +318,7 @@ func (s *APIServer) handleCronList(w http.ResponseWriter, r *http.Request) {
 		jobs = s.cron.Store().List()
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(jobs)
+	apiJSON(w, http.StatusOK, jobs)
 }
 
 func (s *APIServer) handleCronDel(w http.ResponseWriter, r *http.Request) {
@@ -339,8 +344,7 @@ func (s *APIServer) handleCronDel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.cron.RemoveJob(req.ID) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		apiJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	} else {
 		http.Error(w, fmt.Sprintf("job %q not found", req.ID), http.StatusNotFound)
 	}
@@ -374,8 +378,7 @@ func (s *APIServer) handleRelaySend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(resp)
+	apiJSON(w, http.StatusOK, resp)
 }
 
 func (s *APIServer) handleRelayBind(w http.ResponseWriter, r *http.Request) {
@@ -403,8 +406,7 @@ func (s *APIServer) handleRelayBind(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.relay.Bind(req.Platform, req.ChatID, req.Bots)
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	apiJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (s *APIServer) handleRelayBinding(w http.ResponseWriter, r *http.Request) {
@@ -422,6 +424,5 @@ func (s *APIServer) handleRelayBinding(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no binding found", http.StatusNotFound)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(binding)
+	apiJSON(w, http.StatusOK, binding)
 }

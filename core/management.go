@@ -27,7 +27,6 @@ type ManagementServer struct {
 	cronScheduler      *CronScheduler
 	heartbeatScheduler *HeartbeatScheduler
 	bridgeServer       *BridgeServer
-	logBuffer          *logRingBuffer
 }
 
 // NewManagementServer creates a new management API server.
@@ -38,7 +37,6 @@ func NewManagementServer(port int, token string, corsOrigins []string) *Manageme
 		corsOrigins: corsOrigins,
 		engines:     make(map[string]*Engine),
 		startedAt:   time.Now(),
-		logBuffer:   newLogRingBuffer(500),
 	}
 }
 
@@ -144,13 +142,17 @@ func (m *ManagementServer) setCORS(w http.ResponseWriter, r *http.Request) {
 func mgmtJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "data": data})
+	if err := json.NewEncoder(w).Encode(map[string]any{"ok": true, "data": data}); err != nil {
+		slog.Error("management api: write JSON failed", "error", err)
+	}
 }
 
 func mgmtError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": msg})
+	if err := json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": msg}); err != nil {
+		slog.Error("management api: write error JSON failed", "error", err)
+	}
 }
 
 func mgmtOK(w http.ResponseWriter, msg string) {
@@ -895,16 +897,16 @@ func (m *ManagementServer) handleProjectHeartbeat(w http.ResponseWriter, r *http
 			return
 		}
 		data := map[string]any{
-			"enabled":       st.Enabled,
-			"paused":        st.Paused,
-			"interval_mins": st.IntervalMins,
+			"enabled":        st.Enabled,
+			"paused":         st.Paused,
+			"interval_mins":  st.IntervalMins,
 			"only_when_idle": st.OnlyWhenIdle,
-			"session_key":   st.SessionKey,
-			"silent":        st.Silent,
-			"run_count":     st.RunCount,
-			"error_count":   st.ErrorCount,
-			"skipped_busy":  st.SkippedBusy,
-			"last_error":    st.LastError,
+			"session_key":    st.SessionKey,
+			"silent":         st.Silent,
+			"run_count":      st.RunCount,
+			"error_count":    st.ErrorCount,
+			"skipped_busy":   st.SkippedBusy,
+			"last_error":     st.LastError,
 		}
 		if !st.LastRun.IsZero() {
 			data["last_run"] = st.LastRun.Format(time.RFC3339)
@@ -1116,25 +1118,4 @@ func (m *ManagementServer) listBridgeAdapters() []map[string]any {
 		})
 	}
 	return adapters
-}
-
-// ── Log ring buffer ───────────────────────────────────────────
-
-type logRingBuffer struct {
-	entries []logEntry
-	size    int
-}
-
-type logEntry struct {
-	Time    time.Time         `json:"time"`
-	Level   string            `json:"level"`
-	Message string            `json:"message"`
-	Attrs   map[string]string `json:"attrs,omitempty"`
-}
-
-func newLogRingBuffer(size int) *logRingBuffer {
-	return &logRingBuffer{
-		entries: make([]logEntry, size),
-		size:    size,
-	}
 }

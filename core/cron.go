@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,7 +24,7 @@ type CronJob struct {
 	SessionKey  string    `json:"session_key"`
 	CronExpr    string    `json:"cron_expr"`
 	Prompt      string    `json:"prompt"`
-	Exec        string    `json:"exec,omitempty"`    // shell command; mutually exclusive with Prompt
+	Exec        string    `json:"exec,omitempty"`     // shell command; mutually exclusive with Prompt
 	WorkDir     string    `json:"work_dir,omitempty"` // working directory for exec; empty = agent work_dir
 	Description string    `json:"description"`
 	Enabled     bool      `json:"enabled"`
@@ -454,7 +455,9 @@ func (m *mutePlatform) Send(_ context.Context, _ any, _ string) error  { return 
 
 func GenerateCronID() string {
 	b := make([]byte, 4)
-	_, _ = rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Errorf("generate cron id: %w", err))
+	}
 	return hex.EncodeToString(b)
 }
 
@@ -563,15 +566,11 @@ func CronExprToHuman(expr string, lang Language) string {
 
 	// Weekday
 	if dow != "*" {
-	if d, err := fmt.Sscanf(dow, "%d", new(int)); err == nil && d == 1 {
-		var n int
-		_, _ = fmt.Sscanf(dow, "%d", &n)
-			if n >= 0 && n <= 6 {
-				if cjk {
-					parts = append(parts, weekdays[n])
-				} else {
-					parts = append(parts, "Every "+weekdays[n])
-				}
+		if n, err := strconv.Atoi(dow); err == nil && n >= 0 && n <= 6 {
+			if cjk {
+				parts = append(parts, weekdays[n])
+			} else {
+				parts = append(parts, "Every "+weekdays[n])
 			}
 		} else {
 			parts = append(parts, "weekday("+dow+")")
@@ -580,12 +579,8 @@ func CronExprToHuman(expr string, lang Language) string {
 
 	// Month
 	if month != "*" {
-	if m, err := fmt.Sscanf(month, "%d", new(int)); err == nil && m == 1 {
-		var n int
-		_, _ = fmt.Sscanf(month, "%d", &n)
-			if n >= 1 && n <= 12 {
-				parts = append(parts, months[n])
-			}
+		if n, err := strconv.Atoi(month); err == nil && n >= 1 && n <= 12 {
+			parts = append(parts, months[n])
 		}
 	}
 

@@ -48,7 +48,7 @@ type DoctorChecker interface {
 // CLI binary name and display label for doctor checks, avoiding hardcoded
 // agent-specific knowledge in core.
 type AgentDoctorInfo interface {
-	CLIBinaryName() string // e.g. "claude", "codex"
+	CLIBinaryName() string  // e.g. "claude", "codex"
 	CLIDisplayName() string // e.g. "Claude", "Codex" (for display in doctor output)
 }
 
