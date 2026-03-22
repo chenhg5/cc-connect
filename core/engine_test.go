@@ -211,6 +211,16 @@ type stubModelModeAgent struct {
 	active          string
 }
 
+type stubLiveModeSession struct {
+	stubAgentSession
+	modes []string
+}
+
+func (s *stubLiveModeSession) SetLiveMode(mode string) bool {
+	s.modes = append(s.modes, mode)
+	return true
+}
+
 func (a *stubModelModeAgent) SetModel(model string) {
 	a.model = model
 }
@@ -2616,6 +2626,41 @@ func TestCmdMode_UsesInlineButtonsOnButtonOnlyPlatform(t *testing.T) {
 	}
 	if got := p.buttonRows[0][0].Data; got != "cmd:/mode default" {
 		t.Fatalf("first /mode button = %q, want %q", got, "cmd:/mode default")
+	}
+}
+
+func TestCmdMode_AppliesLiveModeWithoutReset(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubModelModeAgent{}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	live := &stubLiveModeSession{}
+	state := &interactiveState{agentSession: live, platform: p, replyCtx: "ctx"}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	session := e.sessions.GetOrCreateActive(key)
+	session.SetAgentSessionID("existing-session", "stub")
+	session.AddHistory("user", "hello")
+
+	e.cmdMode(p, &Message{SessionKey: key, ReplyCtx: "ctx"}, []string{"yolo"})
+
+	if len(live.modes) != 1 || live.modes[0] != "yolo" {
+		t.Fatalf("live modes = %v, want [yolo]", live.modes)
+	}
+	if session.GetAgentSessionID() != "existing-session" {
+		t.Fatalf("agent session id = %q, want existing-session", session.GetAgentSessionID())
+	}
+	if len(session.GetHistory(0)) != 1 {
+		t.Fatalf("history len = %d, want 1", len(session.GetHistory(0)))
+	}
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "Current session updated immediately.") {
+		t.Fatalf("sent = %v, want live mode update reply", p.sent)
+	}
+	if got := agent.GetMode(); got != "yolo" {
+		t.Fatalf("agent mode = %q, want yolo", got)
 	}
 }
 
