@@ -47,7 +47,7 @@ jobs:
 
       - name: Get version
         id: version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
 
       - name: Build binary
         env:
@@ -57,12 +57,7 @@ jobs:
           COMMIT: ${{ github.sha }}
           BUILD_TIME: ${{ github.event.head_commit.timestamp }}
         run: |
-          BINARY_NAME="cc-connect"
-          if [ "$GOOS" = "windows" ]; then
-            BINARY_NAME="cc-connect.exe"
-          fi
-
-          OUTPUT_NAME="cc-connect-${VERSION#${v}}-${GOOS}-${GOARCH}"
+          OUTPUT_NAME="cc-connect-${VERSION#"v"}-${GOOS}-${GOARCH}"
           if [ "$GOOS" = "windows" ]; then
             OUTPUT_NAME="${OUTPUT_NAME}.exe"
           fi
@@ -82,7 +77,7 @@ jobs:
           fi
 
       - name: Upload Release Asset
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: |
             cc-connect-*.*.tar.gz
