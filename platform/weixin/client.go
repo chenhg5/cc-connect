@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -167,8 +168,24 @@ func (c *apiClient) sendMessage(ctx context.Context, msg *sendMessageReq) error 
 	if err != nil {
 		return err
 	}
-	_, err = c.post(ctx, "ilink/bot/sendmessage", payload, 0, "sendMessage")
-	return err
+	raw, err := c.post(ctx, "ilink/bot/sendmessage", payload, 0, "sendMessage")
+	if err != nil {
+		return err
+	}
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return nil
+	}
+	var resp sendMessageResp
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return fmt.Errorf("weixin: sendMessage: response json: %w: %s", err, truncateForLog(raw, 256))
+	}
+	if resp.Ret != 0 {
+		slog.Warn("weixin: sendMessage declined by API",
+			"ret", resp.Ret, "errcode", resp.Errcode, "errmsg", resp.Errmsg)
+		return fmt.Errorf("weixin: sendMessage: ret=%d errcode=%d errmsg=%s",
+			resp.Ret, resp.Errcode, resp.Errmsg)
+	}
+	return nil
 }
 
 func (c *apiClient) getUploadURL(ctx context.Context, req getUploadURLRequest) (*getUploadURLResponse, error) {

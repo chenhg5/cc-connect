@@ -1,6 +1,7 @@
 package weixin
 
 import (
+	"encoding/json"
 	"testing"
 )
 
@@ -60,5 +61,15 @@ func TestMediaOnlyItems(t *testing.T) {
 	}
 	if mediaOnlyItems([]messageItem{{Type: messageItemVoice, VoiceItem: &voiceItem{Text: "x"}}}) {
 		t.Fatal("voice with text is not media-only")
+	}
+}
+
+func TestSendMessageResp_JSON(t *testing.T) {
+	var r sendMessageResp
+	if err := json.Unmarshal([]byte(`{"ret":-1,"errcode":100,"errmsg":"rate limited"}`), &r); err != nil {
+		t.Fatal(err)
+	}
+	if r.Ret != -1 || r.Errcode != 100 || r.Errmsg != "rate limited" {
+		t.Fatalf("got %+v", r)
 	}
 }

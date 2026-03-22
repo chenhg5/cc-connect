@@ -126,6 +126,13 @@ type sendMessageReq struct {
 	BaseInfo baseInfo          `json:"base_info"`
 }
 
+// sendMessageResp is the JSON body returned by ilink/bot/sendmessage on HTTP 200.
+type sendMessageResp struct {
+	Ret     int    `json:"ret"`
+	Errcode int    `json:"errcode"`
+	Errmsg  string `json:"errmsg"`
+}
+
 type weixinOutboundMsg struct {
 	FromUserID   string        `json:"from_user_id"`
 	ToUserID     string        `json:"to_user_id"`
