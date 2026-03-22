@@ -47,6 +47,13 @@ func TestSplitUTF8(t *testing.T) {
 	}
 }
 
+func TestSplitUTF8Empty(t *testing.T) {
+	parts := splitUTF8("", maxWeixinChunk)
+	if len(parts) != 1 || parts[0] != "" {
+		t.Fatalf("parts=%#v", parts)
+	}
+}
+
 func TestMediaOnlyItems(t *testing.T) {
 	if !mediaOnlyItems([]messageItem{{Type: messageItemImage}}) {
 		t.Fatal("image should be media-only")

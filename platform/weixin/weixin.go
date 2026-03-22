@@ -385,7 +385,8 @@ func (p *Platform) dispatchInbound(ctx context.Context, m *weixinMessage, h core
 		}
 	}
 
-	dedupKey := fmt.Sprintf("%d:%d:%s", m.Seq, m.MessageID, from)
+	// Include create_time_ms and client_id so (seq,message_id)=(0,0) or duplicates are less likely to collide.
+	dedupKey := fmt.Sprintf("%s|%d|%d|%d|%s", from, m.MessageID, m.Seq, m.CreateTimeMs, strings.TrimSpace(m.ClientID))
 	p.dedupMu.Lock()
 	if p.dedup == nil {
 		p.dedup = make(map[string]time.Time)
@@ -483,6 +484,9 @@ func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string)
 	}
 	if strings.TrimSpace(rc.contextToken) == "" {
 		return fmt.Errorf("weixin: missing context_token for peer %q", rc.peerUserID)
+	}
+	if strings.TrimSpace(content) == "" {
+		return nil
 	}
 	for _, chunk := range splitUTF8(content, maxWeixinChunk) {
 		if err := p.api.sendText(ctx, rc.peerUserID, chunk, rc.contextToken, "cc-"+randomHex(6)); err != nil {

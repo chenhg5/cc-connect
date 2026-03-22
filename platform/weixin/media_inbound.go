@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/hex"
+	"fmt"
 	"log/slog"
 	"mime"
 	"path/filepath"
@@ -42,12 +43,26 @@ func (p *Platform) collectInboundMedia(ctx context.Context, items []messageItem)
 	client := p.httpClient
 	base := p.cdnBaseURL
 
+	// Deduplicate identical CDN references within one message (duplicate items / retries).
+	seenEnc := make(map[string]struct{})
+	tryEnc := func(enc string) bool {
+		if enc == "" {
+			return false
+		}
+		if _, ok := seenEnc[enc]; ok {
+			return false
+		}
+		seenEnc[enc] = struct{}{}
+		return true
+	}
+	var extraVoiceN int
+
 	for _, it := range items {
 		switch it.Type {
 		case messageItemImage:
 			img := it.ImageItem
 			enc, keyB64, hasKey := imageDecryptMaterial(img)
-			if enc == "" {
+			if enc == "" || !tryEnc(enc) {
 				continue
 			}
 			var buf []byte
@@ -71,7 +86,7 @@ func (p *Platform) collectInboundMedia(ctx context.Context, items []messageItem)
 			}
 			enc := strings.TrimSpace(f.Media.EncryptQueryParam)
 			keyB64 := strings.TrimSpace(f.Media.AESKey)
-			if enc == "" || keyB64 == "" {
+			if enc == "" || keyB64 == "" || !tryEnc(enc) {
 				continue
 			}
 			buf, err := downloadAndDecryptCDN(dlCtx, client, base, enc, keyB64, "weixin inbound file")
@@ -96,7 +111,7 @@ func (p *Platform) collectInboundMedia(ctx context.Context, items []messageItem)
 			}
 			enc := strings.TrimSpace(v.Media.EncryptQueryParam)
 			keyB64 := strings.TrimSpace(v.Media.AESKey)
-			if enc == "" || keyB64 == "" {
+			if enc == "" || keyB64 == "" || !tryEnc(enc) {
 				continue
 			}
 			buf, err := downloadAndDecryptCDN(dlCtx, client, base, enc, keyB64, "weixin inbound video")
@@ -117,7 +132,7 @@ func (p *Platform) collectInboundMedia(ctx context.Context, items []messageItem)
 			}
 			enc := strings.TrimSpace(v.Media.EncryptQueryParam)
 			keyB64 := strings.TrimSpace(v.Media.AESKey)
-			if enc == "" || keyB64 == "" {
+			if enc == "" || keyB64 == "" || !tryEnc(enc) {
 				continue
 			}
 			buf, err := downloadAndDecryptCDN(dlCtx, client, base, enc, keyB64, "weixin inbound voice")
@@ -132,6 +147,14 @@ func (p *Platform) collectInboundMedia(ctx context.Context, items []messageItem)
 			}
 			if audio == nil {
 				audio = a
+			} else {
+				// core.Message carries one Audio; extra raw voice segments go as file attachments for the agent.
+				extraVoiceN++
+				files = append(files, core.FileAttachment{
+					MimeType: "audio/silk",
+					Data:     buf,
+					FileName: fmt.Sprintf("voice_%d.silk", extraVoiceN),
+				})
 			}
 		}
 	}

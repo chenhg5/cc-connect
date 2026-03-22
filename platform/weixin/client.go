@@ -22,6 +22,9 @@ const (
 	defaultLongPollTimeout = 35 * time.Second
 	defaultAPITimeout      = 15 * time.Second
 
+	// maxIlinkHTTPResponseBody caps JSON response size (getUpdates may batch many msgs).
+	maxIlinkHTTPResponseBody = 64 << 20
+
 	channelVersion = "cc-connect-weixin/1.0"
 )
 
@@ -100,9 +103,12 @@ func (c *apiClient) post(ctx context.Context, endpoint string, body []byte, time
 		return nil, fmt.Errorf("weixin: %s: %w", label, err)
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(resp.Body)
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxIlinkHTTPResponseBody+1))
 	if err != nil {
 		return nil, fmt.Errorf("weixin: %s: read body: %w", label, err)
+	}
+	if len(raw) > maxIlinkHTTPResponseBody {
+		return nil, fmt.Errorf("weixin: %s: response body exceeds %d bytes", label, maxIlinkHTTPResponseBody)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("weixin: %s: http %d: %s", label, resp.StatusCode, truncateForLog(raw, 512))
@@ -195,6 +201,9 @@ func (c *apiClient) sendText(ctx context.Context, to, text, contextToken, client
 			Type:     messageItemText,
 			TextItem: &textItem{Text: text},
 		})
+	}
+	if len(items) == 0 {
+		return fmt.Errorf("weixin: sendText: empty item_list")
 	}
 	msg := sendMessageReq{
 		Msg: weixinOutboundMsg{
