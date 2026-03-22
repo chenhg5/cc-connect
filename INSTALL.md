@@ -372,6 +372,42 @@ enable_markdown = false  # true = Markdown messages (WeChat Work app only; perso
 
 **Detailed guide:** [docs/wecom.md](docs/wecom.md)
 
+---
+
+### Ruliu (如流自定义机器人) — Requires public URL
+
+Connection: HTTP Webhook (you need a public URL or enterprise gateway for the callback)
+
+**Setup steps:**
+1. Log in to https://qy.baidu.com and open your enterprise group
+2. Add a **custom robot** to the group and copy the generated robot `Webhook`
+3. In the robot's **Receive Message Server** settings, configure:
+   - URL: `https://<your-public-domain>/ruliu/callback`
+   - Token: any random string
+   - EncodingAESKey: generate or paste the 22-char key
+   - Enable messages like **@robot in group chat**
+4. **Start cc-connect FIRST, then save** (to pass URL verification)
+5. Ensure your public URL or gateway forwards callback traffic to local `http://127.0.0.1:8082/ruliu/callback`
+
+**Config:**
+
+```toml
+[[projects.platforms]]
+type = "ruliu"
+
+[projects.platforms.options]
+webhook = "https://openapi.im.baidu.com/your-ruliu-robot-webhook"
+token = "your-callback-token"
+encoding_aes_key = "your-22-char-encoding-aes-key"
+port = "8082"
+callback_path = "/ruliu/callback"
+# allow_from = "*"  # optional: restrict allowed user IDs
+```
+
+**Detailed guide:** [docs/ruliu.md](docs/ruliu.md)
+
+---
+
 ### QQ (via NapCat / OneBot v11) — No public IP needed
 
 QQ integration requires a third-party OneBot v11 implementation (e.g., NapCat) as a bridge.
