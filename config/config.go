@@ -30,7 +30,8 @@ type Config struct {
 	TTS             TTSConfig           `toml:"tts"`
 	Display         DisplayConfig       `toml:"display"`
 	StreamPreview   StreamPreviewConfig `toml:"stream_preview"`  // real-time streaming preview
-	RateLimit       RateLimitConfig     `toml:"rate_limit"`      // per-session rate limiting
+	RateLimit       RateLimitConfig          `toml:"rate_limit"`           // per-session rate limiting
+	OutgoingRateLimit OutgoingRateLimitConfig `toml:"outgoing_rate_limit"`  // outgoing message throttling
 	Relay           RelayConfig         `toml:"relay"`           // bot-to-bot relay behavior
 	Quiet           *bool               `toml:"quiet,omitempty"` // global default for quiet mode; project-level overrides this
 	Cron            CronConfig          `toml:"cron"`
@@ -89,6 +90,20 @@ type StreamPreviewConfig struct {
 type RateLimitConfig struct {
 	MaxMessages *int `toml:"max_messages"` // max messages per window; 0 = disabled; default 20
 	WindowSecs  *int `toml:"window_secs"`  // window size in seconds; default 60
+}
+
+// OutgoingRateLimitConfig controls how fast messages are sent TO platforms.
+// Prevents account bans on platforms with strict API rate limits (e.g. WeChat Work).
+type OutgoingRateLimitConfig struct {
+	MaxPerSecond *float64                               `toml:"max_per_second"` // messages per second; 0 = unlimited (default)
+	Burst        *int                                   `toml:"burst"`          // max burst size; default = ceil(max_per_second)
+	Platforms    map[string]OutgoingRateLimitPlatConfig  `toml:"platforms"`      // per-platform overrides keyed by platform type name
+}
+
+// OutgoingRateLimitPlatConfig is a per-platform override for outgoing rate limiting.
+type OutgoingRateLimitPlatConfig struct {
+	MaxPerSecond *float64 `toml:"max_per_second"`
+	Burst        *int     `toml:"burst"`
 }
 
 // UsersConfig controls per-user role assignments and policies within a project.
