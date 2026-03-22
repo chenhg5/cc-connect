@@ -160,7 +160,7 @@ func truncateDiscordThreadName(s string, maxRunes int) string {
 }
 
 func threadNameForMessage(m *discordgo.MessageCreate, botID string) string {
-	name := stripDiscordMention(m.Content, botID)
+	name := stripDiscordMention(m.Content, m.Mentions, m.MentionRoles)
 	name = strings.Join(strings.Fields(strings.ReplaceAll(name, "\n", " ")), " ")
 	if name == "" && m.Author != nil {
 		name = "cc " + m.Author.Username
@@ -217,6 +217,12 @@ func resolveThreadReplyContext(m *discordgo.MessageCreate, botID string, ops dis
 
 	thread, err := ops.StartThread(m.ChannelID, m.ID, threadNameForMessage(m, botID), 1440)
 	if err != nil {
+		// Another bot may have already created a thread from this message.
+		// Discord thread ID == parent message ID, so try joining directly.
+		if joinErr := ops.JoinThread(m.ID); joinErr == nil {
+			rc := replyContext{channelID: m.ID, messageID: m.ID, threadID: m.ID}
+			return buildThreadSessionKey(m.ID), rc, nil
+		}
 		return "", replyContext{}, fmt.Errorf("start thread for message %s: %w", m.ID, err)
 	}
 	if err := ops.JoinThread(thread.ID); err != nil {
@@ -359,13 +365,13 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 				slog.Debug("discord: ignoring guild message without bot mention", "channel", m.ChannelID)
 				return
 			}
-			m.Content = stripDiscordMentionWithRole(m.Content, p.botID, botRoleID)
 		}
 
 		slog.Debug("discord: message received", "user", m.Author.Username, "channel", m.ChannelID)
 
 		sessionKey := p.makeSessionKey(m.ChannelID, m.Author.ID)
 		rctx := replyContext{channelID: m.ChannelID, messageID: m.ID}
+		// Resolve thread before stripping mentions so thread name keeps @usernames.
 		if p.threadIsolation && m.GuildID != "" {
 			threadSessionKey, threadCtx, err := resolveThreadReplyContext(m, p.botID, sessionThreadOps{session: p.session})
 			if err != nil {
@@ -374,6 +380,11 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 				sessionKey = threadSessionKey
 				rctx = threadCtx
 			}
+		}
+
+		// Strip bot mention from content after thread name is built.
+		if m.GuildID != "" && !p.groupReplyAll {
+			m.Content = stripDiscordMentionWithRole(m.Content, p.botID, botRoleID)
 		}
 
 		var images []core.ImageAttachment
@@ -782,9 +793,17 @@ func (p *Platform) Stop() error {
 	return nil
 }
 
-// stripDiscordMention removes <@botID> and <@!botID> (nick mention) from text.
-func stripDiscordMention(text, botID string) string {
-	return stripDiscordMentionWithRole(text, botID, "")
+// stripDiscordMention converts user mentions to @username and strips role mentions from text.
+func stripDiscordMention(text string, mentions []*discordgo.User, mentionRoles []string) string {
+	for _, u := range mentions {
+		display := "@" + u.Username
+		text = strings.ReplaceAll(text, "<@!"+u.ID+">", display)
+		text = strings.ReplaceAll(text, "<@"+u.ID+">", display)
+	}
+	for _, roleID := range mentionRoles {
+		text = strings.ReplaceAll(text, "<@&"+roleID+">", "")
+	}
+	return strings.TrimSpace(text)
 }
 
 func stripDiscordMentionWithRole(text, botID string, botRoleID string) string {

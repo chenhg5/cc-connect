@@ -1,6 +1,7 @@
 package discord
 
 import (
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -108,12 +109,13 @@ func TestResolveThreadReplyContext_CreatesThreadForGuildMessage(t *testing.T) {
 			ID:        "msg-42",
 			ChannelID: "channel-1",
 			GuildID:   "guild-1",
-			Content:   "<@bot-1> investigate build failure",
+			Content:   "<@100001> investigate build failure",
 			Author:    &discordgo.User{ID: "u1", Username: "jun"},
+			Mentions:  []*discordgo.User{{ID: "100001", Username: "mybot"}},
 		},
 	}
 
-	sessionKey, rc, err := resolveThreadReplyContext(msg, "bot-1", ops)
+	sessionKey, rc, err := resolveThreadReplyContext(msg, "100001", ops)
 	if err != nil {
 		t.Fatalf("resolveThreadReplyContext() error = %v", err)
 	}
@@ -126,12 +128,81 @@ func TestResolveThreadReplyContext_CreatesThreadForGuildMessage(t *testing.T) {
 	if startChannelID != "channel-1" || startMessageID != "msg-42" {
 		t.Fatalf("thread start args = (%q, %q), want (channel-1, msg-42)", startChannelID, startMessageID)
 	}
-	if startName != "investigate build failure" {
-		t.Fatalf("thread name = %q, want sanitized content", startName)
+	if startName != "@mybot investigate build failure" {
+		t.Fatalf("thread name = %q, want @mybot prefix", startName)
 	}
 	if joinedThread != "thread-99" {
 		t.Fatalf("joinedThread = %q, want thread-99", joinedThread)
 	}
+}
+
+func TestResolveThreadReplyContext_JoinsExistingThreadOnCreateFailure(t *testing.T) {
+	t.Run("StartThread fails, JoinThread succeeds — joins existing thread", func(t *testing.T) {
+		ops := fakeThreadOps{
+			resolveChannel: func(channelID string) (*discordgo.Channel, error) {
+				return &discordgo.Channel{ID: channelID, Type: discordgo.ChannelTypeGuildText}, nil
+			},
+			startThread: func(channelID, messageID, name string, archiveDuration int) (*discordgo.Channel, error) {
+				return nil, fmt.Errorf("thread already exists")
+			},
+			joinThread: func(threadID string) error {
+				if threadID != "msg-42" {
+					t.Fatalf("JoinThread called with %q, want msg-42", threadID)
+				}
+				return nil
+			},
+		}
+
+		msg := &discordgo.MessageCreate{
+			Message: &discordgo.Message{
+				ID:        "msg-42",
+				ChannelID: "channel-1",
+				GuildID:   "guild-1",
+				Content:   "<@bot-1> hello",
+				Author:    &discordgo.User{ID: "u1", Username: "jun"},
+			},
+		}
+
+		sessionKey, rc, err := resolveThreadReplyContext(msg, "bot-1", ops)
+		if err != nil {
+			t.Fatalf("resolveThreadReplyContext() error = %v", err)
+		}
+		if sessionKey != "discord:msg-42" {
+			t.Fatalf("sessionKey = %q, want discord:msg-42", sessionKey)
+		}
+		if rc.channelID != "msg-42" || rc.threadID != "msg-42" {
+			t.Fatalf("replyContext = %#v, want thread routing via message ID", rc)
+		}
+	})
+
+	t.Run("StartThread fails, JoinThread also fails — returns error", func(t *testing.T) {
+		ops := fakeThreadOps{
+			resolveChannel: func(channelID string) (*discordgo.Channel, error) {
+				return &discordgo.Channel{ID: channelID, Type: discordgo.ChannelTypeGuildText}, nil
+			},
+			startThread: func(channelID, messageID, name string, archiveDuration int) (*discordgo.Channel, error) {
+				return nil, fmt.Errorf("thread already exists")
+			},
+			joinThread: func(threadID string) error {
+				return fmt.Errorf("thread not found")
+			},
+		}
+
+		msg := &discordgo.MessageCreate{
+			Message: &discordgo.Message{
+				ID:        "msg-42",
+				ChannelID: "channel-1",
+				GuildID:   "guild-1",
+				Content:   "<@bot-1> hello",
+				Author:    &discordgo.User{ID: "u1", Username: "jun"},
+			},
+		}
+
+		_, _, err := resolveThreadReplyContext(msg, "bot-1", ops)
+		if err == nil {
+			t.Fatal("expected error when both StartThread and JoinThread fail")
+		}
+	})
 }
 
 func TestSessionKeyForChannel_UsesThreadKeyWhenChannelIsThread(t *testing.T) {
@@ -311,25 +382,27 @@ func TestDuplicateMessage_MultipleDuplicateBursts(t *testing.T) {
 // TestStripDiscordMention verifies mention stripping helper.
 func TestStripDiscordMention(t *testing.T) {
 	tests := []struct {
-		name    string
-		content string
-		botID   string
-		want    string
+		name         string
+		content      string
+		mentions     []*discordgo.User
+		mentionRoles []string
+		want         string
 	}{
-		{"strips bot mention at start", "<@123456> hello", "123456", "hello"},
-		{"strips bot mention with ! prefix", "<@!123456> hello", "123456", "hello"},
-		{"strips bot mention in middle", "hey <@123456> do this", "123456", "hey  do this"},
-		{"no mention", "hello world", "123456", "hello world"},
-		{"only mention", "<@123456>", "123456", ""},
-		{"different bot ID unchanged", "<@999999> hello", "123456", "<@999999> hello"},
+		{"converts user mention to @name", "<@123456> hello", []*discordgo.User{{ID: "123456", Username: "bot1"}}, nil, "@bot1 hello"},
+		{"converts nick mention to @name", "<@!123456> hello", []*discordgo.User{{ID: "123456", Username: "bot1"}}, nil, "@bot1 hello"},
+		{"converts multiple user mentions", "<@111> <@222> hi", []*discordgo.User{{ID: "111", Username: "a"}, {ID: "222", Username: "b"}}, nil, "@a @b hi"},
+		{"strips role mention", "<@&999> hello", nil, []string{"999"}, "hello"},
+		{"mixed mentions", "<@111> <@&222> hi", []*discordgo.User{{ID: "111", Username: "a"}}, []string{"222"}, "@a  hi"},
+		{"no mention", "hello world", nil, nil, "hello world"},
+		{"only mention", "<@123456>", []*discordgo.User{{ID: "123456", Username: "bot1"}}, nil, "@bot1"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := stripDiscordMention(tt.content, tt.botID)
+			got := stripDiscordMention(tt.content, tt.mentions, tt.mentionRoles)
 			if got != tt.want {
-				t.Errorf("stripDiscordMention(%q, %q) = %q, want %q",
-					tt.content, tt.botID, got, tt.want)
+				t.Errorf("stripDiscordMention(%q) = %q, want %q",
+					tt.content, got, tt.want)
 			}
 		})
 	}
