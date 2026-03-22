@@ -306,6 +306,37 @@ func TestDuplicateMessage_MultipleDuplicateBursts(t *testing.T) {
 	}
 }
 
+// ── @everyone mention tests ──────────────────────────────────
+
+func TestIsDiscordBotMention_Everyone(t *testing.T) {
+	tests := []struct {
+		name               string
+		respondToAtEveryoneAndHere  bool
+		mentionEveryone    bool
+		want               bool
+	}{
+		{"enabled + @everyone", true, true, true},
+		{"disabled + @everyone", false, true, false},
+		{"enabled + no @everyone", true, false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := &discordgo.MessageCreate{
+				Message: &discordgo.Message{
+					MentionEveryone: tt.mentionEveryone,
+					Content:         "hello",
+					Author:          &discordgo.User{ID: "user1"},
+				},
+			}
+			got := isDiscordBotMention(m, "bot1", "", tt.respondToAtEveryoneAndHere)
+			if got != tt.want {
+				t.Errorf("isDiscordBotMention(respondToAtEveryoneAndHere=%v, MentionEveryone=%v) = %v, want %v",
+					tt.respondToAtEveryoneAndHere, tt.mentionEveryone, got, tt.want)
+			}
+		})
+	}
+}
+
 // ── Mention tests ────────────────────────────────────────────
 
 // TestStripDiscordMention verifies mention stripping helper.
