@@ -427,8 +427,8 @@ name = "my-backend"
 # disabled_commands = ["restart", "upgrade", "cron"]  # Disable specific commands for this project
 #                                                     # 禁用该项目的指定命令
 #
-# admin_from controls who can run privileged commands (/shell, /restart, /upgrade, /commands addexec).
-# admin_from 控制谁可以执行特权命令（/shell, /restart, /upgrade, /commands addexec）。
+# admin_from controls who can run privileged commands (/dir, /shell, /restart, /upgrade, /commands addexec).
+# admin_from 控制谁可以执行特权命令（/dir, /shell, /restart, /upgrade, /commands addexec）。
 #
 # 💡 TIP: Send /whoami or /status to the bot to get your User ID for allow_from / admin_from.
 # 💡 提示：向机器人发送 /whoami 或者 /status  即可获取你的 User ID，用于填写 allow_from / admin_from。

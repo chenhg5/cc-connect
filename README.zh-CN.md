@@ -161,6 +161,9 @@ cp config.example.toml ~/.cc-connect/config.toml
 vim ~/.cc-connect/config.toml
 ```
 
+在项目配置里设置 `admin_from = "alice,bob"` 后，只有这些用户 ID 才能执行 `/dir`、`/shell` 等特权命令。
+执行 `/dir reset` 时，cc-connect 会恢复配置中的 `work_dir`，并清除保存在 `data_dir/projects/<project>.state.json` 里的目录覆盖状态。
+
 ---
 
 ### ▶️ 运行
@@ -234,6 +237,7 @@ cc-connect update --pre     # Beta 版（含 pre-release）
 /list                  列出所有会话
 /switch <id>           切换会话
 /current               查看当前会话
+/dir [路径|reset]      查看、切换或重置工作目录
 ```
 
 ---

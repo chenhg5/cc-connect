@@ -161,6 +161,9 @@ cp config.example.toml ~/.cc-connect/config.toml
 vim ~/.cc-connect/config.toml
 ```
 
+Set `admin_from = "alice,bob"` in a project to allow those user IDs to run privileged commands such as `/dir` and `/shell`.
+When a user runs `/dir reset`, cc-connect restores the configured `work_dir` and clears the persisted override stored under `data_dir/projects/<project>.state.json`.
+
 ---
 
 ### ▶️ Run
@@ -234,6 +237,7 @@ cc-connect update --pre     # Beta (includes pre-releases)
 /list             List all sessions
 /switch <id>      Switch session
 /current          Show current session
+/dir [path|reset] Show, switch, or reset work directory
 ```
 
 ---

@@ -2357,6 +2357,75 @@ func TestCmdDir_HelpShowsUsage(t *testing.T) {
 	}
 }
 
+func TestCmdDir_PersistsAbsoluteOverride(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	baseDir := t.TempDir()
+	nextDir := filepath.Join(baseDir, "next")
+	if err := os.Mkdir(nextDir, 0o755); err != nil {
+		t.Fatalf("mkdir next dir: %v", err)
+	}
+	statePath := filepath.Join(t.TempDir(), "projects", "test.state.json")
+	store := NewProjectStateStore(statePath)
+
+	agent := &stubWorkDirAgent{workDir: baseDir}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetBaseWorkDir(baseDir)
+	e.SetProjectStateStore(store)
+
+	e.cmdDir(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, []string{"next"})
+
+	reloaded := NewProjectStateStore(statePath)
+	if got := reloaded.WorkDirOverride(); got != nextDir {
+		t.Fatalf("WorkDirOverride() = %q, want %q", got, nextDir)
+	}
+}
+
+func TestCmdDir_ResetRestoresBaseWorkDirAndClearsState(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	baseDir := t.TempDir()
+	overrideDir := filepath.Join(baseDir, "override")
+	if err := os.Mkdir(overrideDir, 0o755); err != nil {
+		t.Fatalf("mkdir override dir: %v", err)
+	}
+	statePath := filepath.Join(t.TempDir(), "projects", "test.state.json")
+	store := NewProjectStateStore(statePath)
+	store.SetWorkDirOverride(overrideDir)
+	store.Save()
+
+	agent := &stubWorkDirAgent{workDir: overrideDir}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetBaseWorkDir(baseDir)
+	e.SetProjectStateStore(store)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	s := e.sessions.GetOrCreateActive(msg.SessionKey)
+	s.SetAgentSessionID("existing-session", "test")
+	s.Name = "old"
+	s.AddHistory("user", "hello")
+
+	e.cmdDir(p, msg, []string{"reset"})
+
+	if agent.workDir != baseDir {
+		t.Fatalf("workDir = %q, want %q", agent.workDir, baseDir)
+	}
+	reloaded := NewProjectStateStore(statePath)
+	if got := reloaded.WorkDirOverride(); got != "" {
+		t.Fatalf("WorkDirOverride() = %q, want empty", got)
+	}
+	if s.GetAgentSessionID() != "" {
+		t.Fatalf("AgentSessionID = %q, want cleared", s.GetAgentSessionID())
+	}
+	if s.Name != "old" {
+		t.Fatalf("Name = %q, want unchanged", s.Name)
+	}
+	if len(s.History) != 0 {
+		t.Fatalf("history length = %d, want 0", len(s.History))
+	}
+	if len(p.sent) != 1 || !strings.Contains(strings.ToLower(p.sent[0]), "default") {
+		t.Fatalf("sent = %v, want reset success message", p.sent)
+	}
+}
+
 func TestCmdDir_SwitchesByHistoryIndex(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	tempDir := t.TempDir()
