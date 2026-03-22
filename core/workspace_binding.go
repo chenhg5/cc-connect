@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+const sharedWorkspaceBindingsKey = "shared"
+
 // WorkspaceBinding maps a channel to a workspace directory.
 type WorkspaceBinding struct {
 	ChannelName string    `json:"channel_name"`
@@ -67,6 +69,24 @@ func (m *WorkspaceBindingManager) Lookup(projectKey, channelID string) *Workspac
 		return proj[channelID]
 	}
 	return nil
+}
+
+// LookupEffective returns the effective binding for a channel, checking the
+// current project first and then the shared routing layer.
+func (m *WorkspaceBindingManager) LookupEffective(projectKey, channelID string) (*WorkspaceBinding, string) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if proj := m.bindings[projectKey]; proj != nil {
+		if b := proj[channelID]; b != nil {
+			return b, projectKey
+		}
+	}
+	if shared := m.bindings[sharedWorkspaceBindingsKey]; shared != nil {
+		if b := shared[channelID]; b != nil {
+			return b, sharedWorkspaceBindingsKey
+		}
+	}
+	return nil, ""
 }
 
 func (m *WorkspaceBindingManager) ListByProject(projectKey string) map[string]*WorkspaceBinding {

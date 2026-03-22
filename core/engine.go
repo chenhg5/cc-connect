@@ -2824,7 +2824,7 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 
 	switch subCmd {
 	case "":
-		b := e.workspaceBindings.Lookup(projectKey, channelID)
+		b, _ := e.workspaceBindings.LookupEffective(projectKey, channelID)
 		if b == nil {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsNoBinding))
 		} else {
@@ -3151,7 +3151,7 @@ func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
 	if e.multiWorkspace {
 		channelID := extractChannelID(msg.SessionKey)
 		projectKey := "project:" + e.name
-		if b := e.workspaceBindings.Lookup(projectKey, channelID); b != nil {
+		if b, _ := e.workspaceBindings.LookupEffective(projectKey, channelID); b != nil {
 			workDir = b.Workspace
 		}
 	}
@@ -8698,7 +8698,7 @@ func (e *Engine) sessionContextForKey(sessionKey string) (Agent, *SessionManager
 		return e.agent, e.sessions
 	}
 	projectKey := "project:" + e.name
-	if b := e.workspaceBindings.Lookup(projectKey, channelID); b != nil {
+	if b, _ := e.workspaceBindings.LookupEffective(projectKey, channelID); b != nil {
 		if wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(normalizeWorkspacePath(b.Workspace)); err == nil {
 			return wsAgent, wsSessions
 		}
@@ -8717,7 +8717,7 @@ func (e *Engine) interactiveKeyForSessionKey(sessionKey string) string {
 		return sessionKey
 	}
 	projectKey := "project:" + e.name
-	if b := e.workspaceBindings.Lookup(projectKey, channelID); b != nil {
+	if b, _ := e.workspaceBindings.LookupEffective(projectKey, channelID); b != nil {
 		return normalizeWorkspacePath(b.Workspace) + ":" + sessionKey
 	}
 	return sessionKey
@@ -8730,12 +8730,14 @@ func (e *Engine) resolveWorkspace(p Platform, channelID string) (string, string,
 	projectKey := "project:" + e.name
 
 	// Step 1: Check existing binding
-	if b := e.workspaceBindings.Lookup(projectKey, channelID); b != nil {
+	if b, bindingKey := e.workspaceBindings.LookupEffective(projectKey, channelID); b != nil {
 		// Verify workspace directory still exists
 		if _, err := os.Stat(b.Workspace); err != nil {
-			slog.Warn("bound workspace directory missing, removing binding",
-				"workspace", b.Workspace, "channel", channelID)
-			e.workspaceBindings.Unbind(projectKey, channelID)
+			slog.Warn("bound workspace directory missing",
+				"workspace", b.Workspace, "channel", channelID, "binding_scope", bindingKey)
+			if bindingKey != sharedWorkspaceBindingsKey {
+				e.workspaceBindings.Unbind(bindingKey, channelID)
+			}
 			return "", b.ChannelName, nil
 		}
 		return normalizeWorkspacePath(b.Workspace), b.ChannelName, nil

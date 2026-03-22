@@ -59,3 +59,36 @@ func TestWorkspaceBindingManager_ListByProject(t *testing.T) {
 		t.Errorf("expected 2 bindings, got %d", len(list))
 	}
 }
+
+func TestWorkspaceBindingManager_LookupEffective(t *testing.T) {
+	dir := t.TempDir()
+	mgr := NewWorkspaceBindingManager(filepath.Join(dir, "bindings.json"))
+
+	mgr.Bind(sharedWorkspaceBindingsKey, "C1", "shared-chan", "/shared")
+	mgr.Bind("project:claude", "C1", "local-chan", "/local")
+
+	if b, key := mgr.LookupEffective("project:claude", "C1"); b == nil || key != "project:claude" || b.Workspace != "/local" {
+		t.Fatalf("expected local override, got binding=%v key=%q", b, key)
+	}
+
+	if b, key := mgr.LookupEffective("project:other", "C1"); b == nil || key != sharedWorkspaceBindingsKey || b.Workspace != "/shared" {
+		t.Fatalf("expected shared fallback, got binding=%v key=%q", b, key)
+	}
+
+	if b, key := mgr.LookupEffective("project:none", "missing"); b != nil || key != "" {
+		t.Fatalf("expected nil binding, got binding=%v key=%q", b, key)
+	}
+}
+
+func TestWorkspaceBindingManager_LoadSharedFromDisk(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "bindings.json")
+
+	mgr := NewWorkspaceBindingManager(storePath)
+	mgr.Bind(sharedWorkspaceBindingsKey, "C1", "shared-chan", "/shared")
+
+	reloaded := NewWorkspaceBindingManager(storePath)
+	if b, key := reloaded.LookupEffective("project:other", "C1"); b == nil || key != sharedWorkspaceBindingsKey || b.Workspace != "/shared" {
+		t.Fatalf("expected shared binding after reload, got binding=%v key=%q", b, key)
+	}
+}
