@@ -51,6 +51,18 @@
 
 ---
 
+## 🆕 最近更新（Beta）
+
+> 以下内容仅在 **Beta / 预发布** 中提供：请使用 `npm install -g cc-connect@beta`，或从 [GitHub Releases 预发布](https://github.com/chenhg5/cc-connect/releases) 下载对应资源。**稳定版**尚未包含这些能力，正式发版前仍可能调整。
+
+- **个人微信** — 用 **微信个人号（ilink 长轮询）** 和本地 Agent 对话；支持扫码 `weixin setup`、CDN 收发图片/文件，**无需公网 IP**。*[接入说明 → `docs/weixin.md`](docs/weixin.md)*
+- **自动压缩上下文** — 估算 token 超阈值时可自动压缩会话，长对话尽量不断档、少踩坑。
+- **更稳的 `--continue`** — 支持分叉续聊，降低「桥接会话误接上终端里半截 CLI 会话」的概率。
+- **定时任务增强** — 可选 **每次新会话**执行、**单任务超时**，减少跑飞任务拖死机器人。
+- **平台体验** — 例如 **Discord** 支持 `@everyone` / `@here`，**Telegram** 支持语音类回复，**飞书** 优化回复原消息与异步分发等。
+
+---
+
 ## ✨ 为什么选择 cc-connect？
 
 ### 🤖 通用 Agent 支持
