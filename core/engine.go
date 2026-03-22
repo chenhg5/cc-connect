@@ -115,8 +115,9 @@ var RestartCh = make(chan RestartRequest, 1)
 // DisplayCfg controls truncation of intermediate messages.
 // A value of -1 means "use default", 0 means "no truncation".
 type DisplayCfg struct {
-	ThinkingMaxLen int // max runes for thinking preview; 0 = no truncation
-	ToolMaxLen     int // max runes for tool use preview; 0 = no truncation
+	ThinkingMaxLen int               // max runes for thinking preview; 0 = no truncation
+	ToolMaxLen     int               // max runes for tool use preview; 0 = no truncation
+	HiddenTools    map[string]struct{} // tool names to hide from progress display only
 }
 
 // RateLimitCfg controls per-session message rate limiting.
@@ -367,6 +368,9 @@ func (e *Engine) SetTTSSaveFunc(fn func(mode string) error) {
 
 // SetDisplayConfig overrides the default truncation settings.
 func (e *Engine) SetDisplayConfig(cfg DisplayCfg) {
+	if cfg.HiddenTools == nil {
+		cfg.HiddenTools = map[string]struct{}{}
+	}
 	e.display = cfg
 }
 
@@ -2088,8 +2092,20 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventToolUse:
-			toolCount++
 			if !quiet {
+				if shouldHideToolUse(e.display.HiddenTools, event.ToolName) {
+					continue
+				}
+
+				if event.ToolName == "TodoWrite" {
+					if todoMsg := formatTodoToolInput(event.ToolInput, e.i18n); todoMsg != "" {
+						e.send(p, replyCtx, todoMsg)
+					}
+					continue
+				}
+
+				toolCount++
+
 				// Flush accumulated text segment before tool display
 				previewActive := sp.canPreview()
 				if len(textParts) > segmentStart {
@@ -2195,7 +2211,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					permLimit = permLimit * 8 / 5
 				}
 				toolInput := truncateIf(event.ToolInput, permLimit)
-				prompt := fmt.Sprintf(e.i18n.T(MsgPermissionPrompt), event.ToolName, toolInput)
+				promptKey := MsgPermissionPrompt
+				if _, ok := p.(PermissionButtonSender); ok {
+					promptKey = MsgPermissionPromptButtons
+				}
+				prompt := fmt.Sprintf(e.i18n.T(promptKey), event.ToolName, toolInput)
 				e.sendPermissionPrompt(p, replyCtx, prompt, event.ToolName, toolInput)
 			}
 
@@ -5352,20 +5372,26 @@ func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images
 }
 
 // sendPermissionPrompt sends a permission prompt with interactive buttons when
-// the platform supports them. Fallback chain: InlineButtonSender → CardSender → plain text.
+// the platform supports them. Fallback chain: PermissionButtonSender → InlineButtonSender → CardSender → plain text.
 func (e *Engine) sendPermissionPrompt(p Platform, replyCtx any, prompt, toolName, toolInput string) {
-	// Try inline buttons first (Telegram)
-	if bs, ok := p.(InlineButtonSender); ok {
-		buttons := [][]ButtonOption{
-			{
-				{Text: e.i18n.T(MsgPermBtnAllow), Data: "perm:allow"},
-				{Text: e.i18n.T(MsgPermBtnDeny), Data: "perm:deny"},
-			},
-			{
-				{Text: e.i18n.T(MsgPermBtnAllowAll), Data: "perm:allow_all"},
-			},
+	buttonAllow := ButtonOption{Text: e.i18n.T(MsgPermBtnAllow), Data: "perm:allow"}
+	buttonDeny := ButtonOption{Text: e.i18n.T(MsgPermBtnDeny), Data: "perm:deny"}
+	buttonAllowAll := ButtonOption{Text: e.i18n.T(MsgPermBtnAllowAll), Data: "perm:allow_all"}
+	permissionButtonAllowAll := ButtonOption{Text: e.i18n.T(MsgPermBtnAllowAllShort), Data: "perm:allow_all"}
+	permissionButtons := [][]ButtonOption{{buttonAllow, buttonDeny, permissionButtonAllowAll}}
+	inlineButtons := [][]ButtonOption{{buttonAllow, buttonDeny}, {buttonAllowAll}}
+
+	// Try dedicated permission buttons first (Discord, etc.)
+	if ps, ok := p.(PermissionButtonSender); ok {
+		if err := ps.SendPermissionButtons(e.ctx, replyCtx, prompt, permissionButtons); err == nil {
+			return
 		}
-		if err := bs.SendWithButtons(e.ctx, replyCtx, prompt, buttons); err == nil {
+		slog.Warn("sendPermissionPrompt: permission buttons failed, falling back")
+	}
+
+	// Try inline buttons next (Telegram)
+	if bs, ok := p.(InlineButtonSender); ok {
+		if err := bs.SendWithButtons(e.ctx, replyCtx, prompt, inlineButtons); err == nil {
 			return
 		}
 		slog.Warn("sendPermissionPrompt: inline buttons failed, falling back")
@@ -8249,6 +8275,66 @@ func toolCodeLang(toolName, input string) string {
 	}
 	return ""
 }
+
+func shouldHideToolUse(hiddenTools map[string]struct{}, toolName string) bool {
+	if len(hiddenTools) == 0 {
+		return false
+	}
+	_, ok := hiddenTools[strings.ToLower(strings.TrimSpace(toolName))]
+	return ok
+}
+
+type todoWriteInput struct {
+	Todos []todoWriteItem `json:"todos"`
+}
+
+type todoWriteItem struct {
+	Content    string `json:"content"`
+	Status     string `json:"status"`
+	ActiveForm string `json:"activeForm"`
+}
+
+func formatTodoToolInput(toolInput string, i18n *I18n) string {
+	if strings.TrimSpace(toolInput) == "" {
+		return ""
+	}
+	var input todoWriteInput
+	if err := json.Unmarshal([]byte(toolInput), &input); err != nil || len(input.Todos) == 0 {
+		return ""
+	}
+
+	title := "📝 Current tasks"
+	if i18n != nil {
+		title = i18n.T(MsgTodoTitle)
+	}
+
+	lines := make([]string, 0, len(input.Todos)+2)
+	lines = append(lines, title, "")
+	for _, todo := range input.Todos {
+		icon := "⬜"
+		text := strings.TrimSpace(todo.Content)
+		switch todo.Status {
+		case "completed":
+			icon = "✅"
+		case "in_progress":
+			icon = "⏳"
+			if strings.TrimSpace(todo.ActiveForm) != "" {
+				text = strings.TrimSpace(todo.ActiveForm)
+			}
+		case "pending":
+			icon = "⬜"
+		}
+		if text == "" {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("%s %s", icon, text))
+	}
+	if len(lines) <= 2 {
+		return ""
+	}
+	return strings.Join(lines, "\n")
+}
+
 
 // truncateIf truncates s to maxLen runes. 0 means no truncation.
 func truncateIf(s string, maxLen int) string {

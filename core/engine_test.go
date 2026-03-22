@@ -179,6 +179,18 @@ func (p *stubInlineButtonPlatform) SendWithButtons(_ context.Context, _ any, con
 	return nil
 }
 
+type stubPermissionButtonPlatform struct {
+	stubPlatformEngine
+	permissionButtonContent string
+	permissionButtonRows    [][]ButtonOption
+}
+
+func (p *stubPermissionButtonPlatform) SendPermissionButtons(_ context.Context, _ any, content string, buttons [][]ButtonOption) error {
+	p.permissionButtonContent = content
+	p.permissionButtonRows = buttons
+	return nil
+}
+
 type stubCardPlatform struct {
 	stubPlatformEngine
 	repliedCards []*Card
@@ -1310,11 +1322,54 @@ func TestSendPermissionPrompt_InlineButtonPlatform(t *testing.T) {
 	if p.buttonContent != "full prompt text" {
 		t.Errorf("expected button content to be prompt, got %s", p.buttonContent)
 	}
-	if len(p.buttonRows) < 2 {
-		t.Fatalf("expected at least 2 button rows, got %d", len(p.buttonRows))
+	if len(p.buttonRows) != 2 {
+		t.Fatalf("expected 2 button rows, got %d", len(p.buttonRows))
 	}
 	if p.buttonRows[0][0].Data != "perm:allow" {
 		t.Errorf("expected perm:allow, got %s", p.buttonRows[0][0].Data)
+	}
+	if p.buttonRows[0][1].Data != "perm:deny" {
+		t.Errorf("expected perm:deny, got %s", p.buttonRows[0][1].Data)
+	}
+	if p.buttonRows[1][0].Data != "perm:allow_all" {
+		t.Errorf("expected perm:allow_all, got %s", p.buttonRows[1][0].Data)
+	}
+}
+
+func TestSendPermissionPrompt_PermissionButtonPlatform(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPermissionButtonPlatform{stubPlatformEngine: stubPlatformEngine{n: "discord"}}
+
+	e.sendPermissionPrompt(p, "ctx", "full prompt text", "write_file", "/tmp/test.txt")
+
+	if p.permissionButtonContent != "full prompt text" {
+		t.Errorf("expected permission button content to be prompt, got %s", p.permissionButtonContent)
+	}
+	if len(p.permissionButtonRows) != 1 {
+		t.Fatalf("expected 1 permission button row, got %d", len(p.permissionButtonRows))
+	}
+	if len(p.permissionButtonRows[0]) != 3 {
+		t.Fatalf("expected 3 permission buttons in one row, got %d", len(p.permissionButtonRows[0]))
+	}
+	if p.permissionButtonRows[0][0].Data != "perm:allow" {
+		t.Errorf("expected perm:allow, got %s", p.permissionButtonRows[0][0].Data)
+	}
+	if p.permissionButtonRows[0][1].Data != "perm:deny" {
+		t.Errorf("expected perm:deny, got %s", p.permissionButtonRows[0][1].Data)
+	}
+	if p.permissionButtonRows[0][2].Data != "perm:allow_all" {
+		t.Errorf("expected perm:allow_all, got %s", p.permissionButtonRows[0][2].Data)
+	}
+	if p.permissionButtonRows[0][2].Text != e.i18n.T(MsgPermBtnAllowAllShort) {
+		t.Errorf("expected short allow-all label, got %s", p.permissionButtonRows[0][2].Text)
+	}
+}
+
+func TestPermissionPromptButtonsText_UsedForPermissionButtonPlatforms(t *testing.T) {
+	e := newTestEngine()
+	text := fmt.Sprintf(e.i18n.T(MsgPermissionPromptButtons), "write_file", "/tmp/test.txt")
+	if strings.Contains(text, "Reply **allow** / **deny** / **allow all**") {
+		t.Fatalf("button prompt should not include reply hint, got %q", text)
 	}
 }
 
@@ -6251,5 +6306,68 @@ func TestExtractSessionKeyParts(t *testing.T) {
 				t.Errorf("extractUserID(%q) = %q, want %q", tt.sessionKey, gotUser, tt.wantUser)
 			}
 		})
+	}
+}
+
+func TestProcessInteractiveEvents_HidesReadGrepAndFormatsTodoWrite(t *testing.T) {
+	p := &stubPlatformEngine{n: "telegram"}
+	sess := newControllableSession("todo-test")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangChinese)
+	e.SetDisplayConfig(DisplayCfg{ThinkingMaxLen: 300, ToolMaxLen: 500, HiddenTools: map[string]struct{}{"read": {}, "grep": {}}})
+
+	key := "test:todo-user"
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	session := e.sessions.GetOrCreateActive(key)
+	session.TryLock()
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, key, "", time.Now(), nil)
+		close(done)
+	}()
+
+	sess.events <- Event{Type: EventToolUse, ToolName: "Read", ToolInput: "/tmp/x.txt"}
+	sess.events <- Event{Type: EventToolUse, ToolName: "Grep", ToolInput: "avatar|logo"}
+	sess.events <- Event{Type: EventToolUse, ToolName: "TodoWrite", ToolInput: `{"todos":[{"content":"Change TodoWrite rendering to send the latest formatted status as a normal message","status":"completed","activeForm":"Changing TodoWrite rendering to send the latest formatted status as a normal message"},{"content":"Update tests to match non-editing Todo behavior","status":"in_progress","activeForm":"Updating tests to match non-editing Todo behavior"},{"content":"Rebuild and restart cc-connect safely","status":"pending","activeForm":"Rebuilding and restarting cc-connect safely"}]}`}
+	sess.events <- Event{Type: EventToolUse, ToolName: "TodoWrite", ToolInput: `{"todos":[{"content":"Change TodoWrite rendering to send the latest formatted status as a normal message","status":"completed","activeForm":"Changing TodoWrite rendering to send the latest formatted status as a normal message"},{"content":"Update tests to match non-editing Todo behavior","status":"completed","activeForm":"Updating tests to match non-editing Todo behavior"},{"content":"Verify the fix and report the result","status":"in_progress","activeForm":"Verifying the fix and report the result"}]}`}
+	sess.events <- Event{Type: EventResult, Content: "完成", Done: true}
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("processInteractiveEvents did not complete in time")
+	}
+
+	sent := p.getSent()
+	joined := strings.Join(sent, "\n")
+	if strings.Contains(joined, "Tool #") || strings.Contains(joined, "Read") || strings.Contains(joined, "Grep") {
+		t.Fatalf("expected Read/Grep tool messages to be hidden, got %v", sent)
+	}
+	if !strings.Contains(joined, "📝 当前任务") {
+		t.Fatalf("expected localized todo title, got %v", sent)
+	}
+	if !strings.Contains(joined, "✅ Change TodoWrite rendering to send the latest formatted status as a normal message") {
+		t.Fatalf("expected completed todo item text to remain untranslated, got %v", sent)
+	}
+	if !strings.Contains(joined, "⏳ Updating tests to match non-editing Todo behavior") {
+		t.Fatalf("expected in-progress todo item text to remain untranslated, got %v", sent)
+	}
+	if !strings.Contains(joined, "⬜ Rebuild and restart cc-connect safely") {
+		t.Fatalf("expected pending todo item text to remain untranslated, got %v", sent)
+	}
+	if !strings.Contains(joined, "✅ Update tests to match non-editing Todo behavior") {
+		t.Fatalf("expected latest completed todo item text to remain untranslated, got %v", sent)
+	}
+	if !strings.Contains(joined, "⏳ Verifying the fix and report the result") {
+		t.Fatalf("expected latest todo status message to be sent without translating body text, got sent=%v", sent)
 	}
 }

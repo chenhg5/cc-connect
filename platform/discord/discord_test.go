@@ -1,6 +1,11 @@
 package discord
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -156,6 +161,76 @@ func TestReconstructReplyCtx_ThreadSessionKey(t *testing.T) {
 	rc := rctx.(replyContext)
 	if rc.channelID != "thread-7" || rc.threadID != "thread-7" {
 		t.Fatalf("replyContext = %#v, want thread reply context", rc)
+	}
+}
+
+func TestSendPermissionButtons_SendsThreeButtonsInOneRow(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want POST", r.Method)
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if payload["content"] != "perm prompt" {
+			t.Fatalf("content = %#v, want perm prompt", payload["content"])
+		}
+		components, ok := payload["components"].([]any)
+		if !ok || len(components) != 1 {
+			t.Fatalf("components = %#v, want one row", payload["components"])
+		}
+		row, ok := components[0].(map[string]any)
+		if !ok {
+			t.Fatalf("row = %#v, want object", components[0])
+		}
+		rowComponents, ok := row["components"].([]any)
+		if !ok || len(rowComponents) != 3 {
+			t.Fatalf("row components = %#v, want 3 buttons", row["components"])
+		}
+		if rowComponents[0].(map[string]any)["custom_id"] != "perm:allow" {
+			t.Fatalf("button0 = %#v, want perm:allow", rowComponents[0])
+		}
+		if rowComponents[1].(map[string]any)["custom_id"] != "perm:deny" {
+			t.Fatalf("button1 = %#v, want perm:deny", rowComponents[1])
+		}
+		if rowComponents[2].(map[string]any)["custom_id"] != "perm:allow_all" {
+			t.Fatalf("button2 = %#v, want perm:allow_all", rowComponents[2])
+		}
+		if rowComponents[2].(map[string]any)["style"] != float64(discordgo.PrimaryButton) {
+			t.Fatalf("button2 style = %#v, want %d", rowComponents[2].(map[string]any)["style"], discordgo.PrimaryButton)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"msg-1","channel_id":"ch-1"}`)
+	}))
+	defer server.Close()
+
+	oldEndpointDiscord := discordgo.EndpointDiscord
+	oldEndpointAPI := discordgo.EndpointAPI
+	oldEndpointChannels := discordgo.EndpointChannels
+	discordgo.EndpointDiscord = server.URL + "/"
+	discordgo.EndpointAPI = discordgo.EndpointDiscord + "api/v" + discordgo.APIVersion + "/"
+	discordgo.EndpointChannels = discordgo.EndpointAPI + "channels/"
+	defer func() {
+		discordgo.EndpointDiscord = oldEndpointDiscord
+		discordgo.EndpointAPI = oldEndpointAPI
+		discordgo.EndpointChannels = oldEndpointChannels
+	}()
+
+	s, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New() error = %v", err)
+	}
+	s.Client = server.Client()
+
+	p := &Platform{session: s}
+	err = p.SendPermissionButtons(context.Background(), replyContext{channelID: "ch-1", messageID: "orig-1"}, "perm prompt", [][]core.ButtonOption{{
+		{Text: "Allow", Data: "perm:allow"},
+		{Text: "Deny", Data: "perm:deny"},
+		{Text: "Allow All", Data: "perm:allow_all"},
+	}})
+	if err != nil {
+		t.Fatalf("SendPermissionButtons() error = %v", err)
 	}
 }
 

@@ -260,9 +260,17 @@ func main() {
 
 		// Wire display truncation settings
 		{
+			hiddenTools := make(map[string]struct{}, len(cfg.Display.HiddenTools))
+			for _, tool := range cfg.Display.HiddenTools {
+				tool = strings.ToLower(strings.TrimSpace(tool))
+				if tool != "" {
+					hiddenTools[tool] = struct{}{}
+				}
+			}
 			dcfg := core.DisplayCfg{
 				ThinkingMaxLen: 300,
 				ToolMaxLen:     500,
+				HiddenTools:    hiddenTools,
 			}
 			if cfg.Display.ThinkingMaxLen != nil {
 				dcfg.ThinkingMaxLen = *cfg.Display.ThinkingMaxLen
@@ -997,7 +1005,14 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	}
 
 	// Reload display config
-	dcfg := core.DisplayCfg{ThinkingMaxLen: 300, ToolMaxLen: 500}
+	hiddenTools := make(map[string]struct{}, len(cfg.Display.HiddenTools))
+	for _, tool := range cfg.Display.HiddenTools {
+		tool = strings.ToLower(strings.TrimSpace(tool))
+		if tool != "" {
+			hiddenTools[tool] = struct{}{}
+		}
+	}
+	dcfg := core.DisplayCfg{ThinkingMaxLen: 300, ToolMaxLen: 500, HiddenTools: hiddenTools}
 	if cfg.Display.ThinkingMaxLen != nil {
 		dcfg.ThinkingMaxLen = *cfg.Display.ThinkingMaxLen
 	}
