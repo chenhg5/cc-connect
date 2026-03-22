@@ -436,12 +436,8 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	return nil
 }
 
-// handleInteraction processes an incoming Discord slash command interaction.
+// handleInteraction processes incoming Discord command and button interactions.
 func (p *Platform) handleInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	if i.Type != discordgo.InteractionApplicationCommand {
-		return
-	}
-
 	userID, userName := "", ""
 	if i.Member != nil && i.Member.User != nil {
 		userID = i.Member.User.ID
@@ -460,6 +456,15 @@ func (p *Platform) handleInteraction(s *discordgo.Session, i *discordgo.Interact
 				Flags:   discordgo.MessageFlagsEphemeral,
 			},
 		})
+		return
+	}
+
+	switch i.Type {
+	case discordgo.InteractionMessageComponent:
+		p.handleComponentInteraction(s, i, userID, userName)
+		return
+	case discordgo.InteractionApplicationCommand:
+	default:
 		return
 	}
 
@@ -507,6 +512,43 @@ func reconstructCommand(data discordgo.ApplicationCommandInteractionData) string
 		}
 	}
 	return strings.Join(parts, " ")
+}
+
+func (p *Platform) handleComponentInteraction(s *discordgo.Session, i *discordgo.InteractionCreate, userID, userName string) {
+	data := i.MessageComponentData()
+	if !strings.HasPrefix(data.CustomID, "cmd:") {
+		slog.Debug("discord: unknown component interaction", "custom_id", data.CustomID)
+		return
+	}
+
+	command := strings.TrimPrefix(data.CustomID, "cmd:")
+	origText := ""
+	if i.Message != nil {
+		origText = i.Message.Content
+	}
+	emptyComponents := []discordgo.MessageComponent{}
+	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseUpdateMessage,
+		Data: &discordgo.InteractionResponseData{
+			Content:    origText + "\n\n> " + command,
+			Components: emptyComponents,
+		},
+	}); err != nil {
+		slog.Debug("discord: command component update failed", "error", err)
+	}
+
+	channelID := i.ChannelID
+	sessionKey := resolveSessionKeyForChannel(channelID, userID, p.shareSessionInChannel, p.threadIsolation, sessionThreadOps{session: p.session})
+	p.handler(p, &core.Message{
+		SessionKey: sessionKey,
+		Platform:   "discord",
+		MessageID:  i.ID,
+		UserID:     userID,
+		UserName:   userName,
+		ChatName:   p.resolveChannelName(channelID),
+		Content:    command,
+		ReplyCtx:   replyContext{channelID: channelID},
+	})
 }
 
 func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
@@ -650,7 +692,61 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 	}
 }
 
+func buildDiscordActionRows(rows [][]core.ButtonOption) []discordgo.MessageComponent {
+	components := make([]discordgo.MessageComponent, 0, len(rows))
+	for _, row := range rows {
+		if len(row) == 0 {
+			continue
+		}
+		buttons := make([]discordgo.MessageComponent, 0, len(row))
+		for idx, btn := range row {
+			style := discordgo.SecondaryButton
+			switch idx {
+			case 0:
+				style = discordgo.SuccessButton
+			case 1:
+				style = discordgo.DangerButton
+			case 2:
+				style = discordgo.PrimaryButton
+			}
+			buttons = append(buttons, discordgo.Button{
+				Label:    btn.Text,
+				Style:    style,
+				CustomID: btn.Data,
+			})
+		}
+		components = append(components, discordgo.ActionsRow{Components: buttons})
+	}
+	return components
+}
+
+func (p *Platform) SendWithButtons(ctx context.Context, rctx any, content string, buttons [][]core.ButtonOption) error {
+	rc, ok := rctx.(*interactionReplyCtx)
+	if !ok {
+		return core.ErrNotSupported
+	}
+	if len(buttons) == 0 {
+		return fmt.Errorf("discord: no buttons provided")
+	}
+	components := buildDiscordActionRows(buttons)
+	if len(components) == 0 {
+		return fmt.Errorf("discord: no buttons provided")
+	}
+	if err := p.sendInteraction(rc, content); err != nil {
+		return err
+	}
+	_, err := p.session.FollowupMessageCreate(rc.interaction, true, &discordgo.WebhookParams{
+		Content:    content,
+		Components: components,
+	})
+	if err != nil {
+		return fmt.Errorf("discord: send button followup: %w", err)
+	}
+	return nil
+}
+
 var _ core.ImageSender = (*Platform)(nil)
+var _ core.InlineButtonSender = (*Platform)(nil)
 
 func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	// discord:{channelID}:{userID} or discord:{threadID}
