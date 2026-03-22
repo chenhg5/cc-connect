@@ -116,11 +116,11 @@ type Platform struct {
 	userNameCache         sync.Map // open_id -> display name
 	chatNameCache         sync.Map // chat_id -> chat name
 	// Webhook mode fields (for Lark international version)
-	server         *http.Server
-	port           string
-	callbackPath   string
-	encryptKey     string
-	eventHandler   *dispatcher.EventDispatcher
+	server       *http.Server
+	port         string
+	callbackPath string
+	encryptKey   string
+	eventHandler *dispatcher.EventDispatcher
 }
 
 type interactivePlatform struct {
@@ -174,6 +174,16 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		clientOpts = append(clientOpts, lark.WithOpenBaseUrl(domain))
 	}
 
+	// Add proxy support if configured
+	if proxyCfg, ok := opts["proxy"].(map[string]any); ok {
+		proxyConfig := parseProxyConfig(proxyCfg)
+		httpClient, err := core.BuildHTTPClient(proxyConfig, 60*time.Second)
+		if err != nil {
+			return nil, fmt.Errorf("%s: failed to create proxy client: %w", name, err)
+		}
+		clientOpts = append(clientOpts, lark.WithHttpClient(httpClient))
+	}
+
 	base := &Platform{
 		platformName:          name,
 		domain:                domain,
@@ -197,6 +207,25 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	wrapped := &interactivePlatform{Platform: base}
 	base.self = wrapped
 	return wrapped, nil
+}
+
+// parseProxyConfig converts map[string]any to core.ProxyConfig
+func parseProxyConfig(cfg map[string]any) *core.ProxyConfig {
+	typ, _ := cfg["type"].(string)
+	addr, _ := cfg["addr"].(string)
+	username, _ := cfg["username"].(string)
+	password, _ := cfg["password"].(string)
+
+	if typ == "" || addr == "" {
+		return nil
+	}
+
+	return &core.ProxyConfig{
+		Type:     typ,
+		Addr:     addr,
+		Username: username,
+		Password: password,
+	}
 }
 
 func (p *Platform) Name() string { return p.platformName }

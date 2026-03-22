@@ -159,12 +159,25 @@ func main() {
 
 		var platforms []core.Platform
 		for _, pc := range proj.Platforms {
+			// Copy platform options
 			opts := make(map[string]any, len(pc.Options)+2)
 			for k, v := range pc.Options {
 				opts[k] = v
 			}
 			opts["cc_data_dir"] = cfg.DataDir
 			opts["cc_project"] = proj.Name
+			// Add proxy config if present - convert to map[string]any
+			if pc.Proxy != nil {
+				slog.Info("main: adding proxy to opts", "platform", pc.Type, "proxy_type", pc.Proxy.Type, "proxy_addr", pc.Proxy.Addr)
+				opts["proxy"] = map[string]any{
+					"type":     pc.Proxy.Type,
+					"addr":     pc.Proxy.Addr,
+					"username": pc.Proxy.Username,
+					"password": pc.Proxy.Password,
+				}
+			} else {
+				slog.Info("main: no proxy config for platform", "platform", pc.Type)
+			}
 			p, err := core.CreatePlatform(pc.Type, opts)
 			if err != nil {
 				slog.Error("failed to create platform", "project", proj.Name, "type", pc.Type, "error", err)

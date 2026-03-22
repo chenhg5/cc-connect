@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +15,8 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/gorilla/websocket"
+	"golang.org/x/net/proxy"
 )
 
 func init() {
@@ -39,24 +42,33 @@ type interactionReplyCtx struct {
 }
 
 type Platform struct {
-	token                 string
-	allowFrom             string
-	guildID               string // optional: per-guild registration (instant) vs global (up to 1h propagation)
-	groupReplyAll         bool
-	shareSessionInChannel bool
-	threadIsolation       bool
-	respondToAtEveryoneAndHere     bool
-	session               *discordgo.Session
-	handler               core.MessageHandler
-	botID                 string
-	appID                 string
-	channelNameCache      sync.Map // channelID -> name
-	botRoleIDs            sync.Map // guildID -> bot managed role ID
-	readyCh               chan struct{}
-	seenMsgs              sync.Map // message ID dedup: prevents duplicate MessageCreate events
+	token                      string
+	allowFrom                  string
+	guildID                    string // optional: per-guild registration (instant) vs global (up to 1h propagation)
+	groupReplyAll              bool
+	shareSessionInChannel      bool
+	threadIsolation            bool
+	respondToAtEveryoneAndHere bool
+	httpClient                 *http.Client      // optional HTTP client for proxy
+	proxyConfig                *core.ProxyConfig // proxy configuration for WebSocket dialer
+	session                    *discordgo.Session
+	handler                    core.MessageHandler
+	botID                      string
+	appID                      string
+	channelNameCache           sync.Map // channelID -> name
+	botRoleIDs                 sync.Map // guildID -> bot managed role ID
+	readyCh                    chan struct{}
+	seenMsgs                   sync.Map // message ID dedup: prevents duplicate MessageCreate events
 }
 
 func New(opts map[string]any) (core.Platform, error) {
+	slog.Info("discord: New() called", "opts_keys", func() (keys []string) {
+		for k := range opts {
+			keys = append(keys, k)
+		}
+		return
+	}())
+
 	token, _ := opts["token"].(string)
 	if token == "" {
 		return nil, fmt.Errorf("discord: token is required")
@@ -68,16 +80,62 @@ func New(opts map[string]any) (core.Platform, error) {
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	threadIsolation, _ := opts["thread_isolation"].(bool)
 	respondToAtEveryoneAndHere, _ := opts["respond_to_at_everyone_and_here"].(bool)
+
+	// Build HTTP client with proxy support if configured
+	var httpClient *http.Client
+	var proxyConfig *core.ProxyConfig
+	if proxyCfg, ok := opts["proxy"].(map[string]any); ok {
+		slog.Info("discord: proxy found in opts", "proxy_type", fmt.Sprintf("%T", proxyCfg))
+		proxyConfig = parseProxyConfig(proxyCfg)
+		if proxyConfig != nil {
+			slog.Info("discord: proxy configured", "type", proxyConfig.Type, "addr", proxyConfig.Addr)
+			var err error
+			httpClient, err = core.BuildHTTPClient(proxyConfig, 60*time.Second)
+			if err != nil {
+				return nil, fmt.Errorf("discord: failed to create proxy client: %w", err)
+			}
+			slog.Info("discord: proxy client created successfully")
+		}
+	} else {
+		slog.Info("discord: no proxy configuration found", "proxy_found", ok, "proxy_type", func() string {
+			if !ok {
+				return "not_found"
+			}
+			return fmt.Sprintf("%T", opts["proxy"])
+		}())
+	}
+
 	return &Platform{
-		token:                 token,
-		allowFrom:             allowFrom,
-		guildID:               guildID,
-		groupReplyAll:         groupReplyAll,
-		shareSessionInChannel: shareSessionInChannel,
-		readyCh:               make(chan struct{}),
-		threadIsolation:       threadIsolation,
-		respondToAtEveryoneAndHere:     respondToAtEveryoneAndHere,
+		token:                      token,
+		allowFrom:                  allowFrom,
+		guildID:                    guildID,
+		groupReplyAll:              groupReplyAll,
+		shareSessionInChannel:      shareSessionInChannel,
+		respondToAtEveryoneAndHere: respondToAtEveryoneAndHere,
+		httpClient:                 httpClient,
+		proxyConfig:                proxyConfig,
+		readyCh:                    make(chan struct{}),
+		threadIsolation:            threadIsolation,
 	}, nil
+}
+
+// parseProxyConfig converts map[string]any to core.ProxyConfig
+func parseProxyConfig(cfg map[string]any) *core.ProxyConfig {
+	typ, _ := cfg["type"].(string)
+	addr, _ := cfg["addr"].(string)
+	username, _ := cfg["username"].(string)
+	password, _ := cfg["password"].(string)
+
+	if typ == "" || addr == "" {
+		return nil
+	}
+
+	return &core.ProxyConfig{
+		Type:     typ,
+		Addr:     addr,
+		Username: username,
+		Password: password,
+	}
 }
 
 func (p *Platform) Name() string { return "discord" }
@@ -301,6 +359,55 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	}
 	p.session = session
 
+	// Set custom HTTP client if proxy is configured
+	if p.httpClient != nil {
+		slog.Info("discord: setting custom HTTP client with proxy")
+		session.Client = p.httpClient
+	} else {
+		slog.Info("discord: using default HTTP client (no proxy)")
+	}
+
+	// Configure WebSocket dialer with proxy if needed
+	if p.proxyConfig != nil {
+		slog.Info("discord: configuring WebSocket dialer with proxy", "type", p.proxyConfig.Type, "addr", p.proxyConfig.Addr)
+
+		// Create SOCKS5 dialer
+		if p.proxyConfig.Type == "socks5" {
+			var auth *proxy.Auth
+			if p.proxyConfig.Username != "" || p.proxyConfig.Password != "" {
+				auth = &proxy.Auth{
+					User:     p.proxyConfig.Username,
+					Password: p.proxyConfig.Password,
+				}
+			}
+
+			dialer, err := proxy.SOCKS5("tcp", p.proxyConfig.Addr, auth, proxy.Direct)
+			if err != nil {
+				return fmt.Errorf("discord: failed to create SOCKS5 dialer: %w", err)
+			}
+
+			// Set custom WebSocket dialer
+			session.Dialer = &websocket.Dialer{
+				NetDial: dialer.Dial,
+			}
+			slog.Info("discord: WebSocket dialer configured with SOCKS5 proxy", "addr", p.proxyConfig.Addr)
+		} else {
+			// For HTTP/HTTPS proxies, use standard proxy URL
+			proxyURL, err := url.Parse(p.proxyConfig.Addr)
+			if err != nil {
+				return fmt.Errorf("discord: failed to parse proxy URL: %w", err)
+			}
+			if proxyURL.Scheme == "" {
+				proxyURL.Scheme = "http"
+			}
+
+			session.Dialer = &websocket.Dialer{
+				Proxy: http.ProxyURL(proxyURL),
+			}
+			slog.Info("discord: WebSocket dialer configured with HTTP proxy", "addr", p.proxyConfig.Addr)
+		}
+	}
+
 	session.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentMessageContent
 
 	session.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
@@ -387,7 +494,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		for _, att := range m.Attachments {
 			ct := strings.ToLower(att.ContentType)
 			if strings.HasPrefix(ct, "audio/") {
-				data, err := downloadURL(att.URL)
+				data, err := p.downloadURL(att.URL)
 				if err != nil {
 					slog.Error("discord: download audio failed", "url", att.URL, "error", err)
 					continue
@@ -400,7 +507,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 					MimeType: ct, Data: data, Format: format,
 				}
 			} else if att.Width > 0 && att.Height > 0 {
-				data, err := downloadURL(att.URL)
+				data, err := p.downloadURL(att.URL)
 				if err != nil {
 					slog.Error("discord: download attachment failed", "url", att.URL, "error", err)
 					continue
@@ -420,7 +527,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 			MessageID: m.ID,
 			UserID:    m.Author.ID, UserName: m.Author.Username,
 			ChatName: p.resolveChannelName(m.ChannelID),
-			Content: m.Content, Images: images, Audio: audio, ReplyCtx: rctx,
+			Content:  m.Content, Images: images, Audio: audio, ReplyCtx: rctx,
 		}
 		p.handler(p, msg)
 	})
@@ -487,7 +594,7 @@ func (p *Platform) handleInteraction(s *discordgo.Session, i *discordgo.Interact
 		MessageID: i.ID,
 		UserID:    userID, UserName: userName,
 		ChatName: p.resolveChannelName(channelID),
-		Content: cmdText, ReplyCtx: ictx,
+		Content:  cmdText, ReplyCtx: ictx,
 	}
 	p.handler(p, msg)
 }
@@ -893,8 +1000,12 @@ func (p *Platform) resolveBotRoleIDForGuild(s *discordgo.Session, guildID string
 	return "", nil
 }
 
-func downloadURL(u string) ([]byte, error) {
-	resp, err := core.HTTPClient.Get(u)
+func (p *Platform) downloadURL(u string) ([]byte, error) {
+	client := core.HTTPClient
+	if p.httpClient != nil {
+		client = p.httpClient
+	}
+	resp, err := client.Get(u)
 	if err != nil {
 		return nil, err
 	}
@@ -904,4 +1015,3 @@ func downloadURL(u string) ([]byte, error) {
 	}
 	return io.ReadAll(resp.Body)
 }
-

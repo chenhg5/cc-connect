@@ -214,6 +214,7 @@ type ProviderConfig struct {
 type PlatformConfig struct {
 	Type    string         `toml:"type"`
 	Options map[string]any `toml:"options"`
+	Proxy   *ProxyConfig   `toml:"proxy,omitempty"` // proxy configuration for this platform
 }
 
 // AliasConfig maps a trigger string to a command (e.g. "帮助" → "/help").
@@ -233,6 +234,14 @@ type CommandConfig struct {
 
 type LogConfig struct {
 	Level string `toml:"level"`
+}
+
+// ProxyConfig configures HTTP/SOCKS5 proxy for platform connections.
+type ProxyConfig struct {
+	Type     string `toml:"type"`               // "http" | "https" | "socks5"
+	Addr     string `toml:"addr"`               // proxy address (e.g. "127.0.0.1:1080" or "socks5://127.0.0.1:1080")
+	Username string `toml:"username,omitempty"` // optional proxy username
+	Password string `toml:"password,omitempty"` // optional proxy password
 }
 
 func Load(path string) (*Config, error) {

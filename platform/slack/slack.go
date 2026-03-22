@@ -33,6 +33,7 @@ type Platform struct {
 	appToken              string
 	allowFrom             string
 	shareSessionInChannel bool
+	httpClient            *http.Client // optional HTTP client for proxy
 	client                *slack.Client
 	socket                *socketmode.Client
 	handler               core.MessageHandler
@@ -51,13 +52,47 @@ func New(opts map[string]any) (core.Platform, error) {
 	if botToken == "" || appToken == "" {
 		return nil, fmt.Errorf("slack: bot_token and app_token are required")
 	}
+
+	// Build HTTP client with proxy support if configured
+	var httpClient *http.Client
+	if proxyCfg, ok := opts["proxy"].(map[string]any); ok {
+		proxyConfig := parseProxyConfig(proxyCfg)
+		if proxyConfig != nil {
+			var err error
+			httpClient, err = core.BuildHTTPClient(proxyConfig, 60*time.Second)
+			if err != nil {
+				return nil, fmt.Errorf("slack: failed to create proxy client: %w", err)
+			}
+		}
+	}
+
 	return &Platform{
 		botToken:              botToken,
 		appToken:              appToken,
 		allowFrom:             allowFrom,
 		shareSessionInChannel: shareSessionInChannel,
+		httpClient:            httpClient,
 		channelNameCache:      make(map[string]string),
 	}, nil
+}
+
+// parseProxyConfig converts map[string]any to core.ProxyConfig
+func parseProxyConfig(cfg map[string]any) *core.ProxyConfig {
+	typ, _ := cfg["type"].(string)
+	addr, _ := cfg["addr"].(string)
+	username, _ := cfg["username"].(string)
+	password, _ := cfg["password"].(string)
+
+	if typ == "" || addr == "" {
+		return nil
+	}
+
+	return &core.ProxyConfig{
+		Type:     typ,
+		Addr:     addr,
+		Username: username,
+		Password: password,
+	}
 }
 
 func (p *Platform) Name() string { return "slack" }
@@ -65,9 +100,15 @@ func (p *Platform) Name() string { return "slack" }
 func (p *Platform) Start(handler core.MessageHandler) error {
 	p.handler = handler
 
-	p.client = slack.New(p.botToken,
+	// Build client options
+	slackOpts := []slack.Option{
 		slack.OptionAppLevelToken(p.appToken),
-	)
+	}
+	if p.httpClient != nil {
+		slackOpts = append(slackOpts, slack.OptionHTTPClient(p.httpClient))
+	}
+
+	p.client = slack.New(p.botToken, slackOpts...)
 	p.socket = socketmode.New(p.client)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -143,7 +184,7 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 				msg := &core.Message{
 					SessionKey: sessionKey, Platform: "slack",
 					UserID: ev.User, UserName: p.resolveUserName(ev.User),
-					ChatName: p.resolveChannelNameForMsg(ev.Channel),
+					ChatName:  p.resolveChannelNameForMsg(ev.Channel),
 					Content:   stripAppMentionText(ev.Text),
 					MessageID: ev.TimeStamp,
 					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: ev.TimeStamp},
@@ -230,9 +271,9 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					SessionKey: sessionKey, Platform: "slack",
 					UserID: ev.User, UserName: p.resolveUserName(ev.User),
 					ChatName: p.resolveChannelNameForMsg(ev.Channel),
-					Content: ev.Text, Images: images, Audio: audio,
+					Content:  ev.Text, Images: images, Audio: audio,
 					MessageID: ts,
-					ReplyCtx: replyContext{channel: ev.Channel, timestamp: ts},
+					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: ts},
 				}
 				p.handler(p, msg)
 			}
@@ -341,10 +382,10 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 	}
 
 	_, err := p.client.UploadFileV2Context(ctx, slack.UploadFileV2Parameters{
-		Reader:         bytes.NewReader(img.Data),
-		FileSize:       len(img.Data),
-		Filename:       name,
-		Channel:        rc.channel,
+		Reader:          bytes.NewReader(img.Data),
+		FileSize:        len(img.Data),
+		Filename:        name,
+		Channel:         rc.channel,
 		ThreadTimestamp: rc.timestamp,
 	})
 	if err != nil {

@@ -122,3 +122,4 @@ Desktop.ini
 *.pfx
 secrets/
 credentials/
+/.claude/
