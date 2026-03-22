@@ -616,9 +616,21 @@ func main() {
 			}
 		}
 		apiSrv.SetRelayManager(relayMgr)
+
+		// Create shared DirHistory for all engines
+		dirHistory := core.NewDirHistory(cfg.DataDir)
+
 		for i, e := range engines {
 			apiSrv.RegisterEngine(cfg.Projects[i].Name, e)
 			e.SetRelayManager(relayMgr)
+			e.SetDirHistory(dirHistory)
+
+			// Ensure initial work_dir is in history
+			if initWorkDir, _ := cfg.Projects[i].Agent.Options["work_dir"].(string); initWorkDir != "" {
+				if !dirHistory.Contains(cfg.Projects[i].Name, initWorkDir) {
+					dirHistory.Add(cfg.Projects[i].Name, initWorkDir)
+				}
+			}
 		}
 		if cronSched != nil {
 			apiSrv.SetCronScheduler(cronSched)

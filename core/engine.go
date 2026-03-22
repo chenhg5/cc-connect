@@ -178,6 +178,7 @@ type Engine struct {
 	streamPreview    StreamPreviewCfg
 	relayManager     *RelayManager
 	eventIdleTimeout time.Duration
+	dirHistory       *DirHistory
 
 	// Auto-compress settings
 	autoCompressEnabled   bool
@@ -667,6 +668,10 @@ func (e *Engine) SetRelayManager(rm *RelayManager) {
 
 func (e *Engine) RelayManager() *RelayManager {
 	return e.relayManager
+}
+
+func (e *Engine) SetDirHistory(dh *DirHistory) {
+	e.dirHistory = dh
 }
 
 // RemoveCommand removes a custom command by name. Returns false if not found.
@@ -3110,10 +3115,33 @@ func (e *Engine) cmdDir(p Platform, msg *Message, args []string) {
 		return
 	}
 
+	currentDir := switcher.GetWorkDir()
+
+	// No args: show current dir + history
 	if len(args) == 0 {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgDirCurrent, switcher.GetWorkDir()))
+		var sb strings.Builder
+		sb.WriteString(e.i18n.Tf(MsgDirCurrent, currentDir))
+
+		if e.dirHistory != nil {
+			history := e.dirHistory.List(e.name)
+			if len(history) > 0 {
+				sb.WriteString("\n\n")
+				sb.WriteString(e.i18n.T(MsgDirHistoryTitle))
+				for i, dir := range history {
+					marker := "◻"
+					if dir == currentDir {
+						marker = "▶"
+					}
+					sb.WriteString(fmt.Sprintf("\n  %s %d. %s", marker, i+1, dir))
+				}
+				sb.WriteString("\n\n")
+				sb.WriteString(e.i18n.T(MsgDirHistoryHint))
+			}
+		}
+		e.reply(p, msg.ReplyCtx, sb.String())
 		return
 	}
+
 	if len(args) == 1 {
 		switch strings.ToLower(strings.TrimSpace(args[0])) {
 		case "help", "-h", "--help":
@@ -3122,13 +3150,43 @@ func (e *Engine) cmdDir(p Platform, msg *Message, args []string) {
 		}
 	}
 
-	newDir := filepath.Clean(strings.Join(args, " "))
-	if !filepath.IsAbs(newDir) {
-		baseDir := switcher.GetWorkDir()
-		if baseDir == "" {
-			baseDir, _ = os.Getwd()
+	arg := strings.Join(args, " ")
+	var newDir string
+
+	// Check if argument is a number (history index)
+	if idx, err := strconv.Atoi(strings.TrimSpace(arg)); err == nil && idx > 0 {
+		if e.dirHistory != nil {
+			newDir = e.dirHistory.Get(e.name, idx)
+			if newDir == "" {
+				e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgDirInvalidIndex, idx))
+				return
+			}
+		} else {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDirNoHistory))
+			return
 		}
-		newDir = filepath.Join(baseDir, newDir)
+	} else if arg == "-" {
+		// Jump to previous directory
+		if e.dirHistory != nil {
+			newDir = e.dirHistory.Previous(e.name)
+			if newDir == "" {
+				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDirNoPrevious))
+				return
+			}
+		} else {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDirNoHistory))
+			return
+		}
+	} else {
+		// Normal path
+		newDir = filepath.Clean(arg)
+		if !filepath.IsAbs(newDir) {
+			baseDir := currentDir
+			if baseDir == "" {
+				baseDir, _ = os.Getwd()
+			}
+			newDir = filepath.Join(baseDir, newDir)
+		}
 	}
 
 	info, err := os.Stat(newDir)
@@ -3144,6 +3202,11 @@ func (e *Engine) cmdDir(p Platform, msg *Message, args []string) {
 	s.SetAgentSessionID("", "")
 	s.ClearHistory()
 	sessions.Save()
+
+	// Add to history
+	if e.dirHistory != nil {
+		e.dirHistory.Add(e.name, newDir)
+	}
 
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgDirChanged, newDir))
 }

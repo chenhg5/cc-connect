@@ -2153,6 +2153,104 @@ func TestCmdDir_HelpShowsUsage(t *testing.T) {
 	}
 }
 
+func TestCmdDir_SwitchesByHistoryIndex(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	tempDir := t.TempDir()
+	dir1 := filepath.Join(tempDir, "dir1")
+	dir2 := filepath.Join(tempDir, "dir2")
+	dir3 := filepath.Join(tempDir, "dir3")
+	for _, d := range []string{dir1, dir2, dir3} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+	}
+
+	dataDir := t.TempDir() // separate data dir for history
+	agent := &stubWorkDirAgent{workDir: dir1}
+	e := NewEngine("test", agent, []Platform{p}, dataDir, LangEnglish)
+	e.SetDirHistory(NewDirHistory(dataDir))
+
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	// Build history: dir1 -> dir2 -> dir3
+	e.cmdDir(p, msg, []string{dir2})
+	if agent.workDir != dir2 {
+		t.Fatalf("after /dir dir2: workDir = %q, want %q", agent.workDir, dir2)
+	}
+
+	e.cmdDir(p, msg, []string{dir3})
+	if agent.workDir != dir3 {
+		t.Fatalf("after /dir dir3: workDir = %q, want %q", agent.workDir, dir3)
+	}
+
+	// Now history should be: [dir3, dir2, dir1] (dir1 might not be in history since it wasn't added initially)
+	// Current dir is dir3
+	// Index 2 should be dir2
+
+	p.sent = nil
+	e.cmdDir(p, msg, []string{"2"})
+
+	// Should have switched to dir2
+	if agent.workDir != dir2 {
+		t.Fatalf("after /dir 2: workDir = %q, want %q", agent.workDir, dir2)
+	}
+
+	// Check the reply mentions dir2
+	if len(p.sent) != 1 {
+		t.Fatalf("sent = %d messages, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], dir2) {
+		t.Fatalf("sent = %q, want message containing %q", p.sent[0], dir2)
+	}
+}
+
+func TestCmdDir_DisplaysCorrectIndices(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	tempDir := t.TempDir()
+	dir1 := filepath.Join(tempDir, "dir1")
+	dir2 := filepath.Join(tempDir, "dir2")
+	dir3 := filepath.Join(tempDir, "dir3")
+	for _, d := range []string{dir1, dir2, dir3} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+	}
+
+	dataDir := t.TempDir()
+	agent := &stubWorkDirAgent{workDir: dir1}
+	e := NewEngine("test", agent, []Platform{p}, dataDir, LangEnglish)
+	e.SetDirHistory(NewDirHistory(dataDir))
+
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	// Build history
+	e.cmdDir(p, msg, []string{dir2})
+	e.cmdDir(p, msg, []string{dir3})
+
+	// Now current is dir3, history is [dir3, dir2]
+	p.sent = nil
+	e.cmdDir(p, msg, nil) // show current + history
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent = %d messages, want 1", len(p.sent))
+	}
+
+	// Verify the display shows:
+	// - dir3 with ▶ marker (current)
+	// - dir2 with ◻ marker at index 2
+	output := p.sent[0]
+
+	// Check that dir3 is marked as current
+	if !strings.Contains(output, "▶ 1. "+dir3) {
+		t.Fatalf("output should contain '▶ 1. %s', got: %s", dir3, output)
+	}
+
+	// Check that dir2 is at index 2
+	if !strings.Contains(output, "◻ 2. "+dir2) {
+		t.Fatalf("output should contain '◻ 2. %s', got: %s", dir2, output)
+	}
+}
+
 func TestEngine_AdminFrom_GatesDir(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	tempDir := t.TempDir()

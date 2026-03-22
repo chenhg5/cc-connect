@@ -480,6 +480,11 @@ const (
 	MsgDirUsage        MsgKey = "dir_usage"
 	MsgDirNotSupported MsgKey = "dir_not_supported"
 	MsgDirInvalidPath  MsgKey = "dir_invalid_path"
+	MsgDirHistoryTitle MsgKey = "dir_history_title"
+	MsgDirHistoryHint  MsgKey = "dir_history_hint"
+	MsgDirInvalidIndex MsgKey = "dir_invalid_index"
+	MsgDirNoHistory    MsgKey = "dir_no_history"
+	MsgDirNoPrevious   MsgKey = "dir_no_previous"
 
 	// Multi-workspace messages
 	MsgWsNotEnabled      MsgKey = "ws_not_enabled"
@@ -3178,6 +3183,41 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 目錄不存在: `%s`",
 		LangJapanese:           "❌ ディレクトリが存在しません: `%s`",
 		LangSpanish:            "❌ El directorio no existe: `%s`",
+	},
+	MsgDirHistoryTitle: {
+		LangEnglish:            "📋 History:",
+		LangChinese:            "📋 历史记录:",
+		LangTraditionalChinese: "📋 歷史記錄:",
+		LangJapanese:           "📋 履歴:",
+		LangSpanish:            "📋 Historial:",
+	},
+	MsgDirHistoryHint: {
+		LangEnglish:            "💡 Use `/dir <number>` to switch, or `/dir -` for previous.",
+		LangChinese:            "💡 使用 `/dir <序号>` 切换，或 `/dir -` 返回上一个目录。",
+		LangTraditionalChinese: "💡 使用 `/dir <序號>` 切換，或 `/dir -` 返回上一個目錄。",
+		LangJapanese:           "💡 `/dir <番号>` で切り替え、`/dir -` で前のディレクトリに戻ります。",
+		LangSpanish:            "💡 Usa `/dir <número>` para cambiar, o `/dir -` para el anterior.",
+	},
+	MsgDirInvalidIndex: {
+		LangEnglish:            "❌ Invalid history index: %d",
+		LangChinese:            "❌ 无效的历史序号: %d",
+		LangTraditionalChinese: "❌ 無效的歷史序號: %d",
+		LangJapanese:           "❌ 無効な履歴番号: %d",
+		LangSpanish:            "❌ Índice de historial inválido: %d",
+	},
+	MsgDirNoHistory: {
+		LangEnglish:            "❌ No directory history available.",
+		LangChinese:            "❌ 暂无目录历史记录。",
+		LangTraditionalChinese: "❌ 暫無目錄歷史記錄。",
+		LangJapanese:           "❌ ディレクトリの履歴がありません。",
+		LangSpanish:            "❌ No hay historial de directorios.",
+	},
+	MsgDirNoPrevious: {
+		LangEnglish:            "❌ No previous directory in history.",
+		LangChinese:            "❌ 没有上一个目录记录。",
+		LangTraditionalChinese: "❌ 沒有上一個目錄記錄。",
+		LangJapanese:           "❌ 前のディレクトリが履歴にありません。",
+		LangSpanish:            "❌ No hay directorio anterior en el historial.",
 	},
 
 	// Multi-workspace messages
