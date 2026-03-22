@@ -108,7 +108,7 @@ func newIFlowSession(ctx context.Context, cmd, workDir, model, mode, resumeID st
 	}
 	s.alive.Store(true)
 
-	if resumeID != "" {
+	if resumeID != "" && resumeID != core.ContinueSession {
 		s.sessionID.Store(resumeID)
 		s.sentOnce.Store(true)
 	}

@@ -495,3 +495,15 @@ func TestComputeLineDiff(t *testing.T) {
 		})
 	}
 }
+
+func TestGeminiSession_ContinueSessionTreatedAsFresh(t *testing.T) {
+	s, err := newGeminiSession(context.Background(), "echo", "/tmp", "", "default", core.ContinueSession, nil, 0)
+	if err != nil {
+		t.Fatalf("newGeminiSession: %v", err)
+	}
+	defer s.Close()
+
+	if got := s.CurrentSessionID(); got != "" {
+		t.Errorf("ContinueSession should be treated as fresh: chatID = %q, want empty", got)
+	}
+}

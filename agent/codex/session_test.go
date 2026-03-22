@@ -66,6 +66,27 @@ func TestBuildExecArgs_IncludesReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestBuildExecArgs_ResumeOmitsCdFlag(t *testing.T) {
+	cs, err := newCodexSession(context.Background(), "/tmp/project", "", "", "full-auto", "thread-abc", nil)
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+
+	args := cs.buildExecArgs("hello", nil)
+
+	// codex exec resume does not support --cd; verify it's absent.
+	for i, arg := range args {
+		if arg == "--cd" {
+			t.Fatalf("resume args should not contain --cd, but found at index %d: %v", i, args)
+		}
+	}
+
+	// --json and prompt must still be present.
+	if !containsSequence(args, []string{"--json", "hello"}) {
+		t.Fatalf("resume args missing --json + prompt: %v", args)
+	}
+}
+
 func TestSend_WithImages_PassesImageArgsAndDefaultPrompt(t *testing.T) {
 	workDir := t.TempDir()
 	binDir := filepath.Join(workDir, "bin")
@@ -326,4 +347,16 @@ func indexOf(args []string, target string) int {
 		}
 	}
 	return -1
+}
+
+func TestCodexSession_ContinueSessionTreatedAsFresh(t *testing.T) {
+	s, err := newCodexSession(context.Background(), "/tmp", "", "", "full-auto", core.ContinueSession, nil)
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+	defer s.Close()
+
+	if got := s.CurrentSessionID(); got != "" {
+		t.Errorf("ContinueSession should be treated as fresh: threadID = %q, want empty", got)
+	}
 }

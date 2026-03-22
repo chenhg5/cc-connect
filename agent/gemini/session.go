@@ -56,7 +56,7 @@ func newGeminiSession(ctx context.Context, cmd, workDir, model, mode, resumeID s
 	}
 	gs.alive.Store(true)
 
-	if resumeID != "" {
+	if resumeID != "" && resumeID != core.ContinueSession {
 		gs.chatID.Store(resumeID)
 	}
 
