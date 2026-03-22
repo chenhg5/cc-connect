@@ -186,6 +186,14 @@ func (m *mockCleanerPlatform) DeletePreviewMessage(_ context.Context, handle any
 	return nil
 }
 
+type mockKeepPreviewPlatform struct {
+	mockCleanerPlatform
+}
+
+func (m *mockKeepPreviewPlatform) KeepPreviewOnFinish() bool {
+	return true
+}
+
 func TestStreamPreview_FreezeDeletesOnFinish(t *testing.T) {
 	mp := &mockCleanerPlatform{}
 	cfg := StreamPreviewCfg{
@@ -223,5 +231,64 @@ func TestStreamPreview_NonUpdaterPlatform(t *testing.T) {
 	sp := newStreamPreview(cfg, p, "ctx", context.Background())
 	if sp.canPreview() {
 		t.Error("should not preview on non-updater platform")
+	}
+}
+
+func TestStreamPreview_DiscardDeletesPreview(t *testing.T) {
+	mp := &mockCleanerPlatform{}
+	cfg := StreamPreviewCfg{
+		Enabled:       true,
+		IntervalMs:    50,
+		MinDeltaChars: 1,
+		MaxChars:      500,
+	}
+
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background())
+	sp.appendText("Hello World")
+	time.Sleep(100 * time.Millisecond)
+
+	sp.discard()
+
+	mp.mu.Lock()
+	deletedCount := len(mp.deleted)
+	msgs := append([]string(nil), mp.messages...)
+	mp.mu.Unlock()
+
+	if deletedCount != 1 {
+		t.Fatalf("expected 1 delete call, got %d", deletedCount)
+	}
+	if len(msgs) != 1 || msgs[0] != "start:Hello World" {
+		t.Fatalf("messages = %#v, want only initial preview", msgs)
+	}
+}
+
+func TestStreamPreview_FinishKeepsPreviewWhenPlatformPrefersInPlaceFinalize(t *testing.T) {
+	mp := &mockKeepPreviewPlatform{}
+	cfg := StreamPreviewCfg{
+		Enabled:       true,
+		IntervalMs:    50,
+		MinDeltaChars: 1,
+		MaxChars:      500,
+	}
+
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background())
+	sp.appendText("Hello World")
+	time.Sleep(100 * time.Millisecond)
+
+	ok := sp.finish("Hello World Final")
+	if !ok {
+		t.Fatal("finish should return true when platform prefers in-place finalize")
+	}
+
+	mp.mu.Lock()
+	deletedCount := len(mp.deleted)
+	msgs := append([]string(nil), mp.messages...)
+	mp.mu.Unlock()
+
+	if deletedCount != 0 {
+		t.Fatalf("expected no delete call, got %d", deletedCount)
+	}
+	if len(msgs) < 2 || msgs[len(msgs)-1] != "update:Hello World Final" {
+		t.Fatalf("messages = %#v, want final update in place", msgs)
 	}
 }
