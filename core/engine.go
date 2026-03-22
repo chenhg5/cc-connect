@@ -3933,8 +3933,9 @@ func (e *Engine) renderStatusCard(sessionKey string, userID string) *Card {
 	globalQuiet := e.quiet
 	e.quietMu.RUnlock()
 
+	iKey := e.interactiveKeyForSessionKey(sessionKey)
 	e.interactiveMu.Lock()
-	state, hasState := e.interactiveStates[sessionKey]
+	state, hasState := e.interactiveStates[iKey]
 	e.interactiveMu.Unlock()
 
 	sessionQuiet := false
@@ -5281,6 +5282,11 @@ func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images
 	var state *interactiveState
 	if sessionKey != "" {
 		state = e.interactiveStates[sessionKey]
+		if state == nil && e.multiWorkspace {
+			if iKey := e.interactiveKeyForSessionKey(sessionKey); iKey != sessionKey {
+				state = e.interactiveStates[iKey]
+			}
+		}
 	} else {
 		// Pick the first active session
 		for _, s := range e.interactiveStates {
