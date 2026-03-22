@@ -1,5 +1,50 @@
 # Changelog
 
+## v1.2.2-beta.4 (2026-03-22)
+
+Beta release with Weixin (ilink) personal chat support, session/continue improvements, and platform fixes.
+
+### New Features
+- **Weixin Personal (ilink)**: New platform with long-poll `getUpdates` / `sendMessage`, QR `weixin setup`, CDN decrypt for inbound media and `ImageSender`/`FileSender` outbound (#257)
+- **Telegram**: Voice/audio reply support (#225) and async startup recovery
+- **Discord**: `@everyone` / `@here` broadcast support (#132)
+- **Cron**: Optional new session per run and per-job timeout (#236)
+- **Claude Code**: `disallowed_tools` configuration option (#232)
+- **Auto-Compress**: Compress context when estimated tokens exceed threshold (#231)
+- **Continue / Sessions**: Fork session on `--continue` to avoid context contamination (#244); replace persisted `ContinueSession` sentinel with real agent session id; reserve CLI `--continue` bridge for real user traffic
+- **Core**: `/dir` directory history; `/model` switching aligned with provider flow (#246)
+- **Providers**: MiniMax M2.7 high-speed model added to example configs (#217)
+
+### Bug Fixes
+- **Weixin**: Harden send path (empty body skip, response body cap, dedup keys, multi-voice segments); treat `sendMessage` JSON `ret != 0` as failure so quota/API errors surface correctly
+- **Feishu**: Always reply to the original message; dispatch message handling asynchronously (#57)
+- **Codex**: Mode switch and `--json` flag position fixes (#240, #239)
+- **Multi-Workspace**: Workspace command prefix missing leading slash (#135)
+- **Non-Claude Agents**: Ignore `ContinueSession` sentinel where inappropriate (#244 follow-up)
+- **npm / Update**: Version sync after update; pre-release version comparison normalization
+
+### Improvements
+- **Tests**: Expanded coverage across `config`, `core`, agents, and platforms
+- **Logging / Errors**: Additional error logging in several code paths
+
+### Contributors
+
+Special thanks to all contributors who made this release possible:
+
+- **cg33** — Weixin ilink platform, setup CLI, and CDN media (#257)
+- **Shawn** — Feishu async dispatch and reply-to-original fixes (#57)
+- **quabug** — Discord broadcast and non-Claude ContinueSession handling (#132, #244)
+- **huluma1314** — Auto-compress when token threshold exceeded (#231)
+- **Leigh Stillard** — Fork session on `--continue` (#244)
+- **Deeka Wong** — Telegram audio replies and core `/model` provider flow (#225, #246)
+- **q107580018** — Telegram async startup recovery
+- **just4zeroq** — Codex mode and JSON flag fixes (#240)
+- **术士木星** — Cron session-per-run and job timeout (#236)
+- **hushicai** — Claude `disallowed_tools` (#232)
+- **Octopus** — MiniMax M2.7 high-speed in examples (#217)
+- **alinnb** — `/dir` directory history
+- **Claude** — Continue-session bridge fixes, auto-compress/cron edge cases, Weixin send hardening and API error handling, and broad test improvements
+
 ## v1.2.2-beta.3 (2026-03-19)
 
 Beta release with major multi-user mode, improved workspace stability, and platform enhancements.
