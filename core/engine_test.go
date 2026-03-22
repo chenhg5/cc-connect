@@ -236,6 +236,18 @@ func (p *stubInlineButtonPlatform) SendWithButtons(_ context.Context, _ any, con
 	return nil
 }
 
+type stubPermissionButtonPlatform struct {
+	stubPlatformEngine
+	permissionButtonContent string
+	permissionButtonRows    [][]ButtonOption
+}
+
+func (p *stubPermissionButtonPlatform) SendPermissionButtons(_ context.Context, _ any, content string, buttons [][]ButtonOption) error {
+	p.permissionButtonContent = content
+	p.permissionButtonRows = buttons
+	return nil
+}
+
 type stubCardPlatform struct {
 	stubPlatformEngine
 	repliedCards []*Card
@@ -1405,11 +1417,54 @@ func TestSendPermissionPrompt_InlineButtonPlatform(t *testing.T) {
 	if p.buttonContent != "full prompt text" {
 		t.Errorf("expected button content to be prompt, got %s", p.buttonContent)
 	}
-	if len(p.buttonRows) < 2 {
-		t.Fatalf("expected at least 2 button rows, got %d", len(p.buttonRows))
+	if len(p.buttonRows) != 2 {
+		t.Fatalf("expected 2 button rows, got %d", len(p.buttonRows))
 	}
 	if p.buttonRows[0][0].Data != "perm:allow" {
 		t.Errorf("expected perm:allow, got %s", p.buttonRows[0][0].Data)
+	}
+	if p.buttonRows[0][1].Data != "perm:deny" {
+		t.Errorf("expected perm:deny, got %s", p.buttonRows[0][1].Data)
+	}
+	if p.buttonRows[1][0].Data != "perm:allow_all" {
+		t.Errorf("expected perm:allow_all, got %s", p.buttonRows[1][0].Data)
+	}
+}
+
+func TestSendPermissionPrompt_PermissionButtonPlatform(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPermissionButtonPlatform{stubPlatformEngine: stubPlatformEngine{n: "discord"}}
+
+	e.sendPermissionPrompt(p, "ctx", "full prompt text", "write_file", "/tmp/test.txt")
+
+	if p.permissionButtonContent != "full prompt text" {
+		t.Errorf("expected permission button content to be prompt, got %s", p.permissionButtonContent)
+	}
+	if len(p.permissionButtonRows) != 1 {
+		t.Fatalf("expected 1 permission button row, got %d", len(p.permissionButtonRows))
+	}
+	if len(p.permissionButtonRows[0]) != 3 {
+		t.Fatalf("expected 3 permission buttons in one row, got %d", len(p.permissionButtonRows[0]))
+	}
+	if p.permissionButtonRows[0][0].Data != "perm:allow" {
+		t.Errorf("expected perm:allow, got %s", p.permissionButtonRows[0][0].Data)
+	}
+	if p.permissionButtonRows[0][1].Data != "perm:deny" {
+		t.Errorf("expected perm:deny, got %s", p.permissionButtonRows[0][1].Data)
+	}
+	if p.permissionButtonRows[0][2].Data != "perm:allow_all" {
+		t.Errorf("expected perm:allow_all, got %s", p.permissionButtonRows[0][2].Data)
+	}
+	if p.permissionButtonRows[0][2].Text != e.i18n.T(MsgPermBtnAllowAllShort) {
+		t.Errorf("expected short allow-all label, got %s", p.permissionButtonRows[0][2].Text)
+	}
+}
+
+func TestPermissionPromptButtonsText_UsedForPermissionButtonPlatforms(t *testing.T) {
+	e := newTestEngine()
+	text := fmt.Sprintf(e.i18n.T(MsgPermissionPromptButtons), "write_file", "/tmp/test.txt")
+	if strings.Contains(text, "Reply **allow** / **deny** / **allow all**") {
+		t.Fatalf("button prompt should not include reply hint, got %q", text)
 	}
 }
 

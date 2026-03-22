@@ -2266,7 +2266,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					permLimit = permLimit * 8 / 5
 				}
 				toolInput := truncateIf(event.ToolInput, permLimit)
-				prompt := fmt.Sprintf(e.i18n.T(MsgPermissionPrompt), event.ToolName, toolInput)
+				promptKey := MsgPermissionPrompt
+				if _, ok := p.(PermissionButtonSender); ok {
+					promptKey = MsgPermissionPromptButtons
+				}
+				prompt := fmt.Sprintf(e.i18n.T(promptKey), event.ToolName, toolInput)
 				e.sendPermissionPrompt(p, replyCtx, prompt, event.ToolName, toolInput)
 			}
 
@@ -5438,20 +5442,26 @@ func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images
 }
 
 // sendPermissionPrompt sends a permission prompt with interactive buttons when
-// the platform supports them. Fallback chain: InlineButtonSender → CardSender → plain text.
+// the platform supports them. Fallback chain: PermissionButtonSender → InlineButtonSender → CardSender → plain text.
 func (e *Engine) sendPermissionPrompt(p Platform, replyCtx any, prompt, toolName, toolInput string) {
-	// Try inline buttons first (Telegram)
-	if bs, ok := p.(InlineButtonSender); ok {
-		buttons := [][]ButtonOption{
-			{
-				{Text: e.i18n.T(MsgPermBtnAllow), Data: "perm:allow"},
-				{Text: e.i18n.T(MsgPermBtnDeny), Data: "perm:deny"},
-			},
-			{
-				{Text: e.i18n.T(MsgPermBtnAllowAll), Data: "perm:allow_all"},
-			},
+	buttonAllow := ButtonOption{Text: e.i18n.T(MsgPermBtnAllow), Data: "perm:allow"}
+	buttonDeny := ButtonOption{Text: e.i18n.T(MsgPermBtnDeny), Data: "perm:deny"}
+	buttonAllowAll := ButtonOption{Text: e.i18n.T(MsgPermBtnAllowAll), Data: "perm:allow_all"}
+	permissionButtonAllowAll := ButtonOption{Text: e.i18n.T(MsgPermBtnAllowAllShort), Data: "perm:allow_all"}
+	permissionButtons := [][]ButtonOption{{buttonAllow, buttonDeny, permissionButtonAllowAll}}
+	inlineButtons := [][]ButtonOption{{buttonAllow, buttonDeny}, {buttonAllowAll}}
+
+	// Try dedicated permission buttons first (Discord, etc.)
+	if ps, ok := p.(PermissionButtonSender); ok {
+		if err := ps.SendPermissionButtons(e.ctx, replyCtx, prompt, permissionButtons); err == nil {
+			return
 		}
-		if err := bs.SendWithButtons(e.ctx, replyCtx, prompt, buttons); err == nil {
+		slog.Warn("sendPermissionPrompt: permission buttons failed, falling back")
+	}
+
+	// Try inline buttons next (Telegram)
+	if bs, ok := p.(InlineButtonSender); ok {
+		if err := bs.SendWithButtons(e.ctx, replyCtx, prompt, inlineButtons); err == nil {
 			return
 		}
 		slog.Warn("sendPermissionPrompt: inline buttons failed, falling back")
