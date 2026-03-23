@@ -453,6 +453,79 @@ func TestStop_ClearsProxy(t *testing.T) {
 	}
 }
 
+// -- Dynamic model list tests --
+
+func TestModelDesc(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"github-copilot/claude-sonnet-4.5", "Claude Sonnet 4.5 (github-copilot)"},
+		{"google/gemini-2.5-flash", "Gemini 2.5 Flash (google)"},
+		{"opencode/big-pickle", "Big Pickle (opencode)"},
+		{"anthropic/claude-opus-4-20250514", "Claude Opus 4 20250514 (anthropic)"},
+		{"openai/gpt-4o", "Gpt 4o (openai)"},
+		// No slash — returns as-is
+		{"bare-model-name", "bare-model-name"},
+		// Empty string
+		{"", ""},
+		// Slash at start
+		{"/model-only", "Model Only ()"},
+		// Slash at end
+		{"provider/", " (provider)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := modelDesc(tt.input)
+			if got != tt.want {
+				t.Errorf("modelDesc(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAvailableModels_FallbackToHardcoded(t *testing.T) {
+	// No providers configured, no CLI available → should return hardcoded list
+	a := &Agent{
+		cmd:       "nonexistent-opencode-binary-12345",
+		activeIdx: -1,
+	}
+	models := a.AvailableModels(t.Context())
+	if len(models) == 0 {
+		t.Fatal("AvailableModels() returned empty list, expected hardcoded fallback")
+	}
+	// Verify the hardcoded list is returned
+	found := false
+	for _, m := range models {
+		if m.Name == "anthropic/claude-sonnet-4-20250514" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("hardcoded fallback should include anthropic/claude-sonnet-4-20250514, got %v", models)
+	}
+}
+
+func TestAvailableModels_ConfiguredModelsOverrideCLI(t *testing.T) {
+	// When providers have models configured, they take priority
+	a := &Agent{
+		cmd: "opencode",
+		providers: []core.ProviderConfig{
+			{
+				Models: []core.ModelOption{
+					{Name: "custom/model-1", Desc: "Custom Model 1"},
+				},
+			},
+		},
+		activeIdx: 0,
+	}
+	models := a.AvailableModels(t.Context())
+	if len(models) != 1 || models[0].Name != "custom/model-1" {
+		t.Errorf("AvailableModels() = %v, expected configured models to take priority", models)
+	}
+}
+
 func TestProviderEnvLocked_EnvKeysAreSorted(t *testing.T) {
 	// Verify env entries from the Env map are all present (order doesn't
 	// matter for env vars, but all must be emitted).

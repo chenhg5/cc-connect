@@ -108,8 +108,14 @@ func (a *Agent) configuredModels() []core.ModelOption {
 	return core.GetProviderModels(a.providers, a.activeIdx)
 }
 
-func (a *Agent) AvailableModels(_ context.Context) []core.ModelOption {
+func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	if models := a.configuredModels(); len(models) > 0 {
+		return models
+	}
+	a.mu.RLock()
+	cmd := a.cmd
+	a.mu.RUnlock()
+	if models := fetchModelsFromCLI(ctx, cmd); len(models) > 0 {
 		return models
 	}
 	return []core.ModelOption{
@@ -118,6 +124,60 @@ func (a *Agent) AvailableModels(_ context.Context) []core.ModelOption {
 		{Name: "openai/gpt-4o", Desc: "GPT-4o"},
 		{Name: "openai/o3", Desc: "OpenAI o3"},
 	}
+}
+
+// fetchModelsFromCLI runs `opencode models` and parses the output.
+// Each line is a model ID in the format "provider/model-id".
+func fetchModelsFromCLI(ctx context.Context, cmd string) []core.ModelOption {
+	c := exec.CommandContext(ctx, cmd, "models")
+	out, err := c.Output()
+	if err != nil {
+		slog.Debug("opencode: fetch models from CLI failed", "error", err)
+		return nil
+	}
+
+	var models []core.ModelOption
+	seen := make(map[string]struct{})
+	for _, line := range strings.Split(string(out), "\n") {
+		name := strings.TrimSpace(line)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		models = append(models, core.ModelOption{
+			Name: name,
+			Desc: modelDesc(name),
+		})
+	}
+	if len(models) > 0 {
+		slog.Info("opencode: fetched models from CLI", "count", len(models))
+	}
+	return models
+}
+
+// modelDesc generates a human-readable description from a model ID like
+// "github-copilot/claude-sonnet-4.5" → "Claude Sonnet 4.5 (github-copilot)".
+func modelDesc(modelID string) string {
+	slash := strings.IndexByte(modelID, '/')
+	if slash < 0 {
+		return modelID
+	}
+	provider := modelID[:slash]
+	model := modelID[slash+1:]
+
+	// Title-case the model name: replace hyphens with spaces, capitalize words.
+	words := strings.Split(model, "-")
+	for i, w := range words {
+		if len(w) > 0 {
+			words[i] = strings.ToUpper(w[:1]) + w[1:]
+		}
+	}
+	desc := strings.Join(words, " ")
+
+	return fmt.Sprintf("%s (%s)", desc, provider)
 }
 
 func (a *Agent) SetSessionEnv(env []string) {
