@@ -85,6 +85,24 @@ level = "info" # debug, info, warn, error
 # window_secs = 60          # Window size in seconds (default: 60) / 窗口时间秒数（默认 60）
 
 # =============================================================================
+# Outgoing Rate Limit / 出站速率限制
+# Throttle how fast messages are sent TO platforms.
+# Prevents account bans on platforms with strict API rate limits (e.g. WeChat Work).
+# 限制向平台发送消息的速率，防止因频率过高被封号（如企业微信）。
+# =============================================================================
+# [outgoing_rate_limit]
+# max_per_second = 0         # Global default msgs/sec; 0 = unlimited (default) / 全局默认每秒消息数；0 = 无限制
+# burst = 3                  # Max burst size; default = ceil(max_per_second) / 最大突发数量
+
+# Per-platform overrides / 每平台覆盖配置:
+# [outgoing_rate_limit.platforms.wecom]
+# max_per_second = 1
+# [outgoing_rate_limit.platforms.telegram]
+# max_per_second = 25
+# [outgoing_rate_limit.platforms.feishu]
+# max_per_second = 5
+
+# =============================================================================
 # Relay Settings / Relay 设置
 # =============================================================================
 # Bot-to-bot relay timeout. Controls how long cc-connect waits for the target
