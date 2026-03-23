@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"reflect"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -347,7 +348,37 @@ func updateJobField(job *CronJob, field string, value any) error {
 			return nil
 		}
 	}
+	// Fallback: try to set string field via reflection
+	if v, ok := value.(string); ok {
+		rv := reflect.ValueOf(job).Elem()
+		f := rv.FieldByName(toExportedFieldName(field))
+		if f.IsValid() && f.Kind() == reflect.String && f.CanSet() {
+			f.SetString(v)
+			return nil
+		}
+	}
 	return fmt.Errorf("unknown or invalid field: %s", field)
+}
+
+// toExportedFieldName converts snake_case to Go exported field name (e.g., "session_key" -> "SessionKey")
+func toExportedFieldName(s string) string {
+	result := make([]byte, 0, len(s))
+	upperNext := true
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '_' {
+			upperNext = true
+			continue
+		}
+		if upperNext {
+			if c >= 'a' && c <= 'z' {
+				c -= 32
+			}
+			upperNext = false
+		}
+		result = append(result, c)
+	}
+	return string(result)
 }
 
 // CronScheduler runs cron jobs by injecting synthetic messages into engines.

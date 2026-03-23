@@ -325,6 +325,9 @@ func runCronEdit(args []string) {
 				i++
 				dataDir = args[i]
 			}
+		case "--help", "-h":
+			printCronEditUsage()
+			return
 		default:
 			if id == "" {
 				id = args[i]
@@ -338,17 +341,17 @@ func runCronEdit(args []string) {
 
 	if id == "" {
 		fmt.Fprintln(os.Stderr, "Error: job ID is required")
-		fmt.Fprintln(os.Stderr, "Usage: cc-connect cron edit <id> <field> <value>")
+		fmt.Fprintln(os.Stderr, "Run 'cc-connect cron edit --help' for usage.")
 		os.Exit(1)
 	}
 	if field == "" {
 		fmt.Fprintln(os.Stderr, "Error: field name is required")
-		fmt.Fprintln(os.Stderr, "Usage: cc-connect cron edit <id> <field> <value>")
+		fmt.Fprintln(os.Stderr, "Run 'cc-connect cron edit --help' for usage.")
 		os.Exit(1)
 	}
 	if valueStr == "" {
 		fmt.Fprintln(os.Stderr, "Error: value is required")
-		fmt.Fprintln(os.Stderr, "Usage: cc-connect cron edit <id> <field> <value>")
+		fmt.Fprintln(os.Stderr, "Run 'cc-connect cron edit --help' for usage.")
 		os.Exit(1)
 	}
 
@@ -447,4 +450,42 @@ Examples:
   cc-connect cron add --cron "0 6 * * *" --prompt "Collect GitHub trending data" --desc "Daily Trending"
   cc-connect cron add --cron "*/30 * * * *" --exec "df -h" --desc "Disk usage check"
   cc-connect cron add 0 6 * * * Collect GitHub trending data and send me a summary`)
+}
+
+func printCronEditUsage() {
+	fmt.Println(`Usage: cc-connect cron edit <id> <field> <value> [options]
+
+Edit a specific field of an existing scheduled task.
+
+Editable Fields (string):
+  project       Target project name
+  session_key   Target session key
+  cron_expr     Cron expression, e.g. "0 6 * * *"
+  prompt        Task prompt (runs through agent)
+  exec          Shell command (runs directly)
+  work_dir      Working directory for exec
+  description   Short description
+  session_mode  reuse or new_per_run
+
+Editable Fields (bool: true/false):
+  enabled       Enable or disable the task
+  mute          Suppress all messages
+  silent        Suppress start notification
+
+Editable Fields (int: number):
+  timeout_mins  Max minutes per run (0 = no limit)
+
+Read-only Fields (cannot be edited):
+  id, created_at, last_run, last_error
+
+Options:
+      --data-dir <path>  Data directory (default: ~/.cc-connect)
+  -h, --help             Show this help
+
+Examples:
+  cc-connect cron edit abc123 cron_expr "0 9 * * *"
+  cc-connect cron edit abc123 enabled false
+  cc-connect cron edit abc123 description "Daily standup reminder"
+  cc-connect cron edit abc123 timeout_mins 60
+  cc-connect cron edit abc123 mute true`)
 }
