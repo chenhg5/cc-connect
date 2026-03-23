@@ -222,6 +222,28 @@ func TestProviderConfig_SaveProviderModel(t *testing.T) {
 	}
 }
 
+func TestSaveAgentModel(t *testing.T) {
+	writeTestConfig(t, providerConfigTOML)
+
+	if err := SaveAgentModel("demo", "gpt-5.4"); err != nil {
+		t.Fatalf("SaveAgentModel() error: %v", err)
+	}
+
+	cfg := readTestConfig(t)
+	if got, _ := cfg.Projects[0].Agent.Options["model"].(string); got != "gpt-5.4" {
+		t.Fatalf("agent.options.model = %q, want gpt-5.4", got)
+	}
+	if got, _ := cfg.Projects[0].Agent.Options["mode"].(string); got != "default" {
+		t.Fatalf("agent.options.mode = %q, want default", got)
+	}
+	if got, _ := cfg.Projects[0].Agent.Options["provider"].(string); got != "primary" {
+		t.Fatalf("agent.options.provider = %q, want primary", got)
+	}
+	if len(cfg.Projects[0].Agent.Providers) != 2 {
+		t.Fatalf("provider count = %d, want 2", len(cfg.Projects[0].Agent.Providers))
+	}
+}
+
 func TestCommandConfig_AddAndRemove(t *testing.T) {
 	writeTestConfig(t, baseConfigTOML)
 

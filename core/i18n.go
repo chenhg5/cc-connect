@@ -237,6 +237,7 @@ const (
 
 	MsgModelCurrent          MsgKey = "model_current"
 	MsgModelChanged          MsgKey = "model_changed"
+	MsgModelChangeFailed     MsgKey = "model_change_failed"
 	MsgModelNotSupported     MsgKey = "model_not_supported"
 	MsgReasoningCurrent      MsgKey = "reasoning_current"
 	MsgReasoningChanged      MsgKey = "reasoning_changed"
@@ -1734,6 +1735,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "模型已切換為 `%s`，新會話將使用此模型。",
 		LangJapanese:           "モデルを `%s` に切り替えました。新しいセッションで使用されます。",
 		LangSpanish:            "Modelo cambiado a `%s`. Las nuevas sesiones usarán este modelo.",
+	},
+	MsgModelChangeFailed: {
+		LangEnglish:            "❌ Failed to change model: %v",
+		LangChinese:            "❌ 切换模型失败: %v",
+		LangTraditionalChinese: "❌ 切換模型失敗: %v",
+		LangJapanese:           "❌ モデルの切り替えに失敗しました: %v",
+		LangSpanish:            "❌ Error al cambiar el modelo: %v",
 	},
 	MsgModelNotSupported: {
 		LangEnglish:            "This agent does not support model switching.",

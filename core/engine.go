@@ -147,6 +147,7 @@ type Engine struct {
 	providerAddSaveFunc    func(p ProviderConfig) error
 	providerRemoveSaveFunc func(name string) error
 	providerModelSaveFunc  func(providerName, model string) error
+	modelSaveFunc          func(model string) error
 
 	ttsSaveFunc func(mode string) error
 
@@ -443,6 +444,10 @@ func (e *Engine) SetProviderRemoveSaveFunc(fn func(string) error) {
 
 func (e *Engine) SetProviderModelSaveFunc(fn func(providerName, model string) error) {
 	e.providerModelSaveFunc = fn
+}
+
+func (e *Engine) SetModelSaveFunc(fn func(model string) error) {
+	e.modelSaveFunc = fn
 }
 
 // AddPlatform appends a platform to the engine after construction.
@@ -4570,7 +4575,11 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 		target = resolveModelAlias(models, target)
 	}
 
-	target = e.switchModel(target)
+	target, err := e.switchModel(target)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChangeFailed, err))
+		return
+	}
 	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
 
 	s := e.sessions.GetOrCreateActive(msg.SessionKey)
@@ -4611,36 +4620,50 @@ func parseModelSwitchArgs(args []string) (string, bool) {
 
 // switchModel applies a runtime model selection. When an active provider exists,
 // its configured model is updated so new sessions use the selected model instead
-// of the provider's previous fixed model.
-func (e *Engine) switchModel(target string) string {
+// of the provider's previous fixed model. Persistence errors are returned so
+// callers can avoid claiming success when the change would be lost on reload.
+func (e *Engine) switchModel(target string) (string, error) {
 	switcher, ok := e.agent.(ModelSwitcher)
 	if !ok {
-		return target
+		return target, nil
 	}
-	switcher.SetModel(target)
 
 	providerSwitcher, ok := e.agent.(ProviderSwitcher)
 	if !ok {
-		return target
+		if e.modelSaveFunc != nil {
+			if err := e.modelSaveFunc(target); err != nil {
+				return "", fmt.Errorf("save model: %w", err)
+			}
+		}
+		switcher.SetModel(target)
+		return target, nil
 	}
 	active := providerSwitcher.GetActiveProvider()
 	if active == nil {
-		return target
+		if e.modelSaveFunc != nil {
+			if err := e.modelSaveFunc(target); err != nil {
+				return "", fmt.Errorf("save model: %w", err)
+			}
+		}
+		switcher.SetModel(target)
+		return target, nil
 	}
 
 	providers := providerSwitcher.ListProviders()
 	updated, found := SetProviderModel(providers, active.Name, target)
 	if !found {
-		return target
+		switcher.SetModel(target)
+		return target, nil
 	}
-	providerSwitcher.SetProviders(updated)
-	providerSwitcher.SetActiveProvider(active.Name)
 	if e.providerModelSaveFunc != nil {
 		if err := e.providerModelSaveFunc(active.Name, target); err != nil {
-			slog.Error("failed to save provider model", "provider", active.Name, "model", target, "error", err)
+			return "", fmt.Errorf("save provider model %q: %w", active.Name, err)
 		}
 	}
-	return target
+	providerSwitcher.SetProviders(updated)
+	switcher.SetModel(target)
+	providerSwitcher.SetActiveProvider(active.Name)
+	return target, nil
 }
 
 func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
@@ -5793,7 +5816,10 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		} else {
 			target = resolveModelAlias(models, target)
 		}
-		e.switchModel(target)
+		if _, err := e.switchModel(target); err != nil {
+			slog.Error("failed to switch model from card action", "model", target, "error", err)
+			return
+		}
 		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 		e.cleanupInteractiveState(interactiveKey)
 		s := e.sessions.GetOrCreateActive(sessionKey)
