@@ -539,13 +539,6 @@ func (p *Platform) handleInteraction(s *discordgo.Session, i *discordgo.Interact
 		return
 	}
 
-	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
-	}); err != nil {
-		slog.Error("discord: defer interaction failed", "error", err)
-		return
-	}
-
 	data := i.ApplicationCommandData()
 	cmdText := reconstructCommand(data)
 	channelID := i.ChannelID
@@ -553,9 +546,20 @@ func (p *Platform) handleInteraction(s *discordgo.Session, i *discordgo.Interact
 	slog.Debug("discord: slash command", "user", userName, "command", cmdText, "channel", channelID)
 
 	sessionKey := resolveSessionKeyForChannel(channelID, userID, p.shareSessionInChannel, p.threadIsolation, sessionThreadOps{session: p.session})
-	ictx := &interactionReplyCtx{
+
+	// Try to defer the interaction response. If it fails (e.g. 404 Unknown interaction
+	// when the interaction was already acknowledged by another bot instance), fall back
+	// to sending replies as ordinary channel messages.
+	var rctx any
+	rctx = &interactionReplyCtx{
 		interaction: i.Interaction,
 		channelID:   channelID,
+	}
+	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+	}); err != nil {
+		slog.Warn("discord: defer interaction failed, falling back to channel message", "error", err)
+		rctx = replyContext{channelID: channelID}
 	}
 
 	msg := &core.Message{
@@ -563,7 +567,7 @@ func (p *Platform) handleInteraction(s *discordgo.Session, i *discordgo.Interact
 		MessageID: i.ID,
 		UserID:    userID, UserName: userName,
 		ChatName: p.resolveChannelName(channelID),
-		Content:  cmdText, ReplyCtx: ictx,
+		Content:  cmdText, ReplyCtx: rctx,
 	}
 	p.handler(p, msg)
 }
