@@ -1324,7 +1324,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		"session", session.ID,
 	)
 
-	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, resolvedWorkspace, "")
+	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, resolvedWorkspace, msg.SessionKey)
 }
 
 // queueMessageForBusySession queues a message for later delivery when the
