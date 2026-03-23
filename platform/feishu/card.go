@@ -23,6 +23,26 @@ func (p *interactivePlatform) ReplyCard(ctx context.Context, rctx any, card *cor
 	}
 
 	cardJSON := renderCard(card, rc.sessionKey)
+	if !p.shouldUseThreadOrReplyAPI(rc) {
+		if rc.chatID == "" {
+			return fmt.Errorf("%s: chatID is empty, cannot send card", p.tag())
+		}
+		resp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
+			ReceiveIdType(larkim.ReceiveIdTypeChatId).
+			Body(larkim.NewCreateMessageReqBodyBuilder().
+				ReceiveId(rc.chatID).
+				MsgType(larkim.MsgTypeInteractive).
+				Content(cardJSON).
+				Build()).
+			Build())
+		if err != nil {
+			return fmt.Errorf("%s: send card api call: %w", p.tag(), err)
+		}
+		if !resp.Success() {
+			return fmt.Errorf("%s: send card failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+		}
+		return nil
+	}
 	resp, err := p.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
 		MessageId(rc.messageID).
 		Body(p.buildReplyMessageReqBody(rc, larkim.MsgTypeInteractive, cardJSON)).
@@ -46,7 +66,7 @@ func (p *interactivePlatform) SendCard(ctx context.Context, rctx any, card *core
 		return fmt.Errorf("%s: chatID is empty, cannot send card", p.tag())
 	}
 
-	if p.shouldReplyInThread(rc) {
+	if !p.noReplyToTrigger && p.shouldReplyInThread(rc) {
 		return p.ReplyCard(ctx, rctx, card)
 	}
 

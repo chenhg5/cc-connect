@@ -11,10 +11,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
-	"regexp"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -188,6 +188,9 @@ type Engine struct {
 	autoCompressMaxTokens int
 	autoCompressMinGap    time.Duration
 
+	// When true, append [ctx: ~N%] (or model self-report) to assistant replies shown on platforms.
+	showContextIndicator bool
+
 	// Multi-workspace mode
 	multiWorkspace    bool
 	baseDir           string
@@ -296,6 +299,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		startedAt:             time.Now(),
 		streamPreview:         DefaultStreamPreviewCfg(),
 		eventIdleTimeout:      defaultEventIdleTimeout,
+		showContextIndicator:  true,
 	}
 
 	if ag != nil {
@@ -406,6 +410,11 @@ func (e *Engine) SetAutoCompressConfig(enabled bool, maxTokens int, minGap time.
 		minGap = 30 * time.Minute
 	}
 	e.autoCompressMinGap = minGap
+}
+
+// SetShowContextIndicator controls whether assistant replies include the [ctx: ~N%] suffix.
+func (e *Engine) SetShowContextIndicator(show bool) {
+	e.showContextIndicator = show
 }
 
 // SetInjectSender controls whether sender identity (platform and user ID) is
@@ -2335,10 +2344,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			session.AddHistory("assistant", cleanResponse)
 			sessions.Save()
 
-			if sdkPlausible {
-				cleanResponse += contextIndicator(event.InputTokens)
-			} else if selfPct > 0 {
-				cleanResponse += fmt.Sprintf("\n[ctx: ~%d%%]", selfPct)
+			if e.showContextIndicator {
+				if sdkPlausible {
+					cleanResponse += contextIndicator(event.InputTokens)
+				} else if selfPct > 0 {
+					cleanResponse += fmt.Sprintf("\n[ctx: ~%d%%]", selfPct)
+				}
 			}
 			fullResponse = cleanResponse
 
@@ -3030,6 +3041,9 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 
 const listPageSize = 20
 
+// dirCardPageSize is the max directory history rows per card page (Feishu / other card UIs).
+const dirCardPageSize = 20
+
 func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 	agent, sessions, _, err := e.commandContext(p, msg)
 	if err != nil {
@@ -3280,6 +3294,108 @@ func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
 	}()
 }
 
+// dirApply applies /dir mutations (same semantics as cmdDir). sessionKey is used for GetOrCreateActive.
+// On failure returns a non-empty errMsg; on success returns ("", successMsg) for plain-text replies.
+func (e *Engine) dirApply(agent Agent, sessions *SessionManager, interactiveKey, sessionKey string, args []string) (errMsg, successMsg string) {
+	switcher, ok := agent.(WorkDirSwitcher)
+	if !ok {
+		return e.i18n.T(MsgDirNotSupported), ""
+	}
+	currentDir := switcher.GetWorkDir()
+
+	if len(args) == 1 {
+		switch strings.ToLower(strings.TrimSpace(args[0])) {
+		case "reset":
+			baseDir := strings.TrimSpace(e.baseWorkDir)
+			if baseDir == "" {
+				baseDir = currentDir
+			}
+			if baseDir == "" {
+				baseDir, _ = os.Getwd()
+			}
+			if absDir, err := filepath.Abs(baseDir); err == nil {
+				baseDir = absDir
+			}
+
+			switcher.SetWorkDir(baseDir)
+			e.cleanupInteractiveState(interactiveKey)
+
+			s := sessions.GetOrCreateActive(sessionKey)
+			s.SetAgentSessionID("", "")
+			s.ClearHistory()
+			sessions.Save()
+
+			if e.projectState != nil {
+				e.projectState.ClearWorkDirOverride()
+				e.projectState.Save()
+			}
+			if e.dirHistory != nil {
+				e.dirHistory.Add(e.name, baseDir)
+			}
+
+			return "", e.i18n.Tf(MsgDirReset, baseDir)
+		}
+	}
+
+	arg := strings.Join(args, " ")
+	var newDir string
+
+	if idx, err := strconv.Atoi(strings.TrimSpace(arg)); err == nil && idx > 0 {
+		if e.dirHistory != nil {
+			newDir = e.dirHistory.Get(e.name, idx)
+			if newDir == "" {
+				return e.i18n.Tf(MsgDirInvalidIndex, idx), ""
+			}
+		} else {
+			return e.i18n.T(MsgDirNoHistory), ""
+		}
+	} else if arg == "-" {
+		if e.dirHistory != nil {
+			newDir = e.dirHistory.Previous(e.name)
+			if newDir == "" {
+				return e.i18n.T(MsgDirNoPrevious), ""
+			}
+		} else {
+			return e.i18n.T(MsgDirNoHistory), ""
+		}
+	} else {
+		newDir = filepath.Clean(arg)
+		if !filepath.IsAbs(newDir) {
+			baseDir := currentDir
+			if baseDir == "" {
+				baseDir, _ = os.Getwd()
+			}
+			newDir = filepath.Join(baseDir, newDir)
+		}
+	}
+	if absDir, err := filepath.Abs(newDir); err == nil {
+		newDir = absDir
+	}
+
+	info, err := os.Stat(newDir)
+	if err != nil || !info.IsDir() {
+		return e.i18n.Tf(MsgDirInvalidPath, newDir), ""
+	}
+
+	switcher.SetWorkDir(newDir)
+	e.cleanupInteractiveState(interactiveKey)
+
+	s := sessions.GetOrCreateActive(sessionKey)
+	s.SetAgentSessionID("", "")
+	s.ClearHistory()
+	sessions.Save()
+
+	if e.dirHistory != nil {
+		e.dirHistory.Add(e.name, newDir)
+	}
+	if e.projectState != nil {
+		e.projectState.SetWorkDirOverride(newDir)
+		e.projectState.Save()
+	}
+
+	return "", e.i18n.Tf(MsgDirChanged, newDir)
+}
+
 func (e *Engine) cmdDir(p Platform, msg *Message, args []string) {
 	agent, sessions, interactiveKey, err := e.commandContext(p, msg)
 	if err != nil {
@@ -3294,8 +3410,11 @@ func (e *Engine) cmdDir(p Platform, msg *Message, args []string) {
 
 	currentDir := switcher.GetWorkDir()
 
-	// No args: show current dir + history
 	if len(args) == 0 {
+		if supportsCards(p) {
+			e.replyWithCard(p, msg.ReplyCtx, e.renderDirCardSafe(msg.SessionKey, 1))
+			return
+		}
 		var sb strings.Builder
 		sb.WriteString(e.i18n.Tf(MsgDirCurrent, currentDir))
 
@@ -3324,105 +3443,19 @@ func (e *Engine) cmdDir(p Platform, msg *Message, args []string) {
 		case "help", "-h", "--help":
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDirUsage))
 			return
-		case "reset":
-			baseDir := strings.TrimSpace(e.baseWorkDir)
-			if baseDir == "" {
-				baseDir = currentDir
-			}
-			if baseDir == "" {
-				baseDir, _ = os.Getwd()
-			}
-			if absDir, err := filepath.Abs(baseDir); err == nil {
-				baseDir = absDir
-			}
-
-			switcher.SetWorkDir(baseDir)
-			e.cleanupInteractiveState(interactiveKey)
-
-			s := sessions.GetOrCreateActive(msg.SessionKey)
-			s.SetAgentSessionID("", "")
-			s.ClearHistory()
-			sessions.Save()
-
-			if e.projectState != nil {
-				e.projectState.ClearWorkDirOverride()
-				e.projectState.Save()
-			}
-			if e.dirHistory != nil {
-				e.dirHistory.Add(e.name, baseDir)
-			}
-
-			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgDirReset, baseDir))
-			return
 		}
 	}
 
-	arg := strings.Join(args, " ")
-	var newDir string
-
-	// Check if argument is a number (history index)
-	if idx, err := strconv.Atoi(strings.TrimSpace(arg)); err == nil && idx > 0 {
-		if e.dirHistory != nil {
-			newDir = e.dirHistory.Get(e.name, idx)
-			if newDir == "" {
-				e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgDirInvalidIndex, idx))
-				return
-			}
-		} else {
-			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDirNoHistory))
-			return
-		}
-	} else if arg == "-" {
-		// Jump to previous directory
-		if e.dirHistory != nil {
-			newDir = e.dirHistory.Previous(e.name)
-			if newDir == "" {
-				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDirNoPrevious))
-				return
-			}
-		} else {
-			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDirNoHistory))
-			return
-		}
-	} else {
-		// Normal path
-		newDir = filepath.Clean(arg)
-		if !filepath.IsAbs(newDir) {
-			baseDir := currentDir
-			if baseDir == "" {
-				baseDir, _ = os.Getwd()
-			}
-			newDir = filepath.Join(baseDir, newDir)
-		}
-	}
-	if absDir, err := filepath.Abs(newDir); err == nil {
-		newDir = absDir
-	}
-
-	info, err := os.Stat(newDir)
-	if err != nil || !info.IsDir() {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgDirInvalidPath, newDir))
+	errMsg, successMsg := e.dirApply(agent, sessions, interactiveKey, msg.SessionKey, args)
+	if errMsg != "" {
+		e.reply(p, msg.ReplyCtx, errMsg)
 		return
 	}
-
-	switcher.SetWorkDir(newDir)
-	e.cleanupInteractiveState(interactiveKey)
-
-	s := sessions.GetOrCreateActive(msg.SessionKey)
-	s.SetAgentSessionID("", "")
-	s.ClearHistory()
-	sessions.Save()
-
-	// Add to history
-	if e.dirHistory != nil {
-		e.dirHistory.Add(e.name, newDir)
+	if supportsCards(p) {
+		e.replyWithCard(p, msg.ReplyCtx, e.renderDirCardSafe(msg.SessionKey, 1))
+		return
 	}
-	if e.projectState != nil {
-		e.projectState.SetWorkDirOverride(newDir)
-		e.projectState.Save()
-	}
-
-	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgDirChanged, newDir))
+	e.reply(p, msg.ReplyCtx, successMsg)
 }
 
 // cmdSearch searches sessions by name or message content.
@@ -3992,6 +4025,15 @@ func (e *Engine) renderListCardSafe(sessionKey string, page int) *Card {
 	return card
 }
 
+// renderDirCardSafe wraps renderDirCard and returns an error card on failure.
+func (e *Engine) renderDirCardSafe(sessionKey string, page int) *Card {
+	card, err := e.renderDirCard(sessionKey, page)
+	if err != nil {
+		return e.simpleCard(e.i18n.T(MsgDirCardTitle), "red", err.Error())
+	}
+	return card
+}
+
 func (e *Engine) renderStatusCard(sessionKey string, userID string) *Card {
 	agent, sessions := e.sessionContextForKey(sessionKey)
 	platNames := make([]string, len(e.platforms))
@@ -4341,6 +4383,7 @@ func helpCardGroups() []helpCardGroup {
 				{command: "/config", action: "nav:/config"},
 				{command: "/bind", action: "cmd:/bind"},
 				{command: "/workspace", action: "cmd:/workspace"},
+				{command: "/dir", action: "nav:/dir"},
 				{command: "/version", action: "nav:/version"},
 				{command: "/upgrade", action: "nav:/upgrade"},
 				{command: "/restart", action: "cmd:/restart"},
@@ -5722,6 +5765,14 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 			}
 		}
 		return e.renderListCardSafe(sessionKey, page)
+	case "/dir":
+		page := 1
+		if args != "" {
+			if n, err := strconv.Atoi(args); err == nil && n > 0 {
+				page = n
+			}
+		}
+		return e.renderDirCardSafe(sessionKey, page)
 	case "/current":
 		return e.renderCurrentCard(sessionKey)
 	case "/history":
@@ -5927,6 +5978,32 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		session.SetAgentInfo(matched.ID, agent.Name(), matched.Summary)
 		session.ClearHistory()
 		sessions.Save()
+
+	case "/dir":
+		fields := strings.Fields(args)
+		if len(fields) == 0 {
+			return
+		}
+		agent, sessions := e.sessionContextForKey(sessionKey)
+		ik := e.interactiveKeyForSessionKey(sessionKey)
+		var applyArgs []string
+		switch fields[0] {
+		case "select":
+			if len(fields) < 2 {
+				return
+			}
+			applyArgs = []string{fields[1]}
+		case "reset":
+			applyArgs = []string{"reset"}
+		case "prev":
+			applyArgs = []string{"-"}
+		default:
+			return
+		}
+		errMsg, _ := e.dirApply(agent, sessions, ik, sessionKey, applyArgs)
+		if errMsg != "" {
+			slog.Debug("dir card action failed", "message", errMsg)
+		}
 
 	case "/stop":
 		sessionKey = e.interactiveKeyForSessionKey(sessionKey)
@@ -6526,6 +6603,93 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 
 	if totalPages > 1 {
 		cb.Note(fmt.Sprintf(e.i18n.T(MsgListPageHint), page, totalPages))
+	}
+
+	return cb.Build(), nil
+}
+
+// dirCardTruncPath shortens absolute paths for card list rows.
+func dirCardTruncPath(absPath string) string {
+	r := []rune(absPath)
+	if len(r) <= 56 {
+		return absPath
+	}
+	return string(r[:53]) + "…"
+}
+
+func (e *Engine) renderDirCard(sessionKey string, page int) (*Card, error) {
+	agent, _ := e.sessionContextForKey(sessionKey)
+	switcher, ok := agent.(WorkDirSwitcher)
+	if !ok {
+		return nil, fmt.Errorf("%s", e.i18n.T(MsgDirNotSupported))
+	}
+	currentDir := switcher.GetWorkDir()
+	var history []string
+	if e.dirHistory != nil {
+		history = e.dirHistory.List(e.name)
+	}
+	total := len(history)
+	totalPages := 1
+	if total > 0 {
+		totalPages = (total + dirCardPageSize - 1) / dirCardPageSize
+	}
+	if page < 1 {
+		page = 1
+	}
+	if page > totalPages {
+		page = totalPages
+	}
+	start := (page - 1) * dirCardPageSize
+	end := start + dirCardPageSize
+	if end > total {
+		end = total
+	}
+
+	cb := NewCard().Title(e.i18n.T(MsgDirCardTitle), "turquoise")
+	cb.Markdown(e.i18n.Tf(MsgDirCurrent, currentDir))
+	if total == 0 {
+		cb.Note(e.i18n.T(MsgDirCardEmptyHistory))
+	} else {
+		cb.Divider()
+		for i := start; i < end; i++ {
+			dir := history[i]
+			marker := "◻"
+			if dir == currentDir {
+				marker = "▶"
+			}
+			btnType := "default"
+			if dir == currentDir {
+				btnType = "primary"
+			}
+			displayPath := dirCardTruncPath(dir)
+			cb.ListItemBtn(
+				fmt.Sprintf("%s **%d.** `%s`", marker, i+1, displayPath),
+				fmt.Sprintf("#%d", i+1),
+				btnType,
+				fmt.Sprintf("act:/dir select %d", i+1),
+			)
+		}
+	}
+
+	var actionRow []CardButton
+	if e.dirHistory != nil && len(history) >= 2 {
+		actionRow = append(actionRow, DefaultBtn(e.i18n.T(MsgDirCardPrev), "act:/dir prev"))
+	}
+	actionRow = append(actionRow, DefaultBtn(e.i18n.T(MsgDirCardReset), "act:/dir reset"))
+	cb.Buttons(actionRow...)
+
+	var navBtns []CardButton
+	if totalPages > 1 && page > 1 {
+		navBtns = append(navBtns, e.cardPrevButton(fmt.Sprintf("nav:/dir %d", page-1)))
+	}
+	navBtns = append(navBtns, e.cardBackButton())
+	if totalPages > 1 && page < totalPages {
+		navBtns = append(navBtns, e.cardNextButton(fmt.Sprintf("nav:/dir %d", page+1)))
+	}
+	cb.Buttons(navBtns...)
+
+	if totalPages > 1 {
+		cb.Note(fmt.Sprintf(e.i18n.T(MsgDirCardPageHint), page, totalPages))
 	}
 
 	return cb.Build(), nil

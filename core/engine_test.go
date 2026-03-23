@@ -3011,6 +3011,60 @@ func TestRenderListCard_MakesEveryVisibleSessionClickable(t *testing.T) {
 	}
 }
 
+func TestRenderDirCard_HistoryRowsUseSelectActions(t *testing.T) {
+	tempDir := t.TempDir()
+	dir1 := filepath.Join(tempDir, "dir1")
+	dir2 := filepath.Join(tempDir, "dir2")
+	for _, d := range []string{dir1, dir2} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+	}
+	dataDir := t.TempDir()
+	agent := &stubWorkDirAgent{workDir: dir2}
+	e := NewEngine("test", agent, []Platform{&stubPlatformEngine{n: "test"}}, dataDir, LangEnglish)
+	e.SetDirHistory(NewDirHistory(dataDir))
+	e.dirHistory.Add("test", dir1)
+	e.dirHistory.Add("test", dir2)
+
+	card, err := e.renderDirCard("test:user1", 1)
+	if err != nil {
+		t.Fatalf("renderDirCard: %v", err)
+	}
+	if got := countCardActionValues(card, "act:/dir select "); got != 2 {
+		t.Fatalf("dir select actions = %d, want 2", got)
+	}
+}
+
+func TestHandleCardNav_DirSelectSwitchesWorkDir(t *testing.T) {
+	temp := t.TempDir()
+	d1 := filepath.Join(temp, "a")
+	d2 := filepath.Join(temp, "b")
+	d3 := filepath.Join(temp, "c")
+	for _, d := range []string{d1, d2, d3} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+	}
+	dataDir := t.TempDir()
+	agent := &stubWorkDirAgent{workDir: d3}
+	e := NewEngine("test", agent, []Platform{&stubPlatformEngine{n: "test"}}, dataDir, LangEnglish)
+	e.SetDirHistory(NewDirHistory(dataDir))
+	e.dirHistory.Add("test", d1)
+	e.dirHistory.Add("test", d2)
+	e.dirHistory.Add("test", d3)
+
+	sk := "test:user1"
+	_ = e.handleCardNav("act:/dir select 2", sk)
+	if agent.workDir != d2 {
+		t.Fatalf("workDir = %q, want %q", agent.workDir, d2)
+	}
+	card := e.handleCardNav("nav:/dir 1", sk)
+	if card == nil {
+		t.Fatal("expected dir card after nav")
+	}
+}
+
 func TestRenderHelpCard_DefaultsToSessionTab(t *testing.T) {
 	e := NewEngine("test", &stubAgent{}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
 
@@ -4051,9 +4105,9 @@ func TestCmdBindSetup_UsesSharedLogic(t *testing.T) {
 
 // stubStartSessionAgent records StartSession calls and can fail on specific session IDs.
 type stubStartSessionAgent struct {
-	calls    []string
-	failIDs  map[string]error // session IDs that should fail
-	mu       sync.Mutex
+	calls   []string
+	failIDs map[string]error // session IDs that should fail
+	mu      sync.Mutex
 }
 
 func (a *stubStartSessionAgent) Name() string { return "stub" }

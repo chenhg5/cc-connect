@@ -475,17 +475,22 @@ const (
 	MsgBuiltinCmdShell     MsgKey = "shell"
 	MsgBuiltinCmdDir       MsgKey = "dir"
 
-	MsgDirChanged      MsgKey = "dir_changed"
-	MsgDirCurrent      MsgKey = "dir_current"
-	MsgDirReset        MsgKey = "dir_reset"
-	MsgDirUsage        MsgKey = "dir_usage"
-	MsgDirNotSupported MsgKey = "dir_not_supported"
-	MsgDirInvalidPath  MsgKey = "dir_invalid_path"
-	MsgDirHistoryTitle MsgKey = "dir_history_title"
-	MsgDirHistoryHint  MsgKey = "dir_history_hint"
-	MsgDirInvalidIndex MsgKey = "dir_invalid_index"
-	MsgDirNoHistory    MsgKey = "dir_no_history"
-	MsgDirNoPrevious   MsgKey = "dir_no_previous"
+	MsgDirChanged          MsgKey = "dir_changed"
+	MsgDirCurrent          MsgKey = "dir_current"
+	MsgDirReset            MsgKey = "dir_reset"
+	MsgDirUsage            MsgKey = "dir_usage"
+	MsgDirNotSupported     MsgKey = "dir_not_supported"
+	MsgDirInvalidPath      MsgKey = "dir_invalid_path"
+	MsgDirHistoryTitle     MsgKey = "dir_history_title"
+	MsgDirHistoryHint      MsgKey = "dir_history_hint"
+	MsgDirInvalidIndex     MsgKey = "dir_invalid_index"
+	MsgDirNoHistory        MsgKey = "dir_no_history"
+	MsgDirNoPrevious       MsgKey = "dir_no_previous"
+	MsgDirCardTitle        MsgKey = "dir_card_title"
+	MsgDirCardPageHint     MsgKey = "dir_card_page_hint"
+	MsgDirCardEmptyHistory MsgKey = "dir_card_empty_history"
+	MsgDirCardReset        MsgKey = "dir_card_reset"
+	MsgDirCardPrev         MsgKey = "dir_card_prev"
 
 	// Multi-workspace messages
 	MsgWsNotEnabled      MsgKey = "ws_not_enabled"
@@ -3226,6 +3231,41 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 沒有上一個目錄記錄。",
 		LangJapanese:           "❌ 前のディレクトリが履歴にありません。",
 		LangSpanish:            "❌ No hay directorio anterior en el historial.",
+	},
+	MsgDirCardTitle: {
+		LangEnglish:            "Working directory",
+		LangChinese:            "工作目录",
+		LangTraditionalChinese: "工作目錄",
+		LangJapanese:           "作業ディレクトリ",
+		LangSpanish:            "Directorio de trabajo",
+	},
+	MsgDirCardPageHint: {
+		LangEnglish:            "Page %d/%d — use `/dir <page>` or the buttons below.",
+		LangChinese:            "第 %d/%d 页 — 可用 `/dir <页码>` 或下方按钮翻页。",
+		LangTraditionalChinese: "第 %d/%d 頁 — 可用 `/dir <頁碼>` 或下方按鈕翻頁。",
+		LangJapanese:           "%d/%d ページ — `/dir <ページ>` または下のボタンで移動。",
+		LangSpanish:            "Página %d/%d — usa `/dir <página>` o los botones.",
+	},
+	MsgDirCardEmptyHistory: {
+		LangEnglish:            "No directory history yet. Type `/dir <path>` to switch, or use **Reset** to restore the default.",
+		LangChinese:            "暂无目录历史。可发送 `/dir <路径>` 切换，或点 **重置** 恢复默认目录。",
+		LangTraditionalChinese: "暫無目錄歷史。可傳送 `/dir <路徑>` 切換，或點 **重置** 恢復預設目錄。",
+		LangJapanese:           "まだディレクトリ履歴がありません。`/dir <パス>` で切替えるか、**リセット** で既定に戻せます。",
+		LangSpanish:            "Aún no hay historial de directorios. Usa `/dir <ruta>` o **Restablecer** al valor por defecto.",
+	},
+	MsgDirCardReset: {
+		LangEnglish:            "Reset",
+		LangChinese:            "重置",
+		LangTraditionalChinese: "重置",
+		LangJapanese:           "リセット",
+		LangSpanish:            "Restablecer",
+	},
+	MsgDirCardPrev: {
+		LangEnglish:            "Previous",
+		LangChinese:            "上一目录",
+		LangTraditionalChinese: "上一目錄",
+		LangJapanese:           "前へ",
+		LangSpanish:            "Anterior",
 	},
 
 	// Multi-workspace messages
