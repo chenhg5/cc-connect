@@ -56,6 +56,57 @@ func TestNew_DisabledInteractiveCardsDoesNotStartPreviewCard(t *testing.T) {
 	}
 }
 
+func TestNew_ProgressStyleDefaultLegacy(t *testing.T) {
+	p, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	sp, ok := p.(core.ProgressStyleProvider)
+	if !ok {
+		t.Fatalf("platform type %T does not implement ProgressStyleProvider", p)
+	}
+	if got := sp.ProgressStyle(); got != "legacy" {
+		t.Fatalf("ProgressStyle() = %q, want legacy", got)
+	}
+}
+
+func TestNew_ProgressStyleSupportsCompactAndCard(t *testing.T) {
+	tests := []string{"compact", "card"}
+	for _, style := range tests {
+		t.Run(style, func(t *testing.T) {
+			p, err := New(map[string]any{
+				"app_id":         "cli_xxx",
+				"app_secret":     "secret",
+				"progress_style": style,
+			})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			sp, ok := p.(core.ProgressStyleProvider)
+			if !ok {
+				t.Fatalf("platform type %T does not implement ProgressStyleProvider", p)
+			}
+			if got := sp.ProgressStyle(); got != style {
+				t.Fatalf("ProgressStyle() = %q, want %q", got, style)
+			}
+		})
+	}
+}
+
+func TestNew_ProgressStyleRejectsInvalidValue(t *testing.T) {
+	_, err := New(map[string]any{
+		"app_id":         "cli_xxx",
+		"app_secret":     "secret",
+		"progress_style": "invalid-style",
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid progress_style")
+	}
+	if !strings.Contains(err.Error(), "invalid progress_style") {
+		t.Fatalf("error = %q, want invalid progress_style", err.Error())
+	}
+}
+
 func TestInteractivePlatform_OnMessagePassesCardSenderToHandler(t *testing.T) {
 	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
 	if err != nil {

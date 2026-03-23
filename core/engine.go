@@ -2077,6 +2077,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 	state.mu.Lock()
 	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx)
+	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx)
 	state.mu.Unlock()
 
 	// Idle timeout: 0 = disabled
@@ -2164,7 +2165,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					sp.detachPreview() // keep frozen preview visible as permanent message
 				}
 				preview := truncateIf(event.Content, e.display.ThinkingMaxLen)
-				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgThinking), preview))
+				thinkingMsg := fmt.Sprintf(e.i18n.T(MsgThinking), preview)
+				if !cp.Append(thinkingMsg) {
+					e.send(p, replyCtx, thinkingMsg)
+				}
 			}
 
 		case EventToolUse:
@@ -2206,8 +2210,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 				toolMsg := fmt.Sprintf(e.i18n.T(MsgTool), toolCount, event.ToolName, formattedInput)
-				for _, chunk := range SplitMessageCodeFenceAware(toolMsg, maxPlatformMessageLen) {
-					e.send(p, replyCtx, chunk)
+				if !cp.Append(toolMsg) {
+					for _, chunk := range SplitMessageCodeFenceAware(toolMsg, maxPlatformMessageLen) {
+						e.send(p, replyCtx, chunk)
+					}
 				}
 			}
 
@@ -2499,6 +2505,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				firstEventLogged = false
 				waitStart = time.Now()
 				sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx)
+				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx)
 
 				session.AddHistory("user", queued.content)
 

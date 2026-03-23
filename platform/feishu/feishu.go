@@ -109,6 +109,7 @@ type Platform struct {
 	domain                string
 	appID                 string
 	appSecret             string
+	progressStyle         string
 	useInteractiveCard    bool
 	self                  core.Platform
 	reactionEmoji         string
@@ -169,6 +170,18 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	if v, ok := opts["reply_to_trigger"].(bool); ok && !v {
 		noReplyToTrigger = true
 	}
+
+	progressStyle := "legacy"
+	if v, ok := opts["progress_style"].(string); ok {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "", "legacy":
+			progressStyle = "legacy"
+		case "compact", "card":
+			progressStyle = strings.ToLower(strings.TrimSpace(v))
+		default:
+			return nil, fmt.Errorf("%s: invalid progress_style %q (want legacy, compact, or card)", name, v)
+		}
+	}
 	useInteractiveCard := true
 	if v, ok := opts["enable_feishu_card"].(bool); ok {
 		useInteractiveCard = v
@@ -195,6 +208,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		domain:                domain,
 		appID:                 appID,
 		appSecret:             appSecret,
+		progressStyle:         progressStyle,
 		useInteractiveCard:    useInteractiveCard,
 		reactionEmoji:         reactionEmoji,
 		allowFrom:             allowFrom,
@@ -217,6 +231,8 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 }
 
 func (p *Platform) Name() string { return p.platformName }
+
+func (p *Platform) ProgressStyle() string { return p.progressStyle }
 
 func (p *Platform) tag() string { return p.platformName }
 

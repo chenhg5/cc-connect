@@ -259,6 +259,45 @@ func (p *stubCardPlatform) SendCard(_ context.Context, _ any, card *Card) error 
 	return nil
 }
 
+type stubCompactProgressPlatform struct {
+	stubPlatformEngine
+	previewMu     sync.Mutex
+	previewStarts []string
+	previewEdits  []string
+}
+
+func (p *stubCompactProgressPlatform) ProgressStyle() string { return "compact" }
+
+func (p *stubCompactProgressPlatform) SendPreviewStart(_ context.Context, _ any, content string) (any, error) {
+	p.previewMu.Lock()
+	p.previewStarts = append(p.previewStarts, content)
+	p.previewMu.Unlock()
+	return "preview-handle", nil
+}
+
+func (p *stubCompactProgressPlatform) UpdateMessage(_ context.Context, _ any, content string) error {
+	p.previewMu.Lock()
+	p.previewEdits = append(p.previewEdits, content)
+	p.previewMu.Unlock()
+	return nil
+}
+
+func (p *stubCompactProgressPlatform) getPreviewStarts() []string {
+	p.previewMu.Lock()
+	defer p.previewMu.Unlock()
+	out := make([]string, len(p.previewStarts))
+	copy(out, p.previewStarts)
+	return out
+}
+
+func (p *stubCompactProgressPlatform) getPreviewEdits() []string {
+	p.previewMu.Lock()
+	defer p.previewMu.Unlock()
+	out := make([]string, len(p.previewEdits))
+	copy(out, p.previewEdits)
+	return out
+}
+
 type stubModelModeAgent struct {
 	stubAgent
 	model           string
@@ -746,6 +785,48 @@ func TestProcessInteractiveEvents_QuietToolTurnKeepsPreviewOnFinalize(t *testing
 	}
 	if len(previewMsgs) == 0 || previewMsgs[len(previewMsgs)-1] != "update:final response" {
 		t.Fatalf("preview messages = %#v, want in-place final update", previewMsgs)
+	}
+}
+
+func TestProcessInteractiveEvents_CompactProgressCoalescesThinkingAndToolUse(t *testing.T) {
+	p := &stubCompactProgressPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "feishu:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-compact",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventThinking, Content: "Thinking about command"}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "pwd"}
+	agentSession.events <- Event{Type: EventText, Content: "done"}
+	agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil)
+
+	sent := p.getSent()
+	if len(sent) != 1 || sent[0] != "done" {
+		t.Fatalf("sent = %#v, want only final assistant reply", sent)
+	}
+
+	starts := p.getPreviewStarts()
+	if len(starts) != 1 {
+		t.Fatalf("preview starts = %d, want 1", len(starts))
+	}
+	if !strings.Contains(starts[0], "Thinking") {
+		t.Fatalf("start preview should contain thinking text, got %q", starts[0])
+	}
+
+	edits := p.getPreviewEdits()
+	if len(edits) != 1 {
+		t.Fatalf("preview edits = %d, want 1", len(edits))
+	}
+	if !strings.Contains(edits[0], "pwd") {
+		t.Fatalf("updated preview should contain tool input, got %q", edits[0])
 	}
 }
 
