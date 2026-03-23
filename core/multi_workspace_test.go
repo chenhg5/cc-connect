@@ -8,16 +8,27 @@ import (
 	"testing"
 )
 
+type namedTestAgent struct {
+	name string
+}
+
+func (a *namedTestAgent) Name() string { return a.name }
+func (a *namedTestAgent) StartSession(_ context.Context, _ string) (AgentSession, error) {
+	return &stubAgentSession{}, nil
+}
+func (a *namedTestAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) { return nil, nil }
+func (a *namedTestAgent) Stop() error                                                { return nil }
+
 // mockChannelResolver implements both Platform and ChannelNameResolver.
 type mockChannelResolver struct {
 	names map[string]string
 }
 
-func (m *mockChannelResolver) Name() string                                          { return "mock" }
-func (m *mockChannelResolver) Start(MessageHandler) error                            { return nil }
-func (m *mockChannelResolver) Reply(_ context.Context, _ any, _ string) error        { return nil }
-func (m *mockChannelResolver) Send(_ context.Context, _ any, _ string) error         { return nil }
-func (m *mockChannelResolver) Stop() error                                           { return nil }
+func (m *mockChannelResolver) Name() string                                   { return "mock" }
+func (m *mockChannelResolver) Start(MessageHandler) error                     { return nil }
+func (m *mockChannelResolver) Reply(_ context.Context, _ any, _ string) error { return nil }
+func (m *mockChannelResolver) Send(_ context.Context, _ any, _ string) error  { return nil }
+func (m *mockChannelResolver) Stop() error                                    { return nil }
 func (m *mockChannelResolver) ResolveChannelName(channelID string) (string, error) {
 	if name, ok := m.names[channelID]; ok {
 		return name, nil
@@ -30,6 +41,20 @@ func newTestEngineWithMultiWorkspace(t *testing.T, baseDir string) *Engine {
 	tmpDir := t.TempDir()
 	bindingPath := filepath.Join(tmpDir, "bindings.json")
 	e := NewEngine("test", nil, nil, "", LangEnglish)
+	e.SetMultiWorkspace(baseDir, bindingPath)
+	return e
+}
+
+func newTestEngineWithMultiWorkspaceAgent(t *testing.T, baseDir string) *Engine {
+	t.Helper()
+	tmpDir := t.TempDir()
+	bindingPath := filepath.Join(tmpDir, "bindings.json")
+	sessionPath := filepath.Join(tmpDir, "sessions.json")
+	agentName := "shared-binding-test-agent"
+	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) {
+		return &namedTestAgent{name: agentName}, nil
+	})
+	e := NewEngine("test", &namedTestAgent{name: agentName}, nil, sessionPath, LangEnglish)
 	e.SetMultiWorkspace(baseDir, bindingPath)
 	return e
 }
@@ -119,6 +144,34 @@ func TestMultiWorkspaceResolution_ExistingBinding(t *testing.T) {
 	}
 }
 
+func TestMultiWorkspaceResolution_SharedBinding(t *testing.T) {
+	baseDir := t.TempDir()
+	channelID := "C003S"
+	channelName := "shared-channel"
+
+	wsDir := filepath.Join(baseDir, "shared-workspace")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	e := newTestEngineWithMultiWorkspace(t, baseDir)
+	e.workspaceBindings.Bind(sharedWorkspaceBindingsKey, channelID, channelName, wsDir)
+
+	p := &mockChannelResolver{names: map[string]string{}}
+
+	ws, name, err := e.resolveWorkspace(p, channelID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	expectedWS := normalizeWorkspacePath(wsDir)
+	if ws != expectedWS {
+		t.Errorf("expected workspace %q, got %q", expectedWS, ws)
+	}
+	if name != channelName {
+		t.Errorf("expected channel name %q, got %q", channelName, name)
+	}
+}
+
 func TestMultiWorkspaceResolution_MissingDirRemovesBinding(t *testing.T) {
 	baseDir := t.TempDir()
 	channelID := "C004"
@@ -144,6 +197,113 @@ func TestMultiWorkspaceResolution_MissingDirRemovesBinding(t *testing.T) {
 	// Verify binding was removed
 	if b := e.workspaceBindings.Lookup("project:test", channelID); b != nil {
 		t.Error("expected binding to be removed after missing directory")
+	}
+}
+
+func TestMultiWorkspaceResolution_MissingDirKeepsSharedBinding(t *testing.T) {
+	baseDir := t.TempDir()
+	channelID := "C004S"
+	channelName := "shared-stale-channel"
+	missingDir := filepath.Join(baseDir, "deleted-shared-workspace")
+
+	e := newTestEngineWithMultiWorkspace(t, baseDir)
+	e.workspaceBindings.Bind(sharedWorkspaceBindingsKey, channelID, channelName, missingDir)
+
+	p := &mockChannelResolver{names: map[string]string{}}
+
+	ws, name, err := e.resolveWorkspace(p, channelID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ws != "" {
+		t.Errorf("expected empty workspace for missing dir, got %q", ws)
+	}
+	if name != channelName {
+		t.Errorf("expected channel name %q, got %q", channelName, name)
+	}
+	if b := e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, channelID); b == nil {
+		t.Error("expected shared binding to remain after missing directory")
+	}
+}
+
+func TestInteractiveKeyForSessionKey_MissingSharedBindingFallsBack(t *testing.T) {
+	baseDir := t.TempDir()
+	channelID := "C005SM"
+	missingDir := filepath.Join(baseDir, "missing-shared-workspace")
+
+	e := newTestEngineWithMultiWorkspace(t, baseDir)
+	e.workspaceBindings.Bind(sharedWorkspaceBindingsKey, channelID, "shared-channel", missingDir)
+
+	sessionKey := "mock:" + channelID + ":user"
+	if got := e.interactiveKeyForSessionKey(sessionKey); got != sessionKey {
+		t.Fatalf("interactiveKeyForSessionKey() = %q, want %q", got, sessionKey)
+	}
+}
+
+func TestInteractiveKeyForSessionKey_SharedBinding(t *testing.T) {
+	baseDir := t.TempDir()
+	channelID := "C005S"
+	wsDir := filepath.Join(baseDir, "shared-workspace")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	e := newTestEngineWithMultiWorkspace(t, baseDir)
+	e.workspaceBindings.Bind(sharedWorkspaceBindingsKey, channelID, "shared-channel", wsDir)
+
+	sessionKey := "mock:" + channelID + ":user"
+	want := normalizeWorkspacePath(wsDir) + ":" + sessionKey
+	if got := e.interactiveKeyForSessionKey(sessionKey); got != want {
+		t.Fatalf("interactiveKeyForSessionKey() = %q, want %q", got, want)
+	}
+}
+
+func TestSessionContextForKey_MissingSharedBindingFallsBack(t *testing.T) {
+	baseDir := t.TempDir()
+	channelID := "C006SM"
+	missingDir := filepath.Join(baseDir, "missing-shared-workspace")
+
+	e := newTestEngineWithMultiWorkspaceAgent(t, baseDir)
+	e.workspaceBindings.Bind(sharedWorkspaceBindingsKey, channelID, "shared-channel", missingDir)
+
+	agent, sessions := e.sessionContextForKey("mock:" + channelID + ":user")
+	if agent != e.agent {
+		t.Fatal("expected base agent for missing shared binding")
+	}
+	if sessions != e.sessions {
+		t.Fatal("expected base session manager for missing shared binding")
+	}
+	if got := e.workspacePool.Get(normalizeWorkspacePath(missingDir)); got != nil {
+		t.Fatal("did not expect workspace pool entry for missing shared binding")
+	}
+}
+
+func TestSessionContextForKey_SharedBinding(t *testing.T) {
+	baseDir := t.TempDir()
+	channelID := "C006S"
+	wsDir := filepath.Join(baseDir, "shared-workspace")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	e := newTestEngineWithMultiWorkspaceAgent(t, baseDir)
+	e.workspaceBindings.Bind(sharedWorkspaceBindingsKey, channelID, "shared-channel", wsDir)
+
+	agent, sessions := e.sessionContextForKey("mock:" + channelID + ":user")
+	if agent == nil {
+		t.Fatal("expected workspace agent, got nil")
+	}
+	if agent == e.agent {
+		t.Fatal("expected workspace-specific agent, got base agent")
+	}
+	if sessions == nil {
+		t.Fatal("expected workspace session manager, got nil")
+	}
+	if sessions == e.sessions {
+		t.Fatal("expected workspace session manager, got base session manager")
+	}
+	if got := e.workspacePool.Get(normalizeWorkspacePath(wsDir)); got == nil || got.agent == nil || got.sessions == nil {
+		t.Fatal("expected workspace pool entry to be created for shared binding")
 	}
 }
 

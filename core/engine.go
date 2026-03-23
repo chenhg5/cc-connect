@@ -2816,92 +2816,104 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string) {
 	channelID := extractChannelID(msg.SessionKey)
 	projectKey := "project:" + e.name
-
-	subCmd := ""
-	if len(args) > 0 {
-		subCmd = matchSubCommand(args[0], []string{"init", "bind", "unbind", "list"})
-	}
-
-	switch subCmd {
-	case "":
-		b := e.workspaceBindings.Lookup(projectKey, channelID)
-		if b == nil {
-			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsNoBinding))
-		} else {
-			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsInfo, b.Workspace, b.BoundAt.Format(time.RFC3339)))
+	resolveChannelName := func() func() string {
+		resolved := false
+		channelName := ""
+		return func() string {
+			if resolved {
+				return channelName
+			}
+			resolved = true
+			if resolver, ok := p.(ChannelNameResolver); ok {
+				channelName, _ = resolver.ResolveChannelName(channelID)
+			}
+			return channelName
 		}
-
-	case "bind":
-		if len(args) < 2 {
-			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsBindUsage))
+	}()
+	replyWorkspaceInfo := func(b *WorkspaceBinding, bindingKey string) {
+		if bindingKey == sharedWorkspaceBindingsKey {
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsInfoShared, b.Workspace, b.BoundAt.Format(time.RFC3339)))
 			return
 		}
-		wsName := args[1]
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsInfo, b.Workspace, b.BoundAt.Format(time.RFC3339)))
+	}
+	routeWorkspace := func(bindingKey string, pathParts []string, usageKey, successKey MsgKey) bool {
+		routePath := strings.TrimSpace(strings.Join(pathParts, " "))
+		if routePath == "" {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(usageKey))
+			return false
+		}
+		if !filepath.IsAbs(routePath) {
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsRouteAbsoluteRequired, routePath))
+			return false
+		}
+
+		info, err := os.Stat(routePath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsRouteNotFound, routePath))
+			} else {
+				e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+			}
+			return false
+		}
+		if !info.IsDir() {
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsRouteNotDirectory, routePath))
+			return false
+		}
+
+		normalizedPath := normalizeWorkspacePath(routePath)
+		e.workspaceBindings.Bind(bindingKey, channelID, resolveChannelName(), normalizedPath)
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(successKey, normalizedPath))
+		return true
+	}
+	bindWorkspace := func(bindingKey, wsName string, successKey MsgKey) bool {
 		wsPath := filepath.Join(e.baseDir, wsName)
 
 		// Check if workspace directory exists
 		if _, err := os.Stat(wsPath); os.IsNotExist(err) {
 			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsBindNotFound, wsName))
-			return
+			return false
 		}
 
-		channelName := ""
-		if resolver, ok := p.(ChannelNameResolver); ok {
-			channelName, _ = resolver.ResolveChannelName(channelID)
-		}
-		e.workspaceBindings.Bind(projectKey, channelID, channelName, normalizeWorkspacePath(wsPath))
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsBindSuccess, wsName))
-
-	case "init":
-		if len(args) < 2 {
-			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsInitUsage))
-			return
-		}
-		repoURL := args[1]
+		e.workspaceBindings.Bind(bindingKey, channelID, resolveChannelName(), normalizeWorkspacePath(wsPath))
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(successKey, wsName))
+		return true
+	}
+	initWorkspace := func(bindingKey, repoURL string, successKey MsgKey) bool {
 		if !looksLikeGitURL(repoURL) {
 			e.reply(p, msg.ReplyCtx, "That doesn't look like a git URL.")
-			return
+			return false
 		}
 
 		repoName := extractRepoName(repoURL)
 		cloneTo := filepath.Join(e.baseDir, repoName)
 
 		if _, err := os.Stat(cloneTo); err == nil {
-			channelName := ""
-			if resolver, ok := p.(ChannelNameResolver); ok {
-				channelName, _ = resolver.ResolveChannelName(channelID)
-			}
-			e.workspaceBindings.Bind(projectKey, channelID, channelName, normalizeWorkspacePath(cloneTo))
-			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsCloneSuccess, cloneTo))
-			return
+			e.workspaceBindings.Bind(bindingKey, channelID, resolveChannelName(), normalizeWorkspacePath(cloneTo))
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(successKey, cloneTo))
+			return true
 		}
 
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsCloneProgress, repoURL))
 
 		if err := gitClone(repoURL, cloneTo); err != nil {
 			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsCloneFailed, err))
-			return
+			return false
 		}
 
-		channelName := ""
-		if resolver, ok := p.(ChannelNameResolver); ok {
-			channelName, _ = resolver.ResolveChannelName(channelID)
-		}
-		e.workspaceBindings.Bind(projectKey, channelID, channelName, normalizeWorkspacePath(cloneTo))
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsCloneSuccess, cloneTo))
-
-	case "unbind":
-		e.workspaceBindings.Unbind(projectKey, channelID)
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsUnbindSuccess))
-
-	case "list":
-		bindings := e.workspaceBindings.ListByProject(projectKey)
+		e.workspaceBindings.Bind(bindingKey, channelID, resolveChannelName(), normalizeWorkspacePath(cloneTo))
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(successKey, cloneTo))
+		return true
+	}
+	listBindings := func(bindingKey string, emptyKey, titleKey MsgKey) {
+		bindings := e.workspaceBindings.ListByProject(bindingKey)
 		if len(bindings) == 0 {
-			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsListEmpty))
+			e.reply(p, msg.ReplyCtx, e.i18n.T(emptyKey))
 			return
 		}
 		var sb strings.Builder
-		sb.WriteString(e.i18n.T(MsgWsListTitle) + "\n")
+		sb.WriteString(e.i18n.T(titleKey) + "\n")
 		for chID, b := range bindings {
 			name := b.ChannelName
 			if name == "" {
@@ -2910,10 +2922,115 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 			sb.WriteString(fmt.Sprintf("• #%s → `%s`\n", name, b.Workspace))
 		}
 		e.reply(p, msg.ReplyCtx, sb.String())
+	}
+
+	subCmd := ""
+	if len(args) > 0 {
+		subCmd = matchSubCommand(args[0], []string{"init", "bind", "route", "unbind", "list", "shared"})
+	}
+
+	switch subCmd {
+	case "":
+		b, bindingKey, usable := e.lookupEffectiveWorkspaceBinding(channelID)
+		if !usable {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsNoBinding))
+		} else {
+			replyWorkspaceInfo(b, bindingKey)
+		}
+
+	case "bind":
+		if len(args) < 2 {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsBindUsage))
+			return
+		}
+		bindWorkspace(projectKey, args[1], MsgWsBindSuccess)
+
+	case "route":
+		if len(args) < 2 {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsRouteUsage))
+			return
+		}
+		routeWorkspace(projectKey, args[1:], MsgWsRouteUsage, MsgWsRouteSuccess)
+
+	case "init":
+		if len(args) < 2 {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsInitUsage))
+			return
+		}
+		initWorkspace(projectKey, args[1], MsgWsCloneSuccess)
+
+	case "shared":
+		if !e.isAdmin(msg.UserID) {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgAdminRequired), "/workspace shared"))
+			return
+		}
+		sharedSubCmd := ""
+		if len(args) > 1 {
+			sharedSubCmd = matchSubCommand(args[1], []string{"init", "bind", "route", "unbind", "list"})
+		}
+		switch sharedSubCmd {
+		case "":
+			b := e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, channelID)
+			if b == nil {
+				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsSharedNoBinding))
+			} else {
+				replyWorkspaceInfo(b, sharedWorkspaceBindingsKey)
+			}
+			return
+		case "bind":
+			if len(args) < 3 {
+				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsSharedUsage))
+				return
+			}
+			bindWorkspace(sharedWorkspaceBindingsKey, args[2], MsgWsSharedBindSuccess)
+			return
+		case "route":
+			if len(args) < 3 {
+				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsSharedUsage))
+				return
+			}
+			routeWorkspace(sharedWorkspaceBindingsKey, args[2:], MsgWsSharedUsage, MsgWsSharedRouteSuccess)
+			return
+		case "init":
+			if len(args) < 3 {
+				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsSharedUsage))
+				return
+			}
+			initWorkspace(sharedWorkspaceBindingsKey, args[2], MsgWsSharedBindSuccess)
+			return
+		case "unbind":
+			if e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, channelID) == nil {
+				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsSharedNoBinding))
+				return
+			}
+			e.workspaceBindings.Unbind(sharedWorkspaceBindingsKey, channelID)
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsSharedUnbindSuccess))
+			return
+		case "list":
+			listBindings(sharedWorkspaceBindingsKey, MsgWsSharedListEmpty, MsgWsSharedListTitle)
+			return
+		default:
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsSharedUsage))
+			return
+		}
+
+	case "unbind":
+		if e.workspaceBindings.Lookup(projectKey, channelID) == nil {
+			if e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, channelID) != nil {
+				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsSharedOnlyHint))
+			} else {
+				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsNoBinding))
+			}
+			return
+		}
+		e.workspaceBindings.Unbind(projectKey, channelID)
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsUnbindSuccess))
+
+	case "list":
+		listBindings(projectKey, MsgWsListEmpty, MsgWsListTitle)
 
 	default:
-		e.reply(p, msg.ReplyCtx,
-			"Usage: `/workspace [bind <name> | init <url> | unbind | list]`")
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsUsage))
 	}
 }
 
@@ -3150,9 +3267,8 @@ func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
 	var workDir string
 	if e.multiWorkspace {
 		channelID := extractChannelID(msg.SessionKey)
-		projectKey := "project:" + e.name
-		if b := e.workspaceBindings.Lookup(projectKey, channelID); b != nil {
-			workDir = b.Workspace
+		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelID); usable {
+			workDir = normalizeWorkspacePath(b.Workspace)
 		}
 	}
 	if workDir == "" {
@@ -8697,8 +8813,7 @@ func (e *Engine) sessionContextForKey(sessionKey string) (Agent, *SessionManager
 	if channelID == "" {
 		return e.agent, e.sessions
 	}
-	projectKey := "project:" + e.name
-	if b := e.workspaceBindings.Lookup(projectKey, channelID); b != nil {
+	if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelID); usable {
 		if wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(normalizeWorkspacePath(b.Workspace)); err == nil {
 			return wsAgent, wsSessions
 		}
@@ -8716,26 +8831,44 @@ func (e *Engine) interactiveKeyForSessionKey(sessionKey string) string {
 	if channelID == "" {
 		return sessionKey
 	}
-	projectKey := "project:" + e.name
-	if b := e.workspaceBindings.Lookup(projectKey, channelID); b != nil {
+	if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelID); usable {
 		return normalizeWorkspacePath(b.Workspace) + ":" + sessionKey
 	}
 	return sessionKey
+}
+
+// lookupEffectiveWorkspaceBinding returns the effective binding for a channel
+// plus whether the bound workspace is currently usable.
+func (e *Engine) lookupEffectiveWorkspaceBinding(channelID string) (*WorkspaceBinding, string, bool) {
+	if !e.multiWorkspace || e.workspaceBindings == nil || channelID == "" {
+		return nil, "", false
+	}
+
+	projectKey := "project:" + e.name
+	b, bindingKey := e.workspaceBindings.LookupEffective(projectKey, channelID)
+	if b == nil {
+		return nil, "", false
+	}
+
+	if _, err := os.Stat(b.Workspace); err != nil {
+		slog.Warn("bound workspace directory missing",
+			"workspace", b.Workspace, "channel", channelID, "binding_scope", bindingKey)
+		if bindingKey != sharedWorkspaceBindingsKey {
+			e.workspaceBindings.Unbind(bindingKey, channelID)
+		}
+		return b, bindingKey, false
+	}
+
+	return b, bindingKey, true
 }
 
 // resolveWorkspace resolves a channel to a workspace directory.
 // Returns (workspacePath, channelName, error).
 // If workspacePath is empty, the init flow should be triggered.
 func (e *Engine) resolveWorkspace(p Platform, channelID string) (string, string, error) {
-	projectKey := "project:" + e.name
-
 	// Step 1: Check existing binding
-	if b := e.workspaceBindings.Lookup(projectKey, channelID); b != nil {
-		// Verify workspace directory still exists
-		if _, err := os.Stat(b.Workspace); err != nil {
-			slog.Warn("bound workspace directory missing, removing binding",
-				"workspace", b.Workspace, "channel", channelID)
-			e.workspaceBindings.Unbind(projectKey, channelID)
+	if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelID); b != nil {
+		if !usable {
 			return "", b.ChannelName, nil
 		}
 		return normalizeWorkspacePath(b.Workspace), b.ChannelName, nil
@@ -8760,6 +8893,7 @@ func (e *Engine) resolveWorkspace(p Platform, channelID string) (string, string,
 	candidate := filepath.Join(e.baseDir, channelName)
 	if info, err := os.Stat(candidate); err == nil && info.IsDir() {
 		// Auto-bind
+		projectKey := "project:" + e.name
 		normalized := normalizeWorkspacePath(candidate)
 		e.workspaceBindings.Bind(projectKey, channelID, channelName, normalized)
 		slog.Info("workspace auto-bound by convention",

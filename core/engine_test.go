@@ -5294,6 +5294,82 @@ func TestCmdShell_EmptyCommand_ShowsUsage(t *testing.T) {
 	}
 }
 
+func TestCmdShell_MultiWorkspaceUsesSharedBindingWorkDir(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	wsDir := filepath.Join(baseDir, "shared-shell-workspace")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	normalizedWsDir := normalizeWorkspacePath(wsDir)
+	e.workspaceBindings.Bind(sharedWorkspaceBindingsKey, "ch1", "shared-shell", normalizedWsDir)
+
+	msg := &Message{
+		SessionKey: "test:ch1:user1",
+		Content:    "/shell pwd",
+		ReplyCtx:   "ctx",
+	}
+	e.cmdShell(p, msg, "/shell pwd")
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) > 0 {
+			if !strings.Contains(sent[0], normalizedWsDir) {
+				t.Fatalf("expected shell output to contain shared workspace %q, got %q", normalizedWsDir, sent[0])
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for shell response")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestCmdShell_MultiWorkspaceIgnoresMissingSharedBinding(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agent := &stubWorkDirAgent{workDir: t.TempDir()}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	missingDir := filepath.Join(baseDir, "missing-shared-workspace")
+	e.workspaceBindings.Bind(sharedWorkspaceBindingsKey, "ch1", "shared-shell", missingDir)
+
+	msg := &Message{
+		SessionKey: "test:ch1:user1",
+		Content:    "/shell pwd",
+		ReplyCtx:   "ctx",
+	}
+	e.cmdShell(p, msg, "/shell pwd")
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) > 0 {
+			if !strings.Contains(sent[0], normalizeWorkspacePath(agent.workDir)) {
+				t.Fatalf("expected shell output to fall back to agent work dir %q, got %q", agent.workDir, sent[0])
+			}
+			if strings.Contains(sent[0], missingDir) {
+				t.Fatalf("expected shell output to ignore missing shared workspace %q, got %q", missingDir, sent[0])
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for shell response")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // --- 4. /workspace subcommands ---
 
 func TestWorkspace_NotEnabled_RepliesDisabled(t *testing.T) {
@@ -5408,6 +5484,107 @@ func TestWorkspace_Bind_NonexistentDir(t *testing.T) {
 	}
 }
 
+func TestWorkspace_Route_ShowsCurrentAndSupportsSpaces(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	targetDir := filepath.Join(t.TempDir(), "routed project")
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	msg := &Message{SessionKey: "test:ch1:user1", Content: "/workspace route " + targetDir, ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	normalizedTarget := normalizeWorkspacePath(targetDir)
+	if got := e.workspaceBindings.Lookup("project:test", "ch1"); got == nil || got.Workspace != normalizedTarget {
+		t.Fatalf("expected routed binding %q, got %+v", normalizedTarget, got)
+	}
+
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[0], normalizedTarget) {
+		t.Fatalf("expected route success reply to contain %q, got %v", normalizedTarget, sent)
+	}
+
+	p.clearSent()
+	msg.Content = "/workspace"
+	e.handleCommand(p, msg, msg.Content)
+	sent = p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[0], normalizedTarget) {
+		t.Fatalf("expected workspace info to contain routed path %q, got %v", normalizedTarget, sent)
+	}
+}
+
+func TestWorkspace_Route_RejectsRelativePath(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	msg := &Message{SessionKey: "test:ch1:user1", Content: "/workspace route relative/path", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(strings.ToLower(sent[0]), "absolute") {
+		t.Fatalf("expected absolute-path validation reply, got %v", sent)
+	}
+	if got := e.workspaceBindings.Lookup("project:test", "ch1"); got != nil {
+		t.Fatalf("expected no binding for relative route, got %+v", got)
+	}
+}
+
+func TestWorkspace_Route_RejectsNonexistentPath(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	missingPath := filepath.Join(t.TempDir(), "missing")
+	msg := &Message{SessionKey: "test:ch1:user1", Content: "/workspace route " + missingPath, ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[0], missingPath) {
+		t.Fatalf("expected missing-path reply, got %v", sent)
+	}
+	if got := e.workspaceBindings.Lookup("project:test", "ch1"); got != nil {
+		t.Fatalf("expected no binding for missing route target, got %+v", got)
+	}
+}
+
+func TestWorkspace_Route_RejectsFileTarget(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	fileTarget := filepath.Join(t.TempDir(), "workspace.txt")
+	if err := os.WriteFile(fileTarget, []byte("not a dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	msg := &Message{SessionKey: "test:ch1:user1", Content: "/workspace route " + fileTarget, ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(strings.ToLower(sent[0]), "directory") {
+		t.Fatalf("expected not-directory reply, got %v", sent)
+	}
+	if got := e.workspaceBindings.Lookup("project:test", "ch1"); got != nil {
+		t.Fatalf("expected no binding for file route target, got %+v", got)
+	}
+}
+
 func TestWorkspace_NoArgs_ShowsCurrent(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -5423,6 +5600,250 @@ func TestWorkspace_NoArgs_ShowsCurrent(t *testing.T) {
 	sent := p.getSent()
 	if len(sent) == 0 {
 		t.Fatal("expected a reply")
+	}
+}
+
+func TestWorkspace_NoArgs_ShowsSharedBinding(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	wsDir := filepath.Join(baseDir, "shared-project")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	normalizedWsDir := normalizeWorkspacePath(wsDir)
+	e.workspaceBindings.Bind(sharedWorkspaceBindingsKey, "ch1", "shared-project", normalizedWsDir)
+
+	msg := &Message{SessionKey: "test:ch1:user1", Content: "/workspace", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("expected a reply")
+	}
+	if !strings.Contains(sent[0], normalizedWsDir) {
+		t.Fatalf("expected workspace info to contain shared workspace %q, got %q", normalizedWsDir, sent[0])
+	}
+	if !strings.Contains(strings.ToLower(sent[0]), "shared") {
+		t.Fatalf("expected workspace info to mention shared source, got %q", sent[0])
+	}
+}
+
+func TestWorkspace_SharedCommandsRequireAdmin(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "shared-project")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	msg := &Message{
+		SessionKey: "test:ch1:user1",
+		Content:    "/workspace shared bind shared-project",
+		ReplyCtx:   "ctx",
+		UserID:     "user1",
+	}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("expected admin required reply")
+	}
+	if !strings.Contains(strings.ToLower(sent[0]), "admin") {
+		t.Fatalf("expected admin required reply, got %v", sent)
+	}
+	if got := e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, "ch1"); got != nil {
+		t.Fatalf("shared binding should not be created for non-admin, got %+v", got)
+	}
+}
+
+func TestWorkspace_SharedBind_Unbind_List(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetAdminFrom("admin1")
+
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "shared-project")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	msg := &Message{
+		SessionKey: "test:ch1:admin1",
+		Content:    "/workspace shared bind shared-project",
+		ReplyCtx:   "ctx",
+		UserID:     "admin1",
+	}
+	e.handleCommand(p, msg, msg.Content)
+
+	normalizedWsDir := normalizeWorkspacePath(wsDir)
+	if got := e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, "ch1"); got == nil || got.Workspace != normalizedWsDir {
+		t.Fatalf("expected shared binding %q, got %+v", normalizedWsDir, got)
+	}
+
+	p.clearSent()
+	msg.Content = "/workspace shared"
+	e.handleCommand(p, msg, msg.Content)
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[0], normalizedWsDir) || !strings.Contains(strings.ToLower(sent[0]), "shared") {
+		t.Fatalf("expected shared workspace info, got %v", sent)
+	}
+
+	p.clearSent()
+	msg.Content = "/workspace shared list"
+	e.handleCommand(p, msg, msg.Content)
+	sent = p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[0], "shared-project") {
+		t.Fatalf("expected shared list output, got %v", sent)
+	}
+
+	p.clearSent()
+	msg.Content = "/workspace shared unbind"
+	e.handleCommand(p, msg, msg.Content)
+	sent = p.getSent()
+	if len(sent) == 0 || !strings.Contains(strings.ToLower(sent[0]), "shared workspace") {
+		t.Fatalf("expected shared unbind success, got %v", sent)
+	}
+	if got := e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, "ch1"); got != nil {
+		t.Fatalf("expected shared binding removed, got %+v", got)
+	}
+}
+
+func TestWorkspace_SharedRoute_Unbind_List(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetAdminFrom("admin1")
+
+	baseDir := t.TempDir()
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	targetDir := filepath.Join(t.TempDir(), "shared routed workspace")
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	msg := &Message{
+		SessionKey: "test:ch1:admin1",
+		Content:    "/workspace shared route " + targetDir,
+		ReplyCtx:   "ctx",
+		UserID:     "admin1",
+	}
+	e.handleCommand(p, msg, msg.Content)
+
+	normalizedTarget := normalizeWorkspacePath(targetDir)
+	if got := e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, "ch1"); got == nil || got.Workspace != normalizedTarget {
+		t.Fatalf("expected shared route binding %q, got %+v", normalizedTarget, got)
+	}
+
+	p.clearSent()
+	msg.Content = "/workspace shared"
+	e.handleCommand(p, msg, msg.Content)
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[0], normalizedTarget) || !strings.Contains(strings.ToLower(sent[0]), "shared") {
+		t.Fatalf("expected shared route info, got %v", sent)
+	}
+
+	p.clearSent()
+	msg.Content = "/workspace shared list"
+	e.handleCommand(p, msg, msg.Content)
+	sent = p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[0], normalizedTarget) {
+		t.Fatalf("expected shared route list output, got %v", sent)
+	}
+
+	p.clearSent()
+	msg.Content = "/workspace shared unbind"
+	e.handleCommand(p, msg, msg.Content)
+	sent = p.getSent()
+	if len(sent) == 0 || !strings.Contains(strings.ToLower(sent[0]), "shared workspace") {
+		t.Fatalf("expected shared unbind success, got %v", sent)
+	}
+	if got := e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, "ch1"); got != nil {
+		t.Fatalf("expected shared route binding removed, got %+v", got)
+	}
+}
+
+func TestWorkspace_SharedInit_BindsExistingDir(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetAdminFrom("admin1")
+
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "repo")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	msg := &Message{
+		SessionKey: "test:ch1:admin1",
+		Content:    "/workspace shared init https://github.com/example/repo.git",
+		ReplyCtx:   "ctx",
+		UserID:     "admin1",
+	}
+	e.handleCommand(p, msg, msg.Content)
+
+	normalizedWsDir := normalizeWorkspacePath(wsDir)
+	if got := e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, "ch1"); got == nil || got.Workspace != normalizedWsDir {
+		t.Fatalf("expected shared init binding %q, got %+v", normalizedWsDir, got)
+	}
+}
+
+func TestWorkspace_Unbind_SharedBindingShowsHint(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	wsDir := filepath.Join(baseDir, "shared-project")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e.workspaceBindings.Bind(sharedWorkspaceBindingsKey, "ch1", "shared-project", normalizeWorkspacePath(wsDir))
+
+	msg := &Message{SessionKey: "test:ch1:user1", Content: "/workspace unbind", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[0], "/workspace shared unbind") {
+		t.Fatalf("expected hint to use shared unbind, got %v", sent)
+	}
+}
+
+func TestWorkspace_NoArgs_IgnoresMissingSharedBinding(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	missingDir := filepath.Join(baseDir, "missing-shared-project")
+	e.workspaceBindings.Bind(sharedWorkspaceBindingsKey, "ch1", "shared-project", missingDir)
+
+	msg := &Message{SessionKey: "test:ch1:user1", Content: "/workspace", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("expected a reply")
+	}
+	if !strings.Contains(sent[0], e.i18n.T(MsgWsNoBinding)) {
+		t.Fatalf("expected missing shared binding to be treated as no binding, got %q", sent[0])
 	}
 }
 
