@@ -77,6 +77,8 @@
 ### 🎮 Complete Chat Control
 **Full Control from Chat** — Switch models (`/model`), tune reasoning (`/reasoning`), change permission modes (`/mode`), manage sessions, all via slash commands.
 
+**Directory Switching in Chat** — Change where the next session starts with `/dir <path>` (and `/cd <path>` as a compatibility alias), plus quick history jump via `/dir <number>` / `/dir -`.
+
 ### 🧠 Persistent Memory
 **Agent Memory** — Read and write agent instruction files (`/memory`) without touching the terminal.
 
@@ -266,6 +268,18 @@ cc-connect update --pre     # Beta (includes pre-releases)
 ```
 /model                      List available models (format: alias - model)
 /model switch <alias>       Switch to model by alias
+```
+
+---
+
+### 📂 Work Directory
+
+```
+/dir                         Show current work directory and history
+/dir <path>                  Switch to a path (relative or absolute)
+/dir <number>                Switch from history
+/dir -                       Switch to previous directory
+/cd <path>                   Compatibility alias for /dir <path>
 ```
 
 ---

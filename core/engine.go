@@ -2063,7 +2063,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case <-idleCh:
 			slog.Error("agent session idle timeout: no events for too long, killing session",
 				"session_key", sessionKey, "timeout", e.eventIdleTimeout, "elapsed", time.Since(turnStart))
-			sp.finish("")
+			sp.discard()
 			state.mu.Lock()
 			p := state.platform
 			replyCtx := state.replyCtx
@@ -2317,9 +2317,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.sideText = ""
 			state.mu.Unlock()
 
-			// When tool calls happened, text was sent in segments; only send remainder.
-			if toolCount > 0 {
-				sp.finish("") // cleanup preview
+			// When tool calls happened and prior text was already surfaced in segments,
+			// only send the unsent remainder. In quiet mode, tool events don't surface
+			// side-channel messages and segmentStart stays 0, so keep normal finalize flow.
+			if toolCount > 0 && segmentStart > 0 {
+				sp.discard()
 				if segmentStart < len(textParts) {
 					unsent := strings.Join(textParts[segmentStart:], "")
 					if unsent != "" {
@@ -2332,7 +2334,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 			} else if suppressDuplicate {
-				sp.finish("")
+				sp.discard()
 				slog.Debug("EventResult: suppressed duplicate side-channel text", "response_len", len(fullResponse))
 			} else if sp.finish(fullResponse) {
 				slog.Debug("EventResult: finalized via stream preview", "response_len", len(fullResponse))
@@ -2466,7 +2468,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			return
 
 		case EventError:
-			sp.finish("") // clean up preview on error
+			sp.discard()
 			if event.Error != nil {
 				slog.Error("agent error", "error", event.Error)
 				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
@@ -2496,8 +2498,8 @@ channelClosed:
 		fullResponse := strings.Join(textParts, "")
 		session.AddHistory("assistant", fullResponse)
 
-		if toolCount > 0 {
-			sp.finish("")
+		if toolCount > 0 && segmentStart > 0 {
+			sp.discard()
 			if segmentStart < len(textParts) {
 				unsent := strings.Join(textParts[segmentStart:], "")
 				if unsent != "" {

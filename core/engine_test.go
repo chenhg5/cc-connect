@@ -711,6 +711,44 @@ func TestProcessInteractiveEvents_DoesNotSuppressDifferentFinalText(t *testing.T
 	}
 }
 
+func TestProcessInteractiveEvents_QuietToolTurnKeepsPreviewOnFinalize(t *testing.T) {
+	p := &mockKeepPreviewPlatform{}
+	p.n = "feishu"
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-1",
+		quiet:        true,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "final response"}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "echo hi"}
+	agentSession.events <- Event{Type: EventResult, Content: "", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil)
+
+	if got := p.getSent(); len(got) != 0 {
+		t.Fatalf("sent text = %#v, want no plain-text fallback sends", got)
+	}
+
+	p.mu.Lock()
+	deletedCount := len(p.deleted)
+	previewMsgs := append([]string(nil), p.messages...)
+	p.mu.Unlock()
+
+	if deletedCount != 0 {
+		t.Fatalf("deleted previews = %d, want 0", deletedCount)
+	}
+	if len(previewMsgs) == 0 || previewMsgs[len(previewMsgs)-1] != "update:final response" {
+		t.Fatalf("preview messages = %#v, want in-place final update", previewMsgs)
+	}
+}
+
 func TestAgentSystemPrompt_MentionsAttachmentSend(t *testing.T) {
 	prompt := AgentSystemPrompt()
 	if !strings.Contains(prompt, "cc-connect send --image") {

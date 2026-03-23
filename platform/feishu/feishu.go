@@ -64,6 +64,16 @@ func (l *sanitizingLogger) sanitize(s string) string {
 }
 
 func (l *sanitizingLogger) Debug(ctx context.Context, args ...interface{}) {
+	for _, arg := range args {
+		s, ok := arg.(string)
+		if !ok {
+			continue
+		}
+		msg := strings.ToLower(s)
+		if strings.Contains(msg, "ping success") || strings.Contains(msg, "receive pong") {
+			return
+		}
+	}
 	l.inner.Debug(ctx, l.maskURL(args...)...)
 }
 
@@ -116,11 +126,11 @@ type Platform struct {
 	userNameCache         sync.Map // open_id -> display name
 	chatNameCache         sync.Map // chat_id -> chat name
 	// Webhook mode fields (for Lark international version)
-	server         *http.Server
-	port           string
-	callbackPath   string
-	encryptKey     string
-	eventHandler   *dispatcher.EventDispatcher
+	server       *http.Server
+	port         string
+	callbackPath string
+	encryptKey   string
+	eventHandler *dispatcher.EventDispatcher
 }
 
 type interactivePlatform struct {
@@ -208,6 +218,10 @@ func (p *Platform) dispatchPlatform() core.Platform {
 		return p.self
 	}
 	return p
+}
+
+func (p *Platform) KeepPreviewOnFinish() bool {
+	return p.useInteractiveCard
 }
 
 func (p *Platform) Start(handler core.MessageHandler) error {
@@ -1765,6 +1779,10 @@ func buildCardJSON(content string) string {
 // Using card (interactive) type for both preview and final message so updates
 // are in-place without needing to delete and resend.
 func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content string) (any, error) {
+	if !p.useInteractiveCard {
+		return nil, core.ErrNotSupported
+	}
+
 	rc, ok := rctx.(replyContext)
 	if !ok {
 		return nil, fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
@@ -1822,6 +1840,10 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 // UpdateMessage edits an existing card message identified by previewHandle.
 // Uses the Patch API (HTTP PATCH) which is required for interactive card messages.
 func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content string) error {
+	if !p.useInteractiveCard {
+		return core.ErrNotSupported
+	}
+
 	h, ok := previewHandle.(*feishuPreviewHandle)
 	if !ok {
 		return fmt.Errorf("%s: invalid preview handle type %T", p.tag(), previewHandle)
@@ -1858,6 +1880,30 @@ func (p *Platform) Stop() error {
 		if err := p.server.Shutdown(ctx); err != nil {
 			slog.Error(p.tag()+": webhook server shutdown error", "error", err)
 		}
+	}
+	return nil
+}
+
+// DeletePreviewMessage removes a preview message so the caller can send a
+// separate final message without leaving a stale interactive card behind.
+func (p *Platform) DeletePreviewMessage(ctx context.Context, previewHandle any) error {
+	if !p.useInteractiveCard {
+		return core.ErrNotSupported
+	}
+
+	h, ok := previewHandle.(*feishuPreviewHandle)
+	if !ok {
+		return fmt.Errorf("%s: invalid preview handle type %T", p.tag(), previewHandle)
+	}
+
+	resp, err := p.client.Im.Message.Delete(ctx, larkim.NewDeleteMessageReqBuilder().
+		MessageId(h.messageID).
+		Build())
+	if err != nil {
+		return fmt.Errorf("%s: delete preview message: %w", p.tag(), err)
+	}
+	if !resp.Success() {
+		return fmt.Errorf("%s: delete preview message code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
 	}
 	return nil
 }
