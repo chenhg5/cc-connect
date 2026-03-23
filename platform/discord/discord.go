@@ -459,15 +459,16 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		}
 
 		var images []core.ImageAttachment
+		var files []core.FileAttachment
 		var audio *core.AudioAttachment
 		for _, att := range m.Attachments {
 			ct := strings.ToLower(att.ContentType)
+			data, err := downloadURL(att.URL)
+			if err != nil {
+				slog.Error("discord: download attachment failed", "url", att.URL, "error", err)
+				continue
+			}
 			if strings.HasPrefix(ct, "audio/") {
-				data, err := downloadURL(att.URL)
-				if err != nil {
-					slog.Error("discord: download audio failed", "url", att.URL, "error", err)
-					continue
-				}
 				format := "ogg"
 				if parts := strings.SplitN(ct, "/", 2); len(parts) == 2 {
 					format = parts[1]
@@ -475,19 +476,22 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 				audio = &core.AudioAttachment{
 					MimeType: ct, Data: data, Format: format,
 				}
-			} else if att.Width > 0 && att.Height > 0 {
-				data, err := downloadURL(att.URL)
-				if err != nil {
-					slog.Error("discord: download attachment failed", "url", att.URL, "error", err)
-					continue
-				}
+				continue
+			}
+			if att.Width > 0 && att.Height > 0 {
 				images = append(images, core.ImageAttachment{
 					MimeType: att.ContentType, Data: data, FileName: att.Filename,
 				})
+				continue
 			}
+			files = append(files, core.FileAttachment{
+				MimeType: att.ContentType,
+				Data:     data,
+				FileName: att.Filename,
+			})
 		}
 
-		if m.Content == "" && len(images) == 0 && audio == nil {
+		if m.Content == "" && len(images) == 0 && len(files) == 0 && audio == nil {
 			return
 		}
 
@@ -496,7 +500,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 			MessageID: m.ID,
 			UserID:    m.Author.ID, UserName: m.Author.Username,
 			ChatName: p.resolveChannelName(m.ChannelID),
-			Content:  m.Content, Images: images, Audio: audio, ReplyCtx: rctx,
+			Content:  m.Content, Images: images, Files: files, Audio: audio, ReplyCtx: rctx,
 		}
 		p.handler(p, msg)
 	})
