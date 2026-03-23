@@ -63,6 +63,38 @@
 
 ---
 
+## 🧩 Platform feature snapshot
+
+High-level view of what each **built-in platform** can do in cc-connect. Inspired by [OpenClaw China’s feature matrix](https://github.com/BytePioneer-AI/openclaw-china#功能支持) — handy for comparing channels at a glance.
+
+**Legend**
+
+| Symbol | Meaning |
+|--------|---------|
+| ✅ | Works in **stable** cc-connect with typical configuration |
+| 🧪 | **Beta / pre-release only** — the **Weixin (personal)** column: install [`cc-connect@beta`](https://www.npmjs.com/package/cc-connect?activeTab=versions) or a [pre-release binary](https://github.com/chenhg5/cc-connect/releases); **not** in the default stable npm build yet |
+| ⚠️ | Partial, needs extra config (e.g. speech / ASR), or limited by the vendor app or API |
+| ❌ | Not supported or not applicable in practice |
+
+† **QQ (NapCat / OneBot)** — unofficial self-hosted bridge; behaviour depends on your NapCat / network setup.
+
+| Capability | Feishu | DingTalk | Telegram | Slack | Discord | LINE | WeCom | **Weixin**<br>*(personal)* | QQ† | QQ Bot |
+|------------|:------:|:--------:|:--------:|:-----:|:-------:|:----:|:-----:|:-------------------------:|:---:|:------:|
+| Text & slash commands | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🧪 | ✅ | ✅ |
+| Markdown / cards | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | 🧪 | ✅ | ✅ |
+| Streaming / chunked replies | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🧪 | ✅ | ✅ |
+| Images & files | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | 🧪 | ✅ | ✅ |
+| Voice / STT / TTS | ⚠️ | ⚠️ | ✅ | ⚠️ | ⚠️ | ❌ | ⚠️ | 🧪 | ⚠️ | ⚠️ |
+| Private (DM) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🧪 | ✅ | ✅ |
+| Group / channel | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | 🧪 | ✅ | ✅ |
+
+> **Weixin column:** every **🧪** means “available only when you run a **beta / pre-release** build,” not a statement that the feature is incomplete — the whole **personal WeChat (ilink)** channel is still **pre-stable**.  
+> **WeCom:** Webhook mode needs a **public URL**; long-connection / WS style setups often do not.  
+> **Voice row:** many platforms need `[speech]` / TTS providers enabled in `config.toml`; values are a best-effort summary.  
+> Per-platform setup: [Platform setup guides](#-platform-setup-guides) below.
+
+---
+
 ## ✨ Why cc-connect?
 
 ### 🤖 Universal Agent Support
