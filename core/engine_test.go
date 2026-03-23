@@ -5294,6 +5294,44 @@ func TestCmdShell_EmptyCommand_ShowsUsage(t *testing.T) {
 	}
 }
 
+func TestCmdShell_MultiWorkspaceUsesSharedBindingWorkDir(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	wsDir := filepath.Join(baseDir, "shared-shell-workspace")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	normalizedWsDir := normalizeWorkspacePath(wsDir)
+	e.workspaceBindings.Bind(sharedWorkspaceBindingsKey, "ch1", "shared-shell", normalizedWsDir)
+
+	msg := &Message{
+		SessionKey: "test:ch1:user1",
+		Content:    "/shell pwd",
+		ReplyCtx:   "ctx",
+	}
+	e.cmdShell(p, msg, "/shell pwd")
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) > 0 {
+			if !strings.Contains(sent[0], normalizedWsDir) {
+				t.Fatalf("expected shell output to contain shared workspace %q, got %q", normalizedWsDir, sent[0])
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for shell response")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // --- 4. /workspace subcommands ---
 
 func TestWorkspace_NotEnabled_RepliesDisabled(t *testing.T) {
@@ -5423,6 +5461,33 @@ func TestWorkspace_NoArgs_ShowsCurrent(t *testing.T) {
 	sent := p.getSent()
 	if len(sent) == 0 {
 		t.Fatal("expected a reply")
+	}
+}
+
+func TestWorkspace_NoArgs_ShowsSharedBinding(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	wsDir := filepath.Join(baseDir, "shared-project")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	normalizedWsDir := normalizeWorkspacePath(wsDir)
+	e.workspaceBindings.Bind(sharedWorkspaceBindingsKey, "ch1", "shared-project", normalizedWsDir)
+
+	msg := &Message{SessionKey: "test:ch1:user1", Content: "/workspace", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("expected a reply")
+	}
+	if !strings.Contains(sent[0], normalizedWsDir) {
+		t.Fatalf("expected workspace info to contain shared workspace %q, got %q", normalizedWsDir, sent[0])
 	}
 }
 
