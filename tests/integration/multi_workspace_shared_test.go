@@ -255,7 +255,7 @@ func TestIntegration_SharedWorkspaceBindingLiveSyncAcrossProjects(t *testing.T) 
 	engineB := newIntegrationEngine(t, "project-b", platformB, baseDir, bindingStore, filepath.Join(t.TempDir(), "project-b-sessions.json"))
 	_ = engineB
 
-	platformA.Emit(integrationMessage(platformA.Name(), channelID, "admin", "/workspace shared bind shared-workspace"))
+	platformA.Emit(integrationMessage(platformA.Name(), channelID, "user-a", "/workspace shared bind shared-workspace"))
 	platformA.WaitForOutputContaining(t, "Shared workspace bound")
 
 	platformA.ClearOutputs()
@@ -267,7 +267,7 @@ func TestIntegration_SharedWorkspaceBindingLiveSyncAcrossProjects(t *testing.T) 
 	platformB.WaitForOutputContaining(t, sharedDir)
 
 	platformA.ClearOutputs()
-	platformA.Emit(integrationMessage(platformA.Name(), channelID, "admin", "/workspace shared unbind"))
+	platformA.Emit(integrationMessage(platformA.Name(), channelID, "user-a", "/workspace shared unbind"))
 	platformA.WaitForOutputContaining(t, "Shared workspace unbound")
 
 	platformB.ClearOutputs()
@@ -294,7 +294,7 @@ func TestIntegration_ProjectWorkspaceOverridesSharedAcrossProjects(t *testing.T)
 	engineB := newIntegrationEngine(t, "project-b", platformB, baseDir, bindingStore, filepath.Join(t.TempDir(), "project-b-sessions.json"))
 	_ = engineB
 
-	platformA.Emit(integrationMessage(platformA.Name(), channelID, "admin", "/workspace shared bind shared-workspace"))
+	platformA.Emit(integrationMessage(platformA.Name(), channelID, "user-a", "/workspace shared bind shared-workspace"))
 	platformA.WaitForOutputContaining(t, "Shared workspace bound")
 
 	platformB.ClearOutputs()
@@ -348,7 +348,7 @@ func TestIntegration_SharedWorkspaceRouteLiveSyncAcrossProjects(t *testing.T) {
 	engineB := newIntegrationEngine(t, "project-shared-route-b", platformB, baseDir, bindingStore, filepath.Join(t.TempDir(), "project-shared-route-b-sessions.json"))
 	_ = engineB
 
-	platformA.Emit(integrationMessage(platformA.Name(), channelID, "admin", "/workspace shared route "+routedDir))
+	platformA.Emit(integrationMessage(platformA.Name(), channelID, "user-a", "/workspace shared route "+routedDir))
 	platformA.WaitForOutputContaining(t, "Shared workspace routed")
 
 	platformA.ClearOutputs()

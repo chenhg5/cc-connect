@@ -2960,10 +2960,6 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 		initWorkspace(projectKey, args[1], MsgWsCloneSuccess)
 
 	case "shared":
-		if !e.isAdmin(msg.UserID) {
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgAdminRequired), "/workspace shared"))
-			return
-		}
 		sharedSubCmd := ""
 		if len(args) > 1 {
 			sharedSubCmd = matchSubCommand(args[1], []string{"init", "bind", "route", "unbind", "list"})

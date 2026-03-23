@@ -5633,7 +5633,7 @@ func TestWorkspace_NoArgs_ShowsSharedBinding(t *testing.T) {
 	}
 }
 
-func TestWorkspace_SharedCommandsRequireAdmin(t *testing.T) {
+func TestWorkspace_SharedBind_AllowsRegularUser(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 
@@ -5655,20 +5655,20 @@ func TestWorkspace_SharedCommandsRequireAdmin(t *testing.T) {
 
 	sent := p.getSent()
 	if len(sent) == 0 {
-		t.Fatal("expected admin required reply")
+		t.Fatal("expected shared bind reply")
 	}
-	if !strings.Contains(strings.ToLower(sent[0]), "admin") {
-		t.Fatalf("expected admin required reply, got %v", sent)
+	normalizedWsDir := normalizeWorkspacePath(wsDir)
+	if !strings.Contains(sent[0], "shared-project") {
+		t.Fatalf("expected shared bind success reply to contain workspace name, got %v", sent)
 	}
-	if got := e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, "ch1"); got != nil {
-		t.Fatalf("shared binding should not be created for non-admin, got %+v", got)
+	if got := e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, "ch1"); got == nil || got.Workspace != normalizedWsDir {
+		t.Fatalf("expected shared binding %q for regular user, got %+v", normalizedWsDir, got)
 	}
 }
 
 func TestWorkspace_SharedBind_Unbind_List(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	e.SetAdminFrom("admin1")
 
 	baseDir := t.TempDir()
 	wsDir := filepath.Join(baseDir, "shared-project")
@@ -5679,10 +5679,10 @@ func TestWorkspace_SharedBind_Unbind_List(t *testing.T) {
 	e.SetMultiWorkspace(baseDir, bindStore)
 
 	msg := &Message{
-		SessionKey: "test:ch1:admin1",
+		SessionKey: "test:ch1:user1",
 		Content:    "/workspace shared bind shared-project",
 		ReplyCtx:   "ctx",
-		UserID:     "admin1",
+		UserID:     "user1",
 	}
 	e.handleCommand(p, msg, msg.Content)
 
@@ -5722,7 +5722,6 @@ func TestWorkspace_SharedBind_Unbind_List(t *testing.T) {
 func TestWorkspace_SharedRoute_Unbind_List(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	e.SetAdminFrom("admin1")
 
 	baseDir := t.TempDir()
 	bindStore := filepath.Join(t.TempDir(), "bindings.json")
@@ -5734,10 +5733,10 @@ func TestWorkspace_SharedRoute_Unbind_List(t *testing.T) {
 	}
 
 	msg := &Message{
-		SessionKey: "test:ch1:admin1",
+		SessionKey: "test:ch1:user1",
 		Content:    "/workspace shared route " + targetDir,
 		ReplyCtx:   "ctx",
-		UserID:     "admin1",
+		UserID:     "user1",
 	}
 	e.handleCommand(p, msg, msg.Content)
 
@@ -5777,7 +5776,6 @@ func TestWorkspace_SharedRoute_Unbind_List(t *testing.T) {
 func TestWorkspace_SharedInit_BindsExistingDir(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	e.SetAdminFrom("admin1")
 
 	baseDir := t.TempDir()
 	wsDir := filepath.Join(baseDir, "repo")
@@ -5788,10 +5786,10 @@ func TestWorkspace_SharedInit_BindsExistingDir(t *testing.T) {
 	e.SetMultiWorkspace(baseDir, bindStore)
 
 	msg := &Message{
-		SessionKey: "test:ch1:admin1",
+		SessionKey: "test:ch1:user1",
 		Content:    "/workspace shared init https://github.com/example/repo.git",
 		ReplyCtx:   "ctx",
-		UserID:     "admin1",
+		UserID:     "user1",
 	}
 	e.handleCommand(p, msg, msg.Content)
 
