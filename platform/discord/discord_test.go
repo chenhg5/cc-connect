@@ -1,6 +1,7 @@
 package discord
 
 import (
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -398,6 +399,41 @@ func TestDuplicateMessage_MultipleDuplicateBursts(t *testing.T) {
 	}
 	if len(received) != 10 {
 		t.Errorf("got %d unique messages, want 10", len(received))
+	}
+}
+
+func TestDiscordFileAttachmentIsForwardedAsFile(t *testing.T) {
+	att := discordgo.MessageAttachment{
+		Filename:    "report.pdf",
+		ContentType: "application/pdf",
+	}
+	data := []byte("pdf-bytes")
+	ct := strings.ToLower(att.ContentType)
+
+	var files []core.FileAttachment
+	if strings.HasPrefix(ct, "audio/") {
+		t.Fatal("attachment unexpectedly classified as audio")
+	}
+	if att.Width > 0 && att.Height > 0 {
+		t.Fatal("attachment unexpectedly classified as image")
+	}
+	files = append(files, core.FileAttachment{
+		MimeType: att.ContentType,
+		Data:     data,
+		FileName: att.Filename,
+	})
+
+	if len(files) != 1 {
+		t.Fatalf("files len = %d, want 1", len(files))
+	}
+	if files[0].FileName != "report.pdf" {
+		t.Fatalf("file name = %q, want report.pdf", files[0].FileName)
+	}
+	if files[0].MimeType != "application/pdf" {
+		t.Fatalf("mime type = %q, want application/pdf", files[0].MimeType)
+	}
+	if string(files[0].Data) != "pdf-bytes" {
+		t.Fatalf("file data = %q, want pdf-bytes", string(files[0].Data))
 	}
 }
 
