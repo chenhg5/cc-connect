@@ -154,6 +154,13 @@ type InlineButtonSender interface {
 	SendWithButtons(ctx context.Context, replyCtx any, content string, buttons [][]ButtonOption) error
 }
 
+// PermissionButtonSender is an optional interface for platforms that support
+// dedicated permission-request button UIs, which may differ from generic inline
+// button prompts.
+type PermissionButtonSender interface {
+	SendPermissionButtons(ctx context.Context, replyCtx any, content string, buttons [][]ButtonOption) error
+}
+
 // CardSender is an optional interface for platforms that support sending
 // structured rich cards (e.g. Feishu Interactive Card). Platforms that do not
 // implement this interface will receive a plain-text fallback via Card.RenderText().

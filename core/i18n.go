@@ -122,6 +122,7 @@ const (
 	MsgStarting                  MsgKey = "starting"
 	MsgThinking                  MsgKey = "thinking"
 	MsgTool                      MsgKey = "tool"
+	MsgTodoTitle                 MsgKey = "todo_title"
 	MsgExecutionStopped          MsgKey = "execution_stopped"
 	MsgNoExecution               MsgKey = "no_execution"
 	MsgPreviousProcessing        MsgKey = "previous_processing"
@@ -137,6 +138,7 @@ const (
 	MsgFailedToDeleteSession     MsgKey = "failed_to_delete_session"
 	MsgEmptyResponse             MsgKey = "empty_response"
 	MsgPermissionPrompt          MsgKey = "permission_prompt"
+	MsgPermissionPromptButtons   MsgKey = "permission_prompt_buttons"
 	MsgPermissionAllowed         MsgKey = "permission_allowed"
 	MsgPermissionApproveAll      MsgKey = "permission_approve_all"
 	MsgPermissionDenied          MsgKey = "permission_denied_msg"
@@ -315,10 +317,11 @@ const (
 	MsgCronNextRunLabel  MsgKey = "cron_next_run_label"
 	MsgCronLastRunLabel  MsgKey = "cron_last_run_label"
 
-	MsgPermBtnAllow    MsgKey = "perm_btn_allow"
-	MsgPermBtnDeny     MsgKey = "perm_btn_deny"
-	MsgPermBtnAllowAll MsgKey = "perm_btn_allow_all"
-	MsgPermCardTitle   MsgKey = "perm_card_title"
+	MsgPermBtnAllow          MsgKey = "perm_btn_allow"
+	MsgPermBtnDeny           MsgKey = "perm_btn_deny"
+	MsgPermBtnAllowAll       MsgKey = "perm_btn_allow_all"
+	MsgPermBtnAllowAllShort  MsgKey = "perm_btn_allow_all_short"
+	MsgPermCardTitle         MsgKey = "perm_card_title"
 	MsgPermCardBody    MsgKey = "perm_card_body"
 	MsgPermCardNote    MsgKey = "perm_card_note"
 
@@ -529,6 +532,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "🔧 **ツール #%d: %s**\n---\n%s",
 		LangSpanish:            "🔧 **Herramienta #%d: %s**\n---\n%s",
 	},
+	MsgTodoTitle: {
+		LangEnglish:            "📝 Current tasks",
+		LangChinese:            "📝 当前任务",
+		LangTraditionalChinese: "📝 當前任務",
+		LangJapanese:           "📝 現在のタスク",
+		LangSpanish:            "📝 Tareas actuales",
+	},
 	MsgExecutionStopped: {
 		LangEnglish:            "⏹ Execution stopped.",
 		LangChinese:            "⏹ 执行已停止。",
@@ -633,6 +643,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "⚠️ **權限請求**\n\nAgent 想要使用 **%s**:\n\n```\n%s\n```\n\n回覆 **允許** / **拒絕** / **允許所有**（本次會話不再提醒）。",
 		LangJapanese:           "⚠️ **権限リクエスト**\n\nエージェントが **%s** を使用しようとしています:\n\n```\n%s\n```\n\n**allow** / **deny** / **allow all**（このセッション中は全て自動許可）で返信してください。",
 		LangSpanish:            "⚠️ **Solicitud de permiso**\n\nEl agente quiere usar **%s**:\n\n```\n%s\n```\n\nResponda **allow** / **deny** / **allow all** (omitir futuras solicitudes en esta sesión).",
+	},
+	MsgPermissionPromptButtons: {
+		LangEnglish:            "⚠️ **Permission Request**\n\nAgent wants to use **%s**:\n\n```\n%s\n```",
+		LangChinese:            "⚠️ **权限请求**\n\nAgent 想要使用 **%s**:\n\n```\n%s\n```",
+		LangTraditionalChinese: "⚠️ **權限請求**\n\nAgent 想要使用 **%s**:\n\n```\n%s\n```",
+		LangJapanese:           "⚠️ **権限リクエスト**\n\nエージェントが **%s** を使用しようとしています:\n\n```\n%s\n```",
+		LangSpanish:            "⚠️ **Solicitud de permiso**\n\nEl agente quiere usar **%s**:\n\n```\n%s\n```",
 	},
 	MsgPermissionAllowed: {
 		LangEnglish:            "✅ Allowed, continuing...",
@@ -2170,6 +2187,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "允許所有 (本次會話)",
 		LangJapanese:           "すべて許可 (このセッション)",
 		LangSpanish:            "Permitir todo (esta sesión)",
+	},
+	MsgPermBtnAllowAllShort: {
+		LangEnglish:            "Allow All",
+		LangChinese:            "允许所有",
+		LangTraditionalChinese: "允許所有",
+		LangJapanese:           "すべて許可",
+		LangSpanish:            "Permitir todo",
 	},
 	MsgPermCardTitle: {
 		LangEnglish:            "Permission Request",
