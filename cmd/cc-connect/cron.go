@@ -24,6 +24,8 @@ func runCron(args []string) {
 		runCronAdd(args[1:])
 	case "list":
 		runCronList(args[1:])
+	case "edit":
+		runCronEdit(args[1:])
 	case "del", "delete", "rm", "remove":
 		runCronDel(args[1:])
 	case "--help", "-h", "help":
@@ -311,6 +313,96 @@ func runCronDel(args []string) {
 	fmt.Printf("Cron job %s deleted.\n", id)
 }
 
+func runCronEdit(args []string) {
+	var dataDir string
+	var id, field string
+	var valueStr string
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--data-dir":
+			if i+1 < len(args) {
+				i++
+				dataDir = args[i]
+			}
+		default:
+			if id == "" {
+				id = args[i]
+			} else if field == "" {
+				field = args[i]
+			} else if valueStr == "" {
+				valueStr = args[i]
+			}
+		}
+	}
+
+	if id == "" {
+		fmt.Fprintln(os.Stderr, "Error: job ID is required")
+		fmt.Fprintln(os.Stderr, "Usage: cc-connect cron edit <id> <field> <value>")
+		os.Exit(1)
+	}
+	if field == "" {
+		fmt.Fprintln(os.Stderr, "Error: field name is required")
+		fmt.Fprintln(os.Stderr, "Usage: cc-connect cron edit <id> <field> <value>")
+		os.Exit(1)
+	}
+	if valueStr == "" {
+		fmt.Fprintln(os.Stderr, "Error: value is required")
+		fmt.Fprintln(os.Stderr, "Usage: cc-connect cron edit <id> <field> <value>")
+		os.Exit(1)
+	}
+
+	// Parse value based on field type
+	var value any
+	switch field {
+	case "enabled", "mute":
+		v, err := strconv.ParseBool(valueStr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %s must be true or false\n", field)
+			os.Exit(1)
+		}
+		value = v
+	case "timeout_mins":
+		v, err := strconv.Atoi(valueStr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: timeout_mins must be an integer\n")
+			os.Exit(1)
+		}
+		value = v
+	default:
+		// String fields: project, session_key, cron_expr, prompt, exec, work_dir, description, session_mode
+		value = valueStr
+	}
+
+	sockPath := resolveSocketPath(dataDir)
+	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "Error: cc-connect is not running (socket not found: %s)\n", sockPath)
+		os.Exit(1)
+	}
+
+	payload, _ := json.Marshal(map[string]any{"id": id, "field": field, "value": value})
+	resp, err := apiPost(sockPath, "/cron/edit", payload)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", strings.TrimSpace(string(body)))
+		os.Exit(1)
+	}
+
+	// Pretty-print updated job
+	var prettyJSON bytes.Buffer
+	if err := json.Indent(&prettyJSON, body, "", "  "); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: invalid JSON response: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Updated job %s:\n%s\n", id, prettyJSON.String())
+}
+
 func apiPost(sockPath, path string, payload []byte) (*http.Response, error) {
 	client := &http.Client{
 		Transport: &http.Transport{
@@ -328,6 +420,7 @@ func printCronUsage() {
 Commands:
   add       Create a new scheduled task
   list      List all scheduled tasks
+  edit      Edit a scheduled task field
   del <id>  Delete a scheduled task
 
 Run 'cc-connect cron <command> --help' for details.`)

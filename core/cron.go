@@ -254,6 +254,102 @@ func (s *CronStore) Get(id string) *CronJob {
 	return nil
 }
 
+// Update modifies a specific field of a cron job. Returns false if job not found.
+// readOnlyFields contains fields that cannot be modified: id, created_at.
+func (s *CronStore) Update(id string, field string, value any) bool {
+	readOnlyFields := map[string]bool{"id": true, "created_at": true}
+	if readOnlyFields[field] {
+		return false
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, j := range s.jobs {
+		if j.ID == id {
+			if err := updateJobField(j, field, value); err != nil {
+				return false
+			}
+			if saveErr := s.save(); saveErr != nil {
+				slog.Warn("cron: failed to save after update", "error", saveErr)
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// updateJobField sets a field on a CronJob by reflection. Returns error for unknown fields.
+func updateJobField(job *CronJob, field string, value any) error {
+	switch field {
+	case "project":
+		if v, ok := value.(string); ok {
+			job.Project = v
+			return nil
+		}
+	case "session_key":
+		if v, ok := value.(string); ok {
+			job.SessionKey = v
+			return nil
+		}
+	case "cron_expr":
+		if v, ok := value.(string); ok {
+			job.CronExpr = v
+			return nil
+		}
+	case "prompt":
+		if v, ok := value.(string); ok {
+			job.Prompt = v
+			return nil
+		}
+	case "exec":
+		if v, ok := value.(string); ok {
+			job.Exec = v
+			return nil
+		}
+	case "work_dir":
+		if v, ok := value.(string); ok {
+			job.WorkDir = v
+			return nil
+		}
+	case "description":
+		if v, ok := value.(string); ok {
+			job.Description = v
+			return nil
+		}
+	case "enabled":
+		if v, ok := value.(bool); ok {
+			job.Enabled = v
+			return nil
+		}
+	case "silent":
+		if v, ok := value.(bool); ok {
+			job.Silent = &v
+			return nil
+		}
+	case "mute":
+		if v, ok := value.(bool); ok {
+			job.Mute = v
+			return nil
+		}
+	case "session_mode":
+		if v, ok := value.(string); ok {
+			job.SessionMode = v
+			return nil
+		}
+	case "timeout_mins":
+		if v, ok := value.(float64); ok {
+			n := int(v)
+			job.TimeoutMins = &n
+			return nil
+		}
+		if v, ok := value.(int); ok {
+			job.TimeoutMins = &v
+			return nil
+		}
+	}
+	return fmt.Errorf("unknown or invalid field: %s", field)
+}
+
 // CronScheduler runs cron jobs by injecting synthetic messages into engines.
 type CronScheduler struct {
 	store         *CronStore
@@ -357,6 +453,56 @@ func (cs *CronScheduler) DisableJob(id string) error {
 		delete(cs.entries, id)
 	}
 	cs.mu.Unlock()
+	return nil
+}
+
+// UpdateJob modifies a field of a cron job and reschedules if necessary.
+// Returns error if job not found, field is read-only, or value is invalid.
+func (cs *CronScheduler) UpdateJob(id string, field string, value any) error {
+	job := cs.store.Get(id)
+	if job == nil {
+		return fmt.Errorf("job %q not found", id)
+	}
+
+	// Validate cron expression if updating cron_expr
+	if field == "cron_expr" {
+		expr, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("cron_expr must be a string")
+		}
+		if _, err := cron.ParseStandard(expr); err != nil {
+			return fmt.Errorf("invalid cron expression %q: %w", expr, err)
+		}
+	}
+
+	// Check if reschedule is needed
+	needsReschedule := field == "cron_expr" || field == "enabled"
+
+	if needsReschedule {
+		// Remove current schedule
+		cs.mu.Lock()
+		if entryID, ok := cs.entries[id]; ok {
+			cs.cron.Remove(entryID)
+			delete(cs.entries, id)
+		}
+		cs.mu.Unlock()
+	}
+
+	// Update the field
+	if !cs.store.Update(id, field, value) {
+		return fmt.Errorf("failed to update field %q (may be read-only or invalid type)", field)
+	}
+
+	// Reschedule if needed
+	if needsReschedule {
+		updatedJob := cs.store.Get(id)
+		if updatedJob != nil && updatedJob.Enabled {
+			if err := cs.scheduleJob(updatedJob); err != nil {
+				return fmt.Errorf("reschedule failed: %w", err)
+			}
+		}
+	}
+
 	return nil
 }
 
