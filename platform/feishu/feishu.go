@@ -1302,7 +1302,11 @@ func buildReplyContent(content string) (msgType string, body string) {
 	// 1. Code blocks / tables → card (schema 2.0 markdown)
 	// 2. Many \n\n paragraphs (help, status, etc.) → post rich-text (preserves blank lines)
 	// 3. Other markdown → post md tag (best native rendering)
-	if hasComplexMarkdown(content) {
+	//
+	// Feishu cards support at most 5 tables (API error 11310).
+	// When content exceeds this limit, fall back to post with md tag
+	// which still renders tables without the card table cap.
+	if hasComplexMarkdown(content) && countMarkdownTables(content) <= maxCardTables {
 		return larkim.MsgTypeInteractive, buildCardJSON(sanitizeMarkdownURLs(preprocessFeishuMarkdown(content)))
 	}
 	if strings.Count(content, "\n\n") >= 2 {
@@ -1324,6 +1328,28 @@ func hasComplexMarkdown(s string) bool {
 		}
 	}
 	return false
+}
+
+// maxCardTables is the Feishu interactive card limit for table components.
+// A single card supports at most 5 tables; exceeding this causes API error 11310.
+const maxCardTables = 5
+
+// countMarkdownTables counts the number of distinct markdown tables in s.
+// A table is a group of consecutive lines where each line starts and ends with '|'.
+func countMarkdownTables(s string) int {
+	count := 0
+	inTable := false
+	for _, line := range strings.Split(s, "\n") {
+		trimmed := strings.TrimSpace(line)
+		isTableLine := len(trimmed) > 1 && trimmed[0] == '|' && trimmed[len(trimmed)-1] == '|'
+		if isTableLine && !inTable {
+			count++
+			inTable = true
+		} else if !isTableLine {
+			inTable = false
+		}
+	}
+	return count
 }
 
 // buildPostMdJSON builds a Feishu post message using the md tag,
