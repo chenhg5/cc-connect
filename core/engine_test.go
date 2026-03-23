@@ -3505,7 +3505,7 @@ func TestFirstContinueBridge_SyntheticDoesNotConsume(t *testing.T) {
 		t.Fatal("TryLock")
 	}
 
-	e.getOrCreateInteractiveStateWith(key, p, "ctx", sess, e.sessions, nil, "", false)
+	e.getOrCreateInteractiveStateWith(key, p, "ctx", sess, e.sessions, nil, "", false, nil)
 	if got := ag.startArgs(); len(got) != 1 || got[0] != "" {
 		t.Fatalf("synthetic start ids = %#v want [\"\"]", got)
 	}
@@ -3515,7 +3515,7 @@ func TestFirstContinueBridge_SyntheticDoesNotConsume(t *testing.T) {
 
 	e.cleanupInteractiveState(key)
 
-	e.getOrCreateInteractiveStateWith(key, p, "ctx", sess, e.sessions, nil, "", true)
+	e.getOrCreateInteractiveStateWith(key, p, "ctx", sess, e.sessions, nil, "", true, nil)
 	got := ag.startArgs()
 	if len(got) != 2 {
 		t.Fatalf("want 2 StartSession calls, got %#v", got)
@@ -3625,7 +3625,7 @@ func TestSessionMismatch_RecyclesStaleAgent(t *testing.T) {
 	// The active Session now wants a DIFFERENT agent session ID.
 	session := &Session{AgentSessionID: "new-agent-id"}
 
-	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "", true)
+	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "", true, nil)
 
 	if state.agentSession == oldSess {
 		t.Fatal("expected stale agent session to be replaced")
@@ -3664,7 +3664,7 @@ func TestSessionMismatch_DoesNotLeakQuiet(t *testing.T) {
 	// Active session wants "new-id", which mismatches "old-id".
 	session := &Session{AgentSessionID: "new-id"}
 
-	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "", true)
+	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "", true, nil)
 
 	state.mu.Lock()
 	q := state.quiet
@@ -3695,7 +3695,7 @@ func TestSessionMismatch_ReusesWhenIDsMatch(t *testing.T) {
 
 	session := &Session{AgentSessionID: "matching-id"}
 
-	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "", true)
+	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "", true, nil)
 	if state != existingState {
 		t.Fatal("expected existing state to be reused when session IDs match")
 	}
@@ -3713,7 +3713,7 @@ func TestSessionIDWriteback_ImmediateAfterStartSession(t *testing.T) {
 	key := "test:user1"
 	session := &Session{AgentSessionID: ""} // empty — no prior binding
 
-	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "", true)
+	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "", true, nil)
 
 	got := session.GetAgentSessionID()
 
@@ -3733,7 +3733,7 @@ func TestSessionIDWriteback_DoesNotOverwriteExisting(t *testing.T) {
 	key := "test:user1"
 	session := &Session{AgentSessionID: "existing-uuid"}
 
-	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "", true)
+	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "", true, nil)
 
 	got := session.GetAgentSessionID()
 
@@ -3769,7 +3769,7 @@ func TestStaleGoroutineCleanup_RaceSimulation(t *testing.T) {
 
 	// Step 3: New turn creates Session B and calls getOrCreateInteractiveStateWith.
 	sessionB := &Session{AgentSessionID: ""}
-	newState := e.getOrCreateInteractiveStateWith(key, p, "ctx", sessionB, e.sessions, nil, "", true)
+	newState := e.getOrCreateInteractiveStateWith(key, p, "ctx", sessionB, e.sessions, nil, "", true, nil)
 
 	// Verify S2 is in the map.
 	e.interactiveMu.Lock()
@@ -4044,6 +4044,136 @@ func TestCmdBindSetup_UsesSharedLogic(t *testing.T) {
 	content, _ := os.ReadFile(memFile)
 	if !strings.Contains(string(content), ccConnectInstructionMarker) {
 		t.Error("expected instructions written to file")
+	}
+}
+
+// --- session resilience tests ---
+
+// stubStartSessionAgent records StartSession calls and can fail on specific session IDs.
+type stubStartSessionAgent struct {
+	calls    []string
+	failIDs  map[string]error // session IDs that should fail
+	mu       sync.Mutex
+}
+
+func (a *stubStartSessionAgent) Name() string { return "stub" }
+func (a *stubStartSessionAgent) StartSession(_ context.Context, sessionID string) (AgentSession, error) {
+	a.mu.Lock()
+	a.calls = append(a.calls, sessionID)
+	a.mu.Unlock()
+
+	if err, ok := a.failIDs[sessionID]; ok {
+		return nil, err
+	}
+	return &stubAgentSession{}, nil
+}
+func (a *stubStartSessionAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
+	return nil, nil
+}
+func (a *stubStartSessionAgent) Stop() error { return nil }
+
+func TestResumeFailureFallbackToFreshSession(t *testing.T) {
+	agent := &stubStartSessionAgent{
+		failIDs: map[string]error{
+			ContinueSession: fmt.Errorf("Prompt is too long"),
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	e := &Engine{
+		agent:             agent,
+		sessions:          NewSessionManager(""),
+		ctx:               ctx,
+		i18n:              NewI18n("en"),
+		interactiveStates: make(map[string]*interactiveState),
+		display:           DisplayCfg{},
+	}
+
+	session := e.sessions.GetOrCreateActive("test:user1")
+	session.SetAgentSessionID("old-session-id", "stub")
+
+	p := &stubPlatformEngine{n: "test"}
+	state := e.getOrCreateInteractiveStateWith("test:user1", p, "ctx", session, e.sessions, nil, "", true, nil)
+
+	if state.agentSession == nil {
+		t.Fatal("expected agentSession to be non-nil after fallback")
+	}
+
+	agent.mu.Lock()
+	calls := append([]string{}, agent.calls...)
+	agent.mu.Unlock()
+
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 StartSession calls, got %d: %v", len(calls), calls)
+	}
+	// First call should be ContinueSession (first connection uses --continue)
+	if calls[0] != ContinueSession {
+		t.Fatalf("first StartSession call = %q, want %q", calls[0], ContinueSession)
+	}
+	// Second call should be empty string (fresh session fallback)
+	if calls[1] != "" {
+		t.Fatalf("second StartSession call = %q, want empty string", calls[1])
+	}
+}
+
+func TestFreshSessionRespectedAfterFirstConnection(t *testing.T) {
+	agent := &stubStartSessionAgent{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	e := &Engine{
+		agent:             agent,
+		sessions:          NewSessionManager(""),
+		ctx:               ctx,
+		i18n:              NewI18n("en"),
+		interactiveStates: make(map[string]*interactiveState),
+		display:           DisplayCfg{},
+	}
+	// Simulate first connection already happened
+	e.hasConnectedOnce.Store(true)
+
+	// Create a session with no saved agent session ID (fresh session via /new)
+	session := e.sessions.GetOrCreateActive("test:user2")
+
+	p := &stubPlatformEngine{n: "test"}
+	state := e.getOrCreateInteractiveStateWith("test:user2", p, "ctx", session, e.sessions, nil, "", true, nil)
+
+	if state.agentSession == nil {
+		t.Fatal("expected agentSession to be non-nil")
+	}
+
+	agent.mu.Lock()
+	calls := append([]string{}, agent.calls...)
+	agent.mu.Unlock()
+
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 StartSession call, got %d: %v", len(calls), calls)
+	}
+	// Should be empty string (fresh session), NOT ContinueSession
+	if calls[0] != "" {
+		t.Fatalf("StartSession call = %q, want empty string (fresh session)", calls[0])
+	}
+}
+
+func TestParseSelfReportedCtx(t *testing.T) {
+	tests := []struct {
+		input string
+		want  int
+	}{
+		{"here is my response\n[ctx: ~42%]", 42},
+		{"no context here", 0},
+		{"response\n[ctx: ~100%]", 100},
+		{"response\n[ctx: ~5%]", 5},
+		{"", 0},
+	}
+	for _, tt := range tests {
+		got := parseSelfReportedCtx(tt.input)
+		if got != tt.want {
+			t.Errorf("parseSelfReportedCtx(%q) = %d, want %d", tt.input, got, tt.want)
+		}
 	}
 }
 

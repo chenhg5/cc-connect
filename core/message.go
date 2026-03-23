@@ -155,11 +155,6 @@ const (
 	EventThinking          EventType = "thinking"           // thinking/processing status
 )
 
-// ContinueSession is a sentinel value passed to Agent.StartSession to indicate
-// that the agent should pick up the most recent session in the workspace
-// (equivalent to `claude --continue`), rather than resuming a specific session ID.
-const ContinueSession = "__continue__"
-
 // UserQuestion represents a structured question from AskUserQuestion.
 type UserQuestion struct {
 	Question    string             `json:"question"`
@@ -187,6 +182,8 @@ type Event struct {
 	Questions    []UserQuestion // populated when ToolName == "AskUserQuestion"
 	Done         bool
 	Error        error
+	InputTokens  int // token usage from agent result events
+	OutputTokens int
 }
 
 // HistoryEntry is one turn in a conversation.

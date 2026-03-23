@@ -10,6 +10,10 @@ import (
 	"time"
 )
 
+// ContinueSession is a sentinel value for AgentSessionID that tells the agent
+// to use --continue (resume most recent session) instead of a specific session ID.
+const ContinueSession = "__continue__"
+
 // Session tracks one conversation between a user and the agent.
 type Session struct {
 	ID             string         `json:"id"`
