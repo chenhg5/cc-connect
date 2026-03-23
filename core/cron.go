@@ -258,7 +258,7 @@ func (s *CronStore) Get(id string) *CronJob {
 // Update modifies a specific field of a cron job. Returns false if job not found.
 // readOnlyFields contains fields that cannot be modified: id, created_at.
 func (s *CronStore) Update(id string, field string, value any) bool {
-	readOnlyFields := map[string]bool{"id": true, "created_at": true}
+	readOnlyFields := map[string]bool{"id": true, "created_at": true, "last_run": true, "last_error": true}
 	if readOnlyFields[field] {
 		return false
 	}
