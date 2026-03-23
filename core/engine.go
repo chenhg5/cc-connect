@@ -4738,14 +4738,18 @@ func (e *Engine) cmdMode(p Platform, msg *Message, args []string) {
 			var sb strings.Builder
 			zhLike := e.i18n.IsZhLike()
 			for _, m := range modes {
-				marker := "  "
+				suffix := ""
 				if m.Key == current {
-					marker = "▶ "
+					if zhLike {
+						suffix = "（当前）"
+					} else {
+						suffix = " (current)"
+					}
 				}
 				if zhLike {
-					sb.WriteString(fmt.Sprintf("%s**%s** — %s\n", marker, m.NameZh, m.DescZh))
+					sb.WriteString(fmt.Sprintf("**%s**%s — %s\n", m.NameZh, suffix, m.DescZh))
 				} else {
-					sb.WriteString(fmt.Sprintf("%s**%s** — %s\n", marker, m.Name, m.Desc))
+					sb.WriteString(fmt.Sprintf("**%s**%s — %s\n", m.Name, suffix, m.Desc))
 				}
 			}
 			sb.WriteString(e.i18n.T(MsgModeUsage))
@@ -4756,9 +4760,6 @@ func (e *Engine) cmdMode(p Platform, msg *Message, args []string) {
 				label := m.Name
 				if zhLike {
 					label = m.NameZh
-				}
-				if m.Key == current {
-					label = "▶ " + label
 				}
 				row = append(row, ButtonOption{Text: label, Data: "cmd:/mode " + m.Key})
 				if len(row) >= 2 {
@@ -5475,8 +5476,9 @@ func (e *Engine) sendPermissionPrompt(p Platform, replyCtx any, prompt, toolName
 		}
 		if err := bs.SendWithButtons(e.ctx, replyCtx, prompt, buttons); err == nil {
 			return
+		} else {
+			slog.Warn("sendPermissionPrompt: inline buttons failed, falling back", "error", err)
 		}
-		slog.Warn("sendPermissionPrompt: inline buttons failed, falling back")
 	}
 
 	// Try card with buttons (Feishu/Lark)
