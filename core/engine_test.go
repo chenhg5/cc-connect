@@ -82,6 +82,63 @@ func (p *stubPlatformEngine) clearSent() {
 	p.mu.Unlock()
 }
 
+type stubCronReplyTargetPlatform struct {
+	stubPlatformEngine
+	reconstructSessionKey string
+	resolvedSessionKey    string
+	resolveTitle          string
+}
+
+func (p *stubCronReplyTargetPlatform) ReconstructReplyCtx(sessionKey string) (any, error) {
+	p.reconstructSessionKey = sessionKey
+	return "base-rctx", nil
+}
+
+func (p *stubCronReplyTargetPlatform) ResolveCronReplyTarget(sessionKey string, title string) (string, any, error) {
+	p.resolvedSessionKey = sessionKey
+	p.resolveTitle = title
+	return "discord:thread-fresh", "fresh-rctx", nil
+}
+
+type resultAgent struct {
+	session AgentSession
+}
+
+func (a *resultAgent) Name() string { return "stub" }
+func (a *resultAgent) StartSession(_ context.Context, _ string) (AgentSession, error) {
+	return a.session, nil
+}
+func (a *resultAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) { return nil, nil }
+func (a *resultAgent) Stop() error                                                { return nil }
+
+type resultAgentSession struct {
+	events      chan Event
+	result      string
+	sendOnce    sync.Once
+	sentPrompts []string
+}
+
+func newResultAgentSession(result string) *resultAgentSession {
+	return &resultAgentSession{
+		events: make(chan Event, 1),
+		result: result,
+	}
+}
+
+func (s *resultAgentSession) Send(prompt string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.sentPrompts = append(s.sentPrompts, prompt)
+	s.sendOnce.Do(func() {
+		s.events <- Event{Type: EventResult, Content: s.result, Done: true}
+	})
+	return nil
+}
+
+func (s *resultAgentSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
+func (s *resultAgentSession) Events() <-chan Event                                 { return s.events }
+func (s *resultAgentSession) CurrentSessionID() string                             { return "result-session" }
+func (s *resultAgentSession) Alive() bool                                          { return true }
+func (s *resultAgentSession) Close() error                                         { return nil }
+
 type stubLifecyclePlatform struct {
 	stubPlatformEngine
 	handler         PlatformLifecycleHandler
@@ -6215,6 +6272,74 @@ func TestEngine_AddPlatform_Multiple(t *testing.T) {
 
 	if len(e.platforms) != 3 {
 		t.Fatalf("expected 3 platforms, got %d", len(e.platforms))
+	}
+}
+
+func TestExecuteCronJob_ResolvesCronReplyTarget(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatalf("NewCronStore() error = %v", err)
+	}
+	scheduler := NewCronScheduler(store)
+
+	platform := &stubCronReplyTargetPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "discord"},
+	}
+	agentSession := newResultAgentSession("cron complete")
+	agent := &resultAgent{session: agentSession}
+
+	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+	e.cronScheduler = scheduler
+
+	job := &CronJob{
+		ID:          "job-1",
+		SessionKey:  "discord:channel-1:user-1",
+		Prompt:      "summarize activity",
+		Description: "Daily summary",
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatalf("store.Add() error = %v", err)
+	}
+
+	if err := e.ExecuteCronJob(job); err != nil {
+		t.Fatalf("ExecuteCronJob() error = %v", err)
+	}
+	if platform.resolvedSessionKey != "discord:channel-1:user-1" {
+		t.Fatalf("ResolveCronReplyTarget sessionKey = %q, want base session key", platform.resolvedSessionKey)
+	}
+	if platform.resolveTitle != "Daily summary" {
+		t.Fatalf("ResolveCronReplyTarget title = %q, want Daily summary", platform.resolveTitle)
+	}
+
+	sent := platform.getSent()
+	if len(sent) != 2 {
+		t.Fatalf("sent messages = %d, want 2", len(sent))
+	}
+	if sent[0] != "⏰ Daily summary" {
+		t.Fatalf("sent[0] = %q, want cron start notice", sent[0])
+	}
+	if sent[1] != "cron complete" {
+		t.Fatalf("sent[1] = %q, want final result", sent[1])
+	}
+
+	if got := len(e.sessions.ListSessions("discord:thread-fresh")); got != 0 {
+		t.Fatalf("fresh session count = %d, want 0 for reuse mode", got)
+	}
+	if got := len(e.sessions.ListSessions("discord:channel-1:user-1")); got != 1 {
+		t.Fatalf("base session count = %d, want 1", got)
+	}
+	if job.SessionKey != "discord:channel-1:user-1" {
+		t.Fatalf("job.SessionKey = %q, want unchanged base session key", job.SessionKey)
+	}
+	stored := store.Get("job-1")
+	if stored == nil || stored.SessionKey != "discord:channel-1:user-1" {
+		t.Fatalf("stored sessionKey = %#v, want unchanged base session key", stored)
+	}
+
+	if len(agentSession.sentPrompts) != 1 || !strings.Contains(agentSession.sentPrompts[0], "summarize activity") {
+		t.Fatalf("agent prompts = %#v, want prompt containing summarize activity", agentSession.sentPrompts)
 	}
 }
 
