@@ -39,14 +39,16 @@ type claudeSession struct {
 	alive       atomic.Bool
 }
 
-func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string) (*claudeSession, error) {
+func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	args := []string{
 		"--output-format", "stream-json",
-		"--verbose",
 		"--input-format", "stream-json",
 		"--permission-prompt-tool", "stdio",
+	}
+	if !disableVerbose {
+		args = append(args, "--verbose")
 	}
 
 	if mode != "" && mode != "default" {
