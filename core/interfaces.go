@@ -148,6 +148,12 @@ type ProgressStyleProvider interface {
 	ProgressStyle() string
 }
 
+// ProgressCardPayloadSupport is an optional interface for platforms that can
+// parse and render structured progress-card payloads.
+type ProgressCardPayloadSupport interface {
+	SupportsProgressCardPayload() bool
+}
+
 // ButtonOption represents a clickable inline button.
 type ButtonOption struct {
 	Text string // display text on the button

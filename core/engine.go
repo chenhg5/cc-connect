@@ -2077,7 +2077,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 	state.mu.Lock()
 	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx)
-	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx)
+	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang())
 	state.mu.Unlock()
 
 	// Idle timeout: 0 = disabled
@@ -2102,7 +2102,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case <-idleCh:
 			slog.Error("agent session idle timeout: no events for too long, killing session",
 				"session_key", sessionKey, "timeout", e.eventIdleTimeout, "elapsed", time.Since(turnStart))
-			sp.discard()
+				cp.Finalize(ProgressCardStateFailed)
+				sp.discard()
 			state.mu.Lock()
 			p := state.platform
 			replyCtx := state.replyCtx
@@ -2166,7 +2167,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				preview := truncateIf(event.Content, e.display.ThinkingMaxLen)
 				thinkingMsg := fmt.Sprintf(e.i18n.T(MsgThinking), preview)
-				if !cp.Append(thinkingMsg) {
+				if !cp.AppendEvent(ProgressEntryThinking, preview, "", thinkingMsg) {
 					e.send(p, replyCtx, thinkingMsg)
 				}
 			}
@@ -2210,9 +2211,34 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 				toolMsg := fmt.Sprintf(e.i18n.T(MsgTool), toolCount, event.ToolName, formattedInput)
-				if !cp.Append(toolMsg) {
+				if !cp.AppendEvent(ProgressEntryToolUse, toolInput, event.ToolName, toolMsg) {
 					for _, chunk := range SplitMessageCodeFenceAware(toolMsg, maxPlatformMessageLen) {
 						e.send(p, replyCtx, chunk)
+					}
+				}
+			}
+
+		case EventToolResult:
+			if !quiet {
+				result := strings.TrimSpace(event.ToolResult)
+				if result == "" {
+					result = strings.TrimSpace(event.Content)
+				}
+				if result != "" {
+					result = truncateIf(result, e.display.ToolMaxLen)
+				}
+				if result != "" || event.ToolStatus != "" || event.ToolExitCode != nil || event.ToolSuccess != nil {
+					resultMsg := formatToolResultEventFallback(event.ToolName, result, event.ToolStatus, event.ToolExitCode, event.ToolSuccess, e.i18n.CurrentLang())
+					entry := ProgressCardEntry{
+						Kind:     ProgressEntryToolResult,
+						Tool:     event.ToolName,
+						Text:     result,
+						Status:   event.ToolStatus,
+						ExitCode: event.ToolExitCode,
+						Success:  event.ToolSuccess,
+					}
+					if !cp.AppendStructured(entry, resultMsg) {
+						e.send(p, replyCtx, resultMsg)
 					}
 				}
 			}
@@ -2313,6 +2339,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventResult:
+			cp.Finalize(ProgressCardStateCompleted)
 			if event.SessionID != "" {
 				session.SetAgentSessionID(event.SessionID, e.agent.Name())
 			}
@@ -2505,7 +2532,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				firstEventLogged = false
 				waitStart = time.Now()
 				sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx)
-				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx)
+				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, e.agent.Name(), e.i18n.CurrentLang())
 
 				session.AddHistory("user", queued.content)
 
@@ -2530,7 +2557,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			return
 
 		case EventError:
-			sp.discard()
+				cp.Finalize(ProgressCardStateFailed)
+				sp.discard()
 			if event.Error != nil {
 				slog.Error("agent error", "error", event.Error)
 				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
@@ -8505,6 +8533,51 @@ func toolCodeLang(toolName, input string) string {
 		return "diff"
 	}
 	return ""
+}
+
+func formatToolResultEventFallback(toolName, result, status string, exitCode *int, success *bool, lang Language) string {
+	statusLabel := "Status"
+	exitLabel := "Exit"
+	noOutput := "No output"
+	if lang == LangChinese || lang == LangTraditionalChinese {
+		statusLabel = "状态"
+		exitLabel = "退出码"
+		noOutput = "无输出"
+	}
+	dot := "⚪"
+	if success != nil {
+		if *success {
+			dot = "🟢"
+		} else {
+			dot = "🔴"
+		}
+	}
+	var lines []string
+	first := "🧾"
+	if strings.TrimSpace(toolName) != "" {
+		first += " " + strings.TrimSpace(toolName)
+	}
+	lines = append(lines, first)
+	if strings.TrimSpace(status) != "" || success != nil {
+		s := strings.TrimSpace(status)
+		if s == "" {
+			if success != nil && *success {
+				s = "ok"
+			} else if success != nil && !*success {
+				s = "failed"
+			}
+		}
+		lines = append(lines, fmt.Sprintf("%s %s: %s", dot, statusLabel, s))
+	}
+	if exitCode != nil {
+		lines = append(lines, fmt.Sprintf("🔢 %s: %d", exitLabel, *exitCode))
+	}
+	if strings.TrimSpace(result) != "" {
+		lines = append(lines, "```text\n"+strings.TrimSpace(result)+"\n```")
+	} else {
+		lines = append(lines, "_"+noOutput+"_")
+	}
+	return strings.Join(lines, "\n")
 }
 
 // truncateIf truncates s to maxLen runes. 0 means no truncation.

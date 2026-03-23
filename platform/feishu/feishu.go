@@ -234,6 +234,8 @@ func (p *Platform) Name() string { return p.platformName }
 
 func (p *Platform) ProgressStyle() string { return p.progressStyle }
 
+func (p *Platform) SupportsProgressCardPayload() bool { return true }
+
 func (p *Platform) tag() string { return p.platformName }
 
 func (p *Platform) dispatchPlatform() core.Platform {
@@ -1812,6 +1814,312 @@ func buildCardJSON(content string) string {
 	return string(b)
 }
 
+func isZhLikeProgressLang(lang string) bool {
+	l := strings.ToLower(strings.TrimSpace(lang))
+	return strings.HasPrefix(l, "zh")
+}
+
+func progressAgentLabel(agent string) string {
+	agent = strings.TrimSpace(agent)
+	if agent == "" {
+		return "Agent"
+	}
+	return agent
+}
+
+func progressStateMeta(state core.ProgressCardState, lang string, agent string) (title string, template string, footer string) {
+	zh := isZhLikeProgressLang(lang)
+	switch state {
+	case core.ProgressCardStateCompleted:
+		if zh {
+			return fmt.Sprintf("%s · 已完成", agent), "green", "本过程卡片已停止更新，完整答复见下一条消息。"
+		}
+		return fmt.Sprintf("%s · Completed", agent), "green", "This progress card is no longer updating. Full response is in the next message."
+	case core.ProgressCardStateFailed:
+		if zh {
+			return fmt.Sprintf("%s · 失败", agent), "red", "本过程卡片已停止更新（失败），完整错误说明见下一条消息。"
+		}
+		return fmt.Sprintf("%s · Failed", agent), "red", "This progress card has stopped (failed). See the next message for details."
+	default:
+		if zh {
+			return fmt.Sprintf("%s · 进行中", agent), "blue", ""
+		}
+		return fmt.Sprintf("%s · Running", agent), "blue", ""
+	}
+}
+
+func progressKindLabel(kind core.ProgressCardEntryKind, lang string) string {
+	zh := isZhLikeProgressLang(lang)
+	switch kind {
+	case core.ProgressEntryThinking:
+		if zh {
+			return "思考"
+		}
+		return "Thinking"
+	case core.ProgressEntryToolUse:
+		if zh {
+			return "工具调用"
+		}
+		return "Tool"
+	case core.ProgressEntryToolResult:
+		if zh {
+			return "工具结果"
+		}
+		return "Result"
+	case core.ProgressEntryError:
+		if zh {
+			return "错误"
+		}
+		return "Error"
+	default:
+		if zh {
+			return "更新"
+		}
+		return "Update"
+	}
+}
+
+func normalizeProgressItems(payload *core.ProgressCardPayload) []core.ProgressCardEntry {
+	if payload == nil {
+		return nil
+	}
+	if len(payload.Items) > 0 {
+		return payload.Items
+	}
+	out := make([]core.ProgressCardEntry, 0, len(payload.Entries))
+	for _, entry := range payload.Entries {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		kind := core.ProgressEntryInfo
+		switch {
+		case strings.HasPrefix(entry, "💭"):
+			kind = core.ProgressEntryThinking
+		case strings.HasPrefix(entry, "🔧"), strings.Contains(entry, "**Tool #"):
+			kind = core.ProgressEntryToolUse
+		case strings.HasPrefix(entry, "🧾"):
+			kind = core.ProgressEntryToolResult
+		case strings.HasPrefix(entry, "❌"):
+			kind = core.ProgressEntryError
+		}
+		out = append(out, core.ProgressCardEntry{Kind: kind, Text: entry})
+	}
+	return out
+}
+
+func inlineCodeText(s string) string {
+	return strings.ReplaceAll(strings.TrimSpace(s), "`", "'")
+}
+
+func isBashToolName(toolName string) bool {
+	switch strings.ToLower(strings.TrimSpace(toolName)) {
+	case "bash", "shell", "run_shell_command":
+		return true
+	default:
+		return false
+	}
+}
+
+func formatProgressToolInput(toolName, text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	text = preprocessFeishuMarkdown(sanitizeMarkdownURLs(text))
+	if strings.Contains(text, "```") {
+		return text
+	}
+	if isBashToolName(toolName) {
+		return fmt.Sprintf("```bash\n%s\n```", text)
+	}
+	if strings.Contains(text, "\n") || len(text) > 180 {
+		return fmt.Sprintf("```text\n%s\n```", text)
+	}
+	return fmt.Sprintf("`%s`", inlineCodeText(text))
+}
+
+func formatProgressToolResult(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	text = preprocessFeishuMarkdown(sanitizeMarkdownURLs(text))
+	if strings.Contains(text, "```") {
+		return text
+	}
+	if strings.Contains(text, "\n") || len(text) > 220 {
+		return fmt.Sprintf("```\n%s\n```", text)
+	}
+	return text
+}
+
+func progressNoOutputText(lang string) string {
+	if isZhLikeProgressLang(lang) {
+		return "无输出"
+	}
+	return "No output"
+}
+
+func progressResultDot(item core.ProgressCardEntry) string {
+	if item.Success != nil {
+		if *item.Success {
+			return "🟢"
+		}
+		return "🔴"
+	}
+	if item.ExitCode != nil {
+		if *item.ExitCode == 0 {
+			return "🟢"
+		}
+		return "🔴"
+	}
+	if strings.EqualFold(strings.TrimSpace(item.Status), "completed") || strings.EqualFold(strings.TrimSpace(item.Status), "success") || strings.EqualFold(strings.TrimSpace(item.Status), "succeeded") || strings.EqualFold(strings.TrimSpace(item.Status), "ok") {
+		return "🟢"
+	}
+	if strings.EqualFold(strings.TrimSpace(item.Status), "failed") || strings.EqualFold(strings.TrimSpace(item.Status), "error") {
+		return "🔴"
+	}
+	return "⚪"
+}
+
+func renderProgressEntryElement(item core.ProgressCardEntry, lang string) map[string]any {
+	text := strings.TrimSpace(item.Text)
+	if text == "" {
+		text = " "
+	}
+	switch item.Kind {
+	case core.ProgressEntryThinking:
+		return map[string]any{
+			"tag": "div",
+			"text": map[string]any{
+				"tag":        "plain_text",
+				"content":    "💭 " + inlineCodeText(text),
+				"text_size":  "notation",
+				"text_color": "grey",
+			},
+		}
+	case core.ProgressEntryToolUse:
+		toolName := strings.TrimSpace(item.Tool)
+		if toolName == "" {
+			toolName = "Tool"
+		}
+		content := fmt.Sprintf("<text_tag color='blue'>%s</text_tag> `%s`", progressKindLabel(item.Kind, lang), inlineCodeText(toolName))
+		if body := formatProgressToolInput(toolName, text); body != "" {
+			content += "\n" + body
+		}
+		return map[string]any{
+			"tag":     "markdown",
+			"content": content,
+		}
+	case core.ProgressEntryToolResult:
+		toolName := strings.TrimSpace(item.Tool)
+		content := fmt.Sprintf("<text_tag color='turquoise'>%s</text_tag>", progressKindLabel(item.Kind, lang))
+		if toolName != "" {
+			content += " `" + inlineCodeText(toolName) + "`"
+		}
+		dot := progressResultDot(item)
+		meta := dot
+		if item.ExitCode != nil {
+			meta += fmt.Sprintf(" exit code: `%d`", *item.ExitCode)
+		}
+		content += "\n" + meta
+		if body := formatProgressToolResult(item.Text); body != "" {
+			content += "\n" + body
+		} else {
+			content += "\n_" + progressNoOutputText(lang) + "_"
+		}
+		return map[string]any{
+			"tag":     "markdown",
+			"content": content,
+		}
+	case core.ProgressEntryError:
+		content := fmt.Sprintf("<text_tag color='red'>%s</text_tag>\n%s", progressKindLabel(item.Kind, lang), preprocessFeishuMarkdown(sanitizeMarkdownURLs(text)))
+		return map[string]any{
+			"tag":     "markdown",
+			"content": content,
+		}
+	default:
+		return map[string]any{
+			"tag":     "markdown",
+			"content": preprocessFeishuMarkdown(sanitizeMarkdownURLs(text)),
+		}
+	}
+}
+
+func buildProgressCardJSONFromPayload(payload *core.ProgressCardPayload) string {
+	items := normalizeProgressItems(payload)
+	if len(items) == 0 {
+		return buildCardJSON(" ")
+	}
+
+	agent := progressAgentLabel(payload.Agent)
+	title, template, footer := progressStateMeta(payload.State, payload.Lang, agent)
+
+	elements := make([]map[string]any, 0, len(items)+3)
+	if payload.Truncated {
+		truncatedText := "Showing latest updates only."
+		if isZhLikeProgressLang(payload.Lang) {
+			truncatedText = "仅显示最近更新。"
+		}
+		elements = append(elements, map[string]any{
+			"tag": "div",
+			"text": map[string]any{
+				"tag":        "plain_text",
+				"content":    truncatedText,
+				"text_size":  "notation",
+				"text_color": "grey",
+			},
+		})
+		elements = append(elements, map[string]any{"tag": "hr"})
+	}
+
+	for i, item := range items {
+		elements = append(elements, renderProgressEntryElement(item, payload.Lang))
+		if i < len(items)-1 {
+			elements = append(elements, map[string]any{"tag": "hr"})
+		}
+	}
+	if footer != "" {
+		elements = append(elements, map[string]any{"tag": "hr"})
+		elements = append(elements, map[string]any{
+			"tag": "div",
+			"text": map[string]any{
+				"tag":        "plain_text",
+				"content":    footer,
+				"text_size":  "notation",
+				"text_color": "grey",
+			},
+		})
+	}
+
+	card := map[string]any{
+		"schema": "2.0",
+		"config": map[string]any{
+			"wide_screen_mode": true,
+		},
+		"header": map[string]any{
+			"title": map[string]any{
+				"tag":     "plain_text",
+				"content": title,
+			},
+			"template": template,
+		},
+		"body": map[string]any{
+			"elements": elements,
+		},
+	}
+	b, _ := json.Marshal(card)
+	return string(b)
+}
+
+func buildPreviewCardJSON(content string) string {
+	if payload, ok := core.ParseProgressCardPayload(content); ok {
+		return buildProgressCardJSONFromPayload(payload)
+	}
+	return buildCardJSON(sanitizeMarkdownURLs(content))
+}
+
 // SendPreviewStart sends a new card message and returns a handle for subsequent edits.
 // Using card (interactive) type for both preview and final message so updates
 // are in-place without needing to delete and resend.
@@ -1830,7 +2138,7 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 		return nil, fmt.Errorf("%s: chatID is empty", p.tag())
 	}
 
-	cardJSON := buildCardJSON(sanitizeMarkdownURLs(content))
+	cardJSON := buildPreviewCardJSON(content)
 
 	var msgID string
 	if p.shouldUseThreadOrReplyAPI(rc) {
@@ -1886,11 +2194,16 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 		return fmt.Errorf("%s: invalid preview handle type %T", p.tag(), previewHandle)
 	}
 
-	processed := content
-	if containsMarkdown(content) {
-		processed = preprocessFeishuMarkdown(content)
+	cardJSON := ""
+	if payload, ok := core.ParseProgressCardPayload(content); ok {
+		cardJSON = buildProgressCardJSONFromPayload(payload)
+	} else {
+		processed := content
+		if containsMarkdown(content) {
+			processed = preprocessFeishuMarkdown(content)
+		}
+		cardJSON = buildCardJSON(sanitizeMarkdownURLs(processed))
 	}
-	cardJSON := buildCardJSON(sanitizeMarkdownURLs(processed))
 	resp, err := p.client.Im.Message.Patch(ctx, larkim.NewPatchMessageReqBuilder().
 		MessageId(h.messageID).
 		Body(larkim.NewPatchMessageReqBodyBuilder().

@@ -157,10 +157,10 @@ const (
 
 // UserQuestion represents a structured question from AskUserQuestion.
 type UserQuestion struct {
-	Question    string             `json:"question"`
-	Header      string             `json:"header"`
+	Question    string               `json:"question"`
+	Header      string               `json:"header"`
 	Options     []UserQuestionOption `json:"options"`
-	MultiSelect bool               `json:"multiSelect"`
+	MultiSelect bool                 `json:"multiSelect"`
 }
 
 // UserQuestionOption is one choice in a UserQuestion.
@@ -177,6 +177,9 @@ type Event struct {
 	ToolInput    string         // human-readable summary of tool input
 	ToolInputRaw map[string]any // raw tool input (for EventPermissionRequest, used in allow response)
 	ToolResult   string         // populated for EventToolResult
+	ToolStatus   string         // optional status for EventToolResult (e.g. completed/failed)
+	ToolExitCode *int           // optional exit code for EventToolResult
+	ToolSuccess  *bool          // optional success flag for EventToolResult
 	SessionID    string         // agent-managed session ID for conversation continuity
 	RequestID    string         // unique request ID for EventPermissionRequest
 	Questions    []UserQuestion // populated when ToolName == "AskUserQuestion"

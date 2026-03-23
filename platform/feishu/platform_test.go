@@ -3,6 +3,7 @@ package feishu
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -88,6 +89,13 @@ func TestNew_ProgressStyleSupportsCompactAndCard(t *testing.T) {
 			}
 			if got := sp.ProgressStyle(); got != style {
 				t.Fatalf("ProgressStyle() = %q, want %q", got, style)
+			}
+			payloadCap, ok := p.(core.ProgressCardPayloadSupport)
+			if !ok {
+				t.Fatalf("platform type %T does not implement ProgressCardPayloadSupport", p)
+			}
+			if !payloadCap.SupportsProgressCardPayload() {
+				t.Fatal("SupportsProgressCardPayload() = false, want true")
 			}
 		})
 	}
@@ -788,5 +796,51 @@ func TestLark_ErrorMessagePrefix(t *testing.T) {
 	}
 	if !strings.HasPrefix(err.Error(), "lark:") {
 		t.Fatalf("error = %q, want lark: prefix", err.Error())
+	}
+}
+
+func TestBuildPreviewCardJSON_ProgressPayloadUsesStructuredCard(t *testing.T) {
+	payload := core.BuildProgressCardPayloadV2([]core.ProgressCardEntry{
+		{Kind: core.ProgressEntryThinking, Text: "planning"},
+		{Kind: core.ProgressEntryToolUse, Tool: "Bash", Text: "pwd"},
+	}, false, "Codex", core.LangEnglish, core.ProgressCardStateRunning)
+	if payload == "" {
+		t.Fatal("BuildProgressCardPayload returned empty payload")
+	}
+
+	cardJSON := buildPreviewCardJSON(payload)
+	if strings.Contains(cardJSON, core.ProgressCardPayloadPrefix) {
+		t.Fatalf("card JSON should not leak payload prefix, got %q", cardJSON)
+	}
+	if !strings.Contains(cardJSON, "Codex · Running") {
+		t.Fatalf("card JSON should contain progress title, got %q", cardJSON)
+	}
+	if strings.Contains(cardJSON, "\"tag\":\"note\"") {
+		t.Fatalf("card JSON should not use deprecated note tag, got %q", cardJSON)
+	}
+	if !strings.Contains(cardJSON, "\"text_color\":\"grey\"") {
+		t.Fatalf("card JSON should render thinking with grey style, got %q", cardJSON)
+	}
+	if !strings.Contains(cardJSON, "\\u003ctext_tag color='blue'\\u003eTool") {
+		t.Fatalf("card JSON should include tool label, got %q", cardJSON)
+	}
+
+	var card map[string]any
+	if err := json.Unmarshal([]byte(cardJSON), &card); err != nil {
+		t.Fatalf("card JSON is invalid: %v", err)
+	}
+	header, ok := card["header"].(map[string]any)
+	if !ok || header == nil {
+		t.Fatalf("expected header in card json, got %#v", card["header"])
+	}
+}
+
+func TestBuildPreviewCardJSON_NormalTextFallback(t *testing.T) {
+	cardJSON := buildPreviewCardJSON("plain progress text")
+	if strings.Contains(cardJSON, "cc-connect · 进度") {
+		t.Fatalf("normal text should use default card template, got %q", cardJSON)
+	}
+	if !strings.Contains(cardJSON, "\"tag\":\"markdown\"") {
+		t.Fatalf("default preview card should contain markdown element, got %q", cardJSON)
 	}
 }

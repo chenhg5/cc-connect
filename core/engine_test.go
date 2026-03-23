@@ -261,12 +261,23 @@ func (p *stubCardPlatform) SendCard(_ context.Context, _ any, card *Card) error 
 
 type stubCompactProgressPlatform struct {
 	stubPlatformEngine
-	previewMu     sync.Mutex
-	previewStarts []string
-	previewEdits  []string
+	style          string
+	supportPayload bool
+	previewMu      sync.Mutex
+	previewStarts  []string
+	previewEdits   []string
 }
 
-func (p *stubCompactProgressPlatform) ProgressStyle() string { return "compact" }
+func (p *stubCompactProgressPlatform) ProgressStyle() string {
+	if p.style == "" {
+		return "compact"
+	}
+	return p.style
+}
+
+func (p *stubCompactProgressPlatform) SupportsProgressCardPayload() bool {
+	return p.supportPayload
+}
 
 func (p *stubCompactProgressPlatform) SendPreviewStart(_ context.Context, _ any, content string) (any, error) {
 	p.previewMu.Lock()
@@ -827,6 +838,126 @@ func TestProcessInteractiveEvents_CompactProgressCoalescesThinkingAndToolUse(t *
 	}
 	if !strings.Contains(edits[0], "pwd") {
 		t.Fatalf("updated preview should contain tool input, got %q", edits[0])
+	}
+}
+
+func TestProcessInteractiveEvents_CardProgressUsesCardTemplate(t *testing.T) {
+	p := &stubCompactProgressPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		style:              "card",
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "feishu:user2"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s2")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-card",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventThinking, Content: "Plan first"}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "echo hi"}
+	agentSession.events <- Event{Type: EventText, Content: "done"}
+	agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m2", time.Now(), nil)
+
+	sent := p.getSent()
+	if len(sent) != 1 || sent[0] != "done" {
+		t.Fatalf("sent = %#v, want only final assistant reply", sent)
+	}
+
+	starts := p.getPreviewStarts()
+	if len(starts) != 1 {
+		t.Fatalf("preview starts = %d, want 1", len(starts))
+	}
+	if !strings.Contains(starts[0], "**Progress**") {
+		t.Fatalf("start preview should contain fallback progress title, got %q", starts[0])
+	}
+	if !strings.Contains(starts[0], "1.") {
+		t.Fatalf("start preview should contain first item index, got %q", starts[0])
+	}
+
+	edits := p.getPreviewEdits()
+	if len(edits) != 1 {
+		t.Fatalf("preview edits = %d, want 1", len(edits))
+	}
+	if !strings.Contains(edits[0], "2.") {
+		t.Fatalf("updated preview should contain second item index, got %q", edits[0])
+	}
+	if !strings.Contains(edits[0], "echo hi") {
+		t.Fatalf("updated preview should contain tool command, got %q", edits[0])
+	}
+}
+
+func TestProcessInteractiveEvents_CardProgressUsesStructuredPayloadWhenSupported(t *testing.T) {
+	p := &stubCompactProgressPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		style:              "card",
+		supportPayload:     true,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "feishu:user3"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s3")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-card-structured",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventThinking, Content: "Plan first"}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "echo hi"}
+	agentSession.events <- Event{Type: EventText, Content: "done"}
+	agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m3", time.Now(), nil)
+
+	starts := p.getPreviewStarts()
+	if len(starts) != 1 {
+		t.Fatalf("preview starts = %d, want 1", len(starts))
+	}
+	if !strings.HasPrefix(starts[0], ProgressCardPayloadPrefix) {
+		t.Fatalf("start preview should be structured payload, got %q", starts[0])
+	}
+	startPayload, ok := ParseProgressCardPayload(starts[0])
+	if !ok {
+		t.Fatalf("start preview should parse as structured payload, got %q", starts[0])
+	}
+	if len(startPayload.Items) != 1 {
+		t.Fatalf("start payload items = %d, want 1", len(startPayload.Items))
+	}
+	if startPayload.Items[0].Kind != ProgressEntryThinking {
+		t.Fatalf("start payload kind = %q, want %q", startPayload.Items[0].Kind, ProgressEntryThinking)
+	}
+	if startPayload.State != ProgressCardStateRunning {
+		t.Fatalf("start payload state = %q, want %q", startPayload.State, ProgressCardStateRunning)
+	}
+
+	edits := p.getPreviewEdits()
+	if len(edits) != 2 {
+		t.Fatalf("preview edits = %d, want 2", len(edits))
+	}
+	updatePayload, ok := ParseProgressCardPayload(edits[0])
+	if !ok {
+		t.Fatalf("update preview should parse as structured payload, got %q", edits[0])
+	}
+	if len(updatePayload.Items) != 2 {
+		t.Fatalf("update payload items = %d, want 2", len(updatePayload.Items))
+	}
+	if !strings.Contains(updatePayload.Items[1].Text, "echo hi") {
+		t.Fatalf("second payload item should contain tool command, got %q", updatePayload.Items[1].Text)
+	}
+
+	finalPayload, ok := ParseProgressCardPayload(edits[1])
+	if !ok {
+		t.Fatalf("final preview should parse as structured payload, got %q", edits[1])
+	}
+	if finalPayload.State != ProgressCardStateCompleted {
+		t.Fatalf("final payload state = %q, want %q", finalPayload.State, ProgressCardStateCompleted)
 	}
 }
 
