@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -18,7 +19,7 @@ type WorkspaceBinding struct {
 }
 
 // WorkspaceBindingManager persists channel->workspace mappings.
-// Top-level key is "project:<name>", second-level key is channel ID.
+// Top-level key is "project:<name>", second-level key is a workspace channel key.
 type WorkspaceBindingManager struct {
 	mu                sync.RWMutex
 	bindings          map[string]map[string]*WorkspaceBinding
@@ -38,14 +39,45 @@ func NewWorkspaceBindingManager(storePath string) *WorkspaceBindingManager {
 	return m
 }
 
-func (m *WorkspaceBindingManager) Bind(projectKey, channelID, channelName, workspace string) {
+func legacyWorkspaceChannelKey(channelKey string) string {
+	if i := strings.IndexByte(channelKey, ':'); i >= 0 {
+		return channelKey[i+1:]
+	}
+	return channelKey
+}
+
+func workspaceChannelKeyCandidates(channelKey string) []string {
+	if channelKey == "" {
+		return nil
+	}
+	legacyKey := legacyWorkspaceChannelKey(channelKey)
+	if legacyKey == channelKey {
+		return []string{channelKey}
+	}
+	return []string{channelKey, legacyKey}
+}
+
+func (m *WorkspaceBindingManager) lookupLocked(projectKey, channelKey string) *WorkspaceBinding {
+	proj := m.bindings[projectKey]
+	if proj == nil {
+		return nil
+	}
+	for _, candidate := range workspaceChannelKeyCandidates(channelKey) {
+		if b := proj[candidate]; b != nil {
+			return b
+		}
+	}
+	return nil
+}
+
+func (m *WorkspaceBindingManager) Bind(projectKey, channelKey, channelName, workspace string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.refreshLocked()
 	if m.bindings[projectKey] == nil {
 		m.bindings[projectKey] = make(map[string]*WorkspaceBinding)
 	}
-	m.bindings[projectKey][channelID] = &WorkspaceBinding{
+	m.bindings[projectKey][channelKey] = &WorkspaceBinding{
 		ChannelName: channelName,
 		Workspace:   workspace,
 		BoundAt:     time.Now(),
@@ -53,12 +85,14 @@ func (m *WorkspaceBindingManager) Bind(projectKey, channelID, channelName, works
 	m.saveLocked()
 }
 
-func (m *WorkspaceBindingManager) Unbind(projectKey, channelID string) {
+func (m *WorkspaceBindingManager) Unbind(projectKey, channelKey string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.refreshLocked()
 	if proj := m.bindings[projectKey]; proj != nil {
-		delete(proj, channelID)
+		for _, candidate := range workspaceChannelKeyCandidates(channelKey) {
+			delete(proj, candidate)
+		}
 		if len(proj) == 0 {
 			delete(m.bindings, projectKey)
 		}
@@ -66,31 +100,24 @@ func (m *WorkspaceBindingManager) Unbind(projectKey, channelID string) {
 	m.saveLocked()
 }
 
-func (m *WorkspaceBindingManager) Lookup(projectKey, channelID string) *WorkspaceBinding {
+func (m *WorkspaceBindingManager) Lookup(projectKey, channelKey string) *WorkspaceBinding {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.refreshLocked()
-	if proj := m.bindings[projectKey]; proj != nil {
-		return proj[channelID]
-	}
-	return nil
+	return m.lookupLocked(projectKey, channelKey)
 }
 
 // LookupEffective returns the effective binding for a channel, checking the
 // current project first and then the shared routing layer.
-func (m *WorkspaceBindingManager) LookupEffective(projectKey, channelID string) (*WorkspaceBinding, string) {
+func (m *WorkspaceBindingManager) LookupEffective(projectKey, channelKey string) (*WorkspaceBinding, string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.refreshLocked()
-	if proj := m.bindings[projectKey]; proj != nil {
-		if b := proj[channelID]; b != nil {
-			return b, projectKey
-		}
+	if b := m.lookupLocked(projectKey, channelKey); b != nil {
+		return b, projectKey
 	}
-	if shared := m.bindings[sharedWorkspaceBindingsKey]; shared != nil {
-		if b := shared[channelID]; b != nil {
-			return b, sharedWorkspaceBindingsKey
-		}
+	if b := m.lookupLocked(sharedWorkspaceBindingsKey, channelKey); b != nil {
+		return b, sharedWorkspaceBindingsKey
 	}
 	return nil, ""
 }

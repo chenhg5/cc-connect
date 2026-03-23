@@ -243,15 +243,16 @@ func TestIntegration_SharedWorkspaceBindingLiveSyncAcrossProjects(t *testing.T) 
 	bindingStore := filepath.Join(t.TempDir(), "workspace_bindings.json")
 	channelID := "shared-channel"
 	channelNames := map[string]string{channelID: "shared-channel"}
+	platformName := "shared-platform"
 
 	sharedDir := filepath.Join(baseDir, "shared-workspace")
 	require.NoError(t, os.MkdirAll(sharedDir, 0o755))
 
-	platformA := newIntegrationPlatform("proj-a-platform", channelNames)
+	platformA := newIntegrationPlatform(platformName, channelNames)
 	engineA := newIntegrationEngine(t, "project-a", platformA, baseDir, bindingStore, filepath.Join(t.TempDir(), "project-a-sessions.json"))
 	_ = engineA
 
-	platformB := newIntegrationPlatform("proj-b-platform", channelNames)
+	platformB := newIntegrationPlatform(platformName, channelNames)
 	engineB := newIntegrationEngine(t, "project-b", platformB, baseDir, bindingStore, filepath.Join(t.TempDir(), "project-b-sessions.json"))
 	_ = engineB
 
@@ -280,17 +281,18 @@ func TestIntegration_ProjectWorkspaceOverridesSharedAcrossProjects(t *testing.T)
 	bindingStore := filepath.Join(t.TempDir(), "workspace_bindings.json")
 	channelID := "override-channel"
 	channelNames := map[string]string{channelID: "override-channel"}
+	platformName := "shared-platform"
 
 	sharedDir := filepath.Join(baseDir, "shared-workspace")
 	projectBDir := filepath.Join(baseDir, "project-b-workspace")
 	require.NoError(t, os.MkdirAll(sharedDir, 0o755))
 	require.NoError(t, os.MkdirAll(projectBDir, 0o755))
 
-	platformA := newIntegrationPlatform("proj-a-platform", channelNames)
+	platformA := newIntegrationPlatform(platformName, channelNames)
 	engineA := newIntegrationEngine(t, "project-a", platformA, baseDir, bindingStore, filepath.Join(t.TempDir(), "project-a-sessions.json"))
 	_ = engineA
 
-	platformB := newIntegrationPlatform("proj-b-platform", channelNames)
+	platformB := newIntegrationPlatform(platformName, channelNames)
 	engineB := newIntegrationEngine(t, "project-b", platformB, baseDir, bindingStore, filepath.Join(t.TempDir(), "project-b-sessions.json"))
 	_ = engineB
 
@@ -336,15 +338,16 @@ func TestIntegration_SharedWorkspaceRouteLiveSyncAcrossProjects(t *testing.T) {
 	bindingStore := filepath.Join(t.TempDir(), "workspace_bindings.json")
 	channelID := "shared-route-channel"
 	channelNames := map[string]string{channelID: "shared-route-channel"}
+	platformName := "shared-platform"
 
 	routedDir := filepath.Join(t.TempDir(), "shared routed workspace")
 	require.NoError(t, os.MkdirAll(routedDir, 0o755))
 
-	platformA := newIntegrationPlatform("proj-shared-route-a", channelNames)
+	platformA := newIntegrationPlatform(platformName, channelNames)
 	engineA := newIntegrationEngine(t, "project-shared-route-a", platformA, baseDir, bindingStore, filepath.Join(t.TempDir(), "project-shared-route-a-sessions.json"))
 	_ = engineA
 
-	platformB := newIntegrationPlatform("proj-shared-route-b", channelNames)
+	platformB := newIntegrationPlatform(platformName, channelNames)
 	engineB := newIntegrationEngine(t, "project-shared-route-b", platformB, baseDir, bindingStore, filepath.Join(t.TempDir(), "project-shared-route-b-sessions.json"))
 	_ = engineB
 

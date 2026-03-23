@@ -21,10 +21,16 @@ func (a *namedTestAgent) Stop() error                                           
 
 // mockChannelResolver implements both Platform and ChannelNameResolver.
 type mockChannelResolver struct {
+	name  string
 	names map[string]string
 }
 
-func (m *mockChannelResolver) Name() string                                   { return "mock" }
+func (m *mockChannelResolver) Name() string {
+	if m.name != "" {
+		return m.name
+	}
+	return "mock"
+}
 func (m *mockChannelResolver) Start(MessageHandler) error                     { return nil }
 func (m *mockChannelResolver) Reply(_ context.Context, _ any, _ string) error { return nil }
 func (m *mockChannelResolver) Send(_ context.Context, _ any, _ string) error  { return nil }
@@ -86,7 +92,7 @@ func TestMultiWorkspaceResolution_ConventionMatch(t *testing.T) {
 	}
 
 	// Verify auto-binding was persisted
-	b := e.workspaceBindings.Lookup("project:test", channelID)
+	b := e.workspaceBindings.Lookup("project:test", workspaceChannelKey(p.Name(), channelID))
 	if b == nil {
 		t.Fatal("expected binding to be created by convention match")
 	}
@@ -169,6 +175,38 @@ func TestMultiWorkspaceResolution_SharedBinding(t *testing.T) {
 	}
 	if name != channelName {
 		t.Errorf("expected channel name %q, got %q", channelName, name)
+	}
+}
+
+func TestMultiWorkspaceResolution_SharedBindingDoesNotCrossPlatforms(t *testing.T) {
+	baseDir := t.TempDir()
+	channelID := "C003X"
+
+	wsDir := filepath.Join(baseDir, "shared-workspace")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	e := newTestEngineWithMultiWorkspace(t, baseDir)
+	e.workspaceBindings.Bind(sharedWorkspaceBindingsKey, workspaceChannelKey("mock-a", channelID), "shared-channel", wsDir)
+
+	pA := &mockChannelResolver{name: "mock-a", names: map[string]string{}}
+	pB := &mockChannelResolver{name: "mock-b", names: map[string]string{}}
+
+	ws, _, err := e.resolveWorkspace(pA, channelID)
+	if err != nil {
+		t.Fatalf("unexpected error for matching platform: %v", err)
+	}
+	if ws != normalizeWorkspacePath(wsDir) {
+		t.Fatalf("expected shared binding for matching platform, got %q", ws)
+	}
+
+	ws, name, err := e.resolveWorkspace(pB, channelID)
+	if err != nil {
+		t.Fatalf("unexpected error for other platform: %v", err)
+	}
+	if ws != "" || name != "" {
+		t.Fatalf("expected no shared binding for other platform, got workspace=%q channelName=%q", ws, name)
 	}
 }
 
@@ -364,26 +402,27 @@ func TestWorkspaceInitFlow_SlashCommandCleansUpExistingFlow(t *testing.T) {
 	p := &mockChannelResolver{names: map[string]string{"C010": "test-channel"}}
 
 	channelID := "C010"
+	channelKey := workspaceChannelKey(p.Name(), channelID)
 
 	// Seed a flow in "awaiting_url" state to simulate a prior regular message
 	// that triggered the init flow.
 	e.initFlowsMu.Lock()
-	e.initFlows[channelID] = &workspaceInitFlow{
+	e.initFlows[channelKey] = &workspaceInitFlow{
 		state:       "awaiting_url",
 		channelName: "test-channel",
 	}
 	e.initFlowsMu.Unlock()
 
-	msg := &Message{Content: "/workspace bind my-project"}
+	msg := &Message{SessionKey: "mock:" + channelID + ":user1", Content: "/workspace bind my-project"}
 
-	consumed := e.handleWorkspaceInitFlow(p, msg, channelID, "test-channel")
+	consumed := e.handleWorkspaceInitFlow(p, msg, "test-channel")
 	if consumed {
 		t.Fatal("expected handleWorkspaceInitFlow to return false for slash command, but it returned true")
 	}
 
 	// Verify the flow was cleaned up.
 	e.initFlowsMu.Lock()
-	_, stillExists := e.initFlows[channelID]
+	_, stillExists := e.initFlows[channelKey]
 	e.initFlowsMu.Unlock()
 	if stillExists {
 		t.Error("expected init flow to be deleted after slash command, but it still exists")

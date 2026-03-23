@@ -5501,7 +5501,8 @@ func TestWorkspace_Route_ShowsCurrentAndSupportsSpaces(t *testing.T) {
 	e.handleCommand(p, msg, msg.Content)
 
 	normalizedTarget := normalizeWorkspacePath(targetDir)
-	if got := e.workspaceBindings.Lookup("project:test", "ch1"); got == nil || got.Workspace != normalizedTarget {
+	channelKey := workspaceChannelKey("test", "ch1")
+	if got := e.workspaceBindings.Lookup("project:test", channelKey); got == nil || got.Workspace != normalizedTarget {
 		t.Fatalf("expected routed binding %q, got %+v", normalizedTarget, got)
 	}
 
@@ -5534,7 +5535,7 @@ func TestWorkspace_Route_RejectsRelativePath(t *testing.T) {
 	if len(sent) == 0 || !strings.Contains(strings.ToLower(sent[0]), "absolute") {
 		t.Fatalf("expected absolute-path validation reply, got %v", sent)
 	}
-	if got := e.workspaceBindings.Lookup("project:test", "ch1"); got != nil {
+	if got := e.workspaceBindings.Lookup("project:test", workspaceChannelKey("test", "ch1")); got != nil {
 		t.Fatalf("expected no binding for relative route, got %+v", got)
 	}
 }
@@ -5555,7 +5556,7 @@ func TestWorkspace_Route_RejectsNonexistentPath(t *testing.T) {
 	if len(sent) == 0 || !strings.Contains(sent[0], missingPath) {
 		t.Fatalf("expected missing-path reply, got %v", sent)
 	}
-	if got := e.workspaceBindings.Lookup("project:test", "ch1"); got != nil {
+	if got := e.workspaceBindings.Lookup("project:test", workspaceChannelKey("test", "ch1")); got != nil {
 		t.Fatalf("expected no binding for missing route target, got %+v", got)
 	}
 }
@@ -5580,7 +5581,7 @@ func TestWorkspace_Route_RejectsFileTarget(t *testing.T) {
 	if len(sent) == 0 || !strings.Contains(strings.ToLower(sent[0]), "directory") {
 		t.Fatalf("expected not-directory reply, got %v", sent)
 	}
-	if got := e.workspaceBindings.Lookup("project:test", "ch1"); got != nil {
+	if got := e.workspaceBindings.Lookup("project:test", workspaceChannelKey("test", "ch1")); got != nil {
 		t.Fatalf("expected no binding for file route target, got %+v", got)
 	}
 }
@@ -5661,7 +5662,7 @@ func TestWorkspace_SharedBind_AllowsRegularUser(t *testing.T) {
 	if !strings.Contains(sent[0], "shared-project") {
 		t.Fatalf("expected shared bind success reply to contain workspace name, got %v", sent)
 	}
-	if got := e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, "ch1"); got == nil || got.Workspace != normalizedWsDir {
+	if got := e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, workspaceChannelKey("test", "ch1")); got == nil || got.Workspace != normalizedWsDir {
 		t.Fatalf("expected shared binding %q for regular user, got %+v", normalizedWsDir, got)
 	}
 }
@@ -5687,7 +5688,8 @@ func TestWorkspace_SharedBind_Unbind_List(t *testing.T) {
 	e.handleCommand(p, msg, msg.Content)
 
 	normalizedWsDir := normalizeWorkspacePath(wsDir)
-	if got := e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, "ch1"); got == nil || got.Workspace != normalizedWsDir {
+	channelKey := workspaceChannelKey("test", "ch1")
+	if got := e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, channelKey); got == nil || got.Workspace != normalizedWsDir {
 		t.Fatalf("expected shared binding %q, got %+v", normalizedWsDir, got)
 	}
 
@@ -5714,7 +5716,7 @@ func TestWorkspace_SharedBind_Unbind_List(t *testing.T) {
 	if len(sent) == 0 || !strings.Contains(strings.ToLower(sent[0]), "shared workspace") {
 		t.Fatalf("expected shared unbind success, got %v", sent)
 	}
-	if got := e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, "ch1"); got != nil {
+	if got := e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, channelKey); got != nil {
 		t.Fatalf("expected shared binding removed, got %+v", got)
 	}
 }
@@ -5741,7 +5743,8 @@ func TestWorkspace_SharedRoute_Unbind_List(t *testing.T) {
 	e.handleCommand(p, msg, msg.Content)
 
 	normalizedTarget := normalizeWorkspacePath(targetDir)
-	if got := e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, "ch1"); got == nil || got.Workspace != normalizedTarget {
+	channelKey := workspaceChannelKey("test", "ch1")
+	if got := e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, channelKey); got == nil || got.Workspace != normalizedTarget {
 		t.Fatalf("expected shared route binding %q, got %+v", normalizedTarget, got)
 	}
 
@@ -5768,7 +5771,7 @@ func TestWorkspace_SharedRoute_Unbind_List(t *testing.T) {
 	if len(sent) == 0 || !strings.Contains(strings.ToLower(sent[0]), "shared workspace") {
 		t.Fatalf("expected shared unbind success, got %v", sent)
 	}
-	if got := e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, "ch1"); got != nil {
+	if got := e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, channelKey); got != nil {
 		t.Fatalf("expected shared route binding removed, got %+v", got)
 	}
 }
@@ -5794,7 +5797,7 @@ func TestWorkspace_SharedInit_BindsExistingDir(t *testing.T) {
 	e.handleCommand(p, msg, msg.Content)
 
 	normalizedWsDir := normalizeWorkspacePath(wsDir)
-	if got := e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, "ch1"); got == nil || got.Workspace != normalizedWsDir {
+	if got := e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, workspaceChannelKey("test", "ch1")); got == nil || got.Workspace != normalizedWsDir {
 		t.Fatalf("expected shared init binding %q, got %+v", normalizedWsDir, got)
 	}
 }
@@ -6643,14 +6646,15 @@ func TestExtractSessionKeyParts(t *testing.T) {
 		sessionKey   string
 		wantPlatform string
 		wantChannel  string
+		wantKey      string
 		wantUser     string
 	}{
-		{"full format", "feishu:channel123:user456", "feishu", "channel123", "user456"},
-		{"platform and channel only", "telegram:987654321", "telegram", "987654321", ""},
-		{"no colons", "simplekey", "simplekey", "", ""},
-		{"single colon", "discord:channel1", "discord", "channel1", ""},
-		{"empty string", "", "", "", ""},
-		{"just platform colon user", "line::user1", "line", "", "user1"},
+		{"full format", "feishu:channel123:user456", "feishu", "channel123", "feishu:channel123", "user456"},
+		{"platform and channel only", "telegram:987654321", "telegram", "987654321", "telegram:987654321", ""},
+		{"no colons", "simplekey", "simplekey", "", "", ""},
+		{"single colon", "discord:channel1", "discord", "channel1", "discord:channel1", ""},
+		{"empty string", "", "", "", "", ""},
+		{"just platform colon user", "line::user1", "line", "", "", "user1"},
 	}
 
 	for _, tt := range tests {
@@ -6663,6 +6667,11 @@ func TestExtractSessionKeyParts(t *testing.T) {
 			gotChannel := extractChannelID(tt.sessionKey)
 			if gotChannel != tt.wantChannel {
 				t.Errorf("extractChannelID(%q) = %q, want %q", tt.sessionKey, gotChannel, tt.wantChannel)
+			}
+
+			gotKey := extractWorkspaceChannelKey(tt.sessionKey)
+			if gotKey != tt.wantKey {
+				t.Errorf("extractWorkspaceChannelKey(%q) = %q, want %q", tt.sessionKey, gotKey, tt.wantKey)
 			}
 
 			gotUser := extractUserID(tt.sessionKey)
