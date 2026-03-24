@@ -98,6 +98,51 @@ func init() {
 	})
 }
 
+var toolIconMap = map[string]string{
+	"Bash":      "terminal-two_outlined",
+	"Edit":      "edit_outlined",
+	"Read":      "file-open_outlined",
+	"Write":     "notes_outlined",
+	"Glob":      "folder-open_outlined",
+	"Grep":      "search_outlined",
+	"WebFetch":  "internet_outlined",
+	"WebSearch": "internet_outlined",
+	"Agent":     "robot_outlined",
+	"Skill":     "code_outlined",
+	"LSP":       "code_outlined",
+}
+
+const defaultToolIcon = "setting-inter_outlined"
+
+var thinkingVerbs = []string{
+	"Churning", "Clauding", "Coalescing", "Cogitating", "Computing",
+	"Combobulating", "Concocting", "Conjuring", "Considering", "Contemplating",
+	"Cooking", "Crafting", "Creating", "Crunching", "Deciphering",
+	"Deliberating", "Divining", "Effecting", "Elucidating", "Enchanting",
+	"Envisioning", "Finagling", "Forging", "Generating", "Germinating",
+	"Hatching", "Ideating", "Imagining", "Incubating", "Inferring",
+	"Manifesting", "Marinating", "Meandering", "Mulling", "Musing",
+	"Noodling", "Percolating", "Perusing", "Pondering", "Processing",
+	"Puzzling", "Reticulating", "Ruminating", "Scheming", "Simmering",
+	"Spelunking", "Spinning", "Stewing", "Sussing", "Synthesizing",
+	"Thinking", "Tinkering", "Transmuting", "Unfurling", "Unravelling",
+	"Vibing", "Wandering", "Whirring", "Wizarding", "Working", "Wrangling",
+}
+
+func pickThinkingVerb() string {
+	idx := time.Now().Unix() % int64(len(thinkingVerbs))
+	return thinkingVerbs[idx] + "..."
+}
+
+var markdownTablePattern = regexp.MustCompile(`(?m)^\|.+\|\s*\n\|[\s:|-]+\|\s*\n(?:\|.+\|\s*\n?)+`)
+
+func getToolIcon(toolName string) string {
+	if icon, ok := toolIconMap[toolName]; ok {
+		return icon
+	}
+	return defaultToolIcon
+}
+
 type replyContext struct {
 	messageID  string
 	chatID     string
@@ -115,7 +160,8 @@ type Platform struct {
 	allowFrom             string
 	groupReplyAll         bool
 	shareSessionInChannel bool
-	threadIsolation       bool
+	threadIsolation    bool
+	alwaysThreadReply  bool // when true, ReplyInThread for all chats including p2p
 	// noReplyToTrigger: when true, send via Create instead of Im.Message.Reply (no quote to the user's message).
 	noReplyToTrigger bool
 	client           *lark.Client
@@ -165,6 +211,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	threadIsolation, _ := opts["thread_isolation"].(bool)
+	alwaysThreadReply, _ := opts["always_thread_reply"].(bool)
 	noReplyToTrigger := false
 	if v, ok := opts["reply_to_trigger"].(bool); ok && !v {
 		noReplyToTrigger = true
@@ -201,6 +248,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		groupReplyAll:         groupReplyAll,
 		shareSessionInChannel: shareSessionInChannel,
 		threadIsolation:       threadIsolation,
+		alwaysThreadReply:     alwaysThreadReply,
 		noReplyToTrigger:      noReplyToTrigger,
 		client:                lark.NewClient(appID, appSecret, clientOpts...),
 		port:                  port,
@@ -1303,7 +1351,7 @@ func buildReplyContent(content string) (msgType string, body string) {
 	// 2. Many \n\n paragraphs (help, status, etc.) → post rich-text (preserves blank lines)
 	// 3. Other markdown → post md tag (best native rendering)
 	if hasComplexMarkdown(content) {
-		return larkim.MsgTypeInteractive, buildCardJSON(sanitizeMarkdownURLs(preprocessFeishuMarkdown(content)))
+		return larkim.MsgTypeInteractive, buildCardJSON(sanitizeMarkdownURLs(preprocessFeishuMarkdown(content)), core.CardStatusDone)
 	}
 	if strings.Count(content, "\n\n") >= 2 {
 		return larkim.MsgTypePost, buildPostJSON(content)
@@ -1682,6 +1730,9 @@ func (p *Platform) shouldReplyInThread(rc replyContext) bool {
 	if rc.messageID == "" {
 		return false
 	}
+	if p.alwaysThreadReply {
+		return true
+	}
 	return p.threadIsolation && isThreadSessionKey(rc.sessionKey)
 }
 
@@ -1770,18 +1821,44 @@ func isThreadSessionKey(sessionKey string) bool {
 
 // feishuPreviewHandle stores the message ID for an editable preview message.
 type feishuPreviewHandle struct {
-	messageID string
-	chatID    string
+	mu          sync.Mutex
+	messageID   string
+	chatID      string
+	status      core.CardStatus
+	lastContent string
 }
 
 // buildCardJSON builds a Feishu interactive card JSON string with a markdown element.
 // Uses schema 2.0 which supports code blocks, tables, and inline formatting.
 // Card font is inherently smaller than Post/Text — this is a Feishu platform limitation.
-func buildCardJSON(content string) string {
+
+// isCardJSON returns true if content looks like a complete Feishu card JSON
+// (has "schema" and "body"). Used to avoid double-wrapping rich card output.
+func isCardJSON(content string) bool {
+	if len(content) < 10 || content[0] != '{' {
+		return false
+	}
+	return strings.Contains(content, `"schema"`) && strings.Contains(content, `"body"`)
+}
+
+func buildCardJSON(content string, status core.CardStatus) string {
+	template := "grey"
+	switch status {
+	case core.CardStatusWorking:
+		template = "blue"
+	case core.CardStatusDone:
+		template = "green"
+	case core.CardStatusError:
+		template = "red"
+	}
 	card := map[string]any{
 		"schema": "2.0",
 		"config": map[string]any{
 			"wide_screen_mode": true,
+		},
+		"header": map[string]any{
+			"template": template,
+			"title":    map[string]any{"tag": "plain_text", "content": ""},
 		},
 		"body": map[string]any{
 			"elements": []map[string]any{
@@ -1794,6 +1871,153 @@ func buildCardJSON(content string) string {
 	}
 	b, _ := json.Marshal(card)
 	return string(b)
+}
+
+func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, markdown string, streaming bool) string {
+	panelTitle := "Thinking..."
+	if len(steps) > 0 {
+		if streaming {
+			panelTitle = fmt.Sprintf("Working on it (%d steps)", len(steps))
+		} else {
+			toolCounts := make(map[string]int)
+			var toolOrder []string
+			for _, s := range steps {
+				if toolCounts[s.Name] == 0 {
+					toolOrder = append(toolOrder, s.Name)
+				}
+				toolCounts[s.Name]++
+			}
+			var toolParts []string
+			for _, name := range toolOrder {
+				if toolCounts[name] > 1 {
+					toolParts = append(toolParts, fmt.Sprintf("%s×%d", name, toolCounts[name]))
+				} else {
+					toolParts = append(toolParts, name)
+				}
+			}
+			toolSummary := strings.Join(toolParts, ", ")
+			preview := strings.TrimSpace(markdown)
+			if idx := strings.IndexByte(preview, '\n'); idx > 0 {
+				preview = preview[:idx]
+			}
+			if runes := []rune(preview); len(runes) > 20 {
+				preview = string(runes[:20]) + "..."
+			}
+			if preview != "" {
+				panelTitle = fmt.Sprintf("%s · %s", toolSummary, preview)
+			} else {
+				panelTitle = toolSummary
+			}
+		}
+	}
+
+	panelCap := len(steps)
+	if panelCap < 1 {
+		panelCap = 1
+	}
+	panelElements := make([]map[string]any, 0, panelCap)
+	if len(steps) == 0 {
+		panelElements = append(panelElements, map[string]any{
+			"tag":  "div",
+			"text": map[string]any{"tag": "plain_text", "content": "Thinking..."},
+		})
+	} else {
+		for _, step := range steps {
+			summary := strings.TrimSpace(step.Summary)
+			if summary == "" {
+				summary = step.Name
+			}
+			panelElements = append(panelElements, map[string]any{
+				"tag":  "div",
+				"icon": map[string]any{"tag": "standard_icon", "token": getToolIcon(step.Name)},
+				"text": map[string]any{"tag": "plain_text", "content": summary},
+			})
+		}
+	}
+
+	panelMap := map[string]any{
+		"tag":              "collapsible_panel",
+		"expanded":         streaming,
+		"background_color": "grey",
+		"header": map[string]any{
+			"title": map[string]any{"tag": "plain_text", "content": panelTitle},
+		},
+		"border":           map[string]any{"color": "grey"},
+		"vertical_spacing": "8px",
+		"padding":          "4px 8px",
+		"elements":         panelElements,
+	}
+	markdownMap := map[string]any{
+		"tag":     "markdown",
+		"content": preprocessFeishuMarkdown(markdown),
+	}
+
+	var elements []map[string]any
+	if len(steps) > 0 || streaming {
+		elements = append(elements, panelMap, markdownMap)
+	} else {
+		elements = append(elements, markdownMap)
+	}
+
+	card := map[string]any{
+		"schema": "2.0",
+		"config": map[string]any{
+			"streaming_mode":             streaming,
+			"update_multi":               true,
+			"enable_forward_interaction": true,
+		},
+		"body": map[string]any{"elements": elements},
+	}
+
+	if streaming {
+		card["header"] = map[string]any{
+			"template": "blue",
+			"title":    map[string]any{"tag": "plain_text", "content": pickThinkingVerb()},
+		}
+	}
+
+	b, err := json.Marshal(card)
+	if err != nil {
+		slog.Debug("feishu: build rich card marshal failed, fallback to basic card", "error", err)
+		return buildCardJSON(preprocessFeishuMarkdown(markdown), status)
+	}
+	return string(b)
+}
+
+func splitMarkdownByTables(md string, maxTables int) []string {
+	if maxTables <= 0 {
+		return []string{md}
+	}
+	matches := markdownTablePattern.FindAllStringIndex(md, -1)
+	if len(matches) <= maxTables {
+		return []string{md}
+	}
+	parts := make([]string, 0, len(matches)-maxTables+1)
+	firstEnd := len(md)
+	if len(matches) > maxTables {
+		firstEnd = matches[maxTables][0]
+	}
+	first := strings.TrimSpace(md[:firstEnd])
+	if first != "" {
+		parts = append(parts, first)
+	}
+	for _, match := range matches[maxTables:] {
+		block := strings.TrimSpace(md[match[0]:match[1]])
+		if block != "" {
+			parts = append(parts, block)
+		}
+	}
+	return parts
+}
+
+// BuildRichCard implements core.RichCardSupporter.
+func (p *Platform) BuildRichCard(status core.CardStatus, title string, steps []core.ToolStep, markdown string, streaming bool) string {
+	return buildRichCard(status, title, steps, markdown, streaming)
+}
+
+// SplitMarkdownByTables implements core.MarkdownTableSplitter.
+func (p *Platform) SplitMarkdownByTables(md string, maxTables int) []string {
+	return splitMarkdownByTables(md, maxTables)
 }
 
 // SendPreviewStart sends a new card message and returns a handle for subsequent edits.
@@ -1814,7 +2038,12 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 		return nil, fmt.Errorf("%s: chatID is empty", p.tag())
 	}
 
-	cardJSON := buildCardJSON(sanitizeMarkdownURLs(content))
+	var cardJSON string
+	if isCardJSON(content) {
+		cardJSON = content
+	} else {
+		cardJSON = buildCardJSON(sanitizeMarkdownURLs(content), core.CardStatusThinking)
+	}
 
 	var msgID string
 	if p.shouldUseThreadOrReplyAPI(rc) {
@@ -1870,11 +2099,21 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 		return fmt.Errorf("%s: invalid preview handle type %T", p.tag(), previewHandle)
 	}
 
-	processed := content
-	if containsMarkdown(content) {
-		processed = preprocessFeishuMarkdown(content)
+	h.mu.Lock()
+	h.lastContent = content
+	status := h.status
+	h.mu.Unlock()
+
+	var cardJSON string
+	if isCardJSON(content) {
+		cardJSON = content
+	} else {
+		processed := content
+		if containsMarkdown(content) {
+			processed = preprocessFeishuMarkdown(content)
+		}
+		cardJSON = buildCardJSON(sanitizeMarkdownURLs(processed), status)
 	}
-	cardJSON := buildCardJSON(sanitizeMarkdownURLs(processed))
 	resp, err := p.client.Im.Message.Patch(ctx, larkim.NewPatchMessageReqBuilder().
 		MessageId(h.messageID).
 		Body(larkim.NewPatchMessageReqBodyBuilder().
@@ -1888,6 +2127,41 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 		return fmt.Errorf("%s: patch message code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
 	}
 	return nil
+}
+
+// SetPreviewStatus updates the card header color to reflect the agent's current state.
+func (p *Platform) SetPreviewStatus(previewHandle any, status core.CardStatus) {
+	h, ok := previewHandle.(*feishuPreviewHandle)
+	if !ok {
+		return
+	}
+
+	h.mu.Lock()
+	h.status = status
+	lastContent := h.lastContent
+	h.mu.Unlock()
+
+	if lastContent == "" {
+		return
+	}
+	cardJSON := buildCardJSON(lastContent, status)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resp, err := p.client.Im.Message.Patch(ctx, larkim.NewPatchMessageReqBuilder().
+		MessageId(h.messageID).
+		Body(larkim.NewPatchMessageReqBodyBuilder().
+			Content(cardJSON).
+			Build()).
+		Build())
+	if err != nil {
+		slog.Debug("feishu: set preview status patch failed", "error", err)
+		return
+	}
+	if !resp.Success() {
+		slog.Debug("feishu: set preview status patch failed", "code", resp.Code, "msg", resp.Msg)
+	}
 }
 
 func (p *Platform) Stop() error {
