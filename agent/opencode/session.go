@@ -26,6 +26,7 @@ type opencodeSession struct {
 	workDir  string
 	model    string
 	mode     string
+	attach   string
 	extraEnv []string
 	events   chan core.Event
 	chatID   atomic.Value // stores string — OpenCode session ID
@@ -35,7 +36,7 @@ type opencodeSession struct {
 	alive    atomic.Bool
 }
 
-func newOpencodeSession(ctx context.Context, cmd, workDir, model, mode, resumeID string, extraEnv []string) (*opencodeSession, error) {
+func newOpencodeSession(ctx context.Context, cmd, workDir, model, mode, attach, resumeID string, extraEnv []string) (*opencodeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	s := &opencodeSession{
@@ -43,6 +44,7 @@ func newOpencodeSession(ctx context.Context, cmd, workDir, model, mode, resumeID
 		workDir:  workDir,
 		model:    model,
 		mode:     mode,
+		attach:   attach,
 		extraEnv: extraEnv,
 		events:   make(chan core.Event, 64),
 		ctx:      sessionCtx,
@@ -70,6 +72,9 @@ func (s *opencodeSession) Send(prompt string, images []core.ImageAttachment, fil
 	isResume := chatID != ""
 
 	args := []string{"run", "--format", "json"}
+	if s.attach != "" {
+		args = append(args, "--attach", s.attach)
+	}
 
 	if isResume {
 		args = append(args, "--session", chatID)

@@ -28,6 +28,7 @@ type Agent struct {
 	workDir    string
 	model      string
 	mode       string
+	attach     string
 	cmd        string // CLI binary name, default "opencode"
 	providers  []core.ProviderConfig
 	activeIdx  int
@@ -43,6 +44,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	model, _ := opts["model"].(string)
 	mode, _ := opts["mode"].(string)
 	mode = normalizeMode(mode)
+	attach, _ := opts["attach"].(string)
 	cmd, _ := opts["cmd"].(string)
 	if cmd == "" {
 		cmd = "opencode"
@@ -56,6 +58,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		workDir:   workDir,
 		model:     model,
 		mode:      mode,
+		attach:    attach,
 		cmd:       cmd,
 		activeIdx: -1,
 	}, nil
@@ -126,6 +129,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	a.mu.Lock()
 	model := a.model
 	mode := a.mode
+	attach := a.attach
 	cmd := a.cmd
 	workDir := a.workDir
 	extraEnv := a.providerEnvLocked()
@@ -137,7 +141,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 	a.mu.Unlock()
 
-	return newOpencodeSession(ctx, cmd, workDir, model, mode, sessionID, extraEnv)
+	return newOpencodeSession(ctx, cmd, workDir, model, mode, attach, sessionID, extraEnv)
 }
 
 // ListSessions runs `opencode session list` and parses the JSON output.
