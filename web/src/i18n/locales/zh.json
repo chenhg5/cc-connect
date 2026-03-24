@@ -51,6 +51,11 @@
     "messageInput": "消息",
     "delete": "删除",
     "noSessions": "暂无会话",
+    "noMessages": "暂无消息",
+    "notLiveHint": "此会话当前未活跃，仅在 Agent 运行时才能发送消息。",
+    "offline": "离线",
+    "justNow": "刚刚",
+    "allProjects": "全部项目",
     "chat": "对话",
     "enterSession": "进入会话"
   },

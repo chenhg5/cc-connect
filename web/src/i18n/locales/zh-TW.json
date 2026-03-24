@@ -51,6 +51,11 @@
     "messageInput": "訊息",
     "delete": "刪除",
     "noSessions": "尚無工作階段",
+    "noMessages": "暫無訊息",
+    "notLiveHint": "此工作階段目前未活躍，僅在 Agent 執行時才能傳送訊息。",
+    "offline": "離線",
+    "justNow": "剛剛",
+    "allProjects": "全部專案",
     "chat": "對話",
     "enterSession": "進入工作階段"
   },

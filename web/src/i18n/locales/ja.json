@@ -51,6 +51,11 @@
     "messageInput": "メッセージ",
     "delete": "削除",
     "noSessions": "セッションがありません",
+    "noMessages": "メッセージはまだありません",
+    "notLiveHint": "このセッションは現在アクティブではありません。エージェント実行中のみメッセージを送信できます。",
+    "offline": "オフライン",
+    "justNow": "たった今",
+    "allProjects": "すべてのプロジェクト",
     "chat": "チャット",
     "enterSession": "セッションを開く"
   },

@@ -51,6 +51,11 @@
     "messageInput": "Mensaje",
     "delete": "Eliminar",
     "noSessions": "No hay sesiones",
+    "noMessages": "Sin mensajes aún",
+    "notLiveHint": "Esta sesión no está activa. Solo se pueden enviar mensajes cuando el agente está en ejecución.",
+    "offline": "sin conexión",
+    "justNow": "ahora",
+    "allProjects": "Todos los proyectos",
     "chat": "Chat",
     "enterSession": "Abrir sesión"
   },

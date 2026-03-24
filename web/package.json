@@ -9,15 +9,19 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@tailwindcss/typography": "^0.5.19",
+    "clsx": "^2.1.1",
+    "highlight.js": "^11.11.1",
+    "i18next": "^25.1.2",
+    "lucide-react": "^0.487.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "react-router-dom": "^7.5.0",
-    "zustand": "^5.0.5",
-    "i18next": "^25.1.2",
     "react-i18next": "^15.5.1",
-    "lucide-react": "^0.487.0",
-    "clsx": "^2.1.1",
-    "react-markdown": "^10.1.0"
+    "react-markdown": "^10.1.0",
+    "react-router-dom": "^7.5.0",
+    "rehype-highlight": "^7.0.2",
+    "remark-gfm": "^4.0.1",
+    "zustand": "^5.0.5"
   },
   "devDependencies": {
     "@types/react": "^19.1.2",

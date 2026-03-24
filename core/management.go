@@ -147,6 +147,10 @@ func mgmtJSON(w http.ResponseWriter, status int, data any) {
 	}
 }
 
+func splitSessionKey(key string) []string {
+	return strings.SplitN(key, ":", 3)
+}
+
 func mgmtError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -563,14 +567,55 @@ func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.
 		}
 		e.interactiveMu.Unlock()
 
+		idToKey, activeIDs := e.sessions.SessionKeyMap()
 		stored := e.sessions.AllSessions()
 		sessions := make([]map[string]any, 0, len(stored))
 		for _, s := range stored {
+			s.mu.Lock()
+			histCount := len(s.History)
+			var lastMsg map[string]any
+			if histCount > 0 {
+				last := s.History[histCount-1]
+				preview := last.Content
+				if len(preview) > 200 {
+					preview = preview[:200]
+				}
+				lastMsg = map[string]any{
+					"role":      last.Role,
+					"content":   preview,
+					"timestamp": last.Timestamp,
+				}
+			}
 			info := map[string]any{
 				"id":            s.ID,
-				"name":          s.GetName(),
-				"history_count": len(s.History),
+				"name":          s.Name,
+				"session_key":   idToKey[s.ID],
+				"agent_type":    s.AgentType,
+				"active":        activeIDs[s.ID],
+				"history_count": histCount,
+				"created_at":    s.CreatedAt,
+				"updated_at":    s.UpdatedAt,
+				"last_message":  lastMsg,
 			}
+			s.mu.Unlock()
+
+			sessionKey := idToKey[s.ID]
+			_, live := activeKeys[sessionKey]
+			info["live"] = live
+			if p, ok := activeKeys[sessionKey]; ok {
+				info["platform"] = p
+			} else if len(sessionKey) > 0 {
+				parts := splitSessionKey(sessionKey)
+				if len(parts) > 0 {
+					info["platform"] = parts[0]
+				}
+			}
+
+			if meta := e.sessions.GetUserMeta(sessionKey); meta != nil {
+				info["user_name"] = meta.UserName
+				info["chat_name"] = meta.ChatName
+			}
+
 			sessions = append(sessions, info)
 		}
 
@@ -628,16 +673,43 @@ func (m *ManagementServer) handleProjectSessionDetail(w http.ResponseWriter, r *
 		histJSON := make([]map[string]any, len(hist))
 		for i, h := range hist {
 			histJSON[i] = map[string]any{
-				"role":    h.Role,
-				"content": h.Content,
+				"role":      h.Role,
+				"content":   h.Content,
+				"timestamp": h.Timestamp,
 			}
 		}
 
-		mgmtJSON(w, http.StatusOK, map[string]any{
-			"id":      s.ID,
-			"name":    s.GetName(),
-			"history": histJSON,
-		})
+		idToKey, activeIDs := e.sessions.SessionKeyMap()
+		sessionKey := idToKey[s.ID]
+
+		e.interactiveMu.Lock()
+		_, live := e.interactiveStates[sessionKey]
+		e.interactiveMu.Unlock()
+
+		s.mu.Lock()
+		data := map[string]any{
+			"id":               s.ID,
+			"name":             s.Name,
+			"session_key":      sessionKey,
+			"agent_session_id": s.AgentSessionID,
+			"agent_type":       s.AgentType,
+			"active":           activeIDs[s.ID],
+			"live":             live,
+			"history_count":    len(s.History),
+			"created_at":       s.CreatedAt,
+			"updated_at":       s.UpdatedAt,
+			"history":          histJSON,
+		}
+		s.mu.Unlock()
+
+		if len(sessionKey) > 0 {
+			parts := splitSessionKey(sessionKey)
+			if len(parts) > 0 {
+				data["platform"] = parts[0]
+			}
+		}
+
+		mgmtJSON(w, http.StatusOK, data)
 
 	case http.MethodDelete:
 		if e.sessions.DeleteByID(sessionID) {
