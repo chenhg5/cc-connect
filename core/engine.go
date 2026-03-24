@@ -3319,6 +3319,9 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	session.SetAgentInfo(matched.ID, agent.Name(), matched.Summary)
 	session.ClearHistory()
 	sessions.Save()
+	// Mark user connection as established so first-turn --continue bridge
+	// does not override an explicit /switch target on the next message.
+	e.hasConnectedOnce.Store(true)
 
 	shortID := matched.ID
 	if len(shortID) > 12 {

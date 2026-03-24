@@ -6464,6 +6464,19 @@ func (a *switchableAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, e
 	return a.sessions, nil
 }
 
+type switchableRecordingAgent struct {
+	switchableAgent
+	mu       sync.Mutex
+	startIDs []string
+}
+
+func (a *switchableRecordingAgent) StartSession(_ context.Context, id string) (AgentSession, error) {
+	a.mu.Lock()
+	a.startIDs = append(a.startIDs, id)
+	a.mu.Unlock()
+	return newControllableSession(id), nil
+}
+
 func TestCmdSwitch_NoArgs_ShowsUsage(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -6603,6 +6616,51 @@ func TestCmdSwitch_ByName(t *testing.T) {
 	}
 	if !foundSwitch {
 		t.Fatalf("expected switch by name to succeed, got %v", sent)
+	}
+}
+
+func TestCmdSwitch_DoesNotUseContinueBridgeOnNextSend(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agent := &switchableRecordingAgent{
+		switchableAgent: switchableAgent{
+			sessions: []AgentSessionInfo{
+				{ID: "sess-old", Summary: "Old"},
+				{ID: "sess-target", Summary: "Target"},
+			},
+		},
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	key := "test:ch:user1"
+
+	// First user send path would normally consume continue bridge.
+	if e.hasConnectedOnce.Load() {
+		t.Fatal("hasConnectedOnce should start false")
+	}
+
+	msg := &Message{SessionKey: key, Content: "/switch 2", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	session := e.sessions.GetOrCreateActive(key)
+	if got := session.GetAgentSessionID(); got != "sess-target" {
+		t.Fatalf("agent session id after switch = %q, want sess-target", got)
+	}
+	if !e.hasConnectedOnce.Load() {
+		t.Fatal("hasConnectedOnce should be true after explicit /switch")
+	}
+
+	if !session.TryLock() {
+		t.Fatal("TryLock")
+	}
+	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "", true, nil)
+
+	agent.mu.Lock()
+	calls := append([]string{}, agent.startIDs...)
+	agent.mu.Unlock()
+	if len(calls) == 0 {
+		t.Fatal("expected StartSession to be called")
+	}
+	if calls[0] != "sess-target" {
+		t.Fatalf("StartSession id = %q, want sess-target (not continue bridge)", calls[0])
 	}
 }
 

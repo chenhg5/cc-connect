@@ -418,3 +418,4 @@ func (a *Agent) SkillDirs() []string {
 var _ core.Agent = (*Agent)(nil)
 var _ core.ProviderSwitcher = (*Agent)(nil)
 var _ core.ContextCompressor = (*Agent)(nil)
+var _ core.UsageReporter = (*Agent)(nil)
