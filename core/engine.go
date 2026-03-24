@@ -1934,8 +1934,10 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	if connectedOnce != nil {
 		once = connectedOnce
 	}
-	if consumeFirstUserContinueBridge && !once.Swap(true) {
+	if agent.Name() != "opencode" && consumeFirstUserContinueBridge && !once.Swap(true) {
 		startSessionID = ContinueSession
+	} else if consumeFirstUserContinueBridge {
+		once.Store(true)
 	}
 
 	isResume := startSessionID != ""
