@@ -1831,6 +1831,16 @@ type feishuPreviewHandle struct {
 // buildCardJSON builds a Feishu interactive card JSON string with a markdown element.
 // Uses schema 2.0 which supports code blocks, tables, and inline formatting.
 // Card font is inherently smaller than Post/Text — this is a Feishu platform limitation.
+
+// isCardJSON returns true if content looks like a complete Feishu card JSON
+// (has "schema" and "body"). Used to avoid double-wrapping rich card output.
+func isCardJSON(content string) bool {
+	if len(content) < 10 || content[0] != '{' {
+		return false
+	}
+	return strings.Contains(content, `"schema"`) && strings.Contains(content, `"body"`)
+}
+
 func buildCardJSON(content string, status core.CardStatus) string {
 	template := "grey"
 	switch status {
@@ -2028,7 +2038,12 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 		return nil, fmt.Errorf("%s: chatID is empty", p.tag())
 	}
 
-	cardJSON := buildCardJSON(sanitizeMarkdownURLs(content), core.CardStatusThinking)
+	var cardJSON string
+	if isCardJSON(content) {
+		cardJSON = content
+	} else {
+		cardJSON = buildCardJSON(sanitizeMarkdownURLs(content), core.CardStatusThinking)
+	}
 
 	var msgID string
 	if p.shouldUseThreadOrReplyAPI(rc) {
@@ -2089,11 +2104,16 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 	status := h.status
 	h.mu.Unlock()
 
-	processed := content
-	if containsMarkdown(content) {
-		processed = preprocessFeishuMarkdown(content)
+	var cardJSON string
+	if isCardJSON(content) {
+		cardJSON = content
+	} else {
+		processed := content
+		if containsMarkdown(content) {
+			processed = preprocessFeishuMarkdown(content)
+		}
+		cardJSON = buildCardJSON(sanitizeMarkdownURLs(processed), status)
 	}
-	cardJSON := buildCardJSON(sanitizeMarkdownURLs(processed), status)
 	resp, err := p.client.Im.Message.Patch(ctx, larkim.NewPatchMessageReqBuilder().
 		MessageId(h.messageID).
 		Body(larkim.NewPatchMessageReqBodyBuilder().
