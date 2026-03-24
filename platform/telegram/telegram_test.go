@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -757,6 +758,39 @@ func TestSendAudioReturnsConversionErrorForWAV(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "mock conversion failure") {
 		t.Fatalf("expected wrapped conversion error, got: %v", err)
+	}
+}
+
+func TestTruncateTelegramBotDescription_UTF8Safe(t *testing.T) {
+	t.Parallel()
+	cjk := strings.Repeat("你", 200)
+	out := truncateTelegramBotDescription(cjk)
+	if !utf8.ValidString(out) {
+		t.Fatal("invalid UTF-8 from CJK description")
+	}
+	if got, max := utf8.RuneCountInString(out), 256; got > max {
+		t.Fatalf("rune count %d > %d", got, max)
+	}
+
+	long := strings.Repeat("b", 260)
+	out2 := truncateTelegramBotDescription(long)
+	if want := 256; utf8.RuneCountInString(out2) != want {
+		t.Fatalf("ascii truncation: got %d runes want %d", utf8.RuneCountInString(out2), want)
+	}
+	if !utf8.ValidString(out2) {
+		t.Fatal("invalid UTF-8 after ascii truncation")
+	}
+}
+
+func TestTruncateForLog_UTF8Safe(t *testing.T) {
+	t.Parallel()
+	s := strings.Repeat("世", 50) // 50 runes
+	out := truncateForLog(s, 10)
+	if !utf8.ValidString(out) {
+		t.Fatal("invalid UTF-8")
+	}
+	if utf8.RuneCountInString(out) != 13 { // 10 + "..."
+		t.Fatalf("got %d runes", utf8.RuneCountInString(out))
 	}
 }
 
