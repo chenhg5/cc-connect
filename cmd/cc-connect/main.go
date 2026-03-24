@@ -501,6 +501,9 @@ func main() {
 		engine.SetProviderModelSaveFunc(func(providerName, model string) error {
 			return config.SaveProviderModel(projName, providerName, model)
 		})
+		engine.SetModelSaveFunc(func(model string) error {
+			return config.SaveAgentModel(projName, model)
+		})
 
 		// Wire config reload
 		capturedEngine := engine

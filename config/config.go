@@ -406,6 +406,35 @@ func SaveProviderModel(projectName, providerName, model string) error {
 	return fmt.Errorf("project %q not found in config", projectName)
 }
 
+// SaveAgentModel persists the selected default model for a project's agent.
+func SaveAgentModel(projectName, model string) error {
+	configMu.Lock()
+	defer configMu.Unlock()
+	if ConfigPath == "" {
+		return fmt.Errorf("config path not set")
+	}
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+
+	for i := range cfg.Projects {
+		if cfg.Projects[i].Name != projectName {
+			continue
+		}
+		if cfg.Projects[i].Agent.Options == nil {
+			cfg.Projects[i].Agent.Options = make(map[string]any)
+		}
+		cfg.Projects[i].Agent.Options["model"] = model
+		return saveConfig(cfg)
+	}
+	return fmt.Errorf("project %q not found in config", projectName)
+}
+
 // AddProviderToConfig adds a provider to a project's agent config and saves.
 func AddProviderToConfig(projectName string, provider ProviderConfig) error {
 	configMu.Lock()
