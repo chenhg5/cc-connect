@@ -26,6 +26,8 @@ func runCron(args []string) {
 		runCronList(args[1:])
 	case "edit":
 		runCronEdit(args[1:])
+	case "info":
+		runCronInfo(args[1:])
 	case "del", "delete", "rm", "remove":
 		runCronDel(args[1:])
 	case "--help", "-h", "help":
@@ -313,6 +315,98 @@ func runCronDel(args []string) {
 	fmt.Printf("Cron job %s deleted.\n", id)
 }
 
+func runCronInfo(args []string) {
+	var dataDir, id, field string
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--data-dir":
+			if i+1 < len(args) {
+				i++
+				dataDir = args[i]
+			}
+		default:
+			if id == "" {
+				id = args[i]
+			} else if field == "" {
+				field = args[i]
+			}
+		}
+	}
+
+	if id == "" {
+		fmt.Fprintln(os.Stderr, "Error: job ID is required")
+		fmt.Fprintln(os.Stderr, "Usage: cc-connect cron info <id> [field]")
+		fmt.Fprintln(os.Stderr, "Use 'cc-connect cron list' to see all task IDs.")
+		os.Exit(1)
+	}
+
+	sockPath := resolveSocketPath(dataDir)
+	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "Error: cc-connect is not running (socket not found: %s)\n", sockPath)
+		os.Exit(1)
+	}
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+				return net.Dial("unix", sockPath)
+			},
+		},
+	}
+
+	resp, err := client.Get("http://unix/cron/info?id=" + id)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusNotFound {
+		fmt.Fprintf(os.Stderr, "Error: job '%s' not found\n", id)
+		os.Exit(1)
+	}
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", strings.TrimSpace(string(body)))
+		os.Exit(1)
+	}
+
+	// If field specified, extract and print only that field
+	if field != "" {
+		var result map[string]any
+		if err := json.Unmarshal(body, &result); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: invalid JSON response: %v\n", err)
+			os.Exit(1)
+		}
+		val, ok := result[field]
+		if !ok {
+			fmt.Fprintf(os.Stderr, "Error: field '%s' not found\n", field)
+			fmt.Fprintln(os.Stderr, "Available fields:")
+			for k := range result {
+				fmt.Fprintf(os.Stderr, "  - %s\n", k)
+			}
+			os.Exit(1)
+		}
+		// Output field value (string directly, otherwise JSON formatted)
+		if s, ok := val.(string); ok {
+			fmt.Println(s)
+		} else {
+			data, _ := json.MarshalIndent(val, "", "  ")
+			fmt.Println(string(data))
+		}
+		return
+	}
+
+	// Pretty-print full JSON
+	var prettyJSON bytes.Buffer
+	if err := json.Indent(&prettyJSON, body, "", "  "); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: invalid JSON response: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println(prettyJSON.String())
+}
+
 func runCronEdit(args []string) {
 	var dataDir string
 	var id, field string
@@ -424,6 +518,8 @@ Commands:
   add       Create a new scheduled task
   list      List all scheduled tasks
   edit      Edit a scheduled task field
+  info <id> [field]  Show detailed info of a scheduled task
+                     (optionally filter to a single field)
   del <id>  Delete a scheduled task
 
 Run 'cc-connect cron <command> --help' for details.`)
