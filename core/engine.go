@@ -4918,14 +4918,18 @@ func (e *Engine) cmdMode(p Platform, msg *Message, args []string) {
 			var sb strings.Builder
 			zhLike := e.i18n.IsZhLike()
 			for _, m := range modes {
-				marker := "  "
+				suffix := ""
 				if m.Key == current {
-					marker = "▶ "
+					if zhLike {
+						suffix = "（当前）"
+					} else {
+						suffix = " (current)"
+					}
 				}
 				if zhLike {
-					sb.WriteString(fmt.Sprintf("%s**%s** — %s\n", marker, m.NameZh, m.DescZh))
+					sb.WriteString(fmt.Sprintf("**%s**%s — %s\n", m.NameZh, suffix, m.DescZh))
 				} else {
-					sb.WriteString(fmt.Sprintf("%s**%s** — %s\n", marker, m.Name, m.Desc))
+					sb.WriteString(fmt.Sprintf("**%s**%s — %s\n", m.Name, suffix, m.Desc))
 				}
 			}
 			sb.WriteString(e.i18n.T(MsgModeUsage))
@@ -4936,9 +4940,6 @@ func (e *Engine) cmdMode(p Platform, msg *Message, args []string) {
 				label := m.Name
 				if zhLike {
 					label = m.NameZh
-				}
-				if m.Key == current {
-					label = "▶ " + label
 				}
 				row = append(row, ButtonOption{Text: label, Data: "cmd:/mode " + m.Key})
 				if len(row) >= 2 {
@@ -4959,8 +4960,11 @@ func (e *Engine) cmdMode(p Platform, msg *Message, args []string) {
 	target := strings.ToLower(args[0])
 	switcher.SetMode(target)
 	newMode := switcher.GetMode()
+	appliedLive := e.applyLiveModeChange(msg.SessionKey, newMode)
 
-	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
+	if !appliedLive {
+		e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
+	}
 
 	modes := switcher.PermissionModes()
 	displayName := newMode
@@ -4975,7 +4979,26 @@ func (e *Engine) cmdMode(p Platform, msg *Message, args []string) {
 			break
 		}
 	}
-	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgModeChanged), displayName))
+	reply := fmt.Sprintf(e.i18n.T(MsgModeChanged), displayName)
+	if appliedLive {
+		reply += "\n\n(Current session updated immediately.)"
+	}
+	e.reply(p, msg.ReplyCtx, reply)
+}
+
+func (e *Engine) applyLiveModeChange(sessionKey, mode string) bool {
+	iKey := e.interactiveKeyForSessionKey(sessionKey)
+	e.interactiveMu.Lock()
+	state, ok := e.interactiveStates[iKey]
+	e.interactiveMu.Unlock()
+	if !ok || state == nil || state.agentSession == nil || !state.agentSession.Alive() {
+		return false
+	}
+	switcher, ok := state.agentSession.(LiveModeSwitcher)
+	if !ok {
+		return false
+	}
+	return switcher.SetLiveMode(mode)
 }
 
 func (e *Engine) cmdQuiet(p Platform, msg *Message, args []string) {
@@ -5633,8 +5656,9 @@ func (e *Engine) sendPermissionPrompt(p Platform, replyCtx any, prompt, toolName
 		}
 		if err := bs.SendWithButtons(e.ctx, replyCtx, prompt, buttons); err == nil {
 			return
+		} else {
+			slog.Warn("sendPermissionPrompt: inline buttons failed, falling back", "error", err)
 		}
-		slog.Warn("sendPermissionPrompt: inline buttons failed, falling back")
 	}
 
 	// Try card with buttons (Feishu/Lark)
@@ -6026,8 +6050,13 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		if !ok {
 			return
 		}
-		switcher.SetMode(strings.ToLower(args))
+		newMode := strings.ToLower(args)
+		switcher.SetMode(newMode)
 		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
+		if e.applyLiveModeChange(sessionKey, switcher.GetMode()) {
+			e.cleanupInteractiveState(interactiveKey)
+			return
+		}
 		e.cleanupInteractiveState(interactiveKey)
 		// Mode change requires a new session to take effect
 		s := e.sessions.GetOrCreateActive(sessionKey)
