@@ -796,6 +796,62 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 	}
 }
 
+func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachment) error {
+	name := file.FileName
+	if name == "" {
+		name = "attachment"
+	}
+
+	newFile := func() *discordgo.File {
+		return &discordgo.File{
+			Name:        name,
+			ContentType: file.MimeType,
+			Reader:      bytes.NewReader(file.Data),
+		}
+	}
+
+	switch rc := rctx.(type) {
+	case *interactionReplyCtx:
+		rc.mu.Lock()
+		first := !rc.firstDone
+		if first {
+			rc.firstDone = true
+		}
+		rc.mu.Unlock()
+
+		var err error
+		if first {
+			_, err = p.session.InteractionResponseEdit(rc.interaction, &discordgo.WebhookEdit{
+				Files: []*discordgo.File{newFile()},
+			})
+		} else {
+			_, err = p.session.FollowupMessageCreate(rc.interaction, true, &discordgo.WebhookParams{
+				Files: []*discordgo.File{newFile()},
+			})
+		}
+		if err != nil {
+			slog.Warn("discord: interaction file failed, falling back to channel message", "error", err)
+			_, err = p.session.ChannelMessageSendComplex(rc.channelID, &discordgo.MessageSend{
+				Files: []*discordgo.File{newFile()},
+			})
+			if err != nil {
+				return fmt.Errorf("discord: send file fallback: %w", err)
+			}
+		}
+		return nil
+	case replyContext:
+		_, err := p.session.ChannelMessageSendComplex(rc.targetChannelID(), &discordgo.MessageSend{
+			Files: []*discordgo.File{newFile()},
+		})
+		if err != nil {
+			return fmt.Errorf("discord: send file: %w", err)
+		}
+		return nil
+	default:
+		return fmt.Errorf("discord: SendFile: invalid reply context type %T", rctx)
+	}
+}
+
 func buildDiscordActionRows(rows [][]core.ButtonOption) []discordgo.MessageComponent {
 	components := make([]discordgo.MessageComponent, 0, len(rows))
 	for _, row := range rows {
@@ -850,6 +906,7 @@ func (p *Platform) SendWithButtons(ctx context.Context, rctx any, content string
 }
 
 var _ core.ImageSender = (*Platform)(nil)
+var _ core.FileSender = (*Platform)(nil)
 var _ core.InlineButtonSender = (*Platform)(nil)
 
 func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
