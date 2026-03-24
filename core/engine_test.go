@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -4447,6 +4448,47 @@ func TestFreshSessionRespectedAfterFirstConnection(t *testing.T) {
 	// Should be empty string (fresh session), NOT ContinueSession
 	if calls[0] != "" {
 		t.Fatalf("StartSession call = %q, want empty string (fresh session)", calls[0])
+	}
+}
+
+func TestWorkspaceReconnectWithSavedSessionIDSkipsContinueBridge(t *testing.T) {
+	agent := &stubStartSessionAgent{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	e := &Engine{
+		agent:             agent,
+		sessions:          NewSessionManager(""),
+		ctx:               ctx,
+		i18n:              NewI18n("en"),
+		interactiveStates: make(map[string]*interactiveState),
+		display:           DisplayCfg{},
+	}
+
+	session := e.sessions.GetOrCreateActive("test:user3")
+	session.SetAgentSessionID("saved-session-id", "stub")
+
+	var wsConnectedOnce atomic.Bool
+	p := &stubPlatformEngine{n: "test"}
+	state := e.getOrCreateInteractiveStateWith("test:user3", p, "ctx", session, e.sessions, nil, "", true, &wsConnectedOnce)
+
+	if state.agentSession == nil {
+		t.Fatal("expected agentSession to be non-nil")
+	}
+	if !wsConnectedOnce.Load() {
+		t.Fatal("workspace connectedOnce flag should be marked after exact resume")
+	}
+
+	agent.mu.Lock()
+	calls := append([]string{}, agent.calls...)
+	agent.mu.Unlock()
+
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 StartSession call, got %d: %v", len(calls), calls)
+	}
+	if calls[0] != "saved-session-id" {
+		t.Fatalf("StartSession call = %q, want saved session id", calls[0])
 	}
 }
 
