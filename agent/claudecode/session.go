@@ -7,11 +7,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -44,13 +46,21 @@ type claudeSession struct {
 
 func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
+	claudeBin := resolveClaudeBinary()
+	effectiveDisableVerbose := disableVerbose
+	if filepath.Base(claudeBin) == "claude-orig" {
+		// The native Claude CLI on this machine requires --verbose together with
+		// stream-json in non-TTY/print mode. Keep verbose enabled for claude-orig;
+		// the earlier router-specific suppression only applied to the wrapper path.
+		effectiveDisableVerbose = false
+	}
 
 	args := []string{
 		"--output-format", "stream-json",
 		"--input-format", "stream-json",
 		"--permission-prompt-tool", "stdio",
 	}
-	if !disableVerbose {
+	if !effectiveDisableVerbose {
 		args = append(args, "--verbose")
 	}
 
@@ -87,13 +97,20 @@ func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode strin
 		args = append(args, "--append-system-prompt", sysPrompt)
 	}
 
-	slog.Debug("claudeSession: starting", "args", core.RedactArgs(args), "dir", workDir, "mode", mode)
-
-	cmd := exec.CommandContext(sessionCtx, "claude", args...)
+	cmd := exec.CommandContext(sessionCtx, claudeBin, args...)
 	cmd.Dir = workDir
-	// Filter out CLAUDECODE env var to prevent "nested session" detection,
-	// since cc-connect is a bridge, not a nested Claude Code session.
+	// Filter out Claude Code/session bridge env from the parent process so the
+	// child CLI does not attach to an existing remote/service-backed session.
 	env := filterEnv(os.Environ(), "CLAUDECODE")
+	env = filterEnvPrefix(env, "CLAUDE_CODE_")
+	claudeConfigDir := resolveClaudeConfigDir(workDir)
+	if claudeConfigDir != "" {
+		if err := os.MkdirAll(claudeConfigDir, 0o755); err != nil {
+			cancel()
+			return nil, fmt.Errorf("claudeSession: create config dir: %w", err)
+		}
+		env = core.MergeEnv(env, []string{"CLAUDE_CONFIG_DIR=" + claudeConfigDir})
+	}
 	if len(extraEnv) > 0 {
 		env = core.MergeEnv(env, extraEnv)
 	}
@@ -138,13 +155,30 @@ func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode strin
 }
 
 func (cs *claudeSession) readLoop(stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
+	var (
+		sawStructuredEvent bool
+		plainTextLines     []string
+	)
+
 	defer func() {
 		cs.alive.Store(false)
-		if err := cs.cmd.Wait(); err != nil {
-			stderrMsg := strings.TrimSpace(stderrBuf.String())
-			if stderrMsg != "" {
-				slog.Error("claudeSession: process failed", "error", err, "stderr", stderrMsg)
-				evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
+		err := cs.cmd.Wait()
+		stderrMsg := strings.TrimSpace(stderrBuf.String())
+
+		if err != nil && stderrMsg != "" {
+			slog.Error("claudeSession: process failed", "error", err, "stderr", stderrMsg)
+			evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
+			select {
+			case cs.events <- evt:
+			case <-cs.ctx.Done():
+				return
+			}
+		}
+
+		if !sawStructuredEvent && len(plainTextLines) > 0 {
+			content := strings.TrimSpace(strings.Join(plainTextLines, "\n"))
+			if content != "" {
+				evt := core.Event{Type: core.EventText, Content: content}
 				select {
 				case cs.events <- evt:
 				case <-cs.ctx.Done():
@@ -167,12 +201,22 @@ func (cs *claudeSession) readLoop(stdout io.ReadCloser, stderrBuf *bytes.Buffer)
 
 		var raw map[string]any
 		if err := json.Unmarshal([]byte(line), &raw); err != nil {
-			slog.Debug("claudeSession: non-JSON line", "line", line)
+			if maybeWorkspaceTrustPrompt(line) {
+				err := fmt.Errorf("Claude Code is waiting for workspace trust confirmation for %s; open the workspace in claude CLI once and confirm trust, then retry", cs.workDir)
+				slog.Error("claudeSession: workspace trust prompt blocked stream-json", "work_dir", cs.workDir)
+				evt := core.Event{Type: core.EventError, Error: err}
+				select {
+				case cs.events <- evt:
+				case <-cs.ctx.Done():
+					return
+				}
+			}
+			plainTextLines = append(plainTextLines, line)
 			continue
 		}
 
 		eventType, _ := raw["type"].(string)
-		slog.Debug("claudeSession: event", "type", eventType)
+		sawStructuredEvent = true
 
 		switch eventType {
 		case "system":
@@ -186,8 +230,7 @@ func (cs *claudeSession) readLoop(stdout io.ReadCloser, stderrBuf *bytes.Buffer)
 		case "control_request":
 			cs.handleControlRequest(raw)
 		case "control_cancel_request":
-			requestID, _ := raw["request_id"].(string)
-			slog.Debug("claudeSession: permission cancelled", "request_id", requestID)
+			_, _ = raw["request_id"].(string)
 		}
 	}
 
@@ -391,12 +434,15 @@ func (cs *claudeSession) Send(prompt string, images []core.ImageAttachment, file
 	if !cs.alive.Load() {
 		return fmt.Errorf("session process is not running")
 	}
-
 	if len(images) == 0 && len(files) == 0 {
-		return cs.writeJSON(map[string]any{
+		err := cs.writeJSON(map[string]any{
 			"type":    "user",
 			"message": map[string]any{"role": "user", "content": prompt},
 		})
+		if err != nil {
+			return err
+		}
+		return nil
 	}
 
 	attachDir := filepath.Join(cs.workDir, ".cc-connect", "attachments")
@@ -451,10 +497,14 @@ func (cs *claudeSession) Send(prompt string, images []core.ImageAttachment, file
 	}
 	parts = append(parts, map[string]any{"type": "text", "text": textPart})
 
-	return cs.writeJSON(map[string]any{
+	err := cs.writeJSON(map[string]any{
 		"type":    "user",
 		"message": map[string]any{"role": "user", "content": parts},
 	})
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func extFromMime(mime string) string {
@@ -588,4 +638,62 @@ func filterEnv(env []string, key string) []string {
 		}
 	}
 	return out
+}
+
+func filterEnvPrefix(env []string, prefix string) []string {
+	out := make([]string, 0, len(env))
+	for _, e := range env {
+		if !strings.HasPrefix(e, prefix) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+var ansiControlSeq = regexp.MustCompile(`\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))`)
+
+func maybeWorkspaceTrustPrompt(line string) bool {
+	clean := ansiControlSeq.ReplaceAllString(line, "")
+	clean = strings.Map(func(r rune) rune {
+		if r < 32 && r != '\n' && r != '\t' {
+			return -1
+		}
+		return r
+	}, clean)
+	clean = strings.Join(strings.Fields(clean), " ")
+	clean = strings.ToLower(clean)
+	return strings.Contains(clean, "project you trust") ||
+		strings.Contains(clean, "quick safety check") ||
+		strings.Contains(clean, "yes, i trust this folder")
+}
+
+func resolveClaudeBinary() string {
+	claudePath, err := exec.LookPath("claude")
+	if err != nil {
+		return "claude"
+	}
+	origPath, err := exec.LookPath("claude-orig")
+	if err != nil {
+		return "claude"
+	}
+
+	data, err := os.ReadFile(claudePath)
+	if err != nil {
+		return "claude"
+	}
+	content := string(data)
+	if strings.Contains(content, "ccr code") {
+		slog.Info("claudeSession: using claude-orig to bypass wrapper", "wrapper", claudePath, "resolved", origPath)
+		return origPath
+	}
+	return "claude"
+}
+
+func resolveClaudeConfigDir(workDir string) string {
+	if strings.TrimSpace(workDir) == "" {
+		return ""
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(workDir))
+	return filepath.Join(os.TempDir(), "cc-connect-claude", fmt.Sprintf("%08x", h.Sum32()))
 }
