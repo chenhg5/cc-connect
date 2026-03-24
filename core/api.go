@@ -65,6 +65,7 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 	s.mux.HandleFunc("/sessions", s.handleSessions)
 	s.mux.HandleFunc("/cron/add", s.handleCronAdd)
 	s.mux.HandleFunc("/cron/list", s.handleCronList)
+	s.mux.HandleFunc("/cron/info", s.handleCronInfo)
 	s.mux.HandleFunc("/cron/edit", s.handleCronEdit)
 	s.mux.HandleFunc("/cron/del", s.handleCronDel)
 	s.mux.HandleFunc("/relay/send", s.handleRelaySend)
@@ -349,6 +350,31 @@ func (s *APIServer) handleCronDel(w http.ResponseWriter, r *http.Request) {
 	} else {
 		http.Error(w, fmt.Sprintf("job %q not found", req.ID), http.StatusNotFound)
 	}
+}
+
+func (s *APIServer) handleCronInfo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.cron == nil {
+		http.Error(w, "cron scheduler not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		http.Error(w, "id is required", http.StatusBadRequest)
+		return
+	}
+
+	job := s.cron.store.Get(id)
+	if job == nil {
+		http.Error(w, fmt.Sprintf("job %q not found", id), http.StatusNotFound)
+		return
+	}
+
+	apiJSON(w, http.StatusOK, job)
 }
 
 func (s *APIServer) handleCronEdit(w http.ResponseWriter, r *http.Request) {
