@@ -46,6 +46,7 @@ config.toml
 .npmrc
 package-lock.json
 node_modules/
+.vite/
 
 # ============================================================================
 # Build & distribution
