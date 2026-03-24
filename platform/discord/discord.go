@@ -617,14 +617,15 @@ func (p *Platform) handleComponentInteraction(s *discordgo.Session, i *discordgo
 
 	channelID := i.ChannelID
 	sessionKey := resolveSessionKeyForChannel(channelID, userID, p.shareSessionInChannel, p.threadIsolation, sessionThreadOps{session: p.session})
+    chatName, _ := p.ResolveChannelName(channelID);
 	p.handler(p, &core.Message{
 		SessionKey: sessionKey,
 		Platform:   "discord",
 		MessageID:  i.ID,
 		UserID:     userID,
 		UserName:   userName,
-		ChatName:   p.resolveChannelName(channelID),
 		Content:    command,
+        ChatName:   chatName,
 		ReplyCtx:   replyContext{channelID: channelID},
 	})
 }

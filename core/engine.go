@@ -382,7 +382,6 @@ func (e *Engine) SetDefaultQuiet(q bool) {
 	e.defaultQuiet = q
 }
 
-<<<<<<< HEAD
 // estimateTokens provides a rough token estimate for a set of history entries.
 func estimateTokens(entries []HistoryEntry) int {
 	return estimateTokensWithPendingAssistant(entries, "")
@@ -4781,7 +4780,7 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 		target = resolveModelAlias(models, target)
 	}
 
-	target, err := e.switchModel(target)
+	target, err = e.switchModel(target)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChangeFailed, err))
 		return
