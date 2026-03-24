@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"log/slog"
 	"os"
@@ -46,21 +45,13 @@ type claudeSession struct {
 
 func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
-	claudeBin := resolveClaudeBinary()
-	effectiveDisableVerbose := disableVerbose
-	if filepath.Base(claudeBin) == "claude-orig" {
-		// The native Claude CLI on this machine requires --verbose together with
-		// stream-json in non-TTY/print mode. Keep verbose enabled for claude-orig;
-		// the earlier router-specific suppression only applied to the wrapper path.
-		effectiveDisableVerbose = false
-	}
 
 	args := []string{
 		"--output-format", "stream-json",
 		"--input-format", "stream-json",
 		"--permission-prompt-tool", "stdio",
 	}
-	if !effectiveDisableVerbose {
+	if !disableVerbose {
 		args = append(args, "--verbose")
 	}
 
@@ -97,20 +88,12 @@ func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode strin
 		args = append(args, "--append-system-prompt", sysPrompt)
 	}
 
-	cmd := exec.CommandContext(sessionCtx, claudeBin, args...)
+	cmd := exec.CommandContext(sessionCtx, "claude", args...)
 	cmd.Dir = workDir
 	// Filter out Claude Code/session bridge env from the parent process so the
 	// child CLI does not attach to an existing remote/service-backed session.
 	env := filterEnv(os.Environ(), "CLAUDECODE")
 	env = filterEnvPrefix(env, "CLAUDE_CODE_")
-	claudeConfigDir := resolveClaudeConfigDir(workDir)
-	if claudeConfigDir != "" {
-		if err := os.MkdirAll(claudeConfigDir, 0o755); err != nil {
-			cancel()
-			return nil, fmt.Errorf("claudeSession: create config dir: %w", err)
-		}
-		env = core.MergeEnv(env, []string{"CLAUDE_CONFIG_DIR=" + claudeConfigDir})
-	}
 	if len(extraEnv) > 0 {
 		env = core.MergeEnv(env, extraEnv)
 	}
@@ -665,35 +648,4 @@ func maybeWorkspaceTrustPrompt(line string) bool {
 	return strings.Contains(clean, "project you trust") ||
 		strings.Contains(clean, "quick safety check") ||
 		strings.Contains(clean, "yes, i trust this folder")
-}
-
-func resolveClaudeBinary() string {
-	claudePath, err := exec.LookPath("claude")
-	if err != nil {
-		return "claude"
-	}
-	origPath, err := exec.LookPath("claude-orig")
-	if err != nil {
-		return "claude"
-	}
-
-	data, err := os.ReadFile(claudePath)
-	if err != nil {
-		return "claude"
-	}
-	content := string(data)
-	if strings.Contains(content, "ccr code") {
-		slog.Info("claudeSession: using claude-orig to bypass wrapper", "wrapper", claudePath, "resolved", origPath)
-		return origPath
-	}
-	return "claude"
-}
-
-func resolveClaudeConfigDir(workDir string) string {
-	if strings.TrimSpace(workDir) == "" {
-		return ""
-	}
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(workDir))
-	return filepath.Join(os.TempDir(), "cc-connect-claude", fmt.Sprintf("%08x", h.Sum32()))
 }
