@@ -493,11 +493,12 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 
 		msg := &core.Message{
 			SessionKey: sessionKey, Platform: "discord",
+			ChannelID: m.ChannelID,
 			MessageID: m.ID,
 			UserID:    m.Author.ID, UserName: m.Author.Username,
-			ChatName: p.resolveChannelName(m.ChannelID),
-			Content:  m.Content, Images: images, Audio: audio, ReplyCtx: rctx,
+			Content: m.Content, Images: images, Audio: audio, ReplyCtx: rctx,
 		}
+		msg.ChatName, _ = p.ResolveChannelName(m.ChannelID)
 		p.handler(p, msg)
 	})
 
@@ -566,10 +567,11 @@ func (p *Platform) handleInteraction(s *discordgo.Session, i *discordgo.Interact
 	msg := &core.Message{
 		SessionKey: sessionKey, Platform: "discord",
 		MessageID: i.ID,
+		ChannelID: i.ChannelID,
 		UserID:    userID, UserName: userName,
-		ChatName: p.resolveChannelName(channelID),
-		Content:  cmdText, ReplyCtx: ictx,
+		Content: cmdText, ReplyCtx: ictx,
 	}
+	msg.ChatName, _ = p.ResolveChannelName(channelID)
 	p.handler(p, msg)
 }
 
@@ -615,14 +617,15 @@ func (p *Platform) handleComponentInteraction(s *discordgo.Session, i *discordgo
 
 	channelID := i.ChannelID
 	sessionKey := resolveSessionKeyForChannel(channelID, userID, p.shareSessionInChannel, p.threadIsolation, sessionThreadOps{session: p.session})
+    chatName, _ := p.ResolveChannelName(channelID);
 	p.handler(p, &core.Message{
 		SessionKey: sessionKey,
 		Platform:   "discord",
 		MessageID:  i.ID,
 		UserID:     userID,
 		UserName:   userName,
-		ChatName:   p.resolveChannelName(channelID),
 		Content:    command,
+        ChatName:   chatName,
 		ReplyCtx:   replyContext{channelID: channelID},
 	})
 }
@@ -938,30 +941,22 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 	return func() { close(done) }
 }
 
-// ResolveChannelName implements core.ChannelNameResolver.
 func (p *Platform) ResolveChannelName(channelID string) (string, error) {
-	name := p.resolveChannelName(channelID)
-	if name == channelID {
-		return "", fmt.Errorf("discord: channel name not found for %s", channelID)
-	}
-	return name, nil
-}
-
-func (p *Platform) resolveChannelName(channelID string) string {
 	if cached, ok := p.channelNameCache.Load(channelID); ok {
-		return cached.(string)
+		return cached.(string), nil
 	}
 	ch, err := p.session.Channel(channelID)
 	if err != nil {
 		slog.Debug("discord: resolve channel name failed", "channel", channelID, "error", err)
-		return channelID
+		return channelID, err
 	}
 	name := ch.Name
+	slog.Debug("discord: resolve channel name", "channel", channelID, "name", ch.Name)
 	if name == "" {
-		return channelID
+		return channelID, nil
 	}
 	p.channelNameCache.Store(channelID, name)
-	return name
+	return name, nil
 }
 
 func (p *Platform) Stop() error {
