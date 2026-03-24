@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -389,6 +390,7 @@ func TestSendWithButtons_PreservesMultipleRows(t *testing.T) {
 		t.Fatalf("SendWithButtons() error = %v", err)
 	}
 }
+
 // ── Dedup tests ──────────────────────────────────────────────
 
 // simulateHandlerCall mimics the dedup + dispatch logic in the MessageCreate
@@ -591,6 +593,28 @@ func TestStripDiscordMention(t *testing.T) {
 			if got != tt.want {
 				t.Errorf("stripDiscordMention(%q, %q) = %q, want %q",
 					tt.content, tt.botID, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestReplyContextForDeferredInteractionFallback(t *testing.T) {
+	cid := "chan-1"
+	tests := []struct {
+		name string
+		ch   *discordgo.Channel
+		want replyContext
+	}{
+		{"nil channel", nil, replyContext{channelID: cid}},
+		{"guild text", &discordgo.Channel{ID: cid, Type: discordgo.ChannelTypeGuildText}, replyContext{channelID: cid}},
+		{"public thread", &discordgo.Channel{ID: cid, Type: discordgo.ChannelTypeGuildPublicThread}, replyContext{channelID: cid, threadID: cid}},
+		{"private thread", &discordgo.Channel{ID: cid, Type: discordgo.ChannelTypeGuildPrivateThread}, replyContext{channelID: cid, threadID: cid}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := replyContextForDeferredInteractionFallback(tt.ch, cid)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("got %+v want %+v", got, tt.want)
 			}
 		})
 	}
