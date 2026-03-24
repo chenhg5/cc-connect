@@ -1926,16 +1926,22 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		return state
 	}
 
-	// On first real-user connection after engine startup (or workspace re-creation
-	// after idle reap), use --continue to pick up the most recent CLI session.
-	// Subsequent connections respect the stored session ID (or "" for fresh).
+	// On first real-user connection after engine startup, use --continue to pick
+	// up the most recent CLI session. For workspace-scoped reconnects after idle
+	// reap, keep that behavior only when we do not already have a concrete saved
+	// agent session ID; otherwise exact resume is more precise than continuing
+	// whatever the CLI considers "latest" in that workspace.
 	startSessionID := session.GetAgentSessionID()
 	once := &e.hasConnectedOnce
 	if connectedOnce != nil {
 		once = connectedOnce
 	}
-	if consumeFirstUserContinueBridge && !once.Swap(true) {
-		startSessionID = ContinueSession
+	if consumeFirstUserContinueBridge {
+		if connectedOnce != nil && startSessionID != "" {
+			once.Store(true)
+		} else if !once.Swap(true) {
+			startSessionID = ContinueSession
+		}
 	}
 
 	isResume := startSessionID != ""
