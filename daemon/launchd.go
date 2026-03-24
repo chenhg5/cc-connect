@@ -171,7 +171,10 @@ func buildPlist(cfg Config) string {
 	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>
-	<true/>
+	<dict>
+		<key>SuccessfulExit</key>
+		<true/>
+	</dict>
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>CC_LOG_FILE</key>
