@@ -1851,11 +1851,16 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		// wrong conversation context.
 		wantID := session.GetAgentSessionID()
 		currentID := state.agentSession.CurrentSessionID()
-		if wantID == "" || currentID == "" || wantID == currentID {
+		// Reuse only when the live process matches what the Session expects:
+		// - IDs match (same Claude session), or
+		// - the process has not reported an ID yet (startup; empty want is OK).
+		// If wantID is empty (/new, cleared session) but the process already has
+		// a concrete ID, reusing would keep --resume context — recycle (#238).
+		needRecycle := currentID != "" && (wantID == "" || wantID != currentID)
+		if !needRecycle {
 			return state
 		}
-		// Active session has changed — tear down the stale agent so we can
-		// start a new one that matches the current session below.
+		// Tear down the stale agent so we start one that matches the Session below.
 		slog.Info("interactive session mismatch, recycling",
 			"session_key", sessionKey,
 			"want_agent_session", wantID,
