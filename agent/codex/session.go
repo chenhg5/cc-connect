@@ -24,18 +24,18 @@ import (
 // codexSession manages a multi-turn Codex conversation.
 // First Send() uses `codex exec`, subsequent ones use `codex exec resume <threadID>`.
 type codexSession struct {
-	workDir    string
-	model      string
-	effort     string
-	mode       string
-	extraEnv   []string
-	events     chan core.Event
-	threadID   atomic.Value // stores string — Codex thread_id
-	ctx        context.Context
-	cancel     context.CancelFunc
-	wg         sync.WaitGroup
-	alive      atomic.Bool
-	closeOnce  sync.Once
+	workDir   string
+	model     string
+	effort    string
+	mode      string
+	extraEnv  []string
+	events    chan core.Event
+	threadID  atomic.Value // stores string — Codex thread_id
+	ctx       context.Context
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
+	alive     atomic.Bool
+	closeOnce sync.Once
 
 	pendingMsgs []string // buffered agent_message texts awaiting classification
 }
@@ -535,13 +535,25 @@ func (cs *codexSession) Close() error {
 	}()
 	select {
 	case <-done:
+		// readLoop has exited; safe to close the events channel.
+		cs.closeOnce.Do(func() {
+			close(cs.events)
+		})
+		return nil
 	case <-time.After(8 * time.Second):
-		slog.Warn("codexSession: close timed out, abandoning wg.Wait")
+		// Do not close(cs.events) here: readLoop may still be in handleEvent
+		// (e.g. turn.completed -> flushPendingAsText) and would panic on send.
+		// See https://github.com/chenhg5/cc-connect/issues/281
+		slog.Warn("codexSession: close timed out, deferring events channel close until readLoop exits",
+			"wait", 8*time.Second)
+		go func() {
+			<-done
+			cs.closeOnce.Do(func() {
+				close(cs.events)
+			})
+		}()
+		return nil
 	}
-	cs.closeOnce.Do(func() {
-		close(cs.events)
-	})
-	return nil
 }
 
 // extractItemText extracts text from an item's array field (e.g. "summary" or "content").
