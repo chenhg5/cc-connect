@@ -1009,6 +1009,40 @@ app_secret = "your-feishu-app-secret"
 # [projects.platforms.options]
 # token = "your-telegram-bot-token"
 
+# =============================================================================
+# Project 5: Using Droid CLI / 项目 5：使用 Droid CLI (uncomment to enable / 取消注释以启用)
+# =============================================================================
+# Requires: Droid CLI (`droid`) installed and authenticated or configured BYOK.
+# 需要安装并完成登录认证：Droid CLI（`droid`）或者配置好BYOK。
+# Droid uses `droid exec --output-format stream-json` under the hood.
+# Droid 底层使用 `droid exec --output-format stream-json` 命令。
+
+# [[projects]]
+# name = "my-droid-project"
+#
+# [projects.agent]
+# type = "droid"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/project"
+# cmd = "droid"          # optional CLI binary name / 可选 CLI 二进制名称
+# model = "gpt-5.3-codex" # optional model / 可选模型
+# reasoning_effort = "medium" # "none" | "off" | "low" | "medium" | "high" | "xhigh" | "max"
+# auto = ""              # "" | "low" | "medium" | "high"
+# skip_permissions_unsafe = false # true = --skip-permissions-unsafe（危险）
+#
+# Mode mapping in chat (/mode):
+# 聊天命令 /mode 与 Droid 参数映射：
+# - default -> no --auto (read-only default)
+# - low/medium/high -> --auto <level>
+# - yolo -> --skip-permissions-unsafe
+#
+# [[projects.platforms]]
+# type = "telegram"
+#
+# [projects.platforms.options]
+# token = "your-telegram-bot-token"
+
 # QQ (via NapCat / OneBot v11) (uncomment to enable / 取消注释以启用)
 # Requires a OneBot v11 implementation running alongside your QQ client:
 # 需要一个 OneBot v11 实现配合 QQ 客户端运行：
@@ -1055,7 +1089,7 @@ app_secret = "your-feishu-app-secret"
 # markdown_support = false  # Enable Markdown messages (msg_type: 2). Requires bot permission. / 启用 Markdown 消息（msg_type: 2）。需要机器人具备该权限。
 
 # =============================================================================
-# Project 5: Using Qoder CLI / 项目 5：使用 Qoder CLI (uncomment to enable / 取消注释以启用)
+# Project 6: Using Qoder CLI / 项目 6：使用 Qoder CLI (uncomment to enable / 取消注释以启用)
 # =============================================================================
 # Requires: curl -fsSL https://qoder.com/install | bash
 # 需要安装：curl -fsSL https://qoder.com/install | bash
@@ -1086,7 +1120,7 @@ app_secret = "your-feishu-app-secret"
 # token = "your-telegram-bot-token"
 
 # =============================================================================
-# Project 6: Using OpenCode / 项目 6：使用 OpenCode (uncomment to enable / 取消注释以启用)
+# Project 7: Using OpenCode / 项目 7：使用 OpenCode (uncomment to enable / 取消注释以启用)
 # =============================================================================
 # Requires: OpenCode CLI — https://github.com/opencode-ai/opencode
 # 需要安装：OpenCode CLI
@@ -1183,7 +1217,7 @@ app_secret = "your-feishu-app-secret"
 # token = "your-telegram-bot-token"
 
 # =============================================================================
-# Project 7: Using iFlow CLI / 项目 7：使用 iFlow CLI (uncomment to enable / 取消注释以启用)
+# Project 8: Using iFlow CLI / 项目 8：使用 iFlow CLI (uncomment to enable / 取消注释以启用)
 # =============================================================================
 # Requires: npm install -g @iflow-ai/iflow-cli
 # 需要安装：npm install -g @iflow-ai/iflow-cli
@@ -1227,7 +1261,7 @@ app_secret = "your-feishu-app-secret"
 # token = "your-telegram-bot-token"
 
 # =============================================================================
-# Project 8: Another example / 项目 8：更多示例 (uncomment to enable / 取消注释以启用)
+# Project 9: Another example / 项目 9：更多示例 (uncomment to enable / 取消注释以启用)
 # =============================================================================
 
 # [[projects]]
