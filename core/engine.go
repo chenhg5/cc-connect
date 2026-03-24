@@ -2252,6 +2252,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventText:
 			if event.Content != "" {
+				if len(textParts) == 0 {
+					sp.setStatus(CardStatusWorking)
+				}
 				textParts = append(textParts, event.Content)
 				if sp.canPreview() {
 					sp.appendText(event.Content)
@@ -2430,14 +2433,17 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			} else if suppressDuplicate {
 				sp.discard()
 				slog.Debug("EventResult: suppressed duplicate side-channel text", "response_len", len(fullResponse))
-			} else if sp.finish(fullResponse) {
-				slog.Debug("EventResult: finalized via stream preview", "response_len", len(fullResponse))
 			} else {
-				slog.Debug("EventResult: sending via p.Send (preview inactive or failed)", "response_len", len(fullResponse), "chunks", len(splitMessage(fullResponse, maxPlatformMessageLen)))
-				for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
-					if err := p.Send(e.ctx, replyCtx, chunk); err != nil {
-						slog.Error("failed to send reply", "error", err, "msg_id", msgID)
-						return
+				sp.setStatus(CardStatusDone)
+				if sp.finish(fullResponse) {
+					slog.Debug("EventResult: finalized via stream preview", "response_len", len(fullResponse))
+				} else {
+					slog.Debug("EventResult: sending via p.Send (preview inactive or failed)", "response_len", len(fullResponse), "chunks", len(splitMessage(fullResponse, maxPlatformMessageLen)))
+					for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
+						if err := p.Send(e.ctx, replyCtx, chunk); err != nil {
+							slog.Error("failed to send reply", "error", err, "msg_id", msgID)
+							return
+						}
 					}
 				}
 			}
@@ -2559,7 +2565,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			return
 
 		case EventError:
-			sp.discard()
+			sp.setStatus(CardStatusError)
+			sp.finish(sp.getFullText())
 			if event.Error != nil {
 				slog.Error("agent error", "error", event.Error)
 				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
@@ -2598,11 +2605,14 @@ channelClosed:
 					}
 				}
 			}
-		} else if sp.finish(fullResponse) {
-			slog.Debug("stream preview: finalized in-place (process exited)")
 		} else {
-			for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
-				e.send(p, replyCtx, chunk)
+			sp.setStatus(CardStatusDone)
+			if sp.finish(fullResponse) {
+				slog.Debug("stream preview: finalized in-place (process exited)")
+			} else {
+				for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
+					e.send(p, replyCtx, chunk)
+				}
 			}
 		}
 	}
