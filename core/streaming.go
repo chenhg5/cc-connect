@@ -52,6 +52,24 @@ type streamPreview struct {
 	pendingStatus CardStatus // last status set via setStatus(); applied on recovery
 }
 
+// ToolStep is one summarized tool invocation shown in rich progress cards.
+type ToolStep struct {
+	Name    string // tool name (e.g. "Bash", "Edit")
+	Summary string // human-readable summary shown in the card
+}
+
+// RichCardSupporter is an optional interface for platforms that can build
+// native rich cards combining tool steps and markdown content.
+type RichCardSupporter interface {
+	BuildRichCard(status CardStatus, title string, steps []ToolStep, markdown string, streaming bool) string
+}
+
+// MarkdownTableSplitter is an optional interface for platforms that need
+// platform-specific markdown table chunking before final send.
+type MarkdownTableSplitter interface {
+	SplitMarkdownByTables(md string, maxTables int) []string
+}
+
 // PreviewStarter is an optional interface for platforms that can initiate a
 // streaming preview message and return a handle for subsequent updates.
 type PreviewStarter interface {
@@ -286,6 +304,21 @@ func (sp *streamPreview) finish(finalText string) bool {
 
 	if sp.previewMsgID == nil || sp.degraded {
 		if sp.previewMsgID != nil && sp.degraded {
+			// Try to recover degraded preview via UpdateMessage before falling back to delete
+			if finalText != "" {
+				if updater, ok := sp.platform.(MessageUpdater); ok {
+					if err := updater.UpdateMessage(sp.ctx, sp.previewMsgID, finalText); err == nil {
+						if sp.pendingStatus != "" {
+							if statusUpdater, ok := sp.platform.(PreviewStatusUpdater); ok {
+								statusUpdater.SetPreviewStatus(sp.previewMsgID, sp.pendingStatus)
+							}
+						}
+						return true
+					} else {
+						slog.Debug("stream preview finish: degraded UpdateMessage failed, cleaning up", "error", err)
+					}
+				}
+			}
 			if cleaner, ok := sp.platform.(PreviewCleaner); ok {
 				slog.Debug("stream preview finish: deleting stale preview (degraded)")
 				_ = cleaner.DeletePreviewMessage(sp.ctx, sp.previewMsgID)
