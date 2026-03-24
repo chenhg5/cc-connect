@@ -1059,6 +1059,12 @@ func (e *Engine) OnPlatformUnavailable(p Platform, err error) {
 	slog.Warn("platform unavailable", "project", e.name, "platform", p.Name(), "error", err)
 }
 
+// ReceiveMessage delivers a message from a platform to the engine.
+// This is a public wrapper for use in integration tests and external callers.
+func (e *Engine) ReceiveMessage(p Platform, msg *Message) {
+	e.handleMessage(p, msg)
+}
+
 func (e *Engine) onPlatformReady(p Platform) {
 	if !e.markPlatformReady(p) {
 		return
