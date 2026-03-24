@@ -111,6 +111,38 @@ func (a *resultAgent) StartSession(_ context.Context, _ string) (AgentSession, e
 func (a *resultAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) { return nil, nil }
 func (a *resultAgent) Stop() error                                                { return nil }
 
+type sessionEnvRecordingAgent struct {
+	stubAgent
+	session AgentSession
+	mu      sync.Mutex
+	env     []string
+}
+
+func (a *sessionEnvRecordingAgent) StartSession(_ context.Context, _ string) (AgentSession, error) {
+	if a.session != nil {
+		return a.session, nil
+	}
+	return &stubAgentSession{}, nil
+}
+
+func (a *sessionEnvRecordingAgent) SetSessionEnv(env []string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.env = append([]string(nil), env...)
+}
+
+func (a *sessionEnvRecordingAgent) EnvValue(key string) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	prefix := key + "="
+	for _, entry := range a.env {
+		if strings.HasPrefix(entry, prefix) {
+			return strings.TrimPrefix(entry, prefix)
+		}
+	}
+	return ""
+}
+
 type resultAgentSession struct {
 	events      chan Event
 	result      string
@@ -1531,6 +1563,58 @@ func TestHandlePendingPermission_MultiWorkspaceLookup(t *testing.T) {
 	}
 	if session.lastResult.Behavior != "allow" {
 		t.Fatalf("RespondPermission behavior = %q, want %q", session.lastResult.Behavior, "allow")
+	}
+}
+
+func TestHandleMessage_MultiWorkspacePreservesCCSessionKey(t *testing.T) {
+	p := &stubPlatformEngine{n: "discord"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindingPath)
+
+	wsDir := filepath.Join(baseDir, "ws1")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	normalizedWsDir := normalizeWorkspacePath(wsDir)
+	channelID := "C123"
+	e.workspaceBindings.Bind("project:test", channelID, "chan", normalizedWsDir)
+
+	wsAgent := &sessionEnvRecordingAgent{session: newResultAgentSession("ok")}
+	ws := e.workspacePool.GetOrCreate(normalizedWsDir)
+	ws.agent = wsAgent
+	ws.sessions = NewSessionManager("")
+
+	msg := &Message{
+		SessionKey: "discord:" + channelID + ":U1",
+		Platform:   "discord",
+		UserID:     "U1",
+		UserName:   "user",
+		Content:    "hello",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	deadline := time.After(2 * time.Second)
+	for {
+		if got := wsAgent.EnvValue("CC_SESSION_KEY"); got != "" {
+			if got != msg.SessionKey {
+				t.Fatalf("CC_SESSION_KEY = %q, want %q", got, msg.SessionKey)
+			}
+			if strings.Contains(got, normalizedWsDir) {
+				t.Fatalf("CC_SESSION_KEY leaked workspace path: %q", got)
+			}
+			return
+		}
+
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for CC_SESSION_KEY to be injected")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
 	}
 }
 
