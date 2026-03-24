@@ -1963,11 +1963,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	}
 
 	if newID := agentSession.CurrentSessionID(); newID != "" {
-		if session.AgentSessionID == ContinueSession {
-			// Sentinel was persisted (e.g. after restart). Replace with real ID and save.
-			session.SetAgentSessionID(newID, agent.Name())
-			sessions.Save()
-		} else if session.CompareAndSetAgentSessionID(newID, agent.Name()) {
+		if session.CompareAndSetAgentSessionID(newID, agent.Name()) {
 			sessions.Save()
 		}
 	}
