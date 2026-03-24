@@ -391,6 +391,92 @@ func TestSendWithButtons_PreservesMultipleRows(t *testing.T) {
 	}
 }
 
+func TestSendFile_SendsChannelAttachment(t *testing.T) {
+	var contentType string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		contentType = r.Header.Get("Content-Type")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"msg-file","channel_id":"ch-1"}`)
+	}))
+	defer server.Close()
+
+	oldEndpointDiscord := discordgo.EndpointDiscord
+	oldEndpointAPI := discordgo.EndpointAPI
+	oldEndpointChannels := discordgo.EndpointChannels
+	discordgo.EndpointDiscord = server.URL + "/"
+	discordgo.EndpointAPI = discordgo.EndpointDiscord + "api/v" + discordgo.APIVersion + "/"
+	discordgo.EndpointChannels = discordgo.EndpointAPI + "channels/"
+	defer func() {
+		discordgo.EndpointDiscord = oldEndpointDiscord
+		discordgo.EndpointAPI = oldEndpointAPI
+		discordgo.EndpointChannels = oldEndpointChannels
+	}()
+
+	s, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New() error = %v", err)
+	}
+	s.Client = server.Client()
+
+	p := &Platform{session: s}
+	err = p.SendFile(context.Background(), replyContext{channelID: "ch-1"}, core.FileAttachment{
+		FileName: "report.pdf",
+		MimeType: "application/pdf",
+		Data:     []byte("pdf-data"),
+	})
+	if err != nil {
+		t.Fatalf("SendFile() error = %v", err)
+	}
+	if !strings.Contains(contentType, "multipart/form-data") {
+		t.Fatalf("content type = %q, want multipart/form-data", contentType)
+	}
+}
+
+func TestSendFile_UsesInteractionEndpoints(t *testing.T) {
+	requests := make([]string, 0, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"msg-file","channel_id":"ch-1"}`)
+	}))
+	defer server.Close()
+
+	oldEndpointDiscord := discordgo.EndpointDiscord
+	oldEndpointAPI := discordgo.EndpointAPI
+	oldEndpointChannels := discordgo.EndpointChannels
+	oldEndpointWebhooks := discordgo.EndpointWebhooks
+	discordgo.EndpointDiscord = server.URL + "/"
+	discordgo.EndpointAPI = discordgo.EndpointDiscord + "api/v" + discordgo.APIVersion + "/"
+	discordgo.EndpointChannels = discordgo.EndpointAPI + "channels/"
+	discordgo.EndpointWebhooks = discordgo.EndpointAPI + "webhooks/"
+	defer func() {
+		discordgo.EndpointDiscord = oldEndpointDiscord
+		discordgo.EndpointAPI = oldEndpointAPI
+		discordgo.EndpointChannels = oldEndpointChannels
+		discordgo.EndpointWebhooks = oldEndpointWebhooks
+	}()
+
+	s, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New() error = %v", err)
+	}
+	s.Client = server.Client()
+
+	p := &Platform{session: s}
+	rc := &interactionReplyCtx{interaction: &discordgo.Interaction{AppID: "app-1", Token: "token-1"}}
+	err = p.SendFile(context.Background(), rc, core.FileAttachment{
+		FileName: "report.pdf",
+		MimeType: "application/pdf",
+		Data:     []byte("pdf-data"),
+	})
+	if err != nil {
+		t.Fatalf("SendFile() error = %v", err)
+	}
+	if len(requests) != 1 || !strings.Contains(requests[0], "/messages/@original") {
+		t.Fatalf("requests = %v, want one original interaction edit", requests)
+	}
+}
+
 // ── Dedup tests ──────────────────────────────────────────────
 
 // simulateHandlerCall mimics the dedup + dispatch logic in the MessageCreate
