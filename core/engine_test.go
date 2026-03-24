@@ -3898,6 +3898,42 @@ func TestSessionMismatch_RecyclesStaleAgent(t *testing.T) {
 	}
 }
 
+// TestSessionClearedAfterNew_RecyclesAliveAgent verifies issue #238: after /new the
+// Session's AgentSessionID is empty but an older Claude process may still be alive;
+// it must be recycled instead of reused (which would keep prior --resume context).
+func TestSessionClearedAfterNew_RecyclesAliveAgent(t *testing.T) {
+	newSess := newControllableSession("fresh-id")
+	agent := &controllableAgent{nextSession: newSess}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.hasConnectedOnce.Store(true) // not the process-wide first connection; /new is after prior chat
+
+	key := "test:user1"
+	oldSess := newControllableSession("prior-claude-session")
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{
+		agentSession: oldSess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Unlock()
+
+	session := &Session{AgentSessionID: ""}
+
+	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "", true, nil)
+	if state.agentSession == oldSess {
+		t.Fatal("expected stale agent to be recycled when AgentSessionID was cleared")
+	}
+	if state.agentSession != newSess {
+		t.Fatal("expected new agent session from StartSession")
+	}
+	select {
+	case <-oldSess.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("old agent session was not closed after /new-style clear")
+	}
+}
+
 // TestSessionMismatch_DoesNotLeakQuiet verifies that after a session mismatch,
 // the new state gets defaultQuiet instead of inheriting quiet from the stale state.
 func TestSessionMismatch_DoesNotLeakQuiet(t *testing.T) {

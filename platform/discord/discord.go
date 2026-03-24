@@ -544,11 +544,28 @@ func (p *Platform) handleInteraction(s *discordgo.Session, i *discordgo.Interact
 		return
 	}
 
+	var rctx any
 	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
 	}); err != nil {
-		slog.Error("discord: defer interaction failed", "error", err)
-		return
+		// Defer must usually happen within ~3s; if it fails (e.g. "Unknown interaction"),
+		// aborting here drops the command entirely (#258). Fall back to normal channel
+		// messages — sendInteraction already falls back similarly on edit failures.
+		slog.Warn("discord: defer interaction failed, continuing with channel replies", "error", err)
+		channelID := i.ChannelID
+		var rc replyContext
+		if ch, chErr := s.Channel(channelID); chErr != nil {
+			slog.Debug("discord: channel lookup for slash fallback failed", "channel", channelID, "error", chErr)
+			rc = replyContext{channelID: channelID}
+		} else {
+			rc = replyContextForDeferredInteractionFallback(ch, channelID)
+		}
+		rctx = rc
+	} else {
+		rctx = &interactionReplyCtx{
+			interaction: i.Interaction,
+			channelID:   i.ChannelID,
+		}
 	}
 
 	data := i.ApplicationCommandData()
@@ -558,19 +575,30 @@ func (p *Platform) handleInteraction(s *discordgo.Session, i *discordgo.Interact
 	slog.Debug("discord: slash command", "user", userName, "command", cmdText, "channel", channelID)
 
 	sessionKey := resolveSessionKeyForChannel(channelID, userID, p.shareSessionInChannel, p.threadIsolation, sessionThreadOps{session: p.session})
-	ictx := &interactionReplyCtx{
-		interaction: i.Interaction,
-		channelID:   channelID,
-	}
 
 	msg := &core.Message{
 		SessionKey: sessionKey, Platform: "discord",
 		MessageID: i.ID,
 		UserID:    userID, UserName: userName,
 		ChatName: p.resolveChannelName(channelID),
-		Content:  cmdText, ReplyCtx: ictx,
+		Content:  cmdText, ReplyCtx: rctx,
 	}
 	p.handler(p, msg)
+}
+
+// replyContextForDeferredInteractionFallback builds a replyContext for slash commands
+// when InteractionRespond(defer) failed. Thread channels must set threadID so
+// sendChannelReply uses ChannelMessageSend instead of ChannelMessageSendReply with an empty ref.
+func replyContextForDeferredInteractionFallback(ch *discordgo.Channel, channelID string) replyContext {
+	if ch == nil {
+		return replyContext{channelID: channelID}
+	}
+	switch ch.Type {
+	case discordgo.ChannelTypeGuildPublicThread, discordgo.ChannelTypeGuildPrivateThread:
+		return replyContext{channelID: channelID, threadID: channelID}
+	default:
+		return replyContext{channelID: channelID}
+	}
 }
 
 // reconstructCommand converts a Discord interaction back to a text command string

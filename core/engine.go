@@ -1851,11 +1851,16 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		// wrong conversation context.
 		wantID := session.GetAgentSessionID()
 		currentID := state.agentSession.CurrentSessionID()
-		if wantID == "" || currentID == "" || wantID == currentID {
+		// Reuse only when the live process matches what the Session expects:
+		// - IDs match (same Claude session), or
+		// - the process has not reported an ID yet (startup; empty want is OK).
+		// If wantID is empty (/new, cleared session) but the process already has
+		// a concrete ID, reusing would keep --resume context — recycle (#238).
+		needRecycle := currentID != "" && (wantID == "" || wantID != currentID)
+		if !needRecycle {
 			return state
 		}
-		// Active session has changed — tear down the stale agent so we can
-		// start a new one that matches the current session below.
+		// Tear down the stale agent so we start one that matches the Session below.
 		slog.Info("interactive session mismatch, recycling",
 			"session_key", sessionKey,
 			"want_agent_session", wantID,
@@ -1963,11 +1968,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	}
 
 	if newID := agentSession.CurrentSessionID(); newID != "" {
-		if session.AgentSessionID == ContinueSession {
-			// Sentinel was persisted (e.g. after restart). Replace with real ID and save.
-			session.SetAgentSessionID(newID, agent.Name())
-			sessions.Save()
-		} else if session.CompareAndSetAgentSessionID(newID, agent.Name()) {
+		if session.CompareAndSetAgentSessionID(newID, agent.Name()) {
 			sessions.Save()
 		}
 	}
@@ -3173,17 +3174,23 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 	slog.Info("cmdNew: cleaning up old session", "session_key", msg.SessionKey)
 	e.cleanupInteractiveState(interactiveKey)
 	slog.Info("cmdNew: cleanup done, creating new session", "session_key", msg.SessionKey)
+
+	// Clear old session's agent session ID so it cannot be resumed
+	s := sessions.GetOrCreateActive(msg.SessionKey)
+	s.SetAgentSessionID("", "")
+	s.ClearHistory()
+	sessions.Save()
+
 	name := ""
 	if len(args) > 0 {
 		name = strings.Join(args, " ")
 	}
-	s := sessions.NewSession(msg.SessionKey, name)
+	s = sessions.NewSession(msg.SessionKey, name)
 	if name != "" {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgNewSessionCreatedName), name))
 	} else {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNewSessionCreated))
 	}
-	_ = s
 }
 
 const listPageSize = 20
@@ -5612,8 +5619,18 @@ func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images
 	var state *interactiveState
 	if sessionKey != "" {
 		state = e.interactiveStates[sessionKey]
+	} else if len(e.interactiveStates) == 1 {
+		// Single session: use it when no sessionKey is provided (backward compatible)
+		for _, s := range e.interactiveStates {
+			state = s
+			break
+		}
+	} else if len(e.interactiveStates) > 1 && (len(images) > 0 || len(files) > 0) {
+		// Multiple sessions with attachments but no explicit sessionKey: ambiguous
+		e.interactiveMu.Unlock()
+		return fmt.Errorf("multiple active sessions; must specify --session to send attachments")
 	} else {
-		// Pick the first active session
+		// Multiple sessions but text-only: pick the first (legacy behavior)
 		for _, s := range e.interactiveStates {
 			state = s
 			break
