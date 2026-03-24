@@ -48,6 +48,8 @@ type streamPreview struct {
 
 	timer     *time.Timer
 	timerStop chan struct{} // closed when preview ends
+
+	pendingStatus CardStatus // last status set via setStatus(); applied on recovery
 }
 
 // PreviewStarter is an optional interface for platforms that can initiate a
@@ -343,8 +345,35 @@ func (sp *streamPreview) finish(finalText string) bool {
 		}
 		return false
 	}
+	if sp.pendingStatus != "" {
+		if statusUpdater, ok := sp.platform.(PreviewStatusUpdater); ok {
+			statusUpdater.SetPreviewStatus(sp.previewMsgID, sp.pendingStatus)
+		}
+	}
 	slog.Debug("stream preview finish: success via UpdateMessage")
 	return true
+}
+
+// setStatus updates the card header status of the active preview message.
+// If the preview is not yet active or is degraded, the status is saved and
+// applied when the preview recovers (at finish time).
+func (sp *streamPreview) setStatus(status CardStatus) {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	sp.pendingStatus = status
+	if sp.previewMsgID == nil || sp.degraded {
+		return
+	}
+	if updater, ok := sp.platform.(PreviewStatusUpdater); ok {
+		updater.SetPreviewStatus(sp.previewMsgID, status)
+	}
+}
+
+// getFullText returns the accumulated text so far.
+func (sp *streamPreview) getFullText() string {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	return sp.fullText
 }
 
 // detachPreview clears the preview message handle so that finish() won't
