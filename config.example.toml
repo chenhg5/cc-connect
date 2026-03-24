@@ -1117,6 +1117,72 @@ app_secret = "your-feishu-app-secret"
 # token = "your-telegram-bot-token"
 
 # =============================================================================
+# Project: ACP (Agent Client Protocol) agent / 使用 ACP 子进程
+# =============================================================================
+# Runs any binary that speaks ACP over stdio (newline-delimited JSON-RPC 2.0).
+# See: https://agentclientprotocol.com/
+# 启动符合 ACP 的 Agent 进程，通过标准输入输出进行 JSON-RPC 通信。
+# Same agent type works for Cursor Agent CLI, OpenClaw bridge, GitHub Copilot CLI, etc.:
+# set command + args to match each tool's documented ACP entrypoint.
+# 同一 type=acp：通过 command/args 指向各工具文档中的 ACP 启动方式即可。
+
+# --- Example: Cursor Agent CLI (npm: @anthropic-ai/cursor-agent) ---
+# [[projects]]
+# name = "cursor-acp"
+#
+# [projects.agent]
+# type = "acp"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/project"
+# command = "agent"
+# args = ["acp"]
+# auth_method = "cursor_login"
+# display_name = "Cursor ACP"
+
+# --- Example: OpenClaw (Gateway-backed ACP bridge) ---
+# Docs: https://docs.openclaw.ai/cli/acp
+# Install the OpenClaw CLI, run a Gateway, then point cc-connect at `openclaw acp`.
+# [[projects]]
+# name = "openclaw-acp"
+#
+# [projects.agent]
+# type = "acp"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/project"
+# command = "openclaw"
+# args = ["acp"]
+# # Remote gateway (use token-file on shared hosts — avoid --token in argv):
+# # args = ["acp", "--url", "wss://gateway-host:18789", "--token-file", "/path/to/gateway.token"]
+# # Optional: bind to an existing session key
+# # args = ["acp", "--session", "agent:main:main"]
+# display_name = "OpenClaw ACP"
+# # env = { OPENCLAW_GATEWAY_TOKEN = "..." }
+
+# --- Example: GitHub Copilot CLI (public preview) ---
+# Docs: https://docs.github.com/en/copilot/reference/copilot-cli-reference/acp-server
+# Requires Copilot CLI installed and authenticated; no auth_method for ACP subprocess.
+# [[projects]]
+# name = "copilot-acp"
+#
+# [projects.agent]
+# type = "acp"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/project"
+# command = "copilot"
+# args = ["--acp", "--stdio"]
+# display_name = "Copilot ACP"
+# # command = "/absolute/path/to/copilot"   # if not on PATH (see COPILOT_CLI_PATH in GitHub docs)
+
+# [[projects.platforms]]
+# type = "telegram"
+#
+# [projects.platforms.options]
+# token = "your-telegram-bot-token"
+
+# =============================================================================
 # Project 7: Using iFlow CLI / 项目 7：使用 iFlow CLI (uncomment to enable / 取消注释以启用)
 # =============================================================================
 # Requires: npm install -g @iflow-ai/iflow-cli

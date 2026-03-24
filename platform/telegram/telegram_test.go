@@ -441,8 +441,8 @@ func TestPlatformStartTypingSwitchesToCurrentBotAfterReconnect(t *testing.T) {
 		cancel()
 	}()
 
-	if got := oldBot.SendCalls(); got != 1 {
-		t.Fatalf("old bot send calls after initial typing = %d, want 1", got)
+	if got := oldBot.RequestCalls(); got != 1 {
+		t.Fatalf("old bot request calls after initial typing = %d, want 1", got)
 	}
 
 	if _, ok := p.publishConnectedBot(newBot); !ok {
@@ -452,11 +452,11 @@ func TestPlatformStartTypingSwitchesToCurrentBotAfterReconnect(t *testing.T) {
 	ticker.ch <- time.Now()
 	time.Sleep(20 * time.Millisecond)
 
-	if got := oldBot.SendCalls(); got != 1 {
-		t.Fatalf("old bot send calls after reconnect tick = %d, want 1", got)
+	if got := oldBot.RequestCalls(); got != 1 {
+		t.Fatalf("old bot request calls after reconnect tick = %d, want 1", got)
 	}
-	if got := newBot.SendCalls(); got != 1 {
-		t.Fatalf("new bot send calls after reconnect tick = %d, want 1", got)
+	if got := newBot.RequestCalls(); got != 1 {
+		t.Fatalf("new bot request calls after reconnect tick = %d, want 1", got)
 	}
 }
 

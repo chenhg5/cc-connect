@@ -713,7 +713,7 @@ func TestProcessInteractiveEvents_SuppressesDuplicateSideChannelText(t *testing.
 	}
 
 	agentSession.events <- Event{Type: EventResult, Content: sideText, Done: true}
-	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil)
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil)
 
 	if got := p.getSent(); len(got) != 1 || got[0] != sideText {
 		t.Fatalf("sent text = %#v, want one side-channel message", got)
@@ -743,7 +743,7 @@ func TestProcessInteractiveEvents_DoesNotSuppressDifferentFinalText(t *testing.T
 
 	finalText := "文件已发出，另外我也把使用方法整理好了。"
 	agentSession.events <- Event{Type: EventResult, Content: finalText, Done: true}
-	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil)
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil)
 
 	if got := p.getSent(); len(got) != 2 || got[0] == got[1] {
 		t.Fatalf("sent text = %#v, want side-channel and final reply", got)
@@ -772,7 +772,7 @@ func TestProcessInteractiveEvents_QuietToolTurnKeepsPreviewOnFinalize(t *testing
 	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "echo hi"}
 	agentSession.events <- Event{Type: EventResult, Content: "", Done: true}
 
-	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil)
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil)
 
 	if got := p.getSent(); len(got) != 0 {
 		t.Fatalf("sent text = %#v, want no plain-text fallback sends", got)
@@ -4506,6 +4506,127 @@ func (s *queuingAgentSession) Send(prompt string, _ []ImageAttachment, _ []FileA
 	return nil
 }
 
+// blockingSendAgentSession blocks in Send until unblock is closed, mimicking agents
+// whose Send does not return until the prompt turn completes (e.g. ACP session/prompt).
+type blockingSendAgentSession struct {
+	controllableAgentSession
+	sendStarted chan struct{} // sent to when Send begins waiting on unblock
+	unblock     chan struct{} // close to let Send return
+}
+
+func newBlockingSendSession(id string) *blockingSendAgentSession {
+	return &blockingSendAgentSession{
+		controllableAgentSession: controllableAgentSession{
+			sessionID: id,
+			alive:     true,
+			events:    make(chan Event, 16),
+			closed:    make(chan struct{}),
+		},
+		sendStarted: make(chan struct{}, 1),
+		unblock:     make(chan struct{}),
+	}
+}
+
+func (s *blockingSendAgentSession) Send(_ string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.sendStarted <- struct{}{}
+	<-s.unblock
+	return nil
+}
+
+// permSignalInlinePlatform wraps stubInlineButtonPlatform and signals when a
+// SendWithButtons call includes perm:allow, so tests do not read buttonRows
+// from another goroutine (race with the engine under -race).
+type permSignalInlinePlatform struct {
+	stubInlineButtonPlatform
+	permAllowSent chan<- struct{}
+}
+
+func (p *permSignalInlinePlatform) SendWithButtons(ctx context.Context, replyCtx any, content string, buttons [][]ButtonOption) error {
+	if err := p.stubInlineButtonPlatform.SendWithButtons(ctx, replyCtx, content, buttons); err != nil {
+		return err
+	}
+	for _, row := range buttons {
+		for _, b := range row {
+			if b.Data == "perm:allow" {
+				select {
+				case p.permAllowSent <- struct{}{}:
+				default:
+				}
+				return nil
+			}
+		}
+	}
+	return nil
+}
+
+// Regression: permission events must be handled while Send is still blocked.
+// If the engine called Send synchronously before reading Events(), this would deadlock
+// and never call sendPermissionPrompt.
+func TestProcessInteractiveEvents_PermissionWhileSendBlocked(t *testing.T) {
+	permAllowSent := make(chan struct{}, 1)
+	p := &permSignalInlinePlatform{
+		stubInlineButtonPlatform: stubInlineButtonPlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}},
+		permAllowSent:            permAllowSent,
+	}
+	sess := newBlockingSendSession("blk-perm")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	session := e.sessions.GetOrCreateActive(key)
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	sendDone := make(chan error, 1)
+	go func() {
+		sendDone <- sess.Send("prompt", nil, nil)
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, key, "m1", time.Now(), nil, sendDone)
+		close(done)
+	}()
+
+	select {
+	case <-sess.sendStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Send did not reach blocking wait")
+	}
+
+	sess.events <- Event{
+		Type:         EventPermissionRequest,
+		RequestID:    "req-blocked-send",
+		ToolName:     "write_file",
+		ToolInput:    "/tmp/x",
+		ToolInputRaw: map[string]any{"path": "/tmp/x"},
+	}
+
+	select {
+	case <-permAllowSent:
+	case <-time.After(2 * time.Second):
+		t.Fatal("permission inline buttons not sent while Send blocked")
+	}
+
+	if !e.handlePendingPermission(p, &Message{SessionKey: key, ReplyCtx: "ctx"}, "allow") {
+		t.Fatal("expected handlePendingPermission to resolve pending request")
+	}
+	close(sess.unblock)
+
+	sess.events <- Event{Type: EventResult, Content: "ok", Done: true}
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("processInteractiveEvents did not complete")
+	}
+}
+
 func TestQueueMessageForBusySession_FIFODequeue(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newQueuingSession("qs1")
@@ -4600,10 +4721,13 @@ func TestProcessInteractiveEvents_DrainsQueuedMessages(t *testing.T) {
 
 	session.AddHistory("user", "initial-msg")
 
+	sendDone := make(chan error, 1)
+	sendDone <- nil
+
 	// processInteractiveEvents should handle both turns.
 	done := make(chan struct{})
 	go func() {
-		e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), nil)
+		e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), nil, sendDone)
 		close(done)
 	}()
 
@@ -4950,7 +5074,7 @@ func TestAutoCompress_TriggerAfterResult(t *testing.T) {
 	session.AddHistory("user", "hello world")
 
 	// Simulate a full turn.
-	go e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), func() {})
+	go e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), func() {}, nil)
 
 	sess.events <- Event{Type: EventResult, Content: "response", Done: true}
 
@@ -5575,7 +5699,7 @@ func TestEventIdleTimeout_CleansUpSession(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		e.processInteractiveEvents(state, session, e.sessions, key, "", time.Now(), nil)
+		e.processInteractiveEvents(state, session, e.sessions, key, "", time.Now(), nil, nil)
 		close(done)
 	}()
 
@@ -5619,7 +5743,7 @@ func TestEventIdleTimeout_ResetOnEvent(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		e.processInteractiveEvents(state, session, e.sessions, key, "", time.Now(), nil)
+		e.processInteractiveEvents(state, session, e.sessions, key, "", time.Now(), nil, nil)
 		close(done)
 	}()
 
@@ -5671,7 +5795,7 @@ func TestEventIdleTimeout_DisabledWhenZero(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		e.processInteractiveEvents(state, session, e.sessions, key, "", time.Now(), nil)
+		e.processInteractiveEvents(state, session, e.sessions, key, "", time.Now(), nil, nil)
 		close(done)
 	}()
 

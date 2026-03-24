@@ -1741,55 +1741,19 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.fromVoice = msg.FromVoice
 	state.sideText = ""
 	state.mu.Unlock()
-	if err := state.agentSession.Send(promptContent, msg.Images, msg.Files); err != nil {
-		slog.Error("failed to send prompt", "error", err)
 
-		if !state.agentSession.Alive() {
-			// Preserve queued messages before cleanup so we can migrate
-			// them to the replacement state after restart.
-			state.mu.Lock()
-			savedQueue := state.pendingMessages
-			state.pendingMessages = nil
-			state.mu.Unlock()
+	// Run Send concurrently with processInteractiveEvents. Some agents block inside
+	// Send until the prompt turn finishes (e.g. ACP session/prompt); they may emit
+	// EventPermissionRequest while blocked — the event loop must run in parallel.
+	sendDone := make(chan error, 1)
+	go func() {
+		sendDone <- state.agentSession.Send(promptContent, msg.Images, msg.Files)
+	}()
 
-			e.cleanupInteractiveState(interactiveKey, state)
-			e.send(p, msg.ReplyCtx, e.i18n.T(MsgSessionRestarting))
-
-			state = e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey, consumeBridge, wsConnectedOnce)
-			if workspaceDir != "" {
-				state.mu.Lock()
-				state.workspaceDir = workspaceDir
-				state.mu.Unlock()
-			}
-			// Restore queued messages on the new state.
-			if len(savedQueue) > 0 {
-				state.mu.Lock()
-				state.pendingMessages = append(state.pendingMessages, savedQueue...)
-				state.mu.Unlock()
-			}
-			if state.agentSession == nil {
-				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), "failed to restart agent session"))
-				return
-			}
-			sendStart = time.Now()
-			state.mu.Lock()
-			state.fromVoice = msg.FromVoice
-			state.sideText = ""
-			state.mu.Unlock()
-			if err := state.agentSession.Send(promptContent, msg.Images, msg.Files); err != nil {
-				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
-				return
-			}
-		} else {
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
-			return
-		}
-	}
+	e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone)
 	if elapsed := time.Since(sendStart); elapsed >= slowAgentSend {
 		slog.Warn("slow agent send", "elapsed", elapsed, "session", msg.SessionKey, "content_len", len(msg.Content))
 	}
-
-	e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping)
 	stopTyping = nil // ownership transferred; prevent defer from double-stopping
 
 	// Guard against a narrow race: a message may have been queued between
@@ -2064,13 +2028,14 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 
 const defaultEventIdleTimeout = 2 * time.Hour
 
-func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func()) {
+func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func(), sendDone <-chan error) {
 	var textParts []string
 	var segmentStart int // index into textParts: text before this has been sent/displayed
 	toolCount := 0
 	waitStart := time.Now()
 	firstEventLogged := false
 	triggerAutoCompress := false
+	pendingSend := sendDone
 
 	// stopTyping tracks the current turn's typing indicator so it can be
 	// stopped when a queued message starts a new turn.
@@ -2104,6 +2069,27 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if !ok {
 				goto channelClosed
 			}
+		case err := <-pendingSend:
+			pendingSend = nil
+			if err != nil {
+				slog.Error("failed to send prompt", "error", err, "session_key", sessionKey)
+				sp.discard()
+				if stopTyping != nil {
+					stopTyping()
+					stopTyping = nil
+				}
+				e.notifyDroppedQueuedMessages(state, err)
+				if state.agentSession == nil || !state.agentSession.Alive() {
+					e.cleanupInteractiveState(sessionKey, state)
+				}
+				state.mu.Lock()
+				p := state.platform
+				replyCtx := state.replyCtx
+				state.mu.Unlock()
+				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+				return
+			}
+			continue
 		case <-idleCh:
 			slog.Error("agent session idle timeout: no events for too long, killing session",
 				"session_key", sessionKey, "timeout", e.eventIdleTimeout, "elapsed", time.Since(turnStart))
@@ -2212,6 +2198,55 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 				toolMsg := fmt.Sprintf(e.i18n.T(MsgTool), toolCount, event.ToolName, formattedInput)
+				for _, chunk := range SplitMessageCodeFenceAware(toolMsg, maxPlatformMessageLen) {
+					e.send(p, replyCtx, chunk)
+				}
+			}
+
+		case EventToolResult:
+			if !quiet {
+				out := strings.TrimSpace(event.Content)
+				if out == "" {
+					out = strings.TrimSpace(event.ToolResult)
+				}
+				if out == "" {
+					break
+				}
+				tn := strings.TrimSpace(event.ToolName)
+				if tn == "" {
+					tn = "tool"
+				}
+				previewActive := sp.canPreview()
+				if len(textParts) > segmentStart {
+					if !previewActive {
+						segment := strings.Join(textParts[segmentStart:], "")
+						if segment != "" {
+							for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
+								e.send(p, replyCtx, chunk)
+							}
+						}
+					}
+					segmentStart = len(textParts)
+				}
+				sp.freeze()
+				if previewActive {
+					sp.detachPreview()
+				}
+				var formattedOut string
+				if strings.Contains(out, "```") {
+					formattedOut = out
+				} else if strings.Contains(out, "\n") || utf8.RuneCountInString(out) > 200 {
+					lang := toolCodeLang(tn, out)
+					formattedOut = fmt.Sprintf("```%s\n%s\n```", lang, out)
+				} else {
+					switch tn {
+					case "shell", "run_shell_command", "Bash":
+						formattedOut = fmt.Sprintf("```bash\n%s\n```", out)
+					default:
+						formattedOut = fmt.Sprintf("`%s`", out)
+					}
+				}
+				toolMsg := fmt.Sprintf(e.i18n.T(MsgToolResult), tn, formattedOut)
 				for _, chunk := range SplitMessageCodeFenceAware(toolMsg, maxPlatformMessageLen) {
 					e.send(p, replyCtx, chunk)
 				}
@@ -2429,6 +2464,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 			// Auto-compress after finishing a turn, before sending any queued messages.
 			if triggerAutoCompress {
+				if pendingSend != nil {
+					if err := <-pendingSend; err != nil {
+						slog.Debug("async send error before compress", "error", err)
+					}
+				}
 				state.mu.Lock()
 				state.lastAutoCompressAt = time.Now()
 				state.mu.Unlock()
@@ -2466,32 +2506,19 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// stale leftovers (e.g. a deferred EventError from cmd.Wait()).
 				drainEvents(state.agentSession.Events())
 
+				if pendingSend != nil {
+					if err := <-pendingSend; err != nil {
+						slog.Debug("async send error before queued turn", "error", err)
+					}
+				}
+
 				queuedPrompt := e.buildSenderPrompt(queued.content, queued.userID, queued.msgPlatform, queued.msgSessionKey)
 
-				// NOW send the queued message to agent stdin (not at queue time).
-				if err := state.agentSession.Send(queuedPrompt, queued.images, queued.files); err != nil {
-					slog.Error("failed to send queued message to agent", "error", err, "session", sessionKey)
-
-					// Send failed — stop typing, notify user, drain remaining queue.
-					// We intentionally do NOT attempt to restart the session here:
-					// the restart path introduces complex state management issues
-					// (stale session pointers, FIFO ordering, workspace agent
-					// recreation races). The user's next message will trigger a
-					// normal session restart via processInteractiveMessageWith.
-					if stopTyping != nil {
-						stopTyping()
-						stopTyping = nil
-					}
-					e.send(queued.platform, queued.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
-					state.mu.Lock()
-					remaining := state.pendingMessages
-					state.pendingMessages = nil
-					state.mu.Unlock()
-					for _, q := range remaining {
-						e.send(q.platform, q.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
-					}
-					return
-				}
+				nextSend := make(chan error, 1)
+				go func() {
+					nextSend <- state.agentSession.Send(queuedPrompt, queued.images, queued.files)
+				}()
+				pendingSend = nextSend
 
 				// Detect language now (deferred from queue time to avoid
 				// flipping locale while the previous turn is still running).
@@ -2526,6 +2553,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 			state.mu.Unlock()
 
+			if pendingSend != nil {
+				if err := <-pendingSend; err != nil {
+					slog.Debug("async send error after EventResult", "error", err)
+				}
+			}
 			return
 
 		case EventError:
@@ -2623,13 +2655,12 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 
 		drainEvents(state.agentSession.Events())
 
-		if err := state.agentSession.Send(prompt, queued.images, queued.files); err != nil {
-			slog.Error("failed to send queued message", "error", err, "session", sessionKey)
-			e.send(queued.platform, queued.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
-			e.notifyDroppedQueuedMessages(state, err)
-			return false
-		}
 		session.AddHistory("user", queued.content)
+
+		sendDone := make(chan error, 1)
+		go func() {
+			sendDone <- state.agentSession.Send(prompt, queued.images, queued.files)
+		}()
 
 		var stopTyping func()
 		if ti, ok := queued.platform.(TypingIndicator); ok {
@@ -2637,7 +2668,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		}
 
 		slog.Info("processing queued message", "session", sessionKey)
-		e.processInteractiveEvents(state, session, sessions, sessionKey, "", time.Now(), stopTyping)
+		e.processInteractiveEvents(state, session, sessions, sessionKey, "", time.Now(), stopTyping, sendDone)
 	}
 }
 
@@ -5243,6 +5274,21 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 		case EventText:
 			if !auto && event.Content != "" {
 				textParts = append(textParts, event.Content)
+			}
+		case EventToolResult:
+			if !auto {
+				out := strings.TrimSpace(event.Content)
+				if out == "" {
+					out = strings.TrimSpace(event.ToolResult)
+				}
+				if out == "" {
+					break
+				}
+				tn := strings.TrimSpace(event.ToolName)
+				if tn == "" {
+					tn = "tool"
+				}
+				textParts = append(textParts, fmt.Sprintf(e.i18n.T(MsgToolResult), tn, out)+"\n")
 			}
 		case EventResult:
 			result := event.Content
@@ -8801,6 +8847,18 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 				if session.CompareAndSetAgentSessionID(event.SessionID, e.agent.Name()) {
 					e.sessions.Save()
 				}
+			}
+		case EventToolResult:
+			out := strings.TrimSpace(event.Content)
+			if out == "" {
+				out = strings.TrimSpace(event.ToolResult)
+			}
+			if out != "" {
+				tn := strings.TrimSpace(event.ToolName)
+				if tn == "" {
+					tn = "tool"
+				}
+				textParts = append(textParts, fmt.Sprintf(e.i18n.T(MsgToolResult), tn, out)+"\n\n")
 			}
 		case EventResult:
 			if event.SessionID != "" {

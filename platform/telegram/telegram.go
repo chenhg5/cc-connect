@@ -1196,7 +1196,8 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 
 	action := tgbotapi.NewChatAction(rc.chatID, tgbotapi.ChatTyping)
 	if bot, err := p.connectedBot("typing"); err == nil {
-		if _, err := bot.Send(action); err != nil {
+		// sendChatAction returns result=true, not a Message — use Request, not Send.
+		if _, err := bot.Request(action); err != nil {
 			slog.Debug("telegram: initial typing send failed", "error", err)
 		}
 	} else {
@@ -1219,7 +1220,7 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 					slog.Debug("telegram: typing stopped", "error", err)
 					return
 				}
-				if _, err := bot.Send(action); err != nil {
+				if _, err := bot.Request(action); err != nil {
 					slog.Debug("telegram: typing send failed", "error", err)
 				}
 			}
