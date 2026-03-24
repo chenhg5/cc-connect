@@ -364,6 +364,17 @@ type SessionDeleter interface {
 	DeleteSession(ctx context.Context, sessionID string) error
 }
 
+// AllProjectSessionLister is an optional interface for agents that can list
+// sessions across all project directories, not just the current work_dir.
+// This enables cross-project session discovery (e.g. listing terminal sessions
+// started from different directories).
+type AllProjectSessionLister interface {
+	ListAllProjectSessions(ctx context.Context) ([]AgentSessionInfo, error)
+	// ResolveProjectWorkDir reconstructs a filesystem path from a project directory name.
+	// Returns empty string if resolution fails.
+	ResolveProjectWorkDir(projectDir string) string
+}
+
 // WorkDirSwitcher is an optional interface for agents that support runtime
 // work directory switching. The change takes effect on the next session start;
 // the current running session is terminated automatically by the engine.

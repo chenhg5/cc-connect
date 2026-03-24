@@ -324,6 +324,184 @@ func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, erro
 	return sessions, nil
 }
 
+// ListAllProjectSessions returns sessions from ALL Claude Code project directories,
+// not just the current work_dir. Cross-project sessions have ProjectDir set to the
+// raw directory name (e.g. "C--Users-Mi") so callers can identify their origin.
+func (a *Agent) ListAllProjectSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("claudecode: cannot determine home dir: %w", err)
+	}
+
+	absWorkDir, err := filepath.Abs(a.workDir)
+	if err != nil {
+		return nil, fmt.Errorf("claudecode: resolve work_dir: %w", err)
+	}
+
+	currentProjectDir := findProjectDir(homeDir, absWorkDir)
+	projectsBase := filepath.Join(homeDir, ".claude", "projects")
+
+	projectDirs, err := os.ReadDir(projectsBase)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("claudecode: read projects base: %w", err)
+	}
+
+	var allSessions []core.AgentSessionInfo
+	for _, pDir := range projectDirs {
+		if !pDir.IsDir() {
+			continue
+		}
+		projectPath := filepath.Join(projectsBase, pDir.Name())
+		isCurrent := projectPath == currentProjectDir
+
+		entries, err := os.ReadDir(projectPath)
+		if err != nil {
+			continue
+		}
+
+		for _, entry := range entries {
+			name := entry.Name()
+			if entry.IsDir() || !strings.HasSuffix(name, ".jsonl") {
+				continue
+			}
+			sessionID := strings.TrimSuffix(name, ".jsonl")
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+			summary, msgCount := scanSessionMeta(filepath.Join(projectPath, name))
+
+			s := core.AgentSessionInfo{
+				ID:           sessionID,
+				Summary:      summary,
+				MessageCount: msgCount,
+				ModifiedAt:   info.ModTime(),
+			}
+			if !isCurrent {
+				s.ProjectDir = pDir.Name()
+			}
+			allSessions = append(allSessions, s)
+		}
+	}
+
+	sort.Slice(allSessions, func(i, j int) bool {
+		return allSessions[i].ModifiedAt.After(allSessions[j].ModifiedAt)
+	})
+
+	return allSessions, nil
+}
+
+// resolveWorkDirFromProjectDir attempts to reconstruct a filesystem path from a
+// Claude Code project directory name. The encoding replaces \, /, :, _ with "-",
+// so reconstruction is done greedily by walking the filesystem.
+//
+// Example: "C--Ai-OrionAI" → "C:\Ai\OrionAI" (Windows)
+func resolveWorkDirFromProjectDir(dirName string) string {
+	if dirName == "" {
+		return ""
+	}
+
+	parts := strings.Split(dirName, "-")
+	if len(parts) < 2 {
+		return ""
+	}
+
+	// Windows path: single letter drive (e.g. "C--Ai-OrionAI")
+	// parts[0]="C", parts[1]="" (from double dash), parts[2:]="Ai","OrionAI"
+	if len(parts[0]) == 1 && parts[0][0] >= 'A' && parts[0][0] <= 'Z' {
+		return resolveWindowsPath(parts)
+	}
+
+	// Unix path: starts with empty string from leading "-" (e.g. "-home-user-proj")
+	// parts[0]="", parts[1:]="home","user","proj"
+	if parts[0] == "" && len(parts) >= 2 {
+		return resolveUnixPath(parts[1:])
+	}
+
+	return ""
+}
+
+// resolveWindowsPath rebuilds a Windows path from split parts.
+// Input: ["C", "", "Ai", "OrionAI"] for "C--Ai-OrionAI"
+func resolveWindowsPath(parts []string) string {
+	drive := parts[0] + ":"
+
+	// Skip the empty part from double-dash after drive letter
+	remaining := parts[1:]
+	if len(remaining) > 0 && remaining[0] == "" {
+		remaining = remaining[1:]
+	}
+	if len(remaining) == 0 {
+		return drive + "\\"
+	}
+
+	return greedyResolve(drive+"\\", remaining)
+}
+
+// resolveUnixPath rebuilds a Unix path from split parts.
+func resolveUnixPath(parts []string) string {
+	if len(parts) == 0 {
+		return ""
+	}
+	return greedyResolve("/", parts)
+}
+
+// greedyResolve tries to reconstruct a filesystem path by greedily joining
+// segments with the OS path separator, falling back to "-" when a directory
+// doesn't exist.
+func greedyResolve(base string, segments []string) string {
+	if len(segments) == 0 {
+		if _, err := os.Stat(base); err == nil {
+			return base
+		}
+		return ""
+	}
+
+	// Try joining with path separator first (most common case)
+	candidate := filepath.Join(base, segments[0])
+	if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+		if result := greedyResolve(candidate, segments[1:]); result != "" {
+			return result
+		}
+	}
+
+	// Try joining with "-" (original path had a literal hyphen)
+	if len(segments) >= 2 {
+		merged := segments[0] + "-" + segments[1]
+		rest := append([]string{merged}, segments[2:]...)
+		if result := greedyResolve(base, rest); result != "" {
+			return result
+		}
+	}
+
+	// Try joining with "_" (underscores also become "-")
+	if len(segments) >= 2 {
+		merged := segments[0] + "_" + segments[1]
+		rest := append([]string{merged}, segments[2:]...)
+		if result := greedyResolve(base, rest); result != "" {
+			return result
+		}
+	}
+
+	// Base case: this is the last segment, check if path exists (as file or dir)
+	if len(segments) == 1 {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+
+	return ""
+}
+
+// ResolveProjectWorkDir reconstructs a filesystem path from a Claude Code project
+// directory name. Returns empty string if the path cannot be resolved.
+func (a *Agent) ResolveProjectWorkDir(projectDir string) string {
+	return resolveWorkDirFromProjectDir(projectDir)
+}
+
 func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {

@@ -398,9 +398,11 @@ const (
 	MsgDeleteModeResultTitle    MsgKey = "delete_mode_result_title"
 	MsgDeleteModeMissingSession MsgKey = "delete_mode_missing_session"
 
-	MsgSwitchSuccess   MsgKey = "switch_success"
-	MsgSwitchNoMatch   MsgKey = "switch_no_match"
-	MsgSwitchNoSession MsgKey = "switch_no_session"
+	MsgSwitchSuccess        MsgKey = "switch_success"
+	MsgSwitchNoMatch        MsgKey = "switch_no_match"
+	MsgSwitchNoSession      MsgKey = "switch_no_session"
+	MsgSwitchProjectChanged MsgKey = "switch_project_changed"
+	MsgListProjectLabel     MsgKey = "list_project_label"
 
 	MsgCommandTimeout MsgKey = "command_timeout"
 
@@ -2605,6 +2607,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 沒有第 %d 個會話",
 		LangJapanese:           "❌ セッション #%d が見つかりません",
 		LangSpanish:            "❌ No hay sesión #%d",
+	},
+	MsgSwitchProjectChanged: {
+		LangEnglish:            "📂 Work directory switched to: %s",
+		LangChinese:            "📂 工作目录已切换到：%s",
+		LangTraditionalChinese: "📂 工作目錄已切換到：%s",
+		LangJapanese:           "📂 作業ディレクトリ切替：%s",
+		LangSpanish:            "📂 Directorio cambiado a: %s",
+	},
+	MsgListProjectLabel: {
+		LangEnglish:            "📂 %s",
+		LangChinese:            "📂 %s",
+		LangTraditionalChinese: "📂 %s",
+		LangJapanese:           "📂 %s",
+		LangSpanish:            "📂 %s",
 	},
 	MsgCommandTimeout: {
 		LangEnglish:            "⏰ Command timed out (60s): `%s`",

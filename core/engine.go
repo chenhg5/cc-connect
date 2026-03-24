@@ -200,6 +200,10 @@ type Engine struct {
 	interactiveMu     sync.Mutex
 	interactiveStates map[string]*interactiveState // key = sessionKey
 
+	// Cached /list results so /switch numbers match what the user saw
+	lastListCache map[string][]AgentSessionInfo // sessionKey → last /list results
+	lastListMu    sync.RWMutex
+
 	quietMu sync.RWMutex
 	quiet   bool // when true, suppress thinking and tool progress messages globally
 
@@ -292,6 +296,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		skills:                NewSkillRegistry(),
 		aliases:               make(map[string]string),
 		interactiveStates:     make(map[string]*interactiveState),
+		lastListCache:         make(map[string][]AgentSessionInfo),
 		platformReady:         make(map[Platform]bool),
 		startedAt:             time.Now(),
 		streamPreview:         DefaultStreamPreviewCfg(),
@@ -3030,6 +3035,52 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 
 const listPageSize = 20
 
+// resolveListSessions returns agent sessions, optionally including all projects.
+func (e *Engine) resolveListSessions(agent Agent, listAll bool) ([]AgentSessionInfo, error) {
+	if listAll {
+		if lister, ok := agent.(AllProjectSessionLister); ok {
+			return lister.ListAllProjectSessions(e.ctx)
+		}
+	}
+	return agent.ListSessions(e.ctx)
+}
+
+// cacheListResults stores the last /list output so /switch numbers stay consistent.
+func (e *Engine) cacheListResults(sessionKey string, sessions []AgentSessionInfo) {
+	e.lastListMu.Lock()
+	e.lastListCache[sessionKey] = sessions
+	e.lastListMu.Unlock()
+}
+
+// getCachedListResults returns the cached /list results, or nil if none.
+func (e *Engine) getCachedListResults(sessionKey string) []AgentSessionInfo {
+	e.lastListMu.RLock()
+	defer e.lastListMu.RUnlock()
+	return e.lastListCache[sessionKey]
+}
+
+// switchAgentWorkDir resolves a project directory name to a real path and
+// switches the agent's work directory. Used when switching to a cross-project session.
+// If p is non-nil, a notification is sent to the user.
+func (e *Engine) switchAgentWorkDir(agent Agent, projectDir string, p Platform, replyCtx any) {
+	lister, ok := agent.(AllProjectSessionLister)
+	if !ok {
+		return
+	}
+	resolved := lister.ResolveProjectWorkDir(projectDir)
+	if resolved == "" {
+		slog.Warn("switchAgentWorkDir: cannot resolve project dir", "project_dir", projectDir)
+		return
+	}
+	if switcher, ok := agent.(WorkDirSwitcher); ok {
+		switcher.SetWorkDir(resolved)
+		slog.Info("switchAgentWorkDir: switched", "project_dir", projectDir, "resolved", resolved)
+		if p != nil {
+			e.reply(p, replyCtx, e.i18n.Tf(MsgSwitchProjectChanged, resolved))
+		}
+	}
+}
+
 func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 	agent, sessions, _, err := e.commandContext(p, msg)
 	if err != nil {
@@ -3037,12 +3088,27 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	if !supportsCards(p) {
-		agentSessions, err := agent.ListSessions(e.ctx)
-		if err != nil {
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgListError), err))
-			return
+	// Check for "all" / "-a" flag for cross-project listing
+	listAll := false
+	var filteredArgs []string
+	for _, a := range args {
+		if strings.EqualFold(a, "all") || a == "-a" {
+			listAll = true
+		} else {
+			filteredArgs = append(filteredArgs, a)
 		}
+	}
+
+	agentSessions, err := e.resolveListSessions(agent, listAll)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgListError), err))
+		return
+	}
+
+	// Cache results so /switch numbers match what the user sees
+	e.cacheListResults(msg.SessionKey, agentSessions)
+
+	if !supportsCards(p) {
 		if len(agentSessions) == 0 {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgListEmpty))
 			return
@@ -3052,8 +3118,8 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 		totalPages := (total + listPageSize - 1) / listPageSize
 
 		page := 1
-		if len(args) > 0 {
-			if n, err := strconv.Atoi(args[0]); err == nil && n > 0 {
+		if len(filteredArgs) > 0 {
+			if n, err := strconv.Atoi(filteredArgs[0]); err == nil && n > 0 {
 				page = n
 			}
 		}
@@ -3096,6 +3162,9 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 					displayName = string([]rune(displayName)[:40]) + "…"
 				}
 			}
+			if s.ProjectDir != "" {
+				displayName += " " + fmt.Sprintf(e.i18n.T(MsgListProjectLabel), s.ProjectDir)
+			}
 			sb.WriteString(fmt.Sprintf("%s **%d.** %s · **%d** msgs · %s\n",
 				marker, i+1, displayName, s.MessageCount, s.ModifiedAt.Format("01-02 15:04")))
 		}
@@ -3108,12 +3177,12 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 	}
 
 	page := 1
-	if len(args) > 0 {
-		if n, err := strconv.Atoi(args[0]); err == nil && n > 0 {
+	if len(filteredArgs) > 0 {
+		if n, err := strconv.Atoi(filteredArgs[0]); err == nil && n > 0 {
 			page = n
 		}
 	}
-	card, err := e.renderListCard(msg.SessionKey, page)
+	card, err := e.renderListCardEx(msg.SessionKey, page, agentSessions)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, err.Error())
 		return
@@ -3134,16 +3203,38 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
 		return
 	}
-	agentSessions, err := agent.ListSessions(e.ctx)
-	if err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
-		return
-	}
 
-	matched := e.matchSession(agentSessions, sessions, query)
+	// Use cached /list results first (so numbers match what user saw),
+	// then fall back to current-project, then all-project sessions.
+	var matched *AgentSessionInfo
+	if cached := e.getCachedListResults(msg.SessionKey); len(cached) > 0 {
+		matched = e.matchSession(cached, sessions, query)
+	}
+	if matched == nil {
+		agentSessions, err := agent.ListSessions(e.ctx)
+		if err != nil {
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
+			return
+		}
+		matched = e.matchSession(agentSessions, sessions, query)
+	}
+	if matched == nil {
+		// Try all-project sessions if available
+		if lister, ok := agent.(AllProjectSessionLister); ok {
+			allSessions, err := lister.ListAllProjectSessions(e.ctx)
+			if err == nil {
+				matched = e.matchSession(allSessions, sessions, query)
+			}
+		}
+	}
 	if matched == nil {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgSwitchNoMatch), query))
 		return
+	}
+
+	// If cross-project session, switch work directory
+	if matched.ProjectDir != "" {
+		e.switchAgentWorkDir(agent, matched.ProjectDir, p, msg.ReplyCtx)
 	}
 
 	slog.Info("cmdSwitch: cleaning up old session", "session_key", msg.SessionKey)
@@ -3983,8 +4074,16 @@ func (e *Engine) simpleCard(title, color, content string) *Card {
 }
 
 // renderListCardSafe wraps renderListCard and returns an error card on failure.
+// It uses cached /list results when available so card navigation preserves
+// the original listing (e.g. all-project sessions from /list all).
 func (e *Engine) renderListCardSafe(sessionKey string, page int) *Card {
-	card, err := e.renderListCard(sessionKey, page)
+	var card *Card
+	var err error
+	if cached := e.getCachedListResults(sessionKey); len(cached) > 0 {
+		card, err = e.renderListCardEx(sessionKey, page, cached)
+	} else {
+		card, err = e.renderListCard(sessionKey, page)
+	}
 	if err != nil {
 		agent, _ := e.sessionContextForKey(sessionKey)
 		return e.simpleCard(e.i18n.Tf(MsgCardTitleSessions, agent.Name(), 0), "red", err.Error())
@@ -5913,13 +6012,31 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 			return
 		}
 		agent, sessions := e.sessionContextForKey(sessionKey)
-		agentSessions, err := agent.ListSessions(e.ctx)
-		if err != nil || len(agentSessions) == 0 {
-			return
+		// Use cached /list results first so card button numbers match
+		var matched *AgentSessionInfo
+		if cached := e.getCachedListResults(sessionKey); len(cached) > 0 {
+			matched = e.matchSession(cached, sessions, args)
 		}
-		matched := e.matchSession(agentSessions, sessions, args)
+		if matched == nil {
+			agentSessions, err := agent.ListSessions(e.ctx)
+			if err != nil || len(agentSessions) == 0 {
+				return
+			}
+			matched = e.matchSession(agentSessions, sessions, args)
+		}
+		if matched == nil {
+			if lister, ok := agent.(AllProjectSessionLister); ok {
+				allSessions, err := lister.ListAllProjectSessions(e.ctx)
+				if err == nil {
+					matched = e.matchSession(allSessions, sessions, args)
+				}
+			}
+		}
 		if matched == nil {
 			return
+		}
+		if matched.ProjectDir != "" {
+			e.switchAgentWorkDir(agent, matched.ProjectDir, nil, nil)
 		}
 		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 		e.cleanupInteractiveState(interactiveKey)
@@ -6450,11 +6567,18 @@ func (e *Engine) renderModeCard() *Card {
 }
 
 func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
-	agent, sessions := e.sessionContextForKey(sessionKey)
+	agent, _ := e.sessionContextForKey(sessionKey)
 	agentSessions, err := agent.ListSessions(e.ctx)
 	if err != nil {
 		return nil, fmt.Errorf(e.i18n.T(MsgListError), err)
 	}
+	return e.renderListCardEx(sessionKey, page, agentSessions)
+}
+
+// renderListCardEx renders the session list card with pre-resolved sessions.
+// Cross-project sessions (ProjectDir != "") are annotated with their project path.
+func (e *Engine) renderListCardEx(sessionKey string, page int, agentSessions []AgentSessionInfo) (*Card, error) {
+	agent, sessions := e.sessionContextForKey(sessionKey)
 	if len(agentSessions) == 0 {
 		return e.simpleCard(e.i18n.Tf(MsgCardTitleSessions, agent.Name(), 0), "turquoise", e.i18n.T(MsgListEmpty)), nil
 	}
@@ -6501,6 +6625,9 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 			if len([]rune(displayName)) > 40 {
 				displayName = string([]rune(displayName)[:40]) + "…"
 			}
+		}
+		if s.ProjectDir != "" {
+			displayName += " " + fmt.Sprintf(e.i18n.T(MsgListProjectLabel), s.ProjectDir)
 		}
 		btnType := "default"
 		if s.ID == activeAgentID {
