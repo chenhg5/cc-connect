@@ -362,6 +362,10 @@ router_url = "http://127.0.0.1:3456"
 router_api_key = "your-secret-key"
 ```
 
+设置 `router_api_key` 后，cc-connect 会同时将其导出为
+`ANTHROPIC_API_KEY` 和 `ANTHROPIC_AUTH_TOKEN`，以兼容 CCR 入站认证和
+router 后面 Anthropic 兼容上游的鉴权方式。
+
 ---
 
 ## 语音消息（语音转文字）

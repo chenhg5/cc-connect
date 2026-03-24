@@ -19,6 +19,19 @@ func (a *namedTestAgent) StartSession(_ context.Context, _ string) (AgentSession
 func (a *namedTestAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) { return nil, nil }
 func (a *namedTestAgent) Stop() error                                                { return nil }
 
+type optionsProvidingTestAgent struct {
+	namedTestAgent
+	opts map[string]any
+}
+
+func (a *optionsProvidingTestAgent) AgentOptions() map[string]any {
+	out := make(map[string]any, len(a.opts))
+	for k, v := range a.opts {
+		out[k] = v
+	}
+	return out
+}
+
 // mockChannelResolver implements both Platform and ChannelNameResolver.
 type mockChannelResolver struct {
 	name  string
@@ -426,5 +439,71 @@ func TestWorkspaceInitFlow_SlashCommandCleansUpExistingFlow(t *testing.T) {
 	e.initFlowsMu.Unlock()
 	if stillExists {
 		t.Error("expected init flow to be deleted after slash command, but it still exists")
+	}
+}
+
+func TestGetOrCreateWorkspaceAgent_PreservesAgentOptions(t *testing.T) {
+	baseDir := t.TempDir()
+	workspace := normalizeWorkspacePath(filepath.Join(baseDir, "project-a"))
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	const agentName = "workspace-options-test-agent"
+	var gotOpts map[string]any
+	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) {
+		gotOpts = make(map[string]any, len(opts))
+		for k, v := range opts {
+			gotOpts[k] = v
+		}
+		return &namedTestAgent{name: agentName}, nil
+	})
+
+	tmpDir := t.TempDir()
+	sessionPath := filepath.Join(tmpDir, "sessions.json")
+	e := NewEngine("test", &optionsProvidingTestAgent{
+		namedTestAgent: namedTestAgent{name: agentName},
+		opts: map[string]any{
+			"work_dir":         "/tmp/original",
+			"router_url":       "http://127.0.0.1:3456",
+			"router_api_key":   "router-secret",
+			"model":            "sonnet",
+			"mode":             "default",
+			"allowed_tools":    []any{"Read", "Edit"},
+			"disallowed_tools": []any{"Bash"},
+		},
+	}, nil, sessionPath, LangEnglish)
+	e.SetMultiWorkspace(baseDir, filepath.Join(tmpDir, "bindings.json"))
+
+	agent, _, err := e.getOrCreateWorkspaceAgent(workspace)
+	if err != nil {
+		t.Fatalf("getOrCreateWorkspaceAgent() error = %v", err)
+	}
+	if agent == nil {
+		t.Fatal("expected workspace agent")
+	}
+	if gotOpts == nil {
+		t.Fatal("factory did not receive opts")
+	}
+	if gotOpts["work_dir"] != workspace {
+		t.Fatalf("work_dir = %v, want %q", gotOpts["work_dir"], workspace)
+	}
+	if gotOpts["router_url"] != "http://127.0.0.1:3456" {
+		t.Fatalf("router_url = %v", gotOpts["router_url"])
+	}
+	if gotOpts["router_api_key"] != "router-secret" {
+		t.Fatalf("router_api_key = %v", gotOpts["router_api_key"])
+	}
+	if gotOpts["model"] != "sonnet" {
+		t.Fatalf("model = %v", gotOpts["model"])
+	}
+	if gotOpts["mode"] != "default" {
+		t.Fatalf("mode = %v", gotOpts["mode"])
+	}
+	if fmt.Sprint(gotOpts["allowed_tools"]) != "[Read Edit]" {
+		t.Fatalf("allowed_tools = %#v", gotOpts["allowed_tools"])
+	}
+	if fmt.Sprint(gotOpts["disallowed_tools"]) != "[Bash]" {
+		t.Fatalf("disallowed_tools = %#v", gotOpts["disallowed_tools"])
 	}
 }

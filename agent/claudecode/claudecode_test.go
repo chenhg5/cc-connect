@@ -1,6 +1,8 @@
 package claudecode
 
 import (
+	"context"
+	"reflect"
 	"testing"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -273,6 +275,138 @@ func TestAgent_SetMode(t *testing.T) {
 	a.SetMode("yolo")
 	if got := a.GetMode(); got != "bypassPermissions" {
 		t.Fatalf("GetMode() after SetMode(yolo) = %q, want bypassPermissions", got)
+	}
+}
+
+func TestAgent_AgentOptions(t *testing.T) {
+	a := &Agent{
+		workDir:         "/tmp/ws",
+		model:           "sonnet",
+		mode:            "default",
+		routerURL:       "http://127.0.0.1:3456",
+		routerAPIKey:    "secret",
+		allowedTools:    []string{"Read", "Edit"},
+		disallowedTools: []string{"Bash"},
+	}
+
+	got := a.AgentOptions()
+	if got["work_dir"] != "/tmp/ws" {
+		t.Fatalf("work_dir = %v, want /tmp/ws", got["work_dir"])
+	}
+	if got["router_url"] != "http://127.0.0.1:3456" {
+		t.Fatalf("router_url = %v", got["router_url"])
+	}
+	if got["router_api_key"] != "secret" {
+		t.Fatalf("router_api_key = %v", got["router_api_key"])
+	}
+	if !reflect.DeepEqual(got["allowed_tools"], []any{"Read", "Edit"}) {
+		t.Fatalf("allowed_tools = %#v", got["allowed_tools"])
+	}
+	if !reflect.DeepEqual(got["disallowed_tools"], []any{"Bash"}) {
+		t.Fatalf("disallowed_tools = %#v", got["disallowed_tools"])
+	}
+}
+
+func TestStartSession_DisableVerboseAndSessionID(t *testing.T) {
+	type call struct {
+		sessionID      string
+		disableVerbose bool
+		extraEnv       []string
+	}
+
+	tests := []struct {
+		name            string
+		routerURL       string
+		routerAPIKey    string
+		sessionID       string
+		wantSessionID   string
+		wantDisableVerb bool
+		wantExtraEnv    []string
+	}{
+		{
+			name:            "no router keeps old behavior",
+			sessionID:       core.ContinueSession,
+			wantSessionID:   core.ContinueSession,
+			wantDisableVerb: false,
+		},
+		{
+			name:            "router disables verbose",
+			routerURL:       "http://127.0.0.1:3456",
+			sessionID:       "existing",
+			wantSessionID:   "existing",
+			wantDisableVerb: true,
+			wantExtraEnv: []string{
+				"ANTHROPIC_BASE_URL=http://127.0.0.1:3456",
+				"NO_PROXY=127.0.0.1",
+				"DISABLE_TELEMETRY=true",
+				"DISABLE_COST_WARNINGS=true",
+			},
+		},
+		{
+			name:            "router continue session forces fresh session",
+			routerURL:       "http://127.0.0.1:3456",
+			sessionID:       core.ContinueSession,
+			wantSessionID:   "",
+			wantDisableVerb: true,
+			wantExtraEnv: []string{
+				"ANTHROPIC_BASE_URL=http://127.0.0.1:3456",
+				"NO_PROXY=127.0.0.1",
+				"DISABLE_TELEMETRY=true",
+				"DISABLE_COST_WARNINGS=true",
+			},
+		},
+		{
+			name:            "router api key injects both auth env vars",
+			routerURL:       "http://127.0.0.1:3456",
+			routerAPIKey:    "test-key",
+			sessionID:       "existing",
+			wantSessionID:   "existing",
+			wantDisableVerb: true,
+			wantExtraEnv: []string{
+				"ANTHROPIC_BASE_URL=http://127.0.0.1:3456",
+				"NO_PROXY=127.0.0.1",
+				"DISABLE_TELEMETRY=true",
+				"DISABLE_COST_WARNINGS=true",
+				"ANTHROPIC_API_KEY=test-key",
+				"ANTHROPIC_AUTH_TOKEN=test-key",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a := &Agent{
+				workDir:      "/tmp/ws",
+				mode:         "default",
+				routerURL:    tt.routerURL,
+				routerAPIKey: tt.routerAPIKey,
+			}
+
+			var got call
+			oldFunc := newClaudeSessionFunc
+			newClaudeSessionFunc = func(_ context.Context, _ string, _ string, sessionID string, _ string, _ []string, _ []string, extraEnv []string, _ string, disableVerbose bool) (*claudeSession, error) {
+				got = call{
+					sessionID:      sessionID,
+					disableVerbose: disableVerbose,
+					extraEnv:       append([]string(nil), extraEnv...),
+				}
+				return &claudeSession{}, nil
+			}
+			defer func() { newClaudeSessionFunc = oldFunc }()
+
+			if _, err := a.StartSession(context.Background(), tt.sessionID); err != nil {
+				t.Fatalf("StartSession() error = %v", err)
+			}
+			if got.sessionID != tt.wantSessionID {
+				t.Fatalf("sessionID = %q, want %q", got.sessionID, tt.wantSessionID)
+			}
+			if got.disableVerbose != tt.wantDisableVerb {
+				t.Fatalf("disableVerbose = %v, want %v", got.disableVerbose, tt.wantDisableVerb)
+			}
+			if !reflect.DeepEqual(got.extraEnv, tt.wantExtraEnv) {
+				t.Fatalf("extraEnv = %#v, want %#v", got.extraEnv, tt.wantExtraEnv)
+			}
+		})
 	}
 }
 

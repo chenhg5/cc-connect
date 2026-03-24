@@ -24,6 +24,8 @@ func init() {
 	core.RegisterAgent("claudecode", New)
 }
 
+var newClaudeSessionFunc = newClaudeSession
+
 // Agent drives Claude Code CLI using --input-format stream-json
 // and --permission-prompt-tool stdio for bidirectional communication.
 //
@@ -317,7 +319,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 		sessionID = ""
 	}
 
-	return newClaudeSession(ctx, workDir, model, sessionID, mode, tools, disTools, extraEnv, platformPrompt, disableVerbose)
+	return newClaudeSessionFunc(ctx, workDir, model, sessionID, mode, tools, disTools, extraEnv, platformPrompt, disableVerbose)
 }
 
 func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {
