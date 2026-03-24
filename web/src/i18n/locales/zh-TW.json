@@ -1,0 +1,150 @@
+{
+  "nav": {
+    "dashboard": "總覽",
+    "projects": "專案",
+    "sessions": "工作階段",
+    "cron": "排程工作",
+    "bridge": "橋接",
+    "system": "系統"
+  },
+  "dashboard": {
+    "title": "總覽",
+    "version": "版本",
+    "uptime": "運作時間",
+    "platforms": "平台",
+    "projects": "專案",
+    "bridgeAdapters": "橋接介接器",
+    "noData": "尚無資料"
+  },
+  "projects": {
+    "title": "專案",
+    "name": "名稱",
+    "agent": "智慧代理",
+    "platforms": "平台",
+    "sessions": "工作階段",
+    "heartbeat": "心跳",
+    "settings": "設定",
+    "quiet": "靜音模式",
+    "language": "語言",
+    "adminFrom": "管理來源",
+    "disabledCommands": "已停用指令",
+    "save": "儲存",
+    "detail": "詳細資料",
+    "noProjects": "尚未設定專案",
+    "tabs": {
+      "overview": "總覽",
+      "providers": "供應商",
+      "heartbeat": "心跳",
+      "settings": "設定"
+    }
+  },
+  "sessions": {
+    "title": "工作階段",
+    "id": "編號",
+    "sessionKey": "工作階段金鑰",
+    "name": "名稱",
+    "platform": "平台",
+    "active": "使用中",
+    "createdAt": "建立時間",
+    "history": "歷程",
+    "send": "傳送",
+    "messageInput": "訊息",
+    "delete": "刪除",
+    "noSessions": "尚無工作階段",
+    "chat": "對話",
+    "enterSession": "進入工作階段"
+  },
+  "providers": {
+    "title": "模型供應商",
+    "name": "名稱",
+    "model": "模型",
+    "baseUrl": "基礎 URL",
+    "active": "使用中",
+    "add": "新增供應商",
+    "remove": "移除",
+    "activate": "啟用",
+    "setModel": "設定模型",
+    "models": "可用模型"
+  },
+  "cron": {
+    "title": "排程工作",
+    "expression": "Cron 運算式",
+    "prompt": "提示詞",
+    "exec": "執行",
+    "description": "說明",
+    "enabled": "已啟用",
+    "silent": "靜音",
+    "lastRun": "上次執行",
+    "lastError": "上次錯誤",
+    "add": "新增工作",
+    "delete": "刪除",
+    "noJobs": "尚無排程工作",
+    "workDir": "工作目錄",
+    "sessionKey": "工作階段金鑰",
+    "project": "專案"
+  },
+  "heartbeat": {
+    "title": "心跳",
+    "status": "狀態",
+    "interval": "間隔",
+    "paused": "已暫停",
+    "running": "執行中",
+    "pause": "暫停",
+    "resume": "繼續",
+    "trigger": "立即執行",
+    "setInterval": "設定間隔",
+    "runCount": "執行次數",
+    "errorCount": "錯誤次數",
+    "skippedBusy": "略過（忙碌）",
+    "lastRun": "上次執行"
+  },
+  "bridge": {
+    "title": "橋接",
+    "platform": "平台",
+    "capabilities": "能力",
+    "connectedAt": "連線時間",
+    "noAdapters": "尚無橋接介接器"
+  },
+  "system": {
+    "title": "系統",
+    "config": "設定",
+    "logs": "記錄",
+    "restart": "重新啟動",
+    "reload": "重新載入設定",
+    "restartConfirm": "確定要重新啟動服務嗎？進行中的工作階段可能會中斷。",
+    "reloadConfirm": "從磁碟重新載入設定？",
+    "level": "記錄層級",
+    "limit": "筆數上限"
+  },
+  "login": {
+    "title": "CC-Connect 管理後台",
+    "subtitle": "連線至您的 CC-Connect 執行個體",
+    "token": "API 權杖",
+    "serverUrl": "伺服器位址",
+    "connect": "連線",
+    "invalidToken": "權杖無效或已過期",
+    "logout": "登出"
+  },
+  "common": {
+    "loading": "載入中…",
+    "error": "錯誤",
+    "success": "成功",
+    "confirm": "確認",
+    "cancel": "取消",
+    "save": "儲存",
+    "delete": "刪除",
+    "back": "返回",
+    "refresh": "重新整理",
+    "search": "搜尋",
+    "noData": "無資料",
+    "actions": "操作",
+    "viewAll": "檢視全部",
+    "optional": "選填",
+    "confirmDelete": "確定要刪除嗎？"
+  },
+  "theme": {
+    "light": "淺色",
+    "dark": "深色",
+    "system": "跟隨系統"
+  }
+}

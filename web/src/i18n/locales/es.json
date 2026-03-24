@@ -1,0 +1,150 @@
+{
+  "nav": {
+    "dashboard": "Panel",
+    "projects": "Proyectos",
+    "sessions": "Sesiones",
+    "cron": "Cron",
+    "bridge": "Puente",
+    "system": "Sistema"
+  },
+  "dashboard": {
+    "title": "Panel",
+    "version": "Versión",
+    "uptime": "Tiempo activo",
+    "platforms": "Plataformas",
+    "projects": "Proyectos",
+    "bridgeAdapters": "Adaptadores de puente",
+    "noData": "No hay datos disponibles"
+  },
+  "projects": {
+    "title": "Proyectos",
+    "name": "Nombre",
+    "agent": "Agente",
+    "platforms": "Plataformas",
+    "sessions": "Sesiones",
+    "heartbeat": "Latido",
+    "settings": "Ajustes",
+    "quiet": "Modo silencioso",
+    "language": "Idioma",
+    "adminFrom": "Administración desde",
+    "disabledCommands": "Comandos deshabilitados",
+    "save": "Guardar",
+    "detail": "Detalles",
+    "noProjects": "No hay proyectos configurados",
+    "tabs": {
+      "overview": "Resumen",
+      "providers": "Proveedores",
+      "heartbeat": "Latido",
+      "settings": "Ajustes"
+    }
+  },
+  "sessions": {
+    "title": "Sesiones",
+    "id": "ID",
+    "sessionKey": "Clave de sesión",
+    "name": "Nombre",
+    "platform": "Plataforma",
+    "active": "Activa",
+    "createdAt": "Creada el",
+    "history": "Historial",
+    "send": "Enviar",
+    "messageInput": "Mensaje",
+    "delete": "Eliminar",
+    "noSessions": "No hay sesiones",
+    "chat": "Chat",
+    "enterSession": "Abrir sesión"
+  },
+  "providers": {
+    "title": "Proveedores",
+    "name": "Nombre",
+    "model": "Modelo",
+    "baseUrl": "URL base",
+    "active": "Activo",
+    "add": "Añadir proveedor",
+    "remove": "Quitar",
+    "activate": "Activar",
+    "setModel": "Establecer modelo",
+    "models": "Modelos disponibles"
+  },
+  "cron": {
+    "title": "Tareas programadas",
+    "expression": "Expresión cron",
+    "prompt": "Indicación",
+    "exec": "Ejecutar",
+    "description": "Descripción",
+    "enabled": "Habilitada",
+    "silent": "Silenciosa",
+    "lastRun": "Última ejecución",
+    "lastError": "Último error",
+    "add": "Añadir tarea",
+    "delete": "Eliminar",
+    "noJobs": "No hay tareas programadas",
+    "workDir": "Directorio de trabajo",
+    "sessionKey": "Clave de sesión",
+    "project": "Proyecto"
+  },
+  "heartbeat": {
+    "title": "Latido",
+    "status": "Estado",
+    "interval": "Intervalo",
+    "paused": "En pausa",
+    "running": "En ejecución",
+    "pause": "Pausar",
+    "resume": "Reanudar",
+    "trigger": "Ejecutar ahora",
+    "setInterval": "Establecer intervalo",
+    "runCount": "Ejecuciones",
+    "errorCount": "Errores",
+    "skippedBusy": "Omitida (ocupado)",
+    "lastRun": "Última ejecución"
+  },
+  "bridge": {
+    "title": "Puente",
+    "platform": "Plataforma",
+    "capabilities": "Capacidades",
+    "connectedAt": "Conectada el",
+    "noAdapters": "No hay adaptadores de puente"
+  },
+  "system": {
+    "title": "Sistema",
+    "config": "Configuración",
+    "logs": "Registros",
+    "restart": "Reiniciar",
+    "reload": "Recargar configuración",
+    "restartConfirm": "¿Reiniciar el servicio? Las sesiones activas pueden interrumpirse.",
+    "reloadConfirm": "¿Recargar la configuración desde el disco?",
+    "level": "Nivel de registro",
+    "limit": "Límite de líneas"
+  },
+  "login": {
+    "title": "CC-Connect Admin",
+    "subtitle": "Conéctese a su instancia de CC-Connect",
+    "token": "Token de API",
+    "serverUrl": "URL del servidor",
+    "connect": "Conectar",
+    "invalidToken": "Token no válido o caducado",
+    "logout": "Cerrar sesión"
+  },
+  "common": {
+    "loading": "Cargando…",
+    "error": "Error",
+    "success": "Correcto",
+    "confirm": "Confirmar",
+    "cancel": "Cancelar",
+    "save": "Guardar",
+    "delete": "Eliminar",
+    "back": "Volver",
+    "refresh": "Actualizar",
+    "search": "Buscar",
+    "noData": "Sin datos",
+    "actions": "Acciones",
+    "viewAll": "Ver todo",
+    "optional": "opcional",
+    "confirmDelete": "¿Seguro que desea eliminar esto?"
+  },
+  "theme": {
+    "light": "Claro",
+    "dark": "Oscuro",
+    "system": "Sistema"
+  }
+}

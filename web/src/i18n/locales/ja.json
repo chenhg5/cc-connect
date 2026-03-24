@@ -1,0 +1,150 @@
+{
+  "nav": {
+    "dashboard": "ダッシュボード",
+    "projects": "プロジェクト",
+    "sessions": "セッション",
+    "cron": "Cron",
+    "bridge": "ブリッジ",
+    "system": "システム"
+  },
+  "dashboard": {
+    "title": "ダッシュボード",
+    "version": "バージョン",
+    "uptime": "稼働時間",
+    "platforms": "プラットフォーム",
+    "projects": "プロジェクト",
+    "bridgeAdapters": "ブリッジアダプター",
+    "noData": "データがありません"
+  },
+  "projects": {
+    "title": "プロジェクト",
+    "name": "名前",
+    "agent": "エージェント",
+    "platforms": "プラットフォーム",
+    "sessions": "セッション",
+    "heartbeat": "ハートビート",
+    "settings": "設定",
+    "quiet": "サイレントモード",
+    "language": "言語",
+    "adminFrom": "管理元",
+    "disabledCommands": "無効化したコマンド",
+    "save": "保存",
+    "detail": "詳細",
+    "noProjects": "プロジェクトが設定されていません",
+    "tabs": {
+      "overview": "概要",
+      "providers": "プロバイダー",
+      "heartbeat": "ハートビート",
+      "settings": "設定"
+    }
+  },
+  "sessions": {
+    "title": "セッション",
+    "id": "ID",
+    "sessionKey": "セッションキー",
+    "name": "名前",
+    "platform": "プラットフォーム",
+    "active": "アクティブ",
+    "createdAt": "作成日時",
+    "history": "履歴",
+    "send": "送信",
+    "messageInput": "メッセージ",
+    "delete": "削除",
+    "noSessions": "セッションがありません",
+    "chat": "チャット",
+    "enterSession": "セッションを開く"
+  },
+  "providers": {
+    "title": "プロバイダー",
+    "name": "名前",
+    "model": "モデル",
+    "baseUrl": "ベース URL",
+    "active": "有効",
+    "add": "プロバイダーを追加",
+    "remove": "削除",
+    "activate": "有効化",
+    "setModel": "モデルを設定",
+    "models": "利用可能なモデル"
+  },
+  "cron": {
+    "title": "スケジュールジョブ",
+    "expression": "Cron 式",
+    "prompt": "プロンプト",
+    "exec": "実行",
+    "description": "説明",
+    "enabled": "有効",
+    "silent": "サイレント",
+    "lastRun": "最終実行",
+    "lastError": "最後のエラー",
+    "add": "ジョブを追加",
+    "delete": "削除",
+    "noJobs": "スケジュールジョブがありません",
+    "workDir": "作業ディレクトリ",
+    "sessionKey": "セッションキー",
+    "project": "プロジェクト"
+  },
+  "heartbeat": {
+    "title": "ハートビート",
+    "status": "状態",
+    "interval": "間隔",
+    "paused": "一時停止",
+    "running": "実行中",
+    "pause": "一時停止",
+    "resume": "再開",
+    "trigger": "今すぐ実行",
+    "setInterval": "間隔を設定",
+    "runCount": "実行回数",
+    "errorCount": "エラー回数",
+    "skippedBusy": "スキップ（ビジー）",
+    "lastRun": "最終実行"
+  },
+  "bridge": {
+    "title": "ブリッジ",
+    "platform": "プラットフォーム",
+    "capabilities": "機能",
+    "connectedAt": "接続日時",
+    "noAdapters": "ブリッジアダプターがありません"
+  },
+  "system": {
+    "title": "システム",
+    "config": "設定",
+    "logs": "ログ",
+    "restart": "再起動",
+    "reload": "設定の再読み込み",
+    "restartConfirm": "サービスを再起動しますか？アクティブなセッションが中断される場合があります。",
+    "reloadConfirm": "ディスクから設定を再読み込みしますか？",
+    "level": "ログレベル",
+    "limit": "行数の上限"
+  },
+  "login": {
+    "title": "CC-Connect 管理コンソール",
+    "subtitle": "CC-Connect インスタンスに接続",
+    "token": "API トークン",
+    "serverUrl": "サーバー URL",
+    "connect": "接続",
+    "invalidToken": "トークンが無効または期限切れです",
+    "logout": "ログアウト"
+  },
+  "common": {
+    "loading": "読み込み中…",
+    "error": "エラー",
+    "success": "成功",
+    "confirm": "確認",
+    "cancel": "キャンセル",
+    "save": "保存",
+    "delete": "削除",
+    "back": "戻る",
+    "refresh": "更新",
+    "search": "検索",
+    "noData": "データなし",
+    "actions": "操作",
+    "viewAll": "すべて表示",
+    "optional": "任意",
+    "confirmDelete": "本当に削除しますか？"
+  },
+  "theme": {
+    "light": "ライト",
+    "dark": "ダーク",
+    "system": "システムに合わせる"
+  }
+}
