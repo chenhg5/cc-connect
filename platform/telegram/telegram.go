@@ -1075,6 +1075,9 @@ func (p *Platform) downloadFile(bot telegramBot, fileID string) ([]byte, error) 
 	if err != nil {
 		return nil, fmt.Errorf("get file: %w", err)
 	}
+	if file.FilePath == "" {
+		return nil, fmt.Errorf("get file: empty file_path returned for file_id %s", fileID)
+	}
 	link := file.Link(bot.Token())
 
 	resp, err := p.httpClient.Get(link)
@@ -1083,6 +1086,9 @@ func (p *Platform) downloadFile(bot telegramBot, fileID string) ([]byte, error) 
 		return nil, fmt.Errorf("download file %s: %s", fileID, errMsg)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("download file %s: status %d", fileID, resp.StatusCode)
+	}
 	return io.ReadAll(resp.Body)
 }
 
@@ -1190,7 +1196,8 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 
 	action := tgbotapi.NewChatAction(rc.chatID, tgbotapi.ChatTyping)
 	if bot, err := p.connectedBot("typing"); err == nil {
-		if _, err := bot.Send(action); err != nil {
+		// sendChatAction returns result=true, not a Message — use Request, not Send.
+		if _, err := bot.Request(action); err != nil {
 			slog.Debug("telegram: initial typing send failed", "error", err)
 		}
 	} else {
@@ -1213,7 +1220,7 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 					slog.Debug("telegram: typing stopped", "error", err)
 					return
 				}
-				if _, err := bot.Send(action); err != nil {
+				if _, err := bot.Request(action); err != nil {
 					slog.Debug("telegram: typing send failed", "error", err)
 				}
 			}

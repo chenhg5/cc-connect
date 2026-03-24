@@ -111,6 +111,38 @@ func (a *resultAgent) StartSession(_ context.Context, _ string) (AgentSession, e
 func (a *resultAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) { return nil, nil }
 func (a *resultAgent) Stop() error                                                { return nil }
 
+type sessionEnvRecordingAgent struct {
+	stubAgent
+	session AgentSession
+	mu      sync.Mutex
+	env     []string
+}
+
+func (a *sessionEnvRecordingAgent) StartSession(_ context.Context, _ string) (AgentSession, error) {
+	if a.session != nil {
+		return a.session, nil
+	}
+	return &stubAgentSession{}, nil
+}
+
+func (a *sessionEnvRecordingAgent) SetSessionEnv(env []string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.env = append([]string(nil), env...)
+}
+
+func (a *sessionEnvRecordingAgent) EnvValue(key string) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	prefix := key + "="
+	for _, entry := range a.env {
+		if strings.HasPrefix(entry, prefix) {
+			return strings.TrimPrefix(entry, prefix)
+		}
+	}
+	return ""
+}
+
 type resultAgentSession struct {
 	events      chan Event
 	result      string
@@ -266,6 +298,16 @@ type stubModelModeAgent struct {
 	reasoningEffort string
 	providers       []ProviderConfig
 	active          string
+}
+
+type stubLiveModeSession struct {
+	stubAgentSession
+	modes []string
+}
+
+func (s *stubLiveModeSession) SetLiveMode(mode string) bool {
+	s.modes = append(s.modes, mode)
+	return true
 }
 
 func (a *stubModelModeAgent) SetModel(model string) {
@@ -671,7 +713,7 @@ func TestProcessInteractiveEvents_SuppressesDuplicateSideChannelText(t *testing.
 	}
 
 	agentSession.events <- Event{Type: EventResult, Content: sideText, Done: true}
-	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil)
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil)
 
 	if got := p.getSent(); len(got) != 1 || got[0] != sideText {
 		t.Fatalf("sent text = %#v, want one side-channel message", got)
@@ -701,7 +743,7 @@ func TestProcessInteractiveEvents_DoesNotSuppressDifferentFinalText(t *testing.T
 
 	finalText := "文件已发出，另外我也把使用方法整理好了。"
 	agentSession.events <- Event{Type: EventResult, Content: finalText, Done: true}
-	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil)
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil)
 
 	if got := p.getSent(); len(got) != 2 || got[0] == got[1] {
 		t.Fatalf("sent text = %#v, want side-channel and final reply", got)
@@ -730,7 +772,7 @@ func TestProcessInteractiveEvents_QuietToolTurnKeepsPreviewOnFinalize(t *testing
 	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "echo hi"}
 	agentSession.events <- Event{Type: EventResult, Content: "", Done: true}
 
-	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil)
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil)
 
 	if got := p.getSent(); len(got) != 0 {
 		t.Fatalf("sent text = %#v, want no plain-text fallback sends", got)
@@ -1531,6 +1573,58 @@ func TestHandlePendingPermission_MultiWorkspaceLookup(t *testing.T) {
 	}
 	if session.lastResult.Behavior != "allow" {
 		t.Fatalf("RespondPermission behavior = %q, want %q", session.lastResult.Behavior, "allow")
+	}
+}
+
+func TestHandleMessage_MultiWorkspacePreservesCCSessionKey(t *testing.T) {
+	p := &stubPlatformEngine{n: "discord"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindingPath)
+
+	wsDir := filepath.Join(baseDir, "ws1")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	normalizedWsDir := normalizeWorkspacePath(wsDir)
+	channelID := "C123"
+	e.workspaceBindings.Bind("project:test", channelID, "chan", normalizedWsDir)
+
+	wsAgent := &sessionEnvRecordingAgent{session: newResultAgentSession("ok")}
+	ws := e.workspacePool.GetOrCreate(normalizedWsDir)
+	ws.agent = wsAgent
+	ws.sessions = NewSessionManager("")
+
+	msg := &Message{
+		SessionKey: "discord:" + channelID + ":U1",
+		Platform:   "discord",
+		UserID:     "U1",
+		UserName:   "user",
+		Content:    "hello",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	deadline := time.After(2 * time.Second)
+	for {
+		if got := wsAgent.EnvValue("CC_SESSION_KEY"); got != "" {
+			if got != msg.SessionKey {
+				t.Fatalf("CC_SESSION_KEY = %q, want %q", got, msg.SessionKey)
+			}
+			if strings.Contains(got, normalizedWsDir) {
+				t.Fatalf("CC_SESSION_KEY leaked workspace path: %q", got)
+			}
+			return
+		}
+
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for CC_SESSION_KEY to be injected")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
 	}
 }
 
@@ -2355,6 +2449,79 @@ func TestCmdModel_LegacySyntaxStillWorks(t *testing.T) {
 	}
 }
 
+func TestCmdModel_SavesModelWhenNoActiveProvider(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubModelModeAgent{
+		model: "gpt-4.1-mini",
+		providers: []ProviderConfig{
+			{
+				Name:   "openai",
+				Model:  "gpt-4.1-mini",
+				Models: []ModelOption{{Name: "gpt-4.1", Alias: "gpt"}, {Name: "gpt-4.1-mini", Alias: "mini"}},
+			},
+		},
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	var savedModel string
+	e.SetModelSaveFunc(func(model string) error {
+		savedModel = model
+		return nil
+	})
+
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	e.cmdModel(p, msg, []string{"switch", "gpt"})
+
+	if agent.model != "gpt-4.1" {
+		t.Fatalf("agent model = %q, want gpt-4.1", agent.model)
+	}
+	if savedModel != "gpt-4.1" {
+		t.Fatalf("saved model = %q, want gpt-4.1", savedModel)
+	}
+}
+
+func TestCmdModel_DoesNotClaimSuccessWhenModelSaveFails(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubModelModeAgent{
+		model: "gpt-4.1-mini",
+		providers: []ProviderConfig{
+			{
+				Name:   "openai",
+				Model:  "gpt-4.1-mini",
+				Models: []ModelOption{{Name: "gpt-4.1", Alias: "gpt"}, {Name: "gpt-4.1-mini", Alias: "mini"}},
+			},
+		},
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetModelSaveFunc(func(model string) error {
+		return errors.New("disk full")
+	})
+
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	s := e.sessions.GetOrCreateActive(msg.SessionKey)
+	s.SetAgentSessionID("existing-session", "test")
+	s.AddHistory("user", "keep me")
+
+	e.cmdModel(p, msg, []string{"switch", "gpt"})
+
+	if agent.model != "gpt-4.1-mini" {
+		t.Fatalf("agent model = %q, want unchanged gpt-4.1-mini", agent.model)
+	}
+	if active := e.sessions.GetOrCreateActive(msg.SessionKey); active.AgentSessionID != "existing-session" {
+		t.Fatalf("session id = %q, want existing-session after failure", active.AgentSessionID)
+	}
+	if active := e.sessions.GetOrCreateActive(msg.SessionKey); len(active.History) != 1 {
+		t.Fatalf("history length = %d, want 1 after failure", len(active.History))
+	}
+	sent := p.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(sent))
+	}
+	if !strings.Contains(sent[0], "Failed to change model") {
+		t.Fatalf("reply = %q, want model change failure message", sent[0])
+	}
+}
+
 func TestCmdDir_ShowsCurrentDirectory(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	agent := &stubWorkDirAgent{workDir: "/tmp/project-a"}
@@ -2711,6 +2878,41 @@ func TestCmdMode_UsesInlineButtonsOnButtonOnlyPlatform(t *testing.T) {
 	}
 	if got := p.buttonRows[0][0].Data; got != "cmd:/mode default" {
 		t.Fatalf("first /mode button = %q, want %q", got, "cmd:/mode default")
+	}
+}
+
+func TestCmdMode_AppliesLiveModeWithoutReset(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubModelModeAgent{}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	live := &stubLiveModeSession{}
+	state := &interactiveState{agentSession: live, platform: p, replyCtx: "ctx"}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	session := e.sessions.GetOrCreateActive(key)
+	session.SetAgentSessionID("existing-session", "stub")
+	session.AddHistory("user", "hello")
+
+	e.cmdMode(p, &Message{SessionKey: key, ReplyCtx: "ctx"}, []string{"yolo"})
+
+	if len(live.modes) != 1 || live.modes[0] != "yolo" {
+		t.Fatalf("live modes = %v, want [yolo]", live.modes)
+	}
+	if session.GetAgentSessionID() != "existing-session" {
+		t.Fatalf("agent session id = %q, want existing-session", session.GetAgentSessionID())
+	}
+	if len(session.GetHistory(0)) != 1 {
+		t.Fatalf("history len = %d, want 1", len(session.GetHistory(0)))
+	}
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "Current session updated immediately.") {
+		t.Fatalf("sent = %v, want live mode update reply", p.sent)
+	}
+	if got := agent.GetMode(); got != "yolo" {
+		t.Fatalf("agent mode = %q, want yolo", got)
 	}
 }
 
@@ -4304,6 +4506,127 @@ func (s *queuingAgentSession) Send(prompt string, _ []ImageAttachment, _ []FileA
 	return nil
 }
 
+// blockingSendAgentSession blocks in Send until unblock is closed, mimicking agents
+// whose Send does not return until the prompt turn completes (e.g. ACP session/prompt).
+type blockingSendAgentSession struct {
+	controllableAgentSession
+	sendStarted chan struct{} // sent to when Send begins waiting on unblock
+	unblock     chan struct{} // close to let Send return
+}
+
+func newBlockingSendSession(id string) *blockingSendAgentSession {
+	return &blockingSendAgentSession{
+		controllableAgentSession: controllableAgentSession{
+			sessionID: id,
+			alive:     true,
+			events:    make(chan Event, 16),
+			closed:    make(chan struct{}),
+		},
+		sendStarted: make(chan struct{}, 1),
+		unblock:     make(chan struct{}),
+	}
+}
+
+func (s *blockingSendAgentSession) Send(_ string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.sendStarted <- struct{}{}
+	<-s.unblock
+	return nil
+}
+
+// permSignalInlinePlatform wraps stubInlineButtonPlatform and signals when a
+// SendWithButtons call includes perm:allow, so tests do not read buttonRows
+// from another goroutine (race with the engine under -race).
+type permSignalInlinePlatform struct {
+	stubInlineButtonPlatform
+	permAllowSent chan<- struct{}
+}
+
+func (p *permSignalInlinePlatform) SendWithButtons(ctx context.Context, replyCtx any, content string, buttons [][]ButtonOption) error {
+	if err := p.stubInlineButtonPlatform.SendWithButtons(ctx, replyCtx, content, buttons); err != nil {
+		return err
+	}
+	for _, row := range buttons {
+		for _, b := range row {
+			if b.Data == "perm:allow" {
+				select {
+				case p.permAllowSent <- struct{}{}:
+				default:
+				}
+				return nil
+			}
+		}
+	}
+	return nil
+}
+
+// Regression: permission events must be handled while Send is still blocked.
+// If the engine called Send synchronously before reading Events(), this would deadlock
+// and never call sendPermissionPrompt.
+func TestProcessInteractiveEvents_PermissionWhileSendBlocked(t *testing.T) {
+	permAllowSent := make(chan struct{}, 1)
+	p := &permSignalInlinePlatform{
+		stubInlineButtonPlatform: stubInlineButtonPlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}},
+		permAllowSent:            permAllowSent,
+	}
+	sess := newBlockingSendSession("blk-perm")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	session := e.sessions.GetOrCreateActive(key)
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	sendDone := make(chan error, 1)
+	go func() {
+		sendDone <- sess.Send("prompt", nil, nil)
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, key, "m1", time.Now(), nil, sendDone)
+		close(done)
+	}()
+
+	select {
+	case <-sess.sendStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Send did not reach blocking wait")
+	}
+
+	sess.events <- Event{
+		Type:         EventPermissionRequest,
+		RequestID:    "req-blocked-send",
+		ToolName:     "write_file",
+		ToolInput:    "/tmp/x",
+		ToolInputRaw: map[string]any{"path": "/tmp/x"},
+	}
+
+	select {
+	case <-permAllowSent:
+	case <-time.After(2 * time.Second):
+		t.Fatal("permission inline buttons not sent while Send blocked")
+	}
+
+	if !e.handlePendingPermission(p, &Message{SessionKey: key, ReplyCtx: "ctx"}, "allow") {
+		t.Fatal("expected handlePendingPermission to resolve pending request")
+	}
+	close(sess.unblock)
+
+	sess.events <- Event{Type: EventResult, Content: "ok", Done: true}
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("processInteractiveEvents did not complete")
+	}
+}
+
 func TestQueueMessageForBusySession_FIFODequeue(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newQueuingSession("qs1")
@@ -4398,10 +4721,13 @@ func TestProcessInteractiveEvents_DrainsQueuedMessages(t *testing.T) {
 
 	session.AddHistory("user", "initial-msg")
 
+	sendDone := make(chan error, 1)
+	sendDone <- nil
+
 	// processInteractiveEvents should handle both turns.
 	done := make(chan struct{})
 	go func() {
-		e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), nil)
+		e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), nil, sendDone)
 		close(done)
 	}()
 
@@ -4748,7 +5074,7 @@ func TestAutoCompress_TriggerAfterResult(t *testing.T) {
 	session.AddHistory("user", "hello world")
 
 	// Simulate a full turn.
-	go e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), func() {})
+	go e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), func() {}, nil)
 
 	sess.events <- Event{Type: EventResult, Content: "response", Done: true}
 
@@ -5373,7 +5699,7 @@ func TestEventIdleTimeout_CleansUpSession(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		e.processInteractiveEvents(state, session, e.sessions, key, "", time.Now(), nil)
+		e.processInteractiveEvents(state, session, e.sessions, key, "", time.Now(), nil, nil)
 		close(done)
 	}()
 
@@ -5417,7 +5743,7 @@ func TestEventIdleTimeout_ResetOnEvent(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		e.processInteractiveEvents(state, session, e.sessions, key, "", time.Now(), nil)
+		e.processInteractiveEvents(state, session, e.sessions, key, "", time.Now(), nil, nil)
 		close(done)
 	}()
 
@@ -5469,7 +5795,7 @@ func TestEventIdleTimeout_DisabledWhenZero(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		e.processInteractiveEvents(state, session, e.sessions, key, "", time.Now(), nil)
+		e.processInteractiveEvents(state, session, e.sessions, key, "", time.Now(), nil, nil)
 		close(done)
 	}()
 
@@ -5570,6 +5896,82 @@ func TestCmdShell_EmptyCommand_ShowsUsage(t *testing.T) {
 	}
 	if !foundUsage {
 		t.Fatalf("expected usage message, got %v", sent)
+	}
+}
+
+func TestCmdShell_MultiWorkspaceUsesSharedBindingWorkDir(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	wsDir := filepath.Join(baseDir, "shared-shell-workspace")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	normalizedWsDir := normalizeWorkspacePath(wsDir)
+	e.workspaceBindings.Bind(sharedWorkspaceBindingsKey, "ch1", "shared-shell", normalizedWsDir)
+
+	msg := &Message{
+		SessionKey: "test:ch1:user1",
+		Content:    "/shell pwd",
+		ReplyCtx:   "ctx",
+	}
+	e.cmdShell(p, msg, "/shell pwd")
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) > 0 {
+			if !strings.Contains(sent[0], normalizedWsDir) {
+				t.Fatalf("expected shell output to contain shared workspace %q, got %q", normalizedWsDir, sent[0])
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for shell response")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestCmdShell_MultiWorkspaceIgnoresMissingSharedBinding(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agent := &stubWorkDirAgent{workDir: t.TempDir()}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	missingDir := filepath.Join(baseDir, "missing-shared-workspace")
+	e.workspaceBindings.Bind(sharedWorkspaceBindingsKey, "ch1", "shared-shell", missingDir)
+
+	msg := &Message{
+		SessionKey: "test:ch1:user1",
+		Content:    "/shell pwd",
+		ReplyCtx:   "ctx",
+	}
+	e.cmdShell(p, msg, "/shell pwd")
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) > 0 {
+			if !strings.Contains(sent[0], normalizeWorkspacePath(agent.workDir)) {
+				t.Fatalf("expected shell output to fall back to agent work dir %q, got %q", agent.workDir, sent[0])
+			}
+			if strings.Contains(sent[0], missingDir) {
+				t.Fatalf("expected shell output to ignore missing shared workspace %q, got %q", missingDir, sent[0])
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for shell response")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -5687,6 +6089,108 @@ func TestWorkspace_Bind_NonexistentDir(t *testing.T) {
 	}
 }
 
+func TestWorkspace_Route_ShowsCurrentAndSupportsSpaces(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	targetDir := filepath.Join(t.TempDir(), "routed project")
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	msg := &Message{SessionKey: "test:ch1:user1", Content: "/workspace route " + targetDir, ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	normalizedTarget := normalizeWorkspacePath(targetDir)
+	channelKey := workspaceChannelKey("test", "ch1")
+	if got := e.workspaceBindings.Lookup("project:test", channelKey); got == nil || got.Workspace != normalizedTarget {
+		t.Fatalf("expected routed binding %q, got %+v", normalizedTarget, got)
+	}
+
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[0], normalizedTarget) {
+		t.Fatalf("expected route success reply to contain %q, got %v", normalizedTarget, sent)
+	}
+
+	p.clearSent()
+	msg.Content = "/workspace"
+	e.handleCommand(p, msg, msg.Content)
+	sent = p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[0], normalizedTarget) {
+		t.Fatalf("expected workspace info to contain routed path %q, got %v", normalizedTarget, sent)
+	}
+}
+
+func TestWorkspace_Route_RejectsRelativePath(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	msg := &Message{SessionKey: "test:ch1:user1", Content: "/workspace route relative/path", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(strings.ToLower(sent[0]), "absolute") {
+		t.Fatalf("expected absolute-path validation reply, got %v", sent)
+	}
+	if got := e.workspaceBindings.Lookup("project:test", workspaceChannelKey("test", "ch1")); got != nil {
+		t.Fatalf("expected no binding for relative route, got %+v", got)
+	}
+}
+
+func TestWorkspace_Route_RejectsNonexistentPath(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	missingPath := filepath.Join(t.TempDir(), "missing")
+	msg := &Message{SessionKey: "test:ch1:user1", Content: "/workspace route " + missingPath, ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[0], missingPath) {
+		t.Fatalf("expected missing-path reply, got %v", sent)
+	}
+	if got := e.workspaceBindings.Lookup("project:test", workspaceChannelKey("test", "ch1")); got != nil {
+		t.Fatalf("expected no binding for missing route target, got %+v", got)
+	}
+}
+
+func TestWorkspace_Route_RejectsFileTarget(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	fileTarget := filepath.Join(t.TempDir(), "workspace.txt")
+	if err := os.WriteFile(fileTarget, []byte("not a dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	msg := &Message{SessionKey: "test:ch1:user1", Content: "/workspace route " + fileTarget, ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(strings.ToLower(sent[0]), "directory") {
+		t.Fatalf("expected not-directory reply, got %v", sent)
+	}
+	if got := e.workspaceBindings.Lookup("project:test", workspaceChannelKey("test", "ch1")); got != nil {
+		t.Fatalf("expected no binding for file route target, got %+v", got)
+	}
+}
+
 func TestWorkspace_NoArgs_ShowsCurrent(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -5702,6 +6206,250 @@ func TestWorkspace_NoArgs_ShowsCurrent(t *testing.T) {
 	sent := p.getSent()
 	if len(sent) == 0 {
 		t.Fatal("expected a reply")
+	}
+}
+
+func TestWorkspace_NoArgs_ShowsSharedBinding(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	wsDir := filepath.Join(baseDir, "shared-project")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	normalizedWsDir := normalizeWorkspacePath(wsDir)
+	e.workspaceBindings.Bind(sharedWorkspaceBindingsKey, "ch1", "shared-project", normalizedWsDir)
+
+	msg := &Message{SessionKey: "test:ch1:user1", Content: "/workspace", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("expected a reply")
+	}
+	if !strings.Contains(sent[0], normalizedWsDir) {
+		t.Fatalf("expected workspace info to contain shared workspace %q, got %q", normalizedWsDir, sent[0])
+	}
+	if !strings.Contains(strings.ToLower(sent[0]), "shared") {
+		t.Fatalf("expected workspace info to mention shared source, got %q", sent[0])
+	}
+}
+
+func TestWorkspace_SharedBind_AllowsRegularUser(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "shared-project")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	msg := &Message{
+		SessionKey: "test:ch1:user1",
+		Content:    "/workspace shared bind shared-project",
+		ReplyCtx:   "ctx",
+		UserID:     "user1",
+	}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("expected shared bind reply")
+	}
+	normalizedWsDir := normalizeWorkspacePath(wsDir)
+	if !strings.Contains(sent[0], "shared-project") {
+		t.Fatalf("expected shared bind success reply to contain workspace name, got %v", sent)
+	}
+	if got := e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, workspaceChannelKey("test", "ch1")); got == nil || got.Workspace != normalizedWsDir {
+		t.Fatalf("expected shared binding %q for regular user, got %+v", normalizedWsDir, got)
+	}
+}
+
+func TestWorkspace_SharedBind_Unbind_List(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "shared-project")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	msg := &Message{
+		SessionKey: "test:ch1:user1",
+		Content:    "/workspace shared bind shared-project",
+		ReplyCtx:   "ctx",
+		UserID:     "user1",
+	}
+	e.handleCommand(p, msg, msg.Content)
+
+	normalizedWsDir := normalizeWorkspacePath(wsDir)
+	channelKey := workspaceChannelKey("test", "ch1")
+	if got := e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, channelKey); got == nil || got.Workspace != normalizedWsDir {
+		t.Fatalf("expected shared binding %q, got %+v", normalizedWsDir, got)
+	}
+
+	p.clearSent()
+	msg.Content = "/workspace shared"
+	e.handleCommand(p, msg, msg.Content)
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[0], normalizedWsDir) || !strings.Contains(strings.ToLower(sent[0]), "shared") {
+		t.Fatalf("expected shared workspace info, got %v", sent)
+	}
+
+	p.clearSent()
+	msg.Content = "/workspace shared list"
+	e.handleCommand(p, msg, msg.Content)
+	sent = p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[0], "shared-project") {
+		t.Fatalf("expected shared list output, got %v", sent)
+	}
+
+	p.clearSent()
+	msg.Content = "/workspace shared unbind"
+	e.handleCommand(p, msg, msg.Content)
+	sent = p.getSent()
+	if len(sent) == 0 || !strings.Contains(strings.ToLower(sent[0]), "shared workspace") {
+		t.Fatalf("expected shared unbind success, got %v", sent)
+	}
+	if got := e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, channelKey); got != nil {
+		t.Fatalf("expected shared binding removed, got %+v", got)
+	}
+}
+
+func TestWorkspace_SharedRoute_Unbind_List(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	targetDir := filepath.Join(t.TempDir(), "shared routed workspace")
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	msg := &Message{
+		SessionKey: "test:ch1:user1",
+		Content:    "/workspace shared route " + targetDir,
+		ReplyCtx:   "ctx",
+		UserID:     "user1",
+	}
+	e.handleCommand(p, msg, msg.Content)
+
+	normalizedTarget := normalizeWorkspacePath(targetDir)
+	channelKey := workspaceChannelKey("test", "ch1")
+	if got := e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, channelKey); got == nil || got.Workspace != normalizedTarget {
+		t.Fatalf("expected shared route binding %q, got %+v", normalizedTarget, got)
+	}
+
+	p.clearSent()
+	msg.Content = "/workspace shared"
+	e.handleCommand(p, msg, msg.Content)
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[0], normalizedTarget) || !strings.Contains(strings.ToLower(sent[0]), "shared") {
+		t.Fatalf("expected shared route info, got %v", sent)
+	}
+
+	p.clearSent()
+	msg.Content = "/workspace shared list"
+	e.handleCommand(p, msg, msg.Content)
+	sent = p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[0], normalizedTarget) {
+		t.Fatalf("expected shared route list output, got %v", sent)
+	}
+
+	p.clearSent()
+	msg.Content = "/workspace shared unbind"
+	e.handleCommand(p, msg, msg.Content)
+	sent = p.getSent()
+	if len(sent) == 0 || !strings.Contains(strings.ToLower(sent[0]), "shared workspace") {
+		t.Fatalf("expected shared unbind success, got %v", sent)
+	}
+	if got := e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, channelKey); got != nil {
+		t.Fatalf("expected shared route binding removed, got %+v", got)
+	}
+}
+
+func TestWorkspace_SharedInit_BindsExistingDir(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "repo")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	msg := &Message{
+		SessionKey: "test:ch1:user1",
+		Content:    "/workspace shared init https://github.com/example/repo.git",
+		ReplyCtx:   "ctx",
+		UserID:     "user1",
+	}
+	e.handleCommand(p, msg, msg.Content)
+
+	normalizedWsDir := normalizeWorkspacePath(wsDir)
+	if got := e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, workspaceChannelKey("test", "ch1")); got == nil || got.Workspace != normalizedWsDir {
+		t.Fatalf("expected shared init binding %q, got %+v", normalizedWsDir, got)
+	}
+}
+
+func TestWorkspace_Unbind_SharedBindingShowsHint(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	wsDir := filepath.Join(baseDir, "shared-project")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e.workspaceBindings.Bind(sharedWorkspaceBindingsKey, "ch1", "shared-project", normalizeWorkspacePath(wsDir))
+
+	msg := &Message{SessionKey: "test:ch1:user1", Content: "/workspace unbind", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[0], "/workspace shared unbind") {
+		t.Fatalf("expected hint to use shared unbind, got %v", sent)
+	}
+}
+
+func TestWorkspace_NoArgs_IgnoresMissingSharedBinding(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	missingDir := filepath.Join(baseDir, "missing-shared-project")
+	e.workspaceBindings.Bind(sharedWorkspaceBindingsKey, "ch1", "shared-project", missingDir)
+
+	msg := &Message{SessionKey: "test:ch1:user1", Content: "/workspace", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("expected a reply")
+	}
+	if !strings.Contains(sent[0], e.i18n.T(MsgWsNoBinding)) {
+		t.Fatalf("expected missing shared binding to be treated as no binding, got %q", sent[0])
 	}
 }
 
@@ -6571,14 +7319,15 @@ func TestExtractSessionKeyParts(t *testing.T) {
 		sessionKey   string
 		wantPlatform string
 		wantChannel  string
+		wantKey      string
 		wantUser     string
 	}{
-		{"full format", "feishu:channel123:user456", "feishu", "channel123", "user456"},
-		{"platform and channel only", "telegram:987654321", "telegram", "987654321", ""},
-		{"no colons", "simplekey", "simplekey", "", ""},
-		{"single colon", "discord:channel1", "discord", "channel1", ""},
-		{"empty string", "", "", "", ""},
-		{"just platform colon user", "line::user1", "line", "", "user1"},
+		{"full format", "feishu:channel123:user456", "feishu", "channel123", "feishu:channel123", "user456"},
+		{"platform and channel only", "telegram:987654321", "telegram", "987654321", "telegram:987654321", ""},
+		{"no colons", "simplekey", "simplekey", "", "", ""},
+		{"single colon", "discord:channel1", "discord", "channel1", "discord:channel1", ""},
+		{"empty string", "", "", "", "", ""},
+		{"just platform colon user", "line::user1", "line", "", "", "user1"},
 	}
 
 	for _, tt := range tests {
@@ -6591,6 +7340,11 @@ func TestExtractSessionKeyParts(t *testing.T) {
 			gotChannel := extractChannelID(tt.sessionKey)
 			if gotChannel != tt.wantChannel {
 				t.Errorf("extractChannelID(%q) = %q, want %q", tt.sessionKey, gotChannel, tt.wantChannel)
+			}
+
+			gotKey := extractWorkspaceChannelKey(tt.sessionKey)
+			if gotKey != tt.wantKey {
+				t.Errorf("extractWorkspaceChannelKey(%q) = %q, want %q", tt.sessionKey, gotKey, tt.wantKey)
 			}
 
 			gotUser := extractUserID(tt.sessionKey)

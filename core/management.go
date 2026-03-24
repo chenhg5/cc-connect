@@ -854,8 +854,7 @@ func (m *ManagementServer) handleProjectModel(w http.ResponseWriter, r *http.Req
 		mgmtError(w, http.StatusMethodNotAllowed, "POST only")
 		return
 	}
-	ms, ok := e.agent.(ModelSwitcher)
-	if !ok {
+	if _, ok := e.agent.(ModelSwitcher); !ok {
 		mgmtError(w, http.StatusBadRequest, "agent does not support model switching")
 		return
 	}
@@ -870,9 +869,13 @@ func (m *ManagementServer) handleProjectModel(w http.ResponseWriter, r *http.Req
 		mgmtError(w, http.StatusBadRequest, "model is required")
 		return
 	}
-	ms.SetModel(body.Model)
+	model, err := e.switchModel(body.Model)
+	if err != nil {
+		mgmtError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	mgmtJSON(w, http.StatusOK, map[string]any{
-		"model":   body.Model,
+		"model":   model,
 		"message": "model updated",
 	})
 }
