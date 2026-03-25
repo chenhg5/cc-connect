@@ -63,6 +63,38 @@
 
 ---
 
+## 🧩 Platform feature snapshot
+
+High-level view of what each **built-in platform** can do in cc-connect. Inspired by [OpenClaw China’s feature matrix](https://github.com/BytePioneer-AI/openclaw-china#功能支持) — handy for comparing channels at a glance.
+
+**Legend**
+
+| Symbol | Meaning |
+|--------|---------|
+| ✅ | Works in **stable** cc-connect with typical configuration |
+| ✅（beta） | **Beta / pre-release only** — the **Weixin (personal)** column: install [`cc-connect@beta`](https://www.npmjs.com/package/cc-connect?activeTab=versions) or a [pre-release binary](https://github.com/chenhg5/cc-connect/releases); **not** in the default stable npm build yet |
+| ⚠️ | Partial, needs extra config (e.g. speech / ASR), or limited by the vendor app or API |
+| ❌ | Not supported or not applicable in practice |
+
+† **QQ (NapCat / OneBot)** — unofficial self-hosted bridge; behaviour depends on your NapCat / network setup.
+
+| Capability | Feishu | DingTalk | Telegram | Slack | Discord | LINE | WeCom | **Weixin**<br>*(personal)* | QQ† | QQ Bot |
+|------------|:------:|:--------:|:--------:|:-----:|:-------:|:----:|:-----:|:-------------------------:|:---:|:------:|
+| Text & slash commands | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅（beta） | ✅ | ✅ |
+| Markdown / cards | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ✅（beta） | ✅ | ✅ |
+| Streaming / chunked replies | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅（beta） | ✅ | ✅ |
+| Images & files | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ✅（beta） | ✅ | ✅ |
+| Voice / STT / TTS | ⚠️ | ⚠️ | ✅ | ⚠️ | ⚠️ | ❌ | ⚠️ | ✅（beta） | ⚠️ | ⚠️ |
+| Private (DM) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅（beta） | ✅ | ✅ |
+| Group / channel | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ✅（beta） | ✅ | ✅ |
+
+> **Weixin column:** every **✅（beta）** means “available only when you run a **beta / pre-release** build,” not a statement that the feature is incomplete — the whole **personal WeChat (ilink)** channel is still **pre-stable**.  
+> **WeCom:** Webhook mode needs a **public URL**; long-connection / WS style setups often do not.  
+> **Voice row:** many platforms need `[speech]` / TTS providers enabled in `config.toml`; values are a best-effort summary.  
+> Per-platform setup: [Platform setup guides](#-platform-setup-guides) below.
+
+---
+
 ## ✨ Why cc-connect?
 
 ### 🤖 Universal Agent Support
@@ -76,6 +108,8 @@
 
 ### 🎮 Complete Chat Control
 **Full Control from Chat** — Switch models (`/model`), tune reasoning (`/reasoning`), change permission modes (`/mode`), manage sessions, all via slash commands.
+
+**Directory Switching in Chat** — Change where the next session starts with `/dir <path>` (and `/cd <path>` as a compatibility alias), plus quick history jump via `/dir <number>` / `/dir -`.
 
 ### 🧠 Persistent Memory
 **Agent Memory** — Read and write agent instruction files (`/memory`) without touching the terminal.
@@ -207,7 +241,7 @@ cc-connect update --pre     # Beta (includes pre-releases)
 | Platform | Discord | ✅ Gateway — no public IP needed |
 | Platform | LINE | ✅ Webhook — public URL required |
 | Platform | WeChat Work | ✅ WebSocket / Webhook |
-| Platform | Weixin (personal, ilink) | 🧪 **Beta / pre-release** — HTTP long polling — no public IP needed |
+| Platform | Weixin (personal, ilink) | ✅（beta）— HTTP long polling — no public IP needed |
 | Platform | QQ (NapCat/OneBot) | ✅ WebSocket — Beta |
 | Platform | QQ Bot (Official) | ✅ WebSocket — no public IP needed |
 
@@ -266,6 +300,18 @@ cc-connect update --pre     # Beta (includes pre-releases)
 ```
 /model                      List available models (format: alias - model)
 /model switch <alias>       Switch to model by alias
+```
+
+---
+
+### 📂 Work Directory
+
+```
+/dir                         Show current work directory and history
+/dir <path>                  Switch to a path (relative or absolute)
+/dir <number>                Switch from history
+/dir -                       Switch to previous directory
+/cd <path>                   Compatibility alias for /dir <path>
 ```
 
 ---

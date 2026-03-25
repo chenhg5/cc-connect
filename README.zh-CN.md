@@ -63,6 +63,38 @@
 
 ---
 
+## 🧩 平台能力一览
+
+内置各渠道在 cc-connect 里的大致能力对照，风格参考 [OpenClaw China 功能支持表](https://github.com/BytePioneer-AI/openclaw-china#功能支持)，方便快速对比。
+
+**图例**
+
+| 符号 | 含义 |
+|------|------|
+| ✅ | **稳定版** cc-connect + 常规配置下可用 |
+| ✅（beta） | **仅 Beta / 预发布** — **微信个人号**整列：需 `npm install -g cc-connect@beta` 或 [GitHub 预发布包](https://github.com/chenhg5/cc-connect/releases)；**默认稳定版 npm 不含** `weixin` 平台 |
+| ⚠️ | 部分支持、需额外配置（如语音/STT）或受厂商接口 / 应用类型限制 |
+| ❌ | 不支持或实际不可用 |
+
+† **QQ（NapCat / OneBot）** — 非官方自建桥接，体验依赖你的 NapCat 与网络环境。
+
+| 能力 | 飞书 | 钉钉 | Telegram | Slack | Discord | LINE | 企业微信 | **微信个人号**<br>（ilink） | QQ† | QQ 官方机器人 |
+|------|:----:|:----:|:--------:|:-----:|:-------:|:----:|:--------:|:--------------------------:|:---:|:------------:|
+| 文本与斜杠命令 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅（beta） | ✅ | ✅ |
+| Markdown / 卡片 | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ✅（beta） | ✅ | ✅ |
+| 流式 / 分片回复 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅（beta） | ✅ | ✅ |
+| 图片与文件 | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ✅（beta） | ✅ | ✅ |
+| 语音 / STT / TTS | ⚠️ | ⚠️ | ✅ | ⚠️ | ⚠️ | ❌ | ⚠️ | ✅（beta） | ⚠️ | ⚠️ |
+| 私聊 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅（beta） | ✅ | ✅ |
+| 群聊 / 频道 | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ✅（beta） | ✅ | ✅ |
+
+> **微信个人号列：** 格子里全是 **✅（beta）** 表示「只有跑 **Beta / 预发布** 才有这一整渠道」，不代表单项能力未做完 — **个人微信（ilink）整体仍属预稳定阶段**。  
+> **企业微信：** Webhook 模式需要**公网 URL**；长连接等模式多数**不需要**。  
+> **语音行：** 多数平台要在 `config.toml` 里配置 `[speech]` / TTS 等，表中为经验性归纳。  
+> 分平台接入步骤见下文 [平台接入指南](#-平台接入指南)。
+
+---
+
 ## ✨ 为什么选择 cc-connect？
 
 ### 🤖 通用 Agent 支持
@@ -76,6 +108,8 @@
 
 ### 🎮 完整的聊天控制
 **聊天即控制** — 切换模型 (`/model`)、切换推理强度 (`/reasoning`)、切换权限模式 (`/mode`)、管理会话，全部通过斜杠命令完成。
+
+**聊天切换工作目录** — 使用 `/dir <路径>` 切换下一次会话启动目录（`/cd <路径>` 为兼容别名），并支持 `/dir <序号>` / `/dir -` 快速在历史目录间跳转。
 
 ### 🧠 持久化记忆
 **Agent 记忆** — 在聊天中直接读写 Agent 指令文件 (`/memory`)，无需回到终端。
@@ -207,7 +241,7 @@ cc-connect update --pre     # Beta 版（含 pre-release）
 | Platform | Discord | ✅ Gateway — 无需公网 IP |
 | Platform | LINE | ✅ Webhook — 需要公网 URL |
 | Platform | 企业微信 | ✅ WebSocket / Webhook |
-| Platform | 微信个人号（ilink） | 🧪 **Beta / 预发布** — HTTP 长轮询 — 无需公网 IP |
+| Platform | 微信个人号（ilink） | ✅（beta）— HTTP 长轮询 — 无需公网 IP |
 | Platform | QQ (NapCat/OneBot) | ✅ WebSocket — Beta |
 | Platform | QQ 官方机器人 | ✅ WebSocket — 无需公网 IP |
 
@@ -266,6 +300,18 @@ cc-connect update --pre     # Beta 版（含 pre-release）
 ```
 /model                      列出可用模型（格式：alias - model）
 /model switch <alias>       按别名切换模型
+```
+
+---
+
+### 📂 工作目录
+
+```
+/dir                         查看当前工作目录与历史
+/dir <路径>                  切换到指定目录（相对或绝对路径）
+/dir <序号>                  按历史序号切换
+/dir -                       返回上一个目录
+/cd <路径>                   `/dir <路径>` 的兼容别名
 ```
 
 ---

@@ -3,6 +3,7 @@ package core
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -486,4 +487,128 @@ func TestMgmt_MethodNotAllowed(t *testing.T) {
 		t.Fatalf("decode method not allowed response: %v", err)
 	}
 	resp.Body.Close()
+}
+
+func TestMgmt_ProjectModel_UsesSwitchModelWithActiveProvider(t *testing.T) {
+	agent := &stubModelModeAgent{
+		model: "gpt-4.1-mini",
+		providers: []ProviderConfig{
+			{
+				Name:   "openai",
+				Model:  "gpt-4.1-mini",
+				Models: []ModelOption{{Name: "gpt-4.1", Alias: "gpt"}, {Name: "gpt-4.1-mini", Alias: "mini"}},
+			},
+		},
+		active: "openai",
+	}
+	e := NewEngine("test-project", agent, nil, "", LangEnglish)
+	var savedProvider, savedModel string
+	e.SetProviderModelSaveFunc(func(providerName, model string) error {
+		savedProvider = providerName
+		savedModel = model
+		return nil
+	})
+
+	mgmt := NewManagementServer(0, "tok", nil)
+	mgmt.RegisterEngine("test-project", e)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/projects/", mgmt.wrap(mgmt.handleProjectRoutes))
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	r := mgmtPost(t, ts.URL+"/api/v1/projects/test-project/model", "tok", map[string]string{"model": "gpt-4.1"})
+	if !r.OK {
+		t.Fatalf("update model failed: %s", r.Error)
+	}
+
+	if got := agent.GetModel(); got != "gpt-4.1" {
+		t.Fatalf("GetModel() = %q, want gpt-4.1", got)
+	}
+	if got := agent.GetActiveProvider(); got == nil || got.Model != "gpt-4.1" {
+		t.Fatalf("active provider model = %#v, want gpt-4.1", got)
+	}
+	if savedProvider != "openai" || savedModel != "gpt-4.1" {
+		t.Fatalf("saved provider/model = %q/%q, want openai/gpt-4.1", savedProvider, savedModel)
+	}
+}
+
+func TestMgmt_ProjectModel_SavesModelWithoutActiveProvider(t *testing.T) {
+	agent := &stubModelModeAgent{
+		model: "gpt-4.1-mini",
+		providers: []ProviderConfig{
+			{
+				Name:   "openai",
+				Model:  "gpt-4.1-mini",
+				Models: []ModelOption{{Name: "gpt-4.1", Alias: "gpt"}, {Name: "gpt-4.1-mini", Alias: "mini"}},
+			},
+		},
+	}
+	e := NewEngine("test-project", agent, nil, "", LangEnglish)
+	var savedModel string
+	var providerSaveCalled bool
+	e.SetModelSaveFunc(func(model string) error {
+		savedModel = model
+		return nil
+	})
+	e.SetProviderModelSaveFunc(func(providerName, model string) error {
+		providerSaveCalled = true
+		return nil
+	})
+
+	mgmt := NewManagementServer(0, "tok", nil)
+	mgmt.RegisterEngine("test-project", e)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/projects/", mgmt.wrap(mgmt.handleProjectRoutes))
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	r := mgmtPost(t, ts.URL+"/api/v1/projects/test-project/model", "tok", map[string]string{"model": "gpt-4.1"})
+	if !r.OK {
+		t.Fatalf("update model failed: %s", r.Error)
+	}
+
+	if got := agent.GetModel(); got != "gpt-4.1" {
+		t.Fatalf("GetModel() = %q, want gpt-4.1", got)
+	}
+	if savedModel != "gpt-4.1" {
+		t.Fatalf("saved model = %q, want gpt-4.1", savedModel)
+	}
+	if providerSaveCalled {
+		t.Fatal("provider save callback should not be called without active provider")
+	}
+}
+
+func TestMgmt_ProjectModel_ReturnsErrorWhenModelSaveFails(t *testing.T) {
+	agent := &stubModelModeAgent{
+		model: "gpt-4.1-mini",
+		providers: []ProviderConfig{
+			{
+				Name:   "openai",
+				Model:  "gpt-4.1-mini",
+				Models: []ModelOption{{Name: "gpt-4.1", Alias: "gpt"}, {Name: "gpt-4.1-mini", Alias: "mini"}},
+			},
+		},
+	}
+	e := NewEngine("test-project", agent, nil, "", LangEnglish)
+	e.SetModelSaveFunc(func(model string) error {
+		return errors.New("disk full")
+	})
+
+	mgmt := NewManagementServer(0, "tok", nil)
+	mgmt.RegisterEngine("test-project", e)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/projects/", mgmt.wrap(mgmt.handleProjectRoutes))
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	r := mgmtPost(t, ts.URL+"/api/v1/projects/test-project/model", "tok", map[string]string{"model": "gpt-4.1"})
+	if r.OK {
+		t.Fatal("update model unexpectedly succeeded")
+	}
+	if !strings.Contains(r.Error, "disk full") {
+		t.Fatalf("error = %q, want save failure", r.Error)
+	}
+	if got := agent.GetModel(); got != "gpt-4.1-mini" {
+		t.Fatalf("GetModel() = %q, want unchanged gpt-4.1-mini", got)
+	}
 }

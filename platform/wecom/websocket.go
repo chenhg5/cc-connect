@@ -15,27 +15,27 @@ import (
 )
 
 const (
-	wsEndpoint     = "wss://openws.work.weixin.qq.com"
-	wsPingInterval = 30 * time.Second
-	wsMaxBackoff   = 30 * time.Second
+	wsEndpoint      = "wss://openws.work.weixin.qq.com"
+	wsPingInterval  = 30 * time.Second
+	wsMaxBackoff    = 30 * time.Second
 	wsMaxMissedPong = 2
 )
 
 // WSPlatform implements core.Platform using the WeChat Work WebSocket long-connection
 // mode (智能机器人长连接). No public URL, no message encryption, no IP allowlist required.
 type WSPlatform struct {
-	botID     string
-	secret    string
-	allowFrom string
-	conn      *websocket.Conn
-	handler   core.MessageHandler
-	ctx       context.Context
-	cancel    context.CancelFunc
-	mu        sync.Mutex // protects conn writes
-	dedup     core.MessageDedup
-	reqSeq    atomic.Int64 // monotonic counter for generating unique req_id
-	missedPong atomic.Int32 // consecutive heartbeat acks not received
-	pendingAcks sync.Map   // req_id -> chan error, for sequential send with ack waiting
+	botID       string
+	secret      string
+	allowFrom   string
+	conn        *websocket.Conn
+	handler     core.MessageHandler
+	ctx         context.Context
+	cancel      context.CancelFunc
+	mu          sync.Mutex // protects conn writes
+	dedup       core.MessageDedup
+	reqSeq      atomic.Int64 // monotonic counter for generating unique req_id
+	missedPong  atomic.Int32 // consecutive heartbeat acks not received
+	pendingAcks sync.Map     // req_id -> chan error, for sequential send with ack waiting
 }
 
 const wsAckTimeout = 5 * time.Second
@@ -54,11 +54,11 @@ type wsReplyContext struct {
 // Format: { cmd, headers: { req_id }, body: {...} }
 // Response frames may omit cmd and include errcode/errmsg instead.
 type wsFrame struct {
-	Cmd     string            `json:"cmd,omitempty"`
-	Headers wsFrameHeaders    `json:"headers"`
-	Body    json.RawMessage   `json:"body,omitempty"`
-	ErrCode *int              `json:"errcode,omitempty"`
-	ErrMsg  string            `json:"errmsg,omitempty"`
+	Cmd     string          `json:"cmd,omitempty"`
+	Headers wsFrameHeaders  `json:"headers"`
+	Body    json.RawMessage `json:"body,omitempty"`
+	ErrCode *int            `json:"errcode,omitempty"`
+	ErrMsg  string          `json:"errmsg,omitempty"`
 }
 
 type wsFrameHeaders struct {
@@ -362,18 +362,19 @@ func (p *WSPlatform) handleMsgCallback(frame wsFrame) {
 
 	switch body.MsgType {
 	case "text":
-		slog.Debug("wecom-ws: text received", "user", body.From.UserID, "len", len(body.Text.Content))
+		text := stripWeComAtMentions(body.Text.Content, p.botID, body.AibotID)
+		slog.Debug("wecom-ws: text received", "user", body.From.UserID, "len", len(text))
 		go p.handler(p, &core.Message{
 			SessionKey: sessionKey, Platform: "wecom",
 			MessageID: body.MsgID,
-			UserID: body.From.UserID, UserName: body.From.UserID,
+			UserID:    body.From.UserID, UserName: body.From.UserID,
 			ChatName: chatName,
-			Content: body.Text.Content, ReplyCtx: rctx,
+			Content:  text, ReplyCtx: rctx,
 		})
 
 	case "voice":
 		// WebSocket mode: voice messages arrive pre-transcribed by the server
-		text := body.Voice.Text
+		text := stripWeComAtMentions(body.Voice.Text, p.botID, body.AibotID)
 		if text == "" {
 			slog.Debug("wecom-ws: voice message with empty transcription, ignoring")
 			return
@@ -382,9 +383,9 @@ func (p *WSPlatform) handleMsgCallback(frame wsFrame) {
 		go p.handler(p, &core.Message{
 			SessionKey: sessionKey, Platform: "wecom",
 			MessageID: body.MsgID,
-			UserID: body.From.UserID, UserName: body.From.UserID,
+			UserID:    body.From.UserID, UserName: body.From.UserID,
 			ChatName: chatName,
-			Content: text, ReplyCtx: rctx, FromVoice: true,
+			Content:  text, ReplyCtx: rctx, FromVoice: true,
 		})
 
 	default:

@@ -116,6 +116,42 @@ func TestNormalizePermissionMode(t *testing.T) {
 	}
 }
 
+func TestClaudeSessionSetLiveMode(t *testing.T) {
+	cs := &claudeSession{}
+	cs.setPermissionMode("default")
+	if cs.autoApprove.Load() || cs.acceptEditsOnly.Load() || cs.dontAsk.Load() {
+		t.Fatal("expected default mode flags to be off")
+	}
+
+	if !cs.SetLiveMode("acceptEdits") {
+		t.Fatal("SetLiveMode(acceptEdits) = false, want true")
+	}
+	if !cs.acceptEditsOnly.Load() || cs.autoApprove.Load() || cs.dontAsk.Load() {
+		t.Fatal("acceptEdits flags not set correctly")
+	}
+
+	cs.SetLiveMode("bypassPermissions")
+	if !cs.autoApprove.Load() || cs.acceptEditsOnly.Load() || cs.dontAsk.Load() {
+		t.Fatal("bypassPermissions flags not set correctly")
+	}
+
+	cs.SetLiveMode("dontAsk")
+	if !cs.dontAsk.Load() || cs.autoApprove.Load() || cs.acceptEditsOnly.Load() {
+		t.Fatal("dontAsk flags not set correctly")
+	}
+}
+
+func TestIsClaudeEditTool(t *testing.T) {
+	for _, tool := range []string{"Edit", "Write", "NotebookEdit", "MultiEdit"} {
+		if !isClaudeEditTool(tool) {
+			t.Fatalf("isClaudeEditTool(%q) = false, want true", tool)
+		}
+	}
+	if isClaudeEditTool("Bash") {
+		t.Fatal("isClaudeEditTool(Bash) = true, want false")
+	}
+}
+
 func TestSummarizeInput_AskUserQuestion(t *testing.T) {
 	input := map[string]any{
 		"questions": []any{

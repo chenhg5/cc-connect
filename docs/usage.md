@@ -8,6 +8,7 @@ Complete guide to using cc-connect features.
 - [Permission Modes](#permission-modes)
 - [API Provider Management](#api-provider-management)
 - [Model Selection](#model-selection)
+- [Work Directory Switching (`/dir`, `/cd`)](#work-directory-switching-dir-cd)
 - [Feishu Setup CLI](#feishu-setup-cli)
 - [Weixin (personal) Setup CLI](#weixin-personal-setup-cli)
 - [Claude Code Router Integration](#claude-code-router-integration)
@@ -36,6 +37,7 @@ Each user gets an independent session with full conversation context. Manage ses
 | `/usage` | Show account/model quota usage (if supported) |
 | `/provider [...]` | Manage API providers |
 | `/model [switch <alias>]` | List available models or switch by alias |
+| `/dir [path]` | Show or switch the agent work directory |
 | `/allow <tool>` | Pre-allow a tool (next session) |
 | `/reasoning [level]` | View or switch reasoning effort (Codex) |
 | `/mode [name]` | View or switch permission mode |
@@ -223,6 +225,38 @@ alias = "spark"
 ```
 
 When `models` is configured, `/model` shows exactly that list without making an API round-trip. When omitted, models are fetched from the provider API or fall back to a built-in list.
+
+---
+
+## Work Directory Switching (`/dir`, `/cd`)
+
+Switch where the next agent session starts, directly from chat.
+
+### Chat Commands
+
+```
+/dir                    Show current work directory and recent history
+/dir <path>             Switch to a path (relative or absolute)
+/dir <number>           Switch to a directory from history
+/dir -                  Switch back to previous directory
+/dir help               Show command usage
+/cd <path>              Backward-compatible alias of /dir <path>
+```
+
+### Behavior Notes
+
+- Directory changes apply to the next session in the current project.
+- Relative paths are resolved from the current agent work directory.
+- Directory history is project-scoped and can be switched by index.
+- `/cd` is kept for compatibility, but `/dir` is the primary command.
+
+Examples:
+
+```text
+/dir ../another-repo
+/dir 2
+/dir -
+```
 
 ---
 

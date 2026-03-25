@@ -331,7 +331,7 @@ cc-connect 内置了自动重连机制，断开后会自动尝试重新连接。
 - [机器人开发指南](https://open.feishu.cn/document/ukTMukTMukTM/uYjNwUjL2YDM14iN2ATN)
 - [事件订阅文档](https://open.feishu.cn/document/ukTMukTMukTM/uUTNz4SN1MjL1UzM)
 - [权限列表](https://open.feishu.cn/document/ukTMukTMukTM/uQjNz4CN1MjL2czN)
-- [OpenClaw 飞书接入教程](https://m.163.com/dy/article/KMO4FEP105566SCS.html)
+- [OpenClaw 飞书接入教程](https://bytedance.larkoffice.com/docx/MFK7dDFLFoVlOGxWCv5cTXKmnMh)
 - [飞书 WebSocket 长连接模式](https://m.blog.csdn.net/u014177256/article/details/158267848)
 
 ---

@@ -10,6 +10,10 @@ import (
 	"time"
 )
 
+// ContinueSession is a sentinel value for AgentSessionID that tells the agent
+// to use --continue (resume most recent session) instead of a specific session ID.
+const ContinueSession = "__continue__"
+
 // Session tracks one conversation between a user and the agent.
 type Session struct {
 	ID             string         `json:"id"`
@@ -53,6 +57,9 @@ func (s *Session) AddHistory(role, content string) {
 
 // SetAgentInfo atomically sets the agent session ID, agent type, and name.
 func (s *Session) SetAgentInfo(agentSessionID, agentType, name string) {
+	if agentSessionID == ContinueSession {
+		agentSessionID = ""
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.AgentSessionID = agentSessionID
@@ -75,24 +82,41 @@ func (s *Session) GetName() string {
 }
 
 // SetAgentSessionID atomically sets the agent session ID and agent type.
+// The ContinueSession sentinel is never persisted — it is only used transiently
+// when starting an agent (see engine); storing it on disk breaks resume (#255).
 func (s *Session) SetAgentSessionID(id, agentType string) {
+	if id == ContinueSession {
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.AgentSessionID = id
 	s.AgentType = agentType
 }
 
-// CompareAndSetAgentSessionID sets the agent session ID only if it is currently empty.
-// Returns true if the value was set, false if it was already non-empty.
+// CompareAndSetAgentSessionID sets the agent session ID only if it is currently
+// empty or still holds the erroneous persisted ContinueSession sentinel.
+// Returns true if the value was set, false if a real session ID was already stored.
 func (s *Session) CompareAndSetAgentSessionID(id, agentType string) bool {
+	if id == "" || id == ContinueSession {
+		return false
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.AgentSessionID != "" {
+	if s.AgentSessionID != "" && s.AgentSessionID != ContinueSession {
 		return false
 	}
 	s.AgentSessionID = id
 	s.AgentType = agentType
 	return true
+}
+
+func (s *Session) stripContinueSessionSentinel() {
+	s.mu.Lock()
+	if s.AgentSessionID == ContinueSession {
+		s.AgentSessionID = ""
+	}
+	s.mu.Unlock()
 }
 
 func (s *Session) ClearHistory() {
@@ -400,10 +424,15 @@ func (sm *SessionManager) saveLocked() {
 	snapSessions := make(map[string]*Session, len(sm.sessions))
 	for id, s := range sm.sessions {
 		s.mu.Lock()
+		agentSID := s.AgentSessionID
+		if agentSID == ContinueSession {
+			agentSID = ""
+			s.AgentSessionID = ""
+		}
 		snapSessions[id] = &Session{
 			ID:             s.ID,
 			Name:           s.Name,
-			AgentSessionID: s.AgentSessionID,
+			AgentSessionID: agentSID,
 			AgentType:      s.AgentType,
 			History:        append([]HistoryEntry(nil), s.History...),
 			CreatedAt:      s.CreatedAt,
@@ -468,6 +497,10 @@ func (sm *SessionManager) load() {
 	}
 	if sm.userMeta == nil {
 		sm.userMeta = make(map[string]*UserMeta)
+	}
+
+	for _, s := range sm.sessions {
+		s.stripContinueSessionSentinel()
 	}
 
 	slog.Info("session: loaded from disk", "path", sm.storePath, "sessions", len(sm.sessions))

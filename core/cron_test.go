@@ -180,7 +180,7 @@ func TestRenderCronCard_WithButtons(t *testing.T) {
 	scheduler := NewCronScheduler(store)
 	e.cronScheduler = scheduler
 
-	card := e.renderCronCard("test:ch1")
+	card := e.renderCronCard("test:ch1", "")
 	if card == nil {
 		t.Fatal("card should not be nil")
 	}
@@ -245,7 +245,7 @@ func TestRenderCronCard_HasHint(t *testing.T) {
 	scheduler := NewCronScheduler(store)
 	e.cronScheduler = scheduler
 
-	card := e.renderCronCard("test:ch1")
+	card := e.renderCronCard("test:ch1", "")
 	text := card.RenderText()
 	if !strings.Contains(text, "/cron add") || !strings.Contains(text, "/cron mute") {
 		t.Errorf("card should contain command hints, got:\n%s", text)
