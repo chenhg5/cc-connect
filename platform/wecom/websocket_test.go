@@ -177,6 +177,47 @@ func TestHandleMsgCallback_GroupChat_ChatIDPreserved(t *testing.T) {
 	}
 }
 
+func TestHandleMsgCallback_StripsBotMention(t *testing.T) {
+	p := &WSPlatform{
+		allowFrom: "*",
+		botID:     "robot01",
+	}
+
+	captured := make(chan *core.Message, 1)
+	p.handler = func(_ core.Platform, msg *core.Message) {
+		captured <- msg
+	}
+
+	body := wsMsgCallbackBody{
+		MsgID:    "msg_mention",
+		ChatID:   "grp1",
+		ChatType: "group",
+		MsgType:  "text",
+		AibotID:  "robot01",
+	}
+	body.From.UserID = "u1"
+	body.Text.Content = "允许 @Robot01"
+	body.CreateTime = time.Now().Unix()
+
+	bodyBytes, _ := json.Marshal(body)
+	frame := wsFrame{
+		Cmd:     "aibot_msg_callback",
+		Headers: wsFrameHeaders{ReqID: "req_m"},
+		Body:    bodyBytes,
+	}
+
+	p.handleMsgCallback(frame)
+
+	select {
+	case msg := <-captured:
+		if msg.Content != "允许" {
+			t.Fatalf("expected stripped content %q, got %q", "允许", msg.Content)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("handler not called")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // ReconstructReplyCtx
 // ---------------------------------------------------------------------------

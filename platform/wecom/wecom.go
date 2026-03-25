@@ -303,12 +303,13 @@ func (p *Platform) handleMessage(w http.ResponseWriter, r *http.Request, msgSig,
 
 	switch msg.MsgType {
 	case "text":
-		slog.Debug("wecom: message received", "user", msg.FromUserName, "text_len", len(msg.Content))
+		text := stripWeComAtMentions(msg.Content, p.agentID)
+		slog.Debug("wecom: message received", "user", msg.FromUserName, "text_len", len(text))
 		go p.handler(p, &core.Message{
 			SessionKey: sessionKey, Platform: "wecom",
 			MessageID: strconv.FormatInt(msg.MsgId, 10),
-			UserID: msg.FromUserName, UserName: p.resolveUserName(msg.FromUserName),
-			Content: msg.Content, ReplyCtx: rctx,
+			UserID:    msg.FromUserName, UserName: p.resolveUserName(msg.FromUserName),
+			Content: text, ReplyCtx: rctx,
 		})
 
 	case "image":
@@ -322,8 +323,8 @@ func (p *Platform) handleMessage(w http.ResponseWriter, r *http.Request, msgSig,
 			p.handler(p, &core.Message{
 				SessionKey: sessionKey, Platform: "wecom",
 				MessageID: strconv.FormatInt(msg.MsgId, 10),
-				UserID: msg.FromUserName, UserName: p.resolveUserName(msg.FromUserName),
-				Images:  []core.ImageAttachment{{MimeType: "image/jpeg", Data: imgData}},
+				UserID:    msg.FromUserName, UserName: p.resolveUserName(msg.FromUserName),
+				Images:   []core.ImageAttachment{{MimeType: "image/jpeg", Data: imgData}},
 				ReplyCtx: rctx,
 			})
 		}()
@@ -343,7 +344,7 @@ func (p *Platform) handleMessage(w http.ResponseWriter, r *http.Request, msgSig,
 			p.handler(p, &core.Message{
 				SessionKey: sessionKey, Platform: "wecom",
 				MessageID: strconv.FormatInt(msg.MsgId, 10),
-				UserID: msg.FromUserName, UserName: p.resolveUserName(msg.FromUserName),
+				UserID:    msg.FromUserName, UserName: p.resolveUserName(msg.FromUserName),
 				Audio:    &core.AudioAttachment{MimeType: "audio/" + format, Data: audioData, Format: format},
 				ReplyCtx: rctx,
 			})

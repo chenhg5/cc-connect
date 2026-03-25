@@ -24,6 +24,10 @@ func runCron(args []string) {
 		runCronAdd(args[1:])
 	case "list":
 		runCronList(args[1:])
+	case "edit":
+		runCronEdit(args[1:])
+	case "info":
+		runCronInfo(args[1:])
 	case "del", "delete", "rm", "remove":
 		runCronDel(args[1:])
 	case "--help", "-h", "help":
@@ -311,6 +315,191 @@ func runCronDel(args []string) {
 	fmt.Printf("Cron job %s deleted.\n", id)
 }
 
+func runCronInfo(args []string) {
+	var dataDir, id, field string
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--data-dir":
+			if i+1 < len(args) {
+				i++
+				dataDir = args[i]
+			}
+		default:
+			if id == "" {
+				id = args[i]
+			} else if field == "" {
+				field = args[i]
+			}
+		}
+	}
+
+	if id == "" {
+		fmt.Fprintln(os.Stderr, "Error: job ID is required")
+		fmt.Fprintln(os.Stderr, "Usage: cc-connect cron info <id> [field]")
+		fmt.Fprintln(os.Stderr, "Use 'cc-connect cron list' to see all task IDs.")
+		os.Exit(1)
+	}
+
+	sockPath := resolveSocketPath(dataDir)
+	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "Error: cc-connect is not running (socket not found: %s)\n", sockPath)
+		os.Exit(1)
+	}
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+				return net.Dial("unix", sockPath)
+			},
+		},
+	}
+
+	resp, err := client.Get("http://unix/cron/info?id=" + id)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusNotFound {
+		fmt.Fprintf(os.Stderr, "Error: job '%s' not found\n", id)
+		os.Exit(1)
+	}
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", strings.TrimSpace(string(body)))
+		os.Exit(1)
+	}
+
+	// If field specified, extract and print only that field
+	if field != "" {
+		var result map[string]any
+		if err := json.Unmarshal(body, &result); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: invalid JSON response: %v\n", err)
+			os.Exit(1)
+		}
+		val, ok := result[field]
+		if !ok {
+			fmt.Fprintf(os.Stderr, "Error: field '%s' not found\n", field)
+			fmt.Fprintln(os.Stderr, "Available fields:")
+			for k := range result {
+				fmt.Fprintf(os.Stderr, "  - %s\n", k)
+			}
+			os.Exit(1)
+		}
+		// Output field value (string directly, otherwise JSON formatted)
+		if s, ok := val.(string); ok {
+			fmt.Println(s)
+		} else {
+			data, _ := json.MarshalIndent(val, "", "  ")
+			fmt.Println(string(data))
+		}
+		return
+	}
+
+	// Pretty-print full JSON
+	var prettyJSON bytes.Buffer
+	if err := json.Indent(&prettyJSON, body, "", "  "); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: invalid JSON response: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println(prettyJSON.String())
+}
+
+func runCronEdit(args []string) {
+	var dataDir string
+	var id, field string
+	var valueStr string
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--data-dir":
+			if i+1 < len(args) {
+				i++
+				dataDir = args[i]
+			}
+		case "--help", "-h":
+			printCronEditUsage()
+			return
+		default:
+			if id == "" {
+				id = args[i]
+			} else if field == "" {
+				field = args[i]
+			} else if valueStr == "" {
+				valueStr = args[i]
+			}
+		}
+	}
+
+	if id == "" {
+		fmt.Fprintln(os.Stderr, "Error: job ID is required")
+		fmt.Fprintln(os.Stderr, "Run 'cc-connect cron edit --help' for usage.")
+		os.Exit(1)
+	}
+	if field == "" {
+		fmt.Fprintln(os.Stderr, "Error: field name is required")
+		fmt.Fprintln(os.Stderr, "Run 'cc-connect cron edit --help' for usage.")
+		os.Exit(1)
+	}
+	if valueStr == "" {
+		fmt.Fprintln(os.Stderr, "Error: value is required")
+		fmt.Fprintln(os.Stderr, "Run 'cc-connect cron edit --help' for usage.")
+		os.Exit(1)
+	}
+
+	// Parse value based on field type
+	var value any
+	switch field {
+	case "enabled", "mute":
+		v, err := strconv.ParseBool(valueStr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %s must be true or false\n", field)
+			os.Exit(1)
+		}
+		value = v
+	case "timeout_mins":
+		v, err := strconv.Atoi(valueStr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: timeout_mins must be an integer\n")
+			os.Exit(1)
+		}
+		value = v
+	default:
+		// String fields: project, session_key, cron_expr, prompt, exec, work_dir, description, session_mode
+		value = valueStr
+	}
+
+	sockPath := resolveSocketPath(dataDir)
+	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "Error: cc-connect is not running (socket not found: %s)\n", sockPath)
+		os.Exit(1)
+	}
+
+	payload, _ := json.Marshal(map[string]any{"id": id, "field": field, "value": value})
+	resp, err := apiPost(sockPath, "/cron/edit", payload)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", strings.TrimSpace(string(body)))
+		os.Exit(1)
+	}
+
+	// Pretty-print updated job
+	var prettyJSON bytes.Buffer
+	if err := json.Indent(&prettyJSON, body, "", "  "); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: invalid JSON response: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Updated job %s:\n%s\n", id, prettyJSON.String())
+}
+
 func apiPost(sockPath, path string, payload []byte) (*http.Response, error) {
 	client := &http.Client{
 		Transport: &http.Transport{
@@ -328,6 +517,9 @@ func printCronUsage() {
 Commands:
   add       Create a new scheduled task
   list      List all scheduled tasks
+  edit      Edit a scheduled task field
+  info <id> [field]  Show detailed info of a scheduled task
+                     (optionally filter to a single field)
   del <id>  Delete a scheduled task
 
 Run 'cc-connect cron <command> --help' for details.`)
@@ -354,4 +546,42 @@ Examples:
   cc-connect cron add --cron "0 6 * * *" --prompt "Collect GitHub trending data" --desc "Daily Trending"
   cc-connect cron add --cron "*/30 * * * *" --exec "df -h" --desc "Disk usage check"
   cc-connect cron add 0 6 * * * Collect GitHub trending data and send me a summary`)
+}
+
+func printCronEditUsage() {
+	fmt.Println(`Usage: cc-connect cron edit <id> <field> <value> [options]
+
+Edit a specific field of an existing scheduled task.
+
+Editable Fields (string):
+  project       Target project name
+  session_key   Target session key
+  cron_expr     Cron expression, e.g. "0 6 * * *"
+  prompt        Task prompt (runs through agent)
+  exec          Shell command (runs directly)
+  work_dir      Working directory for exec
+  description   Short description
+  session_mode  reuse or new_per_run
+
+Editable Fields (bool: true/false):
+  enabled       Enable or disable the task
+  mute          Suppress all messages
+  silent        Suppress start notification
+
+Editable Fields (int: number):
+  timeout_mins  Max minutes per run (0 = no limit)
+
+Read-only Fields (cannot be edited):
+  id, created_at, last_run, last_error
+
+Options:
+      --data-dir <path>  Data directory (default: ~/.cc-connect)
+  -h, --help             Show this help
+
+Examples:
+  cc-connect cron edit abc123 cron_expr "0 9 * * *"
+  cc-connect cron edit abc123 enabled false
+  cc-connect cron edit abc123 description "Daily standup reminder"
+  cc-connect cron edit abc123 timeout_mins 60
+  cc-connect cron edit abc123 mute true`)
 }

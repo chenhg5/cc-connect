@@ -116,15 +116,17 @@ type Platform struct {
 	groupReplyAll         bool
 	shareSessionInChannel bool
 	threadIsolation       bool
-	client                *lark.Client
-	wsClient              *larkws.Client
-	handler               core.MessageHandler
-	cardNavHandler        core.CardNavigationHandler
-	cancel                context.CancelFunc
-	dedup                 core.MessageDedup
-	botOpenID             string
-	userNameCache         sync.Map // open_id -> display name
-	chatNameCache         sync.Map // chat_id -> chat name
+	// noReplyToTrigger: when true, send via Create instead of Im.Message.Reply (no quote to the user's message).
+	noReplyToTrigger bool
+	client           *lark.Client
+	wsClient         *larkws.Client
+	handler          core.MessageHandler
+	cardNavHandler   core.CardNavigationHandler
+	cancel           context.CancelFunc
+	dedup            core.MessageDedup
+	botOpenID        string
+	userNameCache    sync.Map // open_id -> display name
+	chatNameCache    sync.Map // chat_id -> chat name
 	// Webhook mode fields (for Lark international version)
 	server       *http.Server
 	port         string
@@ -163,6 +165,10 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	threadIsolation, _ := opts["thread_isolation"].(bool)
+	noReplyToTrigger := false
+	if v, ok := opts["reply_to_trigger"].(bool); ok && !v {
+		noReplyToTrigger = true
+	}
 	useInteractiveCard := true
 	if v, ok := opts["enable_feishu_card"].(bool); ok {
 		useInteractiveCard = v
@@ -195,6 +201,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		groupReplyAll:         groupReplyAll,
 		shareSessionInChannel: shareSessionInChannel,
 		threadIsolation:       threadIsolation,
+		noReplyToTrigger:      noReplyToTrigger,
 		client:                lark.NewClient(appID, appSecret, clientOpts...),
 		port:                  port,
 		callbackPath:          callbackPath,
@@ -1064,6 +1071,10 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 
 	msgType, msgBody := buildReplyContent(content)
 
+	if !p.shouldUseThreadOrReplyAPI(rc) {
+		return p.sendNewMessageToChat(ctx, rc, msgType, msgBody)
+	}
+
 	resp, err := p.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
 		MessageId(rc.messageID).
 		Body(p.buildReplyMessageReqBody(rc, msgType, msgBody)).
@@ -1086,31 +1097,12 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
 	}
 
-	if rc.messageID != "" {
+	if p.shouldUseThreadOrReplyAPI(rc) {
 		return p.Reply(ctx, rctx, content)
 	}
 
-	if rc.chatID == "" {
-		return fmt.Errorf("%s: chatID is empty, cannot send new message", p.tag())
-	}
-
 	msgType, msgBody := buildReplyContent(content)
-
-	resp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
-		ReceiveIdType(larkim.ReceiveIdTypeChatId).
-		Body(larkim.NewCreateMessageReqBodyBuilder().
-			ReceiveId(rc.chatID).
-			MsgType(msgType).
-			Content(msgBody).
-			Build()).
-		Build())
-	if err != nil {
-		return fmt.Errorf("%s: send api call: %w", p.tag(), err)
-	}
-	if !resp.Success() {
-		return fmt.Errorf("%s: send failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
-	}
-	return nil
+	return p.sendNewMessageToChat(ctx, rc, msgType, msgBody)
 }
 
 func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttachment) error {
@@ -1182,7 +1174,7 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 }
 
 func (p *Platform) sendMediaMessage(ctx context.Context, rc replyContext, msgType, content string) error {
-	if rc.messageID != "" {
+	if p.shouldUseThreadOrReplyAPI(rc) {
 		replyResp, err := p.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
 			MessageId(rc.messageID).
 			Body(p.buildReplyMessageReqBody(rc, msgType, content)).
@@ -1310,7 +1302,11 @@ func buildReplyContent(content string) (msgType string, body string) {
 	// 1. Code blocks / tables → card (schema 2.0 markdown)
 	// 2. Many \n\n paragraphs (help, status, etc.) → post rich-text (preserves blank lines)
 	// 3. Other markdown → post md tag (best native rendering)
-	if hasComplexMarkdown(content) {
+	//
+	// Feishu cards support at most 5 tables (API error 11310).
+	// When content exceeds this limit, fall back to post with md tag
+	// which still renders tables without the card table cap.
+	if hasComplexMarkdown(content) && countMarkdownTables(content) <= maxCardTables {
 		return larkim.MsgTypeInteractive, buildCardJSON(sanitizeMarkdownURLs(preprocessFeishuMarkdown(content)))
 	}
 	if strings.Count(content, "\n\n") >= 2 {
@@ -1332,6 +1328,28 @@ func hasComplexMarkdown(s string) bool {
 		}
 	}
 	return false
+}
+
+// maxCardTables is the Feishu interactive card limit for table components.
+// A single card supports at most 5 tables; exceeding this causes API error 11310.
+const maxCardTables = 5
+
+// countMarkdownTables counts the number of distinct markdown tables in s.
+// A table is a group of consecutive lines where each line starts and ends with '|'.
+func countMarkdownTables(s string) int {
+	count := 0
+	inTable := false
+	for _, line := range strings.Split(s, "\n") {
+		trimmed := strings.TrimSpace(line)
+		isTableLine := len(trimmed) > 1 && trimmed[0] == '|' && trimmed[len(trimmed)-1] == '|'
+		if isTableLine && !inTable {
+			count++
+			inTable = true
+		} else if !isTableLine {
+			inTable = false
+		}
+	}
+	return count
 }
 
 // buildPostMdJSON builds a Feishu post message using the md tag,
@@ -1693,6 +1711,35 @@ func (p *Platform) shouldReplyInThread(rc replyContext) bool {
 	return p.threadIsolation && isThreadSessionKey(rc.sessionKey)
 }
 
+// shouldUseThreadOrReplyAPI is true when we should call Im.Message.Reply (optionally with ReplyInThread).
+func (p *Platform) shouldUseThreadOrReplyAPI(rc replyContext) bool {
+	if rc.messageID == "" {
+		return false
+	}
+	return !p.noReplyToTrigger
+}
+
+func (p *Platform) sendNewMessageToChat(ctx context.Context, rc replyContext, msgType, content string) error {
+	if rc.chatID == "" {
+		return fmt.Errorf("%s: chatID is empty, cannot send new message", p.tag())
+	}
+	resp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
+		ReceiveIdType(larkim.ReceiveIdTypeChatId).
+		Body(larkim.NewCreateMessageReqBodyBuilder().
+			ReceiveId(rc.chatID).
+			MsgType(msgType).
+			Content(content).
+			Build()).
+		Build())
+	if err != nil {
+		return fmt.Errorf("%s: send api call: %w", p.tag(), err)
+	}
+	if !resp.Success() {
+		return fmt.Errorf("%s: send failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+	}
+	return nil
+}
+
 func (p *Platform) buildReplyMessageReqBody(rc replyContext, msgType, content string) *larkim.ReplyMessageReqBody {
 	body := larkim.NewReplyMessageReqBodyBuilder().
 		MsgType(msgType).
@@ -1796,7 +1843,7 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 	cardJSON := buildCardJSON(sanitizeMarkdownURLs(content))
 
 	var msgID string
-	if rc.messageID != "" {
+	if p.shouldUseThreadOrReplyAPI(rc) {
 		resp, err := p.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
 			MessageId(rc.messageID).
 			Body(p.buildReplyMessageReqBody(rc, larkim.MsgTypeInteractive, cardJSON)).
@@ -1953,36 +2000,7 @@ func (p *Platform) SendAudio(ctx context.Context, rctx any, audio []byte, format
 		return fmt.Errorf("%s: build audio message: %w", p.tag(), err)
 	}
 
-	// Send audio message — reply to original message when possible.
-	if rc.messageID != "" {
-		replyResp, err := p.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
-			MessageId(rc.messageID).
-			Body(p.buildReplyMessageReqBody(rc, larkim.MsgTypeAudio, audioContent)).
-			Build())
-		if err != nil {
-			return fmt.Errorf("%s: send audio message: %w", p.tag(), err)
-		}
-		if !replyResp.Success() {
-			return fmt.Errorf("%s: send audio message code=%d msg=%s", p.tag(), replyResp.Code, replyResp.Msg)
-		}
-		return nil
-	}
-
-	sendResp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
-		ReceiveIdType(larkim.ReceiveIdTypeChatId).
-		Body(larkim.NewCreateMessageReqBodyBuilder().
-			ReceiveId(rc.chatID).
-			MsgType(larkim.MsgTypeAudio).
-			Content(audioContent).
-			Build()).
-		Build())
-	if err != nil {
-		return fmt.Errorf("%s: send audio message: %w", p.tag(), err)
-	}
-	if !sendResp.Success() {
-		return fmt.Errorf("%s: send audio message code=%d msg=%s", p.tag(), sendResp.Code, sendResp.Msg)
-	}
-	return nil
+	return p.sendMediaMessage(ctx, rc, larkim.MsgTypeAudio, audioContent)
 }
 
 type postElement struct {

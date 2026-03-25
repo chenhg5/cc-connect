@@ -390,6 +390,12 @@ type ModeSwitcher interface {
 	PermissionModes() []PermissionModeInfo
 }
 
+// LiveModeSwitcher is an optional interface for running agent sessions that can
+// apply a mode change immediately without restarting the process.
+type LiveModeSwitcher interface {
+	SetLiveMode(mode string) bool
+}
+
 // PermissionModeInfo describes a permission mode for display.
 type PermissionModeInfo struct {
 	Key    string

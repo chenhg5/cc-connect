@@ -1,6 +1,13 @@
 package discord
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -254,6 +261,222 @@ func TestResolveCronReplyTarget_ReusesExistingThreadKey(t *testing.T) {
 	}
 }
 
+func TestSendWithButtons_UsesFollowupComponents(t *testing.T) {
+	requests := make([]string, 0, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.URL.Path)
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		switch {
+		case strings.Contains(r.URL.Path, "/messages/@original"):
+			if payload["content"] != "choose mode" {
+				t.Fatalf("original content = %#v, want choose mode", payload["content"])
+			}
+		case strings.Contains(r.URL.Path, "/webhooks/app-1/token-1"):
+			if payload["content"] != "choose mode" {
+				t.Fatalf("followup content = %#v, want choose mode", payload["content"])
+			}
+			components, ok := payload["components"].([]any)
+			if !ok || len(components) != 1 {
+				t.Fatalf("components = %#v, want one row", payload["components"])
+			}
+			row := components[0].(map[string]any)
+			rowComponents := row["components"].([]any)
+			if rowComponents[0].(map[string]any)["custom_id"] != "cmd:/mode default" {
+				t.Fatalf("button0 = %#v, want cmd:/mode default", rowComponents[0])
+			}
+			if rowComponents[1].(map[string]any)["custom_id"] != "cmd:/mode yolo" {
+				t.Fatalf("button1 = %#v, want cmd:/mode yolo", rowComponents[1])
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"msg-1","channel_id":"ch-1"}`)
+	}))
+	defer server.Close()
+
+	oldEndpointDiscord := discordgo.EndpointDiscord
+	oldEndpointAPI := discordgo.EndpointAPI
+	oldEndpointChannels := discordgo.EndpointChannels
+	oldEndpointWebhooks := discordgo.EndpointWebhooks
+	discordgo.EndpointDiscord = server.URL + "/"
+	discordgo.EndpointAPI = discordgo.EndpointDiscord + "api/v" + discordgo.APIVersion + "/"
+	discordgo.EndpointChannels = discordgo.EndpointAPI + "channels/"
+	discordgo.EndpointWebhooks = discordgo.EndpointAPI + "webhooks/"
+	defer func() {
+		discordgo.EndpointDiscord = oldEndpointDiscord
+		discordgo.EndpointAPI = oldEndpointAPI
+		discordgo.EndpointChannels = oldEndpointChannels
+		discordgo.EndpointWebhooks = oldEndpointWebhooks
+	}()
+
+	s, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New() error = %v", err)
+	}
+	s.Client = server.Client()
+
+	p := &Platform{session: s}
+	rc := &interactionReplyCtx{interaction: &discordgo.Interaction{AppID: "app-1", Token: "token-1"}}
+	err = p.SendWithButtons(context.Background(), rc, "choose mode", [][]core.ButtonOption{{
+		{Text: "Default", Data: "cmd:/mode default"},
+		{Text: "YOLO", Data: "cmd:/mode yolo"},
+	}})
+	if err != nil {
+		t.Fatalf("SendWithButtons() error = %v", err)
+	}
+	if len(requests) != 2 {
+		t.Fatalf("requests = %v, want 2", requests)
+	}
+}
+
+func TestSendWithButtons_PreservesMultipleRows(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if strings.Contains(r.URL.Path, "/messages/@original") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"id":"msg-1","channel_id":"ch-1"}`)
+			return
+		}
+		components, ok := payload["components"].([]any)
+		if !ok || len(components) != 2 {
+			t.Fatalf("components = %#v, want two rows", payload["components"])
+		}
+		first := components[0].(map[string]any)["components"].([]any)
+		second := components[1].(map[string]any)["components"].([]any)
+		if first[0].(map[string]any)["custom_id"] != "cmd:/reasoning 1" || first[1].(map[string]any)["custom_id"] != "cmd:/reasoning 2" {
+			t.Fatalf("first row = %#v, want cmd:/reasoning 1 and 2", first)
+		}
+		if second[0].(map[string]any)["custom_id"] != "cmd:/reasoning 3" {
+			t.Fatalf("second row = %#v, want cmd:/reasoning 3", second)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"msg-2","channel_id":"ch-1"}`)
+	}))
+	defer server.Close()
+
+	oldEndpointDiscord := discordgo.EndpointDiscord
+	oldEndpointAPI := discordgo.EndpointAPI
+	oldEndpointChannels := discordgo.EndpointChannels
+	oldEndpointWebhooks := discordgo.EndpointWebhooks
+	discordgo.EndpointDiscord = server.URL + "/"
+	discordgo.EndpointAPI = discordgo.EndpointDiscord + "api/v" + discordgo.APIVersion + "/"
+	discordgo.EndpointChannels = discordgo.EndpointAPI + "channels/"
+	discordgo.EndpointWebhooks = discordgo.EndpointAPI + "webhooks/"
+	defer func() {
+		discordgo.EndpointDiscord = oldEndpointDiscord
+		discordgo.EndpointAPI = oldEndpointAPI
+		discordgo.EndpointChannels = oldEndpointChannels
+		discordgo.EndpointWebhooks = oldEndpointWebhooks
+	}()
+
+	s, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New() error = %v", err)
+	}
+	s.Client = server.Client()
+
+	p := &Platform{session: s}
+	rc := &interactionReplyCtx{interaction: &discordgo.Interaction{AppID: "app-1", Token: "token-1"}}
+	err = p.SendWithButtons(context.Background(), rc, "choose reasoning", [][]core.ButtonOption{
+		{{Text: "low", Data: "cmd:/reasoning 1"}, {Text: "medium", Data: "cmd:/reasoning 2"}},
+		{{Text: "high", Data: "cmd:/reasoning 3"}},
+	})
+	if err != nil {
+		t.Fatalf("SendWithButtons() error = %v", err)
+	}
+}
+
+func TestSendFile_SendsChannelAttachment(t *testing.T) {
+	var contentType string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		contentType = r.Header.Get("Content-Type")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"msg-file","channel_id":"ch-1"}`)
+	}))
+	defer server.Close()
+
+	oldEndpointDiscord := discordgo.EndpointDiscord
+	oldEndpointAPI := discordgo.EndpointAPI
+	oldEndpointChannels := discordgo.EndpointChannels
+	discordgo.EndpointDiscord = server.URL + "/"
+	discordgo.EndpointAPI = discordgo.EndpointDiscord + "api/v" + discordgo.APIVersion + "/"
+	discordgo.EndpointChannels = discordgo.EndpointAPI + "channels/"
+	defer func() {
+		discordgo.EndpointDiscord = oldEndpointDiscord
+		discordgo.EndpointAPI = oldEndpointAPI
+		discordgo.EndpointChannels = oldEndpointChannels
+	}()
+
+	s, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New() error = %v", err)
+	}
+	s.Client = server.Client()
+
+	p := &Platform{session: s}
+	err = p.SendFile(context.Background(), replyContext{channelID: "ch-1"}, core.FileAttachment{
+		FileName: "report.pdf",
+		MimeType: "application/pdf",
+		Data:     []byte("pdf-data"),
+	})
+	if err != nil {
+		t.Fatalf("SendFile() error = %v", err)
+	}
+	if !strings.Contains(contentType, "multipart/form-data") {
+		t.Fatalf("content type = %q, want multipart/form-data", contentType)
+	}
+}
+
+func TestSendFile_UsesInteractionEndpoints(t *testing.T) {
+	requests := make([]string, 0, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"msg-file","channel_id":"ch-1"}`)
+	}))
+	defer server.Close()
+
+	oldEndpointDiscord := discordgo.EndpointDiscord
+	oldEndpointAPI := discordgo.EndpointAPI
+	oldEndpointChannels := discordgo.EndpointChannels
+	oldEndpointWebhooks := discordgo.EndpointWebhooks
+	discordgo.EndpointDiscord = server.URL + "/"
+	discordgo.EndpointAPI = discordgo.EndpointDiscord + "api/v" + discordgo.APIVersion + "/"
+	discordgo.EndpointChannels = discordgo.EndpointAPI + "channels/"
+	discordgo.EndpointWebhooks = discordgo.EndpointAPI + "webhooks/"
+	defer func() {
+		discordgo.EndpointDiscord = oldEndpointDiscord
+		discordgo.EndpointAPI = oldEndpointAPI
+		discordgo.EndpointChannels = oldEndpointChannels
+		discordgo.EndpointWebhooks = oldEndpointWebhooks
+	}()
+
+	s, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New() error = %v", err)
+	}
+	s.Client = server.Client()
+
+	p := &Platform{session: s}
+	rc := &interactionReplyCtx{interaction: &discordgo.Interaction{AppID: "app-1", Token: "token-1"}}
+	err = p.SendFile(context.Background(), rc, core.FileAttachment{
+		FileName: "report.pdf",
+		MimeType: "application/pdf",
+		Data:     []byte("pdf-data"),
+	})
+	if err != nil {
+		t.Fatalf("SendFile() error = %v", err)
+	}
+	if len(requests) != 1 || !strings.Contains(requests[0], "/messages/@original") {
+		t.Fatalf("requests = %v, want one original interaction edit", requests)
+	}
+}
+
 // ── Dedup tests ──────────────────────────────────────────────
 
 // simulateHandlerCall mimics the dedup + dispatch logic in the MessageCreate
@@ -456,6 +679,28 @@ func TestStripDiscordMention(t *testing.T) {
 			if got != tt.want {
 				t.Errorf("stripDiscordMention(%q, %q) = %q, want %q",
 					tt.content, tt.botID, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestReplyContextForDeferredInteractionFallback(t *testing.T) {
+	cid := "chan-1"
+	tests := []struct {
+		name string
+		ch   *discordgo.Channel
+		want replyContext
+	}{
+		{"nil channel", nil, replyContext{channelID: cid}},
+		{"guild text", &discordgo.Channel{ID: cid, Type: discordgo.ChannelTypeGuildText}, replyContext{channelID: cid}},
+		{"public thread", &discordgo.Channel{ID: cid, Type: discordgo.ChannelTypeGuildPublicThread}, replyContext{channelID: cid, threadID: cid}},
+		{"private thread", &discordgo.Channel{ID: cid, Type: discordgo.ChannelTypeGuildPrivateThread}, replyContext{channelID: cid, threadID: cid}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := replyContextForDeferredInteractionFallback(tt.ch, cid)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("got %+v want %+v", got, tt.want)
 			}
 		})
 	}

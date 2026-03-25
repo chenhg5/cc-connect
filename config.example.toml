@@ -423,6 +423,8 @@ level = "info" # debug, info, warn, error
 
 [[projects]]
 name = "my-backend"
+# show_context_indicator = false  # Hide the “[ctx: ~N%]” suffix on assistant replies (default: true / show)
+#                                   # 不在助手回复末尾显示「[ctx: ~N%]」上下文占用提示（默认 true 显示）
 # quiet = true  # Override global quiet for this project / 覆盖全局静默模式
 # disabled_commands = ["restart", "upgrade", "cron"]  # Disable specific commands for this project
 #                                                     # 禁用该项目的指定命令
@@ -643,8 +645,8 @@ app_secret = "your-feishu-app-secret"
 #                                   # 设为 true 时，群聊内所有用户共享同一个 Agent 会话
 # thread_isolation = false  # If true, group messages use Feishu reply threads as session boundaries (one thread/root = one agent session)
 #                           # 设为 true 时，群聊按飞书话题/根消息隔离会话（一个 thread/root 对应一个 Agent 会话）
-# reply_in_thread = false  # If true, all responses are threaded to the original message (helps trace which question triggered which reply)
-#                          # 设为 true 时，所有回复都会引用原消息（方便追踪每条回复对应哪条提问）
+# reply_to_trigger = true   # Default: bot uses “reply to message” API (quotes the user’s message). Set false to post plain chat messages instead.
+#                           # 默认 true：用「回复消息」API（引用用户消息）。设为 false 则在会话里发普通消息、不引用触发消息。
 
 # Lark (International Version) / Lark 国际版
 # Lark uses Webhook mode instead of WebSocket long-connection.
@@ -1108,6 +1110,72 @@ app_secret = "your-feishu-app-secret"
 # Optional: specify a model (provider/model format) / 可选：指定模型
 # model = "anthropic/claude-sonnet-4-20250514"
 #
+# [[projects.platforms]]
+# type = "telegram"
+#
+# [projects.platforms.options]
+# token = "your-telegram-bot-token"
+
+# =============================================================================
+# Project: ACP (Agent Client Protocol) agent / 使用 ACP 子进程
+# =============================================================================
+# Runs any binary that speaks ACP over stdio (newline-delimited JSON-RPC 2.0).
+# See: https://agentclientprotocol.com/
+# 启动符合 ACP 的 Agent 进程，通过标准输入输出进行 JSON-RPC 通信。
+# Same agent type works for Cursor Agent CLI, OpenClaw bridge, GitHub Copilot CLI, etc.:
+# set command + args to match each tool's documented ACP entrypoint.
+# 同一 type=acp：通过 command/args 指向各工具文档中的 ACP 启动方式即可。
+
+# --- Example: Cursor Agent CLI (npm: @anthropic-ai/cursor-agent) ---
+# [[projects]]
+# name = "cursor-acp"
+#
+# [projects.agent]
+# type = "acp"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/project"
+# command = "agent"
+# args = ["acp"]
+# auth_method = "cursor_login"
+# display_name = "Cursor ACP"
+
+# --- Example: OpenClaw (Gateway-backed ACP bridge) ---
+# Docs: https://docs.openclaw.ai/cli/acp
+# Install the OpenClaw CLI, run a Gateway, then point cc-connect at `openclaw acp`.
+# [[projects]]
+# name = "openclaw-acp"
+#
+# [projects.agent]
+# type = "acp"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/project"
+# command = "openclaw"
+# args = ["acp"]
+# # Remote gateway (use token-file on shared hosts — avoid --token in argv):
+# # args = ["acp", "--url", "wss://gateway-host:18789", "--token-file", "/path/to/gateway.token"]
+# # Optional: bind to an existing session key
+# # args = ["acp", "--session", "agent:main:main"]
+# display_name = "OpenClaw ACP"
+# # env = { OPENCLAW_GATEWAY_TOKEN = "..." }
+
+# --- Example: GitHub Copilot CLI (public preview) ---
+# Docs: https://docs.github.com/en/copilot/reference/copilot-cli-reference/acp-server
+# Requires Copilot CLI installed and authenticated; no auth_method for ACP subprocess.
+# [[projects]]
+# name = "copilot-acp"
+#
+# [projects.agent]
+# type = "acp"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/project"
+# command = "copilot"
+# args = ["--acp", "--stdio"]
+# display_name = "Copilot ACP"
+# # command = "/absolute/path/to/copilot"   # if not on PATH (see COPILOT_CLI_PATH in GitHub docs)
+
 # [[projects.platforms]]
 # type = "telegram"
 #

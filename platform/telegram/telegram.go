@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
 
@@ -903,6 +904,7 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 	if name == "" {
 		name = "image"
 	}
+	slog.Debug("telegram: sending image", "chat_id", rc.chatID, "name", name, "size", len(img.Data))
 	msg := tgbotapi.NewPhoto(rc.chatID, tgbotapi.FileBytes{Name: name, Bytes: img.Data})
 	if _, err := bot.Send(msg); err != nil {
 		return fmt.Errorf("telegram: send image: %w", err)
@@ -1075,6 +1077,9 @@ func (p *Platform) downloadFile(bot telegramBot, fileID string) ([]byte, error) 
 	if err != nil {
 		return nil, fmt.Errorf("get file: %w", err)
 	}
+	if file.FilePath == "" {
+		return nil, fmt.Errorf("get file: empty file_path returned for file_id %s", fileID)
+	}
 	link := file.Link(bot.Token())
 
 	resp, err := p.httpClient.Get(link)
@@ -1083,6 +1088,9 @@ func (p *Platform) downloadFile(bot telegramBot, fileID string) ([]byte, error) 
 		return nil, fmt.Errorf("download file %s: %s", fileID, errMsg)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("download file %s: status %d", fileID, resp.StatusCode)
+	}
 	return io.ReadAll(resp.Body)
 }
 
@@ -1190,7 +1198,8 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 
 	action := tgbotapi.NewChatAction(rc.chatID, tgbotapi.ChatTyping)
 	if bot, err := p.connectedBot("typing"); err == nil {
-		if _, err := bot.Send(action); err != nil {
+		// sendChatAction returns result=true, not a Message — use Request, not Send.
+		if _, err := bot.Request(action); err != nil {
 			slog.Debug("telegram: initial typing send failed", "error", err)
 		}
 	} else {
@@ -1213,7 +1222,7 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 					slog.Debug("telegram: typing stopped", "error", err)
 					return
 				}
-				if _, err := bot.Send(action); err != nil {
+				if _, err := bot.Request(action); err != nil {
 					slog.Debug("telegram: typing send failed", "error", err)
 				}
 			}
@@ -1224,10 +1233,29 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 }
 
 func truncateForLog(s string, maxLen int) string {
-	if len(s) <= maxLen {
+	if maxLen <= 0 {
+		return ""
+	}
+	if utf8.RuneCountInString(s) <= maxLen {
 		return s
 	}
-	return s[:maxLen] + "..."
+	r := []rune(s)
+	if len(r) <= maxLen {
+		return s
+	}
+	return string(r[:maxLen]) + "..."
+}
+
+// truncateTelegramBotDescription enforces Telegram's 256-character limit for
+// BotCommand.Description. Byte slicing breaks UTF-8 for CJK text and triggers
+// "text must be encoded in UTF-8" from the API (#119).
+func truncateTelegramBotDescription(s string) string {
+	const max = 256
+	if utf8.RuneCountInString(s) <= max {
+		return s
+	}
+	r := []rune(s)
+	return string(r[:253]) + "..."
 }
 
 func (p *Platform) Stop() error {
@@ -1268,10 +1296,7 @@ func (p *Platform) RegisterCommands(commands []core.BotCommandInfo) error {
 			continue
 		}
 		seen[cmd] = true
-		desc := c.Description
-		if len(desc) > 256 {
-			desc = desc[:253] + "..."
-		}
+		desc := truncateTelegramBotDescription(c.Description)
 		tgCommands = append(tgCommands, tgbotapi.BotCommand{
 			Command:     cmd,
 			Description: desc,
