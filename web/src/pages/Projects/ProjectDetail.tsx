@@ -9,8 +9,24 @@ import { Card, Badge, Button, Input, Modal, EmptyState } from '@/components/ui';
 import { getProject, updateProject, type ProjectDetail as ProjectDetailType } from '@/api/projects';
 import { listProviders, addProvider, removeProvider, activateProvider, listModels, setModel, type Provider } from '@/api/providers';
 import { getHeartbeat, pauseHeartbeat, resumeHeartbeat, triggerHeartbeat, setHeartbeatInterval, type HeartbeatStatus } from '@/api/heartbeat';
-import { formatTime } from '@/lib/utils';
-import { cn } from '@/lib/utils';
+import { restartSystem } from '@/api/status';
+import { formatTime, cn } from '@/lib/utils';
+import PlatformSetupQR from './PlatformSetupQR';
+
+const PLATFORM_OPTIONS: { key: string; label: string; color: string; abbr: string; qr?: boolean }[] = [
+  { key: 'feishu', label: 'Feishu / Lark', abbr: 'FS', color: 'bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400', qr: true },
+  { key: 'weixin', label: 'WeChat', abbr: 'WX', color: 'bg-green-50 dark:bg-green-900/30 text-green-600 dark:text-green-400', qr: true },
+  { key: 'telegram', label: 'Telegram', abbr: 'TG', color: 'bg-sky-50 dark:bg-sky-900/30 text-sky-600 dark:text-sky-400' },
+  { key: 'discord', label: 'Discord', abbr: 'DC', color: 'bg-indigo-50 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400' },
+  { key: 'slack', label: 'Slack', abbr: 'SK', color: 'bg-purple-50 dark:bg-purple-900/30 text-purple-600 dark:text-purple-400' },
+  { key: 'dingtalk', label: 'DingTalk', abbr: 'DT', color: 'bg-orange-50 dark:bg-orange-900/30 text-orange-600 dark:text-orange-400' },
+  { key: 'wecom', label: 'WeChat Work', abbr: 'WC', color: 'bg-emerald-50 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400' },
+  { key: 'qq', label: 'QQ (OneBot)', abbr: 'QQ', color: 'bg-cyan-50 dark:bg-cyan-900/30 text-cyan-600 dark:text-cyan-400' },
+  { key: 'qqbot', label: 'QQ Bot (Official)', abbr: 'QB', color: 'bg-cyan-50 dark:bg-cyan-900/30 text-cyan-600 dark:text-cyan-400' },
+  { key: 'line', label: 'LINE', abbr: 'LN', color: 'bg-lime-50 dark:bg-lime-900/30 text-lime-600 dark:text-lime-400' },
+];
+
+const isQRPlatform = (type: string) => type === 'feishu' || type === 'lark' || type === 'weixin';
 
 type Tab = 'overview' | 'providers' | 'heartbeat' | 'settings';
 
@@ -40,6 +56,11 @@ export default function ProjectDetail() {
   // Interval modal
   const [showInterval, setShowInterval] = useState(false);
   const [newInterval, setNewInterval] = useState('30');
+
+  // Add platform
+  const [showAddPlatform, setShowAddPlatform] = useState(false);
+  const [addPlatType, setAddPlatType] = useState('');
+  const [showRestartModal, setShowRestartModal] = useState(false);
 
   const fetchAll = useCallback(async () => {
     if (!name) return;
@@ -155,7 +176,12 @@ export default function ProjectDetail() {
       {tab === 'overview' && project && (
         <div className="space-y-4">
           <Card>
-            <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-3">{t('projects.platforms')}</h3>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-semibold text-gray-900 dark:text-white">{t('projects.platforms')}</h3>
+              <Button size="sm" onClick={() => { setShowAddPlatform(true); setAddPlatType(''); }}>
+                <Plus size={14} /> {t('setup.addPlatform', 'Add platform')}
+              </Button>
+            </div>
             <div className="flex flex-wrap gap-2">
               {project.platforms?.map((p) => (
                 <Badge key={p.type} variant={p.connected ? 'success' : 'danger'}>
@@ -318,6 +344,70 @@ export default function ProjectDetail() {
           </div>
         </Card>
       )}
+
+      {/* Add Platform Modal */}
+      <Modal open={showAddPlatform} onClose={() => setShowAddPlatform(false)} title={t('setup.addPlatform', 'Add platform')}>
+        {!addPlatType ? (
+          <div className="space-y-3 py-2">
+            <p className="text-sm text-gray-500 dark:text-gray-400 mb-2">
+              {t('setup.choosePlatform', 'Choose a platform to connect:')}
+            </p>
+            <div className="grid grid-cols-2 gap-2 max-h-80 overflow-y-auto">
+              {PLATFORM_OPTIONS.map(({ key, label, color, qr, abbr }) => (
+                <button
+                  key={key}
+                  onClick={() => setAddPlatType(key)}
+                  className="flex items-center gap-2.5 p-3 rounded-xl border border-gray-200 dark:border-gray-700 hover:border-accent/50 hover:bg-accent/5 transition-all text-left"
+                >
+                  <div className={`w-9 h-9 rounded-lg ${color} flex items-center justify-center shrink-0 font-bold text-xs`}>
+                    {abbr}
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium text-gray-900 dark:text-white truncate">{label}</div>
+                    <div className="text-[11px] text-gray-400">
+                      {qr ? t('setup.scanToConnect', 'Scan QR code') : t('setup.manualSetup', 'Manual setup')}
+                    </div>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : isQRPlatform(addPlatType) ? (
+          <PlatformSetupQR
+            platformType={addPlatType as 'feishu' | 'weixin'}
+            projectName={name!}
+            onComplete={() => {
+              setShowAddPlatform(false);
+              setShowRestartModal(true);
+            }}
+            onCancel={() => setAddPlatType('')}
+          />
+        ) : (
+          <div className="space-y-4 py-4 text-center">
+            <p className="text-sm text-gray-600 dark:text-gray-400">
+              {t('setup.manualHint', 'For {{platform}}, please configure credentials in config.toml and restart the service.', { platform: PLATFORM_OPTIONS.find(o => o.key === addPlatType)?.label || addPlatType })}
+            </p>
+            <Button variant="secondary" onClick={() => setAddPlatType('')}>{t('common.back')}</Button>
+          </div>
+        )}
+      </Modal>
+
+      {/* Restart Required Modal */}
+      <Modal open={showRestartModal} onClose={() => setShowRestartModal(false)} title={t('setup.restartRequired', 'Restart required')}>
+        <div className="space-y-4 py-2">
+          <p className="text-sm text-gray-600 dark:text-gray-400">
+            {t('setup.restartHint', 'Restart the service for the new platform to take effect.')}
+          </p>
+          <div className="flex justify-end gap-2">
+            <Button variant="secondary" onClick={() => { setShowRestartModal(false); fetchAll(); }}>
+              {t('setup.later', 'Later')}
+            </Button>
+            <Button onClick={async () => { await restartSystem(); setShowRestartModal(false); fetchAll(); }}>
+              {t('setup.restartNow', 'Restart now')}
+            </Button>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }

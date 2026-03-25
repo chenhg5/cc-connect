@@ -620,6 +620,45 @@ func main() {
 		if bridgeSrv != nil {
 			mgmtSrv.SetBridgeServer(bridgeSrv)
 		}
+		mgmtSrv.SetSetupFeishuSave(func(req core.FeishuSetupSaveRequest) error {
+			platType := req.PlatformType
+			if platType == "" {
+				platType = "feishu"
+			}
+			_, err := config.EnsureProjectWithFeishuPlatform(config.EnsureProjectWithFeishuOptions{
+				ProjectName:  req.ProjectName,
+				PlatformType: platType,
+			})
+			if err != nil {
+				return fmt.Errorf("ensure project: %w", err)
+			}
+			_, err = config.SaveFeishuPlatformCredentials(config.FeishuCredentialUpdateOptions{
+				ProjectName:       req.ProjectName,
+				PlatformType:      platType,
+				AppID:             req.AppID,
+				AppSecret:         req.AppSecret,
+				OwnerOpenID:       req.OwnerOpenID,
+				SetAllowFromEmpty: true,
+			})
+			return err
+		})
+		mgmtSrv.SetSetupWeixinSave(func(req core.WeixinSetupSaveRequest) error {
+			_, err := config.EnsureProjectWithWeixinPlatform(config.EnsureProjectWithWeixinOptions{
+				ProjectName: req.ProjectName,
+			})
+			if err != nil {
+				return fmt.Errorf("ensure project: %w", err)
+			}
+			_, err = config.SaveWeixinPlatformCredentials(config.WeixinCredentialUpdateOptions{
+				ProjectName:       req.ProjectName,
+				Token:             req.Token,
+				BaseURL:           req.BaseURL,
+				AccountID:         req.IlinkBotID,
+				ScannedUserID:     req.IlinkUserID,
+				SetAllowFromEmpty: true,
+			})
+			return err
+		})
 		mgmtSrv.Start()
 	}
 
