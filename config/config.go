@@ -1652,6 +1652,43 @@ func extractLineComment(line string) string {
 	return ""
 }
 
+// AddPlatformToProject appends a platform config to a project.
+// If the project doesn't exist, it is created with agent config cloned from the first existing project.
+func AddPlatformToProject(projectName string, platform PlatformConfig) error {
+	configMu.Lock()
+	defer configMu.Unlock()
+	if ConfigPath == "" {
+		return fmt.Errorf("config path not set")
+	}
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+	if platform.Options == nil {
+		platform.Options = map[string]any{}
+	}
+	for i := range cfg.Projects {
+		if cfg.Projects[i].Name == projectName {
+			cfg.Projects[i].Platforms = append(cfg.Projects[i].Platforms, platform)
+			return saveConfig(cfg)
+		}
+	}
+	agentCfg := AgentConfig{Type: "codex", Options: map[string]any{}}
+	if len(cfg.Projects) > 0 {
+		agentCfg = cloneAgentConfig(cfg.Projects[0].Agent)
+	}
+	cfg.Projects = append(cfg.Projects, ProjectConfig{
+		Name:      projectName,
+		Agent:     agentCfg,
+		Platforms: []PlatformConfig{platform},
+	})
+	return saveConfig(cfg)
+}
+
 func writeRawConfig(content string) error {
 	dir := filepath.Dir(ConfigPath)
 	tmp, err := os.CreateTemp(dir, ".config-*.tmp")

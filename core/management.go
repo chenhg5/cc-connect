@@ -28,8 +28,9 @@ type ManagementServer struct {
 	heartbeatScheduler *HeartbeatScheduler
 	bridgeServer       *BridgeServer
 
-	setupFeishuSave func(req FeishuSetupSaveRequest) error
-	setupWeixinSave func(req WeixinSetupSaveRequest) error
+	setupFeishuSave      func(req FeishuSetupSaveRequest) error
+	setupWeixinSave      func(req WeixinSetupSaveRequest) error
+	addPlatformToProject func(projectName, platType string, opts map[string]any) error
 }
 
 // NewManagementServer creates a new management API server.
@@ -57,6 +58,10 @@ func (m *ManagementServer) SetSetupFeishuSave(fn func(FeishuSetupSaveRequest) er
 }
 func (m *ManagementServer) SetSetupWeixinSave(fn func(WeixinSetupSaveRequest) error) {
 	m.setupWeixinSave = fn
+}
+
+func (m *ManagementServer) SetAddPlatformToProject(fn func(string, string, map[string]any) error) {
+	m.addPlatformToProject = fn
 }
 
 func (m *ManagementServer) Start() {
@@ -391,6 +396,8 @@ func (m *ManagementServer) handleProjectRoutes(w http.ResponseWriter, r *http.Re
 		m.handleProjectHeartbeat(w, r, projName, rest)
 	case "users":
 		m.handleProjectUsers(w, r, engine)
+	case "add-platform":
+		m.handleProjectAddPlatform(w, r, projName)
 	default:
 		mgmtError(w, http.StatusNotFound, "not found")
 	}

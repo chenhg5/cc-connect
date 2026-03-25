@@ -12,6 +12,8 @@ import { getHeartbeat, pauseHeartbeat, resumeHeartbeat, triggerHeartbeat, setHea
 import { restartSystem } from '@/api/status';
 import { formatTime, cn } from '@/lib/utils';
 import PlatformSetupQR from './PlatformSetupQR';
+import PlatformManualForm from './PlatformManualForm';
+import { platformMeta } from '@/lib/platformMeta';
 
 const PLATFORM_OPTIONS: { key: string; label: string; color: string; abbr: string; qr?: boolean }[] = [
   { key: 'feishu', label: 'Feishu / Lark', abbr: 'FS', color: 'bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400', qr: true },
@@ -375,6 +377,16 @@ export default function ProjectDetail() {
         ) : isQRPlatform(addPlatType) ? (
           <PlatformSetupQR
             platformType={addPlatType as 'feishu' | 'weixin'}
+            projectName={name!}
+            onComplete={() => {
+              setShowAddPlatform(false);
+              setShowRestartModal(true);
+            }}
+            onCancel={() => setAddPlatType('')}
+          />
+        ) : platformMeta[addPlatType] ? (
+          <PlatformManualForm
+            platformType={addPlatType}
             projectName={name!}
             onComplete={() => {
               setShowAddPlatform(false);

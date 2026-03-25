@@ -659,6 +659,12 @@ func main() {
 			})
 			return err
 		})
+		mgmtSrv.SetAddPlatformToProject(func(projectName, platType string, opts map[string]any) error {
+			if opts == nil {
+				opts = map[string]any{}
+			}
+			return config.AddPlatformToProject(projectName, config.PlatformConfig{Type: platType, Options: opts})
+		})
 		mgmtSrv.Start()
 	}
 

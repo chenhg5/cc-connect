@@ -4,11 +4,9 @@ import { Link, useNavigate } from 'react-router-dom';
 import { Server, Heart, ArrowRight, FolderKanban, Plus, Smartphone, Settings2 } from 'lucide-react';
 import { Card, Badge, Button, Input, Modal, EmptyState } from '@/components/ui';
 import { listProjects, type ProjectSummary } from '@/api/projects';
-import { restartSystem } from '@/api/status';
 import PlatformSetupQR from './PlatformSetupQR';
-import {
-  setupFeishuSave, setupWeixinSave,
-} from '@/api/setup';
+import PlatformManualForm from './PlatformManualForm';
+import { platformMeta } from '@/lib/platformMeta';
 
 const PLATFORM_OPTIONS: { key: string; label: string; color: string; qr?: boolean }[] = [
   { key: 'feishu', label: 'Feishu / Lark', color: 'bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400', qr: true },
@@ -31,7 +29,7 @@ export default function ProjectList() {
 
   // Add project wizard state
   const [showWizard, setShowWizard] = useState(false);
-  const [wizStep, setWizStep] = useState<'name' | 'platform' | 'qr' | 'done'>('name');
+  const [wizStep, setWizStep] = useState<'name' | 'platform' | 'qr' | 'form' | 'done'>('name');
   const [newProjName, setNewProjName] = useState('');
   const [selectedPlat, setSelectedPlat] = useState('');
 
@@ -65,6 +63,8 @@ export default function ProjectList() {
     setSelectedPlat(key);
     if (isQRPlatform(key)) {
       setWizStep('qr');
+    } else if (platformMeta[key]) {
+      setWizStep('form');
     } else {
       setWizStep('done');
     }
@@ -188,6 +188,18 @@ export default function ProjectList() {
             platformType={selectedPlat as 'feishu' | 'weixin'}
             projectName={newProjName}
             onComplete={handleQRComplete}
+            onCancel={() => setWizStep('platform')}
+          />
+        )}
+
+        {wizStep === 'form' && platformMeta[selectedPlat] && (
+          <PlatformManualForm
+            platformType={selectedPlat}
+            projectName={newProjName}
+            onComplete={() => {
+              setShowWizard(false);
+              fetch();
+            }}
             onCancel={() => setWizStep('platform')}
           />
         )}

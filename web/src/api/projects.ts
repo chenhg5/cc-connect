@@ -31,3 +31,6 @@ export interface ProjectDetail {
 export const listProjects = () => api.get<{ projects: ProjectSummary[] }>('/projects');
 export const getProject = (name: string) => api.get<ProjectDetail>(`/projects/${name}`);
 export const updateProject = (name: string, body: Partial<ProjectDetail['settings']>) => api.patch(`/projects/${name}`, body);
+
+export const addPlatformToProject = (projectName: string, body: { type: string; options: Record<string, any> }) =>
+  api.post<{ message: string; restart_required: boolean }>(`/projects/${projectName}/add-platform`, body);
