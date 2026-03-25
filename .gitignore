@@ -42,9 +42,11 @@ config.toml
 # CC-Connect runtime state
 .cc-connect/
 
-# npm (for npm package distribution)
+# npm / pnpm (for npm package distribution and web admin)
 .npmrc
 package-lock.json
+node_modules/
+.vite/
 
 # ============================================================================
 # Build & distribution

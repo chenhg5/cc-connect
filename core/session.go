@@ -347,6 +347,24 @@ func (sm *SessionManager) AllSessions() []*Session {
 	return out
 }
 
+// SessionKeyMap returns a mapping from session ID to the user key (session_key) it belongs to,
+// plus active session IDs for each user key.
+func (sm *SessionManager) SessionKeyMap() (idToKey map[string]string, activeIDs map[string]bool) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	idToKey = make(map[string]string, len(sm.sessions))
+	activeIDs = make(map[string]bool)
+	for userKey, ids := range sm.userSessions {
+		for _, sid := range ids {
+			idToKey[sid] = userKey
+		}
+		if aid, ok := sm.activeSession[userKey]; ok {
+			activeIDs[aid] = true
+		}
+	}
+	return
+}
+
 // FindByID looks up a session by its internal ID across all users.
 func (sm *SessionManager) FindByID(id string) *Session {
 	sm.mu.RLock()

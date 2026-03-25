@@ -301,12 +301,14 @@ func querySessionMessageCounts() map[string]int {
 	}
 	sqlite3, err := exec.LookPath("sqlite3")
 	if err != nil {
+		slog.Warn("opencode: sqlite3 CLI not found, message counts unavailable", "err", err)
 		return nil
 	}
 
 	out, err := exec.Command(sqlite3, dbPath,
 		"SELECT session_id, COUNT(*) FROM message GROUP BY session_id").Output()
 	if err != nil {
+		slog.Warn("opencode: sqlite3 query failed", "db_path", dbPath, "err", err)
 		return nil
 	}
 
