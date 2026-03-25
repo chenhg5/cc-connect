@@ -11,7 +11,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/chenhg5/cc-connect/core"
@@ -477,6 +476,48 @@ func TestSendFile_UsesInteractionEndpoints(t *testing.T) {
 	}
 }
 
+func TestSendChannelReply_WithoutMessageIDFallsBackToChannelSend(t *testing.T) {
+	var payload map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"msg-reply","channel_id":"ch-1"}`)
+	}))
+	defer server.Close()
+
+	oldEndpointDiscord := discordgo.EndpointDiscord
+	oldEndpointAPI := discordgo.EndpointAPI
+	oldEndpointChannels := discordgo.EndpointChannels
+	discordgo.EndpointDiscord = server.URL + "/"
+	discordgo.EndpointAPI = discordgo.EndpointDiscord + "api/v" + discordgo.APIVersion + "/"
+	discordgo.EndpointChannels = discordgo.EndpointAPI + "channels/"
+	defer func() {
+		discordgo.EndpointDiscord = oldEndpointDiscord
+		discordgo.EndpointAPI = oldEndpointAPI
+		discordgo.EndpointChannels = oldEndpointChannels
+	}()
+
+	s, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New() error = %v", err)
+	}
+	s.Client = server.Client()
+
+	p := &Platform{session: s}
+	err = p.sendChannelReply(replyContext{channelID: "ch-1"}, "language set to English")
+	if err != nil {
+		t.Fatalf("sendChannelReply() error = %v", err)
+	}
+	if payload["content"] != "language set to English" {
+		t.Fatalf("content = %#v, want language set to English", payload["content"])
+	}
+	if _, ok := payload["message_reference"]; ok {
+		t.Fatalf("message_reference = %#v, want omitted when messageID is empty", payload["message_reference"])
+	}
+}
+
 // ── Dedup tests ──────────────────────────────────────────────
 
 // simulateHandlerCall mimics the dedup + dispatch logic in the MessageCreate
@@ -484,15 +525,34 @@ func TestSendFile_UsesInteractionEndpoints(t *testing.T) {
 // was dispatched (not a duplicate).
 func (p *Platform) simulateHandlerCall(msgID, userID, userName, channelID, content string) bool {
 	// --- dedup (same logic as Start handler) ---
-	if _, loaded := p.seenMsgs.LoadOrStore(msgID, struct{}{}); loaded {
+	if !rememberDedupID(&p.seenMsgs, msgID) {
 		return false
 	}
-	time.AfterFunc(2*time.Minute, func() { p.seenMsgs.Delete(msgID) })
 
 	msg := &core.Message{
 		SessionKey: p.makeSessionKey(channelID, userID),
 		Platform:   "discord",
 		MessageID:  msgID,
+		UserID:     userID,
+		UserName:   userName,
+		Content:    content,
+	}
+	p.handler(p, msg)
+	return true
+}
+
+// simulateInteractionHandlerCall mimics the dedup + dispatch logic shared by
+// slash commands and button interactions. It returns true when the interaction
+// was dispatched (not a duplicate).
+func (p *Platform) simulateInteractionHandlerCall(interactionID, userID, userName, channelID, content string) bool {
+	if !rememberDedupID(&p.seenInteractions, interactionID) {
+		return false
+	}
+
+	msg := &core.Message{
+		SessionKey: p.makeSessionKey(channelID, userID),
+		Platform:   "discord",
+		MessageID:  interactionID,
 		UserID:     userID,
 		UserName:   userName,
 		Content:    content,
@@ -621,6 +681,59 @@ func TestDuplicateMessage_MultipleDuplicateBursts(t *testing.T) {
 	}
 	if len(received) != 10 {
 		t.Errorf("got %d unique messages, want 10", len(received))
+	}
+}
+
+// TestDuplicateInteraction_SameIDDeduped verifies the shared interaction dedup
+// path used by slash commands and button interactions.
+func TestDuplicateInteraction_SameIDDeduped(t *testing.T) {
+	var calls int32
+	p := newTestPlatform(func(_ core.Platform, _ *core.Message) {
+		atomic.AddInt32(&calls, 1)
+	})
+
+	const interactionID = "1499999999999999999"
+
+	if !p.simulateInteractionHandlerCall(interactionID, "user1", "quabug", "ch1", "/config thinking_max_len 200") {
+		t.Fatal("first interaction delivery was incorrectly treated as duplicate")
+	}
+	if p.simulateInteractionHandlerCall(interactionID, "user1", "quabug", "ch1", "/config thinking_max_len 200") {
+		t.Fatal("second interaction delivery was not caught as duplicate")
+	}
+
+	if n := atomic.LoadInt32(&calls); n != 1 {
+		t.Fatalf("handler called %d times, want 1", n)
+	}
+}
+
+func TestDuplicateInteraction_ConcurrentRace(t *testing.T) {
+	var calls int32
+	p := newTestPlatform(func(_ core.Platform, _ *core.Message) {
+		atomic.AddInt32(&calls, 1)
+	})
+
+	const (
+		interactionID = "race-interaction-1"
+		goroutines    = 50
+	)
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	start := make(chan struct{})
+
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			<-start
+			p.simulateInteractionHandlerCall(interactionID, "user1", "quabug", "ch1", "cmd:new")
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+
+	if n := atomic.LoadInt32(&calls); n != 1 {
+		t.Fatalf("handler called %d times under race, want exactly 1", n)
 	}
 }
 

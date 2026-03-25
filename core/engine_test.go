@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -3710,78 +3709,6 @@ func (a *controllableAgent) ListSessions(_ context.Context) ([]AgentSessionInfo,
 }
 func (a *controllableAgent) Stop() error { return nil }
 
-// recordingStartAgent records each StartSession session-id argument (for testing
-// the one-time ContinueSession bridge).
-type recordingStartAgent struct {
-	startIDs []string
-	mu       sync.Mutex
-}
-
-func (a *recordingStartAgent) Name() string { return "recording-start" }
-
-func (a *recordingStartAgent) StartSession(_ context.Context, id string) (AgentSession, error) {
-	a.mu.Lock()
-	a.startIDs = append(a.startIDs, id)
-	a.mu.Unlock()
-	return newControllableSession("agent-id"), nil
-}
-
-func (a *recordingStartAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
-	return nil, nil
-}
-
-func (a *recordingStartAgent) Stop() error { return nil }
-
-func (a *recordingStartAgent) startArgs() []string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	out := make([]string, len(a.startIDs))
-	copy(out, a.startIDs)
-	return out
-}
-
-func TestMessageConsumesFirstContinueBridge(t *testing.T) {
-	if !messageConsumesFirstContinueBridge(&Message{UserID: "u1"}) {
-		t.Fatal("expected true for normal user")
-	}
-	if messageConsumesFirstContinueBridge(&Message{UserID: "cron"}) {
-		t.Fatal("expected false for cron")
-	}
-	if messageConsumesFirstContinueBridge(&Message{UserID: "heartbeat"}) {
-		t.Fatal("expected false for heartbeat")
-	}
-}
-
-func TestFirstContinueBridge_SyntheticDoesNotConsume(t *testing.T) {
-	ag := &recordingStartAgent{}
-	p := &stubPlatformEngine{n: "test"}
-	e := NewEngine("test", ag, []Platform{p}, "", LangEnglish)
-	key := "test:user1"
-	sess := e.sessions.GetOrCreateActive(key)
-	if !sess.TryLock() {
-		t.Fatal("TryLock")
-	}
-
-	e.getOrCreateInteractiveStateWith(key, p, "ctx", sess, e.sessions, nil, "", false, nil)
-	if got := ag.startArgs(); len(got) != 1 || got[0] != "" {
-		t.Fatalf("synthetic start ids = %#v want [\"\"]", got)
-	}
-	if e.hasConnectedOnce.Load() {
-		t.Fatal("hasConnectedOnce should stay false after synthetic start")
-	}
-
-	e.cleanupInteractiveState(key)
-
-	e.getOrCreateInteractiveStateWith(key, p, "ctx", sess, e.sessions, nil, "", true, nil)
-	got := ag.startArgs()
-	if len(got) != 2 {
-		t.Fatalf("want 2 StartSession calls, got %#v", got)
-	}
-	if got[1] != ContinueSession {
-		t.Fatalf("user start id = %q want %q", got[1], ContinueSession)
-	}
-}
-
 // TestCleanupCAS_SkipsWhenStateReplaced verifies that cleanupInteractiveState
 // with an expected state pointer is a no-op when the map entry has been replaced.
 // This is the core of the /new race fix: old goroutine's cleanup must not delete
@@ -3882,7 +3809,7 @@ func TestSessionMismatch_RecyclesStaleAgent(t *testing.T) {
 	// The active Session now wants a DIFFERENT agent session ID.
 	session := &Session{AgentSessionID: "new-agent-id"}
 
-	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "", true, nil)
+	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
 
 	if state.agentSession == oldSess {
 		t.Fatal("expected stale agent session to be replaced")
@@ -3907,8 +3834,6 @@ func TestSessionClearedAfterNew_RecyclesAliveAgent(t *testing.T) {
 	agent := &controllableAgent{nextSession: newSess}
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
-	e.hasConnectedOnce.Store(true) // not the process-wide first connection; /new is after prior chat
-
 	key := "test:user1"
 	oldSess := newControllableSession("prior-claude-session")
 	e.interactiveMu.Lock()
@@ -3921,7 +3846,7 @@ func TestSessionClearedAfterNew_RecyclesAliveAgent(t *testing.T) {
 
 	session := &Session{AgentSessionID: ""}
 
-	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "", true, nil)
+	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
 	if state.agentSession == oldSess {
 		t.Fatal("expected stale agent to be recycled when AgentSessionID was cleared")
 	}
@@ -3957,7 +3882,7 @@ func TestSessionMismatch_DoesNotLeakQuiet(t *testing.T) {
 	// Active session wants "new-id", which mismatches "old-id".
 	session := &Session{AgentSessionID: "new-id"}
 
-	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "", true, nil)
+	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
 
 	state.mu.Lock()
 	q := state.quiet
@@ -3988,7 +3913,7 @@ func TestSessionMismatch_ReusesWhenIDsMatch(t *testing.T) {
 
 	session := &Session{AgentSessionID: "matching-id"}
 
-	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "", true, nil)
+	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
 	if state != existingState {
 		t.Fatal("expected existing state to be reused when session IDs match")
 	}
@@ -4006,7 +3931,7 @@ func TestSessionIDWriteback_ImmediateAfterStartSession(t *testing.T) {
 	key := "test:user1"
 	session := &Session{AgentSessionID: ""} // empty — no prior binding
 
-	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "", true, nil)
+	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
 
 	got := session.GetAgentSessionID()
 
@@ -4026,7 +3951,7 @@ func TestSessionIDWriteback_DoesNotOverwriteExisting(t *testing.T) {
 	key := "test:user1"
 	session := &Session{AgentSessionID: "existing-uuid"}
 
-	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "", true, nil)
+	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
 
 	got := session.GetAgentSessionID()
 
@@ -4062,7 +3987,7 @@ func TestStaleGoroutineCleanup_RaceSimulation(t *testing.T) {
 
 	// Step 3: New turn creates Session B and calls getOrCreateInteractiveStateWith.
 	sessionB := &Session{AgentSessionID: ""}
-	newState := e.getOrCreateInteractiveStateWith(key, p, "ctx", sessionB, e.sessions, nil, "", true, nil)
+	newState := e.getOrCreateInteractiveStateWith(key, p, "ctx", sessionB, e.sessions, nil, "")
 
 	// Verify S2 is in the map.
 	e.interactiveMu.Lock()
@@ -4368,7 +4293,7 @@ func (a *stubStartSessionAgent) Stop() error { return nil }
 func TestResumeFailureFallbackToFreshSession(t *testing.T) {
 	agent := &stubStartSessionAgent{
 		failIDs: map[string]error{
-			ContinueSession: fmt.Errorf("Prompt is too long"),
+			"old-session-id": fmt.Errorf("Prompt is too long"),
 		},
 	}
 
@@ -4388,7 +4313,7 @@ func TestResumeFailureFallbackToFreshSession(t *testing.T) {
 	session.SetAgentSessionID("old-session-id", "stub")
 
 	p := &stubPlatformEngine{n: "test"}
-	state := e.getOrCreateInteractiveStateWith("test:user1", p, "ctx", session, e.sessions, nil, "", true, nil)
+	state := e.getOrCreateInteractiveStateWith("test:user1", p, "ctx", session, e.sessions, nil, "")
 
 	if state.agentSession == nil {
 		t.Fatal("expected agentSession to be non-nil after fallback")
@@ -4401,17 +4326,15 @@ func TestResumeFailureFallbackToFreshSession(t *testing.T) {
 	if len(calls) != 2 {
 		t.Fatalf("expected 2 StartSession calls, got %d: %v", len(calls), calls)
 	}
-	// First call should be ContinueSession (first connection uses --continue)
-	if calls[0] != ContinueSession {
-		t.Fatalf("first StartSession call = %q, want %q", calls[0], ContinueSession)
+	if calls[0] != "old-session-id" {
+		t.Fatalf("first StartSession call = %q, want saved session id", calls[0])
 	}
-	// Second call should be empty string (fresh session fallback)
 	if calls[1] != "" {
 		t.Fatalf("second StartSession call = %q, want empty string", calls[1])
 	}
 }
 
-func TestFreshSessionRespectedAfterFirstConnection(t *testing.T) {
+func TestFreshSessionWithoutSavedSessionIDStartsFresh(t *testing.T) {
 	agent := &stubStartSessionAgent{}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -4425,14 +4348,10 @@ func TestFreshSessionRespectedAfterFirstConnection(t *testing.T) {
 		interactiveStates: make(map[string]*interactiveState),
 		display:           DisplayCfg{},
 	}
-	// Simulate first connection already happened
-	e.hasConnectedOnce.Store(true)
-
-	// Create a session with no saved agent session ID (fresh session via /new)
 	session := e.sessions.GetOrCreateActive("test:user2")
 
 	p := &stubPlatformEngine{n: "test"}
-	state := e.getOrCreateInteractiveStateWith("test:user2", p, "ctx", session, e.sessions, nil, "", true, nil)
+	state := e.getOrCreateInteractiveStateWith("test:user2", p, "ctx", session, e.sessions, nil, "")
 
 	if state.agentSession == nil {
 		t.Fatal("expected agentSession to be non-nil")
@@ -4445,13 +4364,12 @@ func TestFreshSessionRespectedAfterFirstConnection(t *testing.T) {
 	if len(calls) != 1 {
 		t.Fatalf("expected 1 StartSession call, got %d: %v", len(calls), calls)
 	}
-	// Should be empty string (fresh session), NOT ContinueSession
 	if calls[0] != "" {
 		t.Fatalf("StartSession call = %q, want empty string (fresh session)", calls[0])
 	}
 }
 
-func TestWorkspaceReconnectWithSavedSessionIDSkipsContinueBridge(t *testing.T) {
+func TestWorkspaceReconnectWithSavedSessionIDUsesExactResume(t *testing.T) {
 	agent := &stubStartSessionAgent{}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -4469,15 +4387,11 @@ func TestWorkspaceReconnectWithSavedSessionIDSkipsContinueBridge(t *testing.T) {
 	session := e.sessions.GetOrCreateActive("test:user3")
 	session.SetAgentSessionID("saved-session-id", "stub")
 
-	var wsConnectedOnce atomic.Bool
 	p := &stubPlatformEngine{n: "test"}
-	state := e.getOrCreateInteractiveStateWith("test:user3", p, "ctx", session, e.sessions, nil, "", true, &wsConnectedOnce)
+	state := e.getOrCreateInteractiveStateWith("test:user3", p, "ctx", session, e.sessions, nil, "")
 
 	if state.agentSession == nil {
 		t.Fatal("expected agentSession to be non-nil")
-	}
-	if !wsConnectedOnce.Load() {
-		t.Fatal("workspace connectedOnce flag should be marked after exact resume")
 	}
 
 	agent.mu.Lock()

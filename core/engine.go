@@ -16,7 +16,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
@@ -207,7 +206,6 @@ type Engine struct {
 	quietMu sync.RWMutex
 	quiet   bool // when true, suppress thinking and tool progress messages globally
 
-	hasConnectedOnce    atomic.Bool // first connection uses --continue to bridge CLI usage
 	platformLifecycleMu sync.Mutex
 	platformReady       map[Platform]bool
 	stopping            bool
@@ -1691,16 +1689,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	if agent != e.agent {
 		agentOverride = agent
 	}
-	// Per-workspace connectedOnce flag so that idle-reaped workspaces
-	// re-use --continue on their first reconnection.
-	var wsConnectedOnce *atomic.Bool
-	if workspaceDir != "" {
-		if ws := e.workspacePool.Get(workspaceDir); ws != nil {
-			wsConnectedOnce = &ws.hasConnectedOnce
-		}
-	}
-	consumeBridge := messageConsumesFirstContinueBridge(msg)
-	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey, consumeBridge, wsConnectedOnce)
+	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey)
 
 	// Set workspaceDir on the state for idle reaper identification
 	if workspaceDir != "" {
@@ -1822,30 +1811,10 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 	return agent, sessions, nil
 }
 
-// messageConsumesFirstContinueBridge reports whether this message may trigger the
-// one-time --continue bridge to the latest CLI session. Synthetic injectors (cron,
-// heartbeat) must not flip hasConnectedOnce so a real user's first message still
-// receives the bridge if nothing else has connected yet.
-func messageConsumesFirstContinueBridge(msg *Message) bool {
-	if msg == nil {
-		return true
-	}
-	switch strings.ToLower(strings.TrimSpace(msg.UserID)) {
-	case "cron", "heartbeat":
-		return false
-	default:
-		return true
-	}
-}
-
 // getOrCreateInteractiveStateWith accepts an optional agent override for multi-workspace mode.
 // When agentOverride is non-nil it is used instead of e.agent to start the session.
 // ccSessionKey, when non-empty, is used for CC_SESSION_KEY env injection; otherwise sessionKey is used.
-// consumeFirstUserContinueBridge controls whether this start may use the global
-// one-time ContinueSession bridge (see messageConsumesFirstContinueBridge).
-// connectedOnce, when non-nil, is used instead of the engine-level hasConnectedOnce flag
-// (for per-workspace tracking after idle reap).
-func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string, consumeFirstUserContinueBridge bool, connectedOnce *atomic.Bool) *interactiveState {
+func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string) *interactiveState {
 	e.interactiveMu.Lock()
 	defer e.interactiveMu.Unlock()
 
@@ -1932,24 +1901,10 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		return state
 	}
 
-	// On first real-user connection after engine startup, use --continue to pick
-	// up the most recent CLI session. For workspace-scoped reconnects after idle
-	// reap, keep that behavior only when we do not already have a concrete saved
-	// agent session ID; otherwise exact resume is more precise than continuing
-	// whatever the CLI considers "latest" in that workspace.
+	// Resume only when we have a concrete saved agent session ID. If the session
+	// is unbound, force a fresh start instead of attaching to whichever CLI
+	// conversation happens to be "latest" in this workspace.
 	startSessionID := session.GetAgentSessionID()
-	once := &e.hasConnectedOnce
-	if connectedOnce != nil {
-		once = connectedOnce
-	}
-	if consumeFirstUserContinueBridge {
-		if connectedOnce != nil && startSessionID != "" {
-			once.Store(true)
-		} else if !once.Swap(true) {
-			startSessionID = ContinueSession
-		}
-	}
-
 	isResume := startSessionID != ""
 	startAt := time.Now()
 	agentSession, err := agent.StartSession(e.ctx, startSessionID)
