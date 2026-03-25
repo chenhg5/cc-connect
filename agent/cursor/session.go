@@ -107,6 +107,14 @@ func (cs *cursorSession) Send(prompt string, images []core.ImageAttachment, file
 	}
 	cmd.Env = env
 
+	// Explicit StdinPipe prevents the child from inheriting the parent's stdin.
+	// Under launchd, the parent stdin is /dev/null which can cause the Cursor
+	// agent CLI (Node.js) to hang on startup in newer versions.
+	stdinPipe, err := cmd.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("cursorSession: stdin pipe: %w", err)
+	}
+
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("cursorSession: stdout pipe: %w", err)
@@ -120,13 +128,14 @@ func (cs *cursorSession) Send(prompt string, images []core.ImageAttachment, file
 	}
 
 	cs.wg.Add(1)
-	go cs.readLoop(cmd, stdout, &stderrBuf)
+	go cs.readLoop(cmd, stdout, &stderrBuf, stdinPipe)
 
 	return nil
 }
 
-func (cs *cursorSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
+func (cs *cursorSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer, stdinPipe io.WriteCloser) {
 	defer cs.wg.Done()
+	defer stdinPipe.Close()
 	defer func() {
 		if err := cmd.Wait(); err != nil {
 			stderrMsg := strings.TrimSpace(stderrBuf.String())
