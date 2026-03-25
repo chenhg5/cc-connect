@@ -659,6 +659,10 @@ func (p *Platform) handleComponentInteraction(s *discordgo.Session, i *discordgo
 
 	channelID := i.ChannelID
 	sessionKey := resolveSessionKeyForChannel(channelID, userID, p.shareSessionInChannel, p.threadIsolation, sessionThreadOps{session: p.session})
+	rc := replyContext{channelID: channelID}
+	if i.Message != nil {
+		rc.messageID = i.Message.ID
+	}
 	p.handler(p, &core.Message{
 		SessionKey: sessionKey,
 		Platform:   "discord",
@@ -667,7 +671,7 @@ func (p *Platform) handleComponentInteraction(s *discordgo.Session, i *discordgo
 		UserName:   userName,
 		ChatName:   p.resolveChannelName(channelID),
 		Content:    command,
-		ReplyCtx:   replyContext{channelID: channelID},
+		ReplyCtx:   rc,
 	})
 }
 
@@ -730,7 +734,7 @@ func (p *Platform) sendChannelReply(rc replyContext, content string) error {
 	chunks := core.SplitMessageCodeFenceAware(content, maxDiscordLen)
 	for _, chunk := range chunks {
 		var err error
-		if rc.useThreadChannel() {
+		if rc.useThreadChannel() || rc.messageID == "" {
 			_, err = p.session.ChannelMessageSend(rc.targetChannelID(), chunk)
 		} else {
 			ref := &discordgo.MessageReference{MessageID: rc.messageID}

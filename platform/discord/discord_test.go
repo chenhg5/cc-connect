@@ -476,6 +476,48 @@ func TestSendFile_UsesInteractionEndpoints(t *testing.T) {
 	}
 }
 
+func TestSendChannelReply_WithoutMessageIDFallsBackToChannelSend(t *testing.T) {
+	var payload map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"msg-reply","channel_id":"ch-1"}`)
+	}))
+	defer server.Close()
+
+	oldEndpointDiscord := discordgo.EndpointDiscord
+	oldEndpointAPI := discordgo.EndpointAPI
+	oldEndpointChannels := discordgo.EndpointChannels
+	discordgo.EndpointDiscord = server.URL + "/"
+	discordgo.EndpointAPI = discordgo.EndpointDiscord + "api/v" + discordgo.APIVersion + "/"
+	discordgo.EndpointChannels = discordgo.EndpointAPI + "channels/"
+	defer func() {
+		discordgo.EndpointDiscord = oldEndpointDiscord
+		discordgo.EndpointAPI = oldEndpointAPI
+		discordgo.EndpointChannels = oldEndpointChannels
+	}()
+
+	s, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New() error = %v", err)
+	}
+	s.Client = server.Client()
+
+	p := &Platform{session: s}
+	err = p.sendChannelReply(replyContext{channelID: "ch-1"}, "language set to English")
+	if err != nil {
+		t.Fatalf("sendChannelReply() error = %v", err)
+	}
+	if payload["content"] != "language set to English" {
+		t.Fatalf("content = %#v, want language set to English", payload["content"])
+	}
+	if _, ok := payload["message_reference"]; ok {
+		t.Fatalf("message_reference = %#v, want omitted when messageID is empty", payload["message_reference"])
+	}
+}
+
 // ── Dedup tests ──────────────────────────────────────────────
 
 // simulateHandlerCall mimics the dedup + dispatch logic in the MessageCreate
