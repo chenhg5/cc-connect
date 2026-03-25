@@ -1,6 +1,7 @@
 package qq
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -39,6 +40,7 @@ type Platform struct {
 	selfID                int64
 	dedup                 core.MessageDedup
 	groupNameCache        sync.Map // groupID -> group name
+	httpURL            string   // OneBot HTTP API URL, e.g. "http://127.0.0.1:3000"
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -51,11 +53,16 @@ func New(opts map[string]any) (core.Platform, error) {
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 
 	core.CheckAllowFrom("qq", allowFrom)
+
+	httpURL, _ := opts["http_url"].(string)
+	httpURL = strings.TrimRight(httpURL, "/")
+
 	return &Platform{
 		wsURL:                 wsURL,
 		token:                 token,
 		allowFrom:             allowFrom,
 		shareSessionInChannel: shareSessionInChannel,
+		httpURL:            httpURL,
 	}, nil
 }
 
@@ -457,6 +464,56 @@ func (p *Platform) callAPI(action string, params map[string]any) (map[string]any
 	}
 }
 
+// callHTTPAPI calls a OneBot v11 HTTP endpoint (e.g. /upload_group_file).
+// Used for file operations — avoids WebSocket message size limits and
+// file-path issues across Windows/WSL/Docker boundaries.
+// Requires http_url to be configured.
+func (p *Platform) callHTTPAPI(action string, params map[string]any) (map[string]any, error) {
+	if p.httpURL == "" {
+		return nil, fmt.Errorf("qq: http_url not configured")
+	}
+	body, err := json.Marshal(params)
+	if err != nil {
+		return nil, err
+	}
+	url := p.httpURL + "/" + action
+	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if p.token != "" {
+		req.Header.Set("Authorization", "Bearer "+p.token)
+	}
+	client := &http.Client{Timeout: 120 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("qq: HTTP %s failed: %w", action, err)
+	}
+	defer resp.Body.Close()
+
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("qq: HTTP %s read body: %w", action, err)
+	}
+
+	var apiResp struct {
+		Status  string          `json:"status"`
+		RetCode int             `json:"retcode"`
+		Data    json.RawMessage `json:"data"`
+		Message string          `json:"message"`
+	}
+	if json.Unmarshal(raw, &apiResp) != nil {
+		return nil, fmt.Errorf("qq: HTTP %s invalid response", action)
+	}
+	if apiResp.RetCode != 0 {
+		return nil, fmt.Errorf("qq: HTTP %s failed (retcode=%d, msg=%s)", action, apiResp.RetCode, apiResp.Message)
+	}
+	var result map[string]any
+	_ = json.Unmarshal(apiResp.Data, &result)
+	return result, nil
+}
+
 // ── Helpers ─────────────────────────────────────────────────────
 
 type replyContext struct {
@@ -546,3 +603,55 @@ func downloadFile(url string) ([]byte, string, error) {
 	}
 	return data, mime, nil
 }
+
+// SendFile sends a file to the conversation.
+// Implements core.FileSender.
+//
+// Uses base64-encoded file data to avoid file-path issues across
+// Windows/WSL/Docker. Routes through NapCat HTTP API when configured
+// (better for large files), falls back to WebSocket.
+func (p *Platform) SendFile(ctx context.Context, replyCtx any, file core.FileAttachment) error {
+	rctx, ok := replyCtx.(*replyContext)
+	if !ok {
+		return fmt.Errorf("qq: SendFile: invalid reply context type %T", replyCtx)
+	}
+
+	name := file.FileName
+	if name == "" {
+		name = "attachment"
+	}
+
+	b64data := "base64://" + base64.StdEncoding.EncodeToString(file.Data)
+
+	// Pick API caller: prefer HTTP for large payloads, fall back to WebSocket.
+	call := p.callAPI
+	if p.httpURL != "" {
+		call = p.callHTTPAPI
+	}
+
+	if rctx.messageType == "group" {
+		_, err := call("upload_group_file", map[string]any{
+			"group_id": rctx.groupID,
+			"file":     b64data,
+			"name":     name,
+		})
+		if err != nil {
+			return fmt.Errorf("qq: SendFile group: %w", err)
+		}
+		return nil
+	}
+
+	// Private: use send_private_msg with file segment
+	_, err := call("send_private_msg", map[string]any{
+		"user_id": rctx.userID,
+		"message": []map[string]any{
+			{"type": "file", "data": map[string]any{"file": b64data, "name": name}},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("qq: SendFile private: %w", err)
+	}
+	return nil
+}
+
+var _ core.FileSender = (*Platform)(nil)
