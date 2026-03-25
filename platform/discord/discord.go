@@ -54,6 +54,7 @@ type Platform struct {
 	botRoleIDs                 sync.Map // guildID -> bot managed role ID
 	readyCh                    chan struct{}
 	seenMsgs                   sync.Map // message ID dedup: prevents duplicate MessageCreate events
+	seenInteractions           sync.Map // interaction ID dedup: prevents duplicate slash/button events
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -84,6 +85,17 @@ func (p *Platform) Name() string { return "discord" }
 
 func (p *Platform) makeSessionKey(channelID string, userID string) string {
 	return buildSessionKey(channelID, userID, p.shareSessionInChannel)
+}
+
+func rememberDedupID(store *sync.Map, id string) bool {
+	if id == "" {
+		return true
+	}
+	if _, loaded := store.LoadOrStore(id, struct{}{}); loaded {
+		return false
+	}
+	time.AfterFunc(2*time.Minute, func() { store.Delete(id) })
+	return true
 }
 
 func buildSessionKey(channelID string, userID string, shareSessionInChannel bool) string {
@@ -407,11 +419,10 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 
 	session.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
 		// Deduplicate: Discord gateway may deliver the same event twice
-		if _, loaded := p.seenMsgs.LoadOrStore(m.ID, struct{}{}); loaded {
+		if !rememberDedupID(&p.seenMsgs, m.ID) {
 			slog.Debug("discord: ignoring duplicate message", "msg_id", m.ID)
 			return
 		}
-		time.AfterFunc(2*time.Minute, func() { p.seenMsgs.Delete(m.ID) })
 
 		if m.Author.Bot || m.Author.ID == p.botID {
 			return
@@ -514,6 +525,11 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 
 // handleInteraction processes incoming Discord command and button interactions.
 func (p *Platform) handleInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	if !rememberDedupID(&p.seenInteractions, i.ID) {
+		slog.Debug("discord: ignoring duplicate interaction", "interaction_id", i.ID, "type", i.Type)
+		return
+	}
+
 	userID, userName := "", ""
 	if i.Member != nil && i.Member.User != nil {
 		userID = i.Member.User.ID
