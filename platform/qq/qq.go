@@ -203,8 +203,8 @@ func (p *Platform) handleMessage(payload map[string]any) {
 	}
 
 	// Parse message content from CQ message array or raw_message
-	text, images, audio := p.parseMessage(payload)
-	if text == "" && len(images) == 0 && audio == nil {
+	text, images, files, audio := p.parseMessage(payload, msgType, groupID)
+	if text == "" && len(images) == 0 && len(files) == 0 && audio == nil {
 		return
 	}
 
@@ -240,6 +240,7 @@ func (p *Platform) handleMessage(payload map[string]any) {
 		ChatName:   chatName,
 		Content:    text,
 		Images:     images,
+		Files:      files,
 		Audio:      audio,
 		ReplyCtx:   rctx,
 	}
@@ -248,9 +249,10 @@ func (p *Platform) handleMessage(payload map[string]any) {
 	p.handler(p, msg)
 }
 
-func (p *Platform) parseMessage(payload map[string]any) (string, []core.ImageAttachment, *core.AudioAttachment) {
+func (p *Platform) parseMessage(payload map[string]any, msgType string, groupID int64) (string, []core.ImageAttachment, []core.FileAttachment, *core.AudioAttachment) {
 	var textParts []string
 	var images []core.ImageAttachment
+	var files []core.FileAttachment
 	var audio *core.AudioAttachment
 
 	// OneBot message can be array of segments or a string
@@ -304,6 +306,117 @@ func (p *Platform) parseMessage(payload map[string]any) (string, []core.ImageAtt
 						Format: format,
 					}
 				}
+			case "file":
+				name, _ := data["name"].(string)
+				if name == "" {
+					name, _ = data["file"].(string)
+				}
+				fileID, _ := data["file_id"].(string)
+				if fileID == "" {
+					fileID, _ = data["file"].(string)
+				}
+
+				slog.Info("qq: file segment received", "name", name, "file_id", fileID,
+					"has_url", data["url"] != nil, "msg_type", msgType, "group_id", groupID)
+
+				var downloaded bool
+
+				// Step 1: Try direct URL from message segment (with longer timeout for large files)
+				if url, ok := data["url"].(string); ok && url != "" {
+					fileData, mime, err := downloadLargeFile(url)
+					if err != nil {
+						slog.Warn("qq: [step1] download file via segment URL failed", "error", err)
+					} else {
+						files = append(files, core.FileAttachment{
+							MimeType: mime,
+							Data:     fileData,
+							FileName: name,
+						})
+						downloaded = true
+						slog.Info("qq: [step1] file downloaded via segment URL", "name", name, "size", len(fileData))
+					}
+				}
+
+				// Step 2: Get fresh direct link via NapCat API (CDN URLs expire / have download limits)
+				// NapCat docs: params are STRINGS — group (not group_id), file_id
+				if !downloaded && p.httpURL != "" && fileID != "" {
+					var freshURL string
+					if msgType == "group" && groupID != 0 {
+						groupStr := strconv.FormatInt(groupID, 10)
+						slog.Info("qq: [step2] trying get_group_file_url", "file_id", fileID, "group", groupStr)
+						result, err := p.callHTTPAPI("get_group_file_url", map[string]any{
+							"file_id": fileID,
+							"group":   groupStr,
+						})
+						if err == nil {
+							freshURL, _ = result["url"].(string)
+							slog.Info("qq: [step2] get_group_file_url returned", "has_url", freshURL != "")
+						} else {
+							slog.Warn("qq: [step2] get_group_file_url failed", "file_id", fileID, "error", err)
+						}
+					} else {
+						slog.Info("qq: [step2] trying get_private_file_url", "file_id", fileID)
+						result, err := p.callHTTPAPI("get_private_file_url", map[string]any{
+							"file_id": fileID,
+						})
+						if err == nil {
+							freshURL, _ = result["url"].(string)
+						} else {
+							slog.Warn("qq: [step2] get_private_file_url failed", "file_id", fileID, "error", err)
+						}
+					}
+					if freshURL != "" {
+						fileData, mime, err := downloadLargeFile(freshURL)
+						if err == nil {
+							files = append(files, core.FileAttachment{
+								MimeType: mime,
+								Data:     fileData,
+								FileName: name,
+							})
+							downloaded = true
+							slog.Info("qq: [step2] file downloaded via fresh URL", "name", name, "size", len(fileData))
+						} else {
+							slog.Warn("qq: [step2] download file via fresh URL failed", "error", err)
+						}
+					}
+				}
+
+				// Step 3: Last resort — get_file (downloads to NapCat local or returns base64)
+				if !downloaded && p.httpURL != "" && fileID != "" {
+					slog.Info("qq: [step3] trying get_file", "file_id", fileID)
+					result, err := p.callHTTPAPI("get_file", map[string]any{"file_id": fileID})
+					if err == nil {
+						if fileURL, ok := result["url"].(string); ok && fileURL != "" {
+							fileData, mime, err := downloadLargeFile(fileURL)
+							if err == nil {
+								files = append(files, core.FileAttachment{
+									MimeType: mime,
+									Data:     fileData,
+									FileName: name,
+								})
+								downloaded = true
+							}
+						}
+						if !downloaded {
+							if b64Str, ok := result["base64"].(string); ok && b64Str != "" {
+								if decoded, err := base64.StdEncoding.DecodeString(b64Str); err == nil {
+									files = append(files, core.FileAttachment{
+										MimeType: http.DetectContentType(decoded),
+										Data:     decoded,
+										FileName: name,
+									})
+									downloaded = true
+								}
+							}
+						}
+					} else {
+						slog.Warn("qq: get_file API failed", "file_id", fileID, "error", err)
+					}
+				}
+
+				if !downloaded {
+					slog.Warn("qq: file segment could not be downloaded", "name", name)
+				}
 			case "at":
 				// Ignore @mentions in parsed text
 			}
@@ -315,7 +428,7 @@ func (p *Platform) parseMessage(payload map[string]any) (string, []core.ImageAtt
 		}
 	}
 
-	return strings.TrimSpace(strings.Join(textParts, "")), images, audio
+	return strings.TrimSpace(strings.Join(textParts, "")), images, files, audio
 }
 
 // Reply sends a message as a reply to an incoming message.
@@ -582,6 +695,30 @@ func stripCQCodes(s string) string {
 		s = s[idx+end+1:]
 	}
 	return result.String()
+}
+
+func downloadLargeFile(url string) ([]byte, string, error) {
+	client := &http.Client{Timeout: 120 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, "", err
+	}
+
+	mime := resp.Header.Get("Content-Type")
+	if mime == "" {
+		mime = http.DetectContentType(data)
+	}
+	return data, mime, nil
 }
 
 func downloadFile(url string) ([]byte, string, error) {
