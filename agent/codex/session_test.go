@@ -360,3 +360,37 @@ func TestCodexSession_ContinueSessionTreatedAsFresh(t *testing.T) {
 		t.Errorf("ContinueSession should be treated as fresh: threadID = %q, want empty", got)
 	}
 }
+
+func TestHandleEvent_RecoverFromPanic(t *testing.T) {
+	cs, err := newCodexSession(context.Background(), "/tmp", "", "", "", "", nil)
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+	defer cs.Close()
+
+	// Craft a malformed event that triggers handleItemCompleted with an
+	// item whose "type" matches a known tool name in codexToolNames, but
+	// whose nested structure could cause unexpected panics in downstream
+	// processing. This verifies handleEvent does not crash the process.
+	malformedEvents := []map[string]any{
+		// nil item field
+		{"type": "item.completed", "item": nil},
+		// item with unknown type — should be handled gracefully
+		{"type": "item.completed", "item": map[string]any{"type": "totally_unknown_type_xyz"}},
+		// item matching a known tool name but with unusual nested structure
+		{"type": "item.completed", "item": map[string]any{"type": "web_search", "action": "not-a-map"}},
+	}
+
+	for i, evt := range malformedEvents {
+		// handleEvent should not panic; if it does, the test will catch it.
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("handleEvent panicked on malformed event %d: %v", i, r)
+				}
+			}()
+			cs.handleEvent(evt)
+		}()
+	}
+}
+
