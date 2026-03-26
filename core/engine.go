@@ -3480,7 +3480,11 @@ func (e *Engine) dirApply(agent Agent, sessions *SessionManager, interactiveKey,
 		}
 	} else {
 		newDir = filepath.Clean(arg)
-		if !filepath.IsAbs(newDir) {
+		if strings.HasPrefix(newDir, "~") {
+			if homeDir, err := os.UserHomeDir(); err == nil {
+				newDir = filepath.Join(homeDir, strings.TrimPrefix(newDir, "~"))
+			}
+		} else if !filepath.IsAbs(newDir) {
 			baseDir := currentDir
 			if baseDir == "" {
 				baseDir, _ = os.Getwd()
