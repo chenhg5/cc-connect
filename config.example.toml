@@ -809,6 +809,9 @@ app_secret = "your-feishu-app-secret"
 # enable_markdown = false  # set true to send Markdown (only renders in WeChat Work app, NOT personal WeChat)
 #                          # 设为 true 发送 Markdown（仅企业微信应用内可渲染，个人微信显示"暂不支持"）
 # allow_from = "*"  # Allowed WeChat Work user IDs / 允许的企业微信用户 ID
+# Inbound (HTTP callback): text, image, voice, and file messages are passed to the agent.
+# 入站（HTTP 回调）：文本、图片、语音与文件会交给 Agent（如 Claude Code）处理。
+# WebSocket 智能机器人：文本、语音（转文字）、图片、文件、图文混排与引用中的图片/文件（URL+aeskey 下载解密）。
 # proxy = ""  # optional: forward proxy for API calls if your IP is dynamic
 #             # 可选：正向代理，用于 IP 不固定的场景
 #             # e.g. "http://your-vps-ip:8888" — the VPS IP goes into trusted IP list
