@@ -31,6 +31,7 @@ type ManagementServer struct {
 	setupFeishuSave      func(req FeishuSetupSaveRequest) error
 	setupWeixinSave      func(req WeixinSetupSaveRequest) error
 	addPlatformToProject func(projectName, platType string, opts map[string]any) error
+	removeProject        func(projectName string) error
 }
 
 // NewManagementServer creates a new management API server.
@@ -62,6 +63,10 @@ func (m *ManagementServer) SetSetupWeixinSave(fn func(WeixinSetupSaveRequest) er
 
 func (m *ManagementServer) SetAddPlatformToProject(fn func(string, string, map[string]any) error) {
 	m.addPlatformToProject = fn
+}
+
+func (m *ManagementServer) SetRemoveProject(fn func(string) error) {
+	m.removeProject = fn
 }
 
 func (m *ManagementServer) Start() {
@@ -502,7 +507,23 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	mgmtError(w, http.StatusMethodNotAllowed, "GET or PATCH only")
+	if r.Method == http.MethodDelete {
+		if m.removeProject == nil {
+			mgmtError(w, http.StatusNotImplemented, "project removal not configured")
+			return
+		}
+		if err := m.removeProject(name); err != nil {
+			mgmtError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		mgmtJSON(w, http.StatusOK, map[string]any{
+			"message":          fmt.Sprintf("project %q removed from config", name),
+			"restart_required": true,
+		})
+		return
+	}
+
+	mgmtError(w, http.StatusMethodNotAllowed, "GET, PATCH or DELETE only")
 }
 
 // ── Users endpoints ──────────────────────────────────────────

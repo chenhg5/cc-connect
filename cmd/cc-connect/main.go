@@ -665,6 +665,7 @@ func main() {
 			}
 			return config.AddPlatformToProject(projectName, config.PlatformConfig{Type: platType, Options: opts})
 		})
+		mgmtSrv.SetRemoveProject(config.RemoveProject)
 		mgmtSrv.Start()
 	}
 

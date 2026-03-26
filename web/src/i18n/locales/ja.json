@@ -32,6 +32,10 @@
     "save": "保存",
     "detail": "詳細",
     "noProjects": "プロジェクトが設定されていません",
+    "deleteTitle": "プロジェクトを削除",
+    "deleteConfirm": "プロジェクト「{{name}}」を削除してもよろしいですか？設定ファイルから削除されます。",
+    "dangerZone": "危険ゾーン",
+    "deleteHint": "このプロジェクトを設定から削除します。再起動が必要です。",
     "tabs": {
       "overview": "概要",
       "providers": "プロバイダー",
@@ -172,6 +176,7 @@
     "restartRequired": "再起動が必要です",
     "restartNow": "今すぐ再起動",
     "restarting": "サービスを再起動中...",
+    "restartAfterDelete": "プロジェクトを削除しました。サービスを再起動しますか？",
     "later": "あとで",
     "expired": "QRコードの有効期限が切れました。",
     "denied": "認証が拒否されました。",

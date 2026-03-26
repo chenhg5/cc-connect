@@ -1,12 +1,12 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, Plug, Heart, Settings, Layers, Zap, Pause, Play,
   Trash2, Plus, Check, Clock,
 } from 'lucide-react';
 import { Card, Badge, Button, Input, Modal, EmptyState } from '@/components/ui';
-import { getProject, updateProject, type ProjectDetail as ProjectDetailType } from '@/api/projects';
+import { getProject, updateProject, deleteProject, type ProjectDetail as ProjectDetailType } from '@/api/projects';
 import { listProviders, addProvider, removeProvider, activateProvider, listModels, setModel, type Provider } from '@/api/providers';
 import { getHeartbeat, pauseHeartbeat, resumeHeartbeat, triggerHeartbeat, setHeartbeatInterval, type HeartbeatStatus } from '@/api/heartbeat';
 import { restartSystem } from '@/api/status';
@@ -63,6 +63,44 @@ export default function ProjectDetail() {
   const [showAddPlatform, setShowAddPlatform] = useState(false);
   const [addPlatType, setAddPlatType] = useState('');
   const [showRestartModal, setShowRestartModal] = useState(false);
+
+  // Delete project
+  const navigate = useNavigate();
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  const handleDeleteProject = async () => {
+    if (!name) return;
+    setDeleting(true);
+    try {
+      const res = await deleteProject(name);
+      setShowDeleteConfirm(false);
+      if (res.restart_required && window.confirm(t('setup.restartAfterDelete'))) {
+        await restartSystem();
+        // Wait for service to come back up before navigating
+        await waitForService(8000);
+      }
+      navigate('/projects');
+    } catch (e: any) {
+      alert(e?.message || String(e));
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const waitForService = (maxMs: number) =>
+    new Promise<void>((resolve) => {
+      const start = Date.now();
+      const poll = () => {
+        fetch('/api/v1/status')
+          .then((r) => { if (r.ok) resolve(); else throw new Error(); })
+          .catch(() => {
+            if (Date.now() - start > maxMs) { resolve(); return; }
+            setTimeout(poll, 500);
+          });
+      };
+      setTimeout(poll, 1500);
+    });
 
   const fetchAll = useCallback(async () => {
     if (!name) return;
@@ -328,6 +366,7 @@ export default function ProjectDetail() {
       )}
 
       {tab === 'settings' && project && (
+        <div className="space-y-4">
         <Card>
           <div className="space-y-4 max-w-lg">
             <div className="flex items-center justify-between">
@@ -345,7 +384,35 @@ export default function ProjectDetail() {
             <Button loading={saving} onClick={handleSaveSettings}>{t('common.save')}</Button>
           </div>
         </Card>
+        <Card>
+          <h3 className="text-sm font-semibold text-red-600 dark:text-red-400 mb-3">{t('projects.dangerZone', 'Danger Zone')}</h3>
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm text-gray-700 dark:text-gray-300">{t('projects.deleteTitle')}</p>
+              <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">{t('projects.deleteHint', 'Remove this project from config. Requires restart.')}</p>
+            </div>
+            <Button variant="danger" size="sm" onClick={() => setShowDeleteConfirm(true)}>
+              <Trash2 size={14} /> {t('common.delete')}
+            </Button>
+          </div>
+        </Card>
+        </div>
       )}
+
+      {/* Delete confirmation */}
+      <Modal open={showDeleteConfirm} onClose={() => setShowDeleteConfirm(false)} title={t('projects.deleteTitle')}>
+        <div className="space-y-4 py-2">
+          <p className="text-sm text-gray-600 dark:text-gray-400">
+            {t('projects.deleteConfirm', { name })}
+          </p>
+          <div className="flex justify-end gap-2">
+            <Button variant="secondary" onClick={() => setShowDeleteConfirm(false)}>{t('common.cancel')}</Button>
+            <Button variant="danger" onClick={handleDeleteProject} disabled={deleting}>
+              {deleting ? t('common.deleting', 'Deleting...') : t('common.delete')}
+            </Button>
+          </div>
+        </div>
+      </Modal>
 
       {/* Add Platform Modal */}
       <Modal open={showAddPlatform} onClose={() => setShowAddPlatform(false)} title={t('setup.addPlatform', 'Add platform')}>

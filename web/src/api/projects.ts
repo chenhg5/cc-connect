@@ -34,3 +34,6 @@ export const updateProject = (name: string, body: Partial<ProjectDetail['setting
 
 export const addPlatformToProject = (projectName: string, body: { type: string; options: Record<string, any> }) =>
   api.post<{ message: string; restart_required: boolean }>(`/projects/${projectName}/add-platform`, body);
+
+export const deleteProject = (name: string) =>
+  api.delete<{ message: string; restart_required: boolean }>(`/projects/${name}`);

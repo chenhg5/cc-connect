@@ -1,11 +1,10 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
-import { MessageSquare, Bot, User, Circle, FolderKanban } from 'lucide-react';
-import { EmptyState, Badge } from '@/components/ui';
+import { MessageSquare, Bot, User, Circle, ArrowRight } from 'lucide-react';
+import { Card, EmptyState, Badge } from '@/components/ui';
 import { listProjects, type ProjectSummary } from '@/api/projects';
 import { listSessions, type Session } from '@/api/sessions';
-import { cn } from '@/lib/utils';
 
 interface ChatEntry {
   project: ProjectSummary;
@@ -72,76 +71,62 @@ export default function ChatList() {
   }
 
   return (
-    <div className="max-w-2xl mx-auto space-y-1 animate-fade-in">
+    <div className="animate-fade-in space-y-4">
+      <h2 className="text-lg font-bold text-gray-900 dark:text-white">{t('nav.chat')}</h2>
+
       {entries.length === 0 ? (
         <EmptyState message={t('chat.noChats')} icon={MessageSquare} />
       ) : (
-        entries.map(({ project, latestSession }) => {
-          const hasLive = latestSession?.live;
-          const lastMsg = latestSession?.last_message;
-          const ts = latestSession?.updated_at || latestSession?.created_at || '';
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+          {entries.map(({ project, latestSession }) => {
+            const hasLive = latestSession?.live;
+            const lastMsg = latestSession?.last_message;
+            const ts = latestSession?.updated_at || latestSession?.created_at || '';
 
-          return (
-            <Link key={project.name} to={`/chat/${project.name}`}>
-              <div
-                className={cn(
-                  'group flex items-center gap-4 px-4 py-3.5 rounded-xl transition-all duration-200 cursor-pointer',
-                  'hover:bg-gray-100/70 dark:hover:bg-white/[0.04]',
-                )}
-              >
-                {/* Avatar */}
-                <div
-                  className={cn(
-                    'w-12 h-12 rounded-2xl flex items-center justify-center shrink-0',
-                    'bg-accent/10 ring-1 ring-accent/20',
-                  )}
-                >
-                  <FolderKanban size={22} className="text-accent" />
-                </div>
-
-                {/* Content */}
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between gap-2 mb-0.5">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <span className="text-sm font-semibold text-gray-900 dark:text-white truncate">
-                        {project.name}
-                      </span>
-                      {hasLive && <Circle size={5} className="fill-emerald-500 text-emerald-500 shrink-0" />}
+            return (
+              <Link key={project.name} to={`/chat/${project.name}`}>
+                <Card hover className="h-full flex flex-col">
+                  <div className="flex items-start justify-between mb-3">
+                    <div className="flex items-center gap-2">
+                      <MessageSquare size={18} className="text-accent" />
+                      <h3 className="font-semibold text-gray-900 dark:text-white">{project.name}</h3>
+                      {hasLive && <Circle size={6} className="fill-emerald-500 text-emerald-500" />}
                     </div>
-                    {ts && (
-                      <span className="text-[11px] text-gray-400 shrink-0">{timeAgo(ts, t)}</span>
+                    <ArrowRight size={16} className="text-gray-300 dark:text-gray-600" />
+                  </div>
+
+                  <div className="flex-1 min-h-[2rem] mb-3">
+                    {lastMsg ? (
+                      <p className="text-xs text-gray-500 dark:text-gray-400 line-clamp-2 leading-relaxed">
+                        {lastMsg.role === 'user' ? (
+                          <User size={10} className="inline mr-1 -mt-0.5 opacity-60" />
+                        ) : (
+                          <Bot size={10} className="inline mr-1 -mt-0.5 opacity-60" />
+                        )}
+                        {lastMsg.content.replace(/\n/g, ' ').slice(0, 120)}
+                      </p>
+                    ) : (
+                      <p className="text-xs text-gray-400 dark:text-gray-500 italic">
+                        {t('chat.noMessages')}
+                      </p>
                     )}
                   </div>
 
-                  <div className="flex items-center gap-2">
-                    <div className="flex-1 min-w-0">
-                      {lastMsg ? (
-                        <p className="text-xs text-gray-500 dark:text-gray-400 truncate leading-relaxed">
-                          {lastMsg.role === 'user' ? (
-                            <User size={10} className="inline mr-1 -mt-0.5 opacity-60" />
-                          ) : (
-                            <Bot size={10} className="inline mr-1 -mt-0.5 opacity-60" />
-                          )}
-                          {lastMsg.content.replace(/\n/g, ' ').slice(0, 80)}
-                        </p>
-                      ) : (
-                        <p className="text-xs text-gray-400 dark:text-gray-500 italic">
-                          {t('chat.noMessages')}
-                        </p>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-1 shrink-0">
+                  <div className="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400 mt-auto pt-3 border-t border-gray-100 dark:border-gray-800">
+                    <div className="flex items-center gap-1.5">
                       <Badge className="text-[9px]">{project.agent_type}</Badge>
-                      <span className="text-[10px] text-gray-400">
-                        {project.sessions_count}
-                      </span>
+                      {project.platforms?.map((pl) => <Badge key={pl}>{pl}</Badge>)}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span>{project.sessions_count} {t('chat.sessions', 'sessions')}</span>
+                      {ts && <span className="text-gray-400">{timeAgo(ts, t)}</span>}
                     </div>
                   </div>
-                </div>
-              </div>
-            </Link>
-          );
-        })
+                </Card>
+              </Link>
+            );
+          })}
+        </div>
       )}
     </div>
   );

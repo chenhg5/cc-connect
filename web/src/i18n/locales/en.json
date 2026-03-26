@@ -32,6 +32,10 @@
     "save": "Save",
     "detail": "Details",
     "noProjects": "No projects configured",
+    "deleteTitle": "Delete Project",
+    "deleteConfirm": "Are you sure you want to delete project \"{{name}}\"? This will remove it from the config file.",
+    "dangerZone": "Danger Zone",
+    "deleteHint": "Remove this project from config. Requires restart.",
     "tabs": {
       "overview": "Overview",
       "providers": "Providers",
@@ -172,6 +176,7 @@
     "restartRequired": "Restart required",
     "restartNow": "Restart now",
     "restarting": "Restarting service...",
+    "restartAfterDelete": "Project removed. Restart service to take effect?",
     "later": "Later",
     "expired": "QR code expired.",
     "denied": "Authorization was denied.",

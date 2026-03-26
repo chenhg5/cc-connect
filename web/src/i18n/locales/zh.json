@@ -32,6 +32,10 @@
     "save": "保存",
     "detail": "详情",
     "noProjects": "尚未配置项目",
+    "deleteTitle": "删除项目",
+    "deleteConfirm": "确定要删除项目「{{name}}」吗？这将从配置文件中移除该项目。",
+    "dangerZone": "危险操作",
+    "deleteHint": "从配置文件中移除此项目，需要重启服务。",
     "tabs": {
       "overview": "概览",
       "providers": "服务商",
@@ -172,6 +176,7 @@
     "restartRequired": "需要重启",
     "restartNow": "立即重启",
     "restarting": "正在重启服务...",
+    "restartAfterDelete": "项目已删除，是否重启服务使其生效？",
     "later": "稍后",
     "expired": "二维码已过期。",
     "denied": "授权被拒绝。",

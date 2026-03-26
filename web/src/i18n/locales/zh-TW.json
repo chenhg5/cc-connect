@@ -32,6 +32,10 @@
     "save": "儲存",
     "detail": "詳細資料",
     "noProjects": "尚未設定專案",
+    "deleteTitle": "刪除專案",
+    "deleteConfirm": "確定要刪除專案「{{name}}」嗎？這將從設定檔中移除該專案。",
+    "dangerZone": "危險操作",
+    "deleteHint": "從設定檔中移除此專案，需要重新啟動服務。",
     "tabs": {
       "overview": "總覽",
       "providers": "供應商",
@@ -172,6 +176,7 @@
     "restartRequired": "需要重新啟動",
     "restartNow": "立即重新啟動",
     "restarting": "正在重新啟動服務...",
+    "restartAfterDelete": "專案已刪除，是否重新啟動服務使其生效？",
     "later": "稍後",
     "expired": "QR 碼已過期。",
     "denied": "授權被拒絕。",

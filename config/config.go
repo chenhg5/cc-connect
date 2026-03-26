@@ -1732,6 +1732,35 @@ func extractLineComment(line string) string {
 	return ""
 }
 
+// RemoveProject removes a project from the config file.
+func RemoveProject(projectName string) error {
+	configMu.Lock()
+	defer configMu.Unlock()
+	if ConfigPath == "" {
+		return fmt.Errorf("config path not set")
+	}
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+	found := false
+	for i := range cfg.Projects {
+		if cfg.Projects[i].Name == projectName {
+			cfg.Projects = append(cfg.Projects[:i], cfg.Projects[i+1:]...)
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("project %q not found", projectName)
+	}
+	return saveConfig(cfg)
+}
+
 // AddPlatformToProject appends a platform config to a project.
 // If the project doesn't exist, it is created with agent config cloned from the first existing project.
 func AddPlatformToProject(projectName string, platform PlatformConfig) error {
