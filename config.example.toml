@@ -503,12 +503,13 @@ type = "claudecode"
 
 [projects.agent.options]
 work_dir = "/path/to/backend"
-mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "bypassPermissions" (yolo)
+mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassPermissions" (yolo)
 
 # Mode options / 模式说明:
 # - "default":            Every tool call requires user approval. / 每次工具调用都需要用户确认。
 # - "acceptEdits" (edit): File edit tools auto-approved; other tools still ask. / 文件编辑自动通过，其他仍需确认。
 # - "plan":               Claude only plans — no execution until you approve. / 只做规划不执行，审批后再执行。
+# - "auto": Claude automatically decides when a permission prompt is needed. / Claude 自动判断何时需要确认。
 # - "bypassPermissions" (yolo): All tool calls auto-approved. Use with caution. / 全部自动通过，请谨慎使用。
 # - "dontAsk" (dont-ask): Auto-deny tools unless pre-approved via allowed_tools or settings allow rules. / 未预授权的工具自动拒绝，安全推荐。
 #
@@ -1238,6 +1239,7 @@ app_secret = "your-feishu-app-secret"
 #
 # [projects.agent.options]
 # work_dir = "/path/to/frontend"
+# mode = "auto"
 # mode = "bypassPermissions"
 #
 # [[projects.platforms]]

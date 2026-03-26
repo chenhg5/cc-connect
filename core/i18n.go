@@ -2011,11 +2011,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Uso: `/reasoning <número>` o `/reasoning <low|medium|high|xhigh>`",
 	},
 	MsgModeUsage: {
-		LangEnglish:            "\nUse `/mode <name>` to switch.\nAvailable: `default` / `edit` / `plan` / `yolo`",
-		LangChinese:            "\n使用 `/mode <名称>` 切换模式\n可用值: `default` / `edit` / `plan` / `yolo`",
-		LangTraditionalChinese: "\n使用 `/mode <名稱>` 切換模式\n可用值: `default` / `edit` / `plan` / `yolo`",
-		LangJapanese:           "\n`/mode <名前>` で切り替え\n選択肢: `default` / `edit` / `plan` / `yolo`",
-		LangSpanish:            "\nUse `/mode <nombre>` para cambiar.\nDisponibles: `default` / `edit` / `plan` / `yolo`",
+		LangEnglish:            "\nUse `/mode <name>` to switch.\nAvailable: %s",
+		LangChinese:            "\n使用 `/mode <名称>` 切换模式\n可用值: %s",
+		LangTraditionalChinese: "\n使用 `/mode <名稱>` 切換模式\n可用值: %s",
+		LangJapanese:           "\n`/mode <名前>` で切り替え\n選択肢: %s",
+		LangSpanish:            "\nUse `/mode <nombre>` para cambiar.\nDisponibles: %s",
 	},
 	MsgLangSelectPlaceholder: {
 		LangEnglish: "Select language", LangChinese: "选择语言", LangTraditionalChinese: "選擇語言",

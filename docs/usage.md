@@ -59,6 +59,7 @@ All agents support permission modes switchable at runtime via `/mode`.
 |------|-------------|----------|
 | Default | `default` | Every tool call requires approval |
 | Accept Edits | `acceptEdits` / `edit` | File edits auto-approved |
+| Auto | `auto` | Claude decides when to ask for permission |
 | Plan Mode | `plan` | Claude only plans, no execution |
 | YOLO | `bypassPermissions` / `yolo` | All tools auto-approved |
 
