@@ -239,9 +239,9 @@ func (m *ManagementServer) handleRestart(w http.ResponseWriter, r *http.Request)
 		SessionKey string `json:"session_key"`
 		Platform   string `json:"platform"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		mgmtError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
-		return
+	// Body is optional; ignore decode errors from empty body
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&body)
 	}
 
 	select {

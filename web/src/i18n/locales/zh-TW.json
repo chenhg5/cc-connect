@@ -171,6 +171,7 @@
     "restartHint": "請重新啟動服務後，新平台才會生效。",
     "restartRequired": "需要重新啟動",
     "restartNow": "立即重新啟動",
+    "restarting": "正在重新啟動服務...",
     "later": "稍後",
     "expired": "QR 碼已過期。",
     "denied": "授權被拒絕。",

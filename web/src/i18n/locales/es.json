@@ -171,6 +171,7 @@
     "restartHint": "Reinicia el servicio para que la nueva plataforma surta efecto.",
     "restartRequired": "Reinicio necesario",
     "restartNow": "Reiniciar ahora",
+    "restarting": "Reiniciando el servicio...",
     "later": "Más tarde",
     "expired": "El código QR ha caducado.",
     "denied": "Se denegó la autorización.",

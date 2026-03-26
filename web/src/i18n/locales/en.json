@@ -171,6 +171,7 @@
     "restartHint": "Restart the service for the new platform to take effect.",
     "restartRequired": "Restart required",
     "restartNow": "Restart now",
+    "restarting": "Restarting service...",
     "later": "Later",
     "expired": "QR code expired.",
     "denied": "Authorization was denied.",

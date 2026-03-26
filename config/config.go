@@ -514,10 +514,18 @@ func saveConfig(cfg *Config) error {
 	}
 	tmpPath := tmp.Name()
 
-	if err := toml.NewEncoder(tmp).Encode(cfg); err != nil {
+	var buf strings.Builder
+	if err := toml.NewEncoder(&buf).Encode(cfg); err != nil {
 		tmp.Close()
 		os.Remove(tmpPath)
 		return fmt.Errorf("encode config: %w", err)
+	}
+
+	formatted := formatTOML(buf.String())
+	if _, err := tmp.WriteString(formatted); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("write config: %w", err)
 	}
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()
@@ -529,6 +537,78 @@ func saveConfig(cfg *Config) error {
 		return err
 	}
 	return os.Rename(tmpPath, ConfigPath)
+}
+
+// formatTOML post-processes raw TOML encoder output to improve readability:
+//   - inserts blank lines before section/array-table headers
+//   - removes key-value lines whose value is a zero/empty default
+//   - removes section headers that have no remaining key-value pairs
+func formatTOML(raw string) string {
+	lines := strings.Split(raw, "\n")
+
+	// Pass 1: mark zero-value lines for removal.
+	// A "zero-value" line looks like:  key = "" | key = 0 | key = false | key = []
+	keep := make([]bool, len(lines))
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || trimmed[0] == '[' || trimmed[0] == '#' {
+			keep[i] = true
+			continue
+		}
+		if eqIdx := strings.Index(trimmed, "="); eqIdx > 0 {
+			val := strings.TrimSpace(trimmed[eqIdx+1:])
+			switch val {
+			case `""`, "0", "false", "[]":
+				keep[i] = false
+				continue
+			}
+		}
+		keep[i] = true
+	}
+
+	// Pass 2: remove empty sections (header followed only by blank/removed lines
+	// until the next header or EOF).
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if len(trimmed) == 0 || trimmed[0] != '[' {
+			continue
+		}
+		hasContent := false
+		for j := i + 1; j < len(lines); j++ {
+			t := strings.TrimSpace(lines[j])
+			if len(t) > 0 && t[0] == '[' {
+				break
+			}
+			if keep[j] && t != "" {
+				hasContent = true
+				break
+			}
+		}
+		if !hasContent {
+			keep[i] = false
+		}
+	}
+
+	// Pass 3: assemble output with blank lines before section headers.
+	var out []string
+	for i, line := range lines {
+		if !keep[i] {
+			continue
+		}
+		trimmed := strings.TrimSpace(line)
+		if len(trimmed) > 0 && trimmed[0] == '[' {
+			if len(out) > 0 && strings.TrimSpace(out[len(out)-1]) != "" {
+				out = append(out, "")
+			}
+		}
+		out = append(out, line)
+	}
+
+	// Trim trailing blank lines, then ensure single trailing newline.
+	for len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "" {
+		out = out[:len(out)-1]
+	}
+	return strings.Join(out, "\n") + "\n"
 }
 
 // SaveLanguage saves the language setting to the config file.

@@ -171,6 +171,7 @@
     "restartHint": "重启服务后新平台才会生效。",
     "restartRequired": "需要重启",
     "restartNow": "立即重启",
+    "restarting": "正在重启服务...",
     "later": "稍后",
     "expired": "二维码已过期。",
     "denied": "授权被拒绝。",

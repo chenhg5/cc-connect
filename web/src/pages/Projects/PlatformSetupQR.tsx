@@ -1,12 +1,13 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { QRCodeSVG } from 'qrcode.react';
-import { Loader2, CheckCircle2, XCircle, RefreshCw, Smartphone } from 'lucide-react';
+import { Loader2, CheckCircle2, XCircle, RefreshCw, Smartphone, RotateCcw } from 'lucide-react';
 import { Button } from '@/components/ui';
 import {
   setupFeishuBegin, setupFeishuPoll, setupFeishuSave,
   setupWeixinBegin, setupWeixinPoll, setupWeixinSave,
 } from '@/api/setup';
+import { restartSystem } from '@/api/status';
 
 type PlatformKind = 'feishu' | 'lark' | 'weixin';
 type Phase = 'idle' | 'loading' | 'scanning' | 'scanned' | 'completed' | 'expired' | 'denied' | 'error' | 'saving';
@@ -40,6 +41,8 @@ export default function PlatformSetupQR({ platformType, projectName, onComplete,
   const startFeishuFlow = useCallback(async () => {
     setPhase('loading');
     setError('');
+    cancelledRef.current = false;
+    pollingRef.current = false;
     try {
       const res = await setupFeishuBegin();
       feishuRef.current = {
@@ -112,29 +115,27 @@ export default function PlatformSetupQR({ platformType, projectName, onComplete,
   const startWeixinFlow = useCallback(async () => {
     setPhase('loading');
     setError('');
+    cancelledRef.current = false;
+    pollingRef.current = false;
     try {
       const res = await setupWeixinBegin();
-      weixinRef.current.qrKey = res.qr_key;
+      console.log('[weixin-setup] begin response:', { qr_key: res.qr_key, qr_url_len: res.qr_url?.length, qr_url_prefix: res.qr_url?.slice(0, 80) });
+      const qrKey = res.qr_key;
+      weixinRef.current.qrKey = qrKey;
       setQrUrl(res.qr_url);
       setPhase('scanning');
-      pollWeixin();
-    } catch (e: any) {
-      setError(e?.message || String(e));
-      setPhase('error');
-    }
-  }, []);
 
-  const pollWeixin = useCallback(async () => {
-    if (pollingRef.current) return;
-    pollingRef.current = true;
-
-    const poll = async () => {
+      console.log('[weixin-setup] starting poll loop, qrKey=', qrKey, 'cancelledRef=', cancelledRef.current);
+      let consecutiveErrors = 0;
       while (!cancelledRef.current) {
         try {
-          const res = await setupWeixinPoll(weixinRef.current.qrKey);
+          console.log('[weixin-setup] sending poll request, qrKey=', qrKey);
+          const pollRes = await setupWeixinPoll(qrKey);
+          console.log('[weixin-setup] poll response:', pollRes);
+          consecutiveErrors = 0;
           if (cancelledRef.current) break;
 
-          switch (res.status) {
+          switch (pollRes.status) {
             case 'scaned':
               setPhase('scanned');
               break;
@@ -142,31 +143,34 @@ export default function PlatformSetupQR({ platformType, projectName, onComplete,
               setPhase('saving');
               await setupWeixinSave({
                 project: projectName,
-                token: res.bot_token!,
-                base_url: res.base_url,
-                ilink_bot_id: res.ilink_bot_id,
-                ilink_user_id: res.ilink_user_id,
+                token: pollRes.bot_token!,
+                base_url: pollRes.base_url,
+                ilink_bot_id: pollRes.ilink_bot_id,
+                ilink_user_id: pollRes.ilink_user_id,
               });
               setPhase('completed');
-              pollingRef.current = false;
               return;
             case 'expired':
               setPhase('expired');
-              pollingRef.current = false;
               return;
           }
         } catch (e: any) {
+          console.error('[weixin-setup] poll error:', e);
           if (cancelledRef.current) break;
-          setError(e?.message || String(e));
-          setPhase('error');
-          pollingRef.current = false;
-          return;
+          consecutiveErrors++;
+          if (consecutiveErrors >= 5) {
+            setError(e?.message || String(e));
+            setPhase('error');
+            return;
+          }
         }
-        await sleep(1500);
+        await sleep(500);
       }
-      pollingRef.current = false;
-    };
-    poll();
+    } catch (e: any) {
+      console.error('[weixin-setup] begin error:', e);
+      setError(e?.message || String(e));
+      setPhase('error');
+    }
   }, [projectName]);
 
   const startFlow = isFeishu ? startFeishuFlow : startWeixinFlow;
@@ -248,7 +252,32 @@ export default function PlatformSetupQR({ platformType, projectName, onComplete,
           <p className="text-xs text-gray-500 text-center">
             {t('setup.restartHint', 'Restart the service for the new platform to take effect.')}
           </p>
-          <Button onClick={onComplete}>{t('common.confirm')}</Button>
+          <div className="flex gap-2">
+            <Button
+              variant="secondary"
+              onClick={async () => {
+                try {
+                  await restartSystem();
+                  setPhase('restarting' as Phase);
+                  setTimeout(() => onComplete(), 3000);
+                } catch (e: any) {
+                  setError(e?.message || String(e));
+                }
+              }}
+            >
+              <RotateCcw size={14} /> {t('setup.restartNow', 'Restart Now')}
+            </Button>
+            <Button onClick={onComplete}>{t('setup.later', 'Later')}</Button>
+          </div>
+        </div>
+      )}
+
+      {phase === ('restarting' as Phase) && (
+        <div className="flex flex-col items-center gap-3 py-4">
+          <Loader2 size={32} className="animate-spin text-accent" />
+          <p className="text-sm text-gray-600 dark:text-gray-400">
+            {t('setup.restarting', 'Restarting service...')}
+          </p>
         </div>
       )}
 

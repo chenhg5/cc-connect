@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -301,9 +302,16 @@ func (m *ManagementServer) handleSetupWeixinBegin(w http.ResponseWriter, r *http
 		return
 	}
 	if qrResp.QRCodeImgContent == "" {
+		slog.Warn("weixin begin: empty qrcode_img_content", "raw_body", string(body))
 		mgmtError(w, http.StatusBadGateway, "weixin: empty qrcode_img_content")
 		return
 	}
+
+	slog.Info("weixin begin: QR generated",
+		"qr_key", qrResp.QRCode,
+		"qr_url_len", len(qrResp.QRCodeImgContent),
+		"qr_url_prefix", truncateStr(strings.TrimSpace(qrResp.QRCodeImgContent), 80),
+	)
 
 	mgmtJSON(w, http.StatusOK, map[string]any{
 		"qr_key": qrResp.QRCode,
@@ -341,7 +349,7 @@ func (m *ManagementServer) handleSetupWeixinPoll(w http.ResponseWriter, r *http.
 	q.Set("qrcode", req.QRKey)
 	u.RawQuery = q.Encode()
 
-	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 37*time.Second)
 	defer cancel()
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
@@ -351,15 +359,23 @@ func (m *ManagementServer) handleSetupWeixinPoll(w http.ResponseWriter, r *http.
 	}
 	httpReq.Header.Set("iLink-App-ClientVersion", "1")
 
-	client := &http.Client{Timeout: 25 * time.Second}
+	slog.Info("weixin poll: calling ilink", "url", u.String(), "qr_key", req.QRKey)
+
+	client := &http.Client{Timeout: 40 * time.Second}
 	resp, err := client.Do(httpReq)
 	if err != nil {
+		slog.Warn("weixin poll: request error", "error", err)
 		mgmtJSON(w, http.StatusOK, map[string]any{"status": "wait"})
 		return
 	}
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	slog.Info("weixin poll: ilink raw response",
+		"http_status", resp.StatusCode,
+		"body", truncateStr(string(body), 500),
+	)
+
 	if resp.StatusCode != http.StatusOK {
 		mgmtError(w, http.StatusBadGateway, fmt.Sprintf("weixin poll: http %d", resp.StatusCode))
 		return
@@ -373,12 +389,16 @@ func (m *ManagementServer) handleSetupWeixinPoll(w http.ResponseWriter, r *http.
 		IlinkUserID string `json:"ilink_user_id"`
 	}
 	if err := json.Unmarshal(body, &status); err != nil {
+		slog.Warn("weixin poll: JSON decode failed", "error", err, "body", truncateStr(string(body), 300))
 		mgmtError(w, http.StatusBadGateway, "weixin decode: "+err.Error())
 		return
 	}
 
+	slog.Info("weixin poll: parsed status", "status", status.Status)
+
 	result := map[string]any{"status": status.Status}
 	if status.Status == "" {
+		slog.Warn("weixin poll: empty status field, raw body", "body", truncateStr(string(body), 500))
 		result["status"] = "wait"
 	}
 

@@ -171,6 +171,7 @@
     "restartHint": "新しいプラットフォームを有効にするにはサービスを再起動してください。",
     "restartRequired": "再起動が必要です",
     "restartNow": "今すぐ再起動",
+    "restarting": "サービスを再起動中...",
     "later": "あとで",
     "expired": "QRコードの有効期限が切れました。",
     "denied": "認証が拒否されました。",
