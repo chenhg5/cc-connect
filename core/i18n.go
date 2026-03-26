@@ -172,6 +172,15 @@ const (
 	MsgNameUsage                 MsgKey = "name_usage"
 	MsgNameSet                   MsgKey = "name_set"
 	MsgNameNoSession             MsgKey = "name_no_session"
+	MsgAgentNotSupported         MsgKey = "agent_not_supported"
+	MsgAgentNone                 MsgKey = "agent_none"
+	MsgAgentCurrent              MsgKey = "agent_current"
+	MsgAgentListTitle            MsgKey = "agent_list_title"
+	MsgAgentListEmpty            MsgKey = "agent_list_empty"
+	MsgAgentNotFound             MsgKey = "agent_not_found"
+	MsgAgentSwitched             MsgKey = "agent_switched"
+	MsgAgentUsage                MsgKey = "agent_usage"
+	MsgAgentSelectPlaceholder    MsgKey = "agent_select_placeholder"
 	MsgProviderNotSupported      MsgKey = "provider_not_supported"
 	MsgProviderNone              MsgKey = "provider_none"
 	MsgProviderCurrent           MsgKey = "provider_current"
@@ -288,6 +297,7 @@ const (
 	MsgCardTitleStatus           MsgKey = "card_title_status"
 	MsgCardTitleLanguage         MsgKey = "card_title_language"
 	MsgCardTitleModel            MsgKey = "card_title_model"
+	MsgCardTitleAgent            MsgKey = "card_title_agent"
 	MsgCardTitleReasoning        MsgKey = "card_title_reasoning"
 	MsgCardTitleMode             MsgKey = "card_title_mode"
 	MsgCardTitleSessions         MsgKey = "card_title_sessions"
@@ -455,6 +465,7 @@ const (
 	MsgBuiltinCmdMemory    MsgKey = "memory"
 	MsgBuiltinCmdAllow     MsgKey = "allow"
 	MsgBuiltinCmdModel     MsgKey = "model"
+	MsgBuiltinCmdAgent     MsgKey = "agent"
 	MsgBuiltinCmdReasoning MsgKey = "reasoning"
 	MsgBuiltinCmdMode      MsgKey = "mode"
 	MsgBuiltinCmdLang      MsgKey = "lang"
@@ -781,6 +792,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/current\n  Show current active session\n\n" +
 			"/history [n]\n  Show last n messages (default 10)\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  Manage API providers\n\n" +
+			"/agent [switch <name>]\n  Switch backend agents\n\n" +
 			"/memory [add|global|global add]\n  View/edit agent memory files\n\n" +
 			"/allow <tool>\n  Pre-allow a tool (next session)\n\n" +
 			"/model [switch <name>]\n  View/switch model\n\n" +
@@ -824,6 +836,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/current\n  查看当前活跃会话\n\n" +
 			"/history [n]\n  查看最近 n 条消息（默认 10）\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  管理 API Provider\n\n" +
+			"/agent [switch <名称>]\n  切换后端 Agent\n\n" +
 			"/memory [add|global|global add]\n  查看/编辑 Agent 记忆文件\n\n" +
 			"/allow <工具名>\n  预授权工具（下次会话生效）\n\n" +
 			"/model [switch <名称>]\n  查看/切换模型\n\n" +
@@ -867,6 +880,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/current\n  查看當前活躍會話\n\n" +
 			"/history [n]\n  查看最近 n 條訊息（預設 10）\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  管理 API Provider\n\n" +
+			"/agent [switch <名稱>]\n  切換後端 Agent\n\n" +
 			"/memory [add|global|global add]\n  查看/編輯 Agent 記憶檔案\n\n" +
 			"/allow <工具名>\n  預授權工具（下次會話生效）\n\n" +
 			"/model [switch <名稱>]\n  查看/切換模型\n\n" +
@@ -909,6 +923,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/current\n  現在のアクティブセッションを表示\n\n" +
 			"/history [n]\n  直近 n 件のメッセージを表示（デフォルト 10）\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  API プロバイダ管理\n\n" +
+			"/agent [switch <名前>]\n  バックエンド Agent の切り替え\n\n" +
 			"/memory [add|global|global add]\n  エージェントメモリの表示/編集\n\n" +
 			"/allow <ツール名>\n  ツールを事前許可（次のセッションで有効）\n\n" +
 			"/model [switch <名前>]\n  モデルの表示/切り替え\n\n" +
@@ -951,6 +966,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/current\n  Mostrar sesión activa actual\n\n" +
 			"/history [n]\n  Mostrar últimos n mensajes (por defecto 10)\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  Gestionar proveedores API\n\n" +
+			"/agent [switch <nombre>]\n  Cambiar agentes de backend\n\n" +
 			"/memory [add|global|global add]\n  Ver/editar archivos de memoria del agente\n\n" +
 			"/allow <herramienta>\n  Pre-autorizar herramienta (próxima sesión)\n\n" +
 			"/model [switch <nombre>]\n  Ver/cambiar modelo\n\n" +
@@ -1041,6 +1057,7 @@ var messages = map[MsgKey]map[Language]string{
 	},
 	MsgHelpAgentSection: {
 		LangEnglish: "**Agent Configuration**\n" +
+			"/agent [switch <name>] — Switch backend agent\n" +
 			"/model [switch <name>] — View/switch model\n" +
 			"/mode [name] — View/switch permission mode\n" +
 			"/provider [list|add|...] — Manage API providers\n" +
@@ -1049,6 +1066,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|...] — View/switch language\n" +
 			"/quiet [global] — Toggle progress messages",
 		LangChinese: "**Agent 配置**\n" +
+			"/agent [switch <名称>] — 切换后端 Agent\n" +
 			"/model [switch <名称>] — 查看/切换模型\n" +
 			"/mode [名称] — 查看/切换权限模式\n" +
 			"/provider [list|add|...] — 管理 API Provider\n" +
@@ -1057,6 +1075,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|...] — 查看/切换语言\n" +
 			"/quiet [global] — 开关进度消息",
 		LangTraditionalChinese: "**Agent 配置**\n" +
+			"/agent [switch <名稱>] — 切換後端 Agent\n" +
 			"/model [switch <名稱>] — 查看/切換模型\n" +
 			"/mode [名稱] — 查看/切換權限模式\n" +
 			"/provider [list|add|...] — 管理 API Provider\n" +
@@ -1065,6 +1084,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|...] — 查看/切換語言\n" +
 			"/quiet [global] — 開關進度訊息",
 		LangJapanese: "**エージェント設定**\n" +
+			"/agent [switch <名前>] — バックエンド Agent の切り替え\n" +
 			"/model [switch <名前>] — モデルの表示/切り替え\n" +
 			"/mode [名前] — 権限モードの表示/切り替え\n" +
 			"/provider [list|add|...] — API プロバイダ管理\n" +
@@ -1073,6 +1093,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|...] — 言語の表示/切り替え\n" +
 			"/quiet [global] — 進捗メッセージの表示切替",
 		LangSpanish: "**Configuración del agente**\n" +
+			"/agent [switch <nombre>] — Cambiar agente de backend\n" +
 			"/model [switch <nombre>] — Ver/cambiar modelo\n" +
 			"/mode [nombre] — Ver/cambiar modo de permisos\n" +
 			"/provider [list|add|...] — Gestionar proveedores\n" +
@@ -1258,6 +1279,62 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 沒有活躍會話，請先傳送訊息或切換到一個會話。",
 		LangJapanese:           "❌ アクティブなセッションがありません。メッセージを送信するかセッションに切り替えてください。",
 		LangSpanish:            "❌ No hay sesión activa. Envía un mensaje primero o cambia a una sesión.",
+	},
+	MsgAgentNotSupported: {
+		LangEnglish:            "This agent does not support backend switching.",
+		LangChinese:            "当前 Agent 不支持后端切换。",
+		LangTraditionalChinese: "當前 Agent 不支援後端切換。",
+		LangJapanese:           "このエージェントはバックエンド切り替えをサポートしていません。",
+		LangSpanish:            "Este agente no soporta el cambio de backend.",
+	},
+	MsgAgentNone: {
+		LangEnglish:            "No backend configured.",
+		LangChinese:            "未配置后端。",
+		LangTraditionalChinese: "未配置後端。",
+		LangJapanese:           "バックエンドが設定されていません。",
+		LangSpanish:            "No hay backend configurado.",
+	},
+	MsgAgentCurrent: {
+		LangEnglish:            "📦 Current agent: **%s**",
+		LangChinese:            "📦 当前 agent: **%s**",
+		LangTraditionalChinese: "📦 當前 agent: **%s**",
+		LangJapanese:           "📦 現在の agent: **%s**",
+		LangSpanish:            "📦 Agente actual: **%s**",
+	},
+	MsgAgentListTitle: {
+		LangEnglish:            "Available backends:\n",
+		LangChinese:            "可用后端:\n",
+		LangTraditionalChinese: "可用後端:\n",
+		LangJapanese:           "利用可能なバックエンド:\n",
+		LangSpanish:            "Backends disponibles:\n",
+	},
+	MsgAgentListEmpty: {
+		LangEnglish:            "No backends configured.",
+		LangChinese:            "未配置后端。",
+		LangTraditionalChinese: "未配置後端。",
+		LangJapanese:           "バックエンドが設定されていません。",
+		LangSpanish:            "No hay backends configurados.",
+	},
+	MsgAgentNotFound: {
+		LangEnglish:            "❌ Backend %q not found. Use `/agent` to see available backends.",
+		LangChinese:            "❌ 未找到后端 %q。使用 `/agent` 查看可用列表。",
+		LangTraditionalChinese: "❌ 未找到後端 %q。使用 `/agent` 查看可用列表。",
+		LangJapanese:           "❌ バックエンド %q が見つかりません。`/agent` で一覧を確認してください。",
+		LangSpanish:            "❌ Backend %q no encontrado. Use `/agent` para ver los disponibles.",
+	},
+	MsgAgentSwitched: {
+		LangEnglish:            "✅ Backend switched to **%s**. New sessions will use this backend.",
+		LangChinese:            "✅ 后端已切换为 **%s**，新会话将使用此后端。",
+		LangTraditionalChinese: "✅ 後端已切換為 **%s**，新會話將使用此後端。",
+		LangJapanese:           "✅ バックエンドを **%s** に切り替えました。新しいセッションで使用されます。",
+		LangSpanish:            "✅ Backend cambiado a **%s**. Las nuevas sesiones usarán este backend.",
+	},
+	MsgAgentUsage: {
+		LangEnglish:            "Usage: `/agent switch <number>` or `/agent switch <name>`",
+		LangChinese:            "用法: `/agent switch <序号>` 或 `/agent switch <后端名>`",
+		LangTraditionalChinese: "用法: `/agent switch <序號>` 或 `/agent switch <後端名>`",
+		LangJapanese:           "使い方: `/agent switch <番号>` または `/agent switch <名前>`",
+		LangSpanish:            "Uso: `/agent switch <número>` o `/agent switch <nombre>`",
 	},
 	MsgProviderNotSupported: {
 		LangEnglish:            "This agent does not support provider switching.",
@@ -2025,6 +2102,10 @@ var messages = map[MsgKey]map[Language]string{
 		LangEnglish: "Select model", LangChinese: "选择模型", LangTraditionalChinese: "選擇模型",
 		LangJapanese: "モデルを選択", LangSpanish: "Seleccionar modelo",
 	},
+	MsgAgentSelectPlaceholder: {
+		LangEnglish: "Select agent", LangChinese: "选择 Agent", LangTraditionalChinese: "選擇 Agent",
+		LangJapanese: "エージェントを選択", LangSpanish: "Seleccionar agente",
+	},
 	MsgReasoningSelectPlaceholder: {
 		LangEnglish: "Select reasoning level", LangChinese: "选择推理强度", LangTraditionalChinese: "選擇推理強度",
 		LangJapanese: "推論強度を選択", LangSpanish: "Seleccionar nivel de razonamiento",
@@ -2060,6 +2141,10 @@ var messages = map[MsgKey]map[Language]string{
 	MsgCardTitleModel: {
 		LangEnglish: "Model", LangChinese: "模型", LangTraditionalChinese: "模型",
 		LangJapanese: "モデル", LangSpanish: "Modelo",
+	},
+	MsgCardTitleAgent: {
+		LangEnglish: "Agent", LangChinese: "Agent", LangTraditionalChinese: "Agent",
+		LangJapanese: "エージェント", LangSpanish: "Agente",
 	},
 	MsgCardTitleReasoning: {
 		LangEnglish: "Reasoning", LangChinese: "推理强度", LangTraditionalChinese: "推理強度",
@@ -3038,6 +3123,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "查看/切換模型，參數: [名稱]",
 		LangJapanese:           "モデルの表示/切り替え、引数: [名前]",
 		LangSpanish:            "Ver/cambiar modelo, arg: [nombre]",
+	},
+	MsgBuiltinCmdAgent: {
+		LangEnglish:            "Switch backend agent, arg: [name]",
+		LangChinese:            "切换后端 Agent，参数: [名称]",
+		LangTraditionalChinese: "切換後端 Agent，參數: [名稱]",
+		LangJapanese:           "バックエンド Agent の切り替え、引数: [名前]",
+		LangSpanish:            "Cambiar agente de backend, arg: [nombre]",
 	},
 	MsgBuiltinCmdReasoning: {
 		LangEnglish:            "View/switch reasoning effort, arg: [level]",

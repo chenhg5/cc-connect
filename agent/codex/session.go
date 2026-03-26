@@ -24,34 +24,36 @@ import (
 // codexSession manages a multi-turn Codex conversation.
 // First Send() uses `codex exec`, subsequent ones use `codex exec resume <threadID>`.
 type codexSession struct {
-	workDir   string
-	model     string
-	effort    string
-	mode      string
-	extraEnv  []string
-	events    chan core.Event
-	threadID  atomic.Value // stores string — Codex thread_id
-	ctx       context.Context
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
-	alive     atomic.Bool
-	closeOnce sync.Once
+	binaryPath string
+	workDir    string
+	model      string
+	effort     string
+	mode       string
+	extraEnv   []string
+	events     chan core.Event
+	threadID   atomic.Value // stores string — Codex thread_id
+	ctx        context.Context
+	cancel     context.CancelFunc
+	wg         sync.WaitGroup
+	alive      atomic.Bool
+	closeOnce  sync.Once
 
 	pendingMsgs []string // buffered agent_message texts awaiting classification
 }
 
-func newCodexSession(ctx context.Context, workDir, model, effort, mode, resumeID string, extraEnv []string) (*codexSession, error) {
+func newCodexSession(ctx context.Context, binaryPath, workDir, model, effort, mode, resumeID string, extraEnv []string) (*codexSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	cs := &codexSession{
-		workDir:  workDir,
-		model:    model,
-		effort:   effort,
-		mode:     mode,
-		extraEnv: extraEnv,
-		events:   make(chan core.Event, 64),
-		ctx:      sessionCtx,
-		cancel:   cancel,
+		binaryPath: binaryPath,
+		workDir:    workDir,
+		model:      model,
+		effort:     effort,
+		mode:       mode,
+		extraEnv:   extraEnv,
+		events:     make(chan core.Event, 64),
+		ctx:        sessionCtx,
+		cancel:     cancel,
 	}
 	cs.alive.Store(true)
 
@@ -78,13 +80,20 @@ func (cs *codexSession) Send(prompt string, images []core.ImageAttachment, files
 	if err != nil {
 		return err
 	}
+	binaryPath := cs.binaryPath
+	if strings.TrimSpace(binaryPath) == "" {
+		binaryPath, err = resolveCodexBinary()
+		if err != nil {
+			return err
+		}
+	}
 
 	isResume := cs.CurrentSessionID() != ""
 	args := cs.buildExecArgs(prompt, imagePaths)
 
 	slog.Debug("codexSession: launching", "resume", isResume, "args", core.RedactArgs(args))
 
-	cmd := exec.CommandContext(cs.ctx, "codex", args...)
+	cmd := exec.CommandContext(cs.ctx, binaryPath, args...)
 	cmd.Dir = cs.workDir
 	if len(cs.extraEnv) > 0 {
 		cmd.Env = core.MergeEnv(os.Environ(), cs.extraEnv)

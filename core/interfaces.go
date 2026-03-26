@@ -41,6 +41,12 @@ type SessionEnvInjector interface {
 	SetSessionEnv(env []string)
 }
 
+// OptionSnapshotter is an optional interface for agents that need their
+// original config options preserved when the engine clones per-workspace agents.
+type OptionSnapshotter interface {
+	SnapshotOptions() map[string]any
+}
+
 // FormattingInstructionProvider is an optional interface for platforms that
 // provide platform-specific formatting instructions for the agent system prompt
 // (e.g., Slack mrkdwn vs standard Markdown).
@@ -278,6 +284,21 @@ type ModelSwitcher interface {
 	// AvailableModels tries to fetch models from the provider API.
 	// Falls back to a built-in list on failure.
 	AvailableModels(ctx context.Context) []ModelOption
+}
+
+// AgentOption describes a selectable backend agent for /agent switching.
+type AgentOption struct {
+	Name string // backend identifier shown to the user
+	Desc string // short description (e.g. "claudecode / claude-sonnet-4-6")
+}
+
+// AgentSwitcher is an optional interface for agents that multiplex multiple
+// backend implementations behind a single project. /agent uses this to switch
+// between backends without interfering with /model.
+type AgentSwitcher interface {
+	SetActiveAgent(name string) bool
+	GetActiveAgent() string
+	ListAgents() []AgentOption
 }
 
 // ReasoningEffortSwitcher is an optional interface for agents that support
