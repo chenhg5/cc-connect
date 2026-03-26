@@ -691,19 +691,48 @@ func (a *bridgeAdapter) handleCardAction(raw json.RawMessage) {
 	slog.Debug("bridge: card_action", "platform", a.platform, "action", ca.Action, "session_key", ca.SessionKey)
 
 	ref := a.server.resolveEngine(ca.SessionKey)
-	if ref == nil || ref.platform.navHandler == nil {
+	if ref == nil {
+		return
+	}
+
+	// perm: — permission response; convert to a regular message for the engine
+	if strings.HasPrefix(ca.Action, "perm:") {
+		var responseText string
+		switch ca.Action {
+		case "perm:allow":
+			responseText = "allow"
+		case "perm:deny":
+			responseText = "deny"
+		case "perm:allow_all":
+			responseText = "allow all"
+		default:
+			return
+		}
+		a.dispatchAsMessage(ref, ca.SessionKey, ca.ReplyCtx, responseText)
+		return
+	}
+
+	// askq: — AskUserQuestion answer; forward as a regular message
+	if strings.HasPrefix(ca.Action, "askq:") {
+		a.dispatchAsMessage(ref, ca.SessionKey, ca.ReplyCtx, ca.Action)
+		return
+	}
+
+	// cmd: — command shortcut from a card button; forward as a message
+	if strings.HasPrefix(ca.Action, "cmd:") {
+		cmdText := strings.TrimPrefix(ca.Action, "cmd:")
+		a.dispatchAsMessage(ref, ca.SessionKey, ca.ReplyCtx, cmdText)
+		return
+	}
+
+	// nav: / act: — card navigation and in-place updates
+	if ref.platform.navHandler == nil {
 		return
 	}
 
 	card := ref.platform.navHandler(ca.Action, ca.SessionKey)
 	if card == nil {
 		return
-	}
-
-	rc := &bridgeReplyCtx{
-		Platform:   a.platform,
-		SessionKey: ca.SessionKey,
-		ReplyCtx:   ca.ReplyCtx,
 	}
 
 	if a.capabilities["card"] {
@@ -714,8 +743,34 @@ func (a *bridgeAdapter) handleCardAction(raw json.RawMessage) {
 			"card":        serializeCard(card),
 		})
 	} else {
+		rc := &bridgeReplyCtx{
+			Platform:   a.platform,
+			SessionKey: ca.SessionKey,
+			ReplyCtx:   ca.ReplyCtx,
+		}
 		_ = ref.platform.Reply(context.Background(), rc, card.RenderText())
 	}
+}
+
+// dispatchAsMessage converts a card action into a regular user message
+// and dispatches it to the engine's message handler.
+func (a *bridgeAdapter) dispatchAsMessage(ref *bridgeEngineRef, sessionKey, replyCtx, content string) {
+	if ref.platform.handler == nil {
+		return
+	}
+	msg := &Message{
+		SessionKey: sessionKey,
+		Platform:   a.platform,
+		UserID:     "web-admin",
+		UserName:   "Web Admin",
+		Content:    content,
+		ReplyCtx: &bridgeReplyCtx{
+			Platform:   a.platform,
+			SessionKey: sessionKey,
+			ReplyCtx:   replyCtx,
+		},
+	}
+	go ref.platform.handler(ref.platform, msg)
 }
 
 func (a *bridgeAdapter) handlePreviewAck(raw json.RawMessage) {

@@ -2,12 +2,18 @@ import { useEffect, useState, useRef, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useParams, Link } from 'react-router-dom';
 import {
-  ArrowLeft, Send, User, Bot, RotateCw, Circle, WifiOff,
+  ArrowLeft, Send, User, Bot, Circle, WifiOff,
   Copy, Check, FileText, Image as ImageIcon, Loader2,
+  Slash, ChevronDown,
 } from 'lucide-react';
 import { Badge, Button } from '@/components/ui';
-import { getSession, type SessionDetail } from '@/api/sessions';
-import { useBridgeSocket, fetchBridgeConfig, type BridgeConfig, type BridgeIncoming, type BridgeStatus } from '@/hooks/useBridgeSocket';
+import { listSessions, getSession, type Session, type SessionDetail } from '@/api/sessions';
+import {
+  useBridgeSocket, fetchBridgeConfig,
+  type BridgeConfig, type BridgeIncoming, type BridgeStatus,
+} from '@/hooks/useBridgeSocket';
+import CommandPalette, { type SlashCommand } from './CommandPalette';
+import SessionDrawer from './SessionDrawer';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
@@ -175,8 +181,6 @@ function colorToBg(c?: string) {
   return map[c || ''] || 'bg-gray-800';
 }
 
-// ── Buttons renderer ─────────────────────────────────────────
-
 function ButtonsBlock({ content, buttons, onAction }: { content: string; buttons: { text: string; data: string }[][]; onAction: (v: string) => void }) {
   return (
     <div className="space-y-3">
@@ -194,8 +198,6 @@ function ButtonsBlock({ content, buttons, onAction }: { content: string; buttons
   );
 }
 
-// ── File/Image attachments ───────────────────────────────────
-
 function FileBlock({ name, size }: { name: string; size?: number }) {
   return (
     <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700">
@@ -212,78 +214,127 @@ function ImageBlock({ url }: { url: string }) {
   return <img src={url} alt="" className="max-w-sm rounded-lg border border-gray-200 dark:border-gray-700 shadow-sm" />;
 }
 
-// ── Connection status badge ──────────────────────────────────
-
 function StatusBadge({ status }: { status: BridgeStatus }) {
   const { t } = useTranslation();
   if (status === 'connected') {
     return (
       <span className="flex items-center gap-1 text-[10px] text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-900/20 px-1.5 py-0.5 rounded-full">
-        <Circle size={5} className="fill-current" /> {t('sessions.bridgeConnected', 'connected')}
+        <Circle size={5} className="fill-current" /> {t('sessions.bridgeConnected')}
       </span>
     );
   }
   if (status === 'connecting' || status === 'registering') {
     return (
       <span className="flex items-center gap-1 text-[10px] text-yellow-600 dark:text-yellow-400 bg-yellow-50 dark:bg-yellow-900/20 px-1.5 py-0.5 rounded-full">
-        <Loader2 size={9} className="animate-spin" /> {t('sessions.bridgeConnecting', 'connecting...')}
+        <Loader2 size={9} className="animate-spin" /> {t('sessions.bridgeConnecting')}
       </span>
     );
   }
   return (
     <span className="flex items-center gap-1 text-[10px] text-gray-400 bg-gray-100 dark:bg-gray-800 px-1.5 py-0.5 rounded-full">
-      <WifiOff size={9} /> {t('sessions.bridgeDisconnected', 'disconnected')}
+      <WifiOff size={9} /> {t('sessions.bridgeDisconnected')}
     </span>
   );
 }
 
 // ── Main component ───────────────────────────────────────────
 
-export default function SessionChat() {
+export default function ChatView() {
   const { t } = useTranslation();
-  const { project, id } = useParams<{ project: string; id: string }>();
-  const [session, setSession] = useState<SessionDetail | null>(null);
+  const { name: projectName } = useParams<{ name: string }>();
+
+  // Session state
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [currentSession, setCurrentSession] = useState<SessionDetail | null>(null);
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [loading, setLoading] = useState(true);
   const [typing, setTyping] = useState(false);
   const [bridgeCfg, setBridgeCfg] = useState<BridgeConfig | null>(null);
+
+  // UI state
+  const [cmdOpen, setCmdOpen] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+
   const messagesEnd = useRef<HTMLDivElement>(null);
-  const streamBufRef = useRef<Map<string, string>>(new Map());
   const previewHandleCounter = useRef(0);
+  const cmdBtnRef = useRef<HTMLButtonElement>(null);
+  const sessionKeyRef = useRef('');
 
-  const sessionKey = session?.session_key || '';
+  const sessionKey = currentSession?.session_key || '';
+  sessionKeyRef.current = sessionKey;
 
-  // Load session data + bridge config
-  const fetchSession = useCallback(async () => {
-    if (!project || !id) return;
+  // Load project sessions and auto-select latest
+  const fetchData = useCallback(async () => {
+    if (!projectName) return;
+    setLoading(true);
     try {
-      setLoading(true);
-      const [data, cfg] = await Promise.all([
-        getSession(project, id, 200),
+      const [{ sessions: allSessions }, cfg] = await Promise.all([
+        listSessions(projectName),
         fetchBridgeConfig(),
       ]);
-      setSession(data);
       setBridgeCfg(cfg);
-      if (data.history) {
-        setMessages(data.history.map((h, i) => ({
+      const sorted = (allSessions || []).sort(
+        (a, b) => (b.updated_at || b.created_at || '').localeCompare(a.updated_at || a.created_at || ''),
+      );
+      setSessions(sorted);
+
+      if (sorted.length > 0) {
+        const latest = sorted[0];
+        const detail = await getSession(projectName, latest.id, 200);
+        setCurrentSession(detail);
+        if (detail.history) {
+          setMessages(detail.history.map((h, i) => ({
+            id: `hist-${i}`,
+            role: h.role as 'user' | 'assistant',
+            content: h.content,
+            format: 'markdown',
+            timestamp: h.timestamp,
+          })));
+        }
+      } else {
+        setCurrentSession(null);
+        setMessages([]);
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, [projectName]);
+
+  useEffect(() => { fetchData(); }, [fetchData]);
+
+  // Switch to a different session
+  const switchToSession = useCallback(async (s: Session) => {
+    if (!projectName) return;
+    setDrawerOpen(false);
+    setLoading(true);
+    try {
+      const detail = await getSession(projectName, s.id, 200);
+      setCurrentSession(detail);
+      if (detail.history) {
+        setMessages(detail.history.map((h, i) => ({
           id: `hist-${i}`,
           role: h.role as 'user' | 'assistant',
           content: h.content,
           format: 'markdown',
           timestamp: h.timestamp,
         })));
+      } else {
+        setMessages([]);
       }
     } finally {
       setLoading(false);
     }
-  }, [project, id]);
+  }, [projectName]);
 
-  useEffect(() => { fetchSession(); }, [fetchSession]);
-
-  // Handle bridge incoming messages
+  // Handle bridge incoming messages — only process messages for the current session
   const handleBridgeMessage = useCallback((msg: BridgeIncoming) => {
+    const msgKey = (msg as any).session_key;
+    if (msgKey && sessionKeyRef.current && msgKey !== sessionKeyRef.current) {
+      return; // ignore messages for other sessions
+    }
+
     if (msg.type === 'reply') {
       setMessages(prev => {
         const streamIdx = prev.findIndex(m => m.streaming && m.role === 'assistant');
@@ -292,12 +343,7 @@ export default function SessionChat() {
           updated[streamIdx] = { ...updated[streamIdx], content: msg.content, format: (msg as any).format === 'markdown' ? 'markdown' : 'text', streaming: false };
           return updated;
         }
-        return [...prev, {
-          id: `reply-${Date.now()}`,
-          role: 'assistant',
-          content: msg.content,
-          format: (msg as any).format === 'markdown' ? 'markdown' : 'text',
-        }];
+        return [...prev, { id: `reply-${Date.now()}`, role: 'assistant', content: msg.content, format: (msg as any).format === 'markdown' ? 'markdown' : 'text' }];
       });
       setTyping(false);
     } else if (msg.type === 'reply_stream') {
@@ -326,23 +372,11 @@ export default function SessionChat() {
       }
     } else if (msg.type === 'card') {
       const card = msg as Extract<BridgeIncoming, { type: 'card' }>;
-      setMessages(prev => [...prev, {
-        id: `card-${Date.now()}`,
-        role: 'assistant',
-        content: '',
-        format: 'card',
-        card: card.card,
-      }]);
+      setMessages(prev => [...prev, { id: `card-${Date.now()}`, role: 'assistant', content: '', format: 'card', card: card.card }]);
       setTyping(false);
     } else if (msg.type === 'buttons') {
       const btns = msg as Extract<BridgeIncoming, { type: 'buttons' }>;
-      setMessages(prev => [...prev, {
-        id: `btn-${Date.now()}`,
-        role: 'assistant',
-        content: btns.content,
-        format: 'buttons',
-        buttons: btns.buttons,
-      }]);
+      setMessages(prev => [...prev, { id: `btn-${Date.now()}`, role: 'assistant', content: btns.content, format: 'buttons', buttons: btns.buttons }]);
       setTyping(false);
     } else if (msg.type === 'typing_start') {
       setTyping(true);
@@ -352,13 +386,7 @@ export default function SessionChat() {
       const ps = msg as Extract<BridgeIncoming, { type: 'preview_start' }>;
       const handle = `web-preview-${++previewHandleCounter.current}`;
       sendPreviewAck(ps.ref_id, handle);
-      setMessages(prev => [...prev, {
-        id: `stream-${handle}`,
-        role: 'assistant',
-        content: ps.content,
-        format: 'markdown',
-        streaming: true,
-      }]);
+      setMessages(prev => [...prev, { id: `stream-${handle}`, role: 'assistant', content: ps.content, format: 'markdown', streaming: true }]);
     } else if (msg.type === 'update_message') {
       const um = msg as Extract<BridgeIncoming, { type: 'update_message' }>;
       setMessages(prev => {
@@ -373,9 +401,7 @@ export default function SessionChat() {
     } else if (msg.type === 'delete_message') {
       setMessages(prev => {
         const idx = prev.findIndex(m => m.streaming);
-        if (idx >= 0) {
-          return prev.filter((_, i) => i !== idx);
-        }
+        if (idx >= 0) return prev.filter((_, i) => i !== idx);
         return prev;
       });
     }
@@ -392,16 +418,13 @@ export default function SessionChat() {
     messagesEnd.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, typing]);
 
+  // Send message
   const handleSend = useCallback(() => {
     if (!input.trim() || bridgeStatus !== 'connected') return;
     const content = input.trim();
     setInput('');
     setSending(true);
-    setMessages(prev => [...prev, {
-      id: `user-${Date.now()}`,
-      role: 'user',
-      content,
-    }]);
+    setMessages(prev => [...prev, { id: `user-${Date.now()}`, role: 'user', content }]);
     bridgeSend(content);
     setTimeout(() => setSending(false), 300);
   }, [input, bridgeStatus, bridgeSend]);
@@ -411,48 +434,78 @@ export default function SessionChat() {
       e.preventDefault();
       handleSend();
     }
+    if (e.key === '/' && !input) {
+      e.preventDefault();
+      setCmdOpen(true);
+    }
   };
+
+  const handleCmdSelect = useCallback((cmd: SlashCommand) => {
+    setCmdOpen(false);
+    if (cmd.cmd === '/list') {
+      setDrawerOpen(true);
+      return;
+    }
+    if (bridgeStatus !== 'connected') return;
+    setMessages(prev => [...prev, { id: `user-${Date.now()}`, role: 'user', content: cmd.cmd }]);
+    bridgeSend(cmd.cmd);
+  }, [bridgeStatus, bridgeSend]);
 
   const handleCardAction = useCallback((value: string) => {
     if (bridgeStatus !== 'connected') return;
     sendCardAction(value);
   }, [bridgeStatus, sendCardAction]);
 
-  if (loading && !session) {
-    return <div className="flex items-center justify-center h-64 text-gray-400 animate-pulse">Loading...</div>;
-  }
+  const handleNewSession = useCallback(() => {
+    if (bridgeStatus !== 'connected') return;
+    setMessages(prev => [...prev, { id: `user-${Date.now()}`, role: 'user', content: '/new' }]);
+    bridgeSend('/new');
+    setDrawerOpen(false);
+  }, [bridgeStatus, bridgeSend]);
 
   const canSend = bridgeStatus === 'connected';
+
+  if (loading && !currentSession && sessions.length === 0) {
+    return <div className="flex items-center justify-center h-64 text-gray-400 animate-pulse">Loading...</div>;
+  }
 
   return (
     <div className="flex flex-col h-[calc(100vh-8rem)] animate-fade-in">
       {/* Header */}
-      <div className="flex items-center justify-between pb-4 border-b border-gray-200 dark:border-gray-800">
+      <div className="flex items-center justify-between pb-3 border-b border-gray-200 dark:border-gray-800 shrink-0">
         <div className="flex items-center gap-3">
-          <Link to="/sessions" className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors">
+          <Link to="/chat" className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors">
             <ArrowLeft size={18} className="text-gray-400" />
           </Link>
           <div>
             <div className="flex items-center gap-2">
-              <h2 className="text-lg font-semibold text-gray-900 dark:text-white">{session?.name || id}</h2>
+              <h2 className="text-lg font-semibold text-gray-900 dark:text-white">{projectName}</h2>
               <StatusBadge status={bridgeStatus} />
             </div>
-            <div className="flex items-center gap-2 mt-0.5">
-              <Badge>{project}</Badge>
-              {session?.platform && <Badge variant="info">{session.platform}</Badge>}
-              <span className="text-xs text-gray-500">{session?.session_key}</span>
-            </div>
+            {currentSession && (
+              <button
+                type="button"
+                onClick={() => setDrawerOpen(true)}
+                className="flex items-center gap-1 text-xs text-gray-500 hover:text-accent transition-colors mt-0.5"
+              >
+                <span>{currentSession.name || currentSession.id.slice(0, 8)}</span>
+                <ChevronDown size={12} />
+              </button>
+            )}
           </div>
         </div>
-        <Button size="sm" variant="ghost" onClick={fetchSession}>
-          <RotateCw size={14} /> {t('common.refresh')}
-        </Button>
       </div>
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto py-6 space-y-5">
         {messages.length === 0 && !loading && (
-          <p className="text-center text-sm text-gray-400 py-12">{t('sessions.noMessages')}</p>
+          <div className="flex flex-col items-center justify-center h-full text-center py-12">
+            <div className="w-16 h-16 rounded-2xl bg-accent/10 flex items-center justify-center mb-4">
+              <Bot size={32} className="text-accent" />
+            </div>
+            <p className="text-sm text-gray-500 dark:text-gray-400 mb-1">{t('chat.emptyHint')}</p>
+            <p className="text-xs text-gray-400 dark:text-gray-500">{t('chat.slashHint')}</p>
+          </div>
         )}
         {messages.map((msg) => {
           const isUser = msg.role === 'user';
@@ -512,42 +565,78 @@ export default function SessionChat() {
         <div ref={messagesEnd} />
       </div>
 
-      {/* Input */}
-      <div className="border-t border-gray-200 dark:border-gray-800 pt-4">
+      {/* Input area */}
+      <div className="border-t border-gray-200 dark:border-gray-800 pt-3 shrink-0">
         {canSend ? (
-          <div className="flex gap-3">
-            <input
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder={t('sessions.messageInput')}
-              className="flex-1 px-4 py-3 text-sm rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent transition-colors placeholder:text-gray-400"
-              disabled={sending}
-            />
+          <div className="relative flex items-end gap-2">
+            {/* Command palette trigger */}
+            <div className="relative">
+              <button
+                ref={cmdBtnRef}
+                type="button"
+                onClick={() => setCmdOpen(!cmdOpen)}
+                className={cn(
+                  'p-3 rounded-xl transition-all duration-200',
+                  cmdOpen
+                    ? 'bg-accent/15 text-accent ring-1 ring-accent/30'
+                    : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/[0.06]',
+                )}
+                title={t('chat.commands')}
+              >
+                <Slash size={18} />
+              </button>
+              <CommandPalette
+                open={cmdOpen}
+                onClose={() => setCmdOpen(false)}
+                onSelect={handleCmdSelect}
+                anchorRef={cmdBtnRef}
+              />
+            </div>
+
+            {/* Text input */}
+            <div className="flex-1 relative">
+              <input
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder={t('chat.inputPlaceholder')}
+                className="w-full px-4 py-3 text-sm rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent transition-colors placeholder:text-gray-400"
+                disabled={sending}
+              />
+            </div>
+
+            {/* Send button */}
             <button
+              type="button"
               onClick={handleSend}
               disabled={sending || !input.trim()}
-              className="px-4 py-3 rounded-xl bg-accent text-black hover:bg-accent-dim transition-colors disabled:opacity-50 flex items-center gap-2"
+              className="p-3 rounded-xl bg-accent text-black hover:bg-accent-dim transition-colors disabled:opacity-50 flex items-center"
             >
-              {sending ? (
-                <Loader2 size={18} className="animate-spin" />
-              ) : (
-                <Send size={18} />
-              )}
+              {sending ? <Loader2 size={18} className="animate-spin" /> : <Send size={18} />}
             </button>
           </div>
         ) : bridgeStatus === 'disconnected' || bridgeStatus === 'error' ? (
           <div className="flex items-center gap-2 px-4 py-3 text-sm text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 rounded-xl">
             <WifiOff size={14} />
-            <span>{t('sessions.bridgeNotAvailable', 'Bridge not available. Enable [bridge] in config.toml to chat from web.')}</span>
+            <span>{t('sessions.bridgeNotAvailable')}</span>
           </div>
         ) : (
           <div className="flex items-center gap-2 px-4 py-3 text-sm text-gray-400 bg-gray-50 dark:bg-gray-800/50 rounded-xl">
             <Loader2 size={14} className="animate-spin" />
-            <span>{t('sessions.bridgeConnecting', 'Connecting to bridge...')}</span>
+            <span>{t('sessions.bridgeConnecting')}</span>
           </div>
         )}
       </div>
+
+      {/* Session drawer */}
+      <SessionDrawer
+        open={drawerOpen}
+        onClose={() => setDrawerOpen(false)}
+        sessions={sessions}
+        currentSessionId={currentSession?.id || ''}
+        onSelect={switchToSession}
+        onNewSession={handleNewSession}
+      />
     </div>
   );
 }

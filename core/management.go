@@ -212,13 +212,22 @@ func (m *ManagementServer) handleStatus(w http.ResponseWriter, r *http.Request) 
 		adapters = m.listBridgeAdapters()
 	}
 
-	mgmtJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"version":             CurrentVersion,
 		"uptime_seconds":      int(time.Since(m.startedAt).Seconds()),
 		"connected_platforms": platforms,
 		"projects_count":      len(m.engines),
 		"bridge_adapters":     adapters,
-	})
+	}
+	if m.bridgeServer != nil {
+		resp["bridge"] = map[string]any{
+			"enabled": true,
+			"port":    m.bridgeServer.port,
+			"path":    m.bridgeServer.path,
+			"token":   m.bridgeServer.token,
+		}
+	}
+	mgmtJSON(w, http.StatusOK, resp)
 }
 
 func (m *ManagementServer) handleRestart(w http.ResponseWriter, r *http.Request) {

@@ -7,7 +7,7 @@ import { cn } from '@/lib/utils';
 const routeTitles: Record<string, string> = {
   '/': 'nav.dashboard',
   '/projects': 'nav.projects',
-  '/sessions': 'nav.sessions',
+  '/chat': 'nav.chat',
   '/cron': 'nav.cron',
   '/bridge': 'nav.bridge',
   '/system': 'nav.system',

@@ -23,7 +23,7 @@ import { useState } from 'react';
 const navItems = [
   { key: 'dashboard', path: '/', icon: LayoutDashboard },
   { key: 'projects', path: '/projects', icon: FolderKanban },
-  { key: 'sessions', path: '/sessions', icon: MessageSquare },
+  { key: 'chat', path: '/chat', icon: MessageSquare },
   { key: 'cron', path: '/cron', icon: Clock },
   { key: 'bridge', path: '/bridge', icon: Cable },
   { key: 'system', path: '/system', icon: Settings },

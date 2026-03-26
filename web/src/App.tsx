@@ -5,8 +5,8 @@ import Login from '@/pages/Login';
 import Dashboard from '@/pages/Dashboard';
 import ProjectList from '@/pages/Projects/ProjectList';
 import ProjectDetail from '@/pages/Projects/ProjectDetail';
-import SessionList from '@/pages/Sessions/SessionList';
-import SessionChat from '@/pages/Sessions/SessionChat';
+import ChatList from '@/pages/Chat/ChatList';
+import ChatView from '@/pages/Chat/ChatView';
 import CronList from '@/pages/Cron/CronList';
 import BridgeAdapters from '@/pages/Bridge/BridgeAdapters';
 import SystemConfig from '@/pages/System/Config';
@@ -28,8 +28,8 @@ export default function App() {
         <Route index element={<Dashboard />} />
         <Route path="projects" element={<ProjectList />} />
         <Route path="projects/:name" element={<ProjectDetail />} />
-        <Route path="sessions" element={<SessionList />} />
-        <Route path="sessions/:project/:id" element={<SessionChat />} />
+        <Route path="chat" element={<ChatList />} />
+        <Route path="chat/:name" element={<ChatView />} />
         <Route path="cron" element={<CronList />} />
         <Route path="bridge" element={<BridgeAdapters />} />
         <Route path="system" element={<SystemConfig />} />
