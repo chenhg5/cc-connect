@@ -401,8 +401,9 @@ type CronScheduler struct {
 	engines       map[string]*Engine // project name → engine
 	mu            sync.RWMutex
 	entries       map[string]cron.EntryID // job ID → cron entry
-	defaultSilent      bool   // global default for suppressing cron start notifications
-	defaultSessionMode string // global default session mode; "" = reuse, "new_per_run" = fresh session each run
+	defaultSilent      bool       // global default for suppressing cron start notifications
+	defaultSessionMode string     // global default session mode; "" = reuse, "new_per_run" = fresh session each run
+	stopWatchdog       chan struct{} // signals the wake watchdog to stop
 }
 
 func NewCronScheduler(store *CronStore) *CronScheduler {
@@ -455,12 +456,74 @@ func (cs *CronScheduler) Start() error {
 		}
 	}
 	cs.cron.Start()
+	cs.startWakeWatchdog()
 	slog.Info("cron: scheduler started", "jobs", len(jobs))
 	return nil
 }
 
 func (cs *CronScheduler) Stop() {
+	if cs.stopWatchdog != nil {
+		close(cs.stopWatchdog)
+	}
 	cs.cron.Stop()
+}
+
+// startWakeWatchdog detects system wake from sleep by monitoring wall-clock
+// jumps. On macOS (and Linux), time.Timer/Ticker use a monotonic clock that
+// does not advance during sleep, causing robfig/cron to miscalculate
+// next-run times. When a jump > 2 minutes is detected, the cron scheduler
+// is rebuilt so all jobs are rescheduled against the current wall clock.
+func (cs *CronScheduler) startWakeWatchdog() {
+	cs.stopWatchdog = make(chan struct{})
+	go func() {
+		const checkInterval = 30 * time.Second
+		const sleepThreshold = 2 * time.Minute
+		ticker := time.NewTicker(checkInterval)
+		defer ticker.Stop()
+		lastCheck := time.Now()
+		for {
+			select {
+			case <-cs.stopWatchdog:
+				return
+			case now := <-ticker.C:
+				if elapsed := now.Sub(lastCheck); elapsed > sleepThreshold {
+					slog.Info("cron: detected wake from sleep, rescheduling all jobs", "gap", elapsed.Round(time.Second))
+					cs.rescheduleAll()
+				}
+				lastCheck = now
+			}
+		}
+	}()
+}
+
+// rescheduleAll stops the current cron runner, creates a new one, and
+// re-adds all enabled jobs so next-run times are recalculated from the
+// current wall clock.
+func (cs *CronScheduler) rescheduleAll() {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	cs.cron.Stop()
+	cs.cron = cron.New()
+	cs.entries = make(map[string]cron.EntryID)
+
+	for _, job := range cs.store.List() {
+		if !job.Enabled {
+			continue
+		}
+		jobID := job.ID
+		entryID, err := cs.cron.AddFunc(job.CronExpr, func() {
+			cs.executeJob(jobID)
+		})
+		if err != nil {
+			slog.Warn("cron: failed to reschedule job after wake", "id", job.ID, "error", err)
+			continue
+		}
+		cs.entries[job.ID] = entryID
+	}
+
+	cs.cron.Start()
+	slog.Info("cron: rescheduled after wake", "jobs", len(cs.entries))
 }
 
 func (cs *CronScheduler) AddJob(job *CronJob) error {
