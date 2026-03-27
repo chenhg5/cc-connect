@@ -93,6 +93,7 @@ level = "info" # debug, info, warn, error
 # [outgoing_rate_limit]
 # max_per_second = 0         # Global default msgs/sec; 0 = unlimited (default) / 全局默认每秒消息数；0 = 无限制
 # burst = 3                  # Max burst size; default = ceil(max_per_second) / 最大突发数量
+#                            # For fractional rates (e.g. 0.2), default burst becomes ceil(max_per_second).
 
 # Per-platform overrides / 每平台覆盖配置:
 # [outgoing_rate_limit.platforms.wecom]

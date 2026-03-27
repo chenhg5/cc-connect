@@ -249,6 +249,19 @@ func progressStyleForPlatform(p Platform) string {
 	return ps
 }
 
+// SuppressStandaloneToolResultEvent is true when a platform opts into progress
+// styling (ProgressStyleProvider) but uses legacy mode. In that case tool_use
+// lines are still shown, but a separate chat message for EventToolResult is
+// skipped to avoid duplicate noise (e.g. Codex structured tool results on Feishu).
+// Platforms without ProgressStyleProvider keep showing standalone tool results.
+func SuppressStandaloneToolResultEvent(p Platform) bool {
+	_, ok := p.(ProgressStyleProvider)
+	if !ok {
+		return false
+	}
+	return progressStyleForPlatform(p) == progressStyleLegacy
+}
+
 func newCompactProgressWriter(ctx context.Context, p Platform, replyCtx any, agentName string, lang Language) *compactProgressWriter {
 	w := &compactProgressWriter{
 		ctx:        ctx,

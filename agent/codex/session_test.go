@@ -494,12 +494,9 @@ func TestClose_ForceKillsAllTrackedProcessesAfterCmdOverwrite(t *testing.T) {
 	}
 
 	startsFile := filepath.Join(workDir, "starts.txt")
+	// Prompt is passed on stdin (--json -), not as a trailing argv argument.
 	script := "#!/bin/sh\n" +
-		"prompt=''\n" +
-		"for last\n" +
-		"do\n" +
-		"  prompt=\"$last\"\n" +
-		"done\n" +
+		"prompt=$(cat)\n" +
 		"printf '%s\\n' \"$prompt\" >> \"$CODEX_STARTS_FILE\"\n" +
 		"if [ \"$prompt\" = \"first\" ]; then\n" +
 		"  printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"thread-overlap\"}'\n" +

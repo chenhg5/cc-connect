@@ -101,6 +101,10 @@ func (e *Engine) SendRestartNotification(platformName, sessionKey string) {
 		if CurrentVersion != "" {
 			text += fmt.Sprintf(" (%s)", CurrentVersion)
 		}
+		if err := e.waitOutgoing(p); err != nil {
+			slog.Debug("restart notify: outgoing wait cancelled or limited", "platform", platformName, "error", err)
+			return
+		}
 		if err := p.Send(e.ctx, rctx, text); err != nil {
 			slog.Debug("restart notify: send failed", "error", err)
 		}
@@ -2253,7 +2257,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					result = truncateIf(result, e.display.ToolMaxLen)
 				}
 				if result != "" || event.ToolStatus != "" || event.ToolExitCode != nil || event.ToolSuccess != nil {
-					resultMsg := formatToolResultEventFallback(event.ToolName, result, event.ToolStatus, event.ToolExitCode, event.ToolSuccess, e.i18n.CurrentLang())
+					resultMsg := e.formatToolResultEventFallback(event.ToolName, result, event.ToolStatus, event.ToolExitCode, event.ToolSuccess)
 					entry := ProgressCardEntry{
 						Kind:     ProgressEntryToolResult,
 						Tool:     event.ToolName,
@@ -2263,57 +2267,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						Success:  event.ToolSuccess,
 					}
 					if !cp.AppendStructured(entry, resultMsg) {
-						e.send(p, replyCtx, resultMsg)
-					}
-				}
-			}
-
-		case EventToolResult:
-			if !quiet {
-				out := strings.TrimSpace(event.Content)
-				if out == "" {
-					out = strings.TrimSpace(event.ToolResult)
-				}
-				if out == "" {
-					break
-				}
-				tn := strings.TrimSpace(event.ToolName)
-				if tn == "" {
-					tn = "tool"
-				}
-				previewActive := sp.canPreview()
-				if len(textParts) > segmentStart {
-					if !previewActive {
-						segment := strings.Join(textParts[segmentStart:], "")
-						if segment != "" {
-							for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
-								e.send(p, replyCtx, chunk)
-							}
+						if !SuppressStandaloneToolResultEvent(p) {
+							e.send(p, replyCtx, resultMsg)
 						}
 					}
-					segmentStart = len(textParts)
-				}
-				sp.freeze()
-				if previewActive {
-					sp.detachPreview()
-				}
-				var formattedOut string
-				if strings.Contains(out, "```") {
-					formattedOut = out
-				} else if strings.Contains(out, "\n") || utf8.RuneCountInString(out) > 200 {
-					lang := toolCodeLang(tn, out)
-					formattedOut = fmt.Sprintf("```%s\n%s\n```", lang, out)
-				} else {
-					switch tn {
-					case "shell", "run_shell_command", "Bash":
-						formattedOut = fmt.Sprintf("```bash\n%s\n```", out)
-					default:
-						formattedOut = fmt.Sprintf("`%s`", out)
-					}
-				}
-				toolMsg := fmt.Sprintf(e.i18n.T(MsgToolResult), tn, formattedOut)
-				for _, chunk := range SplitMessageCodeFenceAware(toolMsg, maxPlatformMessageLen) {
-					e.send(p, replyCtx, chunk)
 				}
 			}
 
@@ -2488,7 +2445,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					unsent := strings.Join(textParts[segmentStart:], "")
 					if unsent != "" {
 						for _, chunk := range splitMessage(unsent, maxPlatformMessageLen) {
-							e.send(p, replyCtx, chunk)
+							if err := e.sendWithError(p, replyCtx, chunk); err != nil {
+								return
+							}
 						}
 					}
 				}
@@ -2500,7 +2459,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			} else {
 				slog.Debug("EventResult: sending via p.Send (preview inactive or failed)", "response_len", len(fullResponse), "chunks", len(splitMessage(fullResponse, maxPlatformMessageLen)))
 				for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
-					e.send(p, replyCtx, chunk)
+					if err := e.sendWithError(p, replyCtx, chunk); err != nil {
+						return
+					}
 				}
 			}
 
@@ -2658,7 +2619,9 @@ channelClosed:
 				unsent := strings.Join(textParts[segmentStart:], "")
 				if unsent != "" {
 					for _, chunk := range splitMessage(unsent, maxPlatformMessageLen) {
-						e.send(p, replyCtx, chunk)
+						if err := e.sendWithError(p, replyCtx, chunk); err != nil {
+							return
+						}
 					}
 				}
 			}
@@ -2666,7 +2629,9 @@ channelClosed:
 			slog.Debug("stream preview: finalized in-place (process exited)")
 		} else {
 			for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
-				e.send(p, replyCtx, chunk)
+				if err := e.sendWithError(p, replyCtx, chunk); err != nil {
+					return
+				}
 			}
 		}
 	}
@@ -5786,6 +5751,9 @@ func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images
 	}
 
 	if message != "" {
+		if err := e.waitOutgoing(p); err != nil {
+			return err
+		}
 		if err := p.Send(e.ctx, replyCtx, message); err != nil {
 			return err
 		}
@@ -5796,11 +5764,17 @@ func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images
 		}
 	}
 	for _, img := range images {
+		if err := e.waitOutgoing(p); err != nil {
+			return err
+		}
 		if err := imageSender.SendImage(e.ctx, replyCtx, img); err != nil {
 			return err
 		}
 	}
 	for _, file := range files {
+		if err := e.waitOutgoing(p); err != nil {
+			return err
+		}
 		if err := fileSender.SendFile(e.ctx, replyCtx, file); err != nil {
 			return err
 		}
@@ -5821,6 +5795,10 @@ func (e *Engine) sendPermissionPrompt(p Platform, replyCtx any, prompt, toolName
 			{
 				{Text: e.i18n.T(MsgPermBtnAllowAll), Data: "perm:allow_all"},
 			},
+		}
+		if err := e.waitOutgoing(p); err != nil {
+			slog.Warn("sendPermissionPrompt: outgoing wait cancelled", "platform", p.Name(), "error", err)
+			return
 		}
 		if err := bs.SendWithButtons(e.ctx, replyCtx, prompt, buttons); err == nil {
 			return
@@ -5930,6 +5908,10 @@ func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []Use
 		for i, opt := range q.Options {
 			rows = append(rows, []ButtonOption{{Text: opt.Label, Data: fmt.Sprintf("askq:%d:%d", qIdx, i+1)}})
 		}
+		if err := e.waitOutgoing(p); err != nil {
+			slog.Warn("sendAskQuestionPrompt: outgoing wait cancelled", "platform", p.Name(), "error", err)
+			return
+		}
 		if err := bs.SendWithButtons(e.ctx, replyCtx, textBuf.String(), rows); err == nil {
 			return
 		}
@@ -5957,21 +5939,35 @@ func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []Use
 	e.send(p, replyCtx, sb.String())
 }
 
-// send wraps p.Send with error logging, slow-operation warnings, and outgoing rate limiting.
-func (e *Engine) send(p Platform, replyCtx any, content string) {
-	if e.outgoingRL != nil {
-		if err := e.outgoingRL.Wait(e.ctx, p.Name()); err != nil {
-			slog.Warn("outgoing rate limit: context cancelled", "platform", p.Name(), "error", err)
-			return
-		}
+// waitOutgoing blocks on the per-platform outgoing rate limiter when enabled.
+func (e *Engine) waitOutgoing(p Platform) error {
+	if e.outgoingRL == nil {
+		return nil
+	}
+	return e.outgoingRL.Wait(e.ctx, p.Name())
+}
+
+// sendWithError applies outgoing rate limiting and p.Send. It logs wait
+// cancellation and platform failures, and returns a non-nil error on either.
+func (e *Engine) sendWithError(p Platform, replyCtx any, content string) error {
+	if err := e.waitOutgoing(p); err != nil {
+		slog.Warn("outgoing rate limit: context cancelled", "platform", p.Name(), "error", err)
+		return err
 	}
 	start := time.Now()
 	if err := p.Send(e.ctx, replyCtx, content); err != nil {
 		slog.Error("platform send failed", "platform", p.Name(), "error", err, "content_len", len(content))
+		return err
 	}
 	if elapsed := time.Since(start); elapsed >= slowPlatformSend {
 		slog.Warn("slow platform send", "platform", p.Name(), "elapsed", elapsed, "content_len", len(content))
 	}
+	return nil
+}
+
+// send wraps p.Send with error logging, slow-operation warnings, and outgoing rate limiting.
+func (e *Engine) send(p Platform, replyCtx any, content string) {
+	_ = e.sendWithError(p, replyCtx, content)
 }
 
 // drainEvents discards any buffered events from the channel.
@@ -5996,30 +5992,34 @@ func drainEvents(ch <-chan Event) {
 	}
 }
 
-// reply wraps p.Reply with error logging, slow-operation warnings, and outgoing rate limiting.
-func (e *Engine) reply(p Platform, replyCtx any, content string) {
-	if e.outgoingRL != nil {
-		if err := e.outgoingRL.Wait(e.ctx, p.Name()); err != nil {
-			slog.Warn("outgoing rate limit: context cancelled", "platform", p.Name(), "error", err)
-			return
-		}
+// replyWithError applies outgoing rate limiting and p.Reply.
+func (e *Engine) replyWithError(p Platform, replyCtx any, content string) error {
+	if err := e.waitOutgoing(p); err != nil {
+		slog.Warn("outgoing rate limit: context cancelled", "platform", p.Name(), "error", err)
+		return err
 	}
 	start := time.Now()
 	if err := p.Reply(e.ctx, replyCtx, content); err != nil {
 		slog.Error("platform reply failed", "platform", p.Name(), "error", err, "content_len", len(content))
+		return err
 	}
 	if elapsed := time.Since(start); elapsed >= slowPlatformSend {
 		slog.Warn("slow platform reply", "platform", p.Name(), "elapsed", elapsed, "content_len", len(content))
 	}
+	return nil
+}
+
+// reply wraps p.Reply with error logging, slow-operation warnings, and outgoing rate limiting.
+func (e *Engine) reply(p Platform, replyCtx any, content string) {
+	_ = e.replyWithError(p, replyCtx, content)
 }
 
 // replyWithButtons sends a reply with inline buttons if the platform supports it,
 // otherwise falls back to plain text reply.
 func (e *Engine) replyWithButtons(p Platform, replyCtx any, content string, buttons [][]ButtonOption) {
-	if e.outgoingRL != nil {
-		if err := e.outgoingRL.Wait(e.ctx, p.Name()); err != nil {
-			return
-		}
+	if err := e.waitOutgoing(p); err != nil {
+		slog.Warn("outgoing rate limit: context cancelled", "platform", p.Name(), "error", err)
+		return
 	}
 	if bs, ok := p.(InlineButtonSender); ok {
 		if err := bs.SendWithButtons(e.ctx, replyCtx, content, buttons); err == nil {
@@ -6041,10 +6041,9 @@ func (e *Engine) replyWithCard(p Platform, replyCtx any, card *Card) {
 		slog.Error("replyWithCard: nil card", "platform", p.Name())
 		return
 	}
-	if e.outgoingRL != nil {
-		if err := e.outgoingRL.Wait(e.ctx, p.Name()); err != nil {
-			return
-		}
+	if err := e.waitOutgoing(p); err != nil {
+		slog.Warn("outgoing rate limit: context cancelled", "platform", p.Name(), "error", err)
+		return
 	}
 	if cs, ok := p.(CardSender); ok {
 		if err := cs.ReplyCard(e.ctx, replyCtx, card); err != nil {
@@ -6061,10 +6060,9 @@ func (e *Engine) sendWithCard(p Platform, replyCtx any, card *Card) {
 		slog.Error("sendWithCard: nil card", "platform", p.Name())
 		return
 	}
-	if e.outgoingRL != nil {
-		if err := e.outgoingRL.Wait(e.ctx, p.Name()); err != nil {
-			return
-		}
+	if err := e.waitOutgoing(p); err != nil {
+		slog.Warn("outgoing rate limit: context cancelled", "platform", p.Name(), "error", err)
+		return
 	}
 	if cs, ok := p.(CardSender); ok {
 		if err := cs.SendCard(e.ctx, replyCtx, card); err != nil {
@@ -8843,15 +8841,10 @@ func toolCodeLang(toolName, input string) string {
 	return ""
 }
 
-func formatToolResultEventFallback(toolName, result, status string, exitCode *int, success *bool, lang Language) string {
-	statusLabel := "Status"
-	exitLabel := "Exit"
-	noOutput := "No output"
-	if lang == LangChinese || lang == LangTraditionalChinese {
-		statusLabel = "状态"
-		exitLabel = "退出码"
-		noOutput = "无输出"
-	}
+func (e *Engine) formatToolResultEventFallback(toolName, result, status string, exitCode *int, success *bool) string {
+	statusLabel := e.i18n.T(MsgToolResultFmtStatus)
+	exitLabel := e.i18n.T(MsgToolResultFmtExit)
+	noOutput := e.i18n.T(MsgToolResultFmtNoOutput)
 	dot := "⚪"
 	if success != nil {
 		if *success {
@@ -8870,9 +8863,9 @@ func formatToolResultEventFallback(toolName, result, status string, exitCode *in
 		s := strings.TrimSpace(status)
 		if s == "" {
 			if success != nil && *success {
-				s = "ok"
+				s = e.i18n.T(MsgToolResultFmtOk)
 			} else if success != nil && !*success {
-				s = "failed"
+				s = e.i18n.T(MsgToolResultFmtFailed)
 			}
 		}
 		lines = append(lines, fmt.Sprintf("%s %s: %s", dot, statusLabel, s))

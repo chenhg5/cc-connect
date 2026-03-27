@@ -1,9 +1,45 @@
 package core
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
+
+type suppressTestPlatform struct {
+	style string
+}
+
+func (s *suppressTestPlatform) Name() string { return "test" }
+func (s *suppressTestPlatform) Start(MessageHandler) error { return nil }
+func (s *suppressTestPlatform) Reply(context.Context, any, string) error { return nil }
+func (s *suppressTestPlatform) Send(context.Context, any, string) error { return nil }
+func (s *suppressTestPlatform) Stop() error { return nil }
+func (s *suppressTestPlatform) ProgressStyle() string { return s.style }
+
+func TestSuppressStandaloneToolResultEvent(t *testing.T) {
+	if SuppressStandaloneToolResultEvent(&stubPlatformNoProgress{}) {
+		t.Fatal("platform without ProgressStyleProvider should not suppress")
+	}
+	if !SuppressStandaloneToolResultEvent(&suppressTestPlatform{style: "legacy"}) {
+		t.Fatal("legacy ProgressStyleProvider should suppress standalone tool results")
+	}
+	if SuppressStandaloneToolResultEvent(&suppressTestPlatform{style: "compact"}) {
+		t.Fatal("compact should not suppress (writer absorbs tool results)")
+	}
+	if SuppressStandaloneToolResultEvent(&suppressTestPlatform{style: "card"}) {
+		t.Fatal("card should not suppress")
+	}
+}
+
+// stubPlatformNoProgress is a minimal Platform without ProgressStyleProvider.
+type stubPlatformNoProgress struct{}
+
+func (stubPlatformNoProgress) Name() string { return "plain" }
+func (stubPlatformNoProgress) Start(MessageHandler) error { return nil }
+func (stubPlatformNoProgress) Reply(context.Context, any, string) error { return nil }
+func (stubPlatformNoProgress) Send(context.Context, any, string) error { return nil }
+func (stubPlatformNoProgress) Stop() error { return nil }
 
 func TestBuildAndParseProgressCardPayload(t *testing.T) {
 	payload := BuildProgressCardPayload([]string{" step1 ", "", "step2"}, true)
