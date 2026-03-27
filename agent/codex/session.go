@@ -36,9 +36,14 @@ type codexSession struct {
 	wg        sync.WaitGroup
 	alive     atomic.Bool
 	closeOnce sync.Once
+	cmdMu     sync.Mutex
+	cmds      map[*exec.Cmd]struct{}
 
 	pendingMsgs []string // buffered agent_message texts awaiting classification
 }
+
+var codexSessionCloseTimeout = 8 * time.Second
+var codexSessionForceKillWait = 2 * time.Second
 
 func newCodexSession(ctx context.Context, workDir, model, effort, mode, resumeID string, extraEnv []string) (*codexSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
@@ -52,6 +57,7 @@ func newCodexSession(ctx context.Context, workDir, model, effort, mode, resumeID
 		events:   make(chan core.Event, 64),
 		ctx:      sessionCtx,
 		cancel:   cancel,
+		cmds:     make(map[*exec.Cmd]struct{}),
 	}
 	cs.alive.Store(true)
 
@@ -86,6 +92,7 @@ func (cs *codexSession) Send(prompt string, images []core.ImageAttachment, files
 
 	cmd := exec.CommandContext(cs.ctx, "codex", args...)
 	cmd.Dir = cs.workDir
+	prepareCmdForKill(cmd)
 	if len(cs.extraEnv) > 0 {
 		cmd.Env = core.MergeEnv(os.Environ(), cs.extraEnv)
 	}
@@ -101,6 +108,7 @@ func (cs *codexSession) Send(prompt string, images []core.ImageAttachment, files
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("codexSession: start: %w", err)
 	}
+	cs.addCmd(cmd)
 
 	cs.wg.Add(1)
 	go cs.readLoop(cmd, stdout, &stderrBuf)
@@ -195,6 +203,7 @@ func codexImageExt(mime string) string {
 func (cs *codexSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
 	defer cs.wg.Done()
 	defer func() {
+		defer cs.removeCmd(cmd)
 		if err := cmd.Wait(); err != nil {
 			stderrMsg := strings.TrimSpace(stderrBuf.String())
 			if stderrMsg != "" {
@@ -540,20 +549,66 @@ func (cs *codexSession) Close() error {
 			close(cs.events)
 		})
 		return nil
-	case <-time.After(8 * time.Second):
-		// Do not close(cs.events) here: readLoop may still be in handleEvent
-		// (e.g. turn.completed -> flushPendingAsText) and would panic on send.
-		// See https://github.com/chenhg5/cc-connect/issues/281
-		slog.Warn("codexSession: close timed out, deferring events channel close until readLoop exits",
-			"wait", 8*time.Second)
-		go func() {
-			<-done
+	case <-time.After(codexSessionCloseTimeout):
+		cmds := cs.activeCmds()
+		slog.Warn("codexSession: graceful close timed out, killing active process groups",
+			"wait", codexSessionCloseTimeout,
+			"count", len(cmds))
+		if err := forceKillAllCmds(cmds); err != nil {
+			slog.Debug("codexSession: force kill failed", "error", err)
+		}
+		select {
+		case <-done:
 			cs.closeOnce.Do(func() {
 				close(cs.events)
 			})
-		}()
-		return nil
+			return nil
+		case <-time.After(codexSessionForceKillWait):
+			// Do not close(cs.events) here: readLoop may still be in handleEvent
+			// (e.g. turn.completed -> flushPendingAsText) and would panic on send.
+			slog.Warn("codexSession: force kill wait timed out, deferring events channel close until readLoop exits",
+				"wait", codexSessionForceKillWait)
+			go func() {
+				<-done
+				cs.closeOnce.Do(func() {
+					close(cs.events)
+				})
+			}()
+			return nil
+		}
 	}
+}
+
+func (cs *codexSession) addCmd(cmd *exec.Cmd) {
+	cs.cmdMu.Lock()
+	defer cs.cmdMu.Unlock()
+	cs.cmds[cmd] = struct{}{}
+}
+
+func (cs *codexSession) removeCmd(cmd *exec.Cmd) {
+	cs.cmdMu.Lock()
+	defer cs.cmdMu.Unlock()
+	delete(cs.cmds, cmd)
+}
+
+func (cs *codexSession) activeCmds() []*exec.Cmd {
+	cs.cmdMu.Lock()
+	defer cs.cmdMu.Unlock()
+	cmds := make([]*exec.Cmd, 0, len(cs.cmds))
+	for cmd := range cs.cmds {
+		cmds = append(cmds, cmd)
+	}
+	return cmds
+}
+
+func forceKillAllCmds(cmds []*exec.Cmd) error {
+	var errs []error
+	for _, cmd := range cmds {
+		if err := forceKillCmd(cmd); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // extractItemText extracts text from an item's array field (e.g. "summary" or "content").

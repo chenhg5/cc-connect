@@ -4557,6 +4557,44 @@ func (s *blockingSendAgentSession) Send(_ string, _ []ImageAttachment, _ []FileA
 	return nil
 }
 
+// blockingCloseAgentSession blocks in Close until releaseClose is closed.
+// It is used to verify that /stop detaches the session and stops forwarding
+// events before the underlying agent process has fully exited.
+type blockingCloseAgentSession struct {
+	controllableAgentSession
+	closeStarted chan struct{}
+	releaseClose chan struct{}
+}
+
+func newBlockingCloseSession(id string) *blockingCloseAgentSession {
+	return &blockingCloseAgentSession{
+		controllableAgentSession: controllableAgentSession{
+			sessionID: id,
+			alive:     true,
+			events:    make(chan Event, 16),
+			closed:    make(chan struct{}),
+		},
+		closeStarted: make(chan struct{}, 1),
+		releaseClose: make(chan struct{}),
+	}
+}
+
+func (s *blockingCloseAgentSession) Close() error {
+	s.alive = false
+	select {
+	case s.closeStarted <- struct{}{}:
+	default:
+	}
+	<-s.releaseClose
+	close(s.events)
+	select {
+	case <-s.closed:
+	default:
+		close(s.closed)
+	}
+	return nil
+}
+
 // permSignalInlinePlatform wraps stubInlineButtonPlatform and signals when a
 // SendWithButtons call includes perm:allow, so tests do not read buttonRows
 // from another goroutine (race with the engine under -race).
@@ -5503,6 +5541,76 @@ func TestExecuteCardAction_StopPreservesQuiet(t *testing.T) {
 	}
 	if state.agentSession != nil {
 		t.Error("expected agentSession to be nil after /stop")
+	}
+}
+
+func TestCmdStop_ReturnsWhileCloseBlockedAndStopsEventLoop(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newBlockingCloseSession("stop-blocked")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	key := "test:user1"
+	session := e.sessions.GetOrCreateActive(key)
+
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, key, "msg-1", time.Now(), nil, nil, "ctx")
+		close(done)
+	}()
+
+	stopDone := make(chan struct{})
+	go func() {
+		e.cmdStop(p, &Message{SessionKey: key, ReplyCtx: "ctx"})
+		close(stopDone)
+	}()
+
+	select {
+	case <-sess.closeStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected Close to start after /stop")
+	}
+
+	select {
+	case <-stopDone:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("cmdStop blocked on Close")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("event loop did not stop after /stop")
+	}
+
+	e.interactiveMu.Lock()
+	_, exists := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	if exists {
+		t.Fatal("expected interactive state to be removed after /stop")
+	}
+
+	sess.events <- Event{Type: EventText, Content: "stale output"}
+	sess.events <- Event{Type: EventResult, Content: "stale result", Done: true}
+	time.Sleep(50 * time.Millisecond)
+
+	sent := p.getSent()
+	if len(sent) != 1 || sent[0] != e.i18n.T(MsgExecutionStopped) {
+		t.Fatalf("sent messages = %v, want only execution stopped", sent)
+	}
+
+	close(sess.releaseClose)
+	select {
+	case <-sess.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not finish after release")
 	}
 }
 

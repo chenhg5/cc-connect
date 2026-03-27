@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -359,4 +360,197 @@ func TestCodexSession_ContinueSessionTreatedAsFresh(t *testing.T) {
 	if got := s.CurrentSessionID(); got != "" {
 		t.Errorf("ContinueSession should be treated as fresh: threadID = %q, want empty", got)
 	}
+}
+
+func TestClose_ForceKillsProcessGroupAfterGracefulTimeout(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process-group semantics differ on windows")
+	}
+
+	workDir := t.TempDir()
+	binDir := filepath.Join(workDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"thread-close\"}'\n" +
+		"(sleep 0.12; printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"late child output\"}}'; sleep 30) &\n" +
+		"wait\n"
+	scriptPath := filepath.Join(binDir, "codex")
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	oldCloseTimeout := codexSessionCloseTimeout
+	oldForceKillWait := codexSessionForceKillWait
+	codexSessionCloseTimeout = 50 * time.Millisecond
+	codexSessionForceKillWait = 500 * time.Millisecond
+	t.Cleanup(func() {
+		codexSessionCloseTimeout = oldCloseTimeout
+		codexSessionForceKillWait = oldForceKillWait
+	})
+
+	cs, err := newCodexSession(context.Background(), workDir, "", "", "", "", nil)
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+
+	if err := cs.Send("hello", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	waitForThreadID(t, cs, "thread-close")
+
+	closeStarted := time.Now()
+	if err := cs.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if elapsed := time.Since(closeStarted); elapsed > time.Second {
+		t.Fatalf("Close took too long after force kill: %v", elapsed)
+	}
+
+	select {
+	case evt, ok := <-cs.Events():
+		if ok {
+			t.Fatalf("unexpected event after Close: %#v", evt)
+		}
+	case <-time.After(700 * time.Millisecond):
+		t.Fatal("timed out waiting for events channel to close")
+	}
+}
+
+func TestClose_ForceKillsAllTrackedProcessesAfterCmdOverwrite(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process-group semantics differ on windows")
+	}
+
+	workDir := t.TempDir()
+	binDir := filepath.Join(workDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+
+	startsFile := filepath.Join(workDir, "starts.txt")
+	script := "#!/bin/sh\n" +
+		"prompt=''\n" +
+		"for last\n" +
+		"do\n" +
+		"  prompt=\"$last\"\n" +
+		"done\n" +
+		"printf '%s\\n' \"$prompt\" >> \"$CODEX_STARTS_FILE\"\n" +
+		"if [ \"$prompt\" = \"first\" ]; then\n" +
+		"  printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"thread-overlap\"}'\n" +
+		"  printf '%s\\n' '{\"type\":\"turn.completed\"}'\n" +
+		"fi\n" +
+		"sleep 30\n"
+	scriptPath := filepath.Join(binDir, "codex")
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+
+	t.Setenv("CODEX_STARTS_FILE", startsFile)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	oldCloseTimeout := codexSessionCloseTimeout
+	oldForceKillWait := codexSessionForceKillWait
+	codexSessionCloseTimeout = 50 * time.Millisecond
+	codexSessionForceKillWait = 500 * time.Millisecond
+	t.Cleanup(func() {
+		codexSessionCloseTimeout = oldCloseTimeout
+		codexSessionForceKillWait = oldForceKillWait
+	})
+
+	cs, err := newCodexSession(context.Background(), workDir, "", "", "", "", nil)
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+
+	if err := cs.Send("first", nil, nil); err != nil {
+		t.Fatalf("Send(first): %v", err)
+	}
+	waitForThreadID(t, cs, "thread-overlap")
+	waitForDoneResult(t, cs.Events())
+
+	if err := cs.Send("second", nil, nil); err != nil {
+		t.Fatalf("Send(second): %v", err)
+	}
+	waitForFileLines(t, startsFile, 2)
+
+	closeStarted := time.Now()
+	if err := cs.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if elapsed := time.Since(closeStarted); elapsed > time.Second {
+		t.Fatalf("Close took too long after force killing tracked processes: %v", elapsed)
+	}
+
+	select {
+	case evt, ok := <-cs.Events():
+		if ok {
+			t.Fatalf("unexpected event after Close: %#v", evt)
+		}
+	case <-time.After(700 * time.Millisecond):
+		t.Fatal("timed out waiting for events channel to close")
+	}
+}
+
+func waitForThreadID(t *testing.T, cs *codexSession, want string) {
+	t.Helper()
+	timeout := time.After(5 * time.Second)
+	for {
+		select {
+		case <-time.After(10 * time.Millisecond):
+			if cs.CurrentSessionID() == want {
+				return
+			}
+		case <-timeout:
+			t.Fatalf("timed out waiting for thread id %q", want)
+		}
+	}
+}
+
+func waitForDoneResult(t *testing.T, events <-chan core.Event) {
+	t.Helper()
+	timeout := time.After(5 * time.Second)
+	for {
+		select {
+		case evt, ok := <-events:
+			if !ok {
+				t.Fatal("events channel closed before done result")
+			}
+			if evt.Type == core.EventError {
+				t.Fatalf("unexpected error event: %v", evt.Error)
+			}
+			if evt.Type == core.EventResult && evt.Done {
+				return
+			}
+		case <-timeout:
+			t.Fatal("timed out waiting for done result")
+		}
+	}
+}
+
+func waitForFileLines(t *testing.T, path string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+			count := 0
+			for _, line := range lines {
+				if strings.TrimSpace(line) != "" {
+					count++
+				}
+			}
+			if count >= want {
+				return
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %d lines in %s", want, path)
 }
