@@ -37,7 +37,7 @@ type codexSession struct {
 	alive     atomic.Bool
 	closeOnce sync.Once
 	cmdMu     sync.Mutex
-	cmd       *exec.Cmd
+	cmds      map[*exec.Cmd]struct{}
 
 	pendingMsgs []string // buffered agent_message texts awaiting classification
 }
@@ -57,6 +57,7 @@ func newCodexSession(ctx context.Context, workDir, model, effort, mode, resumeID
 		events:   make(chan core.Event, 64),
 		ctx:      sessionCtx,
 		cancel:   cancel,
+		cmds:     make(map[*exec.Cmd]struct{}),
 	}
 	cs.alive.Store(true)
 
@@ -107,7 +108,7 @@ func (cs *codexSession) Send(prompt string, images []core.ImageAttachment, files
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("codexSession: start: %w", err)
 	}
-	cs.setCmd(cmd)
+	cs.addCmd(cmd)
 
 	cs.wg.Add(1)
 	go cs.readLoop(cmd, stdout, &stderrBuf)
@@ -201,8 +202,8 @@ func codexImageExt(mime string) string {
 
 func (cs *codexSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
 	defer cs.wg.Done()
-	defer cs.clearCmd(cmd)
 	defer func() {
+		defer cs.removeCmd(cmd)
 		if err := cmd.Wait(); err != nil {
 			stderrMsg := strings.TrimSpace(stderrBuf.String())
 			if stderrMsg != "" {
@@ -549,9 +550,11 @@ func (cs *codexSession) Close() error {
 		})
 		return nil
 	case <-time.After(codexSessionCloseTimeout):
-		slog.Warn("codexSession: graceful close timed out, killing process group",
-			"wait", codexSessionCloseTimeout)
-		if err := forceKillCmd(cs.currentCmd()); err != nil {
+		cmds := cs.activeCmds()
+		slog.Warn("codexSession: graceful close timed out, killing active process groups",
+			"wait", codexSessionCloseTimeout,
+			"count", len(cmds))
+		if err := forceKillAllCmds(cmds); err != nil {
 			slog.Debug("codexSession: force kill failed", "error", err)
 		}
 		select {
@@ -576,24 +579,36 @@ func (cs *codexSession) Close() error {
 	}
 }
 
-func (cs *codexSession) setCmd(cmd *exec.Cmd) {
+func (cs *codexSession) addCmd(cmd *exec.Cmd) {
 	cs.cmdMu.Lock()
 	defer cs.cmdMu.Unlock()
-	cs.cmd = cmd
+	cs.cmds[cmd] = struct{}{}
 }
 
-func (cs *codexSession) clearCmd(cmd *exec.Cmd) {
+func (cs *codexSession) removeCmd(cmd *exec.Cmd) {
 	cs.cmdMu.Lock()
 	defer cs.cmdMu.Unlock()
-	if cs.cmd == cmd {
-		cs.cmd = nil
+	delete(cs.cmds, cmd)
+}
+
+func (cs *codexSession) activeCmds() []*exec.Cmd {
+	cs.cmdMu.Lock()
+	defer cs.cmdMu.Unlock()
+	cmds := make([]*exec.Cmd, 0, len(cs.cmds))
+	for cmd := range cs.cmds {
+		cmds = append(cmds, cmd)
 	}
+	return cmds
 }
 
-func (cs *codexSession) currentCmd() *exec.Cmd {
-	cs.cmdMu.Lock()
-	defer cs.cmdMu.Unlock()
-	return cs.cmd
+func forceKillAllCmds(cmds []*exec.Cmd) error {
+	var errs []error
+	for _, cmd := range cmds {
+		if err := forceKillCmd(cmd); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // extractItemText extracts text from an item's array field (e.g. "summary" or "content").
