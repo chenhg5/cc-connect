@@ -388,6 +388,18 @@ func (a *stubModelModeAgent) AvailableReasoningEfforts() []string {
 	return []string{"low", "medium", "high", "xhigh"}
 }
 
+type namedStubModelModeAgent struct {
+	stubModelModeAgent
+	name string
+}
+
+func (a *namedStubModelModeAgent) Name() string {
+	if a.name == "" {
+		return "named-stub-model"
+	}
+	return a.name
+}
+
 type stubWorkDirAgent struct {
 	stubAgent
 	workDir string
@@ -2551,6 +2563,92 @@ func TestCmdModel_DoesNotClaimSuccessWhenModelSaveFails(t *testing.T) {
 	}
 	if !strings.Contains(sent[0], "Failed to change model") {
 		t.Fatalf("reply = %q, want model change failure message", sent[0])
+	}
+}
+
+func TestCmdModel_MultiWorkspaceUsesWorkspaceAgentAndSessions(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	globalAgent := &stubModelModeAgent{model: "gpt-4.1-mini"}
+	e := NewEngine("test", globalAgent, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindingPath)
+
+	wsDir := normalizeWorkspacePath(t.TempDir())
+	channelID := "C-model"
+	e.workspaceBindings.Bind("project:test", channelID, "chan", wsDir)
+
+	ws := e.workspacePool.GetOrCreate(wsDir)
+	wsAgent := &stubModelModeAgent{model: "gpt-4.1-mini"}
+	ws.agent = wsAgent
+	ws.sessions = NewSessionManager("")
+
+	msg := &Message{SessionKey: "feishu:" + channelID + ":u1", ReplyCtx: "ctx"}
+
+	globalSession := e.sessions.GetOrCreateActive(msg.SessionKey)
+	globalSession.SetAgentSessionID("global-session", "test")
+	wsSession := ws.sessions.GetOrCreateActive(msg.SessionKey)
+	wsSession.SetAgentSessionID("workspace-session", "test")
+
+	e.cmdModel(p, msg, []string{"switch", "gpt"})
+
+	if wsAgent.model != "gpt-4.1" {
+		t.Fatalf("workspace agent model = %q, want gpt-4.1", wsAgent.model)
+	}
+	if globalAgent.model != "gpt-4.1-mini" {
+		t.Fatalf("global agent model = %q, want unchanged", globalAgent.model)
+	}
+	if got := ws.sessions.GetOrCreateActive(msg.SessionKey).AgentSessionID; got != "" {
+		t.Fatalf("workspace session id = %q, want cleared", got)
+	}
+	if got := e.sessions.GetOrCreateActive(msg.SessionKey).AgentSessionID; got != "global-session" {
+		t.Fatalf("global session id = %q, want untouched", got)
+	}
+}
+
+func TestGetOrCreateWorkspaceAgent_InheritsActiveProvider(t *testing.T) {
+	agentName := "test-workspace-provider-inherit"
+	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) {
+		agent := &namedStubModelModeAgent{name: agentName}
+		if model, ok := opts["model"].(string); ok {
+			agent.model = model
+		}
+		if mode, ok := opts["mode"].(string); ok {
+			agent.mode = mode
+		}
+		return agent, nil
+	})
+
+	globalAgent := &namedStubModelModeAgent{
+		name: agentName,
+		stubModelModeAgent: stubModelModeAgent{
+			model: "gpt-4.1-mini",
+			mode:  "default",
+			providers: []ProviderConfig{
+				{Name: "openai", Model: "gpt-4.1-mini"},
+				{Name: "azure", Model: "gpt-4.1"},
+			},
+			active: "azure",
+		},
+	}
+	e := NewEngine("test", globalAgent, []Platform{&stubPlatformEngine{n: "plain"}}, "", LangEnglish)
+	e.SetMultiWorkspace(t.TempDir(), filepath.Join(t.TempDir(), "bindings.json"))
+
+	wsAgentRaw, _, err := e.getOrCreateWorkspaceAgent(normalizeWorkspacePath(t.TempDir()))
+	if err != nil {
+		t.Fatalf("getOrCreateWorkspaceAgent returned error: %v", err)
+	}
+
+	wsAgent, ok := wsAgentRaw.(*namedStubModelModeAgent)
+	if !ok {
+		t.Fatalf("workspace agent type = %T, want *namedStubModelModeAgent", wsAgentRaw)
+	}
+	if wsAgent.model != "gpt-4.1-mini" {
+		t.Fatalf("workspace model = %q, want inherited global model", wsAgent.model)
+	}
+	if got := wsAgent.GetActiveProvider(); got == nil || got.Name != "azure" {
+		t.Fatalf("workspace active provider = %#v, want azure", got)
 	}
 }
 
@@ -4913,6 +5011,89 @@ func TestExecuteCardAction_ModelCleansUpWithInteractiveKey(t *testing.T) {
 	e.interactiveMu.Unlock()
 	if exists {
 		t.Error("expected interactive state to be cleaned up after /model")
+	}
+}
+
+func TestExecuteCardAction_ModelUsesWorkspaceContext(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	globalAgent := &stubModelModeAgent{model: "global-old"}
+	e := NewEngine("test", globalAgent, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindingPath)
+
+	wsDir := normalizeWorkspacePath(t.TempDir())
+	channelID := "channel1"
+	sessionKey := "feishu:" + channelID + ":user1"
+	e.workspaceBindings.Bind("project:test", channelID, "chan", wsDir)
+
+	ws := e.workspacePool.GetOrCreate(wsDir)
+	wsAgent := &stubModelModeAgent{model: "workspace-old"}
+	ws.agent = wsAgent
+	ws.sessions = NewSessionManager("")
+
+	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
+	e.interactiveMu.Lock()
+	e.interactiveStates[interactiveKey] = &interactiveState{}
+	e.interactiveMu.Unlock()
+
+	globalSession := e.sessions.GetOrCreateActive(sessionKey)
+	globalSession.SetAgentSessionID("global-session", "test")
+	wsSession := ws.sessions.GetOrCreateActive(sessionKey)
+	wsSession.SetAgentSessionID("workspace-session", "test")
+
+	e.executeCardAction("/model", "switch 1", sessionKey)
+
+	if wsAgent.model != "gpt-4.1" {
+		t.Fatalf("workspace agent model = %q, want gpt-4.1", wsAgent.model)
+	}
+	if globalAgent.model != "global-old" {
+		t.Fatalf("global agent model = %q, want unchanged", globalAgent.model)
+	}
+	if got := ws.sessions.GetOrCreateActive(sessionKey).AgentSessionID; got != "" {
+		t.Fatalf("workspace session id = %q, want cleared", got)
+	}
+	if got := e.sessions.GetOrCreateActive(sessionKey).AgentSessionID; got != "global-session" {
+		t.Fatalf("global session id = %q, want untouched", got)
+	}
+
+	e.interactiveMu.Lock()
+	_, exists := e.interactiveStates[interactiveKey]
+	e.interactiveMu.Unlock()
+	if exists {
+		t.Error("expected workspace interactive state to be cleaned up after /model")
+	}
+}
+
+func TestHandleCardNav_ModelCardUsesWorkspaceAgent(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	globalAgent := &stubModelModeAgent{model: "global-model"}
+	e := NewEngine("test", globalAgent, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindingPath)
+
+	wsDir := normalizeWorkspacePath(t.TempDir())
+	channelID := "channel-nav"
+	sessionKey := "feishu:" + channelID + ":user1"
+	e.workspaceBindings.Bind("project:test", channelID, "chan", wsDir)
+
+	ws := e.workspacePool.GetOrCreate(wsDir)
+	ws.agent = &stubModelModeAgent{model: "workspace-model"}
+	ws.sessions = NewSessionManager("")
+
+	card := e.handleCardNav("nav:/model", sessionKey)
+	if card == nil {
+		t.Fatal("expected /model card")
+	}
+	text := card.RenderText()
+	if !strings.Contains(text, "workspace-model") {
+		t.Fatalf("model card text = %q, want workspace model", text)
+	}
+	if strings.Contains(text, "global-model") {
+		t.Fatalf("model card text = %q, should not use global model", text)
 	}
 }
 
