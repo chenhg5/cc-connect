@@ -1225,8 +1225,8 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	var wsSessions *SessionManager
 	var resolvedWorkspace string
 	if e.multiWorkspace {
-		channelID := extractChannelID(msg.SessionKey)
-		channelKey := extractWorkspaceChannelKey(msg.SessionKey)
+		channelID := effectiveChannelID(msg)
+		channelKey := effectiveWorkspaceChannelKey(msg)
 		workspace, channelName, err := e.resolveWorkspace(p, channelID)
 		if err != nil {
 			slog.Error("workspace resolution failed", "err", err)
@@ -2914,8 +2914,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 }
 
 func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string) {
-	channelID := extractChannelID(msg.SessionKey)
-	channelKey := extractWorkspaceChannelKey(msg.SessionKey)
+	channelID := effectiveChannelID(msg)
+	channelKey := effectiveWorkspaceChannelKey(msg)
 	projectKey := "project:" + e.name
 	resolveChannelName := func() func() string {
 		resolved := false
@@ -3372,7 +3372,7 @@ func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
 	// In multi-workspace mode, resolve workspace directory for this channel
 	var workDir string
 	if e.multiWorkspace {
-		channelKey := extractWorkspaceChannelKey(msg.SessionKey)
+		channelKey := effectiveWorkspaceChannelKey(msg)
 		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
 			workDir = normalizeWorkspacePath(b.Workspace)
 		}
@@ -4631,10 +4631,14 @@ func (e *Engine) GetAllCommands() []BotCommandInfo {
 
 	// Collect skills
 	for _, s := range e.skills.ListAll() {
-		if seenCmds[strings.ToLower(s.Name)] {
+		lowerName := strings.ToLower(s.Name)
+		if seenCmds[lowerName] {
 			continue
 		}
-		seenCmds[strings.ToLower(s.Name)] = true
+		if disabledCmds[lowerName] {
+			continue
+		}
+		seenCmds[lowerName] = true
 
 		desc := s.Description
 		if desc == "" {
@@ -9140,14 +9144,32 @@ func extractWorkspaceChannelKey(sessionKey string) string {
 	return workspaceChannelKey(extractPlatformName(sessionKey), extractChannelID(sessionKey))
 }
 
+// effectiveChannelID returns the channel identifier from a Message.
+// It prefers the platform-provided ChannelKey (e.g. "chatID:threadID" for forum topics)
+// and falls back to parsing the session key.
+func effectiveChannelID(msg *Message) string {
+	if msg.ChannelKey != "" {
+		return msg.ChannelKey
+	}
+	return extractChannelID(msg.SessionKey)
+}
+
+// effectiveWorkspaceChannelKey returns the workspace binding key from a Message.
+func effectiveWorkspaceChannelKey(msg *Message) string {
+	if msg.ChannelKey != "" {
+		return workspaceChannelKey(msg.Platform, msg.ChannelKey)
+	}
+	return extractWorkspaceChannelKey(msg.SessionKey)
+}
+
 // commandContext resolves the appropriate agent, session manager, and interactive key
 // for a command. In multi-workspace mode, it routes to the bound workspace if present.
 func (e *Engine) commandContext(p Platform, msg *Message) (Agent, *SessionManager, string, error) {
 	if !e.multiWorkspace {
 		return e.agent, e.sessions, msg.SessionKey, nil
 	}
-	channelID := extractChannelID(msg.SessionKey)
-	channelKey := extractWorkspaceChannelKey(msg.SessionKey)
+	channelID := effectiveChannelID(msg)
+	channelKey := effectiveWorkspaceChannelKey(msg)
 	if channelKey == "" || channelID == "" {
 		return e.agent, e.sessions, msg.SessionKey, nil
 	}
@@ -9271,7 +9293,7 @@ func (e *Engine) resolveWorkspace(p Platform, channelID string) (string, string,
 // handleWorkspaceInitFlow manages the conversational workspace setup.
 // Returns true if the message was consumed by the init flow.
 func (e *Engine) handleWorkspaceInitFlow(p Platform, msg *Message, channelName string) bool {
-	channelKey := extractWorkspaceChannelKey(msg.SessionKey)
+	channelKey := effectiveWorkspaceChannelKey(msg)
 
 	e.initFlowsMu.Lock()
 	flow, exists := e.initFlows[channelKey]
