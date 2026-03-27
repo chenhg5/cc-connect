@@ -684,6 +684,50 @@ func main() {
 		})
 		mgmtSrv.SetGetProjectConfig(config.GetProjectConfigDetails)
 		mgmtSrv.SetConfigFilePath(configPath)
+		mgmtSrv.SetGetGlobalSettings(config.GetGlobalSettings)
+		mgmtSrv.SetSaveGlobalSettings(func(updates map[string]any) error {
+			u := config.GlobalSettingsUpdate{}
+			if v, ok := updates["language"].(string); ok {
+				u.Language = &v
+			}
+			if v, ok := updates["quiet"].(bool); ok {
+				u.Quiet = &v
+			}
+			if v, ok := updates["attachment_send"].(string); ok {
+				u.AttachmentSend = &v
+			}
+			if v, ok := updates["log_level"].(string); ok {
+				u.LogLevel = &v
+			}
+			if v, ok := updates["idle_timeout_mins"].(float64); ok {
+				iv := int(v)
+				u.IdleTimeoutMins = &iv
+			}
+			if v, ok := updates["thinking_max_len"].(float64); ok {
+				iv := int(v)
+				u.ThinkingMaxLen = &iv
+			}
+			if v, ok := updates["tool_max_len"].(float64); ok {
+				iv := int(v)
+				u.ToolMaxLen = &iv
+			}
+			if v, ok := updates["stream_preview_enabled"].(bool); ok {
+				u.StreamPreviewOn = &v
+			}
+			if v, ok := updates["stream_preview_interval_ms"].(float64); ok {
+				iv := int(v)
+				u.StreamPreviewIntMs = &iv
+			}
+			if v, ok := updates["rate_limit_max_messages"].(float64); ok {
+				iv := int(v)
+				u.RateLimitMax = &iv
+			}
+			if v, ok := updates["rate_limit_window_secs"].(float64); ok {
+				iv := int(v)
+				u.RateLimitWindow = &iv
+			}
+			return config.SaveGlobalSettings(u)
+		})
 		mgmtSrv.Start()
 	}
 

@@ -15,7 +15,8 @@
     "platforms": "Plataformas",
     "projects": "Proyectos",
     "bridgeAdapters": "Adaptadores de puente",
-    "noData": "No hay datos disponibles"
+    "noData": "No hay datos disponibles",
+    "recentSessions": "Sesiones recientes"
   },
   "projects": {
     "title": "Proyectos",
@@ -142,7 +143,8 @@
     "restartConfirm": "¿Reiniciar el servicio? Las sesiones activas pueden interrumpirse.",
     "reloadConfirm": "¿Recargar la configuración desde el disco?",
     "level": "Nivel de registro",
-    "limit": "Límite de líneas"
+    "limit": "Límite de líneas",
+    "rawConfig": "Config. sin procesar"
   },
   "login": {
     "title": "CC-Connect Admin",
@@ -276,6 +278,35 @@
     "skills": "Habilidades",
     "upgrade": "Actualizar",
     "deleteMode": "Modo eliminación"
+  },
+  "settings": {
+    "title": "Ajustes globales",
+    "general": "General",
+    "language": "Idioma",
+    "quiet": "Modo silencioso",
+    "quietHint": "Suprimir notificaciones de inicio/fin globalmente",
+    "attachmentSend": "Envío de adjuntos",
+    "attachmentSendHint": "Enviar archivos/imágenes adjuntos de vuelta a la plataforma",
+    "default": "predeterminado",
+    "idleTimeout": "Tiempo de inactividad (min)",
+    "idleTimeoutHint": "Detener agente automáticamente tras N minutos de inactividad; 0 = desactivado",
+    "display": "Visualización",
+    "thinkingMaxLen": "Longitud máx. de pensamiento",
+    "thinkingMaxLenHint": "Caracteres máximos para mensajes de pensamiento; 0 = sin truncar",
+    "toolMaxLen": "Longitud máx. de herramientas",
+    "toolMaxLenHint": "Caracteres máximos para mensajes de uso de herramientas; 0 = sin truncar",
+    "streamPreview": "Vista previa en tiempo real",
+    "streamPreviewEnabled": "Activar",
+    "streamPreviewEnabledHint": "Mostrar actualizaciones en tiempo real en IM",
+    "streamPreviewInterval": "Intervalo (ms)",
+    "streamPreviewIntervalHint": "Milisegundos mínimos entre actualizaciones de vista previa",
+    "rateLimit": "Límite de frecuencia",
+    "rlMaxMessages": "Máx. mensajes",
+    "rlMaxMessagesHint": "Máx. mensajes por ventana; 0 = desactivado",
+    "rlWindowSecs": "Ventana (seg)",
+    "rlWindowSecsHint": "Ventana de tiempo en segundos",
+    "log": "Registro",
+    "logLevel": "Nivel de registro"
   },
   "theme": {
     "light": "Claro",

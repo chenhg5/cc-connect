@@ -49,6 +49,8 @@ type ManagementServer struct {
 	saveProjectSettings  func(projectName string, update ProjectSettingsUpdate) error
 	getProjectConfig     func(projectName string) map[string]any
 	configFilePath       string
+	getGlobalSettings    func() map[string]any
+	saveGlobalSettings   func(map[string]any) error
 }
 
 // NewManagementServer creates a new management API server.
@@ -98,6 +100,14 @@ func (m *ManagementServer) SetGetProjectConfig(fn func(string) map[string]any) {
 	m.getProjectConfig = fn
 }
 
+func (m *ManagementServer) SetGetGlobalSettings(fn func() map[string]any) {
+	m.getGlobalSettings = fn
+}
+
+func (m *ManagementServer) SetSaveGlobalSettings(fn func(map[string]any) error) {
+	m.saveGlobalSettings = fn
+}
+
 func (m *ManagementServer) Start() {
 	mux := http.NewServeMux()
 	prefix := "/api/v1"
@@ -107,6 +117,7 @@ func (m *ManagementServer) Start() {
 	mux.HandleFunc(prefix+"/restart", m.wrap(m.handleRestart))
 	mux.HandleFunc(prefix+"/reload", m.wrap(m.handleReload))
 	mux.HandleFunc(prefix+"/config", m.wrap(m.handleConfig))
+	mux.HandleFunc(prefix+"/settings", m.wrap(m.handleGlobalSettings))
 
 	// Projects
 	mux.HandleFunc(prefix+"/projects", m.wrap(m.handleProjects))
@@ -331,6 +342,40 @@ func (m *ManagementServer) handleConfig(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
+}
+
+func (m *ManagementServer) handleGlobalSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if m.getGlobalSettings == nil {
+			mgmtError(w, http.StatusServiceUnavailable, "global settings not available")
+			return
+		}
+		mgmtJSON(w, http.StatusOK, m.getGlobalSettings())
+
+	case http.MethodPatch:
+		if m.saveGlobalSettings == nil {
+			mgmtError(w, http.StatusServiceUnavailable, "global settings save not available")
+			return
+		}
+		var updates map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
+			mgmtError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+		if err := m.saveGlobalSettings(updates); err != nil {
+			mgmtError(w, http.StatusInternalServerError, "save: "+err.Error())
+			return
+		}
+		if m.getGlobalSettings != nil {
+			mgmtJSON(w, http.StatusOK, m.getGlobalSettings())
+		} else {
+			mgmtOK(w, "settings saved")
+		}
+
+	default:
+		mgmtError(w, http.StatusMethodNotAllowed, "GET or PATCH only")
+	}
 }
 
 // ── Project endpoints ─────────────────────────────────────────

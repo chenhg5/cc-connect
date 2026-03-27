@@ -15,7 +15,8 @@
     "platforms": "Platforms",
     "projects": "Projects",
     "bridgeAdapters": "Bridge adapters",
-    "noData": "No data available"
+    "noData": "No data available",
+    "recentSessions": "Recent sessions"
   },
   "projects": {
     "title": "Projects",
@@ -142,7 +143,8 @@
     "restartConfirm": "Restart the service? Active sessions may be interrupted.",
     "reloadConfirm": "Reload configuration from disk?",
     "level": "Log level",
-    "limit": "Line limit"
+    "limit": "Line limit",
+    "rawConfig": "Raw Config"
   },
   "login": {
     "title": "CC-Connect Admin",
@@ -276,6 +278,35 @@
     "skills": "Skills",
     "upgrade": "Upgrade",
     "deleteMode": "Delete mode"
+  },
+  "settings": {
+    "title": "Global Settings",
+    "general": "General",
+    "language": "Language",
+    "quiet": "Quiet mode",
+    "quietHint": "Suppress start / end notifications globally",
+    "attachmentSend": "Attachment send",
+    "attachmentSendHint": "Send file/image attachments back to platform",
+    "default": "default",
+    "idleTimeout": "Idle timeout (min)",
+    "idleTimeoutHint": "Auto-stop agent after N minutes of inactivity; 0 = disabled",
+    "display": "Display",
+    "thinkingMaxLen": "Thinking max length",
+    "thinkingMaxLenHint": "Max characters for thinking messages; 0 = no truncation",
+    "toolMaxLen": "Tool max length",
+    "toolMaxLenHint": "Max characters for tool use messages; 0 = no truncation",
+    "streamPreview": "Stream preview",
+    "streamPreviewEnabled": "Enable",
+    "streamPreviewEnabledHint": "Show real-time streaming updates in IM",
+    "streamPreviewInterval": "Interval (ms)",
+    "streamPreviewIntervalHint": "Minimum milliseconds between preview updates",
+    "rateLimit": "Rate limit",
+    "rlMaxMessages": "Max messages",
+    "rlMaxMessagesHint": "Max messages per window; 0 = disabled",
+    "rlWindowSecs": "Window (sec)",
+    "rlWindowSecsHint": "Time window in seconds",
+    "log": "Log",
+    "logLevel": "Log level"
   },
   "theme": {
     "light": "Light",

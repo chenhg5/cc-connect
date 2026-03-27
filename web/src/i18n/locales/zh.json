@@ -15,7 +15,8 @@
     "platforms": "平台",
     "projects": "项目",
     "bridgeAdapters": "桥接适配器",
-    "noData": "暂无数据"
+    "noData": "暂无数据",
+    "recentSessions": "最近会话"
   },
   "projects": {
     "title": "项目",
@@ -142,7 +143,8 @@
     "restartConfirm": "确定要重启服务吗？进行中的会话可能会中断。",
     "reloadConfirm": "从磁盘重新加载配置？",
     "level": "日志级别",
-    "limit": "行数限制"
+    "limit": "行数限制",
+    "rawConfig": "原始配置"
   },
   "login": {
     "title": "CC-Connect 管理后台",
@@ -276,6 +278,35 @@
     "skills": "技能",
     "upgrade": "升级",
     "deleteMode": "删除模式"
+  },
+  "settings": {
+    "title": "全局设置",
+    "general": "通用",
+    "language": "语言",
+    "quiet": "静默模式",
+    "quietHint": "全局关闭开始/结束通知",
+    "attachmentSend": "附件回传",
+    "attachmentSendHint": "将文件/图片附件回传到平台",
+    "default": "默认",
+    "idleTimeout": "空闲超时（分钟）",
+    "idleTimeoutHint": "Agent 空闲 N 分钟后自动停止；0 = 不启用",
+    "display": "显示",
+    "thinkingMaxLen": "思考最大长度",
+    "thinkingMaxLenHint": "思考消息的最大字符数；0 = 不截断",
+    "toolMaxLen": "工具最大长度",
+    "toolMaxLenHint": "工具调用消息的最大字符数；0 = 不截断",
+    "streamPreview": "流式预览",
+    "streamPreviewEnabled": "启用",
+    "streamPreviewEnabledHint": "在 IM 中显示实时流式更新",
+    "streamPreviewInterval": "间隔（毫秒）",
+    "streamPreviewIntervalHint": "预览更新之间的最小毫秒数",
+    "rateLimit": "频率限制",
+    "rlMaxMessages": "最大消息数",
+    "rlMaxMessagesHint": "每个窗口内的最大消息数；0 = 不限制",
+    "rlWindowSecs": "窗口时间（秒）",
+    "rlWindowSecsHint": "时间窗口的秒数",
+    "log": "日志",
+    "logLevel": "日志级别"
   },
   "theme": {
     "light": "浅色",

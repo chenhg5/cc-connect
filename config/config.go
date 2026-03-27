@@ -1977,3 +1977,133 @@ func writeRawConfig(content string) error {
 	}
 	return os.Rename(tmpPath, ConfigPath)
 }
+
+// GetGlobalSettings reads global settings from config.toml.
+func GetGlobalSettings() map[string]any {
+	if ConfigPath == "" {
+		return nil
+	}
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return nil
+	}
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return nil
+	}
+	result := map[string]any{
+		"language":        cfg.Language,
+		"attachment_send": cfg.AttachmentSend,
+		"log_level":       cfg.Log.Level,
+	}
+	if cfg.Quiet != nil {
+		result["quiet"] = *cfg.Quiet
+	} else {
+		result["quiet"] = false
+	}
+	if cfg.IdleTimeoutMins != nil {
+		result["idle_timeout_mins"] = *cfg.IdleTimeoutMins
+	} else {
+		result["idle_timeout_mins"] = 120
+	}
+	// Display
+	if cfg.Display.ThinkingMaxLen != nil {
+		result["thinking_max_len"] = *cfg.Display.ThinkingMaxLen
+	} else {
+		result["thinking_max_len"] = 300
+	}
+	if cfg.Display.ToolMaxLen != nil {
+		result["tool_max_len"] = *cfg.Display.ToolMaxLen
+	} else {
+		result["tool_max_len"] = 500
+	}
+	// Stream preview
+	spEnabled := true
+	if cfg.StreamPreview.Enabled != nil {
+		spEnabled = *cfg.StreamPreview.Enabled
+	}
+	result["stream_preview_enabled"] = spEnabled
+	spInterval := 1500
+	if cfg.StreamPreview.IntervalMs != nil {
+		spInterval = *cfg.StreamPreview.IntervalMs
+	}
+	result["stream_preview_interval_ms"] = spInterval
+	// Rate limit
+	rlMax := 20
+	if cfg.RateLimit.MaxMessages != nil {
+		rlMax = *cfg.RateLimit.MaxMessages
+	}
+	result["rate_limit_max_messages"] = rlMax
+	rlWindow := 60
+	if cfg.RateLimit.WindowSecs != nil {
+		rlWindow = *cfg.RateLimit.WindowSecs
+	}
+	result["rate_limit_window_secs"] = rlWindow
+	return result
+}
+
+// GlobalSettingsUpdate holds fields to update in global config.
+type GlobalSettingsUpdate struct {
+	Language           *string `json:"language"`
+	Quiet              *bool   `json:"quiet"`
+	AttachmentSend     *string `json:"attachment_send"`
+	LogLevel           *string `json:"log_level"`
+	IdleTimeoutMins    *int    `json:"idle_timeout_mins"`
+	ThinkingMaxLen     *int    `json:"thinking_max_len"`
+	ToolMaxLen         *int    `json:"tool_max_len"`
+	StreamPreviewOn    *bool   `json:"stream_preview_enabled"`
+	StreamPreviewIntMs *int    `json:"stream_preview_interval_ms"`
+	RateLimitMax       *int    `json:"rate_limit_max_messages"`
+	RateLimitWindow    *int    `json:"rate_limit_window_secs"`
+}
+
+// SaveGlobalSettings persists global settings to config.toml.
+func SaveGlobalSettings(u GlobalSettingsUpdate) error {
+	configMu.Lock()
+	defer configMu.Unlock()
+	if ConfigPath == "" {
+		return fmt.Errorf("config path not set")
+	}
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+	if u.Language != nil {
+		cfg.Language = *u.Language
+	}
+	if u.Quiet != nil {
+		cfg.Quiet = u.Quiet
+	}
+	if u.AttachmentSend != nil {
+		cfg.AttachmentSend = *u.AttachmentSend
+	}
+	if u.LogLevel != nil {
+		cfg.Log.Level = *u.LogLevel
+	}
+	if u.IdleTimeoutMins != nil {
+		cfg.IdleTimeoutMins = u.IdleTimeoutMins
+	}
+	if u.ThinkingMaxLen != nil {
+		cfg.Display.ThinkingMaxLen = u.ThinkingMaxLen
+	}
+	if u.ToolMaxLen != nil {
+		cfg.Display.ToolMaxLen = u.ToolMaxLen
+	}
+	if u.StreamPreviewOn != nil {
+		cfg.StreamPreview.Enabled = u.StreamPreviewOn
+	}
+	if u.StreamPreviewIntMs != nil {
+		cfg.StreamPreview.IntervalMs = u.StreamPreviewIntMs
+	}
+	if u.RateLimitMax != nil {
+		cfg.RateLimit.MaxMessages = u.RateLimitMax
+	}
+	if u.RateLimitWindow != nil {
+		cfg.RateLimit.WindowSecs = u.RateLimitWindow
+	}
+	return saveConfig(cfg)
+}

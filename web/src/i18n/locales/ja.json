@@ -15,7 +15,8 @@
     "platforms": "プラットフォーム",
     "projects": "プロジェクト",
     "bridgeAdapters": "ブリッジアダプター",
-    "noData": "データがありません"
+    "noData": "データがありません",
+    "recentSessions": "最近のセッション"
   },
   "projects": {
     "title": "プロジェクト",
@@ -142,7 +143,8 @@
     "restartConfirm": "サービスを再起動しますか？アクティブなセッションが中断される場合があります。",
     "reloadConfirm": "ディスクから設定を再読み込みしますか？",
     "level": "ログレベル",
-    "limit": "行数の上限"
+    "limit": "行数の上限",
+    "rawConfig": "生の設定"
   },
   "login": {
     "title": "CC-Connect 管理コンソール",
@@ -276,6 +278,35 @@
     "skills": "スキル",
     "upgrade": "アップグレード",
     "deleteMode": "削除モード"
+  },
+  "settings": {
+    "title": "グローバル設定",
+    "general": "一般",
+    "language": "言語",
+    "quiet": "サイレントモード",
+    "quietHint": "開始/終了通知をグローバルで抑制",
+    "attachmentSend": "添付ファイル送信",
+    "attachmentSendHint": "ファイル/画像の添付ファイルをプラットフォームに返送",
+    "default": "デフォルト",
+    "idleTimeout": "アイドルタイムアウト（分）",
+    "idleTimeoutHint": "N分間アイドル後にエージェントを自動停止；0 = 無効",
+    "display": "表示",
+    "thinkingMaxLen": "思考の最大文字数",
+    "thinkingMaxLenHint": "思考メッセージの最大文字数；0 = 制限なし",
+    "toolMaxLen": "ツールの最大文字数",
+    "toolMaxLenHint": "ツール使用メッセージの最大文字数；0 = 制限なし",
+    "streamPreview": "ストリームプレビュー",
+    "streamPreviewEnabled": "有効化",
+    "streamPreviewEnabledHint": "IMでリアルタイムのストリーミング更新を表示",
+    "streamPreviewInterval": "間隔（ミリ秒）",
+    "streamPreviewIntervalHint": "プレビュー更新間の最小ミリ秒数",
+    "rateLimit": "レート制限",
+    "rlMaxMessages": "最大メッセージ数",
+    "rlMaxMessagesHint": "ウィンドウあたりの最大メッセージ数；0 = 無効",
+    "rlWindowSecs": "ウィンドウ（秒）",
+    "rlWindowSecsHint": "タイムウィンドウの秒数",
+    "log": "ログ",
+    "logLevel": "ログレベル"
   },
   "theme": {
     "light": "ライト",
