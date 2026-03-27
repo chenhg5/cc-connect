@@ -55,7 +55,7 @@ func TestBuildExecArgs_IncludesReasoningEffort(t *testing.T) {
 		"--json",
 		"--cd",
 		"/tmp/project",
-		"hello",
+		"-",
 	}
 	if len(args) != len(want) {
 		t.Fatalf("args len = %d, want %d, args=%v", len(args), len(want), args)
@@ -82,9 +82,9 @@ func TestBuildExecArgs_ResumeOmitsCdFlag(t *testing.T) {
 		}
 	}
 
-	// --json and prompt must still be present.
-	if !containsSequence(args, []string{"--json", "hello"}) {
-		t.Fatalf("resume args missing --json + prompt: %v", args)
+	// --json and stdin marker must still be present.
+	if !containsSequence(args, []string{"--json", "-"}) {
+		t.Fatalf("resume args missing --json + stdin marker: %v", args)
 	}
 }
 
@@ -144,8 +144,8 @@ func TestSend_WithImages_PassesImageArgsAndDefaultPrompt(t *testing.T) {
 	if string(data) != string(img.Data) {
 		t.Fatalf("staged image content = %q, want %q", string(data), string(img.Data))
 	}
-	if got := args[len(args)-1]; got != "Please analyze the attached image(s)." {
-		t.Fatalf("prompt = %q, want default image prompt; args=%v", got, args)
+	if got := args[len(args)-1]; got != "-" {
+		t.Fatalf("last arg = %q, want stdin marker '-'; args=%v", got, args)
 	}
 }
 
@@ -185,13 +185,61 @@ func TestSend_ResumeWithImages_PlacesSessionBeforeImageFlags(t *testing.T) {
 	tidIndex := indexOf(args, "thread-123")
 	imageIndex := indexOf(args, "--image")
 	jsonIndex := indexOf(args, "--json")
-	promptIndex := indexOf(args, "describe this")
+	promptIndex := indexOf(args, "-")
 	if tidIndex == -1 || imageIndex == -1 || jsonIndex == -1 || promptIndex == -1 {
-		t.Fatalf("missing resume/image/json/prompt args: %v", args)
+		t.Fatalf("missing resume/image/json/stdin args: %v", args)
 	}
 	// Verify order: thread-id -> --image -> --json -> --cd -> prompt
 	if !(tidIndex < imageIndex && imageIndex < jsonIndex && jsonIndex < promptIndex) {
 		t.Fatalf("unexpected arg order: %v", args)
+	}
+}
+
+func TestSend_UsesStdinForMultilinePrompt(t *testing.T) {
+	workDir := t.TempDir()
+	binDir := filepath.Join(workDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+
+	argsFile := filepath.Join(workDir, "args.txt")
+	stdinFile := filepath.Join(workDir, "stdin.txt")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$@\" > \"$CODEX_ARGS_FILE\"\n" +
+		"cat > \"$CODEX_STDIN_FILE\"\n" +
+		"printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"thread-stdin\"}'\n" +
+		"printf '%s\\n' '{\"type\":\"turn.completed\"}'\n"
+	scriptPath := filepath.Join(binDir, "codex")
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+
+	t.Setenv("CODEX_ARGS_FILE", argsFile)
+	t.Setenv("CODEX_STDIN_FILE", stdinFile)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cs, err := newCodexSession(context.Background(), workDir, "", "", "", "thread-stdin", nil)
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+	defer cs.Close()
+
+	prompt := "line1\nline2"
+	if err := cs.Send(prompt, nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	args := waitForArgsFile(t, argsFile)
+	if !containsSequence(args, []string{"--json", "-"}) {
+		t.Fatalf("args missing stdin marker: %v", args)
+	}
+
+	data, err := waitForFileContent(stdinFile)
+	if err != nil {
+		t.Fatalf("wait for stdin file: %v", err)
+	}
+	if string(data) != prompt {
+		t.Fatalf("stdin content = %q, want %q", string(data), prompt)
 	}
 }
 
@@ -311,6 +359,18 @@ func waitForArgsFile(t *testing.T, path string) []string {
 	}
 	t.Fatalf("timed out waiting for non-empty args file: %s", path)
 	return nil
+}
+
+func waitForFileContent(path string) ([]byte, error) {
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			return data, nil
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return nil, os.ErrNotExist
 }
 
 func containsSequence(args, want []string) bool {
