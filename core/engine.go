@@ -3181,13 +3181,12 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 	if len(args) > 0 {
 		name = strings.Join(args, " ")
 	}
-	s := sessions.NewSession(msg.SessionKey, name)
+	sessions.NewSession(msg.SessionKey, name)
 	if name != "" {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgNewSessionCreatedName), name))
 	} else {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNewSessionCreated))
 	}
-	_ = s
 }
 
 const listPageSize = 20
