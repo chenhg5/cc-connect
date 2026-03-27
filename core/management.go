@@ -13,6 +13,19 @@ import (
 	"time"
 )
 
+// ProjectSettingsUpdate is passed to SetSaveProjectSettings to persist management API PATCH fields.
+// The implementation (typically in cmd/cc-connect) maps this to config.ProjectSettingsUpdate.
+type ProjectSettingsUpdate struct {
+	Quiet                *bool
+	Language             *string
+	AdminFrom            *string
+	DisabledCommands     []string
+	WorkDir              *string
+	Mode                 *string
+	ShowContextIndicator *bool
+	PlatformAllowFrom    map[string]string
+}
+
 // ManagementServer provides an HTTP REST API for external management tools
 // (web dashboards, TUI clients, GUI desktop apps, Mac tray apps, etc.).
 type ManagementServer struct {
@@ -31,9 +44,10 @@ type ManagementServer struct {
 
 	setupFeishuSave      func(req FeishuSetupSaveRequest) error
 	setupWeixinSave      func(req WeixinSetupSaveRequest) error
-	addPlatformToProject func(projectName, platType string, opts map[string]any) error
+	addPlatformToProject func(projectName, platType string, opts map[string]any, workDir, agentType string) error
 	removeProject        func(projectName string) error
-	saveProjectSettings  func(projectName string, quiet *bool, language, adminFrom *string, disabledCommands []string) error
+	saveProjectSettings  func(projectName string, update ProjectSettingsUpdate) error
+	getProjectConfig     func(projectName string) map[string]any
 	configFilePath       string
 }
 
@@ -64,7 +78,7 @@ func (m *ManagementServer) SetSetupWeixinSave(fn func(WeixinSetupSaveRequest) er
 	m.setupWeixinSave = fn
 }
 
-func (m *ManagementServer) SetAddPlatformToProject(fn func(string, string, map[string]any) error) {
+func (m *ManagementServer) SetAddPlatformToProject(fn func(string, string, map[string]any, string, string) error) {
 	m.addPlatformToProject = fn
 }
 
@@ -76,8 +90,12 @@ func (m *ManagementServer) SetConfigFilePath(path string) {
 	m.configFilePath = path
 }
 
-func (m *ManagementServer) SetSaveProjectSettings(fn func(string, *bool, *string, *string, []string) error) {
+func (m *ManagementServer) SetSaveProjectSettings(fn func(string, ProjectSettingsUpdate) error) {
 	m.saveProjectSettings = fn
+}
+
+func (m *ManagementServer) SetGetProjectConfig(fn func(string) map[string]any) {
+	m.getProjectConfig = fn
 }
 
 func (m *ManagementServer) Start() {
@@ -459,16 +477,39 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 			"disabled_commands": e.GetDisabledCommands(),
 		}
 
+		var workDir string
+		if wd, ok := e.agent.(interface{ GetWorkDir() string }); ok {
+			workDir = wd.GetWorkDir()
+		}
+		var agentMode string
+		if am, ok := e.agent.(interface{ GetMode() string }); ok {
+			agentMode = am.GetMode()
+		}
+		data["work_dir"] = workDir
+		data["agent_mode"] = agentMode
+
+		if m.getProjectConfig != nil {
+			if extra := m.getProjectConfig(name); extra != nil {
+				for k, v := range extra {
+					data[k] = v
+				}
+			}
+		}
+
 		mgmtJSON(w, http.StatusOK, data)
 		return
 	}
 
 	if r.Method == http.MethodPatch {
 		var body struct {
-			Quiet            *bool    `json:"quiet"`
-			Language         *string  `json:"language"`
-			AdminFrom        *string  `json:"admin_from"`
-			DisabledCommands []string `json:"disabled_commands"`
+			Quiet                 *bool             `json:"quiet"`
+			Language              *string           `json:"language"`
+			AdminFrom             *string           `json:"admin_from"`
+			DisabledCommands      []string          `json:"disabled_commands"`
+			WorkDir               *string           `json:"work_dir"`
+			Mode                  *string           `json:"mode"`
+			ShowContextIndicator  *bool             `json:"show_context_indicator"`
+			PlatformAllowFrom     map[string]string `json:"platform_allow_from"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			mgmtError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -498,9 +539,32 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 		if body.DisabledCommands != nil {
 			e.SetDisabledCommands(body.DisabledCommands)
 		}
+		if body.WorkDir != nil {
+			if switcher, ok := e.agent.(WorkDirSwitcher); ok {
+				switcher.SetWorkDir(*body.WorkDir)
+			}
+		}
+		if body.Mode != nil {
+			if switcher, ok := e.agent.(ModeSwitcher); ok {
+				switcher.SetMode(*body.Mode)
+			}
+		}
+		if body.ShowContextIndicator != nil {
+			e.SetShowContextIndicator(*body.ShowContextIndicator)
+		}
 
 		if m.saveProjectSettings != nil {
-			if err := m.saveProjectSettings(name, body.Quiet, body.Language, body.AdminFrom, body.DisabledCommands); err != nil {
+			patch := ProjectSettingsUpdate{
+				Quiet:                body.Quiet,
+				Language:             body.Language,
+				AdminFrom:            body.AdminFrom,
+				DisabledCommands:     body.DisabledCommands,
+				WorkDir:              body.WorkDir,
+				Mode:                 body.Mode,
+				ShowContextIndicator: body.ShowContextIndicator,
+				PlatformAllowFrom:    body.PlatformAllowFrom,
+			}
+			if err := m.saveProjectSettings(name, patch); err != nil {
 				slog.Warn("management: failed to persist project settings", "project", name, "error", err)
 			}
 		}

@@ -628,6 +628,8 @@ func main() {
 			_, err := config.EnsureProjectWithFeishuPlatform(config.EnsureProjectWithFeishuOptions{
 				ProjectName:  req.ProjectName,
 				PlatformType: platType,
+				WorkDir:      req.WorkDir,
+				AgentType:    req.AgentType,
 			})
 			if err != nil {
 				return fmt.Errorf("ensure project: %w", err)
@@ -645,6 +647,8 @@ func main() {
 		mgmtSrv.SetSetupWeixinSave(func(req core.WeixinSetupSaveRequest) error {
 			_, err := config.EnsureProjectWithWeixinPlatform(config.EnsureProjectWithWeixinOptions{
 				ProjectName: req.ProjectName,
+				WorkDir:     req.WorkDir,
+				AgentType:   req.AgentType,
 			})
 			if err != nil {
 				return fmt.Errorf("ensure project: %w", err)
@@ -659,14 +663,26 @@ func main() {
 			})
 			return err
 		})
-		mgmtSrv.SetAddPlatformToProject(func(projectName, platType string, opts map[string]any) error {
+		mgmtSrv.SetAddPlatformToProject(func(projectName, platType string, opts map[string]any, workDir, agentType string) error {
 			if opts == nil {
 				opts = map[string]any{}
 			}
-			return config.AddPlatformToProject(projectName, config.PlatformConfig{Type: platType, Options: opts})
+			return config.AddPlatformToProject(projectName, config.PlatformConfig{Type: platType, Options: opts}, workDir, agentType)
 		})
 		mgmtSrv.SetRemoveProject(config.RemoveProject)
-		mgmtSrv.SetSaveProjectSettings(config.SaveProjectSettings)
+		mgmtSrv.SetSaveProjectSettings(func(name string, u core.ProjectSettingsUpdate) error {
+			return config.SaveProjectSettings(name, config.ProjectSettingsUpdate{
+				Quiet:                u.Quiet,
+				Language:             u.Language,
+				AdminFrom:            u.AdminFrom,
+				DisabledCommands:     u.DisabledCommands,
+				WorkDir:              u.WorkDir,
+				Mode:                 u.Mode,
+				ShowContextIndicator: u.ShowContextIndicator,
+				PlatformAllowFrom:    u.PlatformAllowFrom,
+			})
+		})
+		mgmtSrv.SetGetProjectConfig(config.GetProjectConfigDetails)
 		mgmtSrv.SetConfigFilePath(configPath)
 		mgmtSrv.Start()
 	}

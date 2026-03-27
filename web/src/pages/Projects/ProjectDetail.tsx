@@ -49,6 +49,10 @@ export default function ProjectDetail() {
   const [language, setLanguage] = useState('');
   const [adminFrom, setAdminFrom] = useState('');
   const [disabledCmds, setDisabledCmds] = useState('');
+  const [workDir, setWorkDir] = useState('');
+  const [agentMode, setAgentMode] = useState('');
+  const [showCtxIndicator, setShowCtxIndicator] = useState(true);
+  const [platformAllowFrom, setPlatformAllowFrom] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
 
   // Add provider modal
@@ -118,6 +122,14 @@ export default function ProjectDetail() {
         setLanguage(proj.value.settings?.language || '');
         setAdminFrom(proj.value.settings?.admin_from || '');
         setDisabledCmds(proj.value.settings?.disabled_commands?.join(', ') || '');
+        setWorkDir(proj.value.work_dir || '');
+        setAgentMode(proj.value.agent_mode || 'default');
+        setShowCtxIndicator(proj.value.show_context_indicator !== false);
+        const afMap: Record<string, string> = {};
+        proj.value.platform_configs?.forEach(pc => {
+          if (pc.allow_from !== undefined) afMap[pc.type] = pc.allow_from;
+        });
+        setPlatformAllowFrom(afMap);
       }
       if (provs.status === 'fulfilled') {
         setProviders(provs.value.providers || []);
@@ -149,6 +161,10 @@ export default function ProjectDetail() {
         language,
         admin_from: adminFrom,
         disabled_commands: disabledCmds.split(',').map(s => s.trim()).filter(Boolean),
+        work_dir: workDir,
+        mode: agentMode,
+        show_context_indicator: showCtxIndicator,
+        platform_allow_from: platformAllowFrom,
       });
       await fetchAll();
     } finally {
@@ -367,7 +383,33 @@ export default function ProjectDetail() {
 
       {tab === 'settings' && project && (
         <div className="space-y-4">
+        {/* Agent settings */}
         <Card>
+          <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-4">{t('projects.agentSettings', 'Agent')}</h3>
+          <div className="space-y-4 max-w-lg">
+            <Input label={t('projects.workDir', 'Working directory')} value={workDir} onChange={(e) => setWorkDir(e.target.value)} placeholder="/path/to/project" />
+            <div>
+              <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
+                {t('projects.agentMode', 'Permission mode')}
+              </label>
+              <select
+                value={agentMode}
+                onChange={(e) => setAgentMode(e.target.value)}
+                className="w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-accent/50"
+              >
+                <option value="default">default</option>
+                <option value="acceptEdits">acceptEdits (edit)</option>
+                <option value="plan">plan</option>
+                <option value="bypassPermissions">bypassPermissions (yolo)</option>
+                <option value="dontAsk">dontAsk</option>
+              </select>
+            </div>
+          </div>
+        </Card>
+
+        {/* General settings */}
+        <Card>
+          <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-4">{t('projects.generalSettings', 'General')}</h3>
           <div className="space-y-4 max-w-lg">
             <div className="flex items-center justify-between">
               <label className="text-sm font-medium text-gray-700 dark:text-gray-300">{t('projects.quiet')}</label>
@@ -378,12 +420,45 @@ export default function ProjectDetail() {
                 <div className={cn('w-4 h-4 bg-white rounded-full transition-transform mx-1', quiet ? 'translate-x-4' : 'translate-x-0')} />
               </button>
             </div>
+            <div className="flex items-center justify-between">
+              <div>
+                <label className="text-sm font-medium text-gray-700 dark:text-gray-300">{t('projects.showCtxIndicator', 'Context indicator')}</label>
+                <p className="text-[11px] text-gray-400 mt-0.5">{t('projects.showCtxIndicatorHint', 'Show [ctx: ~N%] suffix on replies')}</p>
+              </div>
+              <button
+                onClick={() => setShowCtxIndicator(!showCtxIndicator)}
+                className={cn('w-10 h-6 rounded-full transition-colors', showCtxIndicator ? 'bg-accent' : 'bg-gray-300 dark:bg-gray-700')}
+              >
+                <div className={cn('w-4 h-4 bg-white rounded-full transition-transform mx-1', showCtxIndicator ? 'translate-x-4' : 'translate-x-0')} />
+              </button>
+            </div>
             <Input label={t('projects.language')} value={language} onChange={(e) => setLanguage(e.target.value)} placeholder="en, zh, ja..." />
             <Input label={t('projects.adminFrom')} value={adminFrom} onChange={(e) => setAdminFrom(e.target.value)} placeholder="user1,user2 or *" />
             <Input label={t('projects.disabledCommands')} value={disabledCmds} onChange={(e) => setDisabledCmds(e.target.value)} placeholder="restart, upgrade, cron" />
-            <Button loading={saving} onClick={handleSaveSettings}>{t('common.save')}</Button>
           </div>
         </Card>
+
+        {/* Per-platform allow_from */}
+        {project.platform_configs && project.platform_configs.length > 0 && (
+        <Card>
+          <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-4">{t('projects.platformAccess', 'Platform access control')}</h3>
+          <div className="space-y-3 max-w-lg">
+            {project.platform_configs.map(pc => (
+              <Input
+                key={pc.type}
+                label={`${pc.type} — ${t('fields.allowFrom')}`}
+                value={platformAllowFrom[pc.type] ?? pc.allow_from ?? ''}
+                onChange={(e) => setPlatformAllowFrom(prev => ({ ...prev, [pc.type]: e.target.value }))}
+                placeholder='user1,user2 or *'
+              />
+            ))}
+          </div>
+        </Card>
+        )}
+
+        <div className="max-w-lg">
+          <Button loading={saving} onClick={handleSaveSettings}>{t('common.save')}</Button>
+        </div>
         <Card>
           <h3 className="text-sm font-semibold text-red-600 dark:text-red-400 mb-3">{t('projects.dangerZone', 'Danger Zone')}</h3>
           <div className="flex items-center justify-between">

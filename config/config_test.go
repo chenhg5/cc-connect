@@ -1276,3 +1276,101 @@ func TestSaveWeixinPlatformCredentials_UpdateToken(t *testing.T) {
 		t.Fatalf("base_url = %q", bu)
 	}
 }
+
+func TestSaveProjectSettings_ExtraFields(t *testing.T) {
+	configPath := writeConfigFixture(t, feishuConfigFixture)
+	patchConfigPath(t, configPath)
+
+	show := true
+	wd := "/tmp/patched"
+	mode := "yolo"
+	err := SaveProjectSettings("alpha", ProjectSettingsUpdate{
+		WorkDir:              &wd,
+		Mode:                 &mode,
+		ShowContextIndicator: &show,
+		PlatformAllowFrom:    map[string]string{"telegram": "u1", "Feishu": "u2"},
+	})
+	if err != nil {
+		t.Fatalf("SaveProjectSettings: %v", err)
+	}
+
+	cfg := readConfigFixture(t, configPath)
+	proj := cfg.Projects[0]
+	if stringMapValue(proj.Agent.Options, "work_dir") != wd {
+		t.Fatalf("work_dir = %q, want %q", stringMapValue(proj.Agent.Options, "work_dir"), wd)
+	}
+	if stringMapValue(proj.Agent.Options, "mode") != mode {
+		t.Fatalf("mode = %q, want %q", stringMapValue(proj.Agent.Options, "mode"), mode)
+	}
+	if proj.ShowContextIndicator == nil || !*proj.ShowContextIndicator {
+		t.Fatalf("ShowContextIndicator = %v, want true", proj.ShowContextIndicator)
+	}
+	if stringMapValue(proj.Platforms[0].Options, "allow_from") != "u1" {
+		t.Fatalf("telegram allow_from = %q, want u1", stringMapValue(proj.Platforms[0].Options, "allow_from"))
+	}
+	if stringMapValue(proj.Platforms[1].Options, "allow_from") != "u2" {
+		t.Fatalf("feishu allow_from = %q, want u2", stringMapValue(proj.Platforms[1].Options, "allow_from"))
+	}
+}
+
+func TestGetProjectConfigDetails(t *testing.T) {
+	configPath := writeConfigFixture(t, feishuConfigFixture)
+	patchConfigPath(t, configPath)
+
+	details := GetProjectConfigDetails("alpha")
+	if details == nil {
+		t.Fatal("GetProjectConfigDetails returned nil")
+	}
+	if details["work_dir"] != "/tmp/alpha" {
+		t.Fatalf("work_dir = %v", details["work_dir"])
+	}
+	pcs, ok := details["platform_configs"].([]map[string]any)
+	if !ok || len(pcs) < 2 {
+		t.Fatalf("platform_configs = %#v", details["platform_configs"])
+	}
+}
+
+func TestAddPlatformToProject_NewProjectWithAgentTypeAndWorkDir(t *testing.T) {
+	configPath := writeConfigFixture(t, feishuConfigFixture)
+	patchConfigPath(t, configPath)
+
+	err := AddPlatformToProject("sigma", PlatformConfig{Type: "slack", Options: map[string]any{"token": "x"}}, "/sigma", "gemini")
+	if err != nil {
+		t.Fatalf("AddPlatformToProject: %v", err)
+	}
+	cfg := readConfigFixture(t, configPath)
+	if len(cfg.Projects) != 2 {
+		t.Fatalf("len(projects) = %d, want 2", len(cfg.Projects))
+	}
+	proj := cfg.Projects[1]
+	if proj.Name != "sigma" {
+		t.Fatalf("name = %q", proj.Name)
+	}
+	if proj.Agent.Type != "gemini" {
+		t.Fatalf("agent type = %q, want gemini", proj.Agent.Type)
+	}
+	if stringMapValue(proj.Agent.Options, "work_dir") != "/sigma" {
+		t.Fatalf("work_dir = %q", stringMapValue(proj.Agent.Options, "work_dir"))
+	}
+	if len(proj.Platforms) != 1 || proj.Platforms[0].Type != "slack" {
+		t.Fatalf("platforms = %#v", proj.Platforms)
+	}
+}
+
+func TestAddPlatformToProject_NewProjectClonesAgentWhenAgentTypeEmpty(t *testing.T) {
+	configPath := writeConfigFixture(t, feishuConfigFixture)
+	patchConfigPath(t, configPath)
+
+	err := AddPlatformToProject("tau", PlatformConfig{Type: "slack", Options: map[string]any{"token": "x"}}, "", "")
+	if err != nil {
+		t.Fatalf("AddPlatformToProject: %v", err)
+	}
+	cfg := readConfigFixture(t, configPath)
+	proj := cfg.Projects[len(cfg.Projects)-1]
+	if proj.Agent.Type != "codex" {
+		t.Fatalf("agent type = %q, want codex (cloned)", proj.Agent.Type)
+	}
+	if stringMapValue(proj.Agent.Options, "work_dir") != "/tmp/alpha" {
+		t.Fatalf("cloned work_dir = %q, want /tmp/alpha", stringMapValue(proj.Agent.Options, "work_dir"))
+	}
+}

@@ -26,6 +26,8 @@ type FeishuSetupSaveRequest struct {
 	AppSecret    string `json:"app_secret"`
 	PlatformType string `json:"platform_type"`
 	OwnerOpenID  string `json:"owner_open_id"`
+	WorkDir      string `json:"work_dir"`
+	AgentType    string `json:"agent_type"`
 }
 
 type WeixinSetupSaveRequest struct {
@@ -34,6 +36,8 @@ type WeixinSetupSaveRequest struct {
 	BaseURL     string `json:"base_url"`
 	IlinkBotID  string `json:"ilink_bot_id"`
 	IlinkUserID string `json:"ilink_user_id"`
+	WorkDir     string `json:"work_dir"`
+	AgentType   string `json:"agent_type"`
 }
 
 // ── Feishu / Lark QR Setup ──────────────────────────────────
@@ -443,8 +447,10 @@ func (m *ManagementServer) handleSetupWeixinSave(w http.ResponseWriter, r *http.
 // ── Generic platform add (manual config) ─────────────────────
 
 type AddPlatformRequest struct {
-	Type    string         `json:"type"`
-	Options map[string]any `json:"options"`
+	Type      string         `json:"type"`
+	Options   map[string]any `json:"options"`
+	WorkDir   string         `json:"work_dir"`
+	AgentType string         `json:"agent_type"`
 }
 
 func (m *ManagementServer) handleProjectAddPlatform(w http.ResponseWriter, r *http.Request, projectName string) {
@@ -465,7 +471,7 @@ func (m *ManagementServer) handleProjectAddPlatform(w http.ResponseWriter, r *ht
 		mgmtError(w, http.StatusServiceUnavailable, "config persistence not available")
 		return
 	}
-	if err := m.addPlatformToProject(projectName, req.Type, req.Options); err != nil {
+	if err := m.addPlatformToProject(projectName, req.Type, req.Options, req.WorkDir, req.AgentType); err != nil {
 		mgmtError(w, http.StatusInternalServerError, "save config: "+err.Error())
 		return
 	}

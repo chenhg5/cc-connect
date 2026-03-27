@@ -1732,10 +1732,20 @@ func extractLineComment(line string) string {
 	return ""
 }
 
-// RemoveProject removes a project from the config file.
-// SaveProjectSettings persists project-level settings (quiet, admin_from,
-// disabled_commands) and the global language to config.toml.
-func SaveProjectSettings(projectName string, quiet *bool, language, adminFrom *string, disabledCommands []string) error {
+// ProjectSettingsUpdate carries optional field updates for SaveProjectSettings.
+type ProjectSettingsUpdate struct {
+	Quiet                *bool
+	Language             *string
+	AdminFrom            *string
+	DisabledCommands     []string
+	WorkDir              *string
+	Mode                 *string
+	ShowContextIndicator *bool
+	PlatformAllowFrom    map[string]string
+}
+
+// SaveProjectSettings persists project-level settings and the global language to config.toml.
+func SaveProjectSettings(projectName string, update ProjectSettingsUpdate) error {
 	configMu.Lock()
 	defer configMu.Unlock()
 	if ConfigPath == "" {
@@ -1750,27 +1760,123 @@ func SaveProjectSettings(projectName string, quiet *bool, language, adminFrom *s
 		return fmt.Errorf("parse config: %w", err)
 	}
 
-	if language != nil {
-		cfg.Language = *language
+	if update.Language != nil {
+		cfg.Language = *update.Language
 	}
 
 	for i := range cfg.Projects {
-		if cfg.Projects[i].Name == projectName {
-			if quiet != nil {
-				cfg.Projects[i].Quiet = quiet
-			}
-			if adminFrom != nil {
-				cfg.Projects[i].AdminFrom = *adminFrom
-			}
-			if disabledCommands != nil {
-				cfg.Projects[i].DisabledCommands = disabledCommands
-			}
-			return saveConfig(cfg)
+		if cfg.Projects[i].Name != projectName {
+			continue
 		}
+		proj := &cfg.Projects[i]
+		if update.Quiet != nil {
+			proj.Quiet = update.Quiet
+		}
+		if update.AdminFrom != nil {
+			proj.AdminFrom = *update.AdminFrom
+		}
+		if update.DisabledCommands != nil {
+			proj.DisabledCommands = update.DisabledCommands
+		}
+		if update.ShowContextIndicator != nil {
+			v := *update.ShowContextIndicator
+			proj.ShowContextIndicator = &v
+		}
+		if update.WorkDir != nil || update.Mode != nil {
+			if proj.Agent.Options == nil {
+				proj.Agent.Options = map[string]any{}
+			}
+		}
+		if update.WorkDir != nil {
+			wd := strings.TrimSpace(*update.WorkDir)
+			if wd == "" {
+				delete(proj.Agent.Options, "work_dir")
+			} else {
+				proj.Agent.Options["work_dir"] = wd
+			}
+		}
+		if update.Mode != nil {
+			mode := strings.TrimSpace(*update.Mode)
+			if mode == "" {
+				delete(proj.Agent.Options, "mode")
+			} else {
+				proj.Agent.Options["mode"] = mode
+			}
+		}
+		if update.PlatformAllowFrom != nil {
+			for j := range proj.Platforms {
+				typ := strings.TrimSpace(proj.Platforms[j].Type)
+				if typ == "" {
+					continue
+				}
+				var af string
+				var found bool
+				for k, v := range update.PlatformAllowFrom {
+					if strings.EqualFold(strings.TrimSpace(k), typ) {
+						af, found = v, true
+						break
+					}
+				}
+				if !found {
+					continue
+				}
+				if proj.Platforms[j].Options == nil {
+					proj.Platforms[j].Options = map[string]any{}
+				}
+				proj.Platforms[j].Options["allow_from"] = strings.TrimSpace(af)
+			}
+		}
+		return saveConfig(cfg)
 	}
 	return fmt.Errorf("project %q not found", projectName)
 }
 
+// GetProjectConfigDetails returns persisted project fields from the config file for the management API.
+func GetProjectConfigDetails(projectName string) map[string]any {
+	if ConfigPath == "" {
+		return nil
+	}
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return nil
+	}
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return nil
+	}
+	for _, p := range cfg.Projects {
+		if p.Name != projectName {
+			continue
+		}
+		result := map[string]any{}
+		if p.Agent.Options != nil {
+			if wd, ok := p.Agent.Options["work_dir"].(string); ok && strings.TrimSpace(wd) != "" {
+				result["work_dir"] = wd
+			}
+			if mode, ok := p.Agent.Options["mode"].(string); ok && strings.TrimSpace(mode) != "" {
+				result["mode"] = mode
+			}
+		}
+		if p.ShowContextIndicator != nil {
+			result["show_context_indicator"] = *p.ShowContextIndicator
+		}
+		platConfigs := make([]map[string]any, len(p.Platforms))
+		for j, plat := range p.Platforms {
+			pc := map[string]any{"type": plat.Type}
+			if plat.Options != nil {
+				if af, ok := plat.Options["allow_from"].(string); ok {
+					pc["allow_from"] = af
+				}
+			}
+			platConfigs[j] = pc
+		}
+		result["platform_configs"] = platConfigs
+		return result
+	}
+	return nil
+}
+
+// RemoveProject removes a project from the config file.
 func RemoveProject(projectName string) error {
 	configMu.Lock()
 	defer configMu.Unlock()
@@ -1800,8 +1906,9 @@ func RemoveProject(projectName string) error {
 }
 
 // AddPlatformToProject appends a platform config to a project.
-// If the project doesn't exist, it is created with agent config cloned from the first existing project.
-func AddPlatformToProject(projectName string, platform PlatformConfig) error {
+// If the project doesn't exist, it is created using agentType and workDir when provided,
+// otherwise agent config is cloned from the first existing project when present.
+func AddPlatformToProject(projectName string, platform PlatformConfig, workDir, agentType string) error {
 	configMu.Lock()
 	defer configMu.Unlock()
 	if ConfigPath == "" {
@@ -1825,8 +1932,19 @@ func AddPlatformToProject(projectName string, platform PlatformConfig) error {
 		}
 	}
 	agentCfg := AgentConfig{Type: "codex", Options: map[string]any{}}
-	if len(cfg.Projects) > 0 {
+	at := strings.TrimSpace(agentType)
+	if at != "" {
+		agentCfg.Type = at
+	}
+	if len(cfg.Projects) > 0 && at == "" {
 		agentCfg = cloneAgentConfig(cfg.Projects[0].Agent)
+	}
+	wd := strings.TrimSpace(workDir)
+	if wd != "" {
+		if agentCfg.Options == nil {
+			agentCfg.Options = map[string]any{}
+		}
+		agentCfg.Options["work_dir"] = wd
 	}
 	cfg.Projects = append(cfg.Projects, ProjectConfig{
 		Name:      projectName,
