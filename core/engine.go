@@ -176,6 +176,7 @@ type Engine struct {
 	userRolesMu  sync.RWMutex     // protects userRoles, disabledCmds, and adminFrom
 
 	rateLimiter      *RateLimiter
+	outgoingRL       *OutgoingRateLimiter
 	streamPreview    StreamPreviewCfg
 	relayManager     *RelayManager
 	eventIdleTimeout time.Duration
@@ -665,6 +666,11 @@ func (e *Engine) SetRateLimitCfg(cfg RateLimitCfg) {
 		e.rateLimiter.Stop()
 	}
 	e.rateLimiter = NewRateLimiter(cfg.MaxMessages, cfg.Window)
+}
+
+// SetOutgoingRateLimitCfg configures per-platform outgoing message throttling.
+func (e *Engine) SetOutgoingRateLimitCfg(defaults OutgoingRateLimitCfg, overrides map[string]OutgoingRateLimitCfg) {
+	e.outgoingRL = NewOutgoingRateLimiter(defaults, overrides)
 }
 
 // checkRateLimit returns true if the message is allowed, false if rate-limited.
@@ -2449,10 +2455,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					unsent := strings.Join(textParts[segmentStart:], "")
 					if unsent != "" {
 						for _, chunk := range splitMessage(unsent, maxPlatformMessageLen) {
-							if err := p.Send(e.ctx, replyCtx, chunk); err != nil {
-								slog.Error("failed to send reply", "error", err, "msg_id", msgID)
-								return
-							}
+							e.send(p, replyCtx, chunk)
 						}
 					}
 				}
@@ -2464,10 +2467,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			} else {
 				slog.Debug("EventResult: sending via p.Send (preview inactive or failed)", "response_len", len(fullResponse), "chunks", len(splitMessage(fullResponse, maxPlatformMessageLen)))
 				for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
-					if err := p.Send(e.ctx, replyCtx, chunk); err != nil {
-						slog.Error("failed to send reply", "error", err, "msg_id", msgID)
-						return
-					}
+					e.send(p, replyCtx, chunk)
 				}
 			}
 
@@ -5922,8 +5922,14 @@ func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []Use
 	e.send(p, replyCtx, sb.String())
 }
 
-// send wraps p.Send with error logging and slow-operation warnings.
+// send wraps p.Send with error logging, slow-operation warnings, and outgoing rate limiting.
 func (e *Engine) send(p Platform, replyCtx any, content string) {
+	if e.outgoingRL != nil {
+		if err := e.outgoingRL.Wait(e.ctx, p.Name()); err != nil {
+			slog.Warn("outgoing rate limit: context cancelled", "platform", p.Name(), "error", err)
+			return
+		}
+	}
 	start := time.Now()
 	if err := p.Send(e.ctx, replyCtx, content); err != nil {
 		slog.Error("platform send failed", "platform", p.Name(), "error", err, "content_len", len(content))
@@ -5955,8 +5961,14 @@ func drainEvents(ch <-chan Event) {
 	}
 }
 
-// reply wraps p.Reply with error logging and slow-operation warnings.
+// reply wraps p.Reply with error logging, slow-operation warnings, and outgoing rate limiting.
 func (e *Engine) reply(p Platform, replyCtx any, content string) {
+	if e.outgoingRL != nil {
+		if err := e.outgoingRL.Wait(e.ctx, p.Name()); err != nil {
+			slog.Warn("outgoing rate limit: context cancelled", "platform", p.Name(), "error", err)
+			return
+		}
+	}
 	start := time.Now()
 	if err := p.Reply(e.ctx, replyCtx, content); err != nil {
 		slog.Error("platform reply failed", "platform", p.Name(), "error", err, "content_len", len(content))
@@ -5969,6 +5981,11 @@ func (e *Engine) reply(p Platform, replyCtx any, content string) {
 // replyWithButtons sends a reply with inline buttons if the platform supports it,
 // otherwise falls back to plain text reply.
 func (e *Engine) replyWithButtons(p Platform, replyCtx any, content string, buttons [][]ButtonOption) {
+	if e.outgoingRL != nil {
+		if err := e.outgoingRL.Wait(e.ctx, p.Name()); err != nil {
+			return
+		}
+	}
 	if bs, ok := p.(InlineButtonSender); ok {
 		if err := bs.SendWithButtons(e.ctx, replyCtx, content, buttons); err == nil {
 			return
@@ -5989,6 +6006,11 @@ func (e *Engine) replyWithCard(p Platform, replyCtx any, card *Card) {
 		slog.Error("replyWithCard: nil card", "platform", p.Name())
 		return
 	}
+	if e.outgoingRL != nil {
+		if err := e.outgoingRL.Wait(e.ctx, p.Name()); err != nil {
+			return
+		}
+	}
 	if cs, ok := p.(CardSender); ok {
 		if err := cs.ReplyCard(e.ctx, replyCtx, card); err != nil {
 			slog.Error("card reply failed", "platform", p.Name(), "error", err)
@@ -6003,6 +6025,11 @@ func (e *Engine) sendWithCard(p Platform, replyCtx any, card *Card) {
 	if card == nil {
 		slog.Error("sendWithCard: nil card", "platform", p.Name())
 		return
+	}
+	if e.outgoingRL != nil {
+		if err := e.outgoingRL.Wait(e.ctx, p.Name()); err != nil {
+			return
+		}
 	}
 	if cs, ok := p.(CardSender); ok {
 		if err := cs.SendCard(e.ctx, replyCtx, card); err != nil {
