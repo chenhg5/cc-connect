@@ -584,6 +584,7 @@ cc-connect daemon uninstall
 name = "my-project"
 mode = "multi-workspace"
 base_dir = "~/workspaces"
+auto_create_from_channel_name = true
 
 [projects.agent]
 type = "claudecode"
@@ -601,7 +602,8 @@ type = "claudecode"
 
 ### 工作原理
 
-- 频道名 `#project-a` → 自动绑定 `base_dir/project-a/`
+- 频道/聊天名 `project-a` → 自动绑定 `base_dir/project-a/`
+- 开启 `auto_create_from_channel_name = true` 后，未绑定频道会自动创建并绑定一个 `base_dir` 下的直接子目录
 - 每个频道有独立的会话和 Agent 状态
 
 ---

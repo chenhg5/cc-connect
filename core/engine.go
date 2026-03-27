@@ -192,12 +192,13 @@ type Engine struct {
 	showContextIndicator bool
 
 	// Multi-workspace mode
-	multiWorkspace    bool
-	baseDir           string
-	workspaceBindings *WorkspaceBindingManager
-	workspacePool     *workspacePool
-	initFlows         map[string]*workspaceInitFlow // workspace channel key → init state
-	initFlowsMu       sync.Mutex
+	multiWorkspace                 bool
+	baseDir                        string
+	autoCreateWorkspaceFromChannel bool
+	workspaceBindings              *WorkspaceBindingManager
+	workspacePool                  *workspacePool
+	initFlows                      map[string]*workspaceInitFlow // workspace channel key → init state
+	initFlowsMu                    sync.Mutex
 
 	// Interactive agent session management
 	interactiveMu     sync.Mutex
@@ -323,6 +324,12 @@ func (e *Engine) SetMultiWorkspace(baseDir, bindingStorePath string) {
 	e.workspacePool = newWorkspacePool(15 * time.Minute)
 	e.initFlows = make(map[string]*workspaceInitFlow)
 	go e.runIdleReaper()
+}
+
+// SetMultiWorkspaceAutoCreateFromChannelName controls whether an unresolved
+// channel should create and bind a workspace directory derived from its name.
+func (e *Engine) SetMultiWorkspaceAutoCreateFromChannelName(enabled bool) {
+	e.autoCreateWorkspaceFromChannel = enabled
 }
 
 func (e *Engine) runIdleReaper() {
@@ -9254,7 +9261,7 @@ func (e *Engine) resolveWorkspace(p Platform, channelID string) (string, string,
 	}
 
 	// Step 3: Convention match — check if base_dir/<channel-name> exists
-	candidate := filepath.Join(e.baseDir, channelName)
+	candidate := filepath.Join(e.baseDir, workspaceDirNameForChannel(channelID, channelName))
 	if info, err := os.Stat(candidate); err == nil && info.IsDir() {
 		// Auto-bind
 		projectKey := "project:" + e.name
@@ -9263,9 +9270,26 @@ func (e *Engine) resolveWorkspace(p Platform, channelID string) (string, string,
 		slog.Info("workspace auto-bound by convention",
 			"channel", channelName, "workspace", normalized)
 		return normalized, channelName, nil
+	} else if err != nil && !os.IsNotExist(err) {
+		return "", channelName, err
+	} else if err == nil && !info.IsDir() && e.autoCreateWorkspaceFromChannel {
+		return "", channelName, fmt.Errorf("workspace path exists and is not a directory: %s", candidate)
 	}
 
-	return "", channelName, nil
+	if !e.autoCreateWorkspaceFromChannel {
+		return "", channelName, nil
+	}
+
+	if err := os.MkdirAll(candidate, 0o755); err != nil {
+		return "", channelName, fmt.Errorf("create workspace directory %s: %w", candidate, err)
+	}
+
+	projectKey := "project:" + e.name
+	normalized := normalizeWorkspacePath(candidate)
+	e.workspaceBindings.Bind(projectKey, channelKey, channelName, normalized)
+	slog.Info("workspace auto-created from channel name",
+		"channel", channelName, "workspace", normalized)
+	return normalized, channelName, nil
 }
 
 // handleWorkspaceInitFlow manages the conversational workspace setup.

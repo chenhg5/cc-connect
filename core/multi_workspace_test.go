@@ -119,6 +119,41 @@ func TestMultiWorkspaceResolution_NoMatch(t *testing.T) {
 	}
 }
 
+func TestMultiWorkspaceResolution_AutoCreatesWorkspaceFromChannelName(t *testing.T) {
+	baseDir := t.TempDir()
+	channelID := "C002A"
+	channelName := "研发/项目 A"
+
+	e := newTestEngineWithMultiWorkspace(t, baseDir)
+	e.SetMultiWorkspaceAutoCreateFromChannelName(true)
+	p := &mockChannelResolver{names: map[string]string{channelID: channelName}}
+
+	ws, name, err := e.resolveWorkspace(p, channelID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if name != channelName {
+		t.Fatalf("expected channel name %q, got %q", channelName, name)
+	}
+
+	expectedDir := filepath.Join(baseDir, workspaceDirNameForChannel(channelID, channelName))
+	expectedWS := normalizeWorkspacePath(expectedDir)
+	if ws != expectedWS {
+		t.Fatalf("expected workspace %q, got %q", expectedWS, ws)
+	}
+	if info, err := os.Stat(expectedDir); err != nil || !info.IsDir() {
+		t.Fatalf("expected auto-created workspace directory %q", expectedDir)
+	}
+
+	b := e.workspaceBindings.Lookup("project:test", workspaceChannelKey(p.Name(), channelID))
+	if b == nil {
+		t.Fatal("expected binding to be created by auto-create")
+	}
+	if b.Workspace != expectedWS {
+		t.Fatalf("binding workspace = %q, want %q", b.Workspace, expectedWS)
+	}
+}
+
 func TestMultiWorkspaceResolution_ExistingBinding(t *testing.T) {
 	baseDir := t.TempDir()
 	channelID := "C003"

@@ -406,6 +406,7 @@ level = "info" # debug, info, warn, error
 # name = "claude-multi"
 # mode = "multi-workspace"
 # base_dir = "~/workspace"
+# auto_create_from_channel_name = true
 #
 # [projects.agent]
 # type = "claudecode"

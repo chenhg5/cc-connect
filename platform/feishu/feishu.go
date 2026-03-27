@@ -886,6 +886,15 @@ func (p *Platform) resolveChatName(chatID string) string {
 	return name
 }
 
+// ResolveChannelName implements core.ChannelNameResolver for multi-workspace mode.
+func (p *Platform) ResolveChannelName(channelID string) (string, error) {
+	name := p.resolveChatName(channelID)
+	if name == "" || name == channelID {
+		return "", fmt.Errorf("%s: resolve channel name for %s: no chat name available", p.tag(), channelID)
+	}
+	return name, nil
+}
+
 // parseMergeForward fetches sub-messages of a merge_forward message via the
 // GET /open-apis/im/v1/messages/{message_id} API, then formats them into
 // readable text. Returns combined text, images, and files from the sub-messages.

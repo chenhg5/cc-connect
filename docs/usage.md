@@ -571,6 +571,7 @@ One bot serving multiple workspaces per channel.
 name = "my-project"
 mode = "multi-workspace"
 base_dir = "~/workspaces"
+auto_create_from_channel_name = true
 
 [projects.agent]
 type = "claudecode"
@@ -588,7 +589,8 @@ type = "claudecode"
 
 ### How It Works
 
-- Channel name `#project-a` → auto-binds to `base_dir/project-a/`
+- Channel/chat name `project-a` → auto-binds to `base_dir/project-a/`
+- With `auto_create_from_channel_name = true`, an unresolved channel creates and binds a direct child workspace automatically
 - Each channel has isolated sessions and agent state
 
 ---
