@@ -7,6 +7,7 @@ Complete guide to using cc-connect features.
 - [Session Management](#session-management)
 - [Permission Modes](#permission-modes)
 - [API Provider Management](#api-provider-management)
+- [Backend Switching](#backend-switching)
 - [Model Selection](#model-selection)
 - [Work Directory Switching (`/dir`, `/cd`)](#work-directory-switching-dir-cd)
 - [Feishu Setup CLI](#feishu-setup-cli)
@@ -36,7 +37,8 @@ Each user gets an independent session with full conversation context. Manage ses
 | `/history [n]` | Show last n messages (default 10) |
 | `/usage` | Show account/model quota usage (if supported) |
 | `/provider [...]` | Manage API providers |
-| `/model [switch <alias>]` | List available models or switch by alias |
+| `/agent [switch <name>]` | Switch backend agents (Claude Code / Codex) |
+| `/model [switch <name>]` | List available models for the current backend or switch by name |
 | `/dir [path]` | Show or switch the agent work directory |
 | `/allow <tool>` | Pre-allow a tool (next session) |
 | `/reasoning [level]` | View or switch reasoning effort (Codex) |
@@ -191,6 +193,39 @@ cc-connect provider import --project my-backend  # from cc-switch
 
 ---
 
+## Backend Switching
+
+If you want one Feishu bot to switch quickly between Claude Code and Codex, use `switcher` to mount both backends under one project. Use `/agent` to change backend, and `/model` to change the model within the current backend:
+
+```toml
+[projects.agent]
+type = "switcher"
+
+[projects.agent.options]
+work_dir = "/path/to/project"
+mode = "default"
+agent = "claude"
+
+[[projects.agent.options.backends]]
+name = "claude"
+type = "claudecode"
+model = "claude-sonnet-4-20250514"
+
+[[projects.agent.options.backends]]
+name = "codex"
+type = "codex"
+model = "gpt-4.1"
+```
+
+Chat commands:
+
+```text
+/agent switch codex
+/model switch claude-sonnet-4-20250514
+```
+
+---
+
 ## Model Selection
 
 Pre-configure a list of selectable models per provider using `[[providers.models]]`. Each entry has a `model` identifier and an optional `alias` (short name shown in `/model`).
@@ -219,9 +254,7 @@ alias = "spark"
 
 ```
 /model              List available models (format: alias - model)
-/model switch <alias>      Switch to the model matching the alias
 /model switch <name>       Switch to the model by its full name
-/model <alias>             Legacy syntax, still supported
 ```
 
 When `models` is configured, `/model` shows exactly that list without making an API round-trip. When omitted, models are fetched from the provider API or fall back to a built-in list.

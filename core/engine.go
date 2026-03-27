@@ -146,6 +146,7 @@ type Engine struct {
 	providerAddSaveFunc    func(p ProviderConfig) error
 	providerRemoveSaveFunc func(name string) error
 	providerModelSaveFunc  func(providerName, model string) error
+	agentSaveFunc          func(agent string) error
 	modelSaveFunc          func(model string) error
 
 	ttsSaveFunc func(mode string) error
@@ -451,6 +452,10 @@ func (e *Engine) SetProviderRemoveSaveFunc(fn func(string) error) {
 
 func (e *Engine) SetProviderModelSaveFunc(fn func(providerName, model string) error) {
 	e.providerModelSaveFunc = fn
+}
+
+func (e *Engine) SetAgentSaveFunc(fn func(agent string) error) {
+	e.agentSaveFunc = fn
 }
 
 func (e *Engine) SetModelSaveFunc(fn func(model string) error) {
@@ -1775,8 +1780,22 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 	opts := make(map[string]any)
 	opts["work_dir"] = workspace
 
-	// Copy model from original agent if possible
-	if ma, ok := e.agent.(interface{ GetModel() string }); ok {
+	// Preserve any extra agent-specific options when cloning workspace agents.
+	if snapshotter, ok := e.agent.(OptionSnapshotter); ok {
+		for k, v := range snapshotter.SnapshotOptions() {
+			if k == "work_dir" {
+				continue
+			}
+			opts[k] = v
+		}
+	}
+
+	// Copy the active backend selector for backend-multiplexing agents.
+	if as, ok := e.agent.(AgentSwitcher); ok {
+		if backend := as.GetActiveAgent(); backend != "" {
+			opts["agent"] = backend
+		}
+	} else if ma, ok := e.agent.(interface{ GetModel() string }); ok {
 		if m := ma.GetModel(); m != "" {
 			opts["model"] = m
 		}
@@ -2656,6 +2675,7 @@ var builtinCommands = []struct {
 	{[]string{"history"}, "history"},
 	{[]string{"allow"}, "allow"},
 	{[]string{"model"}, "model"},
+	{[]string{"agent"}, "agent"},
 	{[]string{"reasoning", "effort"}, "reasoning"},
 	{[]string{"mode"}, "mode"},
 	{[]string{"lang"}, "lang"},
@@ -2818,6 +2838,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdAllow(p, msg, args)
 	case "model":
 		e.cmdModel(p, msg, args)
+	case "agent":
+		e.cmdAgent(p, msg, args)
 	case "reasoning":
 		e.cmdReasoning(p, msg, args)
 	case "mode":
@@ -4469,6 +4491,7 @@ func helpCardGroups() []helpCardGroup {
 			key:      "agent",
 			titleKey: MsgHelpAgentSection,
 			items: []helpCardItem{
+				{command: "/agent", action: "nav:/agent"},
 				{command: "/model", action: "nav:/model"},
 				{command: "/reasoning", action: "nav:/reasoning"},
 				{command: "/mode", action: "nav:/mode"},
@@ -4749,6 +4772,109 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChanged, target))
 }
 
+func (e *Engine) cmdAgent(p Platform, msg *Message, args []string) {
+	switcher, ok := e.agent.(AgentSwitcher)
+	if !ok {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgAgentNotSupported))
+		return
+	}
+
+	if len(args) == 0 {
+		if !supportsCards(p) {
+			agents := switcher.ListAgents()
+			current := switcher.GetActiveAgent()
+			if current == "" && len(agents) == 0 {
+				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgAgentListEmpty))
+				return
+			}
+
+			var sb strings.Builder
+			if current == "" {
+				sb.WriteString(e.i18n.T(MsgAgentNone))
+			} else {
+				sb.WriteString(e.i18n.Tf(MsgAgentCurrent, current))
+				sb.WriteString("\n")
+			}
+			sb.WriteString("\n")
+			sb.WriteString(e.i18n.T(MsgAgentListTitle))
+			var buttons [][]ButtonOption
+			var row []ButtonOption
+			for i, a := range agents {
+				marker := "  "
+				if a.Name == current {
+					marker = "> "
+				}
+				line := fmt.Sprintf("%s%d. %s", marker, i+1, a.Name)
+				if a.Desc != "" {
+					line += " — " + a.Desc
+				}
+				sb.WriteString(line + "\n")
+
+				label := a.Name
+				if a.Name == current {
+					label = "▶ " + label
+				}
+				row = append(row, ButtonOption{Text: label, Data: fmt.Sprintf("cmd:/agent switch %d", i+1)})
+				if len(row) >= 3 {
+					buttons = append(buttons, row)
+					row = nil
+				}
+			}
+			if len(row) > 0 {
+				buttons = append(buttons, row)
+			}
+			e.replyWithButtons(p, msg.ReplyCtx, sb.String(), buttons)
+			return
+		}
+		e.replyWithCard(p, msg.ReplyCtx, e.renderAgentCard())
+		return
+	}
+
+	targetInput, ok := parseAgentSwitchArgs(args)
+	if !ok {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgAgentUsage))
+		return
+	}
+
+	agents := switcher.ListAgents()
+	target := targetInput
+	if idx, err := strconv.Atoi(target); err == nil && idx >= 1 && idx <= len(agents) {
+		target = agents[idx-1].Name
+	}
+	found := false
+	for _, a := range agents {
+		if strings.EqualFold(a.Name, target) {
+			target = a.Name
+			found = true
+			break
+		}
+	}
+	if !found {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgAgentNotFound), target))
+		return
+	}
+
+	if e.agentSaveFunc != nil {
+		if err := e.agentSaveFunc(target); err != nil {
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
+			return
+		}
+	}
+
+	if !switcher.SetActiveAgent(target) {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgAgentNotFound), target))
+		return
+	}
+	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
+
+	s := e.sessions.GetOrCreateActive(msg.SessionKey)
+	s.SetAgentSessionID("", "")
+	s.ClearHistory()
+	e.sessions.Save()
+
+	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgAgentSwitched, target))
+}
+
 // resolveModelAlias resolves a user-supplied string to a model name.
 // It first checks for an exact alias match, then falls back to the original value
 // (which may be a direct model name).
@@ -4762,6 +4888,13 @@ func resolveModelAlias(models []ModelOption, input string) string {
 }
 
 func parseModelSwitchArgs(args []string) (string, bool) {
+	if len(args) >= 2 && strings.EqualFold(strings.TrimSpace(args[0]), "switch") {
+		return strings.TrimSpace(args[1]), true
+	}
+	return "", false
+}
+
+func parseAgentSwitchArgs(args []string) (string, bool) {
 	if len(args) == 0 {
 		return "", false
 	}
@@ -4769,7 +4902,7 @@ func parseModelSwitchArgs(args []string) (string, bool) {
 		if strings.EqualFold(strings.TrimSpace(args[0]), "switch") {
 			return "", false
 		}
-		return args[0], true
+		return strings.TrimSpace(args[0]), true
 	}
 	if strings.EqualFold(strings.TrimSpace(args[0]), "switch") && len(args) >= 2 {
 		return strings.TrimSpace(args[1]), true
@@ -5940,6 +6073,8 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 	switch cmd {
 	case "/help":
 		return e.renderHelpGroupCard(args)
+	case "/agent":
+		return e.renderAgentCard()
 	case "/model":
 		return e.renderModelCard()
 	case "/reasoning":
@@ -6039,6 +6174,50 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		}
 		if _, err := e.switchModel(target); err != nil {
 			slog.Error("failed to switch model from card action", "model", target, "error", err)
+			return
+		}
+		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
+		e.cleanupInteractiveState(interactiveKey)
+		s := e.sessions.GetOrCreateActive(sessionKey)
+		s.SetAgentSessionID("", "")
+		s.ClearHistory()
+		e.sessions.Save()
+	case "/agent":
+		if args == "" {
+			return
+		}
+		switcher, ok := e.agent.(AgentSwitcher)
+		if !ok {
+			return
+		}
+		agents := switcher.ListAgents()
+		target, ok := parseAgentSwitchArgs(strings.Fields(args))
+		if !ok {
+			return
+		}
+		if idx, err := strconv.Atoi(target); err == nil && idx >= 1 && idx <= len(agents) {
+			target = agents[idx-1].Name
+		}
+		found := false
+		for _, a := range agents {
+			if strings.EqualFold(a.Name, target) {
+				target = a.Name
+				found = true
+				break
+			}
+		}
+		if !found {
+			slog.Error("failed to switch agent from card action", "agent", target)
+			return
+		}
+		if e.agentSaveFunc != nil {
+			if err := e.agentSaveFunc(target); err != nil {
+				slog.Error("failed to save agent", "error", err)
+				return
+			}
+		}
+		if !switcher.SetActiveAgent(target) {
+			slog.Error("failed to switch agent from card action", "agent", target)
 			return
 		}
 		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
@@ -6592,9 +6771,9 @@ func (e *Engine) renderLangCard() *Card {
 	var opts []CardSelectOption
 	initVal := ""
 	for _, l := range langs {
-		opts = append(opts, CardSelectOption{Text: l.label, Value: "act:/lang " + l.code})
+		opts = append(opts, CardSelectOption{Text: l.label, Value: "lang:" + l.code})
 		if string(cur) == l.code || (cur == LangAuto && l.code == "auto") {
-			initVal = "act:/lang " + l.code
+			initVal = "lang:" + l.code
 		}
 	}
 
@@ -6626,14 +6805,14 @@ func (e *Engine) renderModelCard() *Card {
 
 	var opts []CardSelectOption
 	initVal := ""
-	for i, m := range models {
+	for _, m := range models {
 		label := m.Name
 		if m.Alias != "" {
 			label = m.Alias + " - " + m.Name
 		} else if m.Desc != "" {
 			label += " — " + m.Desc
 		}
-		val := fmt.Sprintf("act:/model switch %d", i+1)
+		val := "model:" + m.Name
 		opts = append(opts, CardSelectOption{Text: label, Value: val})
 		if m.Name == current {
 			initVal = val
@@ -6645,6 +6824,45 @@ func (e *Engine) renderModelCard() *Card {
 		Select(e.i18n.T(MsgModelSelectPlaceholder), opts, initVal).
 		Buttons(e.cardBackButton())
 	cb.Note(e.i18n.T(MsgModelUsage))
+	return cb.Build()
+}
+
+func (e *Engine) renderAgentCard() *Card {
+	switcher, ok := e.agent.(AgentSwitcher)
+	if !ok {
+		return e.simpleCard(e.i18n.T(MsgCardTitleAgent), "indigo", e.i18n.T(MsgAgentNotSupported))
+	}
+
+	agents := switcher.ListAgents()
+	current := switcher.GetActiveAgent()
+	if current == "" && len(agents) == 0 {
+		return e.simpleCard(e.i18n.T(MsgCardTitleAgent), "indigo", e.i18n.T(MsgAgentListEmpty))
+	}
+
+	var sb strings.Builder
+	if current == "" {
+		sb.WriteString(e.i18n.T(MsgAgentNone))
+	} else {
+		sb.WriteString(e.i18n.Tf(MsgAgentCurrent, current))
+	}
+
+	var opts []CardSelectOption
+	initVal := ""
+	for _, a := range agents {
+		label := a.Name
+		if a.Desc != "" {
+			label += " — " + a.Desc
+		}
+		val := "agent:" + a.Name
+		opts = append(opts, CardSelectOption{Text: label, Value: val})
+		if a.Name == current {
+			initVal = val
+		}
+	}
+
+	cb := NewCard().Title(e.i18n.T(MsgCardTitleAgent), "indigo").
+		Markdown(sb.String()).
+		Select(e.i18n.T(MsgAgentSelectPlaceholder), opts, initVal)
 	return cb.Build()
 }
 
@@ -6667,7 +6885,7 @@ func (e *Engine) renderReasoningCard() *Card {
 	var opts []CardSelectOption
 	initVal := ""
 	for i, effort := range efforts {
-		val := fmt.Sprintf("act:/reasoning %d", i+1)
+		val := fmt.Sprintf("reasoning:%d", i+1)
 		opts = append(opts, CardSelectOption{Text: effort, Value: val})
 		if effort == current {
 			initVal = val
@@ -6712,7 +6930,7 @@ func (e *Engine) renderModeCard() *Card {
 		if zhLike {
 			label = m.NameZh
 		}
-		val := "act:/mode " + m.Key
+		val := "mode:" + m.Key
 		opts = append(opts, CardSelectOption{Text: label, Value: val})
 		if m.Key == current {
 			initVal = val
@@ -6981,7 +7199,7 @@ func (e *Engine) renderProviderCard() *Card {
 			if prov.BaseURL != "" {
 				label += " (" + prov.BaseURL + ")"
 			}
-			val := "act:/provider " + prov.Name
+			val := "provider:" + prov.Name
 			opts = append(opts, CardSelectOption{Text: label, Value: val})
 			if current != nil && prov.Name == current.Name {
 				initVal = val

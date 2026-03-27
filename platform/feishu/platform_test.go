@@ -174,6 +174,48 @@ func TestInteractivePlatform_CardActionPassesCardSenderToHandler(t *testing.T) {
 	}
 }
 
+func TestInteractivePlatform_SelectStaticAgentOptionNormalizesToActAction(t *testing.T) {
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip, ok := platformAny.(*interactivePlatform)
+	if !ok {
+		t.Fatalf("platform type = %T, want *interactivePlatform", platformAny)
+	}
+
+	actionCh := make(chan string, 1)
+	ip.cardNavHandler = func(action string, sessionKey string) *core.Card {
+		actionCh <- action
+		return core.NewCard().Markdown("ok").Build()
+	}
+
+	_, err = ip.onCardAction(&callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: "ou_test_user"},
+			Action: &callback.CallBackAction{
+				Tag:    "select_static",
+				Option: "agent:codex",
+				Value:  map[string]any{"session_key": "feishu:oc_test_chat:ou_test_user"},
+			},
+			Context: &callback.Context{OpenChatID: "oc_test_chat", OpenMessageID: "om_test_message"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("onCardAction() error = %v", err)
+	}
+
+	select {
+	case got := <-actionCh:
+		want := "act:/agent codex"
+		if got != want {
+			t.Fatalf("action = %q, want %q", got, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected card nav handler invocation")
+	}
+}
+
 func TestInteractivePlatform_CardActionActWithoutCardResponseDoesNotWarn(t *testing.T) {
 	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
 	if err != nil {

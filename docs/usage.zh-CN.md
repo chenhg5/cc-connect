@@ -7,6 +7,7 @@ cc-connect 完整功能使用指南。
 - [会话管理](#会话管理)
 - [权限模式](#权限模式)
 - [API Provider 管理](#api-provider-管理)
+- [后端切换](#后端切换)
 - [模型选择](#模型选择)
 - [工作目录切换（`/dir`、`/cd`）](#工作目录切换dircd)
 - [飞书配置 CLI](#飞书配置-cli)
@@ -36,7 +37,8 @@ cc-connect 完整功能使用指南。
 | `/history [n]` | 查看最近 n 条消息 |
 | `/usage` | 查看账号/模型限额使用情况 |
 | `/provider [...]` | 管理 API Provider |
-| `/model [switch <alias>]` | 列出可用模型或按别名切换 |
+| `/agent [switch <name>]` | 切换后端 Agent（Claude Code / Codex） |
+| `/model [switch <name>]` | 列出当前后端的可用模型或按名称切换 |
 | `/dir [路径]` | 查看或切换 Agent 工作目录 |
 | `/allow <工具名>` | 预授权工具 |
 | `/reasoning [等级]` | 查看或切换推理强度（Codex）|
@@ -191,6 +193,39 @@ cc-connect provider import --project my-backend  # 从 cc-switch 导入
 
 ---
 
+## 后端切换
+
+如果你想在同一个飞书 bot 里快速切换 Claude Code 和 Codex，可以用 `switcher` 把两个后端挂到同一个项目下，然后通过 `/agent` 切换后端，通过 `/model` 切换当前后端里的模型：
+
+```toml
+[projects.agent]
+type = "switcher"
+
+[projects.agent.options]
+work_dir = "/path/to/project"
+mode = "default"
+agent = "claude"
+
+[[projects.agent.options.backends]]
+name = "claude"
+type = "claudecode"
+model = "claude-sonnet-4-20250514"
+
+[[projects.agent.options.backends]]
+name = "codex"
+type = "codex"
+model = "gpt-4.1"
+```
+
+聊天里：
+
+```text
+/agent switch codex
+/model switch claude-sonnet-4-20250514
+```
+
+---
+
 ## 模型选择
 
 通过 `[[providers.models]]` 为每个 Provider 预配置可选模型列表。每个条目包含 `model`（模型标识符）和可选的 `alias`（别名，显示在 `/model` 中）。
@@ -219,9 +254,7 @@ alias = "spark"
 
 ```
 /model              列出可用模型（格式：alias - model）
-/model switch <alias>      按别名切换模型
 /model switch <name>       按完整名称切换模型
-/model <alias>             兼容旧写法，仍然可用
 ```
 
 配置了 `models` 时，`/model` 直接显示该列表，不发起 API 请求。未配置时，自动从 Provider API 获取或使用内置备选列表。
@@ -617,7 +650,7 @@ type = "claudecode"
 name = "my-project"
 
 [projects.agent]
-type = "claudecode"  # 或 codex, cursor, gemini, qoder, opencode, iflow
+type = "claudecode"  # 或 codex, cursor, gemini, qoder, opencode, iflow, switcher
 
 [projects.agent.options]
 work_dir = "/path/to/project"
@@ -630,3 +663,8 @@ type = "feishu"  # 或 dingtalk, telegram, slack, discord, wecom, weixin, line, 
 [projects.platforms.options]
 # 平台特定配置
 ```
+
+如果你想在同一个飞书 bot 里快速切换 Claude Code 和 Codex，可以使用上面的 `switcher` 示例：
+
+- `/agent` 切换 Claude Code / Codex 后端
+- `/model` 只切当前后端里的具体模型

@@ -364,11 +364,22 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 	}
 
 	actionVal, _ := event.Event.Action.Value["action"].(string)
+	slog.Info(p.tag()+": card action received",
+		"tag", event.Event.Action.Tag,
+		"name", event.Event.Action.Name,
+		"option", event.Event.Action.Option,
+		"action", actionVal,
+		"value", event.Event.Action.Value,
+	)
 
 	// select_static callbacks put the chosen value in event.Event.Action.Option
 	if actionVal == "" && event.Event.Action.Option != "" {
 		actionVal = event.Event.Action.Option
 	}
+	if event.Event.Action.Tag == "select_static" {
+		actionVal = normalizeSelectStaticAction(actionVal)
+	}
+	slog.Info(p.tag()+": card action normalized", "action", actionVal)
 	if actionVal == "" {
 		switch event.Event.Action.Name {
 		case "delete_mode_submit":
@@ -414,12 +425,23 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		if p.cardNavHandler != nil {
 			card := p.cardNavHandler(actionVal, sessionKey)
 			if card != nil {
-				return &callback.CardActionTriggerResponse{
+				if strings.HasPrefix(actionVal, "act:/agent ") {
+					agentName := strings.TrimPrefix(actionVal, "act:/agent ")
+					go func() {
+						_ = p.Reply(context.Background(), replyContext{
+							messageID:  messageID,
+							chatID:     chatID,
+							sessionKey: sessionKey,
+						}, "已切换 agent: "+agentName)
+					}()
+				}
+				resp := &callback.CardActionTriggerResponse{
 					Card: &callback.Card{
 						Type: "raw",
 						Data: renderCardMap(card, sessionKey),
 					},
-				}, nil
+				}
+				return resp, nil
 			}
 		}
 		if strings.HasPrefix(actionVal, "act:") {
@@ -523,6 +545,34 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 	}
 
 	return nil, nil
+}
+
+func normalizeSelectStaticAction(actionVal string) string {
+	if actionVal == "" {
+		return ""
+	}
+	if strings.HasPrefix(actionVal, "nav:") || strings.HasPrefix(actionVal, "act:") || strings.HasPrefix(actionVal, "cmd:") {
+		return actionVal
+	}
+	if strings.HasPrefix(actionVal, "lang:") {
+		return "act:/lang " + strings.TrimPrefix(actionVal, "lang:")
+	}
+	if strings.HasPrefix(actionVal, "model:") {
+		return "act:/model switch " + strings.TrimPrefix(actionVal, "model:")
+	}
+	if strings.HasPrefix(actionVal, "agent:") {
+		return "act:/agent " + strings.TrimPrefix(actionVal, "agent:")
+	}
+	if strings.HasPrefix(actionVal, "reasoning:") {
+		return "act:/reasoning " + strings.TrimPrefix(actionVal, "reasoning:")
+	}
+	if strings.HasPrefix(actionVal, "mode:") {
+		return "act:/mode " + strings.TrimPrefix(actionVal, "mode:")
+	}
+	if strings.HasPrefix(actionVal, "provider:") {
+		return "act:/provider " + strings.TrimPrefix(actionVal, "provider:")
+	}
+	return actionVal
 }
 
 func (p *Platform) addReaction(messageID string) string {

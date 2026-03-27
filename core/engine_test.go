@@ -298,6 +298,8 @@ type stubModelModeAgent struct {
 	reasoningEffort string
 	providers       []ProviderConfig
 	active          string
+	agents          []AgentOption
+	activeAgent     string
 }
 
 type stubLiveModeSession struct {
@@ -316,6 +318,36 @@ func (a *stubModelModeAgent) SetModel(model string) {
 
 func (a *stubModelModeAgent) GetModel() string {
 	return a.model
+}
+
+func (a *stubModelModeAgent) SetActiveAgent(name string) bool {
+	if name == "" {
+		a.activeAgent = ""
+		return true
+	}
+	for _, ag := range a.agents {
+		if ag.Name == name {
+			a.activeAgent = name
+			return true
+		}
+	}
+	return false
+}
+
+func (a *stubModelModeAgent) GetActiveAgent() string {
+	if a.activeAgent != "" {
+		return a.activeAgent
+	}
+	if len(a.agents) > 0 {
+		return a.agents[0].Name
+	}
+	return ""
+}
+
+func (a *stubModelModeAgent) ListAgents() []AgentOption {
+	out := make([]AgentOption, len(a.agents))
+	copy(out, a.agents)
+	return out
 }
 
 func (a *stubModelModeAgent) AvailableModels(_ context.Context) []ModelOption {
@@ -2468,7 +2500,7 @@ func TestCmdModel_UpdatesActiveProviderModel(t *testing.T) {
 	}
 }
 
-func TestCmdModel_LegacySyntaxStillWorks(t *testing.T) {
+func TestCmdModel_RequiresSwitchPrefix(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	agent := &stubModelModeAgent{}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
@@ -2476,8 +2508,15 @@ func TestCmdModel_LegacySyntaxStillWorks(t *testing.T) {
 
 	e.cmdModel(p, msg, []string{"gpt"})
 
-	if agent.model != "gpt-4.1" {
-		t.Fatalf("agent model = %q, want gpt-4.1", agent.model)
+	if agent.model != "" {
+		t.Fatalf("agent model = %q, want unchanged empty model", agent.model)
+	}
+	sent := p.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(sent))
+	}
+	if !strings.Contains(sent[0], "Usage:") {
+		t.Fatalf("reply = %q, want usage message", sent[0])
 	}
 }
 
@@ -2551,6 +2590,75 @@ func TestCmdModel_DoesNotClaimSuccessWhenModelSaveFails(t *testing.T) {
 	}
 	if !strings.Contains(sent[0], "Failed to change model") {
 		t.Fatalf("reply = %q, want model change failure message", sent[0])
+	}
+}
+
+func TestCmdAgent_SwitchesBackendWithoutChangingModel(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubModelModeAgent{
+		model: "claude-sonnet-4-6",
+		agents: []AgentOption{
+			{Name: "claude", Desc: "claudecode / claude-sonnet-4-6"},
+			{Name: "codex", Desc: "codex / gpt-5.4-mini"},
+		},
+		activeAgent: "claude",
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	var savedAgent string
+	e.SetAgentSaveFunc(func(name string) error {
+		savedAgent = name
+		return nil
+	})
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	s := e.sessions.GetOrCreateActive(msg.SessionKey)
+	s.SetAgentSessionID("existing-session", "test")
+	s.AddHistory("user", "keep me")
+
+	e.cmdAgent(p, msg, []string{"switch", "codex"})
+
+	if got := agent.GetActiveAgent(); got != "codex" {
+		t.Fatalf("active agent = %q, want codex", got)
+	}
+	if got := agent.GetModel(); got != "claude-sonnet-4-6" {
+		t.Fatalf("model = %q, want unchanged claude-sonnet-4-6", got)
+	}
+	if savedAgent != "codex" {
+		t.Fatalf("saved agent = %q, want codex", savedAgent)
+	}
+	if active := e.sessions.GetOrCreateActive(msg.SessionKey); active.AgentSessionID != "" {
+		t.Fatalf("session id = %q, want cleared after agent switch", active.AgentSessionID)
+	}
+}
+
+func TestCmdModel_StillSwitchesCurrentBackendModel(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubModelModeAgent{
+		model: "claude-sonnet-4-6",
+		agents: []AgentOption{
+			{Name: "claude", Desc: "claudecode / claude-sonnet-4-6"},
+			{Name: "codex", Desc: "codex / gpt-5.4-mini"},
+		},
+		activeAgent: "claude",
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	var savedModel string
+	e.SetModelSaveFunc(func(model string) error {
+		savedModel = model
+		return nil
+	})
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	e.cmdModel(p, msg, []string{"switch", "claude-sonnet-4-5"})
+
+	if got := agent.GetActiveAgent(); got != "claude" {
+		t.Fatalf("active agent = %q, want claude", got)
+	}
+	if got := agent.GetModel(); got != "claude-sonnet-4-5" {
+		t.Fatalf("model = %q, want claude-sonnet-4-5", got)
+	}
+	if savedModel != "claude-sonnet-4-5" {
+		t.Fatalf("saved model = %q, want claude-sonnet-4-5", savedModel)
 	}
 }
 
@@ -4902,7 +5010,7 @@ func TestExecuteCardAction_ModelCleansUpWithInteractiveKey(t *testing.T) {
 	e.interactiveStates[sessionKey] = &interactiveState{}
 	e.interactiveMu.Unlock()
 
-	e.executeCardAction("/model", "new-model", sessionKey)
+	e.executeCardAction("/model", "switch new-model", sessionKey)
 
 	if agent.model != "new-model" {
 		t.Errorf("model = %q, want new-model", agent.model)
@@ -4913,6 +5021,34 @@ func TestExecuteCardAction_ModelCleansUpWithInteractiveKey(t *testing.T) {
 	e.interactiveMu.Unlock()
 	if exists {
 		t.Error("expected interactive state to be cleaned up after /model")
+	}
+}
+
+func TestExecuteCardAction_AgentCleansUpWithInteractiveKey(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubModelModeAgent{
+		agents:      []AgentOption{{Name: "claude"}, {Name: "codex"}},
+		activeAgent: "claude",
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	sessionKey := "feishu:channel1:user1"
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[sessionKey] = &interactiveState{}
+	e.interactiveMu.Unlock()
+
+	e.executeCardAction("/agent", "switch codex", sessionKey)
+
+	if got := agent.GetActiveAgent(); got != "codex" {
+		t.Errorf("active agent = %q, want codex", got)
+	}
+
+	e.interactiveMu.Lock()
+	_, exists := e.interactiveStates[sessionKey]
+	e.interactiveMu.Unlock()
+	if exists {
+		t.Error("expected interactive state to be cleaned up after /agent")
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/BurntSushi/toml"
+	_ "github.com/chenhg5/cc-connect/agent/switcher"
 )
 
 func TestConfigValidate(t *testing.T) {
@@ -241,6 +242,52 @@ func TestSaveAgentModel(t *testing.T) {
 	}
 	if len(cfg.Projects[0].Agent.Providers) != 2 {
 		t.Fatalf("provider count = %d, want 2", len(cfg.Projects[0].Agent.Providers))
+	}
+}
+
+func TestSaveActiveAgent(t *testing.T) {
+	writeTestConfig(t, switcherConfigTOML)
+
+	if err := SaveActiveAgent("demo", "codex"); err != nil {
+		t.Fatalf("SaveActiveAgent() error: %v", err)
+	}
+
+	cfg := readTestConfig(t)
+	if got, _ := cfg.Projects[0].Agent.Options["agent"].(string); got != "codex" {
+		t.Fatalf("agent.options.agent = %q, want codex", got)
+	}
+	if _, ok := cfg.Projects[0].Agent.Options["model"]; ok {
+		t.Fatalf("agent.options.model should not be written for switcher projects")
+	}
+}
+
+func TestSaveAgentModel_SwitcherBackend(t *testing.T) {
+	writeTestConfig(t, switcherConfigTOML)
+
+	if err := SaveAgentModel("demo", "claude-sonnet-4-5"); err != nil {
+		t.Fatalf("SaveAgentModel() error: %v", err)
+	}
+
+	cfg := readTestConfig(t)
+	var backends []map[string]any
+	switch v := cfg.Projects[0].Agent.Options["backends"].(type) {
+	case []map[string]any:
+		backends = v
+	case []any:
+		backends = make([]map[string]any, 0, len(v))
+		for _, item := range v {
+			backends = append(backends, item.(map[string]any))
+		}
+	default:
+		t.Fatalf("backends has unexpected type %T", v)
+	}
+	claude := backends[0]
+	if got, _ := claude["model"].(string); got != "claude-sonnet-4-5" {
+		t.Fatalf("switcher backend model = %q, want claude-sonnet-4-5", got)
+	}
+	codex := backends[1]
+	if got, _ := codex["model"].(string); got != "gpt-5.4-mini" {
+		t.Fatalf("other backend model = %q, want unchanged gpt-5.4-mini", got)
 	}
 }
 
@@ -799,6 +846,33 @@ type = "telegram"
 token = "test-token"
 `
 
+const switcherConfigTOML = `
+[[projects]]
+name = "demo"
+
+[projects.agent]
+type = "switcher"
+
+[projects.agent.options]
+agent = "claude"
+
+[[projects.agent.options.backends]]
+name = "claude"
+type = "claudecode"
+model = "claude-sonnet-4-6"
+
+[[projects.agent.options.backends]]
+name = "codex"
+type = "codex"
+model = "gpt-5.4-mini"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+token = "test-token"
+`
+
 const feishuConfigFixture = `
 [[projects]]
 name = "alpha"
@@ -899,10 +973,10 @@ func TestValidateUsersConfig(t *testing.T) {
 			name: "nil users is valid",
 			cfg: Config{
 				Projects: []ProjectConfig{{
-					Name: "p1",
-					Agent: AgentConfig{Type: "codex"},
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
-					Users: nil,
+					Users:     nil,
 				}},
 			},
 			wantErr: "",
@@ -911,10 +985,10 @@ func TestValidateUsersConfig(t *testing.T) {
 			name: "empty roles",
 			cfg: Config{
 				Projects: []ProjectConfig{{
-					Name: "p1",
-					Agent: AgentConfig{Type: "codex"},
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
-					Users: &UsersConfig{Roles: map[string]RoleConfig{}},
+					Users:     &UsersConfig{Roles: map[string]RoleConfig{}},
 				}},
 			},
 			wantErr: `no roles defined`,
@@ -923,8 +997,8 @@ func TestValidateUsersConfig(t *testing.T) {
 			name: "empty user_ids in role",
 			cfg: Config{
 				Projects: []ProjectConfig{{
-					Name: "p1",
-					Agent: AgentConfig{Type: "codex"},
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
 					Users: &UsersConfig{
 						Roles: map[string]RoleConfig{
@@ -939,13 +1013,13 @@ func TestValidateUsersConfig(t *testing.T) {
 			name: "duplicate user in different roles",
 			cfg: Config{
 				Projects: []ProjectConfig{{
-					Name: "p1",
-					Agent: AgentConfig{Type: "codex"},
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
 					Users: &UsersConfig{
 						Roles: map[string]RoleConfig{
-							"admin":   {UserIDs: []string{"user1"}},
-							"member":  {UserIDs: []string{"user1"}},
+							"admin":  {UserIDs: []string{"user1"}},
+							"member": {UserIDs: []string{"user1"}},
 						},
 					},
 				}},
@@ -956,8 +1030,8 @@ func TestValidateUsersConfig(t *testing.T) {
 			name: "wildcard in multiple roles",
 			cfg: Config{
 				Projects: []ProjectConfig{{
-					Name: "p1",
-					Agent: AgentConfig{Type: "codex"},
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
 					Users: &UsersConfig{
 						Roles: map[string]RoleConfig{
@@ -973,8 +1047,8 @@ func TestValidateUsersConfig(t *testing.T) {
 			name: "default_role not matching any role",
 			cfg: Config{
 				Projects: []ProjectConfig{{
-					Name: "p1",
-					Agent: AgentConfig{Type: "codex"},
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
 					Users: &UsersConfig{
 						DefaultRole: "superadmin",
@@ -990,8 +1064,8 @@ func TestValidateUsersConfig(t *testing.T) {
 			name: "valid users config",
 			cfg: Config{
 				Projects: []ProjectConfig{{
-					Name: "p1",
-					Agent: AgentConfig{Type: "codex"},
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
 					Users: &UsersConfig{
 						DefaultRole: "member",
@@ -1008,8 +1082,8 @@ func TestValidateUsersConfig(t *testing.T) {
 			name: "valid with wildcard in one role only",
 			cfg: Config{
 				Projects: []ProjectConfig{{
-					Name: "p1",
-					Agent: AgentConfig{Type: "codex"},
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
 					Users: &UsersConfig{
 						Roles: map[string]RoleConfig{
@@ -1173,7 +1247,7 @@ func TestCloneAgentConfig(t *testing.T) {
 			t.Fatalf("Providers length = %d, want 1", len(got.Providers))
 		}
 		p := got.Providers[0]
-		if p.Name != "openai" || p.APIKey != "sk-test" || p.BaseURL != "https://api.openai.com" || p.Model != "gpt-4"  {
+		if p.Name != "openai" || p.APIKey != "sk-test" || p.BaseURL != "https://api.openai.com" || p.Model != "gpt-4" {
 			t.Errorf("Provider fields not cloned correctly: %+v", p)
 		}
 		if p.Env["DEBUG"] != "1" {

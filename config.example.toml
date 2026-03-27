@@ -547,6 +547,32 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "bypassPermission
 # 当前激活的 provider（对应下方 providers 中的 name）
 # provider = "anthropic"
 
+# Switcher backend: keep one bot and switch between Claude Code / Codex
+# 通过 switcher 保持一个 bot，在 Claude Code / Codex 之间切换
+#
+# [projects.agent]
+# type = "switcher"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/project"
+# mode = "default"
+# agent = "claude"   # /agent 切换的后端
+#
+# Verify model strings against the provider's official docs before committing.
+# 提交前请先根据官方文档确认模型字符串。
+#
+# [[projects.agent.options.backends]]
+# name = "claude"
+# type = "claudecode"
+# model = "claude-sonnet-4-20250514"
+#
+# [[projects.agent.options.backends]]
+# name = "codex"
+# type = "codex"
+# model = "gpt-4.1"
+# [projects.agent.options.backends.env]
+# CODEX_HOME = "/path/to/isolated/codex-home"
+
 # API Providers — switch between them via /provider command in chat
 # or via CLI: cc-connect provider add --project my-backend --name relay --api-key sk-xxx
 # API Provider 管理 — 可通过聊天命令 /provider 或 CLI 命令切换

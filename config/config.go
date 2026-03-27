@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/BurntSushi/toml"
+	"github.com/chenhg5/cc-connect/core"
 )
 
 // configMu serializes read-modify-write cycles to prevent lost updates.
@@ -406,6 +407,35 @@ func SaveProviderModel(projectName, providerName, model string) error {
 	return fmt.Errorf("project %q not found in config", projectName)
 }
 
+// SaveActiveAgent persists the selected active backend agent for a project.
+func SaveActiveAgent(projectName, agentName string) error {
+	configMu.Lock()
+	defer configMu.Unlock()
+	if ConfigPath == "" {
+		return fmt.Errorf("config path not set")
+	}
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+	for i := range cfg.Projects {
+		if cfg.Projects[i].Name != projectName {
+			continue
+		}
+		if cfg.Projects[i].Agent.Options == nil {
+			cfg.Projects[i].Agent.Options = make(map[string]any)
+		}
+		cfg.Projects[i].Agent.Options["agent"] = agentName
+		delete(cfg.Projects[i].Agent.Options, "model")
+		return saveConfig(cfg)
+	}
+	return fmt.Errorf("project %q not found in config", projectName)
+}
+
 // SaveAgentModel persists the selected default model for a project's agent.
 func SaveAgentModel(projectName, model string) error {
 	configMu.Lock()
@@ -425,6 +455,12 @@ func SaveAgentModel(projectName, model string) error {
 	for i := range cfg.Projects {
 		if cfg.Projects[i].Name != projectName {
 			continue
+		}
+		if saver, ok := core.LookupAgentModelConfigSaver(cfg.Projects[i].Agent.Type); ok {
+			if err := saver(cfg.Projects[i].Agent.Options, model); err != nil {
+				return err
+			}
+			return saveConfig(cfg)
 		}
 		if cfg.Projects[i].Agent.Options == nil {
 			cfg.Projects[i].Agent.Options = make(map[string]any)
