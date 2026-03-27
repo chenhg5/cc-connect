@@ -222,17 +222,6 @@ func (b *stubTelegramBot) GetFileCallCount() int {
 	return b.getFileCalls
 }
 
-func stubBotFactory(bot telegramBot, me *models.User) botFactory {
-	return func(_ string, _ func(context.Context, *models.Update), _ *http.Client) (telegramBot, *models.User, func(context.Context), error) {
-		return bot, me, func(ctx context.Context) { <-ctx.Done() }, nil
-	}
-}
-
-func failingBotFactory(err error) botFactory {
-	return func(_ string, _ func(context.Context, *models.Update), _ *http.Client) (telegramBot, *models.User, func(context.Context), error) {
-		return nil, nil, nil, err
-	}
-}
 
 func TestPlatformStart_RetriesInBackgroundUntilConnected(t *testing.T) {
 	var attempts atomic.Int32
