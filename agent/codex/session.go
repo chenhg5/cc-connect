@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -194,6 +195,17 @@ func codexImageExt(mime string) string {
 
 func (cs *codexSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
 	defer cs.wg.Done()
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("codexSession: recovered from panic in readLoop",
+				"panic", r, "stack", string(debug.Stack()))
+			evt := core.Event{Type: core.EventError, Error: fmt.Errorf("internal panic: %v", r)}
+			select {
+			case cs.events <- evt:
+			case <-cs.ctx.Done():
+			}
+		}
+	}()
 	defer func() {
 		if err := cmd.Wait(); err != nil {
 			stderrMsg := strings.TrimSpace(stderrBuf.String())
