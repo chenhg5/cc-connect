@@ -96,8 +96,11 @@ func main() {
 
 	configFlag := flag.String("config", "", "path to config file (default: ./config.toml or ~/.cc-connect/config.toml)")
 	showVersion := flag.Bool("version", false, "print version and exit")
+	observeFlag := flag.Bool("observe", false, "observe native terminal Claude Code sessions and forward to Slack")
+	observeChannel := flag.String("observe-channel", "", "Slack channel ID to forward terminal observations to (requires --observe)")
 	flag.Usage = printUsage
 	flag.Parse()
+	_, _ = observeFlag, observeChannel // TODO(observe): wire in a later task
 
 	if *showVersion {
 		fmt.Printf("cc-connect %s\ncommit:  %s\nbuilt:   %s\n", version, commit, buildTime)

@@ -8148,3 +8148,14 @@ func TestExtractSessionKeyParts(t *testing.T) {
 		})
 	}
 }
+
+func TestSetObserveConfig(t *testing.T) {
+	e := NewEngine("test", &stubAgent{}, nil, "", LangEnglish)
+	e.SetObserveConfig("/tmp/test-project", "slack:C123:U456")
+	if !e.observeEnabled {
+		t.Fatal("observe should be enabled")
+	}
+	if e.observeProjectDir != "/tmp/test-project" {
+		t.Fatalf("unexpected project dir: %s", e.observeProjectDir)
+	}
+}

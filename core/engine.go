@@ -206,6 +206,12 @@ type Engine struct {
 	initFlows         map[string]*workspaceInitFlow // workspace channel key → init state
 	initFlowsMu       sync.Mutex
 
+	// Terminal observation (--observe)
+	observeEnabled    bool
+	observeProjectDir string             // ~/.claude/projects/{projectKey}
+	observeSessionKey string             // e.g. "slack:C123:U456" — target for forwarding
+	observeCancel     context.CancelFunc
+
 	// Interactive agent session management
 	interactiveMu     sync.Mutex
 	interactiveStates map[string]*interactiveState // key = sessionKey
@@ -488,6 +494,15 @@ func (e *Engine) SetInjectSender(v bool) {
 // SetAttachmentSendEnabled controls whether side-channel image/file delivery is allowed.
 func (e *Engine) SetAttachmentSendEnabled(v bool) {
 	e.attachmentSendEnabled = v
+}
+
+// SetObserveConfig enables terminal session observation.
+// projectDir is the Claude Code project directory containing session JSONL files.
+// sessionKey identifies the Slack channel to forward messages to.
+func (e *Engine) SetObserveConfig(projectDir, sessionKey string) {
+	e.observeEnabled = true
+	e.observeProjectDir = projectDir
+	e.observeSessionKey = sessionKey
 }
 
 func (e *Engine) SetLanguageSaveFunc(fn func(Language) error) {
