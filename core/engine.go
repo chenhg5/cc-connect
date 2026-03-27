@@ -1830,6 +1830,9 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 	if ps, ok := e.agent.(ProviderSwitcher); ok {
 		if ps2, ok2 := agent.(ProviderSwitcher); ok2 {
 			ps2.SetProviders(ps.ListProviders())
+			if active := ps.GetActiveProvider(); active != nil && active.Name != "" {
+				ps2.SetActiveProvider(active.Name)
+			}
 		}
 	}
 
@@ -4714,7 +4717,13 @@ func (e *Engine) GetAllCommands() []BotCommandInfo {
 }
 
 func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
-	switcher, ok := e.agent.(ModelSwitcher)
+	agent, sessions, interactiveKey, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+
+	switcher, ok := agent.(ModelSwitcher)
 	if !ok {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgModelNotSupported))
 		return
@@ -4776,7 +4785,7 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 			e.replyWithButtons(p, msg.ReplyCtx, sb.String(), buttons)
 			return
 		}
-		e.replyWithCard(p, msg.ReplyCtx, e.renderModelCard())
+		e.replyWithCard(p, msg.ReplyCtx, e.renderModelCard(msg.SessionKey))
 		return
 	}
 
@@ -4797,17 +4806,17 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 		target = resolveModelAlias(models, target)
 	}
 
-	target, err := e.switchModel(target)
+	target, err = e.switchModelOnAgent(agent, target, agent == e.agent)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChangeFailed, err))
 		return
 	}
-	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
+	e.cleanupInteractiveState(interactiveKey)
 
-	s := e.sessions.GetOrCreateActive(msg.SessionKey)
+	s := sessions.GetOrCreateActive(msg.SessionKey)
 	s.SetAgentSessionID("", "")
 	s.ClearHistory()
-	e.sessions.Save()
+	sessions.Save()
 
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChanged, target))
 }
@@ -4840,17 +4849,22 @@ func parseModelSwitchArgs(args []string) (string, bool) {
 	return "", false
 }
 
-// switchModel applies a runtime model selection. When an active provider exists,
-// its configured model is updated so new sessions use the selected model instead
-// of the provider's previous fixed model. Persistence errors are returned so
-// callers can avoid claiming success when the change would be lost on reload.
+// switchModel applies a runtime model selection to the global engine agent and
+// persists the change so reloads keep the selected default.
 func (e *Engine) switchModel(target string) (string, error) {
-	switcher, ok := e.agent.(ModelSwitcher)
+	return e.switchModelOnAgent(e.agent, target, true)
+}
+
+// switchModelOnAgent applies a runtime model selection to the provided agent.
+// When persistConfig is true, config-backed model/provider changes are saved so
+// reloads keep the new default. Workspace-scoped runtime switches pass false.
+func (e *Engine) switchModelOnAgent(agent Agent, target string, persistConfig bool) (string, error) {
+	switcher, ok := agent.(ModelSwitcher)
 	if !ok {
 		return target, nil
 	}
 
-	providerSwitcher, ok := e.agent.(ProviderSwitcher)
+	providerSwitcher, ok := agent.(ProviderSwitcher)
 	if !ok {
 		if e.modelSaveFunc != nil {
 			if err := e.modelSaveFunc(target); err != nil {
@@ -4877,7 +4891,7 @@ func (e *Engine) switchModel(target string) (string, error) {
 		switcher.SetModel(target)
 		return target, nil
 	}
-	if e.providerModelSaveFunc != nil {
+	if persistConfig && e.providerModelSaveFunc != nil {
 		if err := e.providerModelSaveFunc(active.Name, target); err != nil {
 			return "", fmt.Errorf("save provider model %q: %w", active.Name, err)
 		}
@@ -6020,7 +6034,7 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 	case "/help":
 		return e.renderHelpGroupCard(args)
 	case "/model":
-		return e.renderModelCard()
+		return e.renderModelCard(sessionKey)
 	case "/reasoning":
 		return e.renderReasoningCard()
 	case "/mode":
@@ -6100,7 +6114,8 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		if args == "" {
 			return
 		}
-		switcher, ok := e.agent.(ModelSwitcher)
+		agent, sessions := e.sessionContextForKey(sessionKey)
+		switcher, ok := agent.(ModelSwitcher)
 		if !ok {
 			return
 		}
@@ -6116,16 +6131,16 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		} else {
 			target = resolveModelAlias(models, target)
 		}
-		if _, err := e.switchModel(target); err != nil {
+		if _, err := e.switchModelOnAgent(agent, target, agent == e.agent); err != nil {
 			slog.Error("failed to switch model from card action", "model", target, "error", err)
 			return
 		}
 		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 		e.cleanupInteractiveState(interactiveKey)
-		s := e.sessions.GetOrCreateActive(sessionKey)
+		s := sessions.GetOrCreateActive(sessionKey)
 		s.SetAgentSessionID("", "")
 		s.ClearHistory()
-		e.sessions.Save()
+		sessions.Save()
 
 	case "/reasoning":
 		if args == "" {
@@ -6658,8 +6673,13 @@ func (e *Engine) renderLangCard() *Card {
 		Build()
 }
 
-func (e *Engine) renderModelCard() *Card {
-	switcher, ok := e.agent.(ModelSwitcher)
+func (e *Engine) renderModelCard(sessionKey string) *Card {
+	agent := e.agent
+	if sessionKey != "" {
+		agent, _ = e.sessionContextForKey(sessionKey)
+	}
+
+	switcher, ok := agent.(ModelSwitcher)
 	if !ok {
 		return e.simpleCard(e.i18n.T(MsgCardTitleModel), "indigo", e.i18n.T(MsgModelNotSupported))
 	}
