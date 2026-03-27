@@ -31,11 +31,12 @@ func init() {
 //   - "default":           every tool call requires user approval
 //   - "acceptEdits":       auto-approve file edit tools, ask for others
 //   - "plan":              plan only, no execution until approved
-//   - "bypassPermissions": auto-approve everything (YOLO mode)
+//   - "auto":              Claude's automatic permission classifier
+//   - "bypassPermissions": auto-approve everything (alias: yolo)
 type Agent struct {
 	workDir         string
 	model           string
-	mode            string // "default" | "acceptEdits" | "plan" | "bypassPermissions" | "dontAsk"
+	mode            string // "default" | "acceptEdits" | "plan" | "auto" | "bypassPermissions" | "dontAsk"
 	allowedTools    []string
 	disallowedTools []string
 	providers       []core.ProviderConfig
@@ -105,8 +106,10 @@ func normalizePermissionMode(raw string) string {
 		return "acceptEdits"
 	case "plan":
 		return "plan"
+	case "auto":
+		return "auto"
 	case "bypasspermissions", "bypass-permissions", "bypass_permissions",
-		"yolo", "auto":
+		"yolo":
 		return "bypassPermissions"
 	case "dontask", "dont-ask", "dont_ask":
 		return "dontAsk"
@@ -503,6 +506,7 @@ func (a *Agent) PermissionModes() []core.PermissionModeInfo {
 		{Key: "default", Name: "Default", NameZh: "默认", Desc: "Ask permission for every tool call", DescZh: "每次工具调用都需确认"},
 		{Key: "acceptEdits", Name: "Accept Edits", NameZh: "接受编辑", Desc: "Auto-approve file edits, ask for others", DescZh: "自动允许文件编辑，其他需确认"},
 		{Key: "plan", Name: "Plan Mode", NameZh: "计划模式", Desc: "Plan only, no execution until approved", DescZh: "只做规划不执行，审批后再执行"},
+		{Key: "auto", Name: "Auto", NameZh: "自动模式", Desc: "Claude decides when to ask for permission", DescZh: "由 Claude 自动判断何时需要确认"},
 		{Key: "bypassPermissions", Name: "YOLO", NameZh: "YOLO 模式", Desc: "Auto-approve everything", DescZh: "全部自动通过"},
 		{Key: "dontAsk", Name: "Don't Ask", NameZh: "静默拒绝", Desc: "Auto-deny tools unless pre-approved via allowed_tools or settings.json allow rules", DescZh: "未预授权的工具自动拒绝，不弹确认"},
 	}

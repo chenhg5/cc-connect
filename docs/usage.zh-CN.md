@@ -59,6 +59,7 @@ cc-connect 完整功能使用指南。
 |------|--------|------|
 | 默认 | `default` | 每次工具调用需确认 |
 | 接受编辑 | `acceptEdits` / `edit` | 文件编辑自动通过 |
+| 自动模式 | `auto` | 由 Claude 自动判断何时需要确认 |
 | 计划模式 | `plan` | 只规划不执行 |
 | YOLO | `bypassPermissions` / `yolo` | 全部自动通过 |
 
@@ -107,7 +108,7 @@ mode = "default"
 运行时切换：
 ```
 /mode          # 查看当前和可用模式
-/mode yolo     # 切换到 YOLO
+/mode yolo     # 切换到 YOLO 模式
 /mode default  # 切回默认
 ```
 

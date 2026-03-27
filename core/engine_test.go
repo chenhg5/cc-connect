@@ -3009,6 +3009,12 @@ func TestCmdMode_UsesInlineButtonsOnButtonOnlyPlatform(t *testing.T) {
 	if got := p.buttonRows[0][0].Data; got != "cmd:/mode default" {
 		t.Fatalf("first /mode button = %q, want %q", got, "cmd:/mode default")
 	}
+	if !strings.Contains(p.buttonContent, "Available: `default` / `yolo`") {
+		t.Fatalf("button content = %q, want dynamic mode list", p.buttonContent)
+	}
+	if strings.Contains(p.buttonContent, "`edit`") {
+		t.Fatalf("button content = %q, want no hardcoded mode list", p.buttonContent)
+	}
 }
 
 func TestCmdMode_AppliesLiveModeWithoutReset(t *testing.T) {

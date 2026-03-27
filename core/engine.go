@@ -5011,7 +5011,7 @@ func (e *Engine) cmdMode(p Platform, msg *Message, args []string) {
 					sb.WriteString(fmt.Sprintf("**%s**%s — %s\n", m.Name, suffix, m.Desc))
 				}
 			}
-			sb.WriteString(e.i18n.T(MsgModeUsage))
+			sb.WriteString(e.modeUsageText(modes))
 
 			var buttons [][]ButtonOption
 			var row []ButtonOption
@@ -5063,6 +5063,14 @@ func (e *Engine) cmdMode(p Platform, msg *Message, args []string) {
 		reply += "\n\n(Current session updated immediately.)"
 	}
 	e.reply(p, msg.ReplyCtx, reply)
+}
+
+func (e *Engine) modeUsageText(modes []PermissionModeInfo) string {
+	keys := make([]string, 0, len(modes))
+	for _, mode := range modes {
+		keys = append(keys, "`"+mode.Key+"`")
+	}
+	return e.i18n.Tf(MsgModeUsage, strings.Join(keys, " / "))
 }
 
 func (e *Engine) applyLiveModeChange(sessionKey, mode string) bool {
@@ -6795,7 +6803,7 @@ func (e *Engine) renderModeCard() *Card {
 		Markdown(sb.String()).
 		Select(e.i18n.T(MsgModeSelectPlaceholder), opts, initVal).
 		Buttons(e.cardBackButton())
-	cb.Note(e.i18n.T(MsgModeUsage))
+	cb.Note(e.modeUsageText(modes))
 	return cb.Build()
 }
 
