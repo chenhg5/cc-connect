@@ -555,6 +555,38 @@ func TestEngineSendToSessionWithAttachments_DisabledByConfig(t *testing.T) {
 	}
 }
 
+func TestEngineSendToSessionWithAttachments_MultiWorkspaceRawSessionKey(t *testing.T) {
+	p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindingPath)
+
+	wsDir := filepath.Join(baseDir, "ws1")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	normalizedWsDir := normalizeWorkspacePath(wsDir)
+	channelID := "C123"
+	rawKey := "slack:" + channelID + ":U1"
+	e.workspaceBindings.Bind("project:test", channelID, "chan", normalizedWsDir)
+
+	iKey := normalizedWsDir + ":" + rawKey
+	e.interactiveStates[iKey] = &interactiveState{
+		platform: p,
+		replyCtx: "ctx-1",
+	}
+
+	err := e.SendToSessionWithAttachments(rawKey, "delivery ready", nil, nil)
+	if err != nil {
+		t.Fatalf("SendToSessionWithAttachments returned error: %v", err)
+	}
+	if got := p.getSent(); len(got) != 1 || got[0] != "delivery ready" {
+		t.Fatalf("sent text = %#v, want one message", got)
+	}
+}
+
 func TestEngineStart_DefersAsyncPlatformReadyInitialization(t *testing.T) {
 	p := &stubLifecyclePlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -5557,6 +5589,38 @@ func TestCmdStatus_UsesInteractiveKeyForMultiWorkspace(t *testing.T) {
 		if !found {
 			t.Fatalf("expected status to reflect quiet=true, got %v", sent)
 		}
+	}
+}
+
+func TestRenderStatusCard_UsesInteractiveKeyForRawSessionKeyInMultiWorkspace(t *testing.T) {
+	agent := &stubModelModeAgent{model: "gpt-4.1", mode: "default"}
+	e := NewEngine("test", agent, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindingPath)
+
+	wsDir := filepath.Join(baseDir, "ws1")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	normalizedWsDir := normalizeWorkspacePath(wsDir)
+	channelID := "C123"
+	rawKey := "slack:" + channelID + ":U1"
+	e.workspaceBindings.Bind("project:test", channelID, "chan", normalizedWsDir)
+
+	iKey := normalizedWsDir + ":" + rawKey
+	e.interactiveMu.Lock()
+	e.interactiveStates[iKey] = &interactiveState{quiet: true}
+	e.interactiveMu.Unlock()
+
+	card := e.renderStatusCard(rawKey, "U1")
+	if card == nil {
+		t.Fatal("expected status card")
+	}
+	text := card.RenderText()
+	if !strings.Contains(text, "Quiet mode: ON") {
+		t.Fatalf("expected status card to reflect quiet=true from interactiveKey, got %q", text)
 	}
 }
 
