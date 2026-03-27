@@ -450,21 +450,49 @@ func (cs *codexSession) handleItemCompleted(raw map[string]any) {
 		status, _ := item["status"].(string)
 		output, _ := item["aggregated_output"].(string)
 		exitCode, _ := item["exit_code"].(float64)
+		code := int(exitCode)
+		success := codexToolSuccess(status, &code)
 
 		slog.Debug("codexSession: command completed",
 			"command", truncate(command, 100),
 			"status", status,
-			"exit_code", int(exitCode),
+			"exit_code", code,
 			"output_len", len(output),
 		)
+		evt := core.Event{
+			Type:         core.EventToolResult,
+			ToolName:     "Bash",
+			ToolResult:   truncate(strings.TrimSpace(output), 500),
+			ToolStatus:   strings.TrimSpace(status),
+			ToolExitCode: &code,
+			ToolSuccess:  &success,
+		}
+		select {
+		case cs.events <- evt:
+		case <-cs.ctx.Done():
+			return
+		}
 
 	case "function_call":
 		name, _ := item["name"].(string)
 		status, _ := item["status"].(string)
 		output, _ := item["output"].(string)
+		success := codexToolSuccess(status, nil)
 		slog.Debug("codexSession: function_call completed",
 			"name", name, "status", status, "output_len", len(output),
 		)
+		evt := core.Event{
+			Type:        core.EventToolResult,
+			ToolName:    name,
+			ToolResult:  truncate(strings.TrimSpace(output), 500),
+			ToolStatus:  strings.TrimSpace(status),
+			ToolSuccess: &success,
+		}
+		select {
+		case cs.events <- evt:
+		case <-cs.ctx.Done():
+			return
+		}
 
 	case "function_call_output":
 		slog.Debug("codexSession: function_call_output")
@@ -516,6 +544,14 @@ func codexExtractToolInput(item map[string]any) string {
 		return n
 	}
 	return ""
+}
+
+func codexToolSuccess(status string, exitCode *int) bool {
+	s := strings.ToLower(strings.TrimSpace(status))
+	if exitCode != nil {
+		return *exitCode == 0
+	}
+	return s == "completed" || s == "success" || s == "succeeded" || s == "ok"
 }
 
 // RespondPermission is a no-op for Codex — permissions are handled via CLI flags.
