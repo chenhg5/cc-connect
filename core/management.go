@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,6 +33,8 @@ type ManagementServer struct {
 	setupWeixinSave      func(req WeixinSetupSaveRequest) error
 	addPlatformToProject func(projectName, platType string, opts map[string]any) error
 	removeProject        func(projectName string) error
+	saveProjectSettings  func(projectName string, quiet *bool, language, adminFrom *string, disabledCommands []string) error
+	configFilePath       string
 }
 
 // NewManagementServer creates a new management API server.
@@ -67,6 +70,14 @@ func (m *ManagementServer) SetAddPlatformToProject(fn func(string, string, map[s
 
 func (m *ManagementServer) SetRemoveProject(fn func(string) error) {
 	m.removeProject = fn
+}
+
+func (m *ManagementServer) SetConfigFilePath(path string) {
+	m.configFilePath = path
+}
+
+func (m *ManagementServer) SetSaveProjectSettings(fn func(string, *bool, *string, *string, []string) error) {
+	m.saveProjectSettings = fn
 }
 
 func (m *ManagementServer) Start() {
@@ -289,40 +300,19 @@ func (m *ManagementServer) handleConfig(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	projects := make([]map[string]any, 0, len(m.engines))
-	for name, e := range m.engines {
-		proj := map[string]any{
-			"name":       name,
-			"agent_type": e.agent.Name(),
-		}
-		platNames := make([]string, len(e.platforms))
-		for i, p := range e.platforms {
-			platNames[i] = p.Name()
-		}
-		proj["platforms"] = platNames
-
-		if ps, ok := e.agent.(ProviderSwitcher); ok {
-			providers := ps.ListProviders()
-			provList := make([]map[string]any, len(providers))
-			for i, p := range providers {
-				provList[i] = map[string]any{
-					"name":     p.Name,
-					"api_key":  "***",
-					"base_url": p.BaseURL,
-					"model":    p.Model,
-				}
-			}
-			proj["providers"] = provList
-		}
-		projects = append(projects, proj)
+	if m.configFilePath == "" {
+		mgmtError(w, http.StatusNotFound, "config file path not set")
+		return
+	}
+	data, err := os.ReadFile(m.configFilePath)
+	if err != nil {
+		mgmtError(w, http.StatusInternalServerError, "read config: "+err.Error())
+		return
 	}
 
-	mgmtJSON(w, http.StatusOK, map[string]any{
-		"projects": projects,
-	})
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
 }
 
 // ── Project endpoints ─────────────────────────────────────────
@@ -458,9 +448,15 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 		quiet := e.quiet
 		e.quietMu.RUnlock()
 
+		e.userRolesMu.RLock()
+		adminFrom := e.adminFrom
+		e.userRolesMu.RUnlock()
+
 		data["settings"] = map[string]any{
-			"quiet":    quiet,
-			"language": string(e.i18n.CurrentLang()),
+			"quiet":             quiet,
+			"language":          string(e.i18n.CurrentLang()),
+			"admin_from":        adminFrom,
+			"disabled_commands": e.GetDisabledCommands(),
 		}
 
 		mgmtJSON(w, http.StatusOK, data)
@@ -501,6 +497,12 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 		}
 		if body.DisabledCommands != nil {
 			e.SetDisabledCommands(body.DisabledCommands)
+		}
+
+		if m.saveProjectSettings != nil {
+			if err := m.saveProjectSettings(name, body.Quiet, body.Language, body.AdminFrom, body.DisabledCommands); err != nil {
+				slog.Warn("management: failed to persist project settings", "project", name, "error", err)
+			}
 		}
 
 		mgmtOK(w, "settings updated")
@@ -1189,19 +1191,41 @@ func (m *ManagementServer) handleCronByID(w http.ResponseWriter, r *http.Request
 		mgmtError(w, http.StatusServiceUnavailable, "cron scheduler not available")
 		return
 	}
-	if r.Method != http.MethodDelete {
-		mgmtError(w, http.StatusMethodNotAllowed, "DELETE only")
-		return
-	}
 	id := strings.TrimPrefix(r.URL.Path, "/api/v1/cron/")
 	if id == "" {
 		mgmtError(w, http.StatusBadRequest, "cron job id required")
 		return
 	}
-	if m.cronScheduler.RemoveJob(id) {
-		mgmtOK(w, "cron job deleted")
-	} else {
-		mgmtError(w, http.StatusNotFound, fmt.Sprintf("cron job not found: %s", id))
+
+	switch r.Method {
+	case http.MethodDelete:
+		if m.cronScheduler.RemoveJob(id) {
+			mgmtOK(w, "cron job deleted")
+		} else {
+			mgmtError(w, http.StatusNotFound, fmt.Sprintf("cron job not found: %s", id))
+		}
+
+	case http.MethodPatch:
+		var updates map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
+			mgmtError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+		for field, value := range updates {
+			if err := m.cronScheduler.UpdateJob(id, field, value); err != nil {
+				mgmtError(w, http.StatusBadRequest, fmt.Sprintf("update %s: %s", field, err.Error()))
+				return
+			}
+		}
+		job := m.cronScheduler.Store().Get(id)
+		if job == nil {
+			mgmtError(w, http.StatusNotFound, "cron job not found after update")
+			return
+		}
+		mgmtJSON(w, http.StatusOK, job)
+
+	default:
+		mgmtError(w, http.StatusMethodNotAllowed, "DELETE or PATCH only")
 	}
 }
 

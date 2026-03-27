@@ -95,7 +95,14 @@
     "noJobs": "No scheduled jobs",
     "workDir": "Working directory",
     "sessionKey": "Session key",
-    "project": "Project"
+    "project": "Project",
+    "editJob": "Edit job",
+    "schedule": "Schedule",
+    "selectProject": "Select project",
+    "descPlaceholder": "Job description",
+    "promptPlaceholder": "Prompt to send to agent...",
+    "selectSessionKey": "Select session (empty for default)",
+    "taskType": "Task type"
   },
   "heartbeat": {
     "title": "Heartbeat",
@@ -225,7 +232,8 @@
     "emptyHint": "Start a conversation with your agent",
     "slashHint": "Press / to see available commands",
     "inputPlaceholder": "Type a message or press / for commands...",
-    "commands": "Commands"
+    "commands": "Commands",
+    "defaultSession": "Web Session"
   },
   "cmd": {
     "search": "Search commands...",

@@ -666,6 +666,8 @@ func main() {
 			return config.AddPlatformToProject(projectName, config.PlatformConfig{Type: platType, Options: opts})
 		})
 		mgmtSrv.SetRemoveProject(config.RemoveProject)
+		mgmtSrv.SetSaveProjectSettings(config.SaveProjectSettings)
+		mgmtSrv.SetConfigFilePath(configPath)
 		mgmtSrv.Start()
 	}
 

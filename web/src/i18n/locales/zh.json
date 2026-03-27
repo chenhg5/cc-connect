@@ -95,7 +95,14 @@
     "noJobs": "暂无定时任务",
     "workDir": "工作目录",
     "sessionKey": "会话键",
-    "project": "项目"
+    "project": "项目",
+    "editJob": "编辑任务",
+    "schedule": "执行时间",
+    "selectProject": "选择项目",
+    "descPlaceholder": "任务描述",
+    "promptPlaceholder": "发送给 Agent 的提示词...",
+    "selectSessionKey": "选择会话（留空使用默认）",
+    "taskType": "任务类型"
   },
   "heartbeat": {
     "title": "心跳",
@@ -225,7 +232,8 @@
     "emptyHint": "开始和你的 Agent 对话",
     "slashHint": "按 / 查看可用命令",
     "inputPlaceholder": "输入消息或按 / 使用命令...",
-    "commands": "命令"
+    "commands": "命令",
+    "defaultSession": "Web 会话"
   },
   "cmd": {
     "search": "搜索命令...",

@@ -1733,6 +1733,44 @@ func extractLineComment(line string) string {
 }
 
 // RemoveProject removes a project from the config file.
+// SaveProjectSettings persists project-level settings (quiet, admin_from,
+// disabled_commands) and the global language to config.toml.
+func SaveProjectSettings(projectName string, quiet *bool, language, adminFrom *string, disabledCommands []string) error {
+	configMu.Lock()
+	defer configMu.Unlock()
+	if ConfigPath == "" {
+		return fmt.Errorf("config path not set")
+	}
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+
+	if language != nil {
+		cfg.Language = *language
+	}
+
+	for i := range cfg.Projects {
+		if cfg.Projects[i].Name == projectName {
+			if quiet != nil {
+				cfg.Projects[i].Quiet = quiet
+			}
+			if adminFrom != nil {
+				cfg.Projects[i].AdminFrom = *adminFrom
+			}
+			if disabledCommands != nil {
+				cfg.Projects[i].DisabledCommands = disabledCommands
+			}
+			return saveConfig(cfg)
+		}
+	}
+	return fmt.Errorf("project %q not found", projectName)
+}
+
 func RemoveProject(projectName string) error {
 	configMu.Lock()
 	defer configMu.Unlock()

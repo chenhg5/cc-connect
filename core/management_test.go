@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -306,21 +308,29 @@ func TestMgmt_SessionDelete(t *testing.T) {
 }
 
 func TestMgmt_Config(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
+	srv, ts, _ := testManagementServer(t, "tok")
 
-	r := mgmtGet(t, ts.URL+"/api/v1/config", "tok")
-	if !r.OK {
-		t.Fatalf("config failed: %s", r.Error)
+	// Write a temp TOML file and point the server at it
+	tmp := t.TempDir()
+	cfgPath := tmp + "/config.toml"
+	if err := os.WriteFile(cfgPath, []byte("[display]\ntitle = \"test\"\n"), 0644); err != nil {
+		t.Fatal(err)
 	}
+	srv.SetConfigFilePath(cfgPath)
 
-	var data struct {
-		Projects []map[string]any `json:"projects"`
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/config", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := json.Unmarshal(r.Data, &data); err != nil {
-		t.Fatalf("unmarshal config data: %v", err)
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
-	if len(data.Projects) != 1 {
-		t.Fatalf("expected 1 project in config, got %d", len(data.Projects))
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "title") {
+		t.Fatalf("expected TOML content, got: %s", body)
 	}
 }
 

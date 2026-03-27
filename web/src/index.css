@@ -4,6 +4,15 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  --color-accent: 22 163 74;
+  --color-accent-dim: 21 128 61;
+}
+.dark {
+  --color-accent: 66 255 156;
+  --color-accent-dim: 43 200 122;
+}
+
 body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', sans-serif;

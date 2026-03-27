@@ -95,7 +95,14 @@
     "noJobs": "スケジュールジョブがありません",
     "workDir": "作業ディレクトリ",
     "sessionKey": "セッションキー",
-    "project": "プロジェクト"
+    "project": "プロジェクト",
+    "editJob": "ジョブを編集",
+    "schedule": "スケジュール",
+    "selectProject": "プロジェクトを選択",
+    "descPlaceholder": "ジョブの説明",
+    "promptPlaceholder": "エージェントに送信するプロンプト...",
+    "selectSessionKey": "セッションを選択（空=デフォルト）",
+    "taskType": "タスク種別"
   },
   "heartbeat": {
     "title": "ハートビート",
@@ -225,7 +232,8 @@
     "emptyHint": "エージェントとの会話を始めましょう",
     "slashHint": "/ を押して利用可能なコマンドを表示",
     "inputPlaceholder": "メッセージを入力、または / でコマンド...",
-    "commands": "コマンド"
+    "commands": "コマンド",
+    "defaultSession": "Web セッション"
   },
   "cmd": {
     "search": "コマンドを検索...",

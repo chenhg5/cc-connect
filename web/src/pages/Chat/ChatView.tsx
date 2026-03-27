@@ -12,8 +12,9 @@ import {
   useBridgeSocket, fetchBridgeConfig,
   type BridgeConfig, type BridgeIncoming, type BridgeStatus,
 } from '@/hooks/useBridgeSocket';
-import CommandPalette, { type SlashCommand } from './CommandPalette';
+import CommandPalette, { type SlashCommand, slashCommands } from './CommandPalette';
 import SessionDrawer from './SessionDrawer';
+import CommandResultPanel, { type CommandResult } from './CommandResultPanel';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
@@ -106,39 +107,58 @@ interface ChatMsg {
   timestamp?: string;
 }
 
-// ── Card renderer ────────────────────────────────────────────
+// ── Helpers ──────────────────────────────────────────────────
+
+function parseListItemText(text: string): { cmd: string; desc: string } {
+  const m = text.match(/^\*\*(.+?)\*\*\s*(.*)/);
+  if (m) return { cmd: m[1], desc: m[2] };
+  const sp = text.indexOf(' ');
+  if (sp > 0) return { cmd: text.slice(0, sp), desc: text.slice(sp + 1) };
+  return { cmd: text, desc: '' };
+}
+
+function InlineMd({ text }: { text: string }) {
+  const parts = text.split(/(\*\*[^*]+\*\*)/g);
+  return (
+    <>
+      {parts.map((p, i) =>
+        p.startsWith('**') && p.endsWith('**')
+          ? <strong key={i} className="font-semibold text-gray-900 dark:text-white">{p.slice(2, -2)}</strong>
+          : <span key={i}>{p}</span>
+      )}
+    </>
+  );
+}
+
+// ── Card renderer (flat, clean style for in-stream cards) ────
 
 function CardBlock({ card, onAction }: { card: any; onAction: (v: string) => void }) {
   if (!card) return null;
   return (
-    <div className="rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden">
-      {card.header && (
-        <div className={cn('px-4 py-2.5 font-semibold text-sm text-white', colorToBg(card.header.color))}>
-          {card.header.title}
-        </div>
+    <div className="space-y-3">
+      {card.header?.title && (
+        <div className="text-sm font-semibold text-gray-900 dark:text-white">{card.header.title}</div>
       )}
-      <div className="p-4 space-y-3">
-        {card.elements?.map((el: any, i: number) => (
-          <CardElement key={i} el={el} onAction={onAction} />
-        ))}
-      </div>
+      {card.elements?.map((el: any, i: number) => (
+        <CardElement key={i} el={el} onAction={onAction} />
+      ))}
     </div>
   );
 }
 
 function CardElement({ el, onAction }: { el: any; onAction: (v: string) => void }) {
   if (el.type === 'markdown') return <RenderMarkdown content={el.content} />;
-  if (el.type === 'divider') return <hr className="border-gray-200 dark:border-gray-700" />;
-  if (el.type === 'note') return <p className="text-xs text-gray-400">{el.text}</p>;
+  if (el.type === 'divider') return <div className="border-t border-gray-200/60 dark:border-gray-700/40" />;
+  if (el.type === 'note') return <p className="text-[11px] text-gray-400 dark:text-gray-500">{el.text}</p>;
   if (el.type === 'actions') {
     return (
       <div className="flex flex-wrap gap-2">
         {el.buttons?.map((btn: any, j: number) => (
           <button key={j} onClick={() => onAction(btn.value)} className={cn(
-            'px-3 py-1.5 rounded-lg text-xs font-medium transition-colors',
-            btn.btn_type === 'primary' ? 'bg-accent text-black hover:bg-accent-dim' :
-            btn.btn_type === 'danger' ? 'bg-red-500 text-white hover:bg-red-600' :
-            'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700',
+            'px-3 py-1.5 rounded-lg text-xs font-medium transition-all duration-150',
+            btn.btn_type === 'primary' ? 'bg-accent text-black hover:bg-accent-dim shadow-sm' :
+            btn.btn_type === 'danger' ? 'bg-red-500/10 text-red-600 dark:text-red-400 hover:bg-red-500/20' :
+            'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700',
           )}>
             {btn.text}
           </button>
@@ -147,13 +167,32 @@ function CardElement({ el, onAction }: { el: any; onAction: (v: string) => void 
     );
   }
   if (el.type === 'list_item') {
+    const parsed = parseListItemText(el.text);
+    const isCommand = parsed.cmd.startsWith('/');
     return (
-      <div className="flex items-center justify-between">
-        <span className="text-sm text-gray-700 dark:text-gray-300">{el.text}</span>
-        <button onClick={() => onAction(el.btn_value)} className="px-2.5 py-1 rounded-lg text-xs font-medium bg-accent text-black hover:bg-accent-dim">
+      <button
+        onClick={() => onAction(el.btn_value)}
+        className="w-full flex items-center gap-3 py-2 text-left group"
+      >
+        {isCommand ? (
+          <>
+            <code className="shrink-0 w-20 text-xs font-mono font-medium text-accent">{parsed.cmd}</code>
+            <span className="flex-1 text-sm text-gray-500 dark:text-gray-400 truncate">{parsed.desc}</span>
+          </>
+        ) : (
+          <span className="flex-1 text-sm text-gray-700 dark:text-gray-300 truncate min-w-0">
+            <InlineMd text={el.text} />
+          </span>
+        )}
+        <span className={cn(
+          'shrink-0 px-2 py-0.5 rounded-md text-[11px] font-medium transition-all',
+          el.btn_type === 'primary'
+            ? 'bg-accent/15 text-accent group-hover:bg-accent/25'
+            : 'text-gray-400 dark:text-gray-500 bg-gray-100 dark:bg-gray-800 group-hover:bg-accent/15 group-hover:text-accent',
+        )}>
           {el.btn_text}
-        </button>
-      </div>
+        </span>
+      </button>
     );
   }
   if (el.type === 'select') {
@@ -161,7 +200,7 @@ function CardElement({ el, onAction }: { el: any; onAction: (v: string) => void 
       <select
         defaultValue={el.init_value}
         onChange={(e) => onAction(e.target.value)}
-        className="w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+        className="w-full px-3 py-2 text-sm rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800/80 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-accent/40"
       >
         {el.options?.map((opt: any, j: number) => (
           <option key={j} value={opt.value}>{opt.text}</option>
@@ -170,15 +209,6 @@ function CardElement({ el, onAction }: { el: any; onAction: (v: string) => void 
     );
   }
   return null;
-}
-
-function colorToBg(c?: string) {
-  const map: Record<string, string> = {
-    blue: 'bg-blue-600', green: 'bg-green-600', red: 'bg-red-600', orange: 'bg-orange-500',
-    purple: 'bg-purple-600', grey: 'bg-gray-600', turquoise: 'bg-teal-600', violet: 'bg-violet-600',
-    indigo: 'bg-indigo-600', wathet: 'bg-sky-500', yellow: 'bg-yellow-500', carmine: 'bg-rose-600',
-  };
-  return map[c || ''] || 'bg-gray-800';
 }
 
 function ButtonsBlock({ content, buttons, onAction }: { content: string; buttons: { text: string; data: string }[][]; onAction: (v: string) => void }) {
@@ -252,17 +282,29 @@ export default function ChatView() {
   const [loading, setLoading] = useState(true);
   const [typing, setTyping] = useState(false);
   const [bridgeCfg, setBridgeCfg] = useState<BridgeConfig | null>(null);
+  // Whether the user explicitly picked a session from the drawer
+  const [userPickedSession, setUserPickedSession] = useState(false);
 
   // UI state
   const [cmdOpen, setCmdOpen] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [cmdResult, setCmdResult] = useState<CommandResult | null>(null);
 
   const messagesEnd = useRef<HTMLDivElement>(null);
   const previewHandleCounter = useRef(0);
   const cmdBtnRef = useRef<HTMLButtonElement>(null);
   const sessionKeyRef = useRef('');
+  // Track pending slash command so the next reply can be routed to the panel
+  const pendingCmdRef = useRef<string | null>(null);
+  // Mirrors cmdResult.command so card-action callbacks can route follow-ups back to the panel
+  const cmdPanelRef = useRef<string | null>(null);
 
-  const sessionKey = currentSession?.session_key || '';
+  // Web platform uses its own per-project session key by default.
+  // Only use the original session's key when the user explicitly switches via the drawer.
+  const webSessionKey = projectName ? `bridge:web-admin:${projectName}` : '';
+  const sessionKey = userPickedSession && currentSession?.session_key
+    ? currentSession.session_key
+    : webSessionKey;
   sessionKeyRef.current = sessionKey;
 
   // Load project sessions and auto-select latest
@@ -304,11 +346,17 @@ export default function ChatView() {
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  // Switch to a different session
+  // Keep ref in sync with cmdResult so callbacks avoid stale closures
+  useEffect(() => {
+    cmdPanelRef.current = cmdResult?.command ?? null;
+  }, [cmdResult]);
+
+  // Switch to a different session (user explicitly chose from drawer)
   const switchToSession = useCallback(async (s: Session) => {
     if (!projectName) return;
     setDrawerOpen(false);
     setLoading(true);
+    setUserPickedSession(true);
     try {
       const detail = await getSession(projectName, s.id, 200);
       setCurrentSession(detail);
@@ -332,7 +380,25 @@ export default function ChatView() {
   const handleBridgeMessage = useCallback((msg: BridgeIncoming) => {
     const msgKey = (msg as any).session_key;
     if (msgKey && sessionKeyRef.current && msgKey !== sessionKeyRef.current) {
-      return; // ignore messages for other sessions
+      return;
+    }
+
+    // If a slash command is pending, route the first reply/card to the panel
+    const pending = pendingCmdRef.current;
+    if (pending && (msg.type === 'reply' || msg.type === 'card' || msg.type === 'buttons')) {
+      pendingCmdRef.current = null;
+      if (msg.type === 'card') {
+        const card = msg as Extract<BridgeIncoming, { type: 'card' }>;
+        setCmdResult({ command: pending, content: '', format: 'card', card: card.card });
+      } else if (msg.type === 'buttons') {
+        const btns = msg as Extract<BridgeIncoming, { type: 'buttons' }>;
+        setCmdResult({ command: pending, content: btns.content, format: 'buttons', buttons: btns.buttons });
+      } else {
+        const reply = msg as Extract<BridgeIncoming, { type: 'reply' }>;
+        setCmdResult({ command: pending, content: reply.content, format: 'markdown' });
+      }
+      setTyping(false);
+      return;
     }
 
     if (msg.type === 'reply') {
@@ -410,6 +476,7 @@ export default function ChatView() {
   const { status: bridgeStatus, sendMessage: bridgeSend, sendCardAction, sendPreviewAck } = useBridgeSocket({
     bridgeCfg,
     sessionKey,
+    projectName: projectName || '',
     onMessage: handleBridgeMessage,
   });
 
@@ -424,7 +491,14 @@ export default function ChatView() {
     const content = input.trim();
     setInput('');
     setSending(true);
-    setMessages(prev => [...prev, { id: `user-${Date.now()}`, role: 'user', content }]);
+
+    const cmdToken = content.split(' ')[0];
+    const isKnownCmd = knownCommands.has(cmdToken);
+    if (isKnownCmd && !chatCommands.has(cmdToken)) {
+      pendingCmdRef.current = cmdToken;
+    } else {
+      setMessages(prev => [...prev, { id: `user-${Date.now()}`, role: 'user', content }]);
+    }
     bridgeSend(content);
     setTimeout(() => setSending(false), 300);
   }, [input, bridgeStatus, bridgeSend]);
@@ -440,24 +514,34 @@ export default function ChatView() {
     }
   };
 
+  // Commands whose result should go to the message stream (they change state)
+  const chatCommands = new Set(['/new', '/stop', '/switch', '/delete-mode', '/upgrade']);
+  const knownCommands = new Set(slashCommands.map(c => c.cmd));
+
   const handleCmdSelect = useCallback((cmd: SlashCommand) => {
     setCmdOpen(false);
-    if (cmd.cmd === '/list') {
-      setDrawerOpen(true);
-      return;
-    }
     if (bridgeStatus !== 'connected') return;
-    setMessages(prev => [...prev, { id: `user-${Date.now()}`, role: 'user', content: cmd.cmd }]);
+
+    if (chatCommands.has(cmd.cmd)) {
+      setMessages(prev => [...prev, { id: `user-${Date.now()}`, role: 'user', content: cmd.cmd }]);
+    } else {
+      pendingCmdRef.current = cmd.cmd;
+    }
     bridgeSend(cmd.cmd);
   }, [bridgeStatus, bridgeSend]);
 
   const handleCardAction = useCallback((value: string) => {
     if (bridgeStatus !== 'connected') return;
+    // If the command panel is showing, route the follow-up response back to it
+    if (cmdPanelRef.current) {
+      pendingCmdRef.current = cmdPanelRef.current;
+    }
     sendCardAction(value);
   }, [bridgeStatus, sendCardAction]);
 
   const handleNewSession = useCallback(() => {
     if (bridgeStatus !== 'connected') return;
+    setUserPickedSession(false);
     setMessages(prev => [...prev, { id: `user-${Date.now()}`, role: 'user', content: '/new' }]);
     bridgeSend('/new');
     setDrawerOpen(false);
@@ -482,16 +566,16 @@ export default function ChatView() {
               <h2 className="text-lg font-semibold text-gray-900 dark:text-white">{projectName}</h2>
               <StatusBadge status={bridgeStatus} />
             </div>
-            {currentSession && (
-              <button
-                type="button"
-                onClick={() => setDrawerOpen(true)}
-                className="flex items-center gap-1 text-xs text-gray-500 hover:text-accent transition-colors mt-0.5"
-              >
-                <span>{currentSession.name || currentSession.id.slice(0, 8)}</span>
-                <ChevronDown size={12} />
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={() => setDrawerOpen(true)}
+              className="flex items-center gap-1 text-xs text-gray-500 hover:text-accent transition-colors mt-0.5"
+            >
+              <span>{userPickedSession && currentSession
+                ? (currentSession.name || currentSession.id.slice(0, 8))
+                : t('chat.defaultSession')}</span>
+              <ChevronDown size={12} />
+            </button>
           </div>
         </div>
       </div>
@@ -636,6 +720,13 @@ export default function ChatView() {
         currentSessionId={currentSession?.id || ''}
         onSelect={switchToSession}
         onNewSession={handleNewSession}
+      />
+
+      {/* Command result panel */}
+      <CommandResultPanel
+        result={cmdResult}
+        onClose={() => setCmdResult(null)}
+        onCardAction={handleCardAction}
       />
     </div>
   );

@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
-import { Activity, Server, Layers, Cable, ArrowRight } from 'lucide-react';
+import { Activity, Server, Layers } from 'lucide-react';
 import { Card, StatCard, Badge, EmptyState } from '@/components/ui';
 import { getStatus, type SystemStatus } from '@/api/status';
 import { listProjects, type ProjectSummary } from '@/api/projects';
@@ -64,42 +64,45 @@ export default function Dashboard() {
         </Card>
       )}
 
-      {/* Project list */}
-      <Card>
-        <div className="flex items-center justify-between mb-4">
+      {/* Projects */}
+      <div>
+        <div className="flex items-center justify-between mb-3">
           <h3 className="text-sm font-semibold text-gray-900 dark:text-white">{t('nav.projects')}</h3>
           <Link to="/projects" className="text-xs text-accent hover:underline">{t('common.viewAll')}</Link>
         </div>
         {projects.length === 0 ? (
-          <EmptyState message={t('projects.noProjects')} icon={Layers} />
+          <Card><EmptyState message={t('projects.noProjects')} icon={Layers} /></Card>
         ) : (
-          <div className="space-y-2">
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
             {projects.map((p) => (
               <Link
                 key={p.name}
                 to={`/projects/${p.name}`}
-                className="flex items-center justify-between p-3 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors group"
+                className="block p-4 rounded-xl border border-gray-200/80 dark:border-white/[0.06] bg-white dark:bg-white/[0.02] hover:border-accent/40 hover:shadow-md hover:shadow-accent/5 transition-all group"
               >
-                <div className="flex items-center gap-3">
-                  <div className="w-8 h-8 rounded-lg bg-gray-100 dark:bg-gray-800 flex items-center justify-center">
-                    <Server size={16} className="text-gray-500 dark:text-gray-400" />
+                <div className="flex items-center gap-3 mb-3">
+                  <div className="w-9 h-9 rounded-lg bg-accent/10 flex items-center justify-center shrink-0">
+                    <Server size={16} className="text-accent" />
                   </div>
-                  <div>
-                    <p className="text-sm font-medium text-gray-900 dark:text-white">{p.name}</p>
-                    <p className="text-xs text-gray-500 dark:text-gray-400">
-                      {p.agent_type} · {p.platforms?.join(', ')} · {p.sessions_count} {t('nav.sessions').toLowerCase()}
-                    </p>
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-gray-900 dark:text-white truncate">{p.name}</p>
+                    <p className="text-[11px] text-gray-400 font-mono">{p.agent_type}</p>
                   </div>
                 </div>
-                <div className="flex items-center gap-2">
-                  {p.heartbeat_enabled && <Badge variant="success">heartbeat</Badge>}
-                  <ArrowRight size={16} className="text-gray-300 dark:text-gray-600 group-hover:text-accent transition-colors" />
+                <div className="flex flex-wrap gap-1.5 mb-2">
+                  {p.platforms?.map((pl) => (
+                    <Badge key={pl} variant="info" className="text-[10px] px-1.5 py-0">{pl}</Badge>
+                  ))}
+                </div>
+                <div className="flex items-center justify-between text-[11px] text-gray-400">
+                  <span>{p.sessions_count} sessions</span>
+                  {p.heartbeat_enabled && <Badge variant="success" className="text-[10px] px-1.5 py-0">heartbeat</Badge>}
                 </div>
               </Link>
             ))}
           </div>
         )}
-      </Card>
+      </div>
     </div>
   );
 }

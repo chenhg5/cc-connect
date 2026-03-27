@@ -28,10 +28,11 @@ export interface UseBridgeSocketOptions {
   bridgeCfg: BridgeConfig | null;
   platformName?: string;
   sessionKey: string;
+  projectName?: string;
   onMessage: (msg: BridgeIncoming) => void;
 }
 
-export function useBridgeSocket({ bridgeCfg, platformName = 'web', sessionKey, onMessage }: UseBridgeSocketOptions) {
+export function useBridgeSocket({ bridgeCfg, platformName = 'web', sessionKey, projectName, onMessage }: UseBridgeSocketOptions) {
   const wsRef = useRef<WebSocket | null>(null);
   const onMessageRef = useRef(onMessage);
   onMessageRef.current = onMessage;
@@ -53,8 +54,9 @@ export function useBridgeSocket({ bridgeCfg, platformName = 'web', sessionKey, o
       user_name: 'Web Admin',
       content,
       reply_ctx: sessionKey,
+      project: projectName || '',
     });
-  }, [send, sessionKey]);
+  }, [send, sessionKey, projectName]);
 
   const sendCardAction = useCallback((action: string) => {
     send({
@@ -62,8 +64,9 @@ export function useBridgeSocket({ bridgeCfg, platformName = 'web', sessionKey, o
       session_key: sessionKey,
       action,
       reply_ctx: sessionKey,
+      project: projectName || '',
     });
-  }, [send, sessionKey]);
+  }, [send, sessionKey, projectName]);
 
   const sendPreviewAck = useCallback((refId: string, handle: string) => {
     send({ type: 'preview_ack', ref_id: refId, preview_handle: handle });

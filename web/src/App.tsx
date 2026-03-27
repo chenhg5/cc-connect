@@ -8,9 +8,7 @@ import ProjectDetail from '@/pages/Projects/ProjectDetail';
 import ChatList from '@/pages/Chat/ChatList';
 import ChatView from '@/pages/Chat/ChatView';
 import CronList from '@/pages/Cron/CronList';
-import BridgeAdapters from '@/pages/Bridge/BridgeAdapters';
 import SystemConfig from '@/pages/System/Config';
-import SystemLogs from '@/pages/System/Logs';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
@@ -31,9 +29,7 @@ export default function App() {
         <Route path="chat" element={<ChatList />} />
         <Route path="chat/:name" element={<ChatView />} />
         <Route path="cron" element={<CronList />} />
-        <Route path="bridge" element={<BridgeAdapters />} />
         <Route path="system" element={<SystemConfig />} />
-        <Route path="system/logs" element={<SystemLogs />} />
       </Route>
     </Routes>
   );

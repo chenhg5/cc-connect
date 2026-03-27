@@ -555,6 +555,17 @@ func resolveDisabledCmds(cmds []string) map[string]bool {
 	return m
 }
 
+// GetDisabledCommands returns the list of disabled command IDs for this project.
+func (e *Engine) GetDisabledCommands() []string {
+	e.userRolesMu.RLock()
+	defer e.userRolesMu.RUnlock()
+	out := make([]string, 0, len(e.disabledCmds))
+	for k := range e.disabledCmds {
+		out = append(out, k)
+	}
+	return out
+}
+
 // SetDisabledCommands sets the list of command IDs that are disabled for this project.
 func (e *Engine) SetDisabledCommands(cmds []string) {
 	e.userRolesMu.Lock()

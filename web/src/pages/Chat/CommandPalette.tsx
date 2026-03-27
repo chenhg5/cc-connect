@@ -19,7 +19,7 @@ export interface SlashCommand {
 export const slashCommands: SlashCommand[] = [
   // Session
   { cmd: '/new', labelKey: 'cmd.new', icon: MessageSquarePlus, group: 'session' },
-  { cmd: '/list', labelKey: 'cmd.list', icon: List, group: 'session', local: true },
+  { cmd: '/list', labelKey: 'cmd.list', icon: List, group: 'session' },
   { cmd: '/switch', labelKey: 'cmd.switch', icon: ArrowRightLeft, group: 'session' },
   { cmd: '/current', labelKey: 'cmd.current', icon: Eye, group: 'session' },
   { cmd: '/history', labelKey: 'cmd.history', icon: History, group: 'session' },
