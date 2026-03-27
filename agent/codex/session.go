@@ -89,6 +89,7 @@ func (cs *codexSession) Send(prompt string, images []core.ImageAttachment, files
 	if len(cs.extraEnv) > 0 {
 		cmd.Env = core.MergeEnv(os.Environ(), cs.extraEnv)
 	}
+	cmd.Stdin = strings.NewReader(prompt)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -169,12 +170,13 @@ func (cs *codexSession) buildExecArgs(prompt string, imagePaths []string) []stri
 			args = append(args, "--image", imagePath)
 		}
 		// codex exec resume does not support --cd; cmd.Dir handles cwd instead.
-		args = append(args, "--json", prompt)
+		// Use stdin ("-") so multiline prompts are preserved reliably on Windows.
+		args = append(args, "--json", "-")
 	} else {
 		for _, imagePath := range imagePaths {
 			args = append(args, "--image", imagePath)
 		}
-		args = append(args, "--json", "--cd", cs.workDir, prompt)
+		args = append(args, "--json", "--cd", cs.workDir, "-")
 	}
 	return args
 }
