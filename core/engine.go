@@ -257,6 +257,7 @@ type interactiveState struct {
 	deleteMode             *deleteModeState
 	lastAutoCompressAt     time.Time
 	lastAutoCompressTokens int
+	silentEmpty            bool            // when true, drop empty responses instead of sending "(空响应)"
 }
 
 type deleteModeState struct {
@@ -978,12 +979,13 @@ func (e *Engine) ExecuteHeartbeat(sessionKey, prompt string, silent bool) error 
 	}
 
 	msg := &Message{
-		SessionKey: sessionKey,
-		Platform:   platformName,
-		UserID:     "heartbeat",
-		UserName:   "heartbeat",
-		Content:    prompt,
-		ReplyCtx:   replyCtx,
+		SessionKey:  sessionKey,
+		Platform:    platformName,
+		UserID:      "heartbeat",
+		UserName:    "heartbeat",
+		Content:     prompt,
+		ReplyCtx:    replyCtx,
+		SilentEmpty: silent,
 	}
 
 	session := e.sessions.GetOrCreateActive(sessionKey)
@@ -1734,6 +1736,13 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	}
 	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey)
 
+	// Propagate SilentEmpty from message (heartbeat silent mode)
+	if msg.SilentEmpty {
+		state.mu.Lock()
+		state.silentEmpty = true
+		state.mu.Unlock()
+	}
+
 	// Set workspaceDir on the state for idle reaper identification
 	if workspaceDir != "" {
 		state.mu.Lock()
@@ -2380,6 +2389,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				fullResponse = strings.Join(textParts, "")
 			}
 			if fullResponse == "" {
+				state.mu.Lock()
+				isSilent := state.silentEmpty
+				state.mu.Unlock()
+				if isSilent {
+					slog.Debug("silent heartbeat: empty response, skipping send", "session", session.ID)
+					session.Unlock()
+					return
+				}
 				fullResponse = e.i18n.T(MsgEmptyResponse)
 			}
 
