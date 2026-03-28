@@ -1888,7 +1888,9 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 			"have_agent_session", currentID,
 		)
 		state.markStopped()
-		e.closeAgentSessionAsync(sessionKey, state.agentSession)
+		// Close synchronously to prevent race condition where old agent
+		// continues outputting while new agent starts (issue #327).
+		e.closeAgentSessionWithTimeout(sessionKey, state.agentSession)
 		delete(e.interactiveStates, sessionKey)
 		ok = false // prevent reading stale settings below
 	}
