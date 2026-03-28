@@ -234,13 +234,9 @@ func TestSend_UsesStdinForMultilinePrompt(t *testing.T) {
 		t.Fatalf("args missing stdin marker: %v", args)
 	}
 
-	data, err := waitForFileContent(stdinFile)
-	if err != nil {
-		t.Fatalf("wait for stdin file: %v", err)
-	}
-	if string(data) != prompt {
-		t.Fatalf("stdin content = %q, want %q", string(data), prompt)
-	}
+	// cat > file creates the path before stdin is fully read; polling until
+	// content matches avoids racing an empty read (flaky under -cover / CI).
+	waitForFileEquals(t, stdinFile, prompt)
 }
 
 func TestSend_HandlesLargeJSONLines(t *testing.T) {
@@ -361,16 +357,18 @@ func waitForArgsFile(t *testing.T, path string) []string {
 	return nil
 }
 
-func waitForFileContent(path string) ([]byte, error) {
+func waitForFileEquals(t *testing.T, path, want string) {
+	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(path)
-		if err == nil {
-			return data, nil
+		if err == nil && string(data) == want {
+			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	return nil, os.ErrNotExist
+	data, _ := os.ReadFile(path)
+	t.Fatalf("stdin file %s: got %q, want %q", path, string(data), want)
 }
 
 func containsSequence(args, want []string) bool {
