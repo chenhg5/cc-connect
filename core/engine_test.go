@@ -6464,19 +6464,6 @@ func (a *switchableAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, e
 	return a.sessions, nil
 }
 
-type switchableRecordingAgent struct {
-	switchableAgent
-	mu       sync.Mutex
-	startIDs []string
-}
-
-func (a *switchableRecordingAgent) StartSession(_ context.Context, id string) (AgentSession, error) {
-	a.mu.Lock()
-	a.startIDs = append(a.startIDs, id)
-	a.mu.Unlock()
-	return newControllableSession(id), nil
-}
-
 func TestCmdSwitch_NoArgs_ShowsUsage(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
