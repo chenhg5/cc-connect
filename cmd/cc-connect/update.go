@@ -74,7 +74,7 @@ func fetchLatestStableFromGitee() (*githubRelease, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("Gitee API returned HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("gitee API returned HTTP %d", resp.StatusCode)
 	}
 
 	var release githubRelease
