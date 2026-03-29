@@ -2107,3 +2107,93 @@ func SaveGlobalSettings(u GlobalSettingsUpdate) error {
 	}
 	return saveConfig(cfg)
 }
+
+// WebSetupResult holds the config values after enabling web admin.
+type WebSetupResult struct {
+	ManagementPort  int
+	ManagementToken string
+	BridgePort      int
+	BridgeToken     string
+	AlreadyEnabled  bool
+}
+
+// EnableWebAdmin enables the bridge and management sections in config.toml.
+// If already enabled, returns the existing config values without changes.
+func EnableWebAdmin(mgmtToken, bridgeToken string) (*WebSetupResult, error) {
+	configMu.Lock()
+	defer configMu.Unlock()
+	if ConfigPath == "" {
+		return nil, fmt.Errorf("config path not set")
+	}
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return nil, fmt.Errorf("read config: %w", err)
+	}
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+
+	mgmtEnabled := cfg.Management.Enabled != nil && *cfg.Management.Enabled
+	bridgeEnabled := cfg.Bridge.Enabled != nil && *cfg.Bridge.Enabled
+
+	if mgmtEnabled && bridgeEnabled {
+		return &WebSetupResult{
+			ManagementPort:  orDefault(cfg.Management.Port, 9820),
+			ManagementToken: cfg.Management.Token,
+			BridgePort:      orDefault(cfg.Bridge.Port, 9810),
+			BridgeToken:     cfg.Bridge.Token,
+			AlreadyEnabled:  true,
+		}, nil
+	}
+
+	t := true
+	changed := false
+	if !mgmtEnabled {
+		cfg.Management.Enabled = &t
+		if cfg.Management.Port == 0 {
+			cfg.Management.Port = 9820
+		}
+		if cfg.Management.Token == "" {
+			cfg.Management.Token = mgmtToken
+		}
+		if len(cfg.Management.CORSOrigins) == 0 {
+			cfg.Management.CORSOrigins = []string{"*"}
+		}
+		changed = true
+	}
+	if !bridgeEnabled {
+		cfg.Bridge.Enabled = &t
+		if cfg.Bridge.Port == 0 {
+			cfg.Bridge.Port = 9810
+		}
+		if cfg.Bridge.Token == "" {
+			cfg.Bridge.Token = bridgeToken
+		}
+		if len(cfg.Bridge.CORSOrigins) == 0 {
+			cfg.Bridge.CORSOrigins = []string{"*"}
+		}
+		changed = true
+	}
+
+	if changed {
+		if err := saveConfig(cfg); err != nil {
+			return nil, fmt.Errorf("save config: %w", err)
+		}
+	}
+
+	return &WebSetupResult{
+		ManagementPort:  orDefault(cfg.Management.Port, 9820),
+		ManagementToken: cfg.Management.Token,
+		BridgePort:      orDefault(cfg.Bridge.Port, 9810),
+		BridgeToken:     cfg.Bridge.Token,
+		AlreadyEnabled:  false,
+	}, nil
+}
+
+func orDefault(v, d int) int {
+	if v == 0 {
+		return d
+	}
+	return v
+}

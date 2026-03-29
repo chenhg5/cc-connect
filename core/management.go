@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -51,6 +52,7 @@ type ManagementServer struct {
 	configFilePath       string
 	getGlobalSettings    func() map[string]any
 	saveGlobalSettings   func(map[string]any) error
+	webDistDir           string // path to cc-connect-web dist/ for static serving
 }
 
 // NewManagementServer creates a new management API server.
@@ -108,6 +110,10 @@ func (m *ManagementServer) SetSaveGlobalSettings(fn func(map[string]any) error) 
 	m.saveGlobalSettings = fn
 }
 
+func (m *ManagementServer) SetWebDistDir(dir string) {
+	m.webDistDir = dir
+}
+
 func (m *ManagementServer) Start() {
 	mux := http.NewServeMux()
 	prefix := "/api/v1"
@@ -138,9 +144,12 @@ func (m *ManagementServer) Start() {
 	// Bridge
 	mux.HandleFunc(prefix+"/bridge/adapters", m.wrap(m.handleBridgeAdapters))
 
+	// Static file serving for cc-connect-web (SPA)
+	handler := m.withStaticFallback(mux)
+
 	m.server = &http.Server{
 		Addr:    fmt.Sprintf(":%d", m.port),
-		Handler: mux,
+		Handler: handler,
 	}
 	go func() {
 		if err := m.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -154,6 +163,41 @@ func (m *ManagementServer) Stop() {
 	if m.server != nil {
 		m.server.Close()
 	}
+}
+
+// withStaticFallback wraps the API mux with a file server for the web UI.
+// API requests (/api/) go to the mux; everything else tries static files
+// from webDistDir, falling back to index.html for SPA routing.
+func (m *ManagementServer) withStaticFallback(apiMux *http.ServeMux) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			apiMux.ServeHTTP(w, r)
+			return
+		}
+		if m.webDistDir == "" {
+			apiMux.ServeHTTP(w, r)
+			return
+		}
+		// CORS for static files too
+		m.setCORS(w, r)
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		// Try to serve the exact file
+		filePath := filepath.Join(m.webDistDir, filepath.Clean(r.URL.Path))
+		if info, err := os.Stat(filePath); err == nil && !info.IsDir() {
+			http.ServeFile(w, r, filePath)
+			return
+		}
+		// SPA fallback: serve index.html for any non-file route
+		indexPath := filepath.Join(m.webDistDir, "index.html")
+		if _, err := os.Stat(indexPath); err == nil {
+			http.ServeFile(w, r, indexPath)
+			return
+		}
+		apiMux.ServeHTTP(w, r)
+	})
 }
 
 // ── Auth & Middleware ──────────────────────────────────────────
