@@ -67,6 +67,7 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 	s.mux.HandleFunc("/cron/list", s.handleCronList)
 	s.mux.HandleFunc("/cron/info", s.handleCronInfo)
 	s.mux.HandleFunc("/cron/edit", s.handleCronEdit)
+	s.mux.HandleFunc("/cron/exec", s.handleCronExec)
 	s.mux.HandleFunc("/cron/del", s.handleCronDel)
 	s.mux.HandleFunc("/relay/send", s.handleRelaySend)
 	s.mux.HandleFunc("/relay/bind", s.handleRelayBind)
@@ -417,6 +418,36 @@ func (s *APIServer) handleCronEdit(w http.ResponseWriter, r *http.Request) {
 	// Return updated job
 	job := s.cron.Store().Get(req.ID)
 	apiJSON(w, http.StatusOK, job)
+}
+
+func (s *APIServer) handleCronExec(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.cron == nil {
+		http.Error(w, "cron scheduler not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.ID == "" {
+		http.Error(w, "id is required", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.cron.TriggerJob(req.ID); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	apiJSON(w, http.StatusOK, map[string]string{"status": "ok", "id": req.ID})
 }
 
 // ── Relay API ──────────────────────────────────────────────────

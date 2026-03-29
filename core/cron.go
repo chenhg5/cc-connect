@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"reflect"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -578,8 +578,35 @@ func (cs *CronScheduler) scheduleJob(job *CronJob) error {
 }
 
 func (cs *CronScheduler) executeJob(jobID string) {
+	cs.executeJobInternal(jobID, false)
+}
+
+// TriggerJob runs an existing cron job immediately in the background.
+// Manual execution is allowed even when the job is currently disabled.
+func (cs *CronScheduler) TriggerJob(jobID string) error {
 	job := cs.store.Get(jobID)
-	if job == nil || !job.Enabled {
+	if job == nil {
+		return fmt.Errorf("job %q not found", jobID)
+	}
+
+	cs.mu.RLock()
+	_, ok := cs.engines[job.Project]
+	cs.mu.RUnlock()
+
+	if !ok {
+		return fmt.Errorf("project %q not found", job.Project)
+	}
+
+	go cs.executeJobInternal(jobID, true)
+	return nil
+}
+
+func (cs *CronScheduler) executeJobInternal(jobID string, manual bool) {
+	job := cs.store.Get(jobID)
+	if job == nil {
+		return
+	}
+	if !manual && !job.Enabled {
 		return
 	}
 
@@ -588,12 +615,13 @@ func (cs *CronScheduler) executeJob(jobID string) {
 	cs.mu.RUnlock()
 
 	if !ok {
-		slog.Error("cron: project not found", "job", jobID, "project", job.Project)
-		cs.store.MarkRun(jobID, fmt.Errorf("project %q not found", job.Project))
+		err := fmt.Errorf("project %q not found", job.Project)
+		slog.Error("cron: project not found", "job", jobID, "project", job.Project, "manual", manual)
+		cs.store.MarkRun(jobID, err)
 		return
 	}
 
-	slog.Info("cron: executing job", "id", jobID, "project", job.Project, "prompt", truncateStr(job.Prompt, 60))
+	slog.Info("cron: executing job", "id", jobID, "project", job.Project, "manual", manual, "prompt", truncateStr(job.Prompt, 60))
 
 	done := make(chan error, 1)
 	go func() {
@@ -615,9 +643,9 @@ func (cs *CronScheduler) executeJob(jobID string) {
 	cs.store.MarkRun(jobID, err)
 
 	if err != nil {
-		slog.Error("cron: job failed", "id", jobID, "error", err)
+		slog.Error("cron: job failed", "id", jobID, "manual", manual, "error", err)
 	} else {
-		slog.Info("cron: job completed", "id", jobID)
+		slog.Info("cron: job completed", "id", jobID, "manual", manual)
 	}
 }
 
