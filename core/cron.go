@@ -32,6 +32,7 @@ type CronJob struct {
 	Silent      *bool     `json:"silent,omitempty"`       // suppress start notification; nil = use global default
 	Mute        bool      `json:"mute,omitempty"`         // suppress ALL messages (start + result); job runs silently
 	SessionMode string    `json:"session_mode,omitempty"` // "" or "reuse" = share active session; "new_per_run" = fresh session each run
+	Mode        string    `json:"mode,omitempty"`         // permission mode override for this job; "" = use project default
 	TimeoutMins *int      `json:"timeout_mins,omitempty"` // nil = default 30m wait; 0 = no limit; >0 = minutes
 	CreatedAt   time.Time `json:"created_at"`
 	LastRun     time.Time `json:"last_run,omitempty"`
@@ -83,6 +84,13 @@ func validateCronJob(j *CronJob) error {
 	mode := NormalizeCronSessionMode(j.SessionMode)
 	if mode != "" && mode != "new_per_run" {
 		return fmt.Errorf("invalid session_mode %q (want reuse, new_per_run, or new-per-run)", j.SessionMode)
+	}
+	if j.Mode != "" {
+		switch j.Mode {
+		case "default", "bypassPermissions", "acceptEdits", "plan", "auto", "dontAsk":
+		default:
+			return fmt.Errorf("invalid mode %q (want default, bypassPermissions, acceptEdits, plan, auto, or dontAsk)", j.Mode)
+		}
 	}
 	if j.TimeoutMins != nil && *j.TimeoutMins < 0 {
 		return fmt.Errorf("timeout_mins must be >= 0")
@@ -335,6 +343,11 @@ func updateJobField(job *CronJob, field string, value any) error {
 	case "session_mode":
 		if v, ok := value.(string); ok {
 			job.SessionMode = v
+			return nil
+		}
+	case "mode":
+		if v, ok := value.(string); ok {
+			job.Mode = v
 			return nil
 		}
 	case "timeout_mins":

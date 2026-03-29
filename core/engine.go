@@ -874,12 +874,13 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 	}
 
 	msg := &Message{
-		SessionKey: sessionKey,
-		Platform:   platformName,
-		UserID:     "cron",
-		UserName:   "cron",
-		Content:    job.Prompt,
-		ReplyCtx:   replyCtx,
+		SessionKey:   sessionKey,
+		Platform:     platformName,
+		UserID:       "cron",
+		UserName:     "cron",
+		Content:      job.Prompt,
+		ReplyCtx:     replyCtx,
+		ModeOverride: job.Mode,
 	}
 
 	if job.UsesNewSessionPerRun() {
@@ -1775,6 +1776,24 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	if state.agentSession == nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgFailedToStartAgentSession))
 		return
+	}
+
+	// Apply per-message permission mode override (e.g. cron jobs with mode = "bypassPermissions").
+	// Restoration queries the agent's current mode at defer time (not a pre-override snapshot),
+	// so any /mode changes made by users during cron execution are respected.
+	if msg.ModeOverride != "" {
+		if switcher, ok := state.agentSession.(LiveModeSwitcher); ok {
+			switcher.SetLiveMode(msg.ModeOverride)
+			defer func() {
+				defaultMode := "default"
+				if ma, ok := e.agent.(interface{ GetMode() string }); ok {
+					if m := ma.GetMode(); m != "" {
+						defaultMode = m
+					}
+				}
+				switcher.SetLiveMode(defaultMode)
+			}()
+		}
 	}
 
 	// Start typing indicator if platform supports it.

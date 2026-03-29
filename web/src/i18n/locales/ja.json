@@ -110,7 +110,9 @@
     "descPlaceholder": "ジョブの説明",
     "promptPlaceholder": "エージェントに送信するプロンプト...",
     "selectSessionKey": "セッションを選択（空=デフォルト）",
-    "taskType": "タスク種別"
+    "taskType": "タスク種別",
+    "mode": "権限モード",
+    "modeDefault": "プロジェクトのデフォルトを使用"
   },
   "heartbeat": {
     "title": "ハートビート",

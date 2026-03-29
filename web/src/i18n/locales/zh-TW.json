@@ -110,7 +110,9 @@
     "descPlaceholder": "工作說明",
     "promptPlaceholder": "傳送給 Agent 的提示詞...",
     "selectSessionKey": "選擇工作階段（留空使用預設）",
-    "taskType": "任務類型"
+    "taskType": "任務類型",
+    "mode": "權限模式",
+    "modeDefault": "跟隨項目預設"
   },
   "heartbeat": {
     "title": "心跳",

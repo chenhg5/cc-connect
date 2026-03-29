@@ -110,7 +110,9 @@
     "descPlaceholder": "任务描述",
     "promptPlaceholder": "发送给 Agent 的提示词...",
     "selectSessionKey": "选择会话（留空使用默认）",
-    "taskType": "任务类型"
+    "taskType": "任务类型",
+    "mode": "权限模式",
+    "modeDefault": "跟随项目默认"
   },
   "heartbeat": {
     "title": "心跳",

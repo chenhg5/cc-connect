@@ -10,6 +10,8 @@ import { listProjects, type ProjectSummary } from '@/api/projects';
 import { listSessions, type Session } from '@/api/sessions';
 import { formatTime, cn } from '@/lib/utils';
 
+const MODE_OPTIONS = ['bypassPermissions', 'acceptEdits', 'auto', 'plan', 'dontAsk'] as const;
+
 /* ── Cron presets ── */
 interface CronPreset {
   label: string;
@@ -164,12 +166,13 @@ interface JobForm {
   description: string;
   silent: boolean;
   enabled: boolean;
+  mode: string;
   _type: 'prompt' | 'exec';
 }
 
 const emptyForm: JobForm = {
   project: '', session_key: '', cron_expr: '', prompt: '', exec: '',
-  description: '', silent: false, enabled: true, _type: 'prompt',
+  description: '', silent: false, enabled: true, mode: '', _type: 'prompt',
 };
 
 /* ── Main page ── */
@@ -241,6 +244,7 @@ export default function CronList() {
       description: job.description,
       silent: !!job.silent,
       enabled: job.enabled,
+      mode: job.mode || '',
       _type: job.exec ? 'exec' : 'prompt',
     });
     setShowForm(true);
@@ -261,6 +265,7 @@ export default function CronList() {
         if (form.session_key !== editJob.session_key) updates.session_key = form.session_key;
         if (form.silent !== !!editJob.silent) updates.silent = form.silent;
         if (form.enabled !== editJob.enabled) updates.enabled = form.enabled;
+        if ((form.mode || '') !== (editJob.mode || '')) updates.mode = form.mode;
         if (Object.keys(updates).length > 0) {
           await updateCronJob(editJob.id, updates);
         }
@@ -334,13 +339,14 @@ export default function CronList() {
                 </span>
               </div>
 
-              {/* Schedule badge */}
+              {/* Schedule badge + mode badge */}
               <div className="flex items-center gap-2 mb-3">
                 <span className="inline-flex items-center gap-1 text-[11px] font-mono bg-accent/10 text-accent px-2 py-0.5 rounded-md">
                   <Clock size={10} />
                   {describeCron(job.cron_expr)}
                 </span>
                 {job.silent && <Badge variant="default" className="text-[10px] px-1.5 py-0">silent</Badge>}
+                {job.mode && <Badge variant="default" className="text-[10px] px-1.5 py-0">{job.mode}</Badge>}
               </div>
 
               {/* Info */}
@@ -489,6 +495,14 @@ export default function CronList() {
             onChange={v => setForm({ ...form, session_key: v })}
             options={sessionKeys.map(k => ({ value: k, label: k }))}
             placeholder={t('cron.selectSessionKey')}
+          />
+
+          <Select
+            label={t('cron.mode')}
+            value={form.mode}
+            onChange={v => setForm({ ...form, mode: v })}
+            options={MODE_OPTIONS.map(m => ({ value: m, label: m }))}
+            placeholder={t('cron.modeDefault')}
           />
 
           <div className="flex items-center gap-6 pt-1">
