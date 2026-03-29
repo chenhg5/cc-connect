@@ -346,6 +346,10 @@ router_url = "http://127.0.0.1:3456"
 router_api_key = "your-secret-key"  # optional
 ```
 
+When `router_api_key` is set, cc-connect exports it to Claude Code as both
+`ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` so CCR ingress auth and
+Anthropic-compatible upstreams behind the router can both authenticate.
+
 ---
 
 ## Voice Messages (Speech-to-Text)

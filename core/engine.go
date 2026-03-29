@@ -1816,18 +1816,27 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 
 	// Create a new agent instance with this workspace's work_dir
 	opts := make(map[string]any)
+	if provider, ok := e.agent.(AgentOptionsProvider); ok {
+		for k, v := range provider.AgentOptions() {
+			opts[k] = v
+		}
+	}
 	opts["work_dir"] = workspace
 
 	// Copy model from original agent if possible
-	if ma, ok := e.agent.(interface{ GetModel() string }); ok {
-		if m := ma.GetModel(); m != "" {
-			opts["model"] = m
+	if _, copied := opts["model"]; !copied {
+		if ma, ok := e.agent.(interface{ GetModel() string }); ok {
+			if m := ma.GetModel(); m != "" {
+				opts["model"] = m
+			}
 		}
 	}
 	// Copy permission mode
-	if ma, ok := e.agent.(interface{ GetMode() string }); ok {
-		if m := ma.GetMode(); m != "" {
-			opts["mode"] = m
+	if _, copied := opts["mode"]; !copied {
+		if ma, ok := e.agent.(interface{ GetMode() string }); ok {
+			if m := ma.GetMode(); m != "" {
+				opts["mode"] = m
+			}
 		}
 	}
 

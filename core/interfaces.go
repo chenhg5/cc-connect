@@ -41,6 +41,13 @@ type SessionEnvInjector interface {
 	SetSessionEnv(env []string)
 }
 
+// AgentOptionsProvider is an optional interface for agents that can expose
+// their current construction options so the engine can recreate equivalent
+// per-workspace agent instances in multi-workspace mode.
+type AgentOptionsProvider interface {
+	AgentOptions() map[string]any
+}
+
 // FormattingInstructionProvider is an optional interface for platforms that
 // provide platform-specific formatting instructions for the agent system prompt
 // (e.g., Slack mrkdwn vs standard Markdown).

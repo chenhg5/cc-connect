@@ -24,6 +24,8 @@ func init() {
 	core.RegisterAgent("claudecode", New)
 }
 
+var newClaudeSessionFunc = newClaudeSession
+
 // Agent drives Claude Code CLI using --input-format stream-json
 // and --permission-prompt-tool stdio for bidirectional communication.
 //
@@ -121,6 +123,34 @@ func normalizePermissionMode(raw string) string {
 func (a *Agent) Name() string           { return "claudecode" }
 func (a *Agent) CLIBinaryName() string  { return "claude" }
 func (a *Agent) CLIDisplayName() string { return "Claude" }
+
+func (a *Agent) AgentOptions() map[string]any {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	opts := map[string]any{
+		"work_dir":       a.workDir,
+		"model":          a.model,
+		"mode":           a.mode,
+		"router_url":     a.routerURL,
+		"router_api_key": a.routerAPIKey,
+	}
+	if len(a.allowedTools) > 0 {
+		tools := make([]any, 0, len(a.allowedTools))
+		for _, tool := range a.allowedTools {
+			tools = append(tools, tool)
+		}
+		opts["allowed_tools"] = tools
+	}
+	if len(a.disallowedTools) > 0 {
+		tools := make([]any, 0, len(a.disallowedTools))
+		for _, tool := range a.disallowedTools {
+			tools = append(tools, tool)
+		}
+		opts["disallowed_tools"] = tools
+	}
+	return opts
+}
 
 func (a *Agent) SetWorkDir(dir string) {
 	a.mu.Lock()
@@ -259,7 +289,12 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 		extraEnv = append(extraEnv, "DISABLE_COST_WARNINGS=true")
 	}
 	if a.routerAPIKey != "" {
+		// Router mode needs to satisfy two different hops:
+		// 1. Claude Code -> CCR ingress auth often expects x-api-key semantics.
+		// 2. Some downstream third-party providers behind CCR expect Bearer auth.
+		// Inject both so Claude Code can present either header style.
 		extraEnv = append(extraEnv, "ANTHROPIC_API_KEY="+a.routerAPIKey)
+		extraEnv = append(extraEnv, "ANTHROPIC_AUTH_TOKEN="+a.routerAPIKey)
 	}
 
 	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
@@ -271,9 +306,20 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	// When router_url is set, --verbose conflicts with --output-format stream-json
 	// (verbose emits non-JSON text to stdout that corrupts the JSON stream).
 	disableVerbose := a.routerURL != ""
+	routerURL := a.routerURL
+	workDir := a.workDir
+	mode := a.mode
 	a.mu.Unlock()
 
-	return newClaudeSession(ctx, a.workDir, model, sessionID, a.mode, tools, disTools, extraEnv, platformPrompt, disableVerbose)
+	// Router-backed Claude runs have shown unstable behavior when reusing the
+	// "continue latest session" bridge. Force a fresh process-level session for
+	// router mode so we can isolate CCR/auth behavior from stale local session
+	// state. Explicit resume IDs are preserved.
+	if routerURL != "" && sessionID == core.ContinueSession {
+		sessionID = ""
+	}
+
+	return newClaudeSessionFunc(ctx, workDir, model, sessionID, mode, tools, disTools, extraEnv, platformPrompt, disableVerbose)
 }
 
 func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {

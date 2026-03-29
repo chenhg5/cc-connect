@@ -557,6 +557,8 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # When router_url is set, cc-connect will automatically:
 # 设置 router_url 后，cc-connect 会自动：
 #   - Set ANTHROPIC_BASE_URL to router_url
+#   - Export router_api_key as both ANTHROPIC_API_KEY and ANTHROPIC_AUTH_TOKEN when provided
+#   - 提供 router_api_key 时，同时导出为 ANTHROPIC_API_KEY 和 ANTHROPIC_AUTH_TOKEN
 #   - Set NO_PROXY=127.0.0.1 to prevent proxy interference
 #   - Disable telemetry and cost warnings for cleaner integration
 #
