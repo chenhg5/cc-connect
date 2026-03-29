@@ -361,9 +361,16 @@ func TestCronScheduler_TriggerJob_RunsDisabledJob(t *testing.T) {
 	}
 
 	waitForCron(t, time.Second, func() bool {
-		j := store.Get("manual1")
-		return j != nil && !j.LastRun.IsZero() && strings.Contains(strings.Join(p.getSent(), "\n"), "manual complete")
+		return strings.Contains(strings.Join(p.getSent(), "\n"), "manual complete")
 	})
+
+	j := store.Get("manual1")
+	if j == nil {
+		t.Fatal("job should still exist after manual trigger")
+	}
+	if j.LastRun.IsZero() {
+		t.Fatal("manual trigger should update LastRun")
+	}
 }
 
 func TestCmdCronMute_TextCommand(t *testing.T) {
