@@ -771,6 +771,8 @@ app_secret = "your-feishu-app-secret"
 # allow_from = "*"  # Allowed Discord user IDs / 允许的 Discord 用户 ID
 # guild_id = ""     # Optional: set for instant slash command registration (per-guild)
 #                   # 可选：设置后 slash 命令秒级生效（仅该服务器）
+# channel_allow = "" # Optional comma-separated channel IDs routed to this project / 可选：逗号分隔的频道 ID 白名单
+# thread_allow = ""  # Optional comma-separated thread IDs routed to this project / 可选：逗号分隔的 thread ID 白名单
 # group_reply_all = false  # If true, respond to ALL guild messages without @mention / 设为 true 群聊无需 @ 也响应
 # share_session_in_channel = false  # If true, all users in a channel share one agent session / 频道共享会话
 # thread_isolation = false  # If true, cc-connect creates/uses Discord threads as session boundaries when the channel supports threads

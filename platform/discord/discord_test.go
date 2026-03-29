@@ -818,3 +818,83 @@ func TestReplyContextForDeferredInteractionFallback(t *testing.T) {
 		})
 	}
 }
+
+func TestParseDiscordIDSet(t *testing.T) {
+	got := parseDiscordIDSet([]any{" channel-1 ", "", "thread-2"})
+	if len(got) != 2 {
+		t.Fatalf("len(parseDiscordIDSet) = %d, want 2", len(got))
+	}
+	if _, ok := got["channel-1"]; !ok {
+		t.Fatal("missing channel-1")
+	}
+	if _, ok := got["thread-2"]; !ok {
+		t.Fatal("missing thread-2")
+	}
+}
+
+func TestRouteAllowed(t *testing.T) {
+	tests := []struct {
+		name      string
+		platform  *Platform
+		guildID   string
+		channelID string
+		want      bool
+	}{
+		{
+			name:      "default allows all",
+			platform:  &Platform{},
+			guildID:   "guild-1",
+			channelID: "channel-1",
+			want:      true,
+		},
+		{
+			name:      "guild mismatch denied",
+			platform:  &Platform{guildID: "guild-1"},
+			guildID:   "guild-2",
+			channelID: "channel-1",
+			want:      false,
+		},
+		{
+			name:      "guild match allowed without narrower filters",
+			platform:  &Platform{guildID: "guild-1"},
+			guildID:   "guild-1",
+			channelID: "channel-1",
+			want:      true,
+		},
+		{
+			name: "channel allow narrows within guild",
+			platform: &Platform{
+				guildID:      "guild-1",
+				channelAllow: map[string]struct{}{"channel-1": {}},
+			},
+			guildID:   "guild-1",
+			channelID: "channel-2",
+			want:      false,
+		},
+		{
+			name: "channel allow exact match",
+			platform: &Platform{
+				channelAllow: map[string]struct{}{"channel-1": {}},
+			},
+			guildID:   "guild-1",
+			channelID: "channel-1",
+			want:      true,
+		},
+		{
+			name: "thread allow exact match",
+			platform: &Platform{
+				threadAllow: map[string]struct{}{"thread-9": {}},
+			},
+			guildID:   "guild-1",
+			channelID: "thread-9",
+			want:      true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.platform.routeAllowed(tt.guildID, tt.channelID); got != tt.want {
+				t.Fatalf("routeAllowed(%q, %q) = %v, want %v", tt.guildID, tt.channelID, got, tt.want)
+			}
+		})
+	}
+}

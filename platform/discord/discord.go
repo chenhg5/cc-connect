@@ -42,6 +42,8 @@ type Platform struct {
 	token                      string
 	allowFrom                  string
 	guildID                    string // optional: per-guild registration (instant) vs global (up to 1h propagation)
+	channelAllow               map[string]struct{}
+	threadAllow                map[string]struct{}
 	groupReplyAll              bool
 	shareSessionInChannel      bool
 	threadIsolation            bool
@@ -65,6 +67,8 @@ func New(opts map[string]any) (core.Platform, error) {
 	allowFrom, _ := opts["allow_from"].(string)
 	core.CheckAllowFrom("discord", allowFrom)
 	guildID, _ := opts["guild_id"].(string)
+	channelAllow := parseDiscordIDSet(opts["channel_allow"])
+	threadAllow := parseDiscordIDSet(opts["thread_allow"])
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	threadIsolation, _ := opts["thread_isolation"].(bool)
@@ -73,6 +77,8 @@ func New(opts map[string]any) (core.Platform, error) {
 		token:                      token,
 		allowFrom:                  allowFrom,
 		guildID:                    guildID,
+		channelAllow:               channelAllow,
+		threadAllow:                threadAllow,
 		groupReplyAll:              groupReplyAll,
 		shareSessionInChannel:      shareSessionInChannel,
 		readyCh:                    make(chan struct{}),
@@ -103,6 +109,53 @@ func buildSessionKey(channelID string, userID string, shareSessionInChannel bool
 		return fmt.Sprintf("discord:%s", channelID)
 	}
 	return fmt.Sprintf("discord:%s:%s", channelID, userID)
+}
+
+func parseDiscordIDSet(v any) map[string]struct{} {
+	var items []string
+	switch vals := v.(type) {
+	case []string:
+		items = append(items, vals...)
+	case []any:
+		for _, item := range vals {
+			s, ok := item.(string)
+			if !ok {
+				continue
+			}
+			items = append(items, s)
+		}
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	out := make(map[string]struct{}, len(items))
+	for _, id := range items {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		out[id] = struct{}{}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func (p *Platform) routeAllowed(guildID, channelID string) bool {
+	if p.guildID != "" && guildID != p.guildID {
+		return false
+	}
+	if len(p.threadAllow) == 0 && len(p.channelAllow) == 0 {
+		return true
+	}
+	if _, ok := p.threadAllow[channelID]; ok {
+		return true
+	}
+	if _, ok := p.channelAllow[channelID]; ok {
+		return true
+	}
+	return false
 }
 
 // TODO: thread_isolation currently keys each Discord thread as one shared session, so share_session_in_channel=false does not further isolate users within the same thread.
@@ -435,6 +488,10 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 			slog.Debug("discord: message from unauthorized user", "user", m.Author.ID)
 			return
 		}
+		if !p.routeAllowed(m.GuildID, m.ChannelID) {
+			slog.Debug("discord: message blocked by route filter", "guild", m.GuildID, "channel", m.ChannelID)
+			return
+		}
 
 		// In guild channels, only respond when the bot is @mentioned (unless group_reply_all).
 		// Check both user mentions and role mentions (Discord auto-creates a managed role
@@ -545,6 +602,17 @@ func (p *Platform) handleInteraction(s *discordgo.Session, i *discordgo.Interact
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
 			Data: &discordgo.InteractionResponseData{
 				Content: "You are not authorized to use this bot.",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+	if !p.routeAllowed(i.GuildID, i.ChannelID) {
+		slog.Debug("discord: interaction blocked by route filter", "guild", i.GuildID, "channel", i.ChannelID)
+		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "This channel is not routed to the current project.",
 				Flags:   discordgo.MessageFlagsEphemeral,
 			},
 		})
