@@ -296,7 +296,8 @@ func TestDisplayConfig_Save(t *testing.T) {
 
 	thinking := 120
 	tool := 240
-	if err := SaveDisplayConfig(&thinking, &tool); err != nil {
+	showTools := false
+	if err := SaveDisplayConfig(&thinking, &tool, &showTools); err != nil {
 		t.Fatalf("SaveDisplayConfig() error: %v", err)
 	}
 
@@ -307,9 +308,12 @@ func TestDisplayConfig_Save(t *testing.T) {
 	if cfg.Display.ToolMaxLen == nil || *cfg.Display.ToolMaxLen != 240 {
 		t.Fatalf("ToolMaxLen = %#v, want 240", cfg.Display.ToolMaxLen)
 	}
+	if cfg.Display.ToolMessages == nil || *cfg.Display.ToolMessages {
+		t.Fatalf("ToolMessages = %#v, want false", cfg.Display.ToolMessages)
+	}
 
 	thinking = 360
-	if err := SaveDisplayConfig(&thinking, nil); err != nil {
+	if err := SaveDisplayConfig(&thinking, nil, nil); err != nil {
 		t.Fatalf("SaveDisplayConfig() second update error: %v", err)
 	}
 
@@ -319,6 +323,9 @@ func TestDisplayConfig_Save(t *testing.T) {
 	}
 	if cfg.Display.ToolMaxLen == nil || *cfg.Display.ToolMaxLen != 240 {
 		t.Fatalf("ToolMaxLen after nil update = %#v, want 240", cfg.Display.ToolMaxLen)
+	}
+	if cfg.Display.ToolMessages == nil || *cfg.Display.ToolMessages {
+		t.Fatalf("ToolMessages after nil update = %#v, want false", cfg.Display.ToolMessages)
 	}
 }
 
@@ -899,10 +906,10 @@ func TestValidateUsersConfig(t *testing.T) {
 			name: "nil users is valid",
 			cfg: Config{
 				Projects: []ProjectConfig{{
-					Name: "p1",
-					Agent: AgentConfig{Type: "codex"},
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
-					Users: nil,
+					Users:     nil,
 				}},
 			},
 			wantErr: "",
@@ -911,10 +918,10 @@ func TestValidateUsersConfig(t *testing.T) {
 			name: "empty roles",
 			cfg: Config{
 				Projects: []ProjectConfig{{
-					Name: "p1",
-					Agent: AgentConfig{Type: "codex"},
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
-					Users: &UsersConfig{Roles: map[string]RoleConfig{}},
+					Users:     &UsersConfig{Roles: map[string]RoleConfig{}},
 				}},
 			},
 			wantErr: `no roles defined`,
@@ -923,8 +930,8 @@ func TestValidateUsersConfig(t *testing.T) {
 			name: "empty user_ids in role",
 			cfg: Config{
 				Projects: []ProjectConfig{{
-					Name: "p1",
-					Agent: AgentConfig{Type: "codex"},
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
 					Users: &UsersConfig{
 						Roles: map[string]RoleConfig{
@@ -939,13 +946,13 @@ func TestValidateUsersConfig(t *testing.T) {
 			name: "duplicate user in different roles",
 			cfg: Config{
 				Projects: []ProjectConfig{{
-					Name: "p1",
-					Agent: AgentConfig{Type: "codex"},
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
 					Users: &UsersConfig{
 						Roles: map[string]RoleConfig{
-							"admin":   {UserIDs: []string{"user1"}},
-							"member":  {UserIDs: []string{"user1"}},
+							"admin":  {UserIDs: []string{"user1"}},
+							"member": {UserIDs: []string{"user1"}},
 						},
 					},
 				}},
@@ -956,8 +963,8 @@ func TestValidateUsersConfig(t *testing.T) {
 			name: "wildcard in multiple roles",
 			cfg: Config{
 				Projects: []ProjectConfig{{
-					Name: "p1",
-					Agent: AgentConfig{Type: "codex"},
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
 					Users: &UsersConfig{
 						Roles: map[string]RoleConfig{
@@ -973,8 +980,8 @@ func TestValidateUsersConfig(t *testing.T) {
 			name: "default_role not matching any role",
 			cfg: Config{
 				Projects: []ProjectConfig{{
-					Name: "p1",
-					Agent: AgentConfig{Type: "codex"},
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
 					Users: &UsersConfig{
 						DefaultRole: "superadmin",
@@ -990,8 +997,8 @@ func TestValidateUsersConfig(t *testing.T) {
 			name: "valid users config",
 			cfg: Config{
 				Projects: []ProjectConfig{{
-					Name: "p1",
-					Agent: AgentConfig{Type: "codex"},
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
 					Users: &UsersConfig{
 						DefaultRole: "member",
@@ -1008,8 +1015,8 @@ func TestValidateUsersConfig(t *testing.T) {
 			name: "valid with wildcard in one role only",
 			cfg: Config{
 				Projects: []ProjectConfig{{
-					Name: "p1",
-					Agent: AgentConfig{Type: "codex"},
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
 					Users: &UsersConfig{
 						Roles: map[string]RoleConfig{
@@ -1173,7 +1180,7 @@ func TestCloneAgentConfig(t *testing.T) {
 			t.Fatalf("Providers length = %d, want 1", len(got.Providers))
 		}
 		p := got.Providers[0]
-		if p.Name != "openai" || p.APIKey != "sk-test" || p.BaseURL != "https://api.openai.com" || p.Model != "gpt-4"  {
+		if p.Name != "openai" || p.APIKey != "sk-test" || p.BaseURL != "https://api.openai.com" || p.Model != "gpt-4" {
 			t.Errorf("Provider fields not cloned correctly: %+v", p)
 		}
 		if p.Env["DEBUG"] != "1" {

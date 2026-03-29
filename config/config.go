@@ -18,27 +18,27 @@ var configMu sync.Mutex
 var ConfigPath string
 
 type Config struct {
-	DataDir         string              `toml:"data_dir"` // session store directory, default ~/.cc-connect
-	AttachmentSend  string              `toml:"attachment_send"`
-	Projects        []ProjectConfig     `toml:"projects"`
-	Commands        []CommandConfig     `toml:"commands"`     // global custom slash commands
-	Aliases         []AliasConfig       `toml:"aliases"`      // global command aliases
-	BannedWords     []string            `toml:"banned_words"` // messages containing any of these words are blocked
-	Log             LogConfig           `toml:"log"`
-	Language        string              `toml:"language"` // "en" or "zh", default is "en"
-	Speech          SpeechConfig        `toml:"speech"`
-	TTS             TTSConfig           `toml:"tts"`
-	Display         DisplayConfig       `toml:"display"`
-	StreamPreview   StreamPreviewConfig `toml:"stream_preview"`  // real-time streaming preview
-	RateLimit       RateLimitConfig          `toml:"rate_limit"`           // per-session rate limiting
-	OutgoingRateLimit OutgoingRateLimitConfig `toml:"outgoing_rate_limit"`  // outgoing message throttling
-	Relay           RelayConfig         `toml:"relay"`           // bot-to-bot relay behavior
-	Quiet           *bool               `toml:"quiet,omitempty"` // global default for quiet mode; project-level overrides this
-	Cron            CronConfig          `toml:"cron"`
-	Webhook         WebhookConfig       `toml:"webhook"`
-	Bridge          BridgeConfig        `toml:"bridge"`
-	Management      ManagementConfig    `toml:"management"`
-	IdleTimeoutMins *int                `toml:"idle_timeout_mins,omitempty"` // max minutes between agent events; 0 = no timeout; default 120
+	DataDir           string                  `toml:"data_dir"` // session store directory, default ~/.cc-connect
+	AttachmentSend    string                  `toml:"attachment_send"`
+	Projects          []ProjectConfig         `toml:"projects"`
+	Commands          []CommandConfig         `toml:"commands"`     // global custom slash commands
+	Aliases           []AliasConfig           `toml:"aliases"`      // global command aliases
+	BannedWords       []string                `toml:"banned_words"` // messages containing any of these words are blocked
+	Log               LogConfig               `toml:"log"`
+	Language          string                  `toml:"language"` // "en" or "zh", default is "en"
+	Speech            SpeechConfig            `toml:"speech"`
+	TTS               TTSConfig               `toml:"tts"`
+	Display           DisplayConfig           `toml:"display"`
+	StreamPreview     StreamPreviewConfig     `toml:"stream_preview"`      // real-time streaming preview
+	RateLimit         RateLimitConfig         `toml:"rate_limit"`          // per-session rate limiting
+	OutgoingRateLimit OutgoingRateLimitConfig `toml:"outgoing_rate_limit"` // outgoing message throttling
+	Relay             RelayConfig             `toml:"relay"`               // bot-to-bot relay behavior
+	Quiet             *bool                   `toml:"quiet,omitempty"`     // global default for quiet mode; project-level overrides this
+	Cron              CronConfig              `toml:"cron"`
+	Webhook           WebhookConfig           `toml:"webhook"`
+	Bridge            BridgeConfig            `toml:"bridge"`
+	Management        ManagementConfig        `toml:"management"`
+	IdleTimeoutMins   *int                    `toml:"idle_timeout_mins,omitempty"` // max minutes between agent events; 0 = no timeout; default 120
 }
 
 // CronConfig controls cron job behavior.
@@ -73,8 +73,9 @@ type ManagementConfig struct {
 
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
 type DisplayConfig struct {
-	ThinkingMaxLen *int `toml:"thinking_max_len"` // max chars for thinking messages; 0 = no truncation; default 300
-	ToolMaxLen     *int `toml:"tool_max_len"`     // max chars for tool use messages; 0 = no truncation; default 500
+	ThinkingMaxLen *int  `toml:"thinking_max_len"` // max chars for thinking messages; 0 = no truncation; default 300
+	ToolMaxLen     *int  `toml:"tool_max_len"`     // max chars for tool use messages; 0 = no truncation; default 500
+	ToolMessages   *bool `toml:"tool_messages"`    // whether tool progress messages are shown; default true
 }
 
 // StreamPreviewConfig controls real-time streaming preview in IM.
@@ -97,7 +98,7 @@ type RateLimitConfig struct {
 type OutgoingRateLimitConfig struct {
 	MaxPerSecond *float64                               `toml:"max_per_second"` // messages per second; 0 = unlimited (default)
 	Burst        *int                                   `toml:"burst"`          // max burst size; default = ceil(max_per_second)
-	Platforms    map[string]OutgoingRateLimitPlatConfig  `toml:"platforms"`      // per-platform overrides keyed by platform type name
+	Platforms    map[string]OutgoingRateLimitPlatConfig `toml:"platforms"`      // per-platform overrides keyed by platform type name
 }
 
 // OutgoingRateLimitPlatConfig is a per-platform override for outgoing rate limiting.
@@ -696,8 +697,8 @@ func RemoveAlias(name string) error {
 	return saveConfig(cfg)
 }
 
-// SaveDisplayConfig persists the display truncation settings to the config file.
-func SaveDisplayConfig(thinkingMaxLen, toolMaxLen *int) error {
+// SaveDisplayConfig persists the display settings to the config file.
+func SaveDisplayConfig(thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
 	configMu.Lock()
 	defer configMu.Unlock()
 	if ConfigPath == "" {
@@ -716,6 +717,9 @@ func SaveDisplayConfig(thinkingMaxLen, toolMaxLen *int) error {
 	}
 	if toolMaxLen != nil {
 		cfg.Display.ToolMaxLen = toolMaxLen
+	}
+	if toolMessages != nil {
+		cfg.Display.ToolMessages = toolMessages
 	}
 	return saveConfig(cfg)
 }
