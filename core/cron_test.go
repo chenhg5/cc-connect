@@ -9,6 +9,18 @@ import (
 	"time"
 )
 
+func waitForCron(t *testing.T, timeout time.Duration, fn func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if fn() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("condition not met before timeout")
+}
+
 func TestCronStore_MuteToggle(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewCronStore(dir)
@@ -260,14 +272,16 @@ func TestExecuteCardAction_CronActions(t *testing.T) {
 	}
 
 	if err := store.Add(&CronJob{
-		ID: "act1", Project: "test", SessionKey: "test:ch1",
+		ID: "act1", Project: "test", SessionKey: "discord:channel-1:user-1",
 		CronExpr: "0 6 * * *", Prompt: "task", Enabled: true,
 		CreatedAt: time.Now(),
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	p := &stubPlatformEngine{n: "test"}
+	p := &stubCronReplyTargetPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "discord"},
+	}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	scheduler := NewCronScheduler(store)
 	e.cronScheduler = scheduler
@@ -277,34 +291,79 @@ func TestExecuteCardAction_CronActions(t *testing.T) {
 	}
 	defer scheduler.Stop()
 
-	e.executeCardAction("/cron", "disable act1", "test:ch1")
+	e.executeCardAction("/cron", "disable act1", "discord:channel-1:user-1")
 	j := store.Get("act1")
 	if j.Enabled {
 		t.Error("job should be disabled after card action")
 	}
 
-	e.executeCardAction("/cron", "enable act1", "test:ch1")
+	e.executeCardAction("/cron", "enable act1", "discord:channel-1:user-1")
 	j = store.Get("act1")
 	if !j.Enabled {
 		t.Error("job should be re-enabled after card action")
 	}
 
-	e.executeCardAction("/cron", "mute act1", "test:ch1")
+	e.executeCardAction("/cron", "mute act1", "discord:channel-1:user-1")
 	j = store.Get("act1")
 	if !j.Mute {
 		t.Error("job should be muted after card action")
 	}
 
-	e.executeCardAction("/cron", "unmute act1", "test:ch1")
+	e.executeCardAction("/cron", "unmute act1", "discord:channel-1:user-1")
 	j = store.Get("act1")
 	if j.Mute {
 		t.Error("job should be unmuted after card action")
 	}
 
-	e.executeCardAction("/cron", "delete act1", "test:ch1")
+	agentSession := newResultAgentSession("cron run complete")
+	e.agent = &resultAgent{session: agentSession}
+	e.executeCardAction("/cron", "exec act1", "discord:channel-1:user-1")
+	waitForCron(t, time.Second, func() bool {
+		return strings.Contains(strings.Join(p.getSent(), "\n"), "cron run complete")
+	})
+
+	e.executeCardAction("/cron", "delete act1", "discord:channel-1:user-1")
 	if store.Get("act1") != nil {
 		t.Error("job should be deleted after card action")
 	}
+}
+
+func TestCronScheduler_TriggerJob_RunsDisabledJob(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	job := &CronJob{
+		ID:         "manual1",
+		Project:    "test",
+		SessionKey: "discord:channel-1:user-1",
+		CronExpr:   "0 6 * * *",
+		Prompt:     "task",
+		Enabled:    false,
+		CreatedAt:  time.Now(),
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatal(err)
+	}
+
+	p := &stubCronReplyTargetPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "discord"},
+	}
+	agent := &resultAgent{session: newResultAgentSession("manual complete")}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	scheduler := NewCronScheduler(store)
+	scheduler.RegisterEngine("test", e)
+
+	if err := scheduler.TriggerJob("manual1"); err != nil {
+		t.Fatalf("TriggerJob() error = %v", err)
+	}
+
+	waitForCron(t, time.Second, func() bool {
+		j := store.Get("manual1")
+		return j != nil && !j.LastRun.IsZero() && strings.Contains(strings.Join(p.getSent(), "\n"), "manual complete")
+	})
 }
 
 func TestCmdCronMute_TextCommand(t *testing.T) {
@@ -352,6 +411,43 @@ func TestCmdCronMute_TextCommand(t *testing.T) {
 	if len(sent) == 0 || !strings.Contains(sent[len(sent)-1], "not found") {
 		t.Errorf("should reply with not found for bad id, got: %v", sent)
 	}
+}
+
+func TestCmdCronExec_TextCommand(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Add(&CronJob{
+		ID:         "exec1",
+		Project:    "test",
+		SessionKey: "discord:channel-1:user-1",
+		CronExpr:   "0 6 * * *",
+		Prompt:     "task",
+		Enabled:    false,
+		CreatedAt:  time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	p := &stubCronReplyTargetPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "discord"},
+	}
+	agent := &resultAgent{session: newResultAgentSession("exec complete")}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	scheduler := NewCronScheduler(store)
+	e.cronScheduler = scheduler
+	scheduler.RegisterEngine("test", e)
+
+	msg := &Message{SessionKey: "discord:channel-1:user-1", UserID: "u1", ReplyCtx: "ctx"}
+	e.cmdCronExec(p, msg, []string{"exec1"})
+
+	waitForCron(t, time.Second, func() bool {
+		sent := p.getSent()
+		return len(sent) >= 2 && strings.Contains(sent[0], "triggered") && strings.Contains(strings.Join(sent, "\n"), "exec complete")
+	})
 }
 
 func TestCronStore_JobsPath(t *testing.T) {
