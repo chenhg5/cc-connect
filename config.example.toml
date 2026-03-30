@@ -85,6 +85,25 @@ level = "info" # debug, info, warn, error
 # window_secs = 60          # Window size in seconds (default: 60) / 窗口时间秒数（默认 60）
 
 # =============================================================================
+# Outgoing Rate Limit / 出站速率限制
+# Throttle how fast messages are sent TO platforms.
+# Prevents account bans on platforms with strict API rate limits (e.g. WeChat Work).
+# 限制向平台发送消息的速率，防止因频率过高被封号（如企业微信）。
+# =============================================================================
+# [outgoing_rate_limit]
+# max_per_second = 0         # Global default msgs/sec; 0 = unlimited (default) / 全局默认每秒消息数；0 = 无限制
+# burst = 3                  # Max burst size; default = ceil(max_per_second) / 最大突发数量
+#                            # For fractional rates (e.g. 0.2), default burst becomes ceil(max_per_second).
+
+# Per-platform overrides / 每平台覆盖配置:
+# [outgoing_rate_limit.platforms.wecom]
+# max_per_second = 1
+# [outgoing_rate_limit.platforms.telegram]
+# max_per_second = 25
+# [outgoing_rate_limit.platforms.feishu]
+# max_per_second = 5
+
+# =============================================================================
 # Relay Settings / Relay 设置
 # =============================================================================
 # Bot-to-bot relay timeout. Controls how long cc-connect waits for the target
@@ -503,12 +522,13 @@ type = "claudecode"
 
 [projects.agent.options]
 work_dir = "/path/to/backend"
-mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "bypassPermissions" (yolo)
+mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassPermissions" (yolo)
 
 # Mode options / 模式说明:
 # - "default":            Every tool call requires user approval. / 每次工具调用都需要用户确认。
 # - "acceptEdits" (edit): File edit tools auto-approved; other tools still ask. / 文件编辑自动通过，其他仍需确认。
 # - "plan":               Claude only plans — no execution until you approve. / 只做规划不执行，审批后再执行。
+# - "auto": Claude automatically decides when a permission prompt is needed. / Claude 自动判断何时需要确认。
 # - "bypassPermissions" (yolo): All tool calls auto-approved. Use with caution. / 全部自动通过，请谨慎使用。
 # - "dontAsk" (dont-ask): Auto-deny tools unless pre-approved via allowed_tools or settings allow rules. / 未预授权的工具自动拒绝，安全推荐。
 #
@@ -647,6 +667,8 @@ app_secret = "your-feishu-app-secret"
 #                           # 设为 true 时，群聊按飞书话题/根消息隔离会话（一个 thread/root 对应一个 Agent 会话）
 # reply_to_trigger = true   # Default: bot uses “reply to message” API (quotes the user’s message). Set false to post plain chat messages instead.
 #                           # 默认 true：用「回复消息」API（引用用户消息）。设为 false 则在会话里发普通消息、不引用触发消息。
+# progress_style = "legacy" # Progress rendering style: legacy | compact | card
+#                           # 进度消息展示风格：legacy（逐条消息）| compact（单消息持续更新）| card（结构化卡片）
 
 # Lark (International Version) / Lark 国际版
 # Lark uses Webhook mode instead of WebSocket long-connection.
@@ -670,6 +692,7 @@ app_secret = "your-feishu-app-secret"
 # enable_feishu_card = true
 # allow_from = "*"
 # reaction_emoji = "OnIt"
+# progress_style = "legacy"  # legacy | compact | card
 
 # DingTalk / 钉钉 (uncomment to enable / 取消注释以启用)
 # 1. Create an app at https://open-dev.dingtalk.com / 在钉钉开放平台创建应用
@@ -809,6 +832,9 @@ app_secret = "your-feishu-app-secret"
 # enable_markdown = false  # set true to send Markdown (only renders in WeChat Work app, NOT personal WeChat)
 #                          # 设为 true 发送 Markdown（仅企业微信应用内可渲染，个人微信显示"暂不支持"）
 # allow_from = "*"  # Allowed WeChat Work user IDs / 允许的企业微信用户 ID
+# Inbound (HTTP callback): text, image, voice, and file messages are passed to the agent.
+# 入站（HTTP 回调）：文本、图片、语音与文件会交给 Agent（如 Claude Code）处理。
+# WebSocket 智能机器人：文本、语音（转文字）、图片、文件、图文混排与引用中的图片/文件（URL+aeskey 下载解密）。
 # proxy = ""  # optional: forward proxy for API calls if your IP is dynamic
 #             # 可选：正向代理，用于 IP 不固定的场景
 #             # e.g. "http://your-vps-ip:8888" — the VPS IP goes into trusted IP list
@@ -1238,6 +1264,7 @@ app_secret = "your-feishu-app-secret"
 #
 # [projects.agent.options]
 # work_dir = "/path/to/frontend"
+# mode = "auto"
 # mode = "bypassPermissions"
 #
 # [[projects.platforms]]

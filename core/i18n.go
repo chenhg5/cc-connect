@@ -123,6 +123,11 @@ const (
 	MsgThinking                  MsgKey = "thinking"
 	MsgTool                      MsgKey = "tool"
 	MsgToolResult                MsgKey = "tool_result"
+	MsgToolResultFmtStatus       MsgKey = "tool_result_fmt_status"
+	MsgToolResultFmtExit         MsgKey = "tool_result_fmt_exit"
+	MsgToolResultFmtNoOutput     MsgKey = "tool_result_fmt_no_output"
+	MsgToolResultFmtOk           MsgKey = "tool_result_fmt_ok"
+	MsgToolResultFmtFailed       MsgKey = "tool_result_fmt_failed"
 	MsgExecutionStopped          MsgKey = "execution_stopped"
 	MsgNoExecution               MsgKey = "no_execution"
 	MsgPreviousProcessing        MsgKey = "previous_processing"
@@ -564,6 +569,41 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "📤 **%s**\n---\n%s",
 		LangJapanese:           "📤 **%s**\n---\n%s",
 		LangSpanish:            "📤 **%s**\n---\n%s",
+	},
+	MsgToolResultFmtStatus: {
+		LangEnglish:            "Status",
+		LangChinese:            "状态",
+		LangTraditionalChinese: "狀態",
+		LangJapanese:           "ステータス",
+		LangSpanish:            "Estado",
+	},
+	MsgToolResultFmtExit: {
+		LangEnglish:            "Exit",
+		LangChinese:            "退出码",
+		LangTraditionalChinese: "結束代碼",
+		LangJapanese:           "終了コード",
+		LangSpanish:            "Salida",
+	},
+	MsgToolResultFmtNoOutput: {
+		LangEnglish:            "No output",
+		LangChinese:            "无输出",
+		LangTraditionalChinese: "無輸出",
+		LangJapanese:           "出力なし",
+		LangSpanish:            "Sin salida",
+	},
+	MsgToolResultFmtOk: {
+		LangEnglish:            "ok",
+		LangChinese:            "ok",
+		LangTraditionalChinese: "ok",
+		LangJapanese:           "ok",
+		LangSpanish:            "ok",
+	},
+	MsgToolResultFmtFailed: {
+		LangEnglish:            "failed",
+		LangChinese:            "failed",
+		LangTraditionalChinese: "failed",
+		LangJapanese:           "failed",
+		LangSpanish:            "fallido",
 	},
 	MsgExecutionStopped: {
 		LangEnglish:            "⏹ Execution stopped.",
@@ -2023,11 +2063,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Uso: `/reasoning <número>` o `/reasoning <low|medium|high|xhigh>`",
 	},
 	MsgModeUsage: {
-		LangEnglish:            "\nUse `/mode <name>` to switch.\nAvailable: `default` / `edit` / `plan` / `yolo`",
-		LangChinese:            "\n使用 `/mode <名称>` 切换模式\n可用值: `default` / `edit` / `plan` / `yolo`",
-		LangTraditionalChinese: "\n使用 `/mode <名稱>` 切換模式\n可用值: `default` / `edit` / `plan` / `yolo`",
-		LangJapanese:           "\n`/mode <名前>` で切り替え\n選択肢: `default` / `edit` / `plan` / `yolo`",
-		LangSpanish:            "\nUse `/mode <nombre>` para cambiar.\nDisponibles: `default` / `edit` / `plan` / `yolo`",
+		LangEnglish:            "\nUse `/mode <name>` to switch.\nAvailable: %s",
+		LangChinese:            "\n使用 `/mode <名称>` 切换模式\n可用值: %s",
+		LangTraditionalChinese: "\n使用 `/mode <名稱>` 切換模式\n可用值: %s",
+		LangJapanese:           "\n`/mode <名前>` で切り替え\n選択肢: %s",
+		LangSpanish:            "\nUse `/mode <nombre>` para cambiar.\nDisponibles: %s",
 	},
 	MsgLangSelectPlaceholder: {
 		LangEnglish: "Select language", LangChinese: "选择语言", LangTraditionalChinese: "選擇語言",

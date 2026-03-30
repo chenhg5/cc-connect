@@ -96,6 +96,8 @@ func TestNormalizePermissionMode(t *testing.T) {
 		{"dontask", "dontAsk"},
 		{"dont-ask", "dontAsk"},
 		{"dont_ask", "dontAsk"},
+		// auto
+		{"auto", "auto"},
 		// bypassPermissions aliases
 		{"bypassPermissions", "bypassPermissions"},
 		{"yolo", "bypassPermissions"},
@@ -130,14 +132,51 @@ func TestClaudeSessionSetLiveMode(t *testing.T) {
 		t.Fatal("acceptEdits flags not set correctly")
 	}
 
-	cs.SetLiveMode("bypassPermissions")
-	if !cs.autoApprove.Load() || cs.acceptEditsOnly.Load() || cs.dontAsk.Load() {
-		t.Fatal("bypassPermissions flags not set correctly")
+	if cs.SetLiveMode("auto") {
+		t.Fatal("SetLiveMode(auto) = true, want false")
 	}
 
 	cs.SetLiveMode("dontAsk")
 	if !cs.dontAsk.Load() || cs.autoApprove.Load() || cs.acceptEditsOnly.Load() {
 		t.Fatal("dontAsk flags not set correctly")
+	}
+
+	cs.SetLiveMode("bypassPermissions")
+	if !cs.autoApprove.Load() || cs.acceptEditsOnly.Load() || cs.dontAsk.Load() {
+		t.Fatal("bypassPermissions alias flags not set correctly")
+	}
+}
+
+func TestClaudeSessionSetLiveMode_AutoSessionRequiresRestart(t *testing.T) {
+	cs := &claudeSession{}
+	cs.setPermissionMode("auto")
+	if cs.SetLiveMode("default") {
+		t.Fatal("SetLiveMode(default) from auto session = true, want false")
+	}
+}
+
+func TestAgent_PermissionModes(t *testing.T) {
+	a := &Agent{}
+	modes := a.PermissionModes()
+	if len(modes) == 0 {
+		t.Fatal("PermissionModes() returned no modes")
+	}
+
+	foundAuto := false
+	foundBypass := false
+	for _, mode := range modes {
+		if mode.Key == "auto" {
+			foundAuto = true
+		}
+		if mode.Key == "bypassPermissions" {
+			foundBypass = true
+		}
+	}
+	if !foundAuto {
+		t.Fatal("PermissionModes() missing auto mode")
+	}
+	if !foundBypass {
+		t.Fatal("PermissionModes() missing bypassPermissions mode")
 	}
 }
 
@@ -220,6 +259,20 @@ func TestAgent_SetPlatformPrompt(t *testing.T) {
 	a.SetPlatformPrompt("You are a helpful assistant on Feishu.")
 	if a.platformPrompt != "You are a helpful assistant on Feishu." {
 		t.Errorf("platformPrompt = %q, want %q", a.platformPrompt, "You are a helpful assistant on Feishu.")
+	}
+}
+
+func TestAgent_SetMode(t *testing.T) {
+	a := &Agent{}
+
+	a.SetMode("auto")
+	if got := a.GetMode(); got != "auto" {
+		t.Fatalf("GetMode() after SetMode(auto) = %q, want auto", got)
+	}
+
+	a.SetMode("yolo")
+	if got := a.GetMode(); got != "bypassPermissions" {
+		t.Fatalf("GetMode() after SetMode(yolo) = %q, want bypassPermissions", got)
 	}
 }
 

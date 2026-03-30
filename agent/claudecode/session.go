@@ -31,6 +31,7 @@ type claudeSession struct {
 	stdinMu         sync.Mutex
 	events          chan core.Event
 	sessionID       atomic.Value // stores string
+	permissionMode  atomic.Value // stores string
 	autoApprove     atomic.Bool
 	acceptEditsOnly atomic.Bool
 	dontAsk         atomic.Bool
@@ -533,12 +534,17 @@ func isClaudeEditTool(toolName string) bool {
 }
 
 func (cs *claudeSession) setPermissionMode(mode string) {
+	cs.permissionMode.Store(mode)
 	cs.autoApprove.Store(mode == "bypassPermissions")
 	cs.acceptEditsOnly.Store(mode == "acceptEdits")
 	cs.dontAsk.Store(mode == "dontAsk")
 }
 
 func (cs *claudeSession) SetLiveMode(mode string) bool {
+	current, _ := cs.permissionMode.Load().(string)
+	if mode == "auto" || mode == "plan" || current == "auto" || current == "plan" {
+		return false
+	}
 	cs.setPermissionMode(mode)
 	return true
 }

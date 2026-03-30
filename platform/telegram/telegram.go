@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -17,7 +18,8 @@ import (
 
 	"github.com/chenhg5/cc-connect/core"
 
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	tgbot "github.com/go-telegram/bot"
+	"github.com/go-telegram/bot/models"
 )
 
 var telegramConvertAudioToOpus = core.ConvertAudioToOpus
@@ -28,18 +30,25 @@ func init() {
 
 type replyContext struct {
 	chatID    int64
+	threadID  int
 	messageID int
 }
 
+// telegramBot abstracts the Telegram bot API methods for testability.
+// *tgbot.Bot satisfies this interface.
 type telegramBot interface {
-	SelfUser() tgbotapi.User
-	Token() string
-	Send(c tgbotapi.Chattable) (tgbotapi.Message, error)
-	Request(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error)
-	GetUpdates(config tgbotapi.UpdateConfig) ([]tgbotapi.Update, error)
-	GetUpdatesChan(config tgbotapi.UpdateConfig) tgbotapi.UpdatesChannel
-	StopReceivingUpdates()
-	GetFile(config tgbotapi.FileConfig) (tgbotapi.File, error)
+	SendMessage(ctx context.Context, params *tgbot.SendMessageParams) (*models.Message, error)
+	SendPhoto(ctx context.Context, params *tgbot.SendPhotoParams) (*models.Message, error)
+	SendDocument(ctx context.Context, params *tgbot.SendDocumentParams) (*models.Message, error)
+	SendVoice(ctx context.Context, params *tgbot.SendVoiceParams) (*models.Message, error)
+	SendAudio(ctx context.Context, params *tgbot.SendAudioParams) (*models.Message, error)
+	SendChatAction(ctx context.Context, params *tgbot.SendChatActionParams) (bool, error)
+	EditMessageText(ctx context.Context, params *tgbot.EditMessageTextParams) (*models.Message, error)
+	DeleteMessage(ctx context.Context, params *tgbot.DeleteMessageParams) (bool, error)
+	AnswerCallbackQuery(ctx context.Context, params *tgbot.AnswerCallbackQueryParams) (bool, error)
+	SetMyCommands(ctx context.Context, params *tgbot.SetMyCommandsParams) (bool, error)
+	GetFile(ctx context.Context, params *tgbot.GetFileParams) (*models.File, error)
+	FileDownloadLink(f *models.File) string
 }
 
 type backoffTimer interface {
@@ -79,13 +88,6 @@ func (e *retryLoopError) Unwrap() error {
 	return e.err
 }
 
-type botAPIWrapper struct {
-	*tgbotapi.BotAPI
-}
-
-func (b *botAPIWrapper) SelfUser() tgbotapi.User { return b.BotAPI.Self }
-func (b *botAPIWrapper) Token() string           { return b.BotAPI.Token }
-
 type stdlibBackoffTimer struct {
 	*time.Timer
 }
@@ -98,6 +100,9 @@ type stdlibTypingTicker struct {
 
 func (t *stdlibTypingTicker) C() <-chan time.Time { return t.Ticker.C }
 
+// botFactory creates a bot, returns it plus self user info and a blocking poll function.
+type botFactory func(token string, onUpdate func(context.Context, *models.Update), httpClient *http.Client) (telegramBot, *models.User, func(context.Context), error)
+
 type Platform struct {
 	token                 string
 	allowFrom             string
@@ -107,6 +112,7 @@ type Platform struct {
 
 	mu                  sync.RWMutex
 	bot                 telegramBot
+	selfUser            *models.User
 	handler             core.MessageHandler
 	lifecycleHandler    core.PlatformLifecycleHandler
 	cancel              context.CancelFunc
@@ -114,7 +120,7 @@ type Platform struct {
 	generation          uint64
 	unavailableNotified bool
 	everConnected       bool
-	newBot              func(string, *http.Client) (telegramBot, error)
+	newBot              botFactory
 	newBackoffTimer     func(time.Duration) backoffTimer
 	newTypingTicker     func(time.Duration) typingTicker
 }
@@ -164,13 +170,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		return fmt.Errorf("telegram: platform stopped")
 	}
 	if p.newBot == nil {
-		p.newBot = func(token string, client *http.Client) (telegramBot, error) {
-			bot, err := tgbotapi.NewBotAPIWithClient(token, tgbotapi.APIEndpoint, client)
-			if err != nil {
-				return nil, err
-			}
-			return &botAPIWrapper{BotAPI: bot}, nil
-		}
+		p.newBot = defaultNewBot
 	}
 	if p.newBackoffTimer == nil {
 		p.newBackoffTimer = func(d time.Duration) backoffTimer {
@@ -187,6 +187,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	p.handler = handler
 	p.cancel = cancel
 	p.bot = nil
+	p.selfUser = nil
 
 	go p.connectLoop(ctx)
 	return nil
@@ -196,6 +197,30 @@ func (p *Platform) SetLifecycleHandler(h core.PlatformLifecycleHandler) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.lifecycleHandler = h
+}
+
+func defaultNewBot(token string, onUpdate func(context.Context, *models.Update), httpClient *http.Client) (telegramBot, *models.User, func(context.Context), error) {
+	handler := func(ctx context.Context, b *tgbot.Bot, update *models.Update) {
+		onUpdate(ctx, update)
+	}
+	opts := []tgbot.Option{
+		tgbot.WithDefaultHandler(handler),
+		tgbot.WithNotAsyncHandlers(),
+	}
+	if httpClient != nil {
+		opts = append(opts, tgbot.WithHTTPClient(60*time.Second, httpClient))
+	}
+	b, err := tgbot.New(token, opts...)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	me, err := b.GetMe(ctx)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("getMe: %w", err)
+	}
+	return b, me, b.Start, nil
 }
 
 func (p *Platform) connectLoop(ctx context.Context) {
@@ -245,7 +270,8 @@ func (p *Platform) connectLoop(ctx context.Context) {
 }
 
 func (p *Platform) runConnection(ctx context.Context) error {
-	bot, err := p.makeBot()
+	factory := p.getNewBot()
+	b, me, startPoll, err := factory(p.token, p.processUpdate, p.httpClient)
 	if err != nil {
 		cause := retryCauseInitialConnectFailure
 		if p.hasEverConnected() {
@@ -257,58 +283,37 @@ func (p *Platform) runConnection(ctx context.Context) error {
 		}
 	}
 	if ctx.Err() != nil || p.isStopping() {
-		bot.StopReceivingUpdates()
 		return nil
 	}
 
-	gen, ok := p.publishConnectedBot(bot)
+	gen, ok := p.publishBot(b, me)
 	if !ok {
-		bot.StopReceivingUpdates()
 		return nil
 	}
 
-	self := bot.SelfUser()
-	slog.Info("telegram: connected", "bot", self.UserName)
-
-	drain := tgbotapi.NewUpdate(-1)
-	drain.Timeout = 0
-	if _, err := bot.GetUpdates(drain); err != nil {
-		slog.Warn("telegram: failed to drain old updates", "error", err)
-	}
-
-	u := tgbotapi.NewUpdate(0)
-	u.Timeout = 30
-	updates := bot.GetUpdatesChan(u)
-
+	slog.Info("telegram: connected", "bot", me.Username)
 	p.emitReady(gen)
 
-	for {
-		select {
-		case <-ctx.Done():
-			p.finishConnection(gen, bot, ctx.Err(), true)
-			return nil
-		case update, ok := <-updates:
-			if !ok {
-				err := fmt.Errorf("telegram: updates channel closed")
-				p.finishConnection(gen, bot, err, false)
-				return &retryLoopError{cause: retryCauseConnectionLost, err: err}
-			}
-			p.handleUpdate(bot, update)
-		}
-	}
+	// Start polling — blocks until ctx is cancelled or connection drops.
+	startPoll(ctx)
+
+	p.clearBot(gen, b)
+	return nil
 }
 
-func (p *Platform) handleUpdate(bot telegramBot, update tgbotapi.Update) {
+func (p *Platform) processUpdate(ctx context.Context, update *models.Update) {
 	if update.CallbackQuery != nil {
-		p.handleCallbackQuery(bot, update.CallbackQuery)
+		p.handleCallbackQuery(ctx, update.CallbackQuery)
 		return
 	}
 
 	if update.Message == nil {
 		return
 	}
+	p.handleMessage(ctx, update.Message)
+}
 
-	msg := update.Message
+func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 	msgTime := time.Unix(int64(msg.Date), 0)
 	if core.IsOldMessage(msgTime) {
 		slog.Debug("telegram: ignoring old message after restart", "date", msgTime)
@@ -318,41 +323,43 @@ func (p *Platform) handleUpdate(bot telegramBot, update tgbotapi.Update) {
 		return
 	}
 
-	userName := msg.From.UserName
+	userName := msg.From.Username
 	if userName == "" {
 		userName = strings.TrimSpace(msg.From.FirstName + " " + msg.From.LastName)
 	}
-	var sessionKey string
-	if p.shareSessionInChannel {
-		sessionKey = fmt.Sprintf("telegram:%d", msg.Chat.ID)
-	} else {
-		sessionKey = fmt.Sprintf("telegram:%d:%d", msg.Chat.ID, msg.From.ID)
+
+	threadID := 0
+	if msg.Chat.IsForum {
+		threadID = msg.MessageThreadID
 	}
+	sessionKey := p.buildSessionKey(msg.Chat.ID, threadID, msg.From.ID)
+	channelKey := buildChannelKey(msg.Chat.ID, threadID)
+
 	userID := strconv.FormatInt(msg.From.ID, 10)
 	if !core.AllowList(p.allowFrom, userID) {
 		slog.Debug("telegram: message from unauthorized user", "user", userID)
 		return
 	}
 
-	isGroup := msg.Chat.Type == "group" || msg.Chat.Type == "supergroup"
+	isGroup := msg.Chat.Type == models.ChatTypeGroup || msg.Chat.Type == models.ChatTypeSupergroup
 	chatName := ""
 	if isGroup {
 		chatName = msg.Chat.Title
 	}
 
 	if isGroup && !p.groupReplyAll {
-		slog.Debug("telegram: checking group message", "bot", bot.SelfUser().UserName, "text", msg.Text, "is_command", msg.IsCommand())
-		if !p.isDirectedAtBot(bot, msg) {
+		slog.Debug("telegram: checking group message", "text", msg.Text, "is_command", isCommand(msg))
+		if !p.isDirectedAtBot(msg) {
 			return
 		}
 	}
 
-	rctx := replyContext{chatID: msg.Chat.ID, messageID: msg.MessageID}
-	botName := bot.SelfUser().UserName
+	rctx := replyContext{chatID: msg.Chat.ID, threadID: threadID, messageID: msg.ID}
+	botName := p.botUsername()
 
 	if len(msg.Photo) > 0 {
 		best := msg.Photo[len(msg.Photo)-1]
-		imgData, err := p.downloadFile(bot, best.FileID)
+		imgData, err := p.downloadFile(best.FileID)
 		if err != nil {
 			slog.Error("telegram: download photo failed", "error", err)
 			return
@@ -361,17 +368,18 @@ func (p *Platform) handleUpdate(bot telegramBot, update tgbotapi.Update) {
 		p.dispatchMessage(&core.Message{
 			SessionKey: sessionKey, Platform: "telegram",
 			UserID: userID, UserName: userName, ChatName: chatName,
-			Content:   caption,
-			MessageID: strconv.Itoa(msg.MessageID),
-			Images:    []core.ImageAttachment{{MimeType: "image/jpeg", Data: imgData}},
-			ReplyCtx:  rctx,
+			Content:    caption,
+			MessageID:  strconv.Itoa(msg.ID),
+			ChannelKey: channelKey,
+			Images:     []core.ImageAttachment{{MimeType: "image/jpeg", Data: imgData}},
+			ReplyCtx:   rctx,
 		})
 		return
 	}
 
 	if msg.Voice != nil {
 		slog.Debug("telegram: voice received", "user", userName, "duration", msg.Voice.Duration)
-		audioData, err := p.downloadFile(bot, msg.Voice.FileID)
+		audioData, err := p.downloadFile(msg.Voice.FileID)
 		if err != nil {
 			slog.Error("telegram: download voice failed", "error", err)
 			return
@@ -379,7 +387,8 @@ func (p *Platform) handleUpdate(bot telegramBot, update tgbotapi.Update) {
 		p.dispatchMessage(&core.Message{
 			SessionKey: sessionKey, Platform: "telegram",
 			UserID: userID, UserName: userName, ChatName: chatName,
-			MessageID: strconv.Itoa(msg.MessageID),
+			MessageID:  strconv.Itoa(msg.ID),
+			ChannelKey: channelKey,
 			Audio: &core.AudioAttachment{
 				MimeType: msg.Voice.MimeType,
 				Data:     audioData,
@@ -393,7 +402,7 @@ func (p *Platform) handleUpdate(bot telegramBot, update tgbotapi.Update) {
 
 	if msg.Audio != nil {
 		slog.Debug("telegram: audio file received", "user", userName)
-		audioData, err := p.downloadFile(bot, msg.Audio.FileID)
+		audioData, err := p.downloadFile(msg.Audio.FileID)
 		if err != nil {
 			slog.Error("telegram: download audio failed", "error", err)
 			return
@@ -408,7 +417,8 @@ func (p *Platform) handleUpdate(bot telegramBot, update tgbotapi.Update) {
 		p.dispatchMessage(&core.Message{
 			SessionKey: sessionKey, Platform: "telegram",
 			UserID: userID, UserName: userName, ChatName: chatName,
-			MessageID: strconv.Itoa(msg.MessageID),
+			MessageID:  strconv.Itoa(msg.ID),
+			ChannelKey: channelKey,
 			Audio: &core.AudioAttachment{
 				MimeType: msg.Audio.MimeType,
 				Data:     audioData,
@@ -422,7 +432,7 @@ func (p *Platform) handleUpdate(bot telegramBot, update tgbotapi.Update) {
 
 	if msg.Document != nil {
 		slog.Info("telegram: document received", "user", userName, "file_name", msg.Document.FileName, "mime", msg.Document.MimeType, "file_id", msg.Document.FileID)
-		fileData, err := p.downloadFile(bot, msg.Document.FileID)
+		fileData, err := p.downloadFile(msg.Document.FileID)
 		if err != nil {
 			slog.Error("telegram: download document failed", "error", err)
 			return
@@ -431,10 +441,11 @@ func (p *Platform) handleUpdate(bot telegramBot, update tgbotapi.Update) {
 		p.dispatchMessage(&core.Message{
 			SessionKey: sessionKey, Platform: "telegram",
 			UserID: userID, UserName: userName, ChatName: chatName,
-			Content:   caption,
-			MessageID: strconv.Itoa(msg.MessageID),
-			Files:     []core.FileAttachment{{MimeType: msg.Document.MimeType, Data: fileData, FileName: msg.Document.FileName}},
-			ReplyCtx:  rctx,
+			Content:    caption,
+			MessageID:  strconv.Itoa(msg.ID),
+			ChannelKey: channelKey,
+			Files:      []core.FileAttachment{{MimeType: msg.Document.MimeType, Data: fileData, FileName: msg.Document.FileName}},
+			ReplyCtx:   rctx,
 		})
 		return
 	}
@@ -448,9 +459,10 @@ func (p *Platform) handleUpdate(bot telegramBot, update tgbotapi.Update) {
 	p.dispatchMessage(&core.Message{
 		SessionKey: sessionKey, Platform: "telegram",
 		UserID: userID, UserName: userName, ChatName: chatName,
-		Content:   text,
-		MessageID: strconv.Itoa(msg.MessageID),
-		ReplyCtx:  rctx,
+		Content:    text,
+		MessageID:  strconv.Itoa(msg.ID),
+		ChannelKey: channelKey,
+		ReplyCtx:   rctx,
 	})
 }
 
@@ -468,6 +480,26 @@ func (p *Platform) messageHandler() core.MessageHandler {
 	return p.handler
 }
 
+func (p *Platform) buildSessionKey(chatID int64, threadID int, userID int64) string {
+	if p.shareSessionInChannel {
+		if threadID != 0 {
+			return fmt.Sprintf("telegram:%d:%d", chatID, threadID)
+		}
+		return fmt.Sprintf("telegram:%d", chatID)
+	}
+	if threadID != 0 {
+		return fmt.Sprintf("telegram:%d:%d:%d", chatID, threadID, userID)
+	}
+	return fmt.Sprintf("telegram:%d:%d", chatID, userID)
+}
+
+func buildChannelKey(chatID int64, threadID int) string {
+	if threadID != 0 {
+		return fmt.Sprintf("%d:%d", chatID, threadID)
+	}
+	return strconv.FormatInt(chatID, 10)
+}
+
 func stripBotMention(text, botName string) string {
 	if botName == "" {
 		return text
@@ -476,11 +508,10 @@ func stripBotMention(text, botName string) string {
 	return strings.TrimSpace(text)
 }
 
-func (p *Platform) makeBot() (telegramBot, error) {
+func (p *Platform) getNewBot() botFactory {
 	p.mu.RLock()
-	newBot := p.newBot
-	p.mu.RUnlock()
-	return newBot(p.token, p.httpClient)
+	defer p.mu.RUnlock()
+	return p.newBot
 }
 
 func (p *Platform) makeBackoffTimer(d time.Duration) backoffTimer {
@@ -495,7 +526,7 @@ func (p *Platform) isStopping() bool {
 	return p.stopping
 }
 
-func (p *Platform) publishConnectedBot(bot telegramBot) (uint64, bool) {
+func (p *Platform) publishBot(b telegramBot, me *models.User) (uint64, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -503,7 +534,8 @@ func (p *Platform) publishConnectedBot(bot telegramBot) (uint64, bool) {
 		return 0, false
 	}
 	p.generation++
-	p.bot = bot
+	p.bot = b
+	p.selfUser = me
 	return p.generation, true
 }
 
@@ -522,48 +554,37 @@ func (p *Platform) emitReady(gen uint64) {
 	}
 }
 
-func (p *Platform) finishConnection(gen uint64, bot telegramBot, err error, dueToStop bool) {
+func (p *Platform) clearBot(gen uint64, b telegramBot) {
 	notify := false
-
 	p.mu.Lock()
-	if p.bot == bot && p.generation == gen {
+	if p.bot == b && p.generation == gen {
 		p.bot = nil
-		notify = !p.stopping && !dueToStop && err != nil
+		p.selfUser = nil
+		notify = !p.stopping
 	}
 	p.mu.Unlock()
 
 	if notify {
-		p.notifyUnavailable(err)
+		p.notifyUnavailable(fmt.Errorf("telegram: connection lost"))
 	}
-}
-
-func (p *Platform) currentBot() (telegramBot, uint64, error) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	if p.bot == nil {
-		return nil, 0, fmt.Errorf("telegram: bot not connected")
-	}
-	return p.bot, p.generation, nil
-}
-
-func (p *Platform) currentBotFor(action string, candidate telegramBot) (telegramBot, uint64, error) {
-	bot, gen, err := p.currentBot()
-	if err != nil {
-		return nil, 0, fmt.Errorf("telegram: %s: bot not connected", action)
-	}
-	if candidate != nil && bot != candidate {
-		return nil, 0, fmt.Errorf("telegram: %s: bot not connected", action)
-	}
-	return bot, gen, nil
 }
 
 func (p *Platform) connectedBot(action string) (telegramBot, error) {
-	bot, _, err := p.currentBot()
-	if err != nil {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.bot == nil {
 		return nil, fmt.Errorf("telegram: %s: bot not connected", action)
 	}
-	return bot, nil
+	return p.bot, nil
+}
+
+func (p *Platform) botUsername() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.selfUser == nil {
+		return ""
+	}
+	return p.selfUser.Username
 }
 
 func (p *Platform) hasEverConnected() bool {
@@ -607,19 +628,21 @@ func retryLogMessage(cause retryCause) string {
 	}
 }
 
-func (p *Platform) handleCallbackQuery(bot telegramBot, cb *tgbotapi.CallbackQuery) {
-	if cb.Message == nil || cb.From == nil {
+func (p *Platform) handleCallbackQuery(ctx context.Context, cb *models.CallbackQuery) {
+	msg := cb.Message.Message
+	if msg == nil {
 		return
 	}
-	currentBot, _, err := p.currentBotFor("callback query", bot)
+
+	bot, err := p.connectedBot("callback query")
 	if err != nil {
-		slog.Debug("telegram: ignoring callback for stale bot", "error", err)
+		slog.Debug("telegram: ignoring callback for disconnected bot", "error", err)
 		return
 	}
 
 	data := cb.Data
-	chatID := cb.Message.Chat.ID
-	msgID := cb.Message.MessageID
+	chatID := msg.Chat.ID
+	msgID := msg.ID
 	userID := strconv.FormatInt(cb.From.ID, 10)
 
 	if !core.AllowList(p.allowFrom, userID) {
@@ -628,41 +651,45 @@ func (p *Platform) handleCallbackQuery(bot telegramBot, cb *tgbotapi.CallbackQue
 	}
 
 	// Answer the callback to clear the loading indicator
-	answer := tgbotapi.NewCallback(cb.ID, "")
-	if _, err := currentBot.Request(answer); err != nil {
+	if _, err := bot.AnswerCallbackQuery(ctx, &tgbot.AnswerCallbackQueryParams{CallbackQueryID: cb.ID}); err != nil {
 		slog.Debug("telegram: answer callback failed", "error", err)
 	}
 
-	userName := cb.From.UserName
+	userName := cb.From.Username
 	if userName == "" {
 		userName = strings.TrimSpace(cb.From.FirstName + " " + cb.From.LastName)
 	}
-	var sessionKey string
-	if p.shareSessionInChannel {
-		sessionKey = fmt.Sprintf("telegram:%d", chatID)
-	} else {
-		sessionKey = fmt.Sprintf("telegram:%d:%d", chatID, cb.From.ID)
+
+	threadID := 0
+	if msg.Chat.IsForum {
+		threadID = msg.MessageThreadID
 	}
-	isGroup := cb.Message.Chat.Type == "group" || cb.Message.Chat.Type == "supergroup"
+	sessionKey := p.buildSessionKey(chatID, threadID, cb.From.ID)
+	channelKey := buildChannelKey(chatID, threadID)
+
+	isGroup := msg.Chat.Type == models.ChatTypeGroup || msg.Chat.Type == models.ChatTypeSupergroup
 	chatName := ""
 	if isGroup {
-		chatName = cb.Message.Chat.Title
+		chatName = msg.Chat.Title
 	}
-	rctx := replyContext{chatID: chatID, messageID: msgID}
+	rctx := replyContext{chatID: chatID, threadID: threadID, messageID: msgID}
+
+	emptyMarkup := &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{}}
 
 	// Command callbacks (cmd:/lang en, cmd:/mode yolo, etc.)
 	if strings.HasPrefix(data, "cmd:") {
 		command := strings.TrimPrefix(data, "cmd:")
 
-		// Edit original message: append the chosen option and remove buttons
-		origText := cb.Message.Text
+		origText := msg.Text
 		if origText == "" {
 			origText = ""
 		}
-		edit := tgbotapi.NewEditMessageText(chatID, msgID, origText+"\n\n> "+command)
-		emptyMarkup := tgbotapi.NewInlineKeyboardMarkup()
-		edit.ReplyMarkup = &emptyMarkup
-		if _, err := currentBot.Send(edit); err != nil {
+		if _, err := bot.EditMessageText(ctx, &tgbot.EditMessageTextParams{
+			ChatID:      chatID,
+			MessageID:   msgID,
+			Text:        origText + "\n\n> " + command,
+			ReplyMarkup: emptyMarkup,
+		}); err != nil {
 			slog.Debug("telegram: callback edit failed", "error", err)
 		}
 
@@ -674,6 +701,7 @@ func (p *Platform) handleCallbackQuery(bot telegramBot, cb *tgbotapi.CallbackQue
 			ChatName:   chatName,
 			Content:    command,
 			MessageID:  strconv.Itoa(msgID),
+			ChannelKey: channelKey,
 			ReplyCtx:   rctx,
 		})
 		return
@@ -681,28 +709,30 @@ func (p *Platform) handleCallbackQuery(bot telegramBot, cb *tgbotapi.CallbackQue
 
 	// AskUserQuestion callbacks (askq:qIdx:optIdx)
 	if strings.HasPrefix(data, "askq:") {
-		// Extract label from after the last colon for display
 		parts := strings.SplitN(data, ":", 3)
 		choiceLabel := data
 		if len(parts) == 3 {
-			// Try to find the option label from the original message buttons
-			for _, row := range cb.Message.ReplyMarkup.InlineKeyboard {
-				for _, btn := range row {
-					if btn.CallbackData != nil && *btn.CallbackData == data {
-						choiceLabel = "✅ " + btn.Text
+			if msg.ReplyMarkup != nil {
+				for _, row := range msg.ReplyMarkup.InlineKeyboard {
+					for _, btn := range row {
+						if btn.CallbackData == data {
+							choiceLabel = "✅ " + btn.Text
+						}
 					}
 				}
 			}
 		}
 
-		origText := cb.Message.Text
+		origText := msg.Text
 		if origText == "" {
 			origText = "(question)"
 		}
-		edit := tgbotapi.NewEditMessageText(chatID, msgID, origText+"\n\n"+choiceLabel)
-		emptyMarkup := tgbotapi.NewInlineKeyboardMarkup()
-		edit.ReplyMarkup = &emptyMarkup
-		if _, err := currentBot.Send(edit); err != nil {
+		if _, err := bot.EditMessageText(ctx, &tgbot.EditMessageTextParams{
+			ChatID:      chatID,
+			MessageID:   msgID,
+			Text:        origText + "\n\n" + choiceLabel,
+			ReplyMarkup: emptyMarkup,
+		}); err != nil {
 			slog.Debug("telegram: callback edit failed", "error", err)
 		}
 
@@ -714,6 +744,7 @@ func (p *Platform) handleCallbackQuery(bot telegramBot, cb *tgbotapi.CallbackQue
 			ChatName:   chatName,
 			Content:    data,
 			MessageID:  strconv.Itoa(msgID),
+			ChannelKey: channelKey,
 			ReplyCtx:   rctx,
 		})
 		return
@@ -743,14 +774,16 @@ func (p *Platform) handleCallbackQuery(bot telegramBot, cb *tgbotapi.CallbackQue
 		choiceLabel = "✅ Allow All"
 	}
 
-	origText := cb.Message.Text
+	origText := msg.Text
 	if origText == "" {
 		origText = "(permission request)"
 	}
-	edit := tgbotapi.NewEditMessageText(chatID, msgID, origText+"\n\n"+choiceLabel)
-	emptyMarkup := tgbotapi.NewInlineKeyboardMarkup()
-	edit.ReplyMarkup = &emptyMarkup
-	if _, err := currentBot.Send(edit); err != nil {
+	if _, err := bot.EditMessageText(ctx, &tgbot.EditMessageTextParams{
+		ChatID:      chatID,
+		MessageID:   msgID,
+		Text:        origText + "\n\n" + choiceLabel,
+		ReplyMarkup: emptyMarkup,
+	}); err != nil {
 		slog.Debug("telegram: permission callback edit failed", "error", err)
 	}
 
@@ -762,6 +795,7 @@ func (p *Platform) handleCallbackQuery(bot telegramBot, cb *tgbotapi.CallbackQue
 		ChatName:   chatName,
 		Content:    responseText,
 		MessageID:  strconv.Itoa(msgID),
+		ChannelKey: channelKey,
 		ReplyCtx:   rctx,
 	})
 }
@@ -771,17 +805,18 @@ func (p *Platform) handleCallbackQuery(bot telegramBot, cb *tgbotapi.CallbackQue
 //   - Command without @suffix (broadcast to all bots — accept it)
 //   - Command with @otherbot suffix → reject
 //   - Non-command: accept if bot is @mentioned or message is a reply to bot
-func (p *Platform) isDirectedAtBot(bot telegramBot, msg *tgbotapi.Message) bool {
-	currentBot, _, err := p.currentBotFor("bot identity", bot)
-	if err != nil {
-		slog.Debug("telegram: ignoring group routing for stale bot", "error", err)
+func (p *Platform) isDirectedAtBot(msg *models.Message) bool {
+	p.mu.RLock()
+	self := p.selfUser
+	p.mu.RUnlock()
+	if self == nil {
+		slog.Debug("telegram: ignoring group routing, self user unknown")
 		return false
 	}
-	self := currentBot.SelfUser()
-	botName := self.UserName
+	botName := self.Username
 
 	// Commands: /cmd or /cmd@botname
-	if msg.IsCommand() {
+	if isCommand(msg) {
 		atIdx := strings.Index(msg.Text, "@")
 		spaceIdx := strings.Index(msg.Text, " ")
 		cmdEnd := len(msg.Text)
@@ -800,7 +835,7 @@ func (p *Platform) isDirectedAtBot(bot telegramBot, msg *tgbotapi.Message) bool 
 	// Non-command: check @mention
 	if msg.Entities != nil {
 		for _, e := range msg.Entities {
-			if e.Type == "mention" {
+			if e.Type == models.MessageEntityTypeMention {
 				mention := extractEntityText(msg.Text, e.Offset, e.Length)
 				slog.Debug("telegram: checking mention", "bot", botName, "mention", mention, "match", strings.EqualFold(mention, "@"+botName))
 				if strings.EqualFold(mention, "@"+botName) {
@@ -821,7 +856,7 @@ func (p *Platform) isDirectedAtBot(bot telegramBot, msg *tgbotapi.Message) bool 
 	// Also check caption entities (for photos with captions)
 	if msg.CaptionEntities != nil {
 		for _, e := range msg.CaptionEntities {
-			if e.Type == "mention" {
+			if e.Type == models.MessageEntityTypeMention {
 				mention := extractEntityText(msg.Caption, e.Offset, e.Length)
 				if strings.EqualFold(mention, "@"+botName) {
 					return true
@@ -831,6 +866,15 @@ func (p *Platform) isDirectedAtBot(bot telegramBot, msg *tgbotapi.Message) bool 
 	}
 
 	slog.Debug("telegram: ignoring group message not directed at bot", "chat", msg.Chat.ID, "bot", botName, "text", msg.Text, "entities", msg.Entities)
+	return false
+}
+
+func isCommand(msg *models.Message) bool {
+	for _, e := range msg.Entities {
+		if e.Type == models.MessageEntityTypeBotCommand && e.Offset == 0 {
+			return true
+		}
+	}
 	return false
 }
 
@@ -845,15 +889,19 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	}
 
 	html := core.MarkdownToSimpleHTML(content)
-	reply := tgbotapi.NewMessage(rc.chatID, html)
-	reply.ReplyToMessageID = rc.messageID
-	reply.ParseMode = tgbotapi.ModeHTML
+	params := &tgbot.SendMessageParams{
+		ChatID:          rc.chatID,
+		MessageThreadID: rc.threadID,
+		Text:            html,
+		ParseMode:       models.ParseModeHTML,
+		ReplyParameters: &models.ReplyParameters{MessageID: rc.messageID},
+	}
 
-	if _, err := bot.Send(reply); err != nil {
+	if _, err := bot.SendMessage(ctx, params); err != nil {
 		if strings.Contains(err.Error(), "can't parse") {
-			reply.Text = content
-			reply.ParseMode = ""
-			_, err = bot.Send(reply)
+			params.Text = content
+			params.ParseMode = ""
+			_, err = bot.SendMessage(ctx, params)
 		}
 		if err != nil {
 			return fmt.Errorf("telegram: send: %w", err)
@@ -874,14 +922,18 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	}
 
 	html := core.MarkdownToSimpleHTML(content)
-	msg := tgbotapi.NewMessage(rc.chatID, html)
-	msg.ParseMode = tgbotapi.ModeHTML
+	params := &tgbot.SendMessageParams{
+		ChatID:          rc.chatID,
+		MessageThreadID: rc.threadID,
+		Text:            html,
+		ParseMode:       models.ParseModeHTML,
+	}
 
-	if _, err := bot.Send(msg); err != nil {
+	if _, err := bot.SendMessage(ctx, params); err != nil {
 		if strings.Contains(err.Error(), "can't parse") {
-			msg.Text = content
-			msg.ParseMode = ""
-			_, err = bot.Send(msg)
+			params.Text = content
+			params.ParseMode = ""
+			_, err = bot.SendMessage(ctx, params)
 		}
 		if err != nil {
 			return fmt.Errorf("telegram: send: %w", err)
@@ -905,8 +957,12 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 		name = "image"
 	}
 	slog.Debug("telegram: sending image", "chat_id", rc.chatID, "name", name, "size", len(img.Data))
-	msg := tgbotapi.NewPhoto(rc.chatID, tgbotapi.FileBytes{Name: name, Bytes: img.Data})
-	if _, err := bot.Send(msg); err != nil {
+	params := &tgbot.SendPhotoParams{
+		ChatID:          rc.chatID,
+		MessageThreadID: rc.threadID,
+		Photo:           &models.InputFileUpload{Filename: name, Data: bytes.NewReader(img.Data)},
+	}
+	if _, err := bot.SendPhoto(ctx, params); err != nil {
 		return fmt.Errorf("telegram: send image: %w", err)
 	}
 	return nil
@@ -926,8 +982,12 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 	if name == "" {
 		name = "attachment"
 	}
-	msg := tgbotapi.NewDocument(rc.chatID, tgbotapi.FileBytes{Name: name, Bytes: file.Data})
-	if _, err := bot.Send(msg); err != nil {
+	params := &tgbot.SendDocumentParams{
+		ChatID:          rc.chatID,
+		MessageThreadID: rc.threadID,
+		Document:        &models.InputFileUpload{Filename: name, Data: bytes.NewReader(file.Data)},
+	}
+	if _, err := bot.SendDocument(ctx, params); err != nil {
 		return fmt.Errorf("telegram: send file: %w", err)
 	}
 	return nil
@@ -959,9 +1019,9 @@ func (p *Platform) SendAudio(ctx context.Context, rctx any, audio []byte, format
 		sendFormat = "opus"
 	}
 
-	if err := p.sendVoice(rc.chatID, sendData, sendFormat); err != nil {
+	if err := p.sendVoice(ctx, rc, sendData, sendFormat); err != nil {
 		if sendFormat == "mp3" || sendFormat == "m4a" {
-			if fallbackErr := p.sendAudio(rc.chatID, sendData, sendFormat); fallbackErr == nil {
+			if fallbackErr := p.sendAudio(ctx, rc, sendData, sendFormat); fallbackErr == nil {
 				return nil
 			} else {
 				return fmt.Errorf(
@@ -978,23 +1038,33 @@ func (p *Platform) SendAudio(ctx context.Context, rctx any, audio []byte, format
 	return nil
 }
 
-func (p *Platform) sendVoice(chatID int64, audio []byte, format string) error {
-	msg := tgbotapi.NewVoice(chatID, tgbotapi.FileBytes{
-		Name:  "tts_audio." + telegramAudioFileExt(format),
-		Bytes: audio,
-	})
-	if _, err := p.bot.Send(msg); err != nil {
+func (p *Platform) sendVoice(ctx context.Context, rc replyContext, audio []byte, format string) error {
+	bot, err := p.connectedBot("send voice")
+	if err != nil {
+		return err
+	}
+	params := &tgbot.SendVoiceParams{
+		ChatID:          rc.chatID,
+		MessageThreadID: rc.threadID,
+		Voice:           &models.InputFileUpload{Filename: "tts_audio." + telegramAudioFileExt(format), Data: bytes.NewReader(audio)},
+	}
+	if _, err := bot.SendVoice(ctx, params); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (p *Platform) sendAudio(chatID int64, audio []byte, format string) error {
-	msg := tgbotapi.NewAudio(chatID, tgbotapi.FileBytes{
-		Name:  "tts_audio." + telegramAudioFileExt(format),
-		Bytes: audio,
-	})
-	if _, err := p.bot.Send(msg); err != nil {
+func (p *Platform) sendAudio(ctx context.Context, rc replyContext, audio []byte, format string) error {
+	bot, err := p.connectedBot("send audio")
+	if err != nil {
+		return err
+	}
+	params := &tgbot.SendAudioParams{
+		ChatID:          rc.chatID,
+		MessageThreadID: rc.threadID,
+		Audio:           &models.InputFileUpload{Filename: "tts_audio." + telegramAudioFileExt(format), Data: bytes.NewReader(audio)},
+	}
+	if _, err := bot.SendAudio(ctx, params); err != nil {
 		return err
 	}
 	return nil
@@ -1022,25 +1092,29 @@ func (p *Platform) SendWithButtons(ctx context.Context, rctx any, content string
 		return err
 	}
 
-	var rows [][]tgbotapi.InlineKeyboardButton
+	var rows [][]models.InlineKeyboardButton
 	for _, row := range buttons {
-		var btns []tgbotapi.InlineKeyboardButton
+		var btns []models.InlineKeyboardButton
 		for _, b := range row {
-			btns = append(btns, tgbotapi.NewInlineKeyboardButtonData(b.Text, b.Data))
+			btns = append(btns, models.InlineKeyboardButton{Text: b.Text, CallbackData: b.Data})
 		}
 		rows = append(rows, btns)
 	}
 
 	html := core.MarkdownToSimpleHTML(content)
-	msg := tgbotapi.NewMessage(rc.chatID, html)
-	msg.ParseMode = tgbotapi.ModeHTML
-	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(rows...)
+	params := &tgbot.SendMessageParams{
+		ChatID:          rc.chatID,
+		MessageThreadID: rc.threadID,
+		Text:            html,
+		ParseMode:       models.ParseModeHTML,
+		ReplyMarkup:     &models.InlineKeyboardMarkup{InlineKeyboard: rows},
+	}
 
-	if _, err := bot.Send(msg); err != nil {
+	if _, err := bot.SendMessage(ctx, params); err != nil {
 		if strings.Contains(err.Error(), "can't parse") {
-			msg.Text = content
-			msg.ParseMode = ""
-			_, err = bot.Send(msg)
+			params.Text = content
+			params.ParseMode = ""
+			_, err = bot.SendMessage(ctx, params)
 		}
 		if err != nil {
 			return fmt.Errorf("telegram: sendWithButtons: %w", err)
@@ -1059,33 +1133,31 @@ func (p *Platform) DeletePreviewMessage(ctx context.Context, previewHandle any) 
 	if err != nil {
 		return err
 	}
-	del := tgbotapi.NewDeleteMessage(h.chatID, h.messageID)
-	_, err = bot.Request(del)
+	_, err = bot.DeleteMessage(ctx, &tgbot.DeleteMessageParams{ChatID: h.chatID, MessageID: h.messageID})
 	if err != nil {
 		slog.Debug("telegram: delete preview message failed", "error", err)
 	}
 	return err
 }
 
-func (p *Platform) downloadFile(bot telegramBot, fileID string) ([]byte, error) {
-	bot, _, err := p.currentBotFor("download file", bot)
+func (p *Platform) downloadFile(fileID string) ([]byte, error) {
+	bot, err := p.connectedBot("download file")
 	if err != nil {
 		return nil, err
 	}
-	fileConfig := tgbotapi.FileConfig{FileID: fileID}
-	file, err := bot.GetFile(fileConfig)
+	ctx := context.Background()
+	f, err := bot.GetFile(ctx, &tgbot.GetFileParams{FileID: fileID})
 	if err != nil {
 		return nil, fmt.Errorf("get file: %w", err)
 	}
-	if file.FilePath == "" {
+	if f.FilePath == "" {
 		return nil, fmt.Errorf("get file: empty file_path returned for file_id %s", fileID)
 	}
-	link := file.Link(bot.Token())
+	link := bot.FileDownloadLink(f)
 
 	resp, err := p.httpClient.Get(link)
 	if err != nil {
-		errMsg := core.RedactToken(err.Error(), bot.Token())
-		return nil, fmt.Errorf("download file %s: %s", fileID, errMsg)
+		return nil, fmt.Errorf("download file %s: %w", fileID, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -1095,8 +1167,12 @@ func (p *Platform) downloadFile(bot telegramBot, fileID string) ([]byte, error) 
 }
 
 func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
-	// telegram:{chatID}:{userID}
-	parts := strings.SplitN(sessionKey, ":", 3)
+	// Formats:
+	//   telegram:{chatID}                      - shared session, no topic
+	//   telegram:{chatID}:{threadID}           - shared session, with topic
+	//   telegram:{chatID}:{userID}             - per-user session, no topic
+	//   telegram:{chatID}:{threadID}:{userID}  - per-user session, with topic
+	parts := strings.SplitN(sessionKey, ":", 5)
 	if len(parts) < 2 || parts[0] != "telegram" {
 		return nil, fmt.Errorf("telegram: invalid session key %q", sessionKey)
 	}
@@ -1104,18 +1180,33 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("telegram: invalid chat ID in %q", sessionKey)
 	}
-	return replyContext{chatID: chatID}, nil
+
+	threadID := 0
+	switch len(parts) {
+	case 2:
+		// telegram:{chatID}
+	case 3:
+		if p.shareSessionInChannel {
+			// telegram:{chatID}:{threadID}
+			threadID, _ = strconv.Atoi(parts[2])
+		}
+		// else: telegram:{chatID}:{userID} — no threadID
+	case 4:
+		// telegram:{chatID}:{threadID}:{userID}
+		threadID, _ = strconv.Atoi(parts[2])
+	}
+
+	return replyContext{chatID: chatID, threadID: threadID}, nil
 }
 
-// telegramPreviewHandle stores the chat and message IDs for an editable preview message.
+// telegramPreviewHandle stores the chat, thread, and message IDs for an editable preview message.
 type telegramPreviewHandle struct {
 	chatID    int64
+	threadID  int
 	messageID int
 }
 
 // SendPreviewStart sends a new message and returns a handle for subsequent edits.
-// Uses HTML mode to match UpdateMessage formatting, falling back to plain text
-// if Telegram rejects the HTML (reduces visible format "jump" during streaming).
 func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content string) (any, error) {
 	rc, ok := rctx.(replyContext)
 	if !ok {
@@ -1127,21 +1218,25 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 	}
 
 	html := core.MarkdownToSimpleHTML(content)
-	msg := tgbotapi.NewMessage(rc.chatID, html)
-	msg.ParseMode = tgbotapi.ModeHTML
+	params := &tgbot.SendMessageParams{
+		ChatID:          rc.chatID,
+		MessageThreadID: rc.threadID,
+		Text:            html,
+		ParseMode:       models.ParseModeHTML,
+	}
 
-	sent, err := bot.Send(msg)
+	sent, err := bot.SendMessage(ctx, params)
 	if err != nil {
 		if strings.Contains(err.Error(), "can't parse") {
-			msg.Text = content
-			msg.ParseMode = ""
-			sent, err = bot.Send(msg)
+			params.Text = content
+			params.ParseMode = ""
+			sent, err = bot.SendMessage(ctx, params)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("telegram: send preview: %w", err)
 		}
 	}
-	return &telegramPreviewHandle{chatID: rc.chatID, messageID: sent.MessageID}, nil
+	return &telegramPreviewHandle{chatID: rc.chatID, threadID: rc.threadID, messageID: sent.ID}, nil
 }
 
 // UpdateMessage edits an existing message identified by previewHandle.
@@ -1161,10 +1256,14 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 		"content_prefix", truncateForLog(content, 80),
 		"html_prefix", truncateForLog(html, 80))
 
-	edit := tgbotapi.NewEditMessageText(h.chatID, h.messageID, html)
-	edit.ParseMode = tgbotapi.ModeHTML
+	params := &tgbot.EditMessageTextParams{
+		ChatID:    h.chatID,
+		MessageID: h.messageID,
+		Text:      html,
+		ParseMode: models.ParseModeHTML,
+	}
 
-	if _, err := bot.Send(edit); err != nil {
+	if _, err := bot.EditMessageText(ctx, params); err != nil {
 		errMsg := err.Error()
 		slog.Debug("telegram: UpdateMessage HTML failed", "error", errMsg)
 		if strings.Contains(errMsg, "not modified") {
@@ -1172,9 +1271,9 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 		}
 		if strings.Contains(errMsg, "can't parse") {
 			slog.Debug("telegram: UpdateMessage falling back to plain text", "full_html", html)
-			edit.Text = content
-			edit.ParseMode = ""
-			if _, err2 := bot.Send(edit); err2 != nil {
+			params.Text = content
+			params.ParseMode = ""
+			if _, err2 := bot.EditMessageText(ctx, params); err2 != nil {
 				if strings.Contains(err2.Error(), "not modified") {
 					return nil
 				}
@@ -1196,10 +1295,14 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 		return func() {}
 	}
 
-	action := tgbotapi.NewChatAction(rc.chatID, tgbotapi.ChatTyping)
+	params := &tgbot.SendChatActionParams{
+		ChatID:          rc.chatID,
+		MessageThreadID: rc.threadID,
+		Action:          models.ChatActionTyping,
+	}
+
 	if bot, err := p.connectedBot("typing"); err == nil {
-		// sendChatAction returns result=true, not a Message — use Request, not Send.
-		if _, err := bot.Request(action); err != nil {
+		if _, err := bot.SendChatAction(ctx, params); err != nil {
 			slog.Debug("telegram: initial typing send failed", "error", err)
 		}
 	} else {
@@ -1222,7 +1325,7 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 					slog.Debug("telegram: typing stopped", "error", err)
 					return
 				}
-				if _, err := bot.Request(action); err != nil {
+				if _, err := bot.SendChatAction(ctx, params); err != nil {
 					slog.Debug("telegram: typing send failed", "error", err)
 				}
 			}
@@ -1266,16 +1369,13 @@ func (p *Platform) Stop() error {
 	}
 	p.stopping = true
 	cancel := p.cancel
-	bot := p.bot
 	p.cancel = nil
 	p.bot = nil
+	p.selfUser = nil
 	p.mu.Unlock()
 
 	if cancel != nil {
 		cancel()
-	}
-	if bot != nil {
-		bot.StopReceivingUpdates()
 	}
 	return nil
 }
@@ -1288,7 +1388,7 @@ func (p *Platform) RegisterCommands(commands []core.BotCommandInfo) error {
 	}
 
 	// Telegram limits: max 100 commands, description max 256 chars
-	var tgCommands []tgbotapi.BotCommand
+	var tgCommands []models.BotCommand
 	seen := make(map[string]bool)
 	for _, c := range commands {
 		cmd := sanitizeTelegramCommand(c.Command)
@@ -1297,7 +1397,7 @@ func (p *Platform) RegisterCommands(commands []core.BotCommandInfo) error {
 		}
 		seen[cmd] = true
 		desc := truncateTelegramBotDescription(c.Description)
-		tgCommands = append(tgCommands, tgbotapi.BotCommand{
+		tgCommands = append(tgCommands, models.BotCommand{
 			Command:     cmd,
 			Description: desc,
 		})
@@ -1313,9 +1413,8 @@ func (p *Platform) RegisterCommands(commands []core.BotCommandInfo) error {
 		return nil
 	}
 
-	cfg := tgbotapi.NewSetMyCommands(tgCommands...)
-	_, err = bot.Request(cfg)
-	if err != nil {
+	ctx := context.Background()
+	if _, err := bot.SetMyCommands(ctx, &tgbot.SetMyCommandsParams{Commands: tgCommands}); err != nil {
 		return fmt.Errorf("telegram: setMyCommands failed: %w", err)
 	}
 

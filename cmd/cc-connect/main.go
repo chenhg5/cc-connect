@@ -316,6 +316,34 @@ func main() {
 				})
 			}
 		}
+		// Wire outgoing rate limiting
+		{
+			var maxPS float64
+			if cfg.OutgoingRateLimit.MaxPerSecond != nil {
+				maxPS = *cfg.OutgoingRateLimit.MaxPerSecond
+			}
+			var burst int
+			if cfg.OutgoingRateLimit.Burst != nil {
+				burst = *cfg.OutgoingRateLimit.Burst
+			}
+			defaults := core.OutgoingRateLimitCfg{MaxPerSecond: maxPS, Burst: burst}
+			overrides := make(map[string]core.OutgoingRateLimitCfg)
+			for name, pc := range cfg.OutgoingRateLimit.Platforms {
+				var mps float64
+				if pc.MaxPerSecond != nil {
+					mps = *pc.MaxPerSecond
+				}
+				var b int
+				if pc.Burst != nil {
+					b = *pc.Burst
+				}
+				overrides[name] = core.OutgoingRateLimitCfg{MaxPerSecond: mps, Burst: b}
+			}
+			if maxPS > 0 || len(overrides) > 0 {
+				engine.SetOutgoingRateLimitCfg(defaults, overrides)
+			}
+		}
+
 		engine.SetDisplaySaveFunc(func(thinkingMaxLen, toolMaxLen *int) error {
 			return config.SaveDisplayConfig(thinkingMaxLen, toolMaxLen)
 		})

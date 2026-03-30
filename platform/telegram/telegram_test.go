@@ -14,7 +14,9 @@ import (
 	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+
+	tgbot "github.com/go-telegram/bot"
+	"github.com/go-telegram/bot/models"
 )
 
 type testLifecycleHandler struct {
@@ -67,133 +69,174 @@ func (t *stubTypingTicker) C() <-chan time.Time {
 func (t *stubTypingTicker) Stop() {}
 
 type stubTelegramBot struct {
-	userName string
-	userID   int64
-	token    string
+	mu                    sync.Mutex
+	sendMessageCalls      int
+	sendPhotoCalls        int
+	sendDocumentCalls     int
+	sendVoiceCalls        int
+	sendAudioCalls        int
+	sendChatActionCalls   int
+	editMessageTextCalls  int
+	deleteMessageCalls    int
+	answerCallbackCalls   int
+	setMyCommandsCalls    int
+	getFileCalls          int
 
-	mu           sync.Mutex
-	updates      chan tgbotapi.Update
-	sendErr      error
-	requestErr   error
-	fileErr      error
-	file         tgbotapi.File
-	stopCalls    int
-	sendCalls    int
-	requestCalls int
-	getFileCalls int
+	sendErr    error
+	getFileErr error
+	file       *models.File
 }
 
-func newStubTelegramBot(userName string) *stubTelegramBot {
+func newStubTelegramBot() *stubTelegramBot {
 	return &stubTelegramBot{
-		userName: userName,
-		userID:   42,
-		token:    "token",
-		updates:  make(chan tgbotapi.Update),
-		file:     tgbotapi.File{FilePath: "files/test.dat"},
+		file: &models.File{FilePath: "files/test.dat"},
 	}
 }
 
-func (b *stubTelegramBot) SelfUser() tgbotapi.User {
-	return tgbotapi.User{ID: b.userID, UserName: b.userName}
-}
-
-func (b *stubTelegramBot) Token() string {
-	return b.token
-}
-
-func (b *stubTelegramBot) Send(tgbotapi.Chattable) (tgbotapi.Message, error) {
+func (b *stubTelegramBot) SendMessage(_ context.Context, _ *tgbot.SendMessageParams) (*models.Message, error) {
 	b.mu.Lock()
-	b.sendCalls++
+	b.sendMessageCalls++
 	b.mu.Unlock()
 	if b.sendErr != nil {
-		return tgbotapi.Message{}, b.sendErr
+		return nil, b.sendErr
 	}
-	return tgbotapi.Message{MessageID: 99}, nil
+	return &models.Message{ID: 99}, nil
 }
 
-func (b *stubTelegramBot) Request(tgbotapi.Chattable) (*tgbotapi.APIResponse, error) {
+func (b *stubTelegramBot) SendPhoto(_ context.Context, _ *tgbot.SendPhotoParams) (*models.Message, error) {
 	b.mu.Lock()
-	b.requestCalls++
+	b.sendPhotoCalls++
 	b.mu.Unlock()
-	if b.requestErr != nil {
-		return nil, b.requestErr
+	if b.sendErr != nil {
+		return nil, b.sendErr
 	}
-	return &tgbotapi.APIResponse{Ok: true}, nil
+	return &models.Message{ID: 99}, nil
 }
 
-func (b *stubTelegramBot) GetUpdates(tgbotapi.UpdateConfig) ([]tgbotapi.Update, error) {
-	return nil, nil
-}
-
-func (b *stubTelegramBot) GetUpdatesChan(tgbotapi.UpdateConfig) tgbotapi.UpdatesChannel {
-	return b.updates
-}
-
-func (b *stubTelegramBot) StopReceivingUpdates() {
+func (b *stubTelegramBot) SendDocument(_ context.Context, _ *tgbot.SendDocumentParams) (*models.Message, error) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.stopCalls++
-	select {
-	case <-b.updates:
-	default:
+	b.sendDocumentCalls++
+	b.mu.Unlock()
+	if b.sendErr != nil {
+		return nil, b.sendErr
 	}
-	select {
-	case <-b.updates:
-	default:
-	}
-	defer func() {
-		_ = recover()
-	}()
-	close(b.updates)
+	return &models.Message{ID: 99}, nil
 }
 
-func (b *stubTelegramBot) GetFile(tgbotapi.FileConfig) (tgbotapi.File, error) {
+func (b *stubTelegramBot) SendVoice(_ context.Context, _ *tgbot.SendVoiceParams) (*models.Message, error) {
+	b.mu.Lock()
+	b.sendVoiceCalls++
+	b.mu.Unlock()
+	if b.sendErr != nil {
+		return nil, b.sendErr
+	}
+	return &models.Message{ID: 99}, nil
+}
+
+func (b *stubTelegramBot) SendAudio(_ context.Context, _ *tgbot.SendAudioParams) (*models.Message, error) {
+	b.mu.Lock()
+	b.sendAudioCalls++
+	b.mu.Unlock()
+	if b.sendErr != nil {
+		return nil, b.sendErr
+	}
+	return &models.Message{ID: 99}, nil
+}
+
+func (b *stubTelegramBot) SendChatAction(_ context.Context, _ *tgbot.SendChatActionParams) (bool, error) {
+	b.mu.Lock()
+	b.sendChatActionCalls++
+	b.mu.Unlock()
+	if b.sendErr != nil {
+		return false, b.sendErr
+	}
+	return true, nil
+}
+
+func (b *stubTelegramBot) EditMessageText(_ context.Context, _ *tgbot.EditMessageTextParams) (*models.Message, error) {
+	b.mu.Lock()
+	b.editMessageTextCalls++
+	b.mu.Unlock()
+	if b.sendErr != nil {
+		return nil, b.sendErr
+	}
+	return &models.Message{ID: 99}, nil
+}
+
+func (b *stubTelegramBot) DeleteMessage(_ context.Context, _ *tgbot.DeleteMessageParams) (bool, error) {
+	b.mu.Lock()
+	b.deleteMessageCalls++
+	b.mu.Unlock()
+	if b.sendErr != nil {
+		return false, b.sendErr
+	}
+	return true, nil
+}
+
+func (b *stubTelegramBot) AnswerCallbackQuery(_ context.Context, _ *tgbot.AnswerCallbackQueryParams) (bool, error) {
+	b.mu.Lock()
+	b.answerCallbackCalls++
+	b.mu.Unlock()
+	return true, nil
+}
+
+func (b *stubTelegramBot) SetMyCommands(_ context.Context, _ *tgbot.SetMyCommandsParams) (bool, error) {
+	b.mu.Lock()
+	b.setMyCommandsCalls++
+	b.mu.Unlock()
+	if b.sendErr != nil {
+		return false, b.sendErr
+	}
+	return true, nil
+}
+
+func (b *stubTelegramBot) GetFile(_ context.Context, _ *tgbot.GetFileParams) (*models.File, error) {
 	b.mu.Lock()
 	b.getFileCalls++
 	b.mu.Unlock()
-	if b.fileErr != nil {
-		return tgbotapi.File{}, b.fileErr
+	if b.getFileErr != nil {
+		return nil, b.getFileErr
 	}
 	return b.file, nil
 }
 
-func (b *stubTelegramBot) StopCalls() int {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.stopCalls
+func (b *stubTelegramBot) FileDownloadLink(f *models.File) string {
+	return "https://test.example.com/file/" + f.FilePath
 }
 
-func (b *stubTelegramBot) SendCalls() int {
+func (b *stubTelegramBot) SendMessageCallCount() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.sendCalls
+	return b.sendMessageCalls
 }
 
-func (b *stubTelegramBot) GetFileCalls() int {
+func (b *stubTelegramBot) SendChatActionCallCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.sendChatActionCalls
+}
+
+func (b *stubTelegramBot) GetFileCallCount() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.getFileCalls
 }
 
-func (b *stubTelegramBot) RequestCalls() int {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.requestCalls
-}
 
 func TestPlatformStart_RetriesInBackgroundUntilConnected(t *testing.T) {
 	var attempts atomic.Int32
 	readyCh := make(chan struct{}, 1)
-	connectedBot := newStubTelegramBot("mybot")
+	stubBot := newStubTelegramBot()
+	me := &models.User{ID: 42, Username: "mybot"}
 
 	p := &Platform{
 		token:      "token",
 		httpClient: &http.Client{},
-		newBot: func(string, *http.Client) (telegramBot, error) { //nolint:nonamedreturns
+		newBot: func(_ string, _ func(context.Context, *models.Update), _ *http.Client) (telegramBot, *models.User, func(context.Context), error) {
 			if attempts.Add(1) == 1 {
-				return nil, errors.New("dial failed")
+				return nil, nil, nil, errors.New("dial failed")
 			}
-			return connectedBot, nil
+			return stubBot, me, func(ctx context.Context) { <-ctx.Done() }, nil
 		},
 		newBackoffTimer: immediateTimer,
 	}
@@ -227,15 +270,17 @@ func TestPlatformStart_InitialConnectFailureEmitsUnavailableOnceBeforeReady(t *t
 	var attempts atomic.Int32
 	var unavailableCount atomic.Int32
 	readyCh := make(chan struct{}, 1)
+	stubBot := newStubTelegramBot()
+	me := &models.User{ID: 42, Username: "mybot"}
 
 	p := &Platform{
 		token:      "token",
 		httpClient: &http.Client{},
-		newBot: func(string, *http.Client) (telegramBot, error) {
+		newBot: func(_ string, _ func(context.Context, *models.Update), _ *http.Client) (telegramBot, *models.User, func(context.Context), error) {
 			if attempts.Add(1) <= 2 {
-				return nil, errors.New("dial failed")
+				return nil, nil, nil, errors.New("dial failed")
 			}
-			return newStubTelegramBot("mybot"), nil
+			return stubBot, me, func(ctx context.Context) { <-ctx.Done() }, nil
 		},
 		newBackoffTimer: immediateTimer,
 	}
@@ -271,7 +316,7 @@ func TestPlatformStart_InitialConnectFailureEmitsUnavailableOnceBeforeReady(t *t
 func TestPlatformDisconnectedSendPathsReturnNotConnected(t *testing.T) {
 	p := &Platform{token: "token", httpClient: &http.Client{}}
 	ctx := context.Background()
-	rctx := replyContext{chatID: 1, messageID: 2}
+	rctx := replyContext{chatID: 1, threadID: 0, messageID: 2}
 
 	tests := []struct {
 		name string
@@ -321,16 +366,17 @@ func TestPlatformLateReadyIgnoredAfterStop(t *testing.T) {
 	connectDone := make(chan struct{})
 	readyCh := make(chan struct{}, 1)
 	unavailableCh := make(chan error, 1)
-	lateBot := newStubTelegramBot("latebot")
+	stubBot := newStubTelegramBot()
+	me := &models.User{ID: 42, Username: "latebot"}
 
 	p := &Platform{
 		token:      "token",
 		httpClient: &http.Client{},
-		newBot: func(string, *http.Client) (telegramBot, error) {
+		newBot: func(_ string, _ func(context.Context, *models.Update), _ *http.Client) (telegramBot, *models.User, func(context.Context), error) {
 			close(connectStarted)
 			defer close(connectDone)
 			<-releaseConnect
-			return lateBot, nil
+			return stubBot, me, func(ctx context.Context) { <-ctx.Done() }, nil
 		},
 		newBackoffTimer: immediateTimer,
 	}
@@ -360,67 +406,11 @@ func TestPlatformLateReadyIgnoredAfterStop(t *testing.T) {
 		t.Fatalf("unexpected unavailable callback after Stop: %v", err)
 	case <-time.After(100 * time.Millisecond):
 	}
-
-	if got := lateBot.StopCalls(); got != 1 {
-		t.Fatalf("StopReceivingUpdates calls = %d, want 1", got)
-	}
-}
-
-func TestPlatformStaleGenerationCleanupDoesNotClobberNewerBot(t *testing.T) {
-	p := &Platform{token: "token", httpClient: &http.Client{}}
-	oldBot := newStubTelegramBot("old")
-	newBot := newStubTelegramBot("new")
-
-	oldGen, ok := p.publishConnectedBot(oldBot)
-	if !ok {
-		t.Fatal("failed to publish old bot")
-	}
-	newGen, ok := p.publishConnectedBot(newBot)
-	if !ok {
-		t.Fatal("failed to publish new bot")
-	}
-
-	p.finishConnection(oldGen, oldBot, errors.New("old lost"), false)
-
-	gotBot, gotGen, err := p.currentBot()
-	if err != nil {
-		t.Fatalf("currentBot: %v", err)
-	}
-	if gotBot != newBot {
-		t.Fatal("stale cleanup replaced current bot")
-	}
-	if gotGen != newGen {
-		t.Fatalf("generation = %d, want %d", gotGen, newGen)
-	}
-}
-
-func TestPlatformUnavailableEmittedExactlyOnceForCurrentLiveGeneration(t *testing.T) {
-	var unavailableCount atomic.Int32
-	p := &Platform{token: "token", httpClient: &http.Client{}}
-	bot := newStubTelegramBot("live")
-
-	p.SetLifecycleHandler(testLifecycleHandler{
-		onUnavailable: func(core.Platform, error) {
-			unavailableCount.Add(1)
-		},
-	})
-
-	gen, ok := p.publishConnectedBot(bot)
-	if !ok {
-		t.Fatal("failed to publish bot")
-	}
-
-	p.finishConnection(gen, bot, errors.New("lost"), false)
-	p.finishConnection(gen, bot, errors.New("lost again"), false)
-
-	if got := unavailableCount.Load(); got != 1 {
-		t.Fatalf("unavailable callbacks = %d, want 1", got)
-	}
 }
 
 func TestPlatformStartTypingSwitchesToCurrentBotAfterReconnect(t *testing.T) {
-	oldBot := newStubTelegramBot("old")
-	newBot := newStubTelegramBot("new")
+	oldBot := newStubTelegramBot()
+	newBot := newStubTelegramBot()
 	ticker := newStubTypingTicker()
 
 	p := &Platform{
@@ -431,126 +421,31 @@ func TestPlatformStartTypingSwitchesToCurrentBotAfterReconnect(t *testing.T) {
 		},
 	}
 
-	if _, ok := p.publishConnectedBot(oldBot); !ok {
-		t.Fatal("failed to publish old bot")
-	}
+	me := &models.User{ID: 42, Username: "old"}
+	p.publishBot(oldBot, me)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	stop := p.StartTyping(ctx, replyContext{chatID: 1, messageID: 2})
+	stop := p.StartTyping(ctx, replyContext{chatID: 1, threadID: 0, messageID: 2})
 	defer func() {
 		stop()
 		cancel()
 	}()
 
-	if got := oldBot.RequestCalls(); got != 1 {
-		t.Fatalf("old bot request calls after initial typing = %d, want 1", got)
+	if got := oldBot.SendChatActionCallCount(); got != 1 {
+		t.Fatalf("old bot action calls after initial typing = %d, want 1", got)
 	}
 
-	if _, ok := p.publishConnectedBot(newBot); !ok {
-		t.Fatal("failed to publish new bot")
-	}
+	me2 := &models.User{ID: 42, Username: "new"}
+	p.publishBot(newBot, me2)
 
 	ticker.ch <- time.Now()
 	time.Sleep(20 * time.Millisecond)
 
-	if got := oldBot.RequestCalls(); got != 1 {
-		t.Fatalf("old bot request calls after reconnect tick = %d, want 1", got)
+	if got := oldBot.SendChatActionCallCount(); got != 1 {
+		t.Fatalf("old bot action calls after reconnect tick = %d, want 1", got)
 	}
-	if got := newBot.RequestCalls(); got != 1 {
-		t.Fatalf("new bot request calls after reconnect tick = %d, want 1", got)
-	}
-}
-
-func TestPlatformDownloadFileRejectsStaleBot(t *testing.T) {
-	p := &Platform{token: "token", httpClient: &http.Client{}}
-	oldBot := newStubTelegramBot("old")
-	newBot := newStubTelegramBot("new")
-
-	if _, ok := p.publishConnectedBot(oldBot); !ok {
-		t.Fatal("failed to publish old bot")
-	}
-	if _, ok := p.publishConnectedBot(newBot); !ok {
-		t.Fatal("failed to publish new bot")
-	}
-
-	_, err := p.downloadFile(oldBot, "file-1")
-	if err == nil {
-		t.Fatal("expected stale bot error, got nil")
-	}
-	if !strings.Contains(err.Error(), "not connected") {
-		t.Fatalf("error = %q, want to contain %q", err.Error(), "not connected")
-	}
-	if got := oldBot.GetFileCalls(); got != 0 {
-		t.Fatalf("old bot getFile calls = %d, want 0", got)
-	}
-}
-
-func TestPlatformHandleCallbackQueryRejectsStaleBot(t *testing.T) {
-	p := &Platform{token: "token", httpClient: &http.Client{}}
-	oldBot := newStubTelegramBot("old")
-	newBot := newStubTelegramBot("new")
-	handled := make(chan *core.Message, 1)
-
-	p.handler = func(_ core.Platform, msg *core.Message) {
-		handled <- msg
-	}
-
-	if _, ok := p.publishConnectedBot(oldBot); !ok {
-		t.Fatal("failed to publish old bot")
-	}
-	if _, ok := p.publishConnectedBot(newBot); !ok {
-		t.Fatal("failed to publish new bot")
-	}
-
-	callbackData := "perm:allow"
-	p.handleCallbackQuery(oldBot, &tgbotapi.CallbackQuery{
-		ID:   "cb1",
-		Data: callbackData,
-		From: &tgbotapi.User{ID: 7, UserName: "alice"},
-		Message: &tgbotapi.Message{
-			MessageID:   10,
-			Text:        "perm?",
-			Chat:        &tgbotapi.Chat{ID: 1, Type: "private"},
-			ReplyMarkup: &tgbotapi.InlineKeyboardMarkup{},
-		},
-	})
-
-	if got := oldBot.RequestCalls(); got != 0 {
-		t.Fatalf("old bot request calls = %d, want 0", got)
-	}
-	if got := oldBot.SendCalls(); got != 0 {
-		t.Fatalf("old bot send calls = %d, want 0", got)
-	}
-
-	select {
-	case msg := <-handled:
-		t.Fatalf("unexpected handled callback message: %+v", msg)
-	default:
-	}
-}
-
-func TestPlatformIsDirectedAtBotRejectsStaleBot(t *testing.T) {
-	p := &Platform{token: "token", httpClient: &http.Client{}}
-	oldBot := newStubTelegramBot("oldbot")
-	newBot := newStubTelegramBot("newbot")
-
-	if _, ok := p.publishConnectedBot(oldBot); !ok {
-		t.Fatal("failed to publish old bot")
-	}
-	if _, ok := p.publishConnectedBot(newBot); !ok {
-		t.Fatal("failed to publish new bot")
-	}
-
-	msg := &tgbotapi.Message{
-		Text: "/help@oldbot",
-		Chat: &tgbotapi.Chat{ID: 1, Type: "group"},
-		Entities: []tgbotapi.MessageEntity{
-			{Type: "bot_command", Offset: 0, Length: len("/help@oldbot")},
-		},
-	}
-
-	if got := p.isDirectedAtBot(oldBot, msg); got {
-		t.Fatal("stale bot should not be treated as current bot target")
+	if got := newBot.SendChatActionCallCount(); got != 1 {
+		t.Fatalf("new bot action calls after reconnect tick = %d, want 1", got)
 	}
 }
 
@@ -646,6 +541,76 @@ func TestExtractEntityText(t *testing.T) {
 	}
 }
 
+func TestSendAudioRejectsInvalidReplyContext(t *testing.T) {
+	p := &Platform{}
+
+	err := p.SendAudio(context.Background(), "bad-context", []byte("data"), "mp3")
+	if err == nil {
+		t.Fatal("expected error for invalid reply context")
+	}
+	if !strings.Contains(err.Error(), "telegram: SendAudio: invalid reply context type") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestSendAudioReturnsConversionErrorForWAV(t *testing.T) {
+	orig := telegramConvertAudioToOpus
+	t.Cleanup(func() { telegramConvertAudioToOpus = orig })
+
+	telegramConvertAudioToOpus = func(_ context.Context, _ []byte, _ string) ([]byte, error) {
+		return nil, errors.New("mock conversion failure")
+	}
+
+	stubBot := newStubTelegramBot()
+	p := &Platform{}
+	p.bot = stubBot
+	p.selfUser = &models.User{ID: 1, Username: "testbot"}
+
+	err := p.SendAudio(context.Background(), replyContext{chatID: 123}, []byte("wav-data"), "wav")
+	if err == nil {
+		t.Fatal("expected conversion error")
+	}
+	if !strings.Contains(err.Error(), "telegram: SendAudio: convert wav to opus") {
+		t.Fatalf("unexpected error prefix: %v", err)
+	}
+	if !strings.Contains(err.Error(), "mock conversion failure") {
+		t.Fatalf("expected wrapped conversion error, got: %v", err)
+	}
+}
+
+func TestTruncateTelegramBotDescription_UTF8Safe(t *testing.T) {
+	t.Parallel()
+	cjk := strings.Repeat("你", 200)
+	out := truncateTelegramBotDescription(cjk)
+	if !utf8.ValidString(out) {
+		t.Fatal("invalid UTF-8 from CJK description")
+	}
+	if got, max := utf8.RuneCountInString(out), 256; got > max {
+		t.Fatalf("rune count %d > %d", got, max)
+	}
+
+	long := strings.Repeat("b", 260)
+	out2 := truncateTelegramBotDescription(long)
+	if want := 256; utf8.RuneCountInString(out2) != want {
+		t.Fatalf("ascii truncation: got %d runes want %d", utf8.RuneCountInString(out2), want)
+	}
+	if !utf8.ValidString(out2) {
+		t.Fatal("invalid UTF-8 after ascii truncation")
+	}
+}
+
+func TestTruncateForLog_UTF8Safe(t *testing.T) {
+	t.Parallel()
+	s := strings.Repeat("世", 50) // 50 runes
+	out := truncateForLog(s, 10)
+	if !utf8.ValidString(out) {
+		t.Fatal("invalid UTF-8")
+	}
+	if utf8.RuneCountInString(out) != 13 { // 10 + "..."
+		t.Fatalf("got %d runes", utf8.RuneCountInString(out))
+	}
+}
+
 func TestSendAudioMP3PrefersVoice(t *testing.T) {
 	var paths []string
 	p := newTelegramTestPlatform(t, func(w http.ResponseWriter, r *http.Request) {
@@ -728,69 +693,242 @@ func TestSendAudioFallsBackToSendAudioForMP3(t *testing.T) {
 	}
 }
 
-func TestSendAudioRejectsInvalidReplyContext(t *testing.T) {
-	p := &Platform{}
-
-	err := p.SendAudio(context.Background(), "bad-context", []byte("data"), "mp3")
-	if err == nil {
-		t.Fatal("expected error for invalid reply context")
+func TestBuildSessionKey(t *testing.T) {
+	tests := []struct {
+		name   string
+		shared bool
+		chatID int64
+		thread int
+		userID int64
+		want   string
+	}{
+		{name: "private no topic", shared: false, chatID: 100, thread: 0, userID: 7, want: "telegram:100:7"},
+		{name: "private with topic", shared: false, chatID: 100, thread: 42, userID: 7, want: "telegram:100:42:7"},
+		{name: "shared no topic", shared: true, chatID: 100, thread: 0, userID: 7, want: "telegram:100"},
+		{name: "shared with topic", shared: true, chatID: 100, thread: 42, userID: 7, want: "telegram:100:42"},
 	}
-	if !strings.Contains(err.Error(), "telegram: SendAudio: invalid reply context type") {
-		t.Fatalf("unexpected error: %v", err)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &Platform{shareSessionInChannel: tt.shared}
+			got := p.buildSessionKey(tt.chatID, tt.thread, tt.userID)
+			if got != tt.want {
+				t.Fatalf("buildSessionKey(%d, %d, %d) = %q, want %q", tt.chatID, tt.thread, tt.userID, got, tt.want)
+			}
+		})
 	}
 }
 
-func TestSendAudioReturnsConversionErrorForWAV(t *testing.T) {
-	orig := telegramConvertAudioToOpus
-	t.Cleanup(func() { telegramConvertAudioToOpus = orig })
-
-	telegramConvertAudioToOpus = func(_ context.Context, _ []byte, _ string) ([]byte, error) {
-		return nil, errors.New("mock conversion failure")
+func TestReconstructReplyCtx(t *testing.T) {
+	tests := []struct {
+		name     string
+		shared   bool
+		key      string
+		wantChat int64
+		wantThr  int
+		wantErr  bool
+	}{
+		{name: "shared no topic", shared: true, key: "telegram:100", wantChat: 100, wantThr: 0},
+		{name: "shared with topic", shared: true, key: "telegram:100:42", wantChat: 100, wantThr: 42},
+		{name: "per-user no topic", shared: false, key: "telegram:100:7", wantChat: 100, wantThr: 0},
+		{name: "per-user with topic", shared: false, key: "telegram:100:42:7", wantChat: 100, wantThr: 42},
+		{name: "invalid prefix", shared: false, key: "slack:100:7", wantErr: true},
+		{name: "too short", shared: false, key: "telegram", wantErr: true},
 	}
 
-	p := &Platform{bot: &botAPIWrapper{BotAPI: &tgbotapi.BotAPI{}}}
-	err := p.SendAudio(context.Background(), replyContext{chatID: 123}, []byte("wav-data"), "wav")
-	if err == nil {
-		t.Fatal("expected conversion error")
-	}
-	if !strings.Contains(err.Error(), "telegram: SendAudio: convert wav to opus") {
-		t.Fatalf("unexpected error prefix: %v", err)
-	}
-	if !strings.Contains(err.Error(), "mock conversion failure") {
-		t.Fatalf("expected wrapped conversion error, got: %v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &Platform{shareSessionInChannel: tt.shared}
+			rctx, err := p.ReconstructReplyCtx(tt.key)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			rc := rctx.(replyContext)
+			if rc.chatID != tt.wantChat {
+				t.Fatalf("chatID = %d, want %d", rc.chatID, tt.wantChat)
+			}
+			if rc.threadID != tt.wantThr {
+				t.Fatalf("threadID = %d, want %d", rc.threadID, tt.wantThr)
+			}
+		})
 	}
 }
 
-func TestTruncateTelegramBotDescription_UTF8Safe(t *testing.T) {
-	t.Parallel()
-	cjk := strings.Repeat("你", 200)
-	out := truncateTelegramBotDescription(cjk)
-	if !utf8.ValidString(out) {
-		t.Fatal("invalid UTF-8 from CJK description")
-	}
-	if got, max := utf8.RuneCountInString(out), 256; got > max {
-		t.Fatalf("rune count %d > %d", got, max)
+func TestIsDirectedAtBot(t *testing.T) {
+	p := &Platform{token: "token", httpClient: &http.Client{}}
+	p.selfUser = &models.User{ID: 42, Username: "mybot"}
+
+	tests := []struct {
+		name string
+		msg  *models.Message
+		want bool
+	}{
+		{
+			name: "command without @suffix",
+			msg: &models.Message{
+				Text: "/help",
+				Chat: models.Chat{ID: 1, Type: models.ChatTypeGroup},
+				Entities: []models.MessageEntity{
+					{Type: models.MessageEntityTypeBotCommand, Offset: 0, Length: 5},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "command @mybot",
+			msg: &models.Message{
+				Text: "/help@mybot",
+				Chat: models.Chat{ID: 1, Type: models.ChatTypeGroup},
+				Entities: []models.MessageEntity{
+					{Type: models.MessageEntityTypeBotCommand, Offset: 0, Length: 11},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "command @otherbot",
+			msg: &models.Message{
+				Text: "/help@otherbot",
+				Chat: models.Chat{ID: 1, Type: models.ChatTypeGroup},
+				Entities: []models.MessageEntity{
+					{Type: models.MessageEntityTypeBotCommand, Offset: 0, Length: 14},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "@mention in text",
+			msg: &models.Message{
+				Text: "hey @mybot do something",
+				Chat: models.Chat{ID: 1, Type: models.ChatTypeGroup},
+				Entities: []models.MessageEntity{
+					{Type: models.MessageEntityTypeMention, Offset: 4, Length: 6},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "reply to bot message",
+			msg: &models.Message{
+				Text: "yes do it",
+				Chat: models.Chat{ID: 1, Type: models.ChatTypeGroup},
+				ReplyToMessage: &models.Message{
+					From: &models.User{ID: 42},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "plain text not directed",
+			msg: &models.Message{
+				Text: "hello everyone",
+				Chat: models.Chat{ID: 1, Type: models.ChatTypeGroup},
+			},
+			want: false,
+		},
 	}
 
-	long := strings.Repeat("b", 260)
-	out2 := truncateTelegramBotDescription(long)
-	if want := 256; utf8.RuneCountInString(out2) != want {
-		t.Fatalf("ascii truncation: got %d runes want %d", utf8.RuneCountInString(out2), want)
-	}
-	if !utf8.ValidString(out2) {
-		t.Fatal("invalid UTF-8 after ascii truncation")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := p.isDirectedAtBot(tt.msg)
+			if got != tt.want {
+				t.Fatalf("isDirectedAtBot() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
-func TestTruncateForLog_UTF8Safe(t *testing.T) {
-	t.Parallel()
-	s := strings.Repeat("世", 50) // 50 runes
-	out := truncateForLog(s, 10)
-	if !utf8.ValidString(out) {
-		t.Fatal("invalid UTF-8")
+func TestHandleMessageWithForumTopic(t *testing.T) {
+	handled := make(chan *core.Message, 1)
+	p := &Platform{
+		token:         "token",
+		httpClient:    &http.Client{},
+		groupReplyAll: true,
 	}
-	if utf8.RuneCountInString(out) != 13 { // 10 + "..."
-		t.Fatalf("got %d runes", utf8.RuneCountInString(out))
+	p.handler = func(_ core.Platform, msg *core.Message) {
+		handled <- msg
+	}
+	stubBot := newStubTelegramBot()
+	p.bot = stubBot
+	p.selfUser = &models.User{ID: 42, Username: "mybot"}
+
+	msg := &models.Message{
+		ID:              10,
+		MessageThreadID: 55,
+		Text:            "hello from topic",
+		Date:            int(time.Now().Unix()),
+		From:            &models.User{ID: 7, Username: "alice"},
+		Chat: models.Chat{
+			ID:      100,
+			Type:    models.ChatTypeSupergroup,
+			Title:   "Test Group",
+			IsForum: true,
+		},
+	}
+
+	p.handleMessage(context.Background(), msg)
+
+	select {
+	case got := <-handled:
+		if got.SessionKey != "telegram:100:55:7" {
+			t.Fatalf("SessionKey = %q, want %q", got.SessionKey, "telegram:100:55:7")
+		}
+		rc := got.ReplyCtx.(replyContext)
+		if rc.threadID != 55 {
+			t.Fatalf("threadID = %d, want 55", rc.threadID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("message not handled")
+	}
+}
+
+func TestHandleMessageNonForumIgnoresThreadID(t *testing.T) {
+	handled := make(chan *core.Message, 1)
+	p := &Platform{
+		token:         "token",
+		httpClient:    &http.Client{},
+		groupReplyAll: true,
+	}
+	p.handler = func(_ core.Platform, msg *core.Message) {
+		handled <- msg
+	}
+	stubBot := newStubTelegramBot()
+	p.bot = stubBot
+	p.selfUser = &models.User{ID: 42, Username: "mybot"}
+
+	msg := &models.Message{
+		ID:              10,
+		MessageThreadID: 55, // set but not a forum
+		Text:            "hello",
+		Date:            int(time.Now().Unix()),
+		From:            &models.User{ID: 7, Username: "alice"},
+		Chat: models.Chat{
+			ID:      100,
+			Type:    models.ChatTypeGroup,
+			Title:   "Test Group",
+			IsForum: false,
+		},
+	}
+
+	p.handleMessage(context.Background(), msg)
+
+	select {
+	case got := <-handled:
+		if got.SessionKey != "telegram:100:7" {
+			t.Fatalf("SessionKey = %q, want %q (no thread)", got.SessionKey, "telegram:100:7")
+		}
+		rc := got.ReplyCtx.(replyContext)
+		if rc.threadID != 0 {
+			t.Fatalf("threadID = %d, want 0", rc.threadID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("message not handled")
 	}
 }
 
@@ -806,10 +944,17 @@ func newTelegramTestPlatform(t *testing.T, handler func(http.ResponseWriter, *ht
 	}))
 	t.Cleanup(server.Close)
 
-	bot, err := tgbotapi.NewBotAPIWithClient("TEST_TOKEN", server.URL+"/bot%s/%s", server.Client())
+	b, err := tgbot.New("TEST_TOKEN",
+		tgbot.WithServerURL(server.URL),
+		tgbot.WithHTTPClient(5*time.Second, server.Client()),
+	)
 	if err != nil {
-		t.Fatalf("NewBotAPIWithClient returned error: %v", err)
+		t.Fatalf("tgbot.New returned error: %v", err)
 	}
 
-	return &Platform{bot: &botAPIWrapper{BotAPI: bot}}
+	return &Platform{
+		bot:        b,
+		selfUser:   &models.User{ID: 1, Username: "testbot"},
+		httpClient: server.Client(),
+	}
 }
