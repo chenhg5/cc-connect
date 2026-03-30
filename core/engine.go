@@ -2130,8 +2130,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case <-idleCh:
 			slog.Error("agent session idle timeout: no events for too long, killing session",
 				"session_key", sessionKey, "timeout", e.eventIdleTimeout, "elapsed", time.Since(turnStart))
-				cp.Finalize(ProgressCardStateFailed)
-				sp.discard()
+			cp.Finalize(ProgressCardStateFailed)
+			sp.discard()
 			state.mu.Lock()
 			p := state.platform
 			state.mu.Unlock()
@@ -2585,8 +2585,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			return
 
 		case EventError:
-				cp.Finalize(ProgressCardStateFailed)
-				sp.discard()
+			cp.Finalize(ProgressCardStateFailed)
+			sp.discard()
 			if event.Error != nil {
 				slog.Error("agent error", "error", event.Error)
 				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
@@ -2729,6 +2729,7 @@ var builtinCommands = []struct {
 	{[]string{"cron"}, "cron"},
 	{[]string{"heartbeat", "hb"}, "heartbeat"},
 	{[]string{"compress", "compact"}, "compress"},
+	{[]string{"clear"}, "clear"},
 	{[]string{"stop"}, "stop"},
 	{[]string{"help"}, "help"},
 	{[]string{"version"}, "version"},
@@ -2900,6 +2901,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdHeartbeat(p, msg, args)
 	case "compress":
 		e.cmdCompress(p, msg)
+	case "clear":
+		e.cmdClear(p, msg, args)
 	case "stop":
 		e.cmdStop(p, msg)
 	case "help":
@@ -3222,6 +3225,15 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 	} else {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNewSessionCreated))
 	}
+}
+
+func (e *Engine) resetCurrentSessionState(msg *Message, sessions *SessionManager, interactiveKey string) *Session {
+	e.cleanupInteractiveState(interactiveKey)
+	session := sessions.GetOrCreateActive(msg.SessionKey)
+	session.SetAgentSessionID("", "")
+	session.ClearHistory()
+	sessions.Save()
+	return session
 }
 
 const listPageSize = 20
@@ -5168,6 +5180,25 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 		return
 	}
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
+}
+
+func (e *Engine) cmdClear(p Platform, msg *Message, args []string) {
+	mode := "reset"
+	if len(args) > 0 {
+		mode = matchSubCommand(strings.ToLower(args[0]), []string{"reset"})
+	}
+	if mode != "reset" {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgClearUsage))
+		return
+	}
+
+	_, sessions, interactiveKey, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+	e.resetCurrentSessionState(msg, sessions, interactiveKey)
+	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgClearDone))
 }
 
 func (e *Engine) stopInteractiveSession(sessionKey string, quietPlatform Platform, quietReplyCtx any) bool {
