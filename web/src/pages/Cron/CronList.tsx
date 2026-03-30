@@ -346,7 +346,7 @@ export default function CronList() {
                   {describeCron(job.cron_expr)}
                 </span>
                 {job.silent && <Badge variant="default" className="text-[10px] px-1.5 py-0">silent</Badge>}
-                {job.mode && <Badge variant="default" className="text-[10px] px-1.5 py-0">{job.mode}</Badge>}
+                <Badge variant="default" className="text-[10px] px-1.5 py-0">{job.mode || t('cron.modeDefault')}</Badge>
               </div>
 
               {/* Info */}
