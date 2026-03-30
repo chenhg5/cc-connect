@@ -5185,20 +5185,32 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 func (e *Engine) cmdClear(p Platform, msg *Message, args []string) {
 	mode := "reset"
 	if len(args) > 0 {
-		mode = matchSubCommand(strings.ToLower(args[0]), []string{"reset"})
+		mode = matchSubCommand(strings.ToLower(args[0]), []string{"reset", "native"})
 	}
-	if mode != "reset" {
+	switch mode {
+	case "reset":
+		_, sessions, interactiveKey, err := e.commandContext(p, msg)
+		if err != nil {
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+			return
+		}
+		e.resetCurrentSessionState(msg, sessions, interactiveKey)
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgClearDone))
+	case "native":
+		agent, _, _, err := e.commandContext(p, msg)
+		if err != nil {
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+			return
+		}
+		clearer, ok := agent.(ContextClearer)
+		if !ok || clearer.ClearCommand() == "" {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgClearNativeUnsupported))
+			return
+		}
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgClearNativeUnsupported))
+	default:
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgClearUsage))
-		return
 	}
-
-	_, sessions, interactiveKey, err := e.commandContext(p, msg)
-	if err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
-		return
-	}
-	e.resetCurrentSessionState(msg, sessions, interactiveKey)
-	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgClearDone))
 }
 
 func (e *Engine) stopInteractiveSession(sessionKey string, quietPlatform Platform, quietReplyCtx any) bool {

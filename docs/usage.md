@@ -30,7 +30,7 @@ Each user gets an independent session with full conversation context. Manage ses
 | Command | Description |
 |---------|-------------|
 | `/new [name]` | Start a new session |
-| `/clear [reset]` | Clear the current session context in place |
+| `/clear [reset|native]` | Clear the current session context in place |
 | `/list` | List all agent sessions for this project |
 | `/switch <id>` | Switch to a different session |
 | `/current` | Show current session info |
@@ -49,6 +49,8 @@ Each user gets an independent session with full conversation context. Manage ses
 During a session, the agent may request tool permissions. Reply **allow** / **deny** / **allow all**.
 
 `/clear` keeps the current logical session but resets its conversation state. By default it behaves like `/clear reset`: it detaches the current backend agent session so the next message starts a fresh one without creating a new entry in `/list`.
+
+`/clear native` is reserved for agents that expose a real native clear command. At the moment unsupported agents return an explicit hint instead of silently falling back.
 
 ---
 

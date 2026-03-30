@@ -5862,7 +5862,7 @@ func TestCmdClear_ResetAliasUsesSameBehavior(t *testing.T) {
 	}
 }
 
-func TestCmdClear_InvalidModeShowsUsage(t *testing.T) {
+func TestCmdClear_NativeUnsupportedDoesNotResetSession(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 
@@ -5880,6 +5880,19 @@ func TestCmdClear_InvalidModeShowsUsage(t *testing.T) {
 	if got := len(session.GetHistory(0)); got != 1 {
 		t.Fatalf("history len = %d, want unchanged", got)
 	}
+
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[0], e.i18n.T(MsgClearNativeUnsupported)) {
+		t.Fatalf("expected native unsupported message, got %v", sent)
+	}
+}
+
+func TestCmdClear_InvalidModeShowsUsage(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	msg := &Message{SessionKey: "test:clear:user4", Content: "/clear weird", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
 
 	sent := p.getSent()
 	if len(sent) == 0 || !strings.Contains(sent[0], e.i18n.T(MsgClearUsage)) {
