@@ -183,7 +183,7 @@ func truncateDiscordThreadName(s string, maxRunes int) string {
 	return string(runes[:maxRunes])
 }
 
-func threadNameForMessage(m *discordgo.MessageCreate, botID string) string {
+func threadNameForMessage(m *discordgo.MessageCreate) string {
 	name := stripAllMentions(m.Content, m.MentionRoles)
 	name = strings.Join(strings.Fields(strings.ReplaceAll(name, "\n", " ")), " ")
 	if name == "" && m.Author != nil {
@@ -195,7 +195,7 @@ func threadNameForMessage(m *discordgo.MessageCreate, botID string) string {
 	return truncateDiscordThreadName(name, 90)
 }
 
-var reDiscordUserMention = regexp.MustCompile(`<@!?[^>&]+>`)
+var reDiscordUserMention = regexp.MustCompile(`<@!?\d+>`)
 
 // stripAllMentions removes all mention syntax from text for use in thread names.
 // Strips user mentions (<@ID>, <@!ID>), role mentions (<@&ID>), and @everyone/@here.
@@ -280,13 +280,13 @@ func resolveThreadReplyContext(m *discordgo.MessageCreate, botID string, ops dis
 		return buildThreadSessionKey(threadID), rc, nil
 	}
 
-	thread, err := ops.StartThread(m.ChannelID, m.ID, threadNameForMessage(m, botID), 1440)
+	thread, err := ops.StartThread(m.ChannelID, m.ID, threadNameForMessage(m), 1440)
 	if err != nil {
 		// Another bot may have already created the thread. In Discord the
 		// thread ID equals the parent message ID, so try joining it.
 		slog.Debug("discord: start thread failed, attempting join", "message", m.ID, "error", err)
 		if joinErr := ops.JoinThread(m.ID); joinErr != nil {
-			return "", replyContext{}, fmt.Errorf("start thread for message %s: %w (join also failed: %v)", m.ID, err, joinErr)
+			return "", replyContext{}, fmt.Errorf("start thread for message %s: %w (join also failed: %w)", m.ID, err, joinErr)
 		}
 		rc := replyContext{channelID: m.ID, messageID: m.ID, threadID: m.ID}
 		return buildThreadSessionKey(m.ID), rc, nil

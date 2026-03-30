@@ -122,12 +122,12 @@ func TestResolveThreadReplyContext_CreatesThreadForGuildMessage(t *testing.T) {
 			ID:        "msg-42",
 			ChannelID: "channel-1",
 			GuildID:   "guild-1",
-			Content:   "<@bot-1> investigate build failure",
+			Content:   "<@100000> investigate build failure",
 			Author:    &discordgo.User{ID: "u1", Username: "jun"},
 		},
 	}
 
-	sessionKey, rc, err := resolveThreadReplyContext(msg, "bot-1", ops)
+	sessionKey, rc, err := resolveThreadReplyContext(msg, "100000", ops)
 	if err != nil {
 		t.Fatalf("resolveThreadReplyContext() error = %v", err)
 	}
@@ -838,29 +838,32 @@ func TestIsDiscordBotMention_Everyone(t *testing.T) {
 
 func TestThreadNameForMessage(t *testing.T) {
 	tests := []struct {
-		name    string
-		content string
-		want    string
+		name         string
+		content      string
+		mentionRoles []string
+		want         string
 	}{
-		{"strips user mention", "<@123> fix the bug", "fix the bug"},
-		{"strips nick mention", "<@!123> fix the bug", "fix the bug"},
-		{"strips multiple mentions", "<@111> <@222> fix the bug", "fix the bug"},
-		{"strips @everyone", "@everyone hello", "hello"},
-		{"strips @here", "@here hello", "hello"},
-		{"strips mixed mentions and @everyone", "<@111> @everyone fix it", "fix it"},
-		{"empty after strip uses author", "<@123>", "cc testuser"},
-		{"empty content no author", "", "cc session"},
+		{"strips user mention", "<@123> fix the bug", nil, "fix the bug"},
+		{"strips nick mention", "<@!123> fix the bug", nil, "fix the bug"},
+		{"strips multiple mentions", "<@111> <@222> fix the bug", nil, "fix the bug"},
+		{"strips @everyone", "@everyone hello", nil, "hello"},
+		{"strips @here", "@here hello", nil, "hello"},
+		{"strips mixed mentions and @everyone", "<@111> @everyone fix it", nil, "fix it"},
+		{"strips role mention", "<@&456> hello", []string{"456"}, "hello"},
+		{"strips mixed user and role mentions", "<@111> <@&789> fix it", []string{"789"}, "fix it"},
+		{"empty after strip uses author", "<@123>", nil, "cc testuser"},
+		{"empty content no author", "", nil, "cc session"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			m := &discordgo.MessageCreate{
-				Message: &discordgo.Message{Content: tt.content},
+				Message: &discordgo.Message{Content: tt.content, MentionRoles: tt.mentionRoles},
 			}
 			if tt.want == "cc testuser" {
 				m.Author = &discordgo.User{Username: "testuser"}
 			}
-			got := threadNameForMessage(m, "999")
+			got := threadNameForMessage(m)
 			if got != tt.want {
 				t.Errorf("threadNameForMessage(%q) = %q, want %q", tt.content, got, tt.want)
 			}
