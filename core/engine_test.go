@@ -7017,6 +7017,155 @@ func TestCmdCompress_DrainsQueueAfterSuccess(t *testing.T) {
 	}
 }
 
+func TestCmdClear_DefaultResetsCurrentSessionInPlace(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	key := "test:clear:user1"
+	session := e.sessions.NewSession(key, "keep-name")
+	session.SetAgentSessionID("agent-session-1", "stub")
+	session.AddHistory("user", "hello")
+	session.AddHistory("assistant", "world")
+
+	sess := newControllableSession("agent-session-1")
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx"}
+	e.interactiveMu.Unlock()
+
+	msg := &Message{SessionKey: key, Content: "/clear", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	if got := e.sessions.ActiveSessionID(key); got != session.ID {
+		t.Fatalf("active session id = %q, want %q", got, session.ID)
+	}
+	if got := session.GetAgentSessionID(); got != "" {
+		t.Fatalf("agent session id = %q, want empty", got)
+	}
+	if got := session.GetName(); got != "keep-name" {
+		t.Fatalf("session name = %q, want keep-name", got)
+	}
+	if got := len(session.GetHistory(0)); got != 0 {
+		t.Fatalf("history len = %d, want 0", got)
+	}
+
+	e.interactiveMu.Lock()
+	_, exists := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	if exists {
+		t.Fatal("expected interactive state to be cleaned up after /clear")
+	}
+
+	select {
+	case <-sess.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected agent session to be closed after /clear")
+	}
+
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[0], e.i18n.T(MsgClearDone)) {
+		t.Fatalf("expected clear confirmation, got %v", sent)
+	}
+}
+
+func TestCmdClear_ResetAliasUsesSameBehavior(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	key := "test:clear:user2"
+	session := e.sessions.NewSession(key, "named")
+	session.SetAgentSessionID("agent-session-2", "stub")
+	session.AddHistory("user", "hello")
+
+	msg := &Message{SessionKey: key, Content: "/clear reset", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	if got := e.sessions.ActiveSessionID(key); got != session.ID {
+		t.Fatalf("active session id = %q, want %q", got, session.ID)
+	}
+	if got := session.GetAgentSessionID(); got != "" {
+		t.Fatalf("agent session id = %q, want empty", got)
+	}
+	if got := len(session.GetHistory(0)); got != 0 {
+		t.Fatalf("history len = %d, want 0", got)
+	}
+	if got := session.GetName(); got != "named" {
+		t.Fatalf("session name = %q, want named", got)
+	}
+}
+
+func TestCmdClear_InvalidModeShowsUsage(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	key := "test:clear:user3"
+	session := e.sessions.NewSession(key, "named")
+	session.SetAgentSessionID("agent-session-3", "stub")
+	session.AddHistory("user", "hello")
+
+	msg := &Message{SessionKey: key, Content: "/clear native", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	if got := session.GetAgentSessionID(); got != "agent-session-3" {
+		t.Fatalf("agent session id = %q, want unchanged", got)
+	}
+	if got := len(session.GetHistory(0)); got != 1 {
+		t.Fatalf("history len = %d, want unchanged", got)
+	}
+
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[0], e.i18n.T(MsgClearUsage)) {
+		t.Fatalf("expected clear usage message, got %v", sent)
+	}
+}
+
+func TestCmdClear_UsesWorkspaceSessionContext(t *testing.T) {
+	p := &stubPlatformEngine{n: "feishu"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindingPath)
+
+	wsDir := normalizeWorkspacePath(t.TempDir())
+	channelID := "channel1"
+	sessionKey := "feishu:" + channelID + ":user1"
+	e.workspaceBindings.Bind("project:test", channelID, "chan", wsDir)
+
+	ws := e.workspacePool.GetOrCreate(wsDir)
+	ws.agent = &stubAgent{}
+	ws.sessions = NewSessionManager("")
+
+	globalSession := e.sessions.NewSession(sessionKey, "global")
+	globalSession.SetAgentSessionID("global-agent-session", "stub")
+	globalSession.AddHistory("user", "keep")
+
+	workspaceSession := ws.sessions.NewSession(sessionKey, "workspace")
+	workspaceSession.SetAgentSessionID("workspace-agent-session", "stub")
+	workspaceSession.AddHistory("user", "clear-me")
+
+	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
+	sess := newControllableSession("workspace-agent-session")
+	e.interactiveMu.Lock()
+	e.interactiveStates[interactiveKey] = &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx"}
+	e.interactiveMu.Unlock()
+
+	msg := &Message{SessionKey: sessionKey, Content: "/clear", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	if got := workspaceSession.GetAgentSessionID(); got != "" {
+		t.Fatalf("workspace agent session id = %q, want empty", got)
+	}
+	if got := len(workspaceSession.GetHistory(0)); got != 0 {
+		t.Fatalf("workspace history len = %d, want 0", got)
+	}
+	if got := globalSession.GetAgentSessionID(); got != "global-agent-session" {
+		t.Fatalf("global agent session id = %q, want unchanged", got)
+	}
+	if got := len(globalSession.GetHistory(0)); got != 1 {
+		t.Fatalf("global history len = %d, want unchanged", got)
+	}
+}
+
 // --- 3. executeCardAction routing ---
 
 func TestExecuteCardAction_CronEnable(t *testing.T) {

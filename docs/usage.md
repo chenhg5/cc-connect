@@ -32,6 +32,7 @@ Each user gets an independent session with full conversation context. Manage ses
 | Command | Description |
 |---------|-------------|
 | `/new [name]` | Start a new session |
+| `/clear [reset]` | Clear the current session context in place |
 | `/list` | List all agent sessions for this project |
 | `/switch <id>` | Switch to a different session |
 | `/current` | Show current session info |
@@ -57,6 +58,8 @@ reset_on_idle_mins = 60
 ```
 
 When enabled, the next normal message after a long idle period starts in a fresh session automatically, without deleting the old session from `/list`.
+
+`/clear` keeps the current logical session but resets its conversation state. By default it behaves like `/clear reset`: it detaches the current backend agent session so the next message starts a fresh one without creating a new entry in `/list`.
 
 ---
 
