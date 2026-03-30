@@ -556,33 +556,16 @@ func saveConfig(cfg *Config) error {
 
 // formatTOML post-processes raw TOML encoder output to improve readability:
 //   - inserts blank lines before section/array-table headers
-//   - removes key-value lines whose value is a zero/empty default
-//   - removes section headers that have no remaining key-value pairs
+//   - removes empty section headers (no key-value pairs between this header and the next)
+//
+// It deliberately keeps all key-value lines intact, including zero-value ones
+// (e.g. `quiet = false`, `port = 0`), because those may be explicitly set by the user.
 func formatTOML(raw string) string {
 	lines := strings.Split(raw, "\n")
 
-	// Pass 1: mark zero-value lines for removal.
-	// A "zero-value" line looks like:  key = "" | key = 0 | key = false | key = []
-	keep := make([]bool, len(lines))
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || trimmed[0] == '[' || trimmed[0] == '#' {
-			keep[i] = true
-			continue
-		}
-		if eqIdx := strings.Index(trimmed, "="); eqIdx > 0 {
-			val := strings.TrimSpace(trimmed[eqIdx+1:])
-			switch val {
-			case `""`, "0", "false", "[]":
-				keep[i] = false
-				continue
-			}
-		}
-		keep[i] = true
-	}
-
-	// Pass 2: remove empty sections (header followed only by blank/removed lines
+	// Pass 1: identify empty sections (header followed only by blank lines
 	// until the next header or EOF).
+	skipSection := make(map[int]bool)
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if len(trimmed) == 0 || trimmed[0] != '[' {
@@ -594,20 +577,20 @@ func formatTOML(raw string) string {
 			if len(t) > 0 && t[0] == '[' {
 				break
 			}
-			if keep[j] && t != "" {
+			if t != "" {
 				hasContent = true
 				break
 			}
 		}
 		if !hasContent {
-			keep[i] = false
+			skipSection[i] = true
 		}
 	}
 
-	// Pass 3: assemble output with blank lines before section headers.
+	// Pass 2: assemble output with blank lines before section headers.
 	var out []string
 	for i, line := range lines {
-		if !keep[i] {
+		if skipSection[i] {
 			continue
 		}
 		trimmed := strings.TrimSpace(line)

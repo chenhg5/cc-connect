@@ -184,8 +184,12 @@ func (m *ManagementServer) withStaticFallback(apiMux *http.ServeMux) http.Handle
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		// Try to serve the exact file
+		// Try to serve the exact file; guard against path traversal.
 		filePath := filepath.Join(m.webDistDir, filepath.Clean(r.URL.Path))
+		if !strings.HasPrefix(filePath, m.webDistDir) {
+			http.NotFound(w, r)
+			return
+		}
 		if info, err := os.Stat(filePath); err == nil && !info.IsDir() {
 			http.ServeFile(w, r, filePath)
 			return
@@ -310,10 +314,10 @@ func (m *ManagementServer) handleStatus(w http.ResponseWriter, r *http.Request) 
 	}
 	if m.bridgeServer != nil {
 		resp["bridge"] = map[string]any{
-			"enabled": true,
-			"port":    m.bridgeServer.port,
-			"path":    m.bridgeServer.path,
-			"token":   m.bridgeServer.token,
+			"enabled":   true,
+			"port":      m.bridgeServer.port,
+			"path":      m.bridgeServer.path,
+			"token_set": m.bridgeServer.token != "",
 		}
 	}
 	mgmtJSON(w, http.StatusOK, resp)
