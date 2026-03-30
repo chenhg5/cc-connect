@@ -368,6 +368,10 @@ func (a *Agent) SkillDirs() []string {
 
 func (a *Agent) CompressCommand() string { return "/compact" }
 
+// ── ContextClearer implementation ─────────────────────────────
+
+func (a *Agent) ClearCommand() string { return "/clear" }
+
 // ── MemoryFileProvider implementation ─────────────────────────
 
 func (a *Agent) ProjectMemoryFile() string {

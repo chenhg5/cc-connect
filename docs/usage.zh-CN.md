@@ -50,7 +50,7 @@ cc-connect 完整功能使用指南。
 
 `/clear` 会保留当前逻辑会话，但重置其对话上下文。默认等价于 `/clear reset`：解除当前底层 Agent 会话绑定，让下一条消息启动一个新的底层会话，同时不会像 `/new` 那样在 `/list` 中新增一条记录。
 
-`/clear native` 预留给底层 Agent 自带的原生 clear 命令。当前不支持的 Agent 会明确提示暂不支持，而不是静默回退。
+`/clear native` 会在当前 Agent 支持时转发到底层原生 clear 命令。不支持的 Agent 会明确提示暂不支持，而不是静默回退。当前是否可用取决于具体 Agent。
 
 ---
 

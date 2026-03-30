@@ -253,6 +253,9 @@ const (
 	MsgCompressing          MsgKey = "compressing"
 	MsgCompressNoSession    MsgKey = "compress_no_session"
 	MsgCompressDone         MsgKey = "compress_done"
+	MsgClearNativeNoSession MsgKey = "clear_native_no_session"
+	MsgClearNativeInFlight  MsgKey = "clear_native_inflight"
+	MsgClearNativeDone      MsgKey = "clear_native_done"
 
 	MsgMemoryNotSupported MsgKey = "memory_not_supported"
 	MsgMemoryShowProject  MsgKey = "memory_show_project"
@@ -834,7 +837,6 @@ var messages = map[MsgKey]map[Language]string{
 			"/quiet [global]\n  Toggle thinking/tool progress (global = all sessions)\n\n" +
 			"/compress\n  Compress conversation context\n\n" +
 			"/clear [reset|native]\n  Clear current session context in place\n\n" +
-			"/clear [reset]\n  Clear current session context in place\n\n" +
 			"/tts [always|voice_only]\n  View/switch text-to-speech mode\n\n" +
 			"/shell <command>\n  Run a shell command and return the output\n\n" +
 			"/dir [path|reset]\n  Show, switch, or reset agent working directory\n\n" +
@@ -879,7 +881,6 @@ var messages = map[MsgKey]map[Language]string{
 			"/quiet [global]\n  开关思考和工具进度消息（global = 全部会话）\n\n" +
 			"/compress\n  压缩会话上下文\n\n" +
 			"/clear [reset|native]\n  原地清空当前会话上下文\n\n" +
-			"/clear [reset]\n  原地清空当前会话上下文\n\n" +
 			"/tts [always|voice_only]\n  查看/切换语音合成模式\n\n" +
 			"/shell <命令>\n  执行 Shell 命令并返回结果\n\n" +
 			"/dir [路径|reset]\n  查看、切换或重置 Agent 工作目录\n\n" +
@@ -924,7 +925,6 @@ var messages = map[MsgKey]map[Language]string{
 			"/quiet [global]\n  開關思考和工具進度訊息（global = 全部會話）\n\n" +
 			"/compress\n  壓縮會話上下文\n\n" +
 			"/clear [reset|native]\n  原地清空當前會話上下文\n\n" +
-			"/clear [reset]\n  原地清空當前會話上下文\n\n" +
 			"/tts [always|voice_only]\n  查看/切換語音合成模式\n\n" +
 			"/shell <命令>\n  執行 Shell 命令並返回結果\n\n" +
 			"/dir [路徑|reset]\n  查看、切換或重置 Agent 工作目錄\n\n" +
@@ -968,7 +968,6 @@ var messages = map[MsgKey]map[Language]string{
 			"/quiet [global]\n  思考/ツール進捗メッセージの表示切替（global = 全セッション）\n\n" +
 			"/compress\n  会話コンテキストを圧縮\n\n" +
 			"/clear [reset|native]\n  現在のセッションのコンテキストをその場でクリア\n\n" +
-			"/clear [reset]\n  現在のセッションのコンテキストをその場でクリア\n\n" +
 			"/tts [always|voice_only]\n  音声合成モードの表示/切り替え\n\n" +
 			"/shell <コマンド>\n  シェルコマンドを実行して結果を返す\n\n" +
 			"/dir [パス|reset]\n  エージェントの作業ディレクトリを表示/切り替え/リセット\n\n" +
@@ -1012,7 +1011,6 @@ var messages = map[MsgKey]map[Language]string{
 			"/quiet [global]\n  Alternar mensajes de progreso (global = todas las sesiones)\n\n" +
 			"/compress\n  Comprimir contexto de conversación\n\n" +
 			"/clear [reset|native]\n  Limpiar el contexto de la sesión actual sin crear otra sesión\n\n" +
-			"/clear [reset]\n  Limpiar el contexto de la sesión actual sin crear otra sesión\n\n" +
 			"/tts [always|voice_only]\n  Ver/cambiar modo de síntesis de voz\n\n" +
 			"/shell <comando>\n  Ejecutar un comando shell y devolver la salida\n\n" +
 			"/dir [ruta|reset]\n  Ver, cambiar o restablecer el directorio de trabajo del agente\n\n" +
@@ -1145,7 +1143,6 @@ var messages = map[MsgKey]map[Language]string{
 			"/skills — List agent skills\n" +
 			"/compress — Compress context\n" +
 			"/clear [reset|native] — Clear current session context\n" +
-			"/clear [reset] — Clear current session context\n" +
 			"/stop — Stop current execution",
 		LangChinese: "**工具与自动化**\n" +
 			"/shell <命令> — 执行 Shell 命令\n" +
@@ -1156,7 +1153,6 @@ var messages = map[MsgKey]map[Language]string{
 			"/skills — 列出 Agent Skills\n" +
 			"/compress — 压缩上下文\n" +
 			"/clear [reset|native] — 清空当前会话上下文\n" +
-			"/clear [reset] — 清空当前会话上下文\n" +
 			"/stop — 停止当前执行",
 		LangTraditionalChinese: "**工具與自動化**\n" +
 			"/shell <命令> — 執行 Shell 命令\n" +
@@ -1167,7 +1163,6 @@ var messages = map[MsgKey]map[Language]string{
 			"/skills — 列出 Agent Skills\n" +
 			"/compress — 壓縮上下文\n" +
 			"/clear [reset|native] — 清空當前會話上下文\n" +
-			"/clear [reset] — 清空當前會話上下文\n" +
 			"/stop — 停止當前執行",
 		LangJapanese: "**ツール・自動化**\n" +
 			"/shell <コマンド> — シェルコマンド実行\n" +
@@ -1178,7 +1173,6 @@ var messages = map[MsgKey]map[Language]string{
 			"/skills — エージェントスキル一覧\n" +
 			"/compress — コンテキスト圧縮\n" +
 			"/clear [reset|native] — 現在のセッションのコンテキストをクリア\n" +
-			"/clear [reset] — 現在のセッションのコンテキストをクリア\n" +
 			"/stop — 現在の実行を停止",
 		LangSpanish: "**Herramientas y automatización**\n" +
 			"/shell <comando> — Ejecutar comando shell\n" +
@@ -1189,7 +1183,6 @@ var messages = map[MsgKey]map[Language]string{
 			"/skills — Listar skills del agente\n" +
 			"/compress — Comprimir contexto\n" +
 			"/clear [reset|native] — Limpiar el contexto de la sesión actual\n" +
-			"/clear [reset] — Limpiar el contexto de la sesión actual\n" +
 			"/stop — Detener ejecución actual",
 	},
 	MsgHelpSystemSection: {
@@ -1973,6 +1966,27 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "✅ 上下文壓縮完成。",
 		LangJapanese:           "✅ コンテキスト圧縮完了。",
 		LangSpanish:            "✅ Contexto comprimido.",
+	},
+	MsgClearNativeNoSession: {
+		LangEnglish:            "No running agent session to clear.",
+		LangChinese:            "当前没有可清空的运行中 Agent 会话。",
+		LangTraditionalChinese: "當前沒有可清空的執行中 Agent 會話。",
+		LangJapanese:           "クリアできる実行中のエージェントセッションがありません。",
+		LangSpanish:            "No hay una sesión activa del agente para limpiar.",
+	},
+	MsgClearNativeInFlight: {
+		LangEnglish:            "🧹 Clearing context in the current agent session...",
+		LangChinese:            "🧹 正在清空当前 Agent 会话上下文...",
+		LangTraditionalChinese: "🧹 正在清空當前 Agent 會話上下文...",
+		LangJapanese:           "🧹 現在のエージェントセッションのコンテキストをクリアしています...",
+		LangSpanish:            "🧹 Limpiando el contexto de la sesión actual del agente...",
+	},
+	MsgClearNativeDone: {
+		LangEnglish:            "✅ Current agent session context cleared.",
+		LangChinese:            "✅ 当前 Agent 会话上下文已清空。",
+		LangTraditionalChinese: "✅ 當前 Agent 會話上下文已清空。",
+		LangJapanese:           "✅ 現在のエージェントセッションのコンテキストをクリアしました。",
+		LangSpanish:            "✅ Se limpió el contexto de la sesión actual del agente.",
 	},
 
 	// Inline strings for engine.go commands

@@ -5480,6 +5480,13 @@ type stubCompressorAgent struct {
 
 func (a *stubCompressorAgent) CompressCommand() string { return a.cmd }
 
+type stubClearerAgent struct {
+	stubAgent
+	cmd string
+}
+
+func (a *stubClearerAgent) ClearCommand() string { return a.cmd }
+
 func TestCmdCompress_NoCompressor_RepliesNotSupported(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -5784,6 +5791,139 @@ func TestCmdCompress_DrainsQueueAfterSuccess(t *testing.T) {
 	if !found {
 		t.Fatalf("queued message not found in send calls: %v", calls)
 	}
+}
+
+func TestCmdClear_NativeNoSession_RepliesNoSession(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agent := &stubClearerAgent{cmd: "/clear"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	msg := &Message{SessionKey: "test:user1", Content: "/clear native", ReplyCtx: "ctx"}
+	e.cmdClear(p, msg, []string{"native"})
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("expected a reply")
+	}
+	if !strings.Contains(sent[0], e.i18n.T(MsgClearNativeNoSession)) {
+		t.Fatalf("expected MsgClearNativeNoSession, got %q", sent[0])
+	}
+}
+
+func TestCmdClear_NativeSuccessKeepsBackendSessionButClearsLocalHistory(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("native-clear")
+	agent := &stubClearerAgent{cmd: "/clear"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:native:user1"
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	session := e.sessions.GetOrCreateActive(key)
+	session.SetAgentSessionID("agent-session-native", "stub")
+	session.AddHistory("user", "hello")
+	session.AddHistory("assistant", "world")
+
+	msg := &Message{SessionKey: key, Content: "/clear native", ReplyCtx: "ctx"}
+	e.cmdClear(p, msg, []string{"native"})
+
+	deadline := time.After(3 * time.Second)
+	for {
+		sess.sendMu.Lock()
+		n := len(sess.sendCalls)
+		sess.sendMu.Unlock()
+		if n > 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for native clear Send call")
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	sess.events <- Event{Type: EventText, Content: "Context cleared for subsequent turns."}
+	sess.events <- Event{Type: EventResult, Done: true}
+
+	for {
+		sent := p.getSent()
+		foundResult := false
+		for _, s := range sent {
+			if strings.Contains(s, "Context cleared for subsequent turns.") {
+				foundResult = true
+				break
+			}
+		}
+		if foundResult {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for native clear result, sent = %v", p.getSent())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	if got := session.GetAgentSessionID(); got != "agent-session-native" {
+		t.Fatalf("agent session id changed after native clear: %q", got)
+	}
+	if got := len(session.GetHistory(0)); got != 0 {
+		t.Fatalf("expected native clear to clear local history, got %d entries", got)
+	}
+
+	e.interactiveMu.Lock()
+	storedState := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	if storedState == nil || storedState.agentSession != sess {
+		t.Fatal("expected native clear to keep the running interactive state")
+	}
+}
+
+func TestCmdClear_NativeBusy_RepliesPreviousProcessing(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("native-busy")
+	agent := &stubClearerAgent{cmd: "/clear"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:native:busy"
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	session := e.sessions.GetOrCreateActive(key)
+	if !session.TryLock() {
+		t.Fatal("expected TryLock to succeed")
+	}
+
+	msg := &Message{SessionKey: key, Content: "/clear native", ReplyCtx: "ctx"}
+	e.cmdClear(p, msg, []string{"native"})
+
+	sent := p.getSent()
+	found := false
+	for _, s := range sent {
+		if strings.Contains(s, e.i18n.T(MsgPreviousProcessing)) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected MsgPreviousProcessing reply, got %v", sent)
+	}
+	session.Unlock()
 }
 
 func TestCmdClear_DefaultResetsCurrentSessionInPlace(t *testing.T) {

@@ -50,7 +50,7 @@ During a session, the agent may request tool permissions. Reply **allow** / **de
 
 `/clear` keeps the current logical session but resets its conversation state. By default it behaves like `/clear reset`: it detaches the current backend agent session so the next message starts a fresh one without creating a new entry in `/list`.
 
-`/clear native` is reserved for agents that expose a real native clear command. At the moment unsupported agents return an explicit hint instead of silently falling back.
+`/clear native` forwards a real native clear command to the current agent when supported. Unsupported agents return an explicit hint instead of silently falling back. At the moment, support is agent-dependent.
 
 ---
 

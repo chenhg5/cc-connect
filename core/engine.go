@@ -5207,7 +5207,24 @@ func (e *Engine) cmdClear(p Platform, msg *Message, args []string) {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgClearNativeUnsupported))
 			return
 		}
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgClearNativeUnsupported))
+		iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
+		e.interactiveMu.Lock()
+		state, hasState := e.interactiveStates[iKey]
+		e.interactiveMu.Unlock()
+		if !hasState || state == nil || state.agentSession == nil || !state.agentSession.Alive() {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgClearNativeNoSession))
+			return
+		}
+
+		_, sessions := e.sessionContextForKey(msg.SessionKey)
+		session := sessions.GetOrCreateActive(msg.SessionKey)
+		if !session.TryLock() {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
+			return
+		}
+
+		e.send(p, msg.ReplyCtx, e.i18n.T(MsgClearNativeInFlight))
+		go e.runNativeClear(clearer, state, session, sessions, iKey, p, msg.ReplyCtx)
 	default:
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgClearUsage))
 	}
@@ -5286,7 +5303,7 @@ func (e *Engine) cmdCompress(p Platform, msg *Message) {
 // runCompress sends the agent's compress command and handles results.
 // If autoTriggered is true, suppress user-visible "compressing" and completion messages.
 func (e *Engine) runCompress(state *interactiveState, session *Session, sessions *SessionManager, iKey string, p Platform, replyCtx any, auto bool) {
-	// session.Unlock() is called inside drainQueuedMessagesAfterCompress
+	// session.Unlock() is called inside drainQueuedMessagesAfterSessionCommand
 	// while holding state.mu to close the race window. Deferred fallback
 	// ensures the lock is released on early-return paths.
 	compressUnlocked := false
@@ -5421,7 +5438,7 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 			}
 
 			// After compress succeeds, process any queued messages instead of dropping them.
-			e.drainQueuedMessagesAfterCompress(state, session, sessions, sessionKey, unlocked)
+			e.drainQueuedMessagesAfterSessionCommand(state, session, sessions, sessionKey, unlocked)
 			return
 		case EventError:
 			if !auto && event.Error != nil {
@@ -5433,7 +5450,7 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 				e.notifyDroppedQueuedMessages(state, event.Error)
 			} else {
 				// Agent survived — try to process queued messages.
-				e.drainQueuedMessagesAfterCompress(state, session, sessions, sessionKey, unlocked)
+				e.drainQueuedMessagesAfterSessionCommand(state, session, sessions, sessionKey, unlocked)
 			}
 			return
 		case EventPermissionRequest:
@@ -5445,12 +5462,147 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 	}
 }
 
-// drainQueuedMessagesAfterCompress processes any messages that were queued
-// during a /compress operation. It sends each one to the agent and runs the
-// full interactive event loop for it.
-func (e *Engine) drainQueuedMessagesAfterCompress(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, unlocked *bool) {
+// drainQueuedMessagesAfterSessionCommand processes any messages that were
+// queued during a serialized in-session command such as /compress or
+// /clear native. It sends each one to the agent and runs the full
+// interactive event loop for it.
+func (e *Engine) drainQueuedMessagesAfterSessionCommand(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, unlocked *bool) {
 	if e.drainPendingMessages(state, session, sessions, sessionKey) {
 		*unlocked = true
+	}
+}
+
+func (e *Engine) runNativeClear(clearer ContextClearer, state *interactiveState, session *Session, sessions *SessionManager, iKey string, p Platform, replyCtx any) {
+	clearUnlocked := false
+	defer func() {
+		if !clearUnlocked {
+			session.Unlock()
+		}
+	}()
+
+	state.mu.Lock()
+	state.platform = p
+	state.replyCtx = replyCtx
+	state.mu.Unlock()
+
+	drainEvents(state.agentSession.Events())
+
+	cmd := clearer.ClearCommand()
+	if cmd == "" {
+		e.reply(p, replyCtx, e.i18n.T(MsgClearNativeUnsupported))
+		return
+	}
+
+	if err := state.agentSession.Send(cmd, nil, nil); err != nil {
+		e.reply(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+		if !state.agentSession.Alive() {
+			e.cleanupInteractiveState(iKey)
+		}
+		return
+	}
+
+	e.processNativeClearEvents(state, session, sessions, iKey, p, replyCtx, &clearUnlocked)
+}
+
+func (e *Engine) processNativeClearEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, p Platform, replyCtx any, unlocked *bool) {
+	var textParts []string
+	events := state.agentSession.Events()
+	stopCh := state.stopSignal()
+
+	var idleTimer *time.Timer
+	var idleCh <-chan time.Time
+	if e.eventIdleTimeout > 0 {
+		idleTimer = time.NewTimer(e.eventIdleTimeout)
+		defer idleTimer.Stop()
+		idleCh = idleTimer.C
+	}
+
+	for {
+		var event Event
+		var ok bool
+
+		select {
+		case <-stopCh:
+			return
+		case event, ok = <-events:
+			if !ok {
+				e.cleanupInteractiveState(sessionKey, state)
+				e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent process exited during native clear"))
+				return
+			}
+		case <-idleCh:
+			e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "native clear timed out"))
+			e.cleanupInteractiveState(sessionKey, state)
+			e.notifyDroppedQueuedMessages(state, fmt.Errorf("native clear timed out"))
+			return
+		case <-e.ctx.Done():
+			return
+		}
+
+		if state.isStopped() {
+			return
+		}
+
+		if idleTimer != nil {
+			if !idleTimer.Stop() {
+				select {
+				case <-idleTimer.C:
+				default:
+				}
+			}
+			idleTimer.Reset(e.eventIdleTimeout)
+		}
+
+		switch event.Type {
+		case EventText:
+			if event.Content != "" {
+				textParts = append(textParts, event.Content)
+			}
+		case EventToolResult:
+			out := strings.TrimSpace(event.Content)
+			if out == "" {
+				out = strings.TrimSpace(event.ToolResult)
+			}
+			if out == "" {
+				break
+			}
+			tn := strings.TrimSpace(event.ToolName)
+			if tn == "" {
+				tn = "tool"
+			}
+			textParts = append(textParts, fmt.Sprintf(e.i18n.T(MsgToolResult), tn, out)+"\n")
+		case EventResult:
+			session.ClearHistory()
+			sessions.Save()
+
+			result := event.Content
+			if result == "" && len(textParts) > 0 {
+				result = strings.Join(textParts, "")
+			}
+			if result != "" {
+				e.send(p, replyCtx, result)
+			} else {
+				e.reply(p, replyCtx, e.i18n.T(MsgClearNativeDone))
+			}
+
+			e.drainQueuedMessagesAfterSessionCommand(state, session, sessions, sessionKey, unlocked)
+			return
+		case EventError:
+			if event.Error != nil {
+				e.reply(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
+			}
+			if !state.agentSession.Alive() {
+				e.notifyDroppedQueuedMessages(state, event.Error)
+			} else {
+				e.drainQueuedMessagesAfterSessionCommand(state, session, sessions, sessionKey, unlocked)
+			}
+			return
+		case EventPermissionRequest:
+			_ = state.agentSession.RespondPermission(event.RequestID, PermissionResult{
+				Behavior:     "allow",
+				UpdatedInput: event.ToolInputRaw,
+			})
+		}
 	}
 }
 
