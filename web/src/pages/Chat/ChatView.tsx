@@ -2,12 +2,19 @@ import { useEffect, useState, useRef, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useParams, Link } from 'react-router-dom';
 import {
-  ArrowLeft, Send, User, Bot, RotateCw, Circle, WifiOff,
+  ArrowLeft, Send, User, Bot, Circle, WifiOff,
   Copy, Check, FileText, Image as ImageIcon, Loader2,
+  Slash, ChevronDown,
 } from 'lucide-react';
 import { Badge, Button } from '@/components/ui';
-import { getSession, type SessionDetail } from '@/api/sessions';
-import { useBridgeSocket, fetchBridgeConfig, type BridgeConfig, type BridgeIncoming, type BridgeStatus } from '@/hooks/useBridgeSocket';
+import { listSessions, getSession, type Session, type SessionDetail } from '@/api/sessions';
+import {
+  useBridgeSocket, fetchBridgeConfig,
+  type BridgeConfig, type BridgeIncoming, type BridgeStatus,
+} from '@/hooks/useBridgeSocket';
+import CommandPalette, { type SlashCommand, slashCommands } from './CommandPalette';
+import SessionDrawer from './SessionDrawer';
+import CommandResultPanel, { type CommandResult } from './CommandResultPanel';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
@@ -100,39 +107,58 @@ interface ChatMsg {
   timestamp?: string;
 }
 
-// ── Card renderer ────────────────────────────────────────────
+// ── Helpers ──────────────────────────────────────────────────
+
+function parseListItemText(text: string): { cmd: string; desc: string } {
+  const m = text.match(/^\*\*(.+?)\*\*\s*(.*)/);
+  if (m) return { cmd: m[1], desc: m[2] };
+  const sp = text.indexOf(' ');
+  if (sp > 0) return { cmd: text.slice(0, sp), desc: text.slice(sp + 1) };
+  return { cmd: text, desc: '' };
+}
+
+function InlineMd({ text }: { text: string }) {
+  const parts = text.split(/(\*\*[^*]+\*\*)/g);
+  return (
+    <>
+      {parts.map((p, i) =>
+        p.startsWith('**') && p.endsWith('**')
+          ? <strong key={i} className="font-semibold text-gray-900 dark:text-white">{p.slice(2, -2)}</strong>
+          : <span key={i}>{p}</span>
+      )}
+    </>
+  );
+}
+
+// ── Card renderer (flat, clean style for in-stream cards) ────
 
 function CardBlock({ card, onAction }: { card: any; onAction: (v: string) => void }) {
   if (!card) return null;
   return (
-    <div className="rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden">
-      {card.header && (
-        <div className={cn('px-4 py-2.5 font-semibold text-sm text-white', colorToBg(card.header.color))}>
-          {card.header.title}
-        </div>
+    <div className="space-y-3">
+      {card.header?.title && (
+        <div className="text-sm font-semibold text-gray-900 dark:text-white">{card.header.title}</div>
       )}
-      <div className="p-4 space-y-3">
-        {card.elements?.map((el: any, i: number) => (
-          <CardElement key={i} el={el} onAction={onAction} />
-        ))}
-      </div>
+      {card.elements?.map((el: any, i: number) => (
+        <CardElement key={i} el={el} onAction={onAction} />
+      ))}
     </div>
   );
 }
 
 function CardElement({ el, onAction }: { el: any; onAction: (v: string) => void }) {
   if (el.type === 'markdown') return <RenderMarkdown content={el.content} />;
-  if (el.type === 'divider') return <hr className="border-gray-200 dark:border-gray-700" />;
-  if (el.type === 'note') return <p className="text-xs text-gray-400">{el.text}</p>;
+  if (el.type === 'divider') return <div className="border-t border-gray-200/60 dark:border-gray-700/40" />;
+  if (el.type === 'note') return <p className="text-[11px] text-gray-400 dark:text-gray-500">{el.text}</p>;
   if (el.type === 'actions') {
     return (
       <div className="flex flex-wrap gap-2">
         {el.buttons?.map((btn: any, j: number) => (
           <button key={j} onClick={() => onAction(btn.value)} className={cn(
-            'px-3 py-1.5 rounded-lg text-xs font-medium transition-colors',
-            btn.btn_type === 'primary' ? 'bg-accent text-black hover:bg-accent-dim' :
-            btn.btn_type === 'danger' ? 'bg-red-500 text-white hover:bg-red-600' :
-            'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700',
+            'px-3 py-1.5 rounded-lg text-xs font-medium transition-all duration-150',
+            btn.btn_type === 'primary' ? 'bg-accent text-black hover:bg-accent-dim shadow-sm' :
+            btn.btn_type === 'danger' ? 'bg-red-500/10 text-red-600 dark:text-red-400 hover:bg-red-500/20' :
+            'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700',
           )}>
             {btn.text}
           </button>
@@ -141,13 +167,32 @@ function CardElement({ el, onAction }: { el: any; onAction: (v: string) => void 
     );
   }
   if (el.type === 'list_item') {
+    const parsed = parseListItemText(el.text);
+    const isCommand = parsed.cmd.startsWith('/');
     return (
-      <div className="flex items-center justify-between">
-        <span className="text-sm text-gray-700 dark:text-gray-300">{el.text}</span>
-        <button onClick={() => onAction(el.btn_value)} className="px-2.5 py-1 rounded-lg text-xs font-medium bg-accent text-black hover:bg-accent-dim">
+      <button
+        onClick={() => onAction(el.btn_value)}
+        className="w-full flex items-center gap-3 py-2 text-left group"
+      >
+        {isCommand ? (
+          <>
+            <code className="shrink-0 w-20 text-xs font-mono font-medium text-accent">{parsed.cmd}</code>
+            <span className="flex-1 text-sm text-gray-500 dark:text-gray-400 truncate">{parsed.desc}</span>
+          </>
+        ) : (
+          <span className="flex-1 text-sm text-gray-700 dark:text-gray-300 truncate min-w-0">
+            <InlineMd text={el.text} />
+          </span>
+        )}
+        <span className={cn(
+          'shrink-0 px-2 py-0.5 rounded-md text-[11px] font-medium transition-all',
+          el.btn_type === 'primary'
+            ? 'bg-accent/15 text-accent group-hover:bg-accent/25'
+            : 'text-gray-400 dark:text-gray-500 bg-gray-100 dark:bg-gray-800 group-hover:bg-accent/15 group-hover:text-accent',
+        )}>
           {el.btn_text}
-        </button>
-      </div>
+        </span>
+      </button>
     );
   }
   if (el.type === 'select') {
@@ -155,7 +200,7 @@ function CardElement({ el, onAction }: { el: any; onAction: (v: string) => void 
       <select
         defaultValue={el.init_value}
         onChange={(e) => onAction(e.target.value)}
-        className="w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+        className="w-full px-3 py-2 text-sm rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800/80 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-accent/40"
       >
         {el.options?.map((opt: any, j: number) => (
           <option key={j} value={opt.value}>{opt.text}</option>
@@ -165,17 +210,6 @@ function CardElement({ el, onAction }: { el: any; onAction: (v: string) => void 
   }
   return null;
 }
-
-function colorToBg(c?: string) {
-  const map: Record<string, string> = {
-    blue: 'bg-blue-600', green: 'bg-green-600', red: 'bg-red-600', orange: 'bg-orange-500',
-    purple: 'bg-purple-600', grey: 'bg-gray-600', turquoise: 'bg-teal-600', violet: 'bg-violet-600',
-    indigo: 'bg-indigo-600', wathet: 'bg-sky-500', yellow: 'bg-yellow-500', carmine: 'bg-rose-600',
-  };
-  return map[c || ''] || 'bg-gray-800';
-}
-
-// ── Buttons renderer ─────────────────────────────────────────
 
 function ButtonsBlock({ content, buttons, onAction }: { content: string; buttons: { text: string; data: string }[][]; onAction: (v: string) => void }) {
   return (
@@ -194,8 +228,6 @@ function ButtonsBlock({ content, buttons, onAction }: { content: string; buttons
   );
 }
 
-// ── File/Image attachments ───────────────────────────────────
-
 function FileBlock({ name, size }: { name: string; size?: number }) {
   return (
     <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700">
@@ -212,78 +244,163 @@ function ImageBlock({ url }: { url: string }) {
   return <img src={url} alt="" className="max-w-sm rounded-lg border border-gray-200 dark:border-gray-700 shadow-sm" />;
 }
 
-// ── Connection status badge ──────────────────────────────────
-
 function StatusBadge({ status }: { status: BridgeStatus }) {
   const { t } = useTranslation();
   if (status === 'connected') {
     return (
       <span className="flex items-center gap-1 text-[10px] text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-900/20 px-1.5 py-0.5 rounded-full">
-        <Circle size={5} className="fill-current" /> {t('sessions.bridgeConnected', 'connected')}
+        <Circle size={5} className="fill-current" /> {t('sessions.bridgeConnected')}
       </span>
     );
   }
   if (status === 'connecting' || status === 'registering') {
     return (
       <span className="flex items-center gap-1 text-[10px] text-yellow-600 dark:text-yellow-400 bg-yellow-50 dark:bg-yellow-900/20 px-1.5 py-0.5 rounded-full">
-        <Loader2 size={9} className="animate-spin" /> {t('sessions.bridgeConnecting', 'connecting...')}
+        <Loader2 size={9} className="animate-spin" /> {t('sessions.bridgeConnecting')}
       </span>
     );
   }
   return (
     <span className="flex items-center gap-1 text-[10px] text-gray-400 bg-gray-100 dark:bg-gray-800 px-1.5 py-0.5 rounded-full">
-      <WifiOff size={9} /> {t('sessions.bridgeDisconnected', 'disconnected')}
+      <WifiOff size={9} /> {t('sessions.bridgeDisconnected')}
     </span>
   );
 }
 
 // ── Main component ───────────────────────────────────────────
 
-export default function SessionChat() {
+export default function ChatView() {
   const { t } = useTranslation();
-  const { project, id } = useParams<{ project: string; id: string }>();
-  const [session, setSession] = useState<SessionDetail | null>(null);
+  const { name: projectName } = useParams<{ name: string }>();
+
+  // Session state
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [currentSession, setCurrentSession] = useState<SessionDetail | null>(null);
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [loading, setLoading] = useState(true);
   const [typing, setTyping] = useState(false);
   const [bridgeCfg, setBridgeCfg] = useState<BridgeConfig | null>(null);
+  // Whether the user explicitly picked a session from the drawer
+  const [userPickedSession, setUserPickedSession] = useState(false);
+
+  // UI state
+  const [cmdOpen, setCmdOpen] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [cmdResult, setCmdResult] = useState<CommandResult | null>(null);
+
   const messagesEnd = useRef<HTMLDivElement>(null);
-  const streamBufRef = useRef<Map<string, string>>(new Map());
   const previewHandleCounter = useRef(0);
+  const cmdBtnRef = useRef<HTMLButtonElement>(null);
+  const sessionKeyRef = useRef('');
+  // Track pending slash command so the next reply can be routed to the panel
+  const pendingCmdRef = useRef<string | null>(null);
+  // Mirrors cmdResult.command so card-action callbacks can route follow-ups back to the panel
+  const cmdPanelRef = useRef<string | null>(null);
 
-  const sessionKey = session?.session_key || '';
+  // Web platform uses its own per-project session key by default.
+  // Only use the original session's key when the user explicitly switches via the drawer.
+  const webSessionKey = projectName ? `bridge:web-admin:${projectName}` : '';
+  const sessionKey = userPickedSession && currentSession?.session_key
+    ? currentSession.session_key
+    : webSessionKey;
+  sessionKeyRef.current = sessionKey;
 
-  // Load session data + bridge config
-  const fetchSession = useCallback(async () => {
-    if (!project || !id) return;
+  // Load project sessions and auto-select latest
+  const fetchData = useCallback(async () => {
+    if (!projectName) return;
+    setLoading(true);
     try {
-      setLoading(true);
-      const [data, cfg] = await Promise.all([
-        getSession(project, id, 200),
+      const [{ sessions: allSessions }, cfg] = await Promise.all([
+        listSessions(projectName),
         fetchBridgeConfig(),
       ]);
-      setSession(data);
       setBridgeCfg(cfg);
-      if (data.history) {
-        setMessages(data.history.map((h, i) => ({
+      const sorted = (allSessions || []).sort(
+        (a, b) => (b.updated_at || b.created_at || '').localeCompare(a.updated_at || a.created_at || ''),
+      );
+      setSessions(sorted);
+
+      if (sorted.length > 0) {
+        const latest = sorted[0];
+        const detail = await getSession(projectName, latest.id, 200);
+        setCurrentSession(detail);
+        if (detail.history) {
+          setMessages(detail.history.map((h, i) => ({
+            id: `hist-${i}`,
+            role: h.role as 'user' | 'assistant',
+            content: h.content,
+            format: 'markdown',
+            timestamp: h.timestamp,
+          })));
+        }
+      } else {
+        setCurrentSession(null);
+        setMessages([]);
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, [projectName]);
+
+  useEffect(() => { fetchData(); }, [fetchData]);
+
+  // Keep ref in sync with cmdResult so callbacks avoid stale closures
+  useEffect(() => {
+    cmdPanelRef.current = cmdResult?.command ?? null;
+  }, [cmdResult]);
+
+  // Switch to a different session (user explicitly chose from drawer)
+  const switchToSession = useCallback(async (s: Session) => {
+    if (!projectName) return;
+    setDrawerOpen(false);
+    setLoading(true);
+    setUserPickedSession(true);
+    try {
+      const detail = await getSession(projectName, s.id, 200);
+      setCurrentSession(detail);
+      if (detail.history) {
+        setMessages(detail.history.map((h, i) => ({
           id: `hist-${i}`,
           role: h.role as 'user' | 'assistant',
           content: h.content,
           format: 'markdown',
           timestamp: h.timestamp,
         })));
+      } else {
+        setMessages([]);
       }
     } finally {
       setLoading(false);
     }
-  }, [project, id]);
+  }, [projectName]);
 
-  useEffect(() => { fetchSession(); }, [fetchSession]);
-
-  // Handle bridge incoming messages
+  // Handle bridge incoming messages — only process messages for the current session
   const handleBridgeMessage = useCallback((msg: BridgeIncoming) => {
+    const msgKey = (msg as any).session_key;
+    if (msgKey && sessionKeyRef.current && msgKey !== sessionKeyRef.current) {
+      return;
+    }
+
+    // If a slash command is pending, route the first reply/card to the panel
+    const pending = pendingCmdRef.current;
+    if (pending && (msg.type === 'reply' || msg.type === 'card' || msg.type === 'buttons')) {
+      pendingCmdRef.current = null;
+      if (msg.type === 'card') {
+        const card = msg as Extract<BridgeIncoming, { type: 'card' }>;
+        setCmdResult({ command: pending, content: '', format: 'card', card: card.card });
+      } else if (msg.type === 'buttons') {
+        const btns = msg as Extract<BridgeIncoming, { type: 'buttons' }>;
+        setCmdResult({ command: pending, content: btns.content, format: 'buttons', buttons: btns.buttons });
+      } else {
+        const reply = msg as Extract<BridgeIncoming, { type: 'reply' }>;
+        setCmdResult({ command: pending, content: reply.content, format: 'markdown' });
+      }
+      setTyping(false);
+      return;
+    }
+
     if (msg.type === 'reply') {
       setMessages(prev => {
         const streamIdx = prev.findIndex(m => m.streaming && m.role === 'assistant');
@@ -292,12 +409,7 @@ export default function SessionChat() {
           updated[streamIdx] = { ...updated[streamIdx], content: msg.content, format: (msg as any).format === 'markdown' ? 'markdown' : 'text', streaming: false };
           return updated;
         }
-        return [...prev, {
-          id: `reply-${Date.now()}`,
-          role: 'assistant',
-          content: msg.content,
-          format: (msg as any).format === 'markdown' ? 'markdown' : 'text',
-        }];
+        return [...prev, { id: `reply-${Date.now()}`, role: 'assistant', content: msg.content, format: (msg as any).format === 'markdown' ? 'markdown' : 'text' }];
       });
       setTyping(false);
     } else if (msg.type === 'reply_stream') {
@@ -326,23 +438,11 @@ export default function SessionChat() {
       }
     } else if (msg.type === 'card') {
       const card = msg as Extract<BridgeIncoming, { type: 'card' }>;
-      setMessages(prev => [...prev, {
-        id: `card-${Date.now()}`,
-        role: 'assistant',
-        content: '',
-        format: 'card',
-        card: card.card,
-      }]);
+      setMessages(prev => [...prev, { id: `card-${Date.now()}`, role: 'assistant', content: '', format: 'card', card: card.card }]);
       setTyping(false);
     } else if (msg.type === 'buttons') {
       const btns = msg as Extract<BridgeIncoming, { type: 'buttons' }>;
-      setMessages(prev => [...prev, {
-        id: `btn-${Date.now()}`,
-        role: 'assistant',
-        content: btns.content,
-        format: 'buttons',
-        buttons: btns.buttons,
-      }]);
+      setMessages(prev => [...prev, { id: `btn-${Date.now()}`, role: 'assistant', content: btns.content, format: 'buttons', buttons: btns.buttons }]);
       setTyping(false);
     } else if (msg.type === 'typing_start') {
       setTyping(true);
@@ -352,13 +452,7 @@ export default function SessionChat() {
       const ps = msg as Extract<BridgeIncoming, { type: 'preview_start' }>;
       const handle = `web-preview-${++previewHandleCounter.current}`;
       sendPreviewAck(ps.ref_id, handle);
-      setMessages(prev => [...prev, {
-        id: `stream-${handle}`,
-        role: 'assistant',
-        content: ps.content,
-        format: 'markdown',
-        streaming: true,
-      }]);
+      setMessages(prev => [...prev, { id: `stream-${handle}`, role: 'assistant', content: ps.content, format: 'markdown', streaming: true }]);
     } else if (msg.type === 'update_message') {
       const um = msg as Extract<BridgeIncoming, { type: 'update_message' }>;
       setMessages(prev => {
@@ -373,9 +467,7 @@ export default function SessionChat() {
     } else if (msg.type === 'delete_message') {
       setMessages(prev => {
         const idx = prev.findIndex(m => m.streaming);
-        if (idx >= 0) {
-          return prev.filter((_, i) => i !== idx);
-        }
+        if (idx >= 0) return prev.filter((_, i) => i !== idx);
         return prev;
       });
     }
@@ -384,6 +476,7 @@ export default function SessionChat() {
   const { status: bridgeStatus, sendMessage: bridgeSend, sendCardAction, sendPreviewAck } = useBridgeSocket({
     bridgeCfg,
     sessionKey,
+    projectName: projectName || '',
     onMessage: handleBridgeMessage,
   });
 
@@ -392,16 +485,20 @@ export default function SessionChat() {
     messagesEnd.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, typing]);
 
+  // Send message
   const handleSend = useCallback(() => {
     if (!input.trim() || bridgeStatus !== 'connected') return;
     const content = input.trim();
     setInput('');
     setSending(true);
-    setMessages(prev => [...prev, {
-      id: `user-${Date.now()}`,
-      role: 'user',
-      content,
-    }]);
+
+    const cmdToken = content.split(' ')[0];
+    const isKnownCmd = knownCommands.has(cmdToken);
+    if (isKnownCmd && !chatCommands.has(cmdToken)) {
+      pendingCmdRef.current = cmdToken;
+    } else {
+      setMessages(prev => [...prev, { id: `user-${Date.now()}`, role: 'user', content }]);
+    }
     bridgeSend(content);
     setTimeout(() => setSending(false), 300);
   }, [input, bridgeStatus, bridgeSend]);
@@ -411,48 +508,88 @@ export default function SessionChat() {
       e.preventDefault();
       handleSend();
     }
+    if (e.key === '/' && !input) {
+      e.preventDefault();
+      setCmdOpen(true);
+    }
   };
+
+  // Commands whose result should go to the message stream (they change state)
+  const chatCommands = new Set(['/new', '/stop', '/switch', '/delete-mode', '/upgrade']);
+  const knownCommands = new Set(slashCommands.map(c => c.cmd));
+
+  const handleCmdSelect = useCallback((cmd: SlashCommand) => {
+    setCmdOpen(false);
+    if (bridgeStatus !== 'connected') return;
+
+    if (chatCommands.has(cmd.cmd)) {
+      setMessages(prev => [...prev, { id: `user-${Date.now()}`, role: 'user', content: cmd.cmd }]);
+    } else {
+      pendingCmdRef.current = cmd.cmd;
+    }
+    bridgeSend(cmd.cmd);
+  }, [bridgeStatus, bridgeSend]);
 
   const handleCardAction = useCallback((value: string) => {
     if (bridgeStatus !== 'connected') return;
+    // If the command panel is showing, route the follow-up response back to it
+    if (cmdPanelRef.current) {
+      pendingCmdRef.current = cmdPanelRef.current;
+    }
     sendCardAction(value);
   }, [bridgeStatus, sendCardAction]);
 
-  if (loading && !session) {
-    return <div className="flex items-center justify-center h-64 text-gray-400 animate-pulse">Loading...</div>;
-  }
+  const handleNewSession = useCallback(() => {
+    if (bridgeStatus !== 'connected') return;
+    setUserPickedSession(false);
+    setMessages(prev => [...prev, { id: `user-${Date.now()}`, role: 'user', content: '/new' }]);
+    bridgeSend('/new');
+    setDrawerOpen(false);
+  }, [bridgeStatus, bridgeSend]);
 
   const canSend = bridgeStatus === 'connected';
+
+  if (loading && !currentSession && sessions.length === 0) {
+    return <div className="flex items-center justify-center h-64 text-gray-400 animate-pulse">Loading...</div>;
+  }
 
   return (
     <div className="flex flex-col h-[calc(100vh-8rem)] animate-fade-in">
       {/* Header */}
-      <div className="flex items-center justify-between pb-4 border-b border-gray-200 dark:border-gray-800">
+      <div className="flex items-center justify-between pb-3 border-b border-gray-200 dark:border-gray-800 shrink-0">
         <div className="flex items-center gap-3">
-          <Link to="/sessions" className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors">
+          <Link to="/chat" className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors">
             <ArrowLeft size={18} className="text-gray-400" />
           </Link>
           <div>
             <div className="flex items-center gap-2">
-              <h2 className="text-lg font-semibold text-gray-900 dark:text-white">{session?.name || id}</h2>
+              <h2 className="text-lg font-semibold text-gray-900 dark:text-white">{projectName}</h2>
               <StatusBadge status={bridgeStatus} />
             </div>
-            <div className="flex items-center gap-2 mt-0.5">
-              <Badge>{project}</Badge>
-              {session?.platform && <Badge variant="info">{session.platform}</Badge>}
-              <span className="text-xs text-gray-500">{session?.session_key}</span>
-            </div>
+            <button
+              type="button"
+              onClick={() => setDrawerOpen(true)}
+              className="flex items-center gap-1 text-xs text-gray-500 hover:text-accent transition-colors mt-0.5"
+            >
+              <span>{userPickedSession && currentSession
+                ? (currentSession.name || currentSession.id.slice(0, 8))
+                : t('chat.defaultSession')}</span>
+              <ChevronDown size={12} />
+            </button>
           </div>
         </div>
-        <Button size="sm" variant="ghost" onClick={fetchSession}>
-          <RotateCw size={14} /> {t('common.refresh')}
-        </Button>
       </div>
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto py-6 space-y-5">
         {messages.length === 0 && !loading && (
-          <p className="text-center text-sm text-gray-400 py-12">{t('sessions.noMessages')}</p>
+          <div className="flex flex-col items-center justify-center h-full text-center py-12">
+            <div className="w-16 h-16 rounded-2xl bg-accent/10 flex items-center justify-center mb-4">
+              <Bot size={32} className="text-accent" />
+            </div>
+            <p className="text-sm text-gray-500 dark:text-gray-400 mb-1">{t('chat.emptyHint')}</p>
+            <p className="text-xs text-gray-400 dark:text-gray-500">{t('chat.slashHint')}</p>
+          </div>
         )}
         {messages.map((msg) => {
           const isUser = msg.role === 'user';
@@ -512,42 +649,85 @@ export default function SessionChat() {
         <div ref={messagesEnd} />
       </div>
 
-      {/* Input */}
-      <div className="border-t border-gray-200 dark:border-gray-800 pt-4">
+      {/* Input area */}
+      <div className="border-t border-gray-200 dark:border-gray-800 pt-3 shrink-0">
         {canSend ? (
-          <div className="flex gap-3">
-            <input
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder={t('sessions.messageInput')}
-              className="flex-1 px-4 py-3 text-sm rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent transition-colors placeholder:text-gray-400"
-              disabled={sending}
-            />
+          <div className="relative flex items-end gap-2">
+            {/* Command palette trigger */}
+            <div className="relative">
+              <button
+                ref={cmdBtnRef}
+                type="button"
+                onClick={() => setCmdOpen(!cmdOpen)}
+                className={cn(
+                  'p-3 rounded-xl transition-all duration-200',
+                  cmdOpen
+                    ? 'bg-accent/15 text-accent ring-1 ring-accent/30'
+                    : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/[0.06]',
+                )}
+                title={t('chat.commands')}
+              >
+                <Slash size={18} />
+              </button>
+              <CommandPalette
+                open={cmdOpen}
+                onClose={() => setCmdOpen(false)}
+                onSelect={handleCmdSelect}
+                anchorRef={cmdBtnRef}
+              />
+            </div>
+
+            {/* Text input */}
+            <div className="flex-1 relative">
+              <input
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder={t('chat.inputPlaceholder')}
+                className="w-full px-4 py-3 text-sm rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent transition-colors placeholder:text-gray-400"
+                disabled={sending}
+              />
+            </div>
+
+            {/* Send button */}
             <button
+              type="button"
               onClick={handleSend}
               disabled={sending || !input.trim()}
-              className="px-4 py-3 rounded-xl bg-accent text-black hover:bg-accent-dim transition-colors disabled:opacity-50 flex items-center gap-2"
+              className="p-3 rounded-xl bg-accent text-black hover:bg-accent-dim transition-colors disabled:opacity-50 flex items-center"
             >
-              {sending ? (
-                <Loader2 size={18} className="animate-spin" />
-              ) : (
-                <Send size={18} />
-              )}
+              {sending ? <Loader2 size={18} className="animate-spin" /> : <Send size={18} />}
             </button>
           </div>
         ) : bridgeStatus === 'disconnected' || bridgeStatus === 'error' ? (
           <div className="flex items-center gap-2 px-4 py-3 text-sm text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 rounded-xl">
             <WifiOff size={14} />
-            <span>{t('sessions.bridgeNotAvailable', 'Bridge not available. Enable [bridge] in config.toml to chat from web.')}</span>
+            <span>{t('sessions.bridgeNotAvailable')}</span>
           </div>
         ) : (
           <div className="flex items-center gap-2 px-4 py-3 text-sm text-gray-400 bg-gray-50 dark:bg-gray-800/50 rounded-xl">
             <Loader2 size={14} className="animate-spin" />
-            <span>{t('sessions.bridgeConnecting', 'Connecting to bridge...')}</span>
+            <span>{t('sessions.bridgeConnecting')}</span>
           </div>
         )}
       </div>
+
+      {/* Session drawer */}
+      <SessionDrawer
+        open={drawerOpen}
+        onClose={() => setDrawerOpen(false)}
+        sessions={sessions}
+        currentSessionId={currentSession?.id || ''}
+        onSelect={switchToSession}
+        onNewSession={handleNewSession}
+      />
+
+      {/* Command result panel */}
+      <CommandResultPanel
+        result={cmdResult}
+        onClose={() => setCmdResult(null)}
+        onCardAction={handleCardAction}
+      />
     </div>
   );
 }

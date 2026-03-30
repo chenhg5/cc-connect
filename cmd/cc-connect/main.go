@@ -540,6 +540,41 @@ func main() {
 			return reloadConfig(configPath, capturedProjName, capturedEngine)
 		})
 
+		// Wire /web command callbacks
+		capturedDataDir := cfg.DataDir
+		engine.SetWebInstallFunc(func() (string, error) {
+			return core.WebInstall(capturedDataDir)
+		})
+		engine.SetWebUpgradeFunc(func() (string, string, error) {
+			return core.WebUpgrade(capturedDataDir)
+		})
+		engine.SetWebStatusFunc(func() (bool, string, string) {
+			installed := core.WebIsInstalled(capturedDataDir)
+			version := core.WebInstalledVersion(capturedDataDir)
+			url := ""
+			if cfg.Management.Enabled != nil && *cfg.Management.Enabled {
+				port := cfg.Management.Port
+				if port == 0 {
+					port = 9820
+				}
+				url = fmt.Sprintf("http://localhost:%d", port)
+			}
+			return installed, version, url
+		})
+		engine.SetWebEnableFunc(func() (int, string, bool, error) {
+			mgmtToken := core.GenerateToken(16)
+			bridgeToken := core.GenerateToken(16)
+			result, err := config.EnableWebAdmin(mgmtToken, bridgeToken)
+			if err != nil {
+				return 0, "", false, err
+			}
+			return result.ManagementPort, result.ManagementToken, !result.AlreadyEnabled, nil
+		})
+		engine.SetWebUninstallFunc(func() error {
+			dir := core.WebInstallDir(capturedDataDir)
+			return os.RemoveAll(dir)
+		})
+
 		engines = append(engines, engine)
 		effectiveWorkDirs = append(effectiveWorkDirs, effectiveWorkDir)
 	}
@@ -647,6 +682,119 @@ func main() {
 		mgmtSrv.SetHeartbeatScheduler(heartbeatSched)
 		if bridgeSrv != nil {
 			mgmtSrv.SetBridgeServer(bridgeSrv)
+		}
+		mgmtSrv.SetSetupFeishuSave(func(req core.FeishuSetupSaveRequest) error {
+			platType := req.PlatformType
+			if platType == "" {
+				platType = "feishu"
+			}
+			_, err := config.EnsureProjectWithFeishuPlatform(config.EnsureProjectWithFeishuOptions{
+				ProjectName:  req.ProjectName,
+				PlatformType: platType,
+				WorkDir:      req.WorkDir,
+				AgentType:    req.AgentType,
+			})
+			if err != nil {
+				return fmt.Errorf("ensure project: %w", err)
+			}
+			_, err = config.SaveFeishuPlatformCredentials(config.FeishuCredentialUpdateOptions{
+				ProjectName:       req.ProjectName,
+				PlatformType:      platType,
+				AppID:             req.AppID,
+				AppSecret:         req.AppSecret,
+				OwnerOpenID:       req.OwnerOpenID,
+				SetAllowFromEmpty: true,
+			})
+			return err
+		})
+		mgmtSrv.SetSetupWeixinSave(func(req core.WeixinSetupSaveRequest) error {
+			_, err := config.EnsureProjectWithWeixinPlatform(config.EnsureProjectWithWeixinOptions{
+				ProjectName: req.ProjectName,
+				WorkDir:     req.WorkDir,
+				AgentType:   req.AgentType,
+			})
+			if err != nil {
+				return fmt.Errorf("ensure project: %w", err)
+			}
+			_, err = config.SaveWeixinPlatformCredentials(config.WeixinCredentialUpdateOptions{
+				ProjectName:       req.ProjectName,
+				Token:             req.Token,
+				BaseURL:           req.BaseURL,
+				AccountID:         req.IlinkBotID,
+				ScannedUserID:     req.IlinkUserID,
+				SetAllowFromEmpty: true,
+			})
+			return err
+		})
+		mgmtSrv.SetAddPlatformToProject(func(projectName, platType string, opts map[string]any, workDir, agentType string) error {
+			if opts == nil {
+				opts = map[string]any{}
+			}
+			return config.AddPlatformToProject(projectName, config.PlatformConfig{Type: platType, Options: opts}, workDir, agentType)
+		})
+		mgmtSrv.SetRemoveProject(config.RemoveProject)
+		mgmtSrv.SetSaveProjectSettings(func(name string, u core.ProjectSettingsUpdate) error {
+			return config.SaveProjectSettings(name, config.ProjectSettingsUpdate{
+				Quiet:                u.Quiet,
+				Language:             u.Language,
+				AdminFrom:            u.AdminFrom,
+				DisabledCommands:     u.DisabledCommands,
+				WorkDir:              u.WorkDir,
+				Mode:                 u.Mode,
+				ShowContextIndicator: u.ShowContextIndicator,
+				PlatformAllowFrom:    u.PlatformAllowFrom,
+			})
+		})
+		mgmtSrv.SetGetProjectConfig(config.GetProjectConfigDetails)
+		mgmtSrv.SetConfigFilePath(configPath)
+		mgmtSrv.SetGetGlobalSettings(config.GetGlobalSettings)
+		mgmtSrv.SetSaveGlobalSettings(func(updates map[string]any) error {
+			u := config.GlobalSettingsUpdate{}
+			if v, ok := updates["language"].(string); ok {
+				u.Language = &v
+			}
+			if v, ok := updates["quiet"].(bool); ok {
+				u.Quiet = &v
+			}
+			if v, ok := updates["attachment_send"].(string); ok {
+				u.AttachmentSend = &v
+			}
+			if v, ok := updates["log_level"].(string); ok {
+				u.LogLevel = &v
+			}
+			if v, ok := updates["idle_timeout_mins"].(float64); ok {
+				iv := int(v)
+				u.IdleTimeoutMins = &iv
+			}
+			if v, ok := updates["thinking_max_len"].(float64); ok {
+				iv := int(v)
+				u.ThinkingMaxLen = &iv
+			}
+			if v, ok := updates["tool_max_len"].(float64); ok {
+				iv := int(v)
+				u.ToolMaxLen = &iv
+			}
+			if v, ok := updates["stream_preview_enabled"].(bool); ok {
+				u.StreamPreviewOn = &v
+			}
+			if v, ok := updates["stream_preview_interval_ms"].(float64); ok {
+				iv := int(v)
+				u.StreamPreviewIntMs = &iv
+			}
+			if v, ok := updates["rate_limit_max_messages"].(float64); ok {
+				iv := int(v)
+				u.RateLimitMax = &iv
+			}
+			if v, ok := updates["rate_limit_window_secs"].(float64); ok {
+				iv := int(v)
+				u.RateLimitWindow = &iv
+			}
+			return config.SaveGlobalSettings(u)
+		})
+		webDist := core.WebDistDir(cfg.DataDir)
+		if info, err := os.Stat(webDist); err == nil && info.IsDir() {
+			mgmtSrv.SetWebDistDir(webDist)
+			slog.Info("web admin serving static files", "dir", webDist)
 		}
 		mgmtSrv.Start()
 	}

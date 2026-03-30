@@ -214,6 +214,13 @@ type Engine struct {
 	platformLifecycleMu sync.Mutex
 	platformReady       map[Platform]bool
 	stopping            bool
+
+	// /web command callbacks
+	webInstallFunc  func() (version string, err error)
+	webUpgradeFunc  func() (oldVer, newVer string, err error)
+	webStatusFunc   func() (installed bool, version, url string)
+	webEnableFunc   func() (mgmtPort int, token string, needRestart bool, err error)
+	webUninstallFunc func() error
 }
 
 // workspaceInitFlow tracks a channel that is being onboarded to a workspace.
@@ -454,6 +461,12 @@ func (e *Engine) SetShowContextIndicator(show bool) {
 	e.showContextIndicator = show
 }
 
+func (e *Engine) SetWebInstallFunc(fn func() (string, error))              { e.webInstallFunc = fn }
+func (e *Engine) SetWebUpgradeFunc(fn func() (string, string, error))      { e.webUpgradeFunc = fn }
+func (e *Engine) SetWebStatusFunc(fn func() (bool, string, string))        { e.webStatusFunc = fn }
+func (e *Engine) SetWebEnableFunc(fn func() (int, string, bool, error))    { e.webEnableFunc = fn }
+func (e *Engine) SetWebUninstallFunc(fn func() error)                      { e.webUninstallFunc = fn }
+
 // SetInjectSender controls whether sender identity (platform and user ID) is
 // prepended to each message before forwarding it to the agent. When enabled,
 // the agent receives a preamble line like:
@@ -591,6 +604,17 @@ func resolveDisabledCmds(cmds []string) map[string]bool {
 	return m
 }
 
+// GetDisabledCommands returns the list of disabled command IDs for this project.
+func (e *Engine) GetDisabledCommands() []string {
+	e.userRolesMu.RLock()
+	defer e.userRolesMu.RUnlock()
+	out := make([]string, 0, len(e.disabledCmds))
+	for k := range e.disabledCmds {
+		out = append(out, k)
+	}
+	return out
+}
+
 // SetDisabledCommands sets the list of command IDs that are disabled for this project.
 func (e *Engine) SetDisabledCommands(cmds []string) {
 	e.userRolesMu.Lock()
@@ -630,6 +654,7 @@ var privilegedCommands = map[string]bool{
 	"dir":     true,
 	"restart": true,
 	"upgrade": true,
+	"web":     true,
 }
 
 // isAdmin checks whether the given user ID is authorized for privileged commands.
@@ -2747,6 +2772,7 @@ var builtinCommands = []struct {
 	{[]string{"tts"}, "tts"},
 	{[]string{"workspace", "ws"}, "workspace"},
 	{[]string{"whoami", "myid"}, "whoami"},
+	{[]string{"web"}, "web"},
 }
 
 // isBtwCommand checks if a trimmed message starts with a /btw command.
@@ -2941,6 +2967,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		return true
 	case "whoami":
 		e.cmdWhoami(p, msg)
+	case "web":
+		e.cmdWeb(p, msg, args)
 	default:
 		if custom, ok := e.commands.Resolve(cmd); ok {
 			if disabledCmds[strings.ToLower(custom.Name)] {
@@ -9623,4 +9651,104 @@ func parseSelfReportedCtx(s string) int {
 	}
 	v, _ := strconv.Atoi(m[start:end])
 	return v
+}
+
+func (e *Engine) cmdWeb(p Platform, msg *Message, args []string) {
+	subCmd := ""
+	if len(args) > 0 {
+		subCmd = matchSubCommand(strings.ToLower(args[0]),
+			[]string{"install", "upgrade", "status", "open", "uninstall"})
+	}
+
+	switch subCmd {
+	case "install":
+		e.cmdWebInstall(p, msg)
+	case "upgrade":
+		e.cmdWebUpgrade(p, msg)
+	case "uninstall":
+		e.cmdWebUninstall(p, msg)
+	case "open", "status":
+		e.cmdWebStatus(p, msg)
+	default:
+		e.cmdWebStatus(p, msg)
+	}
+}
+
+func (e *Engine) cmdWebInstall(p Platform, msg *Message) {
+	if e.webInstallFunc == nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebNotSupported))
+		return
+	}
+
+	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebInstalling))
+
+	version, err := e.webInstallFunc()
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
+		return
+	}
+
+	// Auto-enable bridge & management
+	if e.webEnableFunc != nil {
+		port, token, needRestart, err := e.webEnableFunc()
+		if err != nil {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgWebInstallDone), version)+"\n\n⚠️ "+err.Error())
+			return
+		}
+		url := fmt.Sprintf("http://localhost:%d", port)
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgWebInstallSuccess), version, url, token))
+		if needRestart {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebNeedRestart))
+		}
+		return
+	}
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgWebInstallDone), version))
+}
+
+func (e *Engine) cmdWebUpgrade(p Platform, msg *Message) {
+	if e.webUpgradeFunc == nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebNotSupported))
+		return
+	}
+
+	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebUpgrading))
+
+	oldVer, newVer, err := e.webUpgradeFunc()
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
+		return
+	}
+
+	if oldVer == newVer {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgWebAlreadyLatest), newVer))
+	} else {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgWebUpgradeSuccess), oldVer, newVer))
+	}
+}
+
+func (e *Engine) cmdWebStatus(p Platform, msg *Message) {
+	if e.webStatusFunc == nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebNotSupported))
+		return
+	}
+
+	installed, version, url := e.webStatusFunc()
+	if !installed {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebNotInstalled))
+		return
+	}
+
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgWebStatus), version, url))
+}
+
+func (e *Engine) cmdWebUninstall(p Platform, msg *Message) {
+	if e.webUninstallFunc == nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebNotSupported))
+		return
+	}
+	if err := e.webUninstallFunc(); err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
+		return
+	}
+	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebUninstalled))
 }
