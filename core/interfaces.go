@@ -357,14 +357,6 @@ type ContextCompressor interface {
 	CompressCommand() string
 }
 
-// ContextClearer is an optional interface for agents that support clearing the
-// current conversation context within an existing running session. ClearCommand
-// returns the native slash command to forward to the agent process, or ""
-// if native clear is not supported.
-type ContextClearer interface {
-	ClearCommand() string
-}
-
 // CommandProvider is an optional interface for agents that expose custom slash
 // commands via local files (e.g. .claude/commands/*.md). The engine scans the
 // returned directories for *.md files and registers them as slash commands.

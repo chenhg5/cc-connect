@@ -253,9 +253,6 @@ const (
 	MsgCompressing          MsgKey = "compressing"
 	MsgCompressNoSession    MsgKey = "compress_no_session"
 	MsgCompressDone         MsgKey = "compress_done"
-	MsgClearNativeNoSession MsgKey = "clear_native_no_session"
-	MsgClearNativeInFlight  MsgKey = "clear_native_inflight"
-	MsgClearNativeDone      MsgKey = "clear_native_done"
 
 	MsgMemoryNotSupported MsgKey = "memory_not_supported"
 	MsgMemoryShowProject  MsgKey = "memory_show_project"
@@ -388,11 +385,10 @@ const (
 	MsgAliasNotFound   MsgKey = "alias_not_found"
 	MsgAliasUsage      MsgKey = "alias_usage"
 
-	MsgNewSessionCreated      MsgKey = "new_session_created"
-	MsgNewSessionCreatedName  MsgKey = "new_session_created_name"
-	MsgClearUsage             MsgKey = "clear_usage"
-	MsgClearDone              MsgKey = "clear_done"
-	MsgClearNativeUnsupported MsgKey = "clear_native_unsupported"
+	MsgNewSessionCreated     MsgKey = "new_session_created"
+	MsgNewSessionCreatedName MsgKey = "new_session_created_name"
+	MsgClearUsage            MsgKey = "clear_usage"
+	MsgClearDone             MsgKey = "clear_done"
 
 	MsgDeleteUsage              MsgKey = "delete_usage"
 	MsgDeleteSuccess            MsgKey = "delete_success"
@@ -1967,28 +1963,6 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "✅ コンテキスト圧縮完了。",
 		LangSpanish:            "✅ Contexto comprimido.",
 	},
-	MsgClearNativeNoSession: {
-		LangEnglish:            "No running agent session to clear.",
-		LangChinese:            "当前没有可清空的运行中 Agent 会话。",
-		LangTraditionalChinese: "當前沒有可清空的執行中 Agent 會話。",
-		LangJapanese:           "クリアできる実行中のエージェントセッションがありません。",
-		LangSpanish:            "No hay una sesión activa del agente para limpiar.",
-	},
-	MsgClearNativeInFlight: {
-		LangEnglish:            "🧹 Clearing context in the current agent session...",
-		LangChinese:            "🧹 正在清空当前 Agent 会话上下文...",
-		LangTraditionalChinese: "🧹 正在清空當前 Agent 會話上下文...",
-		LangJapanese:           "🧹 現在のエージェントセッションのコンテキストをクリアしています...",
-		LangSpanish:            "🧹 Limpiando el contexto de la sesión actual del agente...",
-	},
-	MsgClearNativeDone: {
-		LangEnglish:            "✅ Current agent session context cleared.",
-		LangChinese:            "✅ 当前 Agent 会话上下文已清空。",
-		LangTraditionalChinese: "✅ 當前 Agent 會話上下文已清空。",
-		LangJapanese:           "✅ 現在のエージェントセッションのコンテキストをクリアしました。",
-		LangSpanish:            "✅ Se limpió el contexto de la sesión actual del agente.",
-	},
-
 	// Inline strings for engine.go commands
 	MsgStatusMode: {
 		LangEnglish:            "Mode: %s\n",
@@ -2686,11 +2660,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "✅ Nueva sesión creada: **%s**",
 	},
 	MsgClearUsage: {
-		LangEnglish:            "Usage: `/clear`\n       `/clear reset`\n       `/clear native`",
-		LangChinese:            "用法：`/clear`\n      `/clear reset`\n      `/clear native`",
-		LangTraditionalChinese: "用法：`/clear`\n      `/clear reset`\n      `/clear native`",
-		LangJapanese:           "使い方：`/clear`\n       `/clear reset`\n       `/clear native`",
-		LangSpanish:            "Uso: `/clear`\n      `/clear reset`\n      `/clear native`",
+		LangEnglish:            "Usage: `/clear`",
+		LangChinese:            "用法：`/clear`",
+		LangTraditionalChinese: "用法：`/clear`",
+		LangJapanese:           "使い方：`/clear`",
+		LangSpanish:            "Uso: `/clear`",
 	},
 	MsgClearDone: {
 		LangEnglish:            "✅ Current session context cleared. The next message will start a fresh agent session.",
@@ -2698,13 +2672,6 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "✅ 當前會話上下文已清空。下一則訊息將啟動新的 Agent 會話。",
 		LangJapanese:           "✅ 現在のセッションのコンテキストをクリアしました。次のメッセージで新しいエージェントセッションを開始します。",
 		LangSpanish:            "✅ El contexto de la sesión actual se limpió. El próximo mensaje iniciará una nueva sesión del agente.",
-	},
-	MsgClearNativeUnsupported: {
-		LangEnglish:            "This agent does not support native clear yet. Use `/clear` or `/clear reset` instead.",
-		LangChinese:            "当前 Agent 暂不支持 native clear。请改用 `/clear` 或 `/clear reset`。",
-		LangTraditionalChinese: "當前 Agent 暫不支援 native clear。請改用 `/clear` 或 `/clear reset`。",
-		LangJapanese:           "このエージェントは native clear をまだサポートしていません。代わりに `/clear` または `/clear reset` を使用してください。",
-		LangSpanish:            "Este agente aún no soporta native clear. Usa `/clear` o `/clear reset` en su lugar.",
 	},
 	MsgDeleteUsage: {
 		LangEnglish:            "Usage: `/delete <number>` or `/delete 1,2,3` or `/delete 3-7` or `/delete 1,3-5,8`.\nUse `/list` to see session numbers.",
