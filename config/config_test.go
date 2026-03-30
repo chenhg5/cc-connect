@@ -458,8 +458,8 @@ func TestSaveFeishuPlatformCredentials_SelectByIndexAndOverrideType(t *testing.T
 	if result.PlatformType != "feishu" {
 		t.Fatalf("result.PlatformType = %q, want %q", result.PlatformType, "feishu")
 	}
-	if result.AllowFrom != "ou_existing_owner" {
-		t.Fatalf("result.AllowFrom = %q, want %q", result.AllowFrom, "ou_existing_owner")
+	if result.AllowFrom != "ou_existing_owner,ou_should_not_override" {
+		t.Fatalf("result.AllowFrom = %q, want %q", result.AllowFrom, "ou_existing_owner,ou_should_not_override")
 	}
 
 	cfg := readConfigFixture(t, configPath)
@@ -473,8 +473,63 @@ func TestSaveFeishuPlatformCredentials_SelectByIndexAndOverrideType(t *testing.T
 	if got := stringMapValue(platform.Options, "app_secret"); got != "sec_second_secret" {
 		t.Fatalf("app_secret = %q, want %q", got, "sec_second_secret")
 	}
-	if got := stringMapValue(platform.Options, "allow_from"); got != "ou_existing_owner" {
-		t.Fatalf("allow_from = %q, want %q", got, "ou_existing_owner")
+	if got := stringMapValue(platform.Options, "allow_from"); got != "ou_existing_owner,ou_should_not_override" {
+		t.Fatalf("allow_from = %q, want %q", got, "ou_existing_owner,ou_should_not_override")
+	}
+}
+
+func TestSaveFeishuPlatformCredentials_AppendsOwnerToAllowFrom(t *testing.T) {
+	configPath := writeConfigFixture(t, feishuConfigFixture)
+	patchConfigPath(t, configPath)
+
+	result, err := SaveFeishuPlatformCredentials(FeishuCredentialUpdateOptions{
+		ProjectName:       "alpha",
+		PlatformIndex:     2,
+		PlatformType:      "feishu",
+		AppID:             "cli_second_app",
+		AppSecret:         "sec_second_secret",
+		OwnerOpenID:       "ou_new_owner",
+		SetAllowFromEmpty: true,
+	})
+	if err != nil {
+		t.Fatalf("SaveFeishuPlatformCredentials returned error: %v", err)
+	}
+
+	if result.AllowFrom != "ou_existing_owner,ou_new_owner" {
+		t.Fatalf("result.AllowFrom = %q, want %q", result.AllowFrom, "ou_existing_owner,ou_new_owner")
+	}
+
+	cfg := readConfigFixture(t, configPath)
+	platform := cfg.Projects[0].Platforms[2]
+	if got := stringMapValue(platform.Options, "allow_from"); got != "ou_existing_owner,ou_new_owner" {
+		t.Fatalf("allow_from = %q, want %q", got, "ou_existing_owner,ou_new_owner")
+	}
+}
+
+func TestSaveFeishuPlatformCredentials_LeavesWildcardAllowFromUnchanged(t *testing.T) {
+	configPath := writeConfigFixture(t, strings.Replace(feishuConfigFixture, `allow_from = "ou_existing_owner"`, `allow_from = "*"`, 1))
+	patchConfigPath(t, configPath)
+
+	result, err := SaveFeishuPlatformCredentials(FeishuCredentialUpdateOptions{
+		ProjectName:       "alpha",
+		PlatformIndex:     2,
+		OwnerOpenID:       "ou_new_owner",
+		AppID:             "cli_second_app",
+		AppSecret:         "sec_second_secret",
+		SetAllowFromEmpty: true,
+	})
+	if err != nil {
+		t.Fatalf("SaveFeishuPlatformCredentials returned error: %v", err)
+	}
+
+	if result.AllowFrom != "*" {
+		t.Fatalf("result.AllowFrom = %q, want %q", result.AllowFrom, "*")
+	}
+
+	cfg := readConfigFixture(t, configPath)
+	platform := cfg.Projects[0].Platforms[2]
+	if got := stringMapValue(platform.Options, "allow_from"); got != "*" {
+		t.Fatalf("allow_from = %q, want %q", got, "*")
 	}
 }
 
@@ -899,10 +954,10 @@ func TestValidateUsersConfig(t *testing.T) {
 			name: "nil users is valid",
 			cfg: Config{
 				Projects: []ProjectConfig{{
-					Name: "p1",
-					Agent: AgentConfig{Type: "codex"},
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
-					Users: nil,
+					Users:     nil,
 				}},
 			},
 			wantErr: "",
@@ -911,10 +966,10 @@ func TestValidateUsersConfig(t *testing.T) {
 			name: "empty roles",
 			cfg: Config{
 				Projects: []ProjectConfig{{
-					Name: "p1",
-					Agent: AgentConfig{Type: "codex"},
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
-					Users: &UsersConfig{Roles: map[string]RoleConfig{}},
+					Users:     &UsersConfig{Roles: map[string]RoleConfig{}},
 				}},
 			},
 			wantErr: `no roles defined`,
@@ -923,8 +978,8 @@ func TestValidateUsersConfig(t *testing.T) {
 			name: "empty user_ids in role",
 			cfg: Config{
 				Projects: []ProjectConfig{{
-					Name: "p1",
-					Agent: AgentConfig{Type: "codex"},
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
 					Users: &UsersConfig{
 						Roles: map[string]RoleConfig{
@@ -939,13 +994,13 @@ func TestValidateUsersConfig(t *testing.T) {
 			name: "duplicate user in different roles",
 			cfg: Config{
 				Projects: []ProjectConfig{{
-					Name: "p1",
-					Agent: AgentConfig{Type: "codex"},
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
 					Users: &UsersConfig{
 						Roles: map[string]RoleConfig{
-							"admin":   {UserIDs: []string{"user1"}},
-							"member":  {UserIDs: []string{"user1"}},
+							"admin":  {UserIDs: []string{"user1"}},
+							"member": {UserIDs: []string{"user1"}},
 						},
 					},
 				}},
@@ -956,8 +1011,8 @@ func TestValidateUsersConfig(t *testing.T) {
 			name: "wildcard in multiple roles",
 			cfg: Config{
 				Projects: []ProjectConfig{{
-					Name: "p1",
-					Agent: AgentConfig{Type: "codex"},
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
 					Users: &UsersConfig{
 						Roles: map[string]RoleConfig{
@@ -973,8 +1028,8 @@ func TestValidateUsersConfig(t *testing.T) {
 			name: "default_role not matching any role",
 			cfg: Config{
 				Projects: []ProjectConfig{{
-					Name: "p1",
-					Agent: AgentConfig{Type: "codex"},
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
 					Users: &UsersConfig{
 						DefaultRole: "superadmin",
@@ -990,8 +1045,8 @@ func TestValidateUsersConfig(t *testing.T) {
 			name: "valid users config",
 			cfg: Config{
 				Projects: []ProjectConfig{{
-					Name: "p1",
-					Agent: AgentConfig{Type: "codex"},
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
 					Users: &UsersConfig{
 						DefaultRole: "member",
@@ -1008,8 +1063,8 @@ func TestValidateUsersConfig(t *testing.T) {
 			name: "valid with wildcard in one role only",
 			cfg: Config{
 				Projects: []ProjectConfig{{
-					Name: "p1",
-					Agent: AgentConfig{Type: "codex"},
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
 					Users: &UsersConfig{
 						Roles: map[string]RoleConfig{
@@ -1173,7 +1228,7 @@ func TestCloneAgentConfig(t *testing.T) {
 			t.Fatalf("Providers length = %d, want 1", len(got.Providers))
 		}
 		p := got.Providers[0]
-		if p.Name != "openai" || p.APIKey != "sk-test" || p.BaseURL != "https://api.openai.com" || p.Model != "gpt-4"  {
+		if p.Name != "openai" || p.APIKey != "sk-test" || p.BaseURL != "https://api.openai.com" || p.Model != "gpt-4" {
 			t.Errorf("Provider fields not cloned correctly: %+v", p)
 		}
 		if p.Env["DEBUG"] != "1" {
@@ -1274,6 +1329,54 @@ func TestSaveWeixinPlatformCredentials_UpdateToken(t *testing.T) {
 	bu, _ := cfg.Projects[0].Platforms[0].Options["base_url"].(string)
 	if bu != "https://ilinkai.weixin.qq.com" {
 		t.Fatalf("base_url = %q", bu)
+	}
+}
+
+func TestSaveWeixinPlatformCredentials_AppendsScannedUserToAllowFrom(t *testing.T) {
+	configPath := writeConfigFixture(t, strings.Replace(weixinConfigFixture, `base_url = "https://ilink.example"`, "base_url = \"https://ilink.example\"\nallow_from = \"wx_user_1\"", 1))
+	patchConfigPath(t, configPath)
+
+	result, err := SaveWeixinPlatformCredentials(WeixinCredentialUpdateOptions{
+		ProjectName:       "alpha",
+		Token:             "new_weixin_token",
+		ScannedUserID:     "wx_user_2",
+		SetAllowFromEmpty: true,
+	})
+	if err != nil {
+		t.Fatalf("SaveWeixinPlatformCredentials returned error: %v", err)
+	}
+
+	if result.AllowFrom != "wx_user_1,wx_user_2" {
+		t.Fatalf("result.AllowFrom = %q, want %q", result.AllowFrom, "wx_user_1,wx_user_2")
+	}
+
+	cfg := readConfigFixture(t, configPath)
+	if got := stringMapValue(cfg.Projects[0].Platforms[0].Options, "allow_from"); got != "wx_user_1,wx_user_2" {
+		t.Fatalf("allow_from = %q, want %q", got, "wx_user_1,wx_user_2")
+	}
+}
+
+func TestSaveWeixinPlatformCredentials_LeavesWildcardAllowFromUnchanged(t *testing.T) {
+	configPath := writeConfigFixture(t, strings.Replace(weixinConfigFixture, `base_url = "https://ilink.example"`, "base_url = \"https://ilink.example\"\nallow_from = \"*\"", 1))
+	patchConfigPath(t, configPath)
+
+	result, err := SaveWeixinPlatformCredentials(WeixinCredentialUpdateOptions{
+		ProjectName:       "alpha",
+		Token:             "new_weixin_token",
+		ScannedUserID:     "wx_user_2",
+		SetAllowFromEmpty: true,
+	})
+	if err != nil {
+		t.Fatalf("SaveWeixinPlatformCredentials returned error: %v", err)
+	}
+
+	if result.AllowFrom != "*" {
+		t.Fatalf("result.AllowFrom = %q, want %q", result.AllowFrom, "*")
+	}
+
+	cfg := readConfigFixture(t, configPath)
+	if got := stringMapValue(cfg.Projects[0].Platforms[0].Options, "allow_from"); got != "*" {
+		t.Fatalf("allow_from = %q, want %q", got, "*")
 	}
 }
 
