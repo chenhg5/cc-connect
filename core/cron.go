@@ -388,7 +388,8 @@ type CronScheduler struct {
 	engines       map[string]*Engine // project name → engine
 	mu            sync.RWMutex
 	entries       map[string]cron.EntryID // job ID → cron entry
-	defaultSilent bool                    // global default for suppressing cron start notifications
+	defaultSilent      bool   // global default for suppressing cron start notifications
+	defaultSessionMode string // global default session mode; "" = reuse, "new_per_run" = fresh session each run
 }
 
 func NewCronScheduler(store *CronStore) *CronScheduler {
@@ -410,12 +411,25 @@ func (cs *CronScheduler) SetDefaultSilent(silent bool) {
 	cs.defaultSilent = silent
 }
 
+func (cs *CronScheduler) SetDefaultSessionMode(mode string) {
+	cs.defaultSessionMode = NormalizeCronSessionMode(mode)
+}
+
 // IsSilent returns whether the cron job should suppress the start notification.
 func (cs *CronScheduler) IsSilent(job *CronJob) bool {
 	if job.Silent != nil {
 		return *job.Silent
 	}
 	return cs.defaultSilent
+}
+
+// UsesNewSession returns whether the job should create a fresh session per run,
+// considering both the job-level setting and the global default.
+func (cs *CronScheduler) UsesNewSession(job *CronJob) bool {
+	if job.SessionMode != "" {
+		return job.UsesNewSessionPerRun()
+	}
+	return cs.defaultSessionMode == "new_per_run"
 }
 
 func (cs *CronScheduler) Start() error {
