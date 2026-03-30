@@ -462,6 +462,41 @@ func TestCronScheduler_AddJob_NormalizesSessionMode(t *testing.T) {
 	}
 }
 
+func TestCronScheduler_UsesNewSession_GlobalDefault(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := NewCronScheduler(store)
+
+	// Test 1: global default is "new_per_run", job has no session_mode set
+	cs.SetDefaultSessionMode("new_per_run")
+	job := &CronJob{SessionMode: ""}
+	if !cs.UsesNewSession(job) {
+		t.Error("global new_per_run + job empty: expected UsesNewSession=true")
+	}
+
+	// Test 2: per-job "reuse" overrides global "new_per_run"
+	job.SessionMode = "reuse"
+	if cs.UsesNewSession(job) {
+		t.Error("global new_per_run + job reuse: expected UsesNewSession=false")
+	}
+
+	// Test 3: per-job "new_per_run" overrides global default (reuse)
+	cs.SetDefaultSessionMode("")
+	job.SessionMode = "new_per_run"
+	if !cs.UsesNewSession(job) {
+		t.Error("global reuse + job new_per_run: expected UsesNewSession=true")
+	}
+
+	// Test 4: both global and job are default (reuse)
+	job.SessionMode = ""
+	if cs.UsesNewSession(job) {
+		t.Error("global reuse + job empty: expected UsesNewSession=false")
+	}
+}
+
 func TestCronStore_MarkRun(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewCronStore(dir)
