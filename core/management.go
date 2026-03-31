@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
@@ -1120,7 +1121,9 @@ func (m *ManagementServer) handleProjectModels(w http.ResponseWriter, r *http.Re
 		mgmtError(w, http.StatusBadRequest, "agent does not support model switching")
 		return
 	}
-	models := ms.AvailableModels(r.Context())
+	fetchCtx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	models := ms.AvailableModels(fetchCtx)
 	names := make([]string, len(models))
 	for i, m := range models {
 		names[i] = m.Name
