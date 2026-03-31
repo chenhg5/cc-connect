@@ -129,7 +129,7 @@ jobs:
           cache: true
 
       - name: Run smoke tests
-        run: go test -v -tags=smoke ./tests/e2e/...
+        run: go test -v -tags=smoke,no_web ./tests/e2e/...
 
   regression-test:
     runs-on: ubuntu-latest
@@ -145,7 +145,7 @@ jobs:
           cache: true
 
       - name: Run regression tests
-        run: go test -v -tags=regression ./tests/e2e/...
+        run: go test -v -tags=regression,no_web ./tests/e2e/...
 
   performance-test:
     runs-on: ubuntu-latest
@@ -161,4 +161,4 @@ jobs:
           cache: true
 
       - name: Run performance benchmarks
-        run: go test -bench=. -benchmem -tags=performance ./tests/performance/...
+        run: go test -bench=. -benchmem -tags=performance,no_web ./tests/performance/...
