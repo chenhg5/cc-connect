@@ -1,5 +1,50 @@
 # Changelog
 
+## v1.2.2-beta.5 (2026-03-31)
+
+Beta release with embedded web admin, Discord proxy support, multimodal fixes, and major platform improvements.
+
+### New Features
+- **Embedded Web Admin**: Web frontend is now compiled into the binary via `go:embed` — no separate `npm install` needed. Use `/web setup` to configure, or build with `no_web` tag to exclude. Binary size increases ~1MB (#356)
+- **Web Admin Dashboard**: Full-featured management UI with project CRUD, session management, cron job editor, global settings, chat interface with bridge WebSocket, slash commands, and i18n (en/zh/zh-TW/ja/es) (#316)
+- **Discord Proxy Support**: Discord platform now supports `proxy`, `proxy_username`, `proxy_password` options for HTTP API and WebSocket Gateway connections
+- **Feishu Progress Styles**: Configurable progress display styles (compact/card) to reduce message spam
+- **Claude Code Auto-Permission Mode**: New `auto` permission mode for Claude Code agent (#329)
+- **WeCom File Receiving**: WeCom HTTP callback now supports receiving files and forwarding them to the agent (#330)
+- **Outgoing Rate Limiting**: Per-platform outgoing message rate limiting
+- **Telegram Forum Topics**: Migrated to `go-telegram/bot` library with forum topic support (#321)
+- **Global Settings UI**: Expose global configurations (language, quiet, display, stream preview, rate limit, log) in the web admin
+
+### Bug Fixes
+- **Gemini Image Handling**: Save attachments to workspace directory instead of `/tmp` so Gemini CLI tools can access them; use prompt-based file references instead of unsupported `--image` flag
+- **Security**: Mask bridge token in `/api/v1/status` endpoint; add path traversal protection for static file serving
+- **Codex**: Fix multiline prompt preservation on resume (#341); force kill session process group on stop (#340)
+- **Session Recycling**: Wait for old session to close before creating new one (#352)
+- **Discord**: Harden session routing and remove implicit continue bridge (#322); execute slash commands when defer fails (#300)
+- **Slack**: Pass file uploads to agent (#296)
+- **Telegram**: UTF-8-safe command menu descriptions (#301)
+- **WeCom**: Strip @bot mentions from inbound text (#303)
+- **Daemon**: macOS launchd do not respawn on clean exit (#304)
+- **Core**: Route workspace model changes through session context (#339); outgoing rate limit refinements and i18n tightening
+- **Config**: `formatTOML` no longer strips user-set zero values (e.g. `quiet = false`)
+
+### Improvements
+- **CI**: Add Node.js setup for web frontend build in CI pipeline; use `no_web` tag for e2e/smoke tests
+- **Tests**: Expanded coverage across agents, config, and core packages
+- **Selective Compilation**: Added `no_web` build tag to exclude web assets from binary
+
+### Contributors
+
+Special thanks to all contributors who made this release possible:
+
+- **cg33** — Embedded web admin, Discord proxy, Gemini fix, security hardening
+- **xxb** — Discord session routing fix, codex process kill, workspace reconnect (#322, #340, #315)
+- **dev-null-sec** — Codex multiline prompt fix (#341)
+- **xukp20** — Workspace model routing (#339)
+- **zhengbuqian** — Telegram go-telegram/bot migration and forum topics (#321)
+- **huangdijia** — Claude Code auto permission mode (#329)
+- **buddhism5080** — Discord file sending (#307)
+
 ## v1.2.2-beta.4 (2026-03-22)
 
 Beta release with Weixin (ilink) personal chat support, session/continue improvements, and platform fixes.
