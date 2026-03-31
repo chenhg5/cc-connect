@@ -1462,16 +1462,17 @@ func pickAgentTemplateForNewProject(cfg *Config, opts EnsureProjectWithFeishuOpt
 			}
 		}
 	}
+	if agentType := strings.TrimSpace(opts.AgentType); agentType != "" {
+		return AgentConfig{
+			Type:    agentType,
+			Options: map[string]any{},
+		}
+	}
 	if len(cfg.Projects) > 0 {
 		return cloneAgentConfig(cfg.Projects[0].Agent)
 	}
-
-	agentType := strings.TrimSpace(opts.AgentType)
-	if agentType == "" {
-		agentType = "codex"
-	}
 	return AgentConfig{
-		Type:    agentType,
+		Type:    "codex",
 		Options: map[string]any{},
 	}
 }

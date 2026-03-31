@@ -1131,6 +1131,15 @@ func TestPickAgentTemplateForNewProject(t *testing.T) {
 			t.Errorf("Type = %q, want gemini", got.Type)
 		}
 	})
+
+	t.Run("explicit agent type overrides clone from first project", func(t *testing.T) {
+		cfg := &Config{Projects: []ProjectConfig{baseProj}}
+		opts := EnsureProjectWithFeishuOptions{AgentType: "cursor"}
+		got := pickAgentTemplateForNewProject(cfg, opts)
+		if got.Type != "cursor" {
+			t.Errorf("Type = %q, want cursor (explicit AgentType should take priority over cloning first project)", got.Type)
+		}
+	})
 }
 
 // --- cloneAgentConfig tests ---
