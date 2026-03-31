@@ -248,10 +248,23 @@ Switch where the next agent session starts, directly from chat.
 
 ### Behavior Notes
 
+- `/dir` is a privileged command. You must set `admin_from` under `[[projects]]` in `config.toml` before it can be used.
+- Do not put `admin_from` under `[projects.platforms.options]`, or it will be ignored.
+- Use `/whoami` or `/status` to get your current `User ID`, then place that ID into `admin_from`.
+- If you are the only user of this bot, `admin_from = "*"` also works, but it grants every allowed user privileged command access.
+- Restart `cc-connect` after updating `config.toml`.
 - Directory changes apply to the next session in the current project.
 - Relative paths are resolved from the current agent work directory.
 - Directory history is project-scoped and can be switched by index.
 - `/cd` is kept for compatibility, but `/dir` is the primary command.
+
+Example config:
+
+```toml
+[[projects]]
+name = "my-project"
+admin_from = "ou_xxx"
+```
 
 Examples:
 
