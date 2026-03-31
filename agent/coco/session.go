@@ -129,25 +129,26 @@ func (qs *cocoSession) readLoop(r io.Reader) {
 	defer qs.wg.Done()
 	scanner := bufio.NewScanner(r)
 
-	// 这里是一个极为简化的 fallback parser，如果 coco 没有官方 JSON 输出
-	// 您可能需要自己使用正则清理 ANSI 控制符然后 emit Text
+	finalText := ""
 	for scanner.Scan() {
 		line := scanner.Text()
 		line = cleanAnsi(line)
 		if line == "" {
 			continue
 		}
+		
+		finalText += line + "\n"
 
 		select {
-		case qs.events <- core.Event{Type: core.EventMessage, Data: line + "\n"}:
+		case qs.events <- core.Event{Type: core.EventText, Content: line + "\n"}:
 		case <-qs.ctx.Done():
 			return
 		}
 	}
 	
-	// 最后发送一个完成事件（这里是伪逻辑，您需要根据 coco 真实的结束标志来判断什么时候一个回合结束）
+	// 最后发送一个完成事件
 	select {
-	case qs.events <- core.Event{Type: core.EventTurnComplete}:
+	case qs.events <- core.Event{Type: core.EventResult, Content: finalText, SessionID: qs.CurrentSessionID(), Done: true}:
 	default:
 	}
 }
