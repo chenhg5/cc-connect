@@ -1383,3 +1383,97 @@ func TestAddPlatformToProject_NewProjectClonesAgentWhenAgentTypeEmpty(t *testing
 		t.Fatalf("cloned work_dir = %q, want /tmp/alpha", stringMapValue(proj.Agent.Options, "work_dir"))
 	}
 }
+
+func TestFormatTOML(t *testing.T) {
+	tests := []struct {
+		name, input, want string
+	}{
+		{
+			name:  "collapse multiple blank lines",
+			input: "a = 1\n\n\n\nb = 2\n",
+			want:  "a = 1\n\nb = 2\n",
+		},
+		{
+			name:  "blank line before section header",
+			input: "a = 1\n[section]\nb = 2\n",
+			want:  "a = 1\n\n[section]\nb = 2\n",
+		},
+		{
+			name:  "strip trailing whitespace",
+			input: "a = 1   \nb = 2\t\n",
+			want:  "a = 1\nb = 2\n",
+		},
+		{
+			name:  "remove empty section",
+			input: "[empty]\n\n[real]\nk = 1\n",
+			want:  "[real]\nk = 1\n",
+		},
+		{
+			name:  "already formatted",
+			input: "[section]\na = 1\n",
+			want:  "[section]\na = 1\n",
+		},
+		{
+			name:  "preserves comments",
+			input: "# comment\na = 1\n\n[section]\n# inline\nb = 2\n",
+			want:  "# comment\na = 1\n\n[section]\n# inline\nb = 2\n",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := formatTOML(tc.input)
+			if got != tc.want {
+				t.Errorf("formatTOML:\n  input: %q\n  got:   %q\n  want:  %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFormatConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	messy := "language = \"en\"   \n\n\n\n[[projects]]\nname = \"test\"\n\n\n[projects.agent]\ntype = \"codex\"\n\n[projects.agent.options]\n\n[[projects.platforms]]\ntype = \"telegram\"\n\n[projects.platforms.options]\ntoken = \"abc\"\n"
+	os.WriteFile(path, []byte(messy), 0o644)
+
+	if err := FormatConfigFile(path); err != nil {
+		t.Fatalf("FormatConfigFile: %v", err)
+	}
+
+	data, _ := os.ReadFile(path)
+	content := string(data)
+
+	if strings.Contains(content, "   \n") {
+		t.Error("trailing whitespace not stripped")
+	}
+	if strings.Contains(content, "\n\n\n") {
+		t.Error("consecutive blank lines not collapsed")
+	}
+
+	cfg := &Config{}
+	if _, err := toml.Decode(content, cfg); err != nil {
+		t.Fatalf("formatted config is invalid TOML: %v", err)
+	}
+	if len(cfg.Projects) != 1 || cfg.Projects[0].Name != "test" {
+		t.Error("formatting corrupted config content")
+	}
+
+	t.Run("no-op when already formatted", func(t *testing.T) {
+		before, _ := os.ReadFile(path)
+		if err := FormatConfigFile(path); err != nil {
+			t.Fatalf("second FormatConfigFile: %v", err)
+		}
+		after, _ := os.ReadFile(path)
+		if string(before) != string(after) {
+			t.Error("idempotent format produced different output")
+		}
+	})
+
+	t.Run("rejects invalid TOML", func(t *testing.T) {
+		badPath := filepath.Join(dir, "bad.toml")
+		os.WriteFile(badPath, []byte("[invalid\n"), 0o644)
+		if err := FormatConfigFile(badPath); err == nil {
+			t.Error("expected error for invalid TOML")
+		}
+	})
+}

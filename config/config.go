@@ -587,14 +587,30 @@ func formatTOML(raw string) string {
 		}
 	}
 
-	// Pass 2: assemble output with blank lines before section headers.
+	// Pass 2: strip trailing whitespace from each line, skip empty sections,
+	// ensure a blank line before section headers, and collapse consecutive
+	// blank lines into one.
 	var out []string
+	prevBlank := false
 	for i, line := range lines {
 		if skipSection[i] {
 			continue
 		}
+		line = strings.TrimRight(line, " \t")
 		trimmed := strings.TrimSpace(line)
-		if len(trimmed) > 0 && trimmed[0] == '[' {
+		isBlank := trimmed == ""
+
+		if isBlank {
+			if prevBlank {
+				continue
+			}
+			prevBlank = true
+			out = append(out, "")
+			continue
+		}
+		prevBlank = false
+
+		if trimmed[0] == '[' {
 			if len(out) > 0 && strings.TrimSpace(out[len(out)-1]) != "" {
 				out = append(out, "")
 			}
@@ -602,7 +618,10 @@ func formatTOML(raw string) string {
 		out = append(out, line)
 	}
 
-	// Trim trailing blank lines, then ensure single trailing newline.
+	// Trim leading and trailing blank lines, then ensure single trailing newline.
+	for len(out) > 0 && strings.TrimSpace(out[0]) == "" {
+		out = out[1:]
+	}
 	for len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "" {
 		out = out[:len(out)-1]
 	}
@@ -1954,6 +1973,7 @@ func AddPlatformToProject(projectName string, platform PlatformConfig, workDir, 
 }
 
 func writeRawConfig(content string) error {
+	content = formatTOML(content)
 	dir := filepath.Dir(ConfigPath)
 	tmp, err := os.CreateTemp(dir, ".config-*.tmp")
 	if err != nil {
@@ -1975,6 +1995,44 @@ func writeRawConfig(content string) error {
 		return err
 	}
 	return os.Rename(tmpPath, ConfigPath)
+}
+
+// FormatConfigFile reads the config file at the given path, formats it, and
+// writes it back. It validates the TOML syntax before writing.
+func FormatConfigFile(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return fmt.Errorf("invalid TOML: %w", err)
+	}
+	formatted := formatTOML(string(data))
+	if formatted == string(data) {
+		return nil
+	}
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".config-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.WriteString(formatted); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("write formatted config: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }
 
 // GetGlobalSettings reads global settings from config.toml.

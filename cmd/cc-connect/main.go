@@ -38,6 +38,9 @@ func main() {
 		case "config-example":
 			fmt.Print(ccconnect.ConfigExampleTOML)
 			return
+		case "config":
+			runConfig(os.Args[2:])
+			return
 		case "update":
 			runUpdate()
 			return
@@ -1099,9 +1102,14 @@ Commands:
     new              Force QR login
     bind             Bind existing ilink bot token
 
+  config             Manage configuration
+    example          Print a complete annotated config.toml example
+    format           Format the config file (alias: fmt)
+    path             Print the resolved config file path
+
   update             Check for updates and upgrade the binary (--pre for beta)
   check-update       Check if a newer version is available
-  config-example     Print a complete annotated config.toml example
+  config-example     (deprecated: use 'config example' instead)
 
 Examples:
   cc-connect                          Start with default config
@@ -1113,8 +1121,8 @@ Examples:
   cc-connect feishu setup             Setup Feishu/Lark bot credentials
   cc-connect weixin setup             Setup Weixin (ilink) with QR or --token
   cc-connect update                   Update to the latest version
-  cc-connect config-example           Print full config.toml example
-  cc-connect config-example > c.toml  Save example config to a file
+  cc-connect config format            Format the config file
+  cc-connect config example > c.toml  Save example config to a file
 
 `, v, updateHint)
 }
