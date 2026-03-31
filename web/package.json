@@ -1,37 +1,12 @@
 {
   "name": "cc-connect-web",
   "version": "0.1.0",
-  "description": "Web admin dashboard for CC-Connect — bridge AI coding agents with messaging platforms",
+  "private": true,
   "type": "module",
-  "keywords": [
-    "cc-connect",
-    "admin",
-    "dashboard",
-    "ai-agent",
-    "claude",
-    "codex",
-    "feishu",
-    "telegram",
-    "discord",
-    "slack"
-  ],
-  "homepage": "https://github.com/chenhg5/cc-connect",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/chenhg5/cc-connect.git",
-    "directory": "web"
-  },
-  "license": "MIT",
-  "author": "chenhg5",
-  "files": [
-    "dist"
-  ],
-  "main": "dist/index.html",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "preview": "vite preview",
-    "prepublishOnly": "npm run build"
+    "preview": "vite preview"
   },
   "dependencies": {
     "@tailwindcss/typography": "^0.5.19",
