@@ -191,6 +191,34 @@ func TestMgmt_Status(t *testing.T) {
 	}
 }
 
+func TestMgmt_StatusIncludesBridgeToken(t *testing.T) {
+	mgmt, ts, _ := testManagementServer(t, "tok")
+	mgmt.SetBridgeServer(NewBridgeServer(9810, "bridge-secret", "/bridge/ws", nil))
+
+	r := mgmtGet(t, ts.URL+"/api/v1/status", "tok")
+	if !r.OK {
+		t.Fatalf("status failed: %s", r.Error)
+	}
+
+	var data struct {
+		Bridge struct {
+			Enabled bool   `json:"enabled"`
+			Port    int    `json:"port"`
+			Path    string `json:"path"`
+			Token   string `json:"token"`
+		} `json:"bridge"`
+	}
+	if err := json.Unmarshal(r.Data, &data); err != nil {
+		t.Fatalf("unmarshal status data: %v", err)
+	}
+	if !data.Bridge.Enabled {
+		t.Fatal("expected bridge to be enabled")
+	}
+	if data.Bridge.Token != "bridge-secret" {
+		t.Fatalf("expected bridge token, got %q", data.Bridge.Token)
+	}
+}
+
 func TestMgmt_Projects(t *testing.T) {
 	_, ts, _ := testManagementServer(t, "tok")
 
@@ -479,6 +507,57 @@ func TestMgmt_CORS(t *testing.T) {
 	}
 	if resp.Header.Get("Access-Control-Allow-Origin") != "http://localhost:3000" {
 		t.Fatalf("expected CORS origin header, got %q", resp.Header.Get("Access-Control-Allow-Origin"))
+	}
+}
+
+func TestMgmt_BridgeWebSocketPathProxiesToBridgeServer(t *testing.T) {
+	mgmt := NewManagementServer(0, "", []string{"*"})
+	mgmt.RegisterEngine("p", NewEngine("p", &stubAgent{}, nil, "", LangEnglish))
+	mgmt.SetBridgeServer(NewBridgeServer(9810, "bridge-secret", "/bridge/ws", []string{"*"}))
+
+	mux := http.NewServeMux()
+	ts := httptest.NewServer(mgmt.buildHandler(mux))
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/bridge/ws?token=bridge-secret", nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Sec-WebSocket-Version", "13")
+	req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("expected websocket upgrade, got %d", resp.StatusCode)
+	}
+}
+
+func TestMgmt_BridgeWebSocketPathWorksWhenBridgeServerSetAfterHandlerBuild(t *testing.T) {
+	mgmt := NewManagementServer(0, "", []string{"*"})
+	mgmt.RegisterEngine("p", NewEngine("p", &stubAgent{}, nil, "", LangEnglish))
+
+	mux := http.NewServeMux()
+	ts := httptest.NewServer(mgmt.buildHandler(mux))
+	defer ts.Close()
+
+	mgmt.SetBridgeServer(NewBridgeServer(9810, "bridge-secret", "/bridge/ws", []string{"*"}))
+
+	req, _ := http.NewRequest("GET", ts.URL+"/bridge/ws?token=bridge-secret", nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Sec-WebSocket-Version", "13")
+	req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("expected websocket upgrade after late bridge setup, got %d", resp.StatusCode)
 	}
 }
 
