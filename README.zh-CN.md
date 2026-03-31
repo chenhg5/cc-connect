@@ -375,6 +375,7 @@ cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/ch
 - [使用指南](docs/usage.zh-CN.md) — 完整功能文档
 - [INSTALL.md](INSTALL.md) — AI Agent 友好的安装指南
 - [config.example.toml](config.example.toml) — 配置模板
+- [CONTRIBUTING.md](CONTRIBUTING.md) — Issue / PR 提交流程与贡献说明
 
 ---
 
