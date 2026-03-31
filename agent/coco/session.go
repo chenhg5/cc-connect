@@ -1,7 +1,7 @@
 package coco
 
 import (
-	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
+	"github.com/creack/pty"
 )
 
 type cocoSession struct {
@@ -27,7 +28,7 @@ type cocoSession struct {
 	wg        sync.WaitGroup
 	alive     atomic.Bool
 	cmd       *exec.Cmd
-	stdin     io.WriteCloser
+	ptmx      *os.File
 }
 
 func newCocoSession(ctx context.Context, workDir, resumeID string, extraEnv []string) (*cocoSession, error) {
@@ -57,41 +58,21 @@ func newCocoSession(ctx context.Context, workDir, resumeID string, extraEnv []st
 func (qs *cocoSession) startProcess() error {
 	args := []string{}
 	
-	// 如果 coco 以后支持类似于 --format json 的流输出
-	// args = append(args, "--format", "json")
-
 	qs.cmd = exec.CommandContext(qs.ctx, "coco", args...)
 	qs.cmd.Dir = qs.workDir
 	if len(qs.extraEnv) > 0 {
 		qs.cmd.Env = core.MergeEnv(os.Environ(), qs.extraEnv)
 	}
 
-	stdin, err := qs.cmd.StdinPipe()
+	ptmx, err := pty.Start(qs.cmd)
 	if err != nil {
-		return fmt.Errorf("cocoSession: stdin pipe: %w", err)
+		return fmt.Errorf("cocoSession: start pty: %w", err)
 	}
-	qs.stdin = stdin
-
-	stdout, err := qs.cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("cocoSession: stdout pipe: %w", err)
-	}
-
-	stderr, err := qs.cmd.StderrPipe()
-	if err != nil {
-		return fmt.Errorf("cocoSession: stderr pipe: %w", err)
-	}
-
-	if err := qs.cmd.Start(); err != nil {
-		return fmt.Errorf("cocoSession: start process: %w", err)
-	}
+	qs.ptmx = ptmx
 
 	qs.wg.Add(1)
-	go qs.readLoop(stdout)
+	go qs.readLoop(ptmx)
 	
-	qs.wg.Add(1)
-	go qs.readStderrLoop(stderr)
-
 	go func() {
 		err := qs.cmd.Wait()
 		qs.alive.Store(false)
@@ -117,9 +98,9 @@ func (qs *cocoSession) Send(prompt string, images []core.ImageAttachment, files 
 	}
 
 	// 将用户的 prompt 输入给 coco 进程
-	_, err := fmt.Fprintf(qs.stdin, "%s\n", prompt)
+	_, err := fmt.Fprintf(qs.ptmx, "%s\r", prompt) // 注意这里是 \r 而不是 \n，因为是 PTY
 	if err != nil {
-		return fmt.Errorf("failed to write to coco stdin: %w", err)
+		return fmt.Errorf("failed to write to coco pty: %w", err)
 	}
 
 	return nil
@@ -127,38 +108,37 @@ func (qs *cocoSession) Send(prompt string, images []core.ImageAttachment, files 
 
 func (qs *cocoSession) readLoop(r io.Reader) {
 	defer qs.wg.Done()
-	scanner := bufio.NewScanner(r)
 
-	finalText := ""
-	for scanner.Scan() {
-		line := scanner.Text()
-		line = cleanAnsi(line)
-		if line == "" {
-			continue
+	buf := make([]byte, 1024)
+	var accumulated bytes.Buffer
+
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			chunk := buf[:n]
+			accumulated.Write(chunk)
+			
+			// 发送实时流事件（简化处理）
+			select {
+			case qs.events <- core.Event{Type: core.EventText, Content: string(chunk)}:
+			case <-qs.ctx.Done():
+				return
+			}
 		}
-		
-		finalText += line + "\n"
 
-		select {
-		case qs.events <- core.Event{Type: core.EventText, Content: line + "\n"}:
-		case <-qs.ctx.Done():
-			return
+		if err != nil {
+			if err != io.EOF {
+				slog.Error("cocoSession read error", "error", err)
+			}
+			break
 		}
 	}
 	
-	// 最后发送一个完成事件
+	// 这里通过超时判断或者特定的提示符判断 turn 完成，为了简单起见，暂时在 PTY 断开时发送结果
+	finalText := cleanAnsi(accumulated.String())
 	select {
 	case qs.events <- core.Event{Type: core.EventResult, Content: finalText, SessionID: qs.CurrentSessionID(), Done: true}:
 	default:
-	}
-}
-
-func (qs *cocoSession) readStderrLoop(r io.Reader) {
-	defer qs.wg.Done()
-	scanner := bufio.NewScanner(r)
-	for scanner.Scan() {
-		line := scanner.Text()
-		slog.Warn("coco stderr", "msg", cleanAnsi(line))
 	}
 }
 
@@ -167,13 +147,12 @@ func (qs *cocoSession) RespondPermission(requestID string, result core.Permissio
 		return fmt.Errorf("session is closed")
 	}
 	
-	// 如果 yolo/allow，往 stdin 里写个 Y
-	reply := "Y\n"
+	reply := "Y\r"
 	if result.Behavior == "deny" {
-		reply = "N\n"
+		reply = "N\r"
 	}
 	
-	_, err := io.WriteString(qs.stdin, reply)
+	_, err := io.WriteString(qs.ptmx, reply)
 	return err
 }
 
@@ -200,6 +179,9 @@ func (qs *cocoSession) Close() error {
 	if qs.cmd != nil && qs.cmd.Process != nil {
 		_ = qs.cmd.Process.Kill()
 	}
+	if qs.ptmx != nil {
+		_ = qs.ptmx.Close()
+	}
 	
 	closeCtx, cancelClose := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancelClose()
@@ -219,7 +201,6 @@ func (qs *cocoSession) Close() error {
 	return nil
 }
 
-// cleanAnsi 移除终端颜色等控制字符 (简化版)
 func cleanAnsi(str string) string {
 	var sb strings.Builder
 	inEscape := false
