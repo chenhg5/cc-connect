@@ -1275,3 +1275,13 @@ app_secret = "your-feishu-app-secret"
 #
 # [projects.platforms.options]
 # token = "your-discord-bot-token"
+
+# --- Example: Trae CLI (Coco) ---
+# [[projects]]
+# name = "coco-project"
+#
+# [projects.agent]
+# type = "coco"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/project"
