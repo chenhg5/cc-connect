@@ -378,17 +378,11 @@ const (
 	MsgUpgradeSuccess     MsgKey = "upgrade_success"
 	MsgUpgradeDevBuild    MsgKey = "upgrade_dev_build"
 
-	MsgWebNotSupported   MsgKey = "web_not_supported"
-	MsgWebInstalling     MsgKey = "web_installing"
-	MsgWebInstallDone    MsgKey = "web_install_done"
-	MsgWebInstallSuccess MsgKey = "web_install_success"
-	MsgWebNeedRestart    MsgKey = "web_need_restart"
-	MsgWebUpgrading      MsgKey = "web_upgrading"
-	MsgWebAlreadyLatest  MsgKey = "web_already_latest"
-	MsgWebUpgradeSuccess MsgKey = "web_upgrade_success"
-	MsgWebNotInstalled   MsgKey = "web_not_installed"
-	MsgWebStatus         MsgKey = "web_status"
-	MsgWebUninstalled    MsgKey = "web_uninstalled"
+	MsgWebNotSupported  MsgKey = "web_not_supported"
+	MsgWebNotEnabled    MsgKey = "web_not_enabled"
+	MsgWebSetupSuccess  MsgKey = "web_setup_success"
+	MsgWebNeedRestart   MsgKey = "web_need_restart"
+	MsgWebStatus        MsgKey = "web_status"
 
 	MsgAliasEmpty      MsgKey = "alias_empty"
 	MsgAliasListHeader MsgKey = "alias_list_header"
@@ -2604,40 +2598,33 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "⚠️ Compilación de desarrollo — la verificación de versión no está disponible. Compile desde el código fuente o instale una versión publicada.",
 	},
 	MsgWebNotSupported: {
-		LangEnglish:            "⚠️ Web admin management is not available in this build.",
-		LangChinese:            "⚠️ 当前版本不支持 Web 管理后台。",
-		LangTraditionalChinese: "⚠️ 目前版本不支援 Web 管理後台。",
-		LangJapanese:           "⚠️ このビルドではWeb管理画面は利用できません。",
-		LangSpanish:            "⚠️ La administración web no está disponible en esta versión.",
+		LangEnglish:            "⚠️ Web admin is not available in this build. Rebuild without the `no_web` tag to enable it.",
+		LangChinese:            "⚠️ 当前版本未包含 Web 管理后台。请去掉 `no_web` 标签重新编译以启用。",
+		LangTraditionalChinese: "⚠️ 目前版本未包含 Web 管理後台。請移除 `no_web` 標籤重新編譯以啟用。",
+		LangJapanese:           "⚠️ このビルドにはWeb管理画面が含まれていません。`no_web` タグなしで再ビルドしてください。",
+		LangSpanish:            "⚠️ La administración web no está incluida en esta compilación. Recompile sin la etiqueta `no_web`.",
 	},
-	MsgWebInstalling: {
-		LangEnglish:            "📦 Installing cc-connect-web ...",
-		LangChinese:            "📦 正在安装 cc-connect-web ...",
-		LangTraditionalChinese: "📦 正在安裝 cc-connect-web ...",
-		LangJapanese:           "📦 cc-connect-web をインストールしています...",
-		LangSpanish:            "📦 Instalando cc-connect-web ...",
+	MsgWebNotEnabled: {
+		LangEnglish:            "ℹ️ Web admin is not enabled.\n\nUse `/web setup` to configure and enable it.",
+		LangChinese:            "ℹ️ Web 管理后台未启用。\n\n使用 `/web setup` 配置并启用。",
+		LangTraditionalChinese: "ℹ️ Web 管理後台未啟用。\n\n使用 `/web setup` 設定並啟用。",
+		LangJapanese:           "ℹ️ Web管理画面は有効になっていません。\n\n`/web setup` で設定して有効にしてください。",
+		LangSpanish:            "ℹ️ La administración web no está habilitada.\n\nUsa `/web setup` para configurarla.",
 	},
-	MsgWebInstallDone: {
-		LangEnglish:            "✅ cc-connect-web **%s** installed.",
-		LangChinese:            "✅ cc-connect-web **%s** 安装完成。",
-		LangTraditionalChinese: "✅ cc-connect-web **%s** 安裝完成。",
-		LangJapanese:           "✅ cc-connect-web **%s** をインストールしました。",
-		LangSpanish:            "✅ cc-connect-web **%s** instalado.",
-	},
-	MsgWebInstallSuccess: {
-		LangEnglish: "✅ cc-connect-web **%s** installed!\n\n" +
+	MsgWebSetupSuccess: {
+		LangEnglish: "✅ Web admin configured!\n\n" +
 			"🌐 URL: %s\n🔑 Token: `%s`\n\n" +
 			"Open the URL in your browser and use the token to log in.",
-		LangChinese: "✅ cc-connect-web **%s** 安装完成！\n\n" +
+		LangChinese: "✅ Web 管理后台配置完成！\n\n" +
 			"🌐 地址：%s\n🔑 令牌：`%s`\n\n" +
 			"在浏览器打开地址，使用令牌登录。",
-		LangTraditionalChinese: "✅ cc-connect-web **%s** 安裝完成！\n\n" +
+		LangTraditionalChinese: "✅ Web 管理後台設定完成！\n\n" +
 			"🌐 網址：%s\n🔑 權杖：`%s`\n\n" +
 			"在瀏覽器開啟網址，使用權杖登入。",
-		LangJapanese: "✅ cc-connect-web **%s** インストール完了！\n\n" +
+		LangJapanese: "✅ Web管理画面の設定が完了しました！\n\n" +
 			"🌐 URL: %s\n🔑 トークン: `%s`\n\n" +
 			"ブラウザでURLを開き、トークンでログインしてください。",
-		LangSpanish: "✅ cc-connect-web **%s** instalado!\n\n" +
+		LangSpanish: "✅ Administración web configurada!\n\n" +
 			"🌐 URL: %s\n🔑 Token: `%s`\n\n" +
 			"Abre la URL en tu navegador y usa el token para iniciar sesión.",
 	},
@@ -2648,62 +2635,12 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "🔄 `/restart` でサービスを再起動して、Web管理画面を有効にしてください。",
 		LangSpanish:            "🔄 Reinicia el servicio con `/restart` para activar la administración web.",
 	},
-	MsgWebUpgrading: {
-		LangEnglish:            "⬆️ Upgrading cc-connect-web ...",
-		LangChinese:            "⬆️ 正在升级 cc-connect-web ...",
-		LangTraditionalChinese: "⬆️ 正在升級 cc-connect-web ...",
-		LangJapanese:           "⬆️ cc-connect-web をアップグレードしています...",
-		LangSpanish:            "⬆️ Actualizando cc-connect-web ...",
-	},
-	MsgWebAlreadyLatest: {
-		LangEnglish:            "✅ Already up to date (**%s**).",
-		LangChinese:            "✅ 已是最新版本（**%s**）。",
-		LangTraditionalChinese: "✅ 已是最新版本（**%s**）。",
-		LangJapanese:           "✅ すでに最新版です（**%s**）。",
-		LangSpanish:            "✅ Ya está actualizado (**%s**).",
-	},
-	MsgWebUpgradeSuccess: {
-		LangEnglish:            "✅ Upgraded cc-connect-web: **%s** → **%s**\n\nRestart with `/restart` to apply.",
-		LangChinese:            "✅ cc-connect-web 已升级：**%s** → **%s**\n\n使用 `/restart` 重启以生效。",
-		LangTraditionalChinese: "✅ cc-connect-web 已升級：**%s** → **%s**\n\n使用 `/restart` 重新啟動以生效。",
-		LangJapanese:           "✅ cc-connect-web をアップグレードしました: **%s** → **%s**\n\n`/restart` で再起動して反映してください。",
-		LangSpanish:            "✅ cc-connect-web actualizado: **%s** → **%s**\n\nReinicia con `/restart` para aplicar.",
-	},
-	MsgWebNotInstalled: {
-		LangEnglish:            "ℹ️ Web admin is not installed.\n\nUse `/web install` to install it.",
-		LangChinese:            "ℹ️ Web 管理后台尚未安装。\n\n使用 `/web install` 进行安装。",
-		LangTraditionalChinese: "ℹ️ Web 管理後台尚未安裝。\n\n使用 `/web install` 進行安裝。",
-		LangJapanese:           "ℹ️ Web管理画面はインストールされていません。\n\n`/web install` でインストールしてください。",
-		LangSpanish:            "ℹ️ La administración web no está instalada.\n\nUsa `/web install` para instalarla.",
-	},
 	MsgWebStatus: {
-		LangEnglish: "🌐 **Web Admin**\n\n" +
-			"Version: **%s**\n" +
-			"URL: %s\n\n" +
-			"Commands: `/web upgrade` · `/web uninstall`",
-		LangChinese: "🌐 **Web 管理后台**\n\n" +
-			"版本：**%s**\n" +
-			"地址：%s\n\n" +
-			"可用命令：`/web upgrade` · `/web uninstall`",
-		LangTraditionalChinese: "🌐 **Web 管理後台**\n\n" +
-			"版本：**%s**\n" +
-			"網址：%s\n\n" +
-			"可用命令：`/web upgrade` · `/web uninstall`",
-		LangJapanese: "🌐 **Web管理画面**\n\n" +
-			"バージョン: **%s**\n" +
-			"URL: %s\n\n" +
-			"コマンド: `/web upgrade` · `/web uninstall`",
-		LangSpanish: "🌐 **Administración Web**\n\n" +
-			"Versión: **%s**\n" +
-			"URL: %s\n\n" +
-			"Comandos: `/web upgrade` · `/web uninstall`",
-	},
-	MsgWebUninstalled: {
-		LangEnglish:            "✅ Web admin has been uninstalled.",
-		LangChinese:            "✅ Web 管理后台已卸载。",
-		LangTraditionalChinese: "✅ Web 管理後台已移除。",
-		LangJapanese:           "✅ Web管理画面をアンインストールしました。",
-		LangSpanish:            "✅ La administración web ha sido desinstalada.",
+		LangEnglish:            "🌐 **Web Admin**\n\nURL: %s",
+		LangChinese:            "🌐 **Web 管理后台**\n\n地址：%s",
+		LangTraditionalChinese: "🌐 **Web 管理後台**\n\n網址：%s",
+		LangJapanese:           "🌐 **Web管理画面**\n\nURL: %s",
+		LangSpanish:            "🌐 **Administración Web**\n\nURL: %s",
 	},
 	MsgAliasEmpty: {
 		LangEnglish:            "No aliases configured. Use `/alias add <trigger> <command>` to create one.",

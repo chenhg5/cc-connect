@@ -216,11 +216,8 @@ type Engine struct {
 	stopping            bool
 
 	// /web command callbacks
-	webInstallFunc  func() (version string, err error)
-	webUpgradeFunc  func() (oldVer, newVer string, err error)
-	webStatusFunc   func() (installed bool, version, url string)
-	webEnableFunc   func() (mgmtPort int, token string, needRestart bool, err error)
-	webUninstallFunc func() error
+	webSetupFunc  func() (port int, token string, needRestart bool, err error)
+	webStatusFunc func() (url string)
 }
 
 // workspaceInitFlow tracks a channel that is being onboarded to a workspace.
@@ -461,11 +458,8 @@ func (e *Engine) SetShowContextIndicator(show bool) {
 	e.showContextIndicator = show
 }
 
-func (e *Engine) SetWebInstallFunc(fn func() (string, error))              { e.webInstallFunc = fn }
-func (e *Engine) SetWebUpgradeFunc(fn func() (string, string, error))      { e.webUpgradeFunc = fn }
-func (e *Engine) SetWebStatusFunc(fn func() (bool, string, string))        { e.webStatusFunc = fn }
-func (e *Engine) SetWebEnableFunc(fn func() (int, string, bool, error))    { e.webEnableFunc = fn }
-func (e *Engine) SetWebUninstallFunc(fn func() error)                      { e.webUninstallFunc = fn }
+func (e *Engine) SetWebSetupFunc(fn func() (int, string, bool, error)) { e.webSetupFunc = fn }
+func (e *Engine) SetWebStatusFunc(fn func() string)                    { e.webStatusFunc = fn }
 
 // SetInjectSender controls whether sender identity (platform and user ID) is
 // prepended to each message before forwarding it to the agent. When enabled,
@@ -9657,98 +9651,53 @@ func (e *Engine) cmdWeb(p Platform, msg *Message, args []string) {
 	subCmd := ""
 	if len(args) > 0 {
 		subCmd = matchSubCommand(strings.ToLower(args[0]),
-			[]string{"install", "upgrade", "status", "open", "uninstall"})
+			[]string{"setup", "status"})
 	}
 
 	switch subCmd {
-	case "install":
-		e.cmdWebInstall(p, msg)
-	case "upgrade":
-		e.cmdWebUpgrade(p, msg)
-	case "uninstall":
-		e.cmdWebUninstall(p, msg)
-	case "open", "status":
-		e.cmdWebStatus(p, msg)
+	case "setup":
+		e.cmdWebSetup(p, msg)
 	default:
 		e.cmdWebStatus(p, msg)
 	}
 }
 
-func (e *Engine) cmdWebInstall(p Platform, msg *Message) {
-	if e.webInstallFunc == nil {
+func (e *Engine) cmdWebSetup(p Platform, msg *Message) {
+	if !WebAssetsAvailable() {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebNotSupported))
+		return
+	}
+	if e.webSetupFunc == nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebNotSupported))
 		return
 	}
 
-	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebInstalling))
-
-	version, err := e.webInstallFunc()
+	port, token, needRestart, err := e.webSetupFunc()
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 		return
 	}
-
-	// Auto-enable bridge & management
-	if e.webEnableFunc != nil {
-		port, token, needRestart, err := e.webEnableFunc()
-		if err != nil {
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgWebInstallDone), version)+"\n\n⚠️ "+err.Error())
-			return
-		}
-		url := fmt.Sprintf("http://localhost:%d", port)
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgWebInstallSuccess), version, url, token))
-		if needRestart {
-			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebNeedRestart))
-		}
-		return
-	}
-	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgWebInstallDone), version))
-}
-
-func (e *Engine) cmdWebUpgrade(p Platform, msg *Message) {
-	if e.webUpgradeFunc == nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebNotSupported))
-		return
-	}
-
-	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebUpgrading))
-
-	oldVer, newVer, err := e.webUpgradeFunc()
-	if err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
-		return
-	}
-
-	if oldVer == newVer {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgWebAlreadyLatest), newVer))
-	} else {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgWebUpgradeSuccess), oldVer, newVer))
+	url := fmt.Sprintf("http://localhost:%d", port)
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgWebSetupSuccess), url, token))
+	if needRestart {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebNeedRestart))
 	}
 }
 
 func (e *Engine) cmdWebStatus(p Platform, msg *Message) {
+	if !WebAssetsAvailable() {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebNotSupported))
+		return
+	}
 	if e.webStatusFunc == nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebNotSupported))
 		return
 	}
 
-	installed, version, url := e.webStatusFunc()
-	if !installed {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebNotInstalled))
+	url := e.webStatusFunc()
+	if url == "" {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebNotEnabled))
 		return
 	}
-
-	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgWebStatus), version, url))
-}
-
-func (e *Engine) cmdWebUninstall(p Platform, msg *Message) {
-	if e.webUninstallFunc == nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebNotSupported))
-		return
-	}
-	if err := e.webUninstallFunc(); err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
-		return
-	}
-	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebUninstalled))
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgWebStatus), url))
 }

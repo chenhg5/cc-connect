@@ -541,27 +541,7 @@ func main() {
 		})
 
 		// Wire /web command callbacks
-		capturedDataDir := cfg.DataDir
-		engine.SetWebInstallFunc(func() (string, error) {
-			return core.WebInstall(capturedDataDir)
-		})
-		engine.SetWebUpgradeFunc(func() (string, string, error) {
-			return core.WebUpgrade(capturedDataDir)
-		})
-		engine.SetWebStatusFunc(func() (bool, string, string) {
-			installed := core.WebIsInstalled(capturedDataDir)
-			version := core.WebInstalledVersion(capturedDataDir)
-			url := ""
-			if cfg.Management.Enabled != nil && *cfg.Management.Enabled {
-				port := cfg.Management.Port
-				if port == 0 {
-					port = 9820
-				}
-				url = fmt.Sprintf("http://localhost:%d", port)
-			}
-			return installed, version, url
-		})
-		engine.SetWebEnableFunc(func() (int, string, bool, error) {
+		engine.SetWebSetupFunc(func() (int, string, bool, error) {
 			mgmtToken := core.GenerateToken(16)
 			bridgeToken := core.GenerateToken(16)
 			result, err := config.EnableWebAdmin(mgmtToken, bridgeToken)
@@ -570,9 +550,15 @@ func main() {
 			}
 			return result.ManagementPort, result.ManagementToken, !result.AlreadyEnabled, nil
 		})
-		engine.SetWebUninstallFunc(func() error {
-			dir := core.WebInstallDir(capturedDataDir)
-			return os.RemoveAll(dir)
+		engine.SetWebStatusFunc(func() string {
+			if cfg.Management.Enabled == nil || !*cfg.Management.Enabled {
+				return ""
+			}
+			port := cfg.Management.Port
+			if port == 0 {
+				port = 9820
+			}
+			return fmt.Sprintf("http://localhost:%d", port)
 		})
 
 		engines = append(engines, engine)
@@ -791,11 +777,6 @@ func main() {
 			}
 			return config.SaveGlobalSettings(u)
 		})
-		webDist := core.WebDistDir(cfg.DataDir)
-		if info, err := os.Stat(webDist); err == nil && info.IsDir() {
-			mgmtSrv.SetWebDistDir(webDist)
-			slog.Info("web admin serving static files", "dir", webDist)
-		}
 		mgmtSrv.Start()
 	}
 
