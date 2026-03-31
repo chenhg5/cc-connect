@@ -1139,6 +1139,48 @@ app_secret = "your-feishu-app-secret"
 # Optional: specify a model (provider/model format) / 可选：指定模型
 # model = "anthropic/claude-sonnet-4-20250514"
 #
+# API Providers — switch between them via /provider command in chat
+# API Provider 管理 — 可通过聊天命令 /provider 切换
+#
+# [[projects.agent.providers]]
+# name = "anthropic"
+# api_key = "sk-ant-xxx"
+#
+# # Third-party provider with custom base_url / 第三方 Provider 配置自定义 base_url
+# # When base_url is set, api_key is sent as Bearer token (ANTHROPIC_AUTH_TOKEN)
+# # instead of x-api-key (ANTHROPIC_API_KEY) to avoid validation against api.anthropic.com.
+# # 设置 base_url 后，api_key 会作为 Bearer token 发送，避免对 api.anthropic.com 的验证。
+# [[projects.agent.providers]]
+# name = "relay"
+# api_key = "sk-xxx"
+# base_url = "https://api.relay-service.com"
+# model = "anthropic/claude-sonnet-4-20250514"
+# [[projects.agent.providers.models]]
+# model = "anthropic/claude-sonnet-4-20250514"
+# alias = "sonnet"
+# [[projects.agent.providers.models]]
+# model = "anthropic/claude-opus-4-20250514"
+# alias = "opus"
+#
+# # Third-party provider with thinking override / 第三方 Provider 并覆盖 thinking 参数
+# # Some providers don't support Claude's adaptive thinking.
+# # Set thinking = "disabled" to auto-rewrite via a local proxy.
+# # 部分第三方 Provider 不支持 adaptive thinking，
+# # 设置 thinking = "disabled" 后会通过本地代理自动改写请求。
+# [[projects.agent.providers]]
+# name = "siliconflow"
+# api_key = "sk-xxx"
+# base_url = "https://api.siliconflow.cn"
+# model = "anthropic/claude-sonnet-4-20250514"
+# thinking = "disabled"
+#
+# # OpenAI-compatible providers — use env map for arbitrary env vars
+# # OpenAI 兼容的 Provider — 使用 env 字段设置任意环境变量
+# [[projects.agent.providers]]
+# name = "openai-compatible"
+# env = { OPENAI_API_KEY = "sk-openai-xxx", OPENAI_BASE_URL = "https://api.openai-proxy.com/v1" }
+# model = "openai/gpt-4o"
+#
 # [[projects.platforms]]
 # type = "telegram"
 #

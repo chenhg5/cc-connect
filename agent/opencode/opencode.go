@@ -32,7 +32,11 @@ type Agent struct {
 	providers  []core.ProviderConfig
 	activeIdx  int
 	sessionEnv []string
-	mu         sync.RWMutex
+
+	providerProxy *core.ProviderProxy // local proxy for third-party providers
+	proxyLocalURL string              // local URL of the proxy
+
+	mu sync.RWMutex
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -104,8 +108,14 @@ func (a *Agent) configuredModels() []core.ModelOption {
 	return core.GetProviderModels(a.providers, a.activeIdx)
 }
 
-func (a *Agent) AvailableModels(_ context.Context) []core.ModelOption {
+func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	if models := a.configuredModels(); len(models) > 0 {
+		return models
+	}
+	a.mu.RLock()
+	cmd := a.cmd
+	a.mu.RUnlock()
+	if models := fetchModelsFromCLI(ctx, cmd); len(models) > 0 {
 		return models
 	}
 	return []core.ModelOption{
@@ -114,6 +124,60 @@ func (a *Agent) AvailableModels(_ context.Context) []core.ModelOption {
 		{Name: "openai/gpt-4o", Desc: "GPT-4o"},
 		{Name: "openai/o3", Desc: "OpenAI o3"},
 	}
+}
+
+// fetchModelsFromCLI runs `opencode models` and parses the output.
+// Each line is a model ID in the format "provider/model-id".
+func fetchModelsFromCLI(ctx context.Context, cmd string) []core.ModelOption {
+	c := exec.CommandContext(ctx, cmd, "models")
+	out, err := c.Output()
+	if err != nil {
+		slog.Debug("opencode: fetch models from CLI failed", "error", err)
+		return nil
+	}
+
+	var models []core.ModelOption
+	seen := make(map[string]struct{})
+	for _, line := range strings.Split(string(out), "\n") {
+		name := strings.TrimSpace(line)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		models = append(models, core.ModelOption{
+			Name: name,
+			Desc: modelDesc(name),
+		})
+	}
+	if len(models) > 0 {
+		slog.Info("opencode: fetched models from CLI", "count", len(models))
+	}
+	return models
+}
+
+// modelDesc generates a human-readable description from a model ID like
+// "github-copilot/claude-sonnet-4.5" → "Claude Sonnet 4.5 (github-copilot)".
+func modelDesc(modelID string) string {
+	slash := strings.IndexByte(modelID, '/')
+	if slash < 0 {
+		return modelID
+	}
+	provider := modelID[:slash]
+	model := modelID[slash+1:]
+
+	// Title-case the model name: replace hyphens with spaces, capitalize words.
+	words := strings.Split(model, "-")
+	for i, w := range words {
+		if len(w) > 0 {
+			words[i] = strings.ToUpper(w[:1]) + w[1:]
+		}
+	}
+	desc := strings.Join(words, " ")
+
+	return fmt.Sprintf("%s (%s)", desc, provider)
 }
 
 func (a *Agent) SetSessionEnv(env []string) {
@@ -145,7 +209,12 @@ func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error)
 	return listOpencodeSessions(a.cmd, a.workDir)
 }
 
-func (a *Agent) Stop() error { return nil }
+func (a *Agent) Stop() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.stopProviderProxyLocked()
+	return nil
+}
 
 // -- ModeSwitcher --
 
@@ -202,6 +271,7 @@ func (a *Agent) SetProviders(providers []core.ProviderConfig) {
 func (a *Agent) SetActiveProvider(name string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.stopProviderProxyLocked()
 	if name == "" {
 		a.activeIdx = -1
 		slog.Info("opencode: provider cleared")
@@ -235,19 +305,74 @@ func (a *Agent) ListProviders() []core.ProviderConfig {
 	return result
 }
 
+// providerEnvLocked returns env vars for the active provider. Caller must hold mu.
+//
+// When a custom base_url is configured:
+//  1. We use ANTHROPIC_AUTH_TOKEN (Bearer) instead of ANTHROPIC_API_KEY
+//     (x-api-key). OpenCode's Anthropic provider validates API keys against
+//     api.anthropic.com which hangs for third-party endpoints; Bearer auth
+//     skips that check.
+//  2. If the provider sets thinking (e.g. "disabled"), a local reverse proxy
+//     rewrites the thinking parameter for compatibility with providers that
+//     don't support adaptive thinking.
 func (a *Agent) providerEnvLocked() []string {
 	if a.activeIdx < 0 || a.activeIdx >= len(a.providers) {
+		a.stopProviderProxyLocked()
 		return nil
 	}
 	p := a.providers[a.activeIdx]
 	var env []string
-	if p.APIKey != "" {
-		env = append(env, "ANTHROPIC_API_KEY="+p.APIKey)
+
+	if p.BaseURL != "" {
+		if p.Thinking != "" {
+			if err := a.ensureProviderProxyLocked(p.BaseURL, p.Thinking); err != nil {
+				slog.Error("providerproxy: failed to start", "error", err)
+				env = append(env, "ANTHROPIC_BASE_URL="+p.BaseURL)
+			} else {
+				env = append(env, "ANTHROPIC_BASE_URL="+a.proxyLocalURL)
+				env = append(env, "NO_PROXY=127.0.0.1")
+			}
+		} else {
+			a.stopProviderProxyLocked()
+			env = append(env, "ANTHROPIC_BASE_URL="+p.BaseURL)
+		}
+		if p.APIKey != "" {
+			env = append(env, "ANTHROPIC_AUTH_TOKEN="+p.APIKey)
+			env = append(env, "ANTHROPIC_API_KEY=")
+		}
+	} else {
+		a.stopProviderProxyLocked()
+		if p.APIKey != "" {
+			env = append(env, "ANTHROPIC_API_KEY="+p.APIKey)
+		}
 	}
+
 	for k, v := range p.Env {
 		env = append(env, k+"="+v)
 	}
 	return env
+}
+
+func (a *Agent) ensureProviderProxyLocked(targetURL, thinkingOverride string) error {
+	if a.providerProxy != nil && a.proxyLocalURL != "" {
+		return nil
+	}
+	a.stopProviderProxyLocked()
+	proxy, localURL, err := core.NewProviderProxy(targetURL, thinkingOverride)
+	if err != nil {
+		return err
+	}
+	a.providerProxy = proxy
+	a.proxyLocalURL = localURL
+	return nil
+}
+
+func (a *Agent) stopProviderProxyLocked() {
+	if a.providerProxy != nil {
+		a.providerProxy.Close()
+		a.providerProxy = nil
+	}
+	a.proxyLocalURL = ""
 }
 
 // -- Session listing --
