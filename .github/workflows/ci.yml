@@ -16,6 +16,14 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build web frontend
+        run: cd web && npm install && npm run build
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -50,6 +58,14 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build web frontend
+        run: cd web && npm install && npm run build
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -93,7 +109,7 @@ jobs:
           cache: true
 
       - name: Run smoke tests
-        run: go test -v -tags=smoke ./tests/e2e/...
+        run: go test -v -tags=smoke,no_web ./tests/e2e/...
 
   regression-test:
     runs-on: ubuntu-latest
@@ -109,7 +125,7 @@ jobs:
           cache: true
 
       - name: Run regression tests
-        run: go test -v -tags=regression ./tests/e2e/...
+        run: go test -v -tags=regression,no_web ./tests/e2e/...
 
   performance-test:
     runs-on: ubuntu-latest
@@ -125,4 +141,4 @@ jobs:
           cache: true
 
       - name: Run performance benchmarks
-        run: go test -bench=. -benchmem -tags=performance ./tests/performance/...
+        run: go test -bench=. -benchmem -tags=performance,no_web ./tests/performance/...
