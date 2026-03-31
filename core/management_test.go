@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -9,8 +10,29 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 )
+
+type deadlineAwareModelAgent struct {
+	stubModelModeAgent
+	mu          sync.Mutex
+	hasDeadline bool
+}
+
+func (a *deadlineAwareModelAgent) AvailableModels(ctx context.Context) []ModelOption {
+	a.mu.Lock()
+	_, ok := ctx.Deadline()
+	a.hasDeadline = ok
+	a.mu.Unlock()
+	return []ModelOption{{Name: "gpt-4.1"}}
+}
+
+func (a *deadlineAwareModelAgent) sawDeadline() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.hasDeadline
+}
 
 // testManagementServer creates a ManagementServer with a test engine and returns an httptest.Server.
 func testManagementServer(t *testing.T, token string) (*ManagementServer, *httptest.Server, *Engine) {
@@ -699,5 +721,25 @@ func TestMgmt_ProjectModel_ReturnsErrorWhenModelSaveFails(t *testing.T) {
 	}
 	if got := agent.GetModel(); got != "gpt-4.1-mini" {
 		t.Fatalf("GetModel() = %q, want unchanged gpt-4.1-mini", got)
+	}
+}
+
+func TestMgmt_ProjectModels_UsesTimeoutContext(t *testing.T) {
+	agent := &deadlineAwareModelAgent{}
+	e := NewEngine("test-project", agent, nil, "", LangEnglish)
+
+	mgmt := NewManagementServer(0, "tok", nil)
+	mgmt.RegisterEngine("test-project", e)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/projects/", mgmt.wrap(mgmt.handleProjectRoutes))
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/models", "tok")
+	if !r.OK {
+		t.Fatalf("project models failed: %s", r.Error)
+	}
+	if !agent.sawDeadline() {
+		t.Fatal("AvailableModels context has no deadline; want timeout-bounded context")
 	}
 }
