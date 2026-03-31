@@ -122,7 +122,7 @@ func TestSend_PropagatesExtraEnvToProcess(t *testing.T) {
 		t.Fatalf("Send: %v", err)
 	}
 
-	waitForFileEquals(t, envFile, "http://127.0.0.1:7890")
+	waitForFileEquals(t, envFile, "http://127.0.0.1:7890\n")
 }
 
 func containsEnvPair(env []string, want string) bool {
