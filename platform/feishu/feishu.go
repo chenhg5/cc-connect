@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -153,6 +154,15 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	appSecret, _ := opts["app_secret"].(string)
 	if appID == "" || appSecret == "" {
 		return nil, fmt.Errorf("%s: app_id and app_secret are required", name)
+	}
+	if v, ok := opts["domain"].(string); ok {
+		v = strings.TrimSpace(v)
+		if v != "" {
+			if _, err := url.ParseRequestURI(v); err != nil {
+				return nil, fmt.Errorf("%s: invalid domain %q: %w", name, v, err)
+			}
+			domain = v
+		}
 	}
 	reactionEmoji, _ := opts["reaction_emoji"].(string)
 	if reactionEmoji == "" {
