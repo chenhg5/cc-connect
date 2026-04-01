@@ -49,6 +49,7 @@ type telegramBot interface {
 	SetMyCommands(ctx context.Context, params *tgbot.SetMyCommandsParams) (bool, error)
 	GetFile(ctx context.Context, params *tgbot.GetFileParams) (*models.File, error)
 	FileDownloadLink(f *models.File) string
+	SetMessageReaction(ctx context.Context, params *tgbot.SetMessageReactionParams) (bool, error)
 }
 
 type backoffTimer interface {
@@ -355,6 +356,7 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 	}
 
 	rctx := replyContext{chatID: msg.Chat.ID, threadID: threadID, messageID: msg.ID}
+	go p.reactToMessage(ctx, msg.Chat.ID, msg.ID, "⚡")
 	botName := p.botUsername()
 
 	if len(msg.Photo) > 0 {
@@ -478,6 +480,25 @@ func (p *Platform) messageHandler() core.MessageHandler {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.handler
+}
+
+// reactToMessage sets an emoji reaction on a Telegram message.
+// It is called asynchronously so it never blocks the message dispatch path.
+func (p *Platform) reactToMessage(ctx context.Context, chatID int64, messageID int, emoji string) {
+	bot, err := p.connectedBot("react")
+	if err != nil {
+		return
+	}
+	if _, err := bot.SetMessageReaction(ctx, &tgbot.SetMessageReactionParams{
+		ChatID:    chatID,
+		MessageID: messageID,
+		Reaction: []models.ReactionType{{
+			Type:              models.ReactionTypeTypeEmoji,
+			ReactionTypeEmoji: &models.ReactionTypeEmoji{Emoji: emoji},
+		}},
+	}); err != nil {
+		slog.Debug("telegram: set reaction failed", "error", err)
+	}
 }
 
 func (p *Platform) buildSessionKey(chatID int64, threadID int, userID int64) string {
