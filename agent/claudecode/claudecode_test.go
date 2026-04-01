@@ -219,7 +219,12 @@ func TestAgent_Name(t *testing.T) {
 func TestAgent_CLIBinaryName(t *testing.T) {
 	a := &Agent{}
 	if got := a.CLIBinaryName(); got != "claude" {
-		t.Errorf("CLIBinaryName() = %q, want %q", got, "claude")
+		t.Errorf("CLIBinaryName() default = %q, want %q", got, "claude")
+	}
+
+	a2 := &Agent{cmd: "claude-sandbox"}
+	if got := a2.CLIBinaryName(); got != "claude-sandbox" {
+		t.Errorf("CLIBinaryName() custom = %q, want %q", got, "claude-sandbox")
 	}
 }
 
