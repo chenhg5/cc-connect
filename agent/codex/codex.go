@@ -365,8 +365,12 @@ func (a *Agent) SkillDirs() []string {
 }
 
 // ── ContextCompressor implementation ──────────────────────────
+// Codex slash commands (/compact, /clear) are not reliable in exec/resume mode.
+// See: https://github.com/openai/codex/issues/3641
+// Return "" so engine reports "not supported" instead of sending
+// an unreliable slash command to the session.
 
-func (a *Agent) CompressCommand() string { return "/compact" }
+func (a *Agent) CompressCommand() string { return "" }
 
 // ── MemoryFileProvider implementation ─────────────────────────
 
