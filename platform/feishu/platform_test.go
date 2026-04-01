@@ -474,6 +474,44 @@ func TestNewFeishu_PlatformNameAndDomain(t *testing.T) {
 	}
 }
 
+func TestNewFeishu_CustomDomain(t *testing.T) {
+	customDomain := "https://custom.feishu.cn"
+	pAny, err := New(map[string]any{
+		"app_id":     "cli_xxx",
+		"app_secret": "secret",
+		"domain":     customDomain,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	p, ok := pAny.(*interactivePlatform)
+	if !ok {
+		t.Fatalf("type = %T, want *interactivePlatform", pAny)
+	}
+	if p.domain != customDomain {
+		t.Fatalf("domain = %q, want %q", p.domain, customDomain)
+	}
+}
+
+func TestNewLark_CustomDomain(t *testing.T) {
+	customDomain := "https://custom.larksuite.com"
+	pAny, err := core.CreatePlatform("lark", map[string]any{
+		"app_id":     "cli_xxx",
+		"app_secret": "secret",
+		"domain":     customDomain,
+	})
+	if err != nil {
+		t.Fatalf("CreatePlatform(lark) error = %v", err)
+	}
+	p, ok := pAny.(*interactivePlatform)
+	if !ok {
+		t.Fatalf("type = %T, want *interactivePlatform", pAny)
+	}
+	if p.domain != customDomain {
+		t.Fatalf("domain = %q, want %q", p.domain, customDomain)
+	}
+}
+
 func TestLark_SessionKeyPrefix(t *testing.T) {
 	p, err := newPlatform("lark", lark.LarkBaseUrl, map[string]any{
 		"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true,

@@ -91,10 +91,18 @@ func (l *sanitizingLogger) Error(ctx context.Context, args ...interface{}) {
 
 func init() {
 	core.RegisterPlatform("feishu", func(opts map[string]any) (core.Platform, error) {
-		return newPlatform("feishu", lark.FeishuBaseUrl, opts)
+		domain := lark.FeishuBaseUrl
+		if customDomain, ok := opts["domain"].(string); ok && strings.TrimSpace(customDomain) != "" {
+			domain = strings.TrimSpace(customDomain)
+		}
+		return newPlatform("feishu", domain, opts)
 	})
 	core.RegisterPlatform("lark", func(opts map[string]any) (core.Platform, error) {
-		return newPlatform("lark", lark.LarkBaseUrl, opts)
+		domain := lark.LarkBaseUrl
+		if customDomain, ok := opts["domain"].(string); ok && strings.TrimSpace(customDomain) != "" {
+			domain = strings.TrimSpace(customDomain)
+		}
+		return newPlatform("lark", domain, opts)
 	})
 }
 
@@ -145,7 +153,11 @@ func (p *Platform) SetCardNavigationHandler(h core.CardNavigationHandler) {
 }
 
 func New(opts map[string]any) (core.Platform, error) {
-	return newPlatform("feishu", lark.FeishuBaseUrl, opts)
+	domain := lark.FeishuBaseUrl
+	if customDomain, ok := opts["domain"].(string); ok && strings.TrimSpace(customDomain) != "" {
+		domain = strings.TrimSpace(customDomain)
+	}
+	return newPlatform("feishu", domain, opts)
 }
 
 func newPlatform(name, domain string, opts map[string]any) (core.Platform, error) {
