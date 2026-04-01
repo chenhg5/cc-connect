@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // ContinueSession is a sentinel value for AgentSessionID that tells the agent
@@ -438,6 +440,18 @@ func (sm *SessionManager) saveLocked() {
 		return
 	}
 
+	// Create parent dir and acquire exclusive file lock to serialize concurrent writers.
+	if err := os.MkdirAll(filepath.Dir(sm.storePath), 0o755); err != nil {
+		slog.Error("session: failed to create dir", "error", err)
+		return
+	}
+	lockFile, err := os.OpenFile(sm.storePath+".lock", os.O_CREATE|os.O_RDWR, 0o644)
+	if err == nil {
+		unix.Flock(int(lockFile.Fd()), unix.LOCK_EX)
+		defer unix.Flock(int(lockFile.Fd()), unix.LOCK_UN)
+		defer lockFile.Close()
+	}
+
 	// Build a deep-copy snapshot to avoid racing with concurrent Session mutations.
 	snapSessions := make(map[string]*Session, len(sm.sessions))
 	for id, s := range sm.sessions {
@@ -472,16 +486,20 @@ func (sm *SessionManager) saveLocked() {
 		slog.Error("session: failed to marshal", "error", err)
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(sm.storePath), 0o755); err != nil {
-		slog.Error("session: failed to create dir", "error", err)
-		return
-	}
 	if err := AtomicWriteFile(sm.storePath, data, 0o644); err != nil {
 		slog.Error("session: failed to write", "path", sm.storePath, "error", err)
 	}
 }
 
 func (sm *SessionManager) load() {
+	// Acquire exclusive file lock to ensure consistent read.
+	lockFile, err := os.OpenFile(sm.storePath+".lock", os.O_CREATE|os.O_RDWR, 0o644)
+	if err == nil {
+		unix.Flock(int(lockFile.Fd()), unix.LOCK_EX)
+		defer unix.Flock(int(lockFile.Fd()), unix.LOCK_UN)
+		defer lockFile.Close()
+	}
+
 	data, err := os.ReadFile(sm.storePath)
 	if err != nil {
 		if !os.IsNotExist(err) {
