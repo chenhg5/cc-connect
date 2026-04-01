@@ -192,6 +192,7 @@ type Engine struct {
 	autoCompressEnabled   bool
 	autoCompressMaxTokens int
 	autoCompressMinGap    time.Duration
+	resetOnIdle           time.Duration
 
 	// When true, append [ctx: ~N%] (or model self-report) to assistant replies shown on platforms.
 	showContextIndicator bool
@@ -451,6 +452,16 @@ func (e *Engine) SetAutoCompressConfig(enabled bool, maxTokens int, minGap time.
 		minGap = 30 * time.Minute
 	}
 	e.autoCompressMinGap = minGap
+}
+
+// SetResetOnIdle configures automatic session rotation after prolonged inactivity.
+// A zero or negative duration disables the behavior.
+func (e *Engine) SetResetOnIdle(d time.Duration) {
+	if d <= 0 {
+		e.resetOnIdle = 0
+		return
+	}
+	e.resetOnIdle = d
 }
 
 // SetShowContextIndicator controls whether assistant replies include the [ctx: ~N%] suffix.
@@ -1390,6 +1401,10 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		return
 	}
 
+	if rotated := e.maybeAutoResetSessionOnIdle(p, msg, sessions, interactiveKey, session); rotated != nil {
+		session = rotated
+	}
+
 	slog.Info("processing message",
 		"platform", msg.Platform,
 		"user", msg.UserName,
@@ -1397,6 +1412,45 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	)
 
 	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, resolvedWorkspace, msg.SessionKey)
+}
+
+func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions *SessionManager, interactiveKey string, session *Session) *Session {
+	if e.resetOnIdle <= 0 || session == nil {
+		return nil
+	}
+
+	hasBackend := session.GetAgentSessionID() != ""
+	hasHistory := len(session.GetHistory(1)) > 0
+	if !hasBackend && !hasHistory {
+		return nil
+	}
+
+	lastActive := session.GetUpdatedAt()
+	if lastActive.IsZero() || time.Since(lastActive) < e.resetOnIdle {
+		return nil
+	}
+
+	slog.Info("auto-resetting idle session",
+		"session_key", msg.SessionKey,
+		"session_id", session.ID,
+		"idle_for", time.Since(lastActive),
+		"threshold", e.resetOnIdle,
+	)
+
+	e.cleanupInteractiveState(interactiveKey)
+	session.UnlockWithoutUpdate()
+
+	newSession := sessions.NewSession(msg.SessionKey, "")
+	if !newSession.TryLock() {
+		slog.Error("failed to lock new session after idle auto-reset", "session_key", msg.SessionKey, "new_session", newSession.ID)
+		if session.TryLock() {
+			return session
+		}
+		return nil
+	}
+
+	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgSessionAutoResetIdle, int(e.resetOnIdle/time.Minute)))
+	return newSession
 }
 
 // queueMessageForBusySession queues a message for later delivery when the
@@ -2149,8 +2203,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case <-idleCh:
 			slog.Error("agent session idle timeout: no events for too long, killing session",
 				"session_key", sessionKey, "timeout", e.eventIdleTimeout, "elapsed", time.Since(turnStart))
-				cp.Finalize(ProgressCardStateFailed)
-				sp.discard()
+			cp.Finalize(ProgressCardStateFailed)
+			sp.discard()
 			state.mu.Lock()
 			p := state.platform
 			state.mu.Unlock()
@@ -2604,8 +2658,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			return
 
 		case EventError:
-				cp.Finalize(ProgressCardStateFailed)
-				sp.discard()
+			cp.Finalize(ProgressCardStateFailed)
+			sp.discard()
 			if event.Error != nil {
 				slog.Error("agent error", "error", event.Error)
 				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))

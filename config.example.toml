@@ -58,6 +58,14 @@ level = "info" # debug, info, warn, error
 # Agent 空闲超时：两次 agent 事件之间的最大等待分钟数，超时则认为会话卡住。设为 0 禁用。
 # idle_timeout_mins = 120  # default: 120 (2 hours) / 默认 120（2 小时）
 
+# Auto-reset the active session after the user has been inactive for a while.
+# Unlike idle_timeout_mins, this does not detect stuck agent execution. It
+# rotates to a fresh cc-connect session when the user comes back after being idle.
+# 用户长时间未发消息后，自动切换到一个新的活跃会话。
+# 这与 idle_timeout_mins 不同：它不是检测 agent 卡住，而是用户回来后自动开始新会话。
+# [[projects]]
+# reset_on_idle_mins = 60   # 0 or unset = disabled / 设为 0 或留空表示禁用
+
 # =============================================================================
 # Streaming Preview / 流式预览
 # =============================================================================

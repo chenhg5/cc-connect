@@ -380,6 +380,9 @@ func main() {
 			}
 			engine.SetAutoCompressConfig(true, maxTokens, minGap)
 		}
+		if proj.ResetOnIdleMins != nil {
+			engine.SetResetOnIdle(time.Duration(*proj.ResetOnIdleMins) * time.Minute)
+		}
 
 		// Wire sender injection
 		if proj.InjectSender != nil {
@@ -1202,6 +1205,11 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		engine.SetAutoCompressConfig(true, maxTokens, minGap)
 	} else {
 		engine.SetAutoCompressConfig(false, 0, 0)
+	}
+	if proj.ResetOnIdleMins != nil {
+		engine.SetResetOnIdle(time.Duration(*proj.ResetOnIdleMins) * time.Minute)
+	} else {
+		engine.SetResetOnIdle(0)
 	}
 
 	showCtx := true

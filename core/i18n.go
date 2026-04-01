@@ -378,11 +378,11 @@ const (
 	MsgUpgradeSuccess     MsgKey = "upgrade_success"
 	MsgUpgradeDevBuild    MsgKey = "upgrade_dev_build"
 
-	MsgWebNotSupported  MsgKey = "web_not_supported"
-	MsgWebNotEnabled    MsgKey = "web_not_enabled"
-	MsgWebSetupSuccess  MsgKey = "web_setup_success"
-	MsgWebNeedRestart   MsgKey = "web_need_restart"
-	MsgWebStatus        MsgKey = "web_status"
+	MsgWebNotSupported MsgKey = "web_not_supported"
+	MsgWebNotEnabled   MsgKey = "web_not_enabled"
+	MsgWebSetupSuccess MsgKey = "web_setup_success"
+	MsgWebNeedRestart  MsgKey = "web_need_restart"
+	MsgWebStatus       MsgKey = "web_status"
 
 	MsgAliasEmpty      MsgKey = "alias_empty"
 	MsgAliasListHeader MsgKey = "alias_list_header"
@@ -393,6 +393,7 @@ const (
 
 	MsgNewSessionCreated     MsgKey = "new_session_created"
 	MsgNewSessionCreatedName MsgKey = "new_session_created_name"
+	MsgSessionAutoResetIdle  MsgKey = "session_auto_reset_idle"
 
 	MsgDeleteUsage              MsgKey = "delete_usage"
 	MsgDeleteSuccess            MsgKey = "delete_success"
@@ -2697,6 +2698,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "✅ 新會話已建立：**%s**",
 		LangJapanese:           "✅ 新しいセッションを作成しました：**%s**",
 		LangSpanish:            "✅ Nueva sesión creada: **%s**",
+	},
+	MsgSessionAutoResetIdle: {
+		LangEnglish:            "⏰ Session auto-reset after %d minute(s) of inactivity.",
+		LangChinese:            "⏰ 因空闲超过 %d 分钟，已自动切换到新会话。",
+		LangTraditionalChinese: "⏰ 因閒置超過 %d 分鐘，已自動切換到新會話。",
+		LangJapanese:           "⏰ %d 分以上操作がなかったため、新しいセッションに自動切り替えました。",
+		LangSpanish:            "⏰ La sesión se reinició automáticamente tras %d minuto(s) de inactividad.",
 	},
 	MsgDeleteUsage: {
 		LangEnglish:            "Usage: `/delete <number>` or `/delete 1,2,3` or `/delete 3-7` or `/delete 1,3-5,8`.\nUse `/list` to see session numbers.",

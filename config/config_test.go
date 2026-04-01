@@ -621,6 +621,33 @@ func TestLoad_DefaultsAutoCompressDisabled(t *testing.T) {
 	}
 }
 
+func TestLoad_ParsesResetOnIdleMins(t *testing.T) {
+	configPath := writeConfigFixture(t, projectWithResetOnIdleFixture)
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Projects[0].ResetOnIdleMins == nil {
+		t.Fatal("expected reset_on_idle_mins to be parsed")
+	}
+	if got := *cfg.Projects[0].ResetOnIdleMins; got != 60 {
+		t.Fatalf("reset_on_idle_mins = %d, want 60", got)
+	}
+}
+
+func TestLoad_RejectsNegativeResetOnIdleMins(t *testing.T) {
+	configPath := writeConfigFixture(t, projectWithNegativeResetOnIdleFixture)
+
+	_, err := Load(configPath)
+	if err == nil {
+		t.Fatal("expected error for negative reset_on_idle_mins")
+	}
+	if !strings.Contains(err.Error(), "reset_on_idle_mins") {
+		t.Fatalf("error = %q, want reset_on_idle_mins validation", err.Error())
+	}
+}
+
 func TestLoad_ParsesAttachmentSendOff(t *testing.T) {
 	configPath := writeConfigFixture(t, attachmentSendConfigFixture)
 
@@ -848,6 +875,42 @@ type = "telegram"
 bot_token = "token_xxx"
 `
 
+const projectWithResetOnIdleFixture = `
+[[projects]]
+name = "beta"
+reset_on_idle_mins = 60
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/beta"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+bot_token = "token_xxx"
+`
+
+const projectWithNegativeResetOnIdleFixture = `
+[[projects]]
+name = "beta"
+reset_on_idle_mins = -1
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/beta"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+bot_token = "token_xxx"
+`
+
 const weixinConfigFixture = `
 [[projects]]
 name = "alpha"
@@ -899,10 +962,10 @@ func TestValidateUsersConfig(t *testing.T) {
 			name: "nil users is valid",
 			cfg: Config{
 				Projects: []ProjectConfig{{
-					Name: "p1",
-					Agent: AgentConfig{Type: "codex"},
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
-					Users: nil,
+					Users:     nil,
 				}},
 			},
 			wantErr: "",
@@ -911,10 +974,10 @@ func TestValidateUsersConfig(t *testing.T) {
 			name: "empty roles",
 			cfg: Config{
 				Projects: []ProjectConfig{{
-					Name: "p1",
-					Agent: AgentConfig{Type: "codex"},
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
-					Users: &UsersConfig{Roles: map[string]RoleConfig{}},
+					Users:     &UsersConfig{Roles: map[string]RoleConfig{}},
 				}},
 			},
 			wantErr: `no roles defined`,
@@ -923,8 +986,8 @@ func TestValidateUsersConfig(t *testing.T) {
 			name: "empty user_ids in role",
 			cfg: Config{
 				Projects: []ProjectConfig{{
-					Name: "p1",
-					Agent: AgentConfig{Type: "codex"},
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
 					Users: &UsersConfig{
 						Roles: map[string]RoleConfig{
@@ -939,13 +1002,13 @@ func TestValidateUsersConfig(t *testing.T) {
 			name: "duplicate user in different roles",
 			cfg: Config{
 				Projects: []ProjectConfig{{
-					Name: "p1",
-					Agent: AgentConfig{Type: "codex"},
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
 					Users: &UsersConfig{
 						Roles: map[string]RoleConfig{
-							"admin":   {UserIDs: []string{"user1"}},
-							"member":  {UserIDs: []string{"user1"}},
+							"admin":  {UserIDs: []string{"user1"}},
+							"member": {UserIDs: []string{"user1"}},
 						},
 					},
 				}},
@@ -956,8 +1019,8 @@ func TestValidateUsersConfig(t *testing.T) {
 			name: "wildcard in multiple roles",
 			cfg: Config{
 				Projects: []ProjectConfig{{
-					Name: "p1",
-					Agent: AgentConfig{Type: "codex"},
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
 					Users: &UsersConfig{
 						Roles: map[string]RoleConfig{
@@ -973,8 +1036,8 @@ func TestValidateUsersConfig(t *testing.T) {
 			name: "default_role not matching any role",
 			cfg: Config{
 				Projects: []ProjectConfig{{
-					Name: "p1",
-					Agent: AgentConfig{Type: "codex"},
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
 					Users: &UsersConfig{
 						DefaultRole: "superadmin",
@@ -990,8 +1053,8 @@ func TestValidateUsersConfig(t *testing.T) {
 			name: "valid users config",
 			cfg: Config{
 				Projects: []ProjectConfig{{
-					Name: "p1",
-					Agent: AgentConfig{Type: "codex"},
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
 					Users: &UsersConfig{
 						DefaultRole: "member",
@@ -1008,8 +1071,8 @@ func TestValidateUsersConfig(t *testing.T) {
 			name: "valid with wildcard in one role only",
 			cfg: Config{
 				Projects: []ProjectConfig{{
-					Name: "p1",
-					Agent: AgentConfig{Type: "codex"},
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
 					Users: &UsersConfig{
 						Roles: map[string]RoleConfig{
@@ -1182,7 +1245,7 @@ func TestCloneAgentConfig(t *testing.T) {
 			t.Fatalf("Providers length = %d, want 1", len(got.Providers))
 		}
 		p := got.Providers[0]
-		if p.Name != "openai" || p.APIKey != "sk-test" || p.BaseURL != "https://api.openai.com" || p.Model != "gpt-4"  {
+		if p.Name != "openai" || p.APIKey != "sk-test" || p.BaseURL != "https://api.openai.com" || p.Model != "gpt-4" {
 			t.Errorf("Provider fields not cloned correctly: %+v", p)
 		}
 		if p.Env["DEBUG"] != "1" {
