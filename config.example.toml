@@ -911,20 +911,17 @@ app_secret = "your-feishu-app-secret"
 #
 # [projects.agent.options]
 # work_dir = "/path/to/project"
-# mode = "force"    # "default" | "force" (yolo) | "plan" | "ask"
-# cmd = "agent"     # CLI binary name (default: "agent") / CLI 二进制名称（默认 "agent"）
-# sandbox = "disabled"  # "enabled" | "disabled" | "" (let CLI decide)
+# mode = "force"  # "default" | "force" (yolo) | "plan" | "ask"
+# cmd = "agent"   # CLI binary name (default: "agent") / CLI 二进制名称（默认 "agent"）
 #
 # Mode options / 模式说明:
 # - "default": Trust workspace, ask before tool use / 信任工作区，工具调用前询问
-# - "force":   Auto-approve all tool calls (same as --force/--yolo) / 自动批准所有工具调用
+#              Note: Shell tool is restricted to safe commands (e.g. ls) in this mode
+#              注意：此模式下 Shell 工具仅允许安全命令（如 ls）
+# - "force":   Auto-approve all tool calls, full shell access (same as --force/--yolo)
+#              自动批准所有工具调用，完整 Shell 访问（等同 --force/--yolo）
 # - "plan":    Read-only analysis, no edits / 只读分析，不做修改
 # - "ask":     Q&A style, read-only / 问答风格，只读
-#
-# Sandbox options / 沙箱模式说明:
-# - "disabled": Full tool access (shell, edit, write, etc.) / 完整工具访问（shell、edit、write 等）
-# - "enabled":  Restricted tools (read-only, ls, etc.) / 受限工具（只读、ls 等）
-# - "":         Let Cursor CLI decide (may default to sandbox in headless) / 由 CLI 决定（headless 可能默认沙箱）
 #
 # Optional: specify a model / 可选：指定模型
 # model = "claude-sonnet-4-20250514"

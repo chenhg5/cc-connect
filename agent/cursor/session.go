@@ -26,7 +26,6 @@ type cursorSession struct {
 	workDir  string
 	model    string
 	mode     string
-	sandbox  string // "enabled", "disabled", or ""
 	extraEnv []string
 	events   chan core.Event
 	chatID   atomic.Value // stores string — Cursor chat/session ID
@@ -38,7 +37,7 @@ type cursorSession struct {
 	thinkingBuf strings.Builder // accumulate thinking deltas
 }
 
-func newCursorSession(ctx context.Context, cmd, workDir, model, mode, sandbox, resumeID string, extraEnv []string) (*cursorSession, error) {
+func newCursorSession(ctx context.Context, cmd, workDir, model, mode, resumeID string, extraEnv []string) (*cursorSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	cs := &cursorSession{
@@ -46,7 +45,6 @@ func newCursorSession(ctx context.Context, cmd, workDir, model, mode, sandbox, r
 		workDir:  workDir,
 		model:    model,
 		mode:     mode,
-		sandbox:  sandbox,
 		extraEnv: extraEnv,
 		events:   make(chan core.Event, 64),
 		ctx:      sessionCtx,
@@ -89,10 +87,6 @@ func (cs *cursorSession) Send(prompt string, images []core.ImageAttachment, file
 		args = append(args, "--mode", "plan")
 	case "ask":
 		args = append(args, "--mode", "ask")
-	}
-
-	if cs.sandbox != "" {
-		args = append(args, "--sandbox", cs.sandbox)
 	}
 
 	if isResume {
