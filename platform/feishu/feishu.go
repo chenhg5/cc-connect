@@ -134,6 +134,8 @@ type Platform struct {
 	callbackPath string
 	encryptKey   string
 	eventHandler *dispatcher.EventDispatcher
+	// Token cache for handling invalid token errors (issue #395)
+	tokenCache *tokenCache
 }
 
 type interactivePlatform struct {
@@ -202,6 +204,11 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	if domain != lark.FeishuBaseUrl {
 		clientOpts = append(clientOpts, lark.WithOpenBaseUrl(domain))
 	}
+	// Use custom token cache to handle invalid token errors (issue #395)
+	// The SDK's built-in retry doesn't properly clear cached tokens when
+	// the server returns error 99991663 (invalid tenant_access_token).
+	tc := newTokenCache()
+	clientOpts = append(clientOpts, lark.WithTokenCache(tc))
 
 	base := &Platform{
 		platformName:          name,
@@ -220,6 +227,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		port:                  port,
 		callbackPath:          callbackPath,
 		encryptKey:            encryptKey,
+		tokenCache:            tc,
 	}
 	if !useInteractiveCard {
 		base.self = base
@@ -1093,17 +1101,38 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 		return p.sendNewMessageToChat(ctx, rc, msgType, msgBody)
 	}
 
-	resp, err := p.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
-		MessageId(rc.messageID).
-		Body(p.buildReplyMessageReqBody(rc, msgType, msgBody)).
-		Build())
+	// Retry once if token is invalid (issue #395)
+	resp, err := p.replyWithRetry(ctx, rc, msgType, msgBody)
 	if err != nil {
-		return fmt.Errorf("%s: reply api call: %w", p.tag(), err)
+		return err
 	}
 	if !resp.Success() {
 		return fmt.Errorf("%s: reply failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
 	}
 	return nil
+}
+
+// replyWithRetry sends a reply message, retrying once if the token is invalid.
+func (p *Platform) replyWithRetry(ctx context.Context, rc replyContext, msgType, msgBody string) (*larkim.ReplyMessageResp, error) {
+	resp, err := p.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
+		MessageId(rc.messageID).
+		Body(p.buildReplyMessageReqBody(rc, msgType, msgBody)).
+		Build())
+	if err != nil {
+		return nil, fmt.Errorf("%s: reply api call: %w", p.tag(), err)
+	}
+	// If token is invalid, invalidate cache and retry once (issue #395)
+	if resp.Code == invalidTokenCode && p.tokenCache != nil {
+		p.tokenCache.InvalidateAll()
+		resp, err = p.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
+			MessageId(rc.messageID).
+			Body(p.buildReplyMessageReqBody(rc, msgType, msgBody)).
+			Build())
+		if err != nil {
+			return nil, fmt.Errorf("%s: reply api call (retry): %w", p.tag(), err)
+		}
+	}
+	return resp, nil
 }
 
 // Send sends a message. When the original message ID is available, the message
@@ -1741,21 +1770,46 @@ func (p *Platform) sendNewMessageToChat(ctx context.Context, rc replyContext, ms
 	if rc.chatID == "" {
 		return fmt.Errorf("%s: chatID is empty, cannot send new message", p.tag())
 	}
-	resp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
-		ReceiveIdType(larkim.ReceiveIdTypeChatId).
-		Body(larkim.NewCreateMessageReqBodyBuilder().
-			ReceiveId(rc.chatID).
-			MsgType(msgType).
-			Content(content).
-			Build()).
-		Build())
+	// Retry once if token is invalid (issue #395)
+	resp, err := p.sendNewMessageWithRetry(ctx, rc.chatID, msgType, content)
 	if err != nil {
-		return fmt.Errorf("%s: send api call: %w", p.tag(), err)
+		return err
 	}
 	if !resp.Success() {
 		return fmt.Errorf("%s: send failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
 	}
 	return nil
+}
+
+// sendNewMessageWithRetry creates a new message, retrying once if the token is invalid.
+func (p *Platform) sendNewMessageWithRetry(ctx context.Context, chatID, msgType, content string) (*larkim.CreateMessageResp, error) {
+	resp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
+		ReceiveIdType(larkim.ReceiveIdTypeChatId).
+		Body(larkim.NewCreateMessageReqBodyBuilder().
+			ReceiveId(chatID).
+			MsgType(msgType).
+			Content(content).
+			Build()).
+		Build())
+	if err != nil {
+		return nil, fmt.Errorf("%s: send api call: %w", p.tag(), err)
+	}
+	// If token is invalid, invalidate cache and retry once (issue #395)
+	if resp.Code == invalidTokenCode && p.tokenCache != nil {
+		p.tokenCache.InvalidateAll()
+		resp, err = p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
+			ReceiveIdType(larkim.ReceiveIdTypeChatId).
+			Body(larkim.NewCreateMessageReqBodyBuilder().
+				ReceiveId(chatID).
+				MsgType(msgType).
+				Content(content).
+				Build()).
+			Build())
+		if err != nil {
+			return nil, fmt.Errorf("%s: send api call (retry): %w", p.tag(), err)
+		}
+	}
+	return resp, nil
 }
 
 func (p *Platform) buildReplyMessageReqBody(rc replyContext, msgType, content string) *larkim.ReplyMessageReqBody {
