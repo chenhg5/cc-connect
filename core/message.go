@@ -141,6 +141,7 @@ type Message struct {
 	ChannelKey string            // platform-provided channel identifier for workspace binding (optional)
 	ReplyCtx   any               // platform-specific context needed for replying
 	FromVoice  bool              // true if message originated from voice transcription
+	SilentEmpty bool             // true if empty response should be suppressed (heartbeat silent mode)
 }
 
 // EventType distinguishes different kinds of agent output.

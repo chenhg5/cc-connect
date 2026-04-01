@@ -261,6 +261,7 @@ type interactiveState struct {
 	deleteMode             *deleteModeState
 	lastAutoCompressAt     time.Time
 	lastAutoCompressTokens int
+	silentEmpty            bool // true if empty response should be suppressed (heartbeat silent mode)
 }
 
 type deleteModeState struct {
@@ -997,12 +998,13 @@ func (e *Engine) ExecuteHeartbeat(sessionKey, prompt string, silent bool) error 
 	}
 
 	msg := &Message{
-		SessionKey: sessionKey,
-		Platform:   platformName,
-		UserID:     "heartbeat",
-		UserName:   "heartbeat",
-		Content:    prompt,
-		ReplyCtx:   replyCtx,
+		SessionKey:  sessionKey,
+		Platform:    platformName,
+		UserID:      "heartbeat",
+		UserName:    "heartbeat",
+		Content:     prompt,
+		ReplyCtx:    replyCtx,
+		SilentEmpty: silent,
 	}
 
 	session := e.sessions.GetOrCreateActive(sessionKey)
@@ -1796,6 +1798,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	sendStart := time.Now()
 	state.mu.Lock()
 	state.fromVoice = msg.FromVoice
+	state.silentEmpty = msg.SilentEmpty
 	state.sideText = ""
 	state.mu.Unlock()
 
@@ -2400,7 +2403,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if fullResponse == "" && len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")
 			}
-			if fullResponse == "" {
+			// Check silentEmpty flag to suppress empty response for heartbeat silent mode.
+			state.mu.Lock()
+			silentEmpty := state.silentEmpty
+			state.mu.Unlock()
+			if fullResponse == "" && !silentEmpty {
 				fullResponse = e.i18n.T(MsgEmptyResponse)
 			}
 
