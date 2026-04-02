@@ -274,6 +274,13 @@ cc-connect update --pre     # Beta (includes pre-releases)
 /dir [path|reset] Show, switch, or reset work directory
 ```
 
+Project configs can also rotate to a fresh session automatically after long inactivity:
+
+```toml
+[[projects]]
+reset_on_idle_mins = 60
+```
+
 ---
 
 ### 🔐 Permission Modes
@@ -375,6 +382,7 @@ Notes:
 - [Usage Guide](docs/usage.md) — Complete feature documentation
 - [INSTALL.md](INSTALL.md) — AI-agent-friendly installation guide
 - [config.example.toml](config.example.toml) — Configuration template
+- [CONTRIBUTING.md](CONTRIBUTING.md) — How to report issues and contribute pull requests
 
 ---
 

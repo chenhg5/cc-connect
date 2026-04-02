@@ -162,7 +162,7 @@ func parseDaemonInstallArgs(args []string) (daemon.Config, bool, error) {
 		case strings.HasPrefix(arg, "-config="):
 			cfg.WorkDir = filepath.Dir(strings.TrimPrefix(arg, "-config="))
 		default:
-			return daemon.Config{}, false, fmt.Errorf("Unknown flag: %s", arg)
+			return daemon.Config{}, false, fmt.Errorf("unknown flag: %s", arg)
 		}
 	}
 

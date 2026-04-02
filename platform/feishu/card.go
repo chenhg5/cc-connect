@@ -23,17 +23,13 @@ func (p *interactivePlatform) ReplyCard(ctx context.Context, rctx any, card *cor
 	}
 
 	cardJSON := renderCard(card, rc.sessionKey)
-	resp, err := p.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
-		MessageId(rc.messageID).
-		Body(p.buildReplyMessageReqBody(rc, larkim.MsgTypeInteractive, cardJSON)).
-		Build())
-	if err != nil {
-		return fmt.Errorf("%s: reply card api call: %w", p.tag(), err)
+	if !p.shouldUseThreadOrReplyAPI(rc) {
+		if rc.chatID == "" {
+			return fmt.Errorf("%s: chatID is empty, cannot send card", p.tag())
+		}
+		return p.createMessage(ctx, rc.chatID, larkim.MsgTypeInteractive, cardJSON, "send card")
 	}
-	if !resp.Success() {
-		return fmt.Errorf("%s: reply card failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
-	}
-	return nil
+	return p.replyMessage(ctx, rc, larkim.MsgTypeInteractive, cardJSON)
 }
 
 // SendCard sends a structured card as a new message to the chat.
@@ -46,26 +42,12 @@ func (p *interactivePlatform) SendCard(ctx context.Context, rctx any, card *core
 		return fmt.Errorf("%s: chatID is empty, cannot send card", p.tag())
 	}
 
-	if p.shouldReplyInThread(rc) {
+	if !p.noReplyToTrigger && p.shouldReplyInThread(rc) {
 		return p.ReplyCard(ctx, rctx, card)
 	}
 
 	cardJSON := renderCard(card, rc.sessionKey)
-	resp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
-		ReceiveIdType(larkim.ReceiveIdTypeChatId).
-		Body(larkim.NewCreateMessageReqBodyBuilder().
-			ReceiveId(rc.chatID).
-			MsgType(larkim.MsgTypeInteractive).
-			Content(cardJSON).
-			Build()).
-		Build())
-	if err != nil {
-		return fmt.Errorf("%s: send card api call: %w", p.tag(), err)
-	}
-	if !resp.Success() {
-		return fmt.Errorf("%s: send card failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
-	}
-	return nil
+	return p.createMessage(ctx, rc.chatID, larkim.MsgTypeInteractive, cardJSON, "send card")
 }
 
 // renderCardMap converts a core.Card into the Feishu Interactive Card map

@@ -141,6 +141,19 @@ type MessageUpdater interface {
 	UpdateMessage(ctx context.Context, replyCtx any, content string) error
 }
 
+// ProgressStyleProvider is an optional interface for platforms that expose
+// a preferred style for intermediate progress rendering.
+// Typical values: "legacy", "compact", "card".
+type ProgressStyleProvider interface {
+	ProgressStyle() string
+}
+
+// ProgressCardPayloadSupport is an optional interface for platforms that can
+// parse and render structured progress-card payloads.
+type ProgressCardPayloadSupport interface {
+	SupportsProgressCardPayload() bool
+}
+
 // ButtonOption represents a clickable inline button.
 type ButtonOption struct {
 	Text string // display text on the button
@@ -377,6 +390,12 @@ type ModeSwitcher interface {
 	SetMode(mode string)
 	GetMode() string
 	PermissionModes() []PermissionModeInfo
+}
+
+// LiveModeSwitcher is an optional interface for running agent sessions that can
+// apply a mode change immediately without restarting the process.
+type LiveModeSwitcher interface {
+	SetLiveMode(mode string) bool
 }
 
 // PermissionModeInfo describes a permission mode for display.

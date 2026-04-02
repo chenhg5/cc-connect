@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +15,8 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/gorilla/websocket"
+	"golang.org/x/net/proxy"
 )
 
 func init() {
@@ -46,6 +49,9 @@ type Platform struct {
 	shareSessionInChannel      bool
 	threadIsolation            bool
 	respondToAtEveryoneAndHere bool
+	proxyURL                   *url.URL
+	httpClient                 *http.Client      // optional HTTP client for proxy
+	proxyConfig                *core.ProxyConfig // proxy configuration for WebSocket dialer
 	session                    *discordgo.Session
 	handler                    core.MessageHandler
 	botID                      string
@@ -54,9 +60,17 @@ type Platform struct {
 	botRoleIDs                 sync.Map // guildID -> bot managed role ID
 	readyCh                    chan struct{}
 	seenMsgs                   sync.Map // message ID dedup: prevents duplicate MessageCreate events
+	seenInteractions           sync.Map // interaction ID dedup: prevents duplicate slash/button events
 }
 
 func New(opts map[string]any) (core.Platform, error) {
+	slog.Info("discord: New() called", "opts_keys", func() (keys []string) {
+		for k := range opts {
+			keys = append(keys, k)
+		}
+		return
+	}())
+
 	token, _ := opts["token"].(string)
 	if token == "" {
 		return nil, fmt.Errorf("discord: token is required")
@@ -68,6 +82,35 @@ func New(opts map[string]any) (core.Platform, error) {
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	threadIsolation, _ := opts["thread_isolation"].(bool)
 	respondToAtEveryoneAndHere, _ := opts["respond_to_at_everyone_and_here"].(bool)
+
+	var proxyU *url.URL
+	if proxyStr, _ := opts["proxy"].(string); proxyStr != "" {
+		u, err := url.Parse(proxyStr)
+		if err != nil {
+			return nil, fmt.Errorf("discord: invalid proxy URL %q: %w", proxyStr, err)
+		}
+		if user, _ := opts["proxy_username"].(string); user != "" {
+			pass, _ := opts["proxy_password"].(string)
+			u.User = url.UserPassword(user, pass)
+		}
+		proxyU = u
+	}
+
+	// Try new proxy config format first
+	var httpClient *http.Client
+	var proxyConfig *core.ProxyConfig
+	if proxyCfg, ok := opts["proxy"].(map[string]any); ok {
+		proxyConfig = parseProxyConfig(proxyCfg)
+		if proxyConfig != nil {
+			slog.Info("discord: proxy configured", "type", proxyConfig.Type, "addr", proxyConfig.Addr)
+			var err error
+			httpClient, err = core.BuildHTTPClient(proxyConfig, 60*time.Second)
+			if err != nil {
+				return nil, fmt.Errorf("discord: failed to create HTTP client: %w", err)
+			}
+		}
+	}
+
 	return &Platform{
 		token:                      token,
 		allowFrom:                  allowFrom,
@@ -77,13 +120,46 @@ func New(opts map[string]any) (core.Platform, error) {
 		readyCh:                    make(chan struct{}),
 		threadIsolation:            threadIsolation,
 		respondToAtEveryoneAndHere: respondToAtEveryoneAndHere,
+		proxyURL:                   proxyU,
+		httpClient:                 httpClient,
+		proxyConfig:                proxyConfig,
 	}, nil
+}
+
+// parseProxyConfig converts map[string]any to core.ProxyConfig
+func parseProxyConfig(cfg map[string]any) *core.ProxyConfig {
+	typ, _ := cfg["type"].(string)
+	addr, _ := cfg["addr"].(string)
+	username, _ := cfg["username"].(string)
+	password, _ := cfg["password"].(string)
+
+	if typ == "" || addr == "" {
+		return nil
+	}
+
+	return &core.ProxyConfig{
+		Type:     typ,
+		Addr:     addr,
+		Username: username,
+		Password: password,
+	}
 }
 
 func (p *Platform) Name() string { return "discord" }
 
 func (p *Platform) makeSessionKey(channelID string, userID string) string {
 	return buildSessionKey(channelID, userID, p.shareSessionInChannel)
+}
+
+func rememberDedupID(store *sync.Map, id string) bool {
+	if id == "" {
+		return true
+	}
+	if _, loaded := store.LoadOrStore(id, struct{}{}); loaded {
+		return false
+	}
+	time.AfterFunc(2*time.Minute, func() { store.Delete(id) })
+	return true
 }
 
 func buildSessionKey(channelID string, userID string, shareSessionInChannel bool) string {
@@ -375,7 +451,62 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	if err != nil {
 		return fmt.Errorf("discord: create session: %w", err)
 	}
+	if p.proxyURL != nil {
+		transport := &http.Transport{Proxy: http.ProxyURL(p.proxyURL)}
+		session.Client = &http.Client{Transport: transport, Timeout: 60 * time.Second}
+		session.Dialer = &websocket.Dialer{Proxy: http.ProxyURL(p.proxyURL)}
+		slog.Info("discord: using proxy", "proxy", p.proxyURL.Host)
+	}
 	p.session = session
+
+	// Set custom HTTP client if proxy is configured
+	if p.httpClient != nil {
+		slog.Info("discord: setting custom HTTP client with proxy")
+		session.Client = p.httpClient
+	} else {
+		slog.Info("discord: using default HTTP client (no proxy)")
+	}
+
+	// Configure WebSocket dialer with proxy if needed
+	if p.proxyConfig != nil {
+		slog.Info("discord: configuring WebSocket dialer with proxy", "type", p.proxyConfig.Type, "addr", p.proxyConfig.Addr)
+
+		// Create SOCKS5 dialer
+		if p.proxyConfig.Type == "socks5" {
+			var auth *proxy.Auth
+			if p.proxyConfig.Username != "" || p.proxyConfig.Password != "" {
+				auth = &proxy.Auth{
+					User:     p.proxyConfig.Username,
+					Password: p.proxyConfig.Password,
+				}
+			}
+
+			dialer, err := proxy.SOCKS5("tcp", p.proxyConfig.Addr, auth, proxy.Direct)
+			if err != nil {
+				return fmt.Errorf("discord: failed to create SOCKS5 dialer: %w", err)
+			}
+
+			// Set custom WebSocket dialer
+			session.Dialer = &websocket.Dialer{
+				NetDial: dialer.Dial,
+			}
+			slog.Info("discord: WebSocket dialer configured with SOCKS5 proxy", "addr", p.proxyConfig.Addr)
+		} else {
+			// For HTTP/HTTPS proxies, use standard proxy URL
+			proxyURL, err := url.Parse(p.proxyConfig.Addr)
+			if err != nil {
+				return fmt.Errorf("discord: failed to parse proxy URL: %w", err)
+			}
+			if proxyURL.Scheme == "" {
+				proxyURL.Scheme = "http"
+			}
+
+			session.Dialer = &websocket.Dialer{
+				Proxy: http.ProxyURL(proxyURL),
+			}
+			slog.Info("discord: WebSocket dialer configured with HTTP proxy", "addr", p.proxyConfig.Addr)
+		}
+	}
 
 	session.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentMessageContent
 
@@ -407,11 +538,10 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 
 	session.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
 		// Deduplicate: Discord gateway may deliver the same event twice
-		if _, loaded := p.seenMsgs.LoadOrStore(m.ID, struct{}{}); loaded {
+		if !rememberDedupID(&p.seenMsgs, m.ID) {
 			slog.Debug("discord: ignoring duplicate message", "msg_id", m.ID)
 			return
 		}
-		time.AfterFunc(2*time.Minute, func() { p.seenMsgs.Delete(m.ID) })
 
 		if m.Author.Bot || m.Author.ID == p.botID {
 			return
@@ -463,7 +593,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		for _, att := range m.Attachments {
 			ct := strings.ToLower(att.ContentType)
 			if strings.HasPrefix(ct, "audio/") {
-				data, err := downloadURL(att.URL)
+				data, err := p.downloadURL(att.URL)
 				if err != nil {
 					slog.Error("discord: download audio failed", "url", att.URL, "error", err)
 					continue
@@ -476,7 +606,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 					MimeType: ct, Data: data, Format: format,
 				}
 			} else if att.Width > 0 && att.Height > 0 {
-				data, err := downloadURL(att.URL)
+				data, err := p.downloadURL(att.URL)
 				if err != nil {
 					slog.Error("discord: download attachment failed", "url", att.URL, "error", err)
 					continue
@@ -512,9 +642,10 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	return nil
 }
 
-// handleInteraction processes an incoming Discord slash command interaction.
+// handleInteraction processes incoming Discord command and button interactions.
 func (p *Platform) handleInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	if i.Type != discordgo.InteractionApplicationCommand {
+	if !rememberDedupID(&p.seenInteractions, i.ID) {
+		slog.Debug("discord: ignoring duplicate interaction", "interaction_id", i.ID, "type", i.Type)
 		return
 	}
 
@@ -539,11 +670,37 @@ func (p *Platform) handleInteraction(s *discordgo.Session, i *discordgo.Interact
 		return
 	}
 
+	switch i.Type {
+	case discordgo.InteractionMessageComponent:
+		p.handleComponentInteraction(s, i, userID, userName)
+		return
+	case discordgo.InteractionApplicationCommand:
+	default:
+		return
+	}
+
+	var rctx any
 	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
 	}); err != nil {
-		slog.Error("discord: defer interaction failed", "error", err)
-		return
+		// Defer must usually happen within ~3s; if it fails (e.g. "Unknown interaction"),
+		// aborting here drops the command entirely (#258). Fall back to normal channel
+		// messages — sendInteraction already falls back similarly on edit failures.
+		slog.Warn("discord: defer interaction failed, continuing with channel replies", "error", err)
+		channelID := i.ChannelID
+		var rc replyContext
+		if ch, chErr := s.Channel(channelID); chErr != nil {
+			slog.Debug("discord: channel lookup for slash fallback failed", "channel", channelID, "error", chErr)
+			rc = replyContext{channelID: channelID}
+		} else {
+			rc = replyContextForDeferredInteractionFallback(ch, channelID)
+		}
+		rctx = rc
+	} else {
+		rctx = &interactionReplyCtx{
+			interaction: i.Interaction,
+			channelID:   i.ChannelID,
+		}
 	}
 
 	data := i.ApplicationCommandData()
@@ -553,19 +710,30 @@ func (p *Platform) handleInteraction(s *discordgo.Session, i *discordgo.Interact
 	slog.Debug("discord: slash command", "user", userName, "command", cmdText, "channel", channelID)
 
 	sessionKey := resolveSessionKeyForChannel(channelID, userID, p.shareSessionInChannel, p.threadIsolation, sessionThreadOps{session: p.session})
-	ictx := &interactionReplyCtx{
-		interaction: i.Interaction,
-		channelID:   channelID,
-	}
 
 	msg := &core.Message{
 		SessionKey: sessionKey, Platform: "discord",
 		MessageID: i.ID,
 		UserID:    userID, UserName: userName,
 		ChatName: p.resolveChannelName(channelID),
-		Content:  cmdText, ReplyCtx: ictx,
+		Content:  cmdText, ReplyCtx: rctx,
 	}
 	p.handler(p, msg)
+}
+
+// replyContextForDeferredInteractionFallback builds a replyContext for slash commands
+// when InteractionRespond(defer) failed. Thread channels must set threadID so
+// sendChannelReply uses ChannelMessageSend instead of ChannelMessageSendReply with an empty ref.
+func replyContextForDeferredInteractionFallback(ch *discordgo.Channel, channelID string) replyContext {
+	if ch == nil {
+		return replyContext{channelID: channelID}
+	}
+	switch ch.Type {
+	case discordgo.ChannelTypeGuildPublicThread, discordgo.ChannelTypeGuildPrivateThread:
+		return replyContext{channelID: channelID, threadID: channelID}
+	default:
+		return replyContext{channelID: channelID}
+	}
 }
 
 // reconstructCommand converts a Discord interaction back to a text command string
@@ -583,6 +751,47 @@ func reconstructCommand(data discordgo.ApplicationCommandInteractionData) string
 		}
 	}
 	return strings.Join(parts, " ")
+}
+
+func (p *Platform) handleComponentInteraction(s *discordgo.Session, i *discordgo.InteractionCreate, userID, userName string) {
+	data := i.MessageComponentData()
+	if !strings.HasPrefix(data.CustomID, "cmd:") {
+		slog.Debug("discord: unknown component interaction", "custom_id", data.CustomID)
+		return
+	}
+
+	command := strings.TrimPrefix(data.CustomID, "cmd:")
+	origText := ""
+	if i.Message != nil {
+		origText = i.Message.Content
+	}
+	emptyComponents := []discordgo.MessageComponent{}
+	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseUpdateMessage,
+		Data: &discordgo.InteractionResponseData{
+			Content:    origText + "\n\n> " + command,
+			Components: emptyComponents,
+		},
+	}); err != nil {
+		slog.Debug("discord: command component update failed", "error", err)
+	}
+
+	channelID := i.ChannelID
+	sessionKey := resolveSessionKeyForChannel(channelID, userID, p.shareSessionInChannel, p.threadIsolation, sessionThreadOps{session: p.session})
+	rc := replyContext{channelID: channelID}
+	if i.Message != nil {
+		rc.messageID = i.Message.ID
+	}
+	p.handler(p, &core.Message{
+		SessionKey: sessionKey,
+		Platform:   "discord",
+		MessageID:  i.ID,
+		UserID:     userID,
+		UserName:   userName,
+		ChatName:   p.resolveChannelName(channelID),
+		Content:    command,
+		ReplyCtx:   rc,
+	})
 }
 
 func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
@@ -644,7 +853,7 @@ func (p *Platform) sendChannelReply(rc replyContext, content string) error {
 	chunks := core.SplitMessageCodeFenceAware(content, maxDiscordLen)
 	for _, chunk := range chunks {
 		var err error
-		if rc.useThreadChannel() {
+		if rc.useThreadChannel() || rc.messageID == "" {
 			_, err = p.session.ChannelMessageSend(rc.targetChannelID(), chunk)
 		} else {
 			ref := &discordgo.MessageReference{MessageID: rc.messageID}
@@ -726,7 +935,118 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 	}
 }
 
+func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachment) error {
+	name := file.FileName
+	if name == "" {
+		name = "attachment"
+	}
+
+	newFile := func() *discordgo.File {
+		return &discordgo.File{
+			Name:        name,
+			ContentType: file.MimeType,
+			Reader:      bytes.NewReader(file.Data),
+		}
+	}
+
+	switch rc := rctx.(type) {
+	case *interactionReplyCtx:
+		rc.mu.Lock()
+		first := !rc.firstDone
+		if first {
+			rc.firstDone = true
+		}
+		rc.mu.Unlock()
+
+		var err error
+		if first {
+			_, err = p.session.InteractionResponseEdit(rc.interaction, &discordgo.WebhookEdit{
+				Files: []*discordgo.File{newFile()},
+			})
+		} else {
+			_, err = p.session.FollowupMessageCreate(rc.interaction, true, &discordgo.WebhookParams{
+				Files: []*discordgo.File{newFile()},
+			})
+		}
+		if err != nil {
+			slog.Warn("discord: interaction file failed, falling back to channel message", "error", err)
+			_, err = p.session.ChannelMessageSendComplex(rc.channelID, &discordgo.MessageSend{
+				Files: []*discordgo.File{newFile()},
+			})
+			if err != nil {
+				return fmt.Errorf("discord: send file fallback: %w", err)
+			}
+		}
+		return nil
+	case replyContext:
+		_, err := p.session.ChannelMessageSendComplex(rc.targetChannelID(), &discordgo.MessageSend{
+			Files: []*discordgo.File{newFile()},
+		})
+		if err != nil {
+			return fmt.Errorf("discord: send file: %w", err)
+		}
+		return nil
+	default:
+		return fmt.Errorf("discord: SendFile: invalid reply context type %T", rctx)
+	}
+}
+
+func buildDiscordActionRows(rows [][]core.ButtonOption) []discordgo.MessageComponent {
+	components := make([]discordgo.MessageComponent, 0, len(rows))
+	for _, row := range rows {
+		if len(row) == 0 {
+			continue
+		}
+		buttons := make([]discordgo.MessageComponent, 0, len(row))
+		for idx, btn := range row {
+			style := discordgo.SecondaryButton
+			switch idx {
+			case 0:
+				style = discordgo.SuccessButton
+			case 1:
+				style = discordgo.DangerButton
+			case 2:
+				style = discordgo.PrimaryButton
+			}
+			buttons = append(buttons, discordgo.Button{
+				Label:    btn.Text,
+				Style:    style,
+				CustomID: btn.Data,
+			})
+		}
+		components = append(components, discordgo.ActionsRow{Components: buttons})
+	}
+	return components
+}
+
+func (p *Platform) SendWithButtons(ctx context.Context, rctx any, content string, buttons [][]core.ButtonOption) error {
+	rc, ok := rctx.(*interactionReplyCtx)
+	if !ok {
+		return core.ErrNotSupported
+	}
+	if len(buttons) == 0 {
+		return fmt.Errorf("discord: no buttons provided")
+	}
+	components := buildDiscordActionRows(buttons)
+	if len(components) == 0 {
+		return fmt.Errorf("discord: no buttons provided")
+	}
+	if err := p.sendInteraction(rc, content); err != nil {
+		return err
+	}
+	_, err := p.session.FollowupMessageCreate(rc.interaction, true, &discordgo.WebhookParams{
+		Content:    content,
+		Components: components,
+	})
+	if err != nil {
+		return fmt.Errorf("discord: send button followup: %w", err)
+	}
+	return nil
+}
+
 var _ core.ImageSender = (*Platform)(nil)
+var _ core.FileSender = (*Platform)(nil)
+var _ core.InlineButtonSender = (*Platform)(nil)
 
 func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	// discord:{channelID}:{userID} or discord:{threadID}
@@ -980,8 +1300,12 @@ func (p *Platform) resolveBotRoleIDForGuild(s *discordgo.Session, guildID string
 	return "", nil
 }
 
-func downloadURL(u string) ([]byte, error) {
-	resp, err := core.HTTPClient.Get(u)
+func (p *Platform) downloadURL(u string) ([]byte, error) {
+	client := core.HTTPClient
+	if p.httpClient != nil {
+		client = p.httpClient
+	}
+	resp, err := client.Get(u)
 	if err != nil {
 		return nil, err
 	}

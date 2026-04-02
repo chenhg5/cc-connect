@@ -38,6 +38,9 @@ func main() {
 		case "config-example":
 			fmt.Print(ccconnect.ConfigExampleTOML)
 			return
+		case "config":
+			runConfig(os.Args[2:])
+			return
 		case "update":
 			runUpdate()
 			return
@@ -159,12 +162,25 @@ func main() {
 
 		var platforms []core.Platform
 		for _, pc := range proj.Platforms {
+			// Copy platform options
 			opts := make(map[string]any, len(pc.Options)+2)
 			for k, v := range pc.Options {
 				opts[k] = v
 			}
 			opts["cc_data_dir"] = cfg.DataDir
 			opts["cc_project"] = proj.Name
+			// Add proxy config if present - convert to map[string]any
+			if pc.Proxy != nil {
+				slog.Info("main: adding proxy to opts", "platform", pc.Type, "proxy_type", pc.Proxy.Type, "proxy_addr", pc.Proxy.Addr)
+				opts["proxy"] = map[string]any{
+					"type":     pc.Proxy.Type,
+					"addr":     pc.Proxy.Addr,
+					"username": pc.Proxy.Username,
+					"password": pc.Proxy.Password,
+				}
+			} else {
+				slog.Info("main: no proxy config for platform", "platform", pc.Type)
+			}
 			p, err := core.CreatePlatform(pc.Type, opts)
 			if err != nil {
 				slog.Error("failed to create platform", "project", proj.Name, "type", pc.Type, "error", err)
@@ -196,6 +212,11 @@ func main() {
 		}
 
 		engine := core.NewEngine(proj.Name, agent, platforms, sessionFile, lang)
+		showCtx := true
+		if proj.ShowContextIndicator != nil {
+			showCtx = *proj.ShowContextIndicator
+		}
+		engine.SetShowContextIndicator(showCtx)
 		engine.SetAttachmentSendEnabled(cfg.AttachmentSend != "off")
 		engine.SetBaseWorkDir(workDir)
 		engine.SetProjectStateStore(projectState)
@@ -263,12 +284,16 @@ func main() {
 			dcfg := core.DisplayCfg{
 				ThinkingMaxLen: 300,
 				ToolMaxLen:     500,
+				ToolMessages:   true,
 			}
 			if cfg.Display.ThinkingMaxLen != nil {
 				dcfg.ThinkingMaxLen = *cfg.Display.ThinkingMaxLen
 			}
 			if cfg.Display.ToolMaxLen != nil {
 				dcfg.ToolMaxLen = *cfg.Display.ToolMaxLen
+			}
+			if cfg.Display.ToolMessages != nil {
+				dcfg.ToolMessages = *cfg.Display.ToolMessages
 			}
 			engine.SetDisplayConfig(dcfg)
 		}
@@ -311,8 +336,36 @@ func main() {
 				})
 			}
 		}
-		engine.SetDisplaySaveFunc(func(thinkingMaxLen, toolMaxLen *int) error {
-			return config.SaveDisplayConfig(thinkingMaxLen, toolMaxLen)
+		// Wire outgoing rate limiting
+		{
+			var maxPS float64
+			if cfg.OutgoingRateLimit.MaxPerSecond != nil {
+				maxPS = *cfg.OutgoingRateLimit.MaxPerSecond
+			}
+			var burst int
+			if cfg.OutgoingRateLimit.Burst != nil {
+				burst = *cfg.OutgoingRateLimit.Burst
+			}
+			defaults := core.OutgoingRateLimitCfg{MaxPerSecond: maxPS, Burst: burst}
+			overrides := make(map[string]core.OutgoingRateLimitCfg)
+			for name, pc := range cfg.OutgoingRateLimit.Platforms {
+				var mps float64
+				if pc.MaxPerSecond != nil {
+					mps = *pc.MaxPerSecond
+				}
+				var b int
+				if pc.Burst != nil {
+					b = *pc.Burst
+				}
+				overrides[name] = core.OutgoingRateLimitCfg{MaxPerSecond: mps, Burst: b}
+			}
+			if maxPS > 0 || len(overrides) > 0 {
+				engine.SetOutgoingRateLimitCfg(defaults, overrides)
+			}
+		}
+
+		engine.SetDisplaySaveFunc(func(thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
+			return config.SaveDisplayConfig(thinkingMaxLen, toolMaxLen, toolMessages)
 		})
 
 		// Wire idle timeout
@@ -343,6 +396,9 @@ func main() {
 				maxTokens = 12000
 			}
 			engine.SetAutoCompressConfig(true, maxTokens, minGap)
+		}
+		if proj.ResetOnIdleMins != nil {
+			engine.SetResetOnIdle(time.Duration(*proj.ResetOnIdleMins) * time.Minute)
 		}
 
 		// Wire sender injection
@@ -496,12 +552,36 @@ func main() {
 		engine.SetProviderModelSaveFunc(func(providerName, model string) error {
 			return config.SaveProviderModel(projName, providerName, model)
 		})
+		engine.SetModelSaveFunc(func(model string) error {
+			return config.SaveAgentModel(projName, model)
+		})
 
 		// Wire config reload
 		capturedEngine := engine
 		capturedProjName := projName
 		engine.SetConfigReloadFunc(func() (*core.ConfigReloadResult, error) {
 			return reloadConfig(configPath, capturedProjName, capturedEngine)
+		})
+
+		// Wire /web command callbacks
+		engine.SetWebSetupFunc(func() (int, string, bool, error) {
+			mgmtToken := core.GenerateToken(16)
+			bridgeToken := core.GenerateToken(16)
+			result, err := config.EnableWebAdmin(mgmtToken, bridgeToken)
+			if err != nil {
+				return 0, "", false, err
+			}
+			return result.ManagementPort, result.ManagementToken, !result.AlreadyEnabled, nil
+		})
+		engine.SetWebStatusFunc(func() string {
+			if cfg.Management.Enabled == nil || !*cfg.Management.Enabled {
+				return ""
+			}
+			port := cfg.Management.Port
+			if port == 0 {
+				port = 9820
+			}
+			return fmt.Sprintf("http://localhost:%d", port)
 		})
 
 		engines = append(engines, engine)
@@ -518,6 +598,9 @@ func main() {
 		cronSched = core.NewCronScheduler(cronStore)
 		if cfg.Cron.Silent != nil && *cfg.Cron.Silent {
 			cronSched.SetDefaultSilent(true)
+		}
+		if cfg.Cron.SessionMode != "" {
+			cronSched.SetDefaultSessionMode(cfg.Cron.SessionMode)
 		}
 		for i, e := range engines {
 			cronSched.RegisterEngine(cfg.Projects[i].Name, e)
@@ -612,6 +695,114 @@ func main() {
 		if bridgeSrv != nil {
 			mgmtSrv.SetBridgeServer(bridgeSrv)
 		}
+		mgmtSrv.SetSetupFeishuSave(func(req core.FeishuSetupSaveRequest) error {
+			platType := req.PlatformType
+			if platType == "" {
+				platType = "feishu"
+			}
+			_, err := config.EnsureProjectWithFeishuPlatform(config.EnsureProjectWithFeishuOptions{
+				ProjectName:  req.ProjectName,
+				PlatformType: platType,
+				WorkDir:      req.WorkDir,
+				AgentType:    req.AgentType,
+			})
+			if err != nil {
+				return fmt.Errorf("ensure project: %w", err)
+			}
+			_, err = config.SaveFeishuPlatformCredentials(config.FeishuCredentialUpdateOptions{
+				ProjectName:       req.ProjectName,
+				PlatformType:      platType,
+				AppID:             req.AppID,
+				AppSecret:         req.AppSecret,
+				OwnerOpenID:       req.OwnerOpenID,
+				SetAllowFromEmpty: true,
+			})
+			return err
+		})
+		mgmtSrv.SetSetupWeixinSave(func(req core.WeixinSetupSaveRequest) error {
+			_, err := config.EnsureProjectWithWeixinPlatform(config.EnsureProjectWithWeixinOptions{
+				ProjectName: req.ProjectName,
+				WorkDir:     req.WorkDir,
+				AgentType:   req.AgentType,
+			})
+			if err != nil {
+				return fmt.Errorf("ensure project: %w", err)
+			}
+			_, err = config.SaveWeixinPlatformCredentials(config.WeixinCredentialUpdateOptions{
+				ProjectName:       req.ProjectName,
+				Token:             req.Token,
+				BaseURL:           req.BaseURL,
+				AccountID:         req.IlinkBotID,
+				ScannedUserID:     req.IlinkUserID,
+				SetAllowFromEmpty: true,
+			})
+			return err
+		})
+		mgmtSrv.SetAddPlatformToProject(func(projectName, platType string, opts map[string]any, workDir, agentType string) error {
+			if opts == nil {
+				opts = map[string]any{}
+			}
+			return config.AddPlatformToProject(projectName, config.PlatformConfig{Type: platType, Options: opts}, workDir, agentType)
+		})
+		mgmtSrv.SetRemoveProject(config.RemoveProject)
+		mgmtSrv.SetSaveProjectSettings(func(name string, u core.ProjectSettingsUpdate) error {
+			return config.SaveProjectSettings(name, config.ProjectSettingsUpdate{
+				Quiet:                u.Quiet,
+				Language:             u.Language,
+				AdminFrom:            u.AdminFrom,
+				DisabledCommands:     u.DisabledCommands,
+				WorkDir:              u.WorkDir,
+				Mode:                 u.Mode,
+				ShowContextIndicator: u.ShowContextIndicator,
+				PlatformAllowFrom:    u.PlatformAllowFrom,
+			})
+		})
+		mgmtSrv.SetGetProjectConfig(config.GetProjectConfigDetails)
+		mgmtSrv.SetConfigFilePath(configPath)
+		mgmtSrv.SetGetGlobalSettings(config.GetGlobalSettings)
+		mgmtSrv.SetSaveGlobalSettings(func(updates map[string]any) error {
+			u := config.GlobalSettingsUpdate{}
+			if v, ok := updates["language"].(string); ok {
+				u.Language = &v
+			}
+			if v, ok := updates["quiet"].(bool); ok {
+				u.Quiet = &v
+			}
+			if v, ok := updates["attachment_send"].(string); ok {
+				u.AttachmentSend = &v
+			}
+			if v, ok := updates["log_level"].(string); ok {
+				u.LogLevel = &v
+			}
+			if v, ok := updates["idle_timeout_mins"].(float64); ok {
+				iv := int(v)
+				u.IdleTimeoutMins = &iv
+			}
+			if v, ok := updates["thinking_max_len"].(float64); ok {
+				iv := int(v)
+				u.ThinkingMaxLen = &iv
+			}
+			if v, ok := updates["tool_max_len"].(float64); ok {
+				iv := int(v)
+				u.ToolMaxLen = &iv
+			}
+			if v, ok := updates["stream_preview_enabled"].(bool); ok {
+				u.StreamPreviewOn = &v
+			}
+			if v, ok := updates["stream_preview_interval_ms"].(float64); ok {
+				iv := int(v)
+				u.StreamPreviewIntMs = &iv
+			}
+			if v, ok := updates["rate_limit_max_messages"].(float64); ok {
+				iv := int(v)
+				u.RateLimitMax = &iv
+			}
+			if v, ok := updates["rate_limit_window_secs"].(float64); ok {
+				iv := int(v)
+				u.RateLimitWindow = &iv
+			}
+			return config.SaveGlobalSettings(u)
+		})
 		mgmtSrv.Start()
 	}
 
@@ -934,9 +1125,14 @@ Commands:
     new              Force QR login
     bind             Bind existing ilink bot token
 
+  config             Manage configuration
+    example          Print a complete annotated config.toml example
+    format           Format the config file (alias: fmt)
+    path             Print the resolved config file path
+
   update             Check for updates and upgrade the binary (--pre for beta)
   check-update       Check if a newer version is available
-  config-example     Print a complete annotated config.toml example
+  config-example     (deprecated: use 'config example' instead)
 
 Examples:
   cc-connect                          Start with default config
@@ -948,8 +1144,8 @@ Examples:
   cc-connect feishu setup             Setup Feishu/Lark bot credentials
   cc-connect weixin setup             Setup Weixin (ilink) with QR or --token
   cc-connect update                   Update to the latest version
-  cc-connect config-example           Print full config.toml example
-  cc-connect config-example > c.toml  Save example config to a file
+  cc-connect config format            Format the config file
+  cc-connect config example > c.toml  Save example config to a file
 
 `, v, updateHint)
 }
@@ -997,12 +1193,15 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	}
 
 	// Reload display config
-	dcfg := core.DisplayCfg{ThinkingMaxLen: 300, ToolMaxLen: 500}
+	dcfg := core.DisplayCfg{ThinkingMaxLen: 300, ToolMaxLen: 500, ToolMessages: true}
 	if cfg.Display.ThinkingMaxLen != nil {
 		dcfg.ThinkingMaxLen = *cfg.Display.ThinkingMaxLen
 	}
 	if cfg.Display.ToolMaxLen != nil {
 		dcfg.ToolMaxLen = *cfg.Display.ToolMaxLen
+	}
+	if cfg.Display.ToolMessages != nil {
+		dcfg.ToolMessages = *cfg.Display.ToolMessages
 	}
 	engine.SetDisplayConfig(dcfg)
 	result.DisplayUpdated = true
@@ -1030,6 +1229,17 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	} else {
 		engine.SetAutoCompressConfig(false, 0, 0)
 	}
+	if proj.ResetOnIdleMins != nil {
+		engine.SetResetOnIdle(time.Duration(*proj.ResetOnIdleMins) * time.Minute)
+	} else {
+		engine.SetResetOnIdle(0)
+	}
+
+	showCtx := true
+	if proj.ShowContextIndicator != nil {
+		showCtx = *proj.ShowContextIndicator
+	}
+	engine.SetShowContextIndicator(showCtx)
 
 	// Reload sender injection
 	engine.SetInjectSender(proj.InjectSender != nil && *proj.InjectSender)

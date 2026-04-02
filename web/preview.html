@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+<title>Vibe Usage</title>
+
+<style>
+
+body {
+    margin: 0;
+    height: 100vh;
+    background: linear-gradient(180deg,#cfe8ff,#eaf4ff);
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+
+/* panel */
+
+.panel {
+
+    width: 920px;
+
+    background: rgba(0,0,0,0.85);
+
+    backdrop-filter: blur(20px);
+
+    color: white;
+
+    border-radius: 20px;
+
+    padding: 20px;
+
+    box-shadow: 0 30px 80px rgba(0,0,0,0.5);
+
+    animation: panelIn 0.4s ease;
+}
+
+
+@keyframes panelIn {
+    from {
+        opacity: 0;
+        transform: scale(0.96) translateY(20px);
+    }
+    to {
+        opacity: 1;
+        transform: scale(1);
+    }
+}
+
+
+/* header */
+
+.header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.title {
+    font-size: 22px;
+    font-weight: 600;
+}
+
+
+/* tabs */
+
+.tabs {
+    display: flex;
+    gap: 10px;
+}
+
+.tab {
+
+    padding: 6px 12px;
+
+    border-radius: 8px;
+
+    background: #222;
+
+    color: #aaa;
+
+    cursor: pointer;
+
+    transition: 0.2s;
+}
+
+.tab:hover {
+    background: #333;
+}
+
+.tab.active {
+    background: #555;
+    color: white;
+    box-shadow: 0 0 10px rgba(255,255,255,0.2);
+}
+
+
+
+/* cards */
+
+.cards {
+    display: flex;
+    gap: 14px;
+    margin-top: 16px;
+}
+
+
+.card {
+
+    flex: 1;
+
+    background: rgba(255,255,255,0.05);
+
+    border-radius: 12px;
+
+    padding: 14px;
+
+    transition: 0.25s;
+
+    animation: floatIn 0.4s ease;
+}
+
+
+.card:hover {
+
+    transform: translateY(-4px);
+
+    background: rgba(255,255,255,0.08);
+
+    box-shadow: 0 10px 20px rgba(0,0,0,0.5);
+}
+
+
+@keyframes floatIn {
+
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+
+}
+
+
+.card-title {
+    color: #aaa;
+    font-size: 13px;
+}
+
+.card-value {
+    font-size: 22px;
+    margin-top: 6px;
+    font-weight: bold;
+}
+
+.green {
+    color: #42ff9c;
+}
+
+
+
+/* chart */
+
+.chart {
+
+    margin-top: 20px;
+
+    background: rgba(255,255,255,0.04);
+
+    border-radius: 14px;
+
+    padding: 20px;
+
+    height: 240px;
+
+    display: flex;
+
+    align-items: flex-end;
+
+    gap: 6px;
+
+    overflow: hidden;
+}
+
+
+.bar {
+
+    width: 16px;
+
+    background: #777;
+
+    border-radius: 4px;
+
+    transform: scaleY(0);
+
+    transform-origin: bottom;
+
+    animation: grow 0.6s ease forwards;
+
+}
+
+
+.bar.light {
+    background: #ddd;
+}
+
+
+@keyframes grow {
+
+    from {
+        transform: scaleY(0);
+    }
+
+    to {
+        transform: scaleY(1);
+    }
+
+}
+
+
+
+/* footer */
+
+.footer {
+
+    margin-top: 10px;
+
+    font-size: 12px;
+
+    color: #888;
+
+    display: flex;
+
+    justify-content: space-between;
+}
+
+
+</style>
+
+</head>
+
+
+<body>
+
+
+<div class="panel">
+
+
+    <div class="header">
+
+        <div class="title">Vibe Usage</div>
+
+        <div class="tabs">
+            <div class="tab">1D</div>
+            <div class="tab">7D</div>
+            <div class="tab active">30D</div>
+        </div>
+
+    </div>
+
+
+
+    <div class="cards">
+
+        <div class="card">
+            <div class="card-title">预估费用</div>
+            <div class="card-value green">$2372.04</div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">总 Token</div>
+            <div class="card-value">142.1M</div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">输入 Token</div>
+            <div class="card-value">127.1M</div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">输出 Token</div>
+            <div class="card-value">12.2M</div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">缓存 Token</div>
+            <div class="card-value">4415.5M</div>
+        </div>
+
+    </div>
+
+
+
+    <div class="chart" id="chart"></div>
+
+
+
+    <div class="footer">
+        ✔ 上次同步：刚刚
+        <div>更新数据 · 关闭</div>
+    </div>
+
+
+</div>
+
+
+
+<script>
+
+const chart = document.getElementById("chart")
+
+for (let i = 0; i < 28; i++) {
+
+    let bar = document.createElement("div")
+
+    bar.className = "bar"
+
+    let h = Math.random() * 200 + 20
+
+    bar.style.height = h + "px"
+
+    bar.style.animationDelay = i * 0.03 + "s"
+
+    if (Math.random() > 0.7) {
+        bar.classList.add("light")
+    }
+
+    chart.appendChild(bar)
+}
+
+</script>
+
+
+</body>
+</html>

@@ -122,6 +122,12 @@ const (
 	MsgStarting                  MsgKey = "starting"
 	MsgThinking                  MsgKey = "thinking"
 	MsgTool                      MsgKey = "tool"
+	MsgToolResult                MsgKey = "tool_result"
+	MsgToolResultFmtStatus       MsgKey = "tool_result_fmt_status"
+	MsgToolResultFmtExit         MsgKey = "tool_result_fmt_exit"
+	MsgToolResultFmtNoOutput     MsgKey = "tool_result_fmt_no_output"
+	MsgToolResultFmtOk           MsgKey = "tool_result_fmt_ok"
+	MsgToolResultFmtFailed       MsgKey = "tool_result_fmt_failed"
 	MsgExecutionStopped          MsgKey = "execution_stopped"
 	MsgNoExecution               MsgKey = "no_execution"
 	MsgPreviousProcessing        MsgKey = "previous_processing"
@@ -237,6 +243,7 @@ const (
 
 	MsgModelCurrent          MsgKey = "model_current"
 	MsgModelChanged          MsgKey = "model_changed"
+	MsgModelChangeFailed     MsgKey = "model_change_failed"
 	MsgModelNotSupported     MsgKey = "model_not_supported"
 	MsgReasoningCurrent      MsgKey = "reasoning_current"
 	MsgReasoningChanged      MsgKey = "reasoning_changed"
@@ -371,6 +378,12 @@ const (
 	MsgUpgradeSuccess     MsgKey = "upgrade_success"
 	MsgUpgradeDevBuild    MsgKey = "upgrade_dev_build"
 
+	MsgWebNotSupported MsgKey = "web_not_supported"
+	MsgWebNotEnabled   MsgKey = "web_not_enabled"
+	MsgWebSetupSuccess MsgKey = "web_setup_success"
+	MsgWebNeedRestart  MsgKey = "web_need_restart"
+	MsgWebStatus       MsgKey = "web_status"
+
 	MsgAliasEmpty      MsgKey = "alias_empty"
 	MsgAliasListHeader MsgKey = "alias_list_header"
 	MsgAliasAdded      MsgKey = "alias_added"
@@ -380,6 +393,7 @@ const (
 
 	MsgNewSessionCreated     MsgKey = "new_session_created"
 	MsgNewSessionCreatedName MsgKey = "new_session_created_name"
+	MsgSessionAutoResetIdle  MsgKey = "session_auto_reset_idle"
 
 	MsgDeleteUsage              MsgKey = "delete_usage"
 	MsgDeleteSuccess            MsgKey = "delete_success"
@@ -475,34 +489,54 @@ const (
 	MsgBuiltinCmdShell     MsgKey = "shell"
 	MsgBuiltinCmdDir       MsgKey = "dir"
 
-	MsgDirChanged      MsgKey = "dir_changed"
-	MsgDirCurrent      MsgKey = "dir_current"
-	MsgDirReset        MsgKey = "dir_reset"
-	MsgDirUsage        MsgKey = "dir_usage"
-	MsgDirNotSupported MsgKey = "dir_not_supported"
-	MsgDirInvalidPath  MsgKey = "dir_invalid_path"
-	MsgDirHistoryTitle MsgKey = "dir_history_title"
-	MsgDirHistoryHint  MsgKey = "dir_history_hint"
-	MsgDirInvalidIndex MsgKey = "dir_invalid_index"
-	MsgDirNoHistory    MsgKey = "dir_no_history"
-	MsgDirNoPrevious   MsgKey = "dir_no_previous"
+	MsgDirChanged          MsgKey = "dir_changed"
+	MsgDirCurrent          MsgKey = "dir_current"
+	MsgDirReset            MsgKey = "dir_reset"
+	MsgDirUsage            MsgKey = "dir_usage"
+	MsgDirNotSupported     MsgKey = "dir_not_supported"
+	MsgDirInvalidPath      MsgKey = "dir_invalid_path"
+	MsgDirHistoryTitle     MsgKey = "dir_history_title"
+	MsgDirHistoryHint      MsgKey = "dir_history_hint"
+	MsgDirInvalidIndex     MsgKey = "dir_invalid_index"
+	MsgDirNoHistory        MsgKey = "dir_no_history"
+	MsgDirNoPrevious       MsgKey = "dir_no_previous"
+	MsgDirCardTitle        MsgKey = "dir_card_title"
+	MsgDirCardPageHint     MsgKey = "dir_card_page_hint"
+	MsgDirCardEmptyHistory MsgKey = "dir_card_empty_history"
+	MsgDirCardReset        MsgKey = "dir_card_reset"
+	MsgDirCardPrev         MsgKey = "dir_card_prev"
 
 	// Multi-workspace messages
-	MsgWsNotEnabled      MsgKey = "ws_not_enabled"
-	MsgWsNoBinding       MsgKey = "ws_no_binding"
-	MsgWsInfo            MsgKey = "ws_info"
-	MsgWsInitUsage       MsgKey = "ws_init_usage"
-	MsgWsBindUsage       MsgKey = "ws_bind_usage"
-	MsgWsBindSuccess     MsgKey = "ws_bind_success"
-	MsgWsBindNotFound    MsgKey = "ws_bind_not_found"
-	MsgWsUnbindSuccess   MsgKey = "ws_unbind_success"
-	MsgWsListEmpty       MsgKey = "ws_list_empty"
-	MsgWsListTitle       MsgKey = "ws_list_title"
-	MsgWsNotFoundHint    MsgKey = "ws_not_found_hint"
-	MsgWsResolutionError MsgKey = "ws_resolution_error"
-	MsgWsCloneProgress   MsgKey = "ws_clone_progress"
-	MsgWsCloneSuccess    MsgKey = "ws_clone_success"
-	MsgWsCloneFailed     MsgKey = "ws_clone_failed"
+	MsgWsNotEnabled            MsgKey = "ws_not_enabled"
+	MsgWsNoBinding             MsgKey = "ws_no_binding"
+	MsgWsInfo                  MsgKey = "ws_info"
+	MsgWsInfoShared            MsgKey = "ws_info_shared"
+	MsgWsUsage                 MsgKey = "ws_usage"
+	MsgWsInitUsage             MsgKey = "ws_init_usage"
+	MsgWsBindUsage             MsgKey = "ws_bind_usage"
+	MsgWsBindSuccess           MsgKey = "ws_bind_success"
+	MsgWsBindNotFound          MsgKey = "ws_bind_not_found"
+	MsgWsRouteUsage            MsgKey = "ws_route_usage"
+	MsgWsRouteSuccess          MsgKey = "ws_route_success"
+	MsgWsRouteAbsoluteRequired MsgKey = "ws_route_absolute_required"
+	MsgWsRouteNotFound         MsgKey = "ws_route_not_found"
+	MsgWsRouteNotDirectory     MsgKey = "ws_route_not_directory"
+	MsgWsUnbindSuccess         MsgKey = "ws_unbind_success"
+	MsgWsListEmpty             MsgKey = "ws_list_empty"
+	MsgWsListTitle             MsgKey = "ws_list_title"
+	MsgWsSharedNoBinding       MsgKey = "ws_shared_no_binding"
+	MsgWsSharedUsage           MsgKey = "ws_shared_usage"
+	MsgWsSharedBindSuccess     MsgKey = "ws_shared_bind_success"
+	MsgWsSharedRouteSuccess    MsgKey = "ws_shared_route_success"
+	MsgWsSharedUnbindSuccess   MsgKey = "ws_shared_unbind_success"
+	MsgWsSharedListEmpty       MsgKey = "ws_shared_list_empty"
+	MsgWsSharedListTitle       MsgKey = "ws_shared_list_title"
+	MsgWsSharedOnlyHint        MsgKey = "ws_shared_only_hint"
+	MsgWsNotFoundHint          MsgKey = "ws_not_found_hint"
+	MsgWsResolutionError       MsgKey = "ws_resolution_error"
+	MsgWsCloneProgress         MsgKey = "ws_clone_progress"
+	MsgWsCloneSuccess          MsgKey = "ws_clone_success"
+	MsgWsCloneFailed           MsgKey = "ws_clone_failed"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -523,6 +557,48 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "🔧 **工具 #%d: %s**\n---\n%s",
 		LangJapanese:           "🔧 **ツール #%d: %s**\n---\n%s",
 		LangSpanish:            "🔧 **Herramienta #%d: %s**\n---\n%s",
+	},
+	MsgToolResult: {
+		LangEnglish:            "📤 **%s**\n---\n%s",
+		LangChinese:            "📤 **%s**\n---\n%s",
+		LangTraditionalChinese: "📤 **%s**\n---\n%s",
+		LangJapanese:           "📤 **%s**\n---\n%s",
+		LangSpanish:            "📤 **%s**\n---\n%s",
+	},
+	MsgToolResultFmtStatus: {
+		LangEnglish:            "Status",
+		LangChinese:            "状态",
+		LangTraditionalChinese: "狀態",
+		LangJapanese:           "ステータス",
+		LangSpanish:            "Estado",
+	},
+	MsgToolResultFmtExit: {
+		LangEnglish:            "Exit",
+		LangChinese:            "退出码",
+		LangTraditionalChinese: "結束代碼",
+		LangJapanese:           "終了コード",
+		LangSpanish:            "Salida",
+	},
+	MsgToolResultFmtNoOutput: {
+		LangEnglish:            "No output",
+		LangChinese:            "无输出",
+		LangTraditionalChinese: "無輸出",
+		LangJapanese:           "出力なし",
+		LangSpanish:            "Sin salida",
+	},
+	MsgToolResultFmtOk: {
+		LangEnglish:            "ok",
+		LangChinese:            "ok",
+		LangTraditionalChinese: "ok",
+		LangJapanese:           "ok",
+		LangSpanish:            "ok",
+	},
+	MsgToolResultFmtFailed: {
+		LangEnglish:            "failed",
+		LangChinese:            "failed",
+		LangTraditionalChinese: "failed",
+		LangJapanese:           "failed",
+		LangSpanish:            "fallido",
 	},
 	MsgExecutionStopped: {
 		LangEnglish:            "⏹ Execution stopped.",
@@ -1735,6 +1811,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "モデルを `%s` に切り替えました。新しいセッションで使用されます。",
 		LangSpanish:            "Modelo cambiado a `%s`. Las nuevas sesiones usarán este modelo.",
 	},
+	MsgModelChangeFailed: {
+		LangEnglish:            "❌ Failed to change model: %v",
+		LangChinese:            "❌ 切换模型失败: %v",
+		LangTraditionalChinese: "❌ 切換模型失敗: %v",
+		LangJapanese:           "❌ モデルの切り替えに失敗しました: %v",
+		LangSpanish:            "❌ Error al cambiar el modelo: %v",
+	},
 	MsgModelNotSupported: {
 		LangEnglish:            "This agent does not support model switching.",
 		LangChinese:            "当前 Agent 不支持模型切换。",
@@ -1975,11 +2058,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Uso: `/reasoning <número>` o `/reasoning <low|medium|high|xhigh>`",
 	},
 	MsgModeUsage: {
-		LangEnglish:            "\nUse `/mode <name>` to switch.\nAvailable: `default` / `edit` / `plan` / `yolo`",
-		LangChinese:            "\n使用 `/mode <名称>` 切换模式\n可用值: `default` / `edit` / `plan` / `yolo`",
-		LangTraditionalChinese: "\n使用 `/mode <名稱>` 切換模式\n可用值: `default` / `edit` / `plan` / `yolo`",
-		LangJapanese:           "\n`/mode <名前>` で切り替え\n選択肢: `default` / `edit` / `plan` / `yolo`",
-		LangSpanish:            "\nUse `/mode <nombre>` para cambiar.\nDisponibles: `default` / `edit` / `plan` / `yolo`",
+		LangEnglish:            "\nUse `/mode <name>` to switch.\nAvailable: %s",
+		LangChinese:            "\n使用 `/mode <名称>` 切换模式\n可用值: %s",
+		LangTraditionalChinese: "\n使用 `/mode <名稱>` 切換模式\n可用值: %s",
+		LangJapanese:           "\n`/mode <名前>` で切り替え\n選択肢: %s",
+		LangSpanish:            "\nUse `/mode <nombre>` para cambiar.\nDisponibles: %s",
 	},
 	MsgLangSelectPlaceholder: {
 		LangEnglish: "Select language", LangChinese: "选择语言", LangTraditionalChinese: "選擇語言",
@@ -2515,6 +2598,51 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "⚠️ 開発ビルドのため、バージョン確認ができません。ソースからビルドするか、リリース版をインストールしてください。",
 		LangSpanish:            "⚠️ Compilación de desarrollo — la verificación de versión no está disponible. Compile desde el código fuente o instale una versión publicada.",
 	},
+	MsgWebNotSupported: {
+		LangEnglish:            "⚠️ Web admin is not available in this build. Rebuild without the `no_web` tag to enable it.",
+		LangChinese:            "⚠️ 当前版本未包含 Web 管理后台。请去掉 `no_web` 标签重新编译以启用。",
+		LangTraditionalChinese: "⚠️ 目前版本未包含 Web 管理後台。請移除 `no_web` 標籤重新編譯以啟用。",
+		LangJapanese:           "⚠️ このビルドにはWeb管理画面が含まれていません。`no_web` タグなしで再ビルドしてください。",
+		LangSpanish:            "⚠️ La administración web no está incluida en esta compilación. Recompile sin la etiqueta `no_web`.",
+	},
+	MsgWebNotEnabled: {
+		LangEnglish:            "ℹ️ Web admin is not enabled.\n\nUse `/web setup` to configure and enable it.",
+		LangChinese:            "ℹ️ Web 管理后台未启用。\n\n使用 `/web setup` 配置并启用。",
+		LangTraditionalChinese: "ℹ️ Web 管理後台未啟用。\n\n使用 `/web setup` 設定並啟用。",
+		LangJapanese:           "ℹ️ Web管理画面は有効になっていません。\n\n`/web setup` で設定して有効にしてください。",
+		LangSpanish:            "ℹ️ La administración web no está habilitada.\n\nUsa `/web setup` para configurarla.",
+	},
+	MsgWebSetupSuccess: {
+		LangEnglish: "✅ Web admin configured!\n\n" +
+			"🌐 URL: %s\n🔑 Token: `%s`\n\n" +
+			"Open the URL in your browser and use the token to log in.",
+		LangChinese: "✅ Web 管理后台配置完成！\n\n" +
+			"🌐 地址：%s\n🔑 令牌：`%s`\n\n" +
+			"在浏览器打开地址，使用令牌登录。",
+		LangTraditionalChinese: "✅ Web 管理後台設定完成！\n\n" +
+			"🌐 網址：%s\n🔑 權杖：`%s`\n\n" +
+			"在瀏覽器開啟網址，使用權杖登入。",
+		LangJapanese: "✅ Web管理画面の設定が完了しました！\n\n" +
+			"🌐 URL: %s\n🔑 トークン: `%s`\n\n" +
+			"ブラウザでURLを開き、トークンでログインしてください。",
+		LangSpanish: "✅ Administración web configurada!\n\n" +
+			"🌐 URL: %s\n🔑 Token: `%s`\n\n" +
+			"Abre la URL en tu navegador y usa el token para iniciar sesión.",
+	},
+	MsgWebNeedRestart: {
+		LangEnglish:            "🔄 Restart the service with `/restart` to activate the web admin.",
+		LangChinese:            "🔄 请使用 `/restart` 重启服务以激活 Web 管理后台。",
+		LangTraditionalChinese: "🔄 請使用 `/restart` 重新啟動服務以啟動 Web 管理後台。",
+		LangJapanese:           "🔄 `/restart` でサービスを再起動して、Web管理画面を有効にしてください。",
+		LangSpanish:            "🔄 Reinicia el servicio con `/restart` para activar la administración web.",
+	},
+	MsgWebStatus: {
+		LangEnglish:            "🌐 **Web Admin**\n\nURL: %s",
+		LangChinese:            "🌐 **Web 管理后台**\n\n地址：%s",
+		LangTraditionalChinese: "🌐 **Web 管理後台**\n\n網址：%s",
+		LangJapanese:           "🌐 **Web管理画面**\n\nURL: %s",
+		LangSpanish:            "🌐 **Administración Web**\n\nURL: %s",
+	},
 	MsgAliasEmpty: {
 		LangEnglish:            "No aliases configured. Use `/alias add <trigger> <command>` to create one.",
 		LangChinese:            "暂无别名配置。使用 `/alias add <触发词> <命令>` 创建别名。",
@@ -2570,6 +2698,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "✅ 新會話已建立：**%s**",
 		LangJapanese:           "✅ 新しいセッションを作成しました：**%s**",
 		LangSpanish:            "✅ Nueva sesión creada: **%s**",
+	},
+	MsgSessionAutoResetIdle: {
+		LangEnglish:            "⏰ Session auto-reset after %d minute(s) of inactivity.",
+		LangChinese:            "⏰ 因空闲超过 %d 分钟，已自动切换到新会话。",
+		LangTraditionalChinese: "⏰ 因閒置超過 %d 分鐘，已自動切換到新會話。",
+		LangJapanese:           "⏰ %d 分以上操作がなかったため、新しいセッションに自動切り替えました。",
+		LangSpanish:            "⏰ La sesión se reinició automáticamente tras %d minuto(s) de inactividad.",
 	},
 	MsgDeleteUsage: {
 		LangEnglish:            "Usage: `/delete <number>` or `/delete 1,2,3` or `/delete 3-7` or `/delete 1,3-5,8`.\nUse `/list` to see session numbers.",
@@ -3227,6 +3362,41 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "❌ 前のディレクトリが履歴にありません。",
 		LangSpanish:            "❌ No hay directorio anterior en el historial.",
 	},
+	MsgDirCardTitle: {
+		LangEnglish:            "Working directory",
+		LangChinese:            "工作目录",
+		LangTraditionalChinese: "工作目錄",
+		LangJapanese:           "作業ディレクトリ",
+		LangSpanish:            "Directorio de trabajo",
+	},
+	MsgDirCardPageHint: {
+		LangEnglish:            "Page %d/%d — use `/dir <page>` or the buttons below.",
+		LangChinese:            "第 %d/%d 页 — 可用 `/dir <页码>` 或下方按钮翻页。",
+		LangTraditionalChinese: "第 %d/%d 頁 — 可用 `/dir <頁碼>` 或下方按鈕翻頁。",
+		LangJapanese:           "%d/%d ページ — `/dir <ページ>` または下のボタンで移動。",
+		LangSpanish:            "Página %d/%d — usa `/dir <página>` o los botones.",
+	},
+	MsgDirCardEmptyHistory: {
+		LangEnglish:            "No directory history yet. Type `/dir <path>` to switch, or use **Reset** to restore the default.",
+		LangChinese:            "暂无目录历史。可发送 `/dir <路径>` 切换，或点 **重置** 恢复默认目录。",
+		LangTraditionalChinese: "暫無目錄歷史。可傳送 `/dir <路徑>` 切換，或點 **重置** 恢復預設目錄。",
+		LangJapanese:           "まだディレクトリ履歴がありません。`/dir <パス>` で切替えるか、**リセット** で既定に戻せます。",
+		LangSpanish:            "Aún no hay historial de directorios. Usa `/dir <ruta>` o **Restablecer** al valor por defecto.",
+	},
+	MsgDirCardReset: {
+		LangEnglish:            "Reset",
+		LangChinese:            "重置",
+		LangTraditionalChinese: "重置",
+		LangJapanese:           "リセット",
+		LangSpanish:            "Restablecer",
+	},
+	MsgDirCardPrev: {
+		LangEnglish:            "Previous",
+		LangChinese:            "上一目录",
+		LangTraditionalChinese: "上一目錄",
+		LangJapanese:           "前へ",
+		LangSpanish:            "Anterior",
+	},
 
 	// Multi-workspace messages
 	MsgWsNotEnabled: {
@@ -3249,6 +3419,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "工作區: `%s`\n綁定時間: %s",
 		LangJapanese:           "ワークスペース: `%s`\nバインド: %s",
 		LangSpanish:            "Workspace: `%s`\nVinculado: %s",
+	},
+	MsgWsInfoShared: {
+		LangEnglish:            "Workspace: `%s`\nBound: %s\nSource: shared",
+		LangChinese:            "工作区: `%s`\n绑定时间: %s\n来源: shared",
+		LangTraditionalChinese: "工作區: `%s`\n綁定時間: %s\n來源: shared",
+		LangJapanese:           "ワークスペース: `%s`\nバインド: %s\nソース: shared",
+		LangSpanish:            "Workspace: `%s`\nVinculado: %s\nOrigen: shared",
+	},
+	MsgWsUsage: {
+		LangEnglish:            "Usage: `/workspace [bind <name> | route <absolute-path> | init <url> | unbind | list | shared ...]`",
+		LangChinese:            "用法: `/workspace [bind <名称> | route <绝对路径> | init <仓库地址> | unbind | list | shared ...]`",
+		LangTraditionalChinese: "用法: `/workspace [bind <名稱> | route <絕對路徑> | init <倉庫地址> | unbind | list | shared ...]`",
+		LangJapanese:           "使い方: `/workspace [bind <名前> | route <絶対パス> | init <url> | unbind | list | shared ...]`",
+		LangSpanish:            "Uso: `/workspace [bind <nombre> | route <ruta-absoluta> | init <url> | unbind | list | shared ...]`",
 	},
 	MsgWsInitUsage: {
 		LangEnglish:            "Usage: `/workspace init <git-url>`",
@@ -3278,6 +3462,41 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "ワークスペースが見つかりません: `%s`",
 		LangSpanish:            "Workspace no encontrado: `%s`",
 	},
+	MsgWsRouteUsage: {
+		LangEnglish:            "Usage: `/workspace route <absolute-path>`",
+		LangChinese:            "用法: `/workspace route <绝对路径>`",
+		LangTraditionalChinese: "用法: `/workspace route <絕對路徑>`",
+		LangJapanese:           "使い方: `/workspace route <絶対パス>`",
+		LangSpanish:            "Uso: `/workspace route <ruta-absoluta>`",
+	},
+	MsgWsRouteSuccess: {
+		LangEnglish:            "✅ Workspace routed: `%s`",
+		LangChinese:            "✅ 工作区路由成功: `%s`",
+		LangTraditionalChinese: "✅ 工作區路由成功: `%s`",
+		LangJapanese:           "✅ ワークスペースをルーティングしました: `%s`",
+		LangSpanish:            "✅ Workspace enrutado: `%s`",
+	},
+	MsgWsRouteAbsoluteRequired: {
+		LangEnglish:            "Workspace route must use an absolute path: `%s`",
+		LangChinese:            "工作区路由必须使用绝对路径: `%s`",
+		LangTraditionalChinese: "工作區路由必須使用絕對路徑: `%s`",
+		LangJapanese:           "ワークスペースの route には絶対パスが必要です: `%s`",
+		LangSpanish:            "La ruta del workspace debe ser absoluta: `%s`",
+	},
+	MsgWsRouteNotFound: {
+		LangEnglish:            "Workspace path not found: `%s`",
+		LangChinese:            "工作区路径不存在: `%s`",
+		LangTraditionalChinese: "工作區路徑不存在: `%s`",
+		LangJapanese:           "ワークスペースのパスが見つかりません: `%s`",
+		LangSpanish:            "Ruta de workspace no encontrada: `%s`",
+	},
+	MsgWsRouteNotDirectory: {
+		LangEnglish:            "Workspace route target is not a directory: `%s`",
+		LangChinese:            "工作区路由目标不是目录: `%s`",
+		LangTraditionalChinese: "工作區路由目標不是目錄: `%s`",
+		LangJapanese:           "ワークスペースの route 先がディレクトリではありません: `%s`",
+		LangSpanish:            "El destino de workspace route no es un directorio: `%s`",
+	},
 	MsgWsUnbindSuccess: {
 		LangEnglish:            "✅ Workspace unbound.",
 		LangChinese:            "✅ 已解除工作区绑定。",
@@ -3298,6 +3517,62 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "已綁定的工作區：",
 		LangJapanese:           "バインドされたワークスペース：",
 		LangSpanish:            "Workspaces vinculados:",
+	},
+	MsgWsSharedNoBinding: {
+		LangEnglish:            "No shared workspace bound to this channel.",
+		LangChinese:            "此频道未绑定共享工作区。",
+		LangTraditionalChinese: "此頻道未綁定共享工作區。",
+		LangJapanese:           "このチャンネルに共有ワークスペースがバインドされていません。",
+		LangSpanish:            "No hay workspace compartido vinculado a este canal.",
+	},
+	MsgWsSharedUsage: {
+		LangEnglish:            "Usage: `/workspace shared [bind <name> | route <absolute-path> | init <url> | unbind | list]`",
+		LangChinese:            "用法: `/workspace shared [bind <名称> | route <绝对路径> | init <仓库地址> | unbind | list]`",
+		LangTraditionalChinese: "用法: `/workspace shared [bind <名稱> | route <絕對路徑> | init <倉庫地址> | unbind | list]`",
+		LangJapanese:           "使い方: `/workspace shared [bind <名前> | route <絶対パス> | init <url> | unbind | list]`",
+		LangSpanish:            "Uso: `/workspace shared [bind <nombre> | route <ruta-absoluta> | init <url> | unbind | list]`",
+	},
+	MsgWsSharedBindSuccess: {
+		LangEnglish:            "✅ Shared workspace bound: `%s`",
+		LangChinese:            "✅ 共享工作区绑定成功: `%s`",
+		LangTraditionalChinese: "✅ 共享工作區綁定成功: `%s`",
+		LangJapanese:           "✅ 共有ワークスペースをバインドしました: `%s`",
+		LangSpanish:            "✅ Workspace compartido vinculado: `%s`",
+	},
+	MsgWsSharedRouteSuccess: {
+		LangEnglish:            "✅ Shared workspace routed: `%s`",
+		LangChinese:            "✅ 共享工作区路由成功: `%s`",
+		LangTraditionalChinese: "✅ 共享工作區路由成功: `%s`",
+		LangJapanese:           "✅ 共有ワークスペースをルーティングしました: `%s`",
+		LangSpanish:            "✅ Workspace compartido enrutado: `%s`",
+	},
+	MsgWsSharedUnbindSuccess: {
+		LangEnglish:            "✅ Shared workspace unbound.",
+		LangChinese:            "✅ 已解除共享工作区绑定。",
+		LangTraditionalChinese: "✅ 已解除共享工作區綁定。",
+		LangJapanese:           "✅ 共有ワークスペースのバインドを解除しました。",
+		LangSpanish:            "✅ Workspace compartido desvinculado.",
+	},
+	MsgWsSharedListEmpty: {
+		LangEnglish:            "No shared workspaces bound.",
+		LangChinese:            "没有绑定的共享工作区。",
+		LangTraditionalChinese: "沒有綁定的共享工作區。",
+		LangJapanese:           "バインドされた共有ワークスペースがありません。",
+		LangSpanish:            "No hay workspaces compartidos vinculados.",
+	},
+	MsgWsSharedListTitle: {
+		LangEnglish:            "Shared workspaces:",
+		LangChinese:            "共享工作区：",
+		LangTraditionalChinese: "共享工作區：",
+		LangJapanese:           "共有ワークスペース：",
+		LangSpanish:            "Workspaces compartidos:",
+	},
+	MsgWsSharedOnlyHint: {
+		LangEnglish:            "The current effective workspace comes from the shared layer. Use `/workspace shared unbind` to remove it.",
+		LangChinese:            "当前生效的工作区来自 shared 层。请使用 `/workspace shared unbind` 解除绑定。",
+		LangTraditionalChinese: "當前生效的工作區來自 shared 層。請使用 `/workspace shared unbind` 解除綁定。",
+		LangJapanese:           "現在有効なワークスペースは shared レイヤー由来です。解除するには `/workspace shared unbind` を使用してください。",
+		LangSpanish:            "El workspace efectivo actual proviene de la capa shared. Usa `/workspace shared unbind` para quitarlo.",
 	},
 	MsgWsNotFoundHint: {
 		LangEnglish:            "No workspace found for this channel. Send me a git repo URL to clone, or use `/workspace init <url>`.",

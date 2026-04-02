@@ -126,6 +126,16 @@ type AudioAttachment struct {
 	Duration int    // duration in seconds (if known)
 }
 
+// LocationAttachment represents a geographical location sent by the user.
+type LocationAttachment struct {
+	Latitude            float64 // latitude coordinate
+	Longitude           float64 // longitude coordinate
+	HorizontalAccuracy  float64 // accuracy radius in meters (optional)
+	LivePeriod          int     // time period for live location updates in seconds (optional)
+	Heading             int     // direction of movement in degrees (optional)
+	ProximityAlertRadius int    // maximum distance for proximity alerts in meters (optional)
+}
+
 // Message represents a unified incoming message from any platform.
 type Message struct {
 	SessionKey string // unique key for user context, e.g. "feishu:{chatID}:{userID}"
@@ -137,9 +147,12 @@ type Message struct {
 	Content    string
 	Images     []ImageAttachment // attached images (if any)
 	Files      []FileAttachment  // attached files (if any)
-	Audio      *AudioAttachment  // voice message (if any)
-	ReplyCtx   any               // platform-specific context needed for replying
-	FromVoice  bool              // true if message originated from voice transcription
+	Audio        *AudioAttachment // voice message (if any)
+	Location     *LocationAttachment // geographical location (if any)
+	ChannelKey   string          // platform-provided channel identifier for workspace binding (optional)
+	ReplyCtx     any             // platform-specific context needed for replying
+	FromVoice    bool            // true if message originated from voice transcription
+	ModeOverride string          // if set, temporarily override agent permission mode for this message
 }
 
 // EventType distinguishes different kinds of agent output.
@@ -157,10 +170,10 @@ const (
 
 // UserQuestion represents a structured question from AskUserQuestion.
 type UserQuestion struct {
-	Question    string             `json:"question"`
-	Header      string             `json:"header"`
+	Question    string               `json:"question"`
+	Header      string               `json:"header"`
 	Options     []UserQuestionOption `json:"options"`
-	MultiSelect bool               `json:"multiSelect"`
+	MultiSelect bool                 `json:"multiSelect"`
 }
 
 // UserQuestionOption is one choice in a UserQuestion.
@@ -177,6 +190,9 @@ type Event struct {
 	ToolInput    string         // human-readable summary of tool input
 	ToolInputRaw map[string]any // raw tool input (for EventPermissionRequest, used in allow response)
 	ToolResult   string         // populated for EventToolResult
+	ToolStatus   string         // optional status for EventToolResult (e.g. completed/failed)
+	ToolExitCode *int           // optional exit code for EventToolResult
+	ToolSuccess  *bool          // optional success flag for EventToolResult
 	SessionID    string         // agent-managed session ID for conversation continuity
 	RequestID    string         // unique request ID for EventPermissionRequest
 	Questions    []UserQuestion // populated when ToolName == "AskUserQuestion"

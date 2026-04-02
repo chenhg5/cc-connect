@@ -69,7 +69,11 @@ func MarkdownToSimpleHTML(md string) string {
 			if reTableSep.MatchString(tl) {
 				b.WriteString("——————————")
 			} else {
-				inner := tl[1 : len(tl)-1]
+				tlTrim := strings.TrimSpace(tl)
+				inner := tlTrim
+				if strings.HasPrefix(tlTrim, "|") && strings.HasSuffix(tlTrim, "|") && len(tlTrim) >= 2 {
+					inner = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(tlTrim, "|"), "|"))
+				}
 				cells := strings.Split(inner, "|")
 				for k := range cells {
 					cells[k] = strings.TrimSpace(cells[k])
@@ -193,18 +197,18 @@ func MarkdownToSimpleHTML(md string) string {
 }
 
 var (
-	reInlineCodeHTML  = regexp.MustCompile("`([^`]+)`")
-	reBoldItalicHTML  = regexp.MustCompile(`\*\*\*(.+?)\*\*\*`)
-	reBoldAstHTML     = regexp.MustCompile(`\*\*(.+?)\*\*`)
-	reBoldUndHTML     = regexp.MustCompile(`__(.+?)__`)
-	reItalicAstHTML   = regexp.MustCompile(`(?:^|[^*])\*([^*]+?)\*(?:[^*]|$)`)
-	reStrikeHTML      = regexp.MustCompile(`~~(.+?)~~`)
-	reLinkHTML        = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
-	reWikilinkHTML    = regexp.MustCompile(`\[\[([^\]|]+)\|([^\]]+)\]\]|\[\[([^\]]+)\]\]`)
-	reUnorderedList   = regexp.MustCompile(`^(\s*)[-*]\s+(.*)$`)
-	reOrderedList     = regexp.MustCompile(`^(\s*)\d+\.\s+(.*)$`)
-	reTableSep        = regexp.MustCompile(`^\|[\s:|-]+\|$`)
-	reCallout         = regexp.MustCompile(`^\[!(\w+)\]\s*(.*)$`)
+	reInlineCodeHTML = regexp.MustCompile("`([^`]+)`")
+	reBoldItalicHTML = regexp.MustCompile(`\*\*\*(.+?)\*\*\*`)
+	reBoldAstHTML    = regexp.MustCompile(`\*\*(.+?)\*\*`)
+	reBoldUndHTML    = regexp.MustCompile(`__(.+?)__`)
+	reItalicAstHTML  = regexp.MustCompile(`(?:^|[^*])\*([^*]+?)\*(?:[^*]|$)`)
+	reStrikeHTML     = regexp.MustCompile(`~~(.+?)~~`)
+	reLinkHTML       = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
+	reWikilinkHTML   = regexp.MustCompile(`\[\[([^\]|]+)\|([^\]]+)\]\]|\[\[([^\]]+)\]\]`)
+	reUnorderedList  = regexp.MustCompile(`^(\s*)[-*]\s+(.*)$`)
+	reOrderedList    = regexp.MustCompile(`^(\s*)\d+\.\s+(.*)$`)
+	reTableSep       = regexp.MustCompile(`^\|[\s:|-]+\|$`)
+	reCallout        = regexp.MustCompile(`^\[!(\w+)\]\s*(.*)$`)
 )
 
 // convertInlineHTML converts inline Markdown formatting to Telegram-compatible HTML.
