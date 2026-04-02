@@ -1452,9 +1452,6 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 	newSession := sessions.NewSession(msg.SessionKey, "")
 	if !newSession.TryLock() {
 		slog.Error("failed to lock new session after idle auto-reset", "session_key", msg.SessionKey, "new_session", newSession.ID)
-		if session.TryLock() {
-			return session
-		}
 		return nil
 	}
 
@@ -1835,20 +1832,20 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	}
 
 	// Apply per-message permission mode override (e.g. cron jobs with mode = "bypassPermissions").
-	// Restoration queries the agent's current mode at defer time (not a pre-override snapshot),
-	// so any /mode changes made by users during cron execution are respected.
+	// Defer restores only when SetLiveMode succeeds for the override.
 	if msg.ModeOverride != "" {
 		if switcher, ok := state.agentSession.(LiveModeSwitcher); ok {
-			switcher.SetLiveMode(msg.ModeOverride)
-			defer func() {
-				defaultMode := "default"
-				if ma, ok := e.agent.(interface{ GetMode() string }); ok {
-					if m := ma.GetMode(); m != "" {
-						defaultMode = m
+			if switcher.SetLiveMode(msg.ModeOverride) {
+				defer func() {
+					defaultMode := "default"
+					if ma, ok := e.agent.(interface{ GetMode() string }); ok {
+						if m := ma.GetMode(); m != "" {
+							defaultMode = m
+						}
 					}
-				}
-				switcher.SetLiveMode(defaultMode)
-			}()
+					switcher.SetLiveMode(defaultMode)
+				}()
+			}
 		}
 	}
 
@@ -9143,13 +9140,6 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 
 	var textParts []string
 	for event := range agentSession.Events() {
-		if ctx.Err() != nil {
-			// Relay timed out. Let the agent finish its turn in the
-			// background so the session state is saved cleanly and the
-			// session remains resumable for the next relay call.
-			go e.drainRelaySession(agentSession, session, relaySessionKey)
-			return relayPartialResponseOrError(ctx.Err(), textParts, fromProject, e.name)
-		}
 		switch event.Type {
 		case EventText:
 			if event.Content != "" {
@@ -9200,6 +9190,13 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 				UpdatedInput: event.ToolInputRaw,
 			})
 		}
+		if ctx.Err() != nil {
+			// Relay timed out. Let the agent finish its turn in the
+			// background so the session state is saved cleanly and the
+			// session remains resumable for the next relay call.
+			go e.drainRelaySession(agentSession, session, relaySessionKey)
+			return relayPartialResponseOrError(ctx.Err(), textParts, fromProject, e.name)
+		}
 	}
 
 	// Event channel closed without EventResult.
@@ -9243,6 +9240,7 @@ func (e *Engine) drainRelaySession(agentSession AgentSession, session *Session, 
 		case ev, ok := <-agentSession.Events():
 			if !ok {
 				// Event channel closed — session ended naturally.
+				agentSession.Close()
 				return
 			}
 			if ev.SessionID != "" {

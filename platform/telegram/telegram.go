@@ -109,6 +109,7 @@ type Platform struct {
 	allowFrom             string
 	groupReplyAll         bool
 	shareSessionInChannel bool
+	enableReactions       bool
 	httpClient            *http.Client
 
 	mu                  sync.RWMutex
@@ -158,7 +159,8 @@ func New(opts map[string]any) (core.Platform, error) {
 
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
-	return &Platform{token: token, allowFrom: allowFrom, groupReplyAll: groupReplyAll, shareSessionInChannel: shareSessionInChannel, httpClient: httpClient}, nil
+	enableReactions, _ := opts["enable_reactions"].(bool)
+	return &Platform{token: token, allowFrom: allowFrom, groupReplyAll: groupReplyAll, shareSessionInChannel: shareSessionInChannel, enableReactions: enableReactions, httpClient: httpClient}, nil
 }
 
 func (p *Platform) Name() string { return "telegram" }
@@ -356,7 +358,9 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 	}
 
 	rctx := replyContext{chatID: msg.Chat.ID, threadID: threadID, messageID: msg.ID}
-	go p.reactToMessage(ctx, msg.Chat.ID, msg.ID, "⚡")
+	if p.enableReactions {
+		go p.reactToMessage(ctx, msg.Chat.ID, msg.ID, "⚡")
+	}
 	botName := p.botUsername()
 
 	if len(msg.Photo) > 0 {

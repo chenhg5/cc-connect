@@ -99,7 +99,7 @@ func (a *Agent) runClaudeUsageProbe(ctx context.Context) (string, error) {
 	}()
 
 	terminal := newClaudeUsageTerminal()
-	readErrCh := make(chan error, 1)
+	readDone := make(chan error, 1)
 	go func() {
 		buf := make([]byte, 4096)
 		for {
@@ -109,10 +109,10 @@ func (a *Agent) runClaudeUsageProbe(ctx context.Context) (string, error) {
 			}
 			if err != nil {
 				if errors.Is(err, io.EOF) || errors.Is(err, os.ErrClosed) {
-					readErrCh <- nil
-					return
+					readDone <- nil
+				} else {
+					readDone <- err
 				}
-				readErrCh <- err
 				return
 			}
 		}
@@ -121,6 +121,8 @@ func (a *Agent) runClaudeUsageProbe(ctx context.Context) (string, error) {
 	defer func() {
 		_ = ptmx.Close()
 		cancel()
+		// Wait for reader goroutine to finish so it is never leaked.
+		<-readDone
 		select {
 		case <-processDone:
 		case <-time.After(2 * time.Second):
@@ -151,7 +153,7 @@ func (a *Agent) runClaudeUsageProbe(ctx context.Context) (string, error) {
 				return "", screenErr
 			}
 			return "", fmt.Errorf("claudecode: timed out waiting for Claude Code /usage panel: %w", probeCtx.Err())
-		case err := <-readErrCh:
+		case err := <-readDone:
 			if err != nil {
 				return "", fmt.Errorf("claudecode: read Claude Code /usage output: %w", err)
 			}
@@ -607,18 +609,32 @@ func (t *claudeUsageTerminal) applyCSI(params string, final byte) {
 }
 
 func (t *claudeUsageTerminal) writeRune(r rune) {
+	if t.row >= maxTerminalRows || t.col >= maxTerminalCols {
+		return
+	}
 	t.ensureCell(t.row, t.col)
-	t.lines[t.row][t.col] = r
+	if t.row < len(t.lines) && t.col < len(t.lines[t.row]) {
+		t.lines[t.row][t.col] = r
+	}
 	t.col++
 }
 
+const maxTerminalRows = 500
+const maxTerminalCols = 500
+
 func (t *claudeUsageTerminal) ensureRow(row int) {
+	if row >= maxTerminalRows {
+		return
+	}
 	for len(t.lines) <= row {
 		t.lines = append(t.lines, nil)
 	}
 }
 
 func (t *claudeUsageTerminal) ensureCell(row, col int) {
+	if row >= maxTerminalRows || col >= maxTerminalCols {
+		return
+	}
 	t.ensureRow(row)
 	for len(t.lines[row]) <= col {
 		t.lines[row] = append(t.lines[row], ' ')

@@ -1809,7 +1809,7 @@ func (p *Platform) withFreshTenantAccessTokenRetry(ctx context.Context, operatio
 }
 
 func (p *Platform) fetchFreshTenantAccessToken(ctx context.Context) (string, error) {
-	resp, err := p.client.GetTenantAccessTokenBySelfBuiltApp(ctx, &larkcore.SelfBuiltTenantAccessTokenReq{
+	resp, err := p.replayAPIClient().GetTenantAccessTokenBySelfBuiltApp(ctx, &larkcore.SelfBuiltTenantAccessTokenReq{
 		AppID:     p.appID,
 		AppSecret: p.appSecret,
 	})
