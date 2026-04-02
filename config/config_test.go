@@ -465,8 +465,8 @@ func TestSaveFeishuPlatformCredentials_SelectByIndexAndOverrideType(t *testing.T
 	if result.PlatformType != "feishu" {
 		t.Fatalf("result.PlatformType = %q, want %q", result.PlatformType, "feishu")
 	}
-	if result.AllowFrom != "ou_existing_owner" {
-		t.Fatalf("result.AllowFrom = %q, want %q", result.AllowFrom, "ou_existing_owner")
+	if result.AllowFrom != "ou_existing_owner,ou_should_not_override" {
+		t.Fatalf("result.AllowFrom = %q, want %q", result.AllowFrom, "ou_existing_owner,ou_should_not_override")
 	}
 
 	cfg := readConfigFixture(t, configPath)
@@ -480,8 +480,63 @@ func TestSaveFeishuPlatformCredentials_SelectByIndexAndOverrideType(t *testing.T
 	if got := stringMapValue(platform.Options, "app_secret"); got != "sec_second_secret" {
 		t.Fatalf("app_secret = %q, want %q", got, "sec_second_secret")
 	}
-	if got := stringMapValue(platform.Options, "allow_from"); got != "ou_existing_owner" {
-		t.Fatalf("allow_from = %q, want %q", got, "ou_existing_owner")
+	if got := stringMapValue(platform.Options, "allow_from"); got != "ou_existing_owner,ou_should_not_override" {
+		t.Fatalf("allow_from = %q, want %q", got, "ou_existing_owner,ou_should_not_override")
+	}
+}
+
+func TestSaveFeishuPlatformCredentials_AppendsOwnerToAllowFrom(t *testing.T) {
+	configPath := writeConfigFixture(t, feishuConfigFixture)
+	patchConfigPath(t, configPath)
+
+	result, err := SaveFeishuPlatformCredentials(FeishuCredentialUpdateOptions{
+		ProjectName:       "alpha",
+		PlatformIndex:     2,
+		PlatformType:      "feishu",
+		AppID:             "cli_second_app",
+		AppSecret:         "sec_second_secret",
+		OwnerOpenID:       "ou_new_owner",
+		SetAllowFromEmpty: true,
+	})
+	if err != nil {
+		t.Fatalf("SaveFeishuPlatformCredentials returned error: %v", err)
+	}
+
+	if result.AllowFrom != "ou_existing_owner,ou_new_owner" {
+		t.Fatalf("result.AllowFrom = %q, want %q", result.AllowFrom, "ou_existing_owner,ou_new_owner")
+	}
+
+	cfg := readConfigFixture(t, configPath)
+	platform := cfg.Projects[0].Platforms[2]
+	if got := stringMapValue(platform.Options, "allow_from"); got != "ou_existing_owner,ou_new_owner" {
+		t.Fatalf("allow_from = %q, want %q", got, "ou_existing_owner,ou_new_owner")
+	}
+}
+
+func TestSaveFeishuPlatformCredentials_LeavesWildcardAllowFromUnchanged(t *testing.T) {
+	configPath := writeConfigFixture(t, strings.Replace(feishuConfigFixture, `allow_from = "ou_existing_owner"`, `allow_from = "*"`, 1))
+	patchConfigPath(t, configPath)
+
+	result, err := SaveFeishuPlatformCredentials(FeishuCredentialUpdateOptions{
+		ProjectName:       "alpha",
+		PlatformIndex:     2,
+		OwnerOpenID:       "ou_new_owner",
+		AppID:             "cli_second_app",
+		AppSecret:         "sec_second_secret",
+		SetAllowFromEmpty: true,
+	})
+	if err != nil {
+		t.Fatalf("SaveFeishuPlatformCredentials returned error: %v", err)
+	}
+
+	if result.AllowFrom != "*" {
+		t.Fatalf("result.AllowFrom = %q, want %q", result.AllowFrom, "*")
+	}
+
+	cfg := readConfigFixture(t, configPath)
+	platform := cfg.Projects[0].Platforms[2]
+	if got := stringMapValue(platform.Options, "allow_from"); got != "*" {
+		t.Fatalf("allow_from = %q, want %q", got, "*")
 	}
 }
 
@@ -1353,6 +1408,54 @@ func TestSaveWeixinPlatformCredentials_UpdateToken(t *testing.T) {
 	bu, _ := cfg.Projects[0].Platforms[0].Options["base_url"].(string)
 	if bu != "https://ilinkai.weixin.qq.com" {
 		t.Fatalf("base_url = %q", bu)
+	}
+}
+
+func TestSaveWeixinPlatformCredentials_AppendsScannedUserToAllowFrom(t *testing.T) {
+	configPath := writeConfigFixture(t, strings.Replace(weixinConfigFixture, `base_url = "https://ilink.example"`, "base_url = \"https://ilink.example\"\nallow_from = \"wx_user_1\"", 1))
+	patchConfigPath(t, configPath)
+
+	result, err := SaveWeixinPlatformCredentials(WeixinCredentialUpdateOptions{
+		ProjectName:       "alpha",
+		Token:             "new_weixin_token",
+		ScannedUserID:     "wx_user_2",
+		SetAllowFromEmpty: true,
+	})
+	if err != nil {
+		t.Fatalf("SaveWeixinPlatformCredentials returned error: %v", err)
+	}
+
+	if result.AllowFrom != "wx_user_1,wx_user_2" {
+		t.Fatalf("result.AllowFrom = %q, want %q", result.AllowFrom, "wx_user_1,wx_user_2")
+	}
+
+	cfg := readConfigFixture(t, configPath)
+	if got := stringMapValue(cfg.Projects[0].Platforms[0].Options, "allow_from"); got != "wx_user_1,wx_user_2" {
+		t.Fatalf("allow_from = %q, want %q", got, "wx_user_1,wx_user_2")
+	}
+}
+
+func TestSaveWeixinPlatformCredentials_LeavesWildcardAllowFromUnchanged(t *testing.T) {
+	configPath := writeConfigFixture(t, strings.Replace(weixinConfigFixture, `base_url = "https://ilink.example"`, "base_url = \"https://ilink.example\"\nallow_from = \"*\"", 1))
+	patchConfigPath(t, configPath)
+
+	result, err := SaveWeixinPlatformCredentials(WeixinCredentialUpdateOptions{
+		ProjectName:       "alpha",
+		Token:             "new_weixin_token",
+		ScannedUserID:     "wx_user_2",
+		SetAllowFromEmpty: true,
+	})
+	if err != nil {
+		t.Fatalf("SaveWeixinPlatformCredentials returned error: %v", err)
+	}
+
+	if result.AllowFrom != "*" {
+		t.Fatalf("result.AllowFrom = %q, want %q", result.AllowFrom, "*")
+	}
+
+	cfg := readConfigFixture(t, configPath)
+	if got := stringMapValue(cfg.Projects[0].Platforms[0].Options, "allow_from"); got != "*" {
+		t.Fatalf("allow_from = %q, want %q", got, "*")
 	}
 }
 

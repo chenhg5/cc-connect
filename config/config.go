@@ -863,7 +863,7 @@ type FeishuCredentialUpdateOptions struct {
 	AppID             string // required
 	AppSecret         string // required
 	OwnerOpenID       string // optional owner id from onboarding flow
-	SetAllowFromEmpty bool   // when true, set allow_from=OwnerOpenID only if currently empty
+	SetAllowFromEmpty bool   // when true, seed/append allow_from with OwnerOpenID while preserving "*"
 }
 
 // EnsureProjectWithFeishuOptions controls project auto-provisioning for Feishu/Lark setup.
@@ -1096,8 +1096,11 @@ func SaveFeishuPlatformCredentials(opts FeishuCredentialUpdateOptions) (*FeishuC
 	platform.Options["app_secret"] = strings.TrimSpace(opts.AppSecret)
 
 	allowFrom := strings.TrimSpace(stringOption(platform.Options["allow_from"]))
-	if opts.SetAllowFromEmpty && allowFrom == "" && strings.TrimSpace(opts.OwnerOpenID) != "" {
-		allowFrom = strings.TrimSpace(opts.OwnerOpenID)
+	if opts.SetAllowFromEmpty && strings.TrimSpace(opts.OwnerOpenID) != "" {
+		allowFrom = mergeAllowFromValue(allowFrom, strings.TrimSpace(opts.OwnerOpenID))
+		if allowFrom != "" {
+			platform.Options["allow_from"] = allowFrom
+		}
 	}
 
 	lines, hadTrailing := splitConfigLines(raw)
@@ -1167,6 +1170,53 @@ func stringOption(v any) string {
 	return ""
 }
 
+func mergeAllowFromValue(current, userID string) string {
+	current = strings.TrimSpace(current)
+	userID = strings.TrimSpace(userID)
+
+	if current == "*" || userID == "" {
+		return current
+	}
+	if current == "" {
+		return userID
+	}
+
+	parts := strings.Split(current, ",")
+	merged := make([]string, 0, len(parts)+1)
+	seen := make(map[string]struct{}, len(parts)+1)
+
+	appendPart := func(v string) {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return
+		}
+		if v == "*" {
+			merged = []string{"*"}
+			return
+		}
+		if _, ok := seen[v]; ok {
+			return
+		}
+		seen[v] = struct{}{}
+		merged = append(merged, v)
+	}
+
+	for _, part := range parts {
+		if len(merged) == 1 && merged[0] == "*" {
+			return "*"
+		}
+		appendPart(part)
+	}
+	if len(merged) == 1 && merged[0] == "*" {
+		return "*"
+	}
+	appendPart(userID)
+	if len(merged) == 1 && merged[0] == "*" {
+		return "*"
+	}
+	return strings.Join(merged, ",")
+}
+
 func firstFeishuPlatformIndex(platforms []PlatformConfig) int {
 	for i := range platforms {
 		t := strings.ToLower(strings.TrimSpace(platforms[i].Type))
@@ -1211,7 +1261,7 @@ type WeixinCredentialUpdateOptions struct {
 	BaseURL           string // optional; empty = do not change in TOML
 	CDNBaseURL        string // optional; empty = do not change
 	AccountID         string // optional ilink_bot_id → options.account_id
-	ScannedUserID     string // optional ilink_user_id for allow_from when SetAllowFromEmpty
+	ScannedUserID     string // optional ilink_user_id for allow_from merge when SetAllowFromEmpty
 	SetAllowFromEmpty bool
 }
 
@@ -1417,9 +1467,11 @@ func SaveWeixinPlatformCredentials(opts WeixinCredentialUpdateOptions) (*WeixinC
 	}
 
 	allowFrom := strings.TrimSpace(stringOption(platform.Options["allow_from"]))
-	if opts.SetAllowFromEmpty && allowFrom == "" && strings.TrimSpace(opts.ScannedUserID) != "" {
-		allowFrom = strings.TrimSpace(opts.ScannedUserID)
-		platform.Options["allow_from"] = allowFrom
+	if opts.SetAllowFromEmpty && strings.TrimSpace(opts.ScannedUserID) != "" {
+		allowFrom = mergeAllowFromValue(allowFrom, strings.TrimSpace(opts.ScannedUserID))
+		if allowFrom != "" {
+			platform.Options["allow_from"] = allowFrom
+		}
 	}
 
 	lines, hadTrailing := splitConfigLines(raw)
