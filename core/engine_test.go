@@ -1884,6 +1884,167 @@ func TestHandleMessage_MultiWorkspacePreservesCCSessionKey(t *testing.T) {
 	}
 }
 
+func TestHandleMessage_AutoResetOnIdle_RotatesToNewSession(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agentSession := newResultAgentSession("fresh reply")
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetResetOnIdle(60 * time.Minute)
+
+	key := "test:user1"
+	old := e.sessions.GetOrCreateActive(key)
+	old.AddHistory("user", "stale context")
+	old.SetAgentSessionID("old-session", "stub")
+	staleAt := time.Now().Add(-2 * time.Hour)
+	old.mu.Lock()
+	old.UpdatedAt = staleAt
+	old.mu.Unlock()
+
+	msg := &Message{
+		SessionKey: key,
+		Platform:   "test",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "hello after idle",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	deadline := time.After(2 * time.Second)
+	for {
+		active := e.sessions.GetOrCreateActive(key)
+		sent := p.getSent()
+		if active.ID != old.ID && len(active.GetHistory(0)) >= 2 && len(sent) >= 2 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for idle auto-reset, sent=%v active=%s old=%s", sent, active.ID, old.ID)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	active := e.sessions.GetOrCreateActive(key)
+	if active.ID == old.ID {
+		t.Fatal("expected a new active session after idle auto-reset")
+	}
+	if got := old.GetAgentSessionID(); got != "old-session" {
+		t.Fatalf("old session agent id = %q, want old-session preserved", got)
+	}
+	if got := len(old.GetHistory(0)); got != 1 {
+		t.Fatalf("old session history len = %d, want 1 preserved entry", got)
+	}
+	if got := old.GetUpdatedAt(); !got.Equal(staleAt) {
+		t.Fatalf("old session updated_at = %v, want unchanged %v", got, staleAt)
+	}
+
+	history := active.GetHistory(0)
+	if len(history) != 2 {
+		t.Fatalf("new session history len = %d, want 2", len(history))
+	}
+	if history[0].Role != "user" || history[0].Content != "hello after idle" {
+		t.Fatalf("unexpected first history entry: %#v", history[0])
+	}
+	if history[1].Role != "assistant" || history[1].Content != "fresh reply" {
+		t.Fatalf("unexpected second history entry: %#v", history[1])
+	}
+
+	sent := p.getSent()
+	if !strings.Contains(sent[0], "Session auto-reset") {
+		t.Fatalf("first reply = %q, want auto-reset notice", sent[0])
+	}
+	if got := sent[len(sent)-1]; got != "fresh reply" {
+		t.Fatalf("final reply = %q, want fresh reply", got)
+	}
+}
+
+func TestHandleMessage_AutoResetOnIdle_DoesNotRotateFreshSession(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agentSession := newResultAgentSession("normal reply")
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetResetOnIdle(60 * time.Minute)
+
+	key := "test:user1"
+	session := e.sessions.GetOrCreateActive(key)
+	session.AddHistory("user", "recent context")
+	session.SetAgentSessionID("existing-session", "stub")
+	recentAt := time.Now().Add(-5 * time.Minute)
+	session.mu.Lock()
+	session.UpdatedAt = recentAt
+	session.mu.Unlock()
+
+	msg := &Message{
+		SessionKey: key,
+		Platform:   "test",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "follow up",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	deadline := time.After(2 * time.Second)
+	for {
+		if len(session.GetHistory(0)) >= 3 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for normal turn, sent=%v", p.getSent())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	active := e.sessions.GetOrCreateActive(key)
+	if active.ID != session.ID {
+		t.Fatalf("active session = %s, want unchanged %s", active.ID, session.ID)
+	}
+	sent := p.getSent()
+	for _, line := range sent {
+		if strings.Contains(line, "Session auto-reset") {
+			t.Fatalf("unexpected auto-reset notice in replies: %v", sent)
+		}
+	}
+}
+
+func TestHandleMessage_AutoResetOnIdle_DoesNotTriggerForSlashCommand(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetResetOnIdle(60 * time.Minute)
+
+	key := "test:user1"
+	session := e.sessions.GetOrCreateActive(key)
+	session.AddHistory("user", "stale context")
+	session.SetAgentSessionID("old-session", "stub")
+	staleAt := time.Now().Add(-2 * time.Hour)
+	session.mu.Lock()
+	session.UpdatedAt = staleAt
+	session.mu.Unlock()
+
+	msg := &Message{
+		SessionKey: key,
+		Platform:   "test",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "/list",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	active := e.sessions.GetOrCreateActive(key)
+	if active.ID != session.ID {
+		t.Fatalf("active session = %s, want unchanged %s", active.ID, session.ID)
+	}
+	for _, line := range p.getSent() {
+		if strings.Contains(line, "Session auto-reset") {
+			t.Fatalf("unexpected auto-reset notice for slash command: %v", p.getSent())
+		}
+	}
+}
+
 // --- quiet tests ---
 
 func TestQuietSessionToggle(t *testing.T) {

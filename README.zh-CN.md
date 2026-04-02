@@ -274,6 +274,13 @@ cc-connect update --pre     # Beta 版（含 pre-release）
 /dir [路径|reset]      查看、切换或重置工作目录
 ```
 
+项目配置也可以开启“长时间空闲后自动切到新会话”：
+
+```toml
+[[projects]]
+reset_on_idle_mins = 60
+```
+
 ---
 
 ### 🔐 权限模式

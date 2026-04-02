@@ -18,27 +18,27 @@ var configMu sync.Mutex
 var ConfigPath string
 
 type Config struct {
-	DataDir         string              `toml:"data_dir"` // session store directory, default ~/.cc-connect
-	AttachmentSend  string              `toml:"attachment_send"`
-	Projects        []ProjectConfig     `toml:"projects"`
-	Commands        []CommandConfig     `toml:"commands"`     // global custom slash commands
-	Aliases         []AliasConfig       `toml:"aliases"`      // global command aliases
-	BannedWords     []string            `toml:"banned_words"` // messages containing any of these words are blocked
-	Log             LogConfig           `toml:"log"`
-	Language        string              `toml:"language"` // "en" or "zh", default is "en"
-	Speech          SpeechConfig        `toml:"speech"`
-	TTS             TTSConfig           `toml:"tts"`
-	Display         DisplayConfig       `toml:"display"`
-	StreamPreview   StreamPreviewConfig `toml:"stream_preview"`  // real-time streaming preview
-	RateLimit       RateLimitConfig          `toml:"rate_limit"`           // per-session rate limiting
-	OutgoingRateLimit OutgoingRateLimitConfig `toml:"outgoing_rate_limit"`  // outgoing message throttling
-	Relay           RelayConfig         `toml:"relay"`           // bot-to-bot relay behavior
-	Quiet           *bool               `toml:"quiet,omitempty"` // global default for quiet mode; project-level overrides this
-	Cron            CronConfig          `toml:"cron"`
-	Webhook         WebhookConfig       `toml:"webhook"`
-	Bridge          BridgeConfig        `toml:"bridge"`
-	Management      ManagementConfig    `toml:"management"`
-	IdleTimeoutMins *int                `toml:"idle_timeout_mins,omitempty"` // max minutes between agent events; 0 = no timeout; default 120
+	DataDir           string                  `toml:"data_dir"` // session store directory, default ~/.cc-connect
+	AttachmentSend    string                  `toml:"attachment_send"`
+	Projects          []ProjectConfig         `toml:"projects"`
+	Commands          []CommandConfig         `toml:"commands"`     // global custom slash commands
+	Aliases           []AliasConfig           `toml:"aliases"`      // global command aliases
+	BannedWords       []string                `toml:"banned_words"` // messages containing any of these words are blocked
+	Log               LogConfig               `toml:"log"`
+	Language          string                  `toml:"language"` // "en" or "zh", default is "en"
+	Speech            SpeechConfig            `toml:"speech"`
+	TTS               TTSConfig               `toml:"tts"`
+	Display           DisplayConfig           `toml:"display"`
+	StreamPreview     StreamPreviewConfig     `toml:"stream_preview"`      // real-time streaming preview
+	RateLimit         RateLimitConfig         `toml:"rate_limit"`          // per-session rate limiting
+	OutgoingRateLimit OutgoingRateLimitConfig `toml:"outgoing_rate_limit"` // outgoing message throttling
+	Relay             RelayConfig             `toml:"relay"`               // bot-to-bot relay behavior
+	Quiet             *bool                   `toml:"quiet,omitempty"`     // global default for quiet mode; project-level overrides this
+	Cron              CronConfig              `toml:"cron"`
+	Webhook           WebhookConfig           `toml:"webhook"`
+	Bridge            BridgeConfig            `toml:"bridge"`
+	Management        ManagementConfig        `toml:"management"`
+	IdleTimeoutMins   *int                    `toml:"idle_timeout_mins,omitempty"` // max minutes between agent events; 0 = no timeout; default 120
 }
 
 // CronConfig controls cron job behavior.
@@ -97,7 +97,7 @@ type RateLimitConfig struct {
 type OutgoingRateLimitConfig struct {
 	MaxPerSecond *float64                               `toml:"max_per_second"` // messages per second; 0 = unlimited (default)
 	Burst        *int                                   `toml:"burst"`          // max burst size; default = ceil(max_per_second)
-	Platforms    map[string]OutgoingRateLimitPlatConfig  `toml:"platforms"`      // per-platform overrides keyed by platform type name
+	Platforms    map[string]OutgoingRateLimitPlatConfig `toml:"platforms"`      // per-platform overrides keyed by platform type name
 }
 
 // OutgoingRateLimitPlatConfig is a per-platform override for outgoing rate limiting.
@@ -196,6 +196,10 @@ type ProjectConfig struct {
 	Platforms    []PlatformConfig   `toml:"platforms"`
 	Heartbeat    HeartbeatConfig    `toml:"heartbeat"`
 	AutoCompress AutoCompressConfig `toml:"auto_compress"`
+	// ResetOnIdleMins automatically rotates to a new cc-connect session after
+	// the current session has been inactive for the specified number of minutes.
+	// 0 or nil disables the behavior.
+	ResetOnIdleMins *int `toml:"reset_on_idle_mins,omitempty"`
 	// ShowContextIndicator: nil/true = append [ctx: ~N%] to assistant replies; false = hide.
 	ShowContextIndicator *bool        `toml:"show_context_indicator,omitempty"`
 	Quiet                *bool        `toml:"quiet,omitempty"`             // project-level quiet mode; overrides global setting
@@ -318,6 +322,9 @@ func (c *Config) validate() error {
 			if _, ok := proj.Agent.Options["work_dir"]; ok {
 				return fmt.Errorf("project %q: multi-workspace mode conflicts with agent work_dir (use base_dir instead)", proj.Name)
 			}
+		}
+		if proj.ResetOnIdleMins != nil && *proj.ResetOnIdleMins < 0 {
+			return fmt.Errorf("config: %s.reset_on_idle_mins must be >= 0", prefix)
 		}
 		if err := validateUsersConfig(prefix, proj.Users); err != nil {
 			return err
