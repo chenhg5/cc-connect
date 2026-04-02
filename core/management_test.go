@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -9,8 +10,29 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 )
+
+type deadlineAwareModelAgent struct {
+	stubModelModeAgent
+	mu          sync.Mutex
+	hasDeadline bool
+}
+
+func (a *deadlineAwareModelAgent) AvailableModels(ctx context.Context) []ModelOption {
+	a.mu.Lock()
+	_, ok := ctx.Deadline()
+	a.hasDeadline = ok
+	a.mu.Unlock()
+	return []ModelOption{{Name: "gpt-4.1"}}
+}
+
+func (a *deadlineAwareModelAgent) sawDeadline() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.hasDeadline
+}
 
 // testManagementServer creates a ManagementServer with a test engine and returns an httptest.Server.
 func testManagementServer(t *testing.T, token string) (*ManagementServer, *httptest.Server, *Engine) {
@@ -188,6 +210,34 @@ func TestMgmt_Status(t *testing.T) {
 	}
 	if data["projects_count"] != float64(1) {
 		t.Fatalf("expected 1 project, got %v", data["projects_count"])
+	}
+}
+
+func TestMgmt_StatusIncludesBridgeToken(t *testing.T) {
+	mgmt, ts, _ := testManagementServer(t, "tok")
+	mgmt.SetBridgeServer(NewBridgeServer(9810, "bridge-secret", "/bridge/ws", nil))
+
+	r := mgmtGet(t, ts.URL+"/api/v1/status", "tok")
+	if !r.OK {
+		t.Fatalf("status failed: %s", r.Error)
+	}
+
+	var data struct {
+		Bridge struct {
+			Enabled bool   `json:"enabled"`
+			Port    int    `json:"port"`
+			Path    string `json:"path"`
+			Token   string `json:"token"`
+		} `json:"bridge"`
+	}
+	if err := json.Unmarshal(r.Data, &data); err != nil {
+		t.Fatalf("unmarshal status data: %v", err)
+	}
+	if !data.Bridge.Enabled {
+		t.Fatal("expected bridge to be enabled")
+	}
+	if data.Bridge.Token != "bridge-secret" {
+		t.Fatalf("expected bridge token, got %q", data.Bridge.Token)
 	}
 }
 
@@ -482,6 +532,57 @@ func TestMgmt_CORS(t *testing.T) {
 	}
 }
 
+func TestMgmt_BridgeWebSocketPathProxiesToBridgeServer(t *testing.T) {
+	mgmt := NewManagementServer(0, "", []string{"*"})
+	mgmt.RegisterEngine("p", NewEngine("p", &stubAgent{}, nil, "", LangEnglish))
+	mgmt.SetBridgeServer(NewBridgeServer(9810, "bridge-secret", "/bridge/ws", []string{"*"}))
+
+	mux := http.NewServeMux()
+	ts := httptest.NewServer(mgmt.buildHandler(mux))
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/bridge/ws?token=bridge-secret", nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Sec-WebSocket-Version", "13")
+	req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("expected websocket upgrade, got %d", resp.StatusCode)
+	}
+}
+
+func TestMgmt_BridgeWebSocketPathWorksWhenBridgeServerSetAfterHandlerBuild(t *testing.T) {
+	mgmt := NewManagementServer(0, "", []string{"*"})
+	mgmt.RegisterEngine("p", NewEngine("p", &stubAgent{}, nil, "", LangEnglish))
+
+	mux := http.NewServeMux()
+	ts := httptest.NewServer(mgmt.buildHandler(mux))
+	defer ts.Close()
+
+	mgmt.SetBridgeServer(NewBridgeServer(9810, "bridge-secret", "/bridge/ws", []string{"*"}))
+
+	req, _ := http.NewRequest("GET", ts.URL+"/bridge/ws?token=bridge-secret", nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Sec-WebSocket-Version", "13")
+	req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("expected websocket upgrade after late bridge setup, got %d", resp.StatusCode)
+	}
+}
+
 func TestMgmt_MethodNotAllowed(t *testing.T) {
 	_, ts, _ := testManagementServer(t, "tok")
 
@@ -620,5 +721,25 @@ func TestMgmt_ProjectModel_ReturnsErrorWhenModelSaveFails(t *testing.T) {
 	}
 	if got := agent.GetModel(); got != "gpt-4.1-mini" {
 		t.Fatalf("GetModel() = %q, want unchanged gpt-4.1-mini", got)
+	}
+}
+
+func TestMgmt_ProjectModels_UsesTimeoutContext(t *testing.T) {
+	agent := &deadlineAwareModelAgent{}
+	e := NewEngine("test-project", agent, nil, "", LangEnglish)
+
+	mgmt := NewManagementServer(0, "tok", nil)
+	mgmt.RegisterEngine("test-project", e)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/projects/", mgmt.wrap(mgmt.handleProjectRoutes))
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/models", "tok")
+	if !r.OK {
+		t.Fatalf("project models failed: %s", r.Error)
+	}
+	if !agent.sawDeadline() {
+		t.Fatal("AvailableModels context has no deadline; want timeout-bounded context")
 	}
 }

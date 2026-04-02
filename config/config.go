@@ -18,32 +18,33 @@ var configMu sync.Mutex
 var ConfigPath string
 
 type Config struct {
-	DataDir         string              `toml:"data_dir"` // session store directory, default ~/.cc-connect
-	AttachmentSend  string              `toml:"attachment_send"`
-	Projects        []ProjectConfig     `toml:"projects"`
-	Commands        []CommandConfig     `toml:"commands"`     // global custom slash commands
-	Aliases         []AliasConfig       `toml:"aliases"`      // global command aliases
-	BannedWords     []string            `toml:"banned_words"` // messages containing any of these words are blocked
-	Log             LogConfig           `toml:"log"`
-	Language        string              `toml:"language"` // "en" or "zh", default is "en"
-	Speech          SpeechConfig        `toml:"speech"`
-	TTS             TTSConfig           `toml:"tts"`
-	Display         DisplayConfig       `toml:"display"`
-	StreamPreview   StreamPreviewConfig `toml:"stream_preview"`  // real-time streaming preview
-	RateLimit       RateLimitConfig          `toml:"rate_limit"`           // per-session rate limiting
-	OutgoingRateLimit OutgoingRateLimitConfig `toml:"outgoing_rate_limit"`  // outgoing message throttling
-	Relay           RelayConfig         `toml:"relay"`           // bot-to-bot relay behavior
-	Quiet           *bool               `toml:"quiet,omitempty"` // global default for quiet mode; project-level overrides this
-	Cron            CronConfig          `toml:"cron"`
-	Webhook         WebhookConfig       `toml:"webhook"`
-	Bridge          BridgeConfig        `toml:"bridge"`
-	Management      ManagementConfig    `toml:"management"`
-	IdleTimeoutMins *int                `toml:"idle_timeout_mins,omitempty"` // max minutes between agent events; 0 = no timeout; default 120
+	DataDir           string                  `toml:"data_dir"` // session store directory, default ~/.cc-connect
+	AttachmentSend    string                  `toml:"attachment_send"`
+	Projects          []ProjectConfig         `toml:"projects"`
+	Commands          []CommandConfig         `toml:"commands"`     // global custom slash commands
+	Aliases           []AliasConfig           `toml:"aliases"`      // global command aliases
+	BannedWords       []string                `toml:"banned_words"` // messages containing any of these words are blocked
+	Log               LogConfig               `toml:"log"`
+	Language          string                  `toml:"language"` // "en" or "zh", default is "en"
+	Speech            SpeechConfig            `toml:"speech"`
+	TTS               TTSConfig               `toml:"tts"`
+	Display           DisplayConfig           `toml:"display"`
+	StreamPreview     StreamPreviewConfig     `toml:"stream_preview"`      // real-time streaming preview
+	RateLimit         RateLimitConfig         `toml:"rate_limit"`          // per-session rate limiting
+	OutgoingRateLimit OutgoingRateLimitConfig `toml:"outgoing_rate_limit"` // outgoing message throttling
+	Relay             RelayConfig             `toml:"relay"`               // bot-to-bot relay behavior
+	Quiet             *bool                   `toml:"quiet,omitempty"`     // global default for quiet mode; project-level overrides this
+	Cron              CronConfig              `toml:"cron"`
+	Webhook           WebhookConfig           `toml:"webhook"`
+	Bridge            BridgeConfig            `toml:"bridge"`
+	Management        ManagementConfig        `toml:"management"`
+	IdleTimeoutMins   *int                    `toml:"idle_timeout_mins,omitempty"` // max minutes between agent events; 0 = no timeout; default 120
 }
 
 // CronConfig controls cron job behavior.
 type CronConfig struct {
-	Silent *bool `toml:"silent"` // suppress cron start notification; default false
+	Silent      *bool  `toml:"silent"`       // suppress cron start notification; default false
+	SessionMode string `toml:"session_mode"` // default session mode: "" or "reuse" (default) or "new_per_run"
 }
 
 // WebhookConfig controls the external HTTP webhook endpoint.
@@ -73,8 +74,9 @@ type ManagementConfig struct {
 
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
 type DisplayConfig struct {
-	ThinkingMaxLen *int `toml:"thinking_max_len"` // max chars for thinking messages; 0 = no truncation; default 300
-	ToolMaxLen     *int `toml:"tool_max_len"`     // max chars for tool use messages; 0 = no truncation; default 500
+	ThinkingMaxLen *int  `toml:"thinking_max_len"` // max chars for thinking messages; 0 = no truncation; default 300
+	ToolMaxLen     *int  `toml:"tool_max_len"`     // max chars for tool use messages; 0 = no truncation; default 500
+	ToolMessages   *bool `toml:"tool_messages"`    // whether tool progress messages are shown; default true
 }
 
 // StreamPreviewConfig controls real-time streaming preview in IM.
@@ -97,7 +99,7 @@ type RateLimitConfig struct {
 type OutgoingRateLimitConfig struct {
 	MaxPerSecond *float64                               `toml:"max_per_second"` // messages per second; 0 = unlimited (default)
 	Burst        *int                                   `toml:"burst"`          // max burst size; default = ceil(max_per_second)
-	Platforms    map[string]OutgoingRateLimitPlatConfig  `toml:"platforms"`      // per-platform overrides keyed by platform type name
+	Platforms    map[string]OutgoingRateLimitPlatConfig `toml:"platforms"`      // per-platform overrides keyed by platform type name
 }
 
 // OutgoingRateLimitPlatConfig is a per-platform override for outgoing rate limiting.
@@ -196,6 +198,10 @@ type ProjectConfig struct {
 	Platforms    []PlatformConfig   `toml:"platforms"`
 	Heartbeat    HeartbeatConfig    `toml:"heartbeat"`
 	AutoCompress AutoCompressConfig `toml:"auto_compress"`
+	// ResetOnIdleMins automatically rotates to a new cc-connect session after
+	// the current session has been inactive for the specified number of minutes.
+	// 0 or nil disables the behavior.
+	ResetOnIdleMins *int `toml:"reset_on_idle_mins,omitempty"`
 	// ShowContextIndicator: nil/true = append [ctx: ~N%] to assistant replies; false = hide.
 	ShowContextIndicator *bool        `toml:"show_context_indicator,omitempty"`
 	Quiet                *bool        `toml:"quiet,omitempty"`             // project-level quiet mode; overrides global setting
@@ -318,6 +324,9 @@ func (c *Config) validate() error {
 			if _, ok := proj.Agent.Options["work_dir"]; ok {
 				return fmt.Errorf("project %q: multi-workspace mode conflicts with agent work_dir (use base_dir instead)", proj.Name)
 			}
+		}
+		if proj.ResetOnIdleMins != nil && *proj.ResetOnIdleMins < 0 {
+			return fmt.Errorf("config: %s.reset_on_idle_mins must be >= 0", prefix)
 		}
 		if err := validateUsersConfig(prefix, proj.Users); err != nil {
 			return err
@@ -587,14 +596,30 @@ func formatTOML(raw string) string {
 		}
 	}
 
-	// Pass 2: assemble output with blank lines before section headers.
+	// Pass 2: strip trailing whitespace from each line, skip empty sections,
+	// ensure a blank line before section headers, and collapse consecutive
+	// blank lines into one.
 	var out []string
+	prevBlank := false
 	for i, line := range lines {
 		if skipSection[i] {
 			continue
 		}
+		line = strings.TrimRight(line, " \t")
 		trimmed := strings.TrimSpace(line)
-		if len(trimmed) > 0 && trimmed[0] == '[' {
+		isBlank := trimmed == ""
+
+		if isBlank {
+			if prevBlank {
+				continue
+			}
+			prevBlank = true
+			out = append(out, "")
+			continue
+		}
+		prevBlank = false
+
+		if trimmed[0] == '[' {
 			if len(out) > 0 && strings.TrimSpace(out[len(out)-1]) != "" {
 				out = append(out, "")
 			}
@@ -602,7 +627,10 @@ func formatTOML(raw string) string {
 		out = append(out, line)
 	}
 
-	// Trim trailing blank lines, then ensure single trailing newline.
+	// Trim leading and trailing blank lines, then ensure single trailing newline.
+	for len(out) > 0 && strings.TrimSpace(out[0]) == "" {
+		out = out[1:]
+	}
 	for len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "" {
 		out = out[:len(out)-1]
 	}
@@ -759,8 +787,8 @@ func RemoveAlias(name string) error {
 	return saveConfig(cfg)
 }
 
-// SaveDisplayConfig persists the display truncation settings to the config file.
-func SaveDisplayConfig(thinkingMaxLen, toolMaxLen *int) error {
+// SaveDisplayConfig persists the display settings to the config file.
+func SaveDisplayConfig(thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
 	configMu.Lock()
 	defer configMu.Unlock()
 	if ConfigPath == "" {
@@ -779,6 +807,9 @@ func SaveDisplayConfig(thinkingMaxLen, toolMaxLen *int) error {
 	}
 	if toolMaxLen != nil {
 		cfg.Display.ToolMaxLen = toolMaxLen
+	}
+	if toolMessages != nil {
+		cfg.Display.ToolMessages = toolMessages
 	}
 	return saveConfig(cfg)
 }
@@ -833,7 +864,7 @@ type FeishuCredentialUpdateOptions struct {
 	AppID             string // required
 	AppSecret         string // required
 	OwnerOpenID       string // optional owner id from onboarding flow
-	SetAllowFromEmpty bool   // when true, set allow_from=OwnerOpenID only if currently empty
+	SetAllowFromEmpty bool   // when true, seed/append allow_from with OwnerOpenID while preserving "*"
 }
 
 // EnsureProjectWithFeishuOptions controls project auto-provisioning for Feishu/Lark setup.
@@ -1066,8 +1097,11 @@ func SaveFeishuPlatformCredentials(opts FeishuCredentialUpdateOptions) (*FeishuC
 	platform.Options["app_secret"] = strings.TrimSpace(opts.AppSecret)
 
 	allowFrom := strings.TrimSpace(stringOption(platform.Options["allow_from"]))
-	if opts.SetAllowFromEmpty && allowFrom == "" && strings.TrimSpace(opts.OwnerOpenID) != "" {
-		allowFrom = strings.TrimSpace(opts.OwnerOpenID)
+	if opts.SetAllowFromEmpty && strings.TrimSpace(opts.OwnerOpenID) != "" {
+		allowFrom = mergeAllowFromValue(allowFrom, strings.TrimSpace(opts.OwnerOpenID))
+		if allowFrom != "" {
+			platform.Options["allow_from"] = allowFrom
+		}
 	}
 
 	lines, hadTrailing := splitConfigLines(raw)
@@ -1137,6 +1171,53 @@ func stringOption(v any) string {
 	return ""
 }
 
+func mergeAllowFromValue(current, userID string) string {
+	current = strings.TrimSpace(current)
+	userID = strings.TrimSpace(userID)
+
+	if current == "*" || userID == "" {
+		return current
+	}
+	if current == "" {
+		return userID
+	}
+
+	parts := strings.Split(current, ",")
+	merged := make([]string, 0, len(parts)+1)
+	seen := make(map[string]struct{}, len(parts)+1)
+
+	appendPart := func(v string) {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return
+		}
+		if v == "*" {
+			merged = []string{"*"}
+			return
+		}
+		if _, ok := seen[v]; ok {
+			return
+		}
+		seen[v] = struct{}{}
+		merged = append(merged, v)
+	}
+
+	for _, part := range parts {
+		if len(merged) == 1 && merged[0] == "*" {
+			return "*"
+		}
+		appendPart(part)
+	}
+	if len(merged) == 1 && merged[0] == "*" {
+		return "*"
+	}
+	appendPart(userID)
+	if len(merged) == 1 && merged[0] == "*" {
+		return "*"
+	}
+	return strings.Join(merged, ",")
+}
+
 func firstFeishuPlatformIndex(platforms []PlatformConfig) int {
 	for i := range platforms {
 		t := strings.ToLower(strings.TrimSpace(platforms[i].Type))
@@ -1181,7 +1262,7 @@ type WeixinCredentialUpdateOptions struct {
 	BaseURL           string // optional; empty = do not change in TOML
 	CDNBaseURL        string // optional; empty = do not change
 	AccountID         string // optional ilink_bot_id → options.account_id
-	ScannedUserID     string // optional ilink_user_id for allow_from when SetAllowFromEmpty
+	ScannedUserID     string // optional ilink_user_id for allow_from merge when SetAllowFromEmpty
 	SetAllowFromEmpty bool
 }
 
@@ -1387,9 +1468,11 @@ func SaveWeixinPlatformCredentials(opts WeixinCredentialUpdateOptions) (*WeixinC
 	}
 
 	allowFrom := strings.TrimSpace(stringOption(platform.Options["allow_from"]))
-	if opts.SetAllowFromEmpty && allowFrom == "" && strings.TrimSpace(opts.ScannedUserID) != "" {
-		allowFrom = strings.TrimSpace(opts.ScannedUserID)
-		platform.Options["allow_from"] = allowFrom
+	if opts.SetAllowFromEmpty && strings.TrimSpace(opts.ScannedUserID) != "" {
+		allowFrom = mergeAllowFromValue(allowFrom, strings.TrimSpace(opts.ScannedUserID))
+		if allowFrom != "" {
+			platform.Options["allow_from"] = allowFrom
+		}
 	}
 
 	lines, hadTrailing := splitConfigLines(raw)
@@ -1462,16 +1545,17 @@ func pickAgentTemplateForNewProject(cfg *Config, opts EnsureProjectWithFeishuOpt
 			}
 		}
 	}
+	if agentType := strings.TrimSpace(opts.AgentType); agentType != "" {
+		return AgentConfig{
+			Type:    agentType,
+			Options: map[string]any{},
+		}
+	}
 	if len(cfg.Projects) > 0 {
 		return cloneAgentConfig(cfg.Projects[0].Agent)
 	}
-
-	agentType := strings.TrimSpace(opts.AgentType)
-	if agentType == "" {
-		agentType = "codex"
-	}
 	return AgentConfig{
-		Type:    agentType,
+		Type:    "codex",
 		Options: map[string]any{},
 	}
 }
@@ -1953,6 +2037,7 @@ func AddPlatformToProject(projectName string, platform PlatformConfig, workDir, 
 }
 
 func writeRawConfig(content string) error {
+	content = formatTOML(content)
 	dir := filepath.Dir(ConfigPath)
 	tmp, err := os.CreateTemp(dir, ".config-*.tmp")
 	if err != nil {
@@ -1974,6 +2059,44 @@ func writeRawConfig(content string) error {
 		return err
 	}
 	return os.Rename(tmpPath, ConfigPath)
+}
+
+// FormatConfigFile reads the config file at the given path, formats it, and
+// writes it back. It validates the TOML syntax before writing.
+func FormatConfigFile(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return fmt.Errorf("invalid TOML: %w", err)
+	}
+	formatted := formatTOML(string(data))
+	if formatted == string(data) {
+		return nil
+	}
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".config-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.WriteString(formatted); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("write formatted config: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }
 
 // GetGlobalSettings reads global settings from config.toml.

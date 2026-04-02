@@ -110,7 +110,9 @@
     "descPlaceholder": "Descripción de la tarea",
     "promptPlaceholder": "Indicación para enviar al agente...",
     "selectSessionKey": "Seleccionar sesión (vacío = predeterminada)",
-    "taskType": "Tipo de tarea"
+    "taskType": "Tipo de tarea",
+    "mode": "Modo de permisos",
+    "modeDefault": "Usar predeterminado del proyecto"
   },
   "heartbeat": {
     "title": "Latido",

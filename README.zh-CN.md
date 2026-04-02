@@ -274,6 +274,13 @@ cc-connect update --pre     # Beta 版（含 pre-release）
 /dir [路径|reset]      查看、切换或重置工作目录
 ```
 
+项目配置也可以开启“长时间空闲后自动切到新会话”：
+
+```toml
+[[projects]]
+reset_on_idle_mins = 60
+```
+
 ---
 
 ### 🔐 权限模式
@@ -375,6 +382,7 @@ cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/ch
 - [使用指南](docs/usage.zh-CN.md) — 完整功能文档
 - [INSTALL.md](INSTALL.md) — AI Agent 友好的安装指南
 - [config.example.toml](config.example.toml) — 配置模板
+- [CONTRIBUTING.md](CONTRIBUTING.md) — Issue / PR 提交流程与贡献说明
 
 ---
 

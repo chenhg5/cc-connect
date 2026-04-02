@@ -699,10 +699,15 @@ export default function ChatView() {
               {sending ? <Loader2 size={18} className="animate-spin" /> : <Send size={18} />}
             </button>
           </div>
-        ) : bridgeStatus === 'disconnected' || bridgeStatus === 'error' ? (
+        ) : !bridgeCfg ? (
           <div className="flex items-center gap-2 px-4 py-3 text-sm text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 rounded-xl">
             <WifiOff size={14} />
             <span>{t('sessions.bridgeNotAvailable')}</span>
+          </div>
+        ) : bridgeStatus === 'disconnected' || bridgeStatus === 'error' ? (
+          <div className="flex items-center gap-2 px-4 py-3 text-sm text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 rounded-xl">
+            <WifiOff size={14} />
+            <span>{t('sessions.bridgeDisconnected')}</span>
           </div>
         ) : (
           <div className="flex items-center gap-2 px-4 py-3 text-sm text-gray-400 bg-gray-50 dark:bg-gray-800/50 rounded-xl">

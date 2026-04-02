@@ -1,13 +1,14 @@
 package core
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -52,7 +53,6 @@ type ManagementServer struct {
 	configFilePath       string
 	getGlobalSettings    func() map[string]any
 	saveGlobalSettings   func(map[string]any) error
-	webDistDir           string // path to cc-connect-web dist/ for static serving
 }
 
 // NewManagementServer creates a new management API server.
@@ -110,12 +110,23 @@ func (m *ManagementServer) SetSaveGlobalSettings(fn func(map[string]any) error) 
 	m.saveGlobalSettings = fn
 }
 
-func (m *ManagementServer) SetWebDistDir(dir string) {
-	m.webDistDir = dir
-}
-
 func (m *ManagementServer) Start() {
 	mux := http.NewServeMux()
+	handler := m.buildHandler(mux)
+
+	m.server = &http.Server{
+		Addr:    fmt.Sprintf(":%d", m.port),
+		Handler: handler,
+	}
+	go func() {
+		if err := m.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("management api server error", "error", err)
+		}
+	}()
+	slog.Info("management api started", "port", m.port)
+}
+
+func (m *ManagementServer) buildHandler(mux *http.ServeMux) http.Handler {
 	prefix := "/api/v1"
 
 	// System
@@ -145,18 +156,7 @@ func (m *ManagementServer) Start() {
 	mux.HandleFunc(prefix+"/bridge/adapters", m.wrap(m.handleBridgeAdapters))
 
 	// Static file serving for cc-connect-web (SPA)
-	handler := m.withStaticFallback(mux)
-
-	m.server = &http.Server{
-		Addr:    fmt.Sprintf(":%d", m.port),
-		Handler: handler,
-	}
-	go func() {
-		if err := m.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("management api server error", "error", err)
-		}
-	}()
-	slog.Info("management api started", "port", m.port)
+	return m.withStaticFallback(mux)
 }
 
 func (m *ManagementServer) Stop() {
@@ -166,41 +166,46 @@ func (m *ManagementServer) Stop() {
 }
 
 // withStaticFallback wraps the API mux with a file server for the web UI.
-// API requests (/api/) go to the mux; everything else tries static files
-// from webDistDir, falling back to index.html for SPA routing.
+// API requests (/api/) go to the mux; everything else tries embedded static
+// files, falling back to index.html for SPA routing.
 func (m *ManagementServer) withStaticFallback(apiMux *http.ServeMux) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			apiMux.ServeHTTP(w, r)
 			return
 		}
-		if m.webDistDir == "" {
+		if m.bridgeServer != nil && r.URL.Path == m.bridgeServer.path {
+			m.bridgeServer.handleWS(w, r)
+			return
+		}
+		assets := GetWebAssets()
+		if assets == nil {
 			apiMux.ServeHTTP(w, r)
 			return
 		}
-		// CORS for static files too
 		m.setCORS(w, r)
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		// Try to serve the exact file; guard against path traversal.
-		filePath := filepath.Join(m.webDistDir, filepath.Clean(r.URL.Path))
-		if !strings.HasPrefix(filePath, m.webDistDir) {
-			http.NotFound(w, r)
+		// Try to serve the exact file from the embedded FS.
+		urlPath := strings.TrimPrefix(r.URL.Path, "/")
+		if urlPath == "" {
+			urlPath = "index.html"
+		}
+		if f, err := assets.Open(urlPath); err == nil {
+			f.Close()
+			http.FileServer(http.FS(assets)).ServeHTTP(w, r)
 			return
 		}
-		if info, err := os.Stat(filePath); err == nil && !info.IsDir() {
-			http.ServeFile(w, r, filePath)
+		// SPA fallback: serve index.html for any non-file route.
+		indexData, err := fs.ReadFile(assets, "index.html")
+		if err != nil {
+			apiMux.ServeHTTP(w, r)
 			return
 		}
-		// SPA fallback: serve index.html for any non-file route
-		indexPath := filepath.Join(m.webDistDir, "index.html")
-		if _, err := os.Stat(indexPath); err == nil {
-			http.ServeFile(w, r, indexPath)
-			return
-		}
-		apiMux.ServeHTTP(w, r)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write(indexData)
 	})
 }
 
@@ -317,6 +322,7 @@ func (m *ManagementServer) handleStatus(w http.ResponseWriter, r *http.Request) 
 			"enabled":   true,
 			"port":      m.bridgeServer.port,
 			"path":      m.bridgeServer.path,
+			"token":     m.bridgeServer.token,
 			"token_set": m.bridgeServer.token != "",
 		}
 	}
@@ -595,14 +601,14 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 
 	if r.Method == http.MethodPatch {
 		var body struct {
-			Quiet                 *bool             `json:"quiet"`
-			Language              *string           `json:"language"`
-			AdminFrom             *string           `json:"admin_from"`
-			DisabledCommands      []string          `json:"disabled_commands"`
-			WorkDir               *string           `json:"work_dir"`
-			Mode                  *string           `json:"mode"`
-			ShowContextIndicator  *bool             `json:"show_context_indicator"`
-			PlatformAllowFrom     map[string]string `json:"platform_allow_from"`
+			Quiet                *bool             `json:"quiet"`
+			Language             *string           `json:"language"`
+			AdminFrom            *string           `json:"admin_from"`
+			DisabledCommands     []string          `json:"disabled_commands"`
+			WorkDir              *string           `json:"work_dir"`
+			Mode                 *string           `json:"mode"`
+			ShowContextIndicator *bool             `json:"show_context_indicator"`
+			PlatformAllowFrom    map[string]string `json:"platform_allow_from"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			mgmtError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -1123,7 +1129,9 @@ func (m *ManagementServer) handleProjectModels(w http.ResponseWriter, r *http.Re
 		mgmtError(w, http.StatusBadRequest, "agent does not support model switching")
 		return
 	}
-	models := ms.AvailableModels(r.Context())
+	fetchCtx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	models := ms.AvailableModels(fetchCtx)
 	names := make([]string, len(models))
 	for i, m := range models {
 		names[i] = m.Name
@@ -1329,6 +1337,7 @@ func (m *ManagementServer) handleCron(w http.ResponseWriter, r *http.Request) {
 			Enabled:     true,
 			Silent:      req.Silent,
 			SessionMode: NormalizeCronSessionMode(req.SessionMode),
+			Mode:        req.Mode,
 			TimeoutMins: req.TimeoutMins,
 			CreatedAt:   time.Now(),
 		}

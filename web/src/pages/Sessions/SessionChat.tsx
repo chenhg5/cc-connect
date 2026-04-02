@@ -536,10 +536,15 @@ export default function SessionChat() {
               )}
             </button>
           </div>
-        ) : bridgeStatus === 'disconnected' || bridgeStatus === 'error' ? (
+        ) : !bridgeCfg ? (
           <div className="flex items-center gap-2 px-4 py-3 text-sm text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 rounded-xl">
             <WifiOff size={14} />
             <span>{t('sessions.bridgeNotAvailable', 'Bridge not available. Enable [bridge] in config.toml to chat from web.')}</span>
+          </div>
+        ) : bridgeStatus === 'disconnected' || bridgeStatus === 'error' ? (
+          <div className="flex items-center gap-2 px-4 py-3 text-sm text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 rounded-xl">
+            <WifiOff size={14} />
+            <span>{t('sessions.bridgeDisconnected', 'Bridge disconnected.')}</span>
           </div>
         ) : (
           <div className="flex items-center gap-2 px-4 py-3 text-sm text-gray-400 bg-gray-50 dark:bg-gray-800/50 rounded-xl">

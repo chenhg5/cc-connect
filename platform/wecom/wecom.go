@@ -787,15 +787,42 @@ func wecomInboundFileMime(fileName string, data []byte) string {
 	ext := strings.ToLower(filepath.Ext(fileName))
 	if ext != "" {
 		if mt := mime.TypeByExtension(ext); mt != "" {
-			return mt
+			if mt != "application/octet-stream" {
+				return mt
+			}
 		}
 	}
 	if len(data) > 0 {
+		if mt := wecomInboundFileMagicMime(data); mt != "" {
+			return mt
+		}
 		if sniff := http.DetectContentType(data); sniff != "" {
 			return sniff
 		}
 	}
 	return "application/octet-stream"
+}
+
+func wecomInboundFileMagicMime(data []byte) string {
+	if len(data) >= 8 && string(data[:8]) == "\x89PNG\r\n\x1a\n" {
+		return "image/png"
+	}
+	if len(data) >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF {
+		return "image/jpeg"
+	}
+	if len(data) >= 6 {
+		head := string(data[:6])
+		if head == "GIF87a" || head == "GIF89a" {
+			return "image/gif"
+		}
+	}
+	if len(data) >= 12 && string(data[:4]) == "RIFF" && string(data[8:12]) == "WEBP" {
+		return "image/webp"
+	}
+	if len(data) >= 4 && string(data[:4]) == "%PDF" {
+		return "application/pdf"
+	}
+	return ""
 }
 
 func (p *Platform) downloadMedia(mediaID string) ([]byte, error) {

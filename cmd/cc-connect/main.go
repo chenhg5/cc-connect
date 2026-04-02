@@ -38,6 +38,9 @@ func main() {
 		case "config-example":
 			fmt.Print(ccconnect.ConfigExampleTOML)
 			return
+		case "config":
+			runConfig(os.Args[2:])
+			return
 		case "update":
 			runUpdate()
 			return
@@ -268,12 +271,16 @@ func main() {
 			dcfg := core.DisplayCfg{
 				ThinkingMaxLen: 300,
 				ToolMaxLen:     500,
+				ToolMessages:   true,
 			}
 			if cfg.Display.ThinkingMaxLen != nil {
 				dcfg.ThinkingMaxLen = *cfg.Display.ThinkingMaxLen
 			}
 			if cfg.Display.ToolMaxLen != nil {
 				dcfg.ToolMaxLen = *cfg.Display.ToolMaxLen
+			}
+			if cfg.Display.ToolMessages != nil {
+				dcfg.ToolMessages = *cfg.Display.ToolMessages
 			}
 			engine.SetDisplayConfig(dcfg)
 		}
@@ -344,8 +351,8 @@ func main() {
 			}
 		}
 
-		engine.SetDisplaySaveFunc(func(thinkingMaxLen, toolMaxLen *int) error {
-			return config.SaveDisplayConfig(thinkingMaxLen, toolMaxLen)
+		engine.SetDisplaySaveFunc(func(thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
+			return config.SaveDisplayConfig(thinkingMaxLen, toolMaxLen, toolMessages)
 		})
 
 		// Wire idle timeout
@@ -376,6 +383,9 @@ func main() {
 				maxTokens = 12000
 			}
 			engine.SetAutoCompressConfig(true, maxTokens, minGap)
+		}
+		if proj.ResetOnIdleMins != nil {
+			engine.SetResetOnIdle(time.Duration(*proj.ResetOnIdleMins) * time.Minute)
 		}
 
 		// Wire sender injection
@@ -541,27 +551,7 @@ func main() {
 		})
 
 		// Wire /web command callbacks
-		capturedDataDir := cfg.DataDir
-		engine.SetWebInstallFunc(func() (string, error) {
-			return core.WebInstall(capturedDataDir)
-		})
-		engine.SetWebUpgradeFunc(func() (string, string, error) {
-			return core.WebUpgrade(capturedDataDir)
-		})
-		engine.SetWebStatusFunc(func() (bool, string, string) {
-			installed := core.WebIsInstalled(capturedDataDir)
-			version := core.WebInstalledVersion(capturedDataDir)
-			url := ""
-			if cfg.Management.Enabled != nil && *cfg.Management.Enabled {
-				port := cfg.Management.Port
-				if port == 0 {
-					port = 9820
-				}
-				url = fmt.Sprintf("http://localhost:%d", port)
-			}
-			return installed, version, url
-		})
-		engine.SetWebEnableFunc(func() (int, string, bool, error) {
+		engine.SetWebSetupFunc(func() (int, string, bool, error) {
 			mgmtToken := core.GenerateToken(16)
 			bridgeToken := core.GenerateToken(16)
 			result, err := config.EnableWebAdmin(mgmtToken, bridgeToken)
@@ -570,9 +560,15 @@ func main() {
 			}
 			return result.ManagementPort, result.ManagementToken, !result.AlreadyEnabled, nil
 		})
-		engine.SetWebUninstallFunc(func() error {
-			dir := core.WebInstallDir(capturedDataDir)
-			return os.RemoveAll(dir)
+		engine.SetWebStatusFunc(func() string {
+			if cfg.Management.Enabled == nil || !*cfg.Management.Enabled {
+				return ""
+			}
+			port := cfg.Management.Port
+			if port == 0 {
+				port = 9820
+			}
+			return fmt.Sprintf("http://localhost:%d", port)
 		})
 
 		engines = append(engines, engine)
@@ -589,6 +585,9 @@ func main() {
 		cronSched = core.NewCronScheduler(cronStore)
 		if cfg.Cron.Silent != nil && *cfg.Cron.Silent {
 			cronSched.SetDefaultSilent(true)
+		}
+		if cfg.Cron.SessionMode != "" {
+			cronSched.SetDefaultSessionMode(cfg.Cron.SessionMode)
 		}
 		for i, e := range engines {
 			cronSched.RegisterEngine(cfg.Projects[i].Name, e)
@@ -791,11 +790,6 @@ func main() {
 			}
 			return config.SaveGlobalSettings(u)
 		})
-		webDist := core.WebDistDir(cfg.DataDir)
-		if info, err := os.Stat(webDist); err == nil && info.IsDir() {
-			mgmtSrv.SetWebDistDir(webDist)
-			slog.Info("web admin serving static files", "dir", webDist)
-		}
 		mgmtSrv.Start()
 	}
 
@@ -1118,9 +1112,14 @@ Commands:
     new              Force QR login
     bind             Bind existing ilink bot token
 
+  config             Manage configuration
+    example          Print a complete annotated config.toml example
+    format           Format the config file (alias: fmt)
+    path             Print the resolved config file path
+
   update             Check for updates and upgrade the binary (--pre for beta)
   check-update       Check if a newer version is available
-  config-example     Print a complete annotated config.toml example
+  config-example     (deprecated: use 'config example' instead)
 
 Examples:
   cc-connect                          Start with default config
@@ -1132,8 +1131,8 @@ Examples:
   cc-connect feishu setup             Setup Feishu/Lark bot credentials
   cc-connect weixin setup             Setup Weixin (ilink) with QR or --token
   cc-connect update                   Update to the latest version
-  cc-connect config-example           Print full config.toml example
-  cc-connect config-example > c.toml  Save example config to a file
+  cc-connect config format            Format the config file
+  cc-connect config example > c.toml  Save example config to a file
 
 `, v, updateHint)
 }
@@ -1181,12 +1180,15 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	}
 
 	// Reload display config
-	dcfg := core.DisplayCfg{ThinkingMaxLen: 300, ToolMaxLen: 500}
+	dcfg := core.DisplayCfg{ThinkingMaxLen: 300, ToolMaxLen: 500, ToolMessages: true}
 	if cfg.Display.ThinkingMaxLen != nil {
 		dcfg.ThinkingMaxLen = *cfg.Display.ThinkingMaxLen
 	}
 	if cfg.Display.ToolMaxLen != nil {
 		dcfg.ToolMaxLen = *cfg.Display.ToolMaxLen
+	}
+	if cfg.Display.ToolMessages != nil {
+		dcfg.ToolMessages = *cfg.Display.ToolMessages
 	}
 	engine.SetDisplayConfig(dcfg)
 	result.DisplayUpdated = true
@@ -1213,6 +1215,11 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		engine.SetAutoCompressConfig(true, maxTokens, minGap)
 	} else {
 		engine.SetAutoCompressConfig(false, 0, 0)
+	}
+	if proj.ResetOnIdleMins != nil {
+		engine.SetResetOnIdle(time.Duration(*proj.ResetOnIdleMins) * time.Minute)
+	} else {
+		engine.SetResetOnIdle(0)
 	}
 
 	showCtx := true

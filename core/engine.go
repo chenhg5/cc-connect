@@ -121,6 +121,7 @@ var RestartCh = make(chan RestartRequest, 1)
 type DisplayCfg struct {
 	ThinkingMaxLen int // max runes for thinking preview; 0 = no truncation
 	ToolMaxLen     int // max runes for tool use preview; 0 = no truncation
+	ToolMessages   bool
 }
 
 // RateLimitCfg controls per-session message rate limiting.
@@ -157,7 +158,7 @@ type Engine struct {
 	commandSaveAddFunc func(name, description, prompt, exec, workDir string) error
 	commandSaveDelFunc func(name string) error
 
-	displaySaveFunc  func(thinkingMaxLen, toolMaxLen *int) error
+	displaySaveFunc  func(thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error
 	configReloadFunc func() (*ConfigReloadResult, error)
 
 	cronScheduler      *CronScheduler
@@ -192,6 +193,7 @@ type Engine struct {
 	autoCompressEnabled   bool
 	autoCompressMaxTokens int
 	autoCompressMinGap    time.Duration
+	resetOnIdle           time.Duration
 
 	// When true, append [ctx: ~N%] (or model self-report) to assistant replies shown on platforms.
 	showContextIndicator bool
@@ -216,11 +218,8 @@ type Engine struct {
 	stopping            bool
 
 	// /web command callbacks
-	webInstallFunc   func() (version string, err error)
-	webUpgradeFunc   func() (oldVer, newVer string, err error)
-	webStatusFunc    func() (installed bool, version, url string)
-	webEnableFunc    func() (mgmtPort int, token string, needRestart bool, err error)
-	webUninstallFunc func() error
+	webSetupFunc  func() (port int, token string, needRestart bool, err error)
+	webStatusFunc func() (url string)
 }
 
 // workspaceInitFlow tracks a channel that is being onboarded to a workspace.
@@ -334,7 +333,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		cancel:                cancel,
 		i18n:                  NewI18n(lang),
 		attachmentSendEnabled: true,
-		display:               DisplayCfg{ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen},
+		display:               DisplayCfg{ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen, ToolMessages: true},
 		commands:              NewCommandRegistry(),
 		skills:                NewSkillRegistry(),
 		aliases:               make(map[string]string),
@@ -456,16 +455,23 @@ func (e *Engine) SetAutoCompressConfig(enabled bool, maxTokens int, minGap time.
 	e.autoCompressMinGap = minGap
 }
 
+// SetResetOnIdle configures automatic session rotation after prolonged inactivity.
+// A zero or negative duration disables the behavior.
+func (e *Engine) SetResetOnIdle(d time.Duration) {
+	if d <= 0 {
+		e.resetOnIdle = 0
+		return
+	}
+	e.resetOnIdle = d
+}
+
 // SetShowContextIndicator controls whether assistant replies include the [ctx: ~N%] suffix.
 func (e *Engine) SetShowContextIndicator(show bool) {
 	e.showContextIndicator = show
 }
 
-func (e *Engine) SetWebInstallFunc(fn func() (string, error))           { e.webInstallFunc = fn }
-func (e *Engine) SetWebUpgradeFunc(fn func() (string, string, error))   { e.webUpgradeFunc = fn }
-func (e *Engine) SetWebStatusFunc(fn func() (bool, string, string))     { e.webStatusFunc = fn }
-func (e *Engine) SetWebEnableFunc(fn func() (int, string, bool, error)) { e.webEnableFunc = fn }
-func (e *Engine) SetWebUninstallFunc(fn func() error)                   { e.webUninstallFunc = fn }
+func (e *Engine) SetWebSetupFunc(fn func() (int, string, bool, error)) { e.webSetupFunc = fn }
+func (e *Engine) SetWebStatusFunc(fn func() string)                    { e.webStatusFunc = fn }
 
 // SetInjectSender controls whether sender identity (platform and user ID) is
 // prepended to each message before forwarding it to the agent. When enabled,
@@ -531,7 +537,7 @@ func (e *Engine) SetCommandSaveDelFunc(fn func(name string) error) {
 	e.commandSaveDelFunc = fn
 }
 
-func (e *Engine) SetDisplaySaveFunc(fn func(thinkingMaxLen, toolMaxLen *int) error) {
+func (e *Engine) SetDisplaySaveFunc(fn func(thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error) {
 	e.displaySaveFunc = fn
 }
 
@@ -874,15 +880,23 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 	}
 
 	msg := &Message{
-		SessionKey: sessionKey,
-		Platform:   platformName,
-		UserID:     "cron",
-		UserName:   "cron",
-		Content:    job.Prompt,
-		ReplyCtx:   replyCtx,
+		SessionKey:   sessionKey,
+		Platform:     platformName,
+		UserID:       "cron",
+		UserName:     "cron",
+		Content:      job.Prompt,
+		ReplyCtx:     replyCtx,
+		ModeOverride: job.Mode,
 	}
 
-	if job.UsesNewSessionPerRun() {
+	useNewSession := false
+	if e.cronScheduler != nil {
+		useNewSession = e.cronScheduler.UsesNewSession(job)
+	} else {
+		useNewSession = job.UsesNewSessionPerRun()
+	}
+
+	if useNewSession {
 		msg.SessionKey = runSessionKey
 		session := e.sessions.NewSideSession(runSessionKey, "cron-"+job.ID)
 		if !session.TryLock() {
@@ -1396,6 +1410,10 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		return
 	}
 
+	if rotated := e.maybeAutoResetSessionOnIdle(p, msg, sessions, interactiveKey, session); rotated != nil {
+		session = rotated
+	}
+
 	slog.Info("processing message",
 		"platform", msg.Platform,
 		"user", msg.UserName,
@@ -1403,6 +1421,45 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	)
 
 	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, resolvedWorkspace, msg.SessionKey)
+}
+
+func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions *SessionManager, interactiveKey string, session *Session) *Session {
+	if e.resetOnIdle <= 0 || session == nil {
+		return nil
+	}
+
+	hasBackend := session.GetAgentSessionID() != ""
+	hasHistory := len(session.GetHistory(1)) > 0
+	if !hasBackend && !hasHistory {
+		return nil
+	}
+
+	lastActive := session.GetUpdatedAt()
+	if lastActive.IsZero() || time.Since(lastActive) < e.resetOnIdle {
+		return nil
+	}
+
+	slog.Info("auto-resetting idle session",
+		"session_key", msg.SessionKey,
+		"session_id", session.ID,
+		"idle_for", time.Since(lastActive),
+		"threshold", e.resetOnIdle,
+	)
+
+	e.cleanupInteractiveState(interactiveKey)
+	session.UnlockWithoutUpdate()
+
+	newSession := sessions.NewSession(msg.SessionKey, "")
+	if !newSession.TryLock() {
+		slog.Error("failed to lock new session after idle auto-reset", "session_key", msg.SessionKey, "new_session", newSession.ID)
+		if session.TryLock() {
+			return session
+		}
+		return nil
+	}
+
+	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgSessionAutoResetIdle, int(e.resetOnIdle/time.Minute)))
+	return newSession
 }
 
 // queueMessageForBusySession queues a message for later delivery when the
@@ -1775,6 +1832,24 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	if state.agentSession == nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgFailedToStartAgentSession))
 		return
+	}
+
+	// Apply per-message permission mode override (e.g. cron jobs with mode = "bypassPermissions").
+	// Restoration queries the agent's current mode at defer time (not a pre-override snapshot),
+	// so any /mode changes made by users during cron execution are respected.
+	if msg.ModeOverride != "" {
+		if switcher, ok := state.agentSession.(LiveModeSwitcher); ok {
+			switcher.SetLiveMode(msg.ModeOverride)
+			defer func() {
+				defaultMode := "default"
+				if ma, ok := e.agent.(interface{ GetMode() string }); ok {
+					if m := ma.GetMode(); m != "" {
+						defaultMode = m
+					}
+				}
+				switcher.SetLiveMode(defaultMode)
+			}()
+		}
 	}
 
 	// Start typing indicator if platform supports it.
@@ -2230,7 +2305,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventToolUse:
 			toolCount++
-			if !quiet {
+			if !quiet && e.display.ToolMessages {
 				// Flush accumulated text segment before tool display
 				previewActive := sp.canPreview()
 				if len(textParts) > segmentStart {
@@ -2275,7 +2350,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventToolResult:
-			if !quiet {
+			if !quiet && e.display.ToolMessages {
 				result := strings.TrimSpace(event.ToolResult)
 				if result == "" {
 					result = strings.TrimSpace(event.Content)
@@ -3779,7 +3854,11 @@ func (e *Engine) dirApply(agent Agent, sessions *SessionManager, interactiveKey,
 		}
 	} else {
 		newDir = filepath.Clean(arg)
-		if !filepath.IsAbs(newDir) {
+		if strings.HasPrefix(newDir, "~") {
+			if homeDir, err := os.UserHomeDir(); err == nil {
+				newDir = filepath.Join(homeDir, strings.TrimPrefix(newDir, "~"))
+			}
+		} else if !filepath.IsAbs(newDir) {
 			baseDir := currentDir
 			if baseDir == "" {
 				baseDir, _ = os.Getwd()
@@ -8482,7 +8561,26 @@ func (e *Engine) configItems() []configItem {
 				}
 				e.display.ThinkingMaxLen = n
 				if e.displaySaveFunc != nil {
-					return e.displaySaveFunc(&n, nil)
+					return e.displaySaveFunc(&n, nil, nil)
+				}
+				return nil
+			},
+		},
+		{
+			key:    "tool_messages",
+			desc:   "Whether tool progress messages are shown (true/false)",
+			descZh: "是否显示工具进度消息 (true/false)",
+			getFunc: func() string {
+				return fmt.Sprintf("%t", e.display.ToolMessages)
+			},
+			setFunc: func(v string) error {
+				b, err := strconv.ParseBool(v)
+				if err != nil {
+					return fmt.Errorf("invalid boolean: %s", v)
+				}
+				e.display.ToolMessages = b
+				if e.displaySaveFunc != nil {
+					return e.displaySaveFunc(nil, nil, &b)
 				}
 				return nil
 			},
@@ -8504,7 +8602,7 @@ func (e *Engine) configItems() []configItem {
 				}
 				e.display.ToolMaxLen = n
 				if e.displaySaveFunc != nil {
-					return e.displaySaveFunc(nil, &n)
+					return e.displaySaveFunc(nil, &n, nil)
 				}
 				return nil
 			},
@@ -9203,7 +9301,7 @@ func (e *Engine) sendTTSReply(p Platform, replyCtx any, text string) {
 
 // HandleRelay processes a relay message synchronously: starts or resumes a
 // dedicated relay session, sends the message to the agent, and blocks until
-// the complete response is collected.
+// the complete response is collected (or the relay context times out).
 func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message string) (string, error) {
 	relaySessionKey := "relay:" + fromProject + ":" + chatID
 	session := e.sessions.GetOrCreateActive(relaySessionKey)
@@ -9222,23 +9320,41 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 		inj.SetSessionEnv(envVars)
 	}
 
-	agentSession, err := e.agent.StartSession(ctx, session.GetAgentSessionID())
+	// Use the engine context (not the relay timeout context) so that the
+	// agent process is not killed when the relay deadline fires. The relay
+	// timeout only controls how long we *wait* for the response.
+	agentSession, err := e.agent.StartSession(e.ctx, session.GetAgentSessionID())
 	if err != nil {
-		return "", fmt.Errorf("start relay session: %w", err)
+		// Resume failed — fall back to a fresh session so the relay is not
+		// permanently broken by a corrupted/stale session ID.
+		if session.GetAgentSessionID() != "" {
+			slog.Warn("relay: session resume failed, trying fresh session",
+				"relay_key", relaySessionKey, "error", err)
+			session.SetAgentSessionID("", e.agent.Name())
+			e.sessions.Save()
+			agentSession, err = e.agent.StartSession(e.ctx, "")
+		}
+		if err != nil {
+			return "", fmt.Errorf("start relay session: %w", err)
+		}
 	}
-	defer agentSession.Close()
 
 	if session.CompareAndSetAgentSessionID(agentSession.CurrentSessionID(), e.agent.Name()) {
 		e.sessions.Save()
 	}
 
 	if err := agentSession.Send(message, nil, nil); err != nil {
+		agentSession.Close()
 		return "", fmt.Errorf("send relay message: %w", err)
 	}
 
 	var textParts []string
 	for event := range agentSession.Events() {
 		if ctx.Err() != nil {
+			// Relay timed out. Let the agent finish its turn in the
+			// background so the session state is saved cleanly and the
+			// session remains resumable for the next relay call.
+			go e.drainRelaySession(agentSession, session, relaySessionKey)
 			return relayPartialResponseOrError(ctx.Err(), textParts, fromProject, e.name)
 		}
 		switch event.Type {
@@ -9276,8 +9392,10 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 				resp = "(empty response)"
 			}
 			slog.Info("relay: turn complete", "from", fromProject, "to", e.name, "response_len", len(resp))
+			agentSession.Close()
 			return resp, nil
 		case EventError:
+			agentSession.Close()
 			if event.Error != nil {
 				return "", event.Error
 			}
@@ -9290,6 +9408,9 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 			})
 		}
 	}
+
+	// Event channel closed without EventResult.
+	agentSession.Close()
 
 	if ctx.Err() != nil {
 		return relayPartialResponseOrError(ctx.Err(), textParts, fromProject, e.name)
@@ -9314,6 +9435,54 @@ func relayPartialResponseOrError(ctxErr error, textParts []string, fromProject, 
 		"response_len", len(resp),
 	)
 	return resp, nil
+}
+
+// drainRelaySession runs in a goroutine after a relay timeout. It lets the
+// agent finish its current turn (saving the session ID for future resumption),
+// auto-approves any permission requests, and then closes the session. A 10-minute
+// safety timeout prevents the goroutine from leaking if the agent hangs.
+func (e *Engine) drainRelaySession(agentSession AgentSession, session *Session, relaySessionKey string) {
+	timer := time.NewTimer(10 * time.Minute)
+	defer timer.Stop()
+
+	for {
+		select {
+		case ev, ok := <-agentSession.Events():
+			if !ok {
+				// Event channel closed — session ended naturally.
+				return
+			}
+			if ev.SessionID != "" {
+				session.SetAgentSessionID(ev.SessionID, e.agent.Name())
+				e.sessions.Save()
+			}
+			switch ev.Type {
+			case EventResult:
+				slog.Info("relay: background drain completed (agent finished turn)",
+					"relay_key", relaySessionKey)
+				agentSession.Close()
+				return
+			case EventError:
+				slog.Warn("relay: background drain got error",
+					"relay_key", relaySessionKey, "error", ev.Error)
+				agentSession.Close()
+				return
+			case EventPermissionRequest:
+				_ = agentSession.RespondPermission(ev.RequestID, PermissionResult{
+					Behavior:     "allow",
+					UpdatedInput: ev.ToolInputRaw,
+				})
+			}
+		case <-timer.C:
+			slog.Warn("relay: background drain timed out, closing session",
+				"relay_key", relaySessionKey)
+			agentSession.Close()
+			return
+		case <-e.ctx.Done():
+			agentSession.Close()
+			return
+		}
+	}
 }
 
 // cmdBind handles /bind — establishes a relay binding between bots in a group chat.
@@ -9864,98 +10033,53 @@ func (e *Engine) cmdWeb(p Platform, msg *Message, args []string) {
 	subCmd := ""
 	if len(args) > 0 {
 		subCmd = matchSubCommand(strings.ToLower(args[0]),
-			[]string{"install", "upgrade", "status", "open", "uninstall"})
+			[]string{"setup", "status"})
 	}
 
 	switch subCmd {
-	case "install":
-		e.cmdWebInstall(p, msg)
-	case "upgrade":
-		e.cmdWebUpgrade(p, msg)
-	case "uninstall":
-		e.cmdWebUninstall(p, msg)
-	case "open", "status":
-		e.cmdWebStatus(p, msg)
+	case "setup":
+		e.cmdWebSetup(p, msg)
 	default:
 		e.cmdWebStatus(p, msg)
 	}
 }
 
-func (e *Engine) cmdWebInstall(p Platform, msg *Message) {
-	if e.webInstallFunc == nil {
+func (e *Engine) cmdWebSetup(p Platform, msg *Message) {
+	if !WebAssetsAvailable() {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebNotSupported))
+		return
+	}
+	if e.webSetupFunc == nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebNotSupported))
 		return
 	}
 
-	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebInstalling))
-
-	version, err := e.webInstallFunc()
+	port, token, needRestart, err := e.webSetupFunc()
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 		return
 	}
-
-	// Auto-enable bridge & management
-	if e.webEnableFunc != nil {
-		port, token, needRestart, err := e.webEnableFunc()
-		if err != nil {
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgWebInstallDone), version)+"\n\n⚠️ "+err.Error())
-			return
-		}
-		url := fmt.Sprintf("http://localhost:%d", port)
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgWebInstallSuccess), version, url, token))
-		if needRestart {
-			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebNeedRestart))
-		}
-		return
-	}
-	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgWebInstallDone), version))
-}
-
-func (e *Engine) cmdWebUpgrade(p Platform, msg *Message) {
-	if e.webUpgradeFunc == nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebNotSupported))
-		return
-	}
-
-	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebUpgrading))
-
-	oldVer, newVer, err := e.webUpgradeFunc()
-	if err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
-		return
-	}
-
-	if oldVer == newVer {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgWebAlreadyLatest), newVer))
-	} else {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgWebUpgradeSuccess), oldVer, newVer))
+	url := fmt.Sprintf("http://localhost:%d", port)
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgWebSetupSuccess), url, token))
+	if needRestart {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebNeedRestart))
 	}
 }
 
 func (e *Engine) cmdWebStatus(p Platform, msg *Message) {
+	if !WebAssetsAvailable() {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebNotSupported))
+		return
+	}
 	if e.webStatusFunc == nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebNotSupported))
 		return
 	}
 
-	installed, version, url := e.webStatusFunc()
-	if !installed {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebNotInstalled))
+	url := e.webStatusFunc()
+	if url == "" {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebNotEnabled))
 		return
 	}
-
-	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgWebStatus), version, url))
-}
-
-func (e *Engine) cmdWebUninstall(p Platform, msg *Message) {
-	if e.webUninstallFunc == nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebNotSupported))
-		return
-	}
-	if err := e.webUninstallFunc(); err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
-		return
-	}
-	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebUninstalled))
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgWebStatus), url))
 }
