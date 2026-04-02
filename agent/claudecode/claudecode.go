@@ -34,6 +34,7 @@ func init() {
 //   - "auto":              Claude's automatic permission classifier
 //   - "bypassPermissions": auto-approve everything (alias: yolo)
 type Agent struct {
+	cmd             string // CLI 二进制名称（默认 "claude"）
 	workDir         string
 	model           string
 	mode            string // "default" | "acceptEdits" | "plan" | "auto" | "bypassPermissions" | "dontAsk"
@@ -79,15 +80,21 @@ func New(opts map[string]any) (core.Agent, error) {
 		}
 	}
 
+	cmd, _ := opts["cmd"].(string)
+	if cmd == "" {
+		cmd = "claude"
+	}
+
 	// Claude Code Router support
 	routerURL, _ := opts["router_url"].(string)
 	routerAPIKey, _ := opts["router_api_key"].(string)
 
-	if _, err := exec.LookPath("claude"); err != nil {
-		return nil, fmt.Errorf("claudecode: 'claude' CLI not found in PATH, please install Claude Code first")
+	if _, err := exec.LookPath(cmd); err != nil {
+		return nil, fmt.Errorf("claudecode: %q CLI not found in PATH, please install Claude Code first", cmd)
 	}
 
 	return &Agent{
+		cmd:             cmd,
 		workDir:         workDir,
 		model:           model,
 		mode:            mode,
@@ -119,7 +126,12 @@ func normalizePermissionMode(raw string) string {
 }
 
 func (a *Agent) Name() string           { return "claudecode" }
-func (a *Agent) CLIBinaryName() string  { return "claude" }
+func (a *Agent) CLIBinaryName() string {
+	if a.cmd == "" {
+		return "claude"
+	}
+	return a.cmd
+}
 func (a *Agent) CLIDisplayName() string { return "Claude" }
 
 func (a *Agent) SetWorkDir(dir string) {
@@ -273,7 +285,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	disableVerbose := a.routerURL != ""
 	a.mu.Unlock()
 
-	return newClaudeSession(ctx, a.workDir, model, sessionID, a.mode, tools, disTools, extraEnv, platformPrompt, disableVerbose)
+	return newClaudeSession(ctx, a.cmd, a.workDir, model, sessionID, a.mode, tools, disTools, extraEnv, platformPrompt, disableVerbose)
 }
 
 func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {

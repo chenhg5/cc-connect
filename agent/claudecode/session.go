@@ -42,7 +42,7 @@ type claudeSession struct {
 	alive           atomic.Bool
 }
 
-func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool) (*claudeSession, error) {
+func newClaudeSession(ctx context.Context, cmdName, workDir, model, sessionID, mode string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	args := []string{
@@ -89,7 +89,7 @@ func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode strin
 
 	slog.Debug("claudeSession: starting", "args", core.RedactArgs(args), "dir", workDir, "mode", mode)
 
-	cmd := exec.CommandContext(sessionCtx, "claude", args...)
+	cmd := exec.CommandContext(sessionCtx, cmdName, args...)
 	cmd.Dir = workDir
 	// Filter out CLAUDECODE env var to prevent "nested session" detection,
 	// since cc-connect is a bridge, not a nested Claude Code session.
