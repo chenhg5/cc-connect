@@ -18,9 +18,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
-
-	"github.com/chenhg5/cc-connect/core/channel"
 )
+
 
 const maxPlatformMessageLen = 4000
 const maxQueuedMessages = 5 // cap queued messages to bound memory usage
@@ -1283,15 +1282,13 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		return
 	}
 
-	// Enrich content with platform-specific attachments (e.g. location → text)
-	if msg.Location != nil && content == "" {
-		locData := &channel.LocationData{
-			Latitude:  msg.Location.Latitude,
-			Longitude: msg.Location.Longitude,
-		}
-		if enriched := channel.EnrichContent(msg.Platform, locData); enriched != "" {
-			msg.Content = enriched
-			content = enriched
+	// Enrich content with platform-specific context (reply quotes, location text, etc.)
+	if msg.ExtraContent != "" {
+		if content == "" {
+			msg.Content = msg.ExtraContent
+			content = msg.ExtraContent
+		} else {
+			msg.Content = msg.ExtraContent + "\n" + content
 		}
 	}
 

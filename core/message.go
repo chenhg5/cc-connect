@@ -149,7 +149,8 @@ type Message struct {
 	Files      []FileAttachment  // attached files (if any)
 	Audio        *AudioAttachment // voice message (if any)
 	Location     *LocationAttachment // geographical location (if any)
-	ChannelKey   string          // platform-provided channel identifier for workspace binding (optional)
+	ExtraContent string              // platform-enriched content (e.g. location text, reply quote) prepended for the agent
+	ChannelKey   string              // platform-provided channel identifier for workspace binding (optional)
 	ReplyCtx     any             // platform-specific context needed for replying
 	FromVoice    bool            // true if message originated from voice transcription
 	ModeOverride string          // if set, temporarily override agent permission mode for this message
