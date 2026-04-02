@@ -296,7 +296,8 @@ func TestDisplayConfig_Save(t *testing.T) {
 
 	thinking := 120
 	tool := 240
-	if err := SaveDisplayConfig(&thinking, &tool); err != nil {
+	showTools := false
+	if err := SaveDisplayConfig(&thinking, &tool, &showTools); err != nil {
 		t.Fatalf("SaveDisplayConfig() error: %v", err)
 	}
 
@@ -307,9 +308,12 @@ func TestDisplayConfig_Save(t *testing.T) {
 	if cfg.Display.ToolMaxLen == nil || *cfg.Display.ToolMaxLen != 240 {
 		t.Fatalf("ToolMaxLen = %#v, want 240", cfg.Display.ToolMaxLen)
 	}
+	if cfg.Display.ToolMessages == nil || *cfg.Display.ToolMessages {
+		t.Fatalf("ToolMessages = %#v, want false", cfg.Display.ToolMessages)
+	}
 
 	thinking = 360
-	if err := SaveDisplayConfig(&thinking, nil); err != nil {
+	if err := SaveDisplayConfig(&thinking, nil, nil); err != nil {
 		t.Fatalf("SaveDisplayConfig() second update error: %v", err)
 	}
 
@@ -319,6 +323,9 @@ func TestDisplayConfig_Save(t *testing.T) {
 	}
 	if cfg.Display.ToolMaxLen == nil || *cfg.Display.ToolMaxLen != 240 {
 		t.Fatalf("ToolMaxLen after nil update = %#v, want 240", cfg.Display.ToolMaxLen)
+	}
+	if cfg.Display.ToolMessages == nil || *cfg.Display.ToolMessages {
+		t.Fatalf("ToolMessages after nil update = %#v, want false", cfg.Display.ToolMessages)
 	}
 }
 

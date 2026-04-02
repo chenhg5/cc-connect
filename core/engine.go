@@ -121,6 +121,7 @@ var RestartCh = make(chan RestartRequest, 1)
 type DisplayCfg struct {
 	ThinkingMaxLen int // max runes for thinking preview; 0 = no truncation
 	ToolMaxLen     int // max runes for tool use preview; 0 = no truncation
+	ToolMessages   bool
 }
 
 // RateLimitCfg controls per-session message rate limiting.
@@ -157,7 +158,7 @@ type Engine struct {
 	commandSaveAddFunc func(name, description, prompt, exec, workDir string) error
 	commandSaveDelFunc func(name string) error
 
-	displaySaveFunc  func(thinkingMaxLen, toolMaxLen *int) error
+	displaySaveFunc  func(thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error
 	configReloadFunc func() (*ConfigReloadResult, error)
 
 	cronScheduler      *CronScheduler
@@ -332,7 +333,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		cancel:                cancel,
 		i18n:                  NewI18n(lang),
 		attachmentSendEnabled: true,
-		display:               DisplayCfg{ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen},
+		display:               DisplayCfg{ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen, ToolMessages: true},
 		commands:              NewCommandRegistry(),
 		skills:                NewSkillRegistry(),
 		aliases:               make(map[string]string),
@@ -536,7 +537,7 @@ func (e *Engine) SetCommandSaveDelFunc(fn func(name string) error) {
 	e.commandSaveDelFunc = fn
 }
 
-func (e *Engine) SetDisplaySaveFunc(fn func(thinkingMaxLen, toolMaxLen *int) error) {
+func (e *Engine) SetDisplaySaveFunc(fn func(thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error) {
 	e.displaySaveFunc = fn
 }
 
@@ -2278,7 +2279,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventToolUse:
 			toolCount++
-			if !quiet {
+			if !quiet && e.display.ToolMessages {
 				// Flush accumulated text segment before tool display
 				previewActive := sp.canPreview()
 				if len(textParts) > segmentStart {
@@ -2323,7 +2324,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventToolResult:
-			if !quiet {
+			if !quiet && e.display.ToolMessages {
 				result := strings.TrimSpace(event.ToolResult)
 				if result == "" {
 					result = strings.TrimSpace(event.Content)
@@ -8323,7 +8324,26 @@ func (e *Engine) configItems() []configItem {
 				}
 				e.display.ThinkingMaxLen = n
 				if e.displaySaveFunc != nil {
-					return e.displaySaveFunc(&n, nil)
+					return e.displaySaveFunc(&n, nil, nil)
+				}
+				return nil
+			},
+		},
+		{
+			key:    "tool_messages",
+			desc:   "Whether tool progress messages are shown (true/false)",
+			descZh: "是否显示工具进度消息 (true/false)",
+			getFunc: func() string {
+				return fmt.Sprintf("%t", e.display.ToolMessages)
+			},
+			setFunc: func(v string) error {
+				b, err := strconv.ParseBool(v)
+				if err != nil {
+					return fmt.Errorf("invalid boolean: %s", v)
+				}
+				e.display.ToolMessages = b
+				if e.displaySaveFunc != nil {
+					return e.displaySaveFunc(nil, nil, &b)
 				}
 				return nil
 			},
@@ -8345,7 +8365,7 @@ func (e *Engine) configItems() []configItem {
 				}
 				e.display.ToolMaxLen = n
 				if e.displaySaveFunc != nil {
-					return e.displaySaveFunc(nil, &n)
+					return e.displaySaveFunc(nil, &n, nil)
 				}
 				return nil
 			},
