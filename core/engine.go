@@ -18,6 +18,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/chenhg5/cc-connect/core/channel"
 )
 
 const maxPlatformMessageLen = 4000
@@ -1277,9 +1279,22 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	}
 
 	content := strings.TrimSpace(msg.Content)
-	if content == "" && len(msg.Images) == 0 && len(msg.Files) == 0 {
+	if content == "" && len(msg.Images) == 0 && len(msg.Files) == 0 && msg.Location == nil {
 		return
 	}
+
+	// Enrich content with platform-specific attachments (e.g. location → text)
+	if msg.Location != nil && content == "" {
+		locData := &channel.LocationData{
+			Latitude:  msg.Location.Latitude,
+			Longitude: msg.Location.Longitude,
+		}
+		if enriched := channel.EnrichContent(msg.Platform, locData); enriched != "" {
+			msg.Content = enriched
+			content = enriched
+		}
+	}
+
 
 	// Resolve aliases: check if the first word (or whole content) matches an alias
 	content = e.resolveAlias(content)
