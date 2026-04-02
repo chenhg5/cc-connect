@@ -48,6 +48,8 @@ type streamPreview struct {
 
 	timer     *time.Timer
 	timerStop chan struct{} // closed when preview ends
+
+	pendingStatus CardStatus // last status set via setStatus(); applied on recovery
 }
 
 // PreviewStarter is an optional interface for platforms that can initiate a
@@ -57,6 +59,52 @@ type PreviewStarter interface {
 	// that can be passed to UpdateMessage for edits. Returns nil handle if
 	// preview is not supported for this context.
 	SendPreviewStart(ctx context.Context, replyCtx any, content string) (previewHandle any, err error)
+}
+
+// CardStatus represents the visual status of a card header.
+type CardStatus string
+
+const (
+	CardStatusThinking CardStatus = "thinking" // grey
+	CardStatusWorking  CardStatus = "working"  // blue
+	CardStatusDone     CardStatus = "done"     // green
+	CardStatusError    CardStatus = "error"    // red
+)
+
+// ToolStep is one summarized tool invocation shown in rich progress cards.
+type ToolStep struct {
+	Name    string // tool name (e.g. "Bash", "Edit")
+	Summary string // human-readable summary shown in the card
+}
+
+// RichCardContent contains all content for a rich card.
+type RichCardContent struct {
+	Thinking      string     // thinking content (shown in collapsible panel)
+	Steps         []ToolStep // tool steps
+	Markdown      string     // main markdown content
+	Streaming     bool       // true while agent is working
+	WorkDir       string     // working directory
+	StartTime     time.Time  // start time for elapsed calculation
+	ContextPct    int        // context usage percentage (0-100), 0 means not available
+	ModelName     string     // model name (e.g., "claude-sonnet-4-6")
+}
+
+// RichCardSupporter is an optional interface for platforms that can build
+// native rich cards combining tool steps and markdown content.
+type RichCardSupporter interface {
+	BuildRichCard(status CardStatus, content RichCardContent) string
+}
+
+// PreviewStatusUpdater is an optional interface for platforms that support
+// updating the visual status of a preview card header.
+type PreviewStatusUpdater interface {
+	SetPreviewStatus(previewHandle any, status CardStatus)
+}
+
+// MarkdownTableSplitter is an optional interface for platforms that need
+// platform-specific markdown table chunking before final send.
+type MarkdownTableSplitter interface {
+	SplitMarkdownByTables(md string, maxTables int) []string
 }
 
 // PreviewCleaner is an optional interface for platforms that need to clean up
@@ -284,6 +332,21 @@ func (sp *streamPreview) finish(finalText string) bool {
 
 	if sp.previewMsgID == nil || sp.degraded {
 		if sp.previewMsgID != nil && sp.degraded {
+			// Try to recover degraded preview via UpdateMessage before falling back to delete
+			if finalText != "" {
+				if updater, ok := sp.platform.(MessageUpdater); ok {
+					if err := updater.UpdateMessage(sp.ctx, sp.previewMsgID, finalText); err == nil {
+						if sp.pendingStatus != "" {
+							if statusUpdater, ok := sp.platform.(PreviewStatusUpdater); ok {
+								statusUpdater.SetPreviewStatus(sp.previewMsgID, sp.pendingStatus)
+							}
+						}
+						return true
+					} else {
+						slog.Debug("stream preview finish: degraded UpdateMessage failed, cleaning up", "error", err)
+					}
+				}
+			}
 			if cleaner, ok := sp.platform.(PreviewCleaner); ok {
 				slog.Debug("stream preview finish: deleting stale preview (degraded)")
 				_ = cleaner.DeletePreviewMessage(sp.ctx, sp.previewMsgID)
@@ -343,8 +406,35 @@ func (sp *streamPreview) finish(finalText string) bool {
 		}
 		return false
 	}
+	if sp.pendingStatus != "" {
+		if statusUpdater, ok := sp.platform.(PreviewStatusUpdater); ok {
+			statusUpdater.SetPreviewStatus(sp.previewMsgID, sp.pendingStatus)
+		}
+	}
 	slog.Debug("stream preview finish: success via UpdateMessage")
 	return true
+}
+
+// setStatus updates the card header status of the active preview message.
+// If the preview is not yet active or is degraded, the status is saved and
+// applied when the preview recovers (at finish time).
+func (sp *streamPreview) setStatus(status CardStatus) {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	sp.pendingStatus = status
+	if sp.previewMsgID == nil || sp.degraded {
+		return
+	}
+	if updater, ok := sp.platform.(PreviewStatusUpdater); ok {
+		updater.SetPreviewStatus(sp.previewMsgID, status)
+	}
+}
+
+// getFullText returns the accumulated text so far.
+func (sp *streamPreview) getFullText() string {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	return sp.fullText
 }
 
 // detachPreview clears the preview message handle so that finish() won't
