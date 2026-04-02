@@ -494,22 +494,28 @@ const (
 	MsgBuiltinCmdShell     MsgKey = "shell"
 	MsgBuiltinCmdDir       MsgKey = "dir"
 
-	MsgDirChanged          MsgKey = "dir_changed"
-	MsgDirCurrent          MsgKey = "dir_current"
-	MsgDirReset            MsgKey = "dir_reset"
-	MsgDirUsage            MsgKey = "dir_usage"
-	MsgDirNotSupported     MsgKey = "dir_not_supported"
-	MsgDirInvalidPath      MsgKey = "dir_invalid_path"
-	MsgDirHistoryTitle     MsgKey = "dir_history_title"
-	MsgDirHistoryHint      MsgKey = "dir_history_hint"
-	MsgDirInvalidIndex     MsgKey = "dir_invalid_index"
-	MsgDirNoHistory        MsgKey = "dir_no_history"
-	MsgDirNoPrevious       MsgKey = "dir_no_previous"
-	MsgDirCardTitle        MsgKey = "dir_card_title"
-	MsgDirCardPageHint     MsgKey = "dir_card_page_hint"
-	MsgDirCardEmptyHistory MsgKey = "dir_card_empty_history"
-	MsgDirCardReset        MsgKey = "dir_card_reset"
-	MsgDirCardPrev         MsgKey = "dir_card_prev"
+	MsgDiffUsage             MsgKey = "diff_usage"
+	MsgDiffNotTelegram       MsgKey = "diff_not_telegram"
+	MsgDiffNoChanges         MsgKey = "diff_no_changes"
+	MsgDiffResolveBaseFailed MsgKey = "diff_resolve_base_failed"
+	MsgDiffGenerateFailed    MsgKey = "diff_generate_failed"
+	MsgDiffSent              MsgKey = "diff_sent"
+	MsgDirChanged            MsgKey = "dir_changed"
+	MsgDirCurrent            MsgKey = "dir_current"
+	MsgDirReset              MsgKey = "dir_reset"
+	MsgDirUsage              MsgKey = "dir_usage"
+	MsgDirNotSupported       MsgKey = "dir_not_supported"
+	MsgDirInvalidPath        MsgKey = "dir_invalid_path"
+	MsgDirHistoryTitle       MsgKey = "dir_history_title"
+	MsgDirHistoryHint        MsgKey = "dir_history_hint"
+	MsgDirInvalidIndex       MsgKey = "dir_invalid_index"
+	MsgDirNoHistory          MsgKey = "dir_no_history"
+	MsgDirNoPrevious         MsgKey = "dir_no_previous"
+	MsgDirCardTitle          MsgKey = "dir_card_title"
+	MsgDirCardPageHint       MsgKey = "dir_card_page_hint"
+	MsgDirCardEmptyHistory   MsgKey = "dir_card_empty_history"
+	MsgDirCardReset          MsgKey = "dir_card_reset"
+	MsgDirCardPrev           MsgKey = "dir_card_prev"
 
 	// Multi-workspace messages
 	MsgWsNotEnabled            MsgKey = "ws_not_enabled"
@@ -843,6 +849,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/compress\n  Compress conversation context\n\n" +
 			"/tts [always|voice_only]\n  View/switch text-to-speech mode\n\n" +
 			"/shell <command>\n  Run a shell command and return the output\n\n" +
+			"/diff\n  Generate current branch diff and send it as a file (Telegram only)\n\n" +
 			"/dir [path|reset]\n  Show, switch, or reset agent working directory\n\n" +
 			"/stop\n  Stop current execution\n\n" +
 			"/cron [add|list|del|enable|disable]\n  Manage scheduled tasks\n\n" +
@@ -886,6 +893,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/compress\n  压缩会话上下文\n\n" +
 			"/tts [always|voice_only]\n  查看/切换语音合成模式\n\n" +
 			"/shell <命令>\n  执行 Shell 命令并返回结果\n\n" +
+			"/diff\n  生成当前分支变更补丁并以文件发送（仅 Telegram）\n\n" +
 			"/dir [路径|reset]\n  查看、切换或重置 Agent 工作目录\n\n" +
 			"/stop\n  停止当前执行\n\n" +
 			"/cron [add|list|del|enable|disable]\n  管理定时任务\n\n" +
@@ -929,6 +937,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/compress\n  壓縮會話上下文\n\n" +
 			"/tts [always|voice_only]\n  查看/切換語音合成模式\n\n" +
 			"/shell <命令>\n  執行 Shell 命令並返回結果\n\n" +
+			"/diff\n  產生目前分支變更補丁並以檔案傳送（僅 Telegram）\n\n" +
 			"/dir [路徑|reset]\n  查看、切換或重置 Agent 工作目錄\n\n" +
 			"/stop\n  停止當前執行\n\n" +
 			"/cron [add|list|del|enable|disable]\n  管理定時任務\n\n" +
@@ -971,6 +980,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/compress\n  会話コンテキストを圧縮\n\n" +
 			"/tts [always|voice_only]\n  音声合成モードの表示/切り替え\n\n" +
 			"/shell <コマンド>\n  シェルコマンドを実行して結果を返す\n\n" +
+			"/diff\n  現在のブランチ差分をパッチ化してファイル送信（Telegram のみ）\n\n" +
 			"/dir [パス|reset]\n  エージェントの作業ディレクトリを表示/切り替え/リセット\n\n" +
 			"/stop\n  現在の実行を停止\n\n" +
 			"/cron [add|list|del|enable|disable]\n  スケジュールタスク管理\n\n" +
@@ -1013,6 +1023,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/compress\n  Comprimir contexto de conversación\n\n" +
 			"/tts [always|voice_only]\n  Ver/cambiar modo de síntesis de voz\n\n" +
 			"/shell <comando>\n  Ejecutar un comando shell y devolver la salida\n\n" +
+			"/diff\n  Generar el diff de la rama actual y enviarlo como archivo (solo Telegram)\n\n" +
 			"/dir [ruta|reset]\n  Ver, cambiar o restablecer el directorio de trabajo del agente\n\n" +
 			"/stop\n  Detener ejecución actual\n\n" +
 			"/cron [add|list|del|enable|disable]\n  Gestionar tareas programadas\n\n" +
@@ -3339,6 +3350,48 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "查看、切換或重置 Agent 工作目錄，參數: <路徑>",
 		LangJapanese:           "エージェントの作業ディレクトリを表示/変更/リセット、引数: <パス>",
 		LangSpanish:            "Ver, cambiar o restablecer el directorio de trabajo del agente, arg: <ruta>",
+	},
+	MsgDiffUsage: {
+		LangEnglish:            "Usage: `/diff`",
+		LangChinese:            "用法: `/diff`",
+		LangTraditionalChinese: "用法: `/diff`",
+		LangJapanese:           "使い方: `/diff`",
+		LangSpanish:            "Uso: `/diff`",
+	},
+	MsgDiffNotTelegram: {
+		LangEnglish:            "❌ `/diff` is currently only available on Telegram.",
+		LangChinese:            "❌ `/diff` 目前仅支持在 Telegram 上使用。",
+		LangTraditionalChinese: "❌ `/diff` 目前僅支援在 Telegram 上使用。",
+		LangJapanese:           "❌ `/diff` は現在 Telegram でのみ利用できます。",
+		LangSpanish:            "❌ `/diff` solo está disponible actualmente en Telegram.",
+	},
+	MsgDiffNoChanges: {
+		LangEnglish:            "ℹ️ No changes found for the current branch.",
+		LangChinese:            "ℹ️ 当前分支没有可发送的变更。",
+		LangTraditionalChinese: "ℹ️ 目前分支沒有可傳送的變更。",
+		LangJapanese:           "ℹ️ 現在のブランチに送信できる差分はありません。",
+		LangSpanish:            "ℹ️ No se encontraron cambios para la rama actual.",
+	},
+	MsgDiffResolveBaseFailed: {
+		LangEnglish:            "failed to determine the default branch",
+		LangChinese:            "无法确定默认分支",
+		LangTraditionalChinese: "無法確定預設分支",
+		LangJapanese:           "デフォルトブランチを特定できませんでした",
+		LangSpanish:            "no se pudo determinar la rama predeterminada",
+	},
+	MsgDiffGenerateFailed: {
+		LangEnglish:            "❌ Failed to generate diff file: %v",
+		LangChinese:            "❌ 生成 diff 文件失败: %v",
+		LangTraditionalChinese: "❌ 產生 diff 檔案失敗: %v",
+		LangJapanese:           "❌ diff ファイルの生成に失敗しました: %v",
+		LangSpanish:            "❌ No se pudo generar el archivo diff: %v",
+	},
+	MsgDiffSent: {
+		LangEnglish:            "✅ Diff file sent: `%s`",
+		LangChinese:            "✅ Diff 文件已发送: `%s`",
+		LangTraditionalChinese: "✅ Diff 檔案已傳送: `%s`",
+		LangJapanese:           "✅ diff ファイルを送信しました: `%s`",
+		LangSpanish:            "✅ Archivo diff enviado: `%s`",
 	},
 	MsgDirChanged: {
 		LangEnglish:            "✅ Work directory changed to: `%s`\nThe next session will start in this directory.",

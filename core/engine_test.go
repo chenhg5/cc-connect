@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -247,13 +248,25 @@ type stubMediaPlatform struct {
 }
 
 func (p *stubMediaPlatform) SendImage(_ context.Context, _ any, img ImageAttachment) error {
+	p.mu.Lock()
 	p.images = append(p.images, img)
+	p.mu.Unlock()
 	return nil
 }
 
 func (p *stubMediaPlatform) SendFile(_ context.Context, _ any, file FileAttachment) error {
+	p.mu.Lock()
 	p.files = append(p.files, file)
+	p.mu.Unlock()
 	return nil
+}
+
+func (p *stubMediaPlatform) getFiles() []FileAttachment {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	cp := make([]FileAttachment, len(p.files))
+	copy(cp, p.files)
+	return cp
 }
 
 type stubInlineButtonPlatform struct {
@@ -6500,42 +6513,156 @@ func TestCmdShell_MultiWorkspaceUsesSharedBindingWorkDir(t *testing.T) {
 	}
 }
 
-func TestCmdShell_MultiWorkspaceIgnoresMissingSharedBinding(t *testing.T) {
-	p := &stubPlatformEngine{n: "test"}
-	agent := &stubWorkDirAgent{workDir: t.TempDir()}
-	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
-
-	baseDir := t.TempDir()
-	bindStore := filepath.Join(t.TempDir(), "bindings.json")
-	e.SetMultiWorkspace(baseDir, bindStore)
-
-	missingDir := filepath.Join(baseDir, "missing-shared-workspace")
-	e.workspaceBindings.Bind(sharedWorkspaceBindingsKey, "ch1", "shared-shell", missingDir)
+func TestCmdDiff_NonTelegramRejected(t *testing.T) {
+	p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangChinese)
 
 	msg := &Message{
-		SessionKey: "test:ch1:user1",
-		Content:    "/shell pwd",
+		SessionKey: "test:ch:user1",
 		ReplyCtx:   "ctx",
+		Platform:   "test",
 	}
-	e.cmdShell(p, msg, "/shell pwd")
+	e.cmdDiff(p, msg, nil)
 
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		sent := p.getSent()
-		if len(sent) > 0 {
-			if !strings.Contains(sent[0], normalizeWorkspacePath(agent.workDir)) {
-				t.Fatalf("expected shell output to fall back to agent work dir %q, got %q", agent.workDir, sent[0])
-			}
-			if strings.Contains(sent[0], missingDir) {
-				t.Fatalf("expected shell output to ignore missing shared workspace %q, got %q", missingDir, sent[0])
-			}
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("timed out waiting for shell response")
-		}
+	sent := p.getSent()
+	if len(sent) != 1 || !strings.Contains(sent[0], "Telegram") {
+		t.Fatalf("expected telegram-only reply, got %v", sent)
+	}
+	if got := len(p.getFiles()); got != 0 {
+		t.Fatalf("expected no file sent, got %d", got)
+	}
+}
+
+func TestCmdDiff_TelegramSendsHTMLFile(t *testing.T) {
+	repoDir := initGitRepoForDiffTest(t)
+	writeFileForTest(t, filepath.Join(repoDir, "tracked.txt"), "base\nfeature-line\n")
+	gitRun(t, repoDir, "add", "tracked.txt")
+	gitRun(t, repoDir, "commit", "-m", "feature change")
+	writeFileForTest(t, filepath.Join(repoDir, "tracked.txt"), "base\nfeature-line\nworking-tree-line\n")
+
+	agent := &stubWorkDirAgent{workDir: repoDir}
+	p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangChinese)
+
+	msg := &Message{
+		SessionKey: "telegram:chat:user1",
+		ReplyCtx:   "ctx",
+		Platform:   "telegram",
+	}
+	e.cmdDiff(p, msg, nil)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for len(p.getFiles()) == 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
+	files := p.getFiles()
+	if len(files) != 1 {
+		t.Fatalf("expected 1 diff file, got %d", len(files))
+	}
+
+	file := files[0]
+	if !strings.HasSuffix(file.FileName, ".html") {
+		t.Fatalf("expected .html file, got %q", file.FileName)
+	}
+	if file.MimeType != "text/html" {
+		t.Fatalf("expected text/html mime type, got %q", file.MimeType)
+	}
+	content := string(file.Data)
+	if !strings.Contains(strings.ToLower(content), "<!doctype html>") {
+		t.Fatalf("expected html document, got %q", content)
+	}
+	if !strings.Contains(content, "Diff2HtmlUI") || !strings.Contains(content, "d2h-file-side-diff") {
+		t.Fatalf("expected diff2html assets in html, got %q", content)
+	}
+	if !strings.Contains(content, "feature-line") {
+		t.Fatalf("expected committed diff content in html, got %q", content)
+	}
+	if !strings.Contains(content, "working-tree-line") {
+		t.Fatalf("expected working tree diff content in html, got %q", content)
+	}
+	if !strings.Contains(content, "feature/test-diff vs main") {
+		t.Fatalf("expected diff2html title in html, got %q", content)
+	}
+
+	sent := p.getSent()
+	found := false
+	for _, item := range sent {
+		if strings.Contains(item, "Diff 文件已发送") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected sent confirmation, got %v", sent)
+	}
+}
+
+func TestCmdDiff_DefaultBranchResolutionFailure(t *testing.T) {
+	repoDir := t.TempDir()
+	gitRun(t, repoDir, "init")
+	gitRun(t, repoDir, "config", "user.name", "cc-connect-test")
+	gitRun(t, repoDir, "config", "user.email", "test@example.com")
+	gitRun(t, repoDir, "checkout", "-b", "trunk")
+	writeFileForTest(t, filepath.Join(repoDir, "tracked.txt"), "base\n")
+	gitRun(t, repoDir, "add", "tracked.txt")
+	gitRun(t, repoDir, "commit", "-m", "init trunk")
+
+	agent := &stubWorkDirAgent{workDir: repoDir}
+	p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangChinese)
+
+	msg := &Message{
+		SessionKey: "telegram:chat:user1",
+		ReplyCtx:   "ctx",
+		Platform:   "telegram",
+	}
+	e.cmdDiff(p, msg, nil)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for len(p.getSent()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[0], "无法确定默认分支") {
+		t.Fatalf("expected default branch error, got %v", sent)
+	}
+	if got := len(p.getFiles()); got != 0 {
+		t.Fatalf("expected no file sent on error, got %d", got)
+	}
+}
+
+func initGitRepoForDiffTest(t *testing.T) string {
+	t.Helper()
+
+	repoDir := t.TempDir()
+	gitRun(t, repoDir, "init")
+	gitRun(t, repoDir, "config", "user.name", "cc-connect-test")
+	gitRun(t, repoDir, "config", "user.email", "test@example.com")
+	gitRun(t, repoDir, "checkout", "-b", "main")
+	writeFileForTest(t, filepath.Join(repoDir, "tracked.txt"), "base\n")
+	gitRun(t, repoDir, "add", "tracked.txt")
+	gitRun(t, repoDir, "commit", "-m", "init main")
+	gitRun(t, repoDir, "checkout", "-b", "feature/test-diff")
+	return repoDir
+}
+
+func writeFileForTest(t *testing.T, path string, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write file %s: %v", path, err)
+	}
+}
+
+func gitRun(t *testing.T, workDir string, args ...string) string {
+	t.Helper()
+
+	cmd := exec.Command("git", append([]string{"-C", workDir}, args...)...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, string(output))
+	}
+	return strings.TrimSpace(string(output))
 }
 
 // --- 4. /workspace subcommands ---

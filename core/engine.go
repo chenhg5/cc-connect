@@ -216,10 +216,10 @@ type Engine struct {
 	stopping            bool
 
 	// /web command callbacks
-	webInstallFunc  func() (version string, err error)
-	webUpgradeFunc  func() (oldVer, newVer string, err error)
-	webStatusFunc   func() (installed bool, version, url string)
-	webEnableFunc   func() (mgmtPort int, token string, needRestart bool, err error)
+	webInstallFunc   func() (version string, err error)
+	webUpgradeFunc   func() (oldVer, newVer string, err error)
+	webStatusFunc    func() (installed bool, version, url string)
+	webEnableFunc    func() (mgmtPort int, token string, needRestart bool, err error)
 	webUninstallFunc func() error
 }
 
@@ -461,11 +461,11 @@ func (e *Engine) SetShowContextIndicator(show bool) {
 	e.showContextIndicator = show
 }
 
-func (e *Engine) SetWebInstallFunc(fn func() (string, error))              { e.webInstallFunc = fn }
-func (e *Engine) SetWebUpgradeFunc(fn func() (string, string, error))      { e.webUpgradeFunc = fn }
-func (e *Engine) SetWebStatusFunc(fn func() (bool, string, string))        { e.webStatusFunc = fn }
-func (e *Engine) SetWebEnableFunc(fn func() (int, string, bool, error))    { e.webEnableFunc = fn }
-func (e *Engine) SetWebUninstallFunc(fn func() error)                      { e.webUninstallFunc = fn }
+func (e *Engine) SetWebInstallFunc(fn func() (string, error))           { e.webInstallFunc = fn }
+func (e *Engine) SetWebUpgradeFunc(fn func() (string, string, error))   { e.webUpgradeFunc = fn }
+func (e *Engine) SetWebStatusFunc(fn func() (bool, string, string))     { e.webStatusFunc = fn }
+func (e *Engine) SetWebEnableFunc(fn func() (int, string, bool, error)) { e.webEnableFunc = fn }
+func (e *Engine) SetWebUninstallFunc(fn func() error)                   { e.webUninstallFunc = fn }
 
 // SetInjectSender controls whether sender identity (platform and user ID) is
 // prepended to each message before forwarding it to the agent. When enabled,
@@ -2155,8 +2155,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case <-idleCh:
 			slog.Error("agent session idle timeout: no events for too long, killing session",
 				"session_key", sessionKey, "timeout", e.eventIdleTimeout, "elapsed", time.Since(turnStart))
-				cp.Finalize(ProgressCardStateFailed)
-				sp.discard()
+			cp.Finalize(ProgressCardStateFailed)
+			sp.discard()
 			state.mu.Lock()
 			p := state.platform
 			state.mu.Unlock()
@@ -2610,8 +2610,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			return
 
 		case EventError:
-				cp.Finalize(ProgressCardStateFailed)
-				sp.discard()
+			cp.Finalize(ProgressCardStateFailed)
+			sp.discard()
 			if event.Error != nil {
 				slog.Error("agent error", "error", event.Error)
 				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
@@ -2768,6 +2768,7 @@ var builtinCommands = []struct {
 	{[]string{"bind"}, "bind"},
 	{[]string{"search", "find"}, "search"},
 	{[]string{"shell", "sh", "exec", "run"}, "shell"},
+	{[]string{"diff"}, "diff"},
 	{[]string{"dir", "cd", "chdir", "workdir"}, "dir"},
 	{[]string{"tts"}, "tts"},
 	{[]string{"workspace", "ws"}, "workspace"},
@@ -2954,6 +2955,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdSearch(p, msg, args)
 	case "shell":
 		e.cmdShell(p, msg, raw)
+	case "diff":
+		e.cmdDiff(p, msg, args)
 	case "dir":
 		e.cmdDir(p, msg, args)
 	case "tts":
@@ -3461,22 +3464,7 @@ func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
 		return
 	}
 
-	// In multi-workspace mode, resolve workspace directory for this channel
-	var workDir string
-	if e.multiWorkspace {
-		channelKey := effectiveWorkspaceChannelKey(msg)
-		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
-			workDir = normalizeWorkspacePath(b.Workspace)
-		}
-	}
-	if workDir == "" {
-		if wd, ok := e.agent.(interface{ GetWorkDir() string }); ok {
-			workDir = wd.GetWorkDir()
-		}
-	}
-	if workDir == "" {
-		workDir, _ = os.Getwd()
-	}
+	workDir := e.commandWorkDir(msg)
 
 	go func() {
 		ctx, cancel := context.WithTimeout(e.ctx, 60*time.Second)
@@ -3504,6 +3492,225 @@ func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
 
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf("$ %s\n```\n%s\n```", shellCmd, result))
 	}()
+}
+
+func (e *Engine) commandWorkDir(msg *Message) string {
+	var workDir string
+	if e.multiWorkspace {
+		channelKey := effectiveWorkspaceChannelKey(msg)
+		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
+			workDir = normalizeWorkspacePath(b.Workspace)
+		}
+	}
+	if workDir == "" {
+		if wd, ok := e.agent.(interface{ GetWorkDir() string }); ok {
+			workDir = strings.TrimSpace(wd.GetWorkDir())
+		}
+	}
+	if workDir == "" {
+		workDir, _ = os.Getwd()
+	}
+	return normalizeWorkspacePath(workDir)
+}
+
+func (e *Engine) cmdDiff(p Platform, msg *Message, args []string) {
+	if len(args) > 0 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDiffUsage))
+		return
+	}
+	// Only Telegram currently supports sending the rendered file back.
+	if !strings.EqualFold(msg.Platform, "telegram") {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDiffNotTelegram))
+		return
+	}
+	fileSender, ok := p.(FileSender)
+	if !ok {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDiffNotTelegram))
+		return
+	}
+
+	workDir := e.commandWorkDir(msg)
+
+	go func() {
+		ctx, cancel := context.WithTimeout(e.ctx, 60*time.Second)
+		defer cancel()
+
+		file, empty, err := e.buildBranchDiff(ctx, workDir)
+		if err != nil {
+			slog.Error("diff: build patch failed", "workdir", workDir, "error", err)
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgDiffGenerateFailed), err))
+			return
+		}
+		if empty {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDiffNoChanges))
+			return
+		}
+		if err := fileSender.SendFile(e.ctx, msg.ReplyCtx, file); err != nil {
+			slog.Error("diff: send patch failed", "workdir", workDir, "file", file.FileName, "error", err)
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgDiffGenerateFailed), err))
+			return
+		}
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgDiffSent), file.FileName))
+	}()
+}
+
+func (e *Engine) buildBranchDiff(ctx context.Context, workDir string) (FileAttachment, bool, error) {
+	defaultRef, err := detectDefaultBranch(ctx, workDir)
+	if err != nil {
+		return FileAttachment{}, false, fmt.Errorf("%s: %w", e.i18n.T(MsgDiffResolveBaseFailed), err)
+	}
+
+	mergeBase, err := runGitOutput(ctx, workDir, "merge-base", "HEAD", defaultRef)
+	if err != nil {
+		return FileAttachment{}, false, fmt.Errorf("git merge-base %s: %w", defaultRef, err)
+	}
+
+	committedDiff, err := runGitOutput(ctx, workDir, "diff", strings.TrimSpace(mergeBase)+"...HEAD")
+	if err != nil {
+		return FileAttachment{}, false, fmt.Errorf("git diff merge-base...HEAD: %w", err)
+	}
+	workingTreeDiff, err := runGitOutput(ctx, workDir, "diff")
+	if err != nil {
+		return FileAttachment{}, false, fmt.Errorf("git diff working tree: %w", err)
+	}
+
+	committedDiff = strings.TrimSpace(committedDiff)
+	workingTreeDiff = strings.TrimSpace(workingTreeDiff)
+	if committedDiff == "" && workingTreeDiff == "" {
+		return FileAttachment{}, true, nil
+	}
+
+	// Include both branch commits and working tree changes.
+	var parts []string
+	if committedDiff != "" {
+		parts = append(parts, committedDiff)
+	}
+	if workingTreeDiff != "" {
+		parts = append(parts, workingTreeDiff)
+	}
+
+	repoName, branchName := diffDisplayNames(ctx, workDir)
+	fileName := diffFileName(ctx, workDir)
+	htmlContent, err := renderDiffHTMLWithCLI(ctx, repoName, branchName, defaultRef, strings.Join(parts, "\n\n"))
+	if err != nil {
+		return FileAttachment{}, false, err
+	}
+	return FileAttachment{
+		MimeType: "text/html",
+		Data:     htmlContent,
+		FileName: fileName,
+	}, false, nil
+}
+
+func detectDefaultBranch(ctx context.Context, workDir string) (string, error) {
+	// Prefer origin/HEAD, then fall back to common branch names.
+	if ref, err := runGitOutput(ctx, workDir, "symbolic-ref", "refs/remotes/origin/HEAD"); err == nil {
+		ref = strings.TrimSpace(ref)
+		if ref != "" {
+			return ref, nil
+		}
+	}
+
+	candidates := []string{"main", "master", "origin/main", "origin/master"}
+	for _, candidate := range candidates {
+		if err := exec.CommandContext(ctx, "git", "-C", workDir, "rev-parse", "--verify", candidate).Run(); err == nil {
+			return candidate, nil
+		}
+	}
+
+	return "", fmt.Errorf("default branch not found")
+}
+
+func runGitOutput(ctx context.Context, workDir string, args ...string) (string, error) {
+	cmdArgs := append([]string{"-C", workDir}, args...)
+	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		trimmed := strings.TrimSpace(string(output))
+		if trimmed == "" {
+			return "", err
+		}
+		return "", fmt.Errorf("%w: %s", err, trimmed)
+	}
+	return string(output), nil
+}
+
+func diffDisplayNames(ctx context.Context, workDir string) (string, string) {
+	repo := "repo"
+	if topLevel, err := runGitOutput(ctx, workDir, "rev-parse", "--show-toplevel"); err == nil {
+		if base := filepath.Base(strings.TrimSpace(topLevel)); base != "" && base != "." && base != string(filepath.Separator) {
+			repo = base
+		}
+	}
+
+	branch := "current"
+	if head, err := runGitOutput(ctx, workDir, "rev-parse", "--abbrev-ref", "HEAD"); err == nil {
+		if name := strings.TrimSpace(head); name != "" && !strings.EqualFold(name, "head") {
+			branch = name
+		}
+	}
+
+	return repo, branch
+}
+
+func diffFileName(ctx context.Context, workDir string) string {
+	repo, branch := diffDisplayNames(ctx, workDir)
+	return fmt.Sprintf("%s-diff-%s-%s.html", sanitizeDiffName(repo), sanitizeDiffName(branch), time.Now().Format("20060102150405"))
+}
+
+func sanitizeDiffName(name string) string {
+	name = strings.TrimSpace(strings.ToLower(name))
+	if name == "" {
+		return ""
+	}
+	replacer := strings.NewReplacer("/", "-", "\\", "-", " ", "-", ":", "-", "@", "-", "..", "-")
+	name = replacer.Replace(name)
+	name = regexp.MustCompile(`[^a-z0-9._-]+`).ReplaceAllString(name, "-")
+	name = strings.Trim(name, "-.")
+	return name
+}
+
+func renderDiffHTMLWithCLI(ctx context.Context, repoName, branchName, defaultRef, diffText string) ([]byte, error) {
+	tempDir, err := os.MkdirTemp("", "diff-*")
+	if err != nil {
+		return nil, fmt.Errorf("create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	diffPath := filepath.Join(tempDir, "branch.diff")
+	htmlPath := filepath.Join(tempDir, "branch.html")
+	if err := os.WriteFile(diffPath, []byte(diffText), 0o600); err != nil {
+		return nil, fmt.Errorf("write diff file: %w", err)
+	}
+
+	// Use the CLI so the exported file matches the renderer output.
+	title := fmt.Sprintf("%s: %s vs %s", repoName, branchName, defaultRef)
+	cmd := exec.CommandContext(
+		ctx,
+		"diff2html",
+		"-i", "file",
+		"-s", "line",
+		"--summary", "open",
+		"--matching", "lines",
+		"--colorScheme", "light",
+		"-t", title,
+		"-F", htmlPath,
+		"--", diffPath,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		trimmed := strings.TrimSpace(string(output))
+		if trimmed == "" {
+			return nil, fmt.Errorf("run diff2html: %w", err)
+		}
+		return nil, fmt.Errorf("run diff2html: %w: %s", err, trimmed)
+	}
+
+	htmlContent, err := os.ReadFile(htmlPath)
+	if err != nil {
+		return nil, fmt.Errorf("read diff2html output: %w", err)
+	}
+	return htmlContent, nil
 }
 
 // dirApply applies /dir mutations (same semantics as cmdDir). sessionKey is used for GetOrCreateActive.
