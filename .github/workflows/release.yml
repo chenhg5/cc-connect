@@ -77,12 +77,39 @@ jobs:
             tar czf "${BASE_NAME}.tar.gz" "$OUTPUT_NAME"
           fi
 
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            cc-connect-*.tar.gz
+            cc-connect-*.zip
+
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: build-and-release
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List downloaded files
+        run: |
+          echo "Downloaded files:"
+          ls -la artifacts/
+          echo ""
+          echo "All files recursively:"
+          find artifacts/ -type f
+
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            cc-connect-*.*.tar.gz
-            cc-connect-*.*.zip
+          files: artifacts/**/*
           generate_release_notes: true
           fail_on_unmatched_files: true
         env:
