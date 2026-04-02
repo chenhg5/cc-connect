@@ -653,6 +653,7 @@ type = "feishu"
 [projects.platforms.options]
 app_id = "your-feishu-app-id"
 app_secret = "your-feishu-app-secret"
+# domain = "https://open.feishu.cn"  # Optional runtime API/WebSocket base URL override / 可选：运行时 API/WebSocket 域名覆盖
 # enable_feishu_card = true  # Enable Feishu interactive cards (default: true); set false to force plain-text replies
 #                              # 启用飞书交互式卡片（默认 true）；设为 false 时强制回退纯文本回复
 # allow_from = "*"          # Allowed user open_ids, comma-separated; "*" = all (default). Use /whoami to get your open_id.
@@ -686,6 +687,7 @@ app_secret = "your-feishu-app-secret"
 # [projects.platforms.options]
 # app_id = "your-lark-app-id"
 # app_secret = "your-lark-app-secret"
+# domain = "https://open.larksuite.com"  # Optional runtime API base URL override / 可选：运行时 API 域名覆盖
 # port = "8080"                  # Webhook server port / Webhook 服务器端口
 # callback_path = "/feishu/webhook"  # Webhook callback path / Webhook 回调路径
 # encrypt_key = ""               # Event encrypt key (optional) / 事件加密密钥（可选）

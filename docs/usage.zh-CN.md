@@ -288,6 +288,7 @@ cc-connect feishu bind --project my-project --app cli_xxx:sec_xxx
 - 项目存在但没有 `feishu/lark` 平台时会自动补一个平台配置。
 - 命令会回填凭证（`app_id` / `app_secret`）；扫码新建场景下飞书通常会预配权限和事件订阅。
 - 建议在飞书开放平台再核验一次发布状态与可用范围。
+- 运行时平台配置还支持可选 `domain` 覆盖 Feishu/Lark API 域名；这不会改变 `setup/new/bind` 的引导地址。
 
 ---
 
