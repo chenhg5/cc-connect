@@ -68,37 +68,39 @@ func (gs *geminiSession) Send(prompt string, images []core.ImageAttachment, file
 		return fmt.Errorf("session is closed")
 	}
 
-	// Gemini CLI supports @file references for images and files; save to temp files
-	var imageRefs []string
-	tmpDir := os.TempDir()
-	if len(images) > 0 {
-		for i, img := range images {
-			ext := ".png"
-			switch img.MimeType {
-			case "image/jpeg":
-				ext = ".jpg"
-			case "image/gif":
-				ext = ".gif"
-			case "image/webp":
-				ext = ".webp"
-			}
-			fname := fmt.Sprintf("cc-connect-img-%d%s", i, ext)
-		fpath := filepath.Join(tmpDir, fname)
-		if err := os.WriteFile(fpath, img.Data, 0o644); err != nil {
-				slog.Warn("geminiSession: failed to save image", "error", err)
-				continue
-			}
-			imageRefs = append(imageRefs, fpath)
-		}
+	// Save images and files into the workspace so Gemini CLI tools can access them.
+	attachDir := filepath.Join(gs.workDir, ".cc-connect", "attachments")
+	if (len(images) > 0 || len(files) > 0) && os.MkdirAll(attachDir, 0o755) != nil {
+		attachDir = os.TempDir()
 	}
-	// Save files to temp and include as references
+
+	var imageRefs []string
+	for i, img := range images {
+		ext := ".png"
+		switch img.MimeType {
+		case "image/jpeg":
+			ext = ".jpg"
+		case "image/gif":
+			ext = ".gif"
+		case "image/webp":
+			ext = ".webp"
+		}
+		fname := fmt.Sprintf("img_%d_%d%s", time.Now().UnixMilli(), i, ext)
+		fpath := filepath.Join(attachDir, fname)
+		if err := os.WriteFile(fpath, img.Data, 0o644); err != nil {
+			slog.Warn("geminiSession: failed to save image", "error", err)
+			continue
+		}
+		imageRefs = append(imageRefs, fpath)
+	}
+
 	var fileRefs []string
 	for i, f := range files {
 		fname := filepath.Base(f.FileName)
 		if fname == "" || fname == "." || fname == ".." {
-			fname = fmt.Sprintf("cc-connect-file-%d", i)
+			fname = fmt.Sprintf("file_%d_%d", time.Now().UnixMilli(), i)
 		}
-		fpath := filepath.Join(tmpDir, fname)
+		fpath := filepath.Join(attachDir, fname)
 		if err := os.WriteFile(fpath, f.Data, 0o644); err != nil {
 			slog.Warn("geminiSession: failed to save file", "error", err)
 			continue
@@ -129,13 +131,19 @@ func (gs *geminiSession) Send(prompt string, images []core.ImageAttachment, file
 		args = append(args, "-m", gs.model)
 	}
 
-	// Build the prompt with image and file references
+	// Build prompt with explicit file path references so Gemini can find them.
 	fullPrompt := prompt
 	if len(imageRefs) > 0 {
-		fullPrompt = strings.Join(imageRefs, " ") + " " + fullPrompt
+		if fullPrompt == "" {
+			fullPrompt = "Please analyze the attached image(s)."
+		}
+		fullPrompt += "\n\n[Attached images saved at: " + strings.Join(imageRefs, ", ") + "]"
 	}
 	if len(fileRefs) > 0 {
-		fullPrompt = strings.Join(fileRefs, " ") + " " + fullPrompt
+		if fullPrompt == "" {
+			fullPrompt = "Please analyze the attached file(s)."
+		}
+		fullPrompt += "\n\n[Attached files saved at: " + strings.Join(fileRefs, ", ") + "]"
 	}
 
 	args = append(args, "-p", fullPrompt)

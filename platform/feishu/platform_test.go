@@ -474,6 +474,32 @@ func TestNewFeishu_PlatformNameAndDomain(t *testing.T) {
 	}
 }
 
+func TestNewFeishu_CustomDomainOverride(t *testing.T) {
+	customDomain := "https://open.example.invalid"
+	p, err := New(map[string]any{
+		"app_id": "cli_xxx", "app_secret": "secret", "domain": customDomain,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip, ok := p.(*interactivePlatform)
+	if !ok {
+		t.Fatalf("type = %T, want *interactivePlatform", p)
+	}
+	if ip.domain != customDomain {
+		t.Fatalf("domain = %q, want %q", ip.domain, customDomain)
+	}
+}
+
+func TestNewFeishu_InvalidCustomDomain(t *testing.T) {
+	_, err := New(map[string]any{
+		"app_id": "cli_xxx", "app_secret": "secret", "domain": "://bad",
+	})
+	if err == nil {
+		t.Fatal("expected invalid domain error")
+	}
+}
+
 func TestLark_SessionKeyPrefix(t *testing.T) {
 	p, err := newPlatform("lark", lark.LarkBaseUrl, map[string]any{
 		"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true,

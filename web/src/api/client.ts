@@ -39,6 +39,15 @@ class ApiClient {
   post<T = any>(path: string, body?: any) { return this.request<T>('POST', path, body); }
   patch<T = any>(path: string, body?: any) { return this.request<T>('PATCH', path, body); }
   delete<T = any>(path: string) { return this.request<T>('DELETE', path); }
+
+  /** Fetch raw text (non-JSON) from an API endpoint. */
+  async raw(path: string): Promise<string> {
+    const h: HeadersInit = {};
+    if (this.token) h['Authorization'] = `Bearer ${this.token}`;
+    const res = await fetch(`${API_BASE}${path}`, { headers: h });
+    if (!res.ok) throw new ApiError(res.statusText, res.status);
+    return res.text();
+  }
 }
 
 export class ApiError extends Error {

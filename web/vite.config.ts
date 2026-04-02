@@ -15,6 +15,7 @@ export default defineConfig({
       '/api': {
         target: 'http://localhost:9820',
         changeOrigin: true,
+        timeout: 45000,
       },
       '/bridge': {
         target: 'http://localhost:9810',

@@ -107,6 +107,7 @@ type = "feishu"
 [projects.platforms.options]
 app_id = "cli_axxxxxxxxxxxx"
 app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
+# domain = "https://open.feishu.cn" # 可选：覆盖运行时 API/WebSocket 域名
 # enable_feishu_card = true  # 可选：关闭后统一回退纯文本回复
 # thread_isolation = true    # 可选：按飞书 thread/root 隔离群聊会话
 # progress_style = "legacy"  # 可选：legacy | compact | card
@@ -115,6 +116,7 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 > 如果应用没有交互卡片权限，或后台未配置卡片回调，可将 `enable_feishu_card = false`，让所有命令统一走纯文本回复，避免卡片发送失败后用户看不到内容。
 > 如果开启 `thread_isolation = true`，群聊里每个根消息 / reply thread 会对应一个独立 agent session；私聊行为保持原样。
 > `progress_style = "compact"` 会把思考/工具进度合并到一条可更新消息里，减少刷屏；`legacy` 保持原有逐条发送；`card` 会使用结构化卡片（标题 + 进度块）持续更新同一条消息，观感比纯文本更清晰。
+> `domain` 只影响运行时 API / WebSocket 请求地址；CLI `setup/new/bind` 的引导域名仍然使用内置默认值。
 
 ---
 

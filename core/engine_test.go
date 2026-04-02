@@ -885,6 +885,43 @@ func TestProcessInteractiveEvents_QuietToolTurnKeepsPreviewOnFinalize(t *testing
 	}
 }
 
+func TestProcessInteractiveEvents_ToolMessagesDisabledSuppressesToolProgressOnly(t *testing.T) {
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{ThinkingMaxLen: 300, ToolMaxLen: 500, ToolMessages: false})
+	sessionKey := "telegram:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-1",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventThinking, Content: "planning"}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "echo hi"}
+	agentSession.events <- Event{Type: EventToolResult, ToolName: "Bash", ToolResult: "hi"}
+	agentSession.events <- Event{Type: EventText, Content: "done"}
+	agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, nil)
+
+	sent := p.getSent()
+	if len(sent) != 2 {
+		t.Fatalf("sent = %#v, want thinking + final response only", sent)
+	}
+	if !strings.Contains(sent[0], "planning") {
+		t.Fatalf("thinking message = %q, want planning", sent[0])
+	}
+	if strings.Contains(sent[0], "Bash") || strings.Contains(sent[0], "echo hi") || strings.Contains(sent[0], "hi") {
+		t.Fatalf("thinking message should not contain tool output, got %q", sent[0])
+	}
+	if sent[1] != "done" {
+		t.Fatalf("final message = %q, want done", sent[1])
+	}
+}
+
 func TestProcessInteractiveEvents_CompactProgressCoalescesThinkingAndToolUse(t *testing.T) {
 	p := &stubCompactProgressPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -1880,6 +1917,167 @@ func TestHandleMessage_MultiWorkspacePreservesCCSessionKey(t *testing.T) {
 			t.Fatal("timed out waiting for CC_SESSION_KEY to be injected")
 		default:
 			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
+func TestHandleMessage_AutoResetOnIdle_RotatesToNewSession(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agentSession := newResultAgentSession("fresh reply")
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetResetOnIdle(60 * time.Minute)
+
+	key := "test:user1"
+	old := e.sessions.GetOrCreateActive(key)
+	old.AddHistory("user", "stale context")
+	old.SetAgentSessionID("old-session", "stub")
+	staleAt := time.Now().Add(-2 * time.Hour)
+	old.mu.Lock()
+	old.UpdatedAt = staleAt
+	old.mu.Unlock()
+
+	msg := &Message{
+		SessionKey: key,
+		Platform:   "test",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "hello after idle",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	deadline := time.After(2 * time.Second)
+	for {
+		active := e.sessions.GetOrCreateActive(key)
+		sent := p.getSent()
+		if active.ID != old.ID && len(active.GetHistory(0)) >= 2 && len(sent) >= 2 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for idle auto-reset, sent=%v active=%s old=%s", sent, active.ID, old.ID)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	active := e.sessions.GetOrCreateActive(key)
+	if active.ID == old.ID {
+		t.Fatal("expected a new active session after idle auto-reset")
+	}
+	if got := old.GetAgentSessionID(); got != "old-session" {
+		t.Fatalf("old session agent id = %q, want old-session preserved", got)
+	}
+	if got := len(old.GetHistory(0)); got != 1 {
+		t.Fatalf("old session history len = %d, want 1 preserved entry", got)
+	}
+	if got := old.GetUpdatedAt(); !got.Equal(staleAt) {
+		t.Fatalf("old session updated_at = %v, want unchanged %v", got, staleAt)
+	}
+
+	history := active.GetHistory(0)
+	if len(history) != 2 {
+		t.Fatalf("new session history len = %d, want 2", len(history))
+	}
+	if history[0].Role != "user" || history[0].Content != "hello after idle" {
+		t.Fatalf("unexpected first history entry: %#v", history[0])
+	}
+	if history[1].Role != "assistant" || history[1].Content != "fresh reply" {
+		t.Fatalf("unexpected second history entry: %#v", history[1])
+	}
+
+	sent := p.getSent()
+	if !strings.Contains(sent[0], "Session auto-reset") {
+		t.Fatalf("first reply = %q, want auto-reset notice", sent[0])
+	}
+	if got := sent[len(sent)-1]; got != "fresh reply" {
+		t.Fatalf("final reply = %q, want fresh reply", got)
+	}
+}
+
+func TestHandleMessage_AutoResetOnIdle_DoesNotRotateFreshSession(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agentSession := newResultAgentSession("normal reply")
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetResetOnIdle(60 * time.Minute)
+
+	key := "test:user1"
+	session := e.sessions.GetOrCreateActive(key)
+	session.AddHistory("user", "recent context")
+	session.SetAgentSessionID("existing-session", "stub")
+	recentAt := time.Now().Add(-5 * time.Minute)
+	session.mu.Lock()
+	session.UpdatedAt = recentAt
+	session.mu.Unlock()
+
+	msg := &Message{
+		SessionKey: key,
+		Platform:   "test",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "follow up",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	deadline := time.After(2 * time.Second)
+	for {
+		if len(session.GetHistory(0)) >= 3 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for normal turn, sent=%v", p.getSent())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	active := e.sessions.GetOrCreateActive(key)
+	if active.ID != session.ID {
+		t.Fatalf("active session = %s, want unchanged %s", active.ID, session.ID)
+	}
+	sent := p.getSent()
+	for _, line := range sent {
+		if strings.Contains(line, "Session auto-reset") {
+			t.Fatalf("unexpected auto-reset notice in replies: %v", sent)
+		}
+	}
+}
+
+func TestHandleMessage_AutoResetOnIdle_DoesNotTriggerForSlashCommand(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetResetOnIdle(60 * time.Minute)
+
+	key := "test:user1"
+	session := e.sessions.GetOrCreateActive(key)
+	session.AddHistory("user", "stale context")
+	session.SetAgentSessionID("old-session", "stub")
+	staleAt := time.Now().Add(-2 * time.Hour)
+	session.mu.Lock()
+	session.UpdatedAt = staleAt
+	session.mu.Unlock()
+
+	msg := &Message{
+		SessionKey: key,
+		Platform:   "test",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "/list",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	active := e.sessions.GetOrCreateActive(key)
+	if active.ID != session.ID {
+		t.Fatalf("active session = %s, want unchanged %s", active.ID, session.ID)
+	}
+	for _, line := range p.getSent() {
+		if strings.Contains(line, "Session auto-reset") {
+			t.Fatalf("unexpected auto-reset notice for slash command: %v", p.getSent())
 		}
 	}
 }
@@ -3125,6 +3323,39 @@ func TestCmdDir_DisplaysCorrectIndices(t *testing.T) {
 	// Check that dir2 is at index 2
 	if !strings.Contains(output, "◻ 2. "+dir2) {
 		t.Fatalf("output should contain '◻ 2. %s', got: %s", dir2, output)
+	}
+}
+
+func TestCmdDir_ExpandsTilde(t *testing.T) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("cannot determine home dir:", err)
+	}
+
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubWorkDirAgent{workDir: homeDir}
+	e := NewEngine("test", agent, []Platform{p}, t.TempDir(), LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	tests := []struct {
+		input   string
+		wantDir string
+	}{
+		{"~", homeDir},
+		{"~/", homeDir},
+		{"~/Documents", filepath.Join(homeDir, "Documents")},
+	}
+
+	for _, tc := range tests {
+		agent.workDir = homeDir
+		// Ensure the target directory exists before switching
+		if err := os.MkdirAll(tc.wantDir, 0o755); err != nil {
+			t.Fatalf("MkdirAll %q: %v", tc.wantDir, err)
+		}
+		e.cmdDir(p, msg, []string{tc.input})
+		if agent.workDir != tc.wantDir {
+			t.Errorf("input %q: workDir = %q, want %q", tc.input, agent.workDir, tc.wantDir)
+		}
 	}
 }
 
@@ -7834,7 +8065,7 @@ func TestEngine_SetterMethods(t *testing.T) {
 	})
 
 	// Test SetDisplaySaveFunc
-	e.SetDisplaySaveFunc(func(thinkMax, toolMax *int) error {
+	e.SetDisplaySaveFunc(func(thinkMax, toolMax *int, toolMessages *bool) error {
 		return nil
 	})
 

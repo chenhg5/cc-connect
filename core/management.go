@@ -1,16 +1,32 @@
 package core
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
+
+// ProjectSettingsUpdate is passed to SetSaveProjectSettings to persist management API PATCH fields.
+// The implementation (typically in cmd/cc-connect) maps this to config.ProjectSettingsUpdate.
+type ProjectSettingsUpdate struct {
+	Quiet                *bool
+	Language             *string
+	AdminFrom            *string
+	DisabledCommands     []string
+	WorkDir              *string
+	Mode                 *string
+	ShowContextIndicator *bool
+	PlatformAllowFrom    map[string]string
+}
 
 // ManagementServer provides an HTTP REST API for external management tools
 // (web dashboards, TUI clients, GUI desktop apps, Mac tray apps, etc.).
@@ -27,6 +43,16 @@ type ManagementServer struct {
 	cronScheduler      *CronScheduler
 	heartbeatScheduler *HeartbeatScheduler
 	bridgeServer       *BridgeServer
+
+	setupFeishuSave      func(req FeishuSetupSaveRequest) error
+	setupWeixinSave      func(req WeixinSetupSaveRequest) error
+	addPlatformToProject func(projectName, platType string, opts map[string]any, workDir, agentType string) error
+	removeProject        func(projectName string) error
+	saveProjectSettings  func(projectName string, update ProjectSettingsUpdate) error
+	getProjectConfig     func(projectName string) map[string]any
+	configFilePath       string
+	getGlobalSettings    func() map[string]any
+	saveGlobalSettings   func(map[string]any) error
 }
 
 // NewManagementServer creates a new management API server.
@@ -49,31 +75,48 @@ func (m *ManagementServer) RegisterEngine(name string, e *Engine) {
 func (m *ManagementServer) SetCronScheduler(cs *CronScheduler)           { m.cronScheduler = cs }
 func (m *ManagementServer) SetHeartbeatScheduler(hs *HeartbeatScheduler) { m.heartbeatScheduler = hs }
 func (m *ManagementServer) SetBridgeServer(bs *BridgeServer)             { m.bridgeServer = bs }
+func (m *ManagementServer) SetSetupFeishuSave(fn func(FeishuSetupSaveRequest) error) {
+	m.setupFeishuSave = fn
+}
+func (m *ManagementServer) SetSetupWeixinSave(fn func(WeixinSetupSaveRequest) error) {
+	m.setupWeixinSave = fn
+}
+
+func (m *ManagementServer) SetAddPlatformToProject(fn func(string, string, map[string]any, string, string) error) {
+	m.addPlatformToProject = fn
+}
+
+func (m *ManagementServer) SetRemoveProject(fn func(string) error) {
+	m.removeProject = fn
+}
+
+func (m *ManagementServer) SetConfigFilePath(path string) {
+	m.configFilePath = path
+}
+
+func (m *ManagementServer) SetSaveProjectSettings(fn func(string, ProjectSettingsUpdate) error) {
+	m.saveProjectSettings = fn
+}
+
+func (m *ManagementServer) SetGetProjectConfig(fn func(string) map[string]any) {
+	m.getProjectConfig = fn
+}
+
+func (m *ManagementServer) SetGetGlobalSettings(fn func() map[string]any) {
+	m.getGlobalSettings = fn
+}
+
+func (m *ManagementServer) SetSaveGlobalSettings(fn func(map[string]any) error) {
+	m.saveGlobalSettings = fn
+}
 
 func (m *ManagementServer) Start() {
 	mux := http.NewServeMux()
-	prefix := "/api/v1"
-
-	// System
-	mux.HandleFunc(prefix+"/status", m.wrap(m.handleStatus))
-	mux.HandleFunc(prefix+"/restart", m.wrap(m.handleRestart))
-	mux.HandleFunc(prefix+"/reload", m.wrap(m.handleReload))
-	mux.HandleFunc(prefix+"/config", m.wrap(m.handleConfig))
-
-	// Projects
-	mux.HandleFunc(prefix+"/projects", m.wrap(m.handleProjects))
-	mux.HandleFunc(prefix+"/projects/", m.wrap(m.handleProjectRoutes))
-
-	// Cron (global)
-	mux.HandleFunc(prefix+"/cron", m.wrap(m.handleCron))
-	mux.HandleFunc(prefix+"/cron/", m.wrap(m.handleCronByID))
-
-	// Bridge
-	mux.HandleFunc(prefix+"/bridge/adapters", m.wrap(m.handleBridgeAdapters))
+	handler := m.buildHandler(mux)
 
 	m.server = &http.Server{
 		Addr:    fmt.Sprintf(":%d", m.port),
-		Handler: mux,
+		Handler: handler,
 	}
 	go func() {
 		if err := m.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -83,10 +126,87 @@ func (m *ManagementServer) Start() {
 	slog.Info("management api started", "port", m.port)
 }
 
+func (m *ManagementServer) buildHandler(mux *http.ServeMux) http.Handler {
+	prefix := "/api/v1"
+
+	// System
+	mux.HandleFunc(prefix+"/status", m.wrap(m.handleStatus))
+	mux.HandleFunc(prefix+"/restart", m.wrap(m.handleRestart))
+	mux.HandleFunc(prefix+"/reload", m.wrap(m.handleReload))
+	mux.HandleFunc(prefix+"/config", m.wrap(m.handleConfig))
+	mux.HandleFunc(prefix+"/settings", m.wrap(m.handleGlobalSettings))
+
+	// Projects
+	mux.HandleFunc(prefix+"/projects", m.wrap(m.handleProjects))
+	mux.HandleFunc(prefix+"/projects/", m.wrap(m.handleProjectRoutes))
+
+	// Cron (global)
+	mux.HandleFunc(prefix+"/cron", m.wrap(m.handleCron))
+	mux.HandleFunc(prefix+"/cron/", m.wrap(m.handleCronByID))
+
+	// Setup (QR onboarding for feishu/weixin)
+	mux.HandleFunc(prefix+"/setup/feishu/begin", m.wrap(m.handleSetupFeishuBegin))
+	mux.HandleFunc(prefix+"/setup/feishu/poll", m.wrap(m.handleSetupFeishuPoll))
+	mux.HandleFunc(prefix+"/setup/feishu/save", m.wrap(m.handleSetupFeishuSave))
+	mux.HandleFunc(prefix+"/setup/weixin/begin", m.wrap(m.handleSetupWeixinBegin))
+	mux.HandleFunc(prefix+"/setup/weixin/poll", m.wrap(m.handleSetupWeixinPoll))
+	mux.HandleFunc(prefix+"/setup/weixin/save", m.wrap(m.handleSetupWeixinSave))
+
+	// Bridge
+	mux.HandleFunc(prefix+"/bridge/adapters", m.wrap(m.handleBridgeAdapters))
+
+	// Static file serving for cc-connect-web (SPA)
+	return m.withStaticFallback(mux)
+}
+
 func (m *ManagementServer) Stop() {
 	if m.server != nil {
 		m.server.Close()
 	}
+}
+
+// withStaticFallback wraps the API mux with a file server for the web UI.
+// API requests (/api/) go to the mux; everything else tries embedded static
+// files, falling back to index.html for SPA routing.
+func (m *ManagementServer) withStaticFallback(apiMux *http.ServeMux) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			apiMux.ServeHTTP(w, r)
+			return
+		}
+		if m.bridgeServer != nil && r.URL.Path == m.bridgeServer.path {
+			m.bridgeServer.handleWS(w, r)
+			return
+		}
+		assets := GetWebAssets()
+		if assets == nil {
+			apiMux.ServeHTTP(w, r)
+			return
+		}
+		m.setCORS(w, r)
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		// Try to serve the exact file from the embedded FS.
+		urlPath := strings.TrimPrefix(r.URL.Path, "/")
+		if urlPath == "" {
+			urlPath = "index.html"
+		}
+		if f, err := assets.Open(urlPath); err == nil {
+			f.Close()
+			http.FileServer(http.FS(assets)).ServeHTTP(w, r)
+			return
+		}
+		// SPA fallback: serve index.html for any non-file route.
+		indexData, err := fs.ReadFile(assets, "index.html")
+		if err != nil {
+			apiMux.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write(indexData)
+	})
 }
 
 // ── Auth & Middleware ──────────────────────────────────────────
@@ -190,13 +310,23 @@ func (m *ManagementServer) handleStatus(w http.ResponseWriter, r *http.Request) 
 		adapters = m.listBridgeAdapters()
 	}
 
-	mgmtJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"version":             CurrentVersion,
 		"uptime_seconds":      int(time.Since(m.startedAt).Seconds()),
 		"connected_platforms": platforms,
 		"projects_count":      len(m.engines),
 		"bridge_adapters":     adapters,
-	})
+	}
+	if m.bridgeServer != nil {
+		resp["bridge"] = map[string]any{
+			"enabled":   true,
+			"port":      m.bridgeServer.port,
+			"path":      m.bridgeServer.path,
+			"token":     m.bridgeServer.token,
+			"token_set": m.bridgeServer.token != "",
+		}
+	}
+	mgmtJSON(w, http.StatusOK, resp)
 }
 
 func (m *ManagementServer) handleRestart(w http.ResponseWriter, r *http.Request) {
@@ -208,9 +338,9 @@ func (m *ManagementServer) handleRestart(w http.ResponseWriter, r *http.Request)
 		SessionKey string `json:"session_key"`
 		Platform   string `json:"platform"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		mgmtError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
-		return
+	// Body is optional; ignore decode errors from empty body
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&body)
 	}
 
 	select {
@@ -253,40 +383,53 @@ func (m *ManagementServer) handleConfig(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	projects := make([]map[string]any, 0, len(m.engines))
-	for name, e := range m.engines {
-		proj := map[string]any{
-			"name":       name,
-			"agent_type": e.agent.Name(),
-		}
-		platNames := make([]string, len(e.platforms))
-		for i, p := range e.platforms {
-			platNames[i] = p.Name()
-		}
-		proj["platforms"] = platNames
-
-		if ps, ok := e.agent.(ProviderSwitcher); ok {
-			providers := ps.ListProviders()
-			provList := make([]map[string]any, len(providers))
-			for i, p := range providers {
-				provList[i] = map[string]any{
-					"name":     p.Name,
-					"api_key":  "***",
-					"base_url": p.BaseURL,
-					"model":    p.Model,
-				}
-			}
-			proj["providers"] = provList
-		}
-		projects = append(projects, proj)
+	if m.configFilePath == "" {
+		mgmtError(w, http.StatusNotFound, "config file path not set")
+		return
+	}
+	data, err := os.ReadFile(m.configFilePath)
+	if err != nil {
+		mgmtError(w, http.StatusInternalServerError, "read config: "+err.Error())
+		return
 	}
 
-	mgmtJSON(w, http.StatusOK, map[string]any{
-		"projects": projects,
-	})
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
+func (m *ManagementServer) handleGlobalSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if m.getGlobalSettings == nil {
+			mgmtError(w, http.StatusServiceUnavailable, "global settings not available")
+			return
+		}
+		mgmtJSON(w, http.StatusOK, m.getGlobalSettings())
+
+	case http.MethodPatch:
+		if m.saveGlobalSettings == nil {
+			mgmtError(w, http.StatusServiceUnavailable, "global settings save not available")
+			return
+		}
+		var updates map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
+			mgmtError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+		if err := m.saveGlobalSettings(updates); err != nil {
+			mgmtError(w, http.StatusInternalServerError, "save: "+err.Error())
+			return
+		}
+		if m.getGlobalSettings != nil {
+			mgmtJSON(w, http.StatusOK, m.getGlobalSettings())
+		} else {
+			mgmtOK(w, "settings saved")
+		}
+
+	default:
+		mgmtError(w, http.StatusMethodNotAllowed, "GET or PATCH only")
+	}
 }
 
 // ── Project endpoints ─────────────────────────────────────────
@@ -374,6 +517,8 @@ func (m *ManagementServer) handleProjectRoutes(w http.ResponseWriter, r *http.Re
 		m.handleProjectHeartbeat(w, r, projName, rest)
 	case "users":
 		m.handleProjectUsers(w, r, engine)
+	case "add-platform":
+		m.handleProjectAddPlatform(w, r, projName)
 	default:
 		mgmtError(w, http.StatusNotFound, "not found")
 	}
@@ -420,9 +565,34 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 		quiet := e.quiet
 		e.quietMu.RUnlock()
 
+		e.userRolesMu.RLock()
+		adminFrom := e.adminFrom
+		e.userRolesMu.RUnlock()
+
 		data["settings"] = map[string]any{
-			"quiet":    quiet,
-			"language": string(e.i18n.CurrentLang()),
+			"quiet":             quiet,
+			"language":          string(e.i18n.CurrentLang()),
+			"admin_from":        adminFrom,
+			"disabled_commands": e.GetDisabledCommands(),
+		}
+
+		var workDir string
+		if wd, ok := e.agent.(interface{ GetWorkDir() string }); ok {
+			workDir = wd.GetWorkDir()
+		}
+		var agentMode string
+		if am, ok := e.agent.(interface{ GetMode() string }); ok {
+			agentMode = am.GetMode()
+		}
+		data["work_dir"] = workDir
+		data["agent_mode"] = agentMode
+
+		if m.getProjectConfig != nil {
+			if extra := m.getProjectConfig(name); extra != nil {
+				for k, v := range extra {
+					data[k] = v
+				}
+			}
 		}
 
 		mgmtJSON(w, http.StatusOK, data)
@@ -431,10 +601,14 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 
 	if r.Method == http.MethodPatch {
 		var body struct {
-			Quiet            *bool    `json:"quiet"`
-			Language         *string  `json:"language"`
-			AdminFrom        *string  `json:"admin_from"`
-			DisabledCommands []string `json:"disabled_commands"`
+			Quiet                *bool             `json:"quiet"`
+			Language             *string           `json:"language"`
+			AdminFrom            *string           `json:"admin_from"`
+			DisabledCommands     []string          `json:"disabled_commands"`
+			WorkDir              *string           `json:"work_dir"`
+			Mode                 *string           `json:"mode"`
+			ShowContextIndicator *bool             `json:"show_context_indicator"`
+			PlatformAllowFrom    map[string]string `json:"platform_allow_from"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			mgmtError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -464,12 +638,57 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 		if body.DisabledCommands != nil {
 			e.SetDisabledCommands(body.DisabledCommands)
 		}
+		if body.WorkDir != nil {
+			if switcher, ok := e.agent.(WorkDirSwitcher); ok {
+				switcher.SetWorkDir(*body.WorkDir)
+			}
+		}
+		if body.Mode != nil {
+			if switcher, ok := e.agent.(ModeSwitcher); ok {
+				switcher.SetMode(*body.Mode)
+			}
+		}
+		if body.ShowContextIndicator != nil {
+			e.SetShowContextIndicator(*body.ShowContextIndicator)
+		}
+
+		if m.saveProjectSettings != nil {
+			patch := ProjectSettingsUpdate{
+				Quiet:                body.Quiet,
+				Language:             body.Language,
+				AdminFrom:            body.AdminFrom,
+				DisabledCommands:     body.DisabledCommands,
+				WorkDir:              body.WorkDir,
+				Mode:                 body.Mode,
+				ShowContextIndicator: body.ShowContextIndicator,
+				PlatformAllowFrom:    body.PlatformAllowFrom,
+			}
+			if err := m.saveProjectSettings(name, patch); err != nil {
+				slog.Warn("management: failed to persist project settings", "project", name, "error", err)
+			}
+		}
 
 		mgmtOK(w, "settings updated")
 		return
 	}
 
-	mgmtError(w, http.StatusMethodNotAllowed, "GET or PATCH only")
+	if r.Method == http.MethodDelete {
+		if m.removeProject == nil {
+			mgmtError(w, http.StatusNotImplemented, "project removal not configured")
+			return
+		}
+		if err := m.removeProject(name); err != nil {
+			mgmtError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		mgmtJSON(w, http.StatusOK, map[string]any{
+			"message":          fmt.Sprintf("project %q removed from config", name),
+			"restart_required": true,
+		})
+		return
+	}
+
+	mgmtError(w, http.StatusMethodNotAllowed, "GET, PATCH or DELETE only")
 }
 
 // ── Users endpoints ──────────────────────────────────────────
@@ -910,7 +1129,9 @@ func (m *ManagementServer) handleProjectModels(w http.ResponseWriter, r *http.Re
 		mgmtError(w, http.StatusBadRequest, "agent does not support model switching")
 		return
 	}
-	models := ms.AvailableModels(r.Context())
+	fetchCtx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	models := ms.AvailableModels(fetchCtx)
 	names := make([]string, len(models))
 	for i, m := range models {
 		names[i] = m.Name
@@ -1116,6 +1337,7 @@ func (m *ManagementServer) handleCron(w http.ResponseWriter, r *http.Request) {
 			Enabled:     true,
 			Silent:      req.Silent,
 			SessionMode: NormalizeCronSessionMode(req.SessionMode),
+			Mode:        req.Mode,
 			TimeoutMins: req.TimeoutMins,
 			CreatedAt:   time.Now(),
 		}
@@ -1135,19 +1357,41 @@ func (m *ManagementServer) handleCronByID(w http.ResponseWriter, r *http.Request
 		mgmtError(w, http.StatusServiceUnavailable, "cron scheduler not available")
 		return
 	}
-	if r.Method != http.MethodDelete {
-		mgmtError(w, http.StatusMethodNotAllowed, "DELETE only")
-		return
-	}
 	id := strings.TrimPrefix(r.URL.Path, "/api/v1/cron/")
 	if id == "" {
 		mgmtError(w, http.StatusBadRequest, "cron job id required")
 		return
 	}
-	if m.cronScheduler.RemoveJob(id) {
-		mgmtOK(w, "cron job deleted")
-	} else {
-		mgmtError(w, http.StatusNotFound, fmt.Sprintf("cron job not found: %s", id))
+
+	switch r.Method {
+	case http.MethodDelete:
+		if m.cronScheduler.RemoveJob(id) {
+			mgmtOK(w, "cron job deleted")
+		} else {
+			mgmtError(w, http.StatusNotFound, fmt.Sprintf("cron job not found: %s", id))
+		}
+
+	case http.MethodPatch:
+		var updates map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
+			mgmtError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+		for field, value := range updates {
+			if err := m.cronScheduler.UpdateJob(id, field, value); err != nil {
+				mgmtError(w, http.StatusBadRequest, fmt.Sprintf("update %s: %s", field, err.Error()))
+				return
+			}
+		}
+		job := m.cronScheduler.Store().Get(id)
+		if job == nil {
+			mgmtError(w, http.StatusNotFound, "cron job not found after update")
+			return
+		}
+		mgmtJSON(w, http.StatusOK, job)
+
+	default:
+		mgmtError(w, http.StatusMethodNotAllowed, "DELETE or PATCH only")
 	}
 }
 
