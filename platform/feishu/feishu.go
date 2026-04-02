@@ -115,7 +115,8 @@ type Platform struct {
 	self                  core.Platform
 	reactionEmoji         string
 	allowFrom             string
-	groupReplyAll         bool
+	groupReplyAll              bool
+	respondToAtEveryoneAndHere bool
 	shareSessionInChannel bool
 	threadIsolation       bool
 	// noReplyToTrigger: when true, send via Create instead of Im.Message.Reply (no quote to the user's message).
@@ -174,6 +175,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	allowFrom, _ := opts["allow_from"].(string)
 	core.CheckAllowFrom(name, allowFrom)
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
+	respondToAtEveryoneAndHere, _ := opts["respond_to_at_everyone_and_here"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	threadIsolation, _ := opts["thread_isolation"].(bool)
 	noReplyToTrigger := false
@@ -222,7 +224,8 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		useInteractiveCard:    useInteractiveCard,
 		reactionEmoji:         reactionEmoji,
 		allowFrom:             allowFrom,
-		groupReplyAll:         groupReplyAll,
+		groupReplyAll:              groupReplyAll,
+		respondToAtEveryoneAndHere: respondToAtEveryoneAndHere,
 		shareSessionInChannel: shareSessionInChannel,
 		threadIsolation:       threadIsolation,
 		noReplyToTrigger:      noReplyToTrigger,
@@ -672,8 +675,13 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 
 	if chatType == "group" && !p.groupReplyAll && p.botOpenID != "" {
 		if !isBotMentioned(msg.Mentions, p.botOpenID) {
-			slog.Debug(p.tag()+": ignoring group message without bot mention", "chat_id", chatID)
-			return nil
+			// Feishu @all sends {"text":"@_all"} with 0 mentions.
+			if p.respondToAtEveryoneAndHere && msg.Content != nil && strings.Contains(*msg.Content, "@_all") {
+				slog.Debug(p.tag()+": responding to @all message", "chat_id", chatID)
+			} else {
+				slog.Debug(p.tag()+": ignoring group message without bot mention", "chat_id", chatID)
+				return nil
+			}
 		}
 	}
 
