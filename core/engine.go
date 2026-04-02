@@ -6989,10 +6989,6 @@ func (e *Engine) renderModeCardForAgent(agent Agent) *Card {
 	return cb.Build()
 }
 
-func (e *Engine) renderModeCard() *Card {
-	return e.renderModeCardForAgent(e.agent)
-}
-
 func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 	agent, sessions := e.sessionContextForKey(sessionKey)
 	agentSessions, err := agent.ListSessions(e.ctx)
