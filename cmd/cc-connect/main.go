@@ -586,6 +586,9 @@ func main() {
 		if cfg.Cron.Silent != nil && *cfg.Cron.Silent {
 			cronSched.SetDefaultSilent(true)
 		}
+		if cfg.Cron.SessionMode != "" {
+			cronSched.SetDefaultSessionMode(cfg.Cron.SessionMode)
+		}
 		for i, e := range engines {
 			cronSched.RegisterEngine(cfg.Projects[i].Name, e)
 			e.SetCronScheduler(cronSched)

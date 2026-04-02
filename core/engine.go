@@ -888,7 +888,14 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		ReplyCtx:   replyCtx,
 	}
 
-	if job.UsesNewSessionPerRun() {
+	useNewSession := false
+	if e.cronScheduler != nil {
+		useNewSession = e.cronScheduler.UsesNewSession(job)
+	} else {
+		useNewSession = job.UsesNewSessionPerRun()
+	}
+
+	if useNewSession {
 		msg.SessionKey = runSessionKey
 		session := e.sessions.NewSideSession(runSessionKey, "cron-"+job.ID)
 		if !session.TryLock() {
