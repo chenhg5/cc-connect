@@ -37,6 +37,7 @@ type Agent struct {
 	workDir         string
 	model           string
 	mode            string // "default" | "acceptEdits" | "plan" | "auto" | "bypassPermissions" | "dontAsk"
+	cmd             string // CLI binary name, default "claude"
 	allowedTools    []string
 	disallowedTools []string
 	providers       []core.ProviderConfig
@@ -60,6 +61,10 @@ func New(opts map[string]any) (core.Agent, error) {
 	model, _ := opts["model"].(string)
 	mode, _ := opts["mode"].(string)
 	mode = normalizePermissionMode(mode)
+	cmd, _ := opts["cmd"].(string)
+	if cmd == "" {
+		cmd = "claude"
+	}
 
 	var allowedTools []string
 	if tools, ok := opts["allowed_tools"].([]any); ok {
@@ -83,14 +88,15 @@ func New(opts map[string]any) (core.Agent, error) {
 	routerURL, _ := opts["router_url"].(string)
 	routerAPIKey, _ := opts["router_api_key"].(string)
 
-	if _, err := exec.LookPath("claude"); err != nil {
-		return nil, fmt.Errorf("claudecode: 'claude' CLI not found in PATH, please install Claude Code first")
+	if _, err := exec.LookPath(cmd); err != nil {
+		return nil, fmt.Errorf("claudecode: %q CLI not found in PATH, please install Claude Code first", cmd)
 	}
 
 	return &Agent{
 		workDir:         workDir,
 		model:           model,
 		mode:            mode,
+		cmd:             cmd,
 		allowedTools:    allowedTools,
 		disallowedTools: disallowedTools,
 		activeIdx:       -1,
@@ -273,7 +279,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	disableVerbose := a.routerURL != ""
 	a.mu.Unlock()
 
-	return newClaudeSession(ctx, a.workDir, model, sessionID, a.mode, tools, disTools, extraEnv, platformPrompt, disableVerbose)
+	return newClaudeSession(ctx, a.workDir, a.cmd, model, sessionID, a.mode, tools, disTools, extraEnv, platformPrompt, disableVerbose)
 }
 
 func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {
