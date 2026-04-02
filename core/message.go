@@ -137,10 +137,11 @@ type Message struct {
 	Content    string
 	Images     []ImageAttachment // attached images (if any)
 	Files      []FileAttachment  // attached files (if any)
-	Audio      *AudioAttachment  // voice message (if any)
-	ChannelKey string            // platform-provided channel identifier for workspace binding (optional)
-	ReplyCtx   any               // platform-specific context needed for replying
-	FromVoice  bool              // true if message originated from voice transcription
+	Audio        *AudioAttachment // voice message (if any)
+	ChannelKey   string          // platform-provided channel identifier for workspace binding (optional)
+	ReplyCtx     any             // platform-specific context needed for replying
+	FromVoice    bool            // true if message originated from voice transcription
+	ModeOverride string          // if set, temporarily override agent permission mode for this message
 }
 
 // EventType distinguishes different kinds of agent output.

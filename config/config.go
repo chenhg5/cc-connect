@@ -43,7 +43,8 @@ type Config struct {
 
 // CronConfig controls cron job behavior.
 type CronConfig struct {
-	Silent *bool `toml:"silent"` // suppress cron start notification; default false
+	Silent      *bool  `toml:"silent"`       // suppress cron start notification; default false
+	SessionMode string `toml:"session_mode"` // default session mode: "" or "reuse" (default) or "new_per_run"
 }
 
 // WebhookConfig controls the external HTTP webhook endpoint.
@@ -73,8 +74,9 @@ type ManagementConfig struct {
 
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
 type DisplayConfig struct {
-	ThinkingMaxLen *int `toml:"thinking_max_len"` // max chars for thinking messages; 0 = no truncation; default 300
-	ToolMaxLen     *int `toml:"tool_max_len"`     // max chars for tool use messages; 0 = no truncation; default 500
+	ThinkingMaxLen *int  `toml:"thinking_max_len"` // max chars for thinking messages; 0 = no truncation; default 300
+	ToolMaxLen     *int  `toml:"tool_max_len"`     // max chars for tool use messages; 0 = no truncation; default 500
+	ToolMessages   *bool `toml:"tool_messages"`    // whether tool progress messages are shown; default true
 }
 
 // StreamPreviewConfig controls real-time streaming preview in IM.
@@ -196,6 +198,10 @@ type ProjectConfig struct {
 	Platforms    []PlatformConfig   `toml:"platforms"`
 	Heartbeat    HeartbeatConfig    `toml:"heartbeat"`
 	AutoCompress AutoCompressConfig `toml:"auto_compress"`
+	// ResetOnIdleMins automatically rotates to a new cc-connect session after
+	// the current session has been inactive for the specified number of minutes.
+	// 0 or nil disables the behavior.
+	ResetOnIdleMins *int `toml:"reset_on_idle_mins,omitempty"`
 	// ShowContextIndicator: nil/true = append [ctx: ~N%] to assistant replies; false = hide.
 	ShowContextIndicator *bool        `toml:"show_context_indicator,omitempty"`
 	Quiet                *bool        `toml:"quiet,omitempty"`             // project-level quiet mode; overrides global setting
@@ -318,6 +324,9 @@ func (c *Config) validate() error {
 			if _, ok := proj.Agent.Options["work_dir"]; ok {
 				return fmt.Errorf("project %q: multi-workspace mode conflicts with agent work_dir (use base_dir instead)", proj.Name)
 			}
+		}
+		if proj.ResetOnIdleMins != nil && *proj.ResetOnIdleMins < 0 {
+			return fmt.Errorf("config: %s.reset_on_idle_mins must be >= 0", prefix)
 		}
 		if err := validateUsersConfig(prefix, proj.Users); err != nil {
 			return err
@@ -778,8 +787,8 @@ func RemoveAlias(name string) error {
 	return saveConfig(cfg)
 }
 
-// SaveDisplayConfig persists the display truncation settings to the config file.
-func SaveDisplayConfig(thinkingMaxLen, toolMaxLen *int) error {
+// SaveDisplayConfig persists the display settings to the config file.
+func SaveDisplayConfig(thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
 	configMu.Lock()
 	defer configMu.Unlock()
 	if ConfigPath == "" {
@@ -798,6 +807,9 @@ func SaveDisplayConfig(thinkingMaxLen, toolMaxLen *int) error {
 	}
 	if toolMaxLen != nil {
 		cfg.Display.ToolMaxLen = toolMaxLen
+	}
+	if toolMessages != nil {
+		cfg.Display.ToolMessages = toolMessages
 	}
 	return saveConfig(cfg)
 }
@@ -852,7 +864,7 @@ type FeishuCredentialUpdateOptions struct {
 	AppID             string // required
 	AppSecret         string // required
 	OwnerOpenID       string // optional owner id from onboarding flow
-	SetAllowFromEmpty bool   // when true, set allow_from=OwnerOpenID only if currently empty
+	SetAllowFromEmpty bool   // when true, seed/append allow_from with OwnerOpenID while preserving "*"
 }
 
 // EnsureProjectWithFeishuOptions controls project auto-provisioning for Feishu/Lark setup.
@@ -1085,8 +1097,11 @@ func SaveFeishuPlatformCredentials(opts FeishuCredentialUpdateOptions) (*FeishuC
 	platform.Options["app_secret"] = strings.TrimSpace(opts.AppSecret)
 
 	allowFrom := strings.TrimSpace(stringOption(platform.Options["allow_from"]))
-	if opts.SetAllowFromEmpty && allowFrom == "" && strings.TrimSpace(opts.OwnerOpenID) != "" {
-		allowFrom = strings.TrimSpace(opts.OwnerOpenID)
+	if opts.SetAllowFromEmpty && strings.TrimSpace(opts.OwnerOpenID) != "" {
+		allowFrom = mergeAllowFromValue(allowFrom, strings.TrimSpace(opts.OwnerOpenID))
+		if allowFrom != "" {
+			platform.Options["allow_from"] = allowFrom
+		}
 	}
 
 	lines, hadTrailing := splitConfigLines(raw)
@@ -1156,6 +1171,53 @@ func stringOption(v any) string {
 	return ""
 }
 
+func mergeAllowFromValue(current, userID string) string {
+	current = strings.TrimSpace(current)
+	userID = strings.TrimSpace(userID)
+
+	if current == "*" || userID == "" {
+		return current
+	}
+	if current == "" {
+		return userID
+	}
+
+	parts := strings.Split(current, ",")
+	merged := make([]string, 0, len(parts)+1)
+	seen := make(map[string]struct{}, len(parts)+1)
+
+	appendPart := func(v string) {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return
+		}
+		if v == "*" {
+			merged = []string{"*"}
+			return
+		}
+		if _, ok := seen[v]; ok {
+			return
+		}
+		seen[v] = struct{}{}
+		merged = append(merged, v)
+	}
+
+	for _, part := range parts {
+		if len(merged) == 1 && merged[0] == "*" {
+			return "*"
+		}
+		appendPart(part)
+	}
+	if len(merged) == 1 && merged[0] == "*" {
+		return "*"
+	}
+	appendPart(userID)
+	if len(merged) == 1 && merged[0] == "*" {
+		return "*"
+	}
+	return strings.Join(merged, ",")
+}
+
 func firstFeishuPlatformIndex(platforms []PlatformConfig) int {
 	for i := range platforms {
 		t := strings.ToLower(strings.TrimSpace(platforms[i].Type))
@@ -1200,7 +1262,7 @@ type WeixinCredentialUpdateOptions struct {
 	BaseURL           string // optional; empty = do not change in TOML
 	CDNBaseURL        string // optional; empty = do not change
 	AccountID         string // optional ilink_bot_id → options.account_id
-	ScannedUserID     string // optional ilink_user_id for allow_from when SetAllowFromEmpty
+	ScannedUserID     string // optional ilink_user_id for allow_from merge when SetAllowFromEmpty
 	SetAllowFromEmpty bool
 }
 
@@ -1406,9 +1468,11 @@ func SaveWeixinPlatformCredentials(opts WeixinCredentialUpdateOptions) (*WeixinC
 	}
 
 	allowFrom := strings.TrimSpace(stringOption(platform.Options["allow_from"]))
-	if opts.SetAllowFromEmpty && allowFrom == "" && strings.TrimSpace(opts.ScannedUserID) != "" {
-		allowFrom = strings.TrimSpace(opts.ScannedUserID)
-		platform.Options["allow_from"] = allowFrom
+	if opts.SetAllowFromEmpty && strings.TrimSpace(opts.ScannedUserID) != "" {
+		allowFrom = mergeAllowFromValue(allowFrom, strings.TrimSpace(opts.ScannedUserID))
+		if allowFrom != "" {
+			platform.Options["allow_from"] = allowFrom
+		}
 	}
 
 	lines, hadTrailing := splitConfigLines(raw)

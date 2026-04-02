@@ -296,7 +296,8 @@ func TestDisplayConfig_Save(t *testing.T) {
 
 	thinking := 120
 	tool := 240
-	if err := SaveDisplayConfig(&thinking, &tool); err != nil {
+	showTools := false
+	if err := SaveDisplayConfig(&thinking, &tool, &showTools); err != nil {
 		t.Fatalf("SaveDisplayConfig() error: %v", err)
 	}
 
@@ -307,9 +308,12 @@ func TestDisplayConfig_Save(t *testing.T) {
 	if cfg.Display.ToolMaxLen == nil || *cfg.Display.ToolMaxLen != 240 {
 		t.Fatalf("ToolMaxLen = %#v, want 240", cfg.Display.ToolMaxLen)
 	}
+	if cfg.Display.ToolMessages == nil || *cfg.Display.ToolMessages {
+		t.Fatalf("ToolMessages = %#v, want false", cfg.Display.ToolMessages)
+	}
 
 	thinking = 360
-	if err := SaveDisplayConfig(&thinking, nil); err != nil {
+	if err := SaveDisplayConfig(&thinking, nil, nil); err != nil {
 		t.Fatalf("SaveDisplayConfig() second update error: %v", err)
 	}
 
@@ -319,6 +323,9 @@ func TestDisplayConfig_Save(t *testing.T) {
 	}
 	if cfg.Display.ToolMaxLen == nil || *cfg.Display.ToolMaxLen != 240 {
 		t.Fatalf("ToolMaxLen after nil update = %#v, want 240", cfg.Display.ToolMaxLen)
+	}
+	if cfg.Display.ToolMessages == nil || *cfg.Display.ToolMessages {
+		t.Fatalf("ToolMessages after nil update = %#v, want false", cfg.Display.ToolMessages)
 	}
 }
 
@@ -458,8 +465,8 @@ func TestSaveFeishuPlatformCredentials_SelectByIndexAndOverrideType(t *testing.T
 	if result.PlatformType != "feishu" {
 		t.Fatalf("result.PlatformType = %q, want %q", result.PlatformType, "feishu")
 	}
-	if result.AllowFrom != "ou_existing_owner" {
-		t.Fatalf("result.AllowFrom = %q, want %q", result.AllowFrom, "ou_existing_owner")
+	if result.AllowFrom != "ou_existing_owner,ou_should_not_override" {
+		t.Fatalf("result.AllowFrom = %q, want %q", result.AllowFrom, "ou_existing_owner,ou_should_not_override")
 	}
 
 	cfg := readConfigFixture(t, configPath)
@@ -473,8 +480,63 @@ func TestSaveFeishuPlatformCredentials_SelectByIndexAndOverrideType(t *testing.T
 	if got := stringMapValue(platform.Options, "app_secret"); got != "sec_second_secret" {
 		t.Fatalf("app_secret = %q, want %q", got, "sec_second_secret")
 	}
-	if got := stringMapValue(platform.Options, "allow_from"); got != "ou_existing_owner" {
-		t.Fatalf("allow_from = %q, want %q", got, "ou_existing_owner")
+	if got := stringMapValue(platform.Options, "allow_from"); got != "ou_existing_owner,ou_should_not_override" {
+		t.Fatalf("allow_from = %q, want %q", got, "ou_existing_owner,ou_should_not_override")
+	}
+}
+
+func TestSaveFeishuPlatformCredentials_AppendsOwnerToAllowFrom(t *testing.T) {
+	configPath := writeConfigFixture(t, feishuConfigFixture)
+	patchConfigPath(t, configPath)
+
+	result, err := SaveFeishuPlatformCredentials(FeishuCredentialUpdateOptions{
+		ProjectName:       "alpha",
+		PlatformIndex:     2,
+		PlatformType:      "feishu",
+		AppID:             "cli_second_app",
+		AppSecret:         "sec_second_secret",
+		OwnerOpenID:       "ou_new_owner",
+		SetAllowFromEmpty: true,
+	})
+	if err != nil {
+		t.Fatalf("SaveFeishuPlatformCredentials returned error: %v", err)
+	}
+
+	if result.AllowFrom != "ou_existing_owner,ou_new_owner" {
+		t.Fatalf("result.AllowFrom = %q, want %q", result.AllowFrom, "ou_existing_owner,ou_new_owner")
+	}
+
+	cfg := readConfigFixture(t, configPath)
+	platform := cfg.Projects[0].Platforms[2]
+	if got := stringMapValue(platform.Options, "allow_from"); got != "ou_existing_owner,ou_new_owner" {
+		t.Fatalf("allow_from = %q, want %q", got, "ou_existing_owner,ou_new_owner")
+	}
+}
+
+func TestSaveFeishuPlatformCredentials_LeavesWildcardAllowFromUnchanged(t *testing.T) {
+	configPath := writeConfigFixture(t, strings.Replace(feishuConfigFixture, `allow_from = "ou_existing_owner"`, `allow_from = "*"`, 1))
+	patchConfigPath(t, configPath)
+
+	result, err := SaveFeishuPlatformCredentials(FeishuCredentialUpdateOptions{
+		ProjectName:       "alpha",
+		PlatformIndex:     2,
+		OwnerOpenID:       "ou_new_owner",
+		AppID:             "cli_second_app",
+		AppSecret:         "sec_second_secret",
+		SetAllowFromEmpty: true,
+	})
+	if err != nil {
+		t.Fatalf("SaveFeishuPlatformCredentials returned error: %v", err)
+	}
+
+	if result.AllowFrom != "*" {
+		t.Fatalf("result.AllowFrom = %q, want %q", result.AllowFrom, "*")
+	}
+
+	cfg := readConfigFixture(t, configPath)
+	platform := cfg.Projects[0].Platforms[2]
+	if got := stringMapValue(platform.Options, "allow_from"); got != "*" {
+		t.Fatalf("allow_from = %q, want %q", got, "*")
 	}
 }
 
@@ -618,6 +680,33 @@ func TestLoad_DefaultsAutoCompressDisabled(t *testing.T) {
 	}
 	if cfg.Projects[0].AutoCompress.Enabled != nil {
 		t.Fatalf("expected auto_compress.enabled to default to nil")
+	}
+}
+
+func TestLoad_ParsesResetOnIdleMins(t *testing.T) {
+	configPath := writeConfigFixture(t, projectWithResetOnIdleFixture)
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Projects[0].ResetOnIdleMins == nil {
+		t.Fatal("expected reset_on_idle_mins to be parsed")
+	}
+	if got := *cfg.Projects[0].ResetOnIdleMins; got != 60 {
+		t.Fatalf("reset_on_idle_mins = %d, want 60", got)
+	}
+}
+
+func TestLoad_RejectsNegativeResetOnIdleMins(t *testing.T) {
+	configPath := writeConfigFixture(t, projectWithNegativeResetOnIdleFixture)
+
+	_, err := Load(configPath)
+	if err == nil {
+		t.Fatal("expected error for negative reset_on_idle_mins")
+	}
+	if !strings.Contains(err.Error(), "reset_on_idle_mins") {
+		t.Fatalf("error = %q, want reset_on_idle_mins validation", err.Error())
 	}
 }
 
@@ -834,6 +923,42 @@ allow_from = "ou_existing_owner"
 const projectWithoutFeishuFixture = `
 [[projects]]
 name = "beta"
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/beta"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+bot_token = "token_xxx"
+`
+
+const projectWithResetOnIdleFixture = `
+[[projects]]
+name = "beta"
+reset_on_idle_mins = 60
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/beta"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+bot_token = "token_xxx"
+`
+
+const projectWithNegativeResetOnIdleFixture = `
+[[projects]]
+name = "beta"
+reset_on_idle_mins = -1
 
 [projects.agent]
 type = "codex"
@@ -1283,6 +1408,54 @@ func TestSaveWeixinPlatformCredentials_UpdateToken(t *testing.T) {
 	bu, _ := cfg.Projects[0].Platforms[0].Options["base_url"].(string)
 	if bu != "https://ilinkai.weixin.qq.com" {
 		t.Fatalf("base_url = %q", bu)
+	}
+}
+
+func TestSaveWeixinPlatformCredentials_AppendsScannedUserToAllowFrom(t *testing.T) {
+	configPath := writeConfigFixture(t, strings.Replace(weixinConfigFixture, `base_url = "https://ilink.example"`, "base_url = \"https://ilink.example\"\nallow_from = \"wx_user_1\"", 1))
+	patchConfigPath(t, configPath)
+
+	result, err := SaveWeixinPlatformCredentials(WeixinCredentialUpdateOptions{
+		ProjectName:       "alpha",
+		Token:             "new_weixin_token",
+		ScannedUserID:     "wx_user_2",
+		SetAllowFromEmpty: true,
+	})
+	if err != nil {
+		t.Fatalf("SaveWeixinPlatformCredentials returned error: %v", err)
+	}
+
+	if result.AllowFrom != "wx_user_1,wx_user_2" {
+		t.Fatalf("result.AllowFrom = %q, want %q", result.AllowFrom, "wx_user_1,wx_user_2")
+	}
+
+	cfg := readConfigFixture(t, configPath)
+	if got := stringMapValue(cfg.Projects[0].Platforms[0].Options, "allow_from"); got != "wx_user_1,wx_user_2" {
+		t.Fatalf("allow_from = %q, want %q", got, "wx_user_1,wx_user_2")
+	}
+}
+
+func TestSaveWeixinPlatformCredentials_LeavesWildcardAllowFromUnchanged(t *testing.T) {
+	configPath := writeConfigFixture(t, strings.Replace(weixinConfigFixture, `base_url = "https://ilink.example"`, "base_url = \"https://ilink.example\"\nallow_from = \"*\"", 1))
+	patchConfigPath(t, configPath)
+
+	result, err := SaveWeixinPlatformCredentials(WeixinCredentialUpdateOptions{
+		ProjectName:       "alpha",
+		Token:             "new_weixin_token",
+		ScannedUserID:     "wx_user_2",
+		SetAllowFromEmpty: true,
+	})
+	if err != nil {
+		t.Fatalf("SaveWeixinPlatformCredentials returned error: %v", err)
+	}
+
+	if result.AllowFrom != "*" {
+		t.Fatalf("result.AllowFrom = %q, want %q", result.AllowFrom, "*")
+	}
+
+	cfg := readConfigFixture(t, configPath)
+	if got := stringMapValue(cfg.Projects[0].Platforms[0].Options, "allow_from"); got != "*" {
+		t.Fatalf("allow_from = %q, want %q", got, "*")
 	}
 }
 

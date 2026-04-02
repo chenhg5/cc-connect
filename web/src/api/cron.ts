@@ -13,6 +13,7 @@ export interface CronJob {
   silent: boolean;
   mute: boolean;
   session_mode: string;
+  mode: string;
   timeout_mins: number | null;
   created_at: string;
   last_run: string;

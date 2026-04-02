@@ -69,18 +69,19 @@ func (t *stubTypingTicker) C() <-chan time.Time {
 func (t *stubTypingTicker) Stop() {}
 
 type stubTelegramBot struct {
-	mu                   sync.Mutex
-	sendMessageCalls     int
-	sendPhotoCalls       int
-	sendDocumentCalls    int
-	sendVoiceCalls       int
-	sendAudioCalls       int
-	sendChatActionCalls  int
-	editMessageTextCalls int
-	deleteMessageCalls   int
-	answerCallbackCalls  int
-	setMyCommandsCalls   int
-	getFileCalls         int
+	mu                    sync.Mutex
+	sendMessageCalls      int
+	sendPhotoCalls        int
+	sendDocumentCalls     int
+	sendVoiceCalls        int
+	sendAudioCalls        int
+	sendChatActionCalls   int
+	editMessageTextCalls  int
+	deleteMessageCalls    int
+	answerCallbackCalls   int
+	setMyCommandsCalls    int
+	getFileCalls          int
+	setReactionCalls      int
 
 	sendErr    error
 	getFileErr error
@@ -204,6 +205,13 @@ func (b *stubTelegramBot) FileDownloadLink(f *models.File) string {
 	return "https://test.example.com/file/" + f.FilePath
 }
 
+func (b *stubTelegramBot) SetMessageReaction(_ context.Context, _ *tgbot.SetMessageReactionParams) (bool, error) {
+	b.mu.Lock()
+	b.setReactionCalls++
+	b.mu.Unlock()
+	return true, nil
+}
+
 func (b *stubTelegramBot) SendMessageCallCount() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -221,6 +229,7 @@ func (b *stubTelegramBot) GetFileCallCount() int {
 	defer b.mu.Unlock()
 	return b.getFileCalls
 }
+
 
 func TestPlatformStart_RetriesInBackgroundUntilConnected(t *testing.T) {
 	var attempts atomic.Int32

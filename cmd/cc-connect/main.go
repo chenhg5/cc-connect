@@ -271,12 +271,16 @@ func main() {
 			dcfg := core.DisplayCfg{
 				ThinkingMaxLen: 300,
 				ToolMaxLen:     500,
+				ToolMessages:   true,
 			}
 			if cfg.Display.ThinkingMaxLen != nil {
 				dcfg.ThinkingMaxLen = *cfg.Display.ThinkingMaxLen
 			}
 			if cfg.Display.ToolMaxLen != nil {
 				dcfg.ToolMaxLen = *cfg.Display.ToolMaxLen
+			}
+			if cfg.Display.ToolMessages != nil {
+				dcfg.ToolMessages = *cfg.Display.ToolMessages
 			}
 			engine.SetDisplayConfig(dcfg)
 		}
@@ -347,8 +351,8 @@ func main() {
 			}
 		}
 
-		engine.SetDisplaySaveFunc(func(thinkingMaxLen, toolMaxLen *int) error {
-			return config.SaveDisplayConfig(thinkingMaxLen, toolMaxLen)
+		engine.SetDisplaySaveFunc(func(thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
+			return config.SaveDisplayConfig(thinkingMaxLen, toolMaxLen, toolMessages)
 		})
 
 		// Wire idle timeout
@@ -379,6 +383,9 @@ func main() {
 				maxTokens = 12000
 			}
 			engine.SetAutoCompressConfig(true, maxTokens, minGap)
+		}
+		if proj.ResetOnIdleMins != nil {
+			engine.SetResetOnIdle(time.Duration(*proj.ResetOnIdleMins) * time.Minute)
 		}
 
 		// Wire sender injection
@@ -578,6 +585,9 @@ func main() {
 		cronSched = core.NewCronScheduler(cronStore)
 		if cfg.Cron.Silent != nil && *cfg.Cron.Silent {
 			cronSched.SetDefaultSilent(true)
+		}
+		if cfg.Cron.SessionMode != "" {
+			cronSched.SetDefaultSessionMode(cfg.Cron.SessionMode)
 		}
 		for i, e := range engines {
 			cronSched.RegisterEngine(cfg.Projects[i].Name, e)
@@ -1170,12 +1180,15 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	}
 
 	// Reload display config
-	dcfg := core.DisplayCfg{ThinkingMaxLen: 300, ToolMaxLen: 500}
+	dcfg := core.DisplayCfg{ThinkingMaxLen: 300, ToolMaxLen: 500, ToolMessages: true}
 	if cfg.Display.ThinkingMaxLen != nil {
 		dcfg.ThinkingMaxLen = *cfg.Display.ThinkingMaxLen
 	}
 	if cfg.Display.ToolMaxLen != nil {
 		dcfg.ToolMaxLen = *cfg.Display.ToolMaxLen
+	}
+	if cfg.Display.ToolMessages != nil {
+		dcfg.ToolMessages = *cfg.Display.ToolMessages
 	}
 	engine.SetDisplayConfig(dcfg)
 	result.DisplayUpdated = true
@@ -1202,6 +1215,11 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		engine.SetAutoCompressConfig(true, maxTokens, minGap)
 	} else {
 		engine.SetAutoCompressConfig(false, 0, 0)
+	}
+	if proj.ResetOnIdleMins != nil {
+		engine.SetResetOnIdle(time.Duration(*proj.ResetOnIdleMins) * time.Minute)
+	} else {
+		engine.SetResetOnIdle(0)
 	}
 
 	showCtx := true
