@@ -495,6 +495,26 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 		return
 	}
 
+
+		if msg.Location != nil {
+			slog.Info("telegram: location received", "user", userName, "latitude", msg.Location.Latitude, "longitude", msg.Location.Longitude)
+			p.dispatchMessage(&core.Message{
+				SessionKey: sessionKey, Platform: "telegram",
+				UserID: userID, UserName: userName, ChatName: chatName,
+				MessageID:  strconv.Itoa(msg.ID),
+				ChannelKey: channelKey,
+				Location: &core.LocationAttachment{
+					Latitude:            msg.Location.Latitude,
+					Longitude:           msg.Location.Longitude,
+					HorizontalAccuracy:  msg.Location.HorizontalAccuracy,
+					LivePeriod:          msg.Location.LivePeriod,
+					Heading:             msg.Location.Heading,
+					ProximityAlertRadius: msg.Location.ProximityAlertRadius,
+				},
+				ReplyCtx: rctx,
+			})
+			return
+		}
 	if msg.Text == "" {
 		return
 	}
