@@ -98,7 +98,7 @@ High-level view of what each **built-in platform** can do in cc-connect. Inspire
 ## ✨ Why cc-connect?
 
 ### 🤖 Universal Agent Support
-**7 AI Agents** — Claude Code, Codex, Cursor Agent, Qoder CLI, Gemini CLI, OpenCode, iFlow CLI. Use whichever fits your workflow, or all of them at once.
+**8 AI Agents** — Claude Code, Codex, Cursor Agent, Droid, Qoder CLI, Gemini CLI, OpenCode, iFlow CLI. Use whichever fits your workflow, or all of them at once.
 
 ### 📱 Platform Flexibility
 **10 Chat Platforms** — Feishu, DingTalk, Slack, Telegram, Discord, WeChat Work, LINE, QQ, QQ Bot (Official), plus **Weixin (personal ilink)** for **personal WeChat**. *Personal WeChat is **beta / pre-release only*** — install [`cc-connect@beta`](https://www.npmjs.com/package/cc-connect?activeTab=versions) or a [GitHub pre-release](https://github.com/chenhg5/cc-connect/releases) binary; the default **stable** npm package does **not** ship the `weixin` platform yet. Most platforms need **zero public IP**.
@@ -228,6 +228,7 @@ cc-connect update --pre     # Beta (includes pre-releases)
 | Agent | Claude Code | ✅ Supported |
 | Agent | Codex (OpenAI) | ✅ Supported |
 | Agent | Cursor Agent | ✅ Supported |
+| Agent | Droid | ✅ Supported |
 | Agent | Gemini CLI (Google) | ✅ Supported |
 | Agent | Qoder CLI | ✅ Supported |
 | Agent | OpenCode (Crush) | ✅ Supported |
