@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -201,6 +202,13 @@ func (c *apiClient) getUploadURL(ctx context.Context, req getUploadURLRequest) (
 	var out getUploadURLResponse
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, fmt.Errorf("weixin: getUploadUrl json: %w", err)
+	}
+	// 兼容微信 iLink API 变更：新版返回 upload_full_url 而非 upload_param
+	// 从 upload_full_url 的 encrypted_query_param 参数中提取 upload_param
+	if strings.TrimSpace(out.UploadParam) == "" && strings.TrimSpace(out.UploadFullURL) != "" {
+		if u, err := url.Parse(out.UploadFullURL); err == nil {
+			out.UploadParam = u.Query().Get("encrypted_query_param")
+		}
 	}
 	if strings.TrimSpace(out.UploadParam) == "" {
 		return nil, fmt.Errorf("weixin: getUploadUrl: empty upload_param in %s", truncateForLog(raw, 512))
