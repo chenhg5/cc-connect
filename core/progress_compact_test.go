@@ -10,12 +10,12 @@ type suppressTestPlatform struct {
 	style string
 }
 
-func (s *suppressTestPlatform) Name() string { return "test" }
-func (s *suppressTestPlatform) Start(MessageHandler) error { return nil }
+func (s *suppressTestPlatform) Name() string                             { return "test" }
+func (s *suppressTestPlatform) Start(MessageHandler) error               { return nil }
 func (s *suppressTestPlatform) Reply(context.Context, any, string) error { return nil }
-func (s *suppressTestPlatform) Send(context.Context, any, string) error { return nil }
-func (s *suppressTestPlatform) Stop() error { return nil }
-func (s *suppressTestPlatform) ProgressStyle() string { return s.style }
+func (s *suppressTestPlatform) Send(context.Context, any, string) error  { return nil }
+func (s *suppressTestPlatform) Stop() error                              { return nil }
+func (s *suppressTestPlatform) ProgressStyle() string                    { return s.style }
 
 func TestSuppressStandaloneToolResultEvent(t *testing.T) {
 	if SuppressStandaloneToolResultEvent(&stubPlatformNoProgress{}) {
@@ -35,11 +35,11 @@ func TestSuppressStandaloneToolResultEvent(t *testing.T) {
 // stubPlatformNoProgress is a minimal Platform without ProgressStyleProvider.
 type stubPlatformNoProgress struct{}
 
-func (stubPlatformNoProgress) Name() string { return "plain" }
-func (stubPlatformNoProgress) Start(MessageHandler) error { return nil }
+func (stubPlatformNoProgress) Name() string                             { return "plain" }
+func (stubPlatformNoProgress) Start(MessageHandler) error               { return nil }
 func (stubPlatformNoProgress) Reply(context.Context, any, string) error { return nil }
-func (stubPlatformNoProgress) Send(context.Context, any, string) error { return nil }
-func (stubPlatformNoProgress) Stop() error { return nil }
+func (stubPlatformNoProgress) Send(context.Context, any, string) error  { return nil }
+func (stubPlatformNoProgress) Stop() error                              { return nil }
 
 func TestBuildAndParseProgressCardPayload(t *testing.T) {
 	payload := BuildProgressCardPayload([]string{" step1 ", "", "step2"}, true)

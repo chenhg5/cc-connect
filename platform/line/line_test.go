@@ -40,7 +40,7 @@ func TestNew_MissingChannelToken(t *testing.T) {
 func TestNew_WithValidCredentials(t *testing.T) {
 	p, err := New(map[string]any{
 		"channel_secret": "test-secret",
-		"channel_token": "test-token",
+		"channel_token":  "test-token",
 	})
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
@@ -56,7 +56,7 @@ func TestNew_WithValidCredentials(t *testing.T) {
 func TestNew_DefaultPort(t *testing.T) {
 	p, err := New(map[string]any{
 		"channel_secret": "test-secret",
-		"channel_token": "test-token",
+		"channel_token":  "test-token",
 	})
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
@@ -73,8 +73,8 @@ func TestNew_DefaultPort(t *testing.T) {
 func TestNew_CustomPortAndPath(t *testing.T) {
 	p, err := New(map[string]any{
 		"channel_secret": "test-secret",
-		"channel_token": "test-token",
-		"port":          "9090",
+		"channel_token":  "test-token",
+		"port":           "9090",
 		"callback_path":  "/webhook",
 	})
 	if err != nil {
@@ -92,8 +92,8 @@ func TestNew_CustomPortAndPath(t *testing.T) {
 func TestNew_WithAllowFrom(t *testing.T) {
 	p, err := New(map[string]any{
 		"channel_secret": "test-secret",
-		"channel_token": "test-token",
-		"allow_from":    "user1,user2",
+		"channel_token":  "test-token",
+		"allow_from":     "user1,user2",
 	})
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)

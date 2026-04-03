@@ -257,13 +257,13 @@ func TestRegression_PermissionDefault(t *testing.T) {
 
 	manager.Configure("member", []core.RoleInput{
 		{
-			Name:         "admin",
-			UserIDs:      []string{"admin-user"},
+			Name:             "admin",
+			UserIDs:          []string{"admin-user"},
 			DisabledCommands: []string{"rm", "delete"},
 		},
 		{
-			Name:         "member",
-			UserIDs:      []string{"regular-user", "*"},
+			Name:             "member",
+			UserIDs:          []string{"regular-user", "*"},
 			DisabledCommands: []string{},
 		},
 	})
@@ -631,7 +631,7 @@ func TestRegression_CardButtons(t *testing.T) {
 		Build()
 
 	rows := card.CollectButtons()
-	assert.Len(t, rows, 1) // One row of buttons
+	assert.Len(t, rows, 1)    // One row of buttons
 	assert.Len(t, rows[0], 3) // Three buttons
 
 	// Verify button values
@@ -1095,7 +1095,7 @@ func TestRegression_DingtalkCrypto(t *testing.T) {
 			name:        "valid signature",
 			signature:   "test-signature",
 			timestamp:   "1234567890",
-			nonce:      "random-nonce",
+			nonce:       "random-nonce",
 			token:       "test-token",
 			expectValid: true,
 		},
@@ -1176,5 +1176,3 @@ func TestRegression_CronCancel(t *testing.T) {
 
 	t.Log("Cron cancel: PASS")
 }
-
-

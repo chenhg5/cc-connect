@@ -289,9 +289,9 @@ func (m *MiniMaxTTS) Synthesize(ctx context.Context, text string, opts TTSSynthe
 	}
 
 	reqBody := map[string]any{
-		"model":        m.Model,
-		"text":         text,
-		"stream":       true,
+		"model":  m.Model,
+		"text":   text,
+		"stream": true,
 		"voice_setting": map[string]any{
 			"voice_id": voice,
 			"speed":    speed,

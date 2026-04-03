@@ -5288,7 +5288,15 @@ func (e *Engine) stopInteractiveSession(sessionKey string, quietPlatform Platfor
 	quietMode := state.quiet
 	agentSession := state.agentSession
 	state.mu.Unlock()
-
+	// Force kill the agent session if it supports immediate termination
+	// This is faster than graceful Close() when agent is stuck in a loop
+	if state.agentSession != nil {
+		if ft, ok := state.agentSession.(ForceTerminator); ok {
+			slog.Debug("cmdStop: force killing agent session", "session", sessionKey)
+			_ = ft.ForceKill()
+			e.cleanupInteractiveState(sessionKey)
+		}
+	}
 	state.markStopped()
 	if quietMode {
 		if quietPlatform == nil {

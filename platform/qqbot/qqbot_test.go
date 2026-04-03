@@ -40,7 +40,7 @@ func TestNew_MissingBoth(t *testing.T) {
 
 func TestNew_WithValidCredentials(t *testing.T) {
 	p, err := New(map[string]any{
-		"app_id":    "test-app-id",
+		"app_id":     "test-app-id",
 		"app_secret": "test-secret",
 	})
 	if err != nil {
@@ -56,9 +56,9 @@ func TestNew_WithValidCredentials(t *testing.T) {
 
 func TestNew_Sandbox(t *testing.T) {
 	p, err := New(map[string]any{
-		"app_id":    "test-app-id",
+		"app_id":     "test-app-id",
 		"app_secret": "test-secret",
-		"sandbox":   true,
+		"sandbox":    true,
 	})
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
@@ -71,7 +71,7 @@ func TestNew_Sandbox(t *testing.T) {
 
 func TestNew_DefaultIntents(t *testing.T) {
 	p, err := New(map[string]any{
-		"app_id":    "test-app-id",
+		"app_id":     "test-app-id",
 		"app_secret": "test-secret",
 	})
 	if err != nil {
@@ -85,9 +85,9 @@ func TestNew_DefaultIntents(t *testing.T) {
 
 func TestNew_CustomIntents(t *testing.T) {
 	p, err := New(map[string]any{
-		"app_id":    "test-app-id",
+		"app_id":     "test-app-id",
 		"app_secret": "test-secret",
-		"intents":   1 << 20,
+		"intents":    1 << 20,
 	})
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
@@ -100,9 +100,9 @@ func TestNew_CustomIntents(t *testing.T) {
 
 func TestNew_IntentsAsFloat(t *testing.T) {
 	p, err := New(map[string]any{
-		"app_id":    "test-app-id",
+		"app_id":     "test-app-id",
 		"app_secret": "test-secret",
-		"intents":   float64(1 << 18),
+		"intents":    float64(1 << 18),
 	})
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
@@ -115,7 +115,7 @@ func TestNew_IntentsAsFloat(t *testing.T) {
 
 func TestNew_WithAllowFrom(t *testing.T) {
 	p, err := New(map[string]any{
-		"app_id":    "test-app-id",
+		"app_id":     "test-app-id",
 		"app_secret": "test-secret",
 		"allow_from": "user1,user2",
 	})
@@ -130,8 +130,8 @@ func TestNew_WithAllowFrom(t *testing.T) {
 
 func TestNew_ShareSessionInChannel(t *testing.T) {
 	p, err := New(map[string]any{
-		"app_id":    "test-app-id",
-		"app_secret": "test-secret",
+		"app_id":                   "test-app-id",
+		"app_secret":               "test-secret",
 		"share_session_in_channel": true,
 	})
 	if err != nil {
@@ -145,8 +145,8 @@ func TestNew_ShareSessionInChannel(t *testing.T) {
 
 func TestNew_MarkdownSupport(t *testing.T) {
 	p, err := New(map[string]any{
-		"app_id":    "test-app-id",
-		"app_secret": "test-secret",
+		"app_id":           "test-app-id",
+		"app_secret":       "test-secret",
 		"markdown_support": true,
 	})
 	if err != nil {
