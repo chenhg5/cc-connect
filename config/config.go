@@ -20,6 +20,7 @@ var ConfigPath string
 type Config struct {
 	DataDir           string                  `toml:"data_dir"` // session store directory, default ~/.cc-connect
 	AttachmentSend    string                  `toml:"attachment_send"`
+	Providers         []ProviderConfig        `toml:"providers"`
 	Projects          []ProjectConfig         `toml:"projects"`
 	Commands          []CommandConfig         `toml:"commands"`     // global custom slash commands
 	Aliases           []AliasConfig           `toml:"aliases"`      // global command aliases
