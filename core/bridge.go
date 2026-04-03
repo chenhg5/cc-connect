@@ -28,6 +28,7 @@ type BridgeServer struct {
 	token       string
 	path        string
 	corsOrigins []string
+	insecure    bool // allow running without token (local dev only)
 	server      *http.Server
 
 	mu       sync.RWMutex
@@ -121,11 +122,17 @@ type bridgeAudioData struct {
 	Duration int    `json:"duration,omitempty"`
 }
 
-var wsUpgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
+func NewBridgeServer(port int, token, path string, corsOrigins []string) *BridgeServer {
+	return newBridgeServer(port, token, path, corsOrigins, false)
 }
 
-func NewBridgeServer(port int, token, path string, corsOrigins []string) *BridgeServer {
+// NewBridgeServerInsecure creates a BridgeServer that allows running without token.
+// This should only be used for local development.
+func NewBridgeServerInsecure(port int, token, path string, corsOrigins []string) *BridgeServer {
+	return newBridgeServer(port, token, path, corsOrigins, true)
+}
+
+func newBridgeServer(port int, token, path string, corsOrigins []string, insecure bool) *BridgeServer {
 	if port <= 0 {
 		port = 9810
 	}
@@ -135,11 +142,23 @@ func NewBridgeServer(port int, token, path string, corsOrigins []string) *Bridge
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
+
+	// Validate security settings
+	if token == "" && !insecure {
+		slog.Error("bridge: token is required when insecure mode is not enabled",
+			"help", "set bridge.token in config, or use insecure=true for local development only")
+		return nil
+	}
+	if insecure && token == "" {
+		slog.Warn("bridge: running in INSECURE mode without authentication - only use for local development!")
+	}
+
 	return &BridgeServer{
 		port:        port,
 		token:       token,
 		path:        path,
 		corsOrigins: corsOrigins,
+		insecure:    insecure,
 		adapters:    make(map[string]*bridgeAdapter),
 		engines:     make(map[string]*bridgeEngineRef),
 	}
@@ -483,13 +502,60 @@ func (bp *BridgePlatform) SetCardNavigationHandler(h CardNavigationHandler) {
 // WebSocket connection handling (on BridgeServer)
 // ---------------------------------------------------------------------------
 
+// checkOrigin validates the WebSocket origin against CORS origins.
+// In insecure mode, it allows all origins. Otherwise, it checks against CORS origins or same host.
+func (bs *BridgeServer) checkOrigin(r *http.Request) bool {
+	// In insecure mode, allow all origins (for local development)
+	if bs.insecure {
+		return true
+	}
+
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		// No origin header (e.g., non-browser client) - allow only if authenticated
+		// The authentication check happens before this, so we allow
+		return true
+	}
+
+	// If CORS origins are configured, check against them
+	if len(bs.corsOrigins) > 0 {
+		for _, o := range bs.corsOrigins {
+			if o == "*" || o == origin {
+				return true
+			}
+		}
+		slog.Warn("bridge: websocket origin rejected", "origin", origin, "allowed", bs.corsOrigins)
+		return false
+	}
+
+	// No CORS configured - require same-host (origin must match host)
+	host := r.Host
+	if host == "" {
+		host = r.URL.Host
+	}
+	// Parse origin to get host
+	if idx := strings.Index(origin, "://"); idx > 0 {
+		originHost := origin[idx+3:]
+		if originHost == host {
+			return true
+		}
+	}
+	slog.Warn("bridge: websocket origin mismatch", "origin", origin, "host", host)
+	return false
+}
+
 func (bs *BridgeServer) handleWS(w http.ResponseWriter, r *http.Request) {
 	if !bs.authenticate(r) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
-	conn, err := wsUpgrader.Upgrade(w, r, nil)
+	// Use a custom upgrader with origin checking
+	upgrader := websocket.Upgrader{
+		CheckOrigin: bs.checkOrigin,
+	}
+
+	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		slog.Error("bridge: websocket upgrade failed", "error", err)
 		return
@@ -1003,8 +1069,9 @@ func (bs *BridgeServer) handleSessionSwitch(w http.ResponseWriter, r *http.Reque
 // ---------------------------------------------------------------------------
 
 func (bs *BridgeServer) authenticate(r *http.Request) bool {
+	// If token is not set, only allow in insecure mode
 	if bs.token == "" {
-		return true
+		return bs.insecure
 	}
 	if auth := r.Header.Get("Authorization"); auth != "" {
 		if strings.HasPrefix(auth, "Bearer ") {
