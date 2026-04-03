@@ -20,6 +20,7 @@ var ConfigPath string
 type Config struct {
 	DataDir           string                  `toml:"data_dir"` // session store directory, default ~/.cc-connect
 	AttachmentSend    string                  `toml:"attachment_send"`
+	Providers         []ProviderConfig        `toml:"providers"`
 	Projects          []ProjectConfig         `toml:"projects"`
 	Commands          []CommandConfig         `toml:"commands"`     // global custom slash commands
 	Aliases           []AliasConfig           `toml:"aliases"`      // global command aliases
@@ -324,6 +325,9 @@ func (c *Config) validate() error {
 			if _, ok := proj.Agent.Options["work_dir"]; ok {
 				return fmt.Errorf("project %q: multi-workspace mode conflicts with agent work_dir (use base_dir instead)", proj.Name)
 			}
+		}
+		if proj.ResetOnIdleMins != nil && *proj.ResetOnIdleMins < 0 {
+			return fmt.Errorf("config: %s.reset_on_idle_mins must be >= 0", prefix)
 		}
 		if proj.ResetOnIdleMins != nil && *proj.ResetOnIdleMins < 0 {
 			return fmt.Errorf("config: %s.reset_on_idle_mins must be >= 0", prefix)

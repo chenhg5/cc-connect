@@ -31,11 +31,11 @@ Each user gets an independent session with full conversation context. Manage ses
 
 | Command | Description |
 |---------|-------------|
-| `/new [name]` | Start a new session |
-| `/list` | List all agent sessions for this project |
-| `/switch <id>` | Switch to a different session |
-| `/current` | Show current session info |
-| `/history [n]` | Show last n messages (default 10) |
+| `/session new [name]` | Start a new session |
+| `/session list [page]` | List all agent sessions for this project |
+| `/session switch <id>` | Switch to a different session |
+| `/session current` | Show current session info |
+| `/session history [n]` | Show last n messages (default 10) |
 | `/usage` | Show account/model quota usage (if supported) |
 | `/provider [...]` | Manage API providers |
 | `/model [switch <alias>]` | List available models or switch by alias |
@@ -46,6 +46,8 @@ Each user gets an independent session with full conversation context. Manage ses
 | `/quiet` | Toggle thinking/tool progress messages |
 | `/stop` | Stop current execution |
 | `/help` | Show available commands |
+
+Compatibility aliases `/new`, `/list`, and `/switch` still map to `/session new`, `/session list`, and `/session switch` in this release, and will be removed in the next major version.
 
 During a session, the agent may request tool permissions. Reply **allow** / **deny** / **allow all**.
 

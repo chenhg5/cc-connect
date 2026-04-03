@@ -162,6 +162,7 @@ const (
 	MsgHelp                      MsgKey = "message_help" // change from "help", which is used now for builtin command help
 	MsgHelpTitle                 MsgKey = "help_title"
 	MsgHelpSessionSection        MsgKey = "help_session_section"
+	MsgSessionCompatAliases      MsgKey = "session_compat_aliases"
 	MsgHelpAgentSection          MsgKey = "help_agent_section"
 	MsgHelpToolsSection          MsgKey = "help_tools_section"
 	MsgHelpSystemSection         MsgKey = "help_system_section"
@@ -250,6 +251,7 @@ const (
 	MsgReasoningNotSupported MsgKey = "reasoning_not_supported"
 
 	MsgCompressNotSupported MsgKey = "compress_not_supported"
+	MsgSwitchUsage          MsgKey = "switch_usage"
 	MsgCompressing          MsgKey = "compressing"
 	MsgCompressNoSession    MsgKey = "compress_no_session"
 	MsgCompressDone         MsgKey = "compress_done"
@@ -819,14 +821,7 @@ var messages = map[MsgKey]map[Language]string{
 	},
 	MsgHelp: {
 		LangEnglish: "📖 Available Commands\n\n" +
-			"/new [name]\n  Start a new session\n\n" +
-			"/list\n  List agent sessions\n\n" +
-			"/search <keyword>\n  Search sessions by name or ID\n\n" +
-			"/switch <number>\n  Resume a session by its list number\n\n" +
-			"/delete <number>|1,2,3|3-7|1,3-5,8\n  Delete sessions by list number(s)\n\n" +
-			"/name [number] <text>\n  Name a session for easy identification\n\n" +
-			"/current\n  Show current active session\n\n" +
-			"/history [n]\n  Show last n messages (default 10)\n\n" +
+			"/session [new|list|search|switch|rename|current|history|delete]\n  Manage chat sessions\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  Manage API providers\n\n" +
 			"/memory [add|global|global add]\n  View/edit agent memory files\n\n" +
 			"/allow <tool>\n  Pre-allow a tool (next session)\n\n" +
@@ -856,20 +851,13 @@ var messages = map[MsgKey]map[Language]string{
 			"/version\n  Show cc-connect version\n\n" +
 			"/whoami\n  Show your User ID (for allow_from / admin_from)\n\n" +
 			"/help\n  Show this help\n\n" +
-			"Tip: Commands support prefix matching, e.g. `/pro l` = `/provider list`, `/sw 2` = `/switch 2`.\n\n" +
+			"Tip: Commands support prefix matching, e.g. `/pro l` = `/provider list`, `/session sw 2` = `/session switch 2`.\n\n" +
 			"Custom commands: define via `/commands add` or `[[commands]]` in config.toml.\n\n" +
 			"Command aliases: use `/alias add <trigger> <command>` or `[[aliases]]` in config.toml.\n\n" +
 			"Agent skills: auto-discovered from .claude/skills/<name>/SKILL.md etc.\n\n" +
 			"Permission modes: default / edit / plan / yolo",
 		LangChinese: "📖 可用命令\n\n" +
-			"/new [名称]\n  创建新会话\n\n" +
-			"/list\n  列出 Agent 会话列表\n\n" +
-			"/search <关键词>\n  搜索会话名称或 ID\n\n" +
-			"/switch <序号>\n  按列表序号切换会话\n\n" +
-			"/delete <序号>|1,2,3|3-7|1,3-5,8\n  按列表序号批量/单个删除会话\n\n" +
-			"/name [序号] <名称>\n  给会话命名，方便识别\n\n" +
-			"/current\n  查看当前活跃会话\n\n" +
-			"/history [n]\n  查看最近 n 条消息（默认 10）\n\n" +
+			"/session [new|list|search|switch|rename|current|history|delete]\n  管理聊天会话\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  管理 API Provider\n\n" +
 			"/memory [add|global|global add]\n  查看/编辑 Agent 记忆文件\n\n" +
 			"/allow <工具名>\n  预授权工具（下次会话生效）\n\n" +
@@ -899,20 +887,13 @@ var messages = map[MsgKey]map[Language]string{
 			"/version\n  查看 cc-connect 版本\n\n" +
 			"/whoami\n  查看你的 User ID（用于 allow_from / admin_from 配置）\n\n" +
 			"/help\n  显示此帮助\n\n" +
-			"提示：命令支持前缀匹配，如 `/pro l` = `/provider list`，`/sw 2` = `/switch 2`。\n\n" +
+			"提示：命令支持前缀匹配，如 `/pro l` = `/provider list`，`/session sw 2` = `/session switch 2`。\n\n" +
 			"自定义命令：通过 `/commands add` 添加，或在 config.toml 中配置 `[[commands]]`。\n\n" +
 			"命令别名：使用 `/alias add <触发词> <命令>` 或在 config.toml 中配置 `[[aliases]]`。\n\n" +
 			"Agent Skills：自动发现自 .claude/skills/<name>/SKILL.md 等目录。\n\n" +
 			"权限模式：default / edit / plan / yolo",
 		LangTraditionalChinese: "📖 可用命令\n\n" +
-			"/new [名稱]\n  建立新會話\n\n" +
-			"/list\n  列出 Agent 會話列表\n\n" +
-			"/search <關鍵詞>\n  搜尋會話名稱或 ID\n\n" +
-			"/switch <序號>\n  按列表序號切換會話\n\n" +
-			"/delete <序號>|1,2,3|3-7|1,3-5,8\n  按列表序號批量/單筆刪除會話\n\n" +
-			"/name [序號] <名稱>\n  為會話命名，方便辨識\n\n" +
-			"/current\n  查看當前活躍會話\n\n" +
-			"/history [n]\n  查看最近 n 條訊息（預設 10）\n\n" +
+			"/session [new|list|search|switch|rename|current|history|delete]\n  管理聊天會話\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  管理 API Provider\n\n" +
 			"/memory [add|global|global add]\n  查看/編輯 Agent 記憶檔案\n\n" +
 			"/allow <工具名>\n  預授權工具（下次會話生效）\n\n" +
@@ -942,19 +923,13 @@ var messages = map[MsgKey]map[Language]string{
 			"/version\n  查看 cc-connect 版本\n\n" +
 			"/whoami\n  查看你的 User ID（用於 allow_from / admin_from 設定）\n\n" +
 			"/help\n  顯示此說明\n\n" +
-			"提示：命令支持前綴匹配，如 `/pro l` = `/provider list`，`/sw 2` = `/switch 2`。\n\n" +
+			"提示：命令支持前綴匹配，如 `/pro l` = `/provider list`，`/session sw 2` = `/session switch 2`。\n\n" +
 			"自訂命令：透過 `/commands add` 新增，或在 config.toml 中配置 `[[commands]]`。\n\n" +
 			"命令別名：使用 `/alias add <觸發詞> <命令>` 或在 config.toml 中配置 `[[aliases]]`。\n\n" +
 			"Agent Skills：自動發現自 .claude/skills/<name>/SKILL.md 等目錄。\n\n" +
 			"權限模式：default / edit / plan / yolo",
 		LangJapanese: "📖 利用可能なコマンド\n\n" +
-			"/new [名前]\n  新しいセッションを開始\n\n" +
-			"/list\n  エージェントセッション一覧\n\n" +
-			"/switch <番号>\n  リスト番号でセッションを切り替え\n\n" +
-			"/delete <番号>|1,2,3|3-7|1,3-5,8\n  リスト番号でセッションを単体/複数削除\n\n" +
-			"/name [番号] <名前>\n  セッションに名前を付ける\n\n" +
-			"/current\n  現在のアクティブセッションを表示\n\n" +
-			"/history [n]\n  直近 n 件のメッセージを表示（デフォルト 10）\n\n" +
+			"/session [new|list|search|switch|rename|current|history|delete]\n  セッション管理\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  API プロバイダ管理\n\n" +
 			"/memory [add|global|global add]\n  エージェントメモリの表示/編集\n\n" +
 			"/allow <ツール名>\n  ツールを事前許可（次のセッションで有効）\n\n" +
@@ -984,19 +959,13 @@ var messages = map[MsgKey]map[Language]string{
 			"/version\n  cc-connect のバージョンを表示\n\n" +
 			"/whoami\n  あなたの User ID を表示（allow_from / admin_from 設定用）\n\n" +
 			"/help\n  このヘルプを表示\n\n" +
-			"ヒント：コマンドはプレフィックスマッチに対応しています。例: `/pro l` = `/provider list`、`/sw 2` = `/switch 2`。\n\n" +
+			"ヒント：コマンドはプレフィックスマッチに対応しています。例: `/pro l` = `/provider list`、`/session sw 2` = `/session switch 2`。\n\n" +
 			"カスタムコマンド: `/commands add` または config.toml の `[[commands]]` で定義。\n\n" +
 			"コマンドエイリアス: `/alias add <トリガー> <コマンド>` または config.toml の `[[aliases]]` で定義。\n\n" +
 			"エージェントスキル: .claude/skills/<name>/SKILL.md などから自動検出。\n\n" +
 			"権限モード: default / edit / plan / yolo",
 		LangSpanish: "📖 Comandos disponibles\n\n" +
-			"/new [nombre]\n  Iniciar una nueva sesión\n\n" +
-			"/list\n  Listar sesiones del agente\n\n" +
-			"/switch <número>\n  Reanudar sesión por su número en la lista\n\n" +
-			"/delete <número>|1,2,3|3-7|1,3-5,8\n  Eliminar una o varias sesiones por número de lista\n\n" +
-			"/name [número] <texto>\n  Nombrar una sesión para fácil identificación\n\n" +
-			"/current\n  Mostrar sesión activa actual\n\n" +
-			"/history [n]\n  Mostrar últimos n mensajes (por defecto 10)\n\n" +
+			"/session [new|list|search|switch|rename|current|history|delete]\n  Gestionar sesiones del chat\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  Gestionar proveedores API\n\n" +
 			"/memory [add|global|global add]\n  Ver/editar archivos de memoria del agente\n\n" +
 			"/allow <herramienta>\n  Pre-autorizar herramienta (próxima sesión)\n\n" +
@@ -1026,7 +995,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/version\n  Mostrar versión de cc-connect\n\n" +
 			"/whoami\n  Mostrar tu User ID (para allow_from / admin_from)\n\n" +
 			"/help\n  Mostrar esta ayuda\n\n" +
-			"Consejo: Los comandos admiten coincidencia por prefijo, ej. `/pro l` = `/provider list`, `/sw 2` = `/switch 2`.\n\n" +
+			"Consejo: Los comandos admiten coincidencia por prefijo, ej. `/pro l` = `/provider list`, `/session sw 2` = `/session switch 2`.\n\n" +
 			"Comandos personalizados: use `/commands add` o defina `[[commands]]` en config.toml.\n\n" +
 			"Alias de comandos: use `/alias add <trigger> <comando>` o `[[aliases]]` en config.toml.\n\n" +
 			"Skills del agente: descubiertos de .claude/skills/<name>/SKILL.md etc.\n\n" +
@@ -1041,50 +1010,57 @@ var messages = map[MsgKey]map[Language]string{
 	},
 	MsgHelpSessionSection: {
 		LangEnglish: "**Session Management**\n" +
-			"/new [name] — Start a new session\n" +
-			"/list — List agent sessions\n" +
-			"/search <keyword> — Search sessions\n" +
-			"/switch <number> — Resume a session\n" +
-			"/delete <number>|1,2,3|3-7|1,3-5,8 — Delete session(s)\n" +
-			"/name [number] <text> — Name a session\n" +
-			"/current — Show active session\n" +
-			"/history [n] — Show last n messages",
+			"/session new [name] — Start a new session\n" +
+			"/session list [page] — List agent sessions\n" +
+			"/session search <keyword> — Search sessions\n" +
+			"/session switch <number|id_prefix|name> — Resume a session\n" +
+			"/session delete <number>|1,2,3|3-7|1,3-5,8 — Delete session(s)\n" +
+			"/session rename [number] <text> — Name a session\n" +
+			"/session current — Show active session\n" +
+			"/session history [n] — Show last n messages",
 		LangChinese: "**会话管理**\n" +
-			"/new [名称] — 创建新会话\n" +
-			"/list — 列出会话列表\n" +
-			"/search <关键词> — 搜索会话\n" +
-			"/switch <序号> — 切换会话\n" +
-			"/delete <序号>|1,2,3|3-7|1,3-5,8 — 删除会话\n" +
-			"/name [序号] <名称> — 命名会话\n" +
-			"/current — 查看当前会话\n" +
-			"/history [n] — 查看最近 n 条消息",
+			"/session new [名称] — 创建新会话\n" +
+			"/session list [页码] — 列出会话列表\n" +
+			"/session search <关键词> — 搜索会话\n" +
+			"/session switch <序号|ID 前缀|名称> — 切换会话\n" +
+			"/session delete <序号>|1,2,3|3-7|1,3-5,8 — 删除会话\n" +
+			"/session rename [序号] <名称> — 命名会话\n" +
+			"/session current — 查看当前会话\n" +
+			"/session history [n] — 查看最近 n 条消息",
 		LangTraditionalChinese: "**會話管理**\n" +
-			"/new [名稱] — 建立新會話\n" +
-			"/list — 列出會話列表\n" +
-			"/search <關鍵詞> — 搜尋會話\n" +
-			"/switch <序號> — 切換會話\n" +
-			"/delete <序號>|1,2,3|3-7|1,3-5,8 — 刪除會話\n" +
-			"/name [序號] <名稱> — 命名會話\n" +
-			"/current — 查看當前會話\n" +
-			"/history [n] — 查看最近 n 條訊息",
+			"/session new [名稱] — 建立新會話\n" +
+			"/session list [頁碼] — 列出會話列表\n" +
+			"/session search <關鍵詞> — 搜尋會話\n" +
+			"/session switch <序號|ID 前綴|名稱> — 切換會話\n" +
+			"/session delete <序號>|1,2,3|3-7|1,3-5,8 — 刪除會話\n" +
+			"/session rename [序號] <名稱> — 命名會話\n" +
+			"/session current — 查看當前會話\n" +
+			"/session history [n] — 查看最近 n 條訊息",
 		LangJapanese: "**セッション管理**\n" +
-			"/new [名前] — 新しいセッションを開始\n" +
-			"/list — セッション一覧\n" +
-			"/search <キーワード> — セッション検索\n" +
-			"/switch <番号> — セッション切り替え\n" +
-			"/delete <番号>|1,2,3|3-7|1,3-5,8 — セッション削除\n" +
-			"/name [番号] <名前> — セッションに名前を付ける\n" +
-			"/current — 現在のセッションを表示\n" +
-			"/history [n] — 直近 n 件のメッセージを表示",
+			"/session new [名前] — 新しいセッションを開始\n" +
+			"/session list [ページ] — セッション一覧\n" +
+			"/session search <キーワード> — セッション検索\n" +
+			"/session switch <番号|ID 接頭辞|名前> — セッション切り替え\n" +
+			"/session delete <番号>|1,2,3|3-7|1,3-5,8 — セッション削除\n" +
+			"/session rename [番号] <名前> — セッションに名前を付ける\n" +
+			"/session current — 現在のセッションを表示\n" +
+			"/session history [n] — 直近 n 件のメッセージを表示",
 		LangSpanish: "**Gestión de sesiones**\n" +
-			"/new [nombre] — Iniciar nueva sesión\n" +
-			"/list — Listar sesiones\n" +
-			"/search <keyword> — Buscar sesiones\n" +
-			"/switch <número> — Reanudar sesión\n" +
-			"/delete <número>|1,2,3|3-7|1,3-5,8 — Eliminar sesión(es)\n" +
-			"/name [número] <texto> — Nombrar sesión\n" +
-			"/current — Mostrar sesión activa\n" +
-			"/history [n] — Mostrar últimos n mensajes",
+			"/session new [nombre] — Iniciar nueva sesión\n" +
+			"/session list [página] — Listar sesiones\n" +
+			"/session search <keyword> — Buscar sesiones\n" +
+			"/session switch <número|prefijo_id|nombre> — Reanudar sesión\n" +
+			"/session delete <número>|1,2,3|3-7|1,3-5,8 — Eliminar sesión(es)\n" +
+			"/session rename [número] <texto> — Nombrar sesión\n" +
+			"/session current — Mostrar sesión activa\n" +
+			"/session history [n] — Mostrar últimos n mensajes",
+	},
+	MsgSessionCompatAliases: {
+		LangEnglish:            "Compatibility aliases: `/new`, `/list`, and `/switch` still work as aliases for `/session new`, `/session list`, and `/session switch`, and will be removed in the next major version.",
+		LangChinese:            "兼容别名：`/new`、`/list`、`/switch` 当前仍可分别作为 `/session new`、`/session list`、`/session switch` 的别名使用，并将在下一个大版本移除。",
+		LangTraditionalChinese: "相容別名：`/new`、`/list`、`/switch` 目前仍可分別作為 `/session new`、`/session list`、`/session switch` 的別名使用，並將在下一個大版本移除。",
+		LangJapanese:           "互換エイリアス `/new`、`/list`、`/switch` は、引き続き `/session new`、`/session list`、`/session switch` のエイリアスとして利用できますが、次のメジャーバージョンで削除予定です。",
+		LangSpanish:            "Los alias de compatibilidad `/new`, `/list` y `/switch` siguen funcionando como alias de `/session new`, `/session list` y `/session switch`, pero se eliminarán en la próxima versión mayor.",
 	},
 	MsgHelpAgentSection: {
 		LangEnglish: "**Agent Configuration**\n" +
@@ -1258,18 +1234,18 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "\n... y %d más\n",
 	},
 	MsgListPageHint: {
-		LangEnglish:            "\n\nPage %d/%d \n\n`/list <page>` for more\n",
-		LangChinese:            "\n\n第 %d/%d 页 \n\n`/list <页码>` 翻页\n",
-		LangTraditionalChinese: "\n\n第 %d/%d 頁 \n\n`/list <頁碼>` 翻頁\n",
-		LangJapanese:           "\n\n%d/%d ページ \n\n`/list <ページ>` で移動\n",
-		LangSpanish:            "\n\nPágina %d/%d \n\n`/list <página>` para más\n",
+		LangEnglish:            "\n\nPage %d/%d \n\n`/session list <page>` for more\n",
+		LangChinese:            "\n\n第 %d/%d 页 \n\n`/session list <页码>` 翻页\n",
+		LangTraditionalChinese: "\n\n第 %d/%d 頁 \n\n`/session list <頁碼>` 翻頁\n",
+		LangJapanese:           "\n\n%d/%d ページ \n\n`/session list <ページ>` で移動\n",
+		LangSpanish:            "\n\nPágina %d/%d \n\n`/session list <página>` para más\n",
 	},
 	MsgListSwitchHint: {
-		LangEnglish:            "\n`/switch <number>` to switch session",
-		LangChinese:            "\n`/switch <序号>` 切换会话",
-		LangTraditionalChinese: "\n`/switch <序號>` 切換會話",
-		LangJapanese:           "\n`/switch <番号>` でセッション切替",
-		LangSpanish:            "\n`/switch <número>` para cambiar sesión",
+		LangEnglish:            "\n`/session switch <number>` to switch session",
+		LangChinese:            "\n`/session switch <序号>` 切换会话",
+		LangTraditionalChinese: "\n`/session switch <序號>` 切換會話",
+		LangJapanese:           "\n`/session switch <番号>` でセッション切替",
+		LangSpanish:            "\n`/session switch <número>` para cambiar sesión",
 	},
 	MsgListError: {
 		LangEnglish:            "❌ Failed to list sessions: %v",
@@ -1286,11 +1262,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "No hay historial en la sesión actual.",
 	},
 	MsgNameUsage: {
-		LangEnglish:            "Usage:\n`/name <text>` — name the current session\n`/name <number> <text>` — name a session by list number",
-		LangChinese:            "用法：\n`/name <名称>` — 命名当前会话\n`/name <序号> <名称>` — 按列表序号命名会话",
-		LangTraditionalChinese: "用法：\n`/name <名稱>` — 命名當前會話\n`/name <序號> <名稱>` — 按列表序號命名會話",
-		LangJapanese:           "使い方：\n`/name <名前>` — 現在のセッションに名前を付ける\n`/name <番号> <名前>` — リスト番号でセッションに名前を付ける",
-		LangSpanish:            "Uso:\n`/name <texto>` — nombrar la sesión actual\n`/name <número> <texto>` — nombrar una sesión por número de lista",
+		LangEnglish:            "Usage:\n`/session rename <text>` — name the current session\n`/session rename <number> <text>` — name a session by list number",
+		LangChinese:            "用法：\n`/session rename <名称>` — 命名当前会话\n`/session rename <序号> <名称>` — 按列表序号命名会话",
+		LangTraditionalChinese: "用法：\n`/session rename <名稱>` — 命名當前會話\n`/session rename <序號> <名稱>` — 按列表序號命名會話",
+		LangJapanese:           "使い方：\n`/session rename <名前>` — 現在のセッションに名前を付ける\n`/session rename <番号> <名前>` — リスト番号でセッションに名前を付ける",
+		LangSpanish:            "Uso:\n`/session rename <texto>` — nombrar la sesión actual\n`/session rename <número> <texto>` — nombrar una sesión por número de lista",
 	},
 	MsgNameSet: {
 		LangEnglish:            "✅ Session named: **%s** (%s)",
@@ -1930,11 +1906,28 @@ var messages = map[MsgKey]map[Language]string{
 			"`/memory global add <texto>` — agregar a memoria global",
 	},
 	MsgCompressNotSupported: {
-		LangEnglish:            "This agent does not support context compression.",
-		LangChinese:            "当前 Agent 不支持上下文压缩。可以使用 `/new` 开始新会话。",
-		LangTraditionalChinese: "當前 Agent 不支援上下文壓縮。可以使用 `/new` 開始新會話。",
-		LangJapanese:           "このエージェントはコンテキスト圧縮をサポートしていません。`/new` で新しいセッションを開始できます。",
-		LangSpanish:            "Este agente no soporta la compresión de contexto. Puede usar `/new` para iniciar una nueva sesión.",
+		LangEnglish:            "This agent does not support context compression. Use `/session new` to start a fresh session.",
+		LangChinese:            "当前 Agent 不支持上下文压缩。可以使用 `/session new` 开始新会话。",
+		LangTraditionalChinese: "當前 Agent 不支援上下文壓縮。可以使用 `/session new` 開始新會話。",
+		LangJapanese:           "このエージェントはコンテキスト圧縮をサポートしていません。`/session new` で新しいセッションを開始できます。",
+		LangSpanish:            "Este agente no soporta la compresión de contexto. Puede usar `/session new` para iniciar una nueva sesión.",
+	},
+	MsgSwitchUsage: {
+		LangEnglish: "Usage:\n" +
+			"`/session switch <number | id_prefix | name>`\n" +
+			"Compatibility alias: `/switch <number | id_prefix | name>` (deprecated; removed next major version)",
+		LangChinese: "用法：\n" +
+			"`/session switch <序号 | ID 前缀 | 名称>`\n" +
+			"兼容别名：`/switch <序号 | ID 前缀 | 名称>`（已弃用，将在下一个大版本移除）",
+		LangTraditionalChinese: "用法：\n" +
+			"`/session switch <序號 | ID 前綴 | 名稱>`\n" +
+			"相容別名：`/switch <序號 | ID 前綴 | 名稱>`（已棄用，將在下一個大版本移除）",
+		LangJapanese: "使い方:\n" +
+			"`/session switch <番号 | ID 接頭辞 | 名前>`\n" +
+			"互換エイリアス: `/switch <番号 | ID 接頭辞 | 名前>`（非推奨。次のメジャーバージョンで削除予定）",
+		LangSpanish: "Uso:\n" +
+			"`/session switch <número | prefijo_id | nombre>`\n" +
+			"Alias de compatibilidad: `/switch <número | prefijo_id | nombre>` (obsoleto; se elimina en la próxima versión mayor)",
 	},
 	MsgCompressing: {
 		LangEnglish:            "🗜 Compressing context...",
@@ -2707,11 +2700,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "⏰ La sesión se reinició automáticamente tras %d minuto(s) de inactividad.",
 	},
 	MsgDeleteUsage: {
-		LangEnglish:            "Usage: `/delete <number>` or `/delete 1,2,3` or `/delete 3-7` or `/delete 1,3-5,8`.\nUse `/list` to see session numbers.",
-		LangChinese:            "用法：`/delete <序号>`，或 `/delete 1,2,3`，或 `/delete 3-7`，或 `/delete 1,3-5,8`。\n使用 `/list` 查看会话序号。",
-		LangTraditionalChinese: "用法：`/delete <序號>`，或 `/delete 1,2,3`，或 `/delete 3-7`，或 `/delete 1,3-5,8`。\n使用 `/list` 查看會話序號。",
-		LangJapanese:           "使い方：`/delete <番号>`、または `/delete 1,2,3`、または `/delete 3-7`、または `/delete 1,3-5,8`。\n`/list` で番号を確認できます。",
-		LangSpanish:            "Uso: `/delete <número>` o `/delete 1,2,3` o `/delete 3-7` o `/delete 1,3-5,8`.\nUse `/list` para ver los números.",
+		LangEnglish:            "Usage: `/session delete <number>` or `/session delete 1,2,3` or `/session delete 3-7` or `/session delete 1,3-5,8`.\nUse `/session list` to see session numbers.",
+		LangChinese:            "用法：`/session delete <序号>`，或 `/session delete 1,2,3`，或 `/session delete 3-7`，或 `/session delete 1,3-5,8`。\n使用 `/session list` 查看会话序号。",
+		LangTraditionalChinese: "用法：`/session delete <序號>`，或 `/session delete 1,2,3`，或 `/session delete 3-7`，或 `/session delete 1,3-5,8`。\n使用 `/session list` 查看會話序號。",
+		LangJapanese:           "使い方：`/session delete <番号>`、または `/session delete 1,2,3`、または `/session delete 3-7`、または `/session delete 1,3-5,8`。\n`/session list` で番号を確認できます。",
+		LangSpanish:            "Uso: `/session delete <número>` o `/session delete 1,2,3` o `/session delete 3-7` o `/session delete 1,3-5,8`.\nUse `/session list` para ver los números.",
 	},
 	MsgDeleteSuccess: {
 		LangEnglish:            "🗑️ Session deleted: %s",
@@ -3047,11 +3040,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "🔍 Se encontraron %d sesiones que coinciden con %q:",
 	},
 	MsgSearchHint: {
-		LangEnglish:            "Use /switch <id> to switch to a session.",
-		LangChinese:            "使用 /switch <id> 切换到对应会话。",
-		LangTraditionalChinese: "使用 /switch <id> 切換到對應會話。",
-		LangJapanese:           "/switch <id> でセッションを切り替え。",
-		LangSpanish:            "Usa /switch <id> para cambiar a una sesión.",
+		LangEnglish:            "Use /session switch <id> to switch to a session.",
+		LangChinese:            "使用 /session switch <id> 切换到对应会话。",
+		LangTraditionalChinese: "使用 /session switch <id> 切換到對應會話。",
+		LangJapanese:           "/session switch <id> でセッションを切り替え。",
+		LangSpanish:            "Usa /session switch <id> para cambiar a una sesión.",
 	},
 	// Builtin command descriptions
 	MsgBuiltinCmdNew: {

@@ -9,13 +9,16 @@ import (
 )
 
 // Exercises real Cursor CLI "agent acp" when installed (~/.local/bin/agent).
-// Requires prior `agent login` (or CURSOR_API_KEY / CURSOR_AUTH_TOKEN). Skips if binary missing.
+// Requires explicit opt-in plus prior `agent login` (or CURSOR_API_KEY / CURSOR_AUTH_TOKEN).
 func TestCursorCLI_ACPHandshake(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short mode")
 	}
 	if os.Getenv("CI") != "" {
 		t.Skip("skipping real Cursor CLI ACP handshake in CI (requires local agent and login)")
+	}
+	if os.Getenv("CC_CONNECT_RUN_ACP_INTEGRATION") == "" {
+		t.Skip("set CC_CONNECT_RUN_ACP_INTEGRATION=1 to run real Cursor CLI ACP integration tests")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
