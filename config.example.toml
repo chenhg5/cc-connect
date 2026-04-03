@@ -380,6 +380,7 @@ level = "info" # debug, info, warn, error
 # proxy = "http://127.0.0.1:7890"  # Optional HTTP/SOCKS5 proxy for Telegram Bot API / 可选 HTTP/SOCKS5 代理
 # proxy_username = ""              # Optional proxy auth username / 代理用户名
 # proxy_password = ""              # Optional proxy auth password / 代理密码
+# enable_reactions = false  # If true, add ⚡ reaction to incoming messages / 设为 true 收到消息时添加 ⚡ 表情
 
 # Slack (uncomment to enable / 取消注释以启用)
 # 1. Create an app at https://api.slack.com/apps / 创建应用
