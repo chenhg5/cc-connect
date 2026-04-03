@@ -59,7 +59,14 @@ func (p *Platform) uploadToWeixinCDN(ctx context.Context, to string, plaintext [
 	if err != nil {
 		return nil, fmt.Errorf("weixin: %s: %w", label, err)
 	}
-	dl, err := uploadBufferToCDN(ctx, p.httpClient, p.cdnBaseURL, resp.UploadParam, filekey, plaintext, aesKey, label)
+	// 优先使用 upload_full_url（已含完整 CDN 地址 + filekey + taskid）
+	var cdnUploadURL string
+	if resp.UploadFullURL != "" {
+		cdnUploadURL = resp.UploadFullURL
+	} else {
+		cdnUploadURL = buildCdnUploadURL(p.cdnBaseURL, resp.UploadParam, filekey)
+	}
+	dl, err := uploadBufferToCDNDirect(ctx, p.cdnHttpClient, cdnUploadURL, plaintext, aesKey, label)
 	if err != nil {
 		return nil, err
 	}
@@ -104,7 +111,7 @@ func (p *Platform) SendImage(ctx context.Context, replyCtx any, img core.ImageAt
 		ImageItem: &imageItem{
 			Media: &cdnMedia{
 				EncryptQueryParam: ref.downloadParam,
-				AESKey:            base64.StdEncoding.EncodeToString(ref.aesKey),
+				AESKey:            base64.StdEncoding.EncodeToString([]byte(hex.EncodeToString(ref.aesKey))),
 				EncryptType:       1,
 			},
 			MidSize: ref.cipherSize,
@@ -135,7 +142,7 @@ func (p *Platform) SendFile(ctx context.Context, replyCtx any, file core.FileAtt
 		FileItem: &fileItem{
 			Media: &cdnMedia{
 				EncryptQueryParam: ref.downloadParam,
-				AESKey:            base64.StdEncoding.EncodeToString(ref.aesKey),
+				AESKey:            base64.StdEncoding.EncodeToString([]byte(hex.EncodeToString(ref.aesKey))),
 				EncryptType:       1,
 			},
 			FileName: name,
