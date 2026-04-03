@@ -41,6 +41,7 @@ type Platform struct {
 	channelNameCache      map[string]string
 	channelCacheMu        sync.RWMutex
 	userNameCache         sync.Map // userID -> display name
+	dedup                 core.MessageDedup
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -127,6 +128,11 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					}
 				}
 
+				if p.dedup.IsDuplicate(ev.TimeStamp) {
+					slog.Debug("slack: ignoring duplicate app_mention", "ts", ev.TimeStamp)
+					return
+				}
+
 				slog.Debug("slack: app_mention received", "user", ev.User, "channel", ev.Channel)
 
 				if !core.AllowList(p.allowFrom, ev.User) {
@@ -177,6 +183,11 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 							}
 						}
 					}
+				}
+
+				if p.dedup.IsDuplicate(ev.TimeStamp) {
+					slog.Debug("slack: ignoring duplicate message", "ts", ev.TimeStamp)
+					return
 				}
 
 				slog.Debug("slack: message received", "user", ev.User, "channel", ev.Channel)
