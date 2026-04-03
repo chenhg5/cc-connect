@@ -47,6 +47,8 @@ Each user gets an independent session with full conversation context. Manage ses
 | `/stop` | Stop current execution |
 | `/help` | Show available commands |
 
+Compatibility aliases `/new`, `/list`, and `/switch` still map to `/session new`, `/session list`, and `/session switch` in this release, and will be removed in the next major version.
+
 During a session, the agent may request tool permissions. Reply **allow** / **deny** / **allow all**.
 
 You can also configure automatic session rotation after inactivity:

@@ -47,6 +47,8 @@ cc-connect 完整功能使用指南。
 | `/stop` | 停止当前执行 |
 | `/help` | 显示可用命令 |
 
+兼容别名 `/new`、`/list`、`/switch` 在当前版本仍分别映射到 `/session new`、`/session list`、`/session switch`，并计划在下一个大版本移除。
+
 会话中 Agent 请求工具权限时，回复 **允许** / **拒绝** / **允许所有**。
 
 也可以为项目开启“空闲后自动切换新会话”：

@@ -277,6 +277,8 @@ cc-connect update --pre     # Beta 版（含 pre-release）
 /dir [路径|reset]            查看、切换或重置工作目录
 ```
 
+兼容别名 `/new`、`/list`、`/switch` 在当前版本仍可使用，计划在下一个大版本移除。
+
 项目配置也可以开启“长时间空闲后自动切到新会话”：
 
 ```toml

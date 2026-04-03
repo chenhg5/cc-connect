@@ -162,6 +162,7 @@ const (
 	MsgHelp                      MsgKey = "message_help" // change from "help", which is used now for builtin command help
 	MsgHelpTitle                 MsgKey = "help_title"
 	MsgHelpSessionSection        MsgKey = "help_session_section"
+	MsgSessionCompatAliases      MsgKey = "session_compat_aliases"
 	MsgHelpAgentSection          MsgKey = "help_agent_section"
 	MsgHelpToolsSection          MsgKey = "help_tools_section"
 	MsgHelpSystemSection         MsgKey = "help_system_section"
@@ -250,6 +251,7 @@ const (
 	MsgReasoningNotSupported MsgKey = "reasoning_not_supported"
 
 	MsgCompressNotSupported MsgKey = "compress_not_supported"
+	MsgSwitchUsage          MsgKey = "switch_usage"
 	MsgCompressing          MsgKey = "compressing"
 	MsgCompressNoSession    MsgKey = "compress_no_session"
 	MsgCompressDone         MsgKey = "compress_done"
@@ -1052,6 +1054,13 @@ var messages = map[MsgKey]map[Language]string{
 			"/session rename [número] <texto> — Nombrar sesión\n" +
 			"/session current — Mostrar sesión activa\n" +
 			"/session history [n] — Mostrar últimos n mensajes",
+	},
+	MsgSessionCompatAliases: {
+		LangEnglish:            "Compatibility aliases: `/new`, `/list`, and `/switch` still work as aliases for `/session new`, `/session list`, and `/session switch`, and will be removed in the next major version.",
+		LangChinese:            "兼容别名：`/new`、`/list`、`/switch` 当前仍可分别作为 `/session new`、`/session list`、`/session switch` 的别名使用，并将在下一个大版本移除。",
+		LangTraditionalChinese: "相容別名：`/new`、`/list`、`/switch` 目前仍可分別作為 `/session new`、`/session list`、`/session switch` 的別名使用，並將在下一個大版本移除。",
+		LangJapanese:           "互換エイリアス `/new`、`/list`、`/switch` は、引き続き `/session new`、`/session list`、`/session switch` のエイリアスとして利用できますが、次のメジャーバージョンで削除予定です。",
+		LangSpanish:            "Los alias de compatibilidad `/new`, `/list` y `/switch` siguen funcionando como alias de `/session new`, `/session list` y `/session switch`, pero se eliminarán en la próxima versión mayor.",
 	},
 	MsgHelpAgentSection: {
 		LangEnglish: "**Agent Configuration**\n" +
@@ -1897,11 +1906,28 @@ var messages = map[MsgKey]map[Language]string{
 			"`/memory global add <texto>` — agregar a memoria global",
 	},
 	MsgCompressNotSupported: {
-		LangEnglish:            "This agent does not support context compression.",
-		LangChinese:            "当前 Agent 不支持上下文压缩。可以使用 `/new` 开始新会话。",
-		LangTraditionalChinese: "當前 Agent 不支援上下文壓縮。可以使用 `/new` 開始新會話。",
-		LangJapanese:           "このエージェントはコンテキスト圧縮をサポートしていません。`/new` で新しいセッションを開始できます。",
-		LangSpanish:            "Este agente no soporta la compresión de contexto. Puede usar `/new` para iniciar una nueva sesión.",
+		LangEnglish:            "This agent does not support context compression. Use `/session new` to start a fresh session.",
+		LangChinese:            "当前 Agent 不支持上下文压缩。可以使用 `/session new` 开始新会话。",
+		LangTraditionalChinese: "當前 Agent 不支援上下文壓縮。可以使用 `/session new` 開始新會話。",
+		LangJapanese:           "このエージェントはコンテキスト圧縮をサポートしていません。`/session new` で新しいセッションを開始できます。",
+		LangSpanish:            "Este agente no soporta la compresión de contexto. Puede usar `/session new` para iniciar una nueva sesión.",
+	},
+	MsgSwitchUsage: {
+		LangEnglish: "Usage:\n" +
+			"`/session switch <number | id_prefix | name>`\n" +
+			"Compatibility alias: `/switch <number | id_prefix | name>` (deprecated; removed next major version)",
+		LangChinese: "用法：\n" +
+			"`/session switch <序号 | ID 前缀 | 名称>`\n" +
+			"兼容别名：`/switch <序号 | ID 前缀 | 名称>`（已弃用，将在下一个大版本移除）",
+		LangTraditionalChinese: "用法：\n" +
+			"`/session switch <序號 | ID 前綴 | 名稱>`\n" +
+			"相容別名：`/switch <序號 | ID 前綴 | 名稱>`（已棄用，將在下一個大版本移除）",
+		LangJapanese: "使い方:\n" +
+			"`/session switch <番号 | ID 接頭辞 | 名前>`\n" +
+			"互換エイリアス: `/switch <番号 | ID 接頭辞 | 名前>`（非推奨。次のメジャーバージョンで削除予定）",
+		LangSpanish: "Uso:\n" +
+			"`/session switch <número | prefijo_id | nombre>`\n" +
+			"Alias de compatibilidad: `/switch <número | prefijo_id | nombre>` (obsoleto; se elimina en la próxima versión mayor)",
 	},
 	MsgCompressing: {
 		LangEnglish:            "🗜 Compressing context...",

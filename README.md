@@ -277,6 +277,8 @@ cc-connect update --pre     # Beta (includes pre-releases)
 /dir [path|reset]         Show, switch, or reset work directory
 ```
 
+Compatibility aliases `/new`, `/list`, and `/switch` remain available in this release and are planned for removal in the next major version.
+
 Project configs can also rotate to a fresh session automatically after long inactivity:
 
 ```toml

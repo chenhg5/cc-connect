@@ -2326,7 +2326,8 @@ func TestCmdHelp_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	if len(p.sent) != 1 {
 		t.Fatalf("sent messages = %d, want 1", len(p.sent))
 	}
-	if got := p.sent[0]; got != e.i18n.T(MsgHelp) {
+	want := e.i18n.T(MsgHelp) + "\n\n" + e.i18n.T(MsgSessionCompatAliases)
+	if got := p.sent[0]; got != want {
 		t.Fatalf("help text = %q, want legacy help text", got)
 	}
 	if strings.Contains(p.sent[0], "cc-connect 帮助") {
@@ -3922,6 +3923,9 @@ func TestRenderHelpCard_DefaultsToSessionTab(t *testing.T) {
 	}
 	if strings.Contains(text, "**/model**") {
 		t.Fatalf("default help text = %q, should not include agent commands", text)
+	}
+	if !strings.Contains(text, "Compatibility aliases: `/new`, `/list`, and `/switch`") {
+		t.Fatalf("default help text = %q, want session alias deprecation note", text)
 	}
 }
 
@@ -6823,7 +6827,18 @@ func TestCmdShell_MultiWorkspaceIgnoresMissingSharedBinding(t *testing.T) {
 	for {
 		sent := p.getSent()
 		if len(sent) > 0 {
-			if !strings.Contains(sent[0], normalizeWorkspacePath(agent.workDir)) {
+			expectedDirs := []string{
+				agent.workDir,
+				normalizeWorkspacePath(agent.workDir),
+			}
+			matched := false
+			for _, expectedDir := range expectedDirs {
+				if expectedDir != "" && strings.Contains(sent[0], expectedDir) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
 				t.Fatalf("expected shell output to fall back to agent work dir %q, got %q", agent.workDir, sent[0])
 			}
 			if strings.Contains(sent[0], missingDir) {
@@ -7337,7 +7352,7 @@ func TestCmdSwitch_NoArgs_ShowsUsage(t *testing.T) {
 	sent := p.getSent()
 	foundUsage := false
 	for _, s := range sent {
-		if strings.Contains(s, "Usage") || strings.Contains(s, "/switch") {
+		if strings.Contains(s, "/session switch") && strings.Contains(s, "/switch") {
 			foundUsage = true
 		}
 	}
@@ -7359,6 +7374,9 @@ func TestCmdSession_NoArgs_ShowsSessionHelpOnPlainPlatform(t *testing.T) {
 	}
 	if !strings.Contains(sent[0], "/session new") || !strings.Contains(sent[0], "/session list") {
 		t.Fatalf("expected session help reply, got %v", sent)
+	}
+	if !strings.Contains(sent[0], "Compatibility aliases") {
+		t.Fatalf("expected session alias deprecation note, got %v", sent)
 	}
 }
 

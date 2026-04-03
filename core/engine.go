@@ -3021,11 +3021,11 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 	case "session":
 		e.cmdSession(p, msg, args)
 	case "new":
-		e.cmdNew(p, msg, args)
+		e.cmdSession(p, msg, append([]string{"new"}, args...))
 	case "list":
-		e.cmdList(p, msg, args)
+		e.cmdSession(p, msg, append([]string{"list"}, args...))
 	case "switch":
-		e.cmdSwitch(p, msg, args)
+		e.cmdSession(p, msg, append([]string{"switch"}, args...))
 	case "name":
 		e.cmdName(p, msg, args)
 	case "current":
@@ -3390,7 +3390,7 @@ func (e *Engine) cmdSession(p Platform, msg *Message, args []string) {
 			e.replyWithCard(p, msg.ReplyCtx, e.renderHelpGroupCard(defaultHelpGroup))
 			return
 		}
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHelpSessionSection))
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHelpSessionSection)+"\n\n"+e.i18n.T(MsgSessionCompatAliases))
 		return
 	}
 
@@ -3521,7 +3521,7 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 
 func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	if len(args) == 0 {
-		e.reply(p, msg.ReplyCtx, "Usage: /switch <number | id_prefix | name>")
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSwitchUsage))
 		return
 	}
 	query := strings.TrimSpace(strings.Join(args, " "))
@@ -4697,7 +4697,7 @@ func langDisplayName(lang Language) string {
 
 func (e *Engine) cmdHelp(p Platform, msg *Message) {
 	if !supportsCards(p) {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHelp))
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHelp)+"\n\n"+e.i18n.T(MsgSessionCompatAliases))
 		return
 	}
 	e.replyWithCard(p, msg.ReplyCtx, e.renderHelpCard())
@@ -4847,6 +4847,9 @@ func (e *Engine) renderHelpGroupCard(groupKey string) *Card {
 	}
 	for _, item := range current.items {
 		cb.ListItem(commandText(item.command), "▶", item.action)
+	}
+	if current.key == "session" {
+		cb.Note(e.i18n.T(MsgSessionCompatAliases))
 	}
 	cb.Note(e.i18n.T(MsgHelpTip))
 	return cb.Build()
