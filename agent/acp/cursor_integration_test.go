@@ -29,7 +29,7 @@ func TestCursorCLI_ACPHandshake(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	s, err := newACPSession(ctx, agentBin, []string{"acp"}, nil, t.TempDir(), "", "cursor_login")
+	s, err := newACPSession(ctx, agentBin, []string{"acp"}, nil, t.TempDir(), "", "cursor_login", defaultAuthTimeout)
 	if err != nil {
 		t.Fatalf("handshake failed (is `agent login` done?): %v", err)
 	}

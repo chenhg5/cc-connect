@@ -1184,6 +1184,7 @@ app_secret = "your-feishu-app-secret"
 # command = "agent"
 # args = ["acp"]
 # auth_method = "cursor_login"
+# auth_timeout = "2m"              # max wait for device-login (default: 2m)
 # display_name = "Cursor ACP"
 
 # --- Example: OpenClaw (Gateway-backed ACP bridge) ---

@@ -8,9 +8,15 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
+
+// defaultAuthTimeout is the maximum time to wait for the authenticate RPC to
+// complete. Device-login flows (e.g. cursor_login) block until the user
+// approves in a browser; without a timeout the session hangs indefinitely.
+const defaultAuthTimeout = 2 * time.Minute
 
 func init() {
 	core.RegisterAgent("acp", New)
@@ -23,14 +29,15 @@ type Agent struct {
 	args        []string
 	extraEnv    []string
 	sessionEnv  []string
-	authMethod  string // optional, e.g. "cursor_login" for Cursor CLI (see authenticate RPC)
-	displayName string // optional, for doctor (default "ACP")
+	authMethod  string        // optional, e.g. "cursor_login" for Cursor CLI (see authenticate RPC)
+	authTimeout time.Duration // max wait for authenticate RPC; 0 = no extra timeout (use session ctx)
+	displayName string        // optional, for doctor (default "ACP")
 	mu          sync.RWMutex
 }
 
 // New builds an acp agent from project options.
 // Required: options["command"] — executable name or path for the ACP agent.
-// Optional: options["args"], options["env"], options["auth_method"], options["display_name"].
+// Optional: options["args"], options["env"], options["auth_method"], options["auth_timeout"], options["display_name"].
 func New(opts map[string]any) (core.Agent, error) {
 	workDir, _ := opts["work_dir"].(string)
 	if workDir == "" {
@@ -49,6 +56,17 @@ func New(opts map[string]any) (core.Agent, error) {
 	extra := envPairsFromOpts(opts)
 	authMethod, _ := opts["auth_method"].(string)
 	authMethod = strings.TrimSpace(authMethod)
+	authTimeout := defaultAuthTimeout
+	if v, ok := opts["auth_timeout"].(string); ok && v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return nil, fmt.Errorf("acp: invalid auth_timeout %q: %w", v, err)
+		}
+		if d < 0 {
+			return nil, fmt.Errorf("acp: auth_timeout must not be negative: %s", v)
+		}
+		authTimeout = d // 0 = no extra timeout (use session context)
+	}
 	displayName, _ := opts["display_name"].(string)
 	displayName = strings.TrimSpace(displayName)
 	if displayName == "" {
@@ -61,6 +79,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		args:        args,
 		extraEnv:    extra,
 		authMethod:  authMethod,
+		authTimeout: authTimeout,
 		displayName: displayName,
 	}, nil
 }
@@ -137,11 +156,12 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	args := a.args
 	workDir := a.workDir
 	authMethod := a.authMethod
+	authTimeout := a.authTimeout
 	extra := append([]string(nil), a.extraEnv...)
 	extra = append(extra, a.sessionEnv...)
 	a.mu.RUnlock()
 
-	return newACPSession(ctx, command, args, extra, workDir, sessionID, authMethod)
+	return newACPSession(ctx, command, args, extra, workDir, sessionID, authMethod, authTimeout)
 }
 
 func (a *Agent) ListSessions(context.Context) ([]core.AgentSessionInfo, error) {

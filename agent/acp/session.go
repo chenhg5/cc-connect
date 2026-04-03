@@ -19,12 +19,13 @@ import (
 )
 
 type acpSession struct {
-	workDir string
-	events  chan core.Event
-	ctx     context.Context
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
-	alive   atomic.Bool
+	workDir     string
+	authTimeout time.Duration
+	events      chan core.Event
+	ctx         context.Context
+	cancel      context.CancelFunc
+	wg          sync.WaitGroup
+	alive       atomic.Bool
 
 	cmd *exec.Cmd
 	tr  *transport
@@ -51,6 +52,7 @@ func newACPSession(
 	workDir string,
 	resumeSessionID string,
 	authMethod string,
+	authTimeout time.Duration,
 ) (*acpSession, error) {
 	absWorkDir, err := filepath.Abs(workDir)
 	if err != nil {
@@ -59,12 +61,13 @@ func newACPSession(
 
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &acpSession{
-		workDir:   absWorkDir,
-		events:    make(chan core.Event, 128),
-		ctx:       sessionCtx,
-		cancel:    cancel,
-		permByID:  make(map[string]permState),
-		acpSessID: resumeSessionID,
+		workDir:     absWorkDir,
+		authTimeout: authTimeout,
+		events:      make(chan core.Event, 128),
+		ctx:         sessionCtx,
+		cancel:      cancel,
+		permByID:    make(map[string]permState),
+		acpSessID:   resumeSessionID,
 	}
 	s.alive.Store(true)
 
@@ -150,12 +153,24 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 	slog.Debug("acp: initialized", "protocol", initOut.ProtocolVersion, "load_session", initOut.AgentCapabilities.LoadSession)
 
 	if strings.TrimSpace(authMethod) != "" {
-		if _, err := s.tr.call(s.ctx, "authenticate", map[string]any{
+		authCtx := s.ctx
+		if s.authTimeout > 0 {
+			var authCancel context.CancelFunc
+			authCtx, authCancel = context.WithTimeout(s.ctx, s.authTimeout)
+			defer authCancel()
+		}
+		slog.Info("acp: authenticating", "method_id", authMethod, "timeout", s.authTimeout)
+		if _, err := s.tr.call(authCtx, "authenticate", map[string]any{
 			"methodId": authMethod,
 		}); err != nil {
+			if authCtx.Err() == context.DeadlineExceeded {
+				return fmt.Errorf("acp: authenticate (%s) timed out after %s — "+
+					"the device-login flow did not complete in time; "+
+					"please authenticate manually and retry", authMethod, s.authTimeout)
+			}
 			return fmt.Errorf("acp: authenticate (%s): %w", authMethod, err)
 		}
-		slog.Debug("acp: authenticated", "method_id", authMethod)
+		slog.Info("acp: authenticated", "method_id", authMethod)
 	}
 
 	wantResume := resumeSessionID != "" && resumeSessionID != core.ContinueSession
