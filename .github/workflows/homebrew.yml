@@ -1,0 +1,113 @@
+name: Update Homebrew Formula
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  update-formula:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          mkdir -p /tmp/assets
+
+          # Download all release assets
+          gh release download "$VERSION" \
+            --repo chenhg5/cc-connect \
+            --dir /tmp/assets
+
+      - name: Calculate SHA256 checksums
+        id: checksums
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          cd /tmp/assets
+
+          # Calculate SHA256 for each platform
+          DARWIN_AMD64=$(sha256sum "cc-connect-${VERSION}-darwin-amd64.tar.gz" | cut -d' ' -f1)
+          DARWIN_ARM64=$(sha256sum "cc-connect-${VERSION}-darwin-arm64.tar.gz" | cut -d' ' -f1)
+          LINUX_AMD64=$(sha256sum "cc-connect-${VERSION}-linux-amd64.tar.gz" | cut -d' ' -f1)
+          LINUX_ARM64=$(sha256sum "cc-connect-${VERSION}-linux-arm64.tar.gz" | cut -d' ' -f1)
+
+          echo "darwin_amd64=$DARWIN_AMD64" >> $GITHUB_OUTPUT
+          echo "darwin_arm64=$DARWIN_ARM64" >> $GITHUB_OUTPUT
+          echo "linux_amd64=$LINUX_AMD64" >> $GITHUB_OUTPUT
+          echo "linux_arm64=$LINUX_ARM64" >> $GITHUB_OUTPUT
+
+      - name: Update Homebrew formula
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          FORMULA="homebrew/cc-connect.rb"
+
+          # Update version
+          sed -i "s/version \".*\"/version \"${VERSION}\"/" "$FORMULA"
+
+          # Update SHA256 checksums
+          sed -i "s/PLACEHOLDER_DARWIN_AMD64_SHA256/${{ steps.checksums.outputs.darwin_amd64 }}/" "$FORMULA"
+          sed -i "s/PLACEHOLDER_DARWIN_ARM64_SHA256/${{ steps.checksums.outputs.darwin_arm64 }}/" "$FORMULA"
+          sed -i "s/PLACEHOLDER_LINUX_AMD64_SHA256/${{ steps.checksums.outputs.linux_amd64 }}/" "$FORMULA"
+          sed -i "s/PLACEHOLDER_LINUX_ARM64_SHA256/${{ steps.checksums.outputs.linux_arm64 }}/" "$FORMULA"
+
+          cat "$FORMULA"
+
+      - name: Commit and push to homebrew tap
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Check if there are changes
+          if git diff --exit-code homebrew/cc-connect.rb; then
+            echo "No changes to commit"
+            exit 0
+          fi
+
+          git add homebrew/cc-connect.rb
+          git commit -m "chore: update Homebrew formula to ${VERSION}"
+          git push origin HEAD:main
+
+      - name: Create Pull Request to homebrew-tap
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+
+          # Check if homebrew-tap repo exists
+          if ! gh repo view chenhg5/homebrew-cc-connect 2>/dev/null; then
+            echo "Homebrew tap repo not found. Please create chenhg5/homebrew-cc-connect first."
+            exit 0
+          fi
+
+          # Clone the tap repo
+          git clone https://x-access-token:${{ secrets.HOMEBREW_TAP_TOKEN }}@github.com/chenhg5/homebrew-cc-connect.git /tmp/tap
+          cd /tmp/tap
+
+          # Copy the updated formula
+          cp "$GITHUB_WORKSPACE/homebrew/cc-connect.rb" .
+
+          # Commit and push
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if git diff --exit-code cc-connect.rb; then
+            echo "No changes to commit"
+            exit 0
+          fi
+
+          git add cc-connect.rb
+          git commit -m "chore: update formula to ${VERSION}"
+          git push origin main
+
+          echo "Formula updated in homebrew tap!"

@@ -153,6 +153,19 @@ Follow https://raw.githubusercontent.com/chenhg5/cc-connect/refs/heads/main/INST
 
 ### 📦 Manual Install
 
+**Via Homebrew (macOS):**
+
+```bash
+# Add the tap
+brew tap chenhg5/cc-connect
+
+# Install cc-connect
+brew install cc-connect
+
+# Start as a background service (optional)
+brew services start cc-connect
+```
+
 **Via npm:**
 
 ```bash

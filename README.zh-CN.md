@@ -153,6 +153,19 @@
 
 ### 📦 手动安装
 
+**通过 Homebrew（macOS）：**
+
+```bash
+# 添加 tap
+brew tap chenhg5/cc-connect
+
+# 安装 cc-connect
+brew install cc-connect
+
+# 作为后台服务运行（可选）
+brew services start cc-connect
+```
+
 **通过 npm：**
 
 ```bash
