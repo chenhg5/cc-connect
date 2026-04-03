@@ -32,6 +32,7 @@ type Agent struct {
 	model           string
 	reasoningEffort string
 	mode            string // "suggest" | "auto-edit" | "full-auto" | "yolo"
+	extraEnv        []string
 	providers       []core.ProviderConfig
 	activeIdx       int // -1 = no provider set
 	sessionEnv      []string
@@ -47,6 +48,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	reasoningEffort, _ := opts["reasoning_effort"].(string)
 	mode, _ := opts["mode"].(string)
 	mode = normalizeMode(mode)
+	extraEnv := envPairsFromOpts(opts)
 
 	if _, err := exec.LookPath("codex"); err != nil {
 		return nil, fmt.Errorf("codex: 'codex' CLI not found in PATH, install with: npm install -g @openai/codex")
@@ -57,8 +59,32 @@ func New(opts map[string]any) (core.Agent, error) {
 		model:           model,
 		reasoningEffort: normalizeReasoningEffort(reasoningEffort),
 		mode:            mode,
+		extraEnv:        extraEnv,
 		activeIdx:       -1,
 	}, nil
+}
+
+func envPairsFromOpts(opts map[string]any) []string {
+	raw, ok := opts["env"]
+	if !ok || raw == nil {
+		return nil
+	}
+	switch m := raw.(type) {
+	case map[string]string:
+		var out []string
+		for k, v := range m {
+			out = append(out, k+"="+v)
+		}
+		return out
+	case map[string]any:
+		var out []string
+		for k, v := range m {
+			out = append(out, fmt.Sprintf("%s=%v", k, v))
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 func normalizeMode(raw string) string {
@@ -294,7 +320,8 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	mode := a.mode
 	model := a.model
 	reasoningEffort := a.reasoningEffort
-	extraEnv := a.providerEnvLocked()
+	extraEnv := append([]string(nil), a.extraEnv...)
+	extraEnv = append(extraEnv, a.providerEnvLocked()...)
 	extraEnv = append(extraEnv, a.sessionEnv...)
 	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
 		if m := a.providers[a.activeIdx].Model; m != "" {
@@ -338,7 +365,7 @@ func (a *Agent) GetMode() string {
 	return a.mode
 }
 
-// ── SkillProvider implementation ──────────────────────────────
+// ── SkillProvider implementation ─────────────────────────────
 
 func (a *Agent) SkillDirs() []string {
 	absDir, err := filepath.Abs(a.workDir)
