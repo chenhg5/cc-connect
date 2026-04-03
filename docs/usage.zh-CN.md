@@ -258,10 +258,23 @@ alias = "spark"
 
 ### 行为说明
 
+- `/dir` 属于特权命令，使用前需要在 `config.toml` 的 `[[projects]]` 下设置 `admin_from`。
+- 不要把 `admin_from` 写到 `[projects.platforms.options]` 里，否则会被忽略。
+- 可先发送 `/whoami` 或 `/status` 获取当前 `User ID`，再把这个 ID 填到 `admin_from`。
+- 如果是个人单人使用，也可以设置 `admin_from = "*"`，但这会让所有已允许用户都拥有特权命令权限。
+- 修改 `config.toml` 后，需要重启 `cc-connect`。
 - 目录切换会作用于当前项目的下一次会话。
 - 相对路径基于当前 Agent 工作目录解析。
 - 目录历史按项目隔离，可通过序号快速切换。
 - `/cd` 为兼容保留，建议优先使用 `/dir`。
+
+配置示例：
+
+```toml
+[[projects]]
+name = "my-project"
+admin_from = "ou_xxx"
+```
 
 示例：
 
