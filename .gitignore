@@ -49,6 +49,9 @@ config.*.toml
 # CC-Connect runtime state
 .cc-connect/
 
+# Local git worktrees
+.worktrees/
+
 # npm / pnpm (for npm package distribution and web admin)
 .npmrc
 package-lock.json
