@@ -15,27 +15,27 @@ import (
 )
 
 const (
-	wsEndpoint     = "wss://openws.work.weixin.qq.com"
-	wsPingInterval = 30 * time.Second
-	wsMaxBackoff   = 30 * time.Second
+	wsEndpoint      = "wss://openws.work.weixin.qq.com"
+	wsPingInterval  = 30 * time.Second
+	wsMaxBackoff    = 30 * time.Second
 	wsMaxMissedPong = 2
 )
 
 // WSPlatform implements core.Platform using the WeChat Work WebSocket long-connection
 // mode (智能机器人长连接). No public URL, no message encryption, no IP allowlist required.
 type WSPlatform struct {
-	botID     string
-	secret    string
-	allowFrom string
-	conn      *websocket.Conn
-	handler   core.MessageHandler
-	ctx       context.Context
-	cancel    context.CancelFunc
-	mu        sync.Mutex // protects conn writes
-	dedup     core.MessageDedup
-	reqSeq    atomic.Int64 // monotonic counter for generating unique req_id
-	missedPong atomic.Int32 // consecutive heartbeat acks not received
-	pendingAcks sync.Map   // req_id -> chan error, for sequential send with ack waiting
+	botID       string
+	secret      string
+	allowFrom   string
+	conn        *websocket.Conn
+	handler     core.MessageHandler
+	ctx         context.Context
+	cancel      context.CancelFunc
+	mu          sync.Mutex // protects conn writes
+	dedup       core.MessageDedup
+	reqSeq      atomic.Int64 // monotonic counter for generating unique req_id
+	missedPong  atomic.Int32 // consecutive heartbeat acks not received
+	pendingAcks sync.Map     // req_id -> chan error, for sequential send with ack waiting
 }
 
 const wsAckTimeout = 5 * time.Second
@@ -54,11 +54,11 @@ type wsReplyContext struct {
 // Format: { cmd, headers: { req_id }, body: {...} }
 // Response frames may omit cmd and include errcode/errmsg instead.
 type wsFrame struct {
-	Cmd     string            `json:"cmd,omitempty"`
-	Headers wsFrameHeaders    `json:"headers"`
-	Body    json.RawMessage   `json:"body,omitempty"`
-	ErrCode *int              `json:"errcode,omitempty"`
-	ErrMsg  string            `json:"errmsg,omitempty"`
+	Cmd     string          `json:"cmd,omitempty"`
+	Headers wsFrameHeaders  `json:"headers"`
+	Body    json.RawMessage `json:"body,omitempty"`
+	ErrCode *int            `json:"errcode,omitempty"`
+	ErrMsg  string          `json:"errmsg,omitempty"`
 }
 
 type wsFrameHeaders struct {
@@ -78,10 +78,32 @@ type wsMsgCallbackBody struct {
 	Text    struct {
 		Content string `json:"content"`
 	} `json:"text"`
+	// Voice: official field is content; some payloads used text — accept both.
 	Voice struct {
-		Text string `json:"text"` // server-side transcribed text
+		Text    string `json:"text,omitempty"`
+		Content string `json:"content,omitempty"`
 	} `json:"voice"`
-	CreateTime int64 `json:"create_time"`
+	Image *struct {
+		URL    string `json:"url"`
+		Aeskey string `json:"aeskey"`
+	} `json:"image,omitempty"`
+	File *struct {
+		URL    string `json:"url"`
+		Aeskey string `json:"aeskey"`
+	} `json:"file,omitempty"`
+	Mixed      *wsMixedBlock `json:"mixed,omitempty"`
+	Quote      *wsQuoteBlock `json:"quote,omitempty"`
+	CreateTime int64         `json:"create_time"`
+}
+
+func wsVoiceText(v struct {
+	Text    string `json:"text,omitempty"`
+	Content string `json:"content,omitempty"`
+}) string {
+	if s := strings.TrimSpace(v.Content); s != "" {
+		return s
+	}
+	return strings.TrimSpace(v.Text)
 }
 
 func newWebSocket(opts map[string]any) (core.Platform, error) {
@@ -360,36 +382,56 @@ func (p *WSPlatform) handleMsgCallback(frame wsFrame) {
 		chatName = body.ChatID
 	}
 
-	switch body.MsgType {
-	case "text":
-		slog.Debug("wecom-ws: text received", "user", body.From.UserID, "len", len(body.Text.Content))
-		go p.handler(p, &core.Message{
-			SessionKey: sessionKey, Platform: "wecom",
-			MessageID: body.MsgID,
-			UserID: body.From.UserID, UserName: body.From.UserID,
-			ChatName: chatName,
-			Content: body.Text.Content, ReplyCtx: rctx,
-		})
+	texts, imgRefs, fileRefs := wsCollectInboundParts(&body)
 
+	switch body.MsgType {
 	case "voice":
-		// WebSocket mode: voice messages arrive pre-transcribed by the server
-		text := body.Voice.Text
-		if text == "" {
+		vt := stripWeComAtMentions(wsVoiceText(body.Voice), p.botID, body.AibotID)
+		if vt == "" && len(imgRefs) == 0 && len(fileRefs) == 0 {
 			slog.Debug("wecom-ws: voice message with empty transcription, ignoring")
 			return
 		}
-		slog.Debug("wecom-ws: voice received (transcribed)", "user", body.From.UserID, "len", len(text))
+		if len(imgRefs) > 0 || len(fileRefs) > 0 {
+			out := []string{}
+			if vt != "" {
+				out = append(out, vt)
+			}
+			out = append(out, texts...)
+			slog.Info("wecom-ws: voice + media", "user", body.From.UserID, "images", len(imgRefs), "files", len(fileRefs))
+			go p.deliverWSMediaInbound(&body, sessionKey, chatName, rctx, out, imgRefs, fileRefs)
+			return
+		}
+		slog.Debug("wecom-ws: voice received (transcribed)", "user", body.From.UserID, "len", len(vt))
 		go p.handler(p, &core.Message{
 			SessionKey: sessionKey, Platform: "wecom",
 			MessageID: body.MsgID,
-			UserID: body.From.UserID, UserName: body.From.UserID,
+			UserID:    body.From.UserID, UserName: body.From.UserID,
 			ChatName: chatName,
-			Content: text, ReplyCtx: rctx, FromVoice: true,
+			Content:  vt, ReplyCtx: rctx, FromVoice: true,
 		})
-
-	default:
-		slog.Debug("wecom-ws: ignoring unsupported message type", "type", body.MsgType)
+		return
 	}
+
+	if len(imgRefs) == 0 && len(fileRefs) == 0 {
+		if len(texts) == 0 {
+			slog.Warn("wecom-ws: no text or media in message", "msg_type", body.MsgType, "msg_id", body.MsgID)
+			return
+		}
+		content := stripWeComAtMentions(strings.Join(texts, "\n"), p.botID, body.AibotID)
+		slog.Debug("wecom-ws: text received", "user", body.From.UserID, "len", len(content))
+		go p.handler(p, &core.Message{
+			SessionKey: sessionKey, Platform: "wecom",
+			MessageID: body.MsgID,
+			UserID:    body.From.UserID, UserName: body.From.UserID,
+			ChatName: chatName,
+			Content:  content, ReplyCtx: rctx,
+		})
+		return
+	}
+
+	slog.Info("wecom-ws: media message", "msg_type", body.MsgType, "user", body.From.UserID,
+		"images", len(imgRefs), "files", len(fileRefs), "text_parts", len(texts))
+	go p.deliverWSMediaInbound(&body, sessionKey, chatName, rctx, texts, imgRefs, fileRefs)
 }
 
 // Reply sends a response message via aibot_respond_msg using the stream format.

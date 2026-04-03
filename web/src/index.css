@@ -1,0 +1,108 @@
+@import 'highlight.js/styles/github.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --color-accent: 22 163 74;
+  --color-accent-dim: 21 128 61;
+}
+.dark {
+  --color-accent: 66 255 156;
+  --color-accent-dim: 43 200 122;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+pre code.hljs {
+  background: transparent;
+  padding: 0;
+}
+
+/* Dark mode: override highlight.js colors for github-dark feel */
+.dark .hljs {
+  color: #e6edf3;
+}
+.dark .hljs-keyword,
+.dark .hljs-selector-tag {
+  color: #ff7b72;
+}
+.dark .hljs-string,
+.dark .hljs-attr {
+  color: #a5d6ff;
+}
+.dark .hljs-comment,
+.dark .hljs-quote {
+  color: #8b949e;
+  font-style: italic;
+}
+.dark .hljs-number,
+.dark .hljs-literal {
+  color: #79c0ff;
+}
+.dark .hljs-title,
+.dark .hljs-title\.class_,
+.dark .hljs-title\.function_ {
+  color: #d2a8ff;
+}
+.dark .hljs-built_in {
+  color: #ffa657;
+}
+.dark .hljs-type,
+.dark .hljs-params {
+  color: #ffa657;
+}
+.dark .hljs-variable,
+.dark .hljs-template-variable {
+  color: #ffa657;
+}
+.dark .hljs-addition {
+  color: #aff5b4;
+  background-color: rgba(46, 160, 67, 0.15);
+}
+.dark .hljs-deletion {
+  color: #ffdcd7;
+  background-color: rgba(248, 81, 73, 0.15);
+}
+.dark .hljs-meta {
+  color: #79c0ff;
+}
+.dark .hljs-selector-class,
+.dark .hljs-selector-id {
+  color: #7ee787;
+}
+
+/* Responsive font scaling for larger screens */
+html {
+  font-size: 16px;
+}
+@media (min-width: 1536px) {
+  html { font-size: 17px; }
+}
+@media (min-width: 1920px) {
+  html { font-size: 18px; }
+}
+@media (min-width: 2560px) {
+  html { font-size: 20px; }
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(128, 128, 128, 0.3);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(128, 128, 128, 0.5);
+}

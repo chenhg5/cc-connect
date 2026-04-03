@@ -162,7 +162,7 @@ work_dir = "/absolute/path/to/your/project"
 mode = "default"
 
 # --- Claude Code mode options ---
-# "default", "acceptEdits" (alias: "edit"), "plan", "bypassPermissions" (alias: "yolo")
+# "default", "acceptEdits" (alias: "edit"), "plan", "auto", "bypassPermissions" (alias: "yolo")
 # allowed_tools = ["Read", "Grep", "Glob"]  # optional: pre-approve specific tools
 
 # --- Codex mode options ---

@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/gorilla/websocket"
 )
 
 func init() {
@@ -46,6 +48,7 @@ type Platform struct {
 	shareSessionInChannel      bool
 	threadIsolation            bool
 	respondToAtEveryoneAndHere bool
+	proxyURL                   *url.URL
 	session                    *discordgo.Session
 	handler                    core.MessageHandler
 	botID                      string
@@ -54,6 +57,7 @@ type Platform struct {
 	botRoleIDs                 sync.Map // guildID -> bot managed role ID
 	readyCh                    chan struct{}
 	seenMsgs                   sync.Map // message ID dedup: prevents duplicate MessageCreate events
+	seenInteractions           sync.Map // interaction ID dedup: prevents duplicate slash/button events
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -68,6 +72,20 @@ func New(opts map[string]any) (core.Platform, error) {
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	threadIsolation, _ := opts["thread_isolation"].(bool)
 	respondToAtEveryoneAndHere, _ := opts["respond_to_at_everyone_and_here"].(bool)
+
+	var proxyU *url.URL
+	if proxyStr, _ := opts["proxy"].(string); proxyStr != "" {
+		u, err := url.Parse(proxyStr)
+		if err != nil {
+			return nil, fmt.Errorf("discord: invalid proxy URL %q: %w", proxyStr, err)
+		}
+		if user, _ := opts["proxy_username"].(string); user != "" {
+			pass, _ := opts["proxy_password"].(string)
+			u.User = url.UserPassword(user, pass)
+		}
+		proxyU = u
+	}
+
 	return &Platform{
 		token:                      token,
 		allowFrom:                  allowFrom,
@@ -77,6 +95,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		readyCh:                    make(chan struct{}),
 		threadIsolation:            threadIsolation,
 		respondToAtEveryoneAndHere: respondToAtEveryoneAndHere,
+		proxyURL:                   proxyU,
 	}, nil
 }
 
@@ -84,6 +103,17 @@ func (p *Platform) Name() string { return "discord" }
 
 func (p *Platform) makeSessionKey(channelID string, userID string) string {
 	return buildSessionKey(channelID, userID, p.shareSessionInChannel)
+}
+
+func rememberDedupID(store *sync.Map, id string) bool {
+	if id == "" {
+		return true
+	}
+	if _, loaded := store.LoadOrStore(id, struct{}{}); loaded {
+		return false
+	}
+	time.AfterFunc(2*time.Minute, func() { store.Delete(id) })
+	return true
 }
 
 func buildSessionKey(channelID string, userID string, shareSessionInChannel bool) string {
@@ -375,6 +405,12 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	if err != nil {
 		return fmt.Errorf("discord: create session: %w", err)
 	}
+	if p.proxyURL != nil {
+		transport := &http.Transport{Proxy: http.ProxyURL(p.proxyURL)}
+		session.Client = &http.Client{Transport: transport, Timeout: 60 * time.Second}
+		session.Dialer = &websocket.Dialer{Proxy: http.ProxyURL(p.proxyURL)}
+		slog.Info("discord: using proxy", "proxy", p.proxyURL.Host)
+	}
 	p.session = session
 
 	session.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentMessageContent
@@ -407,11 +443,10 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 
 	session.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
 		// Deduplicate: Discord gateway may deliver the same event twice
-		if _, loaded := p.seenMsgs.LoadOrStore(m.ID, struct{}{}); loaded {
+		if !rememberDedupID(&p.seenMsgs, m.ID) {
 			slog.Debug("discord: ignoring duplicate message", "msg_id", m.ID)
 			return
 		}
-		time.AfterFunc(2*time.Minute, func() { p.seenMsgs.Delete(m.ID) })
 
 		if m.Author.Bot || m.Author.ID == p.botID {
 			return
@@ -514,6 +549,11 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 
 // handleInteraction processes incoming Discord command and button interactions.
 func (p *Platform) handleInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	if !rememberDedupID(&p.seenInteractions, i.ID) {
+		slog.Debug("discord: ignoring duplicate interaction", "interaction_id", i.ID, "type", i.Type)
+		return
+	}
+
 	userID, userName := "", ""
 	if i.Member != nil && i.Member.User != nil {
 		userID = i.Member.User.ID
@@ -544,11 +584,28 @@ func (p *Platform) handleInteraction(s *discordgo.Session, i *discordgo.Interact
 		return
 	}
 
+	var rctx any
 	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
 	}); err != nil {
-		slog.Error("discord: defer interaction failed", "error", err)
-		return
+		// Defer must usually happen within ~3s; if it fails (e.g. "Unknown interaction"),
+		// aborting here drops the command entirely (#258). Fall back to normal channel
+		// messages — sendInteraction already falls back similarly on edit failures.
+		slog.Warn("discord: defer interaction failed, continuing with channel replies", "error", err)
+		channelID := i.ChannelID
+		var rc replyContext
+		if ch, chErr := s.Channel(channelID); chErr != nil {
+			slog.Debug("discord: channel lookup for slash fallback failed", "channel", channelID, "error", chErr)
+			rc = replyContext{channelID: channelID}
+		} else {
+			rc = replyContextForDeferredInteractionFallback(ch, channelID)
+		}
+		rctx = rc
+	} else {
+		rctx = &interactionReplyCtx{
+			interaction: i.Interaction,
+			channelID:   i.ChannelID,
+		}
 	}
 
 	data := i.ApplicationCommandData()
@@ -558,19 +615,30 @@ func (p *Platform) handleInteraction(s *discordgo.Session, i *discordgo.Interact
 	slog.Debug("discord: slash command", "user", userName, "command", cmdText, "channel", channelID)
 
 	sessionKey := resolveSessionKeyForChannel(channelID, userID, p.shareSessionInChannel, p.threadIsolation, sessionThreadOps{session: p.session})
-	ictx := &interactionReplyCtx{
-		interaction: i.Interaction,
-		channelID:   channelID,
-	}
 
 	msg := &core.Message{
 		SessionKey: sessionKey, Platform: "discord",
 		MessageID: i.ID,
 		UserID:    userID, UserName: userName,
 		ChatName: p.resolveChannelName(channelID),
-		Content:  cmdText, ReplyCtx: ictx,
+		Content:  cmdText, ReplyCtx: rctx,
 	}
 	p.handler(p, msg)
+}
+
+// replyContextForDeferredInteractionFallback builds a replyContext for slash commands
+// when InteractionRespond(defer) failed. Thread channels must set threadID so
+// sendChannelReply uses ChannelMessageSend instead of ChannelMessageSendReply with an empty ref.
+func replyContextForDeferredInteractionFallback(ch *discordgo.Channel, channelID string) replyContext {
+	if ch == nil {
+		return replyContext{channelID: channelID}
+	}
+	switch ch.Type {
+	case discordgo.ChannelTypeGuildPublicThread, discordgo.ChannelTypeGuildPrivateThread:
+		return replyContext{channelID: channelID, threadID: channelID}
+	default:
+		return replyContext{channelID: channelID}
+	}
 }
 
 // reconstructCommand converts a Discord interaction back to a text command string
@@ -615,6 +683,10 @@ func (p *Platform) handleComponentInteraction(s *discordgo.Session, i *discordgo
 
 	channelID := i.ChannelID
 	sessionKey := resolveSessionKeyForChannel(channelID, userID, p.shareSessionInChannel, p.threadIsolation, sessionThreadOps{session: p.session})
+	rc := replyContext{channelID: channelID}
+	if i.Message != nil {
+		rc.messageID = i.Message.ID
+	}
 	p.handler(p, &core.Message{
 		SessionKey: sessionKey,
 		Platform:   "discord",
@@ -623,7 +695,7 @@ func (p *Platform) handleComponentInteraction(s *discordgo.Session, i *discordgo
 		UserName:   userName,
 		ChatName:   p.resolveChannelName(channelID),
 		Content:    command,
-		ReplyCtx:   replyContext{channelID: channelID},
+		ReplyCtx:   rc,
 	})
 }
 
@@ -686,7 +758,7 @@ func (p *Platform) sendChannelReply(rc replyContext, content string) error {
 	chunks := core.SplitMessageCodeFenceAware(content, maxDiscordLen)
 	for _, chunk := range chunks {
 		var err error
-		if rc.useThreadChannel() {
+		if rc.useThreadChannel() || rc.messageID == "" {
 			_, err = p.session.ChannelMessageSend(rc.targetChannelID(), chunk)
 		} else {
 			ref := &discordgo.MessageReference{MessageID: rc.messageID}
@@ -768,6 +840,62 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 	}
 }
 
+func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachment) error {
+	name := file.FileName
+	if name == "" {
+		name = "attachment"
+	}
+
+	newFile := func() *discordgo.File {
+		return &discordgo.File{
+			Name:        name,
+			ContentType: file.MimeType,
+			Reader:      bytes.NewReader(file.Data),
+		}
+	}
+
+	switch rc := rctx.(type) {
+	case *interactionReplyCtx:
+		rc.mu.Lock()
+		first := !rc.firstDone
+		if first {
+			rc.firstDone = true
+		}
+		rc.mu.Unlock()
+
+		var err error
+		if first {
+			_, err = p.session.InteractionResponseEdit(rc.interaction, &discordgo.WebhookEdit{
+				Files: []*discordgo.File{newFile()},
+			})
+		} else {
+			_, err = p.session.FollowupMessageCreate(rc.interaction, true, &discordgo.WebhookParams{
+				Files: []*discordgo.File{newFile()},
+			})
+		}
+		if err != nil {
+			slog.Warn("discord: interaction file failed, falling back to channel message", "error", err)
+			_, err = p.session.ChannelMessageSendComplex(rc.channelID, &discordgo.MessageSend{
+				Files: []*discordgo.File{newFile()},
+			})
+			if err != nil {
+				return fmt.Errorf("discord: send file fallback: %w", err)
+			}
+		}
+		return nil
+	case replyContext:
+		_, err := p.session.ChannelMessageSendComplex(rc.targetChannelID(), &discordgo.MessageSend{
+			Files: []*discordgo.File{newFile()},
+		})
+		if err != nil {
+			return fmt.Errorf("discord: send file: %w", err)
+		}
+		return nil
+	default:
+		return fmt.Errorf("discord: SendFile: invalid reply context type %T", rctx)
+	}
+}
+
 func buildDiscordActionRows(rows [][]core.ButtonOption) []discordgo.MessageComponent {
 	components := make([]discordgo.MessageComponent, 0, len(rows))
 	for _, row := range rows {
@@ -822,6 +950,7 @@ func (p *Platform) SendWithButtons(ctx context.Context, rctx any, content string
 }
 
 var _ core.ImageSender = (*Platform)(nil)
+var _ core.FileSender = (*Platform)(nil)
 var _ core.InlineButtonSender = (*Platform)(nil)
 
 func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {

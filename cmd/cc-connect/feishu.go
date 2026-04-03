@@ -116,7 +116,7 @@ func runFeishuSetup(args []string, requestedMode string) {
 	appSecret := fs.String("app-secret", "", "existing bot app_secret")
 	timeout := fs.Int("timeout", 600, "QR onboarding timeout in seconds")
 	qrImage := fs.String("qr-image", "", "save QR code as PNG image to this path (e.g. qr.png)")
-	setAllowFromEmpty := fs.Bool("set-allow-from-empty", false, "fill allow_from with owner open_id when it is empty (may be inaccurate)")
+	setAllowFromEmpty := fs.Bool("set-allow-from-empty", false, "merge owner open_id into allow_from when onboarding returns it (preserves *)")
 	debug := fs.Bool("debug", false, "print debug logs for onboarding requests")
 	_ = fs.Parse(args)
 
@@ -362,7 +362,7 @@ Options:
   --app-secret <secret>       Existing app_secret
   --timeout <seconds>         QR onboarding timeout (default: 600)
   --qr-image <path>           Save QR code as PNG image file (e.g. --qr-image qr.png)
-  --set-allow-from-empty      Fill allow_from with owner open_id if empty (default: true)
+  --set-allow-from-empty      Merge owner open_id into allow_from when available (default: false)
   --debug                     Print onboarding debug logs
 
 Examples:
