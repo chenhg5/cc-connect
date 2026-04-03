@@ -2826,6 +2826,7 @@ var builtinCommands = []struct {
 	{[]string{"cron"}, "cron"},
 	{[]string{"heartbeat", "hb"}, "heartbeat"},
 	{[]string{"compress", "compact"}, "compress"},
+	{[]string{"clear"}, "clear"},
 	{[]string{"stop"}, "stop"},
 	{[]string{"help"}, "help"},
 	{[]string{"version"}, "version"},
@@ -2998,6 +2999,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdHeartbeat(p, msg, args)
 	case "compress":
 		e.cmdCompress(p, msg)
+	case "clear":
+		e.cmdClear(p, msg, args)
 	case "stop":
 		e.cmdStop(p, msg)
 	case "help":
@@ -3322,6 +3325,19 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 	} else {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNewSessionCreated))
 	}
+}
+
+func (e *Engine) resetCurrentSessionState(msg *Message, sessions *SessionManager, interactiveKey string) *Session {
+	return e.resetCurrentSessionStateByKey(msg.SessionKey, sessions, interactiveKey)
+}
+
+func (e *Engine) resetCurrentSessionStateByKey(sessionKey string, sessions *SessionManager, interactiveKey string) *Session {
+	e.cleanupInteractiveState(interactiveKey)
+	session := sessions.GetOrCreateActive(sessionKey)
+	session.SetAgentSessionID("", "")
+	session.ClearHistory()
+	sessions.Save()
+	return session
 }
 
 const listPageSize = 20
@@ -5274,6 +5290,21 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
 }
 
+func (e *Engine) cmdClear(p Platform, msg *Message, args []string) {
+	if len(args) > 0 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgClearUsage))
+		return
+	}
+
+	_, sessions, interactiveKey, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+	e.resetCurrentSessionState(msg, sessions, interactiveKey)
+	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgClearDone))
+}
+
 func (e *Engine) stopInteractiveSession(sessionKey string, quietPlatform Platform, quietReplyCtx any) bool {
 	e.interactiveMu.Lock()
 	state, ok := e.interactiveStates[sessionKey]
@@ -5347,7 +5378,7 @@ func (e *Engine) cmdCompress(p Platform, msg *Message) {
 // runCompress sends the agent's compress command and handles results.
 // If autoTriggered is true, suppress user-visible "compressing" and completion messages.
 func (e *Engine) runCompress(state *interactiveState, session *Session, sessions *SessionManager, iKey string, p Platform, replyCtx any, auto bool) {
-	// session.Unlock() is called inside drainQueuedMessagesAfterCompress
+	// session.Unlock() is called inside drainQueuedMessagesAfterSessionCommand
 	// while holding state.mu to close the race window. Deferred fallback
 	// ensures the lock is released on early-return paths.
 	compressUnlocked := false
@@ -5482,7 +5513,7 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 			}
 
 			// After compress succeeds, process any queued messages instead of dropping them.
-			e.drainQueuedMessagesAfterCompress(state, session, sessions, sessionKey, unlocked)
+			e.drainQueuedMessagesAfterSessionCommand(state, session, sessions, sessionKey, unlocked)
 			return
 		case EventError:
 			if !auto && event.Error != nil {
@@ -5494,7 +5525,7 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 				e.notifyDroppedQueuedMessages(state, event.Error)
 			} else {
 				// Agent survived — try to process queued messages.
-				e.drainQueuedMessagesAfterCompress(state, session, sessions, sessionKey, unlocked)
+				e.drainQueuedMessagesAfterSessionCommand(state, session, sessions, sessionKey, unlocked)
 			}
 			return
 		case EventPermissionRequest:
@@ -5506,10 +5537,10 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 	}
 }
 
-// drainQueuedMessagesAfterCompress processes any messages that were queued
-// during a /compress operation. It sends each one to the agent and runs the
-// full interactive event loop for it.
-func (e *Engine) drainQueuedMessagesAfterCompress(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, unlocked *bool) {
+// drainQueuedMessagesAfterSessionCommand processes any messages that were
+// queued during a serialized in-session command such as /compress. It sends
+// each one to the agent and runs the full interactive event loop for it.
+func (e *Engine) drainQueuedMessagesAfterSessionCommand(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, unlocked *bool) {
 	if e.drainPendingMessages(state, session, sessions, sessionKey) {
 		*unlocked = true
 	}
