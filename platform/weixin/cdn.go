@@ -172,63 +172,14 @@ func downloadPlainCDN(ctx context.Context, client *http.Client, cdnBase, encPara
 
 const cdnUploadMaxRetries = 3
 
-// uploadBufferToCDNDirect 使用预构建的完整 URL 上传加密文件到 CDN
-func uploadBufferToCDNDirect(ctx context.Context, client *http.Client, fullURL string, plaintext, aesKey []byte, label string) (downloadParam string, err error) {
+// uploadBufferToCDN encrypts plaintext with AES-128-ECB and uploads to the given CDN URL.
+// Caller is responsible for building the full URL (via buildCdnUploadURL or from upload_full_url).
+func uploadBufferToCDN(ctx context.Context, client *http.Client, cdnURL string, plaintext, aesKey []byte, label string) (downloadParam string, err error) {
 	ciphertext, err := encryptAESECB(plaintext, aesKey)
 	if err != nil {
 		return "", fmt.Errorf("%s: encrypt: %w", label, err)
 	}
-	var lastErr error
-	for attempt := 1; attempt <= cdnUploadMaxRetries; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, fullURL, bytes.NewReader(ciphertext))
-		if err != nil {
-			return "", fmt.Errorf("%s: new request: %w", label, err)
-		}
-		req.Header.Set("Content-Type", "application/octet-stream")
-		resp, err := client.Do(req)
-		if err != nil {
-			lastErr = err
-			slog.Warn("weixin: CDN upload request failed", "label", label, "attempt", attempt, "error", err)
-			continue
-		}
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		_ = resp.Body.Close()
-		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
-			msg := resp.Header.Get("x-error-message")
-			if msg == "" {
-				msg = resp.Status
-			}
-			return "", fmt.Errorf("%s: CDN upload client error %d: %s", label, resp.StatusCode, msg)
-		}
-		if resp.StatusCode != http.StatusOK {
-			msg := resp.Header.Get("x-error-message")
-			if msg == "" {
-				msg = fmt.Sprintf("status %d", resp.StatusCode)
-			}
-			lastErr = fmt.Errorf("%s: CDN upload server error: %s", label, msg)
-			slog.Warn("weixin: CDN upload server error", "label", label, "attempt", attempt, "error", lastErr)
-			continue
-		}
-		dl := resp.Header.Get("x-encrypted-param")
-		if dl == "" {
-			lastErr = fmt.Errorf("%s: CDN response missing x-encrypted-param", label)
-			slog.Warn("weixin: CDN upload bad response", "label", label, "attempt", attempt)
-			continue
-		}
-		return dl, nil
-	}
-	if lastErr != nil {
-		return "", fmt.Errorf("%s: CDN upload failed after %d attempts: %w", label, cdnUploadMaxRetries, lastErr)
-	}
-	return "", fmt.Errorf("%s: CDN upload failed after %d attempts", label, cdnUploadMaxRetries)
-}
-
-func uploadBufferToCDN(ctx context.Context, client *http.Client, cdnBase, uploadParam, filekey string, plaintext, aesKey []byte, label string) (downloadParam string, err error) {
-	ciphertext, err := encryptAESECB(plaintext, aesKey)
-	if err != nil {
-		return "", fmt.Errorf("%s: encrypt: %w", label, err)
-	}
-	u := buildCdnUploadURL(cdnBase, uploadParam, filekey)
+	u := cdnURL
 	var lastErr error
 	for attempt := 1; attempt <= cdnUploadMaxRetries; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(ciphertext))

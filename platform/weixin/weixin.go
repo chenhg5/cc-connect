@@ -136,7 +136,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		slog.Info("weixin: using proxy", "proxy", u.Redacted())
 	}
 
-	// CDN 客户端：国内 CDN 必须直连，不走代理
+	// CDN 客户端：微信国内 CDN 必须直连，绕过环境变量中的代理（如 HTTPS_PROXY）
 	cdnHttpClient := &http.Client{
 		Timeout:   60 * time.Second,
 		Transport: &http.Transport{Proxy: nil},
