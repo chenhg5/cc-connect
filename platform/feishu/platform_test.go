@@ -829,7 +829,7 @@ func TestBuildPreviewCardJSON_ProgressPayloadUsesStructuredCard(t *testing.T) {
 	payload := core.BuildProgressCardPayloadV2([]core.ProgressCardEntry{
 		{Kind: core.ProgressEntryThinking, Text: "planning"},
 		{Kind: core.ProgressEntryToolUse, Tool: "Bash", Text: "pwd"},
-	}, false, "Codex", core.LangEnglish, core.ProgressCardStateRunning)
+	}, false, "Codex", core.LangEnglish, core.ProgressCardStateRunning, "/home/user", time.Now())
 	if payload == "" {
 		t.Fatal("BuildProgressCardPayload returned empty payload")
 	}
@@ -868,5 +868,43 @@ func TestBuildPreviewCardJSON_NormalTextFallback(t *testing.T) {
 	}
 	if !strings.Contains(cardJSON, "\"tag\":\"markdown\"") {
 		t.Fatalf("default preview card should contain markdown element, got %q", cardJSON)
+	}
+}
+
+func TestBuildPreviewCardJSON_EmptyProgressWithMetadata(t *testing.T) {
+	// Test that initial card (no progress events) with work_dir and time renders correctly
+	payload := core.BuildProgressCardPayloadV2(nil, false, "CC", core.LangChinese, core.ProgressCardStateRunning, "/home/user/project", time.Now())
+	if payload == "" {
+		t.Fatal("BuildProgressCardPayloadV2 should handle empty items")
+	}
+
+	cardJSON := buildPreviewCardJSON(payload)
+	if strings.Contains(cardJSON, core.ProgressCardPayloadPrefix) {
+		t.Fatalf("card JSON should not leak payload prefix, got %q", cardJSON)
+	}
+	// Should contain title
+	if !strings.Contains(cardJSON, "CC · 进行中") {
+		t.Fatalf("card JSON should contain title, got %q", cardJSON)
+	}
+	// Should contain work directory
+	if !strings.Contains(cardJSON, "工作目录") || !strings.Contains(cardJSON, "/home/user/project") {
+		t.Fatalf("card JSON should contain work directory, got %q", cardJSON)
+	}
+	// Should contain time
+	if !strings.Contains(cardJSON, "用时") {
+		t.Fatalf("card JSON should contain time, got %q", cardJSON)
+	}
+
+	var card map[string]any
+	if err := json.Unmarshal([]byte(cardJSON), &card); err != nil {
+		t.Fatalf("card JSON is invalid: %v", err)
+	}
+	body, ok := card["body"].(map[string]any)
+	if !ok || body == nil {
+		t.Fatalf("expected body in card json, got %#v", card["body"])
+	}
+	elements, ok := body["elements"].([]any)
+	if !ok || len(elements) < 2 {
+		t.Fatalf("expected at least 2 elements (work_dir and time), got %d", len(elements))
 	}
 }

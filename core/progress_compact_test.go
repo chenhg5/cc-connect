@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 type suppressTestPlatform struct {
@@ -75,7 +76,7 @@ func TestBuildAndParseProgressCardPayloadV2(t *testing.T) {
 	payload := BuildProgressCardPayloadV2([]ProgressCardEntry{
 		{Kind: ProgressEntryThinking, Text: " plan "},
 		{Kind: ProgressEntryToolUse, Tool: "Bash", Text: "pwd"},
-	}, false, "Codex", LangChinese, ProgressCardStateRunning)
+	}, false, "Codex", LangChinese, ProgressCardStateRunning, "/home/user", time.Now())
 	if payload == "" {
 		t.Fatal("BuildProgressCardPayloadV2 returned empty string")
 	}
@@ -101,6 +102,12 @@ func TestBuildAndParseProgressCardPayloadV2(t *testing.T) {
 	}
 	if parsed.Items[1].Kind != ProgressEntryToolUse || parsed.Items[1].Tool != "Bash" {
 		t.Fatalf("items[1] = %#v, want tool_use/Bash", parsed.Items[1])
+	}
+	if parsed.WorkDir != "/home/user" {
+		t.Fatalf("work_dir = %q, want /home/user", parsed.WorkDir)
+	}
+	if parsed.StartTime <= 0 {
+		t.Fatal("start_time should be positive")
 	}
 }
 
