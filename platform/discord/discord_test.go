@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -23,6 +24,32 @@ type fakeThreadOps struct {
 	startThread           func(channelID, messageID, name string, archiveDuration int) (*discordgo.Channel, error)
 	startStandaloneThread func(channelID, name string, typ discordgo.ChannelType, archiveDuration int) (*discordgo.Channel, error)
 	joinThread            func(threadID string) error
+}
+
+func newTestDiscordSession(t *testing.T, server *httptest.Server) *discordgo.Session {
+	t.Helper()
+
+	oldEndpointDiscord := discordgo.EndpointDiscord
+	oldEndpointAPI := discordgo.EndpointAPI
+	oldEndpointChannels := discordgo.EndpointChannels
+	oldEndpointWebhooks := discordgo.EndpointWebhooks
+	discordgo.EndpointDiscord = server.URL + "/"
+	discordgo.EndpointAPI = discordgo.EndpointDiscord + "api/v" + discordgo.APIVersion + "/"
+	discordgo.EndpointChannels = discordgo.EndpointAPI + "channels/"
+	discordgo.EndpointWebhooks = discordgo.EndpointAPI + "webhooks/"
+	t.Cleanup(func() {
+		discordgo.EndpointDiscord = oldEndpointDiscord
+		discordgo.EndpointAPI = oldEndpointAPI
+		discordgo.EndpointChannels = oldEndpointChannels
+		discordgo.EndpointWebhooks = oldEndpointWebhooks
+	})
+
+	s, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New() error = %v", err)
+	}
+	s.Client = server.Client()
+	return s
 }
 
 func (f fakeThreadOps) ResolveChannel(channelID string) (*discordgo.Channel, error) {
@@ -473,6 +500,366 @@ func TestSendFile_UsesInteractionEndpoints(t *testing.T) {
 	}
 	if len(requests) != 1 || !strings.Contains(requests[0], "/messages/@original") {
 		t.Fatalf("requests = %v, want one original interaction edit", requests)
+	}
+}
+
+func TestNew_ProgressStyleSupportsCompactAndCard(t *testing.T) {
+	tests := []struct {
+		style       string
+		wantPayload bool
+	}{
+		{style: "compact", wantPayload: false},
+		{style: "card", wantPayload: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.style, func(t *testing.T) {
+			pAny, err := New(map[string]any{
+				"token":          "discord-token",
+				"progress_style": tt.style,
+			})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			sp, ok := pAny.(core.ProgressStyleProvider)
+			if !ok {
+				t.Fatalf("platform type %T does not implement ProgressStyleProvider", pAny)
+			}
+			if got := sp.ProgressStyle(); got != tt.style {
+				t.Fatalf("ProgressStyle() = %q, want %q", got, tt.style)
+			}
+
+			payloadCap, ok := pAny.(core.ProgressCardPayloadSupport)
+			if !ok {
+				t.Fatalf("platform type %T does not implement ProgressCardPayloadSupport", pAny)
+			}
+			if got := payloadCap.SupportsProgressCardPayload(); got != tt.wantPayload {
+				t.Fatalf("SupportsProgressCardPayload() = %v, want %v", got, tt.wantPayload)
+			}
+		})
+	}
+}
+
+func TestNew_ProgressStyleRejectsInvalidValue(t *testing.T) {
+	_, err := New(map[string]any{
+		"token":          "discord-token",
+		"progress_style": "invalid-style",
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid progress_style")
+	}
+	if !strings.Contains(err.Error(), "invalid progress_style") {
+		t.Fatalf("error = %q, want invalid progress_style", err.Error())
+	}
+}
+
+func TestNew_LegacyProgressStyleDoesNotEnableProgressInterfaces(t *testing.T) {
+	pAny, err := New(map[string]any{
+		"token": "discord-token",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if _, ok := pAny.(core.ProgressStyleProvider); ok {
+		t.Fatalf("legacy discord platform should not implement ProgressStyleProvider, got %T", pAny)
+	}
+	if _, ok := pAny.(core.ProgressCardPayloadSupport); ok {
+		t.Fatalf("legacy discord platform should not implement ProgressCardPayloadSupport, got %T", pAny)
+	}
+}
+
+func TestDispatchMessage_UsesWrappedProgressPlatformForHandler(t *testing.T) {
+	pAny, err := New(map[string]any{
+		"token":          "discord-token",
+		"progress_style": "card",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	pp, ok := pAny.(*progressPlatform)
+	if !ok {
+		t.Fatalf("platform type = %T, want *progressPlatform", pAny)
+	}
+
+	var got core.Platform
+	pp.Platform.handler = func(p core.Platform, msg *core.Message) {
+		got = p
+	}
+
+	pp.Platform.dispatchMessage(&core.Message{SessionKey: "discord:ch-1"})
+
+	if got == nil {
+		t.Fatal("handler platform = nil, want wrapped platform")
+	}
+	if got != pp {
+		t.Fatalf("handler platform = %T, want wrapped %T", got, pp)
+	}
+	sp, ok := got.(core.ProgressStyleProvider)
+	if !ok {
+		t.Fatalf("handler platform type %T does not implement ProgressStyleProvider", got)
+	}
+	if gotStyle := sp.ProgressStyle(); gotStyle != "card" {
+		t.Fatalf("ProgressStyle() = %q, want card", gotStyle)
+	}
+}
+
+func TestDispatchMessage_LegacyPlatformFallsBackToBasePlatform(t *testing.T) {
+	pAny, err := New(map[string]any{
+		"token": "discord-token",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	p, ok := pAny.(*Platform)
+	if !ok {
+		t.Fatalf("platform type = %T, want *Platform", pAny)
+	}
+
+	var got core.Platform
+	p.handler = func(platform core.Platform, msg *core.Message) {
+		got = platform
+	}
+
+	p.dispatchMessage(&core.Message{SessionKey: "discord:ch-1"})
+
+	if got != p {
+		t.Fatalf("handler platform = %T, want base %T", got, p)
+	}
+	if _, ok := got.(core.ProgressStyleProvider); ok {
+		t.Fatalf("legacy handler platform should not implement ProgressStyleProvider, got %T", got)
+	}
+}
+
+func TestSendPreviewStart_ProgressPayloadUsesEmbed(t *testing.T) {
+	var (
+		requestPath string
+		rawBody     string
+		payload     map[string]any
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestPath = r.URL.Path
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read request body: %v", err)
+		}
+		rawBody = string(body)
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"msg-preview","channel_id":"ch-1"}`)
+	}))
+	defer server.Close()
+
+	s := newTestDiscordSession(t, server)
+	p := &Platform{session: s, progressStyle: "card"}
+
+	progress := core.BuildProgressCardPayloadV2([]core.ProgressCardEntry{
+		{Kind: core.ProgressEntryThinking, Text: "planning"},
+		{Kind: core.ProgressEntryToolUse, Tool: "Bash", Text: "pwd"},
+	}, false, "Codex", core.LangEnglish, core.ProgressCardStateRunning)
+	if progress == "" {
+		t.Fatal("BuildProgressCardPayloadV2() returned empty payload")
+	}
+
+	handleAny, err := p.SendPreviewStart(context.Background(), replyContext{channelID: "ch-1"}, progress)
+	if err != nil {
+		t.Fatalf("SendPreviewStart() error = %v", err)
+	}
+	handle, ok := handleAny.(*discordPreviewHandle)
+	if !ok {
+		t.Fatalf("preview handle type = %T, want *discordPreviewHandle", handleAny)
+	}
+	if handle.channelID != "ch-1" || handle.messageID != "msg-preview" {
+		t.Fatalf("preview handle = %#v, want channel/message IDs", handle)
+	}
+	if requestPath != "/api/v"+discordgo.APIVersion+"/channels/ch-1/messages" {
+		t.Fatalf("requestPath = %q, want channel message create path", requestPath)
+	}
+	if strings.Contains(rawBody, core.ProgressCardPayloadPrefix) {
+		t.Fatalf("request body should not leak payload prefix, got %q", rawBody)
+	}
+	embeds, ok := payload["embeds"].([]any)
+	if !ok || len(embeds) != 1 {
+		t.Fatalf("embeds = %#v, want one embed", payload["embeds"])
+	}
+	embed, ok := embeds[0].(map[string]any)
+	if !ok {
+		t.Fatalf("embed = %#v, want object", embeds[0])
+	}
+	if embed["title"] != "Codex · Processing" {
+		t.Fatalf("embed title = %#v, want Codex · Processing", embed["title"])
+	}
+	desc, _ := embed["description"].(string)
+	if !strings.Contains(desc, "💭 planning") {
+		t.Fatalf("embed description = %q, want thinking line", desc)
+	}
+	if !strings.Contains(desc, "🔧 Bash — pwd") {
+		t.Fatalf("embed description = %q, want tool line", desc)
+	}
+	if _, exists := payload["content"]; exists {
+		t.Fatalf("content = %#v, want omitted for embed preview send", payload["content"])
+	}
+}
+
+func TestSendPreviewStart_CompactStyleUsesPlainText(t *testing.T) {
+	var payload map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"msg-preview","channel_id":"ch-1"}`)
+	}))
+	defer server.Close()
+
+	pAny, err := New(map[string]any{
+		"token":          "discord-token",
+		"progress_style": "compact",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	starter, ok := pAny.(core.PreviewStarter)
+	if !ok {
+		t.Fatalf("platform type %T does not implement PreviewStarter", pAny)
+	}
+
+	pp, ok := pAny.(*progressPlatform)
+	if !ok {
+		t.Fatalf("platform type = %T, want *progressPlatform", pAny)
+	}
+	pp.session = newTestDiscordSession(t, server)
+
+	handleAny, err := starter.SendPreviewStart(context.Background(), replyContext{channelID: "ch-1"}, "compact preview")
+	if err != nil {
+		t.Fatalf("SendPreviewStart() error = %v", err)
+	}
+	if _, ok := handleAny.(*discordPreviewHandle); !ok {
+		t.Fatalf("preview handle type = %T, want *discordPreviewHandle", handleAny)
+	}
+	if got, _ := payload["content"].(string); got != "compact preview" {
+		t.Fatalf("content = %q, want compact preview", got)
+	}
+	if embeds, exists := payload["embeds"]; exists && embeds != nil {
+		t.Fatalf("embeds = %#v, want omitted or null for compact text preview", embeds)
+	}
+}
+
+func TestUpdateMessage_ProgressPayloadUsesEmbed(t *testing.T) {
+	var (
+		requestPath string
+		payload     map[string]any
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestPath = r.URL.Path
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"msg-preview","channel_id":"ch-1"}`)
+	}))
+	defer server.Close()
+
+	s := newTestDiscordSession(t, server)
+	p := &Platform{session: s, progressStyle: "card"}
+
+	exitCode := 0
+	progress := core.BuildProgressCardPayloadV2([]core.ProgressCardEntry{
+		{Kind: core.ProgressEntryToolResult, Tool: "Bash", Text: "hi", Status: "completed", ExitCode: &exitCode},
+	}, false, "Codex", core.LangEnglish, core.ProgressCardStateCompleted)
+	if progress == "" {
+		t.Fatal("BuildProgressCardPayloadV2() returned empty payload")
+	}
+
+	err := p.UpdateMessage(context.Background(), &discordPreviewHandle{channelID: "ch-1", messageID: "msg-preview"}, progress)
+	if err != nil {
+		t.Fatalf("UpdateMessage() error = %v", err)
+	}
+	if requestPath != "/api/v"+discordgo.APIVersion+"/channels/ch-1/messages/msg-preview" {
+		t.Fatalf("requestPath = %q, want channel message edit path", requestPath)
+	}
+	if got, _ := payload["content"].(string); got != "" {
+		t.Fatalf("content = %q, want explicit empty string to clear text content", got)
+	}
+	embeds, ok := payload["embeds"].([]any)
+	if !ok || len(embeds) != 1 {
+		t.Fatalf("embeds = %#v, want one embed", payload["embeds"])
+	}
+	embed, ok := embeds[0].(map[string]any)
+	if !ok {
+		t.Fatalf("embed = %#v, want object", embeds[0])
+	}
+	if embed["title"] != "Codex · Completed" {
+		t.Fatalf("embed title = %#v, want Codex · Completed", embed["title"])
+	}
+	desc, _ := embed["description"].(string)
+	if !strings.Contains(desc, "🧾 Bash — completed · exit 0 · hi") {
+		t.Fatalf("embed description = %q, want completed tool result", desc)
+	}
+	footer, ok := embed["footer"].(map[string]any)
+	if !ok || footer["text"] == nil {
+		t.Fatalf("footer = %#v, want footer text", embed["footer"])
+	}
+	if !strings.Contains(footer["text"].(string), "Full response is in the next message.") {
+		t.Fatalf("footer text = %q, want completion note", footer["text"].(string))
+	}
+}
+
+func TestBuildDiscordProgressEmbed_ShowsTruncatedNotice(t *testing.T) {
+	payload := &core.ProgressCardPayload{
+		Agent:     "Codex",
+		Lang:      string(core.LangEnglish),
+		State:     core.ProgressCardStateRunning,
+		Truncated: true,
+		Items: []core.ProgressCardEntry{
+			{Kind: core.ProgressEntryThinking, Text: "reviewing repository state"},
+		},
+	}
+
+	embed := buildDiscordProgressEmbed(payload)
+	if embed == nil {
+		t.Fatal("buildDiscordProgressEmbed() returned nil")
+	}
+	if !strings.Contains(embed.Description, "Showing latest updates only.") {
+		t.Fatalf("embed description = %q, want truncated notice", embed.Description)
+	}
+	if !strings.Contains(embed.Description, "💭 reviewing repository state") {
+		t.Fatalf("embed description = %q, want progress line", embed.Description)
+	}
+}
+
+func TestUpdateMessage_PlainTextClearsEmbeds(t *testing.T) {
+	var payload map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"msg-preview","channel_id":"ch-1"}`)
+	}))
+	defer server.Close()
+
+	s := newTestDiscordSession(t, server)
+	p := &Platform{session: s}
+
+	err := p.UpdateMessage(context.Background(), &discordPreviewHandle{channelID: "ch-1", messageID: "msg-preview"}, "plain preview")
+	if err != nil {
+		t.Fatalf("UpdateMessage() error = %v", err)
+	}
+	if got, _ := payload["content"].(string); got != "plain preview" {
+		t.Fatalf("content = %q, want plain preview", got)
+	}
+	embeds, ok := payload["embeds"].([]any)
+	if !ok {
+		t.Fatalf("embeds = %#v, want explicit empty embeds array", payload["embeds"])
+	}
+	if len(embeds) != 0 {
+		t.Fatalf("embeds = %#v, want empty embeds array", embeds)
 	}
 }
 
