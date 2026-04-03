@@ -49,6 +49,16 @@ Each user gets an independent session with full conversation context. Manage ses
 
 During a session, the agent may request tool permissions. Reply **allow** / **deny** / **allow all**.
 
+You can also configure automatic session rotation after inactivity:
+
+```toml
+[[projects]]
+name = "demo"
+reset_on_idle_mins = 60
+```
+
+When enabled, the next normal message after a long idle period starts in a fresh session automatically, without deleting the old session from `/list`.
+
 ---
 
 ## Permission Modes
@@ -290,6 +300,7 @@ Behavior:
 - If project exists but has no `feishu/lark` platform, one is added automatically.
 - The command writes credentials (`app_id`, `app_secret`); in QR onboarding flow, Feishu usually pre-configures permissions and event subscriptions.
 - Still verify app publish status and availability scope in Feishu Open Platform.
+- Runtime platform config also supports an optional `domain` override for Feishu/Lark API endpoints; this does not change setup/onboarding URLs.
 
 ---
 

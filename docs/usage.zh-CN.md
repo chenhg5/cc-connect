@@ -49,6 +49,16 @@ cc-connect 完整功能使用指南。
 
 会话中 Agent 请求工具权限时，回复 **允许** / **拒绝** / **允许所有**。
 
+也可以为项目开启“空闲后自动切换新会话”：
+
+```toml
+[[projects]]
+name = "demo"
+reset_on_idle_mins = 60
+```
+
+开启后，如果用户长时间未发消息，下一条普通消息会自动进入一个新的会话；旧会话仍会保留在 `/list` 中，不会被删除。
+
 ---
 
 ## 权限模式
@@ -290,6 +300,7 @@ cc-connect feishu bind --project my-project --app cli_xxx:sec_xxx
 - 项目存在但没有 `feishu/lark` 平台时会自动补一个平台配置。
 - 命令会回填凭证（`app_id` / `app_secret`）；扫码新建场景下飞书通常会预配权限和事件订阅。
 - 建议在飞书开放平台再核验一次发布状态与可用范围。
+- 运行时平台配置还支持可选 `domain` 覆盖 Feishu/Lark API 域名；这不会改变 `setup/new/bind` 的引导地址。
 
 ---
 
