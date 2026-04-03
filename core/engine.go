@@ -5789,16 +5789,15 @@ func (e *Engine) SendToSession(sessionKey, message string) error {
 }
 
 func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images []ImageAttachment, files []FileAttachment) error {
-	e.interactiveMu.Lock()
+	iKey := sessionKey
+	if e.multiWorkspace {
+		iKey = e.interactiveKeyForSessionKey(sessionKey)
+	}
 
+	e.interactiveMu.Lock()
 	var state *interactiveState
 	if sessionKey != "" {
-		state = e.interactiveStates[sessionKey]
-		if state == nil && e.multiWorkspace {
-			if iKey := e.interactiveKeyForSessionKey(sessionKey); iKey != sessionKey {
-				state = e.interactiveStates[iKey]
-			}
-		}
+		state = e.interactiveStates[iKey]
 	} else if len(e.interactiveStates) == 1 {
 		// Single session: use it when no sessionKey is provided (backward compatible)
 		for _, s := range e.interactiveStates {
@@ -5817,6 +5816,13 @@ func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images
 		}
 	}
 	e.interactiveMu.Unlock()
+
+	// If no interactive state found but sessionKey is provided, try to initialize it lazily.
+	// This handles the case where sessions are loaded from disk but interactiveStates is empty
+	// after startup (issue #336).
+	if state == nil && sessionKey != "" {
+		state = e.ensureInteractiveState(sessionKey, iKey)
+	}
 
 	if state == nil {
 		return fmt.Errorf("no active session found (key=%q)", sessionKey)
@@ -5886,6 +5892,67 @@ func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images
 		}
 	}
 	return nil
+}
+
+// ensureInteractiveState initializes the interactive state for a sessionKey if it exists
+// in the SessionManager but not in interactiveStates. This handles the case where sessions
+// are loaded from disk on startup but interactiveStates is empty until the first message.
+// Returns nil if the session cannot be initialized.
+func (e *Engine) ensureInteractiveState(sessionKey, iKey string) *interactiveState {
+	// Parse platform name from sessionKey (format: platform:chatID:userID)
+	platformName := ""
+	if idx := strings.Index(sessionKey, ":"); idx > 0 {
+		platformName = sessionKey[:idx]
+	}
+	if platformName == "" {
+		return nil
+	}
+
+	// Find the platform by name
+	var targetPlatform Platform
+	for _, p := range e.platforms {
+		if p.Name() == platformName {
+			targetPlatform = p
+			break
+		}
+	}
+	if targetPlatform == nil {
+		return nil
+	}
+
+	// Check if platform supports reply context reconstruction
+	rc, ok := targetPlatform.(ReplyContextReconstructor)
+	if !ok {
+		return nil
+	}
+
+	// Reconstruct reply context
+	replyCtx, err := rc.ReconstructReplyCtx(sessionKey)
+	if err != nil {
+		slog.Debug("ensureInteractiveState: failed to reconstruct reply context", "session_key", sessionKey, "error", err)
+		return nil
+	}
+
+	// Get the session from SessionManager
+	_, sessions := e.sessionContextForKey(sessionKey)
+	if sessions == nil {
+		return nil
+	}
+
+	// Check if there's an active session for this sessionKey
+	session := sessions.GetOrCreateActive(sessionKey)
+	if session == nil {
+		return nil
+	}
+
+	// Use the interactive key for multi-workspace mode
+	if iKey == "" {
+		iKey = sessionKey
+	}
+
+	// Create the interactive state using the existing helper
+	// This will start/resume the agent session as needed
+	return e.getOrCreateInteractiveStateWith(iKey, targetPlatform, replyCtx, session, sessions, nil, sessionKey)
 }
 
 // sendPermissionPrompt sends a permission prompt with interactive buttons when
