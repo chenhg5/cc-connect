@@ -6,10 +6,22 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/chenhg5/cc-connect/core"
 )
+
+// isWeixinCDNHost 检查 URL 是否指向已知的微信国内 CDN 域名
+func isWeixinCDNHost(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	return strings.HasSuffix(host, ".weixin.qq.com") || strings.HasSuffix(host, ".wechat.com")
+}
 
 type cdnUploadedRef struct {
 	downloadParam string
@@ -59,14 +71,24 @@ func (p *Platform) uploadToWeixinCDN(ctx context.Context, to string, plaintext [
 	if err != nil {
 		return nil, fmt.Errorf("weixin: %s: %w", label, err)
 	}
-	// 优先使用 upload_full_url（已含完整 CDN 地址 + filekey + taskid）
+	// 选择上传 URL 和 HTTP client
 	var cdnUploadURL string
+	var uploadClient *http.Client
 	if resp.UploadFullURL != "" {
+		// 新版 API：使用服务端返回的完整 URL
 		cdnUploadURL = resp.UploadFullURL
+		// 如果 URL 指向已知的微信国内 CDN，使用无代理 client 直连
+		if isWeixinCDNHost(cdnUploadURL) {
+			uploadClient = p.cdnHttpClient
+		} else {
+			uploadClient = p.httpClient
+		}
 	} else {
+		// 旧版 API：用 upload_param 构建 URL，使用配置的 httpClient
 		cdnUploadURL = buildCdnUploadURL(p.cdnBaseURL, resp.UploadParam, filekey)
+		uploadClient = p.httpClient
 	}
-	dl, err := uploadBufferToCDNDirect(ctx, p.cdnHttpClient, cdnUploadURL, plaintext, aesKey, label)
+	dl, err := uploadBufferToCDNDirect(ctx, uploadClient, cdnUploadURL, plaintext, aesKey, label)
 	if err != nil {
 		return nil, err
 	}
