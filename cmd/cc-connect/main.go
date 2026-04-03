@@ -140,24 +140,9 @@ func main() {
 			os.Exit(1)
 		}
 
-		// Wire providers if the agent supports it
-		if ps, ok := agent.(core.ProviderSwitcher); ok && len(proj.Agent.Providers) > 0 {
-			providers := make([]core.ProviderConfig, len(proj.Agent.Providers))
-			for i, p := range proj.Agent.Providers {
-				providers[i] = core.ProviderConfig{
-					Name:     p.Name,
-					APIKey:   p.APIKey,
-					BaseURL:  p.BaseURL,
-					Model:    p.Model,
-					Models:   convertProviderModels(p.Models),
-					Thinking: p.Thinking,
-					Env:      p.Env,
-				}
-			}
-			ps.SetProviders(providers)
-			if active, _ := proj.Agent.Options["provider"].(string); active != "" {
-				ps.SetActiveProvider(active)
-			}
+		if _, err := configureAgentProviders(agent, cfg, proj.Name, proj.Agent.Options); err != nil {
+			slog.Error("failed to configure providers", "project", proj.Name, "error", err)
+			os.Exit(1)
 		}
 
 		var platforms []core.Platform
@@ -1235,20 +1220,10 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	engine.SetAttachmentSendEnabled(cfg.AttachmentSend != "off")
 
 	// Reload providers
-	if ps, ok := engine.GetAgent().(core.ProviderSwitcher); ok {
-		providers := make([]core.ProviderConfig, len(proj.Agent.Providers))
-		for i, p := range proj.Agent.Providers {
-			providers[i] = core.ProviderConfig{
-				Name: p.Name, APIKey: p.APIKey, BaseURL: p.BaseURL,
-				Model: p.Model, Models: convertProviderModels(p.Models), Thinking: p.Thinking, Env: p.Env,
-			}
-		}
-		ps.SetProviders(providers)
-		result.ProvidersUpdated = len(providers)
-
-		if active, _ := proj.Agent.Options["provider"].(string); active != "" {
-			ps.SetActiveProvider(active)
-		}
+	if updated, err := configureAgentProviders(engine.GetAgent(), cfg, proj.Name, proj.Agent.Options); err != nil {
+		return nil, fmt.Errorf("reload providers: %w", err)
+	} else {
+		result.ProvidersUpdated = updated
 	}
 
 	// Reload custom commands
@@ -1326,6 +1301,39 @@ func convertProviderModels(ms []config.ProviderModelConfig) []core.ModelOption {
 		opts[i] = core.ModelOption{Name: m.Model, Alias: m.Alias}
 	}
 	return opts
+}
+
+func configureAgentProviders(agent core.Agent, cfg *config.Config, projectName string, options map[string]any) (int, error) {
+	ps, ok := agent.(core.ProviderSwitcher)
+	if !ok {
+		return 0, nil
+	}
+
+	providerConfigs, err := config.GetEffectiveProjectProviders(cfg, projectName)
+	if err != nil {
+		return 0, err
+	}
+
+	providers := make([]core.ProviderConfig, len(providerConfigs))
+	for i, p := range providerConfigs {
+		providers[i] = core.ProviderConfig{
+			Name:     p.Name,
+			APIKey:   p.APIKey,
+			BaseURL:  p.BaseURL,
+			Model:    p.Model,
+			Models:   convertProviderModels(p.Models),
+			Thinking: p.Thinking,
+			Env:      p.Env,
+		}
+	}
+	ps.SetProviders(providers)
+
+	if active, _ := options["provider"].(string); active != "" {
+		ps.SetActiveProvider(active)
+	} else {
+		ps.SetActiveProvider("")
+	}
+	return len(providers), nil
 }
 
 func convertCoreModels(ms []core.ModelOption) []config.ProviderModelConfig {

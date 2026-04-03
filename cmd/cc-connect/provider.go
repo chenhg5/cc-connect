@@ -41,9 +41,9 @@ func printProviderUsage() {
 	fmt.Println(`Usage: cc-connect provider <command> [options]
 
 Commands:
-  add      Add a new API provider to a project
-  list     List providers for a project
-  remove   Remove a provider from a project
+  add      Add a shared API provider
+  list     List effective providers for a project
+  remove   Remove a shared API provider
   import   Import providers from cc-switch
 
 Examples:
@@ -62,7 +62,7 @@ func initConfigPath(flagValue string) {
 func runProviderAdd(args []string) {
 	fs := flag.NewFlagSet("provider add", flag.ExitOnError)
 	configFile := fs.String("config", "", "path to config file")
-	project := fs.String("project", "", "project name (required)")
+	project := fs.String("project", "", "project name (required for validation)")
 	name := fs.String("name", "", "provider name (required)")
 	apiKey := fs.String("api-key", "", "API key")
 	baseURL := fs.String("base-url", "", "API base URL (optional)")
@@ -93,7 +93,7 @@ func runProviderAdd(args []string) {
 		os.Exit(1)
 	}
 
-	fmt.Printf("✅ Provider %q added to project %q\n", *name, *project)
+	fmt.Printf("✅ Provider %q added to shared config for project %q\n", *name, *project)
 	if *baseURL != "" {
 		fmt.Printf("   Base URL: %s\n", *baseURL)
 	}
@@ -171,7 +171,7 @@ func listProjectProviders(projectName string) {
 func runProviderRemove(args []string) {
 	fs := flag.NewFlagSet("provider remove", flag.ExitOnError)
 	configFile := fs.String("config", "", "path to config file")
-	project := fs.String("project", "", "project name (required)")
+	project := fs.String("project", "", "project name (required for validation)")
 	name := fs.String("name", "", "provider name (required)")
 	_ = fs.Parse(args)
 
@@ -188,7 +188,7 @@ func runProviderRemove(args []string) {
 		os.Exit(1)
 	}
 
-	fmt.Printf("✅ Provider %q removed from project %q\n", *name, *project)
+	fmt.Printf("✅ Provider %q removed from shared config for project %q\n", *name, *project)
 }
 
 // ── Import from cc-switch ──────────────────────────────────────

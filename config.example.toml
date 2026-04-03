@@ -574,19 +574,23 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # Note: When using router, provider settings below are ignored as the router handles model selection.
 # 注意：使用 router 时，下方的 provider 设置将被忽略，因为 router 负责模型选择。
 
-# Active provider (matches a name in [[projects.agent.providers]])
-# 当前激活的 provider（对应下方 providers 中的 name）
+# Active provider (matches a name in top-level [[providers]])
+# 当前激活的 provider（对应顶层 [[providers]] 中的 name）
 # provider = "anthropic"
 
-# API Providers — switch between them via /provider command in chat
+# API Providers — define once at top level and reuse across projects
+# Legacy [[projects.agent.providers]] is still supported for backward compatibility,
+# but new configs should prefer top-level [[providers]].
 # or via CLI: cc-connect provider add --project my-backend --name relay --api-key sk-xxx
-# API Provider 管理 — 可通过聊天命令 /provider 或 CLI 命令切换
+# API Provider 管理 — 顶层定义一次，多项目复用
+# 旧的 [[projects.agent.providers]] 仍兼容读取，但新配置建议使用顶层 [[providers]]
+# 可通过聊天命令 /provider 或 CLI 命令切换
 #
-# [[projects.agent.providers]]
+# [[providers]]
 # name = "anthropic"
 # api_key = "sk-ant-xxx"
 #
-# [[projects.agent.providers]]
+# [[providers]]
 # name = "relay"
 # api_key = "sk-xxx"
 # base_url = "https://api.relay-service.com"
@@ -595,13 +599,13 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # # /model switch [alias] switches to the model; omit to auto-fetch from the API.
 # # 可选：预先配置 /model 命令显示的可用模型列表，格式为 alias - model
 # # 使用 /model switch [alias] 切换模型；留空则自动从 API 获取
-# [[projects.agent.providers.models]]
+# [[providers.models]]
 # model = "claude-sonnet-4-20250514"
 # alias = "sonnet"
-# [[projects.agent.providers.models]]
+# [[providers.models]]
 # model = "claude-opus-4-20250514"
 # alias = "opus"
-# [[projects.agent.providers.models]]
+# [[providers.models]]
 # model = "claude-haiku-3-5-20241022"
 # alias = "haiku"
 #
@@ -610,7 +614,7 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # # Set thinking = "disabled" to auto-rewrite via a local proxy.
 # # 部分第三方 Provider（如硅基流动）不支持 Claude 的 adaptive thinking，
 # # 设置 thinking = "disabled" 后 cc-connect 会通过本地代理自动改写请求。
-# [[projects.agent.providers]]
+# [[providers]]
 # name = "siliconflow"
 # api_key = "sk-xxx"
 # base_url = "https://api.siliconflow.cn"
@@ -621,28 +625,28 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # # MiniMax — 兼容 OpenAI 接口的大模型，支持 1M 超长上下文
 # # Models: MiniMax-M2.7 (flagship, 1M context), MiniMax-M2.7-highspeed, MiniMax-M2.5, MiniMax-M2.5-highspeed
 # # Docs: https://platform.minimaxi.com
-# [[projects.agent.providers]]
+# [[providers]]
 # name = "minimax"
 # api_key = "your-minimax-api-key"
 # base_url = "https://api.minimax.io/v1"
 # model = "MiniMax-M2.7"
 # thinking = "disabled"
-# [[projects.agent.providers.models]]
+# [[providers.models]]
 # model = "MiniMax-M2.7"
 # alias = "m27"
-# [[projects.agent.providers.models]]
+# [[providers.models]]
 # model = "MiniMax-M2.7-highspeed"
 # alias = "m27fast"
-# [[projects.agent.providers.models]]
+# [[providers.models]]
 # model = "MiniMax-M2.5"
 # alias = "m25"
-# [[projects.agent.providers.models]]
+# [[providers.models]]
 # model = "MiniMax-M2.5-highspeed"
 # alias = "m25fast"
 #
 # # For special setups (Bedrock, Vertex, etc.), use the env map:
 # # 特殊环境（Bedrock、Vertex 等）使用 env 字段：
-# [[projects.agent.providers]]
+# [[providers]]
 # name = "bedrock"
 # env = { CLAUDE_CODE_USE_BEDROCK = "1", AWS_PROFILE = "bedrock" }
 
@@ -982,12 +986,12 @@ app_secret = "your-feishu-app-secret"
 # model = "gemini-2.5-flash"
 #
 # # Provider with API key / 使用 API Key 的 Provider
-# [[projects.agent.providers]]
+# [[providers]]
 # name = "google"
 # api_key = "your-gemini-api-key"    # GEMINI_API_KEY
 #
 # # Vertex AI provider / Vertex AI 提供商
-# [[projects.agent.providers]]
+# [[providers]]
 # name = "vertex"
 # env = { GOOGLE_API_KEY = "your-key", GOOGLE_GENAI_USE_VERTEXAI = "true" }
 #
@@ -1028,14 +1032,14 @@ app_secret = "your-feishu-app-secret"
 # Optional: specify Codex reasoning effort / 可选：指定 Codex 推理强度
 # reasoning_effort = "high"  # "minimal" | "low" | "medium" | "high" | "xhigh"
 #
-# # Active provider / 当前激活的 provider
+# # Active provider (matches top-level [[providers]]) / 当前激活的 provider（对应顶层 [[providers]]）
 # # provider = "openai"
 #
-# [[projects.agent.providers]]
+# [[providers]]
 # name = "openai"
 # api_key = "sk-xxx"
 #
-# [[projects.agent.providers]]
+# [[providers]]
 # name = "custom"
 # api_key = "sk-xxx"
 # base_url = "https://custom-api.com/v1"
@@ -1043,7 +1047,7 @@ app_secret = "your-feishu-app-secret"
 #
 # # MiniMax — OpenAI-compatible, works natively with Codex
 # # MiniMax — 兼容 OpenAI 接口，可直接用于 Codex
-# [[projects.agent.providers]]
+# [[providers]]
 # name = "minimax"
 # api_key = "your-minimax-api-key"
 # base_url = "https://api.minimax.io/v1"
@@ -1256,10 +1260,10 @@ app_secret = "your-feishu-app-secret"
 # Optional: specify a model / 可选：指定模型
 # model = "Qwen3-Coder"
 #
-# # Active provider / 当前激活的 provider
+# # Active provider (matches top-level [[providers]]) / 当前激活的 provider（对应顶层 [[providers]]）
 # # provider = "iflow-openai-compatible"
 #
-# [[projects.agent.providers]]
+# [[providers]]
 # name = "iflow-openai-compatible"
 # api_key = "sk-xxx"
 # base_url = "https://api.example.com/v1"

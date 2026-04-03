@@ -137,40 +137,42 @@ mode = "default"
 work_dir = "/path/to/project"
 provider = "anthropic"
 
-[[projects.agent.providers]]
+[[providers]]
 name = "anthropic"
 api_key = "sk-ant-xxx"
 
-[[projects.agent.providers]]
+[[providers]]
 name = "relay"
 api_key = "sk-xxx"
 base_url = "https://api.relay-service.com"
 model = "claude-sonnet-4-20250514"
 
-[[projects.agent.providers.models]]
+[[providers.models]]
 model = "claude-sonnet-4-20250514"
 alias = "sonnet"
 
-[[projects.agent.providers.models]]
+[[providers.models]]
 model = "claude-opus-4-20250514"
 alias = "opus"
 
-[[projects.agent.providers.models]]
+[[providers.models]]
 model = "claude-haiku-3-5-20241022"
 alias = "haiku"
 
 # MiniMax — 兼容 OpenAI 接口，1M 超长上下文
-[[projects.agent.providers]]
+[[providers]]
 name = "minimax"
 api_key = "your-minimax-api-key"
 base_url = "https://api.minimax.io/v1"
 model = "MiniMax-M2.7"
 
 # Bedrock、Vertex 等
-[[projects.agent.providers]]
+[[providers]]
 name = "bedrock"
 env = { CLAUDE_CODE_USE_BEDROCK = "1", AWS_PROFILE = "bedrock" }
 ```
+
+顶层 `[[providers]]` 可以被多个项目复用。旧的 `[[projects.agent.providers]]` 仍兼容读取，但新配置建议优先使用顶层写法。
 
 ### CLI 命令
 
@@ -211,19 +213,19 @@ cc-connect provider import --project my-backend  # 从 cc-switch 导入
 ### 配置模型
 
 ```toml
-[[projects.agent.providers]]
+[[providers]]
 name = "openai"
 api_key = "sk-xxx"
 
-[[projects.agent.providers.models]]
+[[providers.models]]
 model = "gpt-5.3-codex"
 alias = "codex"
 
-[[projects.agent.providers.models]]
+[[providers.models]]
 model = "gpt-5.4"
 alias = "gpt"
 
-[[projects.agent.providers.models]]
+[[providers.models]]
 model = "gpt-5.3-codex-spark"
 alias = "spark"
 ```
@@ -776,6 +778,10 @@ type = "claudecode"  # 或 codex, cursor, gemini, qoder, opencode, iflow
 work_dir = "/path/to/project"
 mode = "default"
 provider = "anthropic"
+
+[[providers]]
+name = "anthropic"
+api_key = "sk-ant-xxx"
 
 [[projects.platforms]]
 type = "feishu"  # 或 dingtalk, telegram, slack, discord, wecom, weixin, line, qq, qqbot

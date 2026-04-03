@@ -137,40 +137,42 @@ Switch between API providers at runtime without restart.
 work_dir = "/path/to/project"
 provider = "anthropic"   # active provider
 
-[[projects.agent.providers]]
+[[providers]]
 name = "anthropic"
 api_key = "sk-ant-xxx"
 
-[[projects.agent.providers]]
+[[providers]]
 name = "relay"
 api_key = "sk-xxx"
 base_url = "https://api.relay-service.com"
 model = "claude-sonnet-4-20250514"
 
-[[projects.agent.providers.models]]
+[[providers.models]]
 model = "claude-sonnet-4-20250514"
 alias = "sonnet"
 
-[[projects.agent.providers.models]]
+[[providers.models]]
 model = "claude-opus-4-20250514"
 alias = "opus"
 
-[[projects.agent.providers.models]]
+[[providers.models]]
 model = "claude-haiku-3-5-20241022"
 alias = "haiku"
 
 # MiniMax — OpenAI-compatible, 1M context
-[[projects.agent.providers]]
+[[providers]]
 name = "minimax"
 api_key = "your-minimax-api-key"
 base_url = "https://api.minimax.io/v1"
 model = "MiniMax-M2.7"
 
 # For Bedrock, Vertex, etc.
-[[projects.agent.providers]]
+[[providers]]
 name = "bedrock"
 env = { CLAUDE_CODE_USE_BEDROCK = "1", AWS_PROFILE = "bedrock" }
 ```
+
+Top-level `[[providers]]` are shared across projects. Legacy `[[projects.agent.providers]]` is still loaded for backward compatibility, but new configs should prefer the top-level form.
 
 ### CLI Commands
 
@@ -211,19 +213,19 @@ Pre-configure a list of selectable models per provider using `[[providers.models
 ### Configure Models
 
 ```toml
-[[projects.agent.providers]]
+[[providers]]
 name = "openai"
 api_key = "sk-xxx"
 
-[[projects.agent.providers.models]]
+[[providers.models]]
 model = "gpt-5.3-codex"
 alias = "codex"
 
-[[projects.agent.providers.models]]
+[[providers.models]]
 model = "gpt-5.4"
 alias = "gpt"
 
-[[projects.agent.providers.models]]
+[[providers.models]]
 model = "gpt-5.3-codex-spark"
 alias = "spark"
 ```
@@ -763,6 +765,10 @@ type = "claudecode"  # or codex, cursor, gemini, qoder, opencode, iflow
 work_dir = "/path/to/project"
 mode = "default"
 provider = "anthropic"
+
+[[providers]]
+name = "anthropic"
+api_key = "sk-ant-xxx"
 
 [[projects.platforms]]
 type = "feishu"  # or dingtalk, telegram, slack, discord, wecom, weixin, line, qq, qqbot
