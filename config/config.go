@@ -212,9 +212,10 @@ type ProjectConfig struct {
 }
 
 type AgentConfig struct {
-	Type      string           `toml:"type"`
-	Options   map[string]any   `toml:"options"`
-	Providers []ProviderConfig `toml:"providers"`
+	Type           string           `toml:"type"`
+	Options        map[string]any   `toml:"options"`
+	Providers      []ProviderConfig `toml:"providers"`
+	PermissionMode string           `toml:"permission_mode,omitempty"` // convenience alias for options.mode
 }
 
 // ProviderModelConfig defines a selectable model entry for a provider,
@@ -281,6 +282,22 @@ func Load(path string) (*Config, error) {
 	cfg.AttachmentSend = strings.ToLower(strings.TrimSpace(cfg.AttachmentSend))
 	if cfg.AttachmentSend == "" {
 		cfg.AttachmentSend = "on"
+	}
+
+	// Propagate convenience agent-level permission_mode into options.mode
+	// so users can write `permission_mode = "yolo"` under [projects.agent]
+	// instead of the nested [projects.agent.options] table.
+	for i := range cfg.Projects {
+		a := &cfg.Projects[i].Agent
+		if a.PermissionMode != "" {
+			if a.Options == nil {
+				a.Options = make(map[string]any)
+			}
+			if _, exists := a.Options["mode"]; !exists {
+				a.Options["mode"] = a.PermissionMode
+			}
+			a.PermissionMode = "" // consumed; avoid duplicate on serialize
+		}
 	}
 
 	if err := cfg.validate(); err != nil {

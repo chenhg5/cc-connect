@@ -1650,3 +1650,86 @@ func TestFormatConfigFile(t *testing.T) {
 		}
 	})
 }
+
+func TestLoad_PermissionModePropagatesToOptions(t *testing.T) {
+	tests := []struct {
+		name     string
+		toml     string
+		wantMode string
+	}{
+		{
+			name: "permission_mode propagated to options",
+			toml: `
+[[projects]]
+name = "test"
+mode = "multi-workspace"
+base_dir = "/tmp/ws"
+
+[projects.agent]
+type = "claudecode"
+permission_mode = "yolo"
+
+[[projects.platforms]]
+type = "telegram"
+[projects.platforms.options]
+token = "test-token"
+`,
+			wantMode: "yolo",
+		},
+		{
+			name: "options mode takes precedence over permission_mode",
+			toml: `
+[[projects]]
+name = "test"
+mode = "multi-workspace"
+base_dir = "/tmp/ws"
+
+[projects.agent]
+type = "claudecode"
+permission_mode = "yolo"
+
+[projects.agent.options]
+mode = "plan"
+
+[[projects.platforms]]
+type = "telegram"
+[projects.platforms.options]
+token = "test-token"
+`,
+			wantMode: "plan",
+		},
+		{
+			name: "no permission_mode leaves options unchanged",
+			toml: `
+[[projects]]
+name = "test"
+
+[projects.agent]
+type = "claudecode"
+
+[projects.agent.options]
+mode = "auto"
+
+[[projects.platforms]]
+type = "telegram"
+[projects.platforms.options]
+token = "test-token"
+`,
+			wantMode: "auto",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfgPath := writeConfigFixture(t, tt.toml)
+			cfg, err := Load(cfgPath)
+			if err != nil {
+				t.Fatalf("Load() error: %v", err)
+			}
+			got, _ := cfg.Projects[0].Agent.Options["mode"].(string)
+			if got != tt.wantMode {
+				t.Errorf("Options[mode] = %q, want %q", got, tt.wantMode)
+			}
+		})
+	}
+}

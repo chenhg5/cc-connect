@@ -439,7 +439,13 @@ level = "info" # debug, info, warn, error
 #
 # [projects.agent]
 # type = "claudecode"
-# permission_mode = "yolo"
+# permission_mode = "yolo"  # Shorthand for [projects.agent.options] mode = "yolo"
+#                            # 等价于在 [projects.agent.options] 中设置 mode = "yolo"
+#
+# # Alternatively, you can set mode under options (takes precedence if both are set):
+# # 也可以在 options 下设置 mode（如果两处都设置了，options 中的优先）:
+# # [projects.agent.options]
+# # mode = "yolo"
 #
 # [[projects.platforms]]
 # type = "slack"
