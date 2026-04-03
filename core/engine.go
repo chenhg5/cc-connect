@@ -2429,18 +2429,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				"tool", event.ToolName,
 			)
 
-			if isAskQuestion {
-				e.sendAskQuestionPrompt(p, replyCtx, event.Questions, 0)
-			} else {
-				permLimit := e.display.ToolMaxLen
-				if permLimit > 0 {
-					permLimit = permLimit * 8 / 5
-				}
-				toolInput := truncateIf(event.ToolInput, permLimit)
-				prompt := fmt.Sprintf(e.i18n.T(MsgPermissionPrompt), event.ToolName, toolInput)
-				e.sendPermissionPrompt(p, replyCtx, prompt, event.ToolName, toolInput)
-			}
-
 			pending := &pendingPermission{
 				RequestID:    event.RequestID,
 				ToolName:     event.ToolName,
@@ -2452,6 +2440,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.mu.Lock()
 			state.pending = pending
 			state.mu.Unlock()
+
+			if isAskQuestion {
+				e.sendAskQuestionPrompt(p, replyCtx, event.Questions, 0)
+			} else {
+				permLimit := e.display.ToolMaxLen
+				if permLimit > 0 {
+					permLimit = permLimit * 8 / 5
+				}
+				toolInput := truncateIf(event.ToolInput, permLimit)
+				prompt := fmt.Sprintf(e.i18n.T(MsgPermissionPrompt), event.ToolName, toolInput)
+				e.sendPermissionPrompt(p, replyCtx, prompt, event.ToolName, toolInput)
+			}
 
 			// Stop idle timer while waiting for user permission response;
 			// the user may take a long time to decide, and we don't want

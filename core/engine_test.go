@@ -268,6 +268,21 @@ func (p *stubInlineButtonPlatform) SendWithButtons(_ context.Context, _ any, con
 	return nil
 }
 
+type callbackInlineButtonPlatform struct {
+	stubInlineButtonPlatform
+	onSend func()
+}
+
+func (p *callbackInlineButtonPlatform) SendWithButtons(ctx context.Context, replyCtx any, content string, buttons [][]ButtonOption) error {
+	if err := p.stubInlineButtonPlatform.SendWithButtons(ctx, replyCtx, content, buttons); err != nil {
+		return err
+	}
+	if p.onSend != nil {
+		p.onSend()
+	}
+	return nil
+}
+
 type stubCardPlatform struct {
 	stubPlatformEngine
 	repliedCards []*Card
@@ -4271,6 +4286,29 @@ func (s *controllableAgentSession) Close() error {
 	return nil
 }
 
+type recordingControllablePermissionSession struct {
+	*controllableAgentSession
+	mu         sync.Mutex
+	lastID     string
+	lastResult PermissionResult
+	calls      int
+}
+
+func newRecordingControllablePermissionSession(id string) *recordingControllablePermissionSession {
+	return &recordingControllablePermissionSession{
+		controllableAgentSession: newControllableSession(id),
+	}
+}
+
+func (s *recordingControllablePermissionSession) RespondPermission(id string, res PermissionResult) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastID = id
+	s.lastResult = res
+	s.calls++
+	return nil
+}
+
 // controllableAgent lets tests control which session is returned by StartSession.
 type controllableAgent struct {
 	nextSession AgentSession
@@ -5233,6 +5271,141 @@ func TestProcessInteractiveEvents_PermissionWhileSendBlocked(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("processInteractiveEvents did not complete")
+	}
+}
+
+func TestProcessInteractiveEvents_PermissionCallbackDuringPromptSend(t *testing.T) {
+	e := NewEngine("test", &stubAgent{}, nil, "", LangEnglish)
+	key := "telegram:user1"
+	session := e.sessions.GetOrCreateActive(key)
+	rec := newRecordingControllablePermissionSession("perm-callback")
+
+	var handled bool
+	p := &callbackInlineButtonPlatform{
+		stubInlineButtonPlatform: stubInlineButtonPlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}},
+	}
+	p.onSend = func() {
+		handled = e.handlePendingPermission(p, &Message{
+			SessionKey: key,
+			UserID:     "user1",
+			ReplyCtx:   "ctx",
+		}, "allow")
+	}
+
+	state := &interactiveState{
+		agentSession: rec,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, key, "m1", time.Now(), nil, nil, "ctx")
+		close(done)
+	}()
+
+	rec.events <- Event{
+		Type:         EventPermissionRequest,
+		RequestID:    "req-inline",
+		ToolName:     "write_file",
+		ToolInput:    "/tmp/x",
+		ToolInputRaw: map[string]any{"path": "/tmp/x"},
+	}
+	rec.events <- Event{Type: EventResult, Content: "ok", Done: true}
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("processInteractiveEvents did not complete; pending permission was likely not set before prompt send")
+	}
+
+	if !handled {
+		t.Fatal("expected inline callback to resolve pending permission during prompt send")
+	}
+	if rec.calls != 1 {
+		t.Fatalf("expected 1 RespondPermission call, got %d", rec.calls)
+	}
+	if rec.lastID != "req-inline" {
+		t.Fatalf("RespondPermission id = %q, want %q", rec.lastID, "req-inline")
+	}
+	if rec.lastResult.Behavior != "allow" {
+		t.Fatalf("RespondPermission behavior = %q, want %q", rec.lastResult.Behavior, "allow")
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.pending != nil {
+		t.Fatal("expected pending permission to be cleared")
+	}
+}
+
+func TestProcessInteractiveEvents_AskQuestionCallbackDuringPromptSend(t *testing.T) {
+	e := NewEngine("test", &stubAgent{}, nil, "", LangEnglish)
+	key := "telegram:user2"
+	session := e.sessions.GetOrCreateActive(key)
+	rec := newRecordingControllablePermissionSession("askq-callback")
+
+	var handled bool
+	p := &callbackInlineButtonPlatform{
+		stubInlineButtonPlatform: stubInlineButtonPlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}},
+	}
+	p.onSend = func() {
+		handled = e.handlePendingPermission(p, &Message{
+			SessionKey: key,
+			UserID:     "user2",
+			ReplyCtx:   "ctx",
+		}, "2")
+	}
+
+	state := &interactiveState{
+		agentSession: rec,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, key, "m2", time.Now(), nil, nil, "ctx")
+		close(done)
+	}()
+
+	rec.events <- Event{
+		Type:         EventPermissionRequest,
+		RequestID:    "req-ask",
+		ToolName:     "AskUserQuestion",
+		ToolInputRaw: map[string]any{"questions": []any{map[string]any{"question": "Which?"}}},
+		Questions:    testQuestions(),
+	}
+	rec.events <- Event{Type: EventResult, Content: "ok", Done: true}
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("processInteractiveEvents did not complete; pending ask-user-question was likely not set before prompt send")
+	}
+
+	if !handled {
+		t.Fatal("expected inline callback to resolve pending ask-user-question during prompt send")
+	}
+	if rec.calls != 1 {
+		t.Fatalf("expected 1 RespondPermission call, got %d", rec.calls)
+	}
+	answers, ok := rec.lastResult.UpdatedInput["answers"].(map[string]any)
+	if !ok {
+		t.Fatal("expected answers in updatedInput")
+	}
+	if answers["0"] != "SQLite" {
+		t.Fatalf("expected answer=SQLite, got %v", answers["0"])
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.pending != nil {
+		t.Fatal("expected pending ask-user-question to be cleared")
 	}
 }
 
