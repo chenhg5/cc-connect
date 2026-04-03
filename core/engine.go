@@ -7283,8 +7283,8 @@ func (e *Engine) renderCronCard(sessionKey string, userID string) *Card {
 			fmtStr := cronTimeFormat(nextRun, now)
 			sb.WriteString(e.i18n.Tf(MsgCronNextRunLabel, nextRun.Format(fmtStr)))
 		}
-		if !j.LastRun.IsZero() {
-			fmtStr := cronTimeFormat(j.LastRun, now)
+		if j.LastRun != nil && !j.LastRun.IsZero() {
+			fmtStr := cronTimeFormat(*j.LastRun, now)
 			sb.WriteString(e.i18n.Tf(MsgCronLastRunLabel, j.LastRun.Format(fmtStr)))
 			if j.LastError != "" {
 				sb.WriteString(e.i18n.Tf(MsgCronFailedSuffix, truncateStr(j.LastError, 40)))
@@ -7732,8 +7732,8 @@ func (e *Engine) cmdCronList(p Platform, msg *Message) {
 			sb.WriteString(e.i18n.Tf(MsgCronNextRunLabel, nextRun.Format(fmtStr)))
 		}
 
-		if !j.LastRun.IsZero() {
-			fmtStr := cronTimeFormat(j.LastRun, now)
+		if j.LastRun != nil && !j.LastRun.IsZero() {
+			fmtStr := cronTimeFormat(*j.LastRun, now)
 			sb.WriteString(e.i18n.Tf(MsgCronLastRunLabel, j.LastRun.Format(fmtStr)))
 			if j.LastError != "" {
 				sb.WriteString(fmt.Sprintf(" (failed: %s)", truncateStr(j.LastError, 40)))

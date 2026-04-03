@@ -617,6 +617,9 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 
 		if body.Quiet != nil {
 			e.SetDefaultQuiet(*body.Quiet)
+			e.quietMu.Lock()
+			e.quiet = *body.Quiet
+			e.quietMu.Unlock()
 		}
 		if body.Language != nil {
 			switch *body.Language {

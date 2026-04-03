@@ -35,7 +35,7 @@ type CronJob struct {
 	Mode        string    `json:"mode,omitempty"`         // permission mode override for this job; "" = use project default
 	TimeoutMins *int      `json:"timeout_mins,omitempty"` // nil = default 30m wait; 0 = no limit; >0 = minutes
 	CreatedAt   time.Time `json:"created_at"`
-	LastRun     time.Time `json:"last_run,omitempty"`
+	LastRun     *time.Time `json:"last_run,omitempty"`
 	LastError   string    `json:"last_error,omitempty"`
 }
 
@@ -124,6 +124,11 @@ func (s *CronStore) load() {
 	if err := json.Unmarshal(data, &s.jobs); err != nil {
 		slog.Error("cron: failed to load jobs", "path", s.path, "error", err)
 	}
+	for _, j := range s.jobs {
+		if j.LastRun != nil && j.LastRun.Year() <= 1 {
+			j.LastRun = nil
+		}
+	}
 }
 
 func (s *CronStore) save() error {
@@ -206,7 +211,8 @@ func (s *CronStore) MarkRun(id string, err error) {
 	defer s.mu.Unlock()
 	for _, j := range s.jobs {
 		if j.ID == id {
-			j.LastRun = time.Now()
+			now := time.Now()
+			j.LastRun = &now
 			if err != nil {
 				j.LastError = err.Error()
 			} else {

@@ -352,27 +352,25 @@ export default function CronList() {
               {/* Info */}
               <div className="space-y-1 text-xs text-gray-500 dark:text-gray-400">
                 <div className="flex items-center gap-1.5">
-                  <span className="font-medium w-12 shrink-0 text-gray-400">{t('cron.project')}</span>
+                  <span className="font-medium w-16 shrink-0 text-gray-400">{t('cron.project')}</span>
                   <span className="truncate">{job.project}</span>
                 </div>
                 {job.prompt && (
                   <div className="flex items-start gap-1.5">
-                    <span className="font-medium w-12 shrink-0 text-gray-400">{t('cron.prompt')}</span>
+                    <span className="font-medium w-16 shrink-0 text-gray-400">{t('cron.prompt')}</span>
                     <span className="line-clamp-2">{job.prompt}</span>
                   </div>
                 )}
                 {job.exec && (
                   <div className="flex items-center gap-1.5">
-                    <span className="font-medium w-12 shrink-0 text-gray-400">{t('cron.exec')}</span>
+                    <span className="font-medium w-16 shrink-0 text-gray-400">{t('cron.exec')}</span>
                     <code className="truncate text-[11px]">{job.exec}</code>
                   </div>
                 )}
-                {job.last_run && (
-                  <div className="flex items-center gap-1.5 pt-1 border-t border-gray-100 dark:border-white/[0.04] mt-1">
-                    <span className="font-medium w-12 shrink-0 text-gray-400">{t('cron.lastRun')}</span>
-                    <span>{formatTime(job.last_run)}</span>
-                  </div>
-                )}
+                <div className="flex items-center gap-1.5 pt-1 border-t border-gray-100 dark:border-white/[0.04] mt-1">
+                  <span className="font-medium w-16 shrink-0 text-gray-400">{t('cron.lastRun')}</span>
+                  <span>{job.last_run ? formatTime(job.last_run) : '-'}</span>
+                </div>
               </div>
 
               {job.last_error && (
