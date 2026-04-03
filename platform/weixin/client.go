@@ -181,7 +181,8 @@ func (c *apiClient) sendMessage(ctx context.Context, msg *sendMessageReq) error 
 	}
 	if resp.Ret != 0 {
 		slog.Warn("weixin: sendMessage declined by API",
-			"ret", resp.Ret, "errcode", resp.Errcode, "errmsg", resp.Errmsg)
+			"ret", resp.Ret, "errcode", resp.Errcode, "errmsg", resp.Errmsg,
+			"content_len", len(payload))
 		return fmt.Errorf("weixin: sendMessage: ret=%d errcode=%d errmsg=%s",
 			resp.Ret, resp.Errcode, resp.Errmsg)
 	}
