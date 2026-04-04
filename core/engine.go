@@ -3452,6 +3452,17 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	session := sessions.GetOrCreateActive(msg.SessionKey)
 	session.SetAgentInfo(matched.ID, agent.Name(), matched.Summary)
 	session.ClearHistory()
+
+	// Sync recent history from agent if supported
+	if hp, ok := agent.(HistoryProvider); ok {
+		if history, err := hp.GetSessionHistory(e.ctx, matched.ID, 10); err == nil && len(history) > 0 {
+			for _, h := range history {
+				session.AddHistory(h.Role, h.Content)
+			}
+			slog.Debug("cmdSwitch: synced history from agent", "session_key", msg.SessionKey, "entries", len(history))
+		}
+	}
+
 	sessions.Save()
 
 	shortID := matched.ID

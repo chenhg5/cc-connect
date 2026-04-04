@@ -475,6 +475,10 @@ type sessionMessage struct {
 }
 
 // textContent extracts text from the flexible content field.
+// Gemini CLI can serialize content as:
+// - a plain string
+// - an array of {text: "..."} parts
+// - an array of objects with nested structures
 func (m *sessionMessage) textContent() string {
 	if len(m.RawContent) == 0 {
 		return ""
@@ -484,7 +488,20 @@ func (m *sessionMessage) textContent() string {
 	if json.Unmarshal(m.RawContent, &s) == nil {
 		return s
 	}
-	// Try as array of {text: "..."} parts
+	// Try as array of objects with "text" field
+	var rawParts []map[string]any
+	if json.Unmarshal(m.RawContent, &rawParts) == nil {
+		var texts []string
+		for _, p := range rawParts {
+			if txt, ok := p["text"].(string); ok && txt != "" {
+				texts = append(texts, txt)
+			}
+		}
+		if len(texts) > 0 {
+			return strings.Join(texts, "\n")
+		}
+	}
+	// Fallback: try as array of struct{Text string}
 	var parts []struct {
 		Text string `json:"text"`
 	}
@@ -601,4 +618,74 @@ func extractSessionSummary(sf *sessionFile) string {
 		return sf.SessionID[:12] + "..."
 	}
 	return sf.SessionID
+}
+
+// GetSessionHistory implements core.HistoryProvider to retrieve conversation history
+// from a Gemini CLI session file.
+func (a *Agent) GetSessionHistory(ctx context.Context, sessionID string, limit int) ([]core.HistoryEntry, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("gemini: cannot determine home dir: %w", err)
+	}
+
+	slug := geminiProjectSlug(a.workDir)
+	chatsDir := filepath.Join(homeDir, ".gemini", "tmp", slug, "chats")
+
+	entries, err := os.ReadDir(chatsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("gemini: read chats dir: %w", err)
+	}
+
+	// Find the session file matching sessionID
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+
+		data, err := os.ReadFile(filepath.Join(chatsDir, entry.Name()))
+		if err != nil {
+			continue
+		}
+
+		var sf sessionFile
+		if json.Unmarshal(data, &sf) != nil || sf.SessionID != sessionID {
+			continue
+		}
+
+		// Skip subagent sessions
+		if sf.Kind == "subagent" {
+			continue
+		}
+
+		// Extract history entries from messages
+		var history []core.HistoryEntry
+		for _, msg := range sf.Messages {
+			text := strings.TrimSpace(msg.textContent())
+			if text == "" {
+				continue
+			}
+
+			role := "assistant"
+			if msg.Type == "user" {
+				role = "user"
+			}
+
+			history = append(history, core.HistoryEntry{
+				Role:    role,
+				Content: text,
+			})
+		}
+
+		// Apply limit (return most recent entries)
+		if limit > 0 && len(history) > limit {
+			history = history[len(history)-limit:]
+		}
+
+		return history, nil
+	}
+
+	return nil, fmt.Errorf("gemini: session not found: %s", sessionID)
 }
