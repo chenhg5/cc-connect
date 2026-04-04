@@ -904,6 +904,7 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		}
 		iKey := fmt.Sprintf("%s#cron:%s", runSessionKey, session.ID)
 		e.processInteractiveMessageWith(effectivePlatform, msg, session, e.agent, e.sessions, iKey, "", runSessionKey)
+		e.cleanupInteractiveState(iKey)
 		return nil
 	}
 
@@ -2591,8 +2592,16 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				state.mu.Lock()
 				state.lastAutoCompressAt = time.Now()
+				tokenEst := state.lastAutoCompressTokens
 				state.mu.Unlock()
 				slog.Info("auto-compress: triggering", "session", sessionKey)
+
+				// Notify user before compressing so they know the context is about to change.
+				compressNotice := e.i18n.T(MsgCompressing)
+				if tokenEst > 0 {
+					compressNotice = fmt.Sprintf("%s (~%dk tokens)", compressNotice, tokenEst/1000)
+				}
+				e.send(state.platform, state.replyCtx, compressNotice)
 
 				// Run compress inline while the session is still locked.
 				e.runCompress(state, session, sessions, sessionKey, state.platform, state.replyCtx, true)
