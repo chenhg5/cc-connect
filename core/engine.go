@@ -5818,14 +5818,37 @@ func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images
 	}
 	e.interactiveMu.Unlock()
 
-	if state == nil {
-		return fmt.Errorf("no active session found (key=%q)", sessionKey)
+	var p Platform
+	var replyCtx any
+	if state != nil {
+		state.mu.Lock()
+		p = state.platform
+		replyCtx = state.replyCtx
+		state.mu.Unlock()
 	}
 
-	state.mu.Lock()
-	p := state.platform
-	replyCtx := state.replyCtx
-	state.mu.Unlock()
+	if p == nil && sessionKey != "" {
+		platformName := ""
+		if idx := strings.Index(sessionKey, ":"); idx > 0 {
+			platformName = sessionKey[:idx]
+		}
+		for _, candidate := range e.platforms {
+			if candidate.Name() != platformName {
+				continue
+			}
+			rc, ok := candidate.(ReplyContextReconstructor)
+			if !ok {
+				return fmt.Errorf("platform %q does not support proactive messaging", platformName)
+			}
+			reconstructed, err := rc.ReconstructReplyCtx(sessionKey)
+			if err != nil {
+				return fmt.Errorf("reconstruct reply context: %w", err)
+			}
+			p = candidate
+			replyCtx = reconstructed
+			break
+		}
+	}
 
 	if p == nil {
 		return fmt.Errorf("no active session found (key=%q)", sessionKey)
@@ -5863,7 +5886,7 @@ func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images
 		if err := p.Send(e.ctx, replyCtx, message); err != nil {
 			return err
 		}
-		if len(images) > 0 || len(files) > 0 {
+		if state != nil && (len(images) > 0 || len(files) > 0) {
 			state.mu.Lock()
 			state.sideText = strings.TrimSpace(message)
 			state.mu.Unlock()
