@@ -87,6 +87,8 @@ func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode strin
 		args = append(args, "--append-system-prompt", sysPrompt)
 	}
 
+	args = append(args, "--max-context-tokens", "900000")
+
 	slog.Debug("claudeSession: starting", "args", core.RedactArgs(args), "dir", workDir, "mode", mode)
 
 	cmd := exec.CommandContext(sessionCtx, "claude", args...)
