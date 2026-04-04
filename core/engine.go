@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -661,6 +662,7 @@ var privilegedCommands = map[string]bool{
 	"restart": true,
 	"upgrade": true,
 	"web":     true,
+	"diff":    true,
 }
 
 // isAdmin checks whether the given user ID is authorized for privileged commands.
@@ -2845,6 +2847,7 @@ var builtinCommands = []struct {
 	{[]string{"workspace", "ws"}, "workspace"},
 	{[]string{"whoami", "myid"}, "whoami"},
 	{[]string{"web"}, "web"},
+	{[]string{"diff"}, "diff"},
 }
 
 // isBtwCommand checks if a trimmed message starts with a /btw command.
@@ -3026,6 +3029,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdSearch(p, msg, args)
 	case "shell":
 		e.cmdShell(p, msg, raw)
+	case "diff":
+		e.cmdDiff(p, msg, raw)
 	case "dir":
 		e.cmdDir(p, msg, args)
 	case "tts":
@@ -3576,6 +3581,114 @@ func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
 
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf("$ %s\n```\n%s\n```", shellCmd, result))
 	}()
+}
+
+func (e *Engine) cmdDiff(p Platform, msg *Message, raw string) {
+	// Parse optional target: /diff [target]
+	diffTarget := ""
+	if strings.HasPrefix(strings.ToLower(raw), "/diff ") {
+		diffTarget = strings.TrimSpace(raw[6:])
+	}
+
+	// Resolve working directory (same pattern as cmdShell)
+	var workDir string
+	if e.multiWorkspace {
+		channelKey := effectiveWorkspaceChannelKey(msg)
+		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
+			workDir = normalizeWorkspacePath(b.Workspace)
+		}
+	}
+	if workDir == "" {
+		if wd, ok := e.agent.(interface{ GetWorkDir() string }); ok {
+			workDir = wd.GetWorkDir()
+		}
+	}
+	if workDir == "" {
+		workDir, _ = os.Getwd()
+	}
+
+	go func() {
+		ctx, cancel := context.WithTimeout(e.ctx, 60*time.Second)
+		defer cancel()
+
+		// Get current branch name and short commit ID
+		branchCmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
+		branchCmd.Dir = workDir
+		branchOut, _ := branchCmd.Output()
+		currentBranch := strings.TrimSpace(string(branchOut))
+		if currentBranch == "" {
+			currentBranch = "unknown"
+		}
+
+		commitCmd := exec.CommandContext(ctx, "git", "rev-parse", "--short", "HEAD")
+		commitCmd.Dir = workDir
+		commitOut, _ := commitCmd.Output()
+		commitID := strings.TrimSpace(string(commitOut))
+		if commitID == "" {
+			commitID = "0000000"
+		}
+
+		gitArgs := []string{"diff"}
+		if diffTarget != "" {
+			gitArgs = append(gitArgs, diffTarget)
+		}
+		gitCmd := exec.CommandContext(ctx, "git", gitArgs...)
+		gitCmd.Dir = workDir
+		diffOutput, err := gitCmd.Output()
+
+		if ctx.Err() == context.DeadlineExceeded {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandTimeout), "git diff"))
+			return
+		}
+		if err != nil && len(diffOutput) == 0 {
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
+			return
+		}
+
+		target := diffTarget
+		if target == "" {
+			target = "HEAD"
+		}
+		if len(strings.TrimSpace(string(diffOutput))) == 0 {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgDiffEmpty), target))
+			return
+		}
+
+		// Try diff2html + FileSender
+		if fileSender, ok := p.(FileSender); ok {
+			title := fmt.Sprintf("%s vs %s", currentBranch, target)
+			htmlData, err := e.diff2html(ctx, diffOutput, workDir, title)
+			if err == nil {
+				fileName := fmt.Sprintf("%s-%s.html", currentBranch, commitID)
+				_ = e.waitOutgoing(p)
+				if err := fileSender.SendFile(e.ctx, msg.ReplyCtx, FileAttachment{
+					MimeType: "text/html", Data: htmlData, FileName: fileName,
+				}); err == nil {
+					return
+				}
+			}
+			if errors.Is(err, exec.ErrNotFound) {
+				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDiffNoDiff2HTML))
+			}
+		}
+
+		// Fallback: plain text diff
+		result := strings.TrimSpace(string(diffOutput))
+		if runes := []rune(result); len(runes) > 4000 {
+			result = string(runes[:3997]) + "..."
+		}
+		e.reply(p, msg.ReplyCtx, "```diff\n"+result+"\n```")
+	}()
+}
+
+func (e *Engine) diff2html(ctx context.Context, diff []byte, workDir, title string) ([]byte, error) {
+	if _, err := exec.LookPath("diff2html"); err != nil {
+		return nil, err
+	}
+	cmd := exec.CommandContext(ctx, "diff2html", "-i", "stdin", "-o", "stdout", "--title", title)
+	cmd.Dir = workDir
+	cmd.Stdin = bytes.NewReader(diff)
+	return cmd.Output()
 }
 
 // dirApply applies /dir mutations (same semantics as cmdDir). sessionKey is used for GetOrCreateActive.
