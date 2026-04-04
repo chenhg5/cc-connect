@@ -306,9 +306,11 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 			return p.onBotMenu(event)
 		})
 
-	// Lark international version uses Webhook mode, not WebSocket long connection
-	// Feishu domestic version supports WebSocket long connection
-	if p.platformName == "lark" {
+	// Lark international version now supports WebSocket long connection (since SDK v3.5.3).
+	// Use WebSocket by default for all platforms; only fallback to webhook if explicitly configured.
+	// Users can force webhook mode by setting encrypt_key + port + callback_path together.
+	if p.encryptKey != "" && p.port != "" && p.callbackPath != "" {
+		slog.Info(p.tag()+": using webhook mode (encrypt_key configured)", "port", p.port)
 		return p.startWebhookMode()
 	}
 
