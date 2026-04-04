@@ -488,6 +488,10 @@ const (
 	MsgBuiltinCmdBind      MsgKey = "bind"
 	MsgBuiltinCmdShell     MsgKey = "shell"
 	MsgBuiltinCmdDir       MsgKey = "dir"
+	MsgBuiltinCmdDiff      MsgKey = "diff"
+
+	MsgDiffEmpty           MsgKey = "diff_empty"
+	MsgDiffNoDiff2HTML     MsgKey = "diff_no_diff2html"
 
 	MsgDirChanged          MsgKey = "dir_changed"
 	MsgDirCurrent          MsgKey = "dir_current"
@@ -3284,6 +3288,27 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "查看、切換或重置 Agent 工作目錄，參數: <路徑>",
 		LangJapanese:           "エージェントの作業ディレクトリを表示/変更/リセット、引数: <パス>",
 		LangSpanish:            "Ver, cambiar o restablecer el directorio de trabajo del agente, arg: <ruta>",
+	},
+	MsgBuiltinCmdDiff: {
+		LangEnglish:            "Generate git diff as HTML file, arg: [target]",
+		LangChinese:            "生成 git diff 并以 HTML 文件发送，参数: [目标]",
+		LangTraditionalChinese: "產生 git diff 並以 HTML 檔案傳送，參數: [目標]",
+		LangJapanese:           "git diff を HTML ファイルで生成、引数: [ターゲット]",
+		LangSpanish:            "Generar git diff como archivo HTML, arg: [objetivo]",
+	},
+	MsgDiffEmpty: {
+		LangEnglish:            "No diff — clean working tree (or no changes vs `%s`).",
+		LangChinese:            "无差异 — 工作区干净（或与 `%s` 无变化）。",
+		LangTraditionalChinese: "無差異 — 工作區乾淨（或與 `%s` 無變化）。",
+		LangJapanese:           "差分なし — 作業ツリーはクリーン（または `%s` との差分なし）。",
+		LangSpanish:            "Sin diferencias — árbol limpio (o sin cambios vs `%s`).",
+	},
+	MsgDiffNoDiff2HTML: {
+		LangEnglish:            "`diff2html` is not installed, sending plain text diff.\nInstall: `npm install -g diff2html-cli`",
+		LangChinese:            "未安装 `diff2html`，将以纯文本发送差异。\n安装命令: `npm install -g diff2html-cli`",
+		LangTraditionalChinese: "未安裝 `diff2html`，將以純文字傳送差異。\n安裝指令: `npm install -g diff2html-cli`",
+		LangJapanese:           "`diff2html` がインストールされていません。プレーンテキストで差分を送信します。\nインストール: `npm install -g diff2html-cli`",
+		LangSpanish:            "`diff2html` no está instalado, enviando diff en texto plano.\nInstalar: `npm install -g diff2html-cli`",
 	},
 	MsgDirChanged: {
 		LangEnglish:            "✅ Work directory changed to: `%s`\nThe next session will start in this directory.",
