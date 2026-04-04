@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -8077,9 +8078,27 @@ func (e *Engine) executeShellCommand(p Platform, msg *Message, cmd *CustomComman
 	ctx, cancel := context.WithTimeout(e.ctx, 60*time.Second)
 	defer cancel()
 
-	// Execute command using shell
-	shellCmd := exec.CommandContext(ctx, "sh", "-c", execCmd)
+	// Execute command using the native shell so Windows config commands work too.
+	var shellCmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		shellCmd = exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", execCmd)
+	} else {
+		shellCmd = exec.CommandContext(ctx, "sh", "-c", execCmd)
+	}
 	shellCmd.Dir = workDir
+	envVars := []string{
+		"CC_PROJECT=" + e.name,
+		"CC_SESSION_KEY=" + msg.SessionKey,
+	}
+	if exePath, err := os.Executable(); err == nil {
+		binDir := filepath.Dir(exePath)
+		if curPath := os.Getenv("PATH"); curPath != "" {
+			envVars = append(envVars, "PATH="+binDir+string(filepath.ListSeparator)+curPath)
+		} else {
+			envVars = append(envVars, "PATH="+binDir)
+		}
+	}
+	shellCmd.Env = MergeEnv(os.Environ(), envVars)
 	output, err := shellCmd.CombinedOutput()
 
 	if ctx.Err() == context.DeadlineExceeded {
