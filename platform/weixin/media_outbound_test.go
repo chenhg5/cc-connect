@@ -3,7 +3,6 @@ package weixin
 import (
 	"encoding/base64"
 	"encoding/hex"
-	"strings"
 	"testing"
 )
 
