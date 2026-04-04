@@ -45,8 +45,9 @@ type Platform struct {
 	longPollMS   int
 	accountLabel string
 
-	httpClient *http.Client
-	api        *apiClient
+	httpClient    *http.Client
+	cdnHttpClient *http.Client // 专用于 CDN 上传/下载，不走代理
+	api           *apiClient
 
 	mu       sync.RWMutex
 	handler  core.MessageHandler
@@ -135,16 +136,23 @@ func New(opts map[string]any) (core.Platform, error) {
 		slog.Info("weixin: using proxy", "proxy", u.Redacted())
 	}
 
+	// CDN 客户端：微信国内 CDN 必须直连，绕过环境变量中的代理（如 HTTPS_PROXY）
+	cdnHttpClient := &http.Client{
+		Timeout:   60 * time.Second,
+		Transport: &http.Transport{Proxy: nil},
+	}
+
 	p := &Platform{
-		token:        token,
-		baseURL:      baseURL,
-		cdnBaseURL:   cdnBaseURL,
-		allowFrom:    allowFrom,
-		routeTag:     routeTag,
-		stateDir:     stateDir,
-		longPollMS:   lp,
-		accountLabel: accountLabel,
-		httpClient:   httpClient,
+		token:         token,
+		baseURL:       baseURL,
+		cdnBaseURL:    cdnBaseURL,
+		allowFrom:     allowFrom,
+		routeTag:      routeTag,
+		stateDir:      stateDir,
+		longPollMS:    lp,
+		accountLabel:  accountLabel,
+		httpClient:    httpClient,
+		cdnHttpClient: cdnHttpClient,
 		tokens:       make(map[string]string),
 		dedup:        make(map[string]time.Time),
 	}
