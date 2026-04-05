@@ -20,6 +20,22 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
+// claudeSettings represents the .claude/settings.json structure.
+type claudeSettings struct {
+	Hooks *claudeHooks `json:"hooks,omitempty"`
+}
+
+// claudeHooks represents the hooks section in settings.json.
+type claudeHooks struct {
+	UserPromptSubmit []claudeHookConfig `json:"UserPromptSubmit,omitempty"`
+}
+
+// claudeHookConfig represents a single hook configuration.
+type claudeHookConfig struct {
+	Command string `json:"command"`
+	Timeout int    `json:"timeout,omitempty"` // milliseconds; default 5000
+}
+
 // claudeSession manages a long-running Claude Code process using
 // --input-format stream-json and --permission-prompt-tool stdio.
 //
@@ -392,6 +408,10 @@ func (cs *claudeSession) Send(prompt string, images []core.ImageAttachment, file
 		return fmt.Errorf("session process is not running")
 	}
 
+	// Execute UserPromptSubmit hooks before sending (stream-json mode only)
+	// Hooks receive {"message": prompt} via stdin, same as CLI mode.
+	executeUserPromptSubmitHooks(cs.ctx, cs.workDir, prompt)
+
 	if len(images) == 0 && len(files) == 0 {
 		return cs.writeJSON(map[string]any{
 			"type":    "user",
@@ -588,5 +608,72 @@ func filterEnv(env []string, key string) []string {
 		}
 	}
 	return out
+}
+
+// loadClaudeSettings loads .claude/settings.json from the workDir.
+func loadClaudeSettings(workDir string) (*claudeSettings, error) {
+	settingsPath := filepath.Join(workDir, ".claude", "settings.json")
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil // no settings file is not an error
+		}
+		return nil, fmt.Errorf("read settings.json: %w", err)
+	}
+
+	var settings claudeSettings
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return nil, fmt.Errorf("parse settings.json: %w", err)
+	}
+	return &settings, nil
+}
+
+// executeUserPromptSubmitHooks runs all configured UserPromptSubmit hooks
+// with the user's prompt passed via stdin as JSON.
+func executeUserPromptSubmitHooks(ctx context.Context, workDir, prompt string) {
+	settings, err := loadClaudeSettings(workDir)
+	if err != nil {
+		slog.Debug("claudeSession: failed to load settings for hooks", "error", err)
+		return
+	}
+	if settings == nil || settings.Hooks == nil || len(settings.Hooks.UserPromptSubmit) == 0 {
+		return // no hooks configured
+	}
+
+	// Prepare stdin payload
+ stdinPayload, err := json.Marshal(map[string]string{"message": prompt})
+	if err != nil {
+		slog.Error("claudeSession: marshal hook stdin failed", "error", err)
+		return
+	}
+
+	for _, hook := range settings.Hooks.UserPromptSubmit {
+		if hook.Command == "" {
+			continue
+		}
+		timeout := hook.Timeout
+		if timeout <= 0 {
+			timeout = 5000 // default 5 seconds
+		}
+
+		hookCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Millisecond)
+		defer cancel()
+
+		cmd := exec.CommandContext(hookCtx, "sh", "-c", hook.Command)
+		cmd.Dir = workDir
+		cmd.Stdin = bytes.NewReader(stdinPayload)
+		cmd.Stdout = nil // hooks output is not used
+		cmd.Stderr = nil // hooks stderr is ignored
+
+		if err := cmd.Run(); err != nil {
+			if hookCtx.Err() == context.DeadlineExceeded {
+				slog.Warn("claudeSession: hook timed out", "command", hook.Command, "timeout_ms", timeout)
+			} else {
+				slog.Warn("claudeSession: hook failed", "command", hook.Command, "error", err)
+			}
+			continue
+		}
+		slog.Debug("claudeSession: hook executed", "command", hook.Command)
+	}
 }
 
