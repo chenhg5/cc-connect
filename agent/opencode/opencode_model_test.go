@@ -341,6 +341,68 @@ func TestAvailableModels_CustomCmdUsedForDiscovery(t *testing.T) {
 	}
 }
 
+// ---------- DeleteSession tests ----------
+
+// writeFakeDeleteBin writes a temporary shell script that acts as a fake opencode CLI.
+// When invoked with "session delete <id>", it either succeeds (exitCode=0) or fails.
+// If wantID is non-empty the script validates the session ID matches.
+func writeFakeDeleteBin(t *testing.T, wantID string, exitCode int, stderr string) string {
+	t.Helper()
+	tmpDir := t.TempDir()
+	name := filepath.Join(tmpDir, "fake-opencode")
+
+	var body strings.Builder
+	body.WriteString("#!/bin/sh\n")
+	body.WriteString("if [ \"$1\" = \"session\" ] && [ \"$2\" = \"delete\" ]; then\n")
+	if wantID != "" {
+		fmt.Fprintf(&body, "  if [ \"$3\" != \"%s\" ]; then\n", wantID)
+		fmt.Fprintf(&body, "    printf 'unexpected session id: %%s\\n' \"$3\" >&2\n")
+		body.WriteString("    exit 1\n")
+		body.WriteString("  fi\n")
+	}
+	if stderr != "" {
+		fmt.Fprintf(&body, "  printf '%s\\n' >&2\n", stderr)
+	}
+	fmt.Fprintf(&body, "  exit %d\n", exitCode)
+	body.WriteString("fi\n")
+	body.WriteString("exit 0\n")
+
+	if err := os.WriteFile(name, []byte(body.String()), 0755); err != nil {
+		t.Fatal(err)
+	}
+	return name
+}
+
+// TestDeleteSession_Success verifies that DeleteSession calls
+// `opencode session delete <id>` and returns nil on success.
+func TestDeleteSession_Success(t *testing.T) {
+	sessionID := "ses_abc123"
+	bin := writeFakeDeleteBin(t, sessionID, 0, "")
+	a := &Agent{cmd: bin, workDir: t.TempDir()}
+
+	if err := a.DeleteSession(context.Background(), sessionID); err != nil {
+		t.Fatalf("DeleteSession() unexpected error: %v", err)
+	}
+}
+
+// TestDeleteSession_CLIError verifies that DeleteSession propagates CLI failures.
+func TestDeleteSession_CLIError(t *testing.T) {
+	bin := writeFakeDeleteBin(t, "", 1, "session not found")
+	a := &Agent{cmd: bin, workDir: t.TempDir()}
+
+	err := a.DeleteSession(context.Background(), "ses_missing")
+	if err == nil {
+		t.Fatal("DeleteSession() expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "ses_missing") {
+		t.Errorf("error %q should mention the session ID", err.Error())
+	}
+}
+
+// TestDeleteSession_ImplementsInterface is a compile-time check that Agent
+// satisfies core.SessionDeleter.
+var _ core.SessionDeleter = (*Agent)(nil)
+
 // ---------- interface / compile-time checks ----------
 
 // verify Agent implements core.Agent
