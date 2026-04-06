@@ -706,6 +706,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		content = *msg.Content
 	}
 	mentions := msg.Mentions
+	parentID := stringValue(msg.ParentId)
 
 	sessionKey := p.makeSessionKey(msg, chatID, userID)
 	rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
@@ -719,7 +720,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 	// blocked by IO-heavy operations (image/audio download, handler HTTP calls).
 	// The dedup and old-message checks above remain synchronous to guarantee
 	// correctness before spawning the goroutine.
-	go p.dispatchMessage(msgType, content, mentions, messageID, sessionKey, userID, userName, chatName, rctx)
+	go p.dispatchMessage(msgType, content, mentions, messageID, sessionKey, userID, userName, chatName, rctx, parentID)
 
 	return nil
 }
@@ -727,7 +728,14 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 // dispatchMessage handles the message content parsing, media download, and
 // handler invocation. It runs in its own goroutine so that onMessage returns
 // quickly and does not block the SDK event loop.
-func (p *Platform) dispatchMessage(msgType, content string, mentions []*larkim.MentionEvent, messageID, sessionKey, userID, userName, chatName string, rctx replyContext) {
+func (p *Platform) dispatchMessage(msgType, content string, mentions []*larkim.MentionEvent, messageID, sessionKey, userID, userName, chatName string, rctx replyContext, parentID string) {
+	// If this message is a reply to another message, fetch the quoted content
+	// and prepend it so the agent has full context.
+	quotedPrefix := ""
+	if parentID != "" {
+		quotedPrefix = p.fetchQuotedMessage(parentID)
+	}
+
 	switch msgType {
 	case "text":
 		var textBody struct {
@@ -750,7 +758,7 @@ func (p *Platform) dispatchMessage(msgType, content string, mentions []*larkim.M
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
-			Content: text, ReplyCtx: rctx,
+			Content: quotedPrefix + text, ReplyCtx: rctx,
 		})
 
 	case "image":
@@ -812,7 +820,7 @@ func (p *Platform) dispatchMessage(msgType, content string, mentions []*larkim.M
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
-			Content: text, Images: images,
+			Content: quotedPrefix + text, Images: images,
 			ReplyCtx: rctx,
 		})
 
@@ -925,6 +933,114 @@ func (p *Platform) resolveChatName(chatID string) string {
 	}
 	p.chatNameCache.Store(chatID, name)
 	return name
+}
+
+// fetchQuotedMessage retrieves the content of a parent message that the user
+// is replying to, and returns a formatted prefix string for context injection.
+// Returns empty string on any failure (graceful degradation — the user's own
+// message is still delivered without the quote).
+func (p *Platform) fetchQuotedMessage(parentID string) string {
+	resp, err := p.client.Im.Message.Get(context.Background(),
+		larkim.NewGetMessageReqBuilder().
+			MessageId(parentID).
+			Build())
+	if err != nil {
+		slog.Debug(p.tag()+": fetch quoted message failed", "parent_id", parentID, "error", err)
+		return ""
+	}
+	if !resp.Success() || resp.Data == nil || len(resp.Data.Items) == 0 {
+		slog.Debug(p.tag()+": fetch quoted message: no data", "parent_id", parentID)
+		return ""
+	}
+
+	item := resp.Data.Items[0]
+	msgType := ""
+	if item.MsgType != nil {
+		msgType = *item.MsgType
+	}
+
+	content := ""
+	if item.Body != nil && item.Body.Content != nil {
+		content = *item.Body.Content
+	}
+	if content == "" {
+		return ""
+	}
+
+	// Extract plain text based on message type.
+	var quotedText string
+	switch msgType {
+	case "text":
+		var textBody struct {
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal([]byte(content), &textBody); err == nil {
+			quotedText = replaceMentions(textBody.Text, item.Mentions)
+		}
+	case "post":
+		// Rich text — extract text elements from the post structure.
+		quotedText = extractPostPlainText(content)
+	default:
+		// For non-text types (image, file, audio, etc.), use a type indicator.
+		quotedText = fmt.Sprintf("[%s]", msgType)
+	}
+
+	if quotedText == "" {
+		return ""
+	}
+
+	// Resolve sender name.
+	senderName := ""
+	if item.Sender != nil && item.Sender.Id != nil {
+		senderName = p.resolveUserName(*item.Sender.Id)
+	}
+	if senderName == "" {
+		senderName = "unknown"
+	}
+
+	return fmt.Sprintf("[Quoted message from %s]:\n%s\n\n", senderName, quotedText)
+}
+
+// extractPostPlainText extracts plain text from a Lark post (rich text) JSON content.
+func extractPostPlainText(content string) string {
+	var post struct {
+		Content [][]struct {
+			Tag  string `json:"tag"`
+			Text string `json:"text"`
+		} `json:"content"`
+		Title string `json:"title"`
+	}
+	// Post content may be wrapped in a locale key like {"zh_cn": {...}}.
+	// Try direct parse first, then try extracting from locale wrapper.
+	if err := json.Unmarshal([]byte(content), &post); err != nil || len(post.Content) == 0 {
+		var localeWrapper map[string]json.RawMessage
+		if err2 := json.Unmarshal([]byte(content), &localeWrapper); err2 == nil {
+			for _, v := range localeWrapper {
+				if err3 := json.Unmarshal(v, &post); err3 == nil && len(post.Content) > 0 {
+					break
+				}
+			}
+		}
+	}
+	if len(post.Content) == 0 {
+		return ""
+	}
+	var parts []string
+	if post.Title != "" {
+		parts = append(parts, post.Title)
+	}
+	for _, para := range post.Content {
+		var line []string
+		for _, elem := range para {
+			if elem.Tag == "text" && elem.Text != "" {
+				line = append(line, elem.Text)
+			}
+		}
+		if len(line) > 0 {
+			parts = append(parts, strings.Join(line, ""))
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 // parseMergeForward fetches sub-messages of a merge_forward message via the
