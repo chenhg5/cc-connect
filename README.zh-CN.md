@@ -385,6 +385,38 @@ cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/ch
 
 ---
 
+## ❤️ 赞助
+
+> 想在这里展示您的品牌？[提交 Issue](https://github.com/chenhg5/cc-connect/issues) 或发邮件联系我们
+
+<details open>
+<summary>赞助商</summary>
+
+<!-- 赞助位招租 - 联系我们成为赞助商 -->
+
+<table>
+<tr>
+<td width="180"><a href="#"><img src="docs/images/sponsors/your-logo-here.png" alt="您的公司" width="150"></a></td>
+<td>成为赞助商！我们为您的产品提供专属用户福利。联系我们了解更多赞助机会。</td>
+</tr>
+</table>
+
+</details>
+
+---
+
+## 🤝 商业合作
+
+我们接受以下商业合作：
+
+- **企业定制**：为企业定制内部 AI 工具入口（飞书、钉钉、企业微信、Slack 等）
+- **技术咨询**：AI agent 集成方案设计与架构咨询
+- **外包项目**：AI 相关系统开发
+
+**联系方式**：提交 Issue 或通过 GitHub Discussions 联系
+
+---
+
 ## 🙏 贡献者
 
 <a href="https://github.com/chenhg5/cc-connect/graphs/contributors">

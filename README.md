@@ -385,6 +385,38 @@ Notes:
 
 ---
 
+## ❤️ Sponsor
+
+> Want to appear here? Contact us: [Open an issue](https://github.com/chenhg5/cc-connect/issues) or email
+
+<details open>
+<summary>Sponsors</summary>
+
+<!-- Sponsor slot available - contact us to become a sponsor -->
+
+<table>
+<tr>
+<td width="180"><a href="#"><img src="docs/images/sponsors/your-logo-here.png" alt="Your Company" width="150"></a></td>
+<td>Become a sponsor! We offer exclusive benefits for our users. Contact us to learn more about sponsorship opportunities.</td>
+</tr>
+</table>
+
+</details>
+
+---
+
+## 🤝 Commercial Cooperation
+
+We accept the following commercial collaborations:
+
+- **Enterprise Customization**: Custom deployment for internal AI tooling (Feishu, DingTalk, WeChat Work, Slack, etc.)
+- **Technical Consulting**: AI agent integration and architecture design
+- **Outsourcing Projects**: AI-related system development
+
+**Contact**: Open an issue or reach out via GitHub Discussions
+
+---
+
 ## 🙏 Contributors
 
 <a href="https://github.com/chenhg5/cc-connect/graphs/contributors">
