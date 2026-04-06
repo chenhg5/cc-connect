@@ -30,7 +30,6 @@ export interface ProjectDetail {
     session_key: string;
   };
   settings: {
-    quiet: boolean;
     admin_from: string;
     language: string;
     disabled_commands: string[];
@@ -38,7 +37,6 @@ export interface ProjectDetail {
 }
 
 export interface ProjectSettingsUpdate {
-  quiet?: boolean;
   language?: string;
   admin_from?: string;
   disabled_commands?: string[];

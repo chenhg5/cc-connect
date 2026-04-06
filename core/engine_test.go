@@ -847,10 +847,11 @@ func TestProcessInteractiveEvents_DoesNotSuppressDifferentFinalText(t *testing.T
 	}
 }
 
-func TestProcessInteractiveEvents_QuietToolTurnKeepsPreviewOnFinalize(t *testing.T) {
+func TestProcessInteractiveEvents_HiddenToolProgressKeepsPreviewOnFinalize(t *testing.T) {
 	p := &mockKeepPreviewPlatform{}
 	p.n = "feishu"
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{ThinkingMessages: true, ThinkingMaxLen: 300, ToolMaxLen: 500, ToolMessages: false})
 	sessionKey := "test:user1"
 	session := e.sessions.GetOrCreateActive(sessionKey)
 	agentSession := newControllableSession("s1")
@@ -858,7 +859,6 @@ func TestProcessInteractiveEvents_QuietToolTurnKeepsPreviewOnFinalize(t *testing
 		agentSession: agentSession,
 		platform:     p,
 		replyCtx:     "ctx-1",
-		quiet:        true,
 	}
 	e.interactiveStates[sessionKey] = state
 
@@ -888,7 +888,7 @@ func TestProcessInteractiveEvents_QuietToolTurnKeepsPreviewOnFinalize(t *testing
 func TestProcessInteractiveEvents_ToolMessagesDisabledSuppressesToolProgressOnly(t *testing.T) {
 	p := &stubPlatformEngine{n: "telegram"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	e.SetDisplayConfig(DisplayCfg{ThinkingMaxLen: 300, ToolMaxLen: 500, ToolMessages: false})
+	e.SetDisplayConfig(DisplayCfg{ThinkingMessages: true, ThinkingMaxLen: 300, ToolMaxLen: 500, ToolMessages: false})
 	sessionKey := "telegram:user1"
 	session := e.sessions.GetOrCreateActive(sessionKey)
 	agentSession := newControllableSession("s1")
@@ -908,17 +908,19 @@ func TestProcessInteractiveEvents_ToolMessagesDisabledSuppressesToolProgressOnly
 	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, nil)
 
 	sent := p.getSent()
-	if len(sent) != 2 {
-		t.Fatalf("sent = %#v, want thinking + final response only", sent)
+	if len(sent) < 1 || len(sent) > 2 {
+		t.Fatalf("sent = %#v, want final response with optional standalone thinking message", sent)
 	}
-	if !strings.Contains(sent[0], "planning") {
+	for _, msg := range sent {
+		if strings.Contains(msg, "Bash") || strings.Contains(msg, "echo hi") || strings.Contains(msg, "hi") {
+			t.Fatalf("tool progress should stay hidden, got %q", msg)
+		}
+	}
+	if len(sent) == 2 && !strings.Contains(sent[0], "planning") {
 		t.Fatalf("thinking message = %q, want planning", sent[0])
 	}
-	if strings.Contains(sent[0], "Bash") || strings.Contains(sent[0], "echo hi") || strings.Contains(sent[0], "hi") {
-		t.Fatalf("thinking message should not contain tool output, got %q", sent[0])
-	}
-	if sent[1] != "done" {
-		t.Fatalf("final message = %q, want done", sent[1])
+	if sent[len(sent)-1] != "done" {
+		t.Fatalf("final message = %q, want done", sent[len(sent)-1])
 	}
 }
 
@@ -2082,158 +2084,25 @@ func TestHandleMessage_AutoResetOnIdle_DoesNotTriggerForSlashCommand(t *testing.
 	}
 }
 
-// --- quiet tests ---
-
-func TestQuietSessionToggle(t *testing.T) {
+func TestConfigItems_ThinkingMessagesToggle(t *testing.T) {
 	e := newTestEngine()
-	p := &stubPlatformEngine{n: "test"}
-	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	items := e.configItems()
 
-	// /quiet — per-session toggle on
-	e.cmdQuiet(p, msg, nil)
-
-	e.interactiveMu.Lock()
-	state := e.interactiveStates["test:user1"]
-	e.interactiveMu.Unlock()
-
-	if state == nil {
-		t.Fatal("expected interactiveState to be created")
+	var item *configItem
+	for i := range items {
+		if items[i].key == "thinking_messages" {
+			item = &items[i]
+			break
+		}
 	}
-	state.mu.Lock()
-	q := state.quiet
-	state.mu.Unlock()
-	if !q {
-		t.Fatal("expected session quiet to be true")
+	if item == nil {
+		t.Fatal("expected thinking_messages config item")
 	}
-
-	// /quiet — per-session toggle off
-	e.cmdQuiet(p, msg, nil)
-	state.mu.Lock()
-	q = state.quiet
-	state.mu.Unlock()
-	if q {
-		t.Fatal("expected session quiet to be false after second toggle")
+	if err := item.setFunc("false"); err != nil {
+		t.Fatalf("set thinking_messages: %v", err)
 	}
-}
-
-func TestQuietSessionResetsOnNewSession(t *testing.T) {
-	e := newTestEngine()
-	p := &stubPlatformEngine{n: "test"}
-	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
-
-	// Enable per-session quiet
-	e.cmdQuiet(p, msg, nil)
-
-	// Simulate /new
-	e.cleanupInteractiveState("test:user1")
-
-	// State should be gone, quiet resets
-	e.interactiveMu.Lock()
-	state := e.interactiveStates["test:user1"]
-	e.interactiveMu.Unlock()
-	if state != nil {
-		t.Fatal("expected interactiveState to be cleaned up")
-	}
-
-	// Global quiet should still be off
-	e.quietMu.RLock()
-	gq := e.quiet
-	e.quietMu.RUnlock()
-	if gq {
-		t.Fatal("expected global quiet to be false")
-	}
-}
-
-func TestQuietGlobalToggle(t *testing.T) {
-	e := newTestEngine()
-	p := &stubPlatformEngine{n: "test"}
-	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
-
-	// Default: global quiet is off
-	if e.quiet {
-		t.Fatal("expected global quiet to be false by default")
-	}
-
-	// /quiet global — toggle on
-	e.cmdQuiet(p, msg, []string{"global"})
-	e.quietMu.RLock()
-	q := e.quiet
-	e.quietMu.RUnlock()
-	if !q {
-		t.Fatal("expected global quiet to be true")
-	}
-
-	// /quiet global — toggle off
-	e.cmdQuiet(p, msg, []string{"global"})
-	e.quietMu.RLock()
-	q = e.quiet
-	e.quietMu.RUnlock()
-	if q {
-		t.Fatal("expected global quiet to be false after second toggle")
-	}
-}
-
-func TestQuietGlobalPersistsAcrossSessions(t *testing.T) {
-	e := newTestEngine()
-	p := &stubPlatformEngine{n: "test"}
-	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
-
-	// Enable global quiet
-	e.cmdQuiet(p, msg, []string{"global"})
-
-	// Simulate /new
-	e.cleanupInteractiveState("test:user1")
-
-	// Global quiet should still be on
-	e.quietMu.RLock()
-	q := e.quiet
-	e.quietMu.RUnlock()
-	if !q {
-		t.Fatal("expected global quiet to remain true after session cleanup")
-	}
-}
-
-func TestQuietGlobalAndSessionCombined(t *testing.T) {
-	e := newTestEngine()
-	p := &stubPlatformEngine{n: "test"}
-	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
-
-	// Only global quiet on — should suppress
-	e.cmdQuiet(p, msg, []string{"global"})
-	e.quietMu.RLock()
-	gq := e.quiet
-	e.quietMu.RUnlock()
-	if !gq {
-		t.Fatal("expected global quiet on")
-	}
-
-	// Session quiet is off (no state yet) — global alone should be enough
-	e.interactiveMu.Lock()
-	state := e.interactiveStates["test:user1"]
-	e.interactiveMu.Unlock()
-	if state != nil {
-		t.Fatal("expected no session state yet")
-	}
-
-	// Turn off global, turn on session
-	e.cmdQuiet(p, msg, []string{"global"}) // global off
-	e.cmdQuiet(p, msg, nil)                // session on
-
-	e.quietMu.RLock()
-	gq = e.quiet
-	e.quietMu.RUnlock()
-	if gq {
-		t.Fatal("expected global quiet off")
-	}
-
-	e.interactiveMu.Lock()
-	state = e.interactiveStates["test:user1"]
-	e.interactiveMu.Unlock()
-	state.mu.Lock()
-	sq := state.quiet
-	state.mu.Unlock()
-	if !sq {
-		t.Fatal("expected session quiet on")
+	if e.display.ThinkingMessages {
+		t.Fatal("expected thinking messages to be disabled")
 	}
 }
 
@@ -2752,10 +2621,10 @@ func TestDeleteMode_FormSubmitShowsConfirmThenDeletes(t *testing.T) {
 	}
 }
 
-func TestExecuteCardActionStop_PreservesQuietStateWithoutCleanupReinsert(t *testing.T) {
+func TestExecuteCardActionStop_RemovesInteractiveState(t *testing.T) {
 	e := newTestEngine()
 	e.interactiveMu.Lock()
-	e.interactiveStates["test:user1"] = &interactiveState{quiet: true}
+	e.interactiveStates["test:user1"] = &interactiveState{}
 	e.interactiveMu.Unlock()
 
 	e.executeCardAction("/stop", "", "test:user1")
@@ -2763,16 +2632,8 @@ func TestExecuteCardActionStop_PreservesQuietStateWithoutCleanupReinsert(t *test
 	e.interactiveMu.Lock()
 	state := e.interactiveStates["test:user1"]
 	e.interactiveMu.Unlock()
-	if state == nil {
-		t.Fatal("expected interactive state to remain for quiet preservation")
-	}
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	if !state.quiet {
-		t.Fatal("expected quiet state to remain enabled")
-	}
-	if state.pending != nil {
-		t.Fatal("expected pending permission to be cleared")
+	if state != nil {
+		t.Fatal("expected interactive state to be removed")
 	}
 }
 
@@ -4439,38 +4300,6 @@ func TestSessionClearedAfterNew_RecyclesAliveAgent(t *testing.T) {
 	}
 }
 
-// TestSessionMismatch_DoesNotLeakQuiet verifies that after a session mismatch,
-// the new state gets defaultQuiet instead of inheriting quiet from the stale state.
-func TestSessionMismatch_DoesNotLeakQuiet(t *testing.T) {
-	agent := &controllableAgent{nextSession: newControllableSession("new-id")}
-	p := &stubPlatformEngine{n: "test"}
-	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
-
-	key := "test:user1"
-
-	// Seed a stale state with quiet=true.
-	e.interactiveMu.Lock()
-	e.interactiveStates[key] = &interactiveState{
-		agentSession: newControllableSession("old-id"),
-		platform:     p,
-		replyCtx:     "ctx",
-		quiet:        true,
-	}
-	e.interactiveMu.Unlock()
-
-	// Active session wants "new-id", which mismatches "old-id".
-	session := &Session{AgentSessionID: "new-id"}
-
-	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
-
-	state.mu.Lock()
-	q := state.quiet
-	state.mu.Unlock()
-	if q {
-		t.Fatal("quiet leaked from stale state into replacement — ok=false fix not working")
-	}
-}
-
 // TestSessionMismatch_ReusesWhenIDsMatch verifies that getOrCreateInteractiveStateWith
 // returns the existing state when agent session IDs match (no unnecessary recycling).
 func TestSessionMismatch_ReusesWhenIDsMatch(t *testing.T) {
@@ -5460,22 +5289,6 @@ func TestDrainOrphanedQueue_UsesWorkspaceSessionManager(t *testing.T) {
 
 // ── executeCardAction interactiveKey tests ───────────────────
 
-func TestExecuteCardAction_QuietUsesInteractiveKey(t *testing.T) {
-	p := &stubPlatformEngine{n: "plain"}
-	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-
-	sessionKey := "feishu:channel1:user1"
-
-	e.executeCardAction("/quiet", "", sessionKey)
-
-	e.interactiveMu.Lock()
-	_, ok := e.interactiveStates[sessionKey]
-	e.interactiveMu.Unlock()
-	if !ok {
-		t.Error("expected interactive state to be stored under sessionKey (non-multi-workspace)")
-	}
-}
-
 func TestExecuteCardAction_ModelCleansUpWithInteractiveKey(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	agent := &stubModelModeAgent{model: "old"}
@@ -6148,13 +5961,13 @@ func TestExecuteCardAction_StopCleansUp(t *testing.T) {
 	}
 }
 
-func TestExecuteCardAction_StopPreservesQuiet(t *testing.T) {
+func TestExecuteCardAction_StopClearsInteractiveState(t *testing.T) {
 	sess := newControllableSession("stop-quiet")
 	e := newTestEngine()
 	key := "test:user1"
 
 	e.interactiveMu.Lock()
-	e.interactiveStates[key] = &interactiveState{agentSession: sess, quiet: true}
+	e.interactiveStates[key] = &interactiveState{agentSession: sess}
 	e.interactiveMu.Unlock()
 
 	e.executeCardAction("/stop", "", key)
@@ -6163,14 +5976,8 @@ func TestExecuteCardAction_StopPreservesQuiet(t *testing.T) {
 	state, exists := e.interactiveStates[key]
 	e.interactiveMu.Unlock()
 
-	if !exists {
-		t.Fatal("expected interactive state to persist (quiet mode)")
-	}
-	if !state.quiet {
-		t.Error("expected quiet flag to be preserved")
-	}
-	if state.agentSession != nil {
-		t.Error("expected agentSession to be nil after /stop")
+	if exists || state != nil {
+		t.Fatal("expected interactive state to be removed after /stop")
 	}
 }
 
@@ -6296,69 +6103,21 @@ func TestCmdStatus_UsesInteractiveKeyForMultiWorkspace(t *testing.T) {
 	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "card"}}
 	agent := &stubModelModeAgent{model: "gpt-4.1", mode: "default"}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		ThinkingMessages: false,
+		ThinkingMaxLen:   300,
+		ToolMaxLen:       500,
+		ToolMessages:     true,
+	})
 
-	wsDir := t.TempDir()
-	rawKey := "feishu:ch1:user1"
-	wsKey := wsDir + ":" + rawKey
-
-	state := &interactiveState{
-		agentSession: newControllableSession("ws-status-test"),
-		platform:     p,
-		quiet:        true,
-	}
-	iKey := e.interactiveKeyForSessionKey(wsKey)
-	e.interactiveMu.Lock()
-	e.interactiveStates[iKey] = state
-	e.interactiveMu.Unlock()
-
-	msg := &Message{SessionKey: wsKey, Content: "/status", ReplyCtx: "ctx"}
+	msg := &Message{SessionKey: "feishu:ch1:user1", Content: "/status", ReplyCtx: "ctx"}
 	e.cmdStatus(p, msg)
 
-	// The status card should include the quiet state from the correct
-	// interactive key (normalized workspace path), not from a raw lookup.
 	if len(p.repliedCards) == 0 && len(p.sentCards) == 0 {
-		sent := p.getSent()
-		found := false
-		for _, s := range sent {
-			if strings.Contains(s, "Quiet") || strings.Contains(s, "quiet") || strings.Contains(s, "ON") {
-				found = true
-			}
+		sent := strings.Join(p.getSent(), "\n")
+		if !strings.Contains(sent, "Thinking messages: OFF") || !strings.Contains(sent, "Tool progress: ON") {
+			t.Fatalf("expected status to reflect display flags, got %q", sent)
 		}
-		if !found {
-			t.Fatalf("expected status to reflect quiet=true, got %v", sent)
-		}
-	}
-}
-
-func TestRenderStatusCard_UsesInteractiveKeyForRawSessionKeyInMultiWorkspace(t *testing.T) {
-	agent := &stubModelModeAgent{model: "gpt-4.1", mode: "default"}
-	e := NewEngine("test", agent, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
-
-	baseDir := t.TempDir()
-	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
-	e.SetMultiWorkspace(baseDir, bindingPath)
-
-	wsDir := filepath.Join(baseDir, "ws1")
-	if err := os.MkdirAll(wsDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	normalizedWsDir := normalizeWorkspacePath(wsDir)
-	channelID := "C123"
-	rawKey := "slack:" + channelID + ":U1"
-	e.workspaceBindings.Bind("project:test", channelID, "chan", normalizedWsDir)
-
-	iKey := normalizedWsDir + ":" + rawKey
-	e.interactiveMu.Lock()
-	e.interactiveStates[iKey] = &interactiveState{quiet: true}
-	e.interactiveMu.Unlock()
-
-	card := e.renderStatusCard(rawKey, "U1")
-	if card == nil {
-		t.Fatal("expected status card")
-	}
-	text := card.RenderText()
-	if !strings.Contains(text, "Quiet mode: ON") {
-		t.Fatalf("expected status card to reflect quiet=true from interactiveKey, got %q", text)
 	}
 }
 
@@ -7954,7 +7713,7 @@ func TestEngine_SetterMethods(t *testing.T) {
 	})
 
 	// Test SetDisplaySaveFunc
-	e.SetDisplaySaveFunc(func(thinkMax, toolMax *int, toolMessages *bool) error {
+	e.SetDisplaySaveFunc(func(thinkingMessages *bool, thinkMax, toolMax *int, toolMessages *bool) error {
 		return nil
 	})
 

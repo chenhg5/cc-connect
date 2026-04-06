@@ -4,7 +4,7 @@ import {
   Slash, Search, MessageSquarePlus, List, ArrowRightLeft, Eye, History,
   Square, Brain, Cpu, Languages, Layers, Activity, Stethoscope, Info,
   Settings, Timer, HeartPulse, Terminal, Tag, Wrench, Upload, Trash2,
-  Volume2, VolumeX, FolderOpen, HelpCircle, User, BookOpen,
+  FolderOpen, HelpCircle, User, BookOpen,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -30,7 +30,6 @@ export const slashCommands: SlashCommand[] = [
   { cmd: '/mode', labelKey: 'cmd.mode', icon: Layers, group: 'settings' },
   { cmd: '/lang', labelKey: 'cmd.lang', icon: Languages, group: 'settings' },
   { cmd: '/provider', labelKey: 'cmd.provider', icon: Activity, group: 'settings' },
-  { cmd: '/quiet', labelKey: 'cmd.quiet', icon: VolumeX, group: 'settings' },
   // Info
   { cmd: '/status', labelKey: 'cmd.status', icon: Info, group: 'info' },
   { cmd: '/help', labelKey: 'cmd.help', icon: HelpCircle, group: 'info' },
