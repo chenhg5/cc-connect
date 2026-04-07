@@ -68,10 +68,11 @@ func mapAgentMessageChunk(sessionID string, update json.RawMessage) []core.Event
 
 func mapToolCall(sessionID string, update json.RawMessage) []core.Event {
 	var u struct {
-		ToolCallID string `json:"toolCallId"`
-		Title      string `json:"title"`
-		Kind       string `json:"kind"`
-		Status     string `json:"status"`
+		ToolCallID string          `json:"toolCallId"`
+		Title      string          `json:"title"`
+		Kind       string          `json:"kind"`
+		Status     string          `json:"status"`
+		RawInput   json.RawMessage `json:"rawInput"`
 	}
 	if err := json.Unmarshal(update, &u); err != nil {
 		return nil
@@ -83,10 +84,14 @@ func mapToolCall(sessionID string, update json.RawMessage) []core.Event {
 	if toolName == "" {
 		toolName = "tool"
 	}
+	toolInput := summarizeACPToolInput(u.Kind, u.RawInput)
+	if toolInput == "" {
+		toolInput = u.Title
+	}
 	return []core.Event{{
 		Type:      core.EventToolUse,
 		ToolName:  toolName,
-		ToolInput: u.Title,
+		ToolInput: toolInput,
 		SessionID: sessionID,
 	}}
 }

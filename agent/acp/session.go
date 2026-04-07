@@ -246,9 +246,10 @@ func (s *acpSession) handlePermissionRequest(id json.RawMessage, params json.Raw
 	var p struct {
 		SessionID string `json:"sessionId"`
 		ToolCall  struct {
-			ToolCallID string `json:"toolCallId"`
-			Title      string `json:"title"`
-			Kind       string `json:"kind"`
+			ToolCallID string          `json:"toolCallId"`
+			Title      string          `json:"title"`
+			Kind       string          `json:"kind"`
+			RawInput   json.RawMessage `json:"rawInput"`
 		} `json:"toolCall"`
 		Options []permissionOption `json:"options"`
 	}
@@ -264,7 +265,10 @@ func (s *acpSession) handlePermissionRequest(id json.RawMessage, params json.Raw
 	if toolName == "" {
 		toolName = "permission"
 	}
-	toolInput := p.ToolCall.Title
+	toolInput := summarizeACPToolInput(p.ToolCall.Kind, p.ToolCall.RawInput)
+	if toolInput == "" {
+		toolInput = p.ToolCall.Title
+	}
 	if toolInput == "" {
 		toolInput = p.ToolCall.ToolCallID
 	}
@@ -432,4 +436,30 @@ func (s *acpSession) Close() error {
 	}
 	close(s.events)
 	return nil
+}
+
+// summarizeACPToolInput extracts a human-readable summary from ACP tool rawInput.
+func summarizeACPToolInput(kind string, raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var m map[string]any
+	if json.Unmarshal(raw, &m) != nil {
+		return string(raw)
+	}
+	switch strings.ToLower(kind) {
+	case "bash", "shell", "terminal":
+		if cmd, ok := m["command"].(string); ok {
+			return cmd
+		}
+	case "read", "write", "edit":
+		if fp, ok := m["file_path"].(string); ok {
+			return fp
+		}
+		if fp, ok := m["path"].(string); ok {
+			return fp
+		}
+	}
+	b, _ := json.Marshal(m)
+	return string(b)
 }
