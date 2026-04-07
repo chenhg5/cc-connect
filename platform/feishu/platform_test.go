@@ -443,6 +443,57 @@ func TestInteractivePlatform_CardActionUsesCallbackSessionKey(t *testing.T) {
 	}
 }
 
+func TestInteractivePlatform_ModelCardActionDispatchesCommandAsync(t *testing.T) {
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip, ok := platformAny.(*interactivePlatform)
+	if !ok {
+		t.Fatalf("platform type = %T, want *interactivePlatform", platformAny)
+	}
+
+	cardNavCalled := make(chan struct{}, 1)
+	ip.cardNavHandler = func(action string, sessionKey string) *core.Card {
+		cardNavCalled <- struct{}{}
+		return core.NewCard().Markdown("unexpected").Build()
+	}
+
+	msgCh := make(chan *core.Message, 1)
+	ip.handler = func(_ core.Platform, msg *core.Message) {
+		msgCh <- msg
+	}
+
+	resp, err := ip.onCardAction(&callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: "ou_test_user"},
+			Action:   &callback.CallBackAction{Value: map[string]any{"action": "act:/model switch 1"}},
+			Context:  &callback.Context{OpenChatID: "oc_test_chat", OpenMessageID: "om_test_message"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("onCardAction() error = %v", err)
+	}
+	if resp == nil || resp.Toast == nil {
+		t.Fatalf("expected toast response, got %#v", resp)
+	}
+
+	select {
+	case <-cardNavCalled:
+		t.Fatal("expected model card action to skip synchronous card nav")
+	default:
+	}
+
+	select {
+	case msg := <-msgCh:
+		if msg.Content != "/model switch 1" {
+			t.Fatalf("message content = %q, want /model switch 1", msg.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected model card action message")
+	}
+}
+
 func TestNewLark_PlatformNameAndDomain(t *testing.T) {
 	p, err := newPlatform("lark", lark.LarkBaseUrl, map[string]any{
 		"app_id": "cli_xxx", "app_secret": "secret",
