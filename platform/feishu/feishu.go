@@ -2447,6 +2447,7 @@ func (p *Platform) SendAudio(ctx context.Context, rctx any, audio []byte, format
 type postElement struct {
 	Tag      string `json:"tag"`
 	Text     string `json:"text,omitempty"`
+	Language string `json:"language,omitempty"`
 	ImageKey string `json:"image_key,omitempty"`
 	Href     string `json:"href,omitempty"`
 }
@@ -2492,6 +2493,11 @@ func (p *Platform) extractPostParts(messageID string, post *postLang) ([]string,
 			case "a":
 				if elem.Text != "" {
 					textParts = append(textParts, elem.Text)
+				}
+			case "code_block":
+				if elem.Text != "" {
+					lang := elem.Language
+					textParts = append(textParts, "```"+lang+"\n"+elem.Text+"\n```")
 				}
 			case "img":
 				if elem.ImageKey != "" {
