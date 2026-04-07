@@ -38,8 +38,8 @@ func mapSessionUpdate(sessionID string, params json.RawMessage) []core.Event {
 	case "plan":
 		return mapPlan(sid, wrap.Update)
 	case "user_message_chunk":
-		// History replay during session/load — show as text for IM.
-		return mapAgentMessageChunk(sid, wrap.Update)
+		// History replay during session/load — suppress to avoid echoing user input.
+		return nil
 	default:
 		// Optional vendor / future ACP shapes — best-effort text extraction.
 		return mapSessionUpdateFallback(sid, head.SessionUpdate, wrap.Update)
