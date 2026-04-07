@@ -1650,3 +1650,194 @@ func TestFormatConfigFile(t *testing.T) {
 		}
 	})
 }
+
+func TestLoadEnvVarSubstitution(t *testing.T) {
+	// Set environment variables for testing
+	t.Setenv("TEST_API_KEY", "secret-api-key-12345")
+	t.Setenv("TEST_BOT_TOKEN", "telegram-bot-token")
+	t.Setenv("TEST_APP_SECRET", "feishu-app-secret")
+
+	envVarConfigTOML := `
+data_dir = "/tmp/test-data"
+
+[[projects]]
+name = "env-test"
+
+[projects.agent]
+type = "claudecode"
+
+[projects.agent.options]
+model = "claude-3-opus"
+api_key = "${TEST_API_KEY}"
+
+[[projects.agent.providers]]
+name = "primary"
+api_key = "${TEST_API_KEY}"
+base_url = "https://api.example.com"
+env = { "MY_VAR" = "${TEST_API_KEY}" }
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+bot_token = "${TEST_BOT_TOKEN}"
+`
+
+	configPath := writeConfigFixture(t, envVarConfigTOML)
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	// Check that env vars were substituted in agent.options.api_key
+	if got := stringMapValue(cfg.Projects[0].Agent.Options, "api_key"); got != "secret-api-key-12345" {
+		t.Fatalf("agent.options.api_key = %q, want %q", got, "secret-api-key-12345")
+	}
+
+	// Check that env vars were substituted in provider.api_key
+	if cfg.Projects[0].Agent.Providers[0].APIKey != "secret-api-key-12345" {
+		t.Fatalf("provider.api_key = %q, want %q", cfg.Projects[0].Agent.Providers[0].APIKey, "secret-api-key-12345")
+	}
+
+	// Check that env vars were substituted in provider.env map
+	if provEnv := cfg.Projects[0].Agent.Providers[0].Env; provEnv != nil {
+		if got := provEnv["MY_VAR"]; got != "secret-api-key-12345" {
+			t.Fatalf("provider.env.MY_VAR = %q, want %q", got, "secret-api-key-12345")
+		}
+	}
+
+	// Check that env vars were substituted in platform.options.bot_token
+	if got := stringMapValue(cfg.Projects[0].Platforms[0].Options, "bot_token"); got != "telegram-bot-token" {
+		t.Fatalf("platform.options.bot_token = %q, want %q", got, "telegram-bot-token")
+	}
+}
+
+func TestLoadEnvVarSubstitutionMissingVariable(t *testing.T) {
+	// Ensure the variable is NOT set (t.Setenv would set it)
+	envVarConfigTOML := `
+[[projects]]
+name = "missing-var-test"
+
+[projects.agent]
+type = "claudecode"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+bot_token = "${MISSING_VAR_NAME}"
+other_value = "static-value"
+`
+
+	configPath := writeConfigFixture(t, envVarConfigTOML)
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	// Missing variable should be replaced with empty string
+	if got := stringMapValue(cfg.Projects[0].Platforms[0].Options, "bot_token"); got != "" {
+		t.Fatalf("platform.options.bot_token = %q, want empty string", got)
+	}
+
+	// Static values should be unchanged
+	if got := stringMapValue(cfg.Projects[0].Platforms[0].Options, "other_value"); got != "static-value" {
+		t.Fatalf("platform.options.other_value = %q, want %q", got, "static-value")
+	}
+}
+
+func TestLoadEnvVarSubstitutionNoEnvVars(t *testing.T) {
+	// Config without any ${...} patterns - should be unchanged
+	noEnvVarConfigTOML := `
+[[projects]]
+name = "no-env-test"
+
+[projects.agent]
+type = "claudecode"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+bot_token = "plain-token-xyz"
+`
+
+	configPath := writeConfigFixture(t, noEnvVarConfigTOML)
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	// Values should remain unchanged
+	if got := stringMapValue(cfg.Projects[0].Platforms[0].Options, "bot_token"); got != "plain-token-xyz" {
+		t.Fatalf("platform.options.bot_token = %q, want %q", got, "plain-token-xyz")
+	}
+}
+
+func TestLoadEnvVarSubstitutionMultipleVarsInOneString(t *testing.T) {
+	t.Setenv("VAR_A", "valueA")
+	t.Setenv("VAR_B", "valueB")
+
+	envVarConfigTOML := `
+[[projects]]
+name = "multi-var-test"
+
+[projects.agent]
+type = "claudecode"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+bot_token = "prefix-${VAR_A}-middle-${VAR_B}-suffix"
+`
+
+	configPath := writeConfigFixture(t, envVarConfigTOML)
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	// Multiple vars in one string should all be substituted
+	expected := "prefix-valueA-middle-valueB-suffix"
+	if got := stringMapValue(cfg.Projects[0].Platforms[0].Options, "bot_token"); got != expected {
+		t.Fatalf("platform.options.bot_token = %q, want %q", got, expected)
+	}
+}
+
+func TestLoadEnvVarSubstitutionInSpeechConfig(t *testing.T) {
+	t.Setenv("SPEECH_API_KEY", "speech-secret-key")
+
+	envVarConfigTOML := `
+[speech]
+enabled = true
+provider = "openai"
+
+[speech.openai]
+api_key = "${SPEECH_API_KEY}"
+base_url = "https://api.openai.com"
+
+[[projects]]
+name = "speech-test"
+
+[projects.agent]
+type = "claudecode"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+bot_token = "test-token"
+`
+
+	configPath := writeConfigFixture(t, envVarConfigTOML)
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	// Check that env vars were substituted in speech.openai.api_key
+	if cfg.Speech.OpenAI.APIKey != "speech-secret-key" {
+		t.Fatalf("speech.openai.api_key = %q, want %q", cfg.Speech.OpenAI.APIKey, "speech-secret-key")
+	}
+}

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -271,6 +273,9 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
+	// Substitute environment variables in all string fields.
+	substituteEnvVars(cfg)
+
 	if cfg.DataDir == "" {
 		if home, err := os.UserHomeDir(); err == nil {
 			cfg.DataDir = filepath.Join(home, ".cc-connect")
@@ -287,6 +292,114 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 	return cfg, nil
+}
+
+// envVarPattern matches ${VAR_NAME} patterns for environment variable substitution.
+var envVarPattern = regexp.MustCompile(`\$\{([^}]+)\}`)
+
+// substituteEnvVars walks through all string fields in the config struct
+// and replaces ${VAR_NAME} patterns with the corresponding environment variable values.
+// Non-existent variables are replaced with empty strings.
+func substituteEnvVars(cfg *Config) {
+	substituteEnvVarsInValue(reflect.ValueOf(cfg).Elem())
+}
+
+// substituteEnvVarsInValue recursively walks a reflect.Value and substitutes env vars in strings.
+func substituteEnvVarsInValue(v reflect.Value) {
+	switch v.Kind() {
+	case reflect.String:
+		if v.CanSet() {
+			original := v.String()
+			replaced := envVarPattern.ReplaceAllStringFunc(original, func(match string) string {
+				// Extract variable name from ${VAR_NAME}
+				varName := envVarPattern.FindStringSubmatch(match)[1]
+				return os.Getenv(varName)
+			})
+			if replaced != original {
+				v.SetString(replaced)
+			}
+		}
+
+	case reflect.Struct:
+		for i := 0; i < v.NumField(); i++ {
+			field := v.Field(i)
+			if field.CanAddr() {
+				substituteEnvVarsInValue(field)
+			}
+		}
+
+	case reflect.Ptr:
+		if v.IsNil() {
+			return
+		}
+		substituteEnvVarsInValue(v.Elem())
+
+	case reflect.Slice:
+		for i := 0; i < v.Len(); i++ {
+			elem := v.Index(i)
+			if elem.CanAddr() {
+				substituteEnvVarsInValue(elem)
+			}
+		}
+
+	case reflect.Map:
+		// Only process map[string]string and map[string]any types
+		if v.Type().Key().Kind() != reflect.String {
+			return
+		}
+		iter := v.MapRange()
+		for iter.Next() {
+			key := iter.Key()
+			val := iter.Value()
+			switch val.Kind() {
+			case reflect.String:
+				// Map values are not addressable, so we must use SetMapIndex
+				original := val.String()
+				replaced := envVarPattern.ReplaceAllStringFunc(original, func(match string) string {
+					varName := envVarPattern.FindStringSubmatch(match)[1]
+					return os.Getenv(varName)
+				})
+				if replaced != original {
+					v.SetMapIndex(key, reflect.ValueOf(replaced).Convert(v.Type().Elem()))
+				}
+			case reflect.Interface:
+				// Handle map[string]any where values are stored as interface{}
+				if iface := val.Interface(); iface != nil {
+					switch concrete := iface.(type) {
+					case string:
+						replaced := envVarPattern.ReplaceAllStringFunc(concrete, func(match string) string {
+							varName := envVarPattern.FindStringSubmatch(match)[1]
+							return os.Getenv(varName)
+						})
+						if replaced != concrete {
+							v.SetMapIndex(key, reflect.ValueOf(replaced))
+						}
+					case map[string]any:
+						// Recursively substitute in nested maps
+						substituteEnvVarsInMapAny(concrete)
+					}
+				}
+			}
+		}
+	}
+}
+
+// substituteEnvVarsInMapAny recursively substitutes env vars in a map[string]any.
+func substituteEnvVarsInMapAny(m map[string]any) {
+	for key, val := range m {
+		switch concrete := val.(type) {
+		case string:
+			replaced := envVarPattern.ReplaceAllStringFunc(concrete, func(match string) string {
+				varName := envVarPattern.FindStringSubmatch(match)[1]
+				return os.Getenv(varName)
+			})
+			if replaced != concrete {
+				m[key] = replaced
+			}
+		case map[string]any:
+			substituteEnvVarsInMapAny(concrete)
+		}
+	}
 }
 
 func (c *Config) validate() error {
