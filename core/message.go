@@ -205,4 +205,5 @@ type AgentSessionInfo struct {
 	MessageCount int
 	ModifiedAt   time.Time
 	GitBranch    string
+	ProjectDir   string // raw project dir name (e.g. "C--Users-Mi"); empty = current project
 }
