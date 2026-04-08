@@ -190,6 +190,21 @@ func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error)
 
 func (a *Agent) Stop() error { return nil }
 
+// DeleteSession implements core.SessionDeleter via `opencode session delete <id>`.
+func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
+	a.mu.RLock()
+	cmd := a.cmd
+	workDir := a.workDir
+	a.mu.RUnlock()
+
+	c := exec.Command(cmd, "session", "delete", sessionID)
+	c.Dir = workDir
+	if out, err := c.CombinedOutput(); err != nil {
+		return fmt.Errorf("opencode: delete session %s: %w: %s", sessionID, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 // -- ModeSwitcher --
 
 func (a *Agent) SetMode(mode string) {
