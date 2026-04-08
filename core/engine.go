@@ -1993,6 +1993,21 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 		}
 	}
 
+	if e.projectState != nil {
+		if override := e.projectState.WorkspaceDirOverride(workspace); override != "" {
+			if info, err := os.Stat(override); err == nil && info.IsDir() {
+				if switcher, ok := agent.(WorkDirSwitcher); ok {
+					switcher.SetWorkDir(override)
+					slog.Info("workspace agent: applied dir override", "workspace", workspace, "override", override)
+				}
+			} else {
+				slog.Warn("workspace agent: ignoring invalid dir override", "workspace", workspace, "override", override)
+				e.projectState.ClearWorkspaceDirOverride(workspace)
+				e.projectState.Save()
+			}
+		}
+	}
+
 	// Create per-workspace session manager
 	h := sha256.Sum256([]byte(workspace))
 	sessionFile := filepath.Join(filepath.Dir(e.sessions.StorePath()),
@@ -3763,7 +3778,13 @@ func (e *Engine) dirApply(agent Agent, sessions *SessionManager, interactiveKey,
 			sessions.Save()
 
 			if e.projectState != nil {
-				e.projectState.ClearWorkDirOverride()
+				if e.multiWorkspace {
+					if workspace := workspaceFromInteractiveKey(interactiveKey); workspace != "" {
+						e.projectState.ClearWorkspaceDirOverride(workspace)
+					}
+				} else {
+					e.projectState.ClearWorkDirOverride()
+				}
 				e.projectState.Save()
 			}
 			if e.dirHistory != nil {
@@ -3830,11 +3851,27 @@ func (e *Engine) dirApply(agent Agent, sessions *SessionManager, interactiveKey,
 		e.dirHistory.Add(e.name, newDir)
 	}
 	if e.projectState != nil {
-		e.projectState.SetWorkDirOverride(newDir)
+		if e.multiWorkspace {
+			if workspace := workspaceFromInteractiveKey(interactiveKey); workspace != "" {
+				e.projectState.SetWorkspaceDirOverride(workspace, newDir)
+			}
+		} else {
+			e.projectState.SetWorkDirOverride(newDir)
+		}
 		e.projectState.Save()
 	}
 
 	return "", e.i18n.Tf(MsgDirChanged, newDir)
+}
+
+func workspaceFromInteractiveKey(key string) string {
+	if !strings.HasPrefix(key, "/") {
+		return ""
+	}
+	if idx := strings.IndexByte(key, ':'); idx > 0 {
+		return key[:idx]
+	}
+	return ""
 }
 
 func (e *Engine) cmdDir(p Platform, msg *Message, args []string) {

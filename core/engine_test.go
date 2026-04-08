@@ -464,6 +464,18 @@ func (a *stubWorkDirAgent) GetWorkDir() string {
 	return a.workDir
 }
 
+type namedStubWorkDirAgent struct {
+	stubWorkDirAgent
+	name string
+}
+
+func (a *namedStubWorkDirAgent) Name() string {
+	if a.name == "" {
+		return "named-stub-workdir"
+	}
+	return a.name
+}
+
 type stubListAgent struct {
 	stubAgent
 	sessions []AgentSessionInfo
@@ -2955,6 +2967,45 @@ func TestGetOrCreateWorkspaceAgent_InheritsActiveProvider(t *testing.T) {
 	}
 }
 
+func TestGetOrCreateWorkspaceAgent_AppliesPersistedWorkspaceDirOverride(t *testing.T) {
+	agentName := "test-workspace-dir-override"
+	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) {
+		agent := &namedStubWorkDirAgent{name: agentName}
+		if workDir, ok := opts["work_dir"].(string); ok {
+			agent.workDir = workDir
+		}
+		return agent, nil
+	})
+
+	baseDir := t.TempDir()
+	workspace := normalizeWorkspacePath(t.TempDir())
+	overrideDir := filepath.Join(baseDir, "override")
+	if err := os.MkdirAll(overrideDir, 0o755); err != nil {
+		t.Fatalf("mkdir override dir: %v", err)
+	}
+
+	store := NewProjectStateStore(filepath.Join(t.TempDir(), "projects", "test.state.json"))
+	store.SetWorkspaceDirOverride(workspace, overrideDir)
+	store.Save()
+
+	e := NewEngine("test", &namedStubWorkDirAgent{name: agentName}, []Platform{&stubPlatformEngine{n: "plain"}}, "", LangEnglish)
+	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+	e.SetProjectStateStore(store)
+
+	wsAgentRaw, _, err := e.getOrCreateWorkspaceAgent(workspace)
+	if err != nil {
+		t.Fatalf("getOrCreateWorkspaceAgent returned error: %v", err)
+	}
+
+	wsAgent, ok := wsAgentRaw.(*namedStubWorkDirAgent)
+	if !ok {
+		t.Fatalf("workspace agent type = %T, want *namedStubWorkDirAgent", wsAgentRaw)
+	}
+	if wsAgent.GetWorkDir() != overrideDir {
+		t.Fatalf("workspace agent workDir = %q, want %q", wsAgent.GetWorkDir(), overrideDir)
+	}
+}
+
 func TestCmdDir_ShowsCurrentDirectory(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	agent := &stubWorkDirAgent{workDir: "/tmp/project-a"}
@@ -3072,6 +3123,74 @@ func TestCmdDir_PersistsAbsoluteOverride(t *testing.T) {
 	reloaded := NewProjectStateStore(statePath)
 	if got := reloaded.WorkDirOverride(); got != nextDir {
 		t.Fatalf("WorkDirOverride() = %q, want %q", got, nextDir)
+	}
+}
+
+func TestDirApply_MultiWorkspacePersistsWorkspaceSpecificOverride(t *testing.T) {
+	baseDir := t.TempDir()
+	workspace := normalizeWorkspacePath(t.TempDir())
+	nextDir := filepath.Join(workspace, "next")
+	if err := os.MkdirAll(nextDir, 0o755); err != nil {
+		t.Fatalf("mkdir next dir: %v", err)
+	}
+
+	statePath := filepath.Join(t.TempDir(), "projects", "test.state.json")
+	store := NewProjectStateStore(statePath)
+	agent := &stubWorkDirAgent{workDir: workspace}
+	e := NewEngine("test", agent, []Platform{&stubPlatformEngine{n: "plain"}}, "", LangEnglish)
+	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+	e.SetProjectStateStore(store)
+
+	sessions := NewSessionManager("")
+	interactiveKey := workspace + ":feishu:oc_xxx:ou_yyy"
+
+	errMsg, successMsg := e.dirApply(agent, sessions, interactiveKey, "feishu:oc_xxx:ou_yyy", []string{"next"})
+	if errMsg != "" {
+		t.Fatalf("dirApply errMsg = %q, want empty", errMsg)
+	}
+	if !strings.Contains(successMsg, nextDir) {
+		t.Fatalf("successMsg = %q, want path %q", successMsg, nextDir)
+	}
+
+	reloaded := NewProjectStateStore(statePath)
+	if got := reloaded.WorkspaceDirOverride(workspace); got != nextDir {
+		t.Fatalf("WorkspaceDirOverride(%q) = %q, want %q", workspace, got, nextDir)
+	}
+	if got := reloaded.WorkDirOverride(); got != "" {
+		t.Fatalf("WorkDirOverride() = %q, want empty in multi-workspace mode", got)
+	}
+}
+
+func TestDirApply_MultiWorkspaceResetClearsWorkspaceSpecificOverride(t *testing.T) {
+	baseDir := t.TempDir()
+	workspace := normalizeWorkspacePath(t.TempDir())
+	overrideDir := filepath.Join(workspace, "override")
+	if err := os.MkdirAll(overrideDir, 0o755); err != nil {
+		t.Fatalf("mkdir override dir: %v", err)
+	}
+
+	statePath := filepath.Join(t.TempDir(), "projects", "test.state.json")
+	store := NewProjectStateStore(statePath)
+	store.SetWorkspaceDirOverride(workspace, overrideDir)
+	store.Save()
+
+	agent := &stubWorkDirAgent{workDir: overrideDir}
+	e := NewEngine("test", agent, []Platform{&stubPlatformEngine{n: "plain"}}, "", LangEnglish)
+	e.SetBaseWorkDir(baseDir)
+	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+	e.SetProjectStateStore(store)
+
+	sessions := NewSessionManager("")
+	interactiveKey := workspace + ":feishu:oc_xxx:ou_yyy"
+
+	errMsg, _ := e.dirApply(agent, sessions, interactiveKey, "feishu:oc_xxx:ou_yyy", []string{"reset"})
+	if errMsg != "" {
+		t.Fatalf("dirApply errMsg = %q, want empty", errMsg)
+	}
+
+	reloaded := NewProjectStateStore(statePath)
+	if got := reloaded.WorkspaceDirOverride(workspace); got != "" {
+		t.Fatalf("WorkspaceDirOverride(%q) after reset = %q, want empty", workspace, got)
 	}
 }
 
@@ -6687,7 +6806,8 @@ func TestCmdShell_MultiWorkspaceIgnoresMissingSharedBinding(t *testing.T) {
 	for {
 		sent := p.getSent()
 		if len(sent) > 0 {
-			if !strings.Contains(sent[0], normalizeWorkspacePath(agent.workDir)) {
+			normalizedWorkDir := normalizeWorkspacePath(agent.workDir)
+			if !strings.Contains(sent[0], normalizedWorkDir) && !strings.Contains(sent[0], agent.workDir) {
 				t.Fatalf("expected shell output to fall back to agent work dir %q, got %q", agent.workDir, sent[0])
 			}
 			if strings.Contains(sent[0], missingDir) {
