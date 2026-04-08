@@ -102,6 +102,76 @@ func TestConfigValidate(t *testing.T) {
 				Projects: []ProjectConfig{validProject("demo")},
 			},
 		},
+		{
+			name: "accepts valid references config",
+			cfg: Config{
+				Projects: []ProjectConfig{
+					func() ProjectConfig {
+						p := validProject("demo")
+						p.References = ReferenceConfig{
+							NormalizeAgents: []string{"codex", "claudecode"},
+							RenderPlatforms: []string{"feishu", "weixin"},
+							DisplayPath:     "dirname_basename",
+							MarkerStyle:     "emoji",
+							EnclosureStyle:  "code",
+						}
+						return p
+					}(),
+				},
+			},
+		},
+		{
+			name: "rejects unsupported reference agent",
+			cfg: Config{
+				Projects: []ProjectConfig{
+					func() ProjectConfig {
+						p := validProject("demo")
+						p.References.NormalizeAgents = []string{"gemini"}
+						return p
+					}(),
+				},
+			},
+			wantErr: `projects[0].references.normalize_agents has unsupported value "gemini"`,
+		},
+		{
+			name: "rejects unsupported reference platform",
+			cfg: Config{
+				Projects: []ProjectConfig{
+					func() ProjectConfig {
+						p := validProject("demo")
+						p.References.RenderPlatforms = []string{"telegram"}
+						return p
+					}(),
+				},
+			},
+			wantErr: `projects[0].references.render_platforms has unsupported value "telegram"`,
+		},
+		{
+			name: "rejects unsupported reference display path",
+			cfg: Config{
+				Projects: []ProjectConfig{
+					func() ProjectConfig {
+						p := validProject("demo")
+						p.References.DisplayPath = "full"
+						return p
+					}(),
+				},
+			},
+			wantErr: `projects[0].references.display_path has unsupported value "full"`,
+		},
+		{
+			name: "accepts all shorthand in references scopes",
+			cfg: Config{
+				Projects: []ProjectConfig{
+					func() ProjectConfig {
+						p := validProject("demo")
+						p.References.NormalizeAgents = []string{"all"}
+						p.References.RenderPlatforms = []string{"all"}
+						return p
+					}(),
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {

@@ -185,6 +185,7 @@ type Engine struct {
 	rateLimiter      *RateLimiter
 	outgoingRL       *OutgoingRateLimiter
 	streamPreview    StreamPreviewCfg
+	references       ReferenceRenderCfg
 	relayManager     *RelayManager
 	eventIdleTimeout time.Duration
 	dirHistory       *DirHistory
@@ -339,6 +340,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		platformReady:         make(map[Platform]bool),
 		startedAt:             time.Now(),
 		streamPreview:         DefaultStreamPreviewCfg(),
+		references:            DefaultReferenceRenderCfg(),
 		eventIdleTimeout:      defaultEventIdleTimeout,
 		showContextIndicator:  true,
 	}
@@ -435,6 +437,16 @@ func (e *Engine) SetTTSSaveFunc(fn func(mode string) error) {
 // SetDisplayConfig overrides the default truncation settings.
 func (e *Engine) SetDisplayConfig(cfg DisplayCfg) {
 	e.display = cfg
+}
+
+// SetReferenceConfig configures local reference normalization/rendering.
+func (e *Engine) SetReferenceConfig(cfg ReferenceRenderCfg) {
+	e.references = normalizeReferenceRenderCfg(cfg)
+}
+
+// SetDefaultQuiet sets whether new sessions start in quiet mode.
+func (e *Engine) SetDefaultQuiet(q bool) {
+	e.defaultQuiet = q
 }
 
 // estimateTokens provides a rough token estimate for a set of history entries.
@@ -2251,8 +2263,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	}()
 
 	state.mu.Lock()
-	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx)
-	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang())
+	workspaceDir := state.workspaceDir
+	workspaceRenderer := func(content string) string {
+		return e.renderOutgoingContentForWorkspace(state.platform, content, workspaceDir)
+	}
+	sendWorkspace := func(p Platform, replyCtx any, content string) {
+		e.sendForWorkspace(p, replyCtx, content, workspaceDir)
+	}
+	sendWorkspaceWithError := func(p Platform, replyCtx any, content string) error {
+		return e.sendWithErrorForWorkspace(p, replyCtx, content, workspaceDir)
+	}
+	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
+	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer)
 	state.mu.Unlock()
 
 	// Idle timeout: 0 = disabled
@@ -2294,10 +2316,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				state.mu.Lock()
 				p := state.platform
 				state.mu.Unlock()
-				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
-				return
-			}
-			continue
+					e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+					return
+				}
+				continue
 		case <-idleCh:
 			slog.Error("agent session idle timeout: no events for too long, killing session",
 				"session_key", sessionKey, "timeout", e.eventIdleTimeout, "elapsed", time.Since(turnStart))
@@ -2350,7 +2372,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						segment := strings.Join(textParts[segmentStart:], "")
 						if segment != "" {
 							for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
-								e.send(p, replyCtx, chunk)
+								sendWorkspace(p, replyCtx, chunk)
 							}
 						}
 					}
@@ -2363,7 +2385,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				preview := truncateIf(event.Content, e.display.ThinkingMaxLen)
 				thinkingMsg := fmt.Sprintf(e.i18n.T(MsgThinking), preview)
 				if !cp.AppendEvent(ProgressEntryThinking, preview, "", thinkingMsg) {
-					e.send(p, replyCtx, thinkingMsg)
+					sendWorkspace(p, replyCtx, thinkingMsg)
 				}
 			}
 
@@ -2377,7 +2399,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						segment := strings.Join(textParts[segmentStart:], "")
 						if segment != "" {
 							for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
-								e.send(p, replyCtx, chunk)
+								sendWorkspace(p, replyCtx, chunk)
 							}
 						}
 					}
@@ -2408,7 +2430,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				toolMsg := fmt.Sprintf(e.i18n.T(MsgTool), toolCount, event.ToolName, formattedInput)
 				if !cp.AppendEvent(ProgressEntryToolUse, toolInput, event.ToolName, toolMsg) {
 					for _, chunk := range SplitMessageCodeFenceAware(toolMsg, maxPlatformMessageLen) {
-						e.send(p, replyCtx, chunk)
+						sendWorkspace(p, replyCtx, chunk)
 					}
 				}
 			}
@@ -2434,7 +2456,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 					if !cp.AppendStructured(entry, resultMsg) {
 						if !SuppressStandaloneToolResultEvent(p) {
-							e.send(p, replyCtx, resultMsg)
+							e.sendRaw(p, replyCtx, resultMsg)
 						}
 					}
 				}
@@ -2480,7 +2502,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					segment := strings.Join(textParts[segmentStart:], "")
 					if segment != "" {
 						for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
-							e.send(p, replyCtx, chunk)
+							sendWorkspace(p, replyCtx, chunk)
 						}
 					}
 				}
@@ -2611,7 +2633,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					unsent := strings.Join(textParts[segmentStart:], "")
 					if unsent != "" {
 						for _, chunk := range splitMessage(unsent, maxPlatformMessageLen) {
-							if err := e.sendWithError(p, replyCtx, chunk); err != nil {
+							if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
 								return
 							}
 						}
@@ -2625,7 +2647,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			} else {
 				slog.Debug("EventResult: sending via p.Send (preview inactive or failed)", "response_len", len(fullResponse), "chunks", len(splitMessage(fullResponse, maxPlatformMessageLen)))
 				for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
-					if err := e.sendWithError(p, replyCtx, chunk); err != nil {
+					if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
 						return
 					}
 				}
@@ -2729,8 +2751,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				turnStart = time.Now()
 				firstEventLogged = false
 				waitStart = time.Now()
-				sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx)
-				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, e.agent.Name(), e.i18n.CurrentLang())
+				queuedRenderer := func(content string) string {
+					return e.renderOutgoingContentForWorkspace(queued.platform, content, workspaceDir)
+				}
+				sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx, queuedRenderer)
+				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), queuedRenderer)
 
 				session.AddHistory("user", queued.content)
 
@@ -2764,8 +2789,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			sp.discard()
 			if event.Error != nil {
 				slog.Error("agent error", "error", event.Error)
-				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
-			}
+					e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
+				}
 			// Only drop queued messages if the agent session is dead.
 			// Some agents (e.g. Codex) emit EventError for per-turn failures
 			// while keeping the session alive for subsequent turns.
@@ -2796,7 +2821,7 @@ channelClosed:
 				unsent := strings.Join(textParts[segmentStart:], "")
 				if unsent != "" {
 					for _, chunk := range splitMessage(unsent, maxPlatformMessageLen) {
-						if err := e.sendWithError(p, replyCtx, chunk); err != nil {
+						if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
 							return
 						}
 					}
@@ -2806,7 +2831,7 @@ channelClosed:
 			slog.Debug("stream preview: finalized in-place (process exited)")
 		} else {
 			for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
-				if err := e.sendWithError(p, replyCtx, chunk); err != nil {
+				if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
 					return
 				}
 			}
@@ -6249,6 +6274,98 @@ func (e *Engine) waitOutgoing(p Platform) error {
 	return e.outgoingRL.Wait(e.ctx, p.Name())
 }
 
+func (e *Engine) renderOutgoingContent(p Platform, content string) string {
+	return content
+}
+
+func (e *Engine) renderOutgoingContentForWorkspace(p Platform, content, workspaceDir string) string {
+	if strings.TrimSpace(content) == "" {
+		return content
+	}
+	return TransformLocalReferences(content, e.references, e.agent.Name(), p.Name(), workspaceDir)
+}
+
+func (e *Engine) sendWithErrorForWorkspace(p Platform, replyCtx any, content, workspaceDir string) error {
+	if err := e.waitOutgoing(p); err != nil {
+		slog.Warn("outgoing rate limit: context cancelled", "platform", p.Name(), "error", err)
+		return err
+	}
+	content = e.renderOutgoingContentForWorkspace(p, content, workspaceDir)
+	return e.sendAlreadyRenderedWithError(p, replyCtx, content)
+}
+
+func (e *Engine) sendForWorkspace(p Platform, replyCtx any, content, workspaceDir string) {
+	_ = e.sendWithErrorForWorkspace(p, replyCtx, content, workspaceDir)
+}
+
+func (e *Engine) replyWithErrorForWorkspace(p Platform, replyCtx any, content, workspaceDir string) error {
+	if err := e.waitOutgoing(p); err != nil {
+		slog.Warn("outgoing rate limit: context cancelled", "platform", p.Name(), "error", err)
+		return err
+	}
+	content = e.renderOutgoingContentForWorkspace(p, content, workspaceDir)
+	start := time.Now()
+	if err := p.Reply(e.ctx, replyCtx, content); err != nil {
+		slog.Error("platform reply failed", "platform", p.Name(), "error", err, "content_len", len(content))
+		return err
+	}
+	if elapsed := time.Since(start); elapsed >= slowPlatformSend {
+		slog.Warn("slow platform reply", "platform", p.Name(), "elapsed", elapsed, "content_len", len(content))
+	}
+	return nil
+}
+
+func (e *Engine) replyForWorkspace(p Platform, replyCtx any, content, workspaceDir string) {
+	_ = e.replyWithErrorForWorkspace(p, replyCtx, content, workspaceDir)
+}
+
+func (e *Engine) renderCardForPlatform(p Platform, card *Card) *Card {
+	return e.renderCardForPlatformWorkspace(p, card, "")
+}
+
+func (e *Engine) renderCardForPlatformWorkspace(p Platform, card *Card, workspaceDir string) *Card {
+	if card == nil {
+		return nil
+	}
+	out := &Card{}
+	if card.Header != nil {
+		h := *card.Header
+		out.Header = &h
+	}
+	out.Elements = make([]CardElement, 0, len(card.Elements))
+	for _, elem := range card.Elements {
+		switch v := elem.(type) {
+		case CardMarkdown:
+			content := v.Content
+			if workspaceDir != "" {
+				content = e.renderOutgoingContentForWorkspace(p, v.Content, workspaceDir)
+			}
+			out.Elements = append(out.Elements, CardMarkdown{Content: content})
+		case CardNote:
+			text := v.Text
+			if workspaceDir != "" {
+				text = e.renderOutgoingContentForWorkspace(p, v.Text, workspaceDir)
+			}
+			out.Elements = append(out.Elements, CardNote{Text: text, Tag: v.Tag})
+		case CardListItem:
+			text := v.Text
+			if workspaceDir != "" {
+				text = e.renderOutgoingContentForWorkspace(p, v.Text, workspaceDir)
+			}
+			out.Elements = append(out.Elements, CardListItem{
+				Text:     text,
+				BtnText:  v.BtnText,
+				BtnType:  v.BtnType,
+				BtnValue: v.BtnValue,
+				Extra:    v.Extra,
+			})
+		default:
+			out.Elements = append(out.Elements, elem)
+		}
+	}
+	return out
+}
+
 // sendWithError applies outgoing rate limiting and p.Send. It logs wait
 // cancellation and platform failures, and returns a non-nil error on either.
 func (e *Engine) sendWithError(p Platform, replyCtx any, content string) error {
@@ -6256,6 +6373,10 @@ func (e *Engine) sendWithError(p Platform, replyCtx any, content string) error {
 		slog.Warn("outgoing rate limit: context cancelled", "platform", p.Name(), "error", err)
 		return err
 	}
+	return e.sendAlreadyRenderedWithError(p, replyCtx, content)
+}
+
+func (e *Engine) sendAlreadyRenderedWithError(p Platform, replyCtx any, content string) error {
 	start := time.Now()
 	if err := p.Send(e.ctx, replyCtx, content); err != nil {
 		slog.Error("platform send failed", "platform", p.Name(), "error", err, "content_len", len(content))
@@ -6270,6 +6391,17 @@ func (e *Engine) sendWithError(p Platform, replyCtx any, content string) error {
 // send wraps p.Send with error logging, slow-operation warnings, and outgoing rate limiting.
 func (e *Engine) send(p Platform, replyCtx any, content string) {
 	_ = e.sendWithError(p, replyCtx, content)
+}
+
+// sendRaw sends content without local-reference rendering. This is used for raw
+// tool outputs, where preserving the original text is preferable to applying the
+// agent-facing reference display transform.
+func (e *Engine) sendRaw(p Platform, replyCtx any, content string) {
+	if err := e.waitOutgoing(p); err != nil {
+		slog.Warn("outgoing rate limit: context cancelled", "platform", p.Name(), "error", err)
+		return
+	}
+	_ = e.sendAlreadyRenderedWithError(p, replyCtx, content)
 }
 
 // drainEvents discards any buffered events from the channel.
@@ -6348,12 +6480,13 @@ func (e *Engine) replyWithCard(p Platform, replyCtx any, card *Card) {
 		return
 	}
 	if cs, ok := p.(CardSender); ok {
-		if err := cs.ReplyCard(e.ctx, replyCtx, card); err != nil {
+		rendered := e.renderCardForPlatform(p, card)
+		if err := cs.ReplyCard(e.ctx, replyCtx, rendered); err != nil {
 			slog.Error("card reply failed", "platform", p.Name(), "error", err)
 		}
 		return
 	}
-	e.reply(p, replyCtx, card.RenderText())
+	e.reply(p, replyCtx, e.renderCardForPlatform(p, card).RenderText())
 }
 
 // sendWithCard sends a card as a new message (not a reply).
@@ -6367,12 +6500,13 @@ func (e *Engine) sendWithCard(p Platform, replyCtx any, card *Card) {
 		return
 	}
 	if cs, ok := p.(CardSender); ok {
-		if err := cs.SendCard(e.ctx, replyCtx, card); err != nil {
+		rendered := e.renderCardForPlatform(p, card)
+		if err := cs.SendCard(e.ctx, replyCtx, rendered); err != nil {
 			slog.Error("card send failed", "platform", p.Name(), "error", err)
 		}
 		return
 	}
-	e.send(p, replyCtx, card.RenderText())
+	e.send(p, replyCtx, e.renderCardForPlatform(p, card).RenderText())
 }
 
 // ──────────────────────────────────────────────────────────────

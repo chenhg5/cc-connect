@@ -1060,6 +1060,87 @@ func TestProcessInteractiveEvents_CardProgressUsesCardTemplate(t *testing.T) {
 	}
 }
 
+func TestProcessInteractiveEvents_FinalReplyUsesWorkspaceForReferenceRendering(t *testing.T) {
+	p := &stubPlatformEngine{n: "feishu"}
+	a := &namedStubModelModeAgent{name: "codex"}
+	e := NewEngine("test", a, []Platform{p}, "", LangEnglish)
+	e.SetReferenceConfig(ReferenceRenderCfg{
+		NormalizeAgents: []string{"codex"},
+		RenderPlatforms: []string{"feishu"},
+		DisplayPath:     "relative",
+		MarkerStyle:     "emoji",
+		EnclosureStyle:  "code",
+	})
+
+	sessionKey := "feishu:user-relative"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-relative")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-relative",
+		workspaceDir: "/root/code",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{
+		Type:    EventResult,
+		Content: "/root/code/demo-repo/src/services/user_profile_service.ts:42",
+		Done:    true,
+	}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-relative", time.Now(), nil, nil, state.replyCtx)
+
+	sent := p.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("sent = %#v, want one final reply", sent)
+	}
+	if got := sent[0]; got != "📄 `demo-repo/src/services/user_profile_service.ts:42`" {
+		t.Fatalf("final reply = %q, want workspace-relative rendered reference", got)
+	}
+}
+
+func TestProcessInteractiveEvents_FinalReplyRemainsRawWhenReferencesDisabled(t *testing.T) {
+	p := &stubPlatformEngine{n: "feishu"}
+	a := &namedStubModelModeAgent{name: "codex"}
+	e := NewEngine("test", a, []Platform{p}, "", LangEnglish)
+	e.SetReferenceConfig(ReferenceRenderCfg{
+		NormalizeAgents: []string{},
+		RenderPlatforms: []string{"feishu"},
+		DisplayPath:     "relative",
+		MarkerStyle:     "emoji",
+		EnclosureStyle:  "code",
+	})
+
+	sessionKey := "feishu:user-relative-raw"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-relative-raw")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-relative-raw",
+		workspaceDir: "/root/code/demo",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	raw := "Check [/root/code/demo/ui/recovery_contact_form.tsx](/root/code/demo/ui/recovery_contact_form.tsx) and /root/code/demo/ui/recovery_contact_form.tsx:11"
+	agentSession.events <- Event{
+		Type:    EventResult,
+		Content: raw,
+		Done:    true,
+	}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-relative-raw", time.Now(), nil, nil, state.replyCtx)
+
+	sent := p.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("sent = %#v, want one final reply", sent)
+	}
+	if got := sent[0]; got != raw {
+		t.Fatalf("final reply = %q, want raw unchanged content %q", got, raw)
+	}
+}
+
 func TestProcessInteractiveEvents_CardProgressUsesStructuredPayloadWhenSupported(t *testing.T) {
 	p := &stubCompactProgressPlatform{
 		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
@@ -2176,6 +2257,61 @@ func TestReplyWithCard_UsesCardSenderWhenSupported(t *testing.T) {
 	}
 	if len(p.sent) != 0 {
 		t.Fatalf("plain replies = %d, want 0", len(p.sent))
+	}
+}
+
+func TestReply_DoesNotTransformLocalReferencesWhenEnabled(t *testing.T) {
+	p := &stubPlatformEngine{n: "feishu"}
+	a := &namedStubModelModeAgent{name: "codex"}
+	e := NewEngine("test", a, []Platform{p}, "", LangEnglish)
+	e.SetBaseWorkDir("/root/code/demo")
+	e.SetReferenceConfig(ReferenceRenderCfg{
+		NormalizeAgents: []string{"codex"},
+		RenderPlatforms: []string{"feishu"},
+		DisplayPath:     "relative",
+		MarkerStyle:     "emoji",
+		EnclosureStyle:  "code",
+	})
+
+	e.reply(p, "ctx", "See /root/code/demo/src/app.ts:42")
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if got := p.sent[0]; got != "See /root/code/demo/src/app.ts:42" {
+		t.Fatalf("reply content = %q, want raw path", got)
+	}
+}
+
+func TestReplyWithCard_DoesNotTransformMarkdownOrFallback(t *testing.T) {
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	a := &namedStubModelModeAgent{name: "codex"}
+	e := NewEngine("test", a, []Platform{p}, "", LangEnglish)
+	e.SetBaseWorkDir("/root/code/demo")
+	e.SetReferenceConfig(ReferenceRenderCfg{
+		NormalizeAgents: []string{"codex"},
+		RenderPlatforms: []string{"feishu"},
+		DisplayPath:     "basename",
+		MarkerStyle:     "ascii",
+		EnclosureStyle:  "code",
+	})
+	card := NewCard().Markdown("Inspect /root/code/demo/src/app.ts:42").Build()
+
+	e.replyWithCard(p, "ctx", card)
+
+	if len(p.repliedCards) != 1 {
+		t.Fatalf("replied cards = %d, want 1", len(p.repliedCards))
+	}
+	rendered := p.repliedCards[0]
+	md, ok := rendered.Elements[0].(CardMarkdown)
+	if !ok {
+		t.Fatalf("first card element = %T, want CardMarkdown", rendered.Elements[0])
+	}
+	if md.Content != "Inspect /root/code/demo/src/app.ts:42" {
+		t.Fatalf("card markdown = %q, want raw reference", md.Content)
+	}
+	if got := rendered.RenderText(); !strings.Contains(got, "/root/code/demo/src/app.ts:42") {
+		t.Fatalf("fallback RenderText() = %q, want raw reference", got)
 	}
 }
 
