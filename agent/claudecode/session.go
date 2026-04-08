@@ -20,6 +20,22 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
+// claudeSettings represents the .claude/settings.json structure.
+type claudeSettings struct {
+	Hooks *claudeHooks `json:"hooks,omitempty"`
+}
+
+// claudeHooks represents the hooks section in settings.json.
+type claudeHooks struct {
+	UserPromptSubmit []claudeHookConfig `json:"UserPromptSubmit,omitempty"`
+}
+
+// claudeHookConfig represents a single hook configuration.
+type claudeHookConfig struct {
+	Command string `json:"command"`
+	Timeout int    `json:"timeout,omitempty"` // milliseconds; default 5000
+}
+
 // claudeSession manages a long-running Claude Code process using
 // --input-format stream-json and --permission-prompt-tool stdio.
 //
@@ -40,6 +56,8 @@ type claudeSession struct {
 	cancel          context.CancelFunc
 	done            chan struct{}
 	alive           atomic.Bool
+	toolIDMap       map[string]string // tool_use_id -> tool_name mapping
+	toolIDMapMu     sync.RWMutex
 }
 
 func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool) (*claudeSession, error) {
@@ -120,13 +138,14 @@ func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode strin
 	}
 
 	cs := &claudeSession{
-		cmd:     cmd,
-		stdin:   stdin,
-		events:  make(chan core.Event, 64),
-		workDir: workDir,
-		ctx:     sessionCtx,
-		cancel:  cancel,
-		done:    make(chan struct{}),
+		cmd:        cmd,
+		stdin:      stdin,
+		events:     make(chan core.Event, 64),
+		workDir:    workDir,
+		ctx:        sessionCtx,
+		cancel:     cancel,
+		done:       make(chan struct{}),
+		toolIDMap:  make(map[string]string),
 	}
 	cs.setPermissionMode(mode)
 	cs.sessionID.Store(sessionID)
@@ -232,8 +251,15 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 		switch contentType {
 		case "tool_use":
 			toolName, _ := item["name"].(string)
+			toolID, _ := item["id"].(string)
 			if toolName == "AskUserQuestion" {
 				continue
+			}
+			// Store tool_use_id -> tool_name mapping for tool_result lookup
+			if toolID != "" && toolName != "" {
+				cs.toolIDMapMu.Lock()
+				cs.toolIDMap[toolID] = toolName
+				cs.toolIDMapMu.Unlock()
 			}
 			inputSummary := summarizeInput(toolName, item["input"])
 			evt := core.Event{Type: core.EventToolUse, ToolName: toolName, ToolInput: inputSummary}
@@ -280,10 +306,54 @@ func (cs *claudeSession) handleUser(raw map[string]any) {
 		}
 		contentType, _ := item["type"].(string)
 		if contentType == "tool_result" {
+			toolUseID, _ := item["tool_use_id"].(string)
 			isError, _ := item["is_error"].(bool)
+
+			// Extract content (can be string or array)
+			var result string
+			switch c := item["content"].(type) {
+			case string:
+				result = c
+			case []any:
+				// Content can be an array of content blocks
+				var parts []string
+				for _, block := range c {
+					if bm, ok := block.(map[string]any); ok {
+						if text, ok := bm["text"].(string); ok {
+							parts = append(parts, text)
+						}
+					}
+				}
+				result = strings.Join(parts, "\n")
+			}
+
+			// Look up tool name from stored mapping
+			var toolName string
+			if toolUseID != "" {
+				cs.toolIDMapMu.RLock()
+				toolName = cs.toolIDMap[toolUseID]
+				cs.toolIDMapMu.RUnlock()
+			}
+
 			if isError {
-				result, _ := item["content"].(string)
-				slog.Debug("claudeSession: tool error", "content", result)
+				slog.Debug("claudeSession: tool error", "tool", toolName, "tool_use_id", toolUseID, "content", truncateStr(result, 200))
+			}
+
+			// Emit EventToolResult for UI progress display
+			if toolName != "" {
+				evt := core.Event{
+					Type:       core.EventToolResult,
+					ToolName:   toolName,
+					ToolResult: truncateStr(result, 500),
+				}
+				if isError {
+					evt.ToolStatus = "error"
+				}
+				select {
+				case cs.events <- evt:
+				case <-cs.ctx.Done():
+					return
+				}
 			}
 		}
 	}
@@ -391,6 +461,10 @@ func (cs *claudeSession) Send(prompt string, images []core.ImageAttachment, file
 	if !cs.alive.Load() {
 		return fmt.Errorf("session process is not running")
 	}
+
+	// Execute UserPromptSubmit hooks before sending (stream-json mode only)
+	// Hooks receive {"message": prompt} via stdin, same as CLI mode.
+	executeUserPromptSubmitHooks(cs.ctx, cs.workDir, prompt)
 
 	if len(images) == 0 && len(files) == 0 {
 		return cs.writeJSON(map[string]any{
@@ -588,5 +662,81 @@ func filterEnv(env []string, key string) []string {
 		}
 	}
 	return out
+}
+
+// loadClaudeSettings loads .claude/settings.json from the workDir.
+func loadClaudeSettings(workDir string) (*claudeSettings, error) {
+	settingsPath := filepath.Join(workDir, ".claude", "settings.json")
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil // no settings file is not an error
+		}
+		return nil, fmt.Errorf("read settings.json: %w", err)
+	}
+
+	var settings claudeSettings
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return nil, fmt.Errorf("parse settings.json: %w", err)
+	}
+	return &settings, nil
+}
+
+// executeUserPromptSubmitHooks runs all configured UserPromptSubmit hooks
+// with the user's prompt passed via stdin as JSON.
+func executeUserPromptSubmitHooks(ctx context.Context, workDir, prompt string) {
+	settings, err := loadClaudeSettings(workDir)
+	if err != nil {
+		slog.Debug("claudeSession: failed to load settings for hooks", "error", err)
+		return
+	}
+	if settings == nil || settings.Hooks == nil || len(settings.Hooks.UserPromptSubmit) == 0 {
+		return // no hooks configured
+	}
+
+	// Prepare stdin payload
+ stdinPayload, err := json.Marshal(map[string]string{"message": prompt})
+	if err != nil {
+		slog.Error("claudeSession: marshal hook stdin failed", "error", err)
+		return
+	}
+
+	for _, hook := range settings.Hooks.UserPromptSubmit {
+		if hook.Command == "" {
+			continue
+		}
+		timeout := hook.Timeout
+		if timeout <= 0 {
+			timeout = 5000 // default 5 seconds
+		}
+
+		hookCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Millisecond)
+		defer cancel()
+
+		cmd := exec.CommandContext(hookCtx, "sh", "-c", hook.Command)
+		cmd.Dir = workDir
+		cmd.Stdin = bytes.NewReader(stdinPayload)
+		cmd.Stdout = nil // hooks output is not used
+		cmd.Stderr = nil // hooks stderr is ignored
+
+		if err := cmd.Run(); err != nil {
+			if hookCtx.Err() == context.DeadlineExceeded {
+				slog.Warn("claudeSession: hook timed out", "command", hook.Command, "timeout_ms", timeout)
+			} else {
+				slog.Warn("claudeSession: hook failed", "command", hook.Command, "error", err)
+			}
+			continue
+		}
+		slog.Debug("claudeSession: hook executed", "command", hook.Command)
+	}
+}
+
+// truncateStr truncates a string to at most n runes.
+func truncateStr(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	// Simple byte truncation is fine for logging/progress display
+	return s[:n] + "..."
 }
 
