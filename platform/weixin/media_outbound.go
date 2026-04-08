@@ -104,7 +104,7 @@ func (p *Platform) SendImage(ctx context.Context, replyCtx any, img core.ImageAt
 		ImageItem: &imageItem{
 			Media: &cdnMedia{
 				EncryptQueryParam: ref.downloadParam,
-				AESKey:            base64.StdEncoding.EncodeToString(ref.aesKey),
+				AESKey:            base64.StdEncoding.EncodeToString([]byte(hex.EncodeToString(ref.aesKey))),
 				EncryptType:       1,
 			},
 			MidSize: ref.cipherSize,
@@ -135,7 +135,7 @@ func (p *Platform) SendFile(ctx context.Context, replyCtx any, file core.FileAtt
 		FileItem: &fileItem{
 			Media: &cdnMedia{
 				EncryptQueryParam: ref.downloadParam,
-				AESKey:            base64.StdEncoding.EncodeToString(ref.aesKey),
+				AESKey:            base64.StdEncoding.EncodeToString([]byte(hex.EncodeToString(ref.aesKey))),
 				EncryptType:       1,
 			},
 			FileName: name,
