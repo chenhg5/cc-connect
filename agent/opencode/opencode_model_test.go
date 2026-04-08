@@ -3,6 +3,7 @@ package opencode
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,12 @@ import (
 
 	"github.com/chenhg5/cc-connect/core"
 )
+
+type errWriter struct{}
+
+func (errWriter) Write(_ []byte) (int, error) {
+	return 0, errors.New("write failed")
+}
 
 // writeFakeModelsBin writes a temporary shell script that acts as a fake CLI.
 // When invoked with "models", it prints lines to stdout.
@@ -38,6 +45,16 @@ func writeFakeModelsBin(t *testing.T, lines []string, exitCode int) string {
 		t.Fatal(err)
 	}
 	return name
+}
+
+func TestWriteProviderSignaturePart_PropagatesWriterError(t *testing.T) {
+	err := writeProviderSignaturePart(errWriter{}, "name", "value")
+	if err == nil {
+		t.Fatal("writeProviderSignaturePart() error = nil, want write failure")
+	}
+	if !strings.Contains(err.Error(), "write failed") {
+		t.Fatalf("writeProviderSignaturePart() error = %v, want write failure", err)
+	}
 }
 
 func writePersistentModelCache(t *testing.T, cachePath string, models []core.ModelOption, updatedAt time.Time) string {

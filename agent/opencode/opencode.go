@@ -250,26 +250,41 @@ func (a *Agent) activeProviderKeyLocked() string {
 
 func providerCacheKey(p core.ProviderConfig) string {
 	h := sha256.New()
-	writeProviderSignaturePart(h, "name", p.Name)
-	writeProviderSignaturePart(h, "base_url", p.BaseURL)
-	writeProviderSignaturePart(h, "model", p.Model)
-	writeProviderSignaturePart(h, "api_key", p.APIKey)
+	mustWriteProviderSignaturePart(h, "name", p.Name)
+	mustWriteProviderSignaturePart(h, "base_url", p.BaseURL)
+	mustWriteProviderSignaturePart(h, "model", p.Model)
+	mustWriteProviderSignaturePart(h, "api_key", p.APIKey)
 	keys := make([]string, 0, len(p.Env))
 	for k := range p.Env {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		writeProviderSignaturePart(h, "env:"+k, p.Env[k])
+		mustWriteProviderSignaturePart(h, "env:"+k, p.Env[k])
 	}
 	return hex.EncodeToString(h.Sum(nil)[:16])
 }
 
-func writeProviderSignaturePart(w io.Writer, key, value string) {
-	io.WriteString(w, key)
-	io.WriteString(w, "\x00")
-	io.WriteString(w, value)
-	io.WriteString(w, "\x00")
+func mustWriteProviderSignaturePart(w io.Writer, key, value string) {
+	if err := writeProviderSignaturePart(w, key, value); err != nil {
+		panic(fmt.Sprintf("write provider signature: %v", err))
+	}
+}
+
+func writeProviderSignaturePart(w io.Writer, key, value string) error {
+	if _, err := io.WriteString(w, key); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(w, "\x00"); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(w, value); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(w, "\x00"); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (a *Agent) activeProviderKey() string {
@@ -292,8 +307,8 @@ func (a *Agent) modelDiscoverySnapshot() opencodeModelDiscoverySnapshot {
 
 func modelDiscoveryContextKey(snapshot opencodeModelDiscoverySnapshot) string {
 	h := sha256.New()
-	writeProviderSignaturePart(h, "provider_key", snapshot.providerKey)
-	writeProviderSignaturePart(h, "work_dir", snapshot.workDir)
+	mustWriteProviderSignaturePart(h, "provider_key", snapshot.providerKey)
+	mustWriteProviderSignaturePart(h, "work_dir", snapshot.workDir)
 	return hex.EncodeToString(h.Sum(nil)[:16])
 }
 
