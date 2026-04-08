@@ -2870,6 +2870,7 @@ var builtinCommands = []struct {
 	{[]string{"compress", "compact"}, "compress"},
 	{[]string{"stop"}, "stop"},
 	{[]string{"help"}, "help"},
+	{[]string{"cc"}, "cc"},
 	{[]string{"version"}, "version"},
 	{[]string{"commands", "command", "cmd"}, "commands"},
 	{[]string{"skills", "skill"}, "skills"},
@@ -3042,6 +3043,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdStop(p, msg)
 	case "help":
 		e.cmdHelp(p, msg)
+	case "cc":
+		return e.cmdCc(p, msg, raw, disabledCmds)
 	case "version":
 		e.reply(p, msg.ReplyCtx, VersionInfo)
 	case "commands":
@@ -3110,11 +3113,128 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 			e.executeSkill(p, msg, skill, args)
 			return true
 		}
-		// Not a cc-connect command — notify user, then fall through to agent
-		e.send(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgUnknownCommand), "/"+cmd))
+		// Not a cc-connect command — notify user (unless passthrough), then fall through to agent
+		if !msg.PassthroughToAgent {
+			e.send(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgUnknownCommand), "/"+cmd))
+		}
 		return false
 	}
 	return true
+}
+
+func (e *Engine) cmdCc(p Platform, msg *Message, raw string, disabledCmds map[string]bool) bool {
+	parts := strings.Fields(raw)
+	if len(parts) == 0 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCcGatewayUsage))
+		return true
+	}
+
+	passthrough := strings.TrimSpace(strings.TrimPrefix(raw, parts[0]))
+	if passthrough == "" {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCcGatewayUsage))
+		return true
+	}
+
+	target := strings.TrimSpace(strings.TrimLeft(passthrough, "/"))
+	targetParts := strings.Fields(target)
+	if len(targetParts) == 0 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCcGatewayUsage))
+		return true
+	}
+
+	if targetParts[0] == "help" || targetParts[0] == "-h" || targetParts[0] == "--help" {
+		e.cmdCcHelp(p, msg, targetParts[1:], disabledCmds)
+		return true
+	}
+
+	if commandDisabledByName(disabledCmds, targetParts[0]) {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandDisabled), "/"+strings.TrimPrefix(targetParts[0], "/")))
+		return true
+	}
+
+	msg.Content = "/" + target
+	msg.PassthroughToAgent = true
+	return false
+}
+
+func (e *Engine) cmdCcHelp(p Platform, msg *Message, args []string, disabledCmds map[string]bool) {
+	commands := discoverAgentNativeCommands(e.agent, disabledCmds)
+	if len(args) == 0 {
+		e.reply(p, msg.ReplyCtx, e.renderCcHelpText(commands))
+		return
+	}
+
+	target := normalizeCommandName(strings.TrimPrefix(args[0], "/"))
+	for _, cmd := range commands {
+		if normalizeCommandName(cmd.Name) != target {
+			continue
+		}
+		e.reply(p, msg.ReplyCtx, e.renderCcHelpDetail(cmd))
+		return
+	}
+
+	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgCcHelpNotFound, strings.TrimPrefix(args[0], "/")))
+}
+
+func (e *Engine) renderCcHelpText(commands []SlashCommandSpec) string {
+	if len(commands) == 0 {
+		return e.i18n.Tf(MsgCcHelpEmpty, agentCommandDisplayName(e.agent))
+	}
+
+	var sb strings.Builder
+	sb.WriteString(e.i18n.Tf(MsgCcHelpTitle, agentCommandDisplayName(e.agent)))
+	sb.WriteString("\n\n")
+	sb.WriteString(e.i18n.T(MsgCcHelpIntro))
+
+	for _, cmd := range commands {
+		sb.WriteString("\n\n")
+		sb.WriteString("/cc ")
+		sb.WriteString(cmd.Name)
+		if cmd.UsageHint != "" {
+			sb.WriteByte(' ')
+			sb.WriteString(cmd.UsageHint)
+		}
+		if cmd.Description != "" {
+			sb.WriteString("\n  ")
+			sb.WriteString(cmd.Description)
+		}
+	}
+
+	sb.WriteString("\n\n")
+	sb.WriteString(e.i18n.T(MsgCcHelpTip))
+	return sb.String()
+}
+
+func (e *Engine) renderCcHelpDetail(cmd SlashCommandSpec) string {
+	var sb strings.Builder
+	sb.WriteString(e.i18n.Tf(MsgCcHelpCommandTitle, cmd.Name))
+	if cmd.Description != "" {
+		sb.WriteString("\n\n")
+		sb.WriteString(cmd.Description)
+	}
+	if cmd.UsageHint != "" {
+		sb.WriteString("\n\n")
+		sb.WriteString(e.i18n.Tf(MsgCcHelpCommandUsage, cmd.Name, cmd.UsageHint))
+	}
+	sb.WriteString("\n\n")
+	sb.WriteString(e.i18n.T(MsgCcHelpTip))
+	return sb.String()
+}
+
+func commandDisabledByName(disabledCmds map[string]bool, name string) bool {
+	if len(disabledCmds) == 0 {
+		return false
+	}
+	target := normalizeCommandName(strings.TrimPrefix(name, "/"))
+	for key, disabled := range disabledCmds {
+		if !disabled {
+			continue
+		}
+		if normalizeCommandName(key) == target {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string) {
@@ -4614,10 +4734,18 @@ func langDisplayName(lang Language) string {
 
 func (e *Engine) cmdHelp(p Platform, msg *Message) {
 	if !supportsCards(p) {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHelp))
+		e.reply(p, msg.ReplyCtx, e.renderHelpText())
 		return
 	}
 	e.replyWithCard(p, msg.ReplyCtx, e.renderHelpCard())
+}
+
+func (e *Engine) renderHelpText() string {
+	help := e.i18n.T(MsgHelp)
+	if len(e.DiscoverAgentNativeGatewayCommands()) > 0 {
+		help += "\n\n" + e.i18n.Tf(MsgHelpCcGateway, agentCommandDisplayName(e.agent))
+	}
+	return help
 }
 
 const defaultHelpGroup = "session"
@@ -4633,8 +4761,8 @@ type helpCardGroup struct {
 	items    []helpCardItem
 }
 
-func helpCardGroups() []helpCardGroup {
-	return []helpCardGroup{
+func (e *Engine) helpCardGroups() []helpCardGroup {
+	groups := []helpCardGroup{
 		{
 			key:      "session",
 			titleKey: MsgHelpSessionSection,
@@ -4653,6 +4781,7 @@ func helpCardGroups() []helpCardGroup {
 			key:      "agent",
 			titleKey: MsgHelpAgentSection,
 			items: []helpCardItem{
+				{command: "/cc", action: "cmd:/cc help"},
 				{command: "/model", action: "nav:/model"},
 				{command: "/reasoning", action: "nav:/reasoning"},
 				{command: "/mode", action: "nav:/mode"},
@@ -4694,6 +4823,23 @@ func helpCardGroups() []helpCardGroup {
 			},
 		},
 	}
+	if len(e.DiscoverAgentNativeGatewayCommands()) == 0 {
+		for i := range groups {
+			if groups[i].key != "agent" {
+				continue
+			}
+			var filtered []helpCardItem
+			for _, item := range groups[i].items {
+				if item.command == "/cc" {
+					continue
+				}
+				filtered = append(filtered, item)
+			}
+			groups[i].items = filtered
+			break
+		}
+	}
+	return groups
 }
 
 func (e *Engine) renderHelpCard() *Card {
@@ -4732,7 +4878,7 @@ func (e *Engine) renderHelpGroupCard(groupKey string) *Card {
 		return "**" + command + "**  " + e.i18n.T(MsgKey(strings.TrimPrefix(command, "/")))
 	}
 
-	groups := helpCardGroups()
+	groups := e.helpCardGroups()
 	current := groups[0]
 	normalizedGroup := strings.ToLower(strings.TrimSpace(groupKey))
 	for _, group := range groups {

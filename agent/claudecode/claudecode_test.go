@@ -230,6 +230,30 @@ func TestAgent_CLIDisplayName(t *testing.T) {
 	}
 }
 
+func TestNativeCommandProvider(t *testing.T) {
+	a := &Agent{workDir: "/tmp/test"}
+	ncp, ok := interface{}(a).(core.NativeCommandProvider)
+	if !ok {
+		t.Fatal("Agent should implement core.NativeCommandProvider")
+	}
+
+	commands := ncp.NativeCommands()
+	if len(commands) == 0 {
+		t.Fatal("expected native commands to be non-empty")
+	}
+
+	foundCommit := false
+	for _, cmd := range commands {
+		if cmd.Name == "commit" {
+			foundCommit = true
+			break
+		}
+	}
+	if !foundCommit {
+		t.Fatal("expected embedded native commands to include commit")
+	}
+}
+
 func TestAgent_SetWorkDir(t *testing.T) {
 	a := &Agent{}
 	a.SetWorkDir("/tmp/test")
@@ -300,3 +324,4 @@ func TestStripXMLTags(t *testing.T) {
 
 // verify Agent implements core.Agent
 var _ core.Agent = (*Agent)(nil)
+var _ core.NativeCommandProvider = (*Agent)(nil)

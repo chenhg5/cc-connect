@@ -128,20 +128,21 @@ type AudioAttachment struct {
 
 // Message represents a unified incoming message from any platform.
 type Message struct {
-	SessionKey string // unique key for user context, e.g. "feishu:{chatID}:{userID}"
-	Platform   string
-	MessageID  string // platform message ID for tracing
-	UserID     string
-	UserName   string
-	ChatName   string // human-readable chat/group name (optional)
-	Content    string
-	Images     []ImageAttachment // attached images (if any)
-	Files      []FileAttachment  // attached files (if any)
-	Audio        *AudioAttachment // voice message (if any)
-	ChannelKey   string          // platform-provided channel identifier for workspace binding (optional)
-	ReplyCtx     any             // platform-specific context needed for replying
-	FromVoice    bool            // true if message originated from voice transcription
-	ModeOverride string          // if set, temporarily override agent permission mode for this message
+	SessionKey         string // unique key for user context, e.g. "feishu:{chatID}:{userID}"
+	Platform           string
+	MessageID          string // platform message ID for tracing
+	UserID             string
+	UserName           string
+	ChatName           string // human-readable chat/group name (optional)
+	Content            string
+	Images             []ImageAttachment // attached images (if any)
+	Files              []FileAttachment  // attached files (if any)
+	Audio              *AudioAttachment  // voice message (if any)
+	ChannelKey         string            // platform-provided channel identifier for workspace binding (optional)
+	ReplyCtx           any               // platform-specific context needed for replying
+	FromVoice          bool              // true if message originated from voice transcription
+	ModeOverride       string            // if set, temporarily override agent permission mode for this message
+	PassthroughToAgent bool              // suppress unknown-command reply and forward slash commands to the agent
 }
 
 // EventType distinguishes different kinds of agent output.

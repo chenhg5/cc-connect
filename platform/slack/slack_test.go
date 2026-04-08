@@ -1,12 +1,16 @@
 package slack
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/chenhg5/cc-connect/core"
+	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
+	"github.com/slack-go/slack/socketmode"
 )
 
 func TestStripAppMentionText(t *testing.T) {
@@ -38,6 +42,101 @@ func TestStripAppMentionText(t *testing.T) {
 				t.Fatalf("stripAppMentionText(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestConvertBangPrefix(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		want     string
+		wantConv bool
+	}{
+		{name: "simple command", input: "!commit", want: "/commit", wantConv: true},
+		{name: "cc gateway", input: "!cc help", want: "/cc help", wantConv: true},
+		{name: "with args", input: "!compact --summary", want: "/compact --summary", wantConv: true},
+		{name: "space after bang unchanged", input: "! something", want: "! something", wantConv: false},
+		{name: "bare bang unchanged", input: "!", want: "!", wantConv: false},
+		{name: "plain text unchanged", input: "hello", want: "hello", wantConv: false},
+		{name: "empty unchanged", input: "", want: "", wantConv: false},
+		{name: "already slash unchanged", input: "/already-slash", want: "/already-slash", wantConv: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, conv := convertBangPrefix(tt.input)
+			if got != tt.want || conv != tt.wantConv {
+				t.Fatalf("convertBangPrefix(%q) = (%q, %v), want (%q, %v)", tt.input, got, conv, tt.want, tt.wantConv)
+			}
+		})
+	}
+}
+
+func TestReplyUsesResponseURLWhenPresent(t *testing.T) {
+	var gotMethod string
+	var gotPayload map[string]any
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		if err := json.NewDecoder(r.Body).Decode(&gotPayload); err != nil {
+			t.Fatalf("decode payload: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer ts.Close()
+
+	p := &Platform{}
+	err := p.Reply(context.Background(), replyContext{
+		channel:  "C123",
+		response: ts.URL,
+	}, "hello from slash command")
+	if err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+	if gotMethod != http.MethodPost {
+		t.Fatalf("method = %q, want POST", gotMethod)
+	}
+	if gotPayload["text"] != "hello from slash command" {
+		t.Fatalf("payload text = %#v", gotPayload["text"])
+	}
+	if gotPayload["response_type"] != "in_channel" {
+		t.Fatalf("payload response_type = %#v", gotPayload["response_type"])
+	}
+}
+
+func TestHandleSlashCommandStoresResponseURL(t *testing.T) {
+	p := &Platform{}
+	var gotCtx replyContext
+	var gotContent string
+	p.handler = func(_ core.Platform, msg *core.Message) {
+		rc, ok := msg.ReplyCtx.(replyContext)
+		if !ok {
+			t.Fatalf("ReplyCtx type = %T", msg.ReplyCtx)
+		}
+		gotCtx = rc
+		gotContent = msg.Content
+	}
+
+	p.handleEvent(socketmode.Event{
+		Type: socketmode.EventTypeSlashCommand,
+		Data: slack.SlashCommand{
+			Command:     "/cc",
+			Text:        "help",
+			UserID:      "U123",
+			UserName:    "leigh",
+			ChannelID:   "C123",
+			ResponseURL: "https://example.test/response",
+		},
+	})
+
+	if gotContent != "/cc help" {
+		t.Fatalf("content = %q, want %q", gotContent, "/cc help")
+	}
+	if gotCtx.channel != "C123" {
+		t.Fatalf("channel = %q, want C123", gotCtx.channel)
+	}
+	if gotCtx.response != "https://example.test/response" {
+		t.Fatalf("response URL = %q", gotCtx.response)
 	}
 }
 

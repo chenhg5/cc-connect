@@ -3,6 +3,7 @@ package claudecode
 import (
 	"bufio"
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -139,6 +140,38 @@ func normalizePermissionMode(raw string) string {
 func (a *Agent) Name() string           { return "claudecode" }
 func (a *Agent) CLIBinaryName() string  { return "claude" }
 func (a *Agent) CLIDisplayName() string { return "Claude" }
+
+//go:embed data/claude-code-commands.json
+var claudeCodeCommandsJSON []byte
+
+type claudeCodeCommandFile struct {
+	Version  string `json:"version"`
+	Updated  string `json:"updated"`
+	Commands []struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		UsageHint   string `json:"usage_hint"`
+	} `json:"commands"`
+}
+
+// NativeCommands implements core.NativeCommandProvider.
+func (a *Agent) NativeCommands() []core.SlashCommandSpec {
+	var file claudeCodeCommandFile
+	if err := json.Unmarshal(claudeCodeCommandsJSON, &file); err != nil {
+		slog.Warn("claudecode: failed to parse embedded native commands", "error", err)
+		return nil
+	}
+
+	specs := make([]core.SlashCommandSpec, 0, len(file.Commands))
+	for _, command := range file.Commands {
+		specs = append(specs, core.SlashCommandSpec{
+			Name:        command.Name,
+			Description: command.Description,
+			UsageHint:   command.UsageHint,
+		})
+	}
+	return specs
+}
 
 func (a *Agent) SetWorkDir(dir string) {
 	a.mu.Lock()

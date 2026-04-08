@@ -23,6 +23,25 @@ func (a *stubAgent) StartSession(_ context.Context, _ string) (AgentSession, err
 func (a *stubAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) { return nil, nil }
 func (a *stubAgent) Stop() error                                                { return nil }
 
+type stubNativeAgent struct {
+	stubAgent
+	commands []SlashCommandSpec
+	cliName  string
+}
+
+func (a *stubNativeAgent) NativeCommands() []SlashCommandSpec {
+	return append([]SlashCommandSpec(nil), a.commands...)
+}
+
+func (a *stubNativeAgent) CLIBinaryName() string { return "stub-native" }
+
+func (a *stubNativeAgent) CLIDisplayName() string {
+	if a.cliName != "" {
+		return a.cliName
+	}
+	return "Stub Native Agent"
+}
+
 type stubAgentSession struct{}
 
 func (s *stubAgentSession) Send(_ string, _ []ImageAttachment, _ []FileAttachment) error { return nil }
@@ -1297,6 +1316,192 @@ func TestEngine_DisabledCommandsWildcard(t *testing.T) {
 	}
 	if !strings.Contains(p.sent[0], "disabled") && !strings.Contains(p.sent[0], "禁用") {
 		t.Errorf("expected disabled message, got: %s", p.sent[0])
+	}
+}
+
+func TestHandleCommandPassthroughSuppressesUnknownNotification(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "test"}
+
+	msg := &Message{
+		SessionKey:         "test:u1",
+		UserID:             "user1",
+		Content:            "/nonexistent-cmd",
+		PassthroughToAgent: true,
+		ReplyCtx:           "ctx",
+	}
+
+	result := e.handleCommand(p, msg, msg.Content)
+	if result {
+		t.Fatal("expected handleCommand to return false for unknown passthrough command")
+	}
+	if got := p.getSent(); len(got) != 0 {
+		t.Fatalf("expected no reply for unknown passthrough command, got %v", got)
+	}
+}
+
+func TestCcGatewayRewritesContent(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "test"}
+
+	msg := &Message{
+		SessionKey: "test:u1",
+		UserID:     "user1",
+		Content:    "/cc commit --amend",
+		ReplyCtx:   "ctx",
+	}
+
+	result := e.handleCommand(p, msg, msg.Content)
+	if result {
+		t.Fatal("expected handleCommand to return false so /cc falls through to agent")
+	}
+	if msg.Content != "/commit --amend" {
+		t.Fatalf("expected content rewritten to %q, got %q", "/commit --amend", msg.Content)
+	}
+	if !msg.PassthroughToAgent {
+		t.Fatal("expected PassthroughToAgent to be set")
+	}
+	if got := p.getSent(); len(got) != 0 {
+		t.Fatalf("expected no immediate reply for /cc passthrough, got %v", got)
+	}
+}
+
+func TestCcGatewayNoArgsShowsUsage(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "test"}
+
+	msg := &Message{
+		SessionKey: "test:u1",
+		UserID:     "user1",
+		Content:    "/cc",
+		ReplyCtx:   "ctx",
+	}
+
+	result := e.handleCommand(p, msg, msg.Content)
+	if !result {
+		t.Fatal("expected handleCommand to return true for bare /cc")
+	}
+	got := p.getSent()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 usage reply, got %d: %v", len(got), got)
+	}
+	if got[0] != e.i18n.T(MsgCcGatewayUsage) {
+		t.Fatalf("usage reply = %q, want %q", got[0], e.i18n.T(MsgCcGatewayUsage))
+	}
+}
+
+func TestCcGatewayHelpListsNativeCommands(t *testing.T) {
+	agent := &stubNativeAgent{
+		commands: []SlashCommandSpec{
+			{Name: "commit", Description: "Create a commit", UsageHint: "[message]"},
+			{Name: "plan", Description: "Create a plan"},
+		},
+		cliName: "Claude Code",
+	}
+	e := NewEngine("test", agent, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
+	p := &stubPlatformEngine{n: "test"}
+
+	msg := &Message{
+		SessionKey: "test:u1",
+		UserID:     "user1",
+		Content:    "/cc help",
+		ReplyCtx:   "ctx",
+	}
+
+	result := e.handleCommand(p, msg, msg.Content)
+	if !result {
+		t.Fatal("expected /cc help to be handled locally")
+	}
+	got := strings.Join(p.getSent(), "\n")
+	if !strings.Contains(got, "Native Claude Code Commands") {
+		t.Fatalf("help output = %q, expected native command title", got)
+	}
+	if !strings.Contains(got, "/cc commit [message]") {
+		t.Fatalf("help output = %q, expected commit usage", got)
+	}
+	if !strings.Contains(got, "/cc plan") {
+		t.Fatalf("help output = %q, expected plan command", got)
+	}
+}
+
+func TestCcGatewayHelpShowsCommandDetail(t *testing.T) {
+	agent := &stubNativeAgent{
+		commands: []SlashCommandSpec{
+			{Name: "commit", Description: "Create a commit", UsageHint: "[message]"},
+		},
+	}
+	e := NewEngine("test", agent, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
+	p := &stubPlatformEngine{n: "test"}
+
+	msg := &Message{
+		SessionKey: "test:u1",
+		UserID:     "user1",
+		Content:    "/cc help commit",
+		ReplyCtx:   "ctx",
+	}
+
+	result := e.handleCommand(p, msg, msg.Content)
+	if !result {
+		t.Fatal("expected /cc help commit to be handled locally")
+	}
+	got := strings.Join(p.getSent(), "\n")
+	if !strings.Contains(got, "**/cc commit**") {
+		t.Fatalf("detail output = %q, expected command title", got)
+	}
+	if !strings.Contains(got, "Usage: `/cc commit [message]`") {
+		t.Fatalf("detail output = %q, expected usage line", got)
+	}
+}
+
+func TestCcGatewayRespectsDisabledCommands(t *testing.T) {
+	agent := &stubNativeAgent{
+		commands: []SlashCommandSpec{
+			{Name: "commit", Description: "Create a commit"},
+		},
+	}
+	e := NewEngine("test", agent, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
+	e.disabledCmds = map[string]bool{"commit": true}
+	p := &stubPlatformEngine{n: "test"}
+
+	msg := &Message{
+		SessionKey: "test:u1",
+		UserID:     "user1",
+		Content:    "/cc commit",
+		ReplyCtx:   "ctx",
+	}
+
+	result := e.handleCommand(p, msg, msg.Content)
+	if !result {
+		t.Fatal("expected disabled /cc command to be blocked locally")
+	}
+	got := strings.Join(p.getSent(), "\n")
+	if !strings.Contains(got, "/commit") {
+		t.Fatalf("blocked output = %q, expected command name", got)
+	}
+}
+
+func TestHelpIncludesCcGateway(t *testing.T) {
+	agent := &stubNativeAgent{
+		commands: []SlashCommandSpec{
+			{Name: "commit", Description: "Create a commit"},
+		},
+	}
+	e := NewEngine("test", agent, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
+	p := &stubPlatformEngine{n: "test"}
+
+	msg := &Message{
+		SessionKey: "test:u1",
+		UserID:     "user1",
+		ReplyCtx:   "ctx",
+	}
+
+	e.cmdHelp(p, msg)
+	got := strings.Join(p.getSent(), "\n")
+	if !strings.Contains(got, "/cc help [command]") {
+		t.Fatalf("help output = %q, expected /cc help entry", got)
+	}
+	if !strings.Contains(got, "Native Stub Native Agent commands are available via `/cc`") {
+		t.Fatalf("help output = %q, expected gateway note", got)
 	}
 }
 

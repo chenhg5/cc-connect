@@ -158,6 +158,15 @@ const (
 	MsgLangChanged               MsgKey = "lang_changed"
 	MsgLangInvalid               MsgKey = "lang_invalid"
 	MsgLangCurrent               MsgKey = "lang_current"
+	MsgCcGatewayUsage            MsgKey = "cc_gateway_usage"
+	MsgCcHelpTitle               MsgKey = "cc_help_title"
+	MsgCcHelpIntro               MsgKey = "cc_help_intro"
+	MsgCcHelpTip                 MsgKey = "cc_help_tip"
+	MsgCcHelpEmpty               MsgKey = "cc_help_empty"
+	MsgCcHelpNotFound            MsgKey = "cc_help_not_found"
+	MsgCcHelpCommandTitle        MsgKey = "cc_help_command_title"
+	MsgCcHelpCommandUsage        MsgKey = "cc_help_command_usage"
+	MsgHelpCcGateway             MsgKey = "help_cc_gateway"
 	MsgUnknownCommand            MsgKey = "unknown_command"
 	MsgHelp                      MsgKey = "message_help" // change from "help", which is used now for builtin command help
 	MsgHelpTitle                 MsgKey = "help_title"
@@ -486,6 +495,7 @@ const (
 	MsgBuiltinCmdUsage     MsgKey = "usage"
 	MsgBuiltinCmdVersion   MsgKey = "version"
 	MsgBuiltinCmdHelp      MsgKey = "help"
+	MsgBuiltinCmdCc        MsgKey = "cc"
 	MsgBuiltinCmdBind      MsgKey = "bind"
 	MsgBuiltinCmdShell     MsgKey = "shell"
 	MsgBuiltinCmdDir       MsgKey = "dir"
@@ -811,6 +821,69 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "🌐 現在の言語: **%s**\n\n使い方: /lang <en|zh|zh-TW|ja|es|auto>",
 		LangSpanish:            "🌐 Idioma actual: **%s**\n\nUso: /lang <en|zh|zh-TW|ja|es|auto>",
 	},
+	MsgCcGatewayUsage: {
+		LangEnglish:            "Usage: `/cc <command> [args]` - runs a native agent command directly. Use `/cc help` to browse available commands.",
+		LangChinese:            "用法: `/cc <command> [args]` - 直接运行 Agent 原生命令。使用 `/cc help` 查看可用命令。",
+		LangTraditionalChinese: "用法: `/cc <command> [args]` - 直接執行 Agent 原生命令。使用 `/cc help` 查看可用命令。",
+		LangJapanese:           "使い方: `/cc <command> [args]` - エージェントのネイティブコマンドを直接実行します。利用可能なコマンドは `/cc help` で確認できます。",
+		LangSpanish:            "Uso: `/cc <command> [args]` - ejecuta un comando nativo del agente directamente. Usa `/cc help` para ver los comandos disponibles.",
+	},
+	MsgCcHelpTitle: {
+		LangEnglish:            "Native %s Commands",
+		LangChinese:            "%s 原生命令",
+		LangTraditionalChinese: "%s 原生命令",
+		LangJapanese:           "%s のネイティブコマンド",
+		LangSpanish:            "Comandos nativos de %s",
+	},
+	MsgCcHelpIntro: {
+		LangEnglish:            "Use `/cc <command> [args]` to run a native command:",
+		LangChinese:            "使用 `/cc <command> [args]` 运行原生命令：",
+		LangTraditionalChinese: "使用 `/cc <command> [args]` 執行原生命令：",
+		LangJapanese:           "`/cc <command> [args]` でネイティブコマンドを実行します:",
+		LangSpanish:            "Usa `/cc <command> [args]` para ejecutar un comando nativo:",
+	},
+	MsgCcHelpTip: {
+		LangEnglish:            "Tip: Use `/cc help <command>` for details.",
+		LangChinese:            "提示：使用 `/cc help <command>` 查看详细说明。",
+		LangTraditionalChinese: "提示：使用 `/cc help <command>` 查看詳細說明。",
+		LangJapanese:           "ヒント: 詳細は `/cc help <command>` を使ってください。",
+		LangSpanish:            "Consejo: Usa `/cc help <command>` para ver detalles.",
+	},
+	MsgCcHelpEmpty: {
+		LangEnglish:            "%s does not expose any native `/cc` commands.",
+		LangChinese:            "%s 未暴露任何可通过 `/cc` 使用的原生命令。",
+		LangTraditionalChinese: "%s 未暴露任何可透過 `/cc` 使用的原生命令。",
+		LangJapanese:           "%s には `/cc` で使えるネイティブコマンドがありません。",
+		LangSpanish:            "%s no expone comandos nativos accesibles mediante `/cc`.",
+	},
+	MsgCcHelpNotFound: {
+		LangEnglish:            "Native command `/%s` not found. Use `/cc help` to list available commands.",
+		LangChinese:            "未找到原生命令 `/%s`。使用 `/cc help` 查看可用命令。",
+		LangTraditionalChinese: "找不到原生命令 `/%s`。使用 `/cc help` 查看可用命令。",
+		LangJapanese:           "ネイティブコマンド `/%s` が見つかりません。利用可能なコマンドは `/cc help` で確認できます。",
+		LangSpanish:            "No se encontró el comando nativo `/%s`. Usa `/cc help` para ver los comandos disponibles.",
+	},
+	MsgCcHelpCommandTitle: {
+		LangEnglish:            "**/cc %s**",
+		LangChinese:            "**/cc %s**",
+		LangTraditionalChinese: "**/cc %s**",
+		LangJapanese:           "**/cc %s**",
+		LangSpanish:            "**/cc %s**",
+	},
+	MsgCcHelpCommandUsage: {
+		LangEnglish:            "Usage: `/cc %s %s`",
+		LangChinese:            "用法: `/cc %s %s`",
+		LangTraditionalChinese: "用法: `/cc %s %s`",
+		LangJapanese:           "使い方: `/cc %s %s`",
+		LangSpanish:            "Uso: `/cc %s %s`",
+	},
+	MsgHelpCcGateway: {
+		LangEnglish:            "Native %s commands are available via `/cc`. Use `/cc help` to browse them.",
+		LangChinese:            "%s 的原生命令可通过 `/cc` 使用。使用 `/cc help` 浏览它们。",
+		LangTraditionalChinese: "%s 的原生命令可透過 `/cc` 使用。使用 `/cc help` 瀏覽它們。",
+		LangJapanese:           "%s のネイティブコマンドは `/cc` から利用できます。`/cc help` で一覧できます。",
+		LangSpanish:            "Los comandos nativos de %s están disponibles mediante `/cc`. Usa `/cc help` para verlos.",
+	},
 	MsgUnknownCommand: {
 		LangEnglish:            "`%s` is not a cc-connect command, forwarding to agent...",
 		LangChinese:            "`%s` 不是 cc-connect 命令，已转发给 Agent 处理...",
@@ -855,6 +928,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/status\n  Show system status\n\n" +
 			"/version\n  Show cc-connect version\n\n" +
 			"/whoami\n  Show your User ID (for allow_from / admin_from)\n\n" +
+			"/cc <command> [args]\n  Run a native agent command directly\n\n" +
+			"/cc help [command]\n  List native agent commands or show command details\n\n" +
 			"/help\n  Show this help\n\n" +
 			"Tip: Commands support prefix matching, e.g. `/pro l` = `/provider list`, `/sw 2` = `/switch 2`.\n\n" +
 			"Custom commands: define via `/commands add` or `[[commands]]` in config.toml.\n\n" +
@@ -897,6 +972,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/status\n  查看系统状态\n\n" +
 			"/version\n  查看 cc-connect 版本\n\n" +
 			"/whoami\n  查看你的 User ID（用于 allow_from / admin_from 配置）\n\n" +
+			"/cc <command> [args]\n  直接运行 Agent 原生命令\n\n" +
+			"/cc help [command]\n  列出原生命令或查看命令详情\n\n" +
 			"/help\n  显示此帮助\n\n" +
 			"提示：命令支持前缀匹配，如 `/pro l` = `/provider list`，`/sw 2` = `/switch 2`。\n\n" +
 			"自定义命令：通过 `/commands add` 添加，或在 config.toml 中配置 `[[commands]]`。\n\n" +
@@ -939,6 +1016,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/status\n  查看系統狀態\n\n" +
 			"/version\n  查看 cc-connect 版本\n\n" +
 			"/whoami\n  查看你的 User ID（用於 allow_from / admin_from 設定）\n\n" +
+			"/cc <command> [args]\n  直接執行 Agent 原生命令\n\n" +
+			"/cc help [command]\n  列出原生命令或查看命令詳情\n\n" +
 			"/help\n  顯示此說明\n\n" +
 			"提示：命令支持前綴匹配，如 `/pro l` = `/provider list`，`/sw 2` = `/switch 2`。\n\n" +
 			"自訂命令：透過 `/commands add` 新增，或在 config.toml 中配置 `[[commands]]`。\n\n" +
@@ -980,6 +1059,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/status\n  システム状態を表示\n\n" +
 			"/version\n  cc-connect のバージョンを表示\n\n" +
 			"/whoami\n  あなたの User ID を表示（allow_from / admin_from 設定用）\n\n" +
+			"/cc <command> [args]\n  エージェントのネイティブコマンドを直接実行\n\n" +
+			"/cc help [command]\n  ネイティブコマンド一覧または詳細を表示\n\n" +
 			"/help\n  このヘルプを表示\n\n" +
 			"ヒント：コマンドはプレフィックスマッチに対応しています。例: `/pro l` = `/provider list`、`/sw 2` = `/switch 2`。\n\n" +
 			"カスタムコマンド: `/commands add` または config.toml の `[[commands]]` で定義。\n\n" +
@@ -1021,6 +1102,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/status\n  Mostrar estado del sistema\n\n" +
 			"/version\n  Mostrar versión de cc-connect\n\n" +
 			"/whoami\n  Mostrar tu User ID (para allow_from / admin_from)\n\n" +
+			"/cc <command> [args]\n  Ejecutar un comando nativo del agente directamente\n\n" +
+			"/cc help [command]\n  Listar comandos nativos o ver detalles\n\n" +
 			"/help\n  Mostrar esta ayuda\n\n" +
 			"Consejo: Los comandos admiten coincidencia por prefijo, ej. `/pro l` = `/provider list`, `/sw 2` = `/switch 2`.\n\n" +
 			"Comandos personalizados: use `/commands add` o defina `[[commands]]` en config.toml.\n\n" +
@@ -3261,6 +3344,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "顯示此說明",
 		LangJapanese:           "このヘルプを表示",
 		LangSpanish:            "Mostrar esta ayuda",
+	},
+	MsgBuiltinCmdCc: {
+		LangEnglish:            "Browse or run native agent commands, arg: <command> [args]",
+		LangChinese:            "浏览或运行 Agent 原生命令，参数: <command> [args]",
+		LangTraditionalChinese: "瀏覽或執行 Agent 原生命令，參數: <command> [args]",
+		LangJapanese:           "ネイティブエージェントコマンドを一覧または実行、引数: <command> [args]",
+		LangSpanish:            "Explorar o ejecutar comandos nativos del agente, arg: <command> [args]",
 	},
 	MsgBuiltinCmdBind: {
 		LangEnglish:            "Bind current session to a target, arg: <target>",

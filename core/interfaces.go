@@ -372,6 +372,13 @@ type SkillProvider interface {
 	SkillDirs() []string
 }
 
+// NativeCommandProvider is an optional interface that agents can implement
+// to expose native slash commands for discovery, gateway help, and optional
+// platform registration.
+type NativeCommandProvider interface {
+	NativeCommands() []SlashCommandSpec
+}
+
 // SessionDeleter is an optional interface for agents that support deleting sessions.
 type SessionDeleter interface {
 	DeleteSession(ctx context.Context, sessionID string) error

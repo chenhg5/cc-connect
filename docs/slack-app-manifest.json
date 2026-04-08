@@ -21,6 +21,12 @@
         "should_escape": false
       },
       {
+        "command": "/cc",
+        "description": "Browse or run native agent commands",
+        "usage_hint": "<command> [args]",
+        "should_escape": false
+      },
+      {
         "command": "/new",
         "description": "Start a new session",
         "usage_hint": "[name]",
