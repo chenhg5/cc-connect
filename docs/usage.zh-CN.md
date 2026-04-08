@@ -274,6 +274,98 @@ alias = "spark"
 
 ---
 
+## 本地引用展示配置（`[projects.references]`）
+
+可选启用对 Agent 输出中的本地文件 / 目录 / 代码位置引用进行标准化与重渲染，提升在 IM 平台中的可读性。
+
+这是一个 **opt-in** 功能：
+
+- 未配置 `[projects.references]` 时，现有行为保持不变
+- 只有命中 `normalize_agents` 和 `render_platforms` 时，才会启用
+
+### 推荐配置
+
+```toml
+[projects.references]
+normalize_agents = ["all"]
+render_platforms = ["all"]
+display_path = "relative"
+marker_style = "emoji"
+enclosure_style = "code"
+```
+
+### 字段说明
+
+- `normalize_agents`
+  - 控制哪些 Agent 输出参与这套引用处理
+  - 当前初始支持：`codex`、`claudecode`、`all`
+
+- `render_platforms`
+  - 控制在哪些平台发送前应用展示重写
+  - 当前初始支持：`feishu`、`weixin`、`all`
+
+- `display_path`
+  - 控制路径主体的显示层级
+  - 可选值：`absolute`、`relative`、`basename`、`dirname_basename`、`smart`
+
+- `marker_style`
+  - 控制前缀标记样式
+  - 可选值：`none`、`ascii`、`emoji`
+
+- `enclosure_style`
+  - 控制路径主体的包裹样式
+  - 可选值：`none`、`bracket`、`angle`、`fullwidth`、`code`
+
+### 支持的引用输入
+
+当前初始支持识别这些常见形式：
+
+- 绝对路径
+- 相对路径
+- 文件 / 目录引用
+- `path:line`
+- `path:line:col`
+- `path:start-end`
+- `path#L42`
+- Markdown 本地文件链接
+- Claude 风格的反引号绝对路径引用
+
+### 行为说明
+
+- 只处理 Agent 输出：
+  - thinking
+  - final response
+  - stream preview
+  - progress / card 中的 Agent 文本
+
+- 不处理：
+  - 系统消息
+  - `/workspace`、`/dir`、`/status` 等命令回复
+  - raw tool result
+
+- 网页链接会保持原样，不会被本地引用重写逻辑污染
+
+### 推荐默认值说明
+
+当前最推荐的组合是：
+
+- `display_path = "relative"`
+- `marker_style = "emoji"`
+- `enclosure_style = "code"`
+
+这样通常会得到类似：
+
+- `📄 ui/recovery_contact_form.tsx:11`
+- `📁 docs/spec.v1/`
+
+如果不希望使用 emoji，更推荐：
+
+- `display_path = "dirname_basename"`
+- `marker_style = "ascii"`
+- `enclosure_style = "code"`
+
+---
+
 ## 引用查看（`/show`）
 
 可直接基于一个文件 / 目录 / 代码位置引用查看内容，而不必手写 `/shell sed ...`。
