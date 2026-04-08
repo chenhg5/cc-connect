@@ -149,10 +149,10 @@ func TestSummarizeACPToolInput(t *testing.T) {
 			want: "",
 		},
 		{
-			name: "unknown kind falls back to JSON",
+			name: "unknown kind falls back to formatted JSON",
 			kind: "unknown_tool",
 			raw:  `{"key": "value"}`,
-			want: `{"key":"value"}`,
+			want: "{\n  \"key\": \"value\"\n}",
 		},
 	}
 	for _, tt := range tests {
