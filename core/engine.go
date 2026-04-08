@@ -444,11 +444,6 @@ func (e *Engine) SetReferenceConfig(cfg ReferenceRenderCfg) {
 	e.references = normalizeReferenceRenderCfg(cfg)
 }
 
-// SetDefaultQuiet sets whether new sessions start in quiet mode.
-func (e *Engine) SetDefaultQuiet(q bool) {
-	e.defaultQuiet = q
-}
-
 // estimateTokens provides a rough token estimate for a set of history entries.
 func estimateTokens(entries []HistoryEntry) int {
 	return estimateTokensWithPendingAssistant(entries, "")
