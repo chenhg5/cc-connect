@@ -2967,42 +2967,37 @@ func TestGetOrCreateWorkspaceAgent_InheritsActiveProvider(t *testing.T) {
 	}
 }
 
-func TestGetOrCreateWorkspaceAgent_AppliesPersistedWorkspaceDirOverride(t *testing.T) {
-	agentName := "test-workspace-dir-override"
-	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) {
-		agent := &namedStubWorkDirAgent{name: agentName}
-		if workDir, ok := opts["work_dir"].(string); ok {
-			agent.workDir = workDir
-		}
-		return agent, nil
-	})
-
-	baseDir := t.TempDir()
+func TestApplyChannelDirOverride_PerChannelIndependence(t *testing.T) {
 	workspace := normalizeWorkspacePath(t.TempDir())
-	overrideDir := filepath.Join(baseDir, "override")
-	if err := os.MkdirAll(overrideDir, 0o755); err != nil {
-		t.Fatalf("mkdir override dir: %v", err)
+	dirA := filepath.Join(workspace, "channelA")
+	dirB := filepath.Join(workspace, "channelB")
+	if err := os.MkdirAll(dirA, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.MkdirAll(dirB, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
 	}
 
 	store := NewProjectStateStore(filepath.Join(t.TempDir(), "projects", "test.state.json"))
-	store.SetWorkspaceDirOverride(workspace, overrideDir)
+	keyA := workspace + ":feishu:oc_aaa:ou_111"
+	keyB := workspace + ":feishu:oc_bbb:ou_222"
+	store.SetWorkspaceDirOverride(keyA, dirA)
+	store.SetWorkspaceDirOverride(keyB, dirB)
 	store.Save()
 
-	e := NewEngine("test", &namedStubWorkDirAgent{name: agentName}, []Platform{&stubPlatformEngine{n: "plain"}}, "", LangEnglish)
-	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+	agent := &stubWorkDirAgent{workDir: workspace}
+	e := NewEngine("test", agent, []Platform{&stubPlatformEngine{n: "plain"}}, "", LangEnglish)
+	e.SetMultiWorkspace(workspace, filepath.Join(t.TempDir(), "bindings.json"))
 	e.SetProjectStateStore(store)
 
-	wsAgentRaw, _, err := e.getOrCreateWorkspaceAgent(workspace)
-	if err != nil {
-		t.Fatalf("getOrCreateWorkspaceAgent returned error: %v", err)
+	e.applyChannelDirOverride(agent, keyA)
+	if agent.GetWorkDir() != dirA {
+		t.Fatalf("after keyA: workDir = %q, want %q", agent.GetWorkDir(), dirA)
 	}
 
-	wsAgent, ok := wsAgentRaw.(*namedStubWorkDirAgent)
-	if !ok {
-		t.Fatalf("workspace agent type = %T, want *namedStubWorkDirAgent", wsAgentRaw)
-	}
-	if wsAgent.GetWorkDir() != overrideDir {
-		t.Fatalf("workspace agent workDir = %q, want %q", wsAgent.GetWorkDir(), overrideDir)
+	e.applyChannelDirOverride(agent, keyB)
+	if agent.GetWorkDir() != dirB {
+		t.Fatalf("after keyB: workDir = %q, want %q", agent.GetWorkDir(), dirB)
 	}
 }
 
@@ -3153,8 +3148,8 @@ func TestDirApply_MultiWorkspacePersistsWorkspaceSpecificOverride(t *testing.T) 
 	}
 
 	reloaded := NewProjectStateStore(statePath)
-	if got := reloaded.WorkspaceDirOverride(workspace); got != nextDir {
-		t.Fatalf("WorkspaceDirOverride(%q) = %q, want %q", workspace, got, nextDir)
+	if got := reloaded.WorkspaceDirOverride(interactiveKey); got != nextDir {
+		t.Fatalf("WorkspaceDirOverride(%q) = %q, want %q", interactiveKey, got, nextDir)
 	}
 	if got := reloaded.WorkDirOverride(); got != "" {
 		t.Fatalf("WorkDirOverride() = %q, want empty in multi-workspace mode", got)
@@ -3171,7 +3166,8 @@ func TestDirApply_MultiWorkspaceResetClearsWorkspaceSpecificOverride(t *testing.
 
 	statePath := filepath.Join(t.TempDir(), "projects", "test.state.json")
 	store := NewProjectStateStore(statePath)
-	store.SetWorkspaceDirOverride(workspace, overrideDir)
+	interactiveKey := workspace + ":feishu:oc_xxx:ou_yyy"
+	store.SetWorkspaceDirOverride(interactiveKey, overrideDir)
 	store.Save()
 
 	agent := &stubWorkDirAgent{workDir: overrideDir}
@@ -3181,7 +3177,6 @@ func TestDirApply_MultiWorkspaceResetClearsWorkspaceSpecificOverride(t *testing.
 	e.SetProjectStateStore(store)
 
 	sessions := NewSessionManager("")
-	interactiveKey := workspace + ":feishu:oc_xxx:ou_yyy"
 
 	errMsg, _ := e.dirApply(agent, sessions, interactiveKey, "feishu:oc_xxx:ou_yyy", []string{"reset"})
 	if errMsg != "" {
@@ -3189,8 +3184,8 @@ func TestDirApply_MultiWorkspaceResetClearsWorkspaceSpecificOverride(t *testing.
 	}
 
 	reloaded := NewProjectStateStore(statePath)
-	if got := reloaded.WorkspaceDirOverride(workspace); got != "" {
-		t.Fatalf("WorkspaceDirOverride(%q) after reset = %q, want empty", workspace, got)
+	if got := reloaded.WorkspaceDirOverride(interactiveKey); got != "" {
+		t.Fatalf("WorkspaceDirOverride(%q) after reset = %q, want empty", interactiveKey, got)
 	}
 }
 

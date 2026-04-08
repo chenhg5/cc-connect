@@ -1414,6 +1414,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		sessions = wsSessions
 		agent = wsAgent
 		interactiveKey = resolvedWorkspace + ":" + msg.SessionKey
+		e.applyChannelDirOverride(agent, interactiveKey)
 	}
 
 	session := sessions.GetOrCreateActive(msg.SessionKey)
@@ -1989,21 +1990,6 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 			ps2.SetProviders(ps.ListProviders())
 			if active := ps.GetActiveProvider(); active != nil && active.Name != "" {
 				ps2.SetActiveProvider(active.Name)
-			}
-		}
-	}
-
-	if e.projectState != nil {
-		if override := e.projectState.WorkspaceDirOverride(workspace); override != "" {
-			if info, err := os.Stat(override); err == nil && info.IsDir() {
-				if switcher, ok := agent.(WorkDirSwitcher); ok {
-					switcher.SetWorkDir(override)
-					slog.Info("workspace agent: applied dir override", "workspace", workspace, "override", override)
-				}
-			} else {
-				slog.Warn("workspace agent: ignoring invalid dir override", "workspace", workspace, "override", override)
-				e.projectState.ClearWorkspaceDirOverride(workspace)
-				e.projectState.Save()
 			}
 		}
 	}
@@ -3779,9 +3765,7 @@ func (e *Engine) dirApply(agent Agent, sessions *SessionManager, interactiveKey,
 
 			if e.projectState != nil {
 				if e.multiWorkspace {
-					if workspace := workspaceFromInteractiveKey(interactiveKey); workspace != "" {
-						e.projectState.ClearWorkspaceDirOverride(workspace)
-					}
+					e.projectState.ClearWorkspaceDirOverride(interactiveKey)
 				} else {
 					e.projectState.ClearWorkDirOverride()
 				}
@@ -3852,9 +3836,7 @@ func (e *Engine) dirApply(agent Agent, sessions *SessionManager, interactiveKey,
 	}
 	if e.projectState != nil {
 		if e.multiWorkspace {
-			if workspace := workspaceFromInteractiveKey(interactiveKey); workspace != "" {
-				e.projectState.SetWorkspaceDirOverride(workspace, newDir)
-			}
+			e.projectState.SetWorkspaceDirOverride(interactiveKey, newDir)
 		} else {
 			e.projectState.SetWorkDirOverride(newDir)
 		}
@@ -3864,14 +3846,22 @@ func (e *Engine) dirApply(agent Agent, sessions *SessionManager, interactiveKey,
 	return "", e.i18n.Tf(MsgDirChanged, newDir)
 }
 
-func workspaceFromInteractiveKey(key string) string {
-	if !strings.HasPrefix(key, "/") {
-		return ""
+func (e *Engine) applyChannelDirOverride(agent Agent, interactiveKey string) {
+	if e.projectState == nil {
+		return
 	}
-	if idx := strings.IndexByte(key, ':'); idx > 0 {
-		return key[:idx]
+	override := e.projectState.WorkspaceDirOverride(interactiveKey)
+	if override == "" {
+		return
 	}
-	return ""
+	if switcher, ok := agent.(WorkDirSwitcher); ok {
+		if info, err := os.Stat(override); err == nil && info.IsDir() {
+			switcher.SetWorkDir(override)
+		} else {
+			e.projectState.ClearWorkspaceDirOverride(interactiveKey)
+			e.projectState.Save()
+		}
+	}
 }
 
 func (e *Engine) cmdDir(p Platform, msg *Message, args []string) {
@@ -9727,7 +9717,9 @@ func (e *Engine) commandContext(p Platform, msg *Message) (Agent, *SessionManage
 	if err != nil {
 		return nil, nil, "", err
 	}
-	return wsAgent, wsSessions, workspace + ":" + msg.SessionKey, nil
+	interactiveKey := workspace + ":" + msg.SessionKey
+	e.applyChannelDirOverride(wsAgent, interactiveKey)
+	return wsAgent, wsSessions, interactiveKey, nil
 }
 
 // sessionContextForKey resolves the agent and session manager for a sessionKey.
