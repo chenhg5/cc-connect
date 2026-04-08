@@ -377,24 +377,45 @@ func (e *Engine) runIdleReaper() {
 		case <-e.ctx.Done():
 			return
 		case <-ticker.C:
-			if e.workspacePool == nil {
-				continue
-			}
-			reaped := e.workspacePool.ReapIdle()
-			for _, ws := range reaped {
-				e.interactiveMu.Lock()
-				for key, state := range e.interactiveStates {
-					if state.workspaceDir == ws {
-						if state.agentSession != nil {
-							state.agentSession.Close()
-						}
-						delete(e.interactiveStates, key)
-					}
-				}
-				e.interactiveMu.Unlock()
-				slog.Info("workspace idle-reaped", "workspace", ws)
-			}
+			e.reapIdleWorkspaces()
 		}
+	}
+}
+
+func (e *Engine) reapIdleWorkspaces() {
+	if e.workspacePool == nil {
+		return
+	}
+
+	reaped := e.workspacePool.ReapIdle()
+	if len(reaped) == 0 {
+		return
+	}
+
+	reapedSet := make(map[string]struct{}, len(reaped))
+	for _, ws := range reaped {
+		reapedSet[ws] = struct{}{}
+	}
+
+	type cleanupTarget struct {
+		key   string
+		state *interactiveState
+	}
+
+	var targets []cleanupTarget
+	e.interactiveMu.Lock()
+	for key, state := range e.interactiveStates {
+		if _, ok := reapedSet[state.workspaceDir]; ok {
+			targets = append(targets, cleanupTarget{key: key, state: state})
+		}
+	}
+	e.interactiveMu.Unlock()
+
+	for _, target := range targets {
+		e.cleanupInteractiveState(target.key, target.state)
+	}
+	for _, ws := range reaped {
+		slog.Info("workspace idle-reaped", "workspace", ws)
 	}
 }
 
@@ -1857,6 +1878,12 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	if state.agentSession == nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgFailedToStartAgentSession))
 		return
+	}
+
+	if workspaceDir != "" && e.workspacePool != nil {
+		ws := e.workspacePool.GetOrCreate(workspaceDir)
+		ws.BeginTurn()
+		defer ws.EndTurn()
 	}
 
 	// Apply per-message permission mode override (e.g. cron jobs with mode = "bypassPermissions").

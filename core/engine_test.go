@@ -5236,6 +5236,148 @@ func TestProcessInteractiveEvents_PermissionWhileSendBlocked(t *testing.T) {
 	}
 }
 
+func TestReapIdleWorkspaces_SkipsWorkspaceWithActiveTurn(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newBlockingSendSession("busy-turn")
+	e := NewEngine("test", &controllableAgent{nextSession: sess}, []Platform{p}, "", LangEnglish)
+	e.workspacePool = newWorkspacePool(50 * time.Millisecond)
+
+	workspaceDir := normalizeWorkspacePath(t.TempDir())
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	if !session.TryLock() {
+		t.Fatal("expected session lock")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveMessageWith(p, &Message{
+			SessionKey: sessionKey,
+			UserID:     "user1",
+			Content:    "long running task",
+			ReplyCtx:   "ctx",
+		}, session, e.agent, e.sessions, sessionKey, workspaceDir, sessionKey)
+		close(done)
+	}()
+
+	select {
+	case <-sess.sendStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Send did not reach blocking wait")
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	e.reapIdleWorkspaces()
+
+	if !sess.Alive() {
+		t.Fatal("idle reaper closed a session with an active turn")
+	}
+	e.interactiveMu.Lock()
+	_, exists := e.interactiveStates[sessionKey]
+	e.interactiveMu.Unlock()
+	if !exists {
+		t.Fatal("idle reaper removed interactive state for an active turn")
+	}
+
+	close(sess.unblock)
+	sess.events <- Event{Type: EventResult, Content: "done", Done: true}
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("processInteractiveMessageWith did not complete")
+	}
+}
+
+func TestReapIdleWorkspaces_SkipsWorkspaceWaitingForPermission(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newBlockingSendSession("perm-wait")
+	e := NewEngine("test", &controllableAgent{nextSession: sess}, []Platform{p}, "", LangEnglish)
+	e.workspacePool = newWorkspacePool(50 * time.Millisecond)
+
+	workspaceDir := normalizeWorkspacePath(t.TempDir())
+	sessionKey := "test:user2"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	if !session.TryLock() {
+		t.Fatal("expected session lock")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveMessageWith(p, &Message{
+			SessionKey: sessionKey,
+			UserID:     "user2",
+			Content:    "needs approval",
+			ReplyCtx:   "ctx",
+		}, session, e.agent, e.sessions, sessionKey, workspaceDir, sessionKey)
+		close(done)
+	}()
+
+	select {
+	case <-sess.sendStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Send did not reach blocking wait")
+	}
+
+	sess.events <- Event{
+		Type:         EventPermissionRequest,
+		RequestID:    "req-1",
+		ToolName:     "write_file",
+		ToolInput:    "/tmp/x",
+		ToolInputRaw: map[string]any{"path": "/tmp/x"},
+	}
+
+	var pending *pendingPermission
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		e.interactiveMu.Lock()
+		state := e.interactiveStates[sessionKey]
+		e.interactiveMu.Unlock()
+		if state != nil {
+			state.mu.Lock()
+			pending = state.pending
+			state.mu.Unlock()
+			if pending != nil {
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if pending == nil {
+		t.Fatal("expected pending permission while turn is waiting")
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	e.reapIdleWorkspaces()
+
+	if !sess.Alive() {
+		t.Fatal("idle reaper closed a session waiting for permission")
+	}
+	e.interactiveMu.Lock()
+	_, exists := e.interactiveStates[sessionKey]
+	e.interactiveMu.Unlock()
+	if !exists {
+		t.Fatal("idle reaper removed interactive state while waiting for permission")
+	}
+
+	if !e.handlePendingPermission(p, &Message{
+		SessionKey: sessionKey,
+		UserID:     "user2",
+		Content:    "allow",
+		ReplyCtx:   "ctx",
+	}, "allow") {
+		t.Fatal("expected pending permission to be handled")
+	}
+	close(sess.unblock)
+	sess.events <- Event{Type: EventResult, Content: "done", Done: true}
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("processInteractiveMessageWith did not complete after permission")
+	}
+}
+
 func TestQueueMessageForBusySession_FIFODequeue(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newQueuingSession("qs1")
