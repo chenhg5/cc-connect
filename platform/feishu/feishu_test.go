@@ -269,6 +269,45 @@ func TestParseInlineMarkdown_BoldAndCode(t *testing.T) {
 	}
 }
 
+func TestExtractPostPlainText_FlatFormat(t *testing.T) {
+	content := `{"title":"公告","content":[[{"tag":"text","text":"第一段"}],[{"tag":"text","text":"第二段"}]]}`
+	got := extractPostPlainText(content)
+	if got != "公告\n第一段\n第二段" {
+		t.Errorf("expected '公告\\n第一段\\n第二段', got %q", got)
+	}
+}
+
+func TestExtractPostPlainText_LocaleWrapped(t *testing.T) {
+	content := `{"zh_cn":{"title":"标题","content":[[{"tag":"text","text":"内容"}]]}}`
+	got := extractPostPlainText(content)
+	if got != "标题\n内容" {
+		t.Errorf("expected '标题\\n内容', got %q", got)
+	}
+}
+
+func TestExtractPostPlainText_NoTitle(t *testing.T) {
+	content := `{"content":[[{"tag":"text","text":"仅内容"}]]}`
+	got := extractPostPlainText(content)
+	if got != "仅内容" {
+		t.Errorf("expected '仅内容', got %q", got)
+	}
+}
+
+func TestExtractPostPlainText_Empty(t *testing.T) {
+	got := extractPostPlainText(`{}`)
+	if got != "" {
+		t.Errorf("expected empty string, got %q", got)
+	}
+}
+
+func TestExtractPostPlainText_NonTextTagsIgnored(t *testing.T) {
+	content := `{"content":[[{"tag":"text","text":"hello"},{"tag":"a","text":"link","href":"http://x.com"}]]}`
+	got := extractPostPlainText(content)
+	if got != "hello" {
+		t.Errorf("expected 'hello', got %q", got)
+	}
+}
+
 func strPtr(s string) *string { return &s }
 
 func TestStripMentions(t *testing.T) {
