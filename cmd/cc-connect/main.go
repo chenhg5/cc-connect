@@ -420,6 +420,14 @@ func main() {
 				} else {
 					slog.Warn("speech: qwen provider enabled but api_key is empty")
 				}
+			case "gemini":
+				apiKey := cfg.Speech.Gemini.APIKey
+				model := cfg.Speech.Gemini.Model
+				if apiKey != "" {
+					speechCfg.STT = core.NewGeminiSTT(apiKey, model)
+				} else {
+					slog.Warn("speech: gemini provider enabled but api_key is empty")
+				}
 			default: // "openai" or unspecified
 				apiKey := cfg.Speech.OpenAI.APIKey
 				baseURL := cfg.Speech.OpenAI.BaseURL
