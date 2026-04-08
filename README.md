@@ -51,19 +51,65 @@
 
 ---
 
+## 🆕 What's New (beta)
+
+> These highlights are in **beta / pre-release** builds — install [`cc-connect@beta`](https://www.npmjs.com/package/cc-connect?activeTab=versions) or grab a [pre-release](https://github.com/chenhg5/cc-connect/releases) binary. They are **not** in the default **stable** release yet; details may change before promotion to stable.
+
+- **Personal WeChat** — Chat with your local agent from **Weixin (personal)** via ilink long-polling; QR `weixin setup`, CDN media, no public IP. *[Setup → `docs/weixin.md`](docs/weixin.md)*
+- **Auto-compress** — When the session estimate blows past your threshold, cc-connect can trim context so long threads keep working instead of silently falling over.
+- **Friendlier `--continue`** — Fork-on-continue so your bridge session doesn’t inherit a half-finished CLI terminal session by accident.
+- **Cron with boundaries** — Run jobs in a **fresh session** each time and cap **per-job timeouts** so runaway tasks don’t wedge the bot.
+- **Richer platforms** — e.g. **Discord** `@everyone` / `@here`, **Telegram** voice-style replies, **Feishu** fixes for reply threading and async dispatch.
+
+---
+
+## 🧩 Platform feature snapshot
+
+High-level view of what each **built-in platform** can do in cc-connect. Inspired by [OpenClaw China’s feature matrix](https://github.com/BytePioneer-AI/openclaw-china#功能支持) — handy for comparing channels at a glance.
+
+**Legend**
+
+| Symbol | Meaning |
+|--------|---------|
+| ✅ | Works in **stable** cc-connect with typical configuration |
+| ✅（beta） | **Beta / pre-release only** — the **Weixin (personal)** column: install [`cc-connect@beta`](https://www.npmjs.com/package/cc-connect?activeTab=versions) or a [pre-release binary](https://github.com/chenhg5/cc-connect/releases); **not** in the default stable npm build yet |
+| ⚠️ | Partial, needs extra config (e.g. speech / ASR), or limited by the vendor app or API |
+| ❌ | Not supported or not applicable in practice |
+
+† **QQ (NapCat / OneBot)** — unofficial self-hosted bridge; behaviour depends on your NapCat / network setup.
+
+| Capability | Feishu | DingTalk | Telegram | Slack | Discord | LINE | WeCom | **Weixin**<br>*(personal)* | QQ† | QQ Bot |
+|------------|:------:|:--------:|:--------:|:-----:|:-------:|:----:|:-----:|:-------------------------:|:---:|:------:|
+| Text & slash commands | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅（beta） | ✅ | ✅ |
+| Markdown / cards | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ✅（beta） | ✅ | ✅ |
+| Streaming / chunked replies | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅（beta） | ✅ | ✅ |
+| Images & files | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ✅（beta） | ✅ | ✅ |
+| Voice / STT / TTS | ⚠️ | ⚠️ | ✅ | ⚠️ | ⚠️ | ❌ | ⚠️ | ✅（beta） | ⚠️ | ⚠️ |
+| Private (DM) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅（beta） | ✅ | ✅ |
+| Group / channel | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ✅（beta） | ✅ | ✅ |
+
+> **Weixin column:** every **✅（beta）** means “available only when you run a **beta / pre-release** build,” not a statement that the feature is incomplete — the whole **personal WeChat (ilink)** channel is still **pre-stable**.  
+> **WeCom:** Webhook mode needs a **public URL**; long-connection / WS style setups often do not.  
+> **Voice row:** many platforms need `[speech]` / TTS providers enabled in `config.toml`; values are a best-effort summary.  
+> Per-platform setup: [Platform setup guides](#-platform-setup-guides) below.
+
+---
+
 ## ✨ Why cc-connect?
 
 ### 🤖 Universal Agent Support
 **7 AI Agents** — Claude Code, Codex, Cursor Agent, Qoder CLI, Gemini CLI, OpenCode, iFlow CLI. Use whichever fits your workflow, or all of them at once.
 
 ### 📱 Platform Flexibility
-**9 Chat Platforms** — Feishu, DingTalk, Slack, Telegram, Discord, WeChat Work, LINE, QQ, QQ Bot (Official). Most need **zero public IP**.
+**10 Chat Platforms** — Feishu, DingTalk, Slack, Telegram, Discord, WeChat Work, LINE, QQ, QQ Bot (Official), plus **Weixin (personal ilink)** for **personal WeChat**. *Personal WeChat is **beta / pre-release only*** — install [`cc-connect@beta`](https://www.npmjs.com/package/cc-connect?activeTab=versions) or a [GitHub pre-release](https://github.com/chenhg5/cc-connect/releases) binary; the default **stable** npm package does **not** ship the `weixin` platform yet. Most platforms need **zero public IP**.
 
 ### 🔄 Multi-Agent Orchestration
 **Multi-Bot Relay** — Bind multiple bots in a group chat and let them communicate with each other. Ask Claude, get insights from Gemini — all in one conversation.
 
 ### 🎮 Complete Chat Control
 **Full Control from Chat** — Switch models (`/model`), tune reasoning (`/reasoning`), change permission modes (`/mode`), manage sessions, all via slash commands.
+
+**Directory Switching in Chat** — Change where the next session starts with `/dir <path>` (and `/cd <path>` as a compatibility alias), plus quick history jump via `/dir <number>` / `/dir -`.
 
 ### 🧠 Persistent Memory
 **Agent Memory** — Read and write agent instruction files (`/memory`) without touching the terminal.
@@ -117,6 +163,8 @@ npm install -g cc-connect
 npm install -g cc-connect@beta
 ```
 
+> **Personal WeChat (Weixin ilink):** only available in **beta / pre-release** builds (`cc-connect@beta` or a prerelease asset under [Releases](https://github.com/chenhg5/cc-connect/releases)). **Stable** `npm install -g cc-connect` does **not** include this platform until it graduates from beta.
+
 **Download binary from [GitHub Releases](https://github.com/chenhg5/cc-connect/releases):**
 
 ```bash
@@ -146,6 +194,9 @@ mkdir -p ~/.cc-connect
 cp config.example.toml ~/.cc-connect/config.toml
 vim ~/.cc-connect/config.toml
 ```
+
+Set `admin_from = "alice,bob"` in a project to allow those user IDs to run privileged commands such as `/dir` and `/shell`.
+When a user runs `/dir reset`, cc-connect restores the configured `work_dir` and clears the persisted override stored under `data_dir/projects/<project>.state.json`.
 
 ---
 
@@ -190,6 +241,7 @@ cc-connect update --pre     # Beta (includes pre-releases)
 | Platform | Discord | ✅ Gateway — no public IP needed |
 | Platform | LINE | ✅ Webhook — public URL required |
 | Platform | WeChat Work | ✅ WebSocket / Webhook |
+| Platform | Weixin (personal, ilink) | ✅（beta）— HTTP long polling — no public IP needed |
 | Platform | QQ (NapCat/OneBot) | ✅ WebSocket — Beta |
 | Platform | QQ Bot (Official) | ✅ WebSocket — no public IP needed |
 
@@ -205,6 +257,7 @@ cc-connect update --pre     # Beta (includes pre-releases)
 | Slack | [docs/slack.md](docs/slack.md) | Socket Mode | No |
 | Discord | [docs/discord.md](docs/discord.md) | Gateway | No |
 | WeChat Work | [docs/wecom.md](docs/wecom.md) | WebSocket / Webhook | No (WS) / Yes (Webhook) |
+| Weixin (personal) | [docs/weixin.md](docs/weixin.md) | HTTP long polling (ilink) — **beta only** | No |
 | QQ / QQ Bot | [docs/qq.md](docs/qq.md) | WebSocket | No |
 
 ---
@@ -218,6 +271,14 @@ cc-connect update --pre     # Beta (includes pre-releases)
 /list             List all sessions
 /switch <id>      Switch session
 /current          Show current session
+/dir [path|reset] Show, switch, or reset work directory
+```
+
+Project configs can also rotate to a fresh session automatically after long inactivity:
+
+```toml
+[[projects]]
+reset_on_idle_mins = 60
 ```
 
 ---
@@ -245,7 +306,19 @@ cc-connect update --pre     # Beta (includes pre-releases)
 
 ```
 /model                      List available models (format: alias - model)
-/model <alias>              Switch to model by alias
+/model switch <alias>       Switch to model by alias
+```
+
+---
+
+### 📂 Work Directory
+
+```
+/dir                         Show current work directory and history
+/dir <path>                  Switch to a path (relative or absolute)
+/dir <number>                Switch from history
+/dir -                       Switch to previous directory
+/cd <path>                   Compatibility alias for /dir <path>
 ```
 
 ---
@@ -309,6 +382,7 @@ Notes:
 - [Usage Guide](docs/usage.md) — Complete feature documentation
 - [INSTALL.md](INSTALL.md) — AI-agent-friendly installation guide
 - [config.example.toml](config.example.toml) — Configuration template
+- [CONTRIBUTING.md](CONTRIBUTING.md) — How to report issues and contribute pull requests
 
 ---
 

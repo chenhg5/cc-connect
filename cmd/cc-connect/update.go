@@ -74,7 +74,7 @@ func fetchLatestStableFromGitee() (*githubRelease, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("Gitee API returned HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("gitee API returned HTTP %d", resp.StatusCode)
 	}
 
 	var release githubRelease
@@ -613,7 +613,11 @@ func syncNpmPackageVersion(execPath, newVer string) {
 	}
 
 	oldVer, _ := pkg["version"].(string)
-	if oldVer == newVer {
+	// Normalize both sides by stripping optional "v" prefix before comparing.
+	// package.json may store "v1.0.0" while newVer is already stripped to "1.0.0".
+	oldNorm := strings.TrimPrefix(oldVer, "v")
+	newNorm := strings.TrimPrefix(newVer, "v")
+	if oldNorm == newNorm {
 		return
 	}
 

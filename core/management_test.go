@@ -1,13 +1,38 @@
 package core
 
 import (
+	"context"
 	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
+	"sync"
 	"testing"
 )
+
+type deadlineAwareModelAgent struct {
+	stubModelModeAgent
+	mu          sync.Mutex
+	hasDeadline bool
+}
+
+func (a *deadlineAwareModelAgent) AvailableModels(ctx context.Context) []ModelOption {
+	a.mu.Lock()
+	_, ok := ctx.Deadline()
+	a.hasDeadline = ok
+	a.mu.Unlock()
+	return []ModelOption{{Name: "gpt-4.1"}}
+}
+
+func (a *deadlineAwareModelAgent) sawDeadline() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.hasDeadline
+}
 
 // testManagementServer creates a ManagementServer with a test engine and returns an httptest.Server.
 func testManagementServer(t *testing.T, token string) (*ManagementServer, *httptest.Server, *Engine) {
@@ -57,7 +82,9 @@ func mgmtGet(t *testing.T, url, token string) mgmtResponse {
 	}
 	defer resp.Body.Close()
 	var r mgmtResponse
-	json.NewDecoder(resp.Body).Decode(&r)
+	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+		t.Fatalf("decode GET response: %v", err)
+	}
 	return r
 }
 
@@ -65,7 +92,9 @@ func mgmtPost(t *testing.T, url, token string, body any) mgmtResponse {
 	t.Helper()
 	var buf bytes.Buffer
 	if body != nil {
-		json.NewEncoder(&buf).Encode(body)
+		if err := json.NewEncoder(&buf).Encode(body); err != nil {
+			t.Fatalf("encode POST body: %v", err)
+		}
 	}
 	req, _ := http.NewRequest("POST", url, &buf)
 	req.Header.Set("Content-Type", "application/json")
@@ -78,7 +107,9 @@ func mgmtPost(t *testing.T, url, token string, body any) mgmtResponse {
 	}
 	defer resp.Body.Close()
 	var r mgmtResponse
-	json.NewDecoder(resp.Body).Decode(&r)
+	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+		t.Fatalf("decode POST response: %v", err)
+	}
 	return r
 }
 
@@ -86,7 +117,9 @@ func mgmtPatch(t *testing.T, url, token string, body any) mgmtResponse {
 	t.Helper()
 	var buf bytes.Buffer
 	if body != nil {
-		json.NewEncoder(&buf).Encode(body)
+		if err := json.NewEncoder(&buf).Encode(body); err != nil {
+			t.Fatalf("encode PATCH body: %v", err)
+		}
 	}
 	req, _ := http.NewRequest("PATCH", url, &buf)
 	req.Header.Set("Content-Type", "application/json")
@@ -99,7 +132,9 @@ func mgmtPatch(t *testing.T, url, token string, body any) mgmtResponse {
 	}
 	defer resp.Body.Close()
 	var r mgmtResponse
-	json.NewDecoder(resp.Body).Decode(&r)
+	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+		t.Fatalf("decode PATCH response: %v", err)
+	}
 	return r
 }
 
@@ -115,7 +150,9 @@ func mgmtDelete(t *testing.T, url, token string) mgmtResponse {
 	}
 	defer resp.Body.Close()
 	var r mgmtResponse
-	json.NewDecoder(resp.Body).Decode(&r)
+	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+		t.Fatalf("decode DELETE response: %v", err)
+	}
 	return r
 }
 
@@ -168,9 +205,39 @@ func TestMgmt_Status(t *testing.T) {
 	}
 
 	var data map[string]any
-	json.Unmarshal(r.Data, &data)
+	if err := json.Unmarshal(r.Data, &data); err != nil {
+		t.Fatalf("unmarshal status data: %v", err)
+	}
 	if data["projects_count"] != float64(1) {
 		t.Fatalf("expected 1 project, got %v", data["projects_count"])
+	}
+}
+
+func TestMgmt_StatusIncludesBridgeToken(t *testing.T) {
+	mgmt, ts, _ := testManagementServer(t, "tok")
+	mgmt.SetBridgeServer(NewBridgeServer(9810, "bridge-secret", "/bridge/ws", nil))
+
+	r := mgmtGet(t, ts.URL+"/api/v1/status", "tok")
+	if !r.OK {
+		t.Fatalf("status failed: %s", r.Error)
+	}
+
+	var data struct {
+		Bridge struct {
+			Enabled bool   `json:"enabled"`
+			Port    int    `json:"port"`
+			Path    string `json:"path"`
+			Token   string `json:"token"`
+		} `json:"bridge"`
+	}
+	if err := json.Unmarshal(r.Data, &data); err != nil {
+		t.Fatalf("unmarshal status data: %v", err)
+	}
+	if !data.Bridge.Enabled {
+		t.Fatal("expected bridge to be enabled")
+	}
+	if data.Bridge.Token != "bridge-secret" {
+		t.Fatalf("expected bridge token, got %q", data.Bridge.Token)
 	}
 }
 
@@ -185,7 +252,9 @@ func TestMgmt_Projects(t *testing.T) {
 	var data struct {
 		Projects []map[string]any `json:"projects"`
 	}
-	json.Unmarshal(r.Data, &data)
+	if err := json.Unmarshal(r.Data, &data); err != nil {
+		t.Fatalf("unmarshal projects data: %v", err)
+	}
 	if len(data.Projects) != 1 {
 		t.Fatalf("expected 1 project, got %d", len(data.Projects))
 	}
@@ -203,7 +272,9 @@ func TestMgmt_ProjectDetail(t *testing.T) {
 	}
 
 	var data map[string]any
-	json.Unmarshal(r.Data, &data)
+	if err := json.Unmarshal(r.Data, &data); err != nil {
+		t.Fatalf("unmarshal project detail: %v", err)
+	}
 	if data["name"] != "test-project" {
 		t.Fatalf("expected test-project, got %v", data["name"])
 	}
@@ -261,7 +332,9 @@ func TestMgmt_SessionDetail(t *testing.T) {
 	var data struct {
 		History []map[string]any `json:"history"`
 	}
-	json.Unmarshal(r.Data, &data)
+	if err := json.Unmarshal(r.Data, &data); err != nil {
+		t.Fatalf("unmarshal session detail: %v", err)
+	}
 	if len(data.History) != 2 {
 		t.Fatalf("expected 2 history entries, got %d", len(data.History))
 	}
@@ -285,19 +358,29 @@ func TestMgmt_SessionDelete(t *testing.T) {
 }
 
 func TestMgmt_Config(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
+	srv, ts, _ := testManagementServer(t, "tok")
 
-	r := mgmtGet(t, ts.URL+"/api/v1/config", "tok")
-	if !r.OK {
-		t.Fatalf("config failed: %s", r.Error)
+	// Write a temp TOML file and point the server at it
+	tmp := t.TempDir()
+	cfgPath := tmp + "/config.toml"
+	if err := os.WriteFile(cfgPath, []byte("[display]\ntitle = \"test\"\n"), 0644); err != nil {
+		t.Fatal(err)
 	}
+	srv.SetConfigFilePath(cfgPath)
 
-	var data struct {
-		Projects []map[string]any `json:"projects"`
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/config", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
 	}
-	json.Unmarshal(r.Data, &data)
-	if len(data.Projects) != 1 {
-		t.Fatalf("expected 1 project in config, got %d", len(data.Projects))
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "title") {
+		t.Fatalf("expected TOML content, got: %s", body)
 	}
 }
 
@@ -334,7 +417,9 @@ func TestMgmt_HeartbeatNotConfigured(t *testing.T) {
 	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/heartbeat", "tok")
 	if r.OK {
 		var data map[string]any
-		json.Unmarshal(r.Data, &data)
+		if err := json.Unmarshal(r.Data, &data); err != nil {
+			t.Fatalf("unmarshal heartbeat data: %v", err)
+		}
 		// heartbeat scheduler is nil, so we expect service unavailable
 	}
 }
@@ -350,7 +435,9 @@ func TestMgmt_HeartbeatWithScheduler(t *testing.T) {
 	}
 
 	var data map[string]any
-	json.Unmarshal(r.Data, &data)
+	if err := json.Unmarshal(r.Data, &data); err != nil {
+		t.Fatalf("unmarshal heartbeat status: %v", err)
+	}
 	if data["enabled"] != false {
 		t.Fatalf("expected heartbeat disabled, got %v", data["enabled"])
 	}
@@ -394,7 +481,9 @@ func TestMgmt_CronWithScheduler(t *testing.T) {
 	}
 
 	var job CronJob
-	json.Unmarshal(r.Data, &job)
+	if err := json.Unmarshal(r.Data, &job); err != nil {
+		t.Fatalf("unmarshal cron job: %v", err)
+	}
 	if job.ID == "" {
 		t.Fatal("expected cron job ID")
 	}
@@ -443,6 +532,57 @@ func TestMgmt_CORS(t *testing.T) {
 	}
 }
 
+func TestMgmt_BridgeWebSocketPathProxiesToBridgeServer(t *testing.T) {
+	mgmt := NewManagementServer(0, "", []string{"*"})
+	mgmt.RegisterEngine("p", NewEngine("p", &stubAgent{}, nil, "", LangEnglish))
+	mgmt.SetBridgeServer(NewBridgeServer(9810, "bridge-secret", "/bridge/ws", []string{"*"}))
+
+	mux := http.NewServeMux()
+	ts := httptest.NewServer(mgmt.buildHandler(mux))
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/bridge/ws?token=bridge-secret", nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Sec-WebSocket-Version", "13")
+	req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("expected websocket upgrade, got %d", resp.StatusCode)
+	}
+}
+
+func TestMgmt_BridgeWebSocketPathWorksWhenBridgeServerSetAfterHandlerBuild(t *testing.T) {
+	mgmt := NewManagementServer(0, "", []string{"*"})
+	mgmt.RegisterEngine("p", NewEngine("p", &stubAgent{}, nil, "", LangEnglish))
+
+	mux := http.NewServeMux()
+	ts := httptest.NewServer(mgmt.buildHandler(mux))
+	defer ts.Close()
+
+	mgmt.SetBridgeServer(NewBridgeServer(9810, "bridge-secret", "/bridge/ws", []string{"*"}))
+
+	req, _ := http.NewRequest("GET", ts.URL+"/bridge/ws?token=bridge-secret", nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Sec-WebSocket-Version", "13")
+	req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("expected websocket upgrade after late bridge setup, got %d", resp.StatusCode)
+	}
+}
+
 func TestMgmt_MethodNotAllowed(t *testing.T) {
 	_, ts, _ := testManagementServer(t, "tok")
 
@@ -452,8 +592,154 @@ func TestMgmt_MethodNotAllowed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
 
 	var r mgmtResponse
-	json.NewDecoder(resp.Body).Decode(&r)
+	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+		t.Fatalf("decode method not allowed response: %v", err)
+	}
+	resp.Body.Close()
+}
+
+func TestMgmt_ProjectModel_UsesSwitchModelWithActiveProvider(t *testing.T) {
+	agent := &stubModelModeAgent{
+		model: "gpt-4.1-mini",
+		providers: []ProviderConfig{
+			{
+				Name:   "openai",
+				Model:  "gpt-4.1-mini",
+				Models: []ModelOption{{Name: "gpt-4.1", Alias: "gpt"}, {Name: "gpt-4.1-mini", Alias: "mini"}},
+			},
+		},
+		active: "openai",
+	}
+	e := NewEngine("test-project", agent, nil, "", LangEnglish)
+	var savedProvider, savedModel string
+	e.SetProviderModelSaveFunc(func(providerName, model string) error {
+		savedProvider = providerName
+		savedModel = model
+		return nil
+	})
+
+	mgmt := NewManagementServer(0, "tok", nil)
+	mgmt.RegisterEngine("test-project", e)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/projects/", mgmt.wrap(mgmt.handleProjectRoutes))
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	r := mgmtPost(t, ts.URL+"/api/v1/projects/test-project/model", "tok", map[string]string{"model": "gpt-4.1"})
+	if !r.OK {
+		t.Fatalf("update model failed: %s", r.Error)
+	}
+
+	if got := agent.GetModel(); got != "gpt-4.1" {
+		t.Fatalf("GetModel() = %q, want gpt-4.1", got)
+	}
+	if got := agent.GetActiveProvider(); got == nil || got.Model != "gpt-4.1" {
+		t.Fatalf("active provider model = %#v, want gpt-4.1", got)
+	}
+	if savedProvider != "openai" || savedModel != "gpt-4.1" {
+		t.Fatalf("saved provider/model = %q/%q, want openai/gpt-4.1", savedProvider, savedModel)
+	}
+}
+
+func TestMgmt_ProjectModel_SavesModelWithoutActiveProvider(t *testing.T) {
+	agent := &stubModelModeAgent{
+		model: "gpt-4.1-mini",
+		providers: []ProviderConfig{
+			{
+				Name:   "openai",
+				Model:  "gpt-4.1-mini",
+				Models: []ModelOption{{Name: "gpt-4.1", Alias: "gpt"}, {Name: "gpt-4.1-mini", Alias: "mini"}},
+			},
+		},
+	}
+	e := NewEngine("test-project", agent, nil, "", LangEnglish)
+	var savedModel string
+	var providerSaveCalled bool
+	e.SetModelSaveFunc(func(model string) error {
+		savedModel = model
+		return nil
+	})
+	e.SetProviderModelSaveFunc(func(providerName, model string) error {
+		providerSaveCalled = true
+		return nil
+	})
+
+	mgmt := NewManagementServer(0, "tok", nil)
+	mgmt.RegisterEngine("test-project", e)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/projects/", mgmt.wrap(mgmt.handleProjectRoutes))
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	r := mgmtPost(t, ts.URL+"/api/v1/projects/test-project/model", "tok", map[string]string{"model": "gpt-4.1"})
+	if !r.OK {
+		t.Fatalf("update model failed: %s", r.Error)
+	}
+
+	if got := agent.GetModel(); got != "gpt-4.1" {
+		t.Fatalf("GetModel() = %q, want gpt-4.1", got)
+	}
+	if savedModel != "gpt-4.1" {
+		t.Fatalf("saved model = %q, want gpt-4.1", savedModel)
+	}
+	if providerSaveCalled {
+		t.Fatal("provider save callback should not be called without active provider")
+	}
+}
+
+func TestMgmt_ProjectModel_ReturnsErrorWhenModelSaveFails(t *testing.T) {
+	agent := &stubModelModeAgent{
+		model: "gpt-4.1-mini",
+		providers: []ProviderConfig{
+			{
+				Name:   "openai",
+				Model:  "gpt-4.1-mini",
+				Models: []ModelOption{{Name: "gpt-4.1", Alias: "gpt"}, {Name: "gpt-4.1-mini", Alias: "mini"}},
+			},
+		},
+	}
+	e := NewEngine("test-project", agent, nil, "", LangEnglish)
+	e.SetModelSaveFunc(func(model string) error {
+		return errors.New("disk full")
+	})
+
+	mgmt := NewManagementServer(0, "tok", nil)
+	mgmt.RegisterEngine("test-project", e)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/projects/", mgmt.wrap(mgmt.handleProjectRoutes))
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	r := mgmtPost(t, ts.URL+"/api/v1/projects/test-project/model", "tok", map[string]string{"model": "gpt-4.1"})
+	if r.OK {
+		t.Fatal("update model unexpectedly succeeded")
+	}
+	if !strings.Contains(r.Error, "disk full") {
+		t.Fatalf("error = %q, want save failure", r.Error)
+	}
+	if got := agent.GetModel(); got != "gpt-4.1-mini" {
+		t.Fatalf("GetModel() = %q, want unchanged gpt-4.1-mini", got)
+	}
+}
+
+func TestMgmt_ProjectModels_UsesTimeoutContext(t *testing.T) {
+	agent := &deadlineAwareModelAgent{}
+	e := NewEngine("test-project", agent, nil, "", LangEnglish)
+
+	mgmt := NewManagementServer(0, "tok", nil)
+	mgmt.RegisterEngine("test-project", e)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/projects/", mgmt.wrap(mgmt.handleProjectRoutes))
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/models", "tok")
+	if !r.OK {
+		t.Fatalf("project models failed: %s", r.Error)
+	}
+	if !agent.sawDeadline() {
+		t.Fatal("AvailableModels context has no deadline; want timeout-bounded context")
+	}
 }

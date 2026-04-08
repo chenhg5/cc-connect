@@ -35,7 +35,7 @@ func (m *launchdManager) Install(cfg Config) error {
 	}
 
 	// Unload existing service first (ignore errors)
-	exec.Command("launchctl", "bootout", fmt.Sprintf("gui/%d/%s", os.Getuid(), launchdLabel)).Run()
+	_ = exec.Command("launchctl", "bootout", fmt.Sprintf("gui/%d/%s", os.Getuid(), launchdLabel)).Run()
 
 	plist := buildPlist(cfg)
 	if err := os.WriteFile(plistPath, []byte(plist), 0644); err != nil {
@@ -47,13 +47,15 @@ func (m *launchdManager) Install(cfg Config) error {
 		return fmt.Errorf("launchctl bootstrap: %s (%w)", out, err)
 	}
 
-	runLaunchctl("kickstart", "-kp", fmt.Sprintf("%s/%s", domain, launchdLabel))
+	if _, err := runLaunchctl("kickstart", "-kp", fmt.Sprintf("%s/%s", domain, launchdLabel)); err != nil {
+		return fmt.Errorf("launchctl kickstart: %w", err)
+	}
 	return nil
 }
 
 func (m *launchdManager) Uninstall() error {
 	domain := fmt.Sprintf("gui/%d", os.Getuid())
-	runLaunchctl("bootout", fmt.Sprintf("%s/%s", domain, launchdLabel))
+	_, _ = runLaunchctl("bootout", fmt.Sprintf("%s/%s", domain, launchdLabel))
 
 	plistPath := launchdPlistPath()
 	if err := os.Remove(plistPath); err != nil && !os.IsNotExist(err) {
@@ -65,8 +67,8 @@ func (m *launchdManager) Uninstall() error {
 func (*launchdManager) Start() error {
 	domain := fmt.Sprintf("gui/%d", os.Getuid())
 	plistPath := launchdPlistPath()
-	out, err := runLaunchctl("bootstrap", domain, plistPath)
-	if err != nil {
+	var out string
+	if _, err := runLaunchctl("bootstrap", domain, plistPath); err != nil {
 		// already bootstrapped — try kickstart
 		out, err = runLaunchctl("kickstart", "-kp", fmt.Sprintf("%s/%s", domain, launchdLabel))
 		if err != nil {
@@ -88,7 +90,7 @@ func (*launchdManager) Stop() error {
 func (*launchdManager) Restart() error {
 	domain := fmt.Sprintf("gui/%d", os.Getuid())
 	target := fmt.Sprintf("%s/%s", domain, launchdLabel)
-	runLaunchctl("bootout", target)
+	_, _ = runLaunchctl("bootout", target)
 
 	plistPath := launchdPlistPath()
 
@@ -108,7 +110,9 @@ func (*launchdManager) Restart() error {
 	if err != nil {
 		return fmt.Errorf("restart: %s (%w)", out, err)
 	}
-	runLaunchctl("kickstart", "-kp", target)
+	if _, err := runLaunchctl("kickstart", "-kp", target); err != nil {
+		return fmt.Errorf("restart kickstart: %w", err)
+	}
 	return nil
 }
 
@@ -167,7 +171,10 @@ func buildPlist(cfg Config) string {
 	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>
-	<true/>
+	<dict>
+		<key>SuccessfulExit</key>
+		<true/>
+	</dict>
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>CC_LOG_FILE</key>

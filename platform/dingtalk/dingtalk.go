@@ -43,6 +43,7 @@ type Platform struct {
 	allowFrom             string
 	shareSessionInChannel bool
 	streamClient          *dingtalkClient.StreamClient
+	streamCtxCancel       context.CancelFunc
 	handler               core.MessageHandler
 	dedup                 core.MessageDedup
 	httpClient            *http.Client
@@ -130,21 +131,34 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		return []byte(""), nil
 	})
 
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- p.streamClient.Start(context.Background())
-	}()
+	ctx, cancel := context.WithCancel(context.Background())
+	p.streamCtxCancel = cancel
 
-	// Give the stream a short window to fail fast on auth errors.
-	// If Start() returns nil quickly, it means it connected successfully (non-blocking SDK).
-	// If it doesn't return within 3s, it's a blocking call that's running fine.
-	select {
-	case err := <-errCh:
-		if err != nil {
-			return fmt.Errorf("dingtalk: start stream: %w", err)
+	// Run the stream in a restart loop. The SDK's processLoop() runs in a background
+	// goroutine and handles keepalive pings internally. If the goroutine exits
+	// (e.g. server closes idle connection), Start() returns and we attempt to reconnect.
+	// This ensures the bot stays connected even after long periods of silence.
+	go func() {
+		defer slog.Info("dingtalk: stream runner exited")
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			if err := p.streamClient.Start(ctx); err != nil {
+				slog.Warn("dingtalk: stream disconnected, reconnecting", "error", err)
+			}
+
+			// Brief pause before reconnecting to avoid tight loop on persistent failures.
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(3 * time.Second):
+			}
 		}
-	case <-time.After(3 * time.Second):
-	}
+	}()
 
 	slog.Info("dingtalk: stream connected", "client_id", p.clientID)
 	return nil
@@ -781,6 +795,9 @@ func (p *Platform) uploadMedia(ctx context.Context, data []byte, fileName, media
 }
 
 func (p *Platform) Stop() error {
+	if p.streamCtxCancel != nil {
+		p.streamCtxCancel()
+	}
 	if p.streamClient != nil {
 		p.streamClient.Close()
 	}

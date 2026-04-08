@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -72,8 +73,12 @@ func TestCronStore_MutePersistence(t *testing.T) {
 		ID: "persist1", Project: "proj", SessionKey: "test:ch1",
 		CronExpr: "0 6 * * *", Prompt: "hello", Enabled: true, CreatedAt: time.Now(),
 	}
-	store.Add(job)
-	store.SetMute("persist1", true)
+	if err := store.Add(job); err != nil {
+		t.Fatal(err)
+	}
+	if !store.SetMute("persist1", true) {
+		t.Fatal("SetMute should return true")
+	}
 
 	store2, err := NewCronStore(dir)
 	if err != nil {
@@ -155,23 +160,27 @@ func TestRenderCronCard_WithButtons(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store.Add(&CronJob{
+	if err := store.Add(&CronJob{
 		ID: "j1", Project: "test", SessionKey: "test:ch1",
 		CronExpr: "0 6 * * *", Prompt: "daily task", Enabled: true,
 		CreatedAt: time.Now(),
-	})
-	store.Add(&CronJob{
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Add(&CronJob{
 		ID: "j2", Project: "test", SessionKey: "test:ch1",
 		CronExpr: "0 12 * * *", Prompt: "noon task", Enabled: false, Mute: true,
 		CreatedAt: time.Now(),
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	scheduler := NewCronScheduler(store)
 	e.cronScheduler = scheduler
 
-	card := e.renderCronCard("test:ch1")
+	card := e.renderCronCard("test:ch1", "")
 	if card == nil {
 		t.Fatal("card should not be nil")
 	}
@@ -223,18 +232,20 @@ func TestRenderCronCard_HasHint(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store.Add(&CronJob{
+	if err := store.Add(&CronJob{
 		ID: "h1", Project: "test", SessionKey: "test:ch1",
 		CronExpr: "0 6 * * *", Prompt: "task", Enabled: true,
 		CreatedAt: time.Now(),
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	scheduler := NewCronScheduler(store)
 	e.cronScheduler = scheduler
 
-	card := e.renderCronCard("test:ch1")
+	card := e.renderCronCard("test:ch1", "")
 	text := card.RenderText()
 	if !strings.Contains(text, "/cron add") || !strings.Contains(text, "/cron mute") {
 		t.Errorf("card should contain command hints, got:\n%s", text)
@@ -248,18 +259,22 @@ func TestExecuteCardAction_CronActions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store.Add(&CronJob{
+	if err := store.Add(&CronJob{
 		ID: "act1", Project: "test", SessionKey: "test:ch1",
 		CronExpr: "0 6 * * *", Prompt: "task", Enabled: true,
 		CreatedAt: time.Now(),
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	scheduler := NewCronScheduler(store)
 	e.cronScheduler = scheduler
 	scheduler.RegisterEngine("test", e)
-	scheduler.Start()
+	if err := scheduler.Start(); err != nil {
+		t.Fatal(err)
+	}
 	defer scheduler.Stop()
 
 	e.executeCardAction("/cron", "disable act1", "test:ch1")
@@ -299,11 +314,13 @@ func TestCmdCronMute_TextCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store.Add(&CronJob{
+	if err := store.Add(&CronJob{
 		ID: "txt1", Project: "test", SessionKey: "test:ch1",
 		CronExpr: "0 6 * * *", Prompt: "task", Enabled: true,
 		CreatedAt: time.Now(),
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -346,5 +363,205 @@ func TestCronStore_JobsPath(t *testing.T) {
 	expected := filepath.Join(dir, "crons", "jobs.json")
 	if store.path != expected {
 		t.Errorf("store path = %q, want %q", store.path, expected)
+	}
+}
+
+func TestCronJob_ExecutionTimeout(t *testing.T) {
+	j := &CronJob{}
+	if got := j.ExecutionTimeout(); got != defaultCronJobTimeout {
+		t.Errorf("nil TimeoutMins: got %v, want %v", got, defaultCronJobTimeout)
+	}
+	zero := 0
+	j.TimeoutMins = &zero
+	if got := j.ExecutionTimeout(); got != 0 {
+		t.Errorf("TimeoutMins=0: got %v, want 0", got)
+	}
+	five := 5
+	j.TimeoutMins = &five
+	if got := j.ExecutionTimeout(); got != 5*time.Minute {
+		t.Errorf("TimeoutMins=5: got %v", got)
+	}
+}
+
+func TestCronScheduler_AddJob_InvalidSessionMode(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := NewCronScheduler(store)
+	err = cs.AddJob(&CronJob{
+		ID: "x1", Project: "p", SessionKey: "test:1:1",
+		CronExpr: "0 6 * * *", Prompt: "hi", SessionMode: "bogus",
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid session_mode")
+	}
+}
+
+func TestCronJob_UsesNewSessionPerRun(t *testing.T) {
+	for _, mode := range []string{"new_per_run", "new-per-run", "NEW_PER_RUN"} {
+		j := &CronJob{SessionMode: mode}
+		if !j.UsesNewSessionPerRun() {
+			t.Errorf("UsesNewSessionPerRun(%q) = false", mode)
+		}
+	}
+	j := &CronJob{SessionMode: "reuse"}
+	if j.UsesNewSessionPerRun() {
+		t.Error("reuse should not use new session per run")
+	}
+}
+
+func TestCronJob_JSONLegacyUnmarshal(t *testing.T) {
+	raw := `{"id":"1","project":"p","session_key":"t:1:1","cron_expr":"0 6 * * *","prompt":"x","enabled":true}`
+	var j CronJob
+	if err := json.Unmarshal([]byte(raw), &j); err != nil {
+		t.Fatal(err)
+	}
+	if j.SessionMode != "" {
+		t.Errorf("legacy JSON: SessionMode = %q, want empty", j.SessionMode)
+	}
+	if j.TimeoutMins != nil {
+		t.Errorf("legacy JSON: TimeoutMins = %v, want nil", j.TimeoutMins)
+	}
+}
+
+func TestCronScheduler_AddJob_NegativeTimeoutMins(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := NewCronScheduler(store)
+	n := -1
+	err = cs.AddJob(&CronJob{
+		ID: "t1", Project: "p", SessionKey: "test:1:1",
+		CronExpr: "0 6 * * *", Prompt: "hi", TimeoutMins: &n,
+	})
+	if err == nil {
+		t.Fatal("expected error for negative timeout_mins")
+	}
+}
+
+func TestCronScheduler_AddJob_NormalizesSessionMode(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := NewCronScheduler(store)
+	job := &CronJob{
+		ID: "n1", Project: "p", SessionKey: "test:1:1",
+		CronExpr: "0 6 * * *", Prompt: "hi", SessionMode: "new-per-run",
+	}
+	if err := cs.AddJob(job); err != nil {
+		t.Fatal(err)
+	}
+	if job.SessionMode != "new_per_run" {
+		t.Errorf("SessionMode = %q, want new_per_run", job.SessionMode)
+	}
+}
+
+func TestCronScheduler_UsesNewSession_GlobalDefault(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := NewCronScheduler(store)
+
+	// Test 1: global default is "new_per_run", job has no session_mode set
+	cs.SetDefaultSessionMode("new_per_run")
+	job := &CronJob{SessionMode: ""}
+	if !cs.UsesNewSession(job) {
+		t.Error("global new_per_run + job empty: expected UsesNewSession=true")
+	}
+
+	// Test 2: per-job "reuse" overrides global "new_per_run"
+	job.SessionMode = "reuse"
+	if cs.UsesNewSession(job) {
+		t.Error("global new_per_run + job reuse: expected UsesNewSession=false")
+	}
+
+	// Test 3: per-job "new_per_run" overrides global default (reuse)
+	cs.SetDefaultSessionMode("")
+	job.SessionMode = "new_per_run"
+	if !cs.UsesNewSession(job) {
+		t.Error("global reuse + job new_per_run: expected UsesNewSession=true")
+	}
+
+	// Test 4: both global and job are default (reuse)
+	job.SessionMode = ""
+	if cs.UsesNewSession(job) {
+		t.Error("global reuse + job empty: expected UsesNewSession=false")
+	}
+}
+
+func TestCronStore_MarkRun(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	job := &CronJob{
+		ID:         "markrun-test",
+		Project:    "proj",
+		SessionKey: "test:ch1",
+		CronExpr:   "0 6 * * *",
+		Prompt:     "hello",
+		Enabled:    true,
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatal(err)
+	}
+
+	// MarkRun should update LastRun
+	before := time.Now()
+	store.MarkRun("markrun-test", nil)
+	after := time.Now()
+
+	updated := store.Get("markrun-test")
+	if updated.LastRun.IsZero() {
+		t.Error("LastRun should be set after MarkRun")
+	}
+	if updated.LastRun.Before(before) || updated.LastRun.After(after) {
+		t.Error("LastRun should be between before and after MarkRun call")
+	}
+}
+
+func TestCronStore_ListByProject(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Add jobs for different projects
+	jobs := []*CronJob{
+		{ID: "j1", Project: "proj1", SessionKey: "s1", CronExpr: "0 6 * * *", Prompt: "p1"},
+		{ID: "j2", Project: "proj1", SessionKey: "s2", CronExpr: "0 7 * * *", Prompt: "p2"},
+		{ID: "j3", Project: "proj2", SessionKey: "s3", CronExpr: "0 8 * * *", Prompt: "p3"},
+	}
+	for _, j := range jobs {
+		j.Enabled = true
+		if err := store.Add(j); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	list := store.ListByProject("proj1")
+	if len(list) != 2 {
+		t.Errorf("ListByProject(proj1) = %d jobs, want 2", len(list))
+	}
+
+	list2 := store.ListByProject("proj2")
+	if len(list2) != 1 {
+		t.Errorf("ListByProject(proj2) = %d jobs, want 1", len(list2))
+	}
+
+	list3 := store.ListByProject("nonexistent")
+	if len(list3) != 0 {
+		t.Errorf("ListByProject(nonexistent) = %d jobs, want 0", len(list3))
 	}
 }

@@ -52,11 +52,20 @@ level = "info" # debug, info, warn, error
 # [display]
 # thinking_max_len = 300   # Max chars for thinking messages (default: 300) / 思考消息最大字符数（默认 300）
 # tool_max_len = 500       # Max chars for tool use messages (default: 500) / 工具调用消息最大字符数（默认 500）
+# tool_messages = true     # Show/hide tool progress messages (default: true) / 是否显示工具进度消息（默认 true）
 
 # Agent idle timeout: max minutes between consecutive agent events before
 # considering the session stuck. Set to 0 to disable the timeout entirely.
 # Agent 空闲超时：两次 agent 事件之间的最大等待分钟数，超时则认为会话卡住。设为 0 禁用。
 # idle_timeout_mins = 120  # default: 120 (2 hours) / 默认 120（2 小时）
+
+# Auto-reset the active session after the user has been inactive for a while.
+# Unlike idle_timeout_mins, this does not detect stuck agent execution. It
+# rotates to a fresh cc-connect session when the user comes back after being idle.
+# 用户长时间未发消息后，自动切换到一个新的活跃会话。
+# 这与 idle_timeout_mins 不同：它不是检测 agent 卡住，而是用户回来后自动开始新会话。
+# [[projects]]
+# reset_on_idle_mins = 60   # 0 or unset = disabled / 设为 0 或留空表示禁用
 
 # =============================================================================
 # Streaming Preview / 流式预览
@@ -85,6 +94,25 @@ level = "info" # debug, info, warn, error
 # window_secs = 60          # Window size in seconds (default: 60) / 窗口时间秒数（默认 60）
 
 # =============================================================================
+# Outgoing Rate Limit / 出站速率限制
+# Throttle how fast messages are sent TO platforms.
+# Prevents account bans on platforms with strict API rate limits (e.g. WeChat Work).
+# 限制向平台发送消息的速率，防止因频率过高被封号（如企业微信）。
+# =============================================================================
+# [outgoing_rate_limit]
+# max_per_second = 0         # Global default msgs/sec; 0 = unlimited (default) / 全局默认每秒消息数；0 = 无限制
+# burst = 3                  # Max burst size; default = ceil(max_per_second) / 最大突发数量
+#                            # For fractional rates (e.g. 0.2), default burst becomes ceil(max_per_second).
+
+# Per-platform overrides / 每平台覆盖配置:
+# [outgoing_rate_limit.platforms.wecom]
+# max_per_second = 1
+# [outgoing_rate_limit.platforms.telegram]
+# max_per_second = 25
+# [outgoing_rate_limit.platforms.feishu]
+# max_per_second = 5
+
+# =============================================================================
 # Relay Settings / Relay 设置
 # =============================================================================
 # Bot-to-bot relay timeout. Controls how long cc-connect waits for the target
@@ -95,6 +123,17 @@ level = "info" # debug, info, warn, error
 # timeout_secs = 120        # Max relay wait in seconds; 0 = disabled (default: 120) / relay 最大等待秒数；0 = 禁用（默认 120）
 
 # =============================================================================
+# Auto-Compress / 自动压缩
+# =============================================================================
+# Automatically trigger /compress when estimated token usage exceeds threshold.
+# 当估算 token 超过阈值时自动触发 /compress。
+#
+# [projects.auto_compress]
+# enabled = true
+# max_tokens = 12000     # estimated token threshold to trigger compression
+# min_gap_mins = 30      # minimum minutes between auto-compress runs (default 30)
+
+# =============================================================================
 # Cron Settings / 定时任务设置
 # =============================================================================
 # Controls cron job behavior.
@@ -103,6 +142,8 @@ level = "info" # debug, info, warn, error
 # [cron]
 # silent = false             # Suppress "⏰ task name" notification when cron starts (default: false)
 #                            # 静默模式：不发送定时任务开始执行的通知消息（默认 false）
+# session_mode = "reuse"     # Default session mode for all cron jobs: "reuse" (default) or "new_per_run"
+#                            # 定时任务默认会话模式："reuse"（复用活跃会话）或 "new_per_run"（每次新建会话）
 
 # =============================================================================
 # Webhook / 外部 Webhook 端点
@@ -412,12 +453,14 @@ level = "info" # debug, info, warn, error
 
 [[projects]]
 name = "my-backend"
+# show_context_indicator = false  # Hide the “[ctx: ~N%]” suffix on assistant replies (default: true / show)
+#                                   # 不在助手回复末尾显示「[ctx: ~N%]」上下文占用提示（默认 true 显示）
 # quiet = true  # Override global quiet for this project / 覆盖全局静默模式
 # disabled_commands = ["restart", "upgrade", "cron"]  # Disable specific commands for this project
 #                                                     # 禁用该项目的指定命令
 #
-# admin_from controls who can run privileged commands (/shell, /restart, /upgrade, /commands addexec).
-# admin_from 控制谁可以执行特权命令（/shell, /restart, /upgrade, /commands addexec）。
+# admin_from controls who can run privileged commands (/dir, /shell, /restart, /upgrade, /commands addexec).
+# admin_from 控制谁可以执行特权命令（/dir, /shell, /restart, /upgrade, /commands addexec）。
 #
 # 💡 TIP: Send /whoami or /status to the bot to get your User ID for allow_from / admin_from.
 # 💡 提示：向机器人发送 /whoami 或者 /status  即可获取你的 User ID，用于填写 allow_from / admin_from。
@@ -490,12 +533,13 @@ type = "claudecode"
 
 [projects.agent.options]
 work_dir = "/path/to/backend"
-mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "bypassPermissions" (yolo)
+mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassPermissions" (yolo)
 
 # Mode options / 模式说明:
 # - "default":            Every tool call requires user approval. / 每次工具调用都需要用户确认。
 # - "acceptEdits" (edit): File edit tools auto-approved; other tools still ask. / 文件编辑自动通过，其他仍需确认。
 # - "plan":               Claude only plans — no execution until you approve. / 只做规划不执行，审批后再执行。
+# - "auto": Claude automatically decides when a permission prompt is needed. / Claude 自动判断何时需要确认。
 # - "bypassPermissions" (yolo): All tool calls auto-approved. Use with caution. / 全部自动通过，请谨慎使用。
 # - "dontAsk" (dont-ask): Auto-deny tools unless pre-approved via allowed_tools or settings allow rules. / 未预授权的工具自动拒绝，安全推荐。
 #
@@ -505,6 +549,10 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "bypassPermission
 # In default/acceptEdits mode, you can pre-approve specific tools:
 # 在 default/acceptEdits 模式下，可预授权特定工具：
 # allowed_tools = ["Read", "Grep", "Glob", "Bash", "Edit", "Write"]
+
+# You can also disallow specific tools (passed to --disallowedTools):
+# 也可以禁用特定工具（传递给 --disallowedTools）：
+# disallowed_tools = ["WebSearch", "WebFetch"]
 
 # Optional: specify a model / 可选：指定模型
 # model = "claude-sonnet-4-20250514"
@@ -544,9 +592,9 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "bypassPermission
 # base_url = "https://api.relay-service.com"
 # model = "claude-sonnet-4-20250514"
 # # Optional: pre-configure available models shown by /model command (alias - model)
-# # /model [alias] switches to the model; omit to auto-fetch from the API.
+# # /model switch [alias] switches to the model; omit to auto-fetch from the API.
 # # 可选：预先配置 /model 命令显示的可用模型列表，格式为 alias - model
-# # 使用 /model [alias] 切换模型；留空则自动从 API 获取
+# # 使用 /model switch [alias] 切换模型；留空则自动从 API 获取
 # [[projects.agent.providers.models]]
 # model = "claude-sonnet-4-20250514"
 # alias = "sonnet"
@@ -571,7 +619,7 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "bypassPermission
 #
 # # MiniMax — OpenAI-compatible provider with 1M context window
 # # MiniMax — 兼容 OpenAI 接口的大模型，支持 1M 超长上下文
-# # Models: MiniMax-M2.7 (flagship, 1M context), MiniMax-M2.5, MiniMax-M2.5-highspeed
+# # Models: MiniMax-M2.7 (flagship, 1M context), MiniMax-M2.7-highspeed, MiniMax-M2.5, MiniMax-M2.5-highspeed
 # # Docs: https://platform.minimaxi.com
 # [[projects.agent.providers]]
 # name = "minimax"
@@ -582,6 +630,9 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "bypassPermission
 # [[projects.agent.providers.models]]
 # model = "MiniMax-M2.7"
 # alias = "m27"
+# [[projects.agent.providers.models]]
+# model = "MiniMax-M2.7-highspeed"
+# alias = "m27fast"
 # [[projects.agent.providers.models]]
 # model = "MiniMax-M2.5"
 # alias = "m25"
@@ -613,6 +664,7 @@ type = "feishu"
 [projects.platforms.options]
 app_id = "your-feishu-app-id"
 app_secret = "your-feishu-app-secret"
+# domain = "https://open.feishu.cn"  # Optional runtime API/WebSocket base URL override / 可选：运行时 API/WebSocket 域名覆盖
 # enable_feishu_card = true  # Enable Feishu interactive cards (default: true); set false to force plain-text replies
 #                              # 启用飞书交互式卡片（默认 true）；设为 false 时强制回退纯文本回复
 # allow_from = "*"          # Allowed user open_ids, comma-separated; "*" = all (default). Use /whoami to get your open_id.
@@ -625,8 +677,10 @@ app_secret = "your-feishu-app-secret"
 #                                   # 设为 true 时，群聊内所有用户共享同一个 Agent 会话
 # thread_isolation = false  # If true, group messages use Feishu reply threads as session boundaries (one thread/root = one agent session)
 #                           # 设为 true 时，群聊按飞书话题/根消息隔离会话（一个 thread/root 对应一个 Agent 会话）
-# reply_in_thread = false  # If true, all responses are threaded to the original message (helps trace which question triggered which reply)
-#                          # 设为 true 时，所有回复都会引用原消息（方便追踪每条回复对应哪条提问）
+# reply_to_trigger = true   # Default: bot uses “reply to message” API (quotes the user’s message). Set false to post plain chat messages instead.
+#                           # 默认 true：用「回复消息」API（引用用户消息）。设为 false 则在会话里发普通消息、不引用触发消息。
+# progress_style = "legacy" # Progress rendering style: legacy | compact | card
+#                           # 进度消息展示风格：legacy（逐条消息）| compact（单消息持续更新）| card（结构化卡片）
 
 # Lark (International Version) / Lark 国际版
 # Lark uses Webhook mode instead of WebSocket long-connection.
@@ -644,12 +698,14 @@ app_secret = "your-feishu-app-secret"
 # [projects.platforms.options]
 # app_id = "your-lark-app-id"
 # app_secret = "your-lark-app-secret"
+# domain = "https://open.larksuite.com"  # Optional runtime API base URL override / 可选：运行时 API 域名覆盖
 # port = "8080"                  # Webhook server port / Webhook 服务器端口
 # callback_path = "/feishu/webhook"  # Webhook callback path / Webhook 回调路径
 # encrypt_key = ""               # Event encrypt key (optional) / 事件加密密钥（可选）
 # enable_feishu_card = true
 # allow_from = "*"
 # reaction_emoji = "OnIt"
+# progress_style = "legacy"  # legacy | compact | card
 
 # DingTalk / 钉钉 (uncomment to enable / 取消注释以启用)
 # 1. Create an app at https://open-dev.dingtalk.com / 在钉钉开放平台创建应用
@@ -682,6 +738,7 @@ app_secret = "your-feishu-app-secret"
 #                   # 允许的 Telegram 用户 ID，如 "123456789,987654321"；"*" 表示所有
 # group_reply_all = false  # If true, respond to ALL group messages without @mention / 设为 true 群聊无需 @ 也响应
 # share_session_in_channel = false  # If true, all users in a group share one agent session / 群聊共享会话
+# enable_reactions = false  # If true, add ⚡ reaction to incoming messages / 设为 true 收到消息时添加 ⚡ 表情
 
 # Slack (uncomment to enable / 取消注释以启用)
 # 1. Create an app at https://api.slack.com/apps / 创建应用
@@ -732,6 +789,11 @@ app_secret = "your-feishu-app-secret"
 # share_session_in_channel = false  # If true, all users in a channel share one agent session / 频道共享会话
 # thread_isolation = false  # If true, cc-connect creates/uses Discord threads as session boundaries when the channel supports threads
 #                           # 设为 true 时，cc-connect 会在支持 thread 的 Discord 频道内按 thread 隔离会话
+# respond_to_at_everyone_and_here = false  # If true, treat @everyone/@here as a direct mention so the bot responds
+#                              # 设为 true 时，将 @everyone/@here 视为直接 @ 机器人，使机器人响应
+# proxy = "http://127.0.0.1:7890"  # Optional HTTP/SOCKS5 proxy for Discord API & Gateway / 可选代理
+# proxy_username = ""              # Optional proxy auth username / 代理用户名
+# proxy_password = ""              # Optional proxy auth password / 代理密码
 
 # LINE (uncomment to enable / 取消注释以启用)
 # 1. Create a channel at https://developers.line.biz/console/ (Messaging API)
@@ -787,6 +849,9 @@ app_secret = "your-feishu-app-secret"
 # enable_markdown = false  # set true to send Markdown (only renders in WeChat Work app, NOT personal WeChat)
 #                          # 设为 true 发送 Markdown（仅企业微信应用内可渲染，个人微信显示"暂不支持"）
 # allow_from = "*"  # Allowed WeChat Work user IDs / 允许的企业微信用户 ID
+# Inbound (HTTP callback): text, image, voice, and file messages are passed to the agent.
+# 入站（HTTP 回调）：文本、图片、语音与文件会交给 Agent（如 Claude Code）处理。
+# WebSocket 智能机器人：文本、语音（转文字）、图片、文件、图文混排与引用中的图片/文件（URL+aeskey 下载解密）。
 # proxy = ""  # optional: forward proxy for API calls if your IP is dynamic
 #             # 可选：正向代理，用于 IP 不固定的场景
 #             # e.g. "http://your-vps-ip:8888" — the VPS IP goes into trusted IP list
@@ -813,6 +878,37 @@ app_secret = "your-feishu-app-secret"
 # bot_secret = "your-bot-secret"
 # allow_from = "*"  # Allowed user IDs / 允许的用户 ID
 
+# Weixin personal (ilink bot) / 微信个人号（ilink 机器人网关）
+# Same HTTP API as OpenClaw @tencent-weixin/openclaw-weixin: long-poll getUpdates + sendMessage.
+# 与 OpenClaw 插件 openclaw-weixin 使用同一套网关：长轮询收消息 + sendMessage 下发。
+#
+# 1. Easiest: run `cc-connect weixin setup --project <name>` — terminal shows a QR; scan with WeChat to obtain token.
+#    Or: `cc-connect weixin bind --project <name> --token <bearer>` if you already have a token (e.g. from OpenClaw).
+# 2. Manual: set token below. Optional: base_url (default https://ilinkai.weixin.qq.com).
+# 3. allow_from: comma-separated Weixin user IDs (e.g. user@im.wechat) or "*".
+# State files (get_updates cursor + context_token cache) live under:
+#   <data_dir>/weixin/<project>/<account_id>/
+#
+# Inbound images / files / video / raw voice (SILK) are downloaded from Weixin CDN and AES-128-ECB decrypted
+# when encrypt_query_param + aes_key are present (aligned with OpenClaw openclaw-weixin).
+# 入站图片、文件、视频、无转写文字时的语音会从微信 CDN 拉取并按 AES-128-ECB 解密（与 OpenClaw 插件一致）。
+
+# [[projects.platforms]]
+# type = "weixin"
+#
+# [projects.platforms.options]
+# token = "your-ilink-bot-bearer-token"
+# base_url = "https://ilinkai.weixin.qq.com"   # optional / 可选
+# cdn_base_url = "https://novac2c.cdn.weixin.qq.com/c2c"   # optional; CDN download/upload / 可选 CDN 根路径
+# allow_from = "*"                             # or "user1@im.wechat,user2@im.wechat"
+# account_id = "default"                       # optional: isolate state dirs / 可选：区分多账号状态目录
+# route_tag = ""                               # optional SKRouteTag header / 可选路由头
+# long_poll_timeout_ms = 35000                 # optional / 可选
+# state_dir = ""                               # optional: override persistence directory / 可选覆盖状态目录
+# proxy = ""                                   # optional HTTP proxy / 可选代理
+# proxy_username = ""
+# proxy_password = ""
+
 # =============================================================================
 # Project 2: Using Cursor Agent / 项目 2：使用 Cursor Agent (uncomment to enable / 取消注释以启用)
 # =============================================================================
@@ -834,7 +930,10 @@ app_secret = "your-feishu-app-secret"
 #
 # Mode options / 模式说明:
 # - "default": Trust workspace, ask before tool use / 信任工作区，工具调用前询问
-# - "force":   Auto-approve all tool calls (same as --force/--yolo) / 自动批准所有工具调用
+#              Note: Shell tool is restricted to safe commands (e.g. ls) in this mode
+#              注意：此模式下 Shell 工具仅允许安全命令（如 ls）
+# - "force":   Auto-approve all tool calls, full shell access (same as --force/--yolo)
+#              自动批准所有工具调用，完整 Shell 访问（等同 --force/--yolo）
 # - "plan":    Read-only analysis, no edits / 只读分析，不做修改
 # - "ask":     Q&A style, read-only / 问答风格，只读
 #
@@ -1064,6 +1163,72 @@ app_secret = "your-feishu-app-secret"
 # token = "your-telegram-bot-token"
 
 # =============================================================================
+# Project: ACP (Agent Client Protocol) agent / 使用 ACP 子进程
+# =============================================================================
+# Runs any binary that speaks ACP over stdio (newline-delimited JSON-RPC 2.0).
+# See: https://agentclientprotocol.com/
+# 启动符合 ACP 的 Agent 进程，通过标准输入输出进行 JSON-RPC 通信。
+# Same agent type works for Cursor Agent CLI, OpenClaw bridge, GitHub Copilot CLI, etc.:
+# set command + args to match each tool's documented ACP entrypoint.
+# 同一 type=acp：通过 command/args 指向各工具文档中的 ACP 启动方式即可。
+
+# --- Example: Cursor Agent CLI (npm: @anthropic-ai/cursor-agent) ---
+# [[projects]]
+# name = "cursor-acp"
+#
+# [projects.agent]
+# type = "acp"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/project"
+# command = "agent"
+# args = ["acp"]
+# auth_method = "cursor_login"
+# display_name = "Cursor ACP"
+
+# --- Example: OpenClaw (Gateway-backed ACP bridge) ---
+# Docs: https://docs.openclaw.ai/cli/acp
+# Install the OpenClaw CLI, run a Gateway, then point cc-connect at `openclaw acp`.
+# [[projects]]
+# name = "openclaw-acp"
+#
+# [projects.agent]
+# type = "acp"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/project"
+# command = "openclaw"
+# args = ["acp"]
+# # Remote gateway (use token-file on shared hosts — avoid --token in argv):
+# # args = ["acp", "--url", "wss://gateway-host:18789", "--token-file", "/path/to/gateway.token"]
+# # Optional: bind to an existing session key
+# # args = ["acp", "--session", "agent:main:main"]
+# display_name = "OpenClaw ACP"
+# # env = { OPENCLAW_GATEWAY_TOKEN = "..." }
+
+# --- Example: GitHub Copilot CLI (public preview) ---
+# Docs: https://docs.github.com/en/copilot/reference/copilot-cli-reference/acp-server
+# Requires Copilot CLI installed and authenticated; no auth_method for ACP subprocess.
+# [[projects]]
+# name = "copilot-acp"
+#
+# [projects.agent]
+# type = "acp"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/project"
+# command = "copilot"
+# args = ["--acp", "--stdio"]
+# display_name = "Copilot ACP"
+# # command = "/absolute/path/to/copilot"   # if not on PATH (see COPILOT_CLI_PATH in GitHub docs)
+
+# [[projects.platforms]]
+# type = "telegram"
+#
+# [projects.platforms.options]
+# token = "your-telegram-bot-token"
+
+# =============================================================================
 # Project 7: Using iFlow CLI / 项目 7：使用 iFlow CLI (uncomment to enable / 取消注释以启用)
 # =============================================================================
 # Requires: npm install -g @iflow-ai/iflow-cli
@@ -1119,6 +1284,7 @@ app_secret = "your-feishu-app-secret"
 #
 # [projects.agent.options]
 # work_dir = "/path/to/frontend"
+# mode = "auto"
 # mode = "bypassPermissions"
 #
 # [[projects.platforms]]

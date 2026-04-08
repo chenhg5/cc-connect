@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -64,6 +65,16 @@ func (l *sanitizingLogger) sanitize(s string) string {
 }
 
 func (l *sanitizingLogger) Debug(ctx context.Context, args ...interface{}) {
+	for _, arg := range args {
+		s, ok := arg.(string)
+		if !ok {
+			continue
+		}
+		msg := strings.ToLower(s)
+		if strings.Contains(msg, "ping success") || strings.Contains(msg, "receive pong") {
+			return
+		}
+	}
 	l.inner.Debug(ctx, l.maskURL(args...)...)
 }
 
@@ -99,34 +110,41 @@ type Platform struct {
 	domain                string
 	appID                 string
 	appSecret             string
+	progressStyle         string
 	useInteractiveCard    bool
 	self                  core.Platform
 	reactionEmoji         string
 	allowFrom             string
-	groupReplyAll         bool
+	groupReplyAll              bool
+	respondToAtEveryoneAndHere bool
 	shareSessionInChannel bool
-	replyInThread         bool
 	threadIsolation       bool
-	client                *lark.Client
-	wsClient              *larkws.Client
-	handler               core.MessageHandler
-	cardNavHandler        core.CardNavigationHandler
-	cancel                context.CancelFunc
-	dedup                 core.MessageDedup
-	botOpenID             string
-	userNameCache         sync.Map // open_id -> display name
-	chatNameCache         sync.Map // chat_id -> chat name
+	// noReplyToTrigger: when true, send via Create instead of Im.Message.Reply (no quote to the user's message).
+	noReplyToTrigger bool
+	client           *lark.Client
+	replayClient     *lark.Client
+	replayClientMu   sync.Mutex
+	wsClient         *larkws.Client
+	handler          core.MessageHandler
+	cardNavHandler   core.CardNavigationHandler
+	cancel           context.CancelFunc
+	dedup            core.MessageDedup
+	botOpenID        string
+	userNameCache    sync.Map // open_id -> display name
+	chatNameCache    sync.Map // chat_id -> chat name
 	// Webhook mode fields (for Lark international version)
-	server         *http.Server
-	port           string
-	callbackPath   string
-	encryptKey     string
-	eventHandler   *dispatcher.EventDispatcher
+	server       *http.Server
+	port         string
+	callbackPath string
+	encryptKey   string
+	eventHandler *dispatcher.EventDispatcher
 }
 
 type interactivePlatform struct {
 	*Platform
 }
+
+type feishuRequestFunc func(client *lark.Client, options ...larkcore.RequestOptionFunc) error
 
 func (p *Platform) SetCardNavigationHandler(h core.CardNavigationHandler) {
 	p.cardNavHandler = h
@@ -142,6 +160,15 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	if appID == "" || appSecret == "" {
 		return nil, fmt.Errorf("%s: app_id and app_secret are required", name)
 	}
+	if v, ok := opts["domain"].(string); ok {
+		v = strings.TrimSpace(v)
+		if v != "" {
+			if _, err := url.ParseRequestURI(v); err != nil {
+				return nil, fmt.Errorf("%s: invalid domain %q: %w", name, v, err)
+			}
+			domain = v
+		}
+	}
 	reactionEmoji, _ := opts["reaction_emoji"].(string)
 	if reactionEmoji == "" {
 		reactionEmoji = "OnIt"
@@ -152,9 +179,25 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	allowFrom, _ := opts["allow_from"].(string)
 	core.CheckAllowFrom(name, allowFrom)
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
+	respondToAtEveryoneAndHere, _ := opts["respond_to_at_everyone_and_here"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
-	replyInThread, _ := opts["reply_in_thread"].(bool)
 	threadIsolation, _ := opts["thread_isolation"].(bool)
+	noReplyToTrigger := false
+	if v, ok := opts["reply_to_trigger"].(bool); ok && !v {
+		noReplyToTrigger = true
+	}
+
+	progressStyle := "legacy"
+	if v, ok := opts["progress_style"].(string); ok {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "", "legacy":
+			progressStyle = "legacy"
+		case "compact", "card":
+			progressStyle = strings.ToLower(strings.TrimSpace(v))
+		default:
+			return nil, fmt.Errorf("%s: invalid progress_style %q (want legacy, compact, or card)", name, v)
+		}
+	}
 	useInteractiveCard := true
 	if v, ok := opts["enable_feishu_card"].(bool); ok {
 		useInteractiveCard = v
@@ -181,14 +224,17 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		domain:                domain,
 		appID:                 appID,
 		appSecret:             appSecret,
+		progressStyle:         progressStyle,
 		useInteractiveCard:    useInteractiveCard,
 		reactionEmoji:         reactionEmoji,
 		allowFrom:             allowFrom,
-		groupReplyAll:         groupReplyAll,
+		groupReplyAll:              groupReplyAll,
+		respondToAtEveryoneAndHere: respondToAtEveryoneAndHere,
 		shareSessionInChannel: shareSessionInChannel,
-		replyInThread:         replyInThread,
 		threadIsolation:       threadIsolation,
+		noReplyToTrigger:      noReplyToTrigger,
 		client:                lark.NewClient(appID, appSecret, clientOpts...),
+		replayClient:          newFeishuReplayClient(appID, appSecret, domain),
 		port:                  port,
 		callbackPath:          callbackPath,
 		encryptKey:            encryptKey,
@@ -204,6 +250,10 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 
 func (p *Platform) Name() string { return p.platformName }
 
+func (p *Platform) ProgressStyle() string { return p.progressStyle }
+
+func (p *Platform) SupportsProgressCardPayload() bool { return true }
+
 func (p *Platform) tag() string { return p.platformName }
 
 func (p *Platform) dispatchPlatform() core.Platform {
@@ -211,6 +261,10 @@ func (p *Platform) dispatchPlatform() core.Platform {
 		return p.self
 	}
 	return p
+}
+
+func (p *Platform) KeepPreviewOnFinish() bool {
+	return p.useInteractiveCard
 }
 
 func (p *Platform) Start(handler core.MessageHandler) error {
@@ -626,8 +680,13 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 
 	if chatType == "group" && !p.groupReplyAll && p.botOpenID != "" {
 		if !isBotMentioned(msg.Mentions, p.botOpenID) {
-			slog.Debug(p.tag()+": ignoring group message without bot mention", "chat_id", chatID)
-			return nil
+			// Feishu @all sends {"text":"@_all"} with 0 mentions.
+			if p.respondToAtEveryoneAndHere && msg.Content != nil && strings.Contains(*msg.Content, "@_all") {
+				slog.Debug(p.tag()+": responding to @all message", "chat_id", chatID)
+			} else {
+				slog.Debug(p.tag()+": ignoring group message without bot mention", "chat_id", chatID)
+				return nil
+			}
 		}
 	}
 
@@ -641,6 +700,13 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		return nil
 	}
 
+	// Capture content before going async — the SDK may reuse the event object.
+	content := ""
+	if msg.Content != nil {
+		content = *msg.Content
+	}
+	mentions := msg.Mentions
+
 	sessionKey := p.makeSessionKey(msg, chatID, userID)
 	rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
 	slog.Debug(p.tag()+": routed inbound message",
@@ -649,23 +715,36 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		"reply_in_thread", p.shouldReplyInThread(rctx),
 	)
 
+	// Dispatch message handling asynchronously so the SDK event loop is not
+	// blocked by IO-heavy operations (image/audio download, handler HTTP calls).
+	// The dedup and old-message checks above remain synchronous to guarantee
+	// correctness before spawning the goroutine.
+	go p.dispatchMessage(msgType, content, mentions, messageID, sessionKey, userID, userName, chatName, rctx)
+
+	return nil
+}
+
+// dispatchMessage handles the message content parsing, media download, and
+// handler invocation. It runs in its own goroutine so that onMessage returns
+// quickly and does not block the SDK event loop.
+func (p *Platform) dispatchMessage(msgType, content string, mentions []*larkim.MentionEvent, messageID, sessionKey, userID, userName, chatName string, rctx replyContext) {
 	switch msgType {
 	case "text":
 		var textBody struct {
 			Text string `json:"text"`
 		}
-		if err := json.Unmarshal([]byte(*msg.Content), &textBody); err != nil {
+		if err := json.Unmarshal([]byte(content), &textBody); err != nil {
 			slog.Error(p.tag()+": failed to parse text content", "error", err)
-			return nil
+			return
 		}
-		text := stripMentions(textBody.Text, msg.Mentions, p.botOpenID)
+		text := stripMentions(textBody.Text, mentions, p.botOpenID)
 		if text == "" {
 			slog.Debug(p.tag()+": dropping empty text after mention stripping",
 				"message_id", messageID,
 				"raw_text_len", len(textBody.Text),
-				"mentions", mentionCount,
+				"mentions", len(mentions),
 			)
-			return nil
+			return
 		}
 		p.handler(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
@@ -678,14 +757,14 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		var imgBody struct {
 			ImageKey string `json:"image_key"`
 		}
-		if err := json.Unmarshal([]byte(*msg.Content), &imgBody); err != nil {
+		if err := json.Unmarshal([]byte(content), &imgBody); err != nil {
 			slog.Error(p.tag()+": failed to parse image content", "error", err)
-			return nil
+			return
 		}
 		imgData, mimeType, err := p.downloadImage(messageID, imgBody.ImageKey)
 		if err != nil {
 			slog.Error(p.tag()+": download image failed", "error", err)
-			return nil
+			return
 		}
 		p.handler(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
@@ -700,15 +779,15 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 			FileKey  string `json:"file_key"`
 			Duration int    `json:"duration"` // milliseconds
 		}
-		if err := json.Unmarshal([]byte(*msg.Content), &audioBody); err != nil {
+		if err := json.Unmarshal([]byte(content), &audioBody); err != nil {
 			slog.Error(p.tag()+": failed to parse audio content", "error", err)
-			return nil
+			return
 		}
 		slog.Debug(p.tag()+": audio received", "user", userID, "file_key", audioBody.FileKey)
 		audioData, err := p.downloadResource(messageID, audioBody.FileKey, "file")
 		if err != nil {
 			slog.Error(p.tag()+": download audio failed", "error", err)
-			return nil
+			return
 		}
 		p.handler(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
@@ -724,10 +803,10 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		})
 
 	case "post":
-		textParts, images := p.parsePostContent(messageID, *msg.Content)
-		text := stripMentions(strings.Join(textParts, "\n"), msg.Mentions, p.botOpenID)
+		textParts, images := p.parsePostContent(messageID, content)
+		text := stripMentions(strings.Join(textParts, "\n"), mentions, p.botOpenID)
 		if text == "" && len(images) == 0 {
-			return nil
+			return
 		}
 		p.handler(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
@@ -742,15 +821,15 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 			FileKey  string `json:"file_key"`
 			FileName string `json:"file_name"`
 		}
-		if err := json.Unmarshal([]byte(*msg.Content), &fileBody); err != nil {
+		if err := json.Unmarshal([]byte(content), &fileBody); err != nil {
 			slog.Error(p.tag()+": failed to parse file content", "error", err)
-			return nil
+			return
 		}
 		slog.Info(p.tag()+": file received", "user", userID, "file_key", fileBody.FileKey, "file_name", fileBody.FileName)
 		fileData, err := p.downloadResource(messageID, fileBody.FileKey, "file")
 		if err != nil {
 			slog.Error(p.tag()+": download file failed", "error", err)
-			return nil
+			return
 		}
 		slog.Debug(p.tag()+": file downloaded", "file_name", fileBody.FileName, "size", len(fileData))
 		mimeType := detectMimeType(fileData)
@@ -770,7 +849,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		text, images, files := p.parseMergeForward(messageID)
 		if text == "" && len(images) == 0 && len(files) == 0 {
 			slog.Warn(p.tag()+": merge_forward produced no content", "message_id", messageID)
-			return nil
+			return
 		}
 		coreMsg := &core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
@@ -786,8 +865,6 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 	default:
 		slog.Debug(p.tag()+": ignoring unsupported message type", "type", msgType)
 	}
-
-	return nil
 }
 
 // resolveUserName fetches a user's display name via the Contact API, with caching.
@@ -1035,52 +1112,27 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 
 	msgType, msgBody := buildReplyContent(content)
 
-	resp, err := p.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
-		MessageId(rc.messageID).
-		Body(p.buildReplyMessageReqBody(rc, msgType, msgBody)).
-		Build())
-	if err != nil {
-		return fmt.Errorf("%s: reply api call: %w", p.tag(), err)
+	if !p.shouldUseThreadOrReplyAPI(rc) {
+		return p.sendNewMessageToChat(ctx, rc, msgType, msgBody)
 	}
-	if !resp.Success() {
-		return fmt.Errorf("%s: reply failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
-	}
-	return nil
+	return p.replyMessage(ctx, rc, msgType, msgBody)
 }
 
-// Send sends a new message to the same chat (not a reply to original message).
-// When reply_in_thread is enabled, threads the message to the original message instead.
+// Send sends a message. When the original message ID is available, the message
+// is sent as a reply (quoting the original) so the conversation stays threaded.
+// Falls back to creating a standalone message when no message ID exists.
 func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	rc, ok := rctx.(replyContext)
 	if !ok {
 		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
 	}
 
-	if p.shouldReplyInThread(rc) {
+	if p.shouldUseThreadOrReplyAPI(rc) {
 		return p.Reply(ctx, rctx, content)
 	}
 
-	if rc.chatID == "" {
-		return fmt.Errorf("%s: chatID is empty, cannot send new message", p.tag())
-	}
-
 	msgType, msgBody := buildReplyContent(content)
-
-	resp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
-		ReceiveIdType(larkim.ReceiveIdTypeChatId).
-		Body(larkim.NewCreateMessageReqBodyBuilder().
-			ReceiveId(rc.chatID).
-			MsgType(msgType).
-			Content(msgBody).
-			Build()).
-		Build())
-	if err != nil {
-		return fmt.Errorf("%s: send api call: %w", p.tag(), err)
-	}
-	if !resp.Success() {
-		return fmt.Errorf("%s: send failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
-	}
-	return nil
+	return p.sendNewMessageToChat(ctx, rc, msgType, msgBody)
 }
 
 func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttachment) error {
@@ -1089,18 +1141,25 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 		return fmt.Errorf("%s: SendImage: invalid reply context type %T", p.tag(), rctx)
 	}
 
-	uploadResp, err := p.client.Im.Image.Create(ctx,
-		larkim.NewCreateImageReqBuilder().
+	var uploadResp *larkim.CreateImageResp
+	if err := p.withFreshTenantAccessTokenRetry(ctx, "upload image", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+		req := larkim.NewCreateImageReqBuilder().
 			Body(larkim.NewCreateImageReqBodyBuilder().
 				ImageType("message").
 				Image(bytes.NewReader(img.Data)).
 				Build()).
-			Build())
-	if err != nil {
-		return fmt.Errorf("%s: upload image: %w", p.tag(), err)
-	}
-	if !uploadResp.Success() {
-		return fmt.Errorf("%s: upload image code=%d msg=%s", p.tag(), uploadResp.Code, uploadResp.Msg)
+			Build()
+		var err error
+		uploadResp, err = client.Im.Image.Create(ctx, req, options...)
+		if err != nil {
+			return fmt.Errorf("%s: upload image: %w", p.tag(), err)
+		}
+		if !uploadResp.Success() {
+			return fmt.Errorf("%s: upload image code=%d msg=%s", p.tag(), uploadResp.Code, uploadResp.Msg)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	if uploadResp.Data == nil || uploadResp.Data.ImageKey == nil {
 		return fmt.Errorf("%s: upload image: no image_key returned", p.tag())
@@ -1125,19 +1184,26 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 		fileName = "attachment"
 	}
 	fileType := detectFeishuFileType(file.MimeType, fileName)
-	uploadResp, err := p.client.Im.File.Create(ctx,
-		larkim.NewCreateFileReqBuilder().
+	var uploadResp *larkim.CreateFileResp
+	if err := p.withFreshTenantAccessTokenRetry(ctx, "upload file", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+		req := larkim.NewCreateFileReqBuilder().
 			Body(larkim.NewCreateFileReqBodyBuilder().
 				FileType(fileType).
 				FileName(fileName).
 				File(bytes.NewReader(file.Data)).
 				Build()).
-			Build())
-	if err != nil {
-		return fmt.Errorf("%s: upload file: %w", p.tag(), err)
-	}
-	if !uploadResp.Success() {
-		return fmt.Errorf("%s: upload file code=%d msg=%s", p.tag(), uploadResp.Code, uploadResp.Msg)
+			Build()
+		var err error
+		uploadResp, err = client.Im.File.Create(ctx, req, options...)
+		if err != nil {
+			return fmt.Errorf("%s: upload file: %w", p.tag(), err)
+		}
+		if !uploadResp.Success() {
+			return fmt.Errorf("%s: upload file code=%d msg=%s", p.tag(), uploadResp.Code, uploadResp.Msg)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	if uploadResp.Data == nil || uploadResp.Data.FileKey == nil {
 		return fmt.Errorf("%s: upload file: no file_key returned", p.tag())
@@ -1152,35 +1218,10 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 }
 
 func (p *Platform) sendMediaMessage(ctx context.Context, rc replyContext, msgType, content string) error {
-	if p.shouldReplyInThread(rc) {
-		replyResp, err := p.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
-			MessageId(rc.messageID).
-			Body(p.buildReplyMessageReqBody(rc, msgType, content)).
-			Build())
-		if err != nil {
-			return fmt.Errorf("%s: send media message: %w", p.tag(), err)
-		}
-		if !replyResp.Success() {
-			return fmt.Errorf("%s: send media message code=%d msg=%s", p.tag(), replyResp.Code, replyResp.Msg)
-		}
-		return nil
+	if p.shouldUseThreadOrReplyAPI(rc) {
+		return p.replyMessage(ctx, rc, msgType, content)
 	}
-
-	sendResp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
-		ReceiveIdType(larkim.ReceiveIdTypeChatId).
-		Body(larkim.NewCreateMessageReqBodyBuilder().
-			ReceiveId(rc.chatID).
-			MsgType(msgType).
-			Content(content).
-			Build()).
-		Build())
-	if err != nil {
-		return fmt.Errorf("%s: send media message: %w", p.tag(), err)
-	}
-	if !sendResp.Success() {
-		return fmt.Errorf("%s: send media message code=%d msg=%s", p.tag(), sendResp.Code, sendResp.Msg)
-	}
-	return nil
+	return p.createMessage(ctx, rc.chatID, msgType, content, "send media message")
 }
 
 func detectFeishuFileType(mimeType, fileName string) string {
@@ -1280,7 +1321,11 @@ func buildReplyContent(content string) (msgType string, body string) {
 	// 1. Code blocks / tables → card (schema 2.0 markdown)
 	// 2. Many \n\n paragraphs (help, status, etc.) → post rich-text (preserves blank lines)
 	// 3. Other markdown → post md tag (best native rendering)
-	if hasComplexMarkdown(content) {
+	//
+	// Feishu cards support at most 5 tables (API error 11310).
+	// When content exceeds this limit, fall back to post with md tag
+	// which still renders tables without the card table cap.
+	if hasComplexMarkdown(content) && countMarkdownTables(content) <= maxCardTables {
 		return larkim.MsgTypeInteractive, buildCardJSON(sanitizeMarkdownURLs(preprocessFeishuMarkdown(content)))
 	}
 	if strings.Count(content, "\n\n") >= 2 {
@@ -1302,6 +1347,28 @@ func hasComplexMarkdown(s string) bool {
 		}
 	}
 	return false
+}
+
+// maxCardTables is the Feishu interactive card limit for table components.
+// A single card supports at most 5 tables; exceeding this causes API error 11310.
+const maxCardTables = 5
+
+// countMarkdownTables counts the number of distinct markdown tables in s.
+// A table is a group of consecutive lines where each line starts and ends with '|'.
+func countMarkdownTables(s string) int {
+	count := 0
+	inTable := false
+	for _, line := range strings.Split(s, "\n") {
+		trimmed := strings.TrimSpace(line)
+		isTableLine := len(trimmed) > 1 && trimmed[0] == '|' && trimmed[len(trimmed)-1] == '|'
+		if isTableLine && !inTable {
+			count++
+			inTable = true
+		} else if !isTableLine {
+			inTable = false
+		}
+	}
+	return count
 }
 
 // buildPostMdJSON builds a Feishu post message using the md tag,
@@ -1660,10 +1727,22 @@ func (p *Platform) shouldReplyInThread(rc replyContext) bool {
 	if rc.messageID == "" {
 		return false
 	}
-	if p.replyInThread {
-		return true
-	}
 	return p.threadIsolation && isThreadSessionKey(rc.sessionKey)
+}
+
+// shouldUseThreadOrReplyAPI is true when we should call Im.Message.Reply (optionally with ReplyInThread).
+func (p *Platform) shouldUseThreadOrReplyAPI(rc replyContext) bool {
+	if rc.messageID == "" {
+		return false
+	}
+	return !p.noReplyToTrigger
+}
+
+func (p *Platform) sendNewMessageToChat(ctx context.Context, rc replyContext, msgType, content string) error {
+	if rc.chatID == "" {
+		return fmt.Errorf("%s: chatID is empty, cannot send new message", p.tag())
+	}
+	return p.createMessage(ctx, rc.chatID, msgType, content, "send")
 }
 
 func (p *Platform) buildReplyMessageReqBody(rc replyContext, msgType, content string) *larkim.ReplyMessageReqBody {
@@ -1674,6 +1753,102 @@ func (p *Platform) buildReplyMessageReqBody(rc replyContext, msgType, content st
 		body.ReplyInThread(true)
 	}
 	return body.Build()
+}
+
+func (p *Platform) replyMessage(ctx context.Context, rc replyContext, msgType, content string) error {
+	req := larkim.NewReplyMessageReqBuilder().
+		MessageId(rc.messageID).
+		Body(p.buildReplyMessageReqBody(rc, msgType, content)).
+		Build()
+	return p.withFreshTenantAccessTokenRetry(ctx, "reply", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+		resp, err := client.Im.Message.Reply(ctx, req, options...)
+		if err != nil {
+			return fmt.Errorf("%s: reply api call: %w", p.tag(), err)
+		}
+		if !resp.Success() {
+			return fmt.Errorf("%s: reply failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+		}
+		return nil
+	})
+}
+
+func (p *Platform) createMessage(ctx context.Context, chatID, msgType, content, op string) error {
+	req := larkim.NewCreateMessageReqBuilder().
+		ReceiveIdType(larkim.ReceiveIdTypeChatId).
+		Body(larkim.NewCreateMessageReqBodyBuilder().
+			ReceiveId(chatID).
+			MsgType(msgType).
+			Content(content).
+			Build()).
+		Build()
+	return p.withFreshTenantAccessTokenRetry(ctx, op, func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+		resp, err := client.Im.Message.Create(ctx, req, options...)
+		if err != nil {
+			return fmt.Errorf("%s: %s api call: %w", p.tag(), op, err)
+		}
+		if !resp.Success() {
+			return fmt.Errorf("%s: %s failed code=%d msg=%s", p.tag(), op, resp.Code, resp.Msg)
+		}
+		return nil
+	})
+}
+
+func (p *Platform) withFreshTenantAccessTokenRetry(ctx context.Context, operation string, fn feishuRequestFunc) error {
+	err := fn(p.client)
+	if !isTenantAccessTokenInvalid(err) {
+		return err
+	}
+
+	freshToken, refreshErr := p.fetchFreshTenantAccessToken(ctx)
+	if refreshErr != nil {
+		return fmt.Errorf("%s: %s failed after token refresh attempt: %w (original error: %v)", p.tag(), operation, refreshErr, err)
+	}
+
+	slog.Warn(p.tag()+": retrying request with fresh tenant access token", "operation", operation)
+	return fn(p.replayAPIClient(), larkcore.WithTenantAccessToken(freshToken))
+}
+
+func (p *Platform) fetchFreshTenantAccessToken(ctx context.Context) (string, error) {
+	resp, err := p.replayAPIClient().GetTenantAccessTokenBySelfBuiltApp(ctx, &larkcore.SelfBuiltTenantAccessTokenReq{
+		AppID:     p.appID,
+		AppSecret: p.appSecret,
+	})
+	if err != nil {
+		return "", fmt.Errorf("%s: fetch tenant access token: %w", p.tag(), err)
+	}
+	if !resp.Success() {
+		return "", fmt.Errorf("%s: fetch tenant access token code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+	}
+	if strings.TrimSpace(resp.TenantAccessToken) == "" {
+		return "", fmt.Errorf("%s: fetch tenant access token returned empty token", p.tag())
+	}
+	return resp.TenantAccessToken, nil
+}
+
+func (p *Platform) replayAPIClient() *lark.Client {
+	p.replayClientMu.Lock()
+	defer p.replayClientMu.Unlock()
+	if p.replayClient == nil {
+		p.replayClient = newFeishuReplayClient(p.appID, p.appSecret, p.domain)
+	}
+	return p.replayClient
+}
+
+func newFeishuReplayClient(appID, appSecret, domain string) *lark.Client {
+	var opts []lark.ClientOptionFunc
+	opts = append(opts, lark.WithEnableTokenCache(false))
+	if domain != "" && domain != lark.FeishuBaseUrl {
+		opts = append(opts, lark.WithOpenBaseUrl(domain))
+	}
+	return lark.NewClient(appID, appSecret, opts...)
+}
+
+func isTenantAccessTokenInvalid(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "99991663") || strings.Contains(msg, "invalid access token")
 }
 
 func stringValue(v *string) string {
@@ -1748,10 +1923,320 @@ func buildCardJSON(content string) string {
 	return string(b)
 }
 
+func isZhLikeProgressLang(lang string) bool {
+	l := strings.ToLower(strings.TrimSpace(lang))
+	return strings.HasPrefix(l, "zh")
+}
+
+func progressAgentLabel(agent string) string {
+	agent = strings.TrimSpace(agent)
+	if agent == "" {
+		return "Agent"
+	}
+	return agent
+}
+
+func progressStateMeta(state core.ProgressCardState, lang string, agent string) (title string, template string, footer string) {
+	zh := isZhLikeProgressLang(lang)
+	switch state {
+	case core.ProgressCardStateCompleted:
+		if zh {
+			return fmt.Sprintf("%s · 已完成", agent), "green", "本过程卡片已停止更新，完整答复见下一条消息。"
+		}
+		return fmt.Sprintf("%s · Completed", agent), "green", "This progress card is no longer updating. Full response is in the next message."
+	case core.ProgressCardStateFailed:
+		if zh {
+			return fmt.Sprintf("%s · 失败", agent), "red", "本过程卡片已停止更新（失败），完整错误说明见下一条消息。"
+		}
+		return fmt.Sprintf("%s · Failed", agent), "red", "This progress card has stopped (failed). See the next message for details."
+	default:
+		if zh {
+			return fmt.Sprintf("%s · 进行中", agent), "blue", ""
+		}
+		return fmt.Sprintf("%s · Running", agent), "blue", ""
+	}
+}
+
+func progressKindLabel(kind core.ProgressCardEntryKind, lang string) string {
+	zh := isZhLikeProgressLang(lang)
+	switch kind {
+	case core.ProgressEntryThinking:
+		if zh {
+			return "思考"
+		}
+		return "Thinking"
+	case core.ProgressEntryToolUse:
+		if zh {
+			return "工具调用"
+		}
+		return "Tool"
+	case core.ProgressEntryToolResult:
+		if zh {
+			return "工具结果"
+		}
+		return "Result"
+	case core.ProgressEntryError:
+		if zh {
+			return "错误"
+		}
+		return "Error"
+	default:
+		if zh {
+			return "更新"
+		}
+		return "Update"
+	}
+}
+
+func normalizeProgressItems(payload *core.ProgressCardPayload) []core.ProgressCardEntry {
+	if payload == nil {
+		return nil
+	}
+	if len(payload.Items) > 0 {
+		return payload.Items
+	}
+	out := make([]core.ProgressCardEntry, 0, len(payload.Entries))
+	for _, entry := range payload.Entries {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		kind := core.ProgressEntryInfo
+		switch {
+		case strings.HasPrefix(entry, "💭"):
+			kind = core.ProgressEntryThinking
+		case strings.HasPrefix(entry, "🔧"), strings.Contains(entry, "**Tool #"):
+			kind = core.ProgressEntryToolUse
+		case strings.HasPrefix(entry, "🧾"):
+			kind = core.ProgressEntryToolResult
+		case strings.HasPrefix(entry, "❌"):
+			kind = core.ProgressEntryError
+		}
+		out = append(out, core.ProgressCardEntry{Kind: kind, Text: entry})
+	}
+	return out
+}
+
+func inlineCodeText(s string) string {
+	return strings.ReplaceAll(strings.TrimSpace(s), "`", "'")
+}
+
+func isBashToolName(toolName string) bool {
+	switch strings.ToLower(strings.TrimSpace(toolName)) {
+	case "bash", "shell", "run_shell_command":
+		return true
+	default:
+		return false
+	}
+}
+
+func formatProgressToolInput(toolName, text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	text = preprocessFeishuMarkdown(sanitizeMarkdownURLs(text))
+	if strings.Contains(text, "```") {
+		return text
+	}
+	if isBashToolName(toolName) {
+		return fmt.Sprintf("```bash\n%s\n```", text)
+	}
+	if strings.Contains(text, "\n") || len(text) > 180 {
+		return fmt.Sprintf("```text\n%s\n```", text)
+	}
+	return fmt.Sprintf("`%s`", inlineCodeText(text))
+}
+
+func formatProgressToolResult(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	text = preprocessFeishuMarkdown(sanitizeMarkdownURLs(text))
+	if strings.Contains(text, "```") {
+		return text
+	}
+	if strings.Contains(text, "\n") || len(text) > 220 {
+		return fmt.Sprintf("```\n%s\n```", text)
+	}
+	return text
+}
+
+func progressNoOutputText(lang string) string {
+	if isZhLikeProgressLang(lang) {
+		return "无输出"
+	}
+	return "No output"
+}
+
+func progressResultDot(item core.ProgressCardEntry) string {
+	if item.Success != nil {
+		if *item.Success {
+			return "🟢"
+		}
+		return "🔴"
+	}
+	if item.ExitCode != nil {
+		if *item.ExitCode == 0 {
+			return "🟢"
+		}
+		return "🔴"
+	}
+	if strings.EqualFold(strings.TrimSpace(item.Status), "completed") || strings.EqualFold(strings.TrimSpace(item.Status), "success") || strings.EqualFold(strings.TrimSpace(item.Status), "succeeded") || strings.EqualFold(strings.TrimSpace(item.Status), "ok") {
+		return "🟢"
+	}
+	if strings.EqualFold(strings.TrimSpace(item.Status), "failed") || strings.EqualFold(strings.TrimSpace(item.Status), "error") {
+		return "🔴"
+	}
+	return "⚪"
+}
+
+func renderProgressEntryElement(item core.ProgressCardEntry, lang string) map[string]any {
+	text := strings.TrimSpace(item.Text)
+	if text == "" {
+		text = " "
+	}
+	switch item.Kind {
+	case core.ProgressEntryThinking:
+		return map[string]any{
+			"tag": "div",
+			"text": map[string]any{
+				"tag":        "plain_text",
+				"content":    "💭 " + inlineCodeText(text),
+				"text_size":  "notation",
+				"text_color": "grey",
+			},
+		}
+	case core.ProgressEntryToolUse:
+		toolName := strings.TrimSpace(item.Tool)
+		if toolName == "" {
+			toolName = "Tool"
+		}
+		content := fmt.Sprintf("<text_tag color='blue'>%s</text_tag> `%s`", progressKindLabel(item.Kind, lang), inlineCodeText(toolName))
+		if body := formatProgressToolInput(toolName, text); body != "" {
+			content += "\n" + body
+		}
+		return map[string]any{
+			"tag":     "markdown",
+			"content": content,
+		}
+	case core.ProgressEntryToolResult:
+		toolName := strings.TrimSpace(item.Tool)
+		content := fmt.Sprintf("<text_tag color='turquoise'>%s</text_tag>", progressKindLabel(item.Kind, lang))
+		if toolName != "" {
+			content += " `" + inlineCodeText(toolName) + "`"
+		}
+		dot := progressResultDot(item)
+		meta := dot
+		if item.ExitCode != nil {
+			meta += fmt.Sprintf(" exit code: `%d`", *item.ExitCode)
+		}
+		content += "\n" + meta
+		if body := formatProgressToolResult(item.Text); body != "" {
+			content += "\n" + body
+		} else {
+			content += "\n_" + progressNoOutputText(lang) + "_"
+		}
+		return map[string]any{
+			"tag":     "markdown",
+			"content": content,
+		}
+	case core.ProgressEntryError:
+		content := fmt.Sprintf("<text_tag color='red'>%s</text_tag>\n%s", progressKindLabel(item.Kind, lang), preprocessFeishuMarkdown(sanitizeMarkdownURLs(text)))
+		return map[string]any{
+			"tag":     "markdown",
+			"content": content,
+		}
+	default:
+		return map[string]any{
+			"tag":     "markdown",
+			"content": preprocessFeishuMarkdown(sanitizeMarkdownURLs(text)),
+		}
+	}
+}
+
+func buildProgressCardJSONFromPayload(payload *core.ProgressCardPayload) string {
+	items := normalizeProgressItems(payload)
+	if len(items) == 0 {
+		return buildCardJSON(" ")
+	}
+
+	agent := progressAgentLabel(payload.Agent)
+	title, template, footer := progressStateMeta(payload.State, payload.Lang, agent)
+
+	elements := make([]map[string]any, 0, len(items)+3)
+	if payload.Truncated {
+		truncatedText := "Showing latest updates only."
+		if isZhLikeProgressLang(payload.Lang) {
+			truncatedText = "仅显示最近更新。"
+		}
+		elements = append(elements, map[string]any{
+			"tag": "div",
+			"text": map[string]any{
+				"tag":        "plain_text",
+				"content":    truncatedText,
+				"text_size":  "notation",
+				"text_color": "grey",
+			},
+		})
+		elements = append(elements, map[string]any{"tag": "hr"})
+	}
+
+	for i, item := range items {
+		elements = append(elements, renderProgressEntryElement(item, payload.Lang))
+		if i < len(items)-1 {
+			elements = append(elements, map[string]any{"tag": "hr"})
+		}
+	}
+	if footer != "" {
+		elements = append(elements, map[string]any{"tag": "hr"})
+		elements = append(elements, map[string]any{
+			"tag": "div",
+			"text": map[string]any{
+				"tag":        "plain_text",
+				"content":    footer,
+				"text_size":  "notation",
+				"text_color": "grey",
+			},
+		})
+	}
+
+	card := map[string]any{
+		"schema": "2.0",
+		"config": map[string]any{
+			"wide_screen_mode": true,
+		},
+		"header": map[string]any{
+			"title": map[string]any{
+				"tag":     "plain_text",
+				"content": title,
+			},
+			"template": template,
+		},
+		"body": map[string]any{
+			"elements": elements,
+		},
+	}
+	b, _ := json.Marshal(card)
+	return string(b)
+}
+
+func buildPreviewCardJSON(content string) string {
+	if payload, ok := core.ParseProgressCardPayload(content); ok {
+		return buildProgressCardJSONFromPayload(payload)
+	}
+	return buildCardJSON(sanitizeMarkdownURLs(content))
+}
+
 // SendPreviewStart sends a new card message and returns a handle for subsequent edits.
 // Using card (interactive) type for both preview and final message so updates
 // are in-place without needing to delete and resend.
 func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content string) (any, error) {
+	if !p.useInteractiveCard {
+		return nil, core.ErrNotSupported
+	}
+
 	rc, ok := rctx.(replyContext)
 	if !ok {
 		return nil, fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
@@ -1762,37 +2247,53 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 		return nil, fmt.Errorf("%s: chatID is empty", p.tag())
 	}
 
-	cardJSON := buildCardJSON(sanitizeMarkdownURLs(content))
+	cardJSON := buildPreviewCardJSON(content)
 
 	var msgID string
-	if p.shouldReplyInThread(rc) {
-		resp, err := p.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
+	if p.shouldUseThreadOrReplyAPI(rc) {
+		req := larkim.NewReplyMessageReqBuilder().
 			MessageId(rc.messageID).
 			Body(p.buildReplyMessageReqBody(rc, larkim.MsgTypeInteractive, cardJSON)).
-			Build())
-		if err != nil {
-			return nil, fmt.Errorf("%s: send preview (reply): %w", p.tag(), err)
-		}
-		if !resp.Success() {
-			return nil, fmt.Errorf("%s: send preview (reply) code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+			Build()
+		var resp *larkim.ReplyMessageResp
+		if err := p.withFreshTenantAccessTokenRetry(ctx, "send preview", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+			var err error
+			resp, err = client.Im.Message.Reply(ctx, req, options...)
+			if err != nil {
+				return fmt.Errorf("%s: send preview (reply): %w", p.tag(), err)
+			}
+			if !resp.Success() {
+				return fmt.Errorf("%s: send preview (reply) code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+			}
+			return nil
+		}); err != nil {
+			return nil, err
 		}
 		if resp.Data != nil && resp.Data.MessageId != nil {
 			msgID = *resp.Data.MessageId
 		}
 	} else {
-		resp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
+		req := larkim.NewCreateMessageReqBuilder().
 			ReceiveIdType(larkim.ReceiveIdTypeChatId).
 			Body(larkim.NewCreateMessageReqBodyBuilder().
 				ReceiveId(chatID).
 				MsgType(larkim.MsgTypeInteractive).
 				Content(cardJSON).
 				Build()).
-			Build())
-		if err != nil {
-			return nil, fmt.Errorf("%s: send preview: %w", p.tag(), err)
-		}
-		if !resp.Success() {
-			return nil, fmt.Errorf("%s: send preview code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+			Build()
+		var resp *larkim.CreateMessageResp
+		if err := p.withFreshTenantAccessTokenRetry(ctx, "send preview", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+			var err error
+			resp, err = client.Im.Message.Create(ctx, req, options...)
+			if err != nil {
+				return fmt.Errorf("%s: send preview: %w", p.tag(), err)
+			}
+			if !resp.Success() {
+				return fmt.Errorf("%s: send preview code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+			}
+			return nil
+		}); err != nil {
+			return nil, err
 		}
 		if resp.Data != nil && resp.Data.MessageId != nil {
 			msgID = *resp.Data.MessageId
@@ -1809,29 +2310,41 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 // UpdateMessage edits an existing card message identified by previewHandle.
 // Uses the Patch API (HTTP PATCH) which is required for interactive card messages.
 func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content string) error {
+	if !p.useInteractiveCard {
+		return core.ErrNotSupported
+	}
+
 	h, ok := previewHandle.(*feishuPreviewHandle)
 	if !ok {
 		return fmt.Errorf("%s: invalid preview handle type %T", p.tag(), previewHandle)
 	}
 
-	processed := content
-	if containsMarkdown(content) {
-		processed = preprocessFeishuMarkdown(content)
+	cardJSON := ""
+	if payload, ok := core.ParseProgressCardPayload(content); ok {
+		cardJSON = buildProgressCardJSONFromPayload(payload)
+	} else {
+		processed := content
+		if containsMarkdown(content) {
+			processed = preprocessFeishuMarkdown(content)
+		}
+		cardJSON = buildCardJSON(sanitizeMarkdownURLs(processed))
 	}
-	cardJSON := buildCardJSON(sanitizeMarkdownURLs(processed))
-	resp, err := p.client.Im.Message.Patch(ctx, larkim.NewPatchMessageReqBuilder().
+	req := larkim.NewPatchMessageReqBuilder().
 		MessageId(h.messageID).
 		Body(larkim.NewPatchMessageReqBodyBuilder().
 			Content(cardJSON).
 			Build()).
-		Build())
-	if err != nil {
-		return fmt.Errorf("%s: patch message: %w", p.tag(), err)
-	}
-	if !resp.Success() {
-		return fmt.Errorf("%s: patch message code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
-	}
-	return nil
+		Build()
+	return p.withFreshTenantAccessTokenRetry(ctx, "patch message", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+		resp, err := client.Im.Message.Patch(ctx, req, options...)
+		if err != nil {
+			return fmt.Errorf("%s: patch message: %w", p.tag(), err)
+		}
+		if !resp.Success() {
+			return fmt.Errorf("%s: patch message code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+		}
+		return nil
+	})
 }
 
 func (p *Platform) Stop() error {
@@ -1847,6 +2360,33 @@ func (p *Platform) Stop() error {
 		}
 	}
 	return nil
+}
+
+// DeletePreviewMessage removes a preview message so the caller can send a
+// separate final message without leaving a stale interactive card behind.
+func (p *Platform) DeletePreviewMessage(ctx context.Context, previewHandle any) error {
+	if !p.useInteractiveCard {
+		return core.ErrNotSupported
+	}
+
+	h, ok := previewHandle.(*feishuPreviewHandle)
+	if !ok {
+		return fmt.Errorf("%s: invalid preview handle type %T", p.tag(), previewHandle)
+	}
+
+	req := larkim.NewDeleteMessageReqBuilder().
+		MessageId(h.messageID).
+		Build()
+	return p.withFreshTenantAccessTokenRetry(ctx, "delete preview message", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+		resp, err := client.Im.Message.Delete(ctx, req, options...)
+		if err != nil {
+			return fmt.Errorf("%s: delete preview message: %w", p.tag(), err)
+		}
+		if !resp.Success() {
+			return fmt.Errorf("%s: delete preview message code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+		}
+		return nil
+	})
 }
 
 // SendAudio uploads audio bytes to Feishu and sends a voice message.
@@ -1867,19 +2407,26 @@ func (p *Platform) SendAudio(ctx context.Context, rctx any, audio []byte, format
 		format = "opus"
 	}
 
-	uploadResp, err := p.client.Im.File.Create(ctx,
-		larkim.NewCreateFileReqBuilder().
+	var uploadResp *larkim.CreateFileResp
+	if err := p.withFreshTenantAccessTokenRetry(ctx, "upload audio", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+		req := larkim.NewCreateFileReqBuilder().
 			Body(larkim.NewCreateFileReqBodyBuilder().
 				FileType(larkim.FileTypeOpus).
 				FileName("tts_audio.opus").
 				File(bytes.NewReader(audio)).
 				Build()).
-			Build())
-	if err != nil {
-		return fmt.Errorf("%s: upload audio: %w", p.tag(), err)
-	}
-	if !uploadResp.Success() {
-		return fmt.Errorf("%s: upload audio code=%d msg=%s", p.tag(), uploadResp.Code, uploadResp.Msg)
+			Build()
+		var err error
+		uploadResp, err = client.Im.File.Create(ctx, req, options...)
+		if err != nil {
+			return fmt.Errorf("%s: upload audio: %w", p.tag(), err)
+		}
+		if !uploadResp.Success() {
+			return fmt.Errorf("%s: upload audio code=%d msg=%s", p.tag(), uploadResp.Code, uploadResp.Msg)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	if uploadResp.Data == nil || uploadResp.Data.FileKey == nil {
 		return fmt.Errorf("%s: upload audio: no file_key returned", p.tag())
@@ -1894,36 +2441,7 @@ func (p *Platform) SendAudio(ctx context.Context, rctx any, audio []byte, format
 		return fmt.Errorf("%s: build audio message: %w", p.tag(), err)
 	}
 
-	// Send audio message to chat or thread.
-	if p.shouldReplyInThread(rc) {
-		replyResp, err := p.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
-			MessageId(rc.messageID).
-			Body(p.buildReplyMessageReqBody(rc, larkim.MsgTypeAudio, audioContent)).
-			Build())
-		if err != nil {
-			return fmt.Errorf("%s: send audio message: %w", p.tag(), err)
-		}
-		if !replyResp.Success() {
-			return fmt.Errorf("%s: send audio message code=%d msg=%s", p.tag(), replyResp.Code, replyResp.Msg)
-		}
-		return nil
-	}
-
-	sendResp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
-		ReceiveIdType(larkim.ReceiveIdTypeChatId).
-		Body(larkim.NewCreateMessageReqBodyBuilder().
-			ReceiveId(rc.chatID).
-			MsgType(larkim.MsgTypeAudio).
-			Content(audioContent).
-			Build()).
-		Build())
-	if err != nil {
-		return fmt.Errorf("%s: send audio message: %w", p.tag(), err)
-	}
-	if !sendResp.Success() {
-		return fmt.Errorf("%s: send audio message code=%d msg=%s", p.tag(), sendResp.Code, sendResp.Msg)
-	}
-	return nil
+	return p.sendMediaMessage(ctx, rc, larkim.MsgTypeAudio, audioContent)
 }
 
 type postElement struct {

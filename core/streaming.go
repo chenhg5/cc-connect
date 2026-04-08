@@ -34,17 +34,17 @@ func DefaultStreamPreviewCfg() StreamPreviewCfg {
 type streamPreview struct {
 	mu sync.Mutex
 
-	cfg       StreamPreviewCfg
-	platform  Platform
-	replyCtx  any
-	ctx       context.Context
+	cfg      StreamPreviewCfg
+	platform Platform
+	replyCtx any
+	ctx      context.Context
 
-	fullText           string // accumulated full text so far
-	lastSentText       string // what was last successfully sent to the platform
-	lastSentAt         time.Time
-	lastSentViaUpdate  bool   // true if lastSentText was delivered via UpdateMessage (not SendPreviewStart)
-	previewMsgID       any    // platform-specific ID for the preview message (returned by SendPreviewStart)
-	degraded           bool   // if true, stop trying (platform doesn't support it or permanent error)
+	fullText          string // accumulated full text so far
+	lastSentText      string // what was last successfully sent to the platform
+	lastSentAt        time.Time
+	lastSentViaUpdate bool // true if lastSentText was delivered via UpdateMessage (not SendPreviewStart)
+	previewMsgID      any  // platform-specific ID for the preview message (returned by SendPreviewStart)
+	degraded          bool // if true, stop trying (platform doesn't support it or permanent error)
 
 	timer     *time.Timer
 	timerStop chan struct{} // closed when preview ends
@@ -64,6 +64,12 @@ type PreviewStarter interface {
 // the preview and sends a fresh message).
 type PreviewCleaner interface {
 	DeletePreviewMessage(ctx context.Context, previewHandle any) error
+}
+
+// PreviewFinishPreference is an optional interface for platforms that want to
+// keep the preview message as the final delivered message on normal completion.
+type PreviewFinishPreference interface {
+	KeepPreviewOnFinish() bool
 }
 
 func newStreamPreview(cfg StreamPreviewCfg, p Platform, replyCtx any, ctx context.Context) *streamPreview {
@@ -234,6 +240,32 @@ func (sp *streamPreview) freeze() {
 	sp.degraded = true
 }
 
+// discard removes the preview message when possible and disables further
+// preview updates. Call this when the caller intends to send a separate
+// non-preview message (for example after tool use or on terminal errors).
+func (sp *streamPreview) discard() {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+
+	sp.cancelTimerLocked()
+
+	select {
+	case <-sp.timerStop:
+	default:
+		close(sp.timerStop)
+	}
+
+	if sp.previewMsgID != nil {
+		if cleaner, ok := sp.platform.(PreviewCleaner); ok {
+			slog.Debug("stream preview discard: deleting preview")
+			_ = cleaner.DeletePreviewMessage(sp.ctx, sp.previewMsgID)
+		}
+	}
+
+	sp.previewMsgID = nil
+	sp.degraded = true
+}
+
 // finish is called when the agent response is complete. It cancels any pending
 // timer and optionally cleans up the preview message.
 // Returns true if a preview was active and the final message was sent via preview
@@ -261,8 +293,13 @@ func (sp *streamPreview) finish(finalText string) bool {
 		return false
 	}
 
-	// If platform wants to delete the preview and send fresh, let it
-	if cleaner, ok := sp.platform.(PreviewCleaner); ok {
+	keepPreview := false
+	if pref, ok := sp.platform.(PreviewFinishPreference); ok {
+		keepPreview = pref.KeepPreviewOnFinish()
+	}
+
+	// If platform wants to delete the preview and send fresh, let it.
+	if cleaner, ok := sp.platform.(PreviewCleaner); ok && !keepPreview {
 		slog.Debug("stream preview finish: deleting preview (PreviewCleaner)")
 		_ = cleaner.DeletePreviewMessage(sp.ctx, sp.previewMsgID)
 		return false

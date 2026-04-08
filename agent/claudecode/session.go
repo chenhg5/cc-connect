@@ -26,33 +26,48 @@ import (
 // In "auto" mode, permission requests are auto-approved internally
 // (avoiding --dangerously-skip-permissions which fails under root).
 type claudeSession struct {
-	cmd         *exec.Cmd
-	stdin       io.WriteCloser
-	stdinMu     sync.Mutex
-	events      chan core.Event
-	sessionID   atomic.Value // stores string
-	autoApprove bool         // auto mode: approve all permission requests
-	workDir     string
-	ctx         context.Context
-	cancel      context.CancelFunc
-	done        chan struct{}
-	alive       atomic.Bool
+	cmd             *exec.Cmd
+	stdin           io.WriteCloser
+	stdinMu         sync.Mutex
+	events          chan core.Event
+	sessionID       atomic.Value // stores string
+	permissionMode  atomic.Value // stores string
+	autoApprove     atomic.Bool
+	acceptEditsOnly atomic.Bool
+	dontAsk         atomic.Bool
+	workDir         string
+	ctx             context.Context
+	cancel          context.CancelFunc
+	done            chan struct{}
+	alive           atomic.Bool
 }
 
-func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode string, allowedTools []string, extraEnv []string, platformPrompt string) (*claudeSession, error) {
+func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	args := []string{
 		"--output-format", "stream-json",
-		"--verbose",
 		"--input-format", "stream-json",
 		"--permission-prompt-tool", "stdio",
+	}
+	if !disableVerbose {
+		args = append(args, "--verbose")
 	}
 
 	if mode != "" && mode != "default" {
 		args = append(args, "--permission-mode", mode)
 	}
-	if sessionID != "" {
+	switch sessionID {
+	case "":
+		// Truly fresh session — no resume, no continue.
+	case core.ContinueSession:
+		// --continue grabs the most recent session in the workspace, which
+		// may belong to an active CLI terminal. Fork it so the platform
+		// conversation gets its own independent context branch.
+		args = append(args, "--continue", "--fork-session")
+	default:
+		// Resuming a known session ID — this is cc-connect's own session
+		// from a previous connection, safe to resume directly.
 		args = append(args, "--resume", sessionID)
 	}
 	if model != "" {
@@ -60,6 +75,9 @@ func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode strin
 	}
 	if len(allowedTools) > 0 {
 		args = append(args, "--allowedTools", strings.Join(allowedTools, ","))
+	}
+	if len(disallowedTools) > 0 {
+		args = append(args, "--disallowedTools", strings.Join(disallowedTools, ","))
 	}
 
 	if sysPrompt := core.AgentSystemPrompt(); sysPrompt != "" {
@@ -102,15 +120,15 @@ func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode strin
 	}
 
 	cs := &claudeSession{
-		cmd:         cmd,
-		stdin:       stdin,
-		events:      make(chan core.Event, 64),
-		autoApprove: mode == "bypassPermissions",
-		workDir:     workDir,
-		ctx:         sessionCtx,
-		cancel:      cancel,
-		done:        make(chan struct{}),
+		cmd:     cmd,
+		stdin:   stdin,
+		events:  make(chan core.Event, 64),
+		workDir: workDir,
+		ctx:     sessionCtx,
+		cancel:  cancel,
+		done:    make(chan struct{}),
 	}
+	cs.setPermissionMode(mode)
 	cs.sessionID.Store(sessionID)
 	cs.alive.Store(true)
 
@@ -279,7 +297,25 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 	if sid, ok := raw["session_id"].(string); ok && sid != "" {
 		cs.sessionID.Store(sid)
 	}
-	evt := core.Event{Type: core.EventResult, Content: content, SessionID: cs.CurrentSessionID(), Done: true}
+
+	var inputTokens, outputTokens int
+	if usage, ok := raw["usage"].(map[string]any); ok {
+		if v, ok := usage["input_tokens"].(float64); ok {
+			inputTokens = int(v)
+		}
+		if v, ok := usage["output_tokens"].(float64); ok {
+			outputTokens = int(v)
+		}
+	}
+
+	evt := core.Event{
+		Type:         core.EventResult,
+		Content:      content,
+		SessionID:    cs.CurrentSessionID(),
+		Done:         true,
+		InputTokens:  inputTokens,
+		OutputTokens: outputTokens,
+	}
 	select {
 	case cs.events <- evt:
 	case <-cs.ctx.Done():
@@ -302,9 +338,24 @@ func (cs *claudeSession) handleControlRequest(raw map[string]any) {
 	toolName, _ := request["tool_name"].(string)
 	input, _ := request["input"].(map[string]any)
 
-	// Auto mode: approve immediately without asking the user
-	if cs.autoApprove {
+	if cs.autoApprove.Load() {
 		slog.Debug("claudeSession: auto-approving", "request_id", requestID, "tool", toolName)
+		_ = cs.RespondPermission(requestID, core.PermissionResult{
+			Behavior:     "allow",
+			UpdatedInput: input,
+		})
+		return
+	}
+	if cs.dontAsk.Load() {
+		slog.Debug("claudeSession: auto-denying", "request_id", requestID, "tool", toolName)
+		_ = cs.RespondPermission(requestID, core.PermissionResult{
+			Behavior: "deny",
+			Message:  "Permission mode is set to dontAsk.",
+		})
+		return
+	}
+	if cs.acceptEditsOnly.Load() && isClaudeEditTool(toolName) {
+		slog.Debug("claudeSession: auto-approving edit tool", "request_id", requestID, "tool", toolName)
 		_ = cs.RespondPermission(requestID, core.PermissionResult{
 			Behavior:     "allow",
 			UpdatedInput: input,
@@ -473,6 +524,31 @@ func (cs *claudeSession) writeJSON(v any) error {
 	return nil
 }
 
+func isClaudeEditTool(toolName string) bool {
+	switch toolName {
+	case "Edit", "Write", "NotebookEdit", "MultiEdit":
+		return true
+	default:
+		return false
+	}
+}
+
+func (cs *claudeSession) setPermissionMode(mode string) {
+	cs.permissionMode.Store(mode)
+	cs.autoApprove.Store(mode == "bypassPermissions")
+	cs.acceptEditsOnly.Store(mode == "acceptEdits")
+	cs.dontAsk.Store(mode == "dontAsk")
+}
+
+func (cs *claudeSession) SetLiveMode(mode string) bool {
+	current, _ := cs.permissionMode.Load().(string)
+	if mode == "auto" || mode == "plan" || current == "auto" || current == "plan" {
+		return false
+	}
+	cs.setPermissionMode(mode)
+	return true
+}
+
 func (cs *claudeSession) Events() <-chan core.Event {
 	return cs.events
 }
@@ -513,3 +589,4 @@ func filterEnv(env []string, key string) []string {
 	}
 	return out
 }
+

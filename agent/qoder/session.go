@@ -49,7 +49,7 @@ func newQoderSession(ctx context.Context, workDir, model, mode, resumeID string,
 	}
 	qs.alive.Store(true)
 
-	if resumeID != "" {
+	if resumeID != "" && resumeID != core.ContinueSession {
 		qs.sessionID.Store(resumeID)
 	}
 

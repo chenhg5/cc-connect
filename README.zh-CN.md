@@ -51,19 +51,65 @@
 
 ---
 
+## 🆕 最近更新（Beta）
+
+> 以下内容仅在 **Beta / 预发布** 中提供：请使用 `npm install -g cc-connect@beta`，或从 [GitHub Releases 预发布](https://github.com/chenhg5/cc-connect/releases) 下载对应资源。**稳定版**尚未包含这些能力，正式发版前仍可能调整。
+
+- **个人微信** — 用 **微信个人号（ilink 长轮询）** 和本地 Agent 对话；支持扫码 `weixin setup`、CDN 收发图片/文件，**无需公网 IP**。*[接入说明 → `docs/weixin.md`](docs/weixin.md)*
+- **自动压缩上下文** — 估算 token 超阈值时可自动压缩会话，长对话尽量不断档、少踩坑。
+- **更稳的 `--continue`** — 支持分叉续聊，降低「桥接会话误接上终端里半截 CLI 会话」的概率。
+- **定时任务增强** — 可选 **每次新会话**执行、**单任务超时**，减少跑飞任务拖死机器人。
+- **平台体验** — 例如 **Discord** 支持 `@everyone` / `@here`，**Telegram** 支持语音类回复，**飞书** 优化回复原消息与异步分发等。
+
+---
+
+## 🧩 平台能力一览
+
+内置各渠道在 cc-connect 里的大致能力对照，风格参考 [OpenClaw China 功能支持表](https://github.com/BytePioneer-AI/openclaw-china#功能支持)，方便快速对比。
+
+**图例**
+
+| 符号 | 含义 |
+|------|------|
+| ✅ | **稳定版** cc-connect + 常规配置下可用 |
+| ✅（beta） | **仅 Beta / 预发布** — **微信个人号**整列：需 `npm install -g cc-connect@beta` 或 [GitHub 预发布包](https://github.com/chenhg5/cc-connect/releases)；**默认稳定版 npm 不含** `weixin` 平台 |
+| ⚠️ | 部分支持、需额外配置（如语音/STT）或受厂商接口 / 应用类型限制 |
+| ❌ | 不支持或实际不可用 |
+
+† **QQ（NapCat / OneBot）** — 非官方自建桥接，体验依赖你的 NapCat 与网络环境。
+
+| 能力 | 飞书 | 钉钉 | Telegram | Slack | Discord | LINE | 企业微信 | **微信个人号**<br>（ilink） | QQ† | QQ 官方机器人 |
+|------|:----:|:----:|:--------:|:-----:|:-------:|:----:|:--------:|:--------------------------:|:---:|:------------:|
+| 文本与斜杠命令 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅（beta） | ✅ | ✅ |
+| Markdown / 卡片 | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ✅（beta） | ✅ | ✅ |
+| 流式 / 分片回复 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅（beta） | ✅ | ✅ |
+| 图片与文件 | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ✅（beta） | ✅ | ✅ |
+| 语音 / STT / TTS | ⚠️ | ⚠️ | ✅ | ⚠️ | ⚠️ | ❌ | ⚠️ | ✅（beta） | ⚠️ | ⚠️ |
+| 私聊 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅（beta） | ✅ | ✅ |
+| 群聊 / 频道 | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ✅（beta） | ✅ | ✅ |
+
+> **微信个人号列：** 格子里全是 **✅（beta）** 表示「只有跑 **Beta / 预发布** 才有这一整渠道」，不代表单项能力未做完 — **个人微信（ilink）整体仍属预稳定阶段**。  
+> **企业微信：** Webhook 模式需要**公网 URL**；长连接等模式多数**不需要**。  
+> **语音行：** 多数平台要在 `config.toml` 里配置 `[speech]` / TTS 等，表中为经验性归纳。  
+> 分平台接入步骤见下文 [平台接入指南](#-平台接入指南)。
+
+---
+
 ## ✨ 为什么选择 cc-connect？
 
 ### 🤖 通用 Agent 支持
 **7 大 AI Agent** — Claude Code、Codex、Cursor Agent、Qoder CLI、Gemini CLI、OpenCode、iFlow CLI。按需选用，或同时使用全部。
 
 ### 📱 平台灵活性
-**9 大聊天平台** — 飞书、钉钉、Slack、Telegram、Discord、企业微信、LINE、QQ、QQ 官方机器人。大部分**无需公网 IP**。
+**10 大聊天平台** — 飞书、钉钉、Slack、Telegram、Discord、企业微信、LINE、QQ、QQ 官方机器人，以及 **微信个人号（ilink）**。其中 **个人微信目前仅在 Beta / 预发布版本中提供**，需安装 `npm install -g cc-connect@beta` 或从 [GitHub Releases 预发布](https://github.com/chenhg5/cc-connect/releases) 下载带 beta 标签的包；**稳定版** npm 包**尚未**内置 `weixin` 平台。大部分平台**无需公网 IP**。
 
 ### 🔄 多 Agent 编排
 **多机器人中继** — 在群聊中绑定多个机器人，让它们相互协作。问 Claude，再听 Gemini 的见解 — 同一个对话搞定。
 
 ### 🎮 完整的聊天控制
 **聊天即控制** — 切换模型 (`/model`)、切换推理强度 (`/reasoning`)、切换权限模式 (`/mode`)、管理会话，全部通过斜杠命令完成。
+
+**聊天切换工作目录** — 使用 `/dir <路径>` 切换下一次会话启动目录（`/cd <路径>` 为兼容别名），并支持 `/dir <序号>` / `/dir -` 快速在历史目录间跳转。
 
 ### 🧠 持久化记忆
 **Agent 记忆** — 在聊天中直接读写 Agent 指令文件 (`/memory`)，无需回到终端。
@@ -117,6 +163,8 @@ npm install -g cc-connect
 npm install -g cc-connect@beta
 ```
 
+> **微信个人号（Weixin ilink）：** 仅在 **Beta / 预发布** 中提供（`cc-connect@beta` 或 Releases 里带 `beta` / `prerelease` 的资源）。**稳定版** `npm install -g cc-connect` **暂时不包含**该通道，正式版上线前请以 Beta 说明为准。
+
 **从 [GitHub Releases](https://github.com/chenhg5/cc-connect/releases) 下载：**
 
 ```bash
@@ -146,6 +194,9 @@ mkdir -p ~/.cc-connect
 cp config.example.toml ~/.cc-connect/config.toml
 vim ~/.cc-connect/config.toml
 ```
+
+在项目配置里设置 `admin_from = "alice,bob"` 后，只有这些用户 ID 才能执行 `/dir`、`/shell` 等特权命令。
+执行 `/dir reset` 时，cc-connect 会恢复配置中的 `work_dir`，并清除保存在 `data_dir/projects/<project>.state.json` 里的目录覆盖状态。
 
 ---
 
@@ -190,6 +241,7 @@ cc-connect update --pre     # Beta 版（含 pre-release）
 | Platform | Discord | ✅ Gateway — 无需公网 IP |
 | Platform | LINE | ✅ Webhook — 需要公网 URL |
 | Platform | 企业微信 | ✅ WebSocket / Webhook |
+| Platform | 微信个人号（ilink） | ✅（beta）— HTTP 长轮询 — 无需公网 IP |
 | Platform | QQ (NapCat/OneBot) | ✅ WebSocket — Beta |
 | Platform | QQ 官方机器人 | ✅ WebSocket — 无需公网 IP |
 
@@ -205,6 +257,7 @@ cc-connect update --pre     # Beta 版（含 pre-release）
 | Slack | [docs/slack.md](docs/slack.md) | Socket Mode | 不需要 |
 | Discord | [docs/discord.md](docs/discord.md) | Gateway | 不需要 |
 | 企业微信 | [docs/wecom.md](docs/wecom.md) | WebSocket / Webhook | 不需要 (WS) / 需要 (Webhook) |
+| 微信个人号（ilink） | [docs/weixin.md](docs/weixin.md) | HTTP 长轮询（ilink），**仅 Beta** | 不需要 |
 | QQ / QQ 机器人 | [docs/qq.md](docs/qq.md) | WebSocket | 不需要 |
 
 ---
@@ -218,6 +271,14 @@ cc-connect update --pre     # Beta 版（含 pre-release）
 /list                  列出所有会话
 /switch <id>           切换会话
 /current               查看当前会话
+/dir [路径|reset]      查看、切换或重置工作目录
+```
+
+项目配置也可以开启“长时间空闲后自动切到新会话”：
+
+```toml
+[[projects]]
+reset_on_idle_mins = 60
 ```
 
 ---
@@ -245,7 +306,19 @@ cc-connect update --pre     # Beta 版（含 pre-release）
 
 ```
 /model                      列出可用模型（格式：alias - model）
-/model <alias>              按别名切换模型
+/model switch <alias>       按别名切换模型
+```
+
+---
+
+### 📂 工作目录
+
+```
+/dir                         查看当前工作目录与历史
+/dir <路径>                  切换到指定目录（相对或绝对路径）
+/dir <序号>                  按历史序号切换
+/dir -                       返回上一个目录
+/cd <路径>                   `/dir <路径>` 的兼容别名
 ```
 
 ---
@@ -309,6 +382,7 @@ cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/ch
 - [使用指南](docs/usage.zh-CN.md) — 完整功能文档
 - [INSTALL.md](INSTALL.md) — AI Agent 友好的安装指南
 - [config.example.toml](config.example.toml) — 配置模板
+- [CONTRIBUTING.md](CONTRIBUTING.md) — Issue / PR 提交流程与贡献说明
 
 ---
 

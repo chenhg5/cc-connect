@@ -56,7 +56,7 @@ func newPiSession(ctx context.Context, cmd, workDir, model, mode, thinking, resu
 	}
 	s.alive.Store(true)
 
-	if resumeID != "" {
+	if resumeID != "" && resumeID != core.ContinueSession {
 		s.sessionID.Store(resumeID)
 	}
 

@@ -4,13 +4,13 @@
 
 ## What is cc-connect?
 
-cc-connect bridges local AI coding assistants to messaging platforms (Feishu, DingTalk, Telegram, Slack, Discord, LINE, WeChat Work, QQ), enabling bidirectional chat with your local AI agent from anywhere.
+cc-connect bridges local AI coding assistants to messaging platforms (Feishu, DingTalk, Telegram, Slack, Discord, LINE, WeChat Work, QQ), and — in **beta / pre-release builds only** — **personal WeChat** via the **Weixin (ilink)** platform. Stable releases focus on the first set of platforms; **personal WeChat is not part of the default stable npm binary yet.**
 
 GitHub: https://github.com/chenhg5/cc-connect
 
 **IMPORTANT: If you are an AI agent helping a user install cc-connect, use interactive tools (like AskUserQuestion) to guide them through configuration choices:**
 - Agent selection (Claude Code, Cursor, Gemini, etc.)
-- Platform selection (Feishu, Telegram, Discord, etc.)
+- Platform selection (Feishu, Telegram, Discord, etc.) — if the user wants **personal WeChat (Weixin ilink)**, they **must** install a **beta / pre-release** build (`cc-connect@beta` or a GitHub/Gitee prerelease asset), not the stable default
 - API keys and authentication tokens
 - Project paths and preferences
 
@@ -26,16 +26,39 @@ npm install -g cc-connect
 
 After installation, the `cc-connect` binary will be available globally.
 
-### Option B: Download binary from GitHub Releases
+This installs the **latest stable** release. It does **not** include the **Weixin (personal WeChat, ilink)** platform until that feature is promoted to stable.
 
-Go to https://github.com/chenhg5/cc-connect/releases and download the binary for your platform:
+### Option A-beta: npm beta (required for personal WeChat / Weixin ilink)
 
-- `cc-connect-linux-amd64` / `cc-connect-linux-arm64`
-- `cc-connect-darwin-amd64` / `cc-connect-darwin-arm64`
-- `cc-connect-windows-amd64.exe`
+**Personal WeChat** support ships only in **beta and pre-release** channels for now. It is **not** a formal stable feature yet — behavior and packaging may change before a stable release.
 
 ```bash
-# Example for Linux amd64:
+npm install -g cc-connect@beta
+```
+
+Verify:
+
+```bash
+cc-connect --version
+```
+
+For binaries, use a **Pre-release** from [GitHub Releases](https://github.com/chenhg5/cc-connect/releases) (tags like `v1.x.x-beta.x`) or your mirror (e.g. Gitee), not only `latest` stable.
+
+### Option B: Download binary from GitHub Releases
+
+Go to https://github.com/chenhg5/cc-connect/releases and download the binary for your platform.
+
+- **Stable:** use the **Latest** release assets (names may include version, e.g. `cc-connect-vX.Y.Z-linux-amd64`).
+- **Personal WeChat (Weixin):** download a **Pre-release** / beta tag asset — **`latest` stable does not include Weixin** until the feature is promoted.
+
+Typical artifact names (check the release page for exact filenames):
+
+- Linux: `cc-connect-<version>-linux-amd64` (or `.tar.gz`)
+- macOS: `cc-connect-<version>-darwin-amd64` / `arm64`
+- Windows: `cc-connect-<version>-windows-amd64.exe` (or `.zip`)
+
+```bash
+# Example for Linux amd64 (replace URL with the asset link from the release you chose):
 curl -L -o cc-connect https://github.com/chenhg5/cc-connect/releases/latest/download/cc-connect-linux-amd64
 chmod +x cc-connect
 sudo mv cc-connect /usr/local/bin/
@@ -139,7 +162,7 @@ work_dir = "/absolute/path/to/your/project"
 mode = "default"
 
 # --- Claude Code mode options ---
-# "default", "acceptEdits" (alias: "edit"), "plan", "bypassPermissions" (alias: "yolo")
+# "default", "acceptEdits" (alias: "edit"), "plan", "auto", "bypassPermissions" (alias: "yolo")
 # allowed_tools = ["Read", "Grep", "Glob"]  # optional: pre-approve specific tools
 
 # --- Codex mode options ---
@@ -371,6 +394,26 @@ enable_markdown = false  # true = Markdown messages (WeChat Work app only; perso
 ```
 
 **Detailed guide:** [docs/wecom.md](docs/wecom.md)
+
+### Weixin (personal, ilink) — Beta / pre-release only; no public IP needed
+
+> **Release channel:** Personal WeChat is supported only in **beta and pre-release** builds of cc-connect (`npm install -g cc-connect@beta` or prerelease binaries from GitHub/Gitee). The **stable** default release **does not** ship the `weixin` platform yet. Treat this as **not production-stable** until an announcement promotes it to stable.
+
+Personal WeChat uses Tencent’s **ilink bot HTTP API** (same family as OpenClaw `openclaw-weixin`). The recommended flow is CLI QR login, which writes `token` (and related fields) into `config.toml`.
+
+1. Run:
+
+   ```bash
+   cc-connect weixin setup --project my-project
+   ```
+
+2. Scan the QR code (or open the printed URL) in WeChat and confirm.
+
+3. Restart cc-connect, then send a message from WeChat once so `context_token` is cached.
+
+If you already have a Bearer token, use `cc-connect weixin bind --project my-project --token '<token>'`.
+
+**Detailed guide (Chinese):** [docs/weixin.md](docs/weixin.md)
 
 ### QQ (via NapCat / OneBot v11) — No public IP needed
 

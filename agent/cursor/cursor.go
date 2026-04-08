@@ -52,7 +52,6 @@ func New(opts map[string]any) (core.Agent, error) {
 	if cmd == "" {
 		cmd = "agent"
 	}
-
 	if _, err := exec.LookPath(cmd); err != nil {
 		return nil, fmt.Errorf("cursor: %q CLI not found in PATH, install with: npm i -g @anthropic-ai/cursor-agent (or from Cursor IDE settings)", cmd)
 	}
@@ -78,6 +77,7 @@ func normalizeMode(raw string) string {
 		return "default"
 	}
 }
+
 
 func (a *Agent) Name() string           { return "cursor" }
 func (a *Agent) CLIBinaryName() string  { return "agent" }
@@ -106,7 +106,7 @@ func (a *Agent) SetModel(model string) {
 func (a *Agent) GetModel() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.model
+	return core.GetProviderModel(a.providers, a.activeIdx, a.model)
 }
 
 func (a *Agent) configuredModels() []core.ModelOption {

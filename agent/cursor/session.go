@@ -52,7 +52,7 @@ func newCursorSession(ctx context.Context, cmd, workDir, model, mode, resumeID s
 	}
 	cs.alive.Store(true)
 
-	if resumeID != "" {
+	if resumeID != "" && resumeID != core.ContinueSession {
 		cs.chatID.Store(resumeID)
 	}
 

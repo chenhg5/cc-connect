@@ -1,8 +1,8 @@
 # cc-connect Management API Specification
 
-> **Version:** 1.0-draft  
+> **Version:** 1.1-draft  
 > **Status:** Draft — subject to change before implementation  
-> **Last Updated:** 2026-03-10
+> **Last Updated:** 2026-03-24
 
 ---
 
@@ -449,7 +449,7 @@ Sessions are conversation contexts within a project. A session is identified by 
 
 #### GET /api/v1/projects/{name}/sessions
 
-Lists sessions for a project.
+Lists sessions for a project with summary info including the last message preview.
 
 **Response:**
 
@@ -463,15 +463,36 @@ Lists sessions for a project.
         "session_key": "telegram:123:456",
         "name": "work",
         "platform": "telegram",
+        "agent_type": "claudecode",
         "active": true,
+        "live": true,
+        "history_count": 12,
         "created_at": "2026-03-10T09:00:00Z",
         "updated_at": "2026-03-10T10:30:00Z",
-        "history_count": 12
+        "last_message": {
+          "role": "assistant",
+          "content": "Done! The tests are passing now...",
+          "timestamp": "2026-03-10T10:30:00Z"
+        },
+        "user_name": "Alice",
+        "chat_name": "dev-channel"
       }
-    ]
+    ],
+    "active_keys": {
+      "telegram:123:456": "telegram"
+    }
   }
 }
 ```
+
+| Field          | Type    | Description                                                       |
+|----------------|---------|-------------------------------------------------------------------|
+| `active`       | boolean | Whether this is the selected session for its user key             |
+| `live`         | boolean | Whether there is a running agent process for this session         |
+| `last_message` | object  | Preview of the last message (role, content truncated to 200 chars, timestamp). `null` if no history. |
+| `user_name`    | string  | Display name of the user (from platform metadata)                 |
+| `chat_name`    | string  | Name of the chat/channel (from platform metadata)                 |
+| `active_keys`  | object  | Map of session keys with active agent connections → platform name |
 
 ---
 
@@ -518,7 +539,7 @@ Returns session detail including message history.
 | Param  | Type   | Description                          |
 |--------|--------|--------------------------------------|
 | `name` | string | Project name                         |
-| `id`   | string | Session ID or session_key            |
+| `id`   | string | Session ID                           |
 
 **Query parameters:**
 
@@ -536,8 +557,11 @@ Returns session detail including message history.
     "session_key": "telegram:123:456",
     "name": "work",
     "platform": "telegram",
-    "active": true,
+    "agent_type": "claudecode",
     "agent_session_id": "as_xxx",
+    "active": true,
+    "live": true,
+    "history_count": 12,
     "created_at": "2026-03-10T09:00:00Z",
     "updated_at": "2026-03-10T10:30:00Z",
     "history": [
@@ -555,6 +579,10 @@ Returns session detail including message history.
   }
 }
 ```
+
+| Field   | Type    | Description                                                   |
+|---------|---------|---------------------------------------------------------------|
+| `live`  | boolean | Whether the session has an active agent process (can receive messages via `/send`) |
 
 ---
 
@@ -609,7 +637,7 @@ Switches the active session for a given session_key (e.g. when a user has multip
 
 #### POST /api/v1/projects/{name}/send
 
-Sends a message to a session. The message is delivered to the agent as if the user had sent it via the platform.
+Sends a message to a session. The message is delivered to the agent as if the user had sent it via the platform. **Requires the session to be live** (i.e., have an active agent process). Check the `live` field from session detail to verify before sending.
 
 **Request body:**
 
@@ -890,6 +918,8 @@ Adds a cron job. Either `prompt` or `exec` must be provided, not both.
 | `work_dir`   | string  | no       | Working directory for exec                    |
 | `description`| string  | no       | Human-readable label                           |
 | `silent`     | boolean | no       | Suppress start notification                   |
+| `session_mode` | string | no       | `reuse` (default) or `new_per_run` — new agent session each run |
+| `timeout_mins` | int    | no       | Scheduler wait per run: omit = 30 min, `0` = no time limit |
 
 **Response:**
 
@@ -1143,6 +1173,7 @@ If not configured, CORS may be disabled or use a default (e.g. `*` for same-orig
 
 | Version   | Date       | Changes                    |
 |-----------|------------|----------------------------|
+| 1.1-draft | 2026-03-24 | Enrich session list/detail with `live`, `last_message`, `agent_type`, `user_name`, `chat_name`, `active_keys` fields |
 | 1.0-draft | 2026-03-10 | Initial specification      |
 
 ---

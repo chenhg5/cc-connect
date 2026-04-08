@@ -206,6 +206,44 @@ func TestProviderConfig_AddAndRemove(t *testing.T) {
 	}
 }
 
+func TestProviderConfig_SaveProviderModel(t *testing.T) {
+	writeTestConfig(t, providerConfigTOML)
+
+	if err := SaveProviderModel("demo", "primary", "gpt-5.4"); err != nil {
+		t.Fatalf("SaveProviderModel() error: %v", err)
+	}
+
+	cfg := readTestConfig(t)
+	if got := cfg.Projects[0].Agent.Providers[0].Model; got != "gpt-5.4" {
+		t.Fatalf("provider model = %q, want gpt-5.4", got)
+	}
+	if err := SaveProviderModel("demo", "missing", "gpt-4.1"); err == nil {
+		t.Fatal("SaveProviderModel() missing provider: expected error")
+	}
+}
+
+func TestSaveAgentModel(t *testing.T) {
+	writeTestConfig(t, providerConfigTOML)
+
+	if err := SaveAgentModel("demo", "gpt-5.4"); err != nil {
+		t.Fatalf("SaveAgentModel() error: %v", err)
+	}
+
+	cfg := readTestConfig(t)
+	if got, _ := cfg.Projects[0].Agent.Options["model"].(string); got != "gpt-5.4" {
+		t.Fatalf("agent.options.model = %q, want gpt-5.4", got)
+	}
+	if got, _ := cfg.Projects[0].Agent.Options["mode"].(string); got != "default" {
+		t.Fatalf("agent.options.mode = %q, want default", got)
+	}
+	if got, _ := cfg.Projects[0].Agent.Options["provider"].(string); got != "primary" {
+		t.Fatalf("agent.options.provider = %q, want primary", got)
+	}
+	if len(cfg.Projects[0].Agent.Providers) != 2 {
+		t.Fatalf("provider count = %d, want 2", len(cfg.Projects[0].Agent.Providers))
+	}
+}
+
 func TestCommandConfig_AddAndRemove(t *testing.T) {
 	writeTestConfig(t, baseConfigTOML)
 
@@ -258,7 +296,8 @@ func TestDisplayConfig_Save(t *testing.T) {
 
 	thinking := 120
 	tool := 240
-	if err := SaveDisplayConfig(&thinking, &tool); err != nil {
+	showTools := false
+	if err := SaveDisplayConfig(&thinking, &tool, &showTools); err != nil {
 		t.Fatalf("SaveDisplayConfig() error: %v", err)
 	}
 
@@ -269,9 +308,12 @@ func TestDisplayConfig_Save(t *testing.T) {
 	if cfg.Display.ToolMaxLen == nil || *cfg.Display.ToolMaxLen != 240 {
 		t.Fatalf("ToolMaxLen = %#v, want 240", cfg.Display.ToolMaxLen)
 	}
+	if cfg.Display.ToolMessages == nil || *cfg.Display.ToolMessages {
+		t.Fatalf("ToolMessages = %#v, want false", cfg.Display.ToolMessages)
+	}
 
 	thinking = 360
-	if err := SaveDisplayConfig(&thinking, nil); err != nil {
+	if err := SaveDisplayConfig(&thinking, nil, nil); err != nil {
 		t.Fatalf("SaveDisplayConfig() second update error: %v", err)
 	}
 
@@ -281,6 +323,9 @@ func TestDisplayConfig_Save(t *testing.T) {
 	}
 	if cfg.Display.ToolMaxLen == nil || *cfg.Display.ToolMaxLen != 240 {
 		t.Fatalf("ToolMaxLen after nil update = %#v, want 240", cfg.Display.ToolMaxLen)
+	}
+	if cfg.Display.ToolMessages == nil || *cfg.Display.ToolMessages {
+		t.Fatalf("ToolMessages after nil update = %#v, want false", cfg.Display.ToolMessages)
 	}
 }
 
@@ -420,8 +465,8 @@ func TestSaveFeishuPlatformCredentials_SelectByIndexAndOverrideType(t *testing.T
 	if result.PlatformType != "feishu" {
 		t.Fatalf("result.PlatformType = %q, want %q", result.PlatformType, "feishu")
 	}
-	if result.AllowFrom != "ou_existing_owner" {
-		t.Fatalf("result.AllowFrom = %q, want %q", result.AllowFrom, "ou_existing_owner")
+	if result.AllowFrom != "ou_existing_owner,ou_should_not_override" {
+		t.Fatalf("result.AllowFrom = %q, want %q", result.AllowFrom, "ou_existing_owner,ou_should_not_override")
 	}
 
 	cfg := readConfigFixture(t, configPath)
@@ -435,8 +480,63 @@ func TestSaveFeishuPlatformCredentials_SelectByIndexAndOverrideType(t *testing.T
 	if got := stringMapValue(platform.Options, "app_secret"); got != "sec_second_secret" {
 		t.Fatalf("app_secret = %q, want %q", got, "sec_second_secret")
 	}
-	if got := stringMapValue(platform.Options, "allow_from"); got != "ou_existing_owner" {
-		t.Fatalf("allow_from = %q, want %q", got, "ou_existing_owner")
+	if got := stringMapValue(platform.Options, "allow_from"); got != "ou_existing_owner,ou_should_not_override" {
+		t.Fatalf("allow_from = %q, want %q", got, "ou_existing_owner,ou_should_not_override")
+	}
+}
+
+func TestSaveFeishuPlatformCredentials_AppendsOwnerToAllowFrom(t *testing.T) {
+	configPath := writeConfigFixture(t, feishuConfigFixture)
+	patchConfigPath(t, configPath)
+
+	result, err := SaveFeishuPlatformCredentials(FeishuCredentialUpdateOptions{
+		ProjectName:       "alpha",
+		PlatformIndex:     2,
+		PlatformType:      "feishu",
+		AppID:             "cli_second_app",
+		AppSecret:         "sec_second_secret",
+		OwnerOpenID:       "ou_new_owner",
+		SetAllowFromEmpty: true,
+	})
+	if err != nil {
+		t.Fatalf("SaveFeishuPlatformCredentials returned error: %v", err)
+	}
+
+	if result.AllowFrom != "ou_existing_owner,ou_new_owner" {
+		t.Fatalf("result.AllowFrom = %q, want %q", result.AllowFrom, "ou_existing_owner,ou_new_owner")
+	}
+
+	cfg := readConfigFixture(t, configPath)
+	platform := cfg.Projects[0].Platforms[2]
+	if got := stringMapValue(platform.Options, "allow_from"); got != "ou_existing_owner,ou_new_owner" {
+		t.Fatalf("allow_from = %q, want %q", got, "ou_existing_owner,ou_new_owner")
+	}
+}
+
+func TestSaveFeishuPlatformCredentials_LeavesWildcardAllowFromUnchanged(t *testing.T) {
+	configPath := writeConfigFixture(t, strings.Replace(feishuConfigFixture, `allow_from = "ou_existing_owner"`, `allow_from = "*"`, 1))
+	patchConfigPath(t, configPath)
+
+	result, err := SaveFeishuPlatformCredentials(FeishuCredentialUpdateOptions{
+		ProjectName:       "alpha",
+		PlatformIndex:     2,
+		OwnerOpenID:       "ou_new_owner",
+		AppID:             "cli_second_app",
+		AppSecret:         "sec_second_secret",
+		SetAllowFromEmpty: true,
+	})
+	if err != nil {
+		t.Fatalf("SaveFeishuPlatformCredentials returned error: %v", err)
+	}
+
+	if result.AllowFrom != "*" {
+		t.Fatalf("result.AllowFrom = %q, want %q", result.AllowFrom, "*")
+	}
+
+	cfg := readConfigFixture(t, configPath)
+	platform := cfg.Projects[0].Platforms[2]
+	if got := stringMapValue(platform.Options, "allow_from"); got != "*" {
+		t.Fatalf("allow_from = %q, want %q", got, "*")
 	}
 }
 
@@ -565,6 +665,48 @@ func TestLoad_DefaultsAttachmentSendToOn(t *testing.T) {
 	}
 	if cfg.AttachmentSend != "on" {
 		t.Fatalf("cfg.AttachmentSend = %q, want %q", cfg.AttachmentSend, "on")
+	}
+}
+
+func TestLoad_DefaultsAutoCompressDisabled(t *testing.T) {
+	configPath := writeConfigFixture(t, projectWithoutFeishuFixture)
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if len(cfg.Projects) == 0 {
+		t.Fatalf("expected at least one project")
+	}
+	if cfg.Projects[0].AutoCompress.Enabled != nil {
+		t.Fatalf("expected auto_compress.enabled to default to nil")
+	}
+}
+
+func TestLoad_ParsesResetOnIdleMins(t *testing.T) {
+	configPath := writeConfigFixture(t, projectWithResetOnIdleFixture)
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Projects[0].ResetOnIdleMins == nil {
+		t.Fatal("expected reset_on_idle_mins to be parsed")
+	}
+	if got := *cfg.Projects[0].ResetOnIdleMins; got != 60 {
+		t.Fatalf("reset_on_idle_mins = %d, want 60", got)
+	}
+}
+
+func TestLoad_RejectsNegativeResetOnIdleMins(t *testing.T) {
+	configPath := writeConfigFixture(t, projectWithNegativeResetOnIdleFixture)
+
+	_, err := Load(configPath)
+	if err == nil {
+		t.Fatal("expected error for negative reset_on_idle_mins")
+	}
+	if !strings.Contains(err.Error(), "reset_on_idle_mins") {
+		t.Fatalf("error = %q, want reset_on_idle_mins validation", err.Error())
 	}
 }
 
@@ -795,6 +937,60 @@ type = "telegram"
 bot_token = "token_xxx"
 `
 
+const projectWithResetOnIdleFixture = `
+[[projects]]
+name = "beta"
+reset_on_idle_mins = 60
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/beta"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+bot_token = "token_xxx"
+`
+
+const projectWithNegativeResetOnIdleFixture = `
+[[projects]]
+name = "beta"
+reset_on_idle_mins = -1
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/beta"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+bot_token = "token_xxx"
+`
+
+const weixinConfigFixture = `
+[[projects]]
+name = "alpha"
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/alpha"
+
+[[projects.platforms]]
+type = "weixin"
+
+[projects.platforms.options]
+token = "old_weixin_token"
+base_url = "https://ilink.example"
+`
+
 const preserveFormatFixture = `# top comment should stay
 custom_top = "keep_me"
 
@@ -815,3 +1011,642 @@ app_id = "old_app" # keep inline comment
 app_secret = "old_secret"
 custom_option = "still_here"
 `
+
+// --- validateUsersConfig tests ---
+
+func TestValidateUsersConfig(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     Config
+		wantErr string
+	}{
+		{
+			name: "nil users is valid",
+			cfg: Config{
+				Projects: []ProjectConfig{{
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
+					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
+					Users:     nil,
+				}},
+			},
+			wantErr: "",
+		},
+		{
+			name: "empty roles",
+			cfg: Config{
+				Projects: []ProjectConfig{{
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
+					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
+					Users:     &UsersConfig{Roles: map[string]RoleConfig{}},
+				}},
+			},
+			wantErr: `no roles defined`,
+		},
+		{
+			name: "empty user_ids in role",
+			cfg: Config{
+				Projects: []ProjectConfig{{
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
+					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
+					Users: &UsersConfig{
+						Roles: map[string]RoleConfig{
+							"admin": {UserIDs: []string{}},
+						},
+					},
+				}},
+			},
+			wantErr: `empty user_ids`,
+		},
+		{
+			name: "duplicate user in different roles",
+			cfg: Config{
+				Projects: []ProjectConfig{{
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
+					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
+					Users: &UsersConfig{
+						Roles: map[string]RoleConfig{
+							"admin":  {UserIDs: []string{"user1"}},
+							"member": {UserIDs: []string{"user1"}},
+						},
+					},
+				}},
+			},
+			wantErr: `appears in both role`,
+		},
+		{
+			name: "wildcard in multiple roles",
+			cfg: Config{
+				Projects: []ProjectConfig{{
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
+					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
+					Users: &UsersConfig{
+						Roles: map[string]RoleConfig{
+							"admin":  {UserIDs: []string{"*"}},
+							"member": {UserIDs: []string{"*"}},
+						},
+					},
+				}},
+			},
+			wantErr: `wildcard`,
+		},
+		{
+			name: "default_role not matching any role",
+			cfg: Config{
+				Projects: []ProjectConfig{{
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
+					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
+					Users: &UsersConfig{
+						DefaultRole: "superadmin",
+						Roles: map[string]RoleConfig{
+							"admin": {UserIDs: []string{"u1"}},
+						},
+					},
+				}},
+			},
+			wantErr: `default_role`,
+		},
+		{
+			name: "valid users config",
+			cfg: Config{
+				Projects: []ProjectConfig{{
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
+					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
+					Users: &UsersConfig{
+						DefaultRole: "member",
+						Roles: map[string]RoleConfig{
+							"admin":  {UserIDs: []string{"admin1"}},
+							"member": {UserIDs: []string{"*"}},
+						},
+					},
+				}},
+			},
+			wantErr: "",
+		},
+		{
+			name: "valid with wildcard in one role only",
+			cfg: Config{
+				Projects: []ProjectConfig{{
+					Name:      "p1",
+					Agent:     AgentConfig{Type: "codex"},
+					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
+					Users: &UsersConfig{
+						Roles: map[string]RoleConfig{
+							"admin":  {UserIDs: []string{"u1"}},
+							"member": {UserIDs: []string{"*", "u2"}},
+						},
+					},
+				}},
+			},
+			wantErr: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateUsersConfig("projects[0]", tt.cfg.Projects[0].Users)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+				}
+			} else {
+				if err == nil {
+					t.Error("expected error, got nil")
+				} else if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("error = %q, want substring %q", err.Error(), tt.wantErr)
+				}
+			}
+		})
+	}
+}
+
+// --- cloneStringMap tests ---
+
+func TestCloneStringMap(t *testing.T) {
+	// nil map
+	if got := cloneStringMap(nil); got != nil {
+		t.Errorf("cloneStringMap(nil) = %v, want nil", got)
+	}
+
+	// empty map
+	empty := cloneStringMap(map[string]string{})
+	if got := cloneStringMap(empty); got == nil || len(got) != 0 {
+		t.Errorf("cloneStringMap(empty) = %v, want empty non-nil map", got)
+	}
+
+	// populated map
+	orig := map[string]string{"key1": "val1", "key2": "val2"}
+	cloned := cloneStringMap(orig)
+	if len(cloned) != len(orig) {
+		t.Errorf("length mismatch: got %d, want %d", len(cloned), len(orig))
+	}
+	for k, v := range orig {
+		if cloned[k] != v {
+			t.Errorf("cloneStringMap[%q] = %q, want %q", k, cloned[k], v)
+		}
+	}
+	// verify it's a deep copy
+	delete(cloned, "key1")
+	if _, ok := orig["key1"]; !ok {
+		t.Error("cloneStringMap returned same map reference, not a copy")
+	}
+}
+
+// --- pickAgentTemplateForNewProject tests ---
+
+func TestPickAgentTemplateForNewProject(t *testing.T) {
+	baseProj := ProjectConfig{
+		Name: "base",
+		Agent: AgentConfig{
+			Type:    "claudecode",
+			Options: map[string]any{"mode": "yolo"},
+			Providers: []ProviderConfig{{
+				Name:   "openai",
+				APIKey: "sk-test",
+				Model:  "gpt-4",
+			}},
+		},
+		Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
+	}
+
+	t.Run("clone from existing project", func(t *testing.T) {
+		cfg := &Config{Projects: []ProjectConfig{baseProj}}
+		opts := EnsureProjectWithFeishuOptions{CloneFromProject: "base"}
+		got := pickAgentTemplateForNewProject(cfg, opts)
+		if got.Type != "claudecode" {
+			t.Errorf("Type = %q, want claudecode", got.Type)
+		}
+		if len(got.Providers) != 1 || got.Providers[0].APIKey != "sk-test" {
+			t.Errorf("Providers not cloned correctly")
+		}
+	})
+
+	t.Run("no clone but has projects", func(t *testing.T) {
+		cfg := &Config{Projects: []ProjectConfig{baseProj}}
+		opts := EnsureProjectWithFeishuOptions{}
+		got := pickAgentTemplateForNewProject(cfg, opts)
+		if got.Type != "claudecode" {
+			t.Errorf("Type = %q, want claudecode", got.Type)
+		}
+	})
+
+	t.Run("no projects uses default codex", func(t *testing.T) {
+		cfg := &Config{Projects: []ProjectConfig{}}
+		opts := EnsureProjectWithFeishuOptions{}
+		got := pickAgentTemplateForNewProject(cfg, opts)
+		if got.Type != "codex" {
+			t.Errorf("Type = %q, want codex", got.Type)
+		}
+		if got.Options == nil {
+			t.Error("Options should not be nil")
+		}
+	})
+
+	t.Run("no projects with explicit agent type", func(t *testing.T) {
+		cfg := &Config{Projects: []ProjectConfig{}}
+		opts := EnsureProjectWithFeishuOptions{AgentType: "gemini"}
+		got := pickAgentTemplateForNewProject(cfg, opts)
+		if got.Type != "gemini" {
+			t.Errorf("Type = %q, want gemini", got.Type)
+		}
+	})
+
+	t.Run("explicit agent type overrides clone from first project", func(t *testing.T) {
+		cfg := &Config{Projects: []ProjectConfig{baseProj}}
+		opts := EnsureProjectWithFeishuOptions{AgentType: "cursor"}
+		got := pickAgentTemplateForNewProject(cfg, opts)
+		if got.Type != "cursor" {
+			t.Errorf("Type = %q, want cursor (explicit AgentType should take priority over cloning first project)", got.Type)
+		}
+	})
+}
+
+// --- cloneAgentConfig tests ---
+
+func TestCloneAgentConfig(t *testing.T) {
+	t.Run("without providers", func(t *testing.T) {
+		in := AgentConfig{
+			Type:    "codex",
+			Options: map[string]any{"mode": "default"},
+		}
+		got := cloneAgentConfig(in)
+		if got.Type != "codex" {
+			t.Errorf("Type = %q, want codex", got.Type)
+		}
+		if got.Options["mode"] != "default" {
+			t.Errorf("Options not cloned")
+		}
+		if len(got.Providers) != 0 {
+			t.Errorf("Providers length = %d, want 0", len(got.Providers))
+		}
+	})
+
+	t.Run("with providers", func(t *testing.T) {
+		in := AgentConfig{
+			Type:    "claudecode",
+			Options: map[string]any{"work_dir": "/tmp/test"},
+			Providers: []ProviderConfig{
+				{
+					Name:     "openai",
+					APIKey:   "sk-test",
+					BaseURL:  "https://api.openai.com",
+					Model:    "gpt-4",
+					Thinking: "on",
+					Env:      map[string]string{"DEBUG": "1"},
+				},
+			},
+		}
+		got := cloneAgentConfig(in)
+		if len(got.Providers) != 1 {
+			t.Fatalf("Providers length = %d, want 1", len(got.Providers))
+		}
+		p := got.Providers[0]
+		if p.Name != "openai" || p.APIKey != "sk-test" || p.BaseURL != "https://api.openai.com" || p.Model != "gpt-4" {
+			t.Errorf("Provider fields not cloned correctly: %+v", p)
+		}
+		if p.Env["DEBUG"] != "1" {
+			t.Errorf("Provider Env not cloned correctly")
+		}
+		// Verify deep copy of Options
+		got.Options["mode"] = "changed"
+		if in.Options["mode"] == "changed" {
+			t.Error("Options is same reference, not a deep copy")
+		}
+		// Verify deep copy of Provider Env
+		delete(got.Providers[0].Env, "DEBUG")
+		if in.Providers[0].Env["DEBUG"] == "" {
+			t.Error("Provider Env is same reference, not a deep copy")
+		}
+	})
+}
+
+func TestEnsureProjectWithWeixinPlatform_CreatesMissingProject(t *testing.T) {
+	configPath := writeConfigFixture(t, feishuConfigFixture)
+	patchConfigPath(t, configPath)
+
+	result, err := EnsureProjectWithWeixinPlatform(EnsureProjectWithWeixinOptions{
+		ProjectName: "gamma",
+		WorkDir:     "/tmp/gamma",
+	})
+	if err != nil {
+		t.Fatalf("EnsureProjectWithWeixinPlatform returned error: %v", err)
+	}
+	if !result.Created {
+		t.Fatal("result.Created = false, want true")
+	}
+	if result.AddedPlatform {
+		t.Fatal("result.AddedPlatform = true, want false")
+	}
+
+	cfg := readConfigFixture(t, configPath)
+	if len(cfg.Projects) != 2 {
+		t.Fatalf("len(cfg.Projects) = %d, want 2", len(cfg.Projects))
+	}
+	proj := cfg.Projects[1]
+	if proj.Name != "gamma" {
+		t.Fatalf("proj.Name = %q, want %q", proj.Name, "gamma")
+	}
+	if len(proj.Platforms) != 1 {
+		t.Fatalf("len(proj.Platforms) = %d, want 1", len(proj.Platforms))
+	}
+	if proj.Platforms[0].Type != "weixin" {
+		t.Fatalf("platform type = %q, want weixin", proj.Platforms[0].Type)
+	}
+}
+
+func TestEnsureProjectWithWeixinPlatform_AddsPlatformWhenMissing(t *testing.T) {
+	configPath := writeConfigFixture(t, projectWithoutFeishuFixture)
+	patchConfigPath(t, configPath)
+
+	result, err := EnsureProjectWithWeixinPlatform(EnsureProjectWithWeixinOptions{
+		ProjectName: "beta",
+	})
+	if err != nil {
+		t.Fatalf("EnsureProjectWithWeixinPlatform returned error: %v", err)
+	}
+	if result.Created {
+		t.Fatal("result.Created = true, want false")
+	}
+	if !result.AddedPlatform {
+		t.Fatal("result.AddedPlatform = false, want true")
+	}
+
+	cfg := readConfigFixture(t, configPath)
+	proj := cfg.Projects[0]
+	if len(proj.Platforms) != 2 {
+		t.Fatalf("len(proj.Platforms) = %d, want 2", len(proj.Platforms))
+	}
+	if proj.Platforms[1].Type != "weixin" {
+		t.Fatalf("platform type = %q, want weixin", proj.Platforms[1].Type)
+	}
+}
+
+func TestSaveWeixinPlatformCredentials_UpdateToken(t *testing.T) {
+	configPath := writeConfigFixture(t, weixinConfigFixture)
+	patchConfigPath(t, configPath)
+
+	_, err := SaveWeixinPlatformCredentials(WeixinCredentialUpdateOptions{
+		ProjectName: "alpha",
+		Token:       "new_weixin_token",
+		BaseURL:     "https://ilinkai.weixin.qq.com",
+	})
+	if err != nil {
+		t.Fatalf("SaveWeixinPlatformCredentials returned error: %v", err)
+	}
+
+	cfg := readConfigFixture(t, configPath)
+	tok, _ := cfg.Projects[0].Platforms[0].Options["token"].(string)
+	if tok != "new_weixin_token" {
+		t.Fatalf("token = %q, want new_weixin_token", tok)
+	}
+	bu, _ := cfg.Projects[0].Platforms[0].Options["base_url"].(string)
+	if bu != "https://ilinkai.weixin.qq.com" {
+		t.Fatalf("base_url = %q", bu)
+	}
+}
+
+func TestSaveWeixinPlatformCredentials_AppendsScannedUserToAllowFrom(t *testing.T) {
+	configPath := writeConfigFixture(t, strings.Replace(weixinConfigFixture, `base_url = "https://ilink.example"`, "base_url = \"https://ilink.example\"\nallow_from = \"wx_user_1\"", 1))
+	patchConfigPath(t, configPath)
+
+	result, err := SaveWeixinPlatformCredentials(WeixinCredentialUpdateOptions{
+		ProjectName:       "alpha",
+		Token:             "new_weixin_token",
+		ScannedUserID:     "wx_user_2",
+		SetAllowFromEmpty: true,
+	})
+	if err != nil {
+		t.Fatalf("SaveWeixinPlatformCredentials returned error: %v", err)
+	}
+
+	if result.AllowFrom != "wx_user_1,wx_user_2" {
+		t.Fatalf("result.AllowFrom = %q, want %q", result.AllowFrom, "wx_user_1,wx_user_2")
+	}
+
+	cfg := readConfigFixture(t, configPath)
+	if got := stringMapValue(cfg.Projects[0].Platforms[0].Options, "allow_from"); got != "wx_user_1,wx_user_2" {
+		t.Fatalf("allow_from = %q, want %q", got, "wx_user_1,wx_user_2")
+	}
+}
+
+func TestSaveWeixinPlatformCredentials_LeavesWildcardAllowFromUnchanged(t *testing.T) {
+	configPath := writeConfigFixture(t, strings.Replace(weixinConfigFixture, `base_url = "https://ilink.example"`, "base_url = \"https://ilink.example\"\nallow_from = \"*\"", 1))
+	patchConfigPath(t, configPath)
+
+	result, err := SaveWeixinPlatformCredentials(WeixinCredentialUpdateOptions{
+		ProjectName:       "alpha",
+		Token:             "new_weixin_token",
+		ScannedUserID:     "wx_user_2",
+		SetAllowFromEmpty: true,
+	})
+	if err != nil {
+		t.Fatalf("SaveWeixinPlatformCredentials returned error: %v", err)
+	}
+
+	if result.AllowFrom != "*" {
+		t.Fatalf("result.AllowFrom = %q, want %q", result.AllowFrom, "*")
+	}
+
+	cfg := readConfigFixture(t, configPath)
+	if got := stringMapValue(cfg.Projects[0].Platforms[0].Options, "allow_from"); got != "*" {
+		t.Fatalf("allow_from = %q, want %q", got, "*")
+	}
+}
+
+func TestSaveProjectSettings_ExtraFields(t *testing.T) {
+	configPath := writeConfigFixture(t, feishuConfigFixture)
+	patchConfigPath(t, configPath)
+
+	show := true
+	wd := "/tmp/patched"
+	mode := "yolo"
+	err := SaveProjectSettings("alpha", ProjectSettingsUpdate{
+		WorkDir:              &wd,
+		Mode:                 &mode,
+		ShowContextIndicator: &show,
+		PlatformAllowFrom:    map[string]string{"telegram": "u1", "Feishu": "u2"},
+	})
+	if err != nil {
+		t.Fatalf("SaveProjectSettings: %v", err)
+	}
+
+	cfg := readConfigFixture(t, configPath)
+	proj := cfg.Projects[0]
+	if stringMapValue(proj.Agent.Options, "work_dir") != wd {
+		t.Fatalf("work_dir = %q, want %q", stringMapValue(proj.Agent.Options, "work_dir"), wd)
+	}
+	if stringMapValue(proj.Agent.Options, "mode") != mode {
+		t.Fatalf("mode = %q, want %q", stringMapValue(proj.Agent.Options, "mode"), mode)
+	}
+	if proj.ShowContextIndicator == nil || !*proj.ShowContextIndicator {
+		t.Fatalf("ShowContextIndicator = %v, want true", proj.ShowContextIndicator)
+	}
+	if stringMapValue(proj.Platforms[0].Options, "allow_from") != "u1" {
+		t.Fatalf("telegram allow_from = %q, want u1", stringMapValue(proj.Platforms[0].Options, "allow_from"))
+	}
+	if stringMapValue(proj.Platforms[1].Options, "allow_from") != "u2" {
+		t.Fatalf("feishu allow_from = %q, want u2", stringMapValue(proj.Platforms[1].Options, "allow_from"))
+	}
+}
+
+func TestGetProjectConfigDetails(t *testing.T) {
+	configPath := writeConfigFixture(t, feishuConfigFixture)
+	patchConfigPath(t, configPath)
+
+	details := GetProjectConfigDetails("alpha")
+	if details == nil {
+		t.Fatal("GetProjectConfigDetails returned nil")
+	}
+	if details["work_dir"] != "/tmp/alpha" {
+		t.Fatalf("work_dir = %v", details["work_dir"])
+	}
+	pcs, ok := details["platform_configs"].([]map[string]any)
+	if !ok || len(pcs) < 2 {
+		t.Fatalf("platform_configs = %#v", details["platform_configs"])
+	}
+}
+
+func TestAddPlatformToProject_NewProjectWithAgentTypeAndWorkDir(t *testing.T) {
+	configPath := writeConfigFixture(t, feishuConfigFixture)
+	patchConfigPath(t, configPath)
+
+	err := AddPlatformToProject("sigma", PlatformConfig{Type: "slack", Options: map[string]any{"token": "x"}}, "/sigma", "gemini")
+	if err != nil {
+		t.Fatalf("AddPlatformToProject: %v", err)
+	}
+	cfg := readConfigFixture(t, configPath)
+	if len(cfg.Projects) != 2 {
+		t.Fatalf("len(projects) = %d, want 2", len(cfg.Projects))
+	}
+	proj := cfg.Projects[1]
+	if proj.Name != "sigma" {
+		t.Fatalf("name = %q", proj.Name)
+	}
+	if proj.Agent.Type != "gemini" {
+		t.Fatalf("agent type = %q, want gemini", proj.Agent.Type)
+	}
+	if stringMapValue(proj.Agent.Options, "work_dir") != "/sigma" {
+		t.Fatalf("work_dir = %q", stringMapValue(proj.Agent.Options, "work_dir"))
+	}
+	if len(proj.Platforms) != 1 || proj.Platforms[0].Type != "slack" {
+		t.Fatalf("platforms = %#v", proj.Platforms)
+	}
+}
+
+func TestAddPlatformToProject_NewProjectClonesAgentWhenAgentTypeEmpty(t *testing.T) {
+	configPath := writeConfigFixture(t, feishuConfigFixture)
+	patchConfigPath(t, configPath)
+
+	err := AddPlatformToProject("tau", PlatformConfig{Type: "slack", Options: map[string]any{"token": "x"}}, "", "")
+	if err != nil {
+		t.Fatalf("AddPlatformToProject: %v", err)
+	}
+	cfg := readConfigFixture(t, configPath)
+	proj := cfg.Projects[len(cfg.Projects)-1]
+	if proj.Agent.Type != "codex" {
+		t.Fatalf("agent type = %q, want codex (cloned)", proj.Agent.Type)
+	}
+	if stringMapValue(proj.Agent.Options, "work_dir") != "/tmp/alpha" {
+		t.Fatalf("cloned work_dir = %q, want /tmp/alpha", stringMapValue(proj.Agent.Options, "work_dir"))
+	}
+}
+
+func TestFormatTOML(t *testing.T) {
+	tests := []struct {
+		name, input, want string
+	}{
+		{
+			name:  "collapse multiple blank lines",
+			input: "a = 1\n\n\n\nb = 2\n",
+			want:  "a = 1\n\nb = 2\n",
+		},
+		{
+			name:  "blank line before section header",
+			input: "a = 1\n[section]\nb = 2\n",
+			want:  "a = 1\n\n[section]\nb = 2\n",
+		},
+		{
+			name:  "strip trailing whitespace",
+			input: "a = 1   \nb = 2\t\n",
+			want:  "a = 1\nb = 2\n",
+		},
+		{
+			name:  "remove empty section",
+			input: "[empty]\n\n[real]\nk = 1\n",
+			want:  "[real]\nk = 1\n",
+		},
+		{
+			name:  "already formatted",
+			input: "[section]\na = 1\n",
+			want:  "[section]\na = 1\n",
+		},
+		{
+			name:  "preserves comments",
+			input: "# comment\na = 1\n\n[section]\n# inline\nb = 2\n",
+			want:  "# comment\na = 1\n\n[section]\n# inline\nb = 2\n",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := formatTOML(tc.input)
+			if got != tc.want {
+				t.Errorf("formatTOML:\n  input: %q\n  got:   %q\n  want:  %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFormatConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	messy := "language = \"en\"   \n\n\n\n[[projects]]\nname = \"test\"\n\n\n[projects.agent]\ntype = \"codex\"\n\n[projects.agent.options]\n\n[[projects.platforms]]\ntype = \"telegram\"\n\n[projects.platforms.options]\ntoken = \"abc\"\n"
+	os.WriteFile(path, []byte(messy), 0o644)
+
+	if err := FormatConfigFile(path); err != nil {
+		t.Fatalf("FormatConfigFile: %v", err)
+	}
+
+	data, _ := os.ReadFile(path)
+	content := string(data)
+
+	if strings.Contains(content, "   \n") {
+		t.Error("trailing whitespace not stripped")
+	}
+	if strings.Contains(content, "\n\n\n") {
+		t.Error("consecutive blank lines not collapsed")
+	}
+
+	cfg := &Config{}
+	if _, err := toml.Decode(content, cfg); err != nil {
+		t.Fatalf("formatted config is invalid TOML: %v", err)
+	}
+	if len(cfg.Projects) != 1 || cfg.Projects[0].Name != "test" {
+		t.Error("formatting corrupted config content")
+	}
+
+	t.Run("no-op when already formatted", func(t *testing.T) {
+		before, _ := os.ReadFile(path)
+		if err := FormatConfigFile(path); err != nil {
+			t.Fatalf("second FormatConfigFile: %v", err)
+		}
+		after, _ := os.ReadFile(path)
+		if string(before) != string(after) {
+			t.Error("idempotent format produced different output")
+		}
+	})
+
+	t.Run("rejects invalid TOML", func(t *testing.T) {
+		badPath := filepath.Join(dir, "bad.toml")
+		os.WriteFile(badPath, []byte("[invalid\n"), 0o644)
+		if err := FormatConfigFile(badPath); err == nil {
+			t.Error("expected error for invalid TOML")
+		}
+	})
+}

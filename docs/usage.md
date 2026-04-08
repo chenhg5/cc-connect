@@ -8,7 +8,9 @@ Complete guide to using cc-connect features.
 - [Permission Modes](#permission-modes)
 - [API Provider Management](#api-provider-management)
 - [Model Selection](#model-selection)
+- [Work Directory Switching (`/dir`, `/cd`)](#work-directory-switching-dir-cd)
 - [Feishu Setup CLI](#feishu-setup-cli)
+- [Weixin (personal) Setup CLI](#weixin-personal-setup-cli)
 - [Claude Code Router Integration](#claude-code-router-integration)
 - [Voice Messages (STT)](#voice-messages-speech-to-text)
 - [Voice Reply (TTS)](#voice-reply-text-to-speech)
@@ -17,6 +19,8 @@ Complete guide to using cc-connect features.
 - [Multi-Bot Relay](#multi-bot-relay)
 - [Daemon Mode](#daemon-mode)
 - [Multi-Workspace Mode](#multi-workspace-mode)
+- [Web Admin Dashboard (Beta)](#web-admin-dashboard-beta)
+- [Bridge — External Adapter Access (Beta)](#bridge--external-adapter-access-beta)
 - [Configuration Reference](#configuration-reference)
 
 ---
@@ -34,7 +38,8 @@ Each user gets an independent session with full conversation context. Manage ses
 | `/history [n]` | Show last n messages (default 10) |
 | `/usage` | Show account/model quota usage (if supported) |
 | `/provider [...]` | Manage API providers |
-| `/model [alias]` | List available models or switch by alias |
+| `/model [switch <alias>]` | List available models or switch by alias |
+| `/dir [path]` | Show or switch the agent work directory |
 | `/allow <tool>` | Pre-allow a tool (next session) |
 | `/reasoning [level]` | View or switch reasoning effort (Codex) |
 | `/mode [name]` | View or switch permission mode |
@@ -43,6 +48,16 @@ Each user gets an independent session with full conversation context. Manage ses
 | `/help` | Show available commands |
 
 During a session, the agent may request tool permissions. Reply **allow** / **deny** / **allow all**.
+
+You can also configure automatic session rotation after inactivity:
+
+```toml
+[[projects]]
+name = "demo"
+reset_on_idle_mins = 60
+```
+
+When enabled, the next normal message after a long idle period starts in a fresh session automatically, without deleting the old session from `/list`.
 
 ---
 
@@ -56,6 +71,7 @@ All agents support permission modes switchable at runtime via `/mode`.
 |------|-------------|----------|
 | Default | `default` | Every tool call requires approval |
 | Accept Edits | `acceptEdits` / `edit` | File edits auto-approved |
+| Auto | `auto` | Claude decides when to ask for permission |
 | Plan Mode | `plan` | Claude only plans, no execution |
 | YOLO | `bypassPermissions` / `yolo` | All tools auto-approved |
 
@@ -216,11 +232,44 @@ alias = "spark"
 
 ```
 /model              List available models (format: alias - model)
-/model <alias>      Switch to the model matching the alias
-/model <name>       Switch to the model by its full name
+/model switch <alias>      Switch to the model matching the alias
+/model switch <name>       Switch to the model by its full name
+/model <alias>             Legacy syntax, still supported
 ```
 
 When `models` is configured, `/model` shows exactly that list without making an API round-trip. When omitted, models are fetched from the provider API or fall back to a built-in list.
+
+---
+
+## Work Directory Switching (`/dir`, `/cd`)
+
+Switch where the next agent session starts, directly from chat.
+
+### Chat Commands
+
+```
+/dir                    Show current work directory and recent history
+/dir <path>             Switch to a path (relative or absolute)
+/dir <number>           Switch to a directory from history
+/dir -                  Switch back to previous directory
+/dir help               Show command usage
+/cd <path>              Backward-compatible alias of /dir <path>
+```
+
+### Behavior Notes
+
+- Directory changes apply to the next session in the current project.
+- Relative paths are resolved from the current agent work directory.
+- Directory history is project-scoped and can be switched by index.
+- `/cd` is kept for compatibility, but `/dir` is the primary command.
+
+Examples:
+
+```text
+/dir ../another-repo
+/dir 2
+/dir -
+```
 
 ---
 
@@ -249,6 +298,27 @@ Behavior:
 - If project exists but has no `feishu/lark` platform, one is added automatically.
 - The command writes credentials (`app_id`, `app_secret`); in QR onboarding flow, Feishu usually pre-configures permissions and event subscriptions.
 - Still verify app publish status and availability scope in Feishu Open Platform.
+- Runtime platform config also supports an optional `domain` override for Feishu/Lark API endpoints; this does not change setup/onboarding URLs.
+
+---
+
+## Weixin (personal) Setup CLI
+
+Weixin personal chat uses the **ilink bot HTTP API** (long polling + `sendMessage`, same family as OpenClaw `openclaw-weixin`). Use the CLI to scan a QR code or bind an existing Bearer token and write `config.toml`.
+
+**Full walkthrough (Chinese): [docs/weixin.md](./weixin.md).**
+
+```bash
+cc-connect weixin setup --project my-project
+cc-connect weixin bind --project my-project --token '<token>'
+cc-connect weixin new --project my-project
+```
+
+Notes:
+- `setup` without `--token` runs QR login; with `--token` behaves like bind.
+- Auto-creates the project and/or a `weixin` platform block when missing.
+- After login, send a message from WeChat once so `context_token` is cached.
+- See `cc-connect weixin help` for flags (`--api-url`, `--cdn-url`, `--route-tag`, etc.).
 
 ---
 
@@ -457,6 +527,8 @@ cc-connect cron list
 cc-connect cron del <job-id>
 ```
 
+Optional: `--session-mode new-per-run` starts a fresh agent session on each run (default is `reuse`, same as before). `--timeout-mins N` sets how long the scheduler waits per run (`0` = no limit; omit = 30 minutes).
+
 ### Natural Language (Claude Code)
 
 > "Every day at 6am, summarize GitHub trending"
@@ -535,6 +607,145 @@ type = "claudecode"
 
 ---
 
+## Web Admin Dashboard (Beta)
+
+> **Status: Beta.** This feature is available since v1.2.2-beta.5. The UI and API may change in future releases.
+
+A full-featured management UI embedded in the binary — project CRUD, session management, cron job editor, global settings, chat interface, and i18n support.
+
+### Quick Setup (Chat Command)
+
+The easiest way to enable web admin:
+
+```
+/web setup
+```
+
+This automatically enables both the **Management API** and the **Bridge** in `config.toml`, generates tokens, and prints the access URL. You may need to run `/restart` for changes to take effect.
+
+After setup, open the URL shown (default `http://localhost:9820`) and log in with the token.
+
+### Check Status
+
+```
+/web           # or /web status — show current web admin URL and status
+```
+
+### Manual Configuration
+
+Add the following to `config.toml`:
+
+```toml
+[management]
+enabled = true
+port = 9820                     # Management UI & API listen port
+token = "your-secret-token"     # Login token; /web setup generates one automatically
+cors_origins = ["*"]            # Allowed CORS origins; empty = no CORS headers
+```
+
+Then restart cc-connect.
+
+### Build Options
+
+Web assets are compiled into the binary by default. To exclude them (saves ~1MB):
+
+```bash
+make build-noweb
+# or
+go build -tags 'no_web' ./cmd/cc-connect
+```
+
+When built with `no_web`, the `/web` command will report that web admin is not available.
+
+### Management API
+
+The Management API is served on the same port as the UI. Base URL: `http://<host>:<port>/api/v1`
+
+All API requests require the `Authorization: Bearer <token>` header.
+
+Key endpoints:
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/v1/status` | System status (version, uptime, platforms) |
+| `POST` | `/api/v1/restart` | Restart cc-connect |
+| `POST` | `/api/v1/reload` | Reload configuration |
+| `GET` | `/api/v1/projects` | List projects |
+| `GET` | `/api/v1/sessions?project=<name>` | List sessions for a project |
+| `GET` | `/api/v1/cron` | List cron jobs |
+| `GET` | `/api/v1/settings` | Get global settings |
+| `PATCH` | `/api/v1/settings` | Update global settings |
+
+Full API reference: [management-api.md](./management-api.md)
+
+---
+
+## Bridge — External Adapter Access (Beta)
+
+> **Status: Beta.** This feature is available since v1.2.2-beta.5. The protocol may change in future releases.
+
+The Bridge exposes a WebSocket + REST server so external adapters (custom UIs, bots, scripts) can interact with cc-connect sessions — send messages, receive events, manage sessions.
+
+### Enable via Chat
+
+The `/web setup` command enables Bridge automatically alongside the Management API.
+
+### Manual Configuration
+
+Add the following to `config.toml`:
+
+```toml
+[bridge]
+enabled = true
+port = 9810                     # Bridge listen port (separate from management)
+token = "your-bridge-secret"    # Auth token for WebSocket and REST
+path = "/bridge/ws"             # WebSocket endpoint path
+cors_origins = ["*"]            # Allowed CORS origins; empty = no CORS
+```
+
+Then restart cc-connect.
+
+### Authentication
+
+All Bridge connections require a token. Supported methods:
+
+- Query parameter: `?token=<bridge-token>`
+- Header: `Authorization: Bearer <bridge-token>`
+- Header: `X-Bridge-Token: <bridge-token>`
+
+### WebSocket
+
+Connect to:
+
+```
+ws://<host>:<bridge-port>/bridge/ws?token=<bridge-token>
+```
+
+The WebSocket supports bidirectional messaging — send user messages to the agent and receive agent events (text, tool calls, permission requests, etc.) in real time.
+
+### REST API
+
+Served on the same port as the WebSocket.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/bridge/sessions?session_key=...&project=...` | List sessions |
+| `POST` | `/bridge/sessions` | Create a new session |
+| `GET` | `/bridge/sessions/{id}?session_key=...&project=...` | Get session detail + history |
+| `DELETE` | `/bridge/sessions/{id}?session_key=...&project=...` | Delete a session |
+| `POST` | `/bridge/sessions/switch` | Switch active session |
+
+Full protocol reference: [bridge-protocol.md](./bridge-protocol.md)
+
+### Port Summary
+
+| Service | Default Port | Config Block |
+|---------|-------------|--------------|
+| Management (Web UI + API) | 9820 | `[management]` |
+| Bridge (WebSocket + REST) | 9810 | `[bridge]` |
+
+---
+
 ## Configuration Reference
 
 See [config.example.toml](../config.example.toml) for full examples.
@@ -554,7 +765,7 @@ mode = "default"
 provider = "anthropic"
 
 [[projects.platforms]]
-type = "feishu"  # or dingtalk, telegram, slack, discord, wecom, line, qq, qqbot
+type = "feishu"  # or dingtalk, telegram, slack, discord, wecom, weixin, line, qq, qqbot
 
 [projects.platforms.options]
 # platform-specific options

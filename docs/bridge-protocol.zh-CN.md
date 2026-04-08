@@ -327,8 +327,8 @@ token = "your-secret"     # 认证密钥，必填
       {
         "type": "actions",
         "buttons": [
-          {"text": "GPT-4", "btn_type": "primary", "value": "cmd:/model gpt-4"},
-          {"text": "Claude", "btn_type": "default", "value": "cmd:/model claude"}
+          {"text": "GPT-4", "btn_type": "primary", "value": "cmd:/model switch gpt-4"},
+          {"text": "Claude", "btn_type": "default", "value": "cmd:/model switch claude"}
         ],
         "layout": "row"
       },
@@ -534,7 +534,7 @@ token = "your-secret"     # 认证密钥，必填
   "text": "GPT-4 — 最强模型",
   "btn_text": "选择",
   "btn_type": "primary",
-  "btn_value": "cmd:/model gpt-4"
+  "btn_value": "cmd:/model switch gpt-4"
 }
 ```
 
@@ -544,10 +544,10 @@ token = "your-secret"     # 认证密钥，必填
   "type": "select",
   "placeholder": "选择一个模型",
   "options": [
-    {"text": "GPT-4", "value": "cmd:/model gpt-4"},
-    {"text": "Claude", "value": "cmd:/model claude"}
+    {"text": "GPT-4", "value": "cmd:/model switch gpt-4"},
+    {"text": "Claude", "value": "cmd:/model switch claude"}
   ],
-  "init_value": "cmd:/model gpt-4"
+  "init_value": "cmd:/model switch gpt-4"
 }
 ```
 

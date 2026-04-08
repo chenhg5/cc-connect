@@ -1,6 +1,9 @@
 package main
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -104,5 +107,70 @@ func TestGetUpdateHintIfAvailable_DevSkipped(t *testing.T) {
 	hint := getUpdateHintIfAvailable()
 	if hint != "" {
 		t.Errorf("expected empty hint for dev version, got: %q", hint)
+	}
+}
+
+func TestSyncNpmPackageVersion_NormalizesVPrefix(t *testing.T) {
+	// Regression test: old package.json stored version as "v1.0.0" but newVer
+	// is already stripped to "1.0.0". They should be treated as equal.
+	dir := t.TempDir()
+	ccConnectDir := filepath.Join(dir, "node_modules", "cc-connect")
+	binDir := filepath.Join(ccConnectDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	execPath := filepath.Join(binDir, "cc-connect")
+
+	pkgJSON := filepath.Join(ccConnectDir, "package.json")
+	pkgData := `{"name": "cc-connect", "version": "v1.0.0"}`
+	if err := os.WriteFile(pkgJSON, []byte(pkgData), 0o644); err != nil {
+		t.Fatalf("write pkg.json: %v", err)
+	}
+
+	// newVer has "v" already stripped: "1.0.0" vs package.json "v1.0.0"
+	syncNpmPackageVersion(execPath, "1.0.0")
+
+	// Re-read and verify version was NOT overwritten (same version)
+	content, err := os.ReadFile(pkgJSON)
+	if err != nil {
+		t.Fatalf("read pkg.json: %v", err)
+	}
+	var pkg map[string]any
+	if err := json.Unmarshal(content, &pkg); err != nil {
+		t.Fatalf("parse pkg.json: %v", err)
+	}
+	// Version should still be "v1.0.0" (not overwritten with "1.0.0")
+	if pkg["version"] != "v1.0.0" {
+		t.Errorf("version = %v, want v1.0.0 (unchanged)", pkg["version"])
+	}
+}
+
+func TestSyncNpmPackageVersion_UpdatesWhenDifferent(t *testing.T) {
+	dir := t.TempDir()
+	ccConnectDir := filepath.Join(dir, "node_modules", "cc-connect")
+	binDir := filepath.Join(ccConnectDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	execPath := filepath.Join(binDir, "cc-connect")
+
+	pkgJSON := filepath.Join(ccConnectDir, "package.json")
+	pkgData := `{"name": "cc-connect", "version": "v0.9.0"}`
+	if err := os.WriteFile(pkgJSON, []byte(pkgData), 0o644); err != nil {
+		t.Fatalf("write pkg.json: %v", err)
+	}
+
+	syncNpmPackageVersion(execPath, "1.0.0")
+
+	content, err := os.ReadFile(pkgJSON)
+	if err != nil {
+		t.Fatalf("read pkg.json: %v", err)
+	}
+	var pkg map[string]any
+	if err := json.Unmarshal(content, &pkg); err != nil {
+		t.Fatalf("parse pkg.json: %v", err)
+	}
+	if pkg["version"] != "1.0.0" {
+		t.Errorf("version = %v, want 1.0.0 (updated)", pkg["version"])
 	}
 }

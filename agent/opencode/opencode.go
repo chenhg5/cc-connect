@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -95,7 +96,7 @@ func (a *Agent) SetModel(model string) {
 func (a *Agent) GetModel() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.model
+	return core.GetProviderModel(a.providers, a.activeIdx, a.model)
 }
 
 func (a *Agent) configuredModels() []core.ModelOption {
@@ -104,7 +105,49 @@ func (a *Agent) configuredModels() []core.ModelOption {
 	return core.GetProviderModels(a.providers, a.activeIdx)
 }
 
-func (a *Agent) AvailableModels(_ context.Context) []core.ModelOption {
+// discoverModels runs `<cmd> models` and parses stdout line-by-line into a
+// deduplicated, lexicographically sorted slice of ModelOption.
+// Returns nil if the command fails, times out, or produces no usable output.
+func (a *Agent) discoverModels(ctx context.Context) []core.ModelOption {
+	a.mu.RLock()
+	cmd := a.cmd
+	a.mu.RUnlock()
+
+	out, err := exec.CommandContext(ctx, cmd, "models").Output()
+	if err != nil {
+		slog.Debug("opencode: discoverModels failed", "err", err)
+		return nil
+	}
+
+	seen := make(map[string]struct{})
+	var models []core.ModelOption
+	for _, line := range strings.Split(string(out), "\n") {
+		name := strings.TrimSpace(line)
+		if name == "" {
+			continue
+		}
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		models = append(models, core.ModelOption{Name: name})
+	}
+
+	if len(models) == 0 {
+		slog.Debug("opencode: discoverModels: no models in output")
+		return nil
+	}
+
+	sort.Slice(models, func(i, j int) bool {
+		return models[i].Name < models[j].Name
+	})
+	return models
+}
+
+func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
+	if models := a.discoverModels(ctx); len(models) > 0 {
+		return models
+	}
 	if models := a.configuredModels(); len(models) > 0 {
 		return models
 	}
@@ -301,12 +344,14 @@ func querySessionMessageCounts() map[string]int {
 	}
 	sqlite3, err := exec.LookPath("sqlite3")
 	if err != nil {
+		slog.Warn("opencode: sqlite3 CLI not found, message counts unavailable", "err", err)
 		return nil
 	}
 
 	out, err := exec.Command(sqlite3, dbPath,
 		"SELECT session_id, COUNT(*) FROM message GROUP BY session_id").Output()
 	if err != nil {
+		slog.Warn("opencode: sqlite3 query failed", "db_path", dbPath, "err", err)
 		return nil
 	}
 

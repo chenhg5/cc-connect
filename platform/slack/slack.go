@@ -3,6 +3,7 @@ package slack
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -140,16 +141,25 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					sessionKey = fmt.Sprintf("slack:%s:%s", ev.Channel, ev.User)
 				}
 
+				var shareFiles []slackevents.File
+				if cb, ok := data.Data.(*slackevents.EventsAPICallbackEvent); ok {
+					shareFiles = parseSlackInnerEventFiles(cb.InnerEvent)
+				}
+				images, audio, docFiles := p.processSlackFileShares(shareFiles)
+				content := stripAppMentionText(ev.Text)
+				if content == "" && len(images) == 0 && audio == nil && len(docFiles) == 0 {
+					return
+				}
 				msg := &core.Message{
 					SessionKey: sessionKey, Platform: "slack",
 					UserID: ev.User, UserName: p.resolveUserName(ev.User),
-					ChatName: p.resolveChannelNameForMsg(ev.Channel),
-					Content:   stripAppMentionText(ev.Text),
+					ChatName:  p.resolveChannelNameForMsg(ev.Channel),
+					Content:   content,
+					Images:    images,
+					Files:     docFiles,
+					Audio:     audio,
 					MessageID: ev.TimeStamp,
 					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: ev.TimeStamp},
-				}
-				if msg.Content == "" {
-					return
 				}
 				p.handler(p, msg)
 
@@ -184,45 +194,9 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 				}
 				ts := ev.TimeStamp
 
-				var images []core.ImageAttachment
-				var audio *core.AudioAttachment
-				for _, f := range ev.Files {
-					// Prefer URLPrivateDownload, fall back to URLPrivate
-					fileURL := f.URLPrivateDownload
-					if fileURL == "" {
-						fileURL = f.URLPrivate
-					}
-					if fileURL == "" {
-						slog.Warn("slack: file has no download URL", "file_id", f.ID, "name", f.Name)
-						continue
-					}
+				images, audio, docFiles := p.processSlackFileShares(ev.Files)
 
-					if f.Mimetype != "" && strings.HasPrefix(f.Mimetype, "audio/") {
-						data, err := p.downloadSlackFile(fileURL)
-						if err != nil {
-							slog.Error("slack: download audio failed", "error", err, "url", core.RedactToken(fileURL, p.botToken))
-							continue
-						}
-						format := "mp3"
-						if parts := strings.SplitN(f.Mimetype, "/", 2); len(parts) == 2 {
-							format = parts[1]
-						}
-						audio = &core.AudioAttachment{
-							MimeType: f.Mimetype, Data: data, Format: format,
-						}
-					} else if f.Mimetype != "" && strings.HasPrefix(f.Mimetype, "image/") {
-						imgData, err := p.downloadSlackFile(fileURL)
-						if err != nil {
-							slog.Error("slack: download file failed", "error", err, "url", core.RedactToken(fileURL, p.botToken))
-							continue
-						}
-						images = append(images, core.ImageAttachment{
-							MimeType: f.Mimetype, Data: imgData, FileName: f.Name,
-						})
-					}
-				}
-
-				if ev.Text == "" && len(images) == 0 && audio == nil {
+				if ev.Text == "" && len(images) == 0 && audio == nil && len(docFiles) == 0 {
 					return
 				}
 
@@ -230,9 +204,9 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					SessionKey: sessionKey, Platform: "slack",
 					UserID: ev.User, UserName: p.resolveUserName(ev.User),
 					ChatName: p.resolveChannelNameForMsg(ev.Channel),
-					Content: ev.Text, Images: images, Audio: audio,
+					Content:  ev.Text, Images: images, Files: docFiles, Audio: audio,
 					MessageID: ts,
-					ReplyCtx: replyContext{channel: ev.Channel, timestamp: ts},
+					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: ts},
 				}
 				p.handler(p, msg)
 			}
@@ -293,6 +267,91 @@ func stripAppMentionText(text string) string {
 	return text
 }
 
+// parseSlackInnerEventFiles extracts the files array from a raw Events API inner
+// event. AppMentionEvent is unmarshaled without a Files field in slack-go, but
+// Slack still includes "files" in the JSON when a mention is sent with uploads.
+func parseSlackInnerEventFiles(raw *json.RawMessage) []slackevents.File {
+	if raw == nil || len(*raw) == 0 {
+		return nil
+	}
+	var wrapper struct {
+		Files []slackevents.File `json:"files"`
+	}
+	if err := json.Unmarshal(*raw, &wrapper); err != nil {
+		slog.Debug("slack: parse inner event files", "error", err)
+		return nil
+	}
+	return wrapper.Files
+}
+
+// processSlackFileShares downloads Slack file shares and maps them to core
+// attachments. Non-audio/non-image types (e.g. PDF, text) become FileAttachment
+// so the engine can persist them and pass paths to the agent.
+func (p *Platform) processSlackFileShares(files []slackevents.File) (images []core.ImageAttachment, audio *core.AudioAttachment, docFiles []core.FileAttachment) {
+	for _, f := range files {
+		fileURL := f.URLPrivateDownload
+		if fileURL == "" {
+			fileURL = f.URLPrivate
+		}
+		if fileURL == "" {
+			slog.Warn("slack: file has no download URL", "file_id", f.ID, "name", f.Name)
+			continue
+		}
+
+		mt := strings.TrimSpace(strings.ToLower(f.Mimetype))
+		switch {
+		case strings.HasPrefix(mt, "audio/"):
+			data, err := p.downloadSlackFile(fileURL)
+			if err != nil {
+				slog.Error("slack: download audio failed", "error", err, "url", core.RedactToken(fileURL, p.botToken))
+				continue
+			}
+			format := "mp3"
+			if parts := strings.SplitN(mt, "/", 2); len(parts) == 2 {
+				format = parts[1]
+			}
+			audioMime := f.Mimetype
+			if audioMime == "" {
+				audioMime = mt
+			}
+			audio = &core.AudioAttachment{
+				MimeType: audioMime, Data: data, Format: format,
+			}
+		case strings.HasPrefix(mt, "image/"):
+			imgData, err := p.downloadSlackFile(fileURL)
+			if err != nil {
+				slog.Error("slack: download image failed", "error", err, "url", core.RedactToken(fileURL, p.botToken))
+				continue
+			}
+			images = append(images, core.ImageAttachment{
+				MimeType: f.Mimetype, Data: imgData, FileName: slackFileDisplayName(f),
+			})
+		default:
+			data, err := p.downloadSlackFile(fileURL)
+			if err != nil {
+				slog.Error("slack: download file failed", "error", err, "url", core.RedactToken(fileURL, p.botToken))
+				continue
+			}
+			if mt == "" {
+				mt = "application/octet-stream"
+			}
+			docFiles = append(docFiles, core.FileAttachment{
+				MimeType: mt,
+				Data:     data,
+				FileName: slackFileDisplayName(f),
+			})
+		}
+	}
+	return images, audio, docFiles
+}
+
+func slackFileDisplayName(f slackevents.File) string {
+	if f.Name != "" {
+		return f.Name
+	}
+	return f.Title
+}
+
 func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	rc, ok := rctx.(replyContext)
 	if !ok {
@@ -341,10 +400,10 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 	}
 
 	_, err := p.client.UploadFileV2Context(ctx, slack.UploadFileV2Parameters{
-		Reader:         bytes.NewReader(img.Data),
-		FileSize:       len(img.Data),
-		Filename:       name,
-		Channel:        rc.channel,
+		Reader:          bytes.NewReader(img.Data),
+		FileSize:        len(img.Data),
+		Filename:        name,
+		Channel:         rc.channel,
 		ThreadTimestamp: rc.timestamp,
 	})
 	if err != nil {

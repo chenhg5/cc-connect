@@ -22,8 +22,7 @@ type systemdManager struct {
 
 func newPlatformManager() (Manager, error) {
 	if _, err := exec.LookPath("systemctl"); err != nil {
-		return nil, fmt.Errorf("systemctl not found; systemd is required on Linux.\n" +
-			"  If running in a container without systemd, use nohup/tmux/screen instead.")
+		return nil, fmt.Errorf("systemctl not found: systemd is required on Linux; if running in a container without systemd, use nohup, tmux, or screen instead")
 	}
 
 	isRoot := os.Getuid() == 0

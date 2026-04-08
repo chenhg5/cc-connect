@@ -914,6 +914,22 @@ func TestPiSession_NewWithResumeID(t *testing.T) {
 	}
 }
 
+func TestPiSession_ContinueSessionTreatedAsFresh(t *testing.T) {
+	// ContinueSession ("__continue__") is a sentinel used by the engine to tell
+	// Claude Code to pick up the latest CLI session via --continue. Agents that
+	// don't support --continue must treat it as "" (fresh session), otherwise
+	// they pass the literal "__continue__" as a session ID which always fails.
+	s, err := newPiSession(context.Background(), "echo", "/tmp", "", "default", "", core.ContinueSession, nil)
+	if err != nil {
+		t.Fatalf("newPiSession: %v", err)
+	}
+	defer s.Close()
+
+	if got := s.CurrentSessionID(); got != "" {
+		t.Errorf("ContinueSession should be treated as fresh: sessionID = %q, want empty", got)
+	}
+}
+
 func TestPiSession_NewWithoutResumeID(t *testing.T) {
 	s, err := newPiSession(context.Background(), "echo", "/tmp", "", "default", "", "", nil)
 	if err != nil {

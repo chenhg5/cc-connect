@@ -1,5 +1,95 @@
 # Changelog
 
+## v1.2.2-beta.5 (2026-03-31)
+
+Beta release with embedded web admin, Discord proxy support, multimodal fixes, and major platform improvements.
+
+### New Features
+- **Embedded Web Admin**: Web frontend is now compiled into the binary via `go:embed` — no separate `npm install` needed. Use `/web setup` to configure, or build with `no_web` tag to exclude. Binary size increases ~1MB (#356)
+- **Web Admin Dashboard**: Full-featured management UI with project CRUD, session management, cron job editor, global settings, chat interface with bridge WebSocket, slash commands, and i18n (en/zh/zh-TW/ja/es) (#316)
+- **Discord Proxy Support**: Discord platform now supports `proxy`, `proxy_username`, `proxy_password` options for HTTP API and WebSocket Gateway connections
+- **Feishu Progress Styles**: Configurable progress display styles (compact/card) to reduce message spam
+- **Claude Code Auto-Permission Mode**: New `auto` permission mode for Claude Code agent (#329)
+- **WeCom File Receiving**: WeCom HTTP callback now supports receiving files and forwarding them to the agent (#330)
+- **Outgoing Rate Limiting**: Per-platform outgoing message rate limiting
+- **Telegram Forum Topics**: Migrated to `go-telegram/bot` library with forum topic support (#321)
+- **Global Settings UI**: Expose global configurations (language, quiet, display, stream preview, rate limit, log) in the web admin
+
+### Bug Fixes
+- **Gemini Image Handling**: Save attachments to workspace directory instead of `/tmp` so Gemini CLI tools can access them; use prompt-based file references instead of unsupported `--image` flag
+- **Security**: Mask bridge token in `/api/v1/status` endpoint; add path traversal protection for static file serving
+- **Codex**: Fix multiline prompt preservation on resume (#341); force kill session process group on stop (#340)
+- **Session Recycling**: Wait for old session to close before creating new one (#352)
+- **Discord**: Harden session routing and remove implicit continue bridge (#322); execute slash commands when defer fails (#300)
+- **Slack**: Pass file uploads to agent (#296)
+- **Telegram**: UTF-8-safe command menu descriptions (#301)
+- **WeCom**: Strip @bot mentions from inbound text (#303)
+- **Daemon**: macOS launchd do not respawn on clean exit (#304)
+- **Core**: Route workspace model changes through session context (#339); outgoing rate limit refinements and i18n tightening
+- **Config**: `formatTOML` no longer strips user-set zero values (e.g. `quiet = false`)
+
+### Improvements
+- **CI**: Add Node.js setup for web frontend build in CI pipeline; use `no_web` tag for e2e/smoke tests
+- **Tests**: Expanded coverage across agents, config, and core packages
+- **Selective Compilation**: Added `no_web` build tag to exclude web assets from binary
+
+### Contributors
+
+Special thanks to all contributors who made this release possible:
+
+- **cg33** — Embedded web admin, Discord proxy, Gemini fix, security hardening
+- **xxb** — Discord session routing fix, codex process kill, workspace reconnect (#322, #340, #315)
+- **dev-null-sec** — Codex multiline prompt fix (#341)
+- **xukp20** — Workspace model routing (#339)
+- **zhengbuqian** — Telegram go-telegram/bot migration and forum topics (#321)
+- **huangdijia** — Claude Code auto permission mode (#329)
+- **buddhism5080** — Discord file sending (#307)
+
+## v1.2.2-beta.4 (2026-03-22)
+
+Beta release with Weixin (ilink) personal chat support, session/continue improvements, and platform fixes.
+
+### New Features
+- **Weixin Personal (ilink)**: New platform with long-poll `getUpdates` / `sendMessage`, QR `weixin setup`, CDN decrypt for inbound media and `ImageSender`/`FileSender` outbound (#257)
+- **Telegram**: Voice/audio reply support (#225) and async startup recovery
+- **Discord**: `@everyone` / `@here` broadcast support (#132)
+- **Cron**: Optional new session per run and per-job timeout (#236)
+- **Claude Code**: `disallowed_tools` configuration option (#232)
+- **Auto-Compress**: Compress context when estimated tokens exceed threshold (#231)
+- **Continue / Sessions**: Fork session on `--continue` to avoid context contamination (#244); replace persisted `ContinueSession` sentinel with real agent session id; reserve CLI `--continue` bridge for real user traffic
+- **Core**: `/dir` directory history; `/model` switching aligned with provider flow (#246)
+- **Providers**: MiniMax M2.7 high-speed model added to example configs (#217)
+
+### Bug Fixes
+- **Weixin**: Harden send path (empty body skip, response body cap, dedup keys, multi-voice segments); treat `sendMessage` JSON `ret != 0` as failure so quota/API errors surface correctly
+- **Feishu**: Always reply to the original message; dispatch message handling asynchronously (#57)
+- **Codex**: Mode switch and `--json` flag position fixes (#240, #239)
+- **Multi-Workspace**: Workspace command prefix missing leading slash (#135)
+- **Non-Claude Agents**: Ignore `ContinueSession` sentinel where inappropriate (#244 follow-up)
+- **npm / Update**: Version sync after update; pre-release version comparison normalization
+
+### Improvements
+- **Tests**: Expanded coverage across `config`, `core`, agents, and platforms
+- **Logging / Errors**: Additional error logging in several code paths
+
+### Contributors
+
+Special thanks to all contributors who made this release possible:
+
+- **cg33** — Weixin ilink platform, setup CLI, and CDN media (#257)
+- **Shawn** — Feishu async dispatch and reply-to-original fixes (#57)
+- **quabug** — Discord broadcast and non-Claude ContinueSession handling (#132, #244)
+- **huluma1314** — Auto-compress when token threshold exceeded (#231)
+- **Leigh Stillard** — Fork session on `--continue` (#244)
+- **Deeka Wong** — Telegram audio replies and core `/model` provider flow (#225, #246)
+- **q107580018** — Telegram async startup recovery
+- **just4zeroq** — Codex mode and JSON flag fixes (#240)
+- **术士木星** — Cron session-per-run and job timeout (#236)
+- **hushicai** — Claude `disallowed_tools` (#232)
+- **Octopus** — MiniMax M2.7 high-speed in examples (#217)
+- **alinnb** — `/dir` directory history
+- **Claude** — Continue-session bridge fixes, auto-compress/cron edge cases, Weixin send hardening and API error handling, and broad test improvements
+
 ## v1.2.2-beta.3 (2026-03-19)
 
 Beta release with major multi-user mode, improved workspace stability, and platform enhancements.
@@ -304,6 +394,7 @@ This is the first stable release of cc-connect 1.2.0, consolidating all beta cha
 
 ### New Features
 - **`/compress` Command**: Compress/compact conversation context by forwarding native commands to agents (Claude Code `/compact`, Codex `/compact`, Gemini `/compress`); keeps long sessions manageable
+- **Auto-Compress**: Added optional automatic context compression when estimated token usage exceeds a configurable threshold (`[projects.auto_compress]`).
 - **Telegram Inline Buttons**: Permission prompts on Telegram now use clickable inline keyboard buttons (Allow / Deny / Allow All) instead of requiring text replies
 - **`/model` Command**: View and switch AI models at runtime; supports numbered quick-select and custom model names. Fetches available models from provider API in real-time (Anthropic, OpenAI, Google), with built-in fallback list
 - **`/memory` Command**: View and edit agent memory files (CLAUDE.md, AGENTS.md, GEMINI.md) directly from chat; supports both project-level and global-level (`/memory global`)

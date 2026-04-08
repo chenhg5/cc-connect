@@ -41,3 +41,17 @@ func TestConfiguredModels_BoundaryConditions(t *testing.T) {
 		})
 	}
 }
+
+func TestGetModel_PrefersActiveProviderModel(t *testing.T) {
+	a := &Agent{
+		model: "gpt-4.1-mini",
+		providers: []core.ProviderConfig{
+			{Name: "openai", Model: "gpt-5.4"},
+		},
+		activeIdx: 0,
+	}
+
+	if got := a.GetModel(); got != "gpt-5.4" {
+		t.Fatalf("GetModel() = %q, want gpt-5.4", got)
+	}
+}

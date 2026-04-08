@@ -24,20 +24,26 @@ import (
 // codexSession manages a multi-turn Codex conversation.
 // First Send() uses `codex exec`, subsequent ones use `codex exec resume <threadID>`.
 type codexSession struct {
-	workDir  string
-	model    string
-	effort   string
-	mode     string
-	extraEnv []string
-	events   chan core.Event
-	threadID atomic.Value // stores string — Codex thread_id
-	ctx      context.Context
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
-	alive    atomic.Bool
+	workDir   string
+	model     string
+	effort    string
+	mode      string
+	extraEnv  []string
+	events    chan core.Event
+	threadID  atomic.Value // stores string — Codex thread_id
+	ctx       context.Context
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
+	alive     atomic.Bool
+	closeOnce sync.Once
+	cmdMu     sync.Mutex
+	cmds      map[*exec.Cmd]struct{}
 
 	pendingMsgs []string // buffered agent_message texts awaiting classification
 }
+
+var codexSessionCloseTimeout = 8 * time.Second
+var codexSessionForceKillWait = 2 * time.Second
 
 func newCodexSession(ctx context.Context, workDir, model, effort, mode, resumeID string, extraEnv []string) (*codexSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
@@ -51,10 +57,11 @@ func newCodexSession(ctx context.Context, workDir, model, effort, mode, resumeID
 		events:   make(chan core.Event, 64),
 		ctx:      sessionCtx,
 		cancel:   cancel,
+		cmds:     make(map[*exec.Cmd]struct{}),
 	}
 	cs.alive.Store(true)
 
-	if resumeID != "" {
+	if resumeID != "" && resumeID != core.ContinueSession {
 		cs.threadID.Store(resumeID)
 	}
 
@@ -85,9 +92,11 @@ func (cs *codexSession) Send(prompt string, images []core.ImageAttachment, files
 
 	cmd := exec.CommandContext(cs.ctx, "codex", args...)
 	cmd.Dir = cs.workDir
+	prepareCmdForKill(cmd)
 	if len(cs.extraEnv) > 0 {
 		cmd.Env = core.MergeEnv(os.Environ(), cs.extraEnv)
 	}
+	cmd.Stdin = strings.NewReader(prompt)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -100,6 +109,7 @@ func (cs *codexSession) Send(prompt string, images []core.ImageAttachment, files
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("codexSession: start: %w", err)
 	}
+	cs.addCmd(cmd)
 
 	cs.wg.Add(1)
 	go cs.readLoop(cmd, stdout, &stderrBuf)
@@ -141,9 +151,11 @@ func (cs *codexSession) buildExecArgs(prompt string, imagePaths []string) []stri
 
 	var args []string
 	if isResume {
-		args = []string{"exec", "resume", "--json", "--skip-git-repo-check"}
+		// For resume: codex exec resume ... <thread_id> [--image ...] --json --cd <dir> <prompt>
+		// The codex CLI requires --json after the thread_id positional argument.
+		args = []string{"exec", "resume", "--skip-git-repo-check"}
 	} else {
-		args = []string{"exec", "--json", "--skip-git-repo-check"}
+		args = []string{"exec", "--skip-git-repo-check"}
 	}
 
 	switch cs.mode {
@@ -165,12 +177,14 @@ func (cs *codexSession) buildExecArgs(prompt string, imagePaths []string) []stri
 		for _, imagePath := range imagePaths {
 			args = append(args, "--image", imagePath)
 		}
-		args = append(args, prompt)
+		// codex exec resume does not support --cd; cmd.Dir handles cwd instead.
+		// Use stdin ("-") so multiline prompts are preserved reliably on Windows.
+		args = append(args, "--json", "-")
 	} else {
 		for _, imagePath := range imagePaths {
 			args = append(args, "--image", imagePath)
 		}
-		args = append(args, "--cd", cs.workDir, prompt)
+		args = append(args, "--json", "--cd", cs.workDir, "-")
 	}
 	return args
 }
@@ -191,6 +205,7 @@ func codexImageExt(mime string) string {
 func (cs *codexSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
 	defer cs.wg.Done()
 	defer func() {
+		defer cs.removeCmd(cmd)
 		if err := cmd.Wait(); err != nil {
 			stderrMsg := strings.TrimSpace(stderrBuf.String())
 			if stderrMsg != "" {
@@ -320,7 +335,13 @@ func (cs *codexSession) handleEvent(raw map[string]any) {
 
 // flushPendingAsThinking emits all buffered agent_messages as EventThinking.
 func (cs *codexSession) flushPendingAsThinking() {
+	if cs.ctx.Err() != nil {
+		return
+	}
 	for _, text := range cs.pendingMsgs {
+		if cs.ctx.Err() != nil {
+			return
+		}
 		evt := core.Event{Type: core.EventThinking, Content: text}
 		select {
 		case cs.events <- evt:
@@ -333,7 +354,13 @@ func (cs *codexSession) flushPendingAsThinking() {
 
 // flushPendingAsText emits all buffered agent_messages as EventText (final response).
 func (cs *codexSession) flushPendingAsText() {
+	if cs.ctx.Err() != nil {
+		return
+	}
 	for _, text := range cs.pendingMsgs {
+		if cs.ctx.Err() != nil {
+			return
+		}
 		evt := core.Event{Type: core.EventText, Content: text}
 		select {
 		case cs.events <- evt:
@@ -423,21 +450,49 @@ func (cs *codexSession) handleItemCompleted(raw map[string]any) {
 		status, _ := item["status"].(string)
 		output, _ := item["aggregated_output"].(string)
 		exitCode, _ := item["exit_code"].(float64)
+		code := int(exitCode)
+		success := codexToolSuccess(status, &code)
 
 		slog.Debug("codexSession: command completed",
 			"command", truncate(command, 100),
 			"status", status,
-			"exit_code", int(exitCode),
+			"exit_code", code,
 			"output_len", len(output),
 		)
+		evt := core.Event{
+			Type:         core.EventToolResult,
+			ToolName:     "Bash",
+			ToolResult:   truncate(strings.TrimSpace(output), 500),
+			ToolStatus:   strings.TrimSpace(status),
+			ToolExitCode: &code,
+			ToolSuccess:  &success,
+		}
+		select {
+		case cs.events <- evt:
+		case <-cs.ctx.Done():
+			return
+		}
 
 	case "function_call":
 		name, _ := item["name"].(string)
 		status, _ := item["status"].(string)
 		output, _ := item["output"].(string)
+		success := codexToolSuccess(status, nil)
 		slog.Debug("codexSession: function_call completed",
 			"name", name, "status", status, "output_len", len(output),
 		)
+		evt := core.Event{
+			Type:        core.EventToolResult,
+			ToolName:    name,
+			ToolResult:  truncate(strings.TrimSpace(output), 500),
+			ToolStatus:  strings.TrimSpace(status),
+			ToolSuccess: &success,
+		}
+		select {
+		case cs.events <- evt:
+		case <-cs.ctx.Done():
+			return
+		}
 
 	case "function_call_output":
 		slog.Debug("codexSession: function_call_output")
@@ -491,6 +546,14 @@ func codexExtractToolInput(item map[string]any) string {
 	return ""
 }
 
+func codexToolSuccess(status string, exitCode *int) bool {
+	s := strings.ToLower(strings.TrimSpace(status))
+	if exitCode != nil {
+		return *exitCode == 0
+	}
+	return s == "completed" || s == "success" || s == "succeeded" || s == "ok"
+}
+
 // RespondPermission is a no-op for Codex — permissions are handled via CLI flags.
 func (cs *codexSession) RespondPermission(_ string, _ core.PermissionResult) error {
 	return nil
@@ -519,11 +582,71 @@ func (cs *codexSession) Close() error {
 	}()
 	select {
 	case <-done:
-	case <-time.After(8 * time.Second):
-		slog.Warn("codexSession: close timed out, abandoning wg.Wait")
+		// readLoop has exited; safe to close the events channel.
+		cs.closeOnce.Do(func() {
+			close(cs.events)
+		})
+		return nil
+	case <-time.After(codexSessionCloseTimeout):
+		cmds := cs.activeCmds()
+		slog.Warn("codexSession: graceful close timed out, killing active process groups",
+			"wait", codexSessionCloseTimeout,
+			"count", len(cmds))
+		if err := forceKillAllCmds(cmds); err != nil {
+			slog.Debug("codexSession: force kill failed", "error", err)
+		}
+		select {
+		case <-done:
+			cs.closeOnce.Do(func() {
+				close(cs.events)
+			})
+			return nil
+		case <-time.After(codexSessionForceKillWait):
+			// Do not close(cs.events) here: readLoop may still be in handleEvent
+			// (e.g. turn.completed -> flushPendingAsText) and would panic on send.
+			slog.Warn("codexSession: force kill wait timed out, deferring events channel close until readLoop exits",
+				"wait", codexSessionForceKillWait)
+			go func() {
+				<-done
+				cs.closeOnce.Do(func() {
+					close(cs.events)
+				})
+			}()
+			return nil
+		}
 	}
-	close(cs.events)
-	return nil
+}
+
+func (cs *codexSession) addCmd(cmd *exec.Cmd) {
+	cs.cmdMu.Lock()
+	defer cs.cmdMu.Unlock()
+	cs.cmds[cmd] = struct{}{}
+}
+
+func (cs *codexSession) removeCmd(cmd *exec.Cmd) {
+	cs.cmdMu.Lock()
+	defer cs.cmdMu.Unlock()
+	delete(cs.cmds, cmd)
+}
+
+func (cs *codexSession) activeCmds() []*exec.Cmd {
+	cs.cmdMu.Lock()
+	defer cs.cmdMu.Unlock()
+	cmds := make([]*exec.Cmd, 0, len(cs.cmds))
+	for cmd := range cs.cmds {
+		cmds = append(cmds, cmd)
+	}
+	return cmds
+}
+
+func forceKillAllCmds(cmds []*exec.Cmd) error {
+	var errs []error
+	for _, cmd := range cmds {
+		if err := forceKillCmd(cmd); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // extractItemText extracts text from an item's array field (e.g. "summary" or "content").
