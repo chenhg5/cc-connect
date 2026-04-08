@@ -3580,7 +3580,7 @@ func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
 	}
 	if workDir == "" {
 		if wd, ok := e.agent.(interface{ GetWorkDir() string }); ok {
-			workDir = wd.GetWorkDir()
+			workDir = normalizeWorkspacePath(wd.GetWorkDir())
 		}
 	}
 	if workDir == "" {
@@ -4913,15 +4913,12 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	fetchCtx, cancel := context.WithTimeout(e.ctx, 10*time.Second)
-	defer cancel()
-	models := switcher.AvailableModels(fetchCtx)
-
-	target := targetInput
-	if idx, err := strconv.Atoi(target); err == nil && idx >= 1 && idx <= len(models) {
-		target = models[idx-1].Name
-	} else {
-		target = resolveModelAlias(models, target)
+	target := strings.TrimSpace(targetInput)
+	if modelSwitchNeedsLookup(target) {
+		fetchCtx, cancel := context.WithTimeout(e.ctx, 10*time.Second)
+		defer cancel()
+		models := switcher.AvailableModels(fetchCtx)
+		target = resolveModelSwitchTarget(target, models)
 	}
 
 	target, err = e.switchModelOnAgent(agent, target, agent == e.agent)
@@ -4949,6 +4946,33 @@ func resolveModelAlias(models []ModelOption, input string) string {
 		}
 	}
 	return input
+}
+
+func resolveModelSwitchTarget(input string, models []ModelOption) string {
+	input = strings.TrimSpace(input)
+	if idx, err := strconv.Atoi(input); err == nil && idx >= 1 && idx <= len(models) {
+		return models[idx-1].Name
+	}
+	if resolved := resolveModelAlias(models, input); resolved != input {
+		return resolved
+	}
+	for _, m := range models {
+		if strings.EqualFold(m.Name, input) {
+			return m.Name
+		}
+	}
+	return input
+}
+
+func modelSwitchNeedsLookup(input string) bool {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return false
+	}
+	if _, err := strconv.Atoi(input); err == nil {
+		return true
+	}
+	return !strings.Contains(input, "/")
 }
 
 func parseModelSwitchArgs(args []string) (string, bool) {
@@ -5006,6 +5030,10 @@ func (e *Engine) switchModelOnAgent(agent Agent, target string, persistConfig bo
 	providers := providerSwitcher.ListProviders()
 	updated, found := SetProviderModel(providers, active.Name, target)
 	if !found {
+		switcher.SetModel(target)
+		return target, nil
+	}
+	if !persistConfig {
 		switcher.SetModel(target)
 		return target, nil
 	}
@@ -6269,17 +6297,17 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 			return
 		}
 		fetchCtx, cancel := context.WithTimeout(e.ctx, 3*time.Second)
-		defer cancel()
-		models := switcher.AvailableModels(fetchCtx)
 		target, ok := parseModelSwitchArgs(strings.Fields(args))
 		if !ok {
+			cancel()
 			return
 		}
-		if idx, err := strconv.Atoi(target); err == nil && idx >= 1 && idx <= len(models) {
-			target = models[idx-1].Name
-		} else {
-			target = resolveModelAlias(models, target)
+		target = strings.TrimSpace(target)
+		if modelSwitchNeedsLookup(target) {
+			models := switcher.AvailableModels(fetchCtx)
+			target = resolveModelSwitchTarget(target, models)
 		}
+		cancel()
 		if _, err := e.switchModelOnAgent(agent, target, agent == e.agent); err != nil {
 			slog.Error("failed to switch model from card action", "model", target, "error", err)
 			return
