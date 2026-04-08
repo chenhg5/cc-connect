@@ -116,12 +116,13 @@ func (e *Engine) SendRestartNotification(platformName, sessionKey string) {
 // to perform a graceful shutdown followed by syscall.Exec.
 var RestartCh = make(chan RestartRequest, 1)
 
-// DisplayCfg controls truncation of intermediate messages.
+// DisplayCfg controls how intermediate messages are surfaced.
 // A value of -1 means "use default", 0 means "no truncation".
 type DisplayCfg struct {
-	ThinkingMaxLen int // max runes for thinking preview; 0 = no truncation
-	ToolMaxLen     int // max runes for tool use preview; 0 = no truncation
-	ToolMessages   bool
+	ThinkingMessages bool
+	ThinkingMaxLen   int // max runes for thinking preview; 0 = no truncation
+	ToolMaxLen       int // max runes for tool use preview; 0 = no truncation
+	ToolMessages     bool
 }
 
 // RateLimitCfg controls per-session message rate limiting.
@@ -142,7 +143,6 @@ type Engine struct {
 	speech                SpeechCfg
 	tts                   *TTSCfg
 	display               DisplayCfg
-	defaultQuiet          bool
 	injectSender          bool
 	attachmentSendEnabled bool
 	startedAt             time.Time
@@ -158,7 +158,7 @@ type Engine struct {
 	commandSaveAddFunc func(name, description, prompt, exec, workDir string) error
 	commandSaveDelFunc func(name string) error
 
-	displaySaveFunc  func(thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error
+	displaySaveFunc  func(thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error
 	configReloadFunc func() (*ConfigReloadResult, error)
 
 	cronScheduler      *CronScheduler
@@ -210,9 +210,6 @@ type Engine struct {
 	interactiveMu     sync.Mutex
 	interactiveStates map[string]*interactiveState // key = sessionKey
 
-	quietMu sync.RWMutex
-	quiet   bool // when true, suppress thinking and tool progress messages globally
-
 	platformLifecycleMu sync.Mutex
 	platformReady       map[Platform]bool
 	stopping            bool
@@ -257,7 +254,6 @@ type interactiveState struct {
 	pending                *pendingPermission
 	pendingMessages        []queuedMessage // messages queued while session was busy
 	approveAll             bool            // when true, auto-approve all permission requests for this session
-	quiet                  bool            // when true, suppress thinking and tool progress for this session
 	fromVoice              bool            // true if current turn originated from voice transcription
 	sideText               string
 	deleteMode             *deleteModeState
@@ -333,7 +329,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		cancel:                cancel,
 		i18n:                  NewI18n(lang),
 		attachmentSendEnabled: true,
-		display:               DisplayCfg{ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen, ToolMessages: true},
+		display:               DisplayCfg{ThinkingMessages: true, ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen, ToolMessages: true},
 		commands:              NewCommandRegistry(),
 		skills:                NewSkillRegistry(),
 		aliases:               make(map[string]string),
@@ -437,11 +433,6 @@ func (e *Engine) SetTTSSaveFunc(fn func(mode string) error) {
 // SetDisplayConfig overrides the default truncation settings.
 func (e *Engine) SetDisplayConfig(cfg DisplayCfg) {
 	e.display = cfg
-}
-
-// SetDefaultQuiet sets whether new sessions start in quiet mode.
-func (e *Engine) SetDefaultQuiet(q bool) {
-	e.defaultQuiet = q
 }
 
 // estimateTokens provides a rough token estimate for a set of history entries.
@@ -558,7 +549,7 @@ func (e *Engine) SetCommandSaveDelFunc(fn func(name string) error) {
 	e.commandSaveDelFunc = fn
 }
 
-func (e *Engine) SetDisplaySaveFunc(fn func(thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error) {
+func (e *Engine) SetDisplaySaveFunc(fn func(thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error) {
 	e.displaySaveFunc = fn
 }
 
@@ -2047,14 +2038,6 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		ok = false // prevent reading stale settings below
 	}
 
-	// Preserve quiet setting from existing state (e.g. set via /quiet before session started)
-	quietMode := e.defaultQuiet
-	if ok && state != nil {
-		state.mu.Lock()
-		quietMode = state.quiet
-		state.mu.Unlock()
-	}
-
 	// Select the agent to use for this session
 	agent := e.agent
 	if agentOverride != nil {
@@ -2097,7 +2080,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	// Check if context is already canceled (e.g. during shutdown/restart)
 	if e.ctx.Err() != nil {
 		slog.Debug("skipping session start: context canceled", "session_key", sessionKey)
-		state = &interactiveState{platform: p, replyCtx: replyCtx, quiet: quietMode}
+		state = &interactiveState{platform: p, replyCtx: replyCtx}
 		e.interactiveStates[sessionKey] = state
 		return state
 	}
@@ -2126,7 +2109,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		}
 		if err != nil {
 			slog.Error("failed to start interactive session", "error", err, "elapsed", startElapsed)
-			state = &interactiveState{platform: p, replyCtx: replyCtx, quiet: quietMode}
+			state = &interactiveState{platform: p, replyCtx: replyCtx}
 			e.interactiveStates[sessionKey] = state
 			return state
 		}
@@ -2145,7 +2128,6 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		agentSession: agentSession,
 		platform:     p,
 		replyCtx:     replyCtx,
-		quiet:        quietMode,
 	}
 	e.interactiveStates[sessionKey] = state
 
@@ -2319,18 +2301,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		state.mu.Lock()
 		p := state.platform
-		sessionQuiet := state.quiet
 		state.mu.Unlock()
-
-		e.quietMu.RLock()
-		globalQuiet := e.quiet
-		e.quietMu.RUnlock()
-
-		quiet := globalQuiet || sessionQuiet
 
 		switch event.Type {
 		case EventThinking:
-			if !quiet && event.Content != "" {
+			if e.display.ThinkingMessages && event.Content != "" {
 				// Flush accumulated text segment before thinking display
 				previewActive := sp.canPreview()
 				if len(textParts) > segmentStart {
@@ -2357,7 +2332,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventToolUse:
 			toolCount++
-			if !quiet && e.display.ToolMessages {
+			if e.display.ToolMessages {
 				// Flush accumulated text segment before tool display
 				previewActive := sp.canPreview()
 				if len(textParts) > segmentStart {
@@ -2402,7 +2377,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventToolResult:
-			if !quiet && e.display.ToolMessages {
+			if e.display.ToolMessages {
 				result := strings.TrimSpace(event.ToolResult)
 				if result == "" {
 					result = strings.TrimSpace(event.Content)
@@ -2591,7 +2566,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.mu.Unlock()
 
 			// When tool calls happened and prior text was already surfaced in segments,
-			// only send the unsent remainder. In quiet mode, tool events don't surface
+			// only send the unsent remainder. When tool progress is hidden, tool events don't surface
 			// side-channel messages and segmentStart stays 0, so keep normal finalize flow.
 			if toolCount > 0 && segmentStart > 0 {
 				sp.discard()
@@ -2875,7 +2850,6 @@ var builtinCommands = []struct {
 	{[]string{"reasoning", "effort"}, "reasoning"},
 	{[]string{"mode"}, "mode"},
 	{[]string{"lang"}, "lang"},
-	{[]string{"quiet"}, "quiet"},
 	{[]string{"provider"}, "provider"},
 	{[]string{"memory"}, "memory"},
 	{[]string{"cron"}, "cron"},
@@ -3041,8 +3015,6 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdMode(p, msg, args)
 	case "lang":
 		e.cmdLang(p, msg, args)
-	case "quiet":
-		e.cmdQuiet(p, msg, args)
 	case "provider":
 		e.cmdProvider(p, msg, args)
 	case "memory":
@@ -3994,28 +3966,16 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 				modeStr = e.i18n.Tf(MsgStatusMode, mode)
 			}
 		}
-
-		e.quietMu.RLock()
-		globalQuiet := e.quiet
-		e.quietMu.RUnlock()
-
-		iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
-		e.interactiveMu.Lock()
-		state, hasState := e.interactiveStates[iKey]
-		e.interactiveMu.Unlock()
-
-		sessionQuiet := false
-		if hasState && state != nil {
-			state.mu.Lock()
-			sessionQuiet = state.quiet
-			state.mu.Unlock()
+		thinkingStr := e.i18n.T(MsgDisabledShort)
+		if e.display.ThinkingMessages {
+			thinkingStr = e.i18n.T(MsgEnabledShort)
 		}
-
-		quietStr := e.i18n.T(MsgQuietOffShort)
-		if globalQuiet || sessionQuiet {
-			quietStr = e.i18n.T(MsgQuietOnShort)
+		toolStr := e.i18n.T(MsgDisabledShort)
+		if e.display.ToolMessages {
+			toolStr = e.i18n.T(MsgEnabledShort)
 		}
-		modeStr += e.i18n.Tf(MsgStatusQuiet, quietStr)
+		modeStr += e.i18n.Tf(MsgStatusThinkingMessages, thinkingStr)
+		modeStr += e.i18n.Tf(MsgStatusToolMessages, toolStr)
 
 		s := sessions.GetOrCreateActive(msg.SessionKey)
 		sessionDisplayName := sessions.GetSessionName(s.GetAgentSessionID())
@@ -4400,28 +4360,16 @@ func (e *Engine) renderStatusCard(sessionKey string, userID string) *Card {
 			modeStr = e.i18n.Tf(MsgStatusMode, mode)
 		}
 	}
-
-	e.quietMu.RLock()
-	globalQuiet := e.quiet
-	e.quietMu.RUnlock()
-
-	iKey := e.interactiveKeyForSessionKey(sessionKey)
-	e.interactiveMu.Lock()
-	state, hasState := e.interactiveStates[iKey]
-	e.interactiveMu.Unlock()
-
-	sessionQuiet := false
-	if hasState && state != nil {
-		state.mu.Lock()
-		sessionQuiet = state.quiet
-		state.mu.Unlock()
+	thinkingStr := e.i18n.T(MsgDisabledShort)
+	if e.display.ThinkingMessages {
+		thinkingStr = e.i18n.T(MsgEnabledShort)
 	}
-
-	quietStr := e.i18n.T(MsgQuietOffShort)
-	if globalQuiet || sessionQuiet {
-		quietStr = e.i18n.T(MsgQuietOnShort)
+	toolStr := e.i18n.T(MsgDisabledShort)
+	if e.display.ToolMessages {
+		toolStr = e.i18n.T(MsgEnabledShort)
 	}
-	modeStr += e.i18n.Tf(MsgStatusQuiet, quietStr)
+	modeStr += e.i18n.Tf(MsgStatusThinkingMessages, thinkingStr)
+	modeStr += e.i18n.Tf(MsgStatusToolMessages, toolStr)
 
 	s := sessions.GetOrCreateActive(sessionKey)
 	sessionDisplayName := sessions.GetSessionName(s.GetAgentSessionID())
@@ -4699,7 +4647,6 @@ func helpCardGroups() []helpCardGroup {
 				{command: "/provider", action: "nav:/provider"},
 				{command: "/memory", action: "cmd:/memory"},
 				{command: "/allow", action: "cmd:/allow"},
-				{command: "/quiet", action: "act:/quiet"},
 				{command: "/tts", action: "cmd:/tts"},
 			},
 		},
@@ -5249,49 +5196,6 @@ func (e *Engine) applyLiveModeChange(sessionKey, mode string) bool {
 	return switcher.SetLiveMode(mode)
 }
 
-func (e *Engine) cmdQuiet(p Platform, msg *Message, args []string) {
-	// /quiet global — toggle global quiet for all sessions
-	if len(args) > 0 && args[0] == "global" {
-		e.quietMu.Lock()
-		e.quiet = !e.quiet
-		quiet := e.quiet
-		e.quietMu.Unlock()
-
-		if quiet {
-			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQuietGlobalOn))
-		} else {
-			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQuietGlobalOff))
-		}
-		return
-	}
-
-	// /quiet — toggle per-session quiet
-	iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
-	e.interactiveMu.Lock()
-	state, ok := e.interactiveStates[iKey]
-	e.interactiveMu.Unlock()
-
-	if !ok || state == nil {
-		state = &interactiveState{platform: p, replyCtx: msg.ReplyCtx, quiet: true}
-		e.interactiveMu.Lock()
-		e.interactiveStates[iKey] = state
-		e.interactiveMu.Unlock()
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQuietOn))
-		return
-	}
-
-	state.mu.Lock()
-	state.quiet = !state.quiet
-	quiet := state.quiet
-	state.mu.Unlock()
-
-	if quiet {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQuietOn))
-	} else {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQuietOff))
-	}
-}
-
 func (e *Engine) cmdTTS(p Platform, msg *Message, args []string) {
 	if e.tts == nil || !e.tts.Enabled || e.tts.TTS == nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgTTSNotEnabled))
@@ -5340,26 +5244,11 @@ func (e *Engine) stopInteractiveSession(sessionKey string, quietPlatform Platfor
 	state.mu.Lock()
 	pending := state.pending
 	state.pending = nil
-	quietMode := state.quiet
 	agentSession := state.agentSession
 	state.mu.Unlock()
 
 	state.markStopped()
-	if quietMode {
-		if quietPlatform == nil {
-			quietPlatform = state.platform
-		}
-		if quietReplyCtx == nil {
-			quietReplyCtx = state.replyCtx
-		}
-		e.interactiveStates[sessionKey] = &interactiveState{
-			platform: quietPlatform,
-			replyCtx: quietReplyCtx,
-			quiet:    true,
-		}
-	} else {
-		delete(e.interactiveStates, sessionKey)
-	}
+	delete(e.interactiveStates, sessionKey)
 	e.interactiveMu.Unlock()
 
 	if pending != nil {
@@ -6318,8 +6207,6 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 		return e.renderVersionCard()
 	case "/new":
 		return e.renderCurrentCard(sessionKey)
-	case "/quiet":
-		return e.renderStatusCard(sessionKey, extractUserID(sessionKey))
 	case "/switch":
 		return e.renderListCardSafe(sessionKey, 1)
 	case "/delete-mode":
@@ -6467,21 +6354,6 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 
 	case "/delete-mode":
 		e.executeDeleteModeAction(sessionKey, args)
-
-	case "/quiet":
-		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
-		e.interactiveMu.Lock()
-		state, ok := e.interactiveStates[interactiveKey]
-		if !ok || state == nil {
-			state = &interactiveState{quiet: true}
-			e.interactiveStates[interactiveKey] = state
-			e.interactiveMu.Unlock()
-		} else {
-			e.interactiveMu.Unlock()
-			state.mu.Lock()
-			state.quiet = !state.quiet
-			state.mu.Unlock()
-		}
 
 	case "/switch":
 		if args == "" {
@@ -8390,6 +8262,25 @@ func (ci configItem) description(isZh bool) string {
 func (e *Engine) configItems() []configItem {
 	return []configItem{
 		{
+			key:    "thinking_messages",
+			desc:   "Whether thinking messages are shown (true/false)",
+			descZh: "是否显示思考消息 (true/false)",
+			getFunc: func() string {
+				return fmt.Sprintf("%t", e.display.ThinkingMessages)
+			},
+			setFunc: func(v string) error {
+				b, err := strconv.ParseBool(v)
+				if err != nil {
+					return fmt.Errorf("invalid boolean: %s", v)
+				}
+				e.display.ThinkingMessages = b
+				if e.displaySaveFunc != nil {
+					return e.displaySaveFunc(&b, nil, nil, nil)
+				}
+				return nil
+			},
+		},
+		{
 			key:    "thinking_max_len",
 			desc:   "Max chars for thinking messages (0=no truncation)",
 			descZh: "思考消息最大长度 (0=不截断)",
@@ -8406,7 +8297,7 @@ func (e *Engine) configItems() []configItem {
 				}
 				e.display.ThinkingMaxLen = n
 				if e.displaySaveFunc != nil {
-					return e.displaySaveFunc(&n, nil, nil)
+					return e.displaySaveFunc(nil, &n, nil, nil)
 				}
 				return nil
 			},
@@ -8425,7 +8316,7 @@ func (e *Engine) configItems() []configItem {
 				}
 				e.display.ToolMessages = b
 				if e.displaySaveFunc != nil {
-					return e.displaySaveFunc(nil, nil, &b)
+					return e.displaySaveFunc(nil, nil, nil, &b)
 				}
 				return nil
 			},
@@ -8447,7 +8338,7 @@ func (e *Engine) configItems() []configItem {
 				}
 				e.display.ToolMaxLen = n
 				if e.displaySaveFunc != nil {
-					return e.displaySaveFunc(nil, &n, nil)
+					return e.displaySaveFunc(nil, nil, &n, nil)
 				}
 				return nil
 			},

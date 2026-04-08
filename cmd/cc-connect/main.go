@@ -269,9 +269,13 @@ func main() {
 		// Wire display truncation settings
 		{
 			dcfg := core.DisplayCfg{
-				ThinkingMaxLen: 300,
-				ToolMaxLen:     500,
-				ToolMessages:   true,
+				ThinkingMessages: true,
+				ThinkingMaxLen:   300,
+				ToolMaxLen:       500,
+				ToolMessages:     true,
+			}
+			if cfg.Display.ThinkingMessages != nil {
+				dcfg.ThinkingMessages = *cfg.Display.ThinkingMessages
 			}
 			if cfg.Display.ThinkingMaxLen != nil {
 				dcfg.ThinkingMaxLen = *cfg.Display.ThinkingMaxLen
@@ -351,8 +355,8 @@ func main() {
 			}
 		}
 
-		engine.SetDisplaySaveFunc(func(thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
-			return config.SaveDisplayConfig(thinkingMaxLen, toolMaxLen, toolMessages)
+		engine.SetDisplaySaveFunc(func(thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
+			return config.SaveDisplayConfig(thinkingMessages, thinkingMaxLen, toolMaxLen, toolMessages)
 		})
 
 		// Wire idle timeout
@@ -363,13 +367,6 @@ func main() {
 			} else {
 				engine.SetEventIdleTimeout(time.Duration(mins) * time.Minute)
 			}
-		}
-
-		// Wire default quiet mode: project-level overrides global
-		if proj.Quiet != nil {
-			engine.SetDefaultQuiet(*proj.Quiet)
-		} else if cfg.Quiet != nil {
-			engine.SetDefaultQuiet(*cfg.Quiet)
 		}
 
 		// Wire auto-compress settings
@@ -742,7 +739,6 @@ func main() {
 		mgmtSrv.SetRemoveProject(config.RemoveProject)
 		mgmtSrv.SetSaveProjectSettings(func(name string, u core.ProjectSettingsUpdate) error {
 			return config.SaveProjectSettings(name, config.ProjectSettingsUpdate{
-				Quiet:                u.Quiet,
 				Language:             u.Language,
 				AdminFrom:            u.AdminFrom,
 				DisabledCommands:     u.DisabledCommands,
@@ -760,9 +756,6 @@ func main() {
 			if v, ok := updates["language"].(string); ok {
 				u.Language = &v
 			}
-			if v, ok := updates["quiet"].(bool); ok {
-				u.Quiet = &v
-			}
 			if v, ok := updates["attachment_send"].(string); ok {
 				u.AttachmentSend = &v
 			}
@@ -773,9 +766,15 @@ func main() {
 				iv := int(v)
 				u.IdleTimeoutMins = &iv
 			}
+			if v, ok := updates["thinking_messages"].(bool); ok {
+				u.ThinkingMessages = &v
+			}
 			if v, ok := updates["thinking_max_len"].(float64); ok {
 				iv := int(v)
 				u.ThinkingMaxLen = &iv
+			}
+			if v, ok := updates["tool_messages"].(bool); ok {
+				u.ToolMessages = &v
 			}
 			if v, ok := updates["tool_max_len"].(float64); ok {
 				iv := int(v)
@@ -1188,7 +1187,10 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	}
 
 	// Reload display config
-	dcfg := core.DisplayCfg{ThinkingMaxLen: 300, ToolMaxLen: 500, ToolMessages: true}
+	dcfg := core.DisplayCfg{ThinkingMessages: true, ThinkingMaxLen: 300, ToolMaxLen: 500, ToolMessages: true}
+	if cfg.Display.ThinkingMessages != nil {
+		dcfg.ThinkingMessages = *cfg.Display.ThinkingMessages
+	}
 	if cfg.Display.ThinkingMaxLen != nil {
 		dcfg.ThinkingMaxLen = *cfg.Display.ThinkingMaxLen
 	}
@@ -1200,15 +1202,6 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	}
 	engine.SetDisplayConfig(dcfg)
 	result.DisplayUpdated = true
-
-	// Reload default quiet mode
-	if proj.Quiet != nil {
-		engine.SetDefaultQuiet(*proj.Quiet)
-	} else if cfg.Quiet != nil {
-		engine.SetDefaultQuiet(*cfg.Quiet)
-	} else {
-		engine.SetDefaultQuiet(false)
-	}
 
 	// Reload auto-compress settings
 	if proj.AutoCompress.Enabled != nil && *proj.AutoCompress.Enabled {

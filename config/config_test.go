@@ -297,7 +297,7 @@ func TestDisplayConfig_Save(t *testing.T) {
 	thinking := 120
 	tool := 240
 	showTools := false
-	if err := SaveDisplayConfig(&thinking, &tool, &showTools); err != nil {
+	if err := SaveDisplayConfig(nil, &thinking, &tool, &showTools); err != nil {
 		t.Fatalf("SaveDisplayConfig() error: %v", err)
 	}
 
@@ -313,7 +313,7 @@ func TestDisplayConfig_Save(t *testing.T) {
 	}
 
 	thinking = 360
-	if err := SaveDisplayConfig(&thinking, nil, nil); err != nil {
+	if err := SaveDisplayConfig(nil, &thinking, nil, nil); err != nil {
 		t.Fatalf("SaveDisplayConfig() second update error: %v", err)
 	}
 

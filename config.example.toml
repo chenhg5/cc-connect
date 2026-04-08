@@ -32,11 +32,6 @@
 # 不带附件的 `cc-connect send --message` 不受影响。
 # attachment_send = "on"
 
-# Default quiet mode (suppress thinking/tool progress messages) / 默认静默模式（隐藏思考和工具进度消息）
-# Can be overridden per-project. Users can still toggle with /quiet command.
-# 可被项目级配置覆盖。用户仍可通过 /quiet 命令切换。
-# quiet = true
-
 [log]
 level = "info" # debug, info, warn, error
 
@@ -50,6 +45,7 @@ level = "info" # debug, info, warn, error
 # 设为 0 表示不截断（显示完整内容）。
 
 # [display]
+# thinking_messages = true # Show/hide thinking messages (default: true) / 是否显示思考消息（默认 true）
 # thinking_max_len = 300   # Max chars for thinking messages (default: 300) / 思考消息最大字符数（默认 300）
 # tool_max_len = 500       # Max chars for tool use messages (default: 500) / 工具调用消息最大字符数（默认 500）
 # tool_messages = true     # Show/hide tool progress messages (default: true) / 是否显示工具进度消息（默认 true）
@@ -455,7 +451,6 @@ level = "info" # debug, info, warn, error
 name = "my-backend"
 # show_context_indicator = false  # Hide the “[ctx: ~N%]” suffix on assistant replies (default: true / show)
 #                                   # 不在助手回复末尾显示「[ctx: ~N%]」上下文占用提示（默认 true 显示）
-# quiet = true  # Override global quiet for this project / 覆盖全局静默模式
 # disabled_commands = ["restart", "upgrade", "cron"]  # Disable specific commands for this project
 #                                                     # 禁用该项目的指定命令
 #
