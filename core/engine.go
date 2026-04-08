@@ -1384,8 +1384,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 				ws.Touch()
 			}
 
-			// Get or create the workspace's agent and session manager
-			wsAgent, wsSessions, err = e.getOrCreateWorkspaceAgent(workspace)
+			wsAgent, wsSessions, _, err = e.workspaceContext(workspace, msg.SessionKey)
 			if err != nil {
 				slog.Error("failed to create workspace agent", "workspace", workspace, "err", err)
 				e.reply(p, msg.ReplyCtx, fmt.Sprintf("Failed to initialize workspace: %v", err))
@@ -1414,7 +1413,6 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		sessions = wsSessions
 		agent = wsAgent
 		interactiveKey = resolvedWorkspace + ":" + msg.SessionKey
-		e.applyChannelDirOverride(agent, interactiveKey)
 	}
 
 	session := sessions.GetOrCreateActive(msg.SessionKey)
@@ -2003,6 +2001,16 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 	ws.agent = agent
 	ws.sessions = sessions
 	return agent, sessions, nil
+}
+
+func (e *Engine) workspaceContext(workspace, sessionKey string) (Agent, *SessionManager, string, error) {
+	wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(workspace)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	interactiveKey := workspace + ":" + sessionKey
+	e.applyChannelDirOverride(wsAgent, interactiveKey)
+	return wsAgent, wsSessions, interactiveKey, nil
 }
 
 // getOrCreateInteractiveStateWith accepts an optional agent override for multi-workspace mode.
@@ -9713,13 +9721,7 @@ func (e *Engine) commandContext(p Platform, msg *Message) (Agent, *SessionManage
 	if workspace == "" {
 		return e.agent, e.sessions, msg.SessionKey, nil
 	}
-	wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(workspace)
-	if err != nil {
-		return nil, nil, "", err
-	}
-	interactiveKey := workspace + ":" + msg.SessionKey
-	e.applyChannelDirOverride(wsAgent, interactiveKey)
-	return wsAgent, wsSessions, interactiveKey, nil
+	return e.workspaceContext(workspace, msg.SessionKey)
 }
 
 // sessionContextForKey resolves the agent and session manager for a sessionKey.
