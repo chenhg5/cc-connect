@@ -210,6 +210,11 @@ type Engine struct {
 	interactiveMu     sync.Mutex
 	interactiveStates map[string]*interactiveState // key = sessionKey
 
+	// Debounce for rapid consecutive messages
+	debounceMu     sync.Mutex
+	debounceStates map[string]*debouncedMessage // key = interactiveKey
+	debounceWindow time.Duration                 // default 500ms
+
 	quietMu sync.RWMutex
 	quiet   bool // when true, suppress thinking and tool progress messages globally
 
@@ -271,6 +276,20 @@ type deleteModeState struct {
 	phase       string
 	hint        string
 	result      string
+}
+
+// debouncedMessage holds messages that are being debounced before processing.
+// Used to merge rapid consecutive messages into a single agent turn.
+type debouncedMessage struct {
+	platform      Platform
+	msg           *Message // original message (first one)
+	contents      []string // all message contents to merge
+	images        []ImageAttachment
+	files         []FileAttachment
+	sessions      *SessionManager
+	agent         Agent
+	interactiveKey string
+	workspaceDir  string
 }
 
 // pendingPermission represents a permission request waiting for user response.
@@ -338,6 +357,8 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		skills:                NewSkillRegistry(),
 		aliases:               make(map[string]string),
 		interactiveStates:     make(map[string]*interactiveState),
+		debounceStates:        make(map[string]*debouncedMessage),
+		debounceWindow:        500 * time.Millisecond, // default debounce window
 		platformReady:         make(map[Platform]bool),
 		startedAt:             time.Now(),
 		streamPreview:         DefaultStreamPreviewCfg(),
@@ -1374,6 +1395,26 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 
 	session := sessions.GetOrCreateActive(msg.SessionKey)
 	sessions.UpdateUserMeta(msg.SessionKey, msg.UserName, msg.ChatName)
+
+	// Check if there's an active agent session in memory
+	e.interactiveMu.Lock()
+	hasActiveState := false
+	if state, ok := e.interactiveStates[interactiveKey]; ok && state != nil && state.agentSession != nil && state.agentSession.Alive() {
+		hasActiveState = true
+	}
+	e.interactiveMu.Unlock()
+
+	// Debounce only for truly fresh sessions (no existing agent session ID)
+	// Sessions with existing IDs are being resumed - don't delay them
+	hasExistingSession := session.GetAgentSessionID() != ""
+
+	// If no active state, no existing session, and debounce is enabled, debounce the message
+	if !hasActiveState && !hasExistingSession && e.debounceWindow > 0 {
+		if e.tryDebounceMessage(p, msg, sessions, agent, interactiveKey, resolvedWorkspace) {
+			return // message debounced, will be processed after window
+		}
+	}
+
 	if !session.TryLock() {
 		// Check for /btw — inject into the running session mid-turn
 		trimmed := strings.TrimSpace(content)
@@ -1529,6 +1570,116 @@ func (e *Engine) drainOrphanedQueue(session *Session, sessions *SessionManager, 
 	}
 
 	unlocked = e.drainPendingMessages(state, session, sessions, interactiveKey)
+}
+
+// tryDebounceMessage attempts to debounce a message for a session that doesn't
+// have an active agent session yet. Returns true if the message was debounced,
+// false if the debounce window has passed and the message should be processed immediately.
+func (e *Engine) tryDebounceMessage(p Platform, msg *Message, sessions *SessionManager, agent Agent, interactiveKey, workspaceDir string) bool {
+	e.debounceMu.Lock()
+	defer e.debounceMu.Unlock()
+
+	state, exists := e.debounceStates[interactiveKey]
+
+	if exists && state != nil {
+		// There's already a pending debounce - merge this message
+		slog.Debug("debounce: merging message", "session", msg.SessionKey)
+		state.contents = append(state.contents, msg.Content)
+		state.images = append(state.images, msg.Images...)
+		state.files = append(state.files, msg.Files...)
+		return true
+	}
+
+	// Start a new debounce
+	slog.Debug("debounce: starting", "session", msg.SessionKey, "window", e.debounceWindow)
+	state = &debouncedMessage{
+		platform:       p,
+		msg:            msg,
+		contents:       []string{msg.Content},
+		images:         msg.Images,
+		files:          msg.Files,
+		sessions:       sessions,
+		agent:          agent,
+		interactiveKey: interactiveKey,
+		workspaceDir:   workspaceDir,
+	}
+	e.debounceStates[interactiveKey] = state
+
+	// Start timer to process after debounce window
+	time.AfterFunc(e.debounceWindow, func() {
+		e.processDebouncedMessages(interactiveKey)
+	})
+
+	return true
+}
+
+// processDebouncedMessages is called when the debounce timer fires.
+// It merges all accumulated messages and processes them.
+func (e *Engine) processDebouncedMessages(interactiveKey string) {
+	e.debounceMu.Lock()
+	state, exists := e.debounceStates[interactiveKey]
+	if !exists || state == nil {
+		e.debounceMu.Unlock()
+		return
+	}
+	delete(e.debounceStates, interactiveKey)
+	e.debounceMu.Unlock()
+
+	// Merge all message contents
+	mergedContent := strings.Join(state.contents, "\n\n")
+	if len(state.contents) > 1 {
+		slog.Info("debounce: merged messages", "session", state.msg.SessionKey, "count", len(state.contents))
+	}
+
+	// Create a merged message
+	mergedMsg := &Message{
+		SessionKey:  state.msg.SessionKey,
+		Platform:    state.msg.Platform,
+		UserID:      state.msg.UserID,
+		UserName:    state.msg.UserName,
+		ChatName:    state.msg.ChatName,
+		Content:     mergedContent,
+		Images:      state.images,
+		Files:       state.files,
+		ReplyCtx:    state.msg.ReplyCtx,
+		MessageID:   state.msg.MessageID,
+		FromVoice:   state.msg.FromVoice,
+	}
+
+	// Acquire session lock and process
+	session := state.sessions.GetOrCreateActive(state.msg.SessionKey)
+	if !session.TryLock() {
+		// Session is now busy - queue the message
+		e.interactiveMu.Lock()
+		iState, hasState := e.interactiveStates[interactiveKey]
+		e.interactiveMu.Unlock()
+
+		if hasState && iState != nil && iState.agentSession != nil && iState.agentSession.Alive() {
+			iState.mu.Lock()
+			if len(iState.pendingMessages) < maxQueuedMessages {
+				iState.pendingMessages = append(iState.pendingMessages, queuedMessage{
+					platform:      iState.platform,
+					replyCtx:      iState.replyCtx,
+					content:       mergedContent,
+					images:        state.images,
+					files:         state.files,
+					fromVoice:     mergedMsg.FromVoice,
+					userID:        mergedMsg.UserID,
+					msgPlatform:   mergedMsg.Platform,
+					msgSessionKey: mergedMsg.SessionKey,
+				})
+				iState.mu.Unlock()
+				return
+			}
+			iState.mu.Unlock()
+		}
+		slog.Warn("debounce: session busy, cannot queue merged message", "session", mergedMsg.SessionKey)
+		return
+	}
+
+	// Process the merged message
+	slog.Info("debounce: processing merged message", "session", mergedMsg.SessionKey, "content_len", len(mergedContent))
+	go e.processInteractiveMessageWith(state.platform, mergedMsg, session, state.agent, state.sessions, interactiveKey, state.workspaceDir, mergedMsg.SessionKey)
 }
 
 // ──────────────────────────────────────────────────────────────
