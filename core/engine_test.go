@@ -8107,6 +8107,53 @@ func TestExecuteCronJob_ResolvesCronReplyTarget(t *testing.T) {
 	}
 }
 
+func TestExecuteCronJob_WorkspacePrefixedSessionKey(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatalf("NewCronStore() error = %v", err)
+	}
+	scheduler := NewCronScheduler(store)
+
+	platform := &stubCronReplyTargetPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "slack"},
+	}
+	agentSession := newResultAgentSession("done")
+	agent := &resultAgent{session: agentSession}
+
+	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+	e.cronScheduler = scheduler
+
+	// Simulate a session key that was stored with a workspace prefix
+	// (as happens in multi-workspace mode).
+	prefixedKey := "/home/user/workspace/myproject:slack:C123:U456"
+	job := &CronJob{
+		ID:          "job-ws",
+		SessionKey:  prefixedKey,
+		Prompt:      "daily standup",
+		Description: "Standup",
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatalf("store.Add() error = %v", err)
+	}
+
+	if err := e.ExecuteCronJob(job); err != nil {
+		t.Fatalf("ExecuteCronJob() with workspace-prefixed key error = %v", err)
+	}
+
+	// The platform should have received the cron start notice and agent reply.
+	sent := platform.getSent()
+	if len(sent) < 1 {
+		t.Fatalf("expected at least one message sent to platform, got %d", len(sent))
+	}
+
+	// Stored session key must remain unchanged.
+	if job.SessionKey != prefixedKey {
+		t.Fatalf("job.SessionKey = %q, want unchanged %q", job.SessionKey, prefixedKey)
+	}
+}
+
 func TestExtractSessionKeyParts(t *testing.T) {
 	tests := []struct {
 		name         string

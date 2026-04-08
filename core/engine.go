@@ -814,6 +814,20 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 			break
 		}
 	}
+	// Fallback: in multi-workspace mode the stored session key may be prefixed
+	// with the workspace path (e.g. "/home/user/project:slack:C123:U456").
+	// Search for a known platform name within the key and strip the prefix.
+	if targetPlatform == nil {
+		for _, p := range e.platforms {
+			needle := ":" + p.Name() + ":"
+			if idx := strings.Index(sessionKey, needle); idx >= 0 {
+				targetPlatform = p
+				platformName = p.Name()
+				sessionKey = sessionKey[idx+1:] // strip workspace prefix
+				break
+			}
+		}
+	}
 	if targetPlatform == nil {
 		return fmt.Errorf("platform %q not found for session %q", platformName, sessionKey)
 	}
@@ -996,6 +1010,20 @@ func (e *Engine) ExecuteHeartbeat(sessionKey, prompt string, silent bool) error 
 		if p.Name() == platformName {
 			targetPlatform = p
 			break
+		}
+	}
+	// Fallback: in multi-workspace mode the stored session key may be prefixed
+	// with the workspace path (e.g. "/home/user/project:slack:C123:U456").
+	// Search for a known platform name within the key and strip the prefix.
+	if targetPlatform == nil {
+		for _, p := range e.platforms {
+			needle := ":" + p.Name() + ":"
+			if idx := strings.Index(sessionKey, needle); idx >= 0 {
+				targetPlatform = p
+				platformName = p.Name()
+				sessionKey = sessionKey[idx+1:] // strip workspace prefix
+				break
+			}
 		}
 	}
 	if targetPlatform == nil {
