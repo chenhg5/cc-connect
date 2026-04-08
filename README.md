@@ -267,11 +267,23 @@ cc-connect update --pre     # Beta (includes pre-releases)
 ### 💬 Session Management
 
 ```
-/new [name]       Start a new session
-/list             List all sessions
-/switch <id>      Switch session
-/current          Show current session
-/dir [path|reset] Show, switch, or reset work directory
+/session new [name]       Start a new session
+/session list [page]      List all sessions
+/session switch <id>      Switch session
+/session current          Show current session
+/session history [n]      Show recent messages
+/session rename <text>    Rename current session
+/session delete <id>      Delete session(s)
+/dir [path|reset]         Show, switch, or reset work directory
+```
+
+Compatibility aliases `/new`, `/list`, and `/switch` remain available in this release and are planned for removal in the next major version.
+
+Project configs can also rotate to a fresh session automatically after long inactivity:
+
+```toml
+[[projects]]
+reset_on_idle_mins = 60
 ```
 
 Project configs can also rotate to a fresh session automatically after long inactivity:

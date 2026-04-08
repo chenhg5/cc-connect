@@ -31,11 +31,11 @@ cc-connect 完整功能使用指南。
 
 | 命令 | 说明 |
 |------|------|
-| `/new [名称]` | 创建新会话 |
-| `/list` | 列出当前项目的会话 |
-| `/switch <id>` | 切换到指定会话 |
-| `/current` | 查看当前会话 |
-| `/history [n]` | 查看最近 n 条消息 |
+| `/session new [名称]` | 创建新会话 |
+| `/session list [页码]` | 列出当前项目的会话 |
+| `/session switch <id>` | 切换到指定会话 |
+| `/session current` | 查看当前会话 |
+| `/session history [n]` | 查看最近 n 条消息 |
 | `/usage` | 查看账号/模型限额使用情况 |
 | `/provider [...]` | 管理 API Provider |
 | `/model [switch <alias>]` | 列出可用模型或按别名切换 |
@@ -46,6 +46,8 @@ cc-connect 完整功能使用指南。
 | `/quiet` | 开关思考/工具进度消息 |
 | `/stop` | 停止当前执行 |
 | `/help` | 显示可用命令 |
+
+兼容别名 `/new`、`/list`、`/switch` 在当前版本仍分别映射到 `/session new`、`/session list`、`/session switch`，并计划在下一个大版本移除。
 
 会话中 Agent 请求工具权限时，回复 **允许** / **拒绝** / **允许所有**。
 
