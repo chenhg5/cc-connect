@@ -2188,6 +2188,13 @@ func (e *Engine) closeAgentSessionWithTimeout(sessionKey string, agentSession Ag
 		return
 	}
 
+	// Allow enough time for the agent's own graceful shutdown sequence:
+	// stdin close → Stop hooks (claude-mem summary etc.) → SIGTERM → SIGKILL.
+	// Claude Code's Stop hooks can take up to 120s (claude-mem uses a
+	// sonnet summarizer). The 45s budget here covers the default 30s
+	// graceful phase + 5s SIGTERM + 10s buffer.
+	const closeTimeout = 45 * time.Second
+
 	slog.Debug("cleanupInteractiveState: closing agent session", "session", sessionKey)
 	closeStart := time.Now()
 
@@ -2202,8 +2209,9 @@ func (e *Engine) closeAgentSessionWithTimeout(sessionKey string, agentSession Ag
 		if elapsed := time.Since(closeStart); elapsed >= slowAgentClose {
 			slog.Warn("slow agent session close", "elapsed", elapsed, "session", sessionKey)
 		}
-	case <-time.After(10 * time.Second):
-		slog.Error("agent session close timed out (10s), abandoning", "session", sessionKey)
+	case <-time.After(closeTimeout):
+		slog.Error("agent session close timed out, abandoning",
+			"timeout", closeTimeout, "session", sessionKey)
 	}
 }
 
