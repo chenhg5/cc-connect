@@ -2967,7 +2967,16 @@ func TestGetOrCreateWorkspaceAgent_InheritsActiveProvider(t *testing.T) {
 	}
 }
 
-func TestApplyChannelDirOverride_PerChannelIndependence(t *testing.T) {
+func TestWorkspaceContext_PerChannelIndependence(t *testing.T) {
+	agentName := "test-workspace-context-dir-override"
+	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) {
+		agent := &namedStubWorkDirAgent{name: agentName}
+		if workDir, ok := opts["work_dir"].(string); ok {
+			agent.workDir = workDir
+		}
+		return agent, nil
+	})
+
 	workspace := normalizeWorkspacePath(t.TempDir())
 	dirA := filepath.Join(workspace, "channelA")
 	dirB := filepath.Join(workspace, "channelB")
@@ -2985,19 +2994,42 @@ func TestApplyChannelDirOverride_PerChannelIndependence(t *testing.T) {
 	store.SetWorkspaceDirOverride(keyB, dirB)
 	store.Save()
 
-	agent := &stubWorkDirAgent{workDir: workspace}
-	e := NewEngine("test", agent, []Platform{&stubPlatformEngine{n: "plain"}}, "", LangEnglish)
+	e := NewEngine("test", &namedStubWorkDirAgent{name: agentName, stubWorkDirAgent: stubWorkDirAgent{workDir: workspace}}, []Platform{&stubPlatformEngine{n: "plain"}}, "", LangEnglish)
 	e.SetMultiWorkspace(workspace, filepath.Join(t.TempDir(), "bindings.json"))
 	e.SetProjectStateStore(store)
 
-	e.applyChannelDirOverride(agent, keyA)
-	if agent.GetWorkDir() != dirA {
-		t.Fatalf("after keyA: workDir = %q, want %q", agent.GetWorkDir(), dirA)
+	agentA, sessionsA, interactiveKeyA, effectiveDirA, err := e.workspaceContext(workspace, "feishu:oc_aaa:ou_111")
+	if err != nil {
+		t.Fatalf("workspaceContext A error: %v", err)
+	}
+	agentB, sessionsB, interactiveKeyB, effectiveDirB, err := e.workspaceContext(workspace, "feishu:oc_bbb:ou_222")
+	if err != nil {
+		t.Fatalf("workspaceContext B error: %v", err)
 	}
 
-	e.applyChannelDirOverride(agent, keyB)
-	if agent.GetWorkDir() != dirB {
-		t.Fatalf("after keyB: workDir = %q, want %q", agent.GetWorkDir(), dirB)
+	if interactiveKeyA != keyA {
+		t.Fatalf("interactiveKeyA = %q, want %q", interactiveKeyA, keyA)
+	}
+	if interactiveKeyB != keyB {
+		t.Fatalf("interactiveKeyB = %q, want %q", interactiveKeyB, keyB)
+	}
+	if effectiveDirA != dirA {
+		t.Fatalf("effectiveDirA = %q, want %q", effectiveDirA, dirA)
+	}
+	if effectiveDirB != dirB {
+		t.Fatalf("effectiveDirB = %q, want %q", effectiveDirB, dirB)
+	}
+	if agentA == agentB {
+		t.Fatal("workspaceContext returned same agent for different effective dirs")
+	}
+	if sessionsA == sessionsB {
+		t.Fatal("workspaceContext returned same session manager for different effective dirs")
+	}
+	if got := agentA.(interface{ GetWorkDir() string }).GetWorkDir(); got != dirA {
+		t.Fatalf("agentA workDir = %q, want %q", got, dirA)
+	}
+	if got := agentB.(interface{ GetWorkDir() string }).GetWorkDir(); got != dirB {
+		t.Fatalf("agentB workDir = %q, want %q", got, dirB)
 	}
 }
 
