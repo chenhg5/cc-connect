@@ -105,6 +105,7 @@ type getUploadURLRequest struct {
 type getUploadURLResponse struct {
 	UploadParam      string `json:"upload_param,omitempty"`
 	ThumbUploadParam string `json:"thumb_upload_param,omitempty"`
+	UploadFullURL    string `json:"upload_full_url,omitempty"` // full CDN URL with encrypted_query_param embedded
 }
 
 type weixinMessage struct {

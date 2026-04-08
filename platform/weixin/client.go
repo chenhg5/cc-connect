@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -201,6 +202,12 @@ func (c *apiClient) getUploadURL(ctx context.Context, req getUploadURLRequest) (
 	var out getUploadURLResponse
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, fmt.Errorf("weixin: getUploadUrl json: %w", err)
+	}
+	// If upload_param is empty but upload_full_url is provided, extract encrypted_query_param from URL
+	if strings.TrimSpace(out.UploadParam) == "" && strings.TrimSpace(out.UploadFullURL) != "" {
+		if u, err := url.Parse(out.UploadFullURL); err == nil {
+			out.UploadParam = u.Query().Get("encrypted_query_param")
+		}
 	}
 	if strings.TrimSpace(out.UploadParam) == "" {
 		return nil, fmt.Errorf("weixin: getUploadUrl: empty upload_param in %s", truncateForLog(raw, 512))
