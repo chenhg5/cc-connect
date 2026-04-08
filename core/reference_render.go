@@ -472,9 +472,7 @@ func cleanDisplayPath(path string) string {
 		return ""
 	}
 	path = filepath.ToSlash(path)
-	if strings.HasPrefix(path, "./") {
-		path = strings.TrimPrefix(path, "./")
-	}
+	path = strings.TrimPrefix(path, "./")
 	return strings.TrimSpace(path)
 }
 

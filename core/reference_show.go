@@ -97,7 +97,7 @@ func renderReferenceFile(path string, req *referenceViewRequest) (string, error)
 
 	switch req.Mode {
 	case referenceViewContext:
-		lines, truncated, err = readFileContext(path, req.Ref.lineStart, req.Window, req.Window, req.MaxLines)
+		lines, _, err = readFileContext(path, req.Ref.lineStart, req.Window, req.Window, req.MaxLines)
 	case referenceViewRange:
 		lines, truncated, err = readFileRange(path, req.Ref.lineStart, req.Ref.lineEnd, req.MaxLines)
 		if truncated {

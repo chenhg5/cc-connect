@@ -6333,10 +6333,6 @@ func (e *Engine) waitOutgoing(p Platform) error {
 	return e.outgoingRL.Wait(e.ctx, p.Name())
 }
 
-func (e *Engine) renderOutgoingContent(p Platform, content string) string {
-	return content
-}
-
 func (e *Engine) renderOutgoingContentForWorkspace(p Platform, content, workspaceDir string) string {
 	if strings.TrimSpace(content) == "" {
 		return content
@@ -6355,27 +6351,6 @@ func (e *Engine) sendWithErrorForWorkspace(p Platform, replyCtx any, content, wo
 
 func (e *Engine) sendForWorkspace(p Platform, replyCtx any, content, workspaceDir string) {
 	_ = e.sendWithErrorForWorkspace(p, replyCtx, content, workspaceDir)
-}
-
-func (e *Engine) replyWithErrorForWorkspace(p Platform, replyCtx any, content, workspaceDir string) error {
-	if err := e.waitOutgoing(p); err != nil {
-		slog.Warn("outgoing rate limit: context cancelled", "platform", p.Name(), "error", err)
-		return err
-	}
-	content = e.renderOutgoingContentForWorkspace(p, content, workspaceDir)
-	start := time.Now()
-	if err := p.Reply(e.ctx, replyCtx, content); err != nil {
-		slog.Error("platform reply failed", "platform", p.Name(), "error", err, "content_len", len(content))
-		return err
-	}
-	if elapsed := time.Since(start); elapsed >= slowPlatformSend {
-		slog.Warn("slow platform reply", "platform", p.Name(), "elapsed", elapsed, "content_len", len(content))
-	}
-	return nil
-}
-
-func (e *Engine) replyForWorkspace(p Platform, replyCtx any, content, workspaceDir string) {
-	_ = e.replyWithErrorForWorkspace(p, replyCtx, content, workspaceDir)
 }
 
 func (e *Engine) renderCardForPlatform(p Platform, card *Card) *Card {
