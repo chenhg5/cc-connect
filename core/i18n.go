@@ -394,7 +394,8 @@ const (
 
 	MsgNewSessionCreated     MsgKey = "new_session_created"
 	MsgNewSessionCreatedName MsgKey = "new_session_created_name"
-	MsgSessionAutoResetIdle  MsgKey = "session_auto_reset_idle"
+	MsgSessionAutoResetIdle     MsgKey = "session_auto_reset_idle"
+	MsgSessionClosingGraceful   MsgKey = "session_closing_graceful"
 
 	MsgDeleteUsage              MsgKey = "delete_usage"
 	MsgDeleteSuccess            MsgKey = "delete_success"
@@ -2707,6 +2708,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "⏰ 因閒置超過 %d 分鐘，已自動切換到新會話。",
 		LangJapanese:           "⏰ %d 分以上操作がなかったため、新しいセッションに自動切り替えました。",
 		LangSpanish:            "⏰ La sesión se reinició automáticamente tras %d minuto(s) de inactividad.",
+	},
+	MsgSessionClosingGraceful: {
+		LangEnglish:            "⏳ Wrapping up your previous session (usually a few seconds, up to 2 minutes). Your new session will start automatically.",
+		LangChinese:            "⏳ 正在结束上一个会话（通常几秒钟，最多2分钟）。新会话将自动启动。",
+		LangTraditionalChinese: "⏳ 正在結束上一個會話（通常幾秒鐘，最多2分鐘）。新會話將自動啟動。",
+		LangJapanese:           "⏳ 前のセッションを終了中です（通常は数秒、最大2分）。新しいセッションは自動的に開始されます。",
+		LangSpanish:            "⏳ Cerrando la sesión anterior (normalmente unos segundos, hasta 2 minutos). La nueva sesión se iniciará automáticamente.",
 	},
 	MsgDeleteUsage: {
 		LangEnglish:            "Usage: `/delete <number>` or `/delete 1,2,3` or `/delete 3-7` or `/delete 1,3-5,8`.\nUse `/list` to see session numbers.",

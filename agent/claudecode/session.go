@@ -45,8 +45,9 @@ type claudeSession struct {
 
 	// gracefulStopTimeout is how long Close() waits for a clean exit
 	// (stdin close → Stop hooks → process exit) before escalating to
-	// SIGTERM and then SIGKILL. Default: 30s. Set to 0 to skip the
-	// graceful phase entirely (old behavior).
+	// SIGTERM and then SIGKILL. Default: 120s to match claude-mem's
+	// Stop hook timeout. The wait ends as soon as the process exits,
+	// so typical shutdowns take seconds, not the full timeout.
 	gracefulStopTimeout time.Duration
 }
 
@@ -139,7 +140,7 @@ func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode strin
 		ctx:                 sessionCtx,
 		cancel:              cancel,
 		done:                make(chan struct{}),
-		gracefulStopTimeout: 30 * time.Second,
+		gracefulStopTimeout: 120 * time.Second,
 	}
 	cs.setPermissionMode(mode)
 	cs.sessionID.Store(sessionID)
