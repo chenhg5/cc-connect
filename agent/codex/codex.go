@@ -396,7 +396,10 @@ func (a *Agent) SkillDirs() []string {
 
 // ── ContextCompressor implementation ──────────────────────────
 
-func (a *Agent) CompressCommand() string { return "/compact" }
+// CompressCommand returns "" because Codex native slash commands (/compact, /clear)
+// are not reliably executed in exec/resume mode — they may be treated as plain text.
+// See: https://github.com/chenhg5/cc-connect/issues/378
+func (a *Agent) CompressCommand() string { return "" }
 
 // ── MemoryFileProvider implementation ─────────────────────────
 
