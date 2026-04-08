@@ -9067,7 +9067,7 @@ func (e *Engine) sendTTSReply(p Platform, replyCtx any, text string) {
 	}
 	slog.Info("tts: starting synthesis", "voice", e.tts.Voice, "text_len", len(text))
 	opts := TTSSynthesisOpts{Voice: e.tts.Voice}
-	audioData, format, err := e.tts.TTS.Synthesize(e.ctx, text, opts)
+	audioData, format, err := e.tts.TTS.Synthesize(e.ctx, StripMarkdown(text), opts)
 	if err != nil {
 		slog.Error("tts: synthesis failed", "error", err)
 		return
