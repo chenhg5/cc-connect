@@ -674,7 +674,7 @@ func (e *Engine) SetAdminFrom(adminFrom string) {
 	shellDisabled := e.disabledCmds["shell"]
 	e.userRolesMu.Unlock()
 	if af == "" && !shellDisabled {
-		slog.Warn("admin_from is not set — privileged commands (/shell, /dir, /restart, /upgrade) are blocked. "+
+		slog.Warn("admin_from is not set — privileged commands (/shell, /show, /dir, /restart, /upgrade) are blocked. "+
 			"Set admin_from in config to enable them, or use disabled_commands to hide them.",
 			"project", e.name)
 	}
@@ -683,6 +683,7 @@ func (e *Engine) SetAdminFrom(adminFrom string) {
 // privilegedCommands are commands that require admin_from authorization.
 var privilegedCommands = map[string]bool{
 	"shell":   true,
+	"show":    true,
 	"dir":     true,
 	"restart": true,
 	"upgrade": true,
@@ -2943,6 +2944,7 @@ var builtinCommands = []struct {
 	{[]string{"bind"}, "bind"},
 	{[]string{"search", "find"}, "search"},
 	{[]string{"shell", "sh", "exec", "run"}, "shell"},
+	{[]string{"show"}, "show"},
 	{[]string{"dir", "cd", "chdir", "workdir"}, "dir"},
 	{[]string{"tts"}, "tts"},
 	{[]string{"workspace", "ws"}, "workspace"},
@@ -3132,6 +3134,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdShell(p, msg, raw)
 	case "diff":
 		e.cmdDiff(p, msg, raw)
+	case "show":
+		e.cmdShow(p, msg, args)
 	case "dir":
 		e.cmdDir(p, msg, args)
 	case "tts":
@@ -3623,6 +3627,67 @@ func (e *Engine) matchSession(sessions []AgentSessionInfo, manager *SessionManag
 	return nil
 }
 
+func (e *Engine) commandWorkDir(agent Agent, msg *Message) string {
+	if switcher, ok := agent.(WorkDirSwitcher); ok {
+		if wd := strings.TrimSpace(switcher.GetWorkDir()); wd != "" {
+			return normalizeWorkspacePath(wd)
+		}
+	}
+	if e.multiWorkspace {
+		channelKey := effectiveWorkspaceChannelKey(msg)
+		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
+			return normalizeWorkspacePath(b.Workspace)
+		}
+	}
+	if wd, ok := agent.(interface{ GetWorkDir() string }); ok {
+		if dir := strings.TrimSpace(wd.GetWorkDir()); dir != "" {
+			return normalizeWorkspacePath(dir)
+		}
+	}
+	if wd, ok := e.agent.(interface{ GetWorkDir() string }); ok {
+		if dir := strings.TrimSpace(wd.GetWorkDir()); dir != "" {
+			return normalizeWorkspacePath(dir)
+		}
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		return normalizeWorkspacePath(cwd)
+	}
+	return ""
+}
+
+func (e *Engine) cmdShow(p Platform, msg *Message, args []string) {
+	rawRef := strings.TrimSpace(strings.Join(args, " "))
+	if rawRef == "" {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgShowUsage))
+		return
+	}
+
+	agent, _, _, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+	workDir := e.commandWorkDir(agent, msg)
+	req, err := buildReferenceViewRequest(rawRef, workDir)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgShowParseError, rawRef))
+		return
+	}
+	content, err := renderReferenceView(req)
+	if err != nil {
+		switch {
+		case strings.Contains(err.Error(), "path does not exist"):
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgShowNotFound, rawRef))
+		case strings.Contains(err.Error(), "directory reference cannot carry a location"):
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgShowDirWithLocation, rawRef))
+		default:
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgShowReadFailed, err))
+		}
+		return
+	}
+	e.reply(p, msg.ReplyCtx, content)
+}
+
 func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
 	// Strip the command prefix ("/shell ", "/sh ", "/exec ", "/run ")
 	shellCmd := raw
@@ -3639,19 +3704,12 @@ func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
 		return
 	}
 
-	// In multi-workspace mode, resolve workspace directory for this channel
-	var workDir string
-	if e.multiWorkspace {
-		channelKey := effectiveWorkspaceChannelKey(msg)
-		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
-			workDir = normalizeWorkspacePath(b.Workspace)
-		}
+	agent, _, _, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
 	}
-	if workDir == "" {
-		if wd, ok := e.agent.(interface{ GetWorkDir() string }); ok {
-			workDir = normalizeWorkspacePath(wd.GetWorkDir())
-		}
-	}
+	workDir := e.commandWorkDir(agent, msg)
 	if workDir == "" {
 		workDir, _ = os.Getwd()
 	}
@@ -4843,6 +4901,7 @@ func helpCardGroups() []helpCardGroup {
 			titleKey: MsgHelpToolsSection,
 			items: []helpCardItem{
 				{command: "/shell", action: "cmd:/shell"},
+				{command: "/show", action: "cmd:/show"},
 				{command: "/cron", action: "nav:/cron"},
 				{command: "/heartbeat", action: "nav:/heartbeat"},
 				{command: "/commands", action: "nav:/commands"},

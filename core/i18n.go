@@ -511,6 +511,12 @@ const (
 	MsgDirCardEmptyHistory MsgKey = "dir_card_empty_history"
 	MsgDirCardReset        MsgKey = "dir_card_reset"
 	MsgDirCardPrev         MsgKey = "dir_card_prev"
+	MsgShow                MsgKey = "show"
+	MsgShowUsage           MsgKey = "show_usage"
+	MsgShowParseError      MsgKey = "show_parse_error"
+	MsgShowNotFound        MsgKey = "show_not_found"
+	MsgShowDirWithLocation MsgKey = "show_dir_with_location"
+	MsgShowReadFailed      MsgKey = "show_read_failed"
 
 	// Multi-workspace messages
 	MsgWsNotEnabled            MsgKey = "ws_not_enabled"
@@ -843,6 +849,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/compress\n  Compress conversation context\n\n" +
 			"/tts [always|voice_only]\n  View/switch text-to-speech mode\n\n" +
 			"/shell <command>\n  Run a shell command and return the output\n\n" +
+			"/show <ref>\n  View a file, directory, or code snippet by reference\n\n" +
 			"/dir [path|reset]\n  Show, switch, or reset agent working directory\n\n" +
 			"/stop\n  Stop current execution\n\n" +
 			"/cron [add|list|del|enable|disable]\n  Manage scheduled tasks\n\n" +
@@ -885,6 +892,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/compress\n  压缩会话上下文\n\n" +
 			"/tts [always|voice_only]\n  查看/切换语音合成模式\n\n" +
 			"/shell <命令>\n  执行 Shell 命令并返回结果\n\n" +
+			"/show <引用>\n  按引用查看文件、目录或代码片段\n\n" +
 			"/dir [路径|reset]\n  查看、切换或重置 Agent 工作目录\n\n" +
 			"/stop\n  停止当前执行\n\n" +
 			"/cron [add|list|del|enable|disable]\n  管理定时任务\n\n" +
@@ -1127,6 +1135,7 @@ var messages = map[MsgKey]map[Language]string{
 	MsgHelpToolsSection: {
 		LangEnglish: "**Tools & Automation**\n" +
 			"/shell <command> — Run a shell command\n" +
+			"/show <ref> — View file / directory / snippet by reference\n" +
 			"/dir [path|reset] — Show, switch, or reset work directory\n" +
 			"/cron [add|list|del|...] — Scheduled tasks\n" +
 			"/commands [add|del] — Custom commands\n" +
@@ -1136,6 +1145,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/stop — Stop current execution",
 		LangChinese: "**工具与自动化**\n" +
 			"/shell <命令> — 执行 Shell 命令\n" +
+			"/show <引用> — 按引用查看文件、目录或代码片段\n" +
 			"/dir [路径|reset] — 查看、切换或重置工作目录\n" +
 			"/cron [add|list|del|...] — 定时任务\n" +
 			"/commands [add|del] — 自定义命令\n" +
@@ -3427,6 +3437,48 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "上一目錄",
 		LangJapanese:           "前へ",
 		LangSpanish:            "Anterior",
+	},
+	MsgShow: {
+		LangEnglish:            "View file / directory / snippet by reference",
+		LangChinese:            "按引用查看文件、目录或代码片段",
+		LangTraditionalChinese: "按引用查看檔案、目錄或程式碼片段",
+		LangJapanese:           "参照からファイル・ディレクトリ・コード断片を表示",
+		LangSpanish:            "Ver archivo/directorio/fragmento por referencia",
+	},
+	MsgShowUsage: {
+		LangEnglish:            "Usage: `/show <path|path:line|path:start-end|dir/>`\nExample: `/show svc/recovery_session_reconciler.go:12`",
+		LangChinese:            "用法: `/show <路径|路径:行号|路径:起止行|目录/>`\n示例: `/show svc/recovery_session_reconciler.go:12`",
+		LangTraditionalChinese: "用法: `/show <路徑|路徑:行號|路徑:起止行|目錄/>`\n範例: `/show svc/recovery_session_reconciler.go:12`",
+		LangJapanese:           "使い方: `/show <パス|パス:行|パス:開始-終了|dir/>`\n例: `/show svc/recovery_session_reconciler.go:12`",
+		LangSpanish:            "Uso: `/show <ruta|ruta:línea|ruta:inicio-fin|dir/>`\nEjemplo: `/show svc/recovery_session_reconciler.go:12`",
+	},
+	MsgShowParseError: {
+		LangEnglish:            "❌ Cannot parse reference: `%s`",
+		LangChinese:            "❌ 无法解析引用: `%s`",
+		LangTraditionalChinese: "❌ 無法解析引用: `%s`",
+		LangJapanese:           "❌ 参照を解析できません: `%s`",
+		LangSpanish:            "❌ No se puede interpretar la referencia: `%s`",
+	},
+	MsgShowNotFound: {
+		LangEnglish:            "❌ Referenced path does not exist: `%s`",
+		LangChinese:            "❌ 引用路径不存在: `%s`",
+		LangTraditionalChinese: "❌ 引用路徑不存在: `%s`",
+		LangJapanese:           "❌ 参照パスが存在しません: `%s`",
+		LangSpanish:            "❌ La ruta referenciada no existe: `%s`",
+	},
+	MsgShowDirWithLocation: {
+		LangEnglish:            "❌ Directory references cannot include line information: `%s`",
+		LangChinese:            "❌ 目录引用不能带行号信息: `%s`",
+		LangTraditionalChinese: "❌ 目錄引用不能帶行號資訊: `%s`",
+		LangJapanese:           "❌ ディレクトリ参照に行情報は指定できません: `%s`",
+		LangSpanish:            "❌ Una referencia de directorio no puede incluir líneas: `%s`",
+	},
+	MsgShowReadFailed: {
+		LangEnglish:            "❌ Failed to read reference: %s",
+		LangChinese:            "❌ 读取引用失败: %s",
+		LangTraditionalChinese: "❌ 讀取引用失敗: %s",
+		LangJapanese:           "❌ 参照の読み取りに失敗しました: %s",
+		LangSpanish:            "❌ Error al leer la referencia: %s",
 	},
 
 	// Multi-workspace messages

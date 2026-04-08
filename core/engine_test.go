@@ -7030,6 +7030,19 @@ func TestCmdDiff_EmptyDiff(t *testing.T) {
 			}
 			if !found {
 				t.Fatalf("expected empty diff message, got %v", sent)
+=======
+	e.cmdShow(p, msg, []string{"svc/handler.go"})
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for {
+		sent := p.getSent()
+		if len(sent) > 0 {
+			if !strings.Contains(sent[0], "📄 svc/handler.go") {
+				t.Fatalf("output = %q, want relative title", sent[0])
+			}
+			if !strings.Contains(sent[0], "package svc") {
+				t.Fatalf("output = %q, want file content", sent[0])
+>>>>>>> feat(show): add reference-aware file and directory viewing
 			}
 			return
 		}
@@ -7188,6 +7201,136 @@ func TestCmdDiff_FileSenderPath(t *testing.T) {
 			t.Fatal("timed out waiting for diff response")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestCmdShow_EmptyReference_ShowsUsage(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetAdminFrom("admin")
+
+	msg := &Message{
+		SessionKey: "test:ch:admin",
+		Content:    "/show",
+		ReplyCtx:   "ctx",
+		UserID:     "admin",
+		Platform:   "test",
+	}
+	e.cmdShow(p, msg, nil)
+
+	sent := p.getSent()
+	if len(sent) != 1 || !strings.Contains(sent[0], "/show") {
+		t.Fatalf("sent = %v, want show usage", sent)
+	}
+}
+
+func TestCmdShow_MultiWorkspaceUsesBoundWorkDirForRelativeReference(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agentName := "test-show-workspace"
+	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) {
+		return &namedStubModelModeAgent{name: agentName}, nil
+	})
+	e := NewEngine("test", &namedStubModelModeAgent{name: agentName}, []Platform{p}, "", LangEnglish)
+	e.SetAdminFrom("admin")
+
+	baseDir := t.TempDir()
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	wsDir := filepath.Join(baseDir, "demo-repo")
+	if err := os.MkdirAll(filepath.Join(wsDir, "svc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wsDir, "svc", "handler.go"), []byte("package svc\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e.workspaceBindings.Bind(sharedWorkspaceBindingsKey, "ch1", "demo", normalizeWorkspacePath(wsDir))
+
+	msg := &Message{
+		SessionKey: "test:ch1:admin",
+		Content:    "/show svc/handler.go",
+		ReplyCtx:   "ctx",
+		UserID:     "admin",
+		Platform:   "test",
+	}
+	e.cmdShow(p, msg, []string{"svc/handler.go"})
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for {
+		sent := p.getSent()
+		if len(sent) > 0 {
+			if !strings.Contains(sent[0], "📄 svc/handler.go") {
+				t.Fatalf("output = %q, want relative title", sent[0])
+			}
+			if !strings.Contains(sent[0], "package svc") {
+				t.Fatalf("output = %q, want file content", sent[0])
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for /show response")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestHandleCommand_ShowRequiresAdmin(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetAdminFrom("admin")
+
+	msg := &Message{
+		SessionKey: "test:ch:user1",
+		Content:    "/show foo.txt",
+		ReplyCtx:   "ctx",
+		UserID:     "user1",
+		Platform:   "test",
+	}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	if len(sent) != 1 || !strings.Contains(strings.ToLower(sent[0]), "admin") {
+		t.Fatalf("sent = %v, want admin required message", sent)
+	}
+}
+
+func TestCmdShow_OutputRemainsRawWhenReferencesEnabled(t *testing.T) {
+	p := &stubPlatformEngine{n: "feishu"}
+	agent := &stubWorkDirAgent{workDir: t.TempDir()}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetAdminFrom("admin")
+	e.references = normalizeReferenceRenderCfg(ReferenceRenderCfg{
+		NormalizeAgents: []string{"all"},
+		RenderPlatforms: []string{"all"},
+		DisplayPath:     "relative",
+		MarkerStyle:     "emoji",
+		EnclosureStyle:  "code",
+	})
+
+	file := filepath.Join(agent.workDir, "svc", "handler.go")
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rawLine := "/root/code/demo-repo/ui/recovery_contact_form.tsx:11"
+	if err := os.WriteFile(file, []byte(rawLine+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	msg := &Message{
+		SessionKey: "test:ch:admin",
+		Content:    "/show svc/handler.go",
+		ReplyCtx:   "ctx",
+		UserID:     "admin",
+		Platform:   "feishu",
+	}
+	e.cmdShow(p, msg, []string{"svc/handler.go"})
+
+	sent := p.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("sent = %v, want one response", sent)
+	}
+	if !strings.Contains(sent[0], rawLine) {
+		t.Fatalf("output = %q, want raw code content preserved", sent[0])
 	}
 }
 

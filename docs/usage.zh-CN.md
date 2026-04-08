@@ -9,6 +9,7 @@ cc-connect 完整功能使用指南。
 - [API Provider 管理](#api-provider-管理)
 - [模型选择](#模型选择)
 - [工作目录切换（`/dir`、`/cd`）](#工作目录切换dircd)
+- [引用查看（`/show`）](#引用查看show)
 - [飞书配置 CLI](#飞书配置-cli)
 - [微信个人号配置 CLI](#微信个人号配置-cli)
 - [Claude Code Router 集成](#claude-code-router-集成)
@@ -40,6 +41,7 @@ cc-connect 完整功能使用指南。
 | `/provider [...]` | 管理 API Provider |
 | `/model [switch <alias>]` | 列出可用模型或按别名切换 |
 | `/dir [路径]` | 查看或切换 Agent 工作目录 |
+| `/show <引用>` | 按引用查看文件、目录或代码片段 |
 | `/allow <工具名>` | 预授权工具 |
 | `/reasoning [等级]` | 查看或切换推理强度（Codex）|
 | `/mode [名称]` | 查看或切换权限模式 |
@@ -268,6 +270,57 @@ alias = "spark"
 /dir ../another-repo
 /dir 2
 /dir -
+```
+
+---
+
+## 引用查看（`/show`）
+
+可直接基于一个文件 / 目录 / 代码位置引用查看内容，而不必手写 `/shell sed ...`。
+
+### 聊天命令
+
+```text
+/show <路径>                  查看文件前 80 行
+/show <路径:行号>             查看该行附近上下文
+/show <路径:起止行>           查看指定 range
+/show <目录路径/>             查看一级目录列表
+```
+
+支持的输入形式包括：
+
+- 绝对路径
+- 相对路径（相对当前 Agent 工作目录）
+- `path:line`
+- `path:line:col`
+- `path:start-end`
+- `path#L42`
+- Markdown 本地文件链接，如：
+  - `[file.ts](/abs/path/file.ts#L42)`
+
+### 行为说明
+
+- 文件，无位置：
+  - 默认显示文件前 80 行
+- `path:line` / `path#L42`：
+  - 默认显示该位置附近上下文
+- `path:start-end`：
+  - 默认显示该 range
+- 目录：
+  - 默认显示一级目录内容
+
+说明：
+
+- `/show` 只解析“纯引用文本”，不解析前端展示层包装后的 `📄 ...` / `[FILE] ...` 这类样式
+- `/show` 属于本地文件系统查看命令，与 `/shell`、`/dir` 类似，默认受 `admin_from` 权限控制
+
+示例：
+
+```text
+/show ui/recovery_contact_form.tsx
+/show svc/recovery_session_reconciler.go:12
+/show svc/recovery_session_reconciler_test.go:8-17
+/show docs/spec.v1/
 ```
 
 ---
