@@ -106,19 +106,19 @@ type replyContext struct {
 }
 
 type Platform struct {
-	platformName          string
-	domain                string
-	appID                 string
-	appSecret             string
-	progressStyle         string
-	useInteractiveCard    bool
-	self                  core.Platform
-	reactionEmoji         string
-	allowFrom             string
+	platformName               string
+	domain                     string
+	appID                      string
+	appSecret                  string
+	progressStyle              string
+	useInteractiveCard         bool
+	self                       core.Platform
+	reactionEmoji              string
+	allowFrom                  string
 	groupReplyAll              bool
 	respondToAtEveryoneAndHere bool
-	shareSessionInChannel bool
-	threadIsolation       bool
+	shareSessionInChannel      bool
+	threadIsolation            bool
 	// noReplyToTrigger: when true, send via Create instead of Im.Message.Reply (no quote to the user's message).
 	noReplyToTrigger bool
 	client           *lark.Client
@@ -220,24 +220,24 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	}
 
 	base := &Platform{
-		platformName:          name,
-		domain:                domain,
-		appID:                 appID,
-		appSecret:             appSecret,
-		progressStyle:         progressStyle,
-		useInteractiveCard:    useInteractiveCard,
-		reactionEmoji:         reactionEmoji,
-		allowFrom:             allowFrom,
+		platformName:               name,
+		domain:                     domain,
+		appID:                      appID,
+		appSecret:                  appSecret,
+		progressStyle:              progressStyle,
+		useInteractiveCard:         useInteractiveCard,
+		reactionEmoji:              reactionEmoji,
+		allowFrom:                  allowFrom,
 		groupReplyAll:              groupReplyAll,
 		respondToAtEveryoneAndHere: respondToAtEveryoneAndHere,
-		shareSessionInChannel: shareSessionInChannel,
-		threadIsolation:       threadIsolation,
-		noReplyToTrigger:      noReplyToTrigger,
-		client:                lark.NewClient(appID, appSecret, clientOpts...),
-		replayClient:          newFeishuReplayClient(appID, appSecret, domain),
-		port:                  port,
-		callbackPath:          callbackPath,
-		encryptKey:            encryptKey,
+		shareSessionInChannel:      shareSessionInChannel,
+		threadIsolation:            threadIsolation,
+		noReplyToTrigger:           noReplyToTrigger,
+		client:                     lark.NewClient(appID, appSecret, clientOpts...),
+		replayClient:               newFeishuReplayClient(appID, appSecret, domain),
+		port:                       port,
+		callbackPath:               callbackPath,
+		encryptKey:                 encryptKey,
 	}
 	if !useInteractiveCard {
 		base.self = base
@@ -444,6 +444,25 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 				Toast: &callback.Toast{
 					Type:    "info",
 					Content: "已记录选择（Selection recorded）",
+				},
+			}, nil
+		}
+		if strings.HasPrefix(actionVal, "act:/model ") {
+			cmdText := strings.TrimPrefix(actionVal, "act:")
+			rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
+			go p.handler(p.dispatchPlatform(), &core.Message{
+				SessionKey: sessionKey,
+				Platform:   p.platformName,
+				UserID:     userID,
+				UserName:   p.resolveUserName(userID),
+				ChatName:   p.resolveChatName(chatID),
+				Content:    cmdText,
+				ReplyCtx:   rctx,
+			})
+			return &callback.CardActionTriggerResponse{
+				Toast: &callback.Toast{
+					Type:    "info",
+					Content: "正在切换模型（Switching model...）",
 				},
 			}, nil
 		}
