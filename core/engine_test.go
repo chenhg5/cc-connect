@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -6696,6 +6697,237 @@ func TestCmdShell_MultiWorkspaceIgnoresMissingSharedBinding(t *testing.T) {
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("timed out waiting for shell response")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// --- /diff command tests ---
+
+func TestCmdDiff_BlockedWithoutAdmin(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	msg := &Message{
+		SessionKey: "test:ch:user1",
+		Content:    "/diff main",
+		ReplyCtx:   "ctx",
+		UserID:     "user1",
+		Platform:   "test",
+	}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	foundAdmin := false
+	for _, s := range sent {
+		if strings.Contains(s, "admin") || strings.Contains(s, e.i18n.T(MsgAdminRequired)[:10]) {
+			foundAdmin = true
+		}
+	}
+	if !foundAdmin {
+		t.Fatalf("expected admin required reply, got %v", sent)
+	}
+}
+
+func TestCmdDiff_EmptyDiff(t *testing.T) {
+	// Create a temp git repo with no changes
+	dir := t.TempDir()
+	cmds := [][]string{
+		{"git", "init"},
+		{"git", "config", "user.email", "test@test.com"},
+		{"git", "config", "user.name", "test"},
+		{"git", "commit", "--allow-empty", "-m", "init"},
+	}
+	for _, args := range cmds {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("setup %v: %s %v", args, out, err)
+		}
+	}
+
+	agent := &stubWorkDirAgent{workDir: dir}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetAdminFrom("admin")
+
+	msg := &Message{
+		SessionKey: "test:ch:admin",
+		Content:    "/diff",
+		ReplyCtx:   "ctx",
+		UserID:     "admin",
+		Platform:   "test",
+	}
+	e.cmdDiff(p, msg, "/diff")
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) > 0 {
+			found := false
+			for _, s := range sent {
+				if strings.Contains(s, "diff") || strings.Contains(s, "clean") {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("expected empty diff message, got %v", sent)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for diff response")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestCmdDiff_PlainTextFallback(t *testing.T) {
+	// Create a temp git repo with uncommitted changes
+	dir := t.TempDir()
+	cmds := [][]string{
+		{"git", "init"},
+		{"git", "config", "user.email", "test@test.com"},
+		{"git", "config", "user.name", "test"},
+	}
+	for _, args := range cmds {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("setup %v: %s %v", args, out, err)
+		}
+	}
+	// Create and commit a file, then modify it
+	if err := os.WriteFile(filepath.Join(dir, "test.txt"), []byte("hello\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"git", "add", "test.txt"},
+		{"git", "commit", "-m", "add test.txt"},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("setup %v: %s %v", args, out, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "test.txt"), []byte("hello\nworld\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Use stubPlatformEngine (no FileSender) → should fall back to plain text
+	agent := &stubWorkDirAgent{workDir: dir}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetAdminFrom("admin")
+
+	msg := &Message{
+		SessionKey: "test:ch:admin",
+		Content:    "/diff",
+		ReplyCtx:   "ctx",
+		UserID:     "admin",
+		Platform:   "test",
+	}
+	e.cmdDiff(p, msg, "/diff")
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) > 0 {
+			found := false
+			for _, s := range sent {
+				if strings.Contains(s, "```diff") && strings.Contains(s, "world") {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("expected plain text diff with ```diff block, got %v", sent)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for diff response")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestCmdDiff_FileSenderPath(t *testing.T) {
+	// Create a temp git repo with uncommitted changes
+	dir := t.TempDir()
+	cmds := [][]string{
+		{"git", "init"},
+		{"git", "config", "user.email", "test@test.com"},
+		{"git", "config", "user.name", "test"},
+	}
+	for _, args := range cmds {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("setup %v: %s %v", args, out, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "test.txt"), []byte("hello\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"git", "add", "test.txt"},
+		{"git", "commit", "-m", "add test.txt"},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("setup %v: %s %v", args, out, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "test.txt"), []byte("changed\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	agent := &stubWorkDirAgent{workDir: dir}
+	mp := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", agent, []Platform{mp}, "", LangEnglish)
+	e.SetAdminFrom("admin")
+
+	msg := &Message{
+		SessionKey: "test:ch:admin",
+		Content:    "/diff",
+		ReplyCtx:   "ctx",
+		UserID:     "admin",
+		Platform:   "test",
+	}
+	e.cmdDiff(mp, msg, "/diff")
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		// If diff2html is installed, we get a file; otherwise plain text fallback
+		files := mp.files
+		sent := mp.getSent()
+		if len(files) > 0 {
+			f := files[0]
+			if f.MimeType != "text/html" {
+				t.Fatalf("expected text/html, got %s", f.MimeType)
+			}
+			if !strings.HasSuffix(f.FileName, ".html") {
+				t.Fatalf("expected .html filename, got %s", f.FileName)
+			}
+			return
+		}
+		if len(sent) > 0 {
+			// diff2html not installed → plain text fallback is also acceptable
+			found := false
+			for _, s := range sent {
+				if strings.Contains(s, "```diff") {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("expected diff output (file or plain text), got %v", sent)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for diff response")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
