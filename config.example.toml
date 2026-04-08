@@ -435,7 +435,9 @@ level = "info" # debug, info, warn, error
 #
 # [projects.agent]
 # type = "claudecode"
-# permission_mode = "yolo"
+#
+# [projects.agent.options]
+# mode = "yolo"  # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassPermissions" (yolo)
 #
 # [[projects.platforms]]
 # type = "slack"
