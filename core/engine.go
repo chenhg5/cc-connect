@@ -2616,27 +2616,30 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 			// Auto-compress after finishing a turn, before sending any queued messages.
 			if triggerAutoCompress {
-				if pendingSend != nil {
-					if err := <-pendingSend; err != nil {
-						slog.Debug("async send error before compress", "error", err)
+				compressor, ok := e.agent.(ContextCompressor)
+				if ok && compressor.CompressCommand() != "" {
+					if pendingSend != nil {
+						if err := <-pendingSend; err != nil {
+							slog.Debug("async send error before compress", "error", err)
+						}
 					}
-				}
-				state.mu.Lock()
-				state.lastAutoCompressAt = time.Now()
-				tokenEst := state.lastAutoCompressTokens
-				state.mu.Unlock()
-				slog.Info("auto-compress: triggering", "session", sessionKey)
+					state.mu.Lock()
+					state.lastAutoCompressAt = time.Now()
+					tokenEst := state.lastAutoCompressTokens
+					state.mu.Unlock()
+					slog.Info("auto-compress: triggering", "session", sessionKey)
 
-				// Notify user before compressing so they know the context is about to change.
-				compressNotice := e.i18n.T(MsgCompressing)
-				if tokenEst > 0 {
-					compressNotice = fmt.Sprintf("%s (~%dk tokens)", compressNotice, tokenEst/1000)
-				}
-				e.send(state.platform, state.replyCtx, compressNotice)
+					// Notify user before compressing so they know the context is about to change.
+					compressNotice := e.i18n.T(MsgCompressing)
+					if tokenEst > 0 {
+						compressNotice = fmt.Sprintf("%s (~%dk tokens)", compressNotice, tokenEst/1000)
+					}
+					e.send(state.platform, state.replyCtx, compressNotice)
 
-				// Run compress inline while the session is still locked.
-				e.runCompress(state, session, sessions, sessionKey, state.platform, state.replyCtx, true)
-				return
+					// Run compress inline while the session is still locked.
+					e.runCompress(state, session, sessions, sessionKey, state.platform, state.replyCtx, true)
+					return
+				}
 			}
 
 			// Check for queued messages — if present, continue the event loop
@@ -5782,25 +5785,41 @@ func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images
 	}
 
 	if p == nil && sessionKey != "" {
+		strippedKey := sessionKey
 		platformName := ""
-		if idx := strings.Index(sessionKey, ":"); idx > 0 {
-			platformName = sessionKey[:idx]
+		if idx := strings.Index(strippedKey, ":"); idx > 0 {
+			platformName = strippedKey[:idx]
 		}
+		var targetPlatform Platform
 		for _, candidate := range e.platforms {
-			if candidate.Name() != platformName {
-				continue
+			if candidate.Name() == platformName {
+				targetPlatform = candidate
+				break
 			}
-			rc, ok := candidate.(ReplyContextReconstructor)
+		}
+		// Fallback: multi-workspace mode may prefix the session key with the
+		// workspace path (same heuristic as ExecuteCronJob / ExecuteHeartbeat).
+		if targetPlatform == nil {
+			for _, candidate := range e.platforms {
+				needle := ":" + candidate.Name() + ":"
+				if idx := strings.Index(strippedKey, needle); idx >= 0 {
+					targetPlatform = candidate
+					strippedKey = strippedKey[idx+1:]
+					break
+				}
+			}
+		}
+		if targetPlatform != nil {
+			rc, ok := targetPlatform.(ReplyContextReconstructor)
 			if !ok {
-				return fmt.Errorf("platform %q does not support proactive messaging", platformName)
+				return fmt.Errorf("platform %q does not support proactive messaging", targetPlatform.Name())
 			}
-			reconstructed, err := rc.ReconstructReplyCtx(sessionKey)
+			reconstructed, err := rc.ReconstructReplyCtx(strippedKey)
 			if err != nil {
 				return fmt.Errorf("reconstruct reply context: %w", err)
 			}
-			p = candidate
+			p = targetPlatform
 			replyCtx = reconstructed
-			break
 		}
 	}
 
@@ -8049,12 +8068,16 @@ func (e *Engine) executeShellCommand(p Platform, msg *Message, cmd *CustomComman
 		"CC_PROJECT=" + e.name,
 		"CC_SESSION_KEY=" + msg.SessionKey,
 	}
-	if exePath, err := os.Executable(); err == nil {
-		binDir := filepath.Dir(exePath)
-		if curPath := os.Getenv("PATH"); curPath != "" {
-			envVars = append(envVars, "PATH="+binDir+string(filepath.ListSeparator)+curPath)
-		} else {
-			envVars = append(envVars, "PATH="+binDir)
+	// Prepend the cc-connect binary dir on Windows only (native shell fix);
+	// on Unix it would change command resolution for user scripts.
+	if runtime.GOOS == "windows" {
+		if exePath, err := os.Executable(); err == nil {
+			binDir := filepath.Dir(exePath)
+			if curPath := os.Getenv("PATH"); curPath != "" {
+				envVars = append(envVars, "PATH="+binDir+string(filepath.ListSeparator)+curPath)
+			} else {
+				envVars = append(envVars, "PATH="+binDir)
+			}
 		}
 	}
 	shellCmd.Env = MergeEnv(os.Environ(), envVars)

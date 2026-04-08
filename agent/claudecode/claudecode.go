@@ -34,16 +34,17 @@ func init() {
 //   - "auto":              Claude's automatic permission classifier
 //   - "bypassPermissions": auto-approve everything (alias: yolo)
 type Agent struct {
-	workDir         string
-	model           string
-	mode            string // "default" | "acceptEdits" | "plan" | "auto" | "bypassPermissions" | "dontAsk"
-	allowedTools    []string
-	disallowedTools []string
-	providers       []core.ProviderConfig
-	activeIdx       int // -1 = no provider set
-	sessionEnv      []string
-	routerURL       string // Claude Code Router URL (e.g., "http://127.0.0.1:3456")
-	routerAPIKey    string // Claude Code Router API key (optional)
+	workDir          string
+	model            string
+	mode             string // "default" | "acceptEdits" | "plan" | "auto" | "bypassPermissions" | "dontAsk"
+	allowedTools     []string
+	disallowedTools  []string
+	maxContextTokens int // optional: passed as --max-context-tokens when > 0
+	providers        []core.ProviderConfig
+	activeIdx        int // -1 = no provider set
+	sessionEnv       []string
+	routerURL        string // Claude Code Router URL (e.g., "http://127.0.0.1:3456")
+	routerAPIKey     string // Claude Code Router API key (optional)
 
 	providerProxy  *core.ProviderProxy // local proxy for third-party providers
 	proxyLocalURL  string              // local URL of the proxy
@@ -79,6 +80,22 @@ func New(opts map[string]any) (core.Agent, error) {
 		}
 	}
 
+	maxContextTokens := 0
+	switch v := opts["max_context_tokens"].(type) {
+	case int:
+		if v > 0 {
+			maxContextTokens = v
+		}
+	case int64:
+		if v > 0 {
+			maxContextTokens = int(v)
+		}
+	case float64:
+		if v > 0 {
+			maxContextTokens = int(v)
+		}
+	}
+
 	// Claude Code Router support
 	routerURL, _ := opts["router_url"].(string)
 	routerAPIKey, _ := opts["router_api_key"].(string)
@@ -88,14 +105,15 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 
 	return &Agent{
-		workDir:         workDir,
-		model:           model,
-		mode:            mode,
-		allowedTools:    allowedTools,
-		disallowedTools: disallowedTools,
-		activeIdx:       -1,
-		routerURL:       routerURL,
-		routerAPIKey:    routerAPIKey,
+		workDir:          workDir,
+		model:            model,
+		mode:             mode,
+		allowedTools:     allowedTools,
+		disallowedTools:  disallowedTools,
+		maxContextTokens: maxContextTokens,
+		activeIdx:        -1,
+		routerURL:        routerURL,
+		routerAPIKey:     routerAPIKey,
 	}, nil
 }
 
@@ -245,6 +263,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	copy(tools, a.allowedTools)
 	disTools := make([]string, len(a.disallowedTools))
 	copy(disTools, a.disallowedTools)
+	maxTok := a.maxContextTokens
 	model := a.model
 	extraEnv := a.providerEnvLocked()
 	extraEnv = append(extraEnv, a.sessionEnv...)
@@ -273,7 +292,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	disableVerbose := a.routerURL != ""
 	a.mu.Unlock()
 
-	return newClaudeSession(ctx, a.workDir, model, sessionID, a.mode, tools, disTools, extraEnv, platformPrompt, disableVerbose)
+	return newClaudeSession(ctx, a.workDir, model, sessionID, a.mode, tools, disTools, extraEnv, platformPrompt, disableVerbose, maxTok)
 }
 
 func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {

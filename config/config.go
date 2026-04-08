@@ -20,6 +20,9 @@ var ConfigPath string
 type Config struct {
 	DataDir           string                  `toml:"data_dir"` // session store directory, default ~/.cc-connect
 	AttachmentSend    string                  `toml:"attachment_send"`
+	// Quiet is legacy: when true and [display] does not set thinking_messages / tool_messages,
+	// engines behave as if those flags were false. Per-project quiet overrides when set.
+	Quiet             *bool                   `toml:"quiet,omitempty"`
 	Projects          []ProjectConfig         `toml:"projects"`
 	Commands          []CommandConfig         `toml:"commands"`     // global custom slash commands
 	Aliases           []AliasConfig           `toml:"aliases"`      // global command aliases
@@ -212,6 +215,9 @@ type ProjectConfig struct {
 	DisabledCommands     []string     `toml:"disabled_commands,omitempty"` // commands to disable for this project (e.g. ["restart", "upgrade"])
 	AdminFrom            string       `toml:"admin_from,omitempty"`        // comma-separated user IDs allowed to run privileged commands; "*" = all allowed users
 	Users                *UsersConfig `toml:"users,omitempty"`             // per-user role config; nil = legacy behavior
+	// Quiet is legacy per-project override; see Config.Quiet. When true and global [display]
+	// omits thinking_messages / tool_messages, those default to off for this project.
+	Quiet *bool `toml:"quiet,omitempty"`
 }
 
 type AgentConfig struct {
@@ -290,6 +296,49 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 	return cfg, nil
+}
+
+// projectQuietEffective returns whether legacy quiet applies to this project: an explicit
+// per-project quiet overrides; otherwise the global root quiet applies.
+func projectQuietEffective(cfg *Config, proj *ProjectConfig) bool {
+	if proj.Quiet != nil {
+		return *proj.Quiet
+	}
+	if cfg.Quiet != nil {
+		return *cfg.Quiet
+	}
+	return false
+}
+
+// EffectiveDisplay resolves global [display] together with legacy quiet (root or per-project).
+// If quiet is in effect and thinking_messages / tool_messages were not explicitly set in [display],
+// they map to false (backward-compatible with pre-display quiet = true).
+func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (thinkingMessages, toolMessages bool, thinkingMaxLen, toolMaxLen int) {
+	thinkingMessages = true
+	toolMessages = true
+	thinkingMaxLen = 300
+	toolMaxLen = 500
+	if cfg.Display.ThinkingMessages != nil {
+		thinkingMessages = *cfg.Display.ThinkingMessages
+	}
+	if cfg.Display.ToolMessages != nil {
+		toolMessages = *cfg.Display.ToolMessages
+	}
+	if cfg.Display.ThinkingMaxLen != nil {
+		thinkingMaxLen = *cfg.Display.ThinkingMaxLen
+	}
+	if cfg.Display.ToolMaxLen != nil {
+		toolMaxLen = *cfg.Display.ToolMaxLen
+	}
+	if projectQuietEffective(cfg, proj) {
+		if cfg.Display.ThinkingMessages == nil {
+			thinkingMessages = false
+		}
+		if cfg.Display.ToolMessages == nil {
+			toolMessages = false
+		}
+	}
+	return thinkingMessages, toolMessages, thinkingMaxLen, toolMaxLen
 }
 
 func (c *Config) validate() error {

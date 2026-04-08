@@ -280,7 +280,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	p.eventHandler = dispatcher.NewEventDispatcher("", p.encryptKey).
 		OnP2MessageReceiveV1(func(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
 			slog.Debug(p.platformName+": message received", "app_id", p.appID)
-			return p.onMessage(event)
+			return p.onMessage(ctx, event)
 		}).
 		OnP2MessageReadV1(func(ctx context.Context, event *larkim.P2MessageReadV1) error {
 			return nil // ignore read receipts
@@ -637,7 +637,7 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 	}
 }
 
-func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
+func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
 	msg := event.Event.Message
 	sender := event.Event.Sender
 
@@ -739,7 +739,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 	// blocked by IO-heavy operations (image/audio download, handler HTTP calls).
 	// The dedup and old-message checks above remain synchronous to guarantee
 	// correctness before spawning the goroutine.
-	go p.dispatchMessage(msgType, content, mentions, messageID, sessionKey, userID, userName, chatName, rctx, parentID)
+	go p.dispatchMessage(ctx, msgType, content, mentions, messageID, sessionKey, userID, userName, chatName, rctx, parentID)
 
 	return nil
 }
@@ -747,12 +747,12 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 // dispatchMessage handles the message content parsing, media download, and
 // handler invocation. It runs in its own goroutine so that onMessage returns
 // quickly and does not block the SDK event loop.
-func (p *Platform) dispatchMessage(msgType, content string, mentions []*larkim.MentionEvent, messageID, sessionKey, userID, userName, chatName string, rctx replyContext, parentID string) {
+func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string, mentions []*larkim.MentionEvent, messageID, sessionKey, userID, userName, chatName string, rctx replyContext, parentID string) {
 	// If this message is a reply to another message, fetch the quoted content
 	// and prepend it so the agent has full context.
 	quotedPrefix := ""
 	if parentID != "" {
-		quotedPrefix = p.fetchQuotedMessage(parentID)
+		quotedPrefix = p.fetchQuotedMessage(ctx, parentID)
 	}
 
 	switch msgType {
@@ -958,12 +958,12 @@ func (p *Platform) resolveChatName(chatID string) string {
 // is replying to, and returns a formatted prefix string for context injection.
 // Returns empty string on any failure (graceful degradation — the user's own
 // message is still delivered without the quote).
-func (p *Platform) fetchQuotedMessage(parentID string) string {
+func (p *Platform) fetchQuotedMessage(ctx context.Context, parentID string) string {
 	// Use raw API call with card_msg_content_type=raw_card_content so that
 	// interactive card messages return the full card JSON (with json_card field)
 	// instead of the simplified final state.
 	apiPath := fmt.Sprintf("/open-apis/im/v1/messages/%s?card_msg_content_type=raw_card_content", parentID)
-	apiResp, err := p.client.Get(context.Background(), apiPath, nil, larkcore.AccessTokenTypeTenant)
+	apiResp, err := p.client.Get(ctx, apiPath, nil, larkcore.AccessTokenTypeTenant)
 	if err != nil {
 		slog.Debug(p.tag()+": fetch quoted message failed", "parent_id", parentID, "error", err)
 		return ""
@@ -1035,8 +1035,9 @@ func (p *Platform) fetchQuotedMessage(parentID string) string {
 func extractPostPlainText(content string) string {
 	var post struct {
 		Content [][]struct {
-			Tag  string `json:"tag"`
-			Text string `json:"text"`
+			Tag      string `json:"tag"`
+			Text     string `json:"text"`
+			Language string `json:"language,omitempty"`
 		} `json:"content"`
 		Title string `json:"title"`
 	}
@@ -1062,8 +1063,16 @@ func extractPostPlainText(content string) string {
 	for _, para := range post.Content {
 		var line []string
 		for _, elem := range para {
-			if elem.Tag == "text" && elem.Text != "" {
-				line = append(line, elem.Text)
+			switch elem.Tag {
+			case "text":
+				if elem.Text != "" {
+					line = append(line, elem.Text)
+				}
+			case "code_block":
+				if elem.Text != "" {
+					lang := elem.Language
+					line = append(line, "```"+lang+"\n"+elem.Text+"\n```")
+				}
 			}
 		}
 		if len(line) > 0 {

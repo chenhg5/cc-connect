@@ -266,27 +266,15 @@ func main() {
 			engine.SetUserRoles(buildUserRoleManager(proj.Users))
 		}
 
-		// Wire display truncation settings
+		// Wire display truncation settings (includes legacy quiet → display mapping)
 		{
-			dcfg := core.DisplayCfg{
-				ThinkingMessages: true,
-				ThinkingMaxLen:   300,
-				ToolMaxLen:       500,
-				ToolMessages:     true,
-			}
-			if cfg.Display.ThinkingMessages != nil {
-				dcfg.ThinkingMessages = *cfg.Display.ThinkingMessages
-			}
-			if cfg.Display.ThinkingMaxLen != nil {
-				dcfg.ThinkingMaxLen = *cfg.Display.ThinkingMaxLen
-			}
-			if cfg.Display.ToolMaxLen != nil {
-				dcfg.ToolMaxLen = *cfg.Display.ToolMaxLen
-			}
-			if cfg.Display.ToolMessages != nil {
-				dcfg.ToolMessages = *cfg.Display.ToolMessages
-			}
-			engine.SetDisplayConfig(dcfg)
+			tm, tool, tmlen, toollen := config.EffectiveDisplay(cfg, &proj)
+			engine.SetDisplayConfig(core.DisplayCfg{
+				ThinkingMessages: tm,
+				ThinkingMaxLen:   tmlen,
+				ToolMaxLen:       toollen,
+				ToolMessages:     tool,
+			})
 		}
 
 		// Wire streaming preview
@@ -1186,21 +1174,14 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		return nil, fmt.Errorf("project %q not found in config", projName)
 	}
 
-	// Reload display config
-	dcfg := core.DisplayCfg{ThinkingMessages: true, ThinkingMaxLen: 300, ToolMaxLen: 500, ToolMessages: true}
-	if cfg.Display.ThinkingMessages != nil {
-		dcfg.ThinkingMessages = *cfg.Display.ThinkingMessages
-	}
-	if cfg.Display.ThinkingMaxLen != nil {
-		dcfg.ThinkingMaxLen = *cfg.Display.ThinkingMaxLen
-	}
-	if cfg.Display.ToolMaxLen != nil {
-		dcfg.ToolMaxLen = *cfg.Display.ToolMaxLen
-	}
-	if cfg.Display.ToolMessages != nil {
-		dcfg.ToolMessages = *cfg.Display.ToolMessages
-	}
-	engine.SetDisplayConfig(dcfg)
+	// Reload display config (includes legacy quiet → display mapping)
+	tm, tool, tmlen, toollen := config.EffectiveDisplay(cfg, proj)
+	engine.SetDisplayConfig(core.DisplayCfg{
+		ThinkingMessages: tm,
+		ThinkingMaxLen:   tmlen,
+		ToolMaxLen:       toollen,
+		ToolMessages:     tool,
+	})
 	result.DisplayUpdated = true
 
 	// Reload auto-compress settings

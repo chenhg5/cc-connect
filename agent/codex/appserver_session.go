@@ -422,25 +422,19 @@ func (s *appServerSession) Close() error {
 
 func (s *appServerSession) readLoop(r io.Reader) {
 	defer s.wg.Done()
-	reader := bufio.NewReader(r)
+	scanner := bufio.NewScanner(r)
+	scanBuf := make([]byte, 0, 64*1024)
+	const maxLineSize = 10 * 1024 * 1024 // 10MB
+	scanner.Buffer(scanBuf, maxLineSize)
 
-	for {
+	for scanner.Scan() {
 		select {
 		case <-s.ctx.Done():
 			return
 		default:
 		}
 
-		data, err := reader.ReadBytes('\n')
-		if err != nil {
-			if s.ctx.Err() == nil && !errors.Is(err, io.EOF) {
-				slog.Warn("codex app-server read failed", "error", err)
-				s.emitError(fmt.Errorf("codex app-server connection closed: %w", err))
-			}
-			s.alive.Store(false)
-			s.rejectPending(err)
-			return
-		}
+		data := scanner.Bytes()
 
 		var probe map[string]json.RawMessage
 		if err := json.Unmarshal(data, &probe); err != nil {
@@ -465,6 +459,24 @@ func (s *appServerSession) readLoop(r io.Reader) {
 		}
 		s.handleNotification(notif.Method, notif.Params)
 	}
+
+	err := scanner.Err()
+	if err != nil {
+		if s.ctx.Err() == nil && !errors.Is(err, io.EOF) {
+			slog.Warn("codex app-server read failed", "error", err)
+			if errors.Is(err, bufio.ErrTooLong) {
+				s.emitError(fmt.Errorf("codex app-server line exceeds max size (%d bytes): %w", maxLineSize, err))
+			} else {
+				s.emitError(fmt.Errorf("codex app-server connection closed: %w", err))
+			}
+		}
+		s.alive.Store(false)
+		s.rejectPending(err)
+		return
+	}
+
+	s.alive.Store(false)
+	s.rejectPending(io.EOF)
 }
 
 func (s *appServerSession) stderrLoop(r io.Reader) {
@@ -812,7 +824,8 @@ func (s *appServerSession) flushPendingAsText() {
 func (s *appServerSession) emit(event core.Event) {
 	select {
 	case s.events <- event:
-	case <-s.ctx.Done():
+	default:
+		slog.Warn("codex appserver: event channel full, dropping event", "type", event.Type)
 	}
 }
 
@@ -871,6 +884,9 @@ func (s *appServerSession) request(method string, params any, out any) error {
 	case <-s.ctx.Done():
 		return s.ctx.Err()
 	case <-time.After(120 * time.Second):
+		s.pendingMu.Lock()
+		delete(s.pending, id)
+		s.pendingMu.Unlock()
 		return fmt.Errorf("%s timed out", method)
 	}
 }

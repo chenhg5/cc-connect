@@ -649,6 +649,37 @@ func TestEngineSendToSessionWithAttachments_MultiWorkspaceRawSessionKey(t *testi
 	}
 }
 
+// stubProactiveSendPlatform implements ReplyContextReconstruct for proactive
+// SendToSessionWithAttachments when there is no interactive session.
+type stubProactiveSendPlatform struct {
+	stubMediaPlatform
+	reconstructKey string
+}
+
+func (p *stubProactiveSendPlatform) ReconstructReplyCtx(sessionKey string) (any, error) {
+	p.reconstructKey = sessionKey
+	return "proactive-rctx", nil
+}
+
+func TestEngineSendToSessionWithAttachments_WorkspacePrefixedSessionKey(t *testing.T) {
+	p := &stubProactiveSendPlatform{
+		stubMediaPlatform: stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "slack"}},
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	prefixed := "/tmp/myproject:slack:C123:U1"
+	err := e.SendToSessionWithAttachments(prefixed, "delivery ready", nil, nil)
+	if err != nil {
+		t.Fatalf("SendToSessionWithAttachments returned error: %v", err)
+	}
+	if p.reconstructKey != "slack:C123:U1" {
+		t.Fatalf("ReconstructReplyCtx key = %q, want slack:C123:U1", p.reconstructKey)
+	}
+	if got := p.getSent(); len(got) != 1 || got[0] != "delivery ready" {
+		t.Fatalf("sent text = %#v, want one message", got)
+	}
+}
+
 func TestEngineStart_DefersAsyncPlatformReadyInitialization(t *testing.T) {
 	p := &stubLifecyclePlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)

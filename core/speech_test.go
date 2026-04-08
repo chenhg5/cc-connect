@@ -34,8 +34,11 @@ func TestGeminiSTT_Transcribe_Success(t *testing.T) {
 		if ct := r.Header.Get("Content-Type"); ct != "application/json" {
 			t.Errorf("expected application/json, got %s", ct)
 		}
-		if r.URL.Query().Get("key") != "test-key" {
-			t.Errorf("expected API key 'test-key', got %q", r.URL.Query().Get("key"))
+		if r.Header.Get("x-goog-api-key") != "test-key" {
+			t.Errorf("expected x-goog-api-key 'test-key', got %q", r.Header.Get("x-goog-api-key"))
+		}
+		if r.URL.Query().Get("key") != "" {
+			t.Errorf("expected API key not in query string")
 		}
 		if !strings.Contains(r.URL.Path, "test-model") {
 			t.Errorf("expected model in path, got %s", r.URL.Path)

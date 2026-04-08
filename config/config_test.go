@@ -118,6 +118,67 @@ func TestConfigValidate(t *testing.T) {
 	}
 }
 
+func TestEffectiveDisplayQuiet(t *testing.T) {
+	tru, fal := true, false
+	tests := []struct {
+		name     string
+		cfg      Config
+		proj     ProjectConfig
+		wantTM   bool
+		wantTool bool
+	}{
+		{
+			name:     "defaults no quiet",
+			cfg:      Config{},
+			proj:     ProjectConfig{},
+			wantTM:   true,
+			wantTool: true,
+		},
+		{
+			name:     "global quiet maps when display unset",
+			cfg:      Config{Quiet: &tru},
+			proj:     ProjectConfig{},
+			wantTM:   false,
+			wantTool: false,
+		},
+		{
+			name:     "project quiet maps when display unset",
+			cfg:      Config{},
+			proj:     ProjectConfig{Quiet: &tru},
+			wantTM:   false,
+			wantTool: false,
+		},
+		{
+			name: "explicit thinking_messages wins over quiet",
+			cfg: Config{
+				Quiet:   &tru,
+				Display: DisplayConfig{ThinkingMessages: &tru},
+			},
+			proj:     ProjectConfig{},
+			wantTM:   true,
+			wantTool: false,
+		},
+		{
+			name:     "project quiet false overrides global quiet",
+			cfg:      Config{Quiet: &tru},
+			proj:     ProjectConfig{Quiet: &fal},
+			wantTM:   true,
+			wantTool: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tm, tool, _, _ := EffectiveDisplay(&tt.cfg, &tt.proj)
+			if tm != tt.wantTM {
+				t.Fatalf("ThinkingMessages = %v, want %v", tm, tt.wantTM)
+			}
+			if tool != tt.wantTool {
+				t.Fatalf("ToolMessages = %v, want %v", tool, tt.wantTool)
+			}
+		})
+	}
+}
+
 func TestLoad_DefaultsDataDir(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)

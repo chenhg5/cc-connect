@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os/exec"
 	"strings"
 	"time"
@@ -200,8 +201,8 @@ func (q *QwenASR) Transcribe(ctx context.Context, audio []byte, format string, l
 }
 
 // GeminiSTT implements SpeechToText using the Google Gemini API.
-// Audio is sent as inline_data (base64) in the contents array, using Gemini's
-// generateContent endpoint with query-parameter authentication.
+// Audio is sent as inline_data (base64) in the contents array against the
+// generateContent endpoint; the API key is sent via the x-goog-api-key header.
 type GeminiSTT struct {
 	APIKey  string
 	Model   string
@@ -253,12 +254,13 @@ func (g *GeminiSTT) Transcribe(ctx context.Context, audio []byte, format string,
 		return "", fmt.Errorf("gemini stt: marshal request: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/models/%s:generateContent?key=%s", g.BaseURL, g.Model, g.APIKey)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(jsonData))
+	apiURL := fmt.Sprintf("%s/models/%s:generateContent", g.BaseURL, url.PathEscape(g.Model))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(jsonData))
 	if err != nil {
 		return "", fmt.Errorf("gemini stt: create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-goog-api-key", g.APIKey)
 
 	resp, err := g.Client.Do(req)
 	if err != nil {

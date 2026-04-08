@@ -163,7 +163,7 @@ func TestInteractivePlatform_OnMessagePassesCardSenderToHandler(t *testing.T) {
 		},
 	}
 
-	if err := ip.onMessage(event); err != nil {
+	if err := ip.onMessage(context.Background(), event); err != nil {
 		t.Fatalf("onMessage() error = %v", err)
 	}
 	wg.Wait()
@@ -577,7 +577,7 @@ func TestLark_SessionKeyPrefix(t *testing.T) {
 		receivedMsg = msg
 	}
 
-	_ = ip.onMessage(&larkim.P2MessageReceiveV1{
+	_ = ip.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
 		Event: &larkim.P2MessageReceiveV1Data{
 			Sender: &larkim.EventSender{
 				SenderId:   &larkim.UserId{OpenId: &openID},
@@ -634,7 +634,7 @@ func TestLark_ThreadIsolationUsesRootSessionKey(t *testing.T) {
 		receivedMsg = msg
 	}
 
-	_ = ip.onMessage(&larkim.P2MessageReceiveV1{
+	_ = ip.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
 		Event: &larkim.P2MessageReceiveV1Data{
 			Sender: &larkim.EventSender{
 				SenderId:   &larkim.UserId{OpenId: &openID},
@@ -691,7 +691,7 @@ func TestLark_GroupReplyAllWithThreadIsolationUsesRootSessionKeyWithoutMention(t
 		msgCh <- msg
 	}
 
-	if err := ip.onMessage(&larkim.P2MessageReceiveV1{
+	if err := ip.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
 		Event: &larkim.P2MessageReceiveV1Data{
 			Sender: &larkim.EventSender{
 				SenderId:   &larkim.UserId{OpenId: &openID},
