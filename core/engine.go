@@ -2317,10 +2317,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				state.mu.Lock()
 				p := state.platform
 				state.mu.Unlock()
-					e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
-					return
-				}
-				continue
+				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+				return
+			}
+			continue
 		case <-idleCh:
 			slog.Error("agent session idle timeout: no events for too long, killing session",
 				"session_key", sessionKey, "timeout", e.eventIdleTimeout, "elapsed", time.Since(turnStart))
@@ -2790,8 +2790,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			sp.discard()
 			if event.Error != nil {
 				slog.Error("agent error", "error", event.Error)
-					e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
-				}
+				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
+			}
 			// Only drop queued messages if the agent session is dead.
 			// Some agents (e.g. Codex) emit EventError for per-turn failures
 			// while keeping the session alive for subsequent turns.
