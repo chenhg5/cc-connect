@@ -1321,8 +1321,18 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	}
 
 	content := strings.TrimSpace(msg.Content)
-	if content == "" && len(msg.Images) == 0 && len(msg.Files) == 0 {
+	if content == "" && len(msg.Images) == 0 && len(msg.Files) == 0 && msg.Location == nil {
 		return
+	}
+
+	// Enrich content with platform-specific context (reply quotes, location text, etc.)
+	if msg.ExtraContent != "" {
+		if content == "" {
+			msg.Content = msg.ExtraContent
+			content = msg.ExtraContent
+		} else {
+			msg.Content = msg.ExtraContent + "\n" + content
+		}
 	}
 
 	// Resolve aliases: check if the first word (or whole content) matches an alias
