@@ -199,9 +199,12 @@ func main() {
 		}
 
 		engine := core.NewEngine(proj.Name, agent, platforms, sessionFile, lang)
+		// Context indicator: project-level overrides global display config; default true
 		showCtx := true
 		if proj.ShowContextIndicator != nil {
 			showCtx = *proj.ShowContextIndicator
+		} else if cfg.Display.ShowContextLabel != nil {
+			showCtx = *cfg.Display.ShowContextLabel
 		}
 		engine.SetShowContextIndicator(showCtx)
 		engine.SetAttachmentSendEnabled(cfg.AttachmentSend != "off")
@@ -1225,6 +1228,8 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	showCtx := true
 	if proj.ShowContextIndicator != nil {
 		showCtx = *proj.ShowContextIndicator
+	} else if cfg.Display.ShowContextLabel != nil {
+		showCtx = *cfg.Display.ShowContextLabel
 	}
 	engine.SetShowContextIndicator(showCtx)
 

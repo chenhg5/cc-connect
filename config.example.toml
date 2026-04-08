@@ -53,6 +53,7 @@ level = "info" # debug, info, warn, error
 # thinking_max_len = 300   # Max chars for thinking messages (default: 300) / 思考消息最大字符数（默认 300）
 # tool_max_len = 500       # Max chars for tool use messages (default: 500) / 工具调用消息最大字符数（默认 500）
 # tool_messages = true     # Show/hide tool progress messages (default: true) / 是否显示工具进度消息（默认 true）
+# show_context_label = true # Show/hide [ctx: ~N%] suffix on assistant replies (default: true) / 是否在助手回复显示 [ctx: ~N%] 后缀（默认 true）
 
 # Agent idle timeout: max minutes between consecutive agent events before
 # considering the session stuck. Set to 0 to disable the timeout entirely.
