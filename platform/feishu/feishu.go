@@ -4,15 +4,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand/v2"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -1526,22 +1530,24 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 	}
 
 	var uploadResp *larkim.CreateImageResp
-	if err := p.withFreshTenantAccessTokenRetry(ctx, "upload image", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
-		req := larkim.NewCreateImageReqBuilder().
-			Body(larkim.NewCreateImageReqBodyBuilder().
-				ImageType("message").
-				Image(bytes.NewReader(img.Data)).
-				Build()).
-			Build()
-		var err error
-		uploadResp, err = client.Im.Image.Create(ctx, req, options...)
-		if err != nil {
-			return fmt.Errorf("%s: upload image: %w", p.tag(), err)
-		}
-		if !uploadResp.Success() {
-			return fmt.Errorf("%s: upload image code=%d msg=%s", p.tag(), uploadResp.Code, uploadResp.Msg)
-		}
-		return nil
+	if err := p.withTransientRetry(ctx, "upload image", func() error {
+		return p.withFreshTenantAccessTokenRetry(ctx, "upload image", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+			req := larkim.NewCreateImageReqBuilder().
+				Body(larkim.NewCreateImageReqBodyBuilder().
+					ImageType("message").
+					Image(bytes.NewReader(img.Data)).
+					Build()).
+				Build()
+			var err error
+			uploadResp, err = client.Im.Image.Create(ctx, req, options...)
+			if err != nil {
+				return fmt.Errorf("%s: upload image: %w", p.tag(), err)
+			}
+			if !uploadResp.Success() {
+				return fmt.Errorf("%s: upload image code=%d msg=%s", p.tag(), uploadResp.Code, uploadResp.Msg)
+			}
+			return nil
+		})
 	}); err != nil {
 		return err
 	}
@@ -1569,23 +1575,25 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 	}
 	fileType := detectFeishuFileType(file.MimeType, fileName)
 	var uploadResp *larkim.CreateFileResp
-	if err := p.withFreshTenantAccessTokenRetry(ctx, "upload file", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
-		req := larkim.NewCreateFileReqBuilder().
-			Body(larkim.NewCreateFileReqBodyBuilder().
-				FileType(fileType).
-				FileName(fileName).
-				File(bytes.NewReader(file.Data)).
-				Build()).
-			Build()
-		var err error
-		uploadResp, err = client.Im.File.Create(ctx, req, options...)
-		if err != nil {
-			return fmt.Errorf("%s: upload file: %w", p.tag(), err)
-		}
-		if !uploadResp.Success() {
-			return fmt.Errorf("%s: upload file code=%d msg=%s", p.tag(), uploadResp.Code, uploadResp.Msg)
-		}
-		return nil
+	if err := p.withTransientRetry(ctx, "upload file", func() error {
+		return p.withFreshTenantAccessTokenRetry(ctx, "upload file", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+			req := larkim.NewCreateFileReqBuilder().
+				Body(larkim.NewCreateFileReqBodyBuilder().
+					FileType(fileType).
+					FileName(fileName).
+					File(bytes.NewReader(file.Data)).
+					Build()).
+				Build()
+			var err error
+			uploadResp, err = client.Im.File.Create(ctx, req, options...)
+			if err != nil {
+				return fmt.Errorf("%s: upload file: %w", p.tag(), err)
+			}
+			if !uploadResp.Success() {
+				return fmt.Errorf("%s: upload file code=%d msg=%s", p.tag(), uploadResp.Code, uploadResp.Msg)
+			}
+			return nil
+		})
 	}); err != nil {
 		return err
 	}
@@ -2144,15 +2152,17 @@ func (p *Platform) replyMessage(ctx context.Context, rc replyContext, msgType, c
 		MessageId(rc.messageID).
 		Body(p.buildReplyMessageReqBody(rc, msgType, content)).
 		Build()
-	return p.withFreshTenantAccessTokenRetry(ctx, "reply", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
-		resp, err := client.Im.Message.Reply(ctx, req, options...)
-		if err != nil {
-			return fmt.Errorf("%s: reply api call: %w", p.tag(), err)
-		}
-		if !resp.Success() {
-			return fmt.Errorf("%s: reply failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
-		}
-		return nil
+	return p.withTransientRetry(ctx, "reply", func() error {
+		return p.withFreshTenantAccessTokenRetry(ctx, "reply", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+			resp, err := client.Im.Message.Reply(ctx, req, options...)
+			if err != nil {
+				return fmt.Errorf("%s: reply api call: %w", p.tag(), err)
+			}
+			if !resp.Success() {
+				return fmt.Errorf("%s: reply failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+			}
+			return nil
+		})
 	})
 }
 
@@ -2165,15 +2175,17 @@ func (p *Platform) createMessage(ctx context.Context, chatID, msgType, content, 
 			Content(content).
 			Build()).
 		Build()
-	return p.withFreshTenantAccessTokenRetry(ctx, op, func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
-		resp, err := client.Im.Message.Create(ctx, req, options...)
-		if err != nil {
-			return fmt.Errorf("%s: %s api call: %w", p.tag(), op, err)
-		}
-		if !resp.Success() {
-			return fmt.Errorf("%s: %s failed code=%d msg=%s", p.tag(), op, resp.Code, resp.Msg)
-		}
-		return nil
+	return p.withTransientRetry(ctx, op, func() error {
+		return p.withFreshTenantAccessTokenRetry(ctx, op, func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+			resp, err := client.Im.Message.Create(ctx, req, options...)
+			if err != nil {
+				return fmt.Errorf("%s: %s api call: %w", p.tag(), op, err)
+			}
+			if !resp.Success() {
+				return fmt.Errorf("%s: %s failed code=%d msg=%s", p.tag(), op, resp.Code, resp.Msg)
+			}
+			return nil
+		})
 	})
 }
 
@@ -2233,6 +2245,93 @@ func isTenantAccessTokenInvalid(err error) bool {
 	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "99991663") || strings.Contains(msg, "invalid access token")
+}
+
+// Transient retry constants for network-level failures.
+const (
+	maxTransientRetries    = 3
+	transientRetryInitial  = 500 * time.Millisecond
+	transientRetryMaxDelay = 5 * time.Second
+)
+
+// isTransientError returns true if the error is a transient network error
+// that warrants a retry (connection reset, timeout, EOF, etc.).
+func isTransientError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Typed syscall checks — more robust than string matching.
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) {
+		return true
+	}
+	// net.Error covers timeouts and temporary errors from the stdlib.
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	// EOF usually means the server closed the connection mid-response.
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	// Unwrapped string checks for common transient symptoms that may
+	// appear in wrapped Feishu SDK errors.
+	msg := err.Error()
+	for _, substr := range []string{
+		"connection reset by peer",
+		"broken pipe",
+		"i/o timeout",
+		"TLS handshake timeout",
+		"server misbehaving",
+		"connection refused",
+	} {
+		if strings.Contains(msg, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+// withTransientRetry wraps an operation with exponential-backoff retry on
+// transient network errors. Non-transient errors are returned immediately.
+// Jitter (up to +25% of delay) is added to prevent thundering-herd retries.
+func (p *Platform) withTransientRetry(ctx context.Context, operation string, fn func() error) error {
+	var lastErr error
+	delay := transientRetryInitial
+	for attempt := 0; attempt <= maxTransientRetries; attempt++ {
+		lastErr = fn()
+		if lastErr == nil {
+			if attempt > 0 {
+				slog.Info(p.tag()+": transient retry succeeded",
+					"operation", operation,
+					"attempt", attempt+1,
+				)
+			}
+			return nil
+		}
+		if !isTransientError(lastErr) {
+			return lastErr
+		}
+		if attempt == maxTransientRetries {
+			break
+		}
+		// Add jitter: up to +25% of delay to spread out concurrent retries.
+		jitter := time.Duration(rand.Int64N(int64(delay / 4)))
+		actualDelay := delay + jitter
+		slog.Warn(p.tag()+": transient error, retrying",
+			"operation", operation,
+			"attempt", attempt+1,
+			"max_retries", maxTransientRetries,
+			"delay", actualDelay,
+			"error", lastErr,
+		)
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%s: %s retry cancelled: %w (last error: %v)", p.tag(), operation, ctx.Err(), lastErr)
+		case <-time.After(actualDelay):
+		}
+		delay = min(delay*2, transientRetryMaxDelay)
+	}
+	return fmt.Errorf("%s failed after %d retries: %w", operation, maxTransientRetries, lastErr)
 }
 
 func stringValue(v *string) string {
@@ -2640,16 +2739,18 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 			Body(p.buildReplyMessageReqBody(rc, larkim.MsgTypeInteractive, cardJSON)).
 			Build()
 		var resp *larkim.ReplyMessageResp
-		if err := p.withFreshTenantAccessTokenRetry(ctx, "send preview", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
-			var err error
-			resp, err = client.Im.Message.Reply(ctx, req, options...)
-			if err != nil {
-				return fmt.Errorf("%s: send preview (reply): %w", p.tag(), err)
-			}
-			if !resp.Success() {
-				return fmt.Errorf("%s: send preview (reply) code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
-			}
-			return nil
+		if err := p.withTransientRetry(ctx, "send preview", func() error {
+			return p.withFreshTenantAccessTokenRetry(ctx, "send preview", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+				var err error
+				resp, err = client.Im.Message.Reply(ctx, req, options...)
+				if err != nil {
+					return fmt.Errorf("%s: send preview (reply): %w", p.tag(), err)
+				}
+				if !resp.Success() {
+					return fmt.Errorf("%s: send preview (reply) code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+				}
+				return nil
+			})
 		}); err != nil {
 			return nil, err
 		}
@@ -2666,16 +2767,18 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 				Build()).
 			Build()
 		var resp *larkim.CreateMessageResp
-		if err := p.withFreshTenantAccessTokenRetry(ctx, "send preview", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
-			var err error
-			resp, err = client.Im.Message.Create(ctx, req, options...)
-			if err != nil {
-				return fmt.Errorf("%s: send preview: %w", p.tag(), err)
-			}
-			if !resp.Success() {
-				return fmt.Errorf("%s: send preview code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
-			}
-			return nil
+		if err := p.withTransientRetry(ctx, "send preview", func() error {
+			return p.withFreshTenantAccessTokenRetry(ctx, "send preview", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+				var err error
+				resp, err = client.Im.Message.Create(ctx, req, options...)
+				if err != nil {
+					return fmt.Errorf("%s: send preview: %w", p.tag(), err)
+				}
+				if !resp.Success() {
+					return fmt.Errorf("%s: send preview code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+				}
+				return nil
+			})
 		}); err != nil {
 			return nil, err
 		}
@@ -2719,15 +2822,17 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 			Content(cardJSON).
 			Build()).
 		Build()
-	return p.withFreshTenantAccessTokenRetry(ctx, "patch message", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
-		resp, err := client.Im.Message.Patch(ctx, req, options...)
-		if err != nil {
-			return fmt.Errorf("%s: patch message: %w", p.tag(), err)
-		}
-		if !resp.Success() {
-			return fmt.Errorf("%s: patch message code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
-		}
-		return nil
+	return p.withTransientRetry(ctx, "patch message", func() error {
+		return p.withFreshTenantAccessTokenRetry(ctx, "patch message", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+			resp, err := client.Im.Message.Patch(ctx, req, options...)
+			if err != nil {
+				return fmt.Errorf("%s: patch message: %w", p.tag(), err)
+			}
+			if !resp.Success() {
+				return fmt.Errorf("%s: patch message code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+			}
+			return nil
+		})
 	})
 }
 
@@ -2761,15 +2866,17 @@ func (p *Platform) DeletePreviewMessage(ctx context.Context, previewHandle any) 
 	req := larkim.NewDeleteMessageReqBuilder().
 		MessageId(h.messageID).
 		Build()
-	return p.withFreshTenantAccessTokenRetry(ctx, "delete preview message", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
-		resp, err := client.Im.Message.Delete(ctx, req, options...)
-		if err != nil {
-			return fmt.Errorf("%s: delete preview message: %w", p.tag(), err)
-		}
-		if !resp.Success() {
-			return fmt.Errorf("%s: delete preview message code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
-		}
-		return nil
+	return p.withTransientRetry(ctx, "delete preview message", func() error {
+		return p.withFreshTenantAccessTokenRetry(ctx, "delete preview message", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+			resp, err := client.Im.Message.Delete(ctx, req, options...)
+			if err != nil {
+				return fmt.Errorf("%s: delete preview message: %w", p.tag(), err)
+			}
+			if !resp.Success() {
+				return fmt.Errorf("%s: delete preview message code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+			}
+			return nil
+		})
 	})
 }
 
@@ -2792,23 +2899,25 @@ func (p *Platform) SendAudio(ctx context.Context, rctx any, audio []byte, format
 	}
 
 	var uploadResp *larkim.CreateFileResp
-	if err := p.withFreshTenantAccessTokenRetry(ctx, "upload audio", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
-		req := larkim.NewCreateFileReqBuilder().
-			Body(larkim.NewCreateFileReqBodyBuilder().
-				FileType(larkim.FileTypeOpus).
-				FileName("tts_audio.opus").
-				File(bytes.NewReader(audio)).
-				Build()).
-			Build()
-		var err error
-		uploadResp, err = client.Im.File.Create(ctx, req, options...)
-		if err != nil {
-			return fmt.Errorf("%s: upload audio: %w", p.tag(), err)
-		}
-		if !uploadResp.Success() {
-			return fmt.Errorf("%s: upload audio code=%d msg=%s", p.tag(), uploadResp.Code, uploadResp.Msg)
-		}
-		return nil
+	if err := p.withTransientRetry(ctx, "upload audio", func() error {
+		return p.withFreshTenantAccessTokenRetry(ctx, "upload audio", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+			req := larkim.NewCreateFileReqBuilder().
+				Body(larkim.NewCreateFileReqBodyBuilder().
+					FileType(larkim.FileTypeOpus).
+					FileName("tts_audio.opus").
+					File(bytes.NewReader(audio)).
+					Build()).
+				Build()
+			var err error
+			uploadResp, err = client.Im.File.Create(ctx, req, options...)
+			if err != nil {
+				return fmt.Errorf("%s: upload audio: %w", p.tag(), err)
+			}
+			if !uploadResp.Success() {
+				return fmt.Errorf("%s: upload audio code=%d msg=%s", p.tag(), uploadResp.Code, uploadResp.Msg)
+			}
+			return nil
+		})
 	}); err != nil {
 		return err
 	}
