@@ -270,6 +270,15 @@ func main() {
 			})
 		}
 
+		// Wire local reference normalization / rendering
+		engine.SetReferenceConfig(core.ReferenceRenderCfg{
+			NormalizeAgents: proj.References.NormalizeAgents,
+			RenderPlatforms: proj.References.RenderPlatforms,
+			DisplayPath:     proj.References.DisplayPath,
+			MarkerStyle:     proj.References.MarkerStyle,
+			EnclosureStyle:  proj.References.EnclosureStyle,
+		})
+
 		// Wire streaming preview
 		{
 			spcfg := core.DefaultStreamPreviewCfg()

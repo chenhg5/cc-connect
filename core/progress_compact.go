@@ -204,9 +204,10 @@ func inferLegacyEntryKind(entry string) ProgressCardEntryKind {
 // compactProgressWriter coalesces intermediate progress (thinking/tool-use)
 // into one editable message for platforms that support message updates.
 type compactProgressWriter struct {
-	ctx      context.Context
-	platform Platform
-	replyCtx any
+	ctx       context.Context
+	platform  Platform
+	replyCtx  any
+	transform func(string) string
 
 	starter PreviewStarter
 	updater MessageUpdater
@@ -262,11 +263,12 @@ func SuppressStandaloneToolResultEvent(p Platform) bool {
 	return progressStyleForPlatform(p) == progressStyleLegacy
 }
 
-func newCompactProgressWriter(ctx context.Context, p Platform, replyCtx any, agentName string, lang Language) *compactProgressWriter {
+func newCompactProgressWriter(ctx context.Context, p Platform, replyCtx any, agentName string, lang Language, transform func(string) string) *compactProgressWriter {
 	w := &compactProgressWriter{
 		ctx:        ctx,
 		platform:   p,
 		replyCtx:   replyCtx,
+		transform:  transform,
 		style:      progressStyleForPlatform(p),
 		state:      ProgressCardStateRunning,
 		agentName:  normalizeProgressAgentLabel(agentName),
@@ -357,6 +359,13 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 	}
 	if fallback == "" {
 		fallback = text
+	}
+	switch item.Kind {
+	case ProgressEntryThinking, ProgressEntryError, ProgressEntryInfo:
+		if w.transform != nil {
+			text = w.transform(text)
+			fallback = w.transform(fallback)
+		}
 	}
 	kind := item.Kind
 	if kind == "" {

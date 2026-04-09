@@ -1060,6 +1060,87 @@ func TestProcessInteractiveEvents_CardProgressUsesCardTemplate(t *testing.T) {
 	}
 }
 
+func TestProcessInteractiveEvents_FinalReplyUsesWorkspaceForReferenceRendering(t *testing.T) {
+	p := &stubPlatformEngine{n: "feishu"}
+	a := &namedStubModelModeAgent{name: "codex"}
+	e := NewEngine("test", a, []Platform{p}, "", LangEnglish)
+	e.SetReferenceConfig(ReferenceRenderCfg{
+		NormalizeAgents: []string{"codex"},
+		RenderPlatforms: []string{"feishu"},
+		DisplayPath:     "relative",
+		MarkerStyle:     "emoji",
+		EnclosureStyle:  "code",
+	})
+
+	sessionKey := "feishu:user-relative"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-relative")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-relative",
+		workspaceDir: "/root/code",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{
+		Type:    EventResult,
+		Content: "/root/code/demo-repo/src/services/user_profile_service.ts:42",
+		Done:    true,
+	}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-relative", time.Now(), nil, nil, state.replyCtx)
+
+	sent := p.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("sent = %#v, want one final reply", sent)
+	}
+	if got := sent[0]; got != "📄 `demo-repo/src/services/user_profile_service.ts:42`" {
+		t.Fatalf("final reply = %q, want workspace-relative rendered reference", got)
+	}
+}
+
+func TestProcessInteractiveEvents_FinalReplyRemainsRawWhenReferencesDisabled(t *testing.T) {
+	p := &stubPlatformEngine{n: "feishu"}
+	a := &namedStubModelModeAgent{name: "codex"}
+	e := NewEngine("test", a, []Platform{p}, "", LangEnglish)
+	e.SetReferenceConfig(ReferenceRenderCfg{
+		NormalizeAgents: []string{},
+		RenderPlatforms: []string{"feishu"},
+		DisplayPath:     "relative",
+		MarkerStyle:     "emoji",
+		EnclosureStyle:  "code",
+	})
+
+	sessionKey := "feishu:user-relative-raw"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-relative-raw")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-relative-raw",
+		workspaceDir: "/root/code/demo",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	raw := "Check [/root/code/demo/ui/recovery_contact_form.tsx](/root/code/demo/ui/recovery_contact_form.tsx) and /root/code/demo/ui/recovery_contact_form.tsx:11"
+	agentSession.events <- Event{
+		Type:    EventResult,
+		Content: raw,
+		Done:    true,
+	}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-relative-raw", time.Now(), nil, nil, state.replyCtx)
+
+	sent := p.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("sent = %#v, want one final reply", sent)
+	}
+	if got := sent[0]; got != raw {
+		t.Fatalf("final reply = %q, want raw unchanged content %q", got, raw)
+	}
+}
+
 func TestProcessInteractiveEvents_CardProgressUsesStructuredPayloadWhenSupported(t *testing.T) {
 	p := &stubCompactProgressPlatform{
 		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
@@ -2176,6 +2257,61 @@ func TestReplyWithCard_UsesCardSenderWhenSupported(t *testing.T) {
 	}
 	if len(p.sent) != 0 {
 		t.Fatalf("plain replies = %d, want 0", len(p.sent))
+	}
+}
+
+func TestReply_DoesNotTransformLocalReferencesWhenEnabled(t *testing.T) {
+	p := &stubPlatformEngine{n: "feishu"}
+	a := &namedStubModelModeAgent{name: "codex"}
+	e := NewEngine("test", a, []Platform{p}, "", LangEnglish)
+	e.SetBaseWorkDir("/root/code/demo")
+	e.SetReferenceConfig(ReferenceRenderCfg{
+		NormalizeAgents: []string{"codex"},
+		RenderPlatforms: []string{"feishu"},
+		DisplayPath:     "relative",
+		MarkerStyle:     "emoji",
+		EnclosureStyle:  "code",
+	})
+
+	e.reply(p, "ctx", "See /root/code/demo/src/app.ts:42")
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if got := p.sent[0]; got != "See /root/code/demo/src/app.ts:42" {
+		t.Fatalf("reply content = %q, want raw path", got)
+	}
+}
+
+func TestReplyWithCard_DoesNotTransformMarkdownOrFallback(t *testing.T) {
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	a := &namedStubModelModeAgent{name: "codex"}
+	e := NewEngine("test", a, []Platform{p}, "", LangEnglish)
+	e.SetBaseWorkDir("/root/code/demo")
+	e.SetReferenceConfig(ReferenceRenderCfg{
+		NormalizeAgents: []string{"codex"},
+		RenderPlatforms: []string{"feishu"},
+		DisplayPath:     "basename",
+		MarkerStyle:     "ascii",
+		EnclosureStyle:  "code",
+	})
+	card := NewCard().Markdown("Inspect /root/code/demo/src/app.ts:42").Build()
+
+	e.replyWithCard(p, "ctx", card)
+
+	if len(p.repliedCards) != 1 {
+		t.Fatalf("replied cards = %d, want 1", len(p.repliedCards))
+	}
+	rendered := p.repliedCards[0]
+	md, ok := rendered.Elements[0].(CardMarkdown)
+	if !ok {
+		t.Fatalf("first card element = %T, want CardMarkdown", rendered.Elements[0])
+	}
+	if md.Content != "Inspect /root/code/demo/src/app.ts:42" {
+		t.Fatalf("card markdown = %q, want raw reference", md.Content)
+	}
+	if got := rendered.RenderText(); !strings.Contains(got, "/root/code/demo/src/app.ts:42") {
+		t.Fatalf("fallback RenderText() = %q, want raw reference", got)
 	}
 }
 
@@ -7052,6 +7188,136 @@ func TestCmdDiff_FileSenderPath(t *testing.T) {
 			t.Fatal("timed out waiting for diff response")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestCmdShow_EmptyReference_ShowsUsage(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetAdminFrom("admin")
+
+	msg := &Message{
+		SessionKey: "test:ch:admin",
+		Content:    "/show",
+		ReplyCtx:   "ctx",
+		UserID:     "admin",
+		Platform:   "test",
+	}
+	e.cmdShow(p, msg, nil)
+
+	sent := p.getSent()
+	if len(sent) != 1 || !strings.Contains(sent[0], "/show") {
+		t.Fatalf("sent = %v, want show usage", sent)
+	}
+}
+
+func TestCmdShow_MultiWorkspaceUsesBoundWorkDirForRelativeReference(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agentName := "test-show-workspace"
+	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) {
+		return &namedStubModelModeAgent{name: agentName}, nil
+	})
+	e := NewEngine("test", &namedStubModelModeAgent{name: agentName}, []Platform{p}, "", LangEnglish)
+	e.SetAdminFrom("admin")
+
+	baseDir := t.TempDir()
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	wsDir := filepath.Join(baseDir, "demo-repo")
+	if err := os.MkdirAll(filepath.Join(wsDir, "svc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wsDir, "svc", "handler.go"), []byte("package svc\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e.workspaceBindings.Bind(sharedWorkspaceBindingsKey, "ch1", "demo", normalizeWorkspacePath(wsDir))
+
+	msg := &Message{
+		SessionKey: "test:ch1:admin",
+		Content:    "/show svc/handler.go",
+		ReplyCtx:   "ctx",
+		UserID:     "admin",
+		Platform:   "test",
+	}
+	e.cmdShow(p, msg, []string{"svc/handler.go"})
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for {
+		sent := p.getSent()
+		if len(sent) > 0 {
+			if !strings.Contains(sent[0], "📄 svc/handler.go") {
+				t.Fatalf("output = %q, want relative title", sent[0])
+			}
+			if !strings.Contains(sent[0], "package svc") {
+				t.Fatalf("output = %q, want file content", sent[0])
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for /show response")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestHandleCommand_ShowRequiresAdmin(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetAdminFrom("admin")
+
+	msg := &Message{
+		SessionKey: "test:ch:user1",
+		Content:    "/show foo.txt",
+		ReplyCtx:   "ctx",
+		UserID:     "user1",
+		Platform:   "test",
+	}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	if len(sent) != 1 || !strings.Contains(strings.ToLower(sent[0]), "admin") {
+		t.Fatalf("sent = %v, want admin required message", sent)
+	}
+}
+
+func TestCmdShow_OutputRemainsRawWhenReferencesEnabled(t *testing.T) {
+	p := &stubPlatformEngine{n: "feishu"}
+	agent := &stubWorkDirAgent{workDir: t.TempDir()}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetAdminFrom("admin")
+	e.references = normalizeReferenceRenderCfg(ReferenceRenderCfg{
+		NormalizeAgents: []string{"all"},
+		RenderPlatforms: []string{"all"},
+		DisplayPath:     "relative",
+		MarkerStyle:     "emoji",
+		EnclosureStyle:  "code",
+	})
+
+	file := filepath.Join(agent.workDir, "svc", "handler.go")
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rawLine := "/root/code/demo-repo/ui/recovery_contact_form.tsx:11"
+	if err := os.WriteFile(file, []byte(rawLine+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	msg := &Message{
+		SessionKey: "test:ch:admin",
+		Content:    "/show svc/handler.go",
+		ReplyCtx:   "ctx",
+		UserID:     "admin",
+		Platform:   "feishu",
+	}
+	e.cmdShow(p, msg, []string{"svc/handler.go"})
+
+	sent := p.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("sent = %v, want one response", sent)
+	}
+	if !strings.Contains(sent[0], rawLine) {
+		t.Fatalf("output = %q, want raw code content preserved", sent[0])
 	}
 }
 

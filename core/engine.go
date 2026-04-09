@@ -185,6 +185,7 @@ type Engine struct {
 	rateLimiter      *RateLimiter
 	outgoingRL       *OutgoingRateLimiter
 	streamPreview    StreamPreviewCfg
+	references       ReferenceRenderCfg
 	relayManager     *RelayManager
 	eventIdleTimeout time.Duration
 	dirHistory       *DirHistory
@@ -339,6 +340,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		platformReady:         make(map[Platform]bool),
 		startedAt:             time.Now(),
 		streamPreview:         DefaultStreamPreviewCfg(),
+		references:            DefaultReferenceRenderCfg(),
 		eventIdleTimeout:      defaultEventIdleTimeout,
 		showContextIndicator:  true,
 	}
@@ -435,6 +437,11 @@ func (e *Engine) SetTTSSaveFunc(fn func(mode string) error) {
 // SetDisplayConfig overrides the default truncation settings.
 func (e *Engine) SetDisplayConfig(cfg DisplayCfg) {
 	e.display = cfg
+}
+
+// SetReferenceConfig configures local reference normalization/rendering.
+func (e *Engine) SetReferenceConfig(cfg ReferenceRenderCfg) {
+	e.references = normalizeReferenceRenderCfg(cfg)
 }
 
 // estimateTokens provides a rough token estimate for a set of history entries.
@@ -662,7 +669,7 @@ func (e *Engine) SetAdminFrom(adminFrom string) {
 	shellDisabled := e.disabledCmds["shell"]
 	e.userRolesMu.Unlock()
 	if af == "" && !shellDisabled {
-		slog.Warn("admin_from is not set — privileged commands (/shell, /dir, /restart, /upgrade) are blocked. "+
+		slog.Warn("admin_from is not set — privileged commands (/shell, /show, /dir, /restart, /upgrade) are blocked. "+
 			"Set admin_from in config to enable them, or use disabled_commands to hide them.",
 			"project", e.name)
 	}
@@ -671,6 +678,7 @@ func (e *Engine) SetAdminFrom(adminFrom string) {
 // privilegedCommands are commands that require admin_from authorization.
 var privilegedCommands = map[string]bool{
 	"shell":   true,
+	"show":    true,
 	"dir":     true,
 	"restart": true,
 	"upgrade": true,
@@ -2251,8 +2259,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	}()
 
 	state.mu.Lock()
-	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx)
-	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang())
+	workspaceDir := state.workspaceDir
+	workspaceRenderer := func(content string) string {
+		return e.renderOutgoingContentForWorkspace(state.platform, content, workspaceDir)
+	}
+	sendWorkspace := func(p Platform, replyCtx any, content string) {
+		e.sendForWorkspace(p, replyCtx, content, workspaceDir)
+	}
+	sendWorkspaceWithError := func(p Platform, replyCtx any, content string) error {
+		return e.sendWithErrorForWorkspace(p, replyCtx, content, workspaceDir)
+	}
+	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
+	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer)
 	state.mu.Unlock()
 
 	// Idle timeout: 0 = disabled
@@ -2350,7 +2368,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						segment := strings.Join(textParts[segmentStart:], "")
 						if segment != "" {
 							for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
-								e.send(p, replyCtx, chunk)
+								sendWorkspace(p, replyCtx, chunk)
 							}
 						}
 					}
@@ -2363,7 +2381,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				preview := truncateIf(event.Content, e.display.ThinkingMaxLen)
 				thinkingMsg := fmt.Sprintf(e.i18n.T(MsgThinking), preview)
 				if !cp.AppendEvent(ProgressEntryThinking, preview, "", thinkingMsg) {
-					e.send(p, replyCtx, thinkingMsg)
+					sendWorkspace(p, replyCtx, thinkingMsg)
 				}
 			}
 
@@ -2377,7 +2395,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						segment := strings.Join(textParts[segmentStart:], "")
 						if segment != "" {
 							for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
-								e.send(p, replyCtx, chunk)
+								sendWorkspace(p, replyCtx, chunk)
 							}
 						}
 					}
@@ -2408,7 +2426,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				toolMsg := fmt.Sprintf(e.i18n.T(MsgTool), toolCount, event.ToolName, formattedInput)
 				if !cp.AppendEvent(ProgressEntryToolUse, toolInput, event.ToolName, toolMsg) {
 					for _, chunk := range SplitMessageCodeFenceAware(toolMsg, maxPlatformMessageLen) {
-						e.send(p, replyCtx, chunk)
+						sendWorkspace(p, replyCtx, chunk)
 					}
 				}
 			}
@@ -2434,7 +2452,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 					if !cp.AppendStructured(entry, resultMsg) {
 						if !SuppressStandaloneToolResultEvent(p) {
-							e.send(p, replyCtx, resultMsg)
+							e.sendRaw(p, replyCtx, resultMsg)
 						}
 					}
 				}
@@ -2480,7 +2498,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					segment := strings.Join(textParts[segmentStart:], "")
 					if segment != "" {
 						for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
-							e.send(p, replyCtx, chunk)
+							sendWorkspace(p, replyCtx, chunk)
 						}
 					}
 				}
@@ -2611,7 +2629,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					unsent := strings.Join(textParts[segmentStart:], "")
 					if unsent != "" {
 						for _, chunk := range splitMessage(unsent, maxPlatformMessageLen) {
-							if err := e.sendWithError(p, replyCtx, chunk); err != nil {
+							if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
 								return
 							}
 						}
@@ -2625,7 +2643,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			} else {
 				slog.Debug("EventResult: sending via p.Send (preview inactive or failed)", "response_len", len(fullResponse), "chunks", len(splitMessage(fullResponse, maxPlatformMessageLen)))
 				for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
-					if err := e.sendWithError(p, replyCtx, chunk); err != nil {
+					if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
 						return
 					}
 				}
@@ -2729,8 +2747,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				turnStart = time.Now()
 				firstEventLogged = false
 				waitStart = time.Now()
-				sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx)
-				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, e.agent.Name(), e.i18n.CurrentLang())
+				queuedRenderer := func(content string) string {
+					return e.renderOutgoingContentForWorkspace(queued.platform, content, workspaceDir)
+				}
+				sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx, queuedRenderer)
+				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), queuedRenderer)
 
 				session.AddHistory("user", queued.content)
 
@@ -2796,7 +2817,7 @@ channelClosed:
 				unsent := strings.Join(textParts[segmentStart:], "")
 				if unsent != "" {
 					for _, chunk := range splitMessage(unsent, maxPlatformMessageLen) {
-						if err := e.sendWithError(p, replyCtx, chunk); err != nil {
+						if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
 							return
 						}
 					}
@@ -2806,7 +2827,7 @@ channelClosed:
 			slog.Debug("stream preview: finalized in-place (process exited)")
 		} else {
 			for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
-				if err := e.sendWithError(p, replyCtx, chunk); err != nil {
+				if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
 					return
 				}
 			}
@@ -2918,6 +2939,7 @@ var builtinCommands = []struct {
 	{[]string{"bind"}, "bind"},
 	{[]string{"search", "find"}, "search"},
 	{[]string{"shell", "sh", "exec", "run"}, "shell"},
+	{[]string{"show"}, "show"},
 	{[]string{"dir", "cd", "chdir", "workdir"}, "dir"},
 	{[]string{"tts"}, "tts"},
 	{[]string{"workspace", "ws"}, "workspace"},
@@ -3107,6 +3129,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdShell(p, msg, raw)
 	case "diff":
 		e.cmdDiff(p, msg, raw)
+	case "show":
+		e.cmdShow(p, msg, args)
 	case "dir":
 		e.cmdDir(p, msg, args)
 	case "tts":
@@ -3598,6 +3622,67 @@ func (e *Engine) matchSession(sessions []AgentSessionInfo, manager *SessionManag
 	return nil
 }
 
+func (e *Engine) commandWorkDir(agent Agent, msg *Message) string {
+	if switcher, ok := agent.(WorkDirSwitcher); ok {
+		if wd := strings.TrimSpace(switcher.GetWorkDir()); wd != "" {
+			return normalizeWorkspacePath(wd)
+		}
+	}
+	if e.multiWorkspace {
+		channelKey := effectiveWorkspaceChannelKey(msg)
+		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
+			return normalizeWorkspacePath(b.Workspace)
+		}
+	}
+	if wd, ok := agent.(interface{ GetWorkDir() string }); ok {
+		if dir := strings.TrimSpace(wd.GetWorkDir()); dir != "" {
+			return normalizeWorkspacePath(dir)
+		}
+	}
+	if wd, ok := e.agent.(interface{ GetWorkDir() string }); ok {
+		if dir := strings.TrimSpace(wd.GetWorkDir()); dir != "" {
+			return normalizeWorkspacePath(dir)
+		}
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		return normalizeWorkspacePath(cwd)
+	}
+	return ""
+}
+
+func (e *Engine) cmdShow(p Platform, msg *Message, args []string) {
+	rawRef := strings.TrimSpace(strings.Join(args, " "))
+	if rawRef == "" {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgShowUsage))
+		return
+	}
+
+	agent, _, _, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+	workDir := e.commandWorkDir(agent, msg)
+	req, err := buildReferenceViewRequest(rawRef, workDir)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgShowParseError, rawRef))
+		return
+	}
+	content, err := renderReferenceView(req)
+	if err != nil {
+		switch {
+		case strings.Contains(err.Error(), "path does not exist"):
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgShowNotFound, rawRef))
+		case strings.Contains(err.Error(), "directory reference cannot carry a location"):
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgShowDirWithLocation, rawRef))
+		default:
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgShowReadFailed, err))
+		}
+		return
+	}
+	e.reply(p, msg.ReplyCtx, content)
+}
+
 func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
 	// Strip the command prefix ("/shell ", "/sh ", "/exec ", "/run ")
 	shellCmd := raw
@@ -3614,19 +3699,12 @@ func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
 		return
 	}
 
-	// In multi-workspace mode, resolve workspace directory for this channel
-	var workDir string
-	if e.multiWorkspace {
-		channelKey := effectiveWorkspaceChannelKey(msg)
-		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
-			workDir = normalizeWorkspacePath(b.Workspace)
-		}
+	agent, _, _, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
 	}
-	if workDir == "" {
-		if wd, ok := e.agent.(interface{ GetWorkDir() string }); ok {
-			workDir = normalizeWorkspacePath(wd.GetWorkDir())
-		}
-	}
+	workDir := e.commandWorkDir(agent, msg)
 	if workDir == "" {
 		workDir, _ = os.Getwd()
 	}
@@ -4818,6 +4896,7 @@ func helpCardGroups() []helpCardGroup {
 			titleKey: MsgHelpToolsSection,
 			items: []helpCardItem{
 				{command: "/shell", action: "cmd:/shell"},
+				{command: "/show", action: "cmd:/show"},
 				{command: "/cron", action: "nav:/cron"},
 				{command: "/heartbeat", action: "nav:/heartbeat"},
 				{command: "/commands", action: "nav:/commands"},
@@ -6249,6 +6328,73 @@ func (e *Engine) waitOutgoing(p Platform) error {
 	return e.outgoingRL.Wait(e.ctx, p.Name())
 }
 
+func (e *Engine) renderOutgoingContentForWorkspace(p Platform, content, workspaceDir string) string {
+	if strings.TrimSpace(content) == "" {
+		return content
+	}
+	return TransformLocalReferences(content, e.references, e.agent.Name(), p.Name(), workspaceDir)
+}
+
+func (e *Engine) sendWithErrorForWorkspace(p Platform, replyCtx any, content, workspaceDir string) error {
+	if err := e.waitOutgoing(p); err != nil {
+		slog.Warn("outgoing rate limit: context cancelled", "platform", p.Name(), "error", err)
+		return err
+	}
+	content = e.renderOutgoingContentForWorkspace(p, content, workspaceDir)
+	return e.sendAlreadyRenderedWithError(p, replyCtx, content)
+}
+
+func (e *Engine) sendForWorkspace(p Platform, replyCtx any, content, workspaceDir string) {
+	_ = e.sendWithErrorForWorkspace(p, replyCtx, content, workspaceDir)
+}
+
+func (e *Engine) renderCardForPlatform(p Platform, card *Card) *Card {
+	return e.renderCardForPlatformWorkspace(p, card, "")
+}
+
+func (e *Engine) renderCardForPlatformWorkspace(p Platform, card *Card, workspaceDir string) *Card {
+	if card == nil {
+		return nil
+	}
+	out := &Card{}
+	if card.Header != nil {
+		h := *card.Header
+		out.Header = &h
+	}
+	out.Elements = make([]CardElement, 0, len(card.Elements))
+	for _, elem := range card.Elements {
+		switch v := elem.(type) {
+		case CardMarkdown:
+			content := v.Content
+			if workspaceDir != "" {
+				content = e.renderOutgoingContentForWorkspace(p, v.Content, workspaceDir)
+			}
+			out.Elements = append(out.Elements, CardMarkdown{Content: content})
+		case CardNote:
+			text := v.Text
+			if workspaceDir != "" {
+				text = e.renderOutgoingContentForWorkspace(p, v.Text, workspaceDir)
+			}
+			out.Elements = append(out.Elements, CardNote{Text: text, Tag: v.Tag})
+		case CardListItem:
+			text := v.Text
+			if workspaceDir != "" {
+				text = e.renderOutgoingContentForWorkspace(p, v.Text, workspaceDir)
+			}
+			out.Elements = append(out.Elements, CardListItem{
+				Text:     text,
+				BtnText:  v.BtnText,
+				BtnType:  v.BtnType,
+				BtnValue: v.BtnValue,
+				Extra:    v.Extra,
+			})
+		default:
+			out.Elements = append(out.Elements, elem)
+		}
+	}
+	return out
+}
+
 // sendWithError applies outgoing rate limiting and p.Send. It logs wait
 // cancellation and platform failures, and returns a non-nil error on either.
 func (e *Engine) sendWithError(p Platform, replyCtx any, content string) error {
@@ -6256,6 +6402,10 @@ func (e *Engine) sendWithError(p Platform, replyCtx any, content string) error {
 		slog.Warn("outgoing rate limit: context cancelled", "platform", p.Name(), "error", err)
 		return err
 	}
+	return e.sendAlreadyRenderedWithError(p, replyCtx, content)
+}
+
+func (e *Engine) sendAlreadyRenderedWithError(p Platform, replyCtx any, content string) error {
 	start := time.Now()
 	if err := p.Send(e.ctx, replyCtx, content); err != nil {
 		slog.Error("platform send failed", "platform", p.Name(), "error", err, "content_len", len(content))
@@ -6270,6 +6420,17 @@ func (e *Engine) sendWithError(p Platform, replyCtx any, content string) error {
 // send wraps p.Send with error logging, slow-operation warnings, and outgoing rate limiting.
 func (e *Engine) send(p Platform, replyCtx any, content string) {
 	_ = e.sendWithError(p, replyCtx, content)
+}
+
+// sendRaw sends content without local-reference rendering. This is used for raw
+// tool outputs, where preserving the original text is preferable to applying the
+// agent-facing reference display transform.
+func (e *Engine) sendRaw(p Platform, replyCtx any, content string) {
+	if err := e.waitOutgoing(p); err != nil {
+		slog.Warn("outgoing rate limit: context cancelled", "platform", p.Name(), "error", err)
+		return
+	}
+	_ = e.sendAlreadyRenderedWithError(p, replyCtx, content)
 }
 
 // drainEvents discards any buffered events from the channel.
@@ -6348,12 +6509,13 @@ func (e *Engine) replyWithCard(p Platform, replyCtx any, card *Card) {
 		return
 	}
 	if cs, ok := p.(CardSender); ok {
-		if err := cs.ReplyCard(e.ctx, replyCtx, card); err != nil {
+		rendered := e.renderCardForPlatform(p, card)
+		if err := cs.ReplyCard(e.ctx, replyCtx, rendered); err != nil {
 			slog.Error("card reply failed", "platform", p.Name(), "error", err)
 		}
 		return
 	}
-	e.reply(p, replyCtx, card.RenderText())
+	e.reply(p, replyCtx, e.renderCardForPlatform(p, card).RenderText())
 }
 
 // sendWithCard sends a card as a new message (not a reply).
@@ -6367,12 +6529,13 @@ func (e *Engine) sendWithCard(p Platform, replyCtx any, card *Card) {
 		return
 	}
 	if cs, ok := p.(CardSender); ok {
-		if err := cs.SendCard(e.ctx, replyCtx, card); err != nil {
+		rendered := e.renderCardForPlatform(p, card)
+		if err := cs.SendCard(e.ctx, replyCtx, rendered); err != nil {
 			slog.Error("card send failed", "platform", p.Name(), "error", err)
 		}
 		return
 	}
-	e.send(p, replyCtx, card.RenderText())
+	e.send(p, replyCtx, e.renderCardForPlatform(p, card).RenderText())
 }
 
 // ──────────────────────────────────────────────────────────────
