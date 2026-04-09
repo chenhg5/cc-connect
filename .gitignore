@@ -55,7 +55,8 @@ dist/
 build/
 bin/
 release/
-!web/dist/
+# Keep web/dist directory (for embedded admin UI) but ignore build artifacts
+web/dist/*
 !web/dist/.keep
 
 # ============================================================================
