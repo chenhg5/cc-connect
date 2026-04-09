@@ -1500,6 +1500,20 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 		"threshold", e.resetOnIdle,
 	)
 
+	// Check if the old session has an agent process that needs graceful
+	// shutdown. If so, tell the user we're wrapping up before blocking.
+	e.interactiveMu.Lock()
+	state, hasState := e.interactiveStates[interactiveKey]
+	hasAgent := hasState && state != nil && state.agentSession != nil && state.agentSession.Alive()
+	e.interactiveMu.Unlock()
+
+	if hasAgent {
+		// Notify the user before the potentially long close. The close
+		// returns as soon as the process exits (usually seconds), but
+		// Stop hooks can take up to 120s.
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSessionClosingGraceful))
+	}
+
 	e.cleanupInteractiveState(interactiveKey)
 	session.UnlockWithoutUpdate()
 
@@ -2188,6 +2202,14 @@ func (e *Engine) closeAgentSessionWithTimeout(sessionKey string, agentSession Ag
 		return
 	}
 
+	// Allow enough time for the agent's own graceful shutdown sequence:
+	// stdin close → Stop hooks (claude-mem summary etc.) → SIGTERM → SIGKILL.
+	// Claude Code's Stop hooks can take up to 120s (claude-mem uses a
+	// sonnet summarizer). The 130s budget covers the default 120s graceful
+	// phase + 5s SIGTERM + 5s buffer. The wait ends early if the process
+	// exits sooner — this is the ceiling, not the typical duration.
+	const closeTimeout = 130 * time.Second
+
 	slog.Debug("cleanupInteractiveState: closing agent session", "session", sessionKey)
 	closeStart := time.Now()
 
@@ -2202,8 +2224,9 @@ func (e *Engine) closeAgentSessionWithTimeout(sessionKey string, agentSession Ag
 		if elapsed := time.Since(closeStart); elapsed >= slowAgentClose {
 			slog.Warn("slow agent session close", "elapsed", elapsed, "session", sessionKey)
 		}
-	case <-time.After(10 * time.Second):
-		slog.Error("agent session close timed out (10s), abandoning", "session", sessionKey)
+	case <-time.After(closeTimeout):
+		slog.Error("agent session close timed out, abandoning",
+			"timeout", closeTimeout, "session", sessionKey)
 	}
 }
 
