@@ -150,16 +150,19 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 				if content == "" && len(images) == 0 && audio == nil && len(docFiles) == 0 {
 					return
 				}
+				userName := p.resolveUserName(ev.User)
+				channelName := p.resolveChannelNameForMsg(ev.Channel)
 				msg := &core.Message{
 					SessionKey: sessionKey, Platform: "slack",
-					UserID: ev.User, UserName: p.resolveUserName(ev.User),
-					ChatName:  p.resolveChannelNameForMsg(ev.Channel),
+					UserID: ev.User, UserName: userName,
+					ChatName:  channelName,
 					Content:   content,
 					Images:    images,
 					Files:     docFiles,
 					Audio:     audio,
 					MessageID: ev.TimeStamp,
 					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: ev.TimeStamp},
+					PlatformContext: slackMessageContext(ev.Channel, channelName, ev.User, userName, ev.TimeStamp, ev.ThreadTimeStamp),
 				}
 				p.handler(p, msg)
 
@@ -200,13 +203,16 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					return
 				}
 
+				userName := p.resolveUserName(ev.User)
+				channelName := p.resolveChannelNameForMsg(ev.Channel)
 				msg := &core.Message{
 					SessionKey: sessionKey, Platform: "slack",
-					UserID: ev.User, UserName: p.resolveUserName(ev.User),
-					ChatName: p.resolveChannelNameForMsg(ev.Channel),
+					UserID: ev.User, UserName: userName,
+					ChatName: channelName,
 					Content:  ev.Text, Images: images, Files: docFiles, Audio: audio,
 					MessageID: ts,
 					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: ts},
+					PlatformContext: slackMessageContext(ev.Channel, channelName, ev.User, userName, ts, ev.ThreadTimeStamp),
 				}
 				p.handler(p, msg)
 			}
@@ -245,8 +251,9 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 		msg := &core.Message{
 			SessionKey: sessionKey, Platform: "slack",
 			UserID: cmd.UserID, UserName: cmd.UserName,
-			Content:  content,
-			ReplyCtx: replyContext{channel: cmd.ChannelID},
+			Content:         content,
+			ReplyCtx:        replyContext{channel: cmd.ChannelID},
+			PlatformContext: slackMessageContext(cmd.ChannelID, cmd.ChannelName, cmd.UserID, cmd.UserName, "", ""),
 		}
 		slog.Debug("slack: slash command", "command", cmd.Command, "text", cmd.Text, "user", cmd.UserID)
 		p.handler(p, msg)
@@ -258,6 +265,23 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 	case socketmode.EventTypeConnectionError:
 		slog.Error("slack: connection error")
 	}
+}
+
+// slackMessageContext builds the ## Slack Message Context block that gets
+// prepended to the agent prompt so Claude knows which channel/thread to target
+// when making Slack MCP tool calls and can apply correct reply threading.
+func slackMessageContext(channelID, channelName, userID, userName, messageTS, threadTS string) string {
+	var b strings.Builder
+	b.WriteString("## Slack Message Context\n")
+	b.WriteString("channel_id: " + channelID + "\n")
+	b.WriteString("channel_name: " + channelName + "\n")
+	b.WriteString("user_id: " + userID + "\n")
+	b.WriteString("user_name: " + userName + "\n")
+	b.WriteString("message_ts: " + messageTS + "\n")
+	if threadTS != "" {
+		b.WriteString("thread_ts: " + threadTS + "\n")
+	}
+	return b.String()
 }
 
 func stripAppMentionText(text string) string {
