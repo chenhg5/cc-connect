@@ -34,10 +34,11 @@ func DefaultStreamPreviewCfg() StreamPreviewCfg {
 type streamPreview struct {
 	mu sync.Mutex
 
-	cfg      StreamPreviewCfg
-	platform Platform
-	replyCtx any
-	ctx      context.Context
+	cfg       StreamPreviewCfg
+	platform  Platform
+	replyCtx  any
+	ctx       context.Context
+	transform func(string) string
 
 	fullText          string // accumulated full text so far
 	lastSentText      string // what was last successfully sent to the platform
@@ -72,12 +73,13 @@ type PreviewFinishPreference interface {
 	KeepPreviewOnFinish() bool
 }
 
-func newStreamPreview(cfg StreamPreviewCfg, p Platform, replyCtx any, ctx context.Context) *streamPreview {
+func newStreamPreview(cfg StreamPreviewCfg, p Platform, replyCtx any, ctx context.Context, transform func(string) string) *streamPreview {
 	return &streamPreview{
 		cfg:       cfg,
 		platform:  p,
 		replyCtx:  replyCtx,
 		ctx:       ctx,
+		transform: transform,
 		timerStop: make(chan struct{}),
 	}
 }
@@ -166,6 +168,9 @@ func (sp *streamPreview) cancelTimerLocked() {
 
 // flushLocked sends the current preview text to the platform. Must hold sp.mu.
 func (sp *streamPreview) flushLocked(text string) {
+	if sp.transform != nil {
+		text = sp.transform(text)
+	}
 	if text == sp.lastSentText || text == "" {
 		return
 	}
@@ -232,6 +237,9 @@ func (sp *streamPreview) freeze() {
 				text = string([]rune(text)[:maxChars]) + "…"
 			}
 			if text != "" {
+				if sp.transform != nil {
+					text = sp.transform(text)
+				}
 				_ = updater.UpdateMessage(sp.ctx, sp.previewMsgID, text)
 			}
 		}
@@ -282,6 +290,9 @@ func (sp *streamPreview) finish(finalText string) bool {
 		close(sp.timerStop)
 	}
 
+	if sp.transform != nil {
+		finalText = sp.transform(finalText)
+	}
 	if sp.previewMsgID == nil || sp.degraded {
 		if sp.previewMsgID != nil && sp.degraded {
 			if cleaner, ok := sp.platform.(PreviewCleaner); ok {

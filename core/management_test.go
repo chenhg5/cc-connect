@@ -1,8 +1,8 @@
 package core
 
 import (
-	"context"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -288,9 +288,8 @@ func TestMgmt_ProjectDetail(t *testing.T) {
 func TestMgmt_ProjectPatch(t *testing.T) {
 	_, ts, _ := testManagementServer(t, "tok")
 
-	quiet := true
 	r := mgmtPatch(t, ts.URL+"/api/v1/projects/test-project", "tok", map[string]any{
-		"quiet": quiet,
+		"language": "zh",
 	})
 	if !r.OK {
 		t.Fatalf("patch failed: %s", r.Error)

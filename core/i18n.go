@@ -265,14 +265,15 @@ const (
 	MsgUsageFetchFailed   MsgKey = "usage_fetch_failed"
 
 	// Inline strings previously hardcoded in engine.go
-	MsgStatusMode       MsgKey = "status_mode"
-	MsgStatusSession    MsgKey = "status_session"
-	MsgStatusCron       MsgKey = "status_cron"
-	MsgStatusQuiet      MsgKey = "status_quiet"
-	MsgStatusSessionKey MsgKey = "status_session_key"
-	MsgStatusUserID     MsgKey = "status_user_id"
-	MsgQuietOnShort     MsgKey = "quiet_on_short"
-	MsgQuietOffShort    MsgKey = "quiet_off_short"
+	MsgStatusMode             MsgKey = "status_mode"
+	MsgStatusSession          MsgKey = "status_session"
+	MsgStatusCron             MsgKey = "status_cron"
+	MsgStatusThinkingMessages MsgKey = "status_thinking_messages"
+	MsgStatusToolMessages     MsgKey = "status_tool_messages"
+	MsgStatusSessionKey       MsgKey = "status_session_key"
+	MsgStatusUserID           MsgKey = "status_user_id"
+	MsgEnabledShort           MsgKey = "enabled_short"
+	MsgDisabledShort          MsgKey = "disabled_short"
 
 	MsgModelDefault               MsgKey = "model_default"
 	MsgModelListTitle             MsgKey = "model_list_title"
@@ -393,7 +394,8 @@ const (
 
 	MsgNewSessionCreated     MsgKey = "new_session_created"
 	MsgNewSessionCreatedName MsgKey = "new_session_created_name"
-	MsgSessionAutoResetIdle  MsgKey = "session_auto_reset_idle"
+	MsgSessionAutoResetIdle     MsgKey = "session_auto_reset_idle"
+	MsgSessionClosingGraceful   MsgKey = "session_closing_graceful"
 
 	MsgDeleteUsage              MsgKey = "delete_usage"
 	MsgDeleteSuccess            MsgKey = "delete_success"
@@ -488,6 +490,10 @@ const (
 	MsgBuiltinCmdBind      MsgKey = "bind"
 	MsgBuiltinCmdShell     MsgKey = "shell"
 	MsgBuiltinCmdDir       MsgKey = "dir"
+	MsgBuiltinCmdDiff      MsgKey = "diff"
+
+	MsgDiffEmpty           MsgKey = "diff_empty"
+	MsgDiffNoDiff2HTML     MsgKey = "diff_no_diff2html"
 
 	MsgDirChanged          MsgKey = "dir_changed"
 	MsgDirCurrent          MsgKey = "dir_current"
@@ -505,6 +511,12 @@ const (
 	MsgDirCardEmptyHistory MsgKey = "dir_card_empty_history"
 	MsgDirCardReset        MsgKey = "dir_card_reset"
 	MsgDirCardPrev         MsgKey = "dir_card_prev"
+	MsgShow                MsgKey = "show"
+	MsgShowUsage           MsgKey = "show_usage"
+	MsgShowParseError      MsgKey = "show_parse_error"
+	MsgShowNotFound        MsgKey = "show_not_found"
+	MsgShowDirWithLocation MsgKey = "show_dir_with_location"
+	MsgShowReadFailed      MsgKey = "show_read_failed"
 
 	// Multi-workspace messages
 	MsgWsNotEnabled            MsgKey = "ws_not_enabled"
@@ -834,10 +846,10 @@ var messages = map[MsgKey]map[Language]string{
 			"/reasoning [level]\n  View/switch reasoning effort\n\n" +
 			"/mode [name]\n  View/switch permission mode\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  View/switch language\n\n" +
-			"/quiet [global]\n  Toggle thinking/tool progress (global = all sessions)\n\n" +
 			"/compress\n  Compress conversation context\n\n" +
 			"/tts [always|voice_only]\n  View/switch text-to-speech mode\n\n" +
 			"/shell <command>\n  Run a shell command and return the output\n\n" +
+			"/show <ref>\n  View a file, directory, or code snippet by reference\n\n" +
 			"/dir [path|reset]\n  Show, switch, or reset agent working directory\n\n" +
 			"/stop\n  Stop current execution\n\n" +
 			"/cron [add|list|del|enable|disable]\n  Manage scheduled tasks\n\n" +
@@ -877,10 +889,10 @@ var messages = map[MsgKey]map[Language]string{
 			"/reasoning [级别]\n  查看/切换推理强度\n\n" +
 			"/mode [名称]\n  查看/切换权限模式\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  查看/切换语言\n\n" +
-			"/quiet [global]\n  开关思考和工具进度消息（global = 全部会话）\n\n" +
 			"/compress\n  压缩会话上下文\n\n" +
 			"/tts [always|voice_only]\n  查看/切换语音合成模式\n\n" +
 			"/shell <命令>\n  执行 Shell 命令并返回结果\n\n" +
+			"/show <引用>\n  按引用查看文件、目录或代码片段\n\n" +
 			"/dir [路径|reset]\n  查看、切换或重置 Agent 工作目录\n\n" +
 			"/stop\n  停止当前执行\n\n" +
 			"/cron [add|list|del|enable|disable]\n  管理定时任务\n\n" +
@@ -920,7 +932,6 @@ var messages = map[MsgKey]map[Language]string{
 			"/reasoning [級別]\n  查看/切換推理強度\n\n" +
 			"/mode [名稱]\n  查看/切換權限模式\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  查看/切換語言\n\n" +
-			"/quiet [global]\n  開關思考和工具進度訊息（global = 全部會話）\n\n" +
 			"/compress\n  壓縮會話上下文\n\n" +
 			"/tts [always|voice_only]\n  查看/切換語音合成模式\n\n" +
 			"/shell <命令>\n  執行 Shell 命令並返回結果\n\n" +
@@ -962,7 +973,6 @@ var messages = map[MsgKey]map[Language]string{
 			"/reasoning [レベル]\n  推論レベルの表示/切り替え\n\n" +
 			"/mode [名前]\n  権限モードの表示/切り替え\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  言語の表示/切り替え\n\n" +
-			"/quiet [global]\n  思考/ツール進捗メッセージの表示切替（global = 全セッション）\n\n" +
 			"/compress\n  会話コンテキストを圧縮\n\n" +
 			"/tts [always|voice_only]\n  音声合成モードの表示/切り替え\n\n" +
 			"/shell <コマンド>\n  シェルコマンドを実行して結果を返す\n\n" +
@@ -1004,7 +1014,6 @@ var messages = map[MsgKey]map[Language]string{
 			"/reasoning [nivel]\n  Ver/cambiar nivel de razonamiento\n\n" +
 			"/mode [nombre]\n  Ver/cambiar modo de permisos\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  Ver/cambiar idioma\n\n" +
-			"/quiet [global]\n  Alternar mensajes de progreso (global = todas las sesiones)\n\n" +
 			"/compress\n  Comprimir contexto de conversación\n\n" +
 			"/tts [always|voice_only]\n  Ver/cambiar modo de síntesis de voz\n\n" +
 			"/shell <comando>\n  Ejecutar un comando shell y devolver la salida\n\n" +
@@ -1093,44 +1102,40 @@ var messages = map[MsgKey]map[Language]string{
 			"/provider [list|add|...] — Manage API providers\n" +
 			"/memory [add|global|...] — View/edit memory files\n" +
 			"/allow <tool> — Pre-allow a tool\n" +
-			"/lang [en|zh|...] — View/switch language\n" +
-			"/quiet [global] — Toggle progress messages",
+			"/lang [en|zh|...] — View/switch language",
 		LangChinese: "**Agent 配置**\n" +
 			"/model [switch <名称>] — 查看/切换模型\n" +
 			"/mode [名称] — 查看/切换权限模式\n" +
 			"/provider [list|add|...] — 管理 API Provider\n" +
 			"/memory [add|global|...] — 查看/编辑记忆文件\n" +
 			"/allow <工具名> — 预授权工具\n" +
-			"/lang [en|zh|...] — 查看/切换语言\n" +
-			"/quiet [global] — 开关进度消息",
+			"/lang [en|zh|...] — 查看/切换语言",
 		LangTraditionalChinese: "**Agent 配置**\n" +
 			"/model [switch <名稱>] — 查看/切換模型\n" +
 			"/mode [名稱] — 查看/切換權限模式\n" +
 			"/provider [list|add|...] — 管理 API Provider\n" +
 			"/memory [add|global|...] — 查看/編輯記憶檔案\n" +
 			"/allow <工具名> — 預授權工具\n" +
-			"/lang [en|zh|...] — 查看/切換語言\n" +
-			"/quiet [global] — 開關進度訊息",
+			"/lang [en|zh|...] — 查看/切換語言",
 		LangJapanese: "**エージェント設定**\n" +
 			"/model [switch <名前>] — モデルの表示/切り替え\n" +
 			"/mode [名前] — 権限モードの表示/切り替え\n" +
 			"/provider [list|add|...] — API プロバイダ管理\n" +
 			"/memory [add|global|...] — メモリの表示/編集\n" +
 			"/allow <ツール名> — ツールを事前許可\n" +
-			"/lang [en|zh|...] — 言語の表示/切り替え\n" +
-			"/quiet [global] — 進捗メッセージの表示切替",
+			"/lang [en|zh|...] — 言語の表示/切り替え",
 		LangSpanish: "**Configuración del agente**\n" +
 			"/model [switch <nombre>] — Ver/cambiar modelo\n" +
 			"/mode [nombre] — Ver/cambiar modo de permisos\n" +
 			"/provider [list|add|...] — Gestionar proveedores\n" +
 			"/memory [add|global|...] — Ver/editar memoria\n" +
 			"/allow <herramienta> — Pre-autorizar herramienta\n" +
-			"/lang [en|zh|...] — Ver/cambiar idioma\n" +
-			"/quiet [global] — Alternar mensajes de progreso",
+			"/lang [en|zh|...] — Ver/cambiar idioma",
 	},
 	MsgHelpToolsSection: {
 		LangEnglish: "**Tools & Automation**\n" +
 			"/shell <command> — Run a shell command\n" +
+			"/show <ref> — View file / directory / snippet by reference\n" +
 			"/dir [path|reset] — Show, switch, or reset work directory\n" +
 			"/cron [add|list|del|...] — Scheduled tasks\n" +
 			"/commands [add|del] — Custom commands\n" +
@@ -1140,6 +1145,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/stop — Stop current execution",
 		LangChinese: "**工具与自动化**\n" +
 			"/shell <命令> — 执行 Shell 命令\n" +
+			"/show <引用> — 按引用查看文件、目录或代码片段\n" +
 			"/dir [路径|reset] — 查看、切换或重置工作目录\n" +
 			"/cron [add|list|del|...] — 定时任务\n" +
 			"/commands [add|del] — 自定义命令\n" +
@@ -1980,12 +1986,19 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "スケジュールタスク: %d (有効: %d)\n",
 		LangSpanish:            "Tareas programadas: %d (habilitadas: %d)\n",
 	},
-	MsgStatusQuiet: {
-		LangEnglish:            "Quiet mode: %s\n",
-		LangChinese:            "安静模式: %s\n",
-		LangTraditionalChinese: "安靜模式: %s\n",
-		LangJapanese:           "出力抑制モード: %s\n",
-		LangSpanish:            "Modo silencioso: %s\n",
+	MsgStatusThinkingMessages: {
+		LangEnglish:            "Thinking messages: %s\n",
+		LangChinese:            "思考消息: %s\n",
+		LangTraditionalChinese: "思考訊息: %s\n",
+		LangJapanese:           "思考メッセージ: %s\n",
+		LangSpanish:            "Mensajes de razonamiento: %s\n",
+	},
+	MsgStatusToolMessages: {
+		LangEnglish:            "Tool progress: %s\n",
+		LangChinese:            "工具进度: %s\n",
+		LangTraditionalChinese: "工具進度: %s\n",
+		LangJapanese:           "ツール進捗: %s\n",
+		LangSpanish:            "Progreso de herramientas: %s\n",
 	},
 	MsgStatusSessionKey: {
 		LangEnglish:            "Session Key: `%s`\n",
@@ -2001,14 +2014,14 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "ユーザーID: `%s`\n",
 		LangSpanish:            "ID de usuario: `%s`\n",
 	},
-	MsgQuietOnShort: {
+	MsgEnabledShort: {
 		LangEnglish:            "ON",
 		LangChinese:            "开启",
 		LangTraditionalChinese: "開啟",
 		LangJapanese:           "ON",
 		LangSpanish:            "Activado",
 	},
-	MsgQuietOffShort: {
+	MsgDisabledShort: {
 		LangEnglish:            "OFF",
 		LangChinese:            "关闭",
 		LangTraditionalChinese: "關閉",
@@ -2706,6 +2719,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "⏰ %d 分以上操作がなかったため、新しいセッションに自動切り替えました。",
 		LangSpanish:            "⏰ La sesión se reinició automáticamente tras %d minuto(s) de inactividad.",
 	},
+	MsgSessionClosingGraceful: {
+		LangEnglish:            "⏳ Wrapping up your previous session (usually a few seconds, up to 2 minutes). Your new session will start automatically.",
+		LangChinese:            "⏳ 正在结束上一个会话（通常几秒钟，最多2分钟）。新会话将自动启动。",
+		LangTraditionalChinese: "⏳ 正在結束上一個會話（通常幾秒鐘，最多2分鐘）。新會話將自動啟動。",
+		LangJapanese:           "⏳ 前のセッションを終了中です（通常は数秒、最大2分）。新しいセッションは自動的に開始されます。",
+		LangSpanish:            "⏳ Cerrando la sesión anterior (normalmente unos segundos, hasta 2 minutos). La nueva sesión se iniciará automáticamente.",
+	},
 	MsgDeleteUsage: {
 		LangEnglish:            "Usage: `/delete <number>` or `/delete 1,2,3` or `/delete 3-7` or `/delete 1,3-5,8`.\nUse `/list` to see session numbers.",
 		LangChinese:            "用法：`/delete <序号>`，或 `/delete 1,2,3`，或 `/delete 3-7`，或 `/delete 1,3-5,8`。\n使用 `/list` 查看会话序号。",
@@ -3285,6 +3305,27 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "エージェントの作業ディレクトリを表示/変更/リセット、引数: <パス>",
 		LangSpanish:            "Ver, cambiar o restablecer el directorio de trabajo del agente, arg: <ruta>",
 	},
+	MsgBuiltinCmdDiff: {
+		LangEnglish:            "Generate git diff as HTML file, arg: [target]",
+		LangChinese:            "生成 git diff 并以 HTML 文件发送，参数: [目标]",
+		LangTraditionalChinese: "產生 git diff 並以 HTML 檔案傳送，參數: [目標]",
+		LangJapanese:           "git diff を HTML ファイルで生成、引数: [ターゲット]",
+		LangSpanish:            "Generar git diff como archivo HTML, arg: [objetivo]",
+	},
+	MsgDiffEmpty: {
+		LangEnglish:            "No diff — clean working tree (or no changes vs `%s`).",
+		LangChinese:            "无差异 — 工作区干净（或与 `%s` 无变化）。",
+		LangTraditionalChinese: "無差異 — 工作區乾淨（或與 `%s` 無變化）。",
+		LangJapanese:           "差分なし — 作業ツリーはクリーン（または `%s` との差分なし）。",
+		LangSpanish:            "Sin diferencias — árbol limpio (o sin cambios vs `%s`).",
+	},
+	MsgDiffNoDiff2HTML: {
+		LangEnglish:            "`diff2html` is not installed, sending plain text diff.\nInstall: `npm install -g diff2html-cli`",
+		LangChinese:            "未安装 `diff2html`，将以纯文本发送差异。\n安装命令: `npm install -g diff2html-cli`",
+		LangTraditionalChinese: "未安裝 `diff2html`，將以純文字傳送差異。\n安裝指令: `npm install -g diff2html-cli`",
+		LangJapanese:           "`diff2html` がインストールされていません。プレーンテキストで差分を送信します。\nインストール: `npm install -g diff2html-cli`",
+		LangSpanish:            "`diff2html` no está instalado, enviando diff en texto plano.\nInstalar: `npm install -g diff2html-cli`",
+	},
 	MsgDirChanged: {
 		LangEnglish:            "✅ Work directory changed to: `%s`\nThe next session will start in this directory.",
 		LangChinese:            "✅ 工作目录已切换为: `%s`\n下次会话将在此目录下启动。",
@@ -3396,6 +3437,48 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "上一目錄",
 		LangJapanese:           "前へ",
 		LangSpanish:            "Anterior",
+	},
+	MsgShow: {
+		LangEnglish:            "View file / directory / snippet by reference",
+		LangChinese:            "按引用查看文件、目录或代码片段",
+		LangTraditionalChinese: "按引用查看檔案、目錄或程式碼片段",
+		LangJapanese:           "参照からファイル・ディレクトリ・コード断片を表示",
+		LangSpanish:            "Ver archivo/directorio/fragmento por referencia",
+	},
+	MsgShowUsage: {
+		LangEnglish:            "Usage: `/show <path|path:line|path:start-end|dir/>`\nExample: `/show svc/recovery_session_reconciler.go:12`",
+		LangChinese:            "用法: `/show <路径|路径:行号|路径:起止行|目录/>`\n示例: `/show svc/recovery_session_reconciler.go:12`",
+		LangTraditionalChinese: "用法: `/show <路徑|路徑:行號|路徑:起止行|目錄/>`\n範例: `/show svc/recovery_session_reconciler.go:12`",
+		LangJapanese:           "使い方: `/show <パス|パス:行|パス:開始-終了|dir/>`\n例: `/show svc/recovery_session_reconciler.go:12`",
+		LangSpanish:            "Uso: `/show <ruta|ruta:línea|ruta:inicio-fin|dir/>`\nEjemplo: `/show svc/recovery_session_reconciler.go:12`",
+	},
+	MsgShowParseError: {
+		LangEnglish:            "❌ Cannot parse reference: `%s`",
+		LangChinese:            "❌ 无法解析引用: `%s`",
+		LangTraditionalChinese: "❌ 無法解析引用: `%s`",
+		LangJapanese:           "❌ 参照を解析できません: `%s`",
+		LangSpanish:            "❌ No se puede interpretar la referencia: `%s`",
+	},
+	MsgShowNotFound: {
+		LangEnglish:            "❌ Referenced path does not exist: `%s`",
+		LangChinese:            "❌ 引用路径不存在: `%s`",
+		LangTraditionalChinese: "❌ 引用路徑不存在: `%s`",
+		LangJapanese:           "❌ 参照パスが存在しません: `%s`",
+		LangSpanish:            "❌ La ruta referenciada no existe: `%s`",
+	},
+	MsgShowDirWithLocation: {
+		LangEnglish:            "❌ Directory references cannot include line information: `%s`",
+		LangChinese:            "❌ 目录引用不能带行号信息: `%s`",
+		LangTraditionalChinese: "❌ 目錄引用不能帶行號資訊: `%s`",
+		LangJapanese:           "❌ ディレクトリ参照に行情報は指定できません: `%s`",
+		LangSpanish:            "❌ Una referencia de directorio no puede incluir líneas: `%s`",
+	},
+	MsgShowReadFailed: {
+		LangEnglish:            "❌ Failed to read reference: %s",
+		LangChinese:            "❌ 读取引用失败: %s",
+		LangTraditionalChinese: "❌ 讀取引用失敗: %s",
+		LangJapanese:           "❌ 参照の読み取りに失敗しました: %s",
+		LangSpanish:            "❌ Error al leer la referencia: %s",
 	},
 
 	// Multi-workspace messages

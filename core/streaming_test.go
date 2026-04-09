@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -48,7 +49,7 @@ func TestStreamPreview_BasicFlow(t *testing.T) {
 		MaxChars:      500,
 	}
 
-	sp := newStreamPreview(cfg, mp, "ctx", context.Background())
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
 
 	if !sp.canPreview() {
 		t.Fatal("should be able to preview")
@@ -75,7 +76,7 @@ func TestStreamPreview_ThrottlesUpdates(t *testing.T) {
 		MaxChars:      500,
 	}
 
-	sp := newStreamPreview(cfg, mp, "ctx", context.Background())
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
 
 	// Rapid-fire small appends
 	for i := 0; i < 10; i++ {
@@ -105,7 +106,7 @@ func TestStreamPreview_MaxChars(t *testing.T) {
 		MaxChars:      10,
 	}
 
-	sp := newStreamPreview(cfg, mp, "ctx", context.Background())
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
 	sp.appendText("This is a very long text that exceeds max chars limit")
 	time.Sleep(100 * time.Millisecond)
 
@@ -134,7 +135,7 @@ func TestStreamPreview_Disabled(t *testing.T) {
 	mp := &mockUpdaterPlatform{}
 	cfg := StreamPreviewCfg{Enabled: false}
 
-	sp := newStreamPreview(cfg, mp, "ctx", context.Background())
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
 	if sp.canPreview() {
 		t.Error("should not be able to preview when disabled")
 	}
@@ -157,7 +158,7 @@ func TestStreamPreview_FinishInPlace(t *testing.T) {
 		MaxChars:      500,
 	}
 
-	sp := newStreamPreview(cfg, mp, "ctx", context.Background())
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
 	sp.appendText("Hello World")
 	time.Sleep(100 * time.Millisecond)
 
@@ -203,7 +204,7 @@ func TestStreamPreview_FreezeDeletesOnFinish(t *testing.T) {
 		MaxChars:      500,
 	}
 
-	sp := newStreamPreview(cfg, mp, "ctx", context.Background())
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
 	sp.appendText("Hello World")
 	time.Sleep(100 * time.Millisecond)
 
@@ -228,7 +229,7 @@ func TestStreamPreview_NonUpdaterPlatform(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	cfg := DefaultStreamPreviewCfg()
 
-	sp := newStreamPreview(cfg, p, "ctx", context.Background())
+	sp := newStreamPreview(cfg, p, "ctx", context.Background(), nil)
 	if sp.canPreview() {
 		t.Error("should not preview on non-updater platform")
 	}
@@ -243,7 +244,7 @@ func TestStreamPreview_DiscardDeletesPreview(t *testing.T) {
 		MaxChars:      500,
 	}
 
-	sp := newStreamPreview(cfg, mp, "ctx", context.Background())
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
 	sp.appendText("Hello World")
 	time.Sleep(100 * time.Millisecond)
 
@@ -271,7 +272,7 @@ func TestStreamPreview_FinishKeepsPreviewWhenPlatformPrefersInPlaceFinalize(t *t
 		MaxChars:      500,
 	}
 
-	sp := newStreamPreview(cfg, mp, "ctx", context.Background())
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
 	sp.appendText("Hello World")
 	time.Sleep(100 * time.Millisecond)
 
@@ -290,5 +291,37 @@ func TestStreamPreview_FinishKeepsPreviewWhenPlatformPrefersInPlaceFinalize(t *t
 	}
 	if len(msgs) < 2 || msgs[len(msgs)-1] != "update:Hello World Final" {
 		t.Fatalf("messages = %#v, want final update in place", msgs)
+	}
+}
+
+func TestStreamPreview_AppliesTransform(t *testing.T) {
+	mp := &mockUpdaterPlatform{}
+	cfg := StreamPreviewCfg{
+		Enabled:       true,
+		IntervalMs:    50,
+		MinDeltaChars: 1,
+		MaxChars:      500,
+	}
+
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), func(s string) string {
+		return strings.ReplaceAll(s, "/root/code/demo/src/app.ts:42", "📄 `src/app.ts:42`")
+	})
+	sp.appendText("See /root/code/demo/src/app.ts:42")
+	time.Sleep(100 * time.Millisecond)
+
+	ok := sp.finish("Final /root/code/demo/src/app.ts:42")
+	if !ok {
+		t.Fatal("finish should succeed when preview is active")
+	}
+
+	msgs := mp.getMessages()
+	if len(msgs) < 2 {
+		t.Fatalf("messages = %#v, want preview start and final update", msgs)
+	}
+	if got := msgs[0]; got != "start:See 📄 `src/app.ts:42`" {
+		t.Fatalf("start message = %q, want transformed preview start", got)
+	}
+	if got := msgs[len(msgs)-1]; got != "update:Final 📄 `src/app.ts:42`" {
+		t.Fatalf("final message = %q, want transformed final preview", got)
 	}
 }

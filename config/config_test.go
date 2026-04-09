@@ -102,6 +102,76 @@ func TestConfigValidate(t *testing.T) {
 				Projects: []ProjectConfig{validProject("demo")},
 			},
 		},
+		{
+			name: "accepts valid references config",
+			cfg: Config{
+				Projects: []ProjectConfig{
+					func() ProjectConfig {
+						p := validProject("demo")
+						p.References = ReferenceConfig{
+							NormalizeAgents: []string{"codex", "claudecode"},
+							RenderPlatforms: []string{"feishu", "weixin"},
+							DisplayPath:     "dirname_basename",
+							MarkerStyle:     "emoji",
+							EnclosureStyle:  "code",
+						}
+						return p
+					}(),
+				},
+			},
+		},
+		{
+			name: "rejects unsupported reference agent",
+			cfg: Config{
+				Projects: []ProjectConfig{
+					func() ProjectConfig {
+						p := validProject("demo")
+						p.References.NormalizeAgents = []string{"gemini"}
+						return p
+					}(),
+				},
+			},
+			wantErr: `projects[0].references.normalize_agents has unsupported value "gemini"`,
+		},
+		{
+			name: "rejects unsupported reference platform",
+			cfg: Config{
+				Projects: []ProjectConfig{
+					func() ProjectConfig {
+						p := validProject("demo")
+						p.References.RenderPlatforms = []string{"telegram"}
+						return p
+					}(),
+				},
+			},
+			wantErr: `projects[0].references.render_platforms has unsupported value "telegram"`,
+		},
+		{
+			name: "rejects unsupported reference display path",
+			cfg: Config{
+				Projects: []ProjectConfig{
+					func() ProjectConfig {
+						p := validProject("demo")
+						p.References.DisplayPath = "full"
+						return p
+					}(),
+				},
+			},
+			wantErr: `projects[0].references.display_path has unsupported value "full"`,
+		},
+		{
+			name: "accepts all shorthand in references scopes",
+			cfg: Config{
+				Projects: []ProjectConfig{
+					func() ProjectConfig {
+						p := validProject("demo")
+						p.References.NormalizeAgents = []string{"all"}
+						p.References.RenderPlatforms = []string{"all"}
+						return p
+					}(),
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -114,6 +184,67 @@ func TestConfigValidate(t *testing.T) {
 				return
 			}
 			assertErrContains(t, err, tt.wantErr)
+		})
+	}
+}
+
+func TestEffectiveDisplayQuiet(t *testing.T) {
+	tru, fal := true, false
+	tests := []struct {
+		name     string
+		cfg      Config
+		proj     ProjectConfig
+		wantTM   bool
+		wantTool bool
+	}{
+		{
+			name:     "defaults no quiet",
+			cfg:      Config{},
+			proj:     ProjectConfig{},
+			wantTM:   true,
+			wantTool: true,
+		},
+		{
+			name:     "global quiet maps when display unset",
+			cfg:      Config{Quiet: &tru},
+			proj:     ProjectConfig{},
+			wantTM:   false,
+			wantTool: false,
+		},
+		{
+			name:     "project quiet maps when display unset",
+			cfg:      Config{},
+			proj:     ProjectConfig{Quiet: &tru},
+			wantTM:   false,
+			wantTool: false,
+		},
+		{
+			name: "explicit thinking_messages wins over quiet",
+			cfg: Config{
+				Quiet:   &tru,
+				Display: DisplayConfig{ThinkingMessages: &tru},
+			},
+			proj:     ProjectConfig{},
+			wantTM:   true,
+			wantTool: false,
+		},
+		{
+			name:     "project quiet false overrides global quiet",
+			cfg:      Config{Quiet: &tru},
+			proj:     ProjectConfig{Quiet: &fal},
+			wantTM:   true,
+			wantTool: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tm, tool, _, _ := EffectiveDisplay(&tt.cfg, &tt.proj)
+			if tm != tt.wantTM {
+				t.Fatalf("ThinkingMessages = %v, want %v", tm, tt.wantTM)
+			}
+			if tool != tt.wantTool {
+				t.Fatalf("ToolMessages = %v, want %v", tool, tt.wantTool)
+			}
 		})
 	}
 }
@@ -297,7 +428,7 @@ func TestDisplayConfig_Save(t *testing.T) {
 	thinking := 120
 	tool := 240
 	showTools := false
-	if err := SaveDisplayConfig(&thinking, &tool, &showTools); err != nil {
+	if err := SaveDisplayConfig(nil, &thinking, &tool, &showTools); err != nil {
 		t.Fatalf("SaveDisplayConfig() error: %v", err)
 	}
 
@@ -313,7 +444,7 @@ func TestDisplayConfig_Save(t *testing.T) {
 	}
 
 	thinking = 360
-	if err := SaveDisplayConfig(&thinking, nil, nil); err != nil {
+	if err := SaveDisplayConfig(nil, &thinking, nil, nil); err != nil {
 		t.Fatalf("SaveDisplayConfig() second update error: %v", err)
 	}
 
