@@ -4,6 +4,10 @@
 # Copy this file to config.toml and fill in your credentials.
 # 复制此文件为 config.toml，填入你的凭证信息。
 #
+# String values support ${VAR_NAME} environment variable substitution.
+# Example: token = "${TELEGRAM_BOT_TOKEN}" / 所有字符串值都支持 ${VAR_NAME} 环境变量替换。
+# 例如：token = "${TELEGRAM_BOT_TOKEN}"
+#
 # Each [[projects]] entry binds one code directory to its own agent + platforms.
 # A single cc-connect process can manage multiple projects simultaneously.
 # 每个 [[projects]] 将一个代码目录绑定到独立的 agent 和平台。
