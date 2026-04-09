@@ -4661,6 +4661,128 @@ func TestCleanupCAS_UnconditionalWithoutExpected(t *testing.T) {
 	}
 }
 
+// TestDetachInteractiveState_ReturnsAgentSession verifies that detachInteractiveState
+// removes the state from the map and returns the agent session without blocking.
+func TestDetachInteractiveState_ReturnsAgentSession(t *testing.T) {
+	e := newTestEngine()
+	key := "test:user1"
+
+	sess := newControllableSession("s1")
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{agentSession: sess}
+	e.interactiveMu.Unlock()
+
+	got := e.detachInteractiveState(key)
+
+	e.interactiveMu.Lock()
+	_, exists := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+
+	if exists {
+		t.Fatal("expected state to be removed from map")
+	}
+	if got != sess {
+		t.Fatalf("expected returned session = %p, got %p", sess, got)
+	}
+}
+
+// TestDetachInteractiveState_SkipsWhenStateReplaced verifies CAS behavior.
+func TestDetachInteractiveState_SkipsWhenStateReplaced(t *testing.T) {
+	e := newTestEngine()
+	key := "test:user1"
+
+	oldState := &interactiveState{agentSession: newControllableSession("old")}
+	newState := &interactiveState{agentSession: newControllableSession("new")}
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = newState
+	e.interactiveMu.Unlock()
+
+	got := e.detachInteractiveState(key, oldState)
+
+	e.interactiveMu.Lock()
+	current := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+
+	if current != newState {
+		t.Fatal("CAS detach deleted the replacement state")
+	}
+	if got != nil {
+		t.Fatal("expected nil return when CAS skips")
+	}
+}
+
+// TestCmdNew_ClearsSessionDataBeforeAsyncClose is a regression test for the race
+// where /new blocks on agent close while the session's AgentSessionID is still set.
+// A message arriving during the close window would resume the old conversation.
+// The fix detaches the state (non-blocking), clears session data, then closes async.
+func TestCmdNew_ClearsSessionDataBeforeAsyncClose(t *testing.T) {
+	// Create a slow-closing session that blocks in Close().
+	slowSess := &slowCloseSession{
+		controllableAgentSession: *newControllableSession("old-agent-id"),
+		closeStarted:            make(chan struct{}),
+		closeRelease:            make(chan struct{}),
+	}
+
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+
+	// Seed the interactive state with the slow-closing session.
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{agentSession: slowSess}
+	e.interactiveMu.Unlock()
+
+	// Seed the session with an old agent session ID.
+	session := e.sessions.GetOrCreateActive(key)
+	session.SetAgentSessionID("old-agent-id", "stub")
+	e.sessions.Save()
+
+	// Run /new
+	msg := &Message{SessionKey: key, Content: "/new", ReplyCtx: "ctx1"}
+	e.cmdNew(p, msg, nil)
+
+	// After cmdNew returns, the session's AgentSessionID must be cleared,
+	// even though the old agent process close may still be in progress.
+	if id := e.sessions.GetOrCreateActive(key).GetAgentSessionID(); id != "" {
+		t.Fatalf("AgentSessionID should be empty after /new, got %q", id)
+	}
+
+	// The interactive state must be removed from the map.
+	e.interactiveMu.Lock()
+	_, exists := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	if exists {
+		t.Fatal("interactive state should be removed after /new")
+	}
+
+	// Verify the async close goroutine was actually started.
+	select {
+	case <-slowSess.closeStarted:
+		// OK — Close() has been invoked asynchronously.
+	case <-time.After(5 * time.Second):
+		t.Fatal("async close goroutine did not start within 5s")
+	}
+
+	// Release the slow close so the goroutine finishes.
+	close(slowSess.closeRelease)
+}
+
+// slowCloseSession wraps controllableAgentSession with a Close() that blocks
+// until the test releases it, simulating a slow agent process shutdown.
+type slowCloseSession struct {
+	controllableAgentSession
+	closeStarted chan struct{} // closed when Close() begins
+	closeRelease chan struct{} // Close() blocks until this is closed
+}
+
+func (s *slowCloseSession) Close() error {
+	close(s.closeStarted)
+	<-s.closeRelease
+	return s.controllableAgentSession.Close()
+}
+
 // TestSessionMismatch_RecyclesStaleAgent verifies that getOrCreateInteractiveStateWith
 // detects when the running agent session ID differs from the active Session's
 // AgentSessionID and creates a fresh agent instead of reusing the stale one.
