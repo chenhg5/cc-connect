@@ -134,6 +134,11 @@ type RateLimitCfg struct {
 }
 
 // Engine routes messages between platforms and the agent for a single project.
+const (
+	busyActionQueue  = "queue"
+	busyActionInject = "inject"
+)
+
 type Engine struct {
 	name                  string
 	agent                 Agent
@@ -147,6 +152,7 @@ type Engine struct {
 	display               DisplayCfg
 	injectSender          bool
 	attachmentSendEnabled bool
+	busyAction            string
 	startedAt             time.Time
 
 	providerSaveFunc       func(providerName string) error
@@ -332,6 +338,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		cancel:                cancel,
 		i18n:                  NewI18n(lang),
 		attachmentSendEnabled: true,
+		busyAction:            busyActionQueue,
 		display:               DisplayCfg{ThinkingMessages: true, ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen, ToolMessages: true},
 		commands:              NewCommandRegistry(),
 		skills:                NewSkillRegistry(),
@@ -504,6 +511,22 @@ func (e *Engine) SetWebStatusFunc(fn func() string)                    { e.webSt
 // accordingly (e.g. personal task views, role-based access control).
 func (e *Engine) SetInjectSender(v bool) {
 	e.injectSender = v
+}
+
+func normalizeBusyAction(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case busyActionInject:
+		return busyActionInject
+	default:
+		return busyActionQueue
+	}
+}
+
+// SetBusyAction controls what happens when a new message arrives while the
+// session is already processing a turn. Supported values are queue (default)
+// and inject.
+func (e *Engine) SetBusyAction(v string) {
+	e.busyAction = normalizeBusyAction(v)
 }
 
 // SetAttachmentSendEnabled controls whether side-channel image/file delivery is allowed.
@@ -1437,23 +1460,25 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	session := sessions.GetOrCreateActive(msg.SessionKey)
 	sessions.UpdateUserMeta(msg.SessionKey, msg.UserName, msg.ChatName)
 	if !session.TryLock() {
-		// Check for /btw — inject into the running session mid-turn
 		trimmed := strings.TrimSpace(content)
+		injected := ""
 		if isBtwCommand(trimmed) {
-			btw := strings.TrimSpace(trimmed[len(matchBtwPrefix(trimmed)):])
-			if btw != "" {
-				e.interactiveMu.Lock()
-				state, ok := e.interactiveStates[interactiveKey]
-				e.interactiveMu.Unlock()
-				if ok && state.agentSession != nil && state.agentSession.Alive() {
-					if err := state.agentSession.Send(btw, nil, nil); err != nil {
-						slog.Error("btw: send failed", "error", err)
-						e.reply(p, msg.ReplyCtx, e.i18n.T(MsgBtwSendFailed))
-					} else {
-						e.reply(p, msg.ReplyCtx, e.i18n.T(MsgBtwSent))
-					}
-					return
+			injected = strings.TrimSpace(trimmed[len(matchBtwPrefix(trimmed)):])
+		} else if e.busyAction == busyActionInject && trimmed != "" && len(msg.Images) == 0 && len(msg.Files) == 0 && !msg.FromVoice {
+			injected = trimmed
+		}
+		if injected != "" {
+			e.interactiveMu.Lock()
+			state, ok := e.interactiveStates[interactiveKey]
+			e.interactiveMu.Unlock()
+			if ok && state.agentSession != nil && state.agentSession.Alive() {
+				if err := state.agentSession.Send(injected, nil, nil); err != nil {
+					slog.Error("btw: send failed", "error", err)
+					e.reply(p, msg.ReplyCtx, e.i18n.T(MsgBtwSendFailed))
+				} else {
+					e.reply(p, msg.ReplyCtx, e.i18n.T(MsgBtwSent))
 				}
+				return
 			}
 		}
 		// Session is busy — try to queue the message for the running turn

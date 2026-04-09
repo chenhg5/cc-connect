@@ -97,6 +97,31 @@ func TestConfigValidate(t *testing.T) {
 			wantErr: `project "demo": multi-workspace mode conflicts with agent work_dir`,
 		},
 		{
+			name: "rejects invalid busy action",
+			cfg: Config{
+				Projects: []ProjectConfig{
+					func() ProjectConfig {
+						p := validProject("demo")
+						p.BusyAction = "drop"
+						return p
+					}(),
+				},
+			},
+			wantErr: `projects[0].busy_action must be "queue" or "inject"`,
+		},
+		{
+			name: "accepts inject busy action",
+			cfg: Config{
+				Projects: []ProjectConfig{
+					func() ProjectConfig {
+						p := validProject("demo")
+						p.BusyAction = "inject"
+						return p
+					}(),
+				},
+			},
+		},
+		{
 			name: "accepts valid config",
 			cfg: Config{
 				Projects: []ProjectConfig{validProject("demo")},
@@ -1627,7 +1652,7 @@ func TestSaveProjectSettings_ExtraFields(t *testing.T) {
 }
 
 func TestGetProjectConfigDetails(t *testing.T) {
-	configPath := writeConfigFixture(t, feishuConfigFixture)
+	configPath := writeConfigFixture(t, strings.Replace(feishuConfigFixture, "name = \"alpha\"", "name = \"alpha\"\nbusy_action = \"inject\"", 1))
 	patchConfigPath(t, configPath)
 
 	details := GetProjectConfigDetails("alpha")
@@ -1636,6 +1661,9 @@ func TestGetProjectConfigDetails(t *testing.T) {
 	}
 	if details["work_dir"] != "/tmp/alpha" {
 		t.Fatalf("work_dir = %v", details["work_dir"])
+	}
+	if details["busy_action"] != "inject" {
+		t.Fatalf("busy_action = %v, want inject", details["busy_action"])
 	}
 	pcs, ok := details["platform_configs"].([]map[string]any)
 	if !ok || len(pcs) < 2 {
