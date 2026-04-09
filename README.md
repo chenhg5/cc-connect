@@ -33,7 +33,6 @@
   <a href="./README.md">English</a> | <a href="./README.zh-CN.md">中文</a>
 </p>
 
----
 
 <p align="center">
   <b>Control your local AI agents from any chat app. Anywhere, anytime.</b>
@@ -49,7 +48,6 @@
   <img src="docs/images/connector.png" alt="CC-Connect Architecture" width="90%"/>
 </p>
 
----
 
 ## 🆕 What's New (beta)
 
@@ -61,7 +59,6 @@
 - **Cron with boundaries** — Run jobs in a **fresh session** each time and cap **per-job timeouts** so runaway tasks don’t wedge the bot.
 - **Richer platforms** — e.g. **Discord** `@everyone` / `@here`, **Telegram** voice-style replies, **Feishu** fixes for reply threading and async dispatch.
 
----
 
 ## 🧩 Platform feature snapshot
 
@@ -93,7 +90,6 @@ High-level view of what each **built-in platform** can do in cc-connect. Inspire
 > **Voice row:** many platforms need `[speech]` / TTS providers enabled in `config.toml`; values are a best-effort summary.  
 > Per-platform setup: [Platform setup guides](#-platform-setup-guides) below.
 
----
 
 ## ✨ Why cc-connect?
 
@@ -126,7 +122,6 @@ High-level view of what each **built-in platform** can do in cc-connect. Inspire
 ### 🌍 Multilingual Interface
 **5 Languages** — Native support for English, Chinese (Simplified & Traditional), Japanese, and Spanish. Built-in i18n ensures everyone feels at home.
 
----
 
 <p align="center">
   <img src="docs/images/screenshot/cc-connect-lark.JPG" alt="飞书" width="32%" />
@@ -137,7 +132,6 @@ High-level view of what each **built-in platform** can do in cc-connect. Inspire
   <em>Left：Lark &nbsp;|&nbsp; Telegram &nbsp;|&nbsp; Right：Wechat</em>
 </p>
 
----
 
 ## 🚀 Quick Start
 
@@ -149,7 +143,6 @@ High-level view of what each **built-in platform** can do in cc-connect. Inspire
 Follow https://raw.githubusercontent.com/chenhg5/cc-connect/refs/heads/main/INSTALL.md to install and configure cc-connect.
 ```
 
----
 
 ### 📦 Manual Install
 
@@ -185,7 +178,6 @@ cd cc-connect
 make build
 ```
 
----
 
 ### ⚙️ Configure
 
@@ -198,7 +190,6 @@ vim ~/.cc-connect/config.toml
 Set `admin_from = "alice,bob"` in a project to allow those user IDs to run privileged commands such as `/dir` and `/shell`.
 When a user runs `/dir reset`, cc-connect restores the configured `work_dir` and clears the persisted override stored under `data_dir/projects/<project>.state.json`.
 
----
 
 ### ▶️ Run
 
@@ -206,7 +197,6 @@ When a user runs `/dir reset`, cc-connect restores the configured `work_dir` and
 ./cc-connect
 ```
 
----
 
 ### 🔄 Upgrade
 
@@ -219,7 +209,6 @@ cc-connect update           # Stable
 cc-connect update --pre     # Beta (includes pre-releases)
 ```
 
----
 
 ## 📊 Support Matrix
 
@@ -245,7 +234,6 @@ cc-connect update --pre     # Beta (includes pre-releases)
 | Platform | QQ (NapCat/OneBot) | ✅ WebSocket — Beta |
 | Platform | QQ Bot (Official) | ✅ WebSocket — no public IP needed |
 
----
 
 ## 📖 Platform Setup Guides
 
@@ -260,7 +248,6 @@ cc-connect update --pre     # Beta (includes pre-releases)
 | Weixin (personal) | [docs/weixin.md](docs/weixin.md) | HTTP long polling (ilink) — **beta only** | No |
 | QQ / QQ Bot | [docs/qq.md](docs/qq.md) | WebSocket | No |
 
----
 
 ## 🎯 Key Features
 
@@ -281,7 +268,6 @@ Project configs can also rotate to a fresh session automatically after long inac
 reset_on_idle_mins = 60
 ```
 
----
 
 ### 🔐 Permission Modes
 
@@ -291,7 +277,6 @@ reset_on_idle_mins = 60
 /mode default     # Ask for each tool
 ```
 
----
 
 ### 🔄 Provider Management
 
@@ -300,7 +285,6 @@ reset_on_idle_mins = 60
 /provider switch <name>     Switch API provider at runtime
 ```
 
----
 
 ### 🤖 Model Selection
 
@@ -309,7 +293,6 @@ reset_on_idle_mins = 60
 /model switch <alias>       Switch to model by alias
 ```
 
----
 
 ### 📂 Work Directory
 
@@ -321,7 +304,6 @@ reset_on_idle_mins = 60
 /cd <path>                   Compatibility alias for /dir <path>
 ```
 
----
 
 ### ⏰ Scheduled Tasks
 
@@ -375,7 +357,6 @@ Notes:
 
 📖 **Full documentation:** [docs/usage.md](docs/usage.md)
 
----
 
 ## 📚 Documentation
 
@@ -384,14 +365,12 @@ Notes:
 - [config.example.toml](config.example.toml) — Configuration template
 - [CONTRIBUTING.md](CONTRIBUTING.md) — How to report issues and contribute pull requests
 
----
 
 ## 👥 Community
 
 - [Discord](https://discord.gg/kHpwgaM4kq)
 - [Telegram](https://t.me/+odGNDhCjbjdmMmZl)
 
----
 
 ## ❤️ Sponsor
 
@@ -411,7 +390,6 @@ Notes:
 
 </details>
 
----
 
 ## ☕ Support the Project
 
@@ -443,7 +421,6 @@ We're grateful to everyone who has supported this project. Leave your GitHub use
 | @username | YYYY-MM-DD |
 -->
 
----
 
 ## 🤝 Commercial Cooperation
 
@@ -455,7 +432,6 @@ We accept the following commercial collaborations:
 
 **Contact**: **Email**: chg80333@gmail.com | **WeChat**: mongorz | [Telegram](https://t.me/+odGNDhCjbjdmMmZl) | [Discord](https://discord.gg/kHpwgaM4kq)
 
----
 
 ## 🙏 Contributors
 
@@ -463,7 +439,6 @@ We accept the following commercial collaborations:
   <img src="https://contrib.rocks/image?repo=chenhg5/cc-connect&v=20250313" />
 </a>
 
----
 
 ## ⭐ Star History
 
@@ -475,13 +450,11 @@ We accept the following commercial collaborations:
  </picture>
 </a>
 
----
 
 ## 📄 License
 
 MIT License
 
----
 
 <p align="center">
   <sub>Built with ❤️ by the cc-connect community</sub>
