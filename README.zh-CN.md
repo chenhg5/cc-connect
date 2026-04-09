@@ -393,6 +393,70 @@ cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/ch
 
 ---
 
+## ❤️ 赞助
+
+> 想在这里展示您的品牌？**邮箱**：chg80333@gmail.com | **微信**：mongorz | [Telegram](https://t.me/+odGNDhCjbjdmMmZl) | [Discord](https://discord.gg/kHpwgaM4kq)
+
+<details open>
+<summary>赞助商</summary>
+
+<!-- 赞助位招租 - 联系我们成为赞助商 -->
+
+<table>
+<tr>
+<td width="180"><a href="#"><img src="docs/images/sponsors/placeholder.svg" alt="您的 Logo" width="150"></a></td>
+<td>成为赞助商！我们为您的产品提供专属用户福利。联系我们了解更多赞助机会。</td>
+</tr>
+</table>
+
+</details>
+
+---
+
+## ☕ 支持项目
+
+如果 cc-connect 对你有帮助，请考虑请我们喝杯咖啡！你的支持帮助我们：
+
+- 🛠️ 维护和改进项目
+- 📚 编写更好的文档和教程
+- 🐛 更快修复 bug 和添加新功能
+- ☕ 让开发者保持精力充沛
+
+### 捐赠方式
+
+**Buy Me a Coffee**：[https://buymeacoffee.com/cg33](https://buymeacoffee.com/cg33)
+
+**微信支付 / 支付宝**：
+
+| 微信支付 | 支付宝 |
+|:----------:|:------:|
+| <img src="docs/images/wechatpay.jpg" alt="微信支付" width="150"> | <img src="docs/images/alipay.jpg" alt="支付宝" width="150"> |
+
+### 感谢捐赠者！🎉
+
+感谢每一位支持这个项目的朋友。捐赠时留言你的 GitHub 用户名，我们会在这里展示！
+
+<!-- 捐赠者名单 -->
+<!--
+| GitHub 用户名 | 日期 |
+|-----------------|------|
+| @username | YYYY-MM-DD |
+-->
+
+---
+
+## 🤝 商业合作
+
+我们接受以下商业合作：
+
+- **企业定制**：为企业定制内部 AI 工具入口（飞书、钉钉、企业微信、Slack 等）
+- **技术咨询**：AI agent 集成方案设计与架构咨询
+- **外包项目**：AI 相关系统开发
+
+**联系方式**：**邮箱**：chg80333@gmail.com | **微信**：mongorz | [Telegram](https://t.me/+odGNDhCjbjdmMmZl) | [Discord](https://discord.gg/kHpwgaM4kq)
+
+---
+
 ## 🙏 贡献者
 
 <a href="https://github.com/chenhg5/cc-connect/graphs/contributors">

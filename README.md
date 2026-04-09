@@ -393,6 +393,70 @@ Notes:
 
 ---
 
+## ❤️ Sponsor
+
+> Want to appear here? Contact us: **Email**: chg80333@gmail.com | **WeChat**: mongorz | [Telegram](https://t.me/+odGNDhCjbjdmMmZl) | [Discord](https://discord.gg/kHpwgaM4kq)
+
+<details open>
+<summary>Sponsors</summary>
+
+<!-- Sponsor slot available - contact us to become a sponsor -->
+
+<table>
+<tr>
+<td width="180"><a href="#"><img src="docs/images/sponsors/placeholder.svg" alt="Your Logo Here" width="150"></a></td>
+<td>Become a sponsor! We offer exclusive benefits for our users. Contact us to learn more about sponsorship opportunities.</td>
+</tr>
+</table>
+
+</details>
+
+---
+
+## ☕ Support the Project
+
+If cc-connect has been helpful to you, consider buying us a coffee! Your support helps us:
+
+- 🛠️ Maintain and improve the project
+- 📚 Write better documentation and tutorials
+- 🐛 Fix bugs and add new features faster
+- ☕ Keep the developers caffeinated
+
+### How to Donate
+
+**Buy Me a Coffee**: [https://buymeacoffee.com/cg33](https://buymeacoffee.com/cg33)
+
+**WeChat Pay / Alipay**:
+
+| WeChat Pay | Alipay |
+|:----------:|:------:|
+| <img src="docs/images/wechatpay.jpg" alt="WeChat Pay" width="150"> | <img src="docs/images/alipay.jpg" alt="Alipay" width="150"> |
+
+### Thank You, Donors! 🎉
+
+We're grateful to everyone who has supported this project. Leave your GitHub username in the donation message if you'd like to be recognized here!
+
+<!-- Donors will be listed below -->
+<!--
+| GitHub Username | Date |
+|-----------------|------|
+| @username | YYYY-MM-DD |
+-->
+
+---
+
+## 🤝 Commercial Cooperation
+
+We accept the following commercial collaborations:
+
+- **Enterprise Customization**: Custom deployment for internal AI tooling (Feishu, DingTalk, WeChat Work, Slack, etc.)
+- **Technical Consulting**: AI agent integration and architecture design
+- **Outsourcing Projects**: AI-related system development
+
+**Contact**: **Email**: chg80333@gmail.com | **WeChat**: mongorz | [Telegram](https://t.me/+odGNDhCjbjdmMmZl) | [Discord](https://discord.gg/kHpwgaM4kq)
+
+---
+
 ## 🙏 Contributors
 
 <a href="https://github.com/chenhg5/cc-connect/graphs/contributors">
