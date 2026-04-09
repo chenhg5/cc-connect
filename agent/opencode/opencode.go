@@ -102,9 +102,6 @@ func opencodeProjectModelCachePath(dataDir, project string) string {
 	}
 	hash := sha256.Sum256([]byte(project))
 	fileName := fmt.Sprintf("%s-%s.opencode-models.json", prefix, hex.EncodeToString(hash[:8]))
-	if fileName == "" {
-		return ""
-	}
 	return filepath.Join(dataDir, "projects", fileName)
 }
 
