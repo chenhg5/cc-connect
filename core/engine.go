@@ -6251,7 +6251,10 @@ func (e *Engine) cmdQuiet(p Platform, msg *Message, args []string) {
 	if e.displaySaveFunc != nil {
 		tm := e.display.ThinkingMessages
 		tool := e.display.ToolMessages
-		if err := e.displaySaveFunc(&tm, nil, nil, &tool); err != nil {
+		if err := e.displaySaveFunc(DisplayCfgUpdate{
+			ThinkingMessages: &tm,
+			ToolMessages:     &tool,
+		}); err != nil {
 			slog.Error("failed to persist display config after /quiet", "error", err)
 		}
 	}
