@@ -387,7 +387,7 @@ Notes:
 
 ## ❤️ Sponsor
 
-> Want to appear here? Contact us: [Open an issue](https://github.com/chenhg5/cc-connect/issues) or email
+> Want to appear here? Contact us: **Email**: chg80333@gmail.com | **WeChat**: mongorz | [Telegram](https://t.me/+odGNDhCjbjdmMmZl) | [Discord](https://discord.gg/kHpwgaM4kq)
 
 <details open>
 <summary>Sponsors</summary>
@@ -396,7 +396,7 @@ Notes:
 
 <table>
 <tr>
-<td width="180"><a href="#"><img src="docs/images/sponsors/your-logo-here.png" alt="Your Company" width="150"></a></td>
+<td width="180"><a href="#"><img src="docs/images/sponsors/placeholder.svg" alt="Your Logo Here" width="150"></a></td>
 <td>Become a sponsor! We offer exclusive benefits for our users. Contact us to learn more about sponsorship opportunities.</td>
 </tr>
 </table>
@@ -413,7 +413,7 @@ We accept the following commercial collaborations:
 - **Technical Consulting**: AI agent integration and architecture design
 - **Outsourcing Projects**: AI-related system development
 
-**Contact**: Open an issue or reach out via GitHub Discussions
+**Contact**: **Email**: chg80333@gmail.com | **WeChat**: mongorz | [Telegram](https://t.me/+odGNDhCjbjdmMmZl) | [Discord](https://discord.gg/kHpwgaM4kq)
 
 ---
 

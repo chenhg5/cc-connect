@@ -387,7 +387,7 @@ cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/ch
 
 ## ❤️ 赞助
 
-> 想在这里展示您的品牌？[提交 Issue](https://github.com/chenhg5/cc-connect/issues) 或发邮件联系我们
+> 想在这里展示您的品牌？**邮箱**：chg80333@gmail.com | **微信**：mongorz | [Telegram](https://t.me/+odGNDhCjbjdmMmZl) | [Discord](https://discord.gg/kHpwgaM4kq)
 
 <details open>
 <summary>赞助商</summary>
@@ -396,7 +396,7 @@ cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/ch
 
 <table>
 <tr>
-<td width="180"><a href="#"><img src="docs/images/sponsors/your-logo-here.png" alt="您的公司" width="150"></a></td>
+<td width="180"><a href="#"><img src="docs/images/sponsors/placeholder.svg" alt="您的 Logo" width="150"></a></td>
 <td>成为赞助商！我们为您的产品提供专属用户福利。联系我们了解更多赞助机会。</td>
 </tr>
 </table>
@@ -413,7 +413,7 @@ cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/ch
 - **技术咨询**：AI agent 集成方案设计与架构咨询
 - **外包项目**：AI 相关系统开发
 
-**联系方式**：提交 Issue 或通过 GitHub Discussions 联系
+**联系方式**：**邮箱**：chg80333@gmail.com | **微信**：mongorz | [Telegram](https://t.me/+odGNDhCjbjdmMmZl) | [Discord](https://discord.gg/kHpwgaM4kq)
 
 ---
 
