@@ -150,9 +150,9 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 | 权限名称 | 权限标识 | 用途 |
 |---------|---------|------|
 | 获取与更新用户基本信息 | `contact:user.base:readonly` | 获取用户信息 |
-| 接收群聊消息 | `im:message.group:receive` | 接收群消息 |
-| 接收单聊消息 | `im:message.p2p:receive` | 接收私聊消息 |
-| 读取群消息 | `im:message.group_msg:readonly` | 读取群消息内容 |
+| 获取群组中用户@机器人消息 | `im:message.group_at_msg:readonly` | 接收群消息 |
+| 读取用户发给机器人的单聊消息 | `im:message.p2p_msg:readonly` | 接收私聊消息 |
+| 获取群组中所有消息（敏感权限） | `im:message.group_msg` | 读取群消息内容 |
 | 读取单聊消息 | `im:message.p2p_msg:readonly` | 读取私聊内容 |
 | 以应用身份发送群消息 | `im:message:send_as_bot` | 发送消息回复用户 |
 
@@ -334,7 +334,7 @@ cc-connect 内置了自动重连机制，断开后会自动尝试重新连接。
 - [飞书开放平台文档](https://open.feishu.cn/document/)
 - [机器人开发指南](https://open.feishu.cn/document/ukTMukTMukTM/uYjNwUjL2YDM14iN2ATN)
 - [事件订阅文档](https://open.feishu.cn/document/ukTMukTMukTM/uUTNz4SN1MjL1UzM)
-- [权限列表](https://open.feishu.cn/document/ukTMukTMukTM/uQjNz4CN1MjL2czN)
+- [权限列表](https://open.feishu.cn/document/server-docs/application-scope/scope-list)
 - [OpenClaw 飞书接入教程](https://bytedance.larkoffice.com/docx/MFK7dDFLFoVlOGxWCv5cTXKmnMh)
 - [飞书 WebSocket 长连接模式](https://m.blog.csdn.net/u014177256/article/details/158267848)
 
