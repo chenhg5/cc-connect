@@ -136,6 +136,8 @@ type Platform struct {
 	botOpenID        string
 	userNameCache    sync.Map // open_id -> display name
 	chatNameCache    sync.Map // chat_id -> chat name
+	msgSessionMap    sync.Map // messageID -> sessionKey; tracks which session a message belongs to
+	rootContextSent  sync.Map // sessionKey -> bool; tracks which sessions already received thread root context
 	// Webhook mode fields (for Lark international version)
 	server       *http.Server
 	port         string
@@ -730,8 +732,15 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	}
 	mentions := msg.Mentions
 	parentID := stringValue(msg.ParentId)
+	rootID := stringValue(msg.RootId)
 
 	sessionKey := p.makeSessionKey(msg, chatID, userID)
+	// Record which session this message belongs to, so that if a bot reply
+	// creates a nested thread on this message, subsequent messages in that
+	// thread can be routed back to the same session.
+	if p.threadIsolation {
+		p.msgSessionMap.Store(messageID, sessionKey)
+	}
 	rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
 	slog.Debug(p.tag()+": routed inbound message",
 		"message_id", messageID,
@@ -743,7 +752,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	// blocked by IO-heavy operations (image/audio download, handler HTTP calls).
 	// The dedup and old-message checks above remain synchronous to guarantee
 	// correctness before spawning the goroutine.
-	go p.dispatchMessage(ctx, msgType, content, mentions, messageID, sessionKey, userID, userName, chatName, rctx, parentID)
+	go p.dispatchMessage(ctx, msgType, content, mentions, messageID, sessionKey, userID, userName, chatName, rctx, parentID, rootID)
 
 	return nil
 }
@@ -751,12 +760,22 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 // dispatchMessage handles the message content parsing, media download, and
 // handler invocation. It runs in its own goroutine so that onMessage returns
 // quickly and does not block the SDK event loop.
-func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string, mentions []*larkim.MentionEvent, messageID, sessionKey, userID, userName, chatName string, rctx replyContext, parentID string) {
-	// If this message is a reply to another message, fetch the quoted content
-	// and prepend it so the agent has full context.
+func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string, mentions []*larkim.MentionEvent, messageID, sessionKey, userID, userName, chatName string, rctx replyContext, parentID, rootID string) {
+	// Determine context prefix based on parent/root relationship:
+	// - parentID == rootID: thread-level reply (Feishu auto-sets parent to root).
+	//   Only inject root message content on the first message of this session.
+	// - parentID != rootID: explicit quote-reply to a specific sub-message.
+	//   Always inject the quoted message content.
 	quotedPrefix := ""
 	if parentID != "" {
-		quotedPrefix = p.fetchQuotedMessage(ctx, parentID)
+		if rootID != "" && parentID == rootID {
+			// Thread root context: only inject once per session.
+			if _, alreadySent := p.rootContextSent.LoadOrStore(sessionKey, true); !alreadySent {
+				quotedPrefix = p.fetchThreadRootMessage(ctx, parentID)
+			}
+		} else {
+			quotedPrefix = p.fetchQuotedMessage(ctx, parentID)
+		}
 	}
 
 	switch msgType {
@@ -1035,6 +1054,35 @@ func (p *Platform) fetchQuotedMessage(ctx context.Context, parentID string) stri
 	return fmt.Sprintf("[Quoted message from %s]:\n%s\n\n", senderName, quotedText)
 }
 
+const threadRootMaxLen = 2000
+
+// fetchThreadRootMessage retrieves the thread root message and formats it with
+// a distinct prefix. Content is truncated to threadRootMaxLen characters to
+// avoid excessive token usage. Returns empty string on any failure (graceful
+// degradation).
+func (p *Platform) fetchThreadRootMessage(ctx context.Context, rootID string) string {
+	raw := p.fetchQuotedMessage(ctx, rootID)
+	if raw == "" {
+		return ""
+	}
+	const oldPrefix = "[Quoted message from "
+	const newPrefix = "[Thread root message from "
+	result := raw
+	if strings.HasPrefix(raw, oldPrefix) {
+		result = newPrefix + raw[len(oldPrefix):]
+	}
+	if idx := strings.Index(result, "]:\n"); idx >= 0 {
+		header := result[:idx+len("]:\n")]
+		body := result[idx+len("]:\n"):]
+		body = strings.TrimSuffix(body, "\n\n")
+		if len(body) > threadRootMaxLen {
+			body = body[:threadRootMaxLen] + "[...truncated]"
+		}
+		result = header + body + "\n\n"
+	}
+	return result
+}
+
 // extractPostPlainText extracts plain text from a Lark post (rich text) JSON content.
 func extractPostPlainText(content string) string {
 	var post struct {
@@ -1129,7 +1177,9 @@ func extractInteractiveCardText(content string) string {
 	if len(parts) == 0 {
 		if raw, ok := card["header"]; ok {
 			var header struct {
-				Title struct{ Content string `json:"content"` } `json:"title"`
+				Title struct {
+					Content string `json:"content"`
+				} `json:"title"`
 			}
 			if json.Unmarshal(raw, &header) == nil && header.Title.Content != "" {
 				parts = append(parts, header.Title.Content)
@@ -2094,6 +2144,13 @@ func (p *Platform) makeSessionKey(msg *larkim.EventMessage, chatID, userID strin
 			rootID = stringValue(msg.MessageId)
 		}
 		if rootID != "" {
+			// When a bot reply creates a nested thread on a user's message,
+			// subsequent messages in that thread have root_id = user's messageID.
+			// Look up whether that root was a message in an existing session
+			// and reuse that session key to maintain conversation continuity.
+			if mapped, ok := p.msgSessionMap.Load(rootID); ok {
+				return mapped.(string)
+			}
 			return fmt.Sprintf("%s:%s:root:%s", p.tag(), chatID, rootID)
 		}
 	}

@@ -912,6 +912,246 @@ func TestBuildPreviewCardJSON_ProgressPayloadUsesStructuredCard(t *testing.T) {
 	}
 }
 
+func TestThreadIsolation_NestedThreadInheritSessionKey(t *testing.T) {
+	// Simulates: user sends msg1 in thread A (root=X), bot replies with
+	// ReplyInThread creating a nested thread on msg1. User then posts msg2
+	// in the nested thread (root=msg1). msg2 should get the same session key
+	// as msg1 via msgSessionMap lookup.
+	p, err := newPlatform("lark", lark.LarkBaseUrl, map[string]any{
+		"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true, "thread_isolation": true,
+	})
+	if err != nil {
+		t.Fatalf("newPlatform error = %v", err)
+	}
+	ip := p.(*interactivePlatform)
+
+	originalRoot := "om_original_root"
+	msg1ID := "om_msg1"
+	chatID := "oc_test"
+	openID := "ou_test"
+	msgType := "text"
+	chatType := "group"
+	senderType := "user"
+	createText := strconv.FormatInt(time.Now().UnixMilli(), 10)
+
+	ip.botOpenID = "ou_bot"
+
+	// Step 1: msg1 in thread A (root = originalRoot).
+	content1 := `{"text":"@bot check alert"}`
+	var msg1Received *core.Message
+	var wg sync.WaitGroup
+	wg.Add(1)
+	ip.handler = func(_ core.Platform, msg *core.Message) {
+		defer wg.Done()
+		msg1Received = msg
+	}
+	_ = ip.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId:   &larkim.UserId{OpenId: &openID},
+				SenderType: &senderType,
+			},
+			Message: &larkim.EventMessage{
+				MessageId:   &msg1ID,
+				RootId:      &originalRoot,
+				ParentId:    &originalRoot,
+				ChatId:      &chatID,
+				ChatType:    &chatType,
+				MessageType: &msgType,
+				Content:     &content1,
+				CreateTime:  &createText,
+				Mentions: []*larkim.MentionEvent{
+					{Key: stringPtr("@bot"), Id: &larkim.UserId{OpenId: stringPtr("ou_bot")}},
+				},
+			},
+		},
+	})
+	wg.Wait()
+	if msg1Received == nil {
+		t.Fatal("msg1 handler not called")
+	}
+	session1Key := msg1Received.SessionKey
+
+	// Step 2: msg2 in nested thread (root = msg1ID), simulating what happens
+	// after bot's ReplyInThread created a topic on msg1.
+	msg2ID := "om_msg2"
+	content2 := `{"text":"@bot continue"}`
+	var msg2Received *core.Message
+	wg.Add(1)
+	ip.handler = func(_ core.Platform, msg *core.Message) {
+		defer wg.Done()
+		msg2Received = msg
+	}
+	_ = ip.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId:   &larkim.UserId{OpenId: &openID},
+				SenderType: &senderType,
+			},
+			Message: &larkim.EventMessage{
+				MessageId:   &msg2ID,
+				RootId:      &msg1ID, // nested thread root = msg1
+				ParentId:    &msg1ID,
+				ChatId:      &chatID,
+				ChatType:    &chatType,
+				MessageType: &msgType,
+				Content:     &content2,
+				CreateTime:  &createText,
+				Mentions: []*larkim.MentionEvent{
+					{Key: stringPtr("@bot"), Id: &larkim.UserId{OpenId: stringPtr("ou_bot")}},
+				},
+			},
+		},
+	})
+	wg.Wait()
+	if msg2Received == nil {
+		t.Fatal("msg2 handler not called")
+	}
+
+	// msg2 should inherit msg1's session key, not get a new one based on msg1ID.
+	if msg2Received.SessionKey != session1Key {
+		t.Fatalf("msg2 SessionKey = %q, want same as msg1 %q", msg2Received.SessionKey, session1Key)
+	}
+}
+
+func TestThreadRootContext_FirstMessageMarksSession(t *testing.T) {
+	p, err := newPlatform("lark", lark.LarkBaseUrl, map[string]any{
+		"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true, "thread_isolation": true,
+	})
+	if err != nil {
+		t.Fatalf("newPlatform error = %v", err)
+	}
+	ip := p.(*interactivePlatform)
+
+	messageID := "om_msg1"
+	rootID := "om_root"
+	parentID := "om_root"
+	chatID := "oc_test"
+	openID := "ou_test"
+	msgType := "text"
+	chatType := "group"
+	senderType := "user"
+	content := `{"text":"@bot check this"}`
+	createText := strconv.FormatInt(time.Now().UnixMilli(), 10)
+
+	var receivedMsg *core.Message
+	var wg sync.WaitGroup
+	wg.Add(1)
+	ip.botOpenID = "ou_bot"
+	ip.handler = func(_ core.Platform, msg *core.Message) {
+		defer wg.Done()
+		receivedMsg = msg
+	}
+	_ = ip.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId:   &larkim.UserId{OpenId: &openID},
+				SenderType: &senderType,
+			},
+			Message: &larkim.EventMessage{
+				MessageId: &messageID, RootId: &rootID, ParentId: &parentID,
+				ChatId: &chatID, ChatType: &chatType, MessageType: &msgType,
+				Content: &content, CreateTime: &createText,
+				Mentions: []*larkim.MentionEvent{
+					{Key: stringPtr("@bot"), Id: &larkim.UserId{OpenId: stringPtr("ou_bot")}},
+				},
+			},
+		},
+	})
+	wg.Wait()
+	if receivedMsg == nil {
+		t.Fatal("handler not called")
+	}
+	if _, ok := ip.rootContextSent.Load(receivedMsg.SessionKey); !ok {
+		t.Fatal("rootContextSent should be marked after first thread message")
+	}
+}
+
+func TestThreadRootContext_SecondMessageSkipsRootContext(t *testing.T) {
+	p, err := newPlatform("lark", lark.LarkBaseUrl, map[string]any{
+		"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true, "thread_isolation": true,
+	})
+	if err != nil {
+		t.Fatalf("newPlatform error = %v", err)
+	}
+	ip := p.(*interactivePlatform)
+
+	rootID := "om_root"
+	parentID := "om_root"
+	chatID := "oc_test"
+	openID := "ou_test"
+	msgType := "text"
+	chatType := "group"
+	senderType := "user"
+	createText := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	ip.botOpenID = "ou_bot"
+
+	sessionKey := "lark:oc_test:root:om_root"
+	ip.rootContextSent.Store(sessionKey, true)
+
+	msg1ID := "om_msg2"
+	content := `{"text":"@bot second message"}`
+	var receivedMsg *core.Message
+	var wg sync.WaitGroup
+	wg.Add(1)
+	ip.handler = func(_ core.Platform, msg *core.Message) {
+		defer wg.Done()
+		receivedMsg = msg
+	}
+	_ = ip.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId:   &larkim.UserId{OpenId: &openID},
+				SenderType: &senderType,
+			},
+			Message: &larkim.EventMessage{
+				MessageId: &msg1ID, RootId: &rootID, ParentId: &parentID,
+				ChatId: &chatID, ChatType: &chatType, MessageType: &msgType,
+				Content: &content, CreateTime: &createText,
+				Mentions: []*larkim.MentionEvent{
+					{Key: stringPtr("@bot"), Id: &larkim.UserId{OpenId: stringPtr("ou_bot")}},
+				},
+			},
+		},
+	})
+	wg.Wait()
+	if receivedMsg == nil {
+		t.Fatal("handler not called")
+	}
+	if strings.Contains(receivedMsg.Content, "[Thread root message") {
+		t.Fatalf("second message should not contain root context, got %q", receivedMsg.Content)
+	}
+}
+
+func TestFetchThreadRootMessage_Truncation(t *testing.T) {
+	input := "[Quoted message from AlertBot]:\n" + strings.Repeat("A", 2500) + "\n\n"
+	const oldPrefix = "[Quoted message from "
+	const newPrefix = "[Thread root message from "
+	result := newPrefix + input[len(oldPrefix):]
+	if idx := strings.Index(result, "]:\n"); idx >= 0 {
+		header := result[:idx+len("]:\n")]
+		body := result[idx+len("]:\n"):]
+		body = strings.TrimSuffix(body, "\n\n")
+		if len(body) > threadRootMaxLen {
+			body = body[:threadRootMaxLen] + "[...truncated]"
+		}
+		result = header + body + "\n\n"
+	}
+	if !strings.HasPrefix(result, "[Thread root message from AlertBot]:\n") {
+		t.Fatalf("expected thread root prefix, got %q", result[:60])
+	}
+	bodyStart := strings.Index(result, "]:\n") + len("]:\n")
+	body := result[bodyStart:]
+	body = strings.TrimSuffix(body, "\n\n")
+	if !strings.HasSuffix(body, "[...truncated]") {
+		t.Fatalf("expected truncation suffix, got ...%q", body[len(body)-20:])
+	}
+	bodyWithoutSuffix := strings.TrimSuffix(body, "[...truncated]")
+	if len(bodyWithoutSuffix) != threadRootMaxLen {
+		t.Fatalf("truncated body length = %d, want %d", len(bodyWithoutSuffix), threadRootMaxLen)
+	}
+}
+
 func TestBuildPreviewCardJSON_NormalTextFallback(t *testing.T) {
 	cardJSON := buildPreviewCardJSON("plain progress text")
 	if strings.Contains(cardJSON, "cc-connect · 进度") {
