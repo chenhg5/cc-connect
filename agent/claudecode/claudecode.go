@@ -816,6 +816,31 @@ func boolVal(m map[string]any, key string) bool {
 	return v
 }
 
+// encodeClaudeProjectKey converts an absolute path to Claude Code's project key format.
+// Claude Code encodes paths by:
+// 1. Replacing path separators (/ or \) with "-"
+// 2. Replacing colons (:) with "-" (Windows drive letters)
+// 3. Replacing underscores (_) with "-"
+// 4. Replacing all non-ASCII characters with "-"
+func encodeClaudeProjectKey(absPath string) string {
+	// First, normalize to forward slashes for consistent processing
+	normalized := strings.ReplaceAll(absPath, "\\", "/")
+
+	// Build the encoded key character by character
+	var result strings.Builder
+	for _, r := range normalized {
+		if r == '/' || r == ':' || r == '_' {
+			result.WriteRune('-')
+		} else if r < 128 { // ASCII range (0-127)
+			result.WriteRune(r)
+		} else {
+			// Non-ASCII characters become hyphens
+			result.WriteRune('-')
+		}
+	}
+	return result.String()
+}
+
 // findProjectDir locates the Claude Code session directory for a given work dir.
 // Claude Code stores sessions at ~/.claude/projects/{projectKey}/ where projectKey
 // is derived from the absolute path. On Windows, the key format may vary (colon
@@ -825,13 +850,12 @@ func findProjectDir(homeDir, absWorkDir string) string {
 	projectsBase := filepath.Join(homeDir, ".claude", "projects")
 
 	// Build candidate keys: different ways Claude Code might encode the path.
-	// Claude Code replaces path separators, colons, and underscores with "-".
+	// Primary encoding: Claude Code's actual algorithm (non-ASCII → "-")
 	candidates := []string{
-		// Unix-style: replace OS separator with "-"
+		encodeClaudeProjectKey(absWorkDir),
+		// Legacy candidates for backward compatibility
 		strings.ReplaceAll(absWorkDir, string(filepath.Separator), "-"),
-		// Windows: replace both "\" and ":" with "-"
 		strings.NewReplacer("/", "-", "\\", "-", ":", "-").Replace(absWorkDir),
-		// Claude Code also replaces underscores with "-"
 		strings.NewReplacer("/", "-", "\\", "-", ":", "-", "_", "-").Replace(absWorkDir),
 	}
 	// Also try with forward slashes (config might use forward slashes on Windows)
@@ -846,19 +870,24 @@ func findProjectDir(homeDir, absWorkDir string) string {
 	}
 
 	// Fallback: scan the projects directory and find a match by
-	// comparing the tail of the encoded path (case-insensitive for Windows).
+	// comparing the encoded path (handles variations in encoding).
 	entries, err := os.ReadDir(projectsBase)
 	if err != nil {
 		return ""
 	}
 
-	normWork := strings.ToLower(strings.NewReplacer("/", "-", "\\", "-", ":", "-", "_", "-").Replace(absWorkDir))
+	// Use the primary encoding for comparison
+	encodedWorkDir := encodeClaudeProjectKey(absWorkDir)
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
-		normEntry := strings.ToLower(entry.Name())
-		if normEntry == normWork {
+		// Direct match with encoded key
+		if entry.Name() == encodedWorkDir {
+			return filepath.Join(projectsBase, entry.Name())
+		}
+		// Case-insensitive match for Windows compatibility
+		if strings.EqualFold(entry.Name(), encodedWorkDir) {
 			return filepath.Join(projectsBase, entry.Name())
 		}
 	}
