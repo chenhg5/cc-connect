@@ -3500,6 +3500,34 @@ func TestCmdStatus_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	}
 }
 
+func TestCmdQuiet_TogglesDisplay(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{ThinkingMessages: true, ToolMessages: true, ThinkingMaxLen: 300, ToolMaxLen: 500})
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	// First /quiet: both on → both off (quiet ON)
+	e.cmdQuiet(p, msg, nil)
+	if e.display.ThinkingMessages || e.display.ToolMessages {
+		t.Fatalf("after first /quiet: ThinkingMessages=%v, ToolMessages=%v, want both false",
+			e.display.ThinkingMessages, e.display.ToolMessages)
+	}
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "Quiet mode ON") {
+		t.Fatalf("sent = %q, want quiet ON message", p.sent)
+	}
+
+	// Second /quiet: both off → both on (quiet OFF)
+	p.sent = nil
+	e.cmdQuiet(p, msg, nil)
+	if !e.display.ThinkingMessages || !e.display.ToolMessages {
+		t.Fatalf("after second /quiet: ThinkingMessages=%v, ToolMessages=%v, want both true",
+			e.display.ThinkingMessages, e.display.ToolMessages)
+	}
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "Quiet mode OFF") {
+		t.Fatalf("sent = %q, want quiet OFF message", p.sent)
+	}
+}
+
 func TestCmdUsage_UnsupportedAgent(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)

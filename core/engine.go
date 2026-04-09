@@ -2898,6 +2898,7 @@ var builtinCommands = []struct {
 	{[]string{"reasoning", "effort"}, "reasoning"},
 	{[]string{"mode"}, "mode"},
 	{[]string{"lang"}, "lang"},
+	{[]string{"quiet"}, "quiet"},
 	{[]string{"provider"}, "provider"},
 	{[]string{"memory"}, "memory"},
 	{[]string{"cron"}, "cron"},
@@ -3064,6 +3065,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdMode(p, msg, args)
 	case "lang":
 		e.cmdLang(p, msg, args)
+	case "quiet":
+		e.cmdQuiet(p, msg, args)
 	case "provider":
 		e.cmdProvider(p, msg, args)
 	case "memory":
@@ -4806,6 +4809,7 @@ func helpCardGroups() []helpCardGroup {
 				{command: "/provider", action: "nav:/provider"},
 				{command: "/memory", action: "cmd:/memory"},
 				{command: "/allow", action: "cmd:/allow"},
+				{command: "/quiet", action: "cmd:/quiet"},
 				{command: "/tts", action: "cmd:/tts"},
 			},
 		},
@@ -5381,6 +5385,28 @@ func (e *Engine) applyLiveModeChange(sessionKey, mode string) bool {
 		return false
 	}
 	return switcher.SetLiveMode(mode)
+}
+
+func (e *Engine) cmdQuiet(p Platform, msg *Message, args []string) {
+	// /quiet toggles both ThinkingMessages and ToolMessages.
+	// Quiet ON = both hidden; Quiet OFF = both shown.
+	isQuiet := e.display.ThinkingMessages || e.display.ToolMessages
+	e.display.ThinkingMessages = !isQuiet
+	e.display.ToolMessages = !isQuiet
+
+	if e.displaySaveFunc != nil {
+		tm := e.display.ThinkingMessages
+		tool := e.display.ToolMessages
+		if err := e.displaySaveFunc(&tm, nil, nil, &tool); err != nil {
+			slog.Error("failed to persist display config after /quiet", "error", err)
+		}
+	}
+
+	if isQuiet {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQuietOn))
+	} else {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQuietOff))
+	}
 }
 
 func (e *Engine) cmdTTS(p Platform, msg *Message, args []string) {
