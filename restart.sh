@@ -150,7 +150,7 @@ if systemctl --user is-active "$SERVICE" &>/dev/null; then
     exit 0
 fi
 
-log "New binary crashed within ${HEALTH_GRACE}s. Journal tail:"
+log "New binary crashed within $HEALTH_GRACE seconds. Journal tail:"
 journalctl --user -u "$SERVICE" -n 20 --no-pager || true
 
 if [[ -f "$BACKUP" ]]; then
