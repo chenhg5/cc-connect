@@ -462,6 +462,29 @@ func TestNewLark_PlatformNameAndDomain(t *testing.T) {
 	}
 }
 
+func TestPlatformShouldUseWebhookMode(t *testing.T) {
+	tests := []struct {
+		name       string
+		platform   string
+		encryptKey string
+		want       bool
+	}{
+		{name: "lark defaults to websocket", platform: "lark", want: false},
+		{name: "lark webhook when encrypt key set", platform: "lark", encryptKey: "enc-key", want: true},
+		{name: "feishu defaults to websocket", platform: "feishu", want: false},
+		{name: "feishu webhook when encrypt key set", platform: "feishu", encryptKey: "enc-key", want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &Platform{platformName: tt.platform, encryptKey: tt.encryptKey}
+			if got := p.shouldUseWebhookMode(); got != tt.want {
+				t.Fatalf("shouldUseWebhookMode() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNewFeishu_PlatformNameAndDomain(t *testing.T) {
 	p, err := New(map[string]any{
 		"app_id": "cli_xxx", "app_secret": "secret",
