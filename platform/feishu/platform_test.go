@@ -921,3 +921,69 @@ func TestBuildPreviewCardJSON_NormalTextFallback(t *testing.T) {
 		t.Fatalf("default preview card should contain markdown element, got %q", cardJSON)
 	}
 }
+
+func TestFormatProgressToolInput_TodoWrite(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		wantContains []string
+		notWantContains []string
+	}{
+		{
+			name: "valid todos with all statuses",
+			input: `{"todos": [
+				{"content": "Task 1", "status": "completed", "activeForm": "Completing task 1"},
+				{"content": "Task 2", "status": "in_progress", "activeForm": "Working on task 2"},
+				{"content": "Task 3", "status": "pending", "activeForm": "Planning task 3"}
+			]}`,
+			wantContains: []string{"✅", "🔄", "⏳", "Task 1", "Task 2", "Task 3", "Completing task 1", "Working on task 2"},
+			notWantContains: []string{"```"},
+		},
+		{
+			name:  "todos without activeForm",
+			input: `{"todos": [{"content": "Simple task", "status": "pending"}]}`,
+			wantContains: []string{"⏳", "Simple task"},
+			notWantContains: []string{"(", ")"},
+		},
+		{
+			name:     "invalid JSON falls back to default",
+			input:    `not valid json`,
+			wantContains: []string{"```text"},
+		},
+		{
+			name:     "empty todos array",
+			input:    `{"todos": []}`,
+			wantContains: []string{"```text"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := formatProgressToolInput("TodoWrite", tt.input)
+			for _, want := range tt.wantContains {
+				if !strings.Contains(result, want) {
+					t.Errorf("result should contain %q, got %q", want, result)
+				}
+			}
+			for _, notWant := range tt.notWantContains {
+				if strings.Contains(result, notWant) {
+					t.Errorf("result should not contain %q, got %q", notWant, result)
+				}
+			}
+		})
+	}
+}
+
+func TestFormatProgressToolInput_OtherTools(t *testing.T) {
+	// Non-TodoWrite tools should use default formatting
+	result := formatProgressToolInput("Bash", "ls -la")
+	if !strings.Contains(result, "```bash") {
+		t.Errorf("Bash tool should use bash code block, got %q", result)
+	}
+
+	// TodoWrite with invalid JSON should fall back to text block
+	result = formatProgressToolInput("TodoWrite", "not json")
+	if !strings.Contains(result, "```text") {
+		t.Errorf("TodoWrite with invalid JSON should fall back to text block, got %q", result)
+	}
+}

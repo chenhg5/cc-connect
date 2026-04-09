@@ -643,6 +643,28 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # name = "bedrock"
 # env = { CLAUDE_CODE_USE_BEDROCK = "1", AWS_PROFILE = "bedrock" }
 
+# Reference normalization and rendering / 本地引用标准化与展示优化
+# Disabled by default. When enabled, cc-connect can normalize Codex / Claude Code
+# local file references (paths, line refs, markdown file links) and re-render them
+# into a more readable platform-friendly form before sending to supported IMs.
+# 默认关闭。启用后，cc-connect 可对 Codex / Claude Code 的本地文件引用
+# （路径、行号引用、Markdown 文件链接）做标准化，并在发送到支持的平台前
+# 重新渲染为更易读的展示形式。
+#
+# Supported today / 当前已支持:
+#   normalize_agents: codex | claudecode | all
+#   render_platforms: feishu | weixin | all
+# Note: render depends on normalize. If normalize_agents is empty, render_platforms
+# alone has no effect.
+# 注意：render 依赖 normalize。若 normalize_agents 为空，仅设置 render_platforms 不生效。
+#
+# [projects.references]
+# normalize_agents = ["codex", "claudecode"]
+# render_platforms = ["feishu", "weixin"]
+# display_path = "dirname_basename" # absolute | relative | basename | dirname_basename | smart
+# marker_style = "emoji"            # none | ascii | emoji
+# enclosure_style = "code"          # none | bracket | angle | fullwidth | code
+
 # Feishu / Lark / 飞书
 # 1. Create an app at https://open.feishu.cn / 在 https://open.feishu.cn 创建应用
 # 2. Enable Bot capability / 开启机器人能力

@@ -1,6 +1,8 @@
 package claudecode
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -300,3 +302,114 @@ func TestStripXMLTags(t *testing.T) {
 
 // verify Agent implements core.Agent
 var _ core.Agent = (*Agent)(nil)
+
+func TestEncodeClaudeProjectKey(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "simple ASCII path",
+			input:    "/Users/username/Documents/project",
+			expected: "-Users-username-Documents-project",
+		},
+		{
+			name:     "path with Chinese characters",
+			input:    "/Users/username/Documents/项目文件夹",
+			expected: "-Users-username-Documents------", // 6 hyphens: 1 for "/" + 5 for Chinese chars
+		},
+		{
+			name:     "path with Japanese characters",
+			input:    "/Users/username/Documents/プロジェクト",
+			expected: "-Users-username-Documents-------", // 6 hyphens: 1 for "/" + 5 for Japanese chars
+		},
+		{
+			name:     "path with emoji",
+			input:    "/Users/username/Documents/🎉project",
+			expected: "-Users-username-Documents--project", // 2 hyphens: 1 for "/" + 1 for emoji
+		},
+		{
+			name:     "Windows path with colon",
+			input:    "C:\\Users\\username\\Documents",
+			expected: "C--Users-username-Documents",
+		},
+		{
+			name:     "path with underscore",
+			input:    "/Users/username/my_project",
+			expected: "-Users-username-my-project",
+		},
+		{
+			name:     "mixed ASCII and non-ASCII",
+			input:    "/Users/username/中文folder/english文件夹",
+			expected: "-Users-username---folder-english---", // "/中文" = 3 hyphens, "/文件夹" = 4 hyphens
+		},
+		{
+			name:     "empty path",
+			input:    "",
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := encodeClaudeProjectKey(tt.input)
+			if got != tt.expected {
+				t.Errorf("encodeClaudeProjectKey(%q) = %q, want %q", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestFindProjectDir_NonASCIIPath(t *testing.T) {
+	// This test verifies that findProjectDir can handle non-ASCII paths
+	// by creating a mock projects directory structure
+	homeDir := t.TempDir()
+	projectsBase := filepath.Join(homeDir, ".claude", "projects")
+
+	// Test case: Chinese characters in path
+	chineseWorkDir := "/Users/test/Documents/项目文件夹"
+	expectedKey := encodeClaudeProjectKey(chineseWorkDir)
+
+	// Create the mock project directory
+	mockProjectDir := filepath.Join(projectsBase, expectedKey)
+	if err := os.MkdirAll(mockProjectDir, 0755); err != nil {
+		t.Fatalf("failed to create mock project dir: %v", err)
+	}
+
+	// Verify findProjectDir finds the directory
+	found := findProjectDir(homeDir, chineseWorkDir)
+	if found != mockProjectDir {
+		t.Errorf("findProjectDir(%q, %q) = %q, want %q", homeDir, chineseWorkDir, found, mockProjectDir)
+	}
+}
+
+func TestFindProjectDir_ASCIIPath(t *testing.T) {
+	// Verify ASCII paths still work correctly
+	homeDir := t.TempDir()
+	projectsBase := filepath.Join(homeDir, ".claude", "projects")
+
+	asciiWorkDir := "/Users/test/Documents/project"
+	expectedKey := encodeClaudeProjectKey(asciiWorkDir)
+
+	mockProjectDir := filepath.Join(projectsBase, expectedKey)
+	if err := os.MkdirAll(mockProjectDir, 0755); err != nil {
+		t.Fatalf("failed to create mock project dir: %v", err)
+	}
+
+	found := findProjectDir(homeDir, asciiWorkDir)
+	if found != mockProjectDir {
+		t.Errorf("findProjectDir(%q, %q) = %q, want %q", homeDir, asciiWorkDir, found, mockProjectDir)
+	}
+}
+
+func TestFindProjectDir_NotFound(t *testing.T) {
+	homeDir := t.TempDir()
+	// Don't create any project directories
+
+	workDir := "/Users/test/Documents/nonexistent"
+	found := findProjectDir(homeDir, workDir)
+	if found != "" {
+		t.Errorf("findProjectDir for nonexistent project = %q, want empty string", found)
+	}
+}

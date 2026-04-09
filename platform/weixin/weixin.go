@@ -26,6 +26,13 @@ func init() {
 const (
 	sessionKeyPrefix = "weixin:dm:"
 	maxWeixinChunk   = 3800 // stay under typical IM limits
+
+	// weixinSendMaxRetries is the maximum number of retries for sendMessage when API returns ret=-2.
+	weixinSendMaxRetries = 3
+	// weixinSendRetryDelay is the delay between retries when sendMessage fails.
+	weixinSendRetryDelay = 500 * time.Millisecond
+	// weixinChunkSendDelay is the delay between sending message chunks to avoid rate limiting.
+	weixinChunkSendDelay = 100 * time.Millisecond
 )
 
 type replyContext struct {
@@ -496,12 +503,58 @@ func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string)
 	if strings.TrimSpace(content) == "" {
 		return nil
 	}
-	for _, chunk := range splitUTF8(content, maxWeixinChunk) {
-		if err := p.api.sendText(ctx, rc.peerUserID, chunk, rc.contextToken, "cc-"+randomHex(6)); err != nil {
+	chunks := splitUTF8(content, maxWeixinChunk)
+	for i, chunk := range chunks {
+		// Add delay between chunks to avoid rate limiting (except for first chunk)
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(weixinChunkSendDelay):
+			}
+		}
+		// Retry sendText with context_token refresh on failure
+		err := p.sendChunkWithRetry(ctx, rc, chunk)
+		if err != nil {
 			return fmt.Errorf("weixin: send: %w", err)
 		}
 	}
 	return nil
+}
+
+// sendChunkWithRetry sends a single chunk with retry mechanism.
+// When sendMessage returns ret=-2, it retries with a fresh context_token.
+func (p *Platform) sendChunkWithRetry(ctx context.Context, rc *replyContext, chunk string) error {
+	var lastErr error
+	for attempt := 0; attempt < weixinSendMaxRetries; attempt++ {
+		clientID := "cc-" + randomHex(6)
+		err := p.api.sendText(ctx, rc.peerUserID, chunk, rc.contextToken, clientID)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		// Check if error is ret=-2 (API declined) - retry with fresh token
+		if strings.Contains(err.Error(), "ret=-2") {
+			slog.Warn("weixin: sendMessage ret=-2, retrying with fresh context_token",
+				"attempt", attempt+1, "peer", rc.peerUserID, "chunk_len", len(chunk))
+			// Add delay before retry
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(weixinSendRetryDelay):
+			}
+			// Refresh context_token from stored tokens (may have been updated by new incoming message)
+			freshToken := p.getContextToken(rc.peerUserID)
+			if freshToken != "" && freshToken != rc.contextToken {
+				rc.contextToken = freshToken
+				slog.Debug("weixin: using refreshed context_token for retry", "peer", rc.peerUserID)
+			}
+			continue
+		}
+		// For other errors, don't retry
+		return err
+	}
+	return lastErr
 }
 
 func splitUTF8(s string, maxRunes int) []string {

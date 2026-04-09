@@ -60,6 +60,18 @@ type bridgeReplyCtx struct {
 	ReplyCtx   string `json:"reply_ctx"`
 }
 
+const bridgeReconstructReplyCtxKind = "bridge_reconstruct"
+
+// bridgeReconstructReplyCtxPayload is a forward-compatible reply envelope for
+// reconstruct_reply adapters. Receivers should ignore unknown fields.
+type bridgeReconstructReplyCtxPayload struct {
+	Kind                string `json:"kind"`
+	Version             int    `json:"v"`
+	SenderProject       string `json:"sender_project"`
+	TransportChatID     string `json:"transport_chat_id"`
+	TransportSessionKey string `json:"transport_session_key,omitempty"`
+}
+
 // --- Wire protocol messages ---
 
 type bridgeMsg struct {
@@ -305,11 +317,42 @@ func (bp *BridgePlatform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	if !a.capabilities["reconstruct_reply"] {
 		return nil, fmt.Errorf("bridge: adapter %q does not support reconstruct_reply", platform)
 	}
+	replyCtx, err := buildBridgeReconstructReplyCtx(bp.project, sessionKey)
+	if err != nil {
+		return nil, err
+	}
 	return &bridgeReplyCtx{
 		Platform:   platform,
 		SessionKey: sessionKey,
-		ReplyCtx:   sessionKey,
+		ReplyCtx:   replyCtx,
 	}, nil
+}
+
+func buildBridgeReconstructReplyCtx(project, sessionKey string) (string, error) {
+	chatID, err := bridgeTransportChatID(sessionKey)
+	if err != nil {
+		return "", err
+	}
+	payload := bridgeReconstructReplyCtxPayload{
+		Kind:                bridgeReconstructReplyCtxKind,
+		Version:             1,
+		SenderProject:       project,
+		TransportChatID:     chatID,
+		TransportSessionKey: sessionKey,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("bridge: marshal reconstruct reply ctx: %w", err)
+	}
+	return string(data), nil
+}
+
+func bridgeTransportChatID(sessionKey string) (string, error) {
+	parts := strings.SplitN(sessionKey, ":", 3)
+	if len(parts) < 2 || parts[1] == "" {
+		return "", fmt.Errorf("bridge: invalid session key %q", sessionKey)
+	}
+	return parts[1], nil
 }
 
 func (bp *BridgePlatform) SendCard(ctx context.Context, replyCtx any, card *Card) error {
