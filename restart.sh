@@ -134,11 +134,14 @@ systemctl --user reset-failed "$SERVICE" 2>/dev/null || true
 systemctl --user start "$SERVICE"
 
 # Braces deliberately omitted on $HEALTH_GRACE below. systemd-run
-# substitutes ${VAR}-with-braces in ExecStart lines from the unit's own
-# environment, and since HEALTH_GRACE is only set inside the bash -c
-# script — not in systemd's env — the braced form would render to empty
-# before bash ever sees it. The non-braced form is passed through verbatim
-# and expanded by bash at runtime.
+# pre-substitutes brace-form variable references in ExecStart lines from
+# the unit's own environment before exec, and since HEALTH_GRACE is only
+# set inside the bash -c script (not in systemd's env), the brace form
+# would render to empty before bash ever sees it. The unbraced form is
+# passed through verbatim and expanded by bash at runtime.
+# (See systemd.service "Command lines" section for the full substitution
+# rules; note that comments inside the bash script are still scanned by
+# the substitution pass, which is why this comment avoids literal braces.)
 log "Health check: waiting $HEALTH_GRACE seconds..."
 sleep "$HEALTH_GRACE"
 
