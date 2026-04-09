@@ -1402,13 +1402,14 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 				ws.Touch()
 			}
 
-			// Get or create the workspace's agent and session manager
-			wsAgent, wsSessions, err = e.getOrCreateWorkspaceAgent(workspace)
+			var effectiveWorkspace string
+			wsAgent, wsSessions, _, effectiveWorkspace, err = e.workspaceContext(workspace, msg.SessionKey)
 			if err != nil {
 				slog.Error("failed to create workspace agent", "workspace", workspace, "err", err)
 				e.reply(p, msg.ReplyCtx, fmt.Sprintf("Failed to initialize workspace: %v", err))
 				return
 			}
+			resolvedWorkspace = effectiveWorkspace
 		}
 	}
 
@@ -2034,6 +2035,32 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 	ws.agent = agent
 	ws.sessions = sessions
 	return agent, sessions, nil
+}
+
+func (e *Engine) resolveChannelWorkDir(workspace, interactiveKey string) string {
+	if e.projectState == nil {
+		return workspace
+	}
+	override := e.projectState.WorkspaceDirOverride(interactiveKey)
+	if override == "" {
+		return workspace
+	}
+	if info, err := os.Stat(override); err == nil && info.IsDir() {
+		return override
+	}
+	e.projectState.ClearWorkspaceDirOverride(interactiveKey)
+	e.projectState.Save()
+	return workspace
+}
+
+func (e *Engine) workspaceContext(workspace, sessionKey string) (Agent, *SessionManager, string, string, error) {
+	interactiveKey := workspace + ":" + sessionKey
+	effectiveDir := e.resolveChannelWorkDir(workspace, interactiveKey)
+	wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(effectiveDir)
+	if err != nil {
+		return nil, nil, "", "", err
+	}
+	return wsAgent, wsSessions, interactiveKey, effectiveDir, nil
 }
 
 // getOrCreateInteractiveStateWith accepts an optional agent override for multi-workspace mode.
@@ -3868,7 +3895,9 @@ func (e *Engine) dirApply(agent Agent, sessions *SessionManager, interactiveKey,
 				baseDir = absDir
 			}
 
-			switcher.SetWorkDir(baseDir)
+			if !e.multiWorkspace {
+				switcher.SetWorkDir(baseDir)
+			}
 			e.cleanupInteractiveState(interactiveKey)
 
 			s := sessions.GetOrCreateActive(sessionKey)
@@ -3877,7 +3906,11 @@ func (e *Engine) dirApply(agent Agent, sessions *SessionManager, interactiveKey,
 			sessions.Save()
 
 			if e.projectState != nil {
-				e.projectState.ClearWorkDirOverride()
+				if e.multiWorkspace {
+					e.projectState.ClearWorkspaceDirOverride(interactiveKey)
+				} else {
+					e.projectState.ClearWorkDirOverride()
+				}
 				e.projectState.Save()
 			}
 			if e.dirHistory != nil {
@@ -3932,7 +3965,9 @@ func (e *Engine) dirApply(agent Agent, sessions *SessionManager, interactiveKey,
 		return e.i18n.Tf(MsgDirInvalidPath, newDir), ""
 	}
 
-	switcher.SetWorkDir(newDir)
+	if !e.multiWorkspace {
+		switcher.SetWorkDir(newDir)
+	}
 	e.cleanupInteractiveState(interactiveKey)
 
 	s := sessions.GetOrCreateActive(sessionKey)
@@ -3944,7 +3979,11 @@ func (e *Engine) dirApply(agent Agent, sessions *SessionManager, interactiveKey,
 		e.dirHistory.Add(e.name, newDir)
 	}
 	if e.projectState != nil {
-		e.projectState.SetWorkDirOverride(newDir)
+		if e.multiWorkspace {
+			e.projectState.SetWorkspaceDirOverride(interactiveKey, newDir)
+		} else {
+			e.projectState.SetWorkDirOverride(newDir)
+		}
 		e.projectState.Save()
 	}
 
@@ -9936,11 +9975,11 @@ func (e *Engine) commandContext(p Platform, msg *Message) (Agent, *SessionManage
 	if workspace == "" {
 		return e.agent, e.sessions, msg.SessionKey, nil
 	}
-	wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(workspace)
+	agent, sessions, interactiveKey, _, err := e.workspaceContext(workspace, msg.SessionKey)
 	if err != nil {
 		return nil, nil, "", err
 	}
-	return wsAgent, wsSessions, workspace + ":" + msg.SessionKey, nil
+	return agent, sessions, interactiveKey, nil
 }
 
 // sessionContextForKey resolves the agent and session manager for a sessionKey.
