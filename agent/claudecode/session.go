@@ -193,6 +193,11 @@ func (cs *claudeSession) readLoop(stdout io.ReadCloser, stderrBuf *bytes.Buffer)
 		case "control_cancel_request":
 			requestID, _ := raw["request_id"].(string)
 			slog.Debug("claudeSession: permission cancelled", "request_id", requestID)
+		default:
+			// Log unknown event types for diagnostic purposes.
+			// Claude Code may emit new event types (e.g., during context compaction)
+			// that we don't yet handle. Logging helps identify and fix issues.
+			slog.Debug("claudeSession: unknown event type", "type", eventType, "event", raw)
 		}
 	}
 
@@ -313,11 +318,20 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 		}
 	}
 
+	// Check for subtype to distinguish real turn completion from intermediate events.
+	// Claude Code may emit result events during context compaction that should not
+	// be treated as turn completion.
+	subtype, _ := raw["subtype"].(string)
+	isCompaction := subtype == "compact" || subtype == "compaction"
+	if subtype != "" {
+		slog.Debug("claudeSession: result subtype", "subtype", subtype, "is_compaction", isCompaction)
+	}
+
 	evt := core.Event{
 		Type:         core.EventResult,
 		Content:      content,
 		SessionID:    cs.CurrentSessionID(),
-		Done:         true,
+		Done:         !isCompaction, // Only mark as done if not a compaction event
 		InputTokens:  inputTokens,
 		OutputTokens: outputTokens,
 	}
