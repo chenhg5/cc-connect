@@ -3512,21 +3512,13 @@ func (e *Engine) cmdResume(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	// Filter out the session the user is currently in — offering "resume
-	// the conversation you are literally having right now" is nonsensical
-	// and wastes a picker slot. We compare against the session-store's
-	// AgentSessionID because the live agentSession's CurrentSessionID may
-	// not be reachable from this synchronous command path.
+	// The session the user is currently in (according to cc-connect's own
+	// session store) stays in the list — filtering it out makes the
+	// chronological "most recent" row mysteriously missing. Instead, we
+	// note its ID so the picker can label that row with "(current)" and
+	// the user still has the option to re-pick it explicitly (e.g. to
+	// branch off their own current thread).
 	currentID := session.GetAgentSessionID()
-	if currentID != "" {
-		filtered := agentSessions[:0]
-		for _, s := range agentSessions {
-			if s.ID != currentID {
-				filtered = append(filtered, s)
-			}
-		}
-		agentSessions = filtered
-	}
 
 	if len(agentSessions) == 0 {
 		session.ClearPendingResumeCandidates()
@@ -3549,9 +3541,12 @@ func (e *Engine) cmdResume(p Platform, msg *Message, args []string) {
 		if first == "" {
 			first = "(no opening user message)"
 		}
-		last := s.Summary
-		fmt.Fprintf(&b, "%2d. %s  — \"%s\"\n", i+1, rel, first)
-		if last != "" && last != s.FirstSummary {
+		marker := ""
+		if currentID != "" && s.ID == currentID {
+			marker = " *(current)*"
+		}
+		fmt.Fprintf(&b, "%2d. %s%s  — \"%s\"\n", i+1, rel, marker, first)
+		if last := s.Summary; last != "" && last != s.FirstSummary {
 			fmt.Fprintf(&b, "     ↳ \"%s\"\n", last)
 		}
 	}
