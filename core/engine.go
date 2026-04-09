@@ -2734,6 +2734,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					slog.Debug("async send error after EventResult", "error", err)
 				}
 			}
+			// Cleanup interactive state for new_per_run cron jobs.
+			// Cron sessions have "#cron:" in their interactive key.
+			if strings.Contains(sessionKey, "#cron:") {
+				e.cleanupInteractiveState(sessionKey, state)
+			}
 			return
 
 		case EventError:
