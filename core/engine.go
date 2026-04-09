@@ -6839,25 +6839,41 @@ func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images
 	}
 
 	if p == nil && sessionKey != "" {
+		strippedKey := sessionKey
 		platformName := ""
-		if idx := strings.Index(sessionKey, ":"); idx > 0 {
-			platformName = sessionKey[:idx]
+		if idx := strings.Index(strippedKey, ":"); idx > 0 {
+			platformName = strippedKey[:idx]
 		}
+		var targetPlatform Platform
 		for _, candidate := range e.platforms {
-			if candidate.Name() != platformName {
-				continue
+			if candidate.Name() == platformName {
+				targetPlatform = candidate
+				break
 			}
-			rc, ok := candidate.(ReplyContextReconstructor)
+		}
+		// Fallback: multi-workspace mode may prefix the session key with the
+		// workspace path (same heuristic as ExecuteCronJob / ExecuteHeartbeat).
+		if targetPlatform == nil {
+			for _, candidate := range e.platforms {
+				needle := ":" + candidate.Name() + ":"
+				if idx := strings.Index(strippedKey, needle); idx >= 0 {
+					targetPlatform = candidate
+					strippedKey = strippedKey[idx+1:]
+					break
+				}
+			}
+		}
+		if targetPlatform != nil {
+			rc, ok := targetPlatform.(ReplyContextReconstructor)
 			if !ok {
-				return fmt.Errorf("platform %q does not support proactive messaging", platformName)
+				return fmt.Errorf("platform %q does not support proactive messaging", targetPlatform.Name())
 			}
-			reconstructed, err := rc.ReconstructReplyCtx(sessionKey)
+			reconstructed, err := rc.ReconstructReplyCtx(strippedKey)
 			if err != nil {
 				return fmt.Errorf("reconstruct reply context: %w", err)
 			}
-			p = candidate
+			p = targetPlatform
 			replyCtx = reconstructed
-			break
 		}
 	}
 
@@ -9424,12 +9440,16 @@ func (e *Engine) executeShellCommand(p Platform, msg *Message, cmd *CustomComman
 		"CC_PROJECT=" + e.name,
 		"CC_SESSION_KEY=" + msg.SessionKey,
 	}
-	if exePath, err := os.Executable(); err == nil {
-		binDir := filepath.Dir(exePath)
-		if curPath := os.Getenv("PATH"); curPath != "" {
-			envVars = append(envVars, "PATH="+binDir+string(filepath.ListSeparator)+curPath)
-		} else {
-			envVars = append(envVars, "PATH="+binDir)
+	// Prepend the cc-connect binary dir on Windows only (native shell fix);
+	// on Unix it would change command resolution for user scripts.
+	if runtime.GOOS == "windows" {
+		if exePath, err := os.Executable(); err == nil {
+			binDir := filepath.Dir(exePath)
+			if curPath := os.Getenv("PATH"); curPath != "" {
+				envVars = append(envVars, "PATH="+binDir+string(filepath.ListSeparator)+curPath)
+			} else {
+				envVars = append(envVars, "PATH="+binDir)
+			}
 		}
 	}
 	shellCmd.Env = MergeEnv(os.Environ(), envVars)
