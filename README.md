@@ -405,6 +405,38 @@ Notes:
 
 ---
 
+## ☕ Support the Project
+
+If cc-connect has been helpful to you, consider buying us a coffee! Your support helps us:
+
+- 🛠️ Maintain and improve the project
+- 📚 Write better documentation and tutorials
+- 🐛 Fix bugs and add new features faster
+- ☕ Keep the developers caffeinated
+
+### How to Donate
+
+**Buy Me a Coffee**: [https://buymeacoffee.com/cg33](https://buymeacoffee.com/cg33)
+
+**WeChat Pay / Alipay**:
+
+| WeChat Pay | Alipay |
+|:----------:|:------:|
+| <img src="docs/images/wechatpay.jpg" alt="WeChat Pay" width="150"> | <img src="docs/images/alipay.jpg" alt="Alipay" width="150"> |
+
+### Thank You, Donors! 🎉
+
+We're grateful to everyone who has supported this project. If you've donated and would like to be recognized here, please [open an issue](https://github.com/chenhg5/cc-connect/issues/new?title=Donor+Recognition&body=I+donated+to+cc-connect!+My+GitHub+username+is:+) with your GitHub username.
+
+<!-- Donors will be listed below -->
+<!--
+| GitHub Username | Date |
+|-----------------|------|
+| @username | YYYY-MM-DD |
+-->
+
+---
+
 ## 🤝 Commercial Cooperation
 
 We accept the following commercial collaborations:

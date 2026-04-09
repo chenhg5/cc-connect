@@ -405,6 +405,38 @@ cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/ch
 
 ---
 
+## ☕ 支持项目
+
+如果 cc-connect 对你有帮助，请考虑请我们喝杯咖啡！你的支持帮助我们：
+
+- 🛠️ 维护和改进项目
+- 📚 编写更好的文档和教程
+- 🐛 更快修复 bug 和添加新功能
+- ☕ 让开发者保持精力充沛
+
+### 捐赠方式
+
+**Buy Me a Coffee**：[https://buymeacoffee.com/cg33](https://buymeacoffee.com/cg33)
+
+**微信支付 / 支付宝**：
+
+| 微信支付 | 支付宝 |
+|:----------:|:------:|
+| <img src="docs/images/wechatpay.jpg" alt="微信支付" width="150"> | <img src="docs/images/alipay.jpg" alt="支付宝" width="150"> |
+
+### 感谢捐赠者！🎉
+
+感谢每一位支持这个项目的朋友。如果你已经捐赠并希望在这里被认可，请[提交 Issue](https://github.com/chenhg5/cc-connect/issues/new?title=捐赠者认可&body=我捐赠了cc-connect！我的GitHub用户名是：) 并附上你的 GitHub 用户名。
+
+<!-- 捐赠者名单 -->
+<!--
+| GitHub 用户名 | 日期 |
+|-----------------|------|
+| @username | YYYY-MM-DD |
+-->
+
+---
+
 ## 🤝 商业合作
 
 我们接受以下商业合作：
