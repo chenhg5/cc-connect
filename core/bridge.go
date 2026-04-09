@@ -45,6 +45,7 @@ type bridgeEngineRef struct {
 type bridgeAdapter struct {
 	platform     string
 	capabilities map[string]bool
+	metadata     map[string]any
 	conn         *websocket.Conn
 	writeMu      sync.Mutex
 	server       *BridgeServer
@@ -58,6 +59,23 @@ type bridgeReplyCtx struct {
 	Platform   string `json:"platform"`
 	SessionKey string `json:"session_key"`
 	ReplyCtx   string `json:"reply_ctx"`
+
+	progressStyle               string `json:"-"`
+	supportsProgressCardPayload bool   `json:"-"`
+}
+
+func (rc *bridgeReplyCtx) progressStyleHint() string {
+	if rc == nil {
+		return progressStyleLegacy
+	}
+	return rc.progressStyle
+}
+
+func (rc *bridgeReplyCtx) supportsProgressCardPayloadHint() bool {
+	if rc == nil {
+		return false
+	}
+	return rc.supportsProgressCardPayload
 }
 
 // --- Wire protocol messages ---
@@ -305,11 +323,82 @@ func (bp *BridgePlatform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	if !a.capabilities["reconstruct_reply"] {
 		return nil, fmt.Errorf("bridge: adapter %q does not support reconstruct_reply", platform)
 	}
-	return &bridgeReplyCtx{
-		Platform:   platform,
+	return newBridgeReplyCtx(a, sessionKey, sessionKey), nil
+}
+
+func newBridgeReplyCtx(a *bridgeAdapter, sessionKey, replyCtx string) *bridgeReplyCtx {
+	rc := &bridgeReplyCtx{
 		SessionKey: sessionKey,
-		ReplyCtx:   sessionKey,
-	}, nil
+		ReplyCtx:   replyCtx,
+	}
+	if a == nil {
+		return rc
+	}
+	rc.Platform = a.platform
+	rc.progressStyle = bridgeProgressStyleForAdapter(a)
+	rc.supportsProgressCardPayload = bridgeSupportsProgressCardPayloadForAdapter(a)
+	return rc
+}
+
+func bridgeProgressStyleForAdapter(a *bridgeAdapter) string {
+	if a == nil {
+		return progressStyleLegacy
+	}
+	if style, ok := bridgeMetadataString(a.metadata, "progress_style"); ok {
+		return normalizeProgressStyle(style)
+	}
+	if a.capabilities["preview"] && a.capabilities["update_message"] {
+		if a.capabilities["card"] {
+			return progressStyleCard
+		}
+		return progressStyleCompact
+	}
+	return progressStyleLegacy
+}
+
+func bridgeSupportsProgressCardPayloadForAdapter(a *bridgeAdapter) bool {
+	if a == nil {
+		return false
+	}
+	if supported, ok := bridgeMetadataBool(a.metadata, "supports_progress_card_payload"); ok {
+		return supported
+	}
+	adapterName, _ := bridgeMetadataString(a.metadata, "adapter")
+	return adapterName == "bot-gateway" && a.capabilities["preview"] && a.capabilities["update_message"]
+}
+
+func bridgeMetadataString(metadata map[string]any, key string) (string, bool) {
+	if metadata == nil {
+		return "", false
+	}
+	raw, ok := metadata[key]
+	if !ok {
+		return "", false
+	}
+	value, ok := raw.(string)
+	if !ok {
+		return "", false
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", false
+	}
+	return value, true
+}
+
+func bridgeMetadataBool(metadata map[string]any, key string) (bool, bool) {
+	if metadata == nil {
+		return false, false
+	}
+	raw, ok := metadata[key]
+	if !ok {
+		return false, false
+	}
+	value, ok := raw.(bool)
+	if !ok {
+		return false, false
+	}
+	return value, true
 }
 
 func (bp *BridgePlatform) SendCard(ctx context.Context, replyCtx any, card *Card) error {
@@ -400,11 +489,7 @@ func (bp *BridgePlatform) SendPreviewStart(ctx context.Context, replyCtx any, co
 
 	select {
 	case handle := <-ch:
-		return &bridgeReplyCtx{
-			Platform:   rc.Platform,
-			SessionKey: rc.SessionKey,
-			ReplyCtx:   handle,
-		}, nil
+		return newBridgeReplyCtx(a, rc.SessionKey, handle), nil
 	case <-time.After(10 * time.Second):
 		a.previewMu.Lock()
 		delete(a.previewRequests, refID)
@@ -541,6 +626,7 @@ func (bs *BridgeServer) handleConnection(conn *websocket.Conn) {
 	adapter := &bridgeAdapter{
 		platform:        reg.Platform,
 		capabilities:    caps,
+		metadata:        reg.Metadata,
 		conn:            conn,
 		server:          bs,
 		previewRequests: make(map[string]chan string),
@@ -635,11 +721,7 @@ func (a *bridgeAdapter) handleMessage(raw json.RawMessage) {
 		UserID:     m.UserID,
 		UserName:   m.UserName,
 		Content:    m.Content,
-		ReplyCtx: &bridgeReplyCtx{
-			Platform:   a.platform,
-			SessionKey: m.SessionKey,
-			ReplyCtx:   m.ReplyCtx,
-		},
+		ReplyCtx:   newBridgeReplyCtx(a, m.SessionKey, m.ReplyCtx),
 	}
 
 	for _, img := range m.Images {
@@ -745,11 +827,7 @@ func (a *bridgeAdapter) handleCardAction(raw json.RawMessage) {
 			"card":        serializeCard(card),
 		})
 	} else {
-		rc := &bridgeReplyCtx{
-			Platform:   a.platform,
-			SessionKey: ca.SessionKey,
-			ReplyCtx:   ca.ReplyCtx,
-		}
+		rc := newBridgeReplyCtx(a, ca.SessionKey, ca.ReplyCtx)
 		_ = ref.platform.Reply(context.Background(), rc, card.RenderText())
 	}
 }
@@ -766,11 +844,7 @@ func (a *bridgeAdapter) dispatchAsMessage(ref *bridgeEngineRef, sessionKey, repl
 		UserID:     "web-admin",
 		UserName:   "Web Admin",
 		Content:    content,
-		ReplyCtx: &bridgeReplyCtx{
-			Platform:   a.platform,
-			SessionKey: sessionKey,
-			ReplyCtx:   replyCtx,
-		},
+		ReplyCtx:   newBridgeReplyCtx(a, sessionKey, replyCtx),
 	}
 	go ref.platform.handler(ref.platform, msg)
 }

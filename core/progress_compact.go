@@ -249,6 +249,31 @@ func progressStyleForPlatform(p Platform) string {
 	return ps
 }
 
+type progressStyleHintProvider interface {
+	progressStyleHint() string
+}
+
+type progressCardPayloadHintProvider interface {
+	supportsProgressCardPayloadHint() bool
+}
+
+func progressStyleForTarget(p Platform, replyCtx any) string {
+	if hint, ok := replyCtx.(progressStyleHintProvider); ok {
+		return normalizeProgressStyle(hint.progressStyleHint())
+	}
+	return progressStyleForPlatform(p)
+}
+
+func progressCardPayloadForTarget(p Platform, replyCtx any) bool {
+	if hint, ok := replyCtx.(progressCardPayloadHintProvider); ok {
+		return hint.supportsProgressCardPayloadHint()
+	}
+	if cap, ok := p.(ProgressCardPayloadSupport); ok {
+		return cap.SupportsProgressCardPayload()
+	}
+	return false
+}
+
 // SuppressStandaloneToolResultEvent is true when a platform opts into progress
 // styling (ProgressStyleProvider) but uses legacy mode. In that case tool_use
 // lines are still shown, but a separate chat message for EventToolResult is
@@ -267,7 +292,7 @@ func newCompactProgressWriter(ctx context.Context, p Platform, replyCtx any, age
 		ctx:        ctx,
 		platform:   p,
 		replyCtx:   replyCtx,
-		style:      progressStyleForPlatform(p),
+		style:      progressStyleForTarget(p, replyCtx),
 		state:      ProgressCardStateRunning,
 		agentName:  normalizeProgressAgentLabel(agentName),
 		lang:       lang,
@@ -288,7 +313,7 @@ func newCompactProgressWriter(ctx context.Context, p Platform, replyCtx any, age
 		w.starter = starter
 	}
 	if w.style == progressStyleCard {
-		if cap, ok := p.(ProgressCardPayloadSupport); ok && cap.SupportsProgressCardPayload() {
+		if progressCardPayloadForTarget(p, replyCtx) {
 			w.usePayload = true
 		}
 	}

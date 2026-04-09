@@ -56,6 +56,22 @@ func register(t *testing.T, conn *websocket.Conn, platform string, caps []string
 	}
 }
 
+func registerWithMetadata(t *testing.T, conn *websocket.Conn, platform string, caps []string, metadata map[string]any) {
+	t.Helper()
+	msg := map[string]any{
+		"type":         "register",
+		"platform":     platform,
+		"capabilities": caps,
+		"metadata":     metadata,
+	}
+	mustWriteJSON(t, conn, msg)
+	var ack map[string]any
+	mustReadJSON(t, conn, &ack)
+	if ack["ok"] != true {
+		t.Fatalf("register failed: %v", ack["error"])
+	}
+}
+
 func readMsg(t *testing.T, conn *websocket.Conn) map[string]any {
 	t.Helper()
 	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
@@ -215,6 +231,49 @@ func TestBridge_MessageRouting(t *testing.T) {
 	}
 }
 
+func TestBridge_MessageReplyCtxCarriesProgressHints(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+
+	var got *bridgeReplyCtx
+
+	bp := bs.NewPlatform("test-proj")
+	e := NewEngine("test-proj", &stubAgent{}, []Platform{bp}, "", LangEnglish)
+	bs.RegisterEngine("test-proj", e, bp)
+	bp.handler = func(p Platform, msg *Message) {
+		rc, ok := msg.ReplyCtx.(*bridgeReplyCtx)
+		if !ok {
+			t.Fatalf("reply ctx type = %T, want *bridgeReplyCtx", msg.ReplyCtx)
+		}
+		got = rc
+	}
+
+	conn := dialWS(t, wsURL, nil)
+	registerWithMetadata(t, conn, "bridge", []string{"text", "card", "preview", "update_message"}, map[string]any{
+		"adapter": "bot-gateway",
+	})
+
+	mustWriteJSON(t, conn, map[string]any{
+		"type":        "message",
+		"msg_id":      "m1",
+		"session_key": "bridge:room-1:user-1",
+		"user_id":     "user-1",
+		"content":     "hello",
+		"reply_ctx":   "ctx-1",
+	})
+
+	time.Sleep(100 * time.Millisecond)
+
+	if got == nil {
+		t.Fatal("expected reply ctx to be captured")
+	}
+	if got.progressStyleHint() != progressStyleCard {
+		t.Fatalf("progressStyleHint() = %q, want %q", got.progressStyleHint(), progressStyleCard)
+	}
+	if !got.supportsProgressCardPayloadHint() {
+		t.Fatal("supportsProgressCardPayloadHint() = false, want true")
+	}
+}
+
 func TestBridge_ReplyRouting(t *testing.T) {
 	bs, wsURL := startTestBridge(t, "")
 
@@ -249,6 +308,32 @@ func TestBridge_ReplyRouting(t *testing.T) {
 	}
 	if reply["reply_ctx"] != "ctx-1" {
 		t.Fatalf("reply_ctx = %q, want ctx-1", reply["reply_ctx"])
+	}
+}
+
+func TestBridge_ReconstructReplyCtxUsesAdapterProgressHints(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+	bp := bs.NewPlatform("test-proj")
+
+	conn := dialWS(t, wsURL, nil)
+	registerWithMetadata(t, conn, "bridge", []string{"text", "card", "preview", "update_message", "reconstruct_reply"}, map[string]any{
+		"adapter": "bot-gateway",
+	})
+
+	replyCtx, err := bp.ReconstructReplyCtx("bridge:room-1:user-1")
+	if err != nil {
+		t.Fatalf("ReconstructReplyCtx() error = %v", err)
+	}
+
+	rc, ok := replyCtx.(*bridgeReplyCtx)
+	if !ok {
+		t.Fatalf("reply ctx type = %T, want *bridgeReplyCtx", replyCtx)
+	}
+	if rc.progressStyleHint() != progressStyleCard {
+		t.Fatalf("progressStyleHint() = %q, want %q", rc.progressStyleHint(), progressStyleCard)
+	}
+	if !rc.supportsProgressCardPayloadHint() {
+		t.Fatal("supportsProgressCardPayloadHint() = false, want true")
 	}
 }
 
