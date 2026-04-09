@@ -141,10 +141,16 @@ type ManagementConfig struct {
 
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
 type DisplayConfig struct {
-	ThinkingMessages *bool `toml:"thinking_messages"` // whether thinking messages are shown; default true
-	ThinkingMaxLen   *int  `toml:"thinking_max_len"`  // max chars for thinking messages; 0 = no truncation; default 300
-	ToolMaxLen       *int  `toml:"tool_max_len"`      // max chars for tool use messages; 0 = no truncation; default 500
-	ToolMessages     *bool `toml:"tool_messages"`     // whether tool progress messages are shown; default true
+	ThinkingMessages     *bool   `toml:"thinking_messages"`        // whether thinking messages are shown; default true
+	ThinkingMaxLen       *int    `toml:"thinking_max_len"`         // max chars for thinking messages; 0 = no truncation; default 300
+	ToolMaxLen           *int    `toml:"tool_max_len"`             // max chars for tool bodies; 0 = no truncation; default 500
+	ToolMessages         *bool   `toml:"tool_messages"`            // whether tool progress messages are shown; default true
+	ProgressStyle        *string `toml:"progress_style,omitempty"` // "" = platform default; legacy | compact | card
+	ToolLayout           *string `toml:"tool_layout,omitempty"`    // split | merged; default merged
+	ToolShowInput        *bool   `toml:"tool_show_input"`          // whether tool input is shown; default true
+	ToolShowResultBody   *bool   `toml:"tool_show_result_body"`    // whether tool result body is shown; default true
+	ProgressMaxEntries   *int    `toml:"progress_max_entries"`     // max recent progress entries shown in compact/card; 0 = unlimited; default 20
+	ProgressHistoryTurns *int    `toml:"progress_history_turns"`   // number of assistant turns with persisted event timelines; 0 = disabled; default 3
 }
 
 // StreamPreviewConfig controls real-time streaming preview in IM.
@@ -281,6 +287,7 @@ type ProjectConfig struct {
 	Name         string             `toml:"name"`
 	Mode         string             `toml:"mode,omitempty"`     // "" or "multi-workspace"
 	BaseDir      string             `toml:"base_dir,omitempty"` // parent dir for workspaces
+	Quiet        *bool              `toml:"quiet,omitempty"`    // project-level quiet mode; overrides global setting
 	Agent        AgentConfig        `toml:"agent"`
 	Platforms    []PlatformConfig   `toml:"platforms"`
 	Heartbeat    HeartbeatConfig    `toml:"heartbeat"`
@@ -567,7 +574,6 @@ func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (thinkingMessages, toolM
 	}
 	return thinkingMessages, toolMessages, thinkingMaxLen, toolMaxLen
 }
-
 func (c *Config) validate() error {
 	switch strings.ToLower(strings.TrimSpace(c.AttachmentSend)) {
 	case "", "on", "off":
@@ -1137,8 +1143,64 @@ func RemoveAlias(name string) error {
 	return saveConfig(cfg)
 }
 
+type DisplayConfigUpdate struct {
+	ThinkingMessages     *bool
+	ThinkingMaxLen       *int
+	ToolMaxLen           *int
+	ToolMessages         *bool
+	ProgressStyle        *string
+	ToolLayout           *string
+	ToolShowInput        *bool
+	ToolShowResultBody   *bool
+	ProgressMaxEntries   *int
+	ProgressHistoryTurns *int
+}
+
+// projectQuietEffective returns whether legacy quiet applies to this project: an explicit
+// per-project quiet overrides; otherwise the global root quiet applies.
+func projectQuietEffective(cfg *Config, proj *ProjectConfig) bool {
+	if proj != nil && proj.Quiet != nil {
+		return *proj.Quiet
+	}
+	if cfg.Quiet != nil {
+		return *cfg.Quiet
+	}
+	return false
+}
+
+// EffectiveDisplay resolves global [display] together with legacy quiet (root or per-project).
+// If quiet is in effect and thinking_messages / tool_messages were not explicitly set in [display],
+// they map to false (backward-compatible with pre-display quiet = true).
+func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (thinkingMessages, toolMessages bool, thinkingMaxLen, toolMaxLen int) {
+	thinkingMessages = true
+	toolMessages = true
+	thinkingMaxLen = 300
+	toolMaxLen = 500
+	if cfg.Display.ThinkingMessages != nil {
+		thinkingMessages = *cfg.Display.ThinkingMessages
+	}
+	if cfg.Display.ToolMessages != nil {
+		toolMessages = *cfg.Display.ToolMessages
+	}
+	if cfg.Display.ThinkingMaxLen != nil {
+		thinkingMaxLen = *cfg.Display.ThinkingMaxLen
+	}
+	if cfg.Display.ToolMaxLen != nil {
+		toolMaxLen = *cfg.Display.ToolMaxLen
+	}
+	if projectQuietEffective(cfg, proj) {
+		if cfg.Display.ThinkingMessages == nil {
+			thinkingMessages = false
+		}
+		if cfg.Display.ToolMessages == nil {
+			toolMessages = false
+		}
+	}
+	return thinkingMessages, toolMessages, thinkingMaxLen, toolMaxLen
+}
+
 // SaveDisplayConfig persists the display settings to the config file.
-func SaveDisplayConfig(thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
+func SaveDisplayConfig(u DisplayConfigUpdate) error {
 	configMu.Lock()
 	defer configMu.Unlock()
 	if ConfigPath == "" {
@@ -1152,17 +1214,40 @@ func SaveDisplayConfig(thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, 
 	if err := toml.Unmarshal(data, cfg); err != nil {
 		return fmt.Errorf("parse config: %w", err)
 	}
-	if thinkingMessages != nil {
-		cfg.Display.ThinkingMessages = thinkingMessages
+	if u.ThinkingMessages != nil {
+		cfg.Display.ThinkingMessages = u.ThinkingMessages
 	}
-	if thinkingMaxLen != nil {
-		cfg.Display.ThinkingMaxLen = thinkingMaxLen
+	if u.ThinkingMaxLen != nil {
+		cfg.Display.ThinkingMaxLen = u.ThinkingMaxLen
 	}
-	if toolMaxLen != nil {
-		cfg.Display.ToolMaxLen = toolMaxLen
+	if u.ToolMaxLen != nil {
+		cfg.Display.ToolMaxLen = u.ToolMaxLen
 	}
-	if toolMessages != nil {
-		cfg.Display.ToolMessages = toolMessages
+	if u.ToolMessages != nil {
+		cfg.Display.ToolMessages = u.ToolMessages
+	}
+	if u.ProgressStyle != nil {
+		style := strings.ToLower(strings.TrimSpace(*u.ProgressStyle))
+		if style == "" || style == "auto" {
+			cfg.Display.ProgressStyle = nil
+		} else {
+			cfg.Display.ProgressStyle = &style
+		}
+	}
+	if u.ToolLayout != nil {
+		cfg.Display.ToolLayout = u.ToolLayout
+	}
+	if u.ToolShowInput != nil {
+		cfg.Display.ToolShowInput = u.ToolShowInput
+	}
+	if u.ToolShowResultBody != nil {
+		cfg.Display.ToolShowResultBody = u.ToolShowResultBody
+	}
+	if u.ProgressMaxEntries != nil {
+		cfg.Display.ProgressMaxEntries = u.ProgressMaxEntries
+	}
+	if u.ProgressHistoryTurns != nil {
+		cfg.Display.ProgressHistoryTurns = u.ProgressHistoryTurns
 	}
 	return saveConfig(cfg)
 }
@@ -2492,6 +2577,36 @@ func GetGlobalSettings() map[string]any {
 	} else {
 		result["tool_max_len"] = 500
 	}
+	if cfg.Display.ProgressStyle != nil && strings.TrimSpace(*cfg.Display.ProgressStyle) != "" {
+		result["progress_style"] = strings.TrimSpace(*cfg.Display.ProgressStyle)
+	} else {
+		result["progress_style"] = "auto"
+	}
+	if cfg.Display.ToolLayout != nil && strings.TrimSpace(*cfg.Display.ToolLayout) != "" {
+		result["tool_layout"] = *cfg.Display.ToolLayout
+	} else {
+		result["tool_layout"] = "merged"
+	}
+	if cfg.Display.ToolShowInput != nil {
+		result["tool_show_input"] = *cfg.Display.ToolShowInput
+	} else {
+		result["tool_show_input"] = true
+	}
+	if cfg.Display.ToolShowResultBody != nil {
+		result["tool_show_result_body"] = *cfg.Display.ToolShowResultBody
+	} else {
+		result["tool_show_result_body"] = true
+	}
+	if cfg.Display.ProgressMaxEntries != nil {
+		result["progress_max_entries"] = *cfg.Display.ProgressMaxEntries
+	} else {
+		result["progress_max_entries"] = 20
+	}
+	if cfg.Display.ProgressHistoryTurns != nil {
+		result["progress_history_turns"] = *cfg.Display.ProgressHistoryTurns
+	} else {
+		result["progress_history_turns"] = 3
+	}
 	// Stream preview
 	spEnabled := true
 	if cfg.StreamPreview.Enabled != nil {
@@ -2519,18 +2634,24 @@ func GetGlobalSettings() map[string]any {
 
 // GlobalSettingsUpdate holds fields to update in global config.
 type GlobalSettingsUpdate struct {
-	Language           *string `json:"language"`
-	AttachmentSend     *string `json:"attachment_send"`
-	LogLevel           *string `json:"log_level"`
-	IdleTimeoutMins    *int    `json:"idle_timeout_mins"`
-	ThinkingMessages   *bool   `json:"thinking_messages"`
-	ThinkingMaxLen     *int    `json:"thinking_max_len"`
-	ToolMessages       *bool   `json:"tool_messages"`
-	ToolMaxLen         *int    `json:"tool_max_len"`
-	StreamPreviewOn    *bool   `json:"stream_preview_enabled"`
-	StreamPreviewIntMs *int    `json:"stream_preview_interval_ms"`
-	RateLimitMax       *int    `json:"rate_limit_max_messages"`
-	RateLimitWindow    *int    `json:"rate_limit_window_secs"`
+	Language             *string `json:"language"`
+	AttachmentSend       *string `json:"attachment_send"`
+	LogLevel             *string `json:"log_level"`
+	IdleTimeoutMins      *int    `json:"idle_timeout_mins"`
+	ThinkingMessages     *bool   `json:"thinking_messages"`
+	ThinkingMaxLen       *int    `json:"thinking_max_len"`
+	ToolMaxLen           *int    `json:"tool_max_len"`
+	ToolMessages         *bool   `json:"tool_messages"`
+	ProgressStyle        *string `json:"progress_style"`
+	ToolLayout           *string `json:"tool_layout"`
+	ToolShowInput        *bool   `json:"tool_show_input"`
+	ToolShowResultBody   *bool   `json:"tool_show_result_body"`
+	ProgressMaxEntries   *int    `json:"progress_max_entries"`
+	ProgressHistoryTurns *int    `json:"progress_history_turns"`
+	StreamPreviewOn      *bool   `json:"stream_preview_enabled"`
+	StreamPreviewIntMs   *int    `json:"stream_preview_interval_ms"`
+	RateLimitMax         *int    `json:"rate_limit_max_messages"`
+	RateLimitWindow      *int    `json:"rate_limit_window_secs"`
 }
 
 // SaveGlobalSettings persists global settings to config.toml.
@@ -2571,6 +2692,29 @@ func SaveGlobalSettings(u GlobalSettingsUpdate) error {
 	}
 	if u.ToolMaxLen != nil {
 		cfg.Display.ToolMaxLen = u.ToolMaxLen
+	}
+	if u.ProgressStyle != nil {
+		style := strings.ToLower(strings.TrimSpace(*u.ProgressStyle))
+		if style == "" || style == "auto" {
+			cfg.Display.ProgressStyle = nil
+		} else {
+			cfg.Display.ProgressStyle = &style
+		}
+	}
+	if u.ToolLayout != nil {
+		cfg.Display.ToolLayout = u.ToolLayout
+	}
+	if u.ToolShowInput != nil {
+		cfg.Display.ToolShowInput = u.ToolShowInput
+	}
+	if u.ToolShowResultBody != nil {
+		cfg.Display.ToolShowResultBody = u.ToolShowResultBody
+	}
+	if u.ProgressMaxEntries != nil {
+		cfg.Display.ProgressMaxEntries = u.ProgressMaxEntries
+	}
+	if u.ProgressHistoryTurns != nil {
+		cfg.Display.ProgressHistoryTurns = u.ProgressHistoryTurns
 	}
 	if u.StreamPreviewOn != nil {
 		cfg.StreamPreview.Enabled = u.StreamPreviewOn

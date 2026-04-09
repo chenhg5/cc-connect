@@ -16,6 +16,7 @@ cc-connect 完整功能使用指南。
 - [语音消息（语音转文字）](#语音消息语音转文字)
 - [语音回复（文字转语音）](#语音回复文字转语音)
 - [图片与文件回传](#图片与文件回传)
+- [进度展示与回看](#进度展示与回看)
 - [定时任务 (Cron)](#定时任务-cron)
 - [多机器人中继](#多机器人中继)
 - [守护进程模式](#守护进程模式)
@@ -654,6 +655,113 @@ cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/ch
 - 只能发送本机上 Agent 可访问到的文件。
 - 必须存在活跃会话；如果当前项目没有活动聊天上下文，命令会失败。
 - 平台本身仍可能有文件大小或文件类型限制。
+
+---
+
+## 进度展示与回看
+
+cc-connect 可以展示 Agent 的中间过程，包括 thinking、工具调用和工具结果。
+
+### Progress 展示风格
+
+平台可以通过 `progress_style` 控制过程消息展示方式：
+
+```toml
+[[projects.platforms]]
+type = "feishu"
+
+[projects.platforms.options]
+progress_style = "card"  # legacy | compact | card
+```
+
+三种风格分别是：
+
+- `legacy`
+  - 保持逐条消息展示
+- `compact`
+  - 把过程合并到一条可更新消息中
+- `card`
+  - 使用结构化卡片持续更新
+
+当前飞书默认是 `card`。
+
+### Display 配置
+
+在 `config.toml` 的 `[display]` 中可控制过程展示：
+
+```toml
+[display]
+thinking_max_len = 300
+tool_max_len = 500
+tool_messages = true
+tool_layout = "merged"          # split | merged
+tool_show_input = true
+tool_show_result_body = true
+progress_max_entries = 20
+progress_history_turns = 3
+```
+
+字段说明：
+
+- `thinking_max_len`
+  - 单条 thinking 的最大展示长度；设为 `0` 表示不截断
+- `tool_max_len`
+  - 工具输入或结果正文在展示时的长度上限；设为 `0` 表示不截断
+- `tool_messages`
+  - 是否显示所有工具相关 progress
+- `tool_layout`
+  - `split`：工具调用和工具结果分别占两个块
+  - `merged`：同一个工具调用只占一个块，结果回来后原位更新
+- `tool_show_input`
+  - 是否展示工具输入正文，例如 Bash 命令
+- `tool_show_result_body`
+  - 是否展示工具结果正文
+- `progress_max_entries`
+  - `compact/card` 视图中最多保留最近多少条 event；设为 `0` 表示不裁剪
+- `progress_history_turns`
+  - 为 `/progress` 保留最近多少轮 assistant 回复对应的过程；设为 `0` 表示禁用过程历史
+
+### 运行时动态调整
+
+这些配置都可以在聊天中直接修改：
+
+```text
+/config get tool_layout
+/config set tool_layout merged
+/config set tool_show_result_body false
+/config set progress_max_entries 30
+/config set progress_history_turns 5
+```
+
+### `/progress` 命令
+
+`/progress` 用于查看最近一轮或上一轮 assistant 回复对应的过程事件。
+
+支持：
+
+```text
+/progress
+/progress 7
+/progress 3:8
+/progress prev
+/progress prev 7
+/progress prev 3:8
+```
+
+含义：
+
+- `/progress`
+  - 查看最近一轮 assistant 回复的全部过程事件
+- `/progress 7`
+  - 查看最近一轮中的第 7 条 event
+- `/progress 3:8`
+  - 查看最近一轮中的第 3 到第 8 条 event
+- `/progress prev`
+  - 查看上一轮 assistant 回复的全部过程事件
+- `/progress prev 7`
+  - 查看上一轮中的第 7 条 event
+- `/progress prev 3:8`
+  - 查看上一轮中的第 3 到第 8 条 event
 
 ---
 

@@ -349,16 +349,7 @@ func main() {
 			engine.SetUserRoles(buildUserRoleManager(proj.Users))
 		}
 
-		// Wire display truncation settings (includes legacy quiet → display mapping)
-		{
-			tm, tool, tmlen, toollen := config.EffectiveDisplay(cfg, &proj)
-			engine.SetDisplayConfig(core.DisplayCfg{
-				ThinkingMessages: tm,
-				ThinkingMaxLen:   tmlen,
-				ToolMaxLen:       toollen,
-				ToolMessages:     tool,
-			})
-		}
+		engine.SetDisplayConfig(buildDisplayCfg(cfg, &proj))
 
 		// Wire local reference normalization / rendering
 		engine.SetReferenceConfig(core.ReferenceRenderCfg{
@@ -435,8 +426,19 @@ func main() {
 			}
 		}
 
-		engine.SetDisplaySaveFunc(func(thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
-			return config.SaveDisplayConfig(thinkingMessages, thinkingMaxLen, toolMaxLen, toolMessages)
+		engine.SetDisplaySaveFunc(func(update core.DisplayCfgUpdate) error {
+			return config.SaveDisplayConfig(config.DisplayConfigUpdate{
+				ThinkingMessages:     update.ThinkingMessages,
+				ThinkingMaxLen:       update.ThinkingMaxLen,
+				ToolMaxLen:           update.ToolMaxLen,
+				ToolMessages:         update.ToolMessages,
+				ProgressStyle:        update.ProgressStyle,
+				ToolLayout:           update.ToolLayout,
+				ToolShowInput:        update.ToolShowInput,
+				ToolShowResultBody:   update.ToolShowResultBody,
+				ProgressMaxEntries:   update.ProgressMaxEntries,
+				ProgressHistoryTurns: update.ProgressHistoryTurns,
+			})
 		})
 
 		// Wire idle timeout
@@ -860,6 +862,26 @@ func main() {
 				iv := int(v)
 				u.ToolMaxLen = &iv
 			}
+			if v, ok := updates["progress_style"].(string); ok {
+				u.ProgressStyle = &v
+			}
+			if v, ok := updates["tool_layout"].(string); ok {
+				u.ToolLayout = &v
+			}
+			if v, ok := updates["tool_show_input"].(bool); ok {
+				u.ToolShowInput = &v
+			}
+			if v, ok := updates["tool_show_result_body"].(bool); ok {
+				u.ToolShowResultBody = &v
+			}
+			if v, ok := updates["progress_max_entries"].(float64); ok {
+				iv := int(v)
+				u.ProgressMaxEntries = &iv
+			}
+			if v, ok := updates["progress_history_turns"].(float64); ok {
+				iv := int(v)
+				u.ProgressHistoryTurns = &iv
+			}
 			if v, ok := updates["stream_preview_enabled"].(bool); ok {
 				u.StreamPreviewOn = &v
 			}
@@ -1265,6 +1287,34 @@ func setupLogger(level string, w io.Writer) {
 	})))
 }
 
+func buildDisplayCfg(cfg *config.Config, proj *config.ProjectConfig) core.DisplayCfg {
+	dcfg := core.DefaultDisplayCfg()
+	tm, tool, tmlen, toollen := config.EffectiveDisplay(cfg, proj)
+	dcfg.ThinkingMessages = tm
+	dcfg.ToolMessages = tool
+	dcfg.ThinkingMaxLen = tmlen
+	dcfg.ToolMaxLen = toollen
+	if cfg.Display.ProgressStyle != nil {
+		dcfg.ProgressStyle = strings.TrimSpace(*cfg.Display.ProgressStyle)
+	}
+	if cfg.Display.ToolLayout != nil && strings.TrimSpace(*cfg.Display.ToolLayout) != "" {
+		dcfg.ToolLayout = strings.TrimSpace(*cfg.Display.ToolLayout)
+	}
+	if cfg.Display.ToolShowInput != nil {
+		dcfg.ToolShowInput = *cfg.Display.ToolShowInput
+	}
+	if cfg.Display.ToolShowResultBody != nil {
+		dcfg.ToolShowResultBody = *cfg.Display.ToolShowResultBody
+	}
+	if cfg.Display.ProgressMaxEntries != nil {
+		dcfg.ProgressMaxEntries = *cfg.Display.ProgressMaxEntries
+	}
+	if cfg.Display.ProgressHistoryTurns != nil {
+		dcfg.ProgressHistoryTurns = *cfg.Display.ProgressHistoryTurns
+	}
+	return dcfg
+}
+
 // reloadConfig re-reads config.toml and applies hot-reloadable settings
 // (display, providers, commands) to the given engine.
 func reloadConfig(configPath, projName string, engine *core.Engine) (*core.ConfigReloadResult, error) {
@@ -1287,14 +1337,8 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		return nil, fmt.Errorf("project %q not found in config", projName)
 	}
 
-	// Reload display config (includes legacy quiet → display mapping)
-	tm, tool, tmlen, toollen := config.EffectiveDisplay(cfg, proj)
-	engine.SetDisplayConfig(core.DisplayCfg{
-		ThinkingMessages: tm,
-		ThinkingMaxLen:   tmlen,
-		ToolMaxLen:       toollen,
-		ToolMessages:     tool,
-	})
+	// Reload display config
+	engine.SetDisplayConfig(buildDisplayCfg(cfg, proj))
 	result.DisplayUpdated = true
 
 	// Reload auto-compress settings

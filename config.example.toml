@@ -49,10 +49,15 @@ level = "info" # debug, info, warn, error
 # 设为 0 表示不截断（显示完整内容）。
 
 # [display]
-# thinking_messages = true # Show/hide thinking messages (default: true) / 是否显示思考消息（默认 true）
-# thinking_max_len = 300   # Max chars for thinking messages (default: 300) / 思考消息最大字符数（默认 300）
-# tool_max_len = 500       # Max chars for tool use messages (default: 500) / 工具调用消息最大字符数（默认 500）
-# tool_messages = true     # Show/hide tool progress messages (default: true) / 是否显示工具进度消息（默认 true）
+# thinking_messages = true   # Show/hide thinking messages (default: true) / 是否显示思考消息（默认 true）
+# thinking_max_len = 300     # Max chars for thinking messages (default: 300) / 思考消息最大字符数（默认 300）
+# tool_max_len = 500         # Max chars for tool input/output bodies when shown (default: 500) / 工具输入或结果正文展示时的最大字符数（默认 500）
+# tool_messages = true       # Show/hide all tool progress messages (default: true) / 是否显示所有工具进度消息（默认 true）
+# tool_layout = "merged"     # Tool block layout: split | merged (default: merged) / 工具块布局：split | merged（默认 merged）
+# tool_show_input = true     # Show tool input body when available (default: true) / 是否展示工具输入正文（默认 true）
+# tool_show_result_body = true # Show tool result body when available (default: true) / 是否展示工具结果正文（默认 true）
+# progress_max_entries = 20  # Max recent progress entries in compact/card view, 0 = unlimited (default: 20) / 紧凑或卡片视图中保留的最近进度条数，0 表示不限制（默认 20）
+# progress_history_turns = 3 # Number of assistant turns whose progress timelines are kept for /progress, 0 = disabled (default: 3) / 为 /progress 保留的最近 assistant 回复轮数，0 表示禁用（默认 3）
 
 # Agent idle timeout: max minutes between consecutive agent events before
 # considering the session stuck. Set to 0 to disable the timeout entirely.
@@ -756,8 +761,8 @@ app_secret = "your-feishu-app-secret"
 #                           # 设为 true 时，群聊按飞书话题/根消息隔离会话（一个 thread/root 对应一个 Agent 会话）
 # reply_to_trigger = true   # Default: bot uses “reply to message” API (quotes the user’s message). Set false to post plain chat messages instead.
 #                           # 默认 true：用「回复消息」API（引用用户消息）。设为 false 则在会话里发普通消息、不引用触发消息。
-# progress_style = "legacy" # Progress rendering style: legacy | compact | card
-#                           # 进度消息展示风格：legacy（逐条消息）| compact（单消息持续更新）| card（结构化卡片）
+# progress_style = "card"   # Progress rendering style: legacy | compact | card (Feishu default: card)
+#                           # 进度消息展示风格：legacy（逐条消息）| compact（单消息持续更新）| card（结构化卡片，飞书默认）
 # resolve_mentions = false  # Auto-resolve @name in outgoing messages to Feishu at tags by matching group member names
 #                           # 自动将发出消息中的 @显示名 替换为飞书 at 标签（通过匹配群成员名称）
 
@@ -785,7 +790,7 @@ app_secret = "your-feishu-app-secret"
 # allow_from = "*"
 # reaction_emoji = "OnIt"
 # done_emoji = "none"
-# progress_style = "legacy"  # legacy | compact | card
+# progress_style = "card"    # legacy | compact | card (Feishu/Lark default: card)
 
 # DingTalk / 钉钉 (uncomment to enable / 取消注释以启用)
 # 1. Create an app at https://open-dev.dingtalk.com / 在钉钉开放平台创建应用
