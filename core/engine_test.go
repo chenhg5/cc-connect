@@ -7030,19 +7030,6 @@ func TestCmdDiff_EmptyDiff(t *testing.T) {
 			}
 			if !found {
 				t.Fatalf("expected empty diff message, got %v", sent)
-=======
-	e.cmdShow(p, msg, []string{"svc/handler.go"})
-
-	deadline := time.Now().Add(500 * time.Millisecond)
-	for {
-		sent := p.getSent()
-		if len(sent) > 0 {
-			if !strings.Contains(sent[0], "📄 svc/handler.go") {
-				t.Fatalf("output = %q, want relative title", sent[0])
-			}
-			if !strings.Contains(sent[0], "package svc") {
-				t.Fatalf("output = %q, want file content", sent[0])
->>>>>>> feat(show): add reference-aware file and directory viewing
 			}
 			return
 		}
