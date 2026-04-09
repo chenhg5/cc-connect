@@ -426,7 +426,7 @@ cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/ch
 
 ### 感谢捐赠者！🎉
 
-感谢每一位支持这个项目的朋友。如果你已经捐赠并希望在这里被认可，请[提交 Issue](https://github.com/chenhg5/cc-connect/issues/new?title=捐赠者认可&body=我捐赠了cc-connect！我的GitHub用户名是：) 并附上你的 GitHub 用户名。
+感谢每一位支持这个项目的朋友。捐赠时留言你的 GitHub 用户名，我们会在这里展示！
 
 <!-- 捐赠者名单 -->
 <!--

@@ -426,7 +426,7 @@ If cc-connect has been helpful to you, consider buying us a coffee! Your support
 
 ### Thank You, Donors! 🎉
 
-We're grateful to everyone who has supported this project. If you've donated and would like to be recognized here, please [open an issue](https://github.com/chenhg5/cc-connect/issues/new?title=Donor+Recognition&body=I+donated+to+cc-connect!+My+GitHub+username+is:+) with your GitHub username.
+We're grateful to everyone who has supported this project. Leave your GitHub username in the donation message if you'd like to be recognized here!
 
 <!-- Donors will be listed below -->
 <!--
