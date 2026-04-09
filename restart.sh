@@ -51,8 +51,10 @@ if [[ "${1:-}" != "--deploy" ]]; then
     log "Scheduling detached restart via systemd-run..."
     # Sleep 2s to let the calling Claude session finish sending its response,
     # then restart the service. Runs as a transient systemd unit so it survives
-    # cc-connect dying.
-    systemd-run --user --unit=cc-connect-restart --description="cc-connect restart" \
+    # cc-connect dying. --collect makes systemd garbage-collect the transient
+    # unit after it exits so a lingering failed/completed unit never blocks
+    # the next invocation with "Unit already loaded or has a fragment file".
+    systemd-run --user --collect --unit=cc-connect-restart --description="cc-connect restart" \
         bash -c "sleep 2 && systemctl --user reset-failed $SERVICE 2>/dev/null || true; systemctl --user restart $SERVICE"
     log "Restart scheduled. Service will bounce in ~2 seconds."
     log "Check status: systemctl --user status $SERVICE"
@@ -131,7 +133,13 @@ log "Clearing any failed state and starting service..."
 systemctl --user reset-failed "$SERVICE" 2>/dev/null || true
 systemctl --user start "$SERVICE"
 
-log "Health check: waiting ${HEALTH_GRACE}s..."
+# Braces deliberately omitted on $HEALTH_GRACE below. systemd-run
+# substitutes ${VAR}-with-braces in ExecStart lines from the unit's own
+# environment, and since HEALTH_GRACE is only set inside the bash -c
+# script — not in systemd's env — the braced form would render to empty
+# before bash ever sees it. The non-braced form is passed through verbatim
+# and expanded by bash at runtime.
+log "Health check: waiting $HEALTH_GRACE seconds..."
 sleep "$HEALTH_GRACE"
 
 if systemctl --user is-active "$SERVICE" &>/dev/null; then
@@ -164,7 +172,13 @@ DEPLOY_EOF
 )
 
 log "Scheduling detached deploy via systemd-run..."
-systemd-run --user --unit=cc-connect-deploy --description="cc-connect deploy" \
+# --collect is critical: without it, a failed or completed cc-connect-deploy
+# transient unit lingers in systemd's view until an explicit reset-failed,
+# and the next ./restart.sh --deploy invocation then fails with "Unit
+# cc-connect-deploy.service was already loaded or has a fragment file".
+# --collect makes systemd drop the unit after it exits, regardless of
+# exit status.
+systemd-run --user --collect --unit=cc-connect-deploy --description="cc-connect deploy" \
     bash -c "$deploy_script"
 log "Deploy scheduled. It will run in ~2 seconds."
 log "Monitor: journalctl --user -u cc-connect-deploy -f"
