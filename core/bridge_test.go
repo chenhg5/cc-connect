@@ -234,7 +234,7 @@ func TestBridge_MessageRouting(t *testing.T) {
 func TestBridge_MessageReplyCtxCarriesProgressHints(t *testing.T) {
 	bs, wsURL := startTestBridge(t, "")
 
-	var got *bridgeReplyCtx
+	gotCh := make(chan *bridgeReplyCtx, 1)
 
 	bp := bs.NewPlatform("test-proj")
 	e := NewEngine("test-proj", &stubAgent{}, []Platform{bp}, "", LangEnglish)
@@ -244,7 +244,7 @@ func TestBridge_MessageReplyCtxCarriesProgressHints(t *testing.T) {
 		if !ok {
 			t.Fatalf("reply ctx type = %T, want *bridgeReplyCtx", msg.ReplyCtx)
 		}
-		got = rc
+		gotCh <- rc
 	}
 
 	conn := dialWS(t, wsURL, nil)
@@ -261,9 +261,10 @@ func TestBridge_MessageReplyCtxCarriesProgressHints(t *testing.T) {
 		"reply_ctx":   "ctx-1",
 	})
 
-	time.Sleep(100 * time.Millisecond)
-
-	if got == nil {
+	var got *bridgeReplyCtx
+	select {
+	case got = <-gotCh:
+	case <-time.After(5 * time.Second):
 		t.Fatal("expected reply ctx to be captured")
 	}
 	if got.progressStyleHint() != progressStyleCard {
