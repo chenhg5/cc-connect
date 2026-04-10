@@ -112,6 +112,13 @@ func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode strin
 	}
 	cmd.Env = env
 
+	// Send SIGTERM first to allow Claude Code to run cleanup hooks (SessionEnd, PreCompact).
+	// After WaitDelay, escalate to the default SIGKILL behavior.
+	cmd.Cancel = func() error {
+		return cmd.Process.Signal(syscall.SIGTERM)
+	}
+	cmd.WaitDelay = 8 * time.Second
+
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		cancel()
