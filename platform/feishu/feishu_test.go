@@ -1,6 +1,7 @@
 package feishu
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -319,6 +320,53 @@ func TestExtractPostPlainText_CodeBlock(t *testing.T) {
 }
 
 func strPtr(s string) *string { return &s }
+
+func TestExtractInteractiveCardText_LegacyFormat(t *testing.T) {
+	cardJSON := `{"config":{"wide_screen_mode":true},"header":{"title":{"tag":"plain_text","content":"Daily Report"},"template":"blue"},"elements":[{"tag":"div","text":{"tag":"lark_md","content":"**Tasks completed:** 5\n**Pending:** 2"}},{"tag":"action","actions":[{"tag":"button","text":{"tag":"plain_text","content":"View Details"},"type":"primary"}]}]}`
+	got := extractInteractiveCardText(cardJSON)
+	if got == "" || got == "[interactive card]" {
+		t.Fatalf("expected non-empty card text, got %q", got)
+	}
+	// Legacy format extracts header title; div/lark_md content is not extracted
+	// by the legacy path (only tag:"text" elements are handled).
+	if !strings.Contains(got, "Daily Report") {
+		t.Errorf("expected 'Daily Report' in output, got %q", got)
+	}
+}
+
+func TestExtractInteractiveCardText_Schema20(t *testing.T) {
+	cardJSON := `{"schema":"2.0","config":{"wide_screen_mode":true},"body":{"tag":"body","elements":[{"tag":"markdown","content":"**Hello World**\nThis is a test card."}]}}`
+	got := extractInteractiveCardText(cardJSON)
+	if got == "" || got == "[interactive card]" {
+		t.Fatalf("expected non-empty card text, got %q", got)
+	}
+	if !strings.Contains(got, "Hello World") {
+		t.Errorf("expected 'Hello World' in output, got %q", got)
+	}
+}
+
+func TestExtractInteractiveCardText_EmptyCard(t *testing.T) {
+	cardJSON := `{"config":{"wide_screen_mode":true}}`
+	got := extractInteractiveCardText(cardJSON)
+	if got != "[interactive card]" {
+		t.Errorf("expected '[interactive card]' for empty card, got %q", got)
+	}
+}
+
+func TestExtractInteractiveCardText_RawCardContent(t *testing.T) {
+	// When fetched via raw_card_content API, card is wrapped in json_card
+	inner := `{"schema":"2.0","config":{"wide_screen_mode":true},"body":{"tag":"body","elements":[{"tag":"markdown","content":"Server CPU high"}]}}`
+	wrapped := `{"json_card":` + jsonEscape(inner) + `}`
+	got := extractInteractiveCardText(wrapped)
+	if !strings.Contains(got, "CPU") {
+		t.Errorf("expected 'CPU' in output, got %q", got)
+	}
+}
+
+func jsonEscape(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
 
 func TestStripMentions(t *testing.T) {
 	tests := []struct {

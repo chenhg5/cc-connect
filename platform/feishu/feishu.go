@@ -876,6 +876,24 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			ReplyCtx: rctx,
 		})
 
+	case "interactive":
+		cardText := extractInteractiveCardText(content)
+		if cardText == "" || cardText == "[interactive card]" {
+			slog.Debug(p.tag()+": interactive card produced no content", "message_id", messageID)
+			return
+		}
+		text := stripMentions(cardText, mentions, p.botOpenID)
+		if text == "" {
+			slog.Debug(p.tag()+": interactive card text empty after mention stripping", "message_id", messageID)
+			return
+		}
+		p.handler(p.dispatchPlatform(), &core.Message{
+			SessionKey: sessionKey, Platform: p.platformName,
+			MessageID: messageID,
+			UserID:    userID, UserName: userName, ChatName: chatName,
+			Content: quotedPrefix + text, ReplyCtx: rctx,
+		})
+
 	case "merge_forward":
 		text, images, files := p.parseMergeForward(messageID)
 		if text == "" && len(images) == 0 && len(files) == 0 {
