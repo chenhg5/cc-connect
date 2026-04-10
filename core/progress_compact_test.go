@@ -108,7 +108,7 @@ func TestCompactProgressWriter_UsesReplyContextHints(t *testing.T) {
 		payload: true,
 	}
 
-	w := newCompactProgressWriter(context.Background(), p, replyCtx, "codex", LangEnglish)
+	w := newCompactProgressWriter(context.Background(), p, replyCtx, "codex", LangEnglish, nil)
 	if !w.enabled {
 		t.Fatal("progress writer should be enabled")
 	}
@@ -187,5 +187,69 @@ func TestParseProgressCardPayloadRejectsInvalid(t *testing.T) {
 	}
 	if _, ok := ParseProgressCardPayload(ProgressCardPayloadPrefix + `{"entries":[]}`); ok {
 		t.Fatal("expected parse failure for empty entries")
+	}
+}
+
+func TestCompactProgressWriter_AppliesTransformToCardPayloadEntries(t *testing.T) {
+	p := &stubCompactProgressPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		style:              "card",
+		supportPayload:     true,
+	}
+	w := newCompactProgressWriter(context.Background(), p, "ctx", "codex", LangEnglish, func(s string) string {
+		return strings.ReplaceAll(s, "/root/code/demo/src/app.ts:42", "📄 `src/app.ts:42`")
+	})
+
+	if ok := w.AppendStructured(ProgressCardEntry{
+		Kind: ProgressEntryThinking,
+		Text: "Inspect /root/code/demo/src/app.ts:42",
+	}, "Inspect /root/code/demo/src/app.ts:42"); !ok {
+		t.Fatal("AppendStructured() = false, want true")
+	}
+
+	starts := p.getPreviewStarts()
+	if len(starts) != 1 {
+		t.Fatalf("preview starts = %d, want 1", len(starts))
+	}
+	payload, ok := ParseProgressCardPayload(starts[0])
+	if !ok {
+		t.Fatalf("ParseProgressCardPayload(%q) failed", starts[0])
+	}
+	if len(payload.Items) != 1 {
+		t.Fatalf("payload items = %d, want 1", len(payload.Items))
+	}
+	if got := payload.Items[0].Text; got != "Inspect 📄 `src/app.ts:42`" {
+		t.Fatalf("payload item text = %q, want transformed text", got)
+	}
+}
+
+func TestCompactProgressWriter_DoesNotTransformToolResults(t *testing.T) {
+	p := &stubCompactProgressPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		style:              "card",
+		supportPayload:     true,
+	}
+	w := newCompactProgressWriter(context.Background(), p, "ctx", "codex", LangEnglish, func(s string) string {
+		return strings.ReplaceAll(s, "/root/code/demo/src/app.ts:42", "📄 `src/app.ts:42`")
+	})
+
+	raw := "/root/code/demo/src/app.ts:42"
+	if ok := w.AppendStructured(ProgressCardEntry{
+		Kind: ProgressEntryToolResult,
+		Text: raw,
+	}, raw); !ok {
+		t.Fatal("AppendStructured() = false, want true")
+	}
+
+	starts := p.getPreviewStarts()
+	if len(starts) != 1 {
+		t.Fatalf("preview starts = %d, want 1", len(starts))
+	}
+	payload, ok := ParseProgressCardPayload(starts[0])
+	if !ok {
+		t.Fatalf("ParseProgressCardPayload(%q) failed", starts[0])
+	}
+	if got := payload.Items[0].Text; got != raw {
+		t.Fatalf("tool result text = %q, want raw %q", got, raw)
 	}
 }

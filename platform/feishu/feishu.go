@@ -2513,11 +2513,86 @@ func isBashToolName(toolName string) bool {
 	}
 }
 
+func isTodoWriteToolName(toolName string) bool {
+	return strings.EqualFold(strings.TrimSpace(toolName), "todowrite")
+}
+
+// todoItem represents a single todo item from TodoWrite tool input.
+type todoItem struct {
+	ActiveForm string `json:"activeForm"`
+	Content    string `json:"content"`
+	Status     string `json:"status"`
+}
+
+// todoWriteInput represents the TodoWrite tool input structure.
+type todoWriteInput struct {
+	Todos []todoItem `json:"todos"`
+}
+
+// formatTodoWriteInput formats TodoWrite JSON input into a readable markdown list.
+// Returns empty string if parsing fails or input is invalid.
+func formatTodoWriteInput(text string, lang string) string {
+	var input todoWriteInput
+	if err := json.Unmarshal([]byte(text), &input); err != nil {
+		return "" // Fall back to default formatting
+	}
+	if len(input.Todos) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	for _, todo := range input.Todos {
+		var icon string
+		switch strings.ToLower(strings.TrimSpace(todo.Status)) {
+		case "completed":
+			icon = "✅"
+		case "in_progress":
+			icon = "🔄"
+		case "pending":
+			icon = "⏳"
+		default:
+			icon = "•"
+		}
+
+		content := strings.TrimSpace(todo.Content)
+		if content == "" {
+			continue
+		}
+
+		// Escape markdown special characters
+		content = strings.ReplaceAll(content, "`", "'")
+
+		sb.WriteString(icon)
+		sb.WriteString(" ")
+		sb.WriteString(content)
+
+		activeForm := strings.TrimSpace(todo.ActiveForm)
+		if activeForm != "" && activeForm != content {
+			sb.WriteString(" _(")
+			sb.WriteString(strings.ReplaceAll(activeForm, "`", "'"))
+			sb.WriteString(")_")
+		}
+		sb.WriteString("\n")
+	}
+
+	return strings.TrimSuffix(sb.String(), "\n")
+}
+
 func formatProgressToolInput(toolName, text string) string {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return ""
 	}
+
+	// Special handling for TodoWrite tool - format JSON as readable list
+	if isTodoWriteToolName(toolName) {
+		if formatted := formatTodoWriteInput(text, ""); formatted != "" {
+			return formatted
+		}
+		// JSON parsing failed or empty todos - show raw input as text block
+		return fmt.Sprintf("```text\n%s\n```", text)
+	}
+
 	text = preprocessFeishuMarkdown(sanitizeMarkdownURLs(text))
 	if strings.Contains(text, "```") {
 		return text

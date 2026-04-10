@@ -9,7 +9,8 @@ import (
 )
 
 type projectStateData struct {
-	WorkDirOverride string `json:"work_dir_override,omitempty"`
+	WorkDirOverride       string            `json:"work_dir_override,omitempty"`
+	WorkspaceDirOverrides map[string]string `json:"workspace_dir_overrides,omitempty"`
 }
 
 // ProjectStateStore persists lightweight runtime state for one project.
@@ -37,6 +38,36 @@ func (ps *ProjectStateStore) SetWorkDirOverride(dir string) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 	ps.state.WorkDirOverride = dir
+}
+
+func (ps *ProjectStateStore) WorkspaceDirOverride(workspace string) string {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	if ps.state.WorkspaceDirOverrides == nil {
+		return ""
+	}
+	return ps.state.WorkspaceDirOverrides[workspace]
+}
+
+func (ps *ProjectStateStore) SetWorkspaceDirOverride(workspace, dir string) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.state.WorkspaceDirOverrides == nil {
+		ps.state.WorkspaceDirOverrides = make(map[string]string)
+	}
+	ps.state.WorkspaceDirOverrides[workspace] = dir
+}
+
+func (ps *ProjectStateStore) ClearWorkspaceDirOverride(workspace string) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.state.WorkspaceDirOverrides == nil {
+		return
+	}
+	delete(ps.state.WorkspaceDirOverrides, workspace)
+	if len(ps.state.WorkspaceDirOverrides) == 0 {
+		ps.state.WorkspaceDirOverrides = nil
+	}
 }
 
 func (ps *ProjectStateStore) ClearWorkDirOverride() {

@@ -311,7 +311,64 @@ func TestBridge_ReplyRouting(t *testing.T) {
 	}
 }
 
-func TestBridge_ReconstructReplyCtxUsesAdapterProgressHints(t *testing.T) {
+func TestBridge_ReconstructReplyCtx_RequiresCapability(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+	bp := bs.NewPlatform("advisor-gemini")
+
+	conn := dialWS(t, wsURL, nil)
+	register(t, conn, "bridge", []string{"text"})
+
+	_, err := bp.ReconstructReplyCtx("bridge:1491487450722341088:relay")
+	if err == nil || !strings.Contains(err.Error(), "does not support reconstruct_reply") {
+		t.Fatalf("ReconstructReplyCtx() error = %v, want reconstruct_reply capability error", err)
+	}
+}
+
+func TestBridge_ReconstructReplyCtx_UsesStructuredPayload(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+	bp := bs.NewPlatform("advisor-gemini")
+
+	conn := dialWS(t, wsURL, nil)
+	register(t, conn, "bridge", []string{"text", "reconstruct_reply"})
+
+	replyCtx, err := bp.ReconstructReplyCtx("bridge:1491487450722341088:relay")
+	if err != nil {
+		t.Fatalf("ReconstructReplyCtx() error = %v", err)
+	}
+
+	rc, ok := replyCtx.(*bridgeReplyCtx)
+	if !ok {
+		t.Fatalf("reply ctx type = %T, want *bridgeReplyCtx", replyCtx)
+	}
+	if rc.Platform != "bridge" {
+		t.Fatalf("Platform = %q, want bridge", rc.Platform)
+	}
+	if rc.SessionKey != "bridge:1491487450722341088:relay" {
+		t.Fatalf("SessionKey = %q, want relay session key", rc.SessionKey)
+	}
+
+	var payload bridgeReconstructReplyCtxPayload
+	if err := json.Unmarshal([]byte(rc.ReplyCtx), &payload); err != nil {
+		t.Fatalf("unmarshal reply_ctx: %v", err)
+	}
+	if payload.Kind != bridgeReconstructReplyCtxKind {
+		t.Fatalf("kind = %q, want %q", payload.Kind, bridgeReconstructReplyCtxKind)
+	}
+	if payload.Version != 1 {
+		t.Fatalf("version = %d, want 1", payload.Version)
+	}
+	if payload.SenderProject != "advisor-gemini" {
+		t.Fatalf("sender_project = %q, want advisor-gemini", payload.SenderProject)
+	}
+	if payload.TransportChatID != "1491487450722341088" {
+		t.Fatalf("transport_chat_id = %q, want 1491487450722341088", payload.TransportChatID)
+	}
+	if payload.TransportSessionKey != "bridge:1491487450722341088:relay" {
+		t.Fatalf("transport_session_key = %q, want relay session key", payload.TransportSessionKey)
+	}
+}
+
+func TestBridge_ReconstructReplyCtx_UsesAdapterProgressHints(t *testing.T) {
 	bs, wsURL := startTestBridge(t, "")
 	bp := bs.NewPlatform("test-proj")
 

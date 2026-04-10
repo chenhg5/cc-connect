@@ -6,9 +6,11 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -107,18 +109,51 @@ func (p *Platform) uploadToWeixinCDN(ctx context.Context, to string, plaintext [
 }
 
 func (p *Platform) sendSingleItem(ctx context.Context, rc *replyContext, item messageItem) error {
-	msg := sendMessageReq{
-		Msg: weixinOutboundMsg{
-			FromUserID:   "",
-			ToUserID:     rc.peerUserID,
-			ClientID:     "cc-" + randomHex(8),
-			MessageType:  messageTypeBot,
-			MessageState: messageStateFinish,
-			ItemList:     []messageItem{item},
-			ContextToken: rc.contextToken,
-		},
+	return p.sendSingleItemWithRetry(ctx, rc, item)
+}
+
+// sendSingleItemWithRetry sends a media item with retry mechanism for ret=-2 errors.
+func (p *Platform) sendSingleItemWithRetry(ctx context.Context, rc *replyContext, item messageItem) error {
+	var lastErr error
+	for attempt := 0; attempt < weixinSendMaxRetries; attempt++ {
+		msg := sendMessageReq{
+			Msg: weixinOutboundMsg{
+				FromUserID:   "",
+				ToUserID:     rc.peerUserID,
+				ClientID:     "cc-" + randomHex(8),
+				MessageType:  messageTypeBot,
+				MessageState: messageStateFinish,
+				ItemList:     []messageItem{item},
+				ContextToken: rc.contextToken,
+			},
+		}
+		err := p.api.sendMessage(ctx, &msg)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		// Check if error is ret=-2 (API declined) - retry with fresh token
+		if strings.Contains(err.Error(), "ret=-2") {
+			slog.Warn("weixin: sendMessage ret=-2 for media, retrying",
+				"attempt", attempt+1, "peer", rc.peerUserID)
+			// Add delay before retry
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(weixinSendRetryDelay):
+			}
+			// Refresh context_token from stored tokens
+			freshToken := p.getContextToken(rc.peerUserID)
+			if freshToken != "" && freshToken != rc.contextToken {
+				rc.contextToken = freshToken
+				slog.Debug("weixin: using refreshed context_token for media retry", "peer", rc.peerUserID)
+			}
+			continue
+		}
+		// For other errors, don't retry
+		return err
 	}
-	return p.api.sendMessage(ctx, &msg)
+	return lastErr
 }
 
 // SendImage implements core.ImageSender.

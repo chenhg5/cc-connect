@@ -475,6 +475,18 @@ func (a *stubWorkDirAgent) GetWorkDir() string {
 	return a.workDir
 }
 
+type namedStubWorkDirAgent struct {
+	stubWorkDirAgent
+	name string
+}
+
+func (a *namedStubWorkDirAgent) Name() string {
+	if a.name == "" {
+		return "named-stub-workdir"
+	}
+	return a.name
+}
+
 type stubListAgent struct {
 	stubAgent
 	sessions []AgentSessionInfo
@@ -1057,6 +1069,87 @@ func TestProcessInteractiveEvents_CardProgressUsesCardTemplate(t *testing.T) {
 	}
 	if !strings.Contains(edits[0], "echo hi") {
 		t.Fatalf("updated preview should contain tool command, got %q", edits[0])
+	}
+}
+
+func TestProcessInteractiveEvents_FinalReplyUsesWorkspaceForReferenceRendering(t *testing.T) {
+	p := &stubPlatformEngine{n: "feishu"}
+	a := &namedStubModelModeAgent{name: "codex"}
+	e := NewEngine("test", a, []Platform{p}, "", LangEnglish)
+	e.SetReferenceConfig(ReferenceRenderCfg{
+		NormalizeAgents: []string{"codex"},
+		RenderPlatforms: []string{"feishu"},
+		DisplayPath:     "relative",
+		MarkerStyle:     "emoji",
+		EnclosureStyle:  "code",
+	})
+
+	sessionKey := "feishu:user-relative"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-relative")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-relative",
+		workspaceDir: "/root/code",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{
+		Type:    EventResult,
+		Content: "/root/code/demo-repo/src/services/user_profile_service.ts:42",
+		Done:    true,
+	}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-relative", time.Now(), nil, nil, state.replyCtx)
+
+	sent := p.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("sent = %#v, want one final reply", sent)
+	}
+	if got := sent[0]; got != "📄 `demo-repo/src/services/user_profile_service.ts:42`" {
+		t.Fatalf("final reply = %q, want workspace-relative rendered reference", got)
+	}
+}
+
+func TestProcessInteractiveEvents_FinalReplyRemainsRawWhenReferencesDisabled(t *testing.T) {
+	p := &stubPlatformEngine{n: "feishu"}
+	a := &namedStubModelModeAgent{name: "codex"}
+	e := NewEngine("test", a, []Platform{p}, "", LangEnglish)
+	e.SetReferenceConfig(ReferenceRenderCfg{
+		NormalizeAgents: []string{},
+		RenderPlatforms: []string{"feishu"},
+		DisplayPath:     "relative",
+		MarkerStyle:     "emoji",
+		EnclosureStyle:  "code",
+	})
+
+	sessionKey := "feishu:user-relative-raw"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-relative-raw")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-relative-raw",
+		workspaceDir: "/root/code/demo",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	raw := "Check [/root/code/demo/ui/recovery_contact_form.tsx](/root/code/demo/ui/recovery_contact_form.tsx) and /root/code/demo/ui/recovery_contact_form.tsx:11"
+	agentSession.events <- Event{
+		Type:    EventResult,
+		Content: raw,
+		Done:    true,
+	}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-relative-raw", time.Now(), nil, nil, state.replyCtx)
+
+	sent := p.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("sent = %#v, want one final reply", sent)
+	}
+	if got := sent[0]; got != raw {
+		t.Fatalf("final reply = %q, want raw unchanged content %q", got, raw)
 	}
 }
 
@@ -2179,6 +2272,61 @@ func TestReplyWithCard_UsesCardSenderWhenSupported(t *testing.T) {
 	}
 }
 
+func TestReply_DoesNotTransformLocalReferencesWhenEnabled(t *testing.T) {
+	p := &stubPlatformEngine{n: "feishu"}
+	a := &namedStubModelModeAgent{name: "codex"}
+	e := NewEngine("test", a, []Platform{p}, "", LangEnglish)
+	e.SetBaseWorkDir("/root/code/demo")
+	e.SetReferenceConfig(ReferenceRenderCfg{
+		NormalizeAgents: []string{"codex"},
+		RenderPlatforms: []string{"feishu"},
+		DisplayPath:     "relative",
+		MarkerStyle:     "emoji",
+		EnclosureStyle:  "code",
+	})
+
+	e.reply(p, "ctx", "See /root/code/demo/src/app.ts:42")
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if got := p.sent[0]; got != "See /root/code/demo/src/app.ts:42" {
+		t.Fatalf("reply content = %q, want raw path", got)
+	}
+}
+
+func TestReplyWithCard_DoesNotTransformMarkdownOrFallback(t *testing.T) {
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	a := &namedStubModelModeAgent{name: "codex"}
+	e := NewEngine("test", a, []Platform{p}, "", LangEnglish)
+	e.SetBaseWorkDir("/root/code/demo")
+	e.SetReferenceConfig(ReferenceRenderCfg{
+		NormalizeAgents: []string{"codex"},
+		RenderPlatforms: []string{"feishu"},
+		DisplayPath:     "basename",
+		MarkerStyle:     "ascii",
+		EnclosureStyle:  "code",
+	})
+	card := NewCard().Markdown("Inspect /root/code/demo/src/app.ts:42").Build()
+
+	e.replyWithCard(p, "ctx", card)
+
+	if len(p.repliedCards) != 1 {
+		t.Fatalf("replied cards = %d, want 1", len(p.repliedCards))
+	}
+	rendered := p.repliedCards[0]
+	md, ok := rendered.Elements[0].(CardMarkdown)
+	if !ok {
+		t.Fatalf("first card element = %T, want CardMarkdown", rendered.Elements[0])
+	}
+	if md.Content != "Inspect /root/code/demo/src/app.ts:42" {
+		t.Fatalf("card markdown = %q, want raw reference", md.Content)
+	}
+	if got := rendered.RenderText(); !strings.Contains(got, "/root/code/demo/src/app.ts:42") {
+		t.Fatalf("fallback RenderText() = %q, want raw reference", got)
+	}
+}
+
 func TestCmdHelp_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangChinese)
@@ -3049,6 +3197,72 @@ func TestGetOrCreateWorkspaceAgent_InheritsActiveProvider(t *testing.T) {
 	}
 }
 
+func TestWorkspaceContext_PerChannelIndependence(t *testing.T) {
+	agentName := "test-workspace-context-dir-override"
+	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) {
+		agent := &namedStubWorkDirAgent{name: agentName}
+		if workDir, ok := opts["work_dir"].(string); ok {
+			agent.workDir = workDir
+		}
+		return agent, nil
+	})
+
+	workspace := normalizeWorkspacePath(t.TempDir())
+	dirA := filepath.Join(workspace, "channelA")
+	dirB := filepath.Join(workspace, "channelB")
+	if err := os.MkdirAll(dirA, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.MkdirAll(dirB, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	store := NewProjectStateStore(filepath.Join(t.TempDir(), "projects", "test.state.json"))
+	keyA := workspace + ":feishu:oc_aaa:ou_111"
+	keyB := workspace + ":feishu:oc_bbb:ou_222"
+	store.SetWorkspaceDirOverride(keyA, dirA)
+	store.SetWorkspaceDirOverride(keyB, dirB)
+	store.Save()
+
+	e := NewEngine("test", &namedStubWorkDirAgent{name: agentName, stubWorkDirAgent: stubWorkDirAgent{workDir: workspace}}, []Platform{&stubPlatformEngine{n: "plain"}}, "", LangEnglish)
+	e.SetMultiWorkspace(workspace, filepath.Join(t.TempDir(), "bindings.json"))
+	e.SetProjectStateStore(store)
+
+	agentA, sessionsA, interactiveKeyA, effectiveDirA, err := e.workspaceContext(workspace, "feishu:oc_aaa:ou_111")
+	if err != nil {
+		t.Fatalf("workspaceContext A error: %v", err)
+	}
+	agentB, sessionsB, interactiveKeyB, effectiveDirB, err := e.workspaceContext(workspace, "feishu:oc_bbb:ou_222")
+	if err != nil {
+		t.Fatalf("workspaceContext B error: %v", err)
+	}
+
+	if interactiveKeyA != keyA {
+		t.Fatalf("interactiveKeyA = %q, want %q", interactiveKeyA, keyA)
+	}
+	if interactiveKeyB != keyB {
+		t.Fatalf("interactiveKeyB = %q, want %q", interactiveKeyB, keyB)
+	}
+	if effectiveDirA != dirA {
+		t.Fatalf("effectiveDirA = %q, want %q", effectiveDirA, dirA)
+	}
+	if effectiveDirB != dirB {
+		t.Fatalf("effectiveDirB = %q, want %q", effectiveDirB, dirB)
+	}
+	if agentA == agentB {
+		t.Fatal("workspaceContext returned same agent for different effective dirs")
+	}
+	if sessionsA == sessionsB {
+		t.Fatal("workspaceContext returned same session manager for different effective dirs")
+	}
+	if got := agentA.(interface{ GetWorkDir() string }).GetWorkDir(); got != dirA {
+		t.Fatalf("agentA workDir = %q, want %q", got, dirA)
+	}
+	if got := agentB.(interface{ GetWorkDir() string }).GetWorkDir(); got != dirB {
+		t.Fatalf("agentB workDir = %q, want %q", got, dirB)
+	}
+}
+
 func TestCmdDir_ShowsCurrentDirectory(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	agent := &stubWorkDirAgent{workDir: "/tmp/project-a"}
@@ -3166,6 +3380,74 @@ func TestCmdDir_PersistsAbsoluteOverride(t *testing.T) {
 	reloaded := NewProjectStateStore(statePath)
 	if got := reloaded.WorkDirOverride(); got != nextDir {
 		t.Fatalf("WorkDirOverride() = %q, want %q", got, nextDir)
+	}
+}
+
+func TestDirApply_MultiWorkspacePersistsWorkspaceSpecificOverride(t *testing.T) {
+	baseDir := t.TempDir()
+	workspace := normalizeWorkspacePath(t.TempDir())
+	nextDir := filepath.Join(workspace, "next")
+	if err := os.MkdirAll(nextDir, 0o755); err != nil {
+		t.Fatalf("mkdir next dir: %v", err)
+	}
+
+	statePath := filepath.Join(t.TempDir(), "projects", "test.state.json")
+	store := NewProjectStateStore(statePath)
+	agent := &stubWorkDirAgent{workDir: workspace}
+	e := NewEngine("test", agent, []Platform{&stubPlatformEngine{n: "plain"}}, "", LangEnglish)
+	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+	e.SetProjectStateStore(store)
+
+	sessions := NewSessionManager("")
+	interactiveKey := workspace + ":feishu:oc_xxx:ou_yyy"
+
+	errMsg, successMsg := e.dirApply(agent, sessions, interactiveKey, "feishu:oc_xxx:ou_yyy", []string{"next"})
+	if errMsg != "" {
+		t.Fatalf("dirApply errMsg = %q, want empty", errMsg)
+	}
+	if !strings.Contains(successMsg, nextDir) {
+		t.Fatalf("successMsg = %q, want path %q", successMsg, nextDir)
+	}
+
+	reloaded := NewProjectStateStore(statePath)
+	if got := reloaded.WorkspaceDirOverride(interactiveKey); got != nextDir {
+		t.Fatalf("WorkspaceDirOverride(%q) = %q, want %q", interactiveKey, got, nextDir)
+	}
+	if got := reloaded.WorkDirOverride(); got != "" {
+		t.Fatalf("WorkDirOverride() = %q, want empty in multi-workspace mode", got)
+	}
+}
+
+func TestDirApply_MultiWorkspaceResetClearsWorkspaceSpecificOverride(t *testing.T) {
+	baseDir := t.TempDir()
+	workspace := normalizeWorkspacePath(t.TempDir())
+	overrideDir := filepath.Join(workspace, "override")
+	if err := os.MkdirAll(overrideDir, 0o755); err != nil {
+		t.Fatalf("mkdir override dir: %v", err)
+	}
+
+	statePath := filepath.Join(t.TempDir(), "projects", "test.state.json")
+	store := NewProjectStateStore(statePath)
+	interactiveKey := workspace + ":feishu:oc_xxx:ou_yyy"
+	store.SetWorkspaceDirOverride(interactiveKey, overrideDir)
+	store.Save()
+
+	agent := &stubWorkDirAgent{workDir: overrideDir}
+	e := NewEngine("test", agent, []Platform{&stubPlatformEngine{n: "plain"}}, "", LangEnglish)
+	e.SetBaseWorkDir(baseDir)
+	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+	e.SetProjectStateStore(store)
+
+	sessions := NewSessionManager("")
+
+	errMsg, _ := e.dirApply(agent, sessions, interactiveKey, "feishu:oc_xxx:ou_yyy", []string{"reset"})
+	if errMsg != "" {
+		t.Fatalf("dirApply errMsg = %q, want empty", errMsg)
+	}
+
+	reloaded := NewProjectStateStore(statePath)
+	if got := reloaded.WorkspaceDirOverride(interactiveKey); got != "" {
+		t.Fatalf("WorkspaceDirOverride(%q) after reset = %q, want empty", interactiveKey, got)
 	}
 }
 
@@ -3497,6 +3779,34 @@ func TestCmdStatus_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	}
 	if strings.Contains(p.sent[0], "[← Back]") {
 		t.Fatalf("status text = %q, should not be card fallback text", p.sent[0])
+	}
+}
+
+func TestCmdQuiet_TogglesDisplay(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{ThinkingMessages: true, ToolMessages: true, ThinkingMaxLen: 300, ToolMaxLen: 500})
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	// First /quiet: both on → both off (quiet ON)
+	e.cmdQuiet(p, msg, nil)
+	if e.display.ThinkingMessages || e.display.ToolMessages {
+		t.Fatalf("after first /quiet: ThinkingMessages=%v, ToolMessages=%v, want both false",
+			e.display.ThinkingMessages, e.display.ToolMessages)
+	}
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "Quiet mode ON") {
+		t.Fatalf("sent = %q, want quiet ON message", p.sent)
+	}
+
+	// Second /quiet: both off → both on (quiet OFF)
+	p.sent = nil
+	e.cmdQuiet(p, msg, nil)
+	if !e.display.ThinkingMessages || !e.display.ToolMessages {
+		t.Fatalf("after second /quiet: ThinkingMessages=%v, ToolMessages=%v, want both true",
+			e.display.ThinkingMessages, e.display.ToolMessages)
+	}
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "Quiet mode OFF") {
+		t.Fatalf("sent = %q, want quiet OFF message", p.sent)
 	}
 }
 
@@ -6781,7 +7091,8 @@ func TestCmdShell_MultiWorkspaceIgnoresMissingSharedBinding(t *testing.T) {
 	for {
 		sent := p.getSent()
 		if len(sent) > 0 {
-			if !strings.Contains(sent[0], normalizeWorkspacePath(agent.workDir)) {
+			normalizedWorkDir := normalizeWorkspacePath(agent.workDir)
+			if !strings.Contains(sent[0], normalizedWorkDir) && !strings.Contains(sent[0], agent.workDir) {
 				t.Fatalf("expected shell output to fall back to agent work dir %q, got %q", agent.workDir, sent[0])
 			}
 			if strings.Contains(sent[0], missingDir) {
@@ -7024,6 +7335,136 @@ func TestCmdDiff_FileSenderPath(t *testing.T) {
 			t.Fatal("timed out waiting for diff response")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestCmdShow_EmptyReference_ShowsUsage(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetAdminFrom("admin")
+
+	msg := &Message{
+		SessionKey: "test:ch:admin",
+		Content:    "/show",
+		ReplyCtx:   "ctx",
+		UserID:     "admin",
+		Platform:   "test",
+	}
+	e.cmdShow(p, msg, nil)
+
+	sent := p.getSent()
+	if len(sent) != 1 || !strings.Contains(sent[0], "/show") {
+		t.Fatalf("sent = %v, want show usage", sent)
+	}
+}
+
+func TestCmdShow_MultiWorkspaceUsesBoundWorkDirForRelativeReference(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agentName := "test-show-workspace"
+	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) {
+		return &namedStubModelModeAgent{name: agentName}, nil
+	})
+	e := NewEngine("test", &namedStubModelModeAgent{name: agentName}, []Platform{p}, "", LangEnglish)
+	e.SetAdminFrom("admin")
+
+	baseDir := t.TempDir()
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	wsDir := filepath.Join(baseDir, "demo-repo")
+	if err := os.MkdirAll(filepath.Join(wsDir, "svc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wsDir, "svc", "handler.go"), []byte("package svc\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e.workspaceBindings.Bind(sharedWorkspaceBindingsKey, "ch1", "demo", normalizeWorkspacePath(wsDir))
+
+	msg := &Message{
+		SessionKey: "test:ch1:admin",
+		Content:    "/show svc/handler.go",
+		ReplyCtx:   "ctx",
+		UserID:     "admin",
+		Platform:   "test",
+	}
+	e.cmdShow(p, msg, []string{"svc/handler.go"})
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for {
+		sent := p.getSent()
+		if len(sent) > 0 {
+			if !strings.Contains(sent[0], "📄 svc/handler.go") {
+				t.Fatalf("output = %q, want relative title", sent[0])
+			}
+			if !strings.Contains(sent[0], "package svc") {
+				t.Fatalf("output = %q, want file content", sent[0])
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for /show response")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestHandleCommand_ShowRequiresAdmin(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetAdminFrom("admin")
+
+	msg := &Message{
+		SessionKey: "test:ch:user1",
+		Content:    "/show foo.txt",
+		ReplyCtx:   "ctx",
+		UserID:     "user1",
+		Platform:   "test",
+	}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	if len(sent) != 1 || !strings.Contains(strings.ToLower(sent[0]), "admin") {
+		t.Fatalf("sent = %v, want admin required message", sent)
+	}
+}
+
+func TestCmdShow_OutputRemainsRawWhenReferencesEnabled(t *testing.T) {
+	p := &stubPlatformEngine{n: "feishu"}
+	agent := &stubWorkDirAgent{workDir: t.TempDir()}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetAdminFrom("admin")
+	e.references = normalizeReferenceRenderCfg(ReferenceRenderCfg{
+		NormalizeAgents: []string{"all"},
+		RenderPlatforms: []string{"all"},
+		DisplayPath:     "relative",
+		MarkerStyle:     "emoji",
+		EnclosureStyle:  "code",
+	})
+
+	file := filepath.Join(agent.workDir, "svc", "handler.go")
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rawLine := "/root/code/demo-repo/ui/recovery_contact_form.tsx:11"
+	if err := os.WriteFile(file, []byte(rawLine+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	msg := &Message{
+		SessionKey: "test:ch:admin",
+		Content:    "/show svc/handler.go",
+		ReplyCtx:   "ctx",
+		UserID:     "admin",
+		Platform:   "feishu",
+	}
+	e.cmdShow(p, msg, []string{"svc/handler.go"})
+
+	sent := p.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("sent = %v, want one response", sent)
+	}
+	if !strings.Contains(sent[0], rawLine) {
+		t.Fatalf("output = %q, want raw code content preserved", sent[0])
 	}
 }
 
