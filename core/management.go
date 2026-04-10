@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -1551,14 +1552,29 @@ func (m *ManagementServer) handleCronByID(w http.ResponseWriter, r *http.Request
 		mgmtError(w, http.StatusServiceUnavailable, "cron scheduler not available")
 		return
 	}
-	id := strings.TrimPrefix(r.URL.Path, "/api/v1/cron/")
-	if id == "" {
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/cron/")
+	path = strings.Trim(path, "/")
+	if path == "" {
 		mgmtError(w, http.StatusBadRequest, "cron job id required")
 		return
+	}
+	parts := strings.Split(path, "/")
+	if len(parts) > 2 {
+		mgmtError(w, http.StatusNotFound, "unknown cron route")
+		return
+	}
+	id := parts[0]
+	action := ""
+	if len(parts) > 1 {
+		action = parts[1]
 	}
 
 	switch r.Method {
 	case http.MethodDelete:
+		if action != "" {
+			mgmtError(w, http.StatusNotFound, "unknown cron route")
+			return
+		}
 		if m.cronScheduler.RemoveJob(id) {
 			mgmtOK(w, "cron job deleted")
 		} else {
@@ -1566,6 +1582,10 @@ func (m *ManagementServer) handleCronByID(w http.ResponseWriter, r *http.Request
 		}
 
 	case http.MethodPatch:
+		if action != "" {
+			mgmtError(w, http.StatusNotFound, "unknown cron route")
+			return
+		}
 		var updates map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
 			mgmtError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -1584,8 +1604,26 @@ func (m *ManagementServer) handleCronByID(w http.ResponseWriter, r *http.Request
 		}
 		mgmtJSON(w, http.StatusOK, job)
 
+	case http.MethodPost:
+		if action != "run" {
+			mgmtError(w, http.StatusNotFound, "unknown cron route")
+			return
+		}
+		if err := m.cronScheduler.RunJobNow(id); err != nil {
+			if errors.Is(err, ErrCronJobNotFound) {
+				mgmtError(w, http.StatusNotFound, err.Error())
+				return
+			}
+			mgmtError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		mgmtJSON(w, http.StatusAccepted, map[string]string{
+			"id":     id,
+			"status": "triggered",
+		})
+
 	default:
-		mgmtError(w, http.StatusMethodNotAllowed, "DELETE or PATCH only")
+		mgmtError(w, http.StatusMethodNotAllowed, "DELETE, PATCH, or POST only")
 	}
 }
 

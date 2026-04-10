@@ -956,6 +956,22 @@ Deletes a cron job.
 }
 ```
 
+#### POST /api/v1/cron/{id}/run
+
+Triggers an existing cron job immediately. Disabled jobs can still be triggered manually.
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "id": "cron_xyz789",
+    "status": "triggered"
+  }
+}
+```
+
 ---
 
 ### 5.6 Heartbeat
