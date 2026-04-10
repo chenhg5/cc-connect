@@ -29,6 +29,16 @@ var (
 	buildTime = "unknown"
 )
 
+type initialModelRefreshStarter interface {
+	StartInitialModelRefresh()
+}
+
+type providerWiringResult struct {
+	explicitProviderRequested bool
+	activeProviderApplied     bool
+	canStartInitialRefresh    bool
+}
+
 func main() {
 	checkUpdateAsync()
 
@@ -96,6 +106,7 @@ func main() {
 
 	configFlag := flag.String("config", "", "path to config file (default: ./config.toml or ~/.cc-connect/config.toml)")
 	showVersion := flag.Bool("version", false, "print version and exit")
+	forceFlag := flag.Bool("force", false, "kill any existing instance with the same config before starting")
 	flag.Usage = printUsage
 	flag.Parse()
 
@@ -108,6 +119,22 @@ func main() {
 	core.CurrentVersion = version
 
 	configPath := resolveConfigPath(*configFlag)
+
+	// Handle --force: kill any existing instance before we try to acquire the lock
+	if *forceFlag {
+		if KillExistingInstance(configPath) {
+			slog.Info("killed existing instance via --force")
+		}
+	}
+
+	// Acquire instance lock to prevent duplicate processes
+	instanceLock, err := AcquireInstanceLock(configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Use --force to kill the existing instance.\n")
+		os.Exit(1)
+	}
+	slog.Info("acquired instance lock", "path", instanceLock.Path())
 
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		if err := bootstrapConfig(configPath); err != nil {
@@ -134,31 +161,13 @@ func main() {
 	effectiveWorkDirs := make([]string, 0, len(cfg.Projects))
 
 	for _, proj := range cfg.Projects {
-		agent, err := core.CreateAgent(proj.Agent.Type, proj.Agent.Options)
+		agent, err := core.CreateAgent(proj.Agent.Type, buildAgentOptions(cfg.DataDir, proj))
 		if err != nil {
 			slog.Error("failed to create agent", "project", proj.Name, "error", err)
 			os.Exit(1)
 		}
 
-		// Wire providers if the agent supports it
-		if ps, ok := agent.(core.ProviderSwitcher); ok && len(proj.Agent.Providers) > 0 {
-			providers := make([]core.ProviderConfig, len(proj.Agent.Providers))
-			for i, p := range proj.Agent.Providers {
-				providers[i] = core.ProviderConfig{
-					Name:     p.Name,
-					APIKey:   p.APIKey,
-					BaseURL:  p.BaseURL,
-					Model:    p.Model,
-					Models:   convertProviderModels(p.Models),
-					Thinking: p.Thinking,
-					Env:      p.Env,
-				}
-			}
-			ps.SetProviders(providers)
-			if active, _ := proj.Agent.Options["provider"].(string); active != "" {
-				ps.SetActiveProvider(active)
-			}
-		}
+		providerWiring := wireAgentProviders(agent, proj.Agent)
 
 		var platforms []core.Platform
 		for _, pc := range proj.Platforms {
@@ -179,6 +188,7 @@ func main() {
 		workDir, _ := proj.Agent.Options["work_dir"].(string)
 		projectState := core.NewProjectStateStore(projectStatePath(cfg.DataDir, proj.Name))
 		effectiveWorkDir := applyProjectStateOverride(proj.Name, agent, workDir, projectState)
+		startInitialRefreshIfReady(agent, providerWiring)
 		sessionFile := sessionStorePath(cfg.DataDir, proj.Name, effectiveWorkDir)
 
 		// Parse language setting
@@ -266,24 +276,25 @@ func main() {
 			engine.SetUserRoles(buildUserRoleManager(proj.Users))
 		}
 
-		// Wire display truncation settings
+		// Wire display truncation settings (includes legacy quiet → display mapping)
 		{
-			dcfg := core.DisplayCfg{
-				ThinkingMaxLen: 300,
-				ToolMaxLen:     500,
-				ToolMessages:   true,
-			}
-			if cfg.Display.ThinkingMaxLen != nil {
-				dcfg.ThinkingMaxLen = *cfg.Display.ThinkingMaxLen
-			}
-			if cfg.Display.ToolMaxLen != nil {
-				dcfg.ToolMaxLen = *cfg.Display.ToolMaxLen
-			}
-			if cfg.Display.ToolMessages != nil {
-				dcfg.ToolMessages = *cfg.Display.ToolMessages
-			}
-			engine.SetDisplayConfig(dcfg)
+			tm, tool, tmlen, toollen := config.EffectiveDisplay(cfg, &proj)
+			engine.SetDisplayConfig(core.DisplayCfg{
+				ThinkingMessages: tm,
+				ThinkingMaxLen:   tmlen,
+				ToolMaxLen:       toollen,
+				ToolMessages:     tool,
+			})
 		}
+
+		// Wire local reference normalization / rendering
+		engine.SetReferenceConfig(core.ReferenceRenderCfg{
+			NormalizeAgents: proj.References.NormalizeAgents,
+			RenderPlatforms: proj.References.RenderPlatforms,
+			DisplayPath:     proj.References.DisplayPath,
+			MarkerStyle:     proj.References.MarkerStyle,
+			EnclosureStyle:  proj.References.EnclosureStyle,
+		})
 
 		// Wire streaming preview
 		{
@@ -351,8 +362,8 @@ func main() {
 			}
 		}
 
-		engine.SetDisplaySaveFunc(func(thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
-			return config.SaveDisplayConfig(thinkingMaxLen, toolMaxLen, toolMessages)
+		engine.SetDisplaySaveFunc(func(thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
+			return config.SaveDisplayConfig(thinkingMessages, thinkingMaxLen, toolMaxLen, toolMessages)
 		})
 
 		// Wire idle timeout
@@ -363,13 +374,6 @@ func main() {
 			} else {
 				engine.SetEventIdleTimeout(time.Duration(mins) * time.Minute)
 			}
-		}
-
-		// Wire default quiet mode: project-level overrides global
-		if proj.Quiet != nil {
-			engine.SetDefaultQuiet(*proj.Quiet)
-		} else if cfg.Quiet != nil {
-			engine.SetDefaultQuiet(*cfg.Quiet)
 		}
 
 		// Wire auto-compress settings
@@ -419,6 +423,14 @@ func main() {
 					speechCfg.STT = core.NewQwenASR(apiKey, baseURL, model)
 				} else {
 					slog.Warn("speech: qwen provider enabled but api_key is empty")
+				}
+			case "gemini":
+				apiKey := cfg.Speech.Gemini.APIKey
+				model := cfg.Speech.Gemini.Model
+				if apiKey != "" {
+					speechCfg.STT = core.NewGeminiSTT(apiKey, model)
+				} else {
+					slog.Warn("speech: gemini provider enabled but api_key is empty")
 				}
 			default: // "openai" or unspecified
 				apiKey := cfg.Speech.OpenAI.APIKey
@@ -734,7 +746,6 @@ func main() {
 		mgmtSrv.SetRemoveProject(config.RemoveProject)
 		mgmtSrv.SetSaveProjectSettings(func(name string, u core.ProjectSettingsUpdate) error {
 			return config.SaveProjectSettings(name, config.ProjectSettingsUpdate{
-				Quiet:                u.Quiet,
 				Language:             u.Language,
 				AdminFrom:            u.AdminFrom,
 				DisabledCommands:     u.DisabledCommands,
@@ -752,9 +763,6 @@ func main() {
 			if v, ok := updates["language"].(string); ok {
 				u.Language = &v
 			}
-			if v, ok := updates["quiet"].(bool); ok {
-				u.Quiet = &v
-			}
 			if v, ok := updates["attachment_send"].(string); ok {
 				u.AttachmentSend = &v
 			}
@@ -765,9 +773,15 @@ func main() {
 				iv := int(v)
 				u.IdleTimeoutMins = &iv
 			}
+			if v, ok := updates["thinking_messages"].(bool); ok {
+				u.ThinkingMessages = &v
+			}
 			if v, ok := updates["thinking_max_len"].(float64); ok {
 				iv := int(v)
 				u.ThinkingMaxLen = &iv
+			}
+			if v, ok := updates["tool_messages"].(bool); ok {
+				u.ToolMessages = &v
 			}
 			if v, ok := updates["tool_max_len"].(float64); ok {
 				iv := int(v)
@@ -876,6 +890,7 @@ func main() {
 	if logCloser != nil {
 		logCloser.Close()
 	}
+	instanceLock.Release()
 
 	if restartReq != nil {
 		if err := core.SaveRestartNotify(cfg.DataDir, *restartReq); err != nil {
@@ -1068,6 +1083,7 @@ Usage:
 
 Flags:
   --config <path>    Path to config file (default: ./config.toml or ~/.cc-connect/config.toml)
+  --force            Kill any existing instance with the same config before starting
   --version          Print version and exit
   --help             Show this help message
 
@@ -1179,28 +1195,15 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		return nil, fmt.Errorf("project %q not found in config", projName)
 	}
 
-	// Reload display config
-	dcfg := core.DisplayCfg{ThinkingMaxLen: 300, ToolMaxLen: 500, ToolMessages: true}
-	if cfg.Display.ThinkingMaxLen != nil {
-		dcfg.ThinkingMaxLen = *cfg.Display.ThinkingMaxLen
-	}
-	if cfg.Display.ToolMaxLen != nil {
-		dcfg.ToolMaxLen = *cfg.Display.ToolMaxLen
-	}
-	if cfg.Display.ToolMessages != nil {
-		dcfg.ToolMessages = *cfg.Display.ToolMessages
-	}
-	engine.SetDisplayConfig(dcfg)
+	// Reload display config (includes legacy quiet → display mapping)
+	tm, tool, tmlen, toollen := config.EffectiveDisplay(cfg, proj)
+	engine.SetDisplayConfig(core.DisplayCfg{
+		ThinkingMessages: tm,
+		ThinkingMaxLen:   tmlen,
+		ToolMaxLen:       toollen,
+		ToolMessages:     tool,
+	})
 	result.DisplayUpdated = true
-
-	// Reload default quiet mode
-	if proj.Quiet != nil {
-		engine.SetDefaultQuiet(*proj.Quiet)
-	} else if cfg.Quiet != nil {
-		engine.SetDefaultQuiet(*cfg.Quiet)
-	} else {
-		engine.SetDefaultQuiet(false)
-	}
 
 	// Reload auto-compress settings
 	if proj.AutoCompress.Enabled != nil && *proj.AutoCompress.Enabled {
@@ -1326,6 +1329,55 @@ func convertProviderModels(ms []config.ProviderModelConfig) []core.ModelOption {
 		opts[i] = core.ModelOption{Name: m.Model, Alias: m.Alias}
 	}
 	return opts
+}
+
+func buildAgentOptions(dataDir string, proj config.ProjectConfig) map[string]any {
+	opts := make(map[string]any, len(proj.Agent.Options)+2)
+	for k, v := range proj.Agent.Options {
+		opts[k] = v
+	}
+	opts["cc_data_dir"] = dataDir
+	opts["cc_project"] = proj.Name
+	return opts
+}
+
+func wireAgentProviders(agent core.Agent, agentCfg config.AgentConfig) providerWiringResult {
+	result := providerWiringResult{canStartInitialRefresh: true}
+	active, _ := agentCfg.Options["provider"].(string)
+	result.explicitProviderRequested = active != ""
+
+	ps, ok := agent.(core.ProviderSwitcher)
+	if !ok || len(agentCfg.Providers) == 0 {
+		return result
+	}
+
+	providers := make([]core.ProviderConfig, len(agentCfg.Providers))
+	for i, p := range agentCfg.Providers {
+		providers[i] = core.ProviderConfig{
+			Name:     p.Name,
+			APIKey:   p.APIKey,
+			BaseURL:  p.BaseURL,
+			Model:    p.Model,
+			Models:   convertProviderModels(p.Models),
+			Thinking: p.Thinking,
+			Env:      p.Env,
+		}
+	}
+	ps.SetProviders(providers)
+	if result.explicitProviderRequested {
+		result.activeProviderApplied = ps.SetActiveProvider(active)
+		result.canStartInitialRefresh = result.activeProviderApplied
+	}
+	return result
+}
+
+func startInitialRefreshIfReady(agent core.Agent, result providerWiringResult) {
+	if !result.canStartInitialRefresh {
+		return
+	}
+	if starter, ok := agent.(initialModelRefreshStarter); ok {
+		starter.StartInitialModelRefresh()
+	}
 }
 
 func convertCoreModels(ms []core.ModelOption) []config.ProviderModelConfig {

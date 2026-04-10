@@ -110,10 +110,12 @@ type = "discord"
 [projects.platforms.options]
 token = "MTk4NjIyNDgzNDcOTY3NDUxMg.G8vKqh.xxx..."
 # thread_isolation = true  # Optional: isolate each agent session in its own Discord thread
+# progress_style = "legacy" # Optional: legacy | compact | card
 ```
 
 > cc-connect automatically configures the required Intents (MESSAGE_CONTENT, GUILD_MESSAGES, DIRECT_MESSAGES).
 > With `thread_isolation = true`, cc-connect creates or reuses a Discord thread for each session and routes follow-up messages by thread channel ID.
+> `progress_style = "compact"` merges thinking/tool updates into one editable message; `progress_style = "card"` renders a Discord-native embed progress card and still sends the final answer as a normal message.
 
 ---
 
@@ -207,6 +209,8 @@ cc-connect: 🤔 Thinking...
 cc-connect: 🔧 Tool: Bash(ls -la)
 cc-connect: Here's the project structure...
 ```
+
+If you enable `progress_style = "card"`, Discord shows one editable progress embed during the turn, then the final answer arrives as a separate normal message. This reduces channel noise compared with the legacy multi-message flow.
 
 ---
 

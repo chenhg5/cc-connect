@@ -18,7 +18,6 @@ import (
 // ProjectSettingsUpdate is passed to SetSaveProjectSettings to persist management API PATCH fields.
 // The implementation (typically in cmd/cc-connect) maps this to config.ProjectSettingsUpdate.
 type ProjectSettingsUpdate struct {
-	Quiet                *bool
 	Language             *string
 	AdminFrom            *string
 	DisabledCommands     []string
@@ -561,16 +560,11 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 			}
 		}
 
-		e.quietMu.RLock()
-		quiet := e.quiet
-		e.quietMu.RUnlock()
-
 		e.userRolesMu.RLock()
 		adminFrom := e.adminFrom
 		e.userRolesMu.RUnlock()
 
 		data["settings"] = map[string]any{
-			"quiet":             quiet,
 			"language":          string(e.i18n.CurrentLang()),
 			"admin_from":        adminFrom,
 			"disabled_commands": e.GetDisabledCommands(),
@@ -601,7 +595,6 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 
 	if r.Method == http.MethodPatch {
 		var body struct {
-			Quiet                *bool             `json:"quiet"`
 			Language             *string           `json:"language"`
 			AdminFrom            *string           `json:"admin_from"`
 			DisabledCommands     []string          `json:"disabled_commands"`
@@ -615,9 +608,6 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 			return
 		}
 
-		if body.Quiet != nil {
-			e.SetDefaultQuiet(*body.Quiet)
-		}
 		if body.Language != nil {
 			switch *body.Language {
 			case "en":
@@ -654,7 +644,6 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 
 		if m.saveProjectSettings != nil {
 			patch := ProjectSettingsUpdate{
-				Quiet:                body.Quiet,
 				Language:             body.Language,
 				AdminFrom:            body.AdminFrom,
 				DisabledCommands:     body.DisabledCommands,

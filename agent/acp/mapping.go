@@ -38,8 +38,8 @@ func mapSessionUpdate(sessionID string, params json.RawMessage) []core.Event {
 	case "plan":
 		return mapPlan(sid, wrap.Update)
 	case "user_message_chunk":
-		// History replay during session/load — show as text for IM.
-		return mapAgentMessageChunk(sid, wrap.Update)
+		// History replay during session/load — suppress to avoid echoing user input.
+		return nil
 	default:
 		// Optional vendor / future ACP shapes — best-effort text extraction.
 		return mapSessionUpdateFallback(sid, head.SessionUpdate, wrap.Update)
@@ -68,10 +68,11 @@ func mapAgentMessageChunk(sessionID string, update json.RawMessage) []core.Event
 
 func mapToolCall(sessionID string, update json.RawMessage) []core.Event {
 	var u struct {
-		ToolCallID string `json:"toolCallId"`
-		Title      string `json:"title"`
-		Kind       string `json:"kind"`
-		Status     string `json:"status"`
+		ToolCallID string          `json:"toolCallId"`
+		Title      string          `json:"title"`
+		Kind       string          `json:"kind"`
+		Status     string          `json:"status"`
+		RawInput   json.RawMessage `json:"rawInput"`
 	}
 	if err := json.Unmarshal(update, &u); err != nil {
 		return nil
@@ -83,10 +84,14 @@ func mapToolCall(sessionID string, update json.RawMessage) []core.Event {
 	if toolName == "" {
 		toolName = "tool"
 	}
+	toolInput := summarizeACPToolInput(u.Kind, u.RawInput)
+	if toolInput == "" {
+		toolInput = u.Title
+	}
 	return []core.Event{{
 		Type:      core.EventToolUse,
 		ToolName:  toolName,
-		ToolInput: u.Title,
+		ToolInput: toolInput,
 		SessionID: sessionID,
 	}}
 }

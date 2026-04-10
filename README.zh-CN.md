@@ -33,7 +33,6 @@
   <a href="./README.md">English</a> | <a href="./README.zh-CN.md">中文</a>
 </p>
 
----
 
 <p align="center">
   <b>在任何聊天工具里，远程操控你的本地 AI Agent。随时随地，随心所欲。</b>
@@ -49,7 +48,6 @@
   <img src="docs/images/connector.png" alt="CC-Connect 架构图" width="90%"/>
 </p>
 
----
 
 ## 🆕 最近更新（Beta）
 
@@ -61,7 +59,6 @@
 - **定时任务增强** — 可选 **每次新会话**执行、**单任务超时**，减少跑飞任务拖死机器人。
 - **平台体验** — 例如 **Discord** 支持 `@everyone` / `@here`，**Telegram** 支持语音类回复，**飞书** 优化回复原消息与异步分发等。
 
----
 
 ## 🧩 平台能力一览
 
@@ -93,7 +90,6 @@
 > **语音行：** 多数平台要在 `config.toml` 里配置 `[speech]` / TTS 等，表中为经验性归纳。  
 > 分平台接入步骤见下文 [平台接入指南](#-平台接入指南)。
 
----
 
 ## ✨ 为什么选择 cc-connect？
 
@@ -126,7 +122,6 @@
 ### 🌍 多语言界面
 **5 种语言** — 原生支持英语、中文（简体/繁体）、日语和西班牙语。内置 i18n 让每个人都能得心应手。
 
----
 
 <p align="center">
   <img src="docs/images/screenshot/cc-connect-lark.JPG" alt="飞书" width="32%" />
@@ -137,7 +132,6 @@
   <em>左：飞书 &nbsp;|&nbsp; Telegram &nbsp;|&nbsp; 右：微信</em>
 </p>
 
----
 
 ## 🚀 快速开始
 
@@ -149,7 +143,6 @@
 请参考 https://raw.githubusercontent.com/chenhg5/cc-connect/refs/heads/main/INSTALL.md 帮我安装和配置 cc-connect
 ```
 
----
 
 ### 📦 手动安装
 
@@ -185,7 +178,6 @@ cd cc-connect
 make build
 ```
 
----
 
 ### ⚙️ 配置
 
@@ -198,7 +190,6 @@ vim ~/.cc-connect/config.toml
 在项目配置里设置 `admin_from = "alice,bob"` 后，只有这些用户 ID 才能执行 `/dir`、`/shell` 等特权命令。
 执行 `/dir reset` 时，cc-connect 会恢复配置中的 `work_dir`，并清除保存在 `data_dir/projects/<project>.state.json` 里的目录覆盖状态。
 
----
 
 ### ▶️ 运行
 
@@ -206,7 +197,6 @@ vim ~/.cc-connect/config.toml
 ./cc-connect
 ```
 
----
 
 ### 🔄 升级
 
@@ -219,7 +209,6 @@ cc-connect update           # 稳定版
 cc-connect update --pre     # Beta 版（含 pre-release）
 ```
 
----
 
 ## 📊 支持状态
 
@@ -245,7 +234,6 @@ cc-connect update --pre     # Beta 版（含 pre-release）
 | Platform | QQ (NapCat/OneBot) | ✅ WebSocket — Beta |
 | Platform | QQ 官方机器人 | ✅ WebSocket — 无需公网 IP |
 
----
 
 ## 📖 平台接入指南
 
@@ -260,7 +248,6 @@ cc-connect update --pre     # Beta 版（含 pre-release）
 | 微信个人号（ilink） | [docs/weixin.md](docs/weixin.md) | HTTP 长轮询（ilink），**仅 Beta** | 不需要 |
 | QQ / QQ 机器人 | [docs/qq.md](docs/qq.md) | WebSocket | 不需要 |
 
----
 
 ## 🎯 核心功能
 
@@ -281,7 +268,6 @@ cc-connect update --pre     # Beta 版（含 pre-release）
 reset_on_idle_mins = 60
 ```
 
----
 
 ### 🔐 权限模式
 
@@ -291,7 +277,6 @@ reset_on_idle_mins = 60
 /mode default     # 每次工具调用前询问
 ```
 
----
 
 ### 🔄 Provider 管理
 
@@ -300,7 +285,6 @@ reset_on_idle_mins = 60
 /provider switch <名称>     运行时切换 API Provider
 ```
 
----
 
 ### 🤖 模型选择
 
@@ -309,7 +293,6 @@ reset_on_idle_mins = 60
 /model switch <alias>       按别名切换模型
 ```
 
----
 
 ### 📂 工作目录
 
@@ -321,7 +304,6 @@ reset_on_idle_mins = 60
 /cd <路径>                   `/dir <路径>` 的兼容别名
 ```
 
----
 
 ### ⏰ 定时任务
 
@@ -375,7 +357,6 @@ cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/ch
 
 📖 **完整文档：** [docs/usage.zh-CN.md](docs/usage.zh-CN.md)
 
----
 
 ## 📚 文档
 
@@ -384,14 +365,73 @@ cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/ch
 - [config.example.toml](config.example.toml) — 配置模板
 - [CONTRIBUTING.md](CONTRIBUTING.md) — Issue / PR 提交流程与贡献说明
 
----
 
 ## 👥 社区
 
 - [Discord](https://discord.gg/kHpwgaM4kq)
 - [Telegram](https://t.me/+odGNDhCjbjdmMmZl)
 
----
+
+## ❤️ 赞助
+
+> 想在这里展示您的品牌？**邮箱**：chg80333@gmail.com | **微信**：mongorz | [Telegram](https://t.me/+odGNDhCjbjdmMmZl) | [Discord](https://discord.gg/kHpwgaM4kq)
+
+<details open>
+<summary>赞助商</summary>
+
+<!-- 赞助位招租 - 联系我们成为赞助商 -->
+
+<table>
+<tr>
+<td width="180"><a href="#"><img src="docs/images/sponsors/placeholder.svg" alt="您的 Logo" width="150"></a></td>
+<td>成为赞助商！我们为您的产品提供专属用户福利。联系我们了解更多赞助机会。</td>
+</tr>
+</table>
+
+</details>
+
+
+## ☕ 支持项目
+
+如果 cc-connect 对你有帮助，请考虑请我们喝杯咖啡！你的支持帮助我们：
+
+- 🛠️ 维护和改进项目
+- 📚 编写更好的文档和教程
+- 🐛 更快修复 bug 和添加新功能
+- ☕ 让开发者保持精力充沛
+
+### 捐赠方式
+
+**Buy Me a Coffee**：[https://buymeacoffee.com/cg33](https://buymeacoffee.com/cg33)
+
+**微信支付 / 支付宝**：
+
+| 微信支付 | 支付宝 |
+|:----------:|:------:|
+| <img src="docs/images/wechatpay.jpg" alt="微信支付" width="150"> | <img src="docs/images/alipay.jpg" alt="支付宝" width="150"> |
+
+### 感谢捐赠者！🎉
+
+感谢每一位支持这个项目的朋友。捐赠时留言你的 GitHub 用户名，我们会在这里展示！
+
+<!-- 捐赠者名单 -->
+<!--
+| GitHub 用户名 | 日期 |
+|-----------------|------|
+| @username | YYYY-MM-DD |
+-->
+
+
+## 🤝 商业合作
+
+我们接受以下商业合作：
+
+- **企业定制**：为企业定制内部 AI 工具入口（飞书、钉钉、企业微信、Slack 等）
+- **技术咨询**：AI agent 集成方案设计与架构咨询
+- **外包项目**：AI 相关系统开发
+
+**联系方式**：**邮箱**：chg80333@gmail.com | **微信**：mongorz | [Telegram](https://t.me/+odGNDhCjbjdmMmZl) | [Discord](https://discord.gg/kHpwgaM4kq)
+
 
 ## 🙏 贡献者
 
@@ -399,7 +439,6 @@ cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/ch
   <img src="https://contrib.rocks/image?repo=chenhg5/cc-connect&v=20250313" />
 </a>
 
----
 
 ## ⭐ Star History
 
@@ -411,13 +450,11 @@ cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/ch
  </picture>
 </a>
 
----
 
 ## 📄 License
 
 MIT License
 
----
 
 <p align="center">
   <sub>由 cc-connect 社区用 ❤️ 构建</sub>

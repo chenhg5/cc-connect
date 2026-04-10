@@ -379,7 +379,7 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 			ChannelKey: channelKey,
 			Images:     []core.ImageAttachment{{MimeType: "image/jpeg", Data: imgData}},
 			ReplyCtx:   rctx,
-		})
+		}, msg)
 		return
 	}
 
@@ -402,7 +402,7 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 				Duration: msg.Voice.Duration,
 			},
 			ReplyCtx: rctx,
-		})
+		}, msg)
 		return
 	}
 
@@ -432,7 +432,7 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 				Duration: msg.Audio.Duration,
 			},
 			ReplyCtx: rctx,
-		})
+		}, msg)
 		return
 	}
 
@@ -452,10 +452,29 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 			ChannelKey: channelKey,
 			Files:      []core.FileAttachment{{MimeType: msg.Document.MimeType, Data: fileData, FileName: msg.Document.FileName}},
 			ReplyCtx:   rctx,
-		})
+		}, msg)
 		return
 	}
 
+	if msg.Location != nil {
+		slog.Info("telegram: location received", "user", userName, "latitude", msg.Location.Latitude, "longitude", msg.Location.Longitude)
+		p.dispatchMessage(&core.Message{
+			SessionKey: sessionKey, Platform: "telegram",
+			UserID: userID, UserName: userName, ChatName: chatName,
+			MessageID:  strconv.Itoa(msg.ID),
+			ChannelKey: channelKey,
+			Location: &core.LocationAttachment{
+				Latitude:             msg.Location.Latitude,
+				Longitude:            msg.Location.Longitude,
+				HorizontalAccuracy:   msg.Location.HorizontalAccuracy,
+				LivePeriod:           msg.Location.LivePeriod,
+				Heading:              msg.Location.Heading,
+				ProximityAlertRadius: msg.Location.ProximityAlertRadius,
+			},
+			ReplyCtx: rctx,
+		}, msg)
+		return
+	}
 	if msg.Text == "" {
 		return
 	}
@@ -469,10 +488,22 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 		MessageID:  strconv.Itoa(msg.ID),
 		ChannelKey: channelKey,
 		ReplyCtx:   rctx,
-	})
+	}, msg)
 }
 
-func (p *Platform) dispatchMessage(msg *core.Message) {
+func (p *Platform) dispatchMessage(msg *core.Message, tgMsg *models.Message) {
+	// Enrich with platform-specific context (reply quotes, location text, etc.)
+	var extras []string
+	if replyText := enrichReplyContent(tgMsg); replyText != "" {
+		extras = append(extras, replyText)
+	}
+	if locText := enrichLocation(msg); locText != "" {
+		extras = append(extras, locText)
+	}
+	if len(extras) > 0 {
+		msg.ExtraContent = strings.Join(extras, "\n")
+	}
+
 	handler := p.messageHandler()
 	if handler == nil {
 		return

@@ -172,12 +172,14 @@ func downloadPlainCDN(ctx context.Context, client *http.Client, cdnBase, encPara
 
 const cdnUploadMaxRetries = 3
 
-func uploadBufferToCDN(ctx context.Context, client *http.Client, cdnBase, uploadParam, filekey string, plaintext, aesKey []byte, label string) (downloadParam string, err error) {
+// uploadBufferToCDN encrypts plaintext with AES-128-ECB and uploads to the given CDN URL.
+// Caller is responsible for building the full URL (via buildCdnUploadURL or from upload_full_url).
+func uploadBufferToCDN(ctx context.Context, client *http.Client, cdnURL string, plaintext, aesKey []byte, label string) (downloadParam string, err error) {
 	ciphertext, err := encryptAESECB(plaintext, aesKey)
 	if err != nil {
 		return "", fmt.Errorf("%s: encrypt: %w", label, err)
 	}
-	u := buildCdnUploadURL(cdnBase, uploadParam, filekey)
+	u := cdnURL
 	var lastErr error
 	for attempt := 1; attempt <= cdnUploadMaxRetries; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(ciphertext))

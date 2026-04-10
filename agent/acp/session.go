@@ -36,6 +36,9 @@ type acpSession struct {
 
 	permMu   sync.Mutex
 	permByID map[string]permState
+
+	toolInputMu   sync.Mutex
+	toolInputByID map[string]string // toolCallId -> summarized tool input
 }
 
 type permState struct {
@@ -62,8 +65,9 @@ func newACPSession(
 		workDir:   absWorkDir,
 		events:    make(chan core.Event, 128),
 		ctx:       sessionCtx,
-		cancel:    cancel,
-		permByID:  make(map[string]permState),
+		cancel:        cancel,
+		permByID:      make(map[string]permState),
+		toolInputByID: make(map[string]string),
 		acpSessID: resumeSessionID,
 	}
 	s.alive.Store(true)
@@ -217,9 +221,61 @@ func (s *acpSession) onNotification(method string, params json.RawMessage) {
 		slog.Debug("acp: notification", "method", method)
 		return
 	}
+	s.cacheToolCallInput(params)
 	sid := s.currentACPSessionID()
 	for _, ev := range mapSessionUpdate(sid, params) {
 		s.emit(ev)
+	}
+}
+
+// cacheToolCallInput extracts and caches rawInput from tool_call and tool_call_update
+// session updates so that handlePermissionRequest can look it up by toolCallId.
+// OpenCode ACP bug (#7370): rawInput is empty in tool_call and request_permission,
+// but populated in tool_call_update. We cache from both sources.
+func (s *acpSession) cacheToolCallInput(params json.RawMessage) {
+	var wrap struct {
+		Update json.RawMessage `json:"update"`
+	}
+	if json.Unmarshal(params, &wrap) != nil || len(wrap.Update) == 0 {
+		return
+	}
+	var head struct {
+		SessionUpdate string `json:"sessionUpdate"`
+	}
+	if json.Unmarshal(wrap.Update, &head) != nil {
+		return
+	}
+	switch head.SessionUpdate {
+	case "tool_call":
+		var tc struct {
+			ToolCallID string          `json:"toolCallId"`
+			Kind       string          `json:"kind"`
+			RawInput   json.RawMessage `json:"rawInput"`
+		}
+		if json.Unmarshal(wrap.Update, &tc) != nil || tc.ToolCallID == "" || len(tc.RawInput) == 0 {
+			return
+		}
+		s.toolInputMu.Lock()
+		input := summarizeACPToolInput(tc.Kind, tc.RawInput)
+		s.toolInputByID[tc.ToolCallID] = input
+		s.toolInputMu.Unlock()
+		slog.Info("acp: cached tool_call input", "toolCallId", tc.ToolCallID, "kind", tc.Kind, "input", input)
+	case "tool_call_update":
+		var tc struct {
+			ToolCallID string          `json:"toolCallId"`
+			RawInput   json.RawMessage `json:"rawInput"`
+		}
+		if json.Unmarshal(wrap.Update, &tc) != nil || tc.ToolCallID == "" || len(tc.RawInput) == 0 {
+			return
+		}
+		input := summarizeACPToolInput("", tc.RawInput)
+		if input == "" {
+			return
+		}
+		s.toolInputMu.Lock()
+		s.toolInputByID[tc.ToolCallID] = input
+		s.toolInputMu.Unlock()
+		slog.Info("acp: cached tool_call_update input", "toolCallId", tc.ToolCallID, "input", input)
 	}
 }
 
@@ -246,9 +302,10 @@ func (s *acpSession) handlePermissionRequest(id json.RawMessage, params json.Raw
 	var p struct {
 		SessionID string `json:"sessionId"`
 		ToolCall  struct {
-			ToolCallID string `json:"toolCallId"`
-			Title      string `json:"title"`
-			Kind       string `json:"kind"`
+			ToolCallID string          `json:"toolCallId"`
+			Title      string          `json:"title"`
+			Kind       string          `json:"kind"`
+			RawInput   json.RawMessage `json:"rawInput"`
 		} `json:"toolCall"`
 		Options []permissionOption `json:"options"`
 	}
@@ -256,6 +313,7 @@ func (s *acpSession) handlePermissionRequest(id json.RawMessage, params json.Raw
 		_ = s.tr.respondError(id, -32602, "invalid params")
 		return
 	}
+	slog.Info("acp: permission request raw params", "params", string(params))
 	reqKey := jsonIDKey(id)
 	toolName := p.ToolCall.Title
 	if toolName == "" {
@@ -263,10 +321,6 @@ func (s *acpSession) handlePermissionRequest(id json.RawMessage, params json.Raw
 	}
 	if toolName == "" {
 		toolName = "permission"
-	}
-	toolInput := p.ToolCall.Title
-	if toolInput == "" {
-		toolInput = p.ToolCall.ToolCallID
 	}
 
 	s.permMu.Lock()
@@ -276,15 +330,49 @@ func (s *acpSession) handlePermissionRequest(id json.RawMessage, params json.Raw
 	rawTool := map[string]any{}
 	_ = json.Unmarshal(params, &rawTool)
 
-	slog.Info("acp: permission request", "request_id", reqKey, "tool", toolName)
-	s.emit(core.Event{
-		Type:         core.EventPermissionRequest,
-		RequestID:    reqKey,
-		ToolName:     toolName,
-		ToolInput:    toolInput,
-		ToolInputRaw: rawTool,
-		SessionID:    s.currentACPSessionID(),
-	})
+	// OpenCode ACP bug (#7370): rawInput in request_permission is always {},
+	// but tool_call_update (which arrives right after) has the real input.
+	// Emit in a goroutine so we don't block the read loop, and wait briefly
+	// for tool_call_update to populate the cache.
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		for i := 0; i < 10; i++ {
+			s.toolInputMu.Lock()
+			toolInput := s.toolInputByID[p.ToolCall.ToolCallID]
+			s.toolInputMu.Unlock()
+			if toolInput != "" {
+				break
+			}
+			select {
+			case <-s.ctx.Done():
+				return
+			case <-time.After(50 * time.Millisecond):
+			}
+		}
+		s.toolInputMu.Lock()
+		toolInput := s.toolInputByID[p.ToolCall.ToolCallID]
+		s.toolInputMu.Unlock()
+		if toolInput == "" {
+			toolInput = summarizeACPToolInput(p.ToolCall.Kind, p.ToolCall.RawInput)
+		}
+		if toolInput == "" {
+			toolInput = p.ToolCall.Title
+		}
+		if toolInput == "" {
+			toolInput = p.ToolCall.ToolCallID
+		}
+
+		slog.Info("acp: permission request", "request_id", reqKey, "tool", toolName, "input", toolInput)
+		s.emit(core.Event{
+			Type:         core.EventPermissionRequest,
+			RequestID:    reqKey,
+			ToolName:     toolName,
+			ToolInput:    toolInput,
+			ToolInputRaw: rawTool,
+			SessionID:    s.currentACPSessionID(),
+		})
+	}()
 }
 
 func (s *acpSession) emit(ev core.Event) {
@@ -432,4 +520,43 @@ func (s *acpSession) Close() error {
 	}
 	close(s.events)
 	return nil
+}
+
+// summarizeACPToolInput extracts a human-readable summary from ACP tool rawInput.
+func summarizeACPToolInput(kind string, raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var m map[string]any
+	if json.Unmarshal(raw, &m) != nil {
+		return string(raw)
+	}
+	if len(m) == 0 {
+		return ""
+	}
+	switch strings.ToLower(kind) {
+	case "bash", "shell", "terminal", "execute":
+		if cmd, ok := m["command"].(string); ok {
+			if desc, ok := m["description"].(string); ok && desc != "" {
+				return "# " + desc + "\n" + cmd
+			}
+			return cmd
+		}
+	case "read", "write", "edit":
+		if fp, ok := m["file_path"].(string); ok {
+			return fp
+		}
+		if fp, ok := m["path"].(string); ok {
+			return fp
+		}
+	}
+	// Fallback: try extracting command with description before formatting JSON.
+	if cmd, ok := m["command"].(string); ok {
+		if desc, ok := m["description"].(string); ok && desc != "" {
+			return "# " + desc + "\n" + cmd
+		}
+		return cmd
+	}
+	b, _ := json.MarshalIndent(m, "", "  ")
+	return string(b)
 }

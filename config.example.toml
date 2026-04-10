@@ -32,11 +32,6 @@
 # 不带附件的 `cc-connect send --message` 不受影响。
 # attachment_send = "on"
 
-# Default quiet mode (suppress thinking/tool progress messages) / 默认静默模式（隐藏思考和工具进度消息）
-# Can be overridden per-project. Users can still toggle with /quiet command.
-# 可被项目级配置覆盖。用户仍可通过 /quiet 命令切换。
-# quiet = true
-
 [log]
 level = "info" # debug, info, warn, error
 
@@ -50,6 +45,7 @@ level = "info" # debug, info, warn, error
 # 设为 0 表示不截断（显示完整内容）。
 
 # [display]
+# thinking_messages = true # Show/hide thinking messages (default: true) / 是否显示思考消息（默认 true）
 # thinking_max_len = 300   # Max chars for thinking messages (default: 300) / 思考消息最大字符数（默认 300）
 # tool_max_len = 500       # Max chars for tool use messages (default: 500) / 工具调用消息最大字符数（默认 500）
 # tool_messages = true     # Show/hide tool progress messages (default: true) / 是否显示工具进度消息（默认 true）
@@ -439,7 +435,9 @@ level = "info" # debug, info, warn, error
 #
 # [projects.agent]
 # type = "claudecode"
-# permission_mode = "yolo"
+#
+# [projects.agent.options]
+# mode = "yolo"  # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassPermissions" (yolo)
 #
 # [[projects.platforms]]
 # type = "slack"
@@ -455,7 +453,6 @@ level = "info" # debug, info, warn, error
 name = "my-backend"
 # show_context_indicator = false  # Hide the “[ctx: ~N%]” suffix on assistant replies (default: true / show)
 #                                   # 不在助手回复末尾显示「[ctx: ~N%]」上下文占用提示（默认 true 显示）
-# quiet = true  # Override global quiet for this project / 覆盖全局静默模式
 # disabled_commands = ["restart", "upgrade", "cron"]  # Disable specific commands for this project
 #                                                     # 禁用该项目的指定命令
 #
@@ -646,6 +643,28 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # name = "bedrock"
 # env = { CLAUDE_CODE_USE_BEDROCK = "1", AWS_PROFILE = "bedrock" }
 
+# Reference normalization and rendering / 本地引用标准化与展示优化
+# Disabled by default. When enabled, cc-connect can normalize Codex / Claude Code
+# local file references (paths, line refs, markdown file links) and re-render them
+# into a more readable platform-friendly form before sending to supported IMs.
+# 默认关闭。启用后，cc-connect 可对 Codex / Claude Code 的本地文件引用
+# （路径、行号引用、Markdown 文件链接）做标准化，并在发送到支持的平台前
+# 重新渲染为更易读的展示形式。
+#
+# Supported today / 当前已支持:
+#   normalize_agents: codex | claudecode | all
+#   render_platforms: feishu | weixin | all
+# Note: render depends on normalize. If normalize_agents is empty, render_platforms
+# alone has no effect.
+# 注意：render 依赖 normalize。若 normalize_agents 为空，仅设置 render_platforms 不生效。
+#
+# [projects.references]
+# normalize_agents = ["codex", "claudecode"]
+# render_platforms = ["feishu", "weixin"]
+# display_path = "dirname_basename" # absolute | relative | basename | dirname_basename | smart
+# marker_style = "emoji"            # none | ascii | emoji
+# enclosure_style = "code"          # none | bracket | angle | fullwidth | code
+
 # Feishu / Lark / 飞书
 # 1. Create an app at https://open.feishu.cn / 在 https://open.feishu.cn 创建应用
 # 2. Enable Bot capability / 开启机器人能力
@@ -789,6 +808,8 @@ app_secret = "your-feishu-app-secret"
 # share_session_in_channel = false  # If true, all users in a channel share one agent session / 频道共享会话
 # thread_isolation = false  # If true, cc-connect creates/uses Discord threads as session boundaries when the channel supports threads
 #                           # 设为 true 时，cc-connect 会在支持 thread 的 Discord 频道内按 thread 隔离会话
+# progress_style = "legacy"  # Progress rendering: legacy | compact | card / 进度展示方式：legacy | compact | card
+#                            # card = one editable Discord embed progress card / card = 单条可编辑的 Discord 嵌入式进度卡
 # respond_to_at_everyone_and_here = false  # If true, treat @everyone/@here as a direct mention so the bot responds
 #                              # 设为 true 时，将 @everyone/@here 视为直接 @ 机器人，使机器人响应
 # proxy = "http://127.0.0.1:7890"  # Optional HTTP/SOCKS5 proxy for Discord API & Gateway / 可选代理
