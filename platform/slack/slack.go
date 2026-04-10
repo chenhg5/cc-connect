@@ -142,24 +142,34 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 				}
 
 				var shareFiles []slackevents.File
+				var clientMsgID string
 				if cb, ok := data.Data.(*slackevents.EventsAPICallbackEvent); ok {
 					shareFiles = parseSlackInnerEventFiles(cb.InnerEvent)
+					clientMsgID = parseSlackClientMsgID(cb.InnerEvent)
 				}
 				images, audio, docFiles := p.processSlackFileShares(shareFiles)
 				content := stripAppMentionText(ev.Text)
 				if content == "" && len(images) == 0 && audio == nil && len(docFiles) == 0 {
 					return
 				}
+				// threadTS is the thread the mention was posted in, or the message
+				// timestamp itself when posted in the main channel (no thread).
+				threadTS := ev.ThreadTimeStamp
+				if threadTS == "" {
+					threadTS = ev.TimeStamp
+				}
 				msg := &core.Message{
-					SessionKey: sessionKey, Platform: "slack",
-					UserID: ev.User, UserName: p.resolveUserName(ev.User),
-					ChatName:  p.resolveChannelNameForMsg(ev.Channel),
-					Content:   content,
-					Images:    images,
-					Files:     docFiles,
-					Audio:     audio,
-					MessageID: ev.TimeStamp,
-					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: ev.TimeStamp},
+					SessionKey:  sessionKey, Platform: "slack",
+					UserID:      ev.User, UserName: p.resolveUserName(ev.User),
+					ChatName:    p.resolveChannelNameForMsg(ev.Channel),
+					Content:     content,
+					Images:      images,
+					Files:       docFiles,
+					Audio:       audio,
+					MessageID:   ev.TimeStamp,
+					ReplyCtx:    replyContext{channel: ev.Channel, timestamp: ev.TimeStamp},
+					ThreadID:    threadTS,
+					ClientMsgID: clientMsgID,
 				}
 				p.handler(p, msg)
 
@@ -200,13 +210,22 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					return
 				}
 
+				// threadTS is the thread the message belongs to. For a top-level
+				// channel message (no thread), treat the message itself as its own
+				// thread so the router can distinguish it from other conversations.
+				threadTS := ev.ThreadTimeStamp
+				if threadTS == "" {
+					threadTS = ts
+				}
 				msg := &core.Message{
-					SessionKey: sessionKey, Platform: "slack",
-					UserID: ev.User, UserName: p.resolveUserName(ev.User),
-					ChatName: p.resolveChannelNameForMsg(ev.Channel),
-					Content:  ev.Text, Images: images, Files: docFiles, Audio: audio,
-					MessageID: ts,
-					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: ts},
+					SessionKey:  sessionKey, Platform: "slack",
+					UserID:      ev.User, UserName: p.resolveUserName(ev.User),
+					ChatName:    p.resolveChannelNameForMsg(ev.Channel),
+					Content:     ev.Text, Images: images, Files: docFiles, Audio: audio,
+					MessageID:   ts,
+					ReplyCtx:    replyContext{channel: ev.Channel, timestamp: ts},
+					ThreadID:    threadTS,
+					ClientMsgID: ev.ClientMsgID,
 				}
 				p.handler(p, msg)
 			}
@@ -282,6 +301,23 @@ func parseSlackInnerEventFiles(raw *json.RawMessage) []slackevents.File {
 		return nil
 	}
 	return wrapper.Files
+}
+
+// parseSlackClientMsgID extracts the client_msg_id field from a raw inner event.
+// AppMentionEvent does not expose this field via the Go struct, so we parse the
+// raw JSON directly — the same approach used by parseSlackInnerEventFiles.
+func parseSlackClientMsgID(raw *json.RawMessage) string {
+	if raw == nil || len(*raw) == 0 {
+		return ""
+	}
+	var wrapper struct {
+		ClientMsgID string `json:"client_msg_id"`
+	}
+	if err := json.Unmarshal(*raw, &wrapper); err != nil {
+		slog.Debug("slack: parse client_msg_id", "error", err)
+		return ""
+	}
+	return wrapper.ClientMsgID
 }
 
 // processSlackFileShares downloads Slack file shares and maps them to core

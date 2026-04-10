@@ -38,6 +38,15 @@ func (s *Session) TryLock() bool {
 	return true
 }
 
+// IsBusy returns true if the session is currently mid-turn (locked).
+// This is a non-acquiring read — callers should not rely on the state
+// remaining stable after the call returns.
+func (s *Session) IsBusy() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.busy
+}
+
 func (s *Session) Unlock() {
 	s.unlock(true)
 }
@@ -206,6 +215,17 @@ func (sm *SessionManager) StorePath() string {
 func (sm *SessionManager) nextID() string {
 	sm.counter++
 	return fmt.Sprintf("s%d", sm.counter)
+}
+
+// PeekActive returns the currently active session for userKey without creating one.
+// Returns nil if no active session exists for the key.
+func (sm *SessionManager) PeekActive(userKey string) *Session {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	if sid, ok := sm.activeSession[userKey]; ok {
+		return sm.sessions[sid]
+	}
+	return nil
 }
 
 func (sm *SessionManager) GetOrCreateActive(userKey string) *Session {

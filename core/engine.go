@@ -209,6 +209,12 @@ type Engine struct {
 	initFlows         map[string]*workspaceInitFlow // workspace channel key → init state
 	initFlowsMu       sync.Mutex
 
+	// Thread-aware session routing (nil = disabled, all messages share one session)
+	threadRouter *ThreadRouter
+	// threadInteractiveKeys maps interactiveKey → effectiveSessionKey so that
+	// cleanupInteractiveState can release thread router affinity for the correct key.
+	threadInteractiveKeys sync.Map
+
 	// Interactive agent session management
 	interactiveMu     sync.Mutex
 	interactiveStates map[string]*interactiveState // key = sessionKey
@@ -489,6 +495,13 @@ func (e *Engine) SetResetOnIdle(d time.Duration) {
 // SetShowContextIndicator controls whether assistant replies include the [ctx: ~N%] suffix.
 func (e *Engine) SetShowContextIndicator(show bool) {
 	e.showContextIndicator = show
+}
+
+// SetThreadRouter enables thread-aware session routing for this engine.
+// When set, incoming messages are routed to per-thread sessions based on
+// their ThreadID field, with context-switch-first, fork-on-contention semantics.
+func (e *Engine) SetThreadRouter(r *ThreadRouter) {
+	e.threadRouter = r
 }
 
 func (e *Engine) SetWebSetupFunc(fn func() (int, string, bool, error)) { e.webSetupFunc = fn }
@@ -1435,8 +1448,46 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		interactiveKey = resolvedWorkspace + ":" + msg.SessionKey
 	}
 
-	session := sessions.GetOrCreateActive(msg.SessionKey)
-	sessions.UpdateUserMeta(msg.SessionKey, msg.UserName, msg.ChatName)
+	// Thread-aware routing: resolve the effective session key for this message.
+	// This runs BEFORE the session lock so that messages route to the correct
+	// session rather than being queued against the wrong one.
+	effectiveSessionKey := msg.SessionKey
+	if e.threadRouter != nil {
+		// Drop "also send to channel" duplicates: Slack fires two events with
+		// the same client_msg_id when the user ticks "also send to #channel".
+		if msg.ClientMsgID != "" && e.threadRouter.IsDuplicateClientMsg(msg.ClientMsgID) {
+			slog.Debug("thread router: dropping duplicate client_msg_id",
+				"client_msg_id", msg.ClientMsgID,
+				"session", msg.SessionKey,
+			)
+			return
+		}
+
+		routeResult := e.threadRouter.Route(msg.SessionKey, msg.ThreadID, sessions)
+		effectiveSessionKey = routeResult.EffectiveKey
+		if routeResult.Forked {
+			slog.Info("thread router: forked new session for thread",
+				"thread_id", msg.ThreadID,
+				"session_key", effectiveSessionKey,
+			)
+			// Warn the user before starting the fork so they see it in their thread.
+			e.reply(p, msg.ReplyCtx, routeResult.ForkWarning)
+		}
+
+		// Update interactiveKey to use the effective session key.
+		if e.multiWorkspace && wsSessions != nil {
+			interactiveKey = resolvedWorkspace + ":" + effectiveSessionKey
+		} else {
+			interactiveKey = effectiveSessionKey
+		}
+
+		// Register the interactiveKey → effectiveSessionKey mapping so that
+		// cleanupInteractiveState can release thread affinity on session expiry.
+		e.threadInteractiveKeys.Store(interactiveKey, effectiveSessionKey)
+	}
+
+	session := sessions.GetOrCreateActive(effectiveSessionKey)
+	sessions.UpdateUserMeta(effectiveSessionKey, msg.UserName, msg.ChatName)
 	if !session.TryLock() {
 		// Check for /btw — inject into the running session mid-turn
 		trimmed := strings.TrimSpace(content)
@@ -1473,7 +1524,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		return
 	}
 
-	if rotated := e.maybeAutoResetSessionOnIdle(p, msg, sessions, interactiveKey, session); rotated != nil {
+	if rotated := e.maybeAutoResetSessionOnIdle(p, msg, sessions, interactiveKey, session, effectiveSessionKey); rotated != nil {
 		session = rotated
 	}
 
@@ -1481,12 +1532,17 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		"platform", msg.Platform,
 		"user", msg.UserName,
 		"session", session.ID,
+		"thread_id", msg.ThreadID,
 	)
 
 	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, resolvedWorkspace, msg.SessionKey)
 }
 
-func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions *SessionManager, interactiveKey string, session *Session) *Session {
+// maybeAutoResetSessionOnIdle rotates to a fresh session when the current one has
+// been idle for longer than resetOnIdle.  effectiveSessionKey is the (possibly
+// thread-routed) key that the session was looked up under; it defaults to
+// msg.SessionKey when thread routing is not active.
+func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions *SessionManager, interactiveKey string, session *Session, effectiveSessionKey string) *Session {
 	if e.resetOnIdle <= 0 || session == nil {
 		return nil
 	}
@@ -1503,7 +1559,7 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 	}
 
 	slog.Info("auto-resetting idle session",
-		"session_key", msg.SessionKey,
+		"session_key", effectiveSessionKey,
 		"session_id", session.ID,
 		"idle_for", time.Since(lastActive),
 		"threshold", e.resetOnIdle,
@@ -1526,9 +1582,9 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 	e.cleanupInteractiveState(interactiveKey)
 	session.UnlockWithoutUpdate()
 
-	newSession := sessions.NewSession(msg.SessionKey, "")
+	newSession := sessions.NewSession(effectiveSessionKey, "")
 	if !newSession.TryLock() {
-		slog.Error("failed to lock new session after idle auto-reset", "session_key", msg.SessionKey, "new_session", newSession.ID)
+		slog.Error("failed to lock new session after idle auto-reset", "session_key", effectiveSessionKey, "new_session", newSession.ID)
 		return nil
 	}
 
@@ -2222,6 +2278,14 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 
 	if ok && state != nil && state.agentSession != nil {
 		e.closeAgentSessionWithTimeout(sessionKey, state.agentSession)
+	}
+
+	// Release thread affinity for this session so future messages from the
+	// same thread re-route fresh (context-switch or fork) after session expiry.
+	if e.threadRouter != nil {
+		if effKey, loaded := e.threadInteractiveKeys.LoadAndDelete(sessionKey); loaded {
+			e.threadRouter.ReleaseSession(effKey.(string))
+		}
 	}
 }
 

@@ -41,12 +41,30 @@ type Config struct {
 	Bridge            BridgeConfig            `toml:"bridge"`
 	Management        ManagementConfig        `toml:"management"`
 	IdleTimeoutMins   *int                    `toml:"idle_timeout_mins,omitempty"` // max minutes between agent events; 0 = no timeout; default 120
+	Threads           ThreadsConfig           `toml:"threads"`                     // thread-aware session routing
 }
 
 // CronConfig controls cron job behavior.
 type CronConfig struct {
 	Silent      *bool  `toml:"silent"`       // suppress cron start notification; default false
 	SessionMode string `toml:"session_mode"` // default session mode: "" or "reuse" (default) or "new_per_run"
+}
+
+// ThreadsConfig controls thread-aware session routing.
+type ThreadsConfig struct {
+	// MaxConcurrent is the maximum number of simultaneous mid-turn sessions per project
+	// binding. When the limit is reached, new threads fall back to the base session and
+	// their messages are queued. Default: 3.
+	//
+	// Resource guidance: each additional concurrent session requires ~430 MB RAM
+	// (300–360 MB for Claude Code + 70 MB Node.js worker). Provision ~512 MB headroom
+	// per slot above the base session.
+	//
+	// Examples:
+	//   max_concurrent = 3 (default): ~4 GB RAM minimum per project binding
+	//   max_concurrent = 5:           ~6 GB RAM minimum per project binding
+	//   max_concurrent = 1:           ~2 GB RAM (no forking, sequential only)
+	MaxConcurrent *int `toml:"max_concurrent,omitempty"`
 }
 
 // WebhookConfig controls the external HTTP webhook endpoint.
