@@ -1821,6 +1821,7 @@ func buildAskQuestionResponse(originalInput map[string]any, questions []UserQues
 }
 
 func isApproveAllResponse(s string) bool {
+	s = stripMentions(s)
 	for _, w := range []string{
 		"allow all", "allowall", "approve all", "yes all",
 		"允许所有", "允许全部", "全部允许", "所有允许", "都允许", "全部同意",
@@ -1833,6 +1834,7 @@ func isApproveAllResponse(s string) bool {
 }
 
 func isAllowResponse(s string) bool {
+	s = stripMentions(s)
 	for _, w := range []string{"allow", "yes", "y", "ok", "允许", "同意", "可以", "好", "好的", "是", "确认", "approve"} {
 		if s == w {
 			return true
@@ -1842,12 +1844,22 @@ func isAllowResponse(s string) bool {
 }
 
 func isDenyResponse(s string) bool {
+	s = stripMentions(s)
 	for _, w := range []string{"deny", "no", "n", "reject", "拒绝", "不允许", "不行", "不", "否", "取消", "cancel"} {
 		if s == w {
 			return true
 		}
 	}
 	return false
+}
+
+// mentionRe matches @mention patterns like "@群机器人", "@user123", etc.
+var mentionRe = regexp.MustCompile(`@[^\s]+`)
+
+// stripMentions removes @mention patterns from anywhere in the string.
+// This handles both "@群机器人 允许" -> "允许" and "允许 @群机器人" -> "允许".
+func stripMentions(s string) string {
+	return strings.TrimSpace(mentionRe.ReplaceAllString(s, ""))
 }
 
 // ──────────────────────────────────────────────────────────────

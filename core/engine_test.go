@@ -8894,3 +8894,97 @@ func TestExtractSessionKeyParts(t *testing.T) {
 		})
 	}
 }
+
+func TestStripMentions(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"允许", "允许"},
+		{"允许 @群机器人", "允许"},
+		{"@群机器人 允许", "允许"},
+		{"允许 @群机器人 @user123", "允许"},
+		{"@bot1 @bot2 同意", "同意"},
+		{"全部允许 @群机器人", "全部允许"},
+		{"拒绝 @群机器人", "拒绝"},
+		{"@群机器人 拒绝", "拒绝"},
+		{"allow", "allow"},
+		{"allow @bot", "allow"},
+		{"@bot allow", "allow"},
+		{"", ""},
+		{"@群机器人", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := stripMentions(tt.input)
+			if got != tt.expected {
+				t.Errorf("stripMentions(%q) = %q, want %q", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestPermissionResponsesWithMentions(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		allow    bool
+		deny     bool
+		approve  bool
+	}{
+		// Basic cases without mentions
+		{"allow basic", "allow", true, false, false},
+		{"deny basic", "deny", false, true, false},
+		{"approve all basic", "allow all", false, false, true},
+		{"允许 basic", "允许", true, false, false},
+		{"拒绝 basic", "拒绝", false, true, false},
+		{"全部允许 basic", "全部允许", false, false, true},
+
+		// With @mention suffix (WeChat Work group chat style)
+		{"允许 @群机器人", "允许 @群机器人", true, false, false},
+		{"拒绝 @群机器人", "拒绝 @群机器人", false, true, false},
+		{"全部允许 @群机器人", "全部允许 @群机器人", false, false, true},
+		{"allow @bot", "allow @bot", true, false, false},
+		{"deny @bot", "deny @bot", false, true, false},
+		{"allow all @bot", "allow all @bot", false, false, true},
+
+		// With @mention prefix
+		{"@群机器人 允许", "@群机器人 允许", true, false, false},
+		{"@群机器人 拒绝", "@群机器人 拒绝", false, true, false},
+		{"@群机器人 全部允许", "@群机器人 全部允许", false, false, true},
+		{"@bot allow", "@bot allow", true, false, false},
+		{"@bot deny", "@bot deny", false, true, false},
+		{"@bot allow all", "@bot allow all", false, false, true},
+
+		// Multiple mentions
+		{"允许 @bot1 @bot2", "允许 @bot1 @bot2", true, false, false},
+		{"@bot1 @bot2 拒绝", "@bot1 @bot2 拒绝", false, true, false},
+
+		// Non-matching cases
+		{"hello", "hello", false, false, false},
+		{"@群机器人", "@群机器人", false, false, false},
+		{"", "", false, false, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Apply the same preprocessing as the actual code
+			lower := strings.ToLower(strings.TrimSpace(tt.input))
+
+			gotAllow := isAllowResponse(lower)
+			gotDeny := isDenyResponse(lower)
+			gotApprove := isApproveAllResponse(lower)
+
+			if gotAllow != tt.allow {
+				t.Errorf("isAllowResponse(%q) = %v, want %v", lower, gotAllow, tt.allow)
+			}
+			if gotDeny != tt.deny {
+				t.Errorf("isDenyResponse(%q) = %v, want %v", lower, gotDeny, tt.deny)
+			}
+			if gotApprove != tt.approve {
+				t.Errorf("isApproveAllResponse(%q) = %v, want %v", lower, gotApprove, tt.approve)
+			}
+		})
+	}
+}
