@@ -51,7 +51,7 @@ type claudeSession struct {
 	gracefulStopTimeout time.Duration
 }
 
-func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool, maxContextTokens int) (*claudeSession, error) {
+func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode, effort string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool, maxContextTokens int) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	args := []string{
@@ -81,6 +81,9 @@ func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode strin
 	}
 	if model != "" {
 		args = append(args, "--model", model)
+	}
+	if effort != "" {
+		args = append(args, "--effort", effort)
 	}
 	if len(allowedTools) > 0 {
 		args = append(args, "--allowedTools", strings.Join(allowedTools, ","))

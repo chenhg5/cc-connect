@@ -45,6 +45,7 @@ type Agent struct {
 	sessionEnv       []string
 	routerURL        string // Claude Code Router URL (e.g., "http://127.0.0.1:3456")
 	routerAPIKey     string // Claude Code Router API key (optional)
+	effort           string // reasoning effort: low, medium, high, max
 
 	providerProxy  *core.ProviderProxy // local proxy for third-party providers
 	proxyLocalURL  string              // local URL of the proxy
@@ -100,6 +101,8 @@ func New(opts map[string]any) (core.Agent, error) {
 	routerURL, _ := opts["router_url"].(string)
 	routerAPIKey, _ := opts["router_api_key"].(string)
 
+	effort := normalizeEffort(opts["reasoning_effort"])
+
 	if _, err := exec.LookPath("claude"); err != nil {
 		return nil, fmt.Errorf("claudecode: 'claude' CLI not found in PATH, please install Claude Code first")
 	}
@@ -114,6 +117,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		activeIdx:        -1,
 		routerURL:        routerURL,
 		routerAPIKey:     routerAPIKey,
+		effort:           effort,
 	}, nil
 }
 
@@ -134,6 +138,36 @@ func normalizePermissionMode(raw string) string {
 	default:
 		return "default"
 	}
+}
+
+var validEfforts = []string{"low", "medium", "high", "max"}
+
+func normalizeEffort(v any) string {
+	s, _ := v.(string)
+	s = strings.ToLower(strings.TrimSpace(s))
+	for _, e := range validEfforts {
+		if e == s {
+			return s
+		}
+	}
+	return ""
+}
+
+func (a *Agent) SetReasoningEffort(effort string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.effort = normalizeEffort(effort)
+	slog.Info("claudecode: reasoning effort changed", "effort", a.effort)
+}
+
+func (a *Agent) GetReasoningEffort() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.effort
+}
+
+func (a *Agent) AvailableReasoningEfforts() []string {
+	return validEfforts
 }
 
 func (a *Agent) Name() string           { return "claudecode" }
@@ -286,13 +320,14 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 			model = m
 		}
 	}
+	effort := a.effort
 	platformPrompt := a.platformPrompt
 	// When router_url is set, --verbose conflicts with --output-format stream-json
 	// (verbose emits non-JSON text to stdout that corrupts the JSON stream).
 	disableVerbose := a.routerURL != ""
 	a.mu.Unlock()
 
-	return newClaudeSession(ctx, a.workDir, model, sessionID, a.mode, tools, disTools, extraEnv, platformPrompt, disableVerbose, maxTok)
+	return newClaudeSession(ctx, a.workDir, model, sessionID, a.mode, effort, tools, disTools, extraEnv, platformPrompt, disableVerbose, maxTok)
 }
 
 func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {
