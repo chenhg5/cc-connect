@@ -51,7 +51,7 @@ type claudeSession struct {
 	gracefulStopTimeout time.Duration
 }
 
-func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool, maxContextTokens int) (*claudeSession, error) {
+func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode, systemPrompt string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool, maxContextTokens int) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	args := []string{
@@ -89,6 +89,12 @@ func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode strin
 		args = append(args, "--disallowedTools", strings.Join(disallowedTools, ","))
 	}
 
+	// Handle custom system prompt
+	if systemPrompt != "" {
+		args = append(args, "--system-prompt", systemPrompt)
+	}
+
+	// Always append cc-connect system prompt for functionality awareness
 	if sysPrompt := core.AgentSystemPrompt(); sysPrompt != "" {
 		if platformPrompt != "" {
 			sysPrompt += "\n## Formatting\n" + platformPrompt + "\n"
