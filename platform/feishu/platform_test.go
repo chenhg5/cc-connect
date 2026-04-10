@@ -987,3 +987,55 @@ func TestFormatProgressToolInput_OtherTools(t *testing.T) {
 		t.Errorf("TodoWrite with invalid JSON should fall back to text block, got %q", result)
 	}
 }
+
+func TestResolveCronReplyTarget_ReturnsReplyCtxWithoutMessageID(t *testing.T) {
+	p, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+		"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true, "thread_isolation": true,
+	})
+	if err != nil {
+		t.Fatalf("newPlatform error = %v", err)
+	}
+	ip := p.(*interactivePlatform)
+
+	// Session key with root: format (the problematic case)
+	sessionKey := "feishu:oc_chat123:root:om_msg456"
+	_, rctx, err := ip.ResolveCronReplyTarget(sessionKey, "Daily report")
+	if err != nil {
+		t.Fatalf("ResolveCronReplyTarget error = %v", err)
+	}
+
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		t.Fatalf("replyCtx type = %T, want replyContext", rctx)
+	}
+	if rc.chatID != "oc_chat123" {
+		t.Fatalf("chatID = %q, want %q", rc.chatID, "oc_chat123")
+	}
+	if rc.messageID != "" {
+		t.Fatalf("messageID = %q, want empty (so Send uses sendNewMessageToChat)", rc.messageID)
+	}
+}
+
+func TestResolveCronReplyTarget_NonThreadSessionKey(t *testing.T) {
+	p, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+		"app_id": "cli_xxx", "app_secret": "secret",
+	})
+	if err != nil {
+		t.Fatalf("newPlatform error = %v", err)
+	}
+
+	// User-scoped session key (no root:)
+	sessionKey := "feishu:oc_chat123:ou_user789"
+	_, rctx, err := p.(*interactivePlatform).ResolveCronReplyTarget(sessionKey, "Check")
+	if err != nil {
+		t.Fatalf("ResolveCronReplyTarget error = %v", err)
+	}
+
+	rc := rctx.(replyContext)
+	if rc.chatID != "oc_chat123" {
+		t.Fatalf("chatID = %q, want %q", rc.chatID, "oc_chat123")
+	}
+	if rc.messageID != "" {
+		t.Fatalf("messageID = %q, want empty", rc.messageID)
+	}
+}

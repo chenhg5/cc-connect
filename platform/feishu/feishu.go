@@ -2356,6 +2356,20 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	return rc, nil
 }
 
+// ResolveCronReplyTarget implements CronReplyTargetResolver. For cron jobs,
+// return a replyContext with only chatID (no messageID) so that Send() uses
+// sendNewMessageToChat instead of ReplyInThread. Without this, cron jobs
+// bound to a thread-isolated session key (feishu:chat:root:msgID) would
+// reply inside a thread rather than posting a new message in the group.
+func (p *Platform) ResolveCronReplyTarget(sessionKey string, title string) (string, any, error) {
+	parts := strings.SplitN(sessionKey, ":", 3)
+	if len(parts) < 2 || parts[0] != p.platformName {
+		return "", nil, fmt.Errorf("%s: invalid session key %q", p.tag(), sessionKey)
+	}
+	rc := replyContext{chatID: parts[1], sessionKey: sessionKey}
+	return sessionKey, rc, nil
+}
+
 func parseThreadRootID(sessionTail string) (string, bool) {
 	for _, prefix := range []string{"root:", "thread:"} {
 		if strings.HasPrefix(sessionTail, prefix) {
