@@ -126,6 +126,16 @@ type AudioAttachment struct {
 	Duration int    // duration in seconds (if known)
 }
 
+// LocationAttachment represents a geographical location sent by the user.
+type LocationAttachment struct {
+	Latitude            float64 // latitude coordinate
+	Longitude           float64 // longitude coordinate
+	HorizontalAccuracy  float64 // accuracy radius in meters (optional)
+	LivePeriod          int     // time period for live location updates in seconds (optional)
+	Heading             int     // direction of movement in degrees (optional)
+	ProximityAlertRadius int    // maximum distance for proximity alerts in meters (optional)
+}
+
 // Message represents a unified incoming message from any platform.
 type Message struct {
 	SessionKey string // unique key for user context, e.g. "feishu:{chatID}:{userID}"
@@ -137,12 +147,16 @@ type Message struct {
 	Content    string
 	Images     []ImageAttachment // attached images (if any)
 	Files      []FileAttachment  // attached files (if any)
-	Audio           *AudioAttachment // voice message (if any)
-	ChannelKey      string           // platform-provided channel identifier for workspace binding (optional)
-	ReplyCtx        any              // platform-specific context needed for replying
-	FromVoice       bool             // true if message originated from voice transcription
-	ModeOverride    string           // if set, temporarily override agent permission mode for this message
-	PlatformContext string           // optional platform-specific context block prepended to the agent prompt (e.g. Slack channel/thread metadata)
+	Audio           *AudioAttachment    // voice message (if any)
+	Location        *LocationAttachment // geographical location (if any)
+	ExtraContent    string              // platform-enriched content (e.g. location text, reply quote) prepended for the agent
+	ChannelKey      string              // platform-provided channel identifier for workspace binding (optional)
+	ReplyCtx        any                 // platform-specific context needed for replying
+	FromVoice       bool                // true if message originated from voice transcription
+	ModeOverride    string              // if set, temporarily override agent permission mode for this message
+	PlatformContext string              // optional platform-specific context block prepended to the agent prompt (e.g. Slack channel/thread metadata)
+	ThreadID        string              // platform thread identifier for thread-aware session routing (e.g. Slack thread_ts)
+	ClientMsgID     string              // client-generated message ID for deduplication (e.g. Slack client_msg_id)
 }
 
 // EventType distinguishes different kinds of agent output.
