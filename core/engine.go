@@ -2414,6 +2414,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventToolUse:
 			toolCount++
+			// When tool messages are hidden, insert a visual break between text
+			// segments so the accumulated response doesn't run together.
+			if !e.display.ToolMessages && len(textParts) > segmentStart {
+				textParts = append(textParts, "\n\n")
+				if sp.canPreview() {
+					sp.appendText("\n\n")
+				}
+			}
 			if e.display.ToolMessages {
 				// Flush accumulated text segment before tool display
 				previewActive := sp.canPreview()
@@ -2587,7 +2595,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 			fullResponse := event.Content
-			if fullResponse == "" && len(textParts) > 0 {
+			// When tool progress is hidden, segmentStart stays 0 and textParts
+			// contains ALL text across tool boundaries. Prefer the full accumulated
+			// text over event.Content which only contains the last assistant segment.
+			if len(textParts) > 0 && segmentStart == 0 {
+				fullResponse = strings.Join(textParts, "")
+			} else if fullResponse == "" && len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")
 			}
 			if fullResponse == "" {
