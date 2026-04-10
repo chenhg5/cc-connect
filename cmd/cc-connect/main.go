@@ -882,6 +882,15 @@ func main() {
 	if apiSrv != nil {
 		apiSrv.Stop()
 	}
+	// Disconnect platforms first so no duplicate message processing can
+	// occur, then release the instance lock so a new process can start
+	// immediately.  Agent sessions are closed afterwards — the graceful
+	// shutdown (stdin EOF → SIGTERM → SIGKILL) can take up to 130s and
+	// must not block a replacement instance from acquiring the lock.
+	for _, e := range engines {
+		e.StopPlatforms()
+	}
+	instanceLock.Release()
 	for _, e := range engines {
 		if err := e.Stop(); err != nil {
 			slog.Error("shutdown error", "error", err)
@@ -890,7 +899,6 @@ func main() {
 	if logCloser != nil {
 		logCloser.Close()
 	}
-	instanceLock.Release()
 
 	if restartReq != nil {
 		if err := core.SaveRestartNotify(cfg.DataDir, *restartReq); err != nil {

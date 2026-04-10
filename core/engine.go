@@ -1128,22 +1128,51 @@ func (e *Engine) Start() error {
 	return nil
 }
 
-func (e *Engine) Stop() error {
+// StopPlatforms disconnects all messaging platforms without closing agent
+// sessions. This is safe to call before Stop() — Stop() will skip platforms
+// that have already been stopped. Use this during shutdown to release the
+// instance lock early: disconnect platforms (no more duplicate messages),
+// release the lock (allow a new instance to start), then call Stop() to
+// close agent sessions gracefully.
+func (e *Engine) StopPlatforms() {
 	e.platformLifecycleMu.Lock()
+	if e.stopping {
+		e.platformLifecycleMu.Unlock()
+		return
+	}
 	e.stopping = true
 	e.platformLifecycleMu.Unlock()
 
-	// Cancel first so late lifecycle callbacks observe shutdown immediately.
 	e.cancel()
 
-	// Stop platforms after cancellation so they can unwind against the closed context.
-	var errs []error
 	for _, p := range e.platforms {
 		if err := p.Stop(); err != nil {
-			errs = append(errs, fmt.Errorf("stop platform %s: %w", p.Name(), err))
+			slog.Warn("engine: stop platform", "platform", p.Name(), "error", err)
 		}
 	}
+}
 
+func (e *Engine) Stop() error {
+	e.platformLifecycleMu.Lock()
+	alreadyStopping := e.stopping
+	e.stopping = true
+	e.platformLifecycleMu.Unlock()
+
+	if !alreadyStopping {
+		// Cancel first so late lifecycle callbacks observe shutdown immediately.
+		e.cancel()
+
+		// Stop platforms after cancellation so they can unwind against the closed context.
+		var errs []error
+		for _, p := range e.platforms {
+			if err := p.Stop(); err != nil {
+				errs = append(errs, fmt.Errorf("stop platform %s: %w", p.Name(), err))
+			}
+		}
+		_ = errs // collected below
+	}
+
+	var errs []error
 	e.interactiveMu.Lock()
 	states := make(map[string]*interactiveState, len(e.interactiveStates))
 	for k, v := range e.interactiveStates {
