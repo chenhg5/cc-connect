@@ -209,6 +209,12 @@ type Engine struct {
 	initFlows         map[string]*workspaceInitFlow // workspace channel key → init state
 	initFlowsMu       sync.Mutex
 
+	// Terminal observation (--observe)
+	observeEnabled    bool
+	observeProjectDir string             // ~/.claude/projects/{projectKey}
+	observeSessionKey string             // e.g. "slack:C123:U456" — target for forwarding
+	observeCancel     context.CancelFunc
+
 	// Interactive agent session management
 	interactiveMu     sync.Mutex
 	interactiveStates map[string]*interactiveState // key = sessionKey
@@ -511,8 +517,28 @@ func (e *Engine) SetAttachmentSendEnabled(v bool) {
 	e.attachmentSendEnabled = v
 }
 
+// SetObserveConfig enables terminal session observation.
+// projectDir is the Claude Code project directory containing session JSONL files.
+// sessionKey identifies the Slack channel to forward messages to.
+func (e *Engine) SetObserveConfig(projectDir, sessionKey string) {
+	e.observeEnabled = true
+	e.observeProjectDir = projectDir
+	e.observeSessionKey = sessionKey
+}
+
 func (e *Engine) SetLanguageSaveFunc(fn func(Language) error) {
 	e.i18n.SetSaveFunc(fn)
+}
+
+// findObserverTarget returns the first platform that implements ObserverTarget,
+// or nil if none do.
+func (e *Engine) findObserverTarget() ObserverTarget {
+	for _, p := range e.platforms {
+		if ot, ok := p.(ObserverTarget); ok {
+			return ot
+		}
+	}
+	return nil
 }
 
 func (e *Engine) SetProviderSaveFunc(fn func(providerName string) error) {
@@ -1125,6 +1151,8 @@ func (e *Engine) Start() error {
 	if len(startErrs) == len(e.platforms) && len(e.platforms) > 0 {
 		return startErrs[0] // Return first error
 	}
+
+	e.startObserver()
 	return nil
 }
 
@@ -1135,6 +1163,10 @@ func (e *Engine) Stop() error {
 
 	// Cancel first so late lifecycle callbacks observe shutdown immediately.
 	e.cancel()
+
+	if e.observeCancel != nil {
+		e.observeCancel()
+	}
 
 	// Stop platforms after cancellation so they can unwind against the closed context.
 	var errs []error

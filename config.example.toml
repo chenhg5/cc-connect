@@ -129,6 +129,10 @@ level = "info" # debug, info, warn, error
 # max_tokens = 12000     # estimated token threshold to trigger compression
 # min_gap_mins = 30      # minimum minutes between auto-compress runs (default 30)
 
+# [projects.observe]
+# enabled = true                    # Forward native terminal sessions to Slack
+# channel = "C0AL13PN4BG"           # Slack channel ID to post observations to
+
 # =============================================================================
 # Cron Settings / 定时任务设置
 # =============================================================================
