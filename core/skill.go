@@ -78,9 +78,7 @@ func (r *SkillRegistry) ListAll() []*Skill {
 	seen := make(map[string]bool)
 
 	for _, dir := range r.dirs {
-		for _, skill := range discoverSkillsInDir(dir, seen) {
-			result = append(result, skill)
-		}
+		result = append(result, discoverSkillsInDir(dir, seen)...)
 	}
 
 	r.cache = result
