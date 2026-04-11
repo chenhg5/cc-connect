@@ -7088,15 +7088,21 @@ func TestCmdShell_MultiWorkspaceIgnoresMissingSharedBinding(t *testing.T) {
 	e.cmdShell(p, msg, "/shell pwd")
 
 	deadline := time.Now().Add(2 * time.Second)
+	// Normalize both the expected and missing paths to handle macOS symlink
+	// resolution (e.g. /var/folders/ -> /private/var/folders/). Then check
+	// that the shell output contains the resolved expected path and does NOT
+	// contain the resolved missing path.
+	expectedResolved := normalizeWorkspacePath(agent.workDir)
+	missingResolved := normalizeWorkspacePath(missingDir)
 	for {
 		sent := p.getSent()
 		if len(sent) > 0 {
-			normalizedWorkDir := normalizeWorkspacePath(agent.workDir)
-			if !strings.Contains(sent[0], normalizedWorkDir) && !strings.Contains(sent[0], agent.workDir) {
-				t.Fatalf("expected shell output to fall back to agent work dir %q, got %q", agent.workDir, sent[0])
+			output := sent[0]
+			if !strings.Contains(output, agent.workDir) && !strings.Contains(output, expectedResolved) {
+				t.Fatalf("expected shell output to fall back to agent work dir %q (resolved %q), got %q", agent.workDir, expectedResolved, output)
 			}
-			if strings.Contains(sent[0], missingDir) {
-				t.Fatalf("expected shell output to ignore missing shared workspace %q, got %q", missingDir, sent[0])
+			if strings.Contains(output, missingDir) || strings.Contains(output, missingResolved) {
+				t.Fatalf("expected shell output to ignore missing shared workspace %q, got %q", missingDir, output)
 			}
 			return
 		}
