@@ -841,6 +841,26 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 	}
 }
 
+// AddReaction adds an emoji reaction to the specified message.
+// Implements core.Reactor.
+func (p *Platform) AddReaction(ctx context.Context, channel, ts, emoji string) error {
+	ref := slack.ItemRef{Channel: channel, Timestamp: ts}
+	if err := p.client.AddReactionContext(ctx, emoji, ref); err != nil {
+		return fmt.Errorf("slack: add reaction %q: %w", emoji, err)
+	}
+	return nil
+}
+
+// RemoveReaction removes an emoji reaction from the specified message.
+// Implements core.Reactor.
+func (p *Platform) RemoveReaction(ctx context.Context, channel, ts, emoji string) error {
+	ref := slack.ItemRef{Channel: channel, Timestamp: ts}
+	if err := p.client.RemoveReactionContext(ctx, emoji, ref); err != nil {
+		return fmt.Errorf("slack: remove reaction %q: %w", emoji, err)
+	}
+	return nil
+}
+
 func (p *Platform) Stop() error {
 	if p.cancel != nil {
 		p.cancel()

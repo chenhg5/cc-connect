@@ -45,6 +45,14 @@ type ReactRequest struct {
 	Emoji   string `json:"emoji"`
 }
 
+// ReactRequest is the JSON body for POST /react and POST /unreact.
+type ReactRequest struct {
+	Project string `json:"project"`
+	Channel string `json:"channel"`
+	Ts      string `json:"ts"`
+	Emoji   string `json:"emoji"`
+}
+
 // NewAPIServer creates an API server on a Unix socket.
 func NewAPIServer(dataDir string) (*APIServer, error) {
 	sockDir := filepath.Join(dataDir, "run")
