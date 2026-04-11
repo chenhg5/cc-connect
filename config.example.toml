@@ -700,6 +700,8 @@ app_secret = "your-feishu-app-secret"
 #                           # 默认 true：用「回复消息」API（引用用户消息）。设为 false 则在会话里发普通消息、不引用触发消息。
 # progress_style = "legacy" # Progress rendering style: legacy | compact | card
 #                           # 进度消息展示风格：legacy（逐条消息）| compact（单消息持续更新）| card（结构化卡片）
+# resolve_mentions = false  # Auto-resolve @name in outgoing messages to Feishu at tags by matching group member names
+#                           # 自动将发出消息中的 @显示名 替换为飞书 at 标签（通过匹配群成员名称）
 
 # Lark (International Version) / Lark 国际版
 # Lark uses Webhook mode instead of WebSocket long-connection.
