@@ -5805,7 +5805,19 @@ func (e *Engine) PostToNewThread(sessionKey, message string, images []ImageAttac
 		return fmt.Errorf("message or attachment is required")
 	}
 	if sessionKey == "" {
-		return fmt.Errorf("session_key is required for --new-thread (set CC_SESSION_KEY or pass --session)")
+		// No session key provided — borrow one from any active session to resolve
+		// the target channel. PostToNewThread only uses the key for channel lookup
+		// (thread timestamps are stripped by ReconstructReplyCtx), so any session
+		// on the right platform works.
+		e.interactiveMu.Lock()
+		for key := range e.interactiveStates {
+			sessionKey = key
+			break
+		}
+		e.interactiveMu.Unlock()
+		if sessionKey == "" {
+			return fmt.Errorf("no active session and no session_key provided for --new-thread")
+		}
 	}
 	if (len(images) > 0 || len(files) > 0) && !e.attachmentSendEnabled {
 		return ErrAttachmentSendDisabled
