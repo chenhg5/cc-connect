@@ -4,12 +4,51 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 
 	"github.com/BurntSushi/toml"
 )
+
+// validRunAsUserName is the portable-username character set plus digits.
+// POSIX does not require a specific pattern, but every mainstream Linux and
+// macOS system accepts these characters for login names. Rejecting anything
+// outside this set removes an injection vector into the sudo argv.
+func isValidRunAsUserName(name string) bool {
+	if name == "" || len(name) > 32 {
+		return false
+	}
+	for i, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r == '_':
+		case r >= '0' && r <= '9' && i > 0:
+		case (r == '-' || r == '.') && i > 0:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func validateRunAsUser(prefix, name string) error {
+	if name == "" {
+		return nil
+	}
+	if runtime.GOOS == "windows" {
+		return fmt.Errorf("config: %s.run_as_user is only supported on Linux/macOS", prefix)
+	}
+	if name == "root" || name == "0" {
+		return fmt.Errorf("config: %s.run_as_user must not be root", prefix)
+	}
+	if !isValidRunAsUserName(name) {
+		return fmt.Errorf("config: %s.run_as_user %q contains invalid characters (allowed: a-z, A-Z, 0-9, -, _, .; must start with a letter or underscore)", prefix, name)
+	}
+	return nil
+}
 
 // configMu serializes read-modify-write cycles to prevent lost updates.
 var configMu sync.Mutex
@@ -224,6 +263,19 @@ type ProjectConfig struct {
 	// the current session has been inactive for the specified number of minutes.
 	// 0 or nil disables the behavior.
 	ResetOnIdleMins *int `toml:"reset_on_idle_mins,omitempty"`
+	// RunAsUser, when set, causes the agent command for this project to be
+	// spawned under a different Unix user via `sudo -n -iu <user> --`. This
+	// provides OS-level file-system isolation from the supervisor user who
+	// runs cc-connect itself. Requires passwordless sudo to the target user
+	// and is POSIX-only. See docs/usage.md "Running agents as a different
+	// Unix user" for setup and migration.
+	RunAsUser string `toml:"run_as_user,omitempty"`
+	// RunAsEnv optionally extends the minimal environment variable allowlist
+	// that crosses the sudo boundary when RunAsUser is set. The default
+	// allowlist (PATH, LANG, LC_*, TERM) is always included. Use this only
+	// for variables that the target user cannot reasonably set in their own
+	// shell profile.
+	RunAsEnv []string `toml:"run_as_env,omitempty"`
 	// ShowContextIndicator: nil/true = append [ctx: ~N%] to assistant replies; false = hide.
 	ShowContextIndicator *bool           `toml:"show_context_indicator,omitempty"`
 	InjectSender         *bool           `toml:"inject_sender,omitempty"`     // prepend sender identity (platform + user ID) to each message sent to the agent
@@ -396,6 +448,9 @@ func (c *Config) validate() error {
 		}
 		if proj.ResetOnIdleMins != nil && *proj.ResetOnIdleMins < 0 {
 			return fmt.Errorf("config: %s.reset_on_idle_mins must be >= 0", prefix)
+		}
+		if err := validateRunAsUser(prefix, proj.RunAsUser); err != nil {
+			return err
 		}
 		if err := validateReferenceConfig(prefix, proj.References); err != nil {
 			return err

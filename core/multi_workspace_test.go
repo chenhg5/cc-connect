@@ -428,3 +428,160 @@ func TestWorkspaceInitFlow_SlashCommandCleansUpExistingFlow(t *testing.T) {
 		t.Error("expected init flow to be deleted after slash command, but it still exists")
 	}
 }
+
+// runAsTestAgent is a stub agent that reports run_as_user and run_as_env
+// via the interface methods getOrCreateWorkspaceAgent uses for propagation.
+// It exists specifically to test TestMultiWorkspaceAgent_PropagatesRunAsUser
+// below — a regression guard for the bug discovered on 2026-04-08 where
+// multi-workspace mode silently dropped run_as_user between the parent
+// (project-level) agent and per-workspace agent instances, causing all
+// coding sessions to run as the supervisor user instead of the configured
+// target user.
+type runAsTestAgent struct {
+	*namedTestAgent
+	runAsUser string
+	runAsEnv  []string
+}
+
+func (a *runAsTestAgent) GetRunAsUser() string { return a.runAsUser }
+func (a *runAsTestAgent) GetRunAsEnv() []string {
+	if len(a.runAsEnv) == 0 {
+		return nil
+	}
+	out := make([]string, len(a.runAsEnv))
+	copy(out, a.runAsEnv)
+	return out
+}
+
+// TestMultiWorkspaceAgent_PropagatesRunAsUser is a regression guard for the
+// bug where Engine.getOrCreateWorkspaceAgent constructed per-workspace agents
+// with a fresh opts map that lost the run_as_user and run_as_env fields from
+// the parent project's agent options.
+//
+// Before the fix: per-workspace agents were created with opts containing
+// only work_dir/model/mode. The project-level run_as_user injected into
+// proj.Agent.Options by cmd/cc-connect/main.go was not propagated, so
+// spawned sessions used the legacy (supervisor-user) path despite the
+// preflight saying otherwise.
+//
+// After the fix: getOrCreateWorkspaceAgent asserts on the parent agent's
+// GetRunAsUser() and GetRunAsEnv() interface methods (same pattern as
+// GetModel/GetMode) and copies both into the workspace opts.
+//
+// See docs/spikes/2026-04-08-spike-3-4-results.md and
+// docs/plans/2026-04-08-diderot-master-plan.md in the partseeker/data-worklog
+// repo for the context that motivated this fix.
+func TestMultiWorkspaceAgent_PropagatesRunAsUser(t *testing.T) {
+	baseDir := t.TempDir()
+	workspaceDir := filepath.Join(baseDir, "loader")
+	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	agentName := "runas-propagation-test-agent"
+	var capturedOpts []map[string]any
+	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) {
+		// Copy the opts map since the caller may reuse it.
+		snapshot := make(map[string]any, len(opts))
+		for k, v := range opts {
+			snapshot[k] = v
+		}
+		capturedOpts = append(capturedOpts, snapshot)
+		return &runAsTestAgent{
+			namedTestAgent: &namedTestAgent{name: agentName},
+			runAsUser:      "partseeker-coder",
+			runAsEnv:       []string{"CUSTOM_VAR", "ANOTHER_VAR"},
+		}, nil
+	})
+
+	// Parent agent: reports run_as_user = "partseeker-coder" and a two-entry
+	// run_as_env extension. The per-workspace agent must inherit both.
+	parent := &runAsTestAgent{
+		namedTestAgent: &namedTestAgent{name: agentName},
+		runAsUser:      "partseeker-coder",
+		runAsEnv:       []string{"CUSTOM_VAR", "ANOTHER_VAR"},
+	}
+	e := NewEngine("test", parent, nil, "", LangEnglish)
+	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+
+	// Trigger per-workspace agent creation via the path the production
+	// code uses when a message arrives for a resolved workspace.
+	_, _, err := e.getOrCreateWorkspaceAgent(workspaceDir)
+	if err != nil {
+		t.Fatalf("getOrCreateWorkspaceAgent: %v", err)
+	}
+
+	if len(capturedOpts) != 1 {
+		t.Fatalf("expected exactly 1 CreateAgent call, got %d", len(capturedOpts))
+	}
+	opts := capturedOpts[0]
+
+	gotUser, _ := opts["run_as_user"].(string)
+	if gotUser != "partseeker-coder" {
+		t.Errorf("run_as_user propagated to workspace opts = %q, want %q", gotUser, "partseeker-coder")
+	}
+
+	gotEnv, _ := opts["run_as_env"].([]string)
+	wantEnv := []string{"CUSTOM_VAR", "ANOTHER_VAR"}
+	if len(gotEnv) != len(wantEnv) {
+		t.Fatalf("run_as_env length = %d, want %d; got = %v", len(gotEnv), len(wantEnv), gotEnv)
+	}
+	for i := range wantEnv {
+		if gotEnv[i] != wantEnv[i] {
+			t.Errorf("run_as_env[%d] = %q, want %q", i, gotEnv[i], wantEnv[i])
+		}
+	}
+
+	// work_dir is still propagated (regression guard for the existing
+	// behaviour the fix must not break).
+	if gotDir, _ := opts["work_dir"].(string); gotDir != workspaceDir {
+		t.Errorf("work_dir propagated = %q, want %q", gotDir, workspaceDir)
+	}
+}
+
+// TestMultiWorkspaceAgent_NoPropagationWhenParentHasNoRunAs verifies that
+// workspace agents do not get spurious run_as_user or run_as_env entries
+// when the parent agent does not report them. This is the "isolation not
+// configured" path — the vast majority of cc-connect deployments, which
+// must remain unchanged.
+func TestMultiWorkspaceAgent_NoPropagationWhenParentHasNoRunAs(t *testing.T) {
+	baseDir := t.TempDir()
+	workspaceDir := filepath.Join(baseDir, "loader")
+	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	agentName := "runas-none-test-agent"
+	var capturedOpts []map[string]any
+	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) {
+		snapshot := make(map[string]any, len(opts))
+		for k, v := range opts {
+			snapshot[k] = v
+		}
+		capturedOpts = append(capturedOpts, snapshot)
+		return &namedTestAgent{name: agentName}, nil
+	})
+
+	// Parent agent is the plain namedTestAgent with no GetRunAsUser method.
+	// The interface assertion in getOrCreateWorkspaceAgent must skip silently.
+	parent := &namedTestAgent{name: agentName}
+	e := NewEngine("test", parent, nil, "", LangEnglish)
+	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+
+	_, _, err := e.getOrCreateWorkspaceAgent(workspaceDir)
+	if err != nil {
+		t.Fatalf("getOrCreateWorkspaceAgent: %v", err)
+	}
+
+	if len(capturedOpts) != 1 {
+		t.Fatalf("expected exactly 1 CreateAgent call, got %d", len(capturedOpts))
+	}
+	opts := capturedOpts[0]
+
+	if _, exists := opts["run_as_user"]; exists {
+		t.Errorf("run_as_user should not be present in opts when parent has no isolation; got %v", opts["run_as_user"])
+	}
+	if _, exists := opts["run_as_env"]; exists {
+		t.Errorf("run_as_env should not be present in opts when parent has no isolation; got %v", opts["run_as_env"])
+	}
+}

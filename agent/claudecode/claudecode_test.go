@@ -8,6 +8,47 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
+func TestNew_ParsesRunAsUserAndRunAsEnv(t *testing.T) {
+	opts := map[string]any{
+		"work_dir":    "/tmp/claudecode-test",
+		"run_as_user": "partseeker-coder",
+		"run_as_env":  []any{"PGSSLROOTCERT", "PGSSLMODE"},
+	}
+	a, err := New(opts)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	ag, ok := a.(*Agent)
+	if !ok {
+		t.Fatalf("agent is not *Agent: %T", a)
+	}
+	if ag.spawnOpts.RunAsUser != "partseeker-coder" {
+		t.Errorf("spawnOpts.RunAsUser = %q, want %q", ag.spawnOpts.RunAsUser, "partseeker-coder")
+	}
+	if got := ag.spawnOpts.EnvAllowlist; len(got) != 2 || got[0] != "PGSSLROOTCERT" || got[1] != "PGSSLMODE" {
+		t.Errorf("spawnOpts.EnvAllowlist = %v, want [PGSSLROOTCERT PGSSLMODE]", got)
+	}
+}
+
+func TestNew_RunAsUserSkipsClaudeLookPath(t *testing.T) {
+	// With run_as_user set, the supervisor's PATH lookup for "claude" is
+	// skipped because the target user's PATH is what matters. Verify that
+	// New() doesn't fail even when claude isn't on this test process's PATH.
+	opts := map[string]any{
+		"work_dir":    "/tmp/claudecode-test",
+		"run_as_user": "target-that-definitely-exists",
+	}
+	// Note: this test relies on New() NOT calling exec.LookPath("claude")
+	// when run_as_user is set. If claude IS on PATH in the test env,
+	// either branch of the code returns success and the test still passes.
+	if _, err := New(opts); err != nil {
+		// The only other reason New() could fail for these opts is the
+		// LookPath check — fail loudly if that's what happened.
+		t.Errorf("New with run_as_user returned error (LookPath not skipped?): %v", err)
+	}
+	_ = core.AgentSystemPrompt // keep the core import used
+}
+
 func TestParseUserQuestions_ValidInput(t *testing.T) {
 	input := map[string]any{
 		"questions": []any{

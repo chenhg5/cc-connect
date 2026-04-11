@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"flag"
@@ -81,6 +82,9 @@ func main() {
 		case "weixin":
 			runWeixin(os.Args[2:])
 			return
+		case "doctor":
+			runDoctor(os.Args[2:])
+			return
 		}
 	}
 
@@ -159,10 +163,31 @@ func main() {
 
 	setupLogger(cfg.Log.Level, logWriter)
 
+	// run_as_user preflight + isolation audit. MUST run before any engine
+	// or agent is constructed. If any project fails, abort startup
+	// entirely — never half-spawn. See core/runas_check.go and
+	// core/runas_audit.go for the checks themselves.
+	if err := runRunAsUserStartupChecks(context.Background(), cfg); err != nil {
+		slog.Error("run_as_user: startup checks failed, refusing to start", "error", err)
+		os.Exit(1)
+	}
+
 	engines := make([]*core.Engine, 0, len(cfg.Projects))
 	effectiveWorkDirs := make([]string, 0, len(cfg.Projects))
 
 	for _, proj := range cfg.Projects {
+		// Inject project-level run_as_user / run_as_env into the agent's
+		// opts map so agents that support isolation can pick them up
+		// without needing their own top-level config plumbing.
+		if proj.RunAsUser != "" {
+			if proj.Agent.Options == nil {
+				proj.Agent.Options = map[string]any{}
+			}
+			proj.Agent.Options["run_as_user"] = proj.RunAsUser
+			if len(proj.RunAsEnv) > 0 {
+				proj.Agent.Options["run_as_env"] = proj.RunAsEnv
+			}
+		}
 		agent, err := core.CreateAgent(proj.Agent.Type, buildAgentOptions(cfg.DataDir, proj))
 		if err != nil {
 			slog.Error("failed to create agent", "project", proj.Name, "error", err)

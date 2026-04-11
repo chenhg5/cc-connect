@@ -2042,6 +2042,22 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 			opts["mode"] = m
 		}
 	}
+	// Copy run_as_user (and run_as_env) for OS-level isolation. Without
+	// this, per-workspace agents silently bypass the project-level
+	// run_as_user config because their opts map is freshly constructed
+	// above, not inherited from the project-level opts that main.go
+	// already decorated. See cc-connect#496 and the cc-connect/core/runas.go
+	// preamble for why run_as_user has to survive this copy.
+	if ma, ok := e.agent.(interface{ GetRunAsUser() string }); ok {
+		if u := ma.GetRunAsUser(); u != "" {
+			opts["run_as_user"] = u
+		}
+	}
+	if ma, ok := e.agent.(interface{ GetRunAsEnv() []string }); ok {
+		if env := ma.GetRunAsEnv(); len(env) > 0 {
+			opts["run_as_env"] = env
+		}
+	}
 
 	agent, err := CreateAgent(e.agent.Name(), opts)
 	if err != nil {
