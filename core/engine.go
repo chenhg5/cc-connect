@@ -8754,7 +8754,7 @@ func (e *Engine) cmdSkills(p Platform, msg *Message) {
 		sb.WriteString(e.i18n.Tf(MsgSkillsTitle, e.agent.Name(), len(skills)))
 
 		for _, s := range skills {
-			sb.WriteString(fmt.Sprintf("  /%s — %s\n", s.Name, s.Description))
+			sb.WriteString(fmt.Sprintf("  /%s — %s\n", displayCommandForPlatform(p.Name(), s.Name), s.Description))
 		}
 
 		sb.WriteString("\n" + e.i18n.T(MsgSkillsHint))
@@ -8763,6 +8763,41 @@ func (e *Engine) cmdSkills(p Platform, msg *Message) {
 	}
 
 	e.replyWithCard(p, msg.ReplyCtx, e.renderSkillsCard())
+}
+
+func displayCommandForPlatform(platformName, command string) string {
+	if !strings.EqualFold(platformName, "telegram") {
+		return command
+	}
+	if sanitized := sanitizeTelegramDisplayCommand(command); sanitized != "" {
+		return sanitized
+	}
+	return command
+}
+
+func sanitizeTelegramDisplayCommand(cmd string) string {
+	cmd = strings.ToLower(cmd)
+	var b strings.Builder
+	for _, c := range cmd {
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+			b.WriteRune(c)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	result := b.String()
+	for strings.Contains(result, "__") {
+		result = strings.ReplaceAll(result, "__", "_")
+	}
+	result = strings.Trim(result, "_")
+	if len(result) == 0 || result[0] < 'a' || result[0] > 'z' {
+		return ""
+	}
+	if len(result) > 32 {
+		result = result[:32]
+	}
+	return result
 }
 
 // ── /config command ──────────────────────────────────────────
