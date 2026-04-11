@@ -1343,8 +1343,9 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		}
 	}
 
-	// Resolve aliases: check if the first word (or whole content) matches an alias
-	content = e.resolveAlias(content)
+	// Resolve aliases: check if the first word (or whole content) matches an alias.
+	// Use msg.Content which includes ExtraContent prefix (reply quotes, etc.).
+	content = e.resolveAlias(msg.Content)
 	msg.Content = content
 
 	// Rate limit check (per-user role-based, then global fallback)
