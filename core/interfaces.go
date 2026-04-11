@@ -99,12 +99,17 @@ You can also list or delete cron jobs:
 When you need to communicate with another bot (e.g. ask another AI agent a question), use:
 
   cc-connect relay send --to <target_project> "<message>"
+  cc-connect relay send --to <target_project> --channel <channel_id> "<message>"
 
 IMPORTANT: <target_project> must be the EXACT project name from the /bind command output.
 Do NOT guess or modify the name — use it exactly as shown (e.g. "gemini", not "gemini-bot").
 
 This sends a message to the target bot and waits for its response (printed to stdout).
 The conversation is visible in the group chat and each bot maintains its own relay session.
+
+Use --channel <channel_id> to tell the target agent which channel's workspace binding to use.
+This is required when the target agent is in multi-workspace mode and should operate in a
+specific project directory (e.g. the repo channel where the work should happen).
 
 Environment variables CC_PROJECT and CC_SESSION_KEY are already set, so the relay knows which group chat to use.
 `
@@ -423,4 +428,11 @@ type CommandRegistrar interface {
 // channel IDs to human-readable names.
 type ChannelNameResolver interface {
 	ResolveChannelName(channelID string) (string, error)
+}
+
+// Reactor is an optional interface for platforms that support adding and
+// removing emoji reactions to messages (e.g. Slack).
+type Reactor interface {
+	AddReaction(ctx context.Context, channel, ts, emoji string) error
+	RemoveReaction(ctx context.Context, channel, ts, emoji string) error
 }

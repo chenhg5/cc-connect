@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -178,4 +179,42 @@ func TestCompactProgressWriter_DoesNotTransformToolResults(t *testing.T) {
 	if got := payload.Items[0].Text; got != raw {
 		t.Fatalf("tool result text = %q, want raw %q", got, raw)
 	}
+}
+
+// stubCompactProgressPlatform is a test double that implements Platform +
+// ProgressStyleProvider + MessageUpdater + PreviewStarter + ProgressCardPayloadSupport.
+type stubCompactProgressPlatform struct {
+	stubPlatformEngine
+	style          string
+	supportPayload bool
+
+	mu            sync.Mutex
+	previewStarts []string
+	updates       []string
+}
+
+func (s *stubCompactProgressPlatform) ProgressStyle() string { return s.style }
+
+func (s *stubCompactProgressPlatform) SupportsProgressCardPayload() bool { return s.supportPayload }
+
+func (s *stubCompactProgressPlatform) SendPreviewStart(_ context.Context, _ any, content string) (any, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.previewStarts = append(s.previewStarts, content)
+	return "handle", nil
+}
+
+func (s *stubCompactProgressPlatform) UpdateMessage(_ context.Context, _ any, content string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.updates = append(s.updates, content)
+	return nil
+}
+
+func (s *stubCompactProgressPlatform) getPreviewStarts() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, len(s.previewStarts))
+	copy(out, s.previewStarts)
+	return out
 }

@@ -33,6 +33,15 @@ type SendRequest struct {
 	Message    string            `json:"message"`
 	Images     []ImageAttachment `json:"images,omitempty"`
 	Files      []FileAttachment  `json:"files,omitempty"`
+	NewThread  bool              `json:"new_thread,omitempty"`
+}
+
+// ReactRequest is the JSON body for POST /react and POST /unreact.
+type ReactRequest struct {
+	Project string `json:"project"`
+	Channel string `json:"channel"`
+	Ts      string `json:"ts"`
+	Emoji   string `json:"emoji"`
 }
 
 // NewAPIServer creates an API server on a Unix socket.
@@ -71,6 +80,8 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 	s.mux.HandleFunc("/relay/send", s.handleRelaySend)
 	s.mux.HandleFunc("/relay/bind", s.handleRelayBind)
 	s.mux.HandleFunc("/relay/binding", s.handleRelayBinding)
+	s.mux.HandleFunc("/react", s.handleReact)
+	s.mux.HandleFunc("/unreact", s.handleUnreact)
 
 	return s, nil
 }
@@ -167,8 +178,14 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := engine.SendToSessionWithAttachments(req.SessionKey, req.Message, req.Images, req.Files); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	var sendErr error
+	if req.NewThread {
+		sendErr = engine.PostToNewThread(req.SessionKey, req.Message, req.Images, req.Files)
+	} else {
+		sendErr = engine.SendToSessionWithAttachments(req.SessionKey, req.Message, req.Images, req.Files)
+	}
+	if sendErr != nil {
+		http.Error(w, sendErr.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -295,7 +312,6 @@ func (s *APIServer) handleCronAdd(w http.ResponseWriter, r *http.Request) {
 		Enabled:     true,
 		Silent:      req.Silent,
 		SessionMode: NormalizeCronSessionMode(req.SessionMode),
-		Mode:        req.Mode,
 		TimeoutMins: req.TimeoutMins,
 	}
 	job.CreatedAt = time.Now()
@@ -496,4 +512,58 @@ func (s *APIServer) handleRelayBinding(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	apiJSON(w, http.StatusOK, binding)
+}
+
+func (s *APIServer) handleReact(w http.ResponseWriter, r *http.Request) {
+	s.handleReaction(w, r, false)
+}
+
+func (s *APIServer) handleUnreact(w http.ResponseWriter, r *http.Request) {
+	s.handleReaction(w, r, true)
+}
+
+func (s *APIServer) handleReaction(w http.ResponseWriter, r *http.Request, remove bool) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req ReactRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Channel == "" || req.Ts == "" || req.Emoji == "" {
+		http.Error(w, "channel, ts, and emoji are required", http.StatusBadRequest)
+		return
+	}
+
+	s.mu.RLock()
+	engine, ok := s.engines[req.Project]
+	if !ok && len(s.engines) == 1 {
+		for _, e := range s.engines {
+			engine = e
+			ok = true
+		}
+	}
+	s.mu.RUnlock()
+
+	if !ok {
+		http.Error(w, fmt.Sprintf("project %q not found", req.Project), http.StatusNotFound)
+		return
+	}
+
+	var err error
+	if remove {
+		err = engine.Unreact(r.Context(), req.Channel, req.Ts, req.Emoji)
+	} else {
+		err = engine.React(r.Context(), req.Channel, req.Ts, req.Emoji)
+	}
+	if err != nil {
+		slog.Warn("reaction failed", "emoji", req.Emoji, "remove", remove, "error", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	apiJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -292,56 +291,6 @@ func (p *stubCardPlatform) SendCard(_ context.Context, _ any, card *Card) error 
 	return nil
 }
 
-type stubCompactProgressPlatform struct {
-	stubPlatformEngine
-	style          string
-	supportPayload bool
-	previewMu      sync.Mutex
-	previewStarts  []string
-	previewEdits   []string
-}
-
-func (p *stubCompactProgressPlatform) ProgressStyle() string {
-	if p.style == "" {
-		return "compact"
-	}
-	return p.style
-}
-
-func (p *stubCompactProgressPlatform) SupportsProgressCardPayload() bool {
-	return p.supportPayload
-}
-
-func (p *stubCompactProgressPlatform) SendPreviewStart(_ context.Context, _ any, content string) (any, error) {
-	p.previewMu.Lock()
-	p.previewStarts = append(p.previewStarts, content)
-	p.previewMu.Unlock()
-	return "preview-handle", nil
-}
-
-func (p *stubCompactProgressPlatform) UpdateMessage(_ context.Context, _ any, content string) error {
-	p.previewMu.Lock()
-	p.previewEdits = append(p.previewEdits, content)
-	p.previewMu.Unlock()
-	return nil
-}
-
-func (p *stubCompactProgressPlatform) getPreviewStarts() []string {
-	p.previewMu.Lock()
-	defer p.previewMu.Unlock()
-	out := make([]string, len(p.previewStarts))
-	copy(out, p.previewStarts)
-	return out
-}
-
-func (p *stubCompactProgressPlatform) getPreviewEdits() []string {
-	p.previewMu.Lock()
-	defer p.previewMu.Unlock()
-	out := make([]string, len(p.previewEdits))
-	copy(out, p.previewEdits)
-	return out
-}
-
 type stubModelModeAgent struct {
 	stubAgent
 	model           string
@@ -349,12 +298,6 @@ type stubModelModeAgent struct {
 	reasoningEffort string
 	providers       []ProviderConfig
 	active          string
-}
-
-type stubStrictModelAgent struct {
-	stubModelModeAgent
-	models []ModelOption
-	calls  int
 }
 
 type stubLiveModeSession struct {
@@ -380,11 +323,6 @@ func (a *stubModelModeAgent) AvailableModels(_ context.Context) []ModelOption {
 		{Name: "gpt-4.1", Desc: "Balanced", Alias: "gpt"},
 		{Name: "gpt-4.1-mini", Desc: "Fast"},
 	}
-}
-
-func (a *stubStrictModelAgent) AvailableModels(_ context.Context) []ModelOption {
-	a.calls++
-	return append([]ModelOption(nil), a.models...)
 }
 
 func (a *stubModelModeAgent) SetProviders(providers []ProviderConfig) {
@@ -450,18 +388,6 @@ func (a *stubModelModeAgent) AvailableReasoningEfforts() []string {
 	return []string{"low", "medium", "high", "xhigh"}
 }
 
-type namedStubModelModeAgent struct {
-	stubModelModeAgent
-	name string
-}
-
-func (a *namedStubModelModeAgent) Name() string {
-	if a.name == "" {
-		return "named-stub-model"
-	}
-	return a.name
-}
-
 type stubWorkDirAgent struct {
 	stubAgent
 	workDir string
@@ -473,18 +399,6 @@ func (a *stubWorkDirAgent) SetWorkDir(dir string) {
 
 func (a *stubWorkDirAgent) GetWorkDir() string {
 	return a.workDir
-}
-
-type namedStubWorkDirAgent struct {
-	stubWorkDirAgent
-	name string
-}
-
-func (a *namedStubWorkDirAgent) Name() string {
-	if a.name == "" {
-		return "named-stub-workdir"
-	}
-	return a.name
 }
 
 type stubListAgent struct {
@@ -667,37 +581,6 @@ func TestEngineSendToSessionWithAttachments_MultiWorkspaceRawSessionKey(t *testi
 	err := e.SendToSessionWithAttachments(rawKey, "delivery ready", nil, nil)
 	if err != nil {
 		t.Fatalf("SendToSessionWithAttachments returned error: %v", err)
-	}
-	if got := p.getSent(); len(got) != 1 || got[0] != "delivery ready" {
-		t.Fatalf("sent text = %#v, want one message", got)
-	}
-}
-
-// stubProactiveSendPlatform implements ReplyContextReconstruct for proactive
-// SendToSessionWithAttachments when there is no interactive session.
-type stubProactiveSendPlatform struct {
-	stubMediaPlatform
-	reconstructKey string
-}
-
-func (p *stubProactiveSendPlatform) ReconstructReplyCtx(sessionKey string) (any, error) {
-	p.reconstructKey = sessionKey
-	return "proactive-rctx", nil
-}
-
-func TestEngineSendToSessionWithAttachments_WorkspacePrefixedSessionKey(t *testing.T) {
-	p := &stubProactiveSendPlatform{
-		stubMediaPlatform: stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "slack"}},
-	}
-	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-
-	prefixed := "/tmp/myproject:slack:C123:U1"
-	err := e.SendToSessionWithAttachments(prefixed, "delivery ready", nil, nil)
-	if err != nil {
-		t.Fatalf("SendToSessionWithAttachments returned error: %v", err)
-	}
-	if p.reconstructKey != "slack:C123:U1" {
-		t.Fatalf("ReconstructReplyCtx key = %q, want slack:C123:U1", p.reconstructKey)
 	}
 	if got := p.getSent(); len(got) != 1 || got[0] != "delivery ready" {
 		t.Fatalf("sent text = %#v, want one message", got)
@@ -902,11 +785,10 @@ func TestProcessInteractiveEvents_DoesNotSuppressDifferentFinalText(t *testing.T
 	}
 }
 
-func TestProcessInteractiveEvents_HiddenToolProgressKeepsPreviewOnFinalize(t *testing.T) {
+func TestProcessInteractiveEvents_QuietToolTurnKeepsPreviewOnFinalize(t *testing.T) {
 	p := &mockKeepPreviewPlatform{}
 	p.n = "feishu"
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	e.SetDisplayConfig(DisplayCfg{ThinkingMessages: true, ThinkingMaxLen: 300, ToolMaxLen: 500, ToolMessages: false})
 	sessionKey := "test:user1"
 	session := e.sessions.GetOrCreateActive(sessionKey)
 	agentSession := newControllableSession("s1")
@@ -914,6 +796,7 @@ func TestProcessInteractiveEvents_HiddenToolProgressKeepsPreviewOnFinalize(t *te
 		agentSession: agentSession,
 		platform:     p,
 		replyCtx:     "ctx-1",
+		quiet:        true,
 	}
 	e.interactiveStates[sessionKey] = state
 
@@ -937,288 +820,6 @@ func TestProcessInteractiveEvents_HiddenToolProgressKeepsPreviewOnFinalize(t *te
 	}
 	if len(previewMsgs) == 0 || previewMsgs[len(previewMsgs)-1] != "update:final response" {
 		t.Fatalf("preview messages = %#v, want in-place final update", previewMsgs)
-	}
-}
-
-func TestProcessInteractiveEvents_ToolMessagesDisabledSuppressesToolProgressOnly(t *testing.T) {
-	p := &stubPlatformEngine{n: "telegram"}
-	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	e.SetDisplayConfig(DisplayCfg{ThinkingMessages: true, ThinkingMaxLen: 300, ToolMaxLen: 500, ToolMessages: false})
-	sessionKey := "telegram:user1"
-	session := e.sessions.GetOrCreateActive(sessionKey)
-	agentSession := newControllableSession("s1")
-	state := &interactiveState{
-		agentSession: agentSession,
-		platform:     p,
-		replyCtx:     "ctx-1",
-	}
-	e.interactiveStates[sessionKey] = state
-
-	agentSession.events <- Event{Type: EventThinking, Content: "planning"}
-	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "echo hi"}
-	agentSession.events <- Event{Type: EventToolResult, ToolName: "Bash", ToolResult: "hi"}
-	agentSession.events <- Event{Type: EventText, Content: "done"}
-	agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
-
-	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, nil)
-
-	sent := p.getSent()
-	if len(sent) < 1 || len(sent) > 2 {
-		t.Fatalf("sent = %#v, want final response with optional standalone thinking message", sent)
-	}
-	for _, msg := range sent {
-		if strings.Contains(msg, "Bash") || strings.Contains(msg, "echo hi") || strings.Contains(msg, "hi") {
-			t.Fatalf("tool progress should stay hidden, got %q", msg)
-		}
-	}
-	if len(sent) == 2 && !strings.Contains(sent[0], "planning") {
-		t.Fatalf("thinking message = %q, want planning", sent[0])
-	}
-	if sent[len(sent)-1] != "done" {
-		t.Fatalf("final message = %q, want done", sent[len(sent)-1])
-	}
-}
-
-func TestProcessInteractiveEvents_CompactProgressCoalescesThinkingAndToolUse(t *testing.T) {
-	p := &stubCompactProgressPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
-	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	sessionKey := "feishu:user1"
-	session := e.sessions.GetOrCreateActive(sessionKey)
-	agentSession := newControllableSession("s1")
-	state := &interactiveState{
-		agentSession: agentSession,
-		platform:     p,
-		replyCtx:     "ctx-compact",
-	}
-	e.interactiveStates[sessionKey] = state
-
-	agentSession.events <- Event{Type: EventThinking, Content: "Thinking about command"}
-	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "pwd"}
-	agentSession.events <- Event{Type: EventText, Content: "done"}
-	agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
-
-	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, state.replyCtx)
-
-	sent := p.getSent()
-	if len(sent) != 1 || sent[0] != "done" {
-		t.Fatalf("sent = %#v, want only final assistant reply", sent)
-	}
-
-	starts := p.getPreviewStarts()
-	if len(starts) != 1 {
-		t.Fatalf("preview starts = %d, want 1", len(starts))
-	}
-	if !strings.Contains(starts[0], "Thinking") {
-		t.Fatalf("start preview should contain thinking text, got %q", starts[0])
-	}
-
-	edits := p.getPreviewEdits()
-	if len(edits) != 1 {
-		t.Fatalf("preview edits = %d, want 1", len(edits))
-	}
-	if !strings.Contains(edits[0], "pwd") {
-		t.Fatalf("updated preview should contain tool input, got %q", edits[0])
-	}
-}
-
-func TestProcessInteractiveEvents_CardProgressUsesCardTemplate(t *testing.T) {
-	p := &stubCompactProgressPlatform{
-		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
-		style:              "card",
-	}
-	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	sessionKey := "feishu:user2"
-	session := e.sessions.GetOrCreateActive(sessionKey)
-	agentSession := newControllableSession("s2")
-	state := &interactiveState{
-		agentSession: agentSession,
-		platform:     p,
-		replyCtx:     "ctx-card",
-	}
-	e.interactiveStates[sessionKey] = state
-
-	agentSession.events <- Event{Type: EventThinking, Content: "Plan first"}
-	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "echo hi"}
-	agentSession.events <- Event{Type: EventText, Content: "done"}
-	agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
-
-	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m2", time.Now(), nil, nil, state.replyCtx)
-
-	sent := p.getSent()
-	if len(sent) != 1 || sent[0] != "done" {
-		t.Fatalf("sent = %#v, want only final assistant reply", sent)
-	}
-
-	starts := p.getPreviewStarts()
-	if len(starts) != 1 {
-		t.Fatalf("preview starts = %d, want 1", len(starts))
-	}
-	if !strings.Contains(starts[0], "**Progress**") {
-		t.Fatalf("start preview should contain fallback progress title, got %q", starts[0])
-	}
-	if !strings.Contains(starts[0], "1.") {
-		t.Fatalf("start preview should contain first item index, got %q", starts[0])
-	}
-
-	edits := p.getPreviewEdits()
-	if len(edits) != 1 {
-		t.Fatalf("preview edits = %d, want 1", len(edits))
-	}
-	if !strings.Contains(edits[0], "2.") {
-		t.Fatalf("updated preview should contain second item index, got %q", edits[0])
-	}
-	if !strings.Contains(edits[0], "echo hi") {
-		t.Fatalf("updated preview should contain tool command, got %q", edits[0])
-	}
-}
-
-func TestProcessInteractiveEvents_FinalReplyUsesWorkspaceForReferenceRendering(t *testing.T) {
-	p := &stubPlatformEngine{n: "feishu"}
-	a := &namedStubModelModeAgent{name: "codex"}
-	e := NewEngine("test", a, []Platform{p}, "", LangEnglish)
-	e.SetReferenceConfig(ReferenceRenderCfg{
-		NormalizeAgents: []string{"codex"},
-		RenderPlatforms: []string{"feishu"},
-		DisplayPath:     "relative",
-		MarkerStyle:     "emoji",
-		EnclosureStyle:  "code",
-	})
-
-	sessionKey := "feishu:user-relative"
-	session := e.sessions.GetOrCreateActive(sessionKey)
-	agentSession := newControllableSession("s-relative")
-	state := &interactiveState{
-		agentSession: agentSession,
-		platform:     p,
-		replyCtx:     "ctx-relative",
-		workspaceDir: "/root/code",
-	}
-	e.interactiveStates[sessionKey] = state
-
-	agentSession.events <- Event{
-		Type:    EventResult,
-		Content: "/root/code/demo-repo/src/services/user_profile_service.ts:42",
-		Done:    true,
-	}
-
-	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-relative", time.Now(), nil, nil, state.replyCtx)
-
-	sent := p.getSent()
-	if len(sent) != 1 {
-		t.Fatalf("sent = %#v, want one final reply", sent)
-	}
-	if got := sent[0]; got != "📄 `demo-repo/src/services/user_profile_service.ts:42`" {
-		t.Fatalf("final reply = %q, want workspace-relative rendered reference", got)
-	}
-}
-
-func TestProcessInteractiveEvents_FinalReplyRemainsRawWhenReferencesDisabled(t *testing.T) {
-	p := &stubPlatformEngine{n: "feishu"}
-	a := &namedStubModelModeAgent{name: "codex"}
-	e := NewEngine("test", a, []Platform{p}, "", LangEnglish)
-	e.SetReferenceConfig(ReferenceRenderCfg{
-		NormalizeAgents: []string{},
-		RenderPlatforms: []string{"feishu"},
-		DisplayPath:     "relative",
-		MarkerStyle:     "emoji",
-		EnclosureStyle:  "code",
-	})
-
-	sessionKey := "feishu:user-relative-raw"
-	session := e.sessions.GetOrCreateActive(sessionKey)
-	agentSession := newControllableSession("s-relative-raw")
-	state := &interactiveState{
-		agentSession: agentSession,
-		platform:     p,
-		replyCtx:     "ctx-relative-raw",
-		workspaceDir: "/root/code/demo",
-	}
-	e.interactiveStates[sessionKey] = state
-
-	raw := "Check [/root/code/demo/ui/recovery_contact_form.tsx](/root/code/demo/ui/recovery_contact_form.tsx) and /root/code/demo/ui/recovery_contact_form.tsx:11"
-	agentSession.events <- Event{
-		Type:    EventResult,
-		Content: raw,
-		Done:    true,
-	}
-
-	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-relative-raw", time.Now(), nil, nil, state.replyCtx)
-
-	sent := p.getSent()
-	if len(sent) != 1 {
-		t.Fatalf("sent = %#v, want one final reply", sent)
-	}
-	if got := sent[0]; got != raw {
-		t.Fatalf("final reply = %q, want raw unchanged content %q", got, raw)
-	}
-}
-
-func TestProcessInteractiveEvents_CardProgressUsesStructuredPayloadWhenSupported(t *testing.T) {
-	p := &stubCompactProgressPlatform{
-		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
-		style:              "card",
-		supportPayload:     true,
-	}
-	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	sessionKey := "feishu:user3"
-	session := e.sessions.GetOrCreateActive(sessionKey)
-	agentSession := newControllableSession("s3")
-	state := &interactiveState{
-		agentSession: agentSession,
-		platform:     p,
-		replyCtx:     "ctx-card-structured",
-	}
-	e.interactiveStates[sessionKey] = state
-
-	agentSession.events <- Event{Type: EventThinking, Content: "Plan first"}
-	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "echo hi"}
-	agentSession.events <- Event{Type: EventText, Content: "done"}
-	agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
-
-	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m3", time.Now(), nil, nil, state.replyCtx)
-
-	starts := p.getPreviewStarts()
-	if len(starts) != 1 {
-		t.Fatalf("preview starts = %d, want 1", len(starts))
-	}
-	if !strings.HasPrefix(starts[0], ProgressCardPayloadPrefix) {
-		t.Fatalf("start preview should be structured payload, got %q", starts[0])
-	}
-	startPayload, ok := ParseProgressCardPayload(starts[0])
-	if !ok {
-		t.Fatalf("start preview should parse as structured payload, got %q", starts[0])
-	}
-	if len(startPayload.Items) != 1 {
-		t.Fatalf("start payload items = %d, want 1", len(startPayload.Items))
-	}
-	if startPayload.Items[0].Kind != ProgressEntryThinking {
-		t.Fatalf("start payload kind = %q, want %q", startPayload.Items[0].Kind, ProgressEntryThinking)
-	}
-	if startPayload.State != ProgressCardStateRunning {
-		t.Fatalf("start payload state = %q, want %q", startPayload.State, ProgressCardStateRunning)
-	}
-
-	edits := p.getPreviewEdits()
-	if len(edits) != 2 {
-		t.Fatalf("preview edits = %d, want 2", len(edits))
-	}
-	updatePayload, ok := ParseProgressCardPayload(edits[0])
-	if !ok {
-		t.Fatalf("update preview should parse as structured payload, got %q", edits[0])
-	}
-	if len(updatePayload.Items) != 2 {
-		t.Fatalf("update payload items = %d, want 2", len(updatePayload.Items))
-	}
-	if !strings.Contains(updatePayload.Items[1].Text, "echo hi") {
-		t.Fatalf("second payload item should contain tool command, got %q", updatePayload.Items[1].Text)
-	}
-
-	finalPayload, ok := ParseProgressCardPayload(edits[1])
-	if !ok {
-		t.Fatalf("final preview should parse as structured payload, got %q", edits[1])
-	}
-	if finalPayload.State != ProgressCardStateCompleted {
-		t.Fatalf("final payload state = %q, want %q", finalPayload.State, ProgressCardStateCompleted)
 	}
 }
 
@@ -2059,186 +1660,158 @@ func TestHandleMessage_MultiWorkspacePreservesCCSessionKey(t *testing.T) {
 	}
 }
 
-func TestHandleMessage_AutoResetOnIdle_RotatesToNewSession(t *testing.T) {
-	p := &stubPlatformEngine{n: "test"}
-	agentSession := newResultAgentSession("fresh reply")
-	agent := &resultAgent{session: agentSession}
-	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
-	e.SetResetOnIdle(60 * time.Minute)
+// --- quiet tests ---
 
-	key := "test:user1"
-	old := e.sessions.GetOrCreateActive(key)
-	old.AddHistory("user", "stale context")
-	old.SetAgentSessionID("old-session", "stub")
-	staleAt := time.Now().Add(-2 * time.Hour)
-	old.mu.Lock()
-	old.UpdatedAt = staleAt
-	old.mu.Unlock()
-
-	msg := &Message{
-		SessionKey: key,
-		Platform:   "test",
-		UserID:     "u1",
-		UserName:   "user",
-		Content:    "hello after idle",
-		ReplyCtx:   "ctx",
-	}
-	e.handleMessage(p, msg)
-
-	deadline := time.After(2 * time.Second)
-	for {
-		active := e.sessions.GetOrCreateActive(key)
-		sent := p.getSent()
-		if active.ID != old.ID && len(active.GetHistory(0)) >= 2 && len(sent) >= 2 {
-			break
-		}
-		select {
-		case <-deadline:
-			t.Fatalf("timed out waiting for idle auto-reset, sent=%v active=%s old=%s", sent, active.ID, old.ID)
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
-
-	active := e.sessions.GetOrCreateActive(key)
-	if active.ID == old.ID {
-		t.Fatal("expected a new active session after idle auto-reset")
-	}
-	if got := old.GetAgentSessionID(); got != "old-session" {
-		t.Fatalf("old session agent id = %q, want old-session preserved", got)
-	}
-	if got := len(old.GetHistory(0)); got != 1 {
-		t.Fatalf("old session history len = %d, want 1 preserved entry", got)
-	}
-	if got := old.GetUpdatedAt(); !got.Equal(staleAt) {
-		t.Fatalf("old session updated_at = %v, want unchanged %v", got, staleAt)
-	}
-
-	history := active.GetHistory(0)
-	if len(history) != 2 {
-		t.Fatalf("new session history len = %d, want 2", len(history))
-	}
-	if history[0].Role != "user" || history[0].Content != "hello after idle" {
-		t.Fatalf("unexpected first history entry: %#v", history[0])
-	}
-	if history[1].Role != "assistant" || history[1].Content != "fresh reply" {
-		t.Fatalf("unexpected second history entry: %#v", history[1])
-	}
-
-	sent := p.getSent()
-	if !strings.Contains(sent[0], "Session auto-reset") {
-		t.Fatalf("first reply = %q, want auto-reset notice", sent[0])
-	}
-	if got := sent[len(sent)-1]; got != "fresh reply" {
-		t.Fatalf("final reply = %q, want fresh reply", got)
-	}
-}
-
-func TestHandleMessage_AutoResetOnIdle_DoesNotRotateFreshSession(t *testing.T) {
-	p := &stubPlatformEngine{n: "test"}
-	agentSession := newResultAgentSession("normal reply")
-	agent := &resultAgent{session: agentSession}
-	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
-	e.SetResetOnIdle(60 * time.Minute)
-
-	key := "test:user1"
-	session := e.sessions.GetOrCreateActive(key)
-	session.AddHistory("user", "recent context")
-	session.SetAgentSessionID("existing-session", "stub")
-	recentAt := time.Now().Add(-5 * time.Minute)
-	session.mu.Lock()
-	session.UpdatedAt = recentAt
-	session.mu.Unlock()
-
-	msg := &Message{
-		SessionKey: key,
-		Platform:   "test",
-		UserID:     "u1",
-		UserName:   "user",
-		Content:    "follow up",
-		ReplyCtx:   "ctx",
-	}
-	e.handleMessage(p, msg)
-
-	deadline := time.After(2 * time.Second)
-	for {
-		if len(session.GetHistory(0)) >= 3 {
-			break
-		}
-		select {
-		case <-deadline:
-			t.Fatalf("timed out waiting for normal turn, sent=%v", p.getSent())
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
-
-	active := e.sessions.GetOrCreateActive(key)
-	if active.ID != session.ID {
-		t.Fatalf("active session = %s, want unchanged %s", active.ID, session.ID)
-	}
-	sent := p.getSent()
-	for _, line := range sent {
-		if strings.Contains(line, "Session auto-reset") {
-			t.Fatalf("unexpected auto-reset notice in replies: %v", sent)
-		}
-	}
-}
-
-func TestHandleMessage_AutoResetOnIdle_DoesNotTriggerForSlashCommand(t *testing.T) {
-	p := &stubPlatformEngine{n: "test"}
-	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	e.SetResetOnIdle(60 * time.Minute)
-
-	key := "test:user1"
-	session := e.sessions.GetOrCreateActive(key)
-	session.AddHistory("user", "stale context")
-	session.SetAgentSessionID("old-session", "stub")
-	staleAt := time.Now().Add(-2 * time.Hour)
-	session.mu.Lock()
-	session.UpdatedAt = staleAt
-	session.mu.Unlock()
-
-	msg := &Message{
-		SessionKey: key,
-		Platform:   "test",
-		UserID:     "u1",
-		UserName:   "user",
-		Content:    "/list",
-		ReplyCtx:   "ctx",
-	}
-	e.handleMessage(p, msg)
-
-	active := e.sessions.GetOrCreateActive(key)
-	if active.ID != session.ID {
-		t.Fatalf("active session = %s, want unchanged %s", active.ID, session.ID)
-	}
-	for _, line := range p.getSent() {
-		if strings.Contains(line, "Session auto-reset") {
-			t.Fatalf("unexpected auto-reset notice for slash command: %v", p.getSent())
-		}
-	}
-}
-
-func TestConfigItems_ThinkingMessagesToggle(t *testing.T) {
+func TestQuietSessionToggle(t *testing.T) {
 	e := newTestEngine()
-	items := e.configItems()
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
 
-	var item *configItem
-	for i := range items {
-		if items[i].key == "thinking_messages" {
-			item = &items[i]
-			break
-		}
+	// /quiet — per-session toggle on
+	e.cmdQuiet(p, msg, nil)
+
+	e.interactiveMu.Lock()
+	state := e.interactiveStates["test:user1"]
+	e.interactiveMu.Unlock()
+
+	if state == nil {
+		t.Fatal("expected interactiveState to be created")
 	}
-	if item == nil {
-		t.Fatal("expected thinking_messages config item")
+	state.mu.Lock()
+	q := state.quiet
+	state.mu.Unlock()
+	if !q {
+		t.Fatal("expected session quiet to be true")
 	}
-	if err := item.setFunc("false"); err != nil {
-		t.Fatalf("set thinking_messages: %v", err)
+
+	// /quiet — per-session toggle off
+	e.cmdQuiet(p, msg, nil)
+	state.mu.Lock()
+	q = state.quiet
+	state.mu.Unlock()
+	if q {
+		t.Fatal("expected session quiet to be false after second toggle")
 	}
-	if e.display.ThinkingMessages {
-		t.Fatal("expected thinking messages to be disabled")
+}
+
+func TestQuietSessionResetsOnNewSession(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	// Enable per-session quiet
+	e.cmdQuiet(p, msg, nil)
+
+	// Simulate /new
+	e.cleanupInteractiveState("test:user1")
+
+	// State should be gone, quiet resets
+	e.interactiveMu.Lock()
+	state := e.interactiveStates["test:user1"]
+	e.interactiveMu.Unlock()
+	if state != nil {
+		t.Fatal("expected interactiveState to be cleaned up")
+	}
+
+	// Global quiet should still be off
+	e.quietMu.RLock()
+	gq := e.quiet
+	e.quietMu.RUnlock()
+	if gq {
+		t.Fatal("expected global quiet to be false")
+	}
+}
+
+func TestQuietGlobalToggle(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	// Default: global quiet is off
+	if e.quiet {
+		t.Fatal("expected global quiet to be false by default")
+	}
+
+	// /quiet global — toggle on
+	e.cmdQuiet(p, msg, []string{"global"})
+	e.quietMu.RLock()
+	q := e.quiet
+	e.quietMu.RUnlock()
+	if !q {
+		t.Fatal("expected global quiet to be true")
+	}
+
+	// /quiet global — toggle off
+	e.cmdQuiet(p, msg, []string{"global"})
+	e.quietMu.RLock()
+	q = e.quiet
+	e.quietMu.RUnlock()
+	if q {
+		t.Fatal("expected global quiet to be false after second toggle")
+	}
+}
+
+func TestQuietGlobalPersistsAcrossSessions(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	// Enable global quiet
+	e.cmdQuiet(p, msg, []string{"global"})
+
+	// Simulate /new
+	e.cleanupInteractiveState("test:user1")
+
+	// Global quiet should still be on
+	e.quietMu.RLock()
+	q := e.quiet
+	e.quietMu.RUnlock()
+	if !q {
+		t.Fatal("expected global quiet to remain true after session cleanup")
+	}
+}
+
+func TestQuietGlobalAndSessionCombined(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	// Only global quiet on — should suppress
+	e.cmdQuiet(p, msg, []string{"global"})
+	e.quietMu.RLock()
+	gq := e.quiet
+	e.quietMu.RUnlock()
+	if !gq {
+		t.Fatal("expected global quiet on")
+	}
+
+	// Session quiet is off (no state yet) — global alone should be enough
+	e.interactiveMu.Lock()
+	state := e.interactiveStates["test:user1"]
+	e.interactiveMu.Unlock()
+	if state != nil {
+		t.Fatal("expected no session state yet")
+	}
+
+	// Turn off global, turn on session
+	e.cmdQuiet(p, msg, []string{"global"}) // global off
+	e.cmdQuiet(p, msg, nil)                // session on
+
+	e.quietMu.RLock()
+	gq = e.quiet
+	e.quietMu.RUnlock()
+	if gq {
+		t.Fatal("expected global quiet off")
+	}
+
+	e.interactiveMu.Lock()
+	state = e.interactiveStates["test:user1"]
+	e.interactiveMu.Unlock()
+	state.mu.Lock()
+	sq := state.quiet
+	state.mu.Unlock()
+	if !sq {
+		t.Fatal("expected session quiet on")
 	}
 }
 
@@ -2269,61 +1842,6 @@ func TestReplyWithCard_UsesCardSenderWhenSupported(t *testing.T) {
 	}
 	if len(p.sent) != 0 {
 		t.Fatalf("plain replies = %d, want 0", len(p.sent))
-	}
-}
-
-func TestReply_DoesNotTransformLocalReferencesWhenEnabled(t *testing.T) {
-	p := &stubPlatformEngine{n: "feishu"}
-	a := &namedStubModelModeAgent{name: "codex"}
-	e := NewEngine("test", a, []Platform{p}, "", LangEnglish)
-	e.SetBaseWorkDir("/root/code/demo")
-	e.SetReferenceConfig(ReferenceRenderCfg{
-		NormalizeAgents: []string{"codex"},
-		RenderPlatforms: []string{"feishu"},
-		DisplayPath:     "relative",
-		MarkerStyle:     "emoji",
-		EnclosureStyle:  "code",
-	})
-
-	e.reply(p, "ctx", "See /root/code/demo/src/app.ts:42")
-
-	if len(p.sent) != 1 {
-		t.Fatalf("sent messages = %d, want 1", len(p.sent))
-	}
-	if got := p.sent[0]; got != "See /root/code/demo/src/app.ts:42" {
-		t.Fatalf("reply content = %q, want raw path", got)
-	}
-}
-
-func TestReplyWithCard_DoesNotTransformMarkdownOrFallback(t *testing.T) {
-	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
-	a := &namedStubModelModeAgent{name: "codex"}
-	e := NewEngine("test", a, []Platform{p}, "", LangEnglish)
-	e.SetBaseWorkDir("/root/code/demo")
-	e.SetReferenceConfig(ReferenceRenderCfg{
-		NormalizeAgents: []string{"codex"},
-		RenderPlatforms: []string{"feishu"},
-		DisplayPath:     "basename",
-		MarkerStyle:     "ascii",
-		EnclosureStyle:  "code",
-	})
-	card := NewCard().Markdown("Inspect /root/code/demo/src/app.ts:42").Build()
-
-	e.replyWithCard(p, "ctx", card)
-
-	if len(p.repliedCards) != 1 {
-		t.Fatalf("replied cards = %d, want 1", len(p.repliedCards))
-	}
-	rendered := p.repliedCards[0]
-	md, ok := rendered.Elements[0].(CardMarkdown)
-	if !ok {
-		t.Fatalf("first card element = %T, want CardMarkdown", rendered.Elements[0])
-	}
-	if md.Content != "Inspect /root/code/demo/src/app.ts:42" {
-		t.Fatalf("card markdown = %q, want raw reference", md.Content)
-	}
-	if got := rendered.RenderText(); !strings.Contains(got, "/root/code/demo/src/app.ts:42") {
-		t.Fatalf("fallback RenderText() = %q, want raw reference", got)
 	}
 }
 
@@ -2812,10 +2330,10 @@ func TestDeleteMode_FormSubmitShowsConfirmThenDeletes(t *testing.T) {
 	}
 }
 
-func TestExecuteCardActionStop_RemovesInteractiveState(t *testing.T) {
+func TestExecuteCardActionStop_PreservesQuietStateWithoutCleanupReinsert(t *testing.T) {
 	e := newTestEngine()
 	e.interactiveMu.Lock()
-	e.interactiveStates["test:user1"] = &interactiveState{}
+	e.interactiveStates["test:user1"] = &interactiveState{quiet: true}
 	e.interactiveMu.Unlock()
 
 	e.executeCardAction("/stop", "", "test:user1")
@@ -2823,8 +2341,16 @@ func TestExecuteCardActionStop_RemovesInteractiveState(t *testing.T) {
 	e.interactiveMu.Lock()
 	state := e.interactiveStates["test:user1"]
 	e.interactiveMu.Unlock()
-	if state != nil {
-		t.Fatal("expected interactive state to be removed")
+	if state == nil {
+		t.Fatal("expected interactive state to remain for quiet preservation")
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if !state.quiet {
+		t.Fatal("expected quiet state to remain enabled")
+	}
+	if state.pending != nil {
+		t.Fatal("expected pending permission to be cleared")
 	}
 }
 
@@ -2942,51 +2468,6 @@ func TestCmdModel_UpdatesActiveProviderModel(t *testing.T) {
 	}
 }
 
-func TestCmdModel_DirectNameDoesNotNeedModelListMatch(t *testing.T) {
-	p := &stubPlatformEngine{n: "plain"}
-	agent := &stubStrictModelAgent{}
-	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
-	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
-
-	e.cmdModel(p, msg, []string{"switch", "custom/provider-model"})
-
-	if agent.model != "custom/provider-model" {
-		t.Fatalf("agent model = %q, want custom/provider-model", agent.model)
-	}
-	if agent.calls != 0 {
-		t.Fatalf("AvailableModels calls = %d, want 0 for direct name switch", agent.calls)
-	}
-}
-
-func TestCmdModel_AliasWithPunctuationStillResolves(t *testing.T) {
-	p := &stubPlatformEngine{n: "plain"}
-	agent := &stubStrictModelAgent{models: []ModelOption{{Name: "openai/gpt-4.1", Alias: "gpt-4.1"}}}
-	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
-	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
-
-	e.cmdModel(p, msg, []string{"switch", "gpt-4.1"})
-
-	if agent.model != "openai/gpt-4.1" {
-		t.Fatalf("agent model = %q, want openai/gpt-4.1", agent.model)
-	}
-	if agent.calls != 1 {
-		t.Fatalf("AvailableModels calls = %d, want 1 for punctuated alias lookup", agent.calls)
-	}
-}
-
-func TestCmdModel_AliasStillResolvesOnColdStart(t *testing.T) {
-	p := &stubPlatformEngine{n: "plain"}
-	agent := &stubStrictModelAgent{models: []ModelOption{{Name: "gpt-4.1", Alias: "gpt"}}}
-	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
-	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
-
-	e.cmdModel(p, msg, []string{"switch", "gpt"})
-
-	if agent.model != "gpt-4.1" {
-		t.Fatalf("agent model = %q, want gpt-4.1", agent.model)
-	}
-}
-
 func TestCmdModel_LegacySyntaxStillWorks(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	agent := &stubModelModeAgent{}
@@ -3070,196 +2551,6 @@ func TestCmdModel_DoesNotClaimSuccessWhenModelSaveFails(t *testing.T) {
 	}
 	if !strings.Contains(sent[0], "Failed to change model") {
 		t.Fatalf("reply = %q, want model change failure message", sent[0])
-	}
-}
-
-func TestCmdModel_MultiWorkspaceUsesWorkspaceAgentAndSessions(t *testing.T) {
-	p := &stubPlatformEngine{n: "plain"}
-	globalAgent := &stubModelModeAgent{model: "gpt-4.1-mini"}
-	e := NewEngine("test", globalAgent, []Platform{p}, "", LangEnglish)
-
-	baseDir := t.TempDir()
-	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
-	e.SetMultiWorkspace(baseDir, bindingPath)
-
-	wsDir := normalizeWorkspacePath(t.TempDir())
-	channelID := "C-model"
-	e.workspaceBindings.Bind("project:test", channelID, "chan", wsDir)
-
-	ws := e.workspacePool.GetOrCreate(wsDir)
-	wsAgent := &stubModelModeAgent{model: "gpt-4.1-mini"}
-	ws.agent = wsAgent
-	ws.sessions = NewSessionManager("")
-
-	msg := &Message{SessionKey: "feishu:" + channelID + ":u1", ReplyCtx: "ctx"}
-
-	globalSession := e.sessions.GetOrCreateActive(msg.SessionKey)
-	globalSession.SetAgentSessionID("global-session", "test")
-	wsSession := ws.sessions.GetOrCreateActive(msg.SessionKey)
-	wsSession.SetAgentSessionID("workspace-session", "test")
-
-	e.cmdModel(p, msg, []string{"switch", "gpt"})
-
-	if wsAgent.model != "gpt-4.1" {
-		t.Fatalf("workspace agent model = %q, want gpt-4.1", wsAgent.model)
-	}
-	if globalAgent.model != "gpt-4.1-mini" {
-		t.Fatalf("global agent model = %q, want unchanged", globalAgent.model)
-	}
-	if got := ws.sessions.GetOrCreateActive(msg.SessionKey).AgentSessionID; got != "" {
-		t.Fatalf("workspace session id = %q, want cleared", got)
-	}
-	if got := e.sessions.GetOrCreateActive(msg.SessionKey).AgentSessionID; got != "global-session" {
-		t.Fatalf("global session id = %q, want untouched", got)
-	}
-}
-
-func TestCmdModel_MultiWorkspaceSwitchDoesNotMutateProviderModel(t *testing.T) {
-	p := &stubPlatformEngine{n: "plain"}
-	globalAgent := &stubModelModeAgent{model: "gpt-4.1-mini"}
-	e := NewEngine("test", globalAgent, []Platform{p}, "", LangEnglish)
-
-	baseDir := t.TempDir()
-	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
-	e.SetMultiWorkspace(baseDir, bindingPath)
-
-	wsDir := normalizeWorkspacePath(t.TempDir())
-	channelID := "C-model-provider"
-	e.workspaceBindings.Bind("project:test", channelID, "chan", wsDir)
-
-	ws := e.workspacePool.GetOrCreate(wsDir)
-	wsAgent := &stubModelModeAgent{
-		model: "gpt-4.1-mini",
-		providers: []ProviderConfig{{
-			Name:   "openai",
-			Model:  "gpt-4.1-mini",
-			Models: []ModelOption{{Name: "gpt-4.1", Alias: "gpt"}, {Name: "gpt-4.1-mini", Alias: "mini"}},
-		}},
-		active: "openai",
-	}
-	ws.agent = wsAgent
-	ws.sessions = NewSessionManager("")
-
-	msg := &Message{SessionKey: "feishu:" + channelID + ":u1", ReplyCtx: "ctx"}
-
-	e.cmdModel(p, msg, []string{"switch", "gpt"})
-
-	if wsAgent.model != "gpt-4.1" {
-		t.Fatalf("workspace agent model = %q, want gpt-4.1", wsAgent.model)
-	}
-	if got := wsAgent.GetActiveProvider(); got == nil || got.Model != "gpt-4.1-mini" {
-		t.Fatalf("workspace active provider = %#v, want unchanged model gpt-4.1-mini", got)
-	}
-}
-
-func TestGetOrCreateWorkspaceAgent_InheritsActiveProvider(t *testing.T) {
-	agentName := "test-workspace-provider-inherit"
-	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) {
-		agent := &namedStubModelModeAgent{name: agentName}
-		if model, ok := opts["model"].(string); ok {
-			agent.model = model
-		}
-		if mode, ok := opts["mode"].(string); ok {
-			agent.mode = mode
-		}
-		return agent, nil
-	})
-
-	globalAgent := &namedStubModelModeAgent{
-		name: agentName,
-		stubModelModeAgent: stubModelModeAgent{
-			model: "gpt-4.1-mini",
-			mode:  "default",
-			providers: []ProviderConfig{
-				{Name: "openai", Model: "gpt-4.1-mini"},
-				{Name: "azure", Model: "gpt-4.1"},
-			},
-			active: "azure",
-		},
-	}
-	e := NewEngine("test", globalAgent, []Platform{&stubPlatformEngine{n: "plain"}}, "", LangEnglish)
-	e.SetMultiWorkspace(t.TempDir(), filepath.Join(t.TempDir(), "bindings.json"))
-
-	wsAgentRaw, _, err := e.getOrCreateWorkspaceAgent(normalizeWorkspacePath(t.TempDir()))
-	if err != nil {
-		t.Fatalf("getOrCreateWorkspaceAgent returned error: %v", err)
-	}
-
-	wsAgent, ok := wsAgentRaw.(*namedStubModelModeAgent)
-	if !ok {
-		t.Fatalf("workspace agent type = %T, want *namedStubModelModeAgent", wsAgentRaw)
-	}
-	if wsAgent.model != "gpt-4.1-mini" {
-		t.Fatalf("workspace model = %q, want inherited global model", wsAgent.model)
-	}
-	if got := wsAgent.GetActiveProvider(); got == nil || got.Name != "azure" {
-		t.Fatalf("workspace active provider = %#v, want azure", got)
-	}
-}
-
-func TestWorkspaceContext_PerChannelIndependence(t *testing.T) {
-	agentName := "test-workspace-context-dir-override"
-	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) {
-		agent := &namedStubWorkDirAgent{name: agentName}
-		if workDir, ok := opts["work_dir"].(string); ok {
-			agent.workDir = workDir
-		}
-		return agent, nil
-	})
-
-	workspace := normalizeWorkspacePath(t.TempDir())
-	dirA := filepath.Join(workspace, "channelA")
-	dirB := filepath.Join(workspace, "channelB")
-	if err := os.MkdirAll(dirA, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.MkdirAll(dirB, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-
-	store := NewProjectStateStore(filepath.Join(t.TempDir(), "projects", "test.state.json"))
-	keyA := workspace + ":feishu:oc_aaa:ou_111"
-	keyB := workspace + ":feishu:oc_bbb:ou_222"
-	store.SetWorkspaceDirOverride(keyA, dirA)
-	store.SetWorkspaceDirOverride(keyB, dirB)
-	store.Save()
-
-	e := NewEngine("test", &namedStubWorkDirAgent{name: agentName, stubWorkDirAgent: stubWorkDirAgent{workDir: workspace}}, []Platform{&stubPlatformEngine{n: "plain"}}, "", LangEnglish)
-	e.SetMultiWorkspace(workspace, filepath.Join(t.TempDir(), "bindings.json"))
-	e.SetProjectStateStore(store)
-
-	agentA, sessionsA, interactiveKeyA, effectiveDirA, err := e.workspaceContext(workspace, "feishu:oc_aaa:ou_111")
-	if err != nil {
-		t.Fatalf("workspaceContext A error: %v", err)
-	}
-	agentB, sessionsB, interactiveKeyB, effectiveDirB, err := e.workspaceContext(workspace, "feishu:oc_bbb:ou_222")
-	if err != nil {
-		t.Fatalf("workspaceContext B error: %v", err)
-	}
-
-	if interactiveKeyA != keyA {
-		t.Fatalf("interactiveKeyA = %q, want %q", interactiveKeyA, keyA)
-	}
-	if interactiveKeyB != keyB {
-		t.Fatalf("interactiveKeyB = %q, want %q", interactiveKeyB, keyB)
-	}
-	if effectiveDirA != dirA {
-		t.Fatalf("effectiveDirA = %q, want %q", effectiveDirA, dirA)
-	}
-	if effectiveDirB != dirB {
-		t.Fatalf("effectiveDirB = %q, want %q", effectiveDirB, dirB)
-	}
-	if agentA == agentB {
-		t.Fatal("workspaceContext returned same agent for different effective dirs")
-	}
-	if sessionsA == sessionsB {
-		t.Fatal("workspaceContext returned same session manager for different effective dirs")
-	}
-	if got := agentA.(interface{ GetWorkDir() string }).GetWorkDir(); got != dirA {
-		t.Fatalf("agentA workDir = %q, want %q", got, dirA)
-	}
-	if got := agentB.(interface{ GetWorkDir() string }).GetWorkDir(); got != dirB {
-		t.Fatalf("agentB workDir = %q, want %q", got, dirB)
 	}
 }
 
@@ -3380,74 +2671,6 @@ func TestCmdDir_PersistsAbsoluteOverride(t *testing.T) {
 	reloaded := NewProjectStateStore(statePath)
 	if got := reloaded.WorkDirOverride(); got != nextDir {
 		t.Fatalf("WorkDirOverride() = %q, want %q", got, nextDir)
-	}
-}
-
-func TestDirApply_MultiWorkspacePersistsWorkspaceSpecificOverride(t *testing.T) {
-	baseDir := t.TempDir()
-	workspace := normalizeWorkspacePath(t.TempDir())
-	nextDir := filepath.Join(workspace, "next")
-	if err := os.MkdirAll(nextDir, 0o755); err != nil {
-		t.Fatalf("mkdir next dir: %v", err)
-	}
-
-	statePath := filepath.Join(t.TempDir(), "projects", "test.state.json")
-	store := NewProjectStateStore(statePath)
-	agent := &stubWorkDirAgent{workDir: workspace}
-	e := NewEngine("test", agent, []Platform{&stubPlatformEngine{n: "plain"}}, "", LangEnglish)
-	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
-	e.SetProjectStateStore(store)
-
-	sessions := NewSessionManager("")
-	interactiveKey := workspace + ":feishu:oc_xxx:ou_yyy"
-
-	errMsg, successMsg := e.dirApply(agent, sessions, interactiveKey, "feishu:oc_xxx:ou_yyy", []string{"next"})
-	if errMsg != "" {
-		t.Fatalf("dirApply errMsg = %q, want empty", errMsg)
-	}
-	if !strings.Contains(successMsg, nextDir) {
-		t.Fatalf("successMsg = %q, want path %q", successMsg, nextDir)
-	}
-
-	reloaded := NewProjectStateStore(statePath)
-	if got := reloaded.WorkspaceDirOverride(interactiveKey); got != nextDir {
-		t.Fatalf("WorkspaceDirOverride(%q) = %q, want %q", interactiveKey, got, nextDir)
-	}
-	if got := reloaded.WorkDirOverride(); got != "" {
-		t.Fatalf("WorkDirOverride() = %q, want empty in multi-workspace mode", got)
-	}
-}
-
-func TestDirApply_MultiWorkspaceResetClearsWorkspaceSpecificOverride(t *testing.T) {
-	baseDir := t.TempDir()
-	workspace := normalizeWorkspacePath(t.TempDir())
-	overrideDir := filepath.Join(workspace, "override")
-	if err := os.MkdirAll(overrideDir, 0o755); err != nil {
-		t.Fatalf("mkdir override dir: %v", err)
-	}
-
-	statePath := filepath.Join(t.TempDir(), "projects", "test.state.json")
-	store := NewProjectStateStore(statePath)
-	interactiveKey := workspace + ":feishu:oc_xxx:ou_yyy"
-	store.SetWorkspaceDirOverride(interactiveKey, overrideDir)
-	store.Save()
-
-	agent := &stubWorkDirAgent{workDir: overrideDir}
-	e := NewEngine("test", agent, []Platform{&stubPlatformEngine{n: "plain"}}, "", LangEnglish)
-	e.SetBaseWorkDir(baseDir)
-	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
-	e.SetProjectStateStore(store)
-
-	sessions := NewSessionManager("")
-
-	errMsg, _ := e.dirApply(agent, sessions, interactiveKey, "feishu:oc_xxx:ou_yyy", []string{"reset"})
-	if errMsg != "" {
-		t.Fatalf("dirApply errMsg = %q, want empty", errMsg)
-	}
-
-	reloaded := NewProjectStateStore(statePath)
-	if got := reloaded.WorkspaceDirOverride(interactiveKey); got != "" {
-		t.Fatalf("WorkspaceDirOverride(%q) after reset = %q, want empty", interactiveKey, got)
 	}
 }
 
@@ -3595,39 +2818,6 @@ func TestCmdDir_DisplaysCorrectIndices(t *testing.T) {
 	}
 }
 
-func TestCmdDir_ExpandsTilde(t *testing.T) {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip("cannot determine home dir:", err)
-	}
-
-	p := &stubPlatformEngine{n: "plain"}
-	agent := &stubWorkDirAgent{workDir: homeDir}
-	e := NewEngine("test", agent, []Platform{p}, t.TempDir(), LangEnglish)
-	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
-
-	tests := []struct {
-		input   string
-		wantDir string
-	}{
-		{"~", homeDir},
-		{"~/", homeDir},
-		{"~/Documents", filepath.Join(homeDir, "Documents")},
-	}
-
-	for _, tc := range tests {
-		agent.workDir = homeDir
-		// Ensure the target directory exists before switching
-		if err := os.MkdirAll(tc.wantDir, 0o755); err != nil {
-			t.Fatalf("MkdirAll %q: %v", tc.wantDir, err)
-		}
-		e.cmdDir(p, msg, []string{tc.input})
-		if agent.workDir != tc.wantDir {
-			t.Errorf("input %q: workDir = %q, want %q", tc.input, agent.workDir, tc.wantDir)
-		}
-	}
-}
-
 func TestEngine_AdminFrom_GatesDir(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	tempDir := t.TempDir()
@@ -3721,12 +2911,6 @@ func TestCmdMode_UsesInlineButtonsOnButtonOnlyPlatform(t *testing.T) {
 	if got := p.buttonRows[0][0].Data; got != "cmd:/mode default" {
 		t.Fatalf("first /mode button = %q, want %q", got, "cmd:/mode default")
 	}
-	if !strings.Contains(p.buttonContent, "Available: `default` / `yolo`") {
-		t.Fatalf("button content = %q, want dynamic mode list", p.buttonContent)
-	}
-	if strings.Contains(p.buttonContent, "`edit`") {
-		t.Fatalf("button content = %q, want no hardcoded mode list", p.buttonContent)
-	}
 }
 
 func TestCmdMode_AppliesLiveModeWithoutReset(t *testing.T) {
@@ -3779,34 +2963,6 @@ func TestCmdStatus_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	}
 	if strings.Contains(p.sent[0], "[← Back]") {
 		t.Fatalf("status text = %q, should not be card fallback text", p.sent[0])
-	}
-}
-
-func TestCmdQuiet_TogglesDisplay(t *testing.T) {
-	p := &stubPlatformEngine{n: "test"}
-	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	e.SetDisplayConfig(DisplayCfg{ThinkingMessages: true, ToolMessages: true, ThinkingMaxLen: 300, ToolMaxLen: 500})
-	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
-
-	// First /quiet: both on → both off (quiet ON)
-	e.cmdQuiet(p, msg, nil)
-	if e.display.ThinkingMessages || e.display.ToolMessages {
-		t.Fatalf("after first /quiet: ThinkingMessages=%v, ToolMessages=%v, want both false",
-			e.display.ThinkingMessages, e.display.ToolMessages)
-	}
-	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "Quiet mode ON") {
-		t.Fatalf("sent = %q, want quiet ON message", p.sent)
-	}
-
-	// Second /quiet: both off → both on (quiet OFF)
-	p.sent = nil
-	e.cmdQuiet(p, msg, nil)
-	if !e.display.ThinkingMessages || !e.display.ToolMessages {
-		t.Fatalf("after second /quiet: ThinkingMessages=%v, ToolMessages=%v, want both true",
-			e.display.ThinkingMessages, e.display.ToolMessages)
-	}
-	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "Quiet mode OFF") {
-		t.Fatalf("sent = %q, want quiet OFF message", p.sent)
 	}
 }
 
@@ -4736,6 +3892,38 @@ func TestSessionClearedAfterNew_RecyclesAliveAgent(t *testing.T) {
 	}
 }
 
+// TestSessionMismatch_DoesNotLeakQuiet verifies that after a session mismatch,
+// the new state gets defaultQuiet instead of inheriting quiet from the stale state.
+func TestSessionMismatch_DoesNotLeakQuiet(t *testing.T) {
+	agent := &controllableAgent{nextSession: newControllableSession("new-id")}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+
+	// Seed a stale state with quiet=true.
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{
+		agentSession: newControllableSession("old-id"),
+		platform:     p,
+		replyCtx:     "ctx",
+		quiet:        true,
+	}
+	e.interactiveMu.Unlock()
+
+	// Active session wants "new-id", which mismatches "old-id".
+	session := &Session{AgentSessionID: "new-id"}
+
+	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+
+	state.mu.Lock()
+	q := state.quiet
+	state.mu.Unlock()
+	if q {
+		t.Fatal("quiet leaked from stale state into replacement — ok=false fix not working")
+	}
+}
+
 // TestSessionMismatch_ReusesWhenIDsMatch verifies that getOrCreateInteractiveStateWith
 // returns the existing state when agent session IDs match (no unnecessary recycling).
 func TestSessionMismatch_ReusesWhenIDsMatch(t *testing.T) {
@@ -5369,44 +4557,6 @@ func (s *blockingSendAgentSession) Send(_ string, _ []ImageAttachment, _ []FileA
 	return nil
 }
 
-// blockingCloseAgentSession blocks in Close until releaseClose is closed.
-// It is used to verify that /stop detaches the session and stops forwarding
-// events before the underlying agent process has fully exited.
-type blockingCloseAgentSession struct {
-	controllableAgentSession
-	closeStarted chan struct{}
-	releaseClose chan struct{}
-}
-
-func newBlockingCloseSession(id string) *blockingCloseAgentSession {
-	return &blockingCloseAgentSession{
-		controllableAgentSession: controllableAgentSession{
-			sessionID: id,
-			alive:     true,
-			events:    make(chan Event, 16),
-			closed:    make(chan struct{}),
-		},
-		closeStarted: make(chan struct{}, 1),
-		releaseClose: make(chan struct{}),
-	}
-}
-
-func (s *blockingCloseAgentSession) Close() error {
-	s.alive = false
-	select {
-	case s.closeStarted <- struct{}{}:
-	default:
-	}
-	<-s.releaseClose
-	close(s.events)
-	select {
-	case <-s.closed:
-	default:
-		close(s.closed)
-	}
-	return nil
-}
-
 // permSignalInlinePlatform wraps stubInlineButtonPlatform and signals when a
 // SendWithButtons call includes perm:allow, so tests do not read buttonRows
 // from another goroutine (race with the engine under -race).
@@ -5498,148 +4648,6 @@ func TestProcessInteractiveEvents_PermissionWhileSendBlocked(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("processInteractiveEvents did not complete")
-	}
-}
-
-func TestReapIdleWorkspaces_SkipsWorkspaceWithActiveTurn(t *testing.T) {
-	p := &stubPlatformEngine{n: "test"}
-	sess := newBlockingSendSession("busy-turn")
-	e := NewEngine("test", &controllableAgent{nextSession: sess}, []Platform{p}, "", LangEnglish)
-	e.workspacePool = newWorkspacePool(50 * time.Millisecond)
-
-	workspaceDir := normalizeWorkspacePath(t.TempDir())
-	sessionKey := "test:user1"
-	session := e.sessions.GetOrCreateActive(sessionKey)
-	if !session.TryLock() {
-		t.Fatal("expected session lock")
-	}
-
-	done := make(chan struct{})
-	go func() {
-		e.processInteractiveMessageWith(p, &Message{
-			SessionKey: sessionKey,
-			UserID:     "user1",
-			Content:    "long running task",
-			ReplyCtx:   "ctx",
-		}, session, e.agent, e.sessions, sessionKey, workspaceDir, sessionKey)
-		close(done)
-	}()
-
-	select {
-	case <-sess.sendStarted:
-	case <-time.After(2 * time.Second):
-		t.Fatal("Send did not reach blocking wait")
-	}
-
-	time.Sleep(100 * time.Millisecond)
-	e.reapIdleWorkspaces()
-
-	if !sess.Alive() {
-		t.Fatal("idle reaper closed a session with an active turn")
-	}
-	e.interactiveMu.Lock()
-	_, exists := e.interactiveStates[sessionKey]
-	e.interactiveMu.Unlock()
-	if !exists {
-		t.Fatal("idle reaper removed interactive state for an active turn")
-	}
-
-	close(sess.unblock)
-	sess.events <- Event{Type: EventResult, Content: "done", Done: true}
-
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("processInteractiveMessageWith did not complete")
-	}
-}
-
-func TestReapIdleWorkspaces_SkipsWorkspaceWaitingForPermission(t *testing.T) {
-	p := &stubPlatformEngine{n: "test"}
-	sess := newBlockingSendSession("perm-wait")
-	e := NewEngine("test", &controllableAgent{nextSession: sess}, []Platform{p}, "", LangEnglish)
-	e.workspacePool = newWorkspacePool(50 * time.Millisecond)
-
-	workspaceDir := normalizeWorkspacePath(t.TempDir())
-	sessionKey := "test:user2"
-	session := e.sessions.GetOrCreateActive(sessionKey)
-	if !session.TryLock() {
-		t.Fatal("expected session lock")
-	}
-
-	done := make(chan struct{})
-	go func() {
-		e.processInteractiveMessageWith(p, &Message{
-			SessionKey: sessionKey,
-			UserID:     "user2",
-			Content:    "needs approval",
-			ReplyCtx:   "ctx",
-		}, session, e.agent, e.sessions, sessionKey, workspaceDir, sessionKey)
-		close(done)
-	}()
-
-	select {
-	case <-sess.sendStarted:
-	case <-time.After(2 * time.Second):
-		t.Fatal("Send did not reach blocking wait")
-	}
-
-	sess.events <- Event{
-		Type:         EventPermissionRequest,
-		RequestID:    "req-1",
-		ToolName:     "write_file",
-		ToolInput:    "/tmp/x",
-		ToolInputRaw: map[string]any{"path": "/tmp/x"},
-	}
-
-	var pending *pendingPermission
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		e.interactiveMu.Lock()
-		state := e.interactiveStates[sessionKey]
-		e.interactiveMu.Unlock()
-		if state != nil {
-			state.mu.Lock()
-			pending = state.pending
-			state.mu.Unlock()
-			if pending != nil {
-				break
-			}
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if pending == nil {
-		t.Fatal("expected pending permission while turn is waiting")
-	}
-
-	time.Sleep(100 * time.Millisecond)
-	e.reapIdleWorkspaces()
-
-	if !sess.Alive() {
-		t.Fatal("idle reaper closed a session waiting for permission")
-	}
-	e.interactiveMu.Lock()
-	_, exists := e.interactiveStates[sessionKey]
-	e.interactiveMu.Unlock()
-	if !exists {
-		t.Fatal("idle reaper removed interactive state while waiting for permission")
-	}
-
-	if !e.handlePendingPermission(p, &Message{
-		SessionKey: sessionKey,
-		UserID:     "user2",
-		Content:    "allow",
-		ReplyCtx:   "ctx",
-	}, "allow") {
-		t.Fatal("expected pending permission to be handled")
-	}
-	close(sess.unblock)
-	sess.events <- Event{Type: EventResult, Content: "done", Done: true}
-
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("processInteractiveMessageWith did not complete after permission")
 	}
 }
 
@@ -5867,6 +4875,22 @@ func TestDrainOrphanedQueue_UsesWorkspaceSessionManager(t *testing.T) {
 
 // ── executeCardAction interactiveKey tests ───────────────────
 
+func TestExecuteCardAction_QuietUsesInteractiveKey(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	sessionKey := "feishu:channel1:user1"
+
+	e.executeCardAction("/quiet", "", sessionKey)
+
+	e.interactiveMu.Lock()
+	_, ok := e.interactiveStates[sessionKey]
+	e.interactiveMu.Unlock()
+	if !ok {
+		t.Error("expected interactive state to be stored under sessionKey (non-multi-workspace)")
+	}
+}
+
 func TestExecuteCardAction_ModelCleansUpWithInteractiveKey(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	agent := &stubModelModeAgent{model: "old"}
@@ -5889,89 +4913,6 @@ func TestExecuteCardAction_ModelCleansUpWithInteractiveKey(t *testing.T) {
 	e.interactiveMu.Unlock()
 	if exists {
 		t.Error("expected interactive state to be cleaned up after /model")
-	}
-}
-
-func TestExecuteCardAction_ModelUsesWorkspaceContext(t *testing.T) {
-	p := &stubPlatformEngine{n: "plain"}
-	globalAgent := &stubModelModeAgent{model: "global-old"}
-	e := NewEngine("test", globalAgent, []Platform{p}, "", LangEnglish)
-
-	baseDir := t.TempDir()
-	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
-	e.SetMultiWorkspace(baseDir, bindingPath)
-
-	wsDir := normalizeWorkspacePath(t.TempDir())
-	channelID := "channel1"
-	sessionKey := "feishu:" + channelID + ":user1"
-	e.workspaceBindings.Bind("project:test", channelID, "chan", wsDir)
-
-	ws := e.workspacePool.GetOrCreate(wsDir)
-	wsAgent := &stubModelModeAgent{model: "workspace-old"}
-	ws.agent = wsAgent
-	ws.sessions = NewSessionManager("")
-
-	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
-	e.interactiveMu.Lock()
-	e.interactiveStates[interactiveKey] = &interactiveState{}
-	e.interactiveMu.Unlock()
-
-	globalSession := e.sessions.GetOrCreateActive(sessionKey)
-	globalSession.SetAgentSessionID("global-session", "test")
-	wsSession := ws.sessions.GetOrCreateActive(sessionKey)
-	wsSession.SetAgentSessionID("workspace-session", "test")
-
-	e.executeCardAction("/model", "switch 1", sessionKey)
-
-	if wsAgent.model != "gpt-4.1" {
-		t.Fatalf("workspace agent model = %q, want gpt-4.1", wsAgent.model)
-	}
-	if globalAgent.model != "global-old" {
-		t.Fatalf("global agent model = %q, want unchanged", globalAgent.model)
-	}
-	if got := ws.sessions.GetOrCreateActive(sessionKey).AgentSessionID; got != "" {
-		t.Fatalf("workspace session id = %q, want cleared", got)
-	}
-	if got := e.sessions.GetOrCreateActive(sessionKey).AgentSessionID; got != "global-session" {
-		t.Fatalf("global session id = %q, want untouched", got)
-	}
-
-	e.interactiveMu.Lock()
-	_, exists := e.interactiveStates[interactiveKey]
-	e.interactiveMu.Unlock()
-	if exists {
-		t.Error("expected workspace interactive state to be cleaned up after /model")
-	}
-}
-
-func TestHandleCardNav_ModelCardUsesWorkspaceAgent(t *testing.T) {
-	p := &stubPlatformEngine{n: "plain"}
-	globalAgent := &stubModelModeAgent{model: "global-model"}
-	e := NewEngine("test", globalAgent, []Platform{p}, "", LangEnglish)
-
-	baseDir := t.TempDir()
-	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
-	e.SetMultiWorkspace(baseDir, bindingPath)
-
-	wsDir := normalizeWorkspacePath(t.TempDir())
-	channelID := "channel-nav"
-	sessionKey := "feishu:" + channelID + ":user1"
-	e.workspaceBindings.Bind("project:test", channelID, "chan", wsDir)
-
-	ws := e.workspacePool.GetOrCreate(wsDir)
-	ws.agent = &stubModelModeAgent{model: "workspace-model"}
-	ws.sessions = NewSessionManager("")
-
-	card := e.handleCardNav("nav:/model", sessionKey)
-	if card == nil {
-		t.Fatal("expected /model card")
-	}
-	text := card.RenderText()
-	if !strings.Contains(text, "workspace-model") {
-		t.Fatalf("model card text = %q, want workspace model", text)
-	}
-	if strings.Contains(text, "global-model") {
-		t.Fatalf("model card text = %q, should not use global model", text)
 	}
 }
 
@@ -6539,13 +5480,13 @@ func TestExecuteCardAction_StopCleansUp(t *testing.T) {
 	}
 }
 
-func TestExecuteCardAction_StopClearsInteractiveState(t *testing.T) {
+func TestExecuteCardAction_StopPreservesQuiet(t *testing.T) {
 	sess := newControllableSession("stop-quiet")
 	e := newTestEngine()
 	key := "test:user1"
 
 	e.interactiveMu.Lock()
-	e.interactiveStates[key] = &interactiveState{agentSession: sess}
+	e.interactiveStates[key] = &interactiveState{agentSession: sess, quiet: true}
 	e.interactiveMu.Unlock()
 
 	e.executeCardAction("/stop", "", key)
@@ -6554,78 +5495,14 @@ func TestExecuteCardAction_StopClearsInteractiveState(t *testing.T) {
 	state, exists := e.interactiveStates[key]
 	e.interactiveMu.Unlock()
 
-	if exists || state != nil {
-		t.Fatal("expected interactive state to be removed after /stop")
+	if !exists {
+		t.Fatal("expected interactive state to persist (quiet mode)")
 	}
-}
-
-func TestCmdStop_ReturnsWhileCloseBlockedAndStopsEventLoop(t *testing.T) {
-	p := &stubPlatformEngine{n: "test"}
-	sess := newBlockingCloseSession("stop-blocked")
-	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	key := "test:user1"
-	session := e.sessions.GetOrCreateActive(key)
-
-	state := &interactiveState{
-		agentSession: sess,
-		platform:     p,
-		replyCtx:     "ctx",
+	if !state.quiet {
+		t.Error("expected quiet flag to be preserved")
 	}
-	e.interactiveMu.Lock()
-	e.interactiveStates[key] = state
-	e.interactiveMu.Unlock()
-
-	done := make(chan struct{})
-	go func() {
-		e.processInteractiveEvents(state, session, e.sessions, key, "msg-1", time.Now(), nil, nil, "ctx")
-		close(done)
-	}()
-
-	stopDone := make(chan struct{})
-	go func() {
-		e.cmdStop(p, &Message{SessionKey: key, ReplyCtx: "ctx"})
-		close(stopDone)
-	}()
-
-	select {
-	case <-sess.closeStarted:
-	case <-time.After(2 * time.Second):
-		t.Fatal("expected Close to start after /stop")
-	}
-
-	select {
-	case <-stopDone:
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("cmdStop blocked on Close")
-	}
-
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("event loop did not stop after /stop")
-	}
-
-	e.interactiveMu.Lock()
-	_, exists := e.interactiveStates[key]
-	e.interactiveMu.Unlock()
-	if exists {
-		t.Fatal("expected interactive state to be removed after /stop")
-	}
-
-	sess.events <- Event{Type: EventText, Content: "stale output"}
-	sess.events <- Event{Type: EventResult, Content: "stale result", Done: true}
-	time.Sleep(50 * time.Millisecond)
-
-	sent := p.getSent()
-	if len(sent) != 1 || sent[0] != e.i18n.T(MsgExecutionStopped) {
-		t.Fatalf("sent messages = %v, want only execution stopped", sent)
-	}
-
-	close(sess.releaseClose)
-	select {
-	case <-sess.closed:
-	case <-time.After(2 * time.Second):
-		t.Fatal("Close did not finish after release")
+	if state.agentSession != nil {
+		t.Error("expected agentSession to be nil after /stop")
 	}
 }
 
@@ -6681,21 +5558,69 @@ func TestCmdStatus_UsesInteractiveKeyForMultiWorkspace(t *testing.T) {
 	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "card"}}
 	agent := &stubModelModeAgent{model: "gpt-4.1", mode: "default"}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
-	e.SetDisplayConfig(DisplayCfg{
-		ThinkingMessages: false,
-		ThinkingMaxLen:   300,
-		ToolMaxLen:       500,
-		ToolMessages:     true,
-	})
 
-	msg := &Message{SessionKey: "feishu:ch1:user1", Content: "/status", ReplyCtx: "ctx"}
+	wsDir := t.TempDir()
+	rawKey := "feishu:ch1:user1"
+	wsKey := wsDir + ":" + rawKey
+
+	state := &interactiveState{
+		agentSession: newControllableSession("ws-status-test"),
+		platform:     p,
+		quiet:        true,
+	}
+	iKey := e.interactiveKeyForSessionKey(wsKey)
+	e.interactiveMu.Lock()
+	e.interactiveStates[iKey] = state
+	e.interactiveMu.Unlock()
+
+	msg := &Message{SessionKey: wsKey, Content: "/status", ReplyCtx: "ctx"}
 	e.cmdStatus(p, msg)
 
+	// The status card should include the quiet state from the correct
+	// interactive key (normalized workspace path), not from a raw lookup.
 	if len(p.repliedCards) == 0 && len(p.sentCards) == 0 {
-		sent := strings.Join(p.getSent(), "\n")
-		if !strings.Contains(sent, "Thinking messages: OFF") || !strings.Contains(sent, "Tool progress: ON") {
-			t.Fatalf("expected status to reflect display flags, got %q", sent)
+		sent := p.getSent()
+		found := false
+		for _, s := range sent {
+			if strings.Contains(s, "Quiet") || strings.Contains(s, "quiet") || strings.Contains(s, "ON") {
+				found = true
+			}
 		}
+		if !found {
+			t.Fatalf("expected status to reflect quiet=true, got %v", sent)
+		}
+	}
+}
+
+func TestRenderStatusCard_UsesInteractiveKeyForRawSessionKeyInMultiWorkspace(t *testing.T) {
+	agent := &stubModelModeAgent{model: "gpt-4.1", mode: "default"}
+	e := NewEngine("test", agent, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindingPath)
+
+	wsDir := filepath.Join(baseDir, "ws1")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	normalizedWsDir := normalizeWorkspacePath(wsDir)
+	channelID := "C123"
+	rawKey := "slack:" + channelID + ":U1"
+	e.workspaceBindings.Bind("project:test", channelID, "chan", normalizedWsDir)
+
+	iKey := normalizedWsDir + ":" + rawKey
+	e.interactiveMu.Lock()
+	e.interactiveStates[iKey] = &interactiveState{quiet: true}
+	e.interactiveMu.Unlock()
+
+	card := e.renderStatusCard(rawKey, "U1")
+	if card == nil {
+		t.Fatal("expected status card")
+	}
+	text := card.RenderText()
+	if !strings.Contains(text, "Quiet mode: ON") {
+		t.Fatalf("expected status card to reflect quiet=true from interactiveKey, got %q", text)
 	}
 }
 
@@ -6736,7 +5661,7 @@ func TestBuildSenderPrompt_Enabled(t *testing.T) {
 	e := newTestEngine()
 	e.SetInjectSender(true)
 
-	result := e.buildSenderPrompt("hello world", "user123", "feishu", "feishu:channel42:user123", "")
+	result := e.buildSenderPrompt("hello world", "user123", "feishu", "feishu:channel42:user123")
 	expected := "[cc-connect sender_id=user123 platform=feishu chat_id=channel42]\nhello world"
 	if result != expected {
 		t.Fatalf("got %q, want %q", result, expected)
@@ -6747,7 +5672,7 @@ func TestBuildSenderPrompt_Disabled(t *testing.T) {
 	e := newTestEngine()
 	e.SetInjectSender(false)
 
-	result := e.buildSenderPrompt("hello", "user1", "feishu", "feishu:ch:user1", "")
+	result := e.buildSenderPrompt("hello", "user1", "feishu", "feishu:ch:user1")
 	if result != "hello" {
 		t.Fatalf("expected raw content when disabled, got %q", result)
 	}
@@ -6757,7 +5682,7 @@ func TestBuildSenderPrompt_EmptyUserID(t *testing.T) {
 	e := newTestEngine()
 	e.SetInjectSender(true)
 
-	result := e.buildSenderPrompt("hello", "", "telegram", "telegram:ch:user1", "")
+	result := e.buildSenderPrompt("hello", "", "telegram", "telegram:ch:user1")
 	if result != "hello" {
 		t.Fatalf("expected raw content when userID is empty, got %q", result)
 	}
@@ -6796,7 +5721,7 @@ func TestBuildSenderPrompt_DifferentPlatforms(t *testing.T) {
 		{"slack", "slack:C012345:carol", "C012345"},
 	}
 	for _, tc := range platforms {
-		result := e.buildSenderPrompt("msg", "uid", tc.platform, tc.sessionKey, "")
+		result := e.buildSenderPrompt("msg", "uid", tc.platform, tc.sessionKey)
 		if !strings.Contains(result, "platform="+tc.platform) {
 			t.Errorf("missing platform=%s in %q", tc.platform, result)
 		}
@@ -7091,8 +6016,7 @@ func TestCmdShell_MultiWorkspaceIgnoresMissingSharedBinding(t *testing.T) {
 	for {
 		sent := p.getSent()
 		if len(sent) > 0 {
-			normalizedWorkDir := normalizeWorkspacePath(agent.workDir)
-			if !strings.Contains(sent[0], normalizedWorkDir) && !strings.Contains(sent[0], agent.workDir) {
+			if !strings.Contains(sent[0], normalizeWorkspacePath(agent.workDir)) {
 				t.Fatalf("expected shell output to fall back to agent work dir %q, got %q", agent.workDir, sent[0])
 			}
 			if strings.Contains(sent[0], missingDir) {
@@ -7104,367 +6028,6 @@ func TestCmdShell_MultiWorkspaceIgnoresMissingSharedBinding(t *testing.T) {
 			t.Fatal("timed out waiting for shell response")
 		}
 		time.Sleep(10 * time.Millisecond)
-	}
-}
-
-// --- /diff command tests ---
-
-func TestCmdDiff_BlockedWithoutAdmin(t *testing.T) {
-	p := &stubPlatformEngine{n: "test"}
-	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-
-	msg := &Message{
-		SessionKey: "test:ch:user1",
-		Content:    "/diff main",
-		ReplyCtx:   "ctx",
-		UserID:     "user1",
-		Platform:   "test",
-	}
-	e.handleCommand(p, msg, msg.Content)
-
-	sent := p.getSent()
-	foundAdmin := false
-	for _, s := range sent {
-		if strings.Contains(s, "admin") || strings.Contains(s, e.i18n.T(MsgAdminRequired)[:10]) {
-			foundAdmin = true
-		}
-	}
-	if !foundAdmin {
-		t.Fatalf("expected admin required reply, got %v", sent)
-	}
-}
-
-func TestCmdDiff_EmptyDiff(t *testing.T) {
-	// Create a temp git repo with no changes
-	dir := t.TempDir()
-	cmds := [][]string{
-		{"git", "init"},
-		{"git", "config", "user.email", "test@test.com"},
-		{"git", "config", "user.name", "test"},
-		{"git", "commit", "--allow-empty", "-m", "init"},
-	}
-	for _, args := range cmds {
-		cmd := exec.Command(args[0], args[1:]...)
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("setup %v: %s %v", args, out, err)
-		}
-	}
-
-	agent := &stubWorkDirAgent{workDir: dir}
-	p := &stubPlatformEngine{n: "test"}
-	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
-	e.SetAdminFrom("admin")
-
-	msg := &Message{
-		SessionKey: "test:ch:admin",
-		Content:    "/diff",
-		ReplyCtx:   "ctx",
-		UserID:     "admin",
-		Platform:   "test",
-	}
-	e.cmdDiff(p, msg, "/diff")
-
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		sent := p.getSent()
-		if len(sent) > 0 {
-			found := false
-			for _, s := range sent {
-				if strings.Contains(s, "diff") || strings.Contains(s, "clean") {
-					found = true
-				}
-			}
-			if !found {
-				t.Fatalf("expected empty diff message, got %v", sent)
-			}
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("timed out waiting for diff response")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
-func TestCmdDiff_PlainTextFallback(t *testing.T) {
-	// Create a temp git repo with uncommitted changes
-	dir := t.TempDir()
-	cmds := [][]string{
-		{"git", "init"},
-		{"git", "config", "user.email", "test@test.com"},
-		{"git", "config", "user.name", "test"},
-	}
-	for _, args := range cmds {
-		cmd := exec.Command(args[0], args[1:]...)
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("setup %v: %s %v", args, out, err)
-		}
-	}
-	// Create and commit a file, then modify it
-	if err := os.WriteFile(filepath.Join(dir, "test.txt"), []byte("hello\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	for _, args := range [][]string{
-		{"git", "add", "test.txt"},
-		{"git", "commit", "-m", "add test.txt"},
-	} {
-		cmd := exec.Command(args[0], args[1:]...)
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("setup %v: %s %v", args, out, err)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(dir, "test.txt"), []byte("hello\nworld\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Use stubPlatformEngine (no FileSender) → should fall back to plain text
-	agent := &stubWorkDirAgent{workDir: dir}
-	p := &stubPlatformEngine{n: "test"}
-	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
-	e.SetAdminFrom("admin")
-
-	msg := &Message{
-		SessionKey: "test:ch:admin",
-		Content:    "/diff",
-		ReplyCtx:   "ctx",
-		UserID:     "admin",
-		Platform:   "test",
-	}
-	e.cmdDiff(p, msg, "/diff")
-
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		sent := p.getSent()
-		if len(sent) > 0 {
-			found := false
-			for _, s := range sent {
-				if strings.Contains(s, "```diff") && strings.Contains(s, "world") {
-					found = true
-				}
-			}
-			if !found {
-				t.Fatalf("expected plain text diff with ```diff block, got %v", sent)
-			}
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("timed out waiting for diff response")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
-func TestCmdDiff_FileSenderPath(t *testing.T) {
-	// Create a temp git repo with uncommitted changes
-	dir := t.TempDir()
-	cmds := [][]string{
-		{"git", "init"},
-		{"git", "config", "user.email", "test@test.com"},
-		{"git", "config", "user.name", "test"},
-	}
-	for _, args := range cmds {
-		cmd := exec.Command(args[0], args[1:]...)
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("setup %v: %s %v", args, out, err)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(dir, "test.txt"), []byte("hello\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	for _, args := range [][]string{
-		{"git", "add", "test.txt"},
-		{"git", "commit", "-m", "add test.txt"},
-	} {
-		cmd := exec.Command(args[0], args[1:]...)
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("setup %v: %s %v", args, out, err)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(dir, "test.txt"), []byte("changed\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	agent := &stubWorkDirAgent{workDir: dir}
-	mp := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
-	e := NewEngine("test", agent, []Platform{mp}, "", LangEnglish)
-	e.SetAdminFrom("admin")
-
-	msg := &Message{
-		SessionKey: "test:ch:admin",
-		Content:    "/diff",
-		ReplyCtx:   "ctx",
-		UserID:     "admin",
-		Platform:   "test",
-	}
-	e.cmdDiff(mp, msg, "/diff")
-
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		// If diff2html is installed, we get a file; otherwise plain text fallback
-		files := mp.files
-		sent := mp.getSent()
-		if len(files) > 0 {
-			f := files[0]
-			if f.MimeType != "text/html" {
-				t.Fatalf("expected text/html, got %s", f.MimeType)
-			}
-			if !strings.HasSuffix(f.FileName, ".html") {
-				t.Fatalf("expected .html filename, got %s", f.FileName)
-			}
-			return
-		}
-		if len(sent) > 0 {
-			// diff2html not installed → plain text fallback is also acceptable
-			found := false
-			for _, s := range sent {
-				if strings.Contains(s, "```diff") {
-					found = true
-				}
-			}
-			if !found {
-				t.Fatalf("expected diff output (file or plain text), got %v", sent)
-			}
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("timed out waiting for diff response")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
-func TestCmdShow_EmptyReference_ShowsUsage(t *testing.T) {
-	p := &stubPlatformEngine{n: "test"}
-	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	e.SetAdminFrom("admin")
-
-	msg := &Message{
-		SessionKey: "test:ch:admin",
-		Content:    "/show",
-		ReplyCtx:   "ctx",
-		UserID:     "admin",
-		Platform:   "test",
-	}
-	e.cmdShow(p, msg, nil)
-
-	sent := p.getSent()
-	if len(sent) != 1 || !strings.Contains(sent[0], "/show") {
-		t.Fatalf("sent = %v, want show usage", sent)
-	}
-}
-
-func TestCmdShow_MultiWorkspaceUsesBoundWorkDirForRelativeReference(t *testing.T) {
-	p := &stubPlatformEngine{n: "test"}
-	agentName := "test-show-workspace"
-	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) {
-		return &namedStubModelModeAgent{name: agentName}, nil
-	})
-	e := NewEngine("test", &namedStubModelModeAgent{name: agentName}, []Platform{p}, "", LangEnglish)
-	e.SetAdminFrom("admin")
-
-	baseDir := t.TempDir()
-	bindStore := filepath.Join(t.TempDir(), "bindings.json")
-	e.SetMultiWorkspace(baseDir, bindStore)
-
-	wsDir := filepath.Join(baseDir, "demo-repo")
-	if err := os.MkdirAll(filepath.Join(wsDir, "svc"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(wsDir, "svc", "handler.go"), []byte("package svc\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	e.workspaceBindings.Bind(sharedWorkspaceBindingsKey, "ch1", "demo", normalizeWorkspacePath(wsDir))
-
-	msg := &Message{
-		SessionKey: "test:ch1:admin",
-		Content:    "/show svc/handler.go",
-		ReplyCtx:   "ctx",
-		UserID:     "admin",
-		Platform:   "test",
-	}
-	e.cmdShow(p, msg, []string{"svc/handler.go"})
-
-	deadline := time.Now().Add(500 * time.Millisecond)
-	for {
-		sent := p.getSent()
-		if len(sent) > 0 {
-			if !strings.Contains(sent[0], "📄 svc/handler.go") {
-				t.Fatalf("output = %q, want relative title", sent[0])
-			}
-			if !strings.Contains(sent[0], "package svc") {
-				t.Fatalf("output = %q, want file content", sent[0])
-			}
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("timed out waiting for /show response")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
-func TestHandleCommand_ShowRequiresAdmin(t *testing.T) {
-	p := &stubPlatformEngine{n: "test"}
-	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	e.SetAdminFrom("admin")
-
-	msg := &Message{
-		SessionKey: "test:ch:user1",
-		Content:    "/show foo.txt",
-		ReplyCtx:   "ctx",
-		UserID:     "user1",
-		Platform:   "test",
-	}
-	e.handleCommand(p, msg, msg.Content)
-
-	sent := p.getSent()
-	if len(sent) != 1 || !strings.Contains(strings.ToLower(sent[0]), "admin") {
-		t.Fatalf("sent = %v, want admin required message", sent)
-	}
-}
-
-func TestCmdShow_OutputRemainsRawWhenReferencesEnabled(t *testing.T) {
-	p := &stubPlatformEngine{n: "feishu"}
-	agent := &stubWorkDirAgent{workDir: t.TempDir()}
-	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
-	e.SetAdminFrom("admin")
-	e.references = normalizeReferenceRenderCfg(ReferenceRenderCfg{
-		NormalizeAgents: []string{"all"},
-		RenderPlatforms: []string{"all"},
-		DisplayPath:     "relative",
-		MarkerStyle:     "emoji",
-		EnclosureStyle:  "code",
-	})
-
-	file := filepath.Join(agent.workDir, "svc", "handler.go")
-	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	rawLine := "/root/code/demo-repo/ui/recovery_contact_form.tsx:11"
-	if err := os.WriteFile(file, []byte(rawLine+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	msg := &Message{
-		SessionKey: "test:ch:admin",
-		Content:    "/show svc/handler.go",
-		ReplyCtx:   "ctx",
-		UserID:     "admin",
-		Platform:   "feishu",
-	}
-	e.cmdShow(p, msg, []string{"svc/handler.go"})
-
-	sent := p.getSent()
-	if len(sent) != 1 {
-		t.Fatalf("sent = %v, want one response", sent)
-	}
-	if !strings.Contains(sent[0], rawLine) {
-		t.Fatalf("output = %q, want raw code content preserved", sent[0])
 	}
 }
 
@@ -8806,53 +7369,6 @@ func TestExecuteCronJob_ResolvesCronReplyTarget(t *testing.T) {
 	}
 }
 
-func TestExecuteCronJob_WorkspacePrefixedSessionKey(t *testing.T) {
-	dir := t.TempDir()
-	store, err := NewCronStore(dir)
-	if err != nil {
-		t.Fatalf("NewCronStore() error = %v", err)
-	}
-	scheduler := NewCronScheduler(store)
-
-	platform := &stubCronReplyTargetPlatform{
-		stubPlatformEngine: stubPlatformEngine{n: "slack"},
-	}
-	agentSession := newResultAgentSession("done")
-	agent := &resultAgent{session: agentSession}
-
-	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
-	defer e.cancel()
-	e.cronScheduler = scheduler
-
-	// Simulate a session key that was stored with a workspace prefix
-	// (as happens in multi-workspace mode).
-	prefixedKey := "/home/user/workspace/myproject:slack:C123:U456"
-	job := &CronJob{
-		ID:          "job-ws",
-		SessionKey:  prefixedKey,
-		Prompt:      "daily standup",
-		Description: "Standup",
-	}
-	if err := store.Add(job); err != nil {
-		t.Fatalf("store.Add() error = %v", err)
-	}
-
-	if err := e.ExecuteCronJob(job); err != nil {
-		t.Fatalf("ExecuteCronJob() with workspace-prefixed key error = %v", err)
-	}
-
-	// The platform should have received the cron start notice and agent reply.
-	sent := platform.getSent()
-	if len(sent) < 1 {
-		t.Fatalf("expected at least one message sent to platform, got %d", len(sent))
-	}
-
-	// Stored session key must remain unchanged.
-	if job.SessionKey != prefixedKey {
-		t.Fatalf("job.SessionKey = %q, want unchanged %q", job.SessionKey, prefixedKey)
-	}
-}
-
 func TestExtractSessionKeyParts(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -8893,45 +7409,4 @@ func TestExtractSessionKeyParts(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestSetObserveConfig(t *testing.T) {
-	e := NewEngine("test", &stubAgent{}, nil, "", LangEnglish)
-	e.SetObserveConfig("/tmp/test-project", "slack:C123:U456")
-	if !e.observeEnabled {
-		t.Fatal("observe should be enabled")
-	}
-	if e.observeProjectDir != "/tmp/test-project" {
-		t.Fatalf("unexpected project dir: %s", e.observeProjectDir)
-	}
-}
-
-func TestObserveStartsOnlyWithSlack(t *testing.T) {
-	stub := &stubPlatformWithObserve{stubPlatform: stubPlatform{n: "slack"}}
-	e := NewEngine("test", &stubAgent{}, []Platform{stub}, "", LangEnglish)
-	e.SetObserveConfig("/tmp/fake-project", "slack:C123:U456")
-
-	target := e.findObserverTarget()
-	if target == nil {
-		t.Fatal("expected to find observer target for Slack")
-	}
-}
-
-func TestObserveNoTargetWithoutSlack(t *testing.T) {
-	stub := &stubPlatform{n: "telegram"}
-	e := NewEngine("test", &stubAgent{}, []Platform{stub}, "", LangEnglish)
-	e.SetObserveConfig("/tmp/fake-project", "slack:C123:U456")
-
-	target := e.findObserverTarget()
-	if target != nil {
-		t.Fatal("expected no observer target without Slack")
-	}
-}
-
-type stubPlatformWithObserve struct {
-	stubPlatform
-}
-
-func (s *stubPlatformWithObserve) SendObservation(_ context.Context, _, _ string) error {
-	return nil
 }
