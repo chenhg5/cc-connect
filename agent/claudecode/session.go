@@ -67,13 +67,8 @@ func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode strin
 		args = append(args, "--permission-mode", mode)
 	}
 	switch sessionID {
-	case "":
+	case "", core.ContinueSession:
 		// Truly fresh session — no resume, no continue.
-	case core.ContinueSession:
-		// --continue grabs the most recent session in the workspace, which
-		// may belong to an active CLI terminal. Fork it so the platform
-		// conversation gets its own independent context branch.
-		args = append(args, "--continue", "--fork-session")
 	default:
 		// Resuming a known session ID — this is cc-connect's own session
 		// from a previous connection, safe to resume directly.

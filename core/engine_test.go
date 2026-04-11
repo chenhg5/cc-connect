@@ -2756,7 +2756,13 @@ func TestDeleteMode_ActiveSessionMarkedWithArrowAndNotSelectable(t *testing.T) {
 	}}}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 	msg := &Message{SessionKey: "feishu:user1", ReplyCtx: "ctx"}
-	e.sessions.GetOrCreateActive(msg.SessionKey).SetAgentSessionID("session-1", "test")
+	// Register both sessions so they pass the owned-session filter.
+	s1 := e.sessions.GetOrCreateActive(msg.SessionKey)
+	s1.SetAgentSessionID("session-1", "test")
+	s2 := e.sessions.NewSession(msg.SessionKey, "two")
+	s2.SetAgentSessionID("session-2", "test")
+	// Switch back to s1 as the active session.
+	e.sessions.SwitchSession(msg.SessionKey, s1.ID)
 
 	e.cmdDelete(p, msg, nil)
 	if len(p.repliedCards) != 1 {
@@ -4069,7 +4075,16 @@ func TestRenderListCard_MakesEveryVisibleSessionClickable(t *testing.T) {
 	}
 
 	e := NewEngine("test", &stubListAgent{sessions: sessions}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
-	e.sessions.GetOrCreateActive("test:user1").SetAgentSessionID(sessions[5].ID, "test")
+	// Register all agent sessions with the session manager so they pass the
+	// owned-session filter (simulates cc-connect having created each session).
+	var internalIDs []string
+	for i, s := range sessions {
+		sess := e.sessions.NewSession("test:user1", "session-"+string(rune('A'+i)))
+		sess.SetAgentSessionID(s.ID, "test")
+		internalIDs = append(internalIDs, sess.ID)
+	}
+	// Switch active to the session mapped to sessions[5] (agent-session-F).
+	e.sessions.SwitchSession("test:user1", internalIDs[5])
 
 	card, err := e.renderListCard("test:user1", 1)
 	if err != nil {
