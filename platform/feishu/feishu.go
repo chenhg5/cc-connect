@@ -118,6 +118,7 @@ type Platform struct {
 	useInteractiveCard         bool
 	self                       core.Platform
 	reactionEmoji              string
+	doneEmoji                  string
 	allowFrom                  string
 	groupReplyAll              bool
 	respondToAtEveryoneAndHere bool
@@ -180,6 +181,10 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	if v, ok := opts["reaction_emoji"].(string); ok && v == "none" {
 		reactionEmoji = ""
 	}
+	doneEmoji, _ := opts["done_emoji"].(string)
+	if doneEmoji == "none" {
+		doneEmoji = ""
+	}
 	allowFrom, _ := opts["allow_from"].(string)
 	core.CheckAllowFrom(name, allowFrom)
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
@@ -231,6 +236,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		progressStyle:              progressStyle,
 		useInteractiveCard:         useInteractiveCard,
 		reactionEmoji:              reactionEmoji,
+		doneEmoji:                  doneEmoji,
 		allowFrom:                  allowFrom,
 		groupReplyAll:              groupReplyAll,
 		respondToAtEveryoneAndHere: respondToAtEveryoneAndHere,
@@ -585,10 +591,13 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 }
 
 func (p *Platform) addReaction(messageID string) string {
-	if p.reactionEmoji == "" {
+	return p.addReactionWithEmoji(messageID, p.reactionEmoji)
+}
+
+func (p *Platform) addReactionWithEmoji(messageID, emojiType string) string {
+	if emojiType == "" {
 		return ""
 	}
-	emojiType := p.reactionEmoji
 	resp, err := p.client.Im.MessageReaction.Create(context.Background(),
 		larkim.NewCreateMessageReactionReqBuilder().
 			MessageId(messageID).
@@ -639,6 +648,19 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 	return func() {
 		go p.removeReaction(rc.messageID, reactionID)
 	}
+}
+
+// AddDoneReaction adds a "done" emoji reaction so the user gets a push
+// notification when the agent finishes a multi-round turn in quiet mode.
+func (p *Platform) AddDoneReaction(rctx any) {
+	if p.doneEmoji == "" {
+		return
+	}
+	rc, ok := rctx.(replyContext)
+	if !ok || rc.messageID == "" {
+		return
+	}
+	go p.addReactionWithEmoji(rc.messageID, p.doneEmoji)
 }
 
 func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceiveV1) error {

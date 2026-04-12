@@ -690,6 +690,8 @@ app_secret = "your-feishu-app-secret"
 #                              # 允许的用户 open_id，逗号分隔；"*" 表示所有（默认）。发送 /whoami 获取你的 open_id。
 # reaction_emoji = "OnIt"  # Emoji reaction on incoming messages (default: "OnIt"); set to "none" to disable
 #                           # 收到消息时添加的表情回复（默认 "OnIt"）；设为 "none" 可禁用
+# done_emoji = "none"       # Emoji reaction after agent finishes streaming work in quiet mode (e.g. "Done"); set to "none" to disable
+#                           # Agent 在 quiet 模式下完成流式工作后的表情回复（如 "Done"）；设为 "none" 可禁用
 # group_reply_all = false   # If true, respond to ALL group messages without requiring @mention
 #                           # 设为 true 时，群聊中无需 @机器人 也会响应所有消息（默认 false）
 # share_session_in_channel = false  # If true, all users in a group share one agent session
@@ -724,6 +726,7 @@ app_secret = "your-feishu-app-secret"
 # enable_feishu_card = true
 # allow_from = "*"
 # reaction_emoji = "OnIt"
+# done_emoji = "none"
 # progress_style = "legacy"  # legacy | compact | card
 
 # DingTalk / 钉钉 (uncomment to enable / 取消注释以启用)

@@ -2279,9 +2279,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	// stopTyping tracks the current turn's typing indicator so it can be
 	// stopped when a queued message starts a new turn.
 	stopTyping := stopTypingFn
+	// doneReaction stores a function to add a "done" emoji after stopTyping.
+	// Set during EventResult handling for multi-round quiet turns.
+	var doneReaction func()
 	defer func() {
 		if stopTyping != nil {
 			stopTyping()
+		}
+		if doneReaction != nil {
+			doneReaction()
 		}
 	}()
 
@@ -2743,6 +2749,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if ti, ok := queued.platform.(TypingIndicator); ok {
 					stopTyping = ti.StartTyping(e.ctx, queued.replyCtx)
 				}
+				// Agent continues working — don't add done reaction for this turn.
+				doneReaction = nil
 
 				// Drain stale events before starting the next turn. Between
 				// EventResult and Send(), the only buffered events would be
@@ -2805,6 +2813,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					slog.Debug("async send error after EventResult", "error", err)
 				}
 			}
+
+			// When the preview was updated in-place at least once (e.g. Feishu card
+			// streaming), the user only saw a push for the initial send and subsequent
+			// updates were silent. Add a "done" reaction so they know the agent finished.
+			// The reaction is added after stopTyping (deferred) so the doing emoji
+			// is removed first.
+			if sp.needsDoneReaction() {
+				if doneTI, ok := p.(TypingIndicatorDone); ok {
+					doneReaction = func() { doneTI.AddDoneReaction(replyCtx) }
+				}
+			}
+
 			return
 
 		case EventError:

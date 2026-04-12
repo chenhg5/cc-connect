@@ -126,6 +126,14 @@ type TypingIndicator interface {
 	StartTyping(ctx context.Context, replyCtx any) (stop func())
 }
 
+// TypingIndicatorDone is an optional interface for platforms that can show a
+// "done" reaction after processing completes. The engine calls AddDoneReaction
+// when the agent finishes a multi-round turn in quiet mode, so the user gets
+// a push notification (e.g. Feishu card edits don't trigger pushes).
+type TypingIndicatorDone interface {
+	AddDoneReaction(replyCtx any)
+}
+
 // ImageSender is an optional interface for platforms that support sending images.
 type ImageSender interface {
 	SendImage(ctx context.Context, replyCtx any, img ImageAttachment) error
