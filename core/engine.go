@@ -9094,32 +9094,12 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, wsChannel
 		inj.SetSessionEnv(envVars)
 	}
 
-	existingID := session.GetAgentSessionID()
-	agentSession, err := agent.StartSession(ctx, existingID)
-	if err != nil && existingID != "" {
-		// Resume failed (stale/corrupt session); fall back to a fresh session.
-		slog.Warn("relay: resume failed, falling back to fresh session",
-			"session_key", relaySessionKey, "agent_session_id", existingID, "err", err)
-		session.CompareAndSetAgentSessionID("", agent.Name())
-		agentSession, err = agent.StartSession(ctx, "")
-	}
+	agentSession, err := e.startRelaySession(ctx, agent, session, sessions, relaySessionKey, message)
 	if err != nil {
-		return "", fmt.Errorf("start relay session: %w", err)
+		return "", err
 	}
 	defer agentSession.Close()
 
-	if session.CompareAndSetAgentSessionID(agentSession.CurrentSessionID(), agent.Name()) {
-		sessions.Save()
-	}
-
-	if err := agentSession.Send(message, nil, nil); err != nil {
-		return "", fmt.Errorf("send relay message: %w", err)
-	}
-
-	// sawNewContent tracks whether Claude has started processing our message
-	// (emitted at least one text or tool event). A stale EventResult from
-	// session resume that slips past the drain is skipped when this is false.
-	sawNewContent := false
 	var textParts []string
 	for event := range agentSession.Events() {
 		if ctx.Err() != nil {
@@ -9127,7 +9107,6 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, wsChannel
 		}
 		switch event.Type {
 		case EventText:
-			sawNewContent = true
 			if event.Content != "" {
 				textParts = append(textParts, event.Content)
 			}
@@ -9137,7 +9116,6 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, wsChannel
 				}
 			}
 		case EventToolResult:
-			sawNewContent = true
 			out := strings.TrimSpace(event.Content)
 			if out == "" {
 				out = strings.TrimSpace(event.ToolResult)
@@ -9150,17 +9128,6 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, wsChannel
 				textParts = append(textParts, fmt.Sprintf(e.i18n.T(MsgToolResult), tn, out)+"\n\n")
 			}
 		case EventResult:
-			if !sawNewContent {
-				// Stale result from session resume — save the session ID
-				// but don't treat it as this turn's response.
-				if event.SessionID != "" {
-					session.SetAgentSessionID(event.SessionID, agent.Name())
-					sessions.Save()
-				}
-				slog.Debug("relay: skipped stale result event from resumed session",
-					"from", fromProject, "to", e.name, "session_id", event.SessionID)
-				continue
-			}
 			if event.SessionID != "" {
 				session.SetAgentSessionID(event.SessionID, agent.Name())
 				sessions.Save()
@@ -9196,6 +9163,124 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, wsChannel
 		return strings.Join(textParts, ""), nil
 	}
 	return "", fmt.Errorf("relay: agent process exited without response")
+}
+
+// startRelaySession starts a Claude session for relay, handling resume gracefully.
+//
+// When a previous session ID exists, it attempts --resume first. Resumed
+// sessions replay the prior turn's final EventResult; if the process exits
+// after only producing that stale result (no new assistant content), the
+// session is discarded and a fresh one is started with the message injected.
+func (e *Engine) startRelaySession(ctx context.Context, agent Agent, session *Session, sessions *SessionManager, relaySessionKey, message string) (AgentSession, error) {
+	existingID := session.GetAgentSessionID()
+	agentSession, err := agent.StartSession(ctx, existingID)
+	if err != nil && existingID != "" {
+		slog.Warn("relay: resume failed, falling back to fresh session",
+			"session_key", relaySessionKey, "agent_session_id", existingID, "err", err)
+		session.CompareAndSetAgentSessionID("", agent.Name())
+		agentSession, err = agent.StartSession(ctx, "")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("start relay session: %w", err)
+	}
+
+	if session.CompareAndSetAgentSessionID(agentSession.CurrentSessionID(), agent.Name()) {
+		sessions.Save()
+	}
+
+	if err := agentSession.Send(message, nil, nil); err != nil {
+		agentSession.Close()
+		return nil, fmt.Errorf("send relay message: %w", err)
+	}
+
+	// If we resumed an existing session, the Claude process may replay
+	// the prior turn's EventResult and exit before processing our new
+	// message. Wait briefly to see if actual content arrives; if only a
+	// stale result appears, start a fresh session.
+	if existingID != "" {
+		for event := range agentSession.Events() {
+			switch event.Type {
+			case EventText, EventToolResult:
+				// Real content for our turn — push it back and return this session.
+				// We can't un-read from a channel, so wrap in a prefixed session.
+				return newPrefixedAgentSession(agentSession, event), nil
+			case EventResult:
+				// Stale result from the resumed turn. Save the session ID,
+				// close this session, and fall through to start fresh.
+				if event.SessionID != "" {
+					session.SetAgentSessionID(event.SessionID, agent.Name())
+					sessions.Save()
+				}
+				slog.Info("relay: resumed session produced stale result, starting fresh",
+					"session_key", relaySessionKey, "stale_session_id", event.SessionID)
+				agentSession.Close()
+				goto freshSession
+			case EventError:
+				agentSession.Close()
+				if event.Error != nil {
+					return nil, event.Error
+				}
+				return nil, fmt.Errorf("agent error during relay resume")
+			case EventPermissionRequest:
+				_ = agentSession.RespondPermission(event.RequestID, PermissionResult{
+					Behavior:     "allow",
+					UpdatedInput: event.ToolInputRaw,
+				})
+			}
+		}
+		// Events channel closed without content — process exited.
+		agentSession.Close()
+		slog.Info("relay: resumed session exited without content, starting fresh",
+			"session_key", relaySessionKey)
+		goto freshSession
+	}
+
+	return agentSession, nil
+
+freshSession:
+	session.CompareAndSetAgentSessionID("", agent.Name())
+	agentSession, err = agent.StartSession(ctx, "")
+	if err != nil {
+		return nil, fmt.Errorf("start fresh relay session: %w", err)
+	}
+	if session.CompareAndSetAgentSessionID(agentSession.CurrentSessionID(), agent.Name()) {
+		sessions.Save()
+	}
+	if err := agentSession.Send(message, nil, nil); err != nil {
+		agentSession.Close()
+		return nil, fmt.Errorf("send relay message (fresh): %w", err)
+	}
+	return agentSession, nil
+}
+
+// prefixedAgentSession wraps an AgentSession and prepends a buffered event
+// to the Events channel. Used when we've already consumed an event from
+// the channel during resume detection and need to replay it.
+type prefixedAgentSession struct {
+	AgentSession
+	prefixCh chan Event
+	merged   chan Event
+	once     sync.Once
+}
+
+func newPrefixedAgentSession(inner AgentSession, first Event) *prefixedAgentSession {
+	merged := make(chan Event, 64)
+	p := &prefixedAgentSession{
+		AgentSession: inner,
+		merged:       merged,
+	}
+	go func() {
+		merged <- first
+		for ev := range inner.Events() {
+			merged <- ev
+		}
+		close(merged)
+	}()
+	return p
+}
+
+func (p *prefixedAgentSession) Events() <-chan Event {
+	return p.merged
 }
 
 func relayPartialResponseOrError(ctxErr error, textParts []string, fromProject, toProject string) (string, error) {
