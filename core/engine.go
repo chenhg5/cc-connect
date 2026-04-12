@@ -2059,6 +2059,15 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		}
 	}
 
+	// When resuming, the Claude process replays the prior turn's final
+	// EventResult before accepting new input. Wait briefly to consume it;
+	// if we get a stale result (no preceding content), discard and start
+	// fresh. This prevents processInteractiveEvents from treating the
+	// replayed result as the response to the next message.
+	if isResume {
+		agentSession = e.drainStaleResumeResult(agentSession, agent, session, sessions, sessionKey)
+	}
+
 	state = &interactiveState{
 		agentSession: agentSession,
 		platform:     p,
@@ -2069,6 +2078,84 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 
 	slog.Info("session spawned", "session_key", sessionKey, "agent_session", session.GetAgentSessionID(), "is_resume", isResume, "elapsed", startElapsed)
 	return state
+}
+
+// drainStaleResumeResult waits briefly for the stale EventResult that a resumed
+// Claude session replays from the prior turn. If a stale result arrives (no
+// preceding content), it is consumed silently and the same session is returned.
+// If the session exits after the stale result (process closed stdin), a fresh
+// session is started. If no event arrives within the timeout, the session is
+// assumed clean and returned as-is.
+func (e *Engine) drainStaleResumeResult(agentSession AgentSession, agent Agent, session *Session, sessions *SessionManager, sessionKey string) AgentSession {
+	timer := time.NewTimer(3 * time.Second)
+	defer timer.Stop()
+
+	events := agentSession.Events()
+	for {
+		select {
+		case event, ok := <-events:
+			if !ok {
+				// Channel closed — process exited after resume. Start fresh.
+				slog.Info("interactive: resumed session exited, starting fresh",
+					"session_key", sessionKey)
+				agentSession.Close()
+				session.CompareAndSetAgentSessionID("", agent.Name())
+				fresh, err := agent.StartSession(e.ctx, "")
+				if err != nil {
+					slog.Error("interactive: failed to start fresh session after stale drain",
+						"session_key", sessionKey, "error", err)
+					return agentSession // return closed session; caller will handle nil check
+				}
+				if newID := fresh.CurrentSessionID(); newID != "" {
+					if session.CompareAndSetAgentSessionID(newID, agent.Name()) {
+						sessions.Save()
+					}
+				}
+				return fresh
+			}
+			switch event.Type {
+			case EventResult:
+				// Stale result consumed. Save session ID and check if process is still alive.
+				if event.SessionID != "" {
+					session.SetAgentSessionID(event.SessionID, agent.Name())
+					sessions.Save()
+				}
+				slog.Info("interactive: drained stale resume result",
+					"session_key", sessionKey, "session_id", event.SessionID)
+				if !agentSession.Alive() {
+					// Process exited after replaying — start fresh.
+					slog.Info("interactive: process exited after stale result, starting fresh",
+						"session_key", sessionKey)
+					agentSession.Close()
+					session.CompareAndSetAgentSessionID("", agent.Name())
+					fresh, err := agent.StartSession(e.ctx, "")
+					if err != nil {
+						slog.Error("interactive: failed to start fresh session",
+							"session_key", sessionKey, "error", err)
+						return agentSession
+					}
+					if newID := fresh.CurrentSessionID(); newID != "" {
+						if session.CompareAndSetAgentSessionID(newID, agent.Name()) {
+							sessions.Save()
+						}
+					}
+					return fresh
+				}
+				return agentSession
+			default:
+				// Unexpected content before we sent anything — shouldn't happen,
+				// but return the session and let the normal flow handle it.
+				slog.Warn("interactive: unexpected event during stale drain",
+					"session_key", sessionKey, "event_type", event.Type)
+				return agentSession
+			}
+		case <-timer.C:
+			// No stale result arrived — session is clean.
+			return agentSession
+		case <-e.ctx.Done():
+			return agentSession
+		}
+	}
 }
 
 // cleanupInteractiveState removes the interactive state for the given session key
