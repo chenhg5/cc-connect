@@ -128,7 +128,7 @@ done
 
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	cs, err := newCodexSession(context.Background(), workDir, "", "", "", "", nil)
+	cs, err := newCodexSession(context.Background(), workDir, "", "", "", "", "", nil)
 	if err != nil {
 		t.Fatalf("newCodexSession: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestRefreshContextUsageFromRollout_UsesLastTokenCount(t *testing.T) {
 		t.Fatalf("write rollout: %v", err)
 	}
 
-	cs, err := newCodexSession(context.Background(), workDir, "", "", "", sessionID, []string{"CODEX_HOME=" + codexHome})
+	cs, err := newCodexSession(context.Background(), workDir, "", "", "", sessionID, "", []string{"CODEX_HOME=" + codexHome})
 	if err != nil {
 		t.Fatalf("newCodexSession: %v", err)
 	}
