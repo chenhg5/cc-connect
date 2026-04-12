@@ -573,6 +573,18 @@ func (cs *codexSession) CurrentSessionID() string {
 	return v
 }
 
+func (cs *codexSession) GetWorkDir() string {
+	return cs.workDir
+}
+
+func (cs *codexSession) GetModel() string {
+	return strings.TrimSpace(cs.model)
+}
+
+func (cs *codexSession) GetReasoningEffort() string {
+	return strings.TrimSpace(cs.effort)
+}
+
 func (cs *codexSession) Alive() bool {
 	return cs.alive.Load()
 }

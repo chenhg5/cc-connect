@@ -2746,7 +2746,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					cleanResponse += fmt.Sprintf("\n[ctx: ~%d%%]", selfPct)
 				}
 			}
-			if footer := e.buildReplyFooter(replyAgent, workspaceDir); footer != "" {
+			if footer := e.buildReplyFooter(replyAgent, state.agentSession, workspaceDir); footer != "" {
 				cleanResponse = appendReplyFooter(cleanResponse, footer)
 			}
 			fullResponse = cleanResponse
@@ -3826,26 +3826,22 @@ func (e *Engine) commandWorkDir(agent Agent, msg *Message) string {
 	return ""
 }
 
-func (e *Engine) buildReplyFooter(agent Agent, workspaceDir string) string {
+func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDir string) string {
 	if !e.replyFooterEnabled || agent == nil {
 		return ""
 	}
 
 	var parts []string
-	if switcher, ok := agent.(ModelSwitcher); ok {
-		if model := strings.TrimSpace(switcher.GetModel()); model != "" {
-			parts = append(parts, model)
-		}
+	if model := replyFooterModel(session, agent); model != "" {
+		parts = append(parts, model)
 	}
-	if switcher, ok := agent.(ReasoningEffortSwitcher); ok {
-		if effort := strings.TrimSpace(switcher.GetReasoningEffort()); effort != "" {
-			parts = append(parts, effort)
-		}
+	if effort := replyFooterReasoningEffort(session, agent); effort != "" {
+		parts = append(parts, effort)
 	}
-	if usage := e.replyFooterUsageText(agent); usage != "" {
+	if usage := e.replyFooterUsageText(session, agent); usage != "" {
 		parts = append(parts, usage)
 	}
-	if dir := replyFooterWorkDir(agent, workspaceDir); dir != "" {
+	if dir := replyFooterWorkDir(session, agent, workspaceDir); dir != "" {
 		parts = append(parts, dir)
 	}
 	if len(parts) == 0 {
@@ -3854,7 +3850,46 @@ func (e *Engine) buildReplyFooter(agent Agent, workspaceDir string) string {
 	return strings.Join(parts, " · ")
 }
 
-func (e *Engine) replyFooterUsageText(agent Agent) string {
+func replyFooterModel(session AgentSession, agent Agent) string {
+	if session != nil {
+		if getter, ok := session.(interface{ GetModel() string }); ok {
+			if model := strings.TrimSpace(getter.GetModel()); model != "" {
+				return model
+			}
+		}
+	}
+	if getter, ok := agent.(interface{ GetModel() string }); ok {
+		return strings.TrimSpace(getter.GetModel())
+	}
+	return ""
+}
+
+func replyFooterReasoningEffort(session AgentSession, agent Agent) string {
+	if session != nil {
+		if getter, ok := session.(interface{ GetReasoningEffort() string }); ok {
+			if effort := strings.TrimSpace(getter.GetReasoningEffort()); effort != "" {
+				return effort
+			}
+		}
+	}
+	if getter, ok := agent.(interface{ GetReasoningEffort() string }); ok {
+		return strings.TrimSpace(getter.GetReasoningEffort())
+	}
+	return ""
+}
+
+func (e *Engine) replyFooterUsageText(session AgentSession, agent Agent) string {
+	ctx, cancel := context.WithTimeout(e.ctx, replyFooterUsageTimeout)
+	defer cancel()
+
+	if session != nil {
+		if reporter, ok := session.(UsageReporter); ok {
+			if report, err := reporter.GetUsage(ctx); err == nil {
+				return formatReplyFooterUsage(report, e.i18n)
+			}
+		}
+	}
+
 	reporter, ok := agent.(UsageReporter)
 	if !ok {
 		return ""
@@ -3866,9 +3901,6 @@ func (e *Engine) replyFooterUsageText(agent Agent) string {
 	if !cached.fetchedAt.IsZero() && time.Since(cached.fetchedAt) < replyFooterUsageCacheTTL {
 		return cached.text
 	}
-
-	ctx, cancel := context.WithTimeout(e.ctx, replyFooterUsageTimeout)
-	defer cancel()
 
 	text := ""
 	if report, err := reporter.GetUsage(ctx); err == nil {
@@ -3901,8 +3933,15 @@ func formatReplyFooterUsage(report *UsageReport, i18n *I18n) string {
 	return i18n.Tf(MsgReplyFooterRemaining, remaining)
 }
 
-func replyFooterWorkDir(agent Agent, workspaceDir string) string {
+func replyFooterWorkDir(session AgentSession, agent Agent, workspaceDir string) string {
 	dir := strings.TrimSpace(workspaceDir)
+	if dir == "" {
+		if session != nil {
+			if wd, ok := session.(interface{ GetWorkDir() string }); ok {
+				dir = strings.TrimSpace(wd.GetWorkDir())
+			}
+		}
+	}
 	if dir == "" {
 		if switcher, ok := agent.(WorkDirSwitcher); ok {
 			dir = strings.TrimSpace(switcher.GetWorkDir())
