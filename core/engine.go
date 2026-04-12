@@ -942,6 +942,31 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		return e.executeCronShell(effectivePlatform, replyCtx, job)
 	}
 
+	// Resolve workspace-specific agent and sessions in multi-workspace mode.
+	agent := e.agent
+	sessions := e.sessions
+	workspaceDir := ""
+	interactivePrefix := ""
+	if e.multiWorkspace {
+		channelID := extractChannelID(sessionKey)
+		if channelID != "" {
+			workspace, _, wsErr := e.resolveWorkspace(targetPlatform, channelID)
+			if wsErr != nil {
+				slog.Error("cron: workspace resolution failed", "session_key", sessionKey, "err", wsErr)
+			} else if workspace != "" {
+				wsAgent, wsSessions, _, effectiveDir, wsErr := e.workspaceContext(workspace, sessionKey)
+				if wsErr != nil {
+					slog.Error("cron: failed to create workspace agent", "workspace", workspace, "err", wsErr)
+				} else {
+					agent = wsAgent
+					sessions = wsSessions
+					workspaceDir = effectiveDir
+					interactivePrefix = effectiveDir + ":"
+				}
+			}
+		}
+	}
+
 	msg := &Message{
 		SessionKey:   sessionKey,
 		Platform:     platformName,
@@ -961,22 +986,23 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 
 	if useNewSession {
 		msg.SessionKey = runSessionKey
-		session := e.sessions.NewSideSession(runSessionKey, "cron-"+job.ID)
+		session := sessions.NewSideSession(runSessionKey, "cron-"+job.ID)
 		if !session.TryLock() {
 			return fmt.Errorf("session %q is busy", runSessionKey)
 		}
-		iKey := fmt.Sprintf("%s#cron:%s", runSessionKey, session.ID)
-		e.processInteractiveMessageWith(effectivePlatform, msg, session, e.agent, e.sessions, iKey, "", runSessionKey)
+		iKey := fmt.Sprintf("%s%s#cron:%s", interactivePrefix, runSessionKey, session.ID)
+		e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, runSessionKey)
 		e.cleanupInteractiveState(iKey)
 		return nil
 	}
 
-	session := e.sessions.GetOrCreateActive(sessionKey)
+	session := sessions.GetOrCreateActive(sessionKey)
 	if !session.TryLock() {
 		return fmt.Errorf("session %q is busy", sessionKey)
 	}
 
-	e.processInteractiveMessageWith(effectivePlatform, msg, session, e.agent, e.sessions, sessionKey, "", sessionKey)
+	iKey := interactivePrefix + sessionKey
+	e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, sessionKey)
 	return nil
 }
 
