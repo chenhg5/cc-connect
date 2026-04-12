@@ -424,6 +424,11 @@ const (
 	MsgCommandDisabled   MsgKey = "command_disabled"
 	MsgAdminRequired     MsgKey = "admin_required"
 	MsgRateLimited       MsgKey = "rate_limited"
+
+	// Agent-side rate limiting (HTTP 429 / overloaded from the AI backend).
+	// Distinct from MsgRateLimited which is cc-connect's own inbound throttle.
+	MsgAgentRateLimitedRetry  MsgKey = "agent_rate_limited_retry"
+	MsgAgentRateLimitedGaveUp MsgKey = "agent_rate_limited_gave_up"
 	MsgBtwSent           MsgKey = "btw_sent"
 	MsgBtwSendFailed     MsgKey = "btw_send_failed"
 
@@ -2893,6 +2898,22 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "⏳ 訊息發送過快，請稍後再試。",
 		LangJapanese:           "⏳ メッセージの送信が速すぎます。しばらくお待ちください。",
 		LangSpanish:            "⏳ Estás enviando mensajes demasiado rápido. Espera un momento.",
+	},
+	MsgAgentRateLimitedRetry: {
+		// args: attempt (int), maxAttempts (int), delaySeconds (int)
+		LangEnglish:            "⏳ Claude rate limited. Retry %d/%d in %ds…",
+		LangChinese:            "⏳ Claude 被限流。%d/%d 次重试将在 %d 秒后进行…",
+		LangTraditionalChinese: "⏳ Claude 被限流。%d/%d 次重試將在 %d 秒後進行…",
+		LangJapanese:           "⏳ Claude がレート制限されました。%d/%d 回目の再試行を %d 秒後に実行します…",
+		LangSpanish:            "⏳ Claude con límite de tasa. Reintento %d/%d en %d s…",
+	},
+	MsgAgentRateLimitedGaveUp: {
+		// args: attempts (int), minutes (int)
+		LangEnglish:            "⚠️ Claude rate limit did not clear after %d attempts over ~%d min. Please try again later.",
+		LangChinese:            "⚠️ 经过 %d 次尝试（约 %d 分钟），Claude 限流仍未解除。请稍后再试。",
+		LangTraditionalChinese: "⚠️ 經過 %d 次嘗試（約 %d 分鐘），Claude 限流仍未解除。請稍後再試。",
+		LangJapanese:           "⚠️ %d 回の再試行（約 %d 分）を経ても Claude のレート制限が解除されませんでした。後でもう一度お試しください。",
+		LangSpanish:            "⚠️ El límite de tasa de Claude no se resolvió tras %d intentos (~%d min). Inténtalo más tarde.",
 	},
 	MsgBtwSent: {
 		LangEnglish:            "✅ Message injected into the current session.",

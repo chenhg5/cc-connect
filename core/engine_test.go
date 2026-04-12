@@ -8990,3 +8990,451 @@ type stubPlatformWithObserve struct {
 func (s *stubPlatformWithObserve) SendObservation(_ context.Context, _, _ string) error {
 	return nil
 }
+
+// ---------- Rate-limit retry tests ----------
+
+// withShortRateLimitDelays temporarily overrides the package-level
+// retry delays so tests don't have to wait 30 seconds. Restores on cleanup.
+func withShortRateLimitDelays(t *testing.T, initial, retry time.Duration, maxAttempts int) {
+	t.Helper()
+	oldInitial, oldRetry, oldMax := RateLimitInitialDelay, RateLimitRetryDelay, RateLimitMaxAttempts
+	RateLimitInitialDelay = initial
+	RateLimitRetryDelay = retry
+	RateLimitMaxAttempts = maxAttempts
+	t.Cleanup(func() {
+		RateLimitInitialDelay = oldInitial
+		RateLimitRetryDelay = oldRetry
+		RateLimitMaxAttempts = oldMax
+	})
+}
+
+// TestProcessInteractiveEvents_ReturnsRetriableKind verifies that when the
+// event loop observes an EventError with a retriable ErrorKind, it returns
+// the kind to the caller (so the caller can schedule a retry) instead of
+// surfacing the error to the platform.
+func TestProcessInteractiveEvents_ReturnsRetriableKind(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-1",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[sessionKey] = state
+	e.interactiveMu.Unlock()
+
+	agentSession.events <- Event{
+		Type:      EventError,
+		Error:     errors.New(`{"error":{"type":"rate_limit_error"}}`),
+		ErrorKind: ErrorKindRateLimit,
+	}
+
+	var got ErrorKind
+	done := make(chan struct{})
+	go func() {
+		got = e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, "ctx-1")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("processInteractiveEvents did not return after EventError")
+	}
+
+	if got != ErrorKindRateLimit {
+		t.Errorf("returned kind = %q, want %q", got, ErrorKindRateLimit)
+	}
+
+	// Must NOT have surfaced the error as a user-visible message — the caller
+	// (processInteractiveMessageWith) decides whether to retry or show "gave up".
+	for _, s := range p.getSent() {
+		if strings.Contains(s, "Error:") || strings.Contains(s, "错误") {
+			t.Errorf("event loop surfaced error during retriable failure: %q", s)
+		}
+	}
+}
+
+// TestProcessInteractiveEvents_ReturnsUnknownOnNonRetriable verifies that a
+// non-retriable EventError returns ErrorKindUnknown and IS surfaced to the
+// platform as the existing error message.
+func TestProcessInteractiveEvents_ReturnsUnknownOnNonRetriable(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	agentSession.alive = false // non-retriable errors usually mean the session is dead
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-1",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[sessionKey] = state
+	e.interactiveMu.Unlock()
+
+	agentSession.events <- Event{
+		Type:      EventError,
+		Error:     errors.New("compilation failed"),
+		ErrorKind: ErrorKindUnknown,
+	}
+
+	var got ErrorKind
+	done := make(chan struct{})
+	go func() {
+		got = e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, "ctx-1")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("processInteractiveEvents did not return")
+	}
+
+	if got != ErrorKindUnknown {
+		t.Errorf("returned kind = %q, want empty", got)
+	}
+	sent := p.getSent()
+	sawError := false
+	for _, s := range sent {
+		if strings.Contains(s, "Error") || strings.Contains(s, "错误") {
+			sawError = true
+		}
+	}
+	if !sawError {
+		t.Errorf("non-retriable error not surfaced to platform; sent = %#v", sent)
+	}
+}
+
+// TestProcessInteractiveEvents_ReturnsUnknownOnSuccess verifies the zero
+// value is returned on a normal successful turn.
+func TestProcessInteractiveEvents_ReturnsUnknownOnSuccess(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-1",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[sessionKey] = state
+	e.interactiveMu.Unlock()
+
+	agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
+
+	var got ErrorKind
+	done := make(chan struct{})
+	go func() {
+		got = e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, "ctx-1")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("processInteractiveEvents did not return")
+	}
+
+	if got != ErrorKindUnknown {
+		t.Errorf("returned kind = %q, want empty", got)
+	}
+}
+
+// ---------- Integration tests for the retry loop in processInteractiveMessageWith ----------
+
+// scriptedAgent returns a different queuingAgentSession on each StartSession
+// call, consuming from a queue. Used to simulate a claude process that dies
+// on 429 and gets replaced by a fresh one on retry. queuingAgentSession
+// tracks Send calls so tests can synchronize event injection with Send.
+type scriptedAgent struct {
+	mu       sync.Mutex
+	sessions []*queuingAgentSession
+	starts   int
+}
+
+func (a *scriptedAgent) Name() string { return "scripted" }
+func (a *scriptedAgent) StartSession(_ context.Context, _ string) (AgentSession, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.starts++
+	if len(a.sessions) == 0 {
+		return nil, fmt.Errorf("scriptedAgent: no more sessions")
+	}
+	s := a.sessions[0]
+	a.sessions = a.sessions[1:]
+	return s, nil
+}
+func (a *scriptedAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
+	return nil, nil
+}
+func (a *scriptedAgent) Stop() error { return nil }
+func (a *scriptedAgent) StartCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.starts
+}
+
+// waitForSend blocks until sess.Send has been called at least once, or the
+// deadline elapses.
+func waitForSend(t *testing.T, sess *queuingAgentSession, deadline time.Duration) {
+	t.Helper()
+	end := time.Now().Add(deadline)
+	for time.Now().Before(end) {
+		sess.sendMu.Lock()
+		n := len(sess.sendCalls)
+		sess.sendMu.Unlock()
+		if n > 0 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for Send to be called")
+}
+
+// waitForSessionIdle polls until the session lock is released by the
+// background processInteractiveMessageWith goroutine, so test cleanup can
+// safely reassign package-level state (e.g. retry delays) without racing
+// the goroutine that's still reading it. Reacquires the lock on success so
+// no other goroutine can start a new turn on the session before cleanup.
+func waitForSessionIdle(t *testing.T, session *Session, deadline time.Duration) {
+	t.Helper()
+	end := time.Now().Add(deadline)
+	for time.Now().Before(end) {
+		if session.TryLock() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for session to become idle")
+}
+
+// TestRetryLoop_RetriesOnRateLimitThenSucceeds drives a full processInteractiveMessageWith
+// where the first agent session emits a rate-limit error and the second
+// succeeds. Verifies the user sees a retry notification followed by the
+// successful reply, and that the agent was restarted (StartSession called twice).
+func TestRetryLoop_RetriesOnRateLimitThenSucceeds(t *testing.T) {
+	withShortRateLimitDelays(t, 10*time.Millisecond, 10*time.Millisecond, 30)
+
+	p := &stubPlatformEngine{n: "test"}
+
+	// First session emits a retriable error. Second session emits success.
+	sess1 := newQueuingSession("s1")
+	sess2 := newQueuingSession("s2")
+	agent := &scriptedAgent{sessions: []*queuingAgentSession{sess1, sess2}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	sessionKey := "test:user1"
+
+	// Inject each session's events after we confirm Send was called.
+	// drainEvents runs before Send in processInteractiveMessageWith, so
+	// pre-queued events would be drained away.
+	go func() {
+		waitForSend(t, sess1, 3*time.Second)
+		sess1.events <- Event{
+			Type:      EventError,
+			Error:     errors.New(`{"error":{"type":"rate_limit_error"}}`),
+			ErrorKind: ErrorKindRateLimit,
+		}
+		waitForSend(t, sess2, 3*time.Second)
+		sess2.events <- Event{Type: EventResult, Content: "hello world", Done: true}
+	}()
+
+	msg := &Message{
+		SessionKey: sessionKey,
+		Platform:   "test",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "what's up",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	// Wait for success reply.
+	deadline := time.After(3 * time.Second)
+	for {
+		sent := p.getSent()
+		sawRetry := false
+		sawSuccess := false
+		for _, s := range sent {
+			if strings.Contains(s, "Retry 1/") || strings.Contains(s, "rate limited") {
+				sawRetry = true
+			}
+			if strings.Contains(s, "hello world") {
+				sawSuccess = true
+			}
+		}
+		if sawRetry && sawSuccess {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for retry + success; sent = %#v", sent)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	if got := agent.StartCount(); got != 2 {
+		t.Errorf("agent.StartSession calls = %d, want 2 (original + retry)", got)
+	}
+	// Wait for the background goroutine to release the session lock before
+	// the test's deferred cleanup touches the global delays.
+	waitForSessionIdle(t, e.sessions.GetOrCreateActive(sessionKey), 2*time.Second)
+}
+
+// TestRetryLoop_GivesUpAtCap verifies that after RateLimitMaxAttempts
+// consecutive rate-limit failures, the loop surfaces the "gave up" message
+// and stops retrying.
+func TestRetryLoop_GivesUpAtCap(t *testing.T) {
+	withShortRateLimitDelays(t, 5*time.Millisecond, 5*time.Millisecond, 3) // 3 total attempts
+
+	p := &stubPlatformEngine{n: "test"}
+
+	// Three sessions all return rate-limit errors.
+	sess1 := newQueuingSession("s1")
+	sess2 := newQueuingSession("s2")
+	sess3 := newQueuingSession("s3")
+	agent := &scriptedAgent{sessions: []*queuingAgentSession{sess1, sess2, sess3}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	sessionKey := "test:user1"
+
+	go func() {
+		rateLimitEvt := Event{
+			Type:      EventError,
+			Error:     errors.New(`{"error":{"type":"rate_limit_error"}}`),
+			ErrorKind: ErrorKindRateLimit,
+		}
+		for _, s := range []*queuingAgentSession{sess1, sess2, sess3} {
+			waitForSend(t, s, 3*time.Second)
+			s.events <- rateLimitEvt
+		}
+	}()
+
+	msg := &Message{
+		SessionKey: sessionKey,
+		Platform:   "test",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "what's up",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	deadline := time.After(3 * time.Second)
+	for {
+		sent := p.getSent()
+		for _, s := range sent {
+			if strings.Contains(s, "did not clear") || strings.Contains(s, "gave up") || strings.Contains(s, "未解除") {
+				goto done
+			}
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for 'gave up' message; sent = %#v", sent)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+done:
+	if got := agent.StartCount(); got != 3 {
+		t.Errorf("agent.StartSession calls = %d, want 3 (all attempts)", got)
+	}
+	waitForSessionIdle(t, e.sessions.GetOrCreateActive(sessionKey), 2*time.Second)
+}
+
+// TestRetryLoop_StopCancelsWait verifies that calling state.markStopped()
+// during the retry wait interrupts the loop.
+func TestRetryLoop_StopCancelsWait(t *testing.T) {
+	// Long delay so the test has time to send the stop signal before the
+	// retry fires.
+	withShortRateLimitDelays(t, 5*time.Second, 5*time.Second, 30)
+
+	p := &stubPlatformEngine{n: "test"}
+	sess1 := newQueuingSession("s1")
+	sess2 := newQueuingSession("s2") // won't actually be used
+	agent := &scriptedAgent{sessions: []*queuingAgentSession{sess1, sess2}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	sessionKey := "test:user1"
+
+	go func() {
+		waitForSend(t, sess1, 3*time.Second)
+		sess1.events <- Event{
+			Type:      EventError,
+			Error:     errors.New(`{"error":{"type":"rate_limit_error"}}`),
+			ErrorKind: ErrorKindRateLimit,
+		}
+	}()
+
+	msg := &Message{
+		SessionKey: sessionKey,
+		Platform:   "test",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "what's up",
+		ReplyCtx:   "ctx",
+	}
+
+	handleDone := make(chan struct{})
+	go func() {
+		e.handleMessage(p, msg)
+		close(handleDone)
+	}()
+
+	// Wait until the retry notification has been sent so we know we're in the
+	// post-first-attempt wait.
+	deadline := time.After(2 * time.Second)
+	for {
+		sawRetry := false
+		for _, s := range p.getSent() {
+			if strings.Contains(s, "Retry 1/") {
+				sawRetry = true
+				break
+			}
+		}
+		if sawRetry {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for retry notification to arrive")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	// Now send stop signal.
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[sessionKey]
+	e.interactiveMu.Unlock()
+	if state == nil {
+		t.Fatal("interactive state missing")
+	}
+	state.markStopped()
+
+	// handleMessage should return promptly (not wait out the 5s delay).
+	select {
+	case <-handleDone:
+	case <-time.After(1 * time.Second):
+		t.Fatal("handleMessage did not return after stop signal")
+	}
+
+	// Wait for the background goroutine to release the session lock before
+	// cleanup so the race detector is happy.
+	waitForSessionIdle(t, e.sessions.GetOrCreateActive(sessionKey), 2*time.Second)
+
+	// Agent should have been started once (the second session is untouched).
+	if got := agent.StartCount(); got != 1 {
+		t.Errorf("agent.StartSession calls = %d, want 1 (stop before retry)", got)
+	}
+}

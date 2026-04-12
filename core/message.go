@@ -169,6 +169,19 @@ const (
 	EventThinking          EventType = "thinking"           // thinking/processing status
 )
 
+// ErrorKind is a structured classification of agent errors so the engine can
+// decide how to react (retry, surface, drop queued messages, etc.) without
+// string-matching free-form error text. Agents set this when emitting an
+// EventError; the zero value ErrorKindUnknown means "not classified" and the
+// engine falls back to its default error surface.
+type ErrorKind string
+
+const (
+	ErrorKindUnknown    ErrorKind = ""            // not classified; use default error surface
+	ErrorKindRateLimit  ErrorKind = "rate_limit"  // HTTP 429 / Anthropic rate_limit_error — retriable
+	ErrorKindOverloaded ErrorKind = "overloaded"  // HTTP 529 / Anthropic overloaded_error — retriable
+)
+
 // UserQuestion represents a structured question from AskUserQuestion.
 type UserQuestion struct {
 	Question    string               `json:"question"`
@@ -199,7 +212,8 @@ type Event struct {
 	Questions    []UserQuestion // populated when ToolName == "AskUserQuestion"
 	Done         bool
 	Error        error
-	InputTokens  int // token usage from agent result events
+	ErrorKind    ErrorKind // structured classification for EventError (zero value = unknown)
+	InputTokens  int       // token usage from agent result events
 	OutputTokens int
 }
 

@@ -167,19 +167,24 @@ func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode strin
 
 func (cs *claudeSession) readLoop(stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
 	defer func() {
-		cs.alive.Store(false)
 		if err := cs.cmd.Wait(); err != nil {
 			stderrMsg := strings.TrimSpace(stderrBuf.String())
 			if stderrMsg != "" {
-				slog.Error("claudeSession: process failed", "error", err, "stderr", stderrMsg)
-				evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
+				kind := core.ClassifyAnthropicError(stderrMsg)
+				slog.Error("claudeSession: process failed", "error", err, "stderr", stderrMsg, "kind", kind)
+				evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg), ErrorKind: kind}
 				select {
 				case cs.events <- evt:
 				case <-cs.ctx.Done():
-					return
 				}
 			}
 		}
+		// Mark dead only after the process has fully exited (cmd.Wait
+		// returned). Previously alive was set before Wait, leaving a
+		// window where Alive()==false but the process was still running,
+		// causing getOrCreateInteractiveStateWith to spawn a replacement
+		// without killing the old one → zombie Claude processes.
+		cs.alive.Store(false)
 		close(cs.events)
 		close(cs.done)
 	}()
@@ -324,6 +329,33 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 	}
 	if sid, ok := raw["session_id"].(string); ok && sid != "" {
 		cs.sessionID.Store(sid)
+	}
+
+	// Claude Code's stream-json schema: result events carry a `subtype` field
+	// (e.g. "success", "error_during_execution", "error_max_turns",
+	// "error_max_budget_usd", "error_max_structured_output_retries") and an
+	// `is_error` boolean. When the turn failed at the API layer, route through
+	// EventError so the engine can decide whether to retry (e.g. on 429).
+	subtype, _ := raw["subtype"].(string)
+	isErr, _ := raw["is_error"].(bool)
+	if isErr || (subtype != "" && subtype != "success") {
+		errMsg := content
+		if errMsg == "" {
+			errMsg = subtype
+		}
+		kind := core.ClassifyAnthropicError(content)
+		slog.Error("claudeSession: result error", "subtype", subtype, "is_error", isErr, "kind", kind, "msg", errMsg)
+		evt := core.Event{
+			Type:      core.EventError,
+			Error:     fmt.Errorf("%s", errMsg),
+			ErrorKind: kind,
+			SessionID: cs.CurrentSessionID(),
+		}
+		select {
+		case cs.events <- evt:
+		case <-cs.ctx.Done():
+		}
+		return
 	}
 
 	var inputTokens, outputTokens int

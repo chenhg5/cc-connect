@@ -2005,32 +2005,100 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		}
 	}()
 
-	// Drain any stale events left in the channel from a previous turn.
-	// This prevents the next processInteractiveEvents from reading an old
-	// EventResult that was pushed after the previous turn already returned.
-	drainEvents(state.agentSession.Events())
-
 	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.Platform, msg.SessionKey)
 
-	sendStart := time.Now()
-	state.mu.Lock()
-	state.fromVoice = msg.FromVoice
-	state.sideText = ""
-	state.mu.Unlock()
+	// Retry loop: on retriable backend errors (429 rate limit, 529
+	// overloaded), wait and re-run the turn on a fresh agent session via
+	// --resume. The loop stays inside the same session lock, so queued
+	// messages remain queued across the wait.
+	for attempt := 1; ; attempt++ {
+		if state.agentSession == nil {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgFailedToStartAgentSession))
+			return
+		}
 
-	// Run Send concurrently with processInteractiveEvents. Some agents block inside
-	// Send until the prompt turn finishes (e.g. ACP session/prompt); they may emit
-	// EventPermissionRequest while blocked — the event loop must run in parallel.
-	sendDone := make(chan error, 1)
-	go func() {
-		sendDone <- state.agentSession.Send(promptContent, msg.Images, msg.Files)
-	}()
+		// Drain any stale events left in the channel from a previous turn
+		// or failed attempt. This prevents the next processInteractiveEvents
+		// from reading an old EventResult that was pushed after the previous
+		// turn already returned.
+		drainEvents(state.agentSession.Events())
 
-	e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx)
-	if elapsed := time.Since(sendStart); elapsed >= slowAgentSend {
-		slog.Warn("slow agent send", "elapsed", elapsed, "session", msg.SessionKey, "content_len", len(msg.Content))
+		sendStart := time.Now()
+		state.mu.Lock()
+		state.fromVoice = msg.FromVoice
+		state.sideText = ""
+		state.mu.Unlock()
+
+		// Run Send concurrently with processInteractiveEvents. Some agents block inside
+		// Send until the prompt turn finishes (e.g. ACP session/prompt); they may emit
+		// EventPermissionRequest while blocked — the event loop must run in parallel.
+		sendDone := make(chan error, 1)
+		go func() {
+			sendDone <- state.agentSession.Send(promptContent, msg.Images, msg.Files)
+		}()
+
+		retriable := e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx)
+		if elapsed := time.Since(sendStart); elapsed >= slowAgentSend {
+			slog.Warn("slow agent send", "elapsed", elapsed, "session", msg.SessionKey, "content_len", len(msg.Content))
+		}
+		stopTyping = nil // ownership transferred; prevent defer from double-stopping
+
+		if !retriable.IsRetriable() {
+			// Success or non-retriable error — done with this turn.
+			break
+		}
+
+		if attempt >= RateLimitMaxAttempts {
+			// Cap reached; tell the user we're giving up.
+			approxMinutes := (RateLimitInitialDelay + time.Duration(RateLimitMaxAttempts-1)*RateLimitRetryDelay) / time.Minute
+			e.send(p, msg.ReplyCtx, e.i18n.Tf(MsgAgentRateLimitedGaveUp, RateLimitMaxAttempts, int(approxMinutes)))
+			slog.Error("agent rate-limit retry exhausted",
+				"kind", retriable, "attempts", RateLimitMaxAttempts, "session_key", interactiveKey)
+			break
+		}
+
+		delay := RateLimitInitialDelay
+		if attempt > 1 {
+			delay = RateLimitRetryDelay
+		}
+		slog.Warn("agent rate-limit retry scheduled",
+			"kind", retriable, "attempt", attempt, "max", RateLimitMaxAttempts,
+			"delay", delay, "session_key", interactiveKey)
+		e.send(p, msg.ReplyCtx, e.i18n.Tf(MsgAgentRateLimitedRetry, attempt, RateLimitMaxAttempts, int(delay.Seconds())))
+
+		// Wait out the delay. /stop (state.stopSignal) and engine shutdown
+		// both interrupt the wait.
+		select {
+		case <-time.After(delay):
+		case <-e.ctx.Done():
+			return
+		case <-state.stopSignal():
+			return
+		}
+
+		// Recycle the dead agent session. getOrCreateInteractiveStateWith
+		// will spawn a new `claude` process with --resume <session-id> when
+		// the stored Session has an agent session ID.
+		e.interactiveMu.Lock()
+		if current, ok := e.interactiveStates[interactiveKey]; ok && current == state {
+			state.markStopped()
+			e.closeAgentSessionWithTimeout(interactiveKey, state.agentSession)
+			delete(e.interactiveStates, interactiveKey)
+		}
+		e.interactiveMu.Unlock()
+
+		state = e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey)
+		if state.agentSession == nil {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgFailedToStartAgentSession))
+			return
+		}
+
+		// Fresh typing indicator for the retry attempt. The previous one
+		// was either stopped by the event loop or by the prior iteration.
+		if ti, ok := p.(TypingIndicator); ok {
+			stopTyping = ti.StartTyping(e.ctx, msg.ReplyCtx)
+		}
 	}
-	stopTyping = nil // ownership transferred; prevent defer from double-stopping
 
 	// Guard against a narrow race: a message may have been queued between
 	// processInteractiveEvents observing an empty queue and returning here
@@ -2145,31 +2213,38 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	defer e.interactiveMu.Unlock()
 
 	state, ok := e.interactiveStates[sessionKey]
-	if ok && state.agentSession != nil && state.agentSession.Alive() {
-		// Verify the running agent session matches the current active session.
-		// After /new or /switch the active session changes, but the old agent
-		// process may still be alive. Reusing it would send messages to the
-		// wrong conversation context.
-		wantID := session.GetAgentSessionID()
-		currentID := state.agentSession.CurrentSessionID()
-		// Reuse only when the live process matches what the Session expects:
-		// - IDs match (same Claude session), or
-		// - the process has not reported an ID yet (startup; empty want is OK).
-		// If wantID is empty (/new, cleared session) but the process already has
-		// a concrete ID, reusing would keep --resume context — recycle (#238).
-		needRecycle := currentID != "" && (wantID == "" || wantID != currentID)
-		if !needRecycle {
-			return state
+	if ok && state.agentSession != nil {
+		if state.agentSession.Alive() {
+			// Verify the running agent session matches the current active session.
+			// After /new or /switch the active session changes, but the old agent
+			// process may still be alive. Reusing it would send messages to the
+			// wrong conversation context.
+			wantID := session.GetAgentSessionID()
+			currentID := state.agentSession.CurrentSessionID()
+			// Reuse only when the live process matches what the Session expects:
+			// - IDs match (same Claude session), or
+			// - the process has not reported an ID yet (startup; empty want is OK).
+			// If wantID is empty (/new, cleared session) but the process already has
+			// a concrete ID, reusing would keep --resume context — recycle (#238).
+			needRecycle := currentID != "" && (wantID == "" || wantID != currentID)
+			if !needRecycle {
+				return state
+			}
+			// Tear down the stale agent so we start one that matches the Session below.
+			slog.Info("interactive session mismatch, recycling",
+				"session_key", sessionKey,
+				"want_agent_session", wantID,
+				"have_agent_session", currentID,
+			)
+		} else {
+			slog.Info("closing dead agent session before replacement",
+				"session_key", sessionKey)
 		}
-		// Tear down the stale agent so we start one that matches the Session below.
-		slog.Info("interactive session mismatch, recycling",
-			"session_key", sessionKey,
-			"want_agent_session", wantID,
-			"have_agent_session", currentID,
-		)
 		state.markStopped()
 		// Close synchronously to prevent race condition where old agent
 		// continues outputting while new agent starts (issue #327).
+		// Also ensures dead-but-not-yet-exited processes are killed before
+		// we spawn a replacement, preventing zombie Claude processes.
 		e.closeAgentSessionWithTimeout(sessionKey, state.agentSession)
 		delete(e.interactiveStates, sessionKey)
 		ok = false // prevent reading stale settings below
@@ -2341,7 +2416,12 @@ func (e *Engine) closeAgentSessionWithTimeout(sessionKey string, agentSession Ag
 
 const defaultEventIdleTimeout = 2 * time.Hour
 
-func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func(), sendDone <-chan error, replyCtx any) {
+// processInteractiveEvents runs the event loop for a single turn. When the
+// turn ends with a retriable backend error (e.g. 429 rate_limit_error), it
+// returns the classified ErrorKind so the caller can decide whether to
+// retry after a delay. All other outcomes return ErrorKindUnknown (zero
+// value), whether success, non-retriable error, or channel close.
+func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func(), sendDone <-chan error, replyCtx any) (retriable ErrorKind) {
 	var textParts []string
 	var segmentStart int // index into textParts: text before this has been sent/displayed
 	toolCount := 0
@@ -2882,6 +2962,25 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			return
 
 		case EventError:
+			// Retriable backend errors (429 rate limit, 529 overloaded):
+			// bubble the classified ErrorKind up to the caller. The caller
+			// (processInteractiveMessageWith) decides whether to wait and
+			// retry or to surface a "gave up" message. The event loop
+			// itself stays simple — no cross-goroutine state, no timers.
+			if event.Error != nil && event.ErrorKind.IsRetriable() {
+				cp.Finalize(ProgressCardStateFailed)
+				sp.discard()
+				slog.Warn("agent retriable error",
+					"kind", event.ErrorKind, "error", event.Error, "session_key", sessionKey)
+				if pendingSend != nil {
+					if err := <-pendingSend; err != nil {
+						slog.Debug("async send error during retriable failure", "error", err)
+					}
+				}
+				retriable = event.ErrorKind
+				return
+			}
+
 			cp.Finalize(ProgressCardStateFailed)
 			sp.discard()
 			if event.Error != nil {
@@ -2934,6 +3033,7 @@ channelClosed:
 			}
 		}
 	}
+	return
 }
 
 // notifyDroppedQueuedMessages drains pendingMessages from the state and
