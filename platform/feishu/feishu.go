@@ -107,6 +107,8 @@ type replyContext struct {
 	messageID  string
 	chatID     string
 	sessionKey string
+	userID     string // sender's open_id, used for @mention in replies
+	threadID   string // topic thread_id (omt_xxx), used for sending into topic threads
 }
 
 type Platform struct {
@@ -136,6 +138,7 @@ type Platform struct {
 	botOpenID        string
 	userNameCache    sync.Map // open_id -> display name
 	chatNameCache    sync.Map // chat_id -> chat name
+	lastMessageID    sync.Map // sessionKey -> messageID (for topic group reply)
 	// Webhook mode fields (for Lark international version)
 	server       *http.Server
 	port         string
@@ -732,7 +735,19 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	parentID := stringValue(msg.ParentId)
 
 	sessionKey := p.makeSessionKey(msg, chatID, userID)
-	rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
+	threadID := stringValue(msg.ThreadId)
+	// For topic threads, use root_id as the messageID so replies stay in the thread
+	replyMessageID := messageID
+	if threadID != "" && stringValue(msg.RootId) != "" {
+		replyMessageID = stringValue(msg.RootId)
+	}
+	rctx := replyContext{messageID: replyMessageID, chatID: chatID, sessionKey: sessionKey, userID: userID, threadID: threadID}
+	// Cache messageID, userID, threadID for ReconstructReplyCtx
+	p.lastMessageID.Store(sessionKey, replyMessageID)
+	p.lastMessageID.Store(sessionKey+":userID", userID)
+	if threadID != "" {
+		p.lastMessageID.Store(sessionKey+":threadID", threadID)
+	}
 	slog.Debug(p.tag()+": routed inbound message",
 		"message_id", messageID,
 		"session_key", sessionKey,
@@ -1499,6 +1514,12 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	}
 
 	msgType, msgBody := buildReplyContent(content)
+	msgBody = p.injectMention(rc, msgType, msgBody)
+
+	// For topic threads (threadID present), always use Reply API with reply_in_thread
+	if rc.threadID != "" && rc.messageID != "" {
+		return p.replyInTopicThread(ctx, rc, msgType, msgBody)
+	}
 
 	if !p.shouldUseThreadOrReplyAPI(rc) {
 		return p.sendNewMessageToChat(ctx, rc, msgType, msgBody)
@@ -1515,11 +1536,17 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
 	}
 
+	// For topic threads, delegate to Reply which handles reply_in_thread
+	if rc.threadID != "" && rc.messageID != "" {
+		return p.Reply(ctx, rctx, content)
+	}
+
 	if p.shouldUseThreadOrReplyAPI(rc) {
 		return p.Reply(ctx, rctx, content)
 	}
 
 	msgType, msgBody := buildReplyContent(content)
+	msgBody = p.injectMention(rc, msgType, msgBody)
 	return p.sendNewMessageToChat(ctx, rc, msgType, msgBody)
 }
 
@@ -1610,6 +1637,10 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 }
 
 func (p *Platform) sendMediaMessage(ctx context.Context, rc replyContext, msgType, content string) error {
+	// For topic threads, use Reply API with reply_in_thread
+	if rc.threadID != "" && rc.messageID != "" {
+		return p.replyInTopicThread(ctx, rc, msgType, content)
+	}
 	if p.shouldUseThreadOrReplyAPI(rc) {
 		return p.replyMessage(ctx, rc, msgType, content)
 	}
@@ -2166,6 +2197,95 @@ func (p *Platform) replyMessage(ctx context.Context, rc replyContext, msgType, c
 	})
 }
 
+// replyInTopicThread sends a reply inside a topic thread using reply_in_thread=true.
+func (p *Platform) replyInTopicThread(ctx context.Context, rc replyContext, msgType, content string) error {
+	req := larkim.NewReplyMessageReqBuilder().
+		MessageId(rc.messageID).
+		Body(larkim.NewReplyMessageReqBodyBuilder().
+			MsgType(msgType).
+			Content(content).
+			ReplyInThread(true).
+			Build()).
+		Build()
+	return p.withTransientRetry(ctx, "reply in topic thread", func() error {
+		return p.withFreshTenantAccessTokenRetry(ctx, "reply in topic thread", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+			resp, err := client.Im.Message.Reply(ctx, req, options...)
+			if err != nil {
+				return fmt.Errorf("%s: reply in topic thread api call: %w", p.tag(), err)
+			}
+			if !resp.Success() {
+				return fmt.Errorf("%s: reply in topic thread failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+			}
+			return nil
+		})
+	})
+}
+
+// injectMention prepends an @mention to the message body when replying in a group chat.
+// Only injects for group chats (chatID starts with "oc_") and when userID is available.
+func (p *Platform) injectMention(rc replyContext, msgType, msgBody string) string {
+	if rc.userID == "" || !strings.HasPrefix(rc.chatID, "oc_") {
+		return msgBody
+	}
+	name := p.resolveMentionName(rc.userID)
+
+	switch msgType {
+	case larkim.MsgTypeText:
+		var body map[string]string
+		if err := json.Unmarshal([]byte(msgBody), &body); err != nil {
+			return msgBody
+		}
+		body["text"] = fmt.Sprintf(`<at user_id="%s">%s</at> %s`, rc.userID, name, body["text"])
+		b, _ := json.Marshal(body)
+		return string(b)
+
+	case larkim.MsgTypePost:
+		var post map[string]any
+		if err := json.Unmarshal([]byte(msgBody), &post); err != nil {
+			return msgBody
+		}
+		// Post structure: {"zh_cn": {"content": [[{elements}], ...]}}
+		for _, lang := range []string{"zh_cn", "en_us", "ja_jp"} {
+			langObj, ok := post[lang].(map[string]any)
+			if !ok {
+				continue
+			}
+			contentArr, ok := langObj["content"].([]any)
+			if !ok || len(contentArr) == 0 {
+				continue
+			}
+			firstPara, ok := contentArr[0].([]any)
+			if !ok {
+				continue
+			}
+			atElement := map[string]any{
+				"tag":     "at",
+				"user_id": rc.userID,
+				"user_name": name,
+			}
+			firstPara = append([]any{atElement}, firstPara...)
+			contentArr[0] = firstPara
+			langObj["content"] = contentArr
+			post[lang] = langObj
+		}
+		b, _ := json.Marshal(post)
+		return string(b)
+
+	default:
+		return msgBody
+	}
+}
+
+// resolveMentionName returns the display name for @mention. Falls back to "你" if unknown.
+func (p *Platform) resolveMentionName(userID string) string {
+	if cached, ok := p.userNameCache.Load(userID); ok {
+		if name, ok := cached.(string); ok && name != "" {
+			return name
+		}
+	}
+	return "你"
+}
+
 func (p *Platform) createMessage(ctx context.Context, chatID, msgType, content, op string) error {
 	req := larkim.NewCreateMessageReqBuilder().
 		ReceiveIdType(larkim.ReceiveIdTypeChatId).
@@ -2351,6 +2471,24 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	if len(parts) == 3 {
 		if rootID, ok := parseThreadRootID(parts[2]); ok {
 			rc.messageID = rootID
+		}
+	}
+	// Restore cached messageID for topic group reply support
+	if rc.messageID == "" {
+		if cached, ok := p.lastMessageID.Load(sessionKey); ok {
+			rc.messageID = cached.(string)
+		}
+	}
+	// Restore cached userID for @mention support
+	if rc.userID == "" {
+		if cached, ok := p.lastMessageID.Load(sessionKey + ":userID"); ok {
+			rc.userID = cached.(string)
+		}
+	}
+	// Restore cached threadID for topic thread reply support
+	if rc.threadID == "" {
+		if cached, ok := p.lastMessageID.Load(sessionKey + ":threadID"); ok {
+			rc.threadID = cached.(string)
 		}
 	}
 	return rc, nil
