@@ -5791,6 +5791,71 @@ func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images
 	return nil
 }
 
+// InjectPrompt injects a message into an active session as if it came from an
+// external user. The agent will process and respond to it. If sessionKey is
+// empty, the first active session is used. This is intended for external
+// triggers (file watchers, CI hooks) that need the agent to act on a prompt.
+func (e *Engine) InjectPrompt(sessionKey, prompt string) error {
+	if prompt == "" {
+		return fmt.Errorf("prompt is required")
+	}
+
+	if sessionKey == "" {
+		e.interactiveMu.Lock()
+		for key := range e.interactiveStates {
+			sessionKey = key
+			break
+		}
+		e.interactiveMu.Unlock()
+		if sessionKey == "" {
+			return fmt.Errorf("no active session for --as-prompt")
+		}
+	}
+
+	platformName := ""
+	if idx := strings.Index(sessionKey, ":"); idx > 0 {
+		platformName = sessionKey[:idx]
+	}
+
+	var targetPlatform Platform
+	for _, p := range e.platforms {
+		if p.Name() == platformName {
+			targetPlatform = p
+			break
+		}
+	}
+	if targetPlatform == nil {
+		return fmt.Errorf("platform %q not found for session key %q", platformName, sessionKey)
+	}
+
+	rc, ok := targetPlatform.(ReplyContextReconstructor)
+	if !ok {
+		return fmt.Errorf("platform %q does not support reply context reconstruction", platformName)
+	}
+
+	replyCtx, err := rc.ReconstructReplyCtx(sessionKey)
+	if err != nil {
+		return fmt.Errorf("reconstruct reply context: %w", err)
+	}
+
+	msg := &Message{
+		SessionKey: sessionKey,
+		Platform:   platformName,
+		UserID:     "trigger",
+		UserName:   "trigger",
+		Content:    prompt,
+		ReplyCtx:   replyCtx,
+	}
+
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	if !session.TryLock() {
+		return fmt.Errorf("session busy, prompt not delivered")
+	}
+
+	go e.processInteractiveMessage(targetPlatform, msg, session)
+	return nil
+}
+
 // PostToNewThread posts a message directly to a platform channel as a new
 // top-level message, without requiring or using an existing interactive session.
 // This is intended for automated notifications (e.g. file-watcher alerts) that

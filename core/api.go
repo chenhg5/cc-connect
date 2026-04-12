@@ -34,6 +34,7 @@ type SendRequest struct {
 	Images     []ImageAttachment `json:"images,omitempty"`
 	Files      []FileAttachment  `json:"files,omitempty"`
 	NewThread  bool              `json:"new_thread,omitempty"`
+	AsPrompt   bool              `json:"as_prompt,omitempty"`
 }
 
 // ReactRequest is the JSON body for POST /react and POST /unreact.
@@ -175,6 +176,16 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 
 	if !ok {
 		http.Error(w, fmt.Sprintf("project %q not found", req.Project), http.StatusNotFound)
+		return
+	}
+
+	if req.AsPrompt {
+		sendErr := engine.InjectPrompt(req.SessionKey, req.Message)
+		if sendErr != nil {
+			http.Error(w, sendErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		apiJSON(w, http.StatusOK, map[string]string{"status": "accepted"})
 		return
 	}
 
