@@ -277,7 +277,6 @@ func (rm *RelayManager) dispatch(ctx context.Context, req RelayRequest) (*RelayR
 	rm.mu.RLock()
 	binding := rm.bindings[chatID]
 	targetEngine := rm.engines[req.To]
-	sourceEngine := rm.engines[req.From]
 	rm.mu.RUnlock()
 
 	if binding == nil {
@@ -290,7 +289,6 @@ func (rm *RelayManager) dispatch(ctx context.Context, req RelayRequest) (*RelayR
 		return nil, fmt.Errorf("relay dispatch: target engine %q not found (is the project running?)", req.To)
 	}
 
-	// Post dispatch notification to the source group chat
 	fromName := req.From
 	if binding.Bots[req.From] != "" {
 		fromName = binding.Bots[req.From]
@@ -299,11 +297,12 @@ func (rm *RelayManager) dispatch(ctx context.Context, req RelayRequest) (*RelayR
 	if binding.Bots[req.To] != "" {
 		toName = binding.Bots[req.To]
 	}
-	if sourceEngine != nil {
-		groupSessionKey := platform + ":" + chatID + ":relay"
-		label := fmt.Sprintf("[%s → %s dispatch] %s", fromName, toName, truncateRelay(req.Message, 500))
-		rm.sendToGroup(ctx, sourceEngine, platform, groupSessionKey, label)
-	}
+
+	// Post the dispatch prompt visibly in the target channel so humans can
+	// see what was asked. Uses the target engine's platform to send.
+	targetChannelSessionKey := platform + ":" + req.Channel
+	label := fmt.Sprintf("[dispatch from %s]\n%s", fromName, req.Message)
+	rm.sendToGroup(ctx, targetEngine, platform, targetChannelSessionKey, label)
 
 	// Inject prompt into the target engine's interactive session for the channel
 	if err := targetEngine.DispatchToChannel(platform, req.Channel, req.Message); err != nil {
