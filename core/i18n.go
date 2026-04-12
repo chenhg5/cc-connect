@@ -353,9 +353,12 @@ const (
 	MsgCommandExecError   MsgKey = "command_exec_error"
 	MsgCommandExecSuccess MsgKey = "command_exec_success"
 
-	MsgSkillsTitle MsgKey = "skills_title"
-	MsgSkillsEmpty MsgKey = "skills_empty"
-	MsgSkillsHint  MsgKey = "skills_hint"
+	MsgSkillsTitle         MsgKey = "skills_title"
+	MsgSkillsEmpty         MsgKey = "skills_empty"
+	MsgSkillsHint          MsgKey = "skills_hint"
+	MsgSkillsPageHintNext  MsgKey = "skills_page_hint_next"
+	MsgSkillsPageHintOther MsgKey = "skills_page_hint_other"
+	MsgSkillsInvalidPage   MsgKey = "skills_invalid_page"
 
 	MsgConfigTitle       MsgKey = "config_title"
 	MsgConfigHint        MsgKey = "config_hint"
@@ -392,10 +395,10 @@ const (
 	MsgAliasNotFound   MsgKey = "alias_not_found"
 	MsgAliasUsage      MsgKey = "alias_usage"
 
-	MsgNewSessionCreated     MsgKey = "new_session_created"
-	MsgNewSessionCreatedName MsgKey = "new_session_created_name"
-	MsgSessionAutoResetIdle     MsgKey = "session_auto_reset_idle"
-	MsgSessionClosingGraceful   MsgKey = "session_closing_graceful"
+	MsgNewSessionCreated      MsgKey = "new_session_created"
+	MsgNewSessionCreatedName  MsgKey = "new_session_created_name"
+	MsgSessionAutoResetIdle   MsgKey = "session_auto_reset_idle"
+	MsgSessionClosingGraceful MsgKey = "session_closing_graceful"
 
 	MsgDeleteUsage              MsgKey = "delete_usage"
 	MsgDeleteSuccess            MsgKey = "delete_success"
@@ -492,8 +495,8 @@ const (
 	MsgBuiltinCmdDir       MsgKey = "dir"
 	MsgBuiltinCmdDiff      MsgKey = "diff"
 
-	MsgDiffEmpty           MsgKey = "diff_empty"
-	MsgDiffNoDiff2HTML     MsgKey = "diff_no_diff2html"
+	MsgDiffEmpty       MsgKey = "diff_empty"
+	MsgDiffNoDiff2HTML MsgKey = "diff_no_diff2html"
 
 	MsgDirChanged          MsgKey = "dir_changed"
 	MsgDirCurrent          MsgKey = "dir_current"
@@ -2443,6 +2446,27 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "用法：/<skill名稱> [參數...] 來調用 Skill。",
 		LangJapanese:           "使い方：/<スキル名> [引数...] でスキルを実行します。",
 		LangSpanish:            "Uso: /<nombre-skill> [args...] para invocar un skill.",
+	},
+	MsgSkillsPageHintNext: {
+		LangEnglish:            "Page %d/%d. Use /skills %d to view the next page.",
+		LangChinese:            "第 %d/%d 页。使用 /skills %d 查看下一页。",
+		LangTraditionalChinese: "第 %d/%d 頁。使用 /skills %d 查看下一頁。",
+		LangJapanese:           "%d/%d ページです。次のページを見るには /skills %d を使います。",
+		LangSpanish:            "Página %d/%d. Usa /skills %d para ver la siguiente página.",
+	},
+	MsgSkillsPageHintOther: {
+		LangEnglish:            "Page %d/%d. Use /skills <page> to view another page.",
+		LangChinese:            "第 %d/%d 页。使用 /skills <页码> 查看其他页面。",
+		LangTraditionalChinese: "第 %d/%d 頁。使用 /skills <頁碼> 查看其他頁面。",
+		LangJapanese:           "%d/%d ページです。他のページを見るには /skills <page> を使います。",
+		LangSpanish:            "Página %d/%d. Usa /skills <page> para ver otra página.",
+	},
+	MsgSkillsInvalidPage: {
+		LangEnglish:            "Invalid page. Use /skills <1-%d>.",
+		LangChinese:            "页码无效。请使用 /skills <1-%d>。",
+		LangTraditionalChinese: "頁碼無效。請使用 /skills <1-%d>。",
+		LangJapanese:           "無効なページです。/skills <1-%d> を使ってください。",
+		LangSpanish:            "Página inválida. Usa /skills <1-%d>.",
 	},
 
 	MsgConfigTitle: {

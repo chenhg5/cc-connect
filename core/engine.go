@@ -23,6 +23,8 @@ import (
 )
 
 const maxPlatformMessageLen = 4000
+const telegramSkillsPageMaxLen = 3500
+const telegramSkillsFooterReserve = 160
 const maxQueuedMessages = 5 // cap queued messages to bound memory usage
 
 const (
@@ -211,8 +213,8 @@ type Engine struct {
 
 	// Terminal observation (--observe)
 	observeEnabled    bool
-	observeProjectDir string             // ~/.claude/projects/{projectKey}
-	observeSessionKey string             // e.g. "slack:C123:U456" — target for forwarding
+	observeProjectDir string // ~/.claude/projects/{projectKey}
+	observeSessionKey string // e.g. "slack:C123:U456" — target for forwarding
 	observeCancel     context.CancelFunc
 
 	// Interactive agent session management
@@ -3183,7 +3185,7 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 	case "commands":
 		e.cmdCommands(p, msg, args)
 	case "skills":
-		e.cmdSkills(p, msg)
+		e.cmdSkills(p, msg, args)
 	case "config":
 		e.cmdConfig(p, msg, args)
 	case "doctor":
@@ -8742,11 +8744,22 @@ func (e *Engine) executeSkill(p Platform, msg *Message, skill *Skill, args []str
 	go e.processInteractiveMessage(p, msg, session)
 }
 
-func (e *Engine) cmdSkills(p Platform, msg *Message) {
+func (e *Engine) cmdSkills(p Platform, msg *Message, args []string) {
 	if !supportsCards(p) {
 		skills := e.skills.ListAll()
 		if len(skills) == 0 {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSkillsEmpty))
+			return
+		}
+
+		if strings.EqualFold(p.Name(), "telegram") {
+			pages := e.renderTelegramSkillsPages(skills)
+			page, ok := parseTelegramSkillsPageArg(args, len(pages))
+			if !ok {
+				e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgSkillsInvalidPage, len(pages)))
+				return
+			}
+			e.reply(p, msg.ReplyCtx, pages[page-1])
 			return
 		}
 
@@ -8763,6 +8776,74 @@ func (e *Engine) cmdSkills(p Platform, msg *Message) {
 	}
 
 	e.replyWithCard(p, msg.ReplyCtx, e.renderSkillsCard())
+}
+
+func parseTelegramSkillsPageArg(args []string, totalPages int) (int, bool) {
+	if len(args) == 0 {
+		return 1, true
+	}
+	if len(args) != 1 {
+		return 0, false
+	}
+	page, err := strconv.Atoi(args[0])
+	if err != nil || page < 1 || page > totalPages {
+		return 0, false
+	}
+	return page, true
+}
+
+func (e *Engine) renderTelegramSkillsPages(skills []*Skill) []string {
+	title := e.i18n.Tf(MsgSkillsTitle, e.agent.Name(), len(skills))
+	hint := e.i18n.T(MsgSkillsHint)
+	bodyBudget := telegramSkillsPageMaxLen - len(title) - len(hint) - telegramSkillsFooterReserve
+	if bodyBudget < 256 {
+		bodyBudget = 256
+	}
+
+	var pages [][]string
+	var current []string
+	currentLen := 0
+	for _, s := range skills {
+		line := fmt.Sprintf("  /%s — %s\n", s.Name, s.Description)
+		if len(line) > bodyBudget {
+			line = truncateStr(strings.TrimSpace(line), bodyBudget-3) + "...\n"
+		}
+		if currentLen+len(line) > bodyBudget && len(current) > 0 {
+			pages = append(pages, current)
+			current = nil
+			currentLen = 0
+		}
+		current = append(current, line)
+		currentLen += len(line)
+	}
+	if len(current) > 0 {
+		pages = append(pages, current)
+	}
+	if len(pages) == 0 {
+		pages = append(pages, nil)
+	}
+
+	out := make([]string, 0, len(pages))
+	totalPages := len(pages)
+	for i, lines := range pages {
+		var sb strings.Builder
+		sb.WriteString(title)
+		for _, line := range lines {
+			sb.WriteString(line)
+		}
+		sb.WriteString("\n")
+		if totalPages > 1 {
+			if i+1 < totalPages {
+				sb.WriteString(e.i18n.Tf(MsgSkillsPageHintNext, i+1, totalPages, i+2))
+			} else {
+				sb.WriteString(e.i18n.Tf(MsgSkillsPageHintOther, i+1, totalPages))
+			}
+			sb.WriteString("\n")
+		}
+		sb.WriteString(hint)
+		out = append(out, sb.String())
+	}
+	return out
 }
 
 // ── /config command ──────────────────────────────────────────
