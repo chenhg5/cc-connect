@@ -3707,15 +3707,15 @@ func TestHandlePendingPermission_AskUserQuestion_SkipsPermFlow(t *testing.T) {
 // and events channel can be controlled by the test.
 type controllableAgentSession struct {
 	sessionID string
-	alive     bool
 	events    chan Event
 	closed    chan struct{} // closed when Close() is called
+	closeOnce sync.Once
+	mu        sync.Mutex // guards sends to events channel
 }
 
 func newControllableSession(id string) *controllableAgentSession {
 	return &controllableAgentSession{
 		sessionID: id,
-		alive:     true,
 		events:    make(chan Event, 8),
 		closed:    make(chan struct{}),
 	}
@@ -3727,16 +3727,39 @@ func (s *controllableAgentSession) Send(_ string, _ []ImageAttachment, _ []FileA
 func (s *controllableAgentSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
 func (s *controllableAgentSession) Events() <-chan Event                                 { return s.events }
 func (s *controllableAgentSession) CurrentSessionID() string                             { return s.sessionID }
-func (s *controllableAgentSession) Alive() bool                                          { return s.alive }
-func (s *controllableAgentSession) Close() error {
-	s.alive = false
+func (s *controllableAgentSession) Alive() bool {
 	select {
 	case <-s.closed:
-		// already closed
+		return false
 	default:
+		return true
+	}
+}
+
+// SendEvent safely sends an event to the session, returning false if closed.
+func (s *controllableAgentSession) SendEvent(e Event) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	select {
+	case <-s.closed:
+		return false
+	default:
+		select {
+		case s.events <- e:
+			return true
+		case <-s.closed:
+			return false
+		}
+	}
+}
+
+func (s *controllableAgentSession) Close() error {
+	s.closeOnce.Do(func() {
+		s.mu.Lock()
 		close(s.events)
 		close(s.closed)
-	}
+		s.mu.Unlock()
+	})
 	return nil
 }
 
@@ -4532,7 +4555,6 @@ func newQueuingSession(id string) *queuingAgentSession {
 	return &queuingAgentSession{
 		controllableAgentSession: controllableAgentSession{
 			sessionID: id,
-			alive:     true,
 			events:    make(chan Event, 16),
 			closed:    make(chan struct{}),
 		},
@@ -4558,7 +4580,6 @@ func newBlockingSendSession(id string) *blockingSendAgentSession {
 	return &blockingSendAgentSession{
 		controllableAgentSession: controllableAgentSession{
 			sessionID: id,
-			alive:     true,
 			events:    make(chan Event, 16),
 			closed:    make(chan struct{}),
 		},
@@ -5030,7 +5051,7 @@ func TestQueueMessage_NoState_ReturnsFalse(t *testing.T) {
 func TestQueueMessage_DeadSession_ReturnsFalse(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newQueuingSession("dead")
-	sess.alive = false
+	_ = sess.Close() // mark session as dead
 	agent := &controllableAgent{nextSession: sess}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 
