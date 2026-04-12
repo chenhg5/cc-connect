@@ -101,6 +101,47 @@ func TestBuildExecArgs_ResumeOmitsCdFlag(t *testing.T) {
 	}
 }
 
+func TestGetModelAndReasoningEffort_FromRuntimeConfigWhenUnset(t *testing.T) {
+	workDir := t.TempDir()
+	binDir := filepath.Join(workDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+
+	script := `#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{"id":%s,"result":{"protocolVersion":"2"}}\n' "$id"
+      ;;
+    *'"method":"config/read"'*)
+      printf '{"id":%s,"result":{"config":{"model":"gpt-5.4","model_reasoning_effort":"xhigh"},"origins":{}}}\n' "$id"
+      ;;
+  esac
+done
+`
+	scriptPath := filepath.Join(binDir, "codex")
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cs, err := newCodexSession(context.Background(), workDir, "", "", "", "", nil)
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+	defer cs.Close()
+
+	if got := cs.GetModel(); got != "gpt-5.4" {
+		t.Fatalf("GetModel() = %q, want gpt-5.4", got)
+	}
+	if got := cs.GetReasoningEffort(); got != "xhigh" {
+		t.Fatalf("GetReasoningEffort() = %q, want xhigh", got)
+	}
+}
+
 func TestSend_WithImages_PassesImageArgsAndDefaultPrompt(t *testing.T) {
 	workDir := t.TempDir()
 	binDir := filepath.Join(workDir, "bin")
