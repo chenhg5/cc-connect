@@ -9116,6 +9116,10 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, wsChannel
 		return "", fmt.Errorf("send relay message: %w", err)
 	}
 
+	// sawNewContent tracks whether Claude has started processing our message
+	// (emitted at least one text or tool event). A stale EventResult from
+	// session resume that slips past the drain is skipped when this is false.
+	sawNewContent := false
 	var textParts []string
 	for event := range agentSession.Events() {
 		if ctx.Err() != nil {
@@ -9123,6 +9127,7 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, wsChannel
 		}
 		switch event.Type {
 		case EventText:
+			sawNewContent = true
 			if event.Content != "" {
 				textParts = append(textParts, event.Content)
 			}
@@ -9132,6 +9137,7 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, wsChannel
 				}
 			}
 		case EventToolResult:
+			sawNewContent = true
 			out := strings.TrimSpace(event.Content)
 			if out == "" {
 				out = strings.TrimSpace(event.ToolResult)
@@ -9144,6 +9150,17 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, wsChannel
 				textParts = append(textParts, fmt.Sprintf(e.i18n.T(MsgToolResult), tn, out)+"\n\n")
 			}
 		case EventResult:
+			if !sawNewContent {
+				// Stale result from session resume — save the session ID
+				// but don't treat it as this turn's response.
+				if event.SessionID != "" {
+					session.SetAgentSessionID(event.SessionID, agent.Name())
+					sessions.Save()
+				}
+				slog.Debug("relay: skipped stale result event from resumed session",
+					"from", fromProject, "to", e.name, "session_id", event.SessionID)
+				continue
+			}
 			if event.SessionID != "" {
 				session.SetAgentSessionID(event.SessionID, agent.Name())
 				sessions.Save()
