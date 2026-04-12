@@ -2278,12 +2278,25 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 // a stale goroutine (still running after /new created a fresh Session object and
 // a new turn started on it) from accidentally destroying the replacement state.
 func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interactiveState) {
+	agentSession := e.detachInteractiveState(sessionKey, expected...)
+	if agentSession != nil {
+		e.closeAgentSessionWithTimeout(sessionKey, agentSession)
+	}
+}
+
+// detachInteractiveState removes the interactive state from the routing map,
+// stops its event loop, and returns the agent session for later closing.
+// It does NOT close the agent session — the caller is responsible for calling
+// closeAgentSessionWithTimeout or closeAgentSessionAsync on the returned value.
+// When an expected state is provided, detach is skipped if the map entry has
+// been replaced by a different state.
+func (e *Engine) detachInteractiveState(sessionKey string, expected ...*interactiveState) AgentSession {
 	e.interactiveMu.Lock()
 	state, ok := e.interactiveStates[sessionKey]
 	if len(expected) > 0 && expected[0] != nil && state != expected[0] {
 		// Another turn has already replaced the state — skip cleanup.
 		e.interactiveMu.Unlock()
-		return
+		return nil
 	}
 	delete(e.interactiveStates, sessionKey)
 	e.interactiveMu.Unlock()
@@ -2295,8 +2308,9 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 	}
 
 	if ok && state != nil && state.agentSession != nil {
-		e.closeAgentSessionWithTimeout(sessionKey, state.agentSession)
+		return state.agentSession
 	}
+	return nil
 }
 
 func (e *Engine) closeAgentSessionAsync(sessionKey string, agentSession AgentSession) {
@@ -2319,7 +2333,7 @@ func (e *Engine) closeAgentSessionWithTimeout(sessionKey string, agentSession Ag
 	// exits sooner — this is the ceiling, not the typical duration.
 	const closeTimeout = 130 * time.Second
 
-	slog.Debug("cleanupInteractiveState: closing agent session", "session", sessionKey)
+	slog.Debug("closeAgentSessionWithTimeout: closing agent session", "session", sessionKey)
 	closeStart := time.Now()
 
 	done := make(chan struct{})
@@ -3509,10 +3523,16 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 	}
 
 	slog.Info("cmdNew: cleaning up old session", "session_key", msg.SessionKey)
-	e.cleanupInteractiveState(interactiveKey)
-	slog.Info("cmdNew: cleanup done, creating new session", "session_key", msg.SessionKey)
 
-	// Clear old session's agent session ID so it cannot be resumed
+	// Phase 1: Detach the interactive state from the routing map and stop its
+	// event loop. This is non-blocking — we get the agent session back for
+	// later cleanup.
+	oldAgentSession := e.detachInteractiveState(interactiveKey)
+
+	// Phase 2: Clear old session data BEFORE the async close, so any message
+	// arriving during the close window starts a fresh agent instead of resuming
+	// the old conversation (race fix: session data must be updated while the
+	// interactive state is already detached but the process may still be exiting).
 	old := sessions.GetOrCreateActive(msg.SessionKey)
 	old.SetAgentSessionID("", "")
 	old.ClearHistory()
@@ -3523,6 +3543,15 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 		name = strings.Join(args, " ")
 	}
 	sessions.NewSession(msg.SessionKey, name)
+
+	// Phase 3: Close the old agent process in the background. The state has
+	// already been detached so no events can leak into the new session.
+	if oldAgentSession != nil {
+		e.closeAgentSessionAsync(interactiveKey, oldAgentSession)
+	}
+
+	slog.Debug("cmdNew: detach done, async close started", "session_key", msg.SessionKey, "had_agent", oldAgentSession != nil)
+	slog.Info("cmdNew: new session created", "session_key", msg.SessionKey)
 	if name != "" {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgNewSessionCreatedName), name))
 	} else {
@@ -3671,13 +3700,21 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	}
 
 	slog.Info("cmdSwitch: cleaning up old session", "session_key", msg.SessionKey)
-	e.cleanupInteractiveState(interactiveKey)
-	slog.Info("cmdSwitch: cleanup done", "session_key", msg.SessionKey)
+
+	// Detach the interactive state first (non-blocking), then update session
+	// data before closing the old process asynchronously. This prevents a race
+	// where a message arriving during the close window resumes the old agent.
+	oldAgentSession := e.detachInteractiveState(interactiveKey)
 
 	session := sessions.GetOrCreateActive(msg.SessionKey)
 	session.SetAgentInfo(matched.ID, agent.Name(), matched.Summary)
 	session.ClearHistory()
 	sessions.Save()
+
+	if oldAgentSession != nil {
+		e.closeAgentSessionAsync(interactiveKey, oldAgentSession)
+	}
+	slog.Info("cmdSwitch: cleanup done", "session_key", msg.SessionKey)
 
 	shortID := matched.ID
 	if len(shortID) > 12 {
@@ -3991,12 +4028,16 @@ func (e *Engine) dirApply(agent Agent, sessions *SessionManager, interactiveKey,
 			if !e.multiWorkspace {
 				switcher.SetWorkDir(baseDir)
 			}
-			e.cleanupInteractiveState(interactiveKey)
+			oldAgentSession := e.detachInteractiveState(interactiveKey)
 
 			s := sessions.GetOrCreateActive(sessionKey)
 			s.SetAgentSessionID("", "")
 			s.ClearHistory()
 			sessions.Save()
+
+			if oldAgentSession != nil {
+				e.closeAgentSessionAsync(interactiveKey, oldAgentSession)
+			}
 
 			if e.projectState != nil {
 				if e.multiWorkspace {
@@ -4061,12 +4102,16 @@ func (e *Engine) dirApply(agent Agent, sessions *SessionManager, interactiveKey,
 	if !e.multiWorkspace {
 		switcher.SetWorkDir(newDir)
 	}
-	e.cleanupInteractiveState(interactiveKey)
+	oldAgentSession := e.detachInteractiveState(interactiveKey)
 
 	s := sessions.GetOrCreateActive(sessionKey)
 	s.SetAgentSessionID("", "")
 	s.ClearHistory()
 	sessions.Save()
+
+	if oldAgentSession != nil {
+		e.closeAgentSessionAsync(interactiveKey, oldAgentSession)
+	}
 
 	if e.dirHistory != nil {
 		e.dirHistory.Add(e.name, newDir)
