@@ -95,16 +95,35 @@ func TestSessionObserverPoll(t *testing.T) {
 	}
 
 	obs := newSessionObserver(dir, target, "C123")
+	sessionFile := filepath.Join(dir, "test-session.jsonl")
+	empty, err := os.Create(sessionFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := empty.Close(); err != nil {
+		t.Fatal(err)
+	}
 	obs.initOffsets()
 
-	// Write a JSONL file simulating a native terminal session
-	sessionFile := filepath.Join(dir, "test-session.jsonl")
-	f, _ := os.Create(sessionFile)
-	f.WriteString(`{"type":"user","message":{"role":"user","content":"hello"},"entrypoint":"cli","sessionId":"s1"}` + "\n")
-	f.WriteString(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi there"}]},"entrypoint":"cli","sessionId":"s1"}` + "\n")
-	f.Close()
-
+	// Append lines incrementally so offsets advance from EOF of the empty file.
 	ctx := context.Background()
+	appendLine := func(line string) {
+		t.Helper()
+		f, err := os.OpenFile(sessionFile, os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.WriteString(line); err != nil {
+			f.Close()
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendLine(`{"type":"user","message":{"role":"user","content":"hello"},"entrypoint":"cli","sessionId":"s1"}` + "\n")
+	obs.poll(ctx)
+	appendLine(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi there"}]},"entrypoint":"cli","sessionId":"s1"}` + "\n")
 	obs.poll(ctx)
 
 	mu.Lock()
@@ -126,6 +145,69 @@ type mockObserverTargetCapture struct {
 
 func (m *mockObserverTargetCapture) SendObservation(ctx context.Context, channelID, text string) error {
 	return m.fn(ctx, channelID, text)
+}
+
+func TestSessionObserverNewFileSkipsPreExistingLines(t *testing.T) {
+	dir := t.TempDir()
+
+	var received []string
+	var mu sync.Mutex
+	target := &mockObserverTargetCapture{
+		fn: func(ctx context.Context, channelID, text string) error {
+			mu.Lock()
+			received = append(received, text)
+			mu.Unlock()
+			return nil
+		},
+	}
+
+	obs := newSessionObserver(dir, target, "C123")
+	obs.initOffsets()
+
+	sessionFile := filepath.Join(dir, "appears-late.jsonl")
+	f, err := os.Create(sessionFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"type":"user","message":{"role":"user","content":"stale"},"entrypoint":"cli"}` + "\n"); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	obs.poll(context.Background())
+
+	mu.Lock()
+	if len(received) != 0 {
+		mu.Unlock()
+		t.Fatalf("expected 0 messages (new file should start at EOF), got %d: %v", len(received), received)
+	}
+	mu.Unlock()
+
+	f, err = os.OpenFile(sessionFile, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"type":"user","message":{"role":"user","content":"fresh"},"entrypoint":"cli"}` + "\n"); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	obs.poll(context.Background())
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(received) != 1 {
+		t.Fatalf("expected 1 new message after append, got %d: %v", len(received), received)
+	}
+	if !strings.Contains(received[0], "fresh") {
+		t.Fatalf("expected appended line only, got %q", received[0])
+	}
 }
 
 func TestSessionObserverInitOffsetsSkipsExisting(t *testing.T) {
@@ -176,14 +258,28 @@ func TestSessionObserverTruncation(t *testing.T) {
 	}
 
 	obs := newSessionObserver(dir, target, "C123")
+	sessionFile := filepath.Join(dir, "long.jsonl")
+	empty, err := os.Create(sessionFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := empty.Close(); err != nil {
+		t.Fatal(err)
+	}
 	obs.initOffsets()
 
-	// Write a very long message
 	longText := strings.Repeat("x", 5000)
-	sessionFile := filepath.Join(dir, "long.jsonl")
-	f, _ := os.Create(sessionFile)
-	f.WriteString(fmt.Sprintf(`{"type":"user","message":{"role":"user","content":"%s"},"entrypoint":"cli"}`, longText) + "\n")
-	f.Close()
+	f, err := os.OpenFile(sessionFile, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(fmt.Sprintf(`{"type":"user","message":{"role":"user","content":"%s"},"entrypoint":"cli"}`, longText) + "\n"); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	obs.poll(context.Background())
 

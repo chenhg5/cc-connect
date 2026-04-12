@@ -189,6 +189,24 @@ func TestConfigValidate(t *testing.T) {
 	}
 }
 
+func TestRunAsEnv_RejectsDangerousVars(t *testing.T) {
+	dangerous := []string{"PATH", "path", "LD_PRELOAD", "HOME", "USER", "SHELL", "SUDO_USER", "SUDO_COMMAND", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES"}
+	for _, v := range dangerous {
+		err := validateRunAsEnv("projects[0]", []string{v})
+		if err == nil {
+			t.Errorf("validateRunAsEnv(%q) = nil, want error", v)
+		}
+	}
+
+	safe := []string{"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "CUSTOM_VAR"}
+	for _, v := range safe {
+		err := validateRunAsEnv("projects[0]", []string{v})
+		if err != nil {
+			t.Errorf("validateRunAsEnv(%q) = %v, want nil", v, err)
+		}
+	}
+}
+
 func TestEffectiveDisplayQuiet(t *testing.T) {
 	tru, fal := true, false
 	tests := []struct {

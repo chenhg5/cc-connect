@@ -34,6 +34,29 @@ func isValidRunAsUserName(name string) bool {
 	return true
 }
 
+var dangerousEnvVars = map[string]bool{
+	"LD_PRELOAD":           true,
+	"LD_LIBRARY_PATH":      true,
+	"DYLD_INSERT_LIBRARIES": true,
+	"DYLD_LIBRARY_PATH":    true,
+	"PATH":                 true,
+	"HOME":                 true,
+	"USER":                 true,
+	"SHELL":                true,
+	"SUDO_USER":            true,
+	"SUDO_COMMAND":         true,
+}
+
+func validateRunAsEnv(prefix string, envVars []string) error {
+	for _, v := range envVars {
+		name := strings.TrimSpace(v)
+		if dangerousEnvVars[strings.ToUpper(name)] {
+			return fmt.Errorf("config: %s.run_as_env must not include dangerous variable %q", prefix, name)
+		}
+	}
+	return nil
+}
+
 func validateRunAsUser(prefix, name string) error {
 	if name == "" {
 		return nil
@@ -272,9 +295,10 @@ type ProjectConfig struct {
 	RunAsUser string `toml:"run_as_user,omitempty"`
 	// RunAsEnv optionally extends the minimal environment variable allowlist
 	// that crosses the sudo boundary when RunAsUser is set. The default
-	// allowlist (PATH, LANG, LC_*, TERM) is always included. Use this only
-	// for variables that the target user cannot reasonably set in their own
-	// shell profile.
+	// allowlist (LANG, LC_*, TERM) is always included; PATH is NOT preserved
+	// by default — the target user's login PATH is used. Dangerous variables
+	// (LD_PRELOAD, PATH, HOME, etc.) are rejected at config validation.
+	// Use this only for variables the target user cannot set in their profile.
 	RunAsEnv []string `toml:"run_as_env,omitempty"`
 	// ShowContextIndicator: nil/true = append [ctx: ~N%] to assistant replies; false = hide.
 	ShowContextIndicator *bool           `toml:"show_context_indicator,omitempty"`
@@ -450,6 +474,9 @@ func (c *Config) validate() error {
 			return fmt.Errorf("config: %s.reset_on_idle_mins must be >= 0", prefix)
 		}
 		if err := validateRunAsUser(prefix, proj.RunAsUser); err != nil {
+			return err
+		}
+		if err := validateRunAsEnv(prefix, proj.RunAsEnv); err != nil {
 			return err
 		}
 		if err := validateReferenceConfig(prefix, proj.References); err != nil {
