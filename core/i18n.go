@@ -239,7 +239,8 @@ const (
 	MsgCronBtnUnmute    MsgKey = "cron_btn_unmute"
 	MsgCronBtnDelete    MsgKey = "cron_btn_delete"
 
-	MsgStatusTitle MsgKey = "status_title"
+	MsgStatusTitle          MsgKey = "status_title"
+	MsgReplyFooterRemaining MsgKey = "reply_footer_remaining"
 
 	MsgModelCurrent          MsgKey = "model_current"
 	MsgModelChanged          MsgKey = "model_changed"
@@ -392,10 +393,10 @@ const (
 	MsgAliasNotFound   MsgKey = "alias_not_found"
 	MsgAliasUsage      MsgKey = "alias_usage"
 
-	MsgNewSessionCreated     MsgKey = "new_session_created"
-	MsgNewSessionCreatedName MsgKey = "new_session_created_name"
-	MsgSessionAutoResetIdle     MsgKey = "session_auto_reset_idle"
-	MsgSessionClosingGraceful   MsgKey = "session_closing_graceful"
+	MsgNewSessionCreated      MsgKey = "new_session_created"
+	MsgNewSessionCreatedName  MsgKey = "new_session_created_name"
+	MsgSessionAutoResetIdle   MsgKey = "session_auto_reset_idle"
+	MsgSessionClosingGraceful MsgKey = "session_closing_graceful"
 
 	MsgDeleteUsage              MsgKey = "delete_usage"
 	MsgDeleteSuccess            MsgKey = "delete_success"
@@ -492,8 +493,8 @@ const (
 	MsgBuiltinCmdDir       MsgKey = "dir"
 	MsgBuiltinCmdDiff      MsgKey = "diff"
 
-	MsgDiffEmpty           MsgKey = "diff_empty"
-	MsgDiffNoDiff2HTML     MsgKey = "diff_no_diff2html"
+	MsgDiffEmpty       MsgKey = "diff_empty"
+	MsgDiffNoDiff2HTML MsgKey = "diff_no_diff2html"
 
 	MsgDirChanged          MsgKey = "dir_changed"
 	MsgDirCurrent          MsgKey = "dir_current"
@@ -1802,6 +1803,13 @@ var messages = map[MsgKey]map[Language]string{
 			"Tiempo activo: %s\n" +
 			"Idioma: %s\n" +
 			"%s" + "%s" + "%s" + "%s" + "%s",
+	},
+	MsgReplyFooterRemaining: {
+		LangEnglish:            "%d%% left",
+		LangChinese:            "剩余 %d%%",
+		LangTraditionalChinese: "剩餘 %d%%",
+		LangJapanese:           "残り %d%%",
+		LangSpanish:            "%d%% restante",
 	},
 	MsgModelCurrent: {
 		LangEnglish:            "Current model: %s",

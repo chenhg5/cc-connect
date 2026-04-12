@@ -499,6 +499,8 @@ level = "info" # debug, info, warn, error
 name = "my-backend"
 # show_context_indicator = false  # Hide the “[ctx: ~N%]” suffix on assistant replies (default: true / show)
 #                                   # 不在助手回复末尾显示「[ctx: ~N%]」上下文占用提示（默认 true 显示）
+# reply_footer = true              # Append a Codex-like footer to each assistant reply when data is available
+#                                   # 在每条助手回复底部追加类似 Codex 的状态行（有数据时显示 model / reasoning / usage / cwd）
 # disabled_commands = ["restart", "upgrade", "cron"]  # Disable specific commands for this project
 #                                                     # 禁用该项目的指定命令
 #

@@ -241,6 +241,7 @@ func main() {
 			showCtx = *proj.ShowContextIndicator
 		}
 		engine.SetShowContextIndicator(showCtx)
+		engine.SetReplyFooterEnabled(proj.ReplyFooter != nil && *proj.ReplyFooter)
 		engine.SetAttachmentSendEnabled(cfg.AttachmentSend != "off")
 		engine.SetBaseWorkDir(workDir)
 		engine.SetProjectStateStore(projectState)
@@ -1310,6 +1311,7 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		showCtx = *proj.ShowContextIndicator
 	}
 	engine.SetShowContextIndicator(showCtx)
+	engine.SetReplyFooterEnabled(proj.ReplyFooter != nil && *proj.ReplyFooter)
 
 	// Reload sender injection
 	engine.SetInjectSender(proj.InjectSender != nil && *proj.InjectSender)

@@ -40,6 +40,11 @@ const (
 	slowAgentFirstEvent = 15 * time.Second // time from send to first agent event
 )
 
+const (
+	replyFooterUsageTimeout  = 1500 * time.Millisecond
+	replyFooterUsageCacheTTL = 30 * time.Second
+)
+
 // VersionInfo is set by main at startup so that /version works.
 var VersionInfo string
 
@@ -53,6 +58,11 @@ var ErrAttachmentSendDisabled = errors.New("attachment send is disabled by confi
 type RestartRequest struct {
 	SessionKey string `json:"session_key"`
 	Platform   string `json:"platform"`
+}
+
+type replyFooterUsageCache struct {
+	text      string
+	fetchedAt time.Time
 }
 
 // SaveRestartNotify persists restart info so the new process can send
@@ -200,6 +210,7 @@ type Engine struct {
 
 	// When true, append [ctx: ~N%] (or model self-report) to assistant replies shown on platforms.
 	showContextIndicator bool
+	replyFooterEnabled   bool
 
 	// Multi-workspace mode
 	multiWorkspace    bool
@@ -222,6 +233,8 @@ type Engine struct {
 	platformLifecycleMu sync.Mutex
 	platformReady       map[Platform]bool
 	stopping            bool
+	replyFooterMu       sync.Mutex
+	replyFooterUsage    replyFooterUsageCache
 
 	// /web command callbacks
 	webSetupFunc  func() (port int, token string, needRestart bool, err error)
@@ -257,6 +270,7 @@ type interactiveState struct {
 	platform               Platform
 	replyCtx               any
 	workspaceDir           string
+	agent                  Agent
 	mu                     sync.Mutex
 	stopCh                 chan struct{}
 	stopped                bool
@@ -495,6 +509,12 @@ func (e *Engine) SetResetOnIdle(d time.Duration) {
 // SetShowContextIndicator controls whether assistant replies include the [ctx: ~N%] suffix.
 func (e *Engine) SetShowContextIndicator(show bool) {
 	e.showContextIndicator = show
+}
+
+// SetReplyFooterEnabled controls whether assistant replies include a Codex-like
+// footer line with model / reasoning / usage / workdir metadata when available.
+func (e *Engine) SetReplyFooterEnabled(show bool) {
+	e.replyFooterEnabled = show
 }
 
 func (e *Engine) SetWebSetupFunc(fn func() (int, string, bool, error)) { e.webSetupFunc = fn }
@@ -2231,7 +2251,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	// Check if context is already canceled (e.g. during shutdown/restart)
 	if e.ctx.Err() != nil {
 		slog.Debug("skipping session start: context canceled", "session_key", sessionKey)
-		newState := &interactiveState{platform: p, replyCtx: replyCtx}
+		newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent}
 		adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
 		state = newState
 		e.interactiveStates[sessionKey] = state
@@ -2262,7 +2282,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		}
 		if err != nil {
 			slog.Error("failed to start interactive session", "error", err, "elapsed", startElapsed)
-			newState := &interactiveState{platform: p, replyCtx: replyCtx}
+			newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent}
 			adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
 			state = newState
 			e.interactiveStates[sessionKey] = state
@@ -2283,6 +2303,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		agentSession: agentSession,
 		platform:     p,
 		replyCtx:     replyCtx,
+		agent:        agent,
 	}
 	adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
 	state = newState
@@ -2381,6 +2402,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 	state.mu.Lock()
 	workspaceDir := state.workspaceDir
+	replyAgent := state.agent
+	if replyAgent == nil {
+		replyAgent = e.agent
+	}
 	workspaceRenderer := func(content string) string {
 		return e.renderOutgoingContentForWorkspace(state.platform, content, workspaceDir)
 	}
@@ -2693,11 +2718,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			selfPct := parseSelfReportedCtx(fullResponse)
 			cleanResponse := ctxSelfReportRe.ReplaceAllString(fullResponse, "")
 			cleanResponse = strings.TrimRight(cleanResponse, "\n ")
+			baseResponse := cleanResponse
 
 			// Evaluate auto-compress trigger (token estimate on user+assistant text,
 			// including this turn's assistant reply before it is appended to history).
 			if e.autoCompressEnabled && e.autoCompressMaxTokens > 0 {
-				estimate := estimateTokensWithPendingAssistant(session.GetHistory(0), cleanResponse)
+				estimate := estimateTokensWithPendingAssistant(session.GetHistory(0), baseResponse)
 				now := time.Now()
 				state.mu.Lock()
 				last := state.lastAutoCompressAt
@@ -2710,7 +2736,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			}
 
-			session.AddHistory("assistant", cleanResponse)
+			session.AddHistory("assistant", baseResponse)
 			sessions.Save()
 
 			if e.showContextIndicator {
@@ -2719,6 +2745,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				} else if selfPct > 0 {
 					cleanResponse += fmt.Sprintf("\n[ctx: ~%d%%]", selfPct)
 				}
+			}
+			if footer := e.buildReplyFooter(replyAgent, workspaceDir); footer != "" {
+				cleanResponse = appendReplyFooter(cleanResponse, footer)
 			}
 			fullResponse = cleanResponse
 
@@ -2735,9 +2764,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			)
 
 			replyStart := time.Now()
-			normalizedResponse := strings.TrimSpace(fullResponse)
+			normalizedBaseResponse := strings.TrimSpace(baseResponse)
 			state.mu.Lock()
-			suppressDuplicate := normalizedResponse != "" && normalizedResponse == state.sideText
+			suppressDuplicate := normalizedBaseResponse != "" && normalizedBaseResponse == state.sideText
 			state.sideText = ""
 			state.mu.Unlock()
 
@@ -2758,6 +2787,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			} else if suppressDuplicate {
 				sp.discard()
+				if metaOnly := strings.TrimSpace(strings.TrimPrefix(fullResponse, baseResponse)); metaOnly != "" {
+					for _, chunk := range splitMessage(metaOnly, maxPlatformMessageLen) {
+						if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
+							return
+						}
+					}
+				}
 				slog.Debug("EventResult: suppressed duplicate side-channel text", "response_len", len(fullResponse))
 			} else if sp.finish(fullResponse) {
 				slog.Debug("EventResult: finalized via stream preview", "response_len", len(fullResponse))
@@ -3788,6 +3824,146 @@ func (e *Engine) commandWorkDir(agent Agent, msg *Message) string {
 		return normalizeWorkspacePath(cwd)
 	}
 	return ""
+}
+
+func (e *Engine) buildReplyFooter(agent Agent, workspaceDir string) string {
+	if !e.replyFooterEnabled || agent == nil {
+		return ""
+	}
+
+	var parts []string
+	if switcher, ok := agent.(ModelSwitcher); ok {
+		if model := strings.TrimSpace(switcher.GetModel()); model != "" {
+			parts = append(parts, model)
+		}
+	}
+	if switcher, ok := agent.(ReasoningEffortSwitcher); ok {
+		if effort := strings.TrimSpace(switcher.GetReasoningEffort()); effort != "" {
+			parts = append(parts, effort)
+		}
+	}
+	if usage := e.replyFooterUsageText(agent); usage != "" {
+		parts = append(parts, usage)
+	}
+	if dir := replyFooterWorkDir(agent, workspaceDir); dir != "" {
+		parts = append(parts, dir)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, " · ")
+}
+
+func (e *Engine) replyFooterUsageText(agent Agent) string {
+	reporter, ok := agent.(UsageReporter)
+	if !ok {
+		return ""
+	}
+
+	e.replyFooterMu.Lock()
+	cached := e.replyFooterUsage
+	e.replyFooterMu.Unlock()
+	if !cached.fetchedAt.IsZero() && time.Since(cached.fetchedAt) < replyFooterUsageCacheTTL {
+		return cached.text
+	}
+
+	ctx, cancel := context.WithTimeout(e.ctx, replyFooterUsageTimeout)
+	defer cancel()
+
+	text := ""
+	if report, err := reporter.GetUsage(ctx); err == nil {
+		text = formatReplyFooterUsage(report, e.i18n)
+	} else if !cached.fetchedAt.IsZero() {
+		text = cached.text
+	}
+
+	e.replyFooterMu.Lock()
+	e.replyFooterUsage = replyFooterUsageCache{text: text, fetchedAt: time.Now()}
+	e.replyFooterMu.Unlock()
+	return text
+}
+
+func formatReplyFooterUsage(report *UsageReport, i18n *I18n) string {
+	if report == nil || i18n == nil {
+		return ""
+	}
+	window, _ := selectUsageWindows(report)
+	if window == nil {
+		return ""
+	}
+	remaining := 100 - window.UsedPercent
+	if remaining < 0 {
+		remaining = 0
+	}
+	if remaining > 100 {
+		remaining = 100
+	}
+	return i18n.Tf(MsgReplyFooterRemaining, remaining)
+}
+
+func replyFooterWorkDir(agent Agent, workspaceDir string) string {
+	dir := strings.TrimSpace(workspaceDir)
+	if dir == "" {
+		if switcher, ok := agent.(WorkDirSwitcher); ok {
+			dir = strings.TrimSpace(switcher.GetWorkDir())
+		}
+	}
+	if dir == "" {
+		if wd, ok := agent.(interface{ GetWorkDir() string }); ok {
+			dir = strings.TrimSpace(wd.GetWorkDir())
+		}
+	}
+	if dir == "" {
+		return ""
+	}
+	return compactReplyFooterPath(dir)
+}
+
+func compactReplyFooterPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	path = normalizeWorkspacePath(path)
+	if home, err := os.UserHomeDir(); err == nil {
+		home = normalizeWorkspacePath(home)
+		if path == home {
+			return "~"
+		}
+		prefix := home + string(os.PathSeparator)
+		if strings.HasPrefix(path, prefix) {
+			return "~" + filepath.ToSlash(strings.TrimPrefix(path, home))
+		}
+	}
+
+	slash := filepath.ToSlash(path)
+	if filepath.IsAbs(path) {
+		trimmed := strings.Trim(slash, "/")
+		if trimmed == "" {
+			return "/"
+		}
+		parts := strings.Split(trimmed, "/")
+		if len(parts) == 1 {
+			return parts[0]
+		}
+		start := len(parts) - 2
+		if start < 0 {
+			start = 0
+		}
+		return "…/" + strings.Join(parts[start:], "/")
+	}
+	return slash
+}
+
+func appendReplyFooter(content, footer string) string {
+	if footer == "" {
+		return content
+	}
+	content = strings.TrimRight(content, "\n")
+	if content == "" {
+		return "`" + footer + "`"
+	}
+	return content + "\n\n`" + footer + "`"
 }
 
 func (e *Engine) cmdShow(p Platform, msg *Message, args []string) {
