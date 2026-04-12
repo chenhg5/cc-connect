@@ -6386,6 +6386,151 @@ func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images
 	return nil
 }
 
+// InjectPrompt injects a message into an active session as if it came from an
+// external user. The agent will process and respond to it. If sessionKey is
+// empty, the first active session is used. This is intended for external
+// triggers (file watchers, CI hooks) that need the agent to act on a prompt.
+func (e *Engine) InjectPrompt(sessionKey, prompt string) error {
+	if prompt == "" {
+		return fmt.Errorf("prompt is required")
+	}
+
+	if sessionKey == "" {
+		e.interactiveMu.Lock()
+		for key := range e.interactiveStates {
+			sessionKey = key
+			break
+		}
+		e.interactiveMu.Unlock()
+		if sessionKey == "" {
+			return fmt.Errorf("no active session for --as-prompt")
+		}
+	}
+
+	platformName := ""
+	if idx := strings.Index(sessionKey, ":"); idx > 0 {
+		platformName = sessionKey[:idx]
+	}
+
+	var targetPlatform Platform
+	for _, p := range e.platforms {
+		if p.Name() == platformName {
+			targetPlatform = p
+			break
+		}
+	}
+	if targetPlatform == nil {
+		return fmt.Errorf("platform %q not found for session key %q", platformName, sessionKey)
+	}
+
+	rc, ok := targetPlatform.(ReplyContextReconstructor)
+	if !ok {
+		return fmt.Errorf("platform %q does not support reply context reconstruction", platformName)
+	}
+
+	replyCtx, err := rc.ReconstructReplyCtx(sessionKey)
+	if err != nil {
+		return fmt.Errorf("reconstruct reply context: %w", err)
+	}
+
+	msg := &Message{
+		SessionKey: sessionKey,
+		Platform:   platformName,
+		UserID:     "trigger",
+		UserName:   "trigger",
+		Content:    prompt,
+		ReplyCtx:   replyCtx,
+	}
+
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	if !session.TryLock() {
+		return fmt.Errorf("session busy, prompt not delivered")
+	}
+
+	go e.processInteractiveMessage(targetPlatform, msg, session)
+	return nil
+}
+
+// PostToNewThread posts a message directly to a platform channel as a new
+// top-level message, without requiring or using an existing interactive session.
+// This is intended for automated notifications (e.g. file-watcher alerts) that
+// must not be threaded into an existing conversation.
+//
+// The session key is used only to identify the target channel / chat; the
+// platform's ReconstructReplyCtx always returns a channel-only context (no
+// thread timestamp), so the message lands top-level regardless of any active
+// sessions.
+func (e *Engine) PostToNewThread(sessionKey, message string, images []ImageAttachment, files []FileAttachment) error {
+	if message == "" && len(images) == 0 && len(files) == 0 {
+		return fmt.Errorf("message or attachment is required")
+	}
+	if sessionKey == "" {
+		// No session key provided — borrow one from any active session to resolve
+		// the target channel. PostToNewThread only uses the key for channel lookup
+		// (thread timestamps are stripped by ReconstructReplyCtx), so any session
+		// on the right platform works.
+		e.interactiveMu.Lock()
+		for key := range e.interactiveStates {
+			sessionKey = key
+			break
+		}
+		e.interactiveMu.Unlock()
+		if sessionKey == "" {
+			return fmt.Errorf("no active session and no session_key provided for --new-thread")
+		}
+	}
+	if (len(images) > 0 || len(files) > 0) && !e.attachmentSendEnabled {
+		return ErrAttachmentSendDisabled
+	}
+
+	// Find the platform that recognises this session key.
+	var platform Platform
+	var replyCtx any
+	for _, p := range e.platforms {
+		rc, ok := p.(ReplyContextReconstructor)
+		if !ok {
+			continue
+		}
+		rctx, err := rc.ReconstructReplyCtx(sessionKey)
+		if err == nil {
+			platform = p
+			replyCtx = rctx
+			break
+		}
+	}
+	if platform == nil {
+		return fmt.Errorf("no platform found that can handle session key %q", sessionKey)
+	}
+
+	if len(images) > 0 {
+		if _, ok := platform.(ImageSender); !ok {
+			return fmt.Errorf("platform %s: %w", platform.Name(), ErrNotSupported)
+		}
+	}
+	if len(files) > 0 {
+		if _, ok := platform.(FileSender); !ok {
+			return fmt.Errorf("platform %s: %w", platform.Name(), ErrNotSupported)
+		}
+	}
+
+	if message != "" {
+		if err := platform.Send(e.ctx, replyCtx, message); err != nil {
+			return err
+		}
+	}
+	for _, img := range images {
+		if err := platform.(ImageSender).SendImage(e.ctx, replyCtx, img); err != nil {
+			return err
+		}
+	}
+	for _, file := range files {
+		if err := platform.(FileSender).SendFile(e.ctx, replyCtx, file); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // sendPermissionPrompt sends a permission prompt with interactive buttons when
 // the platform supports them. Fallback chain: InlineButtonSender → CardSender → plain text.
 func (e *Engine) sendPermissionPrompt(p Platform, replyCtx any, prompt, toolName, toolInput string) {
