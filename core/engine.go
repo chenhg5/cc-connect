@@ -8753,6 +8753,8 @@ func (e *Engine) cmdSkills(p Platform, msg *Message, args []string) {
 		}
 
 		if strings.EqualFold(p.Name(), "telegram") {
+			// Telegram rejects oversized text replies, so render /skills as
+			// explicit pages instead of sending one giant skill list.
 			pages := e.renderTelegramSkillsPages(skills)
 			page, ok := parseTelegramSkillsPageArg(args, len(pages))
 			if !ok {
@@ -8793,6 +8795,9 @@ func parseTelegramSkillsPageArg(args []string, totalPages int) (int, bool) {
 }
 
 func (e *Engine) renderTelegramSkillsPages(skills []*Skill) []string {
+	// Keep Telegram-specific pagination local to /skills for now. If other
+	// plain-text platforms need the same treatment later, we can lift this into
+	// a shared long-text pagination helper.
 	title := e.i18n.Tf(MsgSkillsTitle, e.agent.Name(), len(skills))
 	hint := e.i18n.T(MsgSkillsHint)
 	bodyBudget := telegramSkillsPageMaxLen - len(title) - len(hint) - telegramSkillsFooterReserve
