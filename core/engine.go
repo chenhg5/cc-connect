@@ -9418,6 +9418,7 @@ func (e *Engine) startRelaySession(ctx context.Context, agent Agent, session *Se
 			"session_key", relaySessionKey, "agent_session_id", existingID, "err", err)
 		session.CompareAndSetAgentSessionID("", agent.Name())
 		agentSession, err = agent.StartSession(ctx, "")
+		existingID = "" // skip stale-result detection — we started fresh
 	}
 	if err != nil {
 		return nil, fmt.Errorf("start relay session: %w", err)
