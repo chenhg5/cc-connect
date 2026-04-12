@@ -132,6 +132,7 @@ func (o SpawnOptions) mergedAllowlist() []string {
 // Does NOT run the per-spawn re-check — callers should invoke
 // VerifyRunAsUserCheap immediately before Start() so a sudoers edit
 // between startup preflight and spawn is caught.
+//
 // BuildSpawnCommandInDir is like BuildSpawnCommand but ensures the spawned
 // process starts in workDir even when sudo -i resets to the target user's
 // home directory. When workDir is empty, behaves identically to the non-dir
@@ -183,8 +184,6 @@ func BuildSpawnCommandInDir(ctx context.Context, opts SpawnOptions, workDir, nam
 func BuildSpawnCommand(ctx context.Context, opts SpawnOptions, name string, args ...string) *exec.Cmd {
 	return BuildSpawnCommandInDir(ctx, opts, "", name, args...)
 }
-
-
 // FilterEnvForSpawn strips env down to the merged allowlist when
 // opts.IsolationMode() is true. Belt-and-braces with sudo's own
 // --preserve-env, but having cc-connect's spawn argv be the single

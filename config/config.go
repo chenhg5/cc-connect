@@ -302,9 +302,9 @@ type ProjectConfig struct {
 	Users                *UsersConfig     `toml:"users,omitempty"`             // per-user role config; nil = legacy behavior
 	// Quiet is legacy per-project override; see Config.Quiet. When true and global [display]
 	// omits thinking_messages / tool_messages, those default to off for this project.
-	Quiet                *bool            `toml:"quiet,omitempty"`
-	Observe              *ObserveConfig   `toml:"observe,omitempty"`
-	References           ReferenceConfig  `toml:"references,omitempty"`
+	Quiet      *bool           `toml:"quiet,omitempty"`
+	Observe    *ObserveConfig  `toml:"observe,omitempty"`
+	References ReferenceConfig `toml:"references,omitempty"`
 }
 
 type AgentConfig struct {
