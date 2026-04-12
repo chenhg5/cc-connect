@@ -1398,8 +1398,39 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		interactiveKey = resolvedWorkspace + ":" + msg.SessionKey
 	}
 
-	session := sessions.GetOrCreateActive(msg.SessionKey)
-	sessions.UpdateUserMeta(msg.SessionKey, msg.UserName, msg.ChatName)
+	// Thread-aware routing: resolve the effective session key for this thread.
+	// When the base session is busy and max_concurrent allows it, the router
+	// forks a new session key so threads can run in parallel.
+	effectiveSessionKey := msg.SessionKey
+	var forked bool
+	if e.threadRouter != nil && msg.ThreadID != "" {
+		rr := e.threadRouter.Route(msg.SessionKey, msg.ThreadID, sessions)
+		effectiveSessionKey = rr.EffectiveKey
+		forked = rr.Forked
+		if forked {
+			// Update interactiveKey to use the forked session key
+			if e.multiWorkspace && wsSessions != nil {
+				interactiveKey = resolvedWorkspace + ":" + rr.EffectiveKey
+			} else {
+				interactiveKey = rr.EffectiveKey
+			}
+			// Arm the forked session to use --fork-session from the base
+			// session's agent context, so the new thread starts with the
+			// same conversation history.
+			if baseSession := sessions.PeekActive(msg.SessionKey); baseSession != nil {
+				if baseAgentID := baseSession.GetAgentSessionID(); baseAgentID != "" {
+					forkedSession := sessions.GetOrCreateActive(rr.EffectiveKey)
+					forkedSession.SetForkOnNextStart(baseAgentID)
+				}
+			}
+			if rr.ForkWarning != "" {
+				e.reply(p, msg.ReplyCtx, rr.ForkWarning)
+			}
+		}
+	}
+
+	session := sessions.GetOrCreateActive(effectiveSessionKey)
+	sessions.UpdateUserMeta(effectiveSessionKey, msg.UserName, msg.ChatName)
 	if !session.TryLock() {
 		// Check for /btw — inject into the running session mid-turn
 		trimmed := strings.TrimSpace(content)
@@ -2017,6 +2048,45 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		slog.Debug("skipping session start: context canceled", "session_key", sessionKey)
 		state = &interactiveState{platform: p, replyCtx: replyCtx, quiet: quietMode}
 		e.interactiveStates[sessionKey] = state
+		return state
+	}
+
+	// Check for a pending fork — if armed, use the fork prefix so the agent
+	// starts with --resume <base_id> --fork-session instead of a plain resume.
+	if forkID := session.ConsumeForkOnNextStart(); forkID != "" {
+		startSessionID := ResumeForkPrefix + forkID
+		isResume := true
+		startAt := time.Now()
+		agentSession, err := agent.StartSession(e.ctx, startSessionID)
+		startElapsed := time.Since(startAt)
+		if err != nil {
+			slog.Error("fork session failed, falling back to fresh session",
+				"session_key", sessionKey, "fork_source", forkID, "error", err)
+			agentSession, err = agent.StartSession(e.ctx, "")
+			isResume = false
+		}
+		if err != nil {
+			slog.Error("failed to start session after fork failure", "error", err)
+			state = &interactiveState{platform: p, replyCtx: replyCtx, quiet: quietMode}
+			e.interactiveStates[sessionKey] = state
+			return state
+		}
+		if newID := agentSession.CurrentSessionID(); newID != "" {
+			if session.CompareAndSetAgentSessionID(newID, agent.Name()) {
+				sessions.Save()
+			}
+		}
+		if isResume {
+			agentSession = e.drainStaleResumeResult(agentSession, agent, session, sessions, sessionKey)
+		}
+		state = &interactiveState{
+			agentSession: agentSession,
+			platform:     p,
+			replyCtx:     replyCtx,
+			quiet:        quietMode,
+		}
+		e.interactiveStates[sessionKey] = state
+		slog.Info("session spawned (fork)", "session_key", sessionKey, "fork_source", forkID, "elapsed", startElapsed)
 		return state
 	}
 
