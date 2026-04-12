@@ -3952,10 +3952,23 @@ func replyFooterContextText(usage *ContextUsage, i18n *I18n) string {
 	if usage == nil || i18n == nil {
 		return ""
 	}
-	if usage.ContextWindow <= 0 || usage.TotalTokens < 0 {
+	if usage.ContextWindow <= 0 {
 		return ""
 	}
-	used := usage.TotalTokens * 100 / usage.ContextWindow
+
+	usedTokens := usage.UsedTokens
+	if usedTokens <= 0 {
+		switch {
+		case usage.TotalTokens > 0:
+			usedTokens = usage.TotalTokens
+		case usage.InputTokens > 0 || usage.OutputTokens > 0:
+			usedTokens = usage.InputTokens + usage.OutputTokens
+		default:
+			return ""
+		}
+	}
+
+	used := usedTokens * 100 / usage.ContextWindow
 	if used < 0 {
 		used = 0
 	}

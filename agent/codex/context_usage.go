@@ -43,11 +43,12 @@ type appServerThreadTokenUsageNotification struct {
 }
 
 func mapAppServerTokenUsage(notif appServerThreadTokenUsageNotification) *core.ContextUsage {
-	return contextUsageFromCamel(notif.TokenUsage.Total, notif.TokenUsage.ModelContextWindow)
+	return contextUsageFromCamel(notif.TokenUsage.Last, notif.TokenUsage.ModelContextWindow)
 }
 
 func contextUsageFromCamel(usage codexTokenUsage, contextWindow int) *core.ContextUsage {
 	return contextUsageFromParts(
+		currentContextTokens(usage.TotalTokens, usage.InputTokens, usage.OutputTokens),
 		usage.TotalTokens,
 		usage.InputTokens,
 		usage.CachedInputTokens,
@@ -59,6 +60,7 @@ func contextUsageFromCamel(usage codexTokenUsage, contextWindow int) *core.Conte
 
 func contextUsageFromSnake(usage codexSnakeTokenUsage, contextWindow int) *core.ContextUsage {
 	return contextUsageFromParts(
+		currentContextTokens(usage.TotalTokens, usage.InputTokens, usage.OutputTokens),
 		usage.TotalTokens,
 		usage.InputTokens,
 		usage.CachedInputTokens,
@@ -68,7 +70,17 @@ func contextUsageFromSnake(usage codexSnakeTokenUsage, contextWindow int) *core.
 	)
 }
 
-func contextUsageFromParts(totalTokens, inputTokens, cachedInputTokens, outputTokens, reasoningOutputTokens, contextWindow int) *core.ContextUsage {
+func currentContextTokens(totalTokens, inputTokens, outputTokens int) int {
+	if totalTokens > 0 {
+		return totalTokens
+	}
+	if inputTokens > 0 || outputTokens > 0 {
+		return inputTokens + outputTokens
+	}
+	return 0
+}
+
+func contextUsageFromParts(usedTokens, totalTokens, inputTokens, cachedInputTokens, outputTokens, reasoningOutputTokens, contextWindow int) *core.ContextUsage {
 	if totalTokens <= 0 && inputTokens <= 0 && outputTokens <= 0 {
 		return nil
 	}
@@ -76,6 +88,7 @@ func contextUsageFromParts(totalTokens, inputTokens, cachedInputTokens, outputTo
 		return nil
 	}
 	return &core.ContextUsage{
+		UsedTokens:            usedTokens,
 		TotalTokens:           totalTokens,
 		InputTokens:           inputTokens,
 		CachedInputTokens:     cachedInputTokens,
@@ -272,5 +285,5 @@ func parseContextUsageFromRolloutLine(line []byte) *core.ContextUsage {
 	if payload.Type != "token_count" || payload.Info == nil {
 		return nil
 	}
-	return contextUsageFromSnake(payload.Info.TotalTokenUsage, payload.Info.ModelContextWindow)
+	return contextUsageFromSnake(payload.Info.LastTokenUsage, payload.Info.ModelContextWindow)
 }

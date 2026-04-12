@@ -357,6 +357,9 @@ type ContextUsageReporter interface {
 
 // ContextUsage describes runtime context consumption for the active session.
 type ContextUsage struct {
+	// UsedTokens is the current token load to compare against ContextWindow when
+	// computing remaining context capacity for the next turn.
+	UsedTokens            int
 	TotalTokens           int
 	InputTokens           int
 	CachedInputTokens     int

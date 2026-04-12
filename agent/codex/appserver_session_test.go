@@ -80,18 +80,18 @@ func TestAppServerSession_HandleThreadTokenUsageUpdatedCachesContextUsage(t *tes
 			ModelContextWindow int             `json:"modelContextWindow"`
 		}{
 			Total: codexTokenUsage{
-				TotalTokens:           14840,
-				InputTokens:           14809,
-				CachedInputTokens:     3456,
-				OutputTokens:          31,
-				ReasoningOutputTokens: 24,
+				TotalTokens:           52011395,
+				InputTokens:           51847383,
+				CachedInputTokens:     48187904,
+				OutputTokens:          164012,
+				ReasoningOutputTokens: 78910,
 			},
 			Last: codexTokenUsage{
-				TotalTokens:           14840,
-				InputTokens:           14809,
-				CachedInputTokens:     3456,
-				OutputTokens:          31,
-				ReasoningOutputTokens: 24,
+				TotalTokens:           41061,
+				InputTokens:           40849,
+				CachedInputTokens:     36864,
+				OutputTokens:          212,
+				ReasoningOutputTokens: 32,
 			},
 			ModelContextWindow: 258400,
 		},
@@ -106,14 +106,20 @@ func TestAppServerSession_HandleThreadTokenUsageUpdatedCachesContextUsage(t *tes
 	if usage == nil {
 		t.Fatal("GetContextUsage() = nil, want cached context usage")
 	}
-	if usage.TotalTokens != 14840 {
-		t.Fatalf("total tokens = %d, want 14840", usage.TotalTokens)
+	if usage.UsedTokens != 41061 {
+		t.Fatalf("used tokens = %d, want 41061", usage.UsedTokens)
+	}
+	if usage.TotalTokens != 41061 {
+		t.Fatalf("total tokens = %d, want 41061", usage.TotalTokens)
 	}
 	if usage.ContextWindow != 258400 {
 		t.Fatalf("context window = %d, want 258400", usage.ContextWindow)
 	}
-	if usage.CachedInputTokens != 3456 {
-		t.Fatalf("cached input tokens = %d, want 3456", usage.CachedInputTokens)
+	if usage.CachedInputTokens != 36864 {
+		t.Fatalf("cached input tokens = %d, want 36864", usage.CachedInputTokens)
+	}
+	if usage.InputTokens != 40849 {
+		t.Fatalf("input tokens = %d, want 40849", usage.InputTokens)
 	}
 }
 

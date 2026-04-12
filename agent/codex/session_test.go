@@ -142,7 +142,7 @@ done
 	}
 }
 
-func TestRefreshContextUsageFromRollout_UsesRealTokenCount(t *testing.T) {
+func TestRefreshContextUsageFromRollout_UsesLastTokenCount(t *testing.T) {
 	workDir := t.TempDir()
 	codexHome := filepath.Join(workDir, ".codex")
 	rolloutDir := filepath.Join(codexHome, "sessions", "2026", "04", "12")
@@ -155,7 +155,7 @@ func TestRefreshContextUsageFromRollout_UsesRealTokenCount(t *testing.T) {
 	rollout := strings.Join([]string{
 		`{"type":"session_meta","payload":{"id":"` + sessionID + `","cwd":"/tmp/project"}}`,
 		`{"type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"limit_id":"codex"}}}`,
-		`{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":14809,"cached_input_tokens":3456,"output_tokens":31,"reasoning_output_tokens":24,"total_tokens":14840},"last_token_usage":{"input_tokens":14809,"cached_input_tokens":3456,"output_tokens":31,"reasoning_output_tokens":24,"total_tokens":14840},"model_context_window":258400},"rate_limits":{"limit_id":"codex"}}}`,
+		`{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":50665316,"cached_input_tokens":46971872,"output_tokens":156453,"reasoning_output_tokens":75023,"total_tokens":50821769},"last_token_usage":{"input_tokens":180805,"cached_input_tokens":139776,"output_tokens":619,"reasoning_output_tokens":32,"total_tokens":181424},"model_context_window":258400},"rate_limits":{"limit_id":"codex"}}}`,
 		"",
 	}, "\n")
 	if err := os.WriteFile(rolloutPath, []byte(rollout), 0o644); err != nil {
@@ -174,11 +174,14 @@ func TestRefreshContextUsageFromRollout_UsesRealTokenCount(t *testing.T) {
 	if usage == nil {
 		t.Fatal("GetContextUsage() = nil, want rollout token count")
 	}
-	if usage.TotalTokens != 14840 {
-		t.Fatalf("total tokens = %d, want 14840", usage.TotalTokens)
+	if usage.UsedTokens != 181424 {
+		t.Fatalf("used tokens = %d, want 181424", usage.UsedTokens)
 	}
-	if usage.InputTokens != 14809 {
-		t.Fatalf("input tokens = %d, want 14809", usage.InputTokens)
+	if usage.TotalTokens != 181424 {
+		t.Fatalf("total tokens = %d, want 181424", usage.TotalTokens)
+	}
+	if usage.InputTokens != 180805 {
+		t.Fatalf("input tokens = %d, want 180805", usage.InputTokens)
 	}
 	if usage.ContextWindow != 258400 {
 		t.Fatalf("context window = %d, want 258400", usage.ContextWindow)
