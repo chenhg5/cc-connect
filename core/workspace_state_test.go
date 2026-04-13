@@ -36,6 +36,30 @@ func TestWorkspacePool_Touch(t *testing.T) {
 	}
 }
 
+func TestWorkspaceState_BeginEndTurn(t *testing.T) {
+	state := newWorkspaceState("/workspace/a")
+
+	before := state.LastActivity()
+	time.Sleep(10 * time.Millisecond)
+	state.BeginTurn()
+	if !state.HasActiveTurn() {
+		t.Fatal("expected workspace to report an active turn after BeginTurn")
+	}
+	if !state.LastActivity().After(before) {
+		t.Fatal("expected lastActivity to advance on BeginTurn")
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	mid := state.LastActivity()
+	state.EndTurn()
+	if state.HasActiveTurn() {
+		t.Fatal("expected workspace to report no active turns after EndTurn")
+	}
+	if !state.LastActivity().After(mid) {
+		t.Fatal("expected lastActivity to advance on EndTurn")
+	}
+}
+
 func TestWorkspacePool_ReapIdle(t *testing.T) {
 	pool := newWorkspacePool(50 * time.Millisecond)
 	pool.GetOrCreate("/workspace/a")
@@ -124,6 +148,28 @@ func TestWorkspacePool_ReapIdle_KeepsActive(t *testing.T) {
 
 	if s := pool.Get("/workspace/active"); s == nil {
 		t.Error("expected active workspace to still exist")
+	}
+}
+
+func TestWorkspacePool_ReapIdle_SkipsBusyWorkspace(t *testing.T) {
+	pool := newWorkspacePool(50 * time.Millisecond)
+	state := pool.GetOrCreate("/workspace/busy")
+	state.BeginTurn()
+
+	time.Sleep(100 * time.Millisecond)
+	reaped := pool.ReapIdle()
+	if len(reaped) != 0 {
+		t.Fatalf("expected busy workspace to be preserved, got %v", reaped)
+	}
+	if got := pool.Get("/workspace/busy"); got == nil {
+		t.Fatal("expected busy workspace to remain in pool")
+	}
+
+	state.EndTurn()
+	time.Sleep(60 * time.Millisecond)
+	reaped = pool.ReapIdle()
+	if len(reaped) != 1 || reaped[0] != "/workspace/busy" {
+		t.Fatalf("expected busy workspace to reap after EndTurn, got %v", reaped)
 	}
 }
 

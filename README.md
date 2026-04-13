@@ -33,7 +33,6 @@
   <a href="./README.md">English</a> | <a href="./README.zh-CN.md">中文</a>
 </p>
 
----
 
 <p align="center">
   <b>Control your local AI agents from any chat app. Anywhere, anytime.</b>
@@ -49,7 +48,6 @@
   <img src="docs/images/connector.png" alt="CC-Connect Architecture" width="90%"/>
 </p>
 
----
 
 ## 🆕 What's New (beta)
 
@@ -61,7 +59,6 @@
 - **Cron with boundaries** — Run jobs in a **fresh session** each time and cap **per-job timeouts** so runaway tasks don’t wedge the bot.
 - **Richer platforms** — e.g. **Discord** `@everyone` / `@here`, **Telegram** voice-style replies, **Feishu** fixes for reply threading and async dispatch.
 
----
 
 ## 🧩 Platform feature snapshot
 
@@ -93,7 +90,6 @@ High-level view of what each **built-in platform** can do in cc-connect. Inspire
 > **Voice row:** many platforms need `[speech]` / TTS providers enabled in `config.toml`; values are a best-effort summary.  
 > Per-platform setup: [Platform setup guides](#-platform-setup-guides) below.
 
----
 
 ## ✨ Why cc-connect?
 
@@ -126,7 +122,6 @@ High-level view of what each **built-in platform** can do in cc-connect. Inspire
 ### 🌍 Multilingual Interface
 **5 Languages** — Native support for English, Chinese (Simplified & Traditional), Japanese, and Spanish. Built-in i18n ensures everyone feels at home.
 
----
 
 <p align="center">
   <img src="docs/images/screenshot/cc-connect-lark.JPG" alt="飞书" width="32%" />
@@ -137,7 +132,6 @@ High-level view of what each **built-in platform** can do in cc-connect. Inspire
   <em>Left：Lark &nbsp;|&nbsp; Telegram &nbsp;|&nbsp; Right：Wechat</em>
 </p>
 
----
 
 ## 🚀 Quick Start
 
@@ -149,7 +143,6 @@ High-level view of what each **built-in platform** can do in cc-connect. Inspire
 Follow https://raw.githubusercontent.com/chenhg5/cc-connect/refs/heads/main/INSTALL.md to install and configure cc-connect.
 ```
 
----
 
 ### 📦 Manual Install
 
@@ -185,7 +178,6 @@ cd cc-connect
 make build
 ```
 
----
 
 ### ⚙️ Configure
 
@@ -198,7 +190,6 @@ vim ~/.cc-connect/config.toml
 Set `admin_from = "alice,bob"` in a project to allow those user IDs to run privileged commands such as `/dir` and `/shell`.
 When a user runs `/dir reset`, cc-connect restores the configured `work_dir` and clears the persisted override stored under `data_dir/projects/<project>.state.json`.
 
----
 
 ### ▶️ Run
 
@@ -206,7 +197,6 @@ When a user runs `/dir reset`, cc-connect restores the configured `work_dir` and
 ./cc-connect
 ```
 
----
 
 ### 🔄 Upgrade
 
@@ -219,7 +209,6 @@ cc-connect update           # Stable
 cc-connect update --pre     # Beta (includes pre-releases)
 ```
 
----
 
 ## 📊 Support Matrix
 
@@ -245,7 +234,6 @@ cc-connect update --pre     # Beta (includes pre-releases)
 | Platform | QQ (NapCat/OneBot) | ✅ WebSocket — Beta |
 | Platform | QQ Bot (Official) | ✅ WebSocket — no public IP needed |
 
----
 
 ## 📖 Platform Setup Guides
 
@@ -260,7 +248,6 @@ cc-connect update --pre     # Beta (includes pre-releases)
 | Weixin (personal) | [docs/weixin.md](docs/weixin.md) | HTTP long polling (ilink) — **beta only** | No |
 | QQ / QQ Bot | [docs/qq.md](docs/qq.md) | WebSocket | No |
 
----
 
 ## 🎯 Key Features
 
@@ -274,6 +261,47 @@ cc-connect update --pre     # Beta (includes pre-releases)
 /dir [path|reset] Show, switch, or reset work directory
 ```
 
+Project configs can also rotate to a fresh session automatically after long inactivity:
+
+```toml
+[[projects]]
+reset_on_idle_mins = 60
+```
+
+
+### 🛡️ OS-User Isolation (`run_as_user`)
+
+On Linux/macOS, a project can spawn its agent under a different Unix
+user for OS-level file-system isolation from the supervisor user that
+runs cc-connect. Currently supported by Claude Code.
+
+```toml
+[[projects]]
+name = "claude-sandboxed"
+run_as_user = "partseeker-coder"
+run_as_env = ["PGSSLROOTCERT"]
+```
+
+The target user needs passwordless sudo from the supervisor, no sudo
+of its own, read+write on `work_dir`, and its own `~/.claude/settings.json`
+with whatever credentials the agent uses. If you authenticate via
+`claude.ai` OAuth, symlink the target user's `~/.claude/.credentials.json`
+to the supervisor's copy so token refresh stays in sync — see the
+[environment propagation checklist](./docs/usage.md#environment-propagation-what-moves-into-the-target-users-home)
+for details. See
+[`docs/usage.md`](./docs/usage.md#running-agents-as-a-different-unix-user-run_as_user)
+for the full setup.
+
+Before starting cc-connect, audit the setup with:
+
+```bash
+cc-connect doctor user-isolation
+```
+
+This runs three go/no-go preflight gates and an isolation probe that
+reports what the target user can and cannot read. cc-connect refuses to
+start if any gate fails or if the probe detects a cross-user leak.
+
 ---
 
 ### 🔐 Permission Modes
@@ -284,7 +312,6 @@ cc-connect update --pre     # Beta (includes pre-releases)
 /mode default     # Ask for each tool
 ```
 
----
 
 ### 🔄 Provider Management
 
@@ -293,7 +320,6 @@ cc-connect update --pre     # Beta (includes pre-releases)
 /provider switch <name>     Switch API provider at runtime
 ```
 
----
 
 ### 🤖 Model Selection
 
@@ -302,7 +328,6 @@ cc-connect update --pre     # Beta (includes pre-releases)
 /model switch <alias>       Switch to model by alias
 ```
 
----
 
 ### 📂 Work Directory
 
@@ -314,7 +339,6 @@ cc-connect update --pre     # Beta (includes pre-releases)
 /cd <path>                   Compatibility alias for /dir <path>
 ```
 
----
 
 ### ⏰ Scheduled Tasks
 
@@ -368,22 +392,81 @@ Notes:
 
 📖 **Full documentation:** [docs/usage.md](docs/usage.md)
 
----
 
 ## 📚 Documentation
 
 - [Usage Guide](docs/usage.md) — Complete feature documentation
 - [INSTALL.md](INSTALL.md) — AI-agent-friendly installation guide
 - [config.example.toml](config.example.toml) — Configuration template
+- [CONTRIBUTING.md](CONTRIBUTING.md) — How to report issues and contribute pull requests
 
----
 
 ## 👥 Community
 
 - [Discord](https://discord.gg/kHpwgaM4kq)
 - [Telegram](https://t.me/+odGNDhCjbjdmMmZl)
 
----
+
+## ❤️ Sponsor
+
+> Want to appear here? Contact us: **Email**: chg80333@gmail.com | **WeChat**: mongorz | [Telegram](https://t.me/+odGNDhCjbjdmMmZl) | [Discord](https://discord.gg/kHpwgaM4kq)
+
+<details open>
+<summary>Sponsors</summary>
+
+<!-- Sponsor slot available - contact us to become a sponsor -->
+
+<table>
+<tr>
+<td width="180"><a href="#"><img src="docs/images/sponsors/placeholder.svg" alt="Your Logo Here" width="150"></a></td>
+<td>Become a sponsor! We offer exclusive benefits for our users. Contact us to learn more about sponsorship opportunities.</td>
+</tr>
+</table>
+
+</details>
+
+
+## ☕ Support the Project
+
+If cc-connect has been helpful to you, consider buying us a coffee! Your support helps us:
+
+- 🛠️ Maintain and improve the project
+- 📚 Write better documentation and tutorials
+- 🐛 Fix bugs and add new features faster
+- ☕ Keep the developers caffeinated
+
+### How to Donate
+
+**Buy Me a Coffee**: [https://buymeacoffee.com/cg33](https://buymeacoffee.com/cg33)
+
+**WeChat Pay / Alipay**:
+
+| WeChat Pay | Alipay |
+|:----------:|:------:|
+| <img src="docs/images/wechatpay.jpg" alt="WeChat Pay" width="150"> | <img src="docs/images/alipay.jpg" alt="Alipay" width="150"> |
+
+### Thank You, Donors! 🎉
+
+We're grateful to everyone who has supported this project. Leave your GitHub username in the donation message if you'd like to be recognized here!
+
+<!-- Donors will be listed below -->
+<!--
+| GitHub Username | Date |
+|-----------------|------|
+| @username | YYYY-MM-DD |
+-->
+
+
+## 🤝 Commercial Cooperation
+
+We accept the following commercial collaborations:
+
+- **Enterprise Customization**: Custom deployment for internal AI tooling (Feishu, DingTalk, WeChat Work, Slack, etc.)
+- **Technical Consulting**: AI agent integration and architecture design
+- **Outsourcing Projects**: AI-related system development
+
+**Contact**: **Email**: chg80333@gmail.com | **WeChat**: mongorz | [Telegram](https://t.me/+odGNDhCjbjdmMmZl) | [Discord](https://discord.gg/kHpwgaM4kq)
+
 
 ## 🙏 Contributors
 
@@ -391,7 +474,6 @@ Notes:
   <img src="https://contrib.rocks/image?repo=chenhg5/cc-connect&v=20250313" />
 </a>
 
----
 
 ## ⭐ Star History
 
@@ -403,13 +485,11 @@ Notes:
  </picture>
 </a>
 
----
 
 ## 📄 License
 
 MIT License
 
----
 
 <p align="center">
   <sub>Built with ❤️ by the cc-connect community</sub>

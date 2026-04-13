@@ -48,7 +48,7 @@ export default function Login() {
   const ThemeIcon = themeIcons[theme];
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-sky-100 to-blue-50 dark:from-gray-950 dark:to-gray-900 p-4">
+    <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-gray-100 to-white dark:from-gray-950 dark:to-gray-900 p-4">
       {/* Top right controls */}
       <div className="fixed top-4 right-4 flex items-center gap-2">
         <div className="flex bg-white/80 dark:bg-gray-800/80 backdrop-blur rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
@@ -79,7 +79,7 @@ export default function Login() {
           {/* Logo */}
           <div className="flex justify-center mb-6">
             <div className="w-14 h-14 rounded-2xl bg-gray-900 dark:bg-white/5 flex items-center justify-center shadow-lg">
-              <div className="w-5 h-5 rounded-full bg-accent shadow-[0_0_20px_rgba(66,255,156,0.4)]" />
+              <div className="w-5 h-5 rounded-full bg-accent dark:shadow-[0_0_20px_rgba(66,255,156,0.4)]" />
             </div>
           </div>
           

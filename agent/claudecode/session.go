@@ -12,9 +12,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -31,6 +33,7 @@ type claudeSession struct {
 	stdinMu         sync.Mutex
 	events          chan core.Event
 	sessionID       atomic.Value // stores string
+	permissionMode  atomic.Value // stores string
 	autoApprove     atomic.Bool
 	acceptEditsOnly atomic.Bool
 	dontAsk         atomic.Bool
@@ -39,9 +42,16 @@ type claudeSession struct {
 	cancel          context.CancelFunc
 	done            chan struct{}
 	alive           atomic.Bool
+
+	// gracefulStopTimeout is how long Close() waits for a clean exit
+	// (stdin close → Stop hooks → process exit) before escalating to
+	// SIGTERM and then SIGKILL. Default: 120s to match claude-mem's
+	// Stop hook timeout. The wait ends as soon as the process exits,
+	// so typical shutdowns take seconds, not the full timeout.
+	gracefulStopTimeout time.Duration
 }
 
-func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool) (*claudeSession, error) {
+func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	args := []string{
@@ -57,13 +67,8 @@ func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode strin
 		args = append(args, "--permission-mode", mode)
 	}
 	switch sessionID {
-	case "":
+	case "", core.ContinueSession:
 		// Truly fresh session — no resume, no continue.
-	case core.ContinueSession:
-		// --continue grabs the most recent session in the workspace, which
-		// may belong to an active CLI terminal. Fork it so the platform
-		// conversation gets its own independent context branch.
-		args = append(args, "--continue", "--fork-session")
 	default:
 		// Resuming a known session ID — this is cc-connect's own session
 		// from a previous connection, safe to resume directly.
@@ -86,9 +91,27 @@ func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode strin
 		args = append(args, "--append-system-prompt", sysPrompt)
 	}
 
-	slog.Debug("claudeSession: starting", "args", core.RedactArgs(args), "dir", workDir, "mode", mode)
+	if maxContextTokens > 0 {
+		args = append(args, "--max-context-tokens", strconv.Itoa(maxContextTokens))
+	}
 
-	cmd := exec.CommandContext(sessionCtx, "claude", args...)
+	slog.Debug("claudeSession: starting", "args", core.RedactArgs(args), "dir", workDir, "mode", mode, "run_as_user", spawnOpts.RunAsUser)
+
+	// Per-spawn defense in depth: if run_as_user is set, re-run the cheap
+	// preflight (sudo still works + target still can't escalate) right
+	// before we build the command. This catches sudoers being edited
+	// between startup preflight and now.
+	if spawnOpts.IsolationMode() {
+		verifyCtx, verifyCancel := context.WithTimeout(sessionCtx, 10*time.Second)
+		err := core.VerifyRunAsUserCheap(verifyCtx, core.ExecSudoRunner{}, spawnOpts.RunAsUser)
+		verifyCancel()
+		if err != nil {
+			cancel()
+			return nil, fmt.Errorf("claudeSession: run_as_user spawn refused: %w", err)
+		}
+	}
+
+	cmd := core.BuildSpawnCommand(sessionCtx, spawnOpts, "claude", args...)
 	cmd.Dir = workDir
 	// Filter out CLAUDECODE env var to prevent "nested session" detection,
 	// since cc-connect is a bridge, not a nested Claude Code session.
@@ -96,6 +119,11 @@ func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode strin
 	if len(extraEnv) > 0 {
 		env = core.MergeEnv(env, extraEnv)
 	}
+	// When run_as_user is set, strip the supervisor's environment down to
+	// the allowlist before passing it to sudo. sudo --preserve-env also
+	// enforces this, but filtering here makes the cc-connect spawn argv
+	// the single source of truth.
+	env = core.FilterEnvForSpawn(env, spawnOpts)
 	cmd.Env = env
 
 	stdin, err := cmd.StdinPipe()
@@ -119,13 +147,14 @@ func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode strin
 	}
 
 	cs := &claudeSession{
-		cmd:     cmd,
-		stdin:   stdin,
-		events:  make(chan core.Event, 64),
-		workDir: workDir,
-		ctx:     sessionCtx,
-		cancel:  cancel,
-		done:    make(chan struct{}),
+		cmd:                 cmd,
+		stdin:               stdin,
+		events:              make(chan core.Event, 64),
+		workDir:             workDir,
+		ctx:                 sessionCtx,
+		cancel:              cancel,
+		done:                make(chan struct{}),
+		gracefulStopTimeout: 120 * time.Second,
 	}
 	cs.setPermissionMode(mode)
 	cs.sessionID.Store(sessionID)
@@ -533,12 +562,17 @@ func isClaudeEditTool(toolName string) bool {
 }
 
 func (cs *claudeSession) setPermissionMode(mode string) {
+	cs.permissionMode.Store(mode)
 	cs.autoApprove.Store(mode == "bypassPermissions")
 	cs.acceptEditsOnly.Store(mode == "acceptEdits")
 	cs.dontAsk.Store(mode == "dontAsk")
 }
 
 func (cs *claudeSession) SetLiveMode(mode string) bool {
+	current, _ := cs.permissionMode.Load().(string)
+	if mode == "auto" || mode == "plan" || current == "auto" || current == "plan" {
+		return false
+	}
 	cs.setPermissionMode(mode)
 	return true
 }
@@ -557,19 +591,47 @@ func (cs *claudeSession) Alive() bool {
 }
 
 func (cs *claudeSession) Close() error {
-	cs.cancel()
+	// Phase 1: Close stdin to signal EOF. Claude Code exits cleanly on
+	// stdin close, running Stop hooks (e.g. claude-mem session summary).
+	cs.stdinMu.Lock()
+	_ = cs.stdin.Close()
+	cs.stdinMu.Unlock()
+
+	graceful := cs.gracefulStopTimeout
+	if graceful <= 0 {
+		graceful = 8 * time.Second // legacy fallback
+	}
 
 	select {
 	case <-cs.done:
+		slog.Info("claudeSession: exited cleanly after stdin close")
 		return nil
-	case <-time.After(8 * time.Second):
-		slog.Warn("claudeSession: graceful close timed out, killing process")
-		if cs.cmd != nil && cs.cmd.Process != nil {
-			_ = cs.cmd.Process.Kill()
-		}
-		<-cs.done
-		return nil
+	case <-time.After(graceful):
+		slog.Warn("claudeSession: graceful stop timed out, sending SIGTERM",
+			"timeout", graceful)
 	}
+
+	// Phase 2: SIGTERM — gives the process a second chance to run
+	// cleanup handlers that respond to signals but not stdin EOF.
+	if cs.cmd != nil && cs.cmd.Process != nil {
+		_ = cs.cmd.Process.Signal(syscall.SIGTERM)
+	}
+
+	select {
+	case <-cs.done:
+		slog.Info("claudeSession: exited after SIGTERM")
+		return nil
+	case <-time.After(5 * time.Second):
+		slog.Warn("claudeSession: SIGTERM timed out, sending SIGKILL")
+	}
+
+	// Phase 3: SIGKILL — last resort.
+	cs.cancel()
+	if cs.cmd != nil && cs.cmd.Process != nil {
+		_ = cs.cmd.Process.Kill()
+	}
+	<-cs.done
+	return nil
 }
 
 // filterEnv returns a copy of env with entries matching the given key removed.

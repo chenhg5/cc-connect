@@ -55,6 +55,9 @@ dist/
 build/
 bin/
 release/
+# Keep web/dist directory (for embedded admin UI) but ignore build artifacts
+web/dist/*
+!web/dist/.keep
 
 # ============================================================================
 # Testing & temporary files

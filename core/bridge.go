@@ -60,6 +60,18 @@ type bridgeReplyCtx struct {
 	ReplyCtx   string `json:"reply_ctx"`
 }
 
+const bridgeReconstructReplyCtxKind = "bridge_reconstruct"
+
+// bridgeReconstructReplyCtxPayload is a forward-compatible reply envelope for
+// reconstruct_reply adapters. Receivers should ignore unknown fields.
+type bridgeReconstructReplyCtxPayload struct {
+	Kind                string `json:"kind"`
+	Version             int    `json:"v"`
+	SenderProject       string `json:"sender_project"`
+	TransportChatID     string `json:"transport_chat_id"`
+	TransportSessionKey string `json:"transport_session_key,omitempty"`
+}
+
 // --- Wire protocol messages ---
 
 type bridgeMsg struct {
@@ -82,6 +94,7 @@ type bridgeMessage struct {
 	UserName   string            `json:"user_name,omitempty"`
 	Content    string            `json:"content"`
 	ReplyCtx   string            `json:"reply_ctx"`
+	Project    string            `json:"project,omitempty"`
 	Images     []bridgeImageData `json:"images,omitempty"`
 	Files      []bridgeFileData  `json:"files,omitempty"`
 	Audio      *bridgeAudioData  `json:"audio,omitempty"`
@@ -92,6 +105,7 @@ type bridgeCardAction struct {
 	SessionKey string `json:"session_key"`
 	Action     string `json:"action"`
 	ReplyCtx   string `json:"reply_ctx"`
+	Project    string `json:"project,omitempty"`
 }
 
 type bridgePreviewAck struct {
@@ -303,11 +317,42 @@ func (bp *BridgePlatform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	if !a.capabilities["reconstruct_reply"] {
 		return nil, fmt.Errorf("bridge: adapter %q does not support reconstruct_reply", platform)
 	}
+	replyCtx, err := buildBridgeReconstructReplyCtx(bp.project, sessionKey)
+	if err != nil {
+		return nil, err
+	}
 	return &bridgeReplyCtx{
 		Platform:   platform,
 		SessionKey: sessionKey,
-		ReplyCtx:   sessionKey,
+		ReplyCtx:   replyCtx,
 	}, nil
+}
+
+func buildBridgeReconstructReplyCtx(project, sessionKey string) (string, error) {
+	chatID, err := bridgeTransportChatID(sessionKey)
+	if err != nil {
+		return "", err
+	}
+	payload := bridgeReconstructReplyCtxPayload{
+		Kind:                bridgeReconstructReplyCtxKind,
+		Version:             1,
+		SenderProject:       project,
+		TransportChatID:     chatID,
+		TransportSessionKey: sessionKey,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("bridge: marshal reconstruct reply ctx: %w", err)
+	}
+	return string(data), nil
+}
+
+func bridgeTransportChatID(sessionKey string) (string, error) {
+	parts := strings.SplitN(sessionKey, ":", 3)
+	if len(parts) < 2 || parts[1] == "" {
+		return "", fmt.Errorf("bridge: invalid session key %q", sessionKey)
+	}
+	return parts[1], nil
 }
 
 func (bp *BridgePlatform) SendCard(ctx context.Context, replyCtx any, card *Card) error {
@@ -620,9 +665,9 @@ func (a *bridgeAdapter) handleMessage(raw json.RawMessage) {
 		return
 	}
 
-	ref := a.server.resolveEngine(m.SessionKey)
+	ref := a.server.resolveEngine(m.SessionKey, m.Project)
 	if ref == nil {
-		slog.Warn("bridge: no engine for session", "platform", a.platform, "session_key", m.SessionKey)
+		slog.Warn("bridge: no engine for session", "platform", a.platform, "session_key", m.SessionKey, "project", m.Project)
 		return
 	}
 
@@ -688,22 +733,51 @@ func (a *bridgeAdapter) handleCardAction(raw json.RawMessage) {
 		return
 	}
 
-	slog.Debug("bridge: card_action", "platform", a.platform, "action", ca.Action, "session_key", ca.SessionKey)
+	slog.Debug("bridge: card_action", "platform", a.platform, "action", ca.Action, "session_key", ca.SessionKey, "project", ca.Project)
 
-	ref := a.server.resolveEngine(ca.SessionKey)
-	if ref == nil || ref.platform.navHandler == nil {
+	ref := a.server.resolveEngine(ca.SessionKey, ca.Project)
+	if ref == nil {
+		return
+	}
+
+	// perm: — permission response; convert to a regular message for the engine
+	if strings.HasPrefix(ca.Action, "perm:") {
+		var responseText string
+		switch ca.Action {
+		case "perm:allow":
+			responseText = "allow"
+		case "perm:deny":
+			responseText = "deny"
+		case "perm:allow_all":
+			responseText = "allow all"
+		default:
+			return
+		}
+		a.dispatchAsMessage(ref, ca.SessionKey, ca.ReplyCtx, responseText)
+		return
+	}
+
+	// askq: — AskUserQuestion answer; forward as a regular message
+	if strings.HasPrefix(ca.Action, "askq:") {
+		a.dispatchAsMessage(ref, ca.SessionKey, ca.ReplyCtx, ca.Action)
+		return
+	}
+
+	// cmd: — command shortcut from a card button; forward as a message
+	if strings.HasPrefix(ca.Action, "cmd:") {
+		cmdText := strings.TrimPrefix(ca.Action, "cmd:")
+		a.dispatchAsMessage(ref, ca.SessionKey, ca.ReplyCtx, cmdText)
+		return
+	}
+
+	// nav: / act: — card navigation and in-place updates
+	if ref.platform.navHandler == nil {
 		return
 	}
 
 	card := ref.platform.navHandler(ca.Action, ca.SessionKey)
 	if card == nil {
 		return
-	}
-
-	rc := &bridgeReplyCtx{
-		Platform:   a.platform,
-		SessionKey: ca.SessionKey,
-		ReplyCtx:   ca.ReplyCtx,
 	}
 
 	if a.capabilities["card"] {
@@ -714,8 +788,34 @@ func (a *bridgeAdapter) handleCardAction(raw json.RawMessage) {
 			"card":        serializeCard(card),
 		})
 	} else {
+		rc := &bridgeReplyCtx{
+			Platform:   a.platform,
+			SessionKey: ca.SessionKey,
+			ReplyCtx:   ca.ReplyCtx,
+		}
 		_ = ref.platform.Reply(context.Background(), rc, card.RenderText())
 	}
+}
+
+// dispatchAsMessage converts a card action into a regular user message
+// and dispatches it to the engine's message handler.
+func (a *bridgeAdapter) dispatchAsMessage(ref *bridgeEngineRef, sessionKey, replyCtx, content string) {
+	if ref.platform.handler == nil {
+		return
+	}
+	msg := &Message{
+		SessionKey: sessionKey,
+		Platform:   a.platform,
+		UserID:     "web-admin",
+		UserName:   "Web Admin",
+		Content:    content,
+		ReplyCtx: &bridgeReplyCtx{
+			Platform:   a.platform,
+			SessionKey: sessionKey,
+			ReplyCtx:   replyCtx,
+		},
+	}
+	go ref.platform.handler(ref.platform, msg)
 }
 
 func (a *bridgeAdapter) handlePreviewAck(raw json.RawMessage) {
@@ -767,9 +867,9 @@ func bridgeError(w http.ResponseWriter, status int, msg string) {
 	}
 }
 
-// resolveEngineForSessionKey returns the engine ref for a given session key.
-func (bs *BridgeServer) resolveEngineForSessionKey(sessionKey string) *bridgeEngineRef {
-	return bs.resolveEngine(sessionKey)
+// resolveEngineForSessionKey returns the engine ref for a given session key and optional project.
+func (bs *BridgeServer) resolveEngineForSessionKey(sessionKey, project string) *bridgeEngineRef {
+	return bs.resolveEngine(sessionKey, project)
 }
 
 // handleSessions handles GET /bridge/sessions and POST /bridge/sessions.
@@ -781,7 +881,8 @@ func (bs *BridgeServer) handleSessions(w http.ResponseWriter, r *http.Request) {
 			bridgeError(w, http.StatusBadRequest, "session_key query parameter is required")
 			return
 		}
-		ref := bs.resolveEngineForSessionKey(sessionKey)
+		project := r.URL.Query().Get("project")
+		ref := bs.resolveEngineForSessionKey(sessionKey, project)
 		if ref == nil {
 			bridgeError(w, http.StatusNotFound, "no engine found for session key")
 			return
@@ -808,6 +909,7 @@ func (bs *BridgeServer) handleSessions(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			SessionKey string `json:"session_key"`
 			Name       string `json:"name"`
+			Project    string `json:"project,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			bridgeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -817,7 +919,7 @@ func (bs *BridgeServer) handleSessions(w http.ResponseWriter, r *http.Request) {
 			bridgeError(w, http.StatusBadRequest, "session_key is required")
 			return
 		}
-		ref := bs.resolveEngineForSessionKey(body.SessionKey)
+		ref := bs.resolveEngineForSessionKey(body.SessionKey, body.Project)
 		if ref == nil {
 			bridgeError(w, http.StatusNotFound, "no engine found for session key")
 			return
@@ -858,7 +960,8 @@ func (bs *BridgeServer) handleSessionRoutes(w http.ResponseWriter, r *http.Reque
 		bridgeError(w, http.StatusBadRequest, "session_key query parameter is required")
 		return
 	}
-	ref := bs.resolveEngineForSessionKey(sessionKey)
+	project := r.URL.Query().Get("project")
+	ref := bs.resolveEngineForSessionKey(sessionKey, project)
 	if ref == nil {
 		bridgeError(w, http.StatusNotFound, "no engine found for session key")
 		return
@@ -912,6 +1015,7 @@ func (bs *BridgeServer) handleSessionSwitch(w http.ResponseWriter, r *http.Reque
 	var body struct {
 		SessionKey string `json:"session_key"`
 		Target     string `json:"target"`
+		Project    string `json:"project,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		bridgeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -921,7 +1025,7 @@ func (bs *BridgeServer) handleSessionSwitch(w http.ResponseWriter, r *http.Reque
 		bridgeError(w, http.StatusBadRequest, "session_key and target are required")
 		return
 	}
-	ref := bs.resolveEngineForSessionKey(body.SessionKey)
+	ref := bs.resolveEngineForSessionKey(body.SessionKey, body.Project)
 	if ref == nil {
 		bridgeError(w, http.StatusNotFound, "no engine found for session key")
 		return
@@ -988,11 +1092,18 @@ func (bs *BridgeServer) platformFromSessionKey(sessionKey string) string {
 	return ""
 }
 
-// resolveEngine finds the engine to handle a session_key.
-// If only one engine is registered, it returns that one.
-func (bs *BridgeServer) resolveEngine(sessionKey string) *bridgeEngineRef {
+// resolveEngine finds the engine to handle a message.
+// It first tries to match by project name, then by session_key ownership,
+// and finally falls back to the single-engine case.
+func (bs *BridgeServer) resolveEngine(sessionKey, project string) *bridgeEngineRef {
 	bs.enginesMu.RLock()
 	defer bs.enginesMu.RUnlock()
+
+	if project != "" {
+		if ref, ok := bs.engines[project]; ok {
+			return ref
+		}
+	}
 
 	if len(bs.engines) == 1 {
 		for _, ref := range bs.engines {
@@ -1000,11 +1111,13 @@ func (bs *BridgeServer) resolveEngine(sessionKey string) *bridgeEngineRef {
 		}
 	}
 
-	// TODO: support project routing via adapter register or session_key convention
-	// For now, return the first engine.
+	// Try to find the engine that owns sessions for this key.
 	for _, ref := range bs.engines {
-		return ref
+		if sessions := ref.engine.sessions.ListSessions(sessionKey); len(sessions) > 0 {
+			return ref
+		}
 	}
+
 	return nil
 }
 

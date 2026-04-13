@@ -3,6 +3,7 @@ package feishu
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -56,6 +57,64 @@ func TestNew_DisabledInteractiveCardsDoesNotStartPreviewCard(t *testing.T) {
 	}
 }
 
+func TestNew_ProgressStyleDefaultLegacy(t *testing.T) {
+	p, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	sp, ok := p.(core.ProgressStyleProvider)
+	if !ok {
+		t.Fatalf("platform type %T does not implement ProgressStyleProvider", p)
+	}
+	if got := sp.ProgressStyle(); got != "legacy" {
+		t.Fatalf("ProgressStyle() = %q, want legacy", got)
+	}
+}
+
+func TestNew_ProgressStyleSupportsCompactAndCard(t *testing.T) {
+	tests := []string{"compact", "card"}
+	for _, style := range tests {
+		t.Run(style, func(t *testing.T) {
+			p, err := New(map[string]any{
+				"app_id":         "cli_xxx",
+				"app_secret":     "secret",
+				"progress_style": style,
+			})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			sp, ok := p.(core.ProgressStyleProvider)
+			if !ok {
+				t.Fatalf("platform type %T does not implement ProgressStyleProvider", p)
+			}
+			if got := sp.ProgressStyle(); got != style {
+				t.Fatalf("ProgressStyle() = %q, want %q", got, style)
+			}
+			payloadCap, ok := p.(core.ProgressCardPayloadSupport)
+			if !ok {
+				t.Fatalf("platform type %T does not implement ProgressCardPayloadSupport", p)
+			}
+			if !payloadCap.SupportsProgressCardPayload() {
+				t.Fatal("SupportsProgressCardPayload() = false, want true")
+			}
+		})
+	}
+}
+
+func TestNew_ProgressStyleRejectsInvalidValue(t *testing.T) {
+	_, err := New(map[string]any{
+		"app_id":         "cli_xxx",
+		"app_secret":     "secret",
+		"progress_style": "invalid-style",
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid progress_style")
+	}
+	if !strings.Contains(err.Error(), "invalid progress_style") {
+		t.Fatalf("error = %q, want invalid progress_style", err.Error())
+	}
+}
+
 func TestInteractivePlatform_OnMessagePassesCardSenderToHandler(t *testing.T) {
 	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
 	if err != nil {
@@ -104,7 +163,7 @@ func TestInteractivePlatform_OnMessagePassesCardSenderToHandler(t *testing.T) {
 		},
 	}
 
-	if err := ip.onMessage(event); err != nil {
+	if err := ip.onMessage(context.Background(), event); err != nil {
 		t.Fatalf("onMessage() error = %v", err)
 	}
 	wg.Wait()
@@ -384,6 +443,57 @@ func TestInteractivePlatform_CardActionUsesCallbackSessionKey(t *testing.T) {
 	}
 }
 
+func TestInteractivePlatform_ModelCardActionDispatchesCommandAsync(t *testing.T) {
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip, ok := platformAny.(*interactivePlatform)
+	if !ok {
+		t.Fatalf("platform type = %T, want *interactivePlatform", platformAny)
+	}
+
+	cardNavCalled := make(chan struct{}, 1)
+	ip.cardNavHandler = func(action string, sessionKey string) *core.Card {
+		cardNavCalled <- struct{}{}
+		return core.NewCard().Markdown("unexpected").Build()
+	}
+
+	msgCh := make(chan *core.Message, 1)
+	ip.handler = func(_ core.Platform, msg *core.Message) {
+		msgCh <- msg
+	}
+
+	resp, err := ip.onCardAction(&callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: "ou_test_user"},
+			Action:   &callback.CallBackAction{Value: map[string]any{"action": "act:/model switch 1"}},
+			Context:  &callback.Context{OpenChatID: "oc_test_chat", OpenMessageID: "om_test_message"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("onCardAction() error = %v", err)
+	}
+	if resp == nil || resp.Toast == nil {
+		t.Fatalf("expected toast response, got %#v", resp)
+	}
+
+	select {
+	case <-cardNavCalled:
+		t.Fatal("expected model card action to skip synchronous card nav")
+	default:
+	}
+
+	select {
+	case msg := <-msgCh:
+		if msg.Content != "/model switch 1" {
+			t.Fatalf("message content = %q, want /model switch 1", msg.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected model card action message")
+	}
+}
+
 func TestNewLark_PlatformNameAndDomain(t *testing.T) {
 	p, err := newPlatform("lark", lark.LarkBaseUrl, map[string]any{
 		"app_id": "cli_xxx", "app_secret": "secret",
@@ -415,6 +525,32 @@ func TestNewFeishu_PlatformNameAndDomain(t *testing.T) {
 	}
 }
 
+func TestNewFeishu_CustomDomainOverride(t *testing.T) {
+	customDomain := "https://open.example.invalid"
+	p, err := New(map[string]any{
+		"app_id": "cli_xxx", "app_secret": "secret", "domain": customDomain,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip, ok := p.(*interactivePlatform)
+	if !ok {
+		t.Fatalf("type = %T, want *interactivePlatform", p)
+	}
+	if ip.domain != customDomain {
+		t.Fatalf("domain = %q, want %q", ip.domain, customDomain)
+	}
+}
+
+func TestNewFeishu_InvalidCustomDomain(t *testing.T) {
+	_, err := New(map[string]any{
+		"app_id": "cli_xxx", "app_secret": "secret", "domain": "://bad",
+	})
+	if err == nil {
+		t.Fatal("expected invalid domain error")
+	}
+}
+
 func TestLark_SessionKeyPrefix(t *testing.T) {
 	p, err := newPlatform("lark", lark.LarkBaseUrl, map[string]any{
 		"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true,
@@ -441,7 +577,7 @@ func TestLark_SessionKeyPrefix(t *testing.T) {
 		receivedMsg = msg
 	}
 
-	_ = ip.onMessage(&larkim.P2MessageReceiveV1{
+	_ = ip.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
 		Event: &larkim.P2MessageReceiveV1Data{
 			Sender: &larkim.EventSender{
 				SenderId:   &larkim.UserId{OpenId: &openID},
@@ -498,7 +634,7 @@ func TestLark_ThreadIsolationUsesRootSessionKey(t *testing.T) {
 		receivedMsg = msg
 	}
 
-	_ = ip.onMessage(&larkim.P2MessageReceiveV1{
+	_ = ip.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
 		Event: &larkim.P2MessageReceiveV1Data{
 			Sender: &larkim.EventSender{
 				SenderId:   &larkim.UserId{OpenId: &openID},
@@ -555,7 +691,7 @@ func TestLark_GroupReplyAllWithThreadIsolationUsesRootSessionKeyWithoutMention(t
 		msgCh <- msg
 	}
 
-	if err := ip.onMessage(&larkim.P2MessageReceiveV1{
+	if err := ip.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
 		Event: &larkim.P2MessageReceiveV1Data{
 			Sender: &larkim.EventSender{
 				SenderId:   &larkim.UserId{OpenId: &openID},
@@ -737,5 +873,117 @@ func TestLark_ErrorMessagePrefix(t *testing.T) {
 	}
 	if !strings.HasPrefix(err.Error(), "lark:") {
 		t.Fatalf("error = %q, want lark: prefix", err.Error())
+	}
+}
+
+func TestBuildPreviewCardJSON_ProgressPayloadUsesStructuredCard(t *testing.T) {
+	payload := core.BuildProgressCardPayloadV2([]core.ProgressCardEntry{
+		{Kind: core.ProgressEntryThinking, Text: "planning"},
+		{Kind: core.ProgressEntryToolUse, Tool: "Bash", Text: "pwd"},
+	}, false, "Codex", core.LangEnglish, core.ProgressCardStateRunning)
+	if payload == "" {
+		t.Fatal("BuildProgressCardPayload returned empty payload")
+	}
+
+	cardJSON := buildPreviewCardJSON(payload)
+	if strings.Contains(cardJSON, core.ProgressCardPayloadPrefix) {
+		t.Fatalf("card JSON should not leak payload prefix, got %q", cardJSON)
+	}
+	if !strings.Contains(cardJSON, "Codex · Running") {
+		t.Fatalf("card JSON should contain progress title, got %q", cardJSON)
+	}
+	if strings.Contains(cardJSON, "\"tag\":\"note\"") {
+		t.Fatalf("card JSON should not use deprecated note tag, got %q", cardJSON)
+	}
+	if !strings.Contains(cardJSON, "\"text_color\":\"grey\"") {
+		t.Fatalf("card JSON should render thinking with grey style, got %q", cardJSON)
+	}
+	if !strings.Contains(cardJSON, "\\u003ctext_tag color='blue'\\u003eTool") {
+		t.Fatalf("card JSON should include tool label, got %q", cardJSON)
+	}
+
+	var card map[string]any
+	if err := json.Unmarshal([]byte(cardJSON), &card); err != nil {
+		t.Fatalf("card JSON is invalid: %v", err)
+	}
+	header, ok := card["header"].(map[string]any)
+	if !ok || header == nil {
+		t.Fatalf("expected header in card json, got %#v", card["header"])
+	}
+}
+
+func TestBuildPreviewCardJSON_NormalTextFallback(t *testing.T) {
+	cardJSON := buildPreviewCardJSON("plain progress text")
+	if strings.Contains(cardJSON, "cc-connect · 进度") {
+		t.Fatalf("normal text should use default card template, got %q", cardJSON)
+	}
+	if !strings.Contains(cardJSON, "\"tag\":\"markdown\"") {
+		t.Fatalf("default preview card should contain markdown element, got %q", cardJSON)
+	}
+}
+
+func TestFormatProgressToolInput_TodoWrite(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		wantContains []string
+		notWantContains []string
+	}{
+		{
+			name: "valid todos with all statuses",
+			input: `{"todos": [
+				{"content": "Task 1", "status": "completed", "activeForm": "Completing task 1"},
+				{"content": "Task 2", "status": "in_progress", "activeForm": "Working on task 2"},
+				{"content": "Task 3", "status": "pending", "activeForm": "Planning task 3"}
+			]}`,
+			wantContains: []string{"✅", "🔄", "⏳", "Task 1", "Task 2", "Task 3", "Completing task 1", "Working on task 2"},
+			notWantContains: []string{"```"},
+		},
+		{
+			name:  "todos without activeForm",
+			input: `{"todos": [{"content": "Simple task", "status": "pending"}]}`,
+			wantContains: []string{"⏳", "Simple task"},
+			notWantContains: []string{"(", ")"},
+		},
+		{
+			name:     "invalid JSON falls back to default",
+			input:    `not valid json`,
+			wantContains: []string{"```text"},
+		},
+		{
+			name:     "empty todos array",
+			input:    `{"todos": []}`,
+			wantContains: []string{"```text"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := formatProgressToolInput("TodoWrite", tt.input)
+			for _, want := range tt.wantContains {
+				if !strings.Contains(result, want) {
+					t.Errorf("result should contain %q, got %q", want, result)
+				}
+			}
+			for _, notWant := range tt.notWantContains {
+				if strings.Contains(result, notWant) {
+					t.Errorf("result should not contain %q, got %q", notWant, result)
+				}
+			}
+		})
+	}
+}
+
+func TestFormatProgressToolInput_OtherTools(t *testing.T) {
+	// Non-TodoWrite tools should use default formatting
+	result := formatProgressToolInput("Bash", "ls -la")
+	if !strings.Contains(result, "```bash") {
+		t.Errorf("Bash tool should use bash code block, got %q", result)
+	}
+
+	// TodoWrite with invalid JSON should fall back to text block
+	result = formatProgressToolInput("TodoWrite", "not json")
+	if !strings.Contains(result, "```text") {
+		t.Errorf("TodoWrite with invalid JSON should fall back to text block, got %q", result)
 	}
 }
