@@ -215,6 +215,12 @@ type Engine struct {
 	observeSessionKey string             // e.g. "slack:C123:U456" — target for forwarding
 	observeCancel     context.CancelFunc
 
+	// Thread-aware session routing (nil = disabled, all messages share one session)
+	threadRouter *ThreadRouter
+	// threadInteractiveKeys maps interactiveKey → effectiveSessionKey so that
+	// cleanupInteractiveState can release thread router affinity for the correct key.
+	threadInteractiveKeys sync.Map
+
 	// Interactive agent session management
 	interactiveMu     sync.Mutex
 	interactiveStates map[string]*interactiveState // key = sessionKey
@@ -495,6 +501,13 @@ func (e *Engine) SetResetOnIdle(d time.Duration) {
 // SetShowContextIndicator controls whether assistant replies include the [ctx: ~N%] suffix.
 func (e *Engine) SetShowContextIndicator(show bool) {
 	e.showContextIndicator = show
+}
+
+// SetThreadRouter enables thread-aware session routing for this engine.
+// When set, incoming messages are routed to per-thread sessions based on
+// their ThreadID field, with context-switch-first, fork-on-contention semantics.
+func (e *Engine) SetThreadRouter(r *ThreadRouter) {
+	e.threadRouter = r
 }
 
 func (e *Engine) SetWebSetupFunc(fn func() (int, string, bool, error)) { e.webSetupFunc = fn }
@@ -1466,8 +1479,46 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		interactiveKey = resolvedWorkspace + ":" + msg.SessionKey
 	}
 
-	session := sessions.GetOrCreateActive(msg.SessionKey)
-	sessions.UpdateUserMeta(msg.SessionKey, msg.UserName, msg.ChatName)
+	// Thread-aware routing: resolve the effective session key for this message.
+	// This runs BEFORE the session lock so that messages route to the correct
+	// session rather than being queued against the wrong one.
+	effectiveSessionKey := msg.SessionKey
+	if e.threadRouter != nil {
+		// Drop "also send to channel" duplicates: Slack fires two events with
+		// the same client_msg_id when the user ticks "also send to #channel".
+		if msg.ClientMsgID != "" && e.threadRouter.IsDuplicateClientMsg(msg.ClientMsgID) {
+			slog.Debug("thread router: dropping duplicate client_msg_id",
+				"client_msg_id", msg.ClientMsgID,
+				"session", msg.SessionKey,
+			)
+			return
+		}
+
+		routeResult := e.threadRouter.Route(msg.SessionKey, msg.ThreadID, sessions)
+		effectiveSessionKey = routeResult.EffectiveKey
+		if routeResult.Forked {
+			slog.Info("thread router: forked new session for thread",
+				"thread_id", msg.ThreadID,
+				"session_key", effectiveSessionKey,
+			)
+			// Warn the user before starting the fork so they see it in their thread.
+			e.reply(p, msg.ReplyCtx, routeResult.ForkWarning)
+		}
+
+		// Update interactiveKey to use the effective session key.
+		if e.multiWorkspace && wsSessions != nil {
+			interactiveKey = resolvedWorkspace + ":" + effectiveSessionKey
+		} else {
+			interactiveKey = effectiveSessionKey
+		}
+
+		// Register the interactiveKey → effectiveSessionKey mapping so that
+		// cleanupInteractiveState can release thread affinity on session expiry.
+		e.threadInteractiveKeys.Store(interactiveKey, effectiveSessionKey)
+	}
+
+	session := sessions.GetOrCreateActive(effectiveSessionKey)
+	sessions.UpdateUserMeta(effectiveSessionKey, msg.UserName, msg.ChatName)
 	if !session.TryLock() {
 		// Check for /btw — inject into the running session mid-turn
 		trimmed := strings.TrimSpace(content)
@@ -1504,7 +1555,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		return
 	}
 
-	if rotated := e.maybeAutoResetSessionOnIdle(p, msg, sessions, interactiveKey, session); rotated != nil {
+	if rotated := e.maybeAutoResetSessionOnIdle(p, msg, sessions, interactiveKey, session, effectiveSessionKey); rotated != nil {
 		session = rotated
 	}
 
@@ -1517,12 +1568,17 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		"platform", msg.Platform,
 		"user", msg.UserName,
 		"session", session.ID,
+		"thread_id", msg.ThreadID,
 	)
 
 	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, resolvedWorkspace, msg.SessionKey)
 }
 
-func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions *SessionManager, interactiveKey string, session *Session) *Session {
+// maybeAutoResetSessionOnIdle rotates to a fresh session when the current one has
+// been idle for longer than resetOnIdle.  effectiveSessionKey is the (possibly
+// thread-routed) key that the session was looked up under; it defaults to
+// msg.SessionKey when thread routing is not active.
+func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions *SessionManager, interactiveKey string, session *Session, effectiveSessionKey string) *Session {
 	if e.resetOnIdle <= 0 || session == nil {
 		return nil
 	}
@@ -1539,7 +1595,7 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 	}
 
 	slog.Info("auto-resetting idle session",
-		"session_key", msg.SessionKey,
+		"session_key", effectiveSessionKey,
 		"session_id", session.ID,
 		"idle_for", time.Since(lastActive),
 		"threshold", e.resetOnIdle,
@@ -1562,9 +1618,9 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 	e.cleanupInteractiveState(interactiveKey)
 	session.UnlockWithoutUpdate()
 
-	newSession := sessions.NewSession(msg.SessionKey, "")
+	newSession := sessions.NewSession(effectiveSessionKey, "")
 	if !newSession.TryLock() {
-		slog.Error("failed to lock new session after idle auto-reset", "session_key", msg.SessionKey, "new_session", newSession.ID)
+		slog.Error("failed to lock new session after idle auto-reset", "session_key", effectiveSessionKey, "new_session", newSession.ID)
 		return nil
 	}
 
@@ -2316,6 +2372,14 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 
 	if ok && state != nil && state.agentSession != nil {
 		e.closeAgentSessionWithTimeout(sessionKey, state.agentSession)
+	}
+
+	// Release thread affinity for this session so future messages from the
+	// same thread re-route fresh (context-switch or fork) after session expiry.
+	if e.threadRouter != nil {
+		if effKey, loaded := e.threadInteractiveKeys.LoadAndDelete(sessionKey); loaded {
+			e.threadRouter.ReleaseSession(effKey.(string))
+		}
 	}
 }
 
@@ -6316,6 +6380,227 @@ func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images
 			return err
 		}
 		if err := fileSender.SendFile(e.ctx, replyCtx, file); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// InjectPrompt injects a message into an active session as if it came from an
+// external user. The agent will process and respond to it. If sessionKey is
+// empty, the first active session is used. This is intended for external
+// triggers (file watchers, CI hooks) that need the agent to act on a prompt.
+func (e *Engine) InjectPrompt(sessionKey, prompt string) error {
+	if prompt == "" {
+		return fmt.Errorf("prompt is required")
+	}
+
+	if sessionKey == "" {
+		e.interactiveMu.Lock()
+		for key := range e.interactiveStates {
+			sessionKey = key
+			break
+		}
+		e.interactiveMu.Unlock()
+		if sessionKey == "" {
+			return fmt.Errorf("no active session for --as-prompt")
+		}
+	}
+
+	platformName := ""
+	if idx := strings.Index(sessionKey, ":"); idx > 0 {
+		platformName = sessionKey[:idx]
+	}
+
+	var targetPlatform Platform
+	for _, p := range e.platforms {
+		if p.Name() == platformName {
+			targetPlatform = p
+			break
+		}
+	}
+	if targetPlatform == nil {
+		return fmt.Errorf("platform %q not found for session key %q", platformName, sessionKey)
+	}
+
+	rc, ok := targetPlatform.(ReplyContextReconstructor)
+	if !ok {
+		return fmt.Errorf("platform %q does not support reply context reconstruction", platformName)
+	}
+
+	replyCtx, err := rc.ReconstructReplyCtx(sessionKey)
+	if err != nil {
+		return fmt.Errorf("reconstruct reply context: %w", err)
+	}
+
+	msg := &Message{
+		SessionKey: sessionKey,
+		Platform:   platformName,
+		UserID:     "trigger",
+		UserName:   "trigger",
+		Content:    prompt,
+		ReplyCtx:   replyCtx,
+	}
+
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	if !session.TryLock() {
+		return fmt.Errorf("session busy, prompt not delivered")
+	}
+
+	go e.processInteractiveMessage(targetPlatform, msg, session)
+	return nil
+}
+
+// InjectPromptToNewThread posts a thread anchor message first, then injects a
+// prompt whose responses will be threaded to that anchor. This combines --new-thread
+// and --as-prompt: the anchor is visible in the channel, and the agent processes
+// and responds within that thread.
+func (e *Engine) InjectPromptToNewThread(sessionKey, prompt string) error {
+	if prompt == "" {
+		return fmt.Errorf("prompt is required")
+	}
+
+	if sessionKey == "" {
+		e.interactiveMu.Lock()
+		for key := range e.interactiveStates {
+			sessionKey = key
+			break
+		}
+		e.interactiveMu.Unlock()
+		if sessionKey == "" {
+			return fmt.Errorf("no active session for --as-prompt --new-thread")
+		}
+	}
+
+	platformName := ""
+	if idx := strings.Index(sessionKey, ":"); idx > 0 {
+		platformName = sessionKey[:idx]
+	}
+
+	var targetPlatform Platform
+	for _, p := range e.platforms {
+		if p.Name() == platformName {
+			targetPlatform = p
+			break
+		}
+	}
+	if targetPlatform == nil {
+		return fmt.Errorf("platform %q not found for session key %q", platformName, sessionKey)
+	}
+
+	rc, ok := targetPlatform.(ReplyContextReconstructor)
+	if !ok {
+		return fmt.Errorf("platform %q does not support reply context reconstruction", platformName)
+	}
+
+	baseReplyCtx, err := rc.ReconstructReplyCtx(sessionKey)
+	if err != nil {
+		return fmt.Errorf("reconstruct reply context: %w", err)
+	}
+
+	// Post thread anchor and get threaded reply context
+	tap, ok := targetPlatform.(ThreadAnchorPoster)
+	if !ok {
+		return fmt.Errorf("platform %q does not support thread anchor posting", platformName)
+	}
+
+	threadedReplyCtx, err := tap.PostThreadAnchor(e.ctx, baseReplyCtx, prompt)
+	if err != nil {
+		return fmt.Errorf("post thread anchor: %w", err)
+	}
+
+	msg := &Message{
+		SessionKey: sessionKey,
+		Platform:   platformName,
+		UserID:     "trigger",
+		UserName:   "trigger",
+		Content:    prompt,
+		ReplyCtx:   threadedReplyCtx,
+	}
+
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	if !session.TryLock() {
+		return fmt.Errorf("session busy, prompt not delivered")
+	}
+
+	go e.processInteractiveMessage(targetPlatform, msg, session)
+	return nil
+}
+
+// PostToNewThread posts a message directly to a platform channel as a new
+// top-level message, without requiring or using an existing interactive session.
+// This is intended for automated notifications (e.g. file-watcher alerts) that
+// must not be threaded into an existing conversation.
+//
+// The session key is used only to identify the target channel / chat; the
+// platform's ReconstructReplyCtx always returns a channel-only context (no
+// thread timestamp), so the message lands top-level regardless of any active
+// sessions.
+func (e *Engine) PostToNewThread(sessionKey, message string, images []ImageAttachment, files []FileAttachment) error {
+	if message == "" && len(images) == 0 && len(files) == 0 {
+		return fmt.Errorf("message or attachment is required")
+	}
+	if sessionKey == "" {
+		// No session key provided — borrow one from any active session to resolve
+		// the target channel. PostToNewThread only uses the key for channel lookup
+		// (thread timestamps are stripped by ReconstructReplyCtx), so any session
+		// on the right platform works.
+		e.interactiveMu.Lock()
+		for key := range e.interactiveStates {
+			sessionKey = key
+			break
+		}
+		e.interactiveMu.Unlock()
+		if sessionKey == "" {
+			return fmt.Errorf("no active session and no session_key provided for --new-thread")
+		}
+	}
+	if (len(images) > 0 || len(files) > 0) && !e.attachmentSendEnabled {
+		return ErrAttachmentSendDisabled
+	}
+
+	// Find the platform that recognises this session key.
+	var platform Platform
+	var replyCtx any
+	for _, p := range e.platforms {
+		rc, ok := p.(ReplyContextReconstructor)
+		if !ok {
+			continue
+		}
+		rctx, err := rc.ReconstructReplyCtx(sessionKey)
+		if err == nil {
+			platform = p
+			replyCtx = rctx
+			break
+		}
+	}
+	if platform == nil {
+		return fmt.Errorf("no platform found that can handle session key %q", sessionKey)
+	}
+
+	if len(images) > 0 {
+		if _, ok := platform.(ImageSender); !ok {
+			return fmt.Errorf("platform %s: %w", platform.Name(), ErrNotSupported)
+		}
+	}
+	if len(files) > 0 {
+		if _, ok := platform.(FileSender); !ok {
+			return fmt.Errorf("platform %s: %w", platform.Name(), ErrNotSupported)
+		}
+	}
+
+	if message != "" {
+		if err := platform.Send(e.ctx, replyCtx, message); err != nil {
+			return err
+		}
+	}
+	for _, img := range images {
+		if err := platform.(ImageSender).SendImage(e.ctx, replyCtx, img); err != nil {
+			return err
+		}
+	}
+	for _, file := range files {
+		if err := platform.(FileSender).SendFile(e.ctx, replyCtx, file); err != nil {
 			return err
 		}
 	}

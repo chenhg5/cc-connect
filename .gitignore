@@ -2,6 +2,12 @@
 # Binary outputs
 # ============================================================================
 /cc-connect
+# Staging path used by restart.sh --deploy while verifying a fresh build
+# before it overwrites $BINARY. Always transient.
+/cc-connect.new
+# Rollback snapshot written by restart.sh --deploy. Same bytes as a past
+# $BINARY, so same reasons to never commit it.
+/cc-connect.known-good
 *.exe
 *.exe~
 *.dll
@@ -55,7 +61,10 @@ dist/
 build/
 bin/
 release/
-# Keep web/dist directory (for embedded admin UI) but ignore build artifacts
+!web/dist/
+# Ignore the compiled web assets inside web/dist/ — they are build
+# output from `vite build` and should be rebuilt locally, not committed.
+# .keep stays trackable for any future empty-dir scenario.
 web/dist/*
 !web/dist/.keep
 

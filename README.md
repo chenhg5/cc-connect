@@ -304,6 +304,43 @@ start if any gate fails or if the probe detects a cross-user leak.
 
 ---
 
+### 🧵 Thread-Aware Session Routing (Slack)
+
+When users have concurrent conversations in different Slack threads, cc-connect routes each thread to a dedicated session — preventing cross-talk.
+
+**Model: context-switch first, fork on contention**
+
+```
+Message arrives
+  → Thread idle? Resume context, respond. (One session, context-switch.)
+  → Thread mid-turn? Fork new session, lock it to this thread.
+  → max_concurrent reached? Queue in primary session.
+```
+
+- `client_msg_id` deduplication prevents the "also send to channel" double-event from being processed twice.
+- Forked sessions follow the same idle/reset timeouts as the primary session.
+- When a forked session ends, the thread re-routes fresh on the next message.
+
+**Configuration** (all optional — defaults work out of the box):
+
+```toml
+[threads]
+max_concurrent = 3   # Max simultaneous mid-turn sessions per channel (default: 3)
+                     # Set to 1 to disable forking (sequential/queue-only mode)
+```
+
+**Resource sizing:**
+
+| `max_concurrent` | Min RAM per project binding |
+|---|---|
+| 1 (no forking) | ~2 GB |
+| 3 (default)    | ~4 GB |
+| 5              | ~6 GB |
+
+Each additional concurrent session requires ~430 MB (300–360 MB Claude Code + 70 MB Node.js worker).
+
+---
+
 ### 🔐 Permission Modes
 
 ```

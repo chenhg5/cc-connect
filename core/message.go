@@ -154,6 +154,8 @@ type Message struct {
 	ReplyCtx     any             // platform-specific context needed for replying
 	FromVoice    bool            // true if message originated from voice transcription
 	ModeOverride string          // if set, temporarily override agent permission mode for this message
+	ThreadID     string          // platform thread identifier for thread-aware session routing (e.g. Slack thread_ts)
+	ClientMsgID  string          // client-generated message ID for deduplication (e.g. Slack client_msg_id)
 }
 
 // EventType distinguishes different kinds of agent output.

@@ -33,6 +33,16 @@ type SendRequest struct {
 	Message    string            `json:"message"`
 	Images     []ImageAttachment `json:"images,omitempty"`
 	Files      []FileAttachment  `json:"files,omitempty"`
+	NewThread  bool              `json:"new_thread,omitempty"`
+	AsPrompt   bool              `json:"as_prompt,omitempty"`
+}
+
+// ReactRequest is the JSON body for POST /react and POST /unreact.
+type ReactRequest struct {
+	Project string `json:"project"`
+	Channel string `json:"channel"`
+	Ts      string `json:"ts"`
+	Emoji   string `json:"emoji"`
 }
 
 // NewAPIServer creates an API server on a Unix socket.
@@ -167,8 +177,30 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := engine.SendToSessionWithAttachments(req.SessionKey, req.Message, req.Images, req.Files); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	if req.AsPrompt {
+		var sendErr error
+		if req.NewThread {
+			// Create thread anchor first, then inject prompt into that thread
+			sendErr = engine.InjectPromptToNewThread(req.SessionKey, req.Message)
+		} else {
+			sendErr = engine.InjectPrompt(req.SessionKey, req.Message)
+		}
+		if sendErr != nil {
+			http.Error(w, sendErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		apiJSON(w, http.StatusOK, map[string]string{"status": "accepted"})
+		return
+	}
+
+	var sendErr error
+	if req.NewThread {
+		sendErr = engine.PostToNewThread(req.SessionKey, req.Message, req.Images, req.Files)
+	} else {
+		sendErr = engine.SendToSessionWithAttachments(req.SessionKey, req.Message, req.Images, req.Files)
+	}
+	if sendErr != nil {
+		http.Error(w, sendErr.Error(), http.StatusInternalServerError)
 		return
 	}
 
