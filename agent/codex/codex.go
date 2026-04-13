@@ -322,10 +322,12 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	codexHome := a.codexHome
 	extraEnv := a.providerEnvLocked()
 	extraEnv = append(extraEnv, a.sessionEnv...)
+	var baseURL string
 	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
 		if m := a.providers[a.activeIdx].Model; m != "" {
 			model = m
 		}
+		baseURL = a.providers[a.activeIdx].BaseURL
 	}
 	a.mu.Unlock()
 
@@ -333,7 +335,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 		return newAppServerSession(ctx, appServerURL, a.workDir, model, reasoningEffort, mode, sessionID, extraEnv, codexHome)
 	}
 
-	return newCodexSession(ctx, a.workDir, model, reasoningEffort, mode, sessionID, extraEnv)
+	return newCodexSession(ctx, a.workDir, model, reasoningEffort, mode, sessionID, baseURL, extraEnv)
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {

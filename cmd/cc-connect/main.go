@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"flag"
@@ -81,6 +82,9 @@ func main() {
 		case "weixin":
 			runWeixin(os.Args[2:])
 			return
+		case "doctor":
+			runDoctor(os.Args[2:])
+			return
 		}
 	}
 
@@ -106,6 +110,8 @@ func main() {
 
 	configFlag := flag.String("config", "", "path to config file (default: ./config.toml or ~/.cc-connect/config.toml)")
 	showVersion := flag.Bool("version", false, "print version and exit")
+	observeFlag := flag.Bool("observe", false, "observe native terminal Claude Code sessions and forward to Slack")
+	observeChannel := flag.String("observe-channel", "", "Slack channel ID to forward terminal observations to (requires --observe)")
 	forceFlag := flag.Bool("force", false, "kill any existing instance with the same config before starting")
 	flag.Usage = printUsage
 	flag.Parse()
@@ -157,10 +163,31 @@ func main() {
 
 	setupLogger(cfg.Log.Level, logWriter)
 
+	// run_as_user preflight + isolation audit. MUST run before any engine
+	// or agent is constructed. If any project fails, abort startup
+	// entirely — never half-spawn. See core/runas_check.go and
+	// core/runas_audit.go for the checks themselves.
+	if err := runRunAsUserStartupChecks(context.Background(), cfg); err != nil {
+		slog.Error("run_as_user: startup checks failed, refusing to start", "error", err)
+		os.Exit(1)
+	}
+
 	engines := make([]*core.Engine, 0, len(cfg.Projects))
 	effectiveWorkDirs := make([]string, 0, len(cfg.Projects))
 
 	for _, proj := range cfg.Projects {
+		// Inject project-level run_as_user / run_as_env into the agent's
+		// opts map so agents that support isolation can pick them up
+		// without needing their own top-level config plumbing.
+		if proj.RunAsUser != "" {
+			if proj.Agent.Options == nil {
+				proj.Agent.Options = map[string]any{}
+			}
+			proj.Agent.Options["run_as_user"] = proj.RunAsUser
+			if len(proj.RunAsEnv) > 0 {
+				proj.Agent.Options["run_as_env"] = proj.RunAsEnv
+			}
+		}
 		agent, err := core.CreateAgent(proj.Agent.Type, buildAgentOptions(cfg.DataDir, proj))
 		if err != nil {
 			slog.Error("failed to create agent", "project", proj.Name, "error", err)
@@ -232,6 +259,42 @@ func main() {
 			bindingStore := filepath.Join(cfg.DataDir, "workspace_bindings.json")
 			engine.SetMultiWorkspace(baseDir, bindingStore)
 			slog.Info("multi-workspace mode enabled", "project", proj.Name, "base_dir", baseDir)
+		}
+
+		// Wire terminal observation (--observe / [projects.observe])
+		observeEnabled := *observeFlag
+		obsChan := *observeChannel
+		if proj.Observe != nil {
+			if !observeEnabled && proj.Observe.Enabled {
+				observeEnabled = true
+			}
+			if obsChan == "" && proj.Observe.Channel != "" {
+				obsChan = proj.Observe.Channel
+			}
+		}
+		if observeEnabled {
+			if obsChan == "" {
+				slog.Error("observe: channel is required (use --observe-channel or set channel in [projects.observe])")
+				os.Exit(1)
+			}
+			hasSlack := false
+			for _, p := range platforms {
+				if p.Name() == "slack" {
+					hasSlack = true
+					break
+				}
+			}
+			if !hasSlack {
+				slog.Warn("observe requires a Slack platform; ignoring")
+			} else {
+				projectDir := resolveClaudeProjectDir(workDir)
+				if projectDir == "" {
+					slog.Warn("observe: could not find Claude Code project directory", "workDir", workDir)
+				} else {
+					sessionKey := fmt.Sprintf("slack:%s", obsChan)
+					engine.SetObserveConfig(projectDir, sessionKey)
+				}
+			}
 		}
 
 		// Wire global custom commands
@@ -999,6 +1062,23 @@ func applyProjectStateOverride(projectName string, agent core.Agent, configuredW
 	switcher.SetWorkDir(override)
 	slog.Info("project_state: applied work_dir override", "project", projectName, "work_dir", override)
 	return override
+}
+
+// resolveClaudeProjectDir returns the Claude Code project directory for a given
+// work directory, or "" if it doesn't exist.
+func resolveClaudeProjectDir(workDir string) string {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	// Claude Code encodes paths by replacing os.PathSeparator with "-"
+	// e.g. /home/leigh/workspace/cc-connect -> -home-leigh-workspace-cc-connect
+	encoded := strings.ReplaceAll(workDir, string(os.PathSeparator), "-")
+	dir := filepath.Join(homeDir, ".claude", "projects", encoded)
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		return ""
+	}
+	return dir
 }
 
 // resolveConfigPath determines which config file to use.

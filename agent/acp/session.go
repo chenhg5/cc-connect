@@ -18,6 +18,10 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
+// toolInputCacheMaxEntries caps toolInputByID growth; beyond this we evict
+// roughly half the map (iteration order is arbitrary) to bound memory.
+const toolInputCacheMaxEntries = 1000
+
 type acpSession struct {
 	workDir string
 	events  chan core.Event
@@ -62,13 +66,13 @@ func newACPSession(
 
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &acpSession{
-		workDir:   absWorkDir,
-		events:    make(chan core.Event, 128),
-		ctx:       sessionCtx,
+		workDir:       absWorkDir,
+		events:        make(chan core.Event, 128),
+		ctx:           sessionCtx,
 		cancel:        cancel,
 		permByID:      make(map[string]permState),
 		toolInputByID: make(map[string]string),
-		acpSessID: resumeSessionID,
+		acpSessID:     resumeSessionID,
 	}
 	s.alive.Store(true)
 
@@ -232,6 +236,19 @@ func (s *acpSession) onNotification(method string, params json.RawMessage) {
 // session updates so that handlePermissionRequest can look it up by toolCallId.
 // OpenCode ACP bug (#7370): rawInput is empty in tool_call and request_permission,
 // but populated in tool_call_update. We cache from both sources.
+func (s *acpSession) evictToolInputCacheIfNeededLocked() {
+	if len(s.toolInputByID) < toolInputCacheMaxEntries {
+		return
+	}
+	target := toolInputCacheMaxEntries / 2
+	for k := range s.toolInputByID {
+		if len(s.toolInputByID) <= target {
+			break
+		}
+		delete(s.toolInputByID, k)
+	}
+}
+
 func (s *acpSession) cacheToolCallInput(params json.RawMessage) {
 	var wrap struct {
 		Update json.RawMessage `json:"update"`
@@ -256,6 +273,7 @@ func (s *acpSession) cacheToolCallInput(params json.RawMessage) {
 			return
 		}
 		s.toolInputMu.Lock()
+		s.evictToolInputCacheIfNeededLocked()
 		input := summarizeACPToolInput(tc.Kind, tc.RawInput)
 		s.toolInputByID[tc.ToolCallID] = input
 		s.toolInputMu.Unlock()
@@ -273,6 +291,7 @@ func (s *acpSession) cacheToolCallInput(params json.RawMessage) {
 			return
 		}
 		s.toolInputMu.Lock()
+		s.evictToolInputCacheIfNeededLocked()
 		s.toolInputByID[tc.ToolCallID] = input
 		s.toolInputMu.Unlock()
 		slog.Info("acp: cached tool_call_update input", "toolCallId", tc.ToolCallID, "input", input)
@@ -313,7 +332,7 @@ func (s *acpSession) handlePermissionRequest(id json.RawMessage, params json.Raw
 		_ = s.tr.respondError(id, -32602, "invalid params")
 		return
 	}
-	slog.Info("acp: permission request raw params", "params", string(params))
+	slog.Debug("acp: permission request raw params", "params", string(params))
 	reqKey := jsonIDKey(id)
 	toolName := p.ToolCall.Title
 	if toolName == "" {

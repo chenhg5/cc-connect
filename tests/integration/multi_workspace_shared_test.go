@@ -46,35 +46,30 @@ type integrationRoutingSession struct {
 	sessionID string
 	workDir   string
 	alive     bool
-	events    <-chan core.Event
+	events    chan core.Event
 }
 
 func newIntegrationRoutingSession(sessionID, workDir string) *integrationRoutingSession {
-	ch := make(chan core.Event)
-	close(ch)
 	return &integrationRoutingSession{
 		sessionID: sessionID,
 		workDir:   workDir,
 		alive:     true,
-		events:    ch,
+		events:    make(chan core.Event, 8),
 	}
 }
 
 func (s *integrationRoutingSession) Send(prompt string, _ []core.ImageAttachment, _ []core.FileAttachment) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if !s.alive {
 		return io.ErrClosedPipe
 	}
 
-	ch := make(chan core.Event, 1)
-	ch <- core.Event{
+	s.events <- core.Event{
 		Type:    core.EventResult,
 		Content: fmt.Sprintf("workspace=%s prompt=%s", s.workDir, prompt),
 		Done:    true,
 	}
-	close(ch)
-	s.events = ch
 	return nil
 }
 
@@ -83,8 +78,6 @@ func (s *integrationRoutingSession) RespondPermission(string, core.PermissionRes
 }
 
 func (s *integrationRoutingSession) Events() <-chan core.Event {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
 	return s.events
 }
 
@@ -103,7 +96,10 @@ func (s *integrationRoutingSession) Alive() bool {
 func (s *integrationRoutingSession) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.alive = false
+	if s.alive {
+		s.alive = false
+		close(s.events)
+	}
 	return nil
 }
 
