@@ -52,11 +52,42 @@ if [[ "${1:-}" != "--deploy" ]]; then
     # Sleep 2s to let the calling Claude session finish sending its response,
     # then restart the service. Runs as a transient systemd unit so it survives
     # cc-connect dying. --collect makes systemd garbage-collect the transient
-    # unit after it exits so a lingering failed/completed unit never blocks
+    # unit after it exits so a lingering failed/completed unit never block
     # the next invocation with "Unit already loaded or has a fragment file".
+    #
+    # After restart, wait 10s for service to stabilize, then notify all active
+    # sessions so agents can resume or close out.
+    restart_script=$(cat <<'RESTART_EOF'
+sleep 2
+systemctl --user reset-failed cc-connect.service 2>/dev/null || true
+systemctl --user restart cc-connect.service
+
+# Wait for service to come up and stabilize
+sleep 10
+
+# Notify all active sessions about the restart
+CC_CONNECT="/home/leigh/workspace/cc-connect/cc-connect"
+SOCKET="/home/leigh/.cc-connect/run/api.sock"
+if [[ -x "$CC_CONNECT" && -S "$SOCKET" ]]; then
+    # Query active sessions via API (returns JSON array)
+    sessions=$(curl -s --unix-socket "$SOCKET" http://unix/sessions 2>/dev/null || echo "[]")
+    # Parse each session and send notification
+    echo "$sessions" | jq -c '.[]' 2>/dev/null | while read -r session; do
+        project=$(echo "$session" | jq -r '.project')
+        session_key=$(echo "$session" | jq -r '.session_key')
+        if [[ -n "$project" && -n "$session_key" && "$project" != "null" && "$session_key" != "null" ]]; then
+            "$CC_CONNECT" send --as-prompt --session "$session_key" --project "$project" \
+                -m "cc-connect has restarted. Are we finished here or is there more to do? If finished, please close out the thread." \
+                2>/dev/null || true
+        fi
+    done
+fi
+RESTART_EOF
+)
     systemd-run --user --collect --unit=cc-connect-restart --description="cc-connect restart" \
-        bash -c "sleep 2 && systemctl --user reset-failed $SERVICE 2>/dev/null || true; systemctl --user restart $SERVICE"
+        bash -c "$restart_script"
     log "Restart scheduled. Service will bounce in ~2 seconds."
+    log "Active sessions will be notified after ~12 seconds."
     log "Check status: systemctl --user status $SERVICE"
     exit 0
 fi
