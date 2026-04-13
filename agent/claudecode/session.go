@@ -172,7 +172,8 @@ func (cs *claudeSession) readLoop(stdout io.ReadCloser, stderrBuf *bytes.Buffer)
 	waitErrCh, waitDone := cs.startReadLoopWait(stdout)
 	defer cs.finishReadLoop(waitErrCh, stderrBuf)
 
-	scanner := cs.newReadLoopScanner(stdout)
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 	for scanner.Scan() {
 		cs.handleReadLoopLine(scanner.Text())
 	}
@@ -201,8 +202,8 @@ func (cs *claudeSession) startReadLoopWait(stdout io.ReadCloser) (<-chan error, 
 		// cs.done fires first and we skip the force-close entirely
 		select {
 		case<-cs.done:
-				return
-		case<-time.After(500*time.Millisecond):
+			return
+		case<-time.After(50 * time.Millisecond):
 		}
 		_ = stdout.Close()
 	}()
@@ -232,12 +233,6 @@ func (cs *claudeSession) finishReadLoop(waitErrCh <-chan error, stderrBuf *bytes
 	}
 	close(cs.events)
 	close(cs.done)
-}
-
-func (cs *claudeSession) newReadLoopScanner(stdout io.Reader) *bufio.Scanner {
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
-	return scanner
 }
 
 func (cs *claudeSession) handleReadLoopScanErr(err error, waitDone <-chan struct{}) {
