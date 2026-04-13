@@ -132,10 +132,44 @@ func (o SpawnOptions) mergedAllowlist() []string {
 // Does NOT run the per-spawn re-check — callers should invoke
 // VerifyRunAsUserCheap immediately before Start() so a sudoers edit
 // between startup preflight and spawn is caught.
-func BuildSpawnCommand(ctx context.Context, opts SpawnOptions, name string, args ...string) *exec.Cmd {
+//
+// BuildSpawnCommandInDir is like BuildSpawnCommand but ensures the spawned
+// process starts in workDir even when sudo -i resets to the target user's
+// home directory. When workDir is empty, behaves identically to the non-dir
+// variant.
+func BuildSpawnCommandInDir(ctx context.Context, opts SpawnOptions, workDir, name string, args ...string) *exec.Cmd {
 	if !opts.IsolationMode() {
-		return exec.CommandContext(ctx, name, args...)
+		cmd := exec.CommandContext(ctx, name, args...)
+		if workDir != "" {
+			cmd.Dir = workDir
+		}
+		return cmd
 	}
+
+	// sudo -i resets cwd to the target user's home. Wrap the command in
+	// bash -c "cd <dir> && exec <cmd> <args>" so the agent starts in the
+	// correct workspace directory.
+	if workDir != "" {
+		// Build a single shell command string with proper quoting.
+		var shellCmd strings.Builder
+		shellCmd.WriteString("cd ")
+		shellCmd.WriteString(shellQuote(workDir))
+		shellCmd.WriteString(" && exec ")
+		shellCmd.WriteString(shellQuote(name))
+		for _, a := range args {
+			shellCmd.WriteByte(' ')
+			shellCmd.WriteString(shellQuote(a))
+		}
+		sudoArgs := []string{
+			"-n",
+			"-iu", opts.RunAsUser,
+			"--preserve-env=" + strings.Join(opts.mergedAllowlist(), ","),
+			"--",
+			"bash", "-c", shellCmd.String(),
+		}
+		return exec.CommandContext(ctx, "sudo", sudoArgs...)
+	}
+
 	sudoArgs := []string{
 		"-n",
 		"-iu", opts.RunAsUser,
@@ -147,6 +181,9 @@ func BuildSpawnCommand(ctx context.Context, opts SpawnOptions, name string, args
 	return exec.CommandContext(ctx, "sudo", sudoArgs...)
 }
 
+func BuildSpawnCommand(ctx context.Context, opts SpawnOptions, name string, args ...string) *exec.Cmd {
+	return BuildSpawnCommandInDir(ctx, opts, "", name, args...)
+}
 // FilterEnvForSpawn strips env down to the merged allowlist when
 // opts.IsolationMode() is true. Belt-and-braces with sudo's own
 // --preserve-env, but having cc-connect's spawn argv be the single

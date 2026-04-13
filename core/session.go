@@ -14,6 +14,14 @@ import (
 // to use --continue (resume most recent session) instead of a specific session ID.
 const ContinueSession = "__continue__"
 
+// ResumeForkPrefix marks a session ID that should be resumed with --fork-session
+// instead of plain --resume. Agents that support forking strip this prefix before
+// passing the real UUID to their backend CLI. Used by the /resume slash command
+// to let the user explicitly pick a prior workspace session — terminal-owned or
+// otherwise — and branch off its context into a fresh cc-connect conversation
+// without mutating the source session if it is still live somewhere else.
+const ResumeForkPrefix = "__fork:"
+
 // Session tracks one conversation between a user and the agent.
 type Session struct {
 	ID             string         `json:"id"`
@@ -23,6 +31,30 @@ type Session struct {
 	History        []HistoryEntry `json:"history"`
 	CreatedAt      time.Time      `json:"created_at"`
 	UpdatedAt      time.Time      `json:"updated_at"`
+
+	// pendingResumeCandidates is the in-memory list of workspace session IDs
+	// shown to the user by the most recent `/resume` (no-arg) invocation. The
+	// next `/resume <n>` call resolves <n> against this slice. Transient — not
+	// persisted across cc-connect restarts (unexported field = invisible to
+	// the session-store snapshot writer). Dropped implicitly on /new, because
+	// /new allocates a brand-new Session object and the old one with its
+	// pending candidates becomes unreachable. Order matches the picker's
+	// numbering: 1-based in the UI (`/resume 1` is the top of the list),
+	// 0-based in this slice.
+	pendingResumeCandidates []string
+
+	// forkOnNextStart, if non-empty, carries a backend session ID that the
+	// next StartSession call should resume with --fork-session instead of
+	// resuming whatever AgentSessionID points at. Populated by /resume <n>;
+	// consumed and cleared by the engine when it next spawns an interactive
+	// state for this session. Transient by design — we do NOT stash the
+	// sentinel inside AgentSessionID because that field is persisted to
+	// disk by the session-store snapshot writer and a crash in the narrow
+	// window between /resume pick and first message would leave a stale
+	// sentinel on disk that replays incorrectly on next startup. Keeping
+	// it in its own unexported field means a crash simply drops the
+	// pending fork and the user can re-pick from a fresh /resume list.
+	forkOnNextStart string
 
 	mu   sync.Mutex `json:"-"`
 	busy bool       `json:"-"`
@@ -36,6 +68,15 @@ func (s *Session) TryLock() bool {
 	}
 	s.busy = true
 	return true
+}
+
+// IsBusy returns true if the session is currently mid-turn (locked).
+// This is a non-acquiring read — callers should not rely on the state
+// remaining stable after the call returns.
+func (s *Session) IsBusy() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.busy
 }
 
 func (s *Session) Unlock() {
@@ -154,6 +195,67 @@ func (s *Session) GetHistory(n int) []HistoryEntry {
 	return out
 }
 
+// SetPendingResumeCandidates stores the list of workspace session IDs presented
+// to the user by `/resume` (no-arg). The next `/resume <n>` resolves <n> against
+// this list. Passing nil clears the pending state.
+func (s *Session) SetPendingResumeCandidates(ids []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(ids) == 0 {
+		s.pendingResumeCandidates = nil
+		return
+	}
+	cpy := make([]string, len(ids))
+	copy(cpy, ids)
+	s.pendingResumeCandidates = cpy
+}
+
+// ClearPendingResumeCandidates drops any pending /resume picker state. Called
+// from any non-/resume-pick code path so the picker can't be resolved stale
+// after unrelated messages have been exchanged.
+func (s *Session) ClearPendingResumeCandidates() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pendingResumeCandidates = nil
+}
+
+// TakePendingResumeCandidate atomically returns and clears the pending resume
+// candidate at the given 1-based index (matching the picker UI). Returns the
+// session ID and true on success; empty string and false if the index is out
+// of range or no picker is pending.
+func (s *Session) TakePendingResumeCandidate(oneBasedIndex int) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if oneBasedIndex < 1 || oneBasedIndex > len(s.pendingResumeCandidates) {
+		return "", false
+	}
+	id := s.pendingResumeCandidates[oneBasedIndex-1]
+	s.pendingResumeCandidates = nil
+	return id, true
+}
+
+// SetForkOnNextStart arms the next StartSession call on this session to use
+// --resume <id> --fork-session (via the ResumeForkPrefix sentinel passed
+// through to the agent). Transient; not persisted.
+func (s *Session) SetForkOnNextStart(backendSessionID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.forkOnNextStart = backendSessionID
+}
+
+// ConsumeForkOnNextStart atomically returns the pending fork-resume target,
+// if any, and clears it. Called by the engine just before it decides what
+// session ID to hand to agent.StartSession. Returns empty string if no fork
+// is pending, in which case the caller falls back to the normal
+// AgentSessionID resume path.
+func (s *Session) ConsumeForkOnNextStart() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id := s.forkOnNextStart
+	s.forkOnNextStart = ""
+	return id
+}
+
 // UserMeta stores human-readable display info for a session key.
 type UserMeta struct {
 	UserName string `json:"user_name,omitempty"`
@@ -206,6 +308,17 @@ func (sm *SessionManager) StorePath() string {
 func (sm *SessionManager) nextID() string {
 	sm.counter++
 	return fmt.Sprintf("s%d", sm.counter)
+}
+
+// PeekActive returns the currently active session for userKey without creating one.
+// Returns nil if no active session exists for the key.
+func (sm *SessionManager) PeekActive(userKey string) *Session {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	if sid, ok := sm.activeSession[userKey]; ok {
+		return sm.sessions[sid]
+	}
+	return nil
 }
 
 func (sm *SessionManager) GetOrCreateActive(userKey string) *Session {

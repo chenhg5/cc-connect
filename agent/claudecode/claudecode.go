@@ -75,7 +75,37 @@ func New(opts map[string]any) (core.Agent, error) {
 		}
 	}
 
-	var disallowedTools []string
+	// Hardcoded baseline of disallowed tools that always applies when this
+	// agent runs under cc-connect, regardless of per-project config.
+	//
+	// Cloud-managed claude.ai MCP connectors (Slack, Gmail, Google Calendar,
+	// etc.) are tied to the authenticated claude.ai account's OAuth token
+	// rather than to the cc-connect bot identity. When the agent calls one
+	// of them, the resulting API call happens AS the account owner, so:
+	//
+	//   - Slack messages post with "Sent using @Claude" attributed to the
+	//     human account, not the cc-connect bot — the whole conversation
+	//     attribution is broken for any observer.
+	//   - cc-connect's own delivery path (which knows about thread_ts,
+	//     progress streaming, tool-call suppression, etc.) is bypassed
+	//     entirely, so the message shape is inconsistent with the rest
+	//     of the session.
+	//   - In sandboxed deployments where several Unix users share one
+	//     claude.ai account via file-copied credentials, every sandbox
+	//     user inherits access to every connector that has ever been
+	//     authorised on the shared account — even though the human only
+	//     intended to authorise the connector for their own use.
+	//
+	// Disallowing them here is the cleanest way to enforce "cc-connect owns
+	// message delivery on every platform it bridges to". Per-project config
+	// can extend this list but cannot override it.
+	// Note: mcp__claude_ai_Slack is NOT blocked here because a PreToolUse hook
+	// (slack-guard.sh) guards write operations while allowing search/read.
+	// This gives agents access to Slack history for context.
+	disallowedTools := []string{
+		"mcp__claude_ai_Gmail",
+		"mcp__claude_ai_Google_Calendar",
+	}
 	if tools, ok := opts["disallowed_tools"].([]any); ok {
 		for _, t := range tools {
 			if s, ok := t.(string); ok {
@@ -356,11 +386,12 @@ func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, erro
 			continue
 		}
 
-		summary, msgCount := scanSessionMeta(filepath.Join(projectDir, name))
+		firstSummary, summary, msgCount := scanSessionMeta(filepath.Join(projectDir, name))
 
 		sessions = append(sessions, core.AgentSessionInfo{
 			ID:           sessionID,
 			Summary:      summary,
+			FirstSummary: firstSummary,
 			MessageCount: msgCount,
 			ModifiedAt:   info.ModTime(),
 		})
@@ -393,18 +424,24 @@ func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
 	return os.Remove(path)
 }
 
-func scanSessionMeta(path string) (string, int) {
+// scanSessionMeta parses a claude JSONL session file and returns
+// (firstUserSummary, lastUserSummary, messageCount). Both summaries are
+// XML-tag stripped and truncated to ~40 runes so they fit cleanly in a
+// Slack list row. firstUserSummary is the opening user message in the
+// file (what the user originally started the session with); lastUserSummary
+// is the most recent user message (what the session is currently about).
+// Used by /list, /switch (which want the "current topic" = Summary) and
+// by /resume (which also wants the original starting point = FirstSummary
+// so long-running drifted sessions remain identifiable).
+func scanSessionMeta(path string) (firstSummary, summary string, count int) {
 	f, err := os.Open(path)
 	if err != nil {
-		return "", 0
+		return "", "", 0
 	}
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 256*1024), 256*1024)
-
-	var summary string
-	var count int
 
 	for scanner.Scan() {
 		var entry struct {
@@ -419,16 +456,33 @@ func scanSessionMeta(path string) (string, int) {
 		if entry.Type == "user" || entry.Type == "assistant" {
 			count++
 			if entry.Type == "user" && entry.Message.Content != "" {
+				if firstSummary == "" {
+					firstSummary = entry.Message.Content
+				}
 				summary = entry.Message.Content
 			}
 		}
 	}
-	summary = stripXMLTags(summary)
-	summary = strings.TrimSpace(summary)
-	if utf8.RuneCountInString(summary) > 40 {
-		summary = string([]rune(summary)[:40]) + "..."
+	firstSummary = truncateSummaryForList(stripXMLTags(firstSummary))
+	summary = truncateSummaryForList(stripXMLTags(summary))
+	return firstSummary, summary, count
+}
+
+// truncateSummaryForList trims whitespace, collapses interior newlines to
+// spaces (so a multi-line user message does not blow out the picker row),
+// and truncates to ~40 runes with an ellipsis.
+func truncateSummaryForList(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\r", " ")
+	// Collapse runs of whitespace.
+	for strings.Contains(s, "  ") {
+		s = strings.ReplaceAll(s, "  ", " ")
 	}
-	return summary, count
+	if utf8.RuneCountInString(s) > 40 {
+		s = string([]rune(s)[:40]) + "..."
+	}
+	return s
 }
 
 var xmlTagRe = regexp.MustCompile(`<[^>]+>`)

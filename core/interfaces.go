@@ -99,6 +99,7 @@ You can also list or delete cron jobs:
 When you need to communicate with another bot (e.g. ask another AI agent a question), use:
 
   cc-connect relay send --to <target_project> "<message>"
+  cc-connect relay send --to <target_project> --channel <channel_id> "<message>"
 
 IMPORTANT: <target_project> must be the EXACT project name from the /bind command output.
 Do NOT guess or modify the name — use it exactly as shown (e.g. "gemini", not "gemini-bot").
@@ -106,7 +107,20 @@ Do NOT guess or modify the name — use it exactly as shown (e.g. "gemini", not 
 This sends a message to the target bot and waits for its response (printed to stdout).
 The conversation is visible in the group chat and each bot maintains its own relay session.
 
+Use --channel <channel_id> to tell the target agent which channel's workspace binding to use.
+This is required when the target agent is in multi-workspace mode and should operate in a
+specific project directory (e.g. the repo channel where the work should happen).
+
 Environment variables CC_PROJECT and CC_SESSION_KEY are already set, so the relay knows which group chat to use.
+
+### Emoji reactions
+To add or remove an emoji reaction on a Slack message, use:
+
+  cc-connect react --emoji white_check_mark --channel C0AL12WCNBG --ts 1775870955.961349
+  cc-connect unreact --emoji white_check_mark --channel C0AL12WCNBG --ts 1775870955.961349
+
+--channel and --ts are required. --emoji is the Slack short name without colons.
+If the Slack message context provides channel_id and thread_ts, those can be used directly.
 `
 }
 
@@ -124,6 +138,13 @@ type SystemPromptSupporter interface {
 // a stop function that the caller must invoke when processing ends.
 type TypingIndicator interface {
 	StartTyping(ctx context.Context, replyCtx any) (stop func())
+}
+
+// Reactor is an optional interface for platforms that support adding and
+// removing emoji reactions on messages.
+type Reactor interface {
+	AddReaction(ctx context.Context, channel, ts, emoji string) error
+	RemoveReaction(ctx context.Context, channel, ts, emoji string) error
 }
 
 // ImageSender is an optional interface for platforms that support sending images.

@@ -272,8 +272,11 @@ const (
 	MsgStatusToolMessages     MsgKey = "status_tool_messages"
 	MsgStatusSessionKey       MsgKey = "status_session_key"
 	MsgStatusUserID           MsgKey = "status_user_id"
+	MsgStatusQuiet            MsgKey = "status_quiet"
 	MsgEnabledShort           MsgKey = "enabled_short"
 	MsgDisabledShort          MsgKey = "disabled_short"
+	MsgQuietOnShort           MsgKey = "quiet_on_short"
+	MsgQuietOffShort          MsgKey = "quiet_off_short"
 
 	MsgModelDefault               MsgKey = "model_default"
 	MsgModelListTitle             MsgKey = "model_list_title"
@@ -2014,6 +2017,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "ユーザーID: `%s`\n",
 		LangSpanish:            "ID de usuario: `%s`\n",
 	},
+	MsgStatusQuiet: {
+		LangEnglish:            "Quiet mode: %s\n",
+		LangChinese:            "安静模式: %s\n",
+		LangTraditionalChinese: "安靜模式: %s\n",
+		LangJapanese:           "静音モード: %s\n",
+		LangSpanish:            "Modo silencioso: %s\n",
+	},
 	MsgEnabledShort: {
 		LangEnglish:            "ON",
 		LangChinese:            "开启",
@@ -2022,6 +2032,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Activado",
 	},
 	MsgDisabledShort: {
+		LangEnglish:            "OFF",
+		LangChinese:            "关闭",
+		LangTraditionalChinese: "關閉",
+		LangJapanese:           "OFF",
+		LangSpanish:            "Desactivado",
+	},
+	MsgQuietOnShort: {
+		LangEnglish:            "ON",
+		LangChinese:            "开启",
+		LangTraditionalChinese: "開啟",
+		LangJapanese:           "ON",
+		LangSpanish:            "Activado",
+	},
+	MsgQuietOffShort: {
 		LangEnglish:            "OFF",
 		LangChinese:            "关闭",
 		LangTraditionalChinese: "關閉",

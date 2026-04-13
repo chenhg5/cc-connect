@@ -176,6 +176,35 @@ level = "info" # debug, info, warn, error
 # channel = "C0AL13PN4BG"           # Slack channel ID to post observations to
 
 # =============================================================================
+# Thread-Aware Session Routing / 多线程会话路由
+# =============================================================================
+# Routes Slack thread messages to dedicated sessions, preventing cross-talk
+# when users have concurrent conversations in different threads.
+# 将 Slack 线程消息路由到专属会话，避免多个线程并发时互相干扰。
+#
+# Model: context-switch first, fork on contention.
+# 策略：优先上下文切换，竞争时新建会话。
+#
+#   • One active thread at a time → the primary session handles it (context-switch).
+#     一次只有一个活跃线程 → 主会话处理（上下文切换）。
+#   • Two threads active simultaneously → second thread gets a forked session.
+#     两个线程同时活跃 → 第二个线程获得新建的子会话。
+#   • max_concurrent reached → excess threads queue in the primary session.
+#     达到 max_concurrent 上限 → 超出线程在主会话中排队。
+#
+# Resource guidance (per additional concurrent session / 每个并发会话资源占用):
+#   ~430 MB RAM = 300–360 MB (Claude Code) + 70 MB (Node.js worker)
+#   Provision ~512 MB headroom per slot above the base session.
+#   每个并发槽位建议预留 ~512 MB 内存余量。
+#
+# [threads]
+# max_concurrent = 3   # Max simultaneous mid-turn sessions per channel (default: 3)
+#                      # 每个频道最多同时处于处理中的会话数（默认 3）
+#                      # 1 = no forking, sequential only / 1 = 禁止分叉，顺序处理
+#                      # 3 → ~4 GB RAM minimum per project binding
+#                      # 5 → ~6 GB RAM minimum per project binding
+
+# =============================================================================
 # Cron Settings / 定时任务设置
 # =============================================================================
 # Controls cron job behavior.

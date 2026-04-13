@@ -142,24 +142,37 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 				}
 
 				var shareFiles []slackevents.File
+				var clientMsgID string
 				if cb, ok := data.Data.(*slackevents.EventsAPICallbackEvent); ok {
 					shareFiles = parseSlackInnerEventFiles(cb.InnerEvent)
+					clientMsgID = parseSlackClientMsgID(cb.InnerEvent)
 				}
 				images, audio, docFiles := p.processSlackFileShares(shareFiles)
 				content := stripAppMentionText(ev.Text)
 				if content == "" && len(images) == 0 && audio == nil && len(docFiles) == 0 {
 					return
 				}
+				// threadTS is the thread the mention was posted in, or the message
+				// timestamp itself when posted in the main channel (no thread).
+				threadTS := ev.ThreadTimeStamp
+				if threadTS == "" {
+					threadTS = ev.TimeStamp
+				}
+				userName := p.resolveUserName(ev.User)
+				channelName := p.resolveChannelNameForMsg(ev.Channel)
 				msg := &core.Message{
-					SessionKey: sessionKey, Platform: "slack",
-					UserID: ev.User, UserName: p.resolveUserName(ev.User),
-					ChatName:  p.resolveChannelNameForMsg(ev.Channel),
-					Content:   content,
-					Images:    images,
-					Files:     docFiles,
-					Audio:     audio,
-					MessageID: ev.TimeStamp,
-					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: ev.TimeStamp},
+					SessionKey:  sessionKey, Platform: "slack",
+					UserID:      ev.User, UserName: userName,
+					ChatName:    channelName,
+					Content:     content,
+					Images:      images,
+					Files:       docFiles,
+					Audio:       audio,
+					MessageID:   ev.TimeStamp,
+					ReplyCtx:    replyContext{channel: ev.Channel, timestamp: ev.TimeStamp},
+					PlatformContext: slackMessageContext(ev.Channel, channelName, ev.User, userName, ev.TimeStamp, ev.ThreadTimeStamp),
+					ThreadID:    threadTS,
+					ClientMsgID: clientMsgID,
 				}
 				p.handler(p, msg)
 
@@ -200,13 +213,25 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					return
 				}
 
+				// threadTS is the thread the message belongs to. For a top-level
+				// channel message (no thread), treat the message itself as its own
+				// thread so the router can distinguish it from other conversations.
+				threadTS := ev.ThreadTimeStamp
+				if threadTS == "" {
+					threadTS = ts
+				}
+				userName := p.resolveUserName(ev.User)
+				channelName := p.resolveChannelNameForMsg(ev.Channel)
 				msg := &core.Message{
-					SessionKey: sessionKey, Platform: "slack",
-					UserID: ev.User, UserName: p.resolveUserName(ev.User),
-					ChatName: p.resolveChannelNameForMsg(ev.Channel),
-					Content:  ev.Text, Images: images, Files: docFiles, Audio: audio,
-					MessageID: ts,
-					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: ts},
+					SessionKey:  sessionKey, Platform: "slack",
+					UserID:      ev.User, UserName: userName,
+					ChatName:    channelName,
+					Content:     ev.Text, Images: images, Files: docFiles, Audio: audio,
+					MessageID:   ts,
+					ReplyCtx:    replyContext{channel: ev.Channel, timestamp: ts},
+					PlatformContext: slackMessageContext(ev.Channel, channelName, ev.User, userName, ts, ev.ThreadTimeStamp),
+					ThreadID:    threadTS,
+					ClientMsgID: ev.ClientMsgID,
 				}
 				p.handler(p, msg)
 			}
@@ -245,8 +270,9 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 		msg := &core.Message{
 			SessionKey: sessionKey, Platform: "slack",
 			UserID: cmd.UserID, UserName: cmd.UserName,
-			Content:  content,
-			ReplyCtx: replyContext{channel: cmd.ChannelID},
+			Content:         content,
+			ReplyCtx:        replyContext{channel: cmd.ChannelID},
+			PlatformContext: slackMessageContext(cmd.ChannelID, cmd.ChannelName, cmd.UserID, cmd.UserName, "", ""),
 		}
 		slog.Debug("slack: slash command", "command", cmd.Command, "text", cmd.Text, "user", cmd.UserID)
 		p.handler(p, msg)
@@ -258,6 +284,23 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 	case socketmode.EventTypeConnectionError:
 		slog.Error("slack: connection error")
 	}
+}
+
+// slackMessageContext builds the ## Slack Message Context block that gets
+// prepended to the agent prompt so Claude knows which channel/thread to target
+// when making Slack MCP tool calls and can apply correct reply threading.
+func slackMessageContext(channelID, channelName, userID, userName, messageTS, threadTS string) string {
+	var b strings.Builder
+	b.WriteString("## Slack Message Context\n")
+	b.WriteString("channel_id: " + channelID + "\n")
+	b.WriteString("channel_name: " + channelName + "\n")
+	b.WriteString("user_id: " + userID + "\n")
+	b.WriteString("user_name: " + userName + "\n")
+	b.WriteString("message_ts: " + messageTS + "\n")
+	if threadTS != "" {
+		b.WriteString("thread_ts: " + threadTS + "\n")
+	}
+	return b.String()
 }
 
 func stripAppMentionText(text string) string {
@@ -282,6 +325,23 @@ func parseSlackInnerEventFiles(raw *json.RawMessage) []slackevents.File {
 		return nil
 	}
 	return wrapper.Files
+}
+
+// parseSlackClientMsgID extracts the client_msg_id field from a raw inner event.
+// AppMentionEvent does not expose this field via the Go struct, so we parse the
+// raw JSON directly — the same approach used by parseSlackInnerEventFiles.
+func parseSlackClientMsgID(raw *json.RawMessage) string {
+	if raw == nil || len(*raw) == 0 {
+		return ""
+	}
+	var wrapper struct {
+		ClientMsgID string `json:"client_msg_id"`
+	}
+	if err := json.Unmarshal(*raw, &wrapper); err != nil {
+		slog.Debug("slack: parse client_msg_id", "error", err)
+		return ""
+	}
+	return wrapper.ClientMsgID
 }
 
 // processSlackFileShares downloads Slack file shares and maps them to core
@@ -372,14 +432,38 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	return nil
 }
 
-// Send sends a new message (not a reply)
+// Send posts a message into the channel on the reply context, threading it
+// off rc.timestamp when one is present.
+//
+// In cc-connect's normal Slack flow every triggering user message has its
+// ts captured into replyContext.timestamp, so this effectively threads the
+// entire conversation (final reply, streaming progress, tool-use noise,
+// errors, notifications) under the user's original message. That is the
+// desired shape:
+//
+//   - One thread per conversation, keeping the main channel quiet.
+//   - Tool-call noise and progress updates stay contained inside the thread.
+//   - Parallel conversations in the same channel naturally fork into
+//     separate threads without any per-session book-keeping beyond the
+//     session key that already carries the channel + user.
+//
+// For genuinely standalone posts (slash commands with no message ts,
+// bot-initiated notifications with ReconstructReplyCtx) rc.timestamp is
+// empty and Send falls back to a non-threaded post.
 func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	rc, ok := rctx.(replyContext)
 	if !ok {
 		return fmt.Errorf("slack: invalid reply context type %T", rctx)
 	}
 
-	_, _, err := p.client.PostMessageContext(ctx, rc.channel, slack.MsgOptionText(content, false))
+	opts := []slack.MsgOption{
+		slack.MsgOptionText(content, false),
+	}
+	if rc.timestamp != "" {
+		opts = append(opts, slack.MsgOptionTS(rc.timestamp))
+	}
+
+	_, _, err := p.client.PostMessageContext(ctx, rc.channel, opts...)
 	if err != nil {
 		return fmt.Errorf("slack: send: %w", err)
 	}
@@ -426,6 +510,118 @@ func (p *Platform) SendObservation(ctx context.Context, channelID, text string) 
 	}
 	return nil
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Progress writer (compact style)
+//
+// cc-connect's core compact progress writer coalesces intermediate events
+// (thinking, tool_use, tool_result) into a SINGLE message that is updated in
+// place via chat.update, rather than posting a fresh Slack message per event
+// (the "legacy" behaviour). For Slack we want the compact style because:
+//
+//   - One progress message per turn instead of N. Main channel stays quiet.
+//   - Slack's native long-text clipping kicks in on both mobile (~1500 chars)
+//     and desktop (~4000 chars), rendering an inline "Show more" / "Show less"
+//     link without any interactive-component wiring on our side. This gives
+//     the "collapsible card" user experience for free.
+//   - The final agent reply is posted as a separate threaded message
+//     underneath the progress bubble, so the thread ends up with exactly
+//     two messages: [progress] + [answer].
+//
+// To opt in we implement three optional interfaces from core/interfaces.go:
+//
+//   - ProgressStyleProvider — returns "compact" so the core writer enables.
+//   - PreviewStarter        — posts the initial progress message and returns
+//                             a handle carrying the new message's channel+ts.
+//   - MessageUpdater        — edits the progress message in place via
+//                             chat.update as new events stream in.
+// ──────────────────────────────────────────────────────────────────────────────
+
+// slackPreviewHandle carries the channel + ts of the progress message we
+// posted via SendPreviewStart, so UpdateMessage knows which Slack message to
+// chat.update as intermediate events accumulate. The handle is threaded
+// through the core progress writer as an opaque `any` and type-asserted on
+// the way in.
+type slackPreviewHandle struct {
+	channel string
+	ts      string
+}
+
+// ProgressStyle opts the Slack platform into the compact in-place progress
+// writer. See core/progress_compact.go for the writer itself and the block
+// comment at the top of this section for the rationale.
+func (p *Platform) ProgressStyle() string {
+	return "compact"
+}
+
+// SendPreviewStart posts the initial progress message and returns a handle
+// carrying its channel + ts, which subsequent UpdateMessage calls use for
+// in-place edits.
+//
+// The progress message is always threaded off the triggering user message
+// when a thread ts is available in the reply context — that keeps the
+// progress bubble, the tool-call noise, and the final agent reply all
+// inside the same thread as the user's original message, matching the
+// auto-thread behaviour of Send for final replies.
+func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content string) (any, error) {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return nil, fmt.Errorf("slack: SendPreviewStart: invalid reply context type %T", rctx)
+	}
+
+	opts := []slack.MsgOption{
+		slack.MsgOptionText(content, false),
+	}
+	if rc.timestamp != "" {
+		opts = append(opts, slack.MsgOptionTS(rc.timestamp))
+	}
+
+	_, ts, err := p.client.PostMessageContext(ctx, rc.channel, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("slack: send preview start: %w", err)
+	}
+	return &slackPreviewHandle{channel: rc.channel, ts: ts}, nil
+}
+
+// UpdateMessage edits the progress message in place via Slack's chat.update
+// API. The handle was returned by SendPreviewStart and holds the channel +
+// ts of the message to edit.
+//
+// Failures here cause the core compact writer to mark itself failed and
+// fall back to legacy per-event posts for the rest of the turn, so the
+// user never loses visibility into what the agent is doing — they just
+// get slightly noisier output for that one turn.
+//
+// Note on Slack API quirks:
+//   - "message_not_updated" / identical-content responses return nil error
+//     from slack-go, so they are implicitly a no-op.
+//   - chat.update has an approximate rate limit of ~1 call per second per
+//     message; if a turn streams faster than that we may get rate-limited
+//     and the writer will fall back mid-turn. That is acceptable for an
+//     initial implementation and can be revisited later if it shows up in
+//     practice.
+func (p *Platform) UpdateMessage(ctx context.Context, handle any, content string) error {
+	h, ok := handle.(*slackPreviewHandle)
+	if !ok {
+		return fmt.Errorf("slack: UpdateMessage: invalid handle type %T", handle)
+	}
+
+	_, _, _, err := p.client.UpdateMessageContext(ctx, h.channel, h.ts,
+		slack.MsgOptionText(content, false),
+	)
+	if err != nil {
+		return fmt.Errorf("slack: update message: %w", err)
+	}
+	return nil
+}
+
+// Compile-time assertions that the Slack platform implements the optional
+// progress-writer interfaces used by core/progress_compact.go.
+var (
+	_ core.ProgressStyleProvider = (*Platform)(nil)
+	_ core.PreviewStarter        = (*Platform)(nil)
+	_ core.MessageUpdater        = (*Platform)(nil)
+)
 
 // SendFile uploads and sends a generic file to the channel.
 // Implements core.FileSender.
@@ -643,6 +839,26 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 			}
 		}
 	}
+}
+
+// AddReaction adds an emoji reaction to the specified message.
+// Implements core.Reactor.
+func (p *Platform) AddReaction(ctx context.Context, channel, ts, emoji string) error {
+	ref := slack.ItemRef{Channel: channel, Timestamp: ts}
+	if err := p.client.AddReactionContext(ctx, emoji, ref); err != nil {
+		return fmt.Errorf("slack: add reaction %q: %w", emoji, err)
+	}
+	return nil
+}
+
+// RemoveReaction removes an emoji reaction from the specified message.
+// Implements core.Reactor.
+func (p *Platform) RemoveReaction(ctx context.Context, channel, ts, emoji string) error {
+	ref := slack.ItemRef{Channel: channel, Timestamp: ts}
+	if err := p.client.RemoveReactionContext(ctx, emoji, ref); err != nil {
+		return fmt.Errorf("slack: remove reaction %q: %w", emoji, err)
+	}
+	return nil
 }
 
 func (p *Platform) Stop() error {

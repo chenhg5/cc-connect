@@ -742,6 +742,58 @@ Notes:
 
 ---
 
+## External Triggers (`--as-prompt`)
+
+Inject a message into an active agent session as if it came from an external user. The agent processes it and responds on its platform — ideal for file watchers, CI hooks, and automated pipelines that need to trigger agent work.
+
+### CLI
+
+```bash
+# Basic trigger — agent will process and respond
+cc-connect send --as-prompt -m "New completion file: STORY-42.md. Read and process it."
+
+# Target a specific project
+cc-connect send --as-prompt -p my-project -m "Build succeeded, deploy to staging"
+
+# With explicit session key
+cc-connect send --as-prompt -s "slack:C123:U456" -m "Review PR #87"
+```
+
+### How it works
+
+1. The message is injected into the agent's session as an inbound prompt (not posted as the bot)
+2. If no `--session` is provided, the first active session is used automatically
+3. If the session is busy (mid-turn), the command retries with 2-second backoff for up to 60 seconds
+4. The agent sees the message as coming from user `trigger` and processes it normally
+
+### Example: completion file watcher
+
+A systemd service watches a directory for new `.md` files and triggers the agent:
+
+```bash
+#!/bin/bash
+WATCH_DIR="/path/to/completions/"
+CC_CONNECT="/path/to/cc-connect"
+
+inotifywait -m -e create -e moved_to --format '%f' "$WATCH_DIR" | while read FILE; do
+  [[ "$FILE" == *.md ]] || continue
+  "$CC_CONNECT" send --as-prompt -p my-project --data-dir ~/.cc-connect \
+    -m "New completion file: ${FILE}. Read and process it."
+done
+```
+
+### Difference from `--new-thread`
+
+| Flag | Behavior |
+|------|----------|
+| (default) | Posts a message from the bot into the active thread |
+| `--new-thread` | Posts a message from the bot as a new top-level channel message |
+| `--as-prompt` | Injects as an inbound message the agent will process and respond to |
+
+Use `--as-prompt` when you need the agent to **act**. Use `--new-thread` when you need to **notify** (e.g., post a summary to the channel).
+
+---
+
 ## Scheduled Tasks (Cron)
 
 Create scheduled tasks that run automatically.

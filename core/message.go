@@ -147,13 +147,16 @@ type Message struct {
 	Content    string
 	Images     []ImageAttachment // attached images (if any)
 	Files      []FileAttachment  // attached files (if any)
-	Audio        *AudioAttachment // voice message (if any)
-	Location     *LocationAttachment // geographical location (if any)
-	ExtraContent string              // platform-enriched content (e.g. location text, reply quote) prepended for the agent
-	ChannelKey   string              // platform-provided channel identifier for workspace binding (optional)
-	ReplyCtx     any             // platform-specific context needed for replying
-	FromVoice    bool            // true if message originated from voice transcription
-	ModeOverride string          // if set, temporarily override agent permission mode for this message
+	Audio           *AudioAttachment    // voice message (if any)
+	Location        *LocationAttachment // geographical location (if any)
+	ExtraContent    string              // platform-enriched content (e.g. location text, reply quote) prepended for the agent
+	ChannelKey      string              // platform-provided channel identifier for workspace binding (optional)
+	ReplyCtx        any                 // platform-specific context needed for replying
+	FromVoice       bool                // true if message originated from voice transcription
+	ModeOverride    string              // if set, temporarily override agent permission mode for this message
+	PlatformContext string              // optional platform-specific context block prepended to the agent prompt (e.g. Slack channel/thread metadata)
+	ThreadID        string              // platform thread identifier for thread-aware session routing (e.g. Slack thread_ts)
+	ClientMsgID     string              // client-generated message ID for deduplication (e.g. Slack client_msg_id)
 }
 
 // EventType distinguishes different kinds of agent output.
@@ -211,9 +214,17 @@ type HistoryEntry struct {
 }
 
 // AgentSessionInfo describes one session as reported by the agent backend.
+//
+// Summary historically carries the LAST user message in the session, which
+// is what /list and /switch want (the most recent topic). FirstSummary was
+// added for /resume, which wants the ORIGINAL user message so the user can
+// recognise a session by how it started, not by wherever it happens to be
+// right now — a live terminal session in particular is constantly drifting
+// and its "latest" message is noisy as an identifier.
 type AgentSessionInfo struct {
 	ID           string
-	Summary      string
+	Summary      string // latest user message (≈40 chars, trimmed)
+	FirstSummary string // first user message (≈40 chars, trimmed)
 	MessageCount int
 	ModifiedAt   time.Time
 	GitBranch    string

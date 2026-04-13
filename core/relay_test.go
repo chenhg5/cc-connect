@@ -62,18 +62,18 @@ func TestHandleRelay_ReturnsPartialOnTimeout(t *testing.T) {
 	}
 	done := make(chan relayResult, 1)
 	go func() {
-		resp, err := e.HandleRelay(ctx, "source", "chat-1", "hello")
+		resp, err := e.HandleRelay(ctx, "source", "chat-1", "", "hello")
 		done <- relayResult{resp: resp, err: err}
 	}()
 
-	session.events <- Event{Type: EventText, Content: "partial response", SessionID: "relay-session"}
+	session.SendEvent(Event{Type: EventText, Content: "partial response", SessionID: "relay-session"})
 	time.Sleep(40 * time.Millisecond)
 	// After timeout, HandleRelay consumes the next event from the channel to
 	// unblock the for-range loop, then checks ctx.Err() and spawns the drain
 	// goroutine. We need two events: one to unblock HandleRelay, and one
 	// EventResult for the drain goroutine to close the session cleanly.
-	session.events <- Event{Type: EventThinking, Content: "still working"}
-	session.events <- Event{Type: EventResult, Content: "done"}
+	session.SendEvent(Event{Type: EventThinking, Content: "still working"})
+	session.SendEvent(Event{Type: EventResult, Content: "done"})
 
 	got := <-done
 	if got.err != nil {
@@ -105,14 +105,14 @@ func TestHandleRelay_TimeoutWithoutTextReturnsContextError(t *testing.T) {
 	}
 	done := make(chan relayResult, 1)
 	go func() {
-		resp, err := e.HandleRelay(ctx, "source", "chat-1", "hello")
+		resp, err := e.HandleRelay(ctx, "source", "chat-1", "", "hello")
 		done <- relayResult{resp: resp, err: err}
 	}()
 
 	time.Sleep(40 * time.Millisecond)
 	// One event to unblock HandleRelay's for-range, one for the drain goroutine.
-	session.events <- Event{Type: EventThinking, Content: "still working"}
-	session.events <- Event{Type: EventResult, Content: "done"}
+	session.SendEvent(Event{Type: EventThinking, Content: "still working"})
+	session.SendEvent(Event{Type: EventResult, Content: "done"})
 
 	got := <-done
 	if got.resp != "" {
@@ -164,7 +164,7 @@ func TestHandleRelay_ResumeFailureFallsBackToFreshSession(t *testing.T) {
 	ctx := context.Background()
 	done := make(chan string, 1)
 	go func() {
-		resp, err := e.HandleRelay(ctx, "source", "chat-1", "hello")
+		resp, err := e.HandleRelay(ctx, "source", "chat-1", "", "hello")
 		if err != nil {
 			done <- "error: " + err.Error()
 			return
@@ -173,7 +173,7 @@ func TestHandleRelay_ResumeFailureFallsBackToFreshSession(t *testing.T) {
 	}()
 
 	// The fresh session should receive the message and respond.
-	freshSession.events <- Event{Type: EventResult, Content: "recovered", SessionID: "fresh-session"}
+	freshSession.SendEvent(Event{Type: EventResult, Content: "recovered", SessionID: "fresh-session"})
 
 	got := <-done
 	if got != "recovered" {

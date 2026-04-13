@@ -173,10 +173,12 @@ func (rm *RelayManager) ListBoundBots(chatID, selfProject string) map[string]str
 
 // RelayRequest is the payload for a relay send.
 type RelayRequest struct {
-	From       string `json:"from"`        // source project name
-	To         string `json:"to"`          // target project name
-	SessionKey string `json:"session_key"` // source session key (contains platform + chatID)
+	From       string `json:"from"`              // source project name
+	To         string `json:"to"`                // target project name
+	SessionKey string `json:"session_key"`       // source session key (contains platform + chatID)
 	Message    string `json:"message"`
+	Channel    string `json:"channel,omitempty"` // target workspace channel key (e.g. "C0ALZC59C8Z")
+	Dispatch   bool   `json:"dispatch,omitempty"` // fire-and-forget: inject into target channel's interactive session
 }
 
 // RelayResponse is the result of a relay send.
@@ -185,7 +187,12 @@ type RelayResponse struct {
 }
 
 // Send delivers a message from one bot to another and returns the response.
+// When req.Dispatch is true, the message is injected into the target engine's
+// interactive session for the specified channel and Send returns immediately.
 func (rm *RelayManager) Send(ctx context.Context, req RelayRequest) (*RelayResponse, error) {
+	if req.Dispatch {
+		return rm.dispatch(ctx, req)
+	}
 	platform, chatID, err := parseSessionKeyParts(req.SessionKey)
 	if err != nil {
 		return nil, fmt.Errorf("relay: invalid session key: %w", err)
@@ -233,7 +240,14 @@ func (rm *RelayManager) Send(ctx context.Context, req RelayRequest) (*RelayRespo
 	relayCtx, cancel := rm.relayContext(ctx)
 	defer cancel()
 
-	response, err := targetEngine.HandleRelay(relayCtx, req.From, chatID, req.Message)
+	// Build workspace channel key from the --channel flag if provided.
+	// HandleRelay uses this to resolve the correct workspace binding.
+	wsChannelKey := ""
+	if req.Channel != "" {
+		wsChannelKey = platform + ":" + req.Channel
+	}
+
+	response, err := targetEngine.HandleRelay(relayCtx, req.From, chatID, wsChannelKey, req.Message)
 	if err != nil {
 		return nil, fmt.Errorf("relay: %w", err)
 	}
@@ -245,6 +259,60 @@ func (rm *RelayManager) Send(ctx context.Context, req RelayRequest) (*RelayRespo
 	}
 
 	return &RelayResponse{Response: response}, nil
+}
+
+// dispatch injects a message into the target engine's interactive session for
+// the specified channel. The agent processes the message and responds naturally
+// in that channel. Returns immediately after injection.
+func (rm *RelayManager) dispatch(ctx context.Context, req RelayRequest) (*RelayResponse, error) {
+	if req.Channel == "" {
+		return nil, fmt.Errorf("relay dispatch: --channel is required for dispatch mode")
+	}
+
+	platform, chatID, err := parseSessionKeyParts(req.SessionKey)
+	if err != nil {
+		return nil, fmt.Errorf("relay dispatch: invalid session key: %w", err)
+	}
+
+	rm.mu.RLock()
+	binding := rm.bindings[chatID]
+	targetEngine := rm.engines[req.To]
+	rm.mu.RUnlock()
+
+	if binding == nil {
+		return nil, fmt.Errorf("relay dispatch: no binding for this chat. Use /bind <project> first")
+	}
+	if _, ok := binding.Bots[req.To]; !ok {
+		return nil, fmt.Errorf("relay dispatch: project %q is not bound in this chat", req.To)
+	}
+	if targetEngine == nil {
+		return nil, fmt.Errorf("relay dispatch: target engine %q not found (is the project running?)", req.To)
+	}
+
+	fromName := req.From
+	if binding.Bots[req.From] != "" {
+		fromName = binding.Bots[req.From]
+	}
+	toName := req.To
+	if binding.Bots[req.To] != "" {
+		toName = binding.Bots[req.To]
+	}
+
+	// Post the dispatch prompt visibly in the target channel so humans can
+	// see what was asked. Uses the target engine's platform to send.
+	targetChannelSessionKey := platform + ":" + req.Channel
+	label := fmt.Sprintf("[dispatch from %s]\n%s", fromName, req.Message)
+	rm.sendToGroup(ctx, targetEngine, platform, targetChannelSessionKey, label)
+
+	// Inject prompt into the target engine's interactive session for the channel
+	if err := targetEngine.DispatchToChannel(platform, req.Channel, req.Message); err != nil {
+		return nil, fmt.Errorf("relay dispatch: %w", err)
+	}
+
+	slog.Info("relay: dispatched to channel",
+		"from", fromName, "to", toName, "channel", req.Channel)
+
+	return &RelayResponse{Response: "dispatched"}, nil
 }
 
 // sendToGroup sends a message to the group chat for visibility.
