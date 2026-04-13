@@ -169,48 +169,31 @@ func newClaudeSession(ctx context.Context, workDir, model, effort, sessionID, mo
 }
 
 func (cs *claudeSession) readLoop(stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
-	waitErrCh, waitDone := cs.startReadLoopWait(stdout)
-	defer cs.finishReadLoop(waitErrCh, stderrBuf)
+	var waitErr error
+	defer func() {
+		cs.finishReadLoop(waitErr, stderrBuf)
+	}()
 
 	scanner := cs.newReadLoopScanner(stdout)
 	for scanner.Scan() {
 		cs.handleReadLoopLine(scanner.Text())
 	}
 
-	cs.handleReadLoopScanErr(scanner.Err(), waitDone)
+	cs.handleReadLoopScanErr(scanner.Err())
+	waitErr = cs.cmd.Wait()
 }
 
-func (cs *claudeSession) startReadLoopWait(stdout io.ReadCloser) (<-chan error, <-chan struct{}) {
-	waitErrCh := make(chan error, 1)
-	waitDone := make(chan struct{})
-
-	go func() {
-		waitErrCh <- cs.cmd.Wait()
-		close(waitDone)
-	}()
-
-	go func() {
-		select {
-		case <-cs.ctx.Done():
-		case <-waitDone:
-		}
-		_ = stdout.Close()
-	}()
-
-	return waitErrCh, waitDone
-}
-
-func (cs *claudeSession) finishReadLoop(waitErrCh <-chan error, stderrBuf *bytes.Buffer) {
-	err := <-waitErrCh
-
+func (cs *claudeSession) finishReadLoop(waitErr error, stderrBuf *bytes.Buffer) {
 	cs.alive.Store(false)
-	if err != nil {
+
+	if waitErr != nil {
 		stderrMsg := ""
 		if stderrBuf != nil {
 			stderrMsg = strings.TrimSpace(stderrBuf.String())
 		}
+
 		if stderrMsg != "" {
-			slog.Error("claudeSession: process failed", "error", err, "stderr", stderrMsg)
+			slog.Error("claudeSession: process failed", "error", waitErr, "stderr", stderrMsg)
 			evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
 			select {
 			case cs.events <- evt:
@@ -230,17 +213,13 @@ func (cs *claudeSession) newReadLoopScanner(stdout io.Reader) *bufio.Scanner {
 	return scanner
 }
 
-func (cs *claudeSession) handleReadLoopScanErr(err error, waitDone <-chan struct{}) {
+func (cs *claudeSession) handleReadLoopScanErr(err error) {
 	if err == nil {
 		return
 	}
 
-	select {
-	case <-cs.ctx.Done():
+	if(cs.ctx.Err() != nil) {
 		return
-	case <-waitDone:
-		return
-	default:
 	}
 
 	slog.Error("claudeSession: scanner error", "error", err)
@@ -248,8 +227,7 @@ func (cs *claudeSession) handleReadLoopScanErr(err error, waitDone <-chan struct
 	select {
 	case cs.events <- evt:
 	case <-cs.ctx.Done():
-		return
-	}
+	} 
 }
 
 func (cs *claudeSession) handleReadLoopLine(line string) {
