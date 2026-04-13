@@ -419,14 +419,22 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	return nil
 }
 
-// Send sends a new message (not a reply)
+// Send sends a new message. If the replyContext has a thread timestamp,
+// the message is posted to that thread.
 func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	rc, ok := rctx.(replyContext)
 	if !ok {
 		return fmt.Errorf("slack: invalid reply context type %T", rctx)
 	}
 
-	_, _, err := p.client.PostMessageContext(ctx, rc.channel, slack.MsgOptionText(content, false))
+	opts := []slack.MsgOption{
+		slack.MsgOptionText(content, false),
+	}
+	if rc.timestamp != "" {
+		opts = append(opts, slack.MsgOptionTS(rc.timestamp))
+	}
+
+	_, _, err := p.client.PostMessageContext(ctx, rc.channel, opts...)
 	if err != nil {
 		return fmt.Errorf("slack: send: %w", err)
 	}
