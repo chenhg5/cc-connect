@@ -168,10 +168,7 @@ func matchesProject(filename, project string) bool {
 	if !strings.HasPrefix(base, project+"_") {
 		return false
 	}
-	suffix := base[len(project)+1:]
-	if strings.HasPrefix(suffix, "ws_") {
-		suffix = suffix[3:]
-	}
+	suffix := strings.TrimPrefix(base[len(project)+1:], "ws_")
 	return isHex(suffix)
 }
 
