@@ -411,6 +411,7 @@ type PermissionModeInfo struct {
 type BotCommandInfo struct {
 	Command     string // command name without leading "/"
 	Description string // short description for the menu
+	IsSkill     bool   // whether this entry comes from a skill
 }
 
 // CommandRegistrar is an optional interface for platforms that support
