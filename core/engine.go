@@ -211,8 +211,8 @@ type Engine struct {
 
 	// Terminal observation (--observe)
 	observeEnabled    bool
-	observeProjectDir string             // ~/.claude/projects/{projectKey}
-	observeSessionKey string             // e.g. "slack:C123:U456" — target for forwarding
+	observeProjectDir string // ~/.claude/projects/{projectKey}
+	observeSessionKey string // e.g. "slack:C123:U456" — target for forwarding
 	observeCancel     context.CancelFunc
 
 	// Interactive agent session management
@@ -2053,18 +2053,27 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 
 	// Create a new agent instance with this workspace's work_dir
 	opts := make(map[string]any)
+	if snapshotter, ok := e.agent.(WorkspaceAgentOptionSnapshotter); ok {
+		for k, v := range snapshotter.WorkspaceAgentOptions() {
+			opts[k] = v
+		}
+	}
 	opts["work_dir"] = workspace
 
 	// Copy model from original agent if possible
-	if ma, ok := e.agent.(interface{ GetModel() string }); ok {
-		if m := ma.GetModel(); m != "" {
-			opts["model"] = m
+	if _, ok := opts["model"]; !ok {
+		if ma, ok := e.agent.(interface{ GetModel() string }); ok {
+			if m := ma.GetModel(); m != "" {
+				opts["model"] = m
+			}
 		}
 	}
 	// Copy permission mode
-	if ma, ok := e.agent.(interface{ GetMode() string }); ok {
-		if m := ma.GetMode(); m != "" {
-			opts["mode"] = m
+	if _, ok := opts["mode"]; !ok {
+		if ma, ok := e.agent.(interface{ GetMode() string }); ok {
+			if m := ma.GetMode(); m != "" {
+				opts["mode"] = m
+			}
 		}
 	}
 	// Copy run_as_user (and run_as_env) for OS-level isolation. Without
