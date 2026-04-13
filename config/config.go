@@ -4,12 +4,74 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 
 	"github.com/BurntSushi/toml"
 )
+
+// validRunAsUserName is the portable-username character set plus digits.
+// POSIX does not require a specific pattern, but every mainstream Linux and
+// macOS system accepts these characters for login names. Rejecting anything
+// outside this set removes an injection vector into the sudo argv.
+func isValidRunAsUserName(name string) bool {
+	if name == "" || len(name) > 32 {
+		return false
+	}
+	for i, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r == '_':
+		case r >= '0' && r <= '9' && i > 0:
+		case (r == '-' || r == '.') && i > 0:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+var dangerousEnvVars = map[string]bool{
+	"LD_PRELOAD":           true,
+	"LD_LIBRARY_PATH":      true,
+	"DYLD_INSERT_LIBRARIES": true,
+	"DYLD_LIBRARY_PATH":    true,
+	"PATH":                 true,
+	"HOME":                 true,
+	"USER":                 true,
+	"SHELL":                true,
+	"SUDO_USER":            true,
+	"SUDO_COMMAND":         true,
+}
+
+func validateRunAsEnv(prefix string, envVars []string) error {
+	for _, v := range envVars {
+		name := strings.TrimSpace(v)
+		if dangerousEnvVars[strings.ToUpper(name)] {
+			return fmt.Errorf("config: %s.run_as_env must not include dangerous variable %q", prefix, name)
+		}
+	}
+	return nil
+}
+
+func validateRunAsUser(prefix, name string) error {
+	if name == "" {
+		return nil
+	}
+	if runtime.GOOS == "windows" {
+		return fmt.Errorf("config: %s.run_as_user is only supported on Linux/macOS", prefix)
+	}
+	if name == "root" || name == "0" {
+		return fmt.Errorf("config: %s.run_as_user must not be root", prefix)
+	}
+	if !isValidRunAsUserName(name) {
+		return fmt.Errorf("config: %s.run_as_user %q contains invalid characters (allowed: a-z, A-Z, 0-9, -, _, .; must start with a letter or underscore)", prefix, name)
+	}
+	return nil
+}
 
 // configMu serializes read-modify-write cycles to prevent lost updates.
 var configMu sync.Mutex
@@ -196,6 +258,12 @@ type AutoCompressConfig struct {
 	MinGapMins *int  `toml:"min_gap_mins,omitempty"` // minimum minutes between auto-compress runs (default 30)
 }
 
+// ObserveConfig controls forwarding of native terminal Claude Code sessions to a messaging platform.
+type ObserveConfig struct {
+	Enabled bool   `toml:"enabled"`
+	Channel string `toml:"channel"`
+}
+
 // ReferenceConfig controls local file reference normalization and rendering.
 type ReferenceConfig struct {
 	NormalizeAgents []string `toml:"normalize_agents,omitempty"`
@@ -219,6 +287,20 @@ type ProjectConfig struct {
 	// the current session has been inactive for the specified number of minutes.
 	// 0 or nil disables the behavior.
 	ResetOnIdleMins *int `toml:"reset_on_idle_mins,omitempty"`
+	// RunAsUser, when set, causes the agent command for this project to be
+	// spawned under a different Unix user via `sudo -n -iu <user> --`. This
+	// provides OS-level file-system isolation from the supervisor user who
+	// runs cc-connect itself. Requires passwordless sudo to the target user
+	// and is POSIX-only. See docs/usage.md "Running agents as a different
+	// Unix user" for setup and migration.
+	RunAsUser string `toml:"run_as_user,omitempty"`
+	// RunAsEnv optionally extends the minimal environment variable allowlist
+	// that crosses the sudo boundary when RunAsUser is set. The default
+	// allowlist (LANG, LC_*, TERM) is always included; PATH is NOT preserved
+	// by default — the target user's login PATH is used. Dangerous variables
+	// (LD_PRELOAD, PATH, HOME, etc.) are rejected at config validation.
+	// Use this only for variables the target user cannot set in their profile.
+	RunAsEnv []string `toml:"run_as_env,omitempty"`
 	// ShowContextIndicator: nil/true = append [ctx: ~N%] to assistant replies; false = hide.
 	ShowContextIndicator *bool        `toml:"show_context_indicator,omitempty"`
 	InjectSender         *bool        `toml:"inject_sender,omitempty"`     // prepend sender identity (platform + user ID) to each message sent to the agent
@@ -227,8 +309,9 @@ type ProjectConfig struct {
 	Users                *UsersConfig `toml:"users,omitempty"`             // per-user role config; nil = legacy behavior
 	// Quiet is legacy per-project override; see Config.Quiet. When true and global [display]
 	// omits thinking_messages / tool_messages, those default to off for this project.
-	Quiet      *bool           `toml:"quiet,omitempty"`
-	References ReferenceConfig `toml:"references,omitempty"`
+	Quiet                *bool           `toml:"quiet,omitempty"`
+	Observe              *ObserveConfig  `toml:"observe,omitempty"`
+	References           ReferenceConfig `toml:"references,omitempty"`
 }
 
 type AgentConfig struct {
@@ -395,6 +478,12 @@ func (c *Config) validate() error {
 		}
 		if proj.ResetOnIdleMins != nil && *proj.ResetOnIdleMins < 0 {
 			return fmt.Errorf("config: %s.reset_on_idle_mins must be >= 0", prefix)
+		}
+		if err := validateRunAsUser(prefix, proj.RunAsUser); err != nil {
+			return err
+		}
+		if err := validateRunAsEnv(prefix, proj.RunAsEnv); err != nil {
+			return err
 		}
 		if err := validateReferenceConfig(prefix, proj.References); err != nil {
 			return err

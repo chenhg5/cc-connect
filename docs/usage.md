@@ -272,6 +272,249 @@ Examples:
 
 ---
 
+## Running agents as a different Unix user (`run_as_user`)
+
+> **Platform support**: Linux and macOS. Not supported on Windows.
+> **Agent support**: Claude Code today. Other agents fall back to the
+> supervisor user; see the tracking issue for migration status.
+
+### What this is
+
+By default, every agent session cc-connect spawns runs as the same Unix
+user that runs `cc-connect` itself. If an agent misbehaves — reads a
+secret, overwrites a sibling repo, trashes `~/.ssh/` — it has the
+supervisor user's full file-system reach.
+
+`run_as_user` sets a per-project target Unix user. When it is set,
+cc-connect spawns that project's agent command via
+
+```
+sudo -n -iu <target-user> -- claude ...
+```
+
+The target user is a real, unprivileged Unix account that you create.
+The agent runs under that account's uid/gid, with **its own** home
+directory, shell profile, PATH, and tool credentials. File-system
+isolation is enforced by the kernel, not by hooks or allowlists.
+
+### Security guarantee and non-guarantee
+
+**This provides OS-user isolation from any file or process the target
+user cannot reach.** An agent can no longer read or clobber the
+supervisor's `~/.ssh/`, another project user's `~/.pgpass`, or a repo
+whose UNIX permissions don't grant access to the target user.
+
+**This does not automatically isolate projects from each other** if they
+share the same `run_as_user`. If you want per-project isolation, create
+a separate Unix user per project.
+
+**This is not a sandbox in the sense of Linux namespaces, seccomp, or
+container isolation.** It is strictly file-system scoping by uid.
+
+### Setup
+
+#### 1. Create the target user and install their tooling
+
+The target user needs its own copy of everything the agent touches,
+because `sudo -i` loads the *target* user's login environment — not the
+supervisor's.
+
+```bash
+sudo useradd -m -s /bin/bash partseeker-coder
+sudo -iu partseeker-coder
+
+# Install the agent CLI under the target user's PATH
+#   (for Claude Code, follow the normal install instructions)
+
+# Set up the target user's ~/.claude/
+mkdir -p ~/.claude
+# Copy or re-create:
+#   ~/.claude/settings.json     (MCP servers, hooks, model settings)
+#   ~/.claude.json              (Claude Code auth)
+#   ~/.claude/plugins/          (claude-mem and any other plugin state)
+
+exit
+```
+
+#### 2. Grant the supervisor passwordless sudo to the target
+
+Add a scoped sudoers rule. Do **not** use `NOPASSWD: ALL` for the
+supervisor — that grants the supervisor root, which is irrelevant here
+and dangerous.
+
+```
+# /etc/sudoers.d/cc-connect (install with `sudo visudo -f ...`)
+partseeker-orchestrator ALL=(partseeker-coder) NOPASSWD: ALL
+```
+
+Adjust the usernames for your setup. The rule says: *"the supervisor
+user may run any command as this specific target user, without a
+password."*
+
+#### 3. Verify the target user cannot sudo
+
+The whole point of stepping down into a target user is that the target
+cannot immediately escalate back. Verify:
+
+```bash
+sudo -n -iu partseeker-coder -- sudo -n true
+# must FAIL with "a password is required" or similar
+```
+
+If that command succeeds, cc-connect will refuse to start. Remove any
+`NOPASSWD` sudo grants for the target user first.
+
+#### 4. Make the project's `work_dir` accessible to the target user
+
+The target user needs read AND write on the project's `work_dir`. If
+the directory is owned by the supervisor, either `chown` it to the
+target, add group ownership the target is in, or apply a POSIX ACL:
+
+```bash
+sudo setfacl -R -m u:partseeker-coder:rwX /home/leigh/workspace/sandboxed-repo
+sudo setfacl -R -dm u:partseeker-coder:rwX /home/leigh/workspace/sandboxed-repo
+```
+
+cc-connect refuses to start if the target user cannot read+write the
+`work_dir` root, and warns (non-fatal) for descendant paths that look
+inaccessible.
+
+#### 5. Audit the setup before starting cc-connect
+
+```bash
+cc-connect doctor user-isolation
+```
+
+This runs the full preflight (the three go/no-go gates from
+[#496](https://github.com/chenhg5/cc-connect/issues/496)) and an
+**isolation probe**: it spawns a fixed shell script as the target user
+and reports what the target can read, what it's denied, and any
+cross-user leaks. Output goes to stdout plus a JSON report in
+`~/.cc-connect/audits/<timestamp>-<project>.json`.
+
+Exit code 0 = clean. Exit code 1 = at least one fatal problem.
+
+You can inspect the probe script itself with:
+
+```bash
+cc-connect doctor user-isolation --print-script
+```
+
+### Configuration
+
+```toml
+[[projects]]
+name = "claude-sandboxed"
+run_as_user = "partseeker-coder"
+
+# Optional: extend the default env var allowlist that crosses the sudo
+# boundary. The defaults (PATH, LANG, LC_*, TERM) are always included.
+# Only list vars the target user cannot reasonably set in their own
+# shell profile. Secrets belong in the target user's ~/.claude/settings.json
+# env block, NOT here.
+run_as_env = ["PGSSLROOTCERT", "PGSSLMODE"]
+
+[projects.agent]
+type = "claudecode"
+
+[projects.agent.options]
+mode = "default"
+model = "sonnet"
+work_dir = "/home/leigh/workspace/sandboxed-repo"
+```
+
+### Environment propagation: what moves into the target user's home
+
+This is the 2am-debugging section. When you switch a project to
+`run_as_user`, the supervisor's environment is **not** forwarded across
+the sudo boundary — that's the whole point. Everything the agent needs
+has to live in the target user's home.
+
+Migration checklist:
+
+- [ ] **Agent config** — `~/.claude/settings.json` (MCP servers, hooks,
+      model settings), `~/.claude.json` (auth). Copy from the supervisor
+      or re-create from scratch.
+- [ ] **Plugin state** — `~/.claude/plugins/` — claude-mem, any other
+      Claude Code plugins.
+- [ ] **MCP server binaries** — must be on the target user's `PATH`, not
+      just the supervisor's. Either install under the target user or
+      reference full paths in `settings.json`.
+- [ ] **Postgres TLS** — `PGSSLROOTCERT`, `PGSSLCERT`, `PGSSLKEY` belong
+      in the target user's `~/.claude/settings.json` `env` block. Their
+      referenced cert files must be readable by the target user.
+- [ ] **Claude OAuth credentials** — if you authenticate via `claude.ai`
+      (OAuth), the token lives in `~/.claude/.credentials.json`. OAuth
+      access tokens expire after a few hours and are refreshed
+      automatically by whichever Claude CLI session is running. The
+      target user's token will **not** be refreshed unless the target
+      user has an active session — which it often doesn't between
+      cc-connect spawns. The recommended fix is to symlink the target
+      user's credentials to the supervisor's file so both share one
+      token that stays fresh:
+
+      ```bash
+      # Grant target user read access via ACL (keeps 600 for everyone else)
+      setfacl -m u:<target-user>:rx ~/.claude/
+      setfacl -m u:<target-user>:r  ~/.claude/.credentials.json
+
+      # Replace the target user's credentials with a symlink
+      sudo -iu <target-user> bash -c \
+        'rm -f ~/.claude/.credentials.json && \
+         ln -s /home/<supervisor>/.claude/.credentials.json \
+               ~/.claude/.credentials.json'
+      ```
+
+      **If you use an API key** (`ANTHROPIC_API_KEY`) instead of OAuth,
+      this is not an issue — set the key in the target user's
+      `~/.claude/settings.json` `env` block and it won't expire.
+- [ ] **Credential files** — `~/.pgpass`, `~/.gitconfig`, `~/.netrc`,
+      `~/.aws/`, `~/.config/gh/`, `~/.kube/` — whichever the agent
+      actually uses. Each needs its own copy or a group-readable shared
+      copy.
+- [ ] **SSH keys** — `~/.ssh/id_ed25519` etc., if the agent runs `git
+      push` over SSH. Same story: copy or group-share.
+- [ ] **Key material under** `~/keys/` — custom directories the
+      supervisor uses need an equivalent under the target user's home
+      or a group-readable shared copy.
+- [ ] **Language toolchains** — if the agent uses `asdf`, `mise`, `nvm`,
+      `rustup`, etc., those live in `~`. The target user needs either
+      its own install or a system-wide install that both users can run.
+- [ ] **Shell profile** — `~/.profile` / `~/.bashrc` on the target user
+      needs to set `PATH` and any tool init the agent depends on. Test
+      with `sudo -iu partseeker-coder` before wiring cc-connect.
+
+After migration, run `cc-connect doctor user-isolation` again. The
+`target home` section reports which expected paths are present and
+which are missing — missing isn't necessarily wrong, but it's your
+checklist.
+
+### Opting out
+
+Remove `run_as_user` from the project entry, or set it to `""`. Legacy
+behavior (spawn as supervisor) returns on the next restart.
+
+### Failure modes and error messages
+
+- **"passwordless sudo to user X is not configured"** — step 2 of setup
+  is missing or the sudoers rule is scoped to the wrong supervisor. Fix
+  the rule, run `visudo -c` to validate syntax, then restart cc-connect.
+- **"target user X can run passwordless sudo"** — step 3 failed. The
+  error includes the output of `sudo -l` from the target context; find
+  the offending rule and remove it.
+- **"target user X cannot read AND write work_dir Y"** — step 4 failed.
+  `chown` the directory or add an ACL as shown above.
+- **"CROSS_LEAKED"** or **"SUPERVISOR_LEAKED"** in the audit — the
+  target user can read another user's secrets. Tighten the offending
+  file's permissions (usually `chmod 600 file; chown user:user file`)
+  and re-audit.
+- **"descendant scan timed out"** — non-fatal. The `work_dir` is large
+  enough that the permission walk exceeded its timeout. Run
+  `cc-connect doctor user-isolation` manually if you want the full
+  walk, or narrow the project's `work_dir`.
+
+---
+
 ## Feishu Setup CLI
 
 Use CLI to create or bind Feishu/Lark bot credentials and write them back to `config.toml`.

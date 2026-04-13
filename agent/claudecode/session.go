@@ -51,7 +51,7 @@ type claudeSession struct {
 	gracefulStopTimeout time.Duration
 }
 
-func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool, maxContextTokens int) (*claudeSession, error) {
+func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	args := []string{
@@ -67,13 +67,8 @@ func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode strin
 		args = append(args, "--permission-mode", mode)
 	}
 	switch sessionID {
-	case "":
+	case "", core.ContinueSession:
 		// Truly fresh session — no resume, no continue.
-	case core.ContinueSession:
-		// --continue grabs the most recent session in the workspace, which
-		// may belong to an active CLI terminal. Fork it so the platform
-		// conversation gets its own independent context branch.
-		args = append(args, "--continue", "--fork-session")
 	default:
 		// Resuming a known session ID — this is cc-connect's own session
 		// from a previous connection, safe to resume directly.
@@ -100,9 +95,23 @@ func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode strin
 		args = append(args, "--max-context-tokens", strconv.Itoa(maxContextTokens))
 	}
 
-	slog.Debug("claudeSession: starting", "args", core.RedactArgs(args), "dir", workDir, "mode", mode)
+	slog.Debug("claudeSession: starting", "args", core.RedactArgs(args), "dir", workDir, "mode", mode, "run_as_user", spawnOpts.RunAsUser)
 
-	cmd := exec.CommandContext(sessionCtx, "claude", args...)
+	// Per-spawn defense in depth: if run_as_user is set, re-run the cheap
+	// preflight (sudo still works + target still can't escalate) right
+	// before we build the command. This catches sudoers being edited
+	// between startup preflight and now.
+	if spawnOpts.IsolationMode() {
+		verifyCtx, verifyCancel := context.WithTimeout(sessionCtx, 10*time.Second)
+		err := core.VerifyRunAsUserCheap(verifyCtx, core.ExecSudoRunner{}, spawnOpts.RunAsUser)
+		verifyCancel()
+		if err != nil {
+			cancel()
+			return nil, fmt.Errorf("claudeSession: run_as_user spawn refused: %w", err)
+		}
+	}
+
+	cmd := core.BuildSpawnCommand(sessionCtx, spawnOpts, "claude", args...)
 	cmd.Dir = workDir
 	// Filter out CLAUDECODE env var to prevent "nested session" detection,
 	// since cc-connect is a bridge, not a nested Claude Code session.
@@ -110,6 +119,11 @@ func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode strin
 	if len(extraEnv) > 0 {
 		env = core.MergeEnv(env, extraEnv)
 	}
+	// When run_as_user is set, strip the supervisor's environment down to
+	// the allowlist before passing it to sudo. sudo --preserve-env also
+	// enforces this, but filtering here makes the cc-connect spawn argv
+	// the single source of truth.
+	env = core.FilterEnvForSpawn(env, spawnOpts)
 	cmd.Env = env
 
 	stdin, err := cmd.StdinPipe()

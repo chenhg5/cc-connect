@@ -502,3 +502,54 @@ func TestSessionManager_StorePath(t *testing.T) {
 		t.Errorf("StorePath() empty = %q, want empty string", got)
 	}
 }
+
+func TestKnownAgentSessionIDs(t *testing.T) {
+	sm := NewSessionManager("")
+	s1 := sm.NewSession("user1", "a")
+	s1.SetAgentSessionID("uuid-aaa", "claude")
+	s2 := sm.NewSession("user1", "b")
+	s2.SetAgentSessionID("uuid-bbb", "claude")
+	sm.NewSession("user1", "c") // no agent session id
+
+	known := sm.KnownAgentSessionIDs()
+	if len(known) != 2 {
+		t.Fatalf("KnownAgentSessionIDs len = %d, want 2", len(known))
+	}
+	if _, ok := known["uuid-aaa"]; !ok {
+		t.Fatal("expected uuid-aaa in known set")
+	}
+	if _, ok := known["uuid-bbb"]; !ok {
+		t.Fatal("expected uuid-bbb in known set")
+	}
+}
+
+func TestFilterOwnedSessions_FiltersUnknown(t *testing.T) {
+	all := []AgentSessionInfo{
+		{ID: "owned-1"},
+		{ID: "external-1"},
+		{ID: "owned-2"},
+		{ID: "external-2"},
+	}
+	known := map[string]struct{}{
+		"owned-1": {},
+		"owned-2": {},
+	}
+	filtered := filterOwnedSessions(all, known)
+	if len(filtered) != 2 {
+		t.Fatalf("filterOwnedSessions len = %d, want 2", len(filtered))
+	}
+	if filtered[0].ID != "owned-1" || filtered[1].ID != "owned-2" {
+		t.Fatalf("filtered = %v, want owned-1 and owned-2", filtered)
+	}
+}
+
+func TestFilterOwnedSessions_EmptyKnownReturnsAll(t *testing.T) {
+	all := []AgentSessionInfo{
+		{ID: "session-1"},
+		{ID: "session-2"},
+	}
+	filtered := filterOwnedSessions(all, map[string]struct{}{})
+	if len(filtered) != 2 {
+		t.Fatalf("filterOwnedSessions with empty known = %d, want 2", len(filtered))
+	}
+}

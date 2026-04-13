@@ -64,6 +64,48 @@ level = "info" # debug, info, warn, error
 # reset_on_idle_mins = 60   # 0 or unset = disabled / 设为 0 或留空表示禁用
 
 # =============================================================================
+# OS-user isolation via run_as_user (Linux/macOS only)
+# 通过 run_as_user 实现 OS 用户隔离（仅限 Linux/macOS）
+# =============================================================================
+#
+# Spawn a project's agent command under a different Unix user via
+# `sudo -n -iu <user>`. This provides OS-level file-system isolation from
+# the supervisor user that runs cc-connect itself, so a misbehaving agent
+# cannot read files outside the target user's permission scope.
+#
+# Currently supported by: claudecode.
+# Other agents use the supervisor user until migrated in a follow-up PR.
+#
+# Setup (one-time):
+#   1. Create the target Unix user and install their tooling:
+#        sudo useradd -m -s /bin/bash partseeker-coder
+#        sudo -iu partseeker-coder
+#        # install claude CLI, set up ~/.claude/settings.json, PGSSL certs,
+#        # ~/.pgpass, plugin state, anything the agent needs.
+#   2. Grant the supervisor user passwordless sudo to the target:
+#        # /etc/sudoers.d/cc-connect
+#        partseeker-orchestrator ALL=(partseeker-coder) NOPASSWD: ALL
+#   3. Ensure the target user does NOT have passwordless sudo to anywhere
+#      else. `sudo -n -iu partseeker-coder -- sudo -n true` must fail.
+#   4. Ensure the target user can read AND write the project's work_dir.
+#   5. Run `cc-connect doctor user-isolation` to audit the setup before
+#      starting cc-connect.
+#
+# cc-connect refuses to start if any preflight gate fails (missing sudo,
+# target can escalate, work_dir inaccessible) or if the isolation probe
+# detects that the target user can read another user's secrets.
+#
+# [[projects]]
+# name = "claude-sandboxed"
+# run_as_user = "partseeker-coder"
+# # Extra env vars to forward across the sudo boundary. The default
+# # allowlist (PATH, LANG, LC_*, TERM) is always included; only list
+# # names that the target user cannot reasonably set in their own shell
+# # profile. Secrets belong in the target user's ~/.claude/settings.json
+# # env block, NOT here.
+# run_as_env = ["PGSSLROOTCERT", "PGSSLMODE"]
+
+# =============================================================================
 # Streaming Preview / 流式预览
 # =============================================================================
 # Real-time message preview: shows agent output as it streams, updating the
@@ -128,6 +170,10 @@ level = "info" # debug, info, warn, error
 # enabled = true
 # max_tokens = 12000     # estimated token threshold to trigger compression
 # min_gap_mins = 30      # minimum minutes between auto-compress runs (default 30)
+
+# [projects.observe]
+# enabled = true                    # Forward native terminal sessions to Slack
+# channel = "C0AL13PN4BG"           # Slack channel ID to post observations to
 
 # =============================================================================
 # Cron Settings / 定时任务设置
