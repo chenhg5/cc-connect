@@ -306,6 +306,9 @@ type ProjectConfig struct {
 	DisabledCommands     []string        `toml:"disabled_commands,omitempty"` // commands to disable for this project (e.g. ["restart", "upgrade"])
 	AdminFrom            string          `toml:"admin_from,omitempty"`        // comma-separated user IDs allowed to run privileged commands; "*" = all allowed users
 	Users                *UsersConfig    `toml:"users,omitempty"`             // per-user role config; nil = legacy behavior
+	// WorkspaceIdleTimeoutMins overrides the workspace idle reaper timeout for
+	// multi-workspace mode. 0 disables reaping. Default: 15 minutes.
+	WorkspaceIdleTimeoutMins *int `toml:"workspace_idle_timeout_mins,omitempty"`
 	// Quiet is legacy per-project override; see Config.Quiet. When true and global [display]
 	// omits thinking_messages / tool_messages, those default to off for this project.
 	Quiet      *bool           `toml:"quiet,omitempty"`

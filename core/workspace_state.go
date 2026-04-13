@@ -136,9 +136,13 @@ func (p *workspacePool) GetOrCreate(workspace string) *workspaceState {
 }
 
 // ReapIdle removes and returns workspace paths that have been idle longer than idleTimeout.
+// A zero idleTimeout disables reaping entirely.
 func (p *workspacePool) ReapIdle() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.idleTimeout <= 0 {
+		return nil
+	}
 	cutoff := time.Now().Add(-p.idleTimeout)
 	var reaped []string
 	for path, state := range p.states {
