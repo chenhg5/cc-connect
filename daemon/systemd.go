@@ -174,7 +174,11 @@ func (m *systemdManager) buildUnit(cfg Config) string {
 	fmt.Fprintf(&sb, "Environment=CC_LOG_FILE=%s\n", cfg.LogFile)
 	fmt.Fprintf(&sb, "Environment=CC_LOG_MAX_SIZE=%d\n", cfg.LogMaxSize)
 	if cfg.EnvPATH != "" {
-		fmt.Fprintf(&sb, "Environment=PATH=%s\n", cfg.EnvPATH)
+		// Escape PATH for systemd: use double quotes and escape special chars.
+		// This handles paths with spaces (common in WSL with Windows paths like
+		// "/mnt/c/Program Files/Git/cmd") that would otherwise break systemd parsing.
+		escapedPATH := escapeSystemdEnvValue(cfg.EnvPATH)
+		fmt.Fprintf(&sb, "Environment=\"PATH=%s\"\n", escapedPATH)
 	}
 	sb.WriteString("\n[Install]\n")
 	if m.system {
@@ -183,6 +187,16 @@ func (m *systemdManager) buildUnit(cfg Config) string {
 		sb.WriteString("WantedBy=default.target\n")
 	}
 	return sb.String()
+}
+
+// escapeSystemdEnvValue escapes a value for use in systemd Environment= directive.
+// The value should be wrapped in double quotes; this function escapes special characters
+// that would break the quoting: backslash and double quote.
+func escapeSystemdEnvValue(s string) string {
+	// Escape backslashes and double quotes
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	s = strings.ReplaceAll(s, "\"", "\\\"")
+	return s
 }
 
 func runSystemctl(args ...string) (string, error) {
