@@ -6451,6 +6451,82 @@ func (e *Engine) InjectPrompt(sessionKey, prompt string) error {
 	return nil
 }
 
+// InjectPromptToNewThread posts a thread anchor message first, then injects a
+// prompt whose responses will be threaded to that anchor. This combines --new-thread
+// and --as-prompt: the anchor is visible in the channel, and the agent processes
+// and responds within that thread.
+func (e *Engine) InjectPromptToNewThread(sessionKey, prompt string) error {
+	if prompt == "" {
+		return fmt.Errorf("prompt is required")
+	}
+
+	if sessionKey == "" {
+		e.interactiveMu.Lock()
+		for key := range e.interactiveStates {
+			sessionKey = key
+			break
+		}
+		e.interactiveMu.Unlock()
+		if sessionKey == "" {
+			return fmt.Errorf("no active session for --as-prompt --new-thread")
+		}
+	}
+
+	platformName := ""
+	if idx := strings.Index(sessionKey, ":"); idx > 0 {
+		platformName = sessionKey[:idx]
+	}
+
+	var targetPlatform Platform
+	for _, p := range e.platforms {
+		if p.Name() == platformName {
+			targetPlatform = p
+			break
+		}
+	}
+	if targetPlatform == nil {
+		return fmt.Errorf("platform %q not found for session key %q", platformName, sessionKey)
+	}
+
+	rc, ok := targetPlatform.(ReplyContextReconstructor)
+	if !ok {
+		return fmt.Errorf("platform %q does not support reply context reconstruction", platformName)
+	}
+
+	baseReplyCtx, err := rc.ReconstructReplyCtx(sessionKey)
+	if err != nil {
+		return fmt.Errorf("reconstruct reply context: %w", err)
+	}
+
+	// Post thread anchor and get threaded reply context
+	tap, ok := targetPlatform.(ThreadAnchorPoster)
+	if !ok {
+		return fmt.Errorf("platform %q does not support thread anchor posting", platformName)
+	}
+
+	threadedReplyCtx, err := tap.PostThreadAnchor(e.ctx, baseReplyCtx, prompt)
+	if err != nil {
+		return fmt.Errorf("post thread anchor: %w", err)
+	}
+
+	msg := &Message{
+		SessionKey: sessionKey,
+		Platform:   platformName,
+		UserID:     "trigger",
+		UserName:   "trigger",
+		Content:    prompt,
+		ReplyCtx:   threadedReplyCtx,
+	}
+
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	if !session.TryLock() {
+		return fmt.Errorf("session busy, prompt not delivered")
+	}
+
+	go e.processInteractiveMessage(targetPlatform, msg, session)
+	return nil
+}
+
 // PostToNewThread posts a message directly to a platform channel as a new
 // top-level message, without requiring or using an existing interactive session.
 // This is intended for automated notifications (e.g. file-watcher alerts) that

@@ -441,6 +441,30 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	return nil
 }
 
+// PostThreadAnchor posts a message and returns a reply context that threads to it.
+// Implements core.ThreadAnchorPoster.
+func (p *Platform) PostThreadAnchor(ctx context.Context, rctx any, content string) (any, error) {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return nil, fmt.Errorf("slack: invalid reply context type %T", rctx)
+	}
+
+	opts := []slack.MsgOption{
+		slack.MsgOptionText(content, false),
+	}
+	// Post as top-level message (no thread_ts), even if rc has one
+
+	_, ts, err := p.client.PostMessageContext(ctx, rc.channel, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("slack: post thread anchor: %w", err)
+	}
+
+	// Return a new reply context that threads to the posted message
+	return replyContext{channel: rc.channel, timestamp: ts}, nil
+}
+
+var _ core.ThreadAnchorPoster = (*Platform)(nil)
+
 // SendImage uploads and sends an image to the channel.
 // Implements core.ImageSender.
 func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttachment) error {

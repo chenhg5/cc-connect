@@ -178,7 +178,13 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.AsPrompt {
-		sendErr := engine.InjectPrompt(req.SessionKey, req.Message)
+		var sendErr error
+		if req.NewThread {
+			// Create thread anchor first, then inject prompt into that thread
+			sendErr = engine.InjectPromptToNewThread(req.SessionKey, req.Message)
+		} else {
+			sendErr = engine.InjectPrompt(req.SessionKey, req.Message)
+		}
 		if sendErr != nil {
 			http.Error(w, sendErr.Error(), http.StatusInternalServerError)
 			return
