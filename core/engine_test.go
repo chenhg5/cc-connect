@@ -6259,8 +6259,8 @@ func TestHandleMessage_BusyActionInject_QueuesAttachments(t *testing.T) {
 		t.Fatalf("queued content = %q, want with image", state.pendingMessages[0].content)
 	}
 
-	sent = p.getSent()
-	found = false
+	sent := p.getSent()
+	found := false
 	for _, s := range sent {
 		if strings.Contains(s, e.i18n.T(MsgMessageQueued)) {
 			found = true
