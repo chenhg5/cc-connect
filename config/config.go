@@ -127,6 +127,14 @@ type ThreadsConfig struct {
 	//   max_concurrent = 5:           ~6 GB RAM minimum per project binding
 	//   max_concurrent = 1:           ~2 GB RAM (no forking, sequential only)
 	MaxConcurrent *int `toml:"max_concurrent,omitempty"`
+
+	// Isolation, when true, gives each thread its own independent session. Threads
+	// never share agent context, preventing context drift between conversations.
+	// Default: false (context-switch first, fork on contention).
+	//
+	// Enable this if you experience context drift where responses in one thread
+	// reference work from a different thread.
+	Isolation *bool `toml:"isolation,omitempty"`
 }
 
 // WebhookConfig controls the external HTTP webhook endpoint.

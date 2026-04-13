@@ -464,8 +464,12 @@ func main() {
 			if cfg.Threads.MaxConcurrent != nil {
 				maxConcurrent = *cfg.Threads.MaxConcurrent
 			}
-			if maxConcurrent > 0 {
-				engine.SetThreadRouter(core.NewThreadRouter(maxConcurrent))
+			isolation := false
+			if cfg.Threads.Isolation != nil {
+				isolation = *cfg.Threads.Isolation
+			}
+			if maxConcurrent > 0 || isolation {
+				engine.SetThreadRouter(core.NewThreadRouter(maxConcurrent, isolation))
 			}
 		}
 

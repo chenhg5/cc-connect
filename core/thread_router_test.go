@@ -13,7 +13,7 @@ func newTestSessionManager() *SessionManager {
 }
 
 func TestThreadRouter_NoThreadID(t *testing.T) {
-	r := NewThreadRouter(3)
+	r := NewThreadRouter(3, false)
 	sm := newTestSessionManager()
 
 	result := r.Route("slack:C1", "", sm)
@@ -22,7 +22,7 @@ func TestThreadRouter_NoThreadID(t *testing.T) {
 }
 
 func TestThreadRouter_ContextSwitch_IdleBase(t *testing.T) {
-	r := NewThreadRouter(3)
+	r := NewThreadRouter(3, false)
 	sm := newTestSessionManager()
 
 	// Base session exists but is idle (not busy).
@@ -35,7 +35,7 @@ func TestThreadRouter_ContextSwitch_IdleBase(t *testing.T) {
 }
 
 func TestThreadRouter_SameThread_RoutesSameKey(t *testing.T) {
-	r := NewThreadRouter(3)
+	r := NewThreadRouter(3, false)
 	sm := newTestSessionManager()
 
 	// First route establishes affinity.
@@ -46,7 +46,7 @@ func TestThreadRouter_SameThread_RoutesSameKey(t *testing.T) {
 }
 
 func TestThreadRouter_Fork_WhenBaseBusy(t *testing.T) {
-	r := NewThreadRouter(3)
+	r := NewThreadRouter(3, false)
 	sm := newTestSessionManager()
 
 	// Lock the base session to simulate a mid-turn.
@@ -61,7 +61,7 @@ func TestThreadRouter_Fork_WhenBaseBusy(t *testing.T) {
 }
 
 func TestThreadRouter_Fork_LimitEnforced(t *testing.T) {
-	r := NewThreadRouter(2) // max 2 concurrent
+	r := NewThreadRouter(2, false) // max 2 concurrent
 	sm := newTestSessionManager()
 
 	// Lock the base session.
@@ -85,7 +85,7 @@ func TestThreadRouter_Fork_LimitEnforced(t *testing.T) {
 }
 
 func TestThreadRouter_ReleaseForked(t *testing.T) {
-	r := NewThreadRouter(3)
+	r := NewThreadRouter(3, false)
 	sm := newTestSessionManager()
 
 	// Lock base, fork a session.
@@ -107,7 +107,7 @@ func TestThreadRouter_ReleaseForked(t *testing.T) {
 }
 
 func TestThreadRouter_ReleaseBase_ClearsAllAffinity(t *testing.T) {
-	r := NewThreadRouter(3)
+	r := NewThreadRouter(3, false)
 	sm := newTestSessionManager()
 
 	// Two threads context-switch into the idle base.
@@ -127,7 +127,7 @@ func TestThreadRouter_ReleaseBase_ClearsAllAffinity(t *testing.T) {
 }
 
 func TestThreadRouter_IndependentChannels(t *testing.T) {
-	r := NewThreadRouter(1) // max 1 = no forking
+	r := NewThreadRouter(1, false) // max 1 = no forking
 	sm := newTestSessionManager()
 
 	// Lock channel C1's base.
@@ -142,10 +142,43 @@ func TestThreadRouter_IndependentChannels(t *testing.T) {
 }
 
 func TestThreadRouter_ClientMsgIDDedup(t *testing.T) {
-	r := NewThreadRouter(3)
+	r := NewThreadRouter(3, false)
 
 	assert.False(t, r.IsDuplicateClientMsg(""), "empty id is never a duplicate")
 	assert.False(t, r.IsDuplicateClientMsg("abc-123"), "first time is not a duplicate")
 	assert.True(t, r.IsDuplicateClientMsg("abc-123"), "second time is a duplicate")
 	assert.False(t, r.IsDuplicateClientMsg("def-456"), "different id is not a duplicate")
+}
+
+func TestThreadRouter_Isolation_NeverContextSwitches(t *testing.T) {
+	r := NewThreadRouter(3, true) // isolation enabled
+	sm := newTestSessionManager()
+
+	// Base session is idle.
+	base := sm.GetOrCreateActive("slack:C1")
+	_ = base // idle — not locked
+
+	// In isolation mode, even with idle base, thread gets its own session.
+	r1 := r.Route("slack:C1", "thread-ts-1", sm)
+	assert.NotEqual(t, "slack:C1", r1.EffectiveKey, "isolation mode should not context-switch to base")
+	assert.True(t, r1.Forked, "should create thread-specific session")
+	assert.Empty(t, r1.ForkWarning, "isolation mode should not show fork warning")
+
+	// Second thread also gets its own session, different from first.
+	r2 := r.Route("slack:C1", "thread-ts-2", sm)
+	assert.NotEqual(t, "slack:C1", r2.EffectiveKey)
+	assert.NotEqual(t, r1.EffectiveKey, r2.EffectiveKey, "each thread should have its own session")
+	assert.True(t, r2.Forked)
+}
+
+func TestThreadRouter_Isolation_SameThreadSameSession(t *testing.T) {
+	r := NewThreadRouter(3, true) // isolation enabled
+	sm := newTestSessionManager()
+
+	// First message in thread establishes affinity.
+	r1 := r.Route("slack:C1", "ts-1", sm)
+
+	// Second message in same thread uses same session (affinity preserved).
+	r2 := r.Route("slack:C1", "ts-1", sm)
+	assert.Equal(t, r1.EffectiveKey, r2.EffectiveKey, "same thread should use same session")
 }

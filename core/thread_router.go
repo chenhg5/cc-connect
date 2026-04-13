@@ -23,7 +23,7 @@ type forkedInfo struct {
 
 // ThreadRouter implements thread-aware session routing for a project binding.
 //
-// Design: context-switch first, fork on contention.
+// Design: context-switch first, fork on contention (default).
 //
 //	Message arrives → check thread affinity
 //	  → Thread has existing session? Route to it.
@@ -31,11 +31,14 @@ type forkedInfo struct {
 //	  → No affinity yet + base session busy + below max_concurrent? Fork new session.
 //	  → At max_concurrent? Fall back to base (message will be queued).
 //
+// When isolation mode is enabled, each thread always gets its own session key,
+// preventing context drift between threads.
+//
 // A single ThreadRouter handles all channels/users for a project binding.
 // max_concurrent is enforced per base session key (per channel) so that
 // unrelated channels do not compete for the same concurrency budget.
 // Forked sessions are locked to their originating thread; only the base session
-// participates in context-switching between threads.
+// participates in context-switching between threads (when isolation is disabled).
 type ThreadRouter struct {
 	mu sync.Mutex
 
@@ -48,6 +51,10 @@ type ThreadRouter struct {
 
 	maxConcurrent int
 
+	// isolation, when true, gives each thread its own session key. Threads never
+	// context-switch into the base session, preventing context drift.
+	isolation bool
+
 	// clientMsgDedup prevents double-processing of Slack "also send to channel"
 	// events, which fire two events sharing the same client_msg_id.
 	clientMsgDedup MessageDedup
@@ -56,7 +63,8 @@ type ThreadRouter struct {
 // NewThreadRouter creates a ThreadRouter for a project binding.
 // maxConcurrent is the ceiling on simultaneous mid-turn sessions per channel
 // (base session key); it defaults to 3 when <= 0.
-func NewThreadRouter(maxConcurrent int) *ThreadRouter {
+// isolation, when true, gives each thread its own session key (no context-switching).
+func NewThreadRouter(maxConcurrent int, isolation bool) *ThreadRouter {
 	if maxConcurrent <= 0 {
 		maxConcurrent = defaultMaxConcurrent
 	}
@@ -64,6 +72,7 @@ func NewThreadRouter(maxConcurrent int) *ThreadRouter {
 		threadToKey:   make(map[string]string),
 		forkedKeys:    make(map[string]forkedInfo),
 		maxConcurrent: maxConcurrent,
+		isolation:     isolation,
 	}
 }
 
@@ -107,15 +116,22 @@ func (r *ThreadRouter) Route(baseKey, threadID string, sessions *SessionManager)
 		return RouteResult{EffectiveKey: existing}
 	}
 
-	// 2. No affinity yet.  Check whether the base session is currently mid-turn.
-	if base := sessions.PeekActive(baseKey); base == nil || !base.IsBusy() {
-		// Base session is idle (or not yet created): context-switch into it.
-		r.threadToKey[tk] = baseKey
-		return RouteResult{EffectiveKey: baseKey}
+	// 2. No affinity yet. In isolation mode, always create a thread-specific session.
+	//    Otherwise, context-switch into the base session if it's idle.
+	if !r.isolation {
+		if base := sessions.PeekActive(baseKey); base == nil || !base.IsBusy() {
+			// Base session is idle (or not yet created): context-switch into it.
+			r.threadToKey[tk] = baseKey
+			return RouteResult{EffectiveKey: baseKey}
+		}
 	}
 
-	// 3. Base is busy.  Count how many sessions for this base key are mid-turn.
-	midTurn := 1 // base session counts as one
+	// 3. In isolation mode or when base is busy: allocate a thread-specific session.
+	//    Count how many sessions for this base key are mid-turn to check concurrency limit.
+	midTurn := 0
+	if !r.isolation {
+		midTurn = 1 // base session counts as one (only when not isolated)
+	}
 	for fk, fi := range r.forkedKeys {
 		if fi.baseKey != baseKey {
 			continue
@@ -125,21 +141,27 @@ func (r *ThreadRouter) Route(baseKey, threadID string, sessions *SessionManager)
 		}
 	}
 
-	if midTurn < r.maxConcurrent {
+	if r.isolation || midTurn < r.maxConcurrent {
 		// Fork: allocate a new session key for this thread.
 		forkedKey := fmt.Sprintf("%s:t:%s", baseKey, shortThreadID(threadID))
 		r.threadToKey[tk] = forkedKey
 		r.forkedKeys[forkedKey] = forkedInfo{baseKey: baseKey, threadID: threadID}
+
+		// In isolation mode, don't show the warning since isolation is expected.
+		var warning string
+		if !r.isolation {
+			warning = "⚠️ A new parallel session was started for this thread. " +
+				"Parallel sessions may have divergent context. " +
+				"If you experience unexpected behaviour, keep conversations to a single thread."
+		}
 		return RouteResult{
 			EffectiveKey: forkedKey,
 			Forked:       true,
-			ForkWarning: "⚠️ A new parallel session was started for this thread. " +
-				"Parallel sessions may have divergent context. " +
-				"If you experience unexpected behaviour, keep conversations to a single thread.",
+			ForkWarning:  warning,
 		}
 	}
 
-	// 4. At max_concurrent: fall back to base (message will be queued there).
+	// 4. At max_concurrent (non-isolation mode): fall back to base (message will be queued there).
 	r.threadToKey[tk] = baseKey
 	return RouteResult{EffectiveKey: baseKey}
 }
