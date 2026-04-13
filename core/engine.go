@@ -2700,8 +2700,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventResult:
 			cp.Finalize(ProgressCardStateCompleted)
-			if event.SessionID != "" {
-				session.SetAgentSessionID(event.SessionID, e.agent.Name())
+			// Use state.agentSession.CurrentSessionID() instead of event.SessionID.
+			// event.SessionID may be empty in some cases, causing the agent_session_id
+			// to not be persisted to disk, breaking session resume on next startup.
+			if state != nil && state.agentSession != nil {
+				if currentID := state.agentSession.CurrentSessionID(); currentID != "" {
+					session.SetAgentSessionID(currentID, e.agent.Name())
+					sessions.Save()
+				}
 			}
 
 			fullResponse := event.Content
@@ -9734,8 +9740,9 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 				textParts = append(textParts, fmt.Sprintf(e.i18n.T(MsgToolResult), tn, out)+"\n\n")
 			}
 		case EventResult:
-			if event.SessionID != "" {
-				session.SetAgentSessionID(event.SessionID, e.agent.Name())
+			// Use agentSession.CurrentSessionID() for the same reason as above.
+			if currentID := agentSession.CurrentSessionID(); currentID != "" {
+				session.SetAgentSessionID(currentID, e.agent.Name())
 				e.sessions.Save()
 			}
 			resp := event.Content
