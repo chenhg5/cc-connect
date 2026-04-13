@@ -214,3 +214,53 @@ func (p *Platform) SendFile(ctx context.Context, replyCtx any, file core.FileAtt
 	}
 	return p.sendSingleItem(ctx, rc, item)
 }
+
+// SendAudio implements core.AudioSender.
+// Weixin voice messages require AMR or SILK format. Since SILK encoding is not
+// widely supported, we convert to AMR format using ffmpeg.
+func (p *Platform) SendAudio(ctx context.Context, replyCtx any, audio []byte, format string) error {
+	rc, err := p.resolveReplyContext(replyCtx)
+	if err != nil {
+		return err
+	}
+	if len(audio) == 0 {
+		return fmt.Errorf("weixin: empty audio")
+	}
+
+	// Convert to AMR format if not already AMR
+	sendData := audio
+	sendFormat := strings.ToLower(strings.TrimSpace(format))
+	if sendFormat == "" {
+		sendFormat = "wav" // TTS typically outputs WAV
+	}
+	if sendFormat != "amr" {
+		converted, err := core.ConvertAudioToAMR(ctx, audio, sendFormat)
+		if err != nil {
+			return fmt.Errorf("weixin: convert %s to AMR: %w", sendFormat, err)
+		}
+		sendData = converted
+		sendFormat = "amr"
+	}
+
+	slog.Debug("weixin: audio converted", "format", sendFormat, "size", len(sendData))
+
+	// Upload to CDN as file type (voice uses same CDN upload mechanism)
+	ref, err := p.uploadToWeixinCDN(ctx, rc.peerUserID, sendData, uploadMediaFile, "SendAudio")
+	if err != nil {
+		return err
+	}
+
+	// Send as voice message
+	item := messageItem{
+		Type: messageItemVoice,
+		VoiceItem: &voiceItem{
+			Media: &cdnMedia{
+				EncryptQueryParam: ref.downloadParam,
+				AESKey:            formatAesKeyForAPI(ref.aesKey),
+				EncryptType:       1,
+			},
+			EncodeType: 0, // 0 = AMR format, 1 = SILK format
+		},
+	}
+	return p.sendSingleItem(ctx, rc, item)
+}
