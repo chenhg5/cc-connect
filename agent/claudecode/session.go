@@ -168,18 +168,23 @@ func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode strin
 func (cs *claudeSession) readLoop(stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
 	defer func() {
 		cs.alive.Store(false)
+		// Always close stdout to unblock any future reads
+		_ = stdout.Close()
+		// Wait for process to exit (this is needed to release resources)
 		if err := cs.cmd.Wait(); err != nil {
 			stderrMsg := strings.TrimSpace(stderrBuf.String())
 			if stderrMsg != "" {
 				slog.Error("claudeSession: process failed", "error", err, "stderr", stderrMsg)
 				evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
+				// Try to send error event, but don't block if context is cancelled
 				select {
 				case cs.events <- evt:
 				case <-cs.ctx.Done():
-					return
+					// Context cancelled, proceed to close channels anyway
 				}
 			}
 		}
+		// Always close channels - no early returns above should skip this
 		close(cs.events)
 		close(cs.done)
 	}()
