@@ -73,6 +73,9 @@ func main() {
 		case "sessions":
 			runSessions(os.Args[2:])
 			return
+		case "agent-sid":
+			runAgentSID(os.Args[2:])
+			return
 		case "daemon":
 			runDaemon(os.Args[2:])
 			return
@@ -1188,6 +1191,8 @@ Commands:
   sessions           Browse session history
     list             List all sessions (pipe-friendly)
     show <id>        Show session messages (-n N for last N)
+
+  agent-sid          Print the agent session ID for the current session
 
   relay              Cross-project message relay
     send             Send a message to another project and get the response
