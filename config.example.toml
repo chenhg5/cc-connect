@@ -589,6 +589,10 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # When using IM platforms, you can reply "允许"/"allow" to grant permission.
 # 在 IM 平台中，可回复"允许"或"allow"来授权操作。
 
+# Optional: set reasoning effort level (passed to claude --effort)
+# 可选：设置推理强度等级（传递给 claude --effort）
+# reasoning_effort = "high"  # "low" | "medium" | "high" | "max"
+
 # In default/acceptEdits mode, you can pre-approve specific tools:
 # 在 default/acceptEdits 模式下，可预授权特定工具：
 # allowed_tools = ["Read", "Grep", "Glob", "Bash", "Edit", "Write"]
