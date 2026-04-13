@@ -193,6 +193,8 @@ func (cs *claudeSession) startReadLoopWait(stdout io.ReadCloser) (<-chan error, 
 	go func() {
 		select {
 		case <-cs.ctx.Done():
+			_ = stdout.Close()
+			return
 		case <-waitDone:
 		}
 
