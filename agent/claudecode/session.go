@@ -228,8 +228,9 @@ func (cs *claudeSession) finishReadLoop(waitErrCh <-chan error, stderrBuf *bytes
 			select {
 			case cs.events <- evt:
 			case <-cs.ctx.Done():
-				// Fall through: events and done must still be closed so
-				// the engine event loop sees the session ending.
+				// INVARIANT: readLoop must close cs.events and cs.done exactly once
+				// on every termination path. Callers (engine event loop) rely on
+				// these closures to observe session end.
 			}
 		}
 	}
