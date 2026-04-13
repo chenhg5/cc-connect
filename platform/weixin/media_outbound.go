@@ -6,10 +6,30 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
+	"net/http"
+	"net/url"
 	"strings"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
+
+// formatAesKeyForAPI encodes a raw AES key as base64(hex_string),
+// matching the format expected by the WeChat iLink sendMessage API.
+func formatAesKeyForAPI(key []byte) string {
+	return base64.StdEncoding.EncodeToString([]byte(hex.EncodeToString(key)))
+}
+
+// isWeixinCDNHost 检查 URL 是否指向已知的微信国内 CDN 域名
+func isWeixinCDNHost(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	return strings.HasSuffix(host, ".weixin.qq.com") || strings.HasSuffix(host, ".wechat.com")
+}
 
 type cdnUploadedRef struct {
 	downloadParam string
@@ -59,7 +79,24 @@ func (p *Platform) uploadToWeixinCDN(ctx context.Context, to string, plaintext [
 	if err != nil {
 		return nil, fmt.Errorf("weixin: %s: %w", label, err)
 	}
-	dl, err := uploadBufferToCDN(ctx, p.httpClient, p.cdnBaseURL, resp.UploadParam, filekey, plaintext, aesKey, label)
+	// 选择上传 URL 和 HTTP client
+	var cdnUploadURL string
+	var uploadClient *http.Client
+	if resp.UploadFullURL != "" {
+		// 新版 API：使用服务端返回的完整 URL
+		cdnUploadURL = resp.UploadFullURL
+		// 如果 URL 指向已知的微信国内 CDN，使用无代理 client 直连
+		if isWeixinCDNHost(cdnUploadURL) {
+			uploadClient = p.cdnHttpClient
+		} else {
+			uploadClient = p.httpClient
+		}
+	} else {
+		// 旧版 API：用 upload_param 构建 URL，使用配置的 httpClient
+		cdnUploadURL = buildCdnUploadURL(p.cdnBaseURL, resp.UploadParam, filekey)
+		uploadClient = p.httpClient
+	}
+	dl, err := uploadBufferToCDN(ctx, uploadClient, cdnUploadURL, plaintext, aesKey, label)
 	if err != nil {
 		return nil, err
 	}
@@ -72,18 +109,51 @@ func (p *Platform) uploadToWeixinCDN(ctx context.Context, to string, plaintext [
 }
 
 func (p *Platform) sendSingleItem(ctx context.Context, rc *replyContext, item messageItem) error {
-	msg := sendMessageReq{
-		Msg: weixinOutboundMsg{
-			FromUserID:   "",
-			ToUserID:     rc.peerUserID,
-			ClientID:     "cc-" + randomHex(8),
-			MessageType:  messageTypeBot,
-			MessageState: messageStateFinish,
-			ItemList:     []messageItem{item},
-			ContextToken: rc.contextToken,
-		},
+	return p.sendSingleItemWithRetry(ctx, rc, item)
+}
+
+// sendSingleItemWithRetry sends a media item with retry mechanism for ret=-2 errors.
+func (p *Platform) sendSingleItemWithRetry(ctx context.Context, rc *replyContext, item messageItem) error {
+	var lastErr error
+	for attempt := 0; attempt < weixinSendMaxRetries; attempt++ {
+		msg := sendMessageReq{
+			Msg: weixinOutboundMsg{
+				FromUserID:   "",
+				ToUserID:     rc.peerUserID,
+				ClientID:     "cc-" + randomHex(8),
+				MessageType:  messageTypeBot,
+				MessageState: messageStateFinish,
+				ItemList:     []messageItem{item},
+				ContextToken: rc.contextToken,
+			},
+		}
+		err := p.api.sendMessage(ctx, &msg)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		// Check if error is ret=-2 (API declined) - retry with fresh token
+		if strings.Contains(err.Error(), "ret=-2") {
+			slog.Warn("weixin: sendMessage ret=-2 for media, retrying",
+				"attempt", attempt+1, "peer", rc.peerUserID)
+			// Add delay before retry
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(weixinSendRetryDelay):
+			}
+			// Refresh context_token from stored tokens
+			freshToken := p.getContextToken(rc.peerUserID)
+			if freshToken != "" && freshToken != rc.contextToken {
+				rc.contextToken = freshToken
+				slog.Debug("weixin: using refreshed context_token for media retry", "peer", rc.peerUserID)
+			}
+			continue
+		}
+		// For other errors, don't retry
+		return err
 	}
-	return p.api.sendMessage(ctx, &msg)
+	return lastErr
 }
 
 // SendImage implements core.ImageSender.
@@ -104,7 +174,7 @@ func (p *Platform) SendImage(ctx context.Context, replyCtx any, img core.ImageAt
 		ImageItem: &imageItem{
 			Media: &cdnMedia{
 				EncryptQueryParam: ref.downloadParam,
-				AESKey:            base64.StdEncoding.EncodeToString(ref.aesKey),
+				AESKey:            formatAesKeyForAPI(ref.aesKey),
 				EncryptType:       1,
 			},
 			MidSize: ref.cipherSize,
@@ -135,7 +205,7 @@ func (p *Platform) SendFile(ctx context.Context, replyCtx any, file core.FileAtt
 		FileItem: &fileItem{
 			Media: &cdnMedia{
 				EncryptQueryParam: ref.downloadParam,
-				AESKey:            base64.StdEncoding.EncodeToString(ref.aesKey),
+				AESKey:            formatAesKeyForAPI(ref.aesKey),
 				EncryptType:       1,
 			},
 			FileName: name,

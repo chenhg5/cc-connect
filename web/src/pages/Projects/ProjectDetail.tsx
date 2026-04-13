@@ -45,7 +45,6 @@ export default function ProjectDetail() {
   const [loading, setLoading] = useState(true);
 
   // Settings form
-  const [quiet, setQuiet] = useState(false);
   const [language, setLanguage] = useState('');
   const [adminFrom, setAdminFrom] = useState('');
   const [disabledCmds, setDisabledCmds] = useState('');
@@ -118,7 +117,6 @@ export default function ProjectDetail() {
       ]);
       if (proj.status === 'fulfilled') {
         setProject(proj.value);
-        setQuiet(proj.value.settings?.quiet || false);
         setLanguage(proj.value.settings?.language || '');
         setAdminFrom(proj.value.settings?.admin_from || '');
         setDisabledCmds(proj.value.settings?.disabled_commands?.join(', ') || '');
@@ -157,7 +155,6 @@ export default function ProjectDetail() {
     setSaving(true);
     try {
       await updateProject(name, {
-        quiet,
         language,
         admin_from: adminFrom,
         disabled_commands: disabledCmds.split(',').map(s => s.trim()).filter(Boolean),
@@ -411,15 +408,6 @@ export default function ProjectDetail() {
         <Card>
           <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-4">{t('projects.generalSettings', 'General')}</h3>
           <div className="space-y-4 max-w-lg">
-            <div className="flex items-center justify-between">
-              <label className="text-sm font-medium text-gray-700 dark:text-gray-300">{t('projects.quiet')}</label>
-              <button
-                onClick={() => setQuiet(!quiet)}
-                className={cn('w-10 h-6 rounded-full transition-colors', quiet ? 'bg-accent' : 'bg-gray-300 dark:bg-gray-700')}
-              >
-                <div className={cn('w-4 h-4 bg-white rounded-full transition-transform mx-1', quiet ? 'translate-x-4' : 'translate-x-0')} />
-              </button>
-            </div>
             <div className="flex items-center justify-between">
               <div>
                 <label className="text-sm font-medium text-gray-700 dark:text-gray-300">{t('projects.showCtxIndicator', 'Context indicator')}</label>

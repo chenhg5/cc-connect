@@ -39,10 +39,20 @@ func (s *Session) TryLock() bool {
 }
 
 func (s *Session) Unlock() {
+	s.unlock(true)
+}
+
+func (s *Session) UnlockWithoutUpdate() {
+	s.unlock(false)
+}
+
+func (s *Session) unlock(update bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.busy = false
-	s.UpdatedAt = time.Now()
+	if update {
+		s.UpdatedAt = time.Now()
+	}
 }
 
 func (s *Session) AddHistory(role, content string) {
@@ -79,6 +89,12 @@ func (s *Session) GetName() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.Name
+}
+
+func (s *Session) GetUpdatedAt() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.UpdatedAt
 }
 
 // SetAgentSessionID atomically sets the agent session ID and agent type.
@@ -345,6 +361,24 @@ func (sm *SessionManager) AllSessions() []*Session {
 		out = append(out, s)
 	}
 	return out
+}
+
+// KnownAgentSessionIDs returns the set of agent session IDs tracked by cc-connect.
+// This is used to filter agent.ListSessions() output to only sessions owned by
+// cc-connect, excluding sessions created by external CLI usage in the same work_dir.
+func (sm *SessionManager) KnownAgentSessionIDs() map[string]struct{} {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	ids := make(map[string]struct{})
+	for _, s := range sm.sessions {
+		s.mu.Lock()
+		aid := s.AgentSessionID
+		s.mu.Unlock()
+		if aid != "" {
+			ids[aid] = struct{}{}
+		}
+	}
+	return ids
 }
 
 // SessionKeyMap returns a mapping from session ID to the user key (session_key) it belongs to,

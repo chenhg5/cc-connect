@@ -81,6 +81,7 @@ type stubTelegramBot struct {
 	answerCallbackCalls   int
 	setMyCommandsCalls    int
 	getFileCalls          int
+	setReactionCalls      int
 
 	sendErr    error
 	getFileErr error
@@ -202,6 +203,13 @@ func (b *stubTelegramBot) GetFile(_ context.Context, _ *tgbot.GetFileParams) (*m
 
 func (b *stubTelegramBot) FileDownloadLink(f *models.File) string {
 	return "https://test.example.com/file/" + f.FilePath
+}
+
+func (b *stubTelegramBot) SetMessageReaction(_ context.Context, _ *tgbot.SetMessageReactionParams) (bool, error) {
+	b.mu.Lock()
+	b.setReactionCalls++
+	b.mu.Unlock()
+	return true, nil
 }
 
 func (b *stubTelegramBot) SendMessageCallCount() int {

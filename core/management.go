@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
@@ -17,7 +18,6 @@ import (
 // ProjectSettingsUpdate is passed to SetSaveProjectSettings to persist management API PATCH fields.
 // The implementation (typically in cmd/cc-connect) maps this to config.ProjectSettingsUpdate.
 type ProjectSettingsUpdate struct {
-	Quiet                *bool
 	Language             *string
 	AdminFrom            *string
 	DisabledCommands     []string
@@ -109,9 +109,23 @@ func (m *ManagementServer) SetSaveGlobalSettings(fn func(map[string]any) error) 
 	m.saveGlobalSettings = fn
 }
 
-
 func (m *ManagementServer) Start() {
 	mux := http.NewServeMux()
+	handler := m.buildHandler(mux)
+
+	m.server = &http.Server{
+		Addr:    fmt.Sprintf(":%d", m.port),
+		Handler: handler,
+	}
+	go func() {
+		if err := m.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("management api server error", "error", err)
+		}
+	}()
+	slog.Info("management api started", "port", m.port)
+}
+
+func (m *ManagementServer) buildHandler(mux *http.ServeMux) http.Handler {
 	prefix := "/api/v1"
 
 	// System
@@ -141,18 +155,7 @@ func (m *ManagementServer) Start() {
 	mux.HandleFunc(prefix+"/bridge/adapters", m.wrap(m.handleBridgeAdapters))
 
 	// Static file serving for cc-connect-web (SPA)
-	handler := m.withStaticFallback(mux)
-
-	m.server = &http.Server{
-		Addr:    fmt.Sprintf(":%d", m.port),
-		Handler: handler,
-	}
-	go func() {
-		if err := m.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("management api server error", "error", err)
-		}
-	}()
-	slog.Info("management api started", "port", m.port)
+	return m.withStaticFallback(mux)
 }
 
 func (m *ManagementServer) Stop() {
@@ -168,6 +171,10 @@ func (m *ManagementServer) withStaticFallback(apiMux *http.ServeMux) http.Handle
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			apiMux.ServeHTTP(w, r)
+			return
+		}
+		if m.bridgeServer != nil && r.URL.Path == m.bridgeServer.path {
+			m.bridgeServer.handleWS(w, r)
 			return
 		}
 		assets := GetWebAssets()
@@ -314,6 +321,7 @@ func (m *ManagementServer) handleStatus(w http.ResponseWriter, r *http.Request) 
 			"enabled":   true,
 			"port":      m.bridgeServer.port,
 			"path":      m.bridgeServer.path,
+			"token":     m.bridgeServer.token,
 			"token_set": m.bridgeServer.token != "",
 		}
 	}
@@ -552,16 +560,11 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 			}
 		}
 
-		e.quietMu.RLock()
-		quiet := e.quiet
-		e.quietMu.RUnlock()
-
 		e.userRolesMu.RLock()
 		adminFrom := e.adminFrom
 		e.userRolesMu.RUnlock()
 
 		data["settings"] = map[string]any{
-			"quiet":             quiet,
 			"language":          string(e.i18n.CurrentLang()),
 			"admin_from":        adminFrom,
 			"disabled_commands": e.GetDisabledCommands(),
@@ -592,23 +595,19 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 
 	if r.Method == http.MethodPatch {
 		var body struct {
-			Quiet                 *bool             `json:"quiet"`
-			Language              *string           `json:"language"`
-			AdminFrom             *string           `json:"admin_from"`
-			DisabledCommands      []string          `json:"disabled_commands"`
-			WorkDir               *string           `json:"work_dir"`
-			Mode                  *string           `json:"mode"`
-			ShowContextIndicator  *bool             `json:"show_context_indicator"`
-			PlatformAllowFrom     map[string]string `json:"platform_allow_from"`
+			Language             *string           `json:"language"`
+			AdminFrom            *string           `json:"admin_from"`
+			DisabledCommands     []string          `json:"disabled_commands"`
+			WorkDir              *string           `json:"work_dir"`
+			Mode                 *string           `json:"mode"`
+			ShowContextIndicator *bool             `json:"show_context_indicator"`
+			PlatformAllowFrom    map[string]string `json:"platform_allow_from"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			mgmtError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 			return
 		}
 
-		if body.Quiet != nil {
-			e.SetDefaultQuiet(*body.Quiet)
-		}
 		if body.Language != nil {
 			switch *body.Language {
 			case "en":
@@ -645,7 +644,6 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 
 		if m.saveProjectSettings != nil {
 			patch := ProjectSettingsUpdate{
-				Quiet:                body.Quiet,
 				Language:             body.Language,
 				AdminFrom:            body.AdminFrom,
 				DisabledCommands:     body.DisabledCommands,
@@ -1120,7 +1118,9 @@ func (m *ManagementServer) handleProjectModels(w http.ResponseWriter, r *http.Re
 		mgmtError(w, http.StatusBadRequest, "agent does not support model switching")
 		return
 	}
-	models := ms.AvailableModels(r.Context())
+	fetchCtx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	models := ms.AvailableModels(fetchCtx)
 	names := make([]string, len(models))
 	for i, m := range models {
 		names[i] = m.Name
@@ -1326,6 +1326,7 @@ func (m *ManagementServer) handleCron(w http.ResponseWriter, r *http.Request) {
 			Enabled:     true,
 			Silent:      req.Silent,
 			SessionMode: NormalizeCronSessionMode(req.SessionMode),
+			Mode:        req.Mode,
 			TimeoutMins: req.TimeoutMins,
 			CreatedAt:   time.Now(),
 		}

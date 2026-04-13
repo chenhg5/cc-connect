@@ -110,7 +110,9 @@
     "descPlaceholder": "Job description",
     "promptPlaceholder": "Prompt to send to agent...",
     "selectSessionKey": "Select session (empty for default)",
-    "taskType": "Task type"
+    "taskType": "Task type",
+    "mode": "Permission mode",
+    "modeDefault": "Use project default"
   },
   "heartbeat": {
     "title": "Heartbeat",

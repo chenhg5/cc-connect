@@ -2,11 +2,12 @@ import api from './client';
 
 export interface GlobalSettings {
   language: string;
-  quiet: boolean;
   attachment_send: string;
   log_level: string;
   idle_timeout_mins: number;
+  thinking_messages: boolean;
   thinking_max_len: number;
+  tool_messages: boolean;
   tool_max_len: number;
   stream_preview_enabled: boolean;
   stream_preview_interval_ms: number;

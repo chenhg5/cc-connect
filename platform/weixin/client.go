@@ -181,7 +181,8 @@ func (c *apiClient) sendMessage(ctx context.Context, msg *sendMessageReq) error 
 	}
 	if resp.Ret != 0 {
 		slog.Warn("weixin: sendMessage declined by API",
-			"ret", resp.Ret, "errcode", resp.Errcode, "errmsg", resp.Errmsg)
+			"ret", resp.Ret, "errcode", resp.Errcode, "errmsg", resp.Errmsg,
+			"content_len", len(payload))
 		return fmt.Errorf("weixin: sendMessage: ret=%d errcode=%d errmsg=%s",
 			resp.Ret, resp.Errcode, resp.Errmsg)
 	}
@@ -202,8 +203,10 @@ func (c *apiClient) getUploadURL(ctx context.Context, req getUploadURLRequest) (
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, fmt.Errorf("weixin: getUploadUrl json: %w", err)
 	}
-	if strings.TrimSpace(out.UploadParam) == "" {
-		return nil, fmt.Errorf("weixin: getUploadUrl: empty upload_param in %s", truncateForLog(raw, 512))
+	// 兼容微信 iLink API 变更：新版返回 upload_full_url 而非 upload_param
+	// upload_full_url 是完整的 CDN 上传地址，可独立作为成功路径
+	if strings.TrimSpace(out.UploadParam) == "" && strings.TrimSpace(out.UploadFullURL) == "" {
+		return nil, fmt.Errorf("weixin: getUploadUrl: empty upload_param and upload_full_url in %s", truncateForLog(raw, 512))
 	}
 	return &out, nil
 }

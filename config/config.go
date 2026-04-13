@@ -4,12 +4,74 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 
 	"github.com/BurntSushi/toml"
 )
+
+// validRunAsUserName is the portable-username character set plus digits.
+// POSIX does not require a specific pattern, but every mainstream Linux and
+// macOS system accepts these characters for login names. Rejecting anything
+// outside this set removes an injection vector into the sudo argv.
+func isValidRunAsUserName(name string) bool {
+	if name == "" || len(name) > 32 {
+		return false
+	}
+	for i, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r == '_':
+		case r >= '0' && r <= '9' && i > 0:
+		case (r == '-' || r == '.') && i > 0:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+var dangerousEnvVars = map[string]bool{
+	"LD_PRELOAD":           true,
+	"LD_LIBRARY_PATH":      true,
+	"DYLD_INSERT_LIBRARIES": true,
+	"DYLD_LIBRARY_PATH":    true,
+	"PATH":                 true,
+	"HOME":                 true,
+	"USER":                 true,
+	"SHELL":                true,
+	"SUDO_USER":            true,
+	"SUDO_COMMAND":         true,
+}
+
+func validateRunAsEnv(prefix string, envVars []string) error {
+	for _, v := range envVars {
+		name := strings.TrimSpace(v)
+		if dangerousEnvVars[strings.ToUpper(name)] {
+			return fmt.Errorf("config: %s.run_as_env must not include dangerous variable %q", prefix, name)
+		}
+	}
+	return nil
+}
+
+func validateRunAsUser(prefix, name string) error {
+	if name == "" {
+		return nil
+	}
+	if runtime.GOOS == "windows" {
+		return fmt.Errorf("config: %s.run_as_user is only supported on Linux/macOS", prefix)
+	}
+	if name == "root" || name == "0" {
+		return fmt.Errorf("config: %s.run_as_user must not be root", prefix)
+	}
+	if !isValidRunAsUserName(name) {
+		return fmt.Errorf("config: %s.run_as_user %q contains invalid characters (allowed: a-z, A-Z, 0-9, -, _, .; must start with a letter or underscore)", prefix, name)
+	}
+	return nil
+}
 
 // configMu serializes read-modify-write cycles to prevent lost updates.
 var configMu sync.Mutex
@@ -18,32 +80,35 @@ var configMu sync.Mutex
 var ConfigPath string
 
 type Config struct {
-	DataDir         string              `toml:"data_dir"` // session store directory, default ~/.cc-connect
-	AttachmentSend  string              `toml:"attachment_send"`
-	Projects        []ProjectConfig     `toml:"projects"`
-	Commands        []CommandConfig     `toml:"commands"`     // global custom slash commands
-	Aliases         []AliasConfig       `toml:"aliases"`      // global command aliases
-	BannedWords     []string            `toml:"banned_words"` // messages containing any of these words are blocked
-	Log             LogConfig           `toml:"log"`
-	Language        string              `toml:"language"` // "en" or "zh", default is "en"
-	Speech          SpeechConfig        `toml:"speech"`
-	TTS             TTSConfig           `toml:"tts"`
-	Display         DisplayConfig       `toml:"display"`
-	StreamPreview   StreamPreviewConfig `toml:"stream_preview"`  // real-time streaming preview
-	RateLimit       RateLimitConfig          `toml:"rate_limit"`           // per-session rate limiting
-	OutgoingRateLimit OutgoingRateLimitConfig `toml:"outgoing_rate_limit"`  // outgoing message throttling
-	Relay           RelayConfig         `toml:"relay"`           // bot-to-bot relay behavior
-	Quiet           *bool               `toml:"quiet,omitempty"` // global default for quiet mode; project-level overrides this
-	Cron            CronConfig          `toml:"cron"`
-	Webhook         WebhookConfig       `toml:"webhook"`
-	Bridge          BridgeConfig        `toml:"bridge"`
-	Management      ManagementConfig    `toml:"management"`
-	IdleTimeoutMins *int                `toml:"idle_timeout_mins,omitempty"` // max minutes between agent events; 0 = no timeout; default 120
+	DataDir           string                  `toml:"data_dir"` // session store directory, default ~/.cc-connect
+	AttachmentSend    string                  `toml:"attachment_send"`
+	// Quiet is legacy: when true and [display] does not set thinking_messages / tool_messages,
+	// engines behave as if those flags were false. Per-project quiet overrides when set.
+	Quiet             *bool                   `toml:"quiet,omitempty"`
+	Projects          []ProjectConfig         `toml:"projects"`
+	Commands          []CommandConfig         `toml:"commands"`     // global custom slash commands
+	Aliases           []AliasConfig           `toml:"aliases"`      // global command aliases
+	BannedWords       []string                `toml:"banned_words"` // messages containing any of these words are blocked
+	Log               LogConfig               `toml:"log"`
+	Language          string                  `toml:"language"` // "en" or "zh", default is "en"
+	Speech            SpeechConfig            `toml:"speech"`
+	TTS               TTSConfig               `toml:"tts"`
+	Display           DisplayConfig           `toml:"display"`
+	StreamPreview     StreamPreviewConfig     `toml:"stream_preview"`      // real-time streaming preview
+	RateLimit         RateLimitConfig         `toml:"rate_limit"`          // per-session rate limiting
+	OutgoingRateLimit OutgoingRateLimitConfig `toml:"outgoing_rate_limit"` // outgoing message throttling
+	Relay             RelayConfig             `toml:"relay"`               // bot-to-bot relay behavior
+	Cron              CronConfig              `toml:"cron"`
+	Webhook           WebhookConfig           `toml:"webhook"`
+	Bridge            BridgeConfig            `toml:"bridge"`
+	Management        ManagementConfig        `toml:"management"`
+	IdleTimeoutMins   *int                    `toml:"idle_timeout_mins,omitempty"` // max minutes between agent events; 0 = no timeout; default 120
 }
 
 // CronConfig controls cron job behavior.
 type CronConfig struct {
-	Silent *bool `toml:"silent"` // suppress cron start notification; default false
+	Silent      *bool  `toml:"silent"`       // suppress cron start notification; default false
+	SessionMode string `toml:"session_mode"` // default session mode: "" or "reuse" (default) or "new_per_run"
 }
 
 // WebhookConfig controls the external HTTP webhook endpoint.
@@ -73,8 +138,10 @@ type ManagementConfig struct {
 
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
 type DisplayConfig struct {
-	ThinkingMaxLen *int `toml:"thinking_max_len"` // max chars for thinking messages; 0 = no truncation; default 300
-	ToolMaxLen     *int `toml:"tool_max_len"`     // max chars for tool use messages; 0 = no truncation; default 500
+	ThinkingMessages *bool `toml:"thinking_messages"` // whether thinking messages are shown; default true
+	ThinkingMaxLen   *int  `toml:"thinking_max_len"`  // max chars for thinking messages; 0 = no truncation; default 300
+	ToolMaxLen       *int  `toml:"tool_max_len"`      // max chars for tool use messages; 0 = no truncation; default 500
+	ToolMessages     *bool `toml:"tool_messages"`     // whether tool progress messages are shown; default true
 }
 
 // StreamPreviewConfig controls real-time streaming preview in IM.
@@ -97,7 +164,7 @@ type RateLimitConfig struct {
 type OutgoingRateLimitConfig struct {
 	MaxPerSecond *float64                               `toml:"max_per_second"` // messages per second; 0 = unlimited (default)
 	Burst        *int                                   `toml:"burst"`          // max burst size; default = ceil(max_per_second)
-	Platforms    map[string]OutgoingRateLimitPlatConfig  `toml:"platforms"`      // per-platform overrides keyed by platform type name
+	Platforms    map[string]OutgoingRateLimitPlatConfig `toml:"platforms"`      // per-platform overrides keyed by platform type name
 }
 
 // OutgoingRateLimitPlatConfig is a per-platform override for outgoing rate limiting.
@@ -127,7 +194,7 @@ type RelayConfig struct {
 // SpeechConfig configures speech-to-text for voice messages.
 type SpeechConfig struct {
 	Enabled  bool   `toml:"enabled"`
-	Provider string `toml:"provider"` // "openai" | "groq" | "qwen"
+	Provider string `toml:"provider"` // "openai" | "groq" | "qwen" | "gemini"
 	Language string `toml:"language"` // e.g. "zh", "en"; empty = auto-detect
 	OpenAI   struct {
 		APIKey  string `toml:"api_key"`
@@ -143,6 +210,10 @@ type SpeechConfig struct {
 		BaseURL string `toml:"base_url"`
 		Model   string `toml:"model"`
 	} `toml:"qwen"`
+	Gemini struct {
+		APIKey string `toml:"api_key"`
+		Model  string `toml:"model"`
+	} `toml:"gemini"`
 }
 
 // TTSConfig configures text-to-speech output (mirrors SpeechConfig style).
@@ -187,6 +258,21 @@ type AutoCompressConfig struct {
 	MinGapMins *int  `toml:"min_gap_mins,omitempty"` // minimum minutes between auto-compress runs (default 30)
 }
 
+// ObserveConfig controls forwarding of native terminal Claude Code sessions to a messaging platform.
+type ObserveConfig struct {
+	Enabled bool   `toml:"enabled"`
+	Channel string `toml:"channel"`
+}
+
+// ReferenceConfig controls local file reference normalization and rendering.
+type ReferenceConfig struct {
+	NormalizeAgents []string `toml:"normalize_agents,omitempty"`
+	RenderPlatforms []string `toml:"render_platforms,omitempty"`
+	DisplayPath     string   `toml:"display_path,omitempty"`
+	MarkerStyle     string   `toml:"marker_style,omitempty"`
+	EnclosureStyle  string   `toml:"enclosure_style,omitempty"`
+}
+
 // ProjectConfig binds one agent (with a specific work_dir) to one or more platforms.
 type ProjectConfig struct {
 	Name         string             `toml:"name"`
@@ -196,13 +282,35 @@ type ProjectConfig struct {
 	Platforms    []PlatformConfig   `toml:"platforms"`
 	Heartbeat    HeartbeatConfig    `toml:"heartbeat"`
 	AutoCompress AutoCompressConfig `toml:"auto_compress"`
+	// ResetOnIdleMins automatically rotates to a new cc-connect session after
+	// the current session has been inactive for the specified number of minutes.
+	// 0 or nil disables the behavior.
+	ResetOnIdleMins *int `toml:"reset_on_idle_mins,omitempty"`
+	// RunAsUser, when set, causes the agent command for this project to be
+	// spawned under a different Unix user via `sudo -n -iu <user> --`. This
+	// provides OS-level file-system isolation from the supervisor user who
+	// runs cc-connect itself. Requires passwordless sudo to the target user
+	// and is POSIX-only. See docs/usage.md "Running agents as a different
+	// Unix user" for setup and migration.
+	RunAsUser string `toml:"run_as_user,omitempty"`
+	// RunAsEnv optionally extends the minimal environment variable allowlist
+	// that crosses the sudo boundary when RunAsUser is set. The default
+	// allowlist (LANG, LC_*, TERM) is always included; PATH is NOT preserved
+	// by default — the target user's login PATH is used. Dangerous variables
+	// (LD_PRELOAD, PATH, HOME, etc.) are rejected at config validation.
+	// Use this only for variables the target user cannot set in their profile.
+	RunAsEnv []string `toml:"run_as_env,omitempty"`
 	// ShowContextIndicator: nil/true = append [ctx: ~N%] to assistant replies; false = hide.
-	ShowContextIndicator *bool        `toml:"show_context_indicator,omitempty"`
-	Quiet                *bool        `toml:"quiet,omitempty"`             // project-level quiet mode; overrides global setting
-	InjectSender         *bool        `toml:"inject_sender,omitempty"`     // prepend sender identity (platform + user ID) to each message sent to the agent
-	DisabledCommands     []string     `toml:"disabled_commands,omitempty"` // commands to disable for this project (e.g. ["restart", "upgrade"])
-	AdminFrom            string       `toml:"admin_from,omitempty"`        // comma-separated user IDs allowed to run privileged commands; "*" = all allowed users
-	Users                *UsersConfig `toml:"users,omitempty"`             // per-user role config; nil = legacy behavior
+	ShowContextIndicator *bool           `toml:"show_context_indicator,omitempty"`
+	InjectSender         *bool           `toml:"inject_sender,omitempty"`     // prepend sender identity (platform + user ID) to each message sent to the agent
+	DisabledCommands     []string        `toml:"disabled_commands,omitempty"` // commands to disable for this project (e.g. ["restart", "upgrade"])
+	AdminFrom            string          `toml:"admin_from,omitempty"`        // comma-separated user IDs allowed to run privileged commands; "*" = all allowed users
+	Users                *UsersConfig    `toml:"users,omitempty"`             // per-user role config; nil = legacy behavior
+	// Quiet is legacy per-project override; see Config.Quiet. When true and global [display]
+	// omits thinking_messages / tool_messages, those default to off for this project.
+	Quiet      *bool           `toml:"quiet,omitempty"`
+	Observe              *ObserveConfig  `toml:"observe,omitempty"`
+	References           ReferenceConfig `toml:"references,omitempty"`
 }
 
 type AgentConfig struct {
@@ -283,6 +391,49 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
+// projectQuietEffective returns whether legacy quiet applies to this project: an explicit
+// per-project quiet overrides; otherwise the global root quiet applies.
+func projectQuietEffective(cfg *Config, proj *ProjectConfig) bool {
+	if proj.Quiet != nil {
+		return *proj.Quiet
+	}
+	if cfg.Quiet != nil {
+		return *cfg.Quiet
+	}
+	return false
+}
+
+// EffectiveDisplay resolves global [display] together with legacy quiet (root or per-project).
+// If quiet is in effect and thinking_messages / tool_messages were not explicitly set in [display],
+// they map to false (backward-compatible with pre-display quiet = true).
+func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (thinkingMessages, toolMessages bool, thinkingMaxLen, toolMaxLen int) {
+	thinkingMessages = true
+	toolMessages = true
+	thinkingMaxLen = 300
+	toolMaxLen = 500
+	if cfg.Display.ThinkingMessages != nil {
+		thinkingMessages = *cfg.Display.ThinkingMessages
+	}
+	if cfg.Display.ToolMessages != nil {
+		toolMessages = *cfg.Display.ToolMessages
+	}
+	if cfg.Display.ThinkingMaxLen != nil {
+		thinkingMaxLen = *cfg.Display.ThinkingMaxLen
+	}
+	if cfg.Display.ToolMaxLen != nil {
+		toolMaxLen = *cfg.Display.ToolMaxLen
+	}
+	if projectQuietEffective(cfg, proj) {
+		if cfg.Display.ThinkingMessages == nil {
+			thinkingMessages = false
+		}
+		if cfg.Display.ToolMessages == nil {
+			toolMessages = false
+		}
+	}
+	return thinkingMessages, toolMessages, thinkingMaxLen, toolMaxLen
+}
+
 func (c *Config) validate() error {
 	switch strings.ToLower(strings.TrimSpace(c.AttachmentSend)) {
 	case "", "on", "off":
@@ -319,9 +470,83 @@ func (c *Config) validate() error {
 				return fmt.Errorf("project %q: multi-workspace mode conflicts with agent work_dir (use base_dir instead)", proj.Name)
 			}
 		}
+		if proj.ResetOnIdleMins != nil && *proj.ResetOnIdleMins < 0 {
+			return fmt.Errorf("config: %s.reset_on_idle_mins must be >= 0", prefix)
+		}
+		if err := validateRunAsUser(prefix, proj.RunAsUser); err != nil {
+			return err
+		}
+		if err := validateRunAsEnv(prefix, proj.RunAsEnv); err != nil {
+			return err
+		}
+		if err := validateReferenceConfig(prefix, proj.References); err != nil {
+			return err
+		}
 		if err := validateUsersConfig(prefix, proj.Users); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+var supportedReferenceAgents = map[string]struct{}{
+	"all":        {},
+	"codex":      {},
+	"claudecode": {},
+}
+
+var supportedReferencePlatforms = map[string]struct{}{
+	"all":    {},
+	"feishu": {},
+	"weixin": {},
+}
+
+var supportedReferenceDisplayPaths = map[string]struct{}{
+	"":                 {},
+	"absolute":         {},
+	"relative":         {},
+	"basename":         {},
+	"dirname_basename": {},
+	"smart":            {},
+}
+
+var supportedReferenceMarkerStyles = map[string]struct{}{
+	"":      {},
+	"none":  {},
+	"ascii": {},
+	"emoji": {},
+}
+
+var supportedReferenceEnclosureStyles = map[string]struct{}{
+	"":          {},
+	"none":      {},
+	"bracket":   {},
+	"angle":     {},
+	"fullwidth": {},
+	"code":      {},
+}
+
+func validateReferenceConfig(prefix string, rc ReferenceConfig) error {
+	for _, v := range rc.NormalizeAgents {
+		key := strings.ToLower(strings.TrimSpace(v))
+		if _, ok := supportedReferenceAgents[key]; !ok {
+			return fmt.Errorf("config: %s.references.normalize_agents has unsupported value %q", prefix, v)
+		}
+	}
+	for _, v := range rc.RenderPlatforms {
+		key := strings.ToLower(strings.TrimSpace(v))
+		if _, ok := supportedReferencePlatforms[key]; !ok {
+			return fmt.Errorf("config: %s.references.render_platforms has unsupported value %q", prefix, v)
+		}
+	}
+	if _, ok := supportedReferenceDisplayPaths[strings.ToLower(strings.TrimSpace(rc.DisplayPath))]; !ok {
+		return fmt.Errorf("config: %s.references.display_path has unsupported value %q", prefix, rc.DisplayPath)
+	}
+	if _, ok := supportedReferenceMarkerStyles[strings.ToLower(strings.TrimSpace(rc.MarkerStyle))]; !ok {
+		return fmt.Errorf("config: %s.references.marker_style has unsupported value %q", prefix, rc.MarkerStyle)
+	}
+	if _, ok := supportedReferenceEnclosureStyles[strings.ToLower(strings.TrimSpace(rc.EnclosureStyle))]; !ok {
+		return fmt.Errorf("config: %s.references.enclosure_style has unsupported value %q", prefix, rc.EnclosureStyle)
 	}
 	return nil
 }
@@ -559,7 +784,7 @@ func saveConfig(cfg *Config) error {
 //   - removes empty section headers (no key-value pairs between this header and the next)
 //
 // It deliberately keeps all key-value lines intact, including zero-value ones
-// (e.g. `quiet = false`, `port = 0`), because those may be explicitly set by the user.
+// (e.g. `thinking_messages = false`, `port = 0`), because those may be explicitly set by the user.
 func formatTOML(raw string) string {
 	lines := strings.Split(raw, "\n")
 
@@ -587,14 +812,30 @@ func formatTOML(raw string) string {
 		}
 	}
 
-	// Pass 2: assemble output with blank lines before section headers.
+	// Pass 2: strip trailing whitespace from each line, skip empty sections,
+	// ensure a blank line before section headers, and collapse consecutive
+	// blank lines into one.
 	var out []string
+	prevBlank := false
 	for i, line := range lines {
 		if skipSection[i] {
 			continue
 		}
+		line = strings.TrimRight(line, " \t")
 		trimmed := strings.TrimSpace(line)
-		if len(trimmed) > 0 && trimmed[0] == '[' {
+		isBlank := trimmed == ""
+
+		if isBlank {
+			if prevBlank {
+				continue
+			}
+			prevBlank = true
+			out = append(out, "")
+			continue
+		}
+		prevBlank = false
+
+		if trimmed[0] == '[' {
 			if len(out) > 0 && strings.TrimSpace(out[len(out)-1]) != "" {
 				out = append(out, "")
 			}
@@ -602,7 +843,10 @@ func formatTOML(raw string) string {
 		out = append(out, line)
 	}
 
-	// Trim trailing blank lines, then ensure single trailing newline.
+	// Trim leading and trailing blank lines, then ensure single trailing newline.
+	for len(out) > 0 && strings.TrimSpace(out[0]) == "" {
+		out = out[1:]
+	}
 	for len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "" {
 		out = out[:len(out)-1]
 	}
@@ -759,8 +1003,8 @@ func RemoveAlias(name string) error {
 	return saveConfig(cfg)
 }
 
-// SaveDisplayConfig persists the display truncation settings to the config file.
-func SaveDisplayConfig(thinkingMaxLen, toolMaxLen *int) error {
+// SaveDisplayConfig persists the display settings to the config file.
+func SaveDisplayConfig(thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
 	configMu.Lock()
 	defer configMu.Unlock()
 	if ConfigPath == "" {
@@ -774,11 +1018,17 @@ func SaveDisplayConfig(thinkingMaxLen, toolMaxLen *int) error {
 	if err := toml.Unmarshal(data, cfg); err != nil {
 		return fmt.Errorf("parse config: %w", err)
 	}
+	if thinkingMessages != nil {
+		cfg.Display.ThinkingMessages = thinkingMessages
+	}
 	if thinkingMaxLen != nil {
 		cfg.Display.ThinkingMaxLen = thinkingMaxLen
 	}
 	if toolMaxLen != nil {
 		cfg.Display.ToolMaxLen = toolMaxLen
+	}
+	if toolMessages != nil {
+		cfg.Display.ToolMessages = toolMessages
 	}
 	return saveConfig(cfg)
 }
@@ -833,7 +1083,7 @@ type FeishuCredentialUpdateOptions struct {
 	AppID             string // required
 	AppSecret         string // required
 	OwnerOpenID       string // optional owner id from onboarding flow
-	SetAllowFromEmpty bool   // when true, set allow_from=OwnerOpenID only if currently empty
+	SetAllowFromEmpty bool   // when true, seed/append allow_from with OwnerOpenID while preserving "*"
 }
 
 // EnsureProjectWithFeishuOptions controls project auto-provisioning for Feishu/Lark setup.
@@ -1066,8 +1316,11 @@ func SaveFeishuPlatformCredentials(opts FeishuCredentialUpdateOptions) (*FeishuC
 	platform.Options["app_secret"] = strings.TrimSpace(opts.AppSecret)
 
 	allowFrom := strings.TrimSpace(stringOption(platform.Options["allow_from"]))
-	if opts.SetAllowFromEmpty && allowFrom == "" && strings.TrimSpace(opts.OwnerOpenID) != "" {
-		allowFrom = strings.TrimSpace(opts.OwnerOpenID)
+	if opts.SetAllowFromEmpty && strings.TrimSpace(opts.OwnerOpenID) != "" {
+		allowFrom = mergeAllowFromValue(allowFrom, strings.TrimSpace(opts.OwnerOpenID))
+		if allowFrom != "" {
+			platform.Options["allow_from"] = allowFrom
+		}
 	}
 
 	lines, hadTrailing := splitConfigLines(raw)
@@ -1137,6 +1390,53 @@ func stringOption(v any) string {
 	return ""
 }
 
+func mergeAllowFromValue(current, userID string) string {
+	current = strings.TrimSpace(current)
+	userID = strings.TrimSpace(userID)
+
+	if current == "*" || userID == "" {
+		return current
+	}
+	if current == "" {
+		return userID
+	}
+
+	parts := strings.Split(current, ",")
+	merged := make([]string, 0, len(parts)+1)
+	seen := make(map[string]struct{}, len(parts)+1)
+
+	appendPart := func(v string) {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return
+		}
+		if v == "*" {
+			merged = []string{"*"}
+			return
+		}
+		if _, ok := seen[v]; ok {
+			return
+		}
+		seen[v] = struct{}{}
+		merged = append(merged, v)
+	}
+
+	for _, part := range parts {
+		if len(merged) == 1 && merged[0] == "*" {
+			return "*"
+		}
+		appendPart(part)
+	}
+	if len(merged) == 1 && merged[0] == "*" {
+		return "*"
+	}
+	appendPart(userID)
+	if len(merged) == 1 && merged[0] == "*" {
+		return "*"
+	}
+	return strings.Join(merged, ",")
+}
+
 func firstFeishuPlatformIndex(platforms []PlatformConfig) int {
 	for i := range platforms {
 		t := strings.ToLower(strings.TrimSpace(platforms[i].Type))
@@ -1181,7 +1481,7 @@ type WeixinCredentialUpdateOptions struct {
 	BaseURL           string // optional; empty = do not change in TOML
 	CDNBaseURL        string // optional; empty = do not change
 	AccountID         string // optional ilink_bot_id → options.account_id
-	ScannedUserID     string // optional ilink_user_id for allow_from when SetAllowFromEmpty
+	ScannedUserID     string // optional ilink_user_id for allow_from merge when SetAllowFromEmpty
 	SetAllowFromEmpty bool
 }
 
@@ -1387,9 +1687,11 @@ func SaveWeixinPlatformCredentials(opts WeixinCredentialUpdateOptions) (*WeixinC
 	}
 
 	allowFrom := strings.TrimSpace(stringOption(platform.Options["allow_from"]))
-	if opts.SetAllowFromEmpty && allowFrom == "" && strings.TrimSpace(opts.ScannedUserID) != "" {
-		allowFrom = strings.TrimSpace(opts.ScannedUserID)
-		platform.Options["allow_from"] = allowFrom
+	if opts.SetAllowFromEmpty && strings.TrimSpace(opts.ScannedUserID) != "" {
+		allowFrom = mergeAllowFromValue(allowFrom, strings.TrimSpace(opts.ScannedUserID))
+		if allowFrom != "" {
+			platform.Options["allow_from"] = allowFrom
+		}
 	}
 
 	lines, hadTrailing := splitConfigLines(raw)
@@ -1462,16 +1764,17 @@ func pickAgentTemplateForNewProject(cfg *Config, opts EnsureProjectWithFeishuOpt
 			}
 		}
 	}
+	if agentType := strings.TrimSpace(opts.AgentType); agentType != "" {
+		return AgentConfig{
+			Type:    agentType,
+			Options: map[string]any{},
+		}
+	}
 	if len(cfg.Projects) > 0 {
 		return cloneAgentConfig(cfg.Projects[0].Agent)
 	}
-
-	agentType := strings.TrimSpace(opts.AgentType)
-	if agentType == "" {
-		agentType = "codex"
-	}
 	return AgentConfig{
-		Type:    agentType,
+		Type:    "codex",
 		Options: map[string]any{},
 	}
 }
@@ -1732,7 +2035,6 @@ func extractLineComment(line string) string {
 
 // ProjectSettingsUpdate carries optional field updates for SaveProjectSettings.
 type ProjectSettingsUpdate struct {
-	Quiet                *bool
 	Language             *string
 	AdminFrom            *string
 	DisabledCommands     []string
@@ -1767,9 +2069,6 @@ func SaveProjectSettings(projectName string, update ProjectSettingsUpdate) error
 			continue
 		}
 		proj := &cfg.Projects[i]
-		if update.Quiet != nil {
-			proj.Quiet = update.Quiet
-		}
 		if update.AdminFrom != nil {
 			proj.AdminFrom = *update.AdminFrom
 		}
@@ -1953,6 +2252,7 @@ func AddPlatformToProject(projectName string, platform PlatformConfig, workDir, 
 }
 
 func writeRawConfig(content string) error {
+	content = formatTOML(content)
 	dir := filepath.Dir(ConfigPath)
 	tmp, err := os.CreateTemp(dir, ".config-*.tmp")
 	if err != nil {
@@ -1976,6 +2276,44 @@ func writeRawConfig(content string) error {
 	return os.Rename(tmpPath, ConfigPath)
 }
 
+// FormatConfigFile reads the config file at the given path, formats it, and
+// writes it back. It validates the TOML syntax before writing.
+func FormatConfigFile(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return fmt.Errorf("invalid TOML: %w", err)
+	}
+	formatted := formatTOML(string(data))
+	if formatted == string(data) {
+		return nil
+	}
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".config-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.WriteString(formatted); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("write formatted config: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	return os.Rename(tmpPath, path)
+}
+
 // GetGlobalSettings reads global settings from config.toml.
 func GetGlobalSettings() map[string]any {
 	if ConfigPath == "" {
@@ -1994,21 +2332,26 @@ func GetGlobalSettings() map[string]any {
 		"attachment_send": cfg.AttachmentSend,
 		"log_level":       cfg.Log.Level,
 	}
-	if cfg.Quiet != nil {
-		result["quiet"] = *cfg.Quiet
-	} else {
-		result["quiet"] = false
-	}
 	if cfg.IdleTimeoutMins != nil {
 		result["idle_timeout_mins"] = *cfg.IdleTimeoutMins
 	} else {
 		result["idle_timeout_mins"] = 120
 	}
 	// Display
+	if cfg.Display.ThinkingMessages != nil {
+		result["thinking_messages"] = *cfg.Display.ThinkingMessages
+	} else {
+		result["thinking_messages"] = true
+	}
 	if cfg.Display.ThinkingMaxLen != nil {
 		result["thinking_max_len"] = *cfg.Display.ThinkingMaxLen
 	} else {
 		result["thinking_max_len"] = 300
+	}
+	if cfg.Display.ToolMessages != nil {
+		result["tool_messages"] = *cfg.Display.ToolMessages
+	} else {
+		result["tool_messages"] = true
 	}
 	if cfg.Display.ToolMaxLen != nil {
 		result["tool_max_len"] = *cfg.Display.ToolMaxLen
@@ -2043,11 +2386,12 @@ func GetGlobalSettings() map[string]any {
 // GlobalSettingsUpdate holds fields to update in global config.
 type GlobalSettingsUpdate struct {
 	Language           *string `json:"language"`
-	Quiet              *bool   `json:"quiet"`
 	AttachmentSend     *string `json:"attachment_send"`
 	LogLevel           *string `json:"log_level"`
 	IdleTimeoutMins    *int    `json:"idle_timeout_mins"`
+	ThinkingMessages   *bool   `json:"thinking_messages"`
 	ThinkingMaxLen     *int    `json:"thinking_max_len"`
+	ToolMessages       *bool   `json:"tool_messages"`
 	ToolMaxLen         *int    `json:"tool_max_len"`
 	StreamPreviewOn    *bool   `json:"stream_preview_enabled"`
 	StreamPreviewIntMs *int    `json:"stream_preview_interval_ms"`
@@ -2073,9 +2417,6 @@ func SaveGlobalSettings(u GlobalSettingsUpdate) error {
 	if u.Language != nil {
 		cfg.Language = *u.Language
 	}
-	if u.Quiet != nil {
-		cfg.Quiet = u.Quiet
-	}
 	if u.AttachmentSend != nil {
 		cfg.AttachmentSend = *u.AttachmentSend
 	}
@@ -2085,8 +2426,14 @@ func SaveGlobalSettings(u GlobalSettingsUpdate) error {
 	if u.IdleTimeoutMins != nil {
 		cfg.IdleTimeoutMins = u.IdleTimeoutMins
 	}
+	if u.ThinkingMessages != nil {
+		cfg.Display.ThinkingMessages = u.ThinkingMessages
+	}
 	if u.ThinkingMaxLen != nil {
 		cfg.Display.ThinkingMaxLen = u.ThinkingMaxLen
+	}
+	if u.ToolMessages != nil {
+		cfg.Display.ToolMessages = u.ToolMessages
 	}
 	if u.ToolMaxLen != nil {
 		cfg.Display.ToolMaxLen = u.ToolMaxLen

@@ -72,11 +72,12 @@ export default function GlobalSettings() {
   const [msg, setMsg] = useState('');
 
   const [language, setLanguage] = useState('en');
-  const [quiet, setQuiet] = useState(false);
   const [attachmentSend, setAttachmentSend] = useState('');
   const [logLevel, setLogLevel] = useState('info');
   const [idleTimeout, setIdleTimeout] = useState(120);
+  const [thinkingMessages, setThinkingMessages] = useState(true);
   const [thinkingMaxLen, setThinkingMaxLen] = useState(300);
+  const [toolMessages, setToolMessages] = useState(true);
   const [toolMaxLen, setToolMaxLen] = useState(500);
   const [spEnabled, setSpEnabled] = useState(true);
   const [spInterval, setSpInterval] = useState(1500);
@@ -88,11 +89,12 @@ export default function GlobalSettings() {
     try {
       const s = await getGlobalSettings();
       setLanguage(s.language || 'en');
-      setQuiet(!!s.quiet);
       setAttachmentSend(s.attachment_send || '');
       setLogLevel(s.log_level || 'info');
       setIdleTimeout(s.idle_timeout_mins ?? 120);
+      setThinkingMessages(s.thinking_messages ?? true);
       setThinkingMaxLen(s.thinking_max_len ?? 300);
+      setToolMessages(s.tool_messages ?? true);
       setToolMaxLen(s.tool_max_len ?? 500);
       setSpEnabled(s.stream_preview_enabled ?? true);
       setSpInterval(s.stream_preview_interval_ms ?? 1500);
@@ -113,11 +115,12 @@ export default function GlobalSettings() {
     try {
       await updateGlobalSettings({
         language,
-        quiet,
         attachment_send: attachmentSend,
         log_level: logLevel,
         idle_timeout_mins: idleTimeout,
+        thinking_messages: thinkingMessages,
         thinking_max_len: thinkingMaxLen,
+        tool_messages: toolMessages,
         tool_max_len: toolMaxLen,
         stream_preview_enabled: spEnabled,
         stream_preview_interval_ms: spInterval,
@@ -155,7 +158,6 @@ export default function GlobalSettings() {
             onChange={setLanguage}
             options={LANGUAGES.map((l) => ({ value: l, label: l }))}
           />
-          <Toggle label={t('settings.quiet', 'Quiet mode')} value={quiet} onChange={setQuiet} hint={t('settings.quietHint', 'Suppress start / end notifications globally')} />
           <Select
             label={t('settings.attachmentSend', 'Attachment send')}
             value={attachmentSend}
@@ -177,12 +179,24 @@ export default function GlobalSettings() {
       <Card>
         <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-4">{t('settings.display', 'Display')}</h3>
         <div className="space-y-4 max-w-lg">
+          <Toggle
+            label={t('settings.thinkingMessages', 'Thinking messages')}
+            value={thinkingMessages}
+            onChange={setThinkingMessages}
+            hint={t('settings.thinkingMessagesHint', 'Show or hide intermediate thinking messages')}
+          />
           <NumberInput
             label={t('settings.thinkingMaxLen', 'Thinking max length')}
             value={thinkingMaxLen}
             onChange={setThinkingMaxLen}
             min={0}
             hint={t('settings.thinkingMaxLenHint', 'Max characters for thinking messages; 0 = no truncation')}
+          />
+          <Toggle
+            label={t('settings.toolMessages', 'Tool progress')}
+            value={toolMessages}
+            onChange={setToolMessages}
+            hint={t('settings.toolMessagesHint', 'Show or hide tool progress messages')}
           />
           <NumberInput
             label={t('settings.toolMaxLen', 'Tool max length')}

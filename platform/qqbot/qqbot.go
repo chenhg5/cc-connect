@@ -9,10 +9,13 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
 	"github.com/gorilla/websocket"
@@ -35,6 +38,9 @@ const (
 	tokenRefreshMargin   = 5 * time.Minute
 	messageMaxLen        = 2000
 	msgSeqTTL            = 5 * time.Minute
+	messageCacheTTL      = 7 * 24 * time.Hour
+	messageCacheMaxItems = 1000
+	quotedTextMaxRunes   = 800
 )
 
 // WebSocket opcodes for the QQ Bot gateway protocol.
@@ -81,6 +87,10 @@ type Platform struct {
 	// msg_seq counter per event msg_id (for multiple replies to same event)
 	msgSeqMu  sync.Mutex
 	msgSeqMap map[string]*msgSeqEntry
+
+	messageCacheMu   sync.Mutex
+	messageCache     map[string]cachedMessage
+	messageCachePath string
 }
 
 // msgSeqEntry tracks msg_seq counter with a creation timestamp for TTL eviction.
@@ -89,12 +99,32 @@ type msgSeqEntry struct {
 	createdAt time.Time
 }
 
+type cachedMessage struct {
+	Content   string    `json:"content"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 // replyContext carries the information needed to reply to a QQ Bot message.
 type replyContext struct {
 	messageType string // "group" or "c2c"
 	groupOpenID string // for group messages
 	userOpenID  string // user's openid (member_openid for group, user_openid for c2c)
 	eventMsgID  string // msg_id from the incoming event, used for passive reply
+}
+
+type quotedMessage struct {
+	Content     string       `json:"content,omitempty"`
+	Title       string       `json:"title,omitempty"`
+	Attachments []attachment `json:"attachments,omitempty"`
+}
+
+type messageReference struct {
+	MessageID         string         `json:"message_id"`
+	Content           string         `json:"content,omitempty"`
+	Title             string         `json:"title,omitempty"`
+	Message           *quotedMessage `json:"message,omitempty"`
+	ReferencedMessage *quotedMessage `json:"referenced_message,omitempty"`
+	SourceMessage     *quotedMessage `json:"source_message,omitempty"`
 }
 
 // New creates a new QQ Bot platform from config options.
@@ -121,6 +151,7 @@ func New(opts map[string]any) (core.Platform, error) {
 	}
 
 	core.CheckAllowFrom("qqbot", allowFrom)
+	dataDir, _ := opts["cc_data_dir"].(string)
 	return &Platform{
 		appID:                 appID,
 		appSecret:             appSecret,
@@ -129,6 +160,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		shareSessionInChannel: shareSessionInChannel,
 		intents:               intents,
 		markdownSupport:       markdownSupport,
+		messageCachePath:      qqbotMessageCachePath(dataDir),
 	}, nil
 }
 
@@ -137,6 +169,9 @@ func (p *Platform) Name() string { return "qqbot" }
 // Start connects to the QQ Bot gateway and begins receiving events.
 func (p *Platform) Start(handler core.MessageHandler) error {
 	p.handler = handler
+	if err := p.loadMessageCache(); err != nil {
+		slog.Warn("qqbot: load message cache failed", "error", err)
+	}
 
 	// Get initial access token
 	if err := p.refreshToken(); err != nil {
@@ -823,12 +858,13 @@ func (p *Platform) handleDispatch(eventType string, data json.RawMessage) {
 
 func (p *Platform) handleGroupMessage(data json.RawMessage) {
 	var d struct {
-		ID          string       `json:"id"`
-		GroupOpenID string       `json:"group_openid"`
-		Content     string       `json:"content"`
-		Timestamp   string       `json:"timestamp"`
-		Attachments []attachment `json:"attachments"`
-		Author      struct {
+		ID               string            `json:"id"`
+		GroupOpenID      string            `json:"group_openid"`
+		Content          string            `json:"content"`
+		Timestamp        string            `json:"timestamp"`
+		Attachments      []attachment      `json:"attachments"`
+		MessageReference *messageReference `json:"message_reference"`
+		Author           struct {
 			MemberOpenID string `json:"member_openid"`
 		} `json:"author"`
 	}
@@ -860,9 +896,11 @@ func (p *Platform) handleGroupMessage(data json.RawMessage) {
 
 	// Strip leading @bot mention (the official API includes it as content prefix)
 	content := stripAtMention(d.Content)
+	content = prependQuotedMessage(p.resolveQuotedText(d.MessageReference), content)
 
 	// Download image attachments
 	images := downloadAttachmentImages(d.Attachments)
+	p.cacheMessage(d.ID, contentOrAttachmentSummary(content, d.Attachments))
 
 	if content == "" && len(images) == 0 {
 		return
@@ -900,11 +938,12 @@ func (p *Platform) handleGroupMessage(data json.RawMessage) {
 
 func (p *Platform) handleC2CMessage(data json.RawMessage) {
 	var d struct {
-		ID          string       `json:"id"`
-		Content     string       `json:"content"`
-		Timestamp   string       `json:"timestamp"`
-		Attachments []attachment `json:"attachments"`
-		Author      struct {
+		ID               string            `json:"id"`
+		Content          string            `json:"content"`
+		Timestamp        string            `json:"timestamp"`
+		Attachments      []attachment      `json:"attachments"`
+		MessageReference *messageReference `json:"message_reference"`
+		Author           struct {
 			UserOpenID string `json:"user_openid"`
 		} `json:"author"`
 	}
@@ -935,9 +974,11 @@ func (p *Platform) handleC2CMessage(data json.RawMessage) {
 	}
 
 	content := strings.TrimSpace(d.Content)
+	content = prependQuotedMessage(p.resolveQuotedText(d.MessageReference), content)
 
 	// Download image attachments
 	images := downloadAttachmentImages(d.Attachments)
+	p.cacheMessage(d.ID, contentOrAttachmentSummary(content, d.Attachments))
 
 	if content == "" && len(images) == 0 {
 		return
@@ -1006,7 +1047,21 @@ func (p *Platform) sendMessage(rctx *replyContext, content string) error {
 		body["msg_seq"] = p.nextMsgSeq(rctx.eventMsgID)
 	}
 
-	return p.apiRequest("POST", url, body)
+	var resp struct {
+		ID    string `json:"id"`
+		MsgID string `json:"msg_id"`
+	}
+	if err := p.apiRequestJSON("POST", url, body, &resp); err != nil {
+		return err
+	}
+	msgID := strings.TrimSpace(resp.ID)
+	if msgID == "" {
+		msgID = strings.TrimSpace(resp.MsgID)
+	}
+	if msgID != "" {
+		p.cacheMessage(msgID, content)
+	}
+	return nil
 }
 
 func (p *Platform) nextMsgSeq(eventMsgID string) int32 {
@@ -1169,4 +1224,193 @@ func stripAtMention(content string) string {
 		}
 	}
 	return content
+}
+
+func qqbotMessageCachePath(dataDir string) string {
+	dataDir = strings.TrimSpace(dataDir)
+	if dataDir == "" {
+		return ""
+	}
+	return filepath.Join(dataDir, "run", "qqbot_message_cache.json")
+}
+
+func (p *Platform) loadMessageCache() error {
+	if p.messageCachePath == "" {
+		return nil
+	}
+	data, err := os.ReadFile(p.messageCachePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	cache := make(map[string]cachedMessage)
+	if err := json.Unmarshal(data, &cache); err != nil {
+		return err
+	}
+	p.messageCacheMu.Lock()
+	defer p.messageCacheMu.Unlock()
+	p.messageCache = cache
+	p.purgeMessageCacheLocked(time.Now())
+	return nil
+}
+
+func (p *Platform) cacheMessage(messageID, content string) {
+	messageID = strings.TrimSpace(messageID)
+	content = strings.TrimSpace(content)
+	if messageID == "" || content == "" {
+		return
+	}
+	entry := cachedMessage{
+		Content:   truncateRunes(content, quotedTextMaxRunes),
+		UpdatedAt: time.Now(),
+	}
+	p.messageCacheMu.Lock()
+	if p.messageCache == nil {
+		p.messageCache = make(map[string]cachedMessage)
+	}
+	p.messageCache[messageID] = entry
+	p.purgeMessageCacheLocked(entry.UpdatedAt)
+	err := p.saveMessageCacheLocked()
+	p.messageCacheMu.Unlock()
+	if err != nil {
+		slog.Warn("qqbot: save message cache failed", "error", err)
+	}
+}
+
+func (p *Platform) resolveQuotedText(ref *messageReference) string {
+	if ref == nil {
+		return ""
+	}
+	if text := inlineQuotedText(ref); text != "" {
+		return text
+	}
+	messageID := strings.TrimSpace(ref.MessageID)
+	if messageID == "" {
+		return ""
+	}
+	p.messageCacheMu.Lock()
+	defer p.messageCacheMu.Unlock()
+	if p.messageCache == nil {
+		return ""
+	}
+	p.purgeMessageCacheLocked(time.Now())
+	entry, ok := p.messageCache[messageID]
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(entry.Content)
+}
+
+func (p *Platform) purgeMessageCacheLocked(now time.Time) {
+	for id, entry := range p.messageCache {
+		if now.Sub(entry.UpdatedAt) > messageCacheTTL {
+			delete(p.messageCache, id)
+		}
+	}
+	for len(p.messageCache) > messageCacheMaxItems {
+		var oldestID string
+		var oldestAt time.Time
+		for id, entry := range p.messageCache {
+			if oldestID == "" || entry.UpdatedAt.Before(oldestAt) {
+				oldestID = id
+				oldestAt = entry.UpdatedAt
+			}
+		}
+		if oldestID == "" {
+			break
+		}
+		delete(p.messageCache, oldestID)
+	}
+}
+
+func (p *Platform) saveMessageCacheLocked() error {
+	if p.messageCachePath == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(p.messageCachePath), 0o755); err != nil {
+		return err
+	}
+	data, err := json.Marshal(p.messageCache)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(p.messageCachePath, data, 0o644)
+}
+
+func inlineQuotedText(ref *messageReference) string {
+	if ref == nil {
+		return ""
+	}
+	parts := []string{
+		strings.TrimSpace(ref.Content),
+		quotedMessageText(ref.Message),
+		quotedMessageText(ref.ReferencedMessage),
+		quotedMessageText(ref.SourceMessage),
+		strings.TrimSpace(ref.Title),
+	}
+	var chosen string
+	for _, part := range parts {
+		if part != "" {
+			chosen = part
+			break
+		}
+	}
+	return strings.TrimSpace(chosen)
+}
+
+func quotedMessageText(msg *quotedMessage) string {
+	if msg == nil {
+		return ""
+	}
+	content := strings.TrimSpace(msg.Content)
+	if content != "" {
+		return content
+	}
+	if title := strings.TrimSpace(msg.Title); title != "" {
+		return title
+	}
+	return contentOrAttachmentSummary("", msg.Attachments)
+}
+
+func prependQuotedMessage(quoted, content string) string {
+	quoted = strings.TrimSpace(quoted)
+	content = strings.TrimSpace(content)
+	if quoted == "" {
+		return content
+	}
+	if content == "" {
+		return "[引用消息]\n" + quoted
+	}
+	return "[引用消息]\n" + quoted + "\n\n" + content
+}
+
+func contentOrAttachmentSummary(content string, attachments []attachment) string {
+	content = strings.TrimSpace(content)
+	if content != "" {
+		return content
+	}
+	if len(attachments) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, att := range attachments {
+		switch {
+		case strings.HasPrefix(att.ContentType, "image/"):
+			parts = append(parts, "[图片]")
+		case strings.TrimSpace(att.Filename) != "":
+			parts = append(parts, "[附件: "+strings.TrimSpace(att.Filename)+"]")
+		default:
+			parts = append(parts, "[附件]")
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func truncateRunes(s string, max int) string {
+	if max <= 0 || utf8.RuneCountInString(s) <= max {
+		return s
+	}
+	return string([]rune(s)[:max])
 }

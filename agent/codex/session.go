@@ -28,6 +28,7 @@ type codexSession struct {
 	model     string
 	effort    string
 	mode      string
+	baseURL   string   // provider base URL; passed as -c openai_base_url=<url>
 	extraEnv  []string
 	events    chan core.Event
 	threadID  atomic.Value // stores string — Codex thread_id
@@ -45,7 +46,7 @@ type codexSession struct {
 var codexSessionCloseTimeout = 8 * time.Second
 var codexSessionForceKillWait = 2 * time.Second
 
-func newCodexSession(ctx context.Context, workDir, model, effort, mode, resumeID string, extraEnv []string) (*codexSession, error) {
+func newCodexSession(ctx context.Context, workDir, model, effort, mode, resumeID, baseURL string, extraEnv []string) (*codexSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	cs := &codexSession{
@@ -53,6 +54,7 @@ func newCodexSession(ctx context.Context, workDir, model, effort, mode, resumeID
 		model:    model,
 		effort:   effort,
 		mode:     mode,
+		baseURL:  baseURL,
 		extraEnv: extraEnv,
 		events:   make(chan core.Event, 64),
 		ctx:      sessionCtx,
@@ -167,6 +169,9 @@ func (cs *codexSession) buildExecArgs(prompt string, imagePaths []string) []stri
 
 	if cs.model != "" {
 		args = append(args, "--model", cs.model)
+	}
+	if cs.baseURL != "" {
+		args = append(args, "-c", fmt.Sprintf("openai_base_url=%q", cs.baseURL))
 	}
 	if cs.effort != "" {
 		args = append(args, "-c", fmt.Sprintf("model_reasoning_effort=%q", cs.effort))
