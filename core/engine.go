@@ -3243,6 +3243,7 @@ var builtinCommands = []struct {
 	{[]string{"version"}, "version"},
 	{[]string{"commands", "command", "cmd"}, "commands"},
 	{[]string{"skills", "skill"}, "skills"},
+	{[]string{"mcp"}, "mcp"},
 	{[]string{"config"}, "config"},
 	{[]string{"doctor"}, "doctor"},
 	{[]string{"upgrade", "update"}, "upgrade"},
@@ -3423,6 +3424,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdCommands(p, msg, args)
 	case "skills":
 		e.cmdSkills(p, msg)
+	case "mcp":
+		e.cmdMCP(p, msg)
 	case "config":
 		e.cmdConfig(p, msg, args)
 	case "doctor":
@@ -9609,6 +9612,116 @@ func (e *Engine) cmdSkills(p Platform, msg *Message) {
 	}
 
 	e.replyWithCard(p, msg.ReplyCtx, e.renderSkillsCard())
+}
+
+func (e *Engine) cmdMCP(p Platform, msg *Message) {
+	const runtimeLimit = 100
+
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[e.interactiveKeyForSessionKey(msg.SessionKey)]
+	e.interactiveMu.Unlock()
+
+	var (
+		inventory *MCPInventory
+		err       error
+	)
+
+	if state != nil && state.agentSession != nil && state.agentSession.Alive() {
+		if provider, ok := state.agentSession.(RuntimeMCPInventoryProvider); ok {
+			fetchCtx, cancel := context.WithTimeout(e.ctx, 10*time.Second)
+			defer cancel()
+			inventory, err = provider.GetRuntimeMCPInventory(fetchCtx, runtimeLimit)
+			if err != nil {
+				e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgMCPFetchFailed, err))
+				return
+			}
+		}
+	}
+
+	if inventory == nil {
+		if provider, ok := e.agent.(ConfiguredMCPInventoryProvider); ok {
+			fetchCtx, cancel := context.WithTimeout(e.ctx, 5*time.Second)
+			defer cancel()
+			inventory, err = provider.GetConfiguredMCPInventory(fetchCtx)
+			if err != nil {
+				e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgMCPFetchFailed, err))
+				return
+			}
+		}
+	}
+
+	if inventory == nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMCPNotSupported))
+		return
+	}
+
+	if len(inventory.Servers) == 0 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMCPEmpty))
+		return
+	}
+
+	e.reply(p, msg.ReplyCtx, e.formatMCPInventory(inventory))
+}
+
+func (e *Engine) formatMCPInventory(inventory *MCPInventory) string {
+	titleKey := MsgMCPConfiguredTitle
+	if inventory.Source == "runtime" {
+		titleKey = MsgMCPRuntimeTitle
+	}
+
+	var sb strings.Builder
+	sb.WriteString(e.i18n.Tf(titleKey, len(inventory.Servers)))
+	sb.WriteString("\n\n")
+
+	for i, server := range inventory.Servers {
+		if i > 0 {
+			sb.WriteString("\n")
+		}
+		sb.WriteString("- " + server.Name + "\n")
+
+		if server.AuthStatus != "" {
+			sb.WriteString(fmt.Sprintf("  %s %s\n", e.i18n.T(MsgMCPLabelAuth), server.AuthStatus))
+		}
+		if server.Transport != "" && server.Transport != "runtime" {
+			sb.WriteString(fmt.Sprintf("  %s %s\n", e.i18n.T(MsgMCPLabelType), server.Transport))
+		}
+		if inventory.Source == "configured" {
+			sb.WriteString(fmt.Sprintf("  %s %s\n", e.i18n.T(MsgMCPLabelEnabled), e.mcpBoolText(server.Enabled)))
+			sb.WriteString(fmt.Sprintf("  %s %s\n", e.i18n.T(MsgMCPLabelRequired), e.mcpBoolText(server.Required)))
+		}
+		if server.Command != "" {
+			sb.WriteString(fmt.Sprintf("  %s %s\n", e.i18n.T(MsgMCPLabelCommand), server.Command))
+		}
+		if server.URL != "" {
+			sb.WriteString(fmt.Sprintf("  %s %s\n", e.i18n.T(MsgMCPLabelURL), server.URL))
+		}
+		if server.Cwd != "" {
+			sb.WriteString(fmt.Sprintf("  %s %s\n", e.i18n.T(MsgMCPLabelCwd), server.Cwd))
+		}
+		if len(server.Tools) > 0 {
+			sb.WriteString(fmt.Sprintf("  %s %s\n", e.i18n.T(MsgMCPLabelTools), summarizeMCPTools(server.Tools, e.i18n)))
+		}
+	}
+
+	return strings.TrimSpace(sb.String())
+}
+
+func (e *Engine) mcpBoolText(v bool) string {
+	if v {
+		return e.i18n.T(MsgMCPBoolYes)
+	}
+	return e.i18n.T(MsgMCPBoolNo)
+}
+
+func summarizeMCPTools(tools []string, i18n *I18n) string {
+	if len(tools) == 0 {
+		return ""
+	}
+	const maxShown = 5
+	if len(tools) <= maxShown {
+		return strings.Join(tools, ", ")
+	}
+	return strings.Join(tools[:maxShown], ", ") + " " + i18n.Tf(MsgMCPMoreTools, len(tools)-maxShown)
 }
 
 // ── /config command ──────────────────────────────────────────

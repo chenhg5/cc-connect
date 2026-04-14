@@ -362,6 +362,22 @@ const (
 	MsgSkillsEmpty            MsgKey = "skills_empty"
 	MsgSkillsHint             MsgKey = "skills_hint"
 	MsgSkillsTelegramMenuHint MsgKey = "skills_telegram_menu_hint"
+	MsgMCPRuntimeTitle        MsgKey = "mcp_runtime_title"
+	MsgMCPConfiguredTitle     MsgKey = "mcp_configured_title"
+	MsgMCPEmpty               MsgKey = "mcp_empty"
+	MsgMCPNotSupported        MsgKey = "mcp_not_supported"
+	MsgMCPFetchFailed         MsgKey = "mcp_fetch_failed"
+	MsgMCPLabelAuth           MsgKey = "mcp_label_auth"
+	MsgMCPLabelTools          MsgKey = "mcp_label_tools"
+	MsgMCPLabelType           MsgKey = "mcp_label_type"
+	MsgMCPLabelEnabled        MsgKey = "mcp_label_enabled"
+	MsgMCPLabelRequired       MsgKey = "mcp_label_required"
+	MsgMCPLabelCommand        MsgKey = "mcp_label_command"
+	MsgMCPLabelURL            MsgKey = "mcp_label_url"
+	MsgMCPLabelCwd            MsgKey = "mcp_label_cwd"
+	MsgMCPBoolYes             MsgKey = "mcp_bool_yes"
+	MsgMCPBoolNo              MsgKey = "mcp_bool_no"
+	MsgMCPMoreTools           MsgKey = "mcp_more_tools"
 
 	MsgConfigTitle       MsgKey = "config_title"
 	MsgConfigHint        MsgKey = "config_hint"
@@ -2501,6 +2517,118 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "Telegram 的命令選單已滿，因此 Skill 不會顯示在那裡。你仍然可以手動輸入 /<skill名稱> 來調用它們。",
 		LangJapanese:           "Telegram のコマンドメニューがいっぱいのため、スキルコマンドはそこに表示されません。手動で /<スキル名> と入力すれば実行できます。",
 		LangSpanish:            "El menú de comandos de Telegram está lleno, así que los skills no aparecen allí. Aun así puedes invocarlos escribiendo /<nombre-skill> manualmente.",
+	},
+	MsgMCPRuntimeTitle: {
+		LangEnglish:            "🧩 Runtime MCP Servers — %d server(s)",
+		LangChinese:            "🧩 运行时 MCP Servers — %d 个",
+		LangTraditionalChinese: "🧩 執行中 MCP Servers — %d 個",
+		LangJapanese:           "🧩 ランタイム MCP サーバー — %d 件",
+		LangSpanish:            "🧩 Servidores MCP en runtime — %d",
+	},
+	MsgMCPConfiguredTitle: {
+		LangEnglish:            "🧩 Configured MCP Servers — %d server(s)",
+		LangChinese:            "🧩 已配置 MCP Servers — %d 个",
+		LangTraditionalChinese: "🧩 已配置 MCP Servers — %d 個",
+		LangJapanese:           "🧩 設定済み MCP サーバー — %d 件",
+		LangSpanish:            "🧩 Servidores MCP configurados — %d",
+	},
+	MsgMCPEmpty: {
+		LangEnglish:            "No MCP servers found.",
+		LangChinese:            "未发现任何 MCP server。",
+		LangTraditionalChinese: "未發現任何 MCP server。",
+		LangJapanese:           "MCP サーバーが見つかりません。",
+		LangSpanish:            "No se encontraron servidores MCP.",
+	},
+	MsgMCPNotSupported: {
+		LangEnglish:            "The current agent/backend does not support /mcp.",
+		LangChinese:            "当前 Agent / 后端不支持 /mcp。",
+		LangTraditionalChinese: "當前 Agent / 後端不支援 /mcp。",
+		LangJapanese:           "現在の Agent / バックエンドは /mcp をサポートしていません。",
+		LangSpanish:            "El agente/backend actual no soporta /mcp.",
+	},
+	MsgMCPFetchFailed: {
+		LangEnglish:            "Failed to load MCP inventory: %v",
+		LangChinese:            "读取 MCP inventory 失败：%v",
+		LangTraditionalChinese: "讀取 MCP inventory 失敗：%v",
+		LangJapanese:           "MCP インベントリの読み込みに失敗しました: %v",
+		LangSpanish:            "No se pudo cargar el inventario MCP: %v",
+	},
+	MsgMCPLabelAuth: {
+		LangEnglish:            "auth:",
+		LangChinese:            "认证：",
+		LangTraditionalChinese: "認證：",
+		LangJapanese:           "認証:",
+		LangSpanish:            "auth:",
+	},
+	MsgMCPLabelTools: {
+		LangEnglish:            "tools:",
+		LangChinese:            "工具：",
+		LangTraditionalChinese: "工具：",
+		LangJapanese:           "ツール:",
+		LangSpanish:            "tools:",
+	},
+	MsgMCPLabelType: {
+		LangEnglish:            "type:",
+		LangChinese:            "类型：",
+		LangTraditionalChinese: "類型：",
+		LangJapanese:           "種別:",
+		LangSpanish:            "type:",
+	},
+	MsgMCPLabelEnabled: {
+		LangEnglish:            "enabled:",
+		LangChinese:            "启用：",
+		LangTraditionalChinese: "啟用：",
+		LangJapanese:           "有効:",
+		LangSpanish:            "enabled:",
+	},
+	MsgMCPLabelRequired: {
+		LangEnglish:            "required:",
+		LangChinese:            "必需：",
+		LangTraditionalChinese: "必需：",
+		LangJapanese:           "必須:",
+		LangSpanish:            "required:",
+	},
+	MsgMCPLabelCommand: {
+		LangEnglish:            "command:",
+		LangChinese:            "命令：",
+		LangTraditionalChinese: "命令：",
+		LangJapanese:           "コマンド:",
+		LangSpanish:            "command:",
+	},
+	MsgMCPLabelURL: {
+		LangEnglish:            "url:",
+		LangChinese:            "地址：",
+		LangTraditionalChinese: "位址：",
+		LangJapanese:           "URL:",
+		LangSpanish:            "url:",
+	},
+	MsgMCPLabelCwd: {
+		LangEnglish:            "cwd:",
+		LangChinese:            "目录：",
+		LangTraditionalChinese: "目錄：",
+		LangJapanese:           "作業ディレクトリ:",
+		LangSpanish:            "cwd:",
+	},
+	MsgMCPBoolYes: {
+		LangEnglish:            "yes",
+		LangChinese:            "是",
+		LangTraditionalChinese: "是",
+		LangJapanese:           "はい",
+		LangSpanish:            "sí",
+	},
+	MsgMCPBoolNo: {
+		LangEnglish:            "no",
+		LangChinese:            "否",
+		LangTraditionalChinese: "否",
+		LangJapanese:           "いいえ",
+		LangSpanish:            "no",
+	},
+	MsgMCPMoreTools: {
+		LangEnglish:            "(+%d more)",
+		LangChinese:            "(另有 %d 个)",
+		LangTraditionalChinese: "(另有 %d 個)",
+		LangJapanese:           "(他 %d 件)",
+		LangSpanish:            "(+%d más)",
 	},
 
 	MsgConfigTitle: {

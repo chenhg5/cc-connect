@@ -413,6 +413,38 @@ type SkillProvider interface {
 	SkillDirs() []string
 }
 
+// MCPInventory describes either a runtime or static/configured MCP inventory.
+// Source is a short machine-readable identifier such as "runtime" or "configured".
+type MCPInventory struct {
+	Source  string
+	Servers []MCPServerInfo
+}
+
+// MCPServerInfo is a provider-neutral MCP server summary used by /mcp.
+type MCPServerInfo struct {
+	Name       string
+	AuthStatus string
+	Transport  string // e.g. "stdio", "remote", "unknown"
+	Enabled    bool
+	Required   bool
+	Command    string
+	URL        string
+	Cwd        string
+	Tools      []string
+}
+
+// RuntimeMCPInventoryProvider is an optional interface for running sessions
+// that can enumerate MCP servers known to the current runtime.
+type RuntimeMCPInventoryProvider interface {
+	GetRuntimeMCPInventory(ctx context.Context, limit int) (*MCPInventory, error)
+}
+
+// ConfiguredMCPInventoryProvider is an optional interface for agents that can
+// enumerate statically configured MCP servers from local configuration.
+type ConfiguredMCPInventoryProvider interface {
+	GetConfiguredMCPInventory(ctx context.Context) (*MCPInventory, error)
+}
+
 // SessionDeleter is an optional interface for agents that support deleting sessions.
 type SessionDeleter interface {
 	DeleteSession(ctx context.Context, sessionID string) error
