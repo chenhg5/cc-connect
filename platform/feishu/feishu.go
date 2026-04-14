@@ -2436,6 +2436,11 @@ func progressStateMeta(state core.ProgressCardState, lang string, agent string) 
 			return fmt.Sprintf("%s · 失败", agent), "red", "本过程卡片已停止更新（失败），完整错误说明见下一条消息。"
 		}
 		return fmt.Sprintf("%s · Failed", agent), "red", "This progress card has stopped (failed). See the next message for details."
+	case core.ProgressCardStateStopped:
+		if zh {
+			return fmt.Sprintf("%s · 已停止", agent), "grey", "任务已被用户手动停止。"
+		}
+		return fmt.Sprintf("%s · Stopped", agent), "grey", "Task was stopped by the user."
 	default:
 		if zh {
 			return fmt.Sprintf("%s · 进行中", agent), "blue", ""

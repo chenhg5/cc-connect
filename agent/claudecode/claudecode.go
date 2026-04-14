@@ -46,9 +46,9 @@ type Agent struct {
 	routerURL        string // Claude Code Router URL (e.g., "http://127.0.0.1:3456")
 	routerAPIKey     string // Claude Code Router API key (optional)
 
-	providerProxy  *core.ProviderProxy // local proxy for third-party providers
-	proxyLocalURL  string              // local URL of the proxy
-	platformPrompt string              // platform-specific formatting instructions
+	providerProxy    *core.ProviderProxy // local proxy for third-party providers
+	proxyLocalURL    string              // local URL of the proxy
+	platformPrompt   string              // platform-specific formatting instructions
 
 	// spawnOpts controls OS-user isolation via run_as_user. Zero value
 	// means legacy spawn as the supervisor user. See core/runas.go.
@@ -163,6 +163,10 @@ func normalizePermissionMode(raw string) string {
 func (a *Agent) Name() string           { return "claudecode" }
 func (a *Agent) CLIBinaryName() string  { return "claude" }
 func (a *Agent) CLIDisplayName() string { return "Claude" }
+
+func (a *Agent) ResumeCommand(sessionID string) string {
+	return "claude --resume " + sessionID
+}
 
 func (a *Agent) SetWorkDir(dir string) {
 	a.mu.Lock()

@@ -80,29 +80,30 @@ var configMu sync.Mutex
 var ConfigPath string
 
 type Config struct {
-	DataDir           string                  `toml:"data_dir"` // session store directory, default ~/.cc-connect
-	AttachmentSend    string                  `toml:"attachment_send"`
+	DataDir             string                  `toml:"data_dir"` // session store directory, default ~/.cc-connect
+	AttachmentSend      string                  `toml:"attachment_send"`
 	// Quiet is legacy: when true and [display] does not set thinking_messages / tool_messages,
 	// engines behave as if those flags were false. Per-project quiet overrides when set.
-	Quiet             *bool                   `toml:"quiet,omitempty"`
-	Projects          []ProjectConfig         `toml:"projects"`
-	Commands          []CommandConfig         `toml:"commands"`     // global custom slash commands
-	Aliases           []AliasConfig           `toml:"aliases"`      // global command aliases
-	BannedWords       []string                `toml:"banned_words"` // messages containing any of these words are blocked
-	Log               LogConfig               `toml:"log"`
-	Language          string                  `toml:"language"` // "en" or "zh", default is "en"
-	Speech            SpeechConfig            `toml:"speech"`
-	TTS               TTSConfig               `toml:"tts"`
-	Display           DisplayConfig           `toml:"display"`
-	StreamPreview     StreamPreviewConfig     `toml:"stream_preview"`      // real-time streaming preview
-	RateLimit         RateLimitConfig         `toml:"rate_limit"`          // per-session rate limiting
-	OutgoingRateLimit OutgoingRateLimitConfig `toml:"outgoing_rate_limit"` // outgoing message throttling
-	Relay             RelayConfig             `toml:"relay"`               // bot-to-bot relay behavior
-	Cron              CronConfig              `toml:"cron"`
-	Webhook           WebhookConfig           `toml:"webhook"`
-	Bridge            BridgeConfig            `toml:"bridge"`
-	Management        ManagementConfig        `toml:"management"`
-	IdleTimeoutMins   *int                    `toml:"idle_timeout_mins,omitempty"` // max minutes between agent events; 0 = no timeout; default 120
+	Quiet               *bool                   `toml:"quiet,omitempty"`     // global default for quiet mode; project-level overrides this
+	Projects            []ProjectConfig         `toml:"projects"`
+	Commands            []CommandConfig         `toml:"commands"`     // global custom slash commands
+	Aliases             []AliasConfig           `toml:"aliases"`      // global command aliases
+	BannedWords         []string                `toml:"banned_words"` // messages containing any of these words are blocked
+	Log                 LogConfig               `toml:"log"`
+	Language            string                  `toml:"language"` // "en" or "zh", default is "en"
+	Speech              SpeechConfig            `toml:"speech"`
+	TTS                 TTSConfig               `toml:"tts"`
+	Display             DisplayConfig           `toml:"display"`
+	StreamPreview       StreamPreviewConfig     `toml:"stream_preview"`      // real-time streaming preview
+	RateLimit           RateLimitConfig         `toml:"rate_limit"`          // per-session rate limiting
+	OutgoingRateLimit   OutgoingRateLimitConfig `toml:"outgoing_rate_limit"` // outgoing message throttling
+	Relay               RelayConfig             `toml:"relay"`               // bot-to-bot relay behavior
+	Cron                CronConfig              `toml:"cron"`
+	Webhook             WebhookConfig           `toml:"webhook"`
+	Bridge              BridgeConfig            `toml:"bridge"`
+	Management          ManagementConfig        `toml:"management"`
+	IdleTimeoutMins     *int                    `toml:"idle_timeout_mins,omitempty"`      // max minutes between agent events; 0 = no timeout; default 120
+	BgListenTimeoutMins *int                    `toml:"bg_listen_timeout_mins,omitempty"` // how long to listen for background task events after turn ends; 0 = disabled; default 60
 }
 
 // CronConfig controls cron job behavior.
@@ -301,16 +302,17 @@ type ProjectConfig struct {
 	// Use this only for variables the target user cannot set in their profile.
 	RunAsEnv []string `toml:"run_as_env,omitempty"`
 	// ShowContextIndicator: nil/true = append [ctx: ~N%] to assistant replies; false = hide.
-	ShowContextIndicator *bool           `toml:"show_context_indicator,omitempty"`
-	InjectSender         *bool           `toml:"inject_sender,omitempty"`     // prepend sender identity (platform + user ID) to each message sent to the agent
-	DisabledCommands     []string        `toml:"disabled_commands,omitempty"` // commands to disable for this project (e.g. ["restart", "upgrade"])
-	AdminFrom            string          `toml:"admin_from,omitempty"`        // comma-separated user IDs allowed to run privileged commands; "*" = all allowed users
-	Users                *UsersConfig    `toml:"users,omitempty"`             // per-user role config; nil = legacy behavior
+	ShowContextIndicator     *bool           `toml:"show_context_indicator,omitempty"`
+	InjectSender             *bool           `toml:"inject_sender,omitempty"`                // prepend sender identity (platform + user ID) to each message sent to the agent
+	DisabledCommands         []string        `toml:"disabled_commands,omitempty"`             // commands to disable for this project (e.g. ["restart", "upgrade"])
+	AdminFrom                string          `toml:"admin_from,omitempty"`                   // comma-separated user IDs allowed to run privileged commands; "*" = all allowed users
+	Users                    *UsersConfig    `toml:"users,omitempty"`                        // per-user role config; nil = legacy behavior
 	// Quiet is legacy per-project override; see Config.Quiet. When true and global [display]
 	// omits thinking_messages / tool_messages, those default to off for this project.
-	Quiet      *bool           `toml:"quiet,omitempty"`
-	Observe              *ObserveConfig  `toml:"observe,omitempty"`
-	References           ReferenceConfig `toml:"references,omitempty"`
+	Quiet                    *bool           `toml:"quiet,omitempty"`
+	Observe                  *ObserveConfig  `toml:"observe,omitempty"`
+	References               ReferenceConfig `toml:"references,omitempty"`
+	WorkspaceIdleTimeoutMins *int            `toml:"workspace_idle_timeout_mins,omitempty"` // minutes before idle workspace is reaped; default 120
 }
 
 type AgentConfig struct {

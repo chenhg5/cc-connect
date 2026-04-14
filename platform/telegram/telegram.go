@@ -109,7 +109,7 @@ type Platform struct {
 	allowFrom             string
 	groupReplyAll         bool
 	shareSessionInChannel bool
-	enableReactions       bool
+	reactOnReceive        bool
 	httpClient            *http.Client
 
 	mu                  sync.RWMutex
@@ -159,8 +159,11 @@ func New(opts map[string]any) (core.Platform, error) {
 
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
-	enableReactions, _ := opts["enable_reactions"].(bool)
-	return &Platform{token: token, allowFrom: allowFrom, groupReplyAll: groupReplyAll, shareSessionInChannel: shareSessionInChannel, enableReactions: enableReactions, httpClient: httpClient}, nil
+	reactOnReceive := true
+	if v, ok := opts["react_on_receive"].(bool); ok {
+		reactOnReceive = v
+	}
+	return &Platform{token: token, allowFrom: allowFrom, groupReplyAll: groupReplyAll, shareSessionInChannel: shareSessionInChannel, reactOnReceive: reactOnReceive, httpClient: httpClient}, nil
 }
 
 func (p *Platform) Name() string { return "telegram" }
@@ -325,7 +328,6 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 	if msg.From == nil {
 		return
 	}
-
 	userName := msg.From.Username
 	if userName == "" {
 		userName = strings.TrimSpace(msg.From.FirstName + " " + msg.From.LastName)
@@ -358,7 +360,7 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 	}
 
 	rctx := replyContext{chatID: msg.Chat.ID, threadID: threadID, messageID: msg.ID}
-	if p.enableReactions {
+	if p.reactOnReceive {
 		go p.reactToMessage(ctx, msg.Chat.ID, msg.ID, "⚡")
 	}
 	botName := p.botUsername()
@@ -1056,7 +1058,6 @@ func (p *Platform) SendAudio(ctx context.Context, rctx any, audio []byte, format
 	if !ok {
 		return fmt.Errorf("telegram: SendAudio: invalid reply context type %T", rctx)
 	}
-
 	sendData := audio
 	sendFormat := strings.ToLower(strings.TrimSpace(format))
 	if sendFormat == "" {
@@ -1350,7 +1351,6 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 	if !ok {
 		return func() {}
 	}
-
 	params := &tgbot.SendChatActionParams{
 		ChatID:          rc.chatID,
 		MessageThreadID: rc.threadID,
