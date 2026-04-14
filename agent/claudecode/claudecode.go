@@ -75,7 +75,35 @@ func New(opts map[string]any) (core.Agent, error) {
 		}
 	}
 
-	var disallowedTools []string
+	// Hardcoded baseline of disallowed tools that always applies when this
+	// agent runs under cc-connect, regardless of per-project config.
+	//
+	// Cloud-managed claude.ai MCP connectors (Slack, Gmail, Google Calendar,
+	// etc.) are tied to the authenticated claude.ai account's OAuth token
+	// rather than to the cc-connect bot identity. When the agent calls one
+	// of them, the resulting API call happens AS the account owner, so:
+	//
+	//   - Slack messages post with "Sent using @Claude" attributed to the
+	//     human account, not the cc-connect bot — the whole conversation
+	//     attribution is broken for any observer.
+	//   - cc-connect's own delivery path (which knows about thread_ts,
+	//     progress streaming, tool-call suppression, etc.) is bypassed
+	//     entirely, so the message shape is inconsistent with the rest
+	//     of the session.
+	//   - In sandboxed deployments where several Unix users share one
+	//     claude.ai account via file-copied credentials, every sandbox
+	//     user inherits access to every connector that has ever been
+	//     authorised on the shared account — even though the human only
+	//     intended to authorise the connector for their own use.
+	//
+	// Disallowing them here is the cleanest way to enforce "cc-connect owns
+	// message delivery on every platform it bridges to". Per-project config
+	// can extend this list but cannot override it.
+	disallowedTools := []string{
+		"mcp__claude_ai_Slack",
+		"mcp__claude_ai_Gmail",
+		"mcp__claude_ai_Google_Calendar",
+	}
 	if tools, ok := opts["disallowed_tools"].([]any); ok {
 		for _, t := range tools {
 			if s, ok := t.(string); ok {

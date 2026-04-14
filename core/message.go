@@ -147,13 +147,14 @@ type Message struct {
 	Content    string
 	Images     []ImageAttachment // attached images (if any)
 	Files      []FileAttachment  // attached files (if any)
-	Audio        *AudioAttachment // voice message (if any)
-	Location     *LocationAttachment // geographical location (if any)
-	ExtraContent string              // platform-enriched content (e.g. location text, reply quote) prepended for the agent
-	ChannelKey   string              // platform-provided channel identifier for workspace binding (optional)
-	ReplyCtx     any             // platform-specific context needed for replying
-	FromVoice    bool            // true if message originated from voice transcription
-	ModeOverride string          // if set, temporarily override agent permission mode for this message
+	Audio           *AudioAttachment    // voice message (if any)
+	Location        *LocationAttachment // geographical location (if any)
+	ExtraContent    string              // platform-enriched content (e.g. location text, reply quote) prepended for the agent
+	ChannelKey      string              // platform-provided channel identifier for workspace binding (optional)
+	ReplyCtx        any                 // platform-specific context needed for replying
+	FromVoice       bool                // true if message originated from voice transcription
+	ModeOverride    string              // if set, temporarily override agent permission mode for this message
+	PlatformContext string              // optional platform-specific context block prepended to the agent prompt (e.g. Slack channel/thread metadata)
 }
 
 // EventType distinguishes different kinds of agent output.

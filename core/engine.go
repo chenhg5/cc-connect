@@ -240,15 +240,16 @@ type workspaceInitFlow struct {
 // The message is NOT sent to agent stdin at queue time; the event loop
 // sends it after the current turn completes to avoid mid-turn interference.
 type queuedMessage struct {
-	platform      Platform
-	replyCtx      any
-	content       string
-	images        []ImageAttachment
-	files         []FileAttachment
-	fromVoice     bool
-	userID        string
-	msgPlatform   string // platform name for sender injection
-	msgSessionKey string // session key for extracting chat ID
+	platform        Platform
+	replyCtx        any
+	content         string
+	images          []ImageAttachment
+	files           []FileAttachment
+	fromVoice       bool
+	userID          string
+	msgPlatform     string // platform name for sender injection
+	msgSessionKey   string // session key for extracting chat ID
+	platformContext string // platform-specific context block (e.g. Slack channel/thread metadata)
 }
 
 // interactiveState tracks a running interactive agent session and its permission state.
@@ -1601,15 +1602,16 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		return false // fall back to "previous processing" reply
 	}
 	state.pendingMessages = append(state.pendingMessages, queuedMessage{
-		platform:      p,
-		replyCtx:      msg.ReplyCtx,
-		content:       msg.Content,
-		images:        msg.Images,
-		files:         msg.Files,
-		fromVoice:     msg.FromVoice,
-		userID:        msg.UserID,
-		msgPlatform:   msg.Platform,
-		msgSessionKey: msg.SessionKey,
+		platform:        p,
+		replyCtx:        msg.ReplyCtx,
+		content:         msg.Content,
+		images:          msg.Images,
+		files:           msg.Files,
+		fromVoice:       msg.FromVoice,
+		userID:          msg.UserID,
+		msgPlatform:     msg.Platform,
+		msgSessionKey:   msg.SessionKey,
+		platformContext: msg.PlatformContext,
 	})
 	queueDepth := len(state.pendingMessages)
 	state.mu.Unlock()
@@ -2009,7 +2011,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	// EventResult that was pushed after the previous turn already returned.
 	drainEvents(state.agentSession.Events())
 
-	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.Platform, msg.SessionKey)
+	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.Platform, msg.SessionKey, msg.PlatformContext)
 
 	sendStart := time.Now()
 	state.mu.Lock()
@@ -2879,7 +2881,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 
-				queuedPrompt := e.buildSenderPrompt(queued.content, queued.userID, queued.msgPlatform, queued.msgSessionKey)
+				queuedPrompt := e.buildSenderPrompt(queued.content, queued.userID, queued.msgPlatform, queued.msgSessionKey, queued.platformContext)
 
 				nextSend := make(chan error, 1)
 				go func() {
@@ -3020,7 +3022,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		state.mu.Unlock()
 
 		e.i18n.DetectAndSet(queued.content)
-		prompt := e.buildSenderPrompt(queued.content, queued.userID, queued.msgPlatform, queued.msgSessionKey)
+		prompt := e.buildSenderPrompt(queued.content, queued.userID, queued.msgPlatform, queued.msgSessionKey, queued.platformContext)
 
 		if state.agentSession == nil || !state.agentSession.Alive() {
 			e.send(queued.platform, queued.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session ended"))
@@ -10047,14 +10049,23 @@ func (e *Engine) cmdBindSetup(p Platform, msg *Message) {
 	}
 }
 
-// buildSenderPrompt prepends a sender identity header to content when
-// injectSender is enabled and userID is non-empty.
-func (e *Engine) buildSenderPrompt(content, userID, platform, sessionKey string) string {
-	if !e.injectSender || userID == "" {
+// buildSenderPrompt prepends platform context and/or a sender identity header
+// to content. platformContext (e.g. Slack channel/thread metadata) is always
+// prepended when present. The sender header is only added when injectSender is
+// enabled and userID is non-empty.
+func (e *Engine) buildSenderPrompt(content, userID, platform, sessionKey, platformContext string) string {
+	var prefix string
+	if platformContext != "" {
+		prefix = platformContext + "\n"
+	}
+	if e.injectSender && userID != "" {
+		chatID := extractChannelID(sessionKey)
+		prefix += fmt.Sprintf("[cc-connect sender_id=%s platform=%s chat_id=%s]\n", userID, platform, chatID)
+	}
+	if prefix == "" {
 		return content
 	}
-	chatID := extractChannelID(sessionKey)
-	return fmt.Sprintf("[cc-connect sender_id=%s platform=%s chat_id=%s]\n%s", userID, platform, chatID, content)
+	return prefix + content
 }
 
 func extractChannelID(sessionKey string) string {

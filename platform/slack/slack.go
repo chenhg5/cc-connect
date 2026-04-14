@@ -150,16 +150,19 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 				if content == "" && len(images) == 0 && audio == nil && len(docFiles) == 0 {
 					return
 				}
+				userName := p.resolveUserName(ev.User)
+				channelName := p.resolveChannelNameForMsg(ev.Channel)
 				msg := &core.Message{
 					SessionKey: sessionKey, Platform: "slack",
-					UserID: ev.User, UserName: p.resolveUserName(ev.User),
-					ChatName:  p.resolveChannelNameForMsg(ev.Channel),
+					UserID: ev.User, UserName: userName,
+					ChatName:  channelName,
 					Content:   content,
 					Images:    images,
 					Files:     docFiles,
 					Audio:     audio,
 					MessageID: ev.TimeStamp,
 					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: ev.TimeStamp},
+					PlatformContext: slackMessageContext(ev.Channel, channelName, ev.User, userName, ev.TimeStamp, ev.ThreadTimeStamp),
 				}
 				p.handler(p, msg)
 
@@ -200,13 +203,16 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					return
 				}
 
+				userName := p.resolveUserName(ev.User)
+				channelName := p.resolveChannelNameForMsg(ev.Channel)
 				msg := &core.Message{
 					SessionKey: sessionKey, Platform: "slack",
-					UserID: ev.User, UserName: p.resolveUserName(ev.User),
-					ChatName: p.resolveChannelNameForMsg(ev.Channel),
+					UserID: ev.User, UserName: userName,
+					ChatName: channelName,
 					Content:  ev.Text, Images: images, Files: docFiles, Audio: audio,
 					MessageID: ts,
 					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: ts},
+					PlatformContext: slackMessageContext(ev.Channel, channelName, ev.User, userName, ts, ev.ThreadTimeStamp),
 				}
 				p.handler(p, msg)
 			}
@@ -245,8 +251,9 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 		msg := &core.Message{
 			SessionKey: sessionKey, Platform: "slack",
 			UserID: cmd.UserID, UserName: cmd.UserName,
-			Content:  content,
-			ReplyCtx: replyContext{channel: cmd.ChannelID},
+			Content:         content,
+			ReplyCtx:        replyContext{channel: cmd.ChannelID},
+			PlatformContext: slackMessageContext(cmd.ChannelID, cmd.ChannelName, cmd.UserID, cmd.UserName, "", ""),
 		}
 		slog.Debug("slack: slash command", "command", cmd.Command, "text", cmd.Text, "user", cmd.UserID)
 		p.handler(p, msg)
@@ -258,6 +265,23 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 	case socketmode.EventTypeConnectionError:
 		slog.Error("slack: connection error")
 	}
+}
+
+// slackMessageContext builds the ## Slack Message Context block that gets
+// prepended to the agent prompt so Claude knows which channel/thread to target
+// when making Slack MCP tool calls and can apply correct reply threading.
+func slackMessageContext(channelID, channelName, userID, userName, messageTS, threadTS string) string {
+	var b strings.Builder
+	b.WriteString("## Slack Message Context\n")
+	b.WriteString("channel_id: " + channelID + "\n")
+	b.WriteString("channel_name: " + channelName + "\n")
+	b.WriteString("user_id: " + userID + "\n")
+	b.WriteString("user_name: " + userName + "\n")
+	b.WriteString("message_ts: " + messageTS + "\n")
+	if threadTS != "" {
+		b.WriteString("thread_ts: " + threadTS + "\n")
+	}
+	return b.String()
 }
 
 func stripAppMentionText(text string) string {
@@ -372,14 +396,38 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	return nil
 }
 
-// Send sends a new message (not a reply)
+// Send posts a message into the channel on the reply context, threading it
+// off rc.timestamp when one is present.
+//
+// In cc-connect's normal Slack flow every triggering user message has its
+// ts captured into replyContext.timestamp, so this effectively threads the
+// entire conversation (final reply, streaming progress, tool-use noise,
+// errors, notifications) under the user's original message. That is the
+// desired shape:
+//
+//   - One thread per conversation, keeping the main channel quiet.
+//   - Tool-call noise and progress updates stay contained inside the thread.
+//   - Parallel conversations in the same channel naturally fork into
+//     separate threads without any per-session book-keeping beyond the
+//     session key that already carries the channel + user.
+//
+// For genuinely standalone posts (slash commands with no message ts,
+// bot-initiated notifications with ReconstructReplyCtx) rc.timestamp is
+// empty and Send falls back to a non-threaded post.
 func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	rc, ok := rctx.(replyContext)
 	if !ok {
 		return fmt.Errorf("slack: invalid reply context type %T", rctx)
 	}
 
-	_, _, err := p.client.PostMessageContext(ctx, rc.channel, slack.MsgOptionText(content, false))
+	opts := []slack.MsgOption{
+		slack.MsgOptionText(content, false),
+	}
+	if rc.timestamp != "" {
+		opts = append(opts, slack.MsgOptionTS(rc.timestamp))
+	}
+
+	_, _, err := p.client.PostMessageContext(ctx, rc.channel, opts...)
 	if err != nil {
 		return fmt.Errorf("slack: send: %w", err)
 	}
