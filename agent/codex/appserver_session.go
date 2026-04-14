@@ -527,6 +527,19 @@ func (s *appServerSession) GetContextUsage() *core.ContextUsage {
 	return s.cachedContextUsage()
 }
 
+func (s *appServerSession) CompactSession() error {
+	if !s.alive.Load() {
+		return fmt.Errorf("session is closed")
+	}
+	threadID := s.CurrentSessionID()
+	if threadID == "" {
+		return fmt.Errorf("codex app-server thread id is empty")
+	}
+	return s.request("thread/compact/start", map[string]any{
+		"threadId": threadID,
+	}, nil)
+}
+
 func (s *appServerSession) Alive() bool {
 	return s.alive.Load()
 }

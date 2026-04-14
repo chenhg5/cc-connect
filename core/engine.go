@@ -2968,8 +2968,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 			// Auto-compress after finishing a turn, before sending any queued messages.
 			if triggerAutoCompress {
-				compressor, ok := e.agent.(ContextCompressor)
-				if ok && compressor.CompressCommand() != "" {
+				_, hasNativeCompactor := state.agentSession.(SessionCompactor)
+				compressor, hasLegacyCompressor := e.agent.(ContextCompressor)
+				if hasNativeCompactor || (hasLegacyCompressor && compressor.CompressCommand() != "") {
 					if pendingSend != nil {
 						if err := <-pendingSend; err != nil {
 							slog.Debug("async send error before compress", "error", err)
@@ -6248,16 +6249,21 @@ func (e *Engine) stopInteractiveSession(sessionKey string, quietPlatform Platfor
 }
 
 func (e *Engine) cmdCompress(p Platform, msg *Message) {
-	compressor, ok := e.agent.(ContextCompressor)
-	if !ok || compressor.CompressCommand() == "" {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCompressNotSupported))
-		return
-	}
-
 	iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
 	e.interactiveMu.Lock()
 	state, hasState := e.interactiveStates[iKey]
 	e.interactiveMu.Unlock()
+
+	hasNativeCompactor := false
+	if hasState && state != nil && state.agentSession != nil {
+		_, hasNativeCompactor = state.agentSession.(SessionCompactor)
+	}
+	compressor, hasLegacyCompressor := e.agent.(ContextCompressor)
+	supportsLegacy := hasLegacyCompressor && compressor.CompressCommand() != ""
+	if !hasNativeCompactor && !supportsLegacy {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCompressNotSupported))
+		return
+	}
 
 	if !hasState || state == nil || state.agentSession == nil || !state.agentSession.Alive() {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCompressNoSession))
@@ -6295,6 +6301,20 @@ func (e *Engine) runCompress(state *interactiveState, session *Session, sessions
 	state.mu.Unlock()
 
 	drainEvents(state.agentSession.Events())
+
+	if compactor, ok := state.agentSession.(SessionCompactor); ok {
+		if err := compactor.CompactSession(); err != nil {
+			if !auto {
+				e.reply(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+			}
+			if !state.agentSession.Alive() {
+				e.cleanupInteractiveState(iKey)
+			}
+			return
+		}
+		e.processCompressEvents(state, session, sessions, iKey, p, replyCtx, &compressUnlocked, auto)
+		return
+	}
 
 	compressor, ok := e.agent.(ContextCompressor)
 	if !ok || compressor.CompressCommand() == "" {

@@ -3,7 +3,10 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -162,6 +165,97 @@ func TestMapAppServerRateLimits_PrefersMultiBucketView(t *testing.T) {
 	}
 }
 
+func TestAppServerSessionCompactSession_RequestShape(t *testing.T) {
+	reqCh := make(chan map[string]any, 1)
+	s := &appServerSession{
+		ctx:     context.Background(),
+		events:  make(chan core.Event, 1),
+		pending: make(map[int64]chan rpcResponseEnvelope),
+		stdin:   nopWriteCloser{write: func(p []byte) (int, error) { return len(p), nil }},
+	}
+	s.alive.Store(true)
+	s.threadID.Store("thread-123")
+
+	s.stdin = nopWriteCloser{write: func(p []byte) (int, error) {
+		var req map[string]any
+		if err := json.Unmarshal(bytesTrimSpace(p), &req); err != nil {
+			t.Errorf("unmarshal request: %v", err)
+			return 0, err
+		}
+		reqCh <- req
+		return len(p), nil
+	}}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- s.CompactSession()
+	}()
+
+	var req map[string]any
+	select {
+	case req = <-reqCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for request")
+	}
+
+	if got := req["method"]; got != "thread/compact/start" {
+		t.Fatalf("method = %v, want thread/compact/start", got)
+	}
+	params, _ := req["params"].(map[string]any)
+	if params == nil {
+		t.Fatal("params missing")
+	}
+	if got := params["threadId"]; got != "thread-123" {
+		t.Fatalf("threadId = %v, want thread-123", got)
+	}
+
+	id, _ := rpcIDToInt64(req["id"])
+	s.pendingMu.Lock()
+	ch := s.pending[id]
+	s.pendingMu.Unlock()
+	if ch == nil {
+		t.Fatal("pending request channel missing")
+	}
+	ch <- rpcResponseEnvelope{ID: id, Result: json.RawMessage(`{}`)}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("CompactSession() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for CompactSession to finish")
+	}
+}
+
+func TestAppServerSessionCompactSession_RequiresThreadID(t *testing.T) {
+	s := &appServerSession{
+		events: make(chan core.Event, 1),
+	}
+	s.alive.Store(true)
+
+	if err := s.CompactSession(); err == nil {
+		t.Fatal("CompactSession() error = nil, want error")
+	}
+}
+
+type nopWriteCloser struct {
+	write func([]byte) (int, error)
+}
+
+func (n nopWriteCloser) Write(p []byte) (int, error) {
+	if n.write == nil {
+		return len(p), nil
+	}
+	return n.write(p)
+}
+
+func (n nopWriteCloser) Close() error { return nil }
+
+func bytesTrimSpace(p []byte) []byte {
+	return []byte(strings.TrimSpace(string(p)))
+}
+
 var _ interface {
 	GetUsage(context.Context) (*core.UsageReport, error)
 } = (*appServerSession)(nil)
@@ -169,3 +263,5 @@ var _ interface {
 var _ interface {
 	GetContextUsage() *core.ContextUsage
 } = (*appServerSession)(nil)
+
+var _ io.WriteCloser = nopWriteCloser{}

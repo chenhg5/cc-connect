@@ -6711,6 +6711,21 @@ type stubCompressorAgent struct {
 
 func (a *stubCompressorAgent) CompressCommand() string { return a.cmd }
 
+type stubCompactSession struct {
+	*queuingAgentSession
+	compactCalls int
+	compactErr   error
+}
+
+func newStubCompactSession(id string) *stubCompactSession {
+	return &stubCompactSession{queuingAgentSession: newQueuingSession(id)}
+}
+
+func (s *stubCompactSession) CompactSession() error {
+	s.compactCalls++
+	return s.compactErr
+}
+
 func TestCmdCompress_NoCompressor_RepliesNotSupported(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -6795,6 +6810,49 @@ func TestAutoCompress_TriggerAfterResult(t *testing.T) {
 	}
 }
 
+func TestAutoCompress_TriggerAfterResult_NativeSessionCompactor(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newStubCompactSession("auto-compress-native")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetAutoCompressConfig(true, 4, 0)
+
+	key := "test:user1"
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	session := e.sessions.GetOrCreateActive(key)
+	session.AddHistory("user", "hello world")
+
+	go e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), func() {}, nil, nil)
+
+	sess.events <- Event{Type: EventResult, Content: "response", Done: true}
+
+	deadline := time.After(2 * time.Second)
+	for {
+		if sess.compactCalls > 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for native auto-compress call")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	if len(sess.sendCalls) != 0 {
+		t.Fatalf("sendCalls = %v, want none for native auto-compactor", sess.sendCalls)
+	}
+
+	sess.events <- Event{Type: EventResult, Content: "", Done: true}
+}
+
 func TestCmdCompress_SessionBusy_RepliesPreviousProcessing(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newQueuingSession("compress-busy")
@@ -6868,6 +6926,62 @@ func TestCmdCompress_Success_SendsCompressDone(t *testing.T) {
 		default:
 			time.Sleep(5 * time.Millisecond)
 		}
+	}
+
+	sess.events <- Event{Type: EventResult, Content: "", Done: true}
+
+	for {
+		sent := p.getSent()
+		foundDone := false
+		for _, s := range sent {
+			if strings.Contains(s, e.i18n.T(MsgCompressDone)) {
+				foundDone = true
+			}
+		}
+		if foundDone {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for MsgCompressDone, sent = %v", p.getSent())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
+func TestCmdCompress_NativeSessionCompactor_SendsCompressDone(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newStubCompactSession("compress-native")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	msg := &Message{SessionKey: key, Content: "/compress", ReplyCtx: "ctx"}
+	e.cmdCompress(p, msg)
+
+	deadline := time.After(3 * time.Second)
+	for {
+		if sess.compactCalls == 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for native compact call, compactCalls = %d", sess.compactCalls)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if len(sess.sendCalls) != 0 {
+		t.Fatalf("sendCalls = %v, want none for native compactor", sess.sendCalls)
 	}
 
 	sess.events <- Event{Type: EventResult, Content: "", Done: true}
