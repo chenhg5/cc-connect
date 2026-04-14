@@ -3401,13 +3401,29 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(successKey, wsName))
 		return true
 	}
-	initWorkspace := func(bindingKey, repoURL string, successKey MsgKey) bool {
-		if !looksLikeGitURL(repoURL) {
-			e.reply(p, msg.ReplyCtx, "That doesn't look like a git URL.")
+	initWorkspace := func(bindingKey, target string, successKey MsgKey) bool {
+		// Support local directory paths (absolute or relative to baseDir).
+		if looksLikeLocalDir(target) {
+			dirPath := target
+			if !filepath.IsAbs(dirPath) {
+				dirPath = filepath.Join(e.baseDir, dirPath)
+			}
+			info, err := os.Stat(dirPath)
+			if err != nil || !info.IsDir() {
+				e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsInitDirNotFound, target))
+				return false
+			}
+			e.workspaceBindings.Bind(bindingKey, channelKey, resolveChannelName(), normalizeWorkspacePath(dirPath))
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(successKey, dirPath))
+			return true
+		}
+
+		if !looksLikeGitURL(target) {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsInitInvalidTarget))
 			return false
 		}
 
-		repoName := extractRepoName(repoURL)
+		repoName := extractRepoName(target)
 		cloneTo := filepath.Join(e.baseDir, repoName)
 
 		if _, err := os.Stat(cloneTo); err == nil {
@@ -3416,9 +3432,9 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 			return true
 		}
 
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsCloneProgress, repoURL))
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsCloneProgress, target))
 
-		if err := gitClone(repoURL, cloneTo); err != nil {
+		if err := gitClone(target, cloneTo); err != nil {
 			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsCloneFailed, err))
 			return false
 		}
@@ -10278,8 +10294,29 @@ func (e *Engine) handleWorkspaceInitFlow(p Platform, msg *Message, channelName s
 
 	switch flow.state {
 	case "awaiting_url":
+		// Accept local directory paths: bind directly without cloning.
+		if looksLikeLocalDir(content) {
+			dirPath := content
+			if !filepath.IsAbs(dirPath) {
+				dirPath = filepath.Join(e.baseDir, dirPath)
+			}
+			info, err := os.Stat(dirPath)
+			if err != nil || !info.IsDir() {
+				e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsInitDirNotFound, content))
+				return true
+			}
+			projectKey := "project:" + e.name
+			e.workspaceBindings.Bind(projectKey, channelKey, flow.channelName, normalizeWorkspacePath(dirPath))
+			e.initFlowsMu.Lock()
+			delete(e.initFlows, channelKey)
+			e.initFlowsMu.Unlock()
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(
+				"Bound workspace `%s` to this channel. Ready.", dirPath))
+			return true
+		}
+
 		if !looksLikeGitURL(content) {
-			e.reply(p, msg.ReplyCtx, "That doesn't look like a git URL. Please provide a URL like `https://github.com/org/repo` or `git@github.com:org/repo.git`.")
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsInitInvalidTarget))
 			return true
 		}
 		repoName := extractRepoName(content)
@@ -10335,6 +10372,20 @@ func looksLikeGitURL(s string) bool {
 		strings.HasPrefix(s, "http://") ||
 		strings.HasPrefix(s, "git@") ||
 		strings.HasPrefix(s, "ssh://")
+}
+
+// looksLikeLocalDir returns true if the string looks like a local directory
+// path (absolute path, home-relative, dot-relative, or a bare name that
+// doesn't look like a URL).
+func looksLikeLocalDir(s string) bool {
+	if s == "" {
+		return false
+	}
+	return strings.HasPrefix(s, "/") ||
+		strings.HasPrefix(s, "~/") ||
+		strings.HasPrefix(s, "./") ||
+		strings.HasPrefix(s, "../") ||
+		(!strings.Contains(s, "://") && !strings.Contains(s, "@"))
 }
 
 func extractRepoName(url string) string {

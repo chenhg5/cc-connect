@@ -7999,6 +7999,88 @@ func TestWorkspace_SharedInit_BindsExistingDir(t *testing.T) {
 	}
 }
 
+func TestWorkspace_Init_LocalDirAbsolute(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "my-project")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	msg := &Message{
+		SessionKey: "test:ch1:user1",
+		Content:    "/workspace init " + wsDir,
+		ReplyCtx:   "ctx",
+		UserID:     "user1",
+	}
+	e.handleCommand(p, msg, msg.Content)
+
+	normalizedWsDir := normalizeWorkspacePath(wsDir)
+	projectKey := "project:test"
+	if got := e.workspaceBindings.Lookup(projectKey, workspaceChannelKey("test", "ch1")); got == nil || got.Workspace != normalizedWsDir {
+		t.Fatalf("expected init binding %q, got %+v", normalizedWsDir, got)
+	}
+}
+
+func TestWorkspace_Init_LocalDirRelative(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "my-project")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	// Use relative name — should resolve under baseDir.
+	msg := &Message{
+		SessionKey: "test:ch1:user1",
+		Content:    "/workspace init my-project",
+		ReplyCtx:   "ctx",
+		UserID:     "user1",
+	}
+	e.handleCommand(p, msg, msg.Content)
+
+	normalizedWsDir := normalizeWorkspacePath(wsDir)
+	projectKey := "project:test"
+	if got := e.workspaceBindings.Lookup(projectKey, workspaceChannelKey("test", "ch1")); got == nil || got.Workspace != normalizedWsDir {
+		t.Fatalf("expected init binding %q, got %+v", normalizedWsDir, got)
+	}
+}
+
+func TestWorkspace_Init_LocalDirNotFound(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	msg := &Message{
+		SessionKey: "test:ch1:user1",
+		Content:    "/workspace init nonexistent-dir",
+		ReplyCtx:   "ctx",
+		UserID:     "user1",
+	}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[0], "nonexistent-dir") {
+		t.Fatalf("expected error mentioning missing dir, got %v", sent)
+	}
+
+	projectKey := "project:test"
+	if got := e.workspaceBindings.Lookup(projectKey, workspaceChannelKey("test", "ch1")); got != nil {
+		t.Fatalf("expected no binding for nonexistent dir, got %+v", got)
+	}
+}
+
 func TestWorkspace_Unbind_SharedBindingShowsHint(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
