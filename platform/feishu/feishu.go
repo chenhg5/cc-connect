@@ -315,12 +315,9 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 			return p.onBotMenu(event)
 		})
 
-	// Lark international version uses Webhook mode, not WebSocket long connection
-	// Feishu domestic version supports WebSocket long connection
-	if p.platformName == "lark" {
-		return p.startWebhookMode()
-	}
-
+	// Kernel dedicated build: both Feishu and Lark use the official SDK WebSocket
+	// long-connection path. Keep the webhook implementation available as a helper,
+	// but do not make it the default ingress mode for Lark.
 	return p.startWebSocketMode()
 }
 
