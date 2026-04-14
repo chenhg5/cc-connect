@@ -554,6 +554,59 @@ func (s *appServerSession) SetThreadName(name string) error {
 	}, nil)
 }
 
+func (s *appServerSession) ListRuntimeSkills(forceReload bool) ([]core.RuntimeSkill, error) {
+	if !s.alive.Load() {
+		return nil, fmt.Errorf("session is closed")
+	}
+
+	var resp struct {
+		Data []struct {
+			Skills []struct {
+				Name        string `json:"name"`
+				Description string `json:"description"`
+				Enabled     *bool  `json:"enabled"`
+				Interface   *struct {
+					DisplayName      string `json:"displayName"`
+					ShortDescription string `json:"shortDescription"`
+				} `json:"interface"`
+			} `json:"skills"`
+		} `json:"data"`
+	}
+	if err := s.request("skills/list", map[string]any{
+		"cwds":        []string{s.workDir},
+		"forceReload": forceReload,
+	}, &resp); err != nil {
+		return nil, err
+	}
+
+	var out []core.RuntimeSkill
+	seen := make(map[string]struct{})
+	for _, item := range resp.Data {
+		for _, skill := range item.Skills {
+			if strings.TrimSpace(skill.Name) == "" {
+				continue
+			}
+			if skill.Enabled != nil && !*skill.Enabled {
+				continue
+			}
+			desc := strings.TrimSpace(skill.Description)
+			if desc == "" && skill.Interface != nil {
+				desc = strings.TrimSpace(skill.Interface.ShortDescription)
+			}
+			key := strings.ToLower(strings.TrimSpace(skill.Name))
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, core.RuntimeSkill{
+				Name:        strings.TrimSpace(skill.Name),
+				Description: desc,
+			})
+		}
+	}
+	return out, nil
+}
+
 func (s *appServerSession) Alive() bool {
 	return s.alive.Load()
 }

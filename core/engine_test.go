@@ -4520,6 +4520,71 @@ func TestCmdSkills_TelegramShowsManualInvocationHintWhenSkillsAreOmittedFromMenu
 	}
 }
 
+func TestCmdSkills_UsesRuntimeSkillListWhenAvailable(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sess := newStubSkillListSession("skills-runtime")
+	sess.skills = []RuntimeSkill{{Name: "runtime-skill", Description: "Runtime description"}}
+
+	key := "test:user1"
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Unlock()
+
+	e.cmdSkills(p, &Message{SessionKey: key, ReplyCtx: "ctx"})
+
+	if sess.calls != 1 {
+		t.Fatalf("ListRuntimeSkills calls = %d, want 1", sess.calls)
+	}
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "/runtime-skill") || !strings.Contains(p.sent[0], "Runtime description") {
+		t.Fatalf("skills text = %q, want runtime skills list", p.sent[0])
+	}
+}
+
+func TestCmdSkills_RuntimeSkillListFallbacksToLocalRegistryOnError(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	temp := t.TempDir()
+	skillDir := temp + "/demo"
+	if err := os.Mkdir(skillDir, 0o755); err != nil {
+		t.Fatalf("mkdir skill dir: %v", err)
+	}
+	if err := os.WriteFile(skillDir+"/SKILL.md", []byte("---\ndescription: Demo skill\n---\nDo demo"), 0o644); err != nil {
+		t.Fatalf("write skill file: %v", err)
+	}
+	e.skills.SetDirs([]string{temp})
+
+	sess := newStubSkillListSession("skills-runtime")
+	sess.err = fmt.Errorf("boom")
+	key := "test:user1"
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Unlock()
+
+	e.cmdSkills(p, &Message{SessionKey: key, ReplyCtx: "ctx"})
+
+	if sess.calls != 1 {
+		t.Fatalf("ListRuntimeSkills calls = %d, want 1", sess.calls)
+	}
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "/demo") {
+		t.Fatalf("skills text = %q, want local fallback skill", p.sent[0])
+	}
+}
+
 func TestRenderListCard_MakesEveryVisibleSessionClickable(t *testing.T) {
 	sessions := make([]AgentSessionInfo, 0, 7)
 	base := time.Date(2026, 3, 9, 10, 0, 0, 0, time.UTC)
@@ -6739,6 +6804,25 @@ func newStubThreadNameSession(id string) *stubThreadNameSession {
 func (s *stubThreadNameSession) SetThreadName(name string) error {
 	s.names = append(s.names, name)
 	return s.nameErr
+}
+
+type stubSkillListSession struct {
+	*queuingAgentSession
+	skills []RuntimeSkill
+	err    error
+	calls  int
+}
+
+func newStubSkillListSession(id string) *stubSkillListSession {
+	return &stubSkillListSession{queuingAgentSession: newQueuingSession(id)}
+}
+
+func (s *stubSkillListSession) ListRuntimeSkills(_ bool) ([]RuntimeSkill, error) {
+	s.calls++
+	if s.err != nil {
+		return nil, s.err
+	}
+	return append([]RuntimeSkill(nil), s.skills...), nil
 }
 
 func TestCmdCompress_NoCompressor_RepliesNotSupported(t *testing.T) {

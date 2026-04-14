@@ -268,6 +268,12 @@ type SessionThreadNamer interface {
 	SetThreadName(name string) error
 }
 
+// RuntimeSkill describes one skill surfaced by a running agent/backend.
+type RuntimeSkill struct {
+	Name        string
+	Description string
+}
+
 // PermissionResult represents the user's decision on a permission request.
 type PermissionResult struct {
 	Behavior     string         `json:"behavior"`               // "allow" or "deny"
@@ -426,6 +432,12 @@ type CommandProvider interface {
 // agent-specific — they are NOT shared across different agent types.
 type SkillProvider interface {
 	SkillDirs() []string
+}
+
+// SessionSkillLister is an optional interface for running agent sessions that
+// can enumerate the runtime skill inventory exposed by the backend.
+type SessionSkillLister interface {
+	ListRuntimeSkills(forceReload bool) ([]RuntimeSkill, error)
 }
 
 // SessionDeleter is an optional interface for agents that support deleting sessions.

@@ -7341,7 +7341,7 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 	case "/config":
 		return e.renderConfigCard()
 	case "/skills":
-		return e.renderSkillsCard()
+		return e.renderSkillsCard(sessionKey)
 	case "/doctor":
 		return e.renderDoctorCard()
 	case "/whoami":
@@ -8695,8 +8695,40 @@ func (e *Engine) renderConfigCard() *Card {
 		Build()
 }
 
-func (e *Engine) renderSkillsCard() *Card {
+func (e *Engine) skillListForDisplay(sessionKey string) []RuntimeSkill {
+	iKey := e.interactiveKeyForSessionKey(sessionKey)
+	e.interactiveMu.Lock()
+	state, ok := e.interactiveStates[iKey]
+	e.interactiveMu.Unlock()
+	if !ok || state == nil || state.agentSession == nil || !state.agentSession.Alive() {
+		return e.localSkillListForDisplay()
+	}
+	lister, ok := state.agentSession.(SessionSkillLister)
+	if !ok {
+		return e.localSkillListForDisplay()
+	}
+	skills, err := lister.ListRuntimeSkills(false)
+	if err != nil {
+		slog.Warn("failed to list runtime skills", "session_key", sessionKey, "error", err)
+		return e.localSkillListForDisplay()
+	}
+	return skills
+}
+
+func (e *Engine) localSkillListForDisplay() []RuntimeSkill {
 	skills := e.skills.ListAll()
+	out := make([]RuntimeSkill, 0, len(skills))
+	for _, s := range skills {
+		out = append(out, RuntimeSkill{
+			Name:        s.Name,
+			Description: s.Description,
+		})
+	}
+	return out
+}
+
+func (e *Engine) renderSkillsCard(sessionKey string) *Card {
+	skills := e.skillListForDisplay(sessionKey)
 	if len(skills) == 0 {
 		return e.simpleCard(e.i18n.T(MsgCardTitleSkills), "purple", e.i18n.T(MsgSkillsEmpty))
 	}
@@ -9618,8 +9650,8 @@ func (e *Engine) executeSkill(p Platform, msg *Message, skill *Skill, args []str
 }
 
 func (e *Engine) cmdSkills(p Platform, msg *Message) {
+	skills := e.skillListForDisplay(msg.SessionKey)
 	if !supportsCards(p) {
-		skills := e.skills.ListAll()
 		if len(skills) == 0 {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSkillsEmpty))
 			return
@@ -9640,7 +9672,7 @@ func (e *Engine) cmdSkills(p Platform, msg *Message) {
 		return
 	}
 
-	e.replyWithCard(p, msg.ReplyCtx, e.renderSkillsCard())
+	e.replyWithCard(p, msg.ReplyCtx, e.renderSkillsCard(msg.SessionKey))
 }
 
 // ── /config command ──────────────────────────────────────────
