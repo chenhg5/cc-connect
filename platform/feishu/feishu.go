@@ -120,6 +120,7 @@ type Platform struct {
 	reactionEmoji              string
 	allowFrom                  string
 	allowChat                  string
+	groupOnly                  bool
 	groupReplyAll              bool
 	respondToAtEveryoneAndHere bool
 	shareSessionInChannel      bool
@@ -186,6 +187,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	allowFrom, _ := opts["allow_from"].(string)
 	core.CheckAllowFrom(name, allowFrom)
 	allowChat, _ := opts["allow_chat"].(string)
+	groupOnly, _ := opts["group_only"].(bool)
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
 	respondToAtEveryoneAndHere, _ := opts["respond_to_at_everyone_and_here"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
@@ -237,6 +239,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		reactionEmoji:              reactionEmoji,
 		allowFrom:                  allowFrom,
 		allowChat:                  allowChat,
+		groupOnly:                  groupOnly,
 		groupReplyAll:              groupReplyAll,
 		respondToAtEveryoneAndHere: respondToAtEveryoneAndHere,
 		shareSessionInChannel:      shareSessionInChannel,
@@ -756,6 +759,10 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 
 	if chatType == "group" && !core.AllowList(p.allowChat, chatID) {
 		slog.Debug(p.tag()+": message from unauthorized chat", "chat_id", chatID)
+		return nil
+	}
+	if chatType != "group" && p.groupOnly {
+		slog.Debug(p.tag()+": p2p message skipped (group_only=true)", "chat_type", chatType)
 		return nil
 	}
 
