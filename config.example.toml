@@ -734,6 +734,8 @@ app_secret = "your-feishu-app-secret"
 #                              # 启用飞书交互式卡片（默认 true）；设为 false 时强制回退纯文本回复
 # allow_from = "*"          # Allowed user open_ids, comma-separated; "*" = all (default). Use /whoami to get your open_id.
 #                              # 允许的用户 open_id，逗号分隔；"*" 表示所有（默认）。发送 /whoami 获取你的 open_id。
+# allow_chat = "*"          # Allowed group chat_ids, comma-separated; "*" = all (default). Find chat_id in group settings.
+#                           # 允许的群聊 chat_id，逗号分隔；"*" 表示所有（默认）。在群设置中查看 chat_id。
 # reaction_emoji = "OnIt"  # Emoji reaction on incoming messages (default: "OnIt"); set to "none" to disable
 #                           # 收到消息时添加的表情回复（默认 "OnIt"）；设为 "none" 可禁用
 # group_reply_all = false   # If true, respond to ALL group messages without requiring @mention

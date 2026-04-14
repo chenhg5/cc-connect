@@ -119,6 +119,7 @@ type Platform struct {
 	self                       core.Platform
 	reactionEmoji              string
 	allowFrom                  string
+	allowChat                  string
 	groupReplyAll              bool
 	respondToAtEveryoneAndHere bool
 	shareSessionInChannel      bool
@@ -182,6 +183,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	}
 	allowFrom, _ := opts["allow_from"].(string)
 	core.CheckAllowFrom(name, allowFrom)
+	allowChat, _ := opts["allow_chat"].(string)
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
 	respondToAtEveryoneAndHere, _ := opts["respond_to_at_everyone_and_here"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
@@ -232,6 +234,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		useInteractiveCard:         useInteractiveCard,
 		reactionEmoji:              reactionEmoji,
 		allowFrom:                  allowFrom,
+		allowChat:                  allowChat,
 		groupReplyAll:              groupReplyAll,
 		respondToAtEveryoneAndHere: respondToAtEveryoneAndHere,
 		shareSessionInChannel:      shareSessionInChannel,
@@ -712,6 +715,11 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 
 	if !core.AllowList(p.allowFrom, userID) {
 		slog.Debug(p.tag()+": message from unauthorized user", "user", userID)
+		return nil
+	}
+
+	if chatType == "group" && !core.AllowList(p.allowChat, chatID) {
+		slog.Debug(p.tag()+": message from unauthorized chat", "chat_id", chatID)
 		return nil
 	}
 
