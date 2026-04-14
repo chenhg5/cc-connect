@@ -41,6 +41,36 @@ func (stubPlatformNoProgress) Reply(context.Context, any, string) error { return
 func (stubPlatformNoProgress) Send(context.Context, any, string) error  { return nil }
 func (stubPlatformNoProgress) Stop() error                              { return nil }
 
+type progressHintReplyCtx struct {
+	style   string
+	payload bool
+}
+
+func (r progressHintReplyCtx) progressStyleHint() string { return r.style }
+
+func (r progressHintReplyCtx) supportsProgressCardPayloadHint() bool { return r.payload }
+
+type previewCapturePlatform struct {
+	started []string
+	updated []string
+}
+
+func (p *previewCapturePlatform) Name() string                             { return "bridge" }
+func (p *previewCapturePlatform) Start(MessageHandler) error               { return nil }
+func (p *previewCapturePlatform) Reply(context.Context, any, string) error { return nil }
+func (p *previewCapturePlatform) Send(context.Context, any, string) error  { return nil }
+func (p *previewCapturePlatform) Stop() error                              { return nil }
+
+func (p *previewCapturePlatform) SendPreviewStart(_ context.Context, _ any, content string) (any, error) {
+	p.started = append(p.started, content)
+	return "preview-1", nil
+}
+
+func (p *previewCapturePlatform) UpdateMessage(_ context.Context, _ any, content string) error {
+	p.updated = append(p.updated, content)
+	return nil
+}
+
 func TestBuildAndParseProgressCardPayload(t *testing.T) {
 	payload := BuildProgressCardPayload([]string{" step1 ", "", "step2"}, true)
 	if payload == "" {
@@ -68,6 +98,50 @@ func TestBuildAndParseProgressCardPayload(t *testing.T) {
 	}
 	if parsed.Items[0].Kind != ProgressEntryInfo || parsed.Items[0].Text != "step1" {
 		t.Fatalf("items[0] = %#v, want info/step1", parsed.Items[0])
+	}
+}
+
+func TestCompactProgressWriter_UsesReplyContextHints(t *testing.T) {
+	p := &previewCapturePlatform{}
+	replyCtx := progressHintReplyCtx{
+		style:   progressStyleCard,
+		payload: true,
+	}
+
+	w := newCompactProgressWriter(context.Background(), p, replyCtx, "codex", LangEnglish, nil)
+	if !w.enabled {
+		t.Fatal("progress writer should be enabled")
+	}
+	if !w.usePayload {
+		t.Fatal("progress writer should use payload when reply context advertises it")
+	}
+	if got := w.style; got != progressStyleCard {
+		t.Fatalf("style = %q, want %q", got, progressStyleCard)
+	}
+
+	if !w.AppendEvent(ProgressEntryThinking, "planning bridge progress", "", "planning bridge progress") {
+		t.Fatal("AppendEvent() = false, want true")
+	}
+	if len(p.started) != 1 {
+		t.Fatalf("started = %d, want 1", len(p.started))
+	}
+	if !strings.HasPrefix(p.started[0], ProgressCardPayloadPrefix) {
+		t.Fatalf("preview start payload = %q, want progress payload prefix", p.started[0])
+	}
+
+	if !w.Finalize(ProgressCardStateCompleted) {
+		t.Fatal("Finalize() = false, want true")
+	}
+	if len(p.updated) != 1 {
+		t.Fatalf("updated = %d, want 1", len(p.updated))
+	}
+
+	parsed, ok := ParseProgressCardPayload(p.updated[0])
+	if !ok {
+		t.Fatalf("ParseProgressCardPayload() failed for %q", p.updated[0])
+	}
+	if parsed.State != ProgressCardStateCompleted {
+		t.Fatalf("state = %q, want %q", parsed.State, ProgressCardStateCompleted)
 	}
 }
 
