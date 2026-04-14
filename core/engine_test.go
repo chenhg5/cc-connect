@@ -5057,6 +5057,17 @@ func (s *controllableAgentSession) Close() error {
 	return nil
 }
 
+type interruptibleAgentSession struct {
+	*controllableAgentSession
+	calls int
+	err   error
+}
+
+func (s *interruptibleAgentSession) InterruptSession(_ context.Context) error {
+	s.calls++
+	return s.err
+}
+
 // controllableAgent lets tests control which session is returned by StartSession.
 type controllableAgent struct {
 	nextSession AgentSession
@@ -7331,6 +7342,86 @@ func TestCmdStop_UsesInteractiveKeyForMultiWorkspace(t *testing.T) {
 
 	if exists {
 		t.Error("expected interactive state to be cleaned up by /stop using interactiveKey")
+	}
+}
+
+func TestCmdInterrupt_NoExecution(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	e.cmdInterrupt(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"})
+
+	sent := p.getSent()
+	if len(sent) != 1 || sent[0] != e.i18n.T(MsgNoExecution) {
+		t.Fatalf("sent messages = %v, want only no-execution reply", sent)
+	}
+}
+
+func TestCmdInterrupt_RequestsSessionInterrupt(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	sess := &interruptibleAgentSession{controllableAgentSession: newControllableSession("interrupt-test")}
+	key := "test:user1"
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{agentSession: sess}
+	e.interactiveMu.Unlock()
+
+	e.cmdInterrupt(p, &Message{SessionKey: key, ReplyCtx: "ctx"})
+
+	if sess.calls != 1 {
+		t.Fatalf("InterruptSession calls = %d, want 1", sess.calls)
+	}
+
+	e.interactiveMu.Lock()
+	_, exists := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	if !exists {
+		t.Fatal("expected interactive state to remain after /interrupt")
+	}
+
+	sent := p.getSent()
+	if len(sent) != 1 || sent[0] != e.i18n.T(MsgInterruptRequested) {
+		t.Fatalf("sent messages = %v, want only interrupt requested reply", sent)
+	}
+}
+
+func TestCmdInterrupt_NotSupported(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{agentSession: newControllableSession("plain")}
+	e.interactiveMu.Unlock()
+
+	e.cmdInterrupt(p, &Message{SessionKey: key, ReplyCtx: "ctx"})
+
+	sent := p.getSent()
+	if len(sent) != 1 || sent[0] != e.i18n.T(MsgInterruptNotSupported) {
+		t.Fatalf("sent messages = %v, want only interrupt-not-supported reply", sent)
+	}
+}
+
+func TestCmdInterrupt_UsesInteractiveKeyForMultiWorkspace(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	sess := &interruptibleAgentSession{controllableAgentSession: newControllableSession("ws-interrupt")}
+	wsDir := t.TempDir()
+	rawKey := "feishu:ch1:user1"
+	wsKey := wsDir + ":" + rawKey
+	iKey := e.interactiveKeyForSessionKey(wsKey)
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[iKey] = &interactiveState{agentSession: sess}
+	e.interactiveMu.Unlock()
+
+	e.cmdInterrupt(p, &Message{SessionKey: wsKey, ReplyCtx: "ctx"})
+
+	if sess.calls != 1 {
+		t.Fatalf("InterruptSession calls = %d, want 1", sess.calls)
 	}
 }
 

@@ -398,6 +398,12 @@ type ContextCompressor interface {
 	CompressCommand() string
 }
 
+// SessionInterrupter is an optional interface for sessions that can
+// interrupt the currently running turn without tearing down the whole session.
+type SessionInterrupter interface {
+	InterruptSession(ctx context.Context) error
+}
+
 // CommandProvider is an optional interface for agents that expose custom slash
 // commands via local files (e.g. .claude/commands/*.md). The engine scans the
 // returned directories for *.md files and registers them as slash commands.

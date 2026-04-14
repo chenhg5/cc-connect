@@ -531,6 +531,35 @@ func (s *appServerSession) Alive() bool {
 	return s.alive.Load()
 }
 
+func (s *appServerSession) InterruptSession(ctx context.Context) error {
+	threadID := s.CurrentSessionID()
+	if threadID == "" {
+		return fmt.Errorf("codex app-server thread id is empty")
+	}
+
+	s.stateMu.Lock()
+	turnID := s.currentTurn
+	s.stateMu.Unlock()
+	if strings.TrimSpace(turnID) == "" {
+		return fmt.Errorf("codex app-server has no active turn to interrupt")
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- s.request("turn/interrupt", map[string]any{
+			"threadId": threadID,
+			"turnId":   turnID,
+		}, nil)
+	}()
+
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (s *appServerSession) Close() error {
 	s.alive.Store(false)
 	s.cancel()
@@ -708,6 +737,11 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 	case "turn/completed":
 		var notif turnNotification
 		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
+			s.stateMu.Lock()
+			if notif.Turn.ID == s.currentTurn {
+				s.currentTurn = ""
+			}
+			s.stateMu.Unlock()
 			s.flushPendingAsText()
 			s.emit(core.Event{
 				Type:      core.EventResult,

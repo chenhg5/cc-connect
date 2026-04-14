@@ -622,6 +622,31 @@ func (cs *claudeSession) RespondPermission(requestID string, result core.Permiss
 	return cs.writeJSON(controlResponse)
 }
 
+func (cs *claudeSession) InterruptSession(ctx context.Context) error {
+	if !cs.alive.Load() {
+		return fmt.Errorf("session process is not running")
+	}
+
+	reqID := fmt.Sprintf("cc-connect-interrupt-%d", time.Now().UnixNano())
+	done := make(chan error, 1)
+	go func() {
+		done <- cs.writeJSON(map[string]any{
+			"type":       "control_request",
+			"request_id": reqID,
+			"request": map[string]any{
+				"subtype": "interrupt",
+			},
+		})
+	}()
+
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (cs *claudeSession) writeJSON(v any) error {
 	cs.stdinMu.Lock()
 	defer cs.stdinMu.Unlock()
