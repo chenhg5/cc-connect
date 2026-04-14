@@ -979,6 +979,48 @@ func TestProcessInteractiveEvents_ToolMessagesDisabledSuppressesToolProgressOnly
 	}
 }
 
+// Regression test for #549: when tool_messages=false, EventResult.Content only
+// contains the last assistant turn text, not the full accumulated response.
+// The engine must use accumulated textParts to build fullResponse.
+func TestProcessInteractiveEvents_HiddenToolMessages_AccumulatesAllText(t *testing.T) {
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{ToolMessages: false})
+	sessionKey := "telegram:user-549"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s549")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-549",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	// Simulate: text → tool → text → tool → text → result
+	// The agent sends three text segments, but EventResult.Content only has the last.
+	agentSession.events <- Event{Type: EventText, Content: "First part. "}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"}
+	agentSession.events <- Event{Type: EventToolResult, ToolName: "Bash", ToolResult: "file.go"}
+	agentSession.events <- Event{Type: EventText, Content: "Second part. "}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Read", ToolInput: "file.go"}
+	agentSession.events <- Event{Type: EventToolResult, ToolName: "Read", ToolResult: "package main"}
+	agentSession.events <- Event{Type: EventText, Content: "Third part."}
+	// EventResult.Content = only the last turn text, NOT the full accumulated text
+	agentSession.events <- Event{Type: EventResult, Content: "Third part.", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m549", time.Now(), nil, nil, nil)
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("expected at least one sent message")
+	}
+	final := sent[len(sent)-1]
+	wantAll := "First part. Second part. Third part."
+	if final != wantAll {
+		t.Fatalf("final message = %q (len=%d), want %q (len=%d)", final, len(final), wantAll, len(wantAll))
+	}
+}
+
 func TestProcessInteractiveEvents_CompactProgressCoalescesThinkingAndToolUse(t *testing.T) {
 	p := &stubCompactProgressPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)

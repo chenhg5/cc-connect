@@ -2711,8 +2711,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 			fullResponse := event.Content
-			if fullResponse == "" && len(textParts) > 0 {
-				fullResponse = strings.Join(textParts, "")
+			// When tool messages are hidden (segmentStart stays 0), event.Content
+			// only contains the last assistant turn text. Use accumulated textParts
+			// which hold all assistant text across the entire turn.
+			if len(textParts) > 0 {
+				accumulated := strings.Join(textParts, "")
+				if len(accumulated) > len(fullResponse) {
+					fullResponse = accumulated
+				}
 			}
 			if fullResponse == "" {
 				fullResponse = e.i18n.T(MsgEmptyResponse)
