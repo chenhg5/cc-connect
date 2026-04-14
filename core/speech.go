@@ -406,9 +406,9 @@ func ConvertMP3ToOGG(ctx context.Context, mp3Data []byte) ([]byte, error) {
 	args := []string{
 		"-i", "pipe:0",
 		"-c:a", "libopus",
-		"-ar", "16000",       // 16kHz sample rate for voice
-		"-ac", "1",           // mono
-		"-b:a", "32k",        // 32 kbps bitrate (voice quality)
+		"-ar", "16000", // 16kHz sample rate for voice
+		"-ac", "1", // mono
+		"-b:a", "32k", // 32 kbps bitrate (voice quality)
 		"-application", "voip", // optimize for voice
 		"-f", "ogg",
 		"-y",
@@ -437,9 +437,9 @@ func ConvertMP3ToAMR(ctx context.Context, mp3Data []byte) ([]byte, error) {
 	args := []string{
 		"-i", "pipe:0",
 		"-c:a", "amr_nb",
-		"-ar", "8000",     // 8kHz sample rate (AMR-NB standard)
-		"-ac", "1",        // mono
-		"-b:a", "12.2k",   // 12.2 kbps bitrate (AMR-NB max)
+		"-ar", "8000", // 8kHz sample rate (AMR-NB standard)
+		"-ac", "1", // mono
+		"-b:a", "12.2k", // 12.2 kbps bitrate (AMR-NB max)
 		"-f", "amr",
 		"-y",
 		"pipe:1",

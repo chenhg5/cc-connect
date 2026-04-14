@@ -78,7 +78,6 @@ func normalizeMode(raw string) string {
 	}
 }
 
-
 func (a *Agent) Name() string           { return "cursor" }
 func (a *Agent) CLIBinaryName() string  { return "agent" }
 func (a *Agent) CLIDisplayName() string { return "Cursor Agent" }

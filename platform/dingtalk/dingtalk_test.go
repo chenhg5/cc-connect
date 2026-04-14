@@ -55,7 +55,7 @@ func TestGetAccessToken_ConcurrentAccess(t *testing.T) {
 func TestGetAccessToken_MutexExists(t *testing.T) {
 	// Verify that the tokenMu mutex field exists and works
 	p := &Platform{
-		clientID:    "test_client",
+		clientID:     "test_client",
 		clientSecret: "test_secret",
 	}
 
