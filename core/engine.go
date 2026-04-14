@@ -4764,6 +4764,18 @@ func (e *Engine) cmdName(p Platform, msg *Message, args []string) {
 
 	sessions.SetSessionName(targetID, name)
 
+	iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
+	e.interactiveMu.Lock()
+	state, ok := e.interactiveStates[iKey]
+	e.interactiveMu.Unlock()
+	if ok && state != nil && state.agentSession != nil && state.agentSession.CurrentSessionID() == targetID {
+		if namer, ok := state.agentSession.(SessionThreadNamer); ok {
+			if err := namer.SetThreadName(name); err != nil {
+				slog.Warn("failed to sync native thread name", "agent_session", targetID, "error", err)
+			}
+		}
+	}
+
 	shortID := targetID
 	if len(shortID) > 12 {
 		shortID = shortID[:12]

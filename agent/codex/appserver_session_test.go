@@ -239,6 +239,81 @@ func TestAppServerSessionCompactSession_RequiresThreadID(t *testing.T) {
 	}
 }
 
+func TestAppServerSessionSetThreadName_RequestShape(t *testing.T) {
+	reqCh := make(chan map[string]any, 1)
+	s := &appServerSession{
+		ctx:     context.Background(),
+		events:  make(chan core.Event, 1),
+		pending: make(map[int64]chan rpcResponseEnvelope),
+	}
+	s.alive.Store(true)
+	s.threadID.Store("thread-123")
+	s.stdin = nopWriteCloser{write: func(p []byte) (int, error) {
+		var req map[string]any
+		if err := json.Unmarshal(bytesTrimSpace(p), &req); err != nil {
+			t.Errorf("unmarshal request: %v", err)
+			return 0, err
+		}
+		reqCh <- req
+		return len(p), nil
+	}}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- s.SetThreadName("feature-branch")
+	}()
+
+	var req map[string]any
+	select {
+	case req = <-reqCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for request")
+	}
+
+	if got := req["method"]; got != "thread/name/set" {
+		t.Fatalf("method = %v, want thread/name/set", got)
+	}
+	params, _ := req["params"].(map[string]any)
+	if params == nil {
+		t.Fatal("params missing")
+	}
+	if got := params["threadId"]; got != "thread-123" {
+		t.Fatalf("threadId = %v, want thread-123", got)
+	}
+	if got := params["name"]; got != "feature-branch" {
+		t.Fatalf("name = %v, want feature-branch", got)
+	}
+
+	id, _ := rpcIDToInt64(req["id"])
+	s.pendingMu.Lock()
+	ch := s.pending[id]
+	s.pendingMu.Unlock()
+	if ch == nil {
+		t.Fatal("pending request channel missing")
+	}
+	ch <- rpcResponseEnvelope{ID: id, Result: json.RawMessage(`{}`)}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("SetThreadName() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for SetThreadName to finish")
+	}
+}
+
+func TestAppServerSessionSetThreadName_RequiresThreadID(t *testing.T) {
+	s := &appServerSession{
+		events: make(chan core.Event, 1),
+	}
+	s.alive.Store(true)
+
+	if err := s.SetThreadName("feature-branch"); err == nil {
+		t.Fatal("SetThreadName() error = nil, want error")
+	}
+}
+
 type nopWriteCloser struct {
 	write func([]byte) (int, error)
 }

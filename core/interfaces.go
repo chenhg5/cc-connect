@@ -262,6 +262,12 @@ type SessionCompactor interface {
 	CompactSession() error
 }
 
+// SessionThreadNamer is an optional interface for running agent sessions that
+// can update the agent/backend's user-facing thread name for the active session.
+type SessionThreadNamer interface {
+	SetThreadName(name string) error
+}
+
 // PermissionResult represents the user's decision on a permission request.
 type PermissionResult struct {
 	Behavior     string         `json:"behavior"`               // "allow" or "deny"

@@ -6726,6 +6726,21 @@ func (s *stubCompactSession) CompactSession() error {
 	return s.compactErr
 }
 
+type stubThreadNameSession struct {
+	*queuingAgentSession
+	names   []string
+	nameErr error
+}
+
+func newStubThreadNameSession(id string) *stubThreadNameSession {
+	return &stubThreadNameSession{queuingAgentSession: newQueuingSession(id)}
+}
+
+func (s *stubThreadNameSession) SetThreadName(name string) error {
+	s.names = append(s.names, name)
+	return s.nameErr
+}
+
 func TestCmdCompress_NoCompressor_RepliesNotSupported(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -7128,6 +7143,65 @@ func TestCmdCompress_DrainsQueueAfterSuccess(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("queued message not found in send calls: %v", calls)
+	}
+}
+
+func TestCmdName_CurrentSessionSyncsNativeThreadName(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sess := newStubThreadNameSession("thread-1")
+
+	key := "test:user1"
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	session := e.sessions.GetOrCreateActive(key)
+	session.SetAgentSessionID("thread-1", "stub")
+
+	e.cmdName(p, &Message{SessionKey: key, ReplyCtx: "ctx"}, []string{"feature-branch"})
+
+	if got := e.sessions.GetSessionName("thread-1"); got != "feature-branch" {
+		t.Fatalf("session name = %q, want feature-branch", got)
+	}
+	if len(sess.names) != 1 || sess.names[0] != "feature-branch" {
+		t.Fatalf("native SetThreadName calls = %v, want [feature-branch]", sess.names)
+	}
+}
+
+func TestCmdName_NumberedTargetDoesNotSyncDifferentActiveThread(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agent := &stubListAgent{sessions: []AgentSessionInfo{{ID: "thread-2", Summary: "other"}}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	sess := newStubThreadNameSession("thread-1")
+
+	key := "test:user1"
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	active := e.sessions.GetOrCreateActive(key)
+	active.SetAgentSessionID("thread-1", "stub")
+	other := e.sessions.NewSession(key, "other")
+	other.SetAgentSessionID("thread-2", "stub")
+
+	e.cmdName(p, &Message{SessionKey: key, ReplyCtx: "ctx"}, []string{"1", "backlog"})
+
+	if got := e.sessions.GetSessionName("thread-2"); got != "backlog" {
+		t.Fatalf("session name = %q, want backlog", got)
+	}
+	if len(sess.names) != 0 {
+		t.Fatalf("native SetThreadName calls = %v, want none", sess.names)
 	}
 }
 

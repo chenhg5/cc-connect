@@ -540,6 +540,20 @@ func (s *appServerSession) CompactSession() error {
 	}, nil)
 }
 
+func (s *appServerSession) SetThreadName(name string) error {
+	if !s.alive.Load() {
+		return fmt.Errorf("session is closed")
+	}
+	threadID := s.CurrentSessionID()
+	if threadID == "" {
+		return fmt.Errorf("codex app-server thread id is empty")
+	}
+	return s.request("thread/name/set", map[string]any{
+		"threadId": threadID,
+		"name":     name,
+	}, nil)
+}
+
 func (s *appServerSession) Alive() bool {
 	return s.alive.Load()
 }
