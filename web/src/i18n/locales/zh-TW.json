@@ -230,6 +230,7 @@
     "callbackAesKey": "回呼 AES Key",
     "callbackAesKeyHint": "43 個字元",
     "callbackPath": "回呼路徑",
+    "apiBaseUrl": "API 基礎網址",
     "port": "連接埠",
     "wsUrl": "WebSocket 網址",
     "appId": "App ID",

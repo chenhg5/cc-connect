@@ -913,6 +913,7 @@ app_secret = "your-feishu-app-secret"
 # callback_aes_key = "your-43-char-encoding-aes-key"
 # port = "8081"
 # callback_path = "/wecom/callback"
+# api_base_url = "https://qyapi.weixin.qq.com"  # optional: WeCom API base URL override / 可选：企业微信 API 基础地址覆盖
 # enable_markdown = false  # set true to send Markdown (only renders in WeChat Work app, NOT personal WeChat)
 #                          # 设为 true 发送 Markdown（仅企业微信应用内可渲染，个人微信显示"暂不支持"）
 # allow_from = "*"  # Allowed WeChat Work user IDs / 允许的企业微信用户 ID
