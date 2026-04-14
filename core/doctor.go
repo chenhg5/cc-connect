@@ -52,6 +52,14 @@ type AgentDoctorInfo interface {
 	CLIDisplayName() string // e.g. "Claude", "Codex" (for display in doctor output)
 }
 
+// AgentResumeInfo is an optional interface agents can implement to provide
+// the CLI command for resuming a session from the terminal.
+type AgentResumeInfo interface {
+	// ResumeCommand returns the shell command to resume the given session ID.
+	// e.g. "claude --resume abc123"
+	ResumeCommand(sessionID string) string
+}
+
 // RunDoctorChecks performs all diagnostic checks.
 func RunDoctorChecks(ctx context.Context, agent Agent, platforms []Platform) []DoctorCheckResult {
 	var results []DoctorCheckResult

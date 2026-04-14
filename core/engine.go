@@ -187,7 +187,8 @@ type Engine struct {
 	streamPreview    StreamPreviewCfg
 	references       ReferenceRenderCfg
 	relayManager     *RelayManager
-	eventIdleTimeout time.Duration
+	eventIdleTimeout  time.Duration
+	bgListenTimeout   time.Duration
 	dirHistory       *DirHistory
 	baseWorkDir      string
 	projectState     *ProjectStateStore
@@ -218,6 +219,17 @@ type Engine struct {
 	// Interactive agent session management
 	interactiveMu     sync.Mutex
 	interactiveStates map[string]*interactiveState // key = sessionKey
+
+	// channelKeys caches the platform-provided ChannelKey for each sessionKey.
+	// Platforms like Telegram set ChannelKey to include composite identifiers
+	// (e.g. "chatID:threadID" for forum topics) that cannot be reliably parsed
+	// from the session key string alone. This cache allows string-only code paths
+	// (card actions, SendToSession, etc.) to resolve the correct channel key.
+	// Protected by interactiveMu.
+	channelKeys map[string]string // sessionKey → channelKey
+
+	quietMu sync.RWMutex
+	quiet   bool // when true, suppress thinking and tool progress messages globally
 
 	platformLifecycleMu sync.Mutex
 	platformReady       map[Platform]bool
@@ -268,6 +280,9 @@ type interactiveState struct {
 	deleteMode             *deleteModeState
 	lastAutoCompressAt     time.Time
 	lastAutoCompressTokens int
+	bgListening            bool           // true while a background-listen goroutine is active
+	bgWakeUp               chan struct{}   // closed to signal background-listen goroutine to exit
+	quiet                  bool           // per-session quiet mode
 }
 
 type deleteModeState struct {
@@ -343,11 +358,13 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		skills:                NewSkillRegistry(),
 		aliases:               make(map[string]string),
 		interactiveStates:     make(map[string]*interactiveState),
+		channelKeys:           make(map[string]string),
 		platformReady:         make(map[Platform]bool),
 		startedAt:             time.Now(),
 		streamPreview:         DefaultStreamPreviewCfg(),
 		references:            DefaultReferenceRenderCfg(),
 		eventIdleTimeout:      defaultEventIdleTimeout,
+		bgListenTimeout:       defaultBgListenTimeout,
 		showContextIndicator:  true,
 	}
 
@@ -366,11 +383,11 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 }
 
 // SetMultiWorkspace enables multi-workspace mode for the engine.
-func (e *Engine) SetMultiWorkspace(baseDir, bindingStorePath string) {
+func (e *Engine) SetMultiWorkspace(baseDir, bindingStorePath string, idleTimeout time.Duration) {
 	e.multiWorkspace = true
 	e.baseDir = baseDir
 	e.workspaceBindings = NewWorkspaceBindingManager(bindingStorePath)
-	e.workspacePool = newWorkspacePool(15 * time.Minute)
+	e.workspacePool = newWorkspacePool(idleTimeout)
 	e.initFlows = make(map[string]*workspaceInitFlow)
 	go e.runIdleReaper()
 }
@@ -802,6 +819,20 @@ func (e *Engine) SetStreamPreviewCfg(cfg StreamPreviewCfg) {
 // 0 disables the timeout entirely.
 func (e *Engine) SetEventIdleTimeout(d time.Duration) {
 	e.eventIdleTimeout = d
+}
+
+// SetBgListenTimeout sets how long the background-listen goroutine waits for
+// post-turn agent events (e.g. background task completion) before exiting.
+// 0 disables background listening entirely.
+func (e *Engine) SetBgListenTimeout(d time.Duration) {
+	e.bgListenTimeout = d
+}
+
+// SetDefaultQuiet sets the default quiet mode for new sessions.
+func (e *Engine) SetDefaultQuiet(q bool) {
+	e.quietMu.Lock()
+	e.quiet = q
+	e.quietMu.Unlock()
 }
 
 func (e *Engine) SetRelayManager(rm *RelayManager) {
@@ -1398,7 +1429,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	// Multi-workspace resolution
 	var wsAgent Agent
 	var wsSessions *SessionManager
-	var resolvedWorkspace string
+	var wsPoolKey string
 	if e.multiWorkspace {
 		channelID := effectiveChannelID(msg)
 		channelKey := effectiveWorkspaceChannelKey(msg)
@@ -1426,21 +1457,20 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 				return
 			}
 		} else {
-			resolvedWorkspace = workspace
+			// Get or create the workspace's agent and session manager.
+			wsPoolKey = workspace
 
 			// Touch for idle tracking
-			if ws := e.workspacePool.Get(workspace); ws != nil {
+			if ws := e.workspacePool.Get(wsPoolKey); ws != nil {
 				ws.Touch()
 			}
 
-			var effectiveWorkspace string
-			wsAgent, wsSessions, _, effectiveWorkspace, err = e.workspaceContext(workspace, msg.SessionKey)
+			wsAgent, wsSessions, _, _, err = e.workspaceContext(workspace, msg.SessionKey)
 			if err != nil {
 				slog.Error("failed to create workspace agent", "workspace", workspace, "err", err)
 				e.reply(p, msg.ReplyCtx, fmt.Sprintf("Failed to initialize workspace: %v", err))
 				return
 			}
-			resolvedWorkspace = effectiveWorkspace
 		}
 	}
 
@@ -1463,7 +1493,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	if e.multiWorkspace && wsSessions != nil {
 		sessions = wsSessions
 		agent = wsAgent
-		interactiveKey = resolvedWorkspace + ":" + msg.SessionKey
+		interactiveKey = wsPoolKey + ":" + msg.SessionKey
 	}
 
 	session := sessions.GetOrCreateActive(msg.SessionKey)
@@ -1496,7 +1526,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 			// and the queue append. Re-try TryLock — if it succeeds, no one is
 			// draining the queue so we must start a processor ourselves.
 			if session.TryLock() {
-				go e.drainOrphanedQueue(session, sessions, interactiveKey, agent, resolvedWorkspace)
+				go e.drainOrphanedQueue(session, sessions, interactiveKey, agent, wsPoolKey)
 			}
 			return
 		}
@@ -1519,7 +1549,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		"session", session.ID,
 	)
 
-	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, resolvedWorkspace, msg.SessionKey)
+	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, wsPoolKey, msg.SessionKey)
 }
 
 func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions *SessionManager, interactiveKey string, session *Session) *Session {
@@ -1715,7 +1745,7 @@ func (e *Engine) handleVoiceMessage(p Platform, msg *Message) {
 // ──────────────────────────────────────────────────────────────
 
 func (e *Engine) handlePendingPermission(p Platform, msg *Message, content string) bool {
-	iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
+	iKey := e.interactiveKeyForMessage(msg)
 	e.interactiveMu.Lock()
 	state, ok := e.interactiveStates[iKey]
 	e.interactiveMu.Unlock()
@@ -1945,7 +1975,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	if agent != e.agent {
 		agentOverride = agent
 	}
-	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey)
+	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg, session, sessions, agentOverride, ccSessionKey)
 
 	// Set workspaceDir on the state for idle reaper identification
 	if workspaceDir != "" {
@@ -2004,9 +2034,9 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		}
 	}()
 
-	// Drain any stale events left in the channel from a previous turn.
-	// This prevents the next processInteractiveEvents from reading an old
-	// EventResult that was pushed after the previous turn already returned.
+	// Stop any background-listen goroutine from the previous turn before
+	// draining, so it does not race with the new turn's event consumption.
+	stopBgListen(state)
 	drainEvents(state.agentSession.Events())
 
 	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.Platform, msg.SessionKey)
@@ -2043,7 +2073,8 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 // getOrCreateWorkspaceAgent returns (or creates) a per-workspace agent and session manager.
 // workspace must be a normalized path (from resolveWorkspace or normalizeWorkspacePath).
 func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionManager, error) {
-	ws := e.workspacePool.GetOrCreate(workspace)
+	poolKey := workspace
+	ws := e.workspacePool.GetOrCreate(poolKey)
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
 
@@ -2099,8 +2130,8 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 		}
 	}
 
-	// Create per-workspace session manager
-	h := sha256.Sum256([]byte(workspace))
+	// Create per-workspace session manager — hash the full poolKey.
+	h := sha256.Sum256([]byte(poolKey))
 	sessionFile := filepath.Join(filepath.Dir(e.sessions.StorePath()),
 		fmt.Sprintf("%s_ws_%s.json", e.name, hex.EncodeToString(h[:4])))
 	sessions := NewSessionManager(sessionFile)
@@ -2154,7 +2185,8 @@ func adoptPendingFromPlaceholder(existing, newState *interactiveState) {
 
 // When agentOverride is non-nil it is used instead of e.agent to start the session.
 // ccSessionKey, when non-empty, is used for CC_SESSION_KEY env injection; otherwise sessionKey is used.
-func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string) *interactiveState {
+func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, msg *Message, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string) *interactiveState {
+	replyCtx := msg.ReplyCtx
 	e.interactiveMu.Lock()
 	defer e.interactiveMu.Unlock()
 
@@ -2360,6 +2392,7 @@ func (e *Engine) closeAgentSessionWithTimeout(sessionKey string, agentSession Ag
 }
 
 const defaultEventIdleTimeout = 2 * time.Hour
+const defaultBgListenTimeout = 1 * time.Hour
 
 func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func(), sendDone <-chan error, replyCtx any) {
 	var textParts []string
@@ -2411,7 +2444,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		select {
 		case <-stopCh:
-			sp.discard()
+			// User stopped the session — keep existing messages visible
+			// instead of deleting them.
+			sp.freeze()
+			sp.detachPreview()
+			cp.Finalize(ProgressCardStateStopped)
 			return
 		case event, ok = <-events:
 			if !ok {
@@ -2453,7 +2490,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		}
 
 		if state.isStopped() {
-			sp.discard()
+			sp.freeze()
+			sp.detachPreview()
+			cp.Finalize(ProgressCardStateStopped)
 			return
 		}
 
@@ -2466,6 +2505,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			}
 			idleTimer.Reset(e.eventIdleTimeout)
+		}
+
+		// Touch workspace so the idle reaper knows this workspace is still active.
+		if e.workspacePool != nil {
+			state.mu.Lock()
+			wsDir := state.workspaceDir
+			state.mu.Unlock()
+			if wsDir != "" {
+				if ws := e.workspacePool.Get(wsDir); ws != nil {
+					ws.Touch()
+				}
+			}
 		}
 
 		if !firstEventLogged {
@@ -2680,9 +2731,17 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				session.SetAgentSessionID(event.SessionID, e.agent.Name())
 			}
 
-			fullResponse := event.Content
-			if fullResponse == "" && len(textParts) > 0 {
+			// Prefer the accumulated textParts (all EventText chunks from this
+			// turn) over event.Content. Some agents (e.g. Claude Code) set
+			// event.Content to only the *last* text block (after the final tool
+			// call), not the entire turn output. Using textParts ensures we
+			// capture all text including segments emitted before tool calls.
+			fullResponse := ""
+			if len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")
+			}
+			if fullResponse == "" {
+				fullResponse = event.Content
 			}
 			if fullResponse == "" {
 				fullResponse = e.i18n.T(MsgEmptyResponse)
@@ -2838,9 +2897,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					stopTyping = ti.StartTyping(e.ctx, queued.replyCtx)
 				}
 
-				// Drain stale events before starting the next turn. Between
-				// EventResult and Send(), the only buffered events would be
-				// stale leftovers (e.g. a deferred EventError from cmd.Wait()).
+				// Stop background listener and drain stale events before starting
+				// the next turn.
+				stopBgListen(state)
 				drainEvents(state.agentSession.Events())
 
 				if pendingSend != nil {
@@ -2899,6 +2958,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					slog.Debug("async send error after EventResult", "error", err)
 				}
 			}
+
+			// Start background-listen goroutine to capture post-turn events
+			// (e.g. when Claude Code completes a background task and wakes up).
+			e.startBgListen(state, sessionKey, events)
 			return
 
 		case EventError:
@@ -2998,6 +3061,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 			return false
 		}
 
+		stopBgListen(state)
 		drainEvents(state.agentSession.Events())
 
 		session.AddHistory("user", queued.content)
@@ -3064,6 +3128,7 @@ var builtinCommands = []struct {
 	{[]string{"dir", "cd", "chdir", "workdir"}, "dir"},
 	{[]string{"tts"}, "tts"},
 	{[]string{"workspace", "ws"}, "workspace"},
+	{[]string{"session-id", "session_id", "sid"}, "session-id"},
 	{[]string{"whoami", "myid"}, "whoami"},
 	{[]string{"web"}, "web"},
 	{[]string{"diff"}, "diff"},
@@ -3263,6 +3328,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		}
 		e.handleWorkspaceCommand(p, msg, args)
 		return true
+	case "session-id":
+		e.cmdSessionID(p, msg)
 	case "whoami":
 		e.cmdWhoami(p, msg)
 	case "web":
@@ -4337,6 +4404,26 @@ func (e *Engine) cmdCurrent(p Platform, msg *Message) {
 	e.replyWithCard(p, msg.ReplyCtx, e.renderCurrentCard(msg.SessionKey))
 }
 
+func (e *Engine) cmdSessionID(p Platform, msg *Message) {
+	_, sessions, _, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+	s := sessions.GetOrCreateActive(msg.SessionKey)
+	agentID := s.GetAgentSessionID()
+	if agentID == "" {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSessionIDNoSession))
+		return
+	}
+
+	if ri, ok := e.agent.(AgentResumeInfo); ok {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgSessionID, agentID, ri.ResumeCommand(agentID)))
+	} else {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgSessionIDOnly, agentID))
+	}
+}
+
 func (e *Engine) cmdStatus(p Platform, msg *Message) {
 	if !supportsCards(p) {
 		agent, sessions, _, err := e.commandContext(p, msg)
@@ -4365,6 +4452,24 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 				modeStr = e.i18n.Tf(MsgStatusMode, mode)
 			}
 		}
+		e.quietMu.RLock()
+		globalQuiet := e.quiet
+		_ = globalQuiet
+		e.quietMu.RUnlock()
+
+		iKey := e.interactiveKeyForMessage(msg)
+		e.interactiveMu.Lock()
+		state, hasState := e.interactiveStates[iKey]
+		e.interactiveMu.Unlock()
+
+		sessionQuiet := false
+		if hasState && state != nil {
+			state.mu.Lock()
+			sessionQuiet = state.quiet
+			_ = sessionQuiet
+			state.mu.Unlock()
+		}
+
 		thinkingStr := e.i18n.T(MsgDisabledShort)
 		if e.display.ThinkingMessages {
 			thinkingStr = e.i18n.T(MsgEnabledShort)
@@ -4769,6 +4874,22 @@ func (e *Engine) renderStatusCard(sessionKey string, userID string) *Card {
 	}
 	modeStr += e.i18n.Tf(MsgStatusThinkingMessages, thinkingStr)
 	modeStr += e.i18n.Tf(MsgStatusToolMessages, toolStr)
+
+	// Add quiet mode status
+	iKey := e.interactiveKeyForSessionKey(sessionKey)
+	e.interactiveMu.Lock()
+	state, hasState := e.interactiveStates[iKey]
+	e.interactiveMu.Unlock()
+	if hasState && state != nil {
+		state.mu.Lock()
+		q := state.quiet
+		state.mu.Unlock()
+		quietStr := e.i18n.T(MsgDisabledShort)
+		if q {
+			quietStr = e.i18n.T(MsgEnabledShort)
+		}
+		modeStr += e.i18n.Tf(MsgStatusQuietMode, quietStr)
+	}
 
 	s := sessions.GetOrCreateActive(sessionKey)
 	sessionDisplayName := sessions.GetSessionName(s.GetAgentSessionID())
@@ -5510,7 +5631,7 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 	}
 
 	switcher.SetReasoningEffort(target)
-	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
+	e.cleanupInteractiveState(e.interactiveKeyForMessage(msg))
 
 	s := e.sessions.GetOrCreateActive(msg.SessionKey)
 	s.SetAgentSessionID("", "")
@@ -5579,7 +5700,7 @@ func (e *Engine) cmdMode(p Platform, msg *Message, args []string) {
 	appliedLive := e.applyLiveModeChange(msg.SessionKey, newMode)
 
 	if !appliedLive {
-		e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
+		e.cleanupInteractiveState(e.interactiveKeyForMessage(msg))
 	}
 
 	modes := switcher.PermissionModes()
@@ -5640,6 +5761,23 @@ func (e *Engine) cmdQuiet(p Platform, msg *Message, args []string) {
 		}
 	}
 
+	// Also toggle per-session quiet
+	iKey := e.interactiveKeyForMessage(msg)
+	e.interactiveMu.Lock()
+	state, ok := e.interactiveStates[iKey]
+	e.interactiveMu.Unlock()
+
+	if !ok || state == nil {
+		state = &interactiveState{platform: p, replyCtx: msg.ReplyCtx, quiet: true}
+		e.interactiveMu.Lock()
+		e.interactiveStates[iKey] = state
+		e.interactiveMu.Unlock()
+	} else {
+		state.mu.Lock()
+		state.quiet = !state.quiet
+		state.mu.Unlock()
+	}
+
 	if isQuiet {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQuietOn))
 	} else {
@@ -5676,7 +5814,7 @@ func (e *Engine) cmdTTS(p Platform, msg *Message, args []string) {
 }
 
 func (e *Engine) cmdStop(p Platform, msg *Message) {
-	iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
+	iKey := e.interactiveKeyForMessage(msg)
 	if !e.stopInteractiveSession(iKey, p, msg.ReplyCtx) {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNoExecution))
 		return
@@ -5717,7 +5855,7 @@ func (e *Engine) cmdCompress(p Platform, msg *Message) {
 		return
 	}
 
-	iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
+	iKey := e.interactiveKeyForMessage(msg)
 	e.interactiveMu.Lock()
 	state, hasState := e.interactiveStates[iKey]
 	e.interactiveMu.Unlock()
@@ -5757,6 +5895,7 @@ func (e *Engine) runCompress(state *interactiveState, session *Session, sessions
 	state.replyCtx = replyCtx
 	state.mu.Unlock()
 
+	stopBgListen(state)
 	drainEvents(state.agentSession.Events())
 
 	compressor, ok := e.agent.(ContextCompressor)
@@ -6035,7 +6174,7 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 
 	case "clear", "reset", "none":
 		switcher.SetActiveProvider("")
-		e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
+		e.cleanupInteractiveState(e.interactiveKeyForMessage(msg))
 		if e.providerSaveFunc != nil {
 			if err := e.providerSaveFunc(""); err != nil {
 				slog.Error("failed to save provider", "error", err)
@@ -6162,7 +6301,7 @@ func (e *Engine) switchProvider(p Platform, msg *Message, switcher ProviderSwitc
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgProviderNotFound), name))
 		return
 	}
-	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
+	e.cleanupInteractiveState(e.interactiveKeyForMessage(msg))
 
 	if e.providerSaveFunc != nil {
 		if err := e.providerSaveFunc(name); err != nil {
@@ -6190,7 +6329,9 @@ func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images
 	if sessionKey != "" {
 		state = e.interactiveStates[sessionKey]
 		if state == nil && e.multiWorkspace {
-			if iKey := e.interactiveKeyForSessionKey(sessionKey); iKey != sessionKey {
+			// Inline the channel key lookup to avoid deadlock (we already hold interactiveMu).
+			cached := e.channelKeys[sessionKey]
+			if iKey := e.interactiveKeyWithChannelKey(sessionKey, cached); iKey != sessionKey {
 				state = e.interactiveStates[iKey]
 			}
 		}
@@ -6610,6 +6751,138 @@ func drainEvents(ch <-chan Event) {
 				slog.Warn("drained stale events from previous turn", "count", drained)
 			}
 			return
+		}
+	}
+}
+
+// startBgListen spawns a goroutine that continues reading agent events after a
+// turn has ended (EventResult received). This captures output from background
+// tasks that wake the agent up after the main turn is complete. The goroutine
+// exits when: (a) a new user message arrives (bgWakeUp is closed), (b) the
+// bgListenTimeout expires, (c) the events channel closes, or (d) the engine
+// context is cancelled.
+func (e *Engine) startBgListen(state *interactiveState, sessionKey string, events <-chan Event) {
+	if e.bgListenTimeout <= 0 {
+		return
+	}
+
+	state.mu.Lock()
+	if state.bgListening {
+		// Already listening (shouldn't happen, but be safe).
+		state.mu.Unlock()
+		return
+	}
+	state.bgListening = true
+	state.bgWakeUp = make(chan struct{})
+	wakeUp := state.bgWakeUp
+	state.mu.Unlock()
+
+	go func() {
+		defer func() {
+			state.mu.Lock()
+			state.bgListening = false
+			state.bgWakeUp = nil
+			state.mu.Unlock()
+		}()
+
+		timer := time.NewTimer(e.bgListenTimeout)
+		defer timer.Stop()
+
+		slog.Info("background listen started", "session", sessionKey, "timeout", e.bgListenTimeout)
+
+		sentText := false // track whether EventText already forwarded content
+		for {
+			select {
+			case event, ok := <-events:
+				if !ok {
+					slog.Info("background listen: channel closed", "session", sessionKey)
+					return
+				}
+				timer.Reset(e.bgListenTimeout)
+
+				state.mu.Lock()
+				p := state.platform
+				rctx := state.replyCtx
+				state.mu.Unlock()
+
+				switch event.Type {
+				case EventText:
+					if event.Content != "" {
+						sentText = true
+						for _, chunk := range splitMessage(event.Content, maxPlatformMessageLen) {
+							e.send(p, rctx, chunk)
+						}
+					}
+				case EventResult:
+					// Only send EventResult content if nothing was already
+					// forwarded via EventText — otherwise it's a duplicate.
+					if !sentText && event.Content != "" {
+						for _, chunk := range splitMessage(event.Content, maxPlatformMessageLen) {
+							e.send(p, rctx, chunk)
+						}
+					}
+					slog.Info("background listen: task completed", "session", sessionKey)
+					// Don't return — Claude Code can emit multiple rounds of
+					// post-turn events (e.g. background Agent completes, then
+					// Claude processes the result and emits more events). Reset
+					// state and keep listening for subsequent rounds.
+					sentText = false
+					timer.Reset(e.bgListenTimeout)
+				case EventError:
+					if event.Error != nil {
+						e.send(p, rctx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
+					}
+					return
+				}
+
+			case <-wakeUp:
+				slog.Info("background listen: interrupted by new message", "session", sessionKey)
+				return
+
+			case <-timer.C:
+				slog.Info("background listen: timeout", "session", sessionKey, "timeout", e.bgListenTimeout)
+				return
+
+			case <-e.ctx.Done():
+				return
+			}
+		}
+	}()
+}
+
+// stopBgListen signals the background-listen goroutine (if any) to exit and
+// waits briefly for it to clear the bgListening flag. Called before draining
+// events for a new turn so the goroutine does not race with the new turn's
+// event consumption.
+func stopBgListen(state *interactiveState) {
+	state.mu.Lock()
+	if !state.bgListening || state.bgWakeUp == nil {
+		state.mu.Unlock()
+		return
+	}
+	ch := state.bgWakeUp
+	state.mu.Unlock()
+
+	// Signal the goroutine to exit.
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
+
+	// Wait for the goroutine to clear bgListening (up to 100ms).
+	deadline := time.After(100 * time.Millisecond)
+	for {
+		select {
+		case <-deadline:
+			return
+		default:
+			state.mu.Lock()
+			done := !state.bgListening
+			state.mu.Unlock()
+			if done {
+				return
+			}
+			time.Sleep(time.Millisecond)
 		}
 	}
 }
@@ -8586,10 +8859,11 @@ func (e *Engine) executeShellCommand(p Platform, msg *Message, cmd *CustomComman
 	var shellCmd *exec.Cmd
 	if runtime.GOOS == "windows" {
 		shellCmd = exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", execCmd)
+		shellCmd.Dir = workDir
 	} else {
 		shellCmd = exec.CommandContext(ctx, "sh", "-c", execCmd)
+		shellCmd.Dir = workDir
 	}
-	shellCmd.Dir = workDir
 	envVars := []string{
 		"CC_PROJECT=" + e.name,
 		"CC_SESSION_KEY=" + msg.SessionKey,
@@ -9714,9 +9988,12 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 				session.SetAgentSessionID(event.SessionID, e.agent.Name())
 				e.sessions.Save()
 			}
-			resp := event.Content
-			if resp == "" && len(textParts) > 0 {
+			resp := ""
+			if len(textParts) > 0 {
 				resp = strings.Join(textParts, "")
+			}
+			if resp == "" {
+				resp = event.Content
 			}
 			if resp == "" {
 				resp = "(empty response)"
@@ -10113,7 +10390,13 @@ func (e *Engine) sessionContextForKey(sessionKey string) (Agent, *SessionManager
 	if !e.multiWorkspace || e.workspaceBindings == nil {
 		return e.agent, e.sessions
 	}
-	channelKey := extractWorkspaceChannelKey(sessionKey)
+	// Try cached channel key first, then fall back to parsing the session key.
+	e.interactiveMu.Lock()
+	channelKey := e.channelKeys[sessionKey]
+	e.interactiveMu.Unlock()
+	if channelKey == "" {
+		channelKey = extractWorkspaceChannelKey(sessionKey)
+	}
 	if channelKey == "" {
 		return e.agent, e.sessions
 	}
@@ -10127,16 +10410,52 @@ func (e *Engine) sessionContextForKey(sessionKey string) (Agent, *SessionManager
 
 // interactiveKeyForSessionKey returns the interactive state key for a sessionKey.
 // In multi-workspace mode, it prefixes with the bound workspace path when available.
+//
+// This function first checks the channelKeys cache (populated by interactiveKeyForMessage)
+// for the correct channel key, then falls back to parsing the session key string.
+// The fallback is ambiguous for platforms with composite channel identifiers
+// (e.g. Telegram forum topics: "telegram:chatID:threadID:userID"), so callers
+// with a *Message should prefer interactiveKeyForMessage.
 func (e *Engine) interactiveKeyForSessionKey(sessionKey string) string {
+	// Try cached channel key first (set by interactiveKeyForMessage when a
+	// Message with an explicit ChannelKey was processed).
+	e.interactiveMu.Lock()
+	cached := e.channelKeys[sessionKey]
+	e.interactiveMu.Unlock()
+	return e.interactiveKeyWithChannelKey(sessionKey, cached)
+}
+
+// interactiveKeyForMessage returns the interactive state key for a Message.
+// It uses msg.ChannelKey (set by the platform) when available, which correctly
+// handles composite channel identifiers like Telegram forum topics.
+// It also caches the channel key so that string-only callers (card actions,
+// SendToSession, etc.) can resolve the correct key later.
+func (e *Engine) interactiveKeyForMessage(msg *Message) string {
+	channelKey := effectiveWorkspaceChannelKey(msg)
+	if channelKey != "" && msg.SessionKey != "" {
+		e.interactiveMu.Lock()
+		e.channelKeys[msg.SessionKey] = channelKey
+		e.interactiveMu.Unlock()
+	}
+	return e.interactiveKeyWithChannelKey(msg.SessionKey, channelKey)
+}
+
+// interactiveKeyWithChannelKey is the shared implementation for interactive key resolution.
+// When channelKey is non-empty it is used directly; otherwise the channel is parsed
+// from the sessionKey string (legacy fallback).
+func (e *Engine) interactiveKeyWithChannelKey(sessionKey, channelKey string) string {
 	if !e.multiWorkspace || e.workspaceBindings == nil {
 		return sessionKey
 	}
-	channelKey := extractWorkspaceChannelKey(sessionKey)
+	if channelKey == "" {
+		channelKey = extractWorkspaceChannelKey(sessionKey)
+	}
 	if channelKey == "" {
 		return sessionKey
 	}
 	if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
-		return normalizeWorkspacePath(b.Workspace) + ":" + sessionKey
+		poolKey := normalizeWorkspacePath(b.Workspace)
+		return poolKey + ":" + sessionKey
 	}
 	return sessionKey
 }

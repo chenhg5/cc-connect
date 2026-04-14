@@ -32,6 +32,7 @@ const (
 	ProgressCardStateRunning   ProgressCardState = "running"
 	ProgressCardStateCompleted ProgressCardState = "completed"
 	ProgressCardStateFailed    ProgressCardState = "failed"
+	ProgressCardStateStopped   ProgressCardState = "stopped"
 )
 
 type ProgressCardEntryKind string

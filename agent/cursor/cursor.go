@@ -83,6 +83,10 @@ func (a *Agent) Name() string           { return "cursor" }
 func (a *Agent) CLIBinaryName() string  { return "agent" }
 func (a *Agent) CLIDisplayName() string { return "Cursor Agent" }
 
+func (a *Agent) ResumeCommand(sessionID string) string {
+	return "agent --resume " + sessionID
+}
+
 func (a *Agent) SetWorkDir(dir string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()

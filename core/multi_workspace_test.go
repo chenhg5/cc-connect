@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 type namedTestAgent struct {
@@ -47,7 +48,7 @@ func newTestEngineWithMultiWorkspace(t *testing.T, baseDir string) *Engine {
 	tmpDir := t.TempDir()
 	bindingPath := filepath.Join(tmpDir, "bindings.json")
 	e := NewEngine("test", nil, nil, "", LangEnglish)
-	e.SetMultiWorkspace(baseDir, bindingPath)
+	e.SetMultiWorkspace(baseDir, bindingPath, 15*time.Minute)
 	return e
 }
 
@@ -61,7 +62,7 @@ func newTestEngineWithMultiWorkspaceAgent(t *testing.T, baseDir string) *Engine 
 		return &namedTestAgent{name: agentName}, nil
 	})
 	e := NewEngine("test", &namedTestAgent{name: agentName}, nil, sessionPath, LangEnglish)
-	e.SetMultiWorkspace(baseDir, bindingPath)
+	e.SetMultiWorkspace(baseDir, bindingPath, 15*time.Minute)
 	return e
 }
 
@@ -502,7 +503,7 @@ func TestMultiWorkspaceAgent_PropagatesRunAsUser(t *testing.T) {
 		runAsEnv:       []string{"CUSTOM_VAR", "ANOTHER_VAR"},
 	}
 	e := NewEngine("test", parent, nil, "", LangEnglish)
-	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"), 15*time.Minute)
 
 	// Trigger per-workspace agent creation via the path the production
 	// code uses when a message arrives for a resolved workspace.
@@ -566,7 +567,7 @@ func TestMultiWorkspaceAgent_NoPropagationWhenParentHasNoRunAs(t *testing.T) {
 	// The interface assertion in getOrCreateWorkspaceAgent must skip silently.
 	parent := &namedTestAgent{name: agentName}
 	e := NewEngine("test", parent, nil, "", LangEnglish)
-	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"), 15*time.Minute)
 
 	_, _, err := e.getOrCreateWorkspaceAgent(workspaceDir)
 	if err != nil {

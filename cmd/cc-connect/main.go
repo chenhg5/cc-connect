@@ -257,7 +257,11 @@ func main() {
 				continue
 			}
 			bindingStore := filepath.Join(cfg.DataDir, "workspace_bindings.json")
-			engine.SetMultiWorkspace(baseDir, bindingStore)
+			wsIdleTimeout := 2 * time.Hour
+			if proj.WorkspaceIdleTimeoutMins != nil {
+				wsIdleTimeout = time.Duration(*proj.WorkspaceIdleTimeoutMins) * time.Minute
+			}
+			engine.SetMultiWorkspace(baseDir, bindingStore, wsIdleTimeout)
 			slog.Info("multi-workspace mode enabled", "project", proj.Name, "base_dir", baseDir)
 		}
 
@@ -437,6 +441,23 @@ func main() {
 			} else {
 				engine.SetEventIdleTimeout(time.Duration(mins) * time.Minute)
 			}
+		}
+
+		// Wire background-listen timeout
+		if cfg.BgListenTimeoutMins != nil {
+			mins := *cfg.BgListenTimeoutMins
+			if mins <= 0 {
+				engine.SetBgListenTimeout(0)
+			} else {
+				engine.SetBgListenTimeout(time.Duration(mins) * time.Minute)
+			}
+		}
+
+		// Wire default quiet mode: project-level overrides global
+		if proj.Quiet != nil {
+			engine.SetDefaultQuiet(*proj.Quiet)
+		} else if cfg.Quiet != nil {
+			engine.SetDefaultQuiet(*cfg.Quiet)
 		}
 
 		// Wire auto-compress settings

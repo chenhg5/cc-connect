@@ -59,6 +59,10 @@ func (a *Agent) Name() string           { return "qoder" }
 func (a *Agent) CLIBinaryName() string  { return "qodercli" }
 func (a *Agent) CLIDisplayName() string { return "Qoder" }
 
+func (a *Agent) ResumeCommand(sessionID string) string {
+	return "qodercli -r " + sessionID
+}
+
 func (a *Agent) SetWorkDir(dir string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()

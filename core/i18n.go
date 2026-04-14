@@ -154,6 +154,9 @@ const (
 	MsgModeChanged               MsgKey = "mode_changed"
 	MsgModeNotSupported          MsgKey = "mode_not_supported"
 	MsgSessionRestarting         MsgKey = "session_restarting"
+	MsgSessionID                 MsgKey = "session_id"
+	MsgSessionIDOnly             MsgKey = "session_id_only"
+	MsgSessionIDNoSession        MsgKey = "session_id_no_session"
 	MsgSessionNotStarted         MsgKey = "session_not_started"
 	MsgLangChanged               MsgKey = "lang_changed"
 	MsgLangInvalid               MsgKey = "lang_invalid"
@@ -270,6 +273,7 @@ const (
 	MsgStatusCron             MsgKey = "status_cron"
 	MsgStatusThinkingMessages MsgKey = "status_thinking_messages"
 	MsgStatusToolMessages     MsgKey = "status_tool_messages"
+	MsgStatusQuietMode        MsgKey = "status_quiet_mode"
 	MsgStatusSessionKey       MsgKey = "status_session_key"
 	MsgStatusUserID           MsgKey = "status_user_id"
 	MsgEnabledShort           MsgKey = "enabled_short"
@@ -491,6 +495,12 @@ const (
 	MsgBuiltinCmdShell     MsgKey = "shell"
 	MsgBuiltinCmdDir       MsgKey = "dir"
 	MsgBuiltinCmdDiff      MsgKey = "diff"
+	MsgBuiltinCmdSessionID MsgKey = "session-id"
+	MsgBuiltinCmdHeartbeat MsgKey = "heartbeat"
+	MsgBuiltinCmdTTS       MsgKey = "tts"
+	MsgBuiltinCmdWorkspace MsgKey = "workspace"
+	MsgBuiltinCmdWhoami    MsgKey = "whoami"
+	MsgBuiltinCmdWeb       MsgKey = "web"
 
 	MsgDiffEmpty           MsgKey = "diff_empty"
 	MsgDiffNoDiff2HTML     MsgKey = "diff_no_diff2html"
@@ -549,6 +559,7 @@ const (
 	MsgWsCloneProgress         MsgKey = "ws_clone_progress"
 	MsgWsCloneSuccess          MsgKey = "ws_clone_success"
 	MsgWsCloneFailed           MsgKey = "ws_clone_failed"
+
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -793,6 +804,27 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "🔄 會話進程已退出，正在重啟...",
 		LangJapanese:           "🔄 セッションプロセスが終了しました。再起動中...",
 		LangSpanish:            "🔄 El proceso de sesión finalizó, reiniciando...",
+	},
+	MsgSessionID: {
+		LangEnglish:            "Session ID: `%s`\n\nResume in terminal:\n```\n%s\n```",
+		LangChinese:            "会话 ID: `%s`\n\n在终端恢复会话:\n```\n%s\n```",
+		LangTraditionalChinese: "會話 ID: `%s`\n\n在終端恢復會話:\n```\n%s\n```",
+		LangJapanese:           "セッション ID: `%s`\n\nターミナルで再開:\n```\n%s\n```",
+		LangSpanish:            "ID de sesión: `%s`\n\nReanudar en terminal:\n```\n%s\n```",
+	},
+	MsgSessionIDOnly: {
+		LangEnglish:            "Session ID: `%s`\n\nThis agent does not support terminal resume.",
+		LangChinese:            "会话 ID: `%s`\n\n此 agent 不支持终端恢复。",
+		LangTraditionalChinese: "會話 ID: `%s`\n\n此 agent 不支援終端恢復。",
+		LangJapanese:           "セッション ID: `%s`\n\nこのエージェントはターミナル再開に対応していません。",
+		LangSpanish:            "ID de sesión: `%s`\n\nEste agente no soporta reanudación en terminal.",
+	},
+	MsgSessionIDNoSession: {
+		LangEnglish:            "No active agent session. Send a message first to start one.",
+		LangChinese:            "没有活跃的 agent 会话。请先发送消息以启动会话。",
+		LangTraditionalChinese: "沒有活躍的 agent 會話。請先發送訊息以啟動會話。",
+		LangJapanese:           "アクティブなエージェントセッションがありません。まずメッセージを送信してください。",
+		LangSpanish:            "No hay sesión de agente activa. Envía un mensaje primero para iniciar una.",
 	},
 	MsgSessionNotStarted: {
 		LangEnglish:            "(new — not yet started)",
@@ -1057,6 +1089,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/delete <number>|1,2,3|3-7|1,3-5,8 — Delete session(s)\n" +
 			"/name [number] <text> — Name a session\n" +
 			"/current — Show active session\n" +
+			"/session-id — Show session ID with resume command\n" +
 			"/history [n] — Show last n messages",
 		LangChinese: "**会话管理**\n" +
 			"/new [名称] — 创建新会话\n" +
@@ -1066,6 +1099,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/delete <序号>|1,2,3|3-7|1,3-5,8 — 删除会话\n" +
 			"/name [序号] <名称> — 命名会话\n" +
 			"/current — 查看当前会话\n" +
+			"/session-id — 显示会话 ID 和恢复命令\n" +
 			"/history [n] — 查看最近 n 条消息",
 		LangTraditionalChinese: "**會話管理**\n" +
 			"/new [名稱] — 建立新會話\n" +
@@ -1075,6 +1109,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/delete <序號>|1,2,3|3-7|1,3-5,8 — 刪除會話\n" +
 			"/name [序號] <名稱> — 命名會話\n" +
 			"/current — 查看當前會話\n" +
+			"/session-id — 顯示會話 ID 和恢復命令\n" +
 			"/history [n] — 查看最近 n 條訊息",
 		LangJapanese: "**セッション管理**\n" +
 			"/new [名前] — 新しいセッションを開始\n" +
@@ -1084,6 +1119,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/delete <番号>|1,2,3|3-7|1,3-5,8 — セッション削除\n" +
 			"/name [番号] <名前> — セッションに名前を付ける\n" +
 			"/current — 現在のセッションを表示\n" +
+			"/session-id — セッション ID と再開コマンドを表示\n" +
 			"/history [n] — 直近 n 件のメッセージを表示",
 		LangSpanish: "**Gestión de sesiones**\n" +
 			"/new [nombre] — Iniciar nueva sesión\n" +
@@ -1093,6 +1129,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/delete <número>|1,2,3|3-7|1,3-5,8 — Eliminar sesión(es)\n" +
 			"/name [número] <texto> — Nombrar sesión\n" +
 			"/current — Mostrar sesión activa\n" +
+			"/session-id — Mostrar ID de sesión y comando de reanudación\n" +
 			"/history [n] — Mostrar últimos n mensajes",
 	},
 	MsgHelpAgentSection: {
@@ -1999,6 +2036,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "工具進度: %s\n",
 		LangJapanese:           "ツール進捗: %s\n",
 		LangSpanish:            "Progreso de herramientas: %s\n",
+	},
+	MsgStatusQuietMode: {
+		LangEnglish:            "Quiet mode: %s\n",
+		LangChinese:            "静默模式: %s\n",
+		LangTraditionalChinese: "靜默模式: %s\n",
+		LangJapanese:           "静音モード: %s\n",
+		LangSpanish:            "Modo silencioso: %s\n",
 	},
 	MsgStatusSessionKey: {
 		LangEnglish:            "Session Key: `%s`\n",
@@ -3312,6 +3356,48 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "git diff を HTML ファイルで生成、引数: [ターゲット]",
 		LangSpanish:            "Generar git diff como archivo HTML, arg: [objetivo]",
 	},
+	MsgBuiltinCmdSessionID: {
+		LangEnglish:            "Show session ID and terminal resume command",
+		LangChinese:            "显示会话 ID 和终端恢复命令",
+		LangTraditionalChinese: "顯示會話 ID 和終端恢復命令",
+		LangJapanese:           "セッション ID とターミナル再開コマンドを表示",
+		LangSpanish:            "Mostrar ID de sesión y comando de reanudación",
+	},
+	MsgBuiltinCmdHeartbeat: {
+		LangEnglish:            "Configure session heartbeat interval",
+		LangChinese:            "配置会话心跳间隔",
+		LangTraditionalChinese: "配置會話心跳間隔",
+		LangJapanese:           "セッションハートビート間隔を設定",
+		LangSpanish:            "Configurar intervalo de heartbeat de sesión",
+	},
+	MsgBuiltinCmdTTS: {
+		LangEnglish:            "Toggle text-to-speech for responses",
+		LangChinese:            "开关语音合成回复",
+		LangTraditionalChinese: "開關語音合成回覆",
+		LangJapanese:           "テキスト読み上げのオン/オフ",
+		LangSpanish:            "Activar/desactivar texto a voz",
+	},
+	MsgBuiltinCmdWorkspace: {
+		LangEnglish:            "Manage multi-workspace routing",
+		LangChinese:            "管理多工作区路由",
+		LangTraditionalChinese: "管理多工作區路由",
+		LangJapanese:           "マルチワークスペースルーティングを管理",
+		LangSpanish:            "Gestionar enrutamiento multi-workspace",
+	},
+	MsgBuiltinCmdWhoami: {
+		LangEnglish:            "Show your user and platform info",
+		LangChinese:            "显示你的用户和平台信息",
+		LangTraditionalChinese: "顯示你的用戶和平台資訊",
+		LangJapanese:           "ユーザーとプラットフォーム情報を表示",
+		LangSpanish:            "Mostrar tu información de usuario y plataforma",
+	},
+	MsgBuiltinCmdWeb: {
+		LangEnglish:            "Open web management dashboard",
+		LangChinese:            "打开 Web 管理面板",
+		LangTraditionalChinese: "開啟 Web 管理面板",
+		LangJapanese:           "Web 管理ダッシュボードを開く",
+		LangSpanish:            "Abrir panel de gestión web",
+	},
 	MsgDiffEmpty: {
 		LangEnglish:            "No diff — clean working tree (or no changes vs `%s`).",
 		LangChinese:            "无差异 — 工作区干净（或与 `%s` 无变化）。",
@@ -3692,6 +3778,7 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "❌ リポジトリのクローンに失敗しました: %v",
 		LangSpanish:            "❌ Error al clonar repositorio: %v",
 	},
+
 }
 
 func (i *I18n) T(key MsgKey) string {

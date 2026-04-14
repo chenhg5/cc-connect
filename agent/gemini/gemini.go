@@ -101,6 +101,10 @@ func normalizeMode(raw string) string {
 
 func (a *Agent) Name() string { return "gemini" }
 
+func (a *Agent) ResumeCommand(sessionID string) string {
+	return "gemini --resume " + sessionID
+}
+
 func (a *Agent) SetWorkDir(dir string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
