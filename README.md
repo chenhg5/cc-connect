@@ -65,6 +65,9 @@
 
 </details>
 
+---
+
+<br>
 
 <p align="center">
   <b>Control your local AI agents from any chat app. Anywhere, anytime.</b>

@@ -65,6 +65,9 @@
 
 </details>
 
+---
+
+<br>
 
 <p align="center">
   <b>在任何聊天工具里，远程操控你的本地 AI Agent。随时随地，随心所欲。</b>
