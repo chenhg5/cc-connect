@@ -952,6 +952,36 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		ModeOverride: job.Mode,
 	}
 
+	// Resolve workspace-specific agent and sessions for multi-workspace mode.
+	// Priority: job.WorkDir (explicit) > workspace binding > global agent fallback.
+	agent := e.agent
+	sessions := e.sessions
+	workspaceDir := ""
+
+	if e.multiWorkspace {
+		channelID := extractChannelID(sessionKey)
+		if channelID != "" {
+			workspace, _, err := e.resolveWorkspace(targetPlatform, channelID)
+			if err == nil && workspace != "" {
+				wsAgent, wsSessions, _, effectiveDir, err := e.workspaceContext(workspace, sessionKey)
+				if err == nil {
+					agent = wsAgent
+					sessions = wsSessions
+					workspaceDir = effectiveDir
+				}
+			}
+		}
+	}
+
+	if job.WorkDir != "" {
+		wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(job.WorkDir)
+		if err == nil {
+			agent = wsAgent
+			sessions = wsSessions
+			workspaceDir = job.WorkDir
+		}
+	}
+
 	useNewSession := false
 	if e.cronScheduler != nil {
 		useNewSession = e.cronScheduler.UsesNewSession(job)
@@ -961,22 +991,29 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 
 	if useNewSession {
 		msg.SessionKey = runSessionKey
-		session := e.sessions.NewSideSession(runSessionKey, "cron-"+job.ID)
+		session := sessions.NewSideSession(runSessionKey, "cron-"+job.ID)
 		if !session.TryLock() {
 			return fmt.Errorf("session %q is busy", runSessionKey)
 		}
 		iKey := fmt.Sprintf("%s#cron:%s", runSessionKey, session.ID)
-		e.processInteractiveMessageWith(effectivePlatform, msg, session, e.agent, e.sessions, iKey, "", runSessionKey)
+		if workspaceDir != "" {
+			iKey = workspaceDir + ":" + iKey
+		}
+		e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, runSessionKey)
 		e.cleanupInteractiveState(iKey)
 		return nil
 	}
 
-	session := e.sessions.GetOrCreateActive(sessionKey)
+	session := sessions.GetOrCreateActive(sessionKey)
 	if !session.TryLock() {
 		return fmt.Errorf("session %q is busy", sessionKey)
 	}
 
-	e.processInteractiveMessageWith(effectivePlatform, msg, session, e.agent, e.sessions, sessionKey, "", sessionKey)
+	iKey := sessionKey
+	if workspaceDir != "" {
+		iKey = workspaceDir + ":" + sessionKey
+	}
+	e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, sessionKey)
 	return nil
 }
 
