@@ -78,43 +78,61 @@ func (r *SkillRegistry) ListAll() []*Skill {
 	seen := make(map[string]bool)
 
 	for _, dir := range r.dirs {
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			continue
-		}
-		for _, entry := range entries {
-			fullPath := filepath.Join(dir, entry.Name())
-			info, err := os.Stat(fullPath)
-			if err != nil {
-				continue
-			}
-			if !info.IsDir() {
-				continue
-			}
-			skillName := entry.Name()
-			if seen[strings.ToLower(skillName)] {
-				continue
-			}
-
-			mdPath := filepath.Join(dir, skillName, "SKILL.md")
-			data, err := os.ReadFile(mdPath)
-			if err != nil {
-				continue
-			}
-
-			skill := parseSkillMD(skillName, string(data), dir)
-			if skill == nil {
-				continue
-			}
-
-			seen[strings.ToLower(skillName)] = true
-			result = append(result, skill)
-			slog.Debug("skill: discovered", "name", skillName, "dir", dir)
-		}
+		result = append(result, discoverSkillsInDir(dir, seen)...)
 	}
 
 	r.cache = result
 	return result
+}
+
+func discoverSkillsInDir(root string, seen map[string]bool) []*Skill {
+	var result []*Skill
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if d.Name() != "SKILL.md" {
+			return nil
+		}
+
+		skillDir := filepath.Dir(path)
+		if sameFilePath(skillDir, root) {
+			return nil
+		}
+
+		skillName := filepath.Base(skillDir)
+		if seen[strings.ToLower(skillName)] {
+			return nil
+		}
+
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+
+		skill := parseSkillMD(skillName, string(data), skillDir)
+		if skill == nil {
+			return nil
+		}
+
+		seen[strings.ToLower(skillName)] = true
+		result = append(result, skill)
+		slog.Debug("skill: discovered", "name", skillName, "dir", skillDir)
+		return nil
+	})
+	if err != nil {
+		return result
+	}
+	return result
+}
+
+func sameFilePath(a, b string) bool {
+	aClean := filepath.Clean(a)
+	bClean := filepath.Clean(b)
+	return aClean == bClean
 }
 
 // Invalidate clears the cache so skills are re-scanned on next access.
