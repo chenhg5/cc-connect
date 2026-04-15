@@ -1705,6 +1705,7 @@ app_secret = "your-feishu-app-secret"
 # [projects.platforms.options]
 # ws_url                = "ws://your-bridge-host/ws"
 # client_id             = "ccconnect-prod-01"
+# client_secret         = "0123456789abcdef0123456789abcdef"  # 32-char hex, generate: openssl rand -hex 16
 # bot_id                = 123456
 # ping_interval         = "30s"
 # reconnect_min_backoff = "3s"

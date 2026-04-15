@@ -12,9 +12,10 @@ import (
 )
 
 type wsClient struct {
-	wsURL    string
-	clientID string
-	botID    int64
+	wsURL     string
+	clientID  string
+	botID     int64
+	hexSecret string
 
 	mu   sync.Mutex
 	conn *websocket.Conn
@@ -28,11 +29,12 @@ type wsClient struct {
 	maxBackoff   time.Duration
 }
 
-func newWsClient(wsURL, clientID string, botID int64, onFrame func(BridgeFrame), onReady func()) *wsClient {
+func newWsClient(wsURL, clientID string, botID int64, hexSecret string, onFrame func(BridgeFrame), onReady func()) *wsClient {
 	return &wsClient{
 		wsURL:        wsURL,
 		clientID:     clientID,
 		botID:        botID,
+		hexSecret:    hexSecret,
 		send:         make(chan BridgeFrame, 64),
 		onFrame:      onFrame,
 		onReady:      onReady,
@@ -82,7 +84,11 @@ func (c *wsClient) connect(ctx context.Context) error {
 		conn.Close()
 	}()
 
-	if err := c.writeFrame(conn, buildRegisterFrame(c.clientID, c.botID)); err != nil {
+	regFrame, err := buildRegisterFrame(c.clientID, c.botID, c.hexSecret)
+	if err != nil {
+		return fmt.Errorf("daxiangbridge: build register frame: %w", err)
+	}
+	if err := c.writeFrame(conn, regFrame); err != nil {
 		return err
 	}
 

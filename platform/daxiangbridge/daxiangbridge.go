@@ -17,9 +17,10 @@ func init() {
 
 // Platform implements core.Platform and core.AsyncRecoverablePlatform.
 type Platform struct {
-	wsURL    string
-	clientID string
-	botID    int64
+	wsURL        string
+	clientID     string
+	clientSecret string // 32-char hex AES-128 key
+	botID        int64
 
 	handler   core.MessageHandler
 	client    *wsClient
@@ -33,18 +34,23 @@ type Platform struct {
 }
 
 func New(opts map[string]any) (core.Platform, error) {
-	wsURL, _ := opts["ws_url"].(string)
-	clientID, _ := opts["client_id"].(string)
+	wsURL, _        := opts["ws_url"].(string)
+	clientID, _     := opts["client_id"].(string)
+	clientSecret, _ := opts["client_secret"].(string)
 	botID := int64FromOpt(opts["bot_id"])
 
-	if wsURL == "" || clientID == "" || botID == 0 {
-		return nil, fmt.Errorf("daxiangbridge: ws_url, client_id, and bot_id are required")
+	if wsURL == "" || clientID == "" || clientSecret == "" || botID == 0 {
+		return nil, fmt.Errorf("daxiangbridge: ws_url, client_id, client_secret, and bot_id are required")
+	}
+	if len(clientSecret) != 32 {
+		return nil, fmt.Errorf("daxiangbridge: client_secret must be a 32-char hex string (16 bytes)")
 	}
 	return &Platform{
-		wsURL:       wsURL,
-		clientID:    clientID,
-		botID:       botID,
-		permissions: newPendingPermissions(),
+		wsURL:        wsURL,
+		clientID:     clientID,
+		clientSecret: clientSecret,
+		botID:        botID,
+		permissions:  newPendingPermissions(),
 	}, nil
 }
 
@@ -73,7 +79,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	p.handler = handler
 	ctx, cancel := context.WithCancel(context.Background())
 	p.cancel = cancel
-	p.client = newWsClient(p.wsURL, p.clientID, p.botID, p.onFrame, func() {
+	p.client = newWsClient(p.wsURL, p.clientID, p.botID, p.clientSecret, p.onFrame, func() {
 		p.mu.Lock()
 		h := p.lifecycle
 		p.mu.Unlock()

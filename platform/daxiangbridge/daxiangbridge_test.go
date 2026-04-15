@@ -49,9 +49,10 @@ func TestPlatform_ReceivesMessage(t *testing.T) {
 
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
 	p, err := New(map[string]any{
-		"ws_url":    wsURL,
-		"client_id": "test-client",
-		"bot_id":    int64(123),
+		"ws_url":        wsURL,
+		"client_id":     "test-client",
+		"client_secret": "0123456789abcdef0123456789abcdef",
+		"bot_id":        int64(123),
 	})
 	if err != nil {
 		t.Fatal(err)
