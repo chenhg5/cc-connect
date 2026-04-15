@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 type suppressTestPlatform struct {
@@ -220,6 +221,63 @@ func TestCompactProgressWriter_AppliesTransformToCardPayloadEntries(t *testing.T
 	}
 	if got := payload.Items[0].Text; got != "Inspect 📄 `src/app.ts:42`" {
 		t.Fatalf("payload item text = %q, want transformed text", got)
+	}
+}
+
+type stubThrottledProgressPlatform struct {
+	stubCompactProgressPlatform
+	throttle time.Duration
+}
+
+func (p *stubThrottledProgressPlatform) ProgressUpdateInterval() time.Duration {
+	return p.throttle
+}
+
+func TestCompactProgressWriter_ThrottlesRapidUpdates(t *testing.T) {
+	p := &stubThrottledProgressPlatform{
+		stubCompactProgressPlatform: stubCompactProgressPlatform{
+			stubPlatformEngine: stubPlatformEngine{n: "discord"},
+			style:              "card",
+			supportPayload:     true,
+		},
+		throttle: 50 * time.Millisecond,
+	}
+	w := newCompactProgressWriter(context.Background(), p, "ctx", "cc", LangEnglish, nil)
+
+	w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryThinking, Text: "step 1"}, "step 1")
+	if len(p.getPreviewStarts()) != 1 {
+		t.Fatal("first update should create the preview message")
+	}
+
+	w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryToolUse, Tool: "Bash", Text: "pwd"}, "pwd")
+	w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryToolResult, Tool: "Bash", Text: "ok"}, "ok")
+	editsBeforeThrottle := len(p.getPreviewEdits())
+	if editsBeforeThrottle > 0 {
+		t.Fatalf("rapid updates within throttle window should be skipped, got %d edits", editsBeforeThrottle)
+	}
+
+	time.Sleep(60 * time.Millisecond)
+	w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryThinking, Text: "step 4"}, "step 4")
+	editsAfterWait := len(p.getPreviewEdits())
+	if editsAfterWait != 1 {
+		t.Fatalf("update after throttle interval should go through, got %d edits", editsAfterWait)
+	}
+
+	ok := w.Finalize(ProgressCardStateCompleted)
+	if !ok {
+		t.Fatal("Finalize should succeed")
+	}
+	finalEdits := p.getPreviewEdits()
+	last := finalEdits[len(finalEdits)-1]
+	payload, parsed := ParseProgressCardPayload(last)
+	if !parsed {
+		t.Fatalf("final edit should be a valid payload, got %q", last)
+	}
+	if payload.State != ProgressCardStateCompleted {
+		t.Fatalf("state = %q, want completed", payload.State)
+	}
+	if len(payload.Items) != 4 {
+		t.Fatalf("items = %d, want 4 (all buffered items)", len(payload.Items))
 	}
 }
 
