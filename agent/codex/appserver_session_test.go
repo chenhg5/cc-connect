@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"testing"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -186,11 +188,12 @@ func TestAppServerSessionInterruptSession_RequestShape(t *testing.T) {
 	defer pr.Close()
 
 	s := &appServerSession{
-		stdin:   pw,
-		ctx:     ctx,
-		cancel:  cancel,
-		pending: make(map[int64]chan rpcResponseEnvelope),
-		events:  make(chan core.Event, 1),
+		stdin:      pw,
+		ctx:        ctx,
+		cancel:     cancel,
+		pending:    make(map[int64]chan rpcResponseEnvelope),
+		events:     make(chan core.Event, 1),
+		interrupts: make(map[string]chan error),
 	}
 	s.threadID.Store("thread-1")
 	s.currentTurn = "turn-1"
@@ -213,6 +216,7 @@ func TestAppServerSessionInterruptSession_RequestShape(t *testing.T) {
 			ID:     int64(1),
 			Result: json.RawMessage(`{}`),
 		})
+		s.handleNotification("turn/completed", json.RawMessage(`{"threadId":"thread-1","turn":{"id":"turn-1","status":"interrupted"}}`))
 	}()
 
 	if err := s.InterruptSession(context.Background()); err != nil {
@@ -239,10 +243,11 @@ func TestAppServerSessionInterruptSession_RequiresIDs(t *testing.T) {
 	ctx := context.Background()
 
 	s := &appServerSession{
-		stdin:   nopWC{Writer: io.Discard},
-		ctx:     ctx,
-		pending: make(map[int64]chan rpcResponseEnvelope),
-		events:  make(chan core.Event, 1),
+		stdin:      nopWC{Writer: io.Discard},
+		ctx:        ctx,
+		pending:    make(map[int64]chan rpcResponseEnvelope),
+		events:     make(chan core.Event, 1),
+		interrupts: make(map[string]chan error),
 	}
 	if err := s.InterruptSession(ctx); err == nil {
 		t.Fatal("expected error when thread id is missing")
@@ -251,5 +256,93 @@ func TestAppServerSessionInterruptSession_RequiresIDs(t *testing.T) {
 	s.threadID.Store("thread-1")
 	if err := s.InterruptSession(ctx); err == nil {
 		t.Fatal("expected error when turn id is missing")
+	}
+}
+
+func TestAppServerSessionInterruptSession_WaitsForInterruptedCompletion(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+
+	s := &appServerSession{
+		stdin:      pw,
+		ctx:        ctx,
+		cancel:     cancel,
+		pending:    make(map[int64]chan rpcResponseEnvelope),
+		events:     make(chan core.Event, 1),
+		interrupts: make(map[string]chan error),
+	}
+	s.threadID.Store("thread-1")
+	s.currentTurn = "turn-1"
+
+	go func() {
+		_, _ = bufio.NewReader(pr).ReadBytes('\n')
+		s.handleResponse(rpcResponseEnvelope{ID: int64(1), Result: json.RawMessage(`{}`)})
+		time.Sleep(20 * time.Millisecond)
+		s.handleNotification("turn/completed", json.RawMessage(`{"threadId":"thread-1","turn":{"id":"turn-1","status":"interrupted"}}`))
+	}()
+
+	if err := s.InterruptSession(context.Background()); err != nil {
+		t.Fatalf("InterruptSession: %v", err)
+	}
+}
+
+func TestAppServerSessionInterruptSession_FailsWhenTurnEndsDifferently(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+
+	s := &appServerSession{
+		stdin:      pw,
+		ctx:        ctx,
+		cancel:     cancel,
+		pending:    make(map[int64]chan rpcResponseEnvelope),
+		events:     make(chan core.Event, 1),
+		interrupts: make(map[string]chan error),
+	}
+	s.threadID.Store("thread-1")
+	s.currentTurn = "turn-1"
+
+	go func() {
+		_, _ = bufio.NewReader(pr).ReadBytes('\n')
+		s.handleResponse(rpcResponseEnvelope{ID: int64(1), Result: json.RawMessage(`{}`)})
+		s.handleNotification("turn/completed", json.RawMessage(`{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}`))
+	}()
+
+	err := s.InterruptSession(context.Background())
+	if err == nil {
+		t.Fatal("expected error when turn does not end as interrupted")
+	}
+}
+
+func TestAppServerSessionInterruptSession_TimesOutWaitingForCompletion(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+
+	s := &appServerSession{
+		stdin:      pw,
+		ctx:        context.Background(),
+		pending:    make(map[int64]chan rpcResponseEnvelope),
+		events:     make(chan core.Event, 1),
+		interrupts: make(map[string]chan error),
+	}
+	s.threadID.Store("thread-1")
+	s.currentTurn = "turn-1"
+
+	go func() {
+		_, _ = bufio.NewReader(pr).ReadBytes('\n')
+		s.handleResponse(rpcResponseEnvelope{ID: int64(1), Result: json.RawMessage(`{}`)})
+	}()
+
+	err := s.InterruptSession(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("InterruptSession error = %v, want deadline exceeded", err)
 	}
 }

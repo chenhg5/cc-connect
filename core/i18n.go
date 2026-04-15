@@ -132,6 +132,10 @@ const (
 	MsgNoExecution               MsgKey = "no_execution"
 	MsgInterruptNotSupported     MsgKey = "interrupt_not_supported"
 	MsgInterruptRequested        MsgKey = "interrupt_requested"
+	MsgInterrupting              MsgKey = "interrupting"
+	MsgInterruptDone             MsgKey = "interrupt_done"
+	MsgInterruptUseStop          MsgKey = "interrupt_use_stop"
+	MsgInterruptTimedOutUseStop  MsgKey = "interrupt_timed_out_use_stop"
 	MsgPreviousProcessing        MsgKey = "previous_processing"
 	MsgMessageQueued             MsgKey = "message_queued"
 	MsgNoToolsAllowed            MsgKey = "no_tools_allowed"
@@ -653,6 +657,34 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "已請求中斷。",
 		LangJapanese:           "中断を要求しました。",
 		LangSpanish:            "Interrupción solicitada.",
+	},
+	MsgInterrupting: {
+		LangEnglish:            "Interrupting current execution...",
+		LangChinese:            "正在中断当前执行...",
+		LangTraditionalChinese: "正在中斷目前執行...",
+		LangJapanese:           "現在の実行を中断しています...",
+		LangSpanish:            "Interrumpiendo la ejecución actual...",
+	},
+	MsgInterruptDone: {
+		LangEnglish:            "Current execution interrupted.",
+		LangChinese:            "当前执行已中断。",
+		LangTraditionalChinese: "目前執行已中斷。",
+		LangJapanese:           "現在の実行を中断しました。",
+		LangSpanish:            "La ejecución actual se ha interrumpido.",
+	},
+	MsgInterruptUseStop: {
+		LangEnglish:            "Unable to interrupt the current execution. Please try `/stop`.",
+		LangChinese:            "无法中断当前执行，请尝试 `/stop`。",
+		LangTraditionalChinese: "無法中斷目前執行，請嘗試 `/stop`。",
+		LangJapanese:           "現在の実行を中断できませんでした。`/stop` を試してください。",
+		LangSpanish:            "No se pudo interrumpir la ejecución actual. Pruebe `/stop`.",
+	},
+	MsgInterruptTimedOutUseStop: {
+		LangEnglish:            "Interrupt was not confirmed in time. Please consider `/stop`.",
+		LangChinese:            "未能及时确认中断完成，请考虑使用 `/stop`。",
+		LangTraditionalChinese: "未能及時確認中斷完成，請考慮使用 `/stop`。",
+		LangJapanese:           "中断完了を時間内に確認できませんでした。`/stop` を検討してください。",
+		LangSpanish:            "La interrupción no se confirmó a tiempo. Considere usar `/stop`.",
 	},
 	MsgPreviousProcessing: {
 		LangEnglish:            "⏳ Previous request still processing. Use `/btw <message>` to add context to the current turn.",

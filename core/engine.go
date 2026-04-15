@@ -6248,12 +6248,21 @@ func (e *Engine) cmdInterrupt(p Platform, msg *Message) {
 		return
 	}
 
-	if err := interrupter.InterruptSession(e.ctx); err != nil {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgInterrupting))
+
+	ctx, cancel := context.WithTimeout(e.ctx, 15*time.Second)
+	defer cancel()
+
+	if err := interrupter.InterruptSession(ctx); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgInterruptTimedOutUseStop))
+			return
+		}
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgInterruptUseStop))
 		return
 	}
 
-	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgInterruptRequested))
+	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgInterruptDone))
 }
 
 func (e *Engine) stopInteractiveSession(sessionKey string, quietPlatform Platform, quietReplyCtx any) bool {
