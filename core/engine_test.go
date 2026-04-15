@@ -6778,6 +6778,7 @@ func (a *stubCompressorAgent) CompressCommand() string { return a.cmd }
 
 type stubCompactSession struct {
 	*queuingAgentSession
+	compactMu    sync.Mutex
 	compactCalls int
 	compactErr   error
 }
@@ -6787,8 +6788,16 @@ func newStubCompactSession(id string) *stubCompactSession {
 }
 
 func (s *stubCompactSession) CompactSession() error {
+	s.compactMu.Lock()
+	defer s.compactMu.Unlock()
 	s.compactCalls++
 	return s.compactErr
+}
+
+func (s *stubCompactSession) CompactCalls() int {
+	s.compactMu.Lock()
+	defer s.compactMu.Unlock()
+	return s.compactCalls
 }
 
 type stubThreadNameSession struct {
@@ -6934,7 +6943,7 @@ func TestAutoCompress_TriggerAfterResult_NativeSessionCompactor(t *testing.T) {
 
 	deadline := time.After(2 * time.Second)
 	for {
-		if sess.compactCalls > 0 {
+		if sess.CompactCalls() > 0 {
 			break
 		}
 		select {
@@ -6945,8 +6954,11 @@ func TestAutoCompress_TriggerAfterResult_NativeSessionCompactor(t *testing.T) {
 		}
 	}
 
-	if len(sess.sendCalls) != 0 {
-		t.Fatalf("sendCalls = %v, want none for native auto-compactor", sess.sendCalls)
+	sess.sendMu.Lock()
+	sendCalls := append([]string(nil), sess.sendCalls...)
+	sess.sendMu.Unlock()
+	if len(sendCalls) != 0 {
+		t.Fatalf("sendCalls = %v, want none for native auto-compactor", sendCalls)
 	}
 
 	sess.events <- Event{Type: EventResult, Content: "", Done: true}
@@ -7069,18 +7081,21 @@ func TestCmdCompress_NativeSessionCompactor_SendsCompressDone(t *testing.T) {
 
 	deadline := time.After(3 * time.Second)
 	for {
-		if sess.compactCalls == 1 {
+		if sess.CompactCalls() == 1 {
 			break
 		}
 		select {
 		case <-deadline:
-			t.Fatalf("timed out waiting for native compact call, compactCalls = %d", sess.compactCalls)
+			t.Fatalf("timed out waiting for native compact call, compactCalls = %d", sess.CompactCalls())
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
-	if len(sess.sendCalls) != 0 {
-		t.Fatalf("sendCalls = %v, want none for native compactor", sess.sendCalls)
+	sess.sendMu.Lock()
+	sendCalls := append([]string(nil), sess.sendCalls...)
+	sess.sendMu.Unlock()
+	if len(sendCalls) != 0 {
+		t.Fatalf("sendCalls = %v, want none for native compactor", sendCalls)
 	}
 
 	sess.events <- Event{Type: EventResult, Content: "", Done: true}
