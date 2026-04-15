@@ -987,3 +987,83 @@ func TestFormatProgressToolInput_OtherTools(t *testing.T) {
 		t.Errorf("TodoWrite with invalid JSON should fall back to text block, got %q", result)
 	}
 }
+
+// --- Mention resolution tests ---
+
+func TestResolveMentions_ReplacesKnownMember(t *testing.T) {
+	p := &Platform{platformName: "feishu", resolveMentions: true}
+	p.chatMemberCache.Store("oc_chat", &chatMemberEntry{
+		members:   map[string]string{"张三": "ou_zhangsan", "李四": "ou_lisi"},
+		fetchedAt: time.Now(),
+	})
+	input := "巡检完成，@张三 @李四 请查看"
+	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
+	if !strings.Contains(result, `<at user_id="ou_zhangsan">张三</at>`) {
+		t.Fatalf("expected 张三 to be resolved, got %q", result)
+	}
+	if !strings.Contains(result, `<at user_id="ou_lisi">李四</at>`) {
+		t.Fatalf("expected 李四 to be resolved, got %q", result)
+	}
+}
+
+func TestResolveMentions_UnknownMemberKeptAsIs(t *testing.T) {
+	p := &Platform{platformName: "feishu", resolveMentions: true}
+	p.chatMemberCache.Store("oc_chat", &chatMemberEntry{
+		members:   map[string]string{"张三": "ou_zhangsan"},
+		fetchedAt: time.Now(),
+	})
+	input := "@不存在的人 请查看"
+	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
+	if strings.Contains(result, "<at") {
+		t.Fatalf("unknown member should not be replaced, got %q", result)
+	}
+}
+
+func TestResolveMentions_LongestMatchFirst(t *testing.T) {
+	p := &Platform{platformName: "feishu", resolveMentions: true}
+	p.chatMemberCache.Store("oc_chat", &chatMemberEntry{
+		members:   map[string]string{"张三": "ou_zhangsan", "张三丰": "ou_zhangsanfeng"},
+		fetchedAt: time.Now(),
+	})
+	input := "@张三丰请查看"
+	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
+	if !strings.Contains(result, "ou_zhangsanfeng") {
+		t.Fatalf("should match 张三丰 (longest), got %q", result)
+	}
+}
+
+func TestResolveMentions_CardFormat(t *testing.T) {
+	p := &Platform{platformName: "feishu", resolveMentions: true}
+	p.chatMemberCache.Store("oc_chat", &chatMemberEntry{
+		members:   map[string]string{"张三": "ou_zhangsan"},
+		fetchedAt: time.Now(),
+	})
+	// Content with complex markdown triggers card format
+	input := "# 巡检报告\n\n@张三 请查看\n\n```\nstatus: ok\n```"
+	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
+	if !strings.Contains(result, "<at id=ou_zhangsan></at>") {
+		t.Fatalf("card format should use <at id=...>, got %q", result)
+	}
+}
+
+func TestResolveMentions_DisabledByConfig(t *testing.T) {
+	p := &Platform{platformName: "feishu", resolveMentions: false}
+	p.chatMemberCache.Store("oc_chat", &chatMemberEntry{
+		members:   map[string]string{"张三": "ou_zhangsan"},
+		fetchedAt: time.Now(),
+	})
+	input := "@张三 请查看"
+	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
+	if result != input {
+		t.Fatalf("resolve_mentions=false should not replace, got %q", result)
+	}
+}
+
+func TestResolveMentions_NoAtSign(t *testing.T) {
+	p := &Platform{platformName: "feishu", resolveMentions: true}
+	input := "普通消息没有at"
+	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
+	if result != input {
+		t.Fatalf("no @ should return unchanged, got %q", result)
+	}
+}
