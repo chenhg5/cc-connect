@@ -1693,3 +1693,19 @@ app_secret = "your-feishu-app-secret"
 #
 # [projects.platforms.options]
 # token = "your-discord-bot-token"
+
+# =============================================================================
+# Daxiang Bridge Platform / 大象桥接平台
+# Requires daxiang-bridge cloud service running at ws_url
+# =============================================================================
+
+# [[projects.platforms]]
+# type = "daxiangbridge"
+#
+# [projects.platforms.options]
+# ws_url                = "ws://your-bridge-host/ws"
+# client_id             = "ccconnect-prod-01"
+# bot_id                = 123456
+# ping_interval         = "30s"
+# reconnect_min_backoff = "3s"
+# reconnect_max_backoff = "60s"
