@@ -388,12 +388,54 @@ func (a *Agent) SkillDirs() []string {
 		}
 	}
 	if codexHome != "" {
-		dirs = append(dirs, filepath.Join(codexHome, "skills"))
+		dirs = append(dirs,
+			filepath.Join(codexHome, "skills"),
+			filepath.Join(codexHome, "superpowers", "skills"),
+		)
+		dirs = append(dirs, codexPluginSkillDirs(filepath.Join(codexHome, "plugins"))...)
 	}
 	if home, err := os.UserHomeDir(); err == nil {
 		dirs = append(dirs, filepath.Join(home, ".claude", "skills"))
 	}
-	return dirs
+	return uniqueDirs(dirs)
+}
+
+func codexPluginSkillDirs(root string) []string {
+	var result []string
+
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	for _, entry := range entries {
+		fullPath := filepath.Join(root, entry.Name())
+		info, err := os.Stat(fullPath)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		if entry.Name() == "skills" {
+			result = append(result, fullPath)
+			continue
+		}
+		result = append(result, codexPluginSkillDirs(fullPath)...)
+	}
+	return result
+}
+
+func uniqueDirs(dirs []string) []string {
+	seen := make(map[string]struct{}, len(dirs))
+	unique := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		if dir == "" {
+			continue
+		}
+		if _, ok := seen[dir]; ok {
+			continue
+		}
+		seen[dir] = struct{}{}
+		unique = append(unique, dir)
+	}
+	return unique
 }
 
 // ── ContextCompressor implementation ──────────────────────────

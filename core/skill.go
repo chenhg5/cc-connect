@@ -78,42 +78,45 @@ func (r *SkillRegistry) ListAll() []*Skill {
 	seen := make(map[string]bool)
 
 	for _, dir := range r.dirs {
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			continue
-		}
-		for _, entry := range entries {
-			fullPath := filepath.Join(dir, entry.Name())
-			info, err := os.Stat(fullPath)
-			if err != nil {
-				continue
-			}
-			if !info.IsDir() {
-				continue
-			}
-			skillName := entry.Name()
-			if seen[strings.ToLower(skillName)] {
-				continue
-			}
-
-			mdPath := filepath.Join(dir, skillName, "SKILL.md")
-			data, err := os.ReadFile(mdPath)
-			if err != nil {
-				continue
-			}
-
-			skill := parseSkillMD(skillName, string(data), dir)
-			if skill == nil {
-				continue
-			}
-
-			seen[strings.ToLower(skillName)] = true
-			result = append(result, skill)
-			slog.Debug("skill: discovered", "name", skillName, "dir", dir)
-		}
+		result = append(result, discoverSkills(dir, seen)...)
 	}
 
 	r.cache = result
+	return result
+}
+
+func discoverSkills(root string, seen map[string]bool) []*Skill {
+	var result []*Skill
+
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+
+	for _, entry := range entries {
+		fullPath := filepath.Join(root, entry.Name())
+		info, err := os.Stat(fullPath)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+
+		skillName := entry.Name()
+		mdPath := filepath.Join(fullPath, "SKILL.md")
+		if data, err := os.ReadFile(mdPath); err == nil {
+			if !seen[strings.ToLower(skillName)] {
+				skill := parseSkillMD(skillName, string(data), root)
+				if skill != nil {
+					seen[strings.ToLower(skillName)] = true
+					result = append(result, skill)
+					slog.Debug("skill: discovered", "name", skillName, "dir", root)
+				}
+			}
+			continue
+		}
+
+		result = append(result, discoverSkills(fullPath, seen)...)
+	}
+
 	return result
 }
 
