@@ -1466,8 +1466,6 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 				return
 			}
 		} else {
-			resolvedWorkspace = workspace
-
 			// Touch for idle tracking
 			if ws := e.workspacePool.Get(workspace); ws != nil {
 				ws.Touch()
