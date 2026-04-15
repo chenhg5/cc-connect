@@ -425,10 +425,10 @@ func (p *Platform) RegisterCommands(commands []core.BotCommandInfo) error {
 		})
 	}
 
-	// Limit to 200 commands
-	if len(cmds) > 200 {
-		cmds = cmds[:200]
-		slog.Warn("discord: commands > 200, truncate")
+	// Discord allows max 100 commands per bulk overwrite (guild or global).
+	if len(cmds) > 100 {
+		slog.Warn("discord: truncating commands to Discord limit of 100", "total", len(cmds), "dropped", len(cmds)-100)
+		cmds = cmds[:100]
 	}
 
 	if len(cmds) == 0 {
