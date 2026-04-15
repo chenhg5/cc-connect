@@ -1071,27 +1071,50 @@ func (p *Platform) resolveMentionsInContent(ctx context.Context, chatID, content
 	return result
 }
 
+// chainMessage holds extracted data from one message in a reply chain.
+type chainMessage struct {
+	senderName string
+	senderType string // "user" or "app"
+	text       string
+	parentID   string
+}
+
+// maxReplyChainDepth is the maximum number of parent messages to traverse
+// when building a reply chain. This limits API calls per inbound reply.
+const maxReplyChainDepth = 5
+
 // fetchQuotedMessage retrieves the content of a parent message that the user
 // is replying to, and returns a formatted prefix string for context injection.
+// For multi-level reply chains, it traces parent_id links up to maxReplyChainDepth
+// levels and returns the full conversation chain.
 // Returns empty string on any failure (graceful degradation — the user's own
 // message is still delivered without the quote).
 func (p *Platform) fetchQuotedMessage(ctx context.Context, parentID string) string {
-	// Use raw API call with card_msg_content_type=raw_card_content so that
-	// interactive card messages return the full card JSON (with json_card field)
-	// instead of the simplified final state.
-	apiPath := fmt.Sprintf("/open-apis/im/v1/messages/%s?card_msg_content_type=raw_card_content", parentID)
+	chain := p.fetchReplyChain(ctx, parentID, maxReplyChainDepth)
+	if len(chain) == 0 {
+		return ""
+	}
+	return formatReplyChain(chain)
+}
+
+// fetchSingleMessage retrieves one message by ID from the Feishu API and
+// returns its extracted content as a chainMessage. Returns nil on any failure.
+func (p *Platform) fetchSingleMessage(ctx context.Context, messageID string) *chainMessage {
+	apiPath := fmt.Sprintf("/open-apis/im/v1/messages/%s?card_msg_content_type=raw_card_content", messageID)
 	apiResp, err := p.client.Get(ctx, apiPath, nil, larkcore.AccessTokenTypeTenant)
 	if err != nil {
-		slog.Debug(p.tag()+": fetch quoted message failed", "parent_id", parentID, "error", err)
-		return ""
+		slog.Debug(p.tag()+": fetch single message failed", "message_id", messageID, "error", err)
+		return nil
 	}
 	var resp struct {
 		Code int `json:"code"`
 		Data struct {
 			Items []struct {
-				MsgType string `json:"msg_type"`
-				Sender  struct {
-					ID string `json:"id"`
+				MsgType  string `json:"msg_type"`
+				ParentID string `json:"parent_id"`
+				Sender   struct {
+					ID         string `json:"id"`
+					SenderType string `json:"sender_type"`
 				} `json:"sender"`
 				Body struct {
 					Content string `json:"content"`
@@ -1101,51 +1124,117 @@ func (p *Platform) fetchQuotedMessage(ctx context.Context, parentID string) stri
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(apiResp.RawBody, &resp); err != nil || resp.Code != 0 || len(resp.Data.Items) == 0 {
-		slog.Debug(p.tag()+": fetch quoted message: parse failed or no data", "parent_id", parentID)
-		return ""
+		slog.Debug(p.tag()+": fetch single message: parse failed or no data", "message_id", messageID)
+		return nil
 	}
 
 	item := resp.Data.Items[0]
-	msgType := item.MsgType
 	content := item.Body.Content
 	if content == "" {
-		return ""
+		return nil
 	}
 
 	// Extract plain text based on message type.
-	var quotedText string
-	switch msgType {
+	var text string
+	switch item.MsgType {
 	case "text":
 		var textBody struct {
 			Text string `json:"text"`
 		}
 		if err := json.Unmarshal([]byte(content), &textBody); err == nil {
-			quotedText = replaceMentions(textBody.Text, item.Mentions)
+			text = replaceMentions(textBody.Text, item.Mentions)
 		}
 	case "post":
-		// Rich text — extract text elements from the post structure.
-		quotedText = extractPostPlainText(content)
+		text = extractPostPlainText(content)
 	case "interactive":
-		quotedText = extractInteractiveCardText(content)
+		text = extractInteractiveCardText(content)
 	default:
-		// For non-text types (image, file, audio, etc.), use a type indicator.
-		quotedText = fmt.Sprintf("[%s]", msgType)
+		text = fmt.Sprintf("[%s]", item.MsgType)
 	}
-
-	if quotedText == "" {
-		return ""
+	if text == "" {
+		return nil
 	}
 
 	// Resolve sender name.
 	senderName := ""
-	if item.Sender.ID != "" {
-		senderName = p.resolveUserName(item.Sender.ID)
+	if item.Sender.SenderType == "app" {
+		// Bot messages: sender ID is app_id, not a user open_id.
+		senderName = "Bot"
+	} else if item.Sender.ID != "" {
+		resolved := p.resolveUserName(item.Sender.ID)
+		if resolved != item.Sender.ID {
+			senderName = resolved
+		} else {
+			senderName = "User"
+		}
 	}
 	if senderName == "" {
 		senderName = "unknown"
 	}
 
-	return fmt.Sprintf("[Quoted message from %s]:\n%s\n\n", senderName, quotedText)
+	return &chainMessage{
+		senderName: senderName,
+		senderType: item.Sender.SenderType,
+		text:       text,
+		parentID:   item.ParentID,
+	}
+}
+
+// fetchReplyChain iteratively traverses parent_id links to build a reply chain.
+// Returns messages in chronological order (oldest first). Stops on any failure,
+// circular reference, or when maxDepth is reached.
+func (p *Platform) fetchReplyChain(ctx context.Context, parentID string, maxDepth int) []chainMessage {
+	var chain []chainMessage
+	visited := make(map[string]struct{})
+	currentID := parentID
+
+	for currentID != "" && len(chain) < maxDepth {
+		if _, seen := visited[currentID]; seen {
+			slog.Debug(p.tag()+": reply chain: circular reference detected", "message_id", currentID)
+			break
+		}
+		visited[currentID] = struct{}{}
+
+		msg := p.fetchSingleMessage(ctx, currentID)
+		if msg == nil {
+			break
+		}
+		chain = append(chain, *msg)
+		currentID = msg.parentID
+	}
+
+	// Reverse to chronological order (oldest first).
+	for i, j := 0, len(chain)-1; i < j; i, j = i+1, j-1 {
+		chain[i], chain[j] = chain[j], chain[i]
+	}
+	return chain
+}
+
+// formatReplyChain formats a slice of chain messages into a readable string.
+// Single-message chains use the legacy format for backward compatibility.
+// Multi-message chains use a numbered format with role labels.
+func formatReplyChain(chain []chainMessage) string {
+	if len(chain) == 0 {
+		return ""
+	}
+
+	// Single message: backward-compatible format.
+	if len(chain) == 1 {
+		return fmt.Sprintf("[Quoted message from %s]:\n%s\n\n", chain[0].senderName, chain[0].text)
+	}
+
+	// Multi-message: numbered chain format.
+	var b strings.Builder
+	fmt.Fprintf(&b, "--- Reply chain (%d messages) ---\n", len(chain))
+	for i, msg := range chain {
+		role := "user"
+		if msg.senderType == "app" {
+			role = "assistant"
+		}
+		fmt.Fprintf(&b, "[%d] %s (%s):\n%s\n\n", i+1, msg.senderName, role, msg.text)
+	}
+	b.WriteString("---\n\n")
+	return b.String()
 }
 
 // extractPostPlainText extracts plain text from a Lark post (rich text) JSON content.
