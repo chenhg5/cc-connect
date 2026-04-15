@@ -8221,7 +8221,7 @@ func (e *Engine) cmdCronAddExec(p Platform, msg *Message, args []string) {
 }
 
 func (e *Engine) cmdCronList(p Platform, msg *Message) {
-	jobs := e.cronScheduler.Store().ListBySessionKey(msg.SessionKey)
+	jobs := e.cronScheduler.Store().ListByProject(e.name)
 	if len(jobs) == 0 {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCronEmpty))
 		return
