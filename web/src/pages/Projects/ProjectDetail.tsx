@@ -1,16 +1,34 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, Plug, Heart, Settings, Layers, Zap, Pause, Play,
   Trash2, Plus, Check, Clock,
 } from 'lucide-react';
 import { Card, Badge, Button, Input, Modal, EmptyState } from '@/components/ui';
-import { getProject, updateProject, type ProjectDetail as ProjectDetailType } from '@/api/projects';
+import { getProject, updateProject, deleteProject, type ProjectDetail as ProjectDetailType } from '@/api/projects';
 import { listProviders, addProvider, removeProvider, activateProvider, listModels, setModel, type Provider } from '@/api/providers';
 import { getHeartbeat, pauseHeartbeat, resumeHeartbeat, triggerHeartbeat, setHeartbeatInterval, type HeartbeatStatus } from '@/api/heartbeat';
-import { formatTime } from '@/lib/utils';
-import { cn } from '@/lib/utils';
+import { restartSystem } from '@/api/status';
+import { formatTime, cn } from '@/lib/utils';
+import PlatformSetupQR from './PlatformSetupQR';
+import PlatformManualForm from './PlatformManualForm';
+import { platformMeta } from '@/lib/platformMeta';
+
+const PLATFORM_OPTIONS: { key: string; label: string; color: string; abbr: string; qr?: boolean }[] = [
+  { key: 'feishu', label: 'Feishu / Lark', abbr: 'FS', color: 'bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400', qr: true },
+  { key: 'weixin', label: 'WeChat', abbr: 'WX', color: 'bg-green-50 dark:bg-green-900/30 text-green-600 dark:text-green-400', qr: true },
+  { key: 'telegram', label: 'Telegram', abbr: 'TG', color: 'bg-sky-50 dark:bg-sky-900/30 text-sky-600 dark:text-sky-400' },
+  { key: 'discord', label: 'Discord', abbr: 'DC', color: 'bg-indigo-50 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400' },
+  { key: 'slack', label: 'Slack', abbr: 'SK', color: 'bg-purple-50 dark:bg-purple-900/30 text-purple-600 dark:text-purple-400' },
+  { key: 'dingtalk', label: 'DingTalk', abbr: 'DT', color: 'bg-orange-50 dark:bg-orange-900/30 text-orange-600 dark:text-orange-400' },
+  { key: 'wecom', label: 'WeChat Work', abbr: 'WC', color: 'bg-emerald-50 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400' },
+  { key: 'qq', label: 'QQ (OneBot)', abbr: 'QQ', color: 'bg-cyan-50 dark:bg-cyan-900/30 text-cyan-600 dark:text-cyan-400' },
+  { key: 'qqbot', label: 'QQ Bot (Official)', abbr: 'QB', color: 'bg-cyan-50 dark:bg-cyan-900/30 text-cyan-600 dark:text-cyan-400' },
+  { key: 'line', label: 'LINE', abbr: 'LN', color: 'bg-lime-50 dark:bg-lime-900/30 text-lime-600 dark:text-lime-400' },
+];
+
+const isQRPlatform = (type: string) => type === 'feishu' || type === 'lark' || type === 'weixin';
 
 type Tab = 'overview' | 'providers' | 'heartbeat' | 'settings';
 
@@ -27,10 +45,13 @@ export default function ProjectDetail() {
   const [loading, setLoading] = useState(true);
 
   // Settings form
-  const [quiet, setQuiet] = useState(false);
   const [language, setLanguage] = useState('');
   const [adminFrom, setAdminFrom] = useState('');
   const [disabledCmds, setDisabledCmds] = useState('');
+  const [workDir, setWorkDir] = useState('');
+  const [agentMode, setAgentMode] = useState('');
+  const [showCtxIndicator, setShowCtxIndicator] = useState(true);
+  const [platformAllowFrom, setPlatformAllowFrom] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
 
   // Add provider modal
@@ -40,6 +61,49 @@ export default function ProjectDetail() {
   // Interval modal
   const [showInterval, setShowInterval] = useState(false);
   const [newInterval, setNewInterval] = useState('30');
+
+  // Add platform
+  const [showAddPlatform, setShowAddPlatform] = useState(false);
+  const [addPlatType, setAddPlatType] = useState('');
+  const [showRestartModal, setShowRestartModal] = useState(false);
+
+  // Delete project
+  const navigate = useNavigate();
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  const handleDeleteProject = async () => {
+    if (!name) return;
+    setDeleting(true);
+    try {
+      const res = await deleteProject(name);
+      setShowDeleteConfirm(false);
+      if (res.restart_required && window.confirm(t('setup.restartAfterDelete'))) {
+        await restartSystem();
+        // Wait for service to come back up before navigating
+        await waitForService(8000);
+      }
+      navigate('/projects');
+    } catch (e: any) {
+      alert(e?.message || String(e));
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const waitForService = (maxMs: number) =>
+    new Promise<void>((resolve) => {
+      const start = Date.now();
+      const poll = () => {
+        fetch('/api/v1/status')
+          .then((r) => { if (r.ok) resolve(); else throw new Error(); })
+          .catch(() => {
+            if (Date.now() - start > maxMs) { resolve(); return; }
+            setTimeout(poll, 500);
+          });
+      };
+      setTimeout(poll, 1500);
+    });
 
   const fetchAll = useCallback(async () => {
     if (!name) return;
@@ -53,10 +117,17 @@ export default function ProjectDetail() {
       ]);
       if (proj.status === 'fulfilled') {
         setProject(proj.value);
-        setQuiet(proj.value.settings?.quiet || false);
         setLanguage(proj.value.settings?.language || '');
         setAdminFrom(proj.value.settings?.admin_from || '');
         setDisabledCmds(proj.value.settings?.disabled_commands?.join(', ') || '');
+        setWorkDir(proj.value.work_dir || '');
+        setAgentMode(proj.value.agent_mode || 'default');
+        setShowCtxIndicator(proj.value.show_context_indicator !== false);
+        const afMap: Record<string, string> = {};
+        proj.value.platform_configs?.forEach(pc => {
+          if (pc.allow_from !== undefined) afMap[pc.type] = pc.allow_from;
+        });
+        setPlatformAllowFrom(afMap);
       }
       if (provs.status === 'fulfilled') {
         setProviders(provs.value.providers || []);
@@ -84,10 +155,13 @@ export default function ProjectDetail() {
     setSaving(true);
     try {
       await updateProject(name, {
-        quiet,
         language,
         admin_from: adminFrom,
         disabled_commands: disabledCmds.split(',').map(s => s.trim()).filter(Boolean),
+        work_dir: workDir,
+        mode: agentMode,
+        show_context_indicator: showCtxIndicator,
+        platform_allow_from: platformAllowFrom,
       });
       await fetchAll();
     } finally {
@@ -155,7 +229,12 @@ export default function ProjectDetail() {
       {tab === 'overview' && project && (
         <div className="space-y-4">
           <Card>
-            <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-3">{t('projects.platforms')}</h3>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-semibold text-gray-900 dark:text-white">{t('projects.platforms')}</h3>
+              <Button size="sm" onClick={() => { setShowAddPlatform(true); setAddPlatType(''); }}>
+                <Plus size={14} /> {t('setup.addPlatform', 'Add platform')}
+              </Button>
+            </div>
             <div className="flex flex-wrap gap-2">
               {project.platforms?.map((p) => (
                 <Badge key={p.type} variant={p.connected ? 'success' : 'danger'}>
@@ -300,24 +379,177 @@ export default function ProjectDetail() {
       )}
 
       {tab === 'settings' && project && (
+        <div className="space-y-4">
+        {/* Agent settings */}
         <Card>
+          <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-4">{t('projects.agentSettings', 'Agent')}</h3>
+          <div className="space-y-4 max-w-lg">
+            <Input label={t('projects.workDir', 'Working directory')} value={workDir} onChange={(e) => setWorkDir(e.target.value)} placeholder="/path/to/project" />
+            <div>
+              <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
+                {t('projects.agentMode', 'Permission mode')}
+              </label>
+              <select
+                value={agentMode}
+                onChange={(e) => setAgentMode(e.target.value)}
+                className="w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-accent/50"
+              >
+                <option value="default">default</option>
+                <option value="acceptEdits">acceptEdits (edit)</option>
+                <option value="plan">plan</option>
+                <option value="bypassPermissions">bypassPermissions (yolo)</option>
+                <option value="dontAsk">dontAsk</option>
+              </select>
+            </div>
+          </div>
+        </Card>
+
+        {/* General settings */}
+        <Card>
+          <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-4">{t('projects.generalSettings', 'General')}</h3>
           <div className="space-y-4 max-w-lg">
             <div className="flex items-center justify-between">
-              <label className="text-sm font-medium text-gray-700 dark:text-gray-300">{t('projects.quiet')}</label>
+              <div>
+                <label className="text-sm font-medium text-gray-700 dark:text-gray-300">{t('projects.showCtxIndicator', 'Context indicator')}</label>
+                <p className="text-[11px] text-gray-400 mt-0.5">{t('projects.showCtxIndicatorHint', 'Show [ctx: ~N%] suffix on replies')}</p>
+              </div>
               <button
-                onClick={() => setQuiet(!quiet)}
-                className={cn('w-10 h-6 rounded-full transition-colors', quiet ? 'bg-accent' : 'bg-gray-300 dark:bg-gray-700')}
+                onClick={() => setShowCtxIndicator(!showCtxIndicator)}
+                className={cn('w-10 h-6 rounded-full transition-colors', showCtxIndicator ? 'bg-accent' : 'bg-gray-300 dark:bg-gray-700')}
               >
-                <div className={cn('w-4 h-4 bg-white rounded-full transition-transform mx-1', quiet ? 'translate-x-4' : 'translate-x-0')} />
+                <div className={cn('w-4 h-4 bg-white rounded-full transition-transform mx-1', showCtxIndicator ? 'translate-x-4' : 'translate-x-0')} />
               </button>
             </div>
             <Input label={t('projects.language')} value={language} onChange={(e) => setLanguage(e.target.value)} placeholder="en, zh, ja..." />
             <Input label={t('projects.adminFrom')} value={adminFrom} onChange={(e) => setAdminFrom(e.target.value)} placeholder="user1,user2 or *" />
             <Input label={t('projects.disabledCommands')} value={disabledCmds} onChange={(e) => setDisabledCmds(e.target.value)} placeholder="restart, upgrade, cron" />
-            <Button loading={saving} onClick={handleSaveSettings}>{t('common.save')}</Button>
           </div>
         </Card>
+
+        {/* Per-platform allow_from */}
+        {project.platform_configs && project.platform_configs.length > 0 && (
+        <Card>
+          <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-4">{t('projects.platformAccess', 'Platform access control')}</h3>
+          <div className="space-y-3 max-w-lg">
+            {project.platform_configs.map(pc => (
+              <Input
+                key={pc.type}
+                label={`${pc.type} — ${t('fields.allowFrom')}`}
+                value={platformAllowFrom[pc.type] ?? pc.allow_from ?? ''}
+                onChange={(e) => setPlatformAllowFrom(prev => ({ ...prev, [pc.type]: e.target.value }))}
+                placeholder='user1,user2 or *'
+              />
+            ))}
+          </div>
+        </Card>
+        )}
+
+        <div className="max-w-lg">
+          <Button loading={saving} onClick={handleSaveSettings}>{t('common.save')}</Button>
+        </div>
+        <Card>
+          <h3 className="text-sm font-semibold text-red-600 dark:text-red-400 mb-3">{t('projects.dangerZone', 'Danger Zone')}</h3>
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm text-gray-700 dark:text-gray-300">{t('projects.deleteTitle')}</p>
+              <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">{t('projects.deleteHint', 'Remove this project from config. Requires restart.')}</p>
+            </div>
+            <Button variant="danger" size="sm" onClick={() => setShowDeleteConfirm(true)}>
+              <Trash2 size={14} /> {t('common.delete')}
+            </Button>
+          </div>
+        </Card>
+        </div>
       )}
+
+      {/* Delete confirmation */}
+      <Modal open={showDeleteConfirm} onClose={() => setShowDeleteConfirm(false)} title={t('projects.deleteTitle')}>
+        <div className="space-y-4 py-2">
+          <p className="text-sm text-gray-600 dark:text-gray-400">
+            {t('projects.deleteConfirm', { name })}
+          </p>
+          <div className="flex justify-end gap-2">
+            <Button variant="secondary" onClick={() => setShowDeleteConfirm(false)}>{t('common.cancel')}</Button>
+            <Button variant="danger" onClick={handleDeleteProject} disabled={deleting}>
+              {deleting ? t('common.deleting', 'Deleting...') : t('common.delete')}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Add Platform Modal */}
+      <Modal open={showAddPlatform} onClose={() => setShowAddPlatform(false)} title={t('setup.addPlatform', 'Add platform')}>
+        {!addPlatType ? (
+          <div className="space-y-3 py-2">
+            <p className="text-sm text-gray-500 dark:text-gray-400 mb-2">
+              {t('setup.choosePlatform', 'Choose a platform to connect:')}
+            </p>
+            <div className="grid grid-cols-2 gap-2 max-h-80 overflow-y-auto">
+              {PLATFORM_OPTIONS.map(({ key, label, color, qr, abbr }) => (
+                <button
+                  key={key}
+                  onClick={() => setAddPlatType(key)}
+                  className="flex items-center gap-2.5 p-3 rounded-xl border border-gray-200 dark:border-gray-700 hover:border-accent/50 hover:bg-accent/5 transition-all text-left"
+                >
+                  <div className={`w-9 h-9 rounded-lg ${color} flex items-center justify-center shrink-0 font-bold text-xs`}>
+                    {abbr}
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium text-gray-900 dark:text-white truncate">{label}</div>
+                    <div className="text-[11px] text-gray-400">
+                      {qr ? t('setup.scanToConnect', 'Scan QR code') : t('setup.manualSetup', 'Manual setup')}
+                    </div>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : isQRPlatform(addPlatType) ? (
+          <PlatformSetupQR
+            platformType={addPlatType as 'feishu' | 'weixin'}
+            projectName={name!}
+            onComplete={() => {
+              setShowAddPlatform(false);
+              setShowRestartModal(true);
+            }}
+            onCancel={() => setAddPlatType('')}
+          />
+        ) : platformMeta[addPlatType] ? (
+          <PlatformManualForm
+            platformType={addPlatType}
+            projectName={name!}
+            onComplete={() => {
+              setShowAddPlatform(false);
+              setShowRestartModal(true);
+            }}
+            onCancel={() => setAddPlatType('')}
+          />
+        ) : (
+          <div className="space-y-4 py-4 text-center">
+            <p className="text-sm text-gray-600 dark:text-gray-400">
+              {t('setup.manualHint', 'For {{platform}}, please configure credentials in config.toml and restart the service.', { platform: PLATFORM_OPTIONS.find(o => o.key === addPlatType)?.label || addPlatType })}
+            </p>
+            <Button variant="secondary" onClick={() => setAddPlatType('')}>{t('common.back')}</Button>
+          </div>
+        )}
+      </Modal>
+
+      {/* Restart Required Modal */}
+      <Modal open={showRestartModal} onClose={() => setShowRestartModal(false)} title={t('setup.restartRequired', 'Restart required')}>
+        <div className="space-y-4 py-2">
+          <p className="text-sm text-gray-600 dark:text-gray-400">
+            {t('setup.restartHint', 'Restart the service for the new platform to take effect.')}
+          </p>
+          <div className="flex justify-end gap-2">
+            <Button variant="secondary" onClick={() => { setShowRestartModal(false); fetchAll(); }}>
+              {t('setup.later', 'Later')}
+            </Button>
+            <Button onClick={async () => { await restartSystem(); setShowRestartModal(false); fetchAll(); }}>
+              {t('setup.restartNow', 'Restart now')}
+            </Button>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }

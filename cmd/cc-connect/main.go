@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"flag"
@@ -29,6 +30,16 @@ var (
 	buildTime = "unknown"
 )
 
+type initialModelRefreshStarter interface {
+	StartInitialModelRefresh()
+}
+
+type providerWiringResult struct {
+	explicitProviderRequested bool
+	activeProviderApplied     bool
+	canStartInitialRefresh    bool
+}
+
 func main() {
 	checkUpdateAsync()
 
@@ -37,6 +48,9 @@ func main() {
 		switch os.Args[1] {
 		case "config-example":
 			fmt.Print(ccconnect.ConfigExampleTOML)
+			return
+		case "config":
+			runConfig(os.Args[2:])
 			return
 		case "update":
 			runUpdate()
@@ -68,6 +82,9 @@ func main() {
 		case "weixin":
 			runWeixin(os.Args[2:])
 			return
+		case "doctor":
+			runDoctor(os.Args[2:])
+			return
 		}
 	}
 
@@ -93,6 +110,9 @@ func main() {
 
 	configFlag := flag.String("config", "", "path to config file (default: ./config.toml or ~/.cc-connect/config.toml)")
 	showVersion := flag.Bool("version", false, "print version and exit")
+	observeFlag := flag.Bool("observe", false, "observe native terminal Claude Code sessions and forward to Slack")
+	observeChannel := flag.String("observe-channel", "", "Slack channel ID to forward terminal observations to (requires --observe)")
+	forceFlag := flag.Bool("force", false, "kill any existing instance with the same config before starting")
 	flag.Usage = printUsage
 	flag.Parse()
 
@@ -103,8 +123,26 @@ func main() {
 
 	core.VersionInfo = fmt.Sprintf("cc-connect %s\ncommit: %s\nbuilt: %s", version, commit, buildTime)
 	core.CurrentVersion = version
+	core.CurrentCommit = commit
+	core.CurrentBuildTime = buildTime
 
 	configPath := resolveConfigPath(*configFlag)
+
+	// Handle --force: kill any existing instance before we try to acquire the lock
+	if *forceFlag {
+		if KillExistingInstance(configPath) {
+			slog.Info("killed existing instance via --force")
+		}
+	}
+
+	// Acquire instance lock to prevent duplicate processes
+	instanceLock, err := AcquireInstanceLock(configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Use --force to kill the existing instance.\n")
+		os.Exit(1)
+	}
+	slog.Info("acquired instance lock", "path", instanceLock.Path())
 
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		if err := bootstrapConfig(configPath); err != nil {
@@ -127,35 +165,38 @@ func main() {
 
 	setupLogger(cfg.Log.Level, logWriter)
 
+	// run_as_user preflight + isolation audit. MUST run before any engine
+	// or agent is constructed. If any project fails, abort startup
+	// entirely — never half-spawn. See core/runas_check.go and
+	// core/runas_audit.go for the checks themselves.
+	if err := runRunAsUserStartupChecks(context.Background(), cfg); err != nil {
+		slog.Error("run_as_user: startup checks failed, refusing to start", "error", err)
+		os.Exit(1)
+	}
+
 	engines := make([]*core.Engine, 0, len(cfg.Projects))
 	effectiveWorkDirs := make([]string, 0, len(cfg.Projects))
 
 	for _, proj := range cfg.Projects {
-		agent, err := core.CreateAgent(proj.Agent.Type, proj.Agent.Options)
+		// Inject project-level run_as_user / run_as_env into the agent's
+		// opts map so agents that support isolation can pick them up
+		// without needing their own top-level config plumbing.
+		if proj.RunAsUser != "" {
+			if proj.Agent.Options == nil {
+				proj.Agent.Options = map[string]any{}
+			}
+			proj.Agent.Options["run_as_user"] = proj.RunAsUser
+			if len(proj.RunAsEnv) > 0 {
+				proj.Agent.Options["run_as_env"] = proj.RunAsEnv
+			}
+		}
+		agent, err := core.CreateAgent(proj.Agent.Type, buildAgentOptions(cfg.DataDir, proj))
 		if err != nil {
 			slog.Error("failed to create agent", "project", proj.Name, "error", err)
 			os.Exit(1)
 		}
 
-		// Wire providers if the agent supports it
-		if ps, ok := agent.(core.ProviderSwitcher); ok && len(proj.Agent.Providers) > 0 {
-			providers := make([]core.ProviderConfig, len(proj.Agent.Providers))
-			for i, p := range proj.Agent.Providers {
-				providers[i] = core.ProviderConfig{
-					Name:     p.Name,
-					APIKey:   p.APIKey,
-					BaseURL:  p.BaseURL,
-					Model:    p.Model,
-					Models:   convertProviderModels(p.Models),
-					Thinking: p.Thinking,
-					Env:      p.Env,
-				}
-			}
-			ps.SetProviders(providers)
-			if active, _ := proj.Agent.Options["provider"].(string); active != "" {
-				ps.SetActiveProvider(active)
-			}
-		}
+		providerWiring := wireAgentProviders(agent, proj.Agent)
 
 		var platforms []core.Platform
 		for _, pc := range proj.Platforms {
@@ -176,6 +217,7 @@ func main() {
 		workDir, _ := proj.Agent.Options["work_dir"].(string)
 		projectState := core.NewProjectStateStore(projectStatePath(cfg.DataDir, proj.Name))
 		effectiveWorkDir := applyProjectStateOverride(proj.Name, agent, workDir, projectState)
+		startInitialRefreshIfReady(agent, providerWiring)
 		sessionFile := sessionStorePath(cfg.DataDir, proj.Name, effectiveWorkDir)
 
 		// Parse language setting
@@ -221,6 +263,42 @@ func main() {
 			slog.Info("multi-workspace mode enabled", "project", proj.Name, "base_dir", baseDir)
 		}
 
+		// Wire terminal observation (--observe / [projects.observe])
+		observeEnabled := *observeFlag
+		obsChan := *observeChannel
+		if proj.Observe != nil {
+			if !observeEnabled && proj.Observe.Enabled {
+				observeEnabled = true
+			}
+			if obsChan == "" && proj.Observe.Channel != "" {
+				obsChan = proj.Observe.Channel
+			}
+		}
+		if observeEnabled {
+			if obsChan == "" {
+				slog.Error("observe: channel is required (use --observe-channel or set channel in [projects.observe])")
+				os.Exit(1)
+			}
+			hasSlack := false
+			for _, p := range platforms {
+				if p.Name() == "slack" {
+					hasSlack = true
+					break
+				}
+			}
+			if !hasSlack {
+				slog.Warn("observe requires a Slack platform; ignoring")
+			} else {
+				projectDir := resolveClaudeProjectDir(workDir)
+				if projectDir == "" {
+					slog.Warn("observe: could not find Claude Code project directory", "workDir", workDir)
+				} else {
+					sessionKey := fmt.Sprintf("slack:%s", obsChan)
+					engine.SetObserveConfig(projectDir, sessionKey)
+				}
+			}
+		}
+
 		// Wire global custom commands
 		for _, c := range cfg.Commands {
 			engine.AddCommand(c.Name, c.Description, c.Prompt, c.Exec, c.WorkDir, "config")
@@ -263,20 +341,25 @@ func main() {
 			engine.SetUserRoles(buildUserRoleManager(proj.Users))
 		}
 
-		// Wire display truncation settings
+		// Wire display truncation settings (includes legacy quiet → display mapping)
 		{
-			dcfg := core.DisplayCfg{
-				ThinkingMaxLen: 300,
-				ToolMaxLen:     500,
-			}
-			if cfg.Display.ThinkingMaxLen != nil {
-				dcfg.ThinkingMaxLen = *cfg.Display.ThinkingMaxLen
-			}
-			if cfg.Display.ToolMaxLen != nil {
-				dcfg.ToolMaxLen = *cfg.Display.ToolMaxLen
-			}
-			engine.SetDisplayConfig(dcfg)
+			tm, tool, tmlen, toollen := config.EffectiveDisplay(cfg, &proj)
+			engine.SetDisplayConfig(core.DisplayCfg{
+				ThinkingMessages: tm,
+				ThinkingMaxLen:   tmlen,
+				ToolMaxLen:       toollen,
+				ToolMessages:     tool,
+			})
 		}
+
+		// Wire local reference normalization / rendering
+		engine.SetReferenceConfig(core.ReferenceRenderCfg{
+			NormalizeAgents: proj.References.NormalizeAgents,
+			RenderPlatforms: proj.References.RenderPlatforms,
+			DisplayPath:     proj.References.DisplayPath,
+			MarkerStyle:     proj.References.MarkerStyle,
+			EnclosureStyle:  proj.References.EnclosureStyle,
+		})
 
 		// Wire streaming preview
 		{
@@ -344,8 +427,8 @@ func main() {
 			}
 		}
 
-		engine.SetDisplaySaveFunc(func(thinkingMaxLen, toolMaxLen *int) error {
-			return config.SaveDisplayConfig(thinkingMaxLen, toolMaxLen)
+		engine.SetDisplaySaveFunc(func(thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
+			return config.SaveDisplayConfig(thinkingMessages, thinkingMaxLen, toolMaxLen, toolMessages)
 		})
 
 		// Wire idle timeout
@@ -356,13 +439,6 @@ func main() {
 			} else {
 				engine.SetEventIdleTimeout(time.Duration(mins) * time.Minute)
 			}
-		}
-
-		// Wire default quiet mode: project-level overrides global
-		if proj.Quiet != nil {
-			engine.SetDefaultQuiet(*proj.Quiet)
-		} else if cfg.Quiet != nil {
-			engine.SetDefaultQuiet(*cfg.Quiet)
 		}
 
 		// Wire auto-compress settings
@@ -376,6 +452,9 @@ func main() {
 				maxTokens = 12000
 			}
 			engine.SetAutoCompressConfig(true, maxTokens, minGap)
+		}
+		if proj.ResetOnIdleMins != nil {
+			engine.SetResetOnIdle(time.Duration(*proj.ResetOnIdleMins) * time.Minute)
 		}
 
 		// Wire sender injection
@@ -409,6 +488,14 @@ func main() {
 					speechCfg.STT = core.NewQwenASR(apiKey, baseURL, model)
 				} else {
 					slog.Warn("speech: qwen provider enabled but api_key is empty")
+				}
+			case "gemini":
+				apiKey := cfg.Speech.Gemini.APIKey
+				model := cfg.Speech.Gemini.Model
+				if apiKey != "" {
+					speechCfg.STT = core.NewGeminiSTT(apiKey, model)
+				} else {
+					slog.Warn("speech: gemini provider enabled but api_key is empty")
 				}
 			default: // "openai" or unspecified
 				apiKey := cfg.Speech.OpenAI.APIKey
@@ -540,6 +627,27 @@ func main() {
 			return reloadConfig(configPath, capturedProjName, capturedEngine)
 		})
 
+		// Wire /web command callbacks
+		engine.SetWebSetupFunc(func() (int, string, bool, error) {
+			mgmtToken := core.GenerateToken(16)
+			bridgeToken := core.GenerateToken(16)
+			result, err := config.EnableWebAdmin(mgmtToken, bridgeToken)
+			if err != nil {
+				return 0, "", false, err
+			}
+			return result.ManagementPort, result.ManagementToken, !result.AlreadyEnabled, nil
+		})
+		engine.SetWebStatusFunc(func() string {
+			if cfg.Management.Enabled == nil || !*cfg.Management.Enabled {
+				return ""
+			}
+			port := cfg.Management.Port
+			if port == 0 {
+				port = 9820
+			}
+			return fmt.Sprintf("http://localhost:%d", port)
+		})
+
 		engines = append(engines, engine)
 		effectiveWorkDirs = append(effectiveWorkDirs, effectiveWorkDir)
 	}
@@ -554,6 +662,9 @@ func main() {
 		cronSched = core.NewCronScheduler(cronStore)
 		if cfg.Cron.Silent != nil && *cfg.Cron.Silent {
 			cronSched.SetDefaultSilent(true)
+		}
+		if cfg.Cron.SessionMode != "" {
+			cronSched.SetDefaultSessionMode(cfg.Cron.SessionMode)
 		}
 		for i, e := range engines {
 			cronSched.RegisterEngine(cfg.Projects[i].Name, e)
@@ -648,6 +759,116 @@ func main() {
 		if bridgeSrv != nil {
 			mgmtSrv.SetBridgeServer(bridgeSrv)
 		}
+		mgmtSrv.SetSetupFeishuSave(func(req core.FeishuSetupSaveRequest) error {
+			platType := req.PlatformType
+			if platType == "" {
+				platType = "feishu"
+			}
+			_, err := config.EnsureProjectWithFeishuPlatform(config.EnsureProjectWithFeishuOptions{
+				ProjectName:  req.ProjectName,
+				PlatformType: platType,
+				WorkDir:      req.WorkDir,
+				AgentType:    req.AgentType,
+			})
+			if err != nil {
+				return fmt.Errorf("ensure project: %w", err)
+			}
+			_, err = config.SaveFeishuPlatformCredentials(config.FeishuCredentialUpdateOptions{
+				ProjectName:       req.ProjectName,
+				PlatformType:      platType,
+				AppID:             req.AppID,
+				AppSecret:         req.AppSecret,
+				OwnerOpenID:       req.OwnerOpenID,
+				SetAllowFromEmpty: true,
+			})
+			return err
+		})
+		mgmtSrv.SetSetupWeixinSave(func(req core.WeixinSetupSaveRequest) error {
+			_, err := config.EnsureProjectWithWeixinPlatform(config.EnsureProjectWithWeixinOptions{
+				ProjectName: req.ProjectName,
+				WorkDir:     req.WorkDir,
+				AgentType:   req.AgentType,
+			})
+			if err != nil {
+				return fmt.Errorf("ensure project: %w", err)
+			}
+			_, err = config.SaveWeixinPlatformCredentials(config.WeixinCredentialUpdateOptions{
+				ProjectName:       req.ProjectName,
+				Token:             req.Token,
+				BaseURL:           req.BaseURL,
+				AccountID:         req.IlinkBotID,
+				ScannedUserID:     req.IlinkUserID,
+				SetAllowFromEmpty: true,
+			})
+			return err
+		})
+		mgmtSrv.SetAddPlatformToProject(func(projectName, platType string, opts map[string]any, workDir, agentType string) error {
+			if opts == nil {
+				opts = map[string]any{}
+			}
+			return config.AddPlatformToProject(projectName, config.PlatformConfig{Type: platType, Options: opts}, workDir, agentType)
+		})
+		mgmtSrv.SetRemoveProject(config.RemoveProject)
+		mgmtSrv.SetSaveProjectSettings(func(name string, u core.ProjectSettingsUpdate) error {
+			return config.SaveProjectSettings(name, config.ProjectSettingsUpdate{
+				Language:             u.Language,
+				AdminFrom:            u.AdminFrom,
+				DisabledCommands:     u.DisabledCommands,
+				WorkDir:              u.WorkDir,
+				Mode:                 u.Mode,
+				ShowContextIndicator: u.ShowContextIndicator,
+				PlatformAllowFrom:    u.PlatformAllowFrom,
+			})
+		})
+		mgmtSrv.SetGetProjectConfig(config.GetProjectConfigDetails)
+		mgmtSrv.SetConfigFilePath(configPath)
+		mgmtSrv.SetGetGlobalSettings(config.GetGlobalSettings)
+		mgmtSrv.SetSaveGlobalSettings(func(updates map[string]any) error {
+			u := config.GlobalSettingsUpdate{}
+			if v, ok := updates["language"].(string); ok {
+				u.Language = &v
+			}
+			if v, ok := updates["attachment_send"].(string); ok {
+				u.AttachmentSend = &v
+			}
+			if v, ok := updates["log_level"].(string); ok {
+				u.LogLevel = &v
+			}
+			if v, ok := updates["idle_timeout_mins"].(float64); ok {
+				iv := int(v)
+				u.IdleTimeoutMins = &iv
+			}
+			if v, ok := updates["thinking_messages"].(bool); ok {
+				u.ThinkingMessages = &v
+			}
+			if v, ok := updates["thinking_max_len"].(float64); ok {
+				iv := int(v)
+				u.ThinkingMaxLen = &iv
+			}
+			if v, ok := updates["tool_messages"].(bool); ok {
+				u.ToolMessages = &v
+			}
+			if v, ok := updates["tool_max_len"].(float64); ok {
+				iv := int(v)
+				u.ToolMaxLen = &iv
+			}
+			if v, ok := updates["stream_preview_enabled"].(bool); ok {
+				u.StreamPreviewOn = &v
+			}
+			if v, ok := updates["stream_preview_interval_ms"].(float64); ok {
+				iv := int(v)
+				u.StreamPreviewIntMs = &iv
+			}
+			if v, ok := updates["rate_limit_max_messages"].(float64); ok {
+				iv := int(v)
+				u.RateLimitMax = &iv
+			}
+			if v, ok := updates["rate_limit_window_secs"].(float64); ok {
+				iv := int(v)
+				u.RateLimitWindow = &iv
+			}
+			return config.SaveGlobalSettings(u)
+		})
 		mgmtSrv.Start()
 	}
 
@@ -734,6 +955,7 @@ func main() {
 	if logCloser != nil {
 		logCloser.Close()
 	}
+	instanceLock.Release()
 
 	if restartReq != nil {
 		if err := core.SaveRestartNotify(cfg.DataDir, *restartReq); err != nil {
@@ -844,6 +1066,23 @@ func applyProjectStateOverride(projectName string, agent core.Agent, configuredW
 	return override
 }
 
+// resolveClaudeProjectDir returns the Claude Code project directory for a given
+// work directory, or "" if it doesn't exist.
+func resolveClaudeProjectDir(workDir string) string {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	// Claude Code encodes paths by replacing os.PathSeparator with "-"
+	// e.g. /home/leigh/workspace/cc-connect -> -home-leigh-workspace-cc-connect
+	encoded := strings.ReplaceAll(workDir, string(os.PathSeparator), "-")
+	dir := filepath.Join(homeDir, ".claude", "projects", encoded)
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		return ""
+	}
+	return dir
+}
+
 // resolveConfigPath determines which config file to use.
 // Priority: explicit flag → ./config.toml → ~/.cc-connect/config.toml
 func resolveConfigPath(explicit string) string {
@@ -926,6 +1165,7 @@ Usage:
 
 Flags:
   --config <path>    Path to config file (default: ./config.toml or ~/.cc-connect/config.toml)
+  --force            Kill any existing instance with the same config before starting
   --version          Print version and exit
   --help             Show this help message
 
@@ -970,9 +1210,14 @@ Commands:
     new              Force QR login
     bind             Bind existing ilink bot token
 
+  config             Manage configuration
+    example          Print a complete annotated config.toml example
+    format           Format the config file (alias: fmt)
+    path             Print the resolved config file path
+
   update             Check for updates and upgrade the binary (--pre for beta)
   check-update       Check if a newer version is available
-  config-example     Print a complete annotated config.toml example
+  config-example     (deprecated: use 'config example' instead)
 
 Examples:
   cc-connect                          Start with default config
@@ -984,8 +1229,8 @@ Examples:
   cc-connect feishu setup             Setup Feishu/Lark bot credentials
   cc-connect weixin setup             Setup Weixin (ilink) with QR or --token
   cc-connect update                   Update to the latest version
-  cc-connect config-example           Print full config.toml example
-  cc-connect config-example > c.toml  Save example config to a file
+  cc-connect config format            Format the config file
+  cc-connect config example > c.toml  Save example config to a file
 
 `, v, updateHint)
 }
@@ -1032,25 +1277,15 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		return nil, fmt.Errorf("project %q not found in config", projName)
 	}
 
-	// Reload display config
-	dcfg := core.DisplayCfg{ThinkingMaxLen: 300, ToolMaxLen: 500}
-	if cfg.Display.ThinkingMaxLen != nil {
-		dcfg.ThinkingMaxLen = *cfg.Display.ThinkingMaxLen
-	}
-	if cfg.Display.ToolMaxLen != nil {
-		dcfg.ToolMaxLen = *cfg.Display.ToolMaxLen
-	}
-	engine.SetDisplayConfig(dcfg)
+	// Reload display config (includes legacy quiet → display mapping)
+	tm, tool, tmlen, toollen := config.EffectiveDisplay(cfg, proj)
+	engine.SetDisplayConfig(core.DisplayCfg{
+		ThinkingMessages: tm,
+		ThinkingMaxLen:   tmlen,
+		ToolMaxLen:       toollen,
+		ToolMessages:     tool,
+	})
 	result.DisplayUpdated = true
-
-	// Reload default quiet mode
-	if proj.Quiet != nil {
-		engine.SetDefaultQuiet(*proj.Quiet)
-	} else if cfg.Quiet != nil {
-		engine.SetDefaultQuiet(*cfg.Quiet)
-	} else {
-		engine.SetDefaultQuiet(false)
-	}
 
 	// Reload auto-compress settings
 	if proj.AutoCompress.Enabled != nil && *proj.AutoCompress.Enabled {
@@ -1065,6 +1300,11 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		engine.SetAutoCompressConfig(true, maxTokens, minGap)
 	} else {
 		engine.SetAutoCompressConfig(false, 0, 0)
+	}
+	if proj.ResetOnIdleMins != nil {
+		engine.SetResetOnIdle(time.Duration(*proj.ResetOnIdleMins) * time.Minute)
+	} else {
+		engine.SetResetOnIdle(0)
 	}
 
 	showCtx := true
@@ -1171,6 +1411,55 @@ func convertProviderModels(ms []config.ProviderModelConfig) []core.ModelOption {
 		opts[i] = core.ModelOption{Name: m.Model, Alias: m.Alias}
 	}
 	return opts
+}
+
+func buildAgentOptions(dataDir string, proj config.ProjectConfig) map[string]any {
+	opts := make(map[string]any, len(proj.Agent.Options)+2)
+	for k, v := range proj.Agent.Options {
+		opts[k] = v
+	}
+	opts["cc_data_dir"] = dataDir
+	opts["cc_project"] = proj.Name
+	return opts
+}
+
+func wireAgentProviders(agent core.Agent, agentCfg config.AgentConfig) providerWiringResult {
+	result := providerWiringResult{canStartInitialRefresh: true}
+	active, _ := agentCfg.Options["provider"].(string)
+	result.explicitProviderRequested = active != ""
+
+	ps, ok := agent.(core.ProviderSwitcher)
+	if !ok || len(agentCfg.Providers) == 0 {
+		return result
+	}
+
+	providers := make([]core.ProviderConfig, len(agentCfg.Providers))
+	for i, p := range agentCfg.Providers {
+		providers[i] = core.ProviderConfig{
+			Name:     p.Name,
+			APIKey:   p.APIKey,
+			BaseURL:  p.BaseURL,
+			Model:    p.Model,
+			Models:   convertProviderModels(p.Models),
+			Thinking: p.Thinking,
+			Env:      p.Env,
+		}
+	}
+	ps.SetProviders(providers)
+	if result.explicitProviderRequested {
+		result.activeProviderApplied = ps.SetActiveProvider(active)
+		result.canStartInitialRefresh = result.activeProviderApplied
+	}
+	return result
+}
+
+func startInitialRefreshIfReady(agent core.Agent, result providerWiringResult) {
+	if !result.canStartInitialRefresh {
+		return
+	}
+	if starter, ok := agent.(initialModelRefreshStarter); ok {
+		starter.StartInitialModelRefresh()
+	}
 }
 
 func convertCoreModels(ms []core.ModelOption) []config.ProviderModelConfig {

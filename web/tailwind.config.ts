@@ -7,8 +7,8 @@ export default {
     extend: {
       colors: {
         accent: {
-          DEFAULT: '#42ff9c',
-          dim: '#2bc87a',
+          DEFAULT: 'rgb(var(--color-accent) / <alpha-value>)',
+          dim: 'rgb(var(--color-accent-dim) / <alpha-value>)',
         },
       },
       animation: {

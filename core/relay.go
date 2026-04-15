@@ -289,9 +289,14 @@ func (rm *RelayManager) relayContext(ctx context.Context) (context.Context, cont
 
 func parseSessionKeyParts(sessionKey string) (platform, chatID string, err error) {
 	// Format: "platform:chatID:userID"
+	// Relay session format: "relay:sourceProject:chatID"
 	parts := strings.SplitN(sessionKey, ":", 3)
 	if len(parts) < 2 {
 		return "", "", fmt.Errorf("invalid session key format: %q", sessionKey)
+	}
+	if parts[0] == "relay" && len(parts) == 3 {
+		// For relay sessions, chatID is the third part: "relay:sourceProject:chatID"
+		return parts[0], parts[2], nil
 	}
 	return parts[0], parts[1], nil
 }

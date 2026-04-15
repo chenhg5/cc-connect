@@ -1,6 +1,7 @@
 package weixin
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 )
@@ -72,4 +73,52 @@ func TestSendMessageResp_JSON(t *testing.T) {
 	if r.Ret != -1 || r.Errcode != 100 || r.Errmsg != "rate limited" {
 		t.Fatalf("got %+v", r)
 	}
+}
+
+func TestSendAudioRejectsEmptyAudio(t *testing.T) {
+	p := &Platform{}
+	// resolveReplyContext checks context_token first, so provide one
+	rc := &replyContext{peerUserID: "test", contextToken: "valid-token"}
+	err := p.SendAudio(context.Background(), rc, []byte{}, "wav")
+	if err == nil {
+		t.Fatal("expected error for empty audio")
+	}
+	if !containsStr(err.Error(), "empty audio") {
+		t.Fatalf("expected 'empty audio' error, got: %v", err)
+	}
+}
+
+func TestSendAudioRejectsInvalidReplyContext(t *testing.T) {
+	p := &Platform{}
+	err := p.SendAudio(context.Background(), "invalid-context", []byte("audio-data"), "wav")
+	if err == nil {
+		t.Fatal("expected error for invalid reply context")
+	}
+	if !containsStr(err.Error(), "invalid reply context") {
+		t.Fatalf("expected 'invalid reply context' error, got: %v", err)
+	}
+}
+
+func TestSendAudioRejectsNilReplyContext(t *testing.T) {
+	p := &Platform{}
+	err := p.SendAudio(context.Background(), nil, []byte("audio-data"), "wav")
+	if err == nil {
+		t.Fatal("expected error for nil reply context")
+	}
+	if !containsStr(err.Error(), "invalid reply context") {
+		t.Fatalf("expected 'invalid reply context' error, got: %v", err)
+	}
+}
+
+func containsStr(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsStrHelper(s, substr))
+}
+
+func containsStrHelper(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }

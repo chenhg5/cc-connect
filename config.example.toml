@@ -32,11 +32,6 @@
 # 不带附件的 `cc-connect send --message` 不受影响。
 # attachment_send = "on"
 
-# Default quiet mode (suppress thinking/tool progress messages) / 默认静默模式（隐藏思考和工具进度消息）
-# Can be overridden per-project. Users can still toggle with /quiet command.
-# 可被项目级配置覆盖。用户仍可通过 /quiet 命令切换。
-# quiet = true
-
 [log]
 level = "info" # debug, info, warn, error
 
@@ -50,13 +45,65 @@ level = "info" # debug, info, warn, error
 # 设为 0 表示不截断（显示完整内容）。
 
 # [display]
+# thinking_messages = true # Show/hide thinking messages (default: true) / 是否显示思考消息（默认 true）
 # thinking_max_len = 300   # Max chars for thinking messages (default: 300) / 思考消息最大字符数（默认 300）
 # tool_max_len = 500       # Max chars for tool use messages (default: 500) / 工具调用消息最大字符数（默认 500）
+# tool_messages = true     # Show/hide tool progress messages (default: true) / 是否显示工具进度消息（默认 true）
 
 # Agent idle timeout: max minutes between consecutive agent events before
 # considering the session stuck. Set to 0 to disable the timeout entirely.
 # Agent 空闲超时：两次 agent 事件之间的最大等待分钟数，超时则认为会话卡住。设为 0 禁用。
 # idle_timeout_mins = 120  # default: 120 (2 hours) / 默认 120（2 小时）
+
+# Auto-reset the active session after the user has been inactive for a while.
+# Unlike idle_timeout_mins, this does not detect stuck agent execution. It
+# rotates to a fresh cc-connect session when the user comes back after being idle.
+# 用户长时间未发消息后，自动切换到一个新的活跃会话。
+# 这与 idle_timeout_mins 不同：它不是检测 agent 卡住，而是用户回来后自动开始新会话。
+# [[projects]]
+# reset_on_idle_mins = 60   # 0 or unset = disabled / 设为 0 或留空表示禁用
+
+# =============================================================================
+# OS-user isolation via run_as_user (Linux/macOS only)
+# 通过 run_as_user 实现 OS 用户隔离（仅限 Linux/macOS）
+# =============================================================================
+#
+# Spawn a project's agent command under a different Unix user via
+# `sudo -n -iu <user>`. This provides OS-level file-system isolation from
+# the supervisor user that runs cc-connect itself, so a misbehaving agent
+# cannot read files outside the target user's permission scope.
+#
+# Currently supported by: claudecode.
+# Other agents use the supervisor user until migrated in a follow-up PR.
+#
+# Setup (one-time):
+#   1. Create the target Unix user and install their tooling:
+#        sudo useradd -m -s /bin/bash partseeker-coder
+#        sudo -iu partseeker-coder
+#        # install claude CLI, set up ~/.claude/settings.json, PGSSL certs,
+#        # ~/.pgpass, plugin state, anything the agent needs.
+#   2. Grant the supervisor user passwordless sudo to the target:
+#        # /etc/sudoers.d/cc-connect
+#        partseeker-orchestrator ALL=(partseeker-coder) NOPASSWD: ALL
+#   3. Ensure the target user does NOT have passwordless sudo to anywhere
+#      else. `sudo -n -iu partseeker-coder -- sudo -n true` must fail.
+#   4. Ensure the target user can read AND write the project's work_dir.
+#   5. Run `cc-connect doctor user-isolation` to audit the setup before
+#      starting cc-connect.
+#
+# cc-connect refuses to start if any preflight gate fails (missing sudo,
+# target can escalate, work_dir inaccessible) or if the isolation probe
+# detects that the target user can read another user's secrets.
+#
+# [[projects]]
+# name = "claude-sandboxed"
+# run_as_user = "partseeker-coder"
+# # Extra env vars to forward across the sudo boundary. The default
+# # allowlist (PATH, LANG, LC_*, TERM) is always included; only list
+# # names that the target user cannot reasonably set in their own shell
+# # profile. Secrets belong in the target user's ~/.claude/settings.json
+# # env block, NOT here.
+# run_as_env = ["PGSSLROOTCERT", "PGSSLMODE"]
 
 # =============================================================================
 # Streaming Preview / 流式预览
@@ -124,6 +171,10 @@ level = "info" # debug, info, warn, error
 # max_tokens = 12000     # estimated token threshold to trigger compression
 # min_gap_mins = 30      # minimum minutes between auto-compress runs (default 30)
 
+# [projects.observe]
+# enabled = true                    # Forward native terminal sessions to Slack
+# channel = "C0AL13PN4BG"           # Slack channel ID to post observations to
+
 # =============================================================================
 # Cron Settings / 定时任务设置
 # =============================================================================
@@ -133,6 +184,8 @@ level = "info" # debug, info, warn, error
 # [cron]
 # silent = false             # Suppress "⏰ task name" notification when cron starts (default: false)
 #                            # 静默模式：不发送定时任务开始执行的通知消息（默认 false）
+# session_mode = "reuse"     # Default session mode for all cron jobs: "reuse" (default) or "new_per_run"
+#                            # 定时任务默认会话模式："reuse"（复用活跃会话）或 "new_per_run"（每次新建会话）
 
 # =============================================================================
 # Webhook / 外部 Webhook 端点
@@ -428,7 +481,9 @@ level = "info" # debug, info, warn, error
 #
 # [projects.agent]
 # type = "claudecode"
-# permission_mode = "yolo"
+#
+# [projects.agent.options]
+# mode = "yolo"  # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassPermissions" (yolo)
 #
 # [[projects.platforms]]
 # type = "slack"
@@ -444,7 +499,6 @@ level = "info" # debug, info, warn, error
 name = "my-backend"
 # show_context_indicator = false  # Hide the “[ctx: ~N%]” suffix on assistant replies (default: true / show)
 #                                   # 不在助手回复末尾显示「[ctx: ~N%]」上下文占用提示（默认 true 显示）
-# quiet = true  # Override global quiet for this project / 覆盖全局静默模式
 # disabled_commands = ["restart", "upgrade", "cron"]  # Disable specific commands for this project
 #                                                     # 禁用该项目的指定命令
 #
@@ -635,6 +689,28 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # name = "bedrock"
 # env = { CLAUDE_CODE_USE_BEDROCK = "1", AWS_PROFILE = "bedrock" }
 
+# Reference normalization and rendering / 本地引用标准化与展示优化
+# Disabled by default. When enabled, cc-connect can normalize Codex / Claude Code
+# local file references (paths, line refs, markdown file links) and re-render them
+# into a more readable platform-friendly form before sending to supported IMs.
+# 默认关闭。启用后，cc-connect 可对 Codex / Claude Code 的本地文件引用
+# （路径、行号引用、Markdown 文件链接）做标准化，并在发送到支持的平台前
+# 重新渲染为更易读的展示形式。
+#
+# Supported today / 当前已支持:
+#   normalize_agents: codex | claudecode | all
+#   render_platforms: feishu | weixin | all
+# Note: render depends on normalize. If normalize_agents is empty, render_platforms
+# alone has no effect.
+# 注意：render 依赖 normalize。若 normalize_agents 为空，仅设置 render_platforms 不生效。
+#
+# [projects.references]
+# normalize_agents = ["codex", "claudecode"]
+# render_platforms = ["feishu", "weixin"]
+# display_path = "dirname_basename" # absolute | relative | basename | dirname_basename | smart
+# marker_style = "emoji"            # none | ascii | emoji
+# enclosure_style = "code"          # none | bracket | angle | fullwidth | code
+
 # Feishu / Lark / 飞书
 # 1. Create an app at https://open.feishu.cn / 在 https://open.feishu.cn 创建应用
 # 2. Enable Bot capability / 开启机器人能力
@@ -653,6 +729,7 @@ type = "feishu"
 [projects.platforms.options]
 app_id = "your-feishu-app-id"
 app_secret = "your-feishu-app-secret"
+# domain = "https://open.feishu.cn"  # Optional runtime API/WebSocket base URL override / 可选：运行时 API/WebSocket 域名覆盖
 # enable_feishu_card = true  # Enable Feishu interactive cards (default: true); set false to force plain-text replies
 #                              # 启用飞书交互式卡片（默认 true）；设为 false 时强制回退纯文本回复
 # allow_from = "*"          # Allowed user open_ids, comma-separated; "*" = all (default). Use /whoami to get your open_id.
@@ -669,6 +746,8 @@ app_secret = "your-feishu-app-secret"
 #                           # 默认 true：用「回复消息」API（引用用户消息）。设为 false 则在会话里发普通消息、不引用触发消息。
 # progress_style = "legacy" # Progress rendering style: legacy | compact | card
 #                           # 进度消息展示风格：legacy（逐条消息）| compact（单消息持续更新）| card（结构化卡片）
+# resolve_mentions = false  # Auto-resolve @name in outgoing messages to Feishu at tags by matching group member names
+#                           # 自动将发出消息中的 @显示名 替换为飞书 at 标签（通过匹配群成员名称）
 
 # Lark (International Version) / Lark 国际版
 # Lark uses Webhook mode instead of WebSocket long-connection.
@@ -686,6 +765,7 @@ app_secret = "your-feishu-app-secret"
 # [projects.platforms.options]
 # app_id = "your-lark-app-id"
 # app_secret = "your-lark-app-secret"
+# domain = "https://open.larksuite.com"  # Optional runtime API base URL override / 可选：运行时 API 域名覆盖
 # port = "8080"                  # Webhook server port / Webhook 服务器端口
 # callback_path = "/feishu/webhook"  # Webhook callback path / Webhook 回调路径
 # encrypt_key = ""               # Event encrypt key (optional) / 事件加密密钥（可选）
@@ -725,6 +805,7 @@ app_secret = "your-feishu-app-secret"
 #                   # 允许的 Telegram 用户 ID，如 "123456789,987654321"；"*" 表示所有
 # group_reply_all = false  # If true, respond to ALL group messages without @mention / 设为 true 群聊无需 @ 也响应
 # share_session_in_channel = false  # If true, all users in a group share one agent session / 群聊共享会话
+# enable_reactions = false  # If true, add ⚡ reaction to incoming messages / 设为 true 收到消息时添加 ⚡ 表情
 
 # Slack (uncomment to enable / 取消注释以启用)
 # 1. Create an app at https://api.slack.com/apps / 创建应用
@@ -775,8 +856,13 @@ app_secret = "your-feishu-app-secret"
 # share_session_in_channel = false  # If true, all users in a channel share one agent session / 频道共享会话
 # thread_isolation = false  # If true, cc-connect creates/uses Discord threads as session boundaries when the channel supports threads
 #                           # 设为 true 时，cc-connect 会在支持 thread 的 Discord 频道内按 thread 隔离会话
+# progress_style = "legacy"  # Progress rendering: legacy | compact | card / 进度展示方式：legacy | compact | card
+#                            # card = one editable Discord embed progress card / card = 单条可编辑的 Discord 嵌入式进度卡
 # respond_to_at_everyone_and_here = false  # If true, treat @everyone/@here as a direct mention so the bot responds
 #                              # 设为 true 时，将 @everyone/@here 视为直接 @ 机器人，使机器人响应
+# proxy = "http://127.0.0.1:7890"  # Optional HTTP/SOCKS5 proxy for Discord API & Gateway / 可选代理
+# proxy_username = ""              # Optional proxy auth username / 代理用户名
+# proxy_password = ""              # Optional proxy auth password / 代理密码
 
 # LINE (uncomment to enable / 取消注释以启用)
 # 1. Create a channel at https://developers.line.biz/console/ (Messaging API)
@@ -913,7 +999,10 @@ app_secret = "your-feishu-app-secret"
 #
 # Mode options / 模式说明:
 # - "default": Trust workspace, ask before tool use / 信任工作区，工具调用前询问
-# - "force":   Auto-approve all tool calls (same as --force/--yolo) / 自动批准所有工具调用
+#              Note: Shell tool is restricted to safe commands (e.g. ls) in this mode
+#              注意：此模式下 Shell 工具仅允许安全命令（如 ls）
+# - "force":   Auto-approve all tool calls, full shell access (same as --force/--yolo)
+#              自动批准所有工具调用，完整 Shell 访问（等同 --force/--yolo）
 # - "plan":    Read-only analysis, no edits / 只读分析，不做修改
 # - "ask":     Q&A style, read-only / 问答风格，只读
 #

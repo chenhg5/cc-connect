@@ -11,5 +11,3 @@ export interface SystemStatus {
 export const getStatus = () => api.get<SystemStatus>('/status');
 export const restartSystem = (body?: { session_key?: string; platform?: string }) => api.post('/restart', body);
 export const reloadConfig = () => api.post<{ message: string; projects_added: string[]; projects_removed: string[]; projects_updated: string[] }>('/reload');
-export const getConfig = () => api.get<any>('/config');
-export const getLogs = (params?: { level?: string; limit?: string }) => api.get<{ entries: any[] }>('/logs', params);

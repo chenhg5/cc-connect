@@ -9,6 +9,7 @@ cc-connect 完整功能使用指南。
 - [API Provider 管理](#api-provider-管理)
 - [模型选择](#模型选择)
 - [工作目录切换（`/dir`、`/cd`）](#工作目录切换dircd)
+- [引用查看（`/show`）](#引用查看show)
 - [飞书配置 CLI](#飞书配置-cli)
 - [微信个人号配置 CLI](#微信个人号配置-cli)
 - [Claude Code Router 集成](#claude-code-router-集成)
@@ -19,6 +20,8 @@ cc-connect 完整功能使用指南。
 - [多机器人中继](#多机器人中继)
 - [守护进程模式](#守护进程模式)
 - [多工作区模式](#多工作区模式)
+- [Web 管理后台（Beta）](#web-管理后台beta)
+- [Bridge — 外部适配器接入（Beta）](#bridge--外部适配器接入beta)
 - [配置参考](#配置参考)
 
 ---
@@ -38,14 +41,24 @@ cc-connect 完整功能使用指南。
 | `/provider [...]` | 管理 API Provider |
 | `/model [switch <alias>]` | 列出可用模型或按别名切换 |
 | `/dir [路径]` | 查看或切换 Agent 工作目录 |
+| `/show <引用>` | 按引用查看文件、目录或代码片段 |
 | `/allow <工具名>` | 预授权工具 |
 | `/reasoning [等级]` | 查看或切换推理强度（Codex）|
 | `/mode [名称]` | 查看或切换权限模式 |
-| `/quiet` | 开关思考/工具进度消息 |
 | `/stop` | 停止当前执行 |
 | `/help` | 显示可用命令 |
 
 会话中 Agent 请求工具权限时，回复 **允许** / **拒绝** / **允许所有**。
+
+也可以为项目开启“空闲后自动切换新会话”：
+
+```toml
+[[projects]]
+name = "demo"
+reset_on_idle_mins = 60
+```
+
+开启后，如果用户长时间未发消息，下一条普通消息会自动进入一个新的会话；旧会话仍会保留在 `/list` 中，不会被删除。
 
 ---
 
@@ -261,6 +274,149 @@ alias = "spark"
 
 ---
 
+## 本地引用展示配置（`[projects.references]`）
+
+可选启用对 Agent 输出中的本地文件 / 目录 / 代码位置引用进行标准化与重渲染，提升在 IM 平台中的可读性。
+
+这是一个 **opt-in** 功能：
+
+- 未配置 `[projects.references]` 时，现有行为保持不变
+- 只有命中 `normalize_agents` 和 `render_platforms` 时，才会启用
+
+### 推荐配置
+
+```toml
+[projects.references]
+normalize_agents = ["all"]
+render_platforms = ["all"]
+display_path = "relative"
+marker_style = "emoji"
+enclosure_style = "code"
+```
+
+### 字段说明
+
+- `normalize_agents`
+  - 控制哪些 Agent 输出参与这套引用处理
+  - 当前初始支持：`codex`、`claudecode`、`all`
+
+- `render_platforms`
+  - 控制在哪些平台发送前应用展示重写
+  - 当前初始支持：`feishu`、`weixin`、`all`
+
+- `display_path`
+  - 控制路径主体的显示层级
+  - 可选值：`absolute`、`relative`、`basename`、`dirname_basename`、`smart`
+
+- `marker_style`
+  - 控制前缀标记样式
+  - 可选值：`none`、`ascii`、`emoji`
+
+- `enclosure_style`
+  - 控制路径主体的包裹样式
+  - 可选值：`none`、`bracket`、`angle`、`fullwidth`、`code`
+
+### 支持的引用输入
+
+当前初始支持识别这些常见形式：
+
+- 绝对路径
+- 相对路径
+- 文件 / 目录引用
+- `path:line`
+- `path:line:col`
+- `path:start-end`
+- `path#L42`
+- Markdown 本地文件链接
+- Claude 风格的反引号绝对路径引用
+
+### 行为说明
+
+- 只处理 Agent 输出：
+  - thinking
+  - final response
+  - stream preview
+  - progress / card 中的 Agent 文本
+
+- 不处理：
+  - 系统消息
+  - `/workspace`、`/dir`、`/status` 等命令回复
+  - raw tool result
+
+- 网页链接会保持原样，不会被本地引用重写逻辑污染
+
+### 推荐默认值说明
+
+当前最推荐的组合是：
+
+- `display_path = "relative"`
+- `marker_style = "emoji"`
+- `enclosure_style = "code"`
+
+这样通常会得到类似：
+
+- `📄 ui/recovery_contact_form.tsx:11`
+- `📁 docs/spec.v1/`
+
+如果不希望使用 emoji，更推荐：
+
+- `display_path = "dirname_basename"`
+- `marker_style = "ascii"`
+- `enclosure_style = "code"`
+
+---
+
+## 引用查看（`/show`）
+
+可直接基于一个文件 / 目录 / 代码位置引用查看内容，而不必手写 `/shell sed ...`。
+
+### 聊天命令
+
+```text
+/show <路径>                  查看文件前 80 行
+/show <路径:行号>             查看该行附近上下文
+/show <路径:起止行>           查看指定 range
+/show <目录路径/>             查看一级目录列表
+```
+
+支持的输入形式包括：
+
+- 绝对路径
+- 相对路径（相对当前 Agent 工作目录）
+- `path:line`
+- `path:line:col`
+- `path:start-end`
+- `path#L42`
+- Markdown 本地文件链接，如：
+  - `[file.ts](/abs/path/file.ts#L42)`
+
+### 行为说明
+
+- 文件，无位置：
+  - 默认显示文件前 80 行
+- `path:line` / `path#L42`：
+  - 默认显示该位置附近上下文
+- `path:start-end`：
+  - 默认显示该 range
+- 目录：
+  - 默认显示一级目录内容
+
+说明：
+
+- `/show` 只解析“纯引用文本”，不解析前端展示层包装后的 `📄 ...` / `[FILE] ...` 这类样式
+- `/show` 属于本地文件系统查看命令，与 `/shell`、`/dir` 类似，默认受 `admin_from` 权限控制
+
+示例：
+
+```text
+/show ui/recovery_contact_form.tsx
+/show svc/recovery_session_reconciler.go:12
+/show svc/recovery_session_reconciler_test.go:8-17
+/show docs/spec.v1/
+```
+
+---
+
 ## 飞书配置 CLI
 
 可以直接通过 CLI 完成飞书/Lark 机器人创建或关联，并自动写回 `config.toml`：
@@ -286,6 +442,7 @@ cc-connect feishu bind --project my-project --app cli_xxx:sec_xxx
 - 项目存在但没有 `feishu/lark` 平台时会自动补一个平台配置。
 - 命令会回填凭证（`app_id` / `app_secret`）；扫码新建场景下飞书通常会预配权限和事件订阅。
 - 建议在飞书开放平台再核验一次发布状态与可用范围。
+- 运行时平台配置还支持可选 `domain` 覆盖 Feishu/Lark API 域名；这不会改变 `setup/new/bind` 的引导地址。
 
 ---
 
@@ -604,6 +761,145 @@ type = "claudecode"
 
 - 频道名 `#project-a` → 自动绑定 `base_dir/project-a/`
 - 每个频道有独立的会话和 Agent 状态
+
+---
+
+## Web 管理后台（Beta）
+
+> **状态：Beta。** 此功能自 v1.2.2-beta.5 起可用，UI 和 API 在后续版本中可能调整。
+
+内嵌在二进制中的全功能管理界面，支持项目管理、会话管理、定时任务编辑、全局设置、聊天界面、多语言等。
+
+### 快速启用（聊天命令）
+
+最简单的方式，在聊天中发送：
+
+```
+/web setup
+```
+
+该命令会自动在 `config.toml` 中启用 **Management API** 和 **Bridge**，生成 token，并返回访问地址。首次启用后需要执行 `/restart` 使配置生效。
+
+启用后，打开返回的地址（默认 `http://localhost:9820`），用显示的 token 登录即可。
+
+### 查看状态
+
+```
+/web           # 或 /web status — 查看 Web 管理后台的地址和启用状态
+```
+
+### 手动配置
+
+在 `config.toml` 中添加：
+
+```toml
+[management]
+enabled = true
+port = 9820                     # 管理后台监听端口
+token = "your-secret-token"     # 登录 token；/web setup 会自动生成
+cors_origins = ["*"]            # 允许的 CORS 来源；留空则不设置 CORS 头
+```
+
+然后重启 cc-connect。
+
+### 构建选项
+
+Web 前端资源默认编译进二进制。如果想排除（减小约 1MB）：
+
+```bash
+make build-noweb
+# 或
+go build -tags 'no_web' ./cmd/cc-connect
+```
+
+使用 `no_web` 构建时，`/web` 命令会提示 Web 管理后台不可用。
+
+### Management API
+
+API 与 Web UI 共用同一端口。基础 URL：`http://<host>:<port>/api/v1`
+
+所有 API 请求需要 `Authorization: Bearer <token>` 请求头。
+
+主要接口：
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/api/v1/status` | 系统状态（版本、运行时间、已连接平台） |
+| `POST` | `/api/v1/restart` | 重启 cc-connect |
+| `POST` | `/api/v1/reload` | 重新加载配置 |
+| `GET` | `/api/v1/projects` | 项目列表 |
+| `GET` | `/api/v1/sessions?project=<name>` | 查询项目的会话列表 |
+| `GET` | `/api/v1/cron` | 定时任务列表 |
+| `GET` | `/api/v1/settings` | 获取全局设置 |
+| `PATCH` | `/api/v1/settings` | 更新全局设置 |
+
+完整 API 参考：[management-api.md](./management-api.md)（[中文版](./management-api.zh-CN.md)）
+
+---
+
+## Bridge — 外部适配器接入（Beta）
+
+> **状态：Beta。** 此功能自 v1.2.2-beta.5 起可用，协议在后续版本中可能调整。
+
+Bridge 提供 WebSocket + REST 服务，让外部适配器（自定义 UI、机器人、脚本等）可以接入 cc-connect —— 发送消息、接收 Agent 事件、管理会话。
+
+### 通过聊天启用
+
+`/web setup` 命令会同时启用 Bridge 和管理后台，无需额外操作。
+
+### 手动配置
+
+在 `config.toml` 中添加：
+
+```toml
+[bridge]
+enabled = true
+port = 9810                     # Bridge 监听端口（与管理后台分开）
+token = "your-bridge-secret"    # WebSocket 和 REST 的认证 token
+path = "/bridge/ws"             # WebSocket 端点路径
+cors_origins = ["*"]            # 允许的 CORS 来源；留空则不设置 CORS
+```
+
+然后重启 cc-connect。
+
+### 认证方式
+
+所有 Bridge 连接需要 token 认证，支持三种方式：
+
+- URL 参数：`?token=<bridge-token>`
+- 请求头：`Authorization: Bearer <bridge-token>`
+- 请求头：`X-Bridge-Token: <bridge-token>`
+
+### WebSocket 接入
+
+连接地址：
+
+```
+ws://<host>:<bridge-port>/bridge/ws?token=<bridge-token>
+```
+
+WebSocket 支持双向通信 —— 向 Agent 发送消息，并实时接收 Agent 的文本回复、工具调用、权限请求等事件。
+
+### REST API
+
+与 WebSocket 共用同一端口。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/bridge/sessions?session_key=...&project=...` | 查询会话列表 |
+| `POST` | `/bridge/sessions` | 创建新会话 |
+| `GET` | `/bridge/sessions/{id}?session_key=...&project=...` | 获取会话详情及历史 |
+| `DELETE` | `/bridge/sessions/{id}?session_key=...&project=...` | 删除会话 |
+| `POST` | `/bridge/sessions/switch` | 切换当前活跃会话 |
+
+完整协议参考：[bridge-protocol.md](./bridge-protocol.md)（[中文版](./bridge-protocol.zh-CN.md)）
+
+### 端口汇总
+
+| 服务 | 默认端口 | 配置块 |
+|------|---------|--------|
+| 管理后台（Web UI + API） | 9820 | `[management]` |
+| Bridge（WebSocket + REST） | 9810 | `[bridge]` |
 
 ---
 

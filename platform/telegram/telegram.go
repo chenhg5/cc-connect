@@ -49,6 +49,7 @@ type telegramBot interface {
 	SetMyCommands(ctx context.Context, params *tgbot.SetMyCommandsParams) (bool, error)
 	GetFile(ctx context.Context, params *tgbot.GetFileParams) (*models.File, error)
 	FileDownloadLink(f *models.File) string
+	SetMessageReaction(ctx context.Context, params *tgbot.SetMessageReactionParams) (bool, error)
 }
 
 type backoffTimer interface {
@@ -108,6 +109,7 @@ type Platform struct {
 	allowFrom             string
 	groupReplyAll         bool
 	shareSessionInChannel bool
+	enableReactions       bool
 	httpClient            *http.Client
 
 	mu                  sync.RWMutex
@@ -157,7 +159,8 @@ func New(opts map[string]any) (core.Platform, error) {
 
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
-	return &Platform{token: token, allowFrom: allowFrom, groupReplyAll: groupReplyAll, shareSessionInChannel: shareSessionInChannel, httpClient: httpClient}, nil
+	enableReactions, _ := opts["enable_reactions"].(bool)
+	return &Platform{token: token, allowFrom: allowFrom, groupReplyAll: groupReplyAll, shareSessionInChannel: shareSessionInChannel, enableReactions: enableReactions, httpClient: httpClient}, nil
 }
 
 func (p *Platform) Name() string { return "telegram" }
@@ -355,6 +358,9 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 	}
 
 	rctx := replyContext{chatID: msg.Chat.ID, threadID: threadID, messageID: msg.ID}
+	if p.enableReactions {
+		go p.reactToMessage(ctx, msg.Chat.ID, msg.ID, "⚡")
+	}
 	botName := p.botUsername()
 
 	if len(msg.Photo) > 0 {
@@ -373,7 +379,7 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 			ChannelKey: channelKey,
 			Images:     []core.ImageAttachment{{MimeType: "image/jpeg", Data: imgData}},
 			ReplyCtx:   rctx,
-		})
+		}, msg)
 		return
 	}
 
@@ -396,7 +402,7 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 				Duration: msg.Voice.Duration,
 			},
 			ReplyCtx: rctx,
-		})
+		}, msg)
 		return
 	}
 
@@ -426,7 +432,7 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 				Duration: msg.Audio.Duration,
 			},
 			ReplyCtx: rctx,
-		})
+		}, msg)
 		return
 	}
 
@@ -446,10 +452,29 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 			ChannelKey: channelKey,
 			Files:      []core.FileAttachment{{MimeType: msg.Document.MimeType, Data: fileData, FileName: msg.Document.FileName}},
 			ReplyCtx:   rctx,
-		})
+		}, msg)
 		return
 	}
 
+	if msg.Location != nil {
+		slog.Info("telegram: location received", "user", userName, "latitude", msg.Location.Latitude, "longitude", msg.Location.Longitude)
+		p.dispatchMessage(&core.Message{
+			SessionKey: sessionKey, Platform: "telegram",
+			UserID: userID, UserName: userName, ChatName: chatName,
+			MessageID:  strconv.Itoa(msg.ID),
+			ChannelKey: channelKey,
+			Location: &core.LocationAttachment{
+				Latitude:             msg.Location.Latitude,
+				Longitude:            msg.Location.Longitude,
+				HorizontalAccuracy:   msg.Location.HorizontalAccuracy,
+				LivePeriod:           msg.Location.LivePeriod,
+				Heading:              msg.Location.Heading,
+				ProximityAlertRadius: msg.Location.ProximityAlertRadius,
+			},
+			ReplyCtx: rctx,
+		}, msg)
+		return
+	}
 	if msg.Text == "" {
 		return
 	}
@@ -463,10 +488,22 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 		MessageID:  strconv.Itoa(msg.ID),
 		ChannelKey: channelKey,
 		ReplyCtx:   rctx,
-	})
+	}, msg)
 }
 
-func (p *Platform) dispatchMessage(msg *core.Message) {
+func (p *Platform) dispatchMessage(msg *core.Message, tgMsg *models.Message) {
+	// Enrich with platform-specific context (reply quotes, location text, etc.)
+	var extras []string
+	if replyText := enrichReplyContent(tgMsg); replyText != "" {
+		extras = append(extras, replyText)
+	}
+	if locText := enrichLocation(msg); locText != "" {
+		extras = append(extras, locText)
+	}
+	if len(extras) > 0 {
+		msg.ExtraContent = strings.Join(extras, "\n")
+	}
+
 	handler := p.messageHandler()
 	if handler == nil {
 		return
@@ -478,6 +515,25 @@ func (p *Platform) messageHandler() core.MessageHandler {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.handler
+}
+
+// reactToMessage sets an emoji reaction on a Telegram message.
+// It is called asynchronously so it never blocks the message dispatch path.
+func (p *Platform) reactToMessage(ctx context.Context, chatID int64, messageID int, emoji string) {
+	bot, err := p.connectedBot("react")
+	if err != nil {
+		return
+	}
+	if _, err := bot.SetMessageReaction(ctx, &tgbot.SetMessageReactionParams{
+		ChatID:    chatID,
+		MessageID: messageID,
+		Reaction: []models.ReactionType{{
+			Type:              models.ReactionTypeTypeEmoji,
+			ReactionTypeEmoji: &models.ReactionTypeEmoji{Emoji: emoji},
+		}},
+	}); err != nil {
+		slog.Debug("telegram: set reaction failed", "error", err)
+	}
 }
 
 func (p *Platform) buildSessionKey(chatID int64, threadID int, userID int64) string {
