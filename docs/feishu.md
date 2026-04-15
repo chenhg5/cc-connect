@@ -150,9 +150,9 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 | 权限名称 | 权限标识 | 用途 |
 |---------|---------|------|
 | 获取与更新用户基本信息 | `contact:user.base:readonly` | 获取用户信息 |
-| 接收群聊消息 | `im:message.group:receive` | 接收群消息 |
-| 接收单聊消息 | `im:message.p2p:receive` | 接收私聊消息 |
-| 读取群消息 | `im:message.group_msg:readonly` | 读取群消息内容 |
+| 获取群组中用户@机器人消息 | `im:message.group_at_msg:readonly` | 接收群消息 |
+| 读取用户发给机器人的单聊消息 | `im:message.p2p_msg:readonly` | 接收私聊消息 |
+| 获取群组中所有消息（敏感权限） | `im:message.group_msg` | 读取群消息内容 |
 | 读取单聊消息 | `im:message.p2p_msg:readonly` | 读取私聊内容 |
 | 以应用身份发送群消息 | `im:message:send_as_bot` | 发送消息回复用户 |
 
@@ -290,6 +290,65 @@ cc-connect: ✅ 这是一个 Node.js 项目，包含以下目录...
 
 ---
 
+## Mention 功能
+
+开启 `resolve_mentions = true` 后，机器人发出的消息中 `@显示名` 会自动替换为飞书原生 at 标签。
+
+### 配置
+
+```toml
+[projects.platforms.options]
+resolve_mentions = true
+```
+
+### 语法
+
+直接使用 `@显示名`，无需特殊标记：
+
+```
+@张三 请查看巡检报告
+```
+
+### 使用示例
+
+**Cron 定时任务：**
+
+```bash
+cc-connect cron add \
+  --cron "0 9 * * *" \
+  --prompt "执行每日巡检报告，完成后通知 @张三 和 @李四 查看" \
+  --desc "每日巡检"
+```
+
+**AI 对话中：**
+
+AI 输出中包含 `@某人` 时，发送到飞书前会自动匹配并替换。
+
+### 工作原理
+
+1. 开启 `resolve_mentions` 后，发送消息前拉取群成员列表（懒加载，首次才拉）
+2. 成员列表缓存 1 小时，减少 API 调用
+3. 按名字长度从长到短匹配（`@张三丰` 优先于 `@张三`），避免部分匹配
+4. 未匹配到的 `@xxx` 保留原文不处理
+5. 根据消息类型自动选择正确的飞书 at 语法（文本消息 vs 卡片消息）
+
+### 权限要求
+
+需要以下飞书应用权限之一：
+
+- `im:chat`（获取与更新群组信息）
+- `im:chat:readonly`（获取群组信息）
+- `im:chat.members:read`（查看群成员）
+
+### 注意事项
+
+- 名字匹配为精确匹配（`@张三` 只匹配显示名恰好是「张三」的成员）
+- 同名成员取第一个匹配到的
+- 被 at 的人必须是当前群的成员
+- 未开启 `resolve_mentions` 时不会触发任何成员查询
+
+---
+
 ## 常见问题
 
 ### Q: 长连接和 Webhook 有什么区别？
@@ -334,7 +393,7 @@ cc-connect 内置了自动重连机制，断开后会自动尝试重新连接。
 - [飞书开放平台文档](https://open.feishu.cn/document/)
 - [机器人开发指南](https://open.feishu.cn/document/ukTMukTMukTM/uYjNwUjL2YDM14iN2ATN)
 - [事件订阅文档](https://open.feishu.cn/document/ukTMukTMukTM/uUTNz4SN1MjL1UzM)
-- [权限列表](https://open.feishu.cn/document/ukTMukTMukTM/uQjNz4CN1MjL2czN)
+- [权限列表](https://open.feishu.cn/document/server-docs/application-scope/scope-list)
 - [OpenClaw 飞书接入教程](https://bytedance.larkoffice.com/docx/MFK7dDFLFoVlOGxWCv5cTXKmnMh)
 - [飞书 WebSocket 长连接模式](https://m.blog.csdn.net/u014177256/article/details/158267848)
 

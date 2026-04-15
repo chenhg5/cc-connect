@@ -425,10 +425,10 @@ func (p *Platform) RegisterCommands(commands []core.BotCommandInfo) error {
 		})
 	}
 
-	// Limit to 200 commands
-	if len(cmds) > 200 {
-		cmds = cmds[:200]
-		slog.Warn("discord: commands > 200, truncate")
+	// Discord allows max 100 commands per bulk overwrite (guild or global).
+	if len(cmds) > 100 {
+		slog.Warn("discord: truncating commands to Discord limit of 100", "total", len(cmds), "dropped", len(cmds)-100)
+		cmds = cmds[:100]
 	}
 
 	if len(cmds) == 0 {
@@ -551,6 +551,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 
 		var images []core.ImageAttachment
 		var audio *core.AudioAttachment
+		var files []core.FileAttachment
 		for _, att := range m.Attachments {
 			ct := strings.ToLower(att.ContentType)
 			if strings.HasPrefix(ct, "audio/") {
@@ -575,10 +576,19 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 				images = append(images, core.ImageAttachment{
 					MimeType: att.ContentType, Data: data, FileName: att.Filename,
 				})
+			} else {
+				data, err := downloadURL(att.URL)
+				if err != nil {
+					slog.Error("discord: download file attachment failed", "url", att.URL, "error", err)
+					continue
+				}
+				files = append(files, core.FileAttachment{
+					MimeType: att.ContentType, Data: data, FileName: att.Filename,
+				})
 			}
 		}
 
-		if m.Content == "" && len(images) == 0 && audio == nil {
+		if m.Content == "" && len(images) == 0 && audio == nil && len(files) == 0 {
 			return
 		}
 
@@ -587,7 +597,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 			MessageID: m.ID,
 			UserID:    m.Author.ID, UserName: m.Author.Username,
 			ChatName: p.resolveChannelName(m.ChannelID),
-			Content:  m.Content, Images: images, Audio: audio, ReplyCtx: rctx,
+			Content:  m.Content, Images: images, Files: files, Audio: audio, ReplyCtx: rctx,
 		}
 		p.dispatchMessage(msg)
 	})

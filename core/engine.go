@@ -952,6 +952,36 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		ModeOverride: job.Mode,
 	}
 
+	// Resolve workspace-specific agent and sessions for multi-workspace mode.
+	// Priority: job.WorkDir (explicit) > workspace binding > global agent fallback.
+	agent := e.agent
+	sessions := e.sessions
+	workspaceDir := ""
+
+	if e.multiWorkspace {
+		channelID := extractChannelID(sessionKey)
+		if channelID != "" {
+			workspace, _, err := e.resolveWorkspace(targetPlatform, channelID)
+			if err == nil && workspace != "" {
+				wsAgent, wsSessions, _, effectiveDir, err := e.workspaceContext(workspace, sessionKey)
+				if err == nil {
+					agent = wsAgent
+					sessions = wsSessions
+					workspaceDir = effectiveDir
+				}
+			}
+		}
+	}
+
+	if job.WorkDir != "" {
+		wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(job.WorkDir)
+		if err == nil {
+			agent = wsAgent
+			sessions = wsSessions
+			workspaceDir = job.WorkDir
+		}
+	}
+
 	useNewSession := false
 	if e.cronScheduler != nil {
 		useNewSession = e.cronScheduler.UsesNewSession(job)
@@ -961,22 +991,29 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 
 	if useNewSession {
 		msg.SessionKey = runSessionKey
-		session := e.sessions.NewSideSession(runSessionKey, "cron-"+job.ID)
+		session := sessions.NewSideSession(runSessionKey, "cron-"+job.ID)
 		if !session.TryLock() {
 			return fmt.Errorf("session %q is busy", runSessionKey)
 		}
 		iKey := fmt.Sprintf("%s#cron:%s", runSessionKey, session.ID)
-		e.processInteractiveMessageWith(effectivePlatform, msg, session, e.agent, e.sessions, iKey, "", runSessionKey)
+		if workspaceDir != "" {
+			iKey = workspaceDir + ":" + iKey
+		}
+		e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, runSessionKey)
 		e.cleanupInteractiveState(iKey)
 		return nil
 	}
 
-	session := e.sessions.GetOrCreateActive(sessionKey)
+	session := sessions.GetOrCreateActive(sessionKey)
 	if !session.TryLock() {
 		return fmt.Errorf("session %q is busy", sessionKey)
 	}
 
-	e.processInteractiveMessageWith(effectivePlatform, msg, session, e.agent, e.sessions, sessionKey, "", sessionKey)
+	iKey := sessionKey
+	if workspaceDir != "" {
+		iKey = workspaceDir + ":" + sessionKey
+	}
+	e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, sessionKey)
 	return nil
 }
 
@@ -2532,6 +2569,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventToolUse:
 			toolCount++
+			// When tool messages are hidden, insert a visual break between text
+			// segments so the accumulated response doesn't run together.
+			if !e.display.ToolMessages && len(textParts) > segmentStart {
+				textParts = append(textParts, "\n\n")
+				if sp.canPreview() {
+					sp.appendText("\n\n")
+				}
+			}
 			if e.display.ToolMessages {
 				// Flush accumulated text segment before tool display
 				previewActive := sp.canPreview()
@@ -2711,7 +2756,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 			fullResponse := event.Content
-			if fullResponse == "" && len(textParts) > 0 {
+			// When tool progress is hidden, segmentStart stays 0 and textParts
+			// contains ALL text across tool boundaries. Prefer the full accumulated
+			// text over event.Content which only contains the last assistant segment.
+			if len(textParts) > 0 && segmentStart == 0 {
+				fullResponse = strings.Join(textParts, "")
+			} else if fullResponse == "" && len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")
 			}
 			if fullResponse == "" {
@@ -8221,7 +8271,7 @@ func (e *Engine) cmdCronAddExec(p Platform, msg *Message, args []string) {
 }
 
 func (e *Engine) cmdCronList(p Platform, msg *Message) {
-	jobs := e.cronScheduler.Store().ListBySessionKey(msg.SessionKey)
+	jobs := e.cronScheduler.Store().ListByProject(e.name)
 	if len(jobs) == 0 {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCronEmpty))
 		return
