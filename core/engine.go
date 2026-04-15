@@ -247,6 +247,7 @@ type queuedMessage struct {
 	files         []FileAttachment
 	fromVoice     bool
 	userID        string
+	userName      string // sender's display name for sender injection
 	msgPlatform   string // platform name for sender injection
 	msgSessionKey string // session key for extracting chat ID
 }
@@ -1646,6 +1647,7 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		files:         msg.Files,
 		fromVoice:     msg.FromVoice,
 		userID:        msg.UserID,
+		userName:      msg.UserName,
 		msgPlatform:   msg.Platform,
 		msgSessionKey: msg.SessionKey,
 	})
@@ -2047,7 +2049,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	// EventResult that was pushed after the previous turn already returned.
 	drainEvents(state.agentSession.Events())
 
-	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.Platform, msg.SessionKey)
+	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey)
 
 	sendStart := time.Now()
 	state.mu.Lock()
@@ -2932,7 +2934,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 
-				queuedPrompt := e.buildSenderPrompt(queued.content, queued.userID, queued.msgPlatform, queued.msgSessionKey)
+				queuedPrompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey)
 
 				nextSend := make(chan error, 1)
 				go func() {
@@ -3073,7 +3075,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		state.mu.Unlock()
 
 		e.i18n.DetectAndSet(queued.content)
-		prompt := e.buildSenderPrompt(queued.content, queued.userID, queued.msgPlatform, queued.msgSessionKey)
+		prompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey)
 
 		if state.agentSession == nil || !state.agentSession.Alive() {
 			e.send(queued.platform, queued.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session ended"))
@@ -10101,12 +10103,17 @@ func (e *Engine) cmdBindSetup(p Platform, msg *Message) {
 }
 
 // buildSenderPrompt prepends a sender identity header to content when
-// injectSender is enabled and userID is non-empty.
-func (e *Engine) buildSenderPrompt(content, userID, platform, sessionKey string) string {
+// injectSender is enabled and userID is non-empty. When userName is available
+// it is included as sender_name so the agent can identify who sent the message
+// by display name (useful in shared channel sessions with multiple users).
+func (e *Engine) buildSenderPrompt(content, userID, userName, platform, sessionKey string) string {
 	if !e.injectSender || userID == "" {
 		return content
 	}
 	chatID := extractChannelID(sessionKey)
+	if userName != "" {
+		return fmt.Sprintf("[cc-connect sender_id=%s sender_name=\"%s\" platform=%s chat_id=%s]\n%s", userID, userName, platform, chatID, content)
+	}
 	return fmt.Sprintf("[cc-connect sender_id=%s platform=%s chat_id=%s]\n%s", userID, platform, chatID, content)
 }
 
