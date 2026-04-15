@@ -56,6 +56,22 @@ func register(t *testing.T, conn *websocket.Conn, platform string, caps []string
 	}
 }
 
+func registerWithMetadata(t *testing.T, conn *websocket.Conn, platform string, caps []string, metadata map[string]any) {
+	t.Helper()
+	msg := map[string]any{
+		"type":         "register",
+		"platform":     platform,
+		"capabilities": caps,
+		"metadata":     metadata,
+	}
+	mustWriteJSON(t, conn, msg)
+	var ack map[string]any
+	mustReadJSON(t, conn, &ack)
+	if ack["ok"] != true {
+		t.Fatalf("register failed: %v", ack["error"])
+	}
+}
+
 func readMsg(t *testing.T, conn *websocket.Conn) map[string]any {
 	t.Helper()
 	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
@@ -114,6 +130,72 @@ func TestBridge_RegisterAndConnect(t *testing.T) {
 	adapters := bs.ConnectedAdapters()
 	if len(adapters) != 1 || adapters[0] != "test-chat" {
 		t.Fatalf("expected [test-chat], got %v", adapters)
+	}
+}
+
+func TestBridge_RegisterSendsCapabilitiesSnapshotWhenAdapterSupportsIt(t *testing.T) {
+	prevVersion, prevCommit, prevBuildTime := CurrentVersion, CurrentCommit, CurrentBuildTime
+	CurrentVersion = "v2.0.0"
+	CurrentCommit = "deadbeef"
+	CurrentBuildTime = "2026-04-11T00:00:00Z"
+	defer func() {
+		CurrentVersion = prevVersion
+		CurrentCommit = prevCommit
+		CurrentBuildTime = prevBuildTime
+	}()
+
+	bs, wsURL := startTestBridge(t, "")
+	bp := bs.NewPlatform("test-proj")
+	e := NewEngine("test-proj", &stubAgent{}, []Platform{bp}, "", LangEnglish)
+	e.AddCommand("deploy", "Deploy app", "ship it", "", "", "config")
+	bs.RegisterEngine("test-proj", e, bp)
+
+	conn := dialWS(t, wsURL, nil)
+	registerWithMetadata(t, conn, "bridge", []string{"text"}, map[string]any{
+		"control_plane": []string{bridgeCapabilitiesSnapshotProto},
+	})
+
+	msg := readMsg(t, conn)
+	if msg["type"] != bridgeCapabilitiesSnapshotType {
+		t.Fatalf("type = %v, want %q", msg["type"], bridgeCapabilitiesSnapshotType)
+	}
+	if got := int(msg["v"].(float64)); got != 1 {
+		t.Fatalf("v = %d, want 1", got)
+	}
+	host, ok := msg["host"].(map[string]any)
+	if !ok {
+		t.Fatalf("host = %T, want object", msg["host"])
+	}
+	if host["cc_connect_version"] != "v2.0.0" {
+		t.Fatalf("cc_connect_version = %v, want %q", host["cc_connect_version"], "v2.0.0")
+	}
+	projects, ok := msg["projects"].([]any)
+	if !ok || len(projects) != 1 {
+		t.Fatalf("projects = %T/%d, want 1 project", msg["projects"], len(projects))
+	}
+	project, ok := projects[0].(map[string]any)
+	if !ok {
+		t.Fatalf("project = %T, want object", projects[0])
+	}
+	if project["project"] != "test-proj" {
+		t.Fatalf("project name = %v, want %q", project["project"], "test-proj")
+	}
+	commands, ok := project["commands"].([]any)
+	if !ok || len(commands) == 0 {
+		t.Fatalf("commands = %T/%d, want non-empty list", project["commands"], len(commands))
+	}
+	foundDeploy := false
+	for _, raw := range commands {
+		cmd, ok := raw.(map[string]any)
+		if !ok {
+			t.Fatalf("command = %T, want object", raw)
+		}
+		if cmd["name"] == "deploy" {
+			foundDeploy = true
+		}
+	}
+	if !foundDeploy {
+		t.Fatal("expected deploy command in capabilities snapshot")
 	}
 }
 
@@ -215,6 +297,50 @@ func TestBridge_MessageRouting(t *testing.T) {
 	}
 }
 
+func TestBridge_MessageReplyCtxCarriesProgressHints(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+
+	gotCh := make(chan *bridgeReplyCtx, 1)
+
+	bp := bs.NewPlatform("test-proj")
+	e := NewEngine("test-proj", &stubAgent{}, []Platform{bp}, "", LangEnglish)
+	bs.RegisterEngine("test-proj", e, bp)
+	bp.handler = func(p Platform, msg *Message) {
+		rc, ok := msg.ReplyCtx.(*bridgeReplyCtx)
+		if !ok {
+			t.Fatalf("reply ctx type = %T, want *bridgeReplyCtx", msg.ReplyCtx)
+		}
+		gotCh <- rc
+	}
+
+	conn := dialWS(t, wsURL, nil)
+	registerWithMetadata(t, conn, "bridge", []string{"text", "card", "preview", "update_message"}, map[string]any{
+		"adapter": "bot-gateway",
+	})
+
+	mustWriteJSON(t, conn, map[string]any{
+		"type":        "message",
+		"msg_id":      "m1",
+		"session_key": "bridge:room-1:user-1",
+		"user_id":     "user-1",
+		"content":     "hello",
+		"reply_ctx":   "ctx-1",
+	})
+
+	var got *bridgeReplyCtx
+	select {
+	case got = <-gotCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("expected reply ctx to be captured")
+	}
+	if got.progressStyleHint() != progressStyleCard {
+		t.Fatalf("progressStyleHint() = %q, want %q", got.progressStyleHint(), progressStyleCard)
+	}
+	if !got.supportsProgressCardPayloadHint() {
+		t.Fatal("supportsProgressCardPayloadHint() = false, want true")
+	}
+}
+
 func TestBridge_ReplyRouting(t *testing.T) {
 	bs, wsURL := startTestBridge(t, "")
 
@@ -306,6 +432,32 @@ func TestBridge_ReconstructReplyCtx_UsesStructuredPayload(t *testing.T) {
 	}
 	if payload.TransportSessionKey != "bridge:1491487450722341088:relay" {
 		t.Fatalf("transport_session_key = %q, want relay session key", payload.TransportSessionKey)
+	}
+}
+
+func TestBridge_ReconstructReplyCtx_UsesAdapterProgressHints(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+	bp := bs.NewPlatform("test-proj")
+
+	conn := dialWS(t, wsURL, nil)
+	registerWithMetadata(t, conn, "bridge", []string{"text", "card", "preview", "update_message", "reconstruct_reply"}, map[string]any{
+		"adapter": "bot-gateway",
+	})
+
+	replyCtx, err := bp.ReconstructReplyCtx("bridge:room-1:user-1")
+	if err != nil {
+		t.Fatalf("ReconstructReplyCtx() error = %v", err)
+	}
+
+	rc, ok := replyCtx.(*bridgeReplyCtx)
+	if !ok {
+		t.Fatalf("reply ctx type = %T, want *bridgeReplyCtx", replyCtx)
+	}
+	if rc.progressStyleHint() != progressStyleCard {
+		t.Fatalf("progressStyleHint() = %q, want %q", rc.progressStyleHint(), progressStyleCard)
+	}
+	if !rc.supportsProgressCardPayloadHint() {
+		t.Fatal("supportsProgressCardPayloadHint() = false, want true")
 	}
 }
 
