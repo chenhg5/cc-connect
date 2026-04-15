@@ -687,6 +687,14 @@ func (bs *BridgeServer) handleConnection(conn *websocket.Conn) {
 		slog.Debug("bridge: write register ack failed", "error", err)
 		return
 	}
+
+	if bridgeMetadataStringListContains(reg.Metadata, "control_plane", bridgeCapabilitiesSnapshotProto) {
+		if err := writeJSON(conn, &adapter.writeMu, bs.buildCapabilitiesSnapshot()); err != nil {
+			slog.Debug("bridge: write capabilities snapshot failed", "platform", reg.Platform, "error", err)
+			return
+		}
+	}
+
 	slog.Info("bridge: adapter registered", "platform", reg.Platform, "capabilities", reg.Capabilities)
 
 	defer func() {
@@ -1151,6 +1159,33 @@ func (bs *BridgeServer) sendToAdapter(platform string, msg map[string]any) error
 		return fmt.Errorf("bridge: adapter %q not connected", platform)
 	}
 	return writeJSON(a.conn, &a.writeMu, msg)
+}
+
+func bridgeMetadataStringListContains(metadata map[string]any, key, want string) bool {
+	if metadata == nil || key == "" || want == "" {
+		return false
+	}
+	raw, ok := metadata[key]
+	if !ok {
+		return false
+	}
+	items, ok := raw.([]any)
+	if !ok {
+		if stringsList, ok := raw.([]string); ok {
+			for _, item := range stringsList {
+				if strings.TrimSpace(item) == want {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	for _, item := range items {
+		if s, ok := item.(string); ok && strings.TrimSpace(s) == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (bs *BridgeServer) platformFromSessionKey(sessionKey string) string {

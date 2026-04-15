@@ -133,6 +133,72 @@ func TestBridge_RegisterAndConnect(t *testing.T) {
 	}
 }
 
+func TestBridge_RegisterSendsCapabilitiesSnapshotWhenAdapterSupportsIt(t *testing.T) {
+	prevVersion, prevCommit, prevBuildTime := CurrentVersion, CurrentCommit, CurrentBuildTime
+	CurrentVersion = "v2.0.0"
+	CurrentCommit = "deadbeef"
+	CurrentBuildTime = "2026-04-11T00:00:00Z"
+	defer func() {
+		CurrentVersion = prevVersion
+		CurrentCommit = prevCommit
+		CurrentBuildTime = prevBuildTime
+	}()
+
+	bs, wsURL := startTestBridge(t, "")
+	bp := bs.NewPlatform("test-proj")
+	e := NewEngine("test-proj", &stubAgent{}, []Platform{bp}, "", LangEnglish)
+	e.AddCommand("deploy", "Deploy app", "ship it", "", "", "config")
+	bs.RegisterEngine("test-proj", e, bp)
+
+	conn := dialWS(t, wsURL, nil)
+	registerWithMetadata(t, conn, "bridge", []string{"text"}, map[string]any{
+		"control_plane": []string{bridgeCapabilitiesSnapshotProto},
+	})
+
+	msg := readMsg(t, conn)
+	if msg["type"] != bridgeCapabilitiesSnapshotType {
+		t.Fatalf("type = %v, want %q", msg["type"], bridgeCapabilitiesSnapshotType)
+	}
+	if got := int(msg["v"].(float64)); got != 1 {
+		t.Fatalf("v = %d, want 1", got)
+	}
+	host, ok := msg["host"].(map[string]any)
+	if !ok {
+		t.Fatalf("host = %T, want object", msg["host"])
+	}
+	if host["cc_connect_version"] != "v2.0.0" {
+		t.Fatalf("cc_connect_version = %v, want %q", host["cc_connect_version"], "v2.0.0")
+	}
+	projects, ok := msg["projects"].([]any)
+	if !ok || len(projects) != 1 {
+		t.Fatalf("projects = %T/%d, want 1 project", msg["projects"], len(projects))
+	}
+	project, ok := projects[0].(map[string]any)
+	if !ok {
+		t.Fatalf("project = %T, want object", projects[0])
+	}
+	if project["project"] != "test-proj" {
+		t.Fatalf("project name = %v, want %q", project["project"], "test-proj")
+	}
+	commands, ok := project["commands"].([]any)
+	if !ok || len(commands) == 0 {
+		t.Fatalf("commands = %T/%d, want non-empty list", project["commands"], len(commands))
+	}
+	foundDeploy := false
+	for _, raw := range commands {
+		cmd, ok := raw.(map[string]any)
+		if !ok {
+			t.Fatalf("command = %T, want object", raw)
+		}
+		if cmd["name"] == "deploy" {
+			foundDeploy = true
+		}
+	}
+	if !foundDeploy {
+		t.Fatal("expected deploy command in capabilities snapshot")
+	}
+}
+
 func TestBridge_AuthRequired(t *testing.T) {
 	_, wsURL := startTestBridge(t, "secret123")
 
