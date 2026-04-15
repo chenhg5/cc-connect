@@ -979,6 +979,9 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 			agent = wsAgent
 			sessions = wsSessions
 			workspaceDir = job.WorkDir
+		} else {
+			slog.Warn("cron: workspace agent creation failed, using global",
+				"work_dir", job.WorkDir, "session_key", sessionKey, "error", err)
 		}
 	}
 
@@ -2346,10 +2349,12 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 		e.interactiveMu.Unlock()
 		return
 	}
-	// Capture the agent session before any further processing
+	// Capture the agent session and nil it out atomically to prevent a
+	// concurrent cleanup (without expected) from closing the same session.
 	var agentSession AgentSession
 	if ok && state != nil {
 		agentSession = state.agentSession
+		state.agentSession = nil
 	}
 	e.interactiveMu.Unlock()
 
@@ -2759,7 +2764,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// When tool progress is hidden, segmentStart stays 0 and textParts
 			// contains ALL text across tool boundaries. Prefer the full accumulated
 			// text over event.Content which only contains the last assistant segment.
-			if len(textParts) > 0 && segmentStart == 0 {
+			if len(textParts) > 0 && segmentStart == 0 && !e.display.ToolMessages {
 				fullResponse = strings.Join(textParts, "")
 			} else if fullResponse == "" && len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")

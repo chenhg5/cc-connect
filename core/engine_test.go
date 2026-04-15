@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -4718,6 +4719,50 @@ func TestCleanupCAS_UnconditionalWithoutExpected(t *testing.T) {
 	if current != nil {
 		t.Fatal("expected unconditional cleanup to delete state")
 	}
+}
+
+// TestCleanupCAS_ConcurrentUnconditionalCloseOnce verifies that two concurrent
+// unconditional cleanups for the same key only Close() the agent session once.
+func TestCleanupCAS_ConcurrentUnconditionalCloseOnce(t *testing.T) {
+	e := newTestEngine()
+	key := "test:user1"
+
+	var closeCount atomic.Int32
+	sess := newControllableSession("s1")
+	origClose := sess.Close
+	_ = origClose
+	state := &interactiveState{agentSession: sess}
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			defer wg.Done()
+			e.cleanupInteractiveState(key)
+		}()
+	}
+	wg.Wait()
+
+	// The session's Close() should have been called at most once because
+	// the first cleanup nil's out state.agentSession under the lock.
+	select {
+	case <-sess.closed:
+		closeCount.Add(1)
+	default:
+	}
+	if closeCount.Load() > 1 {
+		t.Fatalf("expected at most 1 close, got %d", closeCount.Load())
+	}
+
+	e.interactiveMu.Lock()
+	if e.interactiveStates[key] != nil {
+		t.Fatal("expected state to be deleted after cleanup")
+	}
+	e.interactiveMu.Unlock()
 }
 
 // TestSessionMismatch_RecyclesStaleAgent verifies that getOrCreateInteractiveStateWith

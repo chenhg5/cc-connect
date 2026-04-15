@@ -1268,6 +1268,8 @@ func (p *Platform) resolveBotRoleIDForGuild(s *discordgo.Session, guildID string
 	return "", nil
 }
 
+const maxDownloadBytes = 50 << 20 // 50 MiB
+
 func downloadURL(u string) ([]byte, error) {
 	resp, err := core.HTTPClient.Get(u)
 	if err != nil {
@@ -1277,5 +1279,5 @@ func downloadURL(u string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("download %s: status %d", u, resp.StatusCode)
 	}
-	return io.ReadAll(resp.Body)
+	return io.ReadAll(io.LimitReader(resp.Body, maxDownloadBytes+1))
 }
