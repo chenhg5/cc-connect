@@ -646,16 +646,94 @@ func (a *Agent) SkillDirs() []string {
 	if err != nil {
 		absDir = a.workDir
 	}
-	dirs := []string{filepath.Join(absDir, ".claude", "skills")}
-	if home, err := os.UserHomeDir(); err == nil {
-		dirs = append(dirs, filepath.Join(home, ".claude", "skills"))
-	}
-	return dirs
+	return appendProjectClaudeSkillDirs(absDir, claudeConfigHomeDir())
 }
 
 // ── ContextCompressor implementation ──────────────────────────
 
 func (a *Agent) CompressCommand() string { return "/compact" }
+
+func claudeConfigHomeDir() string {
+	if dir := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); dir != "" {
+		return dir
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".claude")
+}
+
+func appendProjectClaudeSkillDirs(workDir, configHome string) []string {
+	home, _ := os.UserHomeDir()
+	projectDirs := walkUpClaudeSkillDirs(workDir, home)
+	if configHome == "" {
+		return projectDirs
+	}
+	return uniqueSkillDirs(append(projectDirs, filepath.Join(configHome, "skills")))
+}
+
+func walkUpClaudeSkillDirs(workDir, home string) []string {
+	current := filepath.Clean(workDir)
+	home = filepath.Clean(home)
+	stopAt := findGitRoot(current)
+
+	var dirs []string
+	for {
+		if home != "" && samePath(current, home) {
+			break
+		}
+		dirs = append(dirs, filepath.Join(current, ".claude", "skills"))
+		if stopAt != "" && samePath(current, stopAt) {
+			break
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+	return uniqueSkillDirs(dirs)
+}
+
+func findGitRoot(start string) string {
+	current := filepath.Clean(start)
+	for {
+		gitPath := filepath.Join(current, ".git")
+		if _, err := os.Stat(gitPath); err == nil {
+			return current
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return ""
+		}
+		current = parent
+	}
+}
+
+func samePath(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
+}
+
+func uniqueSkillDirs(paths []string) []string {
+	seen := make(map[string]struct{}, len(paths))
+	out := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		clean := filepath.Clean(path)
+		if _, ok := seen[clean]; ok {
+			continue
+		}
+		seen[clean] = struct{}{}
+		out = append(out, clean)
+	}
+	return out
+}
 
 // ── MemoryFileProvider implementation ─────────────────────────
 

@@ -377,23 +377,7 @@ func (a *Agent) SkillDirs() []string {
 	if err != nil {
 		absDir = a.workDir
 	}
-	dirs := []string{
-		filepath.Join(absDir, ".codex", "skills"),
-		filepath.Join(absDir, ".claude", "skills"),
-	}
-	codexHome := os.Getenv("CODEX_HOME")
-	if codexHome == "" {
-		if home, err := os.UserHomeDir(); err == nil {
-			codexHome = filepath.Join(home, ".codex")
-		}
-	}
-	if codexHome != "" {
-		dirs = append(dirs, filepath.Join(codexHome, "skills"))
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		dirs = append(dirs, filepath.Join(home, ".claude", "skills"))
-	}
-	return dirs
+	return codexSkillDirs(absDir, a.codexHome)
 }
 
 // ── ContextCompressor implementation ──────────────────────────
@@ -402,6 +386,93 @@ func (a *Agent) SkillDirs() []string {
 // are not reliably executed in exec/resume mode — they may be treated as plain text.
 // See: https://github.com/chenhg5/cc-connect/issues/378
 func (a *Agent) CompressCommand() string { return "" }
+
+func codexSkillDirs(workDir, explicitCodexHome string) []string {
+	homeDir, _ := os.UserHomeDir()
+	codexHome := strings.TrimSpace(explicitCodexHome)
+	if codexHome == "" {
+		codexHome = strings.TrimSpace(os.Getenv("CODEX_HOME"))
+	}
+	if codexHome == "" && homeDir != "" {
+		codexHome = filepath.Join(homeDir, ".codex")
+	}
+
+	projectDirs := walkUpCodexProjectSkillDirs(workDir, homeDir)
+	userDirs := make([]string, 0, 2)
+	if codexHome != "" {
+		userDirs = append(userDirs, filepath.Join(codexHome, "skills"))
+	}
+	if homeDir != "" {
+		userDirs = append(userDirs, filepath.Join(homeDir, ".agents", "skills"))
+	}
+	return uniqueCodexSkillDirs(append(projectDirs, userDirs...))
+}
+
+func walkUpCodexProjectSkillDirs(workDir, homeDir string) []string {
+	current := filepath.Clean(workDir)
+	homeDir = filepath.Clean(homeDir)
+	stopAt := findCodexProjectRoot(current)
+
+	var dirs []string
+	for {
+		if homeDir != "" && sameCodexPath(current, homeDir) {
+			break
+		}
+		dirs = append(dirs,
+			filepath.Join(current, ".agents", "skills"),
+			filepath.Join(current, ".codex", "skills"),
+		)
+		if stopAt != "" && sameCodexPath(current, stopAt) {
+			break
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+	return uniqueCodexSkillDirs(dirs)
+}
+
+func findCodexProjectRoot(start string) string {
+	current := filepath.Clean(start)
+	for {
+		for _, marker := range []string{".git", ".jj"} {
+			if _, err := os.Stat(filepath.Join(current, marker)); err == nil {
+				return current
+			}
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return ""
+		}
+		current = parent
+	}
+}
+
+func sameCodexPath(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
+}
+
+func uniqueCodexSkillDirs(paths []string) []string {
+	seen := make(map[string]struct{}, len(paths))
+	out := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		clean := filepath.Clean(path)
+		if _, ok := seen[clean]; ok {
+			continue
+		}
+		seen[clean] = struct{}{}
+		out = append(out, clean)
+	}
+	return out
+}
 
 // ── MemoryFileProvider implementation ─────────────────────────
 
