@@ -35,6 +35,7 @@ type Agent struct {
 	backend         string // "exec" | "app_server"
 	appServerURL    string
 	codexHome       string
+	extraEnv        []string
 	providers       []core.ProviderConfig
 	activeIdx       int // -1 = no provider set
 	sessionEnv      []string
@@ -58,6 +59,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	if appServerURL == "" {
 		appServerURL = "ws://127.0.0.1:3845"
 	}
+	extraEnv := envPairsFromOpts(opts)
 
 	if _, err := exec.LookPath("codex"); err != nil {
 		return nil, fmt.Errorf("codex: 'codex' CLI not found in PATH, install with: npm install -g @openai/codex")
@@ -71,6 +73,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		backend:         backend,
 		appServerURL:    appServerURL,
 		codexHome:       strings.TrimSpace(codexHome),
+		extraEnv:        extraEnv,
 		activeIdx:       -1,
 	}, nil
 }
@@ -81,6 +84,29 @@ func normalizeBackend(raw string) string {
 		return "app_server"
 	default:
 		return "exec"
+	}
+}
+
+func envPairsFromOpts(opts map[string]any) []string {
+	raw, ok := opts["env"]
+	if !ok || raw == nil {
+		return nil
+	}
+	switch m := raw.(type) {
+	case map[string]string:
+		var out []string
+		for k, v := range m {
+			out = append(out, k+"="+v)
+		}
+		return out
+	case map[string]any:
+		var out []string
+		for k, v := range m {
+			out = append(out, fmt.Sprintf("%s=%v", k, v))
+		}
+		return out
+	default:
+		return nil
 	}
 }
 
@@ -320,7 +346,8 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	backend := a.backend
 	appServerURL := a.appServerURL
 	codexHome := a.codexHome
-	extraEnv := a.providerEnvLocked()
+	extraEnv := append([]string(nil), a.extraEnv...)
+	extraEnv = append(extraEnv, a.providerEnvLocked()...)
 	extraEnv = append(extraEnv, a.sessionEnv...)
 	var baseURL string
 	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
@@ -370,7 +397,7 @@ func (a *Agent) GetMode() string {
 	return a.mode
 }
 
-// ── SkillProvider implementation ──────────────────────────────
+// ── SkillProvider implementation ──────────────────────────
 
 func (a *Agent) SkillDirs() []string {
 	absDir, err := filepath.Abs(a.workDir)
@@ -425,7 +452,7 @@ func (a *Agent) GlobalMemoryFile() string {
 	return filepath.Join(codexHome, "AGENTS.md")
 }
 
-// ── ProviderSwitcher implementation ──────────────────────────
+// ── ProviderSwitcher implementation ─────────────────────────
 
 func (a *Agent) SetProviders(providers []core.ProviderConfig) {
 	a.mu.Lock()
