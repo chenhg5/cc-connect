@@ -209,6 +209,12 @@ type Engine struct {
 	initFlows         map[string]*workspaceInitFlow // workspace channel key → init state
 	initFlowsMu       sync.Mutex
 
+	// Terminal observation (--observe)
+	observeEnabled    bool
+	observeProjectDir string             // ~/.claude/projects/{projectKey}
+	observeSessionKey string             // e.g. "slack:C123:U456" — target for forwarding
+	observeCancel     context.CancelFunc
+
 	// Interactive agent session management
 	interactiveMu     sync.Mutex
 	interactiveStates map[string]*interactiveState // key = sessionKey
@@ -511,8 +517,28 @@ func (e *Engine) SetAttachmentSendEnabled(v bool) {
 	e.attachmentSendEnabled = v
 }
 
+// SetObserveConfig enables terminal session observation.
+// projectDir is the Claude Code project directory containing session JSONL files.
+// sessionKey identifies the Slack channel to forward messages to.
+func (e *Engine) SetObserveConfig(projectDir, sessionKey string) {
+	e.observeEnabled = true
+	e.observeProjectDir = projectDir
+	e.observeSessionKey = sessionKey
+}
+
 func (e *Engine) SetLanguageSaveFunc(fn func(Language) error) {
 	e.i18n.SetSaveFunc(fn)
+}
+
+// findObserverTarget returns the first platform that implements ObserverTarget,
+// or nil if none do.
+func (e *Engine) findObserverTarget() ObserverTarget {
+	for _, p := range e.platforms {
+		if ot, ok := p.(ObserverTarget); ok {
+			return ot
+		}
+	}
+	return nil
 }
 
 func (e *Engine) SetProviderSaveFunc(fn func(providerName string) error) {
@@ -926,6 +952,36 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		ModeOverride: job.Mode,
 	}
 
+	// Resolve workspace-specific agent and sessions for multi-workspace mode.
+	// Priority: job.WorkDir (explicit) > workspace binding > global agent fallback.
+	agent := e.agent
+	sessions := e.sessions
+	workspaceDir := ""
+
+	if e.multiWorkspace {
+		channelID := extractChannelID(sessionKey)
+		if channelID != "" {
+			workspace, _, err := e.resolveWorkspace(targetPlatform, channelID)
+			if err == nil && workspace != "" {
+				wsAgent, wsSessions, _, effectiveDir, err := e.workspaceContext(workspace, sessionKey)
+				if err == nil {
+					agent = wsAgent
+					sessions = wsSessions
+					workspaceDir = effectiveDir
+				}
+			}
+		}
+	}
+
+	if job.WorkDir != "" {
+		wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(job.WorkDir)
+		if err == nil {
+			agent = wsAgent
+			sessions = wsSessions
+			workspaceDir = job.WorkDir
+		}
+	}
+
 	useNewSession := false
 	if e.cronScheduler != nil {
 		useNewSession = e.cronScheduler.UsesNewSession(job)
@@ -935,22 +991,29 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 
 	if useNewSession {
 		msg.SessionKey = runSessionKey
-		session := e.sessions.NewSideSession(runSessionKey, "cron-"+job.ID)
+		session := sessions.NewSideSession(runSessionKey, "cron-"+job.ID)
 		if !session.TryLock() {
 			return fmt.Errorf("session %q is busy", runSessionKey)
 		}
 		iKey := fmt.Sprintf("%s#cron:%s", runSessionKey, session.ID)
-		e.processInteractiveMessageWith(effectivePlatform, msg, session, e.agent, e.sessions, iKey, "", runSessionKey)
+		if workspaceDir != "" {
+			iKey = workspaceDir + ":" + iKey
+		}
+		e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, runSessionKey)
 		e.cleanupInteractiveState(iKey)
 		return nil
 	}
 
-	session := e.sessions.GetOrCreateActive(sessionKey)
+	session := sessions.GetOrCreateActive(sessionKey)
 	if !session.TryLock() {
 		return fmt.Errorf("session %q is busy", sessionKey)
 	}
 
-	e.processInteractiveMessageWith(effectivePlatform, msg, session, e.agent, e.sessions, sessionKey, "", sessionKey)
+	iKey := sessionKey
+	if workspaceDir != "" {
+		iKey = workspaceDir + ":" + sessionKey
+	}
+	e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, sessionKey)
 	return nil
 }
 
@@ -1125,6 +1188,8 @@ func (e *Engine) Start() error {
 	if len(startErrs) == len(e.platforms) && len(e.platforms) > 0 {
 		return startErrs[0] // Return first error
 	}
+
+	e.startObserver()
 	return nil
 }
 
@@ -1135,6 +1200,10 @@ func (e *Engine) Stop() error {
 
 	// Cancel first so late lifecycle callbacks observe shutdown immediately.
 	e.cancel()
+
+	if e.observeCancel != nil {
+		e.observeCancel()
+	}
 
 	// Stop platforms after cancellation so they can unwind against the closed context.
 	var errs []error
@@ -1333,19 +1402,18 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		return
 	}
 
-	// Enrich content with platform-specific context (reply quotes, location text, etc.)
+	// Resolve aliases on user text BEFORE merging ExtraContent, so reply
+	// quotes and platform context survive alias resolution (PR #420 fix).
+	content = e.resolveAlias(content)
 	if msg.ExtraContent != "" {
 		if content == "" {
 			msg.Content = msg.ExtraContent
-			content = msg.ExtraContent
 		} else {
 			msg.Content = msg.ExtraContent + "\n" + content
 		}
+	} else {
+		msg.Content = content
 	}
-
-	// Resolve aliases: check if the first word (or whole content) matches an alias
-	content = e.resolveAlias(content)
-	msg.Content = content
 
 	// Rate limit check (per-user role-based, then global fallback)
 	if !e.checkRateLimit(msg) {
@@ -1477,6 +1545,11 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		session = rotated
 	}
 
+	// Ensure an interactiveState entry exists before launching the async
+	// processor so messages arriving during session startup can be queued
+	// instead of dropped (issue #565).
+	e.ensureInteractiveStateForQueueing(interactiveKey, p, msg.ReplyCtx)
+
 	slog.Info("processing message",
 		"platform", msg.Platform,
 		"user", msg.UserName,
@@ -1545,7 +1618,12 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 	state, hasState := e.interactiveStates[interactiveKey]
 	e.interactiveMu.Unlock()
 
-	if !hasState || state == nil || state.agentSession == nil || !state.agentSession.Alive() {
+	if !hasState || state == nil {
+		return false
+	}
+	// Allow queueing when agentSession is nil (session is starting up,
+	// issue #565). Only reject if the session was established and died.
+	if state.agentSession != nil && !state.agentSession.Alive() {
 		return false
 	}
 
@@ -1580,6 +1658,22 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 	)
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
 	return true
+}
+
+// ensureInteractiveStateForQueueing creates a placeholder interactiveState
+// entry if none exists. This allows messages arriving while the agent session
+// is still starting up to be queued instead of dropped (issue #565).
+// The placeholder has agentSession==nil; getOrCreateInteractiveStateWith will
+// replace it with a fully initialized state once the agent process is spawned.
+func (e *Engine) ensureInteractiveStateForQueueing(key string, p Platform, replyCtx any) {
+	e.interactiveMu.Lock()
+	defer e.interactiveMu.Unlock()
+	if _, ok := e.interactiveStates[key]; !ok {
+		e.interactiveStates[key] = &interactiveState{
+			platform: p,
+			replyCtx: replyCtx,
+		}
+	}
 }
 
 // drainOrphanedQueue is called when a message was queued but the drain loop
@@ -2010,6 +2104,22 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 			opts["mode"] = m
 		}
 	}
+	// Copy run_as_user (and run_as_env) for OS-level isolation. Without
+	// this, per-workspace agents silently bypass the project-level
+	// run_as_user config because their opts map is freshly constructed
+	// above, not inherited from the project-level opts that main.go
+	// already decorated. See cc-connect#496 and the cc-connect/core/runas.go
+	// preamble for why run_as_user has to survive this copy.
+	if ma, ok := e.agent.(interface{ GetRunAsUser() string }); ok {
+		if u := ma.GetRunAsUser(); u != "" {
+			opts["run_as_user"] = u
+		}
+	}
+	if ma, ok := e.agent.(interface{ GetRunAsEnv() []string }); ok {
+		if env := ma.GetRunAsEnv(); len(env) > 0 {
+			opts["run_as_env"] = env
+		}
+	}
 
 	agent, err := CreateAgent(e.agent.Name(), opts)
 	if err != nil {
@@ -2064,6 +2174,21 @@ func (e *Engine) workspaceContext(workspace, sessionKey string) (Agent, *Session
 }
 
 // getOrCreateInteractiveStateWith accepts an optional agent override for multi-workspace mode.
+// adoptPendingFromPlaceholder copies pendingMessages from an existing placeholder
+// state to newState so queued messages are not lost when the map entry is replaced.
+// Must be called under interactiveMu.
+func adoptPendingFromPlaceholder(existing, newState *interactiveState) {
+	if existing == nil || existing == newState {
+		return
+	}
+	existing.mu.Lock()
+	if len(existing.pendingMessages) > 0 {
+		newState.pendingMessages = existing.pendingMessages
+		existing.pendingMessages = nil
+	}
+	existing.mu.Unlock()
+}
+
 // When agentOverride is non-nil it is used instead of e.agent to start the session.
 // ccSessionKey, when non-empty, is used for CC_SESSION_KEY env injection; otherwise sessionKey is used.
 func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string) *interactiveState {
@@ -2143,7 +2268,9 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	// Check if context is already canceled (e.g. during shutdown/restart)
 	if e.ctx.Err() != nil {
 		slog.Debug("skipping session start: context canceled", "session_key", sessionKey)
-		state = &interactiveState{platform: p, replyCtx: replyCtx}
+		newState := &interactiveState{platform: p, replyCtx: replyCtx}
+		adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
+		state = newState
 		e.interactiveStates[sessionKey] = state
 		return state
 	}
@@ -2172,7 +2299,9 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		}
 		if err != nil {
 			slog.Error("failed to start interactive session", "error", err, "elapsed", startElapsed)
-			state = &interactiveState{platform: p, replyCtx: replyCtx}
+			newState := &interactiveState{platform: p, replyCtx: replyCtx}
+			adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
+			state = newState
 			e.interactiveStates[sessionKey] = state
 			return state
 		}
@@ -2187,11 +2316,13 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		}
 	}
 
-	state = &interactiveState{
+	newState := &interactiveState{
 		agentSession: agentSession,
 		platform:     p,
 		replyCtx:     replyCtx,
 	}
+	adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
+	state = newState
 	e.interactiveStates[sessionKey] = state
 
 	slog.Info("session spawned", "session_key", sessionKey, "agent_session", session.GetAgentSessionID(), "is_resume", isResume, "elapsed", startElapsed)
@@ -2203,6 +2334,10 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 // skipped if the map entry has been replaced by a different state — this prevents
 // a stale goroutine (still running after /new created a fresh Session object and
 // a new turn started on it) from accidentally destroying the replacement state.
+//
+// IMPORTANT: The state is deleted from the map AFTER the agent session is closed
+// to avoid race conditions where concurrent requests see an empty map while the
+// agent session is still being shut down (which can take up to 130s for Stop hooks).
 func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interactiveState) {
 	e.interactiveMu.Lock()
 	state, ok := e.interactiveStates[sessionKey]
@@ -2211,7 +2346,11 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 		e.interactiveMu.Unlock()
 		return
 	}
-	delete(e.interactiveStates, sessionKey)
+	// Capture the agent session before any further processing
+	var agentSession AgentSession
+	if ok && state != nil {
+		agentSession = state.agentSession
+	}
 	e.interactiveMu.Unlock()
 
 	// Notify senders of any queued messages that will never be processed.
@@ -2220,9 +2359,25 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 		e.notifyDroppedQueuedMessages(state, fmt.Errorf("session reset"))
 	}
 
-	if ok && state != nil && state.agentSession != nil {
-		e.closeAgentSessionWithTimeout(sessionKey, state.agentSession)
+	// Close the agent session BEFORE deleting from the map.
+	// This prevents race conditions where /stop during cleanup sees
+	// an empty map and reports "No execution in progress" while
+	// the agent session Close() is still blocking (up to 130s).
+	if agentSession != nil {
+		e.closeAgentSessionWithTimeout(sessionKey, agentSession)
 	}
+
+	// Now delete the state from the map after the session is closed.
+	e.interactiveMu.Lock()
+	// Re-check that the state hasn't been replaced during the close
+	currentState, currentOk := e.interactiveStates[sessionKey]
+	if currentOk && len(expected) > 0 && expected[0] != nil && currentState != expected[0] {
+		// Another turn has replaced the state during our close — don't delete it.
+		e.interactiveMu.Unlock()
+		return
+	}
+	delete(e.interactiveStates, sessionKey)
+	e.interactiveMu.Unlock()
 }
 
 func (e *Engine) closeAgentSessionAsync(sessionKey string, agentSession AgentSession) {
@@ -2414,6 +2569,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventToolUse:
 			toolCount++
+			// When tool messages are hidden, insert a visual break between text
+			// segments so the accumulated response doesn't run together.
+			if !e.display.ToolMessages && len(textParts) > segmentStart {
+				textParts = append(textParts, "\n\n")
+				if sp.canPreview() {
+					sp.appendText("\n\n")
+				}
+			}
 			if e.display.ToolMessages {
 				// Flush accumulated text segment before tool display
 				previewActive := sp.canPreview()
@@ -2582,12 +2745,23 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventResult:
 			cp.Finalize(ProgressCardStateCompleted)
-			if event.SessionID != "" {
-				session.SetAgentSessionID(event.SessionID, e.agent.Name())
+			// Use state.agentSession.CurrentSessionID() instead of event.SessionID.
+			// event.SessionID may be empty in some cases, causing the agent_session_id
+			// to not be persisted to disk, breaking session resume on next startup.
+			if state != nil && state.agentSession != nil {
+				if currentID := state.agentSession.CurrentSessionID(); currentID != "" {
+					session.SetAgentSessionID(currentID, e.agent.Name())
+					sessions.Save()
+				}
 			}
 
 			fullResponse := event.Content
-			if fullResponse == "" && len(textParts) > 0 {
+			// When tool progress is hidden, segmentStart stays 0 and textParts
+			// contains ALL text across tool boundaries. Prefer the full accumulated
+			// text over event.Content which only contains the last assistant segment.
+			if len(textParts) > 0 && segmentStart == 0 {
+				fullResponse = strings.Join(textParts, "")
+			} else if fullResponse == "" && len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")
 			}
 			if fullResponse == "" {
@@ -3456,6 +3630,23 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 	}
 }
 
+// filterOwnedSessions removes agent sessions that are not tracked by cc-connect's
+// session manager. This prevents external CLI sessions in the same work_dir from
+// appearing in /list, /switch, /delete, etc. If the session manager has no tracked
+// agent sessions at all (e.g. first run), all sessions are returned unfiltered.
+func filterOwnedSessions(sessions []AgentSessionInfo, known map[string]struct{}) []AgentSessionInfo {
+	if len(known) == 0 {
+		return sessions
+	}
+	filtered := make([]AgentSessionInfo, 0, len(sessions))
+	for _, s := range sessions {
+		if _, ok := known[s.ID]; ok {
+			filtered = append(filtered, s)
+		}
+	}
+	return filtered
+}
+
 const listPageSize = 20
 
 // dirCardPageSize is the max directory history rows per card page (Feishu / other card UIs).
@@ -3474,6 +3665,7 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgListError), err))
 			return
 		}
+		agentSessions = filterOwnedSessions(agentSessions, sessions.KnownAgentSessionIDs())
 		if len(agentSessions) == 0 {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgListEmpty))
 			return
@@ -3570,6 +3762,7 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 		return
 	}
+	agentSessions = filterOwnedSessions(agentSessions, sessions.KnownAgentSessionIDs())
 
 	matched := e.matchSession(agentSessions, sessions, query)
 	if matched == nil {
@@ -3771,6 +3964,11 @@ func (e *Engine) cmdDiff(p Platform, msg *Message, raw string) {
 		diffTarget = strings.TrimSpace(raw[6:])
 	}
 
+	if strings.HasPrefix(diffTarget, "-") {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), "diff target must not start with '-'"))
+		return
+	}
+
 	// Resolve working directory (same pattern as cmdShell)
 	var workDir string
 	if e.multiWorkspace {
@@ -3811,7 +4009,7 @@ func (e *Engine) cmdDiff(p Platform, msg *Message, raw string) {
 
 		gitArgs := []string{"diff"}
 		if diffTarget != "" {
-			gitArgs = append(gitArgs, diffTarget)
+			gitArgs = append(gitArgs, "--", diffTarget)
 		}
 		gitCmd := exec.CommandContext(ctx, "git", gitArgs...)
 		gitCmd.Dir = workDir
@@ -4073,6 +4271,7 @@ func (e *Engine) cmdSearch(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgSearchError), err))
 		return
 	}
+	agentSessions = filterOwnedSessions(agentSessions, sessions.KnownAgentSessionIDs())
 
 	type searchResult struct {
 		id           string
@@ -4166,6 +4365,7 @@ func (e *Engine) cmdName(p Platform, msg *Message, args []string) {
 			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 			return
 		}
+		agentSessions = filterOwnedSessions(agentSessions, sessions.KnownAgentSessionIDs())
 		if idx > len(agentSessions) {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgSwitchNoSession), idx))
 			return
@@ -6818,6 +7018,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		if err != nil || len(agentSessions) == 0 {
 			return
 		}
+		agentSessions = filterOwnedSessions(agentSessions, sessions.KnownAgentSessionIDs())
 		matched := e.matchSession(agentSessions, sessions, args)
 		if matched == nil {
 			return
@@ -6955,6 +7156,7 @@ func (e *Engine) renderDeleteModeCard(sessionKey string) *Card {
 	if err != nil {
 		return e.simpleCard(e.i18n.T(MsgDeleteModeTitle), "red", err.Error())
 	}
+	agentSessions = filterOwnedSessions(agentSessions, sessions.KnownAgentSessionIDs())
 	dm := e.getDeleteModeState(sessionKey)
 	if dm == nil {
 		return e.simpleCard(e.i18n.T(MsgDeleteModeTitle), "red", e.i18n.T(MsgDeleteUsage))
@@ -7166,7 +7368,7 @@ func parseDeleteModeSelectedIDs(args []string) map[string]struct{} {
 }
 
 func (e *Engine) submitDeleteModeSelection(sessionKey string, dm *deleteModeState) []string {
-	agent, _ := e.sessionContextForKey(sessionKey)
+	agent, sessions := e.sessionContextForKey(sessionKey)
 	deleter, ok := agent.(SessionDeleter)
 	if !ok {
 		return []string{e.i18n.T(MsgDeleteNotSupported)}
@@ -7175,6 +7377,7 @@ func (e *Engine) submitDeleteModeSelection(sessionKey string, dm *deleteModeStat
 	if err != nil {
 		return []string{e.i18n.Tf(MsgError, err)}
 	}
+	agentSessions = filterOwnedSessions(agentSessions, sessions.KnownAgentSessionIDs())
 	seen := make(map[string]struct{}, len(agentSessions))
 	lines := make([]string, 0, len(dm.selectedIDs))
 	for i := range agentSessions {
@@ -7360,6 +7563,7 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 	if err != nil {
 		return nil, fmt.Errorf(e.i18n.T(MsgListError), err)
 	}
+	agentSessions = filterOwnedSessions(agentSessions, sessions.KnownAgentSessionIDs())
 	if len(agentSessions) == 0 {
 		return e.simpleCard(e.i18n.Tf(MsgCardTitleSessions, agent.Name(), 0), "turquoise", e.i18n.T(MsgListEmpty)), nil
 	}
@@ -8067,7 +8271,7 @@ func (e *Engine) cmdCronAddExec(p Platform, msg *Message, args []string) {
 }
 
 func (e *Engine) cmdCronList(p Platform, msg *Message) {
-	jobs := e.cronScheduler.Store().ListBySessionKey(msg.SessionKey)
+	jobs := e.cronScheduler.Store().ListByProject(e.name)
 	if len(jobs) == 0 {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCronEmpty))
 		return
@@ -9179,7 +9383,7 @@ func (e *Engine) cmdAliasDel(p Platform, msg *Message, args []string) {
 }
 
 func (e *Engine) cmdDelete(p Platform, msg *Message, args []string) {
-	agent, _, _, err := e.commandContext(p, msg)
+	agent, sessions, _, err := e.commandContext(p, msg)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
 		return
@@ -9209,6 +9413,7 @@ func (e *Engine) cmdDelete(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 		return
 	}
+	agentSessions = filterOwnedSessions(agentSessions, sessions.KnownAgentSessionIDs())
 
 	prefix := strings.TrimSpace(args[0])
 	if isExplicitDeleteBatchArg(prefix) {
@@ -9585,8 +9790,9 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 				textParts = append(textParts, fmt.Sprintf(e.i18n.T(MsgToolResult), tn, out)+"\n\n")
 			}
 		case EventResult:
-			if event.SessionID != "" {
-				session.SetAgentSessionID(event.SessionID, e.agent.Name())
+			// Use agentSession.CurrentSessionID() for the same reason as above.
+			if currentID := agentSession.CurrentSessionID(); currentID != "" {
+				session.SetAgentSessionID(currentID, e.agent.Name())
 				e.sessions.Save()
 			}
 			resp := event.Content

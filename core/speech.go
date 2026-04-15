@@ -361,6 +361,40 @@ func ConvertAudioToOpus(ctx context.Context, audio []byte, srcFormat string) ([]
 	return stdout.Bytes(), nil
 }
 
+// ConvertAudioToAMR uses ffmpeg to convert audio to AMR-NB format.
+// AMR is a common voice codec for mobile messaging platforms.
+// Returns the AMR bytes. If ffmpeg is not installed, returns an error.
+func ConvertAudioToAMR(ctx context.Context, audio []byte, srcFormat string) ([]byte, error) {
+	ffmpegPath, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		return nil, fmt.Errorf("ffmpeg not found in PATH: install ffmpeg to enable audio conversion")
+	}
+
+	args := []string{
+		"-i", "pipe:0",
+		"-c:a", "amr_nb",
+		"-ar", "8000",   // 8kHz sample rate (AMR-NB standard)
+		"-ac", "1",      // mono
+		"-b:a", "12.2k", // 12.2 kbps bitrate (AMR-NB max)
+		"-f", "amr",
+		"-y",
+		"pipe:1",
+	}
+	if srcFormat == "amr" || srcFormat == "silk" {
+		args = append([]string{"-f", srcFormat}, args...)
+	}
+	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
+	cmd.Stdin = bytes.NewReader(audio)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("ffmpeg AMR conversion failed: %w (stderr: %s)", err, stderr.String())
+	}
+	return stdout.Bytes(), nil
+}
+
 // ConvertMP3ToOGG converts MP3 audio to OGG format using ffmpeg with stdin/stdout pipes.
 // Optimized for voice: Opus codec, 16kHz mono, 32kbps, voip application.
 func ConvertMP3ToOGG(ctx context.Context, mp3Data []byte) ([]byte, error) {

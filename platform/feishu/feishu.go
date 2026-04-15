@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -125,6 +126,7 @@ type Platform struct {
 	threadIsolation            bool
 	// noReplyToTrigger: when true, send via Create instead of Im.Message.Reply (no quote to the user's message).
 	noReplyToTrigger bool
+	resolveMentions  bool
 	client           *lark.Client
 	replayClient     *lark.Client
 	replayClientMu   sync.Mutex
@@ -136,6 +138,7 @@ type Platform struct {
 	botOpenID        string
 	userNameCache    sync.Map // open_id -> display name
 	chatNameCache    sync.Map // chat_id -> chat name
+	chatMemberCache  sync.Map // chatID -> *chatMemberEntry
 	// Webhook mode fields (for Lark international version)
 	server       *http.Server
 	port         string
@@ -186,6 +189,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	respondToAtEveryoneAndHere, _ := opts["respond_to_at_everyone_and_here"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	threadIsolation, _ := opts["thread_isolation"].(bool)
+	resolveMentionsOpt, _ := opts["resolve_mentions"].(bool)
 	noReplyToTrigger := false
 	if v, ok := opts["reply_to_trigger"].(bool); ok && !v {
 		noReplyToTrigger = true
@@ -236,6 +240,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		respondToAtEveryoneAndHere: respondToAtEveryoneAndHere,
 		shareSessionInChannel:      shareSessionInChannel,
 		threadIsolation:            threadIsolation,
+		resolveMentions:            resolveMentionsOpt,
 		noReplyToTrigger:           noReplyToTrigger,
 		client:                     lark.NewClient(appID, appSecret, clientOpts...),
 		replayClient:               newFeishuReplayClient(appID, appSecret, domain),
@@ -655,14 +660,11 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 		chatID = *msg.ChatId
 	}
 	userID := ""
-	userName := ""
 	if sender.SenderId != nil && sender.SenderId.OpenId != nil {
 		userID = *sender.SenderId.OpenId
 	}
-	if userID != "" {
-		userName = p.resolveUserName(userID)
-	}
-	chatName := p.resolveChatName(chatID)
+	// userName and chatName are resolved in dispatchMessage to avoid blocking
+	// the SDK dispatcher goroutine with synchronous HTTP calls.
 
 	messageID := ""
 	if msg.MessageId != nil {
@@ -743,7 +745,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	// blocked by IO-heavy operations (image/audio download, handler HTTP calls).
 	// The dedup and old-message checks above remain synchronous to guarantee
 	// correctness before spawning the goroutine.
-	go p.dispatchMessage(ctx, msgType, content, mentions, messageID, sessionKey, userID, userName, chatName, rctx, parentID)
+	go p.dispatchMessage(ctx, msgType, content, mentions, messageID, sessionKey, userID, chatID, rctx, parentID)
 
 	return nil
 }
@@ -751,7 +753,14 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 // dispatchMessage handles the message content parsing, media download, and
 // handler invocation. It runs in its own goroutine so that onMessage returns
 // quickly and does not block the SDK event loop.
-func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string, mentions []*larkim.MentionEvent, messageID, sessionKey, userID, userName, chatName string, rctx replyContext, parentID string) {
+func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string, mentions []*larkim.MentionEvent, messageID, sessionKey, userID, chatID string, rctx replyContext, parentID string) {
+	// Resolve user and chat names asynchronously so SDK dispatcher is not blocked.
+	userName := ""
+	if userID != "" {
+		userName = p.resolveUserName(userID)
+	}
+	chatName := p.resolveChatName(chatID)
+
 	// If this message is a reply to another message, fetch the quoted content
 	// and prepend it so the agent has full context.
 	quotedPrefix := ""
@@ -956,6 +965,110 @@ func (p *Platform) resolveChatName(chatID string) string {
 	}
 	p.chatNameCache.Store(chatID, name)
 	return name
+}
+
+// --- Mention resolution ---
+
+const chatMemberCacheTTL = 1 * time.Hour
+
+type chatMemberEntry struct {
+	members   map[string]string // displayName -> openID
+	fetchedAt time.Time
+}
+
+// fetchChatMembers retrieves all members of a chat and returns a name->openID map.
+func (p *Platform) fetchChatMembers(ctx context.Context, chatID string) (map[string]string, error) {
+	if p.client == nil {
+		return nil, fmt.Errorf("%s: client not initialized", p.tag())
+	}
+	members := make(map[string]string)
+	req := larkim.NewGetChatMembersReqBuilder().
+		ChatId(chatID).
+		MemberIdType("open_id").
+		PageSize(100).
+		Build()
+	timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	token, err := p.fetchFreshTenantAccessToken(timeoutCtx)
+	if err != nil {
+		return nil, fmt.Errorf("%s: fetch tenant token for chat members: %w", p.tag(), err)
+	}
+	iter, err := p.client.Im.ChatMembers.GetByIterator(timeoutCtx, req, larkcore.WithTenantAccessToken(token))
+	if err != nil {
+		return nil, fmt.Errorf("%s: list chat members: %w", p.tag(), err)
+	}
+	for {
+		hasMore, member, err := iter.Next()
+		if err != nil {
+			slog.Debug(p.tag()+": fetch chat members page error", "chat_id", chatID, "error", err)
+			break
+		}
+		if member != nil && member.Name != nil && member.MemberId != nil {
+			name := *member.Name
+			if _, exists := members[name]; !exists {
+				members[name] = *member.MemberId
+			}
+		}
+		if !hasMore {
+			break
+		}
+	}
+	return members, nil
+}
+
+// getChatMembers returns the cached name->openID map for a chat, fetching if needed.
+func (p *Platform) getChatMembers(ctx context.Context, chatID string) map[string]string {
+	if v, ok := p.chatMemberCache.Load(chatID); ok {
+		entry := v.(*chatMemberEntry)
+		if time.Since(entry.fetchedAt) < chatMemberCacheTTL {
+			return entry.members
+		}
+	}
+	members, err := p.fetchChatMembers(ctx, chatID)
+	if err != nil {
+		slog.Debug(p.tag()+": fetch chat members failed", "chat_id", chatID, "error", err)
+		return nil
+	}
+	p.chatMemberCache.Store(chatID, &chatMemberEntry{members: members, fetchedAt: time.Now()})
+	return members
+}
+
+// resolveMentionsInContent replaces @name with Feishu at tags in raw content
+// (before JSON serialization). Reverse-matches against the chat member list,
+// longest name first. Uses the correct at syntax based on predicted message type.
+func (p *Platform) resolveMentionsInContent(ctx context.Context, chatID, content string) string {
+	if !p.resolveMentions || chatID == "" || !strings.Contains(content, "@") {
+		return content
+	}
+	members := p.getChatMembers(ctx, chatID)
+	if len(members) == 0 {
+		return content
+	}
+	// Sort names longest-first to avoid partial matches.
+	names := make([]string, 0, len(members))
+	for name := range members {
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool { return len(names[i]) > len(names[j]) })
+
+	useCardFormat := predictMsgType(content) == larkim.MsgTypeInteractive
+	result := content
+	for _, name := range names {
+		pattern := "@" + name
+		if !strings.Contains(result, pattern) {
+			continue
+		}
+		openID := members[name]
+		var atTag string
+		if useCardFormat {
+			atTag = fmt.Sprintf(`<at id=%s></at>`, openID)
+		} else {
+			atTag = fmt.Sprintf(`<at user_id="%s">%s</at>`, openID, name)
+		}
+		slog.Info(p.tag()+": mention resolved", "name", name, "open_id", openID, "card_format", useCardFormat)
+		result = strings.ReplaceAll(result, pattern, atTag)
+	}
+	return result
 }
 
 // fetchQuotedMessage retrieves the content of a parent message that the user
@@ -1498,6 +1611,7 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
 	}
 
+	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
 	msgType, msgBody := buildReplyContent(content)
 
 	if !p.shouldUseThreadOrReplyAPI(rc) {
@@ -1519,6 +1633,7 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 		return p.Reply(ctx, rctx, content)
 	}
 
+	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
 	msgType, msgBody := buildReplyContent(content)
 	return p.sendNewMessageToChat(ctx, rc, msgType, msgBody)
 }
@@ -1702,6 +1817,19 @@ func detectMimeType(data []byte) string {
 		}
 	}
 	return "image/png"
+}
+
+// predictMsgType returns the message type that buildReplyContent will choose,
+// without actually building the content. Used to select the correct at syntax
+// before building.
+func predictMsgType(content string) string {
+	if !containsMarkdown(content) {
+		return larkim.MsgTypeText
+	}
+	if hasComplexMarkdown(content) && countMarkdownTables(content) <= maxCardTables {
+		return larkim.MsgTypeInteractive
+	}
+	return larkim.MsgTypePost
 }
 
 func buildReplyContent(content string) (msgType string, body string) {

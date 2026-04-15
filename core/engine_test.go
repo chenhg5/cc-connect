@@ -2756,7 +2756,13 @@ func TestDeleteMode_ActiveSessionMarkedWithArrowAndNotSelectable(t *testing.T) {
 	}}}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 	msg := &Message{SessionKey: "feishu:user1", ReplyCtx: "ctx"}
-	e.sessions.GetOrCreateActive(msg.SessionKey).SetAgentSessionID("session-1", "test")
+	// Register both sessions so they pass the owned-session filter.
+	s1 := e.sessions.GetOrCreateActive(msg.SessionKey)
+	s1.SetAgentSessionID("session-1", "test")
+	s2 := e.sessions.NewSession(msg.SessionKey, "two")
+	s2.SetAgentSessionID("session-2", "test")
+	// Switch back to s1 as the active session.
+	e.sessions.SwitchSession(msg.SessionKey, s1.ID)
 
 	e.cmdDelete(p, msg, nil)
 	if len(p.repliedCards) != 1 {
@@ -3810,6 +3816,50 @@ func TestCmdQuiet_TogglesDisplay(t *testing.T) {
 	}
 }
 
+func TestHandleMessage_ExtraContentPreservedThroughAlias(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agent := &stubAgent{}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.aliasMu.Lock()
+	e.aliases["hi"] = "hello world"
+	e.aliasMu.Unlock()
+
+	msg := &Message{
+		SessionKey:   "test:user1",
+		ReplyCtx:     "ctx",
+		Content:      "hi",
+		ExtraContent: "> quoted reply context",
+		Platform:     "test",
+		UserID:       "user1",
+	}
+
+	e.handleMessage(p, msg)
+
+	if !strings.Contains(msg.Content, "> quoted reply context") {
+		t.Fatalf("ExtraContent lost after alias resolution: msg.Content = %q", msg.Content)
+	}
+	if !strings.Contains(msg.Content, "hello world") {
+		t.Fatalf("alias not resolved: msg.Content = %q", msg.Content)
+	}
+}
+
+func TestCmdDiff_RejectsDashTarget(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx", UserID: "admin1"}
+	e.SetAdminFrom("admin1")
+
+	e.handleCommand(p, msg, "/diff --output=/tmp/evil")
+
+	if len(p.sent) == 0 {
+		t.Fatal("expected error reply for dash target")
+	}
+	if !strings.Contains(p.sent[0], "must not start with '-'") {
+		t.Fatalf("sent = %q, want rejection of dash target", p.sent[0])
+	}
+}
+
 func TestCmdUsage_UnsupportedAgent(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -4069,7 +4119,16 @@ func TestRenderListCard_MakesEveryVisibleSessionClickable(t *testing.T) {
 	}
 
 	e := NewEngine("test", &stubListAgent{sessions: sessions}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
-	e.sessions.GetOrCreateActive("test:user1").SetAgentSessionID(sessions[5].ID, "test")
+	// Register all agent sessions with the session manager so they pass the
+	// owned-session filter (simulates cc-connect having created each session).
+	var internalIDs []string
+	for i, s := range sessions {
+		sess := e.sessions.NewSession("test:user1", "session-"+string(rune('A'+i)))
+		sess.SetAgentSessionID(s.ID, "test")
+		internalIDs = append(internalIDs, sess.ID)
+	}
+	// Switch active to the session mapped to sessions[5] (agent-session-F).
+	e.sessions.SwitchSession("test:user1", internalIDs[5])
 
 	card, err := e.renderListCard("test:user1", 1)
 	if err != nil {
@@ -6093,6 +6152,40 @@ func TestQueueMessage_DeadSession_ReturnsFalse(t *testing.T) {
 	}
 }
 
+// TestQueueMessage_NilAgentSession_DuringStartup verifies that messages can be
+// queued when the interactiveState exists but agentSession is nil (session is
+// still starting up). This is the fix for issue #565.
+func TestQueueMessage_NilAgentSession_DuringStartup(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := newTestEngine()
+
+	key := "test:starting-session"
+	// Simulate the placeholder state created by ensureInteractiveStateForQueueing
+	state := &interactiveState{
+		platform: p,
+		replyCtx: "ctx",
+		// agentSession is nil — session is starting up
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	msg := &Message{SessionKey: key, Content: "queued during startup", ReplyCtx: "ctx-startup"}
+	ok := e.queueMessageForBusySession(p, msg, key)
+	if !ok {
+		t.Fatal("expected true: messages should be queueable during session startup")
+	}
+
+	state.mu.Lock()
+	if len(state.pendingMessages) != 1 {
+		t.Fatalf("pendingMessages len = %d, want 1", len(state.pendingMessages))
+	}
+	if state.pendingMessages[0].content != "queued during startup" {
+		t.Fatalf("queued content = %q, want %q", state.pendingMessages[0].content, "queued during startup")
+	}
+	state.mu.Unlock()
+}
+
 // --- 2. /compress flow ---
 
 type stubCompressorAgent struct {
@@ -7088,15 +7181,21 @@ func TestCmdShell_MultiWorkspaceIgnoresMissingSharedBinding(t *testing.T) {
 	e.cmdShell(p, msg, "/shell pwd")
 
 	deadline := time.Now().Add(2 * time.Second)
+	// Normalize both the expected and missing paths to handle macOS symlink
+	// resolution (e.g. /var/folders/ -> /private/var/folders/). Then check
+	// that the shell output contains the resolved expected path and does NOT
+	// contain the resolved missing path.
+	expectedResolved := normalizeWorkspacePath(agent.workDir)
+	missingResolved := normalizeWorkspacePath(missingDir)
 	for {
 		sent := p.getSent()
 		if len(sent) > 0 {
-			normalizedWorkDir := normalizeWorkspacePath(agent.workDir)
-			if !strings.Contains(sent[0], normalizedWorkDir) && !strings.Contains(sent[0], agent.workDir) {
-				t.Fatalf("expected shell output to fall back to agent work dir %q, got %q", agent.workDir, sent[0])
+			output := sent[0]
+			if !strings.Contains(output, agent.workDir) && !strings.Contains(output, expectedResolved) {
+				t.Fatalf("expected shell output to fall back to agent work dir %q (resolved %q), got %q", agent.workDir, expectedResolved, output)
 			}
-			if strings.Contains(sent[0], missingDir) {
-				t.Fatalf("expected shell output to ignore missing shared workspace %q, got %q", missingDir, sent[0])
+			if strings.Contains(output, missingDir) || strings.Contains(output, missingResolved) {
+				t.Fatalf("expected shell output to ignore missing shared workspace %q, got %q", missingDir, output)
 			}
 			return
 		}
@@ -8893,4 +8992,45 @@ func TestExtractSessionKeyParts(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSetObserveConfig(t *testing.T) {
+	e := NewEngine("test", &stubAgent{}, nil, "", LangEnglish)
+	e.SetObserveConfig("/tmp/test-project", "slack:C123:U456")
+	if !e.observeEnabled {
+		t.Fatal("observe should be enabled")
+	}
+	if e.observeProjectDir != "/tmp/test-project" {
+		t.Fatalf("unexpected project dir: %s", e.observeProjectDir)
+	}
+}
+
+func TestObserveStartsOnlyWithSlack(t *testing.T) {
+	stub := &stubPlatformWithObserve{stubPlatform: stubPlatform{n: "slack"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{stub}, "", LangEnglish)
+	e.SetObserveConfig("/tmp/fake-project", "slack:C123:U456")
+
+	target := e.findObserverTarget()
+	if target == nil {
+		t.Fatal("expected to find observer target for Slack")
+	}
+}
+
+func TestObserveNoTargetWithoutSlack(t *testing.T) {
+	stub := &stubPlatform{n: "telegram"}
+	e := NewEngine("test", &stubAgent{}, []Platform{stub}, "", LangEnglish)
+	e.SetObserveConfig("/tmp/fake-project", "slack:C123:U456")
+
+	target := e.findObserverTarget()
+	if target != nil {
+		t.Fatal("expected no observer target without Slack")
+	}
+}
+
+type stubPlatformWithObserve struct {
+	stubPlatform
+}
+
+func (s *stubPlatformWithObserve) SendObservation(_ context.Context, _, _ string) error {
+	return nil
 }
