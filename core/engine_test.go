@@ -4094,7 +4094,7 @@ func TestCmdSkills_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	}
 	e.skills.SetDirs([]string{temp})
 
-	e.cmdSkills(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"})
+	e.cmdSkills(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, nil)
 
 	if len(p.sent) != 1 {
 		t.Fatalf("sent messages = %d, want 1", len(p.sent))
@@ -4104,6 +4104,73 @@ func TestCmdSkills_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	}
 	if strings.Contains(p.sent[0], "[← Back]") {
 		t.Fatalf("skills text = %q, should not be card fallback text", p.sent[0])
+	}
+}
+
+func TestCmdSkills_TelegramPaginatesLongSkillLists(t *testing.T) {
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	temp := t.TempDir()
+
+	for i := 0; i < 24; i++ {
+		name := fmt.Sprintf("skill-%02d", i)
+		skillDir := filepath.Join(temp, name)
+		if err := os.MkdirAll(skillDir, 0o755); err != nil {
+			t.Fatalf("mkdir skill dir: %v", err)
+		}
+		desc := strings.Repeat(fmt.Sprintf("description-%02d ", i), 18)
+		content := fmt.Sprintf("---\ndescription: %s\n---\nDo demo", desc)
+		if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(content), 0o644); err != nil {
+			t.Fatalf("write skill file: %v", err)
+		}
+	}
+	e.skills.SetDirs([]string{temp})
+
+	e.cmdSkills(p, &Message{SessionKey: "telegram:user1", ReplyCtx: "ctx"}, nil)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if len(p.sent[0]) >= maxPlatformMessageLen {
+		t.Fatalf("skills page len = %d, want less than %d", len(p.sent[0]), maxPlatformMessageLen)
+	}
+	if !strings.Contains(p.sent[0], "Page 1/") {
+		t.Fatalf("skills text = %q, want pagination footer", p.sent[0])
+	}
+	if !strings.Contains(p.sent[0], "/skills 2") {
+		t.Fatalf("skills text = %q, want next-page hint", p.sent[0])
+	}
+
+	p.sent = nil
+	e.cmdSkills(p, &Message{SessionKey: "telegram:user1", ReplyCtx: "ctx"}, []string{"2"})
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages on page 2 = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "Page 2/") {
+		t.Fatalf("skills text = %q, want second page footer", p.sent[0])
+	}
+}
+
+func TestCmdSkills_TelegramRejectsInvalidPage(t *testing.T) {
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	temp := t.TempDir()
+	skillDir := filepath.Join(temp, "demo")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatalf("mkdir skill dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\ndescription: Demo skill\n---\nDo demo"), 0o644); err != nil {
+		t.Fatalf("write skill file: %v", err)
+	}
+	e.skills.SetDirs([]string{temp})
+
+	e.cmdSkills(p, &Message{SessionKey: "telegram:user1", ReplyCtx: "ctx"}, []string{"2"})
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "Invalid page") {
+		t.Fatalf("skills text = %q, want invalid page message", p.sent[0])
 	}
 }
 
