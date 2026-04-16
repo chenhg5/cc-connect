@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestSessionManager_GetOrCreateActive(t *testing.T) {
@@ -551,5 +552,278 @@ func TestFilterOwnedSessions_EmptyKnownReturnsAll(t *testing.T) {
 	filtered := filterOwnedSessions(all, map[string]struct{}{})
 	if len(filtered) != 2 {
 		t.Fatalf("filterOwnedSessions with empty known = %d, want 2", len(filtered))
+	}
+}
+
+func TestParseSessionKey(t *testing.T) {
+	tests := []struct {
+		key          string
+		wantPlatform string
+		wantBaseChat string
+		wantUser     string
+	}{
+		{
+			key:          "feishu:oc_abc123:ou_xyz789",
+			wantPlatform: "feishu",
+			wantBaseChat: "feishu:oc_abc123",
+			wantUser:     "ou_xyz789",
+		},
+		{
+			key:          "feishu:oc_abc123",
+			wantPlatform: "feishu",
+			wantBaseChat: "feishu:oc_abc123",
+			wantUser:     "",
+		},
+		{
+			key:          "telegram:-100123:root:msg456",
+			wantPlatform: "telegram",
+			wantBaseChat: "telegram:-100123",
+			wantUser:     "root:msg456",
+		},
+		{
+			key:          "invalid",
+			wantPlatform: "invalid",
+			wantBaseChat: "",
+			wantUser:     "",
+		},
+		{
+			key:          "",
+			wantPlatform: "",
+			wantBaseChat: "",
+			wantUser:     "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.key, func(t *testing.T) {
+			platform, baseChat, userOrThread := ParseSessionKey(tt.key)
+			if platform != tt.wantPlatform {
+				t.Errorf("platform = %q, want %q", platform, tt.wantPlatform)
+			}
+			if baseChat != tt.wantBaseChat {
+				t.Errorf("baseChat = %q, want %q", baseChat, tt.wantBaseChat)
+			}
+			if userOrThread != tt.wantUser {
+				t.Errorf("userOrThread = %q, want %q", userOrThread, tt.wantUser)
+			}
+		})
+	}
+}
+
+func TestPruneDuplicateSessions_NoDuplicates(t *testing.T) {
+	sm := NewSessionManager("")
+	sm.GetOrCreateActive("feishu:oc_chat1:ou_user1")
+	sm.GetOrCreateActive("feishu:oc_chat2:ou_user1") // Different chat, no duplicate
+
+	result := sm.PruneDuplicateSessions(false)
+	if len(result.RemovedSessions) != 0 {
+		t.Errorf("removed %d sessions, want 0 (no duplicates)", len(result.RemovedSessions))
+	}
+}
+
+func TestPruneDuplicateSessions_DifferentChats(t *testing.T) {
+	sm := NewSessionManager("")
+
+	// Create sessions for different chats with different users - should not be considered duplicates
+	s1 := sm.GetOrCreateActive("feishu:oc_chatA:ou_user1")
+	s2 := sm.GetOrCreateActive("feishu:oc_chatB:ou_user1") // Different chat
+
+	// Add history to both
+	s1.AddHistory("user", "msg to chatA")
+	s2.AddHistory("user", "msg to chatB")
+
+	result := sm.PruneDuplicateSessions(false)
+	if len(result.RemovedSessions) != 0 {
+		t.Errorf("removed %d sessions, want 0 (different chats)", len(result.RemovedSessions))
+	}
+
+	// Both sessions should still exist
+	if sm.FindByID(s1.ID) == nil {
+		t.Error("s1 should still exist")
+	}
+	if sm.FindByID(s2.ID) == nil {
+		t.Error("s2 should still exist")
+	}
+}
+
+func TestPruneDuplicateSessions_SameChatDifferentUsers(t *testing.T) {
+	sm := NewSessionManager("")
+
+	// Same chat, different users - these are "duplicates" from chat perspective
+	s1 := sm.GetOrCreateActive("feishu:oc_chat1:ou_user1")
+	s2 := sm.NewSession("feishu:oc_chat1:ou_user2", "user2-session")
+
+	// Add history
+	s1.AddHistory("user", "msg from user1")
+	s1.AddHistory("user", "another msg")
+	s2.AddHistory("user", "msg from user2")
+
+	// Make s1 newer (more recent update)
+	s1.mu.Lock()
+	s1.UpdatedAt = time.Now().Add(1 * time.Hour)
+	s1.mu.Unlock()
+
+	result := sm.PruneDuplicateSessions(true) // merge history
+
+	// Should remove one session (the older one)
+	if len(result.RemovedSessions) != 1 {
+		t.Errorf("removed %d sessions, want 1", len(result.RemovedSessions))
+	}
+
+	// s1 should be kept (more recent)
+	if sm.FindByID(s1.ID) == nil {
+		t.Error("s1 (more recent) should be kept")
+	}
+
+	// s2 should be removed
+	if sm.FindByID(s2.ID) != nil {
+		t.Error("s2 (older) should be removed")
+	}
+
+	// History should be merged into s1
+	keep := sm.FindByID(s1.ID)
+	history := keep.GetHistory(0)
+	if len(history) != 3 {
+		t.Errorf("merged history = %d entries, want 3", len(history))
+	}
+}
+
+func TestPruneDuplicateSessions_NoMergeKeepsHistory(t *testing.T) {
+	sm := NewSessionManager("")
+
+	// Same chat, different users
+	s1 := sm.GetOrCreateActive("feishu:oc_chat1:ou_user1")
+	s2 := sm.NewSession("feishu:oc_chat1:ou_user2", "user2-session")
+
+	// s1 has history, s2 is empty
+	s1.AddHistory("user", "msg from user1")
+
+	// Make s2 newer but empty
+	s2.mu.Lock()
+	s2.UpdatedAt = time.Now().Add(1 * time.Hour)
+	s2.mu.Unlock()
+
+	result := sm.PruneDuplicateSessions(false) // NO merge
+
+	// s2 (empty, newer) should be removed, s1 (has history, older) should be kept
+	if len(result.RemovedSessions) != 1 {
+		t.Errorf("removed %d sessions, want 1 (empty session)", len(result.RemovedSessions))
+	}
+
+	// s1 should still exist (has history)
+	if sm.FindByID(s1.ID) == nil {
+		t.Error("s1 (has history) should be kept")
+	}
+
+	// s2 should be removed (empty)
+	if sm.FindByID(s2.ID) != nil {
+		t.Error("s2 (empty) should be removed")
+	}
+}
+
+func TestPruneDuplicateSessions_ThreadIsolation(t *testing.T) {
+	sm := NewSessionManager("")
+
+	// Same chat, different threads
+	s1 := sm.GetOrCreateActive("feishu:oc_chat1:root:thread1")
+	s2 := sm.NewSession("feishu:oc_chat1:root:thread2", "thread2-session")
+	s3 := sm.NewSession("feishu:oc_chat1:ou_user1", "user-session")
+
+	// All have history
+	s1.AddHistory("user", "msg in thread1")
+	s2.AddHistory("user", "msg in thread2")
+	s3.AddHistory("user", "msg from user")
+
+	// Make s1 most recent
+	s1.mu.Lock()
+	s1.UpdatedAt = time.Now().Add(2 * time.Hour)
+	s1.mu.Unlock()
+
+	result := sm.PruneDuplicateSessions(true)
+
+	// Should remove 2 sessions (s2 and s3)
+	if len(result.RemovedSessions) != 2 {
+		t.Errorf("removed %d sessions, want 2", len(result.RemovedSessions))
+	}
+
+	// s1 should be kept
+	if sm.FindByID(s1.ID) == nil {
+		t.Error("s1 (most recent) should be kept")
+	}
+
+	// History should be merged
+	keep := sm.FindByID(s1.ID)
+	history := keep.GetHistory(0)
+	if len(history) != 3 {
+		t.Errorf("merged history = %d entries, want 3", len(history))
+	}
+}
+
+func TestPruneEmptySessions(t *testing.T) {
+	sm := NewSessionManager("")
+
+	// Create sessions
+	s1 := sm.GetOrCreateActive("feishu:oc_chat1:ou_user1")
+	s2 := sm.NewSession("feishu:oc_chat2:ou_user1", "empty-session")
+	s3 := sm.NewSession("feishu:oc_chat3:ou_user1", "another-empty")
+
+	// Only s1 has history
+	s1.AddHistory("user", "msg1")
+	s1.AddHistory("user", "msg2")
+
+	removed := sm.PruneEmptySessions()
+	if removed != 2 {
+		t.Errorf("removed %d empty sessions, want 2", removed)
+	}
+
+	// s1 should still exist
+	if sm.FindByID(s1.ID) == nil {
+		t.Error("s1 (has history) should exist")
+	}
+
+	// s2, s3 should be removed
+	if sm.FindByID(s2.ID) != nil {
+		t.Error("s2 (empty) should be removed")
+	}
+	if sm.FindByID(s3.ID) != nil {
+		t.Error("s3 (empty) should be removed")
+	}
+}
+
+func TestPruneDuplicateSessions_Persistence(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+
+	sm1 := NewSessionManager(path)
+	s1 := sm1.GetOrCreateActive("feishu:oc_chat1:ou_user1")
+	s2 := sm1.NewSession("feishu:oc_chat1:ou_user2", "duplicate")
+
+	s1.AddHistory("user", "msg1")
+	s2.AddHistory("user", "msg2")
+
+	// Make s1 newer
+	s1.mu.Lock()
+	s1.UpdatedAt = time.Now().Add(1 * time.Hour)
+	s1.mu.Unlock()
+
+	result := sm1.PruneDuplicateSessions(true)
+	if len(result.RemovedSessions) != 1 {
+		t.Fatalf("removed %d, want 1", len(result.RemovedSessions))
+	}
+
+	// Reload and verify persisted state
+	sm2 := NewSessionManager(path)
+	// After prune, there should be only one session for the base chat
+	// Note: ListSessions returns sessions for a specific userKey, not base chat
+	// So we need to check AllSessions
+	all := sm2.AllSessions()
+	if len(all) != 1 {
+		t.Errorf("after reload: %d sessions, want 1", len(all))
+	}
+
+	// History should be persisted
+	history := all[0].GetHistory(0)
+	if len(history) != 2 {
+		t.Errorf("merged history after reload = %d, want 2", len(history))
 	}
 }
