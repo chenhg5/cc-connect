@@ -58,6 +58,48 @@ type Agent struct {
 	mu sync.RWMutex
 }
 
+var claudeProviderManagedEnvVars = map[string]struct{}{
+	"CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST":                  {},
+	"CLAUDE_CODE_USE_BEDROCK":                               {},
+	"CLAUDE_CODE_USE_VERTEX":                                {},
+	"CLAUDE_CODE_USE_FOUNDRY":                               {},
+	"ANTHROPIC_BASE_URL":                                    {},
+	"ANTHROPIC_BEDROCK_BASE_URL":                            {},
+	"ANTHROPIC_VERTEX_BASE_URL":                             {},
+	"ANTHROPIC_FOUNDRY_BASE_URL":                            {},
+	"ANTHROPIC_FOUNDRY_RESOURCE":                            {},
+	"ANTHROPIC_VERTEX_PROJECT_ID":                           {},
+	"CLOUD_ML_REGION":                                       {},
+	"ANTHROPIC_API_KEY":                                     {},
+	"ANTHROPIC_AUTH_TOKEN":                                  {},
+	"CLAUDE_CODE_OAUTH_TOKEN":                               {},
+	"AWS_BEARER_TOKEN_BEDROCK":                              {},
+	"ANTHROPIC_FOUNDRY_API_KEY":                             {},
+	"CLAUDE_CODE_SKIP_BEDROCK_AUTH":                         {},
+	"CLAUDE_CODE_SKIP_VERTEX_AUTH":                          {},
+	"CLAUDE_CODE_SKIP_FOUNDRY_AUTH":                         {},
+	"ANTHROPIC_MODEL":                                       {},
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL":                         {},
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION":             {},
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME":                    {},
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES":  {},
+	"ANTHROPIC_DEFAULT_OPUS_MODEL":                          {},
+	"ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION":              {},
+	"ANTHROPIC_DEFAULT_OPUS_MODEL_NAME":                     {},
+	"ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES":   {},
+	"ANTHROPIC_DEFAULT_SONNET_MODEL":                        {},
+	"ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION":            {},
+	"ANTHROPIC_DEFAULT_SONNET_MODEL_NAME":                   {},
+	"ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES": {},
+	"ANTHROPIC_SMALL_FAST_MODEL":                            {},
+	"ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION":                 {},
+	"CLAUDE_CODE_SUBAGENT_MODEL":                            {},
+}
+
+var claudeProviderManagedEnvPrefixes = []string{
+	"VERTEX_REGION_CLAUDE_",
+}
+
 func New(opts map[string]any) (core.Agent, error) {
 	workDir, _ := opts["work_dir"].(string)
 	if workDir == "" {
@@ -328,21 +370,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	maxTok := a.maxContextTokens
 	model := a.model
 	effort := a.reasoningEffort
-	extraEnv := a.providerEnvLocked()
-	extraEnv = append(extraEnv, a.sessionEnv...)
-
-	// Add Claude Code Router environment variables if configured
-	if a.routerURL != "" {
-		extraEnv = append(extraEnv, "ANTHROPIC_BASE_URL="+a.routerURL)
-		// When using router, we need to prevent proxy interference
-		extraEnv = append(extraEnv, "NO_PROXY=127.0.0.1")
-		// Disable telemetry and cost warnings for cleaner router integration
-		extraEnv = append(extraEnv, "DISABLE_TELEMETRY=true")
-		extraEnv = append(extraEnv, "DISABLE_COST_WARNINGS=true")
-	}
-	if a.routerAPIKey != "" {
-		extraEnv = append(extraEnv, "ANTHROPIC_API_KEY="+a.routerAPIKey)
-	}
+	extraEnv := a.runtimeEnvLocked()
 
 	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
 		if m := a.providers[a.activeIdx].Model; m != "" {
@@ -806,6 +834,45 @@ func (a *Agent) providerEnvLocked() []string {
 		env = append(env, k+"="+v)
 	}
 	return env
+}
+
+func (a *Agent) runtimeEnvLocked() []string {
+	env := append([]string(nil), a.providerEnvLocked()...)
+	env = append(env, a.sessionEnv...)
+
+	if a.routerURL != "" {
+		env = append(env, "ANTHROPIC_BASE_URL="+a.routerURL)
+		env = append(env, "NO_PROXY=127.0.0.1")
+		env = append(env, "DISABLE_TELEMETRY=true")
+		env = append(env, "DISABLE_COST_WARNINGS=true")
+	}
+	if a.routerAPIKey != "" {
+		env = append(env, "ANTHROPIC_API_KEY="+a.routerAPIKey)
+	}
+
+	if !claudeEnvManagesProviderRouting(env) {
+		return env
+	}
+	return core.MergeEnv(env, []string{"CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST=1"})
+}
+
+func claudeEnvManagesProviderRouting(env []string) bool {
+	for _, entry := range env {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		upper := strings.ToUpper(strings.TrimSpace(key))
+		if _, ok := claudeProviderManagedEnvVars[upper]; ok {
+			return true
+		}
+		for _, prefix := range claudeProviderManagedEnvPrefixes {
+			if strings.HasPrefix(upper, prefix) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (a *Agent) ensureProviderProxyLocked(targetURL, thinkingOverride string) error {
