@@ -111,6 +111,8 @@ func New(opts map[string]any) (core.Agent, error) {
 	cliBin := "claude"
 	var cliExtraArgs []string
 	if cliPath, _ := opts["cli_path"].(string); cliPath != "" {
+		// NOTE: paths containing spaces are not supported because Fields
+		// splits on whitespace. Use a symlink or wrapper script instead.
 		parts := strings.Fields(cliPath)
 		cliBin = parts[0]
 		if len(parts) > 1 {

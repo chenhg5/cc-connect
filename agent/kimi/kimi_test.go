@@ -2,6 +2,7 @@ package kimi
 
 import (
 	"context"
+	"os/exec"
 	"testing"
 	"time"
 
@@ -9,6 +10,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func skipUnlessKimiAvailable(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("kimi"); err != nil {
+		t.Skipf("kimi CLI not in PATH, skipping: %v", err)
+	}
+}
 
 func TestNormalizeMode(t *testing.T) {
 	cases := []struct {
@@ -34,7 +42,7 @@ func TestNormalizeMode(t *testing.T) {
 }
 
 func TestAgentNew(t *testing.T) {
-	// This test assumes `kimi` binary exists in PATH (true in this environment).
+	skipUnlessKimiAvailable(t)
 	agentInf, err := New(map[string]any{
 		"work_dir":     "/tmp",
 		"model":        "kimi-k2",
@@ -52,6 +60,7 @@ func TestAgentNew(t *testing.T) {
 }
 
 func TestAgentSetters(t *testing.T) {
+	skipUnlessKimiAvailable(t)
 	agentInf, err := New(map[string]any{"work_dir": "/tmp"})
 	require.NoError(t, err)
 	a := agentInf.(*Agent)
@@ -67,6 +76,7 @@ func TestAgentSetters(t *testing.T) {
 }
 
 func TestAgentPermissionModes(t *testing.T) {
+	skipUnlessKimiAvailable(t)
 	agentInf, err := New(map[string]any{"work_dir": "/tmp"})
 	require.NoError(t, err)
 	a := agentInf.(*Agent)
@@ -80,6 +90,7 @@ func TestAgentPermissionModes(t *testing.T) {
 }
 
 func TestAgentProviderSwitcher(t *testing.T) {
+	skipUnlessKimiAvailable(t)
 	agentInf, err := New(map[string]any{"work_dir": "/tmp"})
 	require.NoError(t, err)
 	a := agentInf.(*Agent)
@@ -100,6 +111,7 @@ func TestAgentProviderSwitcher(t *testing.T) {
 }
 
 func TestAgentStartSession(t *testing.T) {
+	skipUnlessKimiAvailable(t)
 	agentInf, err := New(map[string]any{
 		"work_dir":     "/tmp",
 		"model":        "kimi-k2",
@@ -123,6 +135,7 @@ func TestAgentStartSession(t *testing.T) {
 }
 
 func TestAgentMemoryAndSkill(t *testing.T) {
+	skipUnlessKimiAvailable(t)
 	agentInf, err := New(map[string]any{"work_dir": "/tmp/my-project"})
 	require.NoError(t, err)
 	a := agentInf.(*Agent)
@@ -137,6 +150,7 @@ func TestAgentMemoryAndSkill(t *testing.T) {
 }
 
 func TestAgentAvailableModels(t *testing.T) {
+	skipUnlessKimiAvailable(t)
 	agentInf, err := New(map[string]any{"work_dir": "/tmp"})
 	require.NoError(t, err)
 	a := agentInf.(*Agent)

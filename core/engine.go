@@ -4777,7 +4777,7 @@ func (e *Engine) cmdAgentSID(p Platform, msg *Message) {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSessionNotStarted))
 		return
 	}
-	e.reply(p, msg.ReplyCtx, agentID)
+	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgAgentSIDWarning)+"\n\n`"+agentID+"`")
 }
 
 func (e *Engine) cmdStatus(p Platform, msg *Message) {

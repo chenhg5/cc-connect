@@ -224,6 +224,36 @@ func TestClaudeSessionClose_IdempotentNoPanic(t *testing.T) {
 	}
 }
 
+func TestShellJoinArgs(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"empty", nil, ""},
+		{"single_plain", []string{"--verbose"}, "--verbose"},
+		{"multiple_plain", []string{"--verbose", "--model", "opus"}, "--verbose --model opus"},
+		{"arg_with_space", []string{"--prompt", "hello world"}, "--prompt 'hello world'"},
+		{"arg_with_tab", []string{"a\tb"}, "'a\tb'"},
+		{"arg_with_newline", []string{"line1\nline2"}, "'line1\nline2'"},
+		{"arg_with_single_quote", []string{"it's"}, "'it'\\''s'"},
+		{"arg_with_double_quote", []string{`say "hi"`}, `'say "hi"'`},
+		{"arg_with_backslash", []string{`path\to`}, `'path\to'`},
+		{"mixed", []string{"--flag", "has space", "plain", "it's here"}, "--flag 'has space' plain 'it'\\''s here'"},
+		{"empty_string_arg", []string{""}, ""},
+		{"long_prompt", []string{"--append-system-prompt", "You are a helpful assistant.\nBe concise."}, "--append-system-prompt 'You are a helpful assistant.\nBe concise.'"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shellJoinArgs(tt.args)
+			if got != tt.want {
+				t.Errorf("shellJoinArgs(%v)\n  got  = %q\n  want = %q", tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
 func helperCommand(ctx context.Context, mode string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=TestHelperProcess", "--", mode)
 	cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1")

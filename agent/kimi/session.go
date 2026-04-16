@@ -200,18 +200,6 @@ func (ks *kimiSession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.Re
 		for _, f := range tempFiles {
 			os.Remove(f)
 		}
-		if err := cmd.Wait(); err != nil {
-			stderrMsg := strings.TrimSpace(stderrBuf.String())
-			if stderrMsg != "" {
-				slog.Error("kimiSession: process failed", "error", err, "stderr", stderrMsg)
-				evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
-				select {
-				case ks.events <- evt:
-				case <-ks.ctx.Done():
-					return
-				}
-			}
-		}
 	}()
 
 	go func() {
@@ -222,6 +210,7 @@ func (ks *kimiSession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.Re
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 
+	var scanErr error
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" {
@@ -247,13 +236,32 @@ func (ks *kimiSession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.Re
 
 		ks.handleEvent(raw)
 	}
+	scanErr = scanner.Err()
 
-	if err := scanner.Err(); err != nil {
-		slog.Error("kimiSession: scanner error", "error", err)
-		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
+	// Wait for process exit before sending any terminal event so the engine
+	// never sees EventError after EventResult from the same turn.
+	waitErr := cmd.Wait()
+
+	if scanErr != nil {
+		slog.Error("kimiSession: scanner error", "error", scanErr)
+		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", scanErr)}
 		select {
 		case ks.events <- evt:
 		case <-ks.ctx.Done():
+			return
+		}
+	}
+
+	if waitErr != nil {
+		stderrMsg := strings.TrimSpace(stderrBuf.String())
+		if stderrMsg != "" {
+			slog.Error("kimiSession: process failed", "error", waitErr, "stderr", stderrMsg)
+			evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
+			select {
+			case ks.events <- evt:
+			case <-ks.ctx.Done():
+				return
+			}
 			return
 		}
 	}

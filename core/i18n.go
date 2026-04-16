@@ -241,6 +241,7 @@ const (
 
 	MsgStatusTitle          MsgKey = "status_title"
 	MsgReplyFooterRemaining MsgKey = "reply_footer_remaining"
+	MsgAgentSIDWarning      MsgKey = "agent_sid_warning"
 
 	MsgModelCurrent          MsgKey = "model_current"
 	MsgModelChanged          MsgKey = "model_changed"
@@ -1820,10 +1821,17 @@ var messages = map[MsgKey]map[Language]string{
 	},
 	MsgReplyFooterRemaining: {
 		LangEnglish:            "%d%% left",
-		LangChinese:            "%d%% left",
-		LangTraditionalChinese: "%d%% left",
-		LangJapanese:           "%d%% left",
-		LangSpanish:            "%d%% left",
+		LangChinese:            "剩余 %d%%",
+		LangTraditionalChinese: "剩餘 %d%%",
+		LangJapanese:           "残り %d%%",
+		LangSpanish:            "%d%% restante",
+	},
+	MsgAgentSIDWarning: {
+		LangEnglish:            "⚠️ Agent session ID (sensitive — do not share in public channels):",
+		LangChinese:            "⚠️ Agent 会话 ID（敏感信息，请勿在公开频道分享）：",
+		LangTraditionalChinese: "⚠️ Agent 會話 ID（敏感資訊，請勿在公開頻道分享）：",
+		LangJapanese:           "⚠️ エージェントセッションID（機密情報 — 公開チャンネルで共有しないでください）：",
+		LangSpanish:            "⚠️ ID de sesión del agente (sensible — no compartir en canales públicos):",
 	},
 	MsgModelCurrent: {
 		LangEnglish:            "Current model: %s",
