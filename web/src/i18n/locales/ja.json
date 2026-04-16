@@ -230,6 +230,7 @@
     "callbackAesKey": "コールバック AES キー",
     "callbackAesKeyHint": "43文字",
     "callbackPath": "コールバックパス",
+    "apiBaseUrl": "API ベース URL",
     "port": "ポート",
     "wsUrl": "WebSocket URL",
     "appId": "アプリ ID",
