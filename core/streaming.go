@@ -366,3 +366,13 @@ func (sp *streamPreview) detachPreview() {
 	defer sp.mu.Unlock()
 	sp.previewMsgID = nil
 }
+
+// needsDoneReaction returns true if the preview was delivered via in-place
+// UpdateMessage at least once, meaning the user only received a push for the
+// initial SendPreviewStart and subsequent updates were silent. In this case a
+// "done" reaction can notify the user that processing has completed.
+func (sp *streamPreview) needsDoneReaction() bool {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	return sp.previewMsgID != nil && sp.lastSentViaUpdate
+}
