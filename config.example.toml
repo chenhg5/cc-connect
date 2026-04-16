@@ -1356,6 +1356,45 @@ app_secret = "your-feishu-app-secret"
 # token = "your-telegram-bot-token"
 
 # =============================================================================
+# Project: Using Kimi CLI / 项目：使用 Kimi CLI (uncomment to enable / 取消注释以启用)
+# =============================================================================
+# Requires: pip install kimi-cli
+# 需要安装：pip install kimi-cli
+# Kimi CLI uses `kimi --print --output-format stream-json` under the hood.
+# Kimi CLI 底层使用 `kimi --print --output-format stream-json` 命令。
+#
+# Authentication / 认证方式:
+#   - Kimi account login (kimi login) / Kimi 账号登录
+#   - MOONSHOT_API_KEY env var / 环境变量
+
+# [[projects]]
+# name = "my-kimi-project"
+#
+# [projects.agent]
+# type = "kimi"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/project"
+# mode = "default"  # "default" | "yolo" | "plan" | "quiet"
+# cmd = "kimi"      # CLI binary name (default: "kimi") / CLI 二进制名称（默认 "kimi"）
+# timeout_mins = 30  # 每次对话超时时间（分钟），0 表示不限制
+#
+# Mode options / 模式说明:
+# - "default": Standard print mode / 标准打印模式
+# - "yolo":    Auto-approve all tool calls / 自动批准所有工具调用
+# - "plan":    Read-only plan mode / 只读规划模式
+# - "quiet":   Quiet mode (final message only) / 静默模式（仅最终消息）
+#
+# Optional: specify a model / 可选：指定模型
+# model = "kimi-k2-0711-preview"
+#
+# [[projects.platforms]]
+# type = "telegram"
+#
+# [projects.platforms.options]
+# token = "your-telegram-bot-token"
+
+# =============================================================================
 # Project 8: Another example / 项目 8：更多示例 (uncomment to enable / 取消注释以启用)
 # =============================================================================
 
