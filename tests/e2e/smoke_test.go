@@ -121,7 +121,7 @@ func listRegisteredAgents() []string {
 	// This requires access to the internal registry
 	// We'll test via the factory pattern
 	agents := []string{
-		"claudecode", "codex", "cursor", "gemini",
+		"claudecode", "codex", "cursor", "droid", "gemini",
 		"iflow", "opencode", "pi", "qoder",
 	}
 	return agents
@@ -374,10 +374,10 @@ func TestSmoke_EventTypes(t *testing.T) {
 		{Type: core.EventResult, Content: "final result", Done: true},
 		{Type: core.EventError, Error: context.DeadlineExceeded, Done: true},
 		{
-			Type:       core.EventPermissionRequest,
-			ToolName:   "Bash",
-			ToolInput:  "rm -rf /",
-			RequestID:  "req-001",
+			Type:      core.EventPermissionRequest,
+			ToolName:  "Bash",
+			ToolInput: "rm -rf /",
+			RequestID: "req-001",
 		},
 	}
 
@@ -395,14 +395,14 @@ func TestSmoke_EventTypes(t *testing.T) {
 func TestSmoke_WorkspaceSwitch(t *testing.T) {
 	// Create simple workspace state maps to verify isolation concept
 	ws1 := map[string]string{
-		"id":       "workspace-1",
-		"session":  "session-A",
-		"agent":    "claudecode",
+		"id":      "workspace-1",
+		"session": "session-A",
+		"agent":   "claudecode",
 	}
 	ws2 := map[string]string{
-		"id":       "workspace-2",
-		"session":  "session-B",
-		"agent":    "gemini",
+		"id":      "workspace-2",
+		"session": "session-B",
+		"agent":   "gemini",
 	}
 
 	assert.Equal(t, "workspace-1", ws1["id"])
@@ -559,4 +559,3 @@ func TestSmoke_WebhookCallback(t *testing.T) {
 
 	t.Log("Webhook callback: PASS")
 }
-

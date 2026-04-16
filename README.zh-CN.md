@@ -129,7 +129,7 @@
 ## ✨ 为什么选择 cc-connect？
 
 ### 🤖 通用 Agent 支持
-**7 大 AI Agent** — Claude Code、Codex、Cursor Agent、Qoder CLI、Gemini CLI、OpenCode、iFlow CLI。按需选用，或同时使用全部。
+**8 大 AI Agent** — Claude Code、Codex、Cursor Agent、Droid、Qoder CLI、Gemini CLI、OpenCode、iFlow CLI。按需选用，或同时使用全部。
 
 ### 📱 平台灵活性
 **10 大聊天平台** — 飞书、钉钉、Slack、Telegram、Discord、企业微信、LINE、QQ、QQ 官方机器人，以及 **微信个人号（ilink）**。其中 **个人微信目前仅在 Beta / 预发布版本中提供**，需安装 `npm install -g cc-connect@beta` 或从 [GitHub Releases 预发布](https://github.com/chenhg5/cc-connect/releases) 下载带 beta 标签的包；**稳定版** npm 包**尚未**内置 `weixin` 平台。大部分平台**无需公网 IP**。
@@ -252,6 +252,7 @@ cc-connect update --pre     # Beta 版（含 pre-release）
 | Agent | Claude Code | ✅ 已支持 |
 | Agent | Codex (OpenAI) | ✅ 已支持 |
 | Agent | Cursor Agent | ✅ 已支持 |
+| Agent | Droid | ✅ 已支持 |
 | Agent | Gemini CLI (Google) | ✅ 已支持 |
 | Agent | Qoder CLI | ✅ 已支持 |
 | Agent | OpenCode (Crush) | ✅ 已支持 |
