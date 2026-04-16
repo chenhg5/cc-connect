@@ -172,10 +172,10 @@ func (m *systemdManager) buildUnit(cfg Config) string {
 	fmt.Fprintf(&sb, "WorkingDirectory=%s\n", cfg.WorkDir)
 	sb.WriteString("Restart=on-failure\n")
 	sb.WriteString("RestartSec=10\n")
-	fmt.Fprintf(&sb, "Environment=CC_LOG_FILE=%s\n", cfg.LogFile)
-	fmt.Fprintf(&sb, "Environment=CC_LOG_MAX_SIZE=%d\n", cfg.LogMaxSize)
+	fmt.Fprintf(&sb, "Environment=\"CC_LOG_FILE=%s\"\n", cfg.LogFile)
+	fmt.Fprintf(&sb, "Environment=\"CC_LOG_MAX_SIZE=%d\"\n", cfg.LogMaxSize)
 	if cfg.EnvPATH != "" {
-		fmt.Fprintf(&sb, "Environment=PATH=%s\n", cfg.EnvPATH)
+		fmt.Fprintf(&sb, "Environment=\"PATH=%s\"\n", cfg.EnvPATH)
 	}
 	if len(cfg.EnvExtra) > 0 {
 		keys := make([]string, 0, len(cfg.EnvExtra))
@@ -184,7 +184,7 @@ func (m *systemdManager) buildUnit(cfg Config) string {
 		}
 		sort.Strings(keys)
 		for _, key := range keys {
-			fmt.Fprintf(&sb, "Environment=%s=%s\n", key, cfg.EnvExtra[key])
+			fmt.Fprintf(&sb, "Environment=\"%s=%s\"\n", key, cfg.EnvExtra[key])
 		}
 	}
 	sb.WriteString("\n[Install]\n")

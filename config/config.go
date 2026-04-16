@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -512,7 +513,12 @@ func resolveEnvPlaceholders(s string) string {
 		if len(parts) != 2 {
 			return match
 		}
-		return os.Getenv(parts[1])
+		val, ok := os.LookupEnv(parts[1])
+		if !ok {
+			slog.Warn("config: env var placeholder references unset variable",
+				"var", parts[1], "placeholder", match)
+		}
+		return val
 	})
 }
 

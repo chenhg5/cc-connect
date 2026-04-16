@@ -24,14 +24,19 @@ func TestWrapTablesInCodeBlocks(t *testing.T) {
 			want: "```\n| a | b |\n| 1 | 2 |\n```",
 		},
 		{
-			name: "table at end of content",
-			in:   "text\n| x | y |\n| 1 | 2 |",
-			want: "text\n```\n| x | y |\n| 1 | 2 |\n```",
+			name: "table at end of content with separator",
+			in:   "text\n| x | y |\n| --- | --- |\n| 1 | 2 |",
+			want: "text\n```\n| x | y |\n| --- | --- |\n| 1 | 2 |\n```",
 		},
 		{
-			name: "multiple tables",
-			in:   "| a | b |\n| 1 | 2 |\n\ntext\n| c | d |\n| 3 | 4 |",
-			want: "```\n| a | b |\n| 1 | 2 |\n```\n\ntext\n```\n| c | d |\n| 3 | 4 |\n```",
+			name: "pipe rows without separator not wrapped",
+			in:   "text\n| x | y |\n| 1 | 2 |",
+			want: "text\n| x | y |\n| 1 | 2 |",
+		},
+		{
+			name: "multiple tables with separators",
+			in:   "| a | b |\n| - | - |\n| 1 | 2 |\n\ntext\n| c | d |\n| --- | --- |\n| 3 | 4 |",
+			want: "```\n| a | b |\n| - | - |\n| 1 | 2 |\n```\n\ntext\n```\n| c | d |\n| --- | --- |\n| 3 | 4 |\n```",
 		},
 		{
 			name: "pipe in regular text not treated as table",
@@ -40,8 +45,13 @@ func TestWrapTablesInCodeBlocks(t *testing.T) {
 		},
 		{
 			name: "table with code block after",
-			in:   "| a | b |\n| 1 | 2 |\n```go\nfmt.Println()\n```",
-			want: "```\n| a | b |\n| 1 | 2 |\n```\n```go\nfmt.Println()\n```",
+			in:   "| a | b |\n| - | - |\n| 1 | 2 |\n```go\nfmt.Println()\n```",
+			want: "```\n| a | b |\n| - | - |\n| 1 | 2 |\n```\n```go\nfmt.Println()\n```",
+		},
+		{
+			name: "aligned separator with colons",
+			in:   "| left | center | right |\n| :--- | :---: | ---: |\n| a | b | c |",
+			want: "```\n| left | center | right |\n| :--- | :---: | ---: |\n| a | b | c |\n```",
 		},
 	}
 

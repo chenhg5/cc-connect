@@ -3459,12 +3459,13 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 	initWorkspace := func(bindingKey, target string, successKey MsgKey) bool {
 		// Support local directory paths (absolute or relative to baseDir).
 		if looksLikeLocalDir(target) {
-			dirPath := target
-			if !filepath.IsAbs(dirPath) {
-				dirPath = filepath.Join(e.baseDir, dirPath)
+			dirPath, err := resolveLocalDirPath(target, e.baseDir)
+			if err != nil {
+				e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsInitDirNotFound, target))
+				return false
 			}
-			info, err := os.Stat(dirPath)
-			if err != nil || !info.IsDir() {
+			info, statErr := os.Stat(dirPath)
+			if statErr != nil || !info.IsDir() {
 				e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsInitDirNotFound, target))
 				return false
 			}
@@ -10128,7 +10129,8 @@ func (e *Engine) buildSenderPrompt(content, userID, userName, platform, sessionK
 	}
 	chatID := extractChannelID(sessionKey)
 	if userName != "" {
-		return fmt.Sprintf("[cc-connect sender_id=%s sender_name=\"%s\" platform=%s chat_id=%s]\n%s", userID, userName, platform, chatID, content)
+		safeName := strings.NewReplacer(`"`, `'`, "\n", " ", "\r", "").Replace(userName)
+		return fmt.Sprintf("[cc-connect sender_id=%s sender_name=\"%s\" platform=%s chat_id=%s]\n%s", userID, safeName, platform, chatID, content)
 	}
 	return fmt.Sprintf("[cc-connect sender_id=%s platform=%s chat_id=%s]\n%s", userID, platform, chatID, content)
 }
@@ -10356,9 +10358,10 @@ func (e *Engine) handleWorkspaceInitFlow(p Platform, msg *Message, channelName s
 	case "awaiting_url":
 		// Accept local directory paths: bind directly without cloning.
 		if looksLikeLocalDir(content) {
-			dirPath := content
-			if !filepath.IsAbs(dirPath) {
-				dirPath = filepath.Join(e.baseDir, dirPath)
+			dirPath, resolveErr := resolveLocalDirPath(content, e.baseDir)
+			if resolveErr != nil {
+				e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsInitDirNotFound, content))
+				return true
 			}
 			info, err := os.Stat(dirPath)
 			if err != nil || !info.IsDir() {
@@ -10432,6 +10435,37 @@ func looksLikeGitURL(s string) bool {
 		strings.HasPrefix(s, "http://") ||
 		strings.HasPrefix(s, "git@") ||
 		strings.HasPrefix(s, "ssh://")
+}
+
+// resolveLocalDirPath resolves a user-provided directory path to an absolute
+// path, expanding ~/... and joining relative paths with baseDir. It rejects
+// paths that escape baseDir via ../ traversal.
+func resolveLocalDirPath(target, baseDir string) (string, error) {
+	dirPath := target
+	if strings.HasPrefix(dirPath, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("cannot resolve home directory: %w", err)
+		}
+		dirPath = filepath.Join(home, dirPath[2:])
+	} else if !filepath.IsAbs(dirPath) {
+		dirPath = filepath.Join(baseDir, dirPath)
+	}
+	cleaned := filepath.Clean(dirPath)
+	resolved, err := filepath.EvalSymlinks(cleaned)
+	if err != nil {
+		resolved = cleaned
+	}
+	if baseDir != "" && !filepath.IsAbs(target) {
+		cleanBase := filepath.Clean(baseDir)
+		if evalBase, err := filepath.EvalSymlinks(cleanBase); err == nil {
+			cleanBase = evalBase
+		}
+		if !strings.HasPrefix(resolved, cleanBase+string(filepath.Separator)) && resolved != cleanBase {
+			return "", fmt.Errorf("path escapes workspace base directory")
+		}
+	}
+	return resolved, nil
 }
 
 // looksLikeLocalDir returns true if the string looks like a local directory

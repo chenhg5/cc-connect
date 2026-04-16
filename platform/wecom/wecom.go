@@ -151,6 +151,11 @@ func New(opts map[string]any) (core.Platform, error) {
 	apiBaseURL = strings.TrimRight(strings.TrimSpace(apiBaseURL), "/")
 	if apiBaseURL == "" {
 		apiBaseURL = defaultAPIBaseURL
+	} else {
+		parsed, err := url.Parse(apiBaseURL)
+		if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
+			return nil, fmt.Errorf("wecom: invalid api_base_url %q: must be a valid http(s) URL", apiBaseURL)
+		}
 	}
 
 	transport := &http.Transport{
