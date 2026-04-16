@@ -35,6 +35,9 @@ func init() {
 //   - "bypassPermissions": auto-approve everything (alias: yolo)
 type Agent struct {
 	workDir          string
+	cliBin           string   // CLI binary name or path (default: "claude")
+	cliExtraArgs     []string // extra args parsed from cli_path (e.g. ["code", "-t", "foo"])
+	cliArgsFlag      string   // if set, claude args are passed as a single string via this flag (e.g. "-a")
 	model            string
 	reasoningEffort  string // "low" | "medium" | "high" | "max"
 	mode             string // "default" | "acceptEdits" | "plan" | "auto" | "bypassPermissions" | "dontAsk"
@@ -105,6 +108,16 @@ func New(opts map[string]any) (core.Agent, error) {
 	if workDir == "" {
 		workDir = "."
 	}
+	cliBin := "claude"
+	var cliExtraArgs []string
+	if cliPath, _ := opts["cli_path"].(string); cliPath != "" {
+		parts := strings.Fields(cliPath)
+		cliBin = parts[0]
+		if len(parts) > 1 {
+			cliExtraArgs = parts[1:]
+		}
+	}
+	cliArgsFlag, _ := opts["cli_args_flag"].(string)
 	model, _ := opts["model"].(string)
 	reasoningEffort, _ := opts["reasoning_effort"].(string)
 	mode, _ := opts["mode"].(string)
@@ -166,13 +179,16 @@ func New(opts map[string]any) (core.Agent, error) {
 	// skip the supervisor-side LookPath check and let spawn fail loudly
 	// at runtime if the target doesn't have claude installed.
 	if !spawnOpts.IsolationMode() {
-		if _, err := exec.LookPath("claude"); err != nil {
-			return nil, fmt.Errorf("claudecode: 'claude' CLI not found in PATH, please install Claude Code first")
+		if _, err := exec.LookPath(cliBin); err != nil {
+			return nil, fmt.Errorf("claudecode: %q CLI not found in PATH, please install it first", cliBin)
 		}
 	}
 
 	return &Agent{
 		workDir:          workDir,
+		cliBin:           cliBin,
+		cliExtraArgs:     cliExtraArgs,
+		cliArgsFlag:      cliArgsFlag,
 		model:            model,
 		reasoningEffort:  normalizeEffort(reasoningEffort),
 		mode:             mode,
@@ -224,7 +240,7 @@ func normalizePermissionMode(raw string) string {
 }
 
 func (a *Agent) Name() string           { return "claudecode" }
-func (a *Agent) CLIBinaryName() string  { return "claude" }
+func (a *Agent) CLIBinaryName() string  { return a.cliBin }
 func (a *Agent) CLIDisplayName() string { return "Claude" }
 
 func (a *Agent) SetWorkDir(dir string) {
@@ -383,7 +399,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	disableVerbose := a.routerURL != ""
 	a.mu.Unlock()
 
-	return newClaudeSession(ctx, a.workDir, model, effort, sessionID, a.mode, tools, disTools, extraEnv, platformPrompt, disableVerbose, a.spawnOpts, maxTok)
+	return newClaudeSession(ctx, a.workDir, a.cliBin, a.cliExtraArgs, a.cliArgsFlag, model, effort, sessionID, a.mode, tools, disTools, extraEnv, platformPrompt, disableVerbose, a.spawnOpts, maxTok)
 }
 
 func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {

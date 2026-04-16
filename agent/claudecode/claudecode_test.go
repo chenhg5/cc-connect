@@ -260,9 +260,14 @@ func TestAgent_Name(t *testing.T) {
 }
 
 func TestAgent_CLIBinaryName(t *testing.T) {
-	a := &Agent{}
+	a := &Agent{cliBin: "claude"}
 	if got := a.CLIBinaryName(); got != "claude" {
 		t.Errorf("CLIBinaryName() = %q, want %q", got, "claude")
+	}
+
+	a2 := &Agent{cliBin: "my-cli"}
+	if got := a2.CLIBinaryName(); got != "my-cli" {
+		t.Errorf("CLIBinaryName() = %q, want %q", got, "my-cli")
 	}
 }
 
