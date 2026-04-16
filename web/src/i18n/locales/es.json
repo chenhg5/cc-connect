@@ -230,6 +230,7 @@
     "callbackAesKey": "Clave AES de callback",
     "callbackAesKeyHint": "43 caracteres",
     "callbackPath": "Ruta de callback",
+    "apiBaseUrl": "URL base de API",
     "port": "Puerto",
     "wsUrl": "URL de WebSocket",
     "appId": "App ID",

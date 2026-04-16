@@ -110,6 +110,28 @@ func TestSendAudioRejectsNilReplyContext(t *testing.T) {
 	}
 }
 
+func TestGetConfig_RejectsNonZeroErrcode(t *testing.T) {
+	raw := `{"ret":0,"errcode":40001,"errmsg":"invalid token","typing_ticket":""}`
+	var out getConfigResp
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Errcode != 40001 {
+		t.Fatalf("expected errcode 40001, got %d", out.Errcode)
+	}
+}
+
+func TestGetConfig_RejectsNonZeroRet(t *testing.T) {
+	raw := `{"ret":-1,"errcode":0,"errmsg":"internal error","typing_ticket":"tk"}`
+	var out getConfigResp
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Ret != -1 {
+		t.Fatalf("expected ret -1, got %d", out.Ret)
+	}
+}
+
 func containsStr(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsStrHelper(s, substr))
 }
