@@ -56,32 +56,88 @@ func MarkdownToSimpleHTML(md string) string {
 		inBlockquote = false
 	}
 
-	// flushTable renders buffered table rows as readable text.
+	// flushTable renders buffered table rows inside a <pre> block with aligned columns.
 	flushTable := func() {
 		if len(tblLines) == 0 {
 			return
 		}
-		for j, tl := range tblLines {
-			if j > 0 {
-				b.WriteByte('\n')
-			}
+
+		// Parse all rows into cells, skipping separator rows.
+		type row struct {
+			cells []string
+			isSep bool
+		}
+		var rows []row
+		for _, tl := range tblLines {
 			tl = strings.TrimSpace(tl)
 			if reTableSep.MatchString(tl) {
-				b.WriteString("——————————")
-			} else {
-				tlTrim := strings.TrimSpace(tl)
-				inner := tlTrim
-				if strings.HasPrefix(tlTrim, "|") && strings.HasSuffix(tlTrim, "|") && len(tlTrim) >= 2 {
-					inner = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(tlTrim, "|"), "|"))
-				}
-				cells := strings.Split(inner, "|")
-				for k := range cells {
-					cells[k] = strings.TrimSpace(cells[k])
-				}
-				row := strings.Join(cells, " | ")
-				b.WriteString(convertInlineHTML(row))
+				rows = append(rows, row{isSep: true})
+				continue
+			}
+			inner := tl
+			if strings.HasPrefix(tl, "|") && strings.HasSuffix(tl, "|") && len(tl) >= 2 {
+				inner = strings.TrimSpace(tl[1 : len(tl)-1])
+			}
+			cells := strings.Split(inner, "|")
+			for k := range cells {
+				cells[k] = strings.TrimSpace(cells[k])
+			}
+			rows = append(rows, row{cells: cells})
+		}
+
+		// Compute max width per column.
+		numCols := 0
+		for _, r := range rows {
+			if !r.isSep && len(r.cells) > numCols {
+				numCols = len(r.cells)
 			}
 		}
+		colWidths := make([]int, numCols)
+		for _, r := range rows {
+			if r.isSep {
+				continue
+			}
+			for k, c := range r.cells {
+				if k < numCols && len(c) > colWidths[k] {
+					colWidths[k] = len(c)
+				}
+			}
+		}
+
+		// Render inside <pre>.
+		b.WriteString("<pre>")
+		first := true
+		for _, r := range rows {
+			if !first {
+				b.WriteByte('\n')
+			}
+			first = false
+			if r.isSep {
+				// Draw separator line matching column widths.
+				for k, w := range colWidths {
+					if k > 0 {
+						b.WriteString("-+-")
+					}
+					b.WriteString(strings.Repeat("-", w))
+				}
+			} else {
+				for k := 0; k < numCols; k++ {
+					if k > 0 {
+						b.WriteString(" | ")
+					}
+					cell := ""
+					if k < len(r.cells) {
+						cell = r.cells[k]
+					}
+					b.WriteString(escapeHTML(cell))
+					// Pad to column width.
+					if pad := colWidths[k] - len(cell); pad > 0 {
+						b.WriteString(strings.Repeat(" ", pad))
+					}
+				}
+			}
+		}
+		b.WriteString("</pre>")
 		tblLines = tblLines[:0]
 		inTable = false
 	}
