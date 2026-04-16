@@ -175,11 +175,12 @@ func (s *resultAgentSession) Close() error                                      
 
 type stubLifecyclePlatform struct {
 	stubPlatformEngine
-	handler         PlatformLifecycleHandler
-	registerCalls   int
-	cardNavSetCalls int
-	startCalls      int
-	stopCalls       int
+	handler            PlatformLifecycleHandler
+	registerCalls      int
+	registeredCommands []BotCommandInfo
+	cardNavSetCalls    int
+	startCalls         int
+	stopCalls          int
 }
 
 func (p *stubLifecyclePlatform) Start(MessageHandler) error {
@@ -196,8 +197,9 @@ func (p *stubLifecyclePlatform) SetLifecycleHandler(h PlatformLifecycleHandler) 
 	p.handler = h
 }
 
-func (p *stubLifecyclePlatform) RegisterCommands([]BotCommandInfo) error {
+func (p *stubLifecyclePlatform) RegisterCommands(commands []BotCommandInfo) error {
 	p.registerCalls++
+	p.registeredCommands = append([]BotCommandInfo(nil), commands...)
 	return nil
 }
 
@@ -4104,6 +4106,59 @@ func TestCmdSkills_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	}
 	if strings.Contains(p.sent[0], "[← Back]") {
 		t.Fatalf("skills text = %q, should not be card fallback text", p.sent[0])
+	}
+}
+
+func TestMenuCommandsForPlatform_TelegramOmitsAllSkillsWhenMenuWouldOverflow(t *testing.T) {
+	e := NewEngine("test", &stubAgent{}, nil, "", LangEnglish)
+	temp := t.TempDir()
+	for i := 0; i < 80; i++ {
+		name := fmt.Sprintf("skill-%02d", i)
+		skillDir := filepath.Join(temp, name)
+		if err := os.MkdirAll(skillDir, 0o755); err != nil {
+			t.Fatalf("mkdir skill dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\ndescription: Demo skill\n---\nDo demo"), 0o644); err != nil {
+			t.Fatalf("write skill file: %v", err)
+		}
+	}
+	e.skills.SetDirs([]string{temp})
+
+	commands, skillsOmitted := e.menuCommandsForPlatform("telegram")
+
+	if !skillsOmitted {
+		t.Fatalf("expected Telegram menu planner to omit skill commands when command menu overflows")
+	}
+	for _, cmd := range commands {
+		if cmd.IsSkill {
+			t.Fatalf("menu commands should omit skills when overflowed, got %+v", cmd)
+		}
+	}
+}
+
+func TestCmdSkills_TelegramShowsManualInvocationHintWhenSkillsAreOmittedFromMenu(t *testing.T) {
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	temp := t.TempDir()
+	for i := 0; i < 80; i++ {
+		name := fmt.Sprintf("skill-%02d", i)
+		skillDir := filepath.Join(temp, name)
+		if err := os.MkdirAll(skillDir, 0o755); err != nil {
+			t.Fatalf("mkdir skill dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\ndescription: Demo skill\n---\nDo demo"), 0o644); err != nil {
+			t.Fatalf("write skill file: %v", err)
+		}
+	}
+	e.skills.SetDirs([]string{temp})
+
+	e.cmdSkills(p, &Message{SessionKey: "telegram:user1", ReplyCtx: "ctx"})
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "command menu is full") {
+		t.Fatalf("skills text = %q, want Telegram overflow hint", p.sent[0])
 	}
 }
 

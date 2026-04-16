@@ -353,9 +353,10 @@ const (
 	MsgCommandExecError   MsgKey = "command_exec_error"
 	MsgCommandExecSuccess MsgKey = "command_exec_success"
 
-	MsgSkillsTitle MsgKey = "skills_title"
-	MsgSkillsEmpty MsgKey = "skills_empty"
-	MsgSkillsHint  MsgKey = "skills_hint"
+	MsgSkillsTitle            MsgKey = "skills_title"
+	MsgSkillsEmpty            MsgKey = "skills_empty"
+	MsgSkillsHint             MsgKey = "skills_hint"
+	MsgSkillsTelegramMenuHint MsgKey = "skills_telegram_menu_hint"
 
 	MsgConfigTitle       MsgKey = "config_title"
 	MsgConfigHint        MsgKey = "config_hint"
@@ -392,10 +393,10 @@ const (
 	MsgAliasNotFound   MsgKey = "alias_not_found"
 	MsgAliasUsage      MsgKey = "alias_usage"
 
-	MsgNewSessionCreated     MsgKey = "new_session_created"
-	MsgNewSessionCreatedName MsgKey = "new_session_created_name"
-	MsgSessionAutoResetIdle     MsgKey = "session_auto_reset_idle"
-	MsgSessionClosingGraceful   MsgKey = "session_closing_graceful"
+	MsgNewSessionCreated      MsgKey = "new_session_created"
+	MsgNewSessionCreatedName  MsgKey = "new_session_created_name"
+	MsgSessionAutoResetIdle   MsgKey = "session_auto_reset_idle"
+	MsgSessionClosingGraceful MsgKey = "session_closing_graceful"
 
 	MsgDeleteUsage              MsgKey = "delete_usage"
 	MsgDeleteSuccess            MsgKey = "delete_success"
@@ -492,8 +493,8 @@ const (
 	MsgBuiltinCmdDir       MsgKey = "dir"
 	MsgBuiltinCmdDiff      MsgKey = "diff"
 
-	MsgDiffEmpty           MsgKey = "diff_empty"
-	MsgDiffNoDiff2HTML     MsgKey = "diff_no_diff2html"
+	MsgDiffEmpty       MsgKey = "diff_empty"
+	MsgDiffNoDiff2HTML MsgKey = "diff_no_diff2html"
 
 	MsgDirChanged          MsgKey = "dir_changed"
 	MsgDirCurrent          MsgKey = "dir_current"
@@ -2445,6 +2446,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "用法：/<skill名稱> [參數...] 來調用 Skill。",
 		LangJapanese:           "使い方：/<スキル名> [引数...] でスキルを実行します。",
 		LangSpanish:            "Uso: /<nombre-skill> [args...] para invocar un skill.",
+	},
+	MsgSkillsTelegramMenuHint: {
+		LangEnglish:            "Telegram's command menu is full, so skill commands are not listed there. You can still invoke them by typing /<skill-name> manually.",
+		LangChinese:            "Telegram 的命令菜单已满，因此 Skill 不会显示在那里。你仍然可以手动输入 /<skill名称> 来调用它们。",
+		LangTraditionalChinese: "Telegram 的命令選單已滿，因此 Skill 不會顯示在那裡。你仍然可以手動輸入 /<skill名稱> 來調用它們。",
+		LangJapanese:           "Telegram のコマンドメニューがいっぱいのため、スキルコマンドはそこに表示されません。手動で /<スキル名> と入力すれば実行できます。",
+		LangSpanish:            "El menú de comandos de Telegram está lleno, así que los skills no aparecen allí. Aun así puedes invocarlos escribiendo /<nombre-skill> manualmente.",
 	},
 
 	MsgConfigTitle: {
