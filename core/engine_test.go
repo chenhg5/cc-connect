@@ -493,6 +493,32 @@ func (a *namedStubModelModeAgent) Name() string {
 	return a.name
 }
 
+type namedStubWorkspaceOptionAgent struct {
+	namedStubModelModeAgent
+	opts      map[string]any
+	runAsUser string
+	runAsEnv  []string
+}
+
+func (a *namedStubWorkspaceOptionAgent) WorkspaceAgentOptions() map[string]any {
+	out := make(map[string]any, len(a.opts))
+	for k, v := range a.opts {
+		out[k] = v
+	}
+	return out
+}
+
+func (a *namedStubWorkspaceOptionAgent) GetRunAsUser() string { return a.runAsUser }
+
+func (a *namedStubWorkspaceOptionAgent) GetRunAsEnv() []string {
+	if len(a.runAsEnv) == 0 {
+		return nil
+	}
+	out := make([]string, len(a.runAsEnv))
+	copy(out, a.runAsEnv)
+	return out
+}
+
 type stubWorkDirAgent struct {
 	stubAgent
 	workDir string
@@ -3456,6 +3482,85 @@ func TestGetOrCreateWorkspaceAgent_InheritsActiveProvider(t *testing.T) {
 	}
 	if got := wsAgent.GetActiveProvider(); got == nil || got.Name != "azure" {
 		t.Fatalf("workspace active provider = %#v, want azure", got)
+	}
+}
+
+func TestGetOrCreateWorkspaceAgent_InheritsSnapshotOptions(t *testing.T) {
+	agentName := "test-workspace-option-snapshot"
+	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) {
+		snapshot := make(map[string]any, len(opts))
+		for k, v := range opts {
+			snapshot[k] = v
+		}
+		return &namedStubWorkspaceOptionAgent{
+			namedStubModelModeAgent: namedStubModelModeAgent{
+				name: agentName,
+				stubModelModeAgent: stubModelModeAgent{
+					model:           "gpt-5.4",
+					mode:            "yolo",
+					reasoningEffort: "high",
+				},
+			},
+			opts: snapshot,
+		}, nil
+	})
+
+	globalAgent := &namedStubWorkspaceOptionAgent{
+		namedStubModelModeAgent: namedStubModelModeAgent{
+			name: agentName,
+			stubModelModeAgent: stubModelModeAgent{
+				model:           "gpt-5.4",
+				mode:            "yolo",
+				reasoningEffort: "high",
+			},
+		},
+		opts: map[string]any{
+			"backend":          "app_server",
+			"app_server_url":   "ws://127.0.0.1:3846",
+			"codex_home":       "/tmp/codex-home",
+			"reasoning_effort": "high",
+			"mode":             "yolo",
+			"model":            "gpt-5.4",
+			"run_as_user":      "workspace-snapshot-user",
+			"run_as_env":       []string{"SNAPSHOT_ONLY"},
+		},
+		runAsUser: "fallback-user",
+		runAsEnv:  []string{"FALLBACK_ONLY"},
+	}
+	e := NewEngine("test", globalAgent, []Platform{&stubPlatformEngine{n: "plain"}}, "", LangEnglish)
+	e.SetMultiWorkspace(t.TempDir(), filepath.Join(t.TempDir(), "bindings.json"))
+
+	workspace := normalizeWorkspacePath(t.TempDir())
+	wsAgentRaw, _, err := e.getOrCreateWorkspaceAgent(workspace)
+	if err != nil {
+		t.Fatalf("getOrCreateWorkspaceAgent returned error: %v", err)
+	}
+
+	wsAgent, ok := wsAgentRaw.(*namedStubWorkspaceOptionAgent)
+	if !ok {
+		t.Fatalf("workspace agent type = %T, want *namedStubWorkspaceOptionAgent", wsAgentRaw)
+	}
+	if got := wsAgent.opts["backend"]; got != "app_server" {
+		t.Fatalf("workspace backend = %#v, want app_server", got)
+	}
+	if got := wsAgent.opts["app_server_url"]; got != "ws://127.0.0.1:3846" {
+		t.Fatalf("workspace app_server_url = %#v, want ws://127.0.0.1:3846", got)
+	}
+	if got := wsAgent.opts["codex_home"]; got != "/tmp/codex-home" {
+		t.Fatalf("workspace codex_home = %#v, want /tmp/codex-home", got)
+	}
+	if got := wsAgent.opts["reasoning_effort"]; got != "high" {
+		t.Fatalf("workspace reasoning_effort = %#v, want high", got)
+	}
+	if got := wsAgent.opts["work_dir"]; got != workspace {
+		t.Fatalf("workspace work_dir = %#v, want %q", got, workspace)
+	}
+	if got := wsAgent.opts["run_as_user"]; got != "workspace-snapshot-user" {
+		t.Fatalf("workspace run_as_user = %#v, want snapshot value", got)
+	}
+	gotRunAsEnv, _ := wsAgent.opts["run_as_env"].([]string)
+	if len(gotRunAsEnv) != 1 || gotRunAsEnv[0] != "SNAPSHOT_ONLY" {
+		t.Fatalf("workspace run_as_env = %#v, want snapshot value", wsAgent.opts["run_as_env"])
 	}
 }
 

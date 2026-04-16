@@ -433,6 +433,15 @@ type ModeSwitcher interface {
 	PermissionModes() []PermissionModeInfo
 }
 
+// WorkspaceAgentOptionSnapshotter is an optional interface for agents that can
+// export reusable constructor options needed to recreate an equivalent agent in
+// a different workspace. Snapshot values should omit work_dir; the caller is
+// responsible for setting the target workspace explicitly. Provider wiring and
+// run_as propagation may still be handled separately by the engine.
+type WorkspaceAgentOptionSnapshotter interface {
+	WorkspaceAgentOptions() map[string]any
+}
+
 // LiveModeSwitcher is an optional interface for running agent sessions that can
 // apply a mode change immediately without restarting the process.
 type LiveModeSwitcher interface {

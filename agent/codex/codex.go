@@ -373,6 +373,29 @@ func (a *Agent) GetMode() string {
 	return a.mode
 }
 
+func (a *Agent) WorkspaceAgentOptions() map[string]any {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	opts := map[string]any{
+		"mode":    a.mode,
+		"backend": a.backend,
+	}
+	if a.model != "" {
+		opts["model"] = a.model
+	}
+	if a.reasoningEffort != "" {
+		opts["reasoning_effort"] = a.reasoningEffort
+	}
+	if a.appServerURL != "" {
+		opts["app_server_url"] = a.appServerURL
+	}
+	if a.codexHome != "" {
+		opts["codex_home"] = a.codexHome
+	}
+	return opts
+}
+
 // ── SkillProvider implementation ──────────────────────────────
 
 func (a *Agent) SkillDirs() []string {

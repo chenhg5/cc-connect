@@ -2125,18 +2125,27 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 
 	// Create a new agent instance with this workspace's work_dir
 	opts := make(map[string]any)
+	if snapshotter, ok := e.agent.(WorkspaceAgentOptionSnapshotter); ok {
+		for k, v := range snapshotter.WorkspaceAgentOptions() {
+			opts[k] = v
+		}
+	}
 	opts["work_dir"] = workspace
 
 	// Copy model from original agent if possible
-	if ma, ok := e.agent.(interface{ GetModel() string }); ok {
-		if m := ma.GetModel(); m != "" {
-			opts["model"] = m
+	if _, ok := opts["model"]; !ok {
+		if ma, ok := e.agent.(interface{ GetModel() string }); ok {
+			if m := ma.GetModel(); m != "" {
+				opts["model"] = m
+			}
 		}
 	}
 	// Copy permission mode
-	if ma, ok := e.agent.(interface{ GetMode() string }); ok {
-		if m := ma.GetMode(); m != "" {
-			opts["mode"] = m
+	if _, ok := opts["mode"]; !ok {
+		if ma, ok := e.agent.(interface{ GetMode() string }); ok {
+			if m := ma.GetMode(); m != "" {
+				opts["mode"] = m
+			}
 		}
 	}
 	// Copy run_as_user (and run_as_env) for OS-level isolation. Without
@@ -2145,14 +2154,18 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 	// above, not inherited from the project-level opts that main.go
 	// already decorated. See cc-connect#496 and the cc-connect/core/runas.go
 	// preamble for why run_as_user has to survive this copy.
-	if ma, ok := e.agent.(interface{ GetRunAsUser() string }); ok {
-		if u := ma.GetRunAsUser(); u != "" {
-			opts["run_as_user"] = u
+	if _, ok := opts["run_as_user"]; !ok {
+		if ma, ok := e.agent.(interface{ GetRunAsUser() string }); ok {
+			if u := ma.GetRunAsUser(); u != "" {
+				opts["run_as_user"] = u
+			}
 		}
 	}
-	if ma, ok := e.agent.(interface{ GetRunAsEnv() []string }); ok {
-		if env := ma.GetRunAsEnv(); len(env) > 0 {
-			opts["run_as_env"] = env
+	if _, ok := opts["run_as_env"]; !ok {
+		if ma, ok := e.agent.(interface{ GetRunAsEnv() []string }); ok {
+			if env := ma.GetRunAsEnv(); len(env) > 0 {
+				opts["run_as_env"] = env
+			}
 		}
 	}
 
