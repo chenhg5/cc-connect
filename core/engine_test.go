@@ -274,12 +274,16 @@ func (p *stubInlineButtonPlatform) SendWithButtons(_ context.Context, _ any, con
 
 type stubCardPlatform struct {
 	stubPlatformEngine
-	repliedCards []*Card
-	sentCards    []*Card
-	cardErr      error
+	mu             sync.Mutex
+	repliedCards   []*Card
+	sentCards      []*Card
+	refreshedCards []*Card
+	cardErr        error
 }
 
 func (p *stubCardPlatform) ReplyCard(_ context.Context, _ any, card *Card) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.cardErr != nil {
 		return p.cardErr
 	}
@@ -288,11 +292,35 @@ func (p *stubCardPlatform) ReplyCard(_ context.Context, _ any, card *Card) error
 }
 
 func (p *stubCardPlatform) SendCard(_ context.Context, _ any, card *Card) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.cardErr != nil {
 		return p.cardErr
 	}
 	p.sentCards = append(p.sentCards, card)
 	return nil
+}
+
+func (p *stubCardPlatform) ReconstructReplyCtx(sessionKey string) (any, error) {
+	return "reconstructed-ctx:" + sessionKey, nil
+}
+
+func (p *stubCardPlatform) RefreshCard(_ context.Context, _ string, card *Card) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.cardErr != nil {
+		return p.cardErr
+	}
+	p.refreshedCards = append(p.refreshedCards, card)
+	return nil
+}
+
+func (p *stubCardPlatform) getRefreshedCards() []*Card {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	dst := make([]*Card, len(p.refreshedCards))
+	copy(dst, p.refreshedCards)
+	return dst
 }
 
 type stubCompactProgressPlatform struct {
@@ -511,6 +539,21 @@ func (a *stubDeleteAgent) DeleteSession(_ context.Context, sessionID string) err
 	}
 	a.deleted = append(a.deleted, sessionID)
 	return nil
+}
+
+// waitDeleteModePhase polls the delete-mode state for the given session key
+// until it reaches the target phase or the timeout expires.
+func waitDeleteModePhase(t *testing.T, e *Engine, sessionKey, targetPhase string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		dm := e.getDeleteModeState(sessionKey)
+		if dm != nil && dm.phase == targetPhase {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for delete mode phase %q", targetPhase)
 }
 
 type stubProviderAgent struct {
@@ -2615,13 +2658,21 @@ func TestDeleteMode_ConfirmAndSubmitDeletesSelectedSessions(t *testing.T) {
 
 	resultCard := e.handleCardNav("act:/delete-mode submit", msg.SessionKey)
 	if resultCard == nil {
-		t.Fatal("expected result card after submit")
+		t.Fatal("expected deleting card after submit")
 	}
+	// Submit is now async; the returned card is a "deleting" indicator.
+	// Wait for the background goroutine to complete and push the result card.
+	waitDeleteModePhase(t, e, msg.SessionKey, "result")
 	if got, want := strings.Join(agent.deleted, ","), "session-1,session-3"; got != want {
 		t.Fatalf("deleted = %q, want %q", got, want)
 	}
-	if !strings.Contains(resultCard.RenderText(), "Session deleted: One") {
-		t.Fatalf("result text = %q, want delete result", resultCard.RenderText())
+	refreshed := p.getRefreshedCards()
+	if len(refreshed) == 0 {
+		t.Fatal("expected refreshed result card via RefreshCard")
+	}
+	pushedCard := refreshed[len(refreshed)-1]
+	if !strings.Contains(pushedCard.RenderText(), "Session deleted: One") {
+		t.Fatalf("result text = %q, want delete result", pushedCard.RenderText())
 	}
 }
 
@@ -2646,9 +2697,16 @@ func TestDeleteMode_SubmitReportsMissingSelectedSessions(t *testing.T) {
 
 	resultCard := e.handleCardNav("act:/delete-mode submit", msg.SessionKey)
 	if resultCard == nil {
-		t.Fatal("expected result card after submit")
+		t.Fatal("expected deleting card after submit")
 	}
-	resultText := resultCard.RenderText()
+	// Wait for async deletion to complete.
+	waitDeleteModePhase(t, e, msg.SessionKey, "result")
+	refreshed := p.getRefreshedCards()
+	if len(refreshed) == 0 {
+		t.Fatal("expected refreshed result card via RefreshCard")
+	}
+	pushedCard := refreshed[len(refreshed)-1]
+	resultText := pushedCard.RenderText()
 	if !strings.Contains(resultText, "Session deleted: One") {
 		t.Fatalf("result text = %q, want deleted session line", resultText)
 	}
@@ -2741,13 +2799,19 @@ func TestDeleteMode_SubmitBlocksActiveSession(t *testing.T) {
 	_ = e.handleCardNav("act:/delete-mode toggle session-1", msg.SessionKey)
 	resultCard := e.handleCardNav("act:/delete-mode submit", msg.SessionKey)
 	if resultCard == nil {
-		t.Fatal("expected result card")
+		t.Fatal("expected deleting card")
 	}
+	// Wait for async deletion to complete.
+	waitDeleteModePhase(t, e, msg.SessionKey, "result")
 	if len(agent.deleted) != 0 {
 		t.Fatalf("deleted = %v, want none", agent.deleted)
 	}
-	if !strings.Contains(resultCard.RenderText(), "Cannot delete the currently active session") {
-		t.Fatalf("result text = %q, want active-session warning", resultCard.RenderText())
+	if len(p.getRefreshedCards()) == 0 {
+		t.Fatal("expected refreshed result card via RefreshCard")
+	}
+	pushedCard := p.getRefreshedCards()[len(p.getRefreshedCards())-1]
+	if !strings.Contains(pushedCard.RenderText(), "Cannot delete the currently active session") {
+		t.Fatalf("result text = %q, want active-session warning", pushedCard.RenderText())
 	}
 }
 
@@ -2811,13 +2875,20 @@ func TestDeleteMode_FormSubmitShowsConfirmThenDeletes(t *testing.T) {
 
 	resultCard := e.handleCardNav("act:/delete-mode submit", msg.SessionKey)
 	if resultCard == nil {
-		t.Fatal("expected result card after submit")
+		t.Fatal("expected deleting card after submit")
 	}
+	// Wait for async deletion to complete.
+	waitDeleteModePhase(t, e, msg.SessionKey, "result")
 	if got, want := strings.Join(agent.deleted, ","), "session-1,session-3"; got != want {
 		t.Fatalf("deleted = %q, want %q", got, want)
 	}
-	if !strings.Contains(resultCard.RenderText(), "Session deleted: One") {
-		t.Fatalf("result text = %q, want delete result", resultCard.RenderText())
+	refreshed := p.getRefreshedCards()
+	if len(refreshed) == 0 {
+		t.Fatal("expected pushed result card via RefreshCard")
+	}
+	pushedCard := refreshed[len(refreshed)-1]
+	if !strings.Contains(pushedCard.RenderText(), "Session deleted: One") {
+		t.Fatalf("result text = %q, want delete result", pushedCard.RenderText())
 	}
 }
 
@@ -6026,33 +6097,29 @@ func TestDrainOrphanedQueue_UsesWorkspaceSessionManager(t *testing.T) {
 
 // ── executeCardAction interactiveKey tests ───────────────────
 
-func TestExecuteCardAction_ModelCleansUpWithInteractiveKey(t *testing.T) {
-	p := &stubPlatformEngine{n: "plain"}
+func TestHandleCardNav_ModelSwitchesAndRefreshesCard(t *testing.T) {
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
 	agent := &stubModelModeAgent{model: "old"}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 
 	sessionKey := "feishu:channel1:user1"
-
-	e.interactiveMu.Lock()
-	e.interactiveStates[sessionKey] = &interactiveState{}
-	e.interactiveMu.Unlock()
-
-	e.executeCardAction("/model", "new-model", sessionKey)
-
-	if agent.model != "new-model" {
-		t.Errorf("model = %q, want new-model", agent.model)
+	card := e.handleCardNav("act:/model new-model", sessionKey)
+	if card == nil {
+		t.Fatal("expected immediate result card")
 	}
-
-	e.interactiveMu.Lock()
-	_, exists := e.interactiveStates[sessionKey]
-	e.interactiveMu.Unlock()
-	if exists {
-		t.Error("expected interactive state to be cleaned up after /model")
+	if text := card.RenderText(); !strings.Contains(text, "Model switched to `new-model`.") {
+		t.Fatalf("result card = %q", text)
+	}
+	if agent.model != "new-model" {
+		t.Fatalf("model = %q, want new-model", agent.model)
+	}
+	if refreshed := p.getRefreshedCards(); len(refreshed) != 0 {
+		t.Fatalf("unexpected async refreshed cards: %d", len(refreshed))
 	}
 }
 
-func TestExecuteCardAction_ModelUsesWorkspaceContext(t *testing.T) {
-	p := &stubPlatformEngine{n: "plain"}
+func TestHandleCardNav_ModelUsesWorkspaceContext(t *testing.T) {
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
 	globalAgent := &stubModelModeAgent{model: "global-old"}
 	e := NewEngine("test", globalAgent, []Platform{p}, "", LangEnglish)
 
@@ -6080,7 +6147,13 @@ func TestExecuteCardAction_ModelUsesWorkspaceContext(t *testing.T) {
 	wsSession := ws.sessions.GetOrCreateActive(sessionKey)
 	wsSession.SetAgentSessionID("workspace-session", "test")
 
-	e.executeCardAction("/model", "switch 1", sessionKey)
+	card := e.handleCardNav("act:/model switch 1", sessionKey)
+	if card == nil {
+		t.Fatal("expected immediate result card")
+	}
+	if text := card.RenderText(); !strings.Contains(text, "gpt-4.1") {
+		t.Fatalf("result card = %q, want switched workspace model", text)
+	}
 
 	if wsAgent.model != "gpt-4.1" {
 		t.Fatalf("workspace agent model = %q, want gpt-4.1", wsAgent.model)
@@ -6094,12 +6167,52 @@ func TestExecuteCardAction_ModelUsesWorkspaceContext(t *testing.T) {
 	if got := e.sessions.GetOrCreateActive(sessionKey).AgentSessionID; got != "global-session" {
 		t.Fatalf("global session id = %q, want untouched", got)
 	}
+	if refreshed := p.getRefreshedCards(); len(refreshed) != 0 {
+		t.Fatalf("unexpected async refreshed cards: %d", len(refreshed))
+	}
+}
 
-	e.interactiveMu.Lock()
-	_, exists := e.interactiveStates[interactiveKey]
-	e.interactiveMu.Unlock()
-	if exists {
-		t.Error("expected workspace interactive state to be cleaned up after /model")
+func TestHandleCardNav_ModelSwitchFailureRefreshesCard(t *testing.T) {
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	agent := &stubModelModeAgent{model: "old"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.modelSaveFunc = func(string) error { return errors.New("save failed") }
+
+	sessionKey := "feishu:channel1:user1"
+	card := e.handleCardNav("act:/model broken-model", sessionKey)
+	if card == nil {
+		t.Fatal("expected immediate failure card")
+	}
+	if text := card.RenderText(); !strings.Contains(text, "Failed to switch model: save model: save failed") {
+		t.Fatalf("failure card = %q", text)
+	}
+	if refreshed := p.getRefreshedCards(); len(refreshed) != 0 {
+		t.Fatalf("unexpected async refreshed cards: %d", len(refreshed))
+	}
+}
+
+func TestHandleCardNav_ModelResultBackReturnsModelCard(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubModelModeAgent{model: "gpt-5.4"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	sessionKey := "feishu:channel1:user1"
+	result := e.renderModelSwitchResultCard("gpt-5.4", nil)
+	buttons := result.CollectButtons()
+	if len(buttons) != 1 || len(buttons[0]) != 1 {
+		t.Fatalf("result buttons = %#v, want single back button", buttons)
+	}
+	if buttons[0][0].Data != "nav:/model" {
+		t.Fatalf("back button value = %q, want nav:/model", buttons[0][0].Data)
+	}
+
+	card := e.handleCardNav(buttons[0][0].Data, sessionKey)
+	if card == nil {
+		t.Fatal("expected /model card")
+	}
+	text := card.RenderText()
+	if !strings.Contains(text, "Current model: gpt-5.4") {
+		t.Fatalf("model card text = %q", text)
 	}
 }
 

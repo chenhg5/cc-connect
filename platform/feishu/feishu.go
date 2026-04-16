@@ -146,6 +146,10 @@ type Platform struct {
 	callbackPath string
 	encryptKey   string
 	eventHandler *dispatcher.EventDispatcher
+	// cardActionMessageIDs tracks the most recent card-action messageID per
+	// session key, enabling async card refreshes via the Patch API.
+	cardActionMsgMu  sync.Mutex
+	cardActionMsgIDs map[string]string // sessionKey → messageID
 }
 
 type interactivePlatform struct {
@@ -447,6 +451,14 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 
 	// nav: / act: — synchronous card update
 	if strings.HasPrefix(actionVal, "nav:") || strings.HasPrefix(actionVal, "act:") {
+		if messageID != "" {
+			p.cardActionMsgMu.Lock()
+			if p.cardActionMsgIDs == nil {
+				p.cardActionMsgIDs = make(map[string]string)
+			}
+			p.cardActionMsgIDs[sessionKey] = messageID
+			p.cardActionMsgMu.Unlock()
+		}
 		// Feishu uses native form checker for delete-mode toggle,
 		// so return a toast without calling cardNavHandler to avoid a full card refresh.
 		if strings.HasPrefix(actionVal, "act:/delete-mode toggle ") {
@@ -454,25 +466,6 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 				Toast: &callback.Toast{
 					Type:    "info",
 					Content: "已记录选择（Selection recorded）",
-				},
-			}, nil
-		}
-		if strings.HasPrefix(actionVal, "act:/model ") {
-			cmdText := strings.TrimPrefix(actionVal, "act:")
-			rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
-			go p.handler(p.dispatchPlatform(), &core.Message{
-				SessionKey: sessionKey,
-				Platform:   p.platformName,
-				UserID:     userID,
-				UserName:   p.resolveUserName(userID),
-				ChatName:   p.resolveChatName(chatID),
-				Content:    cmdText,
-				ReplyCtx:   rctx,
-			})
-			return &callback.CardActionTriggerResponse{
-				Toast: &callback.Toast{
-					Type:    "info",
-					Content: "正在切换模型（Switching model...）",
 				},
 			}, nil
 		}

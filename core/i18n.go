@@ -244,6 +244,9 @@ const (
 	MsgModelCurrent          MsgKey = "model_current"
 	MsgModelChanged          MsgKey = "model_changed"
 	MsgModelChangeFailed     MsgKey = "model_change_failed"
+	MsgModelCardSwitching    MsgKey = "model_card_switching"
+	MsgModelCardSwitched     MsgKey = "model_card_switched"
+	MsgModelCardSwitchFailed MsgKey = "model_card_switch_failed"
 	MsgModelNotSupported     MsgKey = "model_not_supported"
 	MsgReasoningCurrent      MsgKey = "reasoning_current"
 	MsgReasoningChanged      MsgKey = "reasoning_changed"
@@ -413,6 +416,8 @@ const (
 	MsgDeleteModeBackButton     MsgKey = "delete_mode_back_button"
 	MsgDeleteModeEmptySelection MsgKey = "delete_mode_empty_selection"
 	MsgDeleteModeResultTitle    MsgKey = "delete_mode_result_title"
+	MsgDeleteModeDeletingTitle  MsgKey = "delete_mode_deleting_title"
+	MsgDeleteModeDeletingBody   MsgKey = "delete_mode_deleting_body"
 	MsgDeleteModeMissingSession MsgKey = "delete_mode_missing_session"
 
 	MsgSwitchSuccess   MsgKey = "switch_success"
@@ -1827,6 +1832,27 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "❌ モデルの切り替えに失敗しました: %v",
 		LangSpanish:            "❌ Error al cambiar el modelo: %v",
 	},
+	MsgModelCardSwitching: {
+		LangEnglish:            "Switching model to `%s`...",
+		LangChinese:            "正在切换模型为 `%s`...",
+		LangTraditionalChinese: "正在切換模型為 `%s`...",
+		LangJapanese:           "モデルを `%s` に切り替えています...",
+		LangSpanish:            "Cambiando el modelo a `%s`...",
+	},
+	MsgModelCardSwitched: {
+		LangEnglish:            "Model switched to `%s`.",
+		LangChinese:            "模型已切换为 `%s`。",
+		LangTraditionalChinese: "模型已切換為 `%s`。",
+		LangJapanese:           "モデルを `%s` に切り替えました。",
+		LangSpanish:            "Modelo cambiado a `%s`.",
+	},
+	MsgModelCardSwitchFailed: {
+		LangEnglish:            "Failed to switch model: %v",
+		LangChinese:            "切换模型失败: %v",
+		LangTraditionalChinese: "切換模型失敗: %v",
+		LangJapanese:           "モデルの切り替えに失敗しました: %v",
+		LangSpanish:            "Error al cambiar el modelo: %v",
+	},
 	MsgModelNotSupported: {
 		LangEnglish:            "This agent does not support model switching.",
 		LangChinese:            "当前 Agent 不支持模型切换。",
@@ -2868,6 +2894,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "刪除結果",
 		LangJapanese:           "削除結果",
 		LangSpanish:            "Resultado de eliminación",
+	},
+	MsgDeleteModeDeletingTitle: {
+		LangEnglish:            "Deleting Sessions...",
+		LangChinese:            "正在删除会话...",
+		LangTraditionalChinese: "正在刪除會話...",
+		LangJapanese:           "セッションを削除中...",
+		LangSpanish:            "Eliminando sesiones...",
+	},
+	MsgDeleteModeDeletingBody: {
+		LangEnglish:            "Deleting %d session(s), please wait...",
+		LangChinese:            "正在删除 %d 个会话，请稍候...",
+		LangTraditionalChinese: "正在刪除 %d 個會話，請稍候...",
+		LangJapanese:           "%d 件のセッションを削除中、お待ちください...",
+		LangSpanish:            "Eliminando %d sesión(es), por favor espere...",
 	},
 	MsgDeleteModeMissingSession: {
 		LangEnglish:            "❌ Missing selected session: %s",

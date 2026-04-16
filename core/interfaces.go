@@ -186,6 +186,16 @@ type CardNavigable interface {
 	SetCardNavigationHandler(h CardNavigationHandler)
 }
 
+// CardRefresher is an optional interface for platforms that can update a
+// previously rendered card in-place after the original callback has returned.
+// This is used when async operations (e.g. delete-mode deletion) need to
+// refresh a "loading" card with the final result. Platforms that implement
+// this interface should track the message ID from card action callbacks and
+// use it to patch the card content.
+type CardRefresher interface {
+	RefreshCard(ctx context.Context, sessionKey string, card *Card) error
+}
+
 // PlatformLifecycleHandler receives readiness state transitions from async
 // recoverable platforms.
 type PlatformLifecycleHandler interface {
