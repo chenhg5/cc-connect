@@ -443,7 +443,7 @@ func TestInteractivePlatform_CardActionUsesCallbackSessionKey(t *testing.T) {
 	}
 }
 
-func TestInteractivePlatform_ModelCardActionDispatchesCommandAsync(t *testing.T) {
+func TestInteractivePlatform_ModelCardActionReturnsCardUpdate(t *testing.T) {
 	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -453,15 +453,11 @@ func TestInteractivePlatform_ModelCardActionDispatchesCommandAsync(t *testing.T)
 		t.Fatalf("platform type = %T, want *interactivePlatform", platformAny)
 	}
 
-	cardNavCalled := make(chan struct{}, 1)
+	var gotAction, gotSessionKey string
 	ip.cardNavHandler = func(action string, sessionKey string) *core.Card {
-		cardNavCalled <- struct{}{}
-		return core.NewCard().Markdown("unexpected").Build()
-	}
-
-	msgCh := make(chan *core.Message, 1)
-	ip.handler = func(_ core.Platform, msg *core.Message) {
-		msgCh <- msg
+		gotAction = action
+		gotSessionKey = sessionKey
+		return core.NewCard().Markdown("switching").Build()
 	}
 
 	resp, err := ip.onCardAction(&callback.CardActionTriggerEvent{
@@ -474,23 +470,20 @@ func TestInteractivePlatform_ModelCardActionDispatchesCommandAsync(t *testing.T)
 	if err != nil {
 		t.Fatalf("onCardAction() error = %v", err)
 	}
-	if resp == nil || resp.Toast == nil {
-		t.Fatalf("expected toast response, got %#v", resp)
+	if resp == nil || resp.Card == nil {
+		t.Fatalf("expected card response, got %#v", resp)
 	}
-
-	select {
-	case <-cardNavCalled:
-		t.Fatal("expected model card action to skip synchronous card nav")
-	default:
+	if gotAction != "act:/model switch 1" {
+		t.Fatalf("action = %q, want act:/model switch 1", gotAction)
 	}
-
-	select {
-	case msg := <-msgCh:
-		if msg.Content != "/model switch 1" {
-			t.Fatalf("message content = %q, want /model switch 1", msg.Content)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("expected model card action message")
+	if gotSessionKey == "" {
+		t.Fatal("expected non-empty session key")
+	}
+	ip.cardActionMsgMu.Lock()
+	tracked := ip.cardActionMsgIDs[gotSessionKey]
+	ip.cardActionMsgMu.Unlock()
+	if tracked != "om_test_message" {
+		t.Fatalf("tracked message id = %q, want om_test_message", tracked)
 	}
 }
 

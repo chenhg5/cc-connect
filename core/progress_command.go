@@ -109,7 +109,7 @@ func (e *Engine) cmdProgress(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgProgressEmpty))
 		return
 	}
-	if progressStyleFor(p, e.display) == progressStyleCard {
+	if progressStyleFor(p, msg.ReplyCtx, e.display) == progressStyleCard {
 		if cap, ok := p.(ProgressCardPayloadSupport); ok && cap.SupportsProgressCardPayload() {
 			payload := BuildProgressCardPayloadV2(items, false, normalizeProgressAgentLabel(e.agent.Name()), e.i18n.CurrentLang(), ProgressCardStateCompleted)
 			if payload != "" {

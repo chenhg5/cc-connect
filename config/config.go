@@ -287,7 +287,6 @@ type ProjectConfig struct {
 	Name         string             `toml:"name"`
 	Mode         string             `toml:"mode,omitempty"`     // "" or "multi-workspace"
 	BaseDir      string             `toml:"base_dir,omitempty"` // parent dir for workspaces
-	Quiet        *bool              `toml:"quiet,omitempty"`    // project-level quiet mode; overrides global setting
 	Agent        AgentConfig        `toml:"agent"`
 	Platforms    []PlatformConfig   `toml:"platforms"`
 	Heartbeat    HeartbeatConfig    `toml:"heartbeat"`
@@ -534,46 +533,6 @@ func resolveEnvPlaceholders(s string) string {
 
 // projectQuietEffective returns whether legacy quiet applies to this project: an explicit
 // per-project quiet overrides; otherwise the global root quiet applies.
-func projectQuietEffective(cfg *Config, proj *ProjectConfig) bool {
-	if proj.Quiet != nil {
-		return *proj.Quiet
-	}
-	if cfg.Quiet != nil {
-		return *cfg.Quiet
-	}
-	return false
-}
-
-// EffectiveDisplay resolves global [display] together with legacy quiet (root or per-project).
-// If quiet is in effect and thinking_messages / tool_messages were not explicitly set in [display],
-// they map to false (backward-compatible with pre-display quiet = true).
-func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (thinkingMessages, toolMessages bool, thinkingMaxLen, toolMaxLen int) {
-	thinkingMessages = true
-	toolMessages = true
-	thinkingMaxLen = 300
-	toolMaxLen = 500
-	if cfg.Display.ThinkingMessages != nil {
-		thinkingMessages = *cfg.Display.ThinkingMessages
-	}
-	if cfg.Display.ToolMessages != nil {
-		toolMessages = *cfg.Display.ToolMessages
-	}
-	if cfg.Display.ThinkingMaxLen != nil {
-		thinkingMaxLen = *cfg.Display.ThinkingMaxLen
-	}
-	if cfg.Display.ToolMaxLen != nil {
-		toolMaxLen = *cfg.Display.ToolMaxLen
-	}
-	if projectQuietEffective(cfg, proj) {
-		if cfg.Display.ThinkingMessages == nil {
-			thinkingMessages = false
-		}
-		if cfg.Display.ToolMessages == nil {
-			toolMessages = false
-		}
-	}
-	return thinkingMessages, toolMessages, thinkingMaxLen, toolMaxLen
-}
 func (c *Config) validate() error {
 	switch strings.ToLower(strings.TrimSpace(c.AttachmentSend)) {
 	case "", "on", "off":
