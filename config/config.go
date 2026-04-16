@@ -2,8 +2,11 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -80,8 +83,8 @@ var configMu sync.Mutex
 var ConfigPath string
 
 type Config struct {
-	DataDir           string                  `toml:"data_dir"` // session store directory, default ~/.cc-connect
-	AttachmentSend    string                  `toml:"attachment_send"`
+	DataDir        string `toml:"data_dir"` // session store directory, default ~/.cc-connect
+	AttachmentSend string `toml:"attachment_send"`
 	// Quiet is legacy: when true and [display] does not set thinking_messages / tool_messages,
 	// engines behave as if those flags were false. Per-project quiet overrides when set.
 	Quiet             *bool                   `toml:"quiet,omitempty"`
@@ -301,16 +304,19 @@ type ProjectConfig struct {
 	// Use this only for variables the target user cannot set in their profile.
 	RunAsEnv []string `toml:"run_as_env,omitempty"`
 	// ShowContextIndicator: nil/true = append [ctx: ~N%] to assistant replies; false = hide.
-	ShowContextIndicator *bool           `toml:"show_context_indicator,omitempty"`
-	InjectSender         *bool           `toml:"inject_sender,omitempty"`     // prepend sender identity (platform + user ID) to each message sent to the agent
-	DisabledCommands     []string        `toml:"disabled_commands,omitempty"` // commands to disable for this project (e.g. ["restart", "upgrade"])
-	AdminFrom            string          `toml:"admin_from,omitempty"`        // comma-separated user IDs allowed to run privileged commands; "*" = all allowed users
-	Users                *UsersConfig    `toml:"users,omitempty"`             // per-user role config; nil = legacy behavior
+	ShowContextIndicator *bool `toml:"show_context_indicator,omitempty"`
+	// ReplyFooter: nil/true = append a Codex-style footer; false = disable.
+	// (model/reasoning/usage/workdir, when available) to assistant replies.
+	ReplyFooter      *bool        `toml:"reply_footer,omitempty"`
+	InjectSender     *bool        `toml:"inject_sender,omitempty"`     // prepend sender identity (platform + user ID) to each message sent to the agent
+	DisabledCommands []string     `toml:"disabled_commands,omitempty"` // commands to disable for this project (e.g. ["restart", "upgrade"])
+	AdminFrom        string       `toml:"admin_from,omitempty"`        // comma-separated user IDs allowed to run privileged commands; "*" = all allowed users
+	Users            *UsersConfig `toml:"users,omitempty"`             // per-user role config; nil = legacy behavior
 	// Quiet is legacy per-project override; see Config.Quiet. When true and global [display]
 	// omits thinking_messages / tool_messages, those default to off for this project.
 	Quiet      *bool           `toml:"quiet,omitempty"`
-	Observe              *ObserveConfig  `toml:"observe,omitempty"`
-	References           ReferenceConfig `toml:"references,omitempty"`
+	Observe    *ObserveConfig  `toml:"observe,omitempty"`
+	References ReferenceConfig `toml:"references,omitempty"`
 }
 
 type AgentConfig struct {
@@ -372,6 +378,7 @@ func Load(path string) (*Config, error) {
 	if err := toml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
+	resolveEnvInConfig(cfg)
 
 	if cfg.DataDir == "" {
 		if home, err := os.UserHomeDir(); err == nil {
@@ -389,6 +396,133 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 	return cfg, nil
+}
+
+var envPlaceholderPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+func resolveEnvInConfig(cfg *Config) {
+	resolveEnvValue(reflect.ValueOf(cfg))
+}
+
+func resolveEnvValue(v reflect.Value) {
+	if !v.IsValid() {
+		return
+	}
+
+	switch v.Kind() {
+	case reflect.Pointer:
+		if !v.IsNil() {
+			resolveEnvValue(v.Elem())
+		}
+	case reflect.Struct:
+		for i := 0; i < v.NumField(); i++ {
+			resolveEnvValue(v.Field(i))
+		}
+	case reflect.String:
+		if v.CanSet() {
+			v.SetString(resolveEnvPlaceholders(v.String()))
+		}
+	case reflect.Slice, reflect.Array:
+		for i := 0; i < v.Len(); i++ {
+			elem := v.Index(i)
+			if elem.CanSet() {
+				elem.Set(resolveEnvClone(elem))
+				continue
+			}
+			resolveEnvValue(elem)
+		}
+	case reflect.Map:
+		if v.IsNil() {
+			return
+		}
+		iter := v.MapRange()
+		for iter.Next() {
+			v.SetMapIndex(iter.Key(), resolveEnvClone(iter.Value()))
+		}
+	case reflect.Interface:
+		if v.IsNil() || !v.CanSet() {
+			return
+		}
+		v.Set(resolveEnvClone(v.Elem()))
+	}
+}
+
+func resolveEnvClone(v reflect.Value) reflect.Value {
+	if !v.IsValid() {
+		return v
+	}
+
+	switch v.Kind() {
+	case reflect.String:
+		out := reflect.New(v.Type()).Elem()
+		out.SetString(resolveEnvPlaceholders(v.String()))
+		return out
+	case reflect.Pointer:
+		if v.IsNil() {
+			return reflect.Zero(v.Type())
+		}
+		out := reflect.New(v.Type().Elem())
+		out.Elem().Set(v.Elem())
+		resolveEnvValue(out.Elem())
+		return out
+	case reflect.Struct:
+		out := reflect.New(v.Type()).Elem()
+		out.Set(v)
+		resolveEnvValue(out)
+		return out
+	case reflect.Slice:
+		if v.IsNil() {
+			return reflect.Zero(v.Type())
+		}
+		out := reflect.MakeSlice(v.Type(), v.Len(), v.Len())
+		for i := 0; i < v.Len(); i++ {
+			out.Index(i).Set(resolveEnvClone(v.Index(i)))
+		}
+		return out
+	case reflect.Array:
+		out := reflect.New(v.Type()).Elem()
+		for i := 0; i < v.Len(); i++ {
+			out.Index(i).Set(resolveEnvClone(v.Index(i)))
+		}
+		return out
+	case reflect.Map:
+		if v.IsNil() {
+			return reflect.Zero(v.Type())
+		}
+		out := reflect.MakeMapWithSize(v.Type(), v.Len())
+		iter := v.MapRange()
+		for iter.Next() {
+			out.SetMapIndex(iter.Key(), resolveEnvClone(iter.Value()))
+		}
+		return out
+	case reflect.Interface:
+		if v.IsNil() {
+			return reflect.Zero(v.Type())
+		}
+		out := reflect.New(v.Type()).Elem()
+		out.Set(resolveEnvClone(v.Elem()))
+		return out
+	default:
+		return v
+	}
+}
+
+func resolveEnvPlaceholders(s string) string {
+	if !strings.Contains(s, "${") {
+		return s
+	}
+	return envPlaceholderPattern.ReplaceAllStringFunc(s, func(match string) string {
+		parts := envPlaceholderPattern.FindStringSubmatch(match)
+		if len(parts) != 2 {
+			return match
+		}
+		val, ok := os.LookupEnv(parts[1])
+		if !ok {
+			slog.Warn("config: env var placeholder references unset variable",
+				"var", parts[1], "placeholder", match)
+		}
+		return val
+	})
 }
 
 // projectQuietEffective returns whether legacy quiet applies to this project: an explicit

@@ -262,6 +262,7 @@ callback_token = "你在第三步设置的Token"
 callback_aes_key = "你在第三步获取的EncodingAESKey"
 port = "8081"
 callback_path = "/wecom/callback"
+api_base_url = "https://qyapi.weixin.qq.com"
 enable_markdown = false
 ```
 
@@ -276,6 +277,7 @@ enable_markdown = false
 | `callback_aes_key` | ✅ | 回调 EncodingAESKey（43字符） |
 | `port` | ❌ | Webhook 监听端口（默认 `8081`） |
 | `callback_path` | ❌ | Webhook 路径（默认 `/wecom/callback`） |
+| `api_base_url` | ❌ | 企业微信 API 基础地址（默认 `https://qyapi.weixin.qq.com`） |
 | `enable_markdown` | ❌ | 是否发送 Markdown 消息（默认 `false`） |
 | `proxy` | ❌ | HTTP 正向代理地址（动态 IP 场景使用） |
 

@@ -389,6 +389,7 @@ callback_token = "your-callback-token"
 callback_aes_key = "your-43-char-encoding-aes-key"
 port = "8081"
 callback_path = "/wecom/callback"
+api_base_url = "https://qyapi.weixin.qq.com"  # optional: override WeChat Work API base URL (for private deployments)
 enable_markdown = false  # true = Markdown messages (WeChat Work app only; personal WeChat shows "unsupported")
 # proxy = "http://your-vps-ip:8888"  # optional: forward proxy if your IP is dynamic
 ```

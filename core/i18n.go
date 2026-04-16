@@ -239,11 +239,16 @@ const (
 	MsgCronBtnUnmute    MsgKey = "cron_btn_unmute"
 	MsgCronBtnDelete    MsgKey = "cron_btn_delete"
 
-	MsgStatusTitle MsgKey = "status_title"
+	MsgStatusTitle          MsgKey = "status_title"
+	MsgReplyFooterRemaining MsgKey = "reply_footer_remaining"
+	MsgAgentSIDWarning      MsgKey = "agent_sid_warning"
 
 	MsgModelCurrent          MsgKey = "model_current"
 	MsgModelChanged          MsgKey = "model_changed"
 	MsgModelChangeFailed     MsgKey = "model_change_failed"
+	MsgModelCardSwitching    MsgKey = "model_card_switching"
+	MsgModelCardSwitched     MsgKey = "model_card_switched"
+	MsgModelCardSwitchFailed MsgKey = "model_card_switch_failed"
 	MsgModelNotSupported     MsgKey = "model_not_supported"
 	MsgReasoningCurrent      MsgKey = "reasoning_current"
 	MsgReasoningChanged      MsgKey = "reasoning_changed"
@@ -353,9 +358,10 @@ const (
 	MsgCommandExecError   MsgKey = "command_exec_error"
 	MsgCommandExecSuccess MsgKey = "command_exec_success"
 
-	MsgSkillsTitle MsgKey = "skills_title"
-	MsgSkillsEmpty MsgKey = "skills_empty"
-	MsgSkillsHint  MsgKey = "skills_hint"
+	MsgSkillsTitle            MsgKey = "skills_title"
+	MsgSkillsEmpty            MsgKey = "skills_empty"
+	MsgSkillsHint             MsgKey = "skills_hint"
+	MsgSkillsTelegramMenuHint MsgKey = "skills_telegram_menu_hint"
 
 	MsgConfigTitle       MsgKey = "config_title"
 	MsgConfigHint        MsgKey = "config_hint"
@@ -392,10 +398,10 @@ const (
 	MsgAliasNotFound   MsgKey = "alias_not_found"
 	MsgAliasUsage      MsgKey = "alias_usage"
 
-	MsgNewSessionCreated     MsgKey = "new_session_created"
-	MsgNewSessionCreatedName MsgKey = "new_session_created_name"
-	MsgSessionAutoResetIdle     MsgKey = "session_auto_reset_idle"
-	MsgSessionClosingGraceful   MsgKey = "session_closing_graceful"
+	MsgNewSessionCreated      MsgKey = "new_session_created"
+	MsgNewSessionCreatedName  MsgKey = "new_session_created_name"
+	MsgSessionAutoResetIdle   MsgKey = "session_auto_reset_idle"
+	MsgSessionClosingGraceful MsgKey = "session_closing_graceful"
 
 	MsgDeleteUsage              MsgKey = "delete_usage"
 	MsgDeleteSuccess            MsgKey = "delete_success"
@@ -412,6 +418,8 @@ const (
 	MsgDeleteModeBackButton     MsgKey = "delete_mode_back_button"
 	MsgDeleteModeEmptySelection MsgKey = "delete_mode_empty_selection"
 	MsgDeleteModeResultTitle    MsgKey = "delete_mode_result_title"
+	MsgDeleteModeDeletingTitle  MsgKey = "delete_mode_deleting_title"
+	MsgDeleteModeDeletingBody   MsgKey = "delete_mode_deleting_body"
 	MsgDeleteModeMissingSession MsgKey = "delete_mode_missing_session"
 
 	MsgSwitchSuccess   MsgKey = "switch_success"
@@ -491,9 +499,10 @@ const (
 	MsgBuiltinCmdShell     MsgKey = "shell"
 	MsgBuiltinCmdDir       MsgKey = "dir"
 	MsgBuiltinCmdDiff      MsgKey = "diff"
+	MsgBuiltinCmdAgentSID MsgKey = "agentsid"
 
-	MsgDiffEmpty           MsgKey = "diff_empty"
-	MsgDiffNoDiff2HTML     MsgKey = "diff_no_diff2html"
+	MsgDiffEmpty       MsgKey = "diff_empty"
+	MsgDiffNoDiff2HTML MsgKey = "diff_no_diff2html"
 
 	MsgDirChanged          MsgKey = "dir_changed"
 	MsgDirCurrent          MsgKey = "dir_current"
@@ -549,6 +558,8 @@ const (
 	MsgWsCloneProgress         MsgKey = "ws_clone_progress"
 	MsgWsCloneSuccess          MsgKey = "ws_clone_success"
 	MsgWsCloneFailed           MsgKey = "ws_clone_failed"
+	MsgWsInitDirNotFound       MsgKey = "ws_init_dir_not_found"
+	MsgWsInitInvalidTarget     MsgKey = "ws_init_invalid_target"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -838,6 +849,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/delete <number>|1,2,3|3-7|1,3-5,8\n  Delete sessions by list number(s)\n\n" +
 			"/name [number] <text>\n  Name a session for easy identification\n\n" +
 			"/current\n  Show current active session\n\n" +
+			"/agentsid\n  Print the agent session ID\n\n" +
 			"/history [n]\n  Show last n messages (default 10)\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  Manage API providers\n\n" +
 			"/memory [add|global|global add]\n  View/edit agent memory files\n\n" +
@@ -881,6 +893,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/delete <序号>|1,2,3|3-7|1,3-5,8\n  按列表序号批量/单个删除会话\n\n" +
 			"/name [序号] <名称>\n  给会话命名，方便识别\n\n" +
 			"/current\n  查看当前活跃会话\n\n" +
+			"/agentsid\n  输出 Agent Session ID\n\n" +
 			"/history [n]\n  查看最近 n 条消息（默认 10）\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  管理 API Provider\n\n" +
 			"/memory [add|global|global add]\n  查看/编辑 Agent 记忆文件\n\n" +
@@ -924,6 +937,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/delete <序號>|1,2,3|3-7|1,3-5,8\n  按列表序號批量/單筆刪除會話\n\n" +
 			"/name [序號] <名稱>\n  為會話命名，方便辨識\n\n" +
 			"/current\n  查看當前活躍會話\n\n" +
+			"/agentsid\n  輸出 Agent Session ID\n\n" +
 			"/history [n]\n  查看最近 n 條訊息（預設 10）\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  管理 API Provider\n\n" +
 			"/memory [add|global|global add]\n  查看/編輯 Agent 記憶檔案\n\n" +
@@ -965,6 +979,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/delete <番号>|1,2,3|3-7|1,3-5,8\n  リスト番号でセッションを単体/複数削除\n\n" +
 			"/name [番号] <名前>\n  セッションに名前を付ける\n\n" +
 			"/current\n  現在のアクティブセッションを表示\n\n" +
+			"/agentsid\n  エージェントのセッションIDを表示\n\n" +
 			"/history [n]\n  直近 n 件のメッセージを表示（デフォルト 10）\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  API プロバイダ管理\n\n" +
 			"/memory [add|global|global add]\n  エージェントメモリの表示/編集\n\n" +
@@ -1006,6 +1021,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/delete <número>|1,2,3|3-7|1,3-5,8\n  Eliminar una o varias sesiones por número de lista\n\n" +
 			"/name [número] <texto>\n  Nombrar una sesión para fácil identificación\n\n" +
 			"/current\n  Mostrar sesión activa actual\n\n" +
+			"/agentsid\n  Mostrar el ID de sesión del agente\n\n" +
 			"/history [n]\n  Mostrar últimos n mensajes (por defecto 10)\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  Gestionar proveedores API\n\n" +
 			"/memory [add|global|global add]\n  Ver/editar archivos de memoria del agente\n\n" +
@@ -1803,6 +1819,20 @@ var messages = map[MsgKey]map[Language]string{
 			"Idioma: %s\n" +
 			"%s" + "%s" + "%s" + "%s" + "%s",
 	},
+	MsgReplyFooterRemaining: {
+		LangEnglish:            "%d%% left",
+		LangChinese:            "剩余 %d%%",
+		LangTraditionalChinese: "剩餘 %d%%",
+		LangJapanese:           "残り %d%%",
+		LangSpanish:            "%d%% restante",
+	},
+	MsgAgentSIDWarning: {
+		LangEnglish:            "⚠️ Agent session ID (sensitive — do not share in public channels):",
+		LangChinese:            "⚠️ Agent 会话 ID（敏感信息，请勿在公开频道分享）：",
+		LangTraditionalChinese: "⚠️ Agent 會話 ID（敏感資訊，請勿在公開頻道分享）：",
+		LangJapanese:           "⚠️ エージェントセッションID（機密情報 — 公開チャンネルで共有しないでください）：",
+		LangSpanish:            "⚠️ ID de sesión del agente (sensible — no compartir en canales públicos):",
+	},
 	MsgModelCurrent: {
 		LangEnglish:            "Current model: %s",
 		LangChinese:            "当前模型: %s",
@@ -1823,6 +1853,27 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 切換模型失敗: %v",
 		LangJapanese:           "❌ モデルの切り替えに失敗しました: %v",
 		LangSpanish:            "❌ Error al cambiar el modelo: %v",
+	},
+	MsgModelCardSwitching: {
+		LangEnglish:            "Switching model to `%s`...",
+		LangChinese:            "正在切换模型为 `%s`...",
+		LangTraditionalChinese: "正在切換模型為 `%s`...",
+		LangJapanese:           "モデルを `%s` に切り替えています...",
+		LangSpanish:            "Cambiando el modelo a `%s`...",
+	},
+	MsgModelCardSwitched: {
+		LangEnglish:            "Model switched to `%s`.",
+		LangChinese:            "模型已切换为 `%s`。",
+		LangTraditionalChinese: "模型已切換為 `%s`。",
+		LangJapanese:           "モデルを `%s` に切り替えました。",
+		LangSpanish:            "Modelo cambiado a `%s`.",
+	},
+	MsgModelCardSwitchFailed: {
+		LangEnglish:            "Failed to switch model: %v",
+		LangChinese:            "切换模型失败: %v",
+		LangTraditionalChinese: "切換模型失敗: %v",
+		LangJapanese:           "モデルの切り替えに失敗しました: %v",
+		LangSpanish:            "Error al cambiar el modelo: %v",
 	},
 	MsgModelNotSupported: {
 		LangEnglish:            "This agent does not support model switching.",
@@ -2444,6 +2495,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "使い方：/<スキル名> [引数...] でスキルを実行します。",
 		LangSpanish:            "Uso: /<nombre-skill> [args...] para invocar un skill.",
 	},
+	MsgSkillsTelegramMenuHint: {
+		LangEnglish:            "Telegram's command menu is full, so skill commands are not listed there. You can still invoke them by typing /<skill-name> manually.",
+		LangChinese:            "Telegram 的命令菜单已满，因此 Skill 不会显示在那里。你仍然可以手动输入 /<skill名称> 来调用它们。",
+		LangTraditionalChinese: "Telegram 的命令選單已滿，因此 Skill 不會顯示在那裡。你仍然可以手動輸入 /<skill名稱> 來調用它們。",
+		LangJapanese:           "Telegram のコマンドメニューがいっぱいのため、スキルコマンドはそこに表示されません。手動で /<スキル名> と入力すれば実行できます。",
+		LangSpanish:            "El menú de comandos de Telegram está lleno, así que los skills no aparecen allí. Aun así puedes invocarlos escribiendo /<nombre-skill> manualmente.",
+	},
 
 	MsgConfigTitle: {
 		LangEnglish:            "⚙️ **Runtime Configuration**\n\n",
@@ -2858,6 +2916,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "刪除結果",
 		LangJapanese:           "削除結果",
 		LangSpanish:            "Resultado de eliminación",
+	},
+	MsgDeleteModeDeletingTitle: {
+		LangEnglish:            "Deleting Sessions...",
+		LangChinese:            "正在删除会话...",
+		LangTraditionalChinese: "正在刪除會話...",
+		LangJapanese:           "セッションを削除中...",
+		LangSpanish:            "Eliminando sesiones...",
+	},
+	MsgDeleteModeDeletingBody: {
+		LangEnglish:            "Deleting %d session(s), please wait...",
+		LangChinese:            "正在删除 %d 个会话，请稍候...",
+		LangTraditionalChinese: "正在刪除 %d 個會話，請稍候...",
+		LangJapanese:           "%d 件のセッションを削除中、お待ちください...",
+		LangSpanish:            "Eliminando %d sesión(es), por favor espere...",
 	},
 	MsgDeleteModeMissingSession: {
 		LangEnglish:            "❌ Missing selected session: %s",
@@ -3312,6 +3384,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "git diff を HTML ファイルで生成、引数: [ターゲット]",
 		LangSpanish:            "Generar git diff como archivo HTML, arg: [objetivo]",
 	},
+	MsgBuiltinCmdAgentSID: {
+		LangEnglish:            "Print the agent session ID",
+		LangChinese:            "输出 Agent Session ID",
+		LangTraditionalChinese: "輸出 Agent Session ID",
+		LangJapanese:           "エージェントのセッションIDを表示",
+		LangSpanish:            "Mostrar el ID de sesión del agente",
+	},
 	MsgDiffEmpty: {
 		LangEnglish:            "No diff — clean working tree (or no changes vs `%s`).",
 		LangChinese:            "无差异 — 工作区干净（或与 `%s` 无变化）。",
@@ -3518,11 +3597,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Uso: `/workspace [bind <nombre> | route <ruta-absoluta> | init <url> | unbind | list | shared ...]`",
 	},
 	MsgWsInitUsage: {
-		LangEnglish:            "Usage: `/workspace init <git-url>`",
-		LangChinese:            "用法: `/workspace init <git仓库地址>`",
-		LangTraditionalChinese: "用法: `/workspace init <git倉庫地址>`",
-		LangJapanese:           "使い方: `/workspace init <git-url>`",
-		LangSpanish:            "Uso: `/workspace init <git-url>`",
+		LangEnglish:            "Usage: `/workspace init <git-url or directory-path>`",
+		LangChinese:            "用法: `/workspace init <git仓库地址或目录路径>`",
+		LangTraditionalChinese: "用法: `/workspace init <git倉庫地址或目錄路徑>`",
+		LangJapanese:           "使い方: `/workspace init <git-urlまたはディレクトリパス>`",
+		LangSpanish:            "Uso: `/workspace init <git-url o ruta-de-directorio>`",
 	},
 	MsgWsBindUsage: {
 		LangEnglish:            "Usage: `/workspace bind <workspace-name>`",
@@ -3658,11 +3737,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "El workspace efectivo actual proviene de la capa shared. Usa `/workspace shared unbind` para quitarlo.",
 	},
 	MsgWsNotFoundHint: {
-		LangEnglish:            "No workspace found for this channel. Send me a git repo URL to clone, or use `/workspace init <url>`.",
-		LangChinese:            "此频道未找到工作区。请发送 git 仓库地址进行克隆，或使用 `/workspace init <仓库地址>`。",
-		LangTraditionalChinese: "此頻道未找到工作區。請發送 git 倉庫地址進行克隆，或使用 `/workspace init <倉庫地址>`。",
-		LangJapanese:           "このチャンネルにワークスペースが見つかりません。gitリポジトリURLを送信するか、`/workspace init <url>` を使用してください。",
-		LangSpanish:            "No se encontró workspace para este canal. Envía una URL de repo git para clonar, o usa `/workspace init <url>`.",
+		LangEnglish:            "No workspace found for this channel. Send a git repo URL, a local directory path, or use `/workspace init <url-or-path>`.",
+		LangChinese:            "此频道未找到工作区。请发送 git 仓库地址或本地目录路径，或使用 `/workspace init <仓库地址或目录路径>`。",
+		LangTraditionalChinese: "此頻道未找到工作區。請發送 git 倉庫地址或本地目錄路徑，或使用 `/workspace init <倉庫地址或目錄路徑>`。",
+		LangJapanese:           "このチャンネルにワークスペースが見つかりません。git URL またはローカルディレクトリパスを送信するか、`/workspace init <urlまたはパス>` を使用してください。",
+		LangSpanish:            "No se encontró workspace para este canal. Envía una URL de repo git, una ruta de directorio local, o usa `/workspace init <url-o-ruta>`.",
 	},
 	MsgWsResolutionError: {
 		LangEnglish:            "Workspace resolution error: %v",
@@ -3691,6 +3770,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 克隆倉庫失敗: %v",
 		LangJapanese:           "❌ リポジトリのクローンに失敗しました: %v",
 		LangSpanish:            "❌ Error al clonar repositorio: %v",
+	},
+	MsgWsInitDirNotFound: {
+		LangEnglish:            "Directory not found: `%s`. Please provide a valid directory path or a git URL.",
+		LangChinese:            "目录不存在: `%s`。请提供有效的目录路径或 git 仓库地址。",
+		LangTraditionalChinese: "目錄不存在: `%s`。請提供有效的目錄路徑或 git 倉庫地址。",
+		LangJapanese:           "ディレクトリが見つかりません: `%s`。有効なディレクトリパスまたは git URL を指定してください。",
+		LangSpanish:            "Directorio no encontrado: `%s`. Proporcione una ruta de directorio válida o una URL de git.",
+	},
+	MsgWsInitInvalidTarget: {
+		LangEnglish:            "Please provide a git URL (e.g. `https://github.com/org/repo`) or a local directory path.",
+		LangChinese:            "请提供 git 仓库地址（如 `https://github.com/org/repo`）或本地目录路径。",
+		LangTraditionalChinese: "請提供 git 倉庫地址（如 `https://github.com/org/repo`）或本地目錄路徑。",
+		LangJapanese:           "git URL（例: `https://github.com/org/repo`）またはローカルディレクトリパスを指定してください。",
+		LangSpanish:            "Proporcione una URL de git (ej. `https://github.com/org/repo`) o una ruta de directorio local.",
 	},
 }
 

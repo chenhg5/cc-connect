@@ -126,6 +126,14 @@ type TypingIndicator interface {
 	StartTyping(ctx context.Context, replyCtx any) (stop func())
 }
 
+// TypingIndicatorDone is an optional interface for platforms that can show a
+// "done" reaction after processing completes. The engine calls AddDoneReaction
+// when the agent finishes a multi-round turn in quiet mode, so the user gets
+// a push notification (e.g. Feishu card edits don't trigger pushes).
+type TypingIndicatorDone interface {
+	AddDoneReaction(replyCtx any)
+}
+
 // ImageSender is an optional interface for platforms that support sending images.
 type ImageSender interface {
 	SendImage(ctx context.Context, replyCtx any, img ImageAttachment) error
@@ -184,6 +192,16 @@ type CardNavigationHandler func(action string, sessionKey string) *Card
 // card navigation (updating the existing card instead of sending a new message).
 type CardNavigable interface {
 	SetCardNavigationHandler(h CardNavigationHandler)
+}
+
+// CardRefresher is an optional interface for platforms that can update a
+// previously rendered card in-place after the original callback has returned.
+// This is used when async operations (e.g. delete-mode deletion) need to
+// refresh a "loading" card with the final result. Platforms that implement
+// this interface should track the message ID from card action callbacks and
+// use it to patch the card content.
+type CardRefresher interface {
+	RefreshCard(ctx context.Context, sessionKey string, card *Card) error
 }
 
 // PlatformLifecycleHandler receives readiness state transitions from async
@@ -349,6 +367,29 @@ type UsageCredits struct {
 	Balance    string
 }
 
+// ContextUsageReporter is an optional interface for running agent sessions that
+// can report real runtime context usage for the active conversation.
+type ContextUsageReporter interface {
+	GetContextUsage() *ContextUsage
+}
+
+// ContextUsage describes runtime context consumption for the active session.
+type ContextUsage struct {
+	// UsedTokens is the current token load to compare against ContextWindow when
+	// computing remaining context capacity for the next turn.
+	UsedTokens int
+	// BaselineTokens is the portion of the context window always occupied by
+	// fixed runtime/system instructions and therefore excluded from user-visible
+	// "left" calculations when the agent provides it.
+	BaselineTokens        int
+	TotalTokens           int
+	InputTokens           int
+	CachedInputTokens     int
+	OutputTokens          int
+	ReasoningOutputTokens int
+	ContextWindow         int
+}
+
 // ContextCompressor is an optional interface for agents that support
 // compressing/compacting the conversation context within a running session.
 // CompressCommand returns the native slash command (e.g. "/compact", "/compress")
@@ -392,6 +433,15 @@ type ModeSwitcher interface {
 	PermissionModes() []PermissionModeInfo
 }
 
+// WorkspaceAgentOptionSnapshotter is an optional interface for agents that can
+// export reusable constructor options needed to recreate an equivalent agent in
+// a different workspace. Snapshot values should omit work_dir; the caller is
+// responsible for setting the target workspace explicitly. Provider wiring and
+// run_as propagation may still be handled separately by the engine.
+type WorkspaceAgentOptionSnapshotter interface {
+	WorkspaceAgentOptions() map[string]any
+}
+
 // LiveModeSwitcher is an optional interface for running agent sessions that can
 // apply a mode change immediately without restarting the process.
 type LiveModeSwitcher interface {
@@ -411,6 +461,7 @@ type PermissionModeInfo struct {
 type BotCommandInfo struct {
 	Command     string // command name without leading "/"
 	Description string // short description for the menu
+	IsSkill     bool   // whether this entry comes from a skill
 }
 
 // CommandRegistrar is an optional interface for platforms that support

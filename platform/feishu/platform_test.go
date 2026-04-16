@@ -443,7 +443,7 @@ func TestInteractivePlatform_CardActionUsesCallbackSessionKey(t *testing.T) {
 	}
 }
 
-func TestInteractivePlatform_ModelCardActionDispatchesCommandAsync(t *testing.T) {
+func TestInteractivePlatform_ModelCardActionReturnsCardUpdate(t *testing.T) {
 	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -453,15 +453,11 @@ func TestInteractivePlatform_ModelCardActionDispatchesCommandAsync(t *testing.T)
 		t.Fatalf("platform type = %T, want *interactivePlatform", platformAny)
 	}
 
-	cardNavCalled := make(chan struct{}, 1)
+	var gotAction, gotSessionKey string
 	ip.cardNavHandler = func(action string, sessionKey string) *core.Card {
-		cardNavCalled <- struct{}{}
-		return core.NewCard().Markdown("unexpected").Build()
-	}
-
-	msgCh := make(chan *core.Message, 1)
-	ip.handler = func(_ core.Platform, msg *core.Message) {
-		msgCh <- msg
+		gotAction = action
+		gotSessionKey = sessionKey
+		return core.NewCard().Markdown("switching").Build()
 	}
 
 	resp, err := ip.onCardAction(&callback.CardActionTriggerEvent{
@@ -474,23 +470,20 @@ func TestInteractivePlatform_ModelCardActionDispatchesCommandAsync(t *testing.T)
 	if err != nil {
 		t.Fatalf("onCardAction() error = %v", err)
 	}
-	if resp == nil || resp.Toast == nil {
-		t.Fatalf("expected toast response, got %#v", resp)
+	if resp == nil || resp.Card == nil {
+		t.Fatalf("expected card response, got %#v", resp)
 	}
-
-	select {
-	case <-cardNavCalled:
-		t.Fatal("expected model card action to skip synchronous card nav")
-	default:
+	if gotAction != "act:/model switch 1" {
+		t.Fatalf("action = %q, want act:/model switch 1", gotAction)
 	}
-
-	select {
-	case msg := <-msgCh:
-		if msg.Content != "/model switch 1" {
-			t.Fatalf("message content = %q, want /model switch 1", msg.Content)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("expected model card action message")
+	if gotSessionKey == "" {
+		t.Fatal("expected non-empty session key")
+	}
+	ip.cardActionMsgMu.Lock()
+	tracked := ip.cardActionMsgIDs[gotSessionKey]
+	ip.cardActionMsgMu.Unlock()
+	if tracked != "om_test_message" {
+		t.Fatalf("tracked message id = %q, want om_test_message", tracked)
 	}
 }
 
@@ -924,9 +917,9 @@ func TestBuildPreviewCardJSON_NormalTextFallback(t *testing.T) {
 
 func TestFormatProgressToolInput_TodoWrite(t *testing.T) {
 	tests := []struct {
-		name     string
-		input    string
-		wantContains []string
+		name            string
+		input           string
+		wantContains    []string
 		notWantContains []string
 	}{
 		{
@@ -936,23 +929,23 @@ func TestFormatProgressToolInput_TodoWrite(t *testing.T) {
 				{"content": "Task 2", "status": "in_progress", "activeForm": "Working on task 2"},
 				{"content": "Task 3", "status": "pending", "activeForm": "Planning task 3"}
 			]}`,
-			wantContains: []string{"✅", "🔄", "⏳", "Task 1", "Task 2", "Task 3", "Completing task 1", "Working on task 2"},
+			wantContains:    []string{"✅", "🔄", "⏳", "Task 1", "Task 2", "Task 3", "Completing task 1", "Working on task 2"},
 			notWantContains: []string{"```"},
 		},
 		{
-			name:  "todos without activeForm",
-			input: `{"todos": [{"content": "Simple task", "status": "pending"}]}`,
-			wantContains: []string{"⏳", "Simple task"},
+			name:            "todos without activeForm",
+			input:           `{"todos": [{"content": "Simple task", "status": "pending"}]}`,
+			wantContains:    []string{"⏳", "Simple task"},
 			notWantContains: []string{"(", ")"},
 		},
 		{
-			name:     "invalid JSON falls back to default",
-			input:    `not valid json`,
+			name:         "invalid JSON falls back to default",
+			input:        `not valid json`,
 			wantContains: []string{"```text"},
 		},
 		{
-			name:     "empty todos array",
-			input:    `{"todos": []}`,
+			name:         "empty todos array",
+			input:        `{"todos": []}`,
 			wantContains: []string{"```text"},
 		},
 	}
@@ -1140,5 +1133,37 @@ func TestResolveMentions_NoAtSign(t *testing.T) {
 	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
 	if result != input {
 		t.Fatalf("no @ should return unchanged, got %q", result)
+	}
+}
+
+func TestResolveMentions_DuplicateNameSkipped(t *testing.T) {
+	p := &Platform{platformName: "feishu", resolveMentions: true}
+	p.chatMemberCache.Store("oc_chat", &chatMemberEntry{
+		members:   map[string]string{"张三": "", "李四": "ou_lisi"},
+		fetchedAt: time.Now(),
+	})
+	input := "请 @张三 和 @李四 看看"
+	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
+	if !strings.Contains(result, "@张三") {
+		t.Fatal("ambiguous name should be kept as-is")
+	}
+	if strings.Contains(result, "@李四") {
+		t.Fatal("unique name should be resolved")
+	}
+}
+
+func TestResolveMentions_SpecialCharsEscaped(t *testing.T) {
+	p := &Platform{platformName: "feishu", resolveMentions: true}
+	p.chatMemberCache.Store("oc_chat", &chatMemberEntry{
+		members:   map[string]string{`A<"B">`: "ou_special"},
+		fetchedAt: time.Now(),
+	})
+	input := `@A<"B"> 你好`
+	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
+	if strings.Contains(result, `<"B">`) {
+		t.Fatalf("special chars should be escaped, got %q", result)
+	}
+	if !strings.Contains(result, "A&lt;") {
+		t.Fatalf("expected HTML-escaped name, got %q", result)
 	}
 }

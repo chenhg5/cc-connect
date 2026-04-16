@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -171,10 +172,20 @@ func (m *systemdManager) buildUnit(cfg Config) string {
 	fmt.Fprintf(&sb, "WorkingDirectory=%s\n", cfg.WorkDir)
 	sb.WriteString("Restart=on-failure\n")
 	sb.WriteString("RestartSec=10\n")
-	fmt.Fprintf(&sb, "Environment=CC_LOG_FILE=%s\n", cfg.LogFile)
-	fmt.Fprintf(&sb, "Environment=CC_LOG_MAX_SIZE=%d\n", cfg.LogMaxSize)
+	fmt.Fprintf(&sb, "Environment=\"CC_LOG_FILE=%s\"\n", cfg.LogFile)
+	fmt.Fprintf(&sb, "Environment=\"CC_LOG_MAX_SIZE=%d\"\n", cfg.LogMaxSize)
 	if cfg.EnvPATH != "" {
-		fmt.Fprintf(&sb, "Environment=PATH=%s\n", cfg.EnvPATH)
+		fmt.Fprintf(&sb, "Environment=\"PATH=%s\"\n", cfg.EnvPATH)
+	}
+	if len(cfg.EnvExtra) > 0 {
+		keys := make([]string, 0, len(cfg.EnvExtra))
+		for key := range cfg.EnvExtra {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			fmt.Fprintf(&sb, "Environment=\"%s=%s\"\n", key, cfg.EnvExtra[key])
+		}
 	}
 	sb.WriteString("\n[Install]\n")
 	if m.system {
@@ -260,9 +271,12 @@ func isWSL2() bool {
 func parseKeyValue(text string) map[string]string {
 	m := make(map[string]string)
 	for _, line := range strings.Split(text, "\n") {
-		if k, v, ok := strings.Cut(line, "="); ok {
-			m[strings.TrimSpace(k)] = strings.TrimSpace(v)
+		line = strings.TrimSpace(line)
+		if line == "" || !strings.Contains(line, "=") {
+			continue
 		}
+		parts := strings.SplitN(line, "=", 2)
+		m[parts[0]] = parts[1]
 	}
 	return m
 }

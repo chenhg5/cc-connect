@@ -229,6 +229,9 @@ func (c *apiClient) getConfig(ctx context.Context, userID, contextToken string) 
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, fmt.Errorf("weixin: getConfig json: %w", err)
 	}
+	if out.Ret != 0 || out.Errcode != 0 {
+		return nil, fmt.Errorf("weixin: getConfig ret=%d errcode=%d errmsg=%s", out.Ret, out.Errcode, out.Errmsg)
+	}
 	return &out, nil
 }
 

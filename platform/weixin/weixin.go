@@ -541,10 +541,18 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 				cancel()
 				return
 			case <-ctx.Done():
+				stopCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				if err := p.api.sendTyping(stopCtx, peerID, ticket, typingStatusStop); err != nil {
+					slog.Debug("weixin: typing stop failed (ctx cancelled)", "peer", peerID, "error", err)
+				}
+				cancel()
 				return
 			case <-ticker.C:
 				if err := p.api.sendTyping(ctx, peerID, ticket, typingStatusStart); err != nil {
 					slog.Debug("weixin: typing repeat failed", "peer", peerID, "error", err)
+					bestEffortCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+					_ = p.api.sendTyping(bestEffortCtx, peerID, ticket, typingStatusStop)
+					cancel()
 					return
 				}
 			}

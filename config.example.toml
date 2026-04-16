@@ -4,6 +4,10 @@
 # Copy this file to config.toml and fill in your credentials.
 # 复制此文件为 config.toml，填入你的凭证信息。
 #
+# String values support ${VAR_NAME} environment variable substitution.
+# Example: token = "${TELEGRAM_BOT_TOKEN}" / 所有字符串值都支持 ${VAR_NAME} 环境变量替换。
+# 例如：token = "${TELEGRAM_BOT_TOKEN}"
+#
 # Each [[projects]] entry binds one code directory to its own agent + platforms.
 # A single cc-connect process can manage multiple projects simultaneously.
 # 每个 [[projects]] 将一个代码目录绑定到独立的 agent 和平台。
@@ -499,6 +503,8 @@ level = "info" # debug, info, warn, error
 name = "my-backend"
 # show_context_indicator = false  # Hide the “[ctx: ~N%]” suffix on assistant replies (default: true / show)
 #                                   # 不在助手回复末尾显示「[ctx: ~N%]」上下文占用提示（默认 true 显示）
+# reply_footer = false             # Hide the Codex-like footer on assistant replies (default: true / show)
+#                                   # 不在助手回复底部显示类似 Codex 的状态行（默认 true 显示）
 # disabled_commands = ["restart", "upgrade", "cron"]  # Disable specific commands for this project
 #                                                     # 禁用该项目的指定命令
 #
@@ -588,6 +594,10 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 #
 # When using IM platforms, you can reply "允许"/"allow" to grant permission.
 # 在 IM 平台中，可回复"允许"或"allow"来授权操作。
+
+# Optional: set reasoning effort level (passed to claude --effort)
+# 可选：设置推理强度等级（传递给 claude --effort）
+# reasoning_effort = "high"  # "low" | "medium" | "high" | "max"
 
 # In default/acceptEdits mode, you can pre-approve specific tools:
 # 在 default/acceptEdits 模式下，可预授权特定工具：
@@ -740,6 +750,8 @@ app_secret = "your-feishu-app-secret"
 #                           # 设为 true 时，仅响应群聊消息，忽略私聊（P2P）消息（默认 false）
 # reaction_emoji = "OnIt"  # Emoji reaction on incoming messages (default: "OnIt"); set to "none" to disable
 #                           # 收到消息时添加的表情回复（默认 "OnIt"）；设为 "none" 可禁用
+# done_emoji = "none"       # Emoji reaction after agent finishes streaming work in quiet mode (e.g. "Done"); set to "none" to disable
+#                           # Agent 在 quiet 模式下完成流式工作后的表情回复（如 "Done"）；设为 "none" 可禁用
 # group_reply_all = false   # If true, respond to ALL group messages without requiring @mention
 #                           # 设为 true 时，群聊中无需 @机器人 也会响应所有消息（默认 false）
 # share_session_in_channel = false  # If true, all users in a group share one agent session
@@ -776,6 +788,7 @@ app_secret = "your-feishu-app-secret"
 # enable_feishu_card = true
 # allow_from = "*"
 # reaction_emoji = "OnIt"
+# done_emoji = "none"
 # progress_style = "legacy"  # legacy | compact | card
 
 # DingTalk / 钉钉 (uncomment to enable / 取消注释以启用)
@@ -919,6 +932,7 @@ app_secret = "your-feishu-app-secret"
 # callback_aes_key = "your-43-char-encoding-aes-key"
 # port = "8081"
 # callback_path = "/wecom/callback"
+# api_base_url = "https://qyapi.weixin.qq.com"  # optional: WeCom API base URL override / 可选：企业微信 API 基础地址覆盖
 # enable_markdown = false  # set true to send Markdown (only renders in WeChat Work app, NOT personal WeChat)
 #                          # 设为 true 发送 Markdown（仅企业微信应用内可渲染，个人微信显示"暂不支持"）
 # allow_from = "*"  # Allowed WeChat Work user IDs / 允许的企业微信用户 ID
@@ -1338,6 +1352,45 @@ app_secret = "your-feishu-app-secret"
 # base_url = "https://api.example.com/v1"
 # model = "Qwen3-Coder"
 # env = { IFLOW_selectedAuthType = "openai-compatible" }
+#
+# [[projects.platforms]]
+# type = "telegram"
+#
+# [projects.platforms.options]
+# token = "your-telegram-bot-token"
+
+# =============================================================================
+# Project: Using Kimi CLI / 项目：使用 Kimi CLI (uncomment to enable / 取消注释以启用)
+# =============================================================================
+# Requires: pip install kimi-cli
+# 需要安装：pip install kimi-cli
+# Kimi CLI uses `kimi --print --output-format stream-json` under the hood.
+# Kimi CLI 底层使用 `kimi --print --output-format stream-json` 命令。
+#
+# Authentication / 认证方式:
+#   - Kimi account login (kimi login) / Kimi 账号登录
+#   - MOONSHOT_API_KEY env var / 环境变量
+
+# [[projects]]
+# name = "my-kimi-project"
+#
+# [projects.agent]
+# type = "kimi"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/project"
+# mode = "default"  # "default" | "yolo" | "plan" | "quiet"
+# cmd = "kimi"      # CLI binary name (default: "kimi") / CLI 二进制名称（默认 "kimi"）
+# timeout_mins = 30  # 每次对话超时时间（分钟），0 表示不限制
+#
+# Mode options / 模式说明:
+# - "default": Standard print mode / 标准打印模式
+# - "yolo":    Auto-approve all tool calls / 自动批准所有工具调用
+# - "plan":    Read-only plan mode / 只读规划模式
+# - "quiet":   Quiet mode (final message only) / 静默模式（仅最终消息）
+#
+# Optional: specify a model / 可选：指定模型
+# model = "kimi-k2-0711-preview"
 #
 # [[projects.platforms]]
 # type = "telegram"

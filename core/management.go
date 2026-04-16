@@ -204,7 +204,7 @@ func (m *ManagementServer) withStaticFallback(apiMux *http.ServeMux) http.Handle
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write(indexData)
+		_, _ = w.Write(indexData)
 	})
 }
 

@@ -101,6 +101,96 @@ func TestBuildExecArgs_ResumeOmitsCdFlag(t *testing.T) {
 	}
 }
 
+func TestGetModelAndReasoningEffort_FromRuntimeConfigWhenUnset(t *testing.T) {
+	workDir := t.TempDir()
+	binDir := filepath.Join(workDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+
+	script := `#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{"id":%s,"result":{"protocolVersion":"2"}}\n' "$id"
+      ;;
+    *'"method":"config/read"'*)
+      printf '{"id":%s,"result":{"config":{"model":"gpt-5.4","model_reasoning_effort":"xhigh"},"origins":{}}}\n' "$id"
+      ;;
+  esac
+done
+`
+	scriptPath := filepath.Join(binDir, "codex")
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cs, err := newCodexSession(context.Background(), workDir, "", "", "", "", "", nil)
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+	defer cs.Close()
+
+	if got := cs.GetModel(); got != "gpt-5.4" {
+		t.Fatalf("GetModel() = %q, want gpt-5.4", got)
+	}
+	if got := cs.GetReasoningEffort(); got != "xhigh" {
+		t.Fatalf("GetReasoningEffort() = %q, want xhigh", got)
+	}
+}
+
+func TestRefreshContextUsageFromRollout_UsesLastTokenCount(t *testing.T) {
+	workDir := t.TempDir()
+	codexHome := filepath.Join(workDir, ".codex")
+	rolloutDir := filepath.Join(codexHome, "sessions", "2026", "04", "12")
+	if err := os.MkdirAll(rolloutDir, 0o755); err != nil {
+		t.Fatalf("mkdir rollout dir: %v", err)
+	}
+
+	sessionID := "019d8019-d05a-7612-ace2-db549494c0f9"
+	rolloutPath := filepath.Join(rolloutDir, "rollout-2026-04-12T05-11-08-"+sessionID+".jsonl")
+	rollout := strings.Join([]string{
+		`{"type":"session_meta","payload":{"id":"` + sessionID + `","cwd":"/tmp/project"}}`,
+		`{"type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"limit_id":"codex"}}}`,
+		`{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":50665316,"cached_input_tokens":46971872,"output_tokens":156453,"reasoning_output_tokens":75023,"total_tokens":50821769},"last_token_usage":{"input_tokens":180805,"cached_input_tokens":139776,"output_tokens":619,"reasoning_output_tokens":32,"total_tokens":181424},"model_context_window":258400},"rate_limits":{"limit_id":"codex"}}}`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(rolloutPath, []byte(rollout), 0o644); err != nil {
+		t.Fatalf("write rollout: %v", err)
+	}
+
+	cs, err := newCodexSession(context.Background(), workDir, "", "", "", sessionID, "", []string{"CODEX_HOME=" + codexHome})
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+	defer cs.Close()
+
+	cs.refreshContextUsageFromRollout()
+
+	usage := cs.GetContextUsage()
+	if usage == nil {
+		t.Fatal("GetContextUsage() = nil, want rollout token count")
+	}
+	if usage.UsedTokens != 181424 {
+		t.Fatalf("used tokens = %d, want 181424", usage.UsedTokens)
+	}
+	if usage.BaselineTokens != codexContextBaselineTokens {
+		t.Fatalf("baseline tokens = %d, want %d", usage.BaselineTokens, codexContextBaselineTokens)
+	}
+	if usage.TotalTokens != 181424 {
+		t.Fatalf("total tokens = %d, want 181424", usage.TotalTokens)
+	}
+	if usage.InputTokens != 180805 {
+		t.Fatalf("input tokens = %d, want 180805", usage.InputTokens)
+	}
+	if usage.ContextWindow != 258400 {
+		t.Fatalf("context window = %d, want 258400", usage.ContextWindow)
+	}
+}
+
 func TestSend_WithImages_PassesImageArgsAndDefaultPrompt(t *testing.T) {
 	workDir := t.TempDir()
 	binDir := filepath.Join(workDir, "bin")

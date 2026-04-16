@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"math/rand/v2"
@@ -119,6 +120,7 @@ type Platform struct {
 	useInteractiveCard         bool
 	self                       core.Platform
 	reactionEmoji              string
+	doneEmoji                  string
 	allowFrom                  string
 	allowChat                  string
 	groupOnly                  bool
@@ -149,6 +151,10 @@ type Platform struct {
 	eventHandler *dispatcher.EventDispatcher
 	sharedGroup  *sharedWSGroup // non-nil when sharing WebSocket with other platforms
 	isWSPrimary  bool           // true if this platform owns the shared WebSocket connection
+	// cardActionMessageIDs tracks the most recent card-action messageID per
+	// session key, enabling async card refreshes via the Patch API.
+	cardActionMsgMu  sync.Mutex
+	cardActionMsgIDs map[string]string // sessionKey → messageID
 }
 
 type interactivePlatform struct {
@@ -186,6 +192,10 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	}
 	if v, ok := opts["reaction_emoji"].(string); ok && v == "none" {
 		reactionEmoji = ""
+	}
+	doneEmoji, _ := opts["done_emoji"].(string)
+	if doneEmoji == "none" {
+		doneEmoji = ""
 	}
 	allowFrom, _ := opts["allow_from"].(string)
 	core.CheckAllowFrom(name, allowFrom)
@@ -241,6 +251,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		progressStyle:              progressStyle,
 		useInteractiveCard:         useInteractiveCard,
 		reactionEmoji:              reactionEmoji,
+		doneEmoji:                  doneEmoji,
 		allowFrom:                  allowFrom,
 		allowChat:                  allowChat,
 		groupOnly:                  groupOnly,
@@ -496,6 +507,14 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 
 	// nav: / act: — synchronous card update
 	if strings.HasPrefix(actionVal, "nav:") || strings.HasPrefix(actionVal, "act:") {
+		if messageID != "" {
+			p.cardActionMsgMu.Lock()
+			if p.cardActionMsgIDs == nil {
+				p.cardActionMsgIDs = make(map[string]string)
+			}
+			p.cardActionMsgIDs[sessionKey] = messageID
+			p.cardActionMsgMu.Unlock()
+		}
 		// Feishu uses native form checker for delete-mode toggle,
 		// so return a toast without calling cardNavHandler to avoid a full card refresh.
 		if strings.HasPrefix(actionVal, "act:/delete-mode toggle ") {
@@ -503,25 +522,6 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 				Toast: &callback.Toast{
 					Type:    "info",
 					Content: "已记录选择（Selection recorded）",
-				},
-			}, nil
-		}
-		if strings.HasPrefix(actionVal, "act:/model ") {
-			cmdText := strings.TrimPrefix(actionVal, "act:")
-			rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
-			go p.handler(p.dispatchPlatform(), &core.Message{
-				SessionKey: sessionKey,
-				Platform:   p.platformName,
-				UserID:     userID,
-				UserName:   p.resolveUserName(userID),
-				ChatName:   p.resolveChatName(chatID),
-				Content:    cmdText,
-				ReplyCtx:   rctx,
-			})
-			return &callback.CardActionTriggerResponse{
-				Toast: &callback.Toast{
-					Type:    "info",
-					Content: "正在切换模型（Switching model...）",
 				},
 			}, nil
 		}
@@ -640,10 +640,13 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 }
 
 func (p *Platform) addReaction(messageID string) string {
-	if p.reactionEmoji == "" {
+	return p.addReactionWithEmoji(messageID, p.reactionEmoji)
+}
+
+func (p *Platform) addReactionWithEmoji(messageID, emojiType string) string {
+	if emojiType == "" {
 		return ""
 	}
-	emojiType := p.reactionEmoji
 	resp, err := p.client.Im.MessageReaction.Create(context.Background(),
 		larkim.NewCreateMessageReactionReqBuilder().
 			MessageId(messageID).
@@ -694,6 +697,19 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 	return func() {
 		go p.removeReaction(rc.messageID, reactionID)
 	}
+}
+
+// AddDoneReaction adds a "done" emoji reaction so the user gets a push
+// notification when the agent finishes a multi-round turn in quiet mode.
+func (p *Platform) AddDoneReaction(rctx any) {
+	if p.doneEmoji == "" {
+		return
+	}
+	rc, ok := rctx.(replyContext)
+	if !ok || rc.messageID == "" {
+		return
+	}
+	go p.addReactionWithEmoji(rc.messageID, p.doneEmoji)
 }
 
 func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
@@ -1066,6 +1082,8 @@ func (p *Platform) fetchChatMembers(ctx context.Context, chatID string) (map[str
 			name := *member.Name
 			if _, exists := members[name]; !exists {
 				members[name] = *member.MemberId
+			} else {
+				members[name] = ""
 			}
 		}
 		if !hasMore {
@@ -1118,39 +1136,67 @@ func (p *Platform) resolveMentionsInContent(ctx context.Context, chatID, content
 			continue
 		}
 		openID := members[name]
+		if openID == "" {
+			slog.Debug(p.tag()+": skipping ambiguous mention", "name", name)
+			continue
+		}
 		var atTag string
 		if useCardFormat {
 			atTag = fmt.Sprintf(`<at id=%s></at>`, openID)
 		} else {
-			atTag = fmt.Sprintf(`<at user_id="%s">%s</at>`, openID, name)
+			escapedName := html.EscapeString(name)
+			atTag = fmt.Sprintf(`<at user_id="%s">%s</at>`, openID, escapedName)
 		}
-		slog.Info(p.tag()+": mention resolved", "name", name, "open_id", openID, "card_format", useCardFormat)
+		slog.Debug(p.tag()+": mention resolved", "name", name, "card_format", useCardFormat)
 		result = strings.ReplaceAll(result, pattern, atTag)
 	}
 	return result
 }
 
+// chainMessage holds extracted data from one message in a reply chain.
+type chainMessage struct {
+	senderName string
+	senderType string // "user" or "app"
+	text       string
+	parentID   string
+}
+
+// maxReplyChainDepth is the maximum number of parent messages to traverse
+// when building a reply chain. This limits API calls per inbound reply.
+const maxReplyChainDepth = 5
+
 // fetchQuotedMessage retrieves the content of a parent message that the user
 // is replying to, and returns a formatted prefix string for context injection.
+// For multi-level reply chains, it traces parent_id links up to maxReplyChainDepth
+// levels and returns the full conversation chain.
 // Returns empty string on any failure (graceful degradation — the user's own
 // message is still delivered without the quote).
 func (p *Platform) fetchQuotedMessage(ctx context.Context, parentID string) string {
-	// Use raw API call with card_msg_content_type=raw_card_content so that
-	// interactive card messages return the full card JSON (with json_card field)
-	// instead of the simplified final state.
-	apiPath := fmt.Sprintf("/open-apis/im/v1/messages/%s?card_msg_content_type=raw_card_content", parentID)
+	chain := p.fetchReplyChain(ctx, parentID, maxReplyChainDepth)
+	if len(chain) == 0 {
+		return ""
+	}
+	return formatReplyChain(chain)
+}
+
+// fetchSingleMessage retrieves one message by ID from the Feishu API and
+// returns its extracted content as a chainMessage. Returns nil on any failure.
+func (p *Platform) fetchSingleMessage(ctx context.Context, messageID string) *chainMessage {
+	apiPath := fmt.Sprintf("/open-apis/im/v1/messages/%s?card_msg_content_type=raw_card_content", messageID)
 	apiResp, err := p.client.Get(ctx, apiPath, nil, larkcore.AccessTokenTypeTenant)
 	if err != nil {
-		slog.Debug(p.tag()+": fetch quoted message failed", "parent_id", parentID, "error", err)
-		return ""
+		slog.Debug(p.tag()+": fetch single message failed", "message_id", messageID, "error", err)
+		return nil
 	}
 	var resp struct {
 		Code int `json:"code"`
 		Data struct {
 			Items []struct {
-				MsgType string `json:"msg_type"`
-				Sender  struct {
-					ID string `json:"id"`
+				MsgType  string `json:"msg_type"`
+				ParentID string `json:"parent_id"`
+				Sender   struct {
+					ID         string `json:"id"`
+					SenderType string `json:"sender_type"`
 				} `json:"sender"`
 				Body struct {
 					Content string `json:"content"`
@@ -1160,51 +1206,117 @@ func (p *Platform) fetchQuotedMessage(ctx context.Context, parentID string) stri
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(apiResp.RawBody, &resp); err != nil || resp.Code != 0 || len(resp.Data.Items) == 0 {
-		slog.Debug(p.tag()+": fetch quoted message: parse failed or no data", "parent_id", parentID)
-		return ""
+		slog.Debug(p.tag()+": fetch single message: parse failed or no data", "message_id", messageID)
+		return nil
 	}
 
 	item := resp.Data.Items[0]
-	msgType := item.MsgType
 	content := item.Body.Content
 	if content == "" {
-		return ""
+		return nil
 	}
 
 	// Extract plain text based on message type.
-	var quotedText string
-	switch msgType {
+	var text string
+	switch item.MsgType {
 	case "text":
 		var textBody struct {
 			Text string `json:"text"`
 		}
 		if err := json.Unmarshal([]byte(content), &textBody); err == nil {
-			quotedText = replaceMentions(textBody.Text, item.Mentions)
+			text = replaceMentions(textBody.Text, item.Mentions)
 		}
 	case "post":
-		// Rich text — extract text elements from the post structure.
-		quotedText = extractPostPlainText(content)
+		text = extractPostPlainText(content)
 	case "interactive":
-		quotedText = extractInteractiveCardText(content)
+		text = extractInteractiveCardText(content)
 	default:
-		// For non-text types (image, file, audio, etc.), use a type indicator.
-		quotedText = fmt.Sprintf("[%s]", msgType)
+		text = fmt.Sprintf("[%s]", item.MsgType)
 	}
-
-	if quotedText == "" {
-		return ""
+	if text == "" {
+		return nil
 	}
 
 	// Resolve sender name.
 	senderName := ""
-	if item.Sender.ID != "" {
-		senderName = p.resolveUserName(item.Sender.ID)
+	if item.Sender.SenderType == "app" {
+		// Bot messages: sender ID is app_id, not a user open_id.
+		senderName = "Bot"
+	} else if item.Sender.ID != "" {
+		resolved := p.resolveUserName(item.Sender.ID)
+		if resolved != item.Sender.ID {
+			senderName = resolved
+		} else {
+			senderName = "User"
+		}
 	}
 	if senderName == "" {
 		senderName = "unknown"
 	}
 
-	return fmt.Sprintf("[Quoted message from %s]:\n%s\n\n", senderName, quotedText)
+	return &chainMessage{
+		senderName: senderName,
+		senderType: item.Sender.SenderType,
+		text:       text,
+		parentID:   item.ParentID,
+	}
+}
+
+// fetchReplyChain iteratively traverses parent_id links to build a reply chain.
+// Returns messages in chronological order (oldest first). Stops on any failure,
+// circular reference, or when maxDepth is reached.
+func (p *Platform) fetchReplyChain(ctx context.Context, parentID string, maxDepth int) []chainMessage {
+	var chain []chainMessage
+	visited := make(map[string]struct{})
+	currentID := parentID
+
+	for currentID != "" && len(chain) < maxDepth {
+		if _, seen := visited[currentID]; seen {
+			slog.Debug(p.tag()+": reply chain: circular reference detected", "message_id", currentID)
+			break
+		}
+		visited[currentID] = struct{}{}
+
+		msg := p.fetchSingleMessage(ctx, currentID)
+		if msg == nil {
+			break
+		}
+		chain = append(chain, *msg)
+		currentID = msg.parentID
+	}
+
+	// Reverse to chronological order (oldest first).
+	for i, j := 0, len(chain)-1; i < j; i, j = i+1, j-1 {
+		chain[i], chain[j] = chain[j], chain[i]
+	}
+	return chain
+}
+
+// formatReplyChain formats a slice of chain messages into a readable string.
+// Single-message chains use the legacy format for backward compatibility.
+// Multi-message chains use a numbered format with role labels.
+func formatReplyChain(chain []chainMessage) string {
+	if len(chain) == 0 {
+		return ""
+	}
+
+	// Single message: backward-compatible format.
+	if len(chain) == 1 {
+		return fmt.Sprintf("[Quoted message from %s]:\n%s\n\n", chain[0].senderName, chain[0].text)
+	}
+
+	// Multi-message: numbered chain format.
+	var b strings.Builder
+	fmt.Fprintf(&b, "--- Reply chain (%d messages) ---\n", len(chain))
+	for i, msg := range chain {
+		role := "user"
+		if msg.senderType == "app" {
+			role = "assistant"
+		}
+		fmt.Fprintf(&b, "[%d] %s (%s):\n%s\n\n", i+1, msg.senderName, role, msg.text)
+	}
+	b.WriteString("---\n\n")
+	return b.String()
 }
 
 // extractPostPlainText extracts plain text from a Lark post (rich text) JSON content.
@@ -1301,7 +1413,9 @@ func extractInteractiveCardText(content string) string {
 	if len(parts) == 0 {
 		if raw, ok := card["header"]; ok {
 			var header struct {
-				Title struct{ Content string `json:"content"` } `json:"title"`
+				Title struct {
+					Content string `json:"content"`
+				} `json:"title"`
 			}
 			if json.Unmarshal(raw, &header) == nil && header.Title.Content != "" {
 				parts = append(parts, header.Title.Content)
@@ -1885,7 +1999,7 @@ func predictMsgType(content string) string {
 	if !containsMarkdown(content) {
 		return larkim.MsgTypeText
 	}
-	if hasComplexMarkdown(content) && countMarkdownTables(content) <= maxCardTables {
+	if countMarkdownTables(content) <= maxCardTables {
 		return larkim.MsgTypeInteractive
 	}
 	return larkim.MsgTypePost
@@ -1896,21 +2010,14 @@ func buildReplyContent(content string) (msgType string, body string) {
 		b, _ := json.Marshal(map[string]string{"text": content})
 		return larkim.MsgTypeText, string(b)
 	}
-	// Three-tier rendering strategy:
-	// 1. Code blocks / tables → card (schema 2.0 markdown)
-	// 2. Many \n\n paragraphs (help, status, etc.) → post rich-text (preserves blank lines)
-	// 3. Other markdown → post md tag (best native rendering)
-	//
-	// Feishu cards support at most 5 tables (API error 11310).
-	// When content exceeds this limit, fall back to post with md tag
-	// which still renders tables without the card table cap.
-	if hasComplexMarkdown(content) && countMarkdownTables(content) <= maxCardTables {
-		return larkim.MsgTypeInteractive, buildCardJSON(sanitizeMarkdownURLs(preprocessFeishuMarkdown(content)))
+	// Prefer card for all markdown content — card schema 2.0 has the best
+	// markdown rendering (headings, blockquotes, code blocks, tables, links,
+	// strikethrough, etc.). Only fall back to post md tag when the content
+	// exceeds the card table limit (Feishu API error 11310: max 5 tables).
+	if countMarkdownTables(content) > maxCardTables {
+		return larkim.MsgTypePost, buildPostMdJSON(content)
 	}
-	if strings.Count(content, "\n\n") >= 2 {
-		return larkim.MsgTypePost, buildPostJSON(content)
-	}
-	return larkim.MsgTypePost, buildPostMdJSON(content)
+	return larkim.MsgTypeInteractive, buildCardJSON(sanitizeMarkdownURLs(preprocessFeishuMarkdown(content)))
 }
 
 // hasComplexMarkdown detects code blocks or tables that require card rendering.
