@@ -1242,7 +1242,9 @@ func extractInteractiveCardText(content string) string {
 	if len(parts) == 0 {
 		if raw, ok := card["header"]; ok {
 			var header struct {
-				Title struct{ Content string `json:"content"` } `json:"title"`
+				Title struct {
+					Content string `json:"content"`
+				} `json:"title"`
 			}
 			if json.Unmarshal(raw, &header) == nil && header.Title.Content != "" {
 				parts = append(parts, header.Title.Content)
@@ -1826,7 +1828,7 @@ func predictMsgType(content string) string {
 	if !containsMarkdown(content) {
 		return larkim.MsgTypeText
 	}
-	if hasComplexMarkdown(content) && countMarkdownTables(content) <= maxCardTables {
+	if countMarkdownTables(content) <= maxCardTables {
 		return larkim.MsgTypeInteractive
 	}
 	return larkim.MsgTypePost
@@ -1837,21 +1839,14 @@ func buildReplyContent(content string) (msgType string, body string) {
 		b, _ := json.Marshal(map[string]string{"text": content})
 		return larkim.MsgTypeText, string(b)
 	}
-	// Three-tier rendering strategy:
-	// 1. Code blocks / tables → card (schema 2.0 markdown)
-	// 2. Many \n\n paragraphs (help, status, etc.) → post rich-text (preserves blank lines)
-	// 3. Other markdown → post md tag (best native rendering)
-	//
-	// Feishu cards support at most 5 tables (API error 11310).
-	// When content exceeds this limit, fall back to post with md tag
-	// which still renders tables without the card table cap.
-	if hasComplexMarkdown(content) && countMarkdownTables(content) <= maxCardTables {
-		return larkim.MsgTypeInteractive, buildCardJSON(sanitizeMarkdownURLs(preprocessFeishuMarkdown(content)))
+	// Prefer card for all markdown content — card schema 2.0 has the best
+	// markdown rendering (headings, blockquotes, code blocks, tables, links,
+	// strikethrough, etc.). Only fall back to post md tag when the content
+	// exceeds the card table limit (Feishu API error 11310: max 5 tables).
+	if countMarkdownTables(content) > maxCardTables {
+		return larkim.MsgTypePost, buildPostMdJSON(content)
 	}
-	if strings.Count(content, "\n\n") >= 2 {
-		return larkim.MsgTypePost, buildPostJSON(content)
-	}
-	return larkim.MsgTypePost, buildPostMdJSON(content)
+	return larkim.MsgTypeInteractive, buildCardJSON(sanitizeMarkdownURLs(preprocessFeishuMarkdown(content)))
 }
 
 // hasComplexMarkdown detects code blocks or tables that require card rendering.
