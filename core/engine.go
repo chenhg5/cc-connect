@@ -247,6 +247,7 @@ type queuedMessage struct {
 	files         []FileAttachment
 	fromVoice     bool
 	userID        string
+	userName      string // sender's display name for sender injection
 	msgPlatform   string // platform name for sender injection
 	msgSessionKey string // session key for extracting chat ID
 }
@@ -979,6 +980,9 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 			agent = wsAgent
 			sessions = wsSessions
 			workspaceDir = job.WorkDir
+		} else {
+			slog.Warn("cron: workspace agent creation failed, using global",
+				"work_dir", job.WorkDir, "session_key", sessionKey, "error", err)
 		}
 	}
 
@@ -1463,8 +1467,6 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 				return
 			}
 		} else {
-			resolvedWorkspace = workspace
-
 			// Touch for idle tracking
 			if ws := e.workspacePool.Get(workspace); ws != nil {
 				ws.Touch()
@@ -1645,6 +1647,7 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		files:         msg.Files,
 		fromVoice:     msg.FromVoice,
 		userID:        msg.UserID,
+		userName:      msg.UserName,
 		msgPlatform:   msg.Platform,
 		msgSessionKey: msg.SessionKey,
 	})
@@ -2046,7 +2049,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	// EventResult that was pushed after the previous turn already returned.
 	drainEvents(state.agentSession.Events())
 
-	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.Platform, msg.SessionKey)
+	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey)
 
 	sendStart := time.Now()
 	state.mu.Lock()
@@ -2346,10 +2349,12 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 		e.interactiveMu.Unlock()
 		return
 	}
-	// Capture the agent session before any further processing
+	// Capture the agent session and nil it out atomically to prevent a
+	// concurrent cleanup (without expected) from closing the same session.
 	var agentSession AgentSession
 	if ok && state != nil {
 		agentSession = state.agentSession
+		state.agentSession = nil
 	}
 	e.interactiveMu.Unlock()
 
@@ -2759,7 +2764,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// When tool progress is hidden, segmentStart stays 0 and textParts
 			// contains ALL text across tool boundaries. Prefer the full accumulated
 			// text over event.Content which only contains the last assistant segment.
-			if len(textParts) > 0 && segmentStart == 0 {
+			if len(textParts) > 0 && segmentStart == 0 && !e.display.ToolMessages {
 				fullResponse = strings.Join(textParts, "")
 			} else if fullResponse == "" && len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")
@@ -2929,7 +2934,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 
-				queuedPrompt := e.buildSenderPrompt(queued.content, queued.userID, queued.msgPlatform, queued.msgSessionKey)
+				queuedPrompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey)
 
 				nextSend := make(chan error, 1)
 				go func() {
@@ -3070,7 +3075,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		state.mu.Unlock()
 
 		e.i18n.DetectAndSet(queued.content)
-		prompt := e.buildSenderPrompt(queued.content, queued.userID, queued.msgPlatform, queued.msgSessionKey)
+		prompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey)
 
 		if state.agentSession == nil || !state.agentSession.Alive() {
 			e.send(queued.platform, queued.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session ended"))
@@ -3451,13 +3456,30 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(successKey, wsName))
 		return true
 	}
-	initWorkspace := func(bindingKey, repoURL string, successKey MsgKey) bool {
-		if !looksLikeGitURL(repoURL) {
-			e.reply(p, msg.ReplyCtx, "That doesn't look like a git URL.")
+	initWorkspace := func(bindingKey, target string, successKey MsgKey) bool {
+		// Support local directory paths (absolute or relative to baseDir).
+		if looksLikeLocalDir(target) {
+			dirPath, err := resolveLocalDirPath(target, e.baseDir)
+			if err != nil {
+				e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsInitDirNotFound, target))
+				return false
+			}
+			info, statErr := os.Stat(dirPath)
+			if statErr != nil || !info.IsDir() {
+				e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsInitDirNotFound, target))
+				return false
+			}
+			e.workspaceBindings.Bind(bindingKey, channelKey, resolveChannelName(), normalizeWorkspacePath(dirPath))
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(successKey, dirPath))
+			return true
+		}
+
+		if !looksLikeGitURL(target) {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsInitInvalidTarget))
 			return false
 		}
 
-		repoName := extractRepoName(repoURL)
+		repoName := extractRepoName(target)
 		cloneTo := filepath.Join(e.baseDir, repoName)
 
 		if _, err := os.Stat(cloneTo); err == nil {
@@ -3466,9 +3488,9 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 			return true
 		}
 
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsCloneProgress, repoURL))
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsCloneProgress, target))
 
-		if err := gitClone(repoURL, cloneTo); err != nil {
+		if err := gitClone(target, cloneTo); err != nil {
 			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsCloneFailed, err))
 			return false
 		}
@@ -10098,12 +10120,18 @@ func (e *Engine) cmdBindSetup(p Platform, msg *Message) {
 }
 
 // buildSenderPrompt prepends a sender identity header to content when
-// injectSender is enabled and userID is non-empty.
-func (e *Engine) buildSenderPrompt(content, userID, platform, sessionKey string) string {
+// injectSender is enabled and userID is non-empty. When userName is available
+// it is included as sender_name so the agent can identify who sent the message
+// by display name (useful in shared channel sessions with multiple users).
+func (e *Engine) buildSenderPrompt(content, userID, userName, platform, sessionKey string) string {
 	if !e.injectSender || userID == "" {
 		return content
 	}
 	chatID := extractChannelID(sessionKey)
+	if userName != "" {
+		safeName := strings.NewReplacer(`"`, `'`, "\n", " ", "\r", "").Replace(userName)
+		return fmt.Sprintf("[cc-connect sender_id=%s sender_name=\"%s\" platform=%s chat_id=%s]\n%s", userID, safeName, platform, chatID, content)
+	}
 	return fmt.Sprintf("[cc-connect sender_id=%s platform=%s chat_id=%s]\n%s", userID, platform, chatID, content)
 }
 
@@ -10328,8 +10356,30 @@ func (e *Engine) handleWorkspaceInitFlow(p Platform, msg *Message, channelName s
 
 	switch flow.state {
 	case "awaiting_url":
+		// Accept local directory paths: bind directly without cloning.
+		if looksLikeLocalDir(content) {
+			dirPath, resolveErr := resolveLocalDirPath(content, e.baseDir)
+			if resolveErr != nil {
+				e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsInitDirNotFound, content))
+				return true
+			}
+			info, err := os.Stat(dirPath)
+			if err != nil || !info.IsDir() {
+				e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsInitDirNotFound, content))
+				return true
+			}
+			projectKey := "project:" + e.name
+			e.workspaceBindings.Bind(projectKey, channelKey, flow.channelName, normalizeWorkspacePath(dirPath))
+			e.initFlowsMu.Lock()
+			delete(e.initFlows, channelKey)
+			e.initFlowsMu.Unlock()
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(
+				"Bound workspace `%s` to this channel. Ready.", dirPath))
+			return true
+		}
+
 		if !looksLikeGitURL(content) {
-			e.reply(p, msg.ReplyCtx, "That doesn't look like a git URL. Please provide a URL like `https://github.com/org/repo` or `git@github.com:org/repo.git`.")
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsInitInvalidTarget))
 			return true
 		}
 		repoName := extractRepoName(content)
@@ -10385,6 +10435,51 @@ func looksLikeGitURL(s string) bool {
 		strings.HasPrefix(s, "http://") ||
 		strings.HasPrefix(s, "git@") ||
 		strings.HasPrefix(s, "ssh://")
+}
+
+// resolveLocalDirPath resolves a user-provided directory path to an absolute
+// path, expanding ~/... and joining relative paths with baseDir. It rejects
+// paths that escape baseDir via ../ traversal.
+func resolveLocalDirPath(target, baseDir string) (string, error) {
+	dirPath := target
+	if strings.HasPrefix(dirPath, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("cannot resolve home directory: %w", err)
+		}
+		dirPath = filepath.Join(home, dirPath[2:])
+	} else if !filepath.IsAbs(dirPath) {
+		dirPath = filepath.Join(baseDir, dirPath)
+	}
+	cleaned := filepath.Clean(dirPath)
+	resolved, err := filepath.EvalSymlinks(cleaned)
+	if err != nil {
+		resolved = cleaned
+	}
+	if baseDir != "" && !filepath.IsAbs(target) {
+		cleanBase := filepath.Clean(baseDir)
+		if evalBase, err := filepath.EvalSymlinks(cleanBase); err == nil {
+			cleanBase = evalBase
+		}
+		if !strings.HasPrefix(resolved, cleanBase+string(filepath.Separator)) && resolved != cleanBase {
+			return "", fmt.Errorf("path escapes workspace base directory")
+		}
+	}
+	return resolved, nil
+}
+
+// looksLikeLocalDir returns true if the string looks like a local directory
+// path (absolute path, home-relative, dot-relative, or a bare name that
+// doesn't look like a URL).
+func looksLikeLocalDir(s string) bool {
+	if s == "" {
+		return false
+	}
+	return strings.HasPrefix(s, "/") ||
+		strings.HasPrefix(s, "~/") ||
+		strings.HasPrefix(s, "./") ||
+		strings.HasPrefix(s, "../") ||
+		(!strings.Contains(s, "://") && !strings.Contains(s, "@"))
 }
 
 func extractRepoName(url string) string {

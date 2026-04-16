@@ -549,6 +549,8 @@ const (
 	MsgWsCloneProgress         MsgKey = "ws_clone_progress"
 	MsgWsCloneSuccess          MsgKey = "ws_clone_success"
 	MsgWsCloneFailed           MsgKey = "ws_clone_failed"
+	MsgWsInitDirNotFound       MsgKey = "ws_init_dir_not_found"
+	MsgWsInitInvalidTarget     MsgKey = "ws_init_invalid_target"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -3518,11 +3520,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Uso: `/workspace [bind <nombre> | route <ruta-absoluta> | init <url> | unbind | list | shared ...]`",
 	},
 	MsgWsInitUsage: {
-		LangEnglish:            "Usage: `/workspace init <git-url>`",
-		LangChinese:            "用法: `/workspace init <git仓库地址>`",
-		LangTraditionalChinese: "用法: `/workspace init <git倉庫地址>`",
-		LangJapanese:           "使い方: `/workspace init <git-url>`",
-		LangSpanish:            "Uso: `/workspace init <git-url>`",
+		LangEnglish:            "Usage: `/workspace init <git-url or directory-path>`",
+		LangChinese:            "用法: `/workspace init <git仓库地址或目录路径>`",
+		LangTraditionalChinese: "用法: `/workspace init <git倉庫地址或目錄路徑>`",
+		LangJapanese:           "使い方: `/workspace init <git-urlまたはディレクトリパス>`",
+		LangSpanish:            "Uso: `/workspace init <git-url o ruta-de-directorio>`",
 	},
 	MsgWsBindUsage: {
 		LangEnglish:            "Usage: `/workspace bind <workspace-name>`",
@@ -3658,11 +3660,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "El workspace efectivo actual proviene de la capa shared. Usa `/workspace shared unbind` para quitarlo.",
 	},
 	MsgWsNotFoundHint: {
-		LangEnglish:            "No workspace found for this channel. Send me a git repo URL to clone, or use `/workspace init <url>`.",
-		LangChinese:            "此频道未找到工作区。请发送 git 仓库地址进行克隆，或使用 `/workspace init <仓库地址>`。",
-		LangTraditionalChinese: "此頻道未找到工作區。請發送 git 倉庫地址進行克隆，或使用 `/workspace init <倉庫地址>`。",
-		LangJapanese:           "このチャンネルにワークスペースが見つかりません。gitリポジトリURLを送信するか、`/workspace init <url>` を使用してください。",
-		LangSpanish:            "No se encontró workspace para este canal. Envía una URL de repo git para clonar, o usa `/workspace init <url>`.",
+		LangEnglish:            "No workspace found for this channel. Send a git repo URL, a local directory path, or use `/workspace init <url-or-path>`.",
+		LangChinese:            "此频道未找到工作区。请发送 git 仓库地址或本地目录路径，或使用 `/workspace init <仓库地址或目录路径>`。",
+		LangTraditionalChinese: "此頻道未找到工作區。請發送 git 倉庫地址或本地目錄路徑，或使用 `/workspace init <倉庫地址或目錄路徑>`。",
+		LangJapanese:           "このチャンネルにワークスペースが見つかりません。git URL またはローカルディレクトリパスを送信するか、`/workspace init <urlまたはパス>` を使用してください。",
+		LangSpanish:            "No se encontró workspace para este canal. Envía una URL de repo git, una ruta de directorio local, o usa `/workspace init <url-o-ruta>`.",
 	},
 	MsgWsResolutionError: {
 		LangEnglish:            "Workspace resolution error: %v",
@@ -3691,6 +3693,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 克隆倉庫失敗: %v",
 		LangJapanese:           "❌ リポジトリのクローンに失敗しました: %v",
 		LangSpanish:            "❌ Error al clonar repositorio: %v",
+	},
+	MsgWsInitDirNotFound: {
+		LangEnglish:            "Directory not found: `%s`. Please provide a valid directory path or a git URL.",
+		LangChinese:            "目录不存在: `%s`。请提供有效的目录路径或 git 仓库地址。",
+		LangTraditionalChinese: "目錄不存在: `%s`。請提供有效的目錄路徑或 git 倉庫地址。",
+		LangJapanese:           "ディレクトリが見つかりません: `%s`。有効なディレクトリパスまたは git URL を指定してください。",
+		LangSpanish:            "Directorio no encontrado: `%s`. Proporcione una ruta de directorio válida o una URL de git.",
+	},
+	MsgWsInitInvalidTarget: {
+		LangEnglish:            "Please provide a git URL (e.g. `https://github.com/org/repo`) or a local directory path.",
+		LangChinese:            "请提供 git 仓库地址（如 `https://github.com/org/repo`）或本地目录路径。",
+		LangTraditionalChinese: "請提供 git 倉庫地址（如 `https://github.com/org/repo`）或本地目錄路徑。",
+		LangJapanese:           "git URL（例: `https://github.com/org/repo`）またはローカルディレクトリパスを指定してください。",
+		LangSpanish:            "Proporcione una URL de git (ej. `https://github.com/org/repo`) o una ruta de directorio local.",
 	},
 }
 

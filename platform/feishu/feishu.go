@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"math/rand/v2"
@@ -1007,6 +1008,8 @@ func (p *Platform) fetchChatMembers(ctx context.Context, chatID string) (map[str
 			name := *member.Name
 			if _, exists := members[name]; !exists {
 				members[name] = *member.MemberId
+			} else {
+				members[name] = ""
 			}
 		}
 		if !hasMore {
@@ -1059,13 +1062,18 @@ func (p *Platform) resolveMentionsInContent(ctx context.Context, chatID, content
 			continue
 		}
 		openID := members[name]
+		if openID == "" {
+			slog.Debug(p.tag()+": skipping ambiguous mention", "name", name)
+			continue
+		}
 		var atTag string
 		if useCardFormat {
 			atTag = fmt.Sprintf(`<at id=%s></at>`, openID)
 		} else {
-			atTag = fmt.Sprintf(`<at user_id="%s">%s</at>`, openID, name)
+			escapedName := html.EscapeString(name)
+			atTag = fmt.Sprintf(`<at user_id="%s">%s</at>`, openID, escapedName)
 		}
-		slog.Info(p.tag()+": mention resolved", "name", name, "open_id", openID, "card_format", useCardFormat)
+		slog.Debug(p.tag()+": mention resolved", "name", name, "card_format", useCardFormat)
 		result = strings.ReplaceAll(result, pattern, atTag)
 	}
 	return result

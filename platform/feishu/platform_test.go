@@ -1067,3 +1067,35 @@ func TestResolveMentions_NoAtSign(t *testing.T) {
 		t.Fatalf("no @ should return unchanged, got %q", result)
 	}
 }
+
+func TestResolveMentions_DuplicateNameSkipped(t *testing.T) {
+	p := &Platform{platformName: "feishu", resolveMentions: true}
+	p.chatMemberCache.Store("oc_chat", &chatMemberEntry{
+		members:   map[string]string{"张三": "", "李四": "ou_lisi"},
+		fetchedAt: time.Now(),
+	})
+	input := "请 @张三 和 @李四 看看"
+	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
+	if !strings.Contains(result, "@张三") {
+		t.Fatal("ambiguous name should be kept as-is")
+	}
+	if strings.Contains(result, "@李四") {
+		t.Fatal("unique name should be resolved")
+	}
+}
+
+func TestResolveMentions_SpecialCharsEscaped(t *testing.T) {
+	p := &Platform{platformName: "feishu", resolveMentions: true}
+	p.chatMemberCache.Store("oc_chat", &chatMemberEntry{
+		members:   map[string]string{`A<"B">`: "ou_special"},
+		fetchedAt: time.Now(),
+	})
+	input := `@A<"B"> 你好`
+	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
+	if strings.Contains(result, `<"B">`) {
+		t.Fatalf("special chars should be escaped, got %q", result)
+	}
+	if !strings.Contains(result, "A&lt;") {
+		t.Fatalf("expected HTML-escaped name, got %q", result)
+	}
+}
