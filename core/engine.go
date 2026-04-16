@@ -2122,14 +2122,18 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 	// above, not inherited from the project-level opts that main.go
 	// already decorated. See cc-connect#496 and the cc-connect/core/runas.go
 	// preamble for why run_as_user has to survive this copy.
-	if ma, ok := e.agent.(interface{ GetRunAsUser() string }); ok {
-		if u := ma.GetRunAsUser(); u != "" {
-			opts["run_as_user"] = u
+	if _, ok := opts["run_as_user"]; !ok {
+		if ma, ok := e.agent.(interface{ GetRunAsUser() string }); ok {
+			if u := ma.GetRunAsUser(); u != "" {
+				opts["run_as_user"] = u
+			}
 		}
 	}
-	if ma, ok := e.agent.(interface{ GetRunAsEnv() []string }); ok {
-		if env := ma.GetRunAsEnv(); len(env) > 0 {
-			opts["run_as_env"] = env
+	if _, ok := opts["run_as_env"]; !ok {
+		if ma, ok := e.agent.(interface{ GetRunAsEnv() []string }); ok {
+			if env := ma.GetRunAsEnv(); len(env) > 0 {
+				opts["run_as_env"] = env
+			}
 		}
 	}
 

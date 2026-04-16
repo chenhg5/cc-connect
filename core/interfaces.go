@@ -393,9 +393,10 @@ type ModeSwitcher interface {
 }
 
 // WorkspaceAgentOptionSnapshotter is an optional interface for agents that can
-// export the constructor options needed to recreate an equivalent agent in a
-// different workspace. The engine uses this in multi-workspace mode and then
-// overrides work_dir for the target workspace.
+// export reusable constructor options needed to recreate an equivalent agent in
+// a different workspace. Snapshot values should omit work_dir; the caller is
+// responsible for setting the target workspace explicitly. Provider wiring and
+// run_as propagation may still be handled separately by the engine.
 type WorkspaceAgentOptionSnapshotter interface {
 	WorkspaceAgentOptions() map[string]any
 }

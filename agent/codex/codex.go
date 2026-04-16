@@ -375,9 +375,8 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	defer a.mu.RUnlock()
 
 	opts := map[string]any{
-		"work_dir": a.workDir,
-		"mode":     a.mode,
-		"backend":  a.backend,
+		"mode":    a.mode,
+		"backend": a.backend,
 	}
 	if a.model != "" {
 		opts["model"] = a.model
