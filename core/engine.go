@@ -2281,7 +2281,20 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	// Resume only when we have a concrete saved agent session ID. If the session
 	// is unbound, force a fresh start instead of attaching to whichever CLI
 	// conversation happens to be "latest" in this workspace.
+	//
+	// Additionally, validate that the session ID belongs to this project's
+	// session store to prevent cross-project session context leakage (issue #599).
 	startSessionID := session.GetAgentSessionID()
+	if startSessionID != "" {
+		// Validate session ID belongs to this project before resuming.
+		if validator, ok := agent.(SessionIDValidator); ok && !validator.ValidateSessionID(e.ctx, startSessionID) {
+			slog.Warn("session ID does not belong to this project, clearing it",
+				"session_key", sessionKey, "invalid_session_id", startSessionID)
+			session.SetAgentSessionID("", "")
+			sessions.Save()
+			startSessionID = ""
+		}
+	}
 	isResume := startSessionID != ""
 	startAt := time.Now()
 	agentSession, err := agent.StartSession(e.ctx, startSessionID)

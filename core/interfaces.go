@@ -118,6 +118,13 @@ type SystemPromptSupporter interface {
 	HasSystemPromptSupport() bool
 }
 
+// SessionIDValidator is an optional interface for agents that can validate
+// whether a session ID belongs to their project's session store. This is used
+// to prevent cross-project session context leakage (issue #599).
+type SessionIDValidator interface {
+	ValidateSessionID(ctx context.Context, sessionID string) bool
+}
+
 // TypingIndicator is an optional interface for platforms that can show a
 // "processing" indicator (typing bubble, emoji reaction, etc.) while the
 // agent is working. StartTyping is called when processing begins and returns

@@ -70,7 +70,7 @@ func runSessions(args []string) {
 			printSessionsUsage()
 			return
 		default:
-			if subcommand == "" && (args[i] == "list" || args[i] == "show") {
+			if subcommand == "" && (args[i] == "list" || args[i] == "show" || args[i] == "prune") {
 				subcommand = args[i]
 			} else {
 				positional = append(positional, args[i])
@@ -105,6 +105,19 @@ func runSessions(args []string) {
 			os.Exit(1)
 		}
 		runSessionsShow(dataDir, id, limit)
+	case "prune":
+		var mergeHistory bool
+		var project string
+		for i := 0; i < len(positional); i++ {
+			if positional[i] == "--merge" {
+				mergeHistory = true
+			} else if positional[i] == "--empty" {
+				// Only remove empty sessions
+			} else if project == "" {
+				project = positional[i]
+			}
+		}
+		runSessionsPrune(dataDir, project, mergeHistory)
 	default:
 		// Default: launch TUI
 		runSessionsTUI(dataDir)
@@ -299,6 +312,62 @@ func runSessionsShow(dataDir, id string, limit int) {
 	}
 }
 
+func runSessionsPrune(dataDir, project string, mergeHistory bool) {
+	sessionsDir := filepath.Join(dataDir, "sessions")
+	entries, err := os.ReadDir(sessionsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Println("No sessions directory found.")
+			return
+		}
+		fmt.Fprintf(os.Stderr, "Error: cannot read sessions dir: %v\n", err)
+		os.Exit(1)
+	}
+
+	totalRemoved := 0
+	totalMerged := 0
+	totalChats := 0
+
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+
+		projectName := strings.TrimSuffix(entry.Name(), ".json")
+		// If user specified a project, skip others
+		if project != "" && projectName != project {
+			continue
+		}
+
+		filePath := filepath.Join(sessionsDir, entry.Name())
+		sm := core.NewSessionManager(filePath)
+
+		result := sm.PruneDuplicateSessions(mergeHistory)
+		if len(result.RemovedSessions) > 0 {
+			fmt.Printf("Project %s:\n", projectName)
+			fmt.Printf("  Removed %d duplicate sessions\n", len(result.RemovedSessions))
+			if mergeHistory && result.MergedHistory > 0 {
+				fmt.Printf("  Merged %d history entries\n", result.MergedHistory)
+			}
+			fmt.Printf("  %d chats had duplicates\n", result.ChatsAffected)
+			for _, sid := range result.RemovedSessions {
+				fmt.Printf("    - %s\n", sid)
+			}
+			totalRemoved += len(result.RemovedSessions)
+			totalMerged += result.MergedHistory
+			totalChats += result.ChatsAffected
+		}
+	}
+
+	if totalRemoved == 0 {
+		fmt.Println("No duplicate sessions found.")
+	} else {
+		fmt.Println()
+		fmt.Printf("Total: removed %d sessions, merged %d entries, %d chats affected\n",
+			totalRemoved, totalMerged, totalChats)
+	}
+}
+
 func displayUser(r sessionRecord) string {
 	if r.UserName != "" {
 		return r.UserName
@@ -338,12 +407,13 @@ func truncate(s string, maxLen int) string {
 func printSessionsUsage() {
 	fmt.Println(`Usage: cc-connect sessions [command] [options]
 
-Browse session history.
+Browse and manage session history.
 
 Commands:
   (none)             Interactive TUI browser (default)
   list               List all sessions (pipe-friendly)
   show <id> [-n N]   Show session messages
+  prune [project] [--merge]  Remove duplicate sessions per chat
 
 Options:
   --data-dir <path>  Data directory (default: ~/.cc-connect)
@@ -353,9 +423,16 @@ Session ID formats for 'show':
   <project>:<session>   e.g. "feishu_bot_64788ce0:s1"
   <number> or #<number> Index from 'sessions list', e.g. "1" or "#1"
 
+Prune options:
+  --merge    Merge history from removed sessions into kept one
+             (without --merge, only removes sessions with no history)
+
 Examples:
   cc-connect sessions                           Interactive TUI browser
   cc-connect sessions list                      List all sessions
   cc-connect sessions show "mybot:s1"           Show all messages in session
-  cc-connect sessions show "#1" -n 20           Show last 20 messages of first session`)
+  cc-connect sessions show "#1" -n 20           Show last 20 messages of first session
+  cc-connect sessions prune                     Remove empty duplicate sessions
+  cc-connect sessions prune --merge             Merge duplicates, keeping most recent
+  cc-connect sessions prune mybot --merge       Prune specific project`)
 }

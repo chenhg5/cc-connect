@@ -432,6 +432,39 @@ func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
 	return os.Remove(path)
 }
 
+// ValidateSessionID checks whether a session ID exists in this project's
+// session store. This prevents cross-project session context leakage (issue #599).
+// Returns true if the session file exists in the projectDir derived from workDir.
+func (a *Agent) ValidateSessionID(_ context.Context, sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	return validateSessionIDInProject(homeDir, a.workDir, sessionID)
+}
+
+// validateSessionIDInProject is a testable helper that checks whether a session
+// ID exists in the project directory derived from homeDir and workDir.
+func validateSessionIDInProject(homeDir, workDir, sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	absWorkDir, err := filepath.Abs(workDir)
+	if err != nil {
+		return false
+	}
+	projectDir := findProjectDir(homeDir, absWorkDir)
+	if projectDir == "" {
+		return false
+	}
+	path := filepath.Join(projectDir, sessionID+".jsonl")
+	_, err = os.Stat(path)
+	return err == nil
+}
+
 func scanSessionMeta(path string) (string, int) {
 	f, err := os.Open(path)
 	if err != nil {

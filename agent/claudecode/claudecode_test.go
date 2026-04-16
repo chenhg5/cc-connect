@@ -454,3 +454,104 @@ func TestFindProjectDir_NotFound(t *testing.T) {
 		t.Errorf("findProjectDir for nonexistent project = %q, want empty string", found)
 	}
 }
+
+func TestValidateSessionID_ValidSession(t *testing.T) {
+	// Setup: create a mock project directory with a session file
+	homeDir := t.TempDir()
+	workDir := "/Users/test/Documents/myproject"
+	projectsBase := filepath.Join(homeDir, ".claude", "projects")
+	projectKey := encodeClaudeProjectKey(workDir)
+	projectDir := filepath.Join(projectsBase, projectKey)
+
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("failed to create mock project dir: %v", err)
+	}
+
+	// Create a session file
+	sessionID := "abc123-def456"
+	sessionFile := filepath.Join(projectDir, sessionID+".jsonl")
+	if err := os.WriteFile(sessionFile, []byte("{}"), 0644); err != nil {
+		t.Fatalf("failed to create session file: %v", err)
+	}
+
+	// validateSessionIDInProject should return true for existing session
+	if !validateSessionIDInProject(homeDir, workDir, sessionID) {
+		t.Errorf("validateSessionIDInProject(%q, %q, %q) = false, want true", homeDir, workDir, sessionID)
+	}
+}
+
+func TestValidateSessionID_InvalidSession(t *testing.T) {
+	// Setup: create a mock project directory WITHOUT the target session file
+	homeDir := t.TempDir()
+	workDir := "/Users/test/Documents/myproject"
+	projectsBase := filepath.Join(homeDir, ".claude", "projects")
+	projectKey := encodeClaudeProjectKey(workDir)
+	projectDir := filepath.Join(projectsBase, projectKey)
+
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("failed to create mock project dir: %v", err)
+	}
+
+	// Create a different session file (not the one we'll validate)
+	if err := os.WriteFile(filepath.Join(projectDir, "other-session.jsonl"), []byte("{}"), 0644); err != nil {
+		t.Fatalf("failed to create other session file: %v", err)
+	}
+
+	// validateSessionIDInProject should return false for non-existent session
+	sessionID := "abc123-def456"
+	if validateSessionIDInProject(homeDir, workDir, sessionID) {
+		t.Errorf("validateSessionIDInProject(%q, %q, %q) = true, want false", homeDir, workDir, sessionID)
+	}
+}
+
+func TestValidateSessionID_EmptySessionID(t *testing.T) {
+	if validateSessionIDInProject(t.TempDir(), "/tmp", "") {
+		t.Error("validateSessionIDInProject(empty) = true, want false")
+	}
+}
+
+func TestValidateSessionID_ProjectNotFound(t *testing.T) {
+	// WorkDir doesn't correspond to any existing project directory
+	homeDir := t.TempDir()
+	if validateSessionIDInProject(homeDir, "/nonexistent/path", "some-session-id") {
+		t.Error("validateSessionIDInProject with nonexistent project = true, want false")
+	}
+}
+
+func TestValidateSessionID_CrossProjectLeak(t *testing.T) {
+	// Test that a session ID from one project doesn't validate for a different project
+	homeDir := t.TempDir()
+
+	// Project A has a session
+	projectA := "/Users/test/Documents/projectA"
+	projectKeyA := encodeClaudeProjectKey(projectA)
+	projectDirA := filepath.Join(homeDir, ".claude", "projects", projectKeyA)
+	if err := os.MkdirAll(projectDirA, 0755); err != nil {
+		t.Fatalf("failed to create projectA dir: %v", err)
+	}
+	sessionID := "shared-session-id"
+	if err := os.WriteFile(filepath.Join(projectDirA, sessionID+".jsonl"), []byte("{}"), 0644); err != nil {
+		t.Fatalf("failed to create session file in projectA: %v", err)
+	}
+
+	// Project B has no session files (or different sessions)
+	projectB := "/Users/test/Documents/projectB"
+	projectKeyB := encodeClaudeProjectKey(projectB)
+	projectDirB := filepath.Join(homeDir, ".claude", "projects", projectKeyB)
+	if err := os.MkdirAll(projectDirB, 0755); err != nil {
+		t.Fatalf("failed to create projectB dir: %v", err)
+	}
+
+	// validateSessionIDInProject for Project B should NOT validate session ID from Project A
+	if validateSessionIDInProject(homeDir, projectB, sessionID) {
+		t.Errorf("validateSessionIDInProject(%q, %q, %q) = true, want false (cross-project leak)", homeDir, projectB, sessionID)
+	}
+
+	// validateSessionIDInProject for Project A should validate its own session
+	if !validateSessionIDInProject(homeDir, projectA, sessionID) {
+		t.Errorf("validateSessionIDInProject(%q, %q, %q) = false, want true", homeDir, projectA, sessionID)
+	}
+}
+
+// Verify Agent implements SessionIDValidator
+var _ core.SessionIDValidator = (*Agent)(nil)
