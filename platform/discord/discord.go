@@ -792,7 +792,7 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 // mechanism. The first call edits the deferred "thinking" response; subsequent
 // calls create followup messages.
 func (p *Platform) sendInteraction(ictx *interactionReplyCtx, content string) error {
-	chunks := core.SplitMessageCodeFenceAware(content, maxDiscordLen)
+	chunks := core.SplitMessageCodeFenceAware(wrapTablesInCodeBlocks(content), maxDiscordLen)
 	for _, chunk := range chunks {
 		ictx.mu.Lock()
 		first := !ictx.firstDone
@@ -821,7 +821,7 @@ func (p *Platform) sendInteraction(ictx *interactionReplyCtx, content string) er
 }
 
 func (p *Platform) sendChannelReply(rc replyContext, content string) error {
-	chunks := core.SplitMessageCodeFenceAware(content, maxDiscordLen)
+	chunks := core.SplitMessageCodeFenceAware(wrapTablesInCodeBlocks(content), maxDiscordLen)
 	for _, chunk := range chunks {
 		var err error
 		if rc.useThreadChannel() || rc.messageID == "" {
@@ -838,7 +838,7 @@ func (p *Platform) sendChannelReply(rc replyContext, content string) error {
 }
 
 func (p *Platform) sendChannel(rc replyContext, content string) error {
-	chunks := core.SplitMessageCodeFenceAware(content, maxDiscordLen)
+	chunks := core.SplitMessageCodeFenceAware(wrapTablesInCodeBlocks(content), maxDiscordLen)
 	for _, chunk := range chunks {
 		_, err := p.session.ChannelMessageSend(rc.targetChannelID(), chunk)
 		if err != nil {
@@ -1268,6 +1268,8 @@ func (p *Platform) resolveBotRoleIDForGuild(s *discordgo.Session, guildID string
 	return "", nil
 }
 
+const maxDownloadBytes = 50 << 20 // 50 MiB
+
 func downloadURL(u string) ([]byte, error) {
 	resp, err := core.HTTPClient.Get(u)
 	if err != nil {
@@ -1277,5 +1279,5 @@ func downloadURL(u string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("download %s: status %d", u, resp.StatusCode)
 	}
-	return io.ReadAll(resp.Body)
+	return io.ReadAll(io.LimitReader(resp.Body, maxDownloadBytes+1))
 }

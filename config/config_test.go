@@ -288,6 +288,125 @@ func TestLoad_DefaultsDataDir(t *testing.T) {
 	}
 }
 
+func TestLoad_ResolvesEnvPlaceholders(t *testing.T) {
+
+	root := t.TempDir()
+	t.Setenv("CC_ROOT", root)
+	t.Setenv("TG_TOKEN", "tg-secret")
+	t.Setenv("HOOK_TOKEN", "hook-secret")
+	t.Setenv("OPENAI_API_KEY", "sk-test")
+	t.Setenv("HTTP_PROXY", "http://127.0.0.1:7890")
+
+	configPath := writeConfigFixture(t, `
+ data_dir = "${CC_ROOT}/state"
+
+ [webhook]
+ token = "${HOOK_TOKEN}"
+
+ [[projects]]
+ name = "demo"
+
+ [projects.agent]
+ type = "codex"
+
+ [projects.agent.options]
+ work_dir = "${CC_ROOT}/repo"
+ note = "prefix-${HOOK_TOKEN}-suffix"
+ retries = 3
+
+ [[projects.agent.providers]]
+ name = "relay"
+ api_key = "${OPENAI_API_KEY}"
+ base_url = "https://relay.example/${HOOK_TOKEN}"
+
+ [projects.agent.providers.env]
+ HTTP_PROXY = "${HTTP_PROXY}"
+
+ [[projects.platforms]]
+ type = "telegram"
+
+ [projects.platforms.options]
+ token = "${TG_TOKEN}"
+ chat_id = 12345
+ `)
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if got, want := cfg.DataDir, filepath.Join(root, "state"); got != want {
+		t.Fatalf("DataDir = %q, want %q", got, want)
+	}
+	if got := cfg.Webhook.Token; got != "hook-secret" {
+		t.Fatalf("Webhook.Token = %q, want hook-secret", got)
+	}
+	if got := stringMapValue(cfg.Projects[0].Agent.Options, "work_dir"); got != filepath.Join(root, "repo") {
+		t.Fatalf("work_dir = %q, want %q", got, filepath.Join(root, "repo"))
+	}
+	if got := stringMapValue(cfg.Projects[0].Agent.Options, "note"); got != "prefix-hook-secret-suffix" {
+		t.Fatalf("note = %q, want prefix-hook-secret-suffix", got)
+	}
+	if got := cfg.Projects[0].Agent.Providers[0].APIKey; got != "sk-test" {
+		t.Fatalf("provider api_key = %q, want sk-test", got)
+	}
+	if got := cfg.Projects[0].Agent.Providers[0].Env["HTTP_PROXY"]; got != "http://127.0.0.1:7890" {
+		t.Fatalf("provider env HTTP_PROXY = %q, want http://127.0.0.1:7890", got)
+	}
+	if got := stringMapValue(cfg.Projects[0].Platforms[0].Options, "token"); got != "tg-secret" {
+		t.Fatalf("platform token = %q, want tg-secret", got)
+	}
+	if _, ok := cfg.Projects[0].Platforms[0].Options["chat_id"].(int64); !ok {
+		t.Fatalf("chat_id type = %T, want int64", cfg.Projects[0].Platforms[0].Options["chat_id"])
+	}
+}
+
+func TestLoad_MissingEnvPlaceholderBecomesEmptyString(t *testing.T) {
+
+	configPath := writeConfigFixture(t, `
+ [[projects]]
+ name = "demo"
+
+ [projects.agent]
+ type = "codex"
+
+ [projects.agent.options]
+ work_dir = "/tmp/demo"
+ retries = 5
+
+ [[projects.agent.providers]]
+ name = "relay"
+ api_key = "${MISSING_API_KEY}"
+
+ [projects.agent.providers.env]
+ HTTPS_PROXY = "${MISSING_PROXY}"
+
+ [[projects.platforms]]
+ type = "telegram"
+
+ [projects.platforms.options]
+ token = "prefix-${MISSING_TOKEN}-suffix"
+ `)
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if got := cfg.Projects[0].Agent.Providers[0].APIKey; got != "" {
+		t.Fatalf("provider api_key = %q, want empty", got)
+	}
+	if got := cfg.Projects[0].Agent.Providers[0].Env["HTTPS_PROXY"]; got != "" {
+		t.Fatalf("provider env HTTPS_PROXY = %q, want empty", got)
+	}
+	if got := stringMapValue(cfg.Projects[0].Platforms[0].Options, "token"); got != "prefix--suffix" {
+		t.Fatalf("platform token = %q, want prefix--suffix", got)
+	}
+	if _, ok := cfg.Projects[0].Agent.Options["retries"].(int64); !ok {
+		t.Fatalf("retries type = %T, want int64", cfg.Projects[0].Agent.Options["retries"])
+	}
+}
+
 func TestListProjects(t *testing.T) {
 	writeTestConfig(t, baseConfigTOML)
 

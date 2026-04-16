@@ -34,6 +34,41 @@
 </p>
 
 
+## ❤️ 赞助
+
+> 想在这里展示？联系：chg80333@gmail.com | 微信：mongorz
+
+<details open>
+<summary>赞助商</summary>
+
+<table>
+<tr>
+<td width="150"><a href="https://www.aicodemirror.com/register?invitecode=KDHMUP"><img src="assets/sponsors/aicodemirror.jpg" alt="AICodeMirror" width="120"></a></td>
+<td>感谢 AICodeMirror 对本项目的赞助！AICodeMirror 提供 Claude Code / Codex / Gemini CLI 官方高稳定性中转服务，企业级并发、快速开票、24小时专属技术支持。Claude Code / Codex / Gemini 官方渠道价格仅为原价的 38% / 2% / 9%，充值还有额外折扣！通过 <a href="https://www.aicodemirror.com/register?invitecode=KDHMUP">此链接</a> 注册，首充享受 20% 折扣，企业客户最高可享 25% 折扣！</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://aigocode.com/invite/CYY3C85C"><img src="assets/sponsors/aigocode.png" alt="AIGoCode" width="120"></a></td>
+<td>感谢 AIGoCode 对本项目的赞助！AIGoCode 是集 Claude Code、Codex、最新 Gemini 模型于一体的一站式平台，提供稳定高效、高性价比的 AI 编码服务。灵活订阅方案、零封号风险、无需 VPN 直连、响应速度极快。通过 <a href="https://aigocode.com/invite/CYY3C85C">此链接</a> 注册，首充额外获得 10% 赠送额度！</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://code0.ai/register?aff=5cGO"><img src="assets/sponsors/code0.svg" alt="Code0" width="120"></a></td>
+<td>感谢 Code0 对本项目的赞助！Code0 是面向中国开发者的 AI 模型聚合 API 中转服务，统一兼容 OpenAI / Anthropic / Gemini 三种协议格式，一个 Key 即可调用全量主流模型，稳定适配 Claude Code、Codex、Gemini CLI、cc-connect 等各类 Agent 工具。固定汇率计费：充值 1.5 元人民币 = 1 美元 API 额度，价格透明、国内直连、开箱即用。通过 <a href="https://code0.ai/register?aff=5cGO">此链接</a> 注册。</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://console.claudeapi.com/register?aff=GDbA"><img src="assets/sponsors/claudeapi.svg" alt="claudeapi.com" width="120"></a></td>
+<td>感谢 claudeapi.com 对本项目的赞助！claudeapi 是面向中高端用户的高质量直连 Claude 服务，完整接入 Anthropic 官方第一方 Keys 和 AWS Bedrock 官方渠道——无逆向工程、无智力降级、无拼接。完整保留 Opus / Sonnet / Haiku 的官方能力、长上下文和 Tool Calling 性能。专为 Claude Code 重度用户、Agent 开发者和企业团队设计，开箱即用、企业级稳定。支持开票和团队入驻。通过 <a href="https://console.claudeapi.com/register?aff=GDbA">此链接</a> 注册。</td>
+</tr>
+</table>
+
+</details>
+
+---
+
+<br>
+
 <p align="center">
   <b>在任何聊天工具里，远程操控你的本地 AI Agent。随时随地，随心所欲。</b>
 </p>
@@ -370,25 +405,6 @@ cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/ch
 
 - [Discord](https://discord.gg/kHpwgaM4kq)
 - [Telegram](https://t.me/+odGNDhCjbjdmMmZl)
-
-
-## ❤️ 赞助
-
-> 想在这里展示您的品牌？**邮箱**：chg80333@gmail.com | **微信**：mongorz | [Telegram](https://t.me/+odGNDhCjbjdmMmZl) | [Discord](https://discord.gg/kHpwgaM4kq)
-
-<details open>
-<summary>赞助商</summary>
-
-<!-- 赞助位招租 - 联系我们成为赞助商 -->
-
-<table>
-<tr>
-<td width="180"><a href="#"><img src="docs/images/sponsors/placeholder.svg" alt="您的 Logo" width="150"></a></td>
-<td>成为赞助商！我们为您的产品提供专属用户福利。联系我们了解更多赞助机会。</td>
-</tr>
-</table>
-
-</details>
 
 
 ## ☕ 支持项目
