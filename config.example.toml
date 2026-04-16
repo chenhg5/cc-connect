@@ -736,6 +736,8 @@ app_secret = "your-feishu-app-secret"
 #                              # 允许的用户 open_id，逗号分隔；"*" 表示所有（默认）。发送 /whoami 获取你的 open_id。
 # allow_chat = "*"          # Allowed group chat_ids, comma-separated; "*" = all (default). Find chat_id in group settings.
 #                           # 允许的群聊 chat_id，逗号分隔；"*" 表示所有（默认）。在群设置中查看 chat_id。
+# group_only = false        # If true, only respond to group chat messages; ignore private (P2P) messages (default: false)
+#                           # 设为 true 时，仅响应群聊消息，忽略私聊（P2P）消息（默认 false）
 # reaction_emoji = "OnIt"  # Emoji reaction on incoming messages (default: "OnIt"); set to "none" to disable
 #                           # 收到消息时添加的表情回复（默认 "OnIt"）；设为 "none" 可禁用
 # group_reply_all = false   # If true, respond to ALL group messages without requiring @mention

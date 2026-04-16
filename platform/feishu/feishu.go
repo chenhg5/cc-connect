@@ -301,6 +301,12 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	p.sharedGroup = group
 	p.isWSPrimary = isPrimary
 
+	// Secondary platforms skip connection creation — the primary's connection
+	// fans out events to all platforms in the shared group.
+	if !isPrimary {
+		return nil
+	}
+
 	p.eventHandler = dispatcher.NewEventDispatcher("", p.encryptKey).
 		OnP2MessageReceiveV1(func(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
 			// Fan out to all platforms sharing this WebSocket connection.
@@ -331,6 +337,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		}).
 		OnP2CardActionTrigger(func(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
 			// Fan out card actions: try each platform, return first non-nil response.
+			// Each platform's onCardAction checks allow_chat before processing.
 			for _, sibling := range p.sharedGroup.allPlatforms() {
 				resp, err := sibling.onCardAction(event)
 				if err != nil {
@@ -355,12 +362,6 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	// Feishu domestic version supports WebSocket long connection
 	if p.platformName == "lark" {
 		return p.startWebhookMode()
-	}
-
-	// Secondary platforms skip WebSocket creation — the primary's connection
-	// fans out events to all platforms in the shared group.
-	if !isPrimary {
-		return nil
 	}
 
 	return p.startWebSocketMode()
@@ -448,6 +449,13 @@ func (p *Platform) webhookHandler(w http.ResponseWriter, r *http.Request) {
 func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
 	if event.Event == nil || event.Event.Action == nil {
 		return nil, nil
+	}
+
+	// Check allow_chat filter: skip card actions from chats this platform doesn't own.
+	if event.Event.Context != nil && event.Event.Context.OpenChatID != "" {
+		if !core.AllowList(p.allowChat, event.Event.Context.OpenChatID) {
+			return nil, nil
+		}
 	}
 
 	actionVal, _ := event.Event.Action.Value["action"].(string)
@@ -3091,10 +3099,17 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 }
 
 func (p *Platform) Stop() error {
-	unregisterSharedWS(p)
-	// Only the primary platform owns the WebSocket connection.
-	if p.cancel != nil && p.isWSPrimary {
-		p.cancel()
+	if p.isWSPrimary {
+		remaining := unregisterSharedWS(p)
+		if remaining > 0 {
+			slog.Warn(p.tag()+": primary shutting down, secondary platforms will lose event source",
+				"remaining", remaining)
+		}
+		if p.cancel != nil {
+			p.cancel()
+		}
+	} else {
+		unregisterSharedWS(p)
 	}
 	// Stop webhook server if running (Lark international version)
 	if p.server != nil {
@@ -3284,6 +3299,10 @@ func (p *Platform) onBotMenu(event *larkapplication.P2BotMenuV6) error {
 
 	if !core.AllowList(p.allowFrom, userID) {
 		slog.Debug(p.tag()+": menu event from unauthorized user", "user", userID, "event_key", eventKey)
+		return nil
+	}
+	if p.groupOnly {
+		slog.Debug(p.tag()+": bot menu skipped (group_only=true)", "user", userID)
 		return nil
 	}
 

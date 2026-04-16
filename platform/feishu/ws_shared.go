@@ -49,14 +49,15 @@ func registerSharedWS(p *Platform) (group *sharedWSGroup, isPrimary bool) {
 }
 
 // unregisterSharedWS removes a platform from its shared group.
-func unregisterSharedWS(p *Platform) {
+// Returns the number of platforms remaining in the group.
+func unregisterSharedWS(p *Platform) int {
 	key := sharedWSKey(p.appID, p.domain)
 	sharedWSMu.Lock()
 	defer sharedWSMu.Unlock()
 
 	g, exists := sharedWSGroups[key]
 	if !exists {
-		return
+		return 0
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -66,9 +67,11 @@ func unregisterSharedWS(p *Platform) {
 			break
 		}
 	}
-	if len(g.platforms) == 0 {
+	remaining := len(g.platforms)
+	if remaining == 0 {
 		delete(sharedWSGroups, key)
 	}
+	return remaining
 }
 
 // allPlatforms returns a snapshot of all platforms in the group.
