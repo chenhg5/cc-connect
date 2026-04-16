@@ -1188,7 +1188,6 @@ var messages = map[MsgKey]map[Language]string{
 			"/skills — 列出 Agent Skills\n" +
 			"/compress — 壓縮上下文\n" +
 			"/clear [reset] — 清空當前會話上下文\n" +
-			"/clear [reset] — 清空當前會話上下文\n" +
 			"/stop — 停止當前執行",
 		LangJapanese: "**ツール・自動化**\n" +
 			"/shell <コマンド> — シェルコマンド実行\n" +
@@ -1199,7 +1198,6 @@ var messages = map[MsgKey]map[Language]string{
 			"/skills — エージェントスキル一覧\n" +
 			"/compress — コンテキスト圧縮\n" +
 			"/clear [reset] — 現在のセッションのコンテキストをクリア\n" +
-			"/clear [reset] — 現在のセッションのコンテキストをクリア\n" +
 			"/stop — 現在の実行を停止",
 		LangSpanish: "**Herramientas y automatización**\n" +
 			"/shell <comando> — Ejecutar comando shell\n" +
@@ -1209,7 +1207,6 @@ var messages = map[MsgKey]map[Language]string{
 			"/alias [add|del] — Alias de comandos\n" +
 			"/skills — Listar skills del agente\n" +
 			"/compress — Comprimir contexto\n" +
-			"/clear [reset] — Limpiar el contexto de la sesión actual\n" +
 			"/clear [reset] — Limpiar el contexto de la sesión actual\n" +
 			"/stop — Detener ejecución actual",
 	},
