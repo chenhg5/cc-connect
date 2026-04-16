@@ -762,14 +762,15 @@ app_secret = "your-feishu-app-secret"
 #                           # 自动将发出消息中的 @显示名 替换为飞书 at 标签（通过匹配群成员名称）
 
 # Lark (International Version) / Lark 国际版
-# Lark uses Webhook mode instead of WebSocket long-connection.
-# Lark 使用 Webhook 模式而非 WebSocket 长连接。
+# Lark now supports WebSocket long-connection too; webhook mode is only needed
+# when you explicitly configure encrypt_key.
+# Lark 国际版现已支持 WebSocket 长连接；只有显式配置 encrypt_key 时才需要 Webhook 模式。
 # 1. Create an app at https://open.larksuite.com / 在 https://open.larksuite.com 创建应用
 # 2. Enable Bot capability / 开启机器人能力
-# 3. Add im.message.receive_v1 event, configure Webhook URL (requires public IP)
-#    添加 im.message.receive_v1 事件，配置 Webhook URL（需要公网 IP）
-# 4. Fill in app_id, app_secret, port, callback_path below
-#    填入下方 app_id、app_secret、port、callback_path
+# 3. Add im.message.receive_v1 event and enable WebSocket long-connection mode (recommended)
+#    添加 im.message.receive_v1 事件，并启用 WebSocket 长连接模式（推荐）
+# 4. Fill in app_id and app_secret below; port/callback_path are only used for webhook mode
+#    填入下方 app_id 和 app_secret；port/callback_path 仅在 Webhook 模式下使用
 
 # [[projects.platforms]]
 # type = "lark"
