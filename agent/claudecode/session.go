@@ -51,20 +51,23 @@ type claudeSession struct {
 	gracefulStopTimeout time.Duration
 }
 
-func newClaudeSession(ctx context.Context, workDir, model, effort, sessionID, mode string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int) (*claudeSession, error) {
+func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cliArgsFlag string, model, effort, sessionID, mode string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
-	args := []string{
+	// innerArgs are Claude Code CLI flags — when a wrapper is used with
+	// cliArgsFlag these get bundled into a single passthrough string.
+	// outerArgs are flags the wrapper itself understands (e.g. --model).
+	innerArgs := []string{
 		"--output-format", "stream-json",
 		"--input-format", "stream-json",
 		"--permission-prompt-tool", "stdio",
 	}
 	if !disableVerbose {
-		args = append(args, "--verbose")
+		innerArgs = append(innerArgs, "--verbose")
 	}
 
 	if mode != "" && mode != "default" {
-		args = append(args, "--permission-mode", mode)
+		innerArgs = append(innerArgs, "--permission-mode", mode)
 	}
 	switch sessionID {
 	case "", core.ContinueSession:
@@ -72,33 +75,36 @@ func newClaudeSession(ctx context.Context, workDir, model, effort, sessionID, mo
 	default:
 		// Resuming a known session ID — this is cc-connect's own session
 		// from a previous connection, safe to resume directly.
-		args = append(args, "--resume", sessionID)
-	}
-	if model != "" {
-		args = append(args, "--model", model)
+		innerArgs = append(innerArgs, "--resume", sessionID)
 	}
 	if len(allowedTools) > 0 {
-		args = append(args, "--allowedTools", strings.Join(allowedTools, ","))
+		innerArgs = append(innerArgs, "--allowedTools", strings.Join(allowedTools, ","))
 	}
 	if len(disallowedTools) > 0 {
-		args = append(args, "--disallowedTools", strings.Join(disallowedTools, ","))
+		innerArgs = append(innerArgs, "--disallowedTools", strings.Join(disallowedTools, ","))
 	}
 
 	if sysPrompt := core.AgentSystemPrompt(); sysPrompt != "" {
 		if platformPrompt != "" {
 			sysPrompt += "\n## Formatting\n" + platformPrompt + "\n"
 		}
-		args = append(args, "--append-system-prompt", sysPrompt)
+		innerArgs = append(innerArgs, "--append-system-prompt", sysPrompt)
 	}
 
 	if effort != "" {
-		args = append(args, "--effort", effort)
+		innerArgs = append(innerArgs, "--effort", effort)
 	}
 	if maxContextTokens > 0 {
-		args = append(args, "--max-context-tokens", strconv.Itoa(maxContextTokens))
+		innerArgs = append(innerArgs, "--max-context-tokens", strconv.Itoa(maxContextTokens))
+	}
+	
+	// outerArgs are understood by both the wrapper and Claude CLI directly.
+	var outerArgs []string
+	if model != "" {
+		outerArgs = append(outerArgs, "--model", model)
 	}
 
-	slog.Debug("claudeSession: starting", "args", core.RedactArgs(args), "dir", workDir, "mode", mode, "run_as_user", spawnOpts.RunAsUser)
+	slog.Debug("claudeSession: starting", "innerArgs", core.RedactArgs(innerArgs), "outerArgs", core.RedactArgs(outerArgs), "dir", workDir, "mode", mode, "run_as_user", spawnOpts.RunAsUser)
 
 	// Per-spawn defense in depth: if run_as_user is set, re-run the cheap
 	// preflight (sudo still works + target still can't escalate) right
@@ -114,7 +120,24 @@ func newClaudeSession(ctx context.Context, workDir, model, effort, sessionID, mo
 		}
 	}
 
-	cmd := core.BuildSpawnCommand(sessionCtx, spawnOpts, "claude", args...)
+	// Build final argument list.
+	// When cliArgsFlag is set (e.g. "-a"), inner args are bundled into a
+	// single passthrough string via that flag, while outer args (--model etc.)
+	// are appended directly so the wrapper can also interpret them.
+	// Args containing spaces/newlines are quoted so the wrapper's command-line
+	// parser (e.g. splitCommandLine) keeps them as single tokens.
+	// Result: my-cli code -t foo -a "--verbose --append-system-prompt 'long text'" --model x
+	var allArgs []string
+	if cliArgsFlag != "" {
+		allArgs = append(allArgs, cliExtraArgs...)
+		allArgs = append(allArgs, cliArgsFlag, shellJoinArgs(innerArgs))
+		allArgs = append(allArgs, outerArgs...)
+	} else {
+		allArgs = append(allArgs, cliExtraArgs...)
+		allArgs = append(allArgs, innerArgs...)
+		allArgs = append(allArgs, outerArgs...)
+	}
+	cmd := core.BuildSpawnCommand(sessionCtx, spawnOpts, cliBin, allArgs...)
 	cmd.Dir = workDir
 	// Filter out CLAUDECODE env var to prevent "nested session" detection,
 	// since cc-connect is a bridge, not a nested Claude Code session.
@@ -640,6 +663,37 @@ func (cs *claudeSession) Close() error {
 	}
 	<-cs.done
 	return nil
+}
+
+// shellJoinArgs joins args into a single string, quoting any arg that
+// contains whitespace so that a shell-style splitter (like my_cli's
+// splitCommandLine) preserves each arg as one token.
+//
+// Uses single quotes because some splitters (e.g. my_cli) don't support
+// backslash escapes inside double quotes. For values containing single
+// quotes, we close the single-quoted segment, add an escaped single
+// quote, and reopen: 'it'\''s' → it's
+func shellJoinArgs(args []string) string {
+	var b strings.Builder
+	for i, a := range args {
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		if !strings.ContainsAny(a, " \t\n\r'\"\\") {
+			b.WriteString(a)
+			continue
+		}
+		b.WriteByte('\'')
+		for _, c := range a {
+			if c == '\'' {
+				b.WriteString("'\\''")
+			} else {
+				b.WriteRune(c)
+			}
+		}
+		b.WriteByte('\'')
+	}
+	return b.String()
 }
 
 // filterEnv returns a copy of env with entries matching the given key removed.
