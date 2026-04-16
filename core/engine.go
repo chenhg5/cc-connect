@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,6 +42,11 @@ const (
 	slowAgentFirstEvent = 15 * time.Second // time from send to first agent event
 )
 
+const (
+	replyFooterUsageTimeout  = 1500 * time.Millisecond
+	replyFooterUsageCacheTTL = 30 * time.Second
+)
+
 // VersionInfo is set by main at startup so that /version works.
 var VersionInfo string
 
@@ -54,6 +60,11 @@ var ErrAttachmentSendDisabled = errors.New("attachment send is disabled by confi
 type RestartRequest struct {
 	SessionKey string `json:"session_key"`
 	Platform   string `json:"platform"`
+}
+
+type replyFooterUsageCache struct {
+	text      string
+	fetchedAt time.Time
 }
 
 // SaveRestartNotify persists restart info so the new process can send
@@ -201,6 +212,7 @@ type Engine struct {
 
 	// When true, append [ctx: ~N%] (or model self-report) to assistant replies shown on platforms.
 	showContextIndicator bool
+	replyFooterEnabled   bool
 
 	// Multi-workspace mode
 	multiWorkspace    bool
@@ -223,6 +235,8 @@ type Engine struct {
 	platformLifecycleMu sync.Mutex
 	platformReady       map[Platform]bool
 	stopping            bool
+	replyFooterMu       sync.Mutex
+	replyFooterUsage    replyFooterUsageCache
 
 	// /web command callbacks
 	webSetupFunc  func() (port int, token string, needRestart bool, err error)
@@ -259,6 +273,7 @@ type interactiveState struct {
 	platform               Platform
 	replyCtx               any
 	workspaceDir           string
+	agent                  Agent
 	mu                     sync.Mutex
 	stopCh                 chan struct{}
 	stopped                bool
@@ -504,6 +519,12 @@ func (e *Engine) SetResetOnIdle(d time.Duration) {
 // SetShowContextIndicator controls whether assistant replies include the [ctx: ~N%] suffix.
 func (e *Engine) SetShowContextIndicator(show bool) {
 	e.showContextIndicator = show
+}
+
+// SetReplyFooterEnabled controls whether assistant replies include a Codex-like
+// footer line with model / reasoning / usage / workdir metadata when available.
+func (e *Engine) SetReplyFooterEnabled(show bool) {
+	e.replyFooterEnabled = show
 }
 
 func (e *Engine) SetWebSetupFunc(fn func() (int, string, bool, error)) { e.webSetupFunc = fn }
@@ -2282,7 +2303,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	// Check if context is already canceled (e.g. during shutdown/restart)
 	if e.ctx.Err() != nil {
 		slog.Debug("skipping session start: context canceled", "session_key", sessionKey)
-		newState := &interactiveState{platform: p, replyCtx: replyCtx}
+		newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent}
 		adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
 		state = newState
 		e.interactiveStates[sessionKey] = state
@@ -2313,7 +2334,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		}
 		if err != nil {
 			slog.Error("failed to start interactive session", "error", err, "elapsed", startElapsed)
-			newState := &interactiveState{platform: p, replyCtx: replyCtx}
+			newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent}
 			adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
 			state = newState
 			e.interactiveStates[sessionKey] = state
@@ -2334,6 +2355,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		agentSession: agentSession,
 		platform:     p,
 		replyCtx:     replyCtx,
+		agent:        agent,
 	}
 	adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
 	state = newState
@@ -2458,6 +2480,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 	state.mu.Lock()
 	workspaceDir := state.workspaceDir
+	replyAgent := state.agent
+	if replyAgent == nil {
+		replyAgent = e.agent
+	}
 	workspaceRenderer := func(content string) string {
 		return e.renderOutgoingContentForWorkspace(state.platform, content, workspaceDir)
 	}
@@ -2789,11 +2815,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			selfPct := parseSelfReportedCtx(fullResponse)
 			cleanResponse := ctxSelfReportRe.ReplaceAllString(fullResponse, "")
 			cleanResponse = strings.TrimRight(cleanResponse, "\n ")
+			baseResponse := cleanResponse
+
+			contextEstimate := estimateTokensWithPendingAssistant(session.GetHistory(0), baseResponse)
 
 			// Evaluate auto-compress trigger (token estimate on user+assistant text,
 			// including this turn's assistant reply before it is appended to history).
 			if e.autoCompressEnabled && e.autoCompressMaxTokens > 0 {
-				estimate := estimateTokensWithPendingAssistant(session.GetHistory(0), cleanResponse)
+				estimate := contextEstimate
 				now := time.Now()
 				state.mu.Lock()
 				last := state.lastAutoCompressAt
@@ -2806,7 +2835,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			}
 
-			session.AddHistory("assistant", cleanResponse)
+			session.AddHistory("assistant", baseResponse)
 			sessions.Save()
 
 			if e.showContextIndicator {
@@ -2815,6 +2844,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				} else if selfPct > 0 {
 					cleanResponse += fmt.Sprintf("\n[ctx: ~%d%%]", selfPct)
 				}
+			}
+			if footer := e.buildReplyFooter(replyAgent, state.agentSession, workspaceDir, replyFooterContextText(replyFooterSessionContextUsage(state.agentSession), e.i18n)); footer != "" {
+				cleanResponse = appendReplyFooter(cleanResponse, footer)
 			}
 			fullResponse = cleanResponse
 
@@ -2831,9 +2863,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			)
 
 			replyStart := time.Now()
-			normalizedResponse := strings.TrimSpace(fullResponse)
+			normalizedBaseResponse := strings.TrimSpace(baseResponse)
 			state.mu.Lock()
-			suppressDuplicate := normalizedResponse != "" && normalizedResponse == state.sideText
+			suppressDuplicate := normalizedBaseResponse != "" && normalizedBaseResponse == state.sideText
 			state.sideText = ""
 			state.mu.Unlock()
 
@@ -2854,6 +2886,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			} else if suppressDuplicate {
 				sp.discard()
+				if metaOnly := strings.TrimSpace(strings.TrimPrefix(fullResponse, baseResponse)); metaOnly != "" {
+					for _, chunk := range splitMessage(metaOnly, maxPlatformMessageLen) {
+						if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
+							return
+						}
+					}
+				}
 				slog.Debug("EventResult: suppressed duplicate side-channel text", "response_len", len(fullResponse))
 			} else if sp.finish(fullResponse) {
 				slog.Debug("EventResult: finalized via stream preview", "response_len", len(fullResponse))
@@ -3901,6 +3940,246 @@ func (e *Engine) commandWorkDir(agent Agent, msg *Message) string {
 		return normalizeWorkspacePath(cwd)
 	}
 	return ""
+}
+
+func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDir string, contextLeft string) string {
+	if !e.replyFooterEnabled || agent == nil {
+		return ""
+	}
+
+	var parts []string
+	if model := replyFooterModel(session, agent); model != "" {
+		parts = append(parts, model)
+	}
+	if effort := replyFooterReasoningEffort(session, agent); effort != "" {
+		parts = append(parts, effort)
+	}
+	if left := strings.TrimSpace(contextLeft); left != "" {
+		parts = append(parts, left)
+	} else if usage := e.replyFooterUsageText(session, agent); usage != "" {
+		parts = append(parts, usage)
+	}
+	if dir := replyFooterWorkDir(session, agent, workspaceDir); dir != "" {
+		parts = append(parts, dir)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, " · ")
+}
+
+func replyFooterModel(session AgentSession, agent Agent) string {
+	if session != nil {
+		if getter, ok := session.(interface{ GetModel() string }); ok {
+			if model := strings.TrimSpace(getter.GetModel()); model != "" {
+				return model
+			}
+		}
+	}
+	if getter, ok := agent.(interface{ GetModel() string }); ok {
+		return strings.TrimSpace(getter.GetModel())
+	}
+	return ""
+}
+
+func replyFooterReasoningEffort(session AgentSession, agent Agent) string {
+	if session != nil {
+		if getter, ok := session.(interface{ GetReasoningEffort() string }); ok {
+			if effort := strings.TrimSpace(getter.GetReasoningEffort()); effort != "" {
+				return effort
+			}
+		}
+	}
+	if getter, ok := agent.(interface{ GetReasoningEffort() string }); ok {
+		return strings.TrimSpace(getter.GetReasoningEffort())
+	}
+	return ""
+}
+
+func (e *Engine) replyFooterUsageText(session AgentSession, agent Agent) string {
+	ctx, cancel := context.WithTimeout(e.ctx, replyFooterUsageTimeout)
+	defer cancel()
+
+	if session != nil {
+		if reporter, ok := session.(UsageReporter); ok {
+			if report, err := reporter.GetUsage(ctx); err == nil {
+				return formatReplyFooterUsage(report, e.i18n)
+			}
+		}
+	}
+
+	reporter, ok := agent.(UsageReporter)
+	if !ok {
+		return ""
+	}
+
+	e.replyFooterMu.Lock()
+	cached := e.replyFooterUsage
+	e.replyFooterMu.Unlock()
+	if !cached.fetchedAt.IsZero() && time.Since(cached.fetchedAt) < replyFooterUsageCacheTTL {
+		return cached.text
+	}
+
+	text := ""
+	if report, err := reporter.GetUsage(ctx); err == nil {
+		text = formatReplyFooterUsage(report, e.i18n)
+	} else if !cached.fetchedAt.IsZero() {
+		text = cached.text
+	}
+
+	e.replyFooterMu.Lock()
+	e.replyFooterUsage = replyFooterUsageCache{text: text, fetchedAt: time.Now()}
+	e.replyFooterMu.Unlock()
+	return text
+}
+
+func formatReplyFooterUsage(report *UsageReport, i18n *I18n) string {
+	if report == nil || i18n == nil {
+		return ""
+	}
+	window, _ := selectUsageWindows(report)
+	if window == nil {
+		return ""
+	}
+	remaining := 100 - window.UsedPercent
+	if remaining < 0 {
+		remaining = 0
+	}
+	if remaining > 100 {
+		remaining = 100
+	}
+	return i18n.Tf(MsgReplyFooterRemaining, remaining)
+}
+
+func replyFooterSessionContextUsage(session AgentSession) *ContextUsage {
+	if session == nil {
+		return nil
+	}
+	reporter, ok := session.(ContextUsageReporter)
+	if !ok {
+		return nil
+	}
+	return reporter.GetContextUsage()
+}
+
+func replyFooterContextText(usage *ContextUsage, i18n *I18n) string {
+	if usage == nil || i18n == nil {
+		return ""
+	}
+	if usage.ContextWindow <= 0 {
+		return ""
+	}
+
+	usedTokens := usage.UsedTokens
+	if usedTokens <= 0 {
+		switch {
+		case usage.TotalTokens > 0:
+			usedTokens = usage.TotalTokens
+		case usage.InputTokens > 0 || usage.OutputTokens > 0:
+			usedTokens = usage.InputTokens + usage.OutputTokens
+		default:
+			return ""
+		}
+	}
+
+	baseline := usage.BaselineTokens
+	if baseline < 0 {
+		baseline = 0
+	}
+	if usage.ContextWindow <= baseline {
+		return i18n.Tf(MsgReplyFooterRemaining, 0)
+	}
+
+	effectiveWindow := usage.ContextWindow - baseline
+	effectiveUsed := usedTokens - baseline
+	if effectiveUsed < 0 {
+		effectiveUsed = 0
+	}
+	remaining := effectiveWindow - effectiveUsed
+	if remaining < 0 {
+		remaining = 0
+	}
+
+	left := int(math.Round(float64(remaining) / float64(effectiveWindow) * 100))
+	if left < 0 {
+		left = 0
+	}
+	if left > 100 {
+		left = 100
+	}
+	return i18n.Tf(MsgReplyFooterRemaining, left)
+}
+
+func replyFooterWorkDir(session AgentSession, agent Agent, workspaceDir string) string {
+	dir := strings.TrimSpace(workspaceDir)
+	if dir == "" {
+		if session != nil {
+			if wd, ok := session.(interface{ GetWorkDir() string }); ok {
+				dir = strings.TrimSpace(wd.GetWorkDir())
+			}
+		}
+	}
+	if dir == "" {
+		if switcher, ok := agent.(WorkDirSwitcher); ok {
+			dir = strings.TrimSpace(switcher.GetWorkDir())
+		}
+	}
+	if dir == "" {
+		if wd, ok := agent.(interface{ GetWorkDir() string }); ok {
+			dir = strings.TrimSpace(wd.GetWorkDir())
+		}
+	}
+	if dir == "" {
+		return ""
+	}
+	return compactReplyFooterPath(dir)
+}
+
+func compactReplyFooterPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	path = normalizeWorkspacePath(path)
+	if home, err := os.UserHomeDir(); err == nil {
+		home = normalizeWorkspacePath(home)
+		if path == home {
+			return "~"
+		}
+		prefix := home + string(os.PathSeparator)
+		if strings.HasPrefix(path, prefix) {
+			return "~" + filepath.ToSlash(strings.TrimPrefix(path, home))
+		}
+	}
+
+	slash := filepath.ToSlash(path)
+	if filepath.IsAbs(path) {
+		trimmed := strings.Trim(slash, "/")
+		if trimmed == "" {
+			return "/"
+		}
+		parts := strings.Split(trimmed, "/")
+		if len(parts) == 1 {
+			return parts[0]
+		}
+		start := len(parts) - 2
+		if start < 0 {
+			start = 0
+		}
+		return "…/" + strings.Join(parts[start:], "/")
+	}
+	return slash
+}
+
+func appendReplyFooter(content, footer string) string {
+	if footer == "" {
+		return content
+	}
+	content = strings.TrimRight(content, "\n")
+	if content == "" {
+		return "*" + footer + "*"
+	}
+	return content + "\n\n*" + footer + "*"
 }
 
 func (e *Engine) cmdShow(p Platform, msg *Message, args []string) {
@@ -10824,7 +11103,7 @@ func gitClone(repoURL, dest string) error {
 
 // ── Context usage indicator ──────────────────────────────────
 
-const modelContextWindow = 200_000 // Claude's context window size in tokens
+const modelContextWindow = 200_000 // generic fallback window for heuristic context estimates
 
 // contextIndicator returns a suffix like "\n[ctx: ~42%]" based on SDK-reported input tokens.
 func contextIndicator(inputTokens int) string {

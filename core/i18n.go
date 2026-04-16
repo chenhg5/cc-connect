@@ -239,7 +239,8 @@ const (
 	MsgCronBtnUnmute    MsgKey = "cron_btn_unmute"
 	MsgCronBtnDelete    MsgKey = "cron_btn_delete"
 
-	MsgStatusTitle MsgKey = "status_title"
+	MsgStatusTitle          MsgKey = "status_title"
+	MsgReplyFooterRemaining MsgKey = "reply_footer_remaining"
 
 	MsgModelCurrent          MsgKey = "model_current"
 	MsgModelChanged          MsgKey = "model_changed"
@@ -1810,6 +1811,13 @@ var messages = map[MsgKey]map[Language]string{
 			"Tiempo activo: %s\n" +
 			"Idioma: %s\n" +
 			"%s" + "%s" + "%s" + "%s" + "%s",
+	},
+	MsgReplyFooterRemaining: {
+		LangEnglish:            "%d%% left",
+		LangChinese:            "%d%% left",
+		LangTraditionalChinese: "%d%% left",
+		LangJapanese:           "%d%% left",
+		LangSpanish:            "%d%% left",
 	},
 	MsgModelCurrent: {
 		LangEnglish:            "Current model: %s",
