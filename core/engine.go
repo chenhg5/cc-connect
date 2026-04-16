@@ -318,7 +318,6 @@ type retryContext struct {
 	images []ImageAttachment
 	files  []FileAttachment
 }
-}
 
 // pendingPermission represents a permission request waiting for user response.
 type pendingPermission struct {
