@@ -3235,6 +3235,7 @@ var builtinCommands = []struct {
 	{[]string{"whoami", "myid"}, "whoami"},
 	{[]string{"web"}, "web"},
 	{[]string{"diff"}, "diff"},
+	{[]string{"agentsid", "agent-sid"}, "agentsid"},
 }
 
 // isBtwCommand checks if a trimmed message starts with a /btw command.
@@ -3435,6 +3436,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdWhoami(p, msg)
 	case "web":
 		e.cmdWeb(p, msg, args)
+	case "agentsid":
+		e.cmdAgentSID(p, msg)
 	default:
 		if custom, ok := e.commands.Resolve(cmd); ok {
 			if disabledCmds[strings.ToLower(custom.Name)] {
@@ -4762,6 +4765,21 @@ func (e *Engine) cmdCurrent(p Platform, msg *Message) {
 	e.replyWithCard(p, msg.ReplyCtx, e.renderCurrentCard(msg.SessionKey))
 }
 
+func (e *Engine) cmdAgentSID(p Platform, msg *Message) {
+	_, sessions, _, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+	s := sessions.GetOrCreateActive(msg.SessionKey)
+	agentID := s.GetAgentSessionID()
+	if agentID == "" {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSessionNotStarted))
+		return
+	}
+	e.reply(p, msg.ReplyCtx, agentID)
+}
+
 func (e *Engine) cmdStatus(p Platform, msg *Message) {
 	if !supportsCards(p) {
 		agent, sessions, _, err := e.commandContext(p, msg)
@@ -5457,6 +5475,7 @@ func helpCardGroups() []helpCardGroup {
 				{command: "/new", action: "act:/new"},
 				{command: "/list", action: "nav:/list"},
 				{command: "/current", action: "nav:/current"},
+				{command: "/agentsid", action: "cmd:/agentsid"},
 				{command: "/switch", action: "nav:/list"},
 				{command: "/search", action: "cmd:/search"},
 				{command: "/history", action: "nav:/history"},
