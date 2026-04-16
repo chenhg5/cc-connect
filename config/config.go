@@ -83,8 +83,8 @@ var configMu sync.Mutex
 var ConfigPath string
 
 type Config struct {
-	DataDir           string                  `toml:"data_dir"` // session store directory, default ~/.cc-connect
-	AttachmentSend    string                  `toml:"attachment_send"`
+	DataDir        string `toml:"data_dir"` // session store directory, default ~/.cc-connect
+	AttachmentSend string `toml:"attachment_send"`
 	// Quiet is legacy: when true and [display] does not set thinking_messages / tool_messages,
 	// engines behave as if those flags were false. Per-project quiet overrides when set.
 	Quiet             *bool                   `toml:"quiet,omitempty"`
@@ -279,8 +279,9 @@ type ReferenceConfig struct {
 // ProjectConfig binds one agent (with a specific work_dir) to one or more platforms.
 type ProjectConfig struct {
 	Name         string             `toml:"name"`
-	Mode         string             `toml:"mode,omitempty"`     // "" or "multi-workspace"
-	BaseDir      string             `toml:"base_dir,omitempty"` // parent dir for workspaces
+	Mode         string             `toml:"mode,omitempty"`        // "" or "multi-workspace"
+	BaseDir      string             `toml:"base_dir,omitempty"`    // parent dir for workspaces
+	BusyAction   string             `toml:"busy_action,omitempty"` // "queue" (default) | "inject"
 	Agent        AgentConfig        `toml:"agent"`
 	Platforms    []PlatformConfig   `toml:"platforms"`
 	Heartbeat    HeartbeatConfig    `toml:"heartbeat"`
@@ -304,14 +305,14 @@ type ProjectConfig struct {
 	// Use this only for variables the target user cannot set in their profile.
 	RunAsEnv []string `toml:"run_as_env,omitempty"`
 	// ShowContextIndicator: nil/true = append [ctx: ~N%] to assistant replies; false = hide.
-	ShowContextIndicator *bool           `toml:"show_context_indicator,omitempty"`
-	InjectSender         *bool           `toml:"inject_sender,omitempty"`     // prepend sender identity (platform + user ID) to each message sent to the agent
-	DisabledCommands     []string        `toml:"disabled_commands,omitempty"` // commands to disable for this project (e.g. ["restart", "upgrade"])
-	AdminFrom            string          `toml:"admin_from,omitempty"`        // comma-separated user IDs allowed to run privileged commands; "*" = all allowed users
-	Users                *UsersConfig    `toml:"users,omitempty"`             // per-user role config; nil = legacy behavior
+	ShowContextIndicator *bool        `toml:"show_context_indicator,omitempty"`
+	InjectSender         *bool        `toml:"inject_sender,omitempty"`     // prepend sender identity (platform + user ID) to each message sent to the agent
+	DisabledCommands     []string     `toml:"disabled_commands,omitempty"` // commands to disable for this project (e.g. ["restart", "upgrade"])
+	AdminFrom            string       `toml:"admin_from,omitempty"`        // comma-separated user IDs allowed to run privileged commands; "*" = all allowed users
+	Users                *UsersConfig `toml:"users,omitempty"`             // per-user role config; nil = legacy behavior
 	// Quiet is legacy per-project override; see Config.Quiet. When true and global [display]
 	// omits thinking_messages / tool_messages, those default to off for this project.
-	Quiet      *bool           `toml:"quiet,omitempty"`
+	Quiet                *bool           `toml:"quiet,omitempty"`
 	Observe              *ObserveConfig  `toml:"observe,omitempty"`
 	References           ReferenceConfig `toml:"references,omitempty"`
 }
@@ -592,6 +593,11 @@ func (c *Config) validate() error {
 			if p.Type == "" {
 				return fmt.Errorf("config: %s.platforms[%d].type is required", prefix, j)
 			}
+		}
+		switch strings.ToLower(strings.TrimSpace(proj.BusyAction)) {
+		case "", "queue", "inject":
+		default:
+			return fmt.Errorf("config: %s.busy_action must be \"queue\" or \"inject\"", prefix)
 		}
 		if proj.Mode == "multi-workspace" {
 			if proj.BaseDir == "" {
@@ -2287,6 +2293,9 @@ func GetProjectConfigDetails(projectName string) map[string]any {
 		}
 		if p.ShowContextIndicator != nil {
 			result["show_context_indicator"] = *p.ShowContextIndicator
+		}
+		if strings.TrimSpace(p.BusyAction) != "" {
+			result["busy_action"] = p.BusyAction
 		}
 		platConfigs := make([]map[string]any, len(p.Platforms))
 		for j, plat := range p.Platforms {

@@ -6197,6 +6197,126 @@ func TestQueueMessage_DeadSession_ReturnsFalse(t *testing.T) {
 	}
 }
 
+func TestHandleMessage_BusyActionInject_SendsMidTurnText(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("busy-inject")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetBusyAction("inject")
+
+	key := "test:user1"
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx-running",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	session := e.sessions.GetOrCreateActive(key)
+	if !session.TryLock() {
+		t.Fatal("expected TryLock to succeed")
+	}
+	defer session.Unlock()
+
+	e.handleMessage(
+		p,
+		&Message{
+			SessionKey: key,
+			Content:    "follow up",
+			ReplyCtx:   "ctx-new",
+			UserName:   "u1",
+		},
+	)
+
+	sess.sendMu.Lock()
+	defer sess.sendMu.Unlock()
+	if len(sess.sendCalls) != 1 || sess.sendCalls[0] != "follow up" {
+		t.Fatalf("sendCalls = %v, want [follow up]", sess.sendCalls)
+	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.pendingMessages) != 0 {
+		t.Fatalf("pendingMessages len = %d, want 0", len(state.pendingMessages))
+	}
+
+	sent := p.getSent()
+	found := false
+	for _, s := range sent {
+		if strings.Contains(s, e.i18n.T(MsgBtwSent)) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected MsgBtwSent reply, got %v", sent)
+	}
+}
+
+func TestHandleMessage_BusyActionInject_QueuesAttachments(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("busy-queue-attachments")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetBusyAction("inject")
+
+	key := "test:user2"
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx-running",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	session := e.sessions.GetOrCreateActive(key)
+	if !session.TryLock() {
+		t.Fatal("expected TryLock to succeed")
+	}
+	defer session.Unlock()
+
+	e.handleMessage(
+		p,
+		&Message{
+			SessionKey: key,
+			Content:    "with image",
+			ReplyCtx:   "ctx-new",
+			UserName:   "u2",
+			Images:     []ImageAttachment{{MimeType: "image/png", FileName: "a.png"}},
+		},
+	)
+
+	sess.sendMu.Lock()
+	defer sess.sendMu.Unlock()
+	if len(sess.sendCalls) != 0 {
+		t.Fatalf("sendCalls = %v, want []", sess.sendCalls)
+	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.pendingMessages) != 1 {
+		t.Fatalf("pendingMessages len = %d, want 1", len(state.pendingMessages))
+	}
+	if state.pendingMessages[0].content != "with image" {
+		t.Fatalf("queued content = %q, want with image", state.pendingMessages[0].content)
+	}
+
+	sent := p.getSent()
+	found := false
+	for _, s := range sent {
+		if strings.Contains(s, e.i18n.T(MsgMessageQueued)) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected MsgMessageQueued reply, got %v", sent)
+	}
+}
+
 // TestQueueMessage_NilAgentSession_DuringStartup verifies that messages can be
 // queued when the interactiveState exists but agentSession is nil (session is
 // still starting up). This is the fix for issue #565.

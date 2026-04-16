@@ -244,6 +244,7 @@ func main() {
 		}
 		engine.SetShowContextIndicator(showCtx)
 		engine.SetAttachmentSendEnabled(cfg.AttachmentSend != "off")
+		engine.SetBusyAction(proj.BusyAction)
 		engine.SetBaseWorkDir(workDir)
 		engine.SetProjectStateStore(projectState)
 
@@ -461,6 +462,7 @@ func main() {
 		if proj.InjectSender != nil {
 			engine.SetInjectSender(*proj.InjectSender)
 		}
+		engine.SetBusyAction(proj.BusyAction)
 
 		// Wire speech-to-text if enabled
 		if cfg.Speech.Enabled {
@@ -1315,6 +1317,7 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 
 	// Reload sender injection
 	engine.SetInjectSender(proj.InjectSender != nil && *proj.InjectSender)
+	engine.SetBusyAction(proj.BusyAction)
 
 	// Reload attachment send-back switch
 	engine.SetAttachmentSendEnabled(cfg.AttachmentSend != "off")

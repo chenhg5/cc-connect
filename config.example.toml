@@ -503,6 +503,9 @@ level = "info" # debug, info, warn, error
 name = "my-backend"
 # show_context_indicator = false  # Hide the “[ctx: ~N%]” suffix on assistant replies (default: true / show)
 #                                   # 不在助手回复末尾显示「[ctx: ~N%]」上下文占用提示（默认 true 显示）
+# quiet = true  # Override global quiet for this project / 覆盖全局静默模式
+# busy_action = "inject"  # "queue" (default) | "inject" to auto-send busy messages like /btw
+#                         # "queue"（默认）| "inject" 在会话忙时自动按 /btw 方式注入消息
 # disabled_commands = ["restart", "upgrade", "cron"]  # Disable specific commands for this project
 #                                                     # 禁用该项目的指定命令
 #
