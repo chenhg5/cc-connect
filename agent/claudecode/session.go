@@ -169,72 +169,125 @@ func newClaudeSession(ctx context.Context, workDir, model, effort, sessionID, mo
 }
 
 func (cs *claudeSession) readLoop(stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
-	defer func() {
-		cs.alive.Store(false)
-		// Always close stdout to unblock any future reads
-		_ = stdout.Close()
-		// Wait for process to exit (this is needed to release resources)
-		if err := cs.cmd.Wait(); err != nil {
-			stderrMsg := strings.TrimSpace(stderrBuf.String())
-			if stderrMsg != "" {
-				slog.Error("claudeSession: process failed", "error", err, "stderr", stderrMsg)
-				evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
-				// Try to send error event, but don't block if context is cancelled
-				select {
-				case cs.events <- evt:
-				case <-cs.ctx.Done():
-					// Context cancelled, proceed to close channels anyway
-				}
-			}
-		}
-		// Always close channels - no early returns above should skip this
-		close(cs.events)
-		close(cs.done)
-	}()
+	waitErrCh, waitDone := cs.startReadLoopWait(stdout)
+	defer cs.finishReadLoop(waitErrCh, stderrBuf)
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
-
 	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-
-		var raw map[string]any
-		if err := json.Unmarshal([]byte(line), &raw); err != nil {
-			slog.Debug("claudeSession: non-JSON line", "line", line)
-			continue
-		}
-
-		eventType, _ := raw["type"].(string)
-		slog.Debug("claudeSession: event", "type", eventType)
-
-		switch eventType {
-		case "system":
-			cs.handleSystem(raw)
-		case "assistant":
-			cs.handleAssistant(raw)
-		case "user":
-			cs.handleUser(raw)
-		case "result":
-			cs.handleResult(raw)
-		case "control_request":
-			cs.handleControlRequest(raw)
-		case "control_cancel_request":
-			requestID, _ := raw["request_id"].(string)
-			slog.Debug("claudeSession: permission cancelled", "request_id", requestID)
-		}
+		cs.handleReadLoopLine(scanner.Text())
 	}
 
-	if err := scanner.Err(); err != nil {
-		slog.Error("claudeSession: scanner error", "error", err)
-		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
+	cs.handleReadLoopScanErr(scanner.Err(), waitDone)
+}
+
+func (cs *claudeSession) startReadLoopWait(stdout io.ReadCloser) (<-chan error, <-chan struct{}) {
+	waitErrCh := make(chan error, 1)
+	waitDone := make(chan struct{})
+
+	go func() {
+		waitErrCh <- cs.cmd.Wait()
+		close(waitDone)
+	}()
+
+	go func() {
 		select {
-		case cs.events <- evt:
 		case <-cs.ctx.Done():
+			_ = stdout.Close()
 			return
+		case <-waitDone:
 		}
+
+		// Grace period: give scanner a brief window to drain any data the
+		// agent wrote to the pipe buffer before exiting. If scanner finishes
+		// on its own (pipe fully closed, no descendants holding it),
+		// cs.done fires first and we skip the force-close entirely
+		select {
+		case <-cs.done:
+			return
+		case <-time.After(50 * time.Millisecond):
+		}
+		_ = stdout.Close()
+	}()
+
+	return waitErrCh, waitDone
+}
+
+func (cs *claudeSession) finishReadLoop(waitErrCh <-chan error, stderrBuf *bytes.Buffer) {
+	err := <-waitErrCh
+
+	cs.alive.Store(false)
+	if err != nil {
+		stderrMsg := ""
+		if stderrBuf != nil {
+			stderrMsg = strings.TrimSpace(stderrBuf.String())
+		}
+		if stderrMsg != "" {
+			slog.Error("claudeSession: process failed", "error", err, "stderr", stderrMsg)
+			evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
+			select {
+			case cs.events <- evt:
+			case <-cs.ctx.Done():
+				// INVARIANT: readLoop must close cs.events and cs.done exactly once
+				// on every termination path. Callers (engine event loop) rely on
+				// these closures to observe session end.
+			}
+		}
+	}
+	close(cs.events)
+	close(cs.done)
+}
+
+func (cs *claudeSession) handleReadLoopScanErr(err error, waitDone <-chan struct{}) {
+	if err == nil {
+		return
+	}
+
+	select {
+	case <-cs.ctx.Done():
+		return
+	case <-waitDone:
+		return
+	default:
+	}
+
+	slog.Error("claudeSession: scanner error", "error", err)
+	evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
+	select {
+	case cs.events <- evt:
+	case <-cs.ctx.Done():
+		return
+	}
+}
+
+func (cs *claudeSession) handleReadLoopLine(line string) {
+	if line == "" {
+		return
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(line), &raw); err != nil {
+		slog.Debug("claudeSession: non-JSON line", "line", line)
+		return
+	}
+
+	eventType, _ := raw["type"].(string)
+	slog.Debug("claudeSession: event", "type", eventType)
+
+	switch eventType {
+	case "system":
+		cs.handleSystem(raw)
+	case "assistant":
+		cs.handleAssistant(raw)
+	case "user":
+		cs.handleUser(raw)
+	case "result":
+		cs.handleResult(raw)
+	case "control_request":
+		cs.handleControlRequest(raw)
+	case "control_cancel_request":
+		requestID, _ := raw["request_id"].(string)
+		slog.Debug("claudeSession: permission cancelled", "request_id", requestID)
 	}
 }
 

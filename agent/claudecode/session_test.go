@@ -1,8 +1,10 @@
 package claudecode
 
 import (
+	"bytes"
 	"context"
 	"io"
+	"os"
 	"os/exec"
 	"testing"
 	"time"
@@ -69,11 +71,119 @@ func TestHandleResultNoUsage(t *testing.T) {
 	}
 }
 
+func TestReadLoop_ChildHoldsStdoutPipe(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	pr, pw := io.Pipe()
+	t.Cleanup(func() {
+		_ = pw.Close()
+	})
+
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := io.WriteString(pw, `{"type":"system","session_id":"test-pipe"}`+"\n")
+		writeDone <- err
+	}()
+
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^$")
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	cs := &claudeSession{
+		cmd:    cmd,
+		events: make(chan core.Event, 64),
+		ctx:    ctx,
+		cancel: cancel,
+		done:   make(chan struct{}),
+	}
+	cs.alive.Store(true)
+	go cs.readLoop(pr, &stderrBuf)
+
+	timeout := time.After(5 * time.Second)
+	gotEvent := false
+	for {
+		select {
+		case err := <-writeDone:
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeDone = nil
+		case evt, ok := <-cs.events:
+			if !ok {
+				if !gotEvent {
+					t.Fatal("events closed but system event lost")
+				}
+				return
+			}
+			if evt.SessionID == "test-pipe" {
+				gotEvent = true
+			}
+		case <-timeout:
+			t.Fatal("HANG: events not closed within 5s - readLoop stuck in scanner.Scan()")
+		}
+	}
+}
+
+func TestReadLoop_CtxCancelClosesChannels(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	pr, pw := io.Pipe()
+	t.Cleanup(func() {
+		_ = pw.Close()
+	})
+
+	// "err-then-sleep" emits stderr before sleeping so that ctx cancel
+	// produces a non-empty stderrBuf in readLoop's defer — exercising the
+	// `case <-cs.ctx.Done()` select branch in finishReadLoop.
+	cmd := helperCommand(ctx, "err-then-sleep")
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	cs := &claudeSession{
+		cmd:    cmd,
+		events: make(chan core.Event, 64),
+		ctx:    ctx,
+		cancel: cancel,
+		done:   make(chan struct{}),
+	}
+	cs.alive.Store(true)
+	go cs.readLoop(pr, &stderrBuf)
+
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+
+	timeout := time.After(5 * time.Second)
+	for {
+		select {
+		case _, ok := <-cs.events:
+			if !ok {
+				goto closed
+			}
+		case <-timeout:
+			t.Fatal("HANG: events not closed within 5s after ctx cancel")
+		}
+	}
+closed:
+	select {
+	case <-cs.done:
+	case <-timeout:
+		t.Fatal("HANG: done not closed within 5s after ctx cancel")
+	}
+}
+
 func TestClaudeSessionClose_IdempotentNoPanic(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "sleep", "120")
+	cmd := helperCommand(ctx, "stdin-eof-exit")
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -111,5 +221,35 @@ func TestClaudeSessionClose_IdempotentNoPanic(t *testing.T) {
 	}
 	if err := cs.Close(); err != nil {
 		t.Fatalf("second Close: %v", err)
+	}
+}
+
+func helperCommand(ctx context.Context, mode string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=TestHelperProcess", "--", mode)
+	cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1")
+	return cmd
+}
+
+// TestHelperProcess lets this test binary act as a tiny external command for
+// cases that need a process with controlled lifetime semantics.
+func TestHelperProcess(t *testing.T) {
+	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
+		return
+	}
+
+	mode := os.Args[len(os.Args)-1]
+	switch mode {
+	case "sleep":
+		time.Sleep(30 * time.Second)
+		os.Exit(0)
+	case "err-then-sleep":
+		_, _ = os.Stderr.WriteString("helper: starting up\n")
+		time.Sleep(30 * time.Second)
+		os.Exit(0)
+	case "stdin-eof-exit":
+		_, _ = io.Copy(io.Discard, os.Stdin)
+		os.Exit(0)
+	default:
+		os.Exit(2)
 	}
 }
