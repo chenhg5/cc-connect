@@ -808,7 +808,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
-			Content: quotedPrefix + text, ReplyCtx: rctx,
+			Content: text, ExtraContent: quotedPrefix, ReplyCtx: rctx,
 		})
 
 	case "image":
@@ -870,7 +870,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
-			Content: quotedPrefix + text, Images: images,
+			Content: text, ExtraContent: quotedPrefix, Images: images,
 			ReplyCtx: rctx,
 		})
 
