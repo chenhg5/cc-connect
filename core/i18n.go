@@ -139,6 +139,8 @@ const (
 	MsgToolAllowFailed           MsgKey = "tool_allow_failed"
 	MsgToolAllowedNew            MsgKey = "tool_allowed_new"
 	MsgError                     MsgKey = "error"
+	MsgErrorRetrying             MsgKey = "error_retrying"
+	MsgErrorRetryExhausted       MsgKey = "error_retry_exhausted"
 	MsgFailedToStartAgentSession MsgKey = "failed_to_start_agent_session"
 	MsgFailedToDeleteSession     MsgKey = "failed_to_delete_session"
 	MsgEmptyResponse             MsgKey = "empty_response"
@@ -699,6 +701,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 錯誤: %v",
 		LangJapanese:           "❌ エラー: %v",
 		LangSpanish:            "❌ Error: %v",
+	},
+	MsgErrorRetrying: {
+		LangEnglish:            "⚠️ Error: %[4]v\n🔄 Retrying (%[1]d/%[2]d, waiting %[3]v)...",
+		LangChinese:            "⚠️ 错误: %[4]v\n🔄 正在重试 (%[1]d/%[2]d, 等待 %[3]v)...",
+		LangTraditionalChinese: "⚠️ 錯誤: %[4]v\n🔄 正在重試 (%[1]d/%[2]d, 等待 %[3]v)...",
+		LangJapanese:           "⚠️ エラー: %[4]v\n🔄 リトライ中 (%[1]d/%[2]d, %[3]v 待機)...",
+		LangSpanish:            "⚠️ Error: %[4]v\n🔄 Reintentando (%[1]d/%[2]d, esperando %[3]v)...",
+	},
+	MsgErrorRetryExhausted: {
+		LangEnglish:            "❌ All %d retries exhausted: %v",
+		LangChinese:            "❌ 已用完 %d 次重试: %v",
+		LangTraditionalChinese: "❌ 已用完 %d 次重試: %v",
+		LangJapanese:           "❌ %d 回のリトライを全て消費しました: %v",
+		LangSpanish:            "❌ Se agotaron los %d reintentos: %v",
 	},
 	MsgFailedToStartAgentSession: {
 		LangEnglish:            "❌ Error: failed to start agent session",

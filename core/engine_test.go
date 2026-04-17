@@ -953,7 +953,7 @@ func TestProcessInteractiveEvents_SuppressesDuplicateSideChannelText(t *testing.
 	}
 
 	agentSession.events <- Event{Type: EventResult, Content: sideText, Done: true}
-	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, nil)
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, nil, retryContext{})
 
 	if got := p.getSent(); len(got) != 1 || got[0] != sideText {
 		t.Fatalf("sent text = %#v, want one side-channel message", got)
@@ -983,7 +983,7 @@ func TestProcessInteractiveEvents_DoesNotSuppressDifferentFinalText(t *testing.T
 
 	finalText := "文件已发出，另外我也把使用方法整理好了。"
 	agentSession.events <- Event{Type: EventResult, Content: finalText, Done: true}
-	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, nil)
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, nil, retryContext{})
 
 	if got := p.getSent(); len(got) != 2 || got[0] == got[1] {
 		t.Fatalf("sent text = %#v, want side-channel and final reply", got)
@@ -1029,7 +1029,7 @@ func TestProcessInteractiveEvents_AppendsReplyFooterWhenEnabled(t *testing.T) {
 	e.interactiveStates[sessionKey] = state
 
 	agentSession.events <- Event{Type: EventResult, Content: "answer", Done: true}
-	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-footer", time.Now(), nil, nil, state.replyCtx)
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-footer", time.Now(), nil, nil, state.replyCtx, retryContext{})
 
 	sent := p.getSent()
 	if len(sent) != 1 {
@@ -1077,7 +1077,7 @@ func TestProcessInteractiveEvents_DoesNotAppendReplyFooterWhenDisabled(t *testin
 	e.interactiveStates[sessionKey] = state
 
 	agentSession.events <- Event{Type: EventResult, Content: "answer", Done: true}
-	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-footer-off", time.Now(), nil, nil, state.replyCtx)
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-footer-off", time.Now(), nil, nil, state.replyCtx, retryContext{})
 
 	sent := p.getSent()
 	if len(sent) != 1 {
@@ -1144,7 +1144,7 @@ func TestProcessInteractiveEvents_ReplyFooterPrefersSessionRuntimeState(t *testi
 	e.interactiveStates[sessionKey] = state
 
 	agentSession.events <- Event{Type: EventResult, Content: "answer", Done: true}
-	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-footer-runtime", time.Now(), nil, nil, state.replyCtx)
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-footer-runtime", time.Now(), nil, nil, state.replyCtx, retryContext{})
 
 	sent := p.getSent()
 	if len(sent) != 1 {
@@ -1175,7 +1175,7 @@ func TestProcessInteractiveEvents_HiddenToolProgressKeepsPreviewOnFinalize(t *te
 	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "echo hi"}
 	agentSession.events <- Event{Type: EventResult, Content: "", Done: true}
 
-	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, nil)
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, nil, retryContext{})
 
 	if got := p.getSent(); len(got) != 0 {
 		t.Fatalf("sent text = %#v, want no plain-text fallback sends", got)
@@ -1214,7 +1214,7 @@ func TestProcessInteractiveEvents_ToolMessagesDisabledSuppressesToolProgressOnly
 	agentSession.events <- Event{Type: EventText, Content: "done"}
 	agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
 
-	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, nil)
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, nil, retryContext{})
 
 	sent := p.getSent()
 	if len(sent) < 1 || len(sent) > 2 {
@@ -1251,7 +1251,7 @@ func TestProcessInteractiveEvents_CompactProgressCoalescesThinkingAndToolUse(t *
 	agentSession.events <- Event{Type: EventText, Content: "done"}
 	agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
 
-	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, state.replyCtx)
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, state.replyCtx, retryContext{})
 
 	sent := p.getSent()
 	if len(sent) != 1 || sent[0] != "done" {
@@ -1296,7 +1296,7 @@ func TestProcessInteractiveEvents_CardProgressUsesCardTemplate(t *testing.T) {
 	agentSession.events <- Event{Type: EventText, Content: "done"}
 	agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
 
-	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m2", time.Now(), nil, nil, state.replyCtx)
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m2", time.Now(), nil, nil, state.replyCtx, retryContext{})
 
 	sent := p.getSent()
 	if len(sent) != 1 || sent[0] != "done" {
@@ -1355,7 +1355,7 @@ func TestProcessInteractiveEvents_FinalReplyUsesWorkspaceForReferenceRendering(t
 		Done:    true,
 	}
 
-	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-relative", time.Now(), nil, nil, state.replyCtx)
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-relative", time.Now(), nil, nil, state.replyCtx, retryContext{})
 
 	sent := p.getSent()
 	if len(sent) != 1 {
@@ -1396,7 +1396,7 @@ func TestProcessInteractiveEvents_FinalReplyRemainsRawWhenReferencesDisabled(t *
 		Done:    true,
 	}
 
-	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-relative-raw", time.Now(), nil, nil, state.replyCtx)
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-relative-raw", time.Now(), nil, nil, state.replyCtx, retryContext{})
 
 	sent := p.getSent()
 	if len(sent) != 1 {
@@ -1429,7 +1429,7 @@ func TestProcessInteractiveEvents_CardProgressUsesStructuredPayloadWhenSupported
 	agentSession.events <- Event{Type: EventText, Content: "done"}
 	agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
 
-	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m3", time.Now(), nil, nil, state.replyCtx)
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m3", time.Now(), nil, nil, state.replyCtx, retryContext{})
 
 	starts := p.getPreviewStarts()
 	if len(starts) != 1 {
@@ -5996,7 +5996,7 @@ func TestProcessInteractiveEvents_PermissionWhileSendBlocked(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		e.processInteractiveEvents(state, session, e.sessions, key, "m1", time.Now(), nil, sendDone, nil)
+		e.processInteractiveEvents(state, session, e.sessions, key, "m1", time.Now(), nil, sendDone, nil, retryContext{})
 		close(done)
 	}()
 
@@ -6276,7 +6276,7 @@ func TestProcessInteractiveEvents_DrainsQueuedMessages(t *testing.T) {
 	// processInteractiveEvents should handle both turns.
 	done := make(chan struct{})
 	go func() {
-		e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), nil, sendDone, nil)
+		e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), nil, sendDone, nil, retryContext{})
 		close(done)
 	}()
 
@@ -6766,7 +6766,7 @@ func TestAutoCompress_TriggerAfterResult(t *testing.T) {
 	session.AddHistory("user", "hello world")
 
 	// Simulate a full turn.
-	go e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), func() {}, nil, nil)
+	go e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), func() {}, nil, nil, retryContext{})
 
 	sess.events <- Event{Type: EventResult, Content: "response", Done: true}
 
@@ -7186,7 +7186,7 @@ func TestCmdStop_ReturnsWhileCloseBlockedAndStopsEventLoop(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		e.processInteractiveEvents(state, session, e.sessions, key, "msg-1", time.Now(), nil, nil, "ctx")
+		e.processInteractiveEvents(state, session, e.sessions, key, "msg-1", time.Now(), nil, nil, "ctx", retryContext{})
 		close(done)
 	}()
 
@@ -7506,7 +7506,7 @@ func TestEventIdleTimeout_CleansUpSession(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		e.processInteractiveEvents(state, session, e.sessions, key, "", time.Now(), nil, nil, nil)
+		e.processInteractiveEvents(state, session, e.sessions, key, "", time.Now(), nil, nil, nil, retryContext{})
 		close(done)
 	}()
 
@@ -7550,7 +7550,7 @@ func TestEventIdleTimeout_ResetOnEvent(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		e.processInteractiveEvents(state, session, e.sessions, key, "", time.Now(), nil, nil, nil)
+		e.processInteractiveEvents(state, session, e.sessions, key, "", time.Now(), nil, nil, nil, retryContext{})
 		close(done)
 	}()
 
@@ -7602,7 +7602,7 @@ func TestEventIdleTimeout_DisabledWhenZero(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		e.processInteractiveEvents(state, session, e.sessions, key, "", time.Now(), nil, nil, nil)
+		e.processInteractiveEvents(state, session, e.sessions, key, "", time.Now(), nil, nil, nil, retryContext{})
 		close(done)
 	}()
 
@@ -9698,4 +9698,259 @@ type stubPlatformWithObserve struct {
 
 func (s *stubPlatformWithObserve) SendObservation(_ context.Context, _, _ string) error {
 	return nil
+}
+
+
+// --- Retry mechanism tests ---
+
+func TestIsRetryableError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil error", nil, false},
+		{"empty error", fmt.Errorf(""), false},
+		{"429 too many requests", fmt.Errorf("HTTP 429 Too Many Requests"), true},
+		{"rate limit exceeded", fmt.Errorf("rate limit exceeded"), true},
+		{"rate_limit", fmt.Errorf("hit rate_limit boundary"), true},
+		{"too many requests", fmt.Errorf("too many requests for resource"), true},
+		{"overloaded", fmt.Errorf("server is overloaded"), true},
+		{"capacity", fmt.Errorf("Insufficient capacity to handle request"), true},
+		{"retry after", fmt.Errorf("Retry after 60 seconds"), true},
+		{"retry-after header", fmt.Errorf("retry-after: 30"), true},
+		{"temporarily unavailable", fmt.Errorf("service temporarily unavailable"), true},
+		{"503", fmt.Errorf("HTTP 503 Service Unavailable"), true},
+		{"502", fmt.Errorf("HTTP 502 Bad Gateway"), true},
+		{"internal server error", fmt.Errorf("internal server error occurred"), true},
+		{"service unavailable", fmt.Errorf("service unavailable"), true},
+		{"please try again", fmt.Errorf("please try again later"), true},
+		{"Chinese 网络错误 with 请稍后重试", fmt.Errorf(`API Error: 400 {"type":"error","error":{"message":"网络错误，错误id：20260417090927aaf2f9f3cdc34057，请稍后重试","code":"1234"},"request_id":"20260417090927aaf2f9f3cdc34057"}`), true},
+		{"case insensitive 429", fmt.Errorf("ERROR 429 RATE LIMITED"), true},
+		{"case insensitive rate limit", fmt.Errorf("RATE LIMIT EXCEEDED"), true},
+		{"invalid API key", fmt.Errorf("invalid API key"), false},
+		{"turn failed no details", fmt.Errorf("turn failed (no details)"), false},
+		{"connection refused", fmt.Errorf("connection refused"), false},
+		{"permission denied", fmt.Errorf("permission denied for file access"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isRetryableError(tt.err); got != tt.want {
+				t.Errorf("isRetryableError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRetryBackoff(t *testing.T) {
+	initial := 1 * time.Second
+	maxDelay := 10 * time.Second
+
+	// Attempt 0: base delay
+	d0 := retryBackoff(0, initial, maxDelay)
+	if d0 < initial || d0 > initial+initial/4 {
+		t.Errorf("retryBackoff(0) = %v, want in [%v, %v]", d0, initial, initial+initial/4)
+	}
+
+	// Attempt 1: 2x
+	d1 := retryBackoff(1, initial, maxDelay)
+	base1 := 2 * time.Second
+	if d1 < base1 || d1 > base1+base1/4 {
+		t.Errorf("retryBackoff(1) = %v, want in [%v, %v]", d1, base1, base1+base1/4)
+	}
+
+	// Attempt 4: capped at maxDelay
+	d4 := retryBackoff(4, initial, maxDelay)
+	if d4 > maxDelay+maxDelay/4 {
+		t.Errorf("retryBackoff(4) = %v, should not exceed max+25%% = %v", d4, maxDelay+maxDelay/4)
+	}
+
+	// Verify all delays are positive
+	for attempt := 0; attempt < 10; attempt++ {
+		d := retryBackoff(attempt, initial, maxDelay)
+		if d <= 0 {
+			t.Errorf("retryBackoff(%d) = %v, want positive", attempt, d)
+		}
+	}
+}
+
+func TestRetryOnRetryableError(t *testing.T) {
+	p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetRetryCfg(RetryCfg{MaxRetries: 2, InitialDelay: 10 * time.Millisecond, MaxDelay: 50 * time.Millisecond})
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-1",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	// Push initial retryable error
+	agentSession.events <- Event{Type: EventError, Error: fmt.Errorf("HTTP 429 Too Many Requests")}
+	// After retry drains and resends, push a successful result
+	go func() {
+		time.Sleep(50 * time.Millisecond) // wait for retry backoff + drain
+		agentSession.events <- Event{Type: EventResult, Content: "success after retry", Done: true}
+	}()
+
+	sendDone := make(chan error, 1)
+	sendDone <- nil
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, sendDone, "ctx-1", retryContext{prompt: "test prompt"})
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("processInteractiveEvents did not complete in time")
+	}
+
+	sent := p.getSent()
+	if len(sent) < 2 {
+		t.Fatalf("expected at least 2 sent messages (retry notification + result), got %d: %v", len(sent), sent)
+	}
+	if !strings.Contains(sent[0], "429") || !strings.Contains(sent[0], "Retrying") {
+		t.Errorf("first message should be retry notification, got: %s", sent[0])
+	}
+	lastMsg := sent[len(sent)-1]
+	if !strings.Contains(lastMsg, "success after retry") {
+		t.Errorf("last message should contain success response, got: %s", lastMsg)
+	}
+}
+
+func TestNoRetryWhenSessionDead(t *testing.T) {
+	p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetRetryCfg(RetryCfg{MaxRetries: 3, InitialDelay: 10 * time.Millisecond, MaxDelay: 50 * time.Millisecond})
+	sessionKey := "test:user2"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	agentSession.alive = false // session is dead
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-1",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventError, Error: fmt.Errorf("HTTP 429 rate limited")}
+
+	sendDone := make(chan error, 1)
+	sendDone <- nil
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, sendDone, "ctx-1", retryContext{prompt: "test"})
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("processInteractiveEvents did not complete in time")
+	}
+
+	sent := p.getSent()
+	// Should only have the error message, no retry notification
+	if len(sent) != 1 {
+		t.Fatalf("expected 1 sent message (error only), got %d: %v", len(sent), sent)
+	}
+	if !strings.Contains(sent[0], "Error") {
+		t.Errorf("message should be an error, got: %s", sent[0])
+	}
+}
+
+func TestNoRetryForNonRetryableError(t *testing.T) {
+	p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetRetryCfg(RetryCfg{MaxRetries: 3, InitialDelay: 10 * time.Millisecond, MaxDelay: 50 * time.Millisecond})
+	sessionKey := "test:user3"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-1",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventError, Error: fmt.Errorf("invalid API key provided")}
+
+	sendDone := make(chan error, 1)
+	sendDone <- nil
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, sendDone, "ctx-1", retryContext{prompt: "test"})
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("processInteractiveEvents did not complete in time")
+	}
+
+	sent := p.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("expected 1 sent message (error, no retry), got %d: %v", len(sent), sent)
+	}
+	if strings.Contains(sent[0], "Retrying") {
+		t.Errorf("non-retryable error should not trigger retry, got: %s", sent[0])
+	}
+}
+
+func TestRetryExhausted(t *testing.T) {
+	p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetRetryCfg(RetryCfg{MaxRetries: 2, InitialDelay: 10 * time.Millisecond, MaxDelay: 50 * time.Millisecond})
+	sessionKey := "test:user4"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-1",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	// Push initial error; subsequent errors will be pushed after each retry drain
+	agentSession.events <- Event{Type: EventError, Error: fmt.Errorf("429 rate limited")}
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		agentSession.events <- Event{Type: EventError, Error: fmt.Errorf("429 rate limited")}
+		time.Sleep(50 * time.Millisecond)
+		agentSession.events <- Event{Type: EventError, Error: fmt.Errorf("429 rate limited")}
+	}()
+
+	sendDone := make(chan error, 1)
+	sendDone <- nil
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, sendDone, "ctx-1", retryContext{prompt: "test"})
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("processInteractiveEvents did not complete in time")
+	}
+
+	sent := p.getSent()
+	// Should have: 2 retry notifications + 1 exhausted message
+	if len(sent) != 3 {
+		t.Fatalf("expected 3 sent messages (2 retry + 1 exhausted), got %d: %v", len(sent), sent)
+	}
+	lastMsg := sent[len(sent)-1]
+	if !strings.Contains(lastMsg, "retries exhausted") {
+		t.Errorf("last message should say retries exhausted, got: %s", lastMsg)
+	}
 }

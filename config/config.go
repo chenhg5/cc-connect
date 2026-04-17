@@ -261,6 +261,13 @@ type AutoCompressConfig struct {
 	MinGapMins *int  `toml:"min_gap_mins,omitempty"` // minimum minutes between auto-compress runs (default 30)
 }
 
+// RetryConfig controls automatic retry of transient API errors (429, rate limit, etc.).
+type RetryConfig struct {
+	MaxRetries    *int `toml:"max_retries,omitempty"`     // max retry attempts; default 3
+	InitialDelayMs *int `toml:"initial_delay_ms,omitempty"` // initial backoff delay in ms; default 2000
+	MaxDelayMs    *int `toml:"max_delay_ms,omitempty"`      // max backoff delay in ms; default 30000
+}
+
 // ObserveConfig controls forwarding of native terminal Claude Code sessions to a messaging platform.
 type ObserveConfig struct {
 	Enabled bool   `toml:"enabled"`
@@ -285,6 +292,7 @@ type ProjectConfig struct {
 	Platforms    []PlatformConfig   `toml:"platforms"`
 	Heartbeat    HeartbeatConfig    `toml:"heartbeat"`
 	AutoCompress AutoCompressConfig `toml:"auto_compress"`
+	Retry        RetryConfig        `toml:"retry"`
 	// ResetOnIdleMins automatically rotates to a new cc-connect session after
 	// the current session has been inactive for the specified number of minutes.
 	// 0 or nil disables the behavior.

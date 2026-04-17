@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"math/rand/v2"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -209,6 +210,7 @@ type Engine struct {
 	autoCompressMaxTokens int
 	autoCompressMinGap    time.Duration
 	resetOnIdle           time.Duration
+	retryCfg              RetryCfg
 
 	// When true, append [ctx: ~N%] (or model self-report) to assistant replies shown on platforms.
 	showContextIndicator bool
@@ -302,6 +304,21 @@ type modelSwitchState struct {
 	result string
 }
 
+// RetryCfg controls automatic retry on transient API errors (429, rate limit, etc.)
+// from the LLM provider. Retries only happen when the agent session is still alive.
+type RetryCfg struct {
+	MaxRetries   int
+	InitialDelay time.Duration
+	MaxDelay     time.Duration
+}
+
+// retryContext bundles the original prompt data needed to resend during retry.
+type retryContext struct {
+	prompt string
+	images []ImageAttachment
+	files  []FileAttachment
+}
+
 // pendingPermission represents a permission request waiting for user response.
 type pendingPermission struct {
 	RequestID       string
@@ -373,6 +390,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		references:            DefaultReferenceRenderCfg(),
 		eventIdleTimeout:      defaultEventIdleTimeout,
 		showContextIndicator:  true,
+		retryCfg:              RetryCfg{MaxRetries: 3, InitialDelay: 2 * time.Second, MaxDelay: 30 * time.Second},
 	}
 
 	if ag != nil {
@@ -832,6 +850,18 @@ func (e *Engine) SetStreamPreviewCfg(cfg StreamPreviewCfg) {
 // 0 disables the timeout entirely.
 func (e *Engine) SetEventIdleTimeout(d time.Duration) {
 	e.eventIdleTimeout = d
+}
+
+// SetRetryCfg configures automatic retry on transient API errors.
+// MaxRetries <= 0 disables retry. InitialDelay and MaxDelay default to 2s and 30s.
+func (e *Engine) SetRetryCfg(cfg RetryCfg) {
+	if cfg.InitialDelay <= 0 {
+		cfg.InitialDelay = 2 * time.Second
+	}
+	if cfg.MaxDelay <= 0 {
+		cfg.MaxDelay = 30 * time.Second
+	}
+	e.retryCfg = cfg
 }
 
 func (e *Engine) SetRelayManager(rm *RelayManager) {
@@ -2097,7 +2127,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		sendDone <- state.agentSession.Send(promptContent, msg.Images, msg.Files)
 	}()
 
-	e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx)
+	e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx, retryContext{prompt: promptContent, images: msg.Images, files: msg.Files})
 	if elapsed := time.Since(sendStart); elapsed >= slowAgentSend {
 		slog.Warn("slow agent send", "elapsed", elapsed, "session", msg.SessionKey, "content_len", len(msg.Content))
 	}
@@ -2473,7 +2503,7 @@ func (e *Engine) closeAgentSessionWithTimeout(sessionKey string, agentSession Ag
 
 const defaultEventIdleTimeout = 2 * time.Hour
 
-func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func(), sendDone <-chan error, replyCtx any) {
+func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func(), sendDone <-chan error, replyCtx any, retryCtx retryContext) {
 	var textParts []string
 	var segmentStart int // index into textParts: text before this has been sent/displayed
 	toolCount := 0
@@ -2481,6 +2511,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	firstEventLogged := false
 	triggerAutoCompress := false
 	pendingSend := sendDone
+	retryAttempt := 0
 
 	// stopTyping tracks the current turn's typing indicator so it can be
 	// stopped when a queued message starts a new turn.
@@ -3046,6 +3077,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				segmentStart = 0
 				toolCount = 0
 				turnStart = time.Now()
+				retryAttempt = 0
 				firstEventLogged = false
 				waitStart = time.Now()
 				queuedRenderer := func(content string) string {
@@ -3098,7 +3130,58 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			sp.discard()
 			if event.Error != nil {
 				slog.Error("agent error", "error", event.Error)
-				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
+
+				// Attempt retry if the error is retryable, the session is alive,
+				// and retries are configured.
+				if isRetryableError(event.Error) && state.agentSession != nil && state.agentSession.Alive() && e.retryCfg.MaxRetries > 0 {
+					retryAttempt++
+					if retryAttempt <= e.retryCfg.MaxRetries {
+						delay := retryBackoff(retryAttempt-1, e.retryCfg.InitialDelay, e.retryCfg.MaxDelay)
+						slog.Info("retrying after retryable API error",
+							"session", sessionKey,
+							"attempt", retryAttempt,
+							"max_retries", e.retryCfg.MaxRetries,
+							"delay", delay,
+							"error", event.Error,
+						)
+						e.send(p, replyCtx, e.i18n.Tf(MsgErrorRetrying, retryAttempt, e.retryCfg.MaxRetries, delay.Round(time.Second), event.Error))
+
+						// Wait with backoff, respecting cancellation
+						select {
+						case <-e.ctx.Done():
+							return
+						case <-state.stopSignal():
+							return
+						case <-time.After(delay):
+						}
+
+						// Drain stale events and resend the prompt
+						drainEvents(state.agentSession.Events())
+						retrySendDone := make(chan error, 1)
+						go func() {
+							retrySendDone <- state.agentSession.Send(retryCtx.prompt, retryCtx.images, retryCtx.files)
+						}()
+						pendingSend = retrySendDone
+
+						// Reset per-turn state for the retry
+						textParts = nil
+						segmentStart = 0
+						toolCount = 0
+						sp = newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
+						cp = newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer)
+						continue
+					}
+
+					// Exhausted retries
+					slog.Warn("retries exhausted for retryable error",
+						"session", sessionKey,
+						"attempts", retryAttempt,
+						"error", event.Error,
+					)
+					e.send(p, replyCtx, e.i18n.Tf(MsgErrorRetryExhausted, e.retryCfg.MaxRetries, event.Error))
+				} else {
+					e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
+				}
 			}
 			// Only drop queued messages if the agent session is dead.
 			// Some agents (e.g. Codex) emit EventError for per-turn failures
@@ -3205,7 +3288,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		}
 
 		slog.Info("processing queued message", "session", sessionKey)
-		e.processInteractiveEvents(state, session, sessions, sessionKey, "", time.Now(), stopTyping, sendDone, queued.replyCtx)
+		e.processInteractiveEvents(state, session, sessions, sessionKey, "", time.Now(), stopTyping, sendDone, queued.replyCtx, retryContext{prompt: prompt, images: queued.images, files: queued.files})
 	}
 }
 
@@ -7147,6 +7230,53 @@ func drainEvents(ch <-chan Event) {
 			return
 		}
 	}
+}
+
+// isRetryableError checks whether an agent error message indicates a transient
+// LLM-provider error that may succeed if retried. Errors arrive as strings
+// from CLI subprocess stderr, so detection is by substring match.
+func isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if msg == "" {
+		return false
+	}
+	for _, substr := range []string{
+		"429",
+		"400",
+		"rate limit",
+		"rate_limit",
+		"too many requests",
+		"overloaded",
+		"capacity",
+		"retry after",
+		"retry-after",
+		"temporarily unavailable",
+		"503",
+		"502",
+		"internal server error",
+		"service unavailable",
+		"please try again",
+		"请稍后重试",
+	} {
+		if strings.Contains(msg, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+// retryBackoff returns the delay for the given attempt (0-indexed).
+// Uses exponential backoff with jitter (up to +25% of delay).
+func retryBackoff(attempt int, initialDelay, maxDelay time.Duration) time.Duration {
+	delay := initialDelay
+	for i := 0; i < attempt; i++ {
+		delay = min(delay*2, maxDelay)
+	}
+	jitter := time.Duration(rand.Int64N(max(int64(delay/4), 1)))
+	return min(delay+jitter, maxDelay)
 }
 
 // replyWithError applies outgoing rate limiting and p.Reply.

@@ -465,6 +465,24 @@ func main() {
 			engine.SetResetOnIdle(time.Duration(*proj.ResetOnIdleMins) * time.Minute)
 		}
 
+		// Wire retry config
+		if proj.Retry.MaxRetries != nil {
+			maxRetries := *proj.Retry.MaxRetries
+			initialDelayMs := 2000
+			if proj.Retry.InitialDelayMs != nil {
+				initialDelayMs = *proj.Retry.InitialDelayMs
+			}
+			maxDelayMs := 30000
+			if proj.Retry.MaxDelayMs != nil {
+				maxDelayMs = *proj.Retry.MaxDelayMs
+			}
+			engine.SetRetryCfg(core.RetryCfg{
+				MaxRetries:   maxRetries,
+				InitialDelay: time.Duration(initialDelayMs) * time.Millisecond,
+				MaxDelay:     time.Duration(maxDelayMs) * time.Millisecond,
+			})
+		}
+
 		// Wire sender injection
 		if proj.InjectSender != nil {
 			engine.SetInjectSender(*proj.InjectSender)
@@ -1316,6 +1334,24 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	} else {
 		engine.SetResetOnIdle(0)
 	}
+
+		// Reload retry config
+		if proj.Retry.MaxRetries != nil {
+			maxRetries := *proj.Retry.MaxRetries
+			initialDelayMs := 2000
+			if proj.Retry.InitialDelayMs != nil {
+				initialDelayMs = *proj.Retry.InitialDelayMs
+			}
+			maxDelayMs := 30000
+			if proj.Retry.MaxDelayMs != nil {
+				maxDelayMs = *proj.Retry.MaxDelayMs
+			}
+			engine.SetRetryCfg(core.RetryCfg{
+				MaxRetries:   maxRetries,
+				InitialDelay: time.Duration(initialDelayMs) * time.Millisecond,
+				MaxDelay:     time.Duration(maxDelayMs) * time.Millisecond,
+			})
+		}
 
 	showCtx := true
 	if proj.ShowContextIndicator != nil {

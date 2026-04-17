@@ -175,6 +175,14 @@ level = "info" # debug, info, warn, error
 # max_tokens = 12000     # estimated token threshold to trigger compression
 # min_gap_mins = 30      # minimum minutes between auto-compress runs (default 30)
 
+# Retry transient API errors (429 rate limit, 503 service unavailable, etc.)
+# 自动重试瞬态 API 错误（429 限速、503 服务不可用等）。
+#
+# [projects.retry]
+# max_retries = 3          # max retry attempts for transient API errors (0 = disabled) / 最大重试次数（0 = 禁用）
+# initial_delay_ms = 2000  # initial backoff delay in milliseconds / 初始退避延迟（毫秒）
+# max_delay_ms = 30000     # maximum backoff delay in milliseconds / 最大退避延迟（毫秒）
+
 # [projects.observe]
 # enabled = true                    # Forward native terminal sessions to Slack
 # channel = "C0AL13PN4BG"           # Slack channel ID to post observations to
