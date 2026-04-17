@@ -280,6 +280,35 @@ func (sm *SessionManager) SwitchSession(userKey, target string) (*Session, error
 	return nil, fmt.Errorf("session %q not found", target)
 }
 
+// SwitchToAgentSession finds or creates an internal session that maps to the
+// given agent session ID. If an existing session already references agentSID,
+// it becomes the active session. Otherwise a new session is created so the
+// previous session's AgentSessionID is preserved in KnownAgentSessionIDs.
+func (sm *SessionManager) SwitchToAgentSession(userKey, agentSID, agentName, summary string) *Session {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	for _, sid := range sm.userSessions[userKey] {
+		s := sm.sessions[sid]
+		if s == nil {
+			continue
+		}
+		s.mu.Lock()
+		aid := s.AgentSessionID
+		s.mu.Unlock()
+		if aid == agentSID {
+			sm.activeSession[userKey] = s.ID
+			sm.saveLocked()
+			return s
+		}
+	}
+
+	s := sm.createLocked(userKey, summary)
+	s.SetAgentInfo(agentSID, agentName, summary)
+	sm.saveLocked()
+	return s
+}
+
 func (sm *SessionManager) ListSessions(userKey string) []*Session {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
