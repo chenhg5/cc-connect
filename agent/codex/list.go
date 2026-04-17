@@ -21,6 +21,7 @@ func listCodexSessions(workDir string) ([]core.AgentSessionInfo, error) {
 	if err != nil {
 		absWorkDir = workDir
 	}
+	absWorkDir = core.NormalizeDirPath(absWorkDir)
 
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -137,6 +138,10 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 				}
 			}
 		}
+	}
+
+	if sessionCwd != "" {
+		sessionCwd = core.NormalizeDirPath(sessionCwd)
 	}
 
 	// Filter by cwd

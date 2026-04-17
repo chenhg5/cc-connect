@@ -1,8 +1,6 @@
 package core
 
 import (
-	"log/slog"
-	"path/filepath"
 	"sync"
 	"time"
 )
@@ -12,15 +10,7 @@ import (
 // If the path cannot be resolved (e.g. doesn't exist yet), falls back to
 // filepath.Clean only.
 func normalizeWorkspacePath(path string) string {
-	cleaned := filepath.Clean(path)
-	resolved, err := filepath.EvalSymlinks(cleaned)
-	if err != nil {
-		return cleaned
-	}
-	if resolved != path {
-		slog.Debug("workspace path normalized", "original", path, "normalized", resolved)
-	}
-	return resolved
+	return NormalizeDirPath(path)
 }
 
 // workspaceState holds the runtime state for a single workspace.

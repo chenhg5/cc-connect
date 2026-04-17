@@ -4459,6 +4459,7 @@ func (e *Engine) dirApply(agent Agent, sessions *SessionManager, interactiveKey,
 			if absDir, err := filepath.Abs(baseDir); err == nil {
 				baseDir = absDir
 			}
+			baseDir = NormalizeDirPath(baseDir)
 
 			if !e.multiWorkspace {
 				switcher.SetWorkDir(baseDir)
@@ -4524,6 +4525,7 @@ func (e *Engine) dirApply(agent Agent, sessions *SessionManager, interactiveKey,
 	if absDir, err := filepath.Abs(newDir); err == nil {
 		newDir = absDir
 	}
+	newDir = NormalizeDirPath(newDir)
 
 	info, err := os.Stat(newDir)
 	if err != nil || !info.IsDir() {
