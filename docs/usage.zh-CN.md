@@ -681,6 +681,7 @@ cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/ch
 ```bash
 cc-connect cron add --cron "0 6 * * *" --prompt "总结 GitHub trending" --desc "每日趋势"
 cc-connect cron list
+cc-connect cron run <job-id>
 cc-connect cron del <job-id>
 ```
 

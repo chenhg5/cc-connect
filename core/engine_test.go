@@ -2597,6 +2597,9 @@ func TestCmdHelp_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	if strings.Contains(p.sent[0], "cc-connect 帮助") {
 		t.Fatalf("help text = %q, should not be card title fallback", p.sent[0])
 	}
+	if !strings.Contains(p.sent[0], "/cron [add|list|run|del|enable|disable]") {
+		t.Fatalf("help text = %q, want explicit cron run usage", p.sent[0])
+	}
 }
 
 func TestCmdList_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
@@ -4666,6 +4669,20 @@ func TestHandleCardNav_HelpSwitchesTabs(t *testing.T) {
 	}
 }
 
+func TestHandleCardNav_HelpToolsShowsCronRunUsage(t *testing.T) {
+	e := NewEngine("test", &stubAgent{}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
+
+	card := e.handleCardNav("nav:/help tools", "test:user1")
+	if card == nil {
+		t.Fatal("expected help nav card")
+	}
+	text := card.RenderText()
+
+	if !strings.Contains(text, "**/cron**  Manage scheduled tasks, arg: [add|list|run|del|enable|disable]") {
+		t.Fatalf("tools help text = %q, want explicit cron run usage", text)
+	}
+}
+
 // --- AskUserQuestion tests ---
 
 func testQuestions() []UserQuestion {
@@ -5615,6 +5632,110 @@ func TestCmdCronSetup_NativeAgentSkips(t *testing.T) {
 	}
 	if !strings.Contains(p.sent[0], "natively supports") {
 		t.Errorf("reply = %q, want native support message", p.sent[0])
+	}
+}
+
+func TestCmdCronRun_UsageWhenMissingID(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.cronScheduler = NewCronScheduler(store)
+
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	e.cmdCron(p, msg, []string{"run"})
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent = %d, want 1", len(p.sent))
+	}
+	if strings.Contains(p.sent[0], "/cron add") {
+		t.Fatalf("reply = %q, want dedicated run usage instead of general cron help", p.sent[0])
+	}
+	if !strings.Contains(p.sent[0], "/cron run <id>") {
+		t.Fatalf("reply = %q, want run command in usage", p.sent[0])
+	}
+}
+
+func TestCmdCronRun_TriggersJob(t *testing.T) {
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduler := NewCronScheduler(store)
+	platform := &stubCronReplyTargetPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "plain"},
+	}
+	agentSession := newResultAgentSession("manual run complete")
+	e := NewEngine("test", &resultAgent{session: agentSession}, []Platform{platform}, "", LangEnglish)
+	e.cronScheduler = scheduler
+	scheduler.RegisterEngine("test", e)
+
+	job := &CronJob{
+		ID:          "run-from-chat",
+		Project:     "test",
+		SessionKey:  "plain:user1",
+		CronExpr:    "0 6 * * *",
+		Prompt:      "summarize",
+		Description: "Run from chat",
+		Enabled:     false,
+		CreatedAt:   time.Now(),
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatal(err)
+	}
+
+	msg := &Message{SessionKey: "plain:user1", ReplyCtx: "ctx"}
+	e.cmdCron(platform, msg, []string{"run", job.ID})
+
+	sent := platform.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[0], "triggered") {
+		t.Fatalf("reply = %v, want localized trigger confirmation", sent)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		sent = platform.getSent()
+		if len(sent) >= 3 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for run output, sent=%v", platform.getSent())
+}
+
+func TestCmdCronRun_ProjectMissingReply(t *testing.T) {
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduler := NewCronScheduler(store)
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.cronScheduler = scheduler
+
+	job := &CronJob{
+		ID:         "run-missing-project",
+		Project:    "ghost",
+		SessionKey: "test:user1",
+		CronExpr:   "0 6 * * *",
+		Prompt:     "hello",
+		Enabled:    true,
+		CreatedAt:  time.Now(),
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatal(err)
+	}
+
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	e.cmdCron(p, msg, []string{"run", job.ID})
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent = %d, want 1", len(p.sent))
+	}
+	if strings.Contains(p.sent[0], "cron project not found") || strings.Contains(p.sent[0], "ghost") {
+		t.Fatalf("reply = %q, want user-facing project unavailable message", p.sent[0])
 	}
 }
 

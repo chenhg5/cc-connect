@@ -99,6 +99,8 @@
     "lastRun": "Última ejecución",
     "lastError": "Último error",
     "add": "Añadir tarea",
+    "trigger": "Ejecutar ahora",
+    "triggerPending": "Se activó. Los resultados se actualizarán en breve.",
     "delete": "Eliminar",
     "noJobs": "No hay tareas programadas",
     "workDir": "Directorio de trabajo",

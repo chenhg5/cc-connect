@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 type deadlineAwareModelAgent struct {
@@ -503,6 +504,131 @@ func TestMgmt_CronWithScheduler(t *testing.T) {
 	r = mgmtDelete(t, ts.URL+"/api/v1/cron/nonexistent", "tok")
 	if r.OK {
 		t.Fatal("expected 404 for nonexistent cron job")
+	}
+}
+
+func TestMgmt_CronRunByID(t *testing.T) {
+	mgmt, ts, e := testManagementServer(t, "tok")
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := NewCronScheduler(store)
+	mgmt.SetCronScheduler(cs)
+
+	platform := &stubCronReplyTargetPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "discord"},
+	}
+	agentSession := newResultAgentSession("triggered from management")
+	e.platforms = []Platform{platform}
+	e.agent = &resultAgent{session: agentSession}
+	e.cronScheduler = cs
+	cs.RegisterEngine("test-project", e)
+
+	job := &CronJob{
+		ID:          "cron-run-1",
+		Project:     "test-project",
+		SessionKey:  "discord:channel-1:user-1",
+		CronExpr:    "0 9 * * *",
+		Prompt:      "hello",
+		Description: "Run me now",
+		Enabled:     false,
+		CreatedAt:   time.Now(),
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatal(err)
+	}
+
+	r := mgmtPost(t, ts.URL+"/api/v1/cron/"+job.ID+"/run", "tok", map[string]any{})
+	if !r.OK {
+		t.Fatalf("cron run failed: %s", r.Error)
+	}
+
+	var data map[string]any
+	if err := json.Unmarshal(r.Data, &data); err != nil {
+		t.Fatalf("unmarshal run response: %v", err)
+	}
+	if data["status"] != "triggered" {
+		t.Fatalf("status = %v, want triggered", data["status"])
+	}
+	if data["id"] != job.ID {
+		t.Fatalf("id = %v, want %s", data["id"], job.ID)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(platform.getSent()) >= 2 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for triggered cron run, sent=%v", platform.getSent())
+}
+
+func TestMgmt_CronRunByID_RejectsExtraPathSegments(t *testing.T) {
+	mgmt, ts, e := testManagementServer(t, "tok")
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := NewCronScheduler(store)
+	mgmt.SetCronScheduler(cs)
+	cs.RegisterEngine("test-project", e)
+
+	job := &CronJob{
+		ID:         "cron-run-extra",
+		Project:    "test-project",
+		SessionKey: "discord:channel-1:user-1",
+		CronExpr:   "0 9 * * *",
+		Prompt:     "hello",
+		Enabled:    true,
+		CreatedAt:  time.Now(),
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatal(err)
+	}
+
+	r := mgmtPost(t, ts.URL+"/api/v1/cron/"+job.ID+"/run/extra", "tok", map[string]any{})
+	if r.OK {
+		t.Fatal("expected extra cron path segment to be rejected")
+	}
+	if !strings.Contains(r.Error, "unknown cron route") {
+		t.Fatalf("error = %q, want unknown cron route", r.Error)
+	}
+}
+
+func TestMgmt_CronRunByID_ProjectMissingIsBadRequest(t *testing.T) {
+	mgmt, ts, e := testManagementServer(t, "tok")
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := NewCronScheduler(store)
+	mgmt.SetCronScheduler(cs)
+	cs.RegisterEngine("test-project", e)
+
+	job := &CronJob{
+		ID:         "cron-run-missing-project",
+		Project:    "ghost",
+		SessionKey: "discord:channel-1:user-1",
+		CronExpr:   "0 9 * * *",
+		Prompt:     "hello",
+		Enabled:    true,
+		CreatedAt:  time.Now(),
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatal(err)
+	}
+
+	r := mgmtPost(t, ts.URL+"/api/v1/cron/"+job.ID+"/run", "tok", map[string]any{})
+	if r.OK {
+		t.Fatal("expected run to fail when project is missing")
+	}
+	if !strings.Contains(r.Error, "project") {
+		t.Fatalf("error = %q, want project error", r.Error)
+	}
+	if !strings.Contains(r.Error, "not found") {
+		t.Fatalf("error = %q, want missing project details", r.Error)
 	}
 }
 

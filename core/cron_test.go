@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -364,6 +365,174 @@ func TestCronStore_JobsPath(t *testing.T) {
 	if store.path != expected {
 		t.Errorf("store path = %q, want %q", store.path, expected)
 	}
+}
+
+func TestCronScheduler_RunJobNow_DisabledJobStillRuns(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduler := NewCronScheduler(store)
+
+	platform := &stubCronReplyTargetPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "discord"},
+	}
+	agentSession := newResultAgentSession("manual run complete")
+	agent := &resultAgent{session: agentSession}
+
+	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+	e.cronScheduler = scheduler
+	scheduler.RegisterEngine("test", e)
+
+	job := &CronJob{
+		ID:          "manual1",
+		Project:     "test",
+		SessionKey:  "discord:channel-1:user-1",
+		CronExpr:    "0 6 * * *",
+		Prompt:      "summarize activity",
+		Description: "Disabled daily summary",
+		Enabled:     false,
+		CreatedAt:   time.Now(),
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := scheduler.RunJobNow("manual1"); err != nil {
+		t.Fatalf("RunJobNow() error = %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		sent := platform.getSent()
+		if len(sent) >= 2 {
+			if sent[0] != "⏰ Disabled daily summary" {
+				t.Fatalf("sent[0] = %q, want cron start notice", sent[0])
+			}
+			if sent[1] != "manual run complete" {
+				t.Fatalf("sent[1] = %q, want final result", sent[1])
+			}
+			stored := store.Get("manual1")
+			if stored == nil {
+				t.Fatal("expected stored job")
+			}
+			if stored.LastRun.IsZero() {
+				t.Fatal("expected LastRun to be set after manual run")
+			}
+			if stored.LastError != "" {
+				t.Fatalf("LastError = %q, want empty", stored.LastError)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatalf("timed out waiting for manual run messages, sent=%v", platform.getSent())
+}
+
+func TestCronScheduler_RunJobNow_NotFound(t *testing.T) {
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduler := NewCronScheduler(store)
+
+	err = scheduler.RunJobNow("missing")
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("RunJobNow() error = %v, want not found", err)
+	}
+}
+
+func TestCronScheduler_RunJobNow_ProjectMissingFailsSynchronously(t *testing.T) {
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduler := NewCronScheduler(store)
+
+	job := &CronJob{
+		ID:         "missing-project",
+		Project:    "ghost",
+		SessionKey: "discord:channel-1:user-1",
+		CronExpr:   "0 6 * * *",
+		Prompt:     "hello",
+		Enabled:    true,
+		CreatedAt:  time.Now(),
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatal(err)
+	}
+
+	err = scheduler.RunJobNow("missing-project")
+	if err == nil || !errors.Is(err, ErrCronProjectNotFound) || !strings.Contains(err.Error(), `"ghost"`) {
+		t.Fatalf("RunJobNow() error = %v, want missing project", err)
+	}
+}
+
+func TestCronScheduler_RunJobNow_UsesSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduler := NewCronScheduler(store)
+
+	platform := &stubCronReplyTargetPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "discord"},
+	}
+	agentSession := newResultAgentSession("snapshot complete")
+	agent := &resultAgent{session: agentSession}
+
+	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+	e.cronScheduler = scheduler
+	scheduler.RegisterEngine("test", e)
+
+	job := &CronJob{
+		ID:          "snapshot1",
+		Project:     "test",
+		SessionKey:  "discord:channel-1:user-1",
+		CronExpr:    "0 6 * * *",
+		Prompt:      "original prompt",
+		Description: "Original description",
+		Enabled:     true,
+		CreatedAt:   time.Now(),
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := scheduler.RunJobNow("snapshot1"); err != nil {
+		t.Fatalf("RunJobNow() error = %v", err)
+	}
+	if !store.Update("snapshot1", "prompt", "mutated prompt") {
+		t.Fatal("Update(prompt) returned false")
+	}
+	if !store.Update("snapshot1", "description", "Mutated description") {
+		t.Fatal("Update(description) returned false")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		sent := platform.getSent()
+		if len(sent) >= 2 {
+			if sent[0] != "⏰ Original description" {
+				t.Fatalf("sent[0] = %q, want original description", sent[0])
+			}
+			if len(agentSession.sentPrompts) != 1 || !strings.Contains(agentSession.sentPrompts[0], "original prompt") {
+				t.Fatalf("agent prompts = %#v, want original prompt", agentSession.sentPrompts)
+			}
+			if strings.Contains(agentSession.sentPrompts[0], "mutated prompt") {
+				t.Fatalf("agent prompt used mutated value: %#v", agentSession.sentPrompts)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatalf("timed out waiting for snapshot run, sent=%v", platform.getSent())
 }
 
 func TestCronJob_ExecutionTimeout(t *testing.T) {

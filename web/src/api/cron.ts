@@ -25,3 +25,4 @@ export const listCronJobs = (project?: string) =>
 export const createCronJob = (body: Partial<CronJob>) => api.post<CronJob>('/cron', body);
 export const updateCronJob = (id: string, fields: Record<string, any>) => api.patch<CronJob>(`/cron/${id}`, fields);
 export const deleteCronJob = (id: string) => api.delete(`/cron/${id}`);
+export const triggerCronJob = (id: string) => api.post<{ id: string; status: string }>(`/cron/${id}/run`);

@@ -5,11 +5,12 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
-	"reflect"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -45,6 +46,11 @@ func (j *CronJob) IsShellJob() bool {
 }
 
 const defaultCronJobTimeout = 30 * time.Minute
+
+var (
+	ErrCronJobNotFound     = errors.New("cron job not found")
+	ErrCronProjectNotFound = errors.New("cron project not found")
+)
 
 // ExecutionTimeout returns how long the scheduler waits for the job goroutine to finish.
 // nil TimeoutMins uses 30 minutes. *TimeoutMins == 0 means wait without a time limit.
@@ -396,13 +402,13 @@ func toExportedFieldName(s string) string {
 
 // CronScheduler runs cron jobs by injecting synthetic messages into engines.
 type CronScheduler struct {
-	store         *CronStore
-	cron          *cron.Cron
-	engines       map[string]*Engine // project name → engine
-	mu            sync.RWMutex
-	entries       map[string]cron.EntryID // job ID → cron entry
-	defaultSilent      bool   // global default for suppressing cron start notifications
-	defaultSessionMode string // global default session mode; "" = reuse, "new_per_run" = fresh session each run
+	store              *CronStore
+	cron               *cron.Cron
+	engines            map[string]*Engine // project name → engine
+	mu                 sync.RWMutex
+	entries            map[string]cron.EntryID // job ID → cron entry
+	defaultSilent      bool                    // global default for suppressing cron start notifications
+	defaultSessionMode string                  // global default session mode; "" = reuse, "new_per_run" = fresh session each run
 }
 
 func NewCronScheduler(store *CronStore) *CronScheduler {
@@ -627,7 +633,35 @@ func (cs *CronScheduler) scheduleJob(job *CronJob) error {
 
 func (cs *CronScheduler) executeJob(jobID string) {
 	job := cs.store.Get(jobID)
-	if job == nil || !job.Enabled {
+	if job == nil {
+		return
+	}
+	cs.runJob(job, false)
+}
+
+// RunJobNow triggers a persisted cron job immediately in the background.
+// Disabled jobs are allowed to run manually; only scheduled executions enforce Enabled.
+func (cs *CronScheduler) RunJobNow(id string) error {
+	job := cs.store.Get(id)
+	if job == nil {
+		return fmt.Errorf("%w: %q", ErrCronJobNotFound, id)
+	}
+	cs.mu.RLock()
+	_, ok := cs.engines[job.Project]
+	cs.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("%w: %q", ErrCronProjectNotFound, job.Project)
+	}
+	snapshot := *job
+	go cs.runJob(&snapshot, true)
+	return nil
+}
+
+func (cs *CronScheduler) runJob(job *CronJob, manual bool) {
+	if job == nil {
+		return
+	}
+	if !manual && !job.Enabled {
 		return
 	}
 
@@ -636,12 +670,12 @@ func (cs *CronScheduler) executeJob(jobID string) {
 	cs.mu.RUnlock()
 
 	if !ok {
-		slog.Error("cron: project not found", "job", jobID, "project", job.Project)
-		cs.store.MarkRun(jobID, fmt.Errorf("project %q not found", job.Project))
+		slog.Error("cron: project not found", "job", job.ID, "project", job.Project, "manual", manual)
+		cs.store.MarkRun(job.ID, fmt.Errorf("project %q not found", job.Project))
 		return
 	}
 
-	slog.Info("cron: executing job", "id", jobID, "project", job.Project, "prompt", truncateStr(job.Prompt, 60))
+	slog.Info("cron: executing job", "id", job.ID, "project", job.Project, "manual", manual, "prompt", truncateStr(job.Prompt, 60))
 
 	done := make(chan error, 1)
 	go func() {
@@ -660,12 +694,12 @@ func (cs *CronScheduler) executeJob(jobID string) {
 		err = <-done
 	}
 
-	cs.store.MarkRun(jobID, err)
+	cs.store.MarkRun(job.ID, err)
 
 	if err != nil {
-		slog.Error("cron: job failed", "id", jobID, "error", err)
+		slog.Error("cron: job failed", "id", job.ID, "manual", manual, "error", err)
 	} else {
-		slog.Info("cron: job completed", "id", jobID)
+		slog.Info("cron: job completed", "id", job.ID, "manual", manual)
 	}
 }
 

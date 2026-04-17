@@ -214,30 +214,33 @@ const (
 	MsgHeartbeatUsage        MsgKey = "heartbeat_usage"
 	MsgHeartbeatInvalidMins  MsgKey = "heartbeat_invalid_mins"
 
-	MsgCronNotAvailable MsgKey = "cron_not_available"
-	MsgCronUsage        MsgKey = "cron_usage"
-	MsgCronAddUsage     MsgKey = "cron_add_usage"
-	MsgCronAdded        MsgKey = "cron_added"
-	MsgCronAddedExec    MsgKey = "cron_added_exec"
-	MsgCronAddExecUsage MsgKey = "cron_addexec_usage"
-	MsgCronEmpty        MsgKey = "cron_empty"
-	MsgCronListTitle    MsgKey = "cron_list_title"
-	MsgCronListFooter   MsgKey = "cron_list_footer"
-	MsgCronDelUsage     MsgKey = "cron_del_usage"
-	MsgCronDeleted      MsgKey = "cron_deleted"
-	MsgCronNotFound     MsgKey = "cron_not_found"
-	MsgCronEnabled      MsgKey = "cron_enabled"
-	MsgCronDisabled     MsgKey = "cron_disabled"
-	MsgCronMuted        MsgKey = "cron_muted"
-	MsgCronUnmuted      MsgKey = "cron_unmuted"
-	MsgCronCardHint     MsgKey = "cron_card_hint"
-	MsgCronNextShort    MsgKey = "cron_next_short"
-	MsgCronLastShort    MsgKey = "cron_last_short"
-	MsgCronBtnEnable    MsgKey = "cron_btn_enable"
-	MsgCronBtnDisable   MsgKey = "cron_btn_disable"
-	MsgCronBtnMute      MsgKey = "cron_btn_mute"
-	MsgCronBtnUnmute    MsgKey = "cron_btn_unmute"
-	MsgCronBtnDelete    MsgKey = "cron_btn_delete"
+	MsgCronNotAvailable       MsgKey = "cron_not_available"
+	MsgCronUsage              MsgKey = "cron_usage"
+	MsgCronAddUsage           MsgKey = "cron_add_usage"
+	MsgCronAdded              MsgKey = "cron_added"
+	MsgCronAddedExec          MsgKey = "cron_added_exec"
+	MsgCronAddExecUsage       MsgKey = "cron_addexec_usage"
+	MsgCronEmpty              MsgKey = "cron_empty"
+	MsgCronListTitle          MsgKey = "cron_list_title"
+	MsgCronListFooter         MsgKey = "cron_list_footer"
+	MsgCronRunUsage           MsgKey = "cron_run_usage"
+	MsgCronTriggered          MsgKey = "cron_triggered"
+	MsgCronProjectUnavailable MsgKey = "cron_project_unavailable"
+	MsgCronDelUsage           MsgKey = "cron_del_usage"
+	MsgCronDeleted            MsgKey = "cron_deleted"
+	MsgCronNotFound           MsgKey = "cron_not_found"
+	MsgCronEnabled            MsgKey = "cron_enabled"
+	MsgCronDisabled           MsgKey = "cron_disabled"
+	MsgCronMuted              MsgKey = "cron_muted"
+	MsgCronUnmuted            MsgKey = "cron_unmuted"
+	MsgCronCardHint           MsgKey = "cron_card_hint"
+	MsgCronNextShort          MsgKey = "cron_next_short"
+	MsgCronLastShort          MsgKey = "cron_last_short"
+	MsgCronBtnEnable          MsgKey = "cron_btn_enable"
+	MsgCronBtnDisable         MsgKey = "cron_btn_disable"
+	MsgCronBtnMute            MsgKey = "cron_btn_mute"
+	MsgCronBtnUnmute          MsgKey = "cron_btn_unmute"
+	MsgCronBtnDelete          MsgKey = "cron_btn_delete"
 
 	MsgStatusTitle          MsgKey = "status_title"
 	MsgReplyFooterRemaining MsgKey = "reply_footer_remaining"
@@ -861,7 +864,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/show <ref>\n  View a file, directory, or code snippet by reference\n\n" +
 			"/dir [path|reset]\n  Show, switch, or reset agent working directory\n\n" +
 			"/stop\n  Stop current execution\n\n" +
-			"/cron [add|list|del|enable|disable]\n  Manage scheduled tasks\n\n" +
+			"/cron [add|list|run|del|enable|disable]\n  Manage scheduled tasks\n\n" +
 			"/heartbeat [status|pause|resume|run|interval]\n  Manage heartbeat\n\n" +
 			"/commands [add|del]\n  Manage custom slash commands\n\n" +
 			"/alias [add|del]\n  Manage command aliases (e.g. 帮助 → /help)\n\n" +
@@ -904,7 +907,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/show <引用>\n  按引用查看文件、目录或代码片段\n\n" +
 			"/dir [路径|reset]\n  查看、切换或重置 Agent 工作目录\n\n" +
 			"/stop\n  停止当前执行\n\n" +
-			"/cron [add|list|del|enable|disable]\n  管理定时任务\n\n" +
+			"/cron [add|list|run|del|enable|disable]\n  管理定时任务\n\n" +
 			"/heartbeat [status|pause|resume|run|interval]\n  管理心跳\n\n" +
 			"/commands [add|del]\n  管理自定义命令\n\n" +
 			"/alias [add|del]\n  管理命令别名（如 帮助 → /help）\n\n" +
@@ -946,7 +949,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/shell <命令>\n  執行 Shell 命令並返回結果\n\n" +
 			"/dir [路徑|reset]\n  查看、切換或重置 Agent 工作目錄\n\n" +
 			"/stop\n  停止當前執行\n\n" +
-			"/cron [add|list|del|enable|disable]\n  管理定時任務\n\n" +
+			"/cron [add|list|run|del|enable|disable]\n  管理定時任務\n\n" +
 			"/heartbeat [status|pause|resume|run|interval]\n  管理心跳\n\n" +
 			"/commands [add|del]\n  管理自訂命令\n\n" +
 			"/alias [add|del]\n  管理命令別名（如 幫助 → /help）\n\n" +
@@ -987,7 +990,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/shell <コマンド>\n  シェルコマンドを実行して結果を返す\n\n" +
 			"/dir [パス|reset]\n  エージェントの作業ディレクトリを表示/切り替え/リセット\n\n" +
 			"/stop\n  現在の実行を停止\n\n" +
-			"/cron [add|list|del|enable|disable]\n  スケジュールタスク管理\n\n" +
+			"/cron [add|list|run|del|enable|disable]\n  スケジュールタスク管理\n\n" +
 			"/heartbeat [status|pause|resume|run|interval]\n  ハートビート管理\n\n" +
 			"/commands [add|del]\n  カスタムコマンド管理\n\n" +
 			"/alias [add|del]\n  コマンドエイリアス管理（例: ヘルプ → /help）\n\n" +
@@ -1028,7 +1031,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/shell <comando>\n  Ejecutar un comando shell y devolver la salida\n\n" +
 			"/dir [ruta|reset]\n  Ver, cambiar o restablecer el directorio de trabajo del agente\n\n" +
 			"/stop\n  Detener ejecución actual\n\n" +
-			"/cron [add|list|del|enable|disable]\n  Gestionar tareas programadas\n\n" +
+			"/cron [add|list|run|del|enable|disable]\n  Gestionar tareas programadas\n\n" +
 			"/heartbeat [status|pause|resume|run|interval]\n  Gestionar heartbeat\n\n" +
 			"/commands [add|del]\n  Gestionar comandos personalizados\n\n" +
 			"/alias [add|del]\n  Gestionar alias de comandos (ej. ayuda → /help)\n\n" +
@@ -1146,7 +1149,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/shell <command> — Run a shell command\n" +
 			"/show <ref> — View file / directory / snippet by reference\n" +
 			"/dir [path|reset] — Show, switch, or reset work directory\n" +
-			"/cron [add|list|del|...] — Scheduled tasks\n" +
+			"/cron [add|list|run|del|...] — Scheduled tasks\n" +
 			"/commands [add|del] — Custom commands\n" +
 			"/alias [add|del] — Command aliases\n" +
 			"/skills — List agent skills\n" +
@@ -1156,7 +1159,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/shell <命令> — 执行 Shell 命令\n" +
 			"/show <引用> — 按引用查看文件、目录或代码片段\n" +
 			"/dir [路径|reset] — 查看、切换或重置工作目录\n" +
-			"/cron [add|list|del|...] — 定时任务\n" +
+			"/cron [add|list|run|del|...] — 定时任务\n" +
 			"/commands [add|del] — 自定义命令\n" +
 			"/alias [add|del] — 命令别名\n" +
 			"/skills — 列出 Agent Skills\n" +
@@ -1165,7 +1168,7 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "**工具與自動化**\n" +
 			"/shell <命令> — 執行 Shell 命令\n" +
 			"/dir [路徑|reset] — 查看、切換或重置工作目錄\n" +
-			"/cron [add|list|del|...] — 定時任務\n" +
+			"/cron [add|list|run|del|...] — 定時任務\n" +
 			"/commands [add|del] — 自訂命令\n" +
 			"/alias [add|del] — 命令別名\n" +
 			"/skills — 列出 Agent Skills\n" +
@@ -1174,7 +1177,7 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese: "**ツール・自動化**\n" +
 			"/shell <コマンド> — シェルコマンド実行\n" +
 			"/dir [パス|reset] — 作業ディレクトリの表示/切り替え/リセット\n" +
-			"/cron [add|list|del|...] — スケジュールタスク\n" +
+			"/cron [add|list|run|del|...] — スケジュールタスク\n" +
 			"/commands [add|del] — カスタムコマンド\n" +
 			"/alias [add|del] — コマンドエイリアス\n" +
 			"/skills — エージェントスキル一覧\n" +
@@ -1183,7 +1186,7 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish: "**Herramientas y automatización**\n" +
 			"/shell <comando> — Ejecutar comando shell\n" +
 			"/dir [ruta|reset] — Ver, cambiar o restablecer directorio de trabajo\n" +
-			"/cron [add|list|del|...] — Tareas programadas\n" +
+			"/cron [add|list|run|del|...] — Tareas programadas\n" +
 			"/commands [add|del] — Comandos personalizados\n" +
 			"/alias [add|del] — Alias de comandos\n" +
 			"/skills — Listar skills del agente\n" +
@@ -1615,11 +1618,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "El programador de tareas no está disponible.",
 	},
 	MsgCronUsage: {
-		LangEnglish:            "Usage:\n/cron add <min> <hour> <day> <month> <weekday> <prompt>\n/cron list\n/cron del <id>\n/cron enable <id> · /cron disable <id>\n/cron mute <id> · /cron unmute <id>\n/cron setup — write cc-connect instructions to agent memory file",
-		LangChinese:            "用法：\n/cron add <分> <时> <日> <月> <周> <任务描述>\n/cron list\n/cron del <id>\n/cron enable <id> · /cron disable <id>\n/cron mute <id> · /cron unmute <id> 静音/取消静音\n/cron setup — 将 cc-connect 指令写入 agent 记忆文件",
-		LangTraditionalChinese: "用法：\n/cron add <分> <時> <日> <月> <週> <任務描述>\n/cron list\n/cron del <id>\n/cron enable <id> · /cron disable <id>\n/cron mute <id> · /cron unmute <id> 靜音/取消靜音\n/cron setup — 將 cc-connect 指令寫入 agent 記憶檔案",
-		LangJapanese:           "使い方:\n/cron add <分> <時> <日> <月> <曜日> <タスク内容>\n/cron list\n/cron del <id>\n/cron enable <id> · /cron disable <id>\n/cron mute <id> · /cron unmute <id> ミュート/解除\n/cron setup — cc-connect の指示をエージェントのメモリファイルに書き込む",
-		LangSpanish:            "Uso:\n/cron add <min> <hora> <día> <mes> <día_semana> <tarea>\n/cron list\n/cron del <id>\n/cron enable <id> · /cron disable <id>\n/cron mute <id> · /cron unmute <id>\n/cron setup — escribir las instrucciones de cc-connect en el archivo de memoria del agente",
+		LangEnglish:            "Usage:\n/cron add <min> <hour> <day> <month> <weekday> <prompt>\n/cron list\n/cron run <id>\n/cron del <id>\n/cron enable <id> · /cron disable <id>\n/cron mute <id> · /cron unmute <id>\n/cron setup — write cc-connect instructions to agent memory file",
+		LangChinese:            "用法：\n/cron add <分> <时> <日> <月> <周> <任务描述>\n/cron list\n/cron run <id>\n/cron del <id>\n/cron enable <id> · /cron disable <id>\n/cron mute <id> · /cron unmute <id> 静音/取消静音\n/cron setup — 将 cc-connect 指令写入 agent 记忆文件",
+		LangTraditionalChinese: "用法：\n/cron add <分> <時> <日> <月> <週> <任務描述>\n/cron list\n/cron run <id>\n/cron del <id>\n/cron enable <id> · /cron disable <id>\n/cron mute <id> · /cron unmute <id> 靜音/取消靜音\n/cron setup — 將 cc-connect 指令寫入 agent 記憶檔案",
+		LangJapanese:           "使い方:\n/cron add <分> <時> <日> <月> <曜日> <タスク内容>\n/cron list\n/cron run <id>\n/cron del <id>\n/cron enable <id> · /cron disable <id>\n/cron mute <id> · /cron unmute <id> ミュート/解除\n/cron setup — cc-connect の指示をエージェントのメモリファイルに書き込む",
+		LangSpanish:            "Uso:\n/cron add <min> <hora> <día> <mes> <día_semana> <tarea>\n/cron list\n/cron run <id>\n/cron del <id>\n/cron enable <id> · /cron disable <id>\n/cron mute <id> · /cron unmute <id>\n/cron setup — escribir las instrucciones de cc-connect en el archivo de memoria del agente",
 	},
 	MsgCronAddUsage: {
 		LangEnglish:            "Usage: /cron add <min> <hour> <day> <month> <weekday> <prompt>\nExample: /cron add 0 6 * * * Collect GitHub trending data and send me a summary",
@@ -1664,11 +1667,32 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "⏰ Tareas programadas (%d)",
 	},
 	MsgCronListFooter: {
-		LangEnglish:            "`/cron del <id>` remove · `/cron enable/disable <id>` toggle · `/cron mute/unmute <id>` mute",
-		LangChinese:            "`/cron del <id>` 删除 · `/cron enable/disable <id>` 启停 · `/cron mute/unmute <id>` 静音",
-		LangTraditionalChinese: "`/cron del <id>` 刪除 · `/cron enable/disable <id>` 啟停 · `/cron mute/unmute <id>` 靜音",
-		LangJapanese:           "`/cron del <id>` 削除 · `/cron enable/disable <id>` 切替 · `/cron mute/unmute <id>` ミュート",
-		LangSpanish:            "`/cron del <id>` eliminar · `/cron enable/disable <id>` activar/desactivar · `/cron mute/unmute <id>` silenciar",
+		LangEnglish:            "`/cron run <id>` trigger now · `/cron del <id>` remove · `/cron enable/disable <id>` toggle · `/cron mute/unmute <id>` mute",
+		LangChinese:            "`/cron run <id>` 立即触发 · `/cron del <id>` 删除 · `/cron enable/disable <id>` 启停 · `/cron mute/unmute <id>` 静音",
+		LangTraditionalChinese: "`/cron run <id>` 立即觸發 · `/cron del <id>` 刪除 · `/cron enable/disable <id>` 啟停 · `/cron mute/unmute <id>` 靜音",
+		LangJapanese:           "`/cron run <id>` 今すぐ実行 · `/cron del <id>` 削除 · `/cron enable/disable <id>` 切替 · `/cron mute/unmute <id>` ミュート",
+		LangSpanish:            "`/cron run <id>` ejecutar ahora · `/cron del <id>` eliminar · `/cron enable/disable <id>` activar/desactivar · `/cron mute/unmute <id>` silenciar",
+	},
+	MsgCronRunUsage: {
+		LangEnglish:            "Usage: /cron run <id>",
+		LangChinese:            "用法：/cron run <id>",
+		LangTraditionalChinese: "用法：/cron run <id>",
+		LangJapanese:           "使い方: /cron run <id>",
+		LangSpanish:            "Uso: /cron run <id>",
+	},
+	MsgCronTriggered: {
+		LangEnglish:            "▶️ Cron job `%s` triggered.",
+		LangChinese:            "▶️ 定时任务 `%s` 已触发。",
+		LangTraditionalChinese: "▶️ 定時任務 `%s` 已觸發。",
+		LangJapanese:           "▶️ スケジュールタスク `%s` を実行しました。",
+		LangSpanish:            "▶️ Tarea programada `%s` ejecutada.",
+	},
+	MsgCronProjectUnavailable: {
+		LangEnglish:            "❌ This cron job cannot be triggered because its project is no longer available.",
+		LangChinese:            "❌ 该定时任务关联的项目已不可用，无法触发。",
+		LangTraditionalChinese: "❌ 該定時任務關聯的專案已不可用，無法觸發。",
+		LangJapanese:           "❌ このスケジュールタスクは、関連するプロジェクトが利用できないため実行できません。",
+		LangSpanish:            "❌ Esta tarea programada no puede ejecutarse porque su proyecto ya no está disponible.",
 	},
 	MsgCronDelUsage: {
 		LangEnglish:            "Usage: /cron del <id>",
@@ -1720,11 +1744,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "🔔 Tarea programada `%s` reactivada.",
 	},
 	MsgCronCardHint: {
-		LangEnglish:            "💡 `/cron add` · `/cron del <id>` · `/cron enable/disable <id>` · `/cron mute/unmute <id>`",
-		LangChinese:            "💡 `/cron add` 添加 · `/cron del <id>` 删除 · `/cron enable/disable <id>` 启停 · `/cron mute/unmute <id>` 静音",
-		LangTraditionalChinese: "💡 `/cron add` 新增 · `/cron del <id>` 刪除 · `/cron enable/disable <id>` 啟停 · `/cron mute/unmute <id>` 靜音",
-		LangJapanese:           "💡 `/cron add` 追加 · `/cron del <id>` 削除 · `/cron enable/disable <id>` 切替 · `/cron mute/unmute <id>` ミュート",
-		LangSpanish:            "💡 `/cron add` · `/cron del <id>` · `/cron enable/disable <id>` · `/cron mute/unmute <id>`",
+		LangEnglish:            "💡 `/cron add` · `/cron run <id>` · `/cron del <id>` · `/cron enable/disable <id>` · `/cron mute/unmute <id>`",
+		LangChinese:            "💡 `/cron add` 添加 · `/cron run <id>` 触发 · `/cron del <id>` 删除 · `/cron enable/disable <id>` 启停 · `/cron mute/unmute <id>` 静音",
+		LangTraditionalChinese: "💡 `/cron add` 新增 · `/cron run <id>` 觸發 · `/cron del <id>` 刪除 · `/cron enable/disable <id>` 啟停 · `/cron mute/unmute <id>` 靜音",
+		LangJapanese:           "💡 `/cron add` 追加 · `/cron run <id>` 実行 · `/cron del <id>` 削除 · `/cron enable/disable <id>` 切替 · `/cron mute/unmute <id>` ミュート",
+		LangSpanish:            "💡 `/cron add` · `/cron run <id>` · `/cron del <id>` · `/cron enable/disable <id>` · `/cron mute/unmute <id>`",
 	},
 	MsgCronBtnEnable: {
 		LangEnglish:            "Enable",
@@ -3271,11 +3295,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Detener ejecución actual",
 	},
 	MsgBuiltinCmdCron: {
-		LangEnglish:            "Manage scheduled tasks, arg: [add|list|del|enable|disable]",
-		LangChinese:            "管理定时任务，参数: [add|list|del|enable|disable]",
-		LangTraditionalChinese: "管理定時任務，參數: [add|list|del|enable|disable]",
-		LangJapanese:           "スケジュールタスク管理、引数: [add|list|del|enable|disable]",
-		LangSpanish:            "Gestionar tareas programadas, arg: [add|list|del|enable|disable]",
+		LangEnglish:            "Manage scheduled tasks, arg: [add|list|run|del|enable|disable]",
+		LangChinese:            "管理定时任务，参数: [add|list|run|del|enable|disable]",
+		LangTraditionalChinese: "管理定時任務，參數: [add|list|run|del|enable|disable]",
+		LangJapanese:           "スケジュールタスク管理、引数: [add|list|run|del|enable|disable]",
+		LangSpanish:            "Gestionar tareas programadas, arg: [add|list|run|del|enable|disable]",
 	},
 	MsgBuiltinCmdCommands: {
 		LangEnglish:            "Manage custom slash commands, arg: [add|del]",

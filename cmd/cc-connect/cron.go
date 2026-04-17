@@ -28,6 +28,8 @@ func runCron(args []string) {
 		runCronEdit(args[1:])
 	case "info":
 		runCronInfo(args[1:])
+	case "run":
+		runCronRun(args[1:])
 	case "del", "delete", "rm", "remove":
 		runCronDel(args[1:])
 	case "--help", "-h", "help":
@@ -269,6 +271,54 @@ func runCronList(args []string) {
 		}
 		fmt.Printf("  %s %s  %s  %s\n", enabled, id, expr, display)
 	}
+}
+
+func runCronRun(args []string) {
+	var id, dataDir string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--data-dir":
+			if i+1 < len(args) {
+				i++
+				dataDir = args[i]
+			}
+		case "--help", "-h":
+			printCronRunUsage()
+			return
+		default:
+			if id == "" {
+				id = args[i]
+			}
+		}
+	}
+
+	if id == "" {
+		fmt.Fprintln(os.Stderr, "Error: job ID is required")
+		printCronRunUsage()
+		os.Exit(1)
+	}
+
+	sockPath := resolveSocketPath(dataDir)
+	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "Error: cc-connect is not running (socket not found: %s)\n", sockPath)
+		os.Exit(1)
+	}
+
+	payload, _ := json.Marshal(map[string]any{"id": id})
+	resp, err := apiPost(sockPath, "/cron/run", payload)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", strings.TrimSpace(string(body)))
+		os.Exit(1)
+	}
+
+	fmt.Printf("Triggered cron job: %s\n", id)
 }
 
 func runCronDel(args []string) {
@@ -517,6 +567,7 @@ func printCronUsage() {
 Commands:
   add       Create a new scheduled task
   list      List all scheduled tasks
+  run <id>  Trigger a scheduled task immediately
   edit      Edit a scheduled task field
   info <id> [field]  Show detailed info of a scheduled task
                      (optionally filter to a single field)
@@ -546,6 +597,19 @@ Examples:
   cc-connect cron add --cron "0 6 * * *" --prompt "Collect GitHub trending data" --desc "Daily Trending"
   cc-connect cron add --cron "*/30 * * * *" --exec "df -h" --desc "Disk usage check"
   cc-connect cron add 0 6 * * * Collect GitHub trending data and send me a summary`)
+}
+
+func printCronRunUsage() {
+	fmt.Println(`Usage: cc-connect cron run <id> [options]
+
+Trigger an existing scheduled task immediately.
+
+Options:
+      --data-dir <path>      Data directory (default: ~/.cc-connect)
+  -h, --help                 Show this help
+
+Example:
+  cc-connect cron run abc123`)
 }
 
 func printCronEditUsage() {

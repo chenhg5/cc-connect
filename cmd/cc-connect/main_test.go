@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/chenhg5/cc-connect/config"
@@ -246,5 +249,43 @@ func TestStartInitialRefresh_AfterProjectStateOverride(t *testing.T) {
 	}
 	if agent.workDir != overrideDir {
 		t.Fatalf("agent workDir at refresh = %q, want %q", agent.workDir, overrideDir)
+	}
+}
+
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stderr = w
+	defer func() {
+		os.Stderr = old
+	}()
+
+	fn()
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatalf("copy stderr: %v", err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("close reader: %v", err)
+	}
+	return buf.String()
+}
+
+func TestPrintUsage_ListsCronRunCommand(t *testing.T) {
+	out := captureStderr(t, printUsage)
+
+	if !strings.Contains(out, "Manage scheduled tasks") {
+		t.Fatalf("printUsage() output missing cron section:\n%s", out)
+	}
+	if !strings.Contains(out, "run              Trigger a scheduled task immediately") {
+		t.Fatalf("printUsage() output missing cron run command:\n%s", out)
 	}
 }

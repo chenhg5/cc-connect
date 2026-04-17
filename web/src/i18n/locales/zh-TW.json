@@ -99,6 +99,8 @@
     "lastRun": "上次執行",
     "lastError": "上次錯誤",
     "add": "新增工作",
+    "trigger": "立即執行",
+    "triggerPending": "已觸發，結果稍後更新。",
     "delete": "刪除",
     "noJobs": "尚無排程工作",
     "workDir": "工作目錄",

@@ -1193,6 +1193,7 @@ Commands:
   cron               Manage scheduled tasks
     add              Create a scheduled task (-c <expr> --prompt <text>)
     list             List scheduled tasks
+    run              Trigger a scheduled task immediately
     del              Delete a scheduled task by ID
 
   sessions           Browse session history
