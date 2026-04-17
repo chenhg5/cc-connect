@@ -32,7 +32,8 @@ type ProviderPreset struct {
 	DescriptionZh string          `json:"description_zh,omitempty"`
 	Features    []string          `json:"features,omitempty"`
 	Thinking    string            `json:"thinking,omitempty"`
-	Tier        int               `json:"tier"` // sponsor ranking: lower = higher priority
+	Tier        int               `json:"tier"`                    // sponsor ranking: lower = higher priority
+	Featured    bool              `json:"featured,omitempty"`      // show a star badge when true
 	Website     string            `json:"website,omitempty"`
 }
 

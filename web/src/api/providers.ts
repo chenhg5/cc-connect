@@ -37,6 +37,7 @@ export interface ProviderPreset {
   features?: string[];
   thinking?: string;
   tier: number;
+  featured?: boolean;
   website?: string;
 }
 
