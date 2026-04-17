@@ -898,6 +898,23 @@ app_secret = "your-feishu-app-secret"
 # callback_path = "/callback"
 # allow_from = "*"  # Allowed LINE user IDs / 允许的 LINE 用户 ID
 
+# Weibo / 微博私信 (uncomment to enable / 取消注释以启用)
+# 1. Register an app at https://open.weibo.com/ via 微博龙虾助手
+#    在微博开放平台注册应用，获取 app_id 和 app_secret
+# 2. The bot receives and sends DMs via WebSocket (open-im.api.weibo.com)
+#    机器人通过 WebSocket 收发微博私信
+# Connection: WebSocket — no public URL required / 无需公网地址
+
+# [[projects.platforms]]
+# type = "weibo"
+#
+# [projects.platforms.options]
+# app_id = "your-weibo-app-id"
+# app_secret = "your-weibo-app-secret"
+# allow_from = "*"                 # Allowed Weibo user IDs / 允许的微博用户 ID
+# token_endpoint = ""              # Optional: override token endpoint / 可选：自定义 token 接口地址
+# ws_endpoint = ""                 # Optional: override WebSocket endpoint / 可选：自定义 WebSocket 地址
+
 # WeChat Work / 企业微信 (uncomment to enable / 取消注释以启用)
 # 1. Log in to https://work.weixin.qq.com/wework_admin/frame
 #    登录企业微信管理后台
