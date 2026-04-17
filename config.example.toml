@@ -40,6 +40,44 @@
 level = "info" # debug, info, warn, error
 
 # =============================================================================
+# Global Providers / 全局服务商
+# =============================================================================
+# Define providers once globally; projects reference them by name via provider_refs.
+# 在此统一定义服务商，项目通过 provider_refs 按名称引用。
+# This avoids duplicating API keys across projects.
+# 避免在多个项目中重复配置 API Key。
+#
+# Remote presets URL (fetches recommended providers list from GitHub/Gitee)
+# 远程预设列表 URL（从 GitHub/Gitee 拉取推荐服务商）
+# provider_presets_url = "https://raw.githubusercontent.com/chenhg5/cc-connect/main/provider-presets.json"
+
+# [[providers]]
+# name = "anthropic"
+# api_key = "${ANTHROPIC_API_KEY}"
+# agent_types = ["claudecode"]   # only for Claude Code projects
+
+# [[providers]]
+# name = "minimaxi-claude"
+# api_key = "${MINIMAXI_API_KEY}"
+# base_url = "https://api.minimaxi.chat/v1"
+# agent_types = ["claudecode"]
+# model = "claude-sonnet-4-20250514"
+
+# [[providers]]
+# name = "minimaxi-codex"
+# api_key = "${MINIMAXI_API_KEY}"
+# base_url = "https://api.minimaxi.chat/v1"
+# agent_types = ["codex"]
+# model = "MiniMax-M2.7"
+
+# [[providers]]
+# name = "dashscope"
+# api_key = "${DASHSCOPE_API_KEY}"
+# base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+# model = "glm-5.1"
+# thinking = "disabled"
+
+# =============================================================================
 # Display Settings / 显示设置
 # =============================================================================
 # Controls how intermediate messages (thinking, tool use) are shown in chat.
@@ -627,9 +665,13 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # Note: When using router, provider settings below are ignored as the router handles model selection.
 # 注意：使用 router 时，下方的 provider 设置将被忽略，因为 router 负责模型选择。
 
-# Active provider (matches a name in [[projects.agent.providers]])
-# 当前激活的 provider（对应下方 providers 中的 name）
+# Active provider (matches a name in [[projects.agent.providers]] or provider_refs)
+# 当前激活的 provider（对应下方 providers 或 provider_refs 中的 name）
 # provider = "anthropic"
+
+# Reference global [[providers]] by name — avoids duplicating keys per project
+# 引用全局 [[providers]] — 避免每个项目重复配置
+# provider_refs = ["minimaxi", "dashscope"]
 
 # API Providers — switch between them via /provider command in chat
 # or via CLI: cc-connect provider add --project my-backend --name relay --api-key sk-xxx

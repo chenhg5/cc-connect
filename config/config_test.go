@@ -2058,3 +2058,174 @@ func TestFormatConfigFile(t *testing.T) {
 		}
 	})
 }
+
+func TestResolveProviderRefs(t *testing.T) {
+	cfg := &Config{
+		Providers: []ProviderConfig{
+			{Name: "global-a", APIKey: "key-a", BaseURL: "https://a.com"},
+			{Name: "global-b", APIKey: "key-b", BaseURL: "https://b.com"},
+		},
+		Projects: []ProjectConfig{
+			{
+				Name: "proj-with-refs",
+				Agent: AgentConfig{
+					Type:         "claudecode",
+					ProviderRefs: []string{"global-a", "global-b"},
+				},
+			},
+			{
+				Name: "proj-inline-only",
+				Agent: AgentConfig{
+					Type: "codex",
+					Providers: []ProviderConfig{
+						{Name: "inline-p", APIKey: "inline-key"},
+					},
+				},
+			},
+			{
+				Name: "proj-mixed",
+				Agent: AgentConfig{
+					Type:         "claudecode",
+					ProviderRefs: []string{"global-a", "global-b"},
+					Providers: []ProviderConfig{
+						{Name: "global-a", APIKey: "override-key", BaseURL: "https://override.com"},
+					},
+				},
+			},
+		},
+	}
+
+	cfg.ResolveProviderRefs()
+
+	// proj-with-refs: should have both global providers
+	p0 := cfg.Projects[0].Agent.Providers
+	if len(p0) != 2 {
+		t.Fatalf("proj-with-refs: expected 2 providers, got %d", len(p0))
+	}
+	if p0[0].Name != "global-a" || p0[0].APIKey != "key-a" {
+		t.Errorf("proj-with-refs[0]: expected global-a/key-a, got %s/%s", p0[0].Name, p0[0].APIKey)
+	}
+	if p0[1].Name != "global-b" || p0[1].APIKey != "key-b" {
+		t.Errorf("proj-with-refs[1]: expected global-b/key-b, got %s/%s", p0[1].Name, p0[1].APIKey)
+	}
+
+	// proj-inline-only: should remain unchanged
+	p1 := cfg.Projects[1].Agent.Providers
+	if len(p1) != 1 || p1[0].Name != "inline-p" {
+		t.Errorf("proj-inline-only: expected 1 inline provider, got %d", len(p1))
+	}
+
+	// proj-mixed: inline override takes precedence for global-a, global-b from ref
+	p2 := cfg.Projects[2].Agent.Providers
+	if len(p2) != 2 {
+		t.Fatalf("proj-mixed: expected 2 providers, got %d", len(p2))
+	}
+	// global-b is resolved from ref (since no inline override)
+	if p2[0].Name != "global-b" || p2[0].APIKey != "key-b" {
+		t.Errorf("proj-mixed[0]: expected global-b from ref, got %s/%s", p2[0].Name, p2[0].APIKey)
+	}
+	// global-a is from inline override
+	if p2[1].Name != "global-a" || p2[1].APIKey != "override-key" {
+		t.Errorf("proj-mixed[1]: expected global-a override, got %s/%s", p2[1].Name, p2[1].APIKey)
+	}
+}
+
+func TestResolveProviderRefs_MissingRef(t *testing.T) {
+	cfg := &Config{
+		Providers: []ProviderConfig{
+			{Name: "exists", APIKey: "key"},
+		},
+		Projects: []ProjectConfig{
+			{
+				Name: "proj",
+				Agent: AgentConfig{
+					Type:         "claudecode",
+					ProviderRefs: []string{"exists", "nonexistent"},
+				},
+			},
+		},
+	}
+
+	cfg.ResolveProviderRefs()
+
+	providers := cfg.Projects[0].Agent.Providers
+	if len(providers) != 1 || providers[0].Name != "exists" {
+		t.Errorf("expected 1 resolved provider 'exists', got %d: %+v", len(providers), providers)
+	}
+}
+
+func TestResolveProviderRefs_AgentTypeFiltering(t *testing.T) {
+	cfg := &Config{
+		Providers: []ProviderConfig{
+			{Name: "claude-only", APIKey: "key-c", AgentTypes: []string{"claudecode"}},
+			{Name: "codex-only", APIKey: "key-x", AgentTypes: []string{"codex"}},
+			{Name: "universal", APIKey: "key-u"}, // no agent_types = works for all
+		},
+		Projects: []ProjectConfig{
+			{
+				Name: "proj-claude",
+				Agent: AgentConfig{
+					Type:         "claudecode",
+					ProviderRefs: []string{"claude-only", "codex-only", "universal"},
+				},
+			},
+			{
+				Name: "proj-codex",
+				Agent: AgentConfig{
+					Type:         "codex",
+					ProviderRefs: []string{"claude-only", "codex-only", "universal"},
+				},
+			},
+		},
+	}
+
+	cfg.ResolveProviderRefs()
+
+	// claudecode project: gets claude-only + universal, skips codex-only
+	p0 := cfg.Projects[0].Agent.Providers
+	if len(p0) != 2 {
+		t.Fatalf("proj-claude: expected 2 providers, got %d: %+v", len(p0), p0)
+	}
+	if p0[0].Name != "claude-only" {
+		t.Errorf("proj-claude[0]: expected claude-only, got %s", p0[0].Name)
+	}
+	if p0[1].Name != "universal" {
+		t.Errorf("proj-claude[1]: expected universal, got %s", p0[1].Name)
+	}
+
+	// codex project: gets codex-only + universal, skips claude-only
+	p1 := cfg.Projects[1].Agent.Providers
+	if len(p1) != 2 {
+		t.Fatalf("proj-codex: expected 2 providers, got %d: %+v", len(p1), p1)
+	}
+	if p1[0].Name != "codex-only" {
+		t.Errorf("proj-codex[0]: expected codex-only, got %s", p1[0].Name)
+	}
+	if p1[1].Name != "universal" {
+		t.Errorf("proj-codex[1]: expected universal, got %s", p1[1].Name)
+	}
+}
+
+func TestResolveProviderRefs_NoGlobalProviders(t *testing.T) {
+	cfg := &Config{
+		Projects: []ProjectConfig{
+			{
+				Name: "proj",
+				Agent: AgentConfig{
+					Type:         "claudecode",
+					ProviderRefs: []string{"foo"},
+					Providers: []ProviderConfig{
+						{Name: "bar", APIKey: "key"},
+					},
+				},
+			},
+		},
+	}
+
+	cfg.ResolveProviderRefs()
+
+	providers := cfg.Projects[0].Agent.Providers
+	if len(providers) != 1 || providers[0].Name != "bar" {
+		t.Errorf("expected only inline provider 'bar', got %+v", providers)
+	}
+}

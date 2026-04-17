@@ -1,0 +1,180 @@
+{
+  "version": 1,
+  "updated_at": "2026-04-16",
+  "providers": [
+    {
+      "name": "minimax",
+      "display_name": "MiniMax",
+      "base_url": "https://api.minimax.io/v1",
+      "endpoints": {
+        "claudecode": "https://api.minimax.io/anthropic",
+        "codex": "https://api.minimax.io/v1"
+      },
+      "models": ["MiniMax-M2.7", "MiniMax-M2.7-highspeed", "MiniMax-M2.5"],
+      "agent_models": {
+        "claudecode": "MiniMax-M2.7",
+        "codex": "MiniMax-M2.7"
+      },
+      "agents": ["claudecode", "codex", "opencode"],
+      "invite_url": "https://platform.minimax.io/subscribe/token-plan?code=lqYrKBvjke&source=link",
+      "description": "Next-gen LLM with 1M context window, strong SWE performance (56.2% SWE-Pro). Exclusive 12% off Token Plan for cc-connect users!",
+      "description_zh": "新一代大模型，支持 1M 超长上下文，软件工程能力突出（SWE-Pro 56.2%）。cc-connect 用户专享 Token 套餐 88 折！",
+      "features": ["1M Context", "Extended Thinking", "SWE-Pro 56.2%"],
+      "thinking": "disabled",
+      "tier": 1,
+      "website": "https://platform.minimax.io"
+    },
+    {
+      "name": "minimax-cn",
+      "display_name": "MiniMax (中国站)",
+      "base_url": "https://api.minimaxi.com/v1",
+      "endpoints": {
+        "claudecode": "https://api.minimaxi.com/anthropic",
+        "codex": "https://api.minimaxi.com/v1"
+      },
+      "models": ["MiniMax-M2.7", "MiniMax-M2.7-highspeed", "MiniMax-M2.5"],
+      "agent_models": {
+        "claudecode": "MiniMax-M2.7",
+        "codex": "MiniMax-M2.7"
+      },
+      "agents": ["claudecode", "codex", "opencode"],
+      "invite_url": "https://platform.minimaxi.com/subscribe/token-plan?code=lqYrKBvjke&source=link",
+      "description": "MiniMax China endpoint — lower latency for users in mainland China.",
+      "description_zh": "MiniMax 国内站 — 大陆用户延迟更低。cc-connect 用户专享 Token 套餐 88 折！",
+      "features": ["1M Context", "低延迟 (CN)", "Extended Thinking"],
+      "thinking": "disabled",
+      "tier": 1,
+      "website": "https://platform.minimaxi.com"
+    },
+    {
+      "name": "aigocode",
+      "display_name": "AIGoCode",
+      "base_url": "https://api.aigocode.com",
+      "endpoints": {
+        "claudecode": "https://api.aigocode.com",
+        "codex": "https://api.aigocode.com",
+        "gemini": "https://api.aigocode.com"
+      },
+      "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514", "gpt-5.4", "gemini-2.5-pro"],
+      "agent_models": {
+        "claudecode": "claude-sonnet-4-20250514",
+        "codex": "gpt-5.4",
+        "gemini": "gemini-2.5-pro"
+      },
+      "agents": ["claudecode", "codex", "gemini", "opencode"],
+      "invite_url": "https://aigocode.com/invite/CYY3C85C",
+      "description": "All-in-one platform: Claude Code, Codex & Gemini. Flexible plans, no VPN needed, fast response. 10% bonus credit on first top-up via link!",
+      "description_zh": "集成 Claude Code、Codex、Gemini 的全能平台。灵活套餐，免翻墙，响应快速。通过链接注册首充额外赠送 10%！",
+      "features": ["Claude Code", "Codex", "Gemini", "No VPN"],
+      "tier": 2,
+      "website": "https://aigocode.com"
+    },
+    {
+      "name": "dmxapi",
+      "display_name": "DMXAPI",
+      "base_url": "https://www.dmxapi.cn",
+      "endpoints": {
+        "claudecode": "https://www.dmxapi.cn",
+        "codex": "https://www.dmxapi.cn/v1"
+      },
+      "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514", "gpt-5.4"],
+      "agent_models": {
+        "claudecode": "claude-sonnet-4-20250514",
+        "codex": "gpt-5.4"
+      },
+      "agents": ["claudecode", "codex", "opencode"],
+      "invite_url": "https://www.dmxapi.cn/register?aff=NDln",
+      "description": "Global LLM API for 200+ enterprises. One key for all models. GPT/Claude/Gemini at 32% off, Claude Code models at 66% off!",
+      "description_zh": "服务 200+ 企业的全球大模型 API。一个 Key 接入所有模型。GPT/Claude/Gemini 3.2 折，Claude Code 专属模型低至 6.6 折！",
+      "features": ["All Models", "Unlimited Concurrency", "24/7 Support"],
+      "tier": 2,
+      "website": "https://www.dmxapi.cn"
+    },
+    {
+      "name": "shengsuanyun",
+      "display_name": "Shengsuanyun (省算云)",
+      "base_url": "https://router.shengsuanyun.com/api",
+      "endpoints": {
+        "claudecode": "https://router.shengsuanyun.com/api",
+        "codex": "https://router.shengsuanyun.com/api/v1",
+        "gemini": "https://router.shengsuanyun.com/api"
+      },
+      "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514", "gpt-5.4", "gemini-2.5-pro"],
+      "agent_models": {
+        "claudecode": "claude-sonnet-4-20250514",
+        "codex": "gpt-5.4",
+        "gemini": "gemini-2.5-pro"
+      },
+      "agents": ["claudecode", "codex", "gemini", "opencode"],
+      "invite_url": "https://www.shengsuanyun.com/?from=CH_67XCLZGS",
+      "description": "Industrial-grade AI platform with 99.7% SLA. Smart routing, BYOK hosting, pay-as-you-go. Free $2 credit for new users!",
+      "description_zh": "工业级 AI 平台，99.7% SLA 保障。智能路由，BYOK 密钥托管，按量计费。新用户注册赠送 $2！",
+      "features": ["99.7% SLA", "Smart Routing", "BYOK", "Claude/Codex/Gemini"],
+      "tier": 2,
+      "website": "https://www.shengsuanyun.com"
+    },
+    {
+      "name": "aicodemirror",
+      "display_name": "AICodeMirror",
+      "base_url": "https://api.aicodemirror.com/api/claudecode",
+      "endpoints": {
+        "claudecode": "https://api.aicodemirror.com/api/claudecode",
+        "codex": "https://api.aicodemirror.com/api/codex/backend-api/codex",
+        "gemini": "https://api.aicodemirror.com/api/gemini"
+      },
+      "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"],
+      "agent_models": {
+        "claudecode": "claude-sonnet-4-20250514",
+        "codex": "gpt-5.4",
+        "gemini": "gemini-2.5-pro"
+      },
+      "agents": ["claudecode", "codex", "gemini", "opencode"],
+      "invite_url": "https://www.aicodemirror.com/register?invitecode=KDHMUP",
+      "description": "Official high-stability relay for Claude Code / Codex / Gemini. Enterprise concurrency, 24/7 support. 20% off first top-up for cc-connect users!",
+      "description_zh": "Claude Code / Codex / Gemini 官方高稳定中转。企业级并发，24/7 技术支持。cc-connect 用户首充 8 折，企业最高 75 折！",
+      "features": ["Claude Code", "Codex", "Gemini", "Enterprise"],
+      "tier": 2,
+      "website": "https://www.aicodemirror.com"
+    },
+    {
+      "name": "code0",
+      "display_name": "Code0",
+      "base_url": "https://api.code0.ai",
+      "endpoints": {
+        "claudecode": "https://api.code0.ai",
+        "codex": "https://api.code0.ai/v1"
+      },
+      "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514", "gpt-5.4"],
+      "agent_models": {
+        "claudecode": "claude-sonnet-4-20250514",
+        "codex": "gpt-5.4"
+      },
+      "agents": ["claudecode", "codex", "gemini"],
+      "invite_url": "https://code0.ai/register?aff=5cGO",
+      "description": "AI model aggregation relay for Chinese developers. OpenAI/Anthropic/Gemini compatible. ¥1.5 = $1, transparent pricing, domestic direct.",
+      "description_zh": "面向国内开发者的 AI 模型聚合中转。兼容 OpenAI/Anthropic/Gemini 协议。¥1.5 = $1 固定汇率，透明定价，国内直连。",
+      "features": ["All Protocols", "¥1.5=$1", "Domestic Direct"],
+      "tier": 2,
+      "website": "https://code0.ai"
+    },
+    {
+      "name": "claudeapi",
+      "display_name": "claudeapi.com",
+      "base_url": "https://api.claudeapi.com",
+      "endpoints": {
+        "claudecode": "https://api.claudeapi.com"
+      },
+      "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-haiku-3-5-20241022"],
+      "agent_models": {
+        "claudecode": "claude-sonnet-4-20250514"
+      },
+      "agents": ["claudecode", "opencode"],
+      "invite_url": "https://console.claudeapi.com/register?aff=GDbA",
+      "description": "Premium direct Claude connection — official 1st-party Keys & AWS Bedrock. No reverse engineering, full capabilities preserved. For power users & enterprise teams.",
+      "description_zh": "高品质 Claude 直连服务 — 官方一手 Key + AWS Bedrock 官方通道。无逆向无降智，完整保留官方能力。面向 Claude Code 重度用户和企业团队。",
+      "features": ["Official Channel", "No Reverse Eng.", "Enterprise"],
+      "tier": 2,
+      "website": "https://console.claudeapi.com"
+    }
+  ]
+}

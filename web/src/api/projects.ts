@@ -19,6 +19,7 @@ export interface ProjectDetail {
   work_dir?: string;
   agent_mode?: string;
   show_context_indicator?: boolean;
+  provider_refs?: string[];
   platform_configs?: PlatformConfigInfo[];
   platforms: { type: string; connected: boolean }[];
   sessions_count: number;

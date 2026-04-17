@@ -829,6 +829,7 @@ func main() {
 			})
 		})
 		mgmtSrv.SetGetProjectConfig(config.GetProjectConfigDetails)
+		mgmtSrv.SetSaveProviderRefs(config.SaveProviderRefs)
 		mgmtSrv.SetConfigFilePath(configPath)
 		mgmtSrv.SetGetGlobalSettings(config.GetGlobalSettings)
 		mgmtSrv.SetSaveGlobalSettings(func(updates map[string]any) error {
@@ -877,6 +878,30 @@ func main() {
 			}
 			return config.SaveGlobalSettings(u)
 		})
+		mgmtSrv.SetListGlobalProviders(func() ([]core.GlobalProviderInfo, error) {
+			providers, err := config.ListGlobalProviders()
+			if err != nil {
+				return nil, err
+			}
+			out := make([]core.GlobalProviderInfo, len(providers))
+			for i, p := range providers {
+				out[i] = configProviderToGlobal(p)
+			}
+			return out, nil
+		})
+		mgmtSrv.SetAddGlobalProvider(func(info core.GlobalProviderInfo) error {
+			return config.AddGlobalProvider(globalProviderToConfig(info))
+		})
+		mgmtSrv.SetUpdateGlobalProvider(func(name string, info core.GlobalProviderInfo) error {
+			return config.UpdateGlobalProvider(name, globalProviderToConfig(info))
+		})
+		mgmtSrv.SetRemoveGlobalProvider(func(name string) error {
+			return config.RemoveGlobalProvider(name)
+		})
+		mgmtSrv.SetFetchPresets(core.FetchProviderPresets)
+		if cfg.ProviderPresetsURL != "" {
+			core.SetPresetsURL(cfg.ProviderPresetsURL)
+		}
 		mgmtSrv.Start()
 	}
 
@@ -1475,6 +1500,41 @@ func startInitialRefreshIfReady(agent core.Agent, result providerWiringResult) {
 	if starter, ok := agent.(initialModelRefreshStarter); ok {
 		starter.StartInitialModelRefresh()
 	}
+}
+
+func configProviderToGlobal(p config.ProviderConfig) core.GlobalProviderInfo {
+	info := core.GlobalProviderInfo{
+		Name:       p.Name,
+		APIKey:     p.APIKey,
+		BaseURL:    p.BaseURL,
+		Model:      p.Model,
+		Thinking:   p.Thinking,
+		Env:        p.Env,
+		AgentTypes: p.AgentTypes,
+	}
+	for _, m := range p.Models {
+		info.Models = append(info.Models, struct {
+			Model string `json:"model"`
+			Alias string `json:"alias,omitempty"`
+		}{Model: m.Model, Alias: m.Alias})
+	}
+	return info
+}
+
+func globalProviderToConfig(info core.GlobalProviderInfo) config.ProviderConfig {
+	p := config.ProviderConfig{
+		Name:       info.Name,
+		APIKey:     info.APIKey,
+		BaseURL:    info.BaseURL,
+		Model:      info.Model,
+		Thinking:   info.Thinking,
+		Env:        info.Env,
+		AgentTypes: info.AgentTypes,
+	}
+	for _, m := range info.Models {
+		p.Models = append(p.Models, config.ProviderModelConfig{Model: m.Model, Alias: m.Alias})
+	}
+	return p
 }
 
 func convertCoreModels(ms []core.ModelOption) []config.ProviderModelConfig {

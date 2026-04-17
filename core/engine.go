@@ -284,8 +284,16 @@ type interactiveState struct {
 	sideText               string
 	deleteMode             *deleteModeState
 	modelSwitch            *modelSwitchState
+	pendingProviderAdd     *pendingProviderAddState
 	lastAutoCompressAt     time.Time
 	lastAutoCompressTokens int
+}
+
+type pendingProviderAddState struct {
+	phase   string // "preset" = waiting for API key; "other" = waiting for name api_key base_url [model]
+	name    string
+	baseURL string
+	model   string
 }
 
 type deleteModeState struct {
@@ -1524,6 +1532,11 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 
 	// Permission responses bypass the session lock
 	if e.handlePendingPermission(p, msg, content) {
+		return
+	}
+
+	// Pending provider add (card-driven multi-step flow)
+	if e.handlePendingProviderAdd(p, msg, content) {
 		return
 	}
 
@@ -6586,8 +6599,26 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 
 func (e *Engine) cmdProviderAdd(p Platform, msg *Message, switcher ProviderSwitcher, args []string) {
 	if len(args) == 0 {
+		if supportsCards(p) {
+			e.replyWithCard(p, msg.ReplyCtx, e.renderProviderAddCard(msg.SessionKey))
+			return
+		}
+		if _, ok := p.(InlineButtonSender); ok {
+			if btns := e.providerAddPresetButtons(); len(btns) > 0 {
+				e.replyWithButtons(p, msg.ReplyCtx,
+					e.i18n.T(MsgProviderAddPickHint), btns)
+				return
+			}
+		}
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgProviderAddUsage))
 		return
+	}
+
+	// "/provider add <preset_name>" (1 arg) — check if it matches a preset
+	if len(args) == 1 {
+		if e.tryProviderAddPreset(p, msg, switcher, args[0]) {
+			return
+		}
 	}
 
 	var prov ProviderConfig
@@ -6707,6 +6738,184 @@ func (e *Engine) switchProvider(p Platform, msg *Message, switcher ProviderSwitc
 	}
 
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgProviderSwitched), name))
+}
+
+// handlePendingProviderAdd checks for a pending provider add state (from the
+// card-driven add flow) and completes the add if the user sends the required input.
+func (e *Engine) handlePendingProviderAdd(p Platform, msg *Message, content string) bool {
+	if strings.HasPrefix(content, "/") {
+		return false
+	}
+	interactiveKey := e.interactiveKeyForSessionKey(msg.SessionKey)
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[interactiveKey]
+	e.interactiveMu.Unlock()
+	if state == nil {
+		return false
+	}
+	state.mu.Lock()
+	pa := state.pendingProviderAdd
+	if pa == nil {
+		state.mu.Unlock()
+		return false
+	}
+	paCopy := *pa
+	state.pendingProviderAdd = nil
+	state.mu.Unlock()
+
+	switcher, ok := e.agent.(ProviderSwitcher)
+	if !ok {
+		return false
+	}
+
+	var prov ProviderConfig
+	switch paCopy.phase {
+	case "preset":
+		apiKey := strings.TrimSpace(content)
+		if apiKey == "" {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgProviderAddUsage))
+			return true
+		}
+		prov = ProviderConfig{
+			Name:    paCopy.name,
+			APIKey:  apiKey,
+			BaseURL: paCopy.baseURL,
+			Model:   paCopy.model,
+		}
+	case "other":
+		fields := strings.Fields(content)
+		if len(fields) < 2 {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgProviderAddUsage))
+			return true
+		}
+		prov.Name = fields[0]
+		prov.APIKey = fields[1]
+		if len(fields) > 2 {
+			prov.BaseURL = fields[2]
+		}
+		if len(fields) > 3 {
+			prov.Model = fields[3]
+		}
+	default:
+		return false
+	}
+
+	for _, existing := range switcher.ListProviders() {
+		if existing.Name == prov.Name {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgProviderAddFailed), fmt.Sprintf("provider %q already exists", prov.Name)))
+			return true
+		}
+	}
+
+	updated := append(switcher.ListProviders(), prov)
+	switcher.SetProviders(updated)
+	if e.providerAddSaveFunc != nil {
+		if err := e.providerAddSaveFunc(prov); err != nil {
+			slog.Error("failed to persist provider", "error", err)
+		}
+	}
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgProviderAdded), prov.Name, prov.Name))
+	return true
+}
+
+// setPendingProviderAdd stores a pending provider add state for the card-driven flow.
+func (e *Engine) setPendingProviderAdd(sessionKey string, pa *pendingProviderAddState) {
+	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
+	e.interactiveMu.Lock()
+	state, ok := e.interactiveStates[interactiveKey]
+	if !ok {
+		state = &interactiveState{}
+		e.interactiveStates[interactiveKey] = state
+	}
+	e.interactiveMu.Unlock()
+	state.mu.Lock()
+	state.pendingProviderAdd = pa
+	state.mu.Unlock()
+}
+
+// getPendingProviderAdd retrieves pending provider add state without removing it.
+func (e *Engine) getPendingProviderAdd(sessionKey string) *pendingProviderAddState {
+	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[interactiveKey]
+	e.interactiveMu.Unlock()
+	if state == nil {
+		return nil
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.pendingProviderAdd == nil {
+		return nil
+	}
+	cp := *state.pendingProviderAdd
+	return &cp
+}
+
+// providerAddPresetButtons builds inline keyboard rows for platforms
+// that support InlineButtonSender but not full cards.
+func (e *Engine) providerAddPresetButtons() [][]ButtonOption {
+	agentType := e.agent.Name()
+	presets, err := FetchProviderPresets()
+	if err != nil || presets == nil || len(presets.Providers) == 0 {
+		return nil
+	}
+	var rows [][]ButtonOption
+	var row []ButtonOption
+	for _, preset := range presets.Providers {
+		if len(preset.Agents) > 0 && !stringSliceContains(preset.Agents, agentType) {
+			continue
+		}
+		row = append(row, ButtonOption{
+			Text: preset.DisplayName,
+			Data: "cmd:/provider add " + preset.Name,
+		})
+		if len(row) == 2 {
+			rows = append(rows, row)
+			row = nil
+		}
+	}
+	if len(row) > 0 {
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+// tryProviderAddPreset handles "/provider add <name>" with a single arg that
+// matches a preset name — sets up the pending API key flow.
+func (e *Engine) tryProviderAddPreset(p Platform, msg *Message, switcher ProviderSwitcher, presetName string) bool {
+	agentType := e.agent.Name()
+	presets, err := FetchProviderPresets()
+	if err != nil || presets == nil {
+		return false
+	}
+	for _, preset := range presets.Providers {
+		if preset.Name != presetName {
+			continue
+		}
+		baseURL := preset.BaseURL
+		if ep, ok := preset.Endpoints[agentType]; ok && ep != "" {
+			baseURL = ep
+		}
+		model := ""
+		if m, ok := preset.AgentModels[agentType]; ok && m != "" {
+			model = m
+		} else if len(preset.Models) > 0 {
+			model = preset.Models[0]
+		}
+		e.setPendingProviderAdd(msg.SessionKey, &pendingProviderAddState{
+			phase:   "preset",
+			name:    preset.Name,
+			baseURL: baseURL,
+			model:   model,
+		})
+		displayName := preset.DisplayName
+		if displayName == "" {
+			displayName = preset.Name
+		}
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgProviderAddApiKeyPrompt), displayName))
+		return true
+	}
+	return false
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -7297,6 +7506,8 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 		return e.renderHistoryCard(sessionKey)
 	case "/provider":
 		return e.renderProviderCard()
+	case "/provider/add", "/provider/add-other", "/provider/add-cancel":
+		return e.renderProviderAddCard(sessionKey)
 	case "/cron":
 		return e.renderCronCard(sessionKey, extractUserID(sessionKey))
 	case "/heartbeat":
@@ -7493,6 +7704,46 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 				_ = e.providerSaveFunc(args)
 			}
 		}
+
+	case "/provider/add":
+		if args == "" {
+			return
+		}
+		agentType := e.agent.Name()
+		presets, err := FetchProviderPresets()
+		if err != nil || presets == nil {
+			return
+		}
+		for _, preset := range presets.Providers {
+			if preset.Name != args {
+				continue
+			}
+			baseURL := preset.BaseURL
+			if ep, ok := preset.Endpoints[agentType]; ok && ep != "" {
+				baseURL = ep
+			}
+			model := ""
+			if m, ok := preset.AgentModels[agentType]; ok && m != "" {
+				model = m
+			} else if len(preset.Models) > 0 {
+				model = preset.Models[0]
+			}
+			e.setPendingProviderAdd(sessionKey, &pendingProviderAddState{
+				phase:   "preset",
+				name:    preset.Name,
+				baseURL: baseURL,
+				model:   model,
+			})
+			return
+		}
+
+	case "/provider/add-other":
+		e.setPendingProviderAdd(sessionKey, &pendingProviderAddState{
+			phase: "other",
+		})
+
+	case "/provider/add-cancel":
+		e.setPendingProviderAdd(sessionKey, nil)
 
 	case "/new":
 		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
@@ -8478,7 +8729,10 @@ func (e *Engine) renderProviderCard() *Card {
 	providers := switcher.ListProviders()
 
 	if current == nil && len(providers) == 0 {
-		return e.simpleCard(e.i18n.T(MsgCardTitleProvider), "indigo", e.i18n.T(MsgProviderNone))
+		cb := NewCard().Title(e.i18n.T(MsgCardTitleProvider), "indigo").
+			Markdown(e.i18n.T(MsgProviderNone))
+		cb.Buttons(PrimaryBtn("➕ "+e.i18n.T(MsgCardTitleProviderAdd), "nav:/provider/add"), e.cardBackButton())
+		return cb.Build()
 	}
 
 	var body strings.Builder
@@ -8504,7 +8758,59 @@ func (e *Engine) renderProviderCard() *Card {
 		}
 		cb.Select(e.i18n.T(MsgProviderSelectPlaceholder), opts, initVal)
 	}
-	return cb.Buttons(e.cardBackButton()).Build()
+	cb.Buttons(PrimaryBtn("➕ "+e.i18n.T(MsgCardTitleProviderAdd), "nav:/provider/add"), e.cardBackButton())
+	return cb.Build()
+}
+
+func (e *Engine) renderProviderAddCard(sessionKey string) *Card {
+	if pa := e.getPendingProviderAdd(sessionKey); pa != nil {
+		switch pa.phase {
+		case "preset":
+			cb := NewCard().Title(e.i18n.T(MsgCardTitleProviderAdd), "indigo").
+				Markdown(fmt.Sprintf(e.i18n.T(MsgProviderAddApiKeyPrompt), pa.name))
+			cb.Buttons(DefaultBtn(e.i18n.T(MsgCardBack), "act:/provider/add-cancel"))
+			return cb.Build()
+		case "other":
+			cb := NewCard().Title(e.i18n.T(MsgCardTitleProviderAdd), "indigo").
+				Markdown(e.i18n.T(MsgProviderAddUsage))
+			cb.Buttons(DefaultBtn(e.i18n.T(MsgCardBack), "act:/provider/add-cancel"))
+			return cb.Build()
+		}
+	}
+
+	// Show preset selection card
+	agentType := e.agent.Name()
+	lang := e.i18n.CurrentLang()
+
+	cb := NewCard().Title(e.i18n.T(MsgCardTitleProviderAdd), "indigo").
+		Markdown(e.i18n.T(MsgProviderAddPickHint))
+
+	presets, err := FetchProviderPresets()
+	if err == nil && presets != nil {
+		for _, preset := range presets.Providers {
+			if len(preset.Agents) > 0 && !stringSliceContains(preset.Agents, agentType) {
+				continue
+			}
+			desc := preset.Description
+			if lang == LangChinese || lang == LangTraditionalChinese {
+				if preset.DescriptionZh != "" {
+					desc = preset.DescriptionZh
+				}
+			}
+			label := preset.DisplayName
+			if desc != "" {
+				label += " — " + desc
+			}
+			cb.ListItem(label, preset.DisplayName, "act:/provider/add "+preset.Name)
+		}
+	}
+
+	cb.Divider()
+	cb.Buttons(
+		DefaultBtn("✏️ "+e.i18n.T(MsgProviderAddOther), "act:/provider/add-other"),
+		DefaultBtn(e.i18n.T(MsgCardBack), "nav:/provider"),
+	)
+	return cb.Build()
 }
 
 func (e *Engine) renderCronCard(sessionKey string, userID string) *Card {
@@ -10815,6 +11121,15 @@ func extractUserID(sessionKey string) string {
 		return parts[2]
 	}
 	return ""
+}
+
+func stringSliceContains(ss []string, target string) bool {
+	for _, s := range ss {
+		if s == target {
+			return true
+		}
+	}
+	return false
 }
 
 func extractPlatformName(sessionKey string) string {
