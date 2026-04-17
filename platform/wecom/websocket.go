@@ -434,11 +434,91 @@ func (p *WSPlatform) handleMsgCallback(frame wsFrame) {
 	go p.deliverWSMediaInbound(&body, sessionKey, chatName, rctx, texts, imgRefs, fileRefs)
 }
 
+// wecomStreamHandle is the preview handle returned by SendPreviewStart and
+// passed back to UpdateMessage / FinishStream. It ties all stream chunks
+// to the same req_id + stream.id pair.
+type wecomStreamHandle struct {
+	reqID       string // original req_id from the inbound callback
+	streamID    string // shared stream.id for all chunks in this preview
+	lastContent string // last content sent, needed for FinishStream (content is full-replacement)
+}
+
+// sendStreamChunk sends a single stream chunk via aibot_respond_msg.
+// Uses writeAndWaitAck to ensure the server ACKs before the next chunk is sent,
+// matching the serial-queue behaviour of the official WeChat Work SDK.
+func (p *WSPlatform) sendStreamChunk(ctx context.Context, reqID, streamID, content string, finish bool) error {
+	frame := map[string]any{
+		"cmd":     "aibot_respond_msg",
+		"headers": map[string]string{"req_id": reqID},
+		"body": map[string]any{
+			"msgtype": "stream",
+			"stream": map[string]any{
+				"id":      streamID,
+				"finish":  finish,
+				"content": content,
+			},
+		},
+	}
+	return p.writeAndWaitAck(ctx, frame, reqID)
+}
+
+// SendPreviewStart initiates a streaming preview by sending the first chunk
+// with finish=false. Returns a wecomStreamHandle for subsequent UpdateMessage
+// and FinishStream calls.
+func (p *WSPlatform) SendPreviewStart(ctx context.Context, rctx any, content string) (any, error) {
+	rc, ok := rctx.(wsReplyContext)
+	if !ok {
+		return nil, fmt.Errorf("wecom-ws: invalid reply context type %T", rctx)
+	}
+	if rc.reqID == "" {
+		return nil, fmt.Errorf("wecom-ws: empty reqID, cannot start stream preview")
+	}
+
+	streamID := p.generateReqID("stream")
+	if err := p.sendStreamChunk(ctx, rc.reqID, streamID, content, false); err != nil {
+		return nil, fmt.Errorf("wecom-ws: stream preview start failed: %w", err)
+	}
+	slog.Debug("wecom-ws: stream preview started", "stream_id", streamID, "content_len", len(content))
+	return &wecomStreamHandle{reqID: rc.reqID, streamID: streamID, lastContent: content}, nil
+}
+
+// UpdateMessage sends an intermediate stream chunk (finish=false) with updated
+// content. The content field is a full replacement, not incremental.
+func (p *WSPlatform) UpdateMessage(ctx context.Context, previewHandle any, content string) error {
+	h, ok := previewHandle.(*wecomStreamHandle)
+	if !ok {
+		return fmt.Errorf("wecom-ws: invalid preview handle type %T", previewHandle)
+	}
+	h.lastContent = content
+	return p.sendStreamChunk(ctx, h.reqID, h.streamID, content, false)
+}
+
+// KeepPreviewOnFinish returns true because WeChat Work stream messages are
+// rendered in-place; there is no separate message to delete and re-send.
+func (p *WSPlatform) KeepPreviewOnFinish() bool { return true }
+
+// FinishStream sends the final stream chunk with finish=true, which tells the
+// WeChat Work client to stop the loading animation.
+func (p *WSPlatform) FinishStream(ctx context.Context, previewHandle any) error {
+	h, ok := previewHandle.(*wecomStreamHandle)
+	if !ok {
+		return fmt.Errorf("wecom-ws: invalid preview handle type %T", previewHandle)
+	}
+	if err := p.sendStreamChunk(ctx, h.reqID, h.streamID, h.lastContent, true); err != nil {
+		slog.Debug("wecom-ws: FinishStream failed", "stream_id", h.streamID, "error", err)
+		return err
+	}
+	slog.Debug("wecom-ws: stream finished", "stream_id", h.streamID)
+	return nil
+}
+
 // Reply sends a response message via aibot_respond_msg using the stream format.
 // Uses the req_id from the original callback.
 // The stream content field is a full-replacement (not incremental append), so we
 // send the complete content in one frame with finish=true.
 // Markdown is natively supported by the stream reply format.
+// When the engine uses streaming preview (SendPreviewStart → UpdateMessage →
+// FinishStream), Reply is not called — this path handles non-streaming responses.
 func (p *WSPlatform) Reply(ctx context.Context, rctx any, content string) error {
 	rc, ok := rctx.(wsReplyContext)
 	if !ok {
