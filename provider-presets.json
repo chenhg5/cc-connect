@@ -92,7 +92,7 @@
     },
     {
       "name": "shengsuanyun",
-      "display_name": "Shengsuanyun (省算云)",
+      "display_name": "Shengsuanyun (胜算云)",
       "base_url": "https://router.shengsuanyun.com/api",
       "endpoints": {
         "claudecode": "https://router.shengsuanyun.com/api",

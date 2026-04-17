@@ -290,10 +290,11 @@ type interactiveState struct {
 }
 
 type pendingProviderAddState struct {
-	phase   string // "preset" = waiting for API key; "other" = waiting for name api_key base_url [model]
-	name    string
-	baseURL string
-	model   string
+	phase     string // "preset" = waiting for API key; "other" = waiting for name api_key base_url [model]
+	name      string
+	baseURL   string
+	model     string
+	inviteURL string
 }
 
 type deleteModeState struct {
@@ -6903,16 +6904,21 @@ func (e *Engine) tryProviderAddPreset(p Platform, msg *Message, switcher Provide
 			model = preset.Models[0]
 		}
 		e.setPendingProviderAdd(msg.SessionKey, &pendingProviderAddState{
-			phase:   "preset",
-			name:    preset.Name,
-			baseURL: baseURL,
-			model:   model,
+			phase:     "preset",
+			name:      preset.Name,
+			baseURL:   baseURL,
+			model:     model,
+			inviteURL: preset.InviteURL,
 		})
 		displayName := preset.DisplayName
 		if displayName == "" {
 			displayName = preset.Name
 		}
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgProviderAddApiKeyPrompt), displayName))
+		prompt := fmt.Sprintf(e.i18n.T(MsgProviderAddApiKeyPrompt), displayName)
+		if preset.InviteURL != "" {
+			prompt += "\n\n" + fmt.Sprintf(e.i18n.T(MsgProviderAddInviteHint), preset.InviteURL)
+		}
+		e.reply(p, msg.ReplyCtx, prompt)
 		return true
 	}
 	return false
@@ -7729,10 +7735,11 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 				model = preset.Models[0]
 			}
 			e.setPendingProviderAdd(sessionKey, &pendingProviderAddState{
-				phase:   "preset",
-				name:    preset.Name,
-				baseURL: baseURL,
-				model:   model,
+				phase:     "preset",
+				name:      preset.Name,
+				baseURL:   baseURL,
+				model:     model,
+				inviteURL: preset.InviteURL,
 			})
 			return
 		}
@@ -8766,8 +8773,12 @@ func (e *Engine) renderProviderAddCard(sessionKey string) *Card {
 	if pa := e.getPendingProviderAdd(sessionKey); pa != nil {
 		switch pa.phase {
 		case "preset":
+			body := fmt.Sprintf(e.i18n.T(MsgProviderAddApiKeyPrompt), pa.name)
+			if pa.inviteURL != "" {
+				body += "\n\n" + fmt.Sprintf(e.i18n.T(MsgProviderAddInviteHint), pa.inviteURL)
+			}
 			cb := NewCard().Title(e.i18n.T(MsgCardTitleProviderAdd), "indigo").
-				Markdown(fmt.Sprintf(e.i18n.T(MsgProviderAddApiKeyPrompt), pa.name))
+				Markdown(body)
 			cb.Buttons(DefaultBtn(e.i18n.T(MsgCardBack), "act:/provider/add-cancel"))
 			return cb.Build()
 		case "other":

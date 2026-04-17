@@ -195,6 +195,7 @@ const (
 	MsgProviderAddPickHint       MsgKey = "provider_add_pick_hint"
 	MsgProviderAddOther          MsgKey = "provider_add_other"
 	MsgProviderAddApiKeyPrompt   MsgKey = "provider_add_api_key_prompt"
+	MsgProviderAddInviteHint     MsgKey = "provider_add_invite_hint"
 
 	MsgVoiceNotEnabled               MsgKey = "voice_not_enabled"
 	MsgVoiceUsingPlatformRecognition MsgKey = "voice_using_platform_recognition"
@@ -1459,6 +1460,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "✅ 已選擇 **%s**。\n\n請傳送你的 **API Key**。\n格式：直接傳送金鑰即可，如 `sk-xxxxxxxx`",
 		LangJapanese:           "✅ **%s** を選択しました。\n\n**API キー** を送信してください。\n形式: キーをそのまま送信（例: `sk-xxxxxxxx`）",
 		LangSpanish:            "✅ Seleccionado **%s**.\n\nPor favor envía tu **API Key** para este proveedor.\nFormato: solo la clave, por ejemplo `sk-xxxxxxxx`",
+	},
+	MsgProviderAddInviteHint: {
+		LangEnglish:            "🔑 Don't have a key? Register here: %s",
+		LangChinese:            "🔑 还没有 Key？点击注册获取：%s",
+		LangTraditionalChinese: "🔑 還沒有 Key？點擊註冊取得：%s",
+		LangJapanese:           "🔑 キーをお持ちでない場合はこちらから登録: %s",
+		LangSpanish:            "🔑 ¿No tienes una clave? Regístrate aquí: %s",
 	},
 	MsgVoiceNotEnabled: {
 		LangEnglish:            "🎙 Voice messages are not enabled. Please configure `[speech]` in config.toml.",
