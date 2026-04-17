@@ -1459,8 +1459,8 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		return
 	}
 
-	// Banned words check (skip for slash commands)
-	if !strings.HasPrefix(content, "/") {
+	// Banned words check (skip for slash commands and ! shell shortcut)
+	if !strings.HasPrefix(content, "/") && !strings.HasPrefix(content, "!") {
 		if word := e.matchBannedWord(content); word != "" {
 			slog.Info("message blocked by banned word", "word", word, "user", msg.UserName)
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgBannedWordBlocked))
@@ -1525,6 +1525,37 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	// Permission responses bypass the session lock
 	if e.handlePendingPermission(p, msg, content) {
 		return
+	}
+
+	// "!" prefix: treat as shell command (same as /shell)
+	// Placed after permission handling so "!yes" doesn't hijack permission responses.
+	if len(msg.Images) == 0 && strings.HasPrefix(content, "!") {
+		shellCmd := strings.TrimSpace(content[1:])
+		if shellCmd != "" {
+			// Check disabled / admin just like handleCommand does for "shell"
+			e.userRolesMu.RLock()
+			disabledCmds := e.disabledCmds
+			urm := e.userRoles
+			e.userRolesMu.RUnlock()
+			if urm != nil {
+				if role := urm.ResolveRole(msg.UserID); role != nil {
+					disabledCmds = role.DisabledCmds
+				}
+			}
+			if disabledCmds["shell"] {
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandDisabled), "!"))
+				return
+			}
+			if !e.isAdmin(msg.UserID) {
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgAdminRequired), "!"))
+				return
+			}
+			slog.Info("audit: command_executed",
+				"user_id", msg.UserID, "platform", msg.Platform,
+				"project", e.name, "command", "shell")
+			e.cmdShell(p, msg, "/shell "+shellCmd)
+			return
+		}
 	}
 
 	// Select session manager and agent based on workspace mode
@@ -4278,8 +4309,22 @@ func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
 	shellCmd = strings.TrimSpace(shellCmd)
 
 	if shellCmd == "" {
-		e.reply(p, msg.ReplyCtx, "Usage: /shell <command>\nExample: /shell ls -la")
+		e.reply(p, msg.ReplyCtx, "Usage: /shell [--timeout <seconds>] <command>\nExample: /shell ls -la\nExample: /shell --timeout 300 npm install")
 		return
+	}
+
+	// Parse optional --timeout at the beginning of the command.
+	// Placed before the actual command so no CLI tool's own --timeout can conflict.
+	// Supported: /shell --timeout 300 npm install, ! --timeout 300 npm install
+	timeout := 60 * time.Second
+	if strings.HasPrefix(shellCmd, "--timeout ") {
+		rest := shellCmd[len("--timeout "):]
+		if idx := strings.IndexByte(rest, ' '); idx > 0 {
+			if secs, err := strconv.Atoi(rest[:idx]); err == nil && secs > 0 {
+				timeout = time.Duration(secs) * time.Second
+				shellCmd = strings.TrimSpace(rest[idx:])
+			}
+		}
 	}
 
 	agent, _, _, err := e.commandContext(p, msg)
@@ -4293,7 +4338,7 @@ func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
 	}
 
 	go func() {
-		ctx, cancel := context.WithTimeout(e.ctx, 60*time.Second)
+		ctx, cancel := context.WithTimeout(e.ctx, timeout)
 		defer cancel()
 
 		cmd := exec.CommandContext(ctx, "sh", "-c", shellCmd)
