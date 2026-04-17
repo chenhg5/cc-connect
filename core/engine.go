@@ -2607,6 +2607,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	toolCount := 0
 	waitStart := time.Now()
 	firstEventLogged := false
+	var toolSteps []ToolStep
+	var lastRichCardUpdate time.Time
+	var lastRichCardLen int
+	var cardMessageID any
+	var partialText string
 	triggerAutoCompress := false
 	pendingSend := sendDone
 
@@ -2729,8 +2734,27 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		p := state.platform
 		state.mu.Unlock()
 
+		// main codebase has no per-session quiet flag; pr309 referenced
+		// sessionQuiet which we drop. e.display.ThinkingMessages /
+		// ToolMessages handle user-level quiet in the fallback branches.
+		richCardSupporter, hasRichCard := p.(RichCardSupporter)
+
 		switch event.Type {
 		case EventThinking:
+			if hasRichCard {
+				if cardMessageID == nil {
+					card := richCardSupporter.BuildRichCard(CardStatusThinking, "", toolSteps, partialText, true, time.Since(turnStart))
+					if starter, ok := p.(PreviewStarter); ok {
+						handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
+						if err != nil {
+							slog.Debug("rich card: failed to create initial thinking card", "platform", p.Name(), "error", err)
+						} else {
+							cardMessageID = handle
+						}
+					}
+				}
+				break
+			}
 			// In quiet mode, still split text segments so they don't merge.
 			if !e.display.ThinkingMessages && len(textParts) > segmentStart {
 				if sp.canPreview() {
@@ -2776,6 +2800,29 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventToolUse:
 			toolCount++
+			if hasRichCard {
+				toolSteps = append(toolSteps, ToolStep{
+					Name:    event.ToolName,
+					Summary: truncateIf(event.ToolInput, e.display.ToolMaxLen),
+				})
+				if cardMessageID == nil {
+					card := richCardSupporter.BuildRichCard(CardStatusWorking, "", toolSteps, partialText, true, time.Since(turnStart))
+					if starter, ok := p.(PreviewStarter); ok {
+						handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
+						if err != nil {
+							slog.Debug("rich card: failed to create initial tool card", "platform", p.Name(), "error", err)
+						} else {
+							cardMessageID = handle
+						}
+					}
+				} else if updater, ok := p.(MessageUpdater); ok {
+					card := richCardSupporter.BuildRichCard(CardStatusWorking, "", toolSteps, partialText, true, time.Since(turnStart))
+					if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
+						slog.Debug("rich card: failed to update tool card", "platform", p.Name(), "error", err)
+					}
+				}
+				break
+			}
 			// When tool messages are hidden, split text segments.
 			if !e.display.ToolMessages && len(textParts) > segmentStart {
 				if sp.canPreview() {
@@ -2817,7 +2864,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if toolInput == "" {
 					formattedInput = ""
 				} else if strings.Contains(toolInput, "```") {
-					// Already contains code blocks (pre-formatted by agent) — use as-is
 					formattedInput = toolInput
 				} else if strings.Contains(toolInput, "\n") || utf8.RuneCountInString(toolInput) > 200 {
 					lang := toolCodeLang(event.ToolName, toolInput)
@@ -2867,22 +2913,54 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventText:
 			if event.Content != "" {
+				if len(textParts) == 0 {
+					if hasRichCard {
+						if cardMessageID == nil {
+							card := richCardSupporter.BuildRichCard(CardStatusWorking, "", toolSteps, partialText, true, time.Since(turnStart))
+							if starter, ok := p.(PreviewStarter); ok {
+								handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
+								if err != nil {
+									slog.Debug("rich card: failed to create initial text card", "platform", p.Name(), "error", err)
+								} else {
+									cardMessageID = handle
+								}
+							}
+						}
+					} else {
+						sp.setStatus(CardStatusWorking)
+					}
+				}
 				textParts = append(textParts, event.Content)
-				segmentText := strings.Join(textParts[segmentStart:], "")
-				if silentHold {
-					if !couldBeSilentPrefix(segmentText) {
-						silentHold = false
-						if sp.canPreview() {
-							sp.appendText(segmentText) // flush all held chunks at once
+				partialText += event.Content
+				if hasRichCard {
+					if cardMessageID != nil && (time.Since(lastRichCardUpdate) > 1500*time.Millisecond || len(partialText)-lastRichCardLen > 30) {
+						card := richCardSupporter.BuildRichCard(CardStatusWorking, "", toolSteps, partialText, true, time.Since(turnStart))
+						if updater, ok := p.(MessageUpdater); ok {
+							if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err == nil {
+								lastRichCardUpdate = time.Now()
+								lastRichCardLen = len(partialText)
+							} else {
+								slog.Debug("rich card: failed to update text card", "platform", p.Name(), "error", err)
+							}
 						}
 					}
-				} else if couldBeSilentPrefix(segmentText) {
-					// Hold streaming until we know whether this segment is NO_REPLY.
-					// Safe because once segmentText is no longer a prefix of "NO_REPLY",
-					// it can never become one again — we only ever transition held→released once.
-					silentHold = true
-				} else if sp.canPreview() {
-					sp.appendText(event.Content)
+				} else {
+					segmentText := strings.Join(textParts[segmentStart:], "")
+					if silentHold {
+						if !couldBeSilentPrefix(segmentText) {
+							silentHold = false
+							if sp.canPreview() {
+								sp.appendText(segmentText) // flush all held chunks at once
+							}
+						}
+					} else if couldBeSilentPrefix(segmentText) {
+						// Hold streaming until we know whether this segment is NO_REPLY.
+						// Safe because once segmentText is no longer a prefix of "NO_REPLY",
+						// it can never become one again — we only ever transition held→released once.
+						silentHold = true
+					} else if sp.canPreview() {
+						sp.appendText(event.Content)
+					}
 				}
 			}
 			if event.SessionID != "" {
@@ -3100,6 +3178,35 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if isSilent {
 				sp.discard()
 				slog.Info("silent reply suppressed", "session", session.ID)
+			} else if hasRichCard {
+				parts := []string{fullResponse}
+				if splitter, ok := p.(MarkdownTableSplitter); ok {
+					parts = splitter.SplitMarkdownByTables(fullResponse, 5)
+				}
+				finalCard := richCardSupporter.BuildRichCard(CardStatusDone, "", toolSteps, parts[0], false, time.Since(turnStart))
+				if cardMessageID != nil {
+					if updater, ok := p.(MessageUpdater); ok {
+						if err := updater.UpdateMessage(e.ctx, cardMessageID, finalCard); err != nil {
+							slog.Debug("rich card: final update failed, falling back to send", "platform", p.Name(), "error", err)
+							if err := p.Send(e.ctx, replyCtx, finalCard); err != nil {
+								slog.Error("failed to send rich card reply", "error", err)
+								return
+							}
+						}
+					}
+				} else {
+					if err := p.Send(e.ctx, replyCtx, finalCard); err != nil {
+						slog.Error("failed to send rich card reply", "error", err)
+						return
+					}
+				}
+				for _, overflow := range parts[1:] {
+					overflowCard := richCardSupporter.BuildRichCard(CardStatusDone, "", nil, overflow, false, time.Since(turnStart))
+					if err := p.Send(e.ctx, replyCtx, overflowCard); err != nil {
+						slog.Error("failed to send overflow rich card", "error", err)
+						return
+					}
+				}
 			} else if toolCount > 0 && segmentStart > 0 {
 				// When tool calls happened and prior text was already surfaced in segments,
 				// only send the unsent remainder. When tool progress is hidden, tool events don't surface
@@ -3125,8 +3232,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 				slog.Debug("EventResult: suppressed duplicate side-channel text", "response_len", len(fullResponse))
-			} else if sp.finish(fullResponse) {
-				slog.Debug("EventResult: finalized via stream preview", "response_len", len(fullResponse))
 			} else {
 				slog.Debug("EventResult: sending via p.Send (preview inactive or failed)", "response_len", len(fullResponse), "chunks", len(splitMessage(fullResponse, maxPlatformMessageLen)))
 				for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
@@ -3284,6 +3389,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case EventError:
 			cp.Finalize(ProgressCardStateFailed)
 			sp.discard()
+			if hasRichCard && cardMessageID != nil {
+				errCard := richCardSupporter.BuildRichCard(CardStatusError, "", toolSteps, partialText, false, time.Since(turnStart))
+				if updater, ok := p.(MessageUpdater); ok {
+					if err := updater.UpdateMessage(e.ctx, cardMessageID, errCard); err != nil {
+						slog.Debug("rich card: failed to update error card", "platform", p.Name(), "error", err)
+					}
+				}
+			}
 			if event.Error != nil {
 				slog.Error("agent error", "error", event.Error)
 				e.hooks.Emit(HookEvent{
@@ -3351,8 +3464,6 @@ channelClosed:
 					}
 				}
 			}
-		} else if sp.finish(fullResponse) {
-			slog.Debug("stream preview: finalized in-place (process exited)")
 		} else {
 			for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
 				if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {

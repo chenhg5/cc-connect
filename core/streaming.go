@@ -49,6 +49,28 @@ type streamPreview struct {
 
 	timer     *time.Timer
 	timerStop chan struct{} // closed when preview ends
+
+	pendingStatus CardStatus // last status set via setStatus(); applied on recovery
+}
+
+// ToolStep is one summarized tool invocation shown in rich progress cards.
+type ToolStep struct {
+	Name    string // tool name (e.g. "Bash", "Edit")
+	Summary string // human-readable summary shown in the card
+}
+
+// RichCardSupporter is an optional interface for platforms that can build
+// native rich cards combining tool steps, markdown content, and an elapsed
+// time footer. `elapsed` is measured from turn start; pass 0 to hide the
+// footer.
+type RichCardSupporter interface {
+	BuildRichCard(status CardStatus, title string, steps []ToolStep, markdown string, streaming bool, elapsed time.Duration) string
+}
+
+// MarkdownTableSplitter is an optional interface for platforms that need
+// platform-specific markdown table chunking before final send.
+type MarkdownTableSplitter interface {
+	SplitMarkdownByTables(md string, maxTables int) []string
 }
 
 // PreviewStarter is an optional interface for platforms that can initiate a
@@ -295,6 +317,21 @@ func (sp *streamPreview) finish(finalText string) bool {
 	}
 	if sp.previewMsgID == nil || sp.degraded {
 		if sp.previewMsgID != nil && sp.degraded {
+			// Try to recover degraded preview via UpdateMessage before falling back to delete
+			if finalText != "" {
+				if updater, ok := sp.platform.(MessageUpdater); ok {
+					if err := updater.UpdateMessage(sp.ctx, sp.previewMsgID, finalText); err == nil {
+						if sp.pendingStatus != "" {
+							if statusUpdater, ok := sp.platform.(PreviewStatusUpdater); ok {
+								statusUpdater.SetPreviewStatus(sp.previewMsgID, sp.pendingStatus)
+							}
+						}
+						return true
+					} else {
+						slog.Debug("stream preview finish: degraded UpdateMessage failed, cleaning up", "error", err)
+					}
+				}
+			}
 			if cleaner, ok := sp.platform.(PreviewCleaner); ok {
 				slog.Debug("stream preview finish: deleting stale preview (degraded)")
 				_ = cleaner.DeletePreviewMessage(sp.ctx, sp.previewMsgID)
@@ -354,8 +391,28 @@ func (sp *streamPreview) finish(finalText string) bool {
 		}
 		return false
 	}
+	if sp.pendingStatus != "" {
+		if statusUpdater, ok := sp.platform.(PreviewStatusUpdater); ok {
+			statusUpdater.SetPreviewStatus(sp.previewMsgID, sp.pendingStatus)
+		}
+	}
 	slog.Debug("stream preview finish: success via UpdateMessage")
 	return true
+}
+
+// setStatus updates the card header status of the active preview message.
+// If the preview is not yet active or is degraded, the status is saved and
+// applied when the preview recovers (at finish time).
+func (sp *streamPreview) setStatus(status CardStatus) {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	sp.pendingStatus = status
+	if sp.previewMsgID == nil || sp.degraded {
+		return
+	}
+	if updater, ok := sp.platform.(PreviewStatusUpdater); ok {
+		updater.SetPreviewStatus(sp.previewMsgID, status)
+	}
 }
 
 // detachPreview clears the preview message handle so that finish() won't

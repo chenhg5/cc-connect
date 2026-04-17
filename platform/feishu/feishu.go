@@ -2686,9 +2686,14 @@ func isThreadSessionKey(sessionKey string) bool {
 }
 
 // feishuPreviewHandle stores the message ID for an editable preview message.
+// Card 2.0 path needs mu/status/lastContent to let SetPreviewStatus patch
+// the header color without re-rendering the whole card.
 type feishuPreviewHandle struct {
-	messageID string
-	chatID    string
+	mu          sync.Mutex
+	messageID   string
+	chatID      string
+	status      core.CardStatus
+	lastContent string
 }
 
 // buildCardJSON builds a Feishu interactive card JSON string with a markdown element.
@@ -3112,7 +3117,13 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 		return nil, fmt.Errorf("%s: chatID is empty", p.tag())
 	}
 
-	cardJSON := buildPreviewCardJSON(content)
+	// Card 2.0 path: engine passes a pre-built rich card JSON; pass it through.
+	var cardJSON string
+	if isCardJSON(content) {
+		cardJSON = content
+	} else {
+		cardJSON = buildPreviewCardJSON(content)
+	}
 
 	var msgID string
 	if p.shouldUseThreadOrReplyAPI(rc) {
@@ -3189,7 +3200,13 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 	}
 
 	cardJSON := ""
-	if payload, ok := core.ParseProgressCardPayload(content); ok {
+	if isCardJSON(content) {
+		// Card 2.0: engine passes full card JSON directly, skip all processing.
+		cardJSON = content
+		h.mu.Lock()
+		h.lastContent = content
+		h.mu.Unlock()
+	} else if payload, ok := core.ParseProgressCardPayload(content); ok {
 		cardJSON = buildProgressCardJSONFromPayload(payload)
 	} else {
 		processed := content
@@ -3445,4 +3462,339 @@ func (p *Platform) onBotMenu(event *larkapplication.P2BotMenuV6) error {
 		ReplyCtx:   replyContext{chatID: userID, sessionKey: sessionKey},
 	})
 	return nil
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Card 2.0 rich card support (based on upstream PR #309 + #306,
+// extended with "agent reply elapsed time" in the footer).
+// ═══════════════════════════════════════════════════════════════
+
+const defaultToolIcon = "setting-inter_outlined"
+
+var toolIconMap = map[string]string{
+	"Bash":      "terminal-two_outlined",
+	"Edit":      "edit_outlined",
+	"Read":      "file-open_outlined",
+	"Write":     "notes_outlined",
+	"Glob":      "folder-open_outlined",
+	"Grep":      "search_outlined",
+	"WebFetch":  "internet_outlined",
+	"WebSearch": "internet_outlined",
+	"Agent":     "robot_outlined",
+	"Skill":     "code_outlined",
+	"LSP":       "code_outlined",
+}
+
+var thinkingVerbs = []string{
+	"Churning", "Clauding", "Coalescing", "Cogitating", "Computing",
+	"Combobulating", "Concocting", "Conjuring", "Considering", "Contemplating",
+	"Cooking", "Crafting", "Creating", "Crunching", "Deciphering",
+	"Deliberating", "Divining", "Effecting", "Elucidating", "Enchanting",
+	"Envisioning", "Finagling", "Forging", "Generating", "Germinating",
+	"Hatching", "Ideating", "Imagining", "Incubating", "Inferring",
+	"Manifesting", "Marinating", "Meandering", "Mulling", "Musing",
+	"Noodling", "Percolating", "Perusing", "Pondering", "Processing",
+	"Puzzling", "Reticulating", "Ruminating", "Scheming", "Simmering",
+	"Spelunking", "Spinning", "Stewing", "Sussing", "Synthesizing",
+	"Thinking", "Tinkering", "Transmuting", "Unfurling", "Unravelling",
+	"Vibing", "Wandering", "Whirring", "Wizarding", "Working", "Wrangling",
+}
+
+func pickThinkingVerb() string {
+	idx := time.Now().Unix() % int64(len(thinkingVerbs))
+	return thinkingVerbs[idx] + "..."
+}
+
+var markdownTablePattern = regexp.MustCompile(`(?m)^\|.+\|\s*\n\|[\s:|-]+\|\s*\n(?:\|.+\|\s*\n?)+`)
+
+func getToolIcon(toolName string) string {
+	if icon, ok := toolIconMap[toolName]; ok {
+		return icon
+	}
+	return defaultToolIcon
+}
+
+// isCardJSON returns true if content looks like a complete Feishu card JSON
+// (has "schema" and "body"). Used to avoid double-wrapping rich card output.
+func isCardJSON(content string) bool {
+	if len(content) < 10 || content[0] != '{' {
+		return false
+	}
+	return strings.Contains(content, `"schema"`) && strings.Contains(content, `"body"`)
+}
+
+// buildCardJSONWithStatus builds a Feishu card JSON with a colored header
+// reflecting the given status. Used as a fallback when rich-card assembly fails.
+func buildCardJSONWithStatus(content string, status core.CardStatus) string {
+	template := "grey"
+	switch status {
+	case core.CardStatusWorking, core.CardStatusThinking:
+		template = "blue"
+	case core.CardStatusDone:
+		template = "green"
+	case core.CardStatusError:
+		template = "red"
+	}
+	card := map[string]any{
+		"schema": "2.0",
+		"config": map[string]any{
+			"wide_screen_mode": true,
+		},
+		"header": map[string]any{
+			"template": template,
+			"title":    map[string]any{"tag": "plain_text", "content": ""},
+		},
+		"body": map[string]any{
+			"elements": []map[string]any{
+				{
+					"tag":     "markdown",
+					"content": content,
+				},
+			},
+		},
+	}
+	b, _ := json.Marshal(card)
+	return string(b)
+}
+
+// formatElapsedCN renders a human-readable duration in Chinese.
+// Examples: "3.2 秒", "1 分 23 秒", "1 小时 05 分"。
+func formatElapsedCN(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	totalSec := int64(d / time.Second)
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%.1f 秒", d.Seconds())
+	case d < time.Hour:
+		m := totalSec / 60
+		s := totalSec % 60
+		return fmt.Sprintf("%d 分 %02d 秒", m, s)
+	default:
+		h := totalSec / 3600
+		m := (totalSec % 3600) / 60
+		return fmt.Sprintf("%d 小时 %02d 分", h, m)
+	}
+}
+
+// buildRichCard renders a Card 2.0 "single-card" turn with collapsible
+// tool-step panel, streaming markdown body, status-colored header, and
+// an elapsed-time footer.
+func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, markdown string, streaming bool, elapsed time.Duration) string {
+	panelTitle := "Thinking..."
+	if len(steps) > 0 {
+		if streaming {
+			panelTitle = fmt.Sprintf("Working on it (%d steps)", len(steps))
+		} else {
+			toolCounts := make(map[string]int)
+			var toolOrder []string
+			for _, s := range steps {
+				if toolCounts[s.Name] == 0 {
+					toolOrder = append(toolOrder, s.Name)
+				}
+				toolCounts[s.Name]++
+			}
+			var toolParts []string
+			for _, name := range toolOrder {
+				if toolCounts[name] > 1 {
+					toolParts = append(toolParts, fmt.Sprintf("%s×%d", name, toolCounts[name]))
+				} else {
+					toolParts = append(toolParts, name)
+				}
+			}
+			toolSummary := strings.Join(toolParts, ", ")
+			preview := strings.TrimSpace(markdown)
+			if idx := strings.IndexByte(preview, '\n'); idx > 0 {
+				preview = preview[:idx]
+			}
+			if runes := []rune(preview); len(runes) > 20 {
+				preview = string(runes[:20]) + "..."
+			}
+			if preview != "" {
+				panelTitle = fmt.Sprintf("%s · %s", toolSummary, preview)
+			} else {
+				panelTitle = toolSummary
+			}
+		}
+	}
+
+	panelCap := len(steps)
+	if panelCap < 1 {
+		panelCap = 1
+	}
+	panelElements := make([]map[string]any, 0, panelCap)
+	if len(steps) == 0 {
+		panelElements = append(panelElements, map[string]any{
+			"tag":  "div",
+			"text": map[string]any{"tag": "plain_text", "content": "Thinking..."},
+		})
+	} else {
+		for _, step := range steps {
+			summary := strings.TrimSpace(step.Summary)
+			if summary == "" {
+				summary = step.Name
+			}
+			panelElements = append(panelElements, map[string]any{
+				"tag":  "div",
+				"icon": map[string]any{"tag": "standard_icon", "token": getToolIcon(step.Name)},
+				"text": map[string]any{"tag": "plain_text", "content": summary},
+			})
+		}
+	}
+
+	panelMap := map[string]any{
+		"tag":              "collapsible_panel",
+		"expanded":         streaming,
+		"background_color": "grey",
+		"header": map[string]any{
+			"title": map[string]any{"tag": "plain_text", "content": panelTitle},
+		},
+		"border":           map[string]any{"color": "grey"},
+		"vertical_spacing": "8px",
+		"padding":          "4px 8px",
+		"elements":         panelElements,
+	}
+	markdownMap := map[string]any{
+		"tag":     "markdown",
+		"content": preprocessFeishuMarkdown(markdown),
+	}
+
+	// Footer shows elapsed time: "⏱ 运行中 12.3 秒..." during streaming,
+	// "⏱ 用时 1 分 23 秒" on completion. Skip when elapsed == 0 to avoid noise.
+	var footerMap map[string]any
+	if elapsed > 0 {
+		var footerText string
+		if streaming {
+			footerText = fmt.Sprintf("⏱ 运行中 %s...", formatElapsedCN(elapsed))
+		} else {
+			footerText = fmt.Sprintf("⏱ 用时 %s", formatElapsedCN(elapsed))
+		}
+		footerMap = map[string]any{
+			"tag": "div",
+			"text": map[string]any{
+				"tag":     "plain_text",
+				"content": footerText,
+			},
+		}
+	}
+
+	var elements []map[string]any
+	if len(steps) > 0 || streaming {
+		elements = append(elements, panelMap, markdownMap)
+	} else {
+		elements = append(elements, markdownMap)
+	}
+	if footerMap != nil {
+		elements = append(elements, footerMap)
+	}
+
+	// Header template color follows status.
+	headerTemplate := "blue"
+	headerTitle := pickThinkingVerb()
+	switch status {
+	case core.CardStatusDone:
+		headerTemplate = "green"
+		headerTitle = "Done"
+	case core.CardStatusError:
+		headerTemplate = "red"
+		headerTitle = "Error"
+	case core.CardStatusThinking, core.CardStatusWorking:
+		headerTemplate = "blue"
+		headerTitle = pickThinkingVerb()
+	}
+
+	card := map[string]any{
+		"schema": "2.0",
+		"config": map[string]any{
+			"streaming_mode":             streaming,
+			"update_multi":               true,
+			"enable_forward_interaction": true,
+		},
+		"header": map[string]any{
+			"template": headerTemplate,
+			"title":    map[string]any{"tag": "plain_text", "content": headerTitle},
+		},
+		"body": map[string]any{"elements": elements},
+	}
+
+	b, err := json.Marshal(card)
+	if err != nil {
+		slog.Debug("feishu: build rich card marshal failed, fallback to basic card", "error", err)
+		return buildCardJSONWithStatus(preprocessFeishuMarkdown(markdown), status)
+	}
+	return string(b)
+}
+
+func splitMarkdownByTables(md string, maxTables int) []string {
+	if maxTables <= 0 {
+		return []string{md}
+	}
+	matches := markdownTablePattern.FindAllStringIndex(md, -1)
+	if len(matches) <= maxTables {
+		return []string{md}
+	}
+	parts := make([]string, 0, len(matches)-maxTables+1)
+	firstEnd := len(md)
+	if len(matches) > maxTables {
+		firstEnd = matches[maxTables][0]
+	}
+	first := strings.TrimSpace(md[:firstEnd])
+	if first != "" {
+		parts = append(parts, first)
+	}
+	for _, match := range matches[maxTables:] {
+		block := strings.TrimSpace(md[match[0]:match[1]])
+		if block != "" {
+			parts = append(parts, block)
+		}
+	}
+	return parts
+}
+
+// BuildRichCard implements core.RichCardSupporter. Feishu engine passes an
+// elapsed duration via the preview handle; buildRichCard itself is the
+// renderer and must be called with the duration from engine state.
+func (p *Platform) BuildRichCard(status core.CardStatus, title string, steps []core.ToolStep, markdown string, streaming bool, elapsed time.Duration) string {
+	return buildRichCard(status, title, steps, markdown, streaming, elapsed)
+}
+
+// SplitMarkdownByTables implements core.MarkdownTableSplitter.
+func (p *Platform) SplitMarkdownByTables(md string, maxTables int) []string {
+	return splitMarkdownByTables(md, maxTables)
+}
+
+// SetPreviewStatus updates the card header color to reflect the agent's current state.
+func (p *Platform) SetPreviewStatus(previewHandle any, status core.CardStatus) {
+	h, ok := previewHandle.(*feishuPreviewHandle)
+	if !ok {
+		return
+	}
+
+	h.mu.Lock()
+	h.status = status
+	lastContent := h.lastContent
+	h.mu.Unlock()
+
+	if lastContent == "" {
+		return
+	}
+	cardJSON := buildCardJSONWithStatus(lastContent, status)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resp, err := p.client.Im.Message.Patch(ctx, larkim.NewPatchMessageReqBuilder().
+		MessageId(h.messageID).
+		Body(larkim.NewPatchMessageReqBodyBuilder().
+			Content(cardJSON).
+			Build()).
+		Build())
+	if err != nil {
+		slog.Debug("feishu: set preview status patch failed", "error", err)
+		return
+	}
+	if !resp.Success() {
+		slog.Debug("feishu: set preview status patch failed", "code", resp.Code, "msg", resp.Msg)
+	}
 }
