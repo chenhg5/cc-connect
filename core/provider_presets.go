@@ -11,9 +11,11 @@ import (
 )
 
 const (
-	defaultPresetsURL  = "https://raw.githubusercontent.com/chenhg5/cc-connect/main/provider-presets.json"
-	presetsCacheTTL    = 6 * time.Hour
-	presetsHTTPTimeout = 15 * time.Second
+	defaultPresetsURL         = "https://raw.githubusercontent.com/chenhg5/cc-connect/main/provider-presets.json"
+	fallbackPresetsURL        = "https://gitee.com/chenhg5/cc-connect/raw/main/provider-presets.json"
+	presetsCacheTTL           = 6 * time.Hour
+	presetsHTTPTimeout        = 15 * time.Second
+	presetsFallbackHTTPTimeout = 10 * time.Second
 )
 
 // ProviderPreset describes a recommended provider available from the remote presets list.
@@ -79,42 +81,50 @@ func (c *presetsCache) fetch() (*ProviderPresetsResponse, error) {
 		return c.data, nil
 	}
 
-	url := c.url
-	if url == "" {
-		url = defaultPresetsURL
+	primaryURL := c.url
+	if primaryURL == "" {
+		primaryURL = defaultPresetsURL
 	}
 
-	slog.Debug("fetching provider presets", "url", url)
-	client := &http.Client{Timeout: presetsHTTPTimeout}
-	resp, err := client.Get(url)
+	result, err := fetchPresetsFromURL(primaryURL, presetsHTTPTimeout)
+	if err != nil {
+		slog.Warn("primary presets fetch failed, trying fallback", "url", primaryURL, "error", err)
+		result, err = fetchPresetsFromURL(fallbackPresetsURL, presetsFallbackHTTPTimeout)
+	}
 	if err != nil {
 		if c.data != nil {
-			slog.Warn("failed to refresh presets, using stale cache", "error", err)
+			slog.Warn("all presets sources failed, using stale cache", "error", err)
 			return c.data, nil
 		}
 		return nil, fmt.Errorf("fetch presets: %w", err)
 	}
+
+	c.data = result
+	c.fetchedAt = time.Now()
+	return c.data, nil
+}
+
+func fetchPresetsFromURL(url string, timeout time.Duration) (*ProviderPresetsResponse, error) {
+	slog.Debug("fetching provider presets", "url", url)
+	client := &http.Client{Timeout: timeout}
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP GET %s: %w", url, err)
+	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		if c.data != nil {
-			slog.Warn("presets HTTP error, using stale cache", "status", resp.StatusCode)
-			return c.data, nil
-		}
-		return nil, fmt.Errorf("fetch presets: HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("HTTP GET %s: status %d", url, resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1MB max
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return nil, fmt.Errorf("read presets body: %w", err)
+		return nil, fmt.Errorf("read body from %s: %w", url, err)
 	}
 
 	var result ProviderPresetsResponse
 	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("parse presets JSON: %w", err)
+		return nil, fmt.Errorf("parse JSON from %s: %w", url, err)
 	}
-
-	c.data = &result
-	c.fetchedAt = time.Now()
-	return c.data, nil
+	return &result, nil
 }
