@@ -3274,6 +3274,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		switch event.Type {
 		case EventThinking:
 			if hasRichCard {
+				// Respect /quiet: when thinking messages are suppressed, skip
+				// card creation so the turn has no "Thinking..." header. The
+				// card will be created later by EventText / EventToolUse (if
+				// tool_messages is also on) or by EventResult as the final
+				// completed card.
+				if !e.display.ThinkingMessages {
+					break
+				}
 				if cardMessageID == nil {
 					card := richCardSupporter.BuildRichCard(CardStatusThinking, "", toolSteps, partialText, true, time.Since(turnStart))
 					if starter, ok := p.(PreviewStarter); ok {
@@ -3333,6 +3341,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case EventToolUse:
 			toolCount++
 			if hasRichCard {
+				// Respect /quiet: when tool messages are suppressed, don't
+				// accumulate tool steps and don't create/update the card on
+				// tool events. The card (if any) will still be updated by
+				// EventText for streaming markdown, and the final card from
+				// EventResult will have an empty toolSteps → no panel.
+				if !e.display.ToolMessages {
+					break
+				}
 				toolSteps = append(toolSteps, ToolStep{
 					Name:    event.ToolName,
 					Summary: truncateIf(event.ToolInput, e.display.ToolMaxLen),
