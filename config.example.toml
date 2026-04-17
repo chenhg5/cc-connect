@@ -106,12 +106,17 @@ level = "info" # debug, info, warn, error
 # reset_on_idle_mins = 60   # 0 or unset = disabled / 设为 0 或留空表示禁用
 
 # Keep conversation history when switching models via /model.
-# When enabled, the agent resumes the current session with the new model (--resume + --model),
+# When enabled, the agent resumes the current session with the new model,
 # so context is preserved natively with no extra token cost.
+# Supported by all CLI-based agents (claudecode, codex, opencode, cursor, gemini, iflow, qoder).
 # When disabled (default), model switch starts a completely fresh session.
 # 通过 /model 切换模型时保留对话历史。
-# 开启后，agent 会在新模型下继续当前会话（--resume + --model），由 CLI 原生管理上下文，不额外消耗 token。
+# 开启后，agent 会在新模型下继续当前会话，由 CLI 原生管理上下文，不额外消耗 token。
+# 支持所有 CLI 类 agent（claudecode、codex、opencode、cursor、gemini、iflow、qoder）。
 # 关闭时（默认），切换模型会开启全新的会话。
+#
+# [projects.agent]
+# type = "claudecode"
 # model_switch_keep_history = true
 
 # =============================================================================

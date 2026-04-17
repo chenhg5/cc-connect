@@ -63,12 +63,12 @@ When enabled, the next normal message after a long idle period starts in a fresh
 By default, `/model` starts a completely new session (clearing conversation history). To resume the current session with a new model:
 
 ```toml
-[[projects]]
-name = "demo"
+[projects.agent]
+type = "claudecode"
 model_switch_keep_history = true
 ```
 
-When enabled, the model switch uses `--resume <session-id> --model <new-model>` under the hood, so the agent continues the existing conversation natively with the new model — no extra token cost for replaying history. Note that model switching affects the shared agent instance — if multiple platforms use the same project, the model change applies to all of them.
+When enabled, the agent's session ID is preserved so the next session resumes the existing conversation with the new model — no extra token cost for replaying history. Supported by all CLI-based agents (claudecode, codex, opencode, cursor, gemini, iflow, qoder). Note that model switching affects the shared agent instance — if multiple platforms use the same project, the model change applies to all of them.
 
 ---
 

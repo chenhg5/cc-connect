@@ -308,11 +308,6 @@ type ProjectConfig struct {
 	// the current session has been inactive for the specified number of minutes.
 	// 0 or nil disables the behavior.
 	ResetOnIdleMins *int `toml:"reset_on_idle_mins,omitempty"`
-	// ModelSwitchKeepHistory, when true, preserves conversation history when
-	// switching models via /model instead of clearing it. The new agent process
-	// will replay the previous conversation as context. Default: false (clears
-	// history on model switch, current behavior).
-	ModelSwitchKeepHistory *bool `toml:"model_switch_keep_history,omitempty"`
 	// RunAsUser, when set, causes the agent command for this project to be
 	// spawned under a different Unix user via `sudo -n -iu <user> --`. This
 	// provides OS-level file-system isolation from the supervisor user who
