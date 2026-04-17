@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  Plug, Plus, Trash2, Pencil, ExternalLink, Star, Sparkles, X, Eye, EyeOff,
+  Plug, Plus, Trash2, Pencil, ExternalLink, Sparkles, X, Eye, EyeOff,
 } from 'lucide-react';
 import { Card, Button, Badge, Modal, Input } from '@/components/ui';
 import {
@@ -268,11 +268,6 @@ function PresetGrid({
         const added = existingNames.has(p.name);
         return (
           <Card key={p.name} className="relative overflow-hidden">
-            {p.tier <= 1 && (
-              <div className="absolute top-0 right-0 bg-amber-400/90 text-white text-[10px] font-bold px-2 py-0.5 rounded-bl-lg">
-                <Star size={10} className="inline mr-0.5 -mt-0.5" /> SPONSOR
-              </div>
-            )}
             <div className="space-y-3">
               <div>
                 <h3 className="font-medium text-gray-900 dark:text-white">{p.display_name || p.name}</h3>
