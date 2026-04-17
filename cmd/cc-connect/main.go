@@ -355,12 +355,13 @@ func main() {
 
 		// Wire display truncation settings (includes legacy quiet → display mapping)
 		{
-			tm, tool, tmlen, toollen := config.EffectiveDisplay(cfg, &proj)
+			tm, tool, tmlen, toollen, mode := config.EffectiveDisplay(cfg, &proj)
 			engine.SetDisplayConfig(core.DisplayCfg{
 				ThinkingMessages: tm,
 				ThinkingMaxLen:   tmlen,
 				ToolMaxLen:       toollen,
 				ToolMessages:     tool,
+				Mode:             mode,
 			})
 		}
 
@@ -1366,12 +1367,13 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	}
 
 	// Reload display config (includes legacy quiet → display mapping)
-	tm, tool, tmlen, toollen := config.EffectiveDisplay(cfg, proj)
+	tm, tool, tmlen, toollen, mode := config.EffectiveDisplay(cfg, proj)
 	engine.SetDisplayConfig(core.DisplayCfg{
 		ThinkingMessages: tm,
 		ThinkingMaxLen:   tmlen,
 		ToolMaxLen:       toollen,
 		ToolMessages:     tool,
+		Mode:             mode,
 	})
 	result.DisplayUpdated = true
 

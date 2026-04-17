@@ -160,10 +160,11 @@ type ManagementConfig struct {
 
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
 type DisplayConfig struct {
-	ThinkingMessages *bool `toml:"thinking_messages"` // whether thinking messages are shown; default true
-	ThinkingMaxLen   *int  `toml:"thinking_max_len"`  // max chars for thinking messages; 0 = no truncation; default 300
-	ToolMaxLen       *int  `toml:"tool_max_len"`      // max chars for tool use messages; 0 = no truncation; default 500
-	ToolMessages     *bool `toml:"tool_messages"`     // whether tool progress messages are shown; default true
+	ThinkingMessages *bool   `toml:"thinking_messages"` // whether thinking messages are shown; default true
+	ThinkingMaxLen   *int    `toml:"thinking_max_len"`  // max chars for thinking messages; 0 = no truncation; default 300
+	ToolMaxLen       *int    `toml:"tool_max_len"`      // max chars for tool use messages; 0 = no truncation; default 500
+	ToolMessages     *bool   `toml:"tool_messages"`     // whether tool progress messages are shown; default true
+	Mode             *string `toml:"mode"`              // "legacy" (default, upstream behavior) or "rich" (Card 2.0 single-card streaming with timing footer, feishu only)
 }
 
 // StreamPreviewConfig controls real-time streaming preview in IM.
@@ -579,11 +580,12 @@ func projectQuietEffective(cfg *Config, proj *ProjectConfig) bool {
 // EffectiveDisplay resolves global [display] together with legacy quiet (root or per-project).
 // If quiet is in effect and thinking_messages / tool_messages were not explicitly set in [display],
 // they map to false (backward-compatible with pre-display quiet = true).
-func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (thinkingMessages, toolMessages bool, thinkingMaxLen, toolMaxLen int) {
+func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (thinkingMessages, toolMessages bool, thinkingMaxLen, toolMaxLen int, mode string) {
 	thinkingMessages = true
 	toolMessages = true
 	thinkingMaxLen = 300
 	toolMaxLen = 500
+	mode = "legacy"
 	if cfg.Display.ThinkingMessages != nil {
 		thinkingMessages = *cfg.Display.ThinkingMessages
 	}
@@ -596,6 +598,12 @@ func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (thinkingMessages, toolM
 	if cfg.Display.ToolMaxLen != nil {
 		toolMaxLen = *cfg.Display.ToolMaxLen
 	}
+	if cfg.Display.Mode != nil {
+		m := strings.ToLower(strings.TrimSpace(*cfg.Display.Mode))
+		if m == "rich" || m == "legacy" {
+			mode = m
+		}
+	}
 	if projectQuietEffective(cfg, proj) {
 		if cfg.Display.ThinkingMessages == nil {
 			thinkingMessages = false
@@ -604,7 +612,7 @@ func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (thinkingMessages, toolM
 			toolMessages = false
 		}
 	}
-	return thinkingMessages, toolMessages, thinkingMaxLen, toolMaxLen
+	return thinkingMessages, toolMessages, thinkingMaxLen, toolMaxLen, mode
 }
 
 func (c *Config) validate() error {

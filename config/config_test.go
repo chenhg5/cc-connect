@@ -257,7 +257,7 @@ func TestEffectiveDisplayQuiet(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tm, tool, _, _ := EffectiveDisplay(&tt.cfg, &tt.proj)
+			tm, tool, _, _, _ := EffectiveDisplay(&tt.cfg, &tt.proj)
 			if tm != tt.wantTM {
 				t.Fatalf("ThinkingMessages = %v, want %v", tm, tt.wantTM)
 			}
