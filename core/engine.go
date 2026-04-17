@@ -3080,15 +3080,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			}
 
-			// When the preview was updated in-place at least once (e.g. Feishu card
-			// streaming), the user only saw a push for the initial send and subsequent
-			// updates were silent. Add a "done" reaction so they know the agent finished.
-			// The reaction is added after stopTyping (deferred) so the doing emoji
-			// is removed first.
-			if sp.needsDoneReaction() {
-				if doneTI, ok := p.(TypingIndicatorDone); ok {
-					doneReaction = func() { doneTI.AddDoneReaction(replyCtx) }
-				}
+			// Add a "done" reaction so the user knows the agent finished.
+			// The reaction is added after stopTyping (deferred) so the
+			// "doing" emoji is removed first.
+			if doneTI, ok := p.(TypingIndicatorDone); ok {
+				doneReaction = func() { doneTI.AddDoneReaction(replyCtx) }
 			}
 
 			return
