@@ -929,6 +929,15 @@ func (a *Agent) providerEnvLocked() []string {
 	for k, v := range p.Env {
 		env = append(env, k+"="+v)
 	}
+
+	// Set CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST=1 to tell Claude CLI
+	// that provider routing is managed by cc-connect, preventing
+	// settings.json env vars from overriding our provider config.
+	// This fixes issues #629 and #635 where settings.json env vars
+	// (ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN) would override
+	// config.toml provider settings.
+	env = append(env, "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST=1")
+
 	return env
 }
 
