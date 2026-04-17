@@ -2526,7 +2526,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	sendWorkspaceWithError := func(p Platform, replyCtx any, content string) error {
 		return e.sendWithErrorForWorkspace(p, replyCtx, content, workspaceDir)
 	}
-	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
+	spCfg := e.streamPreview
+	if pref, ok := state.platform.(PreviewFinishPreference); ok && pref.KeepPreviewOnFinish() {
+		spCfg.TailTruncate = true // show latest content, scroll off old
+	}
+	sp := newStreamPreview(spCfg, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
 	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer)
 	state.mu.Unlock()
 
@@ -2660,27 +2664,19 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventToolUse:
 			toolCount++
-			// When tool messages are hidden, split text segments.
-			if !e.display.ToolMessages && len(textParts) > segmentStart {
-				if sp.canPreview() {
-					sp.freeze()
-					sp.detachPreview()
-				} else {
-					// Preview degraded — send accumulated text directly
-					segment := strings.Join(textParts[segmentStart:], "")
-					if segment != "" {
-						for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
-							sendWorkspace(p, replyCtx, chunk)
-						}
-					}
-				}
-				segmentStart = len(textParts)
+			// Check if the platform keeps preview in-place and can absorb tool
+			// events into the running stream instead of separate messages.
+			inlineTools := false
+			if pref, ok := p.(PreviewFinishPreference); ok && pref.KeepPreviewOnFinish() {
+				inlineTools = sp.canPreview()
 			}
-			if e.display.ToolMessages {
-				// Flush accumulated text segment before tool display
-				previewActive := sp.canPreview()
-				if len(textParts) > segmentStart {
-					if !previewActive {
+
+			if !e.display.ToolMessages && len(textParts) > segmentStart {
+				if !inlineTools {
+					if sp.canPreview() {
+						sp.freeze()
+						sp.detachPreview()
+					} else {
 						segment := strings.Join(textParts[segmentStart:], "")
 						if segment != "" {
 							for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
@@ -2690,38 +2686,77 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 					segmentStart = len(textParts)
 				}
-				sp.freeze()
-				if previewActive {
-					sp.detachPreview() // keep frozen preview visible as permanent message
-				}
-				toolInput := event.ToolInput
-				var formattedInput string
-				if toolInput == "" {
-					formattedInput = ""
-				} else if strings.Contains(toolInput, "```") {
-					// Already contains code blocks (pre-formatted by agent) — use as-is
-					formattedInput = toolInput
-				} else if strings.Contains(toolInput, "\n") || utf8.RuneCountInString(toolInput) > 200 {
-					lang := toolCodeLang(event.ToolName, toolInput)
-					formattedInput = fmt.Sprintf("```%s\n%s\n```", lang, toolInput)
-				} else {
-					switch event.ToolName {
-					case "shell", "run_shell_command", "Bash":
-						formattedInput = fmt.Sprintf("```bash\n%s\n```", toolInput)
-					default:
-						formattedInput = fmt.Sprintf("`%s`", toolInput)
+			}
+			if e.display.ToolMessages {
+				if inlineTools {
+					// Append tool info into the streaming preview instead of
+					// freezing and sending a separate message.
+					toolInput := event.ToolInput
+					var inputSummary string
+					if toolInput != "" {
+						// Truncate long inputs for inline display.
+						const maxInlineLen = 200
+						if utf8.RuneCountInString(toolInput) > maxInlineLen {
+							toolInput = string([]rune(toolInput)[:maxInlineLen]) + "…"
+						}
+						// Remove newlines to keep it compact.
+						toolInput = strings.ReplaceAll(toolInput, "\n", " ")
+						inputSummary = fmt.Sprintf(": `%s`", toolInput)
 					}
-				}
-				toolMsg := fmt.Sprintf(e.i18n.T(MsgTool), toolCount, event.ToolName, formattedInput)
-				if !cp.AppendEvent(ProgressEntryToolUse, toolInput, event.ToolName, toolMsg) {
-					for _, chunk := range SplitMessageCodeFenceAware(toolMsg, maxPlatformMessageLen) {
-						sendWorkspace(p, replyCtx, chunk)
+					toolLine := fmt.Sprintf("\n\n🔧 [%d] %s%s", toolCount, event.ToolName, inputSummary)
+					textParts = append(textParts, toolLine)
+					sp.appendText(toolLine)
+				} else {
+					// Flush accumulated text segment before tool display
+					previewActive := sp.canPreview()
+					if len(textParts) > segmentStart {
+						if !previewActive {
+							segment := strings.Join(textParts[segmentStart:], "")
+							if segment != "" {
+								for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
+									sendWorkspace(p, replyCtx, chunk)
+								}
+							}
+						}
+						segmentStart = len(textParts)
+					}
+					sp.freeze()
+					if previewActive {
+						sp.detachPreview()
+					}
+					toolInput := event.ToolInput
+					var formattedInput string
+					if toolInput == "" {
+						formattedInput = ""
+					} else if strings.Contains(toolInput, "```") {
+						formattedInput = toolInput
+					} else if strings.Contains(toolInput, "\n") || utf8.RuneCountInString(toolInput) > 200 {
+						lang := toolCodeLang(event.ToolName, toolInput)
+						formattedInput = fmt.Sprintf("```%s\n%s\n```", lang, toolInput)
+					} else {
+						switch event.ToolName {
+						case "shell", "run_shell_command", "Bash":
+							formattedInput = fmt.Sprintf("```bash\n%s\n```", toolInput)
+						default:
+							formattedInput = fmt.Sprintf("`%s`", toolInput)
+						}
+					}
+					toolMsg := fmt.Sprintf(e.i18n.T(MsgTool), toolCount, event.ToolName, formattedInput)
+					if !cp.AppendEvent(ProgressEntryToolUse, toolInput, event.ToolName, toolMsg) {
+						for _, chunk := range SplitMessageCodeFenceAware(toolMsg, maxPlatformMessageLen) {
+							sendWorkspace(p, replyCtx, chunk)
+						}
 					}
 				}
 			}
 
 		case EventToolResult:
 			if e.display.ToolMessages {
+				inlineResult := false
+				if pref, ok := p.(PreviewFinishPreference); ok && pref.KeepPreviewOnFinish() {
+					inlineResult = sp.canPreview()
+				}
+
 				result := strings.TrimSpace(event.ToolResult)
 				if result == "" {
 					result = strings.TrimSpace(event.Content)
@@ -2729,7 +2764,26 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if result != "" {
 					result = truncateIf(result, e.display.ToolMaxLen)
 				}
-				if result != "" || event.ToolStatus != "" || event.ToolExitCode != nil || event.ToolSuccess != nil {
+
+				if inlineResult {
+					// Append result summary into the stream.
+					status := "✅"
+					if event.ToolSuccess != nil && !*event.ToolSuccess {
+						status = "❌"
+					}
+					resultLine := " " + status
+					if result != "" {
+						// Show a compact snippet of the result.
+						const maxResultInline = 100
+						snippet := strings.ReplaceAll(result, "\n", " ")
+						if utf8.RuneCountInString(snippet) > maxResultInline {
+							snippet = string([]rune(snippet)[:maxResultInline]) + "…"
+						}
+						resultLine += " `" + snippet + "`"
+					}
+					textParts = append(textParts, resultLine)
+					sp.appendText(resultLine)
+				} else if result != "" || event.ToolStatus != "" || event.ToolExitCode != nil || event.ToolSuccess != nil {
 					resultMsg := e.formatToolResultEventFallback(event.ToolName, result, event.ToolStatus, event.ToolExitCode, event.ToolSuccess)
 					entry := ProgressCardEntry{
 						Kind:     ProgressEntryToolResult,
@@ -3065,7 +3119,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				queuedRenderer := func(content string) string {
 					return e.renderOutgoingContentForWorkspace(queued.platform, content, workspaceDir)
 				}
-				sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx, queuedRenderer)
+				qSpCfg := e.streamPreview
+				if pref, ok := queued.platform.(PreviewFinishPreference); ok && pref.KeepPreviewOnFinish() {
+					qSpCfg.TailTruncate = true
+				}
+				sp = newStreamPreview(qSpCfg, queued.platform, queued.replyCtx, e.ctx, queuedRenderer)
 				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), queuedRenderer)
 
 				session.AddHistory("user", queued.content)

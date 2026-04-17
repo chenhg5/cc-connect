@@ -36,6 +36,11 @@ type WSPlatform struct {
 	reqSeq      atomic.Int64 // monotonic counter for generating unique req_id
 	missedPong  atomic.Int32 // consecutive heartbeat acks not received
 	pendingAcks sync.Map     // req_id -> chan error, for sequential send with ack waiting
+
+	// typingPreviews stores preview handles created by StartTyping so that
+	// SendPreviewStart can reuse the same stream instead of creating a new message.
+	// Key: reqID (string), Value: *wsPreviewHandle.
+	typingPreviews sync.Map
 }
 
 const wsAckTimeout = 5 * time.Second
@@ -46,6 +51,12 @@ type wsReplyContext struct {
 	chatID   string // chatid for aibot_send_msg
 	chatType string // chattype: "single" or "group"
 	userID   string // from.userid
+}
+
+// wsPreviewHandle stores the stream ID for in-place message updates via streaming.
+type wsPreviewHandle struct {
+	streamID string
+	reqID    string
 }
 
 // --- WebSocket protocol frame types (matching official SDK) ---
@@ -467,6 +478,158 @@ func (p *WSPlatform) Reply(ctx context.Context, rctx any, content string) error 
 	}
 	slog.Debug("wecom-ws: reply sent", "user", rc.userID, "len", len(content))
 	return nil
+}
+
+// StartTyping sends a "thinking" streaming indicator that progressively adds
+// dots so the user sees the message growing (💭 正在思考. → .. → ... → ....).
+// WeChat Work renders incremental content growth as normal streaming output.
+// The handle is stashed in typingPreviews so SendPreviewStart can reuse it.
+// Implements core.TypingIndicator.
+func (p *WSPlatform) StartTyping(ctx context.Context, rctx any) (stop func()) {
+	rc, ok := rctx.(wsReplyContext)
+	if !ok || rc.reqID == "" {
+		return func() {}
+	}
+	streamID := p.generateReqID("stream")
+	sendFrame := func(content string) error {
+		return p.writeJSON(map[string]any{
+			"cmd":     "aibot_respond_msg",
+			"headers": map[string]string{"req_id": rc.reqID},
+			"body": map[string]any{
+				"msgtype": "stream",
+				"stream": map[string]any{
+					"id":      streamID,
+					"finish":  false,
+					"content": content,
+				},
+			},
+		})
+	}
+	if err := sendFrame("💭 正在思考"); err != nil {
+		slog.Debug("wecom-ws: typing indicator failed", "error", err)
+		return func() {}
+	}
+	handle := &wsPreviewHandle{streamID: streamID, reqID: rc.reqID}
+	p.typingPreviews.Store(rc.reqID, handle)
+	slog.Debug("wecom-ws: typing started", "user", rc.userID, "stream_id", streamID)
+
+	stopCh := make(chan struct{})
+	go func() {
+		const maxDots = 10
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+		n := 0
+		growing := true
+		for {
+			select {
+			case <-stopCh:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if _, ok := p.typingPreviews.Load(rc.reqID); !ok {
+					return
+				}
+				if growing {
+					n++
+					if n >= maxDots {
+						growing = false
+					}
+				} else {
+					n--
+					if n <= 0 {
+						growing = true
+					}
+				}
+				_ = sendFrame("💭 正在思考" + strings.Repeat(".", n))
+			}
+		}
+	}()
+
+	return func() {
+		close(stopCh)
+		p.typingPreviews.Delete(rc.reqID)
+	}
+}
+
+// SendPreviewStart reuses a handle from StartTyping if available, otherwise
+// sends a new streaming frame. Implements core.PreviewStarter.
+func (p *WSPlatform) SendPreviewStart(ctx context.Context, rctx any, content string) (any, error) {
+	rc, ok := rctx.(wsReplyContext)
+	if !ok {
+		return nil, fmt.Errorf("wecom-ws: invalid reply context type %T", rctx)
+	}
+
+	// Reuse the typing indicator's stream if available.
+	if v, ok := p.typingPreviews.LoadAndDelete(rc.reqID); ok {
+		h := v.(*wsPreviewHandle)
+		// Update the existing "thinking" message with real content.
+		frame := map[string]any{
+			"cmd":     "aibot_respond_msg",
+			"headers": map[string]string{"req_id": h.reqID},
+			"body": map[string]any{
+				"msgtype": "stream",
+				"stream": map[string]any{
+					"id":      h.streamID,
+					"finish":  false,
+					"content": content,
+				},
+			},
+		}
+		if err := p.writeJSON(frame); err != nil {
+			return nil, fmt.Errorf("wecom-ws: send preview start (reuse typing): %w", err)
+		}
+		slog.Debug("wecom-ws: preview started (reused typing)", "stream_id", h.streamID, "len", len(content))
+		return h, nil
+	}
+
+	// No typing handle — send a fresh stream.
+	streamID := p.generateReqID("stream")
+	frame := map[string]any{
+		"cmd":     "aibot_respond_msg",
+		"headers": map[string]string{"req_id": rc.reqID},
+		"body": map[string]any{
+			"msgtype": "stream",
+			"stream": map[string]any{
+				"id":      streamID,
+				"finish":  false,
+				"content": content,
+			},
+		},
+	}
+	if err := p.writeJSON(frame); err != nil {
+		return nil, fmt.Errorf("wecom-ws: send preview start: %w", err)
+	}
+	slog.Debug("wecom-ws: preview started", "stream_id", streamID, "len", len(content))
+	return &wsPreviewHandle{streamID: streamID, reqID: rc.reqID}, nil
+}
+
+// UpdateMessage sends an updated streaming frame with the same stream ID.
+// The content is a full replacement (not incremental). Implements core.MessageUpdater.
+func (p *WSPlatform) UpdateMessage(ctx context.Context, previewHandle any, content string) error {
+	h, ok := previewHandle.(*wsPreviewHandle)
+	if !ok {
+		return fmt.Errorf("wecom-ws: invalid preview handle type %T", previewHandle)
+	}
+	frame := map[string]any{
+		"cmd":     "aibot_respond_msg",
+		"headers": map[string]string{"req_id": h.reqID},
+		"body": map[string]any{
+			"msgtype": "stream",
+			"stream": map[string]any{
+				"id":      h.streamID,
+				"finish":  false,
+				"content": content,
+			},
+		},
+	}
+	return p.writeJSON(frame)
+}
+
+// KeepPreviewOnFinish tells the engine to finalize via UpdateMessage instead of
+// deleting the preview and sending a separate Reply. Implements core.PreviewFinishPreference.
+func (p *WSPlatform) KeepPreviewOnFinish() bool {
+	return true
 }
 
 // Send sends a proactive message via aibot_send_msg (markdown format).

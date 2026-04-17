@@ -15,6 +15,7 @@ type StreamPreviewCfg struct {
 	IntervalMs        int      // minimum ms between updates (default 1500)
 	MinDeltaChars     int      // minimum new chars before sending an update (default 30)
 	MaxChars          int      // max preview length (default 2000)
+	TailTruncate      bool     // when true, keep the *last* MaxChars (scrolling window) instead of the first
 }
 
 // DefaultStreamPreviewCfg returns sensible defaults.
@@ -103,6 +104,20 @@ func (sp *streamPreview) canPreview() bool {
 	return ok
 }
 
+// truncatePreview applies MaxChars truncation. When TailTruncate is set it
+// keeps the tail (scrolling window); otherwise it keeps the head.
+func (sp *streamPreview) truncatePreview(text string) string {
+	maxChars := sp.cfg.MaxChars
+	if maxChars <= 0 || len([]rune(text)) <= maxChars {
+		return text
+	}
+	if sp.cfg.TailTruncate {
+		runes := []rune(text)
+		return "…" + string(runes[len(runes)-maxChars:])
+	}
+	return string([]rune(text)[:maxChars]) + "…"
+}
+
 // appendText adds new text content and triggers a throttled flush if needed.
 func (sp *streamPreview) appendText(text string) {
 	sp.mu.Lock()
@@ -114,11 +129,7 @@ func (sp *streamPreview) appendText(text string) {
 
 	sp.fullText += text
 
-	displayText := sp.fullText
-	maxChars := sp.cfg.MaxChars
-	if maxChars > 0 && len([]rune(displayText)) > maxChars {
-		displayText = string([]rune(displayText)[:maxChars]) + "…"
-	}
+	displayText := sp.truncatePreview(sp.fullText)
 
 	delta := len([]rune(displayText)) - len([]rune(sp.lastSentText))
 	elapsed := time.Since(sp.lastSentAt)
@@ -150,11 +161,7 @@ func (sp *streamPreview) scheduleFlushLocked(delay time.Duration) {
 		if sp.degraded {
 			return
 		}
-		displayText := sp.fullText
-		maxChars := sp.cfg.MaxChars
-		if maxChars > 0 && len([]rune(displayText)) > maxChars {
-			displayText = string([]rune(displayText)[:maxChars]) + "…"
-		}
+		displayText := sp.truncatePreview(sp.fullText)
 		sp.flushLocked(displayText)
 	})
 }
@@ -231,11 +238,7 @@ func (sp *streamPreview) freeze() {
 
 	if sp.previewMsgID != nil && !sp.degraded {
 		if updater, ok := sp.platform.(MessageUpdater); ok {
-			text := sp.fullText
-			maxChars := sp.cfg.MaxChars
-			if maxChars > 0 && len([]rune(text)) > maxChars {
-				text = string([]rune(text)[:maxChars]) + "…"
-			}
+			text := sp.truncatePreview(sp.fullText)
 			if text != "" {
 				if sp.transform != nil {
 					text = sp.transform(text)
