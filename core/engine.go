@@ -3259,7 +3259,6 @@ var builtinCommands = []struct {
 	{[]string{"whoami", "myid"}, "whoami"},
 	{[]string{"web"}, "web"},
 	{[]string{"diff"}, "diff"},
-	{[]string{"agentsid", "agent-sid"}, "agentsid"},
 }
 
 // isBtwCommand checks if a trimmed message starts with a /btw command.
@@ -3460,8 +3459,6 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdWhoami(p, msg)
 	case "web":
 		e.cmdWeb(p, msg, args)
-	case "agentsid":
-		e.cmdAgentSID(p, msg)
 	default:
 		if custom, ok := e.commands.Resolve(cmd); ok {
 			if disabledCmds[strings.ToLower(custom.Name)] {
@@ -4787,21 +4784,6 @@ func (e *Engine) cmdCurrent(p Platform, msg *Message) {
 	e.replyWithCard(p, msg.ReplyCtx, e.renderCurrentCard(msg.SessionKey))
 }
 
-func (e *Engine) cmdAgentSID(p Platform, msg *Message) {
-	_, sessions, _, err := e.commandContext(p, msg)
-	if err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
-		return
-	}
-	s := sessions.GetOrCreateActive(msg.SessionKey)
-	agentID := s.GetAgentSessionID()
-	if agentID == "" {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSessionNotStarted))
-		return
-	}
-	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgAgentSIDWarning)+"\n\n`"+agentID+"`")
-}
-
 func (e *Engine) cmdStatus(p Platform, msg *Message) {
 	if !supportsCards(p) {
 		agent, sessions, _, err := e.commandContext(p, msg)
@@ -4817,6 +4799,8 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 		if len(platNames) == 0 {
 			platformStr = "-"
 		}
+
+		workDirStr := e.commandWorkDir(agent, msg)
 
 		uptimeStr := formatDurationI18n(time.Since(e.startedAt), e.i18n.CurrentLang())
 
@@ -4863,6 +4847,11 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 
 		sessionKeyStr := e.i18n.Tf(MsgStatusSessionKey, msg.SessionKey)
 
+		agentSIDStr := ""
+		if agentSID := s.GetAgentSessionID(); agentSID != "" {
+			agentSIDStr = e.i18n.Tf(MsgStatusAgentSID, agentSID)
+		}
+
 		userIDStr := ""
 		if msg.UserID != "" {
 			userIDStr = e.i18n.Tf(MsgStatusUserID, msg.UserID)
@@ -4871,6 +4860,7 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgStatusTitle,
 			e.name,
 			agent.Name(),
+			workDirStr,
 			platformStr,
 			uptimeStr,
 			langStr,
@@ -4878,6 +4868,7 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 			sessionStr,
 			cronStr,
 			sessionKeyStr,
+			agentSIDStr,
 			userIDStr,
 		))
 		return
@@ -5216,6 +5207,14 @@ func (e *Engine) renderStatusCard(sessionKey string, userID string) *Card {
 		platformStr = "-"
 	}
 
+	workDirStr := ""
+	if wd, ok := agent.(interface{ GetWorkDir() string }); ok {
+		workDirStr = strings.TrimSpace(wd.GetWorkDir())
+	}
+	if workDirStr == "" {
+		workDirStr, _ = os.Getwd()
+	}
+
 	uptimeStr := formatDurationI18n(time.Since(e.startedAt), e.i18n.CurrentLang())
 
 	cur := e.i18n.CurrentLang()
@@ -5261,6 +5260,11 @@ func (e *Engine) renderStatusCard(sessionKey string, userID string) *Card {
 
 	sessionKeyStr := e.i18n.Tf(MsgStatusSessionKey, sessionKey)
 
+	agentSIDStr := ""
+	if agentSID := s.GetAgentSessionID(); agentSID != "" {
+		agentSIDStr = e.i18n.Tf(MsgStatusAgentSID, agentSID)
+	}
+
 	userIDStr := ""
 	if userID != "" {
 		userIDStr = e.i18n.Tf(MsgStatusUserID, userID)
@@ -5269,6 +5273,7 @@ func (e *Engine) renderStatusCard(sessionKey string, userID string) *Card {
 	statusText := e.i18n.Tf(MsgStatusTitle,
 		e.name,
 		agent.Name(),
+		workDirStr,
 		platformStr,
 		uptimeStr,
 		langStr,
@@ -5276,6 +5281,7 @@ func (e *Engine) renderStatusCard(sessionKey string, userID string) *Card {
 		sessionStr,
 		cronStr,
 		sessionKeyStr,
+		agentSIDStr,
 		userIDStr,
 	)
 	title, body := splitCardTitleBody(statusText)
@@ -5497,7 +5503,6 @@ func helpCardGroups() []helpCardGroup {
 				{command: "/new", action: "act:/new"},
 				{command: "/list", action: "nav:/list"},
 				{command: "/current", action: "nav:/current"},
-				{command: "/agentsid", action: "cmd:/agentsid"},
 				{command: "/switch", action: "nav:/list"},
 				{command: "/search", action: "cmd:/search"},
 				{command: "/history", action: "nav:/history"},
