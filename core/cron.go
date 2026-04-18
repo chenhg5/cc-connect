@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"reflect"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -33,6 +33,7 @@ type CronJob struct {
 	Mute        bool      `json:"mute,omitempty"`         // suppress ALL messages (start + result); job runs silently
 	SessionMode string    `json:"session_mode,omitempty"` // "" or "reuse" = share active session; "new_per_run" = fresh session each run
 	Mode        string    `json:"mode,omitempty"`         // permission mode override for this job; "" = use project default
+	Effort      string    `json:"effort,omitempty"`       // reasoning effort override for this job; "" = use current agent default
 	TimeoutMins *int      `json:"timeout_mins,omitempty"` // nil = default 30m wait; 0 = no limit; >0 = minutes
 	CreatedAt   time.Time `json:"created_at"`
 	LastRun     time.Time `json:"last_run,omitempty"`
@@ -350,6 +351,11 @@ func updateJobField(job *CronJob, field string, value any) error {
 			job.Mode = v
 			return nil
 		}
+	case "effort":
+		if v, ok := value.(string); ok {
+			job.Effort = v
+			return nil
+		}
 	case "timeout_mins":
 		if v, ok := value.(float64); ok {
 			n := int(v)
@@ -396,13 +402,13 @@ func toExportedFieldName(s string) string {
 
 // CronScheduler runs cron jobs by injecting synthetic messages into engines.
 type CronScheduler struct {
-	store         *CronStore
-	cron          *cron.Cron
-	engines       map[string]*Engine // project name → engine
-	mu            sync.RWMutex
-	entries       map[string]cron.EntryID // job ID → cron entry
-	defaultSilent      bool   // global default for suppressing cron start notifications
-	defaultSessionMode string // global default session mode; "" = reuse, "new_per_run" = fresh session each run
+	store              *CronStore
+	cron               *cron.Cron
+	engines            map[string]*Engine // project name → engine
+	mu                 sync.RWMutex
+	entries            map[string]cron.EntryID // job ID → cron entry
+	defaultSilent      bool                    // global default for suppressing cron start notifications
+	defaultSessionMode string                  // global default session mode; "" = reuse, "new_per_run" = fresh session each run
 }
 
 func NewCronScheduler(store *CronStore) *CronScheduler {

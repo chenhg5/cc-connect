@@ -973,13 +973,14 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 	}
 
 	msg := &Message{
-		SessionKey:   sessionKey,
-		Platform:     platformName,
-		UserID:       "cron",
-		UserName:     "cron",
-		Content:      job.Prompt,
-		ReplyCtx:     replyCtx,
-		ModeOverride: job.Mode,
+		SessionKey:     sessionKey,
+		Platform:       platformName,
+		UserID:         "cron",
+		UserName:       "cron",
+		Content:        job.Prompt,
+		ReplyCtx:       replyCtx,
+		ModeOverride:   job.Mode,
+		EffortOverride: strings.TrimSpace(job.Effort),
 	}
 
 	// Resolve workspace-specific agent and sessions for multi-workspace mode.
@@ -2017,7 +2018,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	if agent != e.agent {
 		agentOverride = agent
 	}
-	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey)
+	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey, msg.EffortOverride)
 
 	// Set workspaceDir on the state for idle reaper identification
 	if workspaceDir != "" {
@@ -2239,7 +2240,7 @@ func adoptPendingFromPlaceholder(existing, newState *interactiveState) {
 
 // When agentOverride is non-nil it is used instead of e.agent to start the session.
 // ccSessionKey, when non-empty, is used for CC_SESSION_KEY env injection; otherwise sessionKey is used.
-func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string) *interactiveState {
+func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string, effortOverride string) *interactiveState {
 	e.interactiveMu.Lock()
 	defer e.interactiveMu.Unlock()
 
@@ -2329,7 +2330,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	startSessionID := session.GetAgentSessionID()
 	isResume := startSessionID != ""
 	startAt := time.Now()
-	agentSession, err := agent.StartSession(e.ctx, startSessionID)
+	agentSession, err := e.startAgentSessionWithOptionalEffort(agent, startSessionID, effortOverride)
 	startElapsed := time.Since(startAt)
 	if err != nil {
 		// If resume/continue failed, try a fresh session as fallback.
@@ -2338,7 +2339,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 				"session_key", sessionKey, "failed_session_id", startSessionID,
 				"error", err, "elapsed", startElapsed)
 			startAt = time.Now()
-			agentSession, err = agent.StartSession(e.ctx, "")
+			agentSession, err = e.startAgentSessionWithOptionalEffort(agent, "", effortOverride)
 			startElapsed = time.Since(startAt)
 			if err == nil {
 				slog.Info("fresh session started after resume failure",
@@ -2376,6 +2377,35 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 
 	slog.Info("session spawned", "session_key", sessionKey, "agent_session", session.GetAgentSessionID(), "is_resume", isResume, "elapsed", startElapsed)
 	return state
+}
+
+func (e *Engine) startAgentSessionWithOptionalEffort(agent Agent, sessionID, effortOverride string) (AgentSession, error) {
+	effortOverride = strings.TrimSpace(effortOverride)
+	if effortOverride == "" {
+		return agent.StartSession(e.ctx, sessionID)
+	}
+
+	if switcher, ok := agent.(ReasoningEffortSwitcher); ok {
+		if allowed := switcher.AvailableReasoningEfforts(); len(allowed) > 0 {
+			valid := false
+			for _, candidate := range allowed {
+				if strings.EqualFold(candidate, effortOverride) {
+					effortOverride = candidate
+					valid = true
+					break
+				}
+			}
+			if !valid {
+				return nil, fmt.Errorf("invalid reasoning effort %q for agent %q (supported: %s)", effortOverride, agent.Name(), strings.Join(allowed, ", "))
+			}
+		}
+	}
+
+	starter, ok := agent.(SessionEffortStarter)
+	if !ok {
+		return nil, fmt.Errorf("agent %q does not support per-session reasoning effort override", agent.Name())
+	}
+	return starter.StartSessionWithEffort(e.ctx, sessionID, effortOverride)
 }
 
 // cleanupInteractiveState removes the interactive state for the given session key

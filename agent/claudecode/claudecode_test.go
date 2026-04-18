@@ -1,8 +1,10 @@
 package claudecode
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -195,6 +197,38 @@ func TestClaudeSessionSetLiveMode_AutoSessionRequiresRestart(t *testing.T) {
 	cs.setPermissionMode("auto")
 	if cs.SetLiveMode("default") {
 		t.Fatal("SetLiveMode(default) from auto session = true, want false")
+	}
+}
+
+func TestStartSessionWithEffort_UsesOverrideWithoutMutatingAgent(t *testing.T) {
+	tmpDir := t.TempDir()
+	script := filepath.Join(tmpDir, "fake-claude.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\ncat >/dev/null\n"), 0o755); err != nil {
+		t.Fatalf("write fake claude: %v", err)
+	}
+
+	a := &Agent{
+		workDir:         tmpDir,
+		cliBin:          script,
+		reasoningEffort: "high",
+	}
+
+	sess, err := a.StartSessionWithEffort(context.Background(), "", "medium")
+	if err != nil {
+		t.Fatalf("StartSessionWithEffort() error = %v", err)
+	}
+	cs, ok := sess.(*claudeSession)
+	if !ok {
+		t.Fatalf("session type = %T, want *claudeSession", sess)
+	}
+	defer cs.Close()
+
+	args := strings.Join(cs.cmd.Args, " ")
+	if !strings.Contains(args, "--effort medium") {
+		t.Fatalf("cmd args = %q, want --effort medium", args)
+	}
+	if a.reasoningEffort != "high" {
+		t.Fatalf("agent reasoningEffort = %q, want high", a.reasoningEffort)
 	}
 }
 

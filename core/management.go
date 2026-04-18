@@ -1327,6 +1327,7 @@ func (m *ManagementServer) handleCron(w http.ResponseWriter, r *http.Request) {
 			Silent:      req.Silent,
 			SessionMode: NormalizeCronSessionMode(req.SessionMode),
 			Mode:        req.Mode,
+			Effort:      req.Effort,
 			TimeoutMins: req.TimeoutMins,
 			CreatedAt:   time.Now(),
 		}
