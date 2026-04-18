@@ -180,7 +180,9 @@
     "actions": "Acciones",
     "viewAll": "Ver todo",
     "optional": "opcional",
-    "confirmDelete": "¿Seguro que desea eliminar esto?"
+    "confirmDelete": "¿Seguro que desea eliminar esto?",
+    "close": "Cerrar",
+    "saving": "Guardando…"
   },
   "setup": {
     "addPlatform": "Añadir plataforma",
@@ -323,6 +325,7 @@
     "title": "Gestión de proveedores",
     "subtitle": "Administra proveedores de API compartidos globalmente entre todos los proyectos",
     "add": "Agregar proveedor",
+    "importCCSwitch": "Importar desde CC-Switch",
     "edit": "Editar proveedor",
     "empty": "No hay proveedores configurados",
     "emptyHint": "Agrega un proveedor global o importa desde los preajustes.",
@@ -349,6 +352,16 @@
       "defaultConfig": "Predeterminado",
       "baseUrl": "Base URL",
       "codexWireApi": "Wire API"
+    },
+    "ccSwitch": {
+      "title": "Importar desde CC-Switch",
+      "notFound": "No se encontró la base de datos de CC-Switch. Asegúrese de que CC-Switch esté instalado.",
+      "empty": "No hay proveedores configurados en CC-Switch.",
+      "hint": "Se encontraron {{count}} proveedores en CC-Switch. Seleccione cuáles importar:",
+      "active": "activo",
+      "exists": "existente",
+      "import": "Importar ({{count}})",
+      "result": "Importación completa: {{imported}} importados, {{skipped}} omitidos."
     }
   },
   "theme": {

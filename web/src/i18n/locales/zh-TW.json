@@ -180,7 +180,9 @@
     "actions": "操作",
     "viewAll": "檢視全部",
     "optional": "選填",
-    "confirmDelete": "確定要刪除嗎？"
+    "confirmDelete": "確定要刪除嗎？",
+    "close": "關閉",
+    "saving": "儲存中…"
   },
   "setup": {
     "addPlatform": "新增平台",
@@ -323,6 +325,7 @@
     "title": "服務商管理",
     "subtitle": "管理全域共用的 API 服務商，可被所有專案引用",
     "add": "新增服務商",
+    "importCCSwitch": "從 CC-Switch 匯入",
     "edit": "編輯服務商",
     "empty": "尚未配置服務商",
     "emptyHint": "新增全域服務商或從預設清單中匯入。",
@@ -349,6 +352,16 @@
       "defaultConfig": "預設",
       "baseUrl": "Base URL",
       "codexWireApi": "Wire API"
+    },
+    "ccSwitch": {
+      "title": "從 CC-Switch 匯入",
+      "notFound": "未找到 CC-Switch 資料庫，請確認已安裝 CC-Switch。",
+      "empty": "CC-Switch 中沒有已設定的服務商。",
+      "hint": "在 CC-Switch 中找到 {{count}} 個服務商，選擇要匯入的：",
+      "active": "目前",
+      "exists": "已存在",
+      "import": "匯入 ({{count}})",
+      "result": "匯入完成：成功 {{imported}} 個，跳過 {{skipped}} 個。"
     }
   },
   "theme": {
