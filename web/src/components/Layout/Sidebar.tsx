@@ -8,6 +8,7 @@ import {
   Settings,
   ChevronLeft,
   ChevronRight,
+  Plug,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useState } from 'react';
@@ -15,6 +16,7 @@ import { useState } from 'react';
 const navItems = [
   { key: 'dashboard', path: '/', icon: LayoutDashboard },
   { key: 'projects', path: '/projects', icon: FolderKanban },
+  { key: 'providers', path: '/providers', icon: Plug },
   { key: 'chat', path: '/chat', icon: MessageSquare },
   { key: 'cron', path: '/cron', icon: Clock },
   { key: 'system', path: '/system', icon: Settings },

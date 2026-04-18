@@ -95,4 +95,12 @@ export const platformMeta: Record<string, PlatformMeta> = {
       { key: 'allow_from', labelKey: 'fields.allowFrom', placeholder: '* (all)', group: 'advanced' },
     ],
   },
+  weibo: {
+    label: 'Weibo (微博)',
+    fields: [
+      { key: 'app_id', labelKey: 'fields.appId', required: true, placeholder: '1234567890' },
+      { key: 'app_secret', labelKey: 'fields.appSecret', required: true, type: 'password' },
+      { key: 'allow_from', labelKey: 'fields.allowFrom', placeholder: '* (all)', group: 'advanced' },
+    ],
+  },
 };
