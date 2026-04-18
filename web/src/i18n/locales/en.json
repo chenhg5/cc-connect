@@ -344,7 +344,11 @@
       "modelsHint": "Models users can switch to via /model. Click ✓ to set as default.",
       "agentTypes": "Agent types",
       "agentTypesHint": "Leave empty for all agent types",
-      "thinkingDefault": "Default (auto)"
+      "thinkingDefault": "Default (auto)",
+      "perAgentHint": "Different agents may use different Base URL / models. Configure per agent type below.",
+      "defaultConfig": "Default",
+      "baseUrl": "Base URL",
+      "codexWireApi": "Wire API"
     }
   },
   "theme": {

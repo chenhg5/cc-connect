@@ -643,7 +643,7 @@ func main() {
 				if len(g.AgentTypes) > 0 && !containsString(g.AgentTypes, agentType) {
 					continue
 				}
-				result = append(result, configProviderToCore(g))
+				result = append(result, configProviderToCore(g.ResolveForAgent(agentType)))
 			}
 			return result, nil
 		})
@@ -1531,13 +1531,15 @@ func startInitialRefreshIfReady(agent core.Agent, result providerWiringResult) {
 
 func configProviderToGlobal(p config.ProviderConfig) core.GlobalProviderInfo {
 	info := core.GlobalProviderInfo{
-		Name:       p.Name,
-		APIKey:     p.APIKey,
-		BaseURL:    p.BaseURL,
-		Model:      p.Model,
-		Thinking:   p.Thinking,
-		Env:        p.Env,
-		AgentTypes: p.AgentTypes,
+		Name:        p.Name,
+		APIKey:      p.APIKey,
+		BaseURL:     p.BaseURL,
+		Model:       p.Model,
+		Thinking:    p.Thinking,
+		Env:         p.Env,
+		AgentTypes:  p.AgentTypes,
+		Endpoints:   p.Endpoints,
+		AgentModels: p.AgentModels,
 	}
 	for _, m := range p.Models {
 		info.Models = append(info.Models, struct {
@@ -1545,21 +1547,55 @@ func configProviderToGlobal(p config.ProviderConfig) core.GlobalProviderInfo {
 			Alias string `json:"alias,omitempty"`
 		}{Model: m.Model, Alias: m.Alias})
 	}
+	if len(p.AgentModelLists) > 0 {
+		info.AgentModelLists = make(map[string][]core.GlobalModelEntry, len(p.AgentModelLists))
+		for at, ml := range p.AgentModelLists {
+			entries := make([]core.GlobalModelEntry, len(ml))
+			for i, m := range ml {
+				entries[i] = core.GlobalModelEntry{Model: m.Model, Alias: m.Alias}
+			}
+			info.AgentModelLists[at] = entries
+		}
+	}
+	if p.Codex != nil {
+		info.Codex = &core.GlobalCodexConfig{
+			WireAPI:     p.Codex.WireAPI,
+			HTTPHeaders: p.Codex.HTTPHeaders,
+		}
+	}
 	return info
 }
 
 func globalProviderToConfig(info core.GlobalProviderInfo) config.ProviderConfig {
 	p := config.ProviderConfig{
-		Name:       info.Name,
-		APIKey:     info.APIKey,
-		BaseURL:    info.BaseURL,
-		Model:      info.Model,
-		Thinking:   info.Thinking,
-		Env:        info.Env,
-		AgentTypes: info.AgentTypes,
+		Name:        info.Name,
+		APIKey:      info.APIKey,
+		BaseURL:     info.BaseURL,
+		Model:       info.Model,
+		Thinking:    info.Thinking,
+		Env:         info.Env,
+		AgentTypes:  info.AgentTypes,
+		Endpoints:   info.Endpoints,
+		AgentModels: info.AgentModels,
 	}
 	for _, m := range info.Models {
 		p.Models = append(p.Models, config.ProviderModelConfig{Model: m.Model, Alias: m.Alias})
+	}
+	if len(info.AgentModelLists) > 0 {
+		p.AgentModelLists = make(map[string][]config.ProviderModelConfig, len(info.AgentModelLists))
+		for at, ml := range info.AgentModelLists {
+			entries := make([]config.ProviderModelConfig, len(ml))
+			for i, m := range ml {
+				entries[i] = config.ProviderModelConfig{Model: m.Model, Alias: m.Alias}
+			}
+			p.AgentModelLists[at] = entries
+		}
+	}
+	if info.Codex != nil {
+		p.Codex = &config.CodexProviderConfig{
+			WireAPI:     info.Codex.WireAPI,
+			HTTPHeaders: info.Codex.HTTPHeaders,
+		}
 	}
 	return p
 }

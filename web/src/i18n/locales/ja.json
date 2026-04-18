@@ -344,7 +344,11 @@
       "modelsHint": "/model コマンドで切り替え可能なモデル一覧",
       "agentTypes": "対応エージェント",
       "agentTypesHint": "空の場合はすべてのエージェントに対応",
-      "thinkingDefault": "デフォルト（自動）"
+      "thinkingDefault": "デフォルト（自動）",
+      "perAgentHint": "エージェントごとに異なる Base URL やモデルを設定できます。",
+      "defaultConfig": "デフォルト",
+      "baseUrl": "Base URL",
+      "codexWireApi": "Wire API"
     }
   },
   "theme": {

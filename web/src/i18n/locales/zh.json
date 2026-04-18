@@ -344,7 +344,11 @@
       "modelsHint": "用户可通过 /model 切换的模型列表。点击 ✓ 设为默认。",
       "agentTypes": "适用 Agent 类型",
       "agentTypesHint": "留空表示适用所有 Agent 类型",
-      "thinkingDefault": "默认（自动）"
+      "thinkingDefault": "默认（自动）",
+      "perAgentHint": "不同 Agent 可能使用不同的 Base URL / 模型，可按 Agent 类型分别配置。",
+      "defaultConfig": "默认",
+      "baseUrl": "Base URL",
+      "codexWireApi": "Wire API"
     }
   },
   "theme": {

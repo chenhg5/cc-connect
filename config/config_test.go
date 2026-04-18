@@ -2519,3 +2519,60 @@ func TestResolveProviderRefs_TOMLParsing(t *testing.T) {
 		t.Fatalf("expected [ssy-codex], got %v", names)
 	}
 }
+
+func TestRemoveGlobalProvider_CleansUpProviderRefs(t *testing.T) {
+	input := `
+[[providers]]
+  name = "prov-a"
+  api_key = "key-a"
+
+[[providers]]
+  name = "prov-b"
+  api_key = "key-b"
+
+[[projects]]
+  name = "proj1"
+  [projects.agent]
+    type = "claudecode"
+    provider_refs = ["prov-a", "prov-b"]
+  [[projects.platforms]]
+    type = "feishu"
+    [projects.platforms.options]
+      app_id = "x"
+      app_secret = "y"
+
+[[projects]]
+  name = "proj2"
+  [projects.agent]
+    type = "codex"
+    provider_refs = ["prov-a"]
+  [[projects.platforms]]
+    type = "telegram"
+    [projects.platforms.options]
+      token = "t"
+`
+	writeTestConfig(t, input)
+
+	if err := RemoveGlobalProvider("prov-a"); err != nil {
+		t.Fatalf("RemoveGlobalProvider: %v", err)
+	}
+
+	cfg, err := loadLocked()
+	if err != nil {
+		t.Fatalf("loadLocked: %v", err)
+	}
+
+	if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "prov-b" {
+		t.Fatalf("expected only prov-b remaining, got %v", cfg.Providers)
+	}
+
+	refs1 := cfg.Projects[0].Agent.ProviderRefs
+	if len(refs1) != 1 || refs1[0] != "prov-b" {
+		t.Errorf("proj1 provider_refs: want [prov-b], got %v", refs1)
+	}
+
+	refs2 := cfg.Projects[1].Agent.ProviderRefs
+	if len(refs2) != 0 {
+		t.Errorf("proj2 provider_refs: want [], got %v", refs2)
+	}
+}

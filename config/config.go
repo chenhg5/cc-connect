@@ -962,19 +962,25 @@ func (cfg *Config) ResolveProviderRefs() {
 					"provider_agents", gp.AgentTypes, "project_agent", agentType)
 				continue
 			}
-		if ep, ok := gp.Endpoints[agentType]; ok && ep != "" {
-			gp.BaseURL = ep
-		}
-		if am, ok := gp.AgentModels[agentType]; ok && am != "" {
-			gp.Model = am
-		}
-		if aml, ok := gp.AgentModelLists[agentType]; ok && len(aml) > 0 {
-			gp.Models = aml
-		}
-		resolved = append(resolved, gp)
+		resolved = append(resolved, gp.ResolveForAgent(agentType))
 		}
 		cfg.Projects[i].Agent.Providers = append(resolved, cfg.Projects[i].Agent.Providers...)
 	}
+}
+
+// ResolveForAgent applies per-agent-type overrides (Endpoints, AgentModels,
+// AgentModelLists) to a copy of the provider and returns it.
+func (p ProviderConfig) ResolveForAgent(agentType string) ProviderConfig {
+	if ep, ok := p.Endpoints[agentType]; ok && ep != "" {
+		p.BaseURL = ep
+	}
+	if am, ok := p.AgentModels[agentType]; ok && am != "" {
+		p.Model = am
+	}
+	if aml, ok := p.AgentModelLists[agentType]; ok && len(aml) > 0 {
+		p.Models = aml
+	}
+	return p
 }
 
 func containsString(ss []string, s string) bool {
@@ -1034,7 +1040,8 @@ func UpdateGlobalProvider(name string, provider ProviderConfig) error {
 	return fmt.Errorf("global provider %q not found", name)
 }
 
-// RemoveGlobalProvider removes a provider from top-level [[providers]] and saves.
+// RemoveGlobalProvider removes a provider from top-level [[providers]] and
+// also strips the name from every project's provider_refs, then saves.
 func RemoveGlobalProvider(name string) error {
 	configMu.Lock()
 	defer configMu.Unlock()
@@ -1042,13 +1049,27 @@ func RemoveGlobalProvider(name string) error {
 	if err != nil {
 		return err
 	}
+	found := false
 	for i := range cfg.Providers {
 		if cfg.Providers[i].Name == name {
 			cfg.Providers = append(cfg.Providers[:i], cfg.Providers[i+1:]...)
-			return saveConfig(cfg)
+			found = true
+			break
 		}
 	}
-	return fmt.Errorf("global provider %q not found", name)
+	if !found {
+		return fmt.Errorf("global provider %q not found", name)
+	}
+	for i := range cfg.Projects {
+		refs := cfg.Projects[i].Agent.ProviderRefs
+		for j := 0; j < len(refs); j++ {
+			if refs[j] == name {
+				cfg.Projects[i].Agent.ProviderRefs = append(refs[:j], refs[j+1:]...)
+				break
+			}
+		}
+	}
+	return saveConfig(cfg)
 }
 
 func loadLocked() (*Config, error) {

@@ -344,7 +344,11 @@
       "modelsHint": "使用者可透過 /model 指令切換的模型列表",
       "agentTypes": "適用 Agent 類型",
       "agentTypesHint": "留空表示適用所有 Agent 類型",
-      "thinkingDefault": "預設（自動）"
+      "thinkingDefault": "預設（自動）",
+      "perAgentHint": "不同 Agent 可能使用不同的 Base URL / 模型，可按 Agent 類型分別設定。",
+      "defaultConfig": "預設",
+      "baseUrl": "Base URL",
+      "codexWireApi": "Wire API"
     }
   },
   "theme": {

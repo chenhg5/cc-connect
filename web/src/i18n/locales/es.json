@@ -344,7 +344,11 @@
       "modelsHint": "Modelos que los usuarios pueden cambiar con /model",
       "agentTypes": "Tipos de agente",
       "agentTypesHint": "Dejar vacío para todos los tipos de agente",
-      "thinkingDefault": "Predeterminado (auto)"
+      "thinkingDefault": "Predeterminado (auto)",
+      "perAgentHint": "Cada tipo de agente puede usar diferente Base URL / modelos. Configura por tipo abajo.",
+      "defaultConfig": "Predeterminado",
+      "baseUrl": "Base URL",
+      "codexWireApi": "Wire API"
     }
   },
   "theme": {

@@ -12,6 +12,11 @@ export interface Provider {
   base_url: string;
 }
 
+export interface CodexConfig {
+  wire_api?: string;
+  http_headers?: Record<string, string>;
+}
+
 export interface GlobalProvider {
   name: string;
   api_key?: string;
@@ -21,6 +26,10 @@ export interface GlobalProvider {
   env?: Record<string, string>;
   agent_types?: string[];
   models?: ProviderModel[];
+  endpoints?: Record<string, string>;
+  agent_models?: Record<string, string>;
+  agent_model_lists?: Record<string, ProviderModel[]>;
+  codex?: CodexConfig;
 }
 
 export interface PresetAgentConfig {

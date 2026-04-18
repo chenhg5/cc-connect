@@ -136,6 +136,22 @@ type GlobalProviderInfo struct {
 		Model string `json:"model"`
 		Alias string `json:"alias,omitempty"`
 	} `json:"models,omitempty"`
+	Endpoints       map[string]string              `json:"endpoints,omitempty"`
+	AgentModels     map[string]string              `json:"agent_models,omitempty"`
+	AgentModelLists map[string][]GlobalModelEntry   `json:"agent_model_lists,omitempty"`
+	Codex           *GlobalCodexConfig              `json:"codex,omitempty"`
+}
+
+// GlobalModelEntry is a model entry inside AgentModelLists.
+type GlobalModelEntry struct {
+	Model string `json:"model"`
+	Alias string `json:"alias,omitempty"`
+}
+
+// GlobalCodexConfig holds Codex-specific provider settings for the management API.
+type GlobalCodexConfig struct {
+	WireAPI     string            `json:"wire_api,omitempty"`
+	HTTPHeaders map[string]string `json:"http_headers,omitempty"`
 }
 
 func (m *ManagementServer) SetListGlobalProviders(fn func() ([]GlobalProviderInfo, error)) {
@@ -1198,7 +1214,7 @@ func (m *ManagementServer) handleProjectProviderRefs(w http.ResponseWriter, r *h
 			mgmtError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		// Reload providers into the running engine
+		// Reload providers into the running engine, resolving per-agent overrides
 		ps, ok := e.agent.(ProviderSwitcher)
 		if ok && m.listGlobalProviders != nil {
 			globals, _ := m.listGlobalProviders()
@@ -1211,17 +1227,13 @@ func (m *ManagementServer) handleProjectProviderRefs(w http.ResponseWriter, r *h
 			for _, p := range existing {
 				existingNames[p.Name] = true
 			}
+			agentType := e.agent.Name()
 			for _, ref := range body.ProviderRefs {
 				if existingNames[ref] {
 					continue
 				}
 				if g, ok := globalMap[ref]; ok {
-					ps.SetProviders(append(ps.ListProviders(), ProviderConfig{
-						Name:    g.Name,
-						APIKey:  g.APIKey,
-						BaseURL: g.BaseURL,
-						Model:   g.Model,
-					}))
+					ps.SetProviders(append(ps.ListProviders(), resolveGlobalProviderForAgent(g, agentType)))
 				}
 			}
 		}
@@ -1648,10 +1660,31 @@ func (m *ManagementServer) handleGlobalProviderRoutes(w http.ResponseWriter, r *
 			}
 			return
 		}
+		m.purgeProviderFromEngines(name)
 		mgmtOK(w, "provider removed")
 
 	default:
 		mgmtError(w, http.StatusMethodNotAllowed, "PUT, PATCH or DELETE only")
+	}
+}
+
+// purgeProviderFromEngines removes a deleted global provider from every
+// running engine's ProviderSwitcher so the runtime stays consistent.
+func (m *ManagementServer) purgeProviderFromEngines(name string) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, e := range m.engines {
+		ps, ok := e.agent.(ProviderSwitcher)
+		if !ok {
+			continue
+		}
+		providers := ps.ListProviders()
+		for i, p := range providers {
+			if p.Name == name {
+				ps.SetProviders(append(providers[:i], providers[i+1:]...))
+				break
+			}
+		}
 	}
 }
 
@@ -1670,4 +1703,33 @@ func (m *ManagementServer) handleProviderPresets(w http.ResponseWriter, r *http.
 		return
 	}
 	mgmtJSON(w, http.StatusOK, data)
+}
+
+// resolveGlobalProviderForAgent creates a ProviderConfig from a GlobalProviderInfo,
+// applying per-agent-type overrides for base_url, model, and models.
+func resolveGlobalProviderForAgent(g GlobalProviderInfo, agentType string) ProviderConfig {
+	pc := ProviderConfig{
+		Name:   g.Name,
+		APIKey: g.APIKey,
+		BaseURL: g.BaseURL,
+		Model:  g.Model,
+	}
+	if ep, ok := g.Endpoints[agentType]; ok && ep != "" {
+		pc.BaseURL = ep
+	}
+	if am, ok := g.AgentModels[agentType]; ok && am != "" {
+		pc.Model = am
+	}
+	if aml, ok := g.AgentModelLists[agentType]; ok && len(aml) > 0 {
+		pc.Models = make([]ModelOption, len(aml))
+		for i, m := range aml {
+			pc.Models[i] = ModelOption{Name: m.Model, Alias: m.Alias}
+		}
+	} else if len(g.Models) > 0 {
+		pc.Models = make([]ModelOption, len(g.Models))
+		for i, m := range g.Models {
+			pc.Models[i] = ModelOption{Name: m.Model, Alias: m.Alias}
+		}
+	}
+	return pc
 }

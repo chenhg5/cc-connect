@@ -58,15 +58,36 @@ export default function ProviderList() {
 
   const handleAddFromPreset = (preset: ProviderPreset) => {
     const agentTypes = Object.keys(preset.agents || {});
-    const firstAgent = agentTypes[0] || 'claudecode';
-    const ac = preset.agents?.[firstAgent];
+    const firstAt = agentTypes[0] || 'claudecode';
+    const firstAc = preset.agents?.[firstAt];
+
+    const endpoints: Record<string, string> = {};
+    const agentModels: Record<string, string> = {};
+    const agentModelLists: Record<string, ProviderModel[]> = {};
+    let codex: GlobalProvider['codex'];
+
+    for (const [at, cfg] of Object.entries(preset.agents || {})) {
+      if (at !== firstAt && cfg.base_url) endpoints[at] = cfg.base_url;
+      if (at !== firstAt && cfg.model) agentModels[at] = cfg.model;
+      const models = cfg.models?.map(m => ({ model: m }));
+      if (models?.length && at !== firstAt) agentModelLists[at] = models;
+      if (at === firstAt && models?.length) { /* stored in top-level */ }
+      if (at === 'codex' && cfg.codex_config?.wire_api) {
+        codex = { wire_api: cfg.codex_config.wire_api, http_headers: cfg.codex_config.http_headers };
+      }
+    }
+
     setEditProvider({
       name: preset.name,
-      base_url: ac?.base_url || '',
-      model: ac?.model || '',
+      base_url: firstAc?.base_url || '',
+      model: firstAc?.model || '',
       thinking: preset.thinking || '',
-      models: ac?.models?.slice(0, 3).map(m => ({ model: m })),
+      models: firstAc?.models?.map(m => ({ model: m })),
       agent_types: agentTypes,
+      endpoints: Object.keys(endpoints).length ? endpoints : undefined,
+      agent_models: Object.keys(agentModels).length ? agentModels : undefined,
+      agent_model_lists: Object.keys(agentModelLists).length ? agentModelLists : undefined,
+      codex,
       _preset: preset,
     } as any);
     setShowAddModal(true);
@@ -437,6 +458,129 @@ function ModelListEditor({
   );
 }
 
+/* ── Per-agent config type (internal form state) ── */
+
+type AgentConfigEntry = { base_url: string; model: string; models: ProviderModel[]; wire_api?: string };
+
+function buildPerAgentConfigs(form: GlobalProvider): Record<string, AgentConfigEntry> {
+  const agents = form.agent_types || [];
+  const result: Record<string, AgentConfigEntry> = {};
+  for (const at of agents) {
+    result[at] = {
+      base_url: form.endpoints?.[at] || form.base_url || '',
+      model: form.agent_models?.[at] || form.model || '',
+      models: form.agent_model_lists?.[at] || form.models || [],
+      wire_api: at === 'codex' ? form.codex?.wire_api || '' : undefined,
+    };
+  }
+  return result;
+}
+
+function mergePerAgentToForm(form: GlobalProvider, configs: Record<string, AgentConfigEntry>): GlobalProvider {
+  const agents = Object.keys(configs);
+  if (agents.length === 0) return form;
+
+  const first = agents[0];
+  const base = configs[first];
+  const endpoints: Record<string, string> = {};
+  const agentModels: Record<string, string> = {};
+  const agentModelLists: Record<string, ProviderModel[]> = {};
+  let codex: GlobalProvider['codex'];
+
+  for (const at of agents) {
+    const cfg = configs[at];
+    if (at !== first) {
+      if (cfg.base_url && cfg.base_url !== base.base_url) endpoints[at] = cfg.base_url;
+      if (cfg.model && cfg.model !== base.model) agentModels[at] = cfg.model;
+      const modelsStr = JSON.stringify(cfg.models);
+      const baseModelsStr = JSON.stringify(base.models);
+      if (cfg.models.length > 0 && modelsStr !== baseModelsStr) agentModelLists[at] = cfg.models;
+    }
+    if (at === 'codex' && cfg.wire_api) {
+      codex = { wire_api: cfg.wire_api };
+    }
+  }
+
+  return {
+    ...form,
+    base_url: base.base_url,
+    model: base.model,
+    models: base.models.length > 0 ? base.models : undefined,
+    endpoints: Object.keys(endpoints).length ? endpoints : undefined,
+    agent_models: Object.keys(agentModels).length ? agentModels : undefined,
+    agent_model_lists: Object.keys(agentModelLists).length ? agentModelLists : undefined,
+    codex: codex || undefined,
+  };
+}
+
+/* ── Per-agent config editor ── */
+
+function AgentConfigEditor({
+  agentType, config, onChange, t,
+}: {
+  agentType: string;
+  config: AgentConfigEntry;
+  onChange: (cfg: AgentConfigEntry) => void;
+  t: (k: string) => string;
+}) {
+  return (
+    <div className="space-y-3 pt-2">
+      <div>
+        <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">
+          {t('globalProviders.form.baseUrl')}
+        </label>
+        <Input
+          value={config.base_url}
+          onChange={e => onChange({ ...config, base_url: e.target.value })}
+          placeholder="https://api.example.com/v1"
+        />
+      </div>
+      <div>
+        <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">
+          {t('globalProviders.form.model')}
+        </label>
+        <Input
+          value={config.model}
+          onChange={e => onChange({ ...config, model: e.target.value })}
+          placeholder="model-name"
+        />
+      </div>
+      <div>
+        <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">
+          {t('globalProviders.form.models')}
+        </label>
+        <ModelListEditor
+          models={config.models}
+          onChange={models => onChange({ ...config, models })}
+          defaultModel={config.model}
+          onSetDefault={model => onChange({ ...config, model })}
+        />
+      </div>
+      {agentType === 'codex' && (
+        <div>
+          <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">
+            {t('globalProviders.form.codexWireApi')}
+          </label>
+          <select
+            value={config.wire_api || ''}
+            onChange={e => onChange({ ...config, wire_api: e.target.value || undefined })}
+            className={cn(
+              'w-full rounded-xl border px-3 py-2 text-sm outline-none transition-colors',
+              'border-gray-200 bg-white text-gray-900',
+              'dark:border-white/10 dark:bg-white/[0.04] dark:text-white',
+              'focus:border-accent focus:ring-1 focus:ring-accent/30',
+            )}
+          >
+            <option value="">default</option>
+            <option value="responses">responses</option>
+            <option value="chat">chat</option>
+          </select>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ── Add/Edit Form Modal ── */
 
 function ProviderFormModal({
@@ -451,15 +595,50 @@ function ProviderFormModal({
   const [form, setForm] = useState<GlobalProvider>(provider || { name: '' });
   const [saving, setSaving] = useState(false);
   const [showKey, setShowKey] = useState(false);
+  const [perAgent, setPerAgent] = useState<Record<string, AgentConfigEntry>>(() =>
+    provider ? buildPerAgentConfigs(provider) : {},
+  );
+  const [activeAgentTab, setActiveAgentTab] = useState<string>('');
 
-  const set = (key: keyof GlobalProvider, value: any) =>
-    setForm(f => ({ ...f, [key]: value }));
+  const agents = form.agent_types || [];
+  const multiAgent = agents.length >= 2;
+
+  const updatePerAgent = (at: string, cfg: AgentConfigEntry) => {
+    setPerAgent(prev => ({ ...prev, [at]: cfg }));
+  };
+
+  const set = (key: keyof GlobalProvider, value: any) => {
+    setForm(f => {
+      const next = { ...f, [key]: value };
+      if (key === 'agent_types') {
+        const newAgents = value as string[];
+        setPerAgent(prev => {
+          const updated = { ...prev };
+          for (const at of newAgents) {
+            if (!updated[at]) {
+              updated[at] = { base_url: f.base_url || '', model: f.model || '', models: [...(f.models || [])] };
+              if (at === 'codex') updated[at].wire_api = f.codex?.wire_api || '';
+            }
+          }
+          for (const at of Object.keys(updated)) {
+            if (!newAgents.includes(at)) delete updated[at];
+          }
+          return updated;
+        });
+        if (newAgents.length >= 2 && !newAgents.includes(activeAgentTab)) {
+          setActiveAgentTab(newAgents[0]);
+        }
+      }
+      return next;
+    });
+  };
 
   const handleSubmit = async () => {
     if (!form.name) return;
     setSaving(true);
     try {
-      await onSave(form);
+      const final = multiAgent ? mergePerAgentToForm(form, perAgent) : form;
+      await onSave(final);
     } catch { /* empty */ }
     setSaving(false);
   };
@@ -468,6 +647,7 @@ function ProviderFormModal({
     <Modal open onClose={onClose} title={isEdit ? t('globalProviders.edit') : t('globalProviders.add')}>
       <div className="space-y-5">
         <div className="space-y-4">
+          {/* Name */}
           <div>
             <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
               {t('globalProviders.form.name')} *
@@ -480,6 +660,7 @@ function ProviderFormModal({
             />
           </div>
 
+          {/* API Key */}
           <div>
             <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
               API Key
@@ -502,56 +683,20 @@ function ProviderFormModal({
             </div>
           </div>
 
-          <div>
-            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-              Base URL
-            </label>
-            <Input
-              value={form.base_url || ''}
-              onChange={e => set('base_url', e.target.value)}
-              placeholder="https://api.example.com/v1"
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-              {t('globalProviders.form.model')}
-            </label>
-            <Input
-              value={form.model || ''}
-              onChange={e => set('model', e.target.value)}
-              placeholder="claude-sonnet-4-20250514"
-            />
-            <p className="mt-1 text-xs text-gray-400">{t('globalProviders.form.modelHint')}</p>
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-              {t('globalProviders.form.models')}
-            </label>
-            <ModelListEditor
-              models={form.models || []}
-              onChange={models => set('models', models)}
-              defaultModel={form.model}
-              onSetDefault={model => set('model', model)}
-            />
-            <p className="mt-1 text-xs text-gray-400">{t('globalProviders.form.modelsHint')}</p>
-          </div>
-
+          {/* Agent Types */}
           <div>
             <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
               {t('globalProviders.form.agentTypes')}
             </label>
             <div className="flex flex-wrap gap-2">
               {['claudecode', 'codex', 'gemini', 'opencode', 'cursor', 'kimi', 'qoder', 'acp'].map(at => {
-                const selected = form.agent_types?.includes(at) ?? false;
+                const selected = agents.includes(at);
                 return (
                   <button
                     key={at}
                     type="button"
                     onClick={() => {
-                      const current = form.agent_types || [];
-                      set('agent_types', selected ? current.filter(x => x !== at) : [...current, at]);
+                      set('agent_types', selected ? agents.filter(x => x !== at) : [...agents, at]);
                     }}
                     className={cn(
                       'px-2.5 py-1 rounded-lg text-xs font-medium border transition-colors',
@@ -568,6 +713,81 @@ function ProviderFormModal({
             <p className="mt-1 text-xs text-gray-400">{t('globalProviders.form.agentTypesHint')}</p>
           </div>
 
+          {/* Base URL / Model / Models — flat when <= 1 agent, tabbed when >= 2 */}
+          {!multiAgent ? (
+            <>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  {t('globalProviders.form.baseUrl')}
+                </label>
+                <Input
+                  value={form.base_url || ''}
+                  onChange={e => set('base_url', e.target.value)}
+                  placeholder="https://api.example.com/v1"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  {t('globalProviders.form.model')}
+                </label>
+                <Input
+                  value={form.model || ''}
+                  onChange={e => set('model', e.target.value)}
+                  placeholder="claude-sonnet-4-20250514"
+                />
+                <p className="mt-1 text-xs text-gray-400">{t('globalProviders.form.modelHint')}</p>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  {t('globalProviders.form.models')}
+                </label>
+                <ModelListEditor
+                  models={form.models || []}
+                  onChange={models => set('models', models)}
+                  defaultModel={form.model}
+                  onSetDefault={model => set('model', model)}
+                />
+                <p className="mt-1 text-xs text-gray-400">{t('globalProviders.form.modelsHint')}</p>
+              </div>
+            </>
+          ) : (
+            <div className="rounded-xl border border-gray-200 dark:border-white/10 overflow-hidden">
+              <p className="px-3 pt-3 text-xs text-gray-400">{t('globalProviders.form.perAgentHint')}</p>
+              <div className="flex gap-1 px-3 pt-2 pb-0">
+                {agents.map(at => (
+                  <button
+                    key={at}
+                    type="button"
+                    onClick={() => setActiveAgentTab(at)}
+                    className={cn(
+                      'px-3 py-1.5 rounded-t-lg text-xs font-medium transition-colors',
+                      (activeAgentTab || agents[0]) === at
+                        ? 'bg-white dark:bg-white/10 text-gray-900 dark:text-white shadow-sm'
+                        : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-300',
+                    )}
+                  >
+                    {at}
+                  </button>
+                ))}
+              </div>
+              <div className="px-3 pb-3 bg-white dark:bg-white/[0.02]">
+                {agents.map(at => {
+                  if ((activeAgentTab || agents[0]) !== at) return null;
+                  return (
+                    <AgentConfigEditor
+                      key={at}
+                      agentType={at}
+                      config={perAgent[at] || { base_url: '', model: '', models: [] }}
+                      onChange={cfg => updatePerAgent(at, cfg)}
+                      t={t}
+                    />
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Thinking */}
           <div>
             <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
               Thinking
