@@ -847,6 +847,7 @@ func main() {
 				DisabledCommands:     u.DisabledCommands,
 				WorkDir:              u.WorkDir,
 				Mode:                 u.Mode,
+				AgentType:            u.AgentType,
 				ShowContextIndicator: u.ShowContextIndicator,
 				ReplyFooter:          u.ReplyFooter,
 				InjectSender:         u.InjectSender,
