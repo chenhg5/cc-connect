@@ -2397,13 +2397,6 @@ func stringValue(v *string) string {
 	return *v
 }
 
-func truncateString(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
-}
-
 func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	// {platformName}:{chatID}:{userID}
 	parts := strings.SplitN(sessionKey, ":", 3)
