@@ -4674,8 +4674,20 @@ func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
 	shellCmd = strings.TrimSpace(shellCmd)
 
 	if shellCmd == "" {
-		e.reply(p, msg.ReplyCtx, "Usage: /shell <command>\nExample: /shell ls -la")
+		e.reply(p, msg.ReplyCtx, "Usage: /shell [--timeout <seconds>] <command>\nExample: /shell ls -la\nExample: /shell --timeout 300 npm install")
 		return
+	}
+
+	// Parse optional --timeout at the beginning of the command.
+	timeout := 60 * time.Second
+	if strings.HasPrefix(shellCmd, "--timeout ") {
+		rest := shellCmd[len("--timeout "):]
+		if idx := strings.IndexByte(rest, ' '); idx > 0 {
+			if secs, err := strconv.Atoi(rest[:idx]); err == nil && secs > 0 {
+				timeout = time.Duration(secs) * time.Second
+				shellCmd = strings.TrimSpace(rest[idx:])
+			}
+		}
 	}
 
 	agent, _, _, err := e.commandContext(p, msg)
@@ -4688,7 +4700,7 @@ func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
 		workDir, _ = os.Getwd()
 	}
 
-	go e.runShellWithProgress(p, msg.ReplyCtx, shellCmd, workDir, 60*time.Second, 4000)
+	go e.runShellWithProgress(p, msg.ReplyCtx, shellCmd, workDir, timeout, 4000)
 }
 
 func (e *Engine) cmdDiff(p Platform, msg *Message, raw string) {
