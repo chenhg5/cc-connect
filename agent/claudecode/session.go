@@ -42,6 +42,27 @@ type claudeSession struct {
 	alive           atomic.Bool
 }
 
+// claudeSessionFileExists reports whether Claude's on-disk jsonl for the
+// given workDir + sessionID exists. Claude stores sessions at
+//   ~/.claude/projects/<workDir-with-slashes-and-dots-replaced-by-dashes>/<sessionID>.jsonl
+func claudeSessionFileExists(workDir, sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	abs, err := filepath.Abs(workDir)
+	if err != nil {
+		return false
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	flat := strings.NewReplacer("/", "-", ".", "-").Replace(abs)
+	path := filepath.Join(home, ".claude", "projects", flat, sessionID+".jsonl")
+	_, err = os.Stat(path)
+	return err == nil
+}
+
 func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
@@ -66,9 +87,16 @@ func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode strin
 		// conversation gets its own independent context branch.
 		args = append(args, "--continue", "--fork-session")
 	default:
-		// Resuming a known session ID — this is cc-connect's own session
-		// from a previous connection, safe to resume directly.
-		args = append(args, "--resume", sessionID)
+		// Pre-flight: verify the session jsonl still exists. If Claude's
+		// sessions were purged externally (e.g. user cleanup), fall back
+		// to a fresh session instead of failing with "No conversation found".
+		if !claudeSessionFileExists(workDir, sessionID) {
+			slog.Warn("claudeSession: stored session not found on disk, starting fresh",
+				"sessionID", sessionID, "workDir", workDir)
+			sessionID = ""
+		} else {
+			args = append(args, "--resume", sessionID)
+		}
 	}
 	if model != "" {
 		args = append(args, "--model", model)
