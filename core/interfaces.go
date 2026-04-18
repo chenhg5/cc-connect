@@ -401,6 +401,14 @@ type ContextCompressor interface {
 	CompressCommand() string
 }
 
+// SessionSteerer is an optional interface for running agent sessions that can
+// append additional user guidance to the current in-flight task without
+// starting a new task. Backends should map this to their native same-turn
+// steering semantics when available.
+type SessionSteerer interface {
+	Steer(prompt string) error
+}
+
 // CommandProvider is an optional interface for agents that expose custom slash
 // commands via local files (e.g. .claude/commands/*.md). The engine scans the
 // returned directories for *.md files and registers them as slash commands.

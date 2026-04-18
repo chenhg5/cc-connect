@@ -246,8 +246,8 @@ const (
 	MsgCronBtnUnmute    MsgKey = "cron_btn_unmute"
 	MsgCronBtnDelete    MsgKey = "cron_btn_delete"
 
-	MsgStatusTitle          MsgKey = "status_title"
-	MsgReplyFooterRemaining MsgKey = "reply_footer_remaining"
+	MsgStatusTitle           MsgKey = "status_title"
+	MsgReplyFooterRemaining  MsgKey = "reply_footer_remaining"
 	MsgModelCurrent          MsgKey = "model_current"
 	MsgModelChanged          MsgKey = "model_changed"
 	MsgModelChangeFailed     MsgKey = "model_change_failed"
@@ -263,6 +263,10 @@ const (
 	MsgCompressing          MsgKey = "compressing"
 	MsgCompressNoSession    MsgKey = "compress_no_session"
 	MsgCompressDone         MsgKey = "compress_done"
+	MsgSteerSent            MsgKey = "steer_sent"
+	MsgSteerSendFailed      MsgKey = "steer_send_failed"
+	MsgSteerEmpty           MsgKey = "steer_empty"
+	MsgSteerNotSupported    MsgKey = "steer_not_supported"
 
 	MsgMemoryNotSupported MsgKey = "memory_not_supported"
 	MsgMemoryShowProject  MsgKey = "memory_show_project"
@@ -489,6 +493,7 @@ const (
 	MsgBuiltinCmdQuiet     MsgKey = "quiet"
 	MsgBuiltinCmdCompress  MsgKey = "compress"
 	MsgBuiltinCmdStop      MsgKey = "stop"
+	MsgBuiltinCmdSteer     MsgKey = "steer"
 	MsgBuiltinCmdCron      MsgKey = "cron"
 	MsgBuiltinCmdCommands  MsgKey = "commands"
 	MsgBuiltinCmdAlias     MsgKey = "alias"
@@ -643,11 +648,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "No hay ejecución en progreso.",
 	},
 	MsgPreviousProcessing: {
-		LangEnglish:            "⏳ Previous request still processing. Use `/btw <message>` to add context to the current turn.",
-		LangChinese:            "⏳ 上一个请求仍在处理中。使用 `/btw <消息>` 可向当前轮次追加上下文。",
-		LangTraditionalChinese: "⏳ 上一個請求仍在處理中。使用 `/btw <訊息>` 可向當前輪次追加上下文。",
-		LangJapanese:           "⏳ 前のリクエストを処理中です。`/btw <メッセージ>` で現在のターンにコンテキストを追加できます。",
-		LangSpanish:            "⏳ La solicitud anterior aún se está procesando. Use `/btw <mensaje>` para agregar contexto al turno actual.",
+		LangEnglish:            "⏳ Previous request still processing. Use `/steer <message>` to add guidance to the current task.",
+		LangChinese:            "⏳ 上一个请求仍在处理中。使用 `/steer <消息>` 可向当前任务追加引导。",
+		LangTraditionalChinese: "⏳ 上一個請求仍在處理中。使用 `/steer <訊息>` 可向當前任務追加引導。",
+		LangJapanese:           "⏳ 前のリクエストを処理中です。`/steer <メッセージ>` で現在のタスクに追加の指示を送れます。",
+		LangSpanish:            "⏳ La solicitud anterior aún se está procesando. Use `/steer <mensaje>` para agregar instrucciones a la tarea actual.",
 	},
 	MsgMessageQueued: {
 		LangEnglish:            "📬 Message received — will process after the current task finishes.",
@@ -2052,6 +2057,34 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "✅ コンテキスト圧縮完了。",
 		LangSpanish:            "✅ Contexto comprimido.",
 	},
+	MsgSteerSent: {
+		LangEnglish:            "✅ Guidance sent to the current task.",
+		LangChinese:            "✅ 已向当前任务发送引导。",
+		LangTraditionalChinese: "✅ 已向當前任務送出引導。",
+		LangJapanese:           "✅ 現在のタスクに追加の指示を送信しました。",
+		LangSpanish:            "✅ Instrucciones enviadas a la tarea actual.",
+	},
+	MsgSteerSendFailed: {
+		LangEnglish:            "❌ Failed to send guidance to the current task.",
+		LangChinese:            "❌ 向当前任务发送引导失败。",
+		LangTraditionalChinese: "❌ 向當前任務送出引導失敗。",
+		LangJapanese:           "❌ 現在のタスクへの追加指示の送信に失敗しました。",
+		LangSpanish:            "❌ Error al enviar instrucciones a la tarea actual.",
+	},
+	MsgSteerEmpty: {
+		LangEnglish:            "Usage: `/steer <message>`",
+		LangChinese:            "用法：`/steer <消息>`",
+		LangTraditionalChinese: "用法：`/steer <訊息>`",
+		LangJapanese:           "使い方：`/steer <メッセージ>`",
+		LangSpanish:            "Uso: `/steer <mensaje>`",
+	},
+	MsgSteerNotSupported: {
+		LangEnglish:            "❌ This agent does not support `/steer`.",
+		LangChinese:            "❌ 当前 Agent 不支持 `/steer`。",
+		LangTraditionalChinese: "❌ 當前 Agent 不支援 `/steer`。",
+		LangJapanese:           "❌ このエージェントは `/steer` をサポートしていません。",
+		LangSpanish:            "❌ Este agente no admite `/steer`.",
+	},
 
 	// Inline strings for engine.go commands
 	MsgStatusMode: {
@@ -3316,6 +3349,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "停止當前執行",
 		LangJapanese:           "現在の実行を停止",
 		LangSpanish:            "Detener ejecución actual",
+	},
+	MsgBuiltinCmdSteer: {
+		LangEnglish:            "Add guidance to the current in-flight task",
+		LangChinese:            "向当前执行中的任务追加引导",
+		LangTraditionalChinese: "向當前執行中的任務追加引導",
+		LangJapanese:           "現在実行中のタスクに追加の指示を送る",
+		LangSpanish:            "Agregar instrucciones a la tarea en curso",
 	},
 	MsgBuiltinCmdCron: {
 		LangEnglish:            "Manage scheduled tasks, arg: [add|list|del|enable|disable]",
