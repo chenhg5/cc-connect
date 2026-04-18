@@ -2403,6 +2403,7 @@ type ProjectSettingsUpdate struct {
 	DisabledCommands     []string
 	WorkDir              *string
 	Mode                 *string
+	AgentType            *string
 	ShowContextIndicator *bool
 	ReplyFooter          *bool
 	InjectSender         *bool
@@ -2434,6 +2435,45 @@ func SaveProjectSettings(projectName string, update ProjectSettingsUpdate) error
 			continue
 		}
 		proj := &cfg.Projects[i]
+		if update.AgentType != nil && *update.AgentType != proj.Agent.Type {
+			newType := *update.AgentType
+			proj.Agent.Type = newType
+			// Filter out provider_refs incompatible with the new agent type.
+			globalByName := make(map[string]ProviderConfig, len(cfg.Providers))
+			for _, p := range cfg.Providers {
+				globalByName[p.Name] = p
+			}
+			var compatible []string
+			for _, ref := range proj.Agent.ProviderRefs {
+				gp, ok := globalByName[ref]
+				if !ok {
+					continue
+				}
+				if len(gp.AgentTypes) > 0 && !containsString(gp.AgentTypes, newType) {
+					slog.Info("removing incompatible provider ref on agent type change",
+						"project", projectName, "provider", ref,
+						"provider_agents", gp.AgentTypes, "new_agent", newType)
+					continue
+				}
+				compatible = append(compatible, ref)
+			}
+			proj.Agent.ProviderRefs = compatible
+			// Clear active provider if it was removed.
+			if opts := proj.Agent.Options; opts != nil {
+				if prov, ok := opts["provider"].(string); ok && prov != "" {
+					found := false
+					for _, ref := range compatible {
+						if ref == prov {
+							found = true
+							break
+						}
+					}
+					if !found {
+						delete(opts, "provider")
+					}
+				}
+			}
+		}
 		if update.AdminFrom != nil {
 			proj.AdminFrom = *update.AdminFrom
 		}

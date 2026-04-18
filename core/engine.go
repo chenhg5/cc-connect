@@ -6598,6 +6598,12 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 	case "clear", "reset", "none":
 		switcher.SetActiveProvider("")
 		e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
+		{
+			s := e.sessions.GetOrCreateActive(msg.SessionKey)
+			s.SetAgentSessionID("", "")
+			s.ClearHistory()
+			e.sessions.Save()
+		}
 		if e.providerSaveFunc != nil {
 			if err := e.providerSaveFunc(""); err != nil {
 				slog.Error("failed to save provider", "error", err)
@@ -6743,6 +6749,11 @@ func (e *Engine) switchProvider(p Platform, msg *Message, switcher ProviderSwitc
 		return
 	}
 	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
+
+	s := e.sessions.GetOrCreateActive(msg.SessionKey)
+	s.SetAgentSessionID("", "")
+	s.ClearHistory()
+	e.sessions.Save()
 
 	if e.providerSaveFunc != nil {
 		if err := e.providerSaveFunc(name); err != nil {
@@ -7716,11 +7727,19 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		if !ok {
 			return
 		}
-		if switcher.SetActiveProvider(args) {
+		provName := args
+		if provName == "clear" {
+			provName = ""
+		}
+		if switcher.SetActiveProvider(provName) {
 			interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 			e.cleanupInteractiveState(interactiveKey)
+			s := e.sessions.GetOrCreateActive(sessionKey)
+			s.SetAgentSessionID("", "")
+			s.ClearHistory()
+			e.sessions.Save()
 			if e.providerSaveFunc != nil {
-				_ = e.providerSaveFunc(args)
+				_ = e.providerSaveFunc(provName)
 			}
 		}
 
@@ -8767,6 +8786,12 @@ func (e *Engine) renderProviderCard() *Card {
 	if len(providers) > 0 {
 		var opts []CardSelectOption
 		initVal := ""
+		if current != nil {
+			opts = append(opts, CardSelectOption{
+				Text:  "🚫 " + e.i18n.T(MsgProviderClearOption),
+				Value: "act:/provider clear",
+			})
+		}
 		for _, prov := range providers {
 			label := prov.Name
 			if prov.BaseURL != "" {

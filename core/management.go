@@ -23,6 +23,7 @@ type ProjectSettingsUpdate struct {
 	DisabledCommands     []string
 	WorkDir              *string
 	Mode                 *string
+	AgentType            *string
 	ShowContextIndicator *bool
 	ReplyFooter          *bool
 	InjectSender         *bool
@@ -212,6 +213,9 @@ func (m *ManagementServer) buildHandler(mux *http.ServeMux) http.Handler {
 	mux.HandleFunc(prefix+"/config", m.wrap(m.handleConfig))
 	mux.HandleFunc(prefix+"/settings", m.wrap(m.handleGlobalSettings))
 
+	// Agents & Platforms (registry)
+	mux.HandleFunc(prefix+"/agents", m.wrap(m.handleAgents))
+
 	// Projects
 	mux.HandleFunc(prefix+"/projects", m.wrap(m.handleProjects))
 	mux.HandleFunc(prefix+"/projects/", m.wrap(m.handleProjectRoutes))
@@ -364,6 +368,17 @@ func mgmtOK(w http.ResponseWriter, msg string) {
 }
 
 // ── System endpoints ──────────────────────────────────────────
+
+func (m *ManagementServer) handleAgents(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		mgmtError(w, http.StatusMethodNotAllowed, "GET only")
+		return
+	}
+	mgmtJSON(w, http.StatusOK, map[string]any{
+		"agents":    ListRegisteredAgents(),
+		"platforms": ListRegisteredPlatforms(),
+	})
+}
 
 func (m *ManagementServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -682,6 +697,7 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 			DisabledCommands     []string          `json:"disabled_commands"`
 			WorkDir              *string           `json:"work_dir"`
 			Mode                 *string           `json:"mode"`
+			AgentType            *string           `json:"agent_type"`
 			ShowContextIndicator *bool             `json:"show_context_indicator"`
 			ReplyFooter          *bool             `json:"reply_footer"`
 			InjectSender         *bool             `json:"inject_sender"`
@@ -732,6 +748,23 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 			e.SetInjectSender(*body.InjectSender)
 		}
 
+		restartRequired := false
+		if body.AgentType != nil && *body.AgentType != e.agent.Name() {
+			registered := ListRegisteredAgents()
+			found := false
+			for _, a := range registered {
+				if a == *body.AgentType {
+					found = true
+					break
+				}
+			}
+			if !found {
+				mgmtError(w, http.StatusBadRequest, fmt.Sprintf("unknown agent type %q", *body.AgentType))
+				return
+			}
+			restartRequired = true
+		}
+
 		if m.saveProjectSettings != nil {
 			patch := ProjectSettingsUpdate{
 				Language:             body.Language,
@@ -739,6 +772,7 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 				DisabledCommands:     body.DisabledCommands,
 				WorkDir:              body.WorkDir,
 				Mode:                 body.Mode,
+				AgentType:            body.AgentType,
 				ShowContextIndicator: body.ShowContextIndicator,
 				ReplyFooter:          body.ReplyFooter,
 				InjectSender:         body.InjectSender,
@@ -749,7 +783,11 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 			}
 		}
 
-		mgmtOK(w, "settings updated")
+		resp := map[string]any{"message": "settings updated"}
+		if restartRequired {
+			resp["restart_required"] = true
+		}
+		mgmtJSON(w, http.StatusOK, resp)
 		return
 	}
 
