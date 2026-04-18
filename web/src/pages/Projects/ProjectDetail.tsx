@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 import { Card, Badge, Button, Input, Modal, EmptyState } from '@/components/ui';
 import { getProject, updateProject, deleteProject, type ProjectDetail as ProjectDetailType } from '@/api/projects';
-import { listProviders, addProvider, removeProvider, activateProvider, listModels, setModel, type Provider, listGlobalProviders, type GlobalProvider, saveProviderRefs } from '@/api/providers';
+import { listProviders, addProvider, removeProvider, activateProvider, type Provider, listGlobalProviders, type GlobalProvider, saveProviderRefs } from '@/api/providers';
 import { getHeartbeat, pauseHeartbeat, resumeHeartbeat, triggerHeartbeat, setHeartbeatInterval, type HeartbeatStatus } from '@/api/heartbeat';
 import { restartSystem } from '@/api/status';
 import { formatTime, cn } from '@/lib/utils';
@@ -40,8 +40,6 @@ export default function ProjectDetail() {
   const [providers, setProviders] = useState<Provider[]>([]);
   const [activeProvider, setActiveProvider] = useState('');
   const [heartbeat, setHeartbeatState] = useState<HeartbeatStatus | null>(null);
-  const [models, setModels] = useState<string[]>([]);
-  const [currentModel, setCurrentModel] = useState('');
   const [loading, setLoading] = useState(true);
 
   // Settings form
@@ -115,11 +113,10 @@ export default function ProjectDetail() {
     if (!name) return;
     try {
       setLoading(true);
-      const [proj, provs, hb, mdls, gp] = await Promise.allSettled([
+      const [proj, provs, hb, gp] = await Promise.allSettled([
         getProject(name),
         listProviders(name),
         getHeartbeat(name),
-        listModels(name),
         listGlobalProviders(),
       ]);
       if (proj.status === 'fulfilled') {
@@ -142,10 +139,6 @@ export default function ProjectDetail() {
         setActiveProvider(provs.value.active_provider || '');
       }
       if (hb.status === 'fulfilled') setHeartbeatState(hb.value);
-      if (mdls.status === 'fulfilled') {
-        setModels(mdls.value.models || []);
-        setCurrentModel(mdls.value.current || '');
-      }
       if (gp.status === 'fulfilled') {
         setGlobalProviders(gp.value.providers || []);
       }
@@ -334,7 +327,6 @@ export default function ProjectDetail() {
                             setSavingRefs(true);
                             try {
                               await saveProviderRefs(name!, next);
-                              await removeProvider(name!, p.name);
                               await fetchAll();
                             } finally { setSavingRefs(false); }
                           }}
@@ -351,29 +343,6 @@ export default function ProjectDetail() {
                 </div>
               ))}
             </div>
-          )}
-
-          {/* Models */}
-          {models.length > 0 && (
-            <Card>
-              <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-3">{t('providers.models')}</h3>
-              <div className="flex flex-wrap gap-2">
-                {models.map((m) => (
-                  <button
-                    key={m}
-                    onClick={() => { setModel(name!, m).then(fetchAll); }}
-                    className={cn(
-                      'px-3 py-1.5 rounded-lg text-xs font-medium transition-all',
-                      m === currentModel
-                        ? 'bg-accent/20 text-accent border border-accent/30'
-                        : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700'
-                    )}
-                  >
-                    {m}
-                  </button>
-                ))}
-              </div>
-            </Card>
           )}
 
           {/* Add Provider Modal */}
@@ -410,7 +379,6 @@ export default function ProjectDetail() {
                           setSavingRefs(true);
                           try {
                             await saveProviderRefs(name!, next);
-                            await addProvider(name!, { name: gp.name, api_key: gp.api_key || '', base_url: gp.base_url || '', model: gp.model || '' });
                             await fetchAll();
                           } finally { setSavingRefs(false); }
                           setShowAddProvider(false);

@@ -756,6 +756,8 @@ func SaveActiveProvider(projectName, providerName string) error {
 }
 
 // SaveProviderModel persists the selected model for a provider in a project.
+// It first looks in the project's inline providers, then falls back to
+// global [[providers]] if the provider is referenced via provider_refs.
 func SaveProviderModel(projectName, providerName, model string) error {
 	configMu.Lock()
 	defer configMu.Unlock()
@@ -775,10 +777,22 @@ func SaveProviderModel(projectName, providerName, model string) error {
 		if cfg.Projects[i].Name != projectName {
 			continue
 		}
+		// Check inline providers first
 		for j := range cfg.Projects[i].Agent.Providers {
 			if cfg.Projects[i].Agent.Providers[j].Name == providerName {
 				cfg.Projects[i].Agent.Providers[j].Model = model
 				return saveConfig(cfg)
+			}
+		}
+		// Fall back to global providers referenced via provider_refs
+		for _, ref := range cfg.Projects[i].Agent.ProviderRefs {
+			if ref == providerName {
+				for k := range cfg.Providers {
+					if cfg.Providers[k].Name == providerName {
+						cfg.Providers[k].Model = model
+						return saveConfig(cfg)
+					}
+				}
 			}
 		}
 		return fmt.Errorf("provider %q not found in project %q", providerName, projectName)
@@ -851,6 +865,8 @@ func AddProviderToConfig(projectName string, provider ProviderConfig) error {
 }
 
 // RemoveProviderFromConfig removes a provider from a project's agent config and saves.
+// For global providers referenced via provider_refs, it removes the reference
+// instead of deleting the global definition.
 func RemoveProviderFromConfig(projectName, providerName string) error {
 	configMu.Lock()
 	defer configMu.Unlock()
@@ -868,17 +884,28 @@ func RemoveProviderFromConfig(projectName, providerName string) error {
 
 	found := false
 	for i := range cfg.Projects {
-		if cfg.Projects[i].Name == projectName {
-			providers := cfg.Projects[i].Agent.Providers
-			for j := range providers {
-				if providers[j].Name == providerName {
-					cfg.Projects[i].Agent.Providers = append(providers[:j], providers[j+1:]...)
-					found = true
-					break
-				}
-			}
-			break
+		if cfg.Projects[i].Name != projectName {
+			continue
 		}
+		// Check inline providers
+		providers := cfg.Projects[i].Agent.Providers
+		for j := range providers {
+			if providers[j].Name == providerName {
+				cfg.Projects[i].Agent.Providers = append(providers[:j], providers[j+1:]...)
+				found = true
+				break
+			}
+		}
+		// Also remove from provider_refs if present
+		refs := cfg.Projects[i].Agent.ProviderRefs
+		for j := range refs {
+			if refs[j] == providerName {
+				cfg.Projects[i].Agent.ProviderRefs = append(refs[:j], refs[j+1:]...)
+				found = true
+				break
+			}
+		}
+		break
 	}
 	if !found {
 		return fmt.Errorf("provider %q not found in project %q", providerName, projectName)

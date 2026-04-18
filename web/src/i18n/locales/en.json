@@ -339,6 +339,9 @@
     "form": {
       "name": "Name",
       "model": "Default model",
+      "modelHint": "The model used when switching to this provider. Click ✓ on a model below to set it.",
+      "models": "Available models",
+      "modelsHint": "Models users can switch to via /model. Click ✓ to set as default.",
       "agentTypes": "Agent types",
       "agentTypesHint": "Leave empty for all agent types",
       "thinkingDefault": "Default (auto)"

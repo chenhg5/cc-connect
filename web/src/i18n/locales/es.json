@@ -339,6 +339,9 @@
     "form": {
       "name": "Nombre",
       "model": "Modelo predeterminado",
+      "modelHint": "Modelo usado al cambiar a este proveedor",
+      "models": "Modelos disponibles",
+      "modelsHint": "Modelos que los usuarios pueden cambiar con /model",
       "agentTypes": "Tipos de agente",
       "agentTypesHint": "Dejar vacío para todos los tipos de agente",
       "thinkingDefault": "Predeterminado (auto)"

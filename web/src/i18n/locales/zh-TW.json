@@ -339,6 +339,9 @@
     "form": {
       "name": "名稱",
       "model": "預設模型",
+      "modelHint": "切換到該服務商時使用的模型",
+      "models": "可用模型",
+      "modelsHint": "使用者可透過 /model 指令切換的模型列表",
       "agentTypes": "適用 Agent 類型",
       "agentTypesHint": "留空表示適用所有 Agent 類型",
       "thinkingDefault": "預設（自動）"

@@ -339,6 +339,9 @@
     "form": {
       "name": "名前",
       "model": "デフォルトモデル",
+      "modelHint": "このプロバイダーに切り替えた時に使用するモデル",
+      "models": "利用可能なモデル",
+      "modelsHint": "/model コマンドで切り替え可能なモデル一覧",
       "agentTypes": "対応エージェント",
       "agentTypesHint": "空の場合はすべてのエージェントに対応",
       "thinkingDefault": "デフォルト（自動）"

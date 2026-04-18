@@ -1,13 +1,13 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  Plug, Plus, Trash2, Pencil, ExternalLink, Star, Sparkles, X, Eye, EyeOff,
+  Plug, Plus, Trash2, Pencil, ExternalLink, Star, Sparkles, X, Eye, EyeOff, Check,
 } from 'lucide-react';
 import { Card, Button, Badge, Modal, Input } from '@/components/ui';
 import {
   listGlobalProviders, addGlobalProvider, updateGlobalProvider, removeGlobalProvider,
   fetchProviderPresets,
-  type GlobalProvider, type ProviderPreset,
+  type GlobalProvider, type ProviderPreset, type ProviderModel,
 } from '@/api/providers';
 import { cn } from '@/lib/utils';
 
@@ -63,7 +63,7 @@ export default function ProviderList() {
       base_url: baseUrl,
       model: preset.agent_models?.['claudecode'] || preset.models?.[0] || '',
       thinking: preset.thinking || '',
-      models: preset.models?.map(m => ({ model: m })),
+      models: preset.models?.slice(0, 3).map(m => ({ model: m })),
       agent_types: preset.agents || [],
       _preset: preset,
     } as any);
@@ -197,13 +197,7 @@ function ProviderGrid({
                 <Badge className="mt-2">{p.model}</Badge>
               )}
               {p.models && p.models.length > 0 && (
-                <div className="mt-2 flex flex-wrap gap-1">
-                  {p.models.map(m => (
-                    <Badge key={m.model} variant="outline" className="text-xs">
-                      {m.alias || m.model}
-                    </Badge>
-                  ))}
-                </div>
+                <ModelBadges models={p.models.map(m => m.alias || m.model)} limit={3} />
               )}
               {p.agent_types && p.agent_types.length > 0 && (
                 <div className="mt-2 flex flex-wrap gap-1">
@@ -297,14 +291,7 @@ function PresetGrid({
                 </div>
               )}
               {p.models && p.models.length > 0 && (
-                <div className="flex flex-wrap gap-1">
-                  {p.models.slice(0, 4).map(m => (
-                    <Badge key={m} className="text-xs">{m}</Badge>
-                  ))}
-                  {p.models.length > 4 && (
-                    <Badge className="text-xs">+{p.models.length - 4}</Badge>
-                  )}
-                </div>
+                <ModelBadges models={p.models} limit={5} />
               )}
               <div className="flex items-center justify-between pt-1">
                 {p.invite_url ? (
@@ -330,6 +317,117 @@ function PresetGrid({
           </Card>
         );
       })}
+    </div>
+  );
+}
+
+/* ── Model Badges (collapsible) ── */
+
+function ModelBadges({ models, limit = 3 }: { models: string[]; limit?: number }) {
+  const [expanded, setExpanded] = useState(false);
+  const visible = expanded ? models : models.slice(0, limit);
+  const remaining = models.length - limit;
+
+  return (
+    <div className="mt-2 flex flex-wrap gap-1 items-center">
+      {visible.map(m => (
+        <Badge key={m} variant="outline" className="text-xs">{m}</Badge>
+      ))}
+      {remaining > 0 && !expanded && (
+        <button
+          onClick={() => setExpanded(true)}
+          className="text-[11px] text-accent hover:underline"
+        >
+          +{remaining} more
+        </button>
+      )}
+      {expanded && remaining > 0 && (
+        <button
+          onClick={() => setExpanded(false)}
+          className="text-[11px] text-gray-400 hover:text-gray-600 hover:underline"
+        >
+          less
+        </button>
+      )}
+    </div>
+  );
+}
+
+/* ── Model List Editor ── */
+
+function ModelListEditor({
+  models, onChange, defaultModel, onSetDefault,
+}: {
+  models: ProviderModel[];
+  onChange: (models: ProviderModel[]) => void;
+  defaultModel?: string;
+  onSetDefault?: (model: string) => void;
+}) {
+  const [input, setInput] = useState('');
+
+  const addModel = () => {
+    const name = input.trim();
+    if (!name || models.some(m => m.model === name)) return;
+    onChange([...models, { model: name }]);
+    setInput('');
+  };
+
+  const removeModel = (model: string) => {
+    onChange(models.filter(m => m.model !== model));
+  };
+
+  return (
+    <div className="space-y-2">
+      {models.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {models.map(m => {
+            const isDefault = defaultModel === m.model;
+            return (
+              <span
+                key={m.model}
+                className={cn(
+                  'inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-xs transition-colors',
+                  isDefault
+                    ? 'bg-accent/15 text-accent border border-accent/30'
+                    : 'bg-gray-100 dark:bg-white/[0.06] text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-white/10',
+                )}
+              >
+                {onSetDefault && !isDefault && (
+                  <button
+                    type="button"
+                    onClick={() => onSetDefault(m.model)}
+                    className="text-gray-400 hover:text-accent transition-colors"
+                    title="Set as default"
+                  >
+                    <Check size={12} />
+                  </button>
+                )}
+                {isDefault && <Check size={12} className="text-accent" />}
+                {m.model}
+                <button
+                  type="button"
+                  onClick={() => removeModel(m.model)}
+                  className="text-gray-400 hover:text-red-500 transition-colors"
+                >
+                  <X size={12} />
+                </button>
+              </span>
+            );
+          })}
+        </div>
+      )}
+      <div className="flex gap-2">
+        <Input
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addModel(); } }}
+          placeholder="model-name"
+          className="flex-1"
+        />
+        <Button type="button" variant="ghost" size="sm" onClick={addModel} disabled={!input.trim()}>
+          <Plus size={14} />
+        </Button>
+      </div>
     </div>
   );
 }
@@ -419,6 +517,20 @@ function ProviderFormModal({
               onChange={e => set('model', e.target.value)}
               placeholder="claude-sonnet-4-20250514"
             />
+            <p className="mt-1 text-xs text-gray-400">{t('globalProviders.form.modelHint')}</p>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+              {t('globalProviders.form.models')}
+            </label>
+            <ModelListEditor
+              models={form.models || []}
+              onChange={models => set('models', models)}
+              defaultModel={form.model}
+              onSetDefault={model => set('model', model)}
+            />
+            <p className="mt-1 text-xs text-gray-400">{t('globalProviders.form.modelsHint')}</p>
           </div>
 
           <div>
