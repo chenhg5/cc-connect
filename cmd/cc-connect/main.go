@@ -88,6 +88,9 @@ func main() {
 		case "doctor":
 			runDoctor(os.Args[2:])
 			return
+		case "web":
+			runWeb(os.Args[2:])
+			return
 		}
 	}
 
