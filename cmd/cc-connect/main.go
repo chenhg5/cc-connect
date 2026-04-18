@@ -927,6 +927,7 @@ func main() {
 		if cfg.ProviderPresetsURL != "" {
 			core.SetPresetsURL(cfg.ProviderPresetsURL)
 		}
+		mgmtSrv.SetListCCSwitchProviders(listCCSwitchProvidersForWeb)
 		mgmtSrv.Start()
 	}
 

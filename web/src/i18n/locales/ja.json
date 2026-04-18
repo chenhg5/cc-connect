@@ -180,7 +180,9 @@
     "actions": "操作",
     "viewAll": "すべて表示",
     "optional": "任意",
-    "confirmDelete": "本当に削除しますか？"
+    "confirmDelete": "本当に削除しますか？",
+    "close": "閉じる",
+    "saving": "保存中…"
   },
   "setup": {
     "addPlatform": "プラットフォームを追加",
@@ -323,6 +325,7 @@
     "title": "プロバイダー管理",
     "subtitle": "全プロジェクトで共有できるグローバル API プロバイダーを管理",
     "add": "プロバイダーを追加",
+    "importCCSwitch": "CC-Switch からインポート",
     "edit": "プロバイダーを編集",
     "empty": "プロバイダーが設定されていません",
     "emptyHint": "グローバルプロバイダーを追加するか、プリセットからインポートしてください。",
@@ -349,6 +352,16 @@
       "defaultConfig": "デフォルト",
       "baseUrl": "Base URL",
       "codexWireApi": "Wire API"
+    },
+    "ccSwitch": {
+      "title": "CC-Switch からインポート",
+      "notFound": "CC-Switch データベースが見つかりません。CC-Switch がインストールされているか確認してください。",
+      "empty": "CC-Switch にプロバイダーが設定されていません。",
+      "hint": "CC-Switch で {{count}} 件のプロバイダーが見つかりました。インポートするものを選択：",
+      "active": "アクティブ",
+      "exists": "既存",
+      "import": "インポート ({{count}})",
+      "result": "インポート完了：{{imported}} 件成功、{{skipped}} 件スキップ。"
     }
   },
   "theme": {

@@ -62,6 +62,9 @@ type ManagementServer struct {
 	updateGlobalProvider func(name string, info GlobalProviderInfo) error
 	removeGlobalProvider func(name string) error
 	fetchPresets         func() (*ProviderPresetsResponse, error)
+
+	// cc-switch migration callback
+	listCCSwitchProviders func() ([]CCSwitchProviderInfo, error)
 }
 
 // NewManagementServer creates a new management API server.
@@ -168,6 +171,19 @@ func (m *ManagementServer) SetRemoveGlobalProvider(fn func(string) error) {
 }
 func (m *ManagementServer) SetFetchPresets(fn func() (*ProviderPresetsResponse, error)) {
 	m.fetchPresets = fn
+}
+func (m *ManagementServer) SetListCCSwitchProviders(fn func() ([]CCSwitchProviderInfo, error)) {
+	m.listCCSwitchProviders = fn
+}
+
+// CCSwitchProviderInfo represents a provider read from the cc-switch database.
+type CCSwitchProviderInfo struct {
+	Name      string `json:"name"`
+	AppType   string `json:"app_type"`
+	APIKey    string `json:"api_key,omitempty"`
+	BaseURL   string `json:"base_url,omitempty"`
+	Model     string `json:"model,omitempty"`
+	IsCurrent bool   `json:"is_current"`
 }
 
 func (m *ManagementServer) Start() {
@@ -1622,6 +1638,12 @@ func (m *ManagementServer) handleGlobalProviderRoutes(w http.ResponseWriter, r *
 		return
 	}
 
+	// /providers/cc-switch — list providers from cc-switch database
+	if rest == "cc-switch" {
+		m.handleCCSwitchProviders(w, r)
+		return
+	}
+
 	// /providers/{name} or /providers/{name}/...
 	parts := strings.SplitN(rest, "/", 2)
 	name := parts[0]
@@ -1703,6 +1725,81 @@ func (m *ManagementServer) handleProviderPresets(w http.ResponseWriter, r *http.
 		return
 	}
 	mgmtJSON(w, http.StatusOK, data)
+}
+
+func (m *ManagementServer) handleCCSwitchProviders(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if m.listCCSwitchProviders == nil {
+			mgmtJSON(w, http.StatusOK, map[string]any{"providers": []any{}, "available": false})
+			return
+		}
+		providers, err := m.listCCSwitchProviders()
+		if err != nil {
+			mgmtJSON(w, http.StatusOK, map[string]any{"providers": []any{}, "available": false, "error": err.Error()})
+			return
+		}
+		mgmtJSON(w, http.StatusOK, map[string]any{"providers": providers, "available": true})
+
+	case http.MethodPost:
+		if m.listCCSwitchProviders == nil || m.addGlobalProvider == nil {
+			mgmtError(w, http.StatusNotImplemented, "not configured")
+			return
+		}
+		var body struct {
+			Names []string `json:"names"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			mgmtError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+		if len(body.Names) == 0 {
+			mgmtError(w, http.StatusBadRequest, "names is required")
+			return
+		}
+
+		all, err := m.listCCSwitchProviders()
+		if err != nil {
+			mgmtError(w, http.StatusInternalServerError, "read cc-switch: "+err.Error())
+			return
+		}
+		byName := make(map[string]CCSwitchProviderInfo, len(all))
+		for _, p := range all {
+			byName[p.Name] = p
+		}
+
+		var imported, skipped []string
+		for _, name := range body.Names {
+			src, ok := byName[name]
+			if !ok {
+				skipped = append(skipped, name)
+				continue
+			}
+			gp := GlobalProviderInfo{
+				Name:    src.Name,
+				APIKey:  src.APIKey,
+				BaseURL: src.BaseURL,
+				Model:   src.Model,
+			}
+			if src.AppType == "claude" {
+				gp.AgentTypes = []string{"claudecode"}
+			} else if src.AppType == "codex" {
+				gp.AgentTypes = []string{"codex"}
+			}
+			if err := m.addGlobalProvider(gp); err != nil {
+				skipped = append(skipped, name)
+				continue
+			}
+			imported = append(imported, name)
+		}
+		mgmtJSON(w, http.StatusOK, map[string]any{
+			"imported": imported,
+			"skipped":  skipped,
+		})
+
+	default:
+		mgmtError(w, http.StatusMethodNotAllowed, "GET or POST only")
+	}
 }
 
 // resolveGlobalProviderForAgent creates a ProviderConfig from a GlobalProviderInfo,

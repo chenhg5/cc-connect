@@ -1,17 +1,18 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 
 	"github.com/chenhg5/cc-connect/config"
 	"github.com/chenhg5/cc-connect/core"
+	_ "modernc.org/sqlite"
 )
 
 func runProviderCommand(args []string) {
@@ -231,13 +232,6 @@ func runProviderImport(args []string) {
 		os.Exit(1)
 	}
 
-	// Check sqlite3 is available
-	if _, err := exec.LookPath("sqlite3"); err != nil {
-		fmt.Fprintln(os.Stderr, "Error: 'sqlite3' CLI not found in PATH")
-		fmt.Fprintln(os.Stderr, "Install it: apt install sqlite3 (Debian/Ubuntu) or brew install sqlite3 (macOS)")
-		os.Exit(1)
-	}
-
 	// Resolve target project
 	targetProject := *project
 	if targetProject == "" {
@@ -263,32 +257,9 @@ func runProviderImport(args []string) {
 	fmt.Printf("Importing from: %s\n", db)
 	fmt.Printf("Target project: %s\n\n", targetProject)
 
-	// Query cc-switch database
-	query := "SELECT id, app_type, name, settings_config, is_current FROM providers"
-	if *appType != "" {
-		// Sanitize: only allow simple alphanumeric app type values
-		for _, c := range *appType {
-			if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-') {
-				fmt.Fprintf(os.Stderr, "Error: invalid app_type value %q\n", *appType)
-				os.Exit(1)
-			}
-		}
-		query += fmt.Sprintf(" WHERE app_type = '%s'", *appType)
-	}
-	cmd := exec.Command("sqlite3", db, "-json", query)
-	output, err := cmd.Output()
+	rows, err := queryCCSwitchDB(db, *appType)
 	if err != nil {
-		stderr := ""
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			stderr = string(exitErr.Stderr)
-		}
-		fmt.Fprintf(os.Stderr, "Error querying database: %v\n%s\n", err, stderr)
-		os.Exit(1)
-	}
-
-	var rows []ccSwitchRow
-	if err := json.Unmarshal(output, &rows); err != nil {
-		fmt.Fprintf(os.Stderr, "Error parsing database output: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error querying database: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -338,6 +309,39 @@ type ccSwitchRow struct {
 	Name           string `json:"name"`
 	SettingsConfig string `json:"settings_config"`
 	IsCurrent      int    `json:"is_current"`
+}
+
+// queryCCSwitchDB opens the cc-switch SQLite database and returns provider rows.
+// appTypeFilter can be empty (return all) or "claude"/"codex".
+func queryCCSwitchDB(dbPath, appTypeFilter string) ([]ccSwitchRow, error) {
+	db, err := sql.Open("sqlite", dbPath+"?mode=ro")
+	if err != nil {
+		return nil, fmt.Errorf("open cc-switch db: %w", err)
+	}
+	defer db.Close()
+
+	query := "SELECT id, app_type, name, settings_config, is_current FROM providers"
+	var args []any
+	if appTypeFilter != "" {
+		query += " WHERE app_type = ?"
+		args = append(args, appTypeFilter)
+	}
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query cc-switch db: %w", err)
+	}
+	defer rows.Close()
+
+	var result []ccSwitchRow
+	for rows.Next() {
+		var r ccSwitchRow
+		if err := rows.Scan(&r.ID, &r.AppType, &r.Name, &r.SettingsConfig, &r.IsCurrent); err != nil {
+			continue
+		}
+		result = append(result, r)
+	}
+	return result, rows.Err()
 }
 
 func convertCCSwitchProvider(row ccSwitchRow) (config.ProviderConfig, error) {
@@ -478,6 +482,37 @@ func ccSwitchDBCandidates() []string {
 	}
 
 	return candidates
+}
+
+// listCCSwitchProvidersForWeb reads the cc-switch database and returns
+// providers in the format expected by the management API.
+func listCCSwitchProvidersForWeb() ([]core.CCSwitchProviderInfo, error) {
+	dbPath := findCCSwitchDB()
+	if dbPath == "" {
+		return nil, fmt.Errorf("cc-switch database not found")
+	}
+
+	rows, err := queryCCSwitchDB(dbPath, "")
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]core.CCSwitchProviderInfo, 0, len(rows))
+	for _, row := range rows {
+		p, err := convertCCSwitchProvider(row)
+		if err != nil {
+			continue
+		}
+		result = append(result, core.CCSwitchProviderInfo{
+			Name:      p.Name,
+			AppType:   row.AppType,
+			APIKey:    p.APIKey,
+			BaseURL:   p.BaseURL,
+			Model:     p.Model,
+			IsCurrent: row.IsCurrent == 1,
+		})
+	}
+	return result, nil
 }
 
 func parseEnvStr(s string) map[string]string {
