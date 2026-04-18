@@ -10568,3 +10568,246 @@ func TestSessionName_ACPLikeFlow(t *testing.T) {
 			"acp-session-001", gotName, "ACP任务")
 	}
 }
+
+// --- attachableAgent stub for /attach /detach /resume-latest tests ---
+
+// attachableAgent mimics the claudecode agent for attach/detach tests.
+// It implements Agent.ListSessions + HistoryProvider so cmdAttach can
+// list, match, and preview sessions without touching the real filesystem.
+// The Name() is configurable so we can also test the "only claudecode"
+// guard by passing a different name.
+type attachableAgent struct {
+	stubAgent
+	name     string
+	sessions []AgentSessionInfo
+	history  []HistoryEntry
+}
+
+func (a *attachableAgent) Name() string {
+	if a.name == "" {
+		return "claudecode"
+	}
+	return a.name
+}
+
+func (a *attachableAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
+	return a.sessions, nil
+}
+
+func (a *attachableAgent) GetSessionHistory(_ context.Context, _ string, _ int) ([]HistoryEntry, error) {
+	return a.history, nil
+}
+
+// newAttachEngine builds an Engine with admin_from="*" so privileged
+// commands (/attach, /resume-latest, /detach) pass the gate in tests.
+func newAttachEngine(t *testing.T, agent Agent) (*Engine, *stubPlatformEngine) {
+	t.Helper()
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetAdminFrom("*")
+	return e, p
+}
+
+func TestCmdAttach_OnlyClaudecodeAgent(t *testing.T) {
+	agent := &attachableAgent{name: "codex"}
+	e, p := newAttachEngine(t, agent)
+
+	msg := &Message{SessionKey: "test:ch:u1", UserID: "u1", Content: "/attach", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := strings.Join(p.getSent(), "\n")
+	if !strings.Contains(sent, "claudecode") {
+		t.Fatalf("expected only-claudecode guard reply, got: %s", sent)
+	}
+}
+
+func TestCmdAttach_NoHistory(t *testing.T) {
+	agent := &attachableAgent{sessions: nil}
+	e, p := newAttachEngine(t, agent)
+
+	msg := &Message{SessionKey: "test:ch:u1", UserID: "u1", Content: "/attach", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := strings.Join(p.getSent(), "\n")
+	if !strings.Contains(sent, "No Claude session history") {
+		t.Fatalf("expected no-history reply, got: %s", sent)
+	}
+}
+
+func TestCmdAttach_Latest_Success(t *testing.T) {
+	oneHourAgo := time.Now().Add(-1 * time.Hour)
+	agent := &attachableAgent{
+		sessions: []AgentSessionInfo{
+			{ID: "uuid-aaaaaaaa-newer", Summary: "Newer session", MessageCount: 7, ModifiedAt: oneHourAgo},
+			{ID: "uuid-bbbbbbbb-older", Summary: "Older session", MessageCount: 3, ModifiedAt: oneHourAgo.Add(-2 * time.Hour)},
+		},
+	}
+	e, p := newAttachEngine(t, agent)
+
+	key := "test:ch:u1"
+	msg := &Message{SessionKey: key, UserID: "u1", Content: "/attach", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := strings.Join(p.getSent(), "\n")
+	if !strings.Contains(sent, "uuid-aaaa") || !strings.Contains(sent, "Attached") {
+		t.Fatalf("expected success reply with newer session uuid, got: %s", sent)
+	}
+
+	if id := e.sessions.GetOrCreateActive(key).GetAgentSessionID(); id != "uuid-aaaaaaaa-newer" {
+		t.Errorf("expected active AgentSessionID=uuid-aaaaaaaa-newer, got %q", id)
+	}
+}
+
+func TestCmdAttach_ByUUIDPrefix(t *testing.T) {
+	oneHourAgo := time.Now().Add(-1 * time.Hour)
+	agent := &attachableAgent{
+		sessions: []AgentSessionInfo{
+			{ID: "aaa111", Summary: "A", ModifiedAt: oneHourAgo},
+			{ID: "bbb222", Summary: "B", ModifiedAt: oneHourAgo},
+		},
+	}
+	e, p := newAttachEngine(t, agent)
+
+	msg := &Message{SessionKey: "test:ch:u1", UserID: "u1", Content: "/attach bbb", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := strings.Join(p.getSent(), "\n")
+	if !strings.Contains(sent, "bbb222") {
+		t.Fatalf("expected attach to match bbb222 by prefix, got: %s", sent)
+	}
+}
+
+func TestCmdAttach_RecentlyActiveGuard(t *testing.T) {
+	agent := &attachableAgent{
+		sessions: []AgentSessionInfo{
+			{ID: "fresh-uuid", Summary: "Fresh", ModifiedAt: time.Now().Add(-5 * time.Second)},
+		},
+	}
+	e, p := newAttachEngine(t, agent)
+
+	msg := &Message{SessionKey: "test:ch:u1", UserID: "u1", Content: "/attach", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := strings.Join(p.getSent(), "\n")
+	if !strings.Contains(sent, "--force") {
+		t.Fatalf("expected recently-active guard with --force hint, got: %s", sent)
+	}
+	if id := e.sessions.GetOrCreateActive("test:ch:u1").GetAgentSessionID(); id != "" {
+		t.Errorf("expected no binding after guard, got %q", id)
+	}
+}
+
+func TestCmdAttach_ForceBypassesGuard(t *testing.T) {
+	agent := &attachableAgent{
+		sessions: []AgentSessionInfo{
+			{ID: "fresh-uuid", Summary: "Fresh", ModifiedAt: time.Now().Add(-5 * time.Second)},
+		},
+	}
+	e, p := newAttachEngine(t, agent)
+
+	key := "test:ch:u1"
+	msg := &Message{SessionKey: key, UserID: "u1", Content: "/attach fresh --force", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := strings.Join(p.getSent(), "\n")
+	if !strings.Contains(sent, "Attached") {
+		t.Fatalf("expected --force to bypass guard and attach, got: %s", sent)
+	}
+	if id := e.sessions.GetOrCreateActive(key).GetAgentSessionID(); id != "fresh-uuid" {
+		t.Errorf("expected AgentSessionID=fresh-uuid after --force attach, got %q", id)
+	}
+}
+
+func TestCmdAttach_NoMatch(t *testing.T) {
+	oneHourAgo := time.Now().Add(-1 * time.Hour)
+	agent := &attachableAgent{
+		sessions: []AgentSessionInfo{
+			{ID: "aaa111", Summary: "A", ModifiedAt: oneHourAgo},
+		},
+	}
+	e, p := newAttachEngine(t, agent)
+
+	msg := &Message{SessionKey: "test:ch:u1", UserID: "u1", Content: "/attach zzz999", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := strings.Join(p.getSent(), "\n")
+	if !strings.Contains(sent, "zzz999") {
+		t.Fatalf("expected no-match reply mentioning the query, got: %s", sent)
+	}
+}
+
+func TestCmdResumeLatest_EquivalentToAttachLatest(t *testing.T) {
+	oneHourAgo := time.Now().Add(-1 * time.Hour)
+	agent := &attachableAgent{
+		sessions: []AgentSessionInfo{
+			{ID: "uuid-latest", Summary: "Latest", ModifiedAt: oneHourAgo},
+			{ID: "uuid-older", Summary: "Older", ModifiedAt: oneHourAgo.Add(-1 * time.Hour)},
+		},
+	}
+	e, p := newAttachEngine(t, agent)
+
+	key := "test:ch:u1"
+	msg := &Message{SessionKey: key, UserID: "u1", Content: "/resume-latest", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	if id := e.sessions.GetOrCreateActive(key).GetAgentSessionID(); id != "uuid-latest" {
+		t.Errorf("expected /resume-latest to attach latest (uuid-latest), got %q", id)
+	}
+}
+
+func TestCmdDetach_NothingToRelease(t *testing.T) {
+	agent := &attachableAgent{}
+	e, p := newAttachEngine(t, agent)
+
+	msg := &Message{SessionKey: "test:ch:u1", UserID: "u1", Content: "/detach", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := strings.Join(p.getSent(), "\n")
+	if !strings.Contains(sent, "nothing to release") {
+		t.Fatalf("expected nothing-to-release reply, got: %s", sent)
+	}
+}
+
+func TestCmdDetach_ClearsActiveBinding(t *testing.T) {
+	agent := &attachableAgent{}
+	e, p := newAttachEngine(t, agent)
+
+	key := "test:ch:u1"
+	// Seed an active agent session as if /attach had been called.
+	sess := e.sessions.GetOrCreateActive(key)
+	sess.SetAgentSessionID("uuid-to-release", "claudecode")
+	e.sessions.Save()
+
+	msg := &Message{SessionKey: key, UserID: "u1", Content: "/detach", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := strings.Join(p.getSent(), "\n")
+	if !strings.Contains(sent, "Released") || !strings.Contains(sent, "claude --resume uuid-to-release") {
+		t.Fatalf("expected detach success with resume hint, got: %s", sent)
+	}
+
+	if id := e.sessions.GetOrCreateActive(key).GetAgentSessionID(); id != "" {
+		t.Errorf("expected AgentSessionID cleared after /detach, got %q", id)
+	}
+}
+
+func TestCmdAttach_RequiresAdmin(t *testing.T) {
+	oneHourAgo := time.Now().Add(-1 * time.Hour)
+	agent := &attachableAgent{
+		sessions: []AgentSessionInfo{{ID: "uuid-x", Summary: "X", ModifiedAt: oneHourAgo}},
+	}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	// Intentionally no SetAdminFrom → privileged commands must be rejected.
+
+	msg := &Message{SessionKey: "test:ch:u1", UserID: "u1", Content: "/attach", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := strings.Join(p.getSent(), "\n")
+	if strings.Contains(sent, "Attached") {
+		t.Fatalf("expected /attach to be blocked without admin_from, got: %s", sent)
+	}
+	if id := e.sessions.GetOrCreateActive("test:ch:u1").GetAgentSessionID(); id != "" {
+		t.Errorf("expected no binding when admin gate blocked, got %q", id)
+	}
+}
