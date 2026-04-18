@@ -742,3 +742,94 @@ func TestMgmt_ProjectModels_UsesTimeoutContext(t *testing.T) {
 		t.Fatal("AvailableModels context has no deadline; want timeout-bounded context")
 	}
 }
+
+func TestMgmt_RemoveGlobalProvider_PurgesFromEngines(t *testing.T) {
+	agent := &stubProviderAgent{
+		providers: []ProviderConfig{
+			{Name: "prov-a", BaseURL: "https://a.example"},
+			{Name: "prov-b", BaseURL: "https://b.example"},
+		},
+		active: "prov-b",
+	}
+	e := NewEngine("proj", agent, nil, "", LangEnglish)
+
+	mgmt := NewManagementServer(0, "tok", nil)
+	mgmt.RegisterEngine("proj", e)
+
+	removed := ""
+	mgmt.SetRemoveGlobalProvider(func(name string) error {
+		removed = name
+		return nil
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/providers/", mgmt.wrap(mgmt.handleGlobalProviderRoutes))
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("DELETE", ts.URL+"/api/v1/providers/prov-a", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("DELETE: %v", err)
+	}
+	resp.Body.Close()
+
+	if removed != "prov-a" {
+		t.Fatalf("removeGlobalProvider called with %q, want prov-a", removed)
+	}
+
+	remaining := agent.ListProviders()
+	if len(remaining) != 1 {
+		t.Fatalf("remaining providers = %d, want 1", len(remaining))
+	}
+	if remaining[0].Name != "prov-b" {
+		t.Fatalf("remaining provider = %q, want prov-b", remaining[0].Name)
+	}
+}
+
+func TestResolveGlobalProviderForAgent(t *testing.T) {
+	g := GlobalProviderInfo{
+		Name:    "relay",
+		APIKey:  "sk-123",
+		BaseURL: "https://api.example.com/anthropic",
+		Model:   "claude-sonnet-4",
+		Endpoints: map[string]string{
+			"codex": "https://api.example.com/v1",
+		},
+		AgentModels: map[string]string{
+			"codex": "gpt-5.3-codex",
+		},
+		AgentModelLists: map[string][]GlobalModelEntry{
+			"codex": {{Model: "gpt-5.3-codex"}, {Model: "gpt-5.4"}},
+		},
+		Models: []struct {
+			Model string `json:"model"`
+			Alias string `json:"alias,omitempty"`
+		}{{Model: "claude-sonnet-4"}, {Model: "claude-opus-4"}},
+	}
+
+	// claudecode: should use top-level values
+	cc := resolveGlobalProviderForAgent(g, "claudecode")
+	if cc.BaseURL != "https://api.example.com/anthropic" {
+		t.Errorf("claudecode BaseURL = %q", cc.BaseURL)
+	}
+	if cc.Model != "claude-sonnet-4" {
+		t.Errorf("claudecode Model = %q", cc.Model)
+	}
+	if len(cc.Models) != 2 || cc.Models[0].Name != "claude-sonnet-4" {
+		t.Errorf("claudecode Models = %v", cc.Models)
+	}
+
+	// codex: should use per-agent overrides
+	cx := resolveGlobalProviderForAgent(g, "codex")
+	if cx.BaseURL != "https://api.example.com/v1" {
+		t.Errorf("codex BaseURL = %q", cx.BaseURL)
+	}
+	if cx.Model != "gpt-5.3-codex" {
+		t.Errorf("codex Model = %q", cx.Model)
+	}
+	if len(cx.Models) != 2 || cx.Models[0].Name != "gpt-5.3-codex" {
+		t.Errorf("codex Models = %v", cx.Models)
+	}
+}

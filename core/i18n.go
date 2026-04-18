@@ -191,6 +191,13 @@ const (
 	MsgProviderAddFailed         MsgKey = "provider_add_failed"
 	MsgProviderRemoved           MsgKey = "provider_removed"
 	MsgProviderRemoveFailed      MsgKey = "provider_remove_failed"
+	MsgCardTitleProviderAdd      MsgKey = "card_title_provider_add"
+	MsgProviderAddPickHint       MsgKey = "provider_add_pick_hint"
+	MsgProviderAddOther          MsgKey = "provider_add_other"
+	MsgProviderAddApiKeyPrompt   MsgKey = "provider_add_api_key_prompt"
+	MsgProviderAddInviteHint     MsgKey = "provider_add_invite_hint"
+	MsgProviderLinkGlobal        MsgKey = "provider_link_global"
+	MsgProviderLinked            MsgKey = "provider_linked"
 
 	MsgVoiceNotEnabled               MsgKey = "voice_not_enabled"
 	MsgVoiceUsingPlatformRecognition MsgKey = "voice_using_platform_recognition"
@@ -241,8 +248,6 @@ const (
 
 	MsgStatusTitle          MsgKey = "status_title"
 	MsgReplyFooterRemaining MsgKey = "reply_footer_remaining"
-	MsgAgentSIDWarning      MsgKey = "agent_sid_warning"
-
 	MsgModelCurrent          MsgKey = "model_current"
 	MsgModelChanged          MsgKey = "model_changed"
 	MsgModelChangeFailed     MsgKey = "model_change_failed"
@@ -276,6 +281,7 @@ const (
 	MsgStatusThinkingMessages MsgKey = "status_thinking_messages"
 	MsgStatusToolMessages     MsgKey = "status_tool_messages"
 	MsgStatusSessionKey       MsgKey = "status_session_key"
+	MsgStatusAgentSID         MsgKey = "status_agent_sid"
 	MsgStatusUserID           MsgKey = "status_user_id"
 	MsgEnabledShort           MsgKey = "enabled_short"
 	MsgDisabledShort          MsgKey = "disabled_short"
@@ -499,7 +505,6 @@ const (
 	MsgBuiltinCmdShell     MsgKey = "shell"
 	MsgBuiltinCmdDir       MsgKey = "dir"
 	MsgBuiltinCmdDiff      MsgKey = "diff"
-	MsgBuiltinCmdAgentSID MsgKey = "agentsid"
 
 	MsgDiffEmpty       MsgKey = "diff_empty"
 	MsgDiffNoDiff2HTML MsgKey = "diff_no_diff2html"
@@ -849,7 +854,6 @@ var messages = map[MsgKey]map[Language]string{
 			"/delete <number>|1,2,3|3-7|1,3-5,8\n  Delete sessions by list number(s)\n\n" +
 			"/name [number] <text>\n  Name a session for easy identification\n\n" +
 			"/current\n  Show current active session\n\n" +
-			"/agentsid\n  Print the agent session ID\n\n" +
 			"/history [n]\n  Show last n messages (default 10)\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  Manage API providers\n\n" +
 			"/memory [add|global|global add]\n  View/edit agent memory files\n\n" +
@@ -893,7 +897,6 @@ var messages = map[MsgKey]map[Language]string{
 			"/delete <序号>|1,2,3|3-7|1,3-5,8\n  按列表序号批量/单个删除会话\n\n" +
 			"/name [序号] <名称>\n  给会话命名，方便识别\n\n" +
 			"/current\n  查看当前活跃会话\n\n" +
-			"/agentsid\n  输出 Agent Session ID\n\n" +
 			"/history [n]\n  查看最近 n 条消息（默认 10）\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  管理 API Provider\n\n" +
 			"/memory [add|global|global add]\n  查看/编辑 Agent 记忆文件\n\n" +
@@ -937,7 +940,6 @@ var messages = map[MsgKey]map[Language]string{
 			"/delete <序號>|1,2,3|3-7|1,3-5,8\n  按列表序號批量/單筆刪除會話\n\n" +
 			"/name [序號] <名稱>\n  為會話命名，方便辨識\n\n" +
 			"/current\n  查看當前活躍會話\n\n" +
-			"/agentsid\n  輸出 Agent Session ID\n\n" +
 			"/history [n]\n  查看最近 n 條訊息（預設 10）\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  管理 API Provider\n\n" +
 			"/memory [add|global|global add]\n  查看/編輯 Agent 記憶檔案\n\n" +
@@ -979,7 +981,6 @@ var messages = map[MsgKey]map[Language]string{
 			"/delete <番号>|1,2,3|3-7|1,3-5,8\n  リスト番号でセッションを単体/複数削除\n\n" +
 			"/name [番号] <名前>\n  セッションに名前を付ける\n\n" +
 			"/current\n  現在のアクティブセッションを表示\n\n" +
-			"/agentsid\n  エージェントのセッションIDを表示\n\n" +
 			"/history [n]\n  直近 n 件のメッセージを表示（デフォルト 10）\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  API プロバイダ管理\n\n" +
 			"/memory [add|global|global add]\n  エージェントメモリの表示/編集\n\n" +
@@ -1021,7 +1022,6 @@ var messages = map[MsgKey]map[Language]string{
 			"/delete <número>|1,2,3|3-7|1,3-5,8\n  Eliminar una o varias sesiones por número de lista\n\n" +
 			"/name [número] <texto>\n  Nombrar una sesión para fácil identificación\n\n" +
 			"/current\n  Mostrar sesión activa actual\n\n" +
-			"/agentsid\n  Mostrar el ID de sesión del agente\n\n" +
 			"/history [n]\n  Mostrar últimos n mensajes (por defecto 10)\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  Gestionar proveedores API\n\n" +
 			"/memory [add|global|global add]\n  Ver/editar archivos de memoria del agente\n\n" +
@@ -1441,6 +1441,46 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "❌ プロバイダの削除に失敗しました: %v",
 		LangSpanish:            "❌ Error al eliminar proveedor: %v",
 	},
+	MsgCardTitleProviderAdd: {
+		LangEnglish: "Add Provider", LangChinese: "添加服务商", LangTraditionalChinese: "新增服務商",
+		LangJapanese: "プロバイダーを追加", LangSpanish: "Añadir proveedor",
+	},
+	MsgProviderAddPickHint: {
+		LangEnglish:            "Pick a provider below, or choose **Other** to enter manually.\nAfter selecting, send your API key to complete.",
+		LangChinese:            "选择一个服务商，或选择 **自定义** 手动填写。\n选择后，请发送你的 API Key 来完成添加。",
+		LangTraditionalChinese: "選擇一個服務商，或選擇 **自訂** 手動填寫。\n選擇後，請傳送你的 API Key 來完成新增。",
+		LangJapanese:           "プロバイダーを選択するか、**その他** を選んで手動入力してください。\n選択後、API キーを送信して完了します。",
+		LangSpanish:            "Elige un proveedor o selecciona **Otro** para ingresar manualmente.\nDespués de seleccionar, envía tu API Key para completar.",
+	},
+	MsgProviderAddOther: {
+		LangEnglish: "Other (manual)", LangChinese: "自定义 (手动)", LangTraditionalChinese: "自訂 (手動)",
+		LangJapanese: "その他 (手動)", LangSpanish: "Otro (manual)",
+	},
+	MsgProviderAddApiKeyPrompt: {
+		LangEnglish:            "✅ Selected **%s**.\n\nPlease send your **API Key** for this provider.\nFormat: just the key, e.g. `sk-xxxxxxxx`",
+		LangChinese:            "✅ 已选择 **%s**。\n\n请发送你的 **API Key**。\n格式：直接发送密钥即可，如 `sk-xxxxxxxx`",
+		LangTraditionalChinese: "✅ 已選擇 **%s**。\n\n請傳送你的 **API Key**。\n格式：直接傳送金鑰即可，如 `sk-xxxxxxxx`",
+		LangJapanese:           "✅ **%s** を選択しました。\n\n**API キー** を送信してください。\n形式: キーをそのまま送信（例: `sk-xxxxxxxx`）",
+		LangSpanish:            "✅ Seleccionado **%s**.\n\nPor favor envía tu **API Key** para este proveedor.\nFormato: solo la clave, por ejemplo `sk-xxxxxxxx`",
+	},
+	MsgProviderAddInviteHint: {
+		LangEnglish:            "🔑 Don't have a key? Register here: %s",
+		LangChinese:            "🔑 还没有 Key？点击注册获取：%s",
+		LangTraditionalChinese: "🔑 還沒有 Key？點擊註冊取得：%s",
+		LangJapanese:           "🔑 キーをお持ちでない場合はこちらから登録: %s",
+		LangSpanish:            "🔑 ¿No tienes una clave? Regístrate aquí: %s",
+	},
+	MsgProviderLinkGlobal: {
+		LangEnglish: "Link existing provider", LangChinese: "关联已有服务商", LangTraditionalChinese: "關聯已有服務商",
+		LangJapanese: "既存プロバイダーをリンク", LangSpanish: "Vincular proveedor existente",
+	},
+	MsgProviderLinked: {
+		LangEnglish:            "✅ Provider **%s** linked to this project.",
+		LangChinese:            "✅ 已关联服务商 **%s** 到当前项目。",
+		LangTraditionalChinese: "✅ 已關聯服務商 **%s** 到目前專案。",
+		LangJapanese:           "✅ プロバイダー **%s** をこのプロジェクトにリンクしました。",
+		LangSpanish:            "✅ Proveedor **%s** vinculado a este proyecto.",
+	},
 	MsgVoiceNotEnabled: {
 		LangEnglish:            "🎙 Voice messages are not enabled. Please configure `[speech]` in config.toml.",
 		LangChinese:            "🎙 语音消息未启用，请在 config.toml 中配置 `[speech]` 部分。",
@@ -1786,38 +1826,43 @@ var messages = map[MsgKey]map[Language]string{
 		LangEnglish: "cc-connect Status\n\n" +
 			"Project: %s\n" +
 			"Agent: %s\n" +
+			"Work Dir: %s\n" +
 			"Platforms: %s\n" +
 			"Uptime: %s\n" +
 			"Language: %s\n" +
-			"%s" + "%s" + "%s" + "%s" + "%s",
+			"%s" + "%s" + "%s" + "%s" + "%s" + "%s",
 		LangChinese: "cc-connect 状态\n\n" +
 			"项目: %s\n" +
 			"Agent: %s\n" +
+			"工作目录: %s\n" +
 			"平台: %s\n" +
 			"运行时间: %s\n" +
 			"语言: %s\n" +
-			"%s" + "%s" + "%s" + "%s" + "%s",
+			"%s" + "%s" + "%s" + "%s" + "%s" + "%s",
 		LangTraditionalChinese: "cc-connect 狀態\n\n" +
 			"項目: %s\n" +
 			"Agent: %s\n" +
+			"工作目錄: %s\n" +
 			"平台: %s\n" +
 			"運行時間: %s\n" +
 			"語言: %s\n" +
-			"%s" + "%s" + "%s" + "%s" + "%s",
+			"%s" + "%s" + "%s" + "%s" + "%s" + "%s",
 		LangJapanese: "cc-connect ステータス\n\n" +
 			"プロジェクト: %s\n" +
 			"エージェント: %s\n" +
+			"作業ディレクトリ: %s\n" +
 			"プラットフォーム: %s\n" +
 			"稼働時間: %s\n" +
 			"言語: %s\n" +
-			"%s" + "%s" + "%s" + "%s" + "%s",
+			"%s" + "%s" + "%s" + "%s" + "%s" + "%s",
 		LangSpanish: "Estado de cc-connect\n\n" +
 			"Proyecto: %s\n" +
 			"Agente: %s\n" +
+			"Directorio: %s\n" +
 			"Plataformas: %s\n" +
 			"Tiempo activo: %s\n" +
 			"Idioma: %s\n" +
-			"%s" + "%s" + "%s" + "%s" + "%s",
+			"%s" + "%s" + "%s" + "%s" + "%s" + "%s",
 	},
 	MsgReplyFooterRemaining: {
 		LangEnglish:            "%d%% left",
@@ -1825,13 +1870,6 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "剩餘 %d%%",
 		LangJapanese:           "残り %d%%",
 		LangSpanish:            "%d%% restante",
-	},
-	MsgAgentSIDWarning: {
-		LangEnglish:            "⚠️ Agent session ID (sensitive — do not share in public channels):",
-		LangChinese:            "⚠️ Agent 会话 ID（敏感信息，请勿在公开频道分享）：",
-		LangTraditionalChinese: "⚠️ Agent 會話 ID（敏感資訊，請勿在公開頻道分享）：",
-		LangJapanese:           "⚠️ エージェントセッションID（機密情報 — 公開チャンネルで共有しないでください）：",
-		LangSpanish:            "⚠️ ID de sesión del agente (sensible — no compartir en canales públicos):",
 	},
 	MsgModelCurrent: {
 		LangEnglish:            "Current model: %s",
@@ -2057,6 +2095,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "會話 Key: `%s`\n",
 		LangJapanese:           "セッションキー: `%s`\n",
 		LangSpanish:            "Clave de sesión: `%s`\n",
+	},
+	MsgStatusAgentSID: {
+		LangEnglish:            "Agent SID: `%s`\n",
+		LangChinese:            "Agent SID: `%s`\n",
+		LangTraditionalChinese: "Agent SID: `%s`\n",
+		LangJapanese:           "Agent SID: `%s`\n",
+		LangSpanish:            "Agent SID: `%s`\n",
 	},
 	MsgStatusUserID: {
 		LangEnglish:            "User ID: `%s`\n",
@@ -3383,13 +3428,6 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "產生 git diff 並以 HTML 檔案傳送，參數: [目標]",
 		LangJapanese:           "git diff を HTML ファイルで生成、引数: [ターゲット]",
 		LangSpanish:            "Generar git diff como archivo HTML, arg: [objetivo]",
-	},
-	MsgBuiltinCmdAgentSID: {
-		LangEnglish:            "Print the agent session ID",
-		LangChinese:            "输出 Agent Session ID",
-		LangTraditionalChinese: "輸出 Agent Session ID",
-		LangJapanese:           "エージェントのセッションIDを表示",
-		LangSpanish:            "Mostrar el ID de sesión del agente",
 	},
 	MsgDiffEmpty: {
 		LangEnglish:            "No diff — clean working tree (or no changes vs `%s`).",
