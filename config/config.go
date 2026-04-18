@@ -88,6 +88,8 @@ type Config struct {
 	// Quiet is legacy: when true and [display] does not set thinking_messages / tool_messages,
 	// engines behave as if those flags were false. Per-project quiet overrides when set.
 	Quiet             *bool                   `toml:"quiet,omitempty"`
+	Providers         []ProviderConfig        `toml:"providers"`          // global shared providers
+	ProviderPresetsURL string                 `toml:"provider_presets_url,omitempty"` // remote JSON URL for provider presets
 	Projects          []ProjectConfig         `toml:"projects"`
 	Commands          []CommandConfig         `toml:"commands"`     // global custom slash commands
 	Aliases           []AliasConfig           `toml:"aliases"`      // global command aliases
@@ -320,9 +322,10 @@ type ProjectConfig struct {
 }
 
 type AgentConfig struct {
-	Type      string           `toml:"type"`
-	Options   map[string]any   `toml:"options"`
-	Providers []ProviderConfig `toml:"providers"`
+	Type         string           `toml:"type"`
+	Options      map[string]any   `toml:"options"`
+	ProviderRefs []string         `toml:"provider_refs,omitempty"` // references to global [[providers]] by name
+	Providers    []ProviderConfig `toml:"providers"`
 }
 
 // ProviderModelConfig defines a selectable model entry for a provider,
@@ -333,13 +336,14 @@ type ProviderModelConfig struct {
 }
 
 type ProviderConfig struct {
-	Name     string                `toml:"name"`
-	APIKey   string                `toml:"api_key"`
-	BaseURL  string                `toml:"base_url,omitempty"`
-	Model    string                `toml:"model,omitempty"`
-	Models   []ProviderModelConfig `toml:"models,omitempty"`
-	Thinking string                `toml:"thinking,omitempty"`
-	Env      map[string]string     `toml:"env,omitempty"`
+	Name       string                `toml:"name"`
+	APIKey     string                `toml:"api_key"`
+	BaseURL    string                `toml:"base_url,omitempty"`
+	Model      string                `toml:"model,omitempty"`
+	Models     []ProviderModelConfig `toml:"models,omitempty"`
+	Thinking   string                `toml:"thinking,omitempty"`
+	Env        map[string]string     `toml:"env,omitempty"`
+	AgentTypes []string              `toml:"agent_types,omitempty"` // optional: restrict to specific agent types (e.g. ["claudecode", "codex"])
 }
 
 type PlatformConfig struct {
@@ -391,6 +395,8 @@ func Load(path string) (*Config, error) {
 	if cfg.AttachmentSend == "" {
 		cfg.AttachmentSend = "on"
 	}
+
+	cfg.ResolveProviderRefs()
 
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -878,6 +884,138 @@ func RemoveProviderFromConfig(projectName, providerName string) error {
 		return fmt.Errorf("provider %q not found in project %q", providerName, projectName)
 	}
 	return saveConfig(cfg)
+}
+
+// ResolveProviderRefs merges global [[providers]] into each project that uses
+// provider_refs. Inline [[projects.agent.providers]] entries are appended after
+// resolved refs; if an inline entry has the same name as a global one, the
+// inline entry wins (override).
+func (cfg *Config) ResolveProviderRefs() {
+	if len(cfg.Providers) == 0 {
+		return
+	}
+	globalByName := make(map[string]ProviderConfig, len(cfg.Providers))
+	for _, p := range cfg.Providers {
+		globalByName[p.Name] = p
+	}
+	for i := range cfg.Projects {
+		refs := cfg.Projects[i].Agent.ProviderRefs
+		if len(refs) == 0 {
+			continue
+		}
+		agentType := cfg.Projects[i].Agent.Type
+		inlineNames := make(map[string]bool, len(cfg.Projects[i].Agent.Providers))
+		for _, p := range cfg.Projects[i].Agent.Providers {
+			inlineNames[p.Name] = true
+		}
+		var resolved []ProviderConfig
+		for _, name := range refs {
+			if inlineNames[name] {
+				continue // inline override takes precedence
+			}
+			gp, ok := globalByName[name]
+			if !ok {
+				slog.Warn("provider ref not found in global [[providers]]", "project", cfg.Projects[i].Name, "ref", name)
+				continue
+			}
+			if len(gp.AgentTypes) > 0 && !containsString(gp.AgentTypes, agentType) {
+				slog.Debug("skipping provider: agent type mismatch", "provider", name, "project", cfg.Projects[i].Name,
+					"provider_agents", gp.AgentTypes, "project_agent", agentType)
+				continue
+			}
+			resolved = append(resolved, gp)
+		}
+		cfg.Projects[i].Agent.Providers = append(resolved, cfg.Projects[i].Agent.Providers...)
+	}
+}
+
+func containsString(ss []string, s string) bool {
+	for _, v := range ss {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+// ── Global provider CRUD ───────────────────────────────────────
+
+// ListGlobalProviders returns the top-level [[providers]] list.
+func ListGlobalProviders() ([]ProviderConfig, error) {
+	configMu.Lock()
+	defer configMu.Unlock()
+	cfg, err := loadLocked()
+	if err != nil {
+		return nil, err
+	}
+	return cfg.Providers, nil
+}
+
+// AddGlobalProvider appends a provider to the top-level [[providers]] and saves.
+func AddGlobalProvider(provider ProviderConfig) error {
+	configMu.Lock()
+	defer configMu.Unlock()
+	cfg, err := loadLocked()
+	if err != nil {
+		return err
+	}
+	for _, existing := range cfg.Providers {
+		if existing.Name == provider.Name {
+			return fmt.Errorf("global provider %q already exists", provider.Name)
+		}
+	}
+	cfg.Providers = append(cfg.Providers, provider)
+	return saveConfig(cfg)
+}
+
+// UpdateGlobalProvider replaces an existing global provider by name.
+func UpdateGlobalProvider(name string, provider ProviderConfig) error {
+	configMu.Lock()
+	defer configMu.Unlock()
+	cfg, err := loadLocked()
+	if err != nil {
+		return err
+	}
+	for i := range cfg.Providers {
+		if cfg.Providers[i].Name == name {
+			provider.Name = name // name is immutable in update
+			cfg.Providers[i] = provider
+			return saveConfig(cfg)
+		}
+	}
+	return fmt.Errorf("global provider %q not found", name)
+}
+
+// RemoveGlobalProvider removes a provider from top-level [[providers]] and saves.
+func RemoveGlobalProvider(name string) error {
+	configMu.Lock()
+	defer configMu.Unlock()
+	cfg, err := loadLocked()
+	if err != nil {
+		return err
+	}
+	for i := range cfg.Providers {
+		if cfg.Providers[i].Name == name {
+			cfg.Providers = append(cfg.Providers[:i], cfg.Providers[i+1:]...)
+			return saveConfig(cfg)
+		}
+	}
+	return fmt.Errorf("global provider %q not found", name)
+}
+
+func loadLocked() (*Config, error) {
+	if ConfigPath == "" {
+		return nil, fmt.Errorf("config path not set")
+	}
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return nil, fmt.Errorf("read config: %w", err)
+	}
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	return cfg, nil
 }
 
 func saveConfig(cfg *Config) error {
@@ -2302,9 +2440,36 @@ func GetProjectConfigDetails(projectName string) map[string]any {
 			platConfigs[j] = pc
 		}
 		result["platform_configs"] = platConfigs
+		if len(p.Agent.ProviderRefs) > 0 {
+			result["provider_refs"] = p.Agent.ProviderRefs
+		}
 		return result
 	}
 	return nil
+}
+
+// SaveProviderRefs updates provider_refs for a project.
+func SaveProviderRefs(projectName string, refs []string) error {
+	configMu.Lock()
+	defer configMu.Unlock()
+	if ConfigPath == "" {
+		return fmt.Errorf("config path not set")
+	}
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+	for i := range cfg.Projects {
+		if cfg.Projects[i].Name == projectName {
+			cfg.Projects[i].Agent.ProviderRefs = refs
+			return saveConfig(cfg)
+		}
+	}
+	return fmt.Errorf("project %q not found", projectName)
 }
 
 // RemoveProject removes a project from the config file.

@@ -49,9 +49,17 @@ type ManagementServer struct {
 	removeProject        func(projectName string) error
 	saveProjectSettings  func(projectName string, update ProjectSettingsUpdate) error
 	getProjectConfig     func(projectName string) map[string]any
+	saveProviderRefs     func(projectName string, refs []string) error
 	configFilePath       string
 	getGlobalSettings    func() map[string]any
 	saveGlobalSettings   func(map[string]any) error
+
+	// Global provider callbacks (set by cmd/cc-connect)
+	listGlobalProviders  func() ([]GlobalProviderInfo, error)
+	addGlobalProvider    func(GlobalProviderInfo) error
+	updateGlobalProvider func(name string, info GlobalProviderInfo) error
+	removeGlobalProvider func(name string) error
+	fetchPresets         func() (*ProviderPresetsResponse, error)
 }
 
 // NewManagementServer creates a new management API server.
@@ -101,12 +109,47 @@ func (m *ManagementServer) SetGetProjectConfig(fn func(string) map[string]any) {
 	m.getProjectConfig = fn
 }
 
+func (m *ManagementServer) SetSaveProviderRefs(fn func(string, []string) error) {
+	m.saveProviderRefs = fn
+}
+
 func (m *ManagementServer) SetGetGlobalSettings(fn func() map[string]any) {
 	m.getGlobalSettings = fn
 }
 
 func (m *ManagementServer) SetSaveGlobalSettings(fn func(map[string]any) error) {
 	m.saveGlobalSettings = fn
+}
+
+// GlobalProviderInfo is the wire type for global provider CRUD in the management API.
+type GlobalProviderInfo struct {
+	Name       string            `json:"name"`
+	APIKey     string            `json:"api_key,omitempty"`
+	BaseURL    string            `json:"base_url,omitempty"`
+	Model      string            `json:"model,omitempty"`
+	Thinking   string            `json:"thinking,omitempty"`
+	Env        map[string]string `json:"env,omitempty"`
+	AgentTypes []string          `json:"agent_types,omitempty"`
+	Models     []struct {
+		Model string `json:"model"`
+		Alias string `json:"alias,omitempty"`
+	} `json:"models,omitempty"`
+}
+
+func (m *ManagementServer) SetListGlobalProviders(fn func() ([]GlobalProviderInfo, error)) {
+	m.listGlobalProviders = fn
+}
+func (m *ManagementServer) SetAddGlobalProvider(fn func(GlobalProviderInfo) error) {
+	m.addGlobalProvider = fn
+}
+func (m *ManagementServer) SetUpdateGlobalProvider(fn func(string, GlobalProviderInfo) error) {
+	m.updateGlobalProvider = fn
+}
+func (m *ManagementServer) SetRemoveGlobalProvider(fn func(string) error) {
+	m.removeGlobalProvider = fn
+}
+func (m *ManagementServer) SetFetchPresets(fn func() (*ProviderPresetsResponse, error)) {
+	m.fetchPresets = fn
 }
 
 func (m *ManagementServer) Start() {
@@ -150,6 +193,10 @@ func (m *ManagementServer) buildHandler(mux *http.ServeMux) http.Handler {
 	mux.HandleFunc(prefix+"/setup/weixin/begin", m.wrap(m.handleSetupWeixinBegin))
 	mux.HandleFunc(prefix+"/setup/weixin/poll", m.wrap(m.handleSetupWeixinPoll))
 	mux.HandleFunc(prefix+"/setup/weixin/save", m.wrap(m.handleSetupWeixinSave))
+
+	// Global Providers
+	mux.HandleFunc(prefix+"/providers", m.wrap(m.handleGlobalProviders))
+	mux.HandleFunc(prefix+"/providers/", m.wrap(m.handleGlobalProviderRoutes))
 
 	// Bridge
 	mux.HandleFunc(prefix+"/bridge/adapters", m.wrap(m.handleBridgeAdapters))
@@ -508,6 +555,8 @@ func (m *ManagementServer) handleProjectRoutes(w http.ResponseWriter, r *http.Re
 		m.handleProjectSend(w, r, engine)
 	case "providers":
 		m.handleProjectProviders(w, r, engine, rest)
+	case "provider-refs":
+		m.handleProjectProviderRefs(w, r, projName, engine)
 	case "models":
 		m.handleProjectModels(w, r, engine)
 	case "model":
@@ -1108,6 +1157,70 @@ func (m *ManagementServer) handleProjectProviders(w http.ResponseWriter, r *http
 	}
 }
 
+func (m *ManagementServer) handleProjectProviderRefs(w http.ResponseWriter, r *http.Request, projName string, e *Engine) {
+	switch r.Method {
+	case http.MethodGet:
+		if m.getProjectConfig == nil {
+			mgmtJSON(w, http.StatusOK, map[string]any{"provider_refs": []string{}})
+			return
+		}
+		cfg := m.getProjectConfig(projName)
+		refs, _ := cfg["provider_refs"].([]string)
+		if refs == nil {
+			refs = []string{}
+		}
+		mgmtJSON(w, http.StatusOK, map[string]any{"provider_refs": refs})
+
+	case http.MethodPut:
+		if m.saveProviderRefs == nil {
+			mgmtError(w, http.StatusNotImplemented, "provider refs saving not available")
+			return
+		}
+		var body struct {
+			ProviderRefs []string `json:"provider_refs"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			mgmtError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+		if err := m.saveProviderRefs(projName, body.ProviderRefs); err != nil {
+			mgmtError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		// Reload providers into the running engine
+		ps, ok := e.agent.(ProviderSwitcher)
+		if ok && m.listGlobalProviders != nil {
+			globals, _ := m.listGlobalProviders()
+			globalMap := make(map[string]GlobalProviderInfo, len(globals))
+			for _, g := range globals {
+				globalMap[g.Name] = g
+			}
+			existing := ps.ListProviders()
+			existingNames := make(map[string]bool, len(existing))
+			for _, p := range existing {
+				existingNames[p.Name] = true
+			}
+			for _, ref := range body.ProviderRefs {
+				if existingNames[ref] {
+					continue
+				}
+				if g, ok := globalMap[ref]; ok {
+					ps.SetProviders(append(ps.ListProviders(), ProviderConfig{
+						Name:    g.Name,
+						APIKey:  g.APIKey,
+						BaseURL: g.BaseURL,
+						Model:   g.Model,
+					}))
+				}
+			}
+		}
+		mgmtOK(w, "provider refs updated")
+
+	default:
+		mgmtError(w, http.StatusMethodNotAllowed, "GET or PUT only")
+	}
+}
+
 func (m *ManagementServer) handleProjectModels(w http.ResponseWriter, r *http.Request, e *Engine) {
 	if r.Method != http.MethodGet {
 		mgmtError(w, http.StatusMethodNotAllowed, "GET only")
@@ -1426,4 +1539,124 @@ func (m *ManagementServer) listBridgeAdapters() []map[string]any {
 		})
 	}
 	return adapters
+}
+
+// ── Global provider endpoints ─────────────────────────────────
+
+func (m *ManagementServer) handleGlobalProviders(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if m.listGlobalProviders == nil {
+			mgmtJSON(w, http.StatusOK, map[string]any{"providers": []any{}})
+			return
+		}
+		providers, err := m.listGlobalProviders()
+		if err != nil {
+			mgmtError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		mgmtJSON(w, http.StatusOK, map[string]any{"providers": providers})
+
+	case http.MethodPost:
+		if m.addGlobalProvider == nil {
+			mgmtError(w, http.StatusNotImplemented, "not configured")
+			return
+		}
+		var body GlobalProviderInfo
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			mgmtError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+		if body.Name == "" {
+			mgmtError(w, http.StatusBadRequest, "name is required")
+			return
+		}
+		if err := m.addGlobalProvider(body); err != nil {
+			if strings.Contains(err.Error(), "already exists") {
+				mgmtError(w, http.StatusConflict, err.Error())
+			} else {
+				mgmtError(w, http.StatusInternalServerError, err.Error())
+			}
+			return
+		}
+		mgmtJSON(w, http.StatusOK, map[string]any{"name": body.Name, "message": "provider added"})
+
+	default:
+		mgmtError(w, http.StatusMethodNotAllowed, "GET or POST only")
+	}
+}
+
+func (m *ManagementServer) handleGlobalProviderRoutes(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/api/v1/providers/")
+	if rest == "" {
+		m.handleGlobalProviders(w, r)
+		return
+	}
+
+	// /providers/presets
+	if rest == "presets" {
+		m.handleProviderPresets(w, r)
+		return
+	}
+
+	// /providers/{name} or /providers/{name}/...
+	parts := strings.SplitN(rest, "/", 2)
+	name := parts[0]
+
+	switch r.Method {
+	case http.MethodPut, http.MethodPatch:
+		if m.updateGlobalProvider == nil {
+			mgmtError(w, http.StatusNotImplemented, "not configured")
+			return
+		}
+		var body GlobalProviderInfo
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			mgmtError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+		if err := m.updateGlobalProvider(name, body); err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				mgmtError(w, http.StatusNotFound, err.Error())
+			} else {
+				mgmtError(w, http.StatusInternalServerError, err.Error())
+			}
+			return
+		}
+		mgmtOK(w, "provider updated")
+
+	case http.MethodDelete:
+		if m.removeGlobalProvider == nil {
+			mgmtError(w, http.StatusNotImplemented, "not configured")
+			return
+		}
+		if err := m.removeGlobalProvider(name); err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				mgmtError(w, http.StatusNotFound, err.Error())
+			} else {
+				mgmtError(w, http.StatusInternalServerError, err.Error())
+			}
+			return
+		}
+		mgmtOK(w, "provider removed")
+
+	default:
+		mgmtError(w, http.StatusMethodNotAllowed, "PUT, PATCH or DELETE only")
+	}
+}
+
+func (m *ManagementServer) handleProviderPresets(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		mgmtError(w, http.StatusMethodNotAllowed, "GET only")
+		return
+	}
+	if m.fetchPresets == nil {
+		mgmtJSON(w, http.StatusOK, &ProviderPresetsResponse{Version: 1})
+		return
+	}
+	data, err := m.fetchPresets()
+	if err != nil {
+		mgmtError(w, http.StatusBadGateway, "fetch presets: "+err.Error())
+		return
+	}
+	mgmtJSON(w, http.StatusOK, data)
 }
