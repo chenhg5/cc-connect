@@ -321,12 +321,28 @@ cc-connect update --pre     # Include pre-releases
 ### 💬 Session Management
 
 ```
-/new [name]       Start a new session
-/list             List all sessions
-/switch <id>      Switch session
-/current          Show current session
-/dir [path|reset] Show, switch, or reset work directory
+/new [name]           Start a new session
+/list                 List all sessions (cc-connect managed)
+/switch <id>          Switch session (cc-connect managed)
+/current              Show current session
+/dir [path|reset]     Show, switch, or reset work directory
+/attach [query]       Adopt an external Claude Code session from terminal
+                      (query: "latest" | index | uuid prefix; --force to bypass
+                      the 30s concurrent-write guard)
+/resume-latest        Shorthand for /attach latest
+/detach               Release the current session so `claude --resume`
+                      can continue it from a terminal without conflicts
 ```
+
+**Continue a terminal session from IM**: when you've been chatting with
+`claude` in a local terminal and want to pick up on your phone, exit the
+terminal process (`/exit`), then send `/resume-latest` in your chat.
+cc-connect locates the most recent `~/.claude/projects/<work_dir>/*.jsonl`
+transcript, spawns a fresh `claude --resume <uuid>`, and continues the
+conversation. Run `/detach` before returning to the terminal to avoid two
+processes writing the same jsonl (`reset_on_idle_mins` also cleans this up
+automatically). `/attach` and `/detach` are privileged — configure
+`admin_from` to enable them.
 
 Project configs can also rotate to a fresh session automatically after long inactivity:
 
