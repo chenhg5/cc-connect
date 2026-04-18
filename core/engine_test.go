@@ -9708,6 +9708,22 @@ func TestStartAgentSessionWithOptionalEffort_InvalidOverrideFails(t *testing.T) 
 	}
 }
 
+func TestStartAgentSessionWithOptionalEffort_NormalizesCaseAndWhitespace(t *testing.T) {
+	agent := &effortRecordingAgent{
+		session:         newResultAgentSession("cron complete"),
+		availableEffort: []string{"low", "medium", "high", "max"},
+	}
+	e := newTestEngineWithAgent(agent)
+	defer e.cancel()
+
+	if _, err := e.startAgentSessionWithOptionalEffort(agent, "", "  MEDIUM  "); err != nil {
+		t.Fatalf("startAgentSessionWithOptionalEffort() error = %v, want nil", err)
+	}
+	if agent.lastEffort != "medium" {
+		t.Fatalf("lastEffort = %q, want medium", agent.lastEffort)
+	}
+}
+
 func TestStartAgentSessionWithOptionalEffort_UnsupportedAgentFails(t *testing.T) {
 	agent := &resultAgent{session: newResultAgentSession("cron complete")}
 	e := newTestEngineWithAgent(agent)

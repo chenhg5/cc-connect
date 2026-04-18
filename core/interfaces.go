@@ -242,6 +242,10 @@ type Agent interface {
 // SessionEffortStarter is an optional interface for agents that support
 // starting a session with a one-off reasoning-effort override without mutating
 // the agent's shared global effort state.
+//
+// If the agent also implements ReasoningEffortSwitcher, the engine will
+// validate effort against AvailableReasoningEfforts before calling this
+// method. Otherwise the effort string is forwarded as-is.
 type SessionEffortStarter interface {
 	StartSessionWithEffort(ctx context.Context, sessionID string, effort string) (AgentSession, error)
 }

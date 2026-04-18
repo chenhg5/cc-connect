@@ -2380,32 +2380,43 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 }
 
 func (e *Engine) startAgentSessionWithOptionalEffort(agent Agent, sessionID, effortOverride string) (AgentSession, error) {
-	effortOverride = strings.TrimSpace(effortOverride)
+	effortOverride, err := validateSessionEffortOverride(agent, effortOverride)
+	if err != nil {
+		return nil, err
+	}
 	if effortOverride == "" {
 		return agent.StartSession(e.ctx, sessionID)
 	}
+	starter := agent.(SessionEffortStarter)
+	return starter.StartSessionWithEffort(e.ctx, sessionID, effortOverride)
+}
 
-	if switcher, ok := agent.(ReasoningEffortSwitcher); ok {
-		if allowed := switcher.AvailableReasoningEfforts(); len(allowed) > 0 {
-			valid := false
-			for _, candidate := range allowed {
-				if strings.EqualFold(candidate, effortOverride) {
-					effortOverride = candidate
-					valid = true
-					break
-				}
-			}
-			if !valid {
-				return nil, fmt.Errorf("invalid reasoning effort %q for agent %q (supported: %s)", effortOverride, agent.Name(), strings.Join(allowed, ", "))
-			}
-		}
+func validateSessionEffortOverride(agent Agent, effortOverride string) (string, error) {
+	effortOverride = strings.TrimSpace(effortOverride)
+	if effortOverride == "" {
+		return "", nil
 	}
 
 	starter, ok := agent.(SessionEffortStarter)
 	if !ok {
-		return nil, fmt.Errorf("agent %q does not support per-session reasoning effort override", agent.Name())
+		return "", fmt.Errorf("agent %q does not support per-session reasoning effort override", agent.Name())
 	}
-	return starter.StartSessionWithEffort(e.ctx, sessionID, effortOverride)
+	_ = starter
+
+	if switcher, ok := agent.(ReasoningEffortSwitcher); ok {
+		if allowed := switcher.AvailableReasoningEfforts(); len(allowed) > 0 {
+			for _, candidate := range allowed {
+				if strings.EqualFold(candidate, effortOverride) {
+					return candidate, nil
+				}
+			}
+			return "", fmt.Errorf("invalid reasoning effort %q for agent %q (supported: %s)", effortOverride, agent.Name(), strings.Join(allowed, ", "))
+		}
+	}
+
+	// No AvailableReasoningEfforts to validate against; the agent is
+	// responsible for rejecting unknown effort values.
+	return effortOverride, nil
 }
 
 // cleanupInteractiveState removes the interactive state for the given session key

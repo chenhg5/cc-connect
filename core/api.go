@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -221,6 +222,34 @@ type CronAddRequest struct {
 	TimeoutMins *int   `json:"timeout_mins,omitempty"`
 }
 
+func (s *APIServer) resolveEngine(project string) (*Engine, string, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if project != "" {
+		engine, ok := s.engines[project]
+		return engine, project, ok
+	}
+	if len(s.engines) == 1 {
+		for name, e := range s.engines {
+			return e, name, true
+		}
+	}
+	return nil, project, false
+}
+
+func (s *APIServer) validateCronEffortForProject(project, effort string) (string, error) {
+	effort = strings.TrimSpace(effort)
+	if effort == "" {
+		return "", nil
+	}
+	engine, _, ok := s.resolveEngine(project)
+	if !ok || engine == nil {
+		return "", fmt.Errorf("project %q not found", project)
+	}
+	return validateSessionEffortOverride(engine.agent, effort)
+}
+
 func (s *APIServer) handleCronAdd(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
@@ -264,6 +293,11 @@ func (s *APIServer) handleCronAdd(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "project is required (multiple projects configured)", http.StatusBadRequest)
 		return
 	}
+	normalizedEffort, err := s.validateCronEffortForProject(project, req.Effort)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	// Resolve session_key: use provided, or auto-detect from active sessions
 	sessionKey := req.SessionKey
@@ -297,7 +331,7 @@ func (s *APIServer) handleCronAdd(w http.ResponseWriter, r *http.Request) {
 		Silent:      req.Silent,
 		SessionMode: NormalizeCronSessionMode(req.SessionMode),
 		Mode:        req.Mode,
-		Effort:      req.Effort,
+		Effort:      normalizedEffort,
 		TimeoutMins: req.TimeoutMins,
 	}
 	job.CreatedAt = time.Now()
@@ -411,6 +445,25 @@ func (s *APIServer) handleCronEdit(w http.ResponseWriter, r *http.Request) {
 	if req.Value == nil {
 		http.Error(w, "value is required", http.StatusBadRequest)
 		return
+	}
+
+	if req.Field == "effort" {
+		job := s.cron.Store().Get(req.ID)
+		if job == nil {
+			http.Error(w, fmt.Sprintf("job %q not found", req.ID), http.StatusBadRequest)
+			return
+		}
+		value, ok := req.Value.(string)
+		if !ok {
+			http.Error(w, "effort must be a string", http.StatusBadRequest)
+			return
+		}
+		normalizedEffort, err := s.validateCronEffortForProject(job.Project, value)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		req.Value = normalizedEffort
 	}
 
 	if err := s.cron.UpdateJob(req.ID, req.Field, req.Value); err != nil {
