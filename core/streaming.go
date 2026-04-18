@@ -370,13 +370,15 @@ func (sp *streamPreview) detachPreview() {
 // appendSeparator inserts a paragraph break into the accumulated text without
 // triggering a flush. Used in quiet mode to visually separate text segments
 // that span thinking/tool boundaries without creating separate messages.
-func (sp *streamPreview) appendSeparator(sep string) {
+// Returns true if the separator was actually added.
+func (sp *streamPreview) appendSeparator(sep string) bool {
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
 	if sp.degraded || !sp.cfg.Enabled || sp.fullText == "" {
-		return
+		return false
 	}
 	sp.fullText += sep
+	return true
 }
 
 // needsDoneReaction returns true if the preview was delivered via in-place
