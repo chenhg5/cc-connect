@@ -113,6 +113,37 @@ func (a *resultAgent) StartSession(_ context.Context, _ string) (AgentSession, e
 func (a *resultAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) { return nil, nil }
 func (a *resultAgent) Stop() error                                                { return nil }
 
+type effortRecordingAgent struct {
+	session         AgentSession
+	defaultStarts   int
+	overrideStarts  int
+	lastSessionID   string
+	lastEffort      string
+	availableEffort []string
+}
+
+func (a *effortRecordingAgent) Name() string { return "effort-stub" }
+func (a *effortRecordingAgent) StartSession(_ context.Context, sessionID string) (AgentSession, error) {
+	a.defaultStarts++
+	a.lastSessionID = sessionID
+	return a.session, nil
+}
+func (a *effortRecordingAgent) StartSessionWithEffort(_ context.Context, sessionID string, effort string) (AgentSession, error) {
+	a.overrideStarts++
+	a.lastSessionID = sessionID
+	a.lastEffort = effort
+	return a.session, nil
+}
+func (a *effortRecordingAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
+	return nil, nil
+}
+func (a *effortRecordingAgent) Stop() error                { return nil }
+func (a *effortRecordingAgent) SetReasoningEffort(string)  {}
+func (a *effortRecordingAgent) GetReasoningEffort() string { return "" }
+func (a *effortRecordingAgent) AvailableReasoningEfforts() []string {
+	return append([]string(nil), a.availableEffort...)
+}
+
 type sessionEnvRecordingAgent struct {
 	stubAgent
 	session AgentSession
@@ -650,6 +681,10 @@ func (a *stubReplyFooterAgent) GetUsage(_ context.Context) (*UsageReport, error)
 
 func newTestEngine() *Engine {
 	return NewEngine("test", &stubAgent{}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
+}
+
+func newTestEngineWithAgent(agent Agent) *Engine {
+	return NewEngine("test", agent, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
 }
 
 func TestEngineSendToSessionWithAttachments(t *testing.T) {
@@ -5218,7 +5253,7 @@ func TestSessionMismatch_RecyclesStaleAgent(t *testing.T) {
 	// The active Session now wants a DIFFERENT agent session ID.
 	session := &Session{AgentSessionID: "new-agent-id"}
 
-	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "", "")
 
 	if state.agentSession == oldSess {
 		t.Fatal("expected stale agent session to be replaced")
@@ -5255,7 +5290,7 @@ func TestSessionClearedAfterNew_RecyclesAliveAgent(t *testing.T) {
 
 	session := &Session{AgentSessionID: ""}
 
-	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "", "")
 	if state.agentSession == oldSess {
 		t.Fatal("expected stale agent to be recycled when AgentSessionID was cleared")
 	}
@@ -5290,7 +5325,7 @@ func TestSessionMismatch_ReusesWhenIDsMatch(t *testing.T) {
 
 	session := &Session{AgentSessionID: "matching-id"}
 
-	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "", "")
 	if state != existingState {
 		t.Fatal("expected existing state to be reused when session IDs match")
 	}
@@ -5308,7 +5343,7 @@ func TestSessionIDWriteback_ImmediateAfterStartSession(t *testing.T) {
 	key := "test:user1"
 	session := &Session{AgentSessionID: ""} // empty — no prior binding
 
-	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "", "")
 
 	got := session.GetAgentSessionID()
 
@@ -5328,7 +5363,7 @@ func TestSessionIDWriteback_DoesNotOverwriteExisting(t *testing.T) {
 	key := "test:user1"
 	session := &Session{AgentSessionID: "existing-uuid"}
 
-	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "", "")
 
 	got := session.GetAgentSessionID()
 
@@ -5364,7 +5399,7 @@ func TestStaleGoroutineCleanup_RaceSimulation(t *testing.T) {
 
 	// Step 3: New turn creates Session B and calls getOrCreateInteractiveStateWith.
 	sessionB := &Session{AgentSessionID: ""}
-	newState := e.getOrCreateInteractiveStateWith(key, p, "ctx", sessionB, e.sessions, nil, "")
+	newState := e.getOrCreateInteractiveStateWith(key, p, "ctx", sessionB, e.sessions, nil, "", "")
 
 	// Verify S2 is in the map.
 	e.interactiveMu.Lock()
@@ -5690,7 +5725,7 @@ func TestResumeFailureFallbackToFreshSession(t *testing.T) {
 	session.SetAgentSessionID("old-session-id", "stub")
 
 	p := &stubPlatformEngine{n: "test"}
-	state := e.getOrCreateInteractiveStateWith("test:user1", p, "ctx", session, e.sessions, nil, "")
+	state := e.getOrCreateInteractiveStateWith("test:user1", p, "ctx", session, e.sessions, nil, "", "")
 
 	if state.agentSession == nil {
 		t.Fatal("expected agentSession to be non-nil after fallback")
@@ -5728,7 +5763,7 @@ func TestFreshSessionWithoutSavedSessionIDStartsFresh(t *testing.T) {
 	session := e.sessions.GetOrCreateActive("test:user2")
 
 	p := &stubPlatformEngine{n: "test"}
-	state := e.getOrCreateInteractiveStateWith("test:user2", p, "ctx", session, e.sessions, nil, "")
+	state := e.getOrCreateInteractiveStateWith("test:user2", p, "ctx", session, e.sessions, nil, "", "")
 
 	if state.agentSession == nil {
 		t.Fatal("expected agentSession to be non-nil")
@@ -5765,7 +5800,7 @@ func TestWorkspaceReconnectWithSavedSessionIDUsesExactResume(t *testing.T) {
 	session.SetAgentSessionID("saved-session-id", "stub")
 
 	p := &stubPlatformEngine{n: "test"}
-	state := e.getOrCreateInteractiveStateWith("test:user3", p, "ctx", session, e.sessions, nil, "")
+	state := e.getOrCreateInteractiveStateWith("test:user3", p, "ctx", session, e.sessions, nil, "", "")
 
 	if state.agentSession == nil {
 		t.Fatal("expected agentSession to be non-nil")
@@ -9614,6 +9649,88 @@ func TestExecuteCronJob_WorkspacePrefixedSessionKey(t *testing.T) {
 	// Stored session key must remain unchanged.
 	if job.SessionKey != prefixedKey {
 		t.Fatalf("job.SessionKey = %q, want unchanged %q", job.SessionKey, prefixedKey)
+	}
+}
+
+func TestExecuteCronJob_UsesEffortOverrideWhenSupported(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatalf("NewCronStore() error = %v", err)
+	}
+	scheduler := NewCronScheduler(store)
+
+	platform := &stubCronReplyTargetPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "discord"},
+	}
+	agentSession := newResultAgentSession("cron complete")
+	agent := &effortRecordingAgent{
+		session:         agentSession,
+		availableEffort: []string{"low", "medium", "high", "max"},
+	}
+
+	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+	e.cronScheduler = scheduler
+
+	job := &CronJob{
+		ID:          "job-effort",
+		SessionKey:  "discord:channel-1:user-1",
+		Prompt:      "summarize activity",
+		Description: "Daily summary",
+		Effort:      "medium",
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatalf("store.Add() error = %v", err)
+	}
+
+	if err := e.ExecuteCronJob(job); err != nil {
+		t.Fatalf("ExecuteCronJob() error = %v", err)
+	}
+	if agent.overrideStarts != 1 || agent.defaultStarts != 0 {
+		t.Fatalf("defaultStarts=%d overrideStarts=%d, want 0/1", agent.defaultStarts, agent.overrideStarts)
+	}
+	if agent.lastEffort != "medium" {
+		t.Fatalf("lastEffort = %q, want medium", agent.lastEffort)
+	}
+}
+
+func TestStartAgentSessionWithOptionalEffort_InvalidOverrideFails(t *testing.T) {
+	agent := &effortRecordingAgent{
+		session:         newResultAgentSession("cron complete"),
+		availableEffort: []string{"low", "medium", "high", "max"},
+	}
+	e := newTestEngineWithAgent(agent)
+	defer e.cancel()
+
+	if _, err := e.startAgentSessionWithOptionalEffort(agent, "", "xhigh"); err == nil || !strings.Contains(err.Error(), "invalid reasoning effort") {
+		t.Fatalf("startAgentSessionWithOptionalEffort() error = %v, want invalid reasoning effort", err)
+	}
+}
+
+func TestStartAgentSessionWithOptionalEffort_NormalizesCaseAndWhitespace(t *testing.T) {
+	agent := &effortRecordingAgent{
+		session:         newResultAgentSession("cron complete"),
+		availableEffort: []string{"low", "medium", "high", "max"},
+	}
+	e := newTestEngineWithAgent(agent)
+	defer e.cancel()
+
+	if _, err := e.startAgentSessionWithOptionalEffort(agent, "", "  MEDIUM  "); err != nil {
+		t.Fatalf("startAgentSessionWithOptionalEffort() error = %v, want nil", err)
+	}
+	if agent.lastEffort != "medium" {
+		t.Fatalf("lastEffort = %q, want medium", agent.lastEffort)
+	}
+}
+
+func TestStartAgentSessionWithOptionalEffort_UnsupportedAgentFails(t *testing.T) {
+	agent := &resultAgent{session: newResultAgentSession("cron complete")}
+	e := newTestEngineWithAgent(agent)
+	defer e.cancel()
+
+	if _, err := e.startAgentSessionWithOptionalEffort(agent, "", "medium"); err == nil || !strings.Contains(err.Error(), "does not support per-session reasoning effort override") {
+		t.Fatalf("startAgentSessionWithOptionalEffort() error = %v, want unsupported override error", err)
 	}
 }
 

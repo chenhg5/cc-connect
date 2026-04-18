@@ -67,6 +67,33 @@ func TestBuildExecArgs_IncludesReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestStartSessionWithEffort_UsesOverrideWithoutMutatingAgent(t *testing.T) {
+	a := &Agent{
+		workDir:         "/tmp/project",
+		model:           "o3",
+		reasoningEffort: "high",
+		mode:            "full-auto",
+		backend:         "exec",
+	}
+
+	sess, err := a.StartSessionWithEffort(context.Background(), "", "medium")
+	if err != nil {
+		t.Fatalf("StartSessionWithEffort() error = %v", err)
+	}
+	cs, ok := sess.(*codexSession)
+	if !ok {
+		t.Fatalf("session type = %T, want *codexSession", sess)
+	}
+	defer cs.Close()
+
+	if cs.effort != "medium" {
+		t.Fatalf("session effort = %q, want medium", cs.effort)
+	}
+	if a.reasoningEffort != "high" {
+		t.Fatalf("agent reasoningEffort = %q, want high", a.reasoningEffort)
+	}
+}
+
 func TestBuildExecArgs_IncludesBaseURL(t *testing.T) {
 	cs, err := newCodexSession(context.Background(), "/tmp/project", "o3", "high", "full-auto", "", "https://custom.api.example.com", nil, "")
 	if err != nil {

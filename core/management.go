@@ -186,6 +186,34 @@ type CCSwitchProviderInfo struct {
 	IsCurrent bool   `json:"is_current"`
 }
 
+func (m *ManagementServer) resolveEngine(project string) (*Engine, string, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if project != "" {
+		engine, ok := m.engines[project]
+		return engine, project, ok
+	}
+	if len(m.engines) == 1 {
+		for name, e := range m.engines {
+			return e, name, true
+		}
+	}
+	return nil, project, false
+}
+
+func (m *ManagementServer) validateCronEffortForProject(project, effort string) (string, error) {
+	effort = strings.TrimSpace(effort)
+	if effort == "" {
+		return "", nil
+	}
+	engine, _, ok := m.resolveEngine(project)
+	if !ok || engine == nil {
+		return "", fmt.Errorf("project %q not found", project)
+	}
+	return validateSessionEffortOverride(engine.agent, effort)
+}
+
 func (m *ManagementServer) Start() {
 	mux := http.NewServeMux()
 	handler := m.buildHandler(mux)
@@ -1465,6 +1493,11 @@ func (m *ManagementServer) handleCron(w http.ResponseWriter, r *http.Request) {
 			mgmtError(w, http.StatusBadRequest, "project is required (multiple projects configured)")
 			return
 		}
+		normalizedEffort, err := m.validateCronEffortForProject(project, req.Effort)
+		if err != nil {
+			mgmtError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 
 		job := &CronJob{
 			ID:          GenerateCronID(),
@@ -1479,6 +1512,7 @@ func (m *ManagementServer) handleCron(w http.ResponseWriter, r *http.Request) {
 			Silent:      req.Silent,
 			SessionMode: NormalizeCronSessionMode(req.SessionMode),
 			Mode:        req.Mode,
+			Effort:      normalizedEffort,
 			TimeoutMins: req.TimeoutMins,
 			CreatedAt:   time.Now(),
 		}
@@ -1517,6 +1551,24 @@ func (m *ManagementServer) handleCronByID(w http.ResponseWriter, r *http.Request
 		if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
 			mgmtError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 			return
+		}
+		if rawEffort, ok := updates["effort"]; ok {
+			job := m.cronScheduler.Store().Get(id)
+			if job == nil {
+				mgmtError(w, http.StatusNotFound, "cron job not found")
+				return
+			}
+			value, ok := rawEffort.(string)
+			if !ok {
+				mgmtError(w, http.StatusBadRequest, "update effort: effort must be a string")
+				return
+			}
+			normalizedEffort, err := m.validateCronEffortForProject(job.Project, value)
+			if err != nil {
+				mgmtError(w, http.StatusBadRequest, fmt.Sprintf("update effort: %s", err.Error()))
+				return
+			}
+			updates["effort"] = normalizedEffort
 		}
 		for field, value := range updates {
 			if err := m.cronScheduler.UpdateJob(id, field, value); err != nil {
