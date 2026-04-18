@@ -66,6 +66,7 @@ Beta release with new agents, new features, and broad platform fixes. No breakin
 ### New Features
 - **Devin agent**: add Devin CLI as a first-class agent with full `/list`, `/mode`, and session management (#672)
 - **`/ps` command** (replaces `/btw`): send a message to a busy session mid-turn; `/btw` kept as alias for backward compatibility (#620)
+- **Continue terminal Claude Code sessions from IM** (`/attach`, `/resume-latest`, `/detach`): adopt a Claude Code session that was started directly in a local terminal, so you can keep the conversation going from Feishu/Telegram/etc. `/attach [latest|index|uuid-prefix]` scans `~/.claude/projects/<work_dir>/*.jsonl` directly, shows a 5-message preview, and binds the external session UUID via `SwitchToAgentSession` so subsequent messages route through `claude --resume <uuid>`. A 30-second `ModifiedAt` guard refuses to adopt a session that a local `claude` process may still be writing; pass `--force` to override. `/detach` is the symmetric release: it stops the cc-connect subprocess via `stopInteractiveSession`, clears the agent binding, and prints the exact `claude --resume <uuid>` command to run in terminal. All three commands are privileged and require `admin_from`. Pair with `reset_on_idle_mins` as an automatic safety net. Full i18n coverage (en/zh/zh-TW/ja/es). (#666)
 - **`!` shell shortcut**: use `!ls -la` as shorthand for `/shell ls -la`, with optional `--timeout` parameter (#658)
 - **NO_REPLY suppression**: agents can return `NO_REPLY` to silently skip platform delivery, useful for cron/analysis tasks (#682)
 - **Feishu shared WebSocket**: multiple projects sharing the same `app_id` now share one WebSocket connection with per-project `allow_chat` / `group_only` filtering (#613)
@@ -126,7 +127,6 @@ Patch release with critical bug fixes for session management, config preservatio
 - **Weibo image & file support**: send and receive images and files in Weibo DMs via base64 encoding within the WebSocket `send_message` payload. Implements `ImageSender` and `FileSender` interfaces.
 - **Comprehensive session tests**: 12 new `SessionManager` unit tests covering `PastAgentSessionIDs`, legacy data migration, and version-based schema detection. 9 new `Engine` integration tests covering `/list` visibility across `/new`, provider switch, and real-world legacy data scenarios, plus end-to-end session name mapping tests for all three agent ID patterns (immediate, EventText, EventResult).
 - **Config preservation tests**: 8 new tests verifying comment and field preservation for `SaveActiveProvider`, `SaveAgentModel`, `SaveProviderModel`, `SaveLanguage`, `SaveDisplayConfig`, `SaveTTSMode`, multi-project config, and global provider refs.
-
 ## v1.3.0 (2026-04-19)
 
 First stable release of the 1.3 series. 555 commits since v1.2.1 with major new features, platform improvements, and broad community contributions.
@@ -197,7 +197,6 @@ Thanks to all contributors who made this release possible:
 - [@sidney061212-ai](https://github.com/sidney061212-ai) — Agent session ID persistence
 - [@zkunzhu](https://github.com/zkunzhu) — Daemon proxy env preservation
 - [@Yuri0314](https://github.com/Yuri0314) — TTS language type fix
-
 ## v1.2.2-beta.5 (2026-03-31)
 
 Beta release with embedded web admin, Discord proxy support, multimodal fixes, and major platform improvements.
