@@ -40,6 +40,44 @@
 level = "info" # debug, info, warn, error
 
 # =============================================================================
+# Global Providers / 全局服务商
+# =============================================================================
+# Define providers once globally; projects reference them by name via provider_refs.
+# 在此统一定义服务商，项目通过 provider_refs 按名称引用。
+# This avoids duplicating API keys across projects.
+# 避免在多个项目中重复配置 API Key。
+#
+# Remote presets URL (fetches recommended providers list from GitHub/Gitee)
+# 远程预设列表 URL（从 GitHub/Gitee 拉取推荐服务商）
+# provider_presets_url = "https://raw.githubusercontent.com/chenhg5/cc-connect/main/provider-presets.json"
+
+# [[providers]]
+# name = "anthropic"
+# api_key = "${ANTHROPIC_API_KEY}"
+# agent_types = ["claudecode"]   # only for Claude Code projects
+
+# [[providers]]
+# name = "minimaxi-claude"
+# api_key = "${MINIMAXI_API_KEY}"
+# base_url = "https://api.minimaxi.chat/v1"
+# agent_types = ["claudecode"]
+# model = "claude-sonnet-4-20250514"
+
+# [[providers]]
+# name = "minimaxi-codex"
+# api_key = "${MINIMAXI_API_KEY}"
+# base_url = "https://api.minimaxi.chat/v1"
+# agent_types = ["codex"]
+# model = "MiniMax-M2.7"
+
+# [[providers]]
+# name = "dashscope"
+# api_key = "${DASHSCOPE_API_KEY}"
+# base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+# model = "glm-5.1"
+# thinking = "disabled"
+
+# =============================================================================
 # Display Settings / 显示设置
 # =============================================================================
 # Controls how intermediate messages (thinking, tool use) are shown in chat.
@@ -632,9 +670,13 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # Note: When using router, provider settings below are ignored as the router handles model selection.
 # 注意：使用 router 时，下方的 provider 设置将被忽略，因为 router 负责模型选择。
 
-# Active provider (matches a name in [[projects.agent.providers]])
-# 当前激活的 provider（对应下方 providers 中的 name）
+# Active provider (matches a name in [[projects.agent.providers]] or provider_refs)
+# 当前激活的 provider（对应下方 providers 或 provider_refs 中的 name）
 # provider = "anthropic"
+
+# Reference global [[providers]] by name — avoids duplicating keys per project
+# 引用全局 [[providers]] — 避免每个项目重复配置
+# provider_refs = ["minimaxi", "dashscope"]
 
 # API Providers — switch between them via /provider command in chat
 # or via CLI: cc-connect provider add --project my-backend --name relay --api-key sk-xxx
@@ -751,8 +793,8 @@ app_secret = "your-feishu-app-secret"
 #                              # 允许的用户 open_id，逗号分隔；"*" 表示所有（默认）。发送 /whoami 获取你的 open_id。
 # reaction_emoji = "OnIt"  # Emoji reaction on incoming messages (default: "OnIt"); set to "none" to disable
 #                           # 收到消息时添加的表情回复（默认 "OnIt"）；设为 "none" 可禁用
-# done_emoji = "none"       # Emoji reaction after agent finishes streaming work in quiet mode (e.g. "Done"); set to "none" to disable
-#                           # Agent 在 quiet 模式下完成流式工作后的表情回复（如 "Done"）；设为 "none" 可禁用
+# done_emoji = "none"       # Emoji reaction when agent finishes a reply (e.g. "Done"); set to "none" to disable
+#                           # Agent 完成回复后添加的表情回复（如 "Done"）；设为 "none" 可禁用
 # group_reply_all = false   # If true, respond to ALL group messages without requiring @mention
 #                           # 设为 true 时，群聊中无需 @机器人 也会响应所有消息（默认 false）
 # share_session_in_channel = false  # If true, all users in a group share one agent session
@@ -767,14 +809,15 @@ app_secret = "your-feishu-app-secret"
 #                           # 自动将发出消息中的 @显示名 替换为飞书 at 标签（通过匹配群成员名称）
 
 # Lark (International Version) / Lark 国际版
-# Lark uses Webhook mode instead of WebSocket long-connection.
-# Lark 使用 Webhook 模式而非 WebSocket 长连接。
+# Lark now supports WebSocket long-connection too; webhook mode is only needed
+# when you explicitly configure encrypt_key.
+# Lark 国际版现已支持 WebSocket 长连接；只有显式配置 encrypt_key 时才需要 Webhook 模式。
 # 1. Create an app at https://open.larksuite.com / 在 https://open.larksuite.com 创建应用
 # 2. Enable Bot capability / 开启机器人能力
-# 3. Add im.message.receive_v1 event, configure Webhook URL (requires public IP)
-#    添加 im.message.receive_v1 事件，配置 Webhook URL（需要公网 IP）
-# 4. Fill in app_id, app_secret, port, callback_path below
-#    填入下方 app_id、app_secret、port、callback_path
+# 3. Add im.message.receive_v1 event and enable WebSocket long-connection mode (recommended)
+#    添加 im.message.receive_v1 事件，并启用 WebSocket 长连接模式（推荐）
+# 4. Fill in app_id and app_secret below; port/callback_path are only used for webhook mode
+#    填入下方 app_id 和 app_secret；port/callback_path 仅在 Webhook 模式下使用
 
 # [[projects.platforms]]
 # type = "lark"
@@ -901,6 +944,23 @@ app_secret = "your-feishu-app-secret"
 # port = "8080"
 # callback_path = "/callback"
 # allow_from = "*"  # Allowed LINE user IDs / 允许的 LINE 用户 ID
+
+# Weibo / 微博私信 (uncomment to enable / 取消注释以启用)
+# 1. Register an app at https://open.weibo.com/ via 微博龙虾助手
+#    在微博开放平台注册应用，获取 app_id 和 app_secret
+# 2. The bot receives and sends DMs via WebSocket (open-im.api.weibo.com)
+#    机器人通过 WebSocket 收发微博私信
+# Connection: WebSocket — no public URL required / 无需公网地址
+
+# [[projects.platforms]]
+# type = "weibo"
+#
+# [projects.platforms.options]
+# app_id = "your-weibo-app-id"
+# app_secret = "your-weibo-app-secret"
+# allow_from = "*"                 # Allowed Weibo user IDs / 允许的微博用户 ID
+# token_endpoint = ""              # Optional: override token endpoint / 可选：自定义 token 接口地址
+# ws_endpoint = ""                 # Optional: override WebSocket endpoint / 可选：自定义 WebSocket 地址
 
 # WeChat Work / 企业微信 (uncomment to enable / 取消注释以启用)
 # 1. Log in to https://work.weixin.qq.com/wework_admin/frame
