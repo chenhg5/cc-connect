@@ -23,14 +23,17 @@ export interface GlobalProvider {
   models?: ProviderModel[];
 }
 
+export interface PresetAgentConfig {
+  base_url: string;
+  model: string;
+  models?: string[];
+  codex_config?: { wire_api?: string; http_headers?: Record<string, string> };
+}
+
 export interface ProviderPreset {
   name: string;
   display_name: string;
-  base_url: string;
-  endpoints?: Record<string, string>;
-  models?: string[];
-  agent_models?: Record<string, string>;
-  agents?: string[];
+  agents: Record<string, PresetAgentConfig>;
   invite_url?: string;
   description?: string;
   description_zh?: string;

@@ -161,11 +161,13 @@ type Engine struct {
 	attachmentSendEnabled bool
 	startedAt             time.Time
 
-	providerSaveFunc       func(providerName string) error
-	providerAddSaveFunc    func(p ProviderConfig) error
-	providerRemoveSaveFunc func(name string) error
-	providerModelSaveFunc  func(providerName, model string) error
-	modelSaveFunc          func(model string) error
+	providerSaveFunc        func(providerName string) error
+	providerAddSaveFunc     func(p ProviderConfig) error
+	providerRemoveSaveFunc  func(name string) error
+	providerModelSaveFunc   func(providerName, model string) error
+	providerRefsSaveFunc    func(refs []string) error
+	listGlobalProvidersFunc func(agentType string) ([]ProviderConfig, error)
+	modelSaveFunc           func(model string) error
 
 	ttsSaveFunc func(mode string) error
 
@@ -290,11 +292,13 @@ type interactiveState struct {
 }
 
 type pendingProviderAddState struct {
-	phase     string // "preset" = waiting for API key; "other" = waiting for name api_key base_url [model]
-	name      string
-	baseURL   string
-	model     string
-	inviteURL string
+	phase            string // "preset" = waiting for API key; "other" = waiting for name api_key base_url [model]
+	name             string
+	baseURL          string
+	model            string
+	inviteURL        string
+	codexWireAPI     string
+	codexHTTPHeaders map[string]string
 }
 
 type deleteModeState struct {
@@ -594,6 +598,14 @@ func (e *Engine) SetProviderRemoveSaveFunc(fn func(string) error) {
 
 func (e *Engine) SetProviderModelSaveFunc(fn func(providerName, model string) error) {
 	e.providerModelSaveFunc = fn
+}
+
+func (e *Engine) SetProviderRefsSaveFunc(fn func(refs []string) error) {
+	e.providerRefsSaveFunc = fn
+}
+
+func (e *Engine) SetListGlobalProvidersFunc(fn func(agentType string) ([]ProviderConfig, error)) {
+	e.listGlobalProvidersFunc = fn
 }
 
 func (e *Engine) SetModelSaveFunc(fn func(model string) error) {
@@ -6778,10 +6790,12 @@ func (e *Engine) handlePendingProviderAdd(p Platform, msg *Message, content stri
 			return true
 		}
 		prov = ProviderConfig{
-			Name:    paCopy.name,
-			APIKey:  apiKey,
-			BaseURL: paCopy.baseURL,
-			Model:   paCopy.model,
+			Name:             paCopy.name,
+			APIKey:           apiKey,
+			BaseURL:          paCopy.baseURL,
+			Model:            paCopy.model,
+			CodexWireAPI:     paCopy.codexWireAPI,
+			CodexHTTPHeaders: paCopy.codexHTTPHeaders,
 		}
 	case "other":
 		fields := strings.Fields(content)
@@ -6863,7 +6877,7 @@ func (e *Engine) providerAddPresetButtons() [][]ButtonOption {
 	var rows [][]ButtonOption
 	var row []ButtonOption
 	for _, preset := range presets.Providers {
-		if len(preset.Agents) > 0 && !stringSliceContains(preset.Agents, agentType) {
+		if !preset.SupportsAgent(agentType) {
 			continue
 		}
 		row = append(row, ButtonOption{
@@ -6893,23 +6907,22 @@ func (e *Engine) tryProviderAddPreset(p Platform, msg *Message, switcher Provide
 		if preset.Name != presetName {
 			continue
 		}
-		baseURL := preset.BaseURL
-		if ep, ok := preset.Endpoints[agentType]; ok && ep != "" {
-			baseURL = ep
+		ac := preset.AgentConfig(agentType)
+		if ac == nil {
+			continue
 		}
-		model := ""
-		if m, ok := preset.AgentModels[agentType]; ok && m != "" {
-			model = m
-		} else if len(preset.Models) > 0 {
-			model = preset.Models[0]
-		}
-		e.setPendingProviderAdd(msg.SessionKey, &pendingProviderAddState{
+		pa := &pendingProviderAddState{
 			phase:     "preset",
 			name:      preset.Name,
-			baseURL:   baseURL,
-			model:     model,
+			baseURL:   ac.BaseURL,
+			model:     ac.Model,
 			inviteURL: preset.InviteURL,
-		})
+		}
+		if ac.CodexConfig != nil {
+			pa.codexWireAPI = ac.CodexConfig.WireAPI
+			pa.codexHTTPHeaders = ac.CodexConfig.HTTPHeaders
+		}
+		e.setPendingProviderAdd(msg.SessionKey, pa)
 		displayName := preset.DisplayName
 		if displayName == "" {
 			displayName = preset.Name
@@ -7724,23 +7737,22 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 			if preset.Name != args {
 				continue
 			}
-			baseURL := preset.BaseURL
-			if ep, ok := preset.Endpoints[agentType]; ok && ep != "" {
-				baseURL = ep
+			ac := preset.AgentConfig(agentType)
+			if ac == nil {
+				continue
 			}
-			model := ""
-			if m, ok := preset.AgentModels[agentType]; ok && m != "" {
-				model = m
-			} else if len(preset.Models) > 0 {
-				model = preset.Models[0]
-			}
-			e.setPendingProviderAdd(sessionKey, &pendingProviderAddState{
+			pa := &pendingProviderAddState{
 				phase:     "preset",
 				name:      preset.Name,
-				baseURL:   baseURL,
-				model:     model,
+				baseURL:   ac.BaseURL,
+				model:     ac.Model,
 				inviteURL: preset.InviteURL,
-			})
+			}
+			if ac.CodexConfig != nil {
+				pa.codexWireAPI = ac.CodexConfig.WireAPI
+				pa.codexHTTPHeaders = ac.CodexConfig.HTTPHeaders
+			}
+			e.setPendingProviderAdd(sessionKey, pa)
 			return
 		}
 
@@ -7751,6 +7763,9 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 
 	case "/provider/add-cancel":
 		e.setPendingProviderAdd(sessionKey, nil)
+
+	case "/provider/link":
+		e.executeProviderLink(sessionKey, args)
 
 	case "/new":
 		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
@@ -8799,7 +8814,7 @@ func (e *Engine) renderProviderAddCard(sessionKey string) *Card {
 	presets, err := FetchProviderPresets()
 	if err == nil && presets != nil {
 		for _, preset := range presets.Providers {
-			if len(preset.Agents) > 0 && !stringSliceContains(preset.Agents, agentType) {
+			if !preset.SupportsAgent(agentType) {
 				continue
 			}
 			desc := preset.Description
@@ -8816,12 +8831,91 @@ func (e *Engine) renderProviderAddCard(sessionKey string) *Card {
 		}
 	}
 
+	// Show linkable global providers not yet in this project
+	if e.listGlobalProvidersFunc != nil {
+		globals, gErr := e.listGlobalProvidersFunc(agentType)
+		if gErr == nil && len(globals) > 0 {
+			var existing map[string]bool
+			if sw, ok := e.agent.(ProviderSwitcher); ok {
+				existing = make(map[string]bool)
+				for _, p := range sw.ListProviders() {
+					existing[p.Name] = true
+				}
+			}
+			var linkable []ProviderConfig
+			for _, g := range globals {
+				if existing[g.Name] {
+					continue
+				}
+				linkable = append(linkable, g)
+			}
+			if len(linkable) > 0 {
+				cb.Divider()
+				cb.Markdown("🔗 " + e.i18n.T(MsgProviderLinkGlobal))
+				for _, g := range linkable {
+					label := g.Name
+					if g.Model != "" {
+						label += " · " + g.Model
+					}
+					cb.ListItem(label, g.Name, "act:/provider/link "+g.Name)
+				}
+			}
+		}
+	}
+
 	cb.Divider()
 	cb.Buttons(
 		DefaultBtn("✏️ "+e.i18n.T(MsgProviderAddOther), "act:/provider/add-other"),
 		DefaultBtn(e.i18n.T(MsgCardBack), "nav:/provider"),
 	)
 	return cb.Build()
+}
+
+func (e *Engine) executeProviderLink(sessionKey, name string) {
+	name = strings.TrimSpace(name)
+	if name == "" || e.listGlobalProvidersFunc == nil {
+		return
+	}
+	agentType := e.agent.Name()
+	globals, err := e.listGlobalProvidersFunc(agentType)
+	if err != nil {
+		slog.Warn("provider link: list global providers", "error", err)
+		return
+	}
+	var target *ProviderConfig
+	for i := range globals {
+		if globals[i].Name == name {
+			target = &globals[i]
+			break
+		}
+	}
+	if target == nil {
+		slog.Warn("provider link: global provider not found or incompatible agent type", "name", name, "agentType", agentType)
+		return
+	}
+
+	sw, ok := e.agent.(ProviderSwitcher)
+	if !ok {
+		return
+	}
+	for _, p := range sw.ListProviders() {
+		if p.Name == name {
+			return // already linked
+		}
+	}
+	updated := append(sw.ListProviders(), *target)
+	sw.SetProviders(updated)
+
+	// Save the updated provider_refs
+	if e.providerRefsSaveFunc != nil {
+		refs := make([]string, 0, len(updated))
+		for _, p := range updated {
+			refs = append(refs, p.Name)
+		}
+		if err := e.providerRefsSaveFunc(refs); err != nil {
+			slog.Error("provider link: save refs", "error", err)
+		}
+	}
 }
 
 func (e *Engine) renderCronCard(sessionKey string, userID string) *Card {

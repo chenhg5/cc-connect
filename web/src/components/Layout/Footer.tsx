@@ -11,7 +11,7 @@ export default function Footer() {
   const year = new Date().getFullYear();
 
   return (
-    <footer className="mt-8 py-4 text-center text-xs text-gray-400 dark:text-gray-500 select-none">
+    <footer className="mt-4 pt-3 pb-1 text-center text-xs text-gray-400 dark:text-gray-500 select-none">
       <span>© {year} CC-Connect</span>
       {version && <span className="mx-1.5">·</span>}
       {version && <span>v{version}</span>}

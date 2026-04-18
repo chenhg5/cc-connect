@@ -613,16 +613,39 @@ func main() {
 			return config.SaveActiveProvider(projName, providerName)
 		})
 		engine.SetProviderAddSaveFunc(func(p core.ProviderConfig) error {
-			return config.AddProviderToConfig(projName, config.ProviderConfig{
+			cp := config.ProviderConfig{
 				Name: p.Name, APIKey: p.APIKey, BaseURL: p.BaseURL,
 				Model: p.Model, Models: convertCoreModels(p.Models), Thinking: p.Thinking, Env: p.Env,
-			})
+			}
+			if p.CodexWireAPI != "" || len(p.CodexHTTPHeaders) > 0 {
+				cp.Codex = &config.CodexProviderConfig{
+					WireAPI: p.CodexWireAPI, HTTPHeaders: p.CodexHTTPHeaders,
+				}
+			}
+			return config.AddProviderToConfig(projName, cp)
 		})
 		engine.SetProviderRemoveSaveFunc(func(name string) error {
 			return config.RemoveProviderFromConfig(projName, name)
 		})
 		engine.SetProviderModelSaveFunc(func(providerName, model string) error {
 			return config.SaveProviderModel(projName, providerName, model)
+		})
+		engine.SetProviderRefsSaveFunc(func(refs []string) error {
+			return config.SaveProviderRefs(projName, refs)
+		})
+		engine.SetListGlobalProvidersFunc(func(agentType string) ([]core.ProviderConfig, error) {
+			globals, err := config.ListGlobalProviders()
+			if err != nil {
+				return nil, err
+			}
+			var result []core.ProviderConfig
+			for _, g := range globals {
+				if len(g.AgentTypes) > 0 && !containsString(g.AgentTypes, agentType) {
+					continue
+				}
+				result = append(result, configProviderToCore(g))
+			}
+			return result, nil
 		})
 		engine.SetModelSaveFunc(func(model string) error {
 			return config.SaveAgentModel(projName, model)
@@ -825,6 +848,8 @@ func main() {
 				WorkDir:              u.WorkDir,
 				Mode:                 u.Mode,
 				ShowContextIndicator: u.ShowContextIndicator,
+				ReplyFooter:          u.ReplyFooter,
+				InjectSender:         u.InjectSender,
 				PlatformAllowFrom:    u.PlatformAllowFrom,
 			})
 		})
@@ -1363,10 +1388,7 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	if ps, ok := engine.GetAgent().(core.ProviderSwitcher); ok {
 		providers := make([]core.ProviderConfig, len(proj.Agent.Providers))
 		for i, p := range proj.Agent.Providers {
-			providers[i] = core.ProviderConfig{
-				Name: p.Name, APIKey: p.APIKey, BaseURL: p.BaseURL,
-				Model: p.Model, Models: convertProviderModels(p.Models), Thinking: p.Thinking, Env: p.Env,
-			}
+			providers[i] = configProviderToCore(p)
 		}
 		ps.SetProviders(providers)
 		result.ProvidersUpdated = len(providers)
@@ -1442,6 +1464,19 @@ func buildUserRoleManager(uc *config.UsersConfig) *core.UserRoleManager {
 	return urm
 }
 
+func configProviderToCore(p config.ProviderConfig) core.ProviderConfig {
+	c := core.ProviderConfig{
+		Name: p.Name, APIKey: p.APIKey, BaseURL: p.BaseURL,
+		Model: p.Model, Models: convertProviderModels(p.Models),
+		Thinking: p.Thinking, Env: p.Env,
+	}
+	if p.Codex != nil {
+		c.CodexWireAPI = p.Codex.WireAPI
+		c.CodexHTTPHeaders = p.Codex.HTTPHeaders
+	}
+	return c
+}
+
 func convertProviderModels(ms []config.ProviderModelConfig) []core.ModelOption {
 	if len(ms) == 0 {
 		return nil
@@ -1475,15 +1510,7 @@ func wireAgentProviders(agent core.Agent, agentCfg config.AgentConfig) providerW
 
 	providers := make([]core.ProviderConfig, len(agentCfg.Providers))
 	for i, p := range agentCfg.Providers {
-		providers[i] = core.ProviderConfig{
-			Name:     p.Name,
-			APIKey:   p.APIKey,
-			BaseURL:  p.BaseURL,
-			Model:    p.Model,
-			Models:   convertProviderModels(p.Models),
-			Thinking: p.Thinking,
-			Env:      p.Env,
-		}
+		providers[i] = configProviderToCore(p)
 	}
 	ps.SetProviders(providers)
 	if result.explicitProviderRequested {

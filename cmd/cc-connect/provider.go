@@ -526,12 +526,15 @@ func runProviderPresets(args []string) {
 		if p.Description != "" {
 			fmt.Printf("   %s\n", p.Description)
 		}
-		fmt.Printf("   Base URL: %s\n", p.BaseURL)
-		if len(p.Models) > 0 {
-			fmt.Printf("   Models: %s\n", strings.Join(p.Models, ", "))
+		agentTypes := make([]string, 0, len(p.Agents))
+		for at := range p.Agents {
+			agentTypes = append(agentTypes, at)
 		}
-		if len(p.Agents) > 0 {
-			fmt.Printf("   Agents: %s\n", strings.Join(p.Agents, ", "))
+		if len(agentTypes) > 0 {
+			fmt.Printf("   Agents: %s\n", strings.Join(agentTypes, ", "))
+		}
+		for at, ac := range p.Agents {
+			fmt.Printf("   [%s] %s · %s\n", at, ac.BaseURL, ac.Model)
 		}
 		if p.InviteURL != "" {
 			fmt.Printf("   Register: %s\n", p.InviteURL)

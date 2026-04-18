@@ -20,21 +20,48 @@ const (
 
 // ProviderPreset describes a recommended provider available from the remote presets list.
 type ProviderPreset struct {
-	Name        string            `json:"name"`
-	DisplayName string            `json:"display_name"`
-	BaseURL     string            `json:"base_url"`                // default base URL
-	Endpoints   map[string]string `json:"endpoints,omitempty"`     // per-agent-type base URL overrides (e.g. {"claudecode": "https://x/anthropic", "codex": "https://x/v1"})
-	Models      []string          `json:"models,omitempty"`        // common models across agents
-	AgentModels map[string]string `json:"agent_models,omitempty"`  // per-agent-type default model (e.g. {"codex": "gpt-5.4"})
-	Agents      []string          `json:"agents,omitempty"`        // supported agent types
-	InviteURL   string            `json:"invite_url,omitempty"`
-	Description string            `json:"description,omitempty"`
-	DescriptionZh string          `json:"description_zh,omitempty"`
-	Features    []string          `json:"features,omitempty"`
-	Thinking    string            `json:"thinking,omitempty"`
-	Tier        int               `json:"tier"`                    // sponsor ranking: lower = higher priority
-	Featured    bool              `json:"featured,omitempty"`      // show a star badge when true
-	Website     string            `json:"website,omitempty"`
+	Name          string                       `json:"name"`
+	DisplayName   string                       `json:"display_name"`
+	Agents        map[string]PresetAgentConfig  `json:"agents"`               // per-agent-type configuration (keys: "claudecode", "codex", "gemini", "opencode", ...)
+	InviteURL     string                       `json:"invite_url,omitempty"`
+	Description   string                       `json:"description,omitempty"`
+	DescriptionZh string                       `json:"description_zh,omitempty"`
+	Features      []string                     `json:"features,omitempty"`
+	Thinking      string                       `json:"thinking,omitempty"`
+	Tier          int                          `json:"tier"`
+	Featured      bool                         `json:"featured,omitempty"`
+	Website       string                       `json:"website,omitempty"`
+}
+
+// PresetAgentConfig holds per-agent-type settings within a provider preset.
+type PresetAgentConfig struct {
+	BaseURL     string            `json:"base_url"`
+	Model       string            `json:"model"`
+	Models      []string          `json:"models,omitempty"`
+	CodexConfig *PresetCodexConfig `json:"codex_config,omitempty"`
+}
+
+// PresetCodexConfig holds Codex-specific provider settings that get written
+// to Codex's config.toml as [model_providers.<name>].
+type PresetCodexConfig struct {
+	EnvKey      string            `json:"env_key,omitempty"`
+	WireAPI     string            `json:"wire_api,omitempty"`
+	HTTPHeaders map[string]string `json:"http_headers,omitempty"`
+}
+
+// SupportsAgent returns true if the preset supports the given agent type.
+func (p *ProviderPreset) SupportsAgent(agentType string) bool {
+	_, ok := p.Agents[agentType]
+	return ok
+}
+
+// AgentConfig returns the agent-specific config, or nil if unsupported.
+func (p *ProviderPreset) AgentConfig(agentType string) *PresetAgentConfig {
+	ac, ok := p.Agents[agentType]
+	if !ok {
+		return nil
+	}
+	return &ac
 }
 
 // ProviderPresetsResponse is the top-level JSON schema for remote presets.

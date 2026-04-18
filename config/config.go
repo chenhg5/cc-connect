@@ -336,14 +336,26 @@ type ProviderModelConfig struct {
 }
 
 type ProviderConfig struct {
-	Name       string                `toml:"name"`
-	APIKey     string                `toml:"api_key"`
-	BaseURL    string                `toml:"base_url,omitempty"`
-	Model      string                `toml:"model,omitempty"`
-	Models     []ProviderModelConfig `toml:"models,omitempty"`
-	Thinking   string                `toml:"thinking,omitempty"`
-	Env        map[string]string     `toml:"env,omitempty"`
-	AgentTypes []string              `toml:"agent_types,omitempty"` // optional: restrict to specific agent types (e.g. ["claudecode", "codex"])
+	Name        string                `toml:"name"`
+	APIKey      string                `toml:"api_key"`
+	BaseURL     string                `toml:"base_url,omitempty"`
+	Model       string                `toml:"model,omitempty"`
+	Models      []ProviderModelConfig `toml:"models,omitempty"`
+	Thinking    string                `toml:"thinking,omitempty"`
+	Env         map[string]string     `toml:"env,omitempty"`
+	AgentTypes      []string                          `toml:"agent_types,omitempty"`       // optional: restrict to specific agent types (e.g. ["claudecode", "codex"])
+	Endpoints       map[string]string                 `toml:"endpoints,omitempty"`         // per-agent-type base URL overrides (e.g. codex = "https://x/v1")
+	AgentModels     map[string]string                 `toml:"agent_models,omitempty"`      // per-agent-type default model (e.g. codex = "openai/gpt-5.3-codex")
+	AgentModelLists map[string][]ProviderModelConfig  `toml:"agent_model_lists,omitempty"` // per-agent-type model lists (overrides Models when matched)
+	Codex           *CodexProviderConfig              `toml:"codex,omitempty"`             // Codex-specific provider settings
+}
+
+// CodexProviderConfig holds Codex CLI-specific provider fields
+// that map to [model_providers.<name>] in Codex's own config.toml.
+type CodexProviderConfig struct {
+	EnvKey      string            `toml:"env_key,omitempty" json:"env_key,omitempty"`
+	WireAPI     string            `toml:"wire_api,omitempty" json:"wire_api,omitempty"`
+	HTTPHeaders map[string]string `toml:"http_headers,omitempty" json:"http_headers,omitempty"`
 }
 
 type PlatformConfig struct {
@@ -950,7 +962,16 @@ func (cfg *Config) ResolveProviderRefs() {
 					"provider_agents", gp.AgentTypes, "project_agent", agentType)
 				continue
 			}
-			resolved = append(resolved, gp)
+		if ep, ok := gp.Endpoints[agentType]; ok && ep != "" {
+			gp.BaseURL = ep
+		}
+		if am, ok := gp.AgentModels[agentType]; ok && am != "" {
+			gp.Model = am
+		}
+		if aml, ok := gp.AgentModelLists[agentType]; ok && len(aml) > 0 {
+			gp.Models = aml
+		}
+		resolved = append(resolved, gp)
 		}
 		cfg.Projects[i].Agent.Providers = append(resolved, cfg.Projects[i].Agent.Providers...)
 	}
@@ -2064,9 +2085,15 @@ func pickAgentTemplateForNewProject(cfg *Config, opts EnsureProjectWithFeishuOpt
 		}
 	}
 	if agentType := strings.TrimSpace(opts.AgentType); agentType != "" {
+		realType, preset, _ := strings.Cut(agentType, ":")
+		agentOpts := map[string]any{}
+		if realType == "acp" && preset != "" {
+			agentOpts["command"] = preset
+			agentOpts["display_name"] = preset
+		}
 		return AgentConfig{
-			Type:    agentType,
-			Options: map[string]any{},
+			Type:    realType,
+			Options: agentOpts,
 		}
 	}
 	if len(cfg.Projects) > 0 {
@@ -2086,15 +2113,31 @@ func cloneAgentConfig(in AgentConfig) AgentConfig {
 	if len(in.Providers) > 0 {
 		out.Providers = make([]ProviderConfig, len(in.Providers))
 		for i := range in.Providers {
-			out.Providers[i] = ProviderConfig{
-				Name:     in.Providers[i].Name,
-				APIKey:   in.Providers[i].APIKey,
-				BaseURL:  in.Providers[i].BaseURL,
-				Model:    in.Providers[i].Model,
-				Models:   append([]ProviderModelConfig(nil), in.Providers[i].Models...),
-				Thinking: in.Providers[i].Thinking,
-				Env:      cloneStringMap(in.Providers[i].Env),
+			p := ProviderConfig{
+				Name:        in.Providers[i].Name,
+				APIKey:      in.Providers[i].APIKey,
+				BaseURL:     in.Providers[i].BaseURL,
+				Model:       in.Providers[i].Model,
+				Models:      append([]ProviderModelConfig(nil), in.Providers[i].Models...),
+				Thinking:    in.Providers[i].Thinking,
+				Env:         cloneStringMap(in.Providers[i].Env),
+				Endpoints:   cloneStringMap(in.Providers[i].Endpoints),
+				AgentModels: cloneStringMap(in.Providers[i].AgentModels),
 			}
+			if len(in.Providers[i].AgentModelLists) > 0 {
+				p.AgentModelLists = make(map[string][]ProviderModelConfig, len(in.Providers[i].AgentModelLists))
+				for k, v := range in.Providers[i].AgentModelLists {
+					p.AgentModelLists[k] = append([]ProviderModelConfig(nil), v...)
+				}
+			}
+			if in.Providers[i].Codex != nil {
+				p.Codex = &CodexProviderConfig{
+					EnvKey:      in.Providers[i].Codex.EnvKey,
+					WireAPI:     in.Providers[i].Codex.WireAPI,
+					HTTPHeaders: cloneStringMap(in.Providers[i].Codex.HTTPHeaders),
+				}
+			}
+			out.Providers[i] = p
 		}
 	}
 	return out
@@ -2340,6 +2383,8 @@ type ProjectSettingsUpdate struct {
 	WorkDir              *string
 	Mode                 *string
 	ShowContextIndicator *bool
+	ReplyFooter          *bool
+	InjectSender         *bool
 	PlatformAllowFrom    map[string]string
 }
 
@@ -2377,6 +2422,14 @@ func SaveProjectSettings(projectName string, update ProjectSettingsUpdate) error
 		if update.ShowContextIndicator != nil {
 			v := *update.ShowContextIndicator
 			proj.ShowContextIndicator = &v
+		}
+		if update.ReplyFooter != nil {
+			v := *update.ReplyFooter
+			proj.ReplyFooter = &v
+		}
+		if update.InjectSender != nil {
+			v := *update.InjectSender
+			proj.InjectSender = &v
 		}
 		if update.WorkDir != nil || update.Mode != nil {
 			if proj.Agent.Options == nil {
@@ -2455,6 +2508,12 @@ func GetProjectConfigDetails(projectName string) map[string]any {
 		}
 		if p.ShowContextIndicator != nil {
 			result["show_context_indicator"] = *p.ShowContextIndicator
+		}
+		if p.ReplyFooter != nil {
+			result["reply_footer"] = *p.ReplyFooter
+		}
+		if p.InjectSender != nil {
+			result["inject_sender"] = *p.InjectSender
 		}
 		platConfigs := make([]map[string]any, len(p.Platforms))
 		for j, plat := range p.Platforms {

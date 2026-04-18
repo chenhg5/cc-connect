@@ -2229,3 +2229,293 @@ func TestResolveProviderRefs_NoGlobalProviders(t *testing.T) {
 		t.Errorf("expected only inline provider 'bar', got %+v", providers)
 	}
 }
+
+func TestResolveProviderRefs_Basic(t *testing.T) {
+	cfg := &Config{
+		Providers: []ProviderConfig{
+			{Name: "global1", APIKey: "key1", BaseURL: "https://example.com", Model: "model-a"},
+		},
+		Projects: []ProjectConfig{{
+			Name: "proj",
+			Agent: AgentConfig{
+				Type:         "claudecode",
+				ProviderRefs: []string{"global1"},
+			},
+		}},
+	}
+	cfg.ResolveProviderRefs()
+
+	ps := cfg.Projects[0].Agent.Providers
+	if len(ps) != 1 || ps[0].Name != "global1" || ps[0].BaseURL != "https://example.com" {
+		t.Fatalf("expected resolved global1, got %+v", ps)
+	}
+}
+
+func TestResolveProviderRefs_AgentTypesFilter(t *testing.T) {
+	cfg := &Config{
+		Providers: []ProviderConfig{
+			{Name: "claude-only", AgentTypes: []string{"claudecode"}},
+			{Name: "codex-only", AgentTypes: []string{"codex"}},
+			{Name: "universal"},
+		},
+		Projects: []ProjectConfig{{
+			Name: "codex-proj",
+			Agent: AgentConfig{
+				Type:         "codex",
+				ProviderRefs: []string{"claude-only", "codex-only", "universal"},
+			},
+		}},
+	}
+	cfg.ResolveProviderRefs()
+
+	ps := cfg.Projects[0].Agent.Providers
+	names := make([]string, len(ps))
+	for i, p := range ps {
+		names[i] = p.Name
+	}
+	if len(ps) != 2 {
+		t.Fatalf("expected 2 providers (codex-only + universal), got %v", names)
+	}
+	if names[0] != "codex-only" || names[1] != "universal" {
+		t.Fatalf("unexpected providers: %v", names)
+	}
+}
+
+func TestResolveProviderRefs_EndpointsOverride(t *testing.T) {
+	cfg := &Config{
+		Providers: []ProviderConfig{{
+			Name:    "multi",
+			BaseURL: "https://provider.com/api",
+			Model:   "claude-sonnet-4",
+			Endpoints: map[string]string{
+				"codex": "https://provider.com/api/v1",
+			},
+			AgentModels: map[string]string{
+				"codex": "openai/gpt-5.3-codex",
+			},
+		}},
+		Projects: []ProjectConfig{
+			{
+				Name: "claude-proj",
+				Agent: AgentConfig{
+					Type:         "claudecode",
+					ProviderRefs: []string{"multi"},
+				},
+			},
+			{
+				Name: "codex-proj",
+				Agent: AgentConfig{
+					Type:         "codex",
+					ProviderRefs: []string{"multi"},
+				},
+			},
+		},
+	}
+	cfg.ResolveProviderRefs()
+
+	// claudecode project: should keep original base_url and model
+	cp := cfg.Projects[0].Agent.Providers
+	if len(cp) != 1 {
+		t.Fatalf("claude-proj: expected 1 provider, got %d", len(cp))
+	}
+	if cp[0].BaseURL != "https://provider.com/api" {
+		t.Errorf("claude-proj: base_url = %q, want original", cp[0].BaseURL)
+	}
+	if cp[0].Model != "claude-sonnet-4" {
+		t.Errorf("claude-proj: model = %q, want original", cp[0].Model)
+	}
+
+	// codex project: should have overridden base_url and model
+	xp := cfg.Projects[1].Agent.Providers
+	if len(xp) != 1 {
+		t.Fatalf("codex-proj: expected 1 provider, got %d", len(xp))
+	}
+	if xp[0].BaseURL != "https://provider.com/api/v1" {
+		t.Errorf("codex-proj: base_url = %q, want codex endpoint", xp[0].BaseURL)
+	}
+	if xp[0].Model != "openai/gpt-5.3-codex" {
+		t.Errorf("codex-proj: model = %q, want codex model", xp[0].Model)
+	}
+}
+
+func TestResolveProviderRefs_SplitProviderPattern(t *testing.T) {
+	cfg := &Config{
+		Providers: []ProviderConfig{
+			{
+				Name:       "ssy",
+				APIKey:     "key-xxx",
+				BaseURL:    "https://router.example.com/api",
+				Model:      "claude-sonnet-4-6",
+				AgentTypes: []string{"claudecode", "gemini"},
+				Models: []ProviderModelConfig{
+					{Model: "claude-sonnet-4-6"},
+					{Model: "claude-opus-4"},
+				},
+			},
+			{
+				Name:       "ssy-codex",
+				APIKey:     "key-xxx",
+				BaseURL:    "https://router.example.com/api/v1",
+				Model:      "openai/gpt-5.3-codex",
+				AgentTypes: []string{"codex"},
+				Models: []ProviderModelConfig{
+					{Model: "openai/gpt-5.3-codex"},
+					{Model: "openai/gpt-5.4"},
+				},
+				Codex: &CodexProviderConfig{WireAPI: "responses"},
+			},
+		},
+		Projects: []ProjectConfig{
+			{
+				Name: "my-claude",
+				Agent: AgentConfig{
+					Type:         "claudecode",
+					ProviderRefs: []string{"ssy", "ssy-codex"},
+				},
+			},
+			{
+				Name: "my-codex",
+				Agent: AgentConfig{
+					Type:         "codex",
+					ProviderRefs: []string{"ssy", "ssy-codex"},
+				},
+			},
+		},
+	}
+	cfg.ResolveProviderRefs()
+
+	// claudecode project should only get "ssy" (not ssy-codex)
+	cp := cfg.Projects[0].Agent.Providers
+	if len(cp) != 1 || cp[0].Name != "ssy" {
+		names := make([]string, len(cp))
+		for i, p := range cp {
+			names[i] = p.Name
+		}
+		t.Fatalf("claude project: expected [ssy], got %v", names)
+	}
+	if len(cp[0].Models) != 2 || cp[0].Models[0].Model != "claude-sonnet-4-6" {
+		t.Errorf("claude project: unexpected models: %+v", cp[0].Models)
+	}
+
+	// codex project should only get "ssy-codex" (not ssy)
+	xp := cfg.Projects[1].Agent.Providers
+	if len(xp) != 1 || xp[0].Name != "ssy-codex" {
+		names := make([]string, len(xp))
+		for i, p := range xp {
+			names[i] = p.Name
+		}
+		t.Fatalf("codex project: expected [ssy-codex], got %v", names)
+	}
+	if xp[0].BaseURL != "https://router.example.com/api/v1" {
+		t.Errorf("codex project: base_url = %q", xp[0].BaseURL)
+	}
+	if xp[0].Model != "openai/gpt-5.3-codex" {
+		t.Errorf("codex project: model = %q", xp[0].Model)
+	}
+	if xp[0].Codex == nil || xp[0].Codex.WireAPI != "responses" {
+		t.Errorf("codex project: codex config missing or wrong: %+v", xp[0].Codex)
+	}
+}
+
+func TestResolveProviderRefs_InlineOverridesGlobal(t *testing.T) {
+	cfg := &Config{
+		Providers: []ProviderConfig{
+			{Name: "global1", BaseURL: "https://global.com", Model: "global-model"},
+		},
+		Projects: []ProjectConfig{{
+			Name: "proj",
+			Agent: AgentConfig{
+				Type:         "claudecode",
+				ProviderRefs: []string{"global1"},
+				Providers: []ProviderConfig{
+					{Name: "global1", BaseURL: "https://override.com", Model: "override-model"},
+				},
+			},
+		}},
+	}
+	cfg.ResolveProviderRefs()
+
+	ps := cfg.Projects[0].Agent.Providers
+	if len(ps) != 1 {
+		t.Fatalf("expected 1 provider (inline override), got %d", len(ps))
+	}
+	if ps[0].BaseURL != "https://override.com" {
+		t.Errorf("inline override not applied: base_url = %q", ps[0].BaseURL)
+	}
+}
+
+func TestResolveProviderRefs_TOMLParsing(t *testing.T) {
+	input := `
+[[providers]]
+  name = "ssy"
+  api_key = "key123"
+  base_url = "https://router.example.com/api"
+  model = "claude-sonnet-4-6"
+  agent_types = ["claudecode", "gemini"]
+
+  [[providers.models]]
+    model = "claude-sonnet-4-6"
+
+[[providers]]
+  name = "ssy-codex"
+  api_key = "key123"
+  base_url = "https://router.example.com/api/v1"
+  model = "openai/gpt-5.3-codex"
+  agent_types = ["codex"]
+
+  [providers.endpoints]
+    codex = "https://router.example.com/api/v1"
+
+  [providers.agent_models]
+    codex = "openai/gpt-5.3-codex"
+
+  [[providers.models]]
+    model = "openai/gpt-5.3-codex"
+
+  [providers.codex]
+    wire_api = "responses"
+
+[[projects]]
+  name = "test-codex"
+
+  [projects.agent]
+    type = "codex"
+    provider_refs = ["ssy", "ssy-codex"]
+
+  [[projects.platforms]]
+    type = "feishu"
+    [projects.platforms.options]
+      app_id = "test"
+      app_secret = "test"
+`
+	var cfg Config
+	if _, err := toml.Decode(input, &cfg); err != nil {
+		t.Fatalf("TOML decode: %v", err)
+	}
+
+	if len(cfg.Providers) != 2 {
+		t.Fatalf("expected 2 global providers, got %d", len(cfg.Providers))
+	}
+
+	codexProv := cfg.Providers[1]
+	if codexProv.Codex == nil {
+		t.Fatal("ssy-codex: codex config not parsed")
+	}
+	if codexProv.Codex.WireAPI != "responses" {
+		t.Errorf("ssy-codex: wire_api = %q, want responses", codexProv.Codex.WireAPI)
+	}
+	if codexProv.Endpoints["codex"] != "https://router.example.com/api/v1" {
+		t.Errorf("ssy-codex: endpoints not parsed: %+v", codexProv.Endpoints)
+	}
+
+	cfg.ResolveProviderRefs()
+
+	ps := cfg.Projects[0].Agent.Providers
+	if len(ps) != 1 || ps[0].Name != "ssy-codex" {
+		names := make([]string, len(ps))
+		for i, p := range ps {
+			names[i] = p.Name
+		}
+		t.Fatalf("expected [ssy-codex], got %v", names)
+	}
+}

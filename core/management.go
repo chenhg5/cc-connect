@@ -24,6 +24,8 @@ type ProjectSettingsUpdate struct {
 	WorkDir              *string
 	Mode                 *string
 	ShowContextIndicator *bool
+	ReplyFooter          *bool
+	InjectSender         *bool
 	PlatformAllowFrom    map[string]string
 }
 
@@ -495,10 +497,7 @@ func (m *ManagementServer) handleProjects(w http.ResponseWriter, r *http.Request
 			platNames[i] = p.Name()
 		}
 
-		sessCount := 0
-		e.interactiveMu.Lock()
-		sessCount = len(e.interactiveStates)
-		e.interactiveMu.Unlock()
+		sessCount := len(e.sessions.AllSessions())
 
 		hbEnabled := false
 		if m.heartbeatScheduler != nil {
@@ -582,9 +581,11 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 			}
 		}
 
+		allSessions := e.sessions.AllSessions()
+		sessCount := len(allSessions)
+
 		e.interactiveMu.Lock()
-		sessCount := len(e.interactiveStates)
-		keys := make([]string, 0, sessCount)
+		keys := make([]string, 0, len(e.interactiveStates))
 		for k := range e.interactiveStates {
 			keys = append(keys, k)
 		}
@@ -650,6 +651,8 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 			WorkDir              *string           `json:"work_dir"`
 			Mode                 *string           `json:"mode"`
 			ShowContextIndicator *bool             `json:"show_context_indicator"`
+			ReplyFooter          *bool             `json:"reply_footer"`
+			InjectSender         *bool             `json:"inject_sender"`
 			PlatformAllowFrom    map[string]string `json:"platform_allow_from"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -690,6 +693,12 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 		if body.ShowContextIndicator != nil {
 			e.SetShowContextIndicator(*body.ShowContextIndicator)
 		}
+		if body.ReplyFooter != nil {
+			e.SetReplyFooterEnabled(*body.ReplyFooter)
+		}
+		if body.InjectSender != nil {
+			e.SetInjectSender(*body.InjectSender)
+		}
 
 		if m.saveProjectSettings != nil {
 			patch := ProjectSettingsUpdate{
@@ -699,6 +708,8 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 				WorkDir:              body.WorkDir,
 				Mode:                 body.Mode,
 				ShowContextIndicator: body.ShowContextIndicator,
+				ReplyFooter:          body.ReplyFooter,
+				InjectSender:         body.InjectSender,
 				PlatformAllowFrom:    body.PlatformAllowFrom,
 			}
 			if err := m.saveProjectSettings(name, patch); err != nil {

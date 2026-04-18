@@ -57,14 +57,16 @@ export default function ProviderList() {
   };
 
   const handleAddFromPreset = (preset: ProviderPreset) => {
-    const baseUrl = preset.endpoints?.['claudecode'] || preset.base_url;
+    const agentTypes = Object.keys(preset.agents || {});
+    const firstAgent = agentTypes[0] || 'claudecode';
+    const ac = preset.agents?.[firstAgent];
     setEditProvider({
       name: preset.name,
-      base_url: baseUrl,
-      model: preset.agent_models?.['claudecode'] || preset.models?.[0] || '',
+      base_url: ac?.base_url || '',
+      model: ac?.model || '',
       thinking: preset.thinking || '',
-      models: preset.models?.slice(0, 3).map(m => ({ model: m })),
-      agent_types: preset.agents || [],
+      models: ac?.models?.slice(0, 3).map(m => ({ model: m })),
+      agent_types: agentTypes,
       _preset: preset,
     } as any);
     setShowAddModal(true);
@@ -276,9 +278,9 @@ function PresetGrid({
                   </p>
                 )}
               </div>
-              {p.agents && p.agents.length > 0 && (
+              {p.agents && Object.keys(p.agents).length > 0 && (
                 <div className="flex flex-wrap gap-1">
-                  {p.agents.map(a => (
+                  {Object.keys(p.agents).map(a => (
                     <Badge key={a} variant="info" className="text-xs">{a}</Badge>
                   ))}
                 </div>
@@ -290,9 +292,12 @@ function PresetGrid({
                   ))}
                 </div>
               )}
-              {p.models && p.models.length > 0 && (
-                <ModelBadges models={p.models} limit={5} />
-              )}
+              {(() => {
+                const firstAc = p.agents?.[Object.keys(p.agents || {})[0]];
+                return firstAc?.models && firstAc.models.length > 0 ? (
+                  <ModelBadges models={firstAc.models} limit={5} />
+                ) : null;
+              })()}
               <div className="flex items-center justify-between pt-1">
                 {p.invite_url ? (
                   <a
