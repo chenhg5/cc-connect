@@ -326,16 +326,18 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 			return p.onBotMenu(event)
 		})
 
-	// Lark international version uses Webhook mode, not WebSocket long connection
-	// Feishu domestic version supports WebSocket long connection
-	if p.platformName == "lark" {
+	if p.shouldUseWebhookMode() {
 		return p.startWebhookMode()
 	}
 
 	return p.startWebSocketMode()
 }
 
-// startWebSocketMode starts the WebSocket long connection mode (for Feishu domestic version)
+func (p *Platform) shouldUseWebhookMode() bool {
+	return strings.TrimSpace(p.encryptKey) != ""
+}
+
+// startWebSocketMode starts the WebSocket long connection mode.
 func (p *Platform) startWebSocketMode() error {
 	wsOpts := []larkws.ClientOption{
 		larkws.WithEventHandler(p.eventHandler),
@@ -806,7 +808,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
-			Content: quotedPrefix + text, ReplyCtx: rctx,
+			Content: text, ExtraContent: quotedPrefix, ReplyCtx: rctx,
 		})
 
 	case "image":
@@ -868,7 +870,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
-			Content: quotedPrefix + text, Images: images,
+			Content: text, ExtraContent: quotedPrefix, Images: images,
 			ReplyCtx: rctx,
 		})
 

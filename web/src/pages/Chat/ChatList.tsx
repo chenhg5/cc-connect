@@ -115,7 +115,10 @@ export default function ChatList() {
                   <div className="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400 mt-auto pt-3 border-t border-gray-100 dark:border-gray-800">
                     <div className="flex items-center gap-1.5">
                       <Badge className="text-[9px]">{project.agent_type}</Badge>
-                      {project.platforms?.map((pl) => <Badge key={pl}>{pl}</Badge>)}
+                      {project.platforms?.slice(0, 2).map((pl) => <Badge key={pl}>{pl}</Badge>)}
+                      {(project.platforms?.length ?? 0) > 2 && (
+                        <Badge>+{project.platforms!.length - 2}</Badge>
+                      )}
                     </div>
                     <div className="flex items-center gap-2">
                       <span>{project.sessions_count} {t('chat.sessions', 'sessions')}</span>
