@@ -2,6 +2,7 @@
   "nav": {
     "dashboard": "總覽",
     "projects": "專案",
+    "providers": "服務商",
     "sessions": "工作階段",
     "chat": "對話",
     "cron": "排程工作",
@@ -86,7 +87,14 @@
     "remove": "移除",
     "activate": "啟用",
     "setModel": "設定模型",
-    "models": "可用模型"
+    "models": "可用模型",
+    "global": "全域",
+    "emptyProject": "此專案尚未設定服務商。",
+    "emptyProjectHint": "關聯全域服務商或新增自訂服務商。",
+    "linkGlobal": "關聯全域服務商",
+    "addCustom": "自訂新增",
+    "allLinked": "所有全域服務商已關聯。",
+    "manageGlobal": "管理全域服務商"
   },
   "cron": {
     "title": "排程工作",
@@ -310,6 +318,38 @@
     "rlWindowSecsHint": "時間視窗的秒數",
     "log": "記錄",
     "logLevel": "記錄層級"
+  },
+  "globalProviders": {
+    "title": "服務商管理",
+    "subtitle": "管理全域共用的 API 服務商，可被所有專案引用",
+    "add": "新增服務商",
+    "edit": "編輯服務商",
+    "empty": "尚未配置服務商",
+    "emptyHint": "新增全域服務商或從預設清單中匯入。",
+    "deleteHint": "移除服務商「{{name}}」？引用該服務商的專案將失去存取權限。",
+    "noPresets": "暫無預設",
+    "noPresetsHint": "無法載入服務商預設清單，請確認網路連線。",
+    "register": "註冊",
+    "addPreset": "新增",
+    "added": "已新增",
+    "tab": {
+      "providers": "我的服務商",
+      "presets": "推薦預設"
+    },
+    "form": {
+      "name": "名稱",
+      "model": "預設模型",
+      "modelHint": "切換到該服務商時使用的模型",
+      "models": "可用模型",
+      "modelsHint": "使用者可透過 /model 指令切換的模型列表",
+      "agentTypes": "適用 Agent 類型",
+      "agentTypesHint": "留空表示適用所有 Agent 類型",
+      "thinkingDefault": "預設（自動）",
+      "perAgentHint": "不同 Agent 可能使用不同的 Base URL / 模型，可按 Agent 類型分別設定。",
+      "defaultConfig": "預設",
+      "baseUrl": "Base URL",
+      "codexWireApi": "Wire API"
+    }
   },
   "theme": {
     "light": "淺色",

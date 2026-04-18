@@ -19,6 +19,9 @@ export interface ProjectDetail {
   work_dir?: string;
   agent_mode?: string;
   show_context_indicator?: boolean;
+  reply_footer?: boolean;
+  inject_sender?: boolean;
+  provider_refs?: string[];
   platform_configs?: PlatformConfigInfo[];
   platforms: { type: string; connected: boolean }[];
   sessions_count: number;
@@ -43,6 +46,8 @@ export interface ProjectSettingsUpdate {
   work_dir?: string;
   mode?: string;
   show_context_indicator?: boolean;
+  reply_footer?: boolean;
+  inject_sender?: boolean;
   platform_allow_from?: Record<string, string>;
 }
 

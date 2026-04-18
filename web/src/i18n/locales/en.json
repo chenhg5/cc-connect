@@ -2,6 +2,7 @@
   "nav": {
     "dashboard": "Dashboard",
     "projects": "Projects",
+    "providers": "Providers",
     "sessions": "Sessions",
     "chat": "Chat",
     "cron": "Cron",
@@ -86,7 +87,14 @@
     "remove": "Remove",
     "activate": "Activate",
     "setModel": "Set model",
-    "models": "Models"
+    "models": "Models",
+    "global": "global",
+    "emptyProject": "No providers configured for this project.",
+    "emptyProjectHint": "Link a global provider or add a custom one.",
+    "linkGlobal": "Link global",
+    "addCustom": "Add custom",
+    "allLinked": "All global providers are already linked.",
+    "manageGlobal": "Manage global providers"
   },
   "cron": {
     "title": "Scheduled jobs",
@@ -310,6 +318,38 @@
     "rlWindowSecsHint": "Time window in seconds",
     "log": "Log",
     "logLevel": "Log level"
+  },
+  "globalProviders": {
+    "title": "Providers",
+    "subtitle": "Manage shared API providers across all projects",
+    "add": "Add Provider",
+    "edit": "Edit Provider",
+    "empty": "No providers configured",
+    "emptyHint": "Add a global provider or import from presets to get started.",
+    "deleteHint": "Remove provider \"{{name}}\"? Projects referencing it will lose access.",
+    "noPresets": "No presets available",
+    "noPresetsHint": "Provider presets could not be loaded. Check your network connection.",
+    "register": "Register",
+    "addPreset": "Add",
+    "added": "Added",
+    "tab": {
+      "providers": "My Providers",
+      "presets": "Presets"
+    },
+    "form": {
+      "name": "Name",
+      "model": "Default model",
+      "modelHint": "The model used when switching to this provider. Click ✓ on a model below to set it.",
+      "models": "Available models",
+      "modelsHint": "Models users can switch to via /model. Click ✓ to set as default.",
+      "agentTypes": "Agent types",
+      "agentTypesHint": "Leave empty for all agent types",
+      "thinkingDefault": "Default (auto)",
+      "perAgentHint": "Different agents may use different Base URL / models. Configure per agent type below.",
+      "defaultConfig": "Default",
+      "baseUrl": "Base URL",
+      "codexWireApi": "Wire API"
+    }
   },
   "theme": {
     "light": "Light",

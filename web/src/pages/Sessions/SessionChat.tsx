@@ -237,6 +237,24 @@ function StatusBadge({ status }: { status: BridgeStatus }) {
   );
 }
 
+function SessionMsgCopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  const handleCopy = () => {
+    navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+  return (
+    <button
+      onClick={handleCopy}
+      className="absolute -bottom-3 right-2 p-1 rounded-md bg-gray-100/90 dark:bg-gray-700/90 hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 opacity-0 group-hover/msg:opacity-100 transition-opacity shadow-sm"
+      title="Copy"
+    >
+      {copied ? <Check size={12} /> : <Copy size={12} />}
+    </button>
+  );
+}
+
 // ── Main component ───────────────────────────────────────────
 
 export default function SessionChat() {
@@ -425,7 +443,7 @@ export default function SessionChat() {
   const canSend = bridgeStatus === 'connected';
 
   return (
-    <div className="flex flex-col h-[calc(100vh-8rem)] animate-fade-in">
+    <div className="flex flex-col flex-1 min-h-0 animate-fade-in">
       {/* Header */}
       <div className="flex items-center justify-between pb-4 border-b border-gray-200 dark:border-gray-800">
         <div className="flex items-center gap-3">
@@ -456,6 +474,7 @@ export default function SessionChat() {
         )}
         {messages.map((msg) => {
           const isUser = msg.role === 'user';
+          const isEmpty = !msg.content && !msg.card && !msg.buttons && !msg.imageUrl && !msg.fileName;
           return (
             <div key={msg.id} className={cn('flex gap-3', isUser ? 'justify-end' : 'justify-start')}>
               {!isUser && (
@@ -464,13 +483,15 @@ export default function SessionChat() {
                 </div>
               )}
               <div className={cn(
-                'rounded-2xl px-5 py-3.5 text-sm',
+                'group/msg relative rounded-2xl px-5 py-3.5 text-sm',
                 isUser
                   ? 'max-w-[70%] bg-accent text-black rounded-br-md'
                   : 'max-w-[85%] bg-white dark:bg-gray-800/80 border border-gray-200 dark:border-gray-700/60 text-gray-900 dark:text-gray-100 rounded-bl-md shadow-sm',
                 msg.streaming && 'animate-pulse-subtle',
               )}>
-                {msg.format === 'card' ? (
+                {isEmpty ? (
+                  <p className="text-xs text-gray-400 dark:text-gray-500 italic">{t('chat.unsupportedMessage', '[Unsupported message]')}</p>
+                ) : msg.format === 'card' ? (
                   <CardBlock card={msg.card} onAction={handleCardAction} />
                 ) : msg.format === 'buttons' && msg.buttons ? (
                   <ButtonsBlock content={msg.content} buttons={msg.buttons} onAction={handleCardAction} />
@@ -485,6 +506,9 @@ export default function SessionChat() {
                 )}
                 {msg.streaming && (
                   <span className="inline-block w-1.5 h-4 bg-accent/60 rounded-sm ml-0.5 animate-pulse" />
+                )}
+                {!isUser && !msg.streaming && msg.content && (
+                  <SessionMsgCopyButton text={msg.content} />
                 )}
               </div>
               {isUser && (
@@ -513,7 +537,7 @@ export default function SessionChat() {
       </div>
 
       {/* Input */}
-      <div className="border-t border-gray-200 dark:border-gray-800 pt-4">
+      <div className="border-t border-gray-200 dark:border-gray-800 pt-3 pb-1 shrink-0">
         {canSend ? (
           <div className="flex gap-3">
             <input

@@ -329,7 +329,17 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 		}
 		baseURL = a.providers[a.activeIdx].BaseURL
 	}
+	provName, provAPIKey, provWireAPI, provHeaders := a.activeProviderCodexConfig()
 	a.mu.Unlock()
+
+	if provName != "" {
+		if err := ensureCodexProviderConfig(codexHome, provName, baseURL, provWireAPI, provHeaders); err != nil {
+			slog.Warn("codex: failed to write provider config", "provider", provName, "error", err)
+		}
+		if err := ensureCodexAuth(codexHome, provAPIKey); err != nil {
+			slog.Warn("codex: failed to write auth.json", "provider", provName, "error", err)
+		}
+	}
 
 	if backend == "app_server" {
 		return newAppServerSession(ctx, appServerURL, a.workDir, model, reasoningEffort, mode, sessionID, extraEnv, codexHome)
@@ -338,7 +348,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 		extraEnv = append(extraEnv, "CODEX_HOME="+codexHome)
 	}
 
-	return newCodexSession(ctx, a.workDir, model, reasoningEffort, mode, sessionID, baseURL, extraEnv)
+	return newCodexSession(ctx, a.workDir, model, reasoningEffort, mode, sessionID, baseURL, extraEnv, provName)
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
@@ -582,6 +592,22 @@ func (a *Agent) providerEnvLocked() []string {
 		env = append(env, k+"="+v)
 	}
 	return env
+}
+
+// activeProviderCodexConfig returns Codex-specific config for the active provider.
+// Returns non-empty name when the provider has codex config (wire_api, headers)
+// OR when it has a BaseURL (third-party provider needing auth.json).
+func (a *Agent) activeProviderCodexConfig() (name string, apiKey string, wireAPI string, headers map[string]string) {
+	if a.activeIdx < 0 || a.activeIdx >= len(a.providers) {
+		return
+	}
+	p := a.providers[a.activeIdx]
+	hasCodexConfig := p.CodexWireAPI != "" || len(p.CodexHTTPHeaders) > 0
+	isThirdParty := p.BaseURL != "" && p.APIKey != ""
+	if !hasCodexConfig && !isThirdParty {
+		return
+	}
+	return p.Name, p.APIKey, p.CodexWireAPI, p.CodexHTTPHeaders
 }
 
 func (a *Agent) PermissionModes() []core.PermissionModeInfo {

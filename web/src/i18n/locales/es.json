@@ -2,6 +2,7 @@
   "nav": {
     "dashboard": "Panel",
     "projects": "Proyectos",
+    "providers": "Proveedores",
     "sessions": "Sesiones",
     "chat": "Chat",
     "cron": "Cron",
@@ -86,7 +87,14 @@
     "remove": "Quitar",
     "activate": "Activar",
     "setModel": "Establecer modelo",
-    "models": "Modelos disponibles"
+    "models": "Modelos disponibles",
+    "global": "global",
+    "emptyProject": "No hay proveedores configurados para este proyecto.",
+    "emptyProjectHint": "Vincula un proveedor global o añade uno personalizado.",
+    "linkGlobal": "Vincular global",
+    "addCustom": "Añadir personalizado",
+    "allLinked": "Todos los proveedores globales ya están vinculados.",
+    "manageGlobal": "Gestionar proveedores globales"
   },
   "cron": {
     "title": "Tareas programadas",
@@ -310,6 +318,38 @@
     "rlWindowSecsHint": "Ventana de tiempo en segundos",
     "log": "Registro",
     "logLevel": "Nivel de registro"
+  },
+  "globalProviders": {
+    "title": "Gestión de proveedores",
+    "subtitle": "Administra proveedores de API compartidos globalmente entre todos los proyectos",
+    "add": "Agregar proveedor",
+    "edit": "Editar proveedor",
+    "empty": "No hay proveedores configurados",
+    "emptyHint": "Agrega un proveedor global o importa desde los preajustes.",
+    "deleteHint": "¿Eliminar proveedor \"{{name}}\"? Los proyectos que lo referencien perderán acceso.",
+    "noPresets": "Sin preajustes",
+    "noPresetsHint": "No se pudieron cargar los preajustes. Verifica tu conexión de red.",
+    "register": "Registrar",
+    "addPreset": "Agregar",
+    "added": "Agregado",
+    "tab": {
+      "providers": "Mis proveedores",
+      "presets": "Preajustes"
+    },
+    "form": {
+      "name": "Nombre",
+      "model": "Modelo predeterminado",
+      "modelHint": "Modelo usado al cambiar a este proveedor",
+      "models": "Modelos disponibles",
+      "modelsHint": "Modelos que los usuarios pueden cambiar con /model",
+      "agentTypes": "Tipos de agente",
+      "agentTypesHint": "Dejar vacío para todos los tipos de agente",
+      "thinkingDefault": "Predeterminado (auto)",
+      "perAgentHint": "Cada tipo de agente puede usar diferente Base URL / modelos. Configura por tipo abajo.",
+      "defaultConfig": "Predeterminado",
+      "baseUrl": "Base URL",
+      "codexWireApi": "Wire API"
+    }
   },
   "theme": {
     "light": "Claro",

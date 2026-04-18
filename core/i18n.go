@@ -191,6 +191,13 @@ const (
 	MsgProviderAddFailed         MsgKey = "provider_add_failed"
 	MsgProviderRemoved           MsgKey = "provider_removed"
 	MsgProviderRemoveFailed      MsgKey = "provider_remove_failed"
+	MsgCardTitleProviderAdd      MsgKey = "card_title_provider_add"
+	MsgProviderAddPickHint       MsgKey = "provider_add_pick_hint"
+	MsgProviderAddOther          MsgKey = "provider_add_other"
+	MsgProviderAddApiKeyPrompt   MsgKey = "provider_add_api_key_prompt"
+	MsgProviderAddInviteHint     MsgKey = "provider_add_invite_hint"
+	MsgProviderLinkGlobal        MsgKey = "provider_link_global"
+	MsgProviderLinked            MsgKey = "provider_linked"
 
 	MsgVoiceNotEnabled               MsgKey = "voice_not_enabled"
 	MsgVoiceUsingPlatformRecognition MsgKey = "voice_using_platform_recognition"
@@ -1433,6 +1440,46 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 移除 Provider 失敗: %v",
 		LangJapanese:           "❌ プロバイダの削除に失敗しました: %v",
 		LangSpanish:            "❌ Error al eliminar proveedor: %v",
+	},
+	MsgCardTitleProviderAdd: {
+		LangEnglish: "Add Provider", LangChinese: "添加服务商", LangTraditionalChinese: "新增服務商",
+		LangJapanese: "プロバイダーを追加", LangSpanish: "Añadir proveedor",
+	},
+	MsgProviderAddPickHint: {
+		LangEnglish:            "Pick a provider below, or choose **Other** to enter manually.\nAfter selecting, send your API key to complete.",
+		LangChinese:            "选择一个服务商，或选择 **自定义** 手动填写。\n选择后，请发送你的 API Key 来完成添加。",
+		LangTraditionalChinese: "選擇一個服務商，或選擇 **自訂** 手動填寫。\n選擇後，請傳送你的 API Key 來完成新增。",
+		LangJapanese:           "プロバイダーを選択するか、**その他** を選んで手動入力してください。\n選択後、API キーを送信して完了します。",
+		LangSpanish:            "Elige un proveedor o selecciona **Otro** para ingresar manualmente.\nDespués de seleccionar, envía tu API Key para completar.",
+	},
+	MsgProviderAddOther: {
+		LangEnglish: "Other (manual)", LangChinese: "自定义 (手动)", LangTraditionalChinese: "自訂 (手動)",
+		LangJapanese: "その他 (手動)", LangSpanish: "Otro (manual)",
+	},
+	MsgProviderAddApiKeyPrompt: {
+		LangEnglish:            "✅ Selected **%s**.\n\nPlease send your **API Key** for this provider.\nFormat: just the key, e.g. `sk-xxxxxxxx`",
+		LangChinese:            "✅ 已选择 **%s**。\n\n请发送你的 **API Key**。\n格式：直接发送密钥即可，如 `sk-xxxxxxxx`",
+		LangTraditionalChinese: "✅ 已選擇 **%s**。\n\n請傳送你的 **API Key**。\n格式：直接傳送金鑰即可，如 `sk-xxxxxxxx`",
+		LangJapanese:           "✅ **%s** を選択しました。\n\n**API キー** を送信してください。\n形式: キーをそのまま送信（例: `sk-xxxxxxxx`）",
+		LangSpanish:            "✅ Seleccionado **%s**.\n\nPor favor envía tu **API Key** para este proveedor.\nFormato: solo la clave, por ejemplo `sk-xxxxxxxx`",
+	},
+	MsgProviderAddInviteHint: {
+		LangEnglish:            "🔑 Don't have a key? Register here: %s",
+		LangChinese:            "🔑 还没有 Key？点击注册获取：%s",
+		LangTraditionalChinese: "🔑 還沒有 Key？點擊註冊取得：%s",
+		LangJapanese:           "🔑 キーをお持ちでない場合はこちらから登録: %s",
+		LangSpanish:            "🔑 ¿No tienes una clave? Regístrate aquí: %s",
+	},
+	MsgProviderLinkGlobal: {
+		LangEnglish: "Link existing provider", LangChinese: "关联已有服务商", LangTraditionalChinese: "關聯已有服務商",
+		LangJapanese: "既存プロバイダーをリンク", LangSpanish: "Vincular proveedor existente",
+	},
+	MsgProviderLinked: {
+		LangEnglish:            "✅ Provider **%s** linked to this project.",
+		LangChinese:            "✅ 已关联服务商 **%s** 到当前项目。",
+		LangTraditionalChinese: "✅ 已關聯服務商 **%s** 到目前專案。",
+		LangJapanese:           "✅ プロバイダー **%s** をこのプロジェクトにリンクしました。",
+		LangSpanish:            "✅ Proveedor **%s** vinculado a este proyecto.",
 	},
 	MsgVoiceNotEnabled: {
 		LangEnglish:            "🎙 Voice messages are not enabled. Please configure `[speech]` in config.toml.",

@@ -2,6 +2,7 @@
   "nav": {
     "dashboard": "概览",
     "projects": "项目",
+    "providers": "服务商",
     "sessions": "会话",
     "chat": "对话",
     "cron": "定时任务",
@@ -86,7 +87,14 @@
     "remove": "移除",
     "activate": "启用",
     "setModel": "设置模型",
-    "models": "可用模型"
+    "models": "可用模型",
+    "global": "全局",
+    "emptyProject": "该项目尚未配置服务商。",
+    "emptyProjectHint": "关联全局服务商或添加自定义服务商。",
+    "linkGlobal": "关联全局服务商",
+    "addCustom": "自定义添加",
+    "allLinked": "所有全局服务商已关联。",
+    "manageGlobal": "管理全局服务商"
   },
   "cron": {
     "title": "定时任务",
@@ -310,6 +318,38 @@
     "rlWindowSecsHint": "时间窗口的秒数",
     "log": "日志",
     "logLevel": "日志级别"
+  },
+  "globalProviders": {
+    "title": "服务商管理",
+    "subtitle": "管理全局共享的 API 服务商，可被所有项目引用",
+    "add": "添加服务商",
+    "edit": "编辑服务商",
+    "empty": "尚未配置服务商",
+    "emptyHint": "添加全局服务商或从预设列表中导入。",
+    "deleteHint": "移除服务商「{{name}}」？引用该服务商的项目将失去访问权限。",
+    "noPresets": "暂无预设",
+    "noPresetsHint": "无法加载服务商预设列表，请检查网络连接。",
+    "register": "注册",
+    "addPreset": "添加",
+    "added": "已添加",
+    "tab": {
+      "providers": "我的服务商",
+      "presets": "推荐预设"
+    },
+    "form": {
+      "name": "名称",
+      "model": "默认模型",
+      "modelHint": "切换到该服务商时使用的模型。点击下方模型的 ✓ 可设为默认。",
+      "models": "可用模型",
+      "modelsHint": "用户可通过 /model 切换的模型列表。点击 ✓ 设为默认。",
+      "agentTypes": "适用 Agent 类型",
+      "agentTypesHint": "留空表示适用所有 Agent 类型",
+      "thinkingDefault": "默认（自动）",
+      "perAgentHint": "不同 Agent 可能使用不同的 Base URL / 模型，可按 Agent 类型分别配置。",
+      "defaultConfig": "默认",
+      "baseUrl": "Base URL",
+      "codexWireApi": "Wire API"
+    }
   },
   "theme": {
     "light": "浅色",

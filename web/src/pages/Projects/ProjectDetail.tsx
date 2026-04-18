@@ -3,11 +3,11 @@ import { useTranslation } from 'react-i18next';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, Plug, Heart, Settings, Layers, Zap, Pause, Play,
-  Trash2, Plus, Check, Clock,
+  Trash2, Plus, Check, Clock, ExternalLink, Link2,
 } from 'lucide-react';
 import { Card, Badge, Button, Input, Modal, EmptyState } from '@/components/ui';
 import { getProject, updateProject, deleteProject, type ProjectDetail as ProjectDetailType } from '@/api/projects';
-import { listProviders, addProvider, removeProvider, activateProvider, listModels, setModel, type Provider } from '@/api/providers';
+import { listProviders, addProvider, removeProvider, activateProvider, type Provider, listGlobalProviders, type GlobalProvider, saveProviderRefs } from '@/api/providers';
 import { getHeartbeat, pauseHeartbeat, resumeHeartbeat, triggerHeartbeat, setHeartbeatInterval, type HeartbeatStatus } from '@/api/heartbeat';
 import { restartSystem } from '@/api/status';
 import { formatTime, cn } from '@/lib/utils';
@@ -26,6 +26,7 @@ const PLATFORM_OPTIONS: { key: string; label: string; color: string; abbr: strin
   { key: 'qq', label: 'QQ (OneBot)', abbr: 'QQ', color: 'bg-cyan-50 dark:bg-cyan-900/30 text-cyan-600 dark:text-cyan-400' },
   { key: 'qqbot', label: 'QQ Bot (Official)', abbr: 'QB', color: 'bg-cyan-50 dark:bg-cyan-900/30 text-cyan-600 dark:text-cyan-400' },
   { key: 'line', label: 'LINE', abbr: 'LN', color: 'bg-lime-50 dark:bg-lime-900/30 text-lime-600 dark:text-lime-400' },
+  { key: 'weibo', label: 'Weibo (微博)', abbr: 'WB', color: 'bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-400' },
 ];
 
 const isQRPlatform = (type: string) => type === 'feishu' || type === 'lark' || type === 'weixin';
@@ -40,8 +41,6 @@ export default function ProjectDetail() {
   const [providers, setProviders] = useState<Provider[]>([]);
   const [activeProvider, setActiveProvider] = useState('');
   const [heartbeat, setHeartbeatState] = useState<HeartbeatStatus | null>(null);
-  const [models, setModels] = useState<string[]>([]);
-  const [currentModel, setCurrentModel] = useState('');
   const [loading, setLoading] = useState(true);
 
   // Settings form
@@ -51,11 +50,19 @@ export default function ProjectDetail() {
   const [workDir, setWorkDir] = useState('');
   const [agentMode, setAgentMode] = useState('');
   const [showCtxIndicator, setShowCtxIndicator] = useState(true);
+  const [replyFooter, setReplyFooter] = useState(true);
+  const [injectSender, setInjectSender] = useState(false);
   const [platformAllowFrom, setPlatformAllowFrom] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
 
+  // Global providers & refs
+  const [globalProviders, setGlobalProviders] = useState<GlobalProvider[]>([]);
+  const [providerRefs, setProviderRefs] = useState<string[]>([]);
+  const [savingRefs, setSavingRefs] = useState(false);
+
   // Add provider modal
   const [showAddProvider, setShowAddProvider] = useState(false);
+  const [addMode, setAddMode] = useState<'pick' | 'custom'>('pick');
   const [newProvider, setNewProvider] = useState({ name: '', api_key: '', base_url: '', model: '' });
 
   // Interval modal
@@ -109,11 +116,11 @@ export default function ProjectDetail() {
     if (!name) return;
     try {
       setLoading(true);
-      const [proj, provs, hb, mdls] = await Promise.allSettled([
+      const [proj, provs, hb, gp] = await Promise.allSettled([
         getProject(name),
         listProviders(name),
         getHeartbeat(name),
-        listModels(name),
+        listGlobalProviders(),
       ]);
       if (proj.status === 'fulfilled') {
         setProject(proj.value);
@@ -123,6 +130,9 @@ export default function ProjectDetail() {
         setWorkDir(proj.value.work_dir || '');
         setAgentMode(proj.value.agent_mode || 'default');
         setShowCtxIndicator(proj.value.show_context_indicator !== false);
+        setReplyFooter(proj.value.reply_footer !== false);
+        setInjectSender(proj.value.inject_sender === true);
+        setProviderRefs(proj.value.provider_refs || []);
         const afMap: Record<string, string> = {};
         proj.value.platform_configs?.forEach(pc => {
           if (pc.allow_from !== undefined) afMap[pc.type] = pc.allow_from;
@@ -134,9 +144,8 @@ export default function ProjectDetail() {
         setActiveProvider(provs.value.active_provider || '');
       }
       if (hb.status === 'fulfilled') setHeartbeatState(hb.value);
-      if (mdls.status === 'fulfilled') {
-        setModels(mdls.value.models || []);
-        setCurrentModel(mdls.value.current || '');
+      if (gp.status === 'fulfilled') {
+        setGlobalProviders(gp.value.providers || []);
       }
     } finally {
       setLoading(false);
@@ -161,6 +170,8 @@ export default function ProjectDetail() {
         work_dir: workDir,
         mode: agentMode,
         show_context_indicator: showCtxIndicator,
+        reply_footer: replyFooter,
+        inject_sender: injectSender,
         platform_allow_from: platformAllowFrom,
       });
       await fetchAll();
@@ -259,82 +270,153 @@ export default function ProjectDetail() {
         </div>
       )}
 
-      {tab === 'providers' && (
+      {tab === 'providers' && (() => {
+        const globalNames = new Set(globalProviders.map(g => g.name));
+        const isGlobal = (pName: string) => globalNames.has(pName) && providerRefs.includes(pName);
+        const unlinkedGlobals = globalProviders.filter(g => !providerRefs.includes(g.name));
+        return (
         <div className="space-y-4">
+          {/* Header */}
           <div className="flex justify-between items-center">
             <h3 className="text-sm font-semibold text-gray-900 dark:text-white">{t('providers.title')}</h3>
-            <Button size="sm" onClick={() => setShowAddProvider(true)}><Plus size={14} /> {t('providers.add')}</Button>
+            <Button size="sm" onClick={() => { setAddMode('pick'); setShowAddProvider(true); }}><Plus size={14} /> {t('providers.add')}</Button>
           </div>
+
+          {/* Unified provider list */}
           {providers.length === 0 ? (
-            <EmptyState message={t('common.noData')} />
+            <Card>
+              <div className="py-6 text-center">
+                <Plug size={32} className="mx-auto text-gray-300 dark:text-gray-600 mb-2" />
+                <p className="text-sm text-gray-500 dark:text-gray-400">{t('providers.emptyProject', 'No providers configured for this project.')}</p>
+                <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">{t('providers.emptyProjectHint', 'Link a global provider or add a custom one.')}</p>
+              </div>
+            </Card>
           ) : (
             <div className="space-y-2">
               {providers.map((p) => (
-                <Card key={p.name}>
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="font-medium text-gray-900 dark:text-white">{p.name}</span>
-                        {p.active && <Badge variant="success">{t('providers.active')}</Badge>}
-                      </div>
-                      <p className="text-xs text-gray-500 mt-1">{p.model} {p.base_url ? `· ${p.base_url}` : ''}</p>
-                    </div>
-                    <div className="flex gap-2">
-                      {!p.active && (
-                        <Button size="sm" variant="secondary" onClick={() => { activateProvider(name!, p.name).then(fetchAll); }}>
-                          <Check size={14} /> {t('providers.activate')}
-                        </Button>
+                <div
+                  key={p.name}
+                  className={cn(
+                    'flex items-center justify-between px-4 py-3 rounded-xl border transition-all',
+                    p.active
+                      ? 'border-emerald-200 dark:border-emerald-500/20 bg-emerald-50/50 dark:bg-emerald-900/10'
+                      : 'border-gray-200 dark:border-gray-700/60 bg-white dark:bg-gray-800/40',
+                  )}
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-gray-900 dark:text-white">{p.name}</span>
+                      {p.active && <Badge variant="success">{t('providers.active')}</Badge>}
+                      {isGlobal(p.name) && (
+                        <Link to="/providers" className="inline-flex items-center gap-0.5 text-[10px] text-gray-400 hover:text-accent transition-colors">
+                          <Link2 size={10} /> {t('providers.global', 'global')}
+                        </Link>
                       )}
-                      {!p.active && (
-                        <Button size="sm" variant="danger" onClick={() => { removeProvider(name!, p.name).then(fetchAll); }}>
+                    </div>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5 truncate">
+                      {p.model}{p.base_url ? ` · ${p.base_url}` : ''}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0 ml-3">
+                    {!p.active && (
+                      <Button size="sm" variant="ghost" onClick={() => { activateProvider(name!, p.name).then(fetchAll); }}>
+                        <Zap size={14} /> {t('providers.activate')}
+                      </Button>
+                    )}
+                    {!p.active && (
+                      isGlobal(p.name) ? (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="text-gray-400 hover:text-red-500"
+                          onClick={async () => {
+                            const next = providerRefs.filter(r => r !== p.name);
+                            setSavingRefs(true);
+                            try {
+                              await saveProviderRefs(name!, next);
+                              await fetchAll();
+                            } finally { setSavingRefs(false); }
+                          }}
+                        >
                           <Trash2 size={14} />
                         </Button>
-                      )}
-                    </div>
+                      ) : (
+                        <Button size="sm" variant="ghost" className="text-gray-400 hover:text-red-500" onClick={() => { removeProvider(name!, p.name).then(fetchAll); }}>
+                          <Trash2 size={14} />
+                        </Button>
+                      )
+                    )}
                   </div>
-                </Card>
+                </div>
               ))}
             </div>
           )}
 
-          {/* Models */}
-          {models.length > 0 && (
-            <Card>
-              <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-3">{t('providers.models')}</h3>
-              <div className="flex flex-wrap gap-2">
-                {models.map((m) => (
-                  <button
-                    key={m}
-                    onClick={() => { setModel(name!, m).then(fetchAll); }}
-                    className={cn(
-                      'px-3 py-1.5 rounded-lg text-xs font-medium transition-all',
-                      m === currentModel
-                        ? 'bg-accent/20 text-accent border border-accent/30'
-                        : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700'
-                    )}
-                  >
-                    {m}
-                  </button>
-                ))}
-              </div>
-            </Card>
-          )}
-
           {/* Add Provider Modal */}
           <Modal open={showAddProvider} onClose={() => setShowAddProvider(false)} title={t('providers.add')}>
-            <div className="space-y-3">
-              <Input label={t('providers.name')} value={newProvider.name} onChange={(e) => setNewProvider({...newProvider, name: e.target.value})} />
-              <Input label="API Key" type="password" value={newProvider.api_key} onChange={(e) => setNewProvider({...newProvider, api_key: e.target.value})} />
-              <Input label={t('providers.baseUrl')} value={newProvider.base_url} onChange={(e) => setNewProvider({...newProvider, base_url: e.target.value})} placeholder="https://api.example.com" />
-              <Input label={t('providers.model')} value={newProvider.model} onChange={(e) => setNewProvider({...newProvider, model: e.target.value})} />
-              <div className="flex justify-end gap-2 pt-2">
-                <Button variant="secondary" onClick={() => setShowAddProvider(false)}>{t('common.cancel')}</Button>
-                <Button onClick={handleAddProvider}>{t('providers.add')}</Button>
+            <div className="space-y-4">
+              {/* Toggle */}
+              <div className="flex rounded-lg bg-gray-100 dark:bg-gray-800 p-0.5">
+                <button
+                  className={cn('flex-1 px-3 py-1.5 rounded-md text-xs font-medium transition-all', addMode === 'pick' ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow-sm' : 'text-gray-500')}
+                  onClick={() => setAddMode('pick')}
+                >{t('providers.linkGlobal', 'Link global')}</button>
+                <button
+                  className={cn('flex-1 px-3 py-1.5 rounded-md text-xs font-medium transition-all', addMode === 'custom' ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow-sm' : 'text-gray-500')}
+                  onClick={() => setAddMode('custom')}
+                >{t('providers.addCustom', 'Add custom')}</button>
               </div>
+
+              {addMode === 'pick' ? (
+                unlinkedGlobals.length === 0 ? (
+                  <div className="py-4 text-center">
+                    <p className="text-sm text-gray-500 dark:text-gray-400">{t('providers.allLinked', 'All global providers are already linked.')}</p>
+                    <Link to="/providers" className="inline-flex items-center gap-1 mt-2 text-xs text-accent hover:underline">
+                      {t('providers.manageGlobal', 'Manage global providers')} <ExternalLink size={11} />
+                    </Link>
+                  </div>
+                ) : (
+                  <div className="space-y-1.5 max-h-64 overflow-y-auto">
+                    {unlinkedGlobals.map(gp => (
+                      <button
+                        key={gp.name}
+                        className="flex items-center justify-between w-full px-3 py-2.5 rounded-lg border border-gray-200 dark:border-gray-700 hover:border-accent/40 hover:bg-accent/5 transition-all text-left"
+                        onClick={async () => {
+                          const next = [...providerRefs, gp.name];
+                          setSavingRefs(true);
+                          try {
+                            await saveProviderRefs(name!, next);
+                            await fetchAll();
+                          } finally { setSavingRefs(false); }
+                          setShowAddProvider(false);
+                        }}
+                      >
+                        <div className="min-w-0">
+                          <div className="text-sm font-medium text-gray-900 dark:text-white">{gp.name}</div>
+                          <div className="text-xs text-gray-500 dark:text-gray-400 truncate">{gp.model}{gp.base_url ? ` · ${gp.base_url}` : ''}</div>
+                        </div>
+                        <Plus size={16} className="shrink-0 text-gray-400" />
+                      </button>
+                    ))}
+                  </div>
+                )
+              ) : (
+                <div className="space-y-3">
+                  <Input label={t('providers.name')} value={newProvider.name} onChange={(e) => setNewProvider({...newProvider, name: e.target.value})} />
+                  <Input label="API Key" type="password" value={newProvider.api_key} onChange={(e) => setNewProvider({...newProvider, api_key: e.target.value})} />
+                  <Input label={t('providers.baseUrl')} value={newProvider.base_url} onChange={(e) => setNewProvider({...newProvider, base_url: e.target.value})} placeholder="https://api.example.com" />
+                  <Input label={t('providers.model')} value={newProvider.model} onChange={(e) => setNewProvider({...newProvider, model: e.target.value})} />
+                  <div className="flex justify-end gap-2 pt-1">
+                    <Button variant="secondary" onClick={() => setShowAddProvider(false)}>{t('common.cancel')}</Button>
+                    <Button onClick={handleAddProvider}>{t('providers.add')}</Button>
+                  </div>
+                </div>
+              )}
             </div>
           </Modal>
         </div>
-      )}
+        );
+      })()}
 
       {tab === 'heartbeat' && (
         <div className="space-y-4">
@@ -418,6 +500,30 @@ export default function ProjectDetail() {
                 className={cn('w-10 h-6 rounded-full transition-colors', showCtxIndicator ? 'bg-accent' : 'bg-gray-300 dark:bg-gray-700')}
               >
                 <div className={cn('w-4 h-4 bg-white rounded-full transition-transform mx-1', showCtxIndicator ? 'translate-x-4' : 'translate-x-0')} />
+              </button>
+            </div>
+            <div className="flex items-center justify-between">
+              <div>
+                <label className="text-sm font-medium text-gray-700 dark:text-gray-300">{t('projects.replyFooter', 'Reply footer')}</label>
+                <p className="text-[11px] text-gray-400 mt-0.5">{t('projects.replyFooterHint', 'Append model/usage metadata to replies')}</p>
+              </div>
+              <button
+                onClick={() => setReplyFooter(!replyFooter)}
+                className={cn('w-10 h-6 rounded-full transition-colors', replyFooter ? 'bg-accent' : 'bg-gray-300 dark:bg-gray-700')}
+              >
+                <div className={cn('w-4 h-4 bg-white rounded-full transition-transform mx-1', replyFooter ? 'translate-x-4' : 'translate-x-0')} />
+              </button>
+            </div>
+            <div className="flex items-center justify-between">
+              <div>
+                <label className="text-sm font-medium text-gray-700 dark:text-gray-300">{t('projects.injectSender', 'Inject sender')}</label>
+                <p className="text-[11px] text-gray-400 mt-0.5">{t('projects.injectSenderHint', 'Prepend sender identity to messages sent to agent')}</p>
+              </div>
+              <button
+                onClick={() => setInjectSender(!injectSender)}
+                className={cn('w-10 h-6 rounded-full transition-colors', injectSender ? 'bg-accent' : 'bg-gray-300 dark:bg-gray-700')}
+              >
+                <div className={cn('w-4 h-4 bg-white rounded-full transition-transform mx-1', injectSender ? 'translate-x-4' : 'translate-x-0')} />
               </button>
             </div>
             <Input label={t('projects.language')} value={language} onChange={(e) => setLanguage(e.target.value)} placeholder="en, zh, ja..." />

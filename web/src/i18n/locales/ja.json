@@ -2,6 +2,7 @@
   "nav": {
     "dashboard": "ダッシュボード",
     "projects": "プロジェクト",
+    "providers": "プロバイダー",
     "sessions": "セッション",
     "chat": "チャット",
     "cron": "Cron",
@@ -86,7 +87,14 @@
     "remove": "削除",
     "activate": "有効化",
     "setModel": "モデルを設定",
-    "models": "利用可能なモデル"
+    "models": "利用可能なモデル",
+    "global": "グローバル",
+    "emptyProject": "このプロジェクトにはプロバイダーが設定されていません。",
+    "emptyProjectHint": "グローバルプロバイダーをリンクするか、カスタムで追加してください。",
+    "linkGlobal": "グローバルをリンク",
+    "addCustom": "カスタム追加",
+    "allLinked": "すべてのグローバルプロバイダーがリンク済みです。",
+    "manageGlobal": "グローバルプロバイダーの管理"
   },
   "cron": {
     "title": "スケジュールジョブ",
@@ -310,6 +318,38 @@
     "rlWindowSecsHint": "タイムウィンドウの秒数",
     "log": "ログ",
     "logLevel": "ログレベル"
+  },
+  "globalProviders": {
+    "title": "プロバイダー管理",
+    "subtitle": "全プロジェクトで共有できるグローバル API プロバイダーを管理",
+    "add": "プロバイダーを追加",
+    "edit": "プロバイダーを編集",
+    "empty": "プロバイダーが設定されていません",
+    "emptyHint": "グローバルプロバイダーを追加するか、プリセットからインポートしてください。",
+    "deleteHint": "プロバイダー「{{name}}」を削除しますか？参照しているプロジェクトはアクセスできなくなります。",
+    "noPresets": "プリセットなし",
+    "noPresetsHint": "プリセット一覧を読み込めませんでした。ネットワーク接続をご確認ください。",
+    "register": "登録",
+    "addPreset": "追加",
+    "added": "追加済み",
+    "tab": {
+      "providers": "マイプロバイダー",
+      "presets": "おすすめプリセット"
+    },
+    "form": {
+      "name": "名前",
+      "model": "デフォルトモデル",
+      "modelHint": "このプロバイダーに切り替えた時に使用するモデル",
+      "models": "利用可能なモデル",
+      "modelsHint": "/model コマンドで切り替え可能なモデル一覧",
+      "agentTypes": "対応エージェント",
+      "agentTypesHint": "空の場合はすべてのエージェントに対応",
+      "thinkingDefault": "デフォルト（自動）",
+      "perAgentHint": "エージェントごとに異なる Base URL やモデルを設定できます。",
+      "defaultConfig": "デフォルト",
+      "baseUrl": "Base URL",
+      "codexWireApi": "Wire API"
+    }
   },
   "theme": {
     "light": "ライト",
