@@ -105,6 +105,114 @@ func TestAgentUsageProbeEnv_AddsHostManagedFlagForRouterOverrides(t *testing.T) 
 	}
 }
 
+func TestProviderEnv_SetsAnthropicModel(t *testing.T) {
+	a := &Agent{
+		providers: []core.ProviderConfig{
+			{
+				Name:    "provider-a",
+				BaseURL: "https://a.example.com/v1",
+				APIKey:  "key-a",
+				Model:   "model-a",
+			},
+			{
+				Name:    "provider-b",
+				BaseURL: "https://b.example.com/v1",
+				APIKey:  "key-b",
+				Model:   "model-b",
+			},
+		},
+		activeIdx: 0,
+	}
+
+	env := envSliceToMap(a.providerEnvLocked())
+	if got := env["ANTHROPIC_MODEL"]; got != "model-a" {
+		t.Fatalf("ANTHROPIC_MODEL = %q, want %q", got, "model-a")
+	}
+	if got := env["ANTHROPIC_BASE_URL"]; got != "https://a.example.com/v1" {
+		t.Fatalf("ANTHROPIC_BASE_URL = %q, want provider-a URL", got)
+	}
+
+	a.SetActiveProvider("provider-b")
+	env = envSliceToMap(a.providerEnvLocked())
+	if got := env["ANTHROPIC_MODEL"]; got != "model-b" {
+		t.Fatalf("after switch: ANTHROPIC_MODEL = %q, want %q", got, "model-b")
+	}
+	if got := env["ANTHROPIC_BASE_URL"]; got != "https://b.example.com/v1" {
+		t.Fatalf("after switch: ANTHROPIC_BASE_URL = %q, want provider-b URL", got)
+	}
+}
+
+func TestProviderEnv_NoModelWhenEmpty(t *testing.T) {
+	a := &Agent{
+		providers: []core.ProviderConfig{
+			{
+				Name:    "no-model",
+				BaseURL: "https://example.com/v1",
+				APIKey:  "key",
+			},
+		},
+		activeIdx: 0,
+	}
+	env := envSliceToMap(a.providerEnvLocked())
+	if _, ok := env["ANTHROPIC_MODEL"]; ok {
+		t.Fatalf("ANTHROPIC_MODEL should not be set when provider has no model")
+	}
+}
+
+func TestProviderEnv_ClearReturnsNil(t *testing.T) {
+	a := &Agent{
+		providers: []core.ProviderConfig{
+			{Name: "p", BaseURL: "https://x.com", APIKey: "k", Model: "m"},
+		},
+		activeIdx: 0,
+	}
+	a.SetActiveProvider("")
+	env := a.providerEnvLocked()
+	if env != nil {
+		t.Fatalf("expected nil env after clearing provider, got %v", env)
+	}
+}
+
+func TestStartSession_UsesActiveProviderModel(t *testing.T) {
+	a := &Agent{
+		model: "default-model",
+		providers: []core.ProviderConfig{
+			{Name: "p1", Model: "provider-model-1"},
+			{Name: "p2", Model: "provider-model-2"},
+		},
+		activeIdx: 0,
+	}
+
+	a.mu.Lock()
+	activeIdx := a.activeIdx
+	model := a.model
+	if activeIdx >= 0 && activeIdx < len(a.providers) {
+		if m := a.providers[activeIdx].Model; m != "" {
+			model = m
+		}
+	}
+	a.mu.Unlock()
+
+	if model != "provider-model-1" {
+		t.Fatalf("model = %q, want %q", model, "provider-model-1")
+	}
+
+	a.SetActiveProvider("p2")
+	a.mu.Lock()
+	activeIdx = a.activeIdx
+	model = a.model
+	if activeIdx >= 0 && activeIdx < len(a.providers) {
+		if m := a.providers[activeIdx].Model; m != "" {
+			model = m
+		}
+	}
+	a.mu.Unlock()
+
+	if model != "provider-model-2" {
+		t.Fatalf("after switch: model = %q, want %q", model, "provider-model-2")
+	}
+}
+
 func envSliceToMap(env []string) map[string]string {
 	out := make(map[string]string, len(env))
 	for _, entry := range env {
