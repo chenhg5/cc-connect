@@ -4138,7 +4138,11 @@ func (e *Engine) cmdAttach(p Platform, msg *Message, args []string) {
 	}
 
 	e.cleanupInteractiveState(interactiveKey)
-	sessions.SwitchToAgentSession(msg.SessionKey, target.ID, agent.Name(), target.Summary)
+	session := sessions.SwitchToAgentSession(msg.SessionKey, target.ID, agent.Name(), target.Summary)
+	// Clear the IM-side local message cache that belonged to the previous
+	// session — we're adopting an external conversation, so whatever was
+	// buffered for the old binding is no longer relevant. Mirrors cmdSwitch.
+	session.ClearHistory()
 
 	short := target.ID
 	if len(short) > 12 {

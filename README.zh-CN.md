@@ -329,6 +329,10 @@ cc-connect update --pre     # 含预发布版本
 /attach [query]        接续 terminal 里留下的外部 Claude Code session
                        （query：latest | 序号 | uuid 前缀；加 --force
                        绕过 30 秒并发写门控）
+                       注意：数字序号是全量 ListSessions 的排序（按修改
+                       时间倒序，含外部 jsonl），可能与 /list 显示的序号
+                       不一致（后者只列 cc-connect 管理的）。精确匹配
+                       建议用 "latest" 或 uuid 前缀。
 /resume-latest         /attach latest 的便捷版
 /detach                释放当前 session，让 terminal 里的
                        `claude --resume` 能无冲突接回
