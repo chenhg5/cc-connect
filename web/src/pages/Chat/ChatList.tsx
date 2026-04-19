@@ -71,7 +71,7 @@ export default function ChatList() {
   }
 
   return (
-    <div className="animate-fade-in space-y-4">
+    <div className="animate-fade-in space-y-4 ">
       <h2 className="text-lg font-bold text-gray-900 dark:text-white">{t('nav.chat')}</h2>
 
       {entries.length === 0 ? (
