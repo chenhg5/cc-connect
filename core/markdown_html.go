@@ -3,6 +3,7 @@ package core
 import (
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 // MarkdownToSimpleHTML converts common Markdown to a simplified HTML subset.
@@ -57,6 +58,13 @@ func MarkdownToSimpleHTML(md string) string {
 	}
 
 	// flushTable renders buffered table rows inside a <pre> block with aligned columns.
+	//
+	// Inline formatting in cells (bold/italic/inline-code/strikethrough/links)
+	// is rendered as Telegram HTML tags; Telegram permits <b>, <i>, <u>, <s>,
+	// <code>, <a> inside <pre>, so `**foo**` becomes a bold "foo" rather than
+	// four literal asterisks. Column widths are computed from the *visual*
+	// (post-strip) rune length so that ` | ` separators still line up even
+	// though the rendered HTML bytes are longer than the plain text.
 	flushTable := func() {
 		if len(tblLines) == 0 {
 			return
@@ -85,7 +93,9 @@ func MarkdownToSimpleHTML(md string) string {
 			rows = append(rows, row{cells: cells})
 		}
 
-		// Compute max width per column.
+		// Compute max width per column using the visual rune length of each
+		// cell (markdown markers stripped). This keeps ASCII columns aligned
+		// even after `**x**` expands to `<b>x</b>` in the rendered output.
 		numCols := 0
 		for _, r := range rows {
 			if !r.isSep && len(r.cells) > numCols {
@@ -98,8 +108,10 @@ func MarkdownToSimpleHTML(md string) string {
 				continue
 			}
 			for k, c := range r.cells {
-				if k < numCols && len(c) > colWidths[k] {
-					colWidths[k] = len(c)
+				if k < numCols {
+					if w := tableCellVisualWidth(c); w > colWidths[k] {
+						colWidths[k] = w
+					}
 				}
 			}
 		}
@@ -129,9 +141,13 @@ func MarkdownToSimpleHTML(md string) string {
 					if k < len(r.cells) {
 						cell = r.cells[k]
 					}
-					b.WriteString(escapeHTML(cell))
-					// Pad to column width.
-					if pad := colWidths[k] - len(cell); pad > 0 {
+					// Render inline formatting to HTML tags (Telegram accepts
+					// <b>/<i>/<code>/<a>/etc. inside <pre>). Falls back to
+					// plain HTML-escaped text when there is no formatting.
+					b.WriteString(convertInlineHTML(cell))
+					// Pad to column width using the *visual* length so the
+					// `|` separators still line up in the rendered message.
+					if pad := colWidths[k] - tableCellVisualWidth(cell); pad > 0 {
 						b.WriteString(strings.Repeat(" ", pad))
 					}
 				}
@@ -376,6 +392,42 @@ func escapeHTML(s string) string {
 	s = strings.ReplaceAll(s, "\"", "&quot;")
 	return s
 }
+
+// tableCellVisualWidth returns the rune count of `cell` after stripping the
+// markdown markers that convertInlineHTML would remove when rendering. Used
+// to compute column widths for <pre>-wrapped tables so that ` | ` separators
+// still line up even though the rendered HTML bytes are longer than the
+// visible text.
+//
+// This is deliberately approximate: it counts each rune as one column, so
+// East-Asian wide characters (which occupy two monospace cells on most
+// clients) will misalign by the same amount the previous byte-based code
+// did. Callers that need exact visual width can switch to unicode width
+// tables later; this helper's contract is "strip formatting markers, count
+// runes".
+func tableCellVisualWidth(cell string) int {
+	// Strip bold ***x***, **x**, __x__ and bold-italic.
+	cell = reBoldItalicHTML.ReplaceAllString(cell, "$1")
+	cell = reBoldAstHTML.ReplaceAllString(cell, "$1")
+	cell = reBoldUndHTML.ReplaceAllString(cell, "$1")
+	// Strip strikethrough ~~x~~.
+	cell = reStrikeHTML.ReplaceAllString(cell, "$1")
+	// Strip inline code `x`.
+	cell = reInlineCodeHTML.ReplaceAllString(cell, "$1")
+	// Strip links [text](url) — keep link text only.
+	cell = reLinkHTML.ReplaceAllString(cell, "$1")
+	// Italic is matched with boundary chars in reItalicAstHTML, which would
+	// swallow the boundary on replace. Use a local, boundary-free pattern
+	// since cell content is already trimmed and we only need to drop *x*.
+	cell = reTableCellItalic.ReplaceAllString(cell, "$1")
+	return utf8.RuneCountInString(cell)
+}
+
+// reTableCellItalic is used ONLY by tableCellVisualWidth to strip `*x*` from
+// a cell for width measurement. It is NOT used for rendering — rendering
+// still goes through the main convertInlineHTML path with its stricter
+// boundary-aware italic regex.
+var reTableCellItalic = regexp.MustCompile(`\*([^*]+)\*`)
 
 // SplitMessageCodeFenceAware splits text into chunks respecting code fence boundaries.
 // When a chunk boundary falls inside a code block, the fence is closed at the end of

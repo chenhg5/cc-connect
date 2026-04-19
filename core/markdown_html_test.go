@@ -364,17 +364,88 @@ func TestMarkdownToSimpleHTML_Table(t *testing.T) {
 }
 
 func TestMarkdownToSimpleHTML_TableWithFormatting(t *testing.T) {
-	// Inline formatting is escaped inside <pre> since HTML tags in <pre> render literally in Telegram
+	// Telegram's HTML parser accepts <b>, <i>, <code>, <a> inside <pre>, so
+	// bold/italic/inline-code/link cells should render as the corresponding
+	// tags — not as literal `**Header**` and friends.
 	md := "| **Header** | `code` |\n|---|---|\n| *italic* | normal |"
 	out := MarkdownToSimpleHTML(md)
 	if !strings.Contains(out, "<pre>") {
 		t.Errorf("expected table wrapped in <pre>, got %q", out)
 	}
-	if !strings.Contains(out, "Header") {
-		t.Errorf("expected header text in table, got %q", out)
+	if !strings.Contains(out, "<b>Header</b>") {
+		t.Errorf("expected **Header** to render as <b>Header</b>, got %q", out)
 	}
-	if !strings.Contains(out, "code") {
-		t.Errorf("expected code text in table, got %q", out)
+	if !strings.Contains(out, "<code>code</code>") {
+		t.Errorf("expected `code` to render as <code>code</code>, got %q", out)
+	}
+	if !strings.Contains(out, "<i>italic</i>") {
+		t.Errorf("expected *italic* to render as <i>italic</i>, got %q", out)
+	}
+	// The literal markdown markers must be gone from cells.
+	if strings.Contains(out, "**Header**") {
+		t.Errorf("literal **Header** should have been replaced by <b>Header</b>, got %q", out)
+	}
+	if strings.Contains(out, "`code`") {
+		t.Errorf("literal `code` should have been replaced by <code>code</code>, got %q", out)
+	}
+}
+
+// TestMarkdownToSimpleHTML_TableCellAlignmentWithFormatting regresses the
+// column-width calculation: `**hunt**` must be measured as visual width 4
+// (the runes of "hunt"), not as byte count including the asterisks. Before
+// the fix, flushTable used byte length of the raw cell, which mis-aligned
+// columns once the cells contained markdown markers.
+func TestMarkdownToSimpleHTML_TableCellAlignmentWithFormatting(t *testing.T) {
+	md := "| Skill | Use |\n|---|---|\n| **hunt** | debug |\n| **think** | plan |"
+	out := MarkdownToSimpleHTML(md)
+	// Expected column widths: col1 = max("Skill", "hunt", "think") = 5,
+	// col2 = max("Use", "debug", "plan") = 5. So separator row is `-----+-----`.
+	if !strings.Contains(out, "-----+-----") {
+		t.Errorf("expected separator row matching stripped column widths (5+5), got %q", out)
+	}
+	// Body rows should pad to the same visual column width.
+	// "hunt" is 4 runes, col width is 5, so one trailing space after </b>.
+	if !strings.Contains(out, "<b>hunt</b>  | debug") {
+		t.Errorf("expected hunt cell rendered with bold + single-space pad, got %q", out)
+	}
+	if !strings.Contains(out, "<b>think</b> | plan") {
+		t.Errorf("expected think cell rendered with bold + no pad (5 runes matches col width), got %q", out)
+	}
+}
+
+// TestMarkdownToSimpleHTML_TableCellWithLink verifies that links in cells
+// are rendered as clickable <a> tags (Telegram supports <a> inside <pre>).
+func TestMarkdownToSimpleHTML_TableCellWithLink(t *testing.T) {
+	md := "| Source | Dest |\n|---|---|\n| [Waza](https://github.com/tw93/Waza) | local |"
+	out := MarkdownToSimpleHTML(md)
+	if !strings.Contains(out, `<a href="https://github.com/tw93/Waza">Waza</a>`) {
+		t.Errorf("expected link rendered inside table cell, got %q", out)
+	}
+	if strings.Contains(out, "[Waza]") {
+		t.Errorf("literal [Waza] should have been replaced by <a> tag, got %q", out)
+	}
+}
+
+func TestTableCellVisualWidth(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int
+	}{
+		{"hunt", 4},
+		{"**hunt**", 4},
+		{"`hunt`", 4},
+		{"*hunt*", 4},
+		{"~~hunt~~", 4},
+		{"***hunt***", 4},
+		{"[Waza](https://github.com/tw93/Waza)", 4},
+		{"调试错误", 4}, // 4 runes, regardless of UTF-8 byte count
+		{"normal", 6},
+		{"", 0},
+	}
+	for _, c := range cases {
+		if got := tableCellVisualWidth(c.in); got != c.want {
+			t.Errorf("tableCellVisualWidth(%q) = %d, want %d", c.in, got, c.want)
+		}
 	}
 }
 
