@@ -401,11 +401,20 @@ func (a *Agent) startSession(ctx context.Context, sessionID string, effortOverri
 	}
 	extraEnv := a.runtimeEnvLocked()
 
-	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
-		if m := a.providers[a.activeIdx].Model; m != "" {
+	activeIdx := a.activeIdx
+	var activeProviderName string
+	if activeIdx >= 0 && activeIdx < len(a.providers) {
+		activeProviderName = a.providers[activeIdx].Name
+		if m := a.providers[activeIdx].Model; m != "" {
 			model = m
 		}
 	}
+	slog.Debug("claudecode: StartSession provider state",
+		"activeIdx", activeIdx,
+		"activeProvider", activeProviderName,
+		"model", model,
+		"sessionID", sessionID,
+		"providerCount", len(a.providers))
 	platformPrompt := a.platformPrompt
 	// When router_url is set, --verbose conflicts with --output-format stream-json
 	// (verbose emits non-JSON text to stdout that corrupts the JSON stream).
@@ -930,6 +939,9 @@ func (a *Agent) providerEnvLocked() []string {
 			env = append(env, "ANTHROPIC_AUTH_TOKEN="+p.APIKey)
 			env = append(env, "ANTHROPIC_API_KEY=")
 		}
+		if p.Model != "" {
+			env = append(env, "ANTHROPIC_MODEL="+p.Model)
+		}
 	} else {
 		a.stopProviderProxyLocked()
 		if p.APIKey != "" {
@@ -940,6 +952,10 @@ func (a *Agent) providerEnvLocked() []string {
 	for k, v := range p.Env {
 		env = append(env, k+"="+v)
 	}
+	slog.Debug("claudecode: providerEnv",
+		"provider", p.Name,
+		"model", p.Model,
+		"env", core.RedactEnv(env))
 	return env
 }
 

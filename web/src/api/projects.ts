@@ -45,11 +45,14 @@ export interface ProjectSettingsUpdate {
   disabled_commands?: string[];
   work_dir?: string;
   mode?: string;
+  agent_type?: string;
   show_context_indicator?: boolean;
   reply_footer?: boolean;
   inject_sender?: boolean;
   platform_allow_from?: Record<string, string>;
 }
+
+export const listAgentTypes = () => api.get<{ agents: string[]; platforms: string[] }>('/agents');
 
 export const listProjects = () => api.get<{ projects: ProjectSummary[] }>('/projects');
 export const getProject = (name: string) => api.get<ProjectDetail>(`/projects/${name}`);
