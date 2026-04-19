@@ -200,9 +200,13 @@ Follow https://raw.githubusercontent.com/chenhg5/cc-connect/refs/heads/main/INST
 **Via npm:**
 
 ```bash
-# Stable version
 npm install -g cc-connect
+```
 
+**Via Homebrew (macOS / Linux):**
+
+```bash
+brew install cc-connect
 ```
 
 **Download binary from [GitHub Releases](https://github.com/chenhg5/cc-connect/releases):**
@@ -252,6 +256,9 @@ When a user runs `/dir reset`, cc-connect restores the configured `work_dir` and
 ```bash
 # npm
 npm install -g cc-connect
+
+# Homebrew
+brew upgrade cc-connect
 
 # Binary self-update
 cc-connect update           # Stable

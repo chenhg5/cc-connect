@@ -27,7 +27,13 @@ npm install -g cc-connect
 After installation, the `cc-connect` binary will be available globally.
 
 
-### Option B: Download binary from GitHub Releases
+### Option B: Homebrew (macOS / Linux)
+
+```bash
+brew install cc-connect
+```
+
+### Option C: Download binary from GitHub Releases
 
 Go to https://github.com/chenhg5/cc-connect/releases and download the binary for your platform.
 
@@ -50,7 +56,7 @@ On macOS, you may need to remove the quarantine attribute:
 xattr -d com.apple.quarantine cc-connect
 ```
 
-### Option C: Build from source
+### Option D: Build from source
 
 Requires Go 1.22+.
 

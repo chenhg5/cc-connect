@@ -200,9 +200,13 @@ MiniMax M2.7 是 MiniMax 首个深度参与自我迭代的模型，可自主构�
 **通过 npm：**
 
 ```bash
-# 稳定版
-npm install -g cc-connect
+# npm install -g cc-connect
+```
 
+**通过 Homebrew（macOS / Linux）：**
+
+```bash
+brew install cc-connect
 ```
 
 **从 [GitHub Releases](https://github.com/chenhg5/cc-connect/releases) 下载：**
@@ -252,6 +256,9 @@ vim ~/.cc-connect/config.toml
 ```bash
 # npm
 npm install -g cc-connect
+
+# Homebrew
+brew upgrade cc-connect
 
 # 二进制自更新
 cc-connect update           # 稳定版
