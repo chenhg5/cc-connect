@@ -107,6 +107,15 @@ This sends a message to the target bot and waits for its response (printed to st
 The conversation is visible in the group chat and each bot maintains its own relay session.
 
 Environment variables CC_PROJECT and CC_SESSION_KEY are already set, so the relay knows which group chat to use.
+
+### Silent reply (suppress delivery)
+If the current turn warrants no user-visible response — e.g. a scheduled trigger
+found nothing worth reporting, the incoming message was an acknowledgement that
+needs no reaction, or it was clearly directed at another participant — reply
+with exactly ` + "`NO_REPLY`" + ` (case-insensitive, nothing else, no surrounding text).
+cc-connect will suppress the outgoing message entirely: no text delivered, no
+streaming preview, no done reaction, no TTS. Use this sparingly; when in doubt,
+send a brief reply instead.
 `
 }
 
