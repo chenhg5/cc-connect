@@ -115,7 +115,7 @@ MiniMax-M2.7 is a next-generation large language model designed for autonomous e
 
 ## 🧩 Platform feature snapshot
 
-High-level view of what each **built-in platform** can do in cc-connect. Inspired by [OpenClaw China’s feature matrix](https://github.com/BytePioneer-AI/openclaw-china#功能支持) — handy for comparing channels at a glance.
+High-level view of what each **built-in platform** can do in cc-connect.
 
 **Legend**
 
@@ -146,7 +146,7 @@ High-level view of what each **built-in platform** can do in cc-connect. Inspire
 ## ✨ Why cc-connect?
 
 ### 🤖 Universal Agent Support
-**7+ AI Agents** — Claude Code, Codex, Cursor Agent, Qoder CLI, Gemini CLI, OpenCode, iFlow CLI — plus any agent that supports the [Agent Client Protocol (ACP)](https://agentclientprotocol.com/get-started/agents). Use whichever fits your workflow, or all of them at once.
+**9+ AI Agents** — Claude Code, Codex, Cursor Agent, Kimi CLI, Qoder CLI, Gemini CLI, OpenCode, iFlow CLI, Pi — plus any agent that supports the [Agent Client Protocol (ACP)](https://agentclientprotocol.com/get-started/agents). Use whichever fits your workflow, or all of them at once.
 
 ### 📱 Platform Flexibility
 **11 Chat Platforms** — Feishu, DingTalk, Slack, Telegram, Discord, WeChat Work, Weibo, LINE, QQ, QQ Bot (Official), plus **Weixin (personal ilink)** for **personal WeChat**. Most platforms need **zero public IP**.
@@ -271,6 +271,8 @@ cc-connect update --pre     # Include pre-releases
 | Agent | Qoder CLI | ✅ Supported |
 | Agent | OpenCode (Crush) | ✅ Supported |
 | Agent | iFlow CLI | ✅ Supported |
+| Agent | Kimi CLI (Moonshot) | ✅ Supported |
+| Agent | Pi (Cursor Background Agent) | ✅ Supported |
 | Agent | ACP (Agent Client Protocol) | ✅ Any [ACP-compatible agent](https://agentclientprotocol.com/get-started/agents) |
 | Agent | Goose (Block) | 🔜 Planned |
 | Agent | Aider | 🔜 Planned |
