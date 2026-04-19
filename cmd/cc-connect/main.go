@@ -426,6 +426,10 @@ func main() {
 				})
 			}
 		}
+		// Wire per-session message queue depth
+		if cfg.Queue.MaxDepth != nil && *cfg.Queue.MaxDepth > 0 {
+			engine.SetMaxQueuedMessages(*cfg.Queue.MaxDepth)
+		}
 		// Wire outgoing rate limiting
 		{
 			var maxPS float64

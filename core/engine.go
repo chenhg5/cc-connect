@@ -25,7 +25,7 @@ import (
 
 const maxPlatformMessageLen = 4000
 const telegramBotCommandLimit = 100
-const maxQueuedMessages = 5 // cap queued messages to bound memory usage
+const defaultMaxQueuedMessages = 5 // default cap on queued messages per session; override via [queue] max_depth
 
 const (
 	defaultThinkingMaxLen = 300
@@ -197,15 +197,16 @@ type Engine struct {
 	userRoles    *UserRoleManager // nil = legacy mode (no per-user policies)
 	userRolesMu  sync.RWMutex     // protects userRoles, disabledCmds, and adminFrom
 
-	rateLimiter      *RateLimiter
-	outgoingRL       *OutgoingRateLimiter
-	streamPreview    StreamPreviewCfg
-	references       ReferenceRenderCfg
-	relayManager     *RelayManager
-	eventIdleTimeout time.Duration
-	dirHistory       *DirHistory
-	baseWorkDir      string
-	projectState     *ProjectStateStore
+	rateLimiter       *RateLimiter
+	outgoingRL        *OutgoingRateLimiter
+	maxQueuedMessages int
+	streamPreview     StreamPreviewCfg
+	references        ReferenceRenderCfg
+	relayManager      *RelayManager
+	eventIdleTimeout  time.Duration
+	dirHistory        *DirHistory
+	baseWorkDir       string
+	projectState      *ProjectStateStore
 
 	// Auto-compress settings
 	autoCompressEnabled   bool
@@ -387,6 +388,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		references:            DefaultReferenceRenderCfg(),
 		eventIdleTimeout:      defaultEventIdleTimeout,
 		showContextIndicator:  true,
+		maxQueuedMessages:     defaultMaxQueuedMessages,
 	}
 
 	if ag != nil {
@@ -797,6 +799,15 @@ func (e *Engine) SetBannedWords(words []string) {
 		lower[i] = strings.ToLower(w)
 	}
 	e.bannedWords = lower
+}
+
+// SetMaxQueuedMessages overrides the per-session message queue depth.
+// Values <= 0 are ignored (default of defaultMaxQueuedMessages is kept).
+func (e *Engine) SetMaxQueuedMessages(n int) {
+	if n <= 0 {
+		return
+	}
+	e.maxQueuedMessages = n
 }
 
 // SetRateLimitCfg configures per-session message rate limiting.
@@ -1636,7 +1647,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 			}
 			return
 		}
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQueueFull))
 		return
 	}
 
@@ -1732,9 +1743,9 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 	// EventResult that never arrives. Instead, the event loop sends the
 	// message after the current turn's EventResult is received.
 	state.mu.Lock()
-	if len(state.pendingMessages) >= maxQueuedMessages {
+	if len(state.pendingMessages) >= e.maxQueuedMessages {
 		state.mu.Unlock()
-		return false // fall back to "previous processing" reply
+		return false // fall back to "queue full" reply
 	}
 	state.pendingMessages = append(state.pendingMessages, queuedMessage{
 		platform:      p,

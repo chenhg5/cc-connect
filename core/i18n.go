@@ -132,6 +132,7 @@ const (
 	MsgNoExecution               MsgKey = "no_execution"
 	MsgPreviousProcessing        MsgKey = "previous_processing"
 	MsgMessageQueued             MsgKey = "message_queued"
+	MsgQueueFull                 MsgKey = "queue_full"
 	MsgNoToolsAllowed            MsgKey = "no_tools_allowed"
 	MsgCurrentTools              MsgKey = "current_tools"
 	MsgCurrentSession            MsgKey = "current_session"
@@ -656,6 +657,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "📬 訊息已收到，將在目前任務完成後處理。",
 		LangJapanese:           "📬 メッセージを受信しました。現在のタスク完了後に処理します。",
 		LangSpanish:            "📬 Mensaje recibido — se procesará después de que termine la tarea actual.",
+	},
+	MsgQueueFull: {
+		LangEnglish:            "📭 Message queue is full — please try again shortly.",
+		LangChinese:            "📭 消息队列已满，请稍后再试。",
+		LangTraditionalChinese: "📭 訊息佇列已滿，請稍後再試。",
+		LangJapanese:           "📭 メッセージキューがいっぱいです。しばらくしてからもう一度お試しください。",
+		LangSpanish:            "📭 La cola de mensajes está llena — inténtalo de nuevo en breve.",
 	},
 	MsgNoToolsAllowed: {
 		LangEnglish:            "No tools pre-allowed.\nUsage: `/allow <tool_name>`\nExample: `/allow Bash`",

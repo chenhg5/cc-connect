@@ -102,6 +102,7 @@ type Config struct {
 	StreamPreview     StreamPreviewConfig     `toml:"stream_preview"`      // real-time streaming preview
 	RateLimit         RateLimitConfig         `toml:"rate_limit"`          // per-session rate limiting
 	OutgoingRateLimit OutgoingRateLimitConfig `toml:"outgoing_rate_limit"` // outgoing message throttling
+	Queue             QueueConfig             `toml:"queue"`               // per-session message queue depth
 	Relay             RelayConfig             `toml:"relay"`               // bot-to-bot relay behavior
 	Cron              CronConfig              `toml:"cron"`
 	Webhook           WebhookConfig           `toml:"webhook"`
@@ -173,6 +174,15 @@ type StreamPreviewConfig struct {
 type RateLimitConfig struct {
 	MaxMessages *int `toml:"max_messages"` // max messages per window; 0 = disabled; default 20
 	WindowSecs  *int `toml:"window_secs"`  // window size in seconds; default 60
+}
+
+// QueueConfig controls per-session message queue depth.
+// When the agent is busy with the current turn, additional incoming messages
+// are queued and replayed after the turn ends. MaxDepth caps how many messages
+// can wait; once full, further senders receive MsgQueueFull instead of being
+// queued. nil or non-positive value means use the engine default (5).
+type QueueConfig struct {
+	MaxDepth *int `toml:"max_depth"` // max queued messages per session; default 5
 }
 
 // OutgoingRateLimitConfig controls how fast messages are sent TO platforms.
