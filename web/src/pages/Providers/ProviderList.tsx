@@ -2,12 +2,13 @@ import { useEffect, useState, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   Plug, Plus, Trash2, Pencil, ExternalLink, Star, Sparkles, X, Eye, EyeOff, Check,
+  Download,
 } from 'lucide-react';
 import { Card, Button, Badge, Modal, Input } from '@/components/ui';
 import {
   listGlobalProviders, addGlobalProvider, updateGlobalProvider, removeGlobalProvider,
-  fetchProviderPresets,
-  type GlobalProvider, type ProviderPreset, type ProviderModel,
+  fetchProviderPresets, listCCSwitchProviders, importCCSwitchProviders,
+  type GlobalProvider, type ProviderPreset, type ProviderModel, type CCSwitchProvider,
 } from '@/api/providers';
 import { cn } from '@/lib/utils';
 
@@ -23,6 +24,7 @@ export default function ProviderList() {
   const [showAddModal, setShowAddModal] = useState(false);
   const [editProvider, setEditProvider] = useState<GlobalProvider | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+  const [showCCSwitchModal, setShowCCSwitchModal] = useState(false);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -94,7 +96,7 @@ export default function ProviderList() {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 ">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
@@ -105,9 +107,14 @@ export default function ProviderList() {
             {t('globalProviders.subtitle')}
           </p>
         </div>
-        <Button onClick={() => { setEditProvider(null); setShowAddModal(true); }}>
-          <Plus size={16} className="mr-1.5" /> {t('globalProviders.add')}
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="secondary" onClick={() => setShowCCSwitchModal(true)}>
+            <Download size={16} className="mr-1.5" /> {t('globalProviders.importCCSwitch')}
+          </Button>
+          <Button onClick={() => { setEditProvider(null); setShowAddModal(true); }}>
+            <Plus size={16} className="mr-1.5" /> {t('globalProviders.add')}
+          </Button>
+        </div>
       </div>
 
       {/* Tabs */}
@@ -178,6 +185,15 @@ export default function ProviderList() {
           <Button variant="danger" onClick={handleDelete}>{t('common.delete')}</Button>
         </div>
       </Modal>
+
+      {showCCSwitchModal && (
+        <CCSwitchImportModal
+          existingNames={new Set(providers.map(p => p.name))}
+          onClose={() => setShowCCSwitchModal(false)}
+          onImported={refresh}
+          t={t}
+        />
+      )}
     </div>
   );
 }
@@ -284,13 +300,13 @@ function PresetGrid({
       {sorted.map(p => {
         const added = existingNames.has(p.name);
         return (
-          <Card key={p.name} className="relative overflow-hidden">
+          <Card key={p.name} className="relative overflow-hidden flex flex-col">
             {p.featured && (
               <div className="absolute top-0 right-0 bg-amber-400/90 text-white text-[10px] font-bold px-2 py-0.5 rounded-bl-lg">
                 <Star size={10} className="inline mr-0.5 -mt-0.5" />
               </div>
             )}
-            <div className="space-y-3">
+            <div className="space-y-3 flex-1">
               <div>
                 <h3 className="font-medium text-gray-900 dark:text-white">{p.display_name || p.name}</h3>
                 {(p.description || p.description_zh) && (
@@ -319,26 +335,26 @@ function PresetGrid({
                   <ModelBadges models={firstAc.models} limit={5} />
                 ) : null;
               })()}
-              <div className="flex items-center justify-between pt-1">
-                {p.invite_url ? (
-                  <a
-                    href={p.invite_url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-xs text-accent hover:underline inline-flex items-center gap-1"
-                  >
-                    {t('globalProviders.register')} <ExternalLink size={11} />
-                  </a>
-                ) : <span />}
-                <Button
-                  size="sm"
-                  variant={added ? 'ghost' : 'primary'}
-                  disabled={added}
-                  onClick={() => onAdd(p)}
+            </div>
+            <div className="flex items-center justify-between mt-4 pt-3 border-t border-gray-100 dark:border-white/[0.06]">
+              {p.invite_url ? (
+                <a
+                  href={p.invite_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs text-accent hover:underline inline-flex items-center gap-1"
                 >
-                  {added ? t('globalProviders.added') : t('globalProviders.addPreset')}
-                </Button>
-              </div>
+                  {t('globalProviders.register')} <ExternalLink size={11} />
+                </a>
+              ) : <span />}
+              <Button
+                size="sm"
+                variant={added ? 'ghost' : 'primary'}
+                disabled={added}
+                onClick={() => onAdd(p)}
+              >
+                {added ? t('globalProviders.added') : t('globalProviders.addPreset')}
+              </Button>
             </div>
           </Card>
         );
@@ -815,6 +831,156 @@ function ProviderFormModal({
             {saving ? t('common.loading') : t('common.save')}
           </Button>
         </div>
+      </div>
+    </Modal>
+  );
+}
+
+/* ── CC-Switch Import Modal ── */
+
+function CCSwitchImportModal({
+  existingNames,
+  onClose,
+  onImported,
+  t,
+}: {
+  existingNames: Set<string>;
+  onClose: () => void;
+  onImported: () => void;
+  t: (key: string, opts?: any) => string;
+}) {
+  const [providers, setProviders] = useState<CCSwitchProvider[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [importing, setImporting] = useState(false);
+  const [result, setResult] = useState<{ imported: string[]; skipped: string[] } | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const data = await listCCSwitchProviders();
+        if (!data.available) {
+          setError(data.error || t('globalProviders.ccSwitch.notFound'));
+        } else {
+          setProviders(data.providers || []);
+          const selectable = (data.providers || []).filter(p => !existingNames.has(p.name));
+          setSelected(new Set(selectable.map(p => p.name)));
+        }
+      } catch {
+        setError(t('globalProviders.ccSwitch.notFound'));
+      }
+      setLoading(false);
+    })();
+  }, []);
+
+  const toggle = (name: string) => {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  };
+
+  const handleImport = async () => {
+    setImporting(true);
+    try {
+      const res = await importCCSwitchProviders([...selected]);
+      setResult(res);
+      onImported();
+    } catch { /* empty */ }
+    setImporting(false);
+  };
+
+  return (
+    <Modal open onClose={onClose} title={t('globalProviders.ccSwitch.title')}>
+      <div className="space-y-4">
+        {loading && (
+          <div className="flex justify-center py-8">
+            <div className="animate-spin rounded-full h-6 w-6 border-2 border-accent border-t-transparent" />
+          </div>
+        )}
+
+        {error && (
+          <div className="rounded-xl border border-amber-200 dark:border-amber-500/20 bg-amber-50 dark:bg-amber-900/10 p-4 text-sm text-amber-700 dark:text-amber-400">
+            {error}
+          </div>
+        )}
+
+        {!loading && !error && providers.length === 0 && (
+          <p className="text-sm text-gray-500 dark:text-gray-400 text-center py-4">
+            {t('globalProviders.ccSwitch.empty')}
+          </p>
+        )}
+
+        {!loading && !error && providers.length > 0 && !result && (
+          <>
+            <p className="text-sm text-gray-500 dark:text-gray-400">
+              {t('globalProviders.ccSwitch.hint', { count: providers.length })}
+            </p>
+            <div className="max-h-72 overflow-y-auto space-y-1">
+              {providers.map(p => {
+                const exists = existingNames.has(p.name);
+                return (
+                  <label
+                    key={p.name}
+                    className={cn(
+                      'flex items-center gap-3 rounded-xl px-3 py-2.5 transition-colors cursor-pointer',
+                      exists
+                        ? 'opacity-50 cursor-not-allowed'
+                        : selected.has(p.name)
+                          ? 'bg-accent/10 dark:bg-accent/5'
+                          : 'hover:bg-gray-50 dark:hover:bg-white/[0.04]',
+                    )}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selected.has(p.name)}
+                      disabled={exists}
+                      onChange={() => !exists && toggle(p.name)}
+                      className="rounded border-gray-300 dark:border-white/20 text-accent focus:ring-accent/30"
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium text-gray-900 dark:text-white truncate">
+                          {p.name}
+                        </span>
+                        <Badge variant={p.app_type === 'claude' ? 'default' : 'info'}>
+                          {p.app_type}
+                        </Badge>
+                        {p.is_current && <Badge variant="success">{t('globalProviders.ccSwitch.active')}</Badge>}
+                        {exists && <Badge variant="warning">{t('globalProviders.ccSwitch.exists')}</Badge>}
+                      </div>
+                      <div className="text-xs text-gray-400 mt-0.5 truncate">
+                        {p.model && <span>{p.model}</span>}
+                        {p.model && p.base_url && <span> · </span>}
+                        {p.base_url && <span>{p.base_url}</span>}
+                      </div>
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <Button variant="ghost" onClick={onClose}>{t('common.cancel')}</Button>
+              <Button onClick={handleImport} disabled={selected.size === 0 || importing}>
+                {importing ? t('common.saving') : t('globalProviders.ccSwitch.import', { count: selected.size })}
+              </Button>
+            </div>
+          </>
+        )}
+
+        {result && (
+          <>
+            <div className="rounded-xl border border-green-200 dark:border-green-500/20 bg-green-50 dark:bg-green-900/10 p-4 text-sm text-green-700 dark:text-green-400">
+              {t('globalProviders.ccSwitch.result', { imported: result.imported?.length || 0, skipped: result.skipped?.length || 0 })}
+            </div>
+            <div className="flex justify-end">
+              <Button onClick={onClose}>{t('common.close')}</Button>
+            </div>
+          </>
+        )}
       </div>
     </Modal>
   );

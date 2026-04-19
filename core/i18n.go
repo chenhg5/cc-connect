@@ -299,6 +299,7 @@ const (
 	MsgModelSelectPlaceholder    MsgKey = "model_select_placeholder"
 	MsgModeSelectPlaceholder     MsgKey = "mode_select_placeholder"
 	MsgProviderSelectPlaceholder MsgKey = "provider_select_placeholder"
+	MsgProviderClearOption       MsgKey = "provider_clear_option"
 	MsgCardBack                  MsgKey = "card_back"
 	MsgCardPrev                  MsgKey = "card_prev"
 	MsgCardNext                  MsgKey = "card_next"
@@ -2205,6 +2206,10 @@ var messages = map[MsgKey]map[Language]string{
 	MsgProviderSelectPlaceholder: {
 		LangEnglish: "Select provider", LangChinese: "选择 Provider", LangTraditionalChinese: "選擇 Provider",
 		LangJapanese: "プロバイダーを選択", LangSpanish: "Seleccionar proveedor",
+	},
+	MsgProviderClearOption: {
+		LangEnglish: "Do not use provider", LangChinese: "不使用服务商", LangTraditionalChinese: "不使用服務商",
+		LangJapanese: "プロバイダーを使用しない", LangSpanish: "No usar proveedor",
 	},
 	MsgCardBack: {
 		LangEnglish: "← Back", LangChinese: "← 返回", LangTraditionalChinese: "← 返回",
