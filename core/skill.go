@@ -158,6 +158,13 @@ func realPath(path string) string {
 	return filepath.Clean(path)
 }
 
+// Dirs returns the configured skill directories.
+func (r *SkillRegistry) Dirs() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return append([]string(nil), r.dirs...)
+}
+
 // Invalidate clears the cache so skills are re-scanned on next access.
 func (r *SkillRegistry) Invalidate() {
 	r.mu.Lock()
