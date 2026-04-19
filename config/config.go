@@ -107,6 +107,7 @@ type Config struct {
 	Webhook           WebhookConfig           `toml:"webhook"`
 	Bridge            BridgeConfig            `toml:"bridge"`
 	Management        ManagementConfig        `toml:"management"`
+	Hooks             []HookConfig            `toml:"hooks"`
 	IdleTimeoutMins   *int                    `toml:"idle_timeout_mins,omitempty"` // max minutes between agent events; 0 = no timeout; default 120
 }
 
@@ -131,6 +132,16 @@ type BridgeConfig struct {
 	Token       string   `toml:"token,omitempty"`        // shared secret for authentication; required
 	Path        string   `toml:"path,omitempty"`         // URL path; default "/bridge/ws"
 	CORSOrigins []string `toml:"cors_origins,omitempty"` // allowed CORS origins; empty = no CORS
+}
+
+// HookConfig is a single event hook rule.
+type HookConfig struct {
+	Event   string `toml:"event"`             // event name or "*"
+	Type    string `toml:"type"`              // "command" or "http"
+	Command string `toml:"command,omitempty"` // shell command (type=command)
+	URL     string `toml:"url,omitempty"`     // HTTP endpoint (type=http)
+	Timeout int    `toml:"timeout,omitempty"` // seconds; 0 = default
+	Async   *bool  `toml:"async,omitempty"`   // nil = true (async by default)
 }
 
 // ManagementConfig controls the HTTP Management API for external tools.
