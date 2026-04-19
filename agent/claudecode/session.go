@@ -740,7 +740,7 @@ func (cs *claudeSession) Close() error {
 // Uses single quotes because some splitters (e.g. my_cli) don't support
 // backslash escapes inside double quotes. For values containing single
 // quotes, we close the single-quoted segment, add an escaped single
-// quote, and reopen: 'it'\”s' → it's
+// quote, and reopen: 'it'\''s' -> it's
 func shellJoinArgs(args []string) string {
 	var b strings.Builder
 	for i, a := range args {
