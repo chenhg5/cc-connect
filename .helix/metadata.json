@@ -1,0 +1,23 @@
+[
+  {
+    "instance_id": "chenhg5__cc-connect__380",
+    "task_title": "Claude Code UsageReporter (GetUsage)",
+    "problem_statement": "Implement the Claude Code (claudecode) agent as a core.UsageReporter.\n\nContract API (must exist on *claudecode.Agent):\n  func (a *Agent) GetUsage(ctx context.Context) (*core.UsageReport, error)\n\nTests assert on *core.UsageReport populated from Claude quota data. Shape to satisfy:\n\n- Top-level core.UsageReport: Provider, AccountID, UserID, Email, Plan; optional Credits pointing at core.UsageCredits { HasCredits, Unlimited, Balance } when the provider exposes that metadata.\n- Buckets: []core.UsageBucket. Each core.UsageBucket has Name, Allowed, LimitReached, and Windows.\n- Windows: []core.UsageWindow. Each core.UsageWindow must carry at least Name, WindowSeconds, UsedPercent, ResetAfterSeconds, and set ResetAtUnix when an absolute reset timestamp is available.\n\nEvaluation may compile only the Go sources and test files explicitly listed for a run, not every *_test.go in the package directory.\n\nINTERFACE EXCEPTION — required identifiers in package claudecode:\nThese exact spellings must exist in agent/claudecode (as functions or methods in that package): newClaudeUsageTerminal, normalizeClaudeUsageText, parseClaudeUsageReport, parseClaudeUsageResetTime.",
+    "variant": "Surface Claude account and model quota limits in the shared core.UsageReport model so the engine can render usage consistently: nested buckets, each with rolling windows labeled with Name and the numeric fields WindowSeconds, UsedPercent, and ResetAfterSeconds. The implementation must tolerate missing or partial quota data without failing the whole report when some fields are absent.",
+    "hints": "Treat absent or malformed quota fragments as optional; preserve numeric window and reset semantics when the backing data includes them.",
+    "repo": "chenhg5/cc-connect",
+    "repo_path_or_url": "https://github.com/chenhg5/cc-connect",
+    "FAIL_TO_PASS": "agent/claudecode/usage_test.go",
+    "PASS_TO_PASS": "agent/claudecode/claudecode_test.go,agent/claudecode/session_test.go,agent/claudecode/claudecode_model_test.go",
+    "language": "go",
+    "docker_file": ".helix/Dockerfile.helix",
+    "run_script": ".helix/run-tests-eval.sh",
+    "task_type": "pull_request",
+    "task_category": "maintenance",
+    "repo_category": "application",
+    "version": "main",
+    "container_mem": "8g",
+    "container_memswap": "8g",
+    "container_network_needed": "true"
+  }
+]
