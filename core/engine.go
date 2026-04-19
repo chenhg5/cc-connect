@@ -2979,13 +2979,27 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			}
 
-			// Detect bare NO_REPLY marker on the base response (before indicators/footer are appended).
-			// When silent, skip the platform send / context indicator / footer / TTS entirely.
-			// History is still written so the agent retains context of its own decision to stay silent.
-			isSilent := isSilentReply(baseResponse)
-
+			// Detect NO_REPLY marker on the base response (before indicators/footer are appended).
+			// Three cases:
+			//   1. bare marker (isSilentReply)               → fully silent
+			//   2. trailing marker with non-empty reasoning  → strip marker, deliver reasoning
+			//   3. trailing marker with empty strip result   → fully silent
+			// History records the ORIGINAL baseResponse so the agent retains context of its own
+			// decision; only the outbound platform text gets rewritten/suppressed.
 			session.AddHistory("assistant", baseResponse)
 			sessions.Save()
+
+			isSilent := isSilentReply(baseResponse)
+			if !isSilent {
+				if stripped, ok := stripTrailingSilent(baseResponse); ok {
+					if strings.TrimSpace(stripped) == "" {
+						isSilent = true
+					} else {
+						baseResponse = stripped
+						cleanResponse = stripped
+					}
+				}
+			}
 
 			if !isSilent {
 				e.hooks.Emit(HookEvent{
@@ -11767,9 +11781,25 @@ var ctxSelfReportRe = regexp.MustCompile(`(?m)\n?\[ctx: ~\d+%\]`)
 // so the agent stays silent in group chats where a reply would be noise.
 var silentReplyRe = regexp.MustCompile(`(?i)^\s*NO_REPLY\s*$`)
 
+// silentReplyTrailingRe matches a trailing NO_REPLY marker preceded by whitespace or
+// markdown emphasis (`*`). Lets agents that narrate their reasoning before the marker
+// still suppress the marker from the delivered text (mirroring OpenClaw's stripSilentToken).
+var silentReplyTrailingRe = regexp.MustCompile(`(?i)(?:^|\s+|\*+)NO_REPLY\s*$`)
+
 // isSilentReply reports whether text is exactly a NO_REPLY marker.
 func isSilentReply(text string) bool {
 	return silentReplyRe.MatchString(text)
+}
+
+// stripTrailingSilent removes a trailing NO_REPLY marker and returns the stripped text
+// along with whether a strip occurred. Caller must first check isSilentReply for the
+// bare-marker case; this helper assumes mixed content.
+func stripTrailingSilent(text string) (string, bool) {
+	stripped := silentReplyTrailingRe.ReplaceAllString(text, "")
+	if stripped == text {
+		return text, false
+	}
+	return strings.TrimRight(stripped, " \t\r\n"), true
 }
 
 // couldBeSilentPrefix reports whether the trimmed text is still a case-insensitive

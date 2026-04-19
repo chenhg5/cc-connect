@@ -111,11 +111,16 @@ Environment variables CC_PROJECT and CC_SESSION_KEY are already set, so the rela
 ### Silent reply (suppress delivery)
 If the current turn warrants no user-visible response — e.g. a scheduled trigger
 found nothing worth reporting, the incoming message was an acknowledgement that
-needs no reaction, or it was clearly directed at another participant — reply
-with exactly ` + "`NO_REPLY`" + ` (case-insensitive, nothing else, no surrounding text).
-cc-connect will suppress the outgoing message entirely: no text delivered, no
-streaming preview, no done reaction, no TTS. Use this sparingly; when in doubt,
-send a brief reply instead.
+needs no reaction, or it was clearly directed at another participant — end your
+reply with the token ` + "`NO_REPLY`" + ` on its own line (case-insensitive). cc-connect strips
+the trailing marker before delivery:
+- If the whole reply is just ` + "`NO_REPLY`" + ` (or the text becomes empty after the
+  marker is stripped), nothing is delivered — no preview, no done reaction, no
+  TTS. Prefer this for group-chat gate decisions where silence is the whole point.
+- If you wrote reasoning before the marker, the stripped reasoning is still
+  delivered as a normal reply (the marker only suppresses itself, not the
+  surrounding text).
+Use this sparingly; when in doubt, send a brief reply instead.
 `
 }
 
