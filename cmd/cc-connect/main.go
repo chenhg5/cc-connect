@@ -88,6 +88,9 @@ func main() {
 		case "doctor":
 			runDoctor(os.Args[2:])
 			return
+		case "web":
+			runWeb(os.Args[2:])
+			return
 		}
 	}
 
@@ -350,6 +353,22 @@ func main() {
 		}
 
 		engine.SetDisplayConfig(buildDisplayCfg(cfg, &proj))
+
+		// Wire hooks
+		if len(cfg.Hooks) > 0 {
+			coreHooks := make([]core.HookConfig, len(cfg.Hooks))
+			for i, h := range cfg.Hooks {
+				coreHooks[i] = core.HookConfig{
+					Event:   h.Event,
+					Type:    h.Type,
+					Command: h.Command,
+					URL:     h.URL,
+					Timeout: h.Timeout,
+					Async:   h.Async,
+				}
+			}
+			engine.SetHooks(core.NewHookManager(proj.Name, coreHooks))
+		}
 
 		// Wire local reference normalization / rendering
 		engine.SetReferenceConfig(core.ReferenceRenderCfg{
@@ -849,6 +868,7 @@ func main() {
 				DisabledCommands:     u.DisabledCommands,
 				WorkDir:              u.WorkDir,
 				Mode:                 u.Mode,
+				AgentType:            u.AgentType,
 				ShowContextIndicator: u.ShowContextIndicator,
 				ReplyFooter:          u.ReplyFooter,
 				InjectSender:         u.InjectSender,
@@ -946,9 +966,11 @@ func main() {
 			return config.RemoveGlobalProvider(name)
 		})
 		mgmtSrv.SetFetchPresets(core.FetchProviderPresets)
+		mgmtSrv.SetFetchSkillPresets(core.FetchSkillPresets)
 		if cfg.ProviderPresetsURL != "" {
 			core.SetPresetsURL(cfg.ProviderPresetsURL)
 		}
+		mgmtSrv.SetListCCSwitchProviders(listCCSwitchProvidersForWeb)
 		mgmtSrv.Start()
 	}
 

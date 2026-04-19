@@ -300,6 +300,45 @@ level = "info" # debug, info, warn, error
 # cors_origins = ["http://localhost:3000"]  # Allowed CORS origins / 允许的 CORS 来源
 
 # =============================================================================
+# Hooks (Event Triggers / 事件钩子)
+# =============================================================================
+# Execute shell commands or send HTTP requests when lifecycle events occur.
+# 在生命周期事件发生时执行 Shell 命令或发送 HTTP 请求。
+#
+# Supported events / 支持的事件:
+#   message.received   — user message arrives / 用户消息到达
+#   message.sent       — agent reply sent / Agent 回复发送完成
+#   session.started    — agent session spawned / Agent 会话启动
+#   session.ended      — agent session stopped / Agent 会话结束
+#   cron.triggered     — cron job fires / 定时任务触发
+#   permission.requested — agent asks for permission / Agent 请求权限
+#   error              — an error occurs / 发生错误
+#   *                  — match all events / 匹配所有事件
+#
+# Handler types / 处理器类型:
+#   command — run a shell command; event context in CC_HOOK_* env vars
+#           — 执行 Shell 命令；事件上下文通过 CC_HOOK_* 环境变量传递
+#   http    — POST JSON to a URL with event payload
+#           — 向 URL 发送 POST JSON 请求，包含事件数据
+#
+# [[hooks]]
+# event = "message.received"
+# type = "command"
+# command = "echo $CC_HOOK_USER_NAME >> /tmp/cc-messages.log"
+# async = true                    # default true; set false to block until done
+# timeout = 10                    # seconds; default 10s for command, 5s for http
+#
+# [[hooks]]
+# event = "error"
+# type = "http"
+# url = "https://my-server.com/cc-connect/on-error"
+#
+# [[hooks]]
+# event = "*"
+# type = "http"
+# url = "https://my-server.com/cc-connect/events"
+
+# =============================================================================
 # Speech-to-Text (Voice Messages) / 语音转文字（语音消息）
 # =============================================================================
 # Enable to transcribe voice messages to text before sending to agents.
