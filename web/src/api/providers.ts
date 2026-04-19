@@ -85,3 +85,17 @@ export const removeGlobalProvider = (name: string) =>
   api.delete<{ message: string }>(`/providers/${name}`);
 export const fetchProviderPresets = () =>
   api.get<PresetsResponse>('/providers/presets');
+
+// cc-switch migration
+export interface CCSwitchProvider {
+  name: string;
+  app_type: string;
+  api_key?: string;
+  base_url?: string;
+  model?: string;
+  is_current: boolean;
+}
+export const listCCSwitchProviders = () =>
+  api.get<{ providers: CCSwitchProvider[]; available: boolean; error?: string }>('/providers/cc-switch');
+export const importCCSwitchProviders = (names: string[]) =>
+  api.post<{ imported: string[]; skipped: string[] }>('/providers/cc-switch', { names });

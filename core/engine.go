@@ -177,6 +177,7 @@ type Engine struct {
 	displaySaveFunc  func(thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error
 	configReloadFunc func() (*ConfigReloadResult, error)
 
+	hooks              *HookManager
 	cronScheduler      *CronScheduler
 	heartbeatScheduler *HeartbeatScheduler
 
@@ -462,7 +463,11 @@ func (e *Engine) reapIdleWorkspaces() {
 	}
 }
 
-// SetSpeechConfig configures the speech-to-text subsystem.
+// SetHooks configures the lifecycle event hook manager.
+func (e *Engine) SetHooks(hm *HookManager) {
+	e.hooks = hm
+}
+
 func (e *Engine) SetSpeechConfig(cfg SpeechCfg) {
 	e.speech = cfg
 }
@@ -884,6 +889,24 @@ func (e *Engine) ProjectName() string {
 	return e.name
 }
 
+// ListSkills returns all discovered skills for this engine's project.
+func (e *Engine) ListSkills() []*Skill {
+	return e.skills.ListAll()
+}
+
+// SkillDirs returns the configured skill directories for this engine.
+func (e *Engine) SkillDirs() []string {
+	return e.skills.Dirs()
+}
+
+// AgentTypeName returns the agent type name (e.g. "claudecode", "codex").
+func (e *Engine) AgentTypeName() string {
+	if e.agent != nil {
+		return e.agent.Name()
+	}
+	return ""
+}
+
 // ActiveSessionKeys returns the session keys of all active interactive sessions.
 func (e *Engine) ActiveSessionKeys() []string {
 	e.interactiveMu.Lock()
@@ -901,6 +924,13 @@ func (e *Engine) ActiveSessionKeys() []string {
 // It finds the platform that owns the session key, reconstructs a reply context,
 // and processes the message as if the user sent it.
 func (e *Engine) ExecuteCronJob(job *CronJob) error {
+	e.hooks.Emit(HookEvent{
+		Event:      HookEventCronTriggered,
+		SessionKey: job.SessionKey,
+		Content:    job.Prompt,
+		Extra:      map[string]any{"job_id": job.ID, "job_description": job.Description},
+	})
+
 	sessionKey := job.SessionKey
 	platformName := ""
 	if idx := strings.Index(sessionKey, ":"); idx > 0 {
@@ -1422,6 +1452,15 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		"content_len", len(msg.Content),
 		"has_images", len(msg.Images) > 0, "has_audio", msg.Audio != nil, "has_files", len(msg.Files) > 0,
 	)
+
+	e.hooks.Emit(HookEvent{
+		Event:      HookEventMessageReceived,
+		SessionKey: msg.SessionKey,
+		Platform:   msg.Platform,
+		UserID:     msg.UserID,
+		UserName:   msg.UserName,
+		Content:    msg.Content,
+	})
 
 	// Voice message: transcribe to text first
 	if msg.Audio != nil {
@@ -2373,6 +2412,12 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		}
 		if err != nil {
 			slog.Error("failed to start interactive session", "error", err, "elapsed", startElapsed)
+			e.hooks.Emit(HookEvent{
+				Event:      HookEventError,
+				SessionKey: sessionKey,
+				Platform:   p.Name(),
+				Error:      fmt.Sprintf("failed to start session: %v", err),
+			})
 			newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent}
 			adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
 			state = newState
@@ -2401,6 +2446,17 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	e.interactiveStates[sessionKey] = state
 
 	slog.Info("session spawned", "session_key", sessionKey, "agent_session", session.GetAgentSessionID(), "is_resume", isResume, "elapsed", startElapsed)
+
+	e.hooks.Emit(HookEvent{
+		Event:      HookEventSessionStarted,
+		SessionKey: sessionKey,
+		Platform:   p.Name(),
+		Extra: map[string]any{
+			"agent_session_id": session.GetAgentSessionID(),
+			"is_resume":        isResume,
+		},
+	})
+
 	return state
 }
 
@@ -2907,6 +2963,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			session.AddHistory("assistant", baseResponse)
 			sessions.Save()
 
+			e.hooks.Emit(HookEvent{
+				Event:      HookEventMessageSent,
+				SessionKey: sessionKey,
+				Platform:   p.Name(),
+				Content:    baseResponse,
+			})
+
 			if e.showContextIndicator {
 				if sdkPlausible {
 					cleanResponse += contextIndicator(event.InputTokens)
@@ -3120,6 +3183,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			sp.discard()
 			if event.Error != nil {
 				slog.Error("agent error", "error", event.Error)
+				e.hooks.Emit(HookEvent{
+					Event:      HookEventError,
+					SessionKey: sessionKey,
+					Platform:   p.Name(),
+					Error:      event.Error.Error(),
+				})
 				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
 			}
 			// Only drop queued messages if the agent session is dead.
@@ -3145,6 +3214,13 @@ channelClosed:
 
 		fullResponse := strings.Join(textParts, "")
 		session.AddHistory("assistant", fullResponse)
+
+		e.hooks.Emit(HookEvent{
+			Event:      HookEventMessageSent,
+			SessionKey: sessionKey,
+			Platform:   p.Name(),
+			Content:    fullResponse,
+		})
 
 		if toolCount > 0 && segmentStart > 0 {
 			sp.discard()
@@ -6272,6 +6348,12 @@ func (e *Engine) stopInteractiveSession(sessionKey string, quietPlatform Platfor
 	}
 	e.notifyDroppedQueuedMessages(state, fmt.Errorf("session reset"))
 	e.closeAgentSessionAsync(sessionKey, agentSession)
+
+	e.hooks.Emit(HookEvent{
+		Event:      HookEventSessionEnded,
+		SessionKey: sessionKey,
+	})
+
 	return true
 }
 
@@ -6601,6 +6683,12 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 	case "clear", "reset", "none":
 		switcher.SetActiveProvider("")
 		e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
+		{
+			s := e.sessions.GetOrCreateActive(msg.SessionKey)
+			s.SetAgentSessionID("", "")
+			s.ClearHistory()
+			e.sessions.Save()
+		}
 		if e.providerSaveFunc != nil {
 			if err := e.providerSaveFunc(""); err != nil {
 				slog.Error("failed to save provider", "error", err)
@@ -6746,6 +6834,11 @@ func (e *Engine) switchProvider(p Platform, msg *Message, switcher ProviderSwitc
 		return
 	}
 	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
+
+	s := e.sessions.GetOrCreateActive(msg.SessionKey)
+	s.SetAgentSessionID("", "")
+	s.ClearHistory()
+	e.sessions.Save()
 
 	if e.providerSaveFunc != nil {
 		if err := e.providerSaveFunc(name); err != nil {
@@ -7092,6 +7185,13 @@ func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images
 // sendPermissionPrompt sends a permission prompt with interactive buttons when
 // the platform supports them. Fallback chain: InlineButtonSender → CardSender → plain text.
 func (e *Engine) sendPermissionPrompt(p Platform, replyCtx any, prompt, toolName, toolInput string) {
+	e.hooks.Emit(HookEvent{
+		Event:    HookEventPermissionRequested,
+		Platform: p.Name(),
+		Content:  prompt,
+		Extra:    map[string]any{"tool_name": toolName},
+	})
+
 	// Try inline buttons first (Telegram)
 	if bs, ok := p.(InlineButtonSender); ok {
 		buttons := [][]ButtonOption{
@@ -7719,11 +7819,19 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		if !ok {
 			return
 		}
-		if switcher.SetActiveProvider(args) {
+		provName := args
+		if provName == "clear" {
+			provName = ""
+		}
+		if switcher.SetActiveProvider(provName) {
 			interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 			e.cleanupInteractiveState(interactiveKey)
+			s := e.sessions.GetOrCreateActive(sessionKey)
+			s.SetAgentSessionID("", "")
+			s.ClearHistory()
+			e.sessions.Save()
 			if e.providerSaveFunc != nil {
-				_ = e.providerSaveFunc(args)
+				_ = e.providerSaveFunc(provName)
 			}
 		}
 
@@ -8770,6 +8878,12 @@ func (e *Engine) renderProviderCard() *Card {
 	if len(providers) > 0 {
 		var opts []CardSelectOption
 		initVal := ""
+		if current != nil {
+			opts = append(opts, CardSelectOption{
+				Text:  "🚫 " + e.i18n.T(MsgProviderClearOption),
+				Value: "act:/provider clear",
+			})
+		}
 		for _, prov := range providers {
 			label := prov.Name
 			if prov.BaseURL != "" {

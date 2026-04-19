@@ -107,6 +107,7 @@ type Config struct {
 	Webhook           WebhookConfig           `toml:"webhook"`
 	Bridge            BridgeConfig            `toml:"bridge"`
 	Management        ManagementConfig        `toml:"management"`
+	Hooks             []HookConfig            `toml:"hooks"`
 	IdleTimeoutMins   *int                    `toml:"idle_timeout_mins,omitempty"` // max minutes between agent events; 0 = no timeout; default 120
 }
 
@@ -131,6 +132,16 @@ type BridgeConfig struct {
 	Token       string   `toml:"token,omitempty"`        // shared secret for authentication; required
 	Path        string   `toml:"path,omitempty"`         // URL path; default "/bridge/ws"
 	CORSOrigins []string `toml:"cors_origins,omitempty"` // allowed CORS origins; empty = no CORS
+}
+
+// HookConfig is a single event hook rule.
+type HookConfig struct {
+	Event   string `toml:"event"`             // event name or "*"
+	Type    string `toml:"type"`              // "command" or "http"
+	Command string `toml:"command,omitempty"` // shell command (type=command)
+	URL     string `toml:"url,omitempty"`     // HTTP endpoint (type=http)
+	Timeout int    `toml:"timeout,omitempty"` // seconds; 0 = default
+	Async   *bool  `toml:"async,omitempty"`   // nil = true (async by default)
 }
 
 // ManagementConfig controls the HTTP Management API for external tools.
@@ -2403,6 +2414,7 @@ type ProjectSettingsUpdate struct {
 	DisabledCommands     []string
 	WorkDir              *string
 	Mode                 *string
+	AgentType            *string
 	ShowContextIndicator *bool
 	ReplyFooter          *bool
 	InjectSender         *bool
@@ -2434,6 +2446,45 @@ func SaveProjectSettings(projectName string, update ProjectSettingsUpdate) error
 			continue
 		}
 		proj := &cfg.Projects[i]
+		if update.AgentType != nil && *update.AgentType != proj.Agent.Type {
+			newType := *update.AgentType
+			proj.Agent.Type = newType
+			// Filter out provider_refs incompatible with the new agent type.
+			globalByName := make(map[string]ProviderConfig, len(cfg.Providers))
+			for _, p := range cfg.Providers {
+				globalByName[p.Name] = p
+			}
+			var compatible []string
+			for _, ref := range proj.Agent.ProviderRefs {
+				gp, ok := globalByName[ref]
+				if !ok {
+					continue
+				}
+				if len(gp.AgentTypes) > 0 && !containsString(gp.AgentTypes, newType) {
+					slog.Info("removing incompatible provider ref on agent type change",
+						"project", projectName, "provider", ref,
+						"provider_agents", gp.AgentTypes, "new_agent", newType)
+					continue
+				}
+				compatible = append(compatible, ref)
+			}
+			proj.Agent.ProviderRefs = compatible
+			// Clear active provider if it was removed.
+			if opts := proj.Agent.Options; opts != nil {
+				if prov, ok := opts["provider"].(string); ok && prov != "" {
+					found := false
+					for _, ref := range compatible {
+						if ref == prov {
+							found = true
+							break
+						}
+					}
+					if !found {
+						delete(opts, "provider")
+					}
+				}
+			}
+		}
 		if update.AdminFrom != nil {
 			proj.AdminFrom = *update.AdminFrom
 		}
