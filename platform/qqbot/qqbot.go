@@ -219,7 +219,7 @@ func (p *Platform) SendImage(ctx context.Context, replyCtx any, img core.ImageAt
 		return fmt.Errorf("qqbot: SendImage: invalid reply context type %T", replyCtx)
 	}
 
-	fileInfo, err := p.uploadRichMedia(rctx, 1, img.Data)
+	fileInfo, err := p.uploadRichMedia(rctx, 1, img.Data, "")
 	if err != nil {
 		return fmt.Errorf("qqbot: upload image: %w", err)
 	}
@@ -248,7 +248,7 @@ func (p *Platform) SendImage(ctx context.Context, replyCtx any, img core.ImageAt
 
 // uploadRichMedia uploads a file to QQ Bot rich media API and returns the file_info.
 // fileType: 1=image, 2=video, 3=audio, 4=file.
-func (p *Platform) uploadRichMedia(rctx *replyContext, fileType int, data []byte) (string, error) {
+func (p *Platform) uploadRichMedia(rctx *replyContext, fileType int, data []byte, fileName string) (string, error) {
 	var url string
 	switch rctx.messageType {
 	case "group":
@@ -264,6 +264,9 @@ func (p *Platform) uploadRichMedia(rctx *replyContext, fileType int, data []byte
 		"file_type":    fileType,
 		"file_data":    b64,
 		"srv_send_msg": false,
+	}
+	if fileType == 4 && fileName != "" {
+		reqBody["file_name"] = fileName
 	}
 
 	var result struct {
@@ -365,7 +368,7 @@ func (p *Platform) SendFile(ctx context.Context, replyCtx any, file core.FileAtt
 		return fmt.Errorf("qqbot: SendFile: invalid reply context type %T", replyCtx)
 	}
 
-	fileInfo, err := p.uploadRichMedia(rctx, 4, file.Data)
+	fileInfo, err := p.uploadRichMedia(rctx, 4, file.Data, file.FileName)
 	if err != nil {
 		return fmt.Errorf("qqbot: upload file: %w", err)
 	}
