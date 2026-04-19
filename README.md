@@ -122,7 +122,6 @@ High-level view of what each **built-in platform** can do in cc-connect.
 | Symbol | Meaning |
 |--------|---------|
 | ✅ | Works in **stable** cc-connect with typical configuration |
-
 | ⚠️ | Partial, needs extra config (e.g. speech / ASR), or limited by the vendor app or API |
 | ❌ | Not supported or not applicable in practice |
 
