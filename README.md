@@ -102,27 +102,26 @@ MiniMax-M2.7 is a next-generation large language model designed for autonomous e
 </p>
 
 
-## 🆕 What's New (beta)
+## 🆕 What’s New in v1.3.0
 
-> These highlights are in **beta / pre-release** builds — install [`cc-connect@beta`](https://www.npmjs.com/package/cc-connect?activeTab=versions) or grab a [pre-release](https://github.com/chenhg5/cc-connect/releases) binary. They are **not** in the default **stable** release yet; details may change before promotion to stable.
-
+- **🌐 Web Admin UI (Recommended)** — Full management dashboard embedded in the binary — **no extra dependencies**. Create and edit projects, manage providers, monitor sessions, edit cron jobs, and **chat with your agent directly from the browser**. Supports 5 languages (en/zh/zh-TW/ja/es). We recommend managing cc-connect through the web UI instead of editing `config.toml` by hand. Run `cc-connect web` to open it instantly.
+- **Lifecycle Event Hooks** — New `[[hooks]]` config triggers shell commands or HTTP webhooks on message, session, cron, permission, and error events. Async by default, fail-open.
+- **Skill Management** — New `/skills` page with local skill browser and recommended presets.
+- **Global Provider Management** — Add/edit/delete providers in the web UI; import from cc-switch config.
 - **Personal WeChat** — Chat with your local agent from **Weixin (personal)** via ilink long-polling; QR `weixin setup`, CDN media, no public IP. *[Setup → `docs/weixin.md`](docs/weixin.md)*
-- **Auto-compress** — When the session estimate blows past your threshold, cc-connect can trim context so long threads keep working instead of silently falling over.
-- **Friendlier `--continue`** — Fork-on-continue so your bridge session doesn’t inherit a half-finished CLI terminal session by accident.
-- **Cron with boundaries** — Run jobs in a **fresh session** each time and cap **per-job timeouts** so runaway tasks don’t wedge the bot.
-- **Richer platforms** — e.g. **Discord** `@everyone` / `@here`, **Telegram** voice-style replies, **Feishu** fixes for reply threading and async dispatch.
+- **Feishu Enhancements** — Auto-resolve `@name` mentions, multi-level reply chain recognition, done-emoji reactions.
+- **New Agents** — Kimi CLI and Pi agent support added.
 
 
 ## 🧩 Platform feature snapshot
 
-High-level view of what each **built-in platform** can do in cc-connect. Inspired by [OpenClaw China’s feature matrix](https://github.com/BytePioneer-AI/openclaw-china#功能支持) — handy for comparing channels at a glance.
+High-level view of what each **built-in platform** can do in cc-connect.
 
 **Legend**
 
 | Symbol | Meaning |
 |--------|---------|
 | ✅ | Works in **stable** cc-connect with typical configuration |
-| ✅（beta） | **Beta / pre-release only** — the **Weixin (personal)** column: install [`cc-connect@beta`](https://www.npmjs.com/package/cc-connect?activeTab=versions) or a [pre-release binary](https://github.com/chenhg5/cc-connect/releases); **not** in the default stable npm build yet |
 | ⚠️ | Partial, needs extra config (e.g. speech / ASR), or limited by the vendor app or API |
 | ❌ | Not supported or not applicable in practice |
 
@@ -130,15 +129,14 @@ High-level view of what each **built-in platform** can do in cc-connect. Inspire
 
 | Capability | Feishu | DingTalk | Telegram | Slack | Discord | LINE | WeCom | Weibo | **Weixin**<br>*(personal)* | QQ† | QQ Bot |
 |------------|:------:|:--------:|:--------:|:-----:|:-------:|:----:|:-----:|:-----:|:-------------------------:|:---:|:------:|
-| Text & slash commands | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅（beta） | ✅ | ✅ |
-| Markdown / cards | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ❌ | ✅（beta） | ✅ | ✅ |
-| Streaming / chunked replies | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅（beta） | ✅ | ✅ |
-| Images & files | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ❌ | ✅（beta） | ✅ | ✅ |
-| Voice / STT / TTS | ⚠️ | ⚠️ | ✅ | ⚠️ | ⚠️ | ❌ | ⚠️ | ❌ | ✅（beta） | ⚠️ | ⚠️ |
-| Private (DM) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅（beta） | ✅ | ✅ |
-| Group / channel | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ❌ | ✅（beta） | ✅ | ✅ |
+| Text & slash commands | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Markdown / cards | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ❌ | ✅ | ✅ | ✅ |
+| Streaming / chunked replies | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Images & files | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ❌ | ✅ | ✅ | ✅ |
+| Voice / STT / TTS | ⚠️ | ⚠️ | ✅ | ⚠️ | ⚠️ | ❌ | ⚠️ | ❌ | ✅ | ⚠️ | ⚠️ |
+| Private (DM) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Group / channel | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ❌ | ✅ | ✅ | ✅ |
 
-> **Weixin column:** every **✅（beta）** means “available only when you run a **beta / pre-release** build,” not a statement that the feature is incomplete — the whole **personal WeChat (ilink)** channel is still **pre-stable**.  
 > **WeCom:** Webhook mode needs a **public URL**; long-connection / WS style setups often do not.  
 > **Voice row:** many platforms need `[speech]` / TTS providers enabled in `config.toml`; values are a best-effort summary.  
 > Per-platform setup: [Platform setup guides](#-platform-setup-guides) below.
@@ -147,10 +145,10 @@ High-level view of what each **built-in platform** can do in cc-connect. Inspire
 ## ✨ Why cc-connect?
 
 ### 🤖 Universal Agent Support
-**7 AI Agents** — Claude Code, Codex, Cursor Agent, Qoder CLI, Gemini CLI, OpenCode, iFlow CLI. Use whichever fits your workflow, or all of them at once.
+**9+ AI Agents** — Claude Code, Codex, Cursor Agent, Kimi CLI, Qoder CLI, Gemini CLI, OpenCode, iFlow CLI, Pi — plus any agent that supports the [Agent Client Protocol (ACP)](https://agentclientprotocol.com/get-started/agents). Use whichever fits your workflow, or all of them at once.
 
 ### 📱 Platform Flexibility
-**11 Chat Platforms** — Feishu, DingTalk, Slack, Telegram, Discord, WeChat Work, Weibo, LINE, QQ, QQ Bot (Official), plus **Weixin (personal ilink)** for **personal WeChat**. *Personal WeChat is **beta / pre-release only*** — install [`cc-connect@beta`](https://www.npmjs.com/package/cc-connect?activeTab=versions) or a [GitHub pre-release](https://github.com/chenhg5/cc-connect/releases) binary; the default **stable** npm package does **not** ship the `weixin` platform yet. Most platforms need **zero public IP**.
+**11 Chat Platforms** — Feishu, DingTalk, Slack, Telegram, Discord, WeChat Work, Weibo, LINE, QQ, QQ Bot (Official), plus **Weixin (personal ilink)** for **personal WeChat**. Most platforms need **zero public IP**.
 
 ### 🔄 Multi-Agent Orchestration
 **Multi-Bot Relay** — Bind multiple bots in a group chat and let them communicate with each other. Ask Claude, get insights from Gemini — all in one conversation.
@@ -205,11 +203,7 @@ Follow https://raw.githubusercontent.com/chenhg5/cc-connect/refs/heads/main/INST
 # Stable version
 npm install -g cc-connect
 
-# Beta version (more features, may be unstable)
-npm install -g cc-connect@beta
 ```
-
-> **Personal WeChat (Weixin ilink):** only available in **beta / pre-release** builds (`cc-connect@beta` or a prerelease asset under [Releases](https://github.com/chenhg5/cc-connect/releases)). **Stable** `npm install -g cc-connect` does **not** include this platform until it graduates from beta.
 
 **Download binary from [GitHub Releases](https://github.com/chenhg5/cc-connect/releases):**
 
@@ -219,8 +213,6 @@ curl -L -o cc-connect https://github.com/chenhg5/cc-connect/releases/latest/down
 chmod +x cc-connect
 sudo mv cc-connect /usr/local/bin/
 
-# Beta version (from pre-release)
-curl -L -o cc-connect https://github.com/chenhg5/cc-connect/releases/download/v1.x.x-beta/cc-connect-linux-amd64
 ```
 
 **Build from source (requires Go 1.22+):**
@@ -233,6 +225,10 @@ make build
 
 
 ### ⚙️ Configure
+
+> **💡 Tip: Use the Web UI to configure** — After installing, run `cc-connect web` to open the built-in management dashboard. You can visually create projects, add platforms, manage providers, and chat with your agent — no need to manually edit TOML files.
+
+If you prefer manual configuration:
 
 ```bash
 mkdir -p ~/.cc-connect
@@ -260,7 +256,7 @@ npm install -g cc-connect
 
 # Binary self-update
 cc-connect update           # Stable
-cc-connect update --pre     # Beta (includes pre-releases)
+cc-connect update --pre     # Include pre-releases
 ```
 
 
@@ -275,6 +271,9 @@ cc-connect update --pre     # Beta (includes pre-releases)
 | Agent | Qoder CLI | ✅ Supported |
 | Agent | OpenCode (Crush) | ✅ Supported |
 | Agent | iFlow CLI | ✅ Supported |
+| Agent | Kimi CLI (Moonshot) | ✅ Supported |
+| Agent | Pi (Cursor Background Agent) | ✅ Supported |
+| Agent | ACP (Agent Client Protocol) | ✅ Any [ACP-compatible agent](https://agentclientprotocol.com/get-started/agents) |
 | Agent | Goose (Block) | 🔜 Planned |
 | Agent | Aider | 🔜 Planned |
 | Platform | Feishu (Lark) | ✅ WebSocket — no public IP needed |
@@ -285,8 +284,8 @@ cc-connect update --pre     # Beta (includes pre-releases)
 | Platform | Weibo | ✅ WebSocket — no public IP needed |
 | Platform | LINE | ✅ Webhook — public URL required |
 | Platform | WeChat Work | ✅ WebSocket / Webhook |
-| Platform | Weixin (personal, ilink) | ✅（beta）— HTTP long polling — no public IP needed |
-| Platform | QQ (NapCat/OneBot) | ✅ WebSocket — Beta |
+| Platform | Weixin (personal, ilink) | ✅— HTTP long polling — no public IP needed |
+| Platform | QQ (NapCat/OneBot) | ✅ WebSocket |
 | Platform | QQ Bot (Official) | ✅ WebSocket — no public IP needed |
 
 
@@ -301,7 +300,7 @@ cc-connect update --pre     # Beta (includes pre-releases)
 | Discord | [docs/discord.md](docs/discord.md) | Gateway | No |
 | Weibo | [docs/weibo.md](docs/weibo.md) | WebSocket | No |
 | WeChat Work | [docs/wecom.md](docs/wecom.md) | WebSocket / Webhook | No (WS) / Yes (Webhook) |
-| Weixin (personal) | [docs/weixin.md](docs/weixin.md) | HTTP long polling (ilink) — **beta only** | No |
+| Weixin (personal) | [docs/weixin.md](docs/weixin.md) | HTTP long polling (ilink) | No |
 | QQ / QQ Bot | [docs/qq.md](docs/qq.md) | WebSocket | No |
 
 

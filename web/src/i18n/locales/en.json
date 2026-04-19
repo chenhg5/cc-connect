@@ -7,6 +7,7 @@
     "chat": "Chat",
     "cron": "Cron",
     "bridge": "Bridge",
+    "skills": "Skills",
     "system": "System"
   },
   "dashboard": {
@@ -35,11 +36,17 @@
     "detail": "Details",
     "noProjects": "No projects configured",
     "workDir": "Working directory",
+    "agentType": "Agent type",
+    "agentTypeChangeHint": "Changing agent type requires restart. Incompatible providers will be removed.",
     "agentMode": "Permission mode",
     "agentSettings": "Agent",
     "generalSettings": "General",
     "showCtxIndicator": "Context indicator",
     "showCtxIndicatorHint": "Show [ctx: ~N%] suffix on replies",
+    "replyFooter": "Reply footer",
+    "replyFooterHint": "Append model/usage metadata to replies",
+    "injectSender": "Inject sender",
+    "injectSenderHint": "Prepend sender identity to messages sent to agent",
     "platformAccess": "Platform access control",
     "deleteTitle": "Delete Project",
     "deleteConfirm": "Are you sure you want to delete project \"{{name}}\"? This will remove it from the config file.",
@@ -135,7 +142,8 @@
     "runCount": "Run count",
     "errorCount": "Error count",
     "skippedBusy": "Skipped (busy)",
-    "lastRun": "Last run"
+    "lastRun": "Last run",
+    "notEnabled": "Heartbeat is not configured for this project. Add [heartbeat] section in config.toml to enable."
   },
   "bridge": {
     "title": "Bridge",
@@ -304,8 +312,12 @@
     "idleTimeout": "Idle timeout (min)",
     "idleTimeoutHint": "Auto-stop agent after N minutes of inactivity; 0 = disabled",
     "display": "Display",
+    "thinkingMessages": "Thinking messages",
+    "thinkingMessagesHint": "Show or hide intermediate thinking messages",
     "thinkingMaxLen": "Thinking max length",
     "thinkingMaxLenHint": "Max characters for thinking messages; 0 = no truncation",
+    "toolMessages": "Tool progress",
+    "toolMessagesHint": "Show or hide tool progress messages",
     "toolMaxLen": "Tool max length",
     "toolMaxLenHint": "Max characters for tool use messages; 0 = no truncation",
     "streamPreview": "Stream preview",
@@ -363,6 +375,30 @@
       "import": "Import ({{count}})",
       "result": "Import complete: {{imported}} imported, {{skipped}} skipped."
     }
+  },
+  "skills": {
+    "title": "Skills",
+    "subtitle": "Manage agent skills and discover new ones",
+    "tab": {
+      "local": "Local Skills",
+      "recommended": "Recommended"
+    },
+    "projects": "Projects",
+    "skillCount": "{{count}} skills",
+    "scanDirs": "Scan directories",
+    "noSkills": "No skills found",
+    "noSkillsHint": "Skills are loaded from agent skill directories (e.g. ~/.claude/skills/)",
+    "emptyProject": "No skills found in this project's directories",
+    "noPresets": "No recommended skills available",
+    "noPresetsHint": "Skill recommendations could not be loaded. Check your network connection.",
+    "featured": "Featured",
+    "allSkills": "All Skills",
+    "author": "Author",
+    "source": "From",
+    "download": "Download",
+    "free": "Free",
+    "freemium": "Freemium",
+    "paid": "Paid"
   },
   "theme": {
     "light": "Light",

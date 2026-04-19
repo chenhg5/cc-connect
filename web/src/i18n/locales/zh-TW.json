@@ -7,6 +7,7 @@
     "chat": "對話",
     "cron": "排程工作",
     "bridge": "橋接",
+    "skills": "技能",
     "system": "系統"
   },
   "dashboard": {
@@ -35,11 +36,17 @@
     "detail": "詳細資料",
     "noProjects": "尚未設定專案",
     "workDir": "工作目錄",
+    "agentType": "Agent 類型",
+    "agentTypeChangeHint": "切換 Agent 類型需要重新啟動，不相容的服務商將被移除。",
     "agentMode": "權限模式",
     "agentSettings": "Agent 設定",
     "generalSettings": "通用設定",
     "showCtxIndicator": "上下文指示",
     "showCtxIndicatorHint": "在回覆末尾顯示 [ctx: ~N%]",
+    "replyFooter": "回覆尾部資訊",
+    "replyFooterHint": "在回覆末尾附加模型/用量元資訊",
+    "injectSender": "注入發送者",
+    "injectSenderHint": "在發送給 Agent 的訊息前附加發送者身份資訊",
     "platformAccess": "平台存取控制",
     "deleteTitle": "刪除專案",
     "deleteConfirm": "確定要刪除專案「{{name}}」嗎？這將從設定檔中移除該專案。",
@@ -135,7 +142,8 @@
     "runCount": "執行次數",
     "errorCount": "錯誤次數",
     "skippedBusy": "略過（忙碌）",
-    "lastRun": "上次執行"
+    "lastRun": "上次執行",
+    "notEnabled": "該專案未配置心跳功能。請在 config.toml 中添加 [heartbeat] 配置段以啟用。"
   },
   "bridge": {
     "title": "橋接",
@@ -304,8 +312,12 @@
     "idleTimeout": "閒置逾時（分鐘）",
     "idleTimeoutHint": "Agent 閒置 N 分鐘後自動停止；0 = 不啟用",
     "display": "顯示",
+    "thinkingMessages": "思考訊息",
+    "thinkingMessagesHint": "顯示或隱藏中間思考過程訊息",
     "thinkingMaxLen": "思考最大長度",
     "thinkingMaxLenHint": "思考訊息的最大字元數；0 = 不截斷",
+    "toolMessages": "工具進度",
+    "toolMessagesHint": "顯示或隱藏工具呼叫進度訊息",
     "toolMaxLen": "工具最大長度",
     "toolMaxLenHint": "工具使用訊息的最大字元數；0 = 不截斷",
     "streamPreview": "串流預覽",
@@ -363,6 +375,30 @@
       "import": "匯入 ({{count}})",
       "result": "匯入完成：成功 {{imported}} 個，跳過 {{skipped}} 個。"
     }
+  },
+  "skills": {
+    "title": "技能",
+    "subtitle": "管理 Agent 技能，探索更多推薦技能",
+    "tab": {
+      "local": "本地技能",
+      "recommended": "推薦"
+    },
+    "projects": "專案",
+    "skillCount": "{{count}} 個技能",
+    "scanDirs": "掃描目錄",
+    "noSkills": "未發現技能",
+    "noSkillsHint": "技能從 Agent 技能目錄載入（如 ~/.claude/skills/）",
+    "emptyProject": "此專案的技能目錄中未發現技能",
+    "noPresets": "暫無推薦技能",
+    "noPresetsHint": "無法載入推薦技能列表，請檢查網路連線。",
+    "featured": "精選",
+    "allSkills": "全部技能",
+    "author": "作者",
+    "source": "來源",
+    "download": "下載",
+    "free": "免費",
+    "freemium": "免費增值",
+    "paid": "付費"
   },
   "theme": {
     "light": "淺色",
