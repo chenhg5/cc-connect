@@ -7,6 +7,7 @@
     "chat": "Chat",
     "cron": "Cron",
     "bridge": "Bridge",
+    "skills": "Skills",
     "system": "System"
   },
   "dashboard": {
@@ -374,6 +375,30 @@
       "import": "Import ({{count}})",
       "result": "Import complete: {{imported}} imported, {{skipped}} skipped."
     }
+  },
+  "skills": {
+    "title": "Skills",
+    "subtitle": "Manage agent skills and discover new ones",
+    "tab": {
+      "local": "Local Skills",
+      "recommended": "Recommended"
+    },
+    "projects": "Projects",
+    "skillCount": "{{count}} skills",
+    "scanDirs": "Scan directories",
+    "noSkills": "No skills found",
+    "noSkillsHint": "Skills are loaded from agent skill directories (e.g. ~/.claude/skills/)",
+    "emptyProject": "No skills found in this project's directories",
+    "noPresets": "No recommended skills available",
+    "noPresetsHint": "Skill recommendations could not be loaded. Check your network connection.",
+    "featured": "Featured",
+    "allSkills": "All Skills",
+    "author": "Author",
+    "source": "From",
+    "download": "Download",
+    "free": "Free",
+    "freemium": "Freemium",
+    "paid": "Paid"
   },
   "theme": {
     "light": "Light",

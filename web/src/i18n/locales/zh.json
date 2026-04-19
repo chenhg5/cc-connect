@@ -7,6 +7,7 @@
     "chat": "对话",
     "cron": "定时任务",
     "bridge": "桥接",
+    "skills": "技能",
     "system": "系统"
   },
   "dashboard": {
@@ -374,6 +375,30 @@
       "import": "导入 ({{count}})",
       "result": "导入完成：成功 {{imported}} 个，跳过 {{skipped}} 个。"
     }
+  },
+  "skills": {
+    "title": "技能",
+    "subtitle": "管理 Agent 技能，发现更多推荐技能",
+    "tab": {
+      "local": "本地技能",
+      "recommended": "推荐"
+    },
+    "projects": "项目",
+    "skillCount": "{{count}} 个技能",
+    "scanDirs": "扫描目录",
+    "noSkills": "未发现技能",
+    "noSkillsHint": "技能从 Agent 技能目录加载（如 ~/.claude/skills/）",
+    "emptyProject": "此项目的技能目录中未发现技能",
+    "noPresets": "暂无推荐技能",
+    "noPresetsHint": "无法加载推荐技能列表，请检查网络连接。",
+    "featured": "精选",
+    "allSkills": "全部技能",
+    "author": "作者",
+    "source": "来源",
+    "download": "下载",
+    "free": "免费",
+    "freemium": "免费增值",
+    "paid": "付费"
   },
   "theme": {
     "light": "浅色",

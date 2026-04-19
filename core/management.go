@@ -63,6 +63,7 @@ type ManagementServer struct {
 	updateGlobalProvider func(name string, info GlobalProviderInfo) error
 	removeGlobalProvider func(name string) error
 	fetchPresets         func() (*ProviderPresetsResponse, error)
+	fetchSkillPresets    func() (*SkillPresetsResponse, error)
 
 	// cc-switch migration callback
 	listCCSwitchProviders func() ([]CCSwitchProviderInfo, error)
@@ -173,6 +174,9 @@ func (m *ManagementServer) SetRemoveGlobalProvider(fn func(string) error) {
 func (m *ManagementServer) SetFetchPresets(fn func() (*ProviderPresetsResponse, error)) {
 	m.fetchPresets = fn
 }
+func (m *ManagementServer) SetFetchSkillPresets(fn func() (*SkillPresetsResponse, error)) {
+	m.fetchSkillPresets = fn
+}
 func (m *ManagementServer) SetListCCSwitchProviders(fn func() ([]CCSwitchProviderInfo, error)) {
 	m.listCCSwitchProviders = fn
 }
@@ -235,6 +239,10 @@ func (m *ManagementServer) buildHandler(mux *http.ServeMux) http.Handler {
 	// Global Providers
 	mux.HandleFunc(prefix+"/providers", m.wrap(m.handleGlobalProviders))
 	mux.HandleFunc(prefix+"/providers/", m.wrap(m.handleGlobalProviderRoutes))
+
+	// Skills
+	mux.HandleFunc(prefix+"/skills", m.wrap(m.handleSkills))
+	mux.HandleFunc(prefix+"/skills/presets", m.wrap(m.handleSkillPresets))
 
 	// Bridge
 	mux.HandleFunc(prefix+"/bridge/adapters", m.wrap(m.handleBridgeAdapters))
@@ -1867,4 +1875,69 @@ func resolveGlobalProviderForAgent(g GlobalProviderInfo, agentType string) Provi
 		}
 	}
 	return pc
+}
+
+// ── Skills API ──
+
+type skillInfo struct {
+	Name        string `json:"name"`
+	DisplayName string `json:"display_name,omitempty"`
+	Description string `json:"description,omitempty"`
+	Source      string `json:"source"`
+}
+
+type projectSkills struct {
+	Project   string      `json:"project"`
+	AgentType string      `json:"agent_type"`
+	Dirs      []string    `json:"dirs"`
+	Skills    []skillInfo `json:"skills"`
+}
+
+func (m *ManagementServer) handleSkills(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		mgmtError(w, http.StatusMethodNotAllowed, "GET only")
+		return
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var result []projectSkills
+	for name, e := range m.engines {
+		skills := e.ListSkills()
+		items := make([]skillInfo, 0, len(skills))
+		for _, s := range skills {
+			items = append(items, skillInfo{
+				Name:        s.Name,
+				DisplayName: s.DisplayName,
+				Description: s.Description,
+				Source:      s.Source,
+			})
+		}
+		result = append(result, projectSkills{
+			Project:   name,
+			AgentType: e.AgentTypeName(),
+			Dirs:      e.SkillDirs(),
+			Skills:    items,
+		})
+	}
+
+	mgmtJSON(w, http.StatusOK, map[string]any{"projects": result})
+}
+
+func (m *ManagementServer) handleSkillPresets(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		mgmtError(w, http.StatusMethodNotAllowed, "GET only")
+		return
+	}
+	if m.fetchSkillPresets == nil {
+		mgmtJSON(w, http.StatusOK, &SkillPresetsResponse{Version: 1})
+		return
+	}
+	data, err := m.fetchSkillPresets()
+	if err != nil {
+		mgmtError(w, http.StatusBadGateway, "fetch skill presets: "+err.Error())
+		return
+	}
+	mgmtJSON(w, http.StatusOK, data)
 }

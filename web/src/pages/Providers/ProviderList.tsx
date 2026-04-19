@@ -96,7 +96,7 @@ export default function ProviderList() {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 ">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
@@ -300,13 +300,13 @@ function PresetGrid({
       {sorted.map(p => {
         const added = existingNames.has(p.name);
         return (
-          <Card key={p.name} className="relative overflow-hidden">
+          <Card key={p.name} className="relative overflow-hidden flex flex-col">
             {p.featured && (
               <div className="absolute top-0 right-0 bg-amber-400/90 text-white text-[10px] font-bold px-2 py-0.5 rounded-bl-lg">
                 <Star size={10} className="inline mr-0.5 -mt-0.5" />
               </div>
             )}
-            <div className="space-y-3">
+            <div className="space-y-3 flex-1">
               <div>
                 <h3 className="font-medium text-gray-900 dark:text-white">{p.display_name || p.name}</h3>
                 {(p.description || p.description_zh) && (
@@ -335,26 +335,26 @@ function PresetGrid({
                   <ModelBadges models={firstAc.models} limit={5} />
                 ) : null;
               })()}
-              <div className="flex items-center justify-between pt-1">
-                {p.invite_url ? (
-                  <a
-                    href={p.invite_url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-xs text-accent hover:underline inline-flex items-center gap-1"
-                  >
-                    {t('globalProviders.register')} <ExternalLink size={11} />
-                  </a>
-                ) : <span />}
-                <Button
-                  size="sm"
-                  variant={added ? 'ghost' : 'primary'}
-                  disabled={added}
-                  onClick={() => onAdd(p)}
+            </div>
+            <div className="flex items-center justify-between mt-4 pt-3 border-t border-gray-100 dark:border-white/[0.06]">
+              {p.invite_url ? (
+                <a
+                  href={p.invite_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs text-accent hover:underline inline-flex items-center gap-1"
                 >
-                  {added ? t('globalProviders.added') : t('globalProviders.addPreset')}
-                </Button>
-              </div>
+                  {t('globalProviders.register')} <ExternalLink size={11} />
+                </a>
+              ) : <span />}
+              <Button
+                size="sm"
+                variant={added ? 'ghost' : 'primary'}
+                disabled={added}
+                onClick={() => onAdd(p)}
+              >
+                {added ? t('globalProviders.added') : t('globalProviders.addPreset')}
+              </Button>
             </div>
           </Card>
         );

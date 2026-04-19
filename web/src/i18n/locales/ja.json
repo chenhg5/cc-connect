@@ -7,6 +7,7 @@
     "chat": "チャット",
     "cron": "Cron",
     "bridge": "ブリッジ",
+    "skills": "スキル",
     "system": "システム"
   },
   "dashboard": {
@@ -374,6 +375,30 @@
       "import": "インポート ({{count}})",
       "result": "インポート完了：{{imported}} 件成功、{{skipped}} 件スキップ。"
     }
+  },
+  "skills": {
+    "title": "スキル",
+    "subtitle": "エージェントスキルの管理とおすすめスキルの発見",
+    "tab": {
+      "local": "ローカルスキル",
+      "recommended": "おすすめ"
+    },
+    "projects": "プロジェクト",
+    "skillCount": "{{count}} 件のスキル",
+    "scanDirs": "スキャンディレクトリ",
+    "noSkills": "スキルが見つかりません",
+    "noSkillsHint": "スキルはエージェントのスキルディレクトリから読み込まれます（例: ~/.claude/skills/）",
+    "emptyProject": "このプロジェクトのディレクトリにスキルがありません",
+    "noPresets": "おすすめスキルがありません",
+    "noPresetsHint": "スキル一覧の読み込みに失敗しました。ネットワーク接続を確認してください。",
+    "featured": "注目",
+    "allSkills": "すべてのスキル",
+    "author": "作者",
+    "source": "提供元",
+    "download": "ダウンロード",
+    "free": "無料",
+    "freemium": "フリーミアム",
+    "paid": "有料"
   },
   "theme": {
     "light": "ライト",

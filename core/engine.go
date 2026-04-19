@@ -884,6 +884,24 @@ func (e *Engine) ProjectName() string {
 	return e.name
 }
 
+// ListSkills returns all discovered skills for this engine's project.
+func (e *Engine) ListSkills() []*Skill {
+	return e.skills.ListAll()
+}
+
+// SkillDirs returns the configured skill directories for this engine.
+func (e *Engine) SkillDirs() []string {
+	return e.skills.Dirs()
+}
+
+// AgentTypeName returns the agent type name (e.g. "claudecode", "codex").
+func (e *Engine) AgentTypeName() string {
+	if e.agent != nil {
+		return e.agent.Name()
+	}
+	return ""
+}
+
 // ActiveSessionKeys returns the session keys of all active interactive sessions.
 func (e *Engine) ActiveSessionKeys() []string {
 	e.interactiveMu.Lock()

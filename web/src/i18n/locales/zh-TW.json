@@ -7,6 +7,7 @@
     "chat": "對話",
     "cron": "排程工作",
     "bridge": "橋接",
+    "skills": "技能",
     "system": "系統"
   },
   "dashboard": {
@@ -374,6 +375,30 @@
       "import": "匯入 ({{count}})",
       "result": "匯入完成：成功 {{imported}} 個，跳過 {{skipped}} 個。"
     }
+  },
+  "skills": {
+    "title": "技能",
+    "subtitle": "管理 Agent 技能，探索更多推薦技能",
+    "tab": {
+      "local": "本地技能",
+      "recommended": "推薦"
+    },
+    "projects": "專案",
+    "skillCount": "{{count}} 個技能",
+    "scanDirs": "掃描目錄",
+    "noSkills": "未發現技能",
+    "noSkillsHint": "技能從 Agent 技能目錄載入（如 ~/.claude/skills/）",
+    "emptyProject": "此專案的技能目錄中未發現技能",
+    "noPresets": "暫無推薦技能",
+    "noPresetsHint": "無法載入推薦技能列表，請檢查網路連線。",
+    "featured": "精選",
+    "allSkills": "全部技能",
+    "author": "作者",
+    "source": "來源",
+    "download": "下載",
+    "free": "免費",
+    "freemium": "免費增值",
+    "paid": "付費"
   },
   "theme": {
     "light": "淺色",

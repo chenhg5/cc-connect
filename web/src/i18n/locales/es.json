@@ -7,6 +7,7 @@
     "chat": "Chat",
     "cron": "Cron",
     "bridge": "Puente",
+    "skills": "Habilidades",
     "system": "Sistema"
   },
   "dashboard": {
@@ -374,6 +375,30 @@
       "import": "Importar ({{count}})",
       "result": "Importación completa: {{imported}} importados, {{skipped}} omitidos."
     }
+  },
+  "skills": {
+    "title": "Habilidades",
+    "subtitle": "Gestiona las habilidades del agente y descubre nuevas",
+    "tab": {
+      "local": "Locales",
+      "recommended": "Recomendadas"
+    },
+    "projects": "Proyectos",
+    "skillCount": "{{count}} habilidades",
+    "scanDirs": "Directorios escaneados",
+    "noSkills": "No se encontraron habilidades",
+    "noSkillsHint": "Las habilidades se cargan desde los directorios de habilidades del agente (ej. ~/.claude/skills/)",
+    "emptyProject": "No se encontraron habilidades en los directorios de este proyecto",
+    "noPresets": "No hay habilidades recomendadas",
+    "noPresetsHint": "No se pudieron cargar las recomendaciones. Verifica tu conexión a internet.",
+    "featured": "Destacadas",
+    "allSkills": "Todas",
+    "author": "Autor",
+    "source": "Fuente",
+    "download": "Descargar",
+    "free": "Gratis",
+    "freemium": "Freemium",
+    "paid": "De pago"
   },
   "theme": {
     "light": "Claro",

@@ -72,7 +72,7 @@ export default function SessionList() {
   }
 
   return (
-    <div className="space-y-4 animate-fade-in">
+    <div className="space-y-4 animate-fade-in ">
       {/* Filter bar */}
       <div className="flex items-center gap-3">
         <Filter size={16} className="text-gray-400" />

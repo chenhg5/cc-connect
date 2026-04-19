@@ -225,7 +225,7 @@ export default function ProjectDetail() {
   }
 
   return (
-    <div className="space-y-6 animate-fade-in">
+    <div className="space-y-6 animate-fade-in ">
       {/* Back + title */}
       <div className="flex items-center gap-3">
         <Link to="/projects" className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors">

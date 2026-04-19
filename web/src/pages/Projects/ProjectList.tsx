@@ -106,7 +106,7 @@ export default function ProjectList() {
   }
 
   return (
-    <div className="animate-fade-in space-y-4">
+    <div className="animate-fade-in space-y-4 ">
       {/* Header */}
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-bold text-gray-900 dark:text-white">{t('projects.title')}</h2>
