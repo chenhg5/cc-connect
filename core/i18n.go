@@ -174,6 +174,18 @@ const (
 	MsgListSwitchHint            MsgKey = "list_switch_hint"
 	MsgListError                 MsgKey = "list_error"
 	MsgHistoryEmpty              MsgKey = "history_empty"
+	MsgProgressUsage             MsgKey = "progress_usage"
+	MsgProgressEmpty             MsgKey = "progress_empty"
+	MsgProgressNoPrevious        MsgKey = "progress_no_previous"
+	MsgProgressEventNotFound     MsgKey = "progress_event_not_found"
+	MsgProgressRangeNotFound     MsgKey = "progress_range_not_found"
+	MsgProgressHeaderLatest      MsgKey = "progress_header_latest"
+	MsgProgressHeaderPrevious    MsgKey = "progress_header_previous"
+	MsgProgressEventInfo         MsgKey = "progress_event_info"
+	MsgProgressEventThinking     MsgKey = "progress_event_thinking"
+	MsgProgressEventToolUse      MsgKey = "progress_event_tool_use"
+	MsgProgressEventToolResult   MsgKey = "progress_event_tool_result"
+	MsgProgressEventError        MsgKey = "progress_event_error"
 	MsgNameUsage                 MsgKey = "name_usage"
 	MsgNameSet                   MsgKey = "name_set"
 	MsgNameNoSession             MsgKey = "name_no_session"
@@ -856,6 +868,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/name [number] <text>\n  Name a session for easy identification\n\n" +
 			"/current\n  Show current active session\n\n" +
 			"/history [n]\n  Show last n messages (default 10)\n\n" +
+			"/progress [prev] [event|start:end]\n  Show progress events for the latest or previous assistant turn\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  Manage API providers\n\n" +
 			"/memory [add|global|global add]\n  View/edit agent memory files\n\n" +
 			"/allow <tool>\n  Pre-allow a tool (next session)\n\n" +
@@ -899,6 +912,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/name [序号] <名称>\n  给会话命名，方便识别\n\n" +
 			"/current\n  查看当前活跃会话\n\n" +
 			"/history [n]\n  查看最近 n 条消息（默认 10）\n\n" +
+			"/progress [prev] [事件号|起始:结束]\n  查看最近一轮或上一轮 assistant 回复的过程事件\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  管理 API Provider\n\n" +
 			"/memory [add|global|global add]\n  查看/编辑 Agent 记忆文件\n\n" +
 			"/allow <工具名>\n  预授权工具（下次会话生效）\n\n" +
@@ -942,6 +956,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/name [序號] <名稱>\n  為會話命名，方便辨識\n\n" +
 			"/current\n  查看當前活躍會話\n\n" +
 			"/history [n]\n  查看最近 n 條訊息（預設 10）\n\n" +
+			"/progress [prev] [事件號|起始:結束]\n  查看最近一輪或上一輪 assistant 回覆的過程事件\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  管理 API Provider\n\n" +
 			"/memory [add|global|global add]\n  查看/編輯 Agent 記憶檔案\n\n" +
 			"/allow <工具名>\n  預授權工具（下次會話生效）\n\n" +
@@ -983,6 +998,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/name [番号] <名前>\n  セッションに名前を付ける\n\n" +
 			"/current\n  現在のアクティブセッションを表示\n\n" +
 			"/history [n]\n  直近 n 件のメッセージを表示（デフォルト 10）\n\n" +
+			"/progress [prev] [イベント番号|開始:終了]\n  最新または直前の assistant 応答の進行イベントを表示\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  API プロバイダ管理\n\n" +
 			"/memory [add|global|global add]\n  エージェントメモリの表示/編集\n\n" +
 			"/allow <ツール名>\n  ツールを事前許可（次のセッションで有効）\n\n" +
@@ -1024,6 +1040,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/name [número] <texto>\n  Nombrar una sesión para fácil identificación\n\n" +
 			"/current\n  Mostrar sesión activa actual\n\n" +
 			"/history [n]\n  Mostrar últimos n mensajes (por defecto 10)\n\n" +
+			"/progress [prev] [evento|inicio:fin]\n  Mostrar eventos de progreso del último o anterior turno del assistant\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  Gestionar proveedores API\n\n" +
 			"/memory [add|global|global add]\n  Ver/editar archivos de memoria del agente\n\n" +
 			"/allow <herramienta>\n  Pre-autorizar herramienta (próxima sesión)\n\n" +
@@ -1074,7 +1091,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/delete <number>|1,2,3|3-7|1,3-5,8 — Delete session(s)\n" +
 			"/name [number] <text> — Name a session\n" +
 			"/current — Show active session\n" +
-			"/history [n] — Show last n messages",
+			"/history [n] — Show last n messages\n" +
+			"/progress [prev] [event|start:end] — Show recent progress events",
 		LangChinese: "**会话管理**\n" +
 			"/new [名称] — 创建新会话\n" +
 			"/list — 列出会话列表\n" +
@@ -1083,7 +1101,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/delete <序号>|1,2,3|3-7|1,3-5,8 — 删除会话\n" +
 			"/name [序号] <名称> — 命名会话\n" +
 			"/current — 查看当前会话\n" +
-			"/history [n] — 查看最近 n 条消息",
+			"/history [n] — 查看最近 n 条消息\n" +
+			"/progress [prev] [事件号|起始:结束] — 查看最近过程事件",
 		LangTraditionalChinese: "**會話管理**\n" +
 			"/new [名稱] — 建立新會話\n" +
 			"/list — 列出會話列表\n" +
@@ -1092,7 +1111,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/delete <序號>|1,2,3|3-7|1,3-5,8 — 刪除會話\n" +
 			"/name [序號] <名稱> — 命名會話\n" +
 			"/current — 查看當前會話\n" +
-			"/history [n] — 查看最近 n 條訊息",
+			"/history [n] — 查看最近 n 條訊息\n" +
+			"/progress [prev] [事件號|起始:結束] — 查看最近過程事件",
 		LangJapanese: "**セッション管理**\n" +
 			"/new [名前] — 新しいセッションを開始\n" +
 			"/list — セッション一覧\n" +
@@ -1101,7 +1121,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/delete <番号>|1,2,3|3-7|1,3-5,8 — セッション削除\n" +
 			"/name [番号] <名前> — セッションに名前を付ける\n" +
 			"/current — 現在のセッションを表示\n" +
-			"/history [n] — 直近 n 件のメッセージを表示",
+			"/history [n] — 直近 n 件のメッセージを表示\n" +
+			"/progress [prev] [イベント番号|開始:終了] — 直近の進行イベントを表示",
 		LangSpanish: "**Gestión de sesiones**\n" +
 			"/new [nombre] — Iniciar nueva sesión\n" +
 			"/list — Listar sesiones\n" +
@@ -1110,7 +1131,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/delete <número>|1,2,3|3-7|1,3-5,8 — Eliminar sesión(es)\n" +
 			"/name [número] <texto> — Nombrar sesión\n" +
 			"/current — Mostrar sesión activa\n" +
-			"/history [n] — Mostrar últimos n mensajes",
+			"/history [n] — Mostrar últimos n mensajes\n" +
+			"/progress [prev] [evento|inicio:fin] — Mostrar eventos de progreso recientes",
 	},
 	MsgHelpAgentSection: {
 		LangEnglish: "**Agent Configuration**\n" +
@@ -1307,6 +1329,90 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "當前會話暫無歷史訊息。",
 		LangJapanese:           "現在のセッションに履歴がありません。",
 		LangSpanish:            "No hay historial en la sesión actual.",
+	},
+	MsgProgressUsage: {
+		LangEnglish:            "Usage: `/progress`, `/progress 7`, `/progress 3:8`, `/progress prev`, `/progress prev 7`, `/progress prev 3:8`",
+		LangChinese:            "用法：`/progress`、`/progress 7`、`/progress 3:8`、`/progress prev`、`/progress prev 7`、`/progress prev 3:8`",
+		LangTraditionalChinese: "用法：`/progress`、`/progress 7`、`/progress 3:8`、`/progress prev`、`/progress prev 7`、`/progress prev 3:8`",
+		LangJapanese:           "使い方: `/progress`、`/progress 7`、`/progress 3:8`、`/progress prev`、`/progress prev 7`、`/progress prev 3:8`",
+		LangSpanish:            "Uso: `/progress`, `/progress 7`, `/progress 3:8`, `/progress prev`, `/progress prev 7`, `/progress prev 3:8`",
+	},
+	MsgProgressEmpty: {
+		LangEnglish:            "No progress history is available for the current session.",
+		LangChinese:            "当前会话暂无可查看的过程历史。",
+		LangTraditionalChinese: "當前會話暫無可查看的過程歷史。",
+		LangJapanese:           "現在のセッションで参照できる進行履歴はありません。",
+		LangSpanish:            "No hay historial de progreso disponible para la sesión actual.",
+	},
+	MsgProgressNoPrevious: {
+		LangEnglish:            "No previous assistant turn with stored progress events was found.",
+		LangChinese:            "没有找到上一轮带过程事件的 assistant 回复。",
+		LangTraditionalChinese: "沒有找到上一輪帶過程事件的 assistant 回覆。",
+		LangJapanese:           "進行イベント付きの直前 assistant ターンは見つかりませんでした。",
+		LangSpanish:            "No se encontró un turno anterior del assistant con eventos de progreso guardados.",
+	},
+	MsgProgressEventNotFound: {
+		LangEnglish:            "Event `%d` is out of range for the selected progress turn.",
+		LangChinese:            "事件 `%d` 超出当前所选过程轮次范围。",
+		LangTraditionalChinese: "事件 `%d` 超出當前所選過程輪次範圍。",
+		LangJapanese:           "イベント `%d` は選択した進行ターンの範囲外です。",
+		LangSpanish:            "El evento `%d` está fuera del rango del turno de progreso seleccionado.",
+	},
+	MsgProgressRangeNotFound: {
+		LangEnglish:            "Event range `%d:%d` is out of range for the selected progress turn.",
+		LangChinese:            "事件范围 `%d:%d` 超出当前所选过程轮次范围。",
+		LangTraditionalChinese: "事件範圍 `%d:%d` 超出當前所選過程輪次範圍。",
+		LangJapanese:           "イベント範囲 `%d:%d` は選択した進行ターンの範囲外です。",
+		LangSpanish:            "El rango `%d:%d` está fuera del rango del turno de progreso seleccionado.",
+	},
+	MsgProgressHeaderLatest: {
+		LangEnglish:            "🧭 Progress for latest assistant turn (%d/%d event(s))",
+		LangChinese:            "🧭 最近一轮 assistant 回复的过程事件（显示 %d/%d 条）",
+		LangTraditionalChinese: "🧭 最近一輪 assistant 回覆的過程事件（顯示 %d/%d 條）",
+		LangJapanese:           "🧭 最新 assistant ターンの進行イベント（%d/%d 件を表示）",
+		LangSpanish:            "🧭 Progreso del último turno del assistant (%d/%d evento(s))",
+	},
+	MsgProgressHeaderPrevious: {
+		LangEnglish:            "🧭 Progress for previous assistant turn (%d/%d event(s))",
+		LangChinese:            "🧭 上一轮 assistant 回复的过程事件（显示 %d/%d 条）",
+		LangTraditionalChinese: "🧭 上一輪 assistant 回覆的過程事件（顯示 %d/%d 條）",
+		LangJapanese:           "🧭 直前 assistant ターンの進行イベント（%d/%d 件を表示）",
+		LangSpanish:            "🧭 Progreso del turno anterior del assistant (%d/%d evento(s))",
+	},
+	MsgProgressEventInfo: {
+		LangEnglish:            "Info",
+		LangChinese:            "信息",
+		LangTraditionalChinese: "資訊",
+		LangJapanese:           "情報",
+		LangSpanish:            "Info",
+	},
+	MsgProgressEventThinking: {
+		LangEnglish:            "Thinking",
+		LangChinese:            "思考",
+		LangTraditionalChinese: "思考",
+		LangJapanese:           "思考",
+		LangSpanish:            "Thinking",
+	},
+	MsgProgressEventToolUse: {
+		LangEnglish:            "Tool Call",
+		LangChinese:            "工具调用",
+		LangTraditionalChinese: "工具調用",
+		LangJapanese:           "ツール呼び出し",
+		LangSpanish:            "Llamada de herramienta",
+	},
+	MsgProgressEventToolResult: {
+		LangEnglish:            "Tool Result",
+		LangChinese:            "工具结果",
+		LangTraditionalChinese: "工具結果",
+		LangJapanese:           "ツール結果",
+		LangSpanish:            "Resultado de herramienta",
+	},
+	MsgProgressEventError: {
+		LangEnglish:            "Error",
+		LangChinese:            "错误",
+		LangTraditionalChinese: "錯誤",
+		LangJapanese:           "エラー",
+		LangSpanish:            "Error",
 	},
 	MsgNameUsage: {
 		LangEnglish:            "Usage:\n`/name <text>` — name the current session\n`/name <number> <text>` — name a session by list number",

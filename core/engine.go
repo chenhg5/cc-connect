@@ -28,8 +28,11 @@ const telegramBotCommandLimit = 100
 const maxQueuedMessages = 5 // cap queued messages to bound memory usage
 
 const (
-	defaultThinkingMaxLen = 300
-	defaultToolMaxLen     = 500
+	defaultThinkingMaxLen       = 300
+	defaultToolMaxLen           = 500
+	defaultToolLayout           = toolLayoutMerged
+	defaultProgressMaxEntries   = 20
+	defaultProgressHistoryTurns = 3
 )
 
 // Slow-operation thresholds. Operations exceeding these durations produce a
@@ -133,10 +136,43 @@ var RestartCh = make(chan RestartRequest, 1)
 // DisplayCfg controls how intermediate messages are surfaced.
 // A value of -1 means "use default", 0 means "no truncation".
 type DisplayCfg struct {
-	ThinkingMessages bool
-	ThinkingMaxLen   int // max runes for thinking preview; 0 = no truncation
-	ToolMaxLen       int // max runes for tool use preview; 0 = no truncation
-	ToolMessages     bool
+	ThinkingMessages     bool
+	ThinkingMaxLen       int // max runes for thinking preview; 0 = no truncation
+	ToolMaxLen           int // max runes for tool text preview; 0 = no truncation
+	ToolMessages         bool
+	ProgressStyle        string // "" = platform default; legacy | compact | card
+	ToolLayout           string // split | merged
+	ToolShowInput        bool
+	ToolShowResultBody   bool
+	ProgressMaxEntries   int // max recent progress entries in compact/card; 0 = unlimited
+	ProgressHistoryTurns int // number of assistant turns with persisted event timelines; 0 = disabled
+}
+
+type DisplayCfgUpdate struct {
+	ThinkingMessages     *bool
+	ThinkingMaxLen       *int
+	ToolMaxLen           *int
+	ToolMessages         *bool
+	ProgressStyle        *string
+	ToolLayout           *string
+	ToolShowInput        *bool
+	ToolShowResultBody   *bool
+	ProgressMaxEntries   *int
+	ProgressHistoryTurns *int
+}
+
+func DefaultDisplayCfg() DisplayCfg {
+	return DisplayCfg{
+		ThinkingMessages:     true,
+		ThinkingMaxLen:       defaultThinkingMaxLen,
+		ToolMaxLen:           defaultToolMaxLen,
+		ToolMessages:         true,
+		ToolLayout:           defaultToolLayout,
+		ToolShowInput:        true,
+		ToolShowResultBody:   true,
+		ProgressMaxEntries:   defaultProgressMaxEntries,
+		ProgressHistoryTurns: defaultProgressHistoryTurns,
+	}
 }
 
 // RateLimitCfg controls per-session message rate limiting.
@@ -174,7 +210,7 @@ type Engine struct {
 	commandSaveAddFunc func(name, description, prompt, exec, workDir string) error
 	commandSaveDelFunc func(name string) error
 
-	displaySaveFunc  func(thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error
+	displaySaveFunc  func(update DisplayCfgUpdate) error
 	configReloadFunc func() (*ConfigReloadResult, error)
 
 	hooks              *HookManager
@@ -376,7 +412,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		cancel:                cancel,
 		i18n:                  NewI18n(lang),
 		attachmentSendEnabled: true,
-		display:               DisplayCfg{ThinkingMessages: true, ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen, ToolMessages: true},
+		display:               DefaultDisplayCfg(),
 		commands:              NewCommandRegistry(),
 		skills:                NewSkillRegistry(),
 		aliases:               make(map[string]string),
@@ -640,7 +676,7 @@ func (e *Engine) SetCommandSaveDelFunc(fn func(name string) error) {
 	e.commandSaveDelFunc = fn
 }
 
-func (e *Engine) SetDisplaySaveFunc(fn func(thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error) {
+func (e *Engine) SetDisplaySaveFunc(fn func(update DisplayCfgUpdate) error) {
 	e.displaySaveFunc = fn
 }
 
@@ -2599,7 +2635,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		return e.sendWithErrorForWorkspace(p, replyCtx, content, workspaceDir)
 	}
 	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
-	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer)
+	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), e.display, workspaceRenderer)
 	state.mu.Unlock()
 
 	// Idle timeout: 0 = disabled
@@ -2612,6 +2648,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	}
 
 	events := state.agentSession.Events()
+	currentTimeline := newEventTimeline(turnStart)
 	stopCh := state.stopSignal()
 	for {
 		var event Event
@@ -2689,6 +2726,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		switch event.Type {
 		case EventThinking:
+			currentTimeline.appendEvent(TimelineEvent{
+				Kind: EventThinking,
+				Text: event.Content,
+			})
 			// In quiet mode, still split text segments so they don't merge.
 			if !e.display.ThinkingMessages && len(textParts) > segmentStart {
 				if sp.canPreview() {
@@ -2731,6 +2772,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventToolUse:
+			currentTimeline.appendEvent(TimelineEvent{
+				Kind:      EventToolUse,
+				ToolName:  event.ToolName,
+				ToolInput: event.ToolInput,
+				Text:      event.ToolInput,
+			})
 			toolCount++
 			// When tool messages are hidden, split text segments.
 			if !e.display.ToolMessages && len(textParts) > segmentStart {
@@ -2767,6 +2814,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					sp.detachPreview() // keep frozen preview visible as permanent message
 				}
 				toolInput := event.ToolInput
+				if !e.display.ToolShowInput {
+					toolInput = ""
+				}
 				var formattedInput string
 				if toolInput == "" {
 					formattedInput = ""
@@ -2785,7 +2835,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 				toolMsg := fmt.Sprintf(e.i18n.T(MsgTool), toolCount, event.ToolName, formattedInput)
-				if !cp.AppendEvent(ProgressEntryToolUse, toolInput, event.ToolName, toolMsg) {
+				entry := ProgressCardEntry{
+					Kind:      ProgressEntryToolUse,
+					Tool:      event.ToolName,
+					ToolInput: toolInput,
+				}
+				if !e.display.ToolShowInput {
+					entry.ToolInput = ""
+				}
+				if !cp.AppendStructured(entry, toolMsg) {
 					for _, chunk := range SplitMessageCodeFenceAware(toolMsg, maxPlatformMessageLen) {
 						sendWorkspace(p, replyCtx, chunk)
 					}
@@ -2793,26 +2851,40 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventToolResult:
+			toolResultText := strings.TrimSpace(event.ToolResult)
+			if toolResultText == "" {
+				toolResultText = strings.TrimSpace(event.Content)
+			}
+			currentTimeline.appendEvent(TimelineEvent{
+				Kind:       EventToolResult,
+				ToolName:   event.ToolName,
+				ToolResult: toolResultText,
+				Status:     event.ToolStatus,
+				ExitCode:   event.ToolExitCode,
+				Success:    event.ToolSuccess,
+			})
 			if e.display.ToolMessages {
 				result := strings.TrimSpace(event.ToolResult)
 				if result == "" {
 					result = strings.TrimSpace(event.Content)
 				}
-				if result != "" {
+				if result != "" && e.display.ToolShowResultBody {
 					result = truncateIf(result, e.display.ToolMaxLen)
+				} else if !e.display.ToolShowResultBody {
+					result = ""
 				}
 				if result != "" || event.ToolStatus != "" || event.ToolExitCode != nil || event.ToolSuccess != nil {
-					resultMsg := e.formatToolResultEventFallback(event.ToolName, result, event.ToolStatus, event.ToolExitCode, event.ToolSuccess)
+					resultMsg := e.formatToolResultEventFallback(event.ToolName, result, event.ToolStatus, event.ToolExitCode, event.ToolSuccess, e.display.ToolShowResultBody)
 					entry := ProgressCardEntry{
-						Kind:     ProgressEntryToolResult,
-						Tool:     event.ToolName,
-						Text:     result,
-						Status:   event.ToolStatus,
-						ExitCode: event.ToolExitCode,
-						Success:  event.ToolSuccess,
+						Kind:       ProgressEntryToolResult,
+						Tool:       event.ToolName,
+						Status:     event.ToolStatus,
+						ExitCode:   event.ToolExitCode,
+						Success:    event.ToolSuccess,
+						ToolResult: result,
 					}
 					if !cp.AppendStructured(entry, resultMsg) {
-						if !SuppressStandaloneToolResultEvent(p) {
+						if !SuppressStandaloneToolResultEvent(p, e.display) {
 							e.sendRaw(p, replyCtx, resultMsg)
 						}
 					}
@@ -2969,7 +3041,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			}
 
-			session.AddHistory("assistant", baseResponse)
+			historyIdx := session.AddHistoryAndReturnIndex("assistant", baseResponse)
+			if e.display.ProgressHistoryTurns != 0 && currentTimeline != nil && len(currentTimeline.Events) > 0 {
+				currentTimeline.AssistantHistoryIdx = historyIdx
+				currentTimeline.CompletedAt = time.Now()
+				session.AppendEventTimeline(*currentTimeline, e.display.ProgressHistoryTurns)
+			}
 			sessions.Save()
 
 			e.hooks.Emit(HookEvent{
@@ -3066,30 +3143,27 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 			// Auto-compress after finishing a turn, before sending any queued messages.
 			if triggerAutoCompress {
-				compressor, ok := e.agent.(ContextCompressor)
-				if ok && compressor.CompressCommand() != "" {
-					if pendingSend != nil {
-						if err := <-pendingSend; err != nil {
-							slog.Debug("async send error before compress", "error", err)
-						}
+				if pendingSend != nil {
+					if err := <-pendingSend; err != nil {
+						slog.Debug("async send error before compress", "error", err)
 					}
-					state.mu.Lock()
-					state.lastAutoCompressAt = time.Now()
-					tokenEst := state.lastAutoCompressTokens
-					state.mu.Unlock()
-					slog.Info("auto-compress: triggering", "session", sessionKey)
-
-					// Notify user before compressing so they know the context is about to change.
-					compressNotice := e.i18n.T(MsgCompressing)
-					if tokenEst > 0 {
-						compressNotice = fmt.Sprintf("%s (~%dk tokens)", compressNotice, tokenEst/1000)
-					}
-					e.send(state.platform, state.replyCtx, compressNotice)
-
-					// Run compress inline while the session is still locked.
-					e.runCompress(state, session, sessions, sessionKey, state.platform, state.replyCtx, true)
-					return
 				}
+				state.mu.Lock()
+				state.lastAutoCompressAt = time.Now()
+				tokenEst := state.lastAutoCompressTokens
+				state.mu.Unlock()
+				slog.Info("auto-compress: triggering", "session", sessionKey)
+
+				// Notify user before compressing so they know the context is about to change.
+				compressNotice := e.i18n.T(MsgCompressing)
+				if tokenEst > 0 {
+					compressNotice = fmt.Sprintf("%s (~%dk tokens)", compressNotice, tokenEst/1000)
+				}
+				e.send(state.platform, state.replyCtx, compressNotice)
+
+				// Run compress inline while the session is still locked.
+				e.runCompress(state, session, sessions, sessionKey, state.platform, state.replyCtx, true)
+				return
 			}
 
 			// Check for queued messages — if present, continue the event loop
@@ -3150,7 +3224,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					return e.renderOutgoingContentForWorkspace(queued.platform, content, workspaceDir)
 				}
 				sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx, queuedRenderer)
-				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), queuedRenderer)
+				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), e.display, queuedRenderer)
+				currentTimeline = newEventTimeline(turnStart)
 
 				session.AddHistory("user", queued.content)
 
@@ -3334,6 +3409,7 @@ var builtinCommands = []struct {
 	{[]string{"status"}, "status"},
 	{[]string{"usage", "quota"}, "usage"},
 	{[]string{"history"}, "history"},
+	{[]string{"progress"}, "progress"},
 	{[]string{"allow"}, "allow"},
 	{[]string{"model"}, "model"},
 	{[]string{"reasoning", "effort"}, "reasoning"},
@@ -3497,6 +3573,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdUsage(p, msg)
 	case "history":
 		e.cmdHistory(p, msg, args)
+	case "progress":
+		e.cmdProgress(p, msg, args)
 	case "allow":
 		e.cmdAllow(p, msg, args)
 	case "model":
@@ -5613,6 +5691,7 @@ func helpCardGroups() []helpCardGroup {
 				{command: "/switch", action: "nav:/list"},
 				{command: "/search", action: "cmd:/search"},
 				{command: "/history", action: "nav:/history"},
+				{command: "/progress", action: "cmd:/progress"},
 				{command: "/delete", action: "cmd:/delete"},
 				{command: "/name", action: "cmd:/name"},
 			},
@@ -6282,7 +6361,10 @@ func (e *Engine) cmdQuiet(p Platform, msg *Message, args []string) {
 	if e.displaySaveFunc != nil {
 		tm := e.display.ThinkingMessages
 		tool := e.display.ToolMessages
-		if err := e.displaySaveFunc(&tm, nil, nil, &tool); err != nil {
+		if err := e.displaySaveFunc(DisplayCfgUpdate{
+			ThinkingMessages: &tm,
+			ToolMessages:     &tool,
+		}); err != nil {
 			slog.Error("failed to persist display config after /quiet", "error", err)
 		}
 	}
@@ -10187,7 +10269,7 @@ func (e *Engine) configItems() []configItem {
 				}
 				e.display.ThinkingMessages = b
 				if e.displaySaveFunc != nil {
-					return e.displaySaveFunc(&b, nil, nil, nil)
+					return e.displaySaveFunc(DisplayCfgUpdate{ThinkingMessages: &b})
 				}
 				return nil
 			},
@@ -10209,7 +10291,7 @@ func (e *Engine) configItems() []configItem {
 				}
 				e.display.ThinkingMaxLen = n
 				if e.displaySaveFunc != nil {
-					return e.displaySaveFunc(nil, &n, nil, nil)
+					return e.displaySaveFunc(DisplayCfgUpdate{ThinkingMaxLen: &n})
 				}
 				return nil
 			},
@@ -10228,7 +10310,7 @@ func (e *Engine) configItems() []configItem {
 				}
 				e.display.ToolMessages = b
 				if e.displaySaveFunc != nil {
-					return e.displaySaveFunc(nil, nil, nil, &b)
+					return e.displaySaveFunc(DisplayCfgUpdate{ToolMessages: &b})
 				}
 				return nil
 			},
@@ -10250,7 +10332,139 @@ func (e *Engine) configItems() []configItem {
 				}
 				e.display.ToolMaxLen = n
 				if e.displaySaveFunc != nil {
-					return e.displaySaveFunc(nil, nil, &n, nil)
+					return e.displaySaveFunc(DisplayCfgUpdate{ToolMaxLen: &n})
+				}
+				return nil
+			},
+		},
+		{
+			key:    "tool_layout",
+			desc:   "Tool progress layout (split|merged)",
+			descZh: "工具进度布局 (split|merged)",
+			getFunc: func() string {
+				return normalizeToolLayout(e.display.ToolLayout)
+			},
+			setFunc: func(v string) error {
+				layout := normalizeToolLayout(v)
+				if strings.TrimSpace(v) != "" && layout != strings.ToLower(strings.TrimSpace(v)) {
+					return fmt.Errorf("invalid layout: %s", v)
+				}
+				e.display.ToolLayout = layout
+				if e.displaySaveFunc != nil {
+					return e.displaySaveFunc(DisplayCfgUpdate{ToolLayout: &layout})
+				}
+				return nil
+			},
+		},
+		{
+			key:    "progress_style",
+			desc:   "Progress rendering style override (auto|legacy|compact|card)",
+			descZh: "进度展示风格覆盖 (auto|legacy|compact|card)",
+			getFunc: func() string {
+				v := strings.ToLower(strings.TrimSpace(e.display.ProgressStyle))
+				if v == "" {
+					return "auto"
+				}
+				return v
+			},
+			setFunc: func(v string) error {
+				style := strings.ToLower(strings.TrimSpace(v))
+				switch style {
+				case "", "auto":
+					style = ""
+				case progressStyleLegacy, progressStyleCompact, progressStyleCard:
+				default:
+					return fmt.Errorf("invalid progress style: %s", v)
+				}
+				e.display.ProgressStyle = style
+				if e.displaySaveFunc != nil {
+					if style == "" {
+						auto := "auto"
+						return e.displaySaveFunc(DisplayCfgUpdate{ProgressStyle: &auto})
+					}
+					return e.displaySaveFunc(DisplayCfgUpdate{ProgressStyle: &style})
+				}
+				return nil
+			},
+		},
+		{
+			key:    "tool_show_input",
+			desc:   "Whether tool input is shown in progress (true/false)",
+			descZh: "是否在进度中显示工具输入 (true/false)",
+			getFunc: func() string {
+				return fmt.Sprintf("%t", e.display.ToolShowInput)
+			},
+			setFunc: func(v string) error {
+				b, err := strconv.ParseBool(v)
+				if err != nil {
+					return fmt.Errorf("invalid boolean: %s", v)
+				}
+				e.display.ToolShowInput = b
+				if e.displaySaveFunc != nil {
+					return e.displaySaveFunc(DisplayCfgUpdate{ToolShowInput: &b})
+				}
+				return nil
+			},
+		},
+		{
+			key:    "tool_show_result_body",
+			desc:   "Whether tool result body is shown in progress (true/false)",
+			descZh: "是否在进度中显示工具结果正文 (true/false)",
+			getFunc: func() string {
+				return fmt.Sprintf("%t", e.display.ToolShowResultBody)
+			},
+			setFunc: func(v string) error {
+				b, err := strconv.ParseBool(v)
+				if err != nil {
+					return fmt.Errorf("invalid boolean: %s", v)
+				}
+				e.display.ToolShowResultBody = b
+				if e.displaySaveFunc != nil {
+					return e.displaySaveFunc(DisplayCfgUpdate{ToolShowResultBody: &b})
+				}
+				return nil
+			},
+		},
+		{
+			key:    "progress_max_entries",
+			desc:   "Max recent progress entries in card/compact (0=no truncation)",
+			descZh: "card/compact 中最近进度条目数上限 (0=不截断)",
+			getFunc: func() string {
+				return fmt.Sprintf("%d", e.display.ProgressMaxEntries)
+			},
+			setFunc: func(v string) error {
+				n, err := strconv.Atoi(v)
+				if err != nil {
+					return fmt.Errorf("invalid integer: %s", v)
+				}
+				if n < 0 {
+					return fmt.Errorf("value must be >= 0")
+				}
+				e.display.ProgressMaxEntries = n
+				if e.displaySaveFunc != nil {
+					return e.displaySaveFunc(DisplayCfgUpdate{ProgressMaxEntries: &n})
+				}
+				return nil
+			},
+		},
+		{
+			key:    "progress_history_turns",
+			desc:   "Number of recent assistant turns with persisted progress history (0=disabled)",
+			descZh: "保留最近多少轮 assistant 过程历史 (0=禁用)",
+			getFunc: func() string {
+				return fmt.Sprintf("%d", e.display.ProgressHistoryTurns)
+			},
+			setFunc: func(v string) error {
+				n, err := strconv.Atoi(v)
+				if err != nil {
+					return fmt.Errorf("invalid integer: %s", v)
+				}
+				if n < 0 {
+					return fmt.Errorf("value must be >= 0")
+				}
+				e.display.ProgressHistoryTurns = n
+				if e.displaySaveFunc != nil {
+					return e.displaySaveFunc(DisplayCfgUpdate{ProgressHistoryTurns: &n})
 				}
 				return nil
 			},
@@ -10825,7 +11039,7 @@ func toolCodeLang(toolName, input string) string {
 	return ""
 }
 
-func (e *Engine) formatToolResultEventFallback(toolName, result, status string, exitCode *int, success *bool) string {
+func (e *Engine) formatToolResultEventFallback(toolName, result, status string, exitCode *int, success *bool, showBody bool) string {
 	statusLabel := e.i18n.T(MsgToolResultFmtStatus)
 	exitLabel := e.i18n.T(MsgToolResultFmtExit)
 	noOutput := e.i18n.T(MsgToolResultFmtNoOutput)
@@ -10857,9 +11071,9 @@ func (e *Engine) formatToolResultEventFallback(toolName, result, status string, 
 	if exitCode != nil {
 		lines = append(lines, fmt.Sprintf("🔢 %s: %d", exitLabel, *exitCode))
 	}
-	if strings.TrimSpace(result) != "" {
+	if showBody && strings.TrimSpace(result) != "" {
 		lines = append(lines, "```text\n"+strings.TrimSpace(result)+"\n```")
-	} else {
+	} else if showBody {
 		lines = append(lines, "_"+noOutput+"_")
 	}
 	return strings.Join(lines, "\n")
