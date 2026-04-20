@@ -26,10 +26,6 @@ func init() {
 }
 
 const (
-	apiBaseProduction = "https://api.sgroup.qq.com"
-	apiBaseSandbox    = "https://sandbox.api.sgroup.qq.com"
-	tokenURL          = "https://bots.qq.com/app/getAppAccessToken"
-
 	// Default intent: GROUP_AND_C2C_EVENT (1 << 25)
 	defaultIntents = 1 << 25
 
@@ -41,6 +37,15 @@ const (
 	messageCacheTTL      = 7 * 24 * time.Hour
 	messageCacheMaxItems = 1000
 	quotedTextMaxRunes   = 800
+
+	// Max attachment download size (20MB), aligned with QQ Bot platform limits.
+	maxAttachmentSize = 20 * 1024 * 1024
+)
+
+var (
+	apiBaseProduction = "https://api.sgroup.qq.com"
+	apiBaseSandbox    = "https://sandbox.api.sgroup.qq.com"
+	tokenURL          = "https://bots.qq.com/app/getAppAccessToken"
 )
 
 // WebSocket opcodes for the QQ Bot gateway protocol.
@@ -1237,7 +1242,12 @@ func downloadAttachmentImages(attachments []attachment) []core.ImageAttachment {
 			slog.Warn("qqbot: download image failed", "url", url, "error", err)
 			continue
 		}
-		data, err := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusOK {
+			slog.Warn("qqbot: download image returned non-200 status", "url", url, "status", resp.StatusCode)
+			resp.Body.Close()
+			continue
+		}
+		data, err := io.ReadAll(io.LimitReader(resp.Body, maxAttachmentSize))
 		resp.Body.Close()
 		if err != nil {
 			slog.Warn("qqbot: read image body failed", "error", err)
@@ -1275,7 +1285,12 @@ func downloadAttachmentFiles(attachments []attachment) []core.FileAttachment {
 			slog.Warn("qqbot: download file failed", "url", url, "error", err)
 			continue
 		}
-		data, err := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusOK {
+			slog.Warn("qqbot: download file returned non-200 status", "url", url, "status", resp.StatusCode)
+			resp.Body.Close()
+			continue
+		}
+		data, err := io.ReadAll(io.LimitReader(resp.Body, maxAttachmentSize))
 		resp.Body.Close()
 		if err != nil {
 			slog.Warn("qqbot: read file body failed", "error", err)
