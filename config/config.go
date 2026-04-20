@@ -752,35 +752,17 @@ func validateUsersConfig(prefix string, u *UsersConfig) error {
 }
 
 // SaveActiveProvider persists the active provider name for a project.
+// It uses surgical text editing to preserve comments and unknown fields.
 func SaveActiveProvider(projectName, providerName string) error {
 	configMu.Lock()
 	defer configMu.Unlock()
-	if ConfigPath == "" {
-		return fmt.Errorf("config path not set")
-	}
-	data, err := os.ReadFile(ConfigPath)
-	if err != nil {
-		return fmt.Errorf("read config: %w", err)
-	}
-	cfg := &Config{}
-	if err := toml.Unmarshal(data, cfg); err != nil {
-		return fmt.Errorf("parse config: %w", err)
-	}
-	for i := range cfg.Projects {
-		if cfg.Projects[i].Name == projectName {
-			if cfg.Projects[i].Agent.Options == nil {
-				cfg.Projects[i].Agent.Options = make(map[string]any)
-			}
-			cfg.Projects[i].Agent.Options["provider"] = providerName
-			break
-		}
-	}
-	return saveConfig(cfg)
+	return patchProjectAgentOption(projectName, "provider", providerName)
 }
 
 // SaveProviderModel persists the selected model for a provider in a project.
 // It first looks in the project's inline providers, then falls back to
 // global [[providers]] if the provider is referenced via provider_refs.
+// Uses surgical text editing to preserve comments and unknown fields.
 func SaveProviderModel(projectName, providerName, model string) error {
 	configMu.Lock()
 	defer configMu.Unlock()
@@ -791,65 +773,83 @@ func SaveProviderModel(projectName, providerName, model string) error {
 	if err != nil {
 		return fmt.Errorf("read config: %w", err)
 	}
+	raw := string(data)
 	cfg := &Config{}
 	if err := toml.Unmarshal(data, cfg); err != nil {
 		return fmt.Errorf("parse config: %w", err)
 	}
 
+	projectIdx := -1
 	for i := range cfg.Projects {
-		if cfg.Projects[i].Name != projectName {
+		if cfg.Projects[i].Name == projectName {
+			projectIdx = i
+			break
+		}
+	}
+	if projectIdx < 0 {
+		return fmt.Errorf("project %q not found in config", projectName)
+	}
+
+	lines, hadTrailing := splitConfigLines(raw)
+	spans := buildRawProjectSpans(lines)
+	if projectIdx >= len(spans) {
+		return fmt.Errorf("project %q located in parsed config but not raw file", projectName)
+	}
+	projSpan := spans[projectIdx]
+
+	for j, prov := range cfg.Projects[projectIdx].Agent.Providers {
+		if prov.Name == providerName {
+			if j < len(projSpan.agentProviders) {
+				ps := projSpan.agentProviders[j]
+				lines = upsertTomlStringKey(lines, ps.start+1, ps.end, "model", model)
+				return writeRawConfig(joinConfigLines(lines, hadTrailing))
+			}
+			break
+		}
+	}
+
+	for _, ref := range cfg.Projects[projectIdx].Agent.ProviderRefs {
+		if ref == providerName {
+			return patchGlobalProviderField(lines, hadTrailing, cfg, providerName, "model", model)
+		}
+	}
+	return fmt.Errorf("provider %q not found in project %q", providerName, projectName)
+}
+
+func patchGlobalProviderField(lines []string, hadTrailing bool, cfg *Config, providerName, key, value string) error {
+	globalStarts := make([]int, 0, 4)
+	for i := range lines {
+		if matchTableHeader(lines[i], "[[providers]]") {
+			globalStarts = append(globalStarts, i)
+		}
+	}
+	for k, gp := range cfg.Providers {
+		if gp.Name != providerName || k >= len(globalStarts) {
 			continue
 		}
-		// Check inline providers first
-		for j := range cfg.Projects[i].Agent.Providers {
-			if cfg.Projects[i].Agent.Providers[j].Name == providerName {
-				cfg.Projects[i].Agent.Providers[j].Model = model
-				return saveConfig(cfg)
+		gstart := globalStarts[k]
+		gend := len(lines) - 1
+		if k+1 < len(globalStarts) {
+			gend = globalStarts[k+1] - 1
+		}
+		for j := gstart + 1; j <= gend; j++ {
+			if isAnyTableHeader(lines[j]) {
+				gend = j - 1
+				break
 			}
 		}
-		// Fall back to global providers referenced via provider_refs
-		for _, ref := range cfg.Projects[i].Agent.ProviderRefs {
-			if ref == providerName {
-				for k := range cfg.Providers {
-					if cfg.Providers[k].Name == providerName {
-						cfg.Providers[k].Model = model
-						return saveConfig(cfg)
-					}
-				}
-			}
-		}
-		return fmt.Errorf("provider %q not found in project %q", providerName, projectName)
+		lines = upsertTomlStringKey(lines, gstart+1, gend, key, value)
+		return writeRawConfig(joinConfigLines(lines, hadTrailing))
 	}
-	return fmt.Errorf("project %q not found in config", projectName)
+	return fmt.Errorf("global provider %q not found", providerName)
 }
 
 // SaveAgentModel persists the selected default model for a project's agent.
+// It uses surgical text editing to preserve comments and unknown fields.
 func SaveAgentModel(projectName, model string) error {
 	configMu.Lock()
 	defer configMu.Unlock()
-	if ConfigPath == "" {
-		return fmt.Errorf("config path not set")
-	}
-	data, err := os.ReadFile(ConfigPath)
-	if err != nil {
-		return fmt.Errorf("read config: %w", err)
-	}
-	cfg := &Config{}
-	if err := toml.Unmarshal(data, cfg); err != nil {
-		return fmt.Errorf("parse config: %w", err)
-	}
-
-	for i := range cfg.Projects {
-		if cfg.Projects[i].Name != projectName {
-			continue
-		}
-		if cfg.Projects[i].Agent.Options == nil {
-			cfg.Projects[i].Agent.Options = make(map[string]any)
-		}
-		cfg.Projects[i].Agent.Options["model"] = model
-		return saveConfig(cfg)
-	}
-	return fmt.Errorf("project %q not found in config", projectName)
+	return patchProjectAgentOption(projectName, "model", model)
 }
 
 // AddProviderToConfig adds a provider to a project's agent config and saves.
@@ -1206,22 +1206,11 @@ func formatTOML(raw string) string {
 }
 
 // SaveLanguage saves the language setting to the config file.
+// Uses surgical text editing to preserve comments and unknown fields.
 func SaveLanguage(lang string) error {
 	configMu.Lock()
 	defer configMu.Unlock()
-	if ConfigPath == "" {
-		return fmt.Errorf("config path not set")
-	}
-	data, err := os.ReadFile(ConfigPath)
-	if err != nil {
-		return fmt.Errorf("read config: %w", err)
-	}
-	cfg := &Config{}
-	if err := toml.Unmarshal(data, cfg); err != nil {
-		return fmt.Errorf("parse config: %w", err)
-	}
-	cfg.Language = lang
-	return saveConfig(cfg)
+	return patchTopLevelField("language", lang)
 }
 
 // ListProjects returns project names from the config file.
@@ -1356,52 +1345,39 @@ func RemoveAlias(name string) error {
 }
 
 // SaveDisplayConfig persists the display settings to the config file.
+// Uses surgical text editing to preserve comments and unknown fields.
 func SaveDisplayConfig(thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
 	configMu.Lock()
 	defer configMu.Unlock()
-	if ConfigPath == "" {
-		return fmt.Errorf("config path not set")
-	}
-	data, err := os.ReadFile(ConfigPath)
-	if err != nil {
-		return fmt.Errorf("read config: %w", err)
-	}
-	cfg := &Config{}
-	if err := toml.Unmarshal(data, cfg); err != nil {
-		return fmt.Errorf("parse config: %w", err)
-	}
 	if thinkingMessages != nil {
-		cfg.Display.ThinkingMessages = thinkingMessages
+		if err := patchSectionField("display", "thinking_messages", fmt.Sprintf("%t", *thinkingMessages)); err != nil {
+			return err
+		}
 	}
 	if thinkingMaxLen != nil {
-		cfg.Display.ThinkingMaxLen = thinkingMaxLen
+		if err := patchSectionField("display", "thinking_max_len", fmt.Sprintf("%d", *thinkingMaxLen)); err != nil {
+			return err
+		}
 	}
 	if toolMaxLen != nil {
-		cfg.Display.ToolMaxLen = toolMaxLen
+		if err := patchSectionField("display", "tool_max_len", fmt.Sprintf("%d", *toolMaxLen)); err != nil {
+			return err
+		}
 	}
 	if toolMessages != nil {
-		cfg.Display.ToolMessages = toolMessages
+		if err := patchSectionField("display", "tool_messages", fmt.Sprintf("%t", *toolMessages)); err != nil {
+			return err
+		}
 	}
-	return saveConfig(cfg)
+	return nil
 }
 
 // SaveTTSMode persists the TTS mode setting to the config file.
+// Uses surgical text editing to preserve comments and unknown fields.
 func SaveTTSMode(mode string) error {
 	configMu.Lock()
 	defer configMu.Unlock()
-	if ConfigPath == "" {
-		return fmt.Errorf("config path not set")
-	}
-	data, err := os.ReadFile(ConfigPath)
-	if err != nil {
-		return fmt.Errorf("read config: %w", err)
-	}
-	cfg := &Config{}
-	if err := toml.Unmarshal(data, cfg); err != nil {
-		return fmt.Errorf("parse config: %w", err)
-	}
-	cfg.TTS.TTSMode = mode
-	return saveConfig(cfg)
+	return patchSectionField("tts", "tts_mode", quoteTomlString(mode))
 }
 
 // GetProjectProviders returns providers for a given project.
@@ -2197,10 +2173,170 @@ func cloneStringMap(in map[string]string) map[string]string {
 	return out
 }
 
+// patchProjectAgentOption does a surgical text-level update of a single key
+// under [projects.agent.options] for the given project. It preserves all
+// comments, unknown fields, and formatting in the config file.
+// The caller must hold configMu.
+func patchProjectAgentOption(projectName, key, value string) error {
+	if ConfigPath == "" {
+		return fmt.Errorf("config path not set")
+	}
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	raw := string(data)
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+
+	projectIdx := -1
+	for i := range cfg.Projects {
+		if cfg.Projects[i].Name == projectName {
+			projectIdx = i
+			break
+		}
+	}
+	if projectIdx < 0 {
+		return fmt.Errorf("project %q not found in config", projectName)
+	}
+
+	lines, hadTrailing := splitConfigLines(raw)
+	spans := buildRawProjectSpans(lines)
+	if projectIdx >= len(spans) {
+		return fmt.Errorf("project %q located in parsed config but not raw file", projectName)
+	}
+	projSpan := spans[projectIdx]
+
+	if projSpan.agentOptionsStart < 0 {
+		// [projects.agent.options] doesn't exist; create it.
+		insertAt := projSpan.agentEnd + 1
+		if projSpan.agentStart < 0 {
+			// [projects.agent] also doesn't exist; insert after [[projects]] header + name line
+			insertAt = projSpan.start + 1
+			for ln := projSpan.start + 1; ln <= projSpan.end; ln++ {
+				if isAnyTableHeader(lines[ln]) {
+					insertAt = ln
+					break
+				}
+				insertAt = ln + 1
+			}
+			block := []string{"", "[projects.agent]", "type = \"claudecode\"", "", "[projects.agent.options]"}
+			lines = insertLines(lines, insertAt, block)
+		} else {
+			block := []string{"", "[projects.agent.options]"}
+			lines = insertLines(lines, insertAt, block)
+		}
+		spans = buildRawProjectSpans(lines)
+		projSpan = spans[projectIdx]
+	}
+
+	lines = upsertTomlStringKey(lines, projSpan.agentOptionsStart+1, projSpan.agentOptionsEnd, key, value)
+	return writeRawConfig(joinConfigLines(lines, hadTrailing))
+}
+
+// patchTopLevelField does a surgical text-level update of a single top-level
+// key in the config file. The caller must hold configMu.
+func patchTopLevelField(key, value string) error {
+	if ConfigPath == "" {
+		return fmt.Errorf("config path not set")
+	}
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	raw := string(data)
+	lines, hadTrailing := splitConfigLines(raw)
+
+	// Top-level keys appear before the first section header.
+	topEnd := len(lines) - 1
+	for i := range lines {
+		if isAnyTableHeader(lines[i]) {
+			topEnd = i - 1
+			break
+		}
+	}
+
+	for i := 0; i <= topEnd && i < len(lines); i++ {
+		if matchTomlStringKey(lines[i], key) {
+			lines[i] = replaceTomlStringKeyLine(lines[i], key, value)
+			return writeRawConfig(joinConfigLines(lines, hadTrailing))
+		}
+	}
+	// Key not found; insert before the first section header.
+	insertAt := topEnd + 1
+	if insertAt < 0 {
+		insertAt = 0
+	}
+	lines = insertLines(lines, insertAt, []string{fmt.Sprintf("%s = %s", key, quoteTomlString(value))})
+	return writeRawConfig(joinConfigLines(lines, hadTrailing))
+}
+
+// patchSectionField does a surgical text-level update of a single key
+// under a given [section] in the config file. The caller must hold configMu.
+func patchSectionField(section, key, tomlValue string) error {
+	if ConfigPath == "" {
+		return fmt.Errorf("config path not set")
+	}
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	raw := string(data)
+	lines, hadTrailing := splitConfigLines(raw)
+
+	sectionStart := -1
+	sectionEnd := len(lines) - 1
+	header := "[" + section + "]"
+	for i := range lines {
+		if sectionStart < 0 && matchTableHeader(lines[i], header) {
+			sectionStart = i
+			continue
+		}
+		if sectionStart >= 0 && isAnyTableHeader(lines[i]) {
+			sectionEnd = i - 1
+			break
+		}
+	}
+
+	if sectionStart < 0 {
+		topEnd := len(lines) - 1
+		for i := range lines {
+			if isAnyTableHeader(lines[i]) {
+				topEnd = i - 1
+				break
+			}
+		}
+		insertAt := topEnd + 1
+		if insertAt < 0 {
+			insertAt = 0
+		}
+		block := []string{"", header, fmt.Sprintf("%s = %s", key, tomlValue)}
+		lines = insertLines(lines, insertAt, block)
+		return writeRawConfig(joinConfigLines(lines, hadTrailing))
+	}
+
+	lines = upsertTomlRawKey(lines, sectionStart+1, sectionEnd, key, tomlValue)
+	return writeRawConfig(joinConfigLines(lines, hadTrailing))
+}
+
 type rawProjectSpan struct {
 	start     int
 	end       int
 	platforms []rawPlatformSpan
+
+	agentStart        int // [projects.agent] header; -1 if absent
+	agentEnd          int // last line before the next header or project end
+	agentOptionsStart int // [projects.agent.options] header; -1 if absent
+	agentOptionsEnd   int // last line of agent options section
+	agentProviders    []rawProviderSpan
+}
+
+type rawProviderSpan struct {
+	start    int // [[projects.agent.providers]] header
+	end      int
+	nameLine int // line with name = "..."
 }
 
 type rawPlatformSpan struct {
@@ -2248,7 +2384,53 @@ func buildRawProjectSpans(lines []string) []rawProjectSpan {
 		if i+1 < len(projectStarts) {
 			end = projectStarts[i+1] - 1
 		}
-		span := rawProjectSpan{start: start, end: end}
+		span := rawProjectSpan{
+			start:             start,
+			end:               end,
+			agentStart:        -1,
+			agentEnd:          -1,
+			agentOptionsStart: -1,
+			agentOptionsEnd:   -1,
+		}
+
+		for ln := start + 1; ln <= end; ln++ {
+			if matchTableHeader(lines[ln], "[projects.agent]") && !matchTableHeader(lines[ln], "[projects.agent.options]") && !matchTableHeader(lines[ln], "[[projects.agent.providers]]") {
+				span.agentStart = ln
+				span.agentEnd = end
+				for j := ln + 1; j <= end; j++ {
+					if isAnyTableHeader(lines[j]) {
+						span.agentEnd = j - 1
+						break
+					}
+				}
+			}
+			if matchTableHeader(lines[ln], "[projects.agent.options]") {
+				span.agentOptionsStart = ln
+				span.agentOptionsEnd = end
+				for j := ln + 1; j <= end; j++ {
+					if isAnyTableHeader(lines[j]) {
+						span.agentOptionsEnd = j - 1
+						break
+					}
+				}
+			}
+			if matchTableHeader(lines[ln], "[[projects.agent.providers]]") {
+				provSpan := rawProviderSpan{start: ln, end: end, nameLine: -1}
+				for j := ln + 1; j <= end; j++ {
+					if isAnyTableHeader(lines[j]) {
+						provSpan.end = j - 1
+						break
+					}
+				}
+				for j := ln + 1; j <= provSpan.end; j++ {
+					if matchTomlStringKey(lines[j], "name") {
+						provSpan.nameLine = j
+						break
+					}
+				}
+				span.agentProviders = append(span.agentProviders, provSpan)
+			}
+		}
 
 		platformStarts := make([]int, 0, 2)
 		for ln := start + 1; ln <= end; ln++ {
@@ -2366,6 +2548,33 @@ func replaceTomlStringKeyLine(line, key, value string) string {
 		updated += " " + comment
 	}
 	return updated
+}
+
+// upsertTomlRawKey is like upsertTomlStringKey but writes the value literally
+// (no quoting). Use for booleans, integers, and pre-formatted values.
+func upsertTomlRawKey(lines []string, start, end int, key, rawValue string) []string {
+	if start < 0 {
+		start = 0
+	}
+	if end >= len(lines) {
+		end = len(lines) - 1
+	}
+	for i := start; i <= end && i < len(lines); i++ {
+		if matchTomlStringKey(lines[i], key) {
+			indent := leadingWhitespace(lines[i])
+			comment := extractLineComment(lines[i])
+			lines[i] = fmt.Sprintf("%s%s = %s", indent, key, rawValue)
+			if comment != "" {
+				lines[i] += " " + comment
+			}
+			return lines
+		}
+	}
+	insertAt := end + 1
+	if insertAt < start {
+		insertAt = start
+	}
+	return insertLines(lines, insertAt, []string{fmt.Sprintf("%s = %s", key, rawValue)})
 }
 
 func quoteTomlString(value string) string {
