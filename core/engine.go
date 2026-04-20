@@ -2431,6 +2431,10 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 
 	if newID := agentSession.CurrentSessionID(); newID != "" {
 		if session.CompareAndSetAgentSessionID(newID, agent.Name()) {
+			pendingName := session.GetName()
+			if pendingName != "" && pendingName != "session" && pendingName != "default" {
+				sessions.SetSessionName(newID, pendingName)
+			}
 			sessions.Save()
 		}
 	}

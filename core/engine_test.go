@@ -5317,6 +5317,26 @@ func TestSessionIDWriteback_ImmediateAfterStartSession(t *testing.T) {
 	}
 }
 
+// TestSessionIDWriteback_MapsSessionName verifies that when startOrResumeSession
+// sets the AgentSessionID, it also maps the session's pending name via
+// SetSessionName so that /list displays the custom name from /new.
+func TestSessionIDWriteback_MapsSessionName(t *testing.T) {
+	sess := newControllableSession("agent-uuid-456")
+	agent := &controllableAgent{nextSession: sess}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	session := e.sessions.NewSession(key, "我的自定义会话")
+
+	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+
+	got := e.sessions.GetSessionName("agent-uuid-456")
+	if got != "我的自定义会话" {
+		t.Fatalf("GetSessionName = %q, want %q — name not mapped during startOrResumeSession", got, "我的自定义会话")
+	}
+}
+
 // TestSessionIDWriteback_DoesNotOverwriteExisting verifies that immediate
 // writeback does not clobber an existing AgentSessionID (e.g. from --resume).
 func TestSessionIDWriteback_DoesNotOverwriteExisting(t *testing.T) {
