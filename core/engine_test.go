@@ -5060,6 +5060,7 @@ func (s *controllableAgentSession) Close() error {
 // controllableAgent lets tests control which session is returned by StartSession.
 type controllableAgent struct {
 	nextSession AgentSession
+	listFn      func() ([]AgentSessionInfo, error)
 }
 
 func (a *controllableAgent) Name() string { return "controllable" }
@@ -5070,6 +5071,9 @@ func (a *controllableAgent) StartSession(_ context.Context, _ string) (AgentSess
 	return newControllableSession("default"), nil
 }
 func (a *controllableAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
+	if a.listFn != nil {
+		return a.listFn()
+	}
 	return nil, nil
 }
 func (a *controllableAgent) Stop() error { return nil }
@@ -10087,5 +10091,106 @@ func TestCmdList_RealWorldLegacyDataFullFlow(t *testing.T) {
 	// The new session should show "我的新会话" (the name from /new), not the message content
 	if !strings.Contains(p.sent[0], "我的新会话") {
 		t.Errorf("step5: /list page 2 should display session name '我的新会话' but it's missing:\n%s", p.sent[0])
+	}
+}
+
+// codexLikeSession simulates real codex agent behavior:
+// - CurrentSessionID() returns "" until Send() is called
+// - Send() sets the thread ID and pushes an EventResult with the SessionID
+type codexLikeSession struct {
+	threadID  string
+	events    chan Event
+	alive     bool
+	hasSentID bool
+}
+
+func newCodexLikeSession(threadID string) *codexLikeSession {
+	return &codexLikeSession{
+		threadID: threadID,
+		events:   make(chan Event, 8),
+		alive:    true,
+	}
+}
+
+func (s *codexLikeSession) Send(prompt string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.hasSentID = true
+	s.events <- Event{Type: EventText, Content: "Agent reply to: " + prompt}
+	s.events <- Event{Type: EventResult, SessionID: s.threadID, Content: "Done", Done: true}
+	return nil
+}
+func (s *codexLikeSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
+func (s *codexLikeSession) Events() <-chan Event                                 { return s.events }
+func (s *codexLikeSession) CurrentSessionID() string {
+	if s.hasSentID {
+		return s.threadID
+	}
+	return ""
+}
+func (s *codexLikeSession) Alive() bool  { return s.alive }
+func (s *codexLikeSession) Close() error { s.alive = false; return nil }
+
+// TestSessionName_CodexLikeFlow does an end-to-end test simulating real codex
+// behavior: CurrentSessionID()="" initially, thread ID only available after Send().
+// This is the exact bug: /new xxx → send message → agent replies with SessionID
+// in EventResult → name "xxx" must appear in /list.
+func TestSessionName_CodexLikeFlow(t *testing.T) {
+	sess := newCodexLikeSession("codex-thread-new-001")
+	listSessions := []AgentSessionInfo{
+		{ID: "codex-thread-old", Summary: "Old session", MessageCount: 5, ModifiedAt: time.Now().Add(-time.Hour)},
+	}
+	agent := &controllableAgent{
+		nextSession: sess,
+		listFn: func() ([]AgentSessionInfo, error) {
+			return listSessions, nil
+		},
+	}
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	userKey := "test:user1"
+
+	// Setup: create initial session with a known agent session ID
+	initial := e.sessions.GetOrCreateActive(userKey)
+	initial.SetAgentSessionID("codex-thread-old", "codex")
+	e.sessions.Save()
+
+	// Step 1: /new "我的新会话"
+	e.cmdNew(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, []string{"我的新会话"})
+
+	// Step 2: send a message (this triggers startOrResumeSession + processInteractiveEvents)
+	e.ReceiveMessage(p, &Message{
+		SessionKey: userKey,
+		Content:    "请帮我做个功能",
+		ReplyCtx:   "ctx2",
+	})
+
+	// Wait for the event loop to complete
+	time.Sleep(200 * time.Millisecond)
+
+	// Step 3: verify session name was mapped
+	newSession := e.sessions.GetOrCreateActive(userKey)
+	agentID := newSession.GetAgentSessionID()
+	if agentID != "codex-thread-new-001" {
+		t.Fatalf("AgentSessionID = %q, want %q", agentID, "codex-thread-new-001")
+	}
+
+	gotName := e.sessions.GetSessionName("codex-thread-new-001")
+	if gotName != "我的新会话" {
+		t.Fatalf("GetSessionName(%q) = %q, want %q", "codex-thread-new-001", gotName, "我的新会话")
+	}
+
+	// Step 4: verify /list displays the name
+	listSessions = append(listSessions, AgentSessionInfo{
+		ID:           "codex-thread-new-001",
+		Summary:      "请帮我做个功能",
+		MessageCount: 2,
+		ModifiedAt:   time.Now(),
+	})
+	p.sent = nil
+	e.cmdList(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, nil)
+	if len(p.sent) != 1 {
+		t.Fatalf("expected 1 reply, got %d", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "我的新会话") {
+		t.Errorf("/list should show session name '我的新会话':\n%s", p.sent[0])
 	}
 }
