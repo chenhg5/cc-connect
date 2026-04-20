@@ -2479,11 +2479,10 @@ func validateSessionEffortOverride(agent Agent, effortOverride string) (string, 
 		return "", nil
 	}
 
-	starter, ok := agent.(SessionEffortStarter)
+	_, ok := agent.(SessionEffortStarter)
 	if !ok {
 		return "", fmt.Errorf("agent %q does not support per-session reasoning effort override", agent.Name())
 	}
-	_ = starter
 
 	if switcher, ok := agent.(ReasoningEffortSwitcher); ok {
 		if allowed := switcher.AvailableReasoningEfforts(); len(allowed) > 0 {
