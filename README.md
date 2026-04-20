@@ -109,6 +109,7 @@ MiniMax-M2.7 is a next-generation large language model designed for autonomous e
 - **Skill Management** — New `/skills` page with local skill browser and recommended presets.
 - **Global Provider Management** — Add/edit/delete providers in the web UI; import from cc-switch config.
 - **Personal WeChat** — Chat with your local agent from **Weixin (personal)** via ilink long-polling; QR `weixin setup`, CDN media, no public IP. *[Setup → `docs/weixin.md`](docs/weixin.md)*
+- **Weibo DM** — Chat with your agent via **Weibo private messages** over WebSocket; no public IP needed, text streaming supported.
 - **Feishu Enhancements** — Auto-resolve `@name` mentions, multi-level reply chain recognition, done-emoji reactions.
 - **New Agents** — Kimi CLI and Pi agent support added.
 
