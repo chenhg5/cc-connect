@@ -4101,21 +4101,26 @@ func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDi
 	}
 
 	var parts []string
+	hasStatus := false
 	if model := replyFooterModel(session, agent); model != "" {
 		parts = append(parts, model)
+		hasStatus = true
 	}
 	if effort := replyFooterReasoningEffort(session, agent); effort != "" {
 		parts = append(parts, effort)
+		hasStatus = true
 	}
 	if left := strings.TrimSpace(contextLeft); left != "" {
 		parts = append(parts, left)
+		hasStatus = true
 	} else if usage := e.replyFooterUsageText(session, agent); usage != "" {
 		parts = append(parts, usage)
+		hasStatus = true
 	}
 	if dir := replyFooterWorkDir(session, agent, workspaceDir); dir != "" {
 		parts = append(parts, dir)
 	}
-	if len(parts) == 0 {
+	if !hasStatus {
 		return ""
 	}
 	return strings.Join(parts, " · ")
