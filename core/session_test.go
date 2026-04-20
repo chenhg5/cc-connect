@@ -502,3 +502,97 @@ func TestSessionManager_StorePath(t *testing.T) {
 		t.Errorf("StorePath() empty = %q, want empty string", got)
 	}
 }
+
+func TestKnownAgentSessionIDs(t *testing.T) {
+	sm := NewSessionManager("")
+	s1 := sm.NewSession("user1", "a")
+	s1.SetAgentSessionID("uuid-aaa", "claude")
+	s2 := sm.NewSession("user1", "b")
+	s2.SetAgentSessionID("uuid-bbb", "claude")
+	sm.NewSession("user1", "c") // no agent session id
+
+	known := sm.KnownAgentSessionIDs()
+	if len(known) != 2 {
+		t.Fatalf("KnownAgentSessionIDs len = %d, want 2", len(known))
+	}
+	if _, ok := known["uuid-aaa"]; !ok {
+		t.Fatal("expected uuid-aaa in known set")
+	}
+	if _, ok := known["uuid-bbb"]; !ok {
+		t.Fatal("expected uuid-bbb in known set")
+	}
+}
+
+func TestFilterOwnedSessions_FiltersUnknown(t *testing.T) {
+	all := []AgentSessionInfo{
+		{ID: "owned-1"},
+		{ID: "external-1"},
+		{ID: "owned-2"},
+		{ID: "external-2"},
+	}
+	known := map[string]struct{}{
+		"owned-1": {},
+		"owned-2": {},
+	}
+	filtered := filterOwnedSessions(all, known)
+	if len(filtered) != 2 {
+		t.Fatalf("filterOwnedSessions len = %d, want 2", len(filtered))
+	}
+	if filtered[0].ID != "owned-1" || filtered[1].ID != "owned-2" {
+		t.Fatalf("filtered = %v, want owned-1 and owned-2", filtered)
+	}
+}
+
+func TestFilterOwnedSessions_EmptyKnownReturnsAll(t *testing.T) {
+	all := []AgentSessionInfo{
+		{ID: "session-1"},
+		{ID: "session-2"},
+	}
+	filtered := filterOwnedSessions(all, map[string]struct{}{})
+	if len(filtered) != 2 {
+		t.Fatalf("filterOwnedSessions with empty known = %d, want 2", len(filtered))
+	}
+}
+
+func TestSwitchToAgentSession_PreservesOldSession(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionManager(dir + "/sessions.json")
+	userKey := "user:alice"
+
+	s1 := sm.GetOrCreateActive(userKey)
+	s1.SetAgentInfo("agent-A", "claude", "session A")
+
+	known := sm.KnownAgentSessionIDs()
+	if _, ok := known["agent-A"]; !ok {
+		t.Fatal("agent-A should be in KnownAgentSessionIDs before switch")
+	}
+
+	s2 := sm.SwitchToAgentSession(userKey, "agent-B", "claude", "session B")
+	if s2.GetAgentSessionID() != "agent-B" {
+		t.Fatalf("switched session AgentSessionID = %q, want agent-B", s2.GetAgentSessionID())
+	}
+
+	known = sm.KnownAgentSessionIDs()
+	if _, ok := known["agent-A"]; !ok {
+		t.Fatal("agent-A should still be in KnownAgentSessionIDs after switch")
+	}
+	if _, ok := known["agent-B"]; !ok {
+		t.Fatal("agent-B should be in KnownAgentSessionIDs after switch")
+	}
+}
+
+func TestSwitchToAgentSession_ReusesExisting(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionManager(dir + "/sessions.json")
+	userKey := "user:bob"
+
+	s1 := sm.GetOrCreateActive(userKey)
+	s1.SetAgentInfo("agent-A", "claude", "session A")
+
+	sm.SwitchToAgentSession(userKey, "agent-B", "claude", "session B")
+
+	s3 := sm.SwitchToAgentSession(userKey, "agent-A", "claude", "session A")
+	if s3.ID != s1.ID {
+		t.Fatalf("switching back to agent-A should reuse session %s, got %s", s1.ID, s3.ID)
+	}
+}

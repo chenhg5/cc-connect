@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os/exec"
 	"strings"
 	"time"
@@ -199,6 +200,102 @@ func (q *QwenASR) Transcribe(ctx context.Context, audio []byte, format string, l
 	return strings.TrimSpace(result.Choices[0].Message.Content), nil
 }
 
+// GeminiSTT implements SpeechToText using the Google Gemini API.
+// Audio is sent as inline_data (base64) in the contents array against the
+// generateContent endpoint; the API key is sent via the x-goog-api-key header.
+type GeminiSTT struct {
+	APIKey  string
+	Model   string
+	BaseURL string // internal; defaults to Google API, overridable for testing
+	Client  *http.Client
+}
+
+func NewGeminiSTT(apiKey, model string) *GeminiSTT {
+	if model == "" {
+		model = "gemini-flash-latest"
+	}
+	return &GeminiSTT{
+		APIKey:  apiKey,
+		Model:   model,
+		BaseURL: "https://generativelanguage.googleapis.com/v1beta",
+		Client:  &http.Client{Timeout: 60 * time.Second},
+	}
+}
+
+func (g *GeminiSTT) Transcribe(ctx context.Context, audio []byte, format string, lang string) (string, error) {
+	b64 := base64.StdEncoding.EncodeToString(audio)
+	mime := formatToAudioMIME(format)
+
+	prompt := "Transcribe this audio accurately. Output only the transcribed text, nothing else."
+	if lang != "" {
+		prompt = fmt.Sprintf("Transcribe this audio accurately in %s. Output only the transcribed text, nothing else.", lang)
+	}
+
+	reqBody := map[string]any{
+		"contents": []map[string]any{
+			{
+				"parts": []map[string]any{
+					{
+						"inline_data": map[string]any{
+							"mime_type": mime,
+							"data":      b64,
+						},
+					},
+					{
+						"text": prompt,
+					},
+				},
+			},
+		},
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("gemini stt: marshal request: %w", err)
+	}
+
+	apiURL := fmt.Sprintf("%s/models/%s:generateContent", g.BaseURL, url.PathEscape(g.Model))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(jsonData))
+	if err != nil {
+		return "", fmt.Errorf("gemini stt: create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-goog-api-key", g.APIKey)
+
+	resp, err := g.Client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("gemini stt: request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("gemini stt: read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("gemini stt API %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Candidates []struct {
+			Content struct {
+				Parts []struct {
+					Text string `json:"text"`
+				} `json:"parts"`
+			} `json:"content"`
+		} `json:"candidates"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("gemini stt: parse response: %w", err)
+	}
+	if len(result.Candidates) == 0 || len(result.Candidates[0].Content.Parts) == 0 {
+		return "", fmt.Errorf("gemini stt: empty response")
+	}
+
+	return strings.TrimSpace(result.Candidates[0].Content.Parts[0].Text), nil
+}
+
 // ConvertAudioToMP3 uses ffmpeg to convert audio from unsupported formats to mp3.
 // Returns the mp3 bytes. If ffmpeg is not installed, returns an error.
 func ConvertAudioToMP3(audio []byte, srcFormat string) ([]byte, error) {
@@ -260,6 +357,40 @@ func ConvertAudioToOpus(ctx context.Context, audio []byte, srcFormat string) ([]
 
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("ffmpeg opus conversion failed: %w (stderr: %s)", err, stderr.String())
+	}
+	return stdout.Bytes(), nil
+}
+
+// ConvertAudioToAMR uses ffmpeg to convert audio to AMR-NB format.
+// AMR is a common voice codec for mobile messaging platforms.
+// Returns the AMR bytes. If ffmpeg is not installed, returns an error.
+func ConvertAudioToAMR(ctx context.Context, audio []byte, srcFormat string) ([]byte, error) {
+	ffmpegPath, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		return nil, fmt.Errorf("ffmpeg not found in PATH: install ffmpeg to enable audio conversion")
+	}
+
+	args := []string{
+		"-i", "pipe:0",
+		"-c:a", "amr_nb",
+		"-ar", "8000",   // 8kHz sample rate (AMR-NB standard)
+		"-ac", "1",      // mono
+		"-b:a", "12.2k", // 12.2 kbps bitrate (AMR-NB max)
+		"-f", "amr",
+		"-y",
+		"pipe:1",
+	}
+	if srcFormat == "amr" || srcFormat == "silk" {
+		args = append([]string{"-f", srcFormat}, args...)
+	}
+	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
+	cmd.Stdin = bytes.NewReader(audio)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("ffmpeg AMR conversion failed: %w (stderr: %s)", err, stderr.String())
 	}
 	return stdout.Bytes(), nil
 }

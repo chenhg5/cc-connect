@@ -111,20 +111,9 @@ func (qs *qoderSession) Send(prompt string, images []core.ImageAttachment, files
 
 func (qs *qoderSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
 	defer qs.wg.Done()
-	defer func() {
-		if err := cmd.Wait(); err != nil {
-			stderrMsg := strings.TrimSpace(stderrBuf.String())
-			if stderrMsg != "" {
-				slog.Error("qoderSession: process failed", "error", err, "stderr", truncStr(stderrMsg, 200))
-				evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
-				select {
-				case qs.events <- evt:
-				case <-qs.ctx.Done():
-					return
-				}
-			}
-		}
-	}()
+
+	var gotResult bool
+	var nonJSONLines []string
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
@@ -138,19 +127,73 @@ func (qs *qoderSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf 
 		var raw streamEvent
 		if err := json.Unmarshal([]byte(line), &raw); err != nil {
 			slog.Debug("qoderSession: non-JSON line", "line", truncStr(line, 100))
+			nonJSONLines = append(nonJSONLines, line)
 			continue
 		}
 
+		if raw.Type == "result" {
+			gotResult = true
+		}
 		qs.handleEvent(&raw)
 	}
 
-	if err := scanner.Err(); err != nil {
-		slog.Error("qoderSession: scanner error", "error", err)
-		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
+	scanErr := scanner.Err()
+	if scanErr != nil {
+		slog.Error("qoderSession: scanner error", "error", scanErr)
+	}
+
+	// Wait for process to exit.
+	exitErr := cmd.Wait()
+
+	// If we already got a result event, the turn completed normally.
+	if gotResult {
+		if exitErr != nil {
+			stderrMsg := strings.TrimSpace(stderrBuf.String())
+			if stderrMsg != "" {
+				slog.Warn("qoderSession: process exited with error after result", "error", exitErr, "stderr", truncStr(stderrMsg, 200))
+			}
+		}
+		return
+	}
+
+	// No result event was received — emit a fallback to prevent the engine
+	// from hanging forever on the events channel.
+	if len(nonJSONLines) > 0 {
+		// qodercli produced plain text instead of stream-json; forward it
+		// as a result so the user at least sees the response.
+		slog.Warn("qoderSession: no result event, falling back to plain-text output", "lines", len(nonJSONLines))
+		text := strings.Join(nonJSONLines, "\n")
+		evt := core.Event{Type: core.EventResult, Content: text, SessionID: qs.CurrentSessionID(), Done: true}
 		select {
 		case qs.events <- evt:
 		case <-qs.ctx.Done():
-			return
+		}
+	} else if exitErr != nil {
+		// Process failed with no usable output.
+		stderrMsg := strings.TrimSpace(stderrBuf.String())
+		if stderrMsg == "" {
+			stderrMsg = exitErr.Error()
+		}
+		slog.Error("qoderSession: process failed with no result", "error", exitErr, "stderr", truncStr(stderrMsg, 200))
+		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
+		select {
+		case qs.events <- evt:
+		case <-qs.ctx.Done():
+		}
+	} else if scanErr != nil {
+		// Scanner error with no output.
+		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", scanErr)}
+		select {
+		case qs.events <- evt:
+		case <-qs.ctx.Done():
+		}
+	} else {
+		// Process exited cleanly but produced nothing at all.
+		slog.Warn("qoderSession: process exited with no output and no result event")
+		evt := core.Event{Type: core.EventResult, Content: "", SessionID: qs.CurrentSessionID(), Done: true}
+		select {
+		case qs.events <- evt:
+		case <-qs.ctx.Done():
 		}
 	}
 }
