@@ -45,6 +45,7 @@ cc-connect 完整功能使用指南。
 | `/allow <工具名>` | 预授权工具 |
 | `/reasoning [等级]` | 查看或切换推理强度（Codex）|
 | `/mode [名称]` | 查看或切换权限模式 |
+| `/flush` | 在 collect/manual 模式下立即提交缓冲消息 |
 | `/stop` | 停止当前执行 |
 | `/help` | 显示可用命令 |
 
@@ -59,6 +60,25 @@ reset_on_idle_mins = 60
 ```
 
 开启后，如果用户长时间未发消息，下一条普通消息会自动进入一个新的会话；旧会话仍会保留在 `/list` 中，不会被删除。
+
+也可以按项目启用消息缓冲模式：
+
+```toml
+[[projects]]
+name = "demo"
+
+[projects.message_queue]
+mode = "collect"         # immediate | collect | manual
+collect_wait_ms = 3000
+```
+
+- `immediate`：当前默认行为，每条消息立刻开始处理
+- `collect`：收集短时间内连续发出的消息，安静窗口结束后自动提交
+- `manual`：先缓存消息，直到你显式发送 `/flush`
+
+也可以通过 `/config` 动态调整，例如：
+- `/config messages.mode collect`
+- `/config messages.collect_wait_ms 3000`
 
 ---
 

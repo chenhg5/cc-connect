@@ -38,6 +38,12 @@ func (s *Session) TryLock() bool {
 	return true
 }
 
+func (s *Session) IsBusy() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.busy
+}
+
 func (s *Session) Unlock() {
 	s.unlock(true)
 }

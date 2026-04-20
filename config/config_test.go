@@ -2047,6 +2047,70 @@ func TestGetProjectConfigDetails(t *testing.T) {
 	}
 }
 
+func TestConfigValidate_MessageQueue(t *testing.T) {
+	cfg := Config{
+		Projects: []ProjectConfig{
+			func() ProjectConfig {
+				p := validProject("demo")
+				wait := 0
+				p.MessageQueue = MessageQueueConfig{
+					Mode:          "collect",
+					CollectWaitMs: &wait,
+				}
+				return p
+			}(),
+		},
+	}
+
+	err := cfg.validate()
+	assertErrContains(t, err, `projects[0].message_queue.collect_wait_ms must be > 0`)
+}
+
+func TestSaveProjectMessageQueueConfig(t *testing.T) {
+	configPath := writeConfigFixture(t, baseConfigTOML)
+	patchConfigPath(t, configPath)
+
+	mode := "manual"
+	wait := 4500
+	maxMsgs := 7
+	maxBytes := 8192
+	if err := SaveProjectMessageQueueConfig("demo", &mode, &wait, &maxMsgs, &maxBytes); err != nil {
+		t.Fatalf("SaveProjectMessageQueueConfig: %v", err)
+	}
+
+	cfg := readConfigFixture(t, configPath)
+	if len(cfg.Projects) != 1 {
+		t.Fatalf("len(projects) = %d, want 1", len(cfg.Projects))
+	}
+	proj := cfg.Projects[0]
+	if proj.MessageQueue.Mode != "manual" {
+		t.Fatalf("message_queue.mode = %q, want manual", proj.MessageQueue.Mode)
+	}
+	if proj.MessageQueue.CollectWaitMs == nil || *proj.MessageQueue.CollectWaitMs != 4500 {
+		t.Fatalf("message_queue.collect_wait_ms = %#v, want 4500", proj.MessageQueue.CollectWaitMs)
+	}
+	if proj.MessageQueue.CollectMaxMessages == nil || *proj.MessageQueue.CollectMaxMessages != 7 {
+		t.Fatalf("message_queue.collect_max_messages = %#v, want 7", proj.MessageQueue.CollectMaxMessages)
+	}
+	if proj.MessageQueue.CollectMaxBytes == nil || *proj.MessageQueue.CollectMaxBytes != 8192 {
+		t.Fatalf("message_queue.collect_max_bytes = %#v, want 8192", proj.MessageQueue.CollectMaxBytes)
+	}
+
+	details := GetProjectConfigDetails("demo")
+	if details["messages.mode"] != "manual" {
+		t.Fatalf("details[messages.mode] = %#v, want manual", details["messages.mode"])
+	}
+	if details["messages.collect_wait_ms"] != 4500 {
+		t.Fatalf("details[messages.collect_wait_ms] = %#v, want 4500", details["messages.collect_wait_ms"])
+	}
+	if details["messages.collect_max_messages"] != 7 {
+		t.Fatalf("details[messages.collect_max_messages] = %#v, want 7", details["messages.collect_max_messages"])
+	}
+	if details["messages.collect_max_bytes"] != 8192 {
+		t.Fatalf("details[messages.collect_max_bytes] = %#v, want 8192", details["messages.collect_max_bytes"])
+	}
+}
+
 func TestAddPlatformToProject_NewProjectWithAgentTypeAndWorkDir(t *testing.T) {
 	configPath := writeConfigFixture(t, feishuConfigFixture)
 	patchConfigPath(t, configPath)
