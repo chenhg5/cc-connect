@@ -69,7 +69,7 @@ name = "demo"
 
 [projects.message_queue]
 mode = "collect"         # immediate | collect | manual
-collect_wait_ms = 3000
+collect_wait_ms = 5000
 ```
 
 - `immediate`：当前默认行为，每条消息立刻开始处理
@@ -78,7 +78,7 @@ collect_wait_ms = 3000
 
 也可以通过 `/config` 动态调整，例如：
 - `/config messages.mode collect`
-- `/config messages.collect_wait_ms 3000`
+- `/config messages.collect_wait_ms 5000`
 
 ---
 

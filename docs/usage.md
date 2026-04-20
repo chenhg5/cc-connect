@@ -67,7 +67,7 @@ name = "demo"
 
 [projects.message_queue]
 mode = "collect"         # immediate | collect | manual
-collect_wait_ms = 3000
+collect_wait_ms = 5000
 ```
 
 - `immediate`: current behavior, each message starts processing right away
@@ -76,7 +76,7 @@ collect_wait_ms = 3000
 
 Runtime changes are available through `/config`, for example:
 - `/config messages.mode collect`
-- `/config messages.collect_wait_ms 3000`
+- `/config messages.collect_wait_ms 5000`
 
 ---
 

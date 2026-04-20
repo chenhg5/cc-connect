@@ -83,7 +83,7 @@ type MessageQueueCfg struct {
 func DefaultMessageQueueCfg() MessageQueueCfg {
 	return MessageQueueCfg{
 		Mode:            messageQueueModeImmediate,
-		CollectWait:     3 * time.Second,
+		CollectWait:     5 * time.Second,
 		CollectMaxMsgs:  20,
 		CollectMaxBytes: 256 * 1024,
 	}
@@ -708,7 +708,7 @@ func (e *Engine) SetMessageQueueConfig(cfg MessageQueueCfg) {
 		cfg.Mode = messageQueueModeImmediate
 	}
 	if cfg.CollectWait <= 0 {
-		cfg.CollectWait = 3 * time.Second
+		cfg.CollectWait = 5 * time.Second
 	}
 	if cfg.CollectMaxMsgs <= 0 {
 		cfg.CollectMaxMsgs = 20
