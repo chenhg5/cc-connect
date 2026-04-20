@@ -326,6 +326,10 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 			return p.onBotMenu(event)
 		})
 
+	if p.useInteractiveCard {
+		slog.Info(p.platformName+": interactive card mode enabled, ensure card.action.trigger event is subscribed in Feishu console")
+	}
+
 	if p.shouldUseWebhookMode() {
 		return p.startWebhookMode()
 	}

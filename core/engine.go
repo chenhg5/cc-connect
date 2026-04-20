@@ -2431,6 +2431,10 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 
 	if newID := agentSession.CurrentSessionID(); newID != "" {
 		if session.CompareAndSetAgentSessionID(newID, agent.Name()) {
+			pendingName := session.GetName()
+			if pendingName != "" && pendingName != "session" && pendingName != "default" {
+				sessions.SetSessionName(newID, pendingName)
+			}
 			sessions.Save()
 		}
 	}
@@ -2917,7 +2921,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// to not be persisted to disk, breaking session resume on next startup.
 			if state != nil && state.agentSession != nil {
 				if currentID := state.agentSession.CurrentSessionID(); currentID != "" {
-					session.SetAgentSessionID(currentID, e.agent.Name())
+					if session.CompareAndSetAgentSessionID(currentID, e.agent.Name()) {
+						pendingName := session.GetName()
+						if pendingName != "" && pendingName != "session" && pendingName != "default" {
+							sessions.SetSessionName(currentID, pendingName)
+						}
+					}
 					sessions.Save()
 				}
 			}
@@ -6823,6 +6832,17 @@ func (e *Engine) cmdProviderRemove(p Platform, msg *Message, switcher ProviderSw
 	}
 
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgProviderRemoved), name))
+}
+
+// resetAllSessions resets the agent session ID and clears history for all
+// active sessions. Used when the provider changes via the management API
+// (where there is no single session key context).
+func (e *Engine) resetAllSessions() {
+	for _, s := range e.sessions.AllSessions() {
+		s.SetAgentSessionID("", "")
+		s.ClearHistory()
+	}
+	e.sessions.Save()
 }
 
 func (e *Engine) switchProvider(p Platform, msg *Message, switcher ProviderSwitcher, name string) {
@@ -10968,8 +10988,14 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 		}
 	}
 
-	if session.CompareAndSetAgentSessionID(agentSession.CurrentSessionID(), e.agent.Name()) {
-		e.sessions.Save()
+	if newID := agentSession.CurrentSessionID(); newID != "" {
+		if session.CompareAndSetAgentSessionID(newID, e.agent.Name()) {
+			pendingName := session.GetName()
+			if pendingName != "" && pendingName != "session" && pendingName != "default" {
+				e.sessions.SetSessionName(newID, pendingName)
+			}
+			e.sessions.Save()
+		}
 	}
 
 	if err := agentSession.Send(message, nil, nil); err != nil {
@@ -10986,6 +11012,10 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 			}
 			if event.SessionID != "" {
 				if session.CompareAndSetAgentSessionID(event.SessionID, e.agent.Name()) {
+					pendingName := session.GetName()
+					if pendingName != "" && pendingName != "session" && pendingName != "default" {
+						e.sessions.SetSessionName(event.SessionID, pendingName)
+					}
 					e.sessions.Save()
 				}
 			}
@@ -11004,7 +11034,12 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 		case EventResult:
 			// Use agentSession.CurrentSessionID() for the same reason as above.
 			if currentID := agentSession.CurrentSessionID(); currentID != "" {
-				session.SetAgentSessionID(currentID, e.agent.Name())
+				if session.CompareAndSetAgentSessionID(currentID, e.agent.Name()) {
+					pendingName := session.GetName()
+					if pendingName != "" && pendingName != "session" && pendingName != "default" {
+						e.sessions.SetSessionName(currentID, pendingName)
+					}
+				}
 				e.sessions.Save()
 			}
 			resp := event.Content

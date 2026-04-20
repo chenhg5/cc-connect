@@ -513,6 +513,133 @@ func TestSaveAgentModel(t *testing.T) {
 	}
 }
 
+const providerConfigWithCommentsTOML = `# This is my config file
+# Very important - do not lose this!
+custom_top = "keep_me"
+
+[[projects]]
+name = "demo"
+work_dir = "/tmp/demo" # inline comment
+
+[projects.agent]
+type = "claudecode"
+
+[projects.agent.options]
+mode = "default"
+provider = "primary"
+custom_option = "still_here" # keep inline comment
+
+[[projects.agent.providers]]
+name = "primary"
+api_key = "sk-primary"
+
+[[projects.agent.providers]]
+name = "backup"
+api_key = "sk-backup"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+token = "test-token"
+`
+
+func TestSaveActiveProvider_PreservesCommentsAndUnknownFields(t *testing.T) {
+	writeTestConfig(t, providerConfigWithCommentsTOML)
+
+	if err := SaveActiveProvider("demo", "backup"); err != nil {
+		t.Fatalf("SaveActiveProvider() error: %v", err)
+	}
+
+	content, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	text := string(content)
+
+	if !strings.Contains(text, "# This is my config file") {
+		t.Fatalf("expected top comment to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, "# Very important - do not lose this!") {
+		t.Fatalf("expected second comment to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, `custom_top = "keep_me"`) {
+		t.Fatalf("expected unknown top-level field to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, `custom_option = "still_here"`) {
+		t.Fatalf("expected unknown options field to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, "keep inline comment") {
+		t.Fatalf("expected inline comment to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, `mode = "default"`) {
+		t.Fatalf("expected mode to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, `provider = "backup"`) {
+		t.Fatalf("expected provider to be updated to backup, got:\n%s", text)
+	}
+	if !strings.Contains(text, `work_dir = "/tmp/demo"`) {
+		t.Fatalf("expected work_dir to be preserved, got:\n%s", text)
+	}
+
+	cfg := readTestConfig(t)
+	active, _ := cfg.Projects[0].Agent.Options["provider"].(string)
+	if active != "backup" {
+		t.Fatalf("active provider = %q, want backup", active)
+	}
+}
+
+func TestSaveAgentModel_PreservesCommentsAndUnknownFields(t *testing.T) {
+	writeTestConfig(t, providerConfigWithCommentsTOML)
+
+	if err := SaveAgentModel("demo", "gpt-5.4"); err != nil {
+		t.Fatalf("SaveAgentModel() error: %v", err)
+	}
+
+	content, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	text := string(content)
+
+	if !strings.Contains(text, "# This is my config file") {
+		t.Fatalf("expected top comment to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, `custom_option = "still_here"`) {
+		t.Fatalf("expected unknown options field to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, `provider = "primary"`) {
+		t.Fatalf("expected provider to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, `model = "gpt-5.4"`) {
+		t.Fatalf("expected model to be set, got:\n%s", text)
+	}
+}
+
+func TestSaveProviderModel_PreservesCommentsAndUnknownFields(t *testing.T) {
+	writeTestConfig(t, providerConfigWithCommentsTOML)
+
+	if err := SaveProviderModel("demo", "primary", "gpt-5.4"); err != nil {
+		t.Fatalf("SaveProviderModel() error: %v", err)
+	}
+
+	content, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	text := string(content)
+
+	if !strings.Contains(text, "# This is my config file") {
+		t.Fatalf("expected top comment to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, `custom_option = "still_here"`) {
+		t.Fatalf("expected unknown options field to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, `model = "gpt-5.4"`) {
+		t.Fatalf("expected model to be set in provider, got:\n%s", text)
+	}
+}
+
 func TestCommandConfig_AddAndRemove(t *testing.T) {
 	writeTestConfig(t, baseConfigTOML)
 
