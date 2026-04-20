@@ -322,9 +322,18 @@ func TestDownloadAttachmentFiles_Success(t *testing.T) {
 }
 
 func TestDownloadAttachmentFiles_SkipsImages(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("data"))
+	}))
+	defer server.Close()
+
+	origClient := core.HTTPClient
+	t.Cleanup(func() { core.HTTPClient = origClient })
+	core.HTTPClient = server.Client()
+
 	attachments := []attachment{
-		{ContentType: "image/png", URL: "http://example.com/image.png"},
-		{ContentType: "application/pdf", URL: "http://example.com/file.pdf"},
+		{ContentType: "image/png", URL: server.URL + "/image.png"},
+		{ContentType: "application/pdf", URL: server.URL + "/file.pdf"},
 	}
 	// Verify that downloadAttachmentFiles skips image content types
 	files := downloadAttachmentFiles(attachments)
