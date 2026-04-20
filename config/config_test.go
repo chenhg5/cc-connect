@@ -640,6 +640,214 @@ func TestSaveProviderModel_PreservesCommentsAndUnknownFields(t *testing.T) {
 	}
 }
 
+func TestSaveLanguage_PreservesComments(t *testing.T) {
+	writeTestConfig(t, providerConfigWithCommentsTOML)
+
+	if err := SaveLanguage("zh"); err != nil {
+		t.Fatalf("SaveLanguage() error: %v", err)
+	}
+
+	content, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	text := string(content)
+
+	if !strings.Contains(text, "# This is my config file") {
+		t.Fatalf("expected top comment to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, `custom_option = "still_here"`) {
+		t.Fatalf("expected unknown options field to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, `language = "zh"`) {
+		t.Fatalf("expected language to be set, got:\n%s", text)
+	}
+
+	cfg := readTestConfig(t)
+	if cfg.Language != "zh" {
+		t.Fatalf("Language = %q, want zh", cfg.Language)
+	}
+}
+
+func TestSaveDisplayConfig_PreservesComments(t *testing.T) {
+	configWithDisplay := providerConfigWithCommentsTOML + `
+[display]
+# display settings below
+thinking_messages = true
+custom_display = "keep" # also keep
+`
+	writeTestConfig(t, configWithDisplay)
+
+	thinking := 200
+	toolShow := false
+	if err := SaveDisplayConfig(nil, &thinking, nil, &toolShow); err != nil {
+		t.Fatalf("SaveDisplayConfig() error: %v", err)
+	}
+
+	content, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	text := string(content)
+
+	if !strings.Contains(text, "# This is my config file") {
+		t.Fatalf("expected top comment to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, "# display settings below") {
+		t.Fatalf("expected display comment to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, `custom_display = "keep"`) {
+		t.Fatalf("expected unknown display field to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, `thinking_max_len = 200`) {
+		t.Fatalf("expected thinking_max_len to be set, got:\n%s", text)
+	}
+	if !strings.Contains(text, `tool_messages = false`) {
+		t.Fatalf("expected tool_messages to be set, got:\n%s", text)
+	}
+}
+
+func TestSaveTTSMode_PreservesComments(t *testing.T) {
+	configWithTTS := providerConfigWithCommentsTOML + `
+[tts]
+# tts config
+tts_mode = "auto"
+`
+	writeTestConfig(t, configWithTTS)
+
+	if err := SaveTTSMode("always"); err != nil {
+		t.Fatalf("SaveTTSMode() error: %v", err)
+	}
+
+	content, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	text := string(content)
+
+	if !strings.Contains(text, "# This is my config file") {
+		t.Fatalf("expected top comment to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, "# tts config") {
+		t.Fatalf("expected tts comment to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, `tts_mode = "always"`) {
+		t.Fatalf("expected tts_mode to be updated, got:\n%s", text)
+	}
+}
+
+const multiProjectConfigTOML = `# multi-project config
+[[projects]]
+name = "alpha"
+work_dir = "/tmp/alpha"
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+provider = "openai"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+token = "alpha-token"
+
+[[projects]]
+name = "beta"
+work_dir = "/tmp/beta"
+
+[projects.agent]
+type = "claudecode"
+
+[projects.agent.options]
+provider = "anthropic"
+
+[[projects.platforms]]
+type = "feishu"
+
+[projects.platforms.options]
+app_id = "beta-app"
+`
+
+func TestSaveActiveProvider_MultiProject(t *testing.T) {
+	writeTestConfig(t, multiProjectConfigTOML)
+
+	if err := SaveActiveProvider("beta", "openai"); err != nil {
+		t.Fatalf("SaveActiveProvider() error: %v", err)
+	}
+
+	content, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	text := string(content)
+
+	if !strings.Contains(text, "# multi-project config") {
+		t.Fatalf("expected top comment preserved, got:\n%s", text)
+	}
+
+	cfg := readTestConfig(t)
+	alphaProvider, _ := cfg.Projects[0].Agent.Options["provider"].(string)
+	betaProvider, _ := cfg.Projects[1].Agent.Options["provider"].(string)
+	if alphaProvider != "openai" {
+		t.Fatalf("alpha provider = %q, want openai (untouched)", alphaProvider)
+	}
+	if betaProvider != "openai" {
+		t.Fatalf("beta provider = %q, want openai (updated)", betaProvider)
+	}
+}
+
+const globalProviderRefConfigTOML = `# global provider refs
+[[providers]]
+name = "shared-openai"
+api_key = "sk-shared"
+model = "gpt-4o"
+
+[[projects]]
+name = "demo"
+work_dir = "/tmp/demo"
+
+[projects.agent]
+type = "codex"
+provider_refs = ["shared-openai"]
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+token = "demo-token"
+`
+
+func TestSaveProviderModel_GlobalProviderRef(t *testing.T) {
+	writeTestConfig(t, globalProviderRefConfigTOML)
+
+	if err := SaveProviderModel("demo", "shared-openai", "gpt-5"); err != nil {
+		t.Fatalf("SaveProviderModel() error: %v", err)
+	}
+
+	content, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	text := string(content)
+
+	if !strings.Contains(text, "# global provider refs") {
+		t.Fatalf("expected comment preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, `model = "gpt-5"`) {
+		t.Fatalf("expected model updated in global provider, got:\n%s", text)
+	}
+	if !strings.Contains(text, `api_key = "sk-shared"`) {
+		t.Fatalf("expected api_key preserved, got:\n%s", text)
+	}
+
+	cfg := readTestConfig(t)
+	if cfg.Providers[0].Model != "gpt-5" {
+		t.Fatalf("global provider model = %q, want gpt-5", cfg.Providers[0].Model)
+	}
+}
+
 func TestCommandConfig_AddAndRemove(t *testing.T) {
 	writeTestConfig(t, baseConfigTOML)
 
