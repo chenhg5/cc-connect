@@ -1,0 +1,93 @@
+name: Test Build
+
+on:
+  push:
+    tags:
+      - 'test-*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build linux/amd64
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Build web assets
+        working-directory: web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+        env:
+          GOPROXY: https://proxy.golang.org,direct
+          GOSUMDB: sum.golang.org
+
+      - name: Get version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+
+      - name: Build binary
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          BASE_NAME="cc-connect-${VERSION}-${GOOS}-${GOARCH}"
+          OUTPUT_NAME="$BASE_NAME"
+          COMMIT=$(git rev-parse --short HEAD)
+          BUILD_TIME=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+          LDFLAGS="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.buildTime=${BUILD_TIME}"
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go build -ldflags "$LDFLAGS" -o "$OUTPUT_NAME" ./cmd/cc-connect
+          tar czf "${BASE_NAME}.tar.gz" "$OUTPUT_NAME"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-linux-amd64
+          path: cc-connect-*.tar.gz
+
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create test release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Test Build: ${{ github.ref_name }}"
+          prerelease: true
+          files: artifacts/**/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
