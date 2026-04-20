@@ -38,6 +38,7 @@ type Agent struct {
 	providers       []core.ProviderConfig
 	activeIdx       int // -1 = no provider set
 	sessionEnv      []string
+	agentEnv        []string // env vars from config [projects.agent.options.env]
 	mu              sync.RWMutex
 }
 
@@ -72,6 +73,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		appServerURL:    appServerURL,
 		codexHome:       strings.TrimSpace(codexHome),
 		activeIdx:       -1,
+		agentEnv:        core.AgentEnvFromOpts(opts),
 	}, nil
 }
 
@@ -322,6 +324,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	codexHome := a.codexHome
 	extraEnv := a.providerEnvLocked()
 	extraEnv = append(extraEnv, a.sessionEnv...)
+	extraEnv = append(extraEnv, a.agentEnv...)
 	var baseURL string
 	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
 		if m := a.providers[a.activeIdx].Model; m != "" {

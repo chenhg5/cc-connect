@@ -37,6 +37,7 @@ type Agent struct {
 	providers  []core.ProviderConfig
 	activeIdx  int
 	sessionEnv []string
+	agentEnv   []string // env vars from config [projects.agent.options.env]
 	mu         sync.RWMutex
 }
 
@@ -62,6 +63,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		mode:      mode,
 		cmd:       cmd,
 		activeIdx: -1,
+		agentEnv:  core.AgentEnvFromOpts(opts),
 	}, nil
 }
 
@@ -123,6 +125,7 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	cmd := a.cmd
 	extraEnv := a.providerEnvLocked()
 	extraEnv = append(extraEnv, a.sessionEnv...)
+	extraEnv = append(extraEnv, a.agentEnv...)
 	a.mu.Unlock()
 
 	if models := fetchModelsFromAgentCLI(ctx, cmd, extraEnv); len(models) > 0 {
@@ -195,6 +198,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	cmd := a.cmd
 	extraEnv := a.providerEnvLocked()
 	extraEnv = append(extraEnv, a.sessionEnv...)
+	extraEnv = append(extraEnv, a.agentEnv...)
 	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
 		if m := a.providers[a.activeIdx].Model; m != "" {
 			model = m

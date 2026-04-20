@@ -566,6 +566,12 @@ level = "info" # debug, info, warn, error
 # [projects.agent.options]
 # mode = "yolo"  # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassPermissions" (yolo)
 #
+# Optional: inject environment variables into agent processes / 可选：向 Agent 进程注入环境变量
+# [projects.agent.options.env]
+# HTTP_PROXY = "http://127.0.0.1:7890"
+# HTTPS_PROXY = "http://127.0.0.1:7890"
+# MY_CUSTOM_VAR = "value"
+#
 # [[projects.platforms]]
 # type = "slack"
 # [projects.platforms.options]

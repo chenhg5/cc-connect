@@ -23,6 +23,7 @@ type Agent struct {
 	model      string
 	mode       string // "default" | "yolo"
 	sessionEnv []string
+	agentEnv   []string // env vars from config [projects.agent.options.env]
 	mu         sync.Mutex
 }
 
@@ -42,7 +43,8 @@ func New(opts map[string]any) (core.Agent, error) {
 	return &Agent{
 		workDir: workDir,
 		model:   model,
-		mode:    mode,
+		mode:     mode,
+		agentEnv: core.AgentEnvFromOpts(opts),
 	}, nil
 }
 
@@ -106,6 +108,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	mode := a.mode
 	model := a.model
 	extraEnv := append([]string{}, a.sessionEnv...)
+	extraEnv = append(extraEnv, a.agentEnv...)
 	a.mu.Unlock()
 
 	return newQoderSession(ctx, a.workDir, model, mode, sessionID, extraEnv)

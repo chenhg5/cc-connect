@@ -47,6 +47,7 @@ type Agent struct {
 	providers        []core.ProviderConfig
 	activeIdx        int // -1 = no provider set
 	sessionEnv       []string
+	agentEnv         []string // env vars from config [projects.agent.options.env]
 	routerURL        string // Claude Code Router URL (e.g., "http://127.0.0.1:3456")
 	routerAPIKey     string // Claude Code Router API key (optional)
 
@@ -198,6 +199,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		disallowedTools:  disallowedTools,
 		maxContextTokens: maxContextTokens,
 		activeIdx:        -1,
+		agentEnv:         core.AgentEnvFromOpts(opts),
 		routerURL:        routerURL,
 		routerAPIKey:     routerAPIKey,
 		spawnOpts:        spawnOpts,
@@ -951,6 +953,7 @@ func (a *Agent) providerEnvLocked() []string {
 func (a *Agent) runtimeEnvLocked() []string {
 	env := append([]string(nil), a.providerEnvLocked()...)
 	env = append(env, a.sessionEnv...)
+	env = append(env, a.agentEnv...)
 
 	if a.routerURL != "" {
 		env = append(env, "ANTHROPIC_BASE_URL="+a.routerURL)
