@@ -1811,6 +1811,14 @@ func bufferedMessageBytes(m bufferedMessage) int {
 	return total
 }
 
+func bufferedMessagesBytes(buffered []bufferedMessage) int {
+	total := 0
+	for _, item := range buffered {
+		total += bufferedMessageBytes(item)
+	}
+	return total
+}
+
 func (e *Engine) bufferMessage(interactiveKey string, base pendingCollectedMessages, bm bufferedMessage) bool {
 	e.collectMu.Lock()
 	state, ok := e.collectStates[interactiveKey]
@@ -1879,6 +1887,27 @@ func (e *Engine) flushBufferedMessages(interactiveKey string, trigger *bufferedM
 	merged := mergeBufferedMessages(anchor, buffered)
 
 	if !state.session.TryLock() {
+		e.collectMu.Lock()
+		current, exists := e.collectStates[interactiveKey]
+		if !exists || current == nil {
+			current = &pendingCollectedMessages{
+				session:        state.session,
+				sessions:       state.sessions,
+				agent:          state.agent,
+				interactiveKey: state.interactiveKey,
+				workspaceDir:   state.workspaceDir,
+				mode:           state.mode,
+			}
+			e.collectStates[interactiveKey] = current
+		}
+		current.messages = append(buffered, current.messages...)
+		current.totalBytes += bufferedMessagesBytes(buffered)
+		if current.mode == messageQueueModeCollect && current.timer == nil {
+			current.timer = time.AfterFunc(e.messageQueueCfg.CollectWait, func() {
+				e.flushBufferedMessages(interactiveKey, nil)
+			})
+		}
+		e.collectMu.Unlock()
 		return false
 	}
 	e.ensureInteractiveStateForQueueing(interactiveKey, anchor.platform, merged.ReplyCtx)

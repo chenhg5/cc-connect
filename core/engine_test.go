@@ -6884,6 +6884,75 @@ func TestMessageQueueManual_FlushSendsBufferedMessages(t *testing.T) {
 	}
 }
 
+func TestMessageQueueFlush_RestoresBufferOnTryLockFailure(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newResultAgentSession("restored-ok")
+	agent := &resultAgent{session: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetMessageQueueConfig(MessageQueueCfg{
+		Mode:            messageQueueModeCollect,
+		CollectWait:     5 * time.Second,
+		CollectMaxMsgs:  20,
+		CollectMaxBytes: 256 * 1024,
+	})
+
+	interactiveKey := "test:user1"
+	base := pendingCollectedMessages{
+		session:        e.sessions.GetOrCreateActive(interactiveKey),
+		sessions:       e.sessions,
+		agent:          agent,
+		interactiveKey: interactiveKey,
+		workspaceDir:   "",
+		mode:           messageQueueModeCollect,
+	}
+	e.bufferMessage(interactiveKey, base, bufferedMessage{
+		platform: p,
+		msg: Message{
+			SessionKey: interactiveKey,
+			UserID:     "user1",
+			Content:    "first",
+			ReplyCtx:   "ctx-1",
+		},
+	})
+
+	session := e.sessions.GetOrCreateActive(interactiveKey)
+	if !session.TryLock() {
+		t.Fatal("expected TryLock to succeed")
+	}
+	if e.flushBufferedMessages(interactiveKey, nil) {
+		t.Fatal("expected flush to fail while session is locked")
+	}
+	session.Unlock()
+
+	e.collectMu.Lock()
+	restored := e.collectStates[interactiveKey]
+	e.collectMu.Unlock()
+	if restored == nil || len(restored.messages) != 1 {
+		t.Fatalf("expected buffered messages to be restored, state=%#v", restored)
+	}
+
+	if !e.flushBufferedMessages(interactiveKey, nil) {
+		t.Fatal("expected flush to succeed after unlocking session")
+	}
+
+	deadline := time.After(2 * time.Second)
+	for {
+		if len(sess.SentPrompts()) == 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for restored flush, prompts=%v", sess.SentPrompts())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	if got := sess.SentPrompts()[0]; got != "first" {
+		t.Fatalf("restored prompt = %q, want %q", got, "first")
+	}
+}
+
 func TestCmdCompress_NoSession_RepliesNoSession(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	agent := &stubCompressorAgent{cmd: "/compact"}

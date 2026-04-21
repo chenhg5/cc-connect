@@ -283,7 +283,7 @@ type ObserveConfig struct {
 // MessageQueueConfig controls optional pre-execution message aggregation.
 type MessageQueueConfig struct {
 	Mode               string `toml:"mode,omitempty"`                 // immediate | collect | manual
-	CollectWaitMs      *int   `toml:"collect_wait_ms,omitempty"`      // quiet window for collect mode; default 3000
+	CollectWaitMs      *int   `toml:"collect_wait_ms,omitempty"`      // quiet window for collect mode; default 5000
 	CollectMaxMessages *int   `toml:"collect_max_messages,omitempty"` // max buffered messages before immediate flush; default 20
 	CollectMaxBytes    *int   `toml:"collect_max_bytes,omitempty"`    // max buffered bytes before immediate flush; default 262144
 }
