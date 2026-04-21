@@ -423,6 +423,172 @@ func TestRealCodex_DynamicFilterToggle(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Full end-to-end: real agent starts, processes messages, creates sessions.
+// Requires API keys — these tests take 30-60s each.
+// ---------------------------------------------------------------------------
+
+// TestE2E_Codex_FullSessionLifecycle exercises the complete workflow with a
+// real Codex agent:
+//  1. Send message → wait for agent reply → /list shows 1 session
+//  2. /new "my-test-session" → new session created
+//  3. Send message in new session → wait for agent reply
+//  4. /list → both sessions visible, session name "my-test-session" appears
+//
+// This proves the full pipeline: real CLI process → event parsing → session
+// tracking → filter logic → /list output.
+func TestE2E_Codex_FullSessionLifecycle(t *testing.T) {
+	e, mp, _, cleanup := setupIntegrationEngine(t, "codex")
+	defer cleanup()
+
+	uk := sessionKey("e2e-codex-user")
+	send := func(content string) {
+		e.ReceiveMessage(mp, &core.Message{
+			SessionKey: uk, Platform: "mock", UserID: "e2e-codex-user",
+			UserName: "tester", Content: content, ReplyCtx: "ctx",
+		})
+	}
+
+	// ── Step 1: first message → agent replies ──
+	t.Log("step 1: sending first message to codex")
+	send("respond with exactly: STEP1_OK")
+	_, ok := waitForMessageContaining(mp, "STEP1_OK", 60*time.Second)
+	if !ok {
+		t.Fatalf("step 1: agent did not reply; got: %v", mp.getSent())
+	}
+	t.Log("step 1: agent replied")
+
+	// ── Step 2: /list → should show at least 1 session ──
+	mp.clear()
+	send("/list")
+	msgs1, ok := waitForMessages(mp, 1, 10*time.Second)
+	if !ok {
+		t.Fatalf("step 2: no /list reply")
+	}
+	list1 := joinMsgContent(msgs1)
+	count1 := strings.Count(list1, "msgs")
+	if count1 < 1 {
+		t.Fatalf("step 2: /list should show >= 1 session, got %d\n%s", count1, list1)
+	}
+	t.Logf("step 2: /list shows %d session(s)", count1)
+
+	// ── Step 3: /new with custom name ──
+	mp.clear()
+	send("/new my-test-session")
+	_, ok = waitForMessageContaining(mp, "new", 10*time.Second)
+	if !ok {
+		t.Logf("step 3: /new response: %v", mp.getSent())
+	}
+	t.Log("step 3: /new executed")
+
+	// ── Step 4: send message in new session → agent replies ──
+	mp.clear()
+	send("respond with exactly: STEP4_OK")
+	_, ok = waitForMessageContaining(mp, "STEP4_OK", 60*time.Second)
+	if !ok {
+		t.Fatalf("step 4: agent did not reply in new session; got: %v", mp.getSent())
+	}
+	t.Log("step 4: agent replied in new session")
+
+	// ── Step 5: /list → both sessions visible ──
+	mp.clear()
+	send("/list")
+	msgs2, ok := waitForMessages(mp, 1, 10*time.Second)
+	if !ok {
+		t.Fatalf("step 5: no /list reply")
+	}
+	list2 := joinMsgContent(msgs2)
+	count2 := strings.Count(list2, "msgs")
+	if count2 < 2 {
+		t.Fatalf("step 5: /list should show >= 2 sessions after /new + message, got %d\n%s", count2, list2)
+	}
+	t.Logf("step 5: /list shows %d sessions", count2)
+
+	// ── Step 6: verify session name ──
+	if !strings.Contains(list2, "my-test-session") {
+		t.Errorf("step 6: /list should show session name 'my-test-session'\n%s", list2)
+	} else {
+		t.Log("step 6: session name 'my-test-session' confirmed in /list")
+	}
+}
+
+// TestE2E_ClaudeCode_FullSessionLifecycle is the same as the Codex variant
+// but exercises Claude Code's session handling (synchronous session ID).
+func TestE2E_ClaudeCode_FullSessionLifecycle(t *testing.T) {
+	e, mp, _, cleanup := setupIntegrationEngine(t, "claudecode")
+	defer cleanup()
+
+	uk := sessionKey("e2e-cc-user")
+	send := func(content string) {
+		e.ReceiveMessage(mp, &core.Message{
+			SessionKey: uk, Platform: "mock", UserID: "e2e-cc-user",
+			UserName: "tester", Content: content, ReplyCtx: "ctx",
+		})
+	}
+
+	// ── Step 1: first message → agent replies ──
+	t.Log("step 1: sending first message to claude code")
+	send("respond with exactly: STEP1_OK")
+	_, ok := waitForMessageContaining(mp, "STEP1_OK", 60*time.Second)
+	if !ok {
+		t.Fatalf("step 1: agent did not reply; got: %v", mp.getSent())
+	}
+	t.Log("step 1: agent replied")
+
+	// ── Step 2: /list ──
+	mp.clear()
+	send("/list")
+	msgs1, ok := waitForMessages(mp, 1, 10*time.Second)
+	if !ok {
+		t.Fatalf("step 2: no /list reply")
+	}
+	list1 := joinMsgContent(msgs1)
+	count1 := strings.Count(list1, "msgs")
+	if count1 < 1 {
+		t.Fatalf("step 2: /list should show >= 1 session, got %d\n%s", count1, list1)
+	}
+	t.Logf("step 2: /list shows %d session(s)", count1)
+
+	// ── Step 3: /new ──
+	mp.clear()
+	send("/new cc-session-name")
+	_, ok = waitForMessageContaining(mp, "new", 10*time.Second)
+	if !ok {
+		t.Logf("step 3: /new response: %v", mp.getSent())
+	}
+	t.Log("step 3: /new executed")
+
+	// ── Step 4: message in new session ──
+	mp.clear()
+	send("respond with exactly: STEP4_OK")
+	_, ok = waitForMessageContaining(mp, "STEP4_OK", 60*time.Second)
+	if !ok {
+		t.Fatalf("step 4: agent did not reply in new session; got: %v", mp.getSent())
+	}
+	t.Log("step 4: agent replied in new session")
+
+	// ── Step 5: /list → both sessions ──
+	mp.clear()
+	send("/list")
+	msgs2, ok := waitForMessages(mp, 1, 10*time.Second)
+	if !ok {
+		t.Fatalf("step 5: no /list reply")
+	}
+	list2 := joinMsgContent(msgs2)
+	count2 := strings.Count(list2, "msgs")
+	if count2 < 2 {
+		t.Fatalf("step 5: /list should show >= 2 sessions, got %d\n%s", count2, list2)
+	}
+	t.Logf("step 5: /list shows %d sessions", count2)
+
+	// ── Step 6: verify session name ──
+	if !strings.Contains(list2, "cc-session-name") {
+		t.Errorf("step 6: /list should show session name 'cc-session-name'\n%s", list2)
+	} else {
+		t.Log("step 6: session name 'cc-session-name' confirmed in /list")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
 
