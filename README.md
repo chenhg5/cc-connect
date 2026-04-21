@@ -56,13 +56,13 @@ MiniMax-M2.7 is a next-generation large language model designed for autonomous e
 </tr>
 
 <tr>
-<td width="150"><a href="https://www.dmxapi.cn/register?aff=NDln"><img src="assets/sponsors/dmx-en.jpg" alt="DMXAPI" width="120"></a></td>
-<td>Thanks to DMXAPI for sponsoring this project! DMXAPI provides global large model API services to 200+ enterprise users. One API key for all global models. Features include: instant invoicing, unlimited concurrency, starting from $0.15, 24/7 technical support. GPT/Claude/Gemini all at 32% off, domestic models 20-50% off, Claude Code exclusive models at 66% off! Register via <a href="https://www.dmxapi.cn/register?aff=NDln">this link</a>.</td>
+<td width="150"><a href="https://aihubmix.com/?aff=mGTx"><img src="assets/sponsors/aihubmix.png" alt="AIHubMix" width="120"></a> <b>AIHubMix</b></td>
+<td>Thanks to AIHubMix for sponsoring this project! AIHubMix offers deep integration with 500+ global models including OpenAI, Claude, Gemini, Qwen, DeepSeek, Kimi. Unlimited concurrency, production-grade stability on Google Cloud. One API Key drives all your Agents with native OpenAI/Anthropic/Gemini format support — zero code changes. Pay-as-you-go pricing aligned with official providers, plus free models like coding-glm-5.1-free. <a href="https://aihubmix.com/?aff=mGTx">Click here to sign up!</a></td>
 </tr>
 
 <tr>
-<td width="150"><a href="https://aihubmix.com/?aff=mGTx"><img src="assets/sponsors/aihubmix.png" alt="AIHubMix" width="120"></a></td>
-<td>Thanks to AIHubMix for sponsoring this project! AIHubMix offers deep integration with 500+ global models including OpenAI, Claude, Gemini, Qwen, DeepSeek, Kimi. Unlimited concurrency, production-grade stability on Google Cloud. One API Key drives all your Agents with native OpenAI/Anthropic/Gemini format support — zero code changes. Pay-as-you-go pricing aligned with official providers, plus free models like coding-glm-5.1-free. <a href="https://aihubmix.com/?aff=mGTx">Click here to sign up!</a></td>
+<td width="150"><a href="https://www.dmxapi.cn/register?aff=NDln"><img src="assets/sponsors/dmx-en.jpg" alt="DMXAPI" width="120"></a></td>
+<td>Thanks to DMXAPI for sponsoring this project! DMXAPI provides global large model API services to 200+ enterprise users. One API key for all global models. Features include: instant invoicing, unlimited concurrency, starting from $0.15, 24/7 technical support. GPT/Claude/Gemini all at 32% off, domestic models 20-50% off, Claude Code exclusive models at 66% off! Register via <a href="https://www.dmxapi.cn/register?aff=NDln">this link</a>.</td>
 </tr>
 
 <tr>
