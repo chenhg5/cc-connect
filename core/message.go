@@ -78,6 +78,55 @@ type FileAttachment struct {
 	FileName string // original filename
 }
 
+// SaveImagesToDisk saves image attachments to workDir/.cc-connect/attachments/
+// and returns the list of absolute file paths. Agents can reference these paths
+// in their prompts so the CLI can read them with built-in tools.
+func SaveImagesToDisk(workDir string, images []ImageAttachment) []string {
+	if len(images) == 0 {
+		return nil
+	}
+	attachDir := filepath.Join(workDir, ".cc-connect", "attachments")
+	if err := os.MkdirAll(attachDir, 0o755); err != nil {
+		slog.Warn("SaveImagesToDisk: mkdir failed", "dir", attachDir, "error", err)
+	}
+
+	var paths []string
+	for i, img := range images {
+		ext := ".png"
+		switch img.MimeType {
+		case "image/jpeg":
+			ext = ".jpg"
+		case "image/gif":
+			ext = ".gif"
+		case "image/webp":
+			ext = ".webp"
+		}
+		fname := img.FileName
+		if fname == "" {
+			fname = fmt.Sprintf("image_%d_%d%s", time.Now().UnixMilli(), i, ext)
+		}
+		fpath := filepath.Join(attachDir, fname)
+		if err := os.WriteFile(fpath, img.Data, 0o644); err != nil {
+			slog.Error("SaveImagesToDisk: write failed", "error", err)
+			continue
+		}
+		paths = append(paths, fpath)
+		slog.Debug("SaveImagesToDisk: image saved", "path", fpath, "name", img.FileName, "mime", img.MimeType, "size", len(img.Data))
+	}
+	return paths
+}
+
+// AppendImageRefs appends image path references to a prompt string.
+func AppendImageRefs(prompt string, imagePaths []string) string {
+	if len(imagePaths) == 0 {
+		return prompt
+	}
+	if prompt == "" {
+		prompt = "Please analyze the attached image(s)."
+	}
+	return prompt + "\n\n(Images saved locally, please read them: " + strings.Join(imagePaths, ", ") + ")"
+}
+
 // SaveFilesToDisk saves file attachments to workDir/.cc-connect/attachments/
 // and returns the list of absolute file paths. Agents can reference these paths
 // in their prompts so the CLI can read them with built-in tools.

@@ -58,6 +58,10 @@ func newOpencodeSession(ctx context.Context, cmd, workDir, model, mode, resumeID
 }
 
 func (s *opencodeSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
+	if len(images) > 0 {
+		imagePaths := core.SaveImagesToDisk(s.workDir, images)
+		prompt = core.AppendImageRefs(prompt, imagePaths)
+	}
 	if len(files) > 0 {
 		filePaths := core.SaveFilesToDisk(s.workDir, files)
 		prompt = core.AppendFileRefs(prompt, filePaths)
