@@ -326,17 +326,22 @@ cc-connect update --pre     # Include pre-releases
 /switch <id>          Switch session (cc-connect managed)
 /current              Show current session
 /dir [path|reset]     Show, switch, or reset work directory
-/attach [query]       Adopt an external Claude Code session from terminal
-                      (query: "latest" | index | uuid prefix; --force to bypass
-                      the 30s concurrent-write guard)
-                      Note: numeric index indexes the full ListSessions order
-                      (newest first, including external jsonls), which can
-                      differ from the /list numbering filtered to cc-connect
-                      owned sessions. Prefer "latest" or a uuid prefix when
-                      precision matters.
+/attach [query]       Explicitly adopt a Claude Code session for this
+                      IM thread (query: "latest" | index | uuid prefix).
+                      Compared with /switch, /attach adds a 30-second
+                      concurrent-write guard (refuses if the jsonl was
+                      touched recently — pass --force to override) and
+                      shows a 5-message history preview before binding.
+                      Note: numeric index counts newest-first across all
+                      jsonl transcripts. When filter_external_sessions
+                      is enabled the /list numbering may differ — prefer
+                      "latest" or a uuid prefix when precision matters.
 /resume-latest        Shorthand for /attach latest
-/detach               Release the current session so `claude --resume`
-                      can continue it from a terminal without conflicts
+/detach               Symmetric release of /attach: stop the live
+                      subprocess, clear the agent binding, and print the
+                      exact `claude --resume <uuid>` command to paste in
+                      a terminal. Pair with reset_on_idle_mins as an
+                      automatic safety net.
 ```
 
 **Continue a terminal session from IM**: when you've been chatting with

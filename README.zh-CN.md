@@ -326,16 +326,18 @@ cc-connect update --pre     # 含预发布版本
 /switch <id>           切换会话（cc-connect 管理的）
 /current               查看当前会话
 /dir [路径|reset]      查看、切换或重置工作目录
-/attach [query]        接续 terminal 里留下的外部 Claude Code session
-                       （query：latest | 序号 | uuid 前缀；加 --force
-                       绕过 30 秒并发写门控）
-                       注意：数字序号是全量 ListSessions 的排序（按修改
-                       时间倒序，含外部 jsonl），可能与 /list 显示的序号
-                       不一致（后者只列 cc-connect 管理的）。精确匹配
-                       建议用 "latest" 或 uuid 前缀。
+/attach [query]        为当前 IM 线程显式接管一个 Claude Code session
+                       （query：latest | 序号 | uuid 前缀）。相比
+                       /switch，/attach 额外提供 30 秒并发写门控（若
+                       jsonl 最近仍在被 terminal claude 写会拒绝，加
+                       --force 强制）以及 5 条最近消息预览。
+                       注意：数字序号按修改时间倒序数所有 jsonl。当
+                       filter_external_sessions 开启时，/list 序号可能
+                       与之不一致，精确匹配请用 "latest" 或 uuid 前缀。
 /resume-latest         /attach latest 的便捷版
-/detach                释放当前 session，让 terminal 里的
-                       `claude --resume` 能无冲突接回
+/detach                /attach 的对称释放：停止子进程，清除 agent 绑定，
+                       打印 `claude --resume <uuid>` 命令供 terminal 使用。
+                       配合 reset_on_idle_mins 作为自动兜底。
 ```
 
 **从 IM 接续 terminal 里的会话**：如果你之前在本机 terminal 里用 `claude`
