@@ -10,7 +10,8 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"path/filepath"
+"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -175,20 +176,7 @@ func (s *opencodeSession) buildRunArgs(prompt string, imagePaths []string, chatI
 
 func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
 	defer s.wg.Done()
-	defer func() {
-		if err := cmd.Wait(); err != nil {
-			stderrMsg := stderrBuf.String()
-			if stderrMsg != "" {
-				slog.Error("opencodeSession: process failed", "error", err, "stderr", stderrMsg)
-				evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
-				select {
-				case s.events <- evt:
-				case <-s.ctx.Done():
-					return
-				}
-			}
-		}
-	}()
+	defer func() { _ = cmd.Wait() }()
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
@@ -216,10 +204,26 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 		case <-s.ctx.Done():
 			return
 		}
+		return
 	}
 
-	// Emit EventResult after all steps are done and the process has finished writing.
+	stderrMsg := stderrBuf.String()
+	if stderrMsg != "" {
+		slog.Error("opencodeSession: process error", "stderr", truncate(stderrMsg, 500))
+		if strings.Contains(stderrMsg, "Session not found") {
+			s.chatID.Store("")
+			slog.Warn("opencodeSession: cleared stale session ID")
+		}
+		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
+		select {
+		case s.events <- evt:
+		case <-s.ctx.Done():
+		}
+		return
+	}
+
 	sid := s.CurrentSessionID()
+	slog.Debug("opencodeSession: readLoop complete, sending fallback EventResult", "session_id", sid)
 	evt := core.Event{Type: core.EventResult, SessionID: sid, Done: true}
 	select {
 	case s.events <- evt:
