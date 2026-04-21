@@ -267,6 +267,67 @@
           "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
         }
       }
+    },
+    {
+      "name": "nekocode",
+      "display_name": "NekoCode",
+      "invite_url": "https://nekocode.ai/?aff=CC-CONNECT",
+      "description": "Reliable, stable API relay for Claude and CodeX. Transparent pricing. Exclusive 10% off for cc-connect users with code: CC-CONNECT.",
+      "description_zh": "Claude 和 CodeX 可靠稳定高效的 API 中转站，价格透明。cc-connect 用户专属 9 折福利码：CC-CONNECT。",
+      "features": ["Claude Code", "CodeX", "Transparent Pricing", "10% Off"],
+      "tier": 2,
+      "website": "https://nekocode.ai",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://api.nekocode.cc",
+          "model": "claude-sonnet-4-20250514",
+          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+        },
+        "codex": {
+          "base_url": "https://api.nekocode.cc/v1",
+          "model": "gpt-5.4",
+          "models": ["gpt-5.4"],
+          "codex_config": { "wire_api": "responses" }
+        },
+        "opencode": {
+          "base_url": "https://api.nekocode.cc/v1",
+          "model": "claude-sonnet-4-20250514",
+          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+        }
+      }
+    },
+    {
+      "name": "visioncoder",
+      "display_name": "VisionCoder",
+      "invite_url": "https://coder.visioncoder.cn",
+      "description": "Reliable API relay for Claude Code, Codex, Gemini. Limited-time Token Plan: buy 1 month, get 1 month free.",
+      "description_zh": "可靠高效的 API 中继服务，支持 Claude Code、Codex、Gemini。Token Plan 限时活动：购买 1 个月，赠送 1 个月。",
+      "features": ["Claude Code", "Codex", "Gemini", "Buy 1 Get 1 Free"],
+      "tier": 2,
+      "website": "https://coder.visioncoder.cn",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://coder.visioncoder.cn",
+          "model": "claude-sonnet-4-20250514",
+          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+        },
+        "codex": {
+          "base_url": "https://coder.visioncoder.cn/v1",
+          "model": "gpt-5.4",
+          "models": ["gpt-5.4"],
+          "codex_config": { "wire_api": "responses" }
+        },
+        "gemini": {
+          "base_url": "https://coder.visioncoder.cn",
+          "model": "gemini-2.5-pro",
+          "models": ["gemini-2.5-pro"]
+        },
+        "opencode": {
+          "base_url": "https://coder.visioncoder.cn/v1",
+          "model": "claude-sonnet-4-20250514",
+          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+        }
+      }
     }
   ]
 }
