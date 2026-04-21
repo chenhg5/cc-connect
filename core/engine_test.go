@@ -10094,6 +10094,252 @@ func TestCmdList_RealWorldLegacyDataFullFlow(t *testing.T) {
 	}
 }
 
+// TestCmdList_FilterExternalSessionsEnabled verifies that when
+// filter_external_sessions is enabled, only cc-connect-tracked sessions
+// appear in /list.
+func TestCmdList_FilterExternalSessionsEnabled(t *testing.T) {
+	agentSessions := []AgentSessionInfo{
+		{ID: "tracked-1", Summary: "Tracked 1", MessageCount: 5},
+		{ID: "tracked-2", Summary: "Tracked 2", MessageCount: 3},
+		{ID: "external-1", Summary: "External CLI session", MessageCount: 10},
+	}
+
+	agent := &stubListAgent{sessions: agentSessions}
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetFilterExternalSessions(true)
+	userKey := "test:user1"
+
+	s1 := e.sessions.GetOrCreateActive(userKey)
+	s1.SetAgentSessionID("tracked-1", "codex")
+	e.sessions.Save()
+	s1.SetAgentSessionID("", "")
+	s2 := e.sessions.NewSession(userKey, "session2")
+	s2.SetAgentSessionID("tracked-2", "codex")
+	e.sessions.Save()
+
+	p.sent = nil
+	msg := &Message{SessionKey: userKey, ReplyCtx: "ctx"}
+	e.cmdList(p, msg, nil)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("expected 1 reply, got %d", len(p.sent))
+	}
+	reply := p.sent[0]
+	if !strings.Contains(reply, "Tracked 1") {
+		t.Errorf("filter enabled: should show tracked session 'Tracked 1':\n%s", reply)
+	}
+	if !strings.Contains(reply, "Tracked 2") {
+		t.Errorf("filter enabled: should show tracked session 'Tracked 2':\n%s", reply)
+	}
+	if strings.Contains(reply, "External CLI session") {
+		t.Errorf("filter enabled: should NOT show external session:\n%s", reply)
+	}
+}
+
+// TestCmdList_DefaultShowsAllSessions verifies that with default config
+// (filter_external_sessions=false), all sessions including external ones appear.
+func TestCmdList_DefaultShowsAllSessions(t *testing.T) {
+	agentSessions := []AgentSessionInfo{
+		{ID: "tracked-1", Summary: "Tracked session", MessageCount: 5},
+		{ID: "external-1", Summary: "External session", MessageCount: 10},
+	}
+
+	agent := &stubListAgent{sessions: agentSessions}
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	userKey := "test:user1"
+
+	s := e.sessions.GetOrCreateActive(userKey)
+	s.SetAgentSessionID("tracked-1", "codex")
+	e.sessions.Save()
+
+	p.sent = nil
+	msg := &Message{SessionKey: userKey, ReplyCtx: "ctx"}
+	e.cmdList(p, msg, nil)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("expected 1 reply, got %d", len(p.sent))
+	}
+	reply := p.sent[0]
+	if !strings.Contains(reply, "Tracked session") {
+		t.Errorf("default mode: should show tracked session:\n%s", reply)
+	}
+	if !strings.Contains(reply, "External session") {
+		t.Errorf("default mode: should show external session:\n%s", reply)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// filter_external_sessions integration test suite
+// Covers /list, /switch, /delete, renderListCard under both modes.
+// ---------------------------------------------------------------------------
+
+// setupFilterTestEngine creates a test Engine with 3 agent sessions, 2 tracked
+// by cc-connect and 1 external. Returns (engine, platform, userKey, agentSessions).
+func setupFilterTestEngine(t *testing.T, filterEnabled bool) (*Engine, *stubPlatformEngine, string, []AgentSessionInfo) {
+	t.Helper()
+	agentSessions := []AgentSessionInfo{
+		{ID: "tracked-1", Summary: "Tracked session 1", MessageCount: 5, ModifiedAt: time.Now().Add(-2 * time.Hour)},
+		{ID: "tracked-2", Summary: "Tracked session 2", MessageCount: 3, ModifiedAt: time.Now().Add(-time.Hour)},
+		{ID: "external-1", Summary: "External CLI session", MessageCount: 10, ModifiedAt: time.Now()},
+	}
+	agent := &stubDeleteAgent{
+		stubListAgent: stubListAgent{sessions: agentSessions},
+		errByID:       map[string]error{},
+	}
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetFilterExternalSessions(filterEnabled)
+	userKey := "test:filter-user"
+
+	s1 := e.sessions.GetOrCreateActive(userKey)
+	s1.SetAgentSessionID("tracked-1", "codex")
+	e.sessions.Save()
+	s1.SetAgentSessionID("", "")
+	s2 := e.sessions.NewSession(userKey, "session2")
+	s2.SetAgentSessionID("tracked-2", "codex")
+	e.sessions.Save()
+
+	return e, p, userKey, agentSessions
+}
+
+func TestFilterExternalSessions_SwitchByIndex(t *testing.T) {
+	t.Run("disabled: index 3 reaches external session", func(t *testing.T) {
+		e, p, userKey, _ := setupFilterTestEngine(t, false)
+		p.sent = nil
+		e.cmdSwitch(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, []string{"3"})
+		if len(p.sent) != 1 {
+			t.Fatalf("expected 1 reply, got %d", len(p.sent))
+		}
+		if !strings.Contains(p.sent[0], "External CLI session") {
+			t.Errorf("default mode: /switch 3 should reach external session:\n%s", p.sent[0])
+		}
+	})
+
+	t.Run("enabled: index 3 out of range", func(t *testing.T) {
+		e, p, userKey, _ := setupFilterTestEngine(t, true)
+		p.sent = nil
+		e.cmdSwitch(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, []string{"3"})
+		if len(p.sent) != 1 {
+			t.Fatalf("expected 1 reply, got %d", len(p.sent))
+		}
+		if strings.Contains(p.sent[0], "External CLI session") {
+			t.Errorf("filter enabled: /switch 3 should NOT reach external session:\n%s", p.sent[0])
+		}
+	})
+}
+
+func TestFilterExternalSessions_SwitchByIDPrefix(t *testing.T) {
+	t.Run("disabled: can switch to external by ID prefix", func(t *testing.T) {
+		e, p, userKey, _ := setupFilterTestEngine(t, false)
+		p.sent = nil
+		e.cmdSwitch(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, []string{"external"})
+		if len(p.sent) != 1 {
+			t.Fatalf("expected 1 reply, got %d", len(p.sent))
+		}
+		if !strings.Contains(p.sent[0], "External CLI session") {
+			t.Errorf("default mode: /switch external should find external session:\n%s", p.sent[0])
+		}
+	})
+
+	t.Run("enabled: external ID prefix not found", func(t *testing.T) {
+		e, p, userKey, _ := setupFilterTestEngine(t, true)
+		p.sent = nil
+		e.cmdSwitch(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, []string{"external"})
+		if len(p.sent) != 1 {
+			t.Fatalf("expected 1 reply, got %d", len(p.sent))
+		}
+		if strings.Contains(p.sent[0], "External CLI session") {
+			t.Errorf("filter enabled: /switch external should NOT find external session:\n%s", p.sent[0])
+		}
+	})
+}
+
+func TestFilterExternalSessions_DeleteByIndex(t *testing.T) {
+	t.Run("disabled: /delete 3 hits external session", func(t *testing.T) {
+		e, p, userKey, _ := setupFilterTestEngine(t, false)
+		p.sent = nil
+		e.cmdDelete(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, []string{"3"})
+		if len(p.sent) == 0 {
+			t.Fatal("expected reply from /delete")
+		}
+		reply := strings.Join(p.sent, "\n")
+		if !strings.Contains(reply, "external-1") && !strings.Contains(reply, "External CLI session") {
+			t.Errorf("default mode: /delete 3 should target external session:\n%s", reply)
+		}
+	})
+
+	t.Run("enabled: /delete 3 out of range", func(t *testing.T) {
+		e, p, userKey, _ := setupFilterTestEngine(t, true)
+		p.sent = nil
+		e.cmdDelete(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, []string{"3"})
+		if len(p.sent) == 0 {
+			t.Fatal("expected reply from /delete")
+		}
+		reply := strings.Join(p.sent, "\n")
+		if strings.Contains(reply, "external-1") || strings.Contains(reply, "External CLI session") {
+			t.Errorf("filter enabled: /delete 3 should NOT target external session:\n%s", reply)
+		}
+	})
+}
+
+func TestFilterExternalSessions_RenderListCard(t *testing.T) {
+	t.Run("disabled: card shows all sessions", func(t *testing.T) {
+		e, _, userKey, agentSessions := setupFilterTestEngine(t, false)
+		card, err := e.renderListCard(userKey, 1)
+		if err != nil {
+			t.Fatalf("renderListCard: %v", err)
+		}
+		switchActions := countCardActionValues(card, "act:/switch ")
+		if switchActions != len(agentSessions) {
+			t.Errorf("default mode: card should show %d sessions, got %d", len(agentSessions), switchActions)
+		}
+	})
+
+	t.Run("enabled: card hides external sessions", func(t *testing.T) {
+		e, _, userKey, _ := setupFilterTestEngine(t, true)
+		card, err := e.renderListCard(userKey, 1)
+		if err != nil {
+			t.Fatalf("renderListCard: %v", err)
+		}
+		switchActions := countCardActionValues(card, "act:/switch ")
+		if switchActions != 2 {
+			t.Errorf("filter enabled: card should show 2 tracked sessions, got %d", switchActions)
+		}
+	})
+}
+
+func TestFilterExternalSessions_DynamicToggle(t *testing.T) {
+	e, p, userKey, agentSessions := setupFilterTestEngine(t, false)
+	msg := &Message{SessionKey: userKey, ReplyCtx: "ctx"}
+
+	p.sent = nil
+	e.cmdList(p, msg, nil)
+	count1 := strings.Count(p.sent[0], "msgs")
+	if count1 != len(agentSessions) {
+		t.Fatalf("before toggle: expected %d sessions, got %d", len(agentSessions), count1)
+	}
+
+	e.SetFilterExternalSessions(true)
+
+	p.sent = nil
+	e.cmdList(p, msg, nil)
+	count2 := strings.Count(p.sent[0], "msgs")
+	if count2 != 2 {
+		t.Fatalf("after enabling filter: expected 2 sessions, got %d\nreply:\n%s", count2, p.sent[0])
+	}
+
+	e.SetFilterExternalSessions(false)
+
+	p.sent = nil
+	e.cmdList(p, msg, nil)
+	count3 := strings.Count(p.sent[0], "msgs")
+	if count3 != len(agentSessions) {
+		t.Fatalf("after disabling filter: expected %d sessions, got %d", len(agentSessions), count3)
+	}
+}
+
 // codexLikeSession simulates real codex agent behavior:
 // - CurrentSessionID() returns "" until Send() is called
 // - Send() sets the thread ID and pushes an EventResult with the SessionID

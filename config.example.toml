@@ -585,6 +585,13 @@ name = "my-backend"
 # disabled_commands = ["restart", "upgrade", "cron"]  # Disable specific commands for this project
 #                                                     # 禁用该项目的指定命令
 #
+# filter_external_sessions: when true, /list /switch /delete only show sessions
+# created by cc-connect, hiding sessions from direct CLI usage in the same work_dir.
+# Default false = show all sessions from the agent.
+# filter_external_sessions = false
+# filter_external_sessions：为 true 时，/list /switch /delete 仅显示由 cc-connect 创建的会话，
+# 隐藏在相同 work_dir 下通过直接 CLI 创建的会话。默认 false = 显示 agent 的全部会话。
+#
 # admin_from controls who can run privileged commands (/dir, /shell, /restart, /upgrade, /commands addexec).
 # admin_from 控制谁可以执行特权命令（/dir, /shell, /restart, /upgrade, /commands addexec）。
 #
