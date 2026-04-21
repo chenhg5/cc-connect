@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "updated_at": "2026-04-18",
+  "updated_at": "2026-04-21",
   "providers": [
     {
       "name": "minimax",
@@ -88,6 +88,39 @@
           "base_url": "https://api.aigocode.com",
           "model": "claude-sonnet-4-20250514",
           "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+        }
+      }
+    },
+    {
+      "name": "aihubmix",
+      "display_name": "AIHubMix",
+      "invite_url": "https://aihubmix.com/?aff=mGTx",
+      "description": "500+ models in one API. Claude, GPT, Gemini, Qwen, DeepSeek all covered. Unlimited concurrency, Google Cloud infrastructure. Native OpenAI/Anthropic/Gemini format support, zero code migration.",
+      "description_zh": "500+ 模型一站式覆盖，Claude/GPT/Gemini/Qwen/DeepSeek 全支持。无限并发，谷歌云集群稳定运行。支持 OpenAI/Anthropic/Gemini 三种原生格式，代码零改动迁移。",
+      "features": ["500+ Models", "Unlimited Concurrency", "Google Cloud", "All Formats"],
+      "tier": 2,
+      "website": "https://aihubmix.com",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://api.aihubmix.com",
+          "model": "claude-sonnet-4-20250514",
+          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-opus-4-6", "claude-sonnet-4-6"]
+        },
+        "codex": {
+          "base_url": "https://api.aihubmix.com/v1",
+          "model": "gpt-5.4",
+          "models": ["gpt-5.4", "gpt-5.4-mini"],
+          "codex_config": { "wire_api": "responses" }
+        },
+        "gemini": {
+          "base_url": "https://api.aihubmix.com",
+          "model": "gemini-2.5-pro",
+          "models": ["gemini-2.5-pro", "gemini-3.1-pro"]
+        },
+        "opencode": {
+          "base_url": "https://api.aihubmix.com/v1",
+          "model": "claude-sonnet-4-6",
+          "models": ["claude-sonnet-4-6", "claude-opus-4-6"]
         }
       }
     },
