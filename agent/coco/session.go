@@ -138,7 +138,7 @@ func (qs *cocoSession) readLoop(r io.Reader) {
 	finalText := cleanAnsi(accumulated.String())
 	select {
 	case qs.events <- core.Event{Type: core.EventResult, Content: finalText, SessionID: qs.CurrentSessionID(), Done: true}:
-	default:
+	case <-qs.ctx.Done():
 	}
 }
 
@@ -151,7 +151,8 @@ func (qs *cocoSession) RespondPermission(requestID string, result core.Permissio
 	if result.Behavior == "deny" {
 		reply = "N\r"
 	}
-	
+
+	slog.Debug("coco: responding to permission prompt", "requestID", requestID, "behavior", result.Behavior, "reply", strings.TrimSuffix(reply, "\r"))
 	_, err := io.WriteString(qs.ptmx, reply)
 	return err
 }
