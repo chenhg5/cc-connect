@@ -401,3 +401,38 @@ func TestStripMentions(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveBotSenderName(t *testing.T) {
+	p := &Platform{peerBots: map[string]string{
+		"cli_known": "Jeeves",
+		"cli_other": "Ivy",
+	}}
+	tests := []struct {
+		name  string
+		appID string
+		want  string
+	}{
+		{"empty app id falls back to Bot", "", "Bot"},
+		{"known app id resolves to alias", "cli_known", "Jeeves"},
+		{"another known app id", "cli_other", "Ivy"},
+		{"unknown app id surfaces id", "cli_unknown", "Bot[cli_unknown]"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := p.resolveBotSenderName(tt.appID)
+			if got != tt.want {
+				t.Errorf("resolveBotSenderName(%q) = %q, want %q", tt.appID, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveBotSenderName_NilMap(t *testing.T) {
+	p := &Platform{}
+	if got := p.resolveBotSenderName("cli_any"); got != "Bot[cli_any]" {
+		t.Errorf("nil peerBots: got %q, want %q", got, "Bot[cli_any]")
+	}
+	if got := p.resolveBotSenderName(""); got != "Bot" {
+		t.Errorf("nil peerBots + empty id: got %q, want %q", got, "Bot")
+	}
+}

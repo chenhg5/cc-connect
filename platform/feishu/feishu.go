@@ -138,9 +138,10 @@ type Platform struct {
 	cancel           context.CancelFunc
 	dedup            core.MessageDedup
 	botOpenID        string
-	userNameCache    sync.Map // open_id -> display name
-	chatNameCache    sync.Map // chat_id -> chat name
-	chatMemberCache  sync.Map // chatID -> *chatMemberEntry
+	peerBots         map[string]string // app_id -> friendly alias, for quoted-reply attribution
+	userNameCache    sync.Map          // open_id -> display name
+	chatNameCache    sync.Map          // chat_id -> chat name
+	chatMemberCache  sync.Map          // chatID -> *chatMemberEntry
 	// Webhook mode fields (for Lark international version)
 	server       *http.Server
 	port         string
@@ -205,6 +206,15 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		noReplyToTrigger = true
 	}
 
+	peerBots := map[string]string{}
+	if raw, ok := opts["peer_bots"].(map[string]any); ok {
+		for k, v := range raw {
+			if s, ok := v.(string); ok && s != "" {
+				peerBots[k] = s
+			}
+		}
+	}
+
 	progressStyle := "legacy"
 	if v, ok := opts["progress_style"].(string); ok {
 		switch strings.ToLower(strings.TrimSpace(v)) {
@@ -258,6 +268,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		port:                       port,
 		callbackPath:               callbackPath,
 		encryptKey:                 encryptKey,
+		peerBots:                   peerBots,
 	}
 	if !useInteractiveCard {
 		base.self = base
@@ -1126,6 +1137,21 @@ func (p *Platform) fetchQuotedMessage(ctx context.Context, parentID string) stri
 	return formatReplyChain(chain)
 }
 
+// resolveBotSenderName returns a display name for a bot sender in a quoted
+// reply chain. Feishu sets sender.id to the bot's app_id (globally stable,
+// not an open_id). We consult the peer_bots config to map app_id → alias;
+// if the app is unknown, we surface the app_id so operators can add it to
+// the config rather than seeing an ambiguous "Bot".
+func (p *Platform) resolveBotSenderName(appID string) string {
+	if appID == "" {
+		return "Bot"
+	}
+	if alias := p.peerBots[appID]; alias != "" {
+		return alias
+	}
+	return "Bot[" + appID + "]"
+}
+
 // fetchSingleMessage retrieves one message by ID from the Feishu API and
 // returns its extracted content as a chainMessage. Returns nil on any failure.
 func (p *Platform) fetchSingleMessage(ctx context.Context, messageID string) *chainMessage {
@@ -1187,8 +1213,7 @@ func (p *Platform) fetchSingleMessage(ctx context.Context, messageID string) *ch
 	// Resolve sender name.
 	senderName := ""
 	if item.Sender.SenderType == "app" {
-		// Bot messages: sender ID is app_id, not a user open_id.
-		senderName = "Bot"
+		senderName = p.resolveBotSenderName(item.Sender.ID)
 	} else if item.Sender.ID != "" {
 		resolved := p.resolveUserName(item.Sender.ID)
 		if resolved != item.Sender.ID {
