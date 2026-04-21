@@ -672,6 +672,11 @@ func (e *Engine) GetAgent() Agent {
 	return e.agent
 }
 
+// GetSessions returns the Engine's session manager (for testing).
+func (e *Engine) GetSessions() *SessionManager {
+	return e.sessions
+}
+
 // AddCommand registers a custom slash command.
 func (e *Engine) AddCommand(name, description, prompt, exec, workDir, source string) {
 	e.commands.Add(name, description, prompt, exec, workDir, source)
