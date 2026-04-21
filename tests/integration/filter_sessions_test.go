@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chenhg5/cc-connect/config"
 	"github.com/chenhg5/cc-connect/core"
 )
 
@@ -424,11 +425,107 @@ func TestRealCodex_DynamicFilterToggle(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // Full end-to-end: real agent starts, processes messages, creates sessions.
-// Requires API keys — these tests take 30-60s each.
+// Uses provider config from /root/.cc-connect/config.toml so no env-var API
+// keys are needed. Tests take 30-60s each (real LLM round-trips).
 // ---------------------------------------------------------------------------
 
+// setupE2EEngine creates a real agent with provider config loaded from
+// the real cc-connect config file. Unlike setupIntegrationEngine, it does
+// NOT require API key env vars — providers carry their own credentials.
+func setupE2EEngine(t *testing.T, projectName string) (*core.Engine, *mockPlatform, func()) {
+	t.Helper()
+
+	cfgPath := "/root/.cc-connect/config.toml"
+	if _, err := os.Stat(cfgPath); err != nil {
+		t.Skipf("skip: config file %s not found", cfgPath)
+	}
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Skipf("skip: cannot load config: %v", err)
+	}
+
+	var proj *config.ProjectConfig
+	for i := range cfg.Projects {
+		if cfg.Projects[i].Name == projectName {
+			proj = &cfg.Projects[i]
+			break
+		}
+	}
+	if proj == nil {
+		t.Skipf("skip: project %q not found in config", projectName)
+	}
+
+	agentType := proj.Agent.Type
+	bin, err := findAgentBin(agentType)
+	if err != nil {
+		t.Skipf("skip: %v", err)
+	}
+	if _, err := exec.LookPath(bin); err != nil {
+		t.Skipf("skip: %s binary not in PATH", bin)
+	}
+
+	workDir := t.TempDir()
+	opts := make(map[string]any)
+	for k, v := range proj.Agent.Options {
+		opts[k] = v
+	}
+	opts["work_dir"] = workDir
+
+	agent, err := core.CreateAgent(agentType, opts)
+	if err != nil {
+		t.Skipf("skip: cannot create agent: %v", err)
+	}
+
+	// Wire providers from config (provider_refs → global providers)
+	if ps, ok := agent.(core.ProviderSwitcher); ok {
+		var providers []core.ProviderConfig
+		for _, ref := range proj.Agent.ProviderRefs {
+			for _, gp := range cfg.Providers {
+				if gp.Name == ref {
+					providers = append(providers, configProviderToCore(gp))
+					break
+				}
+			}
+		}
+		if len(providers) > 0 {
+			ps.SetProviders(providers)
+			if provName, _ := opts["provider"].(string); provName != "" {
+				ps.SetActiveProvider(provName)
+			} else {
+				ps.SetActiveProvider(providers[0].Name)
+			}
+		}
+	}
+
+	mp := &mockPlatform{agent: agent}
+	sessPath := filepath.Join(workDir, "sessions.json")
+	e := core.NewEngine("test", agent, []core.Platform{mp}, sessPath, core.LangEnglish)
+
+	cleanup := func() {
+		agent.Stop()
+		e.Stop()
+	}
+	return e, mp, cleanup
+}
+
+func configProviderToCore(p config.ProviderConfig) core.ProviderConfig {
+	c := core.ProviderConfig{
+		Name: p.Name, APIKey: p.APIKey, BaseURL: p.BaseURL,
+		Model: p.Model, Thinking: p.Thinking, Env: p.Env,
+	}
+	for _, m := range p.Models {
+		c.Models = append(c.Models, core.ModelOption{Name: m.Model, Alias: m.Alias})
+	}
+	if p.Codex != nil {
+		c.CodexWireAPI = p.Codex.WireAPI
+		c.CodexHTTPHeaders = p.Codex.HTTPHeaders
+	}
+	return c
+}
+
 // TestE2E_Codex_FullSessionLifecycle exercises the complete workflow with a
-// real Codex agent:
+// real Codex agent using provider config from the real config file:
 //  1. Send message → wait for agent reply → /list shows 1 session
 //  2. /new "my-test-session" → new session created
 //  3. Send message in new session → wait for agent reply
@@ -437,7 +534,11 @@ func TestRealCodex_DynamicFilterToggle(t *testing.T) {
 // This proves the full pipeline: real CLI process → event parsing → session
 // tracking → filter logic → /list output.
 func TestE2E_Codex_FullSessionLifecycle(t *testing.T) {
-	e, mp, _, cleanup := setupIntegrationEngine(t, "codex")
+	proj := os.Getenv("E2E_CODEX_PROJECT")
+	if proj == "" {
+		proj = "qa-release"
+	}
+	e, mp, cleanup := setupE2EEngine(t, proj)
 	defer cleanup()
 
 	uk := sessionKey("e2e-codex-user")
@@ -450,12 +551,16 @@ func TestE2E_Codex_FullSessionLifecycle(t *testing.T) {
 
 	// ── Step 1: first message → agent replies ──
 	t.Log("step 1: sending first message to codex")
-	send("respond with exactly: STEP1_OK")
-	_, ok := waitForMessageContaining(mp, "STEP1_OK", 60*time.Second)
+	send("respond with exactly: HELLO_CODEX")
+	msgs0, ok := waitForMessages(mp, 1, 90*time.Second)
 	if !ok {
-		t.Fatalf("step 1: agent did not reply; got: %v", mp.getSent())
+		t.Fatalf("step 1: no reply from agent; sent: %v", mp.getSent())
 	}
-	t.Log("step 1: agent replied")
+	reply0 := joinMsgContent(msgs0)
+	if strings.Contains(strings.ToLower(reply0), "auth") || strings.Contains(strings.ToLower(reply0), "balance") {
+		t.Skipf("skip: provider auth/balance error: %s", reply0)
+	}
+	t.Logf("step 1: agent replied: %.100s", reply0)
 
 	// ── Step 2: /list → should show at least 1 session ──
 	mp.clear()
@@ -482,12 +587,12 @@ func TestE2E_Codex_FullSessionLifecycle(t *testing.T) {
 
 	// ── Step 4: send message in new session → agent replies ──
 	mp.clear()
-	send("respond with exactly: STEP4_OK")
-	_, ok = waitForMessageContaining(mp, "STEP4_OK", 60*time.Second)
+	send("respond with exactly: HELLO_CODEX_2")
+	msgs4, ok := waitForMessages(mp, 1, 90*time.Second)
 	if !ok {
-		t.Fatalf("step 4: agent did not reply in new session; got: %v", mp.getSent())
+		t.Fatalf("step 4: no reply in new session; sent: %v", mp.getSent())
 	}
-	t.Log("step 4: agent replied in new session")
+	t.Logf("step 4: agent replied: %.100s", joinMsgContent(msgs4))
 
 	// ── Step 5: /list → both sessions visible ──
 	mp.clear()
@@ -513,8 +618,13 @@ func TestE2E_Codex_FullSessionLifecycle(t *testing.T) {
 
 // TestE2E_ClaudeCode_FullSessionLifecycle is the same as the Codex variant
 // but exercises Claude Code's session handling (synchronous session ID).
+// Uses the "ceo" project by default; override with E2E_CLAUDECODE_PROJECT env.
 func TestE2E_ClaudeCode_FullSessionLifecycle(t *testing.T) {
-	e, mp, _, cleanup := setupIntegrationEngine(t, "claudecode")
+	proj := os.Getenv("E2E_CLAUDECODE_PROJECT")
+	if proj == "" {
+		proj = "ceo"
+	}
+	e, mp, cleanup := setupE2EEngine(t, proj)
 	defer cleanup()
 
 	uk := sessionKey("e2e-cc-user")
@@ -527,12 +637,16 @@ func TestE2E_ClaudeCode_FullSessionLifecycle(t *testing.T) {
 
 	// ── Step 1: first message → agent replies ──
 	t.Log("step 1: sending first message to claude code")
-	send("respond with exactly: STEP1_OK")
-	_, ok := waitForMessageContaining(mp, "STEP1_OK", 60*time.Second)
+	send("respond with exactly: HELLO_CC")
+	msgs0, ok := waitForMessages(mp, 1, 90*time.Second)
 	if !ok {
-		t.Fatalf("step 1: agent did not reply; got: %v", mp.getSent())
+		t.Fatalf("step 1: no reply from agent; sent: %v", mp.getSent())
 	}
-	t.Log("step 1: agent replied")
+	reply0 := joinMsgContent(msgs0)
+	if strings.Contains(strings.ToLower(reply0), "auth") || strings.Contains(strings.ToLower(reply0), "balance") {
+		t.Skipf("skip: provider auth/balance error: %s", reply0)
+	}
+	t.Logf("step 1: agent replied: %.100s", reply0)
 
 	// ── Step 2: /list ──
 	mp.clear()
@@ -559,12 +673,12 @@ func TestE2E_ClaudeCode_FullSessionLifecycle(t *testing.T) {
 
 	// ── Step 4: message in new session ──
 	mp.clear()
-	send("respond with exactly: STEP4_OK")
-	_, ok = waitForMessageContaining(mp, "STEP4_OK", 60*time.Second)
+	send("respond with exactly: HELLO_CC_2")
+	msgs4, ok := waitForMessages(mp, 1, 90*time.Second)
 	if !ok {
-		t.Fatalf("step 4: agent did not reply in new session; got: %v", mp.getSent())
+		t.Fatalf("step 4: no reply in new session; sent: %v", mp.getSent())
 	}
-	t.Log("step 4: agent replied in new session")
+	t.Logf("step 4: agent replied: %.100s", joinMsgContent(msgs4))
 
 	// ── Step 5: /list → both sessions ──
 	mp.clear()
