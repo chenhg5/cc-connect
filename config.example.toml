@@ -4,6 +4,10 @@
 # Copy this file to config.toml and fill in your credentials.
 # 复制此文件为 config.toml，填入你的凭证信息。
 #
+# String values support ${VAR_NAME} environment variable substitution.
+# Example: token = "${TELEGRAM_BOT_TOKEN}" / 所有字符串值都支持 ${VAR_NAME} 环境变量替换。
+# 例如：token = "${TELEGRAM_BOT_TOKEN}"
+#
 # Each [[projects]] entry binds one code directory to its own agent + platforms.
 # A single cc-connect process can manage multiple projects simultaneously.
 # 每个 [[projects]] 将一个代码目录绑定到独立的 agent 和平台。
@@ -36,6 +40,44 @@
 level = "info" # debug, info, warn, error
 
 # =============================================================================
+# Global Providers / 全局服务商
+# =============================================================================
+# Define providers once globally; projects reference them by name via provider_refs.
+# 在此统一定义服务商，项目通过 provider_refs 按名称引用。
+# This avoids duplicating API keys across projects.
+# 避免在多个项目中重复配置 API Key。
+#
+# Remote presets URL (fetches recommended providers list from GitHub/Gitee)
+# 远程预设列表 URL（从 GitHub/Gitee 拉取推荐服务商）
+# provider_presets_url = "https://raw.githubusercontent.com/chenhg5/cc-connect/main/provider-presets.json"
+
+# [[providers]]
+# name = "anthropic"
+# api_key = "${ANTHROPIC_API_KEY}"
+# agent_types = ["claudecode"]   # only for Claude Code projects
+
+# [[providers]]
+# name = "minimaxi-claude"
+# api_key = "${MINIMAXI_API_KEY}"
+# base_url = "https://api.minimaxi.chat/v1"
+# agent_types = ["claudecode"]
+# model = "claude-sonnet-4-20250514"
+
+# [[providers]]
+# name = "minimaxi-codex"
+# api_key = "${MINIMAXI_API_KEY}"
+# base_url = "https://api.minimaxi.chat/v1"
+# agent_types = ["codex"]
+# model = "MiniMax-M2.7"
+
+# [[providers]]
+# name = "dashscope"
+# api_key = "${DASHSCOPE_API_KEY}"
+# base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+# model = "glm-5.1"
+# thinking = "disabled"
+
+# =============================================================================
 # Display Settings / 显示设置
 # =============================================================================
 # Controls how intermediate messages (thinking, tool use) are shown in chat.
@@ -62,6 +104,48 @@ level = "info" # debug, info, warn, error
 # 这与 idle_timeout_mins 不同：它不是检测 agent 卡住，而是用户回来后自动开始新会话。
 # [[projects]]
 # reset_on_idle_mins = 60   # 0 or unset = disabled / 设为 0 或留空表示禁用
+
+# =============================================================================
+# OS-user isolation via run_as_user (Linux/macOS only)
+# 通过 run_as_user 实现 OS 用户隔离（仅限 Linux/macOS）
+# =============================================================================
+#
+# Spawn a project's agent command under a different Unix user via
+# `sudo -n -iu <user>`. This provides OS-level file-system isolation from
+# the supervisor user that runs cc-connect itself, so a misbehaving agent
+# cannot read files outside the target user's permission scope.
+#
+# Currently supported by: claudecode.
+# Other agents use the supervisor user until migrated in a follow-up PR.
+#
+# Setup (one-time):
+#   1. Create the target Unix user and install their tooling:
+#        sudo useradd -m -s /bin/bash partseeker-coder
+#        sudo -iu partseeker-coder
+#        # install claude CLI, set up ~/.claude/settings.json, PGSSL certs,
+#        # ~/.pgpass, plugin state, anything the agent needs.
+#   2. Grant the supervisor user passwordless sudo to the target:
+#        # /etc/sudoers.d/cc-connect
+#        partseeker-orchestrator ALL=(partseeker-coder) NOPASSWD: ALL
+#   3. Ensure the target user does NOT have passwordless sudo to anywhere
+#      else. `sudo -n -iu partseeker-coder -- sudo -n true` must fail.
+#   4. Ensure the target user can read AND write the project's work_dir.
+#   5. Run `cc-connect doctor user-isolation` to audit the setup before
+#      starting cc-connect.
+#
+# cc-connect refuses to start if any preflight gate fails (missing sudo,
+# target can escalate, work_dir inaccessible) or if the isolation probe
+# detects that the target user can read another user's secrets.
+#
+# [[projects]]
+# name = "claude-sandboxed"
+# run_as_user = "partseeker-coder"
+# # Extra env vars to forward across the sudo boundary. The default
+# # allowlist (PATH, LANG, LC_*, TERM) is always included; only list
+# # names that the target user cannot reasonably set in their own shell
+# # profile. Secrets belong in the target user's ~/.claude/settings.json
+# # env block, NOT here.
+# run_as_env = ["PGSSLROOTCERT", "PGSSLMODE"]
 
 # =============================================================================
 # Streaming Preview / 流式预览
@@ -128,6 +212,10 @@ level = "info" # debug, info, warn, error
 # enabled = true
 # max_tokens = 12000     # estimated token threshold to trigger compression
 # min_gap_mins = 30      # minimum minutes between auto-compress runs (default 30)
+
+# [projects.observe]
+# enabled = true                    # Forward native terminal sessions to Slack
+# channel = "C0AL13PN4BG"           # Slack channel ID to post observations to
 
 # =============================================================================
 # Cron Settings / 定时任务设置
@@ -205,6 +293,45 @@ level = "info" # debug, info, warn, error
 # port = 9820                           # HTTP listen port (default: 9820) / 监听端口
 # token = "your-mgmt-secret"            # Auth token (required) / 认证密钥（必填）
 # cors_origins = ["http://localhost:3000"]  # Allowed CORS origins / 允许的 CORS 来源
+
+# =============================================================================
+# Hooks (Event Triggers / 事件钩子)
+# =============================================================================
+# Execute shell commands or send HTTP requests when lifecycle events occur.
+# 在生命周期事件发生时执行 Shell 命令或发送 HTTP 请求。
+#
+# Supported events / 支持的事件:
+#   message.received   — user message arrives / 用户消息到达
+#   message.sent       — agent reply sent / Agent 回复发送完成
+#   session.started    — agent session spawned / Agent 会话启动
+#   session.ended      — agent session stopped / Agent 会话结束
+#   cron.triggered     — cron job fires / 定时任务触发
+#   permission.requested — agent asks for permission / Agent 请求权限
+#   error              — an error occurs / 发生错误
+#   *                  — match all events / 匹配所有事件
+#
+# Handler types / 处理器类型:
+#   command — run a shell command; event context in CC_HOOK_* env vars
+#           — 执行 Shell 命令；事件上下文通过 CC_HOOK_* 环境变量传递
+#   http    — POST JSON to a URL with event payload
+#           — 向 URL 发送 POST JSON 请求，包含事件数据
+#
+# [[hooks]]
+# event = "message.received"
+# type = "command"
+# command = "echo $CC_HOOK_USER_NAME >> /tmp/cc-messages.log"
+# async = true                    # default true; set false to block until done
+# timeout = 10                    # seconds; default 10s for command, 5s for http
+#
+# [[hooks]]
+# event = "error"
+# type = "http"
+# url = "https://my-server.com/cc-connect/on-error"
+#
+# [[hooks]]
+# event = "*"
+# type = "http"
+# url = "https://my-server.com/cc-connect/events"
 
 # =============================================================================
 # Speech-to-Text (Voice Messages) / 语音转文字（语音消息）
@@ -453,8 +580,17 @@ level = "info" # debug, info, warn, error
 name = "my-backend"
 # show_context_indicator = false  # Hide the “[ctx: ~N%]” suffix on assistant replies (default: true / show)
 #                                   # 不在助手回复末尾显示「[ctx: ~N%]」上下文占用提示（默认 true 显示）
+# reply_footer = false             # Hide the Codex-like footer on assistant replies (default: true / show)
+#                                   # 不在助手回复底部显示类似 Codex 的状态行（默认 true 显示）
 # disabled_commands = ["restart", "upgrade", "cron"]  # Disable specific commands for this project
 #                                                     # 禁用该项目的指定命令
+#
+# filter_external_sessions: when true, /list /switch /delete only show sessions
+# created by cc-connect, hiding sessions from direct CLI usage in the same work_dir.
+# Default false = show all sessions from the agent.
+# filter_external_sessions = false
+# filter_external_sessions：为 true 时，/list /switch /delete 仅显示由 cc-connect 创建的会话，
+# 隐藏在相同 work_dir 下通过直接 CLI 创建的会话。默认 false = 显示 agent 的全部会话。
 #
 # admin_from controls who can run privileged commands (/dir, /shell, /restart, /upgrade, /commands addexec).
 # admin_from 控制谁可以执行特权命令（/dir, /shell, /restart, /upgrade, /commands addexec）。
@@ -543,6 +679,10 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # When using IM platforms, you can reply "允许"/"allow" to grant permission.
 # 在 IM 平台中，可回复"允许"或"allow"来授权操作。
 
+# Optional: set reasoning effort level (passed to claude --effort)
+# 可选：设置推理强度等级（传递给 claude --effort）
+# reasoning_effort = "high"  # "low" | "medium" | "high" | "max"
+
 # In default/acceptEdits mode, you can pre-approve specific tools:
 # 在 default/acceptEdits 模式下，可预授权特定工具：
 # allowed_tools = ["Read", "Grep", "Glob", "Bash", "Edit", "Write"]
@@ -574,9 +714,13 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # Note: When using router, provider settings below are ignored as the router handles model selection.
 # 注意：使用 router 时，下方的 provider 设置将被忽略，因为 router 负责模型选择。
 
-# Active provider (matches a name in [[projects.agent.providers]])
-# 当前激活的 provider（对应下方 providers 中的 name）
+# Active provider (matches a name in [[projects.agent.providers]] or provider_refs)
+# 当前激活的 provider（对应下方 providers 或 provider_refs 中的 name）
 # provider = "anthropic"
+
+# Reference global [[providers]] by name — avoids duplicating keys per project
+# 引用全局 [[providers]] — 避免每个项目重复配置
+# provider_refs = ["minimaxi", "dashscope"]
 
 # API Providers — switch between them via /provider command in chat
 # or via CLI: cc-connect provider add --project my-backend --name relay --api-key sk-xxx
@@ -693,6 +837,8 @@ app_secret = "your-feishu-app-secret"
 #                              # 允许的用户 open_id，逗号分隔；"*" 表示所有（默认）。发送 /whoami 获取你的 open_id。
 # reaction_emoji = "OnIt"  # Emoji reaction on incoming messages (default: "OnIt"); set to "none" to disable
 #                           # 收到消息时添加的表情回复（默认 "OnIt"）；设为 "none" 可禁用
+# done_emoji = "none"       # Emoji reaction when agent finishes a reply (e.g. "Done"); set to "none" to disable
+#                           # Agent 完成回复后添加的表情回复（如 "Done"）；设为 "none" 可禁用
 # group_reply_all = false   # If true, respond to ALL group messages without requiring @mention
 #                           # 设为 true 时，群聊中无需 @机器人 也会响应所有消息（默认 false）
 # share_session_in_channel = false  # If true, all users in a group share one agent session
@@ -703,16 +849,19 @@ app_secret = "your-feishu-app-secret"
 #                           # 默认 true：用「回复消息」API（引用用户消息）。设为 false 则在会话里发普通消息、不引用触发消息。
 # progress_style = "legacy" # Progress rendering style: legacy | compact | card
 #                           # 进度消息展示风格：legacy（逐条消息）| compact（单消息持续更新）| card（结构化卡片）
+# resolve_mentions = false  # Auto-resolve @name in outgoing messages to Feishu at tags by matching group member names
+#                           # 自动将发出消息中的 @显示名 替换为飞书 at 标签（通过匹配群成员名称）
 
 # Lark (International Version) / Lark 国际版
-# Lark uses Webhook mode instead of WebSocket long-connection.
-# Lark 使用 Webhook 模式而非 WebSocket 长连接。
+# Lark now supports WebSocket long-connection too; webhook mode is only needed
+# when you explicitly configure encrypt_key.
+# Lark 国际版现已支持 WebSocket 长连接；只有显式配置 encrypt_key 时才需要 Webhook 模式。
 # 1. Create an app at https://open.larksuite.com / 在 https://open.larksuite.com 创建应用
 # 2. Enable Bot capability / 开启机器人能力
-# 3. Add im.message.receive_v1 event, configure Webhook URL (requires public IP)
-#    添加 im.message.receive_v1 事件，配置 Webhook URL（需要公网 IP）
-# 4. Fill in app_id, app_secret, port, callback_path below
-#    填入下方 app_id、app_secret、port、callback_path
+# 3. Add im.message.receive_v1 event and enable WebSocket long-connection mode (recommended)
+#    添加 im.message.receive_v1 事件，并启用 WebSocket 长连接模式（推荐）
+# 4. Fill in app_id and app_secret below; port/callback_path are only used for webhook mode
+#    填入下方 app_id 和 app_secret；port/callback_path 仅在 Webhook 模式下使用
 
 # [[projects.platforms]]
 # type = "lark"
@@ -727,6 +876,7 @@ app_secret = "your-feishu-app-secret"
 # enable_feishu_card = true
 # allow_from = "*"
 # reaction_emoji = "OnIt"
+# done_emoji = "none"
 # progress_style = "legacy"  # legacy | compact | card
 
 # DingTalk / 钉钉 (uncomment to enable / 取消注释以启用)
@@ -839,6 +989,23 @@ app_secret = "your-feishu-app-secret"
 # callback_path = "/callback"
 # allow_from = "*"  # Allowed LINE user IDs / 允许的 LINE 用户 ID
 
+# Weibo / 微博私信 (uncomment to enable / 取消注释以启用)
+# 1. Register an app at https://open.weibo.com/ via 微博龙虾助手
+#    在微博开放平台注册应用，获取 app_id 和 app_secret
+# 2. The bot receives and sends DMs via WebSocket (open-im.api.weibo.com)
+#    机器人通过 WebSocket 收发微博私信
+# Connection: WebSocket — no public URL required / 无需公网地址
+
+# [[projects.platforms]]
+# type = "weibo"
+#
+# [projects.platforms.options]
+# app_id = "your-weibo-app-id"
+# app_secret = "your-weibo-app-secret"
+# allow_from = "*"                 # Allowed Weibo user IDs / 允许的微博用户 ID
+# token_endpoint = ""              # Optional: override token endpoint / 可选：自定义 token 接口地址
+# ws_endpoint = ""                 # Optional: override WebSocket endpoint / 可选：自定义 WebSocket 地址
+
 # WeChat Work / 企业微信 (uncomment to enable / 取消注释以启用)
 # 1. Log in to https://work.weixin.qq.com/wework_admin/frame
 #    登录企业微信管理后台
@@ -870,6 +1037,7 @@ app_secret = "your-feishu-app-secret"
 # callback_aes_key = "your-43-char-encoding-aes-key"
 # port = "8081"
 # callback_path = "/wecom/callback"
+# api_base_url = "https://qyapi.weixin.qq.com"  # optional: WeCom API base URL override / 可选：企业微信 API 基础地址覆盖
 # enable_markdown = false  # set true to send Markdown (only renders in WeChat Work app, NOT personal WeChat)
 #                          # 设为 true 发送 Markdown（仅企业微信应用内可渲染，个人微信显示"暂不支持"）
 # allow_from = "*"  # Allowed WeChat Work user IDs / 允许的企业微信用户 ID
@@ -1187,6 +1355,55 @@ app_secret = "your-feishu-app-secret"
 # token = "your-telegram-bot-token"
 
 # =============================================================================
+# Project: Devin CLI (Cognition, https://cli.devin.ai/) / 使用 Devin CLI
+# =============================================================================
+# Devin speaks the Agent Client Protocol (ACP) over stdio via its `devin acp`
+# subcommand. cc-connect ships a first-class `type = "devin"` agent that pins
+# the command / args / display name so you don't have to.
+# Devin 通过 `devin acp` 子命令使用 ACP 协议与 cc-connect 通信。cc-connect 内置
+# `type = "devin"` 的一级支持：无需手动指定 command/args，默认值就能跑通。
+#
+# Prerequisites / 前置条件:
+#   1. Install Devin CLI per the official docs at https://cli.devin.ai/
+#      安装 Devin CLI，见官方文档 https://cli.devin.ai/
+#   2. Run `devin auth login` once — credentials are stored locally and the
+#      ACP subprocess reads them automatically. cc-connect never sees the token.
+#      运行一次 `devin auth login` 完成登录；ACP 子进程会自动读取本地凭证，
+#      cc-connect 全程不接触 token。
+#   3. Windsurf Enterprise users can alternatively inject WINDSURF_API_KEY
+#      via the agent env option (see below).
+#      Windsurf 企业版用户也可以通过下面的 env 注入 WINDSURF_API_KEY。
+
+# [[projects]]
+# name = "my-devin-project"
+#
+# [projects.agent]
+# type = "devin"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/your/code"
+# # Optional: override only if the `devin` binary is at a non-standard path.
+# # Always use an absolute path when running under launchd / systemd where
+# # $PATH is minimal (e.g. ~/.local/bin may not be included).
+# # command = "/Users/me/.local/bin/devin"
+# #
+# # Optional: initial permission mode applied to new sessions via
+# # session/set_mode. Valid ids: normal, ask, plan, accept-edits, bypass.
+# # 可选：新会话的初始权限模式。合法值：normal / ask / plan / accept-edits / bypass
+# # mode = "normal"
+# #
+# # Optional: Windsurf Enterprise API key (overrides `devin auth login`).
+# # 可选：Windsurf 企业版 API Key（优先级高于 `devin auth login` 的本地凭证）。
+# # [projects.agent.options.env]
+# # WINDSURF_API_KEY = "wk_xxx"
+
+# [[projects.platforms]]
+# type = "telegram"
+#
+# [projects.platforms.options]
+# token = "your-telegram-bot-token"
+
+# =============================================================================
 # Project: ACP (Agent Client Protocol) agent / 使用 ACP 子进程
 # =============================================================================
 # Runs any binary that speaks ACP over stdio (newline-delimited JSON-RPC 2.0).
@@ -1195,6 +1412,9 @@ app_secret = "your-feishu-app-secret"
 # Same agent type works for Cursor Agent CLI, OpenClaw bridge, GitHub Copilot CLI, etc.:
 # set command + args to match each tool's documented ACP entrypoint.
 # 同一 type=acp：通过 command/args 指向各工具文档中的 ACP 启动方式即可。
+# For Devin specifically, prefer the dedicated `type = "devin"` section above.
+# 针对 Devin 建议直接使用上面的 type = "devin"；下面的 type = "acp" 主要给其他
+# 通用 ACP 工具使用。
 
 # --- Example: Cursor Agent CLI (npm: @anthropic-ai/cursor-agent) ---
 # [[projects]]
@@ -1289,6 +1509,45 @@ app_secret = "your-feishu-app-secret"
 # base_url = "https://api.example.com/v1"
 # model = "Qwen3-Coder"
 # env = { IFLOW_selectedAuthType = "openai-compatible" }
+#
+# [[projects.platforms]]
+# type = "telegram"
+#
+# [projects.platforms.options]
+# token = "your-telegram-bot-token"
+
+# =============================================================================
+# Project: Using Kimi CLI / 项目：使用 Kimi CLI (uncomment to enable / 取消注释以启用)
+# =============================================================================
+# Requires: pip install kimi-cli
+# 需要安装：pip install kimi-cli
+# Kimi CLI uses `kimi --print --output-format stream-json` under the hood.
+# Kimi CLI 底层使用 `kimi --print --output-format stream-json` 命令。
+#
+# Authentication / 认证方式:
+#   - Kimi account login (kimi login) / Kimi 账号登录
+#   - MOONSHOT_API_KEY env var / 环境变量
+
+# [[projects]]
+# name = "my-kimi-project"
+#
+# [projects.agent]
+# type = "kimi"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/project"
+# mode = "default"  # "default" | "yolo" | "plan" | "quiet"
+# cmd = "kimi"      # CLI binary name (default: "kimi") / CLI 二进制名称（默认 "kimi"）
+# timeout_mins = 30  # 每次对话超时时间（分钟），0 表示不限制
+#
+# Mode options / 模式说明:
+# - "default": Standard print mode / 标准打印模式
+# - "yolo":    Auto-approve all tool calls / 自动批准所有工具调用
+# - "plan":    Read-only plan mode / 只读规划模式
+# - "quiet":   Quiet mode (final message only) / 静默模式（仅最终消息）
+#
+# Optional: specify a model / 可选：指定模型
+# model = "kimi-k2-0711-preview"
 #
 # [[projects.platforms]]
 # type = "telegram"

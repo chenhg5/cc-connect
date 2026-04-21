@@ -322,30 +322,55 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	codexHome := a.codexHome
 	extraEnv := a.providerEnvLocked()
 	extraEnv = append(extraEnv, a.sessionEnv...)
+	var baseURL string
 	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
 		if m := a.providers[a.activeIdx].Model; m != "" {
 			model = m
 		}
+		baseURL = a.providers[a.activeIdx].BaseURL
 	}
+	provName, provAPIKey, provWireAPI, provHeaders := a.activeProviderCodexConfig()
 	a.mu.Unlock()
+
+	if provName != "" {
+		if err := ensureCodexProviderConfig(codexHome, provName, baseURL, provWireAPI, provHeaders); err != nil {
+			slog.Warn("codex: failed to write provider config", "provider", provName, "error", err)
+		}
+		if err := ensureCodexAuth(codexHome, provAPIKey); err != nil {
+			slog.Warn("codex: failed to write auth.json", "provider", provName, "error", err)
+		}
+	}
 
 	if backend == "app_server" {
 		return newAppServerSession(ctx, appServerURL, a.workDir, model, reasoningEffort, mode, sessionID, extraEnv, codexHome)
 	}
+	if codexHome != "" {
+		extraEnv = append(extraEnv, "CODEX_HOME="+codexHome)
+	}
 
-	return newCodexSession(ctx, a.workDir, model, reasoningEffort, mode, sessionID, extraEnv)
+	return newCodexSession(ctx, a.workDir, model, reasoningEffort, mode, sessionID, baseURL, extraEnv, provName)
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
-	return listCodexSessions(a.workDir)
+	a.mu.RLock()
+	codexHome := a.codexHome
+	workDir := a.workDir
+	a.mu.RUnlock()
+	return listCodexSessions(workDir, codexHome)
 }
 
 func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int) ([]core.HistoryEntry, error) {
-	return getSessionHistory(sessionID, limit)
+	a.mu.RLock()
+	codexHome := a.codexHome
+	a.mu.RUnlock()
+	return getSessionHistory(sessionID, codexHome, limit)
 }
 
 func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
-	path := findSessionFile(sessionID)
+	a.mu.RLock()
+	codexHome := a.codexHome
+	a.mu.RUnlock()
+	path := findSessionFile(sessionID, codexHome)
 	if path == "" {
 		return fmt.Errorf("session file not found: %s", sessionID)
 	}
@@ -368,6 +393,29 @@ func (a *Agent) GetMode() string {
 	return a.mode
 }
 
+func (a *Agent) WorkspaceAgentOptions() map[string]any {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	opts := map[string]any{
+		"mode":    a.mode,
+		"backend": a.backend,
+	}
+	if a.model != "" {
+		opts["model"] = a.model
+	}
+	if a.reasoningEffort != "" {
+		opts["reasoning_effort"] = a.reasoningEffort
+	}
+	if a.appServerURL != "" {
+		opts["app_server_url"] = a.appServerURL
+	}
+	if a.codexHome != "" {
+		opts["codex_home"] = a.codexHome
+	}
+	return opts
+}
+
 // ── SkillProvider implementation ──────────────────────────────
 
 func (a *Agent) SkillDirs() []string {
@@ -375,23 +423,7 @@ func (a *Agent) SkillDirs() []string {
 	if err != nil {
 		absDir = a.workDir
 	}
-	dirs := []string{
-		filepath.Join(absDir, ".codex", "skills"),
-		filepath.Join(absDir, ".claude", "skills"),
-	}
-	codexHome := os.Getenv("CODEX_HOME")
-	if codexHome == "" {
-		if home, err := os.UserHomeDir(); err == nil {
-			codexHome = filepath.Join(home, ".codex")
-		}
-	}
-	if codexHome != "" {
-		dirs = append(dirs, filepath.Join(codexHome, "skills"))
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		dirs = append(dirs, filepath.Join(home, ".claude", "skills"))
-	}
-	return dirs
+	return codexSkillDirs(absDir, a.codexHome)
 }
 
 // ── ContextCompressor implementation ──────────────────────────
@@ -400,6 +432,93 @@ func (a *Agent) SkillDirs() []string {
 // are not reliably executed in exec/resume mode — they may be treated as plain text.
 // See: https://github.com/chenhg5/cc-connect/issues/378
 func (a *Agent) CompressCommand() string { return "" }
+
+func codexSkillDirs(workDir, explicitCodexHome string) []string {
+	homeDir, _ := os.UserHomeDir()
+	codexHome := strings.TrimSpace(explicitCodexHome)
+	if codexHome == "" {
+		codexHome = strings.TrimSpace(os.Getenv("CODEX_HOME"))
+	}
+	if codexHome == "" && homeDir != "" {
+		codexHome = filepath.Join(homeDir, ".codex")
+	}
+
+	projectDirs := walkUpCodexProjectSkillDirs(workDir, homeDir)
+	userDirs := make([]string, 0, 2)
+	if codexHome != "" {
+		userDirs = append(userDirs, filepath.Join(codexHome, "skills"))
+	}
+	if homeDir != "" {
+		userDirs = append(userDirs, filepath.Join(homeDir, ".agents", "skills"))
+	}
+	return uniqueCodexSkillDirs(append(projectDirs, userDirs...))
+}
+
+func walkUpCodexProjectSkillDirs(workDir, homeDir string) []string {
+	current := filepath.Clean(workDir)
+	homeDir = filepath.Clean(homeDir)
+	stopAt := findCodexProjectRoot(current)
+
+	var dirs []string
+	for {
+		if homeDir != "" && sameCodexPath(current, homeDir) {
+			break
+		}
+		dirs = append(dirs,
+			filepath.Join(current, ".agents", "skills"),
+			filepath.Join(current, ".codex", "skills"),
+		)
+		if stopAt != "" && sameCodexPath(current, stopAt) {
+			break
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+	return uniqueCodexSkillDirs(dirs)
+}
+
+func findCodexProjectRoot(start string) string {
+	current := filepath.Clean(start)
+	for {
+		for _, marker := range []string{".git", ".jj"} {
+			if _, err := os.Stat(filepath.Join(current, marker)); err == nil {
+				return current
+			}
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return ""
+		}
+		current = parent
+	}
+}
+
+func sameCodexPath(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
+}
+
+func uniqueCodexSkillDirs(paths []string) []string {
+	seen := make(map[string]struct{}, len(paths))
+	out := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		clean := filepath.Clean(path)
+		if _, ok := seen[clean]; ok {
+			continue
+		}
+		seen[clean] = struct{}{}
+		out = append(out, clean)
+	}
+	return out
+}
 
 // ── MemoryFileProvider implementation ─────────────────────────
 
@@ -483,6 +602,22 @@ func (a *Agent) providerEnvLocked() []string {
 		env = append(env, k+"="+v)
 	}
 	return env
+}
+
+// activeProviderCodexConfig returns Codex-specific config for the active provider.
+// Returns non-empty name when the provider has codex config (wire_api, headers)
+// OR when it has a BaseURL (third-party provider needing auth.json).
+func (a *Agent) activeProviderCodexConfig() (name string, apiKey string, wireAPI string, headers map[string]string) {
+	if a.activeIdx < 0 || a.activeIdx >= len(a.providers) {
+		return
+	}
+	p := a.providers[a.activeIdx]
+	hasCodexConfig := p.CodexWireAPI != "" || len(p.CodexHTTPHeaders) > 0
+	isThirdParty := p.BaseURL != "" && p.APIKey != ""
+	if !hasCodexConfig && !isThirdParty {
+		return
+	}
+	return p.Name, p.APIKey, p.CodexWireAPI, p.CodexHTTPHeaders
 }
 
 func (a *Agent) PermissionModes() []core.PermissionModeInfo {

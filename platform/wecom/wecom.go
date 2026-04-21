@@ -69,6 +69,7 @@ type Platform struct {
 	corpID         string
 	corpSecret     string
 	agentID        string
+	apiBaseURL     string
 	allowFrom      string
 	token          string // callback verification token
 	aesKey         []byte // decoded EncodingAESKey (32 bytes)
@@ -82,6 +83,8 @@ type Platform struct {
 	dedup          msgDedup
 	userNameCache  sync.Map // userID -> display name
 }
+
+const defaultAPIBaseURL = "https://qyapi.weixin.qq.com"
 
 // msgDedup tracks recently processed MsgIds to avoid WeChat Work retry duplicates.
 type msgDedup struct {
@@ -144,6 +147,16 @@ func New(opts map[string]any) (core.Platform, error) {
 	if path == "" {
 		path = "/wecom/callback"
 	}
+	apiBaseURL, _ := opts["api_base_url"].(string)
+	apiBaseURL = strings.TrimRight(strings.TrimSpace(apiBaseURL), "/")
+	if apiBaseURL == "" {
+		apiBaseURL = defaultAPIBaseURL
+	} else {
+		parsed, err := url.Parse(apiBaseURL)
+		if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
+			return nil, fmt.Errorf("wecom: invalid api_base_url %q: must be a valid http(s) URL", apiBaseURL)
+		}
+	}
 
 	transport := &http.Transport{
 		MaxIdleConns:        2,
@@ -174,6 +187,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		corpID:         corpID,
 		corpSecret:     corpSecret,
 		agentID:        agentID,
+		apiBaseURL:     apiBaseURL,
 		allowFrom:      allowFrom,
 		token:          callbackToken,
 		aesKey:         aesKey,
@@ -185,6 +199,18 @@ func New(opts map[string]any) (core.Platform, error) {
 }
 
 func (p *Platform) Name() string { return "wecom" }
+
+func (p *Platform) wecomAPIURL(path string, query url.Values) string {
+	base := strings.TrimRight(strings.TrimSpace(p.apiBaseURL), "/")
+	if base == "" {
+		base = defaultAPIBaseURL
+	}
+	u := base + path
+	if len(query) == 0 {
+		return u
+	}
+	return u + "?" + query.Encode()
+}
 
 func (p *Platform) Start(handler core.MessageHandler) error {
 	p.handler = handler
@@ -490,7 +516,9 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 	}
 
 	body, _ := json.Marshal(payload)
-	apiURL := "https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=" + accessToken
+	apiURL := p.wecomAPIURL("/cgi-bin/message/send", url.Values{
+		"access_token": []string{accessToken},
+	})
 
 	resp, err := p.apiClient.Post(apiURL, "application/json", strings.NewReader(string(body)))
 	if err != nil {
@@ -532,7 +560,10 @@ func (p *Platform) uploadImageMedia(accessToken string, img core.ImageAttachment
 		return "", fmt.Errorf("wecom: close multipart writer: %w", err)
 	}
 
-	apiURL := "https://qyapi.weixin.qq.com/cgi-bin/media/upload?access_token=" + accessToken + "&type=image"
+	apiURL := p.wecomAPIURL("/cgi-bin/media/upload", url.Values{
+		"access_token": []string{accessToken},
+		"type":         []string{"image"},
+	})
 	resp, err := p.apiClient.Post(apiURL, writer.FormDataContentType(), body)
 	if err != nil {
 		return "", fmt.Errorf("wecom: upload image: %w", err)
@@ -567,7 +598,9 @@ func (p *Platform) sendMarkdown(accessToken, toUser, content string) error {
 	}
 
 	body, _ := json.Marshal(payload)
-	apiURL := "https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=" + accessToken
+	apiURL := p.wecomAPIURL("/cgi-bin/message/send", url.Values{
+		"access_token": []string{accessToken},
+	})
 
 	resp, err := p.apiClient.Post(apiURL, "application/json", strings.NewReader(string(body)))
 	if err != nil {
@@ -598,7 +631,9 @@ func (p *Platform) sendText(accessToken, toUser, text string) error {
 	}
 
 	body, _ := json.Marshal(payload)
-	apiURL := "https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=" + accessToken
+	apiURL := p.wecomAPIURL("/cgi-bin/message/send", url.Values{
+		"access_token": []string{accessToken},
+	})
 
 	resp, err := p.apiClient.Post(apiURL, "application/json", strings.NewReader(string(body)))
 	if err != nil {
@@ -627,10 +662,10 @@ func (p *Platform) getAccessToken() (string, error) {
 		return p.tokenCache.token, nil
 	}
 
-	apiURL := fmt.Sprintf(
-		"https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid=%s&corpsecret=%s",
-		p.corpID, p.corpSecret,
-	)
+	apiURL := p.wecomAPIURL("/cgi-bin/gettoken", url.Values{
+		"corpid":     []string{p.corpID},
+		"corpsecret": []string{p.corpSecret},
+	})
 
 	resp, err := p.apiClient.Get(apiURL)
 	if err != nil {
@@ -760,7 +795,10 @@ func (p *Platform) resolveUserName(userID string) string {
 		slog.Debug("wecom: resolve user name: get token failed", "error", err)
 		return userID
 	}
-	apiURL := fmt.Sprintf("https://qyapi.weixin.qq.com/cgi-bin/user/get?access_token=%s&userid=%s", accessToken, url.QueryEscape(userID))
+	apiURL := p.wecomAPIURL("/cgi-bin/user/get", url.Values{
+		"access_token": []string{accessToken},
+		"userid":       []string{userID},
+	})
 	resp, err := p.apiClient.Get(apiURL)
 	if err != nil {
 		slog.Debug("wecom: resolve user name failed", "user", userID, "error", err)
@@ -830,7 +868,10 @@ func (p *Platform) downloadMedia(mediaID string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("get token: %w", err)
 	}
-	u := fmt.Sprintf("https://qyapi.weixin.qq.com/cgi-bin/media/get?access_token=%s&media_id=%s", accessToken, mediaID)
+	u := p.wecomAPIURL("/cgi-bin/media/get", url.Values{
+		"access_token": []string{accessToken},
+		"media_id":     []string{mediaID},
+	})
 	resp, err := p.apiClient.Get(u)
 	if err != nil {
 		return nil, fmt.Errorf("download: %w", err)

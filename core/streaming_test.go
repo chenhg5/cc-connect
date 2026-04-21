@@ -294,6 +294,83 @@ func TestStreamPreview_FinishKeepsPreviewWhenPlatformPrefersInPlaceFinalize(t *t
 	}
 }
 
+func TestStreamPreview_NeedsDoneReaction_TrueAfterUpdate(t *testing.T) {
+	mp := &mockUpdaterPlatform{}
+	cfg := StreamPreviewCfg{
+		Enabled:       true,
+		IntervalMs:    50,
+		MinDeltaChars: 1,
+		MaxChars:      500,
+	}
+
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
+
+	if sp.needsDoneReaction() {
+		t.Error("needsDoneReaction should be false before any send")
+	}
+
+	sp.appendText("Hello World")
+	time.Sleep(100 * time.Millisecond)
+
+	if sp.needsDoneReaction() {
+		t.Error("needsDoneReaction should be false after only SendPreviewStart (no UpdateMessage yet)")
+	}
+
+	sp.appendText(" more text to trigger update")
+	time.Sleep(100 * time.Millisecond)
+
+	msgs := mp.getMessages()
+	hasUpdate := false
+	for _, m := range msgs {
+		if len(m) > 7 && m[:7] == "update:" {
+			hasUpdate = true
+			break
+		}
+	}
+	if !hasUpdate {
+		t.Fatal("expected at least one UpdateMessage call")
+	}
+
+	if !sp.needsDoneReaction() {
+		t.Error("needsDoneReaction should be true after UpdateMessage was used")
+	}
+}
+
+func TestStreamPreview_NeedsDoneReaction_FalseAfterDiscard(t *testing.T) {
+	mp := &mockUpdaterPlatform{}
+	cfg := StreamPreviewCfg{
+		Enabled:       true,
+		IntervalMs:    50,
+		MinDeltaChars: 1,
+		MaxChars:      500,
+	}
+
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
+	sp.appendText("Hello World")
+	time.Sleep(100 * time.Millisecond)
+	sp.appendText(" more text")
+	time.Sleep(100 * time.Millisecond)
+
+	sp.discard()
+
+	if sp.needsDoneReaction() {
+		t.Error("needsDoneReaction should be false after discard (previewMsgID cleared)")
+	}
+}
+
+func TestStreamPreview_NeedsDoneReaction_FalseWhenDisabled(t *testing.T) {
+	mp := &mockUpdaterPlatform{}
+	cfg := StreamPreviewCfg{Enabled: false}
+
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
+	sp.appendText("Hello")
+	time.Sleep(100 * time.Millisecond)
+
+	if sp.needsDoneReaction() {
+		t.Error("needsDoneReaction should be false when preview is disabled")
+	}
+}
+
 func TestStreamPreview_AppliesTransform(t *testing.T) {
 	mp := &mockUpdaterPlatform{}
 	cfg := StreamPreviewCfg{

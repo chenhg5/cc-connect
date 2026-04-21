@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "updated_at": "2026-04-18",
+  "skills": [
+    {
+      "name": "find-skills",
+      "display_name": "Find Skills",
+      "description": "Discover and install specialized agent skills from the open ecosystem when users need extended capabilities",
+      "description_zh": "从开放技能生态中发现和安装专业 Agent 技能，帮助用户扩展 AI 代理能力",
+      "version": "1.0.0",
+      "author": "vercel-labs",
+      "url": "https://skills.sh/vercel-labs/skills/find-skills",
+      "tags": ["skills", "ecosystem", "discovery"],
+      "featured": true,
+      "source": {
+        "provider": "skills.sh",
+        "name": "Skills.sh",
+        "url": "https://skills.sh"
+      },
+      "pricing": {
+        "type": "free"
+      }
+    }
+  ]
+}

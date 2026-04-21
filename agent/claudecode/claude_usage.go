@@ -197,17 +197,7 @@ func (a *Agent) runClaudeUsageProbe(ctx context.Context) (string, error) {
 func (a *Agent) usageProbeEnv() []string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-
-	env := append([]string(nil), a.providerEnvLocked()...)
-	env = append(env, a.sessionEnv...)
-	if a.routerURL != "" {
-		env = append(env, "ANTHROPIC_BASE_URL="+a.routerURL)
-		env = append(env, "NO_PROXY=127.0.0.1")
-		if a.routerAPIKey != "" {
-			env = append(env, "ANTHROPIC_API_KEY="+a.routerAPIKey)
-		}
-	}
-	return env
+	return a.runtimeEnvLocked()
 }
 
 func nextClaudeUsageProbeAction(screen string, state *claudeUsageProbeState, now time.Time) string {
