@@ -163,7 +163,7 @@ func TestInteractivePlatform_OnMessagePassesCardSenderToHandler(t *testing.T) {
 		},
 	}
 
-	if err := ip.onMessage(event); err != nil {
+	if err := ip.onMessage(context.Background(), event); err != nil {
 		t.Fatalf("onMessage() error = %v", err)
 	}
 	wg.Wait()
@@ -443,6 +443,50 @@ func TestInteractivePlatform_CardActionUsesCallbackSessionKey(t *testing.T) {
 	}
 }
 
+func TestInteractivePlatform_ModelCardActionReturnsCardUpdate(t *testing.T) {
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip, ok := platformAny.(*interactivePlatform)
+	if !ok {
+		t.Fatalf("platform type = %T, want *interactivePlatform", platformAny)
+	}
+
+	var gotAction, gotSessionKey string
+	ip.cardNavHandler = func(action string, sessionKey string) *core.Card {
+		gotAction = action
+		gotSessionKey = sessionKey
+		return core.NewCard().Markdown("switching").Build()
+	}
+
+	resp, err := ip.onCardAction(&callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: "ou_test_user"},
+			Action:   &callback.CallBackAction{Value: map[string]any{"action": "act:/model switch 1"}},
+			Context:  &callback.Context{OpenChatID: "oc_test_chat", OpenMessageID: "om_test_message"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("onCardAction() error = %v", err)
+	}
+	if resp == nil || resp.Card == nil {
+		t.Fatalf("expected card response, got %#v", resp)
+	}
+	if gotAction != "act:/model switch 1" {
+		t.Fatalf("action = %q, want act:/model switch 1", gotAction)
+	}
+	if gotSessionKey == "" {
+		t.Fatal("expected non-empty session key")
+	}
+	ip.cardActionMsgMu.Lock()
+	tracked := ip.cardActionMsgIDs[gotSessionKey]
+	ip.cardActionMsgMu.Unlock()
+	if tracked != "om_test_message" {
+		t.Fatalf("tracked message id = %q, want om_test_message", tracked)
+	}
+}
+
 func TestNewLark_PlatformNameAndDomain(t *testing.T) {
 	p, err := newPlatform("lark", lark.LarkBaseUrl, map[string]any{
 		"app_id": "cli_xxx", "app_secret": "secret",
@@ -462,6 +506,29 @@ func TestNewLark_PlatformNameAndDomain(t *testing.T) {
 	}
 }
 
+func TestPlatformShouldUseWebhookMode(t *testing.T) {
+	tests := []struct {
+		name       string
+		platform   string
+		encryptKey string
+		want       bool
+	}{
+		{name: "lark defaults to websocket", platform: "lark", want: false},
+		{name: "lark webhook when encrypt key set", platform: "lark", encryptKey: "enc-key", want: true},
+		{name: "feishu defaults to websocket", platform: "feishu", want: false},
+		{name: "feishu webhook when encrypt key set", platform: "feishu", encryptKey: "enc-key", want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &Platform{platformName: tt.platform, encryptKey: tt.encryptKey}
+			if got := p.shouldUseWebhookMode(); got != tt.want {
+				t.Fatalf("shouldUseWebhookMode() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNewFeishu_PlatformNameAndDomain(t *testing.T) {
 	p, err := New(map[string]any{
 		"app_id": "cli_xxx", "app_secret": "secret",
@@ -471,6 +538,32 @@ func TestNewFeishu_PlatformNameAndDomain(t *testing.T) {
 	}
 	if p.Name() != "feishu" {
 		t.Fatalf("Name() = %q, want feishu", p.Name())
+	}
+}
+
+func TestNewFeishu_CustomDomainOverride(t *testing.T) {
+	customDomain := "https://open.example.invalid"
+	p, err := New(map[string]any{
+		"app_id": "cli_xxx", "app_secret": "secret", "domain": customDomain,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip, ok := p.(*interactivePlatform)
+	if !ok {
+		t.Fatalf("type = %T, want *interactivePlatform", p)
+	}
+	if ip.domain != customDomain {
+		t.Fatalf("domain = %q, want %q", ip.domain, customDomain)
+	}
+}
+
+func TestNewFeishu_InvalidCustomDomain(t *testing.T) {
+	_, err := New(map[string]any{
+		"app_id": "cli_xxx", "app_secret": "secret", "domain": "://bad",
+	})
+	if err == nil {
+		t.Fatal("expected invalid domain error")
 	}
 }
 
@@ -500,7 +593,7 @@ func TestLark_SessionKeyPrefix(t *testing.T) {
 		receivedMsg = msg
 	}
 
-	_ = ip.onMessage(&larkim.P2MessageReceiveV1{
+	_ = ip.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
 		Event: &larkim.P2MessageReceiveV1Data{
 			Sender: &larkim.EventSender{
 				SenderId:   &larkim.UserId{OpenId: &openID},
@@ -557,7 +650,7 @@ func TestLark_ThreadIsolationUsesRootSessionKey(t *testing.T) {
 		receivedMsg = msg
 	}
 
-	_ = ip.onMessage(&larkim.P2MessageReceiveV1{
+	_ = ip.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
 		Event: &larkim.P2MessageReceiveV1Data{
 			Sender: &larkim.EventSender{
 				SenderId:   &larkim.UserId{OpenId: &openID},
@@ -614,7 +707,7 @@ func TestLark_GroupReplyAllWithThreadIsolationUsesRootSessionKeyWithoutMention(t
 		msgCh <- msg
 	}
 
-	if err := ip.onMessage(&larkim.P2MessageReceiveV1{
+	if err := ip.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
 		Event: &larkim.P2MessageReceiveV1Data{
 			Sender: &larkim.EventSender{
 				SenderId:   &larkim.UserId{OpenId: &openID},
@@ -842,5 +935,183 @@ func TestBuildPreviewCardJSON_NormalTextFallback(t *testing.T) {
 	}
 	if !strings.Contains(cardJSON, "\"tag\":\"markdown\"") {
 		t.Fatalf("default preview card should contain markdown element, got %q", cardJSON)
+	}
+}
+
+func TestFormatProgressToolInput_TodoWrite(t *testing.T) {
+	tests := []struct {
+		name            string
+		input           string
+		wantContains    []string
+		notWantContains []string
+	}{
+		{
+			name: "valid todos with all statuses",
+			input: `{"todos": [
+				{"content": "Task 1", "status": "completed", "activeForm": "Completing task 1"},
+				{"content": "Task 2", "status": "in_progress", "activeForm": "Working on task 2"},
+				{"content": "Task 3", "status": "pending", "activeForm": "Planning task 3"}
+			]}`,
+			wantContains:    []string{"✅", "🔄", "⏳", "Task 1", "Task 2", "Task 3", "Completing task 1", "Working on task 2"},
+			notWantContains: []string{"```"},
+		},
+		{
+			name:            "todos without activeForm",
+			input:           `{"todos": [{"content": "Simple task", "status": "pending"}]}`,
+			wantContains:    []string{"⏳", "Simple task"},
+			notWantContains: []string{"(", ")"},
+		},
+		{
+			name:         "invalid JSON falls back to default",
+			input:        `not valid json`,
+			wantContains: []string{"```text"},
+		},
+		{
+			name:         "empty todos array",
+			input:        `{"todos": []}`,
+			wantContains: []string{"```text"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := formatProgressToolInput("TodoWrite", tt.input)
+			for _, want := range tt.wantContains {
+				if !strings.Contains(result, want) {
+					t.Errorf("result should contain %q, got %q", want, result)
+				}
+			}
+			for _, notWant := range tt.notWantContains {
+				if strings.Contains(result, notWant) {
+					t.Errorf("result should not contain %q, got %q", notWant, result)
+				}
+			}
+		})
+	}
+}
+
+func TestFormatProgressToolInput_OtherTools(t *testing.T) {
+	// Non-TodoWrite tools should use default formatting
+	result := formatProgressToolInput("Bash", "ls -la")
+	if !strings.Contains(result, "```bash") {
+		t.Errorf("Bash tool should use bash code block, got %q", result)
+	}
+
+	// TodoWrite with invalid JSON should fall back to text block
+	result = formatProgressToolInput("TodoWrite", "not json")
+	if !strings.Contains(result, "```text") {
+		t.Errorf("TodoWrite with invalid JSON should fall back to text block, got %q", result)
+	}
+}
+
+// --- Mention resolution tests ---
+
+func TestResolveMentions_ReplacesKnownMember(t *testing.T) {
+	p := &Platform{platformName: "feishu", resolveMentions: true}
+	p.chatMemberCache.Store("oc_chat", &chatMemberEntry{
+		members:   map[string]string{"张三": "ou_zhangsan", "李四": "ou_lisi"},
+		fetchedAt: time.Now(),
+	})
+	input := "巡检完成，@张三 @李四 请查看"
+	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
+	if !strings.Contains(result, `<at user_id="ou_zhangsan">张三</at>`) {
+		t.Fatalf("expected 张三 to be resolved, got %q", result)
+	}
+	if !strings.Contains(result, `<at user_id="ou_lisi">李四</at>`) {
+		t.Fatalf("expected 李四 to be resolved, got %q", result)
+	}
+}
+
+func TestResolveMentions_UnknownMemberKeptAsIs(t *testing.T) {
+	p := &Platform{platformName: "feishu", resolveMentions: true}
+	p.chatMemberCache.Store("oc_chat", &chatMemberEntry{
+		members:   map[string]string{"张三": "ou_zhangsan"},
+		fetchedAt: time.Now(),
+	})
+	input := "@不存在的人 请查看"
+	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
+	if strings.Contains(result, "<at") {
+		t.Fatalf("unknown member should not be replaced, got %q", result)
+	}
+}
+
+func TestResolveMentions_LongestMatchFirst(t *testing.T) {
+	p := &Platform{platformName: "feishu", resolveMentions: true}
+	p.chatMemberCache.Store("oc_chat", &chatMemberEntry{
+		members:   map[string]string{"张三": "ou_zhangsan", "张三丰": "ou_zhangsanfeng"},
+		fetchedAt: time.Now(),
+	})
+	input := "@张三丰请查看"
+	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
+	if !strings.Contains(result, "ou_zhangsanfeng") {
+		t.Fatalf("should match 张三丰 (longest), got %q", result)
+	}
+}
+
+func TestResolveMentions_CardFormat(t *testing.T) {
+	p := &Platform{platformName: "feishu", resolveMentions: true}
+	p.chatMemberCache.Store("oc_chat", &chatMemberEntry{
+		members:   map[string]string{"张三": "ou_zhangsan"},
+		fetchedAt: time.Now(),
+	})
+	// Content with complex markdown triggers card format
+	input := "# 巡检报告\n\n@张三 请查看\n\n```\nstatus: ok\n```"
+	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
+	if !strings.Contains(result, "<at id=ou_zhangsan></at>") {
+		t.Fatalf("card format should use <at id=...>, got %q", result)
+	}
+}
+
+func TestResolveMentions_DisabledByConfig(t *testing.T) {
+	p := &Platform{platformName: "feishu", resolveMentions: false}
+	p.chatMemberCache.Store("oc_chat", &chatMemberEntry{
+		members:   map[string]string{"张三": "ou_zhangsan"},
+		fetchedAt: time.Now(),
+	})
+	input := "@张三 请查看"
+	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
+	if result != input {
+		t.Fatalf("resolve_mentions=false should not replace, got %q", result)
+	}
+}
+
+func TestResolveMentions_NoAtSign(t *testing.T) {
+	p := &Platform{platformName: "feishu", resolveMentions: true}
+	input := "普通消息没有at"
+	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
+	if result != input {
+		t.Fatalf("no @ should return unchanged, got %q", result)
+	}
+}
+
+func TestResolveMentions_DuplicateNameSkipped(t *testing.T) {
+	p := &Platform{platformName: "feishu", resolveMentions: true}
+	p.chatMemberCache.Store("oc_chat", &chatMemberEntry{
+		members:   map[string]string{"张三": "", "李四": "ou_lisi"},
+		fetchedAt: time.Now(),
+	})
+	input := "请 @张三 和 @李四 看看"
+	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
+	if !strings.Contains(result, "@张三") {
+		t.Fatal("ambiguous name should be kept as-is")
+	}
+	if strings.Contains(result, "@李四") {
+		t.Fatal("unique name should be resolved")
+	}
+}
+
+func TestResolveMentions_SpecialCharsEscaped(t *testing.T) {
+	p := &Platform{platformName: "feishu", resolveMentions: true}
+	p.chatMemberCache.Store("oc_chat", &chatMemberEntry{
+		members:   map[string]string{`A<"B">`: "ou_special"},
+		fetchedAt: time.Now(),
+	})
+	input := `@A<"B"> 你好`
+	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
+	if strings.Contains(result, `<"B">`) {
+		t.Fatalf("special chars should be escaped, got %q", result)
+	}
+	if !strings.Contains(result, "A&lt;") {
+		t.Fatalf("expected HTML-escaped name, got %q", result)
 	}
 }

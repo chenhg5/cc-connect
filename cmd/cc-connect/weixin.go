@@ -78,7 +78,7 @@ func runWeixinSetup(args []string, requestedMode string) {
 	qrImage := fs.String("qr-image", "", "save QR as PNG (URL encoded; optional)")
 	routeTag := fs.String("route-tag", "", "optional SKRouteTag header")
 	botType := fs.String("bot-type", defaultWeixinBotType, "bot_type query param for get_bot_qrcode")
-	setAllowFromEmpty := fs.Bool("set-allow-from-empty", true, "set allow_from from scanned Weixin user id when currently empty")
+	setAllowFromEmpty := fs.Bool("set-allow-from-empty", false, "merge scanned Weixin user id into allow_from (preserves *)")
 	skipVerify := fs.Bool("skip-verify", false, "bind mode: do not call getUpdates to verify token")
 	debug := fs.Bool("debug", false, "print debug logs for HTTP steps")
 	_ = fs.Parse(args)
@@ -523,7 +523,7 @@ Options:
   --qr-image <path>         Save QR PNG for the login URL
   --route-tag <tag>         Optional SKRouteTag header if your operator requires it
   --bot-type <type>         get_bot_qrcode bot_type (default 3)
-  --set-allow-from-empty    When allow_from empty, set from scanned user (default true)
+  --set-allow-from-empty    Merge scanned user into allow_from (default false)
   --skip-verify             Bind only: skip getUpdates verification
   --debug                   Verbose HTTP logs
 

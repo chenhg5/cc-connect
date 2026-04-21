@@ -98,3 +98,73 @@ func TestBuildPermissionResult(t *testing.T) {
 		t.Fatalf("%v", cancel)
 	}
 }
+
+func TestMapSessionUpdate_toolCall_withRawInput(t *testing.T) {
+	params := json.RawMessage(`{
+		"sessionId": "s1",
+		"update": {
+			"sessionUpdate": "tool_call",
+			"toolCallId": "c1",
+			"title": "Bash",
+			"kind": "bash",
+			"status": "pending",
+			"rawInput": {"command": "ls -la /tmp"}
+		}
+	}`)
+	evs := mapSessionUpdate("", params)
+	if len(evs) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(evs))
+	}
+	if evs[0].Type != core.EventToolUse {
+		t.Fatalf("expected EventToolUse, got %s", evs[0].Type)
+	}
+	if evs[0].ToolInput != "ls -la /tmp" {
+		t.Fatalf("expected tool input 'ls -la /tmp', got %q", evs[0].ToolInput)
+	}
+}
+
+func TestSummarizeACPToolInput(t *testing.T) {
+	tests := []struct {
+		name string
+		kind string
+		raw  string
+		want string
+	}{
+		{
+			name: "bash command",
+			kind: "bash",
+			raw:  `{"command": "echo hello"}`,
+			want: "echo hello",
+		},
+		{
+			name: "read file",
+			kind: "read",
+			raw:  `{"file_path": "/tmp/test.txt"}`,
+			want: "/tmp/test.txt",
+		},
+		{
+			name: "empty raw",
+			kind: "bash",
+			raw:  "",
+			want: "",
+		},
+		{
+			name: "unknown kind falls back to formatted JSON",
+			kind: "unknown_tool",
+			raw:  `{"key": "value"}`,
+			want: "{\n  \"key\": \"value\"\n}",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var raw json.RawMessage
+			if tt.raw != "" {
+				raw = json.RawMessage(tt.raw)
+			}
+			got := summarizeACPToolInput(tt.kind, raw)
+			if got != tt.want {
+				t.Errorf("summarizeACPToolInput(%q, %s) = %q, want %q", tt.kind, tt.raw, got, tt.want)
+			}
+		})
+	}
+}

@@ -4,14 +4,21 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
+	"math/rand/v2"
+	"net"
 	"net/http"
+	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -105,21 +112,26 @@ type replyContext struct {
 }
 
 type Platform struct {
-	platformName          string
-	domain                string
-	appID                 string
-	appSecret             string
-	progressStyle         string
-	useInteractiveCard    bool
-	self                  core.Platform
-	reactionEmoji         string
-	allowFrom             string
-	groupReplyAll         bool
-	shareSessionInChannel bool
-	threadIsolation       bool
+	platformName               string
+	domain                     string
+	appID                      string
+	appSecret                  string
+	progressStyle              string
+	useInteractiveCard         bool
+	self                       core.Platform
+	reactionEmoji              string
+	doneEmoji                  string
+	allowFrom                  string
+	groupReplyAll              bool
+	respondToAtEveryoneAndHere bool
+	shareSessionInChannel      bool
+	threadIsolation            bool
 	// noReplyToTrigger: when true, send via Create instead of Im.Message.Reply (no quote to the user's message).
 	noReplyToTrigger bool
+	resolveMentions  bool
 	client           *lark.Client
+	replayClient     *lark.Client
+	replayClientMu   sync.Mutex
 	wsClient         *larkws.Client
 	handler          core.MessageHandler
 	cardNavHandler   core.CardNavigationHandler
@@ -128,17 +140,24 @@ type Platform struct {
 	botOpenID        string
 	userNameCache    sync.Map // open_id -> display name
 	chatNameCache    sync.Map // chat_id -> chat name
+	chatMemberCache  sync.Map // chatID -> *chatMemberEntry
 	// Webhook mode fields (for Lark international version)
 	server       *http.Server
 	port         string
 	callbackPath string
 	encryptKey   string
 	eventHandler *dispatcher.EventDispatcher
+	// cardActionMessageIDs tracks the most recent card-action messageID per
+	// session key, enabling async card refreshes via the Patch API.
+	cardActionMsgMu  sync.Mutex
+	cardActionMsgIDs map[string]string // sessionKey → messageID
 }
 
 type interactivePlatform struct {
 	*Platform
 }
+
+type feishuRequestFunc func(client *lark.Client, options ...larkcore.RequestOptionFunc) error
 
 func (p *Platform) SetCardNavigationHandler(h core.CardNavigationHandler) {
 	p.cardNavHandler = h
@@ -154,6 +173,15 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	if appID == "" || appSecret == "" {
 		return nil, fmt.Errorf("%s: app_id and app_secret are required", name)
 	}
+	if v, ok := opts["domain"].(string); ok {
+		v = strings.TrimSpace(v)
+		if v != "" {
+			if _, err := url.ParseRequestURI(v); err != nil {
+				return nil, fmt.Errorf("%s: invalid domain %q: %w", name, v, err)
+			}
+			domain = v
+		}
+	}
 	reactionEmoji, _ := opts["reaction_emoji"].(string)
 	if reactionEmoji == "" {
 		reactionEmoji = "OnIt"
@@ -161,11 +189,17 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	if v, ok := opts["reaction_emoji"].(string); ok && v == "none" {
 		reactionEmoji = ""
 	}
+	doneEmoji, _ := opts["done_emoji"].(string)
+	if doneEmoji == "none" {
+		doneEmoji = ""
+	}
 	allowFrom, _ := opts["allow_from"].(string)
 	core.CheckAllowFrom(name, allowFrom)
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
+	respondToAtEveryoneAndHere, _ := opts["respond_to_at_everyone_and_here"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	threadIsolation, _ := opts["thread_isolation"].(bool)
+	resolveMentionsOpt, _ := opts["resolve_mentions"].(bool)
 	noReplyToTrigger := false
 	if v, ok := opts["reply_to_trigger"].(bool); ok && !v {
 		noReplyToTrigger = true
@@ -204,22 +238,26 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	}
 
 	base := &Platform{
-		platformName:          name,
-		domain:                domain,
-		appID:                 appID,
-		appSecret:             appSecret,
-		progressStyle:         progressStyle,
-		useInteractiveCard:    useInteractiveCard,
-		reactionEmoji:         reactionEmoji,
-		allowFrom:             allowFrom,
-		groupReplyAll:         groupReplyAll,
-		shareSessionInChannel: shareSessionInChannel,
-		threadIsolation:       threadIsolation,
-		noReplyToTrigger:      noReplyToTrigger,
-		client:                lark.NewClient(appID, appSecret, clientOpts...),
-		port:                  port,
-		callbackPath:          callbackPath,
-		encryptKey:            encryptKey,
+		platformName:               name,
+		domain:                     domain,
+		appID:                      appID,
+		appSecret:                  appSecret,
+		progressStyle:              progressStyle,
+		useInteractiveCard:         useInteractiveCard,
+		reactionEmoji:              reactionEmoji,
+		doneEmoji:                  doneEmoji,
+		allowFrom:                  allowFrom,
+		groupReplyAll:              groupReplyAll,
+		respondToAtEveryoneAndHere: respondToAtEveryoneAndHere,
+		shareSessionInChannel:      shareSessionInChannel,
+		threadIsolation:            threadIsolation,
+		resolveMentions:            resolveMentionsOpt,
+		noReplyToTrigger:           noReplyToTrigger,
+		client:                     lark.NewClient(appID, appSecret, clientOpts...),
+		replayClient:               newFeishuReplayClient(appID, appSecret, domain),
+		port:                       port,
+		callbackPath:               callbackPath,
+		encryptKey:                 encryptKey,
 	}
 	if !useInteractiveCard {
 		base.self = base
@@ -262,7 +300,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	p.eventHandler = dispatcher.NewEventDispatcher("", p.encryptKey).
 		OnP2MessageReceiveV1(func(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
 			slog.Debug(p.platformName+": message received", "app_id", p.appID)
-			return p.onMessage(event)
+			return p.onMessage(ctx, event)
 		}).
 		OnP2MessageReadV1(func(ctx context.Context, event *larkim.P2MessageReadV1) error {
 			return nil // ignore read receipts
@@ -288,16 +326,22 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 			return p.onBotMenu(event)
 		})
 
-	// Lark international version uses Webhook mode, not WebSocket long connection
-	// Feishu domestic version supports WebSocket long connection
-	if p.platformName == "lark" {
+	if p.useInteractiveCard {
+		slog.Info(p.platformName+": interactive card mode enabled, ensure card.action.trigger event is subscribed in Feishu console")
+	}
+
+	if p.shouldUseWebhookMode() {
 		return p.startWebhookMode()
 	}
 
 	return p.startWebSocketMode()
 }
 
-// startWebSocketMode starts the WebSocket long connection mode (for Feishu domestic version)
+func (p *Platform) shouldUseWebhookMode() bool {
+	return strings.TrimSpace(p.encryptKey) != ""
+}
+
+// startWebSocketMode starts the WebSocket long connection mode.
 func (p *Platform) startWebSocketMode() error {
 	wsOpts := []larkws.ClientOption{
 		larkws.WithEventHandler(p.eventHandler),
@@ -419,6 +463,14 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 
 	// nav: / act: — synchronous card update
 	if strings.HasPrefix(actionVal, "nav:") || strings.HasPrefix(actionVal, "act:") {
+		if messageID != "" {
+			p.cardActionMsgMu.Lock()
+			if p.cardActionMsgIDs == nil {
+				p.cardActionMsgIDs = make(map[string]string)
+			}
+			p.cardActionMsgIDs[sessionKey] = messageID
+			p.cardActionMsgMu.Unlock()
+		}
 		// Feishu uses native form checker for delete-mode toggle,
 		// so return a toast without calling cardNavHandler to avoid a full card refresh.
 		if strings.HasPrefix(actionVal, "act:/delete-mode toggle ") {
@@ -544,10 +596,13 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 }
 
 func (p *Platform) addReaction(messageID string) string {
-	if p.reactionEmoji == "" {
+	return p.addReactionWithEmoji(messageID, p.reactionEmoji)
+}
+
+func (p *Platform) addReactionWithEmoji(messageID, emojiType string) string {
+	if emojiType == "" {
 		return ""
 	}
-	emojiType := p.reactionEmoji
 	resp, err := p.client.Im.MessageReaction.Create(context.Background(),
 		larkim.NewCreateMessageReactionReqBuilder().
 			MessageId(messageID).
@@ -600,7 +655,20 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 	}
 }
 
-func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
+// AddDoneReaction adds a "done" emoji reaction so the user gets a push
+// notification when the agent finishes a multi-round turn in quiet mode.
+func (p *Platform) AddDoneReaction(rctx any) {
+	if p.doneEmoji == "" {
+		return
+	}
+	rc, ok := rctx.(replyContext)
+	if !ok || rc.messageID == "" {
+		return
+	}
+	go p.addReactionWithEmoji(rc.messageID, p.doneEmoji)
+}
+
+func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
 	msg := event.Event.Message
 	sender := event.Event.Sender
 
@@ -614,14 +682,11 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		chatID = *msg.ChatId
 	}
 	userID := ""
-	userName := ""
 	if sender.SenderId != nil && sender.SenderId.OpenId != nil {
 		userID = *sender.SenderId.OpenId
 	}
-	if userID != "" {
-		userName = p.resolveUserName(userID)
-	}
-	chatName := p.resolveChatName(chatID)
+	// userName and chatName are resolved in dispatchMessage to avoid blocking
+	// the SDK dispatcher goroutine with synchronous HTTP calls.
 
 	messageID := ""
 	if msg.MessageId != nil {
@@ -662,8 +727,13 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 
 	if chatType == "group" && !p.groupReplyAll && p.botOpenID != "" {
 		if !isBotMentioned(msg.Mentions, p.botOpenID) {
-			slog.Debug(p.tag()+": ignoring group message without bot mention", "chat_id", chatID)
-			return nil
+			// Feishu @all sends {"text":"@_all"} with 0 mentions.
+			if p.respondToAtEveryoneAndHere && msg.Content != nil && strings.Contains(*msg.Content, "@_all") {
+				slog.Debug(p.tag()+": responding to @all message", "chat_id", chatID)
+			} else {
+				slog.Debug(p.tag()+": ignoring group message without bot mention", "chat_id", chatID)
+				return nil
+			}
 		}
 	}
 
@@ -683,6 +753,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		content = *msg.Content
 	}
 	mentions := msg.Mentions
+	parentID := stringValue(msg.ParentId)
 
 	sessionKey := p.makeSessionKey(msg, chatID, userID)
 	rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
@@ -696,7 +767,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 	// blocked by IO-heavy operations (image/audio download, handler HTTP calls).
 	// The dedup and old-message checks above remain synchronous to guarantee
 	// correctness before spawning the goroutine.
-	go p.dispatchMessage(msgType, content, mentions, messageID, sessionKey, userID, userName, chatName, rctx)
+	go p.dispatchMessage(ctx, msgType, content, mentions, messageID, sessionKey, userID, chatID, rctx, parentID)
 
 	return nil
 }
@@ -704,7 +775,21 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 // dispatchMessage handles the message content parsing, media download, and
 // handler invocation. It runs in its own goroutine so that onMessage returns
 // quickly and does not block the SDK event loop.
-func (p *Platform) dispatchMessage(msgType, content string, mentions []*larkim.MentionEvent, messageID, sessionKey, userID, userName, chatName string, rctx replyContext) {
+func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string, mentions []*larkim.MentionEvent, messageID, sessionKey, userID, chatID string, rctx replyContext, parentID string) {
+	// Resolve user and chat names asynchronously so SDK dispatcher is not blocked.
+	userName := ""
+	if userID != "" {
+		userName = p.resolveUserName(userID)
+	}
+	chatName := p.resolveChatName(chatID)
+
+	// If this message is a reply to another message, fetch the quoted content
+	// and prepend it so the agent has full context.
+	quotedPrefix := ""
+	if parentID != "" {
+		quotedPrefix = p.fetchQuotedMessage(ctx, parentID)
+	}
+
 	switch msgType {
 	case "text":
 		var textBody struct {
@@ -727,7 +812,7 @@ func (p *Platform) dispatchMessage(msgType, content string, mentions []*larkim.M
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
-			Content: text, ReplyCtx: rctx,
+			Content: text, ExtraContent: quotedPrefix, ReplyCtx: rctx,
 		})
 
 	case "image":
@@ -789,7 +874,7 @@ func (p *Platform) dispatchMessage(msgType, content string, mentions []*larkim.M
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
-			Content: text, Images: images,
+			Content: text, ExtraContent: quotedPrefix, Images: images,
 			ReplyCtx: rctx,
 		})
 
@@ -902,6 +987,565 @@ func (p *Platform) resolveChatName(chatID string) string {
 	}
 	p.chatNameCache.Store(chatID, name)
 	return name
+}
+
+// --- Mention resolution ---
+
+const chatMemberCacheTTL = 1 * time.Hour
+
+type chatMemberEntry struct {
+	members   map[string]string // displayName -> openID
+	fetchedAt time.Time
+}
+
+// fetchChatMembers retrieves all members of a chat and returns a name->openID map.
+func (p *Platform) fetchChatMembers(ctx context.Context, chatID string) (map[string]string, error) {
+	if p.client == nil {
+		return nil, fmt.Errorf("%s: client not initialized", p.tag())
+	}
+	members := make(map[string]string)
+	req := larkim.NewGetChatMembersReqBuilder().
+		ChatId(chatID).
+		MemberIdType("open_id").
+		PageSize(100).
+		Build()
+	timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	token, err := p.fetchFreshTenantAccessToken(timeoutCtx)
+	if err != nil {
+		return nil, fmt.Errorf("%s: fetch tenant token for chat members: %w", p.tag(), err)
+	}
+	iter, err := p.client.Im.ChatMembers.GetByIterator(timeoutCtx, req, larkcore.WithTenantAccessToken(token))
+	if err != nil {
+		return nil, fmt.Errorf("%s: list chat members: %w", p.tag(), err)
+	}
+	for {
+		hasMore, member, err := iter.Next()
+		if err != nil {
+			slog.Debug(p.tag()+": fetch chat members page error", "chat_id", chatID, "error", err)
+			break
+		}
+		if member != nil && member.Name != nil && member.MemberId != nil {
+			name := *member.Name
+			if _, exists := members[name]; !exists {
+				members[name] = *member.MemberId
+			} else {
+				members[name] = ""
+			}
+		}
+		if !hasMore {
+			break
+		}
+	}
+	return members, nil
+}
+
+// getChatMembers returns the cached name->openID map for a chat, fetching if needed.
+func (p *Platform) getChatMembers(ctx context.Context, chatID string) map[string]string {
+	if v, ok := p.chatMemberCache.Load(chatID); ok {
+		entry := v.(*chatMemberEntry)
+		if time.Since(entry.fetchedAt) < chatMemberCacheTTL {
+			return entry.members
+		}
+	}
+	members, err := p.fetchChatMembers(ctx, chatID)
+	if err != nil {
+		slog.Debug(p.tag()+": fetch chat members failed", "chat_id", chatID, "error", err)
+		return nil
+	}
+	p.chatMemberCache.Store(chatID, &chatMemberEntry{members: members, fetchedAt: time.Now()})
+	return members
+}
+
+// resolveMentionsInContent replaces @name with Feishu at tags in raw content
+// (before JSON serialization). Reverse-matches against the chat member list,
+// longest name first. Uses the correct at syntax based on predicted message type.
+func (p *Platform) resolveMentionsInContent(ctx context.Context, chatID, content string) string {
+	if !p.resolveMentions || chatID == "" || !strings.Contains(content, "@") {
+		return content
+	}
+	members := p.getChatMembers(ctx, chatID)
+	if len(members) == 0 {
+		return content
+	}
+	// Sort names longest-first to avoid partial matches.
+	names := make([]string, 0, len(members))
+	for name := range members {
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool { return len(names[i]) > len(names[j]) })
+
+	useCardFormat := predictMsgType(content) == larkim.MsgTypeInteractive
+	result := content
+	for _, name := range names {
+		pattern := "@" + name
+		if !strings.Contains(result, pattern) {
+			continue
+		}
+		openID := members[name]
+		if openID == "" {
+			slog.Debug(p.tag()+": skipping ambiguous mention", "name", name)
+			continue
+		}
+		var atTag string
+		if useCardFormat {
+			atTag = fmt.Sprintf(`<at id=%s></at>`, openID)
+		} else {
+			escapedName := html.EscapeString(name)
+			atTag = fmt.Sprintf(`<at user_id="%s">%s</at>`, openID, escapedName)
+		}
+		slog.Debug(p.tag()+": mention resolved", "name", name, "card_format", useCardFormat)
+		result = strings.ReplaceAll(result, pattern, atTag)
+	}
+	return result
+}
+
+// chainMessage holds extracted data from one message in a reply chain.
+type chainMessage struct {
+	senderName string
+	senderType string // "user" or "app"
+	text       string
+	parentID   string
+}
+
+// maxReplyChainDepth is the maximum number of parent messages to traverse
+// when building a reply chain. This limits API calls per inbound reply.
+const maxReplyChainDepth = 5
+
+// fetchQuotedMessage retrieves the content of a parent message that the user
+// is replying to, and returns a formatted prefix string for context injection.
+// For multi-level reply chains, it traces parent_id links up to maxReplyChainDepth
+// levels and returns the full conversation chain.
+// Returns empty string on any failure (graceful degradation — the user's own
+// message is still delivered without the quote).
+func (p *Platform) fetchQuotedMessage(ctx context.Context, parentID string) string {
+	chain := p.fetchReplyChain(ctx, parentID, maxReplyChainDepth)
+	if len(chain) == 0 {
+		return ""
+	}
+	return formatReplyChain(chain)
+}
+
+// fetchSingleMessage retrieves one message by ID from the Feishu API and
+// returns its extracted content as a chainMessage. Returns nil on any failure.
+func (p *Platform) fetchSingleMessage(ctx context.Context, messageID string) *chainMessage {
+	apiPath := fmt.Sprintf("/open-apis/im/v1/messages/%s?card_msg_content_type=raw_card_content", messageID)
+	apiResp, err := p.client.Get(ctx, apiPath, nil, larkcore.AccessTokenTypeTenant)
+	if err != nil {
+		slog.Debug(p.tag()+": fetch single message failed", "message_id", messageID, "error", err)
+		return nil
+	}
+	var resp struct {
+		Code int `json:"code"`
+		Data struct {
+			Items []struct {
+				MsgType  string `json:"msg_type"`
+				ParentID string `json:"parent_id"`
+				Sender   struct {
+					ID         string `json:"id"`
+					SenderType string `json:"sender_type"`
+				} `json:"sender"`
+				Body struct {
+					Content string `json:"content"`
+				} `json:"body"`
+				Mentions []*larkim.Mention `json:"mentions"`
+			} `json:"items"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(apiResp.RawBody, &resp); err != nil || resp.Code != 0 || len(resp.Data.Items) == 0 {
+		slog.Debug(p.tag()+": fetch single message: parse failed or no data", "message_id", messageID)
+		return nil
+	}
+
+	item := resp.Data.Items[0]
+	content := item.Body.Content
+	if content == "" {
+		return nil
+	}
+
+	// Extract plain text based on message type.
+	var text string
+	switch item.MsgType {
+	case "text":
+		var textBody struct {
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal([]byte(content), &textBody); err == nil {
+			text = replaceMentions(textBody.Text, item.Mentions)
+		}
+	case "post":
+		text = extractPostPlainText(content)
+	case "interactive":
+		text = extractInteractiveCardText(content)
+	default:
+		text = fmt.Sprintf("[%s]", item.MsgType)
+	}
+	if text == "" {
+		return nil
+	}
+
+	// Resolve sender name.
+	senderName := ""
+	if item.Sender.SenderType == "app" {
+		// Bot messages: sender ID is app_id, not a user open_id.
+		senderName = "Bot"
+	} else if item.Sender.ID != "" {
+		resolved := p.resolveUserName(item.Sender.ID)
+		if resolved != item.Sender.ID {
+			senderName = resolved
+		} else {
+			senderName = "User"
+		}
+	}
+	if senderName == "" {
+		senderName = "unknown"
+	}
+
+	return &chainMessage{
+		senderName: senderName,
+		senderType: item.Sender.SenderType,
+		text:       text,
+		parentID:   item.ParentID,
+	}
+}
+
+// fetchReplyChain iteratively traverses parent_id links to build a reply chain.
+// Returns messages in chronological order (oldest first). Stops on any failure,
+// circular reference, or when maxDepth is reached.
+func (p *Platform) fetchReplyChain(ctx context.Context, parentID string, maxDepth int) []chainMessage {
+	var chain []chainMessage
+	visited := make(map[string]struct{})
+	currentID := parentID
+
+	for currentID != "" && len(chain) < maxDepth {
+		if _, seen := visited[currentID]; seen {
+			slog.Debug(p.tag()+": reply chain: circular reference detected", "message_id", currentID)
+			break
+		}
+		visited[currentID] = struct{}{}
+
+		msg := p.fetchSingleMessage(ctx, currentID)
+		if msg == nil {
+			break
+		}
+		chain = append(chain, *msg)
+		currentID = msg.parentID
+	}
+
+	// Reverse to chronological order (oldest first).
+	for i, j := 0, len(chain)-1; i < j; i, j = i+1, j-1 {
+		chain[i], chain[j] = chain[j], chain[i]
+	}
+	return chain
+}
+
+// formatReplyChain formats a slice of chain messages into a readable string.
+// Single-message chains use the legacy format for backward compatibility.
+// Multi-message chains use a numbered format with role labels.
+func formatReplyChain(chain []chainMessage) string {
+	if len(chain) == 0 {
+		return ""
+	}
+
+	// Single message: backward-compatible format.
+	if len(chain) == 1 {
+		return fmt.Sprintf("[Quoted message from %s]:\n%s\n\n", chain[0].senderName, chain[0].text)
+	}
+
+	// Multi-message: numbered chain format.
+	var b strings.Builder
+	fmt.Fprintf(&b, "--- Reply chain (%d messages) ---\n", len(chain))
+	for i, msg := range chain {
+		role := "user"
+		if msg.senderType == "app" {
+			role = "assistant"
+		}
+		fmt.Fprintf(&b, "[%d] %s (%s):\n%s\n\n", i+1, msg.senderName, role, msg.text)
+	}
+	b.WriteString("---\n\n")
+	return b.String()
+}
+
+// extractPostPlainText extracts plain text from a Lark post (rich text) JSON content.
+func extractPostPlainText(content string) string {
+	var post struct {
+		Content [][]struct {
+			Tag      string `json:"tag"`
+			Text     string `json:"text"`
+			Language string `json:"language,omitempty"`
+		} `json:"content"`
+		Title string `json:"title"`
+	}
+	// Post content may be wrapped in a locale key like {"zh_cn": {...}}.
+	// Try direct parse first, then try extracting from locale wrapper.
+	if err := json.Unmarshal([]byte(content), &post); err != nil || len(post.Content) == 0 {
+		var localeWrapper map[string]json.RawMessage
+		if err2 := json.Unmarshal([]byte(content), &localeWrapper); err2 == nil {
+			for _, v := range localeWrapper {
+				if err3 := json.Unmarshal(v, &post); err3 == nil && len(post.Content) > 0 {
+					break
+				}
+			}
+		}
+	}
+	if len(post.Content) == 0 {
+		return ""
+	}
+	var parts []string
+	if post.Title != "" {
+		parts = append(parts, post.Title)
+	}
+	for _, para := range post.Content {
+		var line []string
+		for _, elem := range para {
+			switch elem.Tag {
+			case "text":
+				if elem.Text != "" {
+					line = append(line, elem.Text)
+				}
+			case "code_block":
+				if elem.Text != "" {
+					lang := elem.Language
+					line = append(line, "```"+lang+"\n"+elem.Text+"\n```")
+				}
+			}
+		}
+		if len(line) > 0 {
+			parts = append(parts, strings.Join(line, ""))
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+// extractInteractiveCardText extracts readable text from a Feishu interactive card JSON.
+// With raw_card_content, the response wraps the card in {"json_card": "...", ...}.
+// Supports schema 2.0 (body.property.elements with recursive nesting) and
+// legacy format (top-level title + elements).
+func extractInteractiveCardText(content string) string {
+	// Try raw_card_content format: {"json_card": "<escaped JSON>", ...}
+	var wrapper struct {
+		JsonCard string `json:"json_card"`
+	}
+	cardJSON := content
+	if json.Unmarshal([]byte(content), &wrapper) == nil && wrapper.JsonCard != "" {
+		cardJSON = wrapper.JsonCard
+	}
+
+	var card map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(cardJSON), &card); err != nil {
+		return "[interactive card]"
+	}
+
+	var parts []string
+
+	// Schema 2.0: body may use property.elements (standard) or direct elements (simplified).
+	if raw, ok := card["body"]; ok {
+		var body struct {
+			Tag      string            `json:"tag"`
+			Elements []json.RawMessage `json:"elements"`
+			Property struct {
+				Elements []json.RawMessage `json:"elements"`
+			} `json:"property"`
+		}
+		if json.Unmarshal(raw, &body) == nil {
+			if body.Tag == "body" && len(body.Property.Elements) > 0 {
+				extractCardElements(body.Property.Elements, &parts)
+			} else if len(body.Elements) > 0 {
+				extractCardElements(body.Elements, &parts)
+			}
+		}
+	}
+
+	// Legacy: direct title string + flat/nested elements.
+	if len(parts) == 0 {
+		if raw, ok := card["header"]; ok {
+			var header struct {
+				Title struct {
+					Content string `json:"content"`
+				} `json:"title"`
+			}
+			if json.Unmarshal(raw, &header) == nil && header.Title.Content != "" {
+				parts = append(parts, header.Title.Content)
+			}
+		}
+		if len(parts) == 0 {
+			if raw, ok := card["title"]; ok {
+				var title string
+				if json.Unmarshal(raw, &title) == nil && title != "" {
+					parts = append(parts, title)
+				}
+			}
+		}
+		var elements []json.RawMessage
+		if raw, ok := card["elements"]; ok {
+			var nested [][]json.RawMessage
+			if json.Unmarshal(raw, &nested) == nil && len(nested) > 0 {
+				for _, row := range nested {
+					elements = append(elements, row...)
+				}
+			} else {
+				_ = json.Unmarshal(raw, &elements)
+			}
+		}
+		for _, raw := range elements {
+			var elem struct {
+				Tag  string `json:"tag"`
+				Text string `json:"text"`
+			}
+			if json.Unmarshal(raw, &elem) == nil && elem.Tag == "text" && strings.TrimSpace(elem.Text) != "" {
+				parts = append(parts, elem.Text)
+			}
+		}
+	}
+
+	if len(parts) == 0 {
+		return "[interactive card]"
+	}
+	return strings.Join(parts, "\n")
+}
+
+// extractCardElements recursively extracts text from schema 2.0 card elements.
+// Handles: property.content, property.text (nested element), property.elements (recursive),
+// code_span, code_block (with tokenized contents), text_tag, hr, etc.
+func extractCardElements(elements []json.RawMessage, parts *[]string) {
+	for _, raw := range elements {
+		var elem struct {
+			Tag      string `json:"tag"`
+			Content  string `json:"content"`
+			Property struct {
+				Content  string            `json:"content"`
+				Contents json.RawMessage   `json:"contents"`
+				Language string            `json:"language"`
+				Elements []json.RawMessage `json:"elements"`
+				Text     json.RawMessage   `json:"text"`
+				Items    json.RawMessage   `json:"items"`
+				Columns  json.RawMessage   `json:"columns"`
+				Rows     json.RawMessage   `json:"rows"`
+			} `json:"property"`
+		}
+		if json.Unmarshal(raw, &elem) != nil {
+			continue
+		}
+		switch elem.Tag {
+		case "code_block":
+			var lines []struct {
+				Contents []struct {
+					Content string `json:"content"`
+				} `json:"contents"`
+			}
+			if json.Unmarshal(elem.Property.Contents, &lines) == nil {
+				var codeLines []string
+				for _, line := range lines {
+					var lineText string
+					for _, tok := range line.Contents {
+						lineText += tok.Content
+					}
+					codeLines = append(codeLines, lineText)
+				}
+				code := strings.Join(codeLines, "")
+				if strings.TrimSpace(code) != "" {
+					lang := elem.Property.Language
+					if lang != "" {
+						*parts = append(*parts, fmt.Sprintf("```%s\n%s```", lang, code))
+					} else {
+						*parts = append(*parts, fmt.Sprintf("```\n%s```", code))
+					}
+				}
+			}
+		case "code_span":
+			if elem.Property.Content != "" {
+				*parts = append(*parts, "`"+elem.Property.Content+"`")
+			}
+		case "hr":
+			*parts = append(*parts, "---")
+		case "table":
+			extractCardTable(elem.Property.Columns, elem.Property.Rows, parts)
+		case "list":
+			extractCardListItems(elem.Property.Items, parts)
+		default:
+			content := elem.Property.Content
+			if content == "" {
+				content = elem.Content
+			}
+			if content != "" {
+				*parts = append(*parts, content)
+			}
+			if len(elem.Property.Text) > 0 {
+				var textElem struct {
+					Property struct {
+						Content string `json:"content"`
+					} `json:"property"`
+				}
+				if json.Unmarshal(elem.Property.Text, &textElem) == nil && textElem.Property.Content != "" {
+					*parts = append(*parts, textElem.Property.Content)
+				}
+			}
+		}
+		if len(elem.Property.Elements) > 0 {
+			extractCardElements(elem.Property.Elements, parts)
+		}
+	}
+}
+
+// extractCardTable extracts text from a Feishu card table element.
+// Table structure: property.columns defines column names/headers,
+// property.rows is an array of row objects where each key is the column name
+// and the value has a "data" field containing a markdown/plain_text element.
+func extractCardTable(columnsRaw, rowsRaw json.RawMessage, parts *[]string) {
+	var columns []struct {
+		DisplayName string `json:"displayName"`
+		Name        string `json:"name"`
+	}
+	if err := json.Unmarshal(columnsRaw, &columns); err != nil || len(columns) == 0 {
+		return
+	}
+	var rows []map[string]struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(rowsRaw, &rows); err != nil {
+		return
+	}
+
+	// Build markdown table.
+	header := make([]string, len(columns))
+	for i, col := range columns {
+		header[i] = col.DisplayName
+	}
+	*parts = append(*parts, "| "+strings.Join(header, " | ")+" |")
+	sep := make([]string, len(columns))
+	for i := range sep {
+		sep[i] = "---"
+	}
+	*parts = append(*parts, "| "+strings.Join(sep, " | ")+" |")
+
+	for _, row := range rows {
+		cells := make([]string, len(columns))
+		for i, col := range columns {
+			cell := row[col.Name]
+			var cellParts []string
+			extractCardElements([]json.RawMessage{cell.Data}, &cellParts)
+			cells[i] = strings.Join(cellParts, " ")
+		}
+		*parts = append(*parts, "| "+strings.Join(cells, " | ")+" |")
+	}
+}
+
+// extractCardListItems extracts text from a Feishu card list element.
+// List structure: property.items is an array of items, each with an "elements" array.
+func extractCardListItems(itemsRaw json.RawMessage, parts *[]string) {
+	var items []struct {
+		Elements []json.RawMessage `json:"elements"`
+	}
+	if err := json.Unmarshal(itemsRaw, &items); err != nil {
+		return
+	}
+	for _, item := range items {
+		var itemParts []string
+		extractCardElements(item.Elements, &itemParts)
+		if len(itemParts) > 0 {
+			*parts = append(*parts, "- "+strings.Join(itemParts, " "))
+		}
+	}
 }
 
 // parseMergeForward fetches sub-messages of a merge_forward message via the
@@ -1087,23 +1731,13 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
 	}
 
+	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
 	msgType, msgBody := buildReplyContent(content)
 
 	if !p.shouldUseThreadOrReplyAPI(rc) {
 		return p.sendNewMessageToChat(ctx, rc, msgType, msgBody)
 	}
-
-	resp, err := p.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
-		MessageId(rc.messageID).
-		Body(p.buildReplyMessageReqBody(rc, msgType, msgBody)).
-		Build())
-	if err != nil {
-		return fmt.Errorf("%s: reply api call: %w", p.tag(), err)
-	}
-	if !resp.Success() {
-		return fmt.Errorf("%s: reply failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
-	}
-	return nil
+	return p.replyMessage(ctx, rc, msgType, msgBody)
 }
 
 // Send sends a message. When the original message ID is available, the message
@@ -1119,6 +1753,7 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 		return p.Reply(ctx, rctx, content)
 	}
 
+	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
 	msgType, msgBody := buildReplyContent(content)
 	return p.sendNewMessageToChat(ctx, rc, msgType, msgBody)
 }
@@ -1129,18 +1764,27 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 		return fmt.Errorf("%s: SendImage: invalid reply context type %T", p.tag(), rctx)
 	}
 
-	uploadResp, err := p.client.Im.Image.Create(ctx,
-		larkim.NewCreateImageReqBuilder().
-			Body(larkim.NewCreateImageReqBodyBuilder().
-				ImageType("message").
-				Image(bytes.NewReader(img.Data)).
-				Build()).
-			Build())
-	if err != nil {
-		return fmt.Errorf("%s: upload image: %w", p.tag(), err)
-	}
-	if !uploadResp.Success() {
-		return fmt.Errorf("%s: upload image code=%d msg=%s", p.tag(), uploadResp.Code, uploadResp.Msg)
+	var uploadResp *larkim.CreateImageResp
+	if err := p.withTransientRetry(ctx, "upload image", func() error {
+		return p.withFreshTenantAccessTokenRetry(ctx, "upload image", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+			req := larkim.NewCreateImageReqBuilder().
+				Body(larkim.NewCreateImageReqBodyBuilder().
+					ImageType("message").
+					Image(bytes.NewReader(img.Data)).
+					Build()).
+				Build()
+			var err error
+			uploadResp, err = client.Im.Image.Create(ctx, req, options...)
+			if err != nil {
+				return fmt.Errorf("%s: upload image: %w", p.tag(), err)
+			}
+			if !uploadResp.Success() {
+				return fmt.Errorf("%s: upload image code=%d msg=%s", p.tag(), uploadResp.Code, uploadResp.Msg)
+			}
+			return nil
+		})
+	}); err != nil {
+		return err
 	}
 	if uploadResp.Data == nil || uploadResp.Data.ImageKey == nil {
 		return fmt.Errorf("%s: upload image: no image_key returned", p.tag())
@@ -1165,19 +1809,28 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 		fileName = "attachment"
 	}
 	fileType := detectFeishuFileType(file.MimeType, fileName)
-	uploadResp, err := p.client.Im.File.Create(ctx,
-		larkim.NewCreateFileReqBuilder().
-			Body(larkim.NewCreateFileReqBodyBuilder().
-				FileType(fileType).
-				FileName(fileName).
-				File(bytes.NewReader(file.Data)).
-				Build()).
-			Build())
-	if err != nil {
-		return fmt.Errorf("%s: upload file: %w", p.tag(), err)
-	}
-	if !uploadResp.Success() {
-		return fmt.Errorf("%s: upload file code=%d msg=%s", p.tag(), uploadResp.Code, uploadResp.Msg)
+	var uploadResp *larkim.CreateFileResp
+	if err := p.withTransientRetry(ctx, "upload file", func() error {
+		return p.withFreshTenantAccessTokenRetry(ctx, "upload file", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+			req := larkim.NewCreateFileReqBuilder().
+				Body(larkim.NewCreateFileReqBodyBuilder().
+					FileType(fileType).
+					FileName(fileName).
+					File(bytes.NewReader(file.Data)).
+					Build()).
+				Build()
+			var err error
+			uploadResp, err = client.Im.File.Create(ctx, req, options...)
+			if err != nil {
+				return fmt.Errorf("%s: upload file: %w", p.tag(), err)
+			}
+			if !uploadResp.Success() {
+				return fmt.Errorf("%s: upload file code=%d msg=%s", p.tag(), uploadResp.Code, uploadResp.Msg)
+			}
+			return nil
+		})
+	}); err != nil {
+		return err
 	}
 	if uploadResp.Data == nil || uploadResp.Data.FileKey == nil {
 		return fmt.Errorf("%s: upload file: no file_key returned", p.tag())
@@ -1193,34 +1846,9 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 
 func (p *Platform) sendMediaMessage(ctx context.Context, rc replyContext, msgType, content string) error {
 	if p.shouldUseThreadOrReplyAPI(rc) {
-		replyResp, err := p.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
-			MessageId(rc.messageID).
-			Body(p.buildReplyMessageReqBody(rc, msgType, content)).
-			Build())
-		if err != nil {
-			return fmt.Errorf("%s: send media message: %w", p.tag(), err)
-		}
-		if !replyResp.Success() {
-			return fmt.Errorf("%s: send media message code=%d msg=%s", p.tag(), replyResp.Code, replyResp.Msg)
-		}
-		return nil
+		return p.replyMessage(ctx, rc, msgType, content)
 	}
-
-	sendResp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
-		ReceiveIdType(larkim.ReceiveIdTypeChatId).
-		Body(larkim.NewCreateMessageReqBodyBuilder().
-			ReceiveId(rc.chatID).
-			MsgType(msgType).
-			Content(content).
-			Build()).
-		Build())
-	if err != nil {
-		return fmt.Errorf("%s: send media message: %w", p.tag(), err)
-	}
-	if !sendResp.Success() {
-		return fmt.Errorf("%s: send media message code=%d msg=%s", p.tag(), sendResp.Code, sendResp.Msg)
-	}
-	return nil
+	return p.createMessage(ctx, rc.chatID, msgType, content, "send media message")
 }
 
 func detectFeishuFileType(mimeType, fileName string) string {
@@ -1311,26 +1939,32 @@ func detectMimeType(data []byte) string {
 	return "image/png"
 }
 
+// predictMsgType returns the message type that buildReplyContent will choose,
+// without actually building the content. Used to select the correct at syntax
+// before building.
+func predictMsgType(content string) string {
+	if !containsMarkdown(content) {
+		return larkim.MsgTypeText
+	}
+	if countMarkdownTables(content) <= maxCardTables {
+		return larkim.MsgTypeInteractive
+	}
+	return larkim.MsgTypePost
+}
+
 func buildReplyContent(content string) (msgType string, body string) {
 	if !containsMarkdown(content) {
 		b, _ := json.Marshal(map[string]string{"text": content})
 		return larkim.MsgTypeText, string(b)
 	}
-	// Three-tier rendering strategy:
-	// 1. Code blocks / tables → card (schema 2.0 markdown)
-	// 2. Many \n\n paragraphs (help, status, etc.) → post rich-text (preserves blank lines)
-	// 3. Other markdown → post md tag (best native rendering)
-	//
-	// Feishu cards support at most 5 tables (API error 11310).
-	// When content exceeds this limit, fall back to post with md tag
-	// which still renders tables without the card table cap.
-	if hasComplexMarkdown(content) && countMarkdownTables(content) <= maxCardTables {
-		return larkim.MsgTypeInteractive, buildCardJSON(sanitizeMarkdownURLs(preprocessFeishuMarkdown(content)))
+	// Prefer card for all markdown content — card schema 2.0 has the best
+	// markdown rendering (headings, blockquotes, code blocks, tables, links,
+	// strikethrough, etc.). Only fall back to post md tag when the content
+	// exceeds the card table limit (Feishu API error 11310: max 5 tables).
+	if countMarkdownTables(content) > maxCardTables {
+		return larkim.MsgTypePost, buildPostMdJSON(content)
 	}
-	if strings.Count(content, "\n\n") >= 2 {
-		return larkim.MsgTypePost, buildPostJSON(content)
-	}
-	return larkim.MsgTypePost, buildPostMdJSON(content)
+	return larkim.MsgTypeInteractive, buildCardJSON(sanitizeMarkdownURLs(preprocessFeishuMarkdown(content)))
 }
 
 // hasComplexMarkdown detects code blocks or tables that require card rendering.
@@ -1741,21 +2375,7 @@ func (p *Platform) sendNewMessageToChat(ctx context.Context, rc replyContext, ms
 	if rc.chatID == "" {
 		return fmt.Errorf("%s: chatID is empty, cannot send new message", p.tag())
 	}
-	resp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
-		ReceiveIdType(larkim.ReceiveIdTypeChatId).
-		Body(larkim.NewCreateMessageReqBodyBuilder().
-			ReceiveId(rc.chatID).
-			MsgType(msgType).
-			Content(content).
-			Build()).
-		Build())
-	if err != nil {
-		return fmt.Errorf("%s: send api call: %w", p.tag(), err)
-	}
-	if !resp.Success() {
-		return fmt.Errorf("%s: send failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
-	}
-	return nil
+	return p.createMessage(ctx, rc.chatID, msgType, content, "send")
 }
 
 func (p *Platform) buildReplyMessageReqBody(rc replyContext, msgType, content string) *larkim.ReplyMessageReqBody {
@@ -1766,6 +2386,193 @@ func (p *Platform) buildReplyMessageReqBody(rc replyContext, msgType, content st
 		body.ReplyInThread(true)
 	}
 	return body.Build()
+}
+
+func (p *Platform) replyMessage(ctx context.Context, rc replyContext, msgType, content string) error {
+	req := larkim.NewReplyMessageReqBuilder().
+		MessageId(rc.messageID).
+		Body(p.buildReplyMessageReqBody(rc, msgType, content)).
+		Build()
+	return p.withTransientRetry(ctx, "reply", func() error {
+		return p.withFreshTenantAccessTokenRetry(ctx, "reply", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+			resp, err := client.Im.Message.Reply(ctx, req, options...)
+			if err != nil {
+				return fmt.Errorf("%s: reply api call: %w", p.tag(), err)
+			}
+			if !resp.Success() {
+				return fmt.Errorf("%s: reply failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+			}
+			return nil
+		})
+	})
+}
+
+func (p *Platform) createMessage(ctx context.Context, chatID, msgType, content, op string) error {
+	req := larkim.NewCreateMessageReqBuilder().
+		ReceiveIdType(larkim.ReceiveIdTypeChatId).
+		Body(larkim.NewCreateMessageReqBodyBuilder().
+			ReceiveId(chatID).
+			MsgType(msgType).
+			Content(content).
+			Build()).
+		Build()
+	return p.withTransientRetry(ctx, op, func() error {
+		return p.withFreshTenantAccessTokenRetry(ctx, op, func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+			resp, err := client.Im.Message.Create(ctx, req, options...)
+			if err != nil {
+				return fmt.Errorf("%s: %s api call: %w", p.tag(), op, err)
+			}
+			if !resp.Success() {
+				return fmt.Errorf("%s: %s failed code=%d msg=%s", p.tag(), op, resp.Code, resp.Msg)
+			}
+			return nil
+		})
+	})
+}
+
+func (p *Platform) withFreshTenantAccessTokenRetry(ctx context.Context, operation string, fn feishuRequestFunc) error {
+	err := fn(p.client)
+	if !isTenantAccessTokenInvalid(err) {
+		return err
+	}
+
+	freshToken, refreshErr := p.fetchFreshTenantAccessToken(ctx)
+	if refreshErr != nil {
+		return fmt.Errorf("%s: %s failed after token refresh attempt: %w (original error: %v)", p.tag(), operation, refreshErr, err)
+	}
+
+	slog.Warn(p.tag()+": retrying request with fresh tenant access token", "operation", operation)
+	return fn(p.replayAPIClient(), larkcore.WithTenantAccessToken(freshToken))
+}
+
+func (p *Platform) fetchFreshTenantAccessToken(ctx context.Context) (string, error) {
+	resp, err := p.replayAPIClient().GetTenantAccessTokenBySelfBuiltApp(ctx, &larkcore.SelfBuiltTenantAccessTokenReq{
+		AppID:     p.appID,
+		AppSecret: p.appSecret,
+	})
+	if err != nil {
+		return "", fmt.Errorf("%s: fetch tenant access token: %w", p.tag(), err)
+	}
+	if !resp.Success() {
+		return "", fmt.Errorf("%s: fetch tenant access token code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+	}
+	if strings.TrimSpace(resp.TenantAccessToken) == "" {
+		return "", fmt.Errorf("%s: fetch tenant access token returned empty token", p.tag())
+	}
+	return resp.TenantAccessToken, nil
+}
+
+func (p *Platform) replayAPIClient() *lark.Client {
+	p.replayClientMu.Lock()
+	defer p.replayClientMu.Unlock()
+	if p.replayClient == nil {
+		p.replayClient = newFeishuReplayClient(p.appID, p.appSecret, p.domain)
+	}
+	return p.replayClient
+}
+
+func newFeishuReplayClient(appID, appSecret, domain string) *lark.Client {
+	var opts []lark.ClientOptionFunc
+	opts = append(opts, lark.WithEnableTokenCache(false))
+	if domain != "" && domain != lark.FeishuBaseUrl {
+		opts = append(opts, lark.WithOpenBaseUrl(domain))
+	}
+	return lark.NewClient(appID, appSecret, opts...)
+}
+
+func isTenantAccessTokenInvalid(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "99991663") || strings.Contains(msg, "invalid access token")
+}
+
+// Transient retry constants for network-level failures.
+const (
+	maxTransientRetries    = 3
+	transientRetryInitial  = 500 * time.Millisecond
+	transientRetryMaxDelay = 5 * time.Second
+)
+
+// isTransientError returns true if the error is a transient network error
+// that warrants a retry (connection reset, timeout, EOF, etc.).
+func isTransientError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Typed syscall checks — more robust than string matching.
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) {
+		return true
+	}
+	// net.Error covers timeouts and temporary errors from the stdlib.
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	// EOF usually means the server closed the connection mid-response.
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	// Unwrapped string checks for common transient symptoms that may
+	// appear in wrapped Feishu SDK errors.
+	msg := err.Error()
+	for _, substr := range []string{
+		"connection reset by peer",
+		"broken pipe",
+		"i/o timeout",
+		"TLS handshake timeout",
+		"server misbehaving",
+		"connection refused",
+	} {
+		if strings.Contains(msg, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+// withTransientRetry wraps an operation with exponential-backoff retry on
+// transient network errors. Non-transient errors are returned immediately.
+// Jitter (up to +25% of delay) is added to prevent thundering-herd retries.
+func (p *Platform) withTransientRetry(ctx context.Context, operation string, fn func() error) error {
+	var lastErr error
+	delay := transientRetryInitial
+	for attempt := 0; attempt <= maxTransientRetries; attempt++ {
+		lastErr = fn()
+		if lastErr == nil {
+			if attempt > 0 {
+				slog.Info(p.tag()+": transient retry succeeded",
+					"operation", operation,
+					"attempt", attempt+1,
+				)
+			}
+			return nil
+		}
+		if !isTransientError(lastErr) {
+			return lastErr
+		}
+		if attempt == maxTransientRetries {
+			break
+		}
+		// Add jitter: up to +25% of delay to spread out concurrent retries.
+		jitter := time.Duration(rand.Int64N(int64(delay / 4)))
+		actualDelay := delay + jitter
+		slog.Warn(p.tag()+": transient error, retrying",
+			"operation", operation,
+			"attempt", attempt+1,
+			"max_retries", maxTransientRetries,
+			"delay", actualDelay,
+			"error", lastErr,
+		)
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%s: %s retry cancelled: %w (last error: %v)", p.tag(), operation, ctx.Err(), lastErr)
+		case <-time.After(actualDelay):
+		}
+		delay = min(delay*2, transientRetryMaxDelay)
+	}
+	return fmt.Errorf("%s failed after %d retries: %w", operation, maxTransientRetries, lastErr)
 }
 
 func stringValue(v *string) string {
@@ -1947,11 +2754,86 @@ func isBashToolName(toolName string) bool {
 	}
 }
 
+func isTodoWriteToolName(toolName string) bool {
+	return strings.EqualFold(strings.TrimSpace(toolName), "todowrite")
+}
+
+// todoItem represents a single todo item from TodoWrite tool input.
+type todoItem struct {
+	ActiveForm string `json:"activeForm"`
+	Content    string `json:"content"`
+	Status     string `json:"status"`
+}
+
+// todoWriteInput represents the TodoWrite tool input structure.
+type todoWriteInput struct {
+	Todos []todoItem `json:"todos"`
+}
+
+// formatTodoWriteInput formats TodoWrite JSON input into a readable markdown list.
+// Returns empty string if parsing fails or input is invalid.
+func formatTodoWriteInput(text string, lang string) string {
+	var input todoWriteInput
+	if err := json.Unmarshal([]byte(text), &input); err != nil {
+		return "" // Fall back to default formatting
+	}
+	if len(input.Todos) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	for _, todo := range input.Todos {
+		var icon string
+		switch strings.ToLower(strings.TrimSpace(todo.Status)) {
+		case "completed":
+			icon = "✅"
+		case "in_progress":
+			icon = "🔄"
+		case "pending":
+			icon = "⏳"
+		default:
+			icon = "•"
+		}
+
+		content := strings.TrimSpace(todo.Content)
+		if content == "" {
+			continue
+		}
+
+		// Escape markdown special characters
+		content = strings.ReplaceAll(content, "`", "'")
+
+		sb.WriteString(icon)
+		sb.WriteString(" ")
+		sb.WriteString(content)
+
+		activeForm := strings.TrimSpace(todo.ActiveForm)
+		if activeForm != "" && activeForm != content {
+			sb.WriteString(" _(")
+			sb.WriteString(strings.ReplaceAll(activeForm, "`", "'"))
+			sb.WriteString(")_")
+		}
+		sb.WriteString("\n")
+	}
+
+	return strings.TrimSuffix(sb.String(), "\n")
+}
+
 func formatProgressToolInput(toolName, text string) string {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return ""
 	}
+
+	// Special handling for TodoWrite tool - format JSON as readable list
+	if isTodoWriteToolName(toolName) {
+		if formatted := formatTodoWriteInput(text, ""); formatted != "" {
+			return formatted
+		}
+		// JSON parsing failed or empty todos - show raw input as text block
+		return fmt.Sprintf("```text\n%s\n```", text)
+	}
+
 	text = preprocessFeishuMarkdown(sanitizeMarkdownURLs(text))
 	if strings.Contains(text, "```") {
 		return text
@@ -2168,33 +3050,53 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 
 	var msgID string
 	if p.shouldUseThreadOrReplyAPI(rc) {
-		resp, err := p.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
+		req := larkim.NewReplyMessageReqBuilder().
 			MessageId(rc.messageID).
 			Body(p.buildReplyMessageReqBody(rc, larkim.MsgTypeInteractive, cardJSON)).
-			Build())
-		if err != nil {
-			return nil, fmt.Errorf("%s: send preview (reply): %w", p.tag(), err)
-		}
-		if !resp.Success() {
-			return nil, fmt.Errorf("%s: send preview (reply) code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+			Build()
+		var resp *larkim.ReplyMessageResp
+		if err := p.withTransientRetry(ctx, "send preview", func() error {
+			return p.withFreshTenantAccessTokenRetry(ctx, "send preview", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+				var err error
+				resp, err = client.Im.Message.Reply(ctx, req, options...)
+				if err != nil {
+					return fmt.Errorf("%s: send preview (reply): %w", p.tag(), err)
+				}
+				if !resp.Success() {
+					return fmt.Errorf("%s: send preview (reply) code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+				}
+				return nil
+			})
+		}); err != nil {
+			return nil, err
 		}
 		if resp.Data != nil && resp.Data.MessageId != nil {
 			msgID = *resp.Data.MessageId
 		}
 	} else {
-		resp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
+		req := larkim.NewCreateMessageReqBuilder().
 			ReceiveIdType(larkim.ReceiveIdTypeChatId).
 			Body(larkim.NewCreateMessageReqBodyBuilder().
 				ReceiveId(chatID).
 				MsgType(larkim.MsgTypeInteractive).
 				Content(cardJSON).
 				Build()).
-			Build())
-		if err != nil {
-			return nil, fmt.Errorf("%s: send preview: %w", p.tag(), err)
-		}
-		if !resp.Success() {
-			return nil, fmt.Errorf("%s: send preview code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+			Build()
+		var resp *larkim.CreateMessageResp
+		if err := p.withTransientRetry(ctx, "send preview", func() error {
+			return p.withFreshTenantAccessTokenRetry(ctx, "send preview", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+				var err error
+				resp, err = client.Im.Message.Create(ctx, req, options...)
+				if err != nil {
+					return fmt.Errorf("%s: send preview: %w", p.tag(), err)
+				}
+				if !resp.Success() {
+					return fmt.Errorf("%s: send preview code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+				}
+				return nil
+			})
+		}); err != nil {
+			return nil, err
 		}
 		if resp.Data != nil && resp.Data.MessageId != nil {
 			msgID = *resp.Data.MessageId
@@ -2230,19 +3132,24 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 		}
 		cardJSON = buildCardJSON(sanitizeMarkdownURLs(processed))
 	}
-	resp, err := p.client.Im.Message.Patch(ctx, larkim.NewPatchMessageReqBuilder().
+	req := larkim.NewPatchMessageReqBuilder().
 		MessageId(h.messageID).
 		Body(larkim.NewPatchMessageReqBodyBuilder().
 			Content(cardJSON).
 			Build()).
-		Build())
-	if err != nil {
-		return fmt.Errorf("%s: patch message: %w", p.tag(), err)
-	}
-	if !resp.Success() {
-		return fmt.Errorf("%s: patch message code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
-	}
-	return nil
+		Build()
+	return p.withTransientRetry(ctx, "patch message", func() error {
+		return p.withFreshTenantAccessTokenRetry(ctx, "patch message", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+			resp, err := client.Im.Message.Patch(ctx, req, options...)
+			if err != nil {
+				return fmt.Errorf("%s: patch message: %w", p.tag(), err)
+			}
+			if !resp.Success() {
+				return fmt.Errorf("%s: patch message code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+			}
+			return nil
+		})
+	})
 }
 
 func (p *Platform) Stop() error {
@@ -2272,16 +3179,21 @@ func (p *Platform) DeletePreviewMessage(ctx context.Context, previewHandle any) 
 		return fmt.Errorf("%s: invalid preview handle type %T", p.tag(), previewHandle)
 	}
 
-	resp, err := p.client.Im.Message.Delete(ctx, larkim.NewDeleteMessageReqBuilder().
+	req := larkim.NewDeleteMessageReqBuilder().
 		MessageId(h.messageID).
-		Build())
-	if err != nil {
-		return fmt.Errorf("%s: delete preview message: %w", p.tag(), err)
-	}
-	if !resp.Success() {
-		return fmt.Errorf("%s: delete preview message code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
-	}
-	return nil
+		Build()
+	return p.withTransientRetry(ctx, "delete preview message", func() error {
+		return p.withFreshTenantAccessTokenRetry(ctx, "delete preview message", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+			resp, err := client.Im.Message.Delete(ctx, req, options...)
+			if err != nil {
+				return fmt.Errorf("%s: delete preview message: %w", p.tag(), err)
+			}
+			if !resp.Success() {
+				return fmt.Errorf("%s: delete preview message code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+			}
+			return nil
+		})
+	})
 }
 
 // SendAudio uploads audio bytes to Feishu and sends a voice message.
@@ -2302,19 +3214,28 @@ func (p *Platform) SendAudio(ctx context.Context, rctx any, audio []byte, format
 		format = "opus"
 	}
 
-	uploadResp, err := p.client.Im.File.Create(ctx,
-		larkim.NewCreateFileReqBuilder().
-			Body(larkim.NewCreateFileReqBodyBuilder().
-				FileType(larkim.FileTypeOpus).
-				FileName("tts_audio.opus").
-				File(bytes.NewReader(audio)).
-				Build()).
-			Build())
-	if err != nil {
-		return fmt.Errorf("%s: upload audio: %w", p.tag(), err)
-	}
-	if !uploadResp.Success() {
-		return fmt.Errorf("%s: upload audio code=%d msg=%s", p.tag(), uploadResp.Code, uploadResp.Msg)
+	var uploadResp *larkim.CreateFileResp
+	if err := p.withTransientRetry(ctx, "upload audio", func() error {
+		return p.withFreshTenantAccessTokenRetry(ctx, "upload audio", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+			req := larkim.NewCreateFileReqBuilder().
+				Body(larkim.NewCreateFileReqBodyBuilder().
+					FileType(larkim.FileTypeOpus).
+					FileName("tts_audio.opus").
+					File(bytes.NewReader(audio)).
+					Build()).
+				Build()
+			var err error
+			uploadResp, err = client.Im.File.Create(ctx, req, options...)
+			if err != nil {
+				return fmt.Errorf("%s: upload audio: %w", p.tag(), err)
+			}
+			if !uploadResp.Success() {
+				return fmt.Errorf("%s: upload audio code=%d msg=%s", p.tag(), uploadResp.Code, uploadResp.Msg)
+			}
+			return nil
+		})
+	}); err != nil {
+		return err
 	}
 	if uploadResp.Data == nil || uploadResp.Data.FileKey == nil {
 		return fmt.Errorf("%s: upload audio: no file_key returned", p.tag())
@@ -2335,6 +3256,7 @@ func (p *Platform) SendAudio(ctx context.Context, rctx any, audio []byte, format
 type postElement struct {
 	Tag      string `json:"tag"`
 	Text     string `json:"text,omitempty"`
+	Language string `json:"language,omitempty"`
 	ImageKey string `json:"image_key,omitempty"`
 	Href     string `json:"href,omitempty"`
 }
@@ -2380,6 +3302,11 @@ func (p *Platform) extractPostParts(messageID string, post *postLang) ([]string,
 			case "a":
 				if elem.Text != "" {
 					textParts = append(textParts, elem.Text)
+				}
+			case "code_block":
+				if elem.Text != "" {
+					lang := elem.Language
+					textParts = append(textParts, "```"+lang+"\n"+elem.Text+"\n```")
 				}
 			case "img":
 				if elem.ImageKey != "" {

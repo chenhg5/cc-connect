@@ -69,18 +69,19 @@ func (t *stubTypingTicker) C() <-chan time.Time {
 func (t *stubTypingTicker) Stop() {}
 
 type stubTelegramBot struct {
-	mu                    sync.Mutex
-	sendMessageCalls      int
-	sendPhotoCalls        int
-	sendDocumentCalls     int
-	sendVoiceCalls        int
-	sendAudioCalls        int
-	sendChatActionCalls   int
-	editMessageTextCalls  int
-	deleteMessageCalls    int
-	answerCallbackCalls   int
-	setMyCommandsCalls    int
-	getFileCalls          int
+	mu                   sync.Mutex
+	sendMessageCalls     int
+	sendPhotoCalls       int
+	sendDocumentCalls    int
+	sendVoiceCalls       int
+	sendAudioCalls       int
+	sendChatActionCalls  int
+	editMessageTextCalls int
+	deleteMessageCalls   int
+	answerCallbackCalls  int
+	setMyCommandsCalls   int
+	getFileCalls         int
+	setReactionCalls     int
 
 	sendErr    error
 	getFileErr error
@@ -204,6 +205,13 @@ func (b *stubTelegramBot) FileDownloadLink(f *models.File) string {
 	return "https://test.example.com/file/" + f.FilePath
 }
 
+func (b *stubTelegramBot) SetMessageReaction(_ context.Context, _ *tgbot.SetMessageReactionParams) (bool, error) {
+	b.mu.Lock()
+	b.setReactionCalls++
+	b.mu.Unlock()
+	return true, nil
+}
+
 func (b *stubTelegramBot) SendMessageCallCount() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -221,7 +229,6 @@ func (b *stubTelegramBot) GetFileCallCount() int {
 	defer b.mu.Unlock()
 	return b.getFileCalls
 }
-
 
 func TestPlatformStart_RetriesInBackgroundUntilConnected(t *testing.T) {
 	var attempts atomic.Int32
@@ -585,13 +592,13 @@ func TestTruncateTelegramBotDescription_UTF8Safe(t *testing.T) {
 	if !utf8.ValidString(out) {
 		t.Fatal("invalid UTF-8 from CJK description")
 	}
-	if got, max := utf8.RuneCountInString(out), 256; got > max {
+	if got, max := utf8.RuneCountInString(out), telegramBotCommandDescriptionLimit; got > max {
 		t.Fatalf("rune count %d > %d", got, max)
 	}
 
-	long := strings.Repeat("b", 260)
+	long := strings.Repeat("b", 60)
 	out2 := truncateTelegramBotDescription(long)
-	if want := 256; utf8.RuneCountInString(out2) != want {
+	if want := telegramBotCommandDescriptionLimit; utf8.RuneCountInString(out2) != want {
 		t.Fatalf("ascii truncation: got %d runes want %d", utf8.RuneCountInString(out2), want)
 	}
 	if !utf8.ValidString(out2) {

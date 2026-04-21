@@ -19,6 +19,9 @@ const (
 	uploadMediaImage = 1
 	uploadMediaVideo = 2
 	uploadMediaFile  = 3
+
+	typingStatusStart = 1
+	typingStatusStop  = 2
 )
 
 type baseInfo struct {
@@ -105,6 +108,7 @@ type getUploadURLRequest struct {
 type getUploadURLResponse struct {
 	UploadParam      string `json:"upload_param,omitempty"`
 	ThumbUploadParam string `json:"thumb_upload_param,omitempty"`
+	UploadFullURL    string `json:"upload_full_url,omitempty"`
 }
 
 type weixinMessage struct {
@@ -131,6 +135,26 @@ type sendMessageResp struct {
 	Ret     int    `json:"ret"`
 	Errcode int    `json:"errcode"`
 	Errmsg  string `json:"errmsg"`
+}
+
+type sendTypingReq struct {
+	IlinkUserID   string   `json:"ilink_user_id"`
+	TypingTicket  string   `json:"typing_ticket"`
+	Status        int      `json:"status"`
+	BaseInfo      baseInfo `json:"base_info"`
+}
+
+type getConfigReq struct {
+	UserID       string   `json:"user_id"`
+	ContextToken string   `json:"context_token,omitempty"`
+	BaseInfo     baseInfo `json:"base_info"`
+}
+
+type getConfigResp struct {
+	Ret          int    `json:"ret"`
+	Errcode      int    `json:"errcode"`
+	Errmsg       string `json:"errmsg"`
+	TypingTicket string `json:"typing_ticket"`
 }
 
 type weixinOutboundMsg struct {

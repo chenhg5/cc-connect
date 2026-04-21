@@ -1,7 +1,10 @@
 const API_BASE = '/api/v1';
 
+type UnauthorizedHandler = () => void;
+
 class ApiClient {
   private token: string = '';
+  private onUnauthorized?: UnauthorizedHandler;
 
   setToken(token: string) {
     this.token = token;
@@ -9,6 +12,10 @@ class ApiClient {
 
   getToken(): string {
     return this.token;
+  }
+
+  setOnUnauthorized(handler: UnauthorizedHandler) {
+    this.onUnauthorized = handler;
   }
 
   private headers(): HeadersInit {
@@ -28,6 +35,10 @@ class ApiClient {
       headers: this.headers(),
       body: body ? JSON.stringify(body) : undefined,
     });
+    if (res.status === 401 && this.onUnauthorized) {
+      this.onUnauthorized();
+      throw new ApiError('Unauthorized', 401);
+    }
     const json = await res.json();
     if (!json.ok) {
       throw new ApiError(json.error || 'Unknown error', res.status);
@@ -37,6 +48,7 @@ class ApiClient {
 
   get<T = any>(path: string, params?: Record<string, string>) { return this.request<T>('GET', path, undefined, params); }
   post<T = any>(path: string, body?: any) { return this.request<T>('POST', path, body); }
+  put<T = any>(path: string, body?: any) { return this.request<T>('PUT', path, body); }
   patch<T = any>(path: string, body?: any) { return this.request<T>('PATCH', path, body); }
   delete<T = any>(path: string) { return this.request<T>('DELETE', path); }
 
@@ -45,6 +57,10 @@ class ApiClient {
     const h: HeadersInit = {};
     if (this.token) h['Authorization'] = `Bearer ${this.token}`;
     const res = await fetch(`${API_BASE}${path}`, { headers: h });
+    if (res.status === 401 && this.onUnauthorized) {
+      this.onUnauthorized();
+      throw new ApiError('Unauthorized', 401);
+    }
     if (!res.ok) throw new ApiError(res.statusText, res.status);
     return res.text();
   }

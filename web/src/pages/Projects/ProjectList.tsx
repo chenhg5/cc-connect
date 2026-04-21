@@ -13,8 +13,8 @@ const AGENT_OPTIONS = [
   { key: 'codex', label: 'Codex' },
   { key: 'gemini', label: 'Gemini CLI' },
   { key: 'cursor', label: 'Cursor' },
-  { key: 'acp', label: 'ACP' },
-  { key: 'iflow', label: 'iFlow' },
+  { key: 'acp', label: 'ACP (Generic)' },
+  { key: 'acp:openclaw', label: 'OpenClaw (ACP)' },
   { key: 'opencode', label: 'OpenCode' },
   { key: 'qoder', label: 'Qoder' },
 ];
@@ -30,6 +30,7 @@ const PLATFORM_OPTIONS: { key: string; label: string; color: string; qr?: boolea
   { key: 'qq', label: 'QQ (OneBot)', color: 'bg-cyan-50 dark:bg-cyan-900/30 text-cyan-600 dark:text-cyan-400' },
   { key: 'qqbot', label: 'QQ Bot (Official)', color: 'bg-cyan-50 dark:bg-cyan-900/30 text-cyan-600 dark:text-cyan-400' },
   { key: 'line', label: 'LINE', color: 'bg-lime-50 dark:bg-lime-900/30 text-lime-600 dark:text-lime-400' },
+  { key: 'weibo', label: 'Weibo (微博)', color: 'bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-400' },
 ];
 
 export default function ProjectList() {
@@ -105,7 +106,7 @@ export default function ProjectList() {
   }
 
   return (
-    <div className="animate-fade-in space-y-4">
+    <div className="animate-fade-in space-y-4 ">
       {/* Header */}
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-bold text-gray-900 dark:text-white">{t('projects.title')}</h2>
@@ -130,7 +131,10 @@ export default function ProjectList() {
                 </div>
                 <div className="flex flex-wrap gap-1.5 mb-3">
                   <Badge variant="info">{p.agent_type}</Badge>
-                  {p.platforms?.map((pl) => <Badge key={pl}>{pl}</Badge>)}
+                  {p.platforms?.slice(0, 3).map((pl) => <Badge key={pl}>{pl}</Badge>)}
+                  {(p.platforms?.length ?? 0) > 3 && (
+                    <Badge>+{p.platforms!.length - 3}</Badge>
+                  )}
                 </div>
                 <div className="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400 mt-auto pt-3 border-t border-gray-100 dark:border-gray-800">
                   <span>{p.sessions_count} {t('nav.sessions').toLowerCase()}</span>

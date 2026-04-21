@@ -1,5 +1,103 @@
 # Changelog
 
+## v1.3.2 (2026-04-21)
+
+Hotfix release: session filtering is now configurable and defaults to showing all sessions.
+
+### Fixed
+- **`/list` shows all sessions by default**: the session filter introduced in v1.3.0 (which hid sessions not created by cc-connect) was accidentally merged and caused confusion. The filter is now **off by default** — `/list`, `/switch`, and `/delete` show all agent sessions regardless of origin.
+
+### Added
+- **`filter_external_sessions` config option**: users who *do* want to hide externally-created sessions can set `filter_external_sessions = true` in `[[projects]]` to restore the old filtering behavior.
+- **Comprehensive integration tests**: real-agent E2E tests for both Codex and Claude Code covering the full `/list` → `/new` → conversation → `/list` lifecycle with provider-based authentication (no env-var API keys required). Plus 9 adapter-level filter tests using real Codex/Claude Code session file fixtures.
+
+## v1.3.1 (2026-04-20)
+
+Patch release with critical bug fixes for session management, config preservation, and Weibo media support.
+
+### Fixed
+- **Session visibility (`/list`)**: historical Codex sessions disappeared after upgrade due to `AgentSessionID` being cleared on `/new` or provider switch without preservation. Added `PastAgentSessionIDs` tracking with legacy data migration so existing sessions remain visible.
+- **Session naming (`/new xxx`)**: custom session names from `/new` were not mapped to the agent session ID for agents where the ID is established asynchronously (Codex, Qoder, Kimi, etc.). Added name mapping to all `EventResult` and `EventText` handlers across interactive, relay, and drain paths.
+- **Config comment preservation**: `/provider switch`, `/model`, `/lang`, display settings, and TTS changes now use surgical text-level editing instead of full TOML re-serialization, preserving all comments, unknown fields, and formatting.
+- **Codex `codex_home` path**: session listing, history, and deletion now consistently use the configured `codex_home` instead of hardcoded `~/.codex`.
+- **Feishu card callback hint**: log a reminder when interactive card mode is enabled but `card.action.trigger` may not be subscribed.
+
+### Added
+- **Weibo image & file support**: send and receive images and files in Weibo DMs via base64 encoding within the WebSocket `send_message` payload. Implements `ImageSender` and `FileSender` interfaces.
+- **Comprehensive session tests**: 12 new `SessionManager` unit tests covering `PastAgentSessionIDs`, legacy data migration, and version-based schema detection. 9 new `Engine` integration tests covering `/list` visibility across `/new`, provider switch, and real-world legacy data scenarios, plus end-to-end session name mapping tests for all three agent ID patterns (immediate, EventText, EventResult).
+- **Config preservation tests**: 8 new tests verifying comment and field preservation for `SaveActiveProvider`, `SaveAgentModel`, `SaveProviderModel`, `SaveLanguage`, `SaveDisplayConfig`, `SaveTTSMode`, multi-project config, and global provider refs.
+
+## v1.3.0 (2026-04-19)
+
+First stable release of the 1.3 series. 555 commits since v1.2.1 with major new features, platform improvements, and broad community contributions.
+
+### Highlights
+
+- **Web Admin UI** — Full management dashboard embedded in the binary via `go:embed`. Project CRUD, session monitoring, cron editor, provider management, chat interface, and i18n (en/zh/zh-TW/ja/es). Use `cc-connect web` to open directly in the browser with auto-login.
+- **Lifecycle Event Hooks** — New `[[hooks]]` config to trigger shell commands or HTTP webhooks on 7 event types: `message.received`, `message.sent`, `session.started`, `session.ended`, `cron.triggered`, `permission.requested`, `error`. Async by default, fail-open, non-blocking.
+- **Skill Management** — New `/skills` page in the web UI with local skill browser (per-project, per-agent) and recommended skill presets fetched from remote.
+- **Global Provider Management** — Add, edit, delete providers in the web UI; import from cc-switch config; per-agent-type provider presets with featured/star badges.
+
+### New Features
+- `cc-connect web` CLI command: auto-configure web admin, open browser with token-based login
+- Feishu: auto-resolve `@name` mentions to clickable at-tags (`resolve_mentions` config)
+- Feishu: multi-level reply chain recognition; done-emoji reaction after streaming
+- Feishu: configurable progress display styles (compact/card)
+- Claude Code: support CLI wrappers via `cli_path`; `/effort` command for reasoning effort; `auto` permission mode; `disallowed_tools` config
+- Codex: runtime reply footer; preserve workspace app-server options
+- Kimi CLI: new agent support
+- Pi: new agent support
+- Discord: preserve table formatting; proxy support; `@everyone`/`@here` broadcast
+- Telegram: forum topic support; markdown table monospace rendering; command menu adaptation
+- WeCom: configurable `api_base_url` for private deployments; file receiving via HTTP callback
+- Weixin (ilink): personal chat platform with CDN media, QR setup, image/file/audio send
+- Config: support `${ENV_VAR}` placeholders in TOML values
+- Core: `/workspace init` with local directory paths; `/dir` directory history; `agent-sid` command; auto-compress context on token threshold; outgoing rate limiting
+- Daemon: preserve proxy env in systemd service
+
+### Bug Fixes
+- Fix Windows cross-compilation (duplicate runas stub file)
+- Fix web footer double 'v' prefix in version display
+- Fix web modal overlay not covering full viewport (portal rendering)
+- Fix provider preset cards: action buttons pinned to card bottom
+- Fix web page content overlapping footer (global layout restructure)
+- Fix Gemini image handling: save to workspace, prompt-based file references
+- Fix Claude Code: unblock readLoop when child subprocesses hold stdout pipe
+- Fix Codex: multiline prompt on resume; force-kill process group on stop
+- Fix core: race condition during session cleanup; follow symlinked skill directories; persist agent_session_id; filter `/list` to cc-connect owned sessions
+- Fix Feishu: slash commands in thread/reply context; user/chat name resolution in async goroutine
+- Fix Telegram: UTF-8-safe command menu descriptions
+- Fix TTS: don't send empty language_type to Qwen TTS API
+- Fix config: `formatTOML` no longer strips user-set zero values
+- Security: mask bridge token in `/api/v1/status`; path traversal protection for static files
+
+### Contributors
+
+Thanks to all contributors who made this release possible:
+
+- [@leoliang1997](https://github.com/leoliang1997) — Feishu card rendering, auto-resolve @mentions
+- [@xukp20](https://github.com/xukp20) — Provider env handling, skill discovery, Codex options
+- [@boyu-zhu](https://github.com/boyu-zhu) — Telegram markdown table rendering
+- [@RukawaKaede](https://github.com/RukawaKaede) — Claude Code CLI wrapper support
+- [@meishaoqing](https://github.com/meishaoqing) — Feishu multi-level reply chain
+- [@Zx55](https://github.com/Zx55) — Telegram command menu, symlinked skill dirs
+- [@leighstillard](https://github.com/leighstillard) — Claude Code `/effort` command
+- [@ht290](https://github.com/ht290) — inject_sender display name
+- [@Sentixxx](https://github.com/Sentixxx) — Claude Code readLoop subprocess fix
+- [@bugwz](https://github.com/bugwz) — WeCom private deployment API base URL
+- [@cold2600438-lgtm](https://github.com/cold2600438-lgtm) — Kimi CLI agent
+- [@MeteorSkyOne](https://github.com/MeteorSkyOne) — Discord table formatting
+- [@happyTonakai](https://github.com/happyTonakai) — Feishu done-emoji reaction
+- [@xxb](https://github.com/xxb) — Codex reply footer, Discord session routing
+- [@q107580018](https://github.com/q107580018) — Feishu delete/model card flows
+- [@Cigarrr](https://github.com/Cigarrr) — Workspace binding parsing
+- [@g1f9](https://github.com/g1f9) — Local directory workspace init
+- [@0xsegfaulted](https://github.com/0xsegfaulted) — agent-sid command
+- [@yzlu0917](https://github.com/yzlu0917) — Env var config placeholders
+- [@sidney061212-ai](https://github.com/sidney061212-ai) — Agent session ID persistence
+- [@zkunzhu](https://github.com/zkunzhu) — Daemon proxy env preservation
+- [@Yuri0314](https://github.com/Yuri0314) — TTS language type fix
+
 ## v1.2.2-beta.5 (2026-03-31)
 
 Beta release with embedded web admin, Discord proxy support, multimodal fixes, and major platform improvements.

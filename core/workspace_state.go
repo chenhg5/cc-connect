@@ -30,6 +30,7 @@ type workspaceState struct {
 	sessions     *SessionManager
 	agent        Agent
 	lastActivity time.Time
+	activeTurns  int
 }
 
 func newWorkspaceState(workspace string) *workspaceState {
@@ -43,6 +44,28 @@ func (ws *workspaceState) Touch() {
 	ws.mu.Lock()
 	ws.lastActivity = time.Now()
 	ws.mu.Unlock()
+}
+
+func (ws *workspaceState) BeginTurn() {
+	ws.mu.Lock()
+	ws.activeTurns++
+	ws.lastActivity = time.Now()
+	ws.mu.Unlock()
+}
+
+func (ws *workspaceState) EndTurn() {
+	ws.mu.Lock()
+	if ws.activeTurns > 0 {
+		ws.activeTurns--
+	}
+	ws.lastActivity = time.Now()
+	ws.mu.Unlock()
+}
+
+func (ws *workspaceState) HasActiveTurn() bool {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	return ws.activeTurns > 0
 }
 
 func (ws *workspaceState) LastActivity() time.Time {
@@ -119,6 +142,9 @@ func (p *workspacePool) ReapIdle() []string {
 	cutoff := time.Now().Add(-p.idleTimeout)
 	var reaped []string
 	for path, state := range p.states {
+		if state.HasActiveTurn() {
+			continue
+		}
 		if state.LastActivity().Before(cutoff) {
 			reaped = append(reaped, path)
 			delete(p.states, path)
