@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.3.2 (2026-04-21)
+
+Hotfix release: session filtering is now configurable and defaults to showing all sessions.
+
+### Fixed
+- **`/list` shows all sessions by default**: the session filter introduced in v1.3.0 (which hid sessions not created by cc-connect) was accidentally merged and caused confusion. The filter is now **off by default** — `/list`, `/switch`, and `/delete` show all agent sessions regardless of origin.
+
+### Added
+- **`filter_external_sessions` config option**: users who *do* want to hide externally-created sessions can set `filter_external_sessions = true` in `[[projects]]` to restore the old filtering behavior.
+- **Comprehensive integration tests**: real-agent E2E tests for both Codex and Claude Code covering the full `/list` → `/new` → conversation → `/list` lifecycle with provider-based authentication (no env-var API keys required). Plus 9 adapter-level filter tests using real Codex/Claude Code session file fixtures.
+
 ## v1.3.1 (2026-04-20)
 
 Patch release with critical bug fixes for session management, config preservation, and Weibo media support.
