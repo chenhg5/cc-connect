@@ -134,3 +134,85 @@ func TestPlatform_AccessTokenFieldsExist(t *testing.T) {
 
 	t.Log("Platform token caching fields exist and are accessible")
 }
+
+func TestExtractRichText(t *testing.T) {
+	tests := []struct {
+		name    string
+		content interface{}
+		want    string
+	}{
+		{
+			name:    "nil content",
+			content: nil,
+			want:    "",
+		},
+		{
+			name:    "non-map content",
+			content: "not a map",
+			want:    "",
+		},
+		{
+			name: "empty richText array",
+			content: map[string]interface{}{
+				"richText": []interface{}{},
+			},
+			want: "",
+		},
+		{
+			name: "single text element",
+			content: map[string]interface{}{
+				"richText": []interface{}{
+					map[string]interface{}{"text": "Hello World"},
+				},
+			},
+			want: "Hello World",
+		},
+		{
+			name: "multiple text elements",
+			content: map[string]interface{}{
+				"richText": []interface{}{
+					map[string]interface{}{"text": "Hello "},
+					map[string]interface{}{"text": "World"},
+				},
+			},
+			want: "Hello World",
+		},
+		{
+			name: "text with attrs (bold etc) — attrs ignored, text extracted",
+			content: map[string]interface{}{
+				"richText": []interface{}{
+					map[string]interface{}{"text": "normal "},
+					map[string]interface{}{"text": "bold", "attrs": map[string]interface{}{"bold": true}},
+				},
+			},
+			want: "normal bold",
+		},
+		{
+			name: "mixed text and picture elements — pictures skipped",
+			content: map[string]interface{}{
+				"richText": []interface{}{
+					map[string]interface{}{"text": "See image: "},
+					map[string]interface{}{"pictureDownloadCode": "abc123"},
+					map[string]interface{}{"text": "done"},
+				},
+			},
+			want: "See image: done",
+		},
+		{
+			name: "missing richText key",
+			content: map[string]interface{}{
+				"other": "data",
+			},
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractRichText(tt.content)
+			if got != tt.want {
+				t.Errorf("extractRichText() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
