@@ -56,7 +56,7 @@ export default function Header() {
   return (
     <header
       className={cn(
-        'h-14 flex items-center justify-end gap-1 px-4 shrink-0',
+        'h-14 flex items-center justify-end gap-1 px-4 shrink-0 relative z-20',
         'border-b border-gray-200/80 dark:border-white/[0.08]',
         'bg-white/70 backdrop-blur-xl dark:bg-[rgba(0,0,0,0.72)]',
       )}

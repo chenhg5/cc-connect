@@ -3,6 +3,7 @@ package weibo
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -304,11 +305,43 @@ type wsMessage struct {
 }
 
 type messagePayload struct {
-	MessageID  string `json:"messageId"`
-	FromUserID string `json:"fromUserId"`
-	Text       string `json:"text"`
-	Timestamp  int64  `json:"timestamp"`
+	MessageID  string              `json:"messageId"`
+	FromUserID string              `json:"fromUserId"`
+	Text       string              `json:"text"`
+	Timestamp  int64               `json:"timestamp"`
+	Input      []messageInputItem  `json:"input,omitempty"`
 }
+
+type messageInputItem struct {
+	Type    string        `json:"type"`
+	Role    string        `json:"role"`
+	Content []contentPart `json:"content"`
+}
+
+type contentPart struct {
+	Type     string       `json:"type"`
+	Text     string       `json:"text,omitempty"`
+	Source   *inputSource `json:"source,omitempty"`
+	FileName string       `json:"filename,omitempty"`
+}
+
+type inputSource struct {
+	Type      string `json:"type"`
+	MediaType string `json:"media_type"`
+	Data      string `json:"data"`
+}
+
+var supportedImageMIME = map[string]bool{
+	"image/jpeg": true,
+	"image/png":  true,
+	"image/gif":  true,
+	"image/webp": true,
+}
+
+const (
+	maxInboundImageBytes = 10 * 1024 * 1024
+	maxInboundFileBytes  = 5 * 1024 * 1024
+)
 
 func (p *Platform) readLoop(ws *websocket.Conn) {
 	ws.SetPongHandler(func(string) error {
@@ -359,7 +392,11 @@ func (p *Platform) handleInbound(raw json.RawMessage) {
 		return
 	}
 
-	if payload.FromUserID == "" || payload.Text == "" {
+	text, images, files := normalizeInboundInput(payload)
+	hasText := strings.TrimSpace(text) != ""
+	hasAttachments := len(images) > 0 || len(files) > 0
+
+	if payload.FromUserID == "" || (!hasText && !hasAttachments) {
 		return
 	}
 
@@ -379,31 +416,105 @@ func (p *Platform) handleInbound(raw json.RawMessage) {
 	}
 
 	sessionKey := p.name + ":" + userID + ":" + userID
-
 	rctx := replyContext{
 		fromUserID: userID,
 		sessionKey: sessionKey,
 	}
 
-	p.handler(p, &core.Message{
+	msg := &core.Message{
 		SessionKey: sessionKey,
 		Platform:   p.name,
 		MessageID:  msgID,
 		UserID:     userID,
 		UserName:   userID,
-		Content:    payload.Text,
+		Content:    text,
+		Images:     images,
+		Files:      files,
 		ReplyCtx:   rctx,
-	})
+	}
+
+	if hasAttachments {
+		slog.Debug(p.tag()+": inbound with attachments",
+			"user", userID, "images", len(images), "files", len(files))
+	}
+
+	p.handler(p, msg)
+}
+
+func normalizeInboundInput(payload messagePayload) (string, []core.ImageAttachment, []core.FileAttachment) {
+	var textParts []string
+	var images []core.ImageAttachment
+	var files []core.FileAttachment
+
+	for _, item := range payload.Input {
+		if item.Type != "message" || item.Role != "user" {
+			continue
+		}
+		for _, part := range item.Content {
+			switch part.Type {
+			case "input_text":
+				if part.Text != "" {
+					textParts = append(textParts, part.Text)
+				}
+			case "input_image":
+				if part.Source == nil || part.Source.Data == "" {
+					continue
+				}
+				if !supportedImageMIME[part.Source.MediaType] {
+					slog.Warn("weibo: unsupported inbound image mime", "mime", part.Source.MediaType)
+					continue
+				}
+				data, err := base64.StdEncoding.DecodeString(part.Source.Data)
+				if err != nil {
+					slog.Warn("weibo: decode inbound image base64", "error", err)
+					continue
+				}
+				if len(data) == 0 || len(data) > maxInboundImageBytes {
+					continue
+				}
+				images = append(images, core.ImageAttachment{
+					MimeType: part.Source.MediaType,
+					Data:     data,
+					FileName: part.FileName,
+				})
+			case "input_file":
+				if part.Source == nil || part.Source.Data == "" {
+					continue
+				}
+				data, err := base64.StdEncoding.DecodeString(part.Source.Data)
+				if err != nil {
+					slog.Warn("weibo: decode inbound file base64", "error", err)
+					continue
+				}
+				if len(data) == 0 || len(data) > maxInboundFileBytes {
+					continue
+				}
+				files = append(files, core.FileAttachment{
+					MimeType: part.Source.MediaType,
+					Data:     data,
+					FileName: part.FileName,
+				})
+			}
+		}
+	}
+
+	text := payload.Text
+	if len(textParts) > 0 {
+		text = strings.Join(textParts, "\n")
+	}
+
+	return text, images, files
 }
 
 // --- Sending ---
 
 type sendPayload struct {
-	ToUserID  string `json:"toUserId"`
-	Text      string `json:"text"`
-	MessageID string `json:"messageId"`
-	ChunkID   int    `json:"chunkId"`
-	Done      bool   `json:"done"`
+	ToUserID  string             `json:"toUserId"`
+	Text      string             `json:"text"`
+	MessageID string             `json:"messageId"`
+	ChunkID   int                `json:"chunkId"`
+	Done      bool               `json:"done"`
+	Input     []messageInputItem `json:"input,omitempty"`
 }
 
 func (p *Platform) sendMessage(rctx any, content string) error {
@@ -426,15 +537,98 @@ func (p *Platform) sendMessage(rctx any, content string) error {
 				Done:      i == len(chunks)-1,
 			},
 		}
-		p.wsMu.Lock()
-		ws := p.ws
-		p.wsMu.Unlock()
-		if ws == nil {
-			return fmt.Errorf("weibo: not connected")
+		if err := p.writeWS(env); err != nil {
+			return err
 		}
-		if err := ws.WriteJSON(env); err != nil {
-			return fmt.Errorf("weibo: ws send: %w", err)
-		}
+	}
+	return nil
+}
+
+func (p *Platform) SendImage(_ context.Context, rctx any, img core.ImageAttachment) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("weibo: invalid reply context type: %T", rctx)
+	}
+
+	b64 := base64.StdEncoding.EncodeToString(img.Data)
+	mime := img.MimeType
+	if mime == "" {
+		mime = "image/png"
+	}
+	fname := img.FileName
+	if fname == "" {
+		fname = "image"
+	}
+
+	msgID := fmt.Sprintf("img-%s-%d", rc.fromUserID, time.Now().UnixMilli())
+	env := map[string]any{
+		"type": "send_message",
+		"payload": sendPayload{
+			ToUserID:  rc.fromUserID,
+			MessageID: msgID,
+			Done:      true,
+			Input: []messageInputItem{{
+				Type: "message",
+				Role: "assistant",
+				Content: []contentPart{{
+					Type:     "input_image",
+					FileName: fname,
+					Source:   &inputSource{Type: "base64", MediaType: mime, Data: b64},
+				}},
+			}},
+		},
+	}
+	slog.Debug(p.tag()+": sending image", "to", rc.fromUserID, "name", fname, "size", len(img.Data))
+	return p.writeWS(env)
+}
+
+func (p *Platform) SendFile(_ context.Context, rctx any, file core.FileAttachment) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("weibo: invalid reply context type: %T", rctx)
+	}
+
+	b64 := base64.StdEncoding.EncodeToString(file.Data)
+	mime := file.MimeType
+	if mime == "" {
+		mime = "application/octet-stream"
+	}
+	fname := file.FileName
+	if fname == "" {
+		fname = "attachment"
+	}
+
+	msgID := fmt.Sprintf("file-%s-%d", rc.fromUserID, time.Now().UnixMilli())
+	env := map[string]any{
+		"type": "send_message",
+		"payload": sendPayload{
+			ToUserID:  rc.fromUserID,
+			MessageID: msgID,
+			Done:      true,
+			Input: []messageInputItem{{
+				Type: "message",
+				Role: "assistant",
+				Content: []contentPart{{
+					Type:     "input_file",
+					FileName: fname,
+					Source:   &inputSource{Type: "base64", MediaType: mime, Data: b64},
+				}},
+			}},
+		},
+	}
+	slog.Debug(p.tag()+": sending file", "to", rc.fromUserID, "name", fname, "size", len(file.Data))
+	return p.writeWS(env)
+}
+
+func (p *Platform) writeWS(data any) error {
+	p.wsMu.Lock()
+	ws := p.ws
+	p.wsMu.Unlock()
+	if ws == nil {
+		return fmt.Errorf("weibo: not connected")
+	}
+	if err := ws.WriteJSON(data); err != nil {
+		return fmt.Errorf("weibo: ws send: %w", err)
 	}
 	return nil
 }

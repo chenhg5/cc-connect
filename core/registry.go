@@ -33,6 +33,22 @@ func CreatePlatform(name string, opts map[string]any) (Platform, error) {
 	return f(opts)
 }
 
+func ListRegisteredAgents() []string {
+	names := make([]string, 0, len(agentFactories))
+	for k := range agentFactories {
+		names = append(names, k)
+	}
+	return names
+}
+
+func ListRegisteredPlatforms() []string {
+	names := make([]string, 0, len(platformFactories))
+	for k := range platformFactories {
+		names = append(names, k)
+	}
+	return names
+}
+
 func CreateAgent(name string, opts map[string]any) (Agent, error) {
 	f, ok := agentFactories[name]
 	if !ok {

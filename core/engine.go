@@ -162,11 +162,13 @@ type Engine struct {
 	attachmentSendEnabled bool
 	startedAt             time.Time
 
-	providerSaveFunc       func(providerName string) error
-	providerAddSaveFunc    func(p ProviderConfig) error
-	providerRemoveSaveFunc func(name string) error
-	providerModelSaveFunc  func(providerName, model string) error
-	modelSaveFunc          func(model string) error
+	providerSaveFunc        func(providerName string) error
+	providerAddSaveFunc     func(p ProviderConfig) error
+	providerRemoveSaveFunc  func(name string) error
+	providerModelSaveFunc   func(providerName, model string) error
+	providerRefsSaveFunc    func(refs []string) error
+	listGlobalProvidersFunc func(agentType string) ([]ProviderConfig, error)
+	modelSaveFunc           func(model string) error
 
 	ttsSaveFunc func(mode string) error
 
@@ -176,6 +178,7 @@ type Engine struct {
 	displaySaveFunc  func(mode *string, thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error
 	configReloadFunc func() (*ConfigReloadResult, error)
 
+	hooks              *HookManager
 	cronScheduler      *CronScheduler
 	heartbeatScheduler *HeartbeatScheduler
 
@@ -214,6 +217,11 @@ type Engine struct {
 	// When true, append [ctx: ~N%] (or model self-report) to assistant replies shown on platforms.
 	showContextIndicator bool
 	replyFooterEnabled   bool
+
+	// When true, /list etc. only show sessions tracked by cc-connect,
+	// hiding sessions created by direct CLI usage in the same work_dir.
+	// Default false = show all sessions.
+	filterExternalSessions bool
 
 	// Multi-workspace mode
 	multiWorkspace    bool
@@ -285,8 +293,19 @@ type interactiveState struct {
 	sideText               string
 	deleteMode             *deleteModeState
 	modelSwitch            *modelSwitchState
+	pendingProviderAdd     *pendingProviderAddState
 	lastAutoCompressAt     time.Time
 	lastAutoCompressTokens int
+}
+
+type pendingProviderAddState struct {
+	phase            string // "preset" = waiting for API key; "other" = waiting for name api_key base_url [model]
+	name             string
+	baseURL          string
+	model            string
+	inviteURL        string
+	codexWireAPI     string
+	codexHTTPHeaders map[string]string
 }
 
 type deleteModeState struct {
@@ -450,7 +469,11 @@ func (e *Engine) reapIdleWorkspaces() {
 	}
 }
 
-// SetSpeechConfig configures the speech-to-text subsystem.
+// SetHooks configures the lifecycle event hook manager.
+func (e *Engine) SetHooks(hm *HookManager) {
+	e.hooks = hm
+}
+
 func (e *Engine) SetSpeechConfig(cfg SpeechCfg) {
 	e.speech = cfg
 }
@@ -528,6 +551,13 @@ func (e *Engine) SetReplyFooterEnabled(show bool) {
 	e.replyFooterEnabled = show
 }
 
+// SetFilterExternalSessions controls whether /list, /switch, /delete, etc.
+// hide sessions created by direct CLI usage in the same work_dir.
+// Default false = show all sessions from the agent.
+func (e *Engine) SetFilterExternalSessions(v bool) {
+	e.filterExternalSessions = v
+}
+
 func (e *Engine) SetWebSetupFunc(fn func() (int, string, bool, error)) { e.webSetupFunc = fn }
 func (e *Engine) SetWebStatusFunc(fn func() string)                    { e.webStatusFunc = fn }
 
@@ -588,6 +618,14 @@ func (e *Engine) SetProviderModelSaveFunc(fn func(providerName, model string) er
 	e.providerModelSaveFunc = fn
 }
 
+func (e *Engine) SetProviderRefsSaveFunc(fn func(refs []string) error) {
+	e.providerRefsSaveFunc = fn
+}
+
+func (e *Engine) SetListGlobalProvidersFunc(fn func(agentType string) ([]ProviderConfig, error)) {
+	e.listGlobalProvidersFunc = fn
+}
+
 func (e *Engine) SetModelSaveFunc(fn func(model string) error) {
 	e.modelSaveFunc = fn
 }
@@ -633,6 +671,11 @@ func (e *Engine) SetConfigReloadFunc(fn func() (*ConfigReloadResult, error)) {
 // GetAgent returns the engine's agent (for type assertions like ProviderSwitcher).
 func (e *Engine) GetAgent() Agent {
 	return e.agent
+}
+
+// GetSessions returns the Engine's session manager (for testing).
+func (e *Engine) GetSessions() *SessionManager {
+	return e.sessions
 }
 
 // AddCommand registers a custom slash command.
@@ -864,6 +907,24 @@ func (e *Engine) ProjectName() string {
 	return e.name
 }
 
+// ListSkills returns all discovered skills for this engine's project.
+func (e *Engine) ListSkills() []*Skill {
+	return e.skills.ListAll()
+}
+
+// SkillDirs returns the configured skill directories for this engine.
+func (e *Engine) SkillDirs() []string {
+	return e.skills.Dirs()
+}
+
+// AgentTypeName returns the agent type name (e.g. "claudecode", "codex").
+func (e *Engine) AgentTypeName() string {
+	if e.agent != nil {
+		return e.agent.Name()
+	}
+	return ""
+}
+
 // ActiveSessionKeys returns the session keys of all active interactive sessions.
 func (e *Engine) ActiveSessionKeys() []string {
 	e.interactiveMu.Lock()
@@ -881,6 +942,13 @@ func (e *Engine) ActiveSessionKeys() []string {
 // It finds the platform that owns the session key, reconstructs a reply context,
 // and processes the message as if the user sent it.
 func (e *Engine) ExecuteCronJob(job *CronJob) error {
+	e.hooks.Emit(HookEvent{
+		Event:      HookEventCronTriggered,
+		SessionKey: job.SessionKey,
+		Content:    job.Prompt,
+		Extra:      map[string]any{"job_id": job.ID, "job_description": job.Description},
+	})
+
 	sessionKey := job.SessionKey
 	platformName := ""
 	if idx := strings.Index(sessionKey, ":"); idx > 0 {
@@ -1403,6 +1471,15 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		"has_images", len(msg.Images) > 0, "has_audio", msg.Audio != nil, "has_files", len(msg.Files) > 0,
 	)
 
+	e.hooks.Emit(HookEvent{
+		Event:      HookEventMessageReceived,
+		SessionKey: msg.SessionKey,
+		Platform:   msg.Platform,
+		UserID:     msg.UserID,
+		UserName:   msg.UserName,
+		Content:    msg.Content,
+	})
+
 	// Voice message: transcribe to text first
 	if msg.Audio != nil {
 		// If STT is configured, use it for transcription (more accurate)
@@ -1525,6 +1602,11 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 
 	// Permission responses bypass the session lock
 	if e.handlePendingPermission(p, msg, content) {
+		return
+	}
+
+	// Pending provider add (card-driven multi-step flow)
+	if e.handlePendingProviderAdd(p, msg, content) {
 		return
 	}
 
@@ -2348,6 +2430,12 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		}
 		if err != nil {
 			slog.Error("failed to start interactive session", "error", err, "elapsed", startElapsed)
+			e.hooks.Emit(HookEvent{
+				Event:      HookEventError,
+				SessionKey: sessionKey,
+				Platform:   p.Name(),
+				Error:      fmt.Sprintf("failed to start session: %v", err),
+			})
 			newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent}
 			adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
 			state = newState
@@ -2361,6 +2449,10 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 
 	if newID := agentSession.CurrentSessionID(); newID != "" {
 		if session.CompareAndSetAgentSessionID(newID, agent.Name()) {
+			pendingName := session.GetName()
+			if pendingName != "" && pendingName != "session" && pendingName != "default" {
+				sessions.SetSessionName(newID, pendingName)
+			}
 			sessions.Save()
 		}
 	}
@@ -2376,6 +2468,17 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	e.interactiveStates[sessionKey] = state
 
 	slog.Info("session spawned", "session_key", sessionKey, "agent_session", session.GetAgentSessionID(), "is_resume", isResume, "elapsed", startElapsed)
+
+	e.hooks.Emit(HookEvent{
+		Event:      HookEventSessionStarted,
+		SessionKey: sessionKey,
+		Platform:   p.Name(),
+		Extra: map[string]any{
+			"agent_session_id": session.GetAgentSessionID(),
+			"is_resume":        isResume,
+		},
+	})
+
 	return state
 }
 
@@ -2850,7 +2953,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// to not be persisted to disk, breaking session resume on next startup.
 			if state != nil && state.agentSession != nil {
 				if currentID := state.agentSession.CurrentSessionID(); currentID != "" {
-					session.SetAgentSessionID(currentID, e.agent.Name())
+					if session.CompareAndSetAgentSessionID(currentID, e.agent.Name()) {
+						pendingName := session.GetName()
+						if pendingName != "" && pendingName != "session" && pendingName != "default" {
+							sessions.SetSessionName(currentID, pendingName)
+						}
+					}
 					sessions.Save()
 				}
 			}
@@ -2895,6 +3003,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 			session.AddHistory("assistant", baseResponse)
 			sessions.Save()
+
+			e.hooks.Emit(HookEvent{
+				Event:      HookEventMessageSent,
+				SessionKey: sessionKey,
+				Platform:   p.Name(),
+				Content:    baseResponse,
+			})
 
 			if e.showContextIndicator {
 				if sdkPlausible {
@@ -3112,6 +3227,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			sp.discard()
 			if event.Error != nil {
 				slog.Error("agent error", "error", event.Error)
+				e.hooks.Emit(HookEvent{
+					Event:      HookEventError,
+					SessionKey: sessionKey,
+					Platform:   p.Name(),
+					Error:      event.Error.Error(),
+				})
 				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
 			}
 			// Only drop queued messages if the agent session is dead.
@@ -3137,6 +3258,13 @@ channelClosed:
 
 		fullResponse := strings.Join(textParts, "")
 		session.AddHistory("assistant", fullResponse)
+
+		e.hooks.Emit(HookEvent{
+			Event:      HookEventMessageSent,
+			SessionKey: sessionKey,
+			Platform:   p.Name(),
+			Content:    fullResponse,
+		})
 
 		if toolCount > 0 && segmentStart > 0 {
 			sp.discard()
@@ -3773,6 +3901,16 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 	}
 }
 
+// applySessionFilter conditionally filters agent sessions based on the
+// filter_external_sessions config. When disabled (default), all sessions are
+// returned. When enabled, only sessions tracked by cc-connect are shown.
+func (e *Engine) applySessionFilter(sessions []AgentSessionInfo, sm *SessionManager) []AgentSessionInfo {
+	if !e.filterExternalSessions {
+		return sessions
+	}
+	return filterOwnedSessions(sessions, sm.KnownAgentSessionIDs())
+}
+
 // filterOwnedSessions removes agent sessions that are not tracked by cc-connect's
 // session manager. This prevents external CLI sessions in the same work_dir from
 // appearing in /list, /switch, /delete, etc. If the session manager has no tracked
@@ -3808,7 +3946,7 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgListError), err))
 			return
 		}
-		agentSessions = filterOwnedSessions(agentSessions, sessions.KnownAgentSessionIDs())
+		agentSessions = e.applySessionFilter(agentSessions, sessions)
 		if len(agentSessions) == 0 {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgListEmpty))
 			return
@@ -3905,7 +4043,7 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 		return
 	}
-	agentSessions = filterOwnedSessions(agentSessions, sessions.KnownAgentSessionIDs())
+	agentSessions = e.applySessionFilter(agentSessions, sessions)
 
 	matched := e.matchSession(agentSessions, sessions, query)
 	if matched == nil {
@@ -4652,7 +4790,7 @@ func (e *Engine) cmdSearch(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgSearchError), err))
 		return
 	}
-	agentSessions = filterOwnedSessions(agentSessions, sessions.KnownAgentSessionIDs())
+	agentSessions = e.applySessionFilter(agentSessions, sessions)
 
 	type searchResult struct {
 		id           string
@@ -4746,7 +4884,7 @@ func (e *Engine) cmdName(p Platform, msg *Message, args []string) {
 			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 			return
 		}
-		agentSessions = filterOwnedSessions(agentSessions, sessions.KnownAgentSessionIDs())
+		agentSessions = e.applySessionFilter(agentSessions, sessions)
 		if idx > len(agentSessions) {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgSwitchNoSession), idx))
 			return
@@ -6291,6 +6429,12 @@ func (e *Engine) stopInteractiveSession(sessionKey string, quietPlatform Platfor
 	}
 	e.notifyDroppedQueuedMessages(state, fmt.Errorf("session reset"))
 	e.closeAgentSessionAsync(sessionKey, agentSession)
+
+	e.hooks.Emit(HookEvent{
+		Event:      HookEventSessionEnded,
+		SessionKey: sessionKey,
+	})
+
 	return true
 }
 
@@ -6620,6 +6764,12 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 	case "clear", "reset", "none":
 		switcher.SetActiveProvider("")
 		e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
+		{
+			s := e.sessions.GetOrCreateActive(msg.SessionKey)
+			s.SetAgentSessionID("", "")
+			s.ClearHistory()
+			e.sessions.Save()
+		}
 		if e.providerSaveFunc != nil {
 			if err := e.providerSaveFunc(""); err != nil {
 				slog.Error("failed to save provider", "error", err)
@@ -6634,8 +6784,26 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 
 func (e *Engine) cmdProviderAdd(p Platform, msg *Message, switcher ProviderSwitcher, args []string) {
 	if len(args) == 0 {
+		if supportsCards(p) {
+			e.replyWithCard(p, msg.ReplyCtx, e.renderProviderAddCard(msg.SessionKey))
+			return
+		}
+		if _, ok := p.(InlineButtonSender); ok {
+			if btns := e.providerAddPresetButtons(); len(btns) > 0 {
+				e.replyWithButtons(p, msg.ReplyCtx,
+					e.i18n.T(MsgProviderAddPickHint), btns)
+				return
+			}
+		}
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgProviderAddUsage))
 		return
+	}
+
+	// "/provider add <preset_name>" (1 arg) — check if it matches a preset
+	if len(args) == 1 {
+		if e.tryProviderAddPreset(p, msg, switcher, args[0]) {
+			return
+		}
 	}
 
 	var prov ProviderConfig
@@ -6741,12 +6909,28 @@ func (e *Engine) cmdProviderRemove(p Platform, msg *Message, switcher ProviderSw
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgProviderRemoved), name))
 }
 
+// resetAllSessions resets the agent session ID and clears history for all
+// active sessions. Used when the provider changes via the management API
+// (where there is no single session key context).
+func (e *Engine) resetAllSessions() {
+	for _, s := range e.sessions.AllSessions() {
+		s.SetAgentSessionID("", "")
+		s.ClearHistory()
+	}
+	e.sessions.Save()
+}
+
 func (e *Engine) switchProvider(p Platform, msg *Message, switcher ProviderSwitcher, name string) {
 	if !switcher.SetActiveProvider(name) {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgProviderNotFound), name))
 		return
 	}
 	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
+
+	s := e.sessions.GetOrCreateActive(msg.SessionKey)
+	s.SetAgentSessionID("", "")
+	s.ClearHistory()
+	e.sessions.Save()
 
 	if e.providerSaveFunc != nil {
 		if err := e.providerSaveFunc(name); err != nil {
@@ -6755,6 +6939,190 @@ func (e *Engine) switchProvider(p Platform, msg *Message, switcher ProviderSwitc
 	}
 
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgProviderSwitched), name))
+}
+
+// handlePendingProviderAdd checks for a pending provider add state (from the
+// card-driven add flow) and completes the add if the user sends the required input.
+func (e *Engine) handlePendingProviderAdd(p Platform, msg *Message, content string) bool {
+	if strings.HasPrefix(content, "/") {
+		return false
+	}
+	interactiveKey := e.interactiveKeyForSessionKey(msg.SessionKey)
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[interactiveKey]
+	e.interactiveMu.Unlock()
+	if state == nil {
+		return false
+	}
+	state.mu.Lock()
+	pa := state.pendingProviderAdd
+	if pa == nil {
+		state.mu.Unlock()
+		return false
+	}
+	paCopy := *pa
+	state.pendingProviderAdd = nil
+	state.mu.Unlock()
+
+	switcher, ok := e.agent.(ProviderSwitcher)
+	if !ok {
+		return false
+	}
+
+	var prov ProviderConfig
+	switch paCopy.phase {
+	case "preset":
+		apiKey := strings.TrimSpace(content)
+		if apiKey == "" {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgProviderAddUsage))
+			return true
+		}
+		prov = ProviderConfig{
+			Name:             paCopy.name,
+			APIKey:           apiKey,
+			BaseURL:          paCopy.baseURL,
+			Model:            paCopy.model,
+			CodexWireAPI:     paCopy.codexWireAPI,
+			CodexHTTPHeaders: paCopy.codexHTTPHeaders,
+		}
+	case "other":
+		fields := strings.Fields(content)
+		if len(fields) < 2 {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgProviderAddUsage))
+			return true
+		}
+		prov.Name = fields[0]
+		prov.APIKey = fields[1]
+		if len(fields) > 2 {
+			prov.BaseURL = fields[2]
+		}
+		if len(fields) > 3 {
+			prov.Model = fields[3]
+		}
+	default:
+		return false
+	}
+
+	for _, existing := range switcher.ListProviders() {
+		if existing.Name == prov.Name {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgProviderAddFailed), fmt.Sprintf("provider %q already exists", prov.Name)))
+			return true
+		}
+	}
+
+	updated := append(switcher.ListProviders(), prov)
+	switcher.SetProviders(updated)
+	if e.providerAddSaveFunc != nil {
+		if err := e.providerAddSaveFunc(prov); err != nil {
+			slog.Error("failed to persist provider", "error", err)
+		}
+	}
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgProviderAdded), prov.Name, prov.Name))
+	return true
+}
+
+// setPendingProviderAdd stores a pending provider add state for the card-driven flow.
+func (e *Engine) setPendingProviderAdd(sessionKey string, pa *pendingProviderAddState) {
+	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
+	e.interactiveMu.Lock()
+	state, ok := e.interactiveStates[interactiveKey]
+	if !ok {
+		state = &interactiveState{}
+		e.interactiveStates[interactiveKey] = state
+	}
+	e.interactiveMu.Unlock()
+	state.mu.Lock()
+	state.pendingProviderAdd = pa
+	state.mu.Unlock()
+}
+
+// getPendingProviderAdd retrieves pending provider add state without removing it.
+func (e *Engine) getPendingProviderAdd(sessionKey string) *pendingProviderAddState {
+	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[interactiveKey]
+	e.interactiveMu.Unlock()
+	if state == nil {
+		return nil
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.pendingProviderAdd == nil {
+		return nil
+	}
+	cp := *state.pendingProviderAdd
+	return &cp
+}
+
+// providerAddPresetButtons builds inline keyboard rows for platforms
+// that support InlineButtonSender but not full cards.
+func (e *Engine) providerAddPresetButtons() [][]ButtonOption {
+	agentType := e.agent.Name()
+	presets, err := FetchProviderPresets()
+	if err != nil || presets == nil || len(presets.Providers) == 0 {
+		return nil
+	}
+	var rows [][]ButtonOption
+	var row []ButtonOption
+	for _, preset := range presets.Providers {
+		if !preset.SupportsAgent(agentType) {
+			continue
+		}
+		row = append(row, ButtonOption{
+			Text: preset.DisplayName,
+			Data: "cmd:/provider add " + preset.Name,
+		})
+		if len(row) == 2 {
+			rows = append(rows, row)
+			row = nil
+		}
+	}
+	if len(row) > 0 {
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+// tryProviderAddPreset handles "/provider add <name>" with a single arg that
+// matches a preset name — sets up the pending API key flow.
+func (e *Engine) tryProviderAddPreset(p Platform, msg *Message, switcher ProviderSwitcher, presetName string) bool {
+	agentType := e.agent.Name()
+	presets, err := FetchProviderPresets()
+	if err != nil || presets == nil {
+		return false
+	}
+	for _, preset := range presets.Providers {
+		if preset.Name != presetName {
+			continue
+		}
+		ac := preset.AgentConfig(agentType)
+		if ac == nil {
+			continue
+		}
+		pa := &pendingProviderAddState{
+			phase:     "preset",
+			name:      preset.Name,
+			baseURL:   ac.BaseURL,
+			model:     ac.Model,
+			inviteURL: preset.InviteURL,
+		}
+		if ac.CodexConfig != nil {
+			pa.codexWireAPI = ac.CodexConfig.WireAPI
+			pa.codexHTTPHeaders = ac.CodexConfig.HTTPHeaders
+		}
+		e.setPendingProviderAdd(msg.SessionKey, pa)
+		displayName := preset.DisplayName
+		if displayName == "" {
+			displayName = preset.Name
+		}
+		prompt := fmt.Sprintf(e.i18n.T(MsgProviderAddApiKeyPrompt), displayName)
+		if preset.InviteURL != "" {
+			prompt += "\n\n" + fmt.Sprintf(e.i18n.T(MsgProviderAddInviteHint), preset.InviteURL)
+		}
+		e.reply(p, msg.ReplyCtx, prompt)
+		return true
+	}
+	return false
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -6909,6 +7277,13 @@ func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images
 // sendPermissionPrompt sends a permission prompt with interactive buttons when
 // the platform supports them. Fallback chain: InlineButtonSender → CardSender → plain text.
 func (e *Engine) sendPermissionPrompt(p Platform, replyCtx any, prompt, toolName, toolInput string) {
+	e.hooks.Emit(HookEvent{
+		Event:    HookEventPermissionRequested,
+		Platform: p.Name(),
+		Content:  prompt,
+		Extra:    map[string]any{"tool_name": toolName},
+	})
+
 	// Try inline buttons first (Telegram)
 	if bs, ok := p.(InlineButtonSender); ok {
 		buttons := [][]ButtonOption{
@@ -7345,6 +7720,8 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 		return e.renderHistoryCard(sessionKey)
 	case "/provider":
 		return e.renderProviderCard()
+	case "/provider/add", "/provider/add-other", "/provider/add-cancel":
+		return e.renderProviderAddCard(sessionKey)
 	case "/cron":
 		return e.renderCronCard(sessionKey, extractUserID(sessionKey))
 	case "/heartbeat":
@@ -7534,13 +7911,64 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		if !ok {
 			return
 		}
-		if switcher.SetActiveProvider(args) {
+		provName := args
+		if provName == "clear" {
+			provName = ""
+		}
+		if switcher.SetActiveProvider(provName) {
 			interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 			e.cleanupInteractiveState(interactiveKey)
+			s := e.sessions.GetOrCreateActive(sessionKey)
+			s.SetAgentSessionID("", "")
+			s.ClearHistory()
+			e.sessions.Save()
 			if e.providerSaveFunc != nil {
-				_ = e.providerSaveFunc(args)
+				_ = e.providerSaveFunc(provName)
 			}
 		}
+
+	case "/provider/add":
+		if args == "" {
+			return
+		}
+		agentType := e.agent.Name()
+		presets, err := FetchProviderPresets()
+		if err != nil || presets == nil {
+			return
+		}
+		for _, preset := range presets.Providers {
+			if preset.Name != args {
+				continue
+			}
+			ac := preset.AgentConfig(agentType)
+			if ac == nil {
+				continue
+			}
+			pa := &pendingProviderAddState{
+				phase:     "preset",
+				name:      preset.Name,
+				baseURL:   ac.BaseURL,
+				model:     ac.Model,
+				inviteURL: preset.InviteURL,
+			}
+			if ac.CodexConfig != nil {
+				pa.codexWireAPI = ac.CodexConfig.WireAPI
+				pa.codexHTTPHeaders = ac.CodexConfig.HTTPHeaders
+			}
+			e.setPendingProviderAdd(sessionKey, pa)
+			return
+		}
+
+	case "/provider/add-other":
+		e.setPendingProviderAdd(sessionKey, &pendingProviderAddState{
+			phase: "other",
+		})
+
+	case "/provider/add-cancel":
+		e.setPendingProviderAdd(sessionKey, nil)
+
+	case "/provider/link":
+		e.executeProviderLink(sessionKey, args)
 
 	case "/new":
 		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
@@ -7560,7 +7988,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		if err != nil || len(agentSessions) == 0 {
 			return
 		}
-		agentSessions = filterOwnedSessions(agentSessions, sessions.KnownAgentSessionIDs())
+		agentSessions = e.applySessionFilter(agentSessions, sessions)
 		matched := e.matchSession(agentSessions, sessions, args)
 		if matched == nil {
 			return
@@ -7713,7 +8141,7 @@ func (e *Engine) renderDeleteModeCard(sessionKey string) *Card {
 	if err != nil {
 		return e.simpleCard(e.i18n.T(MsgDeleteModeTitle), "red", err.Error())
 	}
-	agentSessions = filterOwnedSessions(agentSessions, sessions.KnownAgentSessionIDs())
+	agentSessions = e.applySessionFilter(agentSessions, sessions)
 	dm := e.getDeleteModeState(sessionKey)
 	if dm == nil {
 		return e.simpleCard(e.i18n.T(MsgDeleteModeTitle), "red", e.i18n.T(MsgDeleteUsage))
@@ -8083,7 +8511,7 @@ func (e *Engine) submitDeleteModeSelection(sessionKey string, selectedIDs map[st
 	if err != nil {
 		return []string{e.i18n.Tf(MsgError, err)}
 	}
-	agentSessions = filterOwnedSessions(agentSessions, sessions.KnownAgentSessionIDs())
+	agentSessions = e.applySessionFilter(agentSessions, sessions)
 	seen := make(map[string]struct{}, len(agentSessions))
 	lines := make([]string, 0, len(selectedIDs))
 	for i := range agentSessions {
@@ -8295,7 +8723,7 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 	if err != nil {
 		return nil, fmt.Errorf(e.i18n.T(MsgListError), err)
 	}
-	agentSessions = filterOwnedSessions(agentSessions, sessions.KnownAgentSessionIDs())
+	agentSessions = e.applySessionFilter(agentSessions, sessions)
 	if len(agentSessions) == 0 {
 		return e.simpleCard(e.i18n.Tf(MsgCardTitleSessions, agent.Name(), 0), "turquoise", e.i18n.T(MsgListEmpty)), nil
 	}
@@ -8526,7 +8954,10 @@ func (e *Engine) renderProviderCard() *Card {
 	providers := switcher.ListProviders()
 
 	if current == nil && len(providers) == 0 {
-		return e.simpleCard(e.i18n.T(MsgCardTitleProvider), "indigo", e.i18n.T(MsgProviderNone))
+		cb := NewCard().Title(e.i18n.T(MsgCardTitleProvider), "indigo").
+			Markdown(e.i18n.T(MsgProviderNone))
+		cb.Buttons(PrimaryBtn("➕ "+e.i18n.T(MsgCardTitleProviderAdd), "nav:/provider/add"), e.cardBackButton())
+		return cb.Build()
 	}
 
 	var body strings.Builder
@@ -8539,6 +8970,12 @@ func (e *Engine) renderProviderCard() *Card {
 	if len(providers) > 0 {
 		var opts []CardSelectOption
 		initVal := ""
+		if current != nil {
+			opts = append(opts, CardSelectOption{
+				Text:  "🚫 " + e.i18n.T(MsgProviderClearOption),
+				Value: "act:/provider clear",
+			})
+		}
 		for _, prov := range providers {
 			label := prov.Name
 			if prov.BaseURL != "" {
@@ -8552,7 +8989,142 @@ func (e *Engine) renderProviderCard() *Card {
 		}
 		cb.Select(e.i18n.T(MsgProviderSelectPlaceholder), opts, initVal)
 	}
-	return cb.Buttons(e.cardBackButton()).Build()
+	cb.Buttons(PrimaryBtn("➕ "+e.i18n.T(MsgCardTitleProviderAdd), "nav:/provider/add"), e.cardBackButton())
+	return cb.Build()
+}
+
+func (e *Engine) renderProviderAddCard(sessionKey string) *Card {
+	if pa := e.getPendingProviderAdd(sessionKey); pa != nil {
+		switch pa.phase {
+		case "preset":
+			body := fmt.Sprintf(e.i18n.T(MsgProviderAddApiKeyPrompt), pa.name)
+			if pa.inviteURL != "" {
+				body += "\n\n" + fmt.Sprintf(e.i18n.T(MsgProviderAddInviteHint), pa.inviteURL)
+			}
+			cb := NewCard().Title(e.i18n.T(MsgCardTitleProviderAdd), "indigo").
+				Markdown(body)
+			cb.Buttons(DefaultBtn(e.i18n.T(MsgCardBack), "act:/provider/add-cancel"))
+			return cb.Build()
+		case "other":
+			cb := NewCard().Title(e.i18n.T(MsgCardTitleProviderAdd), "indigo").
+				Markdown(e.i18n.T(MsgProviderAddUsage))
+			cb.Buttons(DefaultBtn(e.i18n.T(MsgCardBack), "act:/provider/add-cancel"))
+			return cb.Build()
+		}
+	}
+
+	// Show preset selection card
+	agentType := e.agent.Name()
+	lang := e.i18n.CurrentLang()
+
+	cb := NewCard().Title(e.i18n.T(MsgCardTitleProviderAdd), "indigo").
+		Markdown(e.i18n.T(MsgProviderAddPickHint))
+
+	presets, err := FetchProviderPresets()
+	if err == nil && presets != nil {
+		for _, preset := range presets.Providers {
+			if !preset.SupportsAgent(agentType) {
+				continue
+			}
+			desc := preset.Description
+			if lang == LangChinese || lang == LangTraditionalChinese {
+				if preset.DescriptionZh != "" {
+					desc = preset.DescriptionZh
+				}
+			}
+			label := preset.DisplayName
+			if desc != "" {
+				label += " — " + desc
+			}
+			cb.ListItem(label, preset.DisplayName, "act:/provider/add "+preset.Name)
+		}
+	}
+
+	// Show linkable global providers not yet in this project
+	if e.listGlobalProvidersFunc != nil {
+		globals, gErr := e.listGlobalProvidersFunc(agentType)
+		if gErr == nil && len(globals) > 0 {
+			var existing map[string]bool
+			if sw, ok := e.agent.(ProviderSwitcher); ok {
+				existing = make(map[string]bool)
+				for _, p := range sw.ListProviders() {
+					existing[p.Name] = true
+				}
+			}
+			var linkable []ProviderConfig
+			for _, g := range globals {
+				if existing[g.Name] {
+					continue
+				}
+				linkable = append(linkable, g)
+			}
+			if len(linkable) > 0 {
+				cb.Divider()
+				cb.Markdown("🔗 " + e.i18n.T(MsgProviderLinkGlobal))
+				for _, g := range linkable {
+					label := g.Name
+					if g.Model != "" {
+						label += " · " + g.Model
+					}
+					cb.ListItem(label, g.Name, "act:/provider/link "+g.Name)
+				}
+			}
+		}
+	}
+
+	cb.Divider()
+	cb.Buttons(
+		DefaultBtn("✏️ "+e.i18n.T(MsgProviderAddOther), "act:/provider/add-other"),
+		DefaultBtn(e.i18n.T(MsgCardBack), "nav:/provider"),
+	)
+	return cb.Build()
+}
+
+func (e *Engine) executeProviderLink(sessionKey, name string) {
+	name = strings.TrimSpace(name)
+	if name == "" || e.listGlobalProvidersFunc == nil {
+		return
+	}
+	agentType := e.agent.Name()
+	globals, err := e.listGlobalProvidersFunc(agentType)
+	if err != nil {
+		slog.Warn("provider link: list global providers", "error", err)
+		return
+	}
+	var target *ProviderConfig
+	for i := range globals {
+		if globals[i].Name == name {
+			target = &globals[i]
+			break
+		}
+	}
+	if target == nil {
+		slog.Warn("provider link: global provider not found or incompatible agent type", "name", name, "agentType", agentType)
+		return
+	}
+
+	sw, ok := e.agent.(ProviderSwitcher)
+	if !ok {
+		return
+	}
+	for _, p := range sw.ListProviders() {
+		if p.Name == name {
+			return // already linked
+		}
+	}
+	updated := append(sw.ListProviders(), *target)
+	sw.SetProviders(updated)
+
+	// Save the updated provider_refs
+	if e.providerRefsSaveFunc != nil {
+		refs := make([]string, 0, len(updated))
+		for _, p := range updated {
+			refs = append(refs, p.Name)
+		}
+		if err := e.providerRefsSaveFunc(refs); err != nil {
+			slog.Error("provider link: save refs", "error", err)
+		}
+	}
 }
 
 func (e *Engine) renderCronCard(sessionKey string, userID string) *Card {
@@ -10179,7 +10751,7 @@ func (e *Engine) cmdDelete(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 		return
 	}
-	agentSessions = filterOwnedSessions(agentSessions, sessions.KnownAgentSessionIDs())
+	agentSessions = e.applySessionFilter(agentSessions, sessions)
 
 	prefix := strings.TrimSpace(args[0])
 	if isExplicitDeleteBatchArg(prefix) {
@@ -10522,8 +11094,14 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 		}
 	}
 
-	if session.CompareAndSetAgentSessionID(agentSession.CurrentSessionID(), e.agent.Name()) {
-		e.sessions.Save()
+	if newID := agentSession.CurrentSessionID(); newID != "" {
+		if session.CompareAndSetAgentSessionID(newID, e.agent.Name()) {
+			pendingName := session.GetName()
+			if pendingName != "" && pendingName != "session" && pendingName != "default" {
+				e.sessions.SetSessionName(newID, pendingName)
+			}
+			e.sessions.Save()
+		}
 	}
 
 	if err := agentSession.Send(message, nil, nil); err != nil {
@@ -10540,6 +11118,10 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 			}
 			if event.SessionID != "" {
 				if session.CompareAndSetAgentSessionID(event.SessionID, e.agent.Name()) {
+					pendingName := session.GetName()
+					if pendingName != "" && pendingName != "session" && pendingName != "default" {
+						e.sessions.SetSessionName(event.SessionID, pendingName)
+					}
 					e.sessions.Save()
 				}
 			}
@@ -10558,7 +11140,12 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 		case EventResult:
 			// Use agentSession.CurrentSessionID() for the same reason as above.
 			if currentID := agentSession.CurrentSessionID(); currentID != "" {
-				session.SetAgentSessionID(currentID, e.agent.Name())
+				if session.CompareAndSetAgentSessionID(currentID, e.agent.Name()) {
+					pendingName := session.GetName()
+					if pendingName != "" && pendingName != "session" && pendingName != "default" {
+						e.sessions.SetSessionName(currentID, pendingName)
+					}
+				}
 				e.sessions.Save()
 			}
 			resp := event.Content
@@ -10894,6 +11481,15 @@ func extractUserID(sessionKey string) string {
 		return parts[2]
 	}
 	return ""
+}
+
+func stringSliceContains(ss []string, target string) bool {
+	for _, s := range ss {
+		if s == target {
+			return true
+		}
+	}
+	return false
 }
 
 func extractPlatformName(sessionKey string) string {

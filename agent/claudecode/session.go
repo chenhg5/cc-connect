@@ -152,6 +152,21 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 	env = core.FilterEnvForSpawn(env, spawnOpts)
 	cmd.Env = env
 
+	var providerEnvSnapshot []string
+	for _, e := range env {
+		for _, prefix := range []string{"ANTHROPIC_", "CLAUDE_", "AWS_", "NO_PROXY", "DISABLE_"} {
+			if strings.HasPrefix(e, prefix) {
+				providerEnvSnapshot = append(providerEnvSnapshot, e)
+				break
+			}
+		}
+	}
+	slog.Debug("claudeSession: spawn details",
+		"bin", cliBin,
+		"allArgs", core.RedactArgs(allArgs),
+		"model", model,
+		"providerEnv", core.RedactEnv(providerEnvSnapshot))
+
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		cancel()

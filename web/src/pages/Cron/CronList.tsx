@@ -305,7 +305,7 @@ export default function CronList() {
   }
 
   return (
-    <div className="space-y-4 animate-fade-in">
+    <div className="space-y-4 animate-fade-in ">
       <div className="flex justify-between items-center">
         <h2 className="text-lg font-semibold text-gray-900 dark:text-white">{t('cron.title')}</h2>
         <Button onClick={openAdd}><Plus size={16} /> {t('cron.add')}</Button>

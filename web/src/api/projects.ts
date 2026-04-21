@@ -19,6 +19,9 @@ export interface ProjectDetail {
   work_dir?: string;
   agent_mode?: string;
   show_context_indicator?: boolean;
+  reply_footer?: boolean;
+  inject_sender?: boolean;
+  provider_refs?: string[];
   platform_configs?: PlatformConfigInfo[];
   platforms: { type: string; connected: boolean }[];
   sessions_count: number;
@@ -42,9 +45,14 @@ export interface ProjectSettingsUpdate {
   disabled_commands?: string[];
   work_dir?: string;
   mode?: string;
+  agent_type?: string;
   show_context_indicator?: boolean;
+  reply_footer?: boolean;
+  inject_sender?: boolean;
   platform_allow_from?: Record<string, string>;
 }
+
+export const listAgentTypes = () => api.get<{ agents: string[]; platforms: string[] }>('/agents');
 
 export const listProjects = () => api.get<{ projects: ProjectSummary[] }>('/projects');
 export const getProject = (name: string) => api.get<ProjectDetail>(`/projects/${name}`);

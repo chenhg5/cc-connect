@@ -196,6 +196,9 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 | 事件名称 | 事件标识 | 用途 |
 |---------|---------|------|
 | 接收消息 | `im.message.receive_v1` | 接收用户发送的消息 |
+| 卡片回调 | `card.action.trigger` | 响应交互卡片按钮点击（权限确认、provider 切换等） |
+
+> ⚠️ **重要**：如果不订阅 `card.action.trigger` 事件，用户点击卡片上的按钮（如权限确认、provider 选择等）时将无法正常响应，飞书客户端可能会显示加载超时或错误提示。如果暂时无法添加该事件，可以在配置中设置 `enable_feishu_card = false` 关闭交互卡片功能，所有交互将回退到纯文本模式。
 
 ### 5.5 保存配置
 
@@ -374,6 +377,23 @@ cc-connect 内置了自动重连机制，断开后会自动尝试重新连接。
 1. cc-connect 服务是否正常运行
 2. 长连接是否建立成功（查看日志）
 3. 事件订阅是否配置了 `im.message.receive_v1`
+
+### Q: 点击卡片按钮没有反应或报错？
+
+cc-connect 默认使用交互卡片显示权限确认、provider 选择等操作。如果点击按钮后无响应、显示加载超时或报错，请检查：
+
+1. **事件订阅**：确认已在飞书开放平台订阅了 `card.action.trigger` 事件（详见第五步）
+2. **应用发布**：修改事件订阅后需要重新发布应用版本
+3. **权限配置**：确保应用有 `im:message:send_as_bot` 权限
+
+**快速解决方案**：如果暂时无法配置卡片回调，可以在 `config.toml` 中关闭交互卡片：
+
+```toml
+[projects.platforms.options]
+enable_feishu_card = false
+```
+
+关闭后，所有交互将回退为纯文本模式，权限确认等操作通过直接回复文字完成。
 
 ### Q: 提示权限不足？
 

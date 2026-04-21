@@ -2,10 +2,12 @@
   "nav": {
     "dashboard": "Panel",
     "projects": "Proyectos",
+    "providers": "Proveedores",
     "sessions": "Sesiones",
     "chat": "Chat",
     "cron": "Cron",
     "bridge": "Puente",
+    "skills": "Habilidades",
     "system": "Sistema"
   },
   "dashboard": {
@@ -34,11 +36,17 @@
     "detail": "Detalles",
     "noProjects": "No hay proyectos configurados",
     "workDir": "Directorio de trabajo",
+    "agentType": "Tipo de agente",
+    "agentTypeChangeHint": "Cambiar el tipo de agente requiere reinicio. Los proveedores incompatibles serán eliminados.",
     "agentMode": "Modo de permisos",
     "agentSettings": "Agente",
     "generalSettings": "General",
     "showCtxIndicator": "Indicador de contexto",
     "showCtxIndicatorHint": "Mostrar el sufijo [ctx: ~N%] al final de las respuestas",
+    "replyFooter": "Pie de respuesta",
+    "replyFooterHint": "Añadir metadatos de modelo/uso al final de las respuestas",
+    "injectSender": "Inyectar remitente",
+    "injectSenderHint": "Anteponer la identidad del remitente a los mensajes enviados al agente",
     "platformAccess": "Control de acceso a plataformas",
     "deleteTitle": "Eliminar proyecto",
     "deleteConfirm": "¿Está seguro de que desea eliminar el proyecto \"{{name}}\"? Se eliminará del archivo de configuración.",
@@ -86,7 +94,14 @@
     "remove": "Quitar",
     "activate": "Activar",
     "setModel": "Establecer modelo",
-    "models": "Modelos disponibles"
+    "models": "Modelos disponibles",
+    "global": "global",
+    "emptyProject": "No hay proveedores configurados para este proyecto.",
+    "emptyProjectHint": "Vincula un proveedor global o añade uno personalizado.",
+    "linkGlobal": "Vincular global",
+    "addCustom": "Añadir personalizado",
+    "allLinked": "Todos los proveedores globales ya están vinculados.",
+    "manageGlobal": "Gestionar proveedores globales"
   },
   "cron": {
     "title": "Tareas programadas",
@@ -127,7 +142,8 @@
     "runCount": "Ejecuciones",
     "errorCount": "Errores",
     "skippedBusy": "Omitida (ocupado)",
-    "lastRun": "Última ejecución"
+    "lastRun": "Última ejecución",
+    "notEnabled": "El heartbeat no está configurado para este proyecto. Agregue la sección [heartbeat] en config.toml para habilitarlo."
   },
   "bridge": {
     "title": "Puente",
@@ -172,7 +188,9 @@
     "actions": "Acciones",
     "viewAll": "Ver todo",
     "optional": "opcional",
-    "confirmDelete": "¿Seguro que desea eliminar esto?"
+    "confirmDelete": "¿Seguro que desea eliminar esto?",
+    "close": "Cerrar",
+    "saving": "Guardando…"
   },
   "setup": {
     "addPlatform": "Añadir plataforma",
@@ -294,8 +312,12 @@
     "idleTimeout": "Tiempo de inactividad (min)",
     "idleTimeoutHint": "Detener agente automáticamente tras N minutos de inactividad; 0 = desactivado",
     "display": "Visualización",
+    "thinkingMessages": "Mensajes de pensamiento",
+    "thinkingMessagesHint": "Mostrar u ocultar mensajes de proceso de pensamiento",
     "thinkingMaxLen": "Longitud máx. de pensamiento",
     "thinkingMaxLenHint": "Caracteres máximos para mensajes de pensamiento; 0 = sin truncar",
+    "toolMessages": "Progreso de herramientas",
+    "toolMessagesHint": "Mostrar u ocultar mensajes de progreso de herramientas",
     "toolMaxLen": "Longitud máx. de herramientas",
     "toolMaxLenHint": "Caracteres máximos para mensajes de uso de herramientas; 0 = sin truncar",
     "streamPreview": "Vista previa en tiempo real",
@@ -310,6 +332,73 @@
     "rlWindowSecsHint": "Ventana de tiempo en segundos",
     "log": "Registro",
     "logLevel": "Nivel de registro"
+  },
+  "globalProviders": {
+    "title": "Gestión de proveedores",
+    "subtitle": "Administra proveedores de API compartidos globalmente entre todos los proyectos",
+    "add": "Agregar proveedor",
+    "importCCSwitch": "Importar desde CC-Switch",
+    "edit": "Editar proveedor",
+    "empty": "No hay proveedores configurados",
+    "emptyHint": "Agrega un proveedor global o importa desde los preajustes.",
+    "deleteHint": "¿Eliminar proveedor \"{{name}}\"? Los proyectos que lo referencien perderán acceso.",
+    "noPresets": "Sin preajustes",
+    "noPresetsHint": "No se pudieron cargar los preajustes. Verifica tu conexión de red.",
+    "register": "Registrar",
+    "addPreset": "Agregar",
+    "added": "Agregado",
+    "tab": {
+      "providers": "Mis proveedores",
+      "presets": "Preajustes"
+    },
+    "form": {
+      "name": "Nombre",
+      "model": "Modelo predeterminado",
+      "modelHint": "Modelo usado al cambiar a este proveedor",
+      "models": "Modelos disponibles",
+      "modelsHint": "Modelos que los usuarios pueden cambiar con /model",
+      "agentTypes": "Tipos de agente",
+      "agentTypesHint": "Dejar vacío para todos los tipos de agente",
+      "thinkingDefault": "Predeterminado (auto)",
+      "perAgentHint": "Cada tipo de agente puede usar diferente Base URL / modelos. Configura por tipo abajo.",
+      "defaultConfig": "Predeterminado",
+      "baseUrl": "Base URL",
+      "codexWireApi": "Wire API"
+    },
+    "ccSwitch": {
+      "title": "Importar desde CC-Switch",
+      "notFound": "No se encontró la base de datos de CC-Switch. Asegúrese de que CC-Switch esté instalado.",
+      "empty": "No hay proveedores configurados en CC-Switch.",
+      "hint": "Se encontraron {{count}} proveedores en CC-Switch. Seleccione cuáles importar:",
+      "active": "activo",
+      "exists": "existente",
+      "import": "Importar ({{count}})",
+      "result": "Importación completa: {{imported}} importados, {{skipped}} omitidos."
+    }
+  },
+  "skills": {
+    "title": "Habilidades",
+    "subtitle": "Gestiona las habilidades del agente y descubre nuevas",
+    "tab": {
+      "local": "Locales",
+      "recommended": "Recomendadas"
+    },
+    "projects": "Proyectos",
+    "skillCount": "{{count}} habilidades",
+    "scanDirs": "Directorios escaneados",
+    "noSkills": "No se encontraron habilidades",
+    "noSkillsHint": "Las habilidades se cargan desde los directorios de habilidades del agente (ej. ~/.claude/skills/)",
+    "emptyProject": "No se encontraron habilidades en los directorios de este proyecto",
+    "noPresets": "No hay habilidades recomendadas",
+    "noPresetsHint": "No se pudieron cargar las recomendaciones. Verifica tu conexión a internet.",
+    "featured": "Destacadas",
+    "allSkills": "Todas",
+    "author": "Autor",
+    "source": "Fuente",
+    "download": "Descargar",
+    "free": "Gratis",
+    "freemium": "Freemium",
+    "paid": "De pago"
   },
   "theme": {
     "light": "Claro",
