@@ -33,7 +33,7 @@ PLATFORMS := \
 #   make build EXCLUDE=discord,dingtalk,qq,qqbot,line
 # ---------------------------------------------------------------------------
 
-ALL_AGENTS    := acp claudecode codex cursor gemini iflow kimi opencode pi qoder
+ALL_AGENTS    := acp claudecode codex cursor devin gemini iflow kimi opencode pi qoder
 ALL_PLATFORMS := feishu telegram discord slack dingtalk wecom weixin qq qqbot line weibo
 ALL_EXTRAS    := web
 

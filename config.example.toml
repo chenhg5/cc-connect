@@ -1352,6 +1352,55 @@ app_secret = "your-feishu-app-secret"
 # token = "your-telegram-bot-token"
 
 # =============================================================================
+# Project: Devin CLI (Cognition, https://cli.devin.ai/) / 使用 Devin CLI
+# =============================================================================
+# Devin speaks the Agent Client Protocol (ACP) over stdio via its `devin acp`
+# subcommand. cc-connect ships a first-class `type = "devin"` agent that pins
+# the command / args / display name so you don't have to.
+# Devin 通过 `devin acp` 子命令使用 ACP 协议与 cc-connect 通信。cc-connect 内置
+# `type = "devin"` 的一级支持：无需手动指定 command/args，默认值就能跑通。
+#
+# Prerequisites / 前置条件:
+#   1. Install Devin CLI per the official docs at https://cli.devin.ai/
+#      安装 Devin CLI，见官方文档 https://cli.devin.ai/
+#   2. Run `devin auth login` once — credentials are stored locally and the
+#      ACP subprocess reads them automatically. cc-connect never sees the token.
+#      运行一次 `devin auth login` 完成登录；ACP 子进程会自动读取本地凭证，
+#      cc-connect 全程不接触 token。
+#   3. Windsurf Enterprise users can alternatively inject WINDSURF_API_KEY
+#      via the agent env option (see below).
+#      Windsurf 企业版用户也可以通过下面的 env 注入 WINDSURF_API_KEY。
+
+# [[projects]]
+# name = "my-devin-project"
+#
+# [projects.agent]
+# type = "devin"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/your/code"
+# # Optional: override only if the `devin` binary is at a non-standard path.
+# # Always use an absolute path when running under launchd / systemd where
+# # $PATH is minimal (e.g. ~/.local/bin may not be included).
+# # command = "/Users/me/.local/bin/devin"
+# #
+# # Optional: initial permission mode applied to new sessions via
+# # session/set_mode. Valid ids: normal, ask, plan, accept-edits, bypass.
+# # 可选：新会话的初始权限模式。合法值：normal / ask / plan / accept-edits / bypass
+# # mode = "normal"
+# #
+# # Optional: Windsurf Enterprise API key (overrides `devin auth login`).
+# # 可选：Windsurf 企业版 API Key（优先级高于 `devin auth login` 的本地凭证）。
+# # [projects.agent.options.env]
+# # WINDSURF_API_KEY = "wk_xxx"
+
+# [[projects.platforms]]
+# type = "telegram"
+#
+# [projects.platforms.options]
+# token = "your-telegram-bot-token"
+
+# =============================================================================
 # Project: ACP (Agent Client Protocol) agent / 使用 ACP 子进程
 # =============================================================================
 # Runs any binary that speaks ACP over stdio (newline-delimited JSON-RPC 2.0).
@@ -1360,6 +1409,9 @@ app_secret = "your-feishu-app-secret"
 # Same agent type works for Cursor Agent CLI, OpenClaw bridge, GitHub Copilot CLI, etc.:
 # set command + args to match each tool's documented ACP entrypoint.
 # 同一 type=acp：通过 command/args 指向各工具文档中的 ACP 启动方式即可。
+# For Devin specifically, prefer the dedicated `type = "devin"` section above.
+# 针对 Devin 建议直接使用上面的 type = "devin"；下面的 type = "acp" 主要给其他
+# 通用 ACP 工具使用。
 
 # --- Example: Cursor Agent CLI (npm: @anthropic-ai/cursor-agent) ---
 # [[projects]]
