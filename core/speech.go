@@ -49,7 +49,7 @@ func NewOpenAIWhisper(apiKey, baseURL, model string) *OpenAIWhisper {
 		APIKey:  apiKey,
 		BaseURL: strings.TrimRight(baseURL, "/"),
 		Model:   model,
-		Client:  &http.Client{Timeout: 60 * time.Second},
+		Client:  &http.Client{Timeout: 5 * time.Minute},
 	}
 }
 
@@ -130,7 +130,7 @@ func NewQwenASR(apiKey, baseURL, model string) *QwenASR {
 		APIKey:  apiKey,
 		BaseURL: strings.TrimRight(baseURL, "/"),
 		Model:   model,
-		Client:  &http.Client{Timeout: 60 * time.Second},
+		Client:  &http.Client{Timeout: 5 * time.Minute},
 	}
 }
 

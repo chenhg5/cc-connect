@@ -241,11 +241,18 @@ func (m *mockAPI) handleUploads(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing type", http.StatusBadRequest)
 		return
 	}
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"url": m.cdnServer.URL + "/upload?kind=" + kind,
-	})
+	resp := map[string]any{"url": m.cdnServer.URL + "/upload?kind=" + kind}
+	// video/audio carry the real token in the /uploads response itself
+	if kind == "video" || kind == "audio" {
+		resp["token"] = "urltok-" + kind
+	}
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
+// handleCDN mimics per-kind MAX CDN response shapes:
+//   image: {"photos": {"<id>": {"token": "..."}}}
+//   file:  {"token": "..."}
+//   video/audio: XML "<retval>1</retval>" (token comes from /uploads instead)
 func (m *mockAPI) handleCDN(w http.ResponseWriter, r *http.Request) {
 	atomic.AddInt32(&m.cdnCalls, 1)
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
@@ -262,7 +269,20 @@ func (m *mockAPI) handleCDN(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	_ = json.NewEncoder(w).Encode(map[string]any{"token": "tok-" + r.URL.Query().Get("kind")})
+	kind := r.URL.Query().Get("kind")
+	switch kind {
+	case "image":
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"photos": map[string]any{
+				"photo-id-1": map[string]any{"token": "cdntok-image"},
+			},
+		})
+	case "video", "audio":
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte("<retval>1</retval>"))
+	default:
+		_ = json.NewEncoder(w).Encode(map[string]any{"token": "cdntok-" + kind})
+	}
 }
 
 func newTestPlatform(t *testing.T, apiBase string) *Platform {

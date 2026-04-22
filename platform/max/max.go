@@ -332,20 +332,51 @@ func (p *Platform) uploadAttachment(ctx context.Context, kind string, data []byt
 		body, _ := io.ReadAll(io.LimitReader(cdnResp.Body, 512))
 		return "", fmt.Errorf("cdn upload: HTTP %d: %s", cdnResp.StatusCode, body)
 	}
-	var cdnInfo struct {
-		Token string `json:"token"`
+	cdnBody, err := io.ReadAll(io.LimitReader(cdnResp.Body, 64*1024))
+	if err != nil {
+		return "", fmt.Errorf("read cdn response: %w", err)
 	}
-	if err := json.NewDecoder(cdnResp.Body).Decode(&cdnInfo); err != nil {
-		return "", fmt.Errorf("decode cdn response: %w", err)
+	// MAX CDN uses different response shapes per attachment kind:
+	//   image: {"photos": {"<photo_id>": {"token": "..."}}}
+	//   file:  {"token": "..."}
+	//   video/audio: "<retval>1</retval>" (XML) — the real token is already in urlInfo.Token
+	if token := extractCDNToken(kind, cdnBody); token != "" {
+		return token, nil
 	}
-	if cdnInfo.Token == "" {
-		// video/audio sometimes carry the token only in the /uploads response
-		if urlInfo.Token != "" {
-			return urlInfo.Token, nil
+	if urlInfo.Token != "" {
+		return urlInfo.Token, nil
+	}
+	return "", fmt.Errorf("cdn upload: no token in response: %s", cdnBody)
+}
+
+// extractCDNToken parses the token out of a MAX CDN upload response. Returns
+// "" if not found; the caller is expected to fall back to urlInfo.Token.
+func extractCDNToken(kind string, body []byte) string {
+	switch kind {
+	case "image":
+		var resp struct {
+			Photos map[string]struct {
+				Token string `json:"token"`
+			} `json:"photos"`
 		}
-		return "", fmt.Errorf("cdn upload: empty token")
+		if err := json.Unmarshal(body, &resp); err == nil {
+			for _, ph := range resp.Photos {
+				if ph.Token != "" {
+					return ph.Token
+				}
+			}
+		}
+	case "video", "audio":
+		// CDN returns XML for video/audio; token lives in urlInfo.Token. Nothing to extract here.
+	default: // file
+		var resp struct {
+			Token string `json:"token"`
+		}
+		if err := json.Unmarshal(body, &resp); err == nil && resp.Token != "" {
+			return resp.Token
+		}
 	}
-	return cdnInfo.Token, nil
+	return ""
 }
 
 func defaultFilename(kind string) string {
@@ -721,13 +752,12 @@ func (p *Platform) fetchAttachments(ctx context.Context, atts []maxAttachmentRaw
 				FileName: a.Filename,
 			})
 		case "audio":
-			url, fname, err := p.resolveMediaURL(ctx, a.Type, a.Payload.Token)
-			if err != nil {
-				slog.Warn("max: audio URL resolve failed", "error", err)
-				continue
+			url := a.Payload.URL
+			if url == "" {
+				url, _, _ = p.resolveMediaURL(ctx, a.Type, a.Payload.Token)
 			}
 			if url == "" {
-				slog.Warn("max: audio has no resolvable URL")
+				slog.Warn("max: audio has no download URL")
 				continue
 			}
 			data, mime, err := p.downloadAttachment(ctx, url)
@@ -735,24 +765,20 @@ func (p *Platform) fetchAttachments(ctx context.Context, atts []maxAttachmentRaw
 				slog.Warn("max: audio download failed", "error", err)
 				continue
 			}
-			if a.Filename != "" {
-				fname = a.Filename
-			}
 			if audio == nil {
 				audio = &core.AudioAttachment{
 					MimeType: mime,
 					Data:     data,
-					Format:   audioFormatFromMime(mime, fname),
+					Format:   audioFormatFromMime(mime, a.Filename),
 				}
 			}
 		case "video":
-			url, fname, err := p.resolveMediaURL(ctx, a.Type, a.Payload.Token)
-			if err != nil {
-				slog.Warn("max: video URL resolve failed", "error", err)
-				continue
+			url := a.Payload.URL
+			if url == "" {
+				url, _, _ = p.resolveMediaURL(ctx, a.Type, a.Payload.Token)
 			}
 			if url == "" {
-				slog.Warn("max: video has no resolvable URL")
+				slog.Warn("max: video has no download URL")
 				continue
 			}
 			data, mime, err := p.downloadAttachment(ctx, url)
@@ -760,9 +786,7 @@ func (p *Platform) fetchAttachments(ctx context.Context, atts []maxAttachmentRaw
 				slog.Warn("max: video download failed", "error", err)
 				continue
 			}
-			if a.Filename != "" {
-				fname = a.Filename
-			}
+			fname := a.Filename
 			files = append(files, core.FileAttachment{
 				MimeType: mime,
 				Data:     data,
