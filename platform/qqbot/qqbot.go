@@ -26,10 +26,6 @@ func init() {
 }
 
 const (
-	apiBaseProduction = "https://api.sgroup.qq.com"
-	apiBaseSandbox    = "https://sandbox.api.sgroup.qq.com"
-	tokenURL          = "https://bots.qq.com/app/getAppAccessToken"
-
 	// Default intent: GROUP_AND_C2C_EVENT (1 << 25)
 	defaultIntents = 1 << 25
 
@@ -41,6 +37,15 @@ const (
 	messageCacheTTL      = 7 * 24 * time.Hour
 	messageCacheMaxItems = 1000
 	quotedTextMaxRunes   = 800
+
+	// Max attachment download size (20MB), aligned with QQ Bot platform limits.
+	maxAttachmentSize = 20 * 1024 * 1024
+)
+
+var (
+	apiBaseProduction = "https://api.sgroup.qq.com"
+	apiBaseSandbox    = "https://sandbox.api.sgroup.qq.com"
+	tokenURL          = "https://bots.qq.com/app/getAppAccessToken"
 )
 
 // WebSocket opcodes for the QQ Bot gateway protocol.
@@ -125,6 +130,16 @@ type messageReference struct {
 	Message           *quotedMessage `json:"message,omitempty"`
 	ReferencedMessage *quotedMessage `json:"referenced_message,omitempty"`
 	SourceMessage     *quotedMessage `json:"source_message,omitempty"`
+}
+
+// msgTypeQuote indicates a quote (reply) message in the QQ Bot API.
+const msgTypeQuote = 103
+
+// msgElement represents a message element in QQ Bot event.
+// For quote messages (message_type=103), msg_elements[0] contains the quoted content.
+type msgElement struct {
+	Content     string       `json:"content"`
+	Attachments []attachment `json:"attachments"`
 }
 
 // New creates a new QQ Bot platform from config options.
@@ -219,7 +234,7 @@ func (p *Platform) SendImage(ctx context.Context, replyCtx any, img core.ImageAt
 		return fmt.Errorf("qqbot: SendImage: invalid reply context type %T", replyCtx)
 	}
 
-	fileInfo, err := p.uploadRichMedia(rctx, 1, img.Data)
+	fileInfo, err := p.uploadRichMedia(rctx, 1, img.Data, "")
 	if err != nil {
 		return fmt.Errorf("qqbot: upload image: %w", err)
 	}
@@ -248,7 +263,7 @@ func (p *Platform) SendImage(ctx context.Context, replyCtx any, img core.ImageAt
 
 // uploadRichMedia uploads a file to QQ Bot rich media API and returns the file_info.
 // fileType: 1=image, 2=video, 3=audio, 4=file.
-func (p *Platform) uploadRichMedia(rctx *replyContext, fileType int, data []byte) (string, error) {
+func (p *Platform) uploadRichMedia(rctx *replyContext, fileType int, data []byte, fileName string) (string, error) {
 	var url string
 	switch rctx.messageType {
 	case "group":
@@ -264,6 +279,9 @@ func (p *Platform) uploadRichMedia(rctx *replyContext, fileType int, data []byte
 		"file_type":    fileType,
 		"file_data":    b64,
 		"srv_send_msg": false,
+	}
+	if fileType == 4 && fileName != "" {
+		reqBody["file_name"] = fileName
 	}
 
 	var result struct {
@@ -356,6 +374,43 @@ func (p *Platform) apiRequestJSON(method, url string, body any, result any) erro
 }
 
 var _ core.ImageSender = (*Platform)(nil)
+
+// SendFile uploads and sends a file via QQ Bot rich media API.
+// Implements core.FileSender.
+func (p *Platform) SendFile(ctx context.Context, replyCtx any, file core.FileAttachment) error {
+	rctx, ok := replyCtx.(*replyContext)
+	if !ok {
+		return fmt.Errorf("qqbot: SendFile: invalid reply context type %T", replyCtx)
+	}
+
+	fileInfo, err := p.uploadRichMedia(rctx, 4, file.Data, file.FileName)
+	if err != nil {
+		return fmt.Errorf("qqbot: upload file: %w", err)
+	}
+
+	var url string
+	switch rctx.messageType {
+	case "group":
+		url = fmt.Sprintf("%s/v2/groups/%s/messages", p.apiBase(), rctx.groupOpenID)
+	case "c2c":
+		url = fmt.Sprintf("%s/v2/users/%s/messages", p.apiBase(), rctx.userOpenID)
+	default:
+		return fmt.Errorf("qqbot: unknown message type %q", rctx.messageType)
+	}
+
+	body := map[string]any{
+		"msg_type": 7,
+		"media":    map[string]any{"file_info": fileInfo},
+	}
+	if rctx.eventMsgID != "" {
+		body["msg_id"] = rctx.eventMsgID
+		body["msg_seq"] = p.nextMsgSeq(rctx.eventMsgID)
+	}
+
+	return p.apiRequest("POST", url, body)
+}
+
+var _ core.FileSender = (*Platform)(nil)
 
 // Stop shuts down the platform.
 func (p *Platform) Stop() error {
@@ -864,6 +919,8 @@ func (p *Platform) handleGroupMessage(data json.RawMessage) {
 		Timestamp        string            `json:"timestamp"`
 		Attachments      []attachment      `json:"attachments"`
 		MessageReference *messageReference `json:"message_reference"`
+		MessageType      *int              `json:"message_type"`
+		MsgElements      []msgElement      `json:"msg_elements"`
 		Author           struct {
 			MemberOpenID string `json:"member_openid"`
 		} `json:"author"`
@@ -896,13 +953,16 @@ func (p *Platform) handleGroupMessage(data json.RawMessage) {
 
 	// Strip leading @bot mention (the official API includes it as content prefix)
 	content := stripAtMention(d.Content)
-	content = prependQuotedMessage(p.resolveQuotedText(d.MessageReference), content)
-
-	// Download image attachments
+	quotedText := p.resolveQuotedText(d.MessageReference)
+	if quotedText == "" && d.MessageType != nil && *d.MessageType == msgTypeQuote {
+		quotedText = quotedTextFromElements(d.MsgElements)
+	}
+	content = prependQuotedMessage(quotedText, content)
 	images := downloadAttachmentImages(d.Attachments)
+	files := downloadAttachmentFiles(d.Attachments)
 	p.cacheMessage(d.ID, contentOrAttachmentSummary(content, d.Attachments))
 
-	if content == "" && len(images) == 0 {
+	if content == "" && len(images) == 0 && len(files) == 0 {
 		return
 	}
 
@@ -929,10 +989,11 @@ func (p *Platform) handleGroupMessage(data json.RawMessage) {
 		ChatName:   d.GroupOpenID,         // group openid as fallback (no group name API)
 		Content:    content,
 		Images:     images,
+		Files:      files,
 		ReplyCtx:   rctx,
 	}
 
-	slog.Debug("qqbot: group message received", "group", d.GroupOpenID, "user", d.Author.MemberOpenID, "len", len(content), "images", len(images))
+	slog.Debug("qqbot: group message received", "group", d.GroupOpenID, "user", d.Author.MemberOpenID, "len", len(content), "images", len(images), "files", len(files))
 	p.handler(p, msg)
 }
 
@@ -943,6 +1004,8 @@ func (p *Platform) handleC2CMessage(data json.RawMessage) {
 		Timestamp        string            `json:"timestamp"`
 		Attachments      []attachment      `json:"attachments"`
 		MessageReference *messageReference `json:"message_reference"`
+		MessageType      *int              `json:"message_type"`
+		MsgElements      []msgElement      `json:"msg_elements"`
 		Author           struct {
 			UserOpenID string `json:"user_openid"`
 		} `json:"author"`
@@ -974,13 +1037,18 @@ func (p *Platform) handleC2CMessage(data json.RawMessage) {
 	}
 
 	content := strings.TrimSpace(d.Content)
-	content = prependQuotedMessage(p.resolveQuotedText(d.MessageReference), content)
+	quotedText := p.resolveQuotedText(d.MessageReference)
+	if quotedText == "" && d.MessageType != nil && *d.MessageType == msgTypeQuote {
+		quotedText = quotedTextFromElements(d.MsgElements)
+	}
+	content = prependQuotedMessage(quotedText, content)
 
-	// Download image attachments
+	// Download image and file attachments
 	images := downloadAttachmentImages(d.Attachments)
+	files := downloadAttachmentFiles(d.Attachments)
 	p.cacheMessage(d.ID, contentOrAttachmentSummary(content, d.Attachments))
 
-	if content == "" && len(images) == 0 {
+	if content == "" && len(images) == 0 && len(files) == 0 {
 		return
 	}
 
@@ -1000,10 +1068,11 @@ func (p *Platform) handleC2CMessage(data json.RawMessage) {
 		UserName:   d.Author.UserOpenID,
 		Content:    content,
 		Images:     images,
+		Files:      files,
 		ReplyCtx:   rctx,
 	}
 
-	slog.Debug("qqbot: c2c message received", "user", d.Author.UserOpenID, "len", len(content), "images", len(images))
+	slog.Debug("qqbot: c2c message received", "user", d.Author.UserOpenID, "len", len(content), "images", len(images), "files", len(files))
 	p.handler(p, msg)
 }
 
@@ -1193,7 +1262,12 @@ func downloadAttachmentImages(attachments []attachment) []core.ImageAttachment {
 			slog.Warn("qqbot: download image failed", "url", url, "error", err)
 			continue
 		}
-		data, err := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusOK {
+			slog.Warn("qqbot: download image returned non-200 status", "url", url, "status", resp.StatusCode)
+			resp.Body.Close()
+			continue
+		}
+		data, err := io.ReadAll(io.LimitReader(resp.Body, maxAttachmentSize))
 		resp.Body.Close()
 		if err != nil {
 			slog.Warn("qqbot: read image body failed", "error", err)
@@ -1210,6 +1284,49 @@ func downloadAttachmentImages(attachments []attachment) []core.ImageAttachment {
 		})
 	}
 	return images
+}
+
+// downloadAttachmentFiles downloads all non-image file attachments and returns FileAttachments.
+func downloadAttachmentFiles(attachments []attachment) []core.FileAttachment {
+	var files []core.FileAttachment
+	for _, att := range attachments {
+		if strings.HasPrefix(att.ContentType, "image/") {
+			continue
+		}
+		url := att.URL
+		if url == "" {
+			continue
+		}
+		if !strings.HasPrefix(url, "http") {
+			url = "https://" + url
+		}
+		resp, err := core.HTTPClient.Get(url)
+		if err != nil {
+			slog.Warn("qqbot: download file failed", "url", url, "error", err)
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			slog.Warn("qqbot: download file returned non-200 status", "url", url, "status", resp.StatusCode)
+			resp.Body.Close()
+			continue
+		}
+		data, err := io.ReadAll(io.LimitReader(resp.Body, maxAttachmentSize))
+		resp.Body.Close()
+		if err != nil {
+			slog.Warn("qqbot: read file body failed", "error", err)
+			continue
+		}
+		mime := att.ContentType
+		if mime == "" {
+			mime = http.DetectContentType(data)
+		}
+		files = append(files, core.FileAttachment{
+			MimeType: mime,
+			Data:     data,
+			FileName: att.Filename,
+		})
+	}
+	return files
 }
 
 // stripAtMention removes the leading @bot mention from group message content.
@@ -1372,6 +1489,20 @@ func quotedMessageText(msg *quotedMessage) string {
 		return title
 	}
 	return contentOrAttachmentSummary("", msg.Attachments)
+}
+
+// quotedTextFromElements extracts quoted message text from msg_elements[0].
+// QQ Bot sends the referenced message content in msg_elements[0] for quote messages (message_type=103).
+func quotedTextFromElements(elements []msgElement) string {
+	if len(elements) == 0 {
+		return ""
+	}
+	elem := elements[0]
+	content := strings.TrimSpace(elem.Content)
+	if content != "" {
+		return content
+	}
+	return contentOrAttachmentSummary("", elem.Attachments)
 }
 
 func prependQuotedMessage(quoted, content string) string {
