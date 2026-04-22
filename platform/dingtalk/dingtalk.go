@@ -233,11 +233,16 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel, richText *richT
 		return
 	}
 
+	convType := "d" // direct (1:1)
+	if data.ConversationType == "2" {
+		convType = "g" // group
+	}
+
 	var sessionKey string
 	if p.shareSessionInChannel {
-		sessionKey = fmt.Sprintf("dingtalk:%s", data.ConversationId)
+		sessionKey = fmt.Sprintf("dingtalk:%s:%s", convType, data.ConversationId)
 	} else {
-		sessionKey = fmt.Sprintf("dingtalk:%s:%s", data.ConversationId, data.SenderStaffId)
+		sessionKey = fmt.Sprintf("dingtalk:%s:%s:%s", convType, data.ConversationId, data.SenderStaffId)
 	}
 
 	// Handle audio messages
@@ -905,29 +910,39 @@ func (p *Platform) formatReplyContent(richText *richTextContent, fallback string
 }
 
 // ReconstructReplyCtx implements core.ReplyContextReconstructor.
-// Session key format: "dingtalk:{conversationId}:{senderStaffId}" or "dingtalk:{conversationId}"
+// Session key format: "dingtalk:{convType}:{conversationId}:{senderStaffId}" or "dingtalk:{convType}:{conversationId}"
+// where convType is "g" (group) or "d" (direct/1:1).
 func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	if !strings.HasPrefix(sessionKey, "dingtalk:") {
 		return nil, fmt.Errorf("dingtalk: not a dingtalk session key: %q", sessionKey)
 	}
 
 	stripped := strings.TrimPrefix(sessionKey, "dingtalk:")
-	parts := strings.SplitN(stripped, ":", 2)
+	parts := strings.SplitN(stripped, ":", 3)
 
-	conversationId := parts[0]
+	if len(parts) < 2 {
+		return nil, fmt.Errorf("dingtalk: invalid session key format: %q", sessionKey)
+	}
+
+	convType := parts[0]
+	if convType != "g" && convType != "d" {
+		return nil, fmt.Errorf("dingtalk: invalid conversation type %q in session key: %q", convType, sessionKey)
+	}
+
+	conversationId := parts[1]
 	if conversationId == "" {
 		return nil, fmt.Errorf("dingtalk: empty conversationId in session key: %q", sessionKey)
 	}
 
 	var senderStaffId string
-	if len(parts) > 1 {
-		senderStaffId = parts[1]
+	if len(parts) > 2 {
+		senderStaffId = parts[2]
 	}
 
 	return replyContext{
 		conversationId: conversationId,
 		senderStaffId:  senderStaffId,
-		isGroup:        true,
+		isGroup:        convType == "g",
 		proactive:      true,
 	}, nil
 }
