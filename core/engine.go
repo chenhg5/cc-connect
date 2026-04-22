@@ -1637,7 +1637,8 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		}
 		// Session is busy — try to queue the message for the running turn
 		// so the agent processes it immediately after the current turn ends.
-		if e.queueMessageForBusySession(p, msg, interactiveKey) {
+		switch e.queueMessageForBusySession(p, msg, interactiveKey) {
+		case queueResultOK:
 			// Race guard: the drain loop in processInteractiveMessageWith may
 			// have just finished (session unlocked) between our TryLock failure
 			// and the queue append. Re-try TryLock — if it succeeds, no one is
@@ -1645,9 +1646,14 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 			if session.TryLock() {
 				go e.drainOrphanedQueue(session, sessions, interactiveKey, agent, resolvedWorkspace)
 			}
-			return
+		case queueResultFull:
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQueueFull))
+		default:
+			// queueResultNoState / queueResultSessionDead — the session is
+			// busy but there is no usable queue. Fall back to the generic
+			// "previous request still processing" reply.
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
 		}
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQueueFull))
 		return
 	}
 
@@ -1719,22 +1725,34 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 	return newSession
 }
 
+// queueResult distinguishes why queueing succeeded or failed so the caller
+// can pick the right user-facing reply.
+type queueResult int
+
+const (
+	queueResultOK            queueResult = iota // message queued for later delivery
+	queueResultNoState                          // no interactiveState for this key
+	queueResultSessionDead                      // agent session existed but is no longer alive
+	queueResultFull                             // pendingMessages already at maxQueuedMessages
+)
+
 // queueMessageForBusySession queues a message for later delivery when the
 // session is busy. The message is NOT sent to agent stdin at queue time;
 // the event loop sends it after the current turn's EventResult is received.
-// Returns true if the message was successfully queued, false otherwise.
-func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiveKey string) bool {
+// Returns queueResultOK on success, or a specific failure reason so the
+// caller can distinguish "queue full" from other rejection paths.
+func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiveKey string) queueResult {
 	e.interactiveMu.Lock()
 	state, hasState := e.interactiveStates[interactiveKey]
 	e.interactiveMu.Unlock()
 
 	if !hasState || state == nil {
-		return false
+		return queueResultNoState
 	}
 	// Allow queueing when agentSession is nil (session is starting up,
 	// issue #565). Only reject if the session was established and died.
 	if state.agentSession != nil && !state.agentSession.Alive() {
-		return false
+		return queueResultSessionDead
 	}
 
 	// Only queue metadata — do NOT send to agent stdin yet.
@@ -1745,7 +1763,7 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 	state.mu.Lock()
 	if len(state.pendingMessages) >= e.maxQueuedMessages {
 		state.mu.Unlock()
-		return false // fall back to "queue full" reply
+		return queueResultFull
 	}
 	state.pendingMessages = append(state.pendingMessages, queuedMessage{
 		platform:      p,
@@ -1768,7 +1786,7 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		"queue_depth", queueDepth,
 	)
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
-	return true
+	return queueResultOK
 }
 
 // ensureInteractiveStateForQueueing creates a placeholder interactiveState

@@ -6198,11 +6198,11 @@ func TestQueueMessageForBusySession_FIFODequeue(t *testing.T) {
 	msg1 := &Message{SessionKey: key, Content: "msg1", ReplyCtx: "ctx-msg1"}
 	msg2 := &Message{SessionKey: key, Content: "msg2", ReplyCtx: "ctx-msg2"}
 
-	ok1 := e.queueMessageForBusySession(p, msg1, key)
-	ok2 := e.queueMessageForBusySession(p, msg2, key)
+	res1 := e.queueMessageForBusySession(p, msg1, key)
+	res2 := e.queueMessageForBusySession(p, msg2, key)
 
-	if !ok1 || !ok2 {
-		t.Fatal("expected both messages to be queued successfully")
+	if res1 != queueResultOK || res2 != queueResultOK {
+		t.Fatalf("expected both messages queued (OK), got %v / %v", res1, res2)
 	}
 
 	// Since deferred-send, messages are NOT sent to agent stdin at queue
@@ -6597,9 +6597,8 @@ func TestQueueMessageOverflow_DropsOldestAndReturnsfalse(t *testing.T) {
 	// Fill the queue to defaultMaxQueuedMessages (5).
 	for i := 0; i < defaultMaxQueuedMessages; i++ {
 		msg := &Message{SessionKey: key, Content: fmt.Sprintf("msg-%d", i), ReplyCtx: fmt.Sprintf("ctx-%d", i)}
-		ok := e.queueMessageForBusySession(p, msg, key)
-		if !ok {
-			t.Fatalf("expected msg-%d to be queued, got false", i)
+		if res := e.queueMessageForBusySession(p, msg, key); res != queueResultOK {
+			t.Fatalf("expected msg-%d queued OK, got %v", i, res)
 		}
 	}
 
@@ -6609,11 +6608,10 @@ func TestQueueMessageOverflow_DropsOldestAndReturnsfalse(t *testing.T) {
 	}
 	state.mu.Unlock()
 
-	// The 6th message should be rejected (returns false).
+	// The 6th message should be rejected with queueResultFull.
 	overflow := &Message{SessionKey: key, Content: "msg-overflow", ReplyCtx: "ctx-overflow"}
-	ok := e.queueMessageForBusySession(p, overflow, key)
-	if ok {
-		t.Fatal("expected 6th message to be rejected (queue full)")
+	if res := e.queueMessageForBusySession(p, overflow, key); res != queueResultFull {
+		t.Fatalf("expected 6th message rejected with queueResultFull, got %v", res)
 	}
 
 	// Queue should still have exactly defaultMaxQueuedMessages items (the original 5).
@@ -6639,9 +6637,8 @@ func TestQueueMessage_NoState_ReturnsFalse(t *testing.T) {
 	e := newTestEngine()
 
 	msg := &Message{SessionKey: "nonexistent:key", Content: "hello"}
-	ok := e.queueMessageForBusySession(p, msg, "nonexistent:key")
-	if ok {
-		t.Fatal("expected false when no interactive state exists")
+	if res := e.queueMessageForBusySession(p, msg, "nonexistent:key"); res != queueResultNoState {
+		t.Fatalf("expected queueResultNoState when no interactive state exists, got %v", res)
 	}
 }
 
@@ -6662,9 +6659,8 @@ func TestQueueMessage_DeadSession_ReturnsFalse(t *testing.T) {
 	e.interactiveMu.Unlock()
 
 	msg := &Message{SessionKey: key, Content: "hello"}
-	ok := e.queueMessageForBusySession(p, msg, key)
-	if ok {
-		t.Fatal("expected false for dead session")
+	if res := e.queueMessageForBusySession(p, msg, key); res != queueResultSessionDead {
+		t.Fatalf("expected queueResultSessionDead for dead session, got %v", res)
 	}
 }
 
@@ -6687,9 +6683,8 @@ func TestQueueMessage_NilAgentSession_DuringStartup(t *testing.T) {
 	e.interactiveMu.Unlock()
 
 	msg := &Message{SessionKey: key, Content: "queued during startup", ReplyCtx: "ctx-startup"}
-	ok := e.queueMessageForBusySession(p, msg, key)
-	if !ok {
-		t.Fatal("expected true: messages should be queueable during session startup")
+	if res := e.queueMessageForBusySession(p, msg, key); res != queueResultOK {
+		t.Fatalf("expected queueResultOK during session startup, got %v", res)
 	}
 
 	state.mu.Lock()
@@ -6700,6 +6695,64 @@ func TestQueueMessage_NilAgentSession_DuringStartup(t *testing.T) {
 		t.Fatalf("queued content = %q, want %q", state.pendingMessages[0].content, "queued during startup")
 	}
 	state.mu.Unlock()
+}
+
+// TestQueueMessage_SetMaxQueuedMessages_OverridesDefault verifies that
+// SetMaxQueuedMessages changes the per-session queue cap: with depth=n the
+// first n messages are accepted and the (n+1)-th is rejected with
+// queueResultFull.
+func TestQueueMessage_SetMaxQueuedMessages_OverridesDefault(t *testing.T) {
+	const depth = 2 // deliberately != defaultMaxQueuedMessages (5)
+
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("qs-configurable")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetMaxQueuedMessages(depth)
+
+	key := "test:configurable-depth"
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	for i := 0; i < depth; i++ {
+		msg := &Message{SessionKey: key, Content: fmt.Sprintf("msg-%d", i), ReplyCtx: fmt.Sprintf("ctx-%d", i)}
+		if res := e.queueMessageForBusySession(p, msg, key); res != queueResultOK {
+			t.Fatalf("expected msg-%d queued OK under depth=%d, got %v", i, depth, res)
+		}
+	}
+
+	overflow := &Message{SessionKey: key, Content: "msg-overflow", ReplyCtx: "ctx-overflow"}
+	if res := e.queueMessageForBusySession(p, overflow, key); res != queueResultFull {
+		t.Fatalf("expected queueResultFull at depth=%d, got %v", depth, res)
+	}
+
+	state.mu.Lock()
+	if got := len(state.pendingMessages); got != depth {
+		t.Fatalf("queue depth after overflow = %d, want %d", got, depth)
+	}
+	state.mu.Unlock()
+}
+
+// TestSetMaxQueuedMessages_IgnoresNonPositive verifies that SetMaxQueuedMessages
+// is a no-op when n <= 0, preserving the default cap.
+func TestSetMaxQueuedMessages_IgnoresNonPositive(t *testing.T) {
+	e := newTestEngine()
+	e.SetMaxQueuedMessages(0)
+	if e.maxQueuedMessages != defaultMaxQueuedMessages {
+		t.Fatalf("maxQueuedMessages after SetMaxQueuedMessages(0) = %d, want %d (default)",
+			e.maxQueuedMessages, defaultMaxQueuedMessages)
+	}
+	e.SetMaxQueuedMessages(-3)
+	if e.maxQueuedMessages != defaultMaxQueuedMessages {
+		t.Fatalf("maxQueuedMessages after SetMaxQueuedMessages(-3) = %d, want %d (default)",
+			e.maxQueuedMessages, defaultMaxQueuedMessages)
+	}
 }
 
 // --- 2. /compress flow ---
