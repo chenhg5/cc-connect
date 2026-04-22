@@ -149,6 +149,7 @@ type resultAgentSession struct {
 	events      chan Event
 	result      string
 	sendOnce    sync.Once
+	mu          sync.Mutex
 	sentPrompts []string
 }
 
@@ -160,11 +161,19 @@ func newResultAgentSession(result string) *resultAgentSession {
 }
 
 func (s *resultAgentSession) Send(prompt string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.mu.Lock()
 	s.sentPrompts = append(s.sentPrompts, prompt)
+	s.mu.Unlock()
 	s.sendOnce.Do(func() {
 		s.events <- Event{Type: EventResult, Content: s.result, Done: true}
 	})
 	return nil
+}
+
+func (s *resultAgentSession) SentPrompts() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.sentPrompts...)
 }
 
 func (s *resultAgentSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
@@ -2493,6 +2502,51 @@ func TestConfigItems_ThinkingMessagesToggle(t *testing.T) {
 	}
 	if e.display.ThinkingMessages {
 		t.Fatal("expected thinking messages to be disabled")
+	}
+}
+
+func TestConfigItems_MessageQueueSettings(t *testing.T) {
+	e := newTestEngine()
+	e.SetMessageQueueConfig(DefaultMessageQueueCfg())
+	items := e.configItems()
+
+	find := func(key string) *configItem {
+		t.Helper()
+		for i := range items {
+			if items[i].key == key {
+				return &items[i]
+			}
+		}
+		t.Fatalf("missing config item %q", key)
+		return nil
+	}
+
+	if err := find("messages.mode").setFunc("collect"); err != nil {
+		t.Fatalf("set messages.mode: %v", err)
+	}
+	if got := e.messageQueueCfg.Mode; got != "collect" {
+		t.Fatalf("messages.mode = %q, want collect", got)
+	}
+
+	if err := find("messages.collect_wait_ms").setFunc("4500"); err != nil {
+		t.Fatalf("set messages.collect_wait_ms: %v", err)
+	}
+	if got := e.messageQueueCfg.CollectWait; got != 4500*time.Millisecond {
+		t.Fatalf("messages.collect_wait_ms = %v, want 4500ms", got)
+	}
+
+	if err := find("messages.collect_max_messages").setFunc("12"); err != nil {
+		t.Fatalf("set messages.collect_max_messages: %v", err)
+	}
+	if got := e.messageQueueCfg.CollectMaxMsgs; got != 12 {
+		t.Fatalf("messages.collect_max_messages = %d, want 12", got)
+	}
+
+	if err := find("messages.collect_max_bytes").setFunc("4096"); err != nil {
+		t.Fatalf("set messages.collect_max_bytes: %v", err)
+	}
+	if got := e.messageQueueCfg.CollectMaxBytes; got != 4096 {
+		t.Fatalf("messages.collect_max_bytes = %d, want 4096", got)
 	}
 }
 
@@ -6748,6 +6802,178 @@ func TestCmdCompress_NoCompressor_RepliesNotSupported(t *testing.T) {
 	}
 	if !strings.Contains(sent[0], e.i18n.T(MsgCompressNotSupported)) {
 		t.Fatalf("expected MsgCompressNotSupported, got %q", sent[0])
+	}
+}
+
+func TestMessageQueueCollect_MergesBufferedMessages(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newResultAgentSession("merged-ok")
+	agent := &resultAgent{session: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetMessageQueueConfig(MessageQueueCfg{
+		Mode:            messageQueueModeCollect,
+		CollectWait:     30 * time.Millisecond,
+		CollectMaxMsgs:  20,
+		CollectMaxBytes: 256 * 1024,
+	})
+
+	e.handleMessage(p, &Message{SessionKey: "test:user1", UserID: "user1", Content: "first", ReplyCtx: "ctx-1"})
+	time.Sleep(10 * time.Millisecond)
+	e.handleMessage(p, &Message{SessionKey: "test:user1", UserID: "user1", Content: "second", ReplyCtx: "ctx-2"})
+
+	deadline := time.After(2 * time.Second)
+	for {
+		if len(sess.SentPrompts()) == 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for merged send, prompts=%v", sess.SentPrompts())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	if got := sess.SentPrompts()[0]; got != "first\n\nsecond" {
+		t.Fatalf("merged prompt = %q, want %q", got, "first\n\nsecond")
+	}
+
+	sent := p.getSent()
+	found := false
+	for _, line := range sent {
+		if strings.Contains(line, "merged-ok") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("platform replies = %v, want merged result", sent)
+	}
+}
+
+func TestMessageQueueManual_FlushSendsBufferedMessages(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newResultAgentSession("manual-ok")
+	agent := &resultAgent{session: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetMessageQueueConfig(MessageQueueCfg{
+		Mode:            messageQueueModeManual,
+		CollectWait:     3 * time.Second,
+		CollectMaxMsgs:  20,
+		CollectMaxBytes: 256 * 1024,
+	})
+
+	e.handleMessage(p, &Message{SessionKey: "test:user1", UserID: "user1", Content: "manual-one", ReplyCtx: "ctx-1"})
+	e.handleMessage(p, &Message{SessionKey: "test:user1", UserID: "user1", Content: "manual-two", ReplyCtx: "ctx-2"})
+	time.Sleep(50 * time.Millisecond)
+	if len(sess.SentPrompts()) != 0 {
+		t.Fatalf("send prompts before /flush = %v, want none", sess.SentPrompts())
+	}
+
+	e.handleMessage(p, &Message{SessionKey: "test:user1", UserID: "user1", Content: "/flush", ReplyCtx: "ctx-flush"})
+
+	deadline := time.After(2 * time.Second)
+	for {
+		if len(sess.SentPrompts()) == 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for /flush send, prompts=%v", sess.SentPrompts())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	if got := sess.SentPrompts()[0]; got != "manual-one\n\nmanual-two" {
+		t.Fatalf("merged prompt = %q, want %q", got, "manual-one\n\nmanual-two")
+	}
+
+	sent := p.getSent()
+	foundFlush := false
+	foundResult := false
+	for _, line := range sent {
+		if strings.Contains(line, e.i18n.T(MsgFlushStarted)) {
+			foundFlush = true
+		}
+		if strings.Contains(line, "manual-ok") {
+			foundResult = true
+		}
+	}
+	if !foundFlush {
+		t.Fatalf("platform replies = %v, want flush confirmation", sent)
+	}
+	if !foundResult {
+		t.Fatalf("platform replies = %v, want manual result", sent)
+	}
+}
+
+func TestMessageQueueFlush_RestoresBufferOnTryLockFailure(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newResultAgentSession("restored-ok")
+	agent := &resultAgent{session: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetMessageQueueConfig(MessageQueueCfg{
+		Mode:            messageQueueModeCollect,
+		CollectWait:     5 * time.Second,
+		CollectMaxMsgs:  20,
+		CollectMaxBytes: 256 * 1024,
+	})
+
+	interactiveKey := "test:user1"
+	base := pendingCollectedMessages{
+		session:        e.sessions.GetOrCreateActive(interactiveKey),
+		sessions:       e.sessions,
+		agent:          agent,
+		interactiveKey: interactiveKey,
+		workspaceDir:   "",
+		mode:           messageQueueModeCollect,
+	}
+	e.bufferMessage(interactiveKey, base, bufferedMessage{
+		platform: p,
+		msg: Message{
+			SessionKey: interactiveKey,
+			UserID:     "user1",
+			Content:    "first",
+			ReplyCtx:   "ctx-1",
+		},
+	})
+
+	session := e.sessions.GetOrCreateActive(interactiveKey)
+	if !session.TryLock() {
+		t.Fatal("expected TryLock to succeed")
+	}
+	if e.flushBufferedMessages(interactiveKey, nil) {
+		t.Fatal("expected flush to fail while session is locked")
+	}
+	session.Unlock()
+
+	e.collectMu.Lock()
+	restored := e.collectStates[interactiveKey]
+	e.collectMu.Unlock()
+	if restored == nil || len(restored.messages) != 1 {
+		t.Fatalf("expected buffered messages to be restored, state=%#v", restored)
+	}
+
+	if !e.flushBufferedMessages(interactiveKey, nil) {
+		t.Fatal("expected flush to succeed after unlocking session")
+	}
+
+	deadline := time.After(2 * time.Second)
+	for {
+		if len(sess.SentPrompts()) == 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for restored flush, prompts=%v", sess.SentPrompts())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	if got := sess.SentPrompts()[0]; got != "first" {
+		t.Fatalf("restored prompt = %q, want %q", got, "first")
 	}
 }
 

@@ -47,6 +47,12 @@ const (
 	replyFooterUsageCacheTTL = 30 * time.Second
 )
 
+const (
+	messageQueueModeImmediate = "immediate"
+	messageQueueModeCollect   = "collect"
+	messageQueueModeManual    = "manual"
+)
+
 // VersionInfo is set by main at startup so that /version works.
 var VersionInfo string
 
@@ -65,6 +71,35 @@ type RestartRequest struct {
 type replyFooterUsageCache struct {
 	text      string
 	fetchedAt time.Time
+}
+
+type MessageQueueCfg struct {
+	Mode            string
+	CollectWait     time.Duration
+	CollectMaxMsgs  int
+	CollectMaxBytes int
+}
+
+func DefaultMessageQueueCfg() MessageQueueCfg {
+	return MessageQueueCfg{
+		Mode:            messageQueueModeImmediate,
+		CollectWait:     5 * time.Second,
+		CollectMaxMsgs:  20,
+		CollectMaxBytes: 256 * 1024,
+	}
+}
+
+func normalizeMessageQueueMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", messageQueueModeImmediate:
+		return messageQueueModeImmediate
+	case messageQueueModeCollect:
+		return messageQueueModeCollect
+	case messageQueueModeManual:
+		return messageQueueModeManual
+	default:
+		return ""
+	}
 }
 
 // SaveRestartNotify persists restart info so the new process can send
@@ -246,6 +281,11 @@ type Engine struct {
 	replyFooterMu       sync.Mutex
 	replyFooterUsage    replyFooterUsageCache
 
+	messageQueueCfg      MessageQueueCfg
+	messageQueueSaveFunc func(mode *string, collectWaitMs, collectMaxMsgs, collectMaxBytes *int) error
+	collectMu            sync.Mutex
+	collectStates        map[string]*pendingCollectedMessages
+
 	// /web command callbacks
 	webSetupFunc  func() (port int, token string, needRestart bool, err error)
 	webStatusFunc func() (url string)
@@ -273,6 +313,23 @@ type queuedMessage struct {
 	userName      string // sender's display name for sender injection
 	msgPlatform   string // platform name for sender injection
 	msgSessionKey string // session key for extracting chat ID
+}
+
+type bufferedMessage struct {
+	platform Platform
+	msg      Message
+}
+
+type pendingCollectedMessages struct {
+	session        *Session
+	sessions       *SessionManager
+	agent          Agent
+	interactiveKey string
+	workspaceDir   string
+	mode           string
+	timer          *time.Timer
+	messages       []bufferedMessage
+	totalBytes     int
 }
 
 // interactiveState tracks a running interactive agent session and its permission state.
@@ -392,6 +449,8 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		references:            DefaultReferenceRenderCfg(),
 		eventIdleTimeout:      defaultEventIdleTimeout,
 		showContextIndicator:  true,
+		messageQueueCfg:       DefaultMessageQueueCfg(),
+		collectStates:         make(map[string]*pendingCollectedMessages),
 	}
 
 	if ag != nil {
@@ -654,6 +713,26 @@ func (e *Engine) SetCommandSaveDelFunc(fn func(name string) error) {
 
 func (e *Engine) SetDisplaySaveFunc(fn func(thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error) {
 	e.displaySaveFunc = fn
+}
+
+func (e *Engine) SetMessageQueueConfig(cfg MessageQueueCfg) {
+	if cfg.Mode = normalizeMessageQueueMode(cfg.Mode); cfg.Mode == "" {
+		cfg.Mode = messageQueueModeImmediate
+	}
+	if cfg.CollectWait <= 0 {
+		cfg.CollectWait = 5 * time.Second
+	}
+	if cfg.CollectMaxMsgs <= 0 {
+		cfg.CollectMaxMsgs = 20
+	}
+	if cfg.CollectMaxBytes <= 0 {
+		cfg.CollectMaxBytes = 256 * 1024
+	}
+	e.messageQueueCfg = cfg
+}
+
+func (e *Engine) SetMessageQueueSaveFunc(fn func(mode *string, collectWaitMs, collectMaxMsgs, collectMaxBytes *int) error) {
+	e.messageQueueSaveFunc = fn
 }
 
 // ConfigReloadResult describes what was updated by a config reload.
@@ -1322,6 +1401,15 @@ func (e *Engine) Stop() error {
 	}
 	e.interactiveMu.Unlock()
 
+	e.collectMu.Lock()
+	for k, st := range e.collectStates {
+		if st != nil && st.timer != nil {
+			st.timer.Stop()
+		}
+		delete(e.collectStates, k)
+	}
+	e.collectMu.Unlock()
+
 	for key, state := range states {
 		if state.agentSession != nil {
 			slog.Debug("engine.Stop: closing agent session", "session", key)
@@ -1621,6 +1709,11 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 
 	session := sessions.GetOrCreateActive(msg.SessionKey)
 	sessions.UpdateUserMeta(msg.SessionKey, msg.UserName, msg.ChatName)
+
+	if e.maybeBufferPreExecutionMessage(p, msg, session, agent, sessions, interactiveKey, resolvedWorkspace) {
+		return
+	}
+
 	if !session.TryLock() {
 		// Check for /btw — inject into the running session mid-turn
 		trimmed := strings.TrimSpace(content)
@@ -1673,6 +1766,197 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	)
 
 	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, resolvedWorkspace, msg.SessionKey)
+}
+
+func (e *Engine) maybeBufferPreExecutionMessage(p Platform, msg *Message, session *Session, agent Agent, sessions *SessionManager, interactiveKey, workspaceDir string) bool {
+	mode := normalizeMessageQueueMode(e.messageQueueCfg.Mode)
+	if mode == "" || mode == messageQueueModeImmediate {
+		return false
+	}
+	if session == nil || session.IsBusy() {
+		return false
+	}
+	if hasPendingPermission := e.hasPendingPermission(interactiveKey); hasPendingPermission {
+		return false
+	}
+
+	buffered := e.bufferMessage(interactiveKey, pendingCollectedMessages{
+		session:        session,
+		sessions:       sessions,
+		agent:          agent,
+		interactiveKey: interactiveKey,
+		workspaceDir:   workspaceDir,
+		mode:           mode,
+	}, bufferedMessage{
+		platform: p,
+		msg:      cloneMessageForBuffer(msg),
+	})
+	return buffered
+}
+
+func (e *Engine) hasPendingPermission(interactiveKey string) bool {
+	e.interactiveMu.Lock()
+	state, ok := e.interactiveStates[interactiveKey]
+	e.interactiveMu.Unlock()
+	if !ok || state == nil {
+		return false
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return state.pending != nil
+}
+
+func cloneMessageForBuffer(msg *Message) Message {
+	cp := *msg
+	if len(msg.Images) > 0 {
+		cp.Images = append([]ImageAttachment(nil), msg.Images...)
+	}
+	if len(msg.Files) > 0 {
+		cp.Files = append([]FileAttachment(nil), msg.Files...)
+	}
+	return cp
+}
+
+func bufferedMessageBytes(m bufferedMessage) int {
+	total := len([]byte(m.msg.Content))
+	for _, img := range m.msg.Images {
+		total += len(img.Data)
+	}
+	for _, f := range m.msg.Files {
+		total += len(f.Data)
+	}
+	return total
+}
+
+func bufferedMessagesBytes(buffered []bufferedMessage) int {
+	total := 0
+	for _, item := range buffered {
+		total += bufferedMessageBytes(item)
+	}
+	return total
+}
+
+func (e *Engine) bufferMessage(interactiveKey string, base pendingCollectedMessages, bm bufferedMessage) bool {
+	e.collectMu.Lock()
+	state, ok := e.collectStates[interactiveKey]
+	if !ok {
+		state = &pendingCollectedMessages{
+			session:        base.session,
+			sessions:       base.sessions,
+			agent:          base.agent,
+			interactiveKey: base.interactiveKey,
+			workspaceDir:   base.workspaceDir,
+			mode:           base.mode,
+		}
+		e.collectStates[interactiveKey] = state
+	}
+	state.messages = append(state.messages, bm)
+	state.totalBytes += bufferedMessageBytes(bm)
+
+	shouldFlush := false
+	switch state.mode {
+	case messageQueueModeCollect:
+		if state.timer != nil {
+			state.timer.Stop()
+		}
+		if len(state.messages) >= e.messageQueueCfg.CollectMaxMsgs || state.totalBytes >= e.messageQueueCfg.CollectMaxBytes {
+			shouldFlush = true
+		} else {
+			wait := e.messageQueueCfg.CollectWait
+			state.timer = time.AfterFunc(wait, func() {
+				e.flushBufferedMessages(interactiveKey, nil)
+			})
+		}
+	case messageQueueModeManual:
+		shouldFlush = false
+	}
+	e.collectMu.Unlock()
+
+	if shouldFlush {
+		e.flushBufferedMessages(interactiveKey, nil)
+	}
+	return true
+}
+
+func (e *Engine) flushBufferedMessages(interactiveKey string, trigger *bufferedMessage) bool {
+	e.collectMu.Lock()
+	state, ok := e.collectStates[interactiveKey]
+	if !ok || state == nil || len(state.messages) == 0 {
+		e.collectMu.Unlock()
+		return false
+	}
+	delete(e.collectStates, interactiveKey)
+	if state.timer != nil {
+		state.timer.Stop()
+		state.timer = nil
+	}
+	buffered := append([]bufferedMessage(nil), state.messages...)
+	e.collectMu.Unlock()
+
+	if e.ctx.Err() != nil {
+		return false
+	}
+
+	anchor := buffered[len(buffered)-1]
+	if trigger != nil {
+		anchor = *trigger
+	}
+	merged := mergeBufferedMessages(anchor, buffered)
+
+	if !state.session.TryLock() {
+		e.collectMu.Lock()
+		current, exists := e.collectStates[interactiveKey]
+		if !exists || current == nil {
+			current = &pendingCollectedMessages{
+				session:        state.session,
+				sessions:       state.sessions,
+				agent:          state.agent,
+				interactiveKey: state.interactiveKey,
+				workspaceDir:   state.workspaceDir,
+				mode:           state.mode,
+			}
+			e.collectStates[interactiveKey] = current
+		}
+		current.messages = append(buffered, current.messages...)
+		current.totalBytes += bufferedMessagesBytes(buffered)
+		if current.mode == messageQueueModeCollect && current.timer == nil {
+			current.timer = time.AfterFunc(e.messageQueueCfg.CollectWait, func() {
+				e.flushBufferedMessages(interactiveKey, nil)
+			})
+		}
+		e.collectMu.Unlock()
+		return false
+	}
+	e.ensureInteractiveStateForQueueing(interactiveKey, anchor.platform, merged.ReplyCtx)
+	go e.processInteractiveMessageWith(anchor.platform, &merged, state.session, state.agent, state.sessions, interactiveKey, state.workspaceDir, merged.SessionKey)
+	return true
+}
+
+func mergeBufferedMessages(anchor bufferedMessage, buffered []bufferedMessage) Message {
+	merged := cloneMessageForBuffer(&anchor.msg)
+	var parts []string
+	merged.Images = nil
+	merged.Files = nil
+	merged.Location = nil
+	for _, item := range buffered {
+		if strings.TrimSpace(item.msg.Content) != "" {
+			parts = append(parts, item.msg.Content)
+		}
+		merged.Images = append(merged.Images, item.msg.Images...)
+		merged.Files = append(merged.Files, item.msg.Files...)
+		if merged.Location == nil && item.msg.Location != nil {
+			merged.Location = item.msg.Location
+		}
+	}
+	merged.Content = strings.Join(parts, "\n\n")
+	merged.ReplyCtx = anchor.msg.ReplyCtx
+	merged.MessageID = anchor.msg.MessageID
+	merged.UserID = anchor.msg.UserID
+	merged.UserName = anchor.msg.UserName
+	merged.ChatName = anchor.msg.ChatName
+	merged.Platform = anchor.msg.Platform
+	merged.SessionKey = anchor.msg.SessionKey
+	return merged
 }
 
 func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions *SessionManager, interactiveKey string, session *Session) *Session {
@@ -3362,6 +3646,7 @@ var builtinCommands = []struct {
 	{[]string{"cron"}, "cron"},
 	{[]string{"heartbeat", "hb"}, "heartbeat"},
 	{[]string{"compress", "compact"}, "compress"},
+	{[]string{"flush"}, "flush"},
 	{[]string{"stop"}, "stop"},
 	{[]string{"help"}, "help"},
 	{[]string{"version"}, "version"},
@@ -3536,6 +3821,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdHeartbeat(p, msg, args)
 	case "compress":
 		e.cmdCompress(p, msg)
+	case "flush":
+		e.cmdFlush(p, msg)
 	case "stop":
 		e.cmdStop(p, msg)
 	case "help":
@@ -6356,6 +6643,16 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 		return
 	}
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
+}
+
+func (e *Engine) cmdFlush(p Platform, msg *Message) {
+	iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
+	trigger := bufferedMessage{platform: p, msg: cloneMessageForBuffer(msg)}
+	if e.flushBufferedMessages(iKey, &trigger) {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgFlushStarted))
+		return
+	}
+	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgFlushEmpty))
 }
 
 func (e *Engine) stopInteractiveSession(sessionKey string, quietPlatform Platform, quietReplyCtx any) bool {
@@ -10278,6 +10575,91 @@ func (e *Engine) configItems() []configItem {
 				e.display.ToolMaxLen = n
 				if e.displaySaveFunc != nil {
 					return e.displaySaveFunc(nil, nil, &n, nil)
+				}
+				return nil
+			},
+		},
+		{
+			key:    "messages.mode",
+			desc:   "Message buffering mode: immediate | collect | manual",
+			descZh: "消息缓冲模式：immediate | collect | manual",
+			getFunc: func() string {
+				return e.messageQueueCfg.Mode
+			},
+			setFunc: func(v string) error {
+				mode := normalizeMessageQueueMode(v)
+				if mode == "" {
+					return fmt.Errorf("invalid mode: %s", v)
+				}
+				e.messageQueueCfg.Mode = mode
+				if e.messageQueueSaveFunc != nil {
+					return e.messageQueueSaveFunc(&mode, nil, nil, nil)
+				}
+				return nil
+			},
+		},
+		{
+			key:    "messages.collect_wait_ms",
+			desc:   "Collect mode wait window in milliseconds (>0)",
+			descZh: "collect 模式等待窗口毫秒数（>0）",
+			getFunc: func() string {
+				return fmt.Sprintf("%d", e.messageQueueCfg.CollectWait.Milliseconds())
+			},
+			setFunc: func(v string) error {
+				n, err := strconv.Atoi(v)
+				if err != nil {
+					return fmt.Errorf("invalid integer: %s", v)
+				}
+				if n <= 0 {
+					return fmt.Errorf("value must be > 0")
+				}
+				e.messageQueueCfg.CollectWait = time.Duration(n) * time.Millisecond
+				if e.messageQueueSaveFunc != nil {
+					return e.messageQueueSaveFunc(nil, &n, nil, nil)
+				}
+				return nil
+			},
+		},
+		{
+			key:    "messages.collect_max_messages",
+			desc:   "Max buffered messages before forcing a flush (>0)",
+			descZh: "强制提交前允许缓冲的最大消息数（>0）",
+			getFunc: func() string {
+				return fmt.Sprintf("%d", e.messageQueueCfg.CollectMaxMsgs)
+			},
+			setFunc: func(v string) error {
+				n, err := strconv.Atoi(v)
+				if err != nil {
+					return fmt.Errorf("invalid integer: %s", v)
+				}
+				if n <= 0 {
+					return fmt.Errorf("value must be > 0")
+				}
+				e.messageQueueCfg.CollectMaxMsgs = n
+				if e.messageQueueSaveFunc != nil {
+					return e.messageQueueSaveFunc(nil, nil, &n, nil)
+				}
+				return nil
+			},
+		},
+		{
+			key:    "messages.collect_max_bytes",
+			desc:   "Max buffered bytes before forcing a flush (>0)",
+			descZh: "强制提交前允许缓冲的最大字节数（>0）",
+			getFunc: func() string {
+				return fmt.Sprintf("%d", e.messageQueueCfg.CollectMaxBytes)
+			},
+			setFunc: func(v string) error {
+				n, err := strconv.Atoi(v)
+				if err != nil {
+					return fmt.Errorf("invalid integer: %s", v)
+				}
+				if n <= 0 {
+					return fmt.Errorf("value must be > 0")
+				}
+				e.messageQueueCfg.CollectMaxBytes = n
+				if e.messageQueueSaveFunc != nil {
+					return e.messageQueueSaveFunc(nil, nil, nil, &n)
 				}
 				return nil
 			},
