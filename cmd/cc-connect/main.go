@@ -409,6 +409,14 @@ func main() {
 			engine.SetStreamPreviewCfg(spcfg)
 		}
 
+		// Wire instant reply
+		if cfg.InstantReply.Enabled != nil && *cfg.InstantReply.Enabled {
+			engine.SetInstantReply(core.InstantReplyCfg{
+				Enabled: true,
+				Content: cfg.InstantReply.Content,
+			})
+		}
+
 		// Wire rate limiting
 		{
 			maxMsg := 20
@@ -1399,6 +1407,16 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		showFooter = *proj.ReplyFooter
 	}
 	engine.SetReplyFooterEnabled(showFooter)
+
+	// Reload instant reply
+	if cfg.InstantReply.Enabled != nil && *cfg.InstantReply.Enabled {
+		engine.SetInstantReply(core.InstantReplyCfg{
+			Enabled: true,
+			Content: cfg.InstantReply.Content,
+		})
+	} else {
+		engine.SetInstantReply(core.InstantReplyCfg{})
+	}
 
 	// Reload sender injection
 	engine.SetInjectSender(proj.InjectSender != nil && *proj.InjectSender)

@@ -163,6 +163,23 @@ level = "info" # debug, info, warn, error
 # max_chars = 2000          # Max preview length (default: 2000) / 预览最大长度（默认 2000）
 
 # =============================================================================
+# Instant Reply / 即时确认回复
+# =============================================================================
+# Send an immediate confirmation message when a user message is received,
+# before the agent starts processing. This gives users quick feedback
+# that their message was received (e.g. "🤔 Thinking...").
+# 收到用户消息后立即发送确认消息（在 Agent 开始处理之前），让用户知道消息已收到。
+#
+# Platforms with streaming card support (e.g. DingTalk with AI Card configured)
+# will skip instant reply since the card itself provides a "processing" indicator.
+# 已配置流式卡片的平台（如钉钉 AI Card）会自动跳过即时回复，因为卡片本身已提供处理指示。
+
+# [instant_reply]
+# enabled = false            # Enable/disable instant reply (default: false) / 启用/禁用即时确认回复（默认 false）
+# content = "🤔 Thinking..." # Custom reply text; empty = use i18n default ("⏳ Processing...")
+#                            # 自定义回复内容；留空则使用 i18n 默认值（"⏳ 处理中..."）
+
+# =============================================================================
 # Rate Limiting / 速率限制
 # =============================================================================
 # Per-session sliding-window rate limiter. Prevents users from flooding the bot

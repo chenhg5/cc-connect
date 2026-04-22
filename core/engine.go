@@ -139,6 +139,13 @@ type DisplayCfg struct {
 	ToolMessages     bool
 }
 
+// InstantReplyCfg controls the immediate confirmation reply sent when a message
+// is received, before the agent starts processing.
+type InstantReplyCfg struct {
+	Enabled bool
+	Content string // custom reply text; empty = use i18n MsgStarting default
+}
+
 // RateLimitCfg controls per-session message rate limiting.
 type RateLimitCfg struct {
 	MaxMessages int           // max messages per window; 0 = disabled
@@ -200,6 +207,7 @@ type Engine struct {
 	rateLimiter      *RateLimiter
 	outgoingRL       *OutgoingRateLimiter
 	streamPreview    StreamPreviewCfg
+	instantReply     InstantReplyCfg
 	references       ReferenceRenderCfg
 	relayManager     *RelayManager
 	eventIdleTimeout time.Duration
@@ -485,6 +493,11 @@ func (e *Engine) SetTTSSaveFunc(fn func(mode string) error) {
 // SetDisplayConfig overrides the default truncation settings.
 func (e *Engine) SetDisplayConfig(cfg DisplayCfg) {
 	e.display = cfg
+}
+
+// SetInstantReply configures the immediate confirmation reply.
+func (e *Engine) SetInstantReply(cfg InstantReplyCfg) {
+	e.instantReply = cfg
 }
 
 // SetReferenceConfig configures local reference normalization/rendering.
@@ -1654,6 +1667,18 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		"user", msg.UserName,
 		"session", session.ID,
 	)
+
+	// Send instant confirmation reply if enabled and the platform does not
+	// support streaming cards (which provide their own "processing" indicator).
+	if e.instantReply.Enabled {
+		if _, isStreamingCard := p.(StreamingCardPlatform); !isStreamingCard {
+			replyContent := e.instantReply.Content
+			if replyContent == "" {
+				replyContent = e.i18n.T(MsgStarting)
+			}
+			e.send(p, msg.ReplyCtx, replyContent)
+		}
+	}
 
 	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, resolvedWorkspace, msg.SessionKey)
 }
