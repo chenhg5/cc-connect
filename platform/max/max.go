@@ -51,11 +51,12 @@ type Platform struct {
 	apiBase   string
 	allowFrom string
 
-	mu      sync.RWMutex
-	handler core.MessageHandler
-	cancel  context.CancelFunc
+	mu       sync.RWMutex
+	handler  core.MessageHandler
+	cancel   context.CancelFunc
 	stopping bool
-	client  *http.Client
+	client   *http.Client
+	dedup    core.MessageDedup
 }
 
 // New creates a MAX platform from config options.
@@ -419,20 +420,15 @@ Keep responses concise and use plain text where possible.`
 }
 
 // ReconstructReplyCtx implements core.ReplyContextReconstructor.
-// Session key format: "max:{chatID}" or "max:{chatID}:{userID}"
+// Session key format: "max:{chatID}" or "max:{chatID}:{userID}".
 func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
-	// Extract chatID from session key: "max:{chatID}" or "max:{chatID}:{userID}"
-	var chatID string
-	_, err := fmt.Sscanf(sessionKey, "max:%s", &chatID)
-	if err != nil || chatID == "" {
+	rest, ok := strings.CutPrefix(sessionKey, "max:")
+	if !ok {
 		return nil, fmt.Errorf("max: cannot reconstruct reply ctx from %q", sessionKey)
 	}
-	// If chatID has trailing ":userID", strip it
-	for i, c := range chatID {
-		if c == ':' {
-			chatID = chatID[:i]
-			break
-		}
+	chatID, _, _ := strings.Cut(rest, ":")
+	if chatID == "" {
+		return nil, fmt.Errorf("max: cannot reconstruct reply ctx from %q", sessionKey)
 	}
 	return replyContext{chatID: chatID}, nil
 }
@@ -628,6 +624,10 @@ func (p *Platform) handleMessage(ctx context.Context, msg *maxMessage) {
 	msgTime := time.UnixMilli(msg.Timestamp)
 	if core.IsOldMessage(msgTime) {
 		slog.Debug("max: ignoring old message after restart", "date", msgTime)
+		return
+	}
+	if p.dedup.IsDuplicate(msg.Body.Mid) {
+		slog.Debug("max: duplicate message ignored", "message_id", msg.Body.Mid)
 		return
 	}
 
@@ -922,6 +922,10 @@ func sniffImageMime(data []byte) string {
 }
 
 func (p *Platform) handleCallback(ctx context.Context, cb *maxCallback) {
+	if p.dedup.IsDuplicate(cb.CallbackID) {
+		slog.Debug("max: duplicate callback ignored", "callback_id", cb.CallbackID)
+		return
+	}
 	userID := strconv.FormatInt(cb.User.UserID, 10)
 	if !core.AllowList(p.allowFrom, userID) {
 		slog.Debug("max: callback from unauthorized user", "user_id", userID)

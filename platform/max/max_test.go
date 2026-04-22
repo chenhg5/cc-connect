@@ -597,6 +597,27 @@ func TestFetchAttachmentsFileWithAudioMimeRoutesToAudio(t *testing.T) {
 	}
 }
 
+func TestHandleMessageDedupsByID(t *testing.T) {
+	p := newTestPlatform(t, "http://unused")
+
+	delivered := 0
+	_ = p.Start(func(_ core.Platform, _ *core.Message) { delivered++ })
+	defer func() { _ = p.Stop() }()
+
+	msg := &maxMessage{
+		Sender:    maxUser{UserID: 1, Name: "u"},
+		Recipient: maxRecipient{ChatID: 42},
+		Timestamp: time.Now().UnixMilli(),
+		Body:      maxBody{Mid: "mid-1", Text: "hi"},
+	}
+	ctx := context.Background()
+	p.handleMessage(ctx, msg)
+	p.handleMessage(ctx, msg) // duplicate mid → should be dropped
+	if delivered != 1 {
+		t.Errorf("handler fired %d times, want 1 (dedup failed)", delivered)
+	}
+}
+
 func TestSendAudio(t *testing.T) {
 	m := newMockAPI(t)
 	defer m.close()
