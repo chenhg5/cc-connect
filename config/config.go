@@ -104,6 +104,7 @@ type Config struct {
 	OutgoingRateLimit OutgoingRateLimitConfig `toml:"outgoing_rate_limit"` // outgoing message throttling
 	Relay             RelayConfig             `toml:"relay"`               // bot-to-bot relay behavior
 	Cron              CronConfig              `toml:"cron"`
+	Queue             QueueConfig             `toml:"queue"`
 	Webhook           WebhookConfig           `toml:"webhook"`
 	Bridge            BridgeConfig            `toml:"bridge"`
 	Management        ManagementConfig        `toml:"management"`
@@ -115,6 +116,11 @@ type Config struct {
 type CronConfig struct {
 	Silent      *bool  `toml:"silent"`       // suppress cron start notification; default false
 	SessionMode string `toml:"session_mode"` // default session mode: "" or "reuse" (default) or "new_per_run"
+}
+
+// QueueConfig controls the per-session message queue.
+type QueueConfig struct {
+	MaxDepth *int `toml:"max_depth"` // max queued messages per session; default 5
 }
 
 // WebhookConfig controls the external HTTP webhook endpoint.
