@@ -1668,18 +1668,6 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		"session", session.ID,
 	)
 
-	// Send instant confirmation reply if enabled and the platform does not
-	// support streaming cards (which provide their own "processing" indicator).
-	if e.instantReply.Enabled {
-		if _, isStreamingCard := p.(StreamingCardPlatform); !isStreamingCard {
-			replyContent := e.instantReply.Content
-			if replyContent == "" {
-				replyContent = e.i18n.T(MsgStarting)
-			}
-			e.send(p, msg.ReplyCtx, replyContent)
-		}
-	}
-
 	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, resolvedWorkspace, msg.SessionKey)
 }
 
@@ -2670,6 +2658,17 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer)
 	state.mu.Unlock()
 
+	// Send instant confirmation reply if enabled and no streaming card is active.
+	// Streaming cards provide their own "processing" indicator, so instant reply
+	// is only needed when the platform doesn't support cards or card creation failed.
+	if e.instantReply.Enabled && streamCard == nil {
+		replyContent := e.instantReply.Content
+		if replyContent == "" {
+			replyContent = e.i18n.T(MsgStarting)
+		}
+		e.send(state.platform, state.replyCtx, replyContent)
+	}
+
 	// Idle timeout: 0 = disabled
 	var idleTimer *time.Timer
 	var idleCh <-chan time.Time
@@ -3284,6 +3283,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					} else {
 						streamCard = sc
 					}
+				}
+
+				// Send instant reply for queued turn if no streaming card is active.
+				if e.instantReply.Enabled && streamCard == nil {
+					replyContent := e.instantReply.Content
+					if replyContent == "" {
+						replyContent = e.i18n.T(MsgStarting)
+					}
+					e.send(queued.platform, queued.replyCtx, replyContent)
 				}
 
 				session.AddHistory("user", queued.content)

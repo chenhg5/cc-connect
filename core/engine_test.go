@@ -9707,12 +9707,23 @@ func (s *stubPlatformWithObserve) SendObservation(_ context.Context, _, _ string
 type stubStreamingCardPlatform struct {
 	stubPlatformEngine
 	cardCreated bool
+	cardFail    bool // when true, CreateStreamingCard returns an error
 }
 
 func (p *stubStreamingCardPlatform) CreateStreamingCard(_ context.Context, _ any) (StreamingCard, error) {
+	if p.cardFail {
+		return nil, fmt.Errorf("stub: card_template_id not configured")
+	}
 	p.cardCreated = true
-	return nil, fmt.Errorf("stub: not implemented")
+	return &stubStreamingCard{}, nil
 }
+
+// stubStreamingCard is a minimal StreamingCard for tests.
+type stubStreamingCard struct{}
+
+func (c *stubStreamingCard) Update(_ context.Context, _ string) error { return nil }
+func (c *stubStreamingCard) Finalize(_ context.Context, _ string) error { return nil }
+func (c *stubStreamingCard) Failed() bool                                { return false }
 
 func TestHandleMessage_InstantReply_SendsConfirmationWhenEnabled(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
@@ -9847,10 +9858,42 @@ func TestHandleMessage_InstantReply_SkippedForStreamingCardPlatform(t *testing.T
 	}
 	e.handleMessage(p, msg)
 
+	// When streaming card succeeds, the agent reply goes through streamCard.Finalize,
+	// not p.Send. Wait briefly then verify no instant reply was sent via p.Send.
+	time.Sleep(500 * time.Millisecond)
+
+	sent := p.getSent()
+	for _, s := range sent {
+		if s == "🤔 Thinking..." {
+			t.Fatalf("instant reply should be skipped for StreamingCardPlatform, but got: %v", sent)
+		}
+	}
+}
+
+func TestHandleMessage_InstantReply_SentWhenStreamingCardFails(t *testing.T) {
+	p := &stubStreamingCardPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "dingtalk"},
+		cardFail:           true,
+	}
+	agentSession := newResultAgentSession("agent reply")
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetInstantReply(InstantReplyCfg{Enabled: true, Content: "🤔 Thinking..."})
+
+	msg := &Message{
+		SessionKey: "dingtalk:user1",
+		Platform:   "dingtalk",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "hello",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
 	deadline := time.After(2 * time.Second)
 	for {
 		sent := p.getSent()
-		if len(sent) >= 1 {
+		if len(sent) >= 2 {
 			break
 		}
 		select {
@@ -9862,11 +9905,8 @@ func TestHandleMessage_InstantReply_SkippedForStreamingCardPlatform(t *testing.T
 	}
 
 	sent := p.getSent()
-	// Should NOT contain the instant reply because platform supports streaming cards
-	for _, s := range sent {
-		if s == "🤔 Thinking..." {
-			t.Fatalf("instant reply should be skipped for StreamingCardPlatform, but got: %v", sent)
-		}
+	if sent[0] != "🤔 Thinking..." {
+		t.Fatalf("first reply = %q, want instant reply when card creation fails", sent[0])
 	}
 }
 
