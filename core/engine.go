@@ -1632,25 +1632,6 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	session := sessions.GetOrCreateActive(msg.SessionKey)
 	sessions.UpdateUserMeta(msg.SessionKey, msg.UserName, msg.ChatName)
 	if !session.TryLock() {
-		// Check for /btw — inject into the running session mid-turn
-		trimmed := strings.TrimSpace(content)
-		if isBtwCommand(trimmed) {
-			btw := strings.TrimSpace(trimmed[len(matchBtwPrefix(trimmed)):])
-			if btw != "" {
-				e.interactiveMu.Lock()
-				state, ok := e.interactiveStates[interactiveKey]
-				e.interactiveMu.Unlock()
-				if ok && state.agentSession != nil && state.agentSession.Alive() {
-					if err := state.agentSession.Send(btw, nil, nil); err != nil {
-						slog.Error("btw: send failed", "error", err)
-						e.reply(p, msg.ReplyCtx, e.i18n.T(MsgBtwSendFailed))
-					} else {
-						e.reply(p, msg.ReplyCtx, e.i18n.T(MsgBtwSent))
-					}
-					return
-				}
-			}
-		}
 		// Session is busy — try to queue the message for the running turn
 		// so the agent processes it immediately after the current turn ends.
 		if e.queueMessageForBusySession(p, msg, interactiveKey) {
@@ -3375,6 +3356,7 @@ var builtinCommands = []struct {
 	{[]string{"heartbeat", "hb"}, "heartbeat"},
 	{[]string{"compress", "compact"}, "compress"},
 	{[]string{"stop"}, "stop"},
+	{[]string{"ps", "postscript"}, "ps"},
 	{[]string{"help"}, "help"},
 	{[]string{"version"}, "version"},
 	{[]string{"commands", "command", "cmd"}, "commands"},
@@ -3395,26 +3377,6 @@ var builtinCommands = []struct {
 	{[]string{"whoami", "myid"}, "whoami"},
 	{[]string{"web"}, "web"},
 	{[]string{"diff"}, "diff"},
-}
-
-// isBtwCommand checks if a trimmed message starts with a /btw command.
-func isBtwCommand(trimmed string) bool {
-	return matchBtwPrefix(trimmed) != ""
-}
-
-// matchBtwPrefix returns the prefix portion (e.g. "/btw ") if the
-// message starts with a btw command, or "" if it doesn't match.
-func matchBtwPrefix(trimmed string) string {
-	lower := strings.ToLower(trimmed)
-	for _, prefix := range []string{"/btw"} {
-		if strings.HasPrefix(lower, prefix) {
-			rest := trimmed[len(prefix):]
-			if rest == "" || rest[0] == ' ' {
-				return trimmed[:len(prefix)]
-			}
-		}
-	}
-	return ""
 }
 
 // matchPrefix finds a unique command matching the given prefix.
@@ -3550,6 +3512,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdCompress(p, msg)
 	case "stop":
 		e.cmdStop(p, msg)
+	case "ps":
+		e.cmdPs(p, msg, args)
 	case "help":
 		e.cmdHelp(p, msg)
 	case "version":
@@ -5684,6 +5648,7 @@ func helpCardGroups() []helpCardGroup {
 				{command: "/skills", action: "nav:/skills"},
 				{command: "/compress", action: "cmd:/compress"},
 				{command: "/stop", action: "act:/stop"},
+				{command: "/ps", action: "cmd:/ps"},
 			},
 		},
 		{
@@ -6368,6 +6333,36 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 		return
 	}
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
+}
+
+// cmdPs injects a message into the running session mid-turn (postscript).
+// Unlike normal commands, it bypasses TryLock and works even when the session is busy.
+func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
+	// Join args to get the message content
+	content := strings.Join(args, " ")
+	content = strings.TrimSpace(content)
+
+	if content == "" {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsEmpty))
+		return
+	}
+
+	iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
+	e.interactiveMu.Lock()
+	state, ok := e.interactiveStates[iKey]
+	e.interactiveMu.Unlock()
+
+	if !ok || state == nil || state.agentSession == nil || !state.agentSession.Alive() {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsNoSession))
+		return
+	}
+
+	if err := state.agentSession.Send(content, nil, nil); err != nil {
+		slog.Error("ps: send failed", "error", err)
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsSendFailed))
+	} else {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsSent))
+	}
 }
 
 func (e *Engine) stopInteractiveSession(sessionKey string, quietPlatform Platform, quietReplyCtx any) bool {
