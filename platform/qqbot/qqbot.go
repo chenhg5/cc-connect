@@ -70,6 +70,7 @@ type Platform struct {
 	intents               int
 	markdownSupport       bool // enable markdown messages (msg_type: 2)
 	handler               core.MessageHandler
+	ctx                   context.Context    // lifetime context for the platform
 	cancel                context.CancelFunc
 
 	// OAuth2 token management
@@ -195,6 +196,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	p.ctx = ctx
 	p.cancel = cancel
 
 	if err := p.connectGateway(ctx); err != nil {
@@ -772,11 +774,14 @@ func (p *Platform) readLoop(ctx context.Context) {
 	}
 }
 
-func (p *Platform) triggerReconnect(ctx context.Context) {
+func (p *Platform) triggerReconnect(_ context.Context) {
 	if p.reconnecting.CompareAndSwap(false, true) {
 		go func() {
 			defer p.reconnecting.Store(false)
-			p.reconnectLoop(ctx)
+			// Use the platform lifetime context, NOT the per-connection context
+			// that was just canceled. The caller's ctx is a child of connCtx
+			// which connCancel() will cancel inside reconnectLoop.
+			p.reconnectLoop(p.ctx)
 		}()
 	}
 }
