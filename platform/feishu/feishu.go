@@ -1306,15 +1306,20 @@ func extractPostPlainText(content string) string {
 		var line []string
 		for _, elem := range para {
 			switch elem.Tag {
-			case "text":
+			case "text", "a":
 				if elem.Text != "" {
 					line = append(line, elem.Text)
 				}
 			case "code_block":
 				if elem.Text != "" {
-					lang := elem.Language
-					line = append(line, "```"+lang+"\n"+elem.Text+"\n```")
+					if elem.Language != "" {
+						line = append(line, fmt.Sprintf("```%s\n%s\n```", elem.Language, elem.Text))
+					} else {
+						line = append(line, fmt.Sprintf("```\n%s\n```", elem.Text))
+					}
 				}
+			case "hr":
+				line = append(line, "---")
 			}
 		}
 		if len(line) > 0 {

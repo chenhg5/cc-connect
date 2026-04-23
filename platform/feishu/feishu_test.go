@@ -300,19 +300,36 @@ func TestExtractPostPlainText_Empty(t *testing.T) {
 	}
 }
 
-func TestExtractPostPlainText_NonTextTagsIgnored(t *testing.T) {
+func TestExtractPostPlainText_LinkTag(t *testing.T) {
 	content := `{"content":[[{"tag":"text","text":"hello"},{"tag":"a","text":"link","href":"http://x.com"}]]}`
 	got := extractPostPlainText(content)
-	if got != "hello" {
-		t.Errorf("expected 'hello', got %q", got)
+	if got != "hellolink" {
+		t.Errorf("expected 'hellolink', got %q", got)
 	}
 }
 
 func TestExtractPostPlainText_CodeBlock(t *testing.T) {
 	content := `{"content":[[{"tag":"text","text":"see:"},{"tag":"code_block","language":"go","text":"fmt.Println()"}]]}`
 	got := extractPostPlainText(content)
-	// Same paragraph: inline elements are concatenated (no extra newline before the fence).
 	want := "see:```go\nfmt.Println()\n```"
+	if got != want {
+		t.Errorf("expected %q, got %q", want, got)
+	}
+}
+
+func TestExtractPostPlainText_CodeBlockNoLang(t *testing.T) {
+	content := `{"content":[[{"tag":"code_block","text":"echo hello"}]]}`
+	got := extractPostPlainText(content)
+	want := "```\necho hello\n```"
+	if got != want {
+		t.Errorf("expected %q, got %q", want, got)
+	}
+}
+
+func TestExtractPostPlainText_HrTag(t *testing.T) {
+	content := `{"content":[[{"tag":"code_block","text":"fmt.Println()","language":"go"}],[{"tag":"hr"}]]}`
+	got := extractPostPlainText(content)
+	want := "```go\nfmt.Println()\n```\n---"
 	if got != want {
 		t.Errorf("expected %q, got %q", want, got)
 	}
