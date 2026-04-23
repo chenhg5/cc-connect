@@ -1447,6 +1447,32 @@ app_secret = "your-feishu-app-secret"
 # display_name = "OpenClaw ACP"
 # # env = { OPENCLAW_GATEWAY_TOKEN = "..." }
 
+# --- Example: Trae CLI ACP (https://www.trae.ai/) ---
+# [[projects]]
+# name = "trae-acp"
+#
+# [projects.agent]
+# type = "acp"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/project"
+# command = "traecli"
+# args = ["acp", "serve"]
+# display_name = "Trae CLI ACP"
+
+# --- Example: COCO ACP ---
+# [[projects]]
+# name = "coco-acp"
+#
+# [projects.agent]
+# type = "acp"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/project"
+# command = "coco"
+# args = ["acp", "serve"]
+# display_name = "COCO ACP"
+
 # --- Example: GitHub Copilot CLI (public preview) ---
 # Docs: https://docs.github.com/en/copilot/reference/copilot-cli-reference/acp-server
 # Requires Copilot CLI installed and authenticated; no auth_method for ACP subprocess.
