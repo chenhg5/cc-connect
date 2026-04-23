@@ -1960,6 +1960,7 @@ func predictMsgType(content string) string {
 }
 
 func buildReplyContent(content string) (msgType string, body string) {
+	content = core.NormalizeOutgoingContent(content)
 	if !containsMarkdown(content) {
 		b, _ := json.Marshal(map[string]string{"text": content})
 		return larkim.MsgTypeText, string(b)

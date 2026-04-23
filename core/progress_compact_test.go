@@ -253,3 +253,34 @@ func TestCompactProgressWriter_DoesNotTransformToolResults(t *testing.T) {
 		t.Fatalf("tool result text = %q, want raw %q", got, raw)
 	}
 }
+
+func TestCompactProgressWriter_StripsANSIToolResult(t *testing.T) {
+	p := &stubCompactProgressPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		style:              "card",
+		supportPayload:     true,
+	}
+	w := newCompactProgressWriter(context.Background(), p, "ctx", "codex", LangEnglish, func(s string) string {
+		return strings.ReplaceAll(s, "/root/code/demo/src/app.ts:42", "📄 `src/app.ts:42`")
+	})
+
+	raw := "\x1b[32;1m   Id\x1b[0m\x1b[32;1m ProcessName\x1b[0m"
+	if ok := w.AppendStructured(ProgressCardEntry{
+		Kind: ProgressEntryToolResult,
+		Text: raw,
+	}, raw); !ok {
+		t.Fatal("AppendStructured() = false, want true")
+	}
+
+	starts := p.getPreviewStarts()
+	if len(starts) != 1 {
+		t.Fatalf("preview starts = %d, want 1", len(starts))
+	}
+	payload, ok := ParseProgressCardPayload(starts[0])
+	if !ok {
+		t.Fatalf("ParseProgressCardPayload(%q) failed", starts[0])
+	}
+	if got := payload.Items[0].Text; got != "Id ProcessName" {
+		t.Fatalf("tool result text = %q, want %q", got, "Id ProcessName")
+	}
+}
