@@ -6618,8 +6618,8 @@ func TestQueueMessageOverflow_DropsOldestAndReturnsfalse(t *testing.T) {
 	e.interactiveStates[key] = state
 	e.interactiveMu.Unlock()
 
-	// Fill the queue to maxQueuedMessages (5).
-	for i := 0; i < maxQueuedMessages; i++ {
+	// Fill the queue to defaultMaxQueuedMessages (5).
+	for i := 0; i < defaultMaxQueuedMessages; i++ {
 		msg := &Message{SessionKey: key, Content: fmt.Sprintf("msg-%d", i), ReplyCtx: fmt.Sprintf("ctx-%d", i)}
 		ok := e.queueMessageForBusySession(p, msg, key)
 		if !ok {
@@ -6628,22 +6628,22 @@ func TestQueueMessageOverflow_DropsOldestAndReturnsfalse(t *testing.T) {
 	}
 
 	state.mu.Lock()
-	if len(state.pendingMessages) != maxQueuedMessages {
-		t.Fatalf("queue depth = %d, want %d", len(state.pendingMessages), maxQueuedMessages)
+	if len(state.pendingMessages) != defaultMaxQueuedMessages {
+		t.Fatalf("queue depth = %d, want %d", len(state.pendingMessages), defaultMaxQueuedMessages)
 	}
 	state.mu.Unlock()
 
-	// The 6th message should be rejected (returns false).
+	// The 6th message should be handled (returns true) but not queued — MsgQueueFull sent.
 	overflow := &Message{SessionKey: key, Content: "msg-overflow", ReplyCtx: "ctx-overflow"}
 	ok := e.queueMessageForBusySession(p, overflow, key)
-	if ok {
-		t.Fatal("expected 6th message to be rejected (queue full)")
+	if !ok {
+		t.Fatal("expected 6th message to be handled (queue-full reply), got false")
 	}
 
-	// Queue should still have exactly maxQueuedMessages items (the original 5).
+	// Queue should still have exactly defaultMaxQueuedMessages items (the original 5).
 	state.mu.Lock()
-	if len(state.pendingMessages) != maxQueuedMessages {
-		t.Fatalf("queue depth after overflow = %d, want %d", len(state.pendingMessages), maxQueuedMessages)
+	if len(state.pendingMessages) != defaultMaxQueuedMessages {
+		t.Fatalf("queue depth after overflow = %d, want %d", len(state.pendingMessages), defaultMaxQueuedMessages)
 	}
 	// First message should still be msg-0 (FIFO preserved, no silent drop).
 	if state.pendingMessages[0].content != "msg-0" {
@@ -6651,10 +6651,10 @@ func TestQueueMessageOverflow_DropsOldestAndReturnsfalse(t *testing.T) {
 	}
 	state.mu.Unlock()
 
-	// Platform should have received the MsgMessageQueued replies for the 5 accepted + nothing for rejected.
+	// Platform should have received MsgMessageQueued for 5 accepted + MsgQueueFull for the overflow.
 	sent := p.getSent()
-	if len(sent) != maxQueuedMessages {
-		t.Fatalf("platform replies = %d, want %d (one per accepted queue)", len(sent), maxQueuedMessages)
+	if len(sent) != defaultMaxQueuedMessages+1 {
+		t.Fatalf("platform replies = %d, want %d (queued + queue-full)", len(sent), defaultMaxQueuedMessages+1)
 	}
 }
 

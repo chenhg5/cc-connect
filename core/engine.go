@@ -25,7 +25,7 @@ import (
 
 const maxPlatformMessageLen = 4000
 const telegramBotCommandLimit = 100
-const maxQueuedMessages = 5 // cap queued messages to bound memory usage
+const defaultMaxQueuedMessages = 5 // default cap for queued messages per session
 
 const (
 	defaultThinkingMaxLen = 300
@@ -203,6 +203,7 @@ type Engine struct {
 	references       ReferenceRenderCfg
 	relayManager     *RelayManager
 	eventIdleTimeout time.Duration
+	maxQueuedMessages int
 	dirHistory       *DirHistory
 	baseWorkDir      string
 	projectState     *ProjectStateStore
@@ -391,6 +392,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		streamPreview:         DefaultStreamPreviewCfg(),
 		references:            DefaultReferenceRenderCfg(),
 		eventIdleTimeout:      defaultEventIdleTimeout,
+		maxQueuedMessages:    defaultMaxQueuedMessages,
 		showContextIndicator:  true,
 	}
 
@@ -875,6 +877,14 @@ func (e *Engine) SetStreamPreviewCfg(cfg StreamPreviewCfg) {
 // 0 disables the timeout entirely.
 func (e *Engine) SetEventIdleTimeout(d time.Duration) {
 	e.eventIdleTimeout = d
+}
+
+// SetMaxQueuedMessages sets the per-session message queue depth.
+// Values <= 0 are ignored.
+func (e *Engine) SetMaxQueuedMessages(n int) {
+	if n > 0 {
+		e.maxQueuedMessages = n
+	}
 }
 
 func (e *Engine) SetRelayManager(rm *RelayManager) {
@@ -1749,9 +1759,11 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 	// EventResult that never arrives. Instead, the event loop sends the
 	// message after the current turn's EventResult is received.
 	state.mu.Lock()
-	if len(state.pendingMessages) >= maxQueuedMessages {
+	if len(state.pendingMessages) >= e.maxQueuedMessages {
+		depth := len(state.pendingMessages)
 		state.mu.Unlock()
-		return false // fall back to "previous processing" reply
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgQueueFull), depth))
+		return true // handled: queue-full reply sent
 	}
 	state.pendingMessages = append(state.pendingMessages, queuedMessage{
 		platform:      p,
