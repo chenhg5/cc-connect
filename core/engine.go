@@ -25,7 +25,7 @@ import (
 
 const maxPlatformMessageLen = 4000
 const telegramBotCommandLimit = 100
-const maxQueuedMessages = 5 // cap queued messages to bound memory usage
+const defaultMaxQueuedMessages = 5 // default cap for queued messages per session
 
 const (
 	defaultThinkingMaxLen = 300
@@ -159,6 +159,7 @@ type Engine struct {
 	display               DisplayCfg
 	injectSender          bool
 	attachmentSendEnabled bool
+	maxQueuedMessages     int
 	startedAt             time.Time
 
 	providerSaveFunc        func(providerName string) error
@@ -381,6 +382,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		cancel:                cancel,
 		i18n:                  NewI18n(lang),
 		attachmentSendEnabled: true,
+		maxQueuedMessages:     defaultMaxQueuedMessages,
 		display:               DisplayCfg{ThinkingMessages: true, ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen, ToolMessages: true},
 		commands:              NewCommandRegistry(),
 		skills:                NewSkillRegistry(),
@@ -570,6 +572,13 @@ func (e *Engine) SetWebStatusFunc(fn func() string)                    { e.webSt
 // accordingly (e.g. personal task views, role-based access control).
 func (e *Engine) SetInjectSender(v bool) {
 	e.injectSender = v
+}
+
+// SetMaxQueuedMessages overrides the default per-session message queue depth.
+func (e *Engine) SetMaxQueuedMessages(n int) {
+	if n > 0 {
+		e.maxQueuedMessages = n
+	}
 }
 
 // SetAttachmentSendEnabled controls whether side-channel image/file delivery is allowed.
@@ -1653,7 +1662,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 			}
 			return
 		}
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgQueueFull), e.maxQueuedMessages))
 		return
 	}
 
@@ -1749,9 +1758,9 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 	// EventResult that never arrives. Instead, the event loop sends the
 	// message after the current turn's EventResult is received.
 	state.mu.Lock()
-	if len(state.pendingMessages) >= maxQueuedMessages {
+	if len(state.pendingMessages) >= e.maxQueuedMessages {
 		state.mu.Unlock()
-		return false // fall back to "previous processing" reply
+		return false // queue full
 	}
 	state.pendingMessages = append(state.pendingMessages, queuedMessage{
 		platform:      p,
