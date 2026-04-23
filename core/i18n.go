@@ -1183,6 +1183,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/stop — 停止当前执行",
 		LangTraditionalChinese: "**工具與自動化**\n" +
 			"/shell <命令> — 執行 Shell 命令（!快捷方式）\n" +
+			"/show <引用> — 按引用查看檔案、目錄或程式碼片段\n" +
 			"/dir [路徑|reset] — 查看、切換或重置工作目錄\n" +
 			"/cron [add|list|del|...] — 定時任務\n" +
 			"/commands [add|del] — 自訂命令\n" +
@@ -1192,6 +1193,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/stop — 停止當前執行",
 		LangJapanese: "**ツール・自動化**\n" +
 			"/shell <コマンド> — シェルコマンド実行（!ショートカット）\n" +
+			"/show <参照> — ファイル/ディレクトリ/スニペットを参照で表示\n" +
 			"/dir [パス|reset] — 作業ディレクトリの表示/切り替え/リセット\n" +
 			"/cron [add|list|del|...] — スケジュールタスク\n" +
 			"/commands [add|del] — カスタムコマンド\n" +
@@ -1201,6 +1203,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/stop — 現在の実行を停止",
 		LangSpanish: "**Herramientas y automatización**\n" +
 			"/shell <comando> — Ejecutar comando shell (! atajo)\n" +
+			"/show <ref> — Ver archivo/directorio/fragmento por referencia\n" +
 			"/dir [ruta|reset] — Ver, cambiar o restablecer directorio de trabajo\n" +
 			"/cron [add|list|del|...] — Tareas programadas\n" +
 			"/commands [add|del] — Comandos personalizados\n" +

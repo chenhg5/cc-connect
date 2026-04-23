@@ -3271,8 +3271,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// Add a "done" reaction so the user knows the agent finished.
 			// The reaction is added after stopTyping (deferred) so the
 			// "doing" emoji is removed first.
-			if doneTI, ok := p.(TypingIndicatorDone); ok {
-				doneReaction = func() { doneTI.AddDoneReaction(replyCtx) }
+			// Skip for silent (NO_REPLY) turns — the user should not know
+			// the agent processed anything.
+			if !isSilent {
+				if doneTI, ok := p.(TypingIndicatorDone); ok {
+					doneReaction = func() { doneTI.AddDoneReaction(replyCtx) }
+				}
 			}
 
 			return
@@ -3313,6 +3317,20 @@ channelClosed:
 
 		fullResponse := strings.Join(textParts, "")
 		session.AddHistory("assistant", fullResponse)
+
+		// Respect NO_REPLY even on abnormal exit so silent turns stay silent.
+		if isSilentReply(fullResponse) {
+			sp.discard()
+			slog.Info("silent reply suppressed (channel closed)", "session", session.ID)
+			return
+		}
+		if stripped, ok := stripTrailingSilent(fullResponse); ok {
+			if strings.TrimSpace(stripped) == "" {
+				sp.discard()
+				return
+			}
+			fullResponse = stripped
+		}
 
 		e.hooks.Emit(HookEvent{
 			Event:      HookEventMessageSent,
@@ -3456,7 +3474,7 @@ var builtinCommands = []struct {
 	{[]string{"whoami", "myid"}, "whoami"},
 	{[]string{"web"}, "web"},
 	{[]string{"diff"}, "diff"},
-	{[]string{"ps"}, "ps"},
+	{[]string{"ps", "btw"}, "ps"},
 }
 
 func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {

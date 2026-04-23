@@ -10728,3 +10728,15 @@ func TestSessionName_ACPLikeFlow(t *testing.T) {
 			"acp-session-001", gotName, "ACP任务")
 	}
 }
+
+// TestBtwAlias_ResolvesToPs verifies that /btw is accepted as an alias for /ps.
+func TestBtwAlias_ResolvesToPs(t *testing.T) {
+	id := matchPrefix("btw", builtinCommands)
+	if id != "ps" {
+		t.Fatalf("matchPrefix(\"btw\") = %q, want \"ps\"", id)
+	}
+	id2 := matchPrefix("ps", builtinCommands)
+	if id2 != "ps" {
+		t.Fatalf("matchPrefix(\"ps\") = %q, want \"ps\"", id2)
+	}
+}
