@@ -1183,7 +1183,10 @@ func (p *Platform) fetchSingleMessage(ctx context.Context, messageID string) *ch
 	case "post":
 		text = extractPostPlainText(content)
 	case "interactive":
-		text = extractInteractiveCardText(content)
+		// Preserve the full card payload for quoted replies so downstream agents
+		// can inspect structured fields (for example, diagnostic JSON embedded in
+		// card content) instead of only receiving a lossy text summary.
+		text = preserveInteractiveCardPayload(content)
 	default:
 		text = fmt.Sprintf("[%s]", item.MsgType)
 	}
@@ -1322,6 +1325,14 @@ func extractPostPlainText(content string) string {
 		}
 	}
 	return strings.Join(parts, "\n")
+}
+
+// preserveInteractiveCardPayload returns the raw interactive card payload for
+// quoted-message injection. We intentionally do not summarize or compress it:
+// callers replying to a card often need the original JSON structure rather
+// than a lossy text extraction.
+func preserveInteractiveCardPayload(content string) string {
+	return strings.TrimSpace(content)
 }
 
 // extractInteractiveCardText extracts readable text from a Feishu interactive card JSON.
