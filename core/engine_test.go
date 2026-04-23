@@ -7345,7 +7345,7 @@ func TestBuildSenderPrompt_Enabled(t *testing.T) {
 	e := newTestEngine()
 	e.SetInjectSender(true)
 
-	result := e.buildSenderPrompt("hello world", "user123", "Alice", "feishu", "feishu:channel42:user123")
+	result := e.buildSenderPrompt("hello world", "user123", "Alice", "feishu", "feishu:channel42:user123", "")
 	expected := "[cc-connect sender_id=user123 sender_name=\"Alice\" platform=feishu chat_id=channel42]\nhello world"
 	if result != expected {
 		t.Fatalf("got %q, want %q", result, expected)
@@ -7356,7 +7356,7 @@ func TestBuildSenderPrompt_Disabled(t *testing.T) {
 	e := newTestEngine()
 	e.SetInjectSender(false)
 
-	result := e.buildSenderPrompt("hello", "user1", "Alice", "feishu", "feishu:ch:user1")
+	result := e.buildSenderPrompt("hello", "user1", "Alice", "feishu", "feishu:ch:user1", "")
 	if result != "hello" {
 		t.Fatalf("expected raw content when disabled, got %q", result)
 	}
@@ -7366,7 +7366,7 @@ func TestBuildSenderPrompt_EmptyUserID(t *testing.T) {
 	e := newTestEngine()
 	e.SetInjectSender(true)
 
-	result := e.buildSenderPrompt("hello", "", "Bob", "telegram", "telegram:ch:user1")
+	result := e.buildSenderPrompt("hello", "", "Bob", "telegram", "telegram:ch:user1", "")
 	if result != "hello" {
 		t.Fatalf("expected raw content when userID is empty, got %q", result)
 	}
@@ -7376,7 +7376,7 @@ func TestBuildSenderPrompt_EmptyUserName(t *testing.T) {
 	e := newTestEngine()
 	e.SetInjectSender(true)
 
-	result := e.buildSenderPrompt("hello", "user1", "", "feishu", "feishu:ch:user1")
+	result := e.buildSenderPrompt("hello", "user1", "", "feishu", "feishu:ch:user1", "")
 	expected := "[cc-connect sender_id=user1 platform=feishu chat_id=ch]\nhello"
 	if result != expected {
 		t.Fatalf("got %q, want %q", result, expected)
@@ -7387,7 +7387,7 @@ func TestBuildSenderPrompt_NameWithSpaces(t *testing.T) {
 	e := newTestEngine()
 	e.SetInjectSender(true)
 
-	result := e.buildSenderPrompt("hi", "U999", "Jim Tang", "slack", "slack:C012:U999")
+	result := e.buildSenderPrompt("hi", "U999", "Jim Tang", "slack", "slack:C012:U999", "")
 	expected := "[cc-connect sender_id=U999 sender_name=\"Jim Tang\" platform=slack chat_id=C012]\nhi"
 	if result != expected {
 		t.Fatalf("got %q, want %q", result, expected)
@@ -7403,7 +7403,9 @@ func TestExtractChannelID(t *testing.T) {
 		{"telegram:group123:user2", "group123"},
 		{"plain", ""},
 		{"a:b", "b"},
-		{"a:b:c:d", "b"},
+		{"a:bb:c:d", "bb"},
+		{"dingtalk:g:cidXXX:staff1", "cidXXX"},
+		{"dingtalk:d:cidYYY:staff2", "cidYYY"},
 	}
 	for _, tt := range tests {
 		got := extractChannelID(tt.key)
@@ -7427,7 +7429,7 @@ func TestBuildSenderPrompt_DifferentPlatforms(t *testing.T) {
 		{"slack", "slack:C012345:carol", "C012345"},
 	}
 	for _, tc := range platforms {
-		result := e.buildSenderPrompt("msg", "uid", "TestUser", tc.platform, tc.sessionKey)
+		result := e.buildSenderPrompt("msg", "uid", "TestUser", tc.platform, tc.sessionKey, "")
 		if !strings.Contains(result, "platform="+tc.platform) {
 			t.Errorf("missing platform=%s in %q", tc.platform, result)
 		}
@@ -7441,12 +7443,38 @@ func TestBuildSenderPrompt_SanitizesSpecialChars(t *testing.T) {
 	e := newTestEngine()
 	e.SetInjectSender(true)
 
-	result := e.buildSenderPrompt("hi", "U1", "Evil\"Name\nInject", "slack", "slack:C1:U1")
+	result := e.buildSenderPrompt("hi", "U1", "Evil\"Name\nInject", "slack", "slack:C1:U1", "")
 	if strings.Contains(result, `"Name`) || strings.Contains(result, "\n"+`Inject`) {
 		t.Fatalf("quotes/newlines should be sanitized, got %q", result)
 	}
 	if !strings.Contains(result, `sender_name="Evil'Name Inject"`) {
 		t.Fatalf("expected sanitized name, got %q", result)
+	}
+}
+
+func TestBuildSenderPrompt_ChannelKeyOverridesSessionKey(t *testing.T) {
+	e := newTestEngine()
+	e.SetInjectSender(true)
+
+	// When channelKey is provided, it should be used as chat_id instead of
+	// extracting from sessionKey (which would give "g" for dingtalk).
+	result := e.buildSenderPrompt("hello", "staff1", "Alice", "dingtalk", "dingtalk:g:cidXXX:staff1", "cidXXX")
+	expected := "[cc-connect sender_id=staff1 sender_name=\"Alice\" platform=dingtalk chat_id=cidXXX]\nhello"
+	if result != expected {
+		t.Fatalf("got %q, want %q", result, expected)
+	}
+}
+
+func TestBuildSenderPrompt_FallbackWithoutChannelKey(t *testing.T) {
+	e := newTestEngine()
+	e.SetInjectSender(true)
+
+	// When channelKey is empty, extractChannelID heuristic should detect
+	// the 4-segment format and extract the correct channel.
+	result := e.buildSenderPrompt("hello", "staff1", "Alice", "dingtalk", "dingtalk:g:cidXXX:staff1", "")
+	expected := "[cc-connect sender_id=staff1 sender_name=\"Alice\" platform=dingtalk chat_id=cidXXX]\nhello"
+	if result != expected {
+		t.Fatalf("got %q, want %q", result, expected)
 	}
 }
 
@@ -9632,6 +9660,7 @@ func TestExtractSessionKeyParts(t *testing.T) {
 		{"single colon", "discord:channel1", "discord", "channel1", "discord:channel1", ""},
 		{"empty string", "", "", "", "", ""},
 		{"just platform colon user", "line::user1", "line", "", "", "user1"},
+		{"four-segment with type tag", "dingtalk:g:cidXXX:staff1", "dingtalk", "cidXXX", "dingtalk:cidXXX", "staff1"},
 	}
 
 	for _, tt := range tests {

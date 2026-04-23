@@ -276,6 +276,7 @@ type queuedMessage struct {
 	userName      string // sender's display name for sender injection
 	msgPlatform   string // platform name for sender injection
 	msgSessionKey string // session key for extracting chat ID
+	channelKey    string // platform-provided channel identifier (preferred over sessionKey extraction)
 }
 
 // interactiveState tracks a running interactive agent session and its permission state.
@@ -1760,6 +1761,7 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		userName:      msg.UserName,
 		msgPlatform:   msg.Platform,
 		msgSessionKey: msg.SessionKey,
+		channelKey:    msg.ChannelKey,
 	})
 	queueDepth := len(state.pendingMessages)
 	state.mu.Unlock()
@@ -2159,7 +2161,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	// EventResult that was pushed after the previous turn already returned.
 	drainEvents(state.agentSession.Events())
 
-	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey)
+	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
 
 	sendStart := time.Now()
 	state.mu.Lock()
@@ -3245,7 +3247,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 
-				queuedPrompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey)
+				queuedPrompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
 
 				nextSend := make(chan error, 1)
 				go func() {
@@ -3431,7 +3433,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		state.mu.Unlock()
 
 		e.i18n.DetectAndSet(queued.content)
-		prompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey)
+		prompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
 
 		if state.agentSession == nil || !state.agentSession.Alive() {
 			e.send(queued.platform, queued.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session ended"))
@@ -10496,7 +10498,7 @@ func (e *Engine) formatWhoamiText(msg *Message) string {
 		sb.WriteString(fmt.Sprintf("Platform: %s\n", msg.Platform))
 	}
 
-	chatID := extractChannelID(msg.SessionKey)
+	chatID := effectiveChannelID(msg)
 	if chatID != "" {
 		sb.WriteString(fmt.Sprintf("Chat ID: `%s`\n", chatID))
 	}
@@ -10521,7 +10523,7 @@ func (e *Engine) renderWhoamiCard(msg *Message) *Card {
 	if msg.Platform != "" {
 		body.WriteString(fmt.Sprintf("**%s:**  %s\n", e.i18n.T(MsgWhoamiPlatform), msg.Platform))
 	}
-	chatID := extractChannelID(msg.SessionKey)
+	chatID := effectiveChannelID(msg)
 	if chatID != "" {
 		body.WriteString(fmt.Sprintf("**Chat ID:**  `%s`\n", chatID))
 	}
@@ -11464,11 +11466,14 @@ func (e *Engine) cmdBindSetup(p Platform, msg *Message) {
 // injectSender is enabled and userID is non-empty. When userName is available
 // it is included as sender_name so the agent can identify who sent the message
 // by display name (useful in shared channel sessions with multiple users).
-func (e *Engine) buildSenderPrompt(content, userID, userName, platform, sessionKey string) string {
+func (e *Engine) buildSenderPrompt(content, userID, userName, platform, sessionKey, channelKey string) string {
 	if !e.injectSender || userID == "" {
 		return content
 	}
-	chatID := extractChannelID(sessionKey)
+	chatID := channelKey
+	if chatID == "" {
+		chatID = extractChannelID(sessionKey)
+	}
 	if userName != "" {
 		safeName := strings.NewReplacer(`"`, `'`, "\n", " ", "\r", "").Replace(userName)
 		return fmt.Sprintf("[cc-connect sender_id=%s sender_name=\"%s\" platform=%s chat_id=%s]\n%s", userID, safeName, platform, chatID, content)
@@ -11478,7 +11483,14 @@ func (e *Engine) buildSenderPrompt(content, userID, userName, platform, sessionK
 
 func extractChannelID(sessionKey string) string {
 	// Format: "platform:channelID:userID" or "platform:channelID"
-	parts := strings.SplitN(sessionKey, ":", 3)
+	// Some platforms encode a short type tag as an extra segment, e.g.
+	// "platform:t:channelID:userID" where t is a single-char tag.
+	// When 4+ segments exist and parts[1] is a single char, treat parts[2]
+	// as the real channel ID.
+	parts := strings.SplitN(sessionKey, ":", 4)
+	if len(parts) >= 4 && len(parts[1]) == 1 {
+		return parts[2]
+	}
 	if len(parts) >= 2 {
 		return parts[1]
 	}
@@ -11486,7 +11498,13 @@ func extractChannelID(sessionKey string) string {
 }
 
 func extractUserID(sessionKey string) string {
-	parts := strings.SplitN(sessionKey, ":", 3)
+	// Format: "platform:channelID:userID" or "platform:type:channelID:userID"
+	// When 4+ segments exist and parts[1] is a single-char type tag, the
+	// user ID is in parts[3].
+	parts := strings.SplitN(sessionKey, ":", 5)
+	if len(parts) >= 4 && len(parts[1]) == 1 {
+		return parts[3]
+	}
 	if len(parts) >= 3 {
 		return parts[2]
 	}

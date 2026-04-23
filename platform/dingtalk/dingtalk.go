@@ -267,6 +267,7 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel, richText *richT
 		ChatName:   data.ConversationTitle,
 		Content:    messageContent,
 		MessageID:  data.MsgId,
+		ChannelKey: data.ConversationId,
 		ReplyCtx: replyContext{
 			sessionWebhook:  data.SessionWebhook,
 			conversationId:  data.ConversationId,
@@ -309,6 +310,7 @@ func (p *Platform) handleAudioMessage(data *chatbot.BotCallbackDataModel, sessio
 				UserName:   data.SenderNick,
 				Content:    recognition,
 				MessageID:  data.MsgId,
+				ChannelKey: data.ConversationId,
 				ReplyCtx: replyContext{
 					sessionWebhook:  data.SessionWebhook,
 					conversationId:  data.ConversationId,
@@ -332,6 +334,7 @@ func (p *Platform) handleAudioMessage(data *chatbot.BotCallbackDataModel, sessio
 		UserName:   data.SenderNick,
 		Content:    recognition, // Use recognition as text content
 		MessageID:  data.MsgId,
+		ChannelKey: data.ConversationId,
 		ReplyCtx: replyContext{
 			sessionWebhook:  data.SessionWebhook,
 			conversationId:  data.ConversationId,
