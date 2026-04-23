@@ -178,6 +178,7 @@ type Engine struct {
 	configReloadFunc func() (*ConfigReloadResult, error)
 
 	hooks              *HookManager
+	auditor            *Auditor
 	cronScheduler      *CronScheduler
 	heartbeatScheduler *HeartbeatScheduler
 
@@ -471,6 +472,109 @@ func (e *Engine) reapIdleWorkspaces() {
 // SetHooks configures the lifecycle event hook manager.
 func (e *Engine) SetHooks(hm *HookManager) {
 	e.hooks = hm
+}
+
+// SetAuditor configures the project audit logger.
+func (e *Engine) SetAuditor(a *Auditor) {
+	e.auditor = a
+}
+
+func (e *Engine) audit(record AuditRecord) {
+	if e.auditor == nil {
+		return
+	}
+	if record.Project == "" {
+		record.Project = e.name
+	}
+	if record.Agent == "" && e.agent != nil {
+		record.Agent = e.agent.Name()
+	}
+	e.auditor.Record(e.ctx, record)
+}
+
+func (e *Engine) auditReplyMetadata(p Platform, replyCtx any) AuditReplyMetadata {
+	if p == nil {
+		return AuditReplyMetadata{}
+	}
+	if provider, ok := p.(AuditReplyMetadataProvider); ok {
+		meta := provider.AuditReplyMetadata(replyCtx)
+		meta.Extra = CloneAuditExtra(meta.Extra)
+		return meta
+	}
+	return AuditReplyMetadata{}
+}
+
+func (e *Engine) auditOutboundDelivery(kind AuditRecordKind, p Platform, replyCtx any, content, deliveryMethod string, receipt *SendReceipt, err error) {
+	meta := e.auditReplyMetadata(p, replyCtx)
+	extra := MergeAuditExtra(meta.Extra)
+	if deliveryMethod != "" {
+		if extra == nil {
+			extra = map[string]any{}
+		}
+		extra["delivery_method"] = deliveryMethod
+	}
+	if receipt != nil {
+		extra = MergeAuditExtra(extra, receipt.Extra)
+	}
+
+	record := AuditRecord{
+		Kind:              kind,
+		Platform:          p.Name(),
+		SessionKey:        meta.SessionKey,
+		UserID:            meta.UserID,
+		UserName:          meta.UserName,
+		ChatName:          meta.ChatName,
+		ChannelKey:        meta.ChannelKey,
+		ThreadID:          firstNonEmpty(meta.ThreadID, receiptThreadID(receipt)),
+		InboundMessageID:  meta.ReplyToMessageID,
+		ParentMessageID:   firstNonEmpty(receiptParentMessageID(receipt), meta.ParentMessageID),
+		RootMessageID:     firstNonEmpty(receiptRootMessageID(receipt), meta.RootMessageID),
+		ReplyToMessageID:  meta.ReplyToMessageID,
+		OutboundMessageID: receiptMessageID(receipt),
+		ContentSent:       content,
+		Extra:             extra,
+	}
+	if err != nil {
+		record.Error = err.Error()
+	}
+	e.audit(record)
+}
+
+func receiptMessageID(receipt *SendReceipt) string {
+	if receipt == nil {
+		return ""
+	}
+	return receipt.MessageID
+}
+
+func receiptParentMessageID(receipt *SendReceipt) string {
+	if receipt == nil {
+		return ""
+	}
+	return receipt.ParentMessageID
+}
+
+func receiptRootMessageID(receipt *SendReceipt) string {
+	if receipt == nil {
+		return ""
+	}
+	return receipt.RootMessageID
+}
+
+func receiptThreadID(receipt *SendReceipt) string {
+	if receipt == nil {
+		return ""
+	}
+	return receipt.ThreadID
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (e *Engine) SetSpeechConfig(cfg SpeechCfg) {
@@ -1463,6 +1567,7 @@ func (e *Engine) resolveAlias(content string) string {
 }
 
 func (e *Engine) handleMessage(p Platform, msg *Message) {
+	originalContent := msg.Content
 	slog.Info("message received",
 		"platform", msg.Platform, "msg_id", msg.MessageID,
 		"session", msg.SessionKey, "user", msg.UserName,
@@ -1527,6 +1632,31 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	} else {
 		msg.Content = content
 	}
+
+	e.audit(AuditRecord{
+		Kind:             AuditKindInboundReceived,
+		Platform:         msg.Platform,
+		SessionKey:       msg.SessionKey,
+		UserID:           msg.UserID,
+		UserName:         msg.UserName,
+		ChatName:         msg.ChatName,
+		ChannelKey:       msg.ChannelKey,
+		ThreadID:         msg.ThreadID,
+		InboundMessageID: msg.MessageID,
+		ParentMessageID:  msg.ParentMessageID,
+		RootMessageID:    msg.RootMessageID,
+		ContentOriginal:  originalContent,
+		ExtraContent:     msg.ExtraContent,
+		ContentToAgent:   msg.Content,
+		Extra: MergeAuditExtra(msg.AuditExtra, map[string]any{
+			"images_count":  len(msg.Images),
+			"files_count":   len(msg.Files),
+			"has_audio":     msg.Audio != nil,
+			"has_location":  msg.Location != nil,
+			"from_voice":    msg.FromVoice,
+			"mode_override": msg.ModeOverride,
+		}),
+	})
 
 	// Rate limit check (per-user role-based, then global fallback)
 	if !e.checkRateLimit(msg) {
@@ -2989,6 +3119,28 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			session.AddHistory("assistant", baseResponse)
 			sessions.Save()
 
+			meta := e.auditReplyMetadata(p, replyCtx)
+			e.audit(AuditRecord{
+				Kind:             AuditKindAgentResult,
+				Platform:         p.Name(),
+				SessionKey:       firstNonEmpty(meta.SessionKey, sessionKey),
+				UserID:           meta.UserID,
+				UserName:         meta.UserName,
+				ChatName:         meta.ChatName,
+				ChannelKey:       meta.ChannelKey,
+				ThreadID:         meta.ThreadID,
+				InboundMessageID: msgID,
+				ParentMessageID:  meta.ParentMessageID,
+				RootMessageID:    meta.RootMessageID,
+				ReplyToMessageID: firstNonEmpty(meta.ReplyToMessageID, msgID),
+				AgentOutput:      baseResponse,
+				Extra: map[string]any{
+					"input_tokens":  event.InputTokens,
+					"output_tokens": event.OutputTokens,
+					"tool_count":    toolCount,
+				},
+			})
+
 			e.hooks.Emit(HookEvent{
 				Event:      HookEventMessageSent,
 				SessionKey: sessionKey,
@@ -3053,6 +3205,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				slog.Debug("EventResult: suppressed duplicate side-channel text", "response_len", len(fullResponse))
 			} else if sp.finish(fullResponse) {
+				e.auditOutboundDelivery(AuditKindOutboundSent, p, replyCtx, fullResponse, "preview_update", sp.receipt(), nil)
 				slog.Debug("EventResult: finalized via stream preview", "response_len", len(fullResponse))
 			} else {
 				slog.Debug("EventResult: sending via p.Send (preview inactive or failed)", "response_len", len(fullResponse), "chunks", len(splitMessage(fullResponse, maxPlatformMessageLen)))
@@ -3241,6 +3394,27 @@ channelClosed:
 		fullResponse := strings.Join(textParts, "")
 		session.AddHistory("assistant", fullResponse)
 
+		meta := e.auditReplyMetadata(p, replyCtx)
+		e.audit(AuditRecord{
+			Kind:             AuditKindAgentResult,
+			Platform:         p.Name(),
+			SessionKey:       firstNonEmpty(meta.SessionKey, sessionKey),
+			UserID:           meta.UserID,
+			UserName:         meta.UserName,
+			ChatName:         meta.ChatName,
+			ChannelKey:       meta.ChannelKey,
+			ThreadID:         meta.ThreadID,
+			InboundMessageID: msgID,
+			ParentMessageID:  meta.ParentMessageID,
+			RootMessageID:    meta.RootMessageID,
+			ReplyToMessageID: firstNonEmpty(meta.ReplyToMessageID, msgID),
+			AgentOutput:      fullResponse,
+			Extra: map[string]any{
+				"tool_count":     toolCount,
+				"channel_closed": true,
+			},
+		})
+
 		e.hooks.Emit(HookEvent{
 			Event:      HookEventMessageSent,
 			SessionKey: sessionKey,
@@ -3261,6 +3435,7 @@ channelClosed:
 				}
 			}
 		} else if sp.finish(fullResponse) {
+			e.auditOutboundDelivery(AuditKindOutboundSent, p, replyCtx, fullResponse, "preview_update", sp.receipt(), nil)
 			slog.Debug("stream preview: finalized in-place (process exited)")
 		} else {
 			for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
@@ -7477,10 +7652,21 @@ func (e *Engine) sendWithError(p Platform, replyCtx any, content string) error {
 
 func (e *Engine) sendAlreadyRenderedWithError(p Platform, replyCtx any, content string) error {
 	start := time.Now()
-	if err := p.Send(e.ctx, replyCtx, content); err != nil {
+	var (
+		err     error
+		receipt *SendReceipt
+	)
+	if reporter, ok := p.(DeliveryReporter); ok {
+		receipt, err = reporter.SendWithReceipt(e.ctx, replyCtx, content)
+	} else {
+		err = p.Send(e.ctx, replyCtx, content)
+	}
+	if err != nil {
+		e.auditOutboundDelivery(AuditKindOutboundFailed, p, replyCtx, content, "send", receipt, err)
 		slog.Error("platform send failed", "platform", p.Name(), "error", err, "content_len", len(content))
 		return err
 	}
+	e.auditOutboundDelivery(AuditKindOutboundSent, p, replyCtx, content, "send", receipt, nil)
 	if elapsed := time.Since(start); elapsed >= slowPlatformSend {
 		slog.Warn("slow platform send", "platform", p.Name(), "elapsed", elapsed, "content_len", len(content))
 	}
@@ -7532,10 +7718,21 @@ func (e *Engine) replyWithError(p Platform, replyCtx any, content string) error 
 		return err
 	}
 	start := time.Now()
-	if err := p.Reply(e.ctx, replyCtx, content); err != nil {
+	var (
+		err     error
+		receipt *SendReceipt
+	)
+	if reporter, ok := p.(DeliveryReporter); ok {
+		receipt, err = reporter.ReplyWithReceipt(e.ctx, replyCtx, content)
+	} else {
+		err = p.Reply(e.ctx, replyCtx, content)
+	}
+	if err != nil {
+		e.auditOutboundDelivery(AuditKindOutboundFailed, p, replyCtx, content, "reply", receipt, err)
 		slog.Error("platform reply failed", "platform", p.Name(), "error", err, "content_len", len(content))
 		return err
 	}
+	e.auditOutboundDelivery(AuditKindOutboundSent, p, replyCtx, content, "reply", receipt, nil)
 	if elapsed := time.Since(start); elapsed >= slowPlatformSend {
 		slog.Warn("slow platform reply", "platform", p.Name(), "elapsed", elapsed, "content_len", len(content))
 	}

@@ -295,6 +295,30 @@ level = "info" # debug, info, warn, error
 # cors_origins = ["http://localhost:3000"]  # Allowed CORS origins / 允许的 CORS 来源
 
 # =============================================================================
+# Audit (Structured Message Audit / 结构化消息审计)
+# =============================================================================
+# Persist inbound/outbound audit records to a database sink.
+# 将入站/出站审计记录持久化到数据库。
+#
+# [audit]
+# enabled = true
+# timeout_ms = 2000
+#
+# [audit.postgres]
+# dsn = "postgres://user:password@localhost:5432/ccconnect?sslmode=disable"
+# table = "audit_records"
+# auto_create = true
+# max_open_conns = 10
+# max_idle_conns = 5
+# conn_max_lifetime_mins = 30
+#
+# [audit.mongodb]
+# uri = "mongodb://localhost:27017"
+# database = "ccconnect"
+# collection = "audit_records"
+# auto_create_indexes = true
+
+# =============================================================================
 # Hooks (Event Triggers / 事件钩子)
 # =============================================================================
 # Execute shell commands or send HTTP requests when lifecycle events occur.

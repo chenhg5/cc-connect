@@ -17,6 +17,8 @@ import (
 	"time"
 
 	ccconnect "github.com/chenhg5/cc-connect"
+	auditmongodb "github.com/chenhg5/cc-connect/audit/mongodb"
+	auditpostgres "github.com/chenhg5/cc-connect/audit/postgres"
 	"github.com/chenhg5/cc-connect/config"
 	"github.com/chenhg5/cc-connect/core"
 	"github.com/chenhg5/cc-connect/daemon"
@@ -171,6 +173,55 @@ func main() {
 
 	setupLogger(cfg.Log.Level, logWriter)
 
+	var auditor *core.Auditor
+	if auditEnabled(cfg.Audit) {
+		var sinks []core.AuditSink
+
+		if strings.TrimSpace(cfg.Audit.Postgres.DSN) != "" {
+			pgCfg := auditpostgres.DefaultConfig()
+			pgCfg.DSN = cfg.Audit.Postgres.DSN
+			pgCfg.Table = cfg.Audit.Postgres.Table
+			pgCfg.AutoCreate = cfg.Audit.Postgres.AutoCreate
+			if cfg.Audit.Postgres.MaxOpenConns != nil {
+				pgCfg.MaxOpenConns = *cfg.Audit.Postgres.MaxOpenConns
+			}
+			if cfg.Audit.Postgres.MaxIdleConns != nil {
+				pgCfg.MaxIdleConns = *cfg.Audit.Postgres.MaxIdleConns
+			}
+			if cfg.Audit.Postgres.ConnMaxLifetimeMins != nil {
+				pgCfg.ConnMaxLifetime = time.Duration(*cfg.Audit.Postgres.ConnMaxLifetimeMins) * time.Minute
+			}
+			pgSink, err := auditpostgres.New(pgCfg)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error initializing postgres audit sink: %v\n", err)
+				os.Exit(1)
+			}
+			sinks = append(sinks, pgSink)
+			slog.Info("audit sink enabled", "backend", "postgres")
+		}
+
+		if strings.TrimSpace(cfg.Audit.MongoDB.URI) != "" {
+			mongoCfg := auditmongodb.DefaultConfig()
+			mongoCfg.URI = cfg.Audit.MongoDB.URI
+			mongoCfg.Database = cfg.Audit.MongoDB.Database
+			mongoCfg.Collection = cfg.Audit.MongoDB.Collection
+			mongoCfg.AutoCreateIndexes = cfg.Audit.MongoDB.AutoCreateIndexes
+			mongoSink, err := auditmongodb.New(mongoCfg)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error initializing mongodb audit sink: %v\n", err)
+				os.Exit(1)
+			}
+			sinks = append(sinks, mongoSink)
+			slog.Info("audit sink enabled", "backend", "mongodb")
+		}
+
+		if len(sinks) == 0 {
+			fmt.Fprintln(os.Stderr, "Error initializing audit sink: audit is enabled but no sink is configured")
+			os.Exit(1)
+		}
+		auditor = core.NewAuditor(resolveAuditTimeout(cfg.Audit), sinks...)
+	}
+
 	// run_as_user preflight + isolation audit. MUST run before any engine
 	// or agent is constructed. If any project fails, abort startup
 	// entirely — never half-spawn. See core/runas_check.go and
@@ -244,6 +295,7 @@ func main() {
 		}
 
 		engine := core.NewEngine(proj.Name, agent, platforms, sessionFile, lang)
+		engine.SetAuditor(auditor)
 		showCtx := true
 		if proj.ShowContextIndicator != nil {
 			showCtx = *proj.ShowContextIndicator
@@ -1033,6 +1085,11 @@ func main() {
 			slog.Error("shutdown error", "error", err)
 		}
 	}
+	if auditor != nil {
+		if err := auditor.Close(); err != nil {
+			slog.Error("audit shutdown error", "error", err)
+		}
+	}
 	if logCloser != nil {
 		logCloser.Close()
 	}
@@ -1177,6 +1234,20 @@ func resolveConfigPath(explicit string) string {
 		return filepath.Join(home, ".cc-connect", "config.toml")
 	}
 	return "config.toml"
+}
+
+func auditEnabled(cfg config.AuditConfig) bool {
+	if cfg.Enabled != nil {
+		return *cfg.Enabled
+	}
+	return strings.TrimSpace(cfg.Postgres.DSN) != "" || strings.TrimSpace(cfg.MongoDB.URI) != ""
+}
+
+func resolveAuditTimeout(cfg config.AuditConfig) time.Duration {
+	if cfg.TimeoutMs != nil {
+		return time.Duration(*cfg.TimeoutMs) * time.Millisecond
+	}
+	return 2 * time.Second
 }
 
 func bootstrapConfig(path string) error {
