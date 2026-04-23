@@ -295,10 +295,9 @@ level = "info" # debug, info, warn, error
 # cors_origins = ["http://localhost:3000"]  # Allowed CORS origins / 允许的 CORS 来源
 
 # =============================================================================
-# Audit (Structured Message Audit / 结构化消息审计)
+# Audit (Structured Message Audit)
 # =============================================================================
-# Persist inbound/outbound audit records to a database sink.
-# 将入站/出站审计记录持久化到数据库。
+# Persist inbound/outbound audit records to one or more database sinks.
 #
 # [audit]
 # enabled = true
