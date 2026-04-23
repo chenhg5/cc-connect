@@ -33,6 +33,7 @@ type opencodeSession struct {
 	cancel   context.CancelFunc
 	wg       sync.WaitGroup
 	alive    atomic.Bool
+	expectingContinue atomic.Bool // true when compaction_continue received, waiting for next step
 }
 
 func newOpencodeSession(ctx context.Context, cmd, workDir, model, mode, resumeID string, extraEnv []string) (*opencodeSession, error) {
@@ -160,6 +161,15 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 		}
 	}
 
+	// Check if we received compaction_continue before readLoop ended.
+	// If so, OpenCode will continue with a new turn - do NOT send EventResult.
+	// The subsequent process will send its own EventResult when it finishes.
+	if s.expectingContinue.Load() {
+		slog.Info("opencodeSession: readLoop ended after compaction_continue, skipping EventResult", "session_id", s.CurrentSessionID())
+		s.expectingContinue.Store(false)
+		return
+	}
+
 	// Emit EventResult after all steps are done and the process has finished writing.
 	sid := s.CurrentSessionID()
 	evt := core.Event{Type: core.EventResult, SessionID: sid, Done: true}
@@ -201,8 +211,25 @@ func (s *opencodeSession) handleText(raw map[string]any) {
 		return
 	}
 	text, _ := part["text"].(string)
+
+	// Extract metadata and synthetic flags to identify compaction_continue
+	metadata, _ := part["metadata"].(map[string]any)
+	synthetic, _ := part["synthetic"].(bool)
+
+	// Check for compaction_continue: this is OpenCode's auto-continuation signal.
+	// When received, we should NOT send EventText to engine, but mark that we expect
+	// a continuation (next step_start will start a new turn without EventResult).
+	if synthetic && metadata != nil {
+		if cc, ok := metadata["compaction_continue"].(bool); ok && cc {
+			slog.Info("opencodeSession: compaction_continue detected, marking expectingContinue", "session_id", s.CurrentSessionID())
+			s.expectingContinue.Store(true)
+			// Do NOT send EventText - this is internal continuation signal
+			return
+		}
+	}
+
 	if text != "" {
-		evt := core.Event{Type: core.EventText, Content: text}
+		evt := core.Event{Type: core.EventText, Content: text, Metadata: metadata, Synthetic: synthetic}
 		select {
 		case s.events <- evt:
 		case <-s.ctx.Done():

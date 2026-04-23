@@ -201,6 +201,8 @@ type Event struct {
 	Error        error
 	InputTokens  int // token usage from agent result events
 	OutputTokens int
+	Metadata     map[string]any // optional metadata from agent (e.g. compaction_continue)
+	Synthetic    bool           // true if this is a synthetic/generated message (not from real user)
 }
 
 // HistoryEntry is one turn in a conversation.
