@@ -38,16 +38,16 @@ func isValidRunAsUserName(name string) bool {
 }
 
 var dangerousEnvVars = map[string]bool{
-	"LD_PRELOAD":           true,
-	"LD_LIBRARY_PATH":      true,
+	"LD_PRELOAD":            true,
+	"LD_LIBRARY_PATH":       true,
 	"DYLD_INSERT_LIBRARIES": true,
-	"DYLD_LIBRARY_PATH":    true,
-	"PATH":                 true,
-	"HOME":                 true,
-	"USER":                 true,
-	"SHELL":                true,
-	"SUDO_USER":            true,
-	"SUDO_COMMAND":         true,
+	"DYLD_LIBRARY_PATH":     true,
+	"PATH":                  true,
+	"HOME":                  true,
+	"USER":                  true,
+	"SHELL":                 true,
+	"SUDO_USER":             true,
+	"SUDO_COMMAND":          true,
 }
 
 func validateRunAsEnv(prefix string, envVars []string) error {
@@ -87,28 +87,29 @@ type Config struct {
 	AttachmentSend string `toml:"attachment_send"`
 	// Quiet is legacy: when true and [display] does not set thinking_messages / tool_messages,
 	// engines behave as if those flags were false. Per-project quiet overrides when set.
-	Quiet             *bool                   `toml:"quiet,omitempty"`
-	Providers         []ProviderConfig        `toml:"providers"`          // global shared providers
-	ProviderPresetsURL string                 `toml:"provider_presets_url,omitempty"` // remote JSON URL for provider presets
-	Projects          []ProjectConfig         `toml:"projects"`
-	Commands          []CommandConfig         `toml:"commands"`     // global custom slash commands
-	Aliases           []AliasConfig           `toml:"aliases"`      // global command aliases
-	BannedWords       []string                `toml:"banned_words"` // messages containing any of these words are blocked
-	Log               LogConfig               `toml:"log"`
-	Language          string                  `toml:"language"` // "en" or "zh", default is "en"
-	Speech            SpeechConfig            `toml:"speech"`
-	TTS               TTSConfig               `toml:"tts"`
-	Display           DisplayConfig           `toml:"display"`
-	StreamPreview     StreamPreviewConfig     `toml:"stream_preview"`      // real-time streaming preview
-	RateLimit         RateLimitConfig         `toml:"rate_limit"`          // per-session rate limiting
-	OutgoingRateLimit OutgoingRateLimitConfig `toml:"outgoing_rate_limit"` // outgoing message throttling
-	Relay             RelayConfig             `toml:"relay"`               // bot-to-bot relay behavior
-	Cron              CronConfig              `toml:"cron"`
-	Webhook           WebhookConfig           `toml:"webhook"`
-	Bridge            BridgeConfig            `toml:"bridge"`
-	Management        ManagementConfig        `toml:"management"`
-	Hooks             []HookConfig            `toml:"hooks"`
-	IdleTimeoutMins   *int                    `toml:"idle_timeout_mins,omitempty"` // max minutes between agent events; 0 = no timeout; default 120
+	Quiet              *bool                   `toml:"quiet,omitempty"`
+	Providers          []ProviderConfig        `toml:"providers"`                      // global shared providers
+	ProviderPresetsURL string                  `toml:"provider_presets_url,omitempty"` // remote JSON URL for provider presets
+	Projects           []ProjectConfig         `toml:"projects"`
+	Commands           []CommandConfig         `toml:"commands"`     // global custom slash commands
+	Aliases            []AliasConfig           `toml:"aliases"`      // global command aliases
+	BannedWords        []string                `toml:"banned_words"` // messages containing any of these words are blocked
+	Log                LogConfig               `toml:"log"`
+	Language           string                  `toml:"language"` // "en" or "zh", default is "en"
+	Speech             SpeechConfig            `toml:"speech"`
+	TTS                TTSConfig               `toml:"tts"`
+	Display            DisplayConfig           `toml:"display"`
+	StreamPreview      StreamPreviewConfig     `toml:"stream_preview"`      // real-time streaming preview
+	RateLimit          RateLimitConfig         `toml:"rate_limit"`          // per-session rate limiting
+	OutgoingRateLimit  OutgoingRateLimitConfig `toml:"outgoing_rate_limit"` // outgoing message throttling
+	Relay              RelayConfig             `toml:"relay"`               // bot-to-bot relay behavior
+	Cron               CronConfig              `toml:"cron"`
+	Webhook            WebhookConfig           `toml:"webhook"`
+	Bridge             BridgeConfig            `toml:"bridge"`
+	Management         ManagementConfig        `toml:"management"`
+	Audit              AuditConfig             `toml:"audit"`
+	Hooks              []HookConfig            `toml:"hooks"`
+	IdleTimeoutMins    *int                    `toml:"idle_timeout_mins,omitempty"` // max minutes between agent events; 0 = no timeout; default 120
 }
 
 // CronConfig controls cron job behavior.
@@ -142,6 +143,32 @@ type HookConfig struct {
 	URL     string `toml:"url,omitempty"`     // HTTP endpoint (type=http)
 	Timeout int    `toml:"timeout,omitempty"` // seconds; 0 = default
 	Async   *bool  `toml:"async,omitempty"`   // nil = true (async by default)
+}
+
+// AuditConfig controls structured message auditing.
+type AuditConfig struct {
+	Enabled   *bool               `toml:"enabled,omitempty"`    // default false unless a sink DSN/URI is provided
+	TimeoutMs *int                `toml:"timeout_ms,omitempty"` // per-record sink write timeout; default 2000ms
+	Postgres  AuditPostgresConfig `toml:"postgres"`
+	MongoDB   AuditMongoDBConfig  `toml:"mongodb"`
+}
+
+// AuditPostgresConfig configures the PostgreSQL audit sink.
+type AuditPostgresConfig struct {
+	DSN                 string `toml:"dsn,omitempty"`
+	Table               string `toml:"table,omitempty"`
+	AutoCreate          *bool  `toml:"auto_create,omitempty"`            // default true
+	MaxOpenConns        *int   `toml:"max_open_conns,omitempty"`         // default 10
+	MaxIdleConns        *int   `toml:"max_idle_conns,omitempty"`         // default 5
+	ConnMaxLifetimeMins *int   `toml:"conn_max_lifetime_mins,omitempty"` // default 30
+}
+
+// AuditMongoDBConfig configures the MongoDB audit sink.
+type AuditMongoDBConfig struct {
+	URI               string `toml:"uri,omitempty"`
+	Database          string `toml:"database,omitempty"`
+	Collection        string `toml:"collection,omitempty"`
+	AutoCreateIndexes *bool  `toml:"auto_create_indexes,omitempty"` // default true
 }
 
 // ManagementConfig controls the HTTP Management API for external tools.
@@ -351,18 +378,18 @@ type ProviderModelConfig struct {
 }
 
 type ProviderConfig struct {
-	Name        string                `toml:"name"`
-	APIKey      string                `toml:"api_key"`
-	BaseURL     string                `toml:"base_url,omitempty"`
-	Model       string                `toml:"model,omitempty"`
-	Models      []ProviderModelConfig `toml:"models,omitempty"`
-	Thinking    string                `toml:"thinking,omitempty"`
-	Env         map[string]string     `toml:"env,omitempty"`
-	AgentTypes      []string                          `toml:"agent_types,omitempty"`       // optional: restrict to specific agent types (e.g. ["claudecode", "codex"])
-	Endpoints       map[string]string                 `toml:"endpoints,omitempty"`         // per-agent-type base URL overrides (e.g. codex = "https://x/v1")
-	AgentModels     map[string]string                 `toml:"agent_models,omitempty"`      // per-agent-type default model (e.g. codex = "openai/gpt-5.3-codex")
-	AgentModelLists map[string][]ProviderModelConfig  `toml:"agent_model_lists,omitempty"` // per-agent-type model lists (overrides Models when matched)
-	Codex           *CodexProviderConfig              `toml:"codex,omitempty"`             // Codex-specific provider settings
+	Name            string                           `toml:"name"`
+	APIKey          string                           `toml:"api_key"`
+	BaseURL         string                           `toml:"base_url,omitempty"`
+	Model           string                           `toml:"model,omitempty"`
+	Models          []ProviderModelConfig            `toml:"models,omitempty"`
+	Thinking        string                           `toml:"thinking,omitempty"`
+	Env             map[string]string                `toml:"env,omitempty"`
+	AgentTypes      []string                         `toml:"agent_types,omitempty"`       // optional: restrict to specific agent types (e.g. ["claudecode", "codex"])
+	Endpoints       map[string]string                `toml:"endpoints,omitempty"`         // per-agent-type base URL overrides (e.g. codex = "https://x/v1")
+	AgentModels     map[string]string                `toml:"agent_models,omitempty"`      // per-agent-type default model (e.g. codex = "openai/gpt-5.3-codex")
+	AgentModelLists map[string][]ProviderModelConfig `toml:"agent_model_lists,omitempty"` // per-agent-type model lists (overrides Models when matched)
+	Codex           *CodexProviderConfig             `toml:"codex,omitempty"`             // Codex-specific provider settings
 }
 
 // CodexProviderConfig holds Codex CLI-specific provider fields
@@ -432,6 +459,7 @@ func Load(path string) (*Config, error) {
 }
 
 var envPlaceholderPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+var auditIdentifierPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 func resolveEnvInConfig(cfg *Config) {
 	resolveEnvValue(reflect.ValueOf(cfg))
@@ -610,6 +638,9 @@ func (c *Config) validate() error {
 	if c.Relay.TimeoutSecs != nil && *c.Relay.TimeoutSecs < 0 {
 		return fmt.Errorf("config: relay.timeout_secs must be >= 0")
 	}
+	if err := validateAuditConfig(c.Audit); err != nil {
+		return err
+	}
 	if len(c.Projects) == 0 {
 		return fmt.Errorf("config: at least one [[projects]] entry is required")
 	}
@@ -651,6 +682,42 @@ func (c *Config) validate() error {
 		}
 		if err := validateUsersConfig(prefix, proj.Users); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func validateAuditConfig(cfg AuditConfig) error {
+	enabled := cfg.Enabled != nil && *cfg.Enabled
+	hasPostgres := strings.TrimSpace(cfg.Postgres.DSN) != ""
+	hasMongo := strings.TrimSpace(cfg.MongoDB.URI) != ""
+	if !enabled && !hasPostgres && !hasMongo {
+		return nil
+	}
+	if cfg.TimeoutMs != nil && *cfg.TimeoutMs < 0 {
+		return fmt.Errorf("config: audit.timeout_ms must be >= 0")
+	}
+	if enabled && !hasPostgres && !hasMongo {
+		return fmt.Errorf("config: at least one audit sink must be configured when audit is enabled")
+	}
+	if table := strings.TrimSpace(cfg.Postgres.Table); table != "" && !auditIdentifierPattern.MatchString(table) {
+		return fmt.Errorf("config: audit.postgres.table %q contains invalid characters (allowed: letters, numbers, underscore; must start with a letter or underscore)", cfg.Postgres.Table)
+	}
+	if cfg.Postgres.MaxOpenConns != nil && *cfg.Postgres.MaxOpenConns < 0 {
+		return fmt.Errorf("config: audit.postgres.max_open_conns must be >= 0")
+	}
+	if cfg.Postgres.MaxIdleConns != nil && *cfg.Postgres.MaxIdleConns < 0 {
+		return fmt.Errorf("config: audit.postgres.max_idle_conns must be >= 0")
+	}
+	if cfg.Postgres.ConnMaxLifetimeMins != nil && *cfg.Postgres.ConnMaxLifetimeMins < 0 {
+		return fmt.Errorf("config: audit.postgres.conn_max_lifetime_mins must be >= 0")
+	}
+	if hasMongo {
+		if strings.TrimSpace(cfg.MongoDB.Database) == "" {
+			return fmt.Errorf("config: audit.mongodb.database is required when audit.mongodb.uri is set")
+		}
+		if strings.Contains(cfg.MongoDB.Collection, "\x00") {
+			return fmt.Errorf("config: audit.mongodb.collection must not contain NUL characters")
 		}
 	}
 	return nil
@@ -977,7 +1044,7 @@ func (cfg *Config) ResolveProviderRefs() {
 					"provider_agents", gp.AgentTypes, "project_agent", agentType)
 				continue
 			}
-		resolved = append(resolved, gp.ResolveForAgent(agentType))
+			resolved = append(resolved, gp.ResolveForAgent(agentType))
 		}
 		cfg.Projects[i].Agent.Providers = append(resolved, cfg.Projects[i].Agent.Providers...)
 	}

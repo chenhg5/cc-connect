@@ -10,6 +10,10 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+func boolPtr(v bool) *bool {
+	return &v
+}
+
 func TestConfigValidate(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -181,6 +185,77 @@ func TestConfigValidate(t *testing.T) {
 			if tt.wantErr == "" {
 				if err != nil {
 					t.Fatalf("validate() unexpected error: %v", err)
+				}
+				return
+			}
+			assertErrContains(t, err, tt.wantErr)
+		})
+	}
+}
+
+func TestValidateAuditConfig(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     AuditConfig
+		wantErr string
+	}{
+		{
+			name: "disabled audit without sinks",
+			cfg:  AuditConfig{},
+		},
+		{
+			name: "enabled audit requires at least one sink",
+			cfg: AuditConfig{
+				Enabled: boolPtr(true),
+			},
+			wantErr: `at least one audit sink must be configured when audit is enabled`,
+		},
+		{
+			name: "rejects invalid table name",
+			cfg: AuditConfig{
+				Postgres: AuditPostgresConfig{
+					DSN:   "postgres://demo",
+					Table: "audit-records",
+				},
+			},
+			wantErr: `audit.postgres.table "audit-records" contains invalid characters`,
+		},
+		{
+			name: "accepts postgres sink config",
+			cfg: AuditConfig{
+				Postgres: AuditPostgresConfig{
+					DSN:   "postgres://demo",
+					Table: "audit_records",
+				},
+			},
+		},
+		{
+			name: "mongodb uri requires database",
+			cfg: AuditConfig{
+				MongoDB: AuditMongoDBConfig{
+					URI: "mongodb://localhost:27017",
+				},
+			},
+			wantErr: `audit.mongodb.database is required when audit.mongodb.uri is set`,
+		},
+		{
+			name: "accepts mongodb sink config",
+			cfg: AuditConfig{
+				MongoDB: AuditMongoDBConfig{
+					URI:        "mongodb://localhost:27017",
+					Database:   "cc_connect",
+					Collection: "audit_records",
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateAuditConfig(tt.cfg)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateAuditConfig() unexpected error: %v", err)
 				}
 				return
 			}

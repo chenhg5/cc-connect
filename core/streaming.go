@@ -376,3 +376,25 @@ func (sp *streamPreview) needsDoneReaction() bool {
 	defer sp.mu.Unlock()
 	return sp.previewMsgID != nil && sp.lastSentViaUpdate
 }
+
+// receipt returns an audit receipt for the current preview handle when the
+// platform can translate that handle into a durable delivered-message ID.
+func (sp *streamPreview) receipt() *SendReceipt {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+
+	if sp.previewMsgID == nil {
+		return nil
+	}
+	reporter, ok := sp.platform.(PreviewReceiptProvider)
+	if !ok {
+		return nil
+	}
+	receipt := reporter.PreviewReceipt(sp.previewMsgID)
+	if receipt == nil {
+		return nil
+	}
+	cloned := *receipt
+	cloned.Extra = CloneAuditExtra(receipt.Extra)
+	return &cloned
+}
