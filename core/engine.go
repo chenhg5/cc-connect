@@ -2209,6 +2209,13 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 // getOrCreateWorkspaceAgent returns (or creates) a per-workspace agent and session manager.
 // workspace must be a normalized path (from resolveWorkspace or normalizeWorkspacePath).
 func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionManager, error) {
+	if e == nil || e.workspacePool == nil {
+		// Cron executor path could invoke this on an Engine whose
+		// workspacePool was not initialized; the subsequent
+		// p.mu.Lock() on a nil pool crashed the process with
+		// 'invalid memory address or nil pointer dereference'.
+		return nil, nil, fmt.Errorf("workspace agent unavailable: engine workspace pool is not initialized")
+	}
 	ws := e.workspacePool.GetOrCreate(workspace)
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
