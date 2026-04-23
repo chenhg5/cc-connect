@@ -124,7 +124,7 @@ MiniMax-M2.7 is a next-generation large language model designed for autonomous e
 
 ## 🆕 What’s New in v1.3.0
 
-- **🌐 Web Admin UI (Recommended)** — Full management dashboard embedded in the binary — **no extra dependencies**. Create and edit projects, manage providers, monitor sessions, edit cron jobs, and **chat with your agent directly from the browser**. Supports 5 languages (en/zh/zh-TW/ja/es). We recommend managing cc-connect through the web UI instead of editing `config.toml` by hand. Run `cc-connect web` to open it instantly.
+- **🌐 Web Admin UI (Recommended)** — Full management dashboard embedded in the binary — **no extra dependencies**. Create and edit projects, manage providers, monitor sessions, edit cron jobs, and **chat with your agent directly from the browser**. Supports 5 languages (en/zh/zh-TW/ja/es). We recommend managing cc-connect through the web UI instead of editing `config.toml` by hand. Run `cc-connect web` to configure and open the dashboard, then run `cc-connect` to start the service.
 - **Lifecycle Event Hooks** — New `[[hooks]]` config triggers shell commands or HTTP webhooks on message, session, cron, permission, and error events. Async by default, fail-open.
 - **Skill Management** — New `/skills` page with local skill browser and recommended presets.
 - **Global Provider Management** — Add/edit/delete providers in the web UI; import from cc-switch config.
@@ -251,7 +251,7 @@ make build
 
 ### ⚙️ Configure
 
-> **💡 Tip: Use the Web UI to configure** — After installing, run `cc-connect web` to open the built-in management dashboard. You can visually create projects, add platforms, manage providers, and chat with your agent — no need to manually edit TOML files.
+> **💡 Tip: Use the Web UI to configure** — After installing, run `cc-connect web` to configure the web admin and open the dashboard in your browser. You can visually create projects, add platforms, manage providers, and chat with your agent — no need to manually edit TOML files. **Note:** `cc-connect web` only configures and opens the browser — you still need to run `cc-connect` separately to start the service.
 
 If you prefer manual configuration:
 
