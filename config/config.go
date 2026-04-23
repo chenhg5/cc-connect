@@ -103,6 +103,11 @@ type Config struct {
 	Bridge            BridgeConfig            `toml:"bridge"`
 	Management        ManagementConfig        `toml:"management"`
 	IdleTimeoutMins   *int                    `toml:"idle_timeout_mins,omitempty"` // max minutes between agent events; 0 = no timeout; default 120
+	// WorkspaceIdleTimeoutMins overrides the workspace idle reaper timeout
+	// for all projects running in multi-workspace mode. 0 disables reaping.
+	// A per-project value (ProjectConfig.WorkspaceIdleTimeoutMins) takes
+	// precedence over this global. Default: 15 minutes.
+	WorkspaceIdleTimeoutMins *int `toml:"workspace_idle_timeout_mins,omitempty"`
 }
 
 // CronConfig controls cron job behavior.
@@ -307,7 +312,8 @@ type ProjectConfig struct {
 	AdminFrom            string          `toml:"admin_from,omitempty"`        // comma-separated user IDs allowed to run privileged commands; "*" = all allowed users
 	Users                *UsersConfig    `toml:"users,omitempty"`             // per-user role config; nil = legacy behavior
 	// WorkspaceIdleTimeoutMins overrides the workspace idle reaper timeout for
-	// multi-workspace mode. 0 disables reaping. Default: 15 minutes.
+	// multi-workspace mode, taking precedence over the global
+	// Config.WorkspaceIdleTimeoutMins. 0 disables reaping. Default: 15 minutes.
 	WorkspaceIdleTimeoutMins *int `toml:"workspace_idle_timeout_mins,omitempty"`
 	// Quiet is legacy per-project override; see Config.Quiet. When true and global [display]
 	// omits thinking_messages / tool_messages, those default to off for this project.

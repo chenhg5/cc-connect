@@ -2432,9 +2432,20 @@ func (e *Engine) closeAgentSessionWithTimeout(sessionKey string, agentSession Ag
 
 const defaultEventIdleTimeout = 2 * time.Hour
 
+// unsolicitedReaderStopTimeout bounds how long stopUnsolicitedReader waits
+// for the reader goroutine to exit. The reader is structured so its iterations
+// are short (blocking adapter calls like RespondPermission are offloaded), so
+// this timeout should almost always be non-binding. If it does fire, callers
+// force a resync of the Events channel to preserve single-reader correctness.
+const unsolicitedReaderStopTimeout = 5 * time.Second
+
 // stopUnsolicitedReader cancels any running unsolicited reader goroutine and
-// waits (bounded) for it to exit, ensuring exclusive ownership of the Events
-// channel before a foreground turn begins.
+// waits (bounded) for it to exit. If the reader does not exit in time, the
+// caller is responsible for draining/resyncing the Events channel before a
+// new foreground turn reads from it — we set eventsNeedResync here so that
+// any downstream consumer drains before resuming. We do NOT wait unbounded:
+// some callers hold interactiveMu, and a reader stuck in a blocking adapter
+// call would stall unrelated sessions.
 func (e *Engine) stopUnsolicitedReader(state *interactiveState) {
 	state.mu.Lock()
 	cancel := state.unsolicitedCancel
@@ -2447,17 +2458,21 @@ func (e *Engine) stopUnsolicitedReader(state *interactiveState) {
 		return
 	}
 	cancel()
-	if done != nil {
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			slog.Warn("unsolicited reader stop timed out")
-			// Force resync so the foreground turn drains any stale events
-			// the old reader may not have fully consumed.
-			state.mu.Lock()
-			state.eventsNeedResync = true
-			state.mu.Unlock()
-		}
+	if done == nil {
+		return
+	}
+	select {
+	case <-done:
+	case <-time.After(unsolicitedReaderStopTimeout):
+		slog.Warn("unsolicited reader stop timed out; forcing resync",
+			"timeout", unsolicitedReaderStopTimeout)
+		// Force the next foreground turn to drain Events() defensively.
+		// The old reader may still be alive; its ctx-double-check will drop
+		// any event read after cancellation, so concurrent consumers cannot
+		// silently steal foreground events.
+		state.mu.Lock()
+		state.eventsNeedResync = true
+		state.mu.Unlock()
 	}
 }
 
@@ -2500,6 +2515,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 	}()
 
 	var textParts []string
+	var toolsUsed []string
 
 	for {
 		select {
@@ -2511,11 +2527,37 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 
 		case event, ok := <-events:
 			if !ok {
-				// Channel closed — agent process exited.
+				// Channel closed — agent process exited. Log any buffered
+				// tool/text context so it isn't lost silently.
+				if len(toolsUsed) > 0 || len(textParts) > 0 {
+					slog.Warn("unsolicited reader: agent channel closed mid-turn",
+						"session", sessionKey,
+						"tools_used", toolsUsed,
+						"text_fragments", len(textParts))
+				}
 				state.mu.Lock()
 				state.eventsNeedResync = true
 				state.mu.Unlock()
 				return
+			}
+
+			// Go's select is non-deterministic when multiple cases are
+			// ready, so even after ctx is cancelled we may still read one
+			// last event from the channel. If ownership has been handed
+			// off, drop the event rather than processing it — otherwise we
+			// could relay (or worse, respond to) an event that belongs to
+			// the incoming foreground turn. The caller has already set
+			// eventsNeedResync on timeout, so any buffered events will be
+			// drained before the foreground turn reads them.
+			select {
+			case <-ctx.Done():
+				slog.Warn("unsolicited reader: event received after cancellation, dropping",
+					"session", sessionKey, "event_type", event.Type)
+				state.mu.Lock()
+				state.eventsNeedResync = true
+				state.mu.Unlock()
+				return
+			default:
 			}
 
 			// Mark workspace active on first event.
@@ -2542,10 +2584,21 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				}
 
 			case EventToolUse:
-				// Accumulate tool info silently; output will come in EventResult.
+				// Record tool name so we can log or surface context if the
+				// channel closes before a clean EventResult. Output is
+				// delivered via EventResult; we intentionally do not relay
+				// per-tool progress here (no active user turn to observe it).
+				if event.ToolName != "" {
+					toolsUsed = append(toolsUsed, event.ToolName)
+				}
+				slog.Debug("unsolicited tool use",
+					"session", sessionKey,
+					"tool", event.ToolName)
 
 			case EventToolResult:
-				// Accumulate tool results silently.
+				slog.Debug("unsolicited tool result",
+					"session", sessionKey,
+					"status", event.ToolStatus)
 
 			case EventResult:
 				fullResponse := event.Content
@@ -2562,11 +2615,19 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 					}
 				}
 
+				// Safety note: concurrent writes to session.History by the
+				// unsolicited reader and a foreground turn cannot overlap.
+				// Session.AddHistory takes session.mu internally, and
+				// stopUnsolicitedReader (called before any foreground turn
+				// takes event-channel ownership) blocks until this goroutine
+				// exits — so a foreground AddHistory is always ordered after
+				// any unsolicited AddHistory.
 				session.AddHistory("assistant", fullResponse)
 				sessions.Save()
 
 				// Reset for potential subsequent unsolicited turn.
 				textParts = nil
+				toolsUsed = nil
 				turnActive = false
 				if workspaceDir != "" && e.workspacePool != nil {
 					if ws := e.workspacePool.Get(workspaceDir); ws != nil {
@@ -2584,9 +2645,13 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 					"response_len", len(fullResponse))
 
 			case EventPermissionRequest:
-				// Auto-approve in unsolicited context (agent is running
-				// autonomously). If approveAll is set, grant; otherwise deny
-				// since there is no user actively watching.
+				// If approveAll (/yolo) is set, grant the request. Otherwise
+				// deny — there is no active user turn to consult — and notify
+				// the user on the platform so a silently blocked background
+				// task is not invisible. RespondPermission may make a slow
+				// adapter call, so we run it in a detached goroutine to keep
+				// reader iterations fast (stopUnsolicitedReader relies on a
+				// bounded wait for the reader to exit).
 				state.mu.Lock()
 				autoApprove := state.approveAll
 				state.mu.Unlock()
@@ -2595,8 +2660,19 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				if autoApprove {
 					result = PermissionResult{Behavior: "allow", UpdatedInput: event.ToolInputRaw}
 				}
-				if err := state.agentSession.RespondPermission(event.RequestID, result); err != nil {
-					slog.Error("unsolicited: failed to respond permission", "error", err)
+				agentSession := state.agentSession
+				reqID := event.RequestID
+				go func() {
+					if err := agentSession.RespondPermission(reqID, result); err != nil {
+						slog.Error("unsolicited: failed to respond permission", "error", err)
+					}
+				}()
+				if !autoApprove {
+					toolName := event.ToolName
+					if toolName == "" {
+						toolName = "(unknown)"
+					}
+					e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgBackgroundAutoDenied), toolName))
 				}
 
 			case EventError:

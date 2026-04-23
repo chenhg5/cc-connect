@@ -258,8 +258,13 @@ func main() {
 			}
 			bindingStore := filepath.Join(cfg.DataDir, "workspace_bindings.json")
 			engine.SetMultiWorkspace(baseDir, bindingStore)
-			if proj.WorkspaceIdleTimeoutMins != nil {
-				mins := *proj.WorkspaceIdleTimeoutMins
+			// Per-project value takes precedence over the global.
+			idleMins := proj.WorkspaceIdleTimeoutMins
+			if idleMins == nil {
+				idleMins = cfg.WorkspaceIdleTimeoutMins
+			}
+			if idleMins != nil {
+				mins := *idleMins
 				if mins <= 0 {
 					engine.SetWorkspaceIdleTimeout(0)
 				} else {
