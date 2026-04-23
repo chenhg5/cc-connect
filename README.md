@@ -34,6 +34,79 @@
 </p>
 
 
+## ❤️ Sponsor
+
+> Want to appear here? Contact: chg80333@gmail.com | WeChat: mongorz
+
+<details open>
+<summary>Sponsors</summary>
+
+[![MiniMax](assets/banners/minimax-en.jpeg)](https://platform.minimax.io/subscribe/token-plan?code=lqYrKBvjke&source=link)
+
+MiniMax-M2.7 is a next-generation large language model designed for autonomous evolution and real-world productivity. Unlike traditional models, M2.7 actively participates in its own improvement through agent teams, dynamic tool use, and reinforcement learning loops. It delivers strong performance in software engineering (56.22% on SWE-Pro, 55.6% on VIBE-Pro, 57.0% on Terminal Bench 2) and excels in complex office workflows, achieving a leading 1495 ELO on GDPval-AA. With high-fidelity editing across Word, Excel, and PowerPoint, and a 97% adherence rate across 40+ complex skills, M2.7 sets a new standard for building AI-native workflows and organizations.
+
+[Click here](https://platform.minimax.io/subscribe/token-plan?code=lqYrKBvjke&source=link) to get an exclusive 12% off the MiniMax Token Plan + voucher for cc-connect users!
+
+---
+
+<table>
+<tr>
+<td width="150"><a href="https://aigocode.com/invite/CYY3C85C"><img src="assets/sponsors/aigocode.png" alt="AIGoCode" width="120"></a></td>
+<td>Thanks to AIGoCode for sponsoring this project! AIGoCode is an all-in-one platform that integrates Claude Code, Codex, and the latest Gemini models, providing you with stable, efficient, and highly cost-effective AI coding services. The platform offers flexible subscription plans, zero risk of account suspension, direct access with no VPN required, and lightning-fast responses. AIGoCode has prepared a special benefit for cc-connect users: if you register via <a href="https://aigocode.com/invite/CYY3C85C">this link</a>, you'll receive an extra 10% bonus credit on your first top-up!</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://aihubmix.com/?aff=mGTx"><img src="assets/sponsors/aihubmix.png" alt="AIHubMix" width="120"></a> <b>AIHubMix</b></td>
+<td>Thanks to AIHubMix for sponsoring this project! AIHubMix offers deep integration with 500+ global models including OpenAI, Claude, Gemini, Qwen, DeepSeek, Kimi. Unlimited concurrency, production-grade stability on Google Cloud. One API Key drives all your Agents with native OpenAI/Anthropic/Gemini format support — zero code changes. Pay-as-you-go pricing aligned with official providers, plus free models like coding-glm-5.1-free. <a href="https://aihubmix.com/?aff=mGTx">Click here to sign up!</a></td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://nekocode.ai/?aff=CC-CONNECT"><img src="assets/sponsors/nekocode.jpg" alt="NekoCode" width="120"></a></td>
+<td>Thanks to NekoCode for sponsoring this project! NekoCode provides reliable, stable, and efficient API relay services for Claude and CodeX with transparent pricing. Exclusive 10% discount for cc-connect users with promo code: CC-CONNECT. High-value, stable AI model access for developers. Register via <a href="https://nekocode.ai/?aff=CC-CONNECT">this link</a>.</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://www.dmxapi.cn/register?aff=NDln"><img src="assets/sponsors/dmx-en.jpg" alt="DMXAPI" width="120"></a></td>
+<td>Thanks to DMXAPI for sponsoring this project! DMXAPI provides global large model API services to 200+ enterprise users. One API key for all global models. Features include: instant invoicing, unlimited concurrency, starting from $0.15, 24/7 technical support. GPT/Claude/Gemini all at 32% off, domestic models 20-50% off, Claude Code exclusive models at 66% off! Register via <a href="https://www.dmxapi.cn/register?aff=NDln">this link</a>.</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://www.shengsuanyun.com/?from=CH_67XCLZGS"><img src="assets/sponsors/shengsuanyun.svg" alt="Shengsuanyun" width="120"></a></td>
+<td>Thanks to Shengsuanyun for sponsoring this project! Shengsuanyun is a super factory dedicated to serving AI Native Teams, an industrial-grade AI task parallel execution platform, and a model marketplace that aggregates and supplies computing power from domestic and international LLM and image/video multimedia models such as Claude, Chatgpt, and Gemini. It guarantees no reverse engineering or data manipulation, boasts a 99.7% SLA availability across the entire site, and its <a href="https://watch.shengsuanyun.com/status/shengsuanyun">monitoring interface</a> is consistently green. Furthermore, it offers an enterprise-grade customized gateway for refined cost and access control, featuring intelligent routing, security protection, and BYOK enterprise-provided key hosting. The platform is billed on a pay-as-you-go basis and with a tokens plan (coming soon), and invoices are available. New users who register using <a href="https://www.shengsuanyun.com/?from=CH_67XCLZGS">this link</a> will receive 10 yuan in model power and a 10% bonus on their first deposit.</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://www.aicodemirror.com/register?invitecode=KDHMUP"><img src="assets/sponsors/aicodemirror.jpg" alt="AICodeMirror" width="120"></a></td>
+<td>Thanks to AICodeMirror for sponsoring this project! AICodeMirror provides official high-stability relay services for Claude Code / Codex / Gemini CLI, with enterprise-grade concurrency, fast invoicing, and 24/7 dedicated technical support. Claude Code / Codex / Gemini official channels at 38% / 2% / 9% of original price, with extra discounts on top-ups! AICodeMirror offers special benefits for CC users: register via <a href="https://www.aicodemirror.com/register?invitecode=KDHMUP">this link</a> to enjoy 20% off your first top-up, and enterprise customers can get up to 25% off!</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://code0.ai/register?aff=5cGO"><img src="assets/sponsors/code0.svg" alt="Code0" width="120"></a></td>
+<td>Thanks to Code0 for sponsoring this project! Code0 is an AI model aggregation API relay service for Chinese developers, compatible with OpenAI / Anthropic / Gemini protocols. One key for all mainstream models, stable support for Claude Code, Codex, Gemini CLI, cc-connect and more. Fixed exchange rate: ¥1.5 CNY = $1 USD API credit, transparent pricing, domestic direct connection, ready to use. Register via <a href="https://code0.ai/register?aff=5cGO">this link</a>.</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://coder.visioncoder.cn"><img src="assets/sponsors/visioncoder.png" alt="VisionCoder" width="120"></a></td>
+<td>Thanks to VisionCoder for supporting this project. <a href="https://coder.visioncoder.cn">VisionCoder Developer Platform</a> is a reliable and efficient API relay service provider, offering access to mainstream AI models such as Claude Code, Codex, and Gemini. It helps developers and teams integrate AI capabilities more easily and improve productivity. VisionCoder is also offering our users a limited-time <a href="https://coder.visioncoder.cn">Token Plan</a> promotion: buy 1 month and get 1 month free.</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://console.claudeapi.com/register?aff=GDbA"><img src="assets/sponsors/claudeapi.svg" alt="claudeapi.com" width="120"></a></td>
+<td>Thanks to claudeapi.com for sponsoring this project! claudeapi is a high-quality direct Claude connection service for mid-to-high-end users. It is fully integrated with Anthropic's official first-party Keys and AWS Bedrock official channels — no reverse engineering, no intelligence degradation, no stitching. It fully preserves the official capabilities, long context, and tool-calling performance of Opus / Sonnet / Haiku. Designed specifically for Claude Code power users, Agent developers, and enterprise teams, it focuses on out-of-the-box usability and enterprise-grade stability. Invoicing and team onboarding are supported. Register via <a href="https://console.claudeapi.com/register?aff=GDbA">this link</a>.</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://ddshub.short.gy/ccconnect"><img src="assets/sponsors/ddshub.png" alt="DDS Hub" width="120"></a></td>
+<td>Thanks to DDS for sponsoring this project! DDS Hub is a reliable and high-performance Claude and CodeX API proxy service. We provides cost-effective domestic Claude direct acceleration services for both individual and enterprise users. We offer stable and low-latency Claude Max number pools, with full support for Claude Haiku, Opus, Sonnet, GPT 5.4 and other flagship models. Invoices are available for recharges of 1000 RMB or more. Enterprise customers can also enjoy customized grouping and dedicated technical support services. Exclusive benefit for CC connect users: Register via <a href="https://ddshub.short.gy/ccconnect">this link</a> and enjoy an extra 10% credit on your first recharge (please contact the group admin to claim after recharging)!</td>
+</tr>
+</table>
+
+</details>
+
+---
+
+<br>
+
 <p align="center">
   <b>Control your local AI agents from any chat app. Anywhere, anytime.</b>
 </p>
@@ -49,43 +122,42 @@
 </p>
 
 
-## 🆕 What's New (beta)
+## 🆕 What’s New in v1.3.0
 
-> These highlights are in **beta / pre-release** builds — install [`cc-connect@beta`](https://www.npmjs.com/package/cc-connect?activeTab=versions) or grab a [pre-release](https://github.com/chenhg5/cc-connect/releases) binary. They are **not** in the default **stable** release yet; details may change before promotion to stable.
-
+- **🌐 Web Admin UI (Recommended)** — Full management dashboard embedded in the binary — **no extra dependencies**. Create and edit projects, manage providers, monitor sessions, edit cron jobs, and **chat with your agent directly from the browser**. Supports 5 languages (en/zh/zh-TW/ja/es). We recommend managing cc-connect through the web UI instead of editing `config.toml` by hand. Run `cc-connect web` to configure and open the dashboard, then run `cc-connect` to start the service.
+- **Lifecycle Event Hooks** — New `[[hooks]]` config triggers shell commands or HTTP webhooks on message, session, cron, permission, and error events. Async by default, fail-open.
+- **Skill Management** — New `/skills` page with local skill browser and recommended presets.
+- **Global Provider Management** — Add/edit/delete providers in the web UI; import from cc-switch config.
 - **Personal WeChat** — Chat with your local agent from **Weixin (personal)** via ilink long-polling; QR `weixin setup`, CDN media, no public IP. *[Setup → `docs/weixin.md`](docs/weixin.md)*
-- **Auto-compress** — When the session estimate blows past your threshold, cc-connect can trim context so long threads keep working instead of silently falling over.
-- **Friendlier `--continue`** — Fork-on-continue so your bridge session doesn’t inherit a half-finished CLI terminal session by accident.
-- **Cron with boundaries** — Run jobs in a **fresh session** each time and cap **per-job timeouts** so runaway tasks don’t wedge the bot.
-- **Richer platforms** — e.g. **Discord** `@everyone` / `@here`, **Telegram** voice-style replies, **Feishu** fixes for reply threading and async dispatch.
+- **Weibo DM** — Chat with your agent via **Weibo private messages** over WebSocket; no public IP needed, text streaming supported.
+- **Feishu Enhancements** — Auto-resolve `@name` mentions, multi-level reply chain recognition, done-emoji reactions.
+- **New Agents** — Kimi CLI and Pi agent support added.
 
 
 ## 🧩 Platform feature snapshot
 
-High-level view of what each **built-in platform** can do in cc-connect. Inspired by [OpenClaw China’s feature matrix](https://github.com/BytePioneer-AI/openclaw-china#功能支持) — handy for comparing channels at a glance.
+High-level view of what each **built-in platform** can do in cc-connect.
 
 **Legend**
 
 | Symbol | Meaning |
 |--------|---------|
 | ✅ | Works in **stable** cc-connect with typical configuration |
-| ✅（beta） | **Beta / pre-release only** — the **Weixin (personal)** column: install [`cc-connect@beta`](https://www.npmjs.com/package/cc-connect?activeTab=versions) or a [pre-release binary](https://github.com/chenhg5/cc-connect/releases); **not** in the default stable npm build yet |
 | ⚠️ | Partial, needs extra config (e.g. speech / ASR), or limited by the vendor app or API |
 | ❌ | Not supported or not applicable in practice |
 
 † **QQ (NapCat / OneBot)** — unofficial self-hosted bridge; behaviour depends on your NapCat / network setup.
 
-| Capability | Feishu | DingTalk | Telegram | Slack | Discord | LINE | WeCom | **Weixin**<br>*(personal)* | QQ† | QQ Bot |
-|------------|:------:|:--------:|:--------:|:-----:|:-------:|:----:|:-----:|:-------------------------:|:---:|:------:|
-| Text & slash commands | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅（beta） | ✅ | ✅ |
-| Markdown / cards | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ✅（beta） | ✅ | ✅ |
-| Streaming / chunked replies | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅（beta） | ✅ | ✅ |
-| Images & files | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ✅（beta） | ✅ | ✅ |
-| Voice / STT / TTS | ⚠️ | ⚠️ | ✅ | ⚠️ | ⚠️ | ❌ | ⚠️ | ✅（beta） | ⚠️ | ⚠️ |
-| Private (DM) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅（beta） | ✅ | ✅ |
-| Group / channel | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ✅（beta） | ✅ | ✅ |
+| Capability | Feishu | DingTalk | Telegram | Slack | Discord | LINE | WeCom | Weibo | **Weixin**<br>*(personal)* | QQ† | QQ Bot |
+|------------|:------:|:--------:|:--------:|:-----:|:-------:|:----:|:-----:|:-----:|:-------------------------:|:---:|:------:|
+| Text & slash commands | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Markdown / cards | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ❌ | ✅ | ✅ | ✅ |
+| Streaming / chunked replies | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Images & files | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ❌ | ✅ | ✅ | ✅ |
+| Voice / STT / TTS | ⚠️ | ⚠️ | ✅ | ⚠️ | ⚠️ | ❌ | ⚠️ | ❌ | ✅ | ⚠️ | ⚠️ |
+| Private (DM) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Group / channel | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ❌ | ✅ | ✅ | ✅ |
 
-> **Weixin column:** every **✅（beta）** means “available only when you run a **beta / pre-release** build,” not a statement that the feature is incomplete — the whole **personal WeChat (ilink)** channel is still **pre-stable**.  
 > **WeCom:** Webhook mode needs a **public URL**; long-connection / WS style setups often do not.  
 > **Voice row:** many platforms need `[speech]` / TTS providers enabled in `config.toml`; values are a best-effort summary.  
 > Per-platform setup: [Platform setup guides](#-platform-setup-guides) below.
@@ -94,10 +166,10 @@ High-level view of what each **built-in platform** can do in cc-connect. Inspire
 ## ✨ Why cc-connect?
 
 ### 🤖 Universal Agent Support
-**7 AI Agents** — Claude Code, Codex, Cursor Agent, Qoder CLI, Gemini CLI, OpenCode, iFlow CLI. Use whichever fits your workflow, or all of them at once.
+**10+ AI Agents** — Claude Code, Codex, Cursor Agent, Kimi CLI, Qoder CLI, Gemini CLI, OpenCode, iFlow CLI, Pi, Devin — plus any agent that supports the [Agent Client Protocol (ACP)](https://agentclientprotocol.com/get-started/agents). Use whichever fits your workflow, or all of them at once.
 
 ### 📱 Platform Flexibility
-**10 Chat Platforms** — Feishu, DingTalk, Slack, Telegram, Discord, WeChat Work, LINE, QQ, QQ Bot (Official), plus **Weixin (personal ilink)** for **personal WeChat**. *Personal WeChat is **beta / pre-release only*** — install [`cc-connect@beta`](https://www.npmjs.com/package/cc-connect?activeTab=versions) or a [GitHub pre-release](https://github.com/chenhg5/cc-connect/releases) binary; the default **stable** npm package does **not** ship the `weixin` platform yet. Most platforms need **zero public IP**.
+**11 Chat Platforms** — Feishu, DingTalk, Slack, Telegram, Discord, WeChat Work, Weibo, LINE, QQ, QQ Bot (Official), plus **Weixin (personal ilink)** for **personal WeChat**. Most platforms need **zero public IP**.
 
 ### 🔄 Multi-Agent Orchestration
 **Multi-Bot Relay** — Bind multiple bots in a group chat and let them communicate with each other. Ask Claude, get insights from Gemini — all in one conversation.
@@ -149,14 +221,14 @@ Follow https://raw.githubusercontent.com/chenhg5/cc-connect/refs/heads/main/INST
 **Via npm:**
 
 ```bash
-# Stable version
 npm install -g cc-connect
-
-# Beta version (more features, may be unstable)
-npm install -g cc-connect@beta
 ```
 
-> **Personal WeChat (Weixin ilink):** only available in **beta / pre-release** builds (`cc-connect@beta` or a prerelease asset under [Releases](https://github.com/chenhg5/cc-connect/releases)). **Stable** `npm install -g cc-connect` does **not** include this platform until it graduates from beta.
+**Via Homebrew (macOS / Linux):**
+
+```bash
+brew install cc-connect
+```
 
 **Download binary from [GitHub Releases](https://github.com/chenhg5/cc-connect/releases):**
 
@@ -166,8 +238,6 @@ curl -L -o cc-connect https://github.com/chenhg5/cc-connect/releases/latest/down
 chmod +x cc-connect
 sudo mv cc-connect /usr/local/bin/
 
-# Beta version (from pre-release)
-curl -L -o cc-connect https://github.com/chenhg5/cc-connect/releases/download/v1.x.x-beta/cc-connect-linux-amd64
 ```
 
 **Build from source (requires Go 1.22+):**
@@ -180,6 +250,10 @@ make build
 
 
 ### ⚙️ Configure
+
+> **💡 Tip: Use the Web UI to configure** — After installing, run `cc-connect web` to configure the web admin and open the dashboard in your browser. You can visually create projects, add platforms, manage providers, and chat with your agent — no need to manually edit TOML files. **Note:** `cc-connect web` only configures and opens the browser — you still need to run `cc-connect` separately to start the service.
+
+If you prefer manual configuration:
 
 ```bash
 mkdir -p ~/.cc-connect
@@ -204,9 +278,12 @@ When a user runs `/dir reset`, cc-connect restores the configured `work_dir` and
 # npm
 npm install -g cc-connect
 
+# Homebrew
+brew upgrade cc-connect
+
 # Binary self-update
 cc-connect update           # Stable
-cc-connect update --pre     # Beta (includes pre-releases)
+cc-connect update --pre     # Include pre-releases
 ```
 
 
@@ -221,6 +298,10 @@ cc-connect update --pre     # Beta (includes pre-releases)
 | Agent | Qoder CLI | ✅ Supported |
 | Agent | OpenCode (Crush) | ✅ Supported |
 | Agent | iFlow CLI | ✅ Supported |
+| Agent | Kimi CLI (Moonshot) | ✅ Supported |
+| Agent | Pi (Cursor Background Agent) | ✅ Supported |
+| Agent | ACP (Agent Client Protocol) | ✅ Any [ACP-compatible agent](https://agentclientprotocol.com/get-started/agents) |
+| Agent | Devin (Cognition) | ✅ Supported (via ACP) |
 | Agent | Goose (Block) | 🔜 Planned |
 | Agent | Aider | 🔜 Planned |
 | Platform | Feishu (Lark) | ✅ WebSocket — no public IP needed |
@@ -228,10 +309,11 @@ cc-connect update --pre     # Beta (includes pre-releases)
 | Platform | Telegram | ✅ Long Polling — no public IP needed |
 | Platform | Slack | ✅ Socket Mode — no public IP needed |
 | Platform | Discord | ✅ Gateway — no public IP needed |
+| Platform | Weibo | ✅ WebSocket — no public IP needed |
 | Platform | LINE | ✅ Webhook — public URL required |
 | Platform | WeChat Work | ✅ WebSocket / Webhook |
-| Platform | Weixin (personal, ilink) | ✅（beta）— HTTP long polling — no public IP needed |
-| Platform | QQ (NapCat/OneBot) | ✅ WebSocket — Beta |
+| Platform | Weixin (personal, ilink) | ✅— HTTP long polling — no public IP needed |
+| Platform | QQ (NapCat/OneBot) | ✅ WebSocket |
 | Platform | QQ Bot (Official) | ✅ WebSocket — no public IP needed |
 
 
@@ -244,8 +326,9 @@ cc-connect update --pre     # Beta (includes pre-releases)
 | Telegram | [docs/telegram.md](docs/telegram.md) | Long Polling | No |
 | Slack | [docs/slack.md](docs/slack.md) | Socket Mode | No |
 | Discord | [docs/discord.md](docs/discord.md) | Gateway | No |
+| Weibo | [docs/weibo.md](docs/weibo.md) | WebSocket | No |
 | WeChat Work | [docs/wecom.md](docs/wecom.md) | WebSocket / Webhook | No (WS) / Yes (Webhook) |
-| Weixin (personal) | [docs/weixin.md](docs/weixin.md) | HTTP long polling (ilink) — **beta only** | No |
+| Weixin (personal) | [docs/weixin.md](docs/weixin.md) | HTTP long polling (ilink) | No |
 | QQ / QQ Bot | [docs/qq.md](docs/qq.md) | WebSocket | No |
 
 
@@ -405,25 +488,6 @@ Notes:
 
 - [Discord](https://discord.gg/kHpwgaM4kq)
 - [Telegram](https://t.me/+odGNDhCjbjdmMmZl)
-
-
-## ❤️ Sponsor
-
-> Want to appear here? Contact us: **Email**: chg80333@gmail.com | **WeChat**: mongorz | [Telegram](https://t.me/+odGNDhCjbjdmMmZl) | [Discord](https://discord.gg/kHpwgaM4kq)
-
-<details open>
-<summary>Sponsors</summary>
-
-<!-- Sponsor slot available - contact us to become a sponsor -->
-
-<table>
-<tr>
-<td width="180"><a href="#"><img src="docs/images/sponsors/placeholder.svg" alt="Your Logo Here" width="150"></a></td>
-<td>Become a sponsor! We offer exclusive benefits for our users. Contact us to learn more about sponsorship opportunities.</td>
-</tr>
-</table>
-
-</details>
 
 
 ## ☕ Support the Project

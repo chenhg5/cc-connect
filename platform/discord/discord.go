@@ -425,10 +425,10 @@ func (p *Platform) RegisterCommands(commands []core.BotCommandInfo) error {
 		})
 	}
 
-	// Limit to 200 commands
-	if len(cmds) > 200 {
-		cmds = cmds[:200]
-		slog.Warn("discord: commands > 200, truncate")
+	// Discord allows max 100 commands per bulk overwrite (guild or global).
+	if len(cmds) > 100 {
+		slog.Warn("discord: truncating commands to Discord limit of 100", "total", len(cmds), "dropped", len(cmds)-100)
+		cmds = cmds[:100]
 	}
 
 	if len(cmds) == 0 {
@@ -551,6 +551,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 
 		var images []core.ImageAttachment
 		var audio *core.AudioAttachment
+		var files []core.FileAttachment
 		for _, att := range m.Attachments {
 			ct := strings.ToLower(att.ContentType)
 			if strings.HasPrefix(ct, "audio/") {
@@ -575,10 +576,19 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 				images = append(images, core.ImageAttachment{
 					MimeType: att.ContentType, Data: data, FileName: att.Filename,
 				})
+			} else {
+				data, err := downloadURL(att.URL)
+				if err != nil {
+					slog.Error("discord: download file attachment failed", "url", att.URL, "error", err)
+					continue
+				}
+				files = append(files, core.FileAttachment{
+					MimeType: att.ContentType, Data: data, FileName: att.Filename,
+				})
 			}
 		}
 
-		if m.Content == "" && len(images) == 0 && audio == nil {
+		if m.Content == "" && len(images) == 0 && audio == nil && len(files) == 0 {
 			return
 		}
 
@@ -587,7 +597,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 			MessageID: m.ID,
 			UserID:    m.Author.ID, UserName: m.Author.Username,
 			ChatName: p.resolveChannelName(m.ChannelID),
-			Content:  m.Content, Images: images, Audio: audio, ReplyCtx: rctx,
+			Content:  m.Content, Images: images, Files: files, Audio: audio, ReplyCtx: rctx,
 		}
 		p.dispatchMessage(msg)
 	})
@@ -782,7 +792,7 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 // mechanism. The first call edits the deferred "thinking" response; subsequent
 // calls create followup messages.
 func (p *Platform) sendInteraction(ictx *interactionReplyCtx, content string) error {
-	chunks := core.SplitMessageCodeFenceAware(content, maxDiscordLen)
+	chunks := core.SplitMessageCodeFenceAware(wrapTablesInCodeBlocks(content), maxDiscordLen)
 	for _, chunk := range chunks {
 		ictx.mu.Lock()
 		first := !ictx.firstDone
@@ -811,7 +821,7 @@ func (p *Platform) sendInteraction(ictx *interactionReplyCtx, content string) er
 }
 
 func (p *Platform) sendChannelReply(rc replyContext, content string) error {
-	chunks := core.SplitMessageCodeFenceAware(content, maxDiscordLen)
+	chunks := core.SplitMessageCodeFenceAware(wrapTablesInCodeBlocks(content), maxDiscordLen)
 	for _, chunk := range chunks {
 		var err error
 		if rc.useThreadChannel() || rc.messageID == "" {
@@ -828,7 +838,7 @@ func (p *Platform) sendChannelReply(rc replyContext, content string) error {
 }
 
 func (p *Platform) sendChannel(rc replyContext, content string) error {
-	chunks := core.SplitMessageCodeFenceAware(content, maxDiscordLen)
+	chunks := core.SplitMessageCodeFenceAware(wrapTablesInCodeBlocks(content), maxDiscordLen)
 	for _, chunk := range chunks {
 		_, err := p.session.ChannelMessageSend(rc.targetChannelID(), chunk)
 		if err != nil {
@@ -1258,6 +1268,8 @@ func (p *Platform) resolveBotRoleIDForGuild(s *discordgo.Session, guildID string
 	return "", nil
 }
 
+const maxDownloadBytes = 50 << 20 // 50 MiB
+
 func downloadURL(u string) ([]byte, error) {
 	resp, err := core.HTTPClient.Get(u)
 	if err != nil {
@@ -1267,5 +1279,5 @@ func downloadURL(u string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("download %s: status %d", u, resp.StatusCode)
 	}
-	return io.ReadAll(resp.Body)
+	return io.ReadAll(io.LimitReader(resp.Body, maxDownloadBytes+1))
 }

@@ -399,13 +399,6 @@ func (a *Agent) storePersistentModelCache(snapshot opencodeModelDiscoverySnapsho
 	return nil
 }
 
-// discoverModels runs `<cmd> models` and parses stdout line-by-line into a
-// normalized slice of ModelOption.
-// Returns nil if the command fails, times out, or produces no usable output.
-func (a *Agent) discoverModels(ctx context.Context) []core.ModelOption {
-	return a.discoverModelsWithSnapshot(ctx, a.modelDiscoverySnapshot())
-}
-
 func (a *Agent) discoverModelsWithSnapshot(ctx context.Context, snapshot opencodeModelDiscoverySnapshot) []core.ModelOption {
 	c := exec.CommandContext(ctx, snapshot.cmd, "models")
 	c.Dir = snapshot.workDir

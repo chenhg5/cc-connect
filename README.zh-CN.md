@@ -34,6 +34,79 @@
 </p>
 
 
+## ❤️ 赞助
+
+> 想在这里展示？联系：chg80333@gmail.com | 微信：mongorz
+
+<details open>
+<summary>赞助商</summary>
+
+[![MiniMax](assets/banners/minimax-zh.jpeg)](https://platform.minimaxi.com/subscribe/token-plan?code=HAvthxk1tT&source=link)
+
+MiniMax M2.7 是 MiniMax 首个深度参与自我迭代的模型，可自主构建复杂 Agent Harness，并基于 Agent Teams、复杂 Skills、Tool Search Tool 等能力完成高复杂度生产力任务；其在软件工程、端到端项目交付及办公场景中表现优异，多项评测接近行业领先水平，同时具备稳定的复杂任务执行、环境交互能力以及良好的情商与身份保持能力。
+
+[点击此处](https://platform.minimaxi.com/subscribe/token-plan?code=HAvthxk1tT&source=link)享 MiniMax Token Plan 专属 88 折优惠 + cc-connect 用户专属代金券！
+
+---
+
+<table>
+<tr>
+<td width="150"><a href="https://aigocode.com/invite/CYY3C85C"><img src="assets/sponsors/aigocode.png" alt="AIGoCode" width="120"></a></td>
+<td>感谢 AIGoCode 对本项目的赞助！AIGoCode 是集 Claude Code、Codex、最新 Gemini 模型于一体的一站式平台，提供稳定高效、高性价比的 AI 编码服务。灵活订阅方案、零封号风险、无需 VPN 直连、响应速度极快。通过 <a href="https://aigocode.com/invite/CYY3C85C">此链接</a> 注册，首充额外获得 10% 赠送额度！</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://aihubmix.com/?aff=mGTx"><img src="assets/sponsors/aihubmix.png" alt="AIHubMix" width="120"></a> <b>AIHubMix</b></td>
+<td>感谢 AIHubMix 赞助本项目！500+ 模型一站式覆盖（Claude/GPT/Gemini/Qwen/DeepSeek/通义等），无限并发，谷歌云集群稳定运行。一个 API Key 驱动全部 Agent，支持 OpenAI/Anthropic/Gemini 三种原生格式，代码零改动迁移。按量计费对齐原厂，含免费模型。通过 <a href="https://aihubmix.com/?aff=mGTx">此链接</a> 注册。</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://nekocode.ai/?aff=CC-CONNECT"><img src="assets/sponsors/nekocode.jpg" alt="NekoCode" width="120"></a></td>
+<td>感谢 NekoCode 赞助本项目！NekoCode 提供 Claude 和 CodeX 的可靠稳定高效的 API 中转站，价格透明。NekoCode 为 CC-CONNECT 用户专属 9 折福利码：CC-CONNECT，为开发者提供高性价比稳定的 AI 模型接入服务。通过 <a href="https://nekocode.ai/?aff=CC-CONNECT">此链接</a> 注册。</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://www.dmxapi.cn/register?aff=NDln"><img src="assets/sponsors/dmx-zh.jpeg" alt="DMXAPI" width="120"></a></td>
+<td>感谢 DMXAPI（大模型API）赞助本项目！DMXAPI，一个 Key 用全球大模型。为 200+ 企业用户提供全球大模型 API 服务。充值即开票、当天开票、并发不限制、1元起充、7x24 在线技术辅导。GPT/Claude/Gemini 全部 6.8 折，国内模型 5~8 折，Claude Code 专属模型 3.4 折进行中！<a href="https://www.dmxapi.cn/register?aff=NDln">点击这里注册</a></td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://www.shengsuanyun.com/?from=CH_67XCLZGS"><img src="assets/sponsors/shengsuanyun.svg" alt="胜算云" width="120"></a></td>
+<td>感谢胜算云赞助了本项目！胜算云是专为 AI Native Teams 服务的超级工厂，工业级 AI 任务并行执行平台，模型商城集采直供聚合接入了 Claude、Chatgpt、Gemini 等海内外 LLM 及图片视频多媒体模型算力，绝无逆向掺水、全站模型 SLA 可用性高达 99.7%、<a href="https://watch.shengsuanyun.com/status/shengsuanyun">监测接口</a>日常全绿。更有企业级专属定制网关，实现团队精细化成本与权限管控，智能路由+安全防护+BYOK 企业自带密钥托管。平台按量及 tokens plan（即将上线）计费，可开票，使用<a href="https://www.shengsuanyun.com/?from=CH_67XCLZGS">此链接</a>注册新用户可获 10 元模力及首充 10% 赠送。</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://www.aicodemirror.com/register?invitecode=KDHMUP"><img src="assets/sponsors/aicodemirror.jpg" alt="AICodeMirror" width="120"></a></td>
+<td>感谢 AICodeMirror 对本项目的赞助！AICodeMirror 提供 Claude Code / Codex / Gemini CLI 官方高稳定性中转服务，企业级并发、快速开票、24小时专属技术支持。Claude Code / Codex / Gemini 官方渠道价格仅为原价的 38% / 2% / 9%，充值还有额外折扣！AICodeMirror 为 CC 用户专属福利：通过 <a href="https://www.aicodemirror.com/register?invitecode=KDHMUP">此链接</a> 注册首充享受 20% 折扣，企业客户最高可享 25% 折扣！</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://code0.ai/register?aff=5cGO"><img src="assets/sponsors/code0.svg" alt="Code0" width="120"></a></td>
+<td>感谢 Code0 对本项目的赞助！Code0 是面向中国开发者的 AI 模型聚合 API 中转服务，统一兼容 OpenAI / Anthropic / Gemini 三种协议格式，一个 Key 即可调用全量主流模型，稳定适配 Claude Code、Codex、Gemini CLI、cc-connect 等各类 Agent 工具。固定汇率计费：充值 1.5 元人民币 = 1 美元 API 额度，价格透明、国内直连、开箱即用。通过 <a href="https://code0.ai/register?aff=5cGO">此链接</a> 注册。</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://coder.visioncoder.cn"><img src="assets/sponsors/visioncoder.png" alt="VisionCoder" width="120"></a></td>
+<td>感谢 VisionCoder 对本项目的支持。<a href="https://coder.visioncoder.cn">VisionCoder 开发平台</a> 是一个可靠高效的 API 中继服务提供商，提供 Claude Code、Codex、Gemini 等主流 AI 模型，帮助开发者和团队更轻松地集成 AI 功能，提升工作效率。VisionCoder 还为我们的用户提供 <a href="https://coder.visioncoder.cn">Token Plan</a> 限时活动：购买 1 个月，赠送 1 个月。</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://console.claudeapi.com/register?aff=GDbA"><img src="assets/sponsors/claudeapi.svg" alt="claudeapi.com" width="120"></a></td>
+<td>感谢 claudeapi.com 对本项目的赞助！claudeapi 是面向中高端用户的高质量直连 Claude 服务，完整接入 Anthropic 官方第一方 Keys 和 AWS Bedrock 官方渠道——无逆向工程、无智力降级、无拼接。完整保留 Opus / Sonnet / Haiku 的官方能力、长上下文和 Tool Calling 性能。专为 Claude Code 重度用户、Agent 开发者和企业团队设计，开箱即用、企业级稳定。支持开票和团队入驻。通过 <a href="https://console.claudeapi.com/register?aff=GDbA">此链接</a> 注册。</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://ddshub.short.gy/ccconnect"><img src="assets/sponsors/ddshub.png" alt="DDS Hub" width="120"></a></td>
+<td>感谢 DDS 赞助本项目！呆呆兽是一家专注 Claude 和 CodeX 的可靠高效 API 中转站，稳定运行、价格透明、开票便捷。为开发者提供高性价比的 AI 模型接入服务。通过 <a href="https://ddshub.short.gy/ccconnect">此链接</a> 注册。</td>
+</tr>
+</table>
+
+</details>
+
+---
+
+<br>
+
 <p align="center">
   <b>在任何聊天工具里，远程操控你的本地 AI Agent。随时随地，随心所欲。</b>
 </p>
@@ -49,43 +122,42 @@
 </p>
 
 
-## 🆕 最近更新（Beta）
+## 🆕 v1.3.0 更新了什么
 
-> 以下内容仅在 **Beta / 预发布** 中提供：请使用 `npm install -g cc-connect@beta`，或从 [GitHub Releases 预发布](https://github.com/chenhg5/cc-connect/releases) 下载对应资源。**稳定版**尚未包含这些能力，正式发版前仍可能调整。
-
+- **🌐 Web 管理后台（推荐）** — 内置全功能可视化管理界面，**无需额外依赖**。支持项目增删改查、服务商管理、会话监控、定时任务编辑，还可以**直接在浏览器里和 Agent 对话**。支持 5 种语言 (en/zh/zh-TW/ja/es)。建议通过 Web UI 管理 cc-connect，无需手动编辑 `config.toml`。运行 `cc-connect web` 配置并打开管理后台，然后运行 `cc-connect` 启动服务。
+- **生命周期事件钩子** — 新增 `[[hooks]]` 配置，支持在消息收发、会话开始/结束、定时任务触发、权限请求、错误等事件时触发 Shell 命令或 HTTP Webhook。默认异步，失败不阻塞。
+- **技能管理** — 新增 `/skills` 页面，支持本地技能浏览和推荐预设。
+- **全局服务商管理** — 在 Web UI 中添加/编辑/删除 Provider，支持从 cc-switch 配置导入。
 - **个人微信** — 用 **微信个人号（ilink 长轮询）** 和本地 Agent 对话；支持扫码 `weixin setup`、CDN 收发图片/文件，**无需公网 IP**。*[接入说明 → `docs/weixin.md`](docs/weixin.md)*
-- **自动压缩上下文** — 估算 token 超阈值时可自动压缩会话，长对话尽量不断档、少踩坑。
-- **更稳的 `--continue`** — 支持分叉续聊，降低「桥接会话误接上终端里半截 CLI 会话」的概率。
-- **定时任务增强** — 可选 **每次新会话**执行、**单任务超时**，减少跑飞任务拖死机器人。
-- **平台体验** — 例如 **Discord** 支持 `@everyone` / `@here`，**Telegram** 支持语音类回复，**飞书** 优化回复原消息与异步分发等。
+- **微博私信** — 通过 **微博私信** 与 Agent 对话，WebSocket 连接，无需公网 IP，支持流式文本回复。
+- **飞书增强** — 自动解析 `@成员` 提及、多级回复链识别、完成 Emoji 反应。
+- **新增 Agent** — 支持 Kimi CLI 和 Pi agent。
 
 
 ## 🧩 平台能力一览
 
-内置各渠道在 cc-connect 里的大致能力对照，风格参考 [OpenClaw China 功能支持表](https://github.com/BytePioneer-AI/openclaw-china#功能支持)，方便快速对比。
+内置各渠道在 cc-connect 里的大致能力对照，方便快速对比。
 
 **图例**
 
 | 符号 | 含义 |
 |------|------|
 | ✅ | **稳定版** cc-connect + 常规配置下可用 |
-| ✅（beta） | **仅 Beta / 预发布** — **微信个人号**整列：需 `npm install -g cc-connect@beta` 或 [GitHub 预发布包](https://github.com/chenhg5/cc-connect/releases)；**默认稳定版 npm 不含** `weixin` 平台 |
 | ⚠️ | 部分支持、需额外配置（如语音/STT）或受厂商接口 / 应用类型限制 |
 | ❌ | 不支持或实际不可用 |
 
 † **QQ（NapCat / OneBot）** — 非官方自建桥接，体验依赖你的 NapCat 与网络环境。
 
-| 能力 | 飞书 | 钉钉 | Telegram | Slack | Discord | LINE | 企业微信 | **微信个人号**<br>（ilink） | QQ† | QQ 官方机器人 |
-|------|:----:|:----:|:--------:|:-----:|:-------:|:----:|:--------:|:--------------------------:|:---:|:------------:|
-| 文本与斜杠命令 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅（beta） | ✅ | ✅ |
-| Markdown / 卡片 | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ✅（beta） | ✅ | ✅ |
-| 流式 / 分片回复 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅（beta） | ✅ | ✅ |
-| 图片与文件 | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ✅（beta） | ✅ | ✅ |
-| 语音 / STT / TTS | ⚠️ | ⚠️ | ✅ | ⚠️ | ⚠️ | ❌ | ⚠️ | ✅（beta） | ⚠️ | ⚠️ |
-| 私聊 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅（beta） | ✅ | ✅ |
-| 群聊 / 频道 | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ✅（beta） | ✅ | ✅ |
+| 能力 | 飞书 | 钉钉 | Telegram | Slack | Discord | LINE | 企业微信 | 微博 | **微信个人号**<br>（ilink） | QQ† | QQ 官方机器人 |
+|------|:----:|:----:|:--------:|:-----:|:-------:|:----:|:--------:|:----:|:--------------------------:|:---:|:------------:|
+| 文本与斜杠命令 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Markdown / 卡片 | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ❌ | ✅ | ✅ | ✅ |
+| 流式 / 分片回复 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 图片与文件 | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ❌ | ✅ | ✅ | ✅ |
+| 语音 / STT / TTS | ⚠️ | ⚠️ | ✅ | ⚠️ | ⚠️ | ❌ | ⚠️ | ❌ | ✅ | ⚠️ | ⚠️ |
+| 私聊 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 群聊 / 频道 | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ❌ | ✅ | ✅ | ✅ |
 
-> **微信个人号列：** 格子里全是 **✅（beta）** 表示「只有跑 **Beta / 预发布** 才有这一整渠道」，不代表单项能力未做完 — **个人微信（ilink）整体仍属预稳定阶段**。  
 > **企业微信：** Webhook 模式需要**公网 URL**；长连接等模式多数**不需要**。  
 > **语音行：** 多数平台要在 `config.toml` 里配置 `[speech]` / TTS 等，表中为经验性归纳。  
 > 分平台接入步骤见下文 [平台接入指南](#-平台接入指南)。
@@ -94,10 +166,10 @@
 ## ✨ 为什么选择 cc-connect？
 
 ### 🤖 通用 Agent 支持
-**7 大 AI Agent** — Claude Code、Codex、Cursor Agent、Qoder CLI、Gemini CLI、OpenCode、iFlow CLI。按需选用，或同时使用全部。
+**10+ 大 AI Agent** — Claude Code、Codex、Cursor Agent、Kimi CLI、Qoder CLI、Gemini CLI、OpenCode、iFlow CLI、Pi、Devin，还可通过 [Agent Client Protocol (ACP)](https://agentclientprotocol.com/get-started/agents) 接入更多 Agent。按需选用，或同时使用全部。
 
 ### 📱 平台灵活性
-**10 大聊天平台** — 飞书、钉钉、Slack、Telegram、Discord、企业微信、LINE、QQ、QQ 官方机器人，以及 **微信个人号（ilink）**。其中 **个人微信目前仅在 Beta / 预发布版本中提供**，需安装 `npm install -g cc-connect@beta` 或从 [GitHub Releases 预发布](https://github.com/chenhg5/cc-connect/releases) 下载带 beta 标签的包；**稳定版** npm 包**尚未**内置 `weixin` 平台。大部分平台**无需公网 IP**。
+**11 大聊天平台** — 飞书、钉钉、Slack、Telegram、Discord、企业微信、微博、LINE、QQ、QQ 官方机器人，以及 **微信个人号（ilink）**。大部分平台**无需公网 IP**。
 
 ### 🔄 多 Agent 编排
 **多机器人中继** — 在群聊中绑定多个机器人，让它们相互协作。问 Claude，再听 Gemini 的见解 — 同一个对话搞定。
@@ -149,14 +221,14 @@
 **通过 npm：**
 
 ```bash
-# 稳定版
-npm install -g cc-connect
-
-# Beta 版（功能更新，可能不稳定）
-npm install -g cc-connect@beta
+# npm install -g cc-connect
 ```
 
-> **微信个人号（Weixin ilink）：** 仅在 **Beta / 预发布** 中提供（`cc-connect@beta` 或 Releases 里带 `beta` / `prerelease` 的资源）。**稳定版** `npm install -g cc-connect` **暂时不包含**该通道，正式版上线前请以 Beta 说明为准。
+**通过 Homebrew（macOS / Linux）：**
+
+```bash
+brew install cc-connect
+```
 
 **从 [GitHub Releases](https://github.com/chenhg5/cc-connect/releases) 下载：**
 
@@ -166,8 +238,6 @@ curl -L -o cc-connect https://github.com/chenhg5/cc-connect/releases/latest/down
 chmod +x cc-connect
 sudo mv cc-connect /usr/local/bin/
 
-# Beta 版（从 pre-release 下载）
-curl -L -o cc-connect https://github.com/chenhg5/cc-connect/releases/download/v1.x.x-beta/cc-connect-linux-amd64
 ```
 
 **从源码编译（需要 Go 1.22+）：**
@@ -180,6 +250,10 @@ make build
 
 
 ### ⚙️ 配置
+
+> **💡 推荐使用 Web UI 配置** — 安装完成后，运行 `cc-connect web` 配置 Web 管理后台并在浏览器中打开。可以可视化创建项目、添加平台、管理服务商、直接和 Agent 聊天，无需手动编辑 TOML 文件。**注意：** `cc-connect web` 仅用于配置和打开浏览器，并不会启动 cc-connect 服务本身，你仍需单独运行 `cc-connect` 来启动。
+
+如果你更喜欢手动配置：
 
 ```bash
 mkdir -p ~/.cc-connect
@@ -204,9 +278,12 @@ vim ~/.cc-connect/config.toml
 # npm
 npm install -g cc-connect
 
+# Homebrew
+brew upgrade cc-connect
+
 # 二进制自更新
 cc-connect update           # 稳定版
-cc-connect update --pre     # Beta 版（含 pre-release）
+cc-connect update --pre     # 含预发布版本
 ```
 
 
@@ -221,6 +298,10 @@ cc-connect update --pre     # Beta 版（含 pre-release）
 | Agent | Qoder CLI | ✅ 已支持 |
 | Agent | OpenCode (Crush) | ✅ 已支持 |
 | Agent | iFlow CLI | ✅ 已支持 |
+| Agent | Kimi CLI (Moonshot) | ✅ 已支持 |
+| Agent | Pi (Cursor Background Agent) | ✅ 已支持 |
+| Agent | ACP (Agent Client Protocol) | ✅ 支持任何 [ACP 兼容 Agent](https://agentclientprotocol.com/get-started/agents) |
+| Agent | Devin (Cognition) | ✅ 已支持（通过 ACP）|
 | Agent | Goose (Block) | 🔜 计划中 |
 | Agent | Aider | 🔜 计划中 |
 | Platform | 飞书 (Lark) | ✅ WebSocket — 无需公网 IP |
@@ -228,10 +309,11 @@ cc-connect update --pre     # Beta 版（含 pre-release）
 | Platform | Telegram | ✅ Long Polling — 无需公网 IP |
 | Platform | Slack | ✅ Socket Mode — 无需公网 IP |
 | Platform | Discord | ✅ Gateway — 无需公网 IP |
+| Platform | 微博 | ✅ WebSocket — 无需公网 IP |
 | Platform | LINE | ✅ Webhook — 需要公网 URL |
 | Platform | 企业微信 | ✅ WebSocket / Webhook |
-| Platform | 微信个人号（ilink） | ✅（beta）— HTTP 长轮询 — 无需公网 IP |
-| Platform | QQ (NapCat/OneBot) | ✅ WebSocket — Beta |
+| Platform | 微信个人号（ilink） | ✅— HTTP 长轮询 — 无需公网 IP |
+| Platform | QQ (NapCat/OneBot) | ✅ WebSocket |
 | Platform | QQ 官方机器人 | ✅ WebSocket — 无需公网 IP |
 
 
@@ -244,8 +326,9 @@ cc-connect update --pre     # Beta 版（含 pre-release）
 | Telegram | [docs/telegram.md](docs/telegram.md) | Long Polling | 不需要 |
 | Slack | [docs/slack.md](docs/slack.md) | Socket Mode | 不需要 |
 | Discord | [docs/discord.md](docs/discord.md) | Gateway | 不需要 |
+| 微博 | [docs/weibo.md](docs/weibo.md) | WebSocket | 不需要 |
 | 企业微信 | [docs/wecom.md](docs/wecom.md) | WebSocket / Webhook | 不需要 (WS) / 需要 (Webhook) |
-| 微信个人号（ilink） | [docs/weixin.md](docs/weixin.md) | HTTP 长轮询（ilink），**仅 Beta** | 不需要 |
+| 微信个人号（ilink） | [docs/weixin.md](docs/weixin.md) | HTTP 长轮询（ilink） | 不需要 |
 | QQ / QQ 机器人 | [docs/qq.md](docs/qq.md) | WebSocket | 不需要 |
 
 
@@ -268,6 +351,31 @@ cc-connect update --pre     # Beta 版（含 pre-release）
 reset_on_idle_mins = 60
 ```
 
+
+### 🛡️ 系统用户隔离 (`run_as_user`)
+
+在 Linux/macOS 上，项目可以用另一个 Unix 用户身份启动 Agent，从而在操作系统层面实现文件系统隔离。目前 Claude Code 已支持。
+
+```toml
+[[projects]]
+name = "claude-sandboxed"
+run_as_user = "partseeker-coder"
+run_as_env = ["PGSSLROOTCERT"]
+```
+
+目标用户需要：supervisor 对其配置免密 sudo、自身不拥有 sudo、对 `work_dir` 有读写权限、拥有自己的 `~/.claude/settings.json`。
+如果你通过 `claude.ai` OAuth 认证，请将目标用户的 `~/.claude/.credentials.json` 软链接到 supervisor 的副本以保持 token 同步 —— 详见[环境传播清单](./docs/usage.md#environment-propagation-what-moves-into-the-target-users-home)。
+完整设置说明见 [`docs/usage.md`](./docs/usage.md#running-agents-as-a-different-unix-user-run_as_user)。
+
+启动 cc-connect 之前，可用以下命令审核配置：
+
+```bash
+cc-connect doctor user-isolation
+```
+
+该命令会执行三项前置检查和一次隔离探测，报告目标用户能/不能读取的内容。如果任一检查失败或探测到跨用户泄漏，cc-connect 将拒绝启动。
+
+---
 
 ### 🔐 权限模式
 
@@ -370,25 +478,6 @@ cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/ch
 
 - [Discord](https://discord.gg/kHpwgaM4kq)
 - [Telegram](https://t.me/+odGNDhCjbjdmMmZl)
-
-
-## ❤️ 赞助
-
-> 想在这里展示您的品牌？**邮箱**：chg80333@gmail.com | **微信**：mongorz | [Telegram](https://t.me/+odGNDhCjbjdmMmZl) | [Discord](https://discord.gg/kHpwgaM4kq)
-
-<details open>
-<summary>赞助商</summary>
-
-<!-- 赞助位招租 - 联系我们成为赞助商 -->
-
-<table>
-<tr>
-<td width="180"><a href="#"><img src="docs/images/sponsors/placeholder.svg" alt="您的 Logo" width="150"></a></td>
-<td>成为赞助商！我们为您的产品提供专属用户福利。联系我们了解更多赞助机会。</td>
-</tr>
-</table>
-
-</details>
 
 
 ## ☕ 支持项目

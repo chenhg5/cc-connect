@@ -16,13 +16,14 @@ const ContinueSession = "__continue__"
 
 // Session tracks one conversation between a user and the agent.
 type Session struct {
-	ID             string         `json:"id"`
-	Name           string         `json:"name"`
-	AgentSessionID string         `json:"agent_session_id"`
-	AgentType      string         `json:"agent_type,omitempty"`
-	History        []HistoryEntry `json:"history"`
-	CreatedAt      time.Time      `json:"created_at"`
-	UpdatedAt      time.Time      `json:"updated_at"`
+	ID                  string         `json:"id"`
+	Name                string         `json:"name"`
+	AgentSessionID      string         `json:"agent_session_id"`
+	AgentType           string         `json:"agent_type,omitempty"`
+	PastAgentSessionIDs []string       `json:"past_agent_session_ids,omitempty"`
+	History             []HistoryEntry `json:"history"`
+	CreatedAt           time.Time      `json:"created_at"`
+	UpdatedAt           time.Time      `json:"updated_at"`
 
 	mu   sync.Mutex `json:"-"`
 	busy bool       `json:"-"`
@@ -65,6 +66,21 @@ func (s *Session) AddHistory(role, content string) {
 	})
 }
 
+// recordPastAgentSessionID saves the current AgentSessionID to PastAgentSessionIDs
+// so it remains visible in KnownAgentSessionIDs after the ID is replaced or cleared.
+// Must be called with s.mu held.
+func (s *Session) recordPastAgentSessionID() {
+	if s.AgentSessionID == "" || s.AgentSessionID == ContinueSession {
+		return
+	}
+	for _, past := range s.PastAgentSessionIDs {
+		if past == s.AgentSessionID {
+			return
+		}
+	}
+	s.PastAgentSessionIDs = append(s.PastAgentSessionIDs, s.AgentSessionID)
+}
+
 // SetAgentInfo atomically sets the agent session ID, agent type, and name.
 func (s *Session) SetAgentInfo(agentSessionID, agentType, name string) {
 	if agentSessionID == ContinueSession {
@@ -72,6 +88,9 @@ func (s *Session) SetAgentInfo(agentSessionID, agentType, name string) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.AgentSessionID != agentSessionID {
+		s.recordPastAgentSessionID()
+	}
 	s.AgentSessionID = agentSessionID
 	s.AgentType = agentType
 	s.Name = name
@@ -100,12 +119,17 @@ func (s *Session) GetUpdatedAt() time.Time {
 // SetAgentSessionID atomically sets the agent session ID and agent type.
 // The ContinueSession sentinel is never persisted — it is only used transiently
 // when starting an agent (see engine); storing it on disk breaks resume (#255).
+// When the existing ID is replaced or cleared, it is saved to PastAgentSessionIDs
+// so filterOwnedSessions continues to recognise the session.
 func (s *Session) SetAgentSessionID(id, agentType string) {
 	if id == ContinueSession {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.AgentSessionID != id {
+		s.recordPastAgentSessionID()
+	}
 	s.AgentSessionID = id
 	s.AgentType = agentType
 }
@@ -160,14 +184,23 @@ type UserMeta struct {
 	ChatName string `json:"chat_name,omitempty"`
 }
 
+// snapshotVersion tracks the schema version so we can detect data saved by
+// older code that didn't persist all migration flags.
+//   - 0 (missing): original format or early PastIDTracking-only format
+//   - 1: full LegacyData persistence
+const snapshotVersion = 1
+
 // sessionSnapshot is the JSON-serializable state of the SessionManager.
 type sessionSnapshot struct {
-	Sessions      map[string]*Session  `json:"sessions"`
-	ActiveSession map[string]string    `json:"active_session"`
-	UserSessions  map[string][]string  `json:"user_sessions"`
-	Counter       int64                `json:"counter"`
-	SessionNames  map[string]string    `json:"session_names,omitempty"` // agent session ID → custom name
-	UserMeta      map[string]*UserMeta `json:"user_meta,omitempty"`     // sessionKey → display info
+	Sessions       map[string]*Session  `json:"sessions"`
+	ActiveSession  map[string]string    `json:"active_session"`
+	UserSessions   map[string][]string  `json:"user_sessions"`
+	Counter        int64                `json:"counter"`
+	SessionNames   map[string]string    `json:"session_names,omitempty"`    // agent session ID → custom name
+	UserMeta       map[string]*UserMeta `json:"user_meta,omitempty"`        // sessionKey → display info
+	PastIDTracking bool                 `json:"past_id_tracking,omitempty"` // true once PastAgentSessionIDs is supported
+	LegacyData     bool                 `json:"legacy_data,omitempty"`      // true while pre-fix sessions exist
+	Version        int                  `json:"version,omitempty"`          // schema version for migration detection
 }
 
 // SessionManager supports multiple named sessions per user with active-session tracking.
@@ -181,6 +214,12 @@ type SessionManager struct {
 	userMeta      map[string]*UserMeta // sessionKey → display info
 	counter       int64
 	storePath     string // empty = no persistence
+
+	// legacyData is true when sessions were loaded from a snapshot that
+	// predates PastAgentSessionIDs tracking. In this state, many sessions
+	// may have lost their AgentSessionID through /new or provider switches.
+	// KnownAgentSessionIDs returns nil to disable filterOwnedSessions.
+	legacyData bool
 }
 
 func NewSessionManager(storePath string) *SessionManager {
@@ -280,6 +319,35 @@ func (sm *SessionManager) SwitchSession(userKey, target string) (*Session, error
 	return nil, fmt.Errorf("session %q not found", target)
 }
 
+// SwitchToAgentSession finds or creates an internal session that maps to the
+// given agent session ID. If an existing session already references agentSID,
+// it becomes the active session. Otherwise a new session is created so the
+// previous session's AgentSessionID is preserved in KnownAgentSessionIDs.
+func (sm *SessionManager) SwitchToAgentSession(userKey, agentSID, agentName, summary string) *Session {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	for _, sid := range sm.userSessions[userKey] {
+		s := sm.sessions[sid]
+		if s == nil {
+			continue
+		}
+		s.mu.Lock()
+		aid := s.AgentSessionID
+		s.mu.Unlock()
+		if aid == agentSID {
+			sm.activeSession[userKey] = s.ID
+			sm.saveLocked()
+			return s
+		}
+	}
+
+	s := sm.createLocked(userKey, summary)
+	s.SetAgentInfo(agentSID, agentName, summary)
+	sm.saveLocked()
+	return s
+}
+
 func (sm *SessionManager) ListSessions(userKey string) []*Session {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
@@ -361,6 +429,37 @@ func (sm *SessionManager) AllSessions() []*Session {
 		out = append(out, s)
 	}
 	return out
+}
+
+// KnownAgentSessionIDs returns the set of agent session IDs tracked by cc-connect.
+// This is used to filter agent.ListSessions() output to only sessions owned by
+// cc-connect, excluding sessions created by external CLI usage in the same work_dir.
+// It includes both current and historical agent session IDs so that sessions whose
+// IDs were cleared (e.g. after /new or provider switch) remain visible.
+//
+// Legacy data: when the snapshot was written before PastAgentSessionIDs tracking
+// existed, many sessions may have silently lost their IDs through /new or provider
+// switches. Returns nil unconditionally while legacyData is true, disabling
+// filterOwnedSessions. legacyData is only cleared once every session has at least
+// one tracked ID (current or past), meaning the data has been fully migrated.
+func (sm *SessionManager) KnownAgentSessionIDs() map[string]struct{} {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	if sm.legacyData {
+		return nil
+	}
+	ids := make(map[string]struct{})
+	for _, s := range sm.sessions {
+		s.mu.Lock()
+		if s.AgentSessionID != "" {
+			ids[s.AgentSessionID] = struct{}{}
+		}
+		for _, past := range s.PastAgentSessionIDs {
+			ids[past] = struct{}{}
+		}
+		s.mu.Unlock()
+	}
+	return ids
 }
 
 // SessionKeyMap returns a mapping from session ID to the user key (session_key) it belongs to,
@@ -464,24 +563,43 @@ func (sm *SessionManager) saveLocked() {
 			s.AgentSessionID = ""
 		}
 		snapSessions[id] = &Session{
-			ID:             s.ID,
-			Name:           s.Name,
-			AgentSessionID: agentSID,
-			AgentType:      s.AgentType,
-			History:        append([]HistoryEntry(nil), s.History...),
-			CreatedAt:      s.CreatedAt,
-			UpdatedAt:      s.UpdatedAt,
+			ID:                  s.ID,
+			Name:                s.Name,
+			AgentSessionID:      agentSID,
+			AgentType:           s.AgentType,
+			PastAgentSessionIDs: append([]string(nil), s.PastAgentSessionIDs...),
+			History:             append([]HistoryEntry(nil), s.History...),
+			CreatedAt:           s.CreatedAt,
+			UpdatedAt:           s.UpdatedAt,
 		}
 		s.mu.Unlock()
 	}
 
+	// Auto-clear legacyData once every session has at least one tracked ID.
+	if sm.legacyData {
+		allTracked := true
+		for _, s := range snapSessions {
+			if s.AgentSessionID == "" && len(s.PastAgentSessionIDs) == 0 {
+				allTracked = false
+				break
+			}
+		}
+		if allTracked {
+			sm.legacyData = false
+			slog.Info("session: legacy data migration complete, filtering re-enabled")
+		}
+	}
+
 	snap := sessionSnapshot{
-		Sessions:      snapSessions,
-		ActiveSession: sm.activeSession,
-		UserSessions:  sm.userSessions,
-		Counter:       sm.counter,
-		SessionNames:  sm.sessionNames,
-		UserMeta:      sm.userMeta,
+		Sessions:       snapSessions,
+		ActiveSession:  sm.activeSession,
+		UserSessions:   sm.userSessions,
+		Counter:        sm.counter,
+		SessionNames:   sm.sessionNames,
+		UserMeta:       sm.userMeta,
+		PastIDTracking: true,
+		LegacyData:     sm.legacyData,
+		Version:        snapshotVersion,
 	}
 	data, err := json.MarshalIndent(snap, "", "  ")
 	if err != nil {
@@ -516,6 +634,24 @@ func (sm *SessionManager) load() {
 	sm.sessionNames = snap.SessionNames
 	sm.userMeta = snap.UserMeta
 	sm.counter = snap.Counter
+	if snap.Version >= snapshotVersion {
+		sm.legacyData = snap.LegacyData
+	} else {
+		// Snapshot was written before LegacyData persistence existed.
+		sm.legacyData = !snap.PastIDTracking
+		if !sm.legacyData {
+			// PastIDTracking was set by a prior code version but LegacyData
+			// wasn't persisted. Check for sessions that lost their IDs before
+			// PastAgentSessionIDs tracking was available.
+			for _, s := range sm.sessions {
+				if s.AgentSessionID == "" && len(s.PastAgentSessionIDs) == 0 {
+					sm.legacyData = true
+					slog.Info("session: detected untracked sessions from prior data loss, enabling legacy mode")
+					break
+				}
+			}
+		}
+	}
 
 	if sm.sessions == nil {
 		sm.sessions = make(map[string]*Session)
@@ -558,6 +694,7 @@ func (sm *SessionManager) InvalidateForAgent(agentType string) {
 				"new_agent", agentType,
 				"old_agent_session_id", s.AgentSessionID,
 			)
+			s.recordPastAgentSessionID()
 			s.AgentSessionID = ""
 			s.AgentType = agentType
 			invalidated++

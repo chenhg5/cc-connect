@@ -348,28 +348,33 @@ func TestMarkdownToSimpleHTML_BlockquoteBreaksOnBlankLine(t *testing.T) {
 func TestMarkdownToSimpleHTML_Table(t *testing.T) {
 	md := "| Name | Age |\n|------|-----|\n| Alice | 30 |\n| Bob | 25 |"
 	out := MarkdownToSimpleHTML(md)
-	if !strings.Contains(out, "Name | Age") {
+	if !strings.Contains(out, "<pre>") {
+		t.Errorf("expected table wrapped in <pre>, got %q", out)
+	}
+	if !strings.Contains(out, "Name") || !strings.Contains(out, "Age") {
 		t.Errorf("expected table header cells, got %q", out)
 	}
-	if !strings.Contains(out, "——————————") {
-		t.Errorf("expected separator as rule, got %q", out)
-	}
-	if !strings.Contains(out, "Alice | 30") {
+	if !strings.Contains(out, "Alice") || !strings.Contains(out, "30") {
 		t.Errorf("expected table data cells, got %q", out)
+	}
+	// Columns should be aligned with padding
+	if !strings.Contains(out, "-----+-") {
+		t.Errorf("expected aligned separator row, got %q", out)
 	}
 }
 
 func TestMarkdownToSimpleHTML_TableWithFormatting(t *testing.T) {
+	// Inline formatting is escaped inside <pre> since HTML tags in <pre> render literally in Telegram
 	md := "| **Header** | `code` |\n|---|---|\n| *italic* | normal |"
 	out := MarkdownToSimpleHTML(md)
-	if !strings.Contains(out, "<b>Header</b>") {
-		t.Errorf("expected bold in table cell, got %q", out)
+	if !strings.Contains(out, "<pre>") {
+		t.Errorf("expected table wrapped in <pre>, got %q", out)
 	}
-	if !strings.Contains(out, "<code>code</code>") {
-		t.Errorf("expected code in table cell, got %q", out)
+	if !strings.Contains(out, "Header") {
+		t.Errorf("expected header text in table, got %q", out)
 	}
-	if err := validateHTMLNesting(out); err != nil {
-		t.Errorf("invalid HTML nesting: %v, got %q", err, out)
+	if !strings.Contains(out, "code") {
+		t.Errorf("expected code text in table, got %q", out)
 	}
 }
 

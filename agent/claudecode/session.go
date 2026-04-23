@@ -51,56 +51,60 @@ type claudeSession struct {
 	gracefulStopTimeout time.Duration
 }
 
-func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int) (*claudeSession, error) {
+func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cliArgsFlag string, model, effort, sessionID, mode string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
-	args := []string{
+	// innerArgs are Claude Code CLI flags — when a wrapper is used with
+	// cliArgsFlag these get bundled into a single passthrough string.
+	// outerArgs are flags the wrapper itself understands (e.g. --model).
+	innerArgs := []string{
 		"--output-format", "stream-json",
 		"--input-format", "stream-json",
 		"--permission-prompt-tool", "stdio",
 	}
 	if !disableVerbose {
-		args = append(args, "--verbose")
+		innerArgs = append(innerArgs, "--verbose")
 	}
 
 	if mode != "" && mode != "default" {
-		args = append(args, "--permission-mode", mode)
+		innerArgs = append(innerArgs, "--permission-mode", mode)
 	}
 	switch sessionID {
-	case "":
+	case "", core.ContinueSession:
 		// Truly fresh session — no resume, no continue.
-	case core.ContinueSession:
-		// --continue grabs the most recent session in the workspace, which
-		// may belong to an active CLI terminal. Fork it so the platform
-		// conversation gets its own independent context branch.
-		args = append(args, "--continue", "--fork-session")
 	default:
 		// Resuming a known session ID — this is cc-connect's own session
 		// from a previous connection, safe to resume directly.
-		args = append(args, "--resume", sessionID)
-	}
-	if model != "" {
-		args = append(args, "--model", model)
+		innerArgs = append(innerArgs, "--resume", sessionID)
 	}
 	if len(allowedTools) > 0 {
-		args = append(args, "--allowedTools", strings.Join(allowedTools, ","))
+		innerArgs = append(innerArgs, "--allowedTools", strings.Join(allowedTools, ","))
 	}
 	if len(disallowedTools) > 0 {
-		args = append(args, "--disallowedTools", strings.Join(disallowedTools, ","))
+		innerArgs = append(innerArgs, "--disallowedTools", strings.Join(disallowedTools, ","))
 	}
 
 	if sysPrompt := core.AgentSystemPrompt(); sysPrompt != "" {
 		if platformPrompt != "" {
 			sysPrompt += "\n## Formatting\n" + platformPrompt + "\n"
 		}
-		args = append(args, "--append-system-prompt", sysPrompt)
+		innerArgs = append(innerArgs, "--append-system-prompt", sysPrompt)
 	}
 
+	if effort != "" {
+		innerArgs = append(innerArgs, "--effort", effort)
+	}
 	if maxContextTokens > 0 {
-		args = append(args, "--max-context-tokens", strconv.Itoa(maxContextTokens))
+		innerArgs = append(innerArgs, "--max-context-tokens", strconv.Itoa(maxContextTokens))
+	}
+	
+	// outerArgs are understood by both the wrapper and Claude CLI directly.
+	var outerArgs []string
+	if model != "" {
+		outerArgs = append(outerArgs, "--model", model)
 	}
 
-	slog.Debug("claudeSession: starting", "args", core.RedactArgs(args), "dir", workDir, "mode", mode, "run_as_user", spawnOpts.RunAsUser)
+	slog.Debug("claudeSession: starting", "innerArgs", core.RedactArgs(innerArgs), "outerArgs", core.RedactArgs(outerArgs), "dir", workDir, "mode", mode, "run_as_user", spawnOpts.RunAsUser)
 
 	// Per-spawn defense in depth: if run_as_user is set, re-run the cheap
 	// preflight (sudo still works + target still can't escalate) right
@@ -116,7 +120,24 @@ func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode strin
 		}
 	}
 
-	cmd := core.BuildSpawnCommand(sessionCtx, spawnOpts, "claude", args...)
+	// Build final argument list.
+	// When cliArgsFlag is set (e.g. "-a"), inner args are bundled into a
+	// single passthrough string via that flag, while outer args (--model etc.)
+	// are appended directly so the wrapper can also interpret them.
+	// Args containing spaces/newlines are quoted so the wrapper's command-line
+	// parser (e.g. splitCommandLine) keeps them as single tokens.
+	// Result: my-cli code -t foo -a "--verbose --append-system-prompt 'long text'" --model x
+	var allArgs []string
+	if cliArgsFlag != "" {
+		allArgs = append(allArgs, cliExtraArgs...)
+		allArgs = append(allArgs, cliArgsFlag, shellJoinArgs(innerArgs))
+		allArgs = append(allArgs, outerArgs...)
+	} else {
+		allArgs = append(allArgs, cliExtraArgs...)
+		allArgs = append(allArgs, innerArgs...)
+		allArgs = append(allArgs, outerArgs...)
+	}
+	cmd := core.BuildSpawnCommand(sessionCtx, spawnOpts, cliBin, allArgs...)
 	cmd.Dir = workDir
 	// Filter out CLAUDECODE env var to prevent "nested session" detection,
 	// since cc-connect is a bridge, not a nested Claude Code session.
@@ -130,6 +151,21 @@ func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode strin
 	// the single source of truth.
 	env = core.FilterEnvForSpawn(env, spawnOpts)
 	cmd.Env = env
+
+	var providerEnvSnapshot []string
+	for _, e := range env {
+		for _, prefix := range []string{"ANTHROPIC_", "CLAUDE_", "AWS_", "NO_PROXY", "DISABLE_"} {
+			if strings.HasPrefix(e, prefix) {
+				providerEnvSnapshot = append(providerEnvSnapshot, e)
+				break
+			}
+		}
+	}
+	slog.Debug("claudeSession: spawn details",
+		"bin", cliBin,
+		"allArgs", core.RedactArgs(allArgs),
+		"model", model,
+		"providerEnv", core.RedactEnv(providerEnvSnapshot))
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -171,67 +207,125 @@ func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode strin
 }
 
 func (cs *claudeSession) readLoop(stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
-	defer func() {
-		cs.alive.Store(false)
-		if err := cs.cmd.Wait(); err != nil {
-			stderrMsg := strings.TrimSpace(stderrBuf.String())
-			if stderrMsg != "" {
-				slog.Error("claudeSession: process failed", "error", err, "stderr", stderrMsg)
-				evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
-				select {
-				case cs.events <- evt:
-				case <-cs.ctx.Done():
-					return
-				}
-			}
-		}
-		close(cs.events)
-		close(cs.done)
-	}()
+	waitErrCh, waitDone := cs.startReadLoopWait(stdout)
+	defer cs.finishReadLoop(waitErrCh, stderrBuf)
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
-
 	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-
-		var raw map[string]any
-		if err := json.Unmarshal([]byte(line), &raw); err != nil {
-			slog.Debug("claudeSession: non-JSON line", "line", line)
-			continue
-		}
-
-		eventType, _ := raw["type"].(string)
-		slog.Debug("claudeSession: event", "type", eventType)
-
-		switch eventType {
-		case "system":
-			cs.handleSystem(raw)
-		case "assistant":
-			cs.handleAssistant(raw)
-		case "user":
-			cs.handleUser(raw)
-		case "result":
-			cs.handleResult(raw)
-		case "control_request":
-			cs.handleControlRequest(raw)
-		case "control_cancel_request":
-			requestID, _ := raw["request_id"].(string)
-			slog.Debug("claudeSession: permission cancelled", "request_id", requestID)
-		}
+		cs.handleReadLoopLine(scanner.Text())
 	}
 
-	if err := scanner.Err(); err != nil {
-		slog.Error("claudeSession: scanner error", "error", err)
-		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
+	cs.handleReadLoopScanErr(scanner.Err(), waitDone)
+}
+
+func (cs *claudeSession) startReadLoopWait(stdout io.ReadCloser) (<-chan error, <-chan struct{}) {
+	waitErrCh := make(chan error, 1)
+	waitDone := make(chan struct{})
+
+	go func() {
+		waitErrCh <- cs.cmd.Wait()
+		close(waitDone)
+	}()
+
+	go func() {
 		select {
-		case cs.events <- evt:
 		case <-cs.ctx.Done():
+			_ = stdout.Close()
 			return
+		case <-waitDone:
 		}
+
+		// Grace period: give scanner a brief window to drain any data the
+		// agent wrote to the pipe buffer before exiting. If scanner finishes
+		// on its own (pipe fully closed, no descendants holding it),
+		// cs.done fires first and we skip the force-close entirely
+		select {
+		case <-cs.done:
+			return
+		case <-time.After(50 * time.Millisecond):
+		}
+		_ = stdout.Close()
+	}()
+
+	return waitErrCh, waitDone
+}
+
+func (cs *claudeSession) finishReadLoop(waitErrCh <-chan error, stderrBuf *bytes.Buffer) {
+	err := <-waitErrCh
+
+	cs.alive.Store(false)
+	if err != nil {
+		stderrMsg := ""
+		if stderrBuf != nil {
+			stderrMsg = strings.TrimSpace(stderrBuf.String())
+		}
+		if stderrMsg != "" {
+			slog.Error("claudeSession: process failed", "error", err, "stderr", stderrMsg)
+			evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
+			select {
+			case cs.events <- evt:
+			case <-cs.ctx.Done():
+				// INVARIANT: readLoop must close cs.events and cs.done exactly once
+				// on every termination path. Callers (engine event loop) rely on
+				// these closures to observe session end.
+			}
+		}
+	}
+	close(cs.events)
+	close(cs.done)
+}
+
+func (cs *claudeSession) handleReadLoopScanErr(err error, waitDone <-chan struct{}) {
+	if err == nil {
+		return
+	}
+
+	select {
+	case <-cs.ctx.Done():
+		return
+	case <-waitDone:
+		return
+	default:
+	}
+
+	slog.Error("claudeSession: scanner error", "error", err)
+	evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
+	select {
+	case cs.events <- evt:
+	case <-cs.ctx.Done():
+		return
+	}
+}
+
+func (cs *claudeSession) handleReadLoopLine(line string) {
+	if line == "" {
+		return
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(line), &raw); err != nil {
+		slog.Debug("claudeSession: non-JSON line", "line", line)
+		return
+	}
+
+	eventType, _ := raw["type"].(string)
+	slog.Debug("claudeSession: event", "type", eventType)
+
+	switch eventType {
+	case "system":
+		cs.handleSystem(raw)
+	case "assistant":
+		cs.handleAssistant(raw)
+	case "user":
+		cs.handleUser(raw)
+	case "result":
+		cs.handleResult(raw)
+	case "control_request":
+		cs.handleControlRequest(raw)
+	case "control_cancel_request":
+		requestID, _ := raw["request_id"].(string)
+		slog.Debug("claudeSession: permission cancelled", "request_id", requestID)
 	}
 }
 
@@ -637,6 +731,37 @@ func (cs *claudeSession) Close() error {
 	}
 	<-cs.done
 	return nil
+}
+
+// shellJoinArgs joins args into a single string, quoting any arg that
+// contains whitespace so that a shell-style splitter (like my_cli's
+// splitCommandLine) preserves each arg as one token.
+//
+// Uses single quotes because some splitters (e.g. my_cli) don't support
+// backslash escapes inside double quotes. For values containing single
+// quotes, we close the single-quoted segment, add an escaped single
+// quote, and reopen: 'it'\''s' → it's
+func shellJoinArgs(args []string) string {
+	var b strings.Builder
+	for i, a := range args {
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		if !strings.ContainsAny(a, " \t\n\r'\"\\") {
+			b.WriteString(a)
+			continue
+		}
+		b.WriteByte('\'')
+		for _, c := range a {
+			if c == '\'' {
+				b.WriteString("'\\''")
+			} else {
+				b.WriteRune(c)
+			}
+		}
+		b.WriteByte('\'')
+	}
+	return b.String()
 }
 
 // filterEnv returns a copy of env with entries matching the given key removed.

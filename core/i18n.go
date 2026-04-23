@@ -191,6 +191,13 @@ const (
 	MsgProviderAddFailed         MsgKey = "provider_add_failed"
 	MsgProviderRemoved           MsgKey = "provider_removed"
 	MsgProviderRemoveFailed      MsgKey = "provider_remove_failed"
+	MsgCardTitleProviderAdd      MsgKey = "card_title_provider_add"
+	MsgProviderAddPickHint       MsgKey = "provider_add_pick_hint"
+	MsgProviderAddOther          MsgKey = "provider_add_other"
+	MsgProviderAddApiKeyPrompt   MsgKey = "provider_add_api_key_prompt"
+	MsgProviderAddInviteHint     MsgKey = "provider_add_invite_hint"
+	MsgProviderLinkGlobal        MsgKey = "provider_link_global"
+	MsgProviderLinked            MsgKey = "provider_linked"
 
 	MsgVoiceNotEnabled               MsgKey = "voice_not_enabled"
 	MsgVoiceUsingPlatformRecognition MsgKey = "voice_using_platform_recognition"
@@ -239,11 +246,14 @@ const (
 	MsgCronBtnUnmute    MsgKey = "cron_btn_unmute"
 	MsgCronBtnDelete    MsgKey = "cron_btn_delete"
 
-	MsgStatusTitle MsgKey = "status_title"
-
+	MsgStatusTitle          MsgKey = "status_title"
+	MsgReplyFooterRemaining MsgKey = "reply_footer_remaining"
 	MsgModelCurrent          MsgKey = "model_current"
 	MsgModelChanged          MsgKey = "model_changed"
 	MsgModelChangeFailed     MsgKey = "model_change_failed"
+	MsgModelCardSwitching    MsgKey = "model_card_switching"
+	MsgModelCardSwitched     MsgKey = "model_card_switched"
+	MsgModelCardSwitchFailed MsgKey = "model_card_switch_failed"
 	MsgModelNotSupported     MsgKey = "model_not_supported"
 	MsgReasoningCurrent      MsgKey = "reasoning_current"
 	MsgReasoningChanged      MsgKey = "reasoning_changed"
@@ -271,6 +281,7 @@ const (
 	MsgStatusThinkingMessages MsgKey = "status_thinking_messages"
 	MsgStatusToolMessages     MsgKey = "status_tool_messages"
 	MsgStatusSessionKey       MsgKey = "status_session_key"
+	MsgStatusAgentSID         MsgKey = "status_agent_sid"
 	MsgStatusUserID           MsgKey = "status_user_id"
 	MsgEnabledShort           MsgKey = "enabled_short"
 	MsgDisabledShort          MsgKey = "disabled_short"
@@ -288,6 +299,7 @@ const (
 	MsgModelSelectPlaceholder    MsgKey = "model_select_placeholder"
 	MsgModeSelectPlaceholder     MsgKey = "mode_select_placeholder"
 	MsgProviderSelectPlaceholder MsgKey = "provider_select_placeholder"
+	MsgProviderClearOption       MsgKey = "provider_clear_option"
 	MsgCardBack                  MsgKey = "card_back"
 	MsgCardPrev                  MsgKey = "card_prev"
 	MsgCardNext                  MsgKey = "card_next"
@@ -353,9 +365,10 @@ const (
 	MsgCommandExecError   MsgKey = "command_exec_error"
 	MsgCommandExecSuccess MsgKey = "command_exec_success"
 
-	MsgSkillsTitle MsgKey = "skills_title"
-	MsgSkillsEmpty MsgKey = "skills_empty"
-	MsgSkillsHint  MsgKey = "skills_hint"
+	MsgSkillsTitle            MsgKey = "skills_title"
+	MsgSkillsEmpty            MsgKey = "skills_empty"
+	MsgSkillsHint             MsgKey = "skills_hint"
+	MsgSkillsTelegramMenuHint MsgKey = "skills_telegram_menu_hint"
 
 	MsgConfigTitle       MsgKey = "config_title"
 	MsgConfigHint        MsgKey = "config_hint"
@@ -392,10 +405,10 @@ const (
 	MsgAliasNotFound   MsgKey = "alias_not_found"
 	MsgAliasUsage      MsgKey = "alias_usage"
 
-	MsgNewSessionCreated     MsgKey = "new_session_created"
-	MsgNewSessionCreatedName MsgKey = "new_session_created_name"
-	MsgSessionAutoResetIdle     MsgKey = "session_auto_reset_idle"
-	MsgSessionClosingGraceful   MsgKey = "session_closing_graceful"
+	MsgNewSessionCreated      MsgKey = "new_session_created"
+	MsgNewSessionCreatedName  MsgKey = "new_session_created_name"
+	MsgSessionAutoResetIdle   MsgKey = "session_auto_reset_idle"
+	MsgSessionClosingGraceful MsgKey = "session_closing_graceful"
 
 	MsgDeleteUsage              MsgKey = "delete_usage"
 	MsgDeleteSuccess            MsgKey = "delete_success"
@@ -412,6 +425,8 @@ const (
 	MsgDeleteModeBackButton     MsgKey = "delete_mode_back_button"
 	MsgDeleteModeEmptySelection MsgKey = "delete_mode_empty_selection"
 	MsgDeleteModeResultTitle    MsgKey = "delete_mode_result_title"
+	MsgDeleteModeDeletingTitle  MsgKey = "delete_mode_deleting_title"
+	MsgDeleteModeDeletingBody   MsgKey = "delete_mode_deleting_body"
 	MsgDeleteModeMissingSession MsgKey = "delete_mode_missing_session"
 
 	MsgSwitchSuccess   MsgKey = "switch_success"
@@ -492,8 +507,8 @@ const (
 	MsgBuiltinCmdDir       MsgKey = "dir"
 	MsgBuiltinCmdDiff      MsgKey = "diff"
 
-	MsgDiffEmpty           MsgKey = "diff_empty"
-	MsgDiffNoDiff2HTML     MsgKey = "diff_no_diff2html"
+	MsgDiffEmpty       MsgKey = "diff_empty"
+	MsgDiffNoDiff2HTML MsgKey = "diff_no_diff2html"
 
 	MsgDirChanged          MsgKey = "dir_changed"
 	MsgDirCurrent          MsgKey = "dir_current"
@@ -549,6 +564,8 @@ const (
 	MsgWsCloneProgress         MsgKey = "ws_clone_progress"
 	MsgWsCloneSuccess          MsgKey = "ws_clone_success"
 	MsgWsCloneFailed           MsgKey = "ws_clone_failed"
+	MsgWsInitDirNotFound       MsgKey = "ws_init_dir_not_found"
+	MsgWsInitInvalidTarget     MsgKey = "ws_init_invalid_target"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -1425,6 +1442,46 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "❌ プロバイダの削除に失敗しました: %v",
 		LangSpanish:            "❌ Error al eliminar proveedor: %v",
 	},
+	MsgCardTitleProviderAdd: {
+		LangEnglish: "Add Provider", LangChinese: "添加服务商", LangTraditionalChinese: "新增服務商",
+		LangJapanese: "プロバイダーを追加", LangSpanish: "Añadir proveedor",
+	},
+	MsgProviderAddPickHint: {
+		LangEnglish:            "Pick a provider below, or choose **Other** to enter manually.\nAfter selecting, send your API key to complete.",
+		LangChinese:            "选择一个服务商，或选择 **自定义** 手动填写。\n选择后，请发送你的 API Key 来完成添加。",
+		LangTraditionalChinese: "選擇一個服務商，或選擇 **自訂** 手動填寫。\n選擇後，請傳送你的 API Key 來完成新增。",
+		LangJapanese:           "プロバイダーを選択するか、**その他** を選んで手動入力してください。\n選択後、API キーを送信して完了します。",
+		LangSpanish:            "Elige un proveedor o selecciona **Otro** para ingresar manualmente.\nDespués de seleccionar, envía tu API Key para completar.",
+	},
+	MsgProviderAddOther: {
+		LangEnglish: "Other (manual)", LangChinese: "自定义 (手动)", LangTraditionalChinese: "自訂 (手動)",
+		LangJapanese: "その他 (手動)", LangSpanish: "Otro (manual)",
+	},
+	MsgProviderAddApiKeyPrompt: {
+		LangEnglish:            "✅ Selected **%s**.\n\nPlease send your **API Key** for this provider.\nFormat: just the key, e.g. `sk-xxxxxxxx`",
+		LangChinese:            "✅ 已选择 **%s**。\n\n请发送你的 **API Key**。\n格式：直接发送密钥即可，如 `sk-xxxxxxxx`",
+		LangTraditionalChinese: "✅ 已選擇 **%s**。\n\n請傳送你的 **API Key**。\n格式：直接傳送金鑰即可，如 `sk-xxxxxxxx`",
+		LangJapanese:           "✅ **%s** を選択しました。\n\n**API キー** を送信してください。\n形式: キーをそのまま送信（例: `sk-xxxxxxxx`）",
+		LangSpanish:            "✅ Seleccionado **%s**.\n\nPor favor envía tu **API Key** para este proveedor.\nFormato: solo la clave, por ejemplo `sk-xxxxxxxx`",
+	},
+	MsgProviderAddInviteHint: {
+		LangEnglish:            "🔑 Don't have a key? Register here: %s",
+		LangChinese:            "🔑 还没有 Key？点击注册获取：%s",
+		LangTraditionalChinese: "🔑 還沒有 Key？點擊註冊取得：%s",
+		LangJapanese:           "🔑 キーをお持ちでない場合はこちらから登録: %s",
+		LangSpanish:            "🔑 ¿No tienes una clave? Regístrate aquí: %s",
+	},
+	MsgProviderLinkGlobal: {
+		LangEnglish: "Link existing provider", LangChinese: "关联已有服务商", LangTraditionalChinese: "關聯已有服務商",
+		LangJapanese: "既存プロバイダーをリンク", LangSpanish: "Vincular proveedor existente",
+	},
+	MsgProviderLinked: {
+		LangEnglish:            "✅ Provider **%s** linked to this project.",
+		LangChinese:            "✅ 已关联服务商 **%s** 到当前项目。",
+		LangTraditionalChinese: "✅ 已關聯服務商 **%s** 到目前專案。",
+		LangJapanese:           "✅ プロバイダー **%s** をこのプロジェクトにリンクしました。",
+		LangSpanish:            "✅ Proveedor **%s** vinculado a este proyecto.",
+	},
 	MsgVoiceNotEnabled: {
 		LangEnglish:            "🎙 Voice messages are not enabled. Please configure `[speech]` in config.toml.",
 		LangChinese:            "🎙 语音消息未启用，请在 config.toml 中配置 `[speech]` 部分。",
@@ -1770,38 +1827,50 @@ var messages = map[MsgKey]map[Language]string{
 		LangEnglish: "cc-connect Status\n\n" +
 			"Project: %s\n" +
 			"Agent: %s\n" +
+			"Work Dir: %s\n" +
 			"Platforms: %s\n" +
 			"Uptime: %s\n" +
 			"Language: %s\n" +
-			"%s" + "%s" + "%s" + "%s" + "%s",
+			"%s" + "%s" + "%s" + "%s" + "%s" + "%s",
 		LangChinese: "cc-connect 状态\n\n" +
 			"项目: %s\n" +
 			"Agent: %s\n" +
+			"工作目录: %s\n" +
 			"平台: %s\n" +
 			"运行时间: %s\n" +
 			"语言: %s\n" +
-			"%s" + "%s" + "%s" + "%s" + "%s",
+			"%s" + "%s" + "%s" + "%s" + "%s" + "%s",
 		LangTraditionalChinese: "cc-connect 狀態\n\n" +
 			"項目: %s\n" +
 			"Agent: %s\n" +
+			"工作目錄: %s\n" +
 			"平台: %s\n" +
 			"運行時間: %s\n" +
 			"語言: %s\n" +
-			"%s" + "%s" + "%s" + "%s" + "%s",
+			"%s" + "%s" + "%s" + "%s" + "%s" + "%s",
 		LangJapanese: "cc-connect ステータス\n\n" +
 			"プロジェクト: %s\n" +
 			"エージェント: %s\n" +
+			"作業ディレクトリ: %s\n" +
 			"プラットフォーム: %s\n" +
 			"稼働時間: %s\n" +
 			"言語: %s\n" +
-			"%s" + "%s" + "%s" + "%s" + "%s",
+			"%s" + "%s" + "%s" + "%s" + "%s" + "%s",
 		LangSpanish: "Estado de cc-connect\n\n" +
 			"Proyecto: %s\n" +
 			"Agente: %s\n" +
+			"Directorio: %s\n" +
 			"Plataformas: %s\n" +
 			"Tiempo activo: %s\n" +
 			"Idioma: %s\n" +
-			"%s" + "%s" + "%s" + "%s" + "%s",
+			"%s" + "%s" + "%s" + "%s" + "%s" + "%s",
+	},
+	MsgReplyFooterRemaining: {
+		LangEnglish:            "%d%% left",
+		LangChinese:            "剩余 %d%%",
+		LangTraditionalChinese: "剩餘 %d%%",
+		LangJapanese:           "残り %d%%",
+		LangSpanish:            "%d%% restante",
 	},
 	MsgModelCurrent: {
 		LangEnglish:            "Current model: %s",
@@ -1823,6 +1892,27 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 切換模型失敗: %v",
 		LangJapanese:           "❌ モデルの切り替えに失敗しました: %v",
 		LangSpanish:            "❌ Error al cambiar el modelo: %v",
+	},
+	MsgModelCardSwitching: {
+		LangEnglish:            "Switching model to `%s`...",
+		LangChinese:            "正在切换模型为 `%s`...",
+		LangTraditionalChinese: "正在切換模型為 `%s`...",
+		LangJapanese:           "モデルを `%s` に切り替えています...",
+		LangSpanish:            "Cambiando el modelo a `%s`...",
+	},
+	MsgModelCardSwitched: {
+		LangEnglish:            "Model switched to `%s`.",
+		LangChinese:            "模型已切换为 `%s`。",
+		LangTraditionalChinese: "模型已切換為 `%s`。",
+		LangJapanese:           "モデルを `%s` に切り替えました。",
+		LangSpanish:            "Modelo cambiado a `%s`.",
+	},
+	MsgModelCardSwitchFailed: {
+		LangEnglish:            "Failed to switch model: %v",
+		LangChinese:            "切换模型失败: %v",
+		LangTraditionalChinese: "切換模型失敗: %v",
+		LangJapanese:           "モデルの切り替えに失敗しました: %v",
+		LangSpanish:            "Error al cambiar el modelo: %v",
 	},
 	MsgModelNotSupported: {
 		LangEnglish:            "This agent does not support model switching.",
@@ -2007,6 +2097,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "セッションキー: `%s`\n",
 		LangSpanish:            "Clave de sesión: `%s`\n",
 	},
+	MsgStatusAgentSID: {
+		LangEnglish:            "Agent SID: `%s`\n",
+		LangChinese:            "Agent SID: `%s`\n",
+		LangTraditionalChinese: "Agent SID: `%s`\n",
+		LangJapanese:           "Agent SID: `%s`\n",
+		LangSpanish:            "Agent SID: `%s`\n",
+	},
 	MsgStatusUserID: {
 		LangEnglish:            "User ID: `%s`\n",
 		LangChinese:            "User ID: `%s`\n",
@@ -2096,6 +2193,10 @@ var messages = map[MsgKey]map[Language]string{
 	MsgProviderSelectPlaceholder: {
 		LangEnglish: "Select provider", LangChinese: "选择 Provider", LangTraditionalChinese: "選擇 Provider",
 		LangJapanese: "プロバイダーを選択", LangSpanish: "Seleccionar proveedor",
+	},
+	MsgProviderClearOption: {
+		LangEnglish: "Do not use provider", LangChinese: "不使用服务商", LangTraditionalChinese: "不使用服務商",
+		LangJapanese: "プロバイダーを使用しない", LangSpanish: "No usar proveedor",
 	},
 	MsgCardBack: {
 		LangEnglish: "← Back", LangChinese: "← 返回", LangTraditionalChinese: "← 返回",
@@ -2443,6 +2544,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "用法：/<skill名稱> [參數...] 來調用 Skill。",
 		LangJapanese:           "使い方：/<スキル名> [引数...] でスキルを実行します。",
 		LangSpanish:            "Uso: /<nombre-skill> [args...] para invocar un skill.",
+	},
+	MsgSkillsTelegramMenuHint: {
+		LangEnglish:            "Telegram's command menu is full, so skill commands are not listed there. You can still invoke them by typing /<skill-name> manually.",
+		LangChinese:            "Telegram 的命令菜单已满，因此 Skill 不会显示在那里。你仍然可以手动输入 /<skill名称> 来调用它们。",
+		LangTraditionalChinese: "Telegram 的命令選單已滿，因此 Skill 不會顯示在那裡。你仍然可以手動輸入 /<skill名稱> 來調用它們。",
+		LangJapanese:           "Telegram のコマンドメニューがいっぱいのため、スキルコマンドはそこに表示されません。手動で /<スキル名> と入力すれば実行できます。",
+		LangSpanish:            "El menú de comandos de Telegram está lleno, así que los skills no aparecen allí. Aun así puedes invocarlos escribiendo /<nombre-skill> manualmente.",
 	},
 
 	MsgConfigTitle: {
@@ -2858,6 +2966,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "刪除結果",
 		LangJapanese:           "削除結果",
 		LangSpanish:            "Resultado de eliminación",
+	},
+	MsgDeleteModeDeletingTitle: {
+		LangEnglish:            "Deleting Sessions...",
+		LangChinese:            "正在删除会话...",
+		LangTraditionalChinese: "正在刪除會話...",
+		LangJapanese:           "セッションを削除中...",
+		LangSpanish:            "Eliminando sesiones...",
+	},
+	MsgDeleteModeDeletingBody: {
+		LangEnglish:            "Deleting %d session(s), please wait...",
+		LangChinese:            "正在删除 %d 个会话，请稍候...",
+		LangTraditionalChinese: "正在刪除 %d 個會話，請稍候...",
+		LangJapanese:           "%d 件のセッションを削除中、お待ちください...",
+		LangSpanish:            "Eliminando %d sesión(es), por favor espere...",
 	},
 	MsgDeleteModeMissingSession: {
 		LangEnglish:            "❌ Missing selected session: %s",
@@ -3518,11 +3640,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Uso: `/workspace [bind <nombre> | route <ruta-absoluta> | init <url> | unbind | list | shared ...]`",
 	},
 	MsgWsInitUsage: {
-		LangEnglish:            "Usage: `/workspace init <git-url>`",
-		LangChinese:            "用法: `/workspace init <git仓库地址>`",
-		LangTraditionalChinese: "用法: `/workspace init <git倉庫地址>`",
-		LangJapanese:           "使い方: `/workspace init <git-url>`",
-		LangSpanish:            "Uso: `/workspace init <git-url>`",
+		LangEnglish:            "Usage: `/workspace init <git-url or directory-path>`",
+		LangChinese:            "用法: `/workspace init <git仓库地址或目录路径>`",
+		LangTraditionalChinese: "用法: `/workspace init <git倉庫地址或目錄路徑>`",
+		LangJapanese:           "使い方: `/workspace init <git-urlまたはディレクトリパス>`",
+		LangSpanish:            "Uso: `/workspace init <git-url o ruta-de-directorio>`",
 	},
 	MsgWsBindUsage: {
 		LangEnglish:            "Usage: `/workspace bind <workspace-name>`",
@@ -3658,11 +3780,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "El workspace efectivo actual proviene de la capa shared. Usa `/workspace shared unbind` para quitarlo.",
 	},
 	MsgWsNotFoundHint: {
-		LangEnglish:            "No workspace found for this channel. Send me a git repo URL to clone, or use `/workspace init <url>`.",
-		LangChinese:            "此频道未找到工作区。请发送 git 仓库地址进行克隆，或使用 `/workspace init <仓库地址>`。",
-		LangTraditionalChinese: "此頻道未找到工作區。請發送 git 倉庫地址進行克隆，或使用 `/workspace init <倉庫地址>`。",
-		LangJapanese:           "このチャンネルにワークスペースが見つかりません。gitリポジトリURLを送信するか、`/workspace init <url>` を使用してください。",
-		LangSpanish:            "No se encontró workspace para este canal. Envía una URL de repo git para clonar, o usa `/workspace init <url>`.",
+		LangEnglish:            "No workspace found for this channel. Send a git repo URL, a local directory path, or use `/workspace init <url-or-path>`.",
+		LangChinese:            "此频道未找到工作区。请发送 git 仓库地址或本地目录路径，或使用 `/workspace init <仓库地址或目录路径>`。",
+		LangTraditionalChinese: "此頻道未找到工作區。請發送 git 倉庫地址或本地目錄路徑，或使用 `/workspace init <倉庫地址或目錄路徑>`。",
+		LangJapanese:           "このチャンネルにワークスペースが見つかりません。git URL またはローカルディレクトリパスを送信するか、`/workspace init <urlまたはパス>` を使用してください。",
+		LangSpanish:            "No se encontró workspace para este canal. Envía una URL de repo git, una ruta de directorio local, o usa `/workspace init <url-o-ruta>`.",
 	},
 	MsgWsResolutionError: {
 		LangEnglish:            "Workspace resolution error: %v",
@@ -3691,6 +3813,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 克隆倉庫失敗: %v",
 		LangJapanese:           "❌ リポジトリのクローンに失敗しました: %v",
 		LangSpanish:            "❌ Error al clonar repositorio: %v",
+	},
+	MsgWsInitDirNotFound: {
+		LangEnglish:            "Directory not found: `%s`. Please provide a valid directory path or a git URL.",
+		LangChinese:            "目录不存在: `%s`。请提供有效的目录路径或 git 仓库地址。",
+		LangTraditionalChinese: "目錄不存在: `%s`。請提供有效的目錄路徑或 git 倉庫地址。",
+		LangJapanese:           "ディレクトリが見つかりません: `%s`。有効なディレクトリパスまたは git URL を指定してください。",
+		LangSpanish:            "Directorio no encontrado: `%s`. Proporcione una ruta de directorio válida o una URL de git.",
+	},
+	MsgWsInitInvalidTarget: {
+		LangEnglish:            "Please provide a git URL (e.g. `https://github.com/org/repo`) or a local directory path.",
+		LangChinese:            "请提供 git 仓库地址（如 `https://github.com/org/repo`）或本地目录路径。",
+		LangTraditionalChinese: "請提供 git 倉庫地址（如 `https://github.com/org/repo`）或本地目錄路徑。",
+		LangJapanese:           "git URL（例: `https://github.com/org/repo`）またはローカルディレクトリパスを指定してください。",
+		LangSpanish:            "Proporcione una URL de git (ej. `https://github.com/org/repo`) o una ruta de directorio local.",
 	},
 }
 

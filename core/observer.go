@@ -178,9 +178,13 @@ func (o *sessionObserver) poll(ctx context.Context) {
 		o.mu.Lock()
 		offset, known := o.offsets[f]
 		if !known {
-			// New file appeared — start from beginning
+			// New file appeared — start at EOF so we do not replay pre-existing
+			// session history that was already on disk when we first saw the file.
 			offset = 0
-			o.offsets[f] = 0
+			if info, err := os.Stat(f); err == nil {
+				offset = info.Size()
+			}
+			o.offsets[f] = offset
 		}
 		o.mu.Unlock()
 
