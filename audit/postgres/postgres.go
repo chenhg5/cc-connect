@@ -1,3 +1,4 @@
+// Package postgres implements the PostgreSQL-backed audit sink.
 package postgres
 
 import (
@@ -70,6 +71,7 @@ func New(cfg Config) (*Sink, error) {
 	return sink, nil
 }
 
+// newWithDB wires the sink to an existing sql.DB and optionally bootstraps schema.
 func newWithDB(db *sql.DB, cfg Config) (*Sink, error) {
 	cfg = normalizeConfig(cfg)
 	if err := validateIdentifier(cfg.Table); err != nil {
@@ -91,6 +93,7 @@ func newWithDB(db *sql.DB, cfg Config) (*Sink, error) {
 	return sink, nil
 }
 
+// normalizeConfig fills unset fields with PostgreSQL sink defaults.
 func normalizeConfig(cfg Config) Config {
 	defaults := DefaultConfig()
 	if strings.TrimSpace(cfg.Table) == "" {
@@ -112,6 +115,7 @@ func normalizeConfig(cfg Config) Config {
 	return cfg
 }
 
+// autoCreateEnabled resolves the optional auto-create flag with a default of true.
 func autoCreateEnabled(v *bool) bool {
 	if v == nil {
 		return true
@@ -119,6 +123,7 @@ func autoCreateEnabled(v *bool) bool {
 	return *v
 }
 
+// validateIdentifier rejects unsafe table and index identifiers.
 func validateIdentifier(name string) error {
 	if !identifierPattern.MatchString(strings.TrimSpace(name)) {
 		return fmt.Errorf("%q contains invalid characters", name)
@@ -126,6 +131,7 @@ func validateIdentifier(name string) error {
 	return nil
 }
 
+// ensureSchema creates the audit table and supporting indexes when enabled.
 func (s *Sink) ensureSchema(ctx context.Context) error {
 	table := quoteIdent(s.table)
 	indexPrefix := s.table
@@ -161,6 +167,7 @@ func (s *Sink) ensureSchema(ctx context.Context) error {
 		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s ON %s (inbound_message_id)`, quoteIdent(indexPrefix+"_inbound_msg_idx"), table),
 		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s ON %s (outbound_message_id)`, quoteIdent(indexPrefix+"_outbound_msg_idx"), table),
 	}
+	stmts = append(stmts, auditCommentStatements(s.table)...)
 	for _, stmt := range stmts {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("postgres audit sink: ensure schema: %w", err)
@@ -169,14 +176,66 @@ func (s *Sink) ensureSchema(ctx context.Context) error {
 	return nil
 }
 
+// quoteIdent quotes an identifier for interpolation into DDL statements.
 func quoteIdent(name string) string {
 	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 }
 
+// quoteLiteral quotes a string literal for interpolation into COMMENT statements.
+func quoteLiteral(value string) string {
+	return `'` + strings.ReplaceAll(value, `'`, `''`) + `'`
+}
+
+// auditCommentStatements returns COMMENT statements for the audit table and columns.
+func auditCommentStatements(tableName string) []string {
+	table := quoteIdent(tableName)
+	comments := []struct {
+		column      string
+		description string
+	}{
+		{column: "id", description: "Synthetic primary key for the audit row."},
+		{column: "kind", description: "Lifecycle stage represented by the audit row."},
+		{column: "timestamp", description: "UTC timestamp when the audit row was recorded."},
+		{column: "project", description: "cc-connect project name that emitted the record."},
+		{column: "platform", description: "Normalized platform identifier, such as feishu."},
+		{column: "agent", description: "Normalized agent identifier, such as codex."},
+		{column: "session_key", description: "Platform-scoped conversation key used by cc-connect."},
+		{column: "user_id", description: "Platform-native user identifier captured for the turn."},
+		{column: "user_name", description: "Best-effort human-readable user name."},
+		{column: "chat_name", description: "Best-effort human-readable chat or room name."},
+		{column: "channel_key", description: "Platform-specific channel or room identifier used for routing."},
+		{column: "thread_id", description: "Platform-native thread or topic identifier when available."},
+		{column: "inbound_message_id", description: "Incoming platform message identifier for the turn."},
+		{column: "parent_message_id", description: "Direct parent or replied-to message identifier when available."},
+		{column: "root_message_id", description: "Root message identifier for the enclosing thread when available."},
+		{column: "reply_to_message_id", description: "Platform message identifier that outbound content replied to."},
+		{column: "outbound_message_id", description: "Platform message identifier returned after delivery."},
+		{column: "content_original", description: "User-authored text before cc-connect enrichment."},
+		{column: "extra_content", description: "Platform-enriched prefix added before the user-authored text."},
+		{column: "content_to_agent", description: "Final text payload sent to the agent."},
+		{column: "agent_output", description: "Normalized final text returned by the agent."},
+		{column: "content_sent", description: "Final text payload emitted back to the platform."},
+		{column: "error", description: "Terminal delivery or processing error when one occurred."},
+		{column: "extra", description: "Structured metadata that does not warrant first-class columns."},
+	}
+
+	stmts := []string{
+		fmt.Sprintf("COMMENT ON TABLE %s IS %s", table, quoteLiteral("Normalized audit records emitted by cc-connect.")),
+	}
+	for _, comment := range comments {
+		stmts = append(stmts,
+			fmt.Sprintf("COMMENT ON COLUMN %s.%s IS %s", table, quoteIdent(comment.column), quoteLiteral(comment.description)),
+		)
+	}
+	return stmts
+}
+
+// Name returns the stable sink identifier used in logs and diagnostics.
 func (s *Sink) Name() string {
 	return "postgres"
 }
 
+// Write persists a single normalized audit record into PostgreSQL.
 func (s *Sink) Write(ctx context.Context, record *core.AuditRecord) error {
 	if record == nil {
 		return nil
@@ -233,6 +292,7 @@ func (s *Sink) Write(ctx context.Context, record *core.AuditRecord) error {
 	return nil
 }
 
+// Close releases the underlying database handle.
 func (s *Sink) Close() error {
 	if s == nil || s.db == nil {
 		return nil

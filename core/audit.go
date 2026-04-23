@@ -21,29 +21,52 @@ const (
 
 // AuditRecord is the normalized audit payload shared across all sinks.
 type AuditRecord struct {
-	Kind              AuditRecordKind `json:"kind"`
-	Timestamp         time.Time       `json:"timestamp"`
-	Project           string          `json:"project"`
-	Platform          string          `json:"platform,omitempty"`
-	Agent             string          `json:"agent,omitempty"`
-	SessionKey        string          `json:"session_key,omitempty"`
-	UserID            string          `json:"user_id,omitempty"`
-	UserName          string          `json:"user_name,omitempty"`
-	ChatName          string          `json:"chat_name,omitempty"`
-	ChannelKey        string          `json:"channel_key,omitempty"`
-	ThreadID          string          `json:"thread_id,omitempty"`
-	InboundMessageID  string          `json:"inbound_message_id,omitempty"`
-	ParentMessageID   string          `json:"parent_message_id,omitempty"`
-	RootMessageID     string          `json:"root_message_id,omitempty"`
-	ReplyToMessageID  string          `json:"reply_to_message_id,omitempty"`
-	OutboundMessageID string          `json:"outbound_message_id,omitempty"`
-	ContentOriginal   string          `json:"content_original,omitempty"`
-	ExtraContent      string          `json:"extra_content,omitempty"`
-	ContentToAgent    string          `json:"content_to_agent,omitempty"`
-	AgentOutput       string          `json:"agent_output,omitempty"`
-	ContentSent       string          `json:"content_sent,omitempty"`
-	Error             string          `json:"error,omitempty"`
-	Extra             map[string]any  `json:"extra,omitempty"`
+	// Kind identifies the lifecycle stage represented by this record.
+	Kind AuditRecordKind `json:"kind"`
+	// Timestamp is when the record was produced, stored in UTC.
+	Timestamp time.Time `json:"timestamp"`
+	// Project is the cc-connect project name that emitted the record.
+	Project string `json:"project"`
+	// Platform is the normalized platform identifier, such as "feishu".
+	Platform string `json:"platform,omitempty"`
+	// Agent is the normalized agent identifier, such as "codex".
+	Agent string `json:"agent,omitempty"`
+	// SessionKey is the platform-scoped conversation key used by cc-connect.
+	SessionKey string `json:"session_key,omitempty"`
+	// UserID is the platform-native user identifier associated with the turn.
+	UserID string `json:"user_id,omitempty"`
+	// UserName is the best-effort display name captured for the user.
+	UserName string `json:"user_name,omitempty"`
+	// ChatName is the best-effort human-readable room or chat name.
+	ChatName string `json:"chat_name,omitempty"`
+	// ChannelKey is the platform-specific room or channel identifier used for routing.
+	ChannelKey string `json:"channel_key,omitempty"`
+	// ThreadID is the platform-native thread or topic identifier when available.
+	ThreadID string `json:"thread_id,omitempty"`
+	// InboundMessageID is the original incoming platform message identifier for the turn.
+	InboundMessageID string `json:"inbound_message_id,omitempty"`
+	// ParentMessageID is the direct parent or replied-to message identifier when available.
+	ParentMessageID string `json:"parent_message_id,omitempty"`
+	// RootMessageID is the root message identifier for the enclosing thread when available.
+	RootMessageID string `json:"root_message_id,omitempty"`
+	// ReplyToMessageID is the platform message identifier that outbound content replied to.
+	ReplyToMessageID string `json:"reply_to_message_id,omitempty"`
+	// OutboundMessageID is the platform message identifier returned after delivery.
+	OutboundMessageID string `json:"outbound_message_id,omitempty"`
+	// ContentOriginal is the user-authored text before cc-connect enrichment.
+	ContentOriginal string `json:"content_original,omitempty"`
+	// ExtraContent is the platform-enriched prefix added before the user-authored text.
+	ExtraContent string `json:"extra_content,omitempty"`
+	// ContentToAgent is the final text payload sent to the agent.
+	ContentToAgent string `json:"content_to_agent,omitempty"`
+	// AgentOutput is the normalized final text returned by the agent.
+	AgentOutput string `json:"agent_output,omitempty"`
+	// ContentSent is the final text payload emitted back to the platform.
+	ContentSent string `json:"content_sent,omitempty"`
+	// Error stores the terminal delivery or processing error message when one occurred.
+	Error string `json:"error,omitempty"`
+	// Extra carries sink-agnostic structured metadata that does not warrant first-class columns.
+	Extra map[string]any `json:"extra,omitempty"`
 }
 
 // AuditSink stores audit records in a concrete backend such as PostgreSQL.

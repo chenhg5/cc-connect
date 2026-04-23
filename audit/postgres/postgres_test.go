@@ -10,10 +10,12 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
+// boolPtr keeps test configs concise when optional booleans are needed.
 func boolPtr(v bool) *bool {
 	return &v
 }
 
+// TestNewWithDBEnsureSchema verifies that auto-create runs the expected DDL.
 func TestNewWithDBEnsureSchema(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -31,6 +33,10 @@ func TestNewWithDBEnsureSchema(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta(`CREATE INDEX IF NOT EXISTS "audit_records_outbound_msg_idx"`)).
 		WillReturnResult(sqlmock.NewResult(0, 0))
+	for _, stmt := range auditCommentStatements("audit_records") {
+		mock.ExpectExec(regexp.QuoteMeta(stmt)).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+	}
 
 	sink, err := newWithDB(db, Config{
 		Table:      "audit_records",
@@ -47,6 +53,7 @@ func TestNewWithDBEnsureSchema(t *testing.T) {
 	}
 }
 
+// TestSinkWriteInsertsAuditRecord verifies the shape of the INSERT payload.
 func TestSinkWriteInsertsAuditRecord(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {

@@ -9,25 +9,30 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
+// boolPtr keeps test configs concise when optional booleans are needed.
 func boolPtr(v bool) *bool {
 	return &v
 }
 
+// fakeCollection records sink operations without requiring a live MongoDB server.
 type fakeCollection struct {
 	indexCreated bool
 	insertedDoc  any
 }
 
+// InsertOne captures the inserted document for assertions.
 func (c *fakeCollection) InsertOne(_ context.Context, document any) error {
 	c.insertedDoc = document
 	return nil
 }
 
+// CreateIndexes records that index creation was requested.
 func (c *fakeCollection) CreateIndexes(_ context.Context) error {
 	c.indexCreated = true
 	return nil
 }
 
+// TestNewWithCollectionCreatesIndexes verifies that index creation is enabled by default.
 func TestNewWithCollectionCreatesIndexes(t *testing.T) {
 	coll := &fakeCollection{}
 	sink, err := newWithCollection(nil, coll, Config{
@@ -46,6 +51,7 @@ func TestNewWithCollectionCreatesIndexes(t *testing.T) {
 	}
 }
 
+// TestSinkWriteInsertsAuditRecord verifies the shape of the inserted audit document.
 func TestSinkWriteInsertsAuditRecord(t *testing.T) {
 	coll := &fakeCollection{}
 	sink, err := newWithCollection(nil, coll, Config{

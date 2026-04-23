@@ -1,3 +1,4 @@
+// Package mongodb implements the MongoDB-backed audit sink.
 package mongodb
 
 import (
@@ -33,10 +34,12 @@ type collectionAPI interface {
 	CreateIndexes(ctx context.Context) error
 }
 
+// mongoCollection adapts a MongoDB collection to the minimal sink interface.
 type mongoCollection struct {
 	collection *mongo.Collection
 }
 
+// InsertOne writes a single audit document to MongoDB.
 func (c *mongoCollection) InsertOne(ctx context.Context, document any) error {
 	_, err := c.collection.InsertOne(ctx, document)
 	if err != nil {
@@ -45,6 +48,7 @@ func (c *mongoCollection) InsertOne(ctx context.Context, document any) error {
 	return nil
 }
 
+// CreateIndexes creates the standard indexes used by audit queries.
 func (c *mongoCollection) CreateIndexes(ctx context.Context) error {
 	models := []mongo.IndexModel{
 		{
@@ -111,6 +115,7 @@ func New(cfg Config) (*Sink, error) {
 	return sink, nil
 }
 
+// newWithCollection wires the sink to an existing collection adapter and optionally creates indexes.
 func newWithCollection(client *mongo.Client, collection collectionAPI, cfg Config) (*Sink, error) {
 	cfg = normalizeConfig(cfg)
 	if strings.TrimSpace(cfg.Database) == "" {
@@ -133,6 +138,7 @@ func newWithCollection(client *mongo.Client, collection collectionAPI, cfg Confi
 	return sink, nil
 }
 
+// normalizeConfig fills unset fields with MongoDB sink defaults.
 func normalizeConfig(cfg Config) Config {
 	defaults := DefaultConfig()
 	if strings.TrimSpace(cfg.Collection) == "" {
@@ -145,6 +151,7 @@ func normalizeConfig(cfg Config) Config {
 	return cfg
 }
 
+// autoCreateIndexesEnabled resolves the optional index-creation flag with a default of true.
 func autoCreateIndexesEnabled(v *bool) bool {
 	if v == nil {
 		return true
@@ -152,15 +159,16 @@ func autoCreateIndexesEnabled(v *bool) bool {
 	return *v
 }
 
+// Name returns the stable sink identifier used in logs and diagnostics.
 func (s *Sink) Name() string {
 	return "mongodb"
 }
 
-func (s *Sink) Write(ctx context.Context, record *core.AuditRecord) error {
-	if record == nil {
-		return nil
-	}
-	doc := bson.M{
+// auditDocumentFromRecord converts the canonical audit record into the MongoDB
+// document shape. Field names intentionally mirror core.AuditRecord so the
+// shared English field documentation applies uniformly across sinks.
+func auditDocumentFromRecord(record *core.AuditRecord) bson.M {
+	return bson.M{
 		"kind":                string(record.Kind),
 		"timestamp":           record.Timestamp.UTC(),
 		"project":             record.Project,
@@ -185,9 +193,17 @@ func (s *Sink) Write(ctx context.Context, record *core.AuditRecord) error {
 		"error":               record.Error,
 		"extra":               record.Extra,
 	}
-	return s.collection.InsertOne(ctx, doc)
 }
 
+// Write persists a single normalized audit record into MongoDB.
+func (s *Sink) Write(ctx context.Context, record *core.AuditRecord) error {
+	if record == nil {
+		return nil
+	}
+	return s.collection.InsertOne(ctx, auditDocumentFromRecord(record))
+}
+
+// Close disconnects the MongoDB client.
 func (s *Sink) Close() error {
 	if s == nil || s.client == nil {
 		return nil
