@@ -1100,10 +1100,10 @@ func TestProcessInteractiveEvents_NonTerminalResultContinuesTurn(t *testing.T) {
 	session := e.sessions.GetOrCreateActive(sessionKey)
 	agentSession := newControllableSession("s1")
 	state := &interactiveState{
-		agentSession:                  agentSession,
-		platform:                      p,
-		replyCtx:                      "ctx-1",
-		currentTurnUserMessageTimeMs:  100,
+		agentSession:                   agentSession,
+		platform:                       p,
+		replyCtx:                       "ctx-1",
+		currentTurnUserMessageTimeMs:   100,
 		lastCompletedUserMessageTimeMs: 0,
 	}
 	e.interactiveStates[sessionKey] = state
@@ -10963,6 +10963,45 @@ func TestRunShellWithProgress_NonexistentCommand(t *testing.T) {
 	}
 }
 
+func TestExecuteShellCommand_StripsANSIOutput(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubWorkDirAgent{workDir: t.TempDir()}, []Platform{p}, "", LangEnglish)
+
+	msg := &Message{
+		SessionKey: "test:ch:admin",
+		Platform:   "test",
+		ReplyCtx:   "ctx",
+	}
+
+	execCmd := `printf '\033[32;1mId\033[0m\n'`
+	if runtime.GOOS == "windows" {
+		execCmd = `Write-Output ([string][char]27 + '[32;1mId' + [string][char]27 + '[0m')`
+	}
+
+	e.executeShellCommand(p, msg, &CustomCommand{
+		Name: "ansi",
+		Exec: execCmd,
+	}, nil)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) > 0 {
+			if strings.Contains(sent[0], "\x1b[") {
+				t.Fatalf("expected ANSI escapes to be stripped, got %q", sent[0])
+			}
+			if !strings.Contains(sent[0], "Id") {
+				t.Fatalf("expected sanitized output to contain Id, got %q", sent[0])
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for shell response")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // --- /diff command tests ---
 
 func TestCmdDiff_BlockedWithoutAdmin(t *testing.T) {
@@ -15016,8 +15055,8 @@ func TestIsAllowResponse_WithMultipleMentions(t *testing.T) {
 func TestIsAllowResponse_NotInsideOtherWord(t *testing.T) {
 	cases := []string{
 		"禁止允许这种",
-		"不允许这样",   // "不允许" has its own deny entry, but as part of "不允许这样" the user clearly is denying / negating, never allowing.
-		"我不太允许这件事", // long sentence, no token equals "允许"
+		"不允许这样",                            // "不允许" has its own deny entry, but as part of "不允许这样" the user clearly is denying / negating, never allowing.
+		"我不太允许这件事",                         // long sentence, no token equals "允许"
 		"please don't allowall the things", // FieldsFunc keeps "allowall" intact, but it is the approveAll single-token form, not allow.
 		"hello world",
 		"",
@@ -15045,7 +15084,7 @@ func TestIsDenyResponse_WithMention(t *testing.T) {
 	}
 
 	negatives := []string{
-		"拒绝症患者",       // embedded — must not match
+		"拒绝症患者",        // embedded — must not match
 		"我们都不应该 hello", // unrelated
 	}
 	for _, s := range negatives {
