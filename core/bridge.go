@@ -292,6 +292,8 @@ var (
 	_ PreviewCleaner            = (*BridgePlatform)(nil)
 	_ TypingIndicator           = (*BridgePlatform)(nil)
 	_ AudioSender               = (*BridgePlatform)(nil)
+	_ ImageSender               = (*BridgePlatform)(nil)
+	_ FileSender                = (*BridgePlatform)(nil)
 	_ CardNavigable             = (*BridgePlatform)(nil)
 	_ ReplyContextReconstructor = (*BridgePlatform)(nil)
 )
@@ -600,6 +602,44 @@ func (bp *BridgePlatform) SendAudio(ctx context.Context, replyCtx any, audio []b
 		"reply_ctx":   rc.ReplyCtx,
 		"data":        base64.StdEncoding.EncodeToString(audio),
 		"format":      format,
+	})
+}
+
+func (bp *BridgePlatform) SendImage(ctx context.Context, replyCtx any, img ImageAttachment) error {
+	rc, ok := replyCtx.(*bridgeReplyCtx)
+	if !ok {
+		return fmt.Errorf("bridge: invalid reply context")
+	}
+	a := bp.server.getAdapter(rc.Platform)
+	if a == nil || !a.capabilities["image"] {
+		return ErrNotSupported
+	}
+	return bp.server.sendToAdapter(rc.Platform, map[string]any{
+		"type":        "image",
+		"session_key": rc.SessionKey,
+		"reply_ctx":   rc.ReplyCtx,
+		"data":        base64.StdEncoding.EncodeToString(img.Data),
+		"mime_type":   img.MimeType,
+		"file_name":   img.FileName,
+	})
+}
+
+func (bp *BridgePlatform) SendFile(ctx context.Context, replyCtx any, file FileAttachment) error {
+	rc, ok := replyCtx.(*bridgeReplyCtx)
+	if !ok {
+		return fmt.Errorf("bridge: invalid reply context")
+	}
+	a := bp.server.getAdapter(rc.Platform)
+	if a == nil || !a.capabilities["file"] {
+		return ErrNotSupported
+	}
+	return bp.server.sendToAdapter(rc.Platform, map[string]any{
+		"type":        "file",
+		"session_key": rc.SessionKey,
+		"reply_ctx":   rc.ReplyCtx,
+		"data":        base64.StdEncoding.EncodeToString(file.Data),
+		"mime_type":   file.MimeType,
+		"file_name":   file.FileName,
 	})
 }
 
