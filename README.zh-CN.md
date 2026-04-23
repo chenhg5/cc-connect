@@ -338,11 +338,31 @@ cc-connect update --pre     # 含预发布版本
 
 ```
 /new [名称]            创建新会话
-/list                  列出所有会话
-/switch <id>           切换会话
+/list                  列出所有会话（cc-connect 管理的）
+/switch <id>           切换会话（cc-connect 管理的）
 /current               查看当前会话
 /dir [路径|reset]      查看、切换或重置工作目录
+/attach [query]        为当前 IM 线程显式接管一个 Claude Code session
+                       （query：latest | 序号 | uuid 前缀）。相比
+                       /switch，/attach 额外提供 30 秒并发写门控（若
+                       jsonl 最近仍在被 terminal claude 写会拒绝，加
+                       --force 强制）以及 5 条最近消息预览。
+                       注意：数字序号按修改时间倒序数所有 jsonl。当
+                       filter_external_sessions 开启时，/list 序号可能
+                       与之不一致，精确匹配请用 "latest" 或 uuid 前缀。
+/resume-latest         /attach latest 的便捷版
+/detach                /attach 的对称释放：停止子进程，清除 agent 绑定，
+                       打印 `claude --resume <uuid>` 命令供 terminal 使用。
+                       配合 reset_on_idle_mins 作为自动兜底。
 ```
+
+**从 IM 接续 terminal 里的会话**：如果你之前在本机 terminal 里用 `claude`
+聊了一半，出门想在手机上继续，先在 terminal 里 `/exit`，然后在 IM 发
+`/resume-latest`。cc-connect 会定位 `~/.claude/projects/<work_dir>/`
+下最新的 `.jsonl`，spawn 一个 `claude --resume <uuid>` 继续对话。回到
+电脑前先发 `/detach` 再 terminal `claude --resume`，避免两个进程同时
+写一个 jsonl（`reset_on_idle_mins` 也能作为自动兜底）。`/attach`、
+`/detach` 是特权命令——需要配置 `admin_from` 才能使用。
 
 项目配置也可以开启“长时间空闲后自动切到新会话”：
 

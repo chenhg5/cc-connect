@@ -433,6 +433,16 @@ const (
 	MsgSwitchNoMatch   MsgKey = "switch_no_match"
 	MsgSwitchNoSession MsgKey = "switch_no_session"
 
+	MsgAttachOnlyClaudecode   MsgKey = "attach_only_claudecode"
+	MsgAttachNoHistory        MsgKey = "attach_no_history"
+	MsgAttachNoMatch          MsgKey = "attach_no_match"
+	MsgAttachRecentlyActive   MsgKey = "attach_recently_active"
+	MsgAttachSuccess          MsgKey = "attach_success"
+	MsgAttachRecentMessages   MsgKey = "attach_recent_messages"
+	MsgDetachNothingToRelease MsgKey = "detach_nothing_to_release"
+	MsgDetachStopFailed       MsgKey = "detach_stop_failed"
+	MsgDetachSuccess          MsgKey = "detach_success"
+
 	MsgCommandTimeout MsgKey = "command_timeout"
 
 	MsgBannedWordBlocked MsgKey = "banned_word_blocked"
@@ -2861,6 +2871,69 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 沒有找到匹配 %q 的會話",
 		LangJapanese:           "❌ %q に一致するセッションが見つかりません",
 		LangSpanish:            "❌ No hay sesión que coincida con %q",
+	},
+	MsgAttachOnlyClaudecode: {
+		LangEnglish:            "/attach only supports the claudecode agent.",
+		LangChinese:            "/attach 仅支持 claudecode agent。",
+		LangTraditionalChinese: "/attach 僅支援 claudecode agent。",
+		LangJapanese:           "/attach は claudecode エージェントのみサポートします。",
+		LangSpanish:            "/attach solo admite el agent claudecode.",
+	},
+	MsgAttachNoHistory: {
+		LangEnglish:            "No Claude session history found in this work_dir.",
+		LangChinese:            "该工作目录下没有 Claude session 历史。",
+		LangTraditionalChinese: "該工作目錄下沒有 Claude session 歷史。",
+		LangJapanese:           "この work_dir には Claude セッションの履歴がありません。",
+		LangSpanish:            "No se encontró historial de sesiones de Claude en este work_dir.",
+	},
+	MsgAttachNoMatch: {
+		LangEnglish:            "No session matching %q.",
+		LangChinese:            "没有找到匹配 %q 的会话。",
+		LangTraditionalChinese: "沒有找到匹配 %q 的會話。",
+		LangJapanese:           "%q に一致するセッションが見つかりません。",
+		LangSpanish:            "No hay sesión que coincida con %q.",
+	},
+	MsgAttachRecentlyActive: {
+		LangEnglish:            "⚠️ Session %s was modified in the last 30s — a terminal `claude` may still be running.\nExit it first, or retry with: /attach %s --force",
+		LangChinese:            "⚠️ Session %s 最近 30 秒内仍在活动——terminal 里的 `claude` 可能还在运行。\n请先退出 terminal 里的 claude，或使用：/attach %s --force",
+		LangTraditionalChinese: "⚠️ Session %s 最近 30 秒內仍在活動——terminal 裡的 `claude` 可能還在執行。\n請先離開 terminal 裡的 claude，或使用：/attach %s --force",
+		LangJapanese:           "⚠️ セッション %s は直近 30 秒以内に更新されました — ターミナルで `claude` が実行中の可能性があります。\n先に終了するか、次で強制実行: /attach %s --force",
+		LangSpanish:            "⚠️ La sesión %s fue modificada en los últimos 30s — un `claude` de terminal puede seguir ejecutándose.\nCiérralo primero o reintenta con: /attach %s --force",
+	},
+	MsgAttachSuccess: {
+		LangEnglish:            "✅ Attached external session %s (%d msgs, last active %s).%s\nSend a message to continue.",
+		LangChinese:            "✅ 已接续外部 session %s（%d 条消息，最后活动：%s）。%s\n直接发消息即可继续。",
+		LangTraditionalChinese: "✅ 已接續外部 session %s（%d 則訊息，最後活動：%s）。%s\n直接發訊息即可繼續。",
+		LangJapanese:           "✅ 外部セッション %s に接続しました（%d 件、最終アクティビティ: %s）。%s\nメッセージを送信して続行してください。",
+		LangSpanish:            "✅ Adjuntada sesión externa %s (%d msgs, última actividad %s).%s\nEnvía un mensaje para continuar.",
+	},
+	MsgAttachRecentMessages: {
+		LangEnglish:            "\nRecent messages:\n",
+		LangChinese:            "\n最近的消息：\n",
+		LangTraditionalChinese: "\n最近的訊息：\n",
+		LangJapanese:           "\n最近のメッセージ:\n",
+		LangSpanish:            "\nMensajes recientes:\n",
+	},
+	MsgDetachNothingToRelease: {
+		LangEnglish:            "ℹ️ No active Claude session — nothing to release.\nYou can safely run `claude --resume <id>` in your terminal (or `claude` for a fresh one).",
+		LangChinese:            "ℹ️ 当前没有活跃的 Claude session——无需释放。\n可以直接在 terminal 里执行 `claude --resume <id>`（或 `claude` 新开一个）。",
+		LangTraditionalChinese: "ℹ️ 目前沒有活躍的 Claude session——無需釋放。\n可以直接在 terminal 裡執行 `claude --resume <id>`（或 `claude` 新開一個）。",
+		LangJapanese:           "ℹ️ アクティブな Claude セッションはありません — 解放する必要はありません。\nターミナルで `claude --resume <id>` を安全に実行できます（新しい場合は `claude`）。",
+		LangSpanish:            "ℹ️ No hay sesión activa de Claude — nada que liberar.\nPuedes ejecutar `claude --resume <id>` en tu terminal (o `claude` para una nueva).",
+	},
+	MsgDetachStopFailed: {
+		LangEnglish:            "Failed to stop subprocess: %v",
+		LangChinese:            "停止子进程失败：%v",
+		LangTraditionalChinese: "停止子程序失敗：%v",
+		LangJapanese:           "サブプロセスの停止に失敗: %v",
+		LangSpanish:            "Falló al detener subproceso: %v",
+	},
+	MsgDetachSuccess: {
+		LangEnglish:            "✅ Released session %s.\nTerminal can now safely run: claude --resume %s",
+		LangChinese:            "✅ 已释放 session %s。\nterminal 现在可以安全执行：claude --resume %s",
+		LangTraditionalChinese: "✅ 已釋放 session %s。\nterminal 現在可以安全執行：claude --resume %s",
+		LangJapanese:           "✅ セッション %s を解放しました。\n今ならターミナルで安全に実行できます: claude --resume %s",
+		LangSpanish:            "✅ Sesión %s liberada.\nAhora la terminal puede ejecutar con seguridad: claude --resume %s",
 	},
 	MsgSwitchNoSession: {
 		LangEnglish:            "❌ No session #%d",

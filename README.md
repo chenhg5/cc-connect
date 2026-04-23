@@ -337,12 +337,38 @@ cc-connect update --pre     # Include pre-releases
 ### 💬 Session Management
 
 ```
-/new [name]       Start a new session
-/list             List all sessions
-/switch <id>      Switch session
-/current          Show current session
-/dir [path|reset] Show, switch, or reset work directory
+/new [name]           Start a new session
+/list                 List all sessions (cc-connect managed)
+/switch <id>          Switch session (cc-connect managed)
+/current              Show current session
+/dir [path|reset]     Show, switch, or reset work directory
+/attach [query]       Explicitly adopt a Claude Code session for this
+                      IM thread (query: "latest" | index | uuid prefix).
+                      Compared with /switch, /attach adds a 30-second
+                      concurrent-write guard (refuses if the jsonl was
+                      touched recently — pass --force to override) and
+                      shows a 5-message history preview before binding.
+                      Note: numeric index counts newest-first across all
+                      jsonl transcripts. When filter_external_sessions
+                      is enabled the /list numbering may differ — prefer
+                      "latest" or a uuid prefix when precision matters.
+/resume-latest        Shorthand for /attach latest
+/detach               Symmetric release of /attach: stop the live
+                      subprocess, clear the agent binding, and print the
+                      exact `claude --resume <uuid>` command to paste in
+                      a terminal. Pair with reset_on_idle_mins as an
+                      automatic safety net.
 ```
+
+**Continue a terminal session from IM**: when you've been chatting with
+`claude` in a local terminal and want to pick up on your phone, exit the
+terminal process (`/exit`), then send `/resume-latest` in your chat.
+cc-connect locates the most recent `~/.claude/projects/<work_dir>/*.jsonl`
+transcript, spawns a fresh `claude --resume <uuid>`, and continues the
+conversation. Run `/detach` before returning to the terminal to avoid two
+processes writing the same jsonl (`reset_on_idle_mins` also cleans this up
+automatically). `/attach` and `/detach` are privileged — configure
+`admin_from` to enable them.
 
 Project configs can also rotate to a fresh session automatically after long inactivity:
 

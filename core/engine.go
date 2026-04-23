@@ -776,13 +776,16 @@ func (e *Engine) SetAdminFrom(adminFrom string) {
 
 // privilegedCommands are commands that require admin_from authorization.
 var privilegedCommands = map[string]bool{
-	"shell":   true,
-	"show":    true,
-	"dir":     true,
-	"restart": true,
-	"upgrade": true,
-	"web":     true,
-	"diff":    true,
+	"shell":         true,
+	"show":          true,
+	"dir":           true,
+	"restart":       true,
+	"upgrade":       true,
+	"web":           true,
+	"diff":          true,
+	"attach":        true,
+	"resume-latest": true,
+	"detach":        true,
 }
 
 // isAdmin checks whether the given user ID is authorized for privileged commands.
@@ -3383,6 +3386,9 @@ var builtinCommands = []struct {
 	{[]string{"whoami", "myid"}, "whoami"},
 	{[]string{"web"}, "web"},
 	{[]string{"diff"}, "diff"},
+	{[]string{"attach", "adopt"}, "attach"},
+	{[]string{"resume-latest", "latest"}, "resume-latest"},
+	{[]string{"detach", "release"}, "detach"},
 }
 
 // isBtwCommand checks if a trimmed message starts with a /btw command.
@@ -3504,6 +3510,12 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdList(p, msg, args)
 	case "switch":
 		e.cmdSwitch(p, msg, args)
+	case "attach":
+		e.cmdAttach(p, msg, args)
+	case "resume-latest":
+		e.cmdResumeLatest(p, msg)
+	case "detach":
+		e.cmdDetach(p, msg)
 	case "name":
 		e.cmdName(p, msg, args)
 	case "current":
@@ -4050,6 +4062,152 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	}
 	e.reply(p, msg.ReplyCtx,
 		e.i18n.Tf(MsgSwitchSuccess, displayName, shortID, matched.MessageCount))
+}
+
+// cmdAttach adopts an external Claude Code session — one the user created by
+// running `claude` directly in a terminal — so subsequent messages continue
+// that conversation via `claude --resume <uuid>`. It bypasses
+// filterOwnedSessions (which only shows sessions cc-connect itself spawned)
+// and registers the external UUID via SwitchToAgentSession, after which the
+// normal message pipeline handles resume transparently.
+//
+// Usage:
+//
+//	/attach                  → latest session in work_dir
+//	/attach latest           → same as above
+//	/attach <N>              → Nth session from ListSessions (1-based, newest first)
+//	/attach <uuid prefix>    → match by session ID prefix
+//	/attach <...> --force    → bypass the 30s activity guard
+func (e *Engine) cmdAttach(p Platform, msg *Message, args []string) {
+	agent, sessions, interactiveKey, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+	if agent.Name() != "claudecode" {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgAttachOnlyClaudecode))
+		return
+	}
+
+	agentSessions, err := agent.ListSessions(e.ctx)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
+		return
+	}
+	if len(agentSessions) == 0 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgAttachNoHistory))
+		return
+	}
+
+	query := ""
+	force := false
+	for _, a := range args {
+		switch a {
+		case "--force", "-f":
+			force = true
+		default:
+			if query == "" {
+				query = a
+			}
+		}
+	}
+
+	var target *AgentSessionInfo
+	if query == "" || strings.EqualFold(query, "latest") {
+		t := agentSessions[0] // ListSessions is sorted by ModifiedAt desc.
+		target = &t
+	} else {
+		target = e.matchSession(agentSessions, sessions, query)
+	}
+	if target == nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgAttachNoMatch, query))
+		return
+	}
+
+	// Concurrent-write guard: if the jsonl was modified in the last 30s, a
+	// terminal `claude` process may still be holding the session. Two writers
+	// on the same jsonl produce a forked parent-UUID chain and lose messages
+	// on next resume. Require --force to override.
+	if !force && time.Since(target.ModifiedAt) < 30*time.Second {
+		short := target.ID
+		if len(short) > 8 {
+			short = short[:8]
+		}
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgAttachRecentlyActive, short, short))
+		return
+	}
+
+	e.cleanupInteractiveState(interactiveKey)
+	session := sessions.SwitchToAgentSession(msg.SessionKey, target.ID, agent.Name(), target.Summary)
+	// Clear the IM-side local message cache that belonged to the previous
+	// session — we're adopting an external conversation, so whatever was
+	// buffered for the old binding is no longer relevant. Mirrors cmdSwitch.
+	session.ClearHistory()
+
+	short := target.ID
+	if len(short) > 12 {
+		short = short[:12]
+	}
+
+	var preview strings.Builder
+	if hp, ok := agent.(HistoryProvider); ok {
+		if hist, hErr := hp.GetSessionHistory(e.ctx, target.ID, 5); hErr == nil && len(hist) > 0 {
+			preview.WriteString(e.i18n.T(MsgAttachRecentMessages))
+			for _, h := range hist {
+				snippet := strings.ReplaceAll(strings.TrimSpace(h.Content), "\n", " ")
+				if r := []rune(snippet); len(r) > 80 {
+					snippet = string(r[:80]) + "…"
+				}
+				preview.WriteString(fmt.Sprintf("  [%s] %s\n", h.Role, snippet))
+			}
+		}
+	}
+
+	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgAttachSuccess,
+		short, target.MessageCount,
+		target.ModifiedAt.Format("2006-01-02 15:04:05"),
+		preview.String()))
+}
+
+// cmdResumeLatest is shorthand for `/attach latest`.
+func (e *Engine) cmdResumeLatest(p Platform, msg *Message) {
+	e.cmdAttach(p, msg, nil)
+}
+
+// cmdDetach releases the active session so the user can safely resume it from
+// a terminal with `claude --resume <uuid>`. It stops the live subprocess (if
+// any) via stopInteractiveSession and clears the agent binding so the next
+// inbound message cannot silently re-spawn a resume — the user must /attach
+// or /new before sending again.
+func (e *Engine) cmdDetach(p Platform, msg *Message) {
+	_, sessions, interactiveKey, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+
+	active := sessions.GetOrCreateActive(msg.SessionKey)
+	uuid := active.GetAgentSessionID()
+	if uuid == "" {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDetachNothingToRelease))
+		return
+	}
+
+	// stopInteractiveSession returns false when the session is idle (no live
+	// subprocess). Either outcome is fine — the goal is "no cc-connect process
+	// holds the jsonl anymore". We pass the current platform/replyCtx as the
+	// quiet context so stop-specific reply chatter is suppressed.
+	e.stopInteractiveSession(interactiveKey, p, msg.ReplyCtx)
+
+	active.SetAgentSessionID("", "")
+	active.ClearHistory()
+	sessions.Save()
+
+	short := uuid
+	if len(short) > 12 {
+		short = short[:12]
+	}
+	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgDetachSuccess, short, uuid))
 }
 
 // matchSession resolves a user query to an agent session. Priority:
