@@ -101,12 +101,15 @@ func (q *QwenTTS) Synthesize(ctx context.Context, text string, opts TTSSynthesis
 	}
 	reqBody := map[string]any{
 		"model": q.Model,
-		"input": map[string]any{
-			"text":          text,
-			"voice":         voice,
-			"language_type": opts.LanguageType,
-		},
 	}
+	input := map[string]any{
+		"text":  text,
+		"voice": voice,
+	}
+	if opts.LanguageType != "" {
+		input["language_type"] = opts.LanguageType
+	}
+	reqBody["input"] = input
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
 		return nil, "", fmt.Errorf("qwen tts: marshal request: %w", err)

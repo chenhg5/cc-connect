@@ -24,13 +24,14 @@ import (
 // codexSession manages a multi-turn Codex conversation.
 // First Send() uses `codex exec`, subsequent ones use `codex exec resume <threadID>`.
 type codexSession struct {
-	workDir   string
-	model     string
-	effort    string
-	mode      string
-	baseURL   string   // provider base URL; passed as -c openai_base_url=<url>
-	extraEnv  []string
-	events    chan core.Event
+	workDir       string
+	model         string
+	effort        string
+	mode          string
+	baseURL       string // provider base URL; passed as -c openai_base_url=<url>
+	modelProvider string // Codex model_provider name; passed as -c model_provider=<name>
+	extraEnv      []string
+	events        chan core.Event
 	threadID  atomic.Value // stores string — Codex thread_id
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -41,25 +42,40 @@ type codexSession struct {
 	cmds      map[*exec.Cmd]struct{}
 
 	pendingMsgs []string // buffered agent_message texts awaiting classification
+
+	runtimeCfgMu       sync.Mutex
+	runtimeCfgModel    string
+	runtimeCfgEffort   string
+	runtimeCfgFetched  time.Time
+	runtimeCfgFetchErr error
+
+	contextMu    sync.RWMutex
+	contextUsage *core.ContextUsage
+	sessionFile  string
 }
 
 var codexSessionCloseTimeout = 8 * time.Second
 var codexSessionForceKillWait = 2 * time.Second
+var codexRuntimeConfigCacheTTL = 5 * time.Second
+var codexRuntimeConfigTimeout = 1500 * time.Millisecond
+var codexContextUsageRetryDelay = 50 * time.Millisecond
+var codexContextUsageRetryCount = 4
 
-func newCodexSession(ctx context.Context, workDir, model, effort, mode, resumeID, baseURL string, extraEnv []string) (*codexSession, error) {
+func newCodexSession(ctx context.Context, workDir, model, effort, mode, resumeID, baseURL string, extraEnv []string, modelProvider string) (*codexSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	cs := &codexSession{
-		workDir:  workDir,
-		model:    model,
-		effort:   effort,
-		mode:     mode,
-		baseURL:  baseURL,
-		extraEnv: extraEnv,
-		events:   make(chan core.Event, 64),
-		ctx:      sessionCtx,
-		cancel:   cancel,
-		cmds:     make(map[*exec.Cmd]struct{}),
+		workDir:       workDir,
+		model:         model,
+		effort:        effort,
+		mode:          mode,
+		baseURL:       baseURL,
+		modelProvider: modelProvider,
+		extraEnv:      extraEnv,
+		events:        make(chan core.Event, 64),
+		ctx:           sessionCtx,
+		cancel:        cancel,
+		cmds:          make(map[*exec.Cmd]struct{}),
 	}
 	cs.alive.Store(true)
 
@@ -170,6 +186,9 @@ func (cs *codexSession) buildExecArgs(prompt string, imagePaths []string) []stri
 	if cs.model != "" {
 		args = append(args, "--model", cs.model)
 	}
+	if cs.modelProvider != "" {
+		args = append(args, "-c", fmt.Sprintf("model_provider=%q", cs.modelProvider))
+	}
 	if cs.baseURL != "" {
 		args = append(args, "-c", fmt.Sprintf("openai_base_url=%q", cs.baseURL))
 	}
@@ -224,7 +243,7 @@ func (cs *codexSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf 
 			}
 		}
 		if tid := cs.CurrentSessionID(); tid != "" {
-			patchSessionSource(tid)
+			patchSessionSource(tid, getenvFromList(cs.extraEnv, "CODEX_HOME"))
 		}
 	}()
 
@@ -287,11 +306,18 @@ func (cs *codexSession) handleEvent(raw map[string]any) {
 	case "thread.started":
 		if tid, ok := raw["thread_id"].(string); ok {
 			cs.threadID.Store(tid)
+			cs.contextMu.Lock()
+			cs.sessionFile = ""
+			cs.contextUsage = nil
+			cs.contextMu.Unlock()
 			slog.Debug("codexSession: thread started", "thread_id", tid)
 		}
 
 	case "turn.started":
 		cs.pendingMsgs = cs.pendingMsgs[:0]
+		cs.contextMu.Lock()
+		cs.contextUsage = nil
+		cs.contextMu.Unlock()
 		slog.Debug("codexSession: turn started")
 
 	case "item.started":
@@ -301,6 +327,7 @@ func (cs *codexSession) handleEvent(raw map[string]any) {
 		cs.handleItemCompleted(raw)
 
 	case "turn.completed":
+		cs.refreshContextUsageFromRollout()
 		cs.flushPendingAsText()
 		evt := core.Event{Type: core.EventResult, SessionID: cs.CurrentSessionID(), Done: true}
 		select {
@@ -559,6 +586,134 @@ func codexToolSuccess(status string, exitCode *int) bool {
 	return s == "completed" || s == "success" || s == "succeeded" || s == "ok"
 }
 
+func loadCodexRuntimeConfig(ctx context.Context, workDir string, extraEnv []string) (string, string, error) {
+	cmd := exec.CommandContext(ctx, "codex", "app-server")
+	cmd.Dir = workDir
+	prepareCmdForKill(cmd)
+	if len(extraEnv) > 0 {
+		cmd.Env = core.MergeEnv(os.Environ(), extraEnv)
+	}
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return "", "", fmt.Errorf("runtime config stdin pipe: %w", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", "", fmt.Errorf("runtime config stdout pipe: %w", err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Start(); err != nil {
+		return "", "", fmt.Errorf("runtime config start app-server: %w", err)
+	}
+	defer func() {
+		_ = stdin.Close()
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+	}()
+
+	reader := bufio.NewReader(stdout)
+	nextID := int64(1)
+
+	if err := rpcRequestOverIO(stdin, reader, nextID, "initialize", map[string]any{
+		"clientInfo": map[string]any{
+			"name":    "cc-connect-codex-runtime-config",
+			"title":   "CC Connect Codex Runtime Config",
+			"version": "0.1.0",
+		},
+	}, nil); err != nil {
+		return "", "", err
+	}
+	nextID++
+
+	if err := rpcNotifyOverIO(stdin, "initialized", map[string]any{}); err != nil {
+		return "", "", err
+	}
+
+	var resp struct {
+		Config struct {
+			Model                string  `json:"model"`
+			ModelReasoningEffort *string `json:"model_reasoning_effort"`
+		} `json:"config"`
+	}
+	if err := rpcRequestOverIO(stdin, reader, nextID, "config/read", map[string]any{
+		"includeLayers": false,
+	}, &resp); err != nil {
+		return "", "", err
+	}
+
+	return strings.TrimSpace(resp.Config.Model), normalizeRuntimeReasoningEffort(stringValue(resp.Config.ModelReasoningEffort)), nil
+}
+
+func rpcRequestOverIO(stdin io.Writer, reader *bufio.Reader, id int64, method string, params any, out any) error {
+	payload := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"method":  method,
+		"params":  params,
+	}
+	if err := writeRPCMessage(stdin, payload); err != nil {
+		return err
+	}
+
+	for {
+		line, err := reader.ReadBytes('\n')
+		if err != nil {
+			return fmt.Errorf("%s read response: %w", method, err)
+		}
+
+		var probe map[string]json.RawMessage
+		if err := json.Unmarshal(bytes.TrimSpace(line), &probe); err != nil {
+			continue
+		}
+		if _, ok := probe["id"]; !ok {
+			continue
+		}
+
+		var resp rpcResponseEnvelope
+		if err := json.Unmarshal(bytes.TrimSpace(line), &resp); err != nil {
+			continue
+		}
+		respID, ok := rpcIDToInt64(resp.ID)
+		if !ok || respID != id {
+			continue
+		}
+		if resp.Error != nil {
+			return fmt.Errorf("%s: %s", method, strings.TrimSpace(resp.Error.Message))
+		}
+		if out != nil {
+			if err := json.Unmarshal(resp.Result, out); err != nil {
+				return fmt.Errorf("%s decode response: %w", method, err)
+			}
+		}
+		return nil
+	}
+}
+
+func rpcNotifyOverIO(stdin io.Writer, method string, params any) error {
+	payload := map[string]any{
+		"jsonrpc": "2.0",
+		"method":  method,
+		"params":  params,
+	}
+	return writeRPCMessage(stdin, payload)
+}
+
+func writeRPCMessage(w io.Writer, payload any) error {
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode rpc message: %w", err)
+	}
+	if _, err := w.Write(append(b, '\n')); err != nil {
+		return fmt.Errorf("write rpc message: %w", err)
+	}
+	return nil
+}
+
 // RespondPermission is a no-op for Codex — permissions are handled via CLI flags.
 func (cs *codexSession) RespondPermission(_ string, _ core.PermissionResult) error {
 	return nil
@@ -573,8 +728,96 @@ func (cs *codexSession) CurrentSessionID() string {
 	return v
 }
 
+func (cs *codexSession) GetWorkDir() string {
+	return cs.workDir
+}
+
+func (cs *codexSession) GetModel() string {
+	if model := strings.TrimSpace(cs.model); model != "" {
+		return model
+	}
+	model, _ := cs.runtimeConfig()
+	return model
+}
+
+func (cs *codexSession) GetReasoningEffort() string {
+	if effort := strings.TrimSpace(cs.effort); effort != "" {
+		return effort
+	}
+	_, effort := cs.runtimeConfig()
+	return effort
+}
+
 func (cs *codexSession) Alive() bool {
 	return cs.alive.Load()
+}
+
+func (cs *codexSession) GetContextUsage() *core.ContextUsage {
+	cs.contextMu.RLock()
+	defer cs.contextMu.RUnlock()
+	return cloneContextUsage(cs.contextUsage)
+}
+
+func (cs *codexSession) runtimeConfig() (string, string) {
+	cs.runtimeCfgMu.Lock()
+	defer cs.runtimeCfgMu.Unlock()
+
+	if !cs.runtimeCfgFetched.IsZero() && time.Since(cs.runtimeCfgFetched) < codexRuntimeConfigCacheTTL {
+		return cs.runtimeCfgModel, cs.runtimeCfgEffort
+	}
+
+	ctx, cancel := context.WithTimeout(cs.ctx, codexRuntimeConfigTimeout)
+	defer cancel()
+
+	model, effort, err := loadCodexRuntimeConfig(ctx, cs.workDir, cs.extraEnv)
+	if err == nil {
+		cs.runtimeCfgModel = model
+		cs.runtimeCfgEffort = effort
+		cs.runtimeCfgFetchErr = nil
+		cs.runtimeCfgFetched = time.Now()
+		return model, effort
+	}
+
+	cs.runtimeCfgFetchErr = err
+	if !cs.runtimeCfgFetched.IsZero() {
+		return cs.runtimeCfgModel, cs.runtimeCfgEffort
+	}
+	return "", ""
+}
+
+func (cs *codexSession) refreshContextUsageFromRollout() {
+	sessionID := strings.TrimSpace(cs.CurrentSessionID())
+	if sessionID == "" {
+		return
+	}
+
+	for attempt := 0; attempt < codexContextUsageRetryCount; attempt++ {
+		cs.contextMu.RLock()
+		cachedPath := cs.sessionFile
+		cs.contextMu.RUnlock()
+
+		usage, path, err := loadContextUsageFromRollout(cs.extraEnv, sessionID, cachedPath)
+		if err == nil && usage != nil {
+			cs.contextMu.Lock()
+			cs.sessionFile = path
+			cs.contextUsage = cloneContextUsage(usage)
+			cs.contextMu.Unlock()
+			return
+		}
+
+		if attempt == codexContextUsageRetryCount-1 {
+			if err != nil {
+				slog.Debug("codexSession: context usage unavailable", "thread_id", sessionID, "error", err)
+			}
+			return
+		}
+
+		select {
+		case <-time.After(codexContextUsageRetryDelay):
+		case <-cs.ctx.Done():
+			return
+		}
+	}
 }
 
 func (cs *codexSession) Close() error {

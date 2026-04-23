@@ -14,24 +14,31 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
-// listCodexSessions scans ~/.codex/sessions/ for JSONL transcript files
-// whose cwd matches workDir.
-func listCodexSessions(workDir string) ([]core.AgentSessionInfo, error) {
+// resolveCodexHomeDir returns the effective CODEX_HOME directory.
+// Priority: explicit config value > CODEX_HOME env > ~/.codex
+func resolveCodexHomeDir(explicit string) string {
+	if h := strings.TrimSpace(explicit); h != "" {
+		return h
+	}
+	if h := os.Getenv("CODEX_HOME"); h != "" {
+		return h
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(homeDir, ".codex")
+}
+
+// listCodexSessions scans the codex sessions directory for JSONL transcript
+// files whose cwd matches workDir.
+func listCodexSessions(workDir, codexHome string) ([]core.AgentSessionInfo, error) {
 	absWorkDir, err := filepath.Abs(workDir)
 	if err != nil {
 		absWorkDir = workDir
 	}
 
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return nil, err
-	}
-
-	codexHome := os.Getenv("CODEX_HOME")
-	if codexHome == "" {
-		codexHome = filepath.Join(homeDir, ".codex")
-	}
-	sessionsDir := filepath.Join(codexHome, "sessions")
+	sessionsDir := filepath.Join(resolveCodexHomeDir(codexHome), "sessions")
 
 	var files []string
 	_ = filepath.Walk(sessionsDir, func(path string, info os.FileInfo, err error) error {
@@ -52,7 +59,7 @@ func listCodexSessions(workDir string) ([]core.AgentSessionInfo, error) {
 	for _, f := range files {
 		info := parseCodexSessionFile(f, absWorkDir)
 		if info != nil {
-			patchSessionSource(info.ID)
+			patchSessionSource(info.ID, codexHome)
 			sessions = append(sessions, *info)
 		}
 	}
@@ -161,16 +168,8 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 }
 
 // findSessionFile locates the JSONL transcript for a given session ID.
-func findSessionFile(sessionID string) string {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	codexHome := os.Getenv("CODEX_HOME")
-	if codexHome == "" {
-		codexHome = filepath.Join(homeDir, ".codex")
-	}
-	sessionsDir := filepath.Join(codexHome, "sessions")
+func findSessionFile(sessionID, codexHome string) string {
+	sessionsDir := filepath.Join(resolveCodexHomeDir(codexHome), "sessions")
 
 	var found string
 	_ = filepath.Walk(sessionsDir, func(path string, info os.FileInfo, err error) error {
@@ -186,8 +185,8 @@ func findSessionFile(sessionID string) string {
 }
 
 // getSessionHistory reads the JSONL transcript and returns user/assistant messages.
-func getSessionHistory(sessionID string, limit int) ([]core.HistoryEntry, error) {
-	path := findSessionFile(sessionID)
+func getSessionHistory(sessionID, codexHome string, limit int) ([]core.HistoryEntry, error) {
+	path := findSessionFile(sessionID, codexHome)
 	if path == "" {
 		return nil, fmt.Errorf("session file not found for %s", sessionID)
 	}
@@ -267,8 +266,8 @@ func getSessionHistory(sessionID string, limit int) ([]core.HistoryEntry, error)
 // patchSessionSource rewrites the session_meta line in a Codex JSONL transcript
 // so that source="cli" and originator="codex_cli_rs", making the session visible
 // in the interactive `codex` terminal.
-func patchSessionSource(sessionID string) {
-	path := findSessionFile(sessionID)
+func patchSessionSource(sessionID, codexHome string) {
+	path := findSessionFile(sessionID, codexHome)
 	if path == "" {
 		return
 	}

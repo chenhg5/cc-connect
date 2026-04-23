@@ -111,12 +111,14 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 # enable_feishu_card = true  # 可选：关闭后统一回退纯文本回复
 # thread_isolation = true    # 可选：按飞书 thread/root 隔离群聊会话
 # progress_style = "legacy"  # 可选：legacy | compact | card
+# done_emoji = "none"          # 可选：agent 完成回复后添加的表情回复（如 "Done"）；设为 "none" 可禁用
 ```
 
 > 如果应用没有交互卡片权限，或后台未配置卡片回调，可将 `enable_feishu_card = false`，让所有命令统一走纯文本回复，避免卡片发送失败后用户看不到内容。
 > 如果开启 `thread_isolation = true`，群聊里每个根消息 / reply thread 会对应一个独立 agent session；私聊行为保持原样。
 > `progress_style = "compact"` 会把思考/工具进度合并到一条可更新消息里，减少刷屏；`legacy` 保持原有逐条发送；`card` 会使用结构化卡片（标题 + 进度块）持续更新同一条消息，观感比纯文本更清晰。
 > `domain` 只影响运行时 API / WebSocket 请求地址；CLI `setup/new/bind` 的引导域名仍然使用内置默认值。
+> `done_emoji` 设置后，agent 每次完成回复时会在用户消息上添加指定表情（如 `"Done"` → ✅）。先移除 "OnIt" 表情（如果有），再添加 done 表情。在 quiet 模式下特别有用，因为飞书卡片原地更新不触发推送，done 表情可以通知用户 agent 已完成。设为 `"none"` 或不配置则禁用。
 
 ---
 
@@ -150,9 +152,9 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 | 权限名称 | 权限标识 | 用途 |
 |---------|---------|------|
 | 获取与更新用户基本信息 | `contact:user.base:readonly` | 获取用户信息 |
-| 接收群聊消息 | `im:message.group:receive` | 接收群消息 |
-| 接收单聊消息 | `im:message.p2p:receive` | 接收私聊消息 |
-| 读取群消息 | `im:message.group_msg:readonly` | 读取群消息内容 |
+| 获取群组中用户@机器人消息 | `im:message.group_at_msg:readonly` | 接收群消息 |
+| 读取用户发给机器人的单聊消息 | `im:message.p2p_msg:readonly` | 接收私聊消息 |
+| 获取群组中所有消息（敏感权限） | `im:message.group_msg` | 读取群消息内容 |
 | 读取单聊消息 | `im:message.p2p_msg:readonly` | 读取私聊内容 |
 | 以应用身份发送群消息 | `im:message:send_as_bot` | 发送消息回复用户 |
 
@@ -194,6 +196,9 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 | 事件名称 | 事件标识 | 用途 |
 |---------|---------|------|
 | 接收消息 | `im.message.receive_v1` | 接收用户发送的消息 |
+| 卡片回调 | `card.action.trigger` | 响应交互卡片按钮点击（权限确认、provider 切换等） |
+
+> ⚠️ **重要**：如果不订阅 `card.action.trigger` 事件，用户点击卡片上的按钮（如权限确认、provider 选择等）时将无法正常响应，飞书客户端可能会显示加载超时或错误提示。如果暂时无法添加该事件，可以在配置中设置 `enable_feishu_card = false` 关闭交互卡片功能，所有交互将回退到纯文本模式。
 
 ### 5.5 保存配置
 
@@ -290,6 +295,65 @@ cc-connect: ✅ 这是一个 Node.js 项目，包含以下目录...
 
 ---
 
+## Mention 功能
+
+开启 `resolve_mentions = true` 后，机器人发出的消息中 `@显示名` 会自动替换为飞书原生 at 标签。
+
+### 配置
+
+```toml
+[projects.platforms.options]
+resolve_mentions = true
+```
+
+### 语法
+
+直接使用 `@显示名`，无需特殊标记：
+
+```
+@张三 请查看巡检报告
+```
+
+### 使用示例
+
+**Cron 定时任务：**
+
+```bash
+cc-connect cron add \
+  --cron "0 9 * * *" \
+  --prompt "执行每日巡检报告，完成后通知 @张三 和 @李四 查看" \
+  --desc "每日巡检"
+```
+
+**AI 对话中：**
+
+AI 输出中包含 `@某人` 时，发送到飞书前会自动匹配并替换。
+
+### 工作原理
+
+1. 开启 `resolve_mentions` 后，发送消息前拉取群成员列表（懒加载，首次才拉）
+2. 成员列表缓存 1 小时，减少 API 调用
+3. 按名字长度从长到短匹配（`@张三丰` 优先于 `@张三`），避免部分匹配
+4. 未匹配到的 `@xxx` 保留原文不处理
+5. 根据消息类型自动选择正确的飞书 at 语法（文本消息 vs 卡片消息）
+
+### 权限要求
+
+需要以下飞书应用权限之一：
+
+- `im:chat`（获取与更新群组信息）
+- `im:chat:readonly`（获取群组信息）
+- `im:chat.members:read`（查看群成员）
+
+### 注意事项
+
+- 名字匹配为精确匹配（`@张三` 只匹配显示名恰好是「张三」的成员）
+- 同名成员取第一个匹配到的
+- 被 at 的人必须是当前群的成员
+- 未开启 `resolve_mentions` 时不会触发任何成员查询
+
+---
+
 ## 常见问题
 
 ### Q: 长连接和 Webhook 有什么区别？
@@ -314,6 +378,23 @@ cc-connect 内置了自动重连机制，断开后会自动尝试重新连接。
 2. 长连接是否建立成功（查看日志）
 3. 事件订阅是否配置了 `im.message.receive_v1`
 
+### Q: 点击卡片按钮没有反应或报错？
+
+cc-connect 默认使用交互卡片显示权限确认、provider 选择等操作。如果点击按钮后无响应、显示加载超时或报错，请检查：
+
+1. **事件订阅**：确认已在飞书开放平台订阅了 `card.action.trigger` 事件（详见第五步）
+2. **应用发布**：修改事件订阅后需要重新发布应用版本
+3. **权限配置**：确保应用有 `im:message:send_as_bot` 权限
+
+**快速解决方案**：如果暂时无法配置卡片回调，可以在 `config.toml` 中关闭交互卡片：
+
+```toml
+[projects.platforms.options]
+enable_feishu_card = false
+```
+
+关闭后，所有交互将回退为纯文本模式，权限确认等操作通过直接回复文字完成。
+
 ### Q: 提示权限不足？
 
 确保已在「权限管理」中申请并获得了所有必要权限，并发布了新版本。
@@ -334,7 +415,7 @@ cc-connect 内置了自动重连机制，断开后会自动尝试重新连接。
 - [飞书开放平台文档](https://open.feishu.cn/document/)
 - [机器人开发指南](https://open.feishu.cn/document/ukTMukTMukTM/uYjNwUjL2YDM14iN2ATN)
 - [事件订阅文档](https://open.feishu.cn/document/ukTMukTMukTM/uUTNz4SN1MjL1UzM)
-- [权限列表](https://open.feishu.cn/document/ukTMukTMukTM/uQjNz4CN1MjL2czN)
+- [权限列表](https://open.feishu.cn/document/server-docs/application-scope/scope-list)
 - [OpenClaw 飞书接入教程](https://bytedance.larkoffice.com/docx/MFK7dDFLFoVlOGxWCv5cTXKmnMh)
 - [飞书 WebSocket 长连接模式](https://m.blog.csdn.net/u014177256/article/details/158267848)
 
@@ -343,6 +424,7 @@ cc-connect 内置了自动重连机制，断开后会自动尝试重新连接。
 ## 下一步
 
 - [接入钉钉](./dingtalk.md)
+- [接入微博](./weibo.md)
 - [接入 Telegram](./telegram.md)
 - [接入 Slack](./slack.md)
 - [接入 Discord](./discord.md)

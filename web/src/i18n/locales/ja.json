@@ -2,10 +2,12 @@
   "nav": {
     "dashboard": "ダッシュボード",
     "projects": "プロジェクト",
+    "providers": "プロバイダー",
     "sessions": "セッション",
     "chat": "チャット",
     "cron": "Cron",
     "bridge": "ブリッジ",
+    "skills": "スキル",
     "system": "システム"
   },
   "dashboard": {
@@ -34,11 +36,17 @@
     "detail": "詳細",
     "noProjects": "プロジェクトが設定されていません",
     "workDir": "作業ディレクトリ",
+    "agentType": "エージェントタイプ",
+    "agentTypeChangeHint": "エージェントタイプの変更には再起動が必要です。互換性のないプロバイダーは削除されます。",
     "agentMode": "権限モード",
     "agentSettings": "エージェント",
     "generalSettings": "一般",
     "showCtxIndicator": "コンテキスト表示",
     "showCtxIndicatorHint": "返信の末尾に [ctx: ~N%] を表示",
+    "replyFooter": "返信フッター",
+    "replyFooterHint": "返信の末尾にモデル/使用量のメタ情報を付加",
+    "injectSender": "送信者の注入",
+    "injectSenderHint": "エージェントに送信するメッセージの前に送信者の身元情報を付加",
     "platformAccess": "プラットフォームのアクセス制御",
     "deleteTitle": "プロジェクトを削除",
     "deleteConfirm": "プロジェクト「{{name}}」を削除してもよろしいですか？設定ファイルから削除されます。",
@@ -86,7 +94,14 @@
     "remove": "削除",
     "activate": "有効化",
     "setModel": "モデルを設定",
-    "models": "利用可能なモデル"
+    "models": "利用可能なモデル",
+    "global": "グローバル",
+    "emptyProject": "このプロジェクトにはプロバイダーが設定されていません。",
+    "emptyProjectHint": "グローバルプロバイダーをリンクするか、カスタムで追加してください。",
+    "linkGlobal": "グローバルをリンク",
+    "addCustom": "カスタム追加",
+    "allLinked": "すべてのグローバルプロバイダーがリンク済みです。",
+    "manageGlobal": "グローバルプロバイダーの管理"
   },
   "cron": {
     "title": "スケジュールジョブ",
@@ -127,7 +142,8 @@
     "runCount": "実行回数",
     "errorCount": "エラー回数",
     "skippedBusy": "スキップ（ビジー）",
-    "lastRun": "最終実行"
+    "lastRun": "最終実行",
+    "notEnabled": "このプロジェクトではハートビートが設定されていません。config.toml に [heartbeat] セクションを追加して有効にしてください。"
   },
   "bridge": {
     "title": "ブリッジ",
@@ -172,7 +188,9 @@
     "actions": "操作",
     "viewAll": "すべて表示",
     "optional": "任意",
-    "confirmDelete": "本当に削除しますか？"
+    "confirmDelete": "本当に削除しますか？",
+    "close": "閉じる",
+    "saving": "保存中…"
   },
   "setup": {
     "addPlatform": "プラットフォームを追加",
@@ -230,6 +248,7 @@
     "callbackAesKey": "コールバック AES キー",
     "callbackAesKeyHint": "43文字",
     "callbackPath": "コールバックパス",
+    "apiBaseUrl": "API ベース URL",
     "port": "ポート",
     "wsUrl": "WebSocket URL",
     "appId": "アプリ ID",
@@ -293,8 +312,12 @@
     "idleTimeout": "アイドルタイムアウト（分）",
     "idleTimeoutHint": "N分間アイドル後にエージェントを自動停止；0 = 無効",
     "display": "表示",
+    "thinkingMessages": "思考メッセージ",
+    "thinkingMessagesHint": "中間思考プロセスの表示・非表示を切替",
     "thinkingMaxLen": "思考の最大文字数",
     "thinkingMaxLenHint": "思考メッセージの最大文字数；0 = 制限なし",
+    "toolMessages": "ツール進捗",
+    "toolMessagesHint": "ツール呼び出し進捗メッセージの表示・非表示を切替",
     "toolMaxLen": "ツールの最大文字数",
     "toolMaxLenHint": "ツール使用メッセージの最大文字数；0 = 制限なし",
     "streamPreview": "ストリームプレビュー",
@@ -309,6 +332,73 @@
     "rlWindowSecsHint": "タイムウィンドウの秒数",
     "log": "ログ",
     "logLevel": "ログレベル"
+  },
+  "globalProviders": {
+    "title": "プロバイダー管理",
+    "subtitle": "全プロジェクトで共有できるグローバル API プロバイダーを管理",
+    "add": "プロバイダーを追加",
+    "importCCSwitch": "CC-Switch からインポート",
+    "edit": "プロバイダーを編集",
+    "empty": "プロバイダーが設定されていません",
+    "emptyHint": "グローバルプロバイダーを追加するか、プリセットからインポートしてください。",
+    "deleteHint": "プロバイダー「{{name}}」を削除しますか？参照しているプロジェクトはアクセスできなくなります。",
+    "noPresets": "プリセットなし",
+    "noPresetsHint": "プリセット一覧を読み込めませんでした。ネットワーク接続をご確認ください。",
+    "register": "登録",
+    "addPreset": "追加",
+    "added": "追加済み",
+    "tab": {
+      "providers": "マイプロバイダー",
+      "presets": "おすすめプリセット"
+    },
+    "form": {
+      "name": "名前",
+      "model": "デフォルトモデル",
+      "modelHint": "このプロバイダーに切り替えた時に使用するモデル",
+      "models": "利用可能なモデル",
+      "modelsHint": "/model コマンドで切り替え可能なモデル一覧",
+      "agentTypes": "対応エージェント",
+      "agentTypesHint": "空の場合はすべてのエージェントに対応",
+      "thinkingDefault": "デフォルト（自動）",
+      "perAgentHint": "エージェントごとに異なる Base URL やモデルを設定できます。",
+      "defaultConfig": "デフォルト",
+      "baseUrl": "Base URL",
+      "codexWireApi": "Wire API"
+    },
+    "ccSwitch": {
+      "title": "CC-Switch からインポート",
+      "notFound": "CC-Switch データベースが見つかりません。CC-Switch がインストールされているか確認してください。",
+      "empty": "CC-Switch にプロバイダーが設定されていません。",
+      "hint": "CC-Switch で {{count}} 件のプロバイダーが見つかりました。インポートするものを選択：",
+      "active": "アクティブ",
+      "exists": "既存",
+      "import": "インポート ({{count}})",
+      "result": "インポート完了：{{imported}} 件成功、{{skipped}} 件スキップ。"
+    }
+  },
+  "skills": {
+    "title": "スキル",
+    "subtitle": "エージェントスキルの管理とおすすめスキルの発見",
+    "tab": {
+      "local": "ローカルスキル",
+      "recommended": "おすすめ"
+    },
+    "projects": "プロジェクト",
+    "skillCount": "{{count}} 件のスキル",
+    "scanDirs": "スキャンディレクトリ",
+    "noSkills": "スキルが見つかりません",
+    "noSkillsHint": "スキルはエージェントのスキルディレクトリから読み込まれます（例: ~/.claude/skills/）",
+    "emptyProject": "このプロジェクトのディレクトリにスキルがありません",
+    "noPresets": "おすすめスキルがありません",
+    "noPresetsHint": "スキル一覧の読み込みに失敗しました。ネットワーク接続を確認してください。",
+    "featured": "注目",
+    "allSkills": "すべてのスキル",
+    "author": "作者",
+    "source": "提供元",
+    "download": "ダウンロード",
+    "free": "無料",
+    "freemium": "フリーミアム",
+    "paid": "有料"
   },
   "theme": {
     "light": "ライト",
