@@ -85,6 +85,7 @@ type Platform struct {
 	heartbeatMs  int
 	heartbeatOK  atomic.Bool
 	reconnecting atomic.Bool
+	connCancel   context.CancelFunc // cancels per-connection goroutines (heartbeatLoop, readLoop)
 
 	// Message dedup
 	dedup core.MessageDedup
@@ -562,9 +563,12 @@ func (p *Platform) connectGateway(ctx context.Context) error {
 		return err
 	}
 
-	// Start heartbeat and read loop
-	go p.heartbeatLoop(ctx)
-	go p.readLoop(ctx)
+	// Start heartbeat and read loop with a per-connection context
+	// so we can cancel them cleanly on reconnect.
+	connCtx, connCancel := context.WithCancel(ctx)
+	p.connCancel = connCancel
+	go p.heartbeatLoop(connCtx)
+	go p.readLoop(connCtx)
 
 	return nil
 }
@@ -778,6 +782,12 @@ func (p *Platform) triggerReconnect(ctx context.Context) {
 }
 
 func (p *Platform) reconnectLoop(ctx context.Context) {
+	// Cancel old heartbeatLoop/readLoop goroutines before closing the
+	// connection, so they stop promptly instead of racing with the new pair.
+	if p.connCancel != nil {
+		p.connCancel()
+	}
+
 	// Close existing connection
 	p.wsMu.Lock()
 	if p.wsConn != nil {
@@ -872,8 +882,10 @@ func (p *Platform) reconnectLoop(ctx context.Context) {
 		}
 
 		slog.Info("qqbot: reconnected successfully")
-		go p.heartbeatLoop(ctx)
-		go p.readLoop(ctx)
+		connCtx, connCancel := context.WithCancel(ctx)
+		p.connCancel = connCancel
+		go p.heartbeatLoop(connCtx)
+		go p.readLoop(connCtx)
 		return
 	}
 	slog.Error("qqbot: failed to reconnect after max attempts", "attempts", maxReconnectAttempts)
