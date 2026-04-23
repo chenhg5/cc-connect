@@ -596,3 +596,321 @@ func TestSwitchToAgentSession_ReusesExisting(t *testing.T) {
 		t.Fatalf("switching back to agent-A should reuse session %s, got %s", s1.ID, s3.ID)
 	}
 }
+
+func TestPastAgentSessionIDs_ClearPreservesHistory(t *testing.T) {
+	s := &Session{}
+	s.SetAgentSessionID("thread-1", "codex")
+	s.SetAgentSessionID("", "")
+
+	if len(s.PastAgentSessionIDs) != 1 || s.PastAgentSessionIDs[0] != "thread-1" {
+		t.Fatalf("PastAgentSessionIDs = %v, want [thread-1]", s.PastAgentSessionIDs)
+	}
+}
+
+func TestPastAgentSessionIDs_ReplacePreservesHistory(t *testing.T) {
+	s := &Session{}
+	s.SetAgentSessionID("thread-1", "codex")
+	s.SetAgentSessionID("thread-2", "codex")
+
+	if len(s.PastAgentSessionIDs) != 1 || s.PastAgentSessionIDs[0] != "thread-1" {
+		t.Fatalf("PastAgentSessionIDs = %v, want [thread-1]", s.PastAgentSessionIDs)
+	}
+	if s.AgentSessionID != "thread-2" {
+		t.Fatalf("AgentSessionID = %q, want thread-2", s.AgentSessionID)
+	}
+}
+
+func TestPastAgentSessionIDs_NoDuplicates(t *testing.T) {
+	s := &Session{}
+	s.SetAgentSessionID("thread-1", "codex")
+	s.SetAgentSessionID("", "")
+	s.SetAgentSessionID("thread-1", "codex")
+	s.SetAgentSessionID("", "")
+
+	if len(s.PastAgentSessionIDs) != 1 {
+		t.Fatalf("PastAgentSessionIDs has duplicates: %v", s.PastAgentSessionIDs)
+	}
+}
+
+func TestPastAgentSessionIDs_ContinueSentinelNotRecorded(t *testing.T) {
+	s := &Session{}
+	s.SetAgentSessionID(ContinueSession, "codex")
+	s.SetAgentSessionID("real-id", "codex")
+	s.SetAgentSessionID("", "")
+
+	for _, past := range s.PastAgentSessionIDs {
+		if past == ContinueSession {
+			t.Fatal("ContinueSession sentinel should not be in PastAgentSessionIDs")
+		}
+	}
+	if len(s.PastAgentSessionIDs) != 1 || s.PastAgentSessionIDs[0] != "real-id" {
+		t.Fatalf("PastAgentSessionIDs = %v, want [real-id]", s.PastAgentSessionIDs)
+	}
+}
+
+func TestSetAgentInfo_PreservesHistory(t *testing.T) {
+	s := &Session{}
+	s.SetAgentInfo("thread-1", "codex", "session 1")
+	s.SetAgentInfo("thread-2", "codex", "session 2")
+
+	if len(s.PastAgentSessionIDs) != 1 || s.PastAgentSessionIDs[0] != "thread-1" {
+		t.Fatalf("SetAgentInfo PastAgentSessionIDs = %v, want [thread-1]", s.PastAgentSessionIDs)
+	}
+}
+
+func TestKnownAgentSessionIDs_IncludesPast(t *testing.T) {
+	sm := NewSessionManager("")
+	s1 := sm.NewSession("user1", "a")
+	s1.SetAgentSessionID("thread-aaa", "codex")
+	s1.SetAgentSessionID("", "")
+
+	s2 := sm.NewSession("user1", "b")
+	s2.SetAgentSessionID("thread-bbb", "codex")
+
+	known := sm.KnownAgentSessionIDs()
+	if _, ok := known["thread-aaa"]; !ok {
+		t.Fatal("expected thread-aaa (past ID) in known set")
+	}
+	if _, ok := known["thread-bbb"]; !ok {
+		t.Fatal("expected thread-bbb (current ID) in known set")
+	}
+}
+
+// TestKnownAgentSessionIDs_ReproducesNewCommandBug simulates the exact user
+// reproduction steps: repeated /new commands progressively clear AgentSessionIDs.
+// Before the PastAgentSessionIDs fix, only the latest session would remain visible.
+func TestKnownAgentSessionIDs_ReproducesNewCommandBug(t *testing.T) {
+	sm := NewSessionManager("")
+	userKey := "user:test"
+
+	agentSessions := []AgentSessionInfo{
+		{ID: "codex-thread-1"},
+		{ID: "codex-thread-2"},
+		{ID: "codex-thread-3"},
+	}
+
+	s1 := sm.GetOrCreateActive(userKey)
+	s1.SetAgentSessionID("codex-thread-1", "codex")
+
+	s1.SetAgentSessionID("", "")
+	s2 := sm.NewSession(userKey, "session 2")
+	s2.SetAgentSessionID("codex-thread-2", "codex")
+
+	s2.SetAgentSessionID("", "")
+	s3 := sm.NewSession(userKey, "session 3")
+	s3.SetAgentSessionID("codex-thread-3", "codex")
+
+	known := sm.KnownAgentSessionIDs()
+	filtered := filterOwnedSessions(agentSessions, known)
+
+	if len(filtered) != 3 {
+		t.Fatalf("filterOwnedSessions returned %d sessions, want 3 (all should be visible)\nknown IDs: %v",
+			len(filtered), known)
+	}
+}
+
+// TestKnownAgentSessionIDs_ResetAllSessionsBug simulates resetAllSessions
+// clearing all IDs (management API provider switch). Past IDs should keep
+// all sessions visible.
+func TestKnownAgentSessionIDs_ResetAllSessionsBug(t *testing.T) {
+	sm := NewSessionManager("")
+	userKey := "user:test"
+
+	s1 := sm.NewSession(userKey, "a")
+	s1.SetAgentSessionID("thread-1", "codex")
+	s2 := sm.NewSession(userKey, "b")
+	s2.SetAgentSessionID("thread-2", "codex")
+	s3 := sm.NewSession(userKey, "c")
+	s3.SetAgentSessionID("thread-3", "codex")
+
+	for _, s := range sm.AllSessions() {
+		s.SetAgentSessionID("", "")
+	}
+
+	known := sm.KnownAgentSessionIDs()
+	for _, id := range []string{"thread-1", "thread-2", "thread-3"} {
+		if _, ok := known[id]; !ok {
+			t.Fatalf("expected %s in known set after resetAllSessions, known = %v", id, known)
+		}
+	}
+
+	agentSessions := []AgentSessionInfo{
+		{ID: "thread-1"}, {ID: "thread-2"}, {ID: "thread-3"},
+	}
+	filtered := filterOwnedSessions(agentSessions, known)
+	if len(filtered) != 3 {
+		t.Fatalf("filterOwnedSessions returned %d, want 3", len(filtered))
+	}
+}
+
+func TestPastAgentSessionIDs_Persistence(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+
+	sm1 := NewSessionManager(path)
+	s := sm1.NewSession("user1", "test")
+	s.SetAgentSessionID("thread-old", "codex")
+	s.SetAgentSessionID("thread-new", "codex")
+	sm1.Save()
+
+	sm2 := NewSessionManager(path)
+	known := sm2.KnownAgentSessionIDs()
+	if _, ok := known["thread-old"]; !ok {
+		t.Fatal("past ID thread-old not persisted/loaded")
+	}
+	if _, ok := known["thread-new"]; !ok {
+		t.Fatal("current ID thread-new not persisted/loaded")
+	}
+}
+
+// TestKnownAgentSessionIDs_LegacyDataDisablesFilter simulates loading a
+// session file written by the old code (before PastAgentSessionIDs tracking).
+// The filter must be disabled so sessions with lost IDs remain visible.
+func TestKnownAgentSessionIDs_LegacyDataDisablesFilter(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+
+	legacyJSON := `{
+		"sessions": {
+			"s1": {"id":"s1","name":"old","agent_session_id":"","history":null,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},
+			"s2": {"id":"s2","name":"","agent_session_id":"","history":null,"created_at":"2026-01-02T00:00:00Z","updated_at":"2026-01-02T00:00:00Z"},
+			"s3": {"id":"s3","name":"active","agent_session_id":"thread-3","agent_type":"codex","history":null,"created_at":"2026-01-03T00:00:00Z","updated_at":"2026-01-03T00:00:00Z"}
+		},
+		"active_session": {"user1":"s3"},
+		"user_sessions": {"user1":["s1","s2","s3"]},
+		"counter": 3
+	}`
+	if err := os.WriteFile(path, []byte(legacyJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sm := NewSessionManager(path)
+	known := sm.KnownAgentSessionIDs()
+
+	if known != nil {
+		t.Fatalf("legacy data should return nil known IDs to disable filter, got %v", known)
+	}
+
+	agentSessions := []AgentSessionInfo{
+		{ID: "thread-1"}, {ID: "thread-2"}, {ID: "thread-3"},
+	}
+	filtered := filterOwnedSessions(agentSessions, known)
+	if len(filtered) != 3 {
+		t.Fatalf("filterOwnedSessions with legacy data returned %d, want 3 (all visible)", len(filtered))
+	}
+}
+
+// TestKnownAgentSessionIDs_NewDataEnablesFilter verifies that data saved by
+// the new code (with PastIDTracking=true) enables normal filtering.
+func TestKnownAgentSessionIDs_NewDataEnablesFilter(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+
+	sm1 := NewSessionManager(path)
+	s1 := sm1.NewSession("user1", "a")
+	s1.SetAgentSessionID("thread-1", "codex")
+	sm1.NewSession("user1", "b")
+	sm1.Save()
+
+	sm2 := NewSessionManager(path)
+	known := sm2.KnownAgentSessionIDs()
+
+	if known == nil {
+		t.Fatal("new data should not return nil known IDs")
+	}
+	if _, ok := known["thread-1"]; !ok {
+		t.Fatal("thread-1 should be in known set")
+	}
+
+	agentSessions := []AgentSessionInfo{
+		{ID: "thread-1"}, {ID: "external-1"},
+	}
+	filtered := filterOwnedSessions(agentSessions, known)
+	if len(filtered) != 1 || filtered[0].ID != "thread-1" {
+		t.Fatalf("filterOwnedSessions should hide external session, got %v", filtered)
+	}
+}
+
+// TestLegacyData_PartiallyMigratedData verifies that data saved by a prior code
+// version with PastIDTracking=true but without LegacyData persistence is detected
+// as legacy if untracked sessions exist (sessions that lost their IDs before
+// PastAgentSessionIDs tracking was available).
+func TestLegacyData_PartiallyMigratedData(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+
+	partialJSON := `{
+		"sessions": {
+			"s1": {"id":"s1","name":"default","agent_session_id":"","history":null,"created_at":"2026-03-26T22:25:56Z","updated_at":"2026-03-26T22:25:56Z"},
+			"s2": {"id":"s2","name":"","agent_session_id":"","history":null,"created_at":"2026-04-18T09:02:57Z","updated_at":"2026-04-18T09:02:57Z"},
+			"s3": {"id":"s3","name":"active","agent_session_id":"thread-active","agent_type":"codex","past_agent_session_ids":["thread-old"],"history":null,"created_at":"2026-04-20T21:50:14Z","updated_at":"2026-04-20T21:50:14Z"}
+		},
+		"active_session": {"user1":"s3"},
+		"user_sessions":  {"user1":["s1","s2","s3"]},
+		"counter": 3,
+		"past_id_tracking": true
+	}`
+	if err := os.WriteFile(path, []byte(partialJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sm := NewSessionManager(path)
+	known := sm.KnownAgentSessionIDs()
+
+	if known != nil {
+		t.Fatalf("partially migrated data should disable filter (return nil), got %v", known)
+	}
+
+	agentSessions := []AgentSessionInfo{
+		{ID: "thread-active"}, {ID: "thread-old"}, {ID: "other-1"}, {ID: "other-2"},
+	}
+	filtered := filterOwnedSessions(agentSessions, known)
+	if len(filtered) != 4 {
+		t.Fatalf("all sessions should be visible with legacy data, got %d", len(filtered))
+	}
+}
+
+// TestLegacyData_ClearsAfterFirstNewCommand verifies the full migration
+// lifecycle: legacy data → disable filter → /new populates PastAgentSessionIDs
+// → filter re-enables on next cycle.
+func TestLegacyData_ClearsAfterFirstNewCommand(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+
+	legacyJSON := `{
+		"sessions": {
+			"s1": {"id":"s1","name":"","agent_session_id":"thread-old","agent_type":"codex","history":null,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}
+		},
+		"active_session": {"user1":"s1"},
+		"user_sessions": {"user1":["s1"]},
+		"counter": 1
+	}`
+	if err := os.WriteFile(path, []byte(legacyJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sm := NewSessionManager(path)
+	known := sm.KnownAgentSessionIDs()
+	if known == nil {
+		t.Log("legacy mode: filter disabled (only 1 session, OK)")
+	}
+
+	s1 := sm.GetOrCreateActive("user1")
+	s1.SetAgentSessionID("", "")
+	s2 := sm.NewSession("user1", "new")
+	s2.SetAgentSessionID("thread-new", "codex")
+	sm.Save()
+
+	sm2 := NewSessionManager(path)
+	known2 := sm2.KnownAgentSessionIDs()
+
+	if known2 == nil {
+		t.Fatal("after save with new code, known should not be nil")
+	}
+	if _, ok := known2["thread-old"]; !ok {
+		t.Fatal("thread-old should be in known via PastAgentSessionIDs")
+	}
+	if _, ok := known2["thread-new"]; !ok {
+		t.Fatal("thread-new should be in known as current ID")
+	}
+}

@@ -290,11 +290,18 @@ func (p *Platform) KeepPreviewOnFinish() bool {
 func (p *Platform) Start(handler core.MessageHandler) error {
 	p.handler = handler
 
-	if openID, err := p.fetchBotOpenID(); err != nil {
-		slog.Warn(p.platformName+": failed to get bot open_id, group chat filtering disabled", "error", err)
-	} else {
-		p.botOpenID = openID
-		slog.Info(p.platformName+": bot identified", "open_id", openID)
+	// In webhook mode (private/self-hosted Feishu/Lark), startup must not depend
+	// on a successful bot-info API call. Older private deployments may not support
+	// the same auth/bootstrap flow as the public SDK path, but the webhook server
+	// can still receive events and operate correctly. We therefore only attempt
+	// bot open_id discovery eagerly for WebSocket mode.
+	if !p.shouldUseWebhookMode() {
+		if openID, err := p.fetchBotOpenID(); err != nil {
+			slog.Warn(p.platformName+": failed to get bot open_id, group chat filtering disabled", "error", err)
+		} else {
+			p.botOpenID = openID
+			slog.Info(p.platformName+": bot identified", "open_id", openID)
+		}
 	}
 
 	p.eventHandler = dispatcher.NewEventDispatcher("", p.encryptKey).
@@ -325,6 +332,10 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		OnP2BotMenuV6(func(ctx context.Context, event *larkapplication.P2BotMenuV6) error {
 			return p.onBotMenu(event)
 		})
+
+	if p.useInteractiveCard {
+		slog.Info(p.platformName+": interactive card mode enabled, ensure card.action.trigger event is subscribed in Feishu console")
+	}
 
 	if p.shouldUseWebhookMode() {
 		return p.startWebhookMode()
