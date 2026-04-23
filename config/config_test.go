@@ -1407,6 +1407,76 @@ func TestLoad_ParsesAttachmentSendOff(t *testing.T) {
 	}
 }
 
+func TestLoad_FilterExternalSessionsDefault(t *testing.T) {
+	configPath := writeConfigFixture(t, attachmentSendConfigFixture)
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	proj := cfg.Projects[0]
+	if proj.FilterExternalSessions != nil {
+		t.Fatalf("FilterExternalSessions should be nil by default, got %v", *proj.FilterExternalSessions)
+	}
+}
+
+func TestLoad_FilterExternalSessionsTrue(t *testing.T) {
+	fixture := `
+[[projects]]
+name = "beta"
+filter_external_sessions = true
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/beta"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+token = "test"
+`
+	configPath := writeConfigFixture(t, fixture)
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	proj := cfg.Projects[0]
+	if proj.FilterExternalSessions == nil || !*proj.FilterExternalSessions {
+		t.Fatalf("FilterExternalSessions should be true, got %v", proj.FilterExternalSessions)
+	}
+}
+
+func TestLoad_FilterExternalSessionsFalse(t *testing.T) {
+	fixture := `
+[[projects]]
+name = "gamma"
+filter_external_sessions = false
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/gamma"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+token = "test"
+`
+	configPath := writeConfigFixture(t, fixture)
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	proj := cfg.Projects[0]
+	if proj.FilterExternalSessions == nil || *proj.FilterExternalSessions {
+		t.Fatalf("FilterExternalSessions should be false, got %v", proj.FilterExternalSessions)
+	}
+}
+
 func validProject(name string) ProjectConfig {
 	return ProjectConfig{
 		Name: name,

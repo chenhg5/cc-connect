@@ -217,6 +217,11 @@ type Engine struct {
 	showContextIndicator bool
 	replyFooterEnabled   bool
 
+	// When true, /list etc. only show sessions tracked by cc-connect,
+	// hiding sessions created by direct CLI usage in the same work_dir.
+	// Default false = show all sessions.
+	filterExternalSessions bool
+
 	// Multi-workspace mode
 	multiWorkspace    bool
 	baseDir           string
@@ -545,6 +550,13 @@ func (e *Engine) SetReplyFooterEnabled(show bool) {
 	e.replyFooterEnabled = show
 }
 
+// SetFilterExternalSessions controls whether /list, /switch, /delete, etc.
+// hide sessions created by direct CLI usage in the same work_dir.
+// Default false = show all sessions from the agent.
+func (e *Engine) SetFilterExternalSessions(v bool) {
+	e.filterExternalSessions = v
+}
+
 func (e *Engine) SetWebSetupFunc(fn func() (int, string, bool, error)) { e.webSetupFunc = fn }
 func (e *Engine) SetWebStatusFunc(fn func() string)                    { e.webStatusFunc = fn }
 
@@ -658,6 +670,11 @@ func (e *Engine) SetConfigReloadFunc(fn func() (*ConfigReloadResult, error)) {
 // GetAgent returns the engine's agent (for type assertions like ProviderSwitcher).
 func (e *Engine) GetAgent() Agent {
 	return e.agent
+}
+
+// GetSessions returns the Engine's session manager (for testing).
+func (e *Engine) GetSessions() *SessionManager {
+	return e.sessions
 }
 
 // AddCommand registers a custom slash command.
@@ -3916,6 +3933,16 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 	}
 }
 
+// applySessionFilter conditionally filters agent sessions based on the
+// filter_external_sessions config. When disabled (default), all sessions are
+// returned. When enabled, only sessions tracked by cc-connect are shown.
+func (e *Engine) applySessionFilter(sessions []AgentSessionInfo, sm *SessionManager) []AgentSessionInfo {
+	if !e.filterExternalSessions {
+		return sessions
+	}
+	return filterOwnedSessions(sessions, sm.KnownAgentSessionIDs())
+}
+
 // filterOwnedSessions removes agent sessions that are not tracked by cc-connect's
 // session manager. This prevents external CLI sessions in the same work_dir from
 // appearing in /list, /switch, /delete, etc. If the session manager has no tracked
@@ -3951,7 +3978,7 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgListError), err))
 			return
 		}
-		agentSessions = filterOwnedSessions(agentSessions, sessions.KnownAgentSessionIDs())
+		agentSessions = e.applySessionFilter(agentSessions, sessions)
 		if len(agentSessions) == 0 {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgListEmpty))
 			return
@@ -4048,7 +4075,7 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 		return
 	}
-	agentSessions = filterOwnedSessions(agentSessions, sessions.KnownAgentSessionIDs())
+	agentSessions = e.applySessionFilter(agentSessions, sessions)
 
 	matched := e.matchSession(agentSessions, sessions, query)
 	if matched == nil {
@@ -4795,7 +4822,7 @@ func (e *Engine) cmdSearch(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgSearchError), err))
 		return
 	}
-	agentSessions = filterOwnedSessions(agentSessions, sessions.KnownAgentSessionIDs())
+	agentSessions = e.applySessionFilter(agentSessions, sessions)
 
 	type searchResult struct {
 		id           string
@@ -4889,7 +4916,7 @@ func (e *Engine) cmdName(p Platform, msg *Message, args []string) {
 			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 			return
 		}
-		agentSessions = filterOwnedSessions(agentSessions, sessions.KnownAgentSessionIDs())
+		agentSessions = e.applySessionFilter(agentSessions, sessions)
 		if idx > len(agentSessions) {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgSwitchNoSession), idx))
 			return
@@ -7963,7 +7990,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		if err != nil || len(agentSessions) == 0 {
 			return
 		}
-		agentSessions = filterOwnedSessions(agentSessions, sessions.KnownAgentSessionIDs())
+		agentSessions = e.applySessionFilter(agentSessions, sessions)
 		matched := e.matchSession(agentSessions, sessions, args)
 		if matched == nil {
 			return
@@ -8116,7 +8143,7 @@ func (e *Engine) renderDeleteModeCard(sessionKey string) *Card {
 	if err != nil {
 		return e.simpleCard(e.i18n.T(MsgDeleteModeTitle), "red", err.Error())
 	}
-	agentSessions = filterOwnedSessions(agentSessions, sessions.KnownAgentSessionIDs())
+	agentSessions = e.applySessionFilter(agentSessions, sessions)
 	dm := e.getDeleteModeState(sessionKey)
 	if dm == nil {
 		return e.simpleCard(e.i18n.T(MsgDeleteModeTitle), "red", e.i18n.T(MsgDeleteUsage))
@@ -8486,7 +8513,7 @@ func (e *Engine) submitDeleteModeSelection(sessionKey string, selectedIDs map[st
 	if err != nil {
 		return []string{e.i18n.Tf(MsgError, err)}
 	}
-	agentSessions = filterOwnedSessions(agentSessions, sessions.KnownAgentSessionIDs())
+	agentSessions = e.applySessionFilter(agentSessions, sessions)
 	seen := make(map[string]struct{}, len(agentSessions))
 	lines := make([]string, 0, len(selectedIDs))
 	for i := range agentSessions {
@@ -8698,7 +8725,7 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 	if err != nil {
 		return nil, fmt.Errorf(e.i18n.T(MsgListError), err)
 	}
-	agentSessions = filterOwnedSessions(agentSessions, sessions.KnownAgentSessionIDs())
+	agentSessions = e.applySessionFilter(agentSessions, sessions)
 	if len(agentSessions) == 0 {
 		return e.simpleCard(e.i18n.Tf(MsgCardTitleSessions, agent.Name(), 0), "turquoise", e.i18n.T(MsgListEmpty)), nil
 	}
@@ -10695,7 +10722,7 @@ func (e *Engine) cmdDelete(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 		return
 	}
-	agentSessions = filterOwnedSessions(agentSessions, sessions.KnownAgentSessionIDs())
+	agentSessions = e.applySessionFilter(agentSessions, sessions)
 
 	prefix := strings.TrimSpace(args[0])
 	if isExplicitDeleteBatchArg(prefix) {

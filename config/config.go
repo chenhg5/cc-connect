@@ -330,6 +330,10 @@ type ProjectConfig struct {
 	Quiet      *bool           `toml:"quiet,omitempty"`
 	Observe    *ObserveConfig  `toml:"observe,omitempty"`
 	References ReferenceConfig `toml:"references,omitempty"`
+	// FilterExternalSessions: when true, /list only shows sessions created by
+	// cc-connect, hiding sessions created by direct CLI usage in the same work_dir.
+	// Default is false (show all sessions).
+	FilterExternalSessions *bool `toml:"filter_external_sessions,omitempty"`
 }
 
 type AgentConfig struct {
