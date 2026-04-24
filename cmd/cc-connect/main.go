@@ -470,6 +470,11 @@ func main() {
 			}
 		}
 
+		// Wire queue depth
+		if cfg.Queue.MaxDepth != nil && *cfg.Queue.MaxDepth > 0 {
+			engine.SetMaxQueuedMessages(*cfg.Queue.MaxDepth)
+		}
+
 		// Wire auto-compress settings
 		if proj.AutoCompress.Enabled != nil && *proj.AutoCompress.Enabled {
 			minGap := 30 * time.Minute

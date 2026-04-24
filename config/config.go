@@ -104,6 +104,7 @@ type Config struct {
 	OutgoingRateLimit OutgoingRateLimitConfig `toml:"outgoing_rate_limit"` // outgoing message throttling
 	Relay             RelayConfig             `toml:"relay"`               // bot-to-bot relay behavior
 	Cron              CronConfig              `toml:"cron"`
+	Queue             QueueConfig             `toml:"queue"`
 	Webhook           WebhookConfig           `toml:"webhook"`
 	Bridge            BridgeConfig            `toml:"bridge"`
 	Management        ManagementConfig        `toml:"management"`
@@ -115,6 +116,11 @@ type Config struct {
 type CronConfig struct {
 	Silent      *bool  `toml:"silent"`       // suppress cron start notification; default false
 	SessionMode string `toml:"session_mode"` // default session mode: "" or "reuse" (default) or "new_per_run"
+}
+
+// QueueConfig controls the per-session message queue.
+type QueueConfig struct {
+	MaxDepth *int `toml:"max_depth"` // max queued messages per session; default 5
 }
 
 // WebhookConfig controls the external HTTP webhook endpoint.
@@ -3086,6 +3092,12 @@ func GetGlobalSettings() map[string]any {
 		rlWindow = *cfg.RateLimit.WindowSecs
 	}
 	result["rate_limit_window_secs"] = rlWindow
+	// Queue
+	queueMax := 5
+	if cfg.Queue.MaxDepth != nil {
+		queueMax = *cfg.Queue.MaxDepth
+	}
+	result["queue_max_depth"] = queueMax
 	return result
 }
 
@@ -3103,6 +3115,7 @@ type GlobalSettingsUpdate struct {
 	StreamPreviewIntMs *int    `json:"stream_preview_interval_ms"`
 	RateLimitMax       *int    `json:"rate_limit_max_messages"`
 	RateLimitWindow    *int    `json:"rate_limit_window_secs"`
+	QueueMaxDepth      *int    `json:"queue_max_depth"`
 }
 
 // SaveGlobalSettings persists global settings to config.toml.
@@ -3155,6 +3168,9 @@ func SaveGlobalSettings(u GlobalSettingsUpdate) error {
 	}
 	if u.RateLimitWindow != nil {
 		cfg.RateLimit.WindowSecs = u.RateLimitWindow
+	}
+	if u.QueueMaxDepth != nil {
+		cfg.Queue.MaxDepth = u.QueueMaxDepth
 	}
 	return saveConfig(cfg)
 }

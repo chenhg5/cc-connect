@@ -131,6 +131,7 @@ const (
 	MsgExecutionStopped          MsgKey = "execution_stopped"
 	MsgNoExecution               MsgKey = "no_execution"
 	MsgPreviousProcessing        MsgKey = "previous_processing"
+	MsgQueueFull                 MsgKey = "queue_full"
 	MsgMessageQueued             MsgKey = "message_queued"
 	MsgNoToolsAllowed            MsgKey = "no_tools_allowed"
 	MsgCurrentTools              MsgKey = "current_tools"
@@ -440,8 +441,10 @@ const (
 	MsgCommandDisabled   MsgKey = "command_disabled"
 	MsgAdminRequired     MsgKey = "admin_required"
 	MsgRateLimited       MsgKey = "rate_limited"
-	MsgBtwSent           MsgKey = "btw_sent"
-	MsgBtwSendFailed     MsgKey = "btw_send_failed"
+	MsgPsSent       MsgKey = "ps_sent"
+	MsgPsSendFailed MsgKey = "ps_send_failed"
+	MsgPsEmpty      MsgKey = "ps_empty"
+	MsgPsNoSession  MsgKey = "ps_no_session"
 
 	MsgWhoamiTitle     MsgKey = "whoami_title"
 	MsgWhoamiCardTitle MsgKey = "whoami_card_title"
@@ -507,6 +510,7 @@ const (
 	MsgBuiltinCmdShell     MsgKey = "shell"
 	MsgBuiltinCmdDir       MsgKey = "dir"
 	MsgBuiltinCmdDiff      MsgKey = "diff"
+	MsgBuiltinCmdPs        MsgKey = "ps"
 
 	MsgDiffEmpty       MsgKey = "diff_empty"
 	MsgDiffNoDiff2HTML MsgKey = "diff_no_diff2html"
@@ -645,11 +649,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "No hay ejecución en progreso.",
 	},
 	MsgPreviousProcessing: {
-		LangEnglish:            "⏳ Previous request still processing. Use `/btw <message>` to add context to the current turn.",
-		LangChinese:            "⏳ 上一个请求仍在处理中。使用 `/btw <消息>` 可向当前轮次追加上下文。",
-		LangTraditionalChinese: "⏳ 上一個請求仍在處理中。使用 `/btw <訊息>` 可向當前輪次追加上下文。",
-		LangJapanese:           "⏳ 前のリクエストを処理中です。`/btw <メッセージ>` で現在のターンにコンテキストを追加できます。",
-		LangSpanish:            "⏳ La solicitud anterior aún se está procesando. Use `/btw <mensaje>` para agregar contexto al turno actual.",
+		LangEnglish:            "⏳ Previous request still processing. Use `/ps <message>` to send a P.S. to the running task.",
+		LangChinese:            "⏳ 上一个请求仍在处理中。使用 `/ps <消息>` 可向正在执行的任务追加补充信息。",
+		LangTraditionalChinese: "⏳ 上一個請求仍在處理中。使用 `/ps <訊息>` 可向正在執行的任務追加補充資訊。",
+		LangJapanese:           "⏳ 前のリクエストを処理中です。`/ps <メッセージ>` で実行中のタスクに補足情報を送れます。",
+		LangSpanish:            "⏳ La solicitud anterior aún se está procesando. Use `/ps <mensaje>` para enviar un P.S. a la tarea en curso.",
 	},
 	MsgMessageQueued: {
 		LangEnglish:            "📬 Message received — will process after the current task finishes.",
@@ -657,6 +661,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "📬 訊息已收到，將在目前任務完成後處理。",
 		LangJapanese:           "📬 メッセージを受信しました。現在のタスク完了後に処理します。",
 		LangSpanish:            "📬 Mensaje recibido — se procesará después de que termine la tarea actual.",
+	},
+	MsgQueueFull: {
+		LangEnglish:            "📬 Message queue is full (%d pending). Please wait for current tasks to complete.",
+		LangChinese:            "📬 消息队列已满（%d 条待处理）。请等待当前任务完成。",
+		LangTraditionalChinese: "📬 訊息佇列已滿（%d 則待處理）。請等待目前任務完成。",
+		LangJapanese:           "📬 メッセージキューが満杯です（%d 件待ち）。現在のタスク完了をお待ちください。",
+		LangSpanish:            "📬 La cola de mensajes está llena (%d pendientes). Espere a que las tareas actuales se completen.",
 	},
 	MsgNoToolsAllowed: {
 		LangEnglish:            "No tools pre-allowed.\nUsage: `/allow <tool_name>`\nExample: `/allow Bash`",
@@ -873,7 +884,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  View/switch language\n\n" +
 			"/compress\n  Compress conversation context\n\n" +
 			"/tts [always|voice_only]\n  View/switch text-to-speech mode\n\n" +
-			"/shell <command>\n  Run a shell command and return the output\n\n" +
+			"/shell [--timeout <sec>] <command>\n  Run a shell command and return the output (! prefix shortcut: !cmd)\n\n" +
 			"/show <ref>\n  View a file, directory, or code snippet by reference\n\n" +
 			"/dir [path|reset]\n  Show, switch, or reset agent working directory\n\n" +
 			"/stop\n  Stop current execution\n\n" +
@@ -916,7 +927,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  查看/切换语言\n\n" +
 			"/compress\n  压缩会话上下文\n\n" +
 			"/tts [always|voice_only]\n  查看/切换语音合成模式\n\n" +
-			"/shell <命令>\n  执行 Shell 命令并返回结果\n\n" +
+			"/shell [--timeout <秒>] <命令>\n  执行 Shell 命令并返回结果（快捷方式：!命令）\n\n" +
 			"/show <引用>\n  按引用查看文件、目录或代码片段\n\n" +
 			"/dir [路径|reset]\n  查看、切换或重置 Agent 工作目录\n\n" +
 			"/stop\n  停止当前执行\n\n" +
@@ -959,7 +970,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  查看/切換語言\n\n" +
 			"/compress\n  壓縮會話上下文\n\n" +
 			"/tts [always|voice_only]\n  查看/切換語音合成模式\n\n" +
-			"/shell <命令>\n  執行 Shell 命令並返回結果\n\n" +
+			"/shell [--timeout <秒>] <命令>\n  執行 Shell 命令並返回結果（快捷方式：!命令）\n\n" +
 			"/dir [路徑|reset]\n  查看、切換或重置 Agent 工作目錄\n\n" +
 			"/stop\n  停止當前執行\n\n" +
 			"/cron [add|list|del|enable|disable]\n  管理定時任務\n\n" +
@@ -1000,7 +1011,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  言語の表示/切り替え\n\n" +
 			"/compress\n  会話コンテキストを圧縮\n\n" +
 			"/tts [always|voice_only]\n  音声合成モードの表示/切り替え\n\n" +
-			"/shell <コマンド>\n  シェルコマンドを実行して結果を返す\n\n" +
+			"/shell [--timeout <秒>] <コマンド>\n  シェルコマンドを実行して結果を返す（ショートカット：!コマンド）\n\n" +
 			"/dir [パス|reset]\n  エージェントの作業ディレクトリを表示/切り替え/リセット\n\n" +
 			"/stop\n  現在の実行を停止\n\n" +
 			"/cron [add|list|del|enable|disable]\n  スケジュールタスク管理\n\n" +
@@ -1041,7 +1052,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  Ver/cambiar idioma\n\n" +
 			"/compress\n  Comprimir contexto de conversación\n\n" +
 			"/tts [always|voice_only]\n  Ver/cambiar modo de síntesis de voz\n\n" +
-			"/shell <comando>\n  Ejecutar un comando shell y devolver la salida\n\n" +
+			"/shell [--timeout <seg>] <comando>\n  Ejecutar un comando shell y devolver la salida (atajo: !comando)\n\n" +
 			"/dir [ruta|reset]\n  Ver, cambiar o restablecer el directorio de trabajo del agente\n\n" +
 			"/stop\n  Detener ejecución actual\n\n" +
 			"/cron [add|list|del|enable|disable]\n  Gestionar tareas programadas\n\n" +
@@ -1159,7 +1170,7 @@ var messages = map[MsgKey]map[Language]string{
 	},
 	MsgHelpToolsSection: {
 		LangEnglish: "**Tools & Automation**\n" +
-			"/shell <command> — Run a shell command\n" +
+			"/shell <command> — Run a shell command (! shortcut)\n" +
 			"/show <ref> — View file / directory / snippet by reference\n" +
 			"/dir [path|reset] — Show, switch, or reset work directory\n" +
 			"/cron [add|list|del|...] — Scheduled tasks\n" +
@@ -1169,7 +1180,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/compress — Compress context\n" +
 			"/stop — Stop current execution",
 		LangChinese: "**工具与自动化**\n" +
-			"/shell <命令> — 执行 Shell 命令\n" +
+			"/shell <命令> — 执行 Shell 命令（!快捷方式）\n" +
 			"/show <引用> — 按引用查看文件、目录或代码片段\n" +
 			"/dir [路径|reset] — 查看、切换或重置工作目录\n" +
 			"/cron [add|list|del|...] — 定时任务\n" +
@@ -1179,7 +1190,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/compress — 压缩上下文\n" +
 			"/stop — 停止当前执行",
 		LangTraditionalChinese: "**工具與自動化**\n" +
-			"/shell <命令> — 執行 Shell 命令\n" +
+			"/shell <命令> — 執行 Shell 命令（!快捷方式）\n" +
+			"/show <引用> — 按引用查看檔案、目錄或程式碼片段\n" +
 			"/dir [路徑|reset] — 查看、切換或重置工作目錄\n" +
 			"/cron [add|list|del|...] — 定時任務\n" +
 			"/commands [add|del] — 自訂命令\n" +
@@ -1188,7 +1200,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/compress — 壓縮上下文\n" +
 			"/stop — 停止當前執行",
 		LangJapanese: "**ツール・自動化**\n" +
-			"/shell <コマンド> — シェルコマンド実行\n" +
+			"/shell <コマンド> — シェルコマンド実行（!ショートカット）\n" +
+			"/show <参照> — ファイル/ディレクトリ/スニペットを参照で表示\n" +
 			"/dir [パス|reset] — 作業ディレクトリの表示/切り替え/リセット\n" +
 			"/cron [add|list|del|...] — スケジュールタスク\n" +
 			"/commands [add|del] — カスタムコマンド\n" +
@@ -1197,7 +1210,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/compress — コンテキスト圧縮\n" +
 			"/stop — 現在の実行を停止",
 		LangSpanish: "**Herramientas y automatización**\n" +
-			"/shell <comando> — Ejecutar comando shell\n" +
+			"/shell <comando> — Ejecutar comando shell (! atajo)\n" +
+			"/show <ref> — Ver archivo/directorio/fragmento por referencia\n" +
 			"/dir [ruta|reset] — Ver, cambiar o restablecer directorio de trabajo\n" +
 			"/cron [add|list|del|...] — Tareas programadas\n" +
 			"/commands [add|del] — Comandos personalizados\n" +
@@ -3024,19 +3038,33 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "⏳ メッセージの送信が速すぎます。しばらくお待ちください。",
 		LangSpanish:            "⏳ Estás enviando mensajes demasiado rápido. Espera un momento.",
 	},
-	MsgBtwSent: {
-		LangEnglish:            "✅ Message injected into the current session.",
-		LangChinese:            "✅ 消息已注入当前会话。",
-		LangTraditionalChinese: "✅ 訊息已注入目前會話。",
-		LangJapanese:           "✅ メッセージを現在のセッションに注入しました。",
-		LangSpanish:            "✅ Mensaje inyectado en la sesión actual.",
+	MsgPsSent: {
+		LangEnglish:            "✅ P.S. delivered.",
+		LangChinese:            "✅ P.S. 已送达。",
+		LangTraditionalChinese: "✅ P.S. 已送達。",
+		LangJapanese:           "✅ P.S. を送信しました。",
+		LangSpanish:            "✅ P.S. entregado.",
 	},
-	MsgBtwSendFailed: {
-		LangEnglish:            "❌ Failed to inject message into the current session.",
-		LangChinese:            "❌ 消息注入当前会话失败。",
-		LangTraditionalChinese: "❌ 訊息注入目前會話失敗。",
-		LangJapanese:           "❌ 現在のセッションへのメッセージ注入に失敗しました。",
-		LangSpanish:            "❌ Error al inyectar el mensaje en la sesión actual.",
+	MsgPsSendFailed: {
+		LangEnglish:            "❌ Failed to deliver P.S.",
+		LangChinese:            "❌ P.S. 发送失败。",
+		LangTraditionalChinese: "❌ P.S. 傳送失敗。",
+		LangJapanese:           "❌ P.S. の送信に失敗しました。",
+		LangSpanish:            "❌ Error al entregar el P.S.",
+	},
+	MsgPsEmpty: {
+		LangEnglish:            "Usage: `/ps <message>`",
+		LangChinese:            "用法：`/ps <消息>`",
+		LangTraditionalChinese: "用法：`/ps <訊息>`",
+		LangJapanese:           "使い方：`/ps <メッセージ>`",
+		LangSpanish:            "Uso: `/ps <mensaje>`",
+	},
+	MsgPsNoSession: {
+		LangEnglish:            "No task is currently running.",
+		LangChinese:            "当前没有正在执行的任务。",
+		LangTraditionalChinese: "目前沒有正在執行的任務。",
+		LangJapanese:           "現在実行中のタスクはありません。",
+		LangSpanish:            "No hay ninguna tarea en ejecución.",
 	},
 	MsgWhoamiTitle: {
 		LangEnglish:            "🪪 **Your Identity**",
@@ -3441,6 +3469,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "產生 git diff 並以 HTML 檔案傳送，參數: [目標]",
 		LangJapanese:           "git diff を HTML ファイルで生成、引数: [ターゲット]",
 		LangSpanish:            "Generar git diff como archivo HTML, arg: [objetivo]",
+	},
+	MsgBuiltinCmdPs: {
+		LangEnglish:            "Send a P.S. to the running task",
+		LangChinese:            "向正在执行的任务追加补充信息",
+		LangTraditionalChinese: "向正在執行的任務追加補充資訊",
+		LangJapanese:           "実行中のタスクに補足情報を送信",
+		LangSpanish:            "Enviar un P.S. a la tarea en curso",
 	},
 	MsgDiffEmpty: {
 		LangEnglish:            "No diff — clean working tree (or no changes vs `%s`).",

@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -62,6 +63,10 @@ func (s *opencodeSession) Send(prompt string, images []core.ImageAttachment, fil
 		filePaths := core.SaveFilesToDisk(s.workDir, files)
 		prompt = core.AppendFileRefs(prompt, filePaths)
 	}
+	prompt, imagePaths, err := s.stageImages(prompt, images)
+	if err != nil {
+		return err
+	}
 	if !s.alive.Load() {
 		return fmt.Errorf("session is closed")
 	}
@@ -69,23 +74,7 @@ func (s *opencodeSession) Send(prompt string, images []core.ImageAttachment, fil
 	chatID := s.CurrentSessionID()
 	isResume := chatID != ""
 
-	args := []string{"run", "--format", "json"}
-
-	if isResume {
-		args = append(args, "--session", chatID)
-	}
-	if s.model != "" {
-		args = append(args, "--model", s.model)
-	}
-	if s.workDir != "" {
-		args = append(args, "--dir", s.workDir)
-	}
-
-	// Enable thinking blocks
-	args = append(args, "--thinking")
-
-	// Append prompt as positional arg
-	args = append(args, prompt)
+	args := s.buildRunArgs(prompt, imagePaths, chatID)
 
 	slog.Debug("opencodeSession: launching", "resume", isResume, "args", core.RedactArgs(args))
 
@@ -113,6 +102,75 @@ func (s *opencodeSession) Send(prompt string, images []core.ImageAttachment, fil
 	go s.readLoop(cmd, stdout, &stderrBuf)
 
 	return nil
+}
+
+func (s *opencodeSession) stageImages(prompt string, images []core.ImageAttachment) (string, []string, error) {
+	if len(images) == 0 {
+		return prompt, nil, nil
+	}
+
+	imgDir := filepath.Join(s.workDir, ".cc-connect", "images")
+	if err := os.MkdirAll(imgDir, 0o755); err != nil {
+		return "", nil, fmt.Errorf("opencodeSession: create image dir: %w", err)
+	}
+
+	imagePaths := make([]string, 0, len(images))
+	for i, img := range images {
+		ext := opencodeImageExt(img.MimeType)
+		fname := fmt.Sprintf("img_%d_%d%s", time.Now().UnixMilli(), i, ext)
+		fpath := filepath.Join(imgDir, fname)
+		if err := os.WriteFile(fpath, img.Data, 0o644); err != nil {
+			return "", nil, fmt.Errorf("opencodeSession: save image: %w", err)
+		}
+		imagePaths = append(imagePaths, fpath)
+	}
+
+	if prompt == "" {
+		prompt = "Please analyze the attached image(s)."
+	}
+
+	return prompt, imagePaths, nil
+}
+
+func opencodeImageExt(mimeType string) string {
+	switch mimeType {
+	case "image/jpeg":
+		return ".jpg"
+	case "image/gif":
+		return ".gif"
+	case "image/webp":
+		return ".webp"
+	default:
+		return ".png"
+	}
+}
+
+func (s *opencodeSession) buildRunArgs(prompt string, imagePaths []string, chatID string) []string {
+	args := []string{"run", "--format", "json"}
+
+	if chatID != "" {
+		args = append(args, "--session", chatID)
+	}
+	if s.model != "" {
+		args = append(args, "--model", s.model)
+	}
+	if s.workDir != "" {
+		args = append(args, "--dir", s.workDir)
+	}
+
+	// Enable thinking blocks.
+	args = append(args, "--thinking")
+
+	for _, imagePath := range imagePaths {
+		if imagePath == "" {
+			continue
+		}
+		args = append(args, "--file", imagePath)
+	}
+
+	// Append prompt as positional arg.
+	args = append(args, prompt)
+	return args
 }
 
 func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {

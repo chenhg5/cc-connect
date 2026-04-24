@@ -1156,6 +1156,42 @@ func TestProcessInteractiveEvents_ReplyFooterPrefersSessionRuntimeState(t *testi
 	}
 }
 
+// Regression: an agent that only exposes a workdir (no model/effort/usage)
+// must not emit a footer at all. Previously this produced a footer like
+// "*~*" when the agent was running in the user's home directory, which
+// rendered as a bare "~" on Feishu/Weixin.
+func TestProcessInteractiveEvents_SuppressesReplyFooterWhenOnlyWorkDir(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	agent := &stubWorkDirAgent{workDir: homeDir}
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetReplyFooterEnabled(true)
+
+	sessionKey := "telegram:user-footer-workdir-only"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-footer-workdir-only")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-footer-workdir-only",
+		agent:        agent,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventResult, Content: "answer", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-footer-workdir-only", time.Now(), nil, nil, state.replyCtx)
+
+	sent := p.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("sent = %#v, want one final reply", sent)
+	}
+	if sent[0] != "answer" {
+		t.Fatalf("final reply = %q, want plain answer without footer", sent[0])
+	}
+}
+
 func TestProcessInteractiveEvents_HiddenToolProgressKeepsPreviewOnFinalize(t *testing.T) {
 	p := &mockKeepPreviewPlatform{}
 	p.n = "feishu"
@@ -4485,6 +4521,32 @@ func TestCmdSkills_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	}
 }
 
+func TestCmdSkills_UsesTelegramSafeNamesOnTelegramPlatform(t *testing.T) {
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	temp := t.TempDir()
+	skillDir := temp + "/telegram-codex-bot"
+	if err := os.Mkdir(skillDir, 0o755); err != nil {
+		t.Fatalf("mkdir skill dir: %v", err)
+	}
+	if err := os.WriteFile(skillDir+"/SKILL.md", []byte("---\ndescription: Demo skill\n---\nDo demo"), 0o644); err != nil {
+		t.Fatalf("write skill file: %v", err)
+	}
+	e.skills.SetDirs([]string{temp})
+
+	e.cmdSkills(p, &Message{SessionKey: "telegram:user1", ReplyCtx: "ctx"})
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "/telegram_codex_bot") {
+		t.Fatalf("skills text = %q, want Telegram-safe skill command", p.sent[0])
+	}
+	if strings.Contains(p.sent[0], "/telegram-codex-bot") {
+		t.Fatalf("skills text = %q, should not show raw hyphenated command", p.sent[0])
+	}
+}
+
 func TestMenuCommandsForPlatform_TelegramOmitsAllSkillsWhenMenuWouldOverflow(t *testing.T) {
 	e := NewEngine("test", &stubAgent{}, nil, "", LangEnglish)
 	temp := t.TempDir()
@@ -6636,8 +6698,8 @@ func TestQueueMessageOverflow_DropsOldestAndReturnsfalse(t *testing.T) {
 	e.interactiveStates[key] = state
 	e.interactiveMu.Unlock()
 
-	// Fill the queue to maxQueuedMessages (5).
-	for i := 0; i < maxQueuedMessages; i++ {
+	// Fill the queue to defaultMaxQueuedMessages (5).
+	for i := 0; i < defaultMaxQueuedMessages; i++ {
 		msg := &Message{SessionKey: key, Content: fmt.Sprintf("msg-%d", i), ReplyCtx: fmt.Sprintf("ctx-%d", i)}
 		ok := e.queueMessageForBusySession(p, msg, key)
 		if !ok {
@@ -6646,22 +6708,22 @@ func TestQueueMessageOverflow_DropsOldestAndReturnsfalse(t *testing.T) {
 	}
 
 	state.mu.Lock()
-	if len(state.pendingMessages) != maxQueuedMessages {
-		t.Fatalf("queue depth = %d, want %d", len(state.pendingMessages), maxQueuedMessages)
+	if len(state.pendingMessages) != defaultMaxQueuedMessages {
+		t.Fatalf("queue depth = %d, want %d", len(state.pendingMessages), defaultMaxQueuedMessages)
 	}
 	state.mu.Unlock()
 
-	// The 6th message should be rejected (returns false).
+	// The 6th message should be handled (returns true) but not queued — MsgQueueFull sent.
 	overflow := &Message{SessionKey: key, Content: "msg-overflow", ReplyCtx: "ctx-overflow"}
 	ok := e.queueMessageForBusySession(p, overflow, key)
-	if ok {
-		t.Fatal("expected 6th message to be rejected (queue full)")
+	if !ok {
+		t.Fatal("expected 6th message to be handled (queue-full reply), got false")
 	}
 
-	// Queue should still have exactly maxQueuedMessages items (the original 5).
+	// Queue should still have exactly defaultMaxQueuedMessages items (the original 5).
 	state.mu.Lock()
-	if len(state.pendingMessages) != maxQueuedMessages {
-		t.Fatalf("queue depth after overflow = %d, want %d", len(state.pendingMessages), maxQueuedMessages)
+	if len(state.pendingMessages) != defaultMaxQueuedMessages {
+		t.Fatalf("queue depth after overflow = %d, want %d", len(state.pendingMessages), defaultMaxQueuedMessages)
 	}
 	// First message should still be msg-0 (FIFO preserved, no silent drop).
 	if state.pendingMessages[0].content != "msg-0" {
@@ -6669,10 +6731,10 @@ func TestQueueMessageOverflow_DropsOldestAndReturnsfalse(t *testing.T) {
 	}
 	state.mu.Unlock()
 
-	// Platform should have received the MsgMessageQueued replies for the 5 accepted + nothing for rejected.
+	// Platform should have received MsgMessageQueued for 5 accepted + MsgQueueFull for the overflow.
 	sent := p.getSent()
-	if len(sent) != maxQueuedMessages {
-		t.Fatalf("platform replies = %d, want %d (one per accepted queue)", len(sent), maxQueuedMessages)
+	if len(sent) != defaultMaxQueuedMessages+1 {
+		t.Fatalf("platform replies = %d, want %d (queued + queue-full)", len(sent), defaultMaxQueuedMessages+1)
 	}
 }
 
@@ -9742,6 +9804,104 @@ func (s *stubPlatformWithObserve) SendObservation(_ context.Context, _, _ string
 	return nil
 }
 
+func TestIsSilentReply(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"exact marker", "NO_REPLY", true},
+		{"lowercase", "no_reply", true},
+		{"mixed case", "No_Reply", true},
+		{"leading/trailing spaces", "  NO_REPLY  ", true},
+		{"surrounding newlines", "\nNO_REPLY\n", true},
+		{"tabs around", "\tNO_REPLY\t", true},
+
+		{"empty", "", false},
+		{"whitespace only", "   ", false},
+		{"mixed with content", "Hello NO_REPLY", false},
+		{"marker with suffix", "NO_REPLY_EXTRA", false},
+		{"marker with prefix", "X NO_REPLY", false},
+		{"missing underscore", "NO REPLY", false},
+		{"partial", "NO_REPL", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isSilentReply(tc.in); got != tc.want {
+				t.Errorf("isSilentReply(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestStripTrailingSilent(t *testing.T) {
+	cases := []struct {
+		name   string
+		in     string
+		want   string
+		wantOK bool
+	}{
+		{"trailing on new line", "Hello\nNO_REPLY", "Hello", true},
+		{"trailing lowercase on new line", "Hello\nno_reply", "Hello", true},
+		{"trailing after space", "Some reasoning here NO_REPLY", "Some reasoning here", true},
+		{"multi-line then marker", "Line1\nLine2\nNO_REPLY", "Line1\nLine2", true},
+		{"trailing with markdown emphasis", "Done. *NO_REPLY*", "Done. *NO_REPLY*", false},
+		{"trailing preceded by asterisks", "Done.**NO_REPLY", "Done.", true},
+		{"trailing with crlf", "Hello\r\nNO_REPLY", "Hello", true},
+		{"marker followed by trailing whitespace", "Hello NO_REPLY   ", "Hello", true},
+
+		{"no marker", "Hello world", "Hello world", false},
+		{"marker not at end", "NO_REPLY then more", "NO_REPLY then more", false},
+		{"marker with suffix token", "Hello NO_REPLY_EXTRA", "Hello NO_REPLY_EXTRA", false},
+		{"marker touching prior letters", "somethingNO_REPLY", "somethingNO_REPLY", false},
+		{"empty", "", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := stripTrailingSilent(tc.in)
+			if ok != tc.wantOK {
+				t.Errorf("stripTrailingSilent(%q) ok=%v, want %v", tc.in, ok, tc.wantOK)
+			}
+			if got != tc.want {
+				t.Errorf("stripTrailingSilent(%q) got=%q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCouldBeSilentPrefix(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"empty", "", true},
+		{"whitespace only", "   ", true},
+		{"one letter", "N", true},
+		{"two letters", "NO", true},
+		{"underscore partial", "NO_", true},
+		{"five letters", "NO_RE", true},
+		{"almost full", "NO_REPL", true},
+		{"full marker", "NO_REPLY", true},
+		{"lowercase partial", "no_r", true},
+		{"mixed case partial", "No_Re", true},
+		{"trimmed surrounding whitespace", "  NO_  ", true},
+
+		{"non-N start", "Hello", false},
+		{"one wrong letter", "X", false},
+		{"longer than marker", "NO_REPLYX", false},
+		{"similar but divergent", "NO-REPLY", false},
+		{"partial then wrong", "NO_Q", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := couldBeSilentPrefix(tc.in); got != tc.want {
+				t.Errorf("couldBeSilentPrefix(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Integration tests for /list visibility after /new and provider switches
 // ---------------------------------------------------------------------------
@@ -10584,5 +10744,17 @@ func TestSessionName_ACPLikeFlow(t *testing.T) {
 	if gotName != "ACP任务" {
 		t.Fatalf("GetSessionName(%q) = %q, want %q — ACP-like immediate ID name mapping failed",
 			"acp-session-001", gotName, "ACP任务")
+	}
+}
+
+// TestBtwAlias_ResolvesToPs verifies that /btw is accepted as an alias for /ps.
+func TestBtwAlias_ResolvesToPs(t *testing.T) {
+	id := matchPrefix("btw", builtinCommands)
+	if id != "ps" {
+		t.Fatalf("matchPrefix(\"btw\") = %q, want \"ps\"", id)
+	}
+	id2 := matchPrefix("ps", builtinCommands)
+	if id2 != "ps" {
+		t.Fatalf("matchPrefix(\"ps\") = %q, want \"ps\"", id2)
 	}
 }

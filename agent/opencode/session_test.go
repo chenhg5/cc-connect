@@ -3,6 +3,9 @@ package opencode
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -64,6 +67,55 @@ func TestNewOpencodeSession_ContinueSessionTreatedAsFresh(t *testing.T) {
 
 	if got := s.CurrentSessionID(); got != "" {
 		t.Errorf("ContinueSession should be treated as fresh: chatID = %q, want empty", got)
+	}
+}
+
+func TestOpencodeSessionStageImages(t *testing.T) {
+	dir := t.TempDir()
+	s := &opencodeSession{workDir: dir}
+
+	prompt, imagePaths, err := s.stageImages("", []core.ImageAttachment{
+		{MimeType: "image/jpeg", Data: []byte{0xff, 0xd8, 0xff}},
+		{MimeType: "image/webp", Data: []byte("webp")},
+	})
+	if err != nil {
+		t.Fatalf("stageImages: %v", err)
+	}
+	if prompt != "Please analyze the attached image(s)." {
+		t.Fatalf("prompt = %q", prompt)
+	}
+	if len(imagePaths) != 2 {
+		t.Fatalf("imagePaths len = %d, want 2", len(imagePaths))
+	}
+	if filepath.Ext(imagePaths[0]) != ".jpg" {
+		t.Fatalf("first ext = %q, want .jpg", filepath.Ext(imagePaths[0]))
+	}
+	if filepath.Ext(imagePaths[1]) != ".webp" {
+		t.Fatalf("second ext = %q, want .webp", filepath.Ext(imagePaths[1]))
+	}
+	for _, path := range imagePaths {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected staged image %s: %v", path, err)
+		}
+	}
+}
+
+func TestOpencodeSessionBuildRunArgsIncludesImagesAsFiles(t *testing.T) {
+	s := &opencodeSession{workDir: "/repo", model: "provider/model"}
+
+	got := s.buildRunArgs("describe these images", []string{"/tmp/a.png", "/tmp/b.jpg"}, "ses_123")
+	want := []string{
+		"run", "--format", "json",
+		"--session", "ses_123",
+		"--model", "provider/model",
+		"--dir", "/repo",
+		"--thinking",
+		"--file", "/tmp/a.png",
+		"--file", "/tmp/b.jpg",
+		"describe these images",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("args = %#v, want %#v", got, want)
 	}
 }
 

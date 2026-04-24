@@ -105,7 +105,7 @@ qodercli --version
 
 ## Step 3: Create config.toml
 
-> **💡 Recommended: Use the Web UI** — After installing, run `cc-connect web` to open the built-in management dashboard. You can visually create projects, add platforms, manage API providers, and even chat with your agent directly from the browser — no need to edit TOML files by hand. The web UI is the easiest way to get started for both new and existing users.
+> **💡 Recommended: Use the Web UI** — After installing, run `cc-connect web` to configure the web admin and open the dashboard in your browser. You can visually create projects, add platforms, manage API providers, and even chat with your agent directly from the browser — no need to edit TOML files by hand. **Note:** `cc-connect web` only configures and opens the browser — you still need to run `cc-connect` separately to start the service.
 
 If you prefer manual configuration, cc-connect looks for config in this order:
 1. `-config <path>` flag (explicit)
@@ -433,10 +433,11 @@ allow_from = "*"                 # allowed QQ user IDs: "12345,67890" or "*" for
 **Open the Web UI (recommended):**
 
 ```bash
-cc-connect web
+cc-connect web    # configure web admin & open browser (does NOT start cc-connect)
+cc-connect        # start the service
 ```
 
-This launches cc-connect and opens the management dashboard in your browser. From there you can manage all projects, platforms, providers, sessions, and chat with your agent visually.
+> **Note:** `cc-connect web` only configures the web admin and opens the dashboard in your browser — it does **not** start the cc-connect service itself. You still need to run `cc-connect` (or `cc-connect --config <path>`) separately to actually start the bridge. Think of it as two steps: configure first, then run.
 
 **Important: If you are running inside a Claude Code session** (e.g., Claude Code helped you install and configure cc-connect), you must unset the `CLAUDECODE` environment variable before starting, otherwise Claude Code will refuse to launch as a subprocess:
 
