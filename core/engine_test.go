@@ -3261,8 +3261,8 @@ func TestCmdModel_UpdatesActiveProviderModel(t *testing.T) {
 	if savedProvider != "openai" || savedModel != "gpt-4.1" {
 		t.Fatalf("saved provider/model = %q/%q, want openai/gpt-4.1", savedProvider, savedModel)
 	}
-	if active := e.sessions.GetOrCreateActive(msg.SessionKey); active.AgentSessionID != "" {
-		t.Fatalf("session id = %q, want cleared after model switch", active.AgentSessionID)
+	if active := e.sessions.GetOrCreateActive(msg.SessionKey); active.AgentSessionID != "existing-session" {
+		t.Fatalf("session id = %q, want preserved after model switch", active.AgentSessionID)
 	}
 }
 
@@ -3430,8 +3430,8 @@ func TestCmdModel_MultiWorkspaceUsesWorkspaceAgentAndSessions(t *testing.T) {
 	if globalAgent.model != "gpt-4.1-mini" {
 		t.Fatalf("global agent model = %q, want unchanged", globalAgent.model)
 	}
-	if got := ws.sessions.GetOrCreateActive(msg.SessionKey).AgentSessionID; got != "" {
-		t.Fatalf("workspace session id = %q, want cleared", got)
+	if got := ws.sessions.GetOrCreateActive(msg.SessionKey).AgentSessionID; got != "workspace-session" {
+		t.Fatalf("workspace session id = %q, want preserved", got)
 	}
 	if got := e.sessions.GetOrCreateActive(msg.SessionKey).AgentSessionID; got != "global-session" {
 		t.Fatalf("global session id = %q, want untouched", got)
@@ -3489,7 +3489,6 @@ func TestCmdModel_KeepHistoryPreservesSessionID(t *testing.T) {
 		},
 	}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
-	e.SetModelSwitchKeepHistory(true)
 
 	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
 	s := e.sessions.GetOrCreateActive(msg.SessionKey)
@@ -3503,36 +3502,6 @@ func TestCmdModel_KeepHistoryPreservesSessionID(t *testing.T) {
 	}
 	if got := len(s.GetHistory(0)); got != 1 {
 		t.Fatalf("history len = %d, want 1 (original entry preserved)", got)
-	}
-}
-
-func TestCmdModel_DefaultClearsSessionIDAndHistory(t *testing.T) {
-	p := &stubPlatformEngine{n: "plain"}
-	agent := &stubModelModeAgent{
-		model: "gpt-4.1-mini",
-		providers: []ProviderConfig{
-			{
-				Name:   "openai",
-				Model:  "gpt-4.1-mini",
-				Models: []ModelOption{{Name: "gpt-4.1", Alias: "gpt"}, {Name: "gpt-4.1-mini", Alias: "mini"}},
-			},
-		},
-	}
-	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
-	// modelSwitchKeepHistory defaults to false
-
-	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
-	s := e.sessions.GetOrCreateActive(msg.SessionKey)
-	s.SetAgentSessionID("existing-session-id", "test")
-	s.AddHistory("user", "hello")
-
-	e.cmdModel(p, msg, []string{"switch", "gpt"})
-
-	if got := s.GetAgentSessionID(); got != "" {
-		t.Fatalf("session id = %q, want empty (should be cleared by default)", got)
-	}
-	if len(s.GetHistory(0)) != 0 {
-		t.Fatal("history should be cleared by default when model_switch_keep_history is false")
 	}
 }
 
