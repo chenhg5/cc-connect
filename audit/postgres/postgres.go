@@ -16,11 +16,24 @@ import (
 
 var identifierPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
+// IndexProfile controls how aggressively the sink indexes audit data.
+type IndexProfile string
+
+const (
+	// IndexProfileMinimal keeps only the lowest-cost timeline indexes.
+	IndexProfileMinimal IndexProfile = "minimal"
+	// IndexProfileLookup adds exact message ID lookup indexes.
+	IndexProfileLookup IndexProfile = "lookup"
+	// IndexProfileFull adds thread-correlation indexes on top of lookup indexes.
+	IndexProfileFull IndexProfile = "full"
+)
+
 // Config controls the PostgreSQL audit sink.
 type Config struct {
 	DSN             string
 	Table           string
 	AutoCreate      *bool
+	IndexProfile    string
 	MaxOpenConns    int
 	MaxIdleConns    int
 	ConnMaxLifetime time.Duration
@@ -30,6 +43,7 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		Table:           "audit_records",
+		IndexProfile:    string(IndexProfileMinimal),
 		MaxOpenConns:    10,
 		MaxIdleConns:    5,
 		ConnMaxLifetime: 30 * time.Minute,
@@ -38,8 +52,9 @@ func DefaultConfig() Config {
 
 // Sink writes audit records to PostgreSQL.
 type Sink struct {
-	db    *sql.DB
-	table string
+	db           *sql.DB
+	table        string
+	indexProfile IndexProfile
 }
 
 // New opens a PostgreSQL-backed audit sink using the pgx stdlib driver.
@@ -82,7 +97,11 @@ func newWithDB(db *sql.DB, cfg Config) (*Sink, error) {
 	db.SetMaxIdleConns(cfg.MaxIdleConns)
 	db.SetConnMaxLifetime(cfg.ConnMaxLifetime)
 
-	sink := &Sink{db: db, table: cfg.Table}
+	sink := &Sink{
+		db:           db,
+		table:        cfg.Table,
+		indexProfile: normalizeIndexProfile(cfg.IndexProfile),
+	}
 	if autoCreateEnabled(cfg.AutoCreate) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -99,6 +118,9 @@ func normalizeConfig(cfg Config) Config {
 	if strings.TrimSpace(cfg.Table) == "" {
 		cfg.Table = defaults.Table
 	}
+	if strings.TrimSpace(cfg.IndexProfile) == "" {
+		cfg.IndexProfile = defaults.IndexProfile
+	}
 	if cfg.MaxOpenConns == 0 {
 		cfg.MaxOpenConns = defaults.MaxOpenConns
 	}
@@ -113,6 +135,18 @@ func normalizeConfig(cfg Config) Config {
 		cfg.AutoCreate = &def
 	}
 	return cfg
+}
+
+// normalizeIndexProfile collapses empty or unknown values to the default profile.
+func normalizeIndexProfile(value string) IndexProfile {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case string(IndexProfileLookup):
+		return IndexProfileLookup
+	case string(IndexProfileFull):
+		return IndexProfileFull
+	default:
+		return IndexProfileMinimal
+	}
 }
 
 // autoCreateEnabled resolves the optional auto-create flag with a default of true.
@@ -134,7 +168,6 @@ func validateIdentifier(name string) error {
 // ensureSchema creates the audit table and supporting indexes when enabled.
 func (s *Sink) ensureSchema(ctx context.Context) error {
 	table := quoteIdent(s.table)
-	indexPrefix := s.table
 	stmts := []string{
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
 			id BIGSERIAL PRIMARY KEY,
@@ -162,11 +195,8 @@ func (s *Sink) ensureSchema(ctx context.Context) error {
 			error TEXT NOT NULL DEFAULT '',
 			extra JSONB NOT NULL DEFAULT '{}'::jsonb
 		)`, table),
-		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s ON %s (project, timestamp DESC)`, quoteIdent(indexPrefix+"_project_ts_idx"), table),
-		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s ON %s (session_key, timestamp DESC)`, quoteIdent(indexPrefix+"_session_ts_idx"), table),
-		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s ON %s (inbound_message_id)`, quoteIdent(indexPrefix+"_inbound_msg_idx"), table),
-		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s ON %s (outbound_message_id)`, quoteIdent(indexPrefix+"_outbound_msg_idx"), table),
 	}
+	stmts = append(stmts, indexStatements(s.table, s.indexProfile)...)
 	stmts = append(stmts, auditCommentStatements(s.table)...)
 	for _, stmt := range stmts {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
@@ -174,6 +204,30 @@ func (s *Sink) ensureSchema(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// indexStatements returns the managed index DDL for the configured profile.
+func indexStatements(tableName string, profile IndexProfile) []string {
+	table := quoteIdent(tableName)
+	indexPrefix := tableName
+	stmts := []string{
+		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s ON %s (project, timestamp DESC)`, quoteIdent(indexPrefix+"_project_ts_idx"), table),
+		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s ON %s (session_key, timestamp DESC) WHERE session_key <> ''`, quoteIdent(indexPrefix+"_session_ts_idx"), table),
+	}
+
+	if profile == IndexProfileLookup || profile == IndexProfileFull {
+		stmts = append(stmts,
+			fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s ON %s (inbound_message_id) WHERE inbound_message_id <> ''`, quoteIdent(indexPrefix+"_inbound_msg_idx"), table),
+			fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s ON %s (outbound_message_id) WHERE outbound_message_id <> ''`, quoteIdent(indexPrefix+"_outbound_msg_idx"), table),
+		)
+	}
+	if profile == IndexProfileFull {
+		stmts = append(stmts,
+			fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s ON %s (root_message_id, timestamp DESC) WHERE root_message_id <> ''`, quoteIdent(indexPrefix+"_root_ts_idx"), table),
+			fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s ON %s (reply_to_message_id) WHERE reply_to_message_id <> ''`, quoteIdent(indexPrefix+"_reply_to_msg_idx"), table),
+		)
+	}
+	return stmts
 }
 
 // quoteIdent quotes an identifier for interpolation into DDL statements.

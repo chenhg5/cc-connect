@@ -2,11 +2,13 @@ package mongodb
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 // boolPtr keeps test configs concise when optional booleans are needed.
@@ -17,6 +19,7 @@ func boolPtr(v bool) *bool {
 // fakeCollection records sink operations without requiring a live MongoDB server.
 type fakeCollection struct {
 	indexCreated bool
+	indexProfile IndexProfile
 	insertedDoc  any
 }
 
@@ -27,8 +30,9 @@ func (c *fakeCollection) InsertOne(_ context.Context, document any) error {
 }
 
 // CreateIndexes records that index creation was requested.
-func (c *fakeCollection) CreateIndexes(_ context.Context) error {
+func (c *fakeCollection) CreateIndexes(_ context.Context, profile IndexProfile) error {
 	c.indexCreated = true
+	c.indexProfile = profile
 	return nil
 }
 
@@ -48,6 +52,9 @@ func TestNewWithCollectionCreatesIndexes(t *testing.T) {
 	}
 	if !coll.indexCreated {
 		t.Fatal("expected indexes to be created")
+	}
+	if coll.indexProfile != IndexProfileMinimal {
+		t.Fatalf("index profile = %q, want %q", coll.indexProfile, IndexProfileMinimal)
 	}
 }
 
@@ -113,5 +120,84 @@ func TestSinkWriteInsertsAuditRecord(t *testing.T) {
 	}
 	if got := extra["trace"]; got != "trace-1" {
 		t.Fatalf("extra.trace = %#v, want %q", got, "trace-1")
+	}
+}
+
+// TestIndexModels verifies that each index profile expands to the expected models.
+func TestIndexModels(t *testing.T) {
+	tests := []struct {
+		name        string
+		profile     IndexProfile
+		wantCount   int
+		mustHave    []string
+		mustNotHave []string
+	}{
+		{
+			name:      "minimal",
+			profile:   IndexProfileMinimal,
+			wantCount: 2,
+			mustHave: []string{
+				"project_timestamp_desc",
+				"session_timestamp_desc",
+			},
+			mustNotHave: []string{
+				"inbound_message_id",
+				"outbound_message_id",
+				"root_message_id_timestamp_desc",
+				"reply_to_message_id",
+			},
+		},
+		{
+			name:      "lookup",
+			profile:   IndexProfileLookup,
+			wantCount: 4,
+			mustHave: []string{
+				"inbound_message_id",
+				"outbound_message_id",
+			},
+		},
+		{
+			name:      "full",
+			profile:   IndexProfileFull,
+			wantCount: 6,
+			mustHave: []string{
+				"root_message_id_timestamp_desc",
+				"reply_to_message_id",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			models := indexModels(tt.profile)
+			if len(models) != tt.wantCount {
+				t.Fatalf("len(indexModels()) = %d, want %d", len(models), tt.wantCount)
+			}
+
+			names := make([]string, 0, len(models))
+			for _, model := range models {
+				resolved := options.IndexOptions{}
+				for _, apply := range model.Options.List() {
+					if err := apply(&resolved); err != nil {
+						t.Fatalf("apply index option error = %v", err)
+					}
+				}
+				if resolved.Name == nil {
+					t.Fatalf("index options missing name: %#v", resolved)
+				}
+				names = append(names, *resolved.Name)
+			}
+			joined := strings.Join(names, "\n")
+			for _, want := range tt.mustHave {
+				if !strings.Contains(joined, want) {
+					t.Fatalf("index models missing %q:\n%s", want, joined)
+				}
+			}
+			for _, forbidden := range tt.mustNotHave {
+				if strings.Contains(joined, forbidden) {
+					t.Fatalf("index models unexpectedly contain %q:\n%s", forbidden, joined)
+				}
+			}
+		})
 	}
 }

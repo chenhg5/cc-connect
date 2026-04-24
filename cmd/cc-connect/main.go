@@ -182,6 +182,9 @@ func main() {
 			pgCfg.DSN = cfg.Audit.Postgres.DSN
 			pgCfg.Table = cfg.Audit.Postgres.Table
 			pgCfg.AutoCreate = cfg.Audit.Postgres.AutoCreate
+			if strings.TrimSpace(cfg.Audit.Postgres.IndexProfile) != "" {
+				pgCfg.IndexProfile = cfg.Audit.Postgres.IndexProfile
+			}
 			if cfg.Audit.Postgres.MaxOpenConns != nil {
 				pgCfg.MaxOpenConns = *cfg.Audit.Postgres.MaxOpenConns
 			}
@@ -197,7 +200,7 @@ func main() {
 				os.Exit(1)
 			}
 			sinks = append(sinks, pgSink)
-			slog.Info("audit sink enabled", "backend", "postgres")
+			slog.Info("audit sink enabled", "backend", "postgres", "index_profile", pgCfg.IndexProfile)
 		}
 
 		if strings.TrimSpace(cfg.Audit.MongoDB.URI) != "" {
@@ -206,13 +209,16 @@ func main() {
 			mongoCfg.Database = cfg.Audit.MongoDB.Database
 			mongoCfg.Collection = cfg.Audit.MongoDB.Collection
 			mongoCfg.AutoCreateIndexes = cfg.Audit.MongoDB.AutoCreateIndexes
+			if strings.TrimSpace(cfg.Audit.MongoDB.IndexProfile) != "" {
+				mongoCfg.IndexProfile = cfg.Audit.MongoDB.IndexProfile
+			}
 			mongoSink, err := auditmongodb.New(mongoCfg)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error initializing mongodb audit sink: %v\n", err)
 				os.Exit(1)
 			}
 			sinks = append(sinks, mongoSink)
-			slog.Info("audit sink enabled", "backend", "mongodb")
+			slog.Info("audit sink enabled", "backend", "mongodb", "index_profile", mongoCfg.IndexProfile)
 		}
 
 		if len(sinks) == 0 {

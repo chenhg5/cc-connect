@@ -158,6 +158,7 @@ type AuditPostgresConfig struct {
 	DSN                 string `toml:"dsn,omitempty"`
 	Table               string `toml:"table,omitempty"`
 	AutoCreate          *bool  `toml:"auto_create,omitempty"`            // default true
+	IndexProfile        string `toml:"index_profile,omitempty"`          // "minimal" (default), "lookup", or "full"
 	MaxOpenConns        *int   `toml:"max_open_conns,omitempty"`         // default 10
 	MaxIdleConns        *int   `toml:"max_idle_conns,omitempty"`         // default 5
 	ConnMaxLifetimeMins *int   `toml:"conn_max_lifetime_mins,omitempty"` // default 30
@@ -169,6 +170,7 @@ type AuditMongoDBConfig struct {
 	Database          string `toml:"database,omitempty"`
 	Collection        string `toml:"collection,omitempty"`
 	AutoCreateIndexes *bool  `toml:"auto_create_indexes,omitempty"` // default true
+	IndexProfile      string `toml:"index_profile,omitempty"`       // "minimal" (default), "lookup", or "full"
 }
 
 // ManagementConfig controls the HTTP Management API for external tools.
@@ -703,6 +705,9 @@ func validateAuditConfig(cfg AuditConfig) error {
 	if table := strings.TrimSpace(cfg.Postgres.Table); table != "" && !auditIdentifierPattern.MatchString(table) {
 		return fmt.Errorf("config: audit.postgres.table %q contains invalid characters (allowed: letters, numbers, underscore; must start with a letter or underscore)", cfg.Postgres.Table)
 	}
+	if _, ok := supportedAuditIndexProfiles[strings.ToLower(strings.TrimSpace(cfg.Postgres.IndexProfile))]; !ok {
+		return fmt.Errorf("config: audit.postgres.index_profile %q must be one of: minimal, lookup, full", cfg.Postgres.IndexProfile)
+	}
 	if cfg.Postgres.MaxOpenConns != nil && *cfg.Postgres.MaxOpenConns < 0 {
 		return fmt.Errorf("config: audit.postgres.max_open_conns must be >= 0")
 	}
@@ -719,6 +724,9 @@ func validateAuditConfig(cfg AuditConfig) error {
 		if strings.Contains(cfg.MongoDB.Collection, "\x00") {
 			return fmt.Errorf("config: audit.mongodb.collection must not contain NUL characters")
 		}
+	}
+	if _, ok := supportedAuditIndexProfiles[strings.ToLower(strings.TrimSpace(cfg.MongoDB.IndexProfile))]; !ok {
+		return fmt.Errorf("config: audit.mongodb.index_profile %q must be one of: minimal, lookup, full", cfg.MongoDB.IndexProfile)
 	}
 	return nil
 }
@@ -758,6 +766,13 @@ var supportedReferenceEnclosureStyles = map[string]struct{}{
 	"angle":     {},
 	"fullwidth": {},
 	"code":      {},
+}
+
+var supportedAuditIndexProfiles = map[string]struct{}{
+	"":        {},
+	"minimal": {},
+	"lookup":  {},
+	"full":    {},
 }
 
 func validateReferenceConfig(prefix string, rc ReferenceConfig) error {

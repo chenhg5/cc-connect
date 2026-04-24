@@ -14,24 +14,38 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 )
 
+// IndexProfile controls how aggressively the sink indexes audit data.
+type IndexProfile string
+
+const (
+	// IndexProfileMinimal keeps only the lowest-cost timeline indexes.
+	IndexProfileMinimal IndexProfile = "minimal"
+	// IndexProfileLookup adds exact message ID lookup indexes.
+	IndexProfileLookup IndexProfile = "lookup"
+	// IndexProfileFull adds thread-correlation indexes on top of lookup indexes.
+	IndexProfileFull IndexProfile = "full"
+)
+
 // Config controls the MongoDB audit sink.
 type Config struct {
 	URI               string
 	Database          string
 	Collection        string
 	AutoCreateIndexes *bool
+	IndexProfile      string
 }
 
 // DefaultConfig returns a sensible MongoDB sink configuration.
 func DefaultConfig() Config {
 	return Config{
-		Collection: "audit_records",
+		Collection:   "audit_records",
+		IndexProfile: string(IndexProfileMinimal),
 	}
 }
 
 type collectionAPI interface {
 	InsertOne(ctx context.Context, document any) error
-	CreateIndexes(ctx context.Context) error
+	CreateIndexes(ctx context.Context, profile IndexProfile) error
 }
 
 // mongoCollection adapts a MongoDB collection to the minimal sink interface.
@@ -48,26 +62,9 @@ func (c *mongoCollection) InsertOne(ctx context.Context, document any) error {
 	return nil
 }
 
-// CreateIndexes creates the standard indexes used by audit queries.
-func (c *mongoCollection) CreateIndexes(ctx context.Context) error {
-	models := []mongo.IndexModel{
-		{
-			Keys:    bson.D{{Key: "project", Value: 1}, {Key: "timestamp", Value: -1}},
-			Options: options.Index().SetName("project_timestamp_desc"),
-		},
-		{
-			Keys:    bson.D{{Key: "session_key", Value: 1}, {Key: "timestamp", Value: -1}},
-			Options: options.Index().SetName("session_timestamp_desc"),
-		},
-		{
-			Keys:    bson.D{{Key: "inbound_message_id", Value: 1}},
-			Options: options.Index().SetName("inbound_message_id"),
-		},
-		{
-			Keys:    bson.D{{Key: "outbound_message_id", Value: 1}},
-			Options: options.Index().SetName("outbound_message_id"),
-		},
-	}
+// CreateIndexes creates the configured indexes used by audit queries.
+func (c *mongoCollection) CreateIndexes(ctx context.Context, profile IndexProfile) error {
+	models := indexModels(profile)
 	if _, err := c.collection.Indexes().CreateMany(ctx, models); err != nil {
 		return fmt.Errorf("mongodb audit sink: create indexes: %w", err)
 	}
@@ -131,7 +128,7 @@ func newWithCollection(client *mongo.Client, collection collectionAPI, cfg Confi
 	if autoCreateIndexesEnabled(cfg.AutoCreateIndexes) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := sink.collection.CreateIndexes(ctx); err != nil {
+		if err := sink.collection.CreateIndexes(ctx, normalizeIndexProfile(cfg.IndexProfile)); err != nil {
 			return nil, err
 		}
 	}
@@ -144,11 +141,26 @@ func normalizeConfig(cfg Config) Config {
 	if strings.TrimSpace(cfg.Collection) == "" {
 		cfg.Collection = defaults.Collection
 	}
+	if strings.TrimSpace(cfg.IndexProfile) == "" {
+		cfg.IndexProfile = defaults.IndexProfile
+	}
 	if cfg.AutoCreateIndexes == nil {
 		def := true
 		cfg.AutoCreateIndexes = &def
 	}
 	return cfg
+}
+
+// normalizeIndexProfile collapses empty or unknown values to the default profile.
+func normalizeIndexProfile(value string) IndexProfile {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case string(IndexProfileLookup):
+		return IndexProfileLookup
+	case string(IndexProfileFull):
+		return IndexProfileFull
+	default:
+		return IndexProfileMinimal
+	}
 }
 
 // autoCreateIndexesEnabled resolves the optional index-creation flag with a default of true.
@@ -192,6 +204,69 @@ func auditDocumentFromRecord(record *core.AuditRecord) bson.M {
 		"content_sent":        record.ContentSent,
 		"error":               record.Error,
 		"extra":               record.Extra,
+	}
+}
+
+// indexModels returns the managed MongoDB indexes for the configured profile.
+func indexModels(profile IndexProfile) []mongo.IndexModel {
+	models := []mongo.IndexModel{
+		{
+			Keys:    bson.D{{Key: "project", Value: 1}, {Key: "timestamp", Value: -1}},
+			Options: options.Index().SetName("project_timestamp_desc"),
+		},
+		{
+			Keys: bson.D{{Key: "session_key", Value: 1}, {Key: "timestamp", Value: -1}},
+			Options: options.Index().
+				SetName("session_timestamp_desc").
+				SetPartialFilterExpression(nonEmptyStringFilter("session_key")),
+		},
+	}
+
+	if profile == IndexProfileLookup || profile == IndexProfileFull {
+		models = append(models,
+			mongo.IndexModel{
+				Keys: bson.D{{Key: "inbound_message_id", Value: 1}},
+				Options: options.Index().
+					SetName("inbound_message_id").
+					SetPartialFilterExpression(nonEmptyStringFilter("inbound_message_id")),
+			},
+			mongo.IndexModel{
+				Keys: bson.D{{Key: "outbound_message_id", Value: 1}},
+				Options: options.Index().
+					SetName("outbound_message_id").
+					SetPartialFilterExpression(nonEmptyStringFilter("outbound_message_id")),
+			},
+		)
+	}
+	if profile == IndexProfileFull {
+		models = append(models,
+			mongo.IndexModel{
+				Keys: bson.D{{Key: "root_message_id", Value: 1}, {Key: "timestamp", Value: -1}},
+				Options: options.Index().
+					SetName("root_message_id_timestamp_desc").
+					SetPartialFilterExpression(nonEmptyStringFilter("root_message_id")),
+			},
+			mongo.IndexModel{
+				Keys: bson.D{{Key: "reply_to_message_id", Value: 1}},
+				Options: options.Index().
+					SetName("reply_to_message_id").
+					SetPartialFilterExpression(nonEmptyStringFilter("reply_to_message_id")),
+			},
+		)
+	}
+	return models
+}
+
+// nonEmptyStringFilter restricts an index to documents that contain a non-empty string field.
+func nonEmptyStringFilter(field string) bson.D {
+	return bson.D{
+		{
+			Key: field,
+			Value: bson.D{
+				{Key: "$exists", Value: true},
+				{Key: "$ne", Value: ""},
+			},
+		},
 	}
 }
 

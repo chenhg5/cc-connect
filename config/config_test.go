@@ -224,10 +224,21 @@ func TestValidateAuditConfig(t *testing.T) {
 			name: "accepts postgres sink config",
 			cfg: AuditConfig{
 				Postgres: AuditPostgresConfig{
-					DSN:   "postgres://demo",
-					Table: "audit_records",
+					DSN:          "postgres://demo",
+					Table:        "audit_records",
+					IndexProfile: "lookup",
 				},
 			},
+		},
+		{
+			name: "rejects invalid postgres index profile",
+			cfg: AuditConfig{
+				Postgres: AuditPostgresConfig{
+					DSN:          "postgres://demo",
+					IndexProfile: "wide",
+				},
+			},
+			wantErr: `audit.postgres.index_profile "wide" must be one of: minimal, lookup, full`,
 		},
 		{
 			name: "mongodb uri requires database",
@@ -242,11 +253,23 @@ func TestValidateAuditConfig(t *testing.T) {
 			name: "accepts mongodb sink config",
 			cfg: AuditConfig{
 				MongoDB: AuditMongoDBConfig{
-					URI:        "mongodb://localhost:27017",
-					Database:   "cc_connect",
-					Collection: "audit_records",
+					URI:          "mongodb://localhost:27017",
+					Database:     "cc_connect",
+					Collection:   "audit_records",
+					IndexProfile: "full",
 				},
 			},
+		},
+		{
+			name: "rejects invalid mongodb index profile",
+			cfg: AuditConfig{
+				MongoDB: AuditMongoDBConfig{
+					URI:          "mongodb://localhost:27017",
+					Database:     "cc_connect",
+					IndexProfile: "wide",
+				},
+			},
+			wantErr: `audit.mongodb.index_profile "wide" must be one of: minimal, lookup, full`,
 		},
 	}
 
