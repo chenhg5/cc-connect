@@ -158,6 +158,8 @@ type Platform struct {
 	reactionEmoji              string
 	doneEmoji                  string
 	allowFrom                  string
+	allowChat                  string
+	groupOnly                  bool
 	groupReplyAll              bool
 	respondToAtEveryoneAndHere bool
 	shareSessionInChannel      bool
@@ -183,6 +185,8 @@ type Platform struct {
 	callbackPath string
 	encryptKey   string
 	eventHandler *dispatcher.EventDispatcher
+	sharedGroup  *sharedWSGroup // non-nil when sharing WebSocket with other platforms
+	isWSPrimary  bool           // true if this platform owns the shared WebSocket connection
 	// cardActionMessageIDs tracks the most recent card-action messageID per
 	// session key, enabling async card refreshes via the Patch API.
 	cardActionMsgMu  sync.Mutex
@@ -231,6 +235,8 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	}
 	allowFrom, _ := opts["allow_from"].(string)
 	core.CheckAllowFrom(name, allowFrom)
+	allowChat, _ := opts["allow_chat"].(string)
+	groupOnly, _ := opts["group_only"].(bool)
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
 	respondToAtEveryoneAndHere, _ := opts["respond_to_at_everyone_and_here"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
@@ -283,6 +289,8 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		reactionEmoji:              reactionEmoji,
 		doneEmoji:                  doneEmoji,
 		allowFrom:                  allowFrom,
+		allowChat:                  allowChat,
+		groupOnly:                  groupOnly,
 		groupReplyAll:              groupReplyAll,
 		respondToAtEveryoneAndHere: respondToAtEveryoneAndHere,
 		shareSessionInChannel:      shareSessionInChannel,
@@ -340,10 +348,29 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		}
 	}
 
+	// Register for shared WebSocket: multiple projects using the same app_id
+	// share a single WebSocket connection to avoid Feishu's server-side
+	// load-balancing which randomly routes messages across connections.
+	group, isPrimary := registerSharedWS(p)
+	p.sharedGroup = group
+	p.isWSPrimary = isPrimary
+
+	// Secondary platforms skip connection creation — the primary's connection
+	// fans out events to all platforms in the shared group.
+	if !isPrimary {
+		return nil
+	}
+
 	p.eventHandler = dispatcher.NewEventDispatcher("", p.encryptKey).
 		OnP2MessageReceiveV1(func(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
-			slog.Debug(p.platformName+": message received", "app_id", p.appID)
-			return p.onMessage(ctx, event)
+			// Fan out to all platforms sharing this WebSocket connection.
+			// Each platform's onMessage applies its own allow_chat filter.
+			for _, sibling := range p.sharedGroup.allPlatforms() {
+				if err := sibling.onMessage(ctx, event); err != nil {
+					slog.Error("shared ws: onMessage error", "err", err)
+				}
+			}
+			return nil
 		}).
 		OnP2MessageReadV1(func(ctx context.Context, event *larkim.P2MessageReadV1) error {
 			return nil // ignore read receipts
@@ -363,10 +390,26 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 			return nil // ignore reaction removal events (triggered by our own removeReaction)
 		}).
 		OnP2CardActionTrigger(func(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
-			return p.onCardAction(event)
+			// Fan out card actions: try each platform, return first non-nil response.
+			// Each platform's onCardAction checks allow_chat before processing.
+			for _, sibling := range p.sharedGroup.allPlatforms() {
+				resp, err := sibling.onCardAction(event)
+				if err != nil {
+					return nil, err
+				}
+				if resp != nil {
+					return resp, nil
+				}
+			}
+			return nil, nil
 		}).
 		OnP2BotMenuV6(func(ctx context.Context, event *larkapplication.P2BotMenuV6) error {
-			return p.onBotMenu(event)
+			for _, sibling := range p.sharedGroup.allPlatforms() {
+				if err := sibling.onBotMenu(event); err != nil {
+					slog.Error("shared ws: onBotMenu error", "err", err)
+				}
+			}
+			return nil
 		})
 
 	if p.useInteractiveCard {
@@ -466,6 +509,13 @@ func (p *Platform) webhookHandler(w http.ResponseWriter, r *http.Request) {
 func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
 	if event.Event == nil || event.Event.Action == nil {
 		return nil, nil
+	}
+
+	// Check allow_chat filter: skip card actions from chats this platform doesn't own.
+	if event.Event.Context != nil && event.Event.Context.OpenChatID != "" {
+		if !core.AllowList(p.allowChat, event.Event.Context.OpenChatID) {
+			return nil, nil
+		}
 	}
 
 	actionVal, _ := event.Event.Action.Value["action"].(string)
@@ -809,6 +859,15 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 
 	if !core.AllowList(p.allowFrom, userID) {
 		slog.Debug(p.tag()+": message from unauthorized user", "user", userID)
+		return nil
+	}
+
+	if chatType == "group" && !core.AllowList(p.allowChat, chatID) {
+		slog.Debug(p.tag()+": message from unauthorized chat", "chat_id", chatID)
+		return nil
+	}
+	if chatType != "group" && p.groupOnly {
+		slog.Debug(p.tag()+": p2p message skipped (group_only=true)", "chat_type", chatType)
 		return nil
 	}
 
@@ -3323,8 +3382,17 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 }
 
 func (p *Platform) Stop() error {
-	if p.cancel != nil {
-		p.cancel()
+	if p.isWSPrimary {
+		remaining := unregisterSharedWS(p)
+		if remaining > 0 {
+			slog.Warn(p.tag()+": primary shutting down, secondary platforms will lose event source",
+				"remaining", remaining)
+		}
+		if p.cancel != nil {
+			p.cancel()
+		}
+	} else {
+		unregisterSharedWS(p)
 	}
 	// Stop webhook server if running (Lark international version)
 	if p.server != nil {
@@ -3514,6 +3582,10 @@ func (p *Platform) onBotMenu(event *larkapplication.P2BotMenuV6) error {
 
 	if !core.AllowList(p.allowFrom, userID) {
 		slog.Debug(p.tag()+": menu event from unauthorized user", "user", userID, "event_key", eventKey)
+		return nil
+	}
+	if p.groupOnly {
+		slog.Debug(p.tag()+": bot menu skipped (group_only=true)", "user", userID)
 		return nil
 	}
 

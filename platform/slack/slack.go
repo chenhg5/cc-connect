@@ -458,7 +458,7 @@ func (p *Platform) ReplyWithReceipt(ctx context.Context, rctx any, content strin
 	}
 
 	opts := []slack.MsgOption{
-		slack.MsgOptionText(content, false),
+		slack.MsgOptionText(core.MarkdownToSlackMrkdwn(content), false),
 	}
 	if rc.timestamp != "" {
 		opts = append(opts, slack.MsgOptionTS(rc.timestamp))
@@ -495,7 +495,7 @@ func (p *Platform) SendWithReceipt(ctx context.Context, rctx any, content string
 		return nil, fmt.Errorf("slack: invalid reply context type %T", rctx)
 	}
 
-	_, ts, err := p.client.PostMessageContext(ctx, rc.channel, slack.MsgOptionText(content, false))
+	_, ts, err := p.client.PostMessageContext(ctx, rc.channel, slack.MsgOptionText(core.MarkdownToSlackMrkdwn(content), false))
 	if err != nil {
 		return nil, fmt.Errorf("slack: send: %w", err)
 	}
