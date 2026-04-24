@@ -43,10 +43,13 @@ Each user gets an independent session with full conversation context. Manage ses
 | `/allow <tool>` | Pre-allow a tool (next session) |
 | `/reasoning [level]` | View or switch reasoning effort (Codex) |
 | `/mode [name]` | View or switch permission mode |
+| `/mcp` | List MCP servers for the current agent/backend |
 | `/stop` | Stop current execution |
 | `/help` | Show available commands |
 
 During a session, the agent may request tool permissions. Reply **allow** / **deny** / **allow all**.
+
+For Codex, `/mcp` currently has two modes: `app_server` shows **Runtime MCP Servers**, while `exec` shows **Configured MCP Servers** parsed from local config. Other agents/backends may still report `/mcp` as unsupported.
 
 You can also configure automatic session rotation after inactivity:
 

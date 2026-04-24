@@ -113,6 +113,32 @@ func (a *resultAgent) StartSession(_ context.Context, _ string) (AgentSession, e
 func (a *resultAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) { return nil, nil }
 func (a *resultAgent) Stop() error                                                { return nil }
 
+type mcpConfigAgent struct {
+	stubAgent
+	inventory *MCPInventory
+	err       error
+}
+
+func (a *mcpConfigAgent) GetConfiguredMCPInventory(_ context.Context) (*MCPInventory, error) {
+	if a.err != nil {
+		return nil, a.err
+	}
+	return a.inventory, nil
+}
+
+type mcpRuntimeSession struct {
+	stubAgentSession
+	inventory *MCPInventory
+	err       error
+}
+
+func (s *mcpRuntimeSession) GetRuntimeMCPInventory(_ context.Context, _ int) (*MCPInventory, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.inventory, nil
+}
+
 type sessionEnvRecordingAgent struct {
 	stubAgent
 	session AgentSession
@@ -4579,6 +4605,92 @@ func TestCmdSkills_TelegramShowsManualInvocationHintWhenSkillsAreOmittedFromMenu
 	}
 	if !strings.Contains(p.sent[0], "command menu is full") {
 		t.Fatalf("skills text = %q, want Telegram overflow hint", p.sent[0])
+	}
+}
+
+func TestCmdMCP_UsesRuntimeInventoryWhenAvailable(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &mcpConfigAgent{
+		inventory: &MCPInventory{
+			Source: "configured",
+			Servers: []MCPServerInfo{{
+				Name:      "configured-only",
+				Transport: "stdio",
+				Enabled:   true,
+			}},
+		},
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	iKey := e.interactiveKeyForSessionKey("test:user1")
+	e.interactiveStates[iKey] = &interactiveState{
+		agentSession: &mcpRuntimeSession{
+			inventory: &MCPInventory{
+				Source: "runtime",
+				Servers: []MCPServerInfo{{
+					Name:       "runtime-server",
+					AuthStatus: "oAuth",
+					Transport:  "runtime",
+					Enabled:    true,
+					Tools:      []string{"search", "fetch"},
+				}},
+			},
+		},
+	}
+
+	e.cmdMCP(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"})
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "Runtime MCP Servers") || !strings.Contains(p.sent[0], "runtime-server") {
+		t.Fatalf("reply = %q, want runtime inventory", p.sent[0])
+	}
+	if strings.Contains(p.sent[0], "configured-only") {
+		t.Fatalf("reply = %q, should prefer runtime inventory", p.sent[0])
+	}
+}
+
+func TestCmdMCP_FallsBackToConfiguredInventory(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &mcpConfigAgent{
+		inventory: &MCPInventory{
+			Source: "configured",
+			Servers: []MCPServerInfo{{
+				Name:      "docs",
+				Transport: "remote",
+				Enabled:   true,
+				Required:  true,
+				URL:       "https://example.com/mcp",
+				Tools:     []string{"lookup"},
+			}},
+		},
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.cmdMCP(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"})
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "Configured MCP Servers") || !strings.Contains(p.sent[0], "docs") {
+		t.Fatalf("reply = %q, want configured inventory", p.sent[0])
+	}
+	if !strings.Contains(p.sent[0], "url: https://example.com/mcp") {
+		t.Fatalf("reply = %q, want configured server details", p.sent[0])
+	}
+}
+
+func TestCmdMCP_UnsupportedAgent(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	e.cmdMCP(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"})
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "does not support /mcp") {
+		t.Fatalf("reply = %q, want unsupported message", p.sent[0])
 	}
 }
 
@@ -10675,8 +10787,8 @@ func TestSessionName_ClaudeCodeLikeFlow(t *testing.T) {
 }
 
 // acpLikeSession simulates ACP behavior:
-// - CurrentSessionID() returns the thread ID immediately after creation
-//   (ACP does handshake before returning from StartSession)
+//   - CurrentSessionID() returns the thread ID immediately after creation
+//     (ACP does handshake before returning from StartSession)
 type acpLikeSession struct {
 	threadID string
 	events   chan Event
