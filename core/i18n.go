@@ -133,6 +133,8 @@ const (
 	MsgPreviousProcessing        MsgKey = "previous_processing"
 	MsgQueueFull                 MsgKey = "queue_full"
 	MsgMessageQueued             MsgKey = "message_queued"
+	MsgFlushStarted              MsgKey = "flush_started"
+	MsgFlushEmpty                MsgKey = "flush_empty"
 	MsgNoToolsAllowed            MsgKey = "no_tools_allowed"
 	MsgCurrentTools              MsgKey = "current_tools"
 	MsgCurrentSession            MsgKey = "current_session"
@@ -247,8 +249,8 @@ const (
 	MsgCronBtnUnmute    MsgKey = "cron_btn_unmute"
 	MsgCronBtnDelete    MsgKey = "cron_btn_delete"
 
-	MsgStatusTitle          MsgKey = "status_title"
-	MsgReplyFooterRemaining MsgKey = "reply_footer_remaining"
+	MsgStatusTitle           MsgKey = "status_title"
+	MsgReplyFooterRemaining  MsgKey = "reply_footer_remaining"
 	MsgModelCurrent          MsgKey = "model_current"
 	MsgModelChanged          MsgKey = "model_changed"
 	MsgModelChangeFailed     MsgKey = "model_change_failed"
@@ -668,6 +670,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "📬 メッセージキューが満杯です（%d 件待ち）。現在のタスク完了をお待ちください。",
 		LangSpanish:            "📬 La cola de mensajes está llena (%d pendientes). Espere a que las tareas actuales se completen.",
 	},
+	MsgFlushStarted: {
+		LangEnglish:            "✅ Buffered messages sent for processing.",
+		LangChinese:            "✅ 已提交缓冲消息，开始处理。",
+		LangTraditionalChinese: "✅ 已提交緩衝訊息，開始處理。",
+		LangJapanese:           "✅ バッファされたメッセージを処理に回しました。",
+		LangSpanish:            "✅ Los mensajes en búfer se enviaron para su procesamiento.",
+	},
+	MsgFlushEmpty: {
+		LangEnglish:            "No buffered messages to flush.",
+		LangChinese:            "当前没有可提交的缓冲消息。",
+		LangTraditionalChinese: "目前沒有可提交的緩衝訊息。",
+		LangJapanese:           "フラッシュするバッファ済みメッセージはありません。",
+		LangSpanish:            "No hay mensajes en búfer para vaciar.",
+	},
 	MsgNoToolsAllowed: {
 		LangEnglish:            "No tools pre-allowed.\nUsage: `/allow <tool_name>`\nExample: `/allow Bash`",
 		LangChinese:            "尚未预授权任何工具。\n用法: `/allow <工具名>`\n示例: `/allow Bash`",
@@ -880,6 +896,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/show <ref>\n  View a file, directory, or code snippet by reference\n\n" +
 			"/dir [path|reset]\n  Show, switch, or reset agent working directory\n\n" +
 			"/stop\n  Stop current execution\n\n" +
+			"/flush\n  Send buffered messages immediately (collect/manual mode)\n\n" +
 			"/cron [add|list|del|enable|disable]\n  Manage scheduled tasks\n\n" +
 			"/heartbeat [status|pause|resume|run|interval]\n  Manage heartbeat\n\n" +
 			"/commands [add|del]\n  Manage custom slash commands\n\n" +
@@ -923,6 +940,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/show <引用>\n  按引用查看文件、目录或代码片段\n\n" +
 			"/dir [路径|reset]\n  查看、切换或重置 Agent 工作目录\n\n" +
 			"/stop\n  停止当前执行\n\n" +
+			"/flush\n  立即提交缓冲消息（collect/manual 模式）\n\n" +
 			"/cron [add|list|del|enable|disable]\n  管理定时任务\n\n" +
 			"/heartbeat [status|pause|resume|run|interval]\n  管理心跳\n\n" +
 			"/commands [add|del]\n  管理自定义命令\n\n" +
@@ -965,6 +983,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/shell [--timeout <秒>] <命令>\n  執行 Shell 命令並返回結果（快捷方式：!命令）\n\n" +
 			"/dir [路徑|reset]\n  查看、切換或重置 Agent 工作目錄\n\n" +
 			"/stop\n  停止當前執行\n\n" +
+			"/flush\n  立即提交緩衝訊息（collect/manual 模式）\n\n" +
 			"/cron [add|list|del|enable|disable]\n  管理定時任務\n\n" +
 			"/heartbeat [status|pause|resume|run|interval]\n  管理心跳\n\n" +
 			"/commands [add|del]\n  管理自訂命令\n\n" +
@@ -1006,6 +1025,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/shell [--timeout <秒>] <コマンド>\n  シェルコマンドを実行して結果を返す（ショートカット：!コマンド）\n\n" +
 			"/dir [パス|reset]\n  エージェントの作業ディレクトリを表示/切り替え/リセット\n\n" +
 			"/stop\n  現在の実行を停止\n\n" +
+			"/flush\n  バッファ済みメッセージをすぐ送信（collect/manual モード）\n\n" +
 			"/cron [add|list|del|enable|disable]\n  スケジュールタスク管理\n\n" +
 			"/heartbeat [status|pause|resume|run|interval]\n  ハートビート管理\n\n" +
 			"/commands [add|del]\n  カスタムコマンド管理\n\n" +
@@ -1047,6 +1067,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/shell [--timeout <seg>] <comando>\n  Ejecutar un comando shell y devolver la salida (atajo: !comando)\n\n" +
 			"/dir [ruta|reset]\n  Ver, cambiar o restablecer el directorio de trabajo del agente\n\n" +
 			"/stop\n  Detener ejecución actual\n\n" +
+			"/flush\n  Enviar de inmediato los mensajes en búfer (modo collect/manual)\n\n" +
 			"/cron [add|list|del|enable|disable]\n  Gestionar tareas programadas\n\n" +
 			"/heartbeat [status|pause|resume|run|interval]\n  Gestionar heartbeat\n\n" +
 			"/commands [add|del]\n  Gestionar comandos personalizados\n\n" +
@@ -2578,42 +2599,47 @@ var messages = map[MsgKey]map[Language]string{
 		LangEnglish: "Usage:\n" +
 			"`/config` — show all\n" +
 			"`/config thinking_max_len 200` — update\n" +
+			"`/config messages.mode collect` — switch message buffering mode\n" +
 			"`/config get thinking_max_len` — view single\n\n" +
 			"Set to `0` to disable truncation.",
 		LangChinese: "用法：\n" +
 			"`/config` — 查看所有配置\n" +
 			"`/config thinking_max_len 200` — 修改配置\n" +
+			"`/config messages.mode collect` — 切换消息收集模式\n" +
 			"`/config get thinking_max_len` — 查看单项\n\n" +
 			"设为 `0` 表示不截断。",
 		LangTraditionalChinese: "用法：\n" +
 			"`/config` — 查看所有配置\n" +
 			"`/config thinking_max_len 200` — 修改配置\n" +
+			"`/config messages.mode collect` — 切換訊息收集模式\n" +
 			"`/config get thinking_max_len` — 查看單項\n\n" +
 			"設為 `0` 表示不截斷。",
 		LangJapanese: "使い方:\n" +
 			"`/config` — 全設定を表示\n" +
 			"`/config thinking_max_len 200` — 変更\n" +
+			"`/config messages.mode collect` — メッセージ収集モードを切り替え\n" +
 			"`/config get thinking_max_len` — 単一確認\n\n" +
 			"`0` = 切り捨てなし",
 		LangSpanish: "Uso:\n" +
 			"`/config` — ver todo\n" +
 			"`/config thinking_max_len 200` — actualizar\n" +
+			"`/config messages.mode collect` — cambiar el modo de búfer de mensajes\n" +
 			"`/config get thinking_max_len` — ver uno\n\n" +
 			"Establecer `0` para no truncar.",
 	},
 	MsgConfigGetUsage: {
-		LangEnglish:            "Usage: `/config get thinking_max_len`",
-		LangChinese:            "用法：`/config get thinking_max_len`",
-		LangTraditionalChinese: "用法：`/config get thinking_max_len`",
-		LangJapanese:           "使い方: `/config get thinking_max_len`",
-		LangSpanish:            "Uso: `/config get thinking_max_len`",
+		LangEnglish:            "Usage: `/config get thinking_max_len` or `/config get messages.mode`",
+		LangChinese:            "用法：`/config get thinking_max_len` 或 `/config get messages.mode`",
+		LangTraditionalChinese: "用法：`/config get thinking_max_len` 或 `/config get messages.mode`",
+		LangJapanese:           "使い方: `/config get thinking_max_len` または `/config get messages.mode`",
+		LangSpanish:            "Uso: `/config get thinking_max_len` o `/config get messages.mode`",
 	},
 	MsgConfigSetUsage: {
-		LangEnglish:            "Usage: `/config set thinking_max_len 200`",
-		LangChinese:            "用法：`/config set thinking_max_len 200`",
-		LangTraditionalChinese: "用法：`/config set thinking_max_len 200`",
-		LangJapanese:           "使い方: `/config set thinking_max_len 200`",
-		LangSpanish:            "Uso: `/config set thinking_max_len 200`",
+		LangEnglish:            "Usage: `/config set thinking_max_len 200` or `/config set messages.mode collect`",
+		LangChinese:            "用法：`/config set thinking_max_len 200` 或 `/config set messages.mode collect`",
+		LangTraditionalChinese: "用法：`/config set thinking_max_len 200` 或 `/config set messages.mode collect`",
+		LangJapanese:           "使い方: `/config set thinking_max_len 200` または `/config set messages.mode collect`",
+		LangSpanish:            "Uso: `/config set thinking_max_len 200` o `/config set messages.mode collect`",
 	},
 	MsgConfigUpdated: {
 		LangEnglish:            "✅ `%s` → `%s`",

@@ -43,6 +43,7 @@ Each user gets an independent session with full conversation context. Manage ses
 | `/allow <tool>` | Pre-allow a tool (next session) |
 | `/reasoning [level]` | View or switch reasoning effort (Codex) |
 | `/mode [name]` | View or switch permission mode |
+| `/flush` | Flush buffered messages in collect/manual mode |
 | `/stop` | Stop current execution |
 | `/help` | Show available commands |
 
@@ -57,6 +58,25 @@ reset_on_idle_mins = 60
 ```
 
 When enabled, the next normal message after a long idle period starts in a fresh session automatically, without deleting the old session from `/list`.
+
+You can also opt into message buffering per project:
+
+```toml
+[[projects]]
+name = "demo"
+
+[projects.message_queue]
+mode = "collect"         # immediate | collect | manual
+collect_wait_ms = 5000
+```
+
+- `immediate`: current behavior, each message starts processing right away
+- `collect`: buffer rapid consecutive messages and auto-flush after a short idle window
+- `manual`: buffer messages until you explicitly send `/flush`
+
+Runtime changes are available through `/config`, for example:
+- `/config messages.mode collect`
+- `/config messages.collect_wait_ms 5000`
 
 ---
 
