@@ -174,6 +174,9 @@ func (s *sdkSession) mapEvent(evt *sidecarEvent) *core.Event {
 		if input != nil {
 			coreEvt.ToolInput = summarizeInput(evt.ToolName, input)
 		}
+		if evt.ToolName == "AskUserQuestion" {
+			coreEvt.Questions = parseUserQuestions(input)
+		}
 		return coreEvt
 
 	case "result":
@@ -367,4 +370,53 @@ func (s *sdkSession) Close() error {
 	}
 	<-s.done
 	return nil
+}
+
+// parseUserQuestions extracts structured questions from AskUserQuestion input.
+func parseUserQuestions(input map[string]any) []core.UserQuestion {
+	if input == nil {
+		return nil
+	}
+	questionsRaw, ok := input["questions"].([]any)
+	if !ok || len(questionsRaw) == 0 {
+		return nil
+	}
+	var questions []core.UserQuestion
+	for _, qRaw := range questionsRaw {
+		qMap, ok := qRaw.(map[string]any)
+		if !ok {
+			continue
+		}
+		q := core.UserQuestion{
+			Question:    mapStrVal(qMap, "question"),
+			Header:      mapStrVal(qMap, "header"),
+			MultiSelect: mapBoolVal(qMap, "multiSelect"),
+		}
+		if optsRaw, ok := qMap["options"].([]any); ok {
+			for _, oRaw := range optsRaw {
+				oMap, ok := oRaw.(map[string]any)
+				if !ok {
+					continue
+				}
+				q.Options = append(q.Options, core.UserQuestionOption{
+					Label:       mapStrVal(oMap, "label"),
+					Description: mapStrVal(oMap, "description"),
+				})
+			}
+		}
+		if q.Question != "" {
+			questions = append(questions, q)
+		}
+	}
+	return questions
+}
+
+func mapStrVal(m map[string]any, key string) string {
+	v, _ := m[key].(string)
+	return v
+}
+
+func mapBoolVal(m map[string]any, key string) bool {
+	v, _ := m[key].(bool)
+	return v
 }
