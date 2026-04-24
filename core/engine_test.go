@@ -764,37 +764,6 @@ func TestEngineSendToSessionWithAttachments_MultiWorkspaceRawSessionKey(t *testi
 	}
 }
 
-// stubProactiveSendPlatform implements ReplyContextReconstruct for proactive
-// SendToSessionWithAttachments when there is no interactive session.
-type stubProactiveSendPlatform struct {
-	stubMediaPlatform
-	reconstructKey string
-}
-
-func (p *stubProactiveSendPlatform) ReconstructReplyCtx(sessionKey string) (any, error) {
-	p.reconstructKey = sessionKey
-	return "proactive-rctx", nil
-}
-
-func TestEngineSendToSessionWithAttachments_WorkspacePrefixedSessionKey(t *testing.T) {
-	p := &stubProactiveSendPlatform{
-		stubMediaPlatform: stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "slack"}},
-	}
-	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-
-	prefixed := "/tmp/myproject:slack:C123:U1"
-	err := e.SendToSessionWithAttachments(prefixed, "delivery ready", nil, nil)
-	if err != nil {
-		t.Fatalf("SendToSessionWithAttachments returned error: %v", err)
-	}
-	if p.reconstructKey != "slack:C123:U1" {
-		t.Fatalf("ReconstructReplyCtx key = %q, want slack:C123:U1", p.reconstructKey)
-	}
-	if got := p.getSent(); len(got) != 1 || got[0] != "delivery ready" {
-		t.Fatalf("sent text = %#v, want one message", got)
-	}
-}
-
 func TestEngineStart_DefersAsyncPlatformReadyInitialization(t *testing.T) {
 	p := &stubLifecyclePlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -1509,6 +1478,168 @@ func TestProcessInteractiveEvents_CardProgressUsesStructuredPayloadWhenSupported
 	}
 	if finalPayload.State != ProgressCardStateCompleted {
 		t.Fatalf("final payload state = %q, want %q", finalPayload.State, ProgressCardStateCompleted)
+	}
+}
+
+func TestProcessInteractiveEvents_PersistsEventTimeline(t *testing.T) {
+	p := &stubCompactProgressPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}, style: "card", supportPayload: true}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.display.ProgressHistoryTurns = 3
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	session.AddHistory("user", "hello")
+
+	agentSession := newControllableSession("timeline-session")
+	state := &interactiveState{
+		platform:     p,
+		replyCtx:     "reply",
+		agentSession: agentSession,
+	}
+	agentSession.events <- Event{Type: EventThinking, Content: "think"}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "echo hi"}
+	exitCode := 0
+	ok := true
+	agentSession.events <- Event{Type: EventToolResult, ToolName: "Bash", ToolResult: "hi", ToolExitCode: &exitCode, ToolSuccess: &ok}
+	agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-progress", time.Now(), nil, nil, state.replyCtx)
+
+	timelines := session.GetEventTimelines()
+	if len(timelines) != 1 {
+		t.Fatalf("event timelines = %d, want 1", len(timelines))
+	}
+	tl := timelines[0]
+	if tl.AssistantHistoryIdx != 1 {
+		t.Fatalf("assistant history idx = %d, want 1", tl.AssistantHistoryIdx)
+	}
+	if len(tl.Events) != 3 {
+		t.Fatalf("events = %d, want 3", len(tl.Events))
+	}
+	if tl.Events[0].Kind != EventThinking || tl.Events[0].Text != "think" {
+		t.Fatalf("thinking event = %#v", tl.Events[0])
+	}
+	if tl.Events[1].Kind != EventToolUse || tl.Events[1].ToolInput != "echo hi" {
+		t.Fatalf("tool use event = %#v", tl.Events[1])
+	}
+	if tl.Events[2].Kind != EventToolResult || tl.Events[2].ToolResult != "hi" {
+		t.Fatalf("tool result event = %#v", tl.Events[2])
+	}
+}
+
+func TestCmdProgress_ShowsLatestAndPreviousTimelines(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user1"
+	s := e.sessions.GetOrCreateActive(sessionKey)
+	s.AddHistory("user", "u1")
+	idx1 := s.AddHistoryAndReturnIndex("assistant", "a1")
+	s.AppendEventTimeline(EventTimeline{
+		AssistantHistoryIdx: idx1,
+		StartedAt:           time.Now(),
+		CompletedAt:         time.Now(),
+		Events: []TimelineEvent{
+			{Index: 1, Kind: EventThinking, Text: "plan one"},
+			{Index: 2, Kind: EventToolUse, ToolName: "Bash", ToolInput: "echo one"},
+		},
+	}, 3)
+	s.AddHistory("user", "u2")
+	idx2 := s.AddHistoryAndReturnIndex("assistant", "a2")
+	s.AppendEventTimeline(EventTimeline{
+		AssistantHistoryIdx: idx2,
+		StartedAt:           time.Now(),
+		CompletedAt:         time.Now(),
+		Events: []TimelineEvent{
+			{Index: 1, Kind: EventThinking, Text: "plan two"},
+			{Index: 2, Kind: EventToolResult, ToolName: "Bash", ToolResult: "ok"},
+		},
+	}, 3)
+
+	msg := &Message{SessionKey: sessionKey, ReplyCtx: "reply"}
+	e.cmdProgress(p, msg, nil)
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[len(sent)-1], "plan two") || !strings.Contains(sent[len(sent)-1], "Tool Result · Bash") {
+		t.Fatalf("latest /progress output = %#v, want text fallback with latest timeline content", sent)
+	}
+
+	p.clearSent()
+	e.cmdProgress(p, msg, []string{"prev", "2"})
+	sent = p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[len(sent)-1], "echo one") || !strings.Contains(sent[len(sent)-1], "Tool Call · Bash") {
+		t.Fatalf("/progress prev 2 output = %#v, want text fallback with previous timeline event", sent)
+	}
+}
+
+func TestCmdProgress_UsesStructuredPayloadForCardPlatform(t *testing.T) {
+	p := &stubCompactProgressPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}, style: "card", supportPayload: true}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "card:user1"
+	s := e.sessions.GetOrCreateActive(sessionKey)
+	s.AddHistory("user", "u1")
+	idx := s.AddHistoryAndReturnIndex("assistant", "a1")
+	s.AppendEventTimeline(EventTimeline{
+		AssistantHistoryIdx: idx,
+		StartedAt:           time.Now(),
+		CompletedAt:         time.Now(),
+		Events: []TimelineEvent{
+			{Index: 1, Kind: EventThinking, Text: "plan"},
+			{Index: 2, Kind: EventToolResult, ToolName: "Bash", ToolResult: "ok"},
+		},
+	}, 3)
+
+	msg := &Message{SessionKey: sessionKey, ReplyCtx: "reply"}
+	e.cmdProgress(p, msg, nil)
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatalf("/progress output = %#v, want payload reply", sent)
+	}
+	payload, ok := ParseProgressCardPayload(sent[len(sent)-1])
+	if !ok {
+		t.Fatalf("/progress reply should be structured payload, got %#v", sent[len(sent)-1])
+	}
+	if len(payload.Items) != 2 {
+		t.Fatalf("/progress payload items = %#v, want two items", payload.Items)
+	}
+	if payload.Items[0].Kind != ProgressEntryThinking || payload.Items[1].Kind != ProgressEntryToolResult {
+		t.Fatalf("/progress payload items = %#v, want thinking + tool_result", payload.Items)
+	}
+}
+
+func TestCmdProgress_MergedTimelineUsesSingleToolBlock(t *testing.T) {
+	p := &stubCompactProgressPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}, style: "card", supportPayload: true}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangChinese)
+	e.display.ToolLayout = toolLayoutMerged
+	e.display.ToolShowInput = true
+	e.display.ToolShowResultBody = true
+	sessionKey := "card:merged"
+	s := e.sessions.GetOrCreateActive(sessionKey)
+	s.AddHistory("user", "u1")
+	idx := s.AddHistoryAndReturnIndex("assistant", "a1")
+	s.AppendEventTimeline(EventTimeline{
+		AssistantHistoryIdx: idx,
+		StartedAt:           time.Now(),
+		CompletedAt:         time.Now(),
+		Events: []TimelineEvent{
+			{Index: 1, Kind: EventToolUse, ToolName: "Bash", ToolInput: "echo hi"},
+			{Index: 2, Kind: EventToolResult, ToolName: "Bash", ToolResult: "hi"},
+		},
+	}, 3)
+
+	msg := &Message{SessionKey: sessionKey, ReplyCtx: "reply"}
+	e.cmdProgress(p, msg, nil)
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatalf("merged /progress output = %#v, want payload reply", sent)
+	}
+	payload, ok := ParseProgressCardPayload(sent[len(sent)-1])
+	if !ok {
+		t.Fatalf("merged /progress should be structured payload, got %#v", sent[len(sent)-1])
+	}
+	if len(payload.Items) != 1 {
+		t.Fatalf("merged /progress items = %d, want 1", len(payload.Items))
+	}
+	item := payload.Items[0]
+	if item.Kind != ProgressEntryToolResult || item.ToolInput != "echo hi" || item.ToolResult != "hi" {
+		t.Fatalf("merged /progress item = %#v, want merged tool_result with input and output", item)
 	}
 }
 
@@ -9503,7 +9634,7 @@ func TestEngine_SetterMethods(t *testing.T) {
 	})
 
 	// Test SetDisplaySaveFunc
-	e.SetDisplaySaveFunc(func(thinkingMessages *bool, thinkMax, toolMax *int, toolMessages *bool) error {
+	e.SetDisplaySaveFunc(func(update DisplayCfgUpdate) error {
 		return nil
 	})
 

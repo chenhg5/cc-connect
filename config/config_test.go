@@ -267,7 +267,6 @@ func TestEffectiveDisplayQuiet(t *testing.T) {
 		})
 	}
 }
-
 func TestLoad_DefaultsDataDir(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
@@ -680,7 +679,10 @@ custom_display = "keep" # also keep
 
 	thinking := 200
 	toolShow := false
-	if err := SaveDisplayConfig(nil, &thinking, nil, &toolShow); err != nil {
+	if err := SaveDisplayConfig(DisplayConfigUpdate{
+		ThinkingMaxLen: &thinking,
+		ToolMessages:   &toolShow,
+	}); err != nil {
 		t.Fatalf("SaveDisplayConfig() error: %v", err)
 	}
 
@@ -901,7 +903,21 @@ func TestDisplayConfig_Save(t *testing.T) {
 	thinking := 120
 	tool := 240
 	showTools := false
-	if err := SaveDisplayConfig(nil, &thinking, &tool, &showTools); err != nil {
+	layout := "merged"
+	showInput := true
+	showResultBody := true
+	maxEntries := 20
+	historyTurns := 3
+	if err := SaveDisplayConfig(DisplayConfigUpdate{
+		ThinkingMaxLen:       &thinking,
+		ToolMaxLen:           &tool,
+		ToolMessages:         &showTools,
+		ToolLayout:           &layout,
+		ToolShowInput:        &showInput,
+		ToolShowResultBody:   &showResultBody,
+		ProgressMaxEntries:   &maxEntries,
+		ProgressHistoryTurns: &historyTurns,
+	}); err != nil {
 		t.Fatalf("SaveDisplayConfig() error: %v", err)
 	}
 
@@ -915,9 +931,24 @@ func TestDisplayConfig_Save(t *testing.T) {
 	if cfg.Display.ToolMessages == nil || *cfg.Display.ToolMessages {
 		t.Fatalf("ToolMessages = %#v, want false", cfg.Display.ToolMessages)
 	}
+	if cfg.Display.ToolLayout == nil || *cfg.Display.ToolLayout != "merged" {
+		t.Fatalf("ToolLayout = %#v, want merged", cfg.Display.ToolLayout)
+	}
+	if cfg.Display.ToolShowInput == nil || !*cfg.Display.ToolShowInput {
+		t.Fatalf("ToolShowInput = %#v, want true", cfg.Display.ToolShowInput)
+	}
+	if cfg.Display.ToolShowResultBody == nil || !*cfg.Display.ToolShowResultBody {
+		t.Fatalf("ToolShowResultBody = %#v, want true", cfg.Display.ToolShowResultBody)
+	}
+	if cfg.Display.ProgressMaxEntries == nil || *cfg.Display.ProgressMaxEntries != 20 {
+		t.Fatalf("ProgressMaxEntries = %#v, want 20", cfg.Display.ProgressMaxEntries)
+	}
+	if cfg.Display.ProgressHistoryTurns == nil || *cfg.Display.ProgressHistoryTurns != 3 {
+		t.Fatalf("ProgressHistoryTurns = %#v, want 3", cfg.Display.ProgressHistoryTurns)
+	}
 
 	thinking = 360
-	if err := SaveDisplayConfig(nil, &thinking, nil, nil); err != nil {
+	if err := SaveDisplayConfig(DisplayConfigUpdate{ThinkingMaxLen: &thinking}); err != nil {
 		t.Fatalf("SaveDisplayConfig() second update error: %v", err)
 	}
 

@@ -211,10 +211,12 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		noReplyToTrigger = true
 	}
 
-	progressStyle := "legacy"
+	progressStyle := "card"
 	if v, ok := opts["progress_style"].(string); ok {
 		switch strings.ToLower(strings.TrimSpace(v)) {
-		case "", "legacy":
+		case "":
+			progressStyle = "card"
+		case "legacy":
 			progressStyle = "legacy"
 		case "compact", "card":
 			progressStyle = strings.ToLower(strings.TrimSpace(v))
@@ -2019,6 +2021,9 @@ func predictMsgType(content string) string {
 }
 
 func buildReplyContent(content string) (msgType string, body string) {
+	if payload, ok := core.ParseProgressCardPayload(content); ok {
+		return larkim.MsgTypeInteractive, buildProgressCardJSONFromPayload(payload)
+	}
 	if !containsMarkdown(content) {
 		b, _ := json.Marshal(map[string]string{"text": content})
 		return larkim.MsgTypeText, string(b)
@@ -2907,10 +2912,7 @@ func formatProgressToolInput(toolName, text string) string {
 	if isBashToolName(toolName) {
 		return fmt.Sprintf("```bash\n%s\n```", text)
 	}
-	if strings.Contains(text, "\n") || len(text) > 180 {
-		return fmt.Sprintf("```text\n%s\n```", text)
-	}
-	return fmt.Sprintf("`%s`", inlineCodeText(text))
+	return fmt.Sprintf("```text\n%s\n```", text)
 }
 
 func formatProgressToolResult(text string) string {
@@ -2922,39 +2924,42 @@ func formatProgressToolResult(text string) string {
 	if strings.Contains(text, "```") {
 		return text
 	}
-	if strings.Contains(text, "\n") || len(text) > 220 {
-		return fmt.Sprintf("```\n%s\n```", text)
-	}
-	return text
+	return fmt.Sprintf("```text\n%s\n```", text)
 }
 
-func progressNoOutputText(lang string) string {
-	if isZhLikeProgressLang(lang) {
-		return "无输出"
-	}
-	return "No output"
-}
-
-func progressResultDot(item core.ProgressCardEntry) string {
+func progressResultTagColor(item core.ProgressCardEntry) string {
 	if item.Success != nil {
 		if *item.Success {
-			return "🟢"
+			return "green"
 		}
-		return "🔴"
+		return "red"
 	}
 	if item.ExitCode != nil {
 		if *item.ExitCode == 0 {
-			return "🟢"
+			return "green"
 		}
-		return "🔴"
+		return "red"
 	}
 	if strings.EqualFold(strings.TrimSpace(item.Status), "completed") || strings.EqualFold(strings.TrimSpace(item.Status), "success") || strings.EqualFold(strings.TrimSpace(item.Status), "succeeded") || strings.EqualFold(strings.TrimSpace(item.Status), "ok") {
-		return "🟢"
+		return "green"
 	}
 	if strings.EqualFold(strings.TrimSpace(item.Status), "failed") || strings.EqualFold(strings.TrimSpace(item.Status), "error") {
-		return "🔴"
+		return "red"
 	}
-	return "⚪"
+	return "turquoise"
+}
+
+func progressExitWord(lang string) string {
+	switch {
+	case isZhLikeProgressLang(lang):
+		return "退出"
+	case strings.EqualFold(strings.TrimSpace(lang), string(core.LangJapanese)):
+		return "終了"
+	case strings.EqualFold(strings.TrimSpace(lang), string(core.LangSpanish)):
+		return "salida"
+	default:
+		return "exit"
+	}
 }
 
 func renderProgressEntryElement(item core.ProgressCardEntry, lang string) map[string]any {
@@ -2979,7 +2984,11 @@ func renderProgressEntryElement(item core.ProgressCardEntry, lang string) map[st
 			toolName = "Tool"
 		}
 		content := fmt.Sprintf("<text_tag color='blue'>%s</text_tag> `%s`", progressKindLabel(item.Kind, lang), inlineCodeText(toolName))
-		if body := formatProgressToolInput(toolName, text); body != "" {
+		bodyText := item.ToolInput
+		if strings.TrimSpace(bodyText) == "" {
+			bodyText = text
+		}
+		if body := formatProgressToolInput(toolName, bodyText); body != "" {
 			content += "\n" + body
 		}
 		return map[string]any{
@@ -2988,20 +2997,23 @@ func renderProgressEntryElement(item core.ProgressCardEntry, lang string) map[st
 		}
 	case core.ProgressEntryToolResult:
 		toolName := strings.TrimSpace(item.Tool)
-		content := fmt.Sprintf("<text_tag color='turquoise'>%s</text_tag>", progressKindLabel(item.Kind, lang))
+		content := fmt.Sprintf("<text_tag color='%s'>%s</text_tag>", progressResultTagColor(item), progressKindLabel(item.Kind, lang))
 		if toolName != "" {
 			content += " `" + inlineCodeText(toolName) + "`"
 		}
-		dot := progressResultDot(item)
-		meta := dot
 		if item.ExitCode != nil {
-			meta += fmt.Sprintf(" exit code: `%d`", *item.ExitCode)
+			content += fmt.Sprintf(" %s `%d`", progressExitWord(lang), *item.ExitCode)
 		}
-		content += "\n" + meta
-		if body := formatProgressToolResult(item.Text); body != "" {
+		inputBody := formatProgressToolInput(toolName, item.ToolInput)
+		resultText := item.ToolResult
+		if strings.TrimSpace(resultText) == "" {
+			resultText = item.Text
+		}
+		if inputBody != "" {
+			content += "\n" + inputBody
+		}
+		if body := formatProgressToolResult(resultText); body != "" {
 			content += "\n" + body
-		} else {
-			content += "\n_" + progressNoOutputText(lang) + "_"
 		}
 		return map[string]any{
 			"tag":     "markdown",
