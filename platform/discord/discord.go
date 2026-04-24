@@ -855,8 +855,13 @@ func (p *Platform) handleComponentInteraction(s *discordgo.Session, i *discordgo
 
 	channelID := i.ChannelID
 	sessionKey := resolveSessionKeyForChannel(channelID, userID, p.shareSessionInChannel, p.threadIsolation, sessionThreadOps{session: p.session})
+	threadID := ""
+	if ch, chErr := s.Channel(channelID); chErr == nil && ch != nil && isThreadChannelType(ch.Type) {
+		threadID = channelID
+	}
 	rc := replyContext{
 		channelID:  channelID,
+		threadID:   threadID,
 		sessionKey: sessionKey,
 		userID:     userID,
 		userName:   userName,
@@ -864,9 +869,6 @@ func (p *Platform) handleComponentInteraction(s *discordgo.Session, i *discordgo
 	}
 	if i.Message != nil {
 		rc.messageID = i.Message.ID
-		if i.Message.MessageReference != nil {
-			rc.threadID = i.Message.MessageReference.ChannelID
-		}
 	}
 	p.dispatchMessage(&core.Message{
 		SessionKey: sessionKey,
@@ -1218,9 +1220,11 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	if len(parts) < 2 || parts[0] != "discord" {
 		return nil, fmt.Errorf("discord: invalid session key %q", sessionKey)
 	}
-	rc := replyContext{channelID: parts[1]}
+	rc := replyContext{channelID: parts[1], sessionKey: sessionKey}
 	if len(parts) == 2 {
 		rc.threadID = parts[1]
+	} else if len(parts) == 3 {
+		rc.userID = parts[2]
 	}
 	return rc, nil
 }

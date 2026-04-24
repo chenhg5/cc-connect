@@ -198,6 +198,22 @@ func TestReconstructReplyCtx_ThreadSessionKey(t *testing.T) {
 	if rc.channelID != "thread-7" || rc.threadID != "thread-7" {
 		t.Fatalf("replyContext = %#v, want thread reply context", rc)
 	}
+	if rc.sessionKey != "discord:thread-7" {
+		t.Fatalf("sessionKey = %q, want discord:thread-7", rc.sessionKey)
+	}
+}
+
+func TestReconstructReplyCtx_ChannelUserSessionKey(t *testing.T) {
+	p := &Platform{}
+
+	rctx, err := p.ReconstructReplyCtx("discord:channel-7:user-9")
+	if err != nil {
+		t.Fatalf("ReconstructReplyCtx() error = %v", err)
+	}
+	rc := rctx.(replyContext)
+	if rc.channelID != "channel-7" || rc.userID != "user-9" || rc.sessionKey != "discord:channel-7:user-9" {
+		t.Fatalf("replyContext = %#v, want reconstructed user session context", rc)
+	}
 }
 
 func TestResolveCronReplyTarget_CreatesStandaloneThread(t *testing.T) {

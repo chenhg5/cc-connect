@@ -308,6 +308,19 @@ func extractSource(src webhook.SourceInterface) (targetID, targetType, userID st
 	}
 }
 
+func inferTargetType(targetID string) string {
+	switch {
+	case strings.HasPrefix(targetID, "U"):
+		return "user"
+	case strings.HasPrefix(targetID, "C"):
+		return "group"
+	case strings.HasPrefix(targetID, "R"):
+		return "room"
+	default:
+		return "unknown"
+	}
+}
+
 func (p *Platform) downloadContent(messageID string) ([]byte, error) {
 	url := fmt.Sprintf("https://api-data.line.me/v2/bot/message/%s/content", messageID)
 	req, _ := http.NewRequest("GET", url, nil)
@@ -404,7 +417,13 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	if len(parts) < 2 || parts[0] != "line" {
 		return nil, fmt.Errorf("line: invalid session key %q", sessionKey)
 	}
-	return replyContext{targetID: parts[1], targetType: "user", sessionKey: sessionKey}, nil
+	targetID := parts[1]
+	return replyContext{
+		targetID:   targetID,
+		targetType: inferTargetType(targetID),
+		sessionKey: sessionKey,
+		chatName:   targetID,
+	}, nil
 }
 
 func lastLineMessageID(ids []string) string {
