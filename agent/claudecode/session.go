@@ -22,6 +22,17 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
+// modelContextWindow returns the context window size (in tokens) for a given
+// Claude model ID. The "[1m]" suffix signals the 1M-context variant; everything
+// else falls back to the 200k default. Empty/unknown model names also get 200k.
+func modelContextWindow(model string) int {
+	m := strings.ToLower(strings.TrimSpace(model))
+	if strings.Contains(m, "[1m]") || strings.HasSuffix(m, "-1m") {
+		return 1_000_000
+	}
+	return 200_000
+}
+
 // claudeSession manages a long-running Claude Code process using
 // --input-format stream-json and --permission-prompt-tool stdio.
 //
@@ -38,6 +49,7 @@ type claudeSession struct {
 	acceptEditsOnly atomic.Bool
 	dontAsk         atomic.Bool
 	workDir         string
+	model           string
 	ctx             context.Context
 	cancel          context.CancelFunc
 	done            chan struct{}
@@ -192,6 +204,7 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		stdin:               stdin,
 		events:              make(chan core.Event, 64),
 		workDir:             workDir,
+		model:               model,
 		ctx:                 sessionCtx,
 		cancel:              cancel,
 		done:                make(chan struct{}),
@@ -430,18 +443,25 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 		if v, ok := usage["input_tokens"].(float64); ok {
 			inputTokens = int(v)
 		}
+		if v, ok := usage["cache_read_input_tokens"].(float64); ok {
+			inputTokens += int(v)
+		}
+		if v, ok := usage["cache_creation_input_tokens"].(float64); ok {
+			inputTokens += int(v)
+		}
 		if v, ok := usage["output_tokens"].(float64); ok {
 			outputTokens = int(v)
 		}
 	}
 
 	evt := core.Event{
-		Type:         core.EventResult,
-		Content:      content,
-		SessionID:    cs.CurrentSessionID(),
-		Done:         true,
-		InputTokens:  inputTokens,
-		OutputTokens: outputTokens,
+		Type:          core.EventResult,
+		Content:       content,
+		SessionID:     cs.CurrentSessionID(),
+		Done:          true,
+		InputTokens:   inputTokens,
+		OutputTokens:  outputTokens,
+		ContextWindow: modelContextWindow(cs.model),
 	}
 	select {
 	case cs.events <- evt:

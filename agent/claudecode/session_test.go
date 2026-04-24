@@ -44,6 +44,61 @@ func TestHandleResultParsesUsage(t *testing.T) {
 	}
 }
 
+func TestHandleResultAggregatesCacheTokensAnd1MWindow(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cs := &claudeSession{
+		events: make(chan core.Event, 8),
+		ctx:    ctx,
+		model:  "claude-opus-4-7[1m]",
+	}
+	cs.sessionID.Store("test-session")
+	cs.alive.Store(true)
+
+	raw := map[string]any{
+		"type":       "result",
+		"result":     "done",
+		"session_id": "test-session",
+		"usage": map[string]any{
+			"input_tokens":                float64(500),
+			"cache_read_input_tokens":     float64(98000),
+			"cache_creation_input_tokens": float64(1500),
+			"output_tokens":               float64(800),
+		},
+	}
+
+	cs.handleResult(raw)
+
+	evt := <-cs.events
+	if evt.InputTokens != 100000 {
+		t.Errorf("InputTokens = %d, want 100000 (500 + 98000 + 1500)", evt.InputTokens)
+	}
+	if evt.ContextWindow != 1_000_000 {
+		t.Errorf("ContextWindow = %d, want 1_000_000 for [1m] model", evt.ContextWindow)
+	}
+}
+
+func TestModelContextWindow(t *testing.T) {
+	tests := []struct {
+		model string
+		want  int
+	}{
+		{"claude-opus-4-7[1m]", 1_000_000},
+		{"CLAUDE-OPUS-4-7[1M]", 1_000_000},
+		{"claude-sonnet-4-6-1m", 1_000_000},
+		{"claude-opus-4-7", 200_000},
+		{"claude-sonnet-4-6", 200_000},
+		{"claude-haiku-4-5-20251001", 200_000},
+		{"", 200_000},
+	}
+	for _, tt := range tests {
+		if got := modelContextWindow(tt.model); got != tt.want {
+			t.Errorf("modelContextWindow(%q) = %d, want %d", tt.model, got, tt.want)
+		}
+	}
+}
+
 func TestHandleResultNoUsage(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
