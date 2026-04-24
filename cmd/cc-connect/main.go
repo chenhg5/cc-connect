@@ -88,6 +88,9 @@ func main() {
 		case "doctor":
 			runDoctor(os.Args[2:])
 			return
+		case "web":
+			runWeb(os.Args[2:])
+			return
 		}
 	}
 
@@ -252,6 +255,7 @@ func main() {
 		}
 		engine.SetReplyFooterEnabled(showFooter)
 		engine.SetAttachmentSendEnabled(cfg.AttachmentSend != "off")
+		engine.SetFilterExternalSessions(proj.FilterExternalSessions != nil && *proj.FilterExternalSessions)
 		engine.SetBaseWorkDir(workDir)
 		engine.SetProjectStateStore(projectState)
 
@@ -360,6 +364,22 @@ func main() {
 			})
 		}
 
+		// Wire hooks
+		if len(cfg.Hooks) > 0 {
+			coreHooks := make([]core.HookConfig, len(cfg.Hooks))
+			for i, h := range cfg.Hooks {
+				coreHooks[i] = core.HookConfig{
+					Event:   h.Event,
+					Type:    h.Type,
+					Command: h.Command,
+					URL:     h.URL,
+					Timeout: h.Timeout,
+					Async:   h.Async,
+				}
+			}
+			engine.SetHooks(core.NewHookManager(proj.Name, coreHooks))
+		}
+
 		// Wire local reference normalization / rendering
 		engine.SetReferenceConfig(core.ReferenceRenderCfg{
 			NormalizeAgents: proj.References.NormalizeAgents,
@@ -447,6 +467,11 @@ func main() {
 			} else {
 				engine.SetEventIdleTimeout(time.Duration(mins) * time.Minute)
 			}
+		}
+
+		// Wire queue depth
+		if cfg.Queue.MaxDepth != nil && *cfg.Queue.MaxDepth > 0 {
+			engine.SetMaxQueuedMessages(*cfg.Queue.MaxDepth)
 		}
 
 		// Wire auto-compress settings
@@ -847,6 +872,7 @@ func main() {
 				DisabledCommands:     u.DisabledCommands,
 				WorkDir:              u.WorkDir,
 				Mode:                 u.Mode,
+				AgentType:            u.AgentType,
 				ShowContextIndicator: u.ShowContextIndicator,
 				ReplyFooter:          u.ReplyFooter,
 				InjectSender:         u.InjectSender,
@@ -924,6 +950,7 @@ func main() {
 			return config.RemoveGlobalProvider(name)
 		})
 		mgmtSrv.SetFetchPresets(core.FetchProviderPresets)
+		mgmtSrv.SetFetchSkillPresets(core.FetchSkillPresets)
 		if cfg.ProviderPresetsURL != "" {
 			core.SetPresetsURL(cfg.ProviderPresetsURL)
 		}
@@ -1384,6 +1411,9 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 
 	// Reload attachment send-back switch
 	engine.SetAttachmentSendEnabled(cfg.AttachmentSend != "off")
+
+	// Reload filter_external_sessions
+	engine.SetFilterExternalSessions(proj.FilterExternalSessions != nil && *proj.FilterExternalSessions)
 
 	// Reload providers
 	if ps, ok := engine.GetAgent().(core.ProviderSwitcher); ok {

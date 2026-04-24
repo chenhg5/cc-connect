@@ -13,6 +13,7 @@ const AGENT_OPTIONS = [
   { key: 'codex', label: 'Codex' },
   { key: 'gemini', label: 'Gemini CLI' },
   { key: 'cursor', label: 'Cursor' },
+  { key: 'devin', label: 'Devin' },
   { key: 'acp', label: 'ACP (Generic)' },
   { key: 'acp:openclaw', label: 'OpenClaw (ACP)' },
   { key: 'opencode', label: 'OpenCode' },
@@ -106,7 +107,7 @@ export default function ProjectList() {
   }
 
   return (
-    <div className="animate-fade-in space-y-4">
+    <div className="animate-fade-in space-y-4 ">
       {/* Header */}
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-bold text-gray-900 dark:text-white">{t('projects.title')}</h2>

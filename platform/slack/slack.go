@@ -359,7 +359,7 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	}
 
 	opts := []slack.MsgOption{
-		slack.MsgOptionText(content, false),
+		slack.MsgOptionText(core.MarkdownToSlackMrkdwn(content), false),
 	}
 	if rc.timestamp != "" {
 		opts = append(opts, slack.MsgOptionTS(rc.timestamp))
@@ -379,7 +379,7 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 		return fmt.Errorf("slack: invalid reply context type %T", rctx)
 	}
 
-	_, _, err := p.client.PostMessageContext(ctx, rc.channel, slack.MsgOptionText(content, false))
+	_, _, err := p.client.PostMessageContext(ctx, rc.channel, slack.MsgOptionText(core.MarkdownToSlackMrkdwn(content), false))
 	if err != nil {
 		return fmt.Errorf("slack: send: %w", err)
 	}

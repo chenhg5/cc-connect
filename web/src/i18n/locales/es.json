@@ -7,6 +7,7 @@
     "chat": "Chat",
     "cron": "Cron",
     "bridge": "Puente",
+    "skills": "Habilidades",
     "system": "Sistema"
   },
   "dashboard": {
@@ -35,11 +36,17 @@
     "detail": "Detalles",
     "noProjects": "No hay proyectos configurados",
     "workDir": "Directorio de trabajo",
+    "agentType": "Tipo de agente",
+    "agentTypeChangeHint": "Cambiar el tipo de agente requiere reinicio. Los proveedores incompatibles serán eliminados.",
     "agentMode": "Modo de permisos",
     "agentSettings": "Agente",
     "generalSettings": "General",
     "showCtxIndicator": "Indicador de contexto",
     "showCtxIndicatorHint": "Mostrar el sufijo [ctx: ~N%] al final de las respuestas",
+    "replyFooter": "Pie de respuesta",
+    "replyFooterHint": "Añadir metadatos de modelo/uso al final de las respuestas",
+    "injectSender": "Inyectar remitente",
+    "injectSenderHint": "Anteponer la identidad del remitente a los mensajes enviados al agente",
     "platformAccess": "Control de acceso a plataformas",
     "deleteTitle": "Eliminar proyecto",
     "deleteConfirm": "¿Está seguro de que desea eliminar el proyecto \"{{name}}\"? Se eliminará del archivo de configuración.",
@@ -135,7 +142,8 @@
     "runCount": "Ejecuciones",
     "errorCount": "Errores",
     "skippedBusy": "Omitida (ocupado)",
-    "lastRun": "Última ejecución"
+    "lastRun": "Última ejecución",
+    "notEnabled": "El heartbeat no está configurado para este proyecto. Agregue la sección [heartbeat] en config.toml para habilitarlo."
   },
   "bridge": {
     "title": "Puente",
@@ -304,8 +312,12 @@
     "idleTimeout": "Tiempo de inactividad (min)",
     "idleTimeoutHint": "Detener agente automáticamente tras N minutos de inactividad; 0 = desactivado",
     "display": "Visualización",
+    "thinkingMessages": "Mensajes de pensamiento",
+    "thinkingMessagesHint": "Mostrar u ocultar mensajes de proceso de pensamiento",
     "thinkingMaxLen": "Longitud máx. de pensamiento",
     "thinkingMaxLenHint": "Caracteres máximos para mensajes de pensamiento; 0 = sin truncar",
+    "toolMessages": "Progreso de herramientas",
+    "toolMessagesHint": "Mostrar u ocultar mensajes de progreso de herramientas",
     "toolMaxLen": "Longitud máx. de herramientas",
     "toolMaxLenHint": "Caracteres máximos para mensajes de uso de herramientas; 0 = sin truncar",
     "streamPreview": "Vista previa en tiempo real",
@@ -363,6 +375,30 @@
       "import": "Importar ({{count}})",
       "result": "Importación completa: {{imported}} importados, {{skipped}} omitidos."
     }
+  },
+  "skills": {
+    "title": "Habilidades",
+    "subtitle": "Gestiona las habilidades del agente y descubre nuevas",
+    "tab": {
+      "local": "Locales",
+      "recommended": "Recomendadas"
+    },
+    "projects": "Proyectos",
+    "skillCount": "{{count}} habilidades",
+    "scanDirs": "Directorios escaneados",
+    "noSkills": "No se encontraron habilidades",
+    "noSkillsHint": "Las habilidades se cargan desde los directorios de habilidades del agente (ej. ~/.claude/skills/)",
+    "emptyProject": "No se encontraron habilidades en los directorios de este proyecto",
+    "noPresets": "No hay habilidades recomendadas",
+    "noPresetsHint": "No se pudieron cargar las recomendaciones. Verifica tu conexión a internet.",
+    "featured": "Destacadas",
+    "allSkills": "Todas",
+    "author": "Autor",
+    "source": "Fuente",
+    "download": "Descargar",
+    "free": "Gratis",
+    "freemium": "Freemium",
+    "paid": "De pago"
   },
   "theme": {
     "light": "Claro",

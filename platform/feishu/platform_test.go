@@ -1004,6 +1004,81 @@ func TestFormatProgressToolInput_OtherTools(t *testing.T) {
 	}
 }
 
+func TestAllowChat_FiltersGroupMessages(t *testing.T) {
+	tests := []struct {
+		name      string
+		allowChat string
+		chatID    string
+		chatType  string
+		wantPass  bool
+	}{
+		{"empty allow_chat permits all groups", "", "oc_abc", "group", true},
+		{"wildcard permits all groups", "*", "oc_abc", "group", true},
+		{"matching chat_id passes", "oc_abc", "oc_abc", "group", true},
+		{"non-matching chat_id blocked", "oc_abc", "oc_xyz", "group", false},
+		{"multiple chat_ids, match second", "oc_abc,oc_xyz", "oc_xyz", "group", true},
+		{"multiple chat_ids, no match", "oc_abc,oc_def", "oc_xyz", "group", false},
+		{"private chat bypasses allow_chat filter", "oc_abc", "oc_xyz", "p2p", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+				"app_id": "cli_xxx", "app_secret": "secret",
+				"enable_feishu_card": true,
+				"group_reply_all":   true,
+				"allow_chat":        tt.allowChat,
+			})
+			if err != nil {
+				t.Fatalf("newPlatform() error = %v", err)
+			}
+			ip := p.(*interactivePlatform)
+
+			messageID := "om_test_" + tt.name
+			openID := "ou_test"
+			msgType := "text"
+			senderType := "user"
+			content := `{"text":"hello"}`
+			createTime := strconv.FormatInt(time.Now().UnixMilli(), 10)
+
+			msgCh := make(chan *core.Message, 1)
+			ip.handler = func(_ core.Platform, msg *core.Message) {
+				msgCh <- msg
+			}
+
+			if err := ip.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
+				Event: &larkim.P2MessageReceiveV1Data{
+					Sender: &larkim.EventSender{
+						SenderId:   &larkim.UserId{OpenId: &openID},
+						SenderType: &senderType,
+					},
+					Message: &larkim.EventMessage{
+						MessageId:   &messageID,
+						ChatId:      &tt.chatID,
+						ChatType:    &tt.chatType,
+						MessageType: &msgType,
+						Content:     &content,
+						CreateTime:  &createTime,
+					},
+				},
+			}); err != nil {
+				t.Fatalf("onMessage() error = %v", err)
+			}
+
+			select {
+			case <-msgCh:
+				if !tt.wantPass {
+					t.Fatal("expected message to be blocked by allow_chat, but it was delivered")
+				}
+			case <-time.After(2 * time.Second):
+				if tt.wantPass {
+					t.Fatal("expected message to pass allow_chat filter, but it was blocked")
+				}
+			}
+		})
+	}
+}
+
 // --- Mention resolution tests ---
 
 func TestResolveMentions_ReplacesKnownMember(t *testing.T) {

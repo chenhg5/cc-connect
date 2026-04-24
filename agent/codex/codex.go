@@ -352,15 +352,25 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
-	return listCodexSessions(a.workDir)
+	a.mu.RLock()
+	codexHome := a.codexHome
+	workDir := a.workDir
+	a.mu.RUnlock()
+	return listCodexSessions(workDir, codexHome)
 }
 
 func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int) ([]core.HistoryEntry, error) {
-	return getSessionHistory(sessionID, limit)
+	a.mu.RLock()
+	codexHome := a.codexHome
+	a.mu.RUnlock()
+	return getSessionHistory(sessionID, codexHome, limit)
 }
 
 func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
-	path := findSessionFile(sessionID)
+	a.mu.RLock()
+	codexHome := a.codexHome
+	a.mu.RUnlock()
+	path := findSessionFile(sessionID, codexHome)
 	if path == "" {
 		return fmt.Errorf("session file not found: %s", sessionID)
 	}
