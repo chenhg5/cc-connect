@@ -262,6 +262,7 @@ vim ~/.cc-connect/config.toml
 ```
 
 Set `admin_from = "alice,bob"` in a project to allow those user IDs to run privileged commands such as `/dir` and `/shell`.
+`admin_from` must be placed under `[[projects]]` (not under `[projects.platforms.options]`). You can use `/whoami` or `/status` to get your current `User ID`.
 When a user runs `/dir reset`, cc-connect restores the configured `work_dir` and clears the persisted override stored under `data_dir/projects/<project>.state.json`.
 
 
