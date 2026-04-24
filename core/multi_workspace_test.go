@@ -396,6 +396,35 @@ func TestLooksLikeGitURL(t *testing.T) {
 	}
 }
 
+func TestLooksLikeLocalDir(t *testing.T) {
+	valid := []string{
+		"/absolute/path",
+		"~/home/project",
+		"./relative",
+		"../parent",
+		"my-project",
+		"byted-sheet",
+	}
+	for _, s := range valid {
+		if !looksLikeLocalDir(s) {
+			t.Errorf("looksLikeLocalDir(%q) = false, want true", s)
+		}
+	}
+
+	invalid := []string{
+		"",
+		"https://github.com/org/repo",
+		"git@github.com:org/repo.git",
+		"ssh://git@github.com/org/repo",
+		"http://example.com",
+	}
+	for _, s := range invalid {
+		if looksLikeLocalDir(s) {
+			t.Errorf("looksLikeLocalDir(%q) = true, want false", s)
+		}
+	}
+}
+
 func TestWorkspaceInitFlow_SlashCommandCleansUpExistingFlow(t *testing.T) {
 	baseDir := t.TempDir()
 	e := newTestEngineWithMultiWorkspace(t, baseDir)
