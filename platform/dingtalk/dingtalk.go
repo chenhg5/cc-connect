@@ -25,9 +25,13 @@ func init() {
 }
 
 type replyContext struct {
-	sessionWebhook  string
-	conversationId  string
-	senderStaffId   string
+	sessionWebhook string
+	conversationId string
+	senderStaffId  string
+	messageID      string
+	sessionKey     string
+	userName       string
+	chatName       string
 }
 
 type downloadResponse struct {
@@ -38,7 +42,7 @@ type Platform struct {
 	clientID              string
 	clientSecret          string
 	robotCode             string
-	agentID               int64    // Agent ID for work notifications API (numeric)
+	agentID               int64 // Agent ID for work notifications API (numeric)
 	allowFrom             string
 	shareSessionInChannel bool
 	streamClient          *dingtalkClient.StreamClient
@@ -93,6 +97,25 @@ func New(opts map[string]any) (core.Platform, error) {
 }
 
 func (p *Platform) Name() string { return "dingtalk" }
+
+func (p *Platform) AuditReplyMetadata(replyCtx any) core.AuditReplyMetadata {
+	rc, ok := replyCtx.(replyContext)
+	if !ok {
+		return core.AuditReplyMetadata{}
+	}
+	return core.AuditReplyMetadata{
+		SessionKey:       rc.sessionKey,
+		UserID:           rc.senderStaffId,
+		UserName:         rc.userName,
+		ChatName:         rc.chatName,
+		ChannelKey:       rc.conversationId,
+		ReplyToMessageID: rc.messageID,
+		ParentMessageID:  rc.messageID,
+		Extra: map[string]any{
+			"conversation_id": rc.conversationId,
+		},
+	}
+}
 
 func (p *Platform) Start(handler core.MessageHandler) error {
 	p.handler = handler
@@ -182,10 +205,19 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel) {
 		ChatName:   data.ConversationTitle,
 		Content:    data.Text.Content,
 		MessageID:  data.MsgId,
+		ChannelKey: data.ConversationId,
 		ReplyCtx: replyContext{
-			sessionWebhook:  data.SessionWebhook,
-			conversationId:  data.ConversationId,
-			senderStaffId:   data.SenderStaffId,
+			sessionWebhook: data.SessionWebhook,
+			conversationId: data.ConversationId,
+			senderStaffId:  data.SenderStaffId,
+			messageID:      data.MsgId,
+			sessionKey:     sessionKey,
+			userName:       data.SenderNick,
+			chatName:       data.ConversationTitle,
+		},
+		AuditExtra: map[string]any{
+			"conversation_id": data.ConversationId,
+			"msg_type":        data.Msgtype,
 		},
 	}
 
@@ -223,12 +255,21 @@ func (p *Platform) handleAudioMessage(data *chatbot.BotCallbackDataModel, sessio
 				UserName:   data.SenderNick,
 				Content:    recognition,
 				MessageID:  data.MsgId,
+				ChannelKey: data.ConversationId,
 				ReplyCtx: replyContext{
-					sessionWebhook:  data.SessionWebhook,
-					conversationId:  data.ConversationId,
-					senderStaffId:   data.SenderStaffId,
+					sessionWebhook: data.SessionWebhook,
+					conversationId: data.ConversationId,
+					senderStaffId:  data.SenderStaffId,
+					messageID:      data.MsgId,
+					sessionKey:     sessionKey,
+					userName:       data.SenderNick,
+					chatName:       data.ConversationTitle,
 				},
-				FromVoice:  true,
+				FromVoice: true,
+				AuditExtra: map[string]any{
+					"conversation_id": data.ConversationId,
+					"msg_type":        data.Msgtype,
+				},
 			}
 			p.handler(p, msg)
 		}
@@ -245,12 +286,21 @@ func (p *Platform) handleAudioMessage(data *chatbot.BotCallbackDataModel, sessio
 		UserName:   data.SenderNick,
 		Content:    recognition, // Use recognition as text content
 		MessageID:  data.MsgId,
+		ChannelKey: data.ConversationId,
 		ReplyCtx: replyContext{
-			sessionWebhook:  data.SessionWebhook,
-			conversationId:  data.ConversationId,
-			senderStaffId:   data.SenderStaffId,
+			sessionWebhook: data.SessionWebhook,
+			conversationId: data.ConversationId,
+			senderStaffId:  data.SenderStaffId,
+			messageID:      data.MsgId,
+			sessionKey:     sessionKey,
+			userName:       data.SenderNick,
+			chatName:       data.ConversationTitle,
 		},
-		FromVoice:  true,
+		FromVoice: true,
+		AuditExtra: map[string]any{
+			"conversation_id": data.ConversationId,
+			"msg_type":        data.Msgtype,
+		},
 		Audio: &core.AudioAttachment{
 			MimeType: mimeType,
 			Data:     audioBytes,
@@ -408,9 +458,14 @@ func (p *Platform) getAccessToken() (string, error) {
 }
 
 func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
+	_, err := p.ReplyWithReceipt(ctx, rctx, content)
+	return err
+}
+
+func (p *Platform) ReplyWithReceipt(ctx context.Context, rctx any, content string) (*core.SendReceipt, error) {
 	rc, ok := rctx.(replyContext)
 	if !ok {
-		return fmt.Errorf("dingtalk: invalid reply context type %T", rctx)
+		return nil, fmt.Errorf("dingtalk: invalid reply context type %T", rctx)
 	}
 
 	content = preprocessDingTalkMarkdown(content)
@@ -421,30 +476,40 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("dingtalk: marshal reply: %w", err)
+		return nil, fmt.Errorf("dingtalk: marshal reply: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rc.sessionWebhook, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("dingtalk: create request: %w", err)
+		return nil, fmt.Errorf("dingtalk: create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := core.HTTPClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("dingtalk: send reply: %w", err)
+		return nil, fmt.Errorf("dingtalk: send reply: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("dingtalk: reply returned status %d", resp.StatusCode)
+		return nil, fmt.Errorf("dingtalk: reply returned status %d", resp.StatusCode)
 	}
-	return nil
+	return &core.SendReceipt{
+		ParentMessageID: rc.messageID,
+		Extra: map[string]any{
+			"conversation_id": rc.conversationId,
+		},
+	}, nil
 }
 
 // Send sends a new message (same as Reply for DingTalk)
 func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
-	return p.Reply(ctx, rctx, content)
+	_, err := p.SendWithReceipt(ctx, rctx, content)
+	return err
+}
+
+func (p *Platform) SendWithReceipt(ctx context.Context, rctx any, content string) (*core.SendReceipt, error) {
+	return p.ReplyWithReceipt(ctx, rctx, content)
 }
 
 // SendImage uploads and sends an image via DingTalk oToMessages API.
@@ -658,8 +723,8 @@ func (p *Platform) compressAudioWithFFmpeg(ctx context.Context, audio []byte, fo
 	args := []string{
 		"-i", "pipe:0",
 		"-ar", "16000", // 16kHz sample rate for voice
-		"-ac", "1",     // mono
-		"-b:a", "64k",  // 64 kbps bitrate (voice quality)
+		"-ac", "1", // mono
+		"-b:a", "64k", // 64 kbps bitrate (voice quality)
 		"-f", "mp3",
 		"-y",
 		"pipe:1",

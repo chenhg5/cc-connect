@@ -115,6 +115,9 @@ type replyContext struct {
 	groupOpenID string // for group messages
 	userOpenID  string // user's openid (member_openid for group, user_openid for c2c)
 	eventMsgID  string // msg_id from the incoming event, used for passive reply
+	sessionKey  string
+	userName    string
+	chatName    string
 }
 
 type quotedMessage struct {
@@ -181,6 +184,26 @@ func New(opts map[string]any) (core.Platform, error) {
 
 func (p *Platform) Name() string { return "qqbot" }
 
+func (p *Platform) AuditReplyMetadata(replyCtx any) core.AuditReplyMetadata {
+	rctx, ok := replyCtx.(*replyContext)
+	if !ok || rctx == nil {
+		return core.AuditReplyMetadata{}
+	}
+	return core.AuditReplyMetadata{
+		SessionKey:       rctx.sessionKey,
+		UserID:           rctx.auditUserID(),
+		UserName:         rctx.userName,
+		ChatName:         rctx.chatName,
+		ChannelKey:       rctx.channelKey(),
+		ReplyToMessageID: rctx.eventMsgID,
+		ParentMessageID:  rctx.eventMsgID,
+		Extra: map[string]any{
+			"message_type": rctx.messageType,
+			"group_openid": rctx.groupOpenID,
+		},
+	}
+}
+
 // Start connects to the QQ Bot gateway and begins receiving events.
 func (p *Platform) Start(handler core.MessageHandler) error {
 	p.handler = handler
@@ -207,23 +230,45 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 
 // Reply sends a message as a reply to an incoming message.
 func (p *Platform) Reply(ctx context.Context, replyCtx any, content string) error {
-	return p.Send(ctx, replyCtx, content)
+	_, err := p.ReplyWithReceipt(ctx, replyCtx, content)
+	return err
 }
 
 // Send sends a message to the conversation identified by replyCtx.
 func (p *Platform) Send(ctx context.Context, replyCtx any, content string) error {
+	_, err := p.SendWithReceipt(ctx, replyCtx, content)
+	return err
+}
+
+func (p *Platform) ReplyWithReceipt(ctx context.Context, replyCtx any, content string) (*core.SendReceipt, error) {
+	return p.SendWithReceipt(ctx, replyCtx, content)
+}
+
+func (p *Platform) SendWithReceipt(ctx context.Context, replyCtx any, content string) (*core.SendReceipt, error) {
 	rctx, ok := replyCtx.(*replyContext)
 	if !ok {
-		return fmt.Errorf("qqbot: invalid reply context")
+		return nil, fmt.Errorf("qqbot: invalid reply context")
 	}
 
 	chunks := core.SplitMessageCodeFenceAware(content, messageMaxLen)
+	var lastReceipt *core.SendReceipt
 	for _, chunk := range chunks {
-		if err := p.sendMessage(rctx, chunk); err != nil {
-			return err
+		receipt, err := p.sendMessageWithReceipt(rctx, chunk)
+		if err != nil {
+			return nil, err
 		}
+		lastReceipt = receipt
 	}
-	return nil
+	if lastReceipt != nil {
+		return lastReceipt, nil
+	}
+	return &core.SendReceipt{
+		ParentMessageID: rctx.eventMsgID,
+		Extra: map[string]any{
+			"message_type": rctx.messageType,
+			"channel_key":  rctx.channelKey(),
+		},
+	}, nil
 }
 
 // SendImage uploads and sends an image via QQ Bot rich media API.
@@ -437,18 +482,41 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 			return &replyContext{
 				messageType: "group",
 				groupOpenID: parts[2],
+				sessionKey:  sessionKey,
 			}, nil
 		}
 		return &replyContext{
 			messageType: "group",
 			groupOpenID: parts[1],
 			userOpenID:  parts[2],
+			sessionKey:  sessionKey,
 		}, nil
 	}
 	return &replyContext{
 		messageType: "c2c",
 		userOpenID:  parts[1],
+		sessionKey:  sessionKey,
 	}, nil
+}
+
+func (rctx *replyContext) channelKey() string {
+	if rctx == nil {
+		return ""
+	}
+	if rctx.messageType == "group" {
+		return rctx.groupOpenID
+	}
+	return rctx.userOpenID
+}
+
+func (rctx *replyContext) auditUserID() string {
+	if rctx == nil {
+		return ""
+	}
+	if strings.TrimSpace(rctx.userOpenID) != "" {
+		return rctx.userOpenID
+	}
+	return rctx.groupOpenID
 }
 
 // ---------------------------------------------------------------------------
@@ -978,6 +1046,9 @@ func (p *Platform) handleGroupMessage(data json.RawMessage) {
 		groupOpenID: d.GroupOpenID,
 		userOpenID:  d.Author.MemberOpenID,
 		eventMsgID:  d.ID,
+		sessionKey:  sessionKey,
+		userName:    d.Author.MemberOpenID,
+		chatName:    d.GroupOpenID,
 	}
 
 	msg := &core.Message{
@@ -990,7 +1061,16 @@ func (p *Platform) handleGroupMessage(data json.RawMessage) {
 		Content:    content,
 		Images:     images,
 		Files:      files,
+		ChannelKey: d.GroupOpenID,
 		ReplyCtx:   rctx,
+		AuditExtra: map[string]any{
+			"message_type": "group",
+			"group_openid": d.GroupOpenID,
+			"user_openid":  d.Author.MemberOpenID,
+		},
+	}
+	if d.MessageReference != nil {
+		msg.ParentMessageID = d.MessageReference.MessageID
 	}
 
 	slog.Debug("qqbot: group message received", "group", d.GroupOpenID, "user", d.Author.MemberOpenID, "len", len(content), "images", len(images), "files", len(files))
@@ -1058,6 +1138,9 @@ func (p *Platform) handleC2CMessage(data json.RawMessage) {
 		messageType: "c2c",
 		userOpenID:  d.Author.UserOpenID,
 		eventMsgID:  d.ID,
+		sessionKey:  sessionKey,
+		userName:    d.Author.UserOpenID,
+		chatName:    d.Author.UserOpenID,
 	}
 
 	msg := &core.Message{
@@ -1069,7 +1152,15 @@ func (p *Platform) handleC2CMessage(data json.RawMessage) {
 		Content:    content,
 		Images:     images,
 		Files:      files,
+		ChannelKey: d.Author.UserOpenID,
 		ReplyCtx:   rctx,
+		AuditExtra: map[string]any{
+			"message_type": "c2c",
+			"user_openid":  d.Author.UserOpenID,
+		},
+	}
+	if d.MessageReference != nil {
+		msg.ParentMessageID = d.MessageReference.MessageID
 	}
 
 	slog.Debug("qqbot: c2c message received", "user", d.Author.UserOpenID, "len", len(content), "images", len(images), "files", len(files))
@@ -1081,6 +1172,11 @@ func (p *Platform) handleC2CMessage(data json.RawMessage) {
 // ---------------------------------------------------------------------------
 
 func (p *Platform) sendMessage(rctx *replyContext, content string) error {
+	_, err := p.sendMessageWithReceipt(rctx, content)
+	return err
+}
+
+func (p *Platform) sendMessageWithReceipt(rctx *replyContext, content string) (*core.SendReceipt, error) {
 	var url string
 	switch rctx.messageType {
 	case "group":
@@ -1088,7 +1184,7 @@ func (p *Platform) sendMessage(rctx *replyContext, content string) error {
 	case "c2c":
 		url = fmt.Sprintf("%s/v2/users/%s/messages", p.apiBase(), rctx.userOpenID)
 	default:
-		return fmt.Errorf("qqbot: unknown message type %q", rctx.messageType)
+		return nil, fmt.Errorf("qqbot: unknown message type %q", rctx.messageType)
 	}
 
 	var body map[string]any
@@ -1121,7 +1217,7 @@ func (p *Platform) sendMessage(rctx *replyContext, content string) error {
 		MsgID string `json:"msg_id"`
 	}
 	if err := p.apiRequestJSON("POST", url, body, &resp); err != nil {
-		return err
+		return nil, err
 	}
 	msgID := strings.TrimSpace(resp.ID)
 	if msgID == "" {
@@ -1130,7 +1226,14 @@ func (p *Platform) sendMessage(rctx *replyContext, content string) error {
 	if msgID != "" {
 		p.cacheMessage(msgID, content)
 	}
-	return nil
+	return &core.SendReceipt{
+		MessageID:       msgID,
+		ParentMessageID: rctx.eventMsgID,
+		Extra: map[string]any{
+			"message_type": rctx.messageType,
+			"channel_key":  rctx.channelKey(),
+		},
+	}, nil
 }
 
 func (p *Platform) nextMsgSeq(eventMsgID string) int32 {

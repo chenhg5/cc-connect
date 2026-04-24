@@ -61,6 +61,26 @@ func New(opts map[string]any) (core.Platform, error) {
 
 func (p *Platform) Name() string { return "qq" }
 
+func (p *Platform) AuditReplyMetadata(replyCtx any) core.AuditReplyMetadata {
+	rctx, ok := replyCtx.(*replyContext)
+	if !ok || rctx == nil {
+		return core.AuditReplyMetadata{}
+	}
+	return core.AuditReplyMetadata{
+		SessionKey:       rctx.sessionKey,
+		UserID:           qqInt64String(rctx.userID),
+		UserName:         rctx.userName,
+		ChatName:         rctx.chatName,
+		ChannelKey:       rctx.channelKey(),
+		ReplyToMessageID: qqInt32String(rctx.messageID),
+		ParentMessageID:  qqInt32String(rctx.messageID),
+		Extra: map[string]any{
+			"message_type": rctx.messageType,
+			"group_id":     qqInt64String(rctx.groupID),
+		},
+	}
+}
+
 func (p *Platform) Start(handler core.MessageHandler) error {
 	p.handler = handler
 
@@ -212,16 +232,19 @@ func (p *Platform) handleMessage(payload map[string]any) {
 		sessionKey = fmt.Sprintf("qq:%d", userID)
 	}
 
+	var chatName string
+	if msgType == "group" {
+		chatName = p.resolveGroupName(groupID)
+	}
+
 	rctx := &replyContext{
 		messageType: msgType,
 		userID:      userID,
 		groupID:     groupID,
 		messageID:   int32(messageID),
-	}
-
-	var chatName string
-	if msgType == "group" {
-		chatName = p.resolveGroupName(groupID)
+		sessionKey:  sessionKey,
+		userName:    userName,
+		chatName:    chatName,
 	}
 
 	msg := &core.Message{
@@ -234,7 +257,13 @@ func (p *Platform) handleMessage(payload map[string]any) {
 		Content:    text,
 		Images:     images,
 		Audio:      audio,
+		ChannelKey: rctx.channelKey(),
 		ReplyCtx:   rctx,
+		AuditExtra: map[string]any{
+			"message_type": msgType,
+			"group_id":     qqInt64String(groupID),
+			"user_id":      qqInt64String(userID),
+		},
 	}
 
 	slog.Debug("qq: message received", "type", msgType, "user", userID, "text_len", len(text))
@@ -313,29 +342,51 @@ func (p *Platform) parseMessage(payload map[string]any) (string, []core.ImageAtt
 
 // Reply sends a message as a reply to an incoming message.
 func (p *Platform) Reply(ctx context.Context, replyCtx any, content string) error {
-	return p.Send(ctx, replyCtx, content)
+	_, err := p.ReplyWithReceipt(ctx, replyCtx, content)
+	return err
 }
 
 // Send sends a message to the conversation identified by replyCtx.
 func (p *Platform) Send(ctx context.Context, replyCtx any, content string) error {
+	_, err := p.SendWithReceipt(ctx, replyCtx, content)
+	return err
+}
+
+func (p *Platform) ReplyWithReceipt(ctx context.Context, replyCtx any, content string) (*core.SendReceipt, error) {
+	return p.SendWithReceipt(ctx, replyCtx, content)
+}
+
+func (p *Platform) SendWithReceipt(ctx context.Context, replyCtx any, content string) (*core.SendReceipt, error) {
 	rctx, ok := replyCtx.(*replyContext)
 	if !ok {
-		return fmt.Errorf("qq: invalid reply context")
+		return nil, fmt.Errorf("qq: invalid reply context")
 	}
 
 	params := map[string]any{
 		"message": content,
 	}
 
+	var (
+		result map[string]any
+		err    error
+	)
 	if rctx.messageType == "group" {
 		params["group_id"] = rctx.groupID
-		_, err := p.callAPI("send_group_msg", params)
-		return err
+		result, err = p.callAPI("send_group_msg", params)
+	} else {
+		params["user_id"] = rctx.userID
+		result, err = p.callAPI("send_private_msg", params)
 	}
-
-	params["user_id"] = rctx.userID
-	_, err := p.callAPI("send_private_msg", params)
-	return err
+	if err != nil {
+		return nil, err
+	}
+	return &core.SendReceipt{
+		MessageID: qqOutboundMessageID(result),
+		Extra: map[string]any{
+			"message_type": rctx.messageType,
+			"channel_key":  rctx.channelKey(),
+		},
+	}, nil
 }
 
 // SendImage sends an image to the conversation.
@@ -464,6 +515,9 @@ type replyContext struct {
 	userID      int64
 	groupID     int64
 	messageID   int32
+	sessionKey  string
+	userName    string
+	chatName    string
 }
 
 func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
@@ -475,14 +529,68 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	if len(parts) == 3 {
 		if parts[1] == "g" {
 			gid, _ := strconv.ParseInt(parts[2], 10, 64)
-			return &replyContext{messageType: "group", groupID: gid}, nil
+			return &replyContext{messageType: "group", groupID: gid, sessionKey: sessionKey}, nil
 		}
 		gid, _ := strconv.ParseInt(parts[1], 10, 64)
 		uid, _ := strconv.ParseInt(parts[2], 10, 64)
-		return &replyContext{messageType: "group", groupID: gid, userID: uid}, nil
+		return &replyContext{messageType: "group", groupID: gid, userID: uid, sessionKey: sessionKey}, nil
 	}
 	uid, _ := strconv.ParseInt(parts[1], 10, 64)
-	return &replyContext{messageType: "private", userID: uid}, nil
+	return &replyContext{messageType: "private", userID: uid, sessionKey: sessionKey}, nil
+}
+
+func (rctx *replyContext) channelKey() string {
+	if rctx == nil {
+		return ""
+	}
+	if rctx.messageType == "group" {
+		return qqInt64String(rctx.groupID)
+	}
+	return qqInt64String(rctx.userID)
+}
+
+func qqOutboundMessageID(result map[string]any) string {
+	if result == nil {
+		return ""
+	}
+	if msgID := qqAnyString(result["message_id"]); msgID != "" {
+		return msgID
+	}
+	if msgID := qqAnyString(result["messageId"]); msgID != "" {
+		return msgID
+	}
+	return ""
+}
+
+func qqAnyString(v any) string {
+	switch x := v.(type) {
+	case string:
+		return strings.TrimSpace(x)
+	case float64:
+		return strconv.FormatInt(int64(x), 10)
+	case int64:
+		return strconv.FormatInt(x, 10)
+	case int32:
+		return strconv.FormatInt(int64(x), 10)
+	case json.Number:
+		return x.String()
+	default:
+		return ""
+	}
+}
+
+func qqInt64String(v int64) string {
+	if v == 0 {
+		return ""
+	}
+	return strconv.FormatInt(v, 10)
+}
+
+func qqInt32String(v int32) string {
+	if v == 0 {
+		return ""
+	}
+	return strconv.FormatInt(int64(v), 10)
 }
 
 func (p *Platform) isAllowed(userID int64) bool {
