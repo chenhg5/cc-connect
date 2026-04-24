@@ -48,6 +48,17 @@ func (s *recordingAgentSession) RespondPermission(id string, res PermissionResul
 	return nil
 }
 
+type steerSession struct {
+	stubAgentSession
+	lastPrompt string
+	err        error
+}
+
+func (s *steerSession) Steer(prompt string) error {
+	s.lastPrompt = prompt
+	return s.err
+}
+
 type stubPlatformEngine struct {
 	n    string
 	sent []string
@@ -7417,6 +7428,106 @@ func TestCmdStop_UsesInteractiveKeyForMultiWorkspace(t *testing.T) {
 
 	if exists {
 		t.Error("expected interactive state to be cleaned up by /stop using interactiveKey")
+	}
+}
+
+func TestCmdSteer_NoExecution_RepliesNoExecution(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", Content: "/steer focus", ReplyCtx: "ctx"}
+
+	e.cmdSteer(p, msg, []string{"focus"})
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("expected a reply")
+	}
+	if !strings.Contains(sent[0], e.i18n.T(MsgNoExecution)) {
+		t.Fatalf("expected MsgNoExecution, got %q", sent[0])
+	}
+}
+
+func TestCmdSteer_Empty_RepliesUsage(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", Content: "/steer", ReplyCtx: "ctx"}
+
+	e.cmdSteer(p, msg, nil)
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("expected a reply")
+	}
+	if !strings.Contains(sent[0], e.i18n.T(MsgSteerEmpty)) {
+		t.Fatalf("expected MsgSteerEmpty, got %q", sent[0])
+	}
+}
+
+func TestCmdSteer_NotSupported_RepliesNotSupported(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	key := "test:user1"
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{agentSession: &stubAgentSession{}}
+	e.interactiveMu.Unlock()
+
+	msg := &Message{SessionKey: key, Content: "/steer focus", ReplyCtx: "ctx"}
+	e.cmdSteer(p, msg, []string{"focus"})
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("expected a reply")
+	}
+	if !strings.Contains(sent[0], e.i18n.T(MsgSteerNotSupported)) {
+		t.Fatalf("expected MsgSteerNotSupported, got %q", sent[0])
+	}
+}
+
+func TestCmdSteer_Success_SendsGuidance(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	key := "test:user1"
+	sess := &steerSession{}
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{agentSession: sess}
+	e.interactiveMu.Unlock()
+
+	msg := &Message{SessionKey: key, Content: "/steer focus on tests", ReplyCtx: "ctx"}
+	e.cmdSteer(p, msg, []string{"focus", "on", "tests"})
+
+	if sess.lastPrompt != "focus on tests" {
+		t.Fatalf("steer prompt = %q, want %q", sess.lastPrompt, "focus on tests")
+	}
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("expected a reply")
+	}
+	if !strings.Contains(sent[0], e.i18n.T(MsgSteerSent)) {
+		t.Fatalf("expected MsgSteerSent, got %q", sent[0])
+	}
+}
+
+func TestCmdSteer_Error_RepliesFailed(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	key := "test:user1"
+	sess := &steerSession{err: errors.New("boom")}
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{agentSession: sess}
+	e.interactiveMu.Unlock()
+
+	msg := &Message{SessionKey: key, Content: "/steer focus", ReplyCtx: "ctx"}
+	e.cmdSteer(p, msg, []string{"focus"})
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("expected a reply")
+	}
+	if !strings.Contains(sent[0], e.i18n.T(MsgSteerSendFailed)) {
+		t.Fatalf("expected MsgSteerSendFailed, got %q", sent[0])
 	}
 }
 
