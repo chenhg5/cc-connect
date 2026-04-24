@@ -58,6 +58,8 @@ func newSDKSession(
 	cmd.Dir = workDir
 
 	env := os.Environ()
+	// Filter out CLAUDECODE env to prevent nested session detection.
+	env = filterEnv(env, "CLAUDECODE")
 	if len(extraEnv) > 0 {
 		env = core.MergeEnv(env, extraEnv)
 	}
@@ -182,6 +184,11 @@ func (s *sdkSession) mapEvent(evt *sidecarEvent) *core.Event {
 		if evt.Subtype == "init" {
 			s.sessionID.Store(evt.SessionID)
 		}
+		// Forward as EventText so the engine learns the session ID early.
+		sid := evt.SessionID
+		if sid != "" {
+			return &core.Event{Type: core.EventText, SessionID: sid, Content: ""}
+		}
 		return nil
 
 	case "text":
@@ -269,6 +276,14 @@ func summarizeInput(tool string, input map[string]any) string {
 	case "Bash":
 		if cmd, ok := input["command"].(string); ok {
 			return cmd
+		}
+	case "Grep":
+		if pat, ok := input["pattern"].(string); ok {
+			return pat
+		}
+	case "Glob":
+		if pat, ok := input["pattern"].(string); ok {
+			return pat
 		}
 	}
 	b, _ := json.Marshal(input)
@@ -463,4 +478,17 @@ func mapStrVal(m map[string]any, key string) string {
 func mapBoolVal(m map[string]any, key string) bool {
 	v, _ := m[key].(bool)
 	return v
+}
+
+// filterEnv removes env entries whose key matches the given prefix.
+func filterEnv(env []string, removePrefix string) []string {
+	filtered := env[:0]
+	for _, e := range env {
+		k, _, ok := strings.Cut(e, "=")
+		if ok && strings.HasPrefix(k, removePrefix) {
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+	return filtered
 }

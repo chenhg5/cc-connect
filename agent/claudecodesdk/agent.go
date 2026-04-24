@@ -257,7 +257,7 @@ func (a *Agent) SetModel(model string) {
 func (a *Agent) GetModel() string {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return a.model
+	return core.GetProviderModel(a.providers, a.activeIdx, a.model)
 }
 
 func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
@@ -357,6 +357,15 @@ func (a *Agent) GetAllowedTools() []string {
 	return result
 }
 
+// GetDisallowedTools returns the current list of disallowed tools.
+func (a *Agent) GetDisallowedTools() []string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	result := make([]string, len(a.config.DisallowedTools))
+	copy(result, a.config.DisallowedTools)
+	return result
+}
+
 // normalizeEffort maps user-friendly aliases to Claude SDK effort values.
 func normalizeEffort(raw string) string {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
@@ -427,6 +436,8 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	providerEnv := a.providerEnvLocked()
 	platformPrompt := a.platformPrompt
 	reasoningEffort := a.reasoningEffort
+	allowedTools := make([]string, len(a.allowedTools))
+	copy(allowedTools, a.allowedTools)
 	a.mu.RUnlock()
 
 	// Resolve sidecar path: embedded > sidecar_dir > binary-relative
@@ -448,6 +459,11 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	// Apply current reasoning effort (may have changed at runtime).
 	if reasoningEffort != "" {
 		config.Effort = reasoningEffort
+	}
+
+	// Apply current allowed tools (may have been extended via AddAllowedTools).
+	if len(allowedTools) > 0 {
+		config.AllowedTools = allowedTools
 	}
 
 	var extraEnv []string
@@ -526,16 +542,92 @@ func (a *Agent) CompressCommand() string { return "/compact" }
 
 // CommandDirs implements core.CommandProvider.
 func (a *Agent) CommandDirs() []string {
-	return []string{
-		filepath.Join(a.workDir, ".claude", "commands"),
+	absDir, _ := filepath.Abs(a.workDir)
+	dirs := []string{filepath.Join(absDir, ".claude", "commands")}
+	if home, err := os.UserHomeDir(); err == nil {
+		dirs = append(dirs, filepath.Join(home, ".claude", "commands"))
 	}
+	return dirs
 }
 
 // SkillDirs implements core.SkillProvider.
 func (a *Agent) SkillDirs() []string {
-	return []string{
-		filepath.Join(a.workDir, ".claude", "skills"),
+	absDir, _ := filepath.Abs(a.workDir)
+	return appendProjectClaudeSkillDirs(absDir, claudeConfigHomeDir())
+}
+
+func claudeConfigHomeDir() string {
+	if dir := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); dir != "" {
+		return dir
 	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".claude")
+}
+
+func appendProjectClaudeSkillDirs(workDir, configHome string) []string {
+	home, _ := os.UserHomeDir()
+	projectDirs := walkUpClaudeSkillDirs(workDir, home)
+	if configHome == "" {
+		return projectDirs
+	}
+	return uniqueSkillDirs(append(projectDirs, filepath.Join(configHome, "skills")))
+}
+
+func walkUpClaudeSkillDirs(workDir, home string) []string {
+	current := filepath.Clean(workDir)
+	home = filepath.Clean(home)
+	stopAt := findGitRoot(current)
+
+	var dirs []string
+	for {
+		if home != "" && filepath.Clean(current) == filepath.Clean(home) {
+			break
+		}
+		dirs = append(dirs, filepath.Join(current, ".claude", "skills"))
+		if stopAt != "" && filepath.Clean(current) == filepath.Clean(stopAt) {
+			break
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+	return uniqueSkillDirs(dirs)
+}
+
+func findGitRoot(start string) string {
+	current := filepath.Clean(start)
+	for {
+		if _, err := os.Stat(filepath.Join(current, ".git")); err == nil {
+			return current
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return ""
+		}
+		current = parent
+	}
+}
+
+func uniqueSkillDirs(paths []string) []string {
+	seen := make(map[string]struct{}, len(paths))
+	out := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		clean := filepath.Clean(path)
+		if _, ok := seen[clean]; ok {
+			continue
+		}
+		seen[clean] = struct{}{}
+		out = append(out, clean)
+	}
+	return out
 }
 
 // resolveSidecarPath finds the sidecar JS file using this priority:

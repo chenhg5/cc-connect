@@ -72,6 +72,27 @@ func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error)
 	return sessions, nil
 }
 
+// DeleteSession implements core.SessionDeleter.
+func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("claudecodesdk: cannot determine home dir: %w", err)
+	}
+	absWorkDir, err := filepath.Abs(a.workDir)
+	if err != nil {
+		return fmt.Errorf("claudecodesdk: resolve work_dir: %w", err)
+	}
+	projectDir := findProjectDir(homeDir, absWorkDir)
+	if projectDir == "" {
+		return fmt.Errorf("claudecodesdk: session not found")
+	}
+	path := filepath.Join(projectDir, sessionID+".jsonl")
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("claudecodesdk: session file not found: %s", sessionID)
+	}
+	return os.Remove(path)
+}
+
 // GetSessionHistory reads the Claude Code JSONL transcript and returns user/assistant messages.
 func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int) ([]core.HistoryEntry, error) {
 	homeDir, err := os.UserHomeDir()
