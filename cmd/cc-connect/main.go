@@ -278,6 +278,11 @@ func main() {
 		// Global [display] config can be overridden by project-level settings
 		_, _, _, _, _, showCtx, showFooter := config.EffectiveDisplay(cfg, &proj)
 		engine.SetShowContextIndicator(showCtx)
+		showWorkdir := true
+		if proj.ShowWorkdirIndicator != nil {
+			showWorkdir = *proj.ShowWorkdirIndicator
+		}
+		engine.SetShowWorkdirIndicator(showWorkdir)
 		engine.SetReplyFooterEnabled(showFooter)
 		engine.SetAttachmentSendEnabled(cfg.AttachmentSend != "off")
 		engine.SetFilterExternalSessions(proj.FilterExternalSessions != nil && *proj.FilterExternalSessions)
@@ -958,6 +963,7 @@ func main() {
 				Mode:                 u.Mode,
 				AgentType:            u.AgentType,
 				ShowContextIndicator: u.ShowContextIndicator,
+				ShowWorkdirIndicator: u.ShowWorkdirIndicator,
 				ReplyFooter:          u.ReplyFooter,
 				InjectSender:         u.InjectSender,
 				PlatformAllowFrom:    u.PlatformAllowFrom,
@@ -1463,6 +1469,11 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 
 	// Wire show_context_indicator and reply_footer from display config
 	engine.SetShowContextIndicator(showCtx)
+	showWorkdir := true
+	if proj.ShowWorkdirIndicator != nil {
+		showWorkdir = *proj.ShowWorkdirIndicator
+	}
+	engine.SetShowWorkdirIndicator(showWorkdir)
 	engine.SetReplyFooterEnabled(showFooter)
 
 	// Reload auto-compress settings
