@@ -3769,7 +3769,17 @@ func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, mark
 			"text": map[string]any{"tag": "plain_text", "content": "Thinking..."},
 		})
 	} else {
-		for _, step := range steps {
+		// Cap the number of step rows so the collapsible panel doesn't
+		// balloon into hundreds of elements (lark client renders that
+		// poorly and the whole card can hit the ~30KB API limit).
+		const maxPanelSteps = 30
+		visible := steps
+		overflow := 0
+		if len(steps) > maxPanelSteps {
+			visible = steps[:maxPanelSteps]
+			overflow = len(steps) - maxPanelSteps
+		}
+		for _, step := range visible {
 			summary := strings.TrimSpace(step.Summary)
 			if summary == "" {
 				summary = step.Name
@@ -3778,6 +3788,12 @@ func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, mark
 				"tag":  "div",
 				"icon": map[string]any{"tag": "standard_icon", "token": getToolIcon(step.Name)},
 				"text": map[string]any{"tag": "plain_text", "content": summary},
+			})
+		}
+		if overflow > 0 {
+			panelElements = append(panelElements, map[string]any{
+				"tag":  "div",
+				"text": map[string]any{"tag": "plain_text", "content": fmt.Sprintf("… and %d more steps", overflow)},
 			})
 		}
 	}
@@ -3860,6 +3876,14 @@ func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, mark
 	b, err := json.Marshal(card)
 	if err != nil {
 		slog.Debug("feishu: build rich card marshal failed, fallback to basic card", "error", err)
+		return buildCardJSONWithStatus(preprocessFeishuMarkdown(markdown), status)
+	}
+	// Feishu interactive card payload limit is ~30KB; over that the API
+	// rejects the whole card and the lark client may render it as a
+	// mangled JSON dump. Drop the panel and keep just the markdown body.
+	const maxCardJSONBytes = 28000
+	if len(b) > maxCardJSONBytes {
+		slog.Debug("feishu: rich card exceeds size limit, fallback to basic card", "size", len(b))
 		return buildCardJSONWithStatus(preprocessFeishuMarkdown(markdown), status)
 	}
 	return string(b)
