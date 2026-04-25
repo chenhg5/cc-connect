@@ -86,6 +86,11 @@ MiniMax-M2.7 is a next-generation large language model designed for autonomous e
 </tr>
 
 <tr>
+<td width="150"><a href="https://dragoncode.codes/register?ref=23ZELCPX"><img src="assets/sponsors/dragoncode.png" alt="DragonCode" width="120"></a></td>
+<td>Thanks to DragonCode for supporting this project. DragonCode has prepared a special benefit for cc-connect users: register via <a href="https://dragoncode.codes">this link</a> to get started.</td>
+</tr>
+
+<tr>
 <td width="150"><a href="https://coder.visioncoder.cn"><img src="assets/sponsors/visioncoder.png" alt="VisionCoder" width="120"></a></td>
 <td>Thanks to VisionCoder for supporting this project. <a href="https://coder.visioncoder.cn">VisionCoder Developer Platform</a> is a reliable and efficient API relay service provider, offering access to mainstream AI models such as Claude Code, Codex, and Gemini. It helps developers and teams integrate AI capabilities more easily and improve productivity. VisionCoder is also offering our users a limited-time <a href="https://coder.visioncoder.cn">Token Plan</a> promotion: buy 1 month and get 1 month free.</td>
 </tr>
@@ -93,6 +98,11 @@ MiniMax-M2.7 is a next-generation large language model designed for autonomous e
 <tr>
 <td width="150"><a href="https://console.claudeapi.com/register?aff=GDbA"><img src="assets/sponsors/claudeapi.svg" alt="claudeapi.com" width="120"></a></td>
 <td>Thanks to claudeapi.com for sponsoring this project! claudeapi is a high-quality direct Claude connection service for mid-to-high-end users. It is fully integrated with Anthropic's official first-party Keys and AWS Bedrock official channels — no reverse engineering, no intelligence degradation, no stitching. It fully preserves the official capabilities, long context, and tool-calling performance of Opus / Sonnet / Haiku. Designed specifically for Claude Code power users, Agent developers, and enterprise teams, it focuses on out-of-the-box usability and enterprise-grade stability. Invoicing and team onboarding are supported. Register via <a href="https://console.claudeapi.com/register?aff=GDbA">this link</a>.</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://passport.compshare.cn/register?referral_code=H65IOClRGu5CM7nn5ykfad&ytag=GPU_YY_YX_git_cc-connect"><img src="assets/sponsors/youyunzhisuan.png" alt="优云智算" width="120"></a></td>
+<td>Thanks to 优云智算 for sponsoring this project! 优云智算 (UCloud AI Cloud Platform) provides stable and comprehensive domestic and international model APIs with just one key. Featuring high-value Coding Plan packages (monthly or per-use), plus stable official relay for overseas models. Supports Claude Code, Codex, and API calls. Enterprise features include high concurrency, 7x24 technical support, and self-service invoicing. Register via <a href="https://passport.compshare.cn/register?referral_code=H65IOClRGu5CM7nn5ykfad&ytag=GPU_YY_YX_git_cc-connect">this link</a> to receive ¥5 free platform credit!</td>
 </tr>
 
 <tr>
