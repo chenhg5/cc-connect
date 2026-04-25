@@ -278,7 +278,13 @@ func (sp *streamPreview) discard() {
 // timer and optionally cleans up the preview message.
 // Returns true if a preview was active and the final message was sent via preview
 // (so the caller should skip sending the full response separately).
-func (sp *streamPreview) finish(finalText string) bool {
+//
+// `statusFooter` is an optional structured footer string (one or more lines)
+// that platforms implementing StatusFooterUpdater render with small/dim
+// styling separate from the body. When the platform does not implement that
+// interface and statusFooter is non-empty, finish falls back to appending the
+// footer inline to finalText before the regular UpdateMessage call.
+func (sp *streamPreview) finish(finalText, statusFooter string) bool {
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
 
@@ -327,14 +333,18 @@ func (sp *streamPreview) finish(finalText string) bool {
 		return false
 	}
 
-	// If the final text is identical to what was last sent via UpdateMessage,
-	// skip the redundant API call. This prevents duplicate messages on platforms
-	// (e.g. Feishu) where patching with identical content may fail.
-	// Only skip when lastSentViaUpdate is true — if the text was only sent via
-	// SendPreviewStart (first flush), we must still call UpdateMessage because
-	// it may apply different formatting (e.g. Markdown→HTML for Telegram).
-	if finalText == sp.lastSentText && sp.lastSentViaUpdate {
-		slog.Debug("stream preview finish: text unchanged since last UpdateMessage, skipping",
+	// If the final text is identical to what was last sent via UpdateMessage
+	// AND no status footer needs to be applied, skip the redundant API call.
+	// This prevents duplicate messages on platforms (e.g. Feishu) where
+	// patching with identical content may fail. We must NOT skip when a
+	// statusFooter is pending — the body may match but the footer hasn't
+	// been rendered yet, and dropping the call would silently lose it.
+	// Only skip when lastSentViaUpdate is true — if the text was only sent
+	// via SendPreviewStart (first flush), we must still call UpdateMessage
+	// because it may apply different formatting (e.g. Markdown→HTML for
+	// Telegram).
+	if finalText == sp.lastSentText && sp.lastSentViaUpdate && statusFooter == "" {
+		slog.Debug("stream preview finish: text unchanged and no footer, skipping",
 			"text_len", len(finalText))
 		return true
 	}
@@ -344,7 +354,24 @@ func (sp *streamPreview) finish(finalText string) bool {
 	// we always attempt a single final update regardless of length.
 	slog.Debug("stream preview finish: sending final UpdateMessage",
 		"text_len", len(finalText), "lastSent_len", len(sp.lastSentText),
-		"same", finalText == sp.lastSentText, "viaUpdate", sp.lastSentViaUpdate)
+		"same", finalText == sp.lastSentText, "viaUpdate", sp.lastSentViaUpdate,
+		"footer_len", len(statusFooter))
+
+	// Prefer the structured-footer path when the platform supports it, so the
+	// footer renders with small/dim styling separate from the response body.
+	if statusFooter != "" {
+		if sfu, ok := sp.platform.(StatusFooterUpdater); ok {
+			if err := sfu.UpdateMessageWithStatusFooter(sp.ctx, sp.previewMsgID, finalText, statusFooter); err == nil {
+				slog.Debug("stream preview finish: success via UpdateMessageWithStatusFooter")
+				return true
+			} else {
+				slog.Debug("stream preview finish: UpdateMessageWithStatusFooter failed, falling back", "error", err)
+			}
+		}
+		// Fallback: append inline so the footer is at least visible.
+		finalText = appendReplyFooter(finalText, statusFooter)
+	}
+
 	if err := updater.UpdateMessage(sp.ctx, sp.previewMsgID, finalText); err != nil {
 		slog.Debug("stream preview finish: final update FAILED, cleaning up preview", "error", err)
 		// Update failed (e.g. text too long for platform edit API).

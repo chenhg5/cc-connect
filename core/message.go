@@ -199,8 +199,10 @@ type Event struct {
 	Questions    []UserQuestion // populated when ToolName == "AskUserQuestion"
 	Done         bool
 	Error        error
-	InputTokens  int // token usage from agent result events
-	OutputTokens int
+	InputTokens              int // token usage from agent result events
+	OutputTokens             int
+	CacheCreationInputTokens int // cache-write tokens (new content written to cache)
+	CacheReadInputTokens     int // cache-read tokens (prior context retrieved from cache)
 }
 
 // HistoryEntry is one turn in a conversation.

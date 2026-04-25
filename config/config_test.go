@@ -2277,12 +2277,14 @@ func TestSaveProjectSettings_ExtraFields(t *testing.T) {
 	patchConfigPath(t, configPath)
 
 	show := true
+	hideWorkdir := false
 	wd := "/tmp/patched"
 	mode := "yolo"
 	err := SaveProjectSettings("alpha", ProjectSettingsUpdate{
 		WorkDir:              &wd,
 		Mode:                 &mode,
 		ShowContextIndicator: &show,
+		ShowWorkdirIndicator: &hideWorkdir,
 		PlatformAllowFrom:    map[string]string{"telegram": "u1", "Feishu": "u2"},
 	})
 	if err != nil {
@@ -2299,6 +2301,9 @@ func TestSaveProjectSettings_ExtraFields(t *testing.T) {
 	}
 	if proj.ShowContextIndicator == nil || !*proj.ShowContextIndicator {
 		t.Fatalf("ShowContextIndicator = %v, want true", proj.ShowContextIndicator)
+	}
+	if proj.ShowWorkdirIndicator == nil || *proj.ShowWorkdirIndicator {
+		t.Fatalf("ShowWorkdirIndicator = %v, want false (per patch)", proj.ShowWorkdirIndicator)
 	}
 	if stringMapValue(proj.Platforms[0].Options, "allow_from") != "u1" {
 		t.Fatalf("telegram allow_from = %q, want u1", stringMapValue(proj.Platforms[0].Options, "allow_from"))

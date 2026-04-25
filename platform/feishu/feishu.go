@@ -1824,6 +1824,28 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	return p.sendNewMessageToChat(ctx, rc, msgType, msgBody)
 }
 
+// SendWithStatusFooter implements core.StatusFooterSender: send a reply with
+// the body content followed by a small/dim status-footer block. Always uses
+// the interactive card path so the footer can render with text_size:
+// "notation". Falls back to plain Send when the footer is empty.
+func (p *Platform) SendWithStatusFooter(ctx context.Context, rctx any, content, footer string) error {
+	if strings.TrimSpace(footer) == "" {
+		return p.Send(ctx, rctx, content)
+	}
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
+	}
+	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
+	processedBody := sanitizeMarkdownURLs(preprocessFeishuMarkdown(content))
+	processedFooter := sanitizeMarkdownURLs(preprocessFeishuMarkdown(footer))
+	cardJSON := buildCardJSONWithStatusFooter(processedBody, processedFooter)
+	if p.shouldUseThreadOrReplyAPI(rc) {
+		return p.replyMessage(ctx, rc, larkim.MsgTypeInteractive, cardJSON)
+	}
+	return p.sendNewMessageToChat(ctx, rc, larkim.MsgTypeInteractive, cardJSON)
+}
+
 func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttachment) error {
 	rc, ok := rctx.(replyContext)
 	if !ok {
@@ -2713,6 +2735,40 @@ func buildCardJSON(content string) string {
 	return string(b)
 }
 
+// buildCardJSONWithStatusFooter builds an interactive card with a body
+// markdown element followed by a small/dim status-footer markdown element
+// (Lark `text_size: "notation"`). Empty footer falls through to buildCardJSON.
+func buildCardJSONWithStatusFooter(content, footer string) string {
+	if strings.TrimSpace(footer) == "" {
+		return buildCardJSON(content)
+	}
+	elements := []map[string]any{
+		{
+			"tag":     "markdown",
+			"content": content,
+		},
+		{
+			"tag":     "hr",
+		},
+		{
+			"tag":       "markdown",
+			"content":   footer,
+			"text_size": "notation",
+		},
+	}
+	card := map[string]any{
+		"schema": "2.0",
+		"config": map[string]any{
+			"wide_screen_mode": true,
+		},
+		"body": map[string]any{
+			"elements": elements,
+		},
+	}
+	b, _ := json.Marshal(card)
+	return string(b)
+}
+
 func isZhLikeProgressLang(lang string) bool {
 	l := strings.ToLower(strings.TrimSpace(lang))
 	return strings.HasPrefix(l, "zh")
@@ -3198,8 +3254,36 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 		}
 		cardJSON = buildCardJSON(sanitizeMarkdownURLs(processed))
 	}
+	return p.patchCardMessage(ctx, h.messageID, cardJSON)
+}
+
+// UpdateMessageWithStatusFooter implements core.StatusFooterUpdater: edit an
+// existing card to render the body markdown plus a small/dim status-footer
+// block (Lark `text_size: "notation"`). Falls through to UpdateMessage when
+// the footer is empty.
+func (p *Platform) UpdateMessageWithStatusFooter(ctx context.Context, previewHandle any, content, footer string) error {
+	if !p.useInteractiveCard {
+		return core.ErrNotSupported
+	}
+	if strings.TrimSpace(footer) == "" {
+		return p.UpdateMessage(ctx, previewHandle, content)
+	}
+	h, ok := previewHandle.(*feishuPreviewHandle)
+	if !ok {
+		return fmt.Errorf("%s: invalid preview handle type %T", p.tag(), previewHandle)
+	}
+	// Mirror UpdateMessage's existing behavior: it does not resolve
+	// @mentions on the card-edit path either. SendWithStatusFooter does
+	// resolve since the matching Send path resolves on the chat-thread API.
+	processedBody := sanitizeMarkdownURLs(preprocessFeishuMarkdown(content))
+	processedFooter := sanitizeMarkdownURLs(preprocessFeishuMarkdown(footer))
+	cardJSON := buildCardJSONWithStatusFooter(processedBody, processedFooter)
+	return p.patchCardMessage(ctx, h.messageID, cardJSON)
+}
+
+func (p *Platform) patchCardMessage(ctx context.Context, messageID, cardJSON string) error {
 	req := larkim.NewPatchMessageReqBuilder().
-		MessageId(h.messageID).
+		MessageId(messageID).
 		Body(larkim.NewPatchMessageReqBodyBuilder().
 			Content(cardJSON).
 			Build()).
