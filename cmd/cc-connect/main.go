@@ -256,6 +256,11 @@ func main() {
 			showCtx = *proj.ShowContextIndicator
 		}
 		engine.SetShowContextIndicator(showCtx)
+		showWorkdir := true
+		if proj.ShowWorkdirIndicator != nil {
+			showWorkdir = *proj.ShowWorkdirIndicator
+		}
+		engine.SetShowWorkdirIndicator(showWorkdir)
 		showFooter := true
 		if proj.ReplyFooter != nil {
 			showFooter = *proj.ReplyFooter
@@ -896,6 +901,7 @@ func main() {
 				Mode:                 u.Mode,
 				AgentType:            u.AgentType,
 				ShowContextIndicator: u.ShowContextIndicator,
+				ShowWorkdirIndicator: u.ShowWorkdirIndicator,
 				ReplyFooter:          u.ReplyFooter,
 				InjectSender:         u.InjectSender,
 				PlatformAllowFrom:    u.PlatformAllowFrom,
@@ -1423,6 +1429,11 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		showCtx = *proj.ShowContextIndicator
 	}
 	engine.SetShowContextIndicator(showCtx)
+	showWorkdir := true
+	if proj.ShowWorkdirIndicator != nil {
+		showWorkdir = *proj.ShowWorkdirIndicator
+	}
+	engine.SetShowWorkdirIndicator(showWorkdir)
 	showFooter := true
 	if proj.ReplyFooter != nil {
 		showFooter = *proj.ReplyFooter

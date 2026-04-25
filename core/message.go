@@ -200,10 +200,12 @@ type Event struct {
 	Questions    []UserQuestion // populated when ToolName == "AskUserQuestion"
 	Done         bool
 	Error        error
-	InputTokens  int // token usage from agent result events
-	OutputTokens int
-	Metadata     map[string]any // optional metadata from agent (e.g. compaction_continue)
-	Synthetic    bool           // true if this is a synthetic/generated message (not from real user)
+	InputTokens              int // token usage from agent result events
+	OutputTokens             int
+	CacheCreationInputTokens int            // cache-write tokens (new content written to cache)
+	CacheReadInputTokens     int            // cache-read tokens (prior context retrieved from cache)
+	Metadata                 map[string]any // optional metadata from agent (e.g. compaction_continue)
+	Synthetic                bool           // true if this is a synthetic/generated message (not from real user)
 }
 
 // HistoryEntry is one turn in a conversation.
