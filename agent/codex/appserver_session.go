@@ -135,6 +135,9 @@ type appServerSession struct {
 	pendingMu sync.Mutex
 	pending   map[int64]chan rpcResponseEnvelope
 
+	approvalsMu     sync.Mutex
+	pendingApprovals map[string]chan core.PermissionResult
+
 	threadID atomic.Value
 	alive    atomic.Bool
 
@@ -158,17 +161,18 @@ const (
 func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID string, extraEnv []string, codexHome string) (*appServerSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &appServerSession{
-		url:       url,
-		workDir:   workDir,
-		model:     model,
-		effort:    effort,
-		mode:      mode,
-		extraEnv:  append([]string(nil), extraEnv...),
-		codexHome: strings.TrimSpace(codexHome),
-		events:    make(chan core.Event, 128),
-		ctx:       sessionCtx,
-		cancel:    cancel,
-		pending:   make(map[int64]chan rpcResponseEnvelope),
+		url:              url,
+		workDir:          workDir,
+		model:            model,
+		effort:           effort,
+		mode:             mode,
+		extraEnv:         append([]string(nil), extraEnv...),
+		codexHome:        strings.TrimSpace(codexHome),
+		events:           make(chan core.Event, 128),
+		ctx:              sessionCtx,
+		cancel:           cancel,
+		pending:          make(map[int64]chan rpcResponseEnvelope),
+		pendingApprovals: make(map[string]chan core.PermissionResult),
 	}
 	s.alive.Store(true)
 
@@ -194,10 +198,7 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
 }
 
 func (s *appServerSession) connect() error {
-	args := []string{"app-server"}
-	if strings.TrimSpace(s.url) != "" {
-		args = append(args, "--listen", strings.TrimSpace(s.url))
-	}
+	args := []string{"app-server", "--listen", "stdio://"}
 	cmd := exec.CommandContext(s.ctx, "codex", args...)
 	cmd.Dir = s.workDir
 	env := append([]string(nil), s.extraEnv...)
@@ -479,8 +480,181 @@ func (s *appServerSession) stageImages(prompt string, images []core.ImageAttachm
 	return prompt, imagePaths, nil
 }
 
-func (s *appServerSession) RespondPermission(_ string, _ core.PermissionResult) error {
+func (s *appServerSession) RespondPermission(requestID string, result core.PermissionResult) error {
+	s.approvalsMu.Lock()
+	ch := s.pendingApprovals[requestID]
+	s.approvalsMu.Unlock()
+	if ch == nil {
+		return fmt.Errorf("codex app-server: no pending approval for request %s", requestID)
+	}
+	select {
+	case ch <- result:
+	default:
+	}
 	return nil
+}
+
+func (s *appServerSession) handleServerRequest(probe map[string]json.RawMessage) {
+	rawID := probe["id"]
+	var method string
+	if err := json.Unmarshal(probe["method"], &method); err != nil {
+		return
+	}
+	params := probe["params"]
+
+	switch method {
+	case "item/commandExecution/requestApproval", "item/fileChange/requestApproval":
+		s.handleApprovalRequest(rawID, method, params)
+	case "item/permissions/requestApproval":
+		s.handlePermissionsApproval(rawID, params)
+	case "item/tool/call":
+		s.handleDynamicToolCall(rawID, params)
+	default:
+		_ = s.writeJSON(map[string]any{
+			"jsonrpc": "2.0", "id": rawID,
+			"error": map[string]any{"code": -32601, "message": "method not found"},
+		})
+	}
+}
+
+func (s *appServerSession) handleApprovalRequest(rawID json.RawMessage, method string, paramsRaw json.RawMessage) {
+	requestID := string(rawID)
+	var params map[string]any
+	if err := json.Unmarshal(paramsRaw, &params); err != nil {
+		return
+	}
+
+	toolName, toolInput := method, appServerJSON(params)
+	switch method {
+	case "item/commandExecution/requestApproval":
+		toolName = "Bash"
+		if cmd, _ := params["command"].(string); cmd != "" {
+			toolInput = cmd
+			if cwd, _ := params["cwd"].(string); cwd != "" {
+				toolInput += "\n(in " + cwd + ")"
+			}
+		}
+	case "item/fileChange/requestApproval":
+		toolName = "Patch"
+		if reason, _ := params["reason"].(string); reason != "" {
+			toolInput = reason
+		}
+	}
+
+	ch := make(chan core.PermissionResult, 1)
+	s.approvalsMu.Lock()
+	s.pendingApprovals[requestID] = ch
+	s.approvalsMu.Unlock()
+
+	s.flushPendingAsThinking()
+	s.emit(core.Event{
+		Type:         core.EventPermissionRequest,
+		RequestID:    requestID,
+		ToolName:     toolName,
+		ToolInput:    toolInput,
+		ToolInputRaw: params,
+	})
+
+	go func() {
+		timer := time.NewTimer(5 * time.Minute)
+		defer timer.Stop()
+		var result core.PermissionResult
+		select {
+		case result = <-ch:
+		case <-s.ctx.Done():
+			result = core.PermissionResult{Behavior: "deny"}
+		case <-timer.C:
+			result = core.PermissionResult{Behavior: "deny"}
+		}
+		s.approvalsMu.Lock()
+		delete(s.pendingApprovals, requestID)
+		s.approvalsMu.Unlock()
+
+		decision := "decline"
+		if strings.EqualFold(result.Behavior, "allow") {
+			decision = "accept"
+		}
+		_ = s.writeJSON(map[string]any{
+			"jsonrpc": "2.0", "id": rawID,
+			"result": map[string]any{"decision": decision},
+		})
+	}()
+}
+
+func (s *appServerSession) handlePermissionsApproval(rawID json.RawMessage, paramsRaw json.RawMessage) {
+	requestID := string(rawID)
+	var params map[string]any
+	if err := json.Unmarshal(paramsRaw, &params); err != nil {
+		return
+	}
+
+	ch := make(chan core.PermissionResult, 1)
+	s.approvalsMu.Lock()
+	s.pendingApprovals[requestID] = ch
+	s.approvalsMu.Unlock()
+
+	s.flushPendingAsThinking()
+	s.emit(core.Event{
+		Type:         core.EventPermissionRequest,
+		RequestID:    requestID,
+		ToolName:     "Permissions",
+		ToolInput:    appServerJSON(params),
+		ToolInputRaw: params,
+	})
+
+	go func() {
+		timer := time.NewTimer(5 * time.Minute)
+		defer timer.Stop()
+		var result core.PermissionResult
+		select {
+		case result = <-ch:
+		case <-s.ctx.Done():
+			result = core.PermissionResult{Behavior: "deny"}
+		case <-timer.C:
+			result = core.PermissionResult{Behavior: "deny"}
+		}
+		s.approvalsMu.Lock()
+		delete(s.pendingApprovals, requestID)
+		s.approvalsMu.Unlock()
+
+		if strings.EqualFold(result.Behavior, "allow") {
+			perms := params["permissions"]
+			if perms == nil {
+				perms = map[string]any{}
+			}
+			_ = s.writeJSON(map[string]any{
+				"jsonrpc": "2.0", "id": rawID,
+				"result": map[string]any{"permissions": perms, "scope": "turn"},
+			})
+		} else {
+			_ = s.writeJSON(map[string]any{
+				"jsonrpc": "2.0", "id": rawID,
+				"result": map[string]any{"permissions": map[string]any{}},
+			})
+		}
+	}()
+}
+
+func (s *appServerSession) handleDynamicToolCall(rawID json.RawMessage, paramsRaw json.RawMessage) {
+	_ = s.writeJSON(map[string]any{
+		"jsonrpc": "2.0", "id": rawID,
+		"result": map[string]any{
+			"success":      false,
+			"contentItems": []map[string]any{{"type": "inputText", "text": "tool not available on this client"}},
+		},
+	})
+}
+
+func (s *appServerSession) rejectPendingApprovals(err error) {
+	s.approvalsMu.Lock()
+	defer s.approvalsMu.Unlock()
+	for id, ch := range s.pendingApprovals {
+		delete(s.pendingApprovals, id)
+		select {
+		case ch <- core.PermissionResult{Behavior: "deny"}:
+		default:
+		}
+	}
 }
 
 func (s *appServerSession) Events() <-chan core.Event {
@@ -584,22 +758,32 @@ func (s *appServerSession) readLoop(r io.Reader) {
 			continue
 		}
 
-		if _, ok := probe["id"]; ok {
+		_, hasID := probe["id"]
+		_, hasMethod := probe["method"]
+
+		switch {
+		case hasID && !hasMethod:
+			// Response to one of our requests.
 			var resp rpcResponseEnvelope
 			if err := json.Unmarshal(data, &resp); err != nil {
 				slog.Debug("codex app-server: bad response envelope", "error", err)
 				continue
 			}
 			s.handleResponse(resp)
-			continue
-		}
 
-		var notif rpcNotificationEnvelope
-		if err := json.Unmarshal(data, &notif); err != nil {
-			slog.Debug("codex app-server: bad notification envelope", "error", err)
-			continue
+		case hasID && hasMethod:
+			// Server-initiated request that requires a response (e.g. approval).
+			s.handleServerRequest(probe)
+
+		default:
+			// Notification (no id).
+			var notif rpcNotificationEnvelope
+			if err := json.Unmarshal(data, &notif); err != nil {
+				slog.Debug("codex app-server: bad notification envelope", "error", err)
+				continue
+			}
+			s.handleNotification(notif.Method, notif.Params)
 		}
-		s.handleNotification(notif.Method, notif.Params)
 	}
 
 	err := scanner.Err()
@@ -614,11 +798,13 @@ func (s *appServerSession) readLoop(r io.Reader) {
 		}
 		s.alive.Store(false)
 		s.rejectPending(err)
+		s.rejectPendingApprovals(err)
 		return
 	}
 
 	s.alive.Store(false)
 	s.rejectPending(io.EOF)
+	s.rejectPendingApprovals(io.EOF)
 }
 
 func (s *appServerSession) stderrLoop(r io.Reader) {
@@ -708,12 +894,19 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 	case "turn/completed":
 		var notif turnNotification
 		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
-			s.flushPendingAsText()
-			s.emit(core.Event{
-				Type:      core.EventResult,
-				SessionID: s.CurrentSessionID(),
-				Done:      true,
-			})
+			s.completeTurn()
+		}
+
+	case "thread/status/changed":
+		var notif struct {
+			ThreadID string `json:"threadId"`
+			Status   struct {
+				Type string `json:"type"`
+			} `json:"status"`
+		}
+		if err := json.Unmarshal(paramsRaw, &notif); err == nil && notif.Status.Type == "idle" {
+			// In codex 0.125+, thread going idle signals turn completion.
+			s.completeTurn()
 		}
 
 	case "account/rateLimits/updated":
@@ -1081,6 +1274,18 @@ func rpcIDToInt64(v any) (int64, bool) {
 		return i, err == nil
 	}
 	return 0, false
+}
+
+func (s *appServerSession) completeTurn() {
+	s.stateMu.Lock()
+	if s.currentTurn == "" {
+		s.stateMu.Unlock()
+		return
+	}
+	s.currentTurn = ""
+	s.stateMu.Unlock()
+	s.flushPendingAsText()
+	s.emit(core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true})
 }
 
 func (s *appServerSession) flushPendingAsThinking() {
