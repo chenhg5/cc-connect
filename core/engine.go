@@ -199,16 +199,16 @@ type Engine struct {
 	userRoles    *UserRoleManager // nil = legacy mode (no per-user policies)
 	userRolesMu  sync.RWMutex     // protects userRoles, disabledCmds, and adminFrom
 
-	rateLimiter      *RateLimiter
-	outgoingRL       *OutgoingRateLimiter
-	streamPreview    StreamPreviewCfg
-	references       ReferenceRenderCfg
-	relayManager     *RelayManager
-	eventIdleTimeout time.Duration
+	rateLimiter       *RateLimiter
+	outgoingRL        *OutgoingRateLimiter
+	streamPreview     StreamPreviewCfg
+	references        ReferenceRenderCfg
+	relayManager      *RelayManager
+	eventIdleTimeout  time.Duration
 	maxQueuedMessages int
-	dirHistory       *DirHistory
-	baseWorkDir      string
-	projectState     *ProjectStateStore
+	dirHistory        *DirHistory
+	baseWorkDir       string
+	projectState      *ProjectStateStore
 
 	// Auto-compress settings
 	autoCompressEnabled   bool
@@ -406,7 +406,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		streamPreview:         DefaultStreamPreviewCfg(),
 		references:            DefaultReferenceRenderCfg(),
 		eventIdleTimeout:      defaultEventIdleTimeout,
-		maxQueuedMessages:    defaultMaxQueuedMessages,
+		maxQueuedMessages:     defaultMaxQueuedMessages,
 		showContextIndicator:  true,
 	}
 
@@ -3025,7 +3025,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 
 				if fullResponse != "" {
 					if e.showContextIndicator && event.InputTokens >= 100 {
-						fullResponse += contextIndicator(event.InputTokens)
+						fullResponse += contextIndicator(event.InputTokens, event.ContextWindow)
 					}
 					for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
 						e.send(p, replyCtx, chunk)
@@ -3599,7 +3599,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 			if e.showContextIndicator && !isSilent {
 				if sdkPlausible {
-					cleanResponse += contextIndicator(event.InputTokens)
+					cleanResponse += contextIndicator(event.InputTokens, event.ContextWindow)
 				} else if selfPct > 0 {
 					cleanResponse += fmt.Sprintf("\n[ctx: ~%d%%]", selfPct)
 				}
@@ -12809,14 +12809,21 @@ func gitClone(repoURL, dest string) error {
 
 // ── Context usage indicator ──────────────────────────────────
 
-const modelContextWindow = 200_000 // generic fallback window for heuristic context estimates
+// defaultContextWindow is the fallback window used when the agent event
+// doesn't carry a model-specific size (e.g. older Codex/Claude events).
+const defaultContextWindow = 200_000
 
-// contextIndicator returns a suffix like "\n[ctx: ~42%]" based on SDK-reported input tokens.
-func contextIndicator(inputTokens int) string {
+// contextIndicator returns a suffix like "\n[ctx: ~42%]" based on SDK-reported
+// input tokens. The window comes from the agent event when available, so 1M
+// variants render correctly without a central model table in the engine.
+func contextIndicator(inputTokens, window int) string {
 	if inputTokens <= 0 {
 		return ""
 	}
-	pct := inputTokens * 100 / modelContextWindow
+	if window <= 0 {
+		window = defaultContextWindow
+	}
+	pct := inputTokens * 100 / window
 	if pct > 100 {
 		pct = 100
 	}
