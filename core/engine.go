@@ -4516,6 +4516,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// it for the reply quote. Without this reassignment, msg2's
 				// reply would quote msg1's bubble.
 				replyCtx = queued.replyCtx
+				// Rich-mode per-turn state must reset too — otherwise EventText for
+				// the queued message would StreamRichCardText against the previous
+				// turn's cardID, overwriting that card's body with the new turn's
+				// content. Same risk for partialText/toolSteps leaking across turns.
+				cardMessageID = nil
+				toolSteps = nil
+				partialText = ""
+				lastRichCardUpdate = time.Time{}
+				lastRichCardLen = 0
 				queuedRenderer := func(content string) string {
 					return e.renderOutgoingContentForWorkspace(queued.platform, content, workspaceDir)
 				}
