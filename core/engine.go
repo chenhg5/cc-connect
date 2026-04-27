@@ -3736,6 +3736,19 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// preventing a stray done_emoji push.
 			if isSilent {
 				sp.discard()
+				// Rich mode: cardMessageID is tracked independently of sp.previewMsgID,
+				// so sp.discard() doesn't reach it. Without this cleanup the rich card
+				// would stay frozen in "Working" / "Thinking" header state forever
+				// (no Done flip, no Patch). Delete the message so NO_REPLY truly leaves
+				// no trace.
+				if hasRichCard && cardMessageID != nil {
+					if cleaner, ok := p.(PreviewCleaner); ok {
+						if err := cleaner.DeletePreviewMessage(e.ctx, cardMessageID); err != nil {
+							slog.Debug("rich card: failed to delete card on silent reply", "platform", p.Name(), "error", err)
+						}
+					}
+					cardMessageID = nil
+				}
 				slog.Info("silent reply suppressed", "session", session.ID)
 			} else if hasRichCard {
 				parts := []string{fullResponse}
@@ -3944,7 +3957,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// "doing" emoji is removed first.
 			// Skip for silent (NO_REPLY) turns — the user should not know
 			// the agent processed anything.
-			if !isSilent {
+			// Skip for rich mode — the rich card's status header already flips
+			// to green "Done" on EventResult, making the emoji redundant noise.
+			if !isSilent && !hasRichCard {
 				if doneTI, ok := p.(TypingIndicatorDone); ok {
 					doneReaction = func() { doneTI.AddDoneReaction(replyCtx) }
 				}
