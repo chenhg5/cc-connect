@@ -479,6 +479,20 @@ type maxMessage struct {
 	Recipient maxRecipient `json:"recipient"`
 	Timestamp int64        `json:"timestamp"`
 	Body      maxBody      `json:"body"`
+	// Link is set when the message is a forward or a reply. For forwarded
+	// messages the actual content (text + attachments) lives inside Link.Message,
+	// while Body may be empty. We surface those attachments to the agent.
+	Link *maxLink `json:"link,omitempty"`
+}
+
+// maxLink mirrors the LinkedMessage object from MAX bot API. Type is "forward"
+// or "reply"; for forwarded messages the inner Message contains the original
+// text and attachments.
+type maxLink struct {
+	Type    string  `json:"type"`
+	Sender  maxUser `json:"sender,omitempty"`
+	ChatID  int64   `json:"chat_id,omitempty"`
+	Message maxBody `json:"message"`
 }
 
 type maxBody struct {
@@ -633,6 +647,22 @@ func (p *Platform) handleMessage(ctx context.Context, msg *maxMessage) {
 
 	text := msg.Body.Text
 	atts := msg.Body.Attachments
+
+	// Forwarded message: text and attachments live inside link.message.
+	// We merge them into the visible payload so the agent sees the file.
+	// For replies (link.type == "reply") we keep the user's own text/atts
+	// untouched — the quoted message is just context.
+	if msg.Link != nil && msg.Link.Type == "forward" {
+		if text == "" {
+			text = msg.Link.Message.Text
+		} else if msg.Link.Message.Text != "" {
+			text = text + "\n\n[forwarded] " + msg.Link.Message.Text
+		}
+		if len(msg.Link.Message.Attachments) > 0 {
+			atts = append(atts, msg.Link.Message.Attachments...)
+		}
+	}
+
 	if text == "" && len(atts) == 0 {
 		return
 	}
@@ -955,6 +985,41 @@ func (p *Platform) handleCallback(ctx context.Context, cb *maxCallback) {
 
 // --- HTTP helpers ---
 
+// normalizeLineBreaks converts single newlines to markdown hard breaks
+// (two trailing spaces + \n). MAX markdown parser renders a bare \n as
+// literal `'n` on the client; CommonMark spec treats a single \n as just
+// whitespace, so we explicitly mark intended line breaks. Paragraph breaks
+// (consecutive newlines) are preserved, and fenced code blocks are left
+// untouched so code indentation stays intact.
+func normalizeLineBreaks(s string) string {
+	if !strings.Contains(s, "\n") {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	var sb strings.Builder
+	sb.Grow(len(s) + len(lines)*2)
+	inCodeBlock := false
+	for i, line := range lines {
+		isFence := strings.HasPrefix(strings.TrimSpace(line), "```")
+		if isFence {
+			inCodeBlock = !inCodeBlock
+		}
+		sb.WriteString(line)
+		if i < len(lines)-1 {
+			next := lines[i+1]
+			// Do not add hard break when: inside code block, on a fence
+			// line, empty line, empty next line, or already has trailing
+			// double-space (hard break) / backslash (escaped break).
+			if !inCodeBlock && !isFence && line != "" && next != "" &&
+				!strings.HasSuffix(line, "  ") && !strings.HasSuffix(line, `\`) {
+				sb.WriteString("  ")
+			}
+			sb.WriteByte('\n')
+		}
+	}
+	return sb.String()
+}
+
 func (p *Platform) sendText(ctx context.Context, replyCtx any, content string, buttons [][]maxButton) error {
 	rctx, ok := replyCtx.(replyContext)
 	if !ok {
@@ -969,7 +1034,10 @@ func (p *Platform) sendText(ctx context.Context, replyCtx any, content string, b
 		}}
 	}
 
-	const maxLen = 4000
+	content = normalizeLineBreaks(content)
+	// MAX API caps body around 4000 bytes; 1500 runes ≈ 3000 bytes of Cyrillic UTF-8
+	// (or 1500 bytes of ASCII), staying safely under the limit for any script.
+	const maxLen = 1500
 	chunks := splitMessage(content, maxLen)
 	for i, chunk := range chunks {
 		chunkBody := maxSendBody{Text: chunk, Format: "markdown"}
@@ -1071,35 +1139,69 @@ func (p *Platform) setAuth(req *http.Request) {
 	req.Header.Set("Authorization", p.token)
 }
 
+// splitMessage chunks long text under maxLen Unicode code points (runes).
+// Counting in runes (not bytes) is critical for non-ASCII content like
+// Cyrillic, where each character is 2 bytes in UTF-8: a byte-based cut
+// can split a multi-byte character mid-sequence and leave the next chunk
+// with a malformed leading byte that the MAX server may reject.
+//
+// Cut preference:
+//  1. paragraph break (consecutive \n\n) — keeps logical blocks together
+//  2. single newline
+//  3. word boundary (space)
+//  4. exact maxLen — rune-safe by construction
+//
+// minCut prevents tiny chunks if a low-position newline is encountered.
 func splitMessage(text string, maxLen int) []string {
-	if len(text) <= maxLen {
+	runes := []rune(text)
+	if len(runes) <= maxLen {
 		return []string{text}
 	}
+
 	var chunks []string
-	for len(text) > 0 {
-		if len(text) <= maxLen {
-			chunks = append(chunks, text)
+	for len(runes) > 0 {
+		if len(runes) <= maxLen {
+			chunks = append(chunks, string(runes))
 			break
 		}
+
 		cut := maxLen
-		if nl := lastNewline(text[:maxLen]); nl > 100 {
-			cut = nl
+		minCut := maxLen / 4
+
+		// 1. paragraph break
+		for i := maxLen - 1; i > minCut; i-- {
+			if runes[i] == '\n' && i+1 < len(runes) && runes[i+1] == '\n' {
+				cut = i
+				break
+			}
 		}
-		chunks = append(chunks, text[:cut])
-		text = text[cut:]
-		// trim leading newlines
-		for len(text) > 0 && text[0] == '\n' {
-			text = text[1:]
+		// 2. single newline
+		if cut == maxLen {
+			for i := maxLen - 1; i > minCut; i-- {
+				if runes[i] == '\n' {
+					cut = i
+					break
+				}
+			}
+		}
+		// 3. word boundary
+		if cut == maxLen {
+			for i := maxLen - 1; i > maxLen/2; i-- {
+				if runes[i] == ' ' {
+					cut = i
+					break
+				}
+			}
+		}
+		// 4. fall through: cut at maxLen (rune-safe, never splits a code point)
+
+		chunks = append(chunks, string(runes[:cut]))
+		runes = runes[cut:]
+
+		// trim leading whitespace on next chunk
+		for len(runes) > 0 && (runes[0] == '\n' || runes[0] == ' ') {
+			runes = runes[1:]
 		}
 	}
 	return chunks
-}
-
-func lastNewline(s string) int {
-	for i := len(s) - 1; i >= 0; i-- {
-		if s[i] == '\n' {
-			return i
-		}
-	}
-	return -1
 }
