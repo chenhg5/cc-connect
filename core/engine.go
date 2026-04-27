@@ -5841,10 +5841,16 @@ func buildClaudeStatusLineFooter(model, effort string, usage *ContextUsage) stri
 }
 
 // formatStatusTokenCount renders an integer token count compactly.
-//   < 1000      -> "168"
-//   < 1_000_000 -> "40.8k"
-//   else        -> "1.2M"
+//
+//	< 1000      -> "168"
+//	< 1_000_000 -> "40.8k"
+//	else        -> "1.2M"
+//
+// Negative inputs clamp to zero (defensive against bad token deltas).
 func formatStatusTokenCount(n int) string {
+	if n < 0 {
+		n = 0
+	}
 	switch {
 	case n < 1000:
 		return fmt.Sprintf("%d", n)
@@ -6185,18 +6191,6 @@ func (e *Engine) buildClaudeStatusLineFooter(agent Agent, session AgentSession, 
 	default:
 		return ""
 	}
-}
-
-// formatStatusTokenCount renders a token count the way CCD's statusline
-// does: values >= 1000 are shown with one decimal and a "k" suffix.
-func formatStatusTokenCount(n int) string {
-	if n < 0 {
-		n = 0
-	}
-	if n >= 1000 {
-		return fmt.Sprintf("%.1fk", float64(n)/1000)
-	}
-	return strconv.Itoa(n)
 }
 
 // sendChunksWithStatusFooter splits body across maxPlatformMessageLen and sends
