@@ -206,13 +206,15 @@ type streamEvent struct {
 	SessionID string         `json:"session_id"`
 	Done      bool           `json:"done"`
 	Message   *streamMessage `json:"message"`
+	Result    string         `json:"result"` // qodercli 0.2.x: final text in top-level result field
 }
 
 type streamMessage struct {
-	ID      string          `json:"id"`
-	Role    string          `json:"role"`
-	Status  string          `json:"status"`
-	Content json.RawMessage `json:"content"`
+	ID         string          `json:"id"`
+	Role       string          `json:"role"`
+	Status     string          `json:"status"`
+	StopReason string          `json:"stop_reason"`
+	Content    json.RawMessage `json:"content"`
 }
 
 type contentItem struct {
@@ -249,8 +251,12 @@ func (qs *qoderSession) handleAssistant(ev *streamEvent) {
 		return
 	}
 
-	// Only process "finished" status to avoid duplicates from "tool_calling" status
-	if ev.Message.Status != "finished" {
+	// qodercli <0.2: uses Status="finished" to indicate final message
+	// qodercli 0.2.x: Status is empty/null, uses StopReason="end_turn"/"tool_use"
+	isFinished := ev.Message.Status == "finished" ||
+		ev.Message.StopReason == "end_turn" ||
+		ev.Message.StopReason == "tool_use"
+	if !isFinished {
 		return
 	}
 
@@ -285,6 +291,8 @@ func (qs *qoderSession) handleAssistant(ev *streamEvent) {
 
 func (qs *qoderSession) handleResult(ev *streamEvent) {
 	var finalText string
+
+	// qodercli <0.2: result text is in message.content[].text
 	if ev.Message != nil {
 		var items []contentItem
 		if err := json.Unmarshal(ev.Message.Content, &items); err == nil {
@@ -294,6 +302,11 @@ func (qs *qoderSession) handleResult(ev *streamEvent) {
 				}
 			}
 		}
+	}
+
+	// qodercli 0.2.x: result text is in top-level "result" field
+	if finalText == "" && ev.Result != "" {
+		finalText = ev.Result
 	}
 
 	evt := core.Event{Type: core.EventResult, Content: finalText, SessionID: qs.CurrentSessionID(), Done: true}
