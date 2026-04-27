@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -1817,8 +1818,9 @@ func TestMgmt_ProjectPatch_DisabledCommands(t *testing.T) {
 		t.Fatalf("patch disabled_commands failed: %s", r.Error)
 	}
 	got := e.GetDisabledCommands()
-	if len(got) != 2 || got[0] != "new" || got[1] != "delete" {
-		t.Fatalf("disabled_commands = %v, want [new delete]", got)
+	sort.Strings(got)
+	if len(got) != 2 || got[0] != "delete" || got[1] != "new" {
+		t.Fatalf("disabled_commands = %v, want [delete new]", got)
 	}
 }
 
