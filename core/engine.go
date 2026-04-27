@@ -3212,6 +3212,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				"silent", isSilent,
 			)
 
+			normalizedBaseResponse := strings.TrimSpace(baseResponse)
+			state.mu.Lock()
+			suppressDuplicate := normalizedBaseResponse != "" && normalizedBaseResponse == state.sideText
+			state.sideText = ""
+			state.mu.Unlock()
+
 			replyStart := time.Now()
 
 			// --- StreamingCard path ---
