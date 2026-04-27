@@ -1035,7 +1035,7 @@ func TestProcessInteractiveEvents_AppendsReplyFooterWhenEnabled(t *testing.T) {
 	if len(sent) != 1 {
 		t.Fatalf("sent = %#v, want one final reply", sent)
 	}
-	want := "answer\n\n*gpt-5.4 · xhigh · 100% left · ~/codes/cc-connect*"
+	want := "answer\n\n---\n*gpt-5.4 · xhigh · 100% left · ~/codes/cc-connect*"
 	if sent[0] != want {
 		t.Fatalf("final reply = %q, want %q", sent[0], want)
 	}
@@ -1150,7 +1150,7 @@ func TestProcessInteractiveEvents_ReplyFooterPrefersSessionRuntimeState(t *testi
 	if len(sent) != 1 {
 		t.Fatalf("sent = %#v, want one final reply", sent)
 	}
-	want := "answer\n\n*gpt-5.4 · xhigh · 31% left · ~/codes/cc-connect*"
+	want := "answer\n\n---\n*gpt-5.4 · xhigh · 31% left · ~/codes/cc-connect*"
 	if sent[0] != want {
 		t.Fatalf("final reply = %q, want %q", sent[0], want)
 	}

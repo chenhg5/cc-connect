@@ -43,6 +43,16 @@ type claudeSession struct {
 	done            chan struct{}
 	alive           atomic.Bool
 
+	// activeModel stores the model id reported by the CLI's init event (e.g.
+	// "claude-opus-4-7[1m]"). It may be empty if the init event hasn't
+	// carried a model field yet; callers should fall back to the Agent's
+	// configured model.
+	activeModel atomic.Value // stores string
+
+	// usageMu guards lastUsage. Populated from the most recent result event.
+	usageMu   sync.Mutex
+	lastUsage *core.ContextUsage
+
 	// gracefulStopTimeout is how long Close() waits for a clean exit
 	// (stdin close → Stop hooks → process exit) before escalating to
 	// SIGTERM and then SIGKILL. Default: 120s to match claude-mem's
@@ -330,6 +340,9 @@ func (cs *claudeSession) handleReadLoopLine(line string) {
 }
 
 func (cs *claudeSession) handleSystem(raw map[string]any) {
+	if model, ok := raw["model"].(string); ok && model != "" {
+		cs.activeModel.Store(model)
+	}
 	if sid, ok := raw["session_id"].(string); ok && sid != "" {
 		cs.sessionID.Store(sid)
 		evt := core.Event{Type: core.EventText, SessionID: sid}
@@ -341,11 +354,69 @@ func (cs *claudeSession) handleSystem(raw map[string]any) {
 	}
 }
 
+// parseClaudeUsage extracts the four token counts Claude reports per API call.
+// Missing fields default to zero.
+func parseClaudeUsage(usage map[string]any) (input, output, cacheCreation, cacheRead int) {
+	if v, ok := usage["input_tokens"].(float64); ok {
+		input = int(v)
+	}
+	if v, ok := usage["output_tokens"].(float64); ok {
+		output = int(v)
+	}
+	if v, ok := usage["cache_creation_input_tokens"].(float64); ok {
+		cacheCreation = int(v)
+	}
+	if v, ok := usage["cache_read_input_tokens"].(float64); ok {
+		cacheRead = int(v)
+	}
+	return
+}
+
 func (cs *claudeSession) handleAssistant(raw map[string]any) {
 	msg, ok := raw["message"].(map[string]any)
 	if !ok {
 		return
 	}
+
+	// Capture per-sub-call input/cache values to drive the reply footer's
+	// "ctx N%". Each tool-using turn produces several API sub-calls (one
+	// per model turn between tool calls); the result event aggregates
+	// usage across all of them, which sums cache_read_input_tokens — a
+	// value that legitimately exceeds the context window once tool calls
+	// recycle the same cached prefix many times. Using the LAST assistant
+	// event's usage instead gives us the prompt size of the final
+	// inference call, which is what "context used right now" actually
+	// means.
+	//
+	// Note: `output_tokens` on stream-json assistant events is a placeholder
+	// (typically 1), not the real per-call output. The accurate
+	// turn-total output count only appears on the result event, so we
+	// preserve any prior OutputTokens here and let handleResult populate
+	// the final value.
+	if usageRaw, ok := msg["usage"].(map[string]any); ok {
+		input, _, cc, cr := parseClaudeUsage(usageRaw)
+		used := input + cc + cr
+		if used > 0 {
+			model := cs.GetModel()
+			window := claudeContextWindow(model)
+			cs.usageMu.Lock()
+			prevOutput := 0
+			if cs.lastUsage != nil {
+				prevOutput = cs.lastUsage.OutputTokens
+			}
+			cs.lastUsage = &core.ContextUsage{
+				UsedTokens:               used,
+				TotalTokens:              used + prevOutput,
+				InputTokens:              input,
+				CachedInputTokens:        cr,
+				CacheCreationInputTokens: cc,
+				OutputTokens:             prevOutput,
+				ContextWindow:            window,
+			}
+			cs.usageMu.Unlock()
+		}
+	}
+
 	contentArr, ok := msg["content"].([]any)
 	if !ok {
 		return
@@ -425,23 +496,41 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 		cs.sessionID.Store(sid)
 	}
 
-	var inputTokens, outputTokens int
+	// Aggregated usage across all sub-calls in this turn — used for billing-
+	// style reporting in the EventResult event (slog turn-complete log etc.).
+	// We do NOT pull input/cache values into cs.lastUsage from here:
+	// cache_read_input_tokens is summed across every sub-call that hit the
+	// cached prefix, so on long agentic turns it vastly exceeds the model
+	// context window. The per-sub-call usage captured in handleAssistant
+	// gives a faithful "context used right now" snapshot.
+	//
+	// We DO use the result's output_tokens to update lastUsage.OutputTokens
+	// because output is additive (each sub-call's tokens are real new
+	// tokens, never recycled) and the per-assistant-event output_tokens in
+	// stream-json is a placeholder (typically 1). The result is the only
+	// authoritative source of total tokens generated for this turn.
+	var inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens int
 	if usage, ok := raw["usage"].(map[string]any); ok {
-		if v, ok := usage["input_tokens"].(float64); ok {
-			inputTokens = int(v)
+		inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens = parseClaudeUsage(usage)
+	}
+	if outputTokens > 0 {
+		cs.usageMu.Lock()
+		if cs.lastUsage != nil {
+			cs.lastUsage.OutputTokens = outputTokens
+			cs.lastUsage.TotalTokens = cs.lastUsage.UsedTokens + outputTokens
 		}
-		if v, ok := usage["output_tokens"].(float64); ok {
-			outputTokens = int(v)
-		}
+		cs.usageMu.Unlock()
 	}
 
 	evt := core.Event{
-		Type:         core.EventResult,
-		Content:      content,
-		SessionID:    cs.CurrentSessionID(),
-		Done:         true,
-		InputTokens:  inputTokens,
-		OutputTokens: outputTokens,
+		Type:                     core.EventResult,
+		Content:                  content,
+		SessionID:                cs.CurrentSessionID(),
+		Done:                     true,
+		InputTokens:              inputTokens,
+		OutputTokens:             outputTokens,
+		CacheCreationInputTokens: cacheCreationTokens,
+		CacheReadInputTokens:     cacheReadTokens,
 	}
 	select {
 	case cs.events <- evt:
@@ -685,6 +774,32 @@ func (cs *claudeSession) CurrentSessionID() string {
 	return v
 }
 
+// GetModel returns the model id reported by the CLI's init event (e.g.
+// "claude-opus-4-7[1m]"). Returns "" until the init event has been seen.
+func (cs *claudeSession) GetModel() string {
+	if v, ok := cs.activeModel.Load().(string); ok {
+		return v
+	}
+	return ""
+}
+
+// GetWorkDir returns the working directory this session was started in.
+func (cs *claudeSession) GetWorkDir() string {
+	return cs.workDir
+}
+
+// GetContextUsage returns a snapshot of the most recent per-turn context
+// usage, or nil if no result event has been observed yet.
+func (cs *claudeSession) GetContextUsage() *core.ContextUsage {
+	cs.usageMu.Lock()
+	defer cs.usageMu.Unlock()
+	if cs.lastUsage == nil {
+		return nil
+	}
+	clone := *cs.lastUsage
+	return &clone
+}
+
 func (cs *claudeSession) Alive() bool {
 	return cs.alive.Load()
 }
@@ -762,6 +877,22 @@ func shellJoinArgs(args []string) string {
 		b.WriteByte('\'')
 	}
 	return b.String()
+}
+
+// claudeContextWindow returns the context window size (tokens) that best
+// matches the given Claude model id. Used as a fallback when the stream-json
+// result event does not carry a modelUsage map. The "[1m]" suffix
+// (case-insensitive) signals the 1M-context variants; everything else
+// defaults to the standard 200k window.
+func claudeContextWindow(model string) int {
+	lower := strings.ToLower(strings.TrimSpace(model))
+	if lower == "" {
+		return 200_000
+	}
+	if strings.Contains(lower, "[1m]") {
+		return 1_000_000
+	}
+	return 200_000
 }
 
 // filterEnv returns a copy of env with entries matching the given key removed.

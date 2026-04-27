@@ -162,7 +162,7 @@ func TestStreamPreview_FinishInPlace(t *testing.T) {
 	sp.appendText("Hello World")
 	time.Sleep(100 * time.Millisecond)
 
-	ok := sp.finish("Hello World Final")
+	ok := sp.finish("Hello World Final", "")
 	if !ok {
 		t.Error("finish should return true when preview was active")
 	}
@@ -214,7 +214,7 @@ func TestStreamPreview_FreezeDeletesOnFinish(t *testing.T) {
 	// With degraded recovery, finish attempts UpdateMessage on the degraded
 	// preview. Since mockCleanerPlatform embeds mockUpdaterPlatform,
 	// UpdateMessage succeeds and finish returns true (recovered).
-	ok := sp.finish("Hello World Final")
+	ok := sp.finish("Hello World Final", "")
 	if !ok {
 		t.Error("finish should return true when degraded recovery via UpdateMessage succeeds")
 	}
@@ -271,7 +271,7 @@ func TestStreamPreview_FinishKeepsPreviewWhenPlatformPrefersInPlaceFinalize(t *t
 	sp.appendText("Hello World")
 	time.Sleep(100 * time.Millisecond)
 
-	ok := sp.finish("Hello World Final")
+	ok := sp.finish("Hello World Final", "")
 	if !ok {
 		t.Fatal("finish should return true when platform prefers in-place finalize")
 	}
@@ -286,6 +286,69 @@ func TestStreamPreview_FinishKeepsPreviewWhenPlatformPrefersInPlaceFinalize(t *t
 	}
 	if len(msgs) < 2 || msgs[len(msgs)-1] != "update:Hello World Final" {
 		t.Fatalf("messages = %#v, want final update in place", msgs)
+	}
+}
+
+// mockStatusFooterUpdater is a keep-preview platform that also implements
+// StatusFooterUpdater so we can verify the footer-applying call path.
+type mockStatusFooterUpdater struct {
+	mockKeepPreviewPlatform
+	footerCalls []string // captured "<content>|FOOTER|<footer>" tuples
+}
+
+func (m *mockStatusFooterUpdater) UpdateMessageWithStatusFooter(_ context.Context, _ any, content, footer string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.footerCalls = append(m.footerCalls, content+"|FOOTER|"+footer)
+	m.messages = append(m.messages, "footer:"+content+"|"+footer)
+	m.lastMsg = content
+	return nil
+}
+
+// TestStreamPreview_FinishAppliesFooterEvenWhenBodyUnchanged is the regression
+// test for the bug where a streamPreview finalize with a non-empty
+// statusFooter was short-circuited because finalText matched lastSentText
+// from the prior streaming UpdateMessage. The previous behavior dropped the
+// footer entirely; the fix makes the early-return only kick in when there
+// is no footer to render.
+func TestStreamPreview_FinishAppliesFooterEvenWhenBodyUnchanged(t *testing.T) {
+	mp := &mockStatusFooterUpdater{}
+	cfg := StreamPreviewCfg{
+		Enabled:       true,
+		IntervalMs:    50,
+		MinDeltaChars: 1,
+		MaxChars:      500,
+	}
+
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
+	sp.appendText("Hello World")
+	time.Sleep(100 * time.Millisecond)
+	// Send another chunk so lastSentViaUpdate becomes true (a real
+	// UpdateMessage has been issued).
+	sp.appendText(" more")
+	time.Sleep(100 * time.Millisecond)
+
+	// Now finish with the SAME body that was last streamed but with a
+	// non-empty footer. The old short-circuit would skip the API call and
+	// silently drop the footer.
+	finalBody := "Hello World more"
+	ok := sp.finish(finalBody, "model · ctx 5%\n~/path")
+	if !ok {
+		t.Fatal("finish should return true when footer was applied")
+	}
+
+	mp.mu.Lock()
+	footerCalls := append([]string(nil), mp.footerCalls...)
+	mp.mu.Unlock()
+
+	if len(footerCalls) != 1 {
+		t.Fatalf("expected exactly 1 UpdateMessageWithStatusFooter call, got %d: %#v", len(footerCalls), footerCalls)
+	}
+	if !strings.Contains(footerCalls[0], "model · ctx 5%") || !strings.Contains(footerCalls[0], "~/path") {
+		t.Fatalf("footer call missing expected segments: %q", footerCalls[0])
+	}
+	if !strings.Contains(footerCalls[0], finalBody) {
+		t.Fatalf("footer call missing body: %q", footerCalls[0])
 	}
 }
 
@@ -381,7 +444,7 @@ func TestStreamPreview_AppliesTransform(t *testing.T) {
 	sp.appendText("See /root/code/demo/src/app.ts:42")
 	time.Sleep(100 * time.Millisecond)
 
-	ok := sp.finish("Final /root/code/demo/src/app.ts:42")
+	ok := sp.finish("Final /root/code/demo/src/app.ts:42", "")
 	if !ok {
 		t.Fatal("finish should succeed when preview is active")
 	}
