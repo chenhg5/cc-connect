@@ -4582,10 +4582,15 @@ func buildClaudeStatusLineFooter(model, effort string, usage *ContextUsage) stri
 }
 
 // formatStatusTokenCount renders an integer token count compactly.
+// Negative inputs clamp to 0 (defensive — token counts should never be
+// negative; any caller producing one is reflecting a parser glitch).
 //   < 1000      -> "168"
 //   < 1_000_000 -> "40.8k"
 //   else        -> "1.2M"
 func formatStatusTokenCount(n int) string {
+	if n < 0 {
+		n = 0
+	}
 	switch {
 	case n < 1000:
 		return fmt.Sprintf("%d", n)
