@@ -4272,13 +4272,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// it via appendReplyFooter as a fallback. The default
 			// (non-CCD) reply footer keeps its existing inline behavior since
 			// it's a single short line that does not benefit from a separate
-			// card element.
+			// card element. In rich mode, the inline-append fallback is
+			// suppressed — the rich card renders an equivalent statusFooter
+			// through BuildRichCard, so re-appending the legacy footer here
+			// would double-print model/ctx/workdir into the card body.
 			var statusFooter string
 			if !isSilent {
 				if status := e.buildClaudeStatusLineFooter(replyAgent, state.agentSession, workspaceDir); status != "" {
 					statusFooter = status
-				} else if footer := e.buildReplyFooter(replyAgent, state.agentSession, workspaceDir, replyFooterContextText(replyFooterSessionContextUsage(state.agentSession), e.i18n)); footer != "" {
-					cleanResponse = appendReplyFooter(cleanResponse, footer)
+				} else if !hasRichCard {
+					if footer := e.buildReplyFooter(replyAgent, state.agentSession, workspaceDir, replyFooterContextText(replyFooterSessionContextUsage(state.agentSession), e.i18n)); footer != "" {
+						cleanResponse = appendReplyFooter(cleanResponse, footer)
+					}
 				}
 			}
 			fullResponse = cleanResponse
