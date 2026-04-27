@@ -2710,10 +2710,18 @@ func isThreadSessionKey(sessionKey string) bool {
 // feishuPreviewHandle stores the message ID for an editable preview message.
 // Card 2.0 path needs mu/status/lastContent to let SetPreviewStatus patch
 // the header color without re-rendering the whole card.
+//
+// Card 2.0 + cardkit-v1 streaming text path additionally needs cardID and a
+// monotonically increasing sequence counter. cardID is empty when the
+// preview was created via the legacy inline-card-JSON path (Create Card
+// Entity failed → fallback), in which case streamRichCardText must NOT be
+// called and the engine falls back to full-card Patch via UpdateMessage.
 type feishuPreviewHandle struct {
 	mu          sync.Mutex
 	messageID   string
 	chatID      string
+	cardID      string // cardkit-v1 entity id (empty = no streaming text path)
+	sequence    int    // cardkit-v1 streaming text monotonic counter (++ before use; first call = 1)
 	status      core.CardStatus
 	lastContent string
 }
@@ -3158,6 +3166,20 @@ func buildPreviewCardJSON(content string) string {
 // SendPreviewStart sends a new card message and returns a handle for subsequent edits.
 // Using card (interactive) type for both preview and final message so updates
 // are in-place without needing to delete and resend.
+//
+// Card 2.0 + cardkit-v1 path (when content is a rich card JSON and we're NOT
+// in thread/reply mode): runs a two-step flow that captures a card_id usable
+// for streaming text updates:
+//
+//  1. POST /open-apis/cardkit/v1/cards with {type:"card_json", data:<cardJSON>}
+//     → returns card_id (numeric string, 14-day TTL).
+//  2. Im.Message.Create with content {"type":"card","data":{"card_id":"..."}}
+//     → returns message_id; both ids are stored on feishuPreviewHandle.
+//
+// If step (1) fails OR we're in thread/reply mode (Reply API doesn't accept
+// card_id reference), we fall back to the inline-card-JSON path. The handle's
+// cardID stays empty in that case and the engine routes EventText through the
+// full-card Patch path (= original #657 behavior, no typewriter).
 func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content string) (any, error) {
 	if !p.useInteractiveCard {
 		return nil, core.ErrNotSupported
@@ -3175,17 +3197,34 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 
 	// Card 2.0 path: engine passes a pre-built rich card JSON; pass it through.
 	var cardJSON string
+	var sendContent string // what goes into the Im.Message.Create content field
+	var cardID string      // cardkit-v1 entity id (empty = no streaming text path)
 	if isCardJSON(content) {
 		cardJSON = content
+		// Try cardkit-v1 two-step flow (only for non-thread/reply path; Reply
+		// API doesn't document card_id reference support).
+		if !p.shouldUseThreadOrReplyAPI(rc) {
+			if id, err := p.createCardEntity(ctx, cardJSON); err == nil {
+				cardID = id
+				sendContent = fmt.Sprintf(`{"type":"card","data":{"card_id":"%s"}}`, id)
+			} else {
+				slog.Debug(p.tag()+": create card entity failed, falling back to inline card JSON",
+					"error", err)
+				sendContent = cardJSON
+			}
+		} else {
+			sendContent = cardJSON
+		}
 	} else {
 		cardJSON = buildPreviewCardJSON(content)
+		sendContent = cardJSON
 	}
 
 	var msgID string
 	if p.shouldUseThreadOrReplyAPI(rc) {
 		req := larkim.NewReplyMessageReqBuilder().
 			MessageId(rc.messageID).
-			Body(p.buildReplyMessageReqBody(rc, larkim.MsgTypeInteractive, cardJSON)).
+			Body(p.buildReplyMessageReqBody(rc, larkim.MsgTypeInteractive, sendContent)).
 			Build()
 		var resp *larkim.ReplyMessageResp
 		if err := p.withTransientRetry(ctx, "send preview", func() error {
@@ -3212,7 +3251,7 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 			Body(larkim.NewCreateMessageReqBodyBuilder().
 				ReceiveId(chatID).
 				MsgType(larkim.MsgTypeInteractive).
-				Content(cardJSON).
+				Content(sendContent).
 				Build()).
 			Build()
 		var resp *larkim.CreateMessageResp
@@ -3240,7 +3279,106 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 		return nil, fmt.Errorf("%s: send preview: no message ID returned", p.tag())
 	}
 
-	return &feishuPreviewHandle{messageID: msgID, chatID: chatID}, nil
+	return &feishuPreviewHandle{messageID: msgID, chatID: chatID, cardID: cardID}, nil
+}
+
+// createCardEntity calls the cardkit-v1 Create Card Entity API
+// (POST /open-apis/cardkit/v1/cards) and returns the card_id.
+//
+// The card_id is required to drive the streaming text update path
+// (PUT /open-apis/cardkit/v1/cards/{card_id}/elements/{element_id}/content).
+// If this call fails the caller should fall back to inline card JSON via the
+// regular Im.Message.Create path; the rich card will still render but without
+// native typewriter streaming.
+func (p *Platform) createCardEntity(ctx context.Context, cardJSON string) (string, error) {
+	body := map[string]any{
+		"type": "card_json",
+		"data": cardJSON,
+	}
+	var apiResp *larkcore.ApiResp
+	if err := p.withFreshTenantAccessTokenRetry(ctx, "create card entity", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+		var err error
+		apiResp, err = client.Post(ctx, "/open-apis/cardkit/v1/cards", body, larkcore.AccessTokenTypeTenant, options...)
+		return err
+	}); err != nil {
+		return "", fmt.Errorf("%s: create card entity: %w", p.tag(), err)
+	}
+	if apiResp == nil || apiResp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("%s: create card entity: HTTP status %d", p.tag(), apiResp.StatusCode)
+	}
+	var resp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			CardID string `json:"card_id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(apiResp.RawBody, &resp); err != nil {
+		return "", fmt.Errorf("%s: create card entity: parse response: %w", p.tag(), err)
+	}
+	if resp.Code != 0 {
+		return "", fmt.Errorf("%s: create card entity: code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+	}
+	if resp.Data.CardID == "" {
+		return "", fmt.Errorf("%s: create card entity: empty card_id in response", p.tag())
+	}
+	return resp.Data.CardID, nil
+}
+
+// StreamRichCardText implements core.RichCardTextStreamer. Pushes the latest
+// fullText to the rich card's main_text element via cardkit-v1 streaming text
+// update API. The Lark client renders the increment between consecutive PUTs
+// with a typewriter animation (controlled by the card's streaming_config).
+//
+// Returns ErrNotSupported when the handle has no cardID (preview was created
+// via the inline-card-JSON fallback path; engine should fall back to full-card
+// Patch).
+func (p *Platform) StreamRichCardText(ctx context.Context, previewHandle any, fullText string) error {
+	h, ok := previewHandle.(*feishuPreviewHandle)
+	if !ok {
+		return fmt.Errorf("%s: StreamRichCardText: invalid preview handle type %T", p.tag(), previewHandle)
+	}
+
+	// Serialize all PUTs for one card so the monotonic sequence counter is
+	// preserved across concurrent EventText calls; rate-limit headroom is
+	// huge (Lark allows 50 QPS per element).
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.cardID == "" {
+		return core.ErrNotSupported
+	}
+
+	h.sequence++
+	apiPath := fmt.Sprintf("/open-apis/cardkit/v1/cards/%s/elements/%s/content",
+		h.cardID, richCardMainTextElementID)
+	body := map[string]any{
+		"content":  fullText,
+		"sequence": h.sequence,
+	}
+
+	var apiResp *larkcore.ApiResp
+	if err := p.withFreshTenantAccessTokenRetry(ctx, "stream rich card text", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+		var err error
+		apiResp, err = client.Put(ctx, apiPath, body, larkcore.AccessTokenTypeTenant, options...)
+		return err
+	}); err != nil {
+		return fmt.Errorf("%s: stream rich card text: %w", p.tag(), err)
+	}
+	if apiResp == nil || apiResp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s: stream rich card text: HTTP status %d", p.tag(), apiResp.StatusCode)
+	}
+	var resp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	if err := json.Unmarshal(apiResp.RawBody, &resp); err != nil {
+		return fmt.Errorf("%s: stream rich card text: parse response: %w", p.tag(), err)
+	}
+	if resp.Code != 0 {
+		return fmt.Errorf("%s: stream rich card text: code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+	}
+	return nil
 }
 
 // UpdateMessage edits an existing card message identified by previewHandle.
@@ -3555,6 +3693,12 @@ func (p *Platform) onBotMenu(event *larkapplication.P2BotMenuV6) error {
 
 const defaultToolIcon = "setting-inter_outlined"
 
+// richCardMainTextElementID is the fixed element_id assigned to the markdown
+// body block of every rich card. The cardkit-v1 streaming text update API
+// targets card elements by this id (PUT /open-apis/cardkit/v1/cards/{card_id}/elements/{element_id}/content).
+// Hardcoded because each rich card has exactly one streaming-text element.
+const richCardMainTextElementID = "main_text"
+
 var toolIconMap = map[string]string{
 	"Bash":      "code_outlined",          // was: terminal-two_outlined (not in official Lark icon library)
 	"Edit":      "edit_outlined",
@@ -3756,8 +3900,9 @@ func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, mark
 		"elements":         panelElements,
 	}
 	markdownMap := map[string]any{
-		"tag":     "markdown",
-		"content": preprocessFeishuMarkdown(markdown),
+		"tag":        "markdown",
+		"element_id": richCardMainTextElementID, // required for cardkit-v1 streaming text update
+		"content":    preprocessFeishuMarkdown(markdown),
 	}
 
 	// Footer shows elapsed time: "⏱ 运行中 12.3 秒..." during streaming,

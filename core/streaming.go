@@ -73,6 +73,23 @@ type MarkdownTableSplitter interface {
 	SplitMarkdownByTables(md string, maxTables int) []string
 }
 
+// RichCardTextStreamer is an optional interface for platforms that support
+// per-element streaming text updates on rich cards (e.g. Lark/Feishu's
+// cardkit-v1 streaming text update API). When implemented, the engine routes
+// EventText growth through StreamRichCardText instead of full-card updates,
+// giving the client a native typewriter rendering effect.
+//
+// Returns ErrNotSupported when the specific preview handle was created
+// without a streamable card entity (fallback path); the engine then falls
+// back to the standard MessageUpdater full-card update.
+type RichCardTextStreamer interface {
+	// StreamRichCardText pushes the latest fullText to the streaming-text
+	// element of the rich card identified by previewHandle. The platform
+	// implementation is responsible for serializing concurrent calls and
+	// maintaining a monotonic sequence counter per handle.
+	StreamRichCardText(ctx context.Context, previewHandle any, fullText string) error
+}
+
 // PreviewStarter is an optional interface for platforms that can initiate a
 // streaming preview message and return a handle for subsequent updates.
 type PreviewStarter interface {
