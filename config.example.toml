@@ -913,6 +913,21 @@ app_secret = "your-feishu-app-secret"
 # share_session_in_channel = false  # If true, all users in a group share one agent session / 群聊共享会话
 # enable_reactions = false  # If true, add ⚡ reaction to incoming messages / 设为 true 收到消息时添加 ⚡ 表情
 
+# MAX messenger (uncomment to enable / 取消注释以启用)
+# 1. Create a bot via @MasterBot in MAX, get the access token
+#    在 MAX 中通过 @MasterBot 创建机器人，获取 access token
+# 2. Paste the token below / 填入下方 token
+# Connection: Long polling via platform-api.max.ru (no public URL needed) / 长轮询，无需公网 IP
+
+# [[projects.platforms]]
+# type = "max"
+#
+# [projects.platforms.options]
+# token = "your-max-bot-token"
+# allow_from = "*"    # Allowed MAX user IDs, e.g. "66624886,12345678"; "*" = all
+#                     # 允许的 MAX 用户 ID，如 "66624886,12345678"；"*" 表示所有
+# api_base = "https://platform-api.max.ru"   # optional override / 可选覆盖默认 API
+
 # Slack (uncomment to enable / 取消注释以启用)
 # 1. Create an app at https://api.slack.com/apps / 创建应用
 # 2. Enable Socket Mode (Settings > Socket Mode) / 开启 Socket Mode
