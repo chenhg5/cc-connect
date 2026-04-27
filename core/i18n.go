@@ -161,6 +161,7 @@ const (
 	MsgLangInvalid               MsgKey = "lang_invalid"
 	MsgLangCurrent               MsgKey = "lang_current"
 	MsgUnknownCommand            MsgKey = "unknown_command"
+	MsgWelcome                   MsgKey = "welcome"
 	MsgHelp                      MsgKey = "message_help" // change from "help", which is used now for builtin command help
 	MsgHelpTitle                 MsgKey = "help_title"
 	MsgHelpSessionSection        MsgKey = "help_session_section"
@@ -864,6 +865,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "`%s` 不是 cc-connect 命令，已轉發給 Agent 處理...",
 		LangJapanese:           "`%s` は cc-connect のコマンドではありません。エージェントに転送します...",
 		LangSpanish:            "`%s` no es un comando de cc-connect, reenviando al agente...",
+	},
+	MsgWelcome: {
+		LangEnglish:            "👋 Hi! I'm cc-connect, bridging you to **%s**.\n\nJust send a message to chat with the agent. Type /help to see built-in commands.",
+		LangChinese:            "👋 你好！我是 cc-connect，已为你连接到 **%s**。\n\n直接发送消息即可与 Agent 对话。输入 /help 查看内置命令。",
+		LangTraditionalChinese: "👋 你好！我是 cc-connect，已為你連接到 **%s**。\n\n直接發送訊息即可與 Agent 對話。輸入 /help 查看內建命令。",
+		LangJapanese:           "👋 こんにちは！cc-connect が **%s** に接続しました。\n\nメッセージを送信すればエージェントと会話できます。/help で組み込みコマンド一覧を確認できます。",
+		LangSpanish:            "👋 ¡Hola! Soy cc-connect, conectándote con **%s**.\n\nEnvía un mensaje para chatear con el agente. Usa /help para ver los comandos integrados.",
 	},
 	MsgHelp: {
 		LangEnglish: "📖 Available Commands\n\n" +

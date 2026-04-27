@@ -3654,6 +3654,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdStop(p, msg)
 	case "help":
 		e.cmdHelp(p, msg)
+	case "start":
+		e.cmdStart(p, msg)
 	case "version":
 		e.reply(p, msg.ReplyCtx, VersionInfo)
 	case "commands":
@@ -5748,6 +5750,22 @@ func (e *Engine) cmdHelp(p Platform, msg *Message) {
 		return
 	}
 	e.replyWithCard(p, msg.ReplyCtx, e.renderHelpCard())
+}
+
+// cmdStart handles the `/start` slash command.
+//
+// On Telegram, `/start` is a protocol convention sent by the client when a
+// user first opens a bot (or taps the Start button). Without a native
+// handler, the message previously fell through to the default branch and
+// got forwarded verbatim to the agent — and Claude Code's CLI interprets a
+// leading "/" as a slash-command request, replying "Unknown command:
+// /start. Did you mean /stats?" instead of greeting the user.
+//
+// Replying with a localized welcome that names the project keeps the
+// behavior consistent with every other Telegram bot framework, and is a
+// no-op improvement on platforms where /start has no special meaning.
+func (e *Engine) cmdStart(p Platform, msg *Message) {
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgWelcome), e.name))
 }
 
 const defaultHelpGroup = "session"
