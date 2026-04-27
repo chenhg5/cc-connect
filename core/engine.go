@@ -2774,7 +2774,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					break
 				}
 				if cardMessageID == nil {
-					card := richCardSupporter.BuildRichCard(CardStatusThinking, "", toolSteps, partialText, true, time.Since(turnStart))
+					card := richCardSupporter.BuildRichCard(CardStatusThinking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
 					if starter, ok := p.(PreviewStarter); ok {
 						handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
 						if err != nil {
@@ -2845,7 +2845,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					Summary: truncateIf(event.ToolInput, e.display.ToolMaxLen),
 				})
 				if cardMessageID == nil {
-					card := richCardSupporter.BuildRichCard(CardStatusWorking, "", toolSteps, partialText, true, time.Since(turnStart))
+					card := richCardSupporter.BuildRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
 					if starter, ok := p.(PreviewStarter); ok {
 						handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
 						if err != nil {
@@ -2855,7 +2855,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						}
 					}
 				} else if updater, ok := p.(MessageUpdater); ok {
-					card := richCardSupporter.BuildRichCard(CardStatusWorking, "", toolSteps, partialText, true, time.Since(turnStart))
+					card := richCardSupporter.BuildRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
 					if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
 						slog.Debug("rich card: failed to update tool card", "platform", p.Name(), "error", err)
 					}
@@ -2955,7 +2955,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if len(textParts) == 0 {
 					if hasRichCard {
 						if cardMessageID == nil {
-							card := richCardSupporter.BuildRichCard(CardStatusWorking, "", toolSteps, partialText, true, time.Since(turnStart))
+							card := richCardSupporter.BuildRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
 							if starter, ok := p.(PreviewStarter); ok {
 								handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
 								if err != nil {
@@ -2996,7 +2996,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 							}
 						}
 						if !streamed {
-							card := richCardSupporter.BuildRichCard(CardStatusWorking, "", toolSteps, partialText, true, time.Since(turnStart))
+							card := richCardSupporter.BuildRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
 							if updater, ok := p.(MessageUpdater); ok {
 								if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err == nil {
 									lastRichCardUpdate = time.Now()
@@ -3262,7 +3262,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if splitter, ok := p.(MarkdownTableSplitter); ok {
 					parts = splitter.SplitMarkdownByTables(fullResponse, 5)
 				}
-				finalCard := richCardSupporter.BuildRichCard(CardStatusDone, "", toolSteps, parts[0], false, time.Since(turnStart))
+				finalCard := richCardSupporter.BuildRichCard(CardStatusDone, "", toolSteps, parts[0], false, e.composeRichStatusFooter(false, turnStart, e.agent, state.agentSession, state.workspaceDir))
 				if cardMessageID != nil {
 					// Forced final flush via cardkit-v1 streaming text update before
 					// flipping status to Done via full-card Patch. The throttle in the
@@ -3291,7 +3291,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 				for _, overflow := range parts[1:] {
-					overflowCard := richCardSupporter.BuildRichCard(CardStatusDone, "", nil, overflow, false, time.Since(turnStart))
+					overflowCard := richCardSupporter.BuildRichCard(CardStatusDone, "", nil, overflow, false, e.composeRichStatusFooter(false, turnStart, e.agent, state.agentSession, state.workspaceDir))
 					if err := p.Send(e.ctx, replyCtx, overflowCard); err != nil {
 						slog.Error("failed to send overflow rich card", "error", err)
 						return
@@ -3476,7 +3476,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			cp.Finalize(ProgressCardStateFailed)
 			sp.discard()
 			if hasRichCard && cardMessageID != nil {
-				errCard := richCardSupporter.BuildRichCard(CardStatusError, "", toolSteps, partialText, false, time.Since(turnStart))
+				errCard := richCardSupporter.BuildRichCard(CardStatusError, "", toolSteps, partialText, false, e.composeRichStatusFooter(false, turnStart, e.agent, state.agentSession, state.workspaceDir))
 				if updater, ok := p.(MessageUpdater); ok {
 					if err := updater.UpdateMessage(e.ctx, cardMessageID, errCard); err != nil {
 						slog.Debug("rich card: failed to update error card", "platform", p.Name(), "error", err)
@@ -4460,6 +4460,104 @@ func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDi
 		return ""
 	}
 	return strings.Join(parts, " · ")
+}
+
+// composeRichStatusFooter assembles the multi-line statusFooter passed to
+// RichCardSupporter.BuildRichCard. Layout (skipping any empty line):
+//
+//	line 1: ⏱ <i18n elapsed>      (subject to e.replyFooterEnabled)
+//	line 2: model · effort · ctx  (subject to e.showContextIndicator)
+//	line 3: <workdir>             (subject to e.showWorkdirIndicator)
+//
+// Returns "" when the master replyFooterEnabled toggle is off.
+func (e *Engine) composeRichStatusFooter(streaming bool, turnStart time.Time, agent Agent, session AgentSession, workspaceDir string) string {
+	if !e.replyFooterEnabled {
+		return ""
+	}
+	var lines []string
+
+	// Line 1: elapsed timer (always shown when footer enabled)
+	lines = append(lines, formatElapsed(time.Since(turnStart), streaming, e.i18n.currentLang()))
+
+	// Line 2: model + effort + ctx (status only — no workdir tail)
+	if e.showContextIndicator {
+		var statusParts []string
+		if model := replyFooterModel(session, agent); model != "" {
+			statusParts = append(statusParts, model)
+		}
+		if effort := replyFooterReasoningEffort(session, agent); effort != "" {
+			statusParts = append(statusParts, effort)
+		}
+		if ctxText := replyFooterContextText(replyFooterSessionContextUsage(session), e.i18n); ctxText != "" {
+			statusParts = append(statusParts, ctxText)
+		} else if usage := e.replyFooterUsageText(session, agent); usage != "" {
+			statusParts = append(statusParts, usage)
+		}
+		if len(statusParts) > 0 {
+			lines = append(lines, strings.Join(statusParts, " · "))
+		}
+	}
+
+	// Line 3: workdir
+	if e.showWorkdirIndicator {
+		if dir := replyFooterWorkDir(session, agent, workspaceDir); dir != "" {
+			lines = append(lines, dir)
+		}
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+// formatElapsed renders a turn elapsed duration with i18n, in the format used
+// at the top of the rich card status footer.
+//
+// Streaming = true → "⏱ 运行中 12.3 秒..." / "⏱ Running for 12.3s..."
+// Streaming = false → "⏱ 用时 1 分 23 秒"  / "⏱ Elapsed 1m 23s"
+//
+// Currently supports ZH-family (zh / zh-tw) and EN-default. Other languages
+// (ja / es) fall back to EN format. Could be promoted to full MsgKey i18n
+// later if needed.
+func formatElapsed(d time.Duration, streaming bool, lang Language) string {
+	if d < 0 {
+		d = 0
+	}
+	zh := lang == LangChinese || lang == LangTraditionalChinese
+	totalSec := int64(d / time.Second)
+	var dur string
+	switch {
+	case d < time.Minute:
+		if zh {
+			dur = fmt.Sprintf("%.1f 秒", d.Seconds())
+		} else {
+			dur = fmt.Sprintf("%.1fs", d.Seconds())
+		}
+	case d < time.Hour:
+		m := totalSec / 60
+		s := totalSec % 60
+		if zh {
+			dur = fmt.Sprintf("%d 分 %02d 秒", m, s)
+		} else {
+			dur = fmt.Sprintf("%dm %02ds", m, s)
+		}
+	default:
+		h := totalSec / 3600
+		m := (totalSec % 3600) / 60
+		if zh {
+			dur = fmt.Sprintf("%d 小时 %02d 分", h, m)
+		} else {
+			dur = fmt.Sprintf("%dh %02dm", h, m)
+		}
+	}
+	if streaming {
+		if zh {
+			return fmt.Sprintf("⏱ 运行中 %s...", dur)
+		}
+		return fmt.Sprintf("⏱ Running for %s...", dur)
+	}
+	if zh {
+		return fmt.Sprintf("⏱ 用时 %s", dur)
+	}
+	return fmt.Sprintf("⏱ Elapsed %s", dur)
 }
 
 func replyFooterModel(session AgentSession, agent Agent) string {

@@ -3783,31 +3783,10 @@ func buildCardJSONWithStatus(content string, status core.CardStatus) string {
 	return string(b)
 }
 
-// formatElapsedCN renders a human-readable duration in Chinese.
-// Examples: "3.2 秒", "1 分 23 秒", "1 小时 05 分"。
-func formatElapsedCN(d time.Duration) string {
-	if d < 0 {
-		d = 0
-	}
-	totalSec := int64(d / time.Second)
-	switch {
-	case d < time.Minute:
-		return fmt.Sprintf("%.1f 秒", d.Seconds())
-	case d < time.Hour:
-		m := totalSec / 60
-		s := totalSec % 60
-		return fmt.Sprintf("%d 分 %02d 秒", m, s)
-	default:
-		h := totalSec / 3600
-		m := (totalSec % 3600) / 60
-		return fmt.Sprintf("%d 小时 %02d 分", h, m)
-	}
-}
-
 // buildRichCard renders a Card 2.0 "single-card" turn with collapsible
-// tool-step panel, streaming markdown body, status-colored header, and
-// an elapsed-time footer.
-func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, markdown string, streaming bool, elapsed time.Duration) string {
+// tool-step panel, streaming markdown body, status-colored header, and a
+// pre-composed multi-line statusFooter (engine-owned, includes elapsed).
+func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) string {
 	panelTitle := "Thinking..."
 	if len(steps) > 0 {
 		if streaming {
@@ -3903,22 +3882,23 @@ func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, mark
 		"content":    preprocessFeishuMarkdown(markdown),
 	}
 
-	// Footer shows elapsed time: "⏱ 运行中 12.3 秒..." during streaming,
-	// "⏱ 用时 1 分 23 秒" on completion. Skip when elapsed == 0 to avoid noise.
-	var footerMap map[string]any
-	if elapsed > 0 {
-		var footerText string
-		if streaming {
-			footerText = fmt.Sprintf("⏱ 运行中 %s...", formatElapsedCN(elapsed))
-		} else {
-			footerText = fmt.Sprintf("⏱ 用时 %s", formatElapsedCN(elapsed))
-		}
-		footerMap = map[string]any{
-			"tag": "div",
-			"text": map[string]any{
-				"tag":     "plain_text",
-				"content": footerText,
-			},
+	// Footer: engine pre-composes a multi-line statusFooter (lines separated by \n).
+	// Each line renders as its own dim "notation"-sized markdown block so they
+	// visually sit below the body without being mistaken for content. Skip
+	// rendering when statusFooter is empty (footer disabled / nothing to show).
+	var footerElements []map[string]any
+	if statusFooter != "" {
+		for _, line := range strings.Split(statusFooter, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			footerElements = append(footerElements, map[string]any{
+				"tag": "markdown",
+				"content": line,
+				"text_size": "notation",
+				"text_color": "grey",
+			})
 		}
 	}
 
@@ -3928,8 +3908,10 @@ func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, mark
 	} else {
 		elements = append(elements, markdownMap)
 	}
-	if footerMap != nil {
-		elements = append(elements, footerMap)
+	if len(footerElements) > 0 {
+		// Insert a horizontal separator between body and footer so the boundary is clear.
+		elements = append(elements, map[string]any{"tag": "hr"})
+		elements = append(elements, footerElements...)
 	}
 
 	// Header template color follows status.
@@ -4003,11 +3985,11 @@ func splitMarkdownByTables(md string, maxTables int) []string {
 	return parts
 }
 
-// BuildRichCard implements core.RichCardSupporter. Feishu engine passes an
-// elapsed duration via the preview handle; buildRichCard itself is the
-// renderer and must be called with the duration from engine state.
-func (p *Platform) BuildRichCard(status core.CardStatus, title string, steps []core.ToolStep, markdown string, streaming bool, elapsed time.Duration) string {
-	return buildRichCard(status, title, steps, markdown, streaming, elapsed)
+// BuildRichCard implements core.RichCardSupporter. The engine pre-composes
+// statusFooter (multi-line, '\n'-separated) and passes it through; the renderer
+// splits it back into one dim notation block per line.
+func (p *Platform) BuildRichCard(status core.CardStatus, title string, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) string {
+	return buildRichCard(status, title, steps, markdown, streaming, statusFooter)
 }
 
 // SplitMarkdownByTables implements core.MarkdownTableSplitter.

@@ -60,11 +60,20 @@ type ToolStep struct {
 }
 
 // RichCardSupporter is an optional interface for platforms that can build
-// native rich cards combining tool steps, markdown content, and an elapsed
-// time footer. `elapsed` is measured from turn start; pass 0 to hide the
-// footer.
+// native rich cards combining tool steps, markdown content, and a multi-line
+// status footer.
+//
+// statusFooter is a pre-composed multi-line string assembled by the engine
+// (typically one line per: elapsed time, model · effort · ctx, workdir).
+// Pass empty string to hide the footer entirely. Lines are separated by '\n';
+// the platform implementation is expected to render each line as its own
+// dim-styled element so they don't visually merge with the body markdown.
+//
+// (Phase B refactor: previously took elapsed time.Duration; now the engine
+// owns elapsed-time formatting so it can apply i18n + project-level toggles
+// uniformly with the rest of the footer.)
 type RichCardSupporter interface {
-	BuildRichCard(status CardStatus, title string, steps []ToolStep, markdown string, streaming bool, elapsed time.Duration) string
+	BuildRichCard(status CardStatus, title string, steps []ToolStep, markdown string, streaming bool, statusFooter string) string
 }
 
 // MarkdownTableSplitter is an optional interface for platforms that need
