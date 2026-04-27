@@ -405,6 +405,7 @@ enclosure_style = "code"
 
 - `/show` 只解析“纯引用文本”，不解析前端展示层包装后的 `📄 ...` / `[FILE] ...` 这类样式
 - `/show` 属于本地文件系统查看命令，与 `/shell`、`/dir` 类似，默认受 `admin_from` 权限控制
+- 执行 Shell 命令支持 `!` 快捷前缀：`!ls -la` 等同于 `/shell ls -la`，`! --timeout 300 npm install` 可指定超时时间
 
 示例：
 

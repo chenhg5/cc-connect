@@ -92,14 +92,14 @@ func PreflightRunAsUser(ctx context.Context, cfg PreflightConfig) PreflightResul
 		cfg.ScanConfig = DefaultDescendantScanConfig
 	}
 
-	if _, err := cfg.Runner.Run(ctx, "-n", "-iu", cfg.RunAsUser, "--", "/bin/true"); err != nil {
+	if _, err := cfg.Runner.Run(ctx, "-n", "-iu", cfg.RunAsUser, "--", "/usr/bin/true"); err != nil {
 		result.Fatal = append(result.Fatal, fmt.Errorf(
 			"project %q: passwordless sudo to user %q is not configured. Add a sudoers rule such as:\n  %s ALL=(%s) NOPASSWD: ALL\nthen restart cc-connect. Underlying error: %w",
 			cfg.Project, cfg.RunAsUser, currentUsernameOr("<supervisor>"), cfg.RunAsUser, err))
 		return result // subsequent checks are pointless
 	}
 
-	if _, err := cfg.Runner.Run(ctx, "-n", "-iu", cfg.RunAsUser, "--", "sudo", "-n", "/bin/true"); err == nil {
+	if _, err := cfg.Runner.Run(ctx, "-n", "-iu", cfg.RunAsUser, "--", "sudo", "-n", "/usr/bin/true"); err == nil {
 		// Escalation succeeded — collect sudo -l from the target's
 		// context to help the operator find the offending rule.
 		if out, listErr := cfg.Runner.Run(ctx, "-n", "-iu", cfg.RunAsUser, "--", "sudo", "-n", "-l"); listErr == nil {
