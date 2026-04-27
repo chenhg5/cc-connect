@@ -386,6 +386,21 @@ func TestEncodeClaudeProjectKey(t *testing.T) {
 			expected: "-Users-username-my-project",
 		},
 		{
+			name:     "path with spaces",
+			input:    "/Users/username/Mobile Documents/my project",
+			expected: "-Users-username-Mobile-Documents-my-project",
+		},
+		{
+			name:     "path with tildes",
+			input:    "/Users/username/com~apple~CloudDocs/project",
+			expected: "-Users-username-com-apple-CloudDocs-project",
+		},
+		{
+			name:     "iCloud path with spaces and tildes",
+			input:    "/Users/username/Library/Mobile Documents/com~apple~CloudDocs/my project",
+			expected: "-Users-username-Library-Mobile-Documents-com-apple-CloudDocs-my-project",
+		},
+		{
 			name:     "mixed ASCII and non-ASCII",
 			input:    "/Users/username/中文folder/english文件夹",
 			expected: "-Users-username---folder-english---", // "/中文" = 3 hyphens, "/文件夹" = 4 hyphens
@@ -457,5 +472,28 @@ func TestFindProjectDir_NotFound(t *testing.T) {
 	found := findProjectDir(homeDir, workDir)
 	if found != "" {
 		t.Errorf("findProjectDir for nonexistent project = %q, want empty string", found)
+	}
+}
+
+func TestFindProjectDir_ICloudPath(t *testing.T) {
+	// Regression for issue #500: paths containing spaces and "~" (common in macOS
+	// iCloud Drive paths like "/Users/x/Library/Mobile Documents/com~apple~CloudDocs/...")
+	// must match the on-disk project key that Claude Code CLI generates, which
+	// collapses both spaces and "~" to "-".
+	homeDir := t.TempDir()
+	projectsBase := filepath.Join(homeDir, ".claude", "projects")
+
+	iCloudWorkDir := "/Users/test/Library/Mobile Documents/com~apple~CloudDocs/my project"
+	// The on-disk key Claude Code CLI actually writes (spaces and "~" → "-").
+	expectedKey := "-Users-test-Library-Mobile-Documents-com-apple-CloudDocs-my-project"
+
+	mockProjectDir := filepath.Join(projectsBase, expectedKey)
+	if err := os.MkdirAll(mockProjectDir, 0755); err != nil {
+		t.Fatalf("failed to create mock project dir: %v", err)
+	}
+
+	found := findProjectDir(homeDir, iCloudWorkDir)
+	if found != mockProjectDir {
+		t.Errorf("findProjectDir(%q, %q) = %q, want %q", homeDir, iCloudWorkDir, found, mockProjectDir)
 	}
 }
