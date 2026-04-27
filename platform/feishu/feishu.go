@@ -3407,6 +3407,16 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 		}
 		cardJSON = buildCardJSON(sanitizeMarkdownURLs(processed))
 	}
+	// Route card-entity-bound messages to cardkit-v1 full-card update API.
+	// Im.Message.Patch on entity-referenced messages is silently no-op for the
+	// card body / header — only inline card JSON messages can be patched that way.
+	h.mu.Lock()
+	cardID := h.cardID
+	h.mu.Unlock()
+	if cardID != "" {
+		return p.updateCardEntity(ctx, h, cardJSON)
+	}
+
 	return p.patchCardMessage(ctx, h.messageID, cardJSON)
 }
 
@@ -3431,6 +3441,15 @@ func (p *Platform) UpdateMessageWithStatusFooter(ctx context.Context, previewHan
 	processedBody := sanitizeMarkdownURLs(preprocessFeishuMarkdown(content))
 	processedFooter := sanitizeMarkdownURLs(preprocessFeishuMarkdown(footer))
 	cardJSON := buildCardJSONWithStatusFooter(processedBody, processedFooter)
+
+	// Same cardkit-v1 routing for entity-bound messages.
+	h.mu.Lock()
+	cardID := h.cardID
+	h.mu.Unlock()
+	if cardID != "" {
+		return p.updateCardEntity(ctx, h, cardJSON)
+	}
+
 	return p.patchCardMessage(ctx, h.messageID, cardJSON)
 }
 
@@ -3453,6 +3472,56 @@ func (p *Platform) patchCardMessage(ctx context.Context, messageID, cardJSON str
 			return nil
 		})
 	})
+}
+
+// updateCardEntity performs a full-card replacement on a cardkit-v1 entity via
+// PUT /open-apis/cardkit/v1/cards/{card_id}. Required for messages that were
+// sent as card_id references (rich-mode path) — Im.Message.Patch does not
+// affect the rendered content of such messages.
+//
+// Reuses h.sequence as the monotonic ordering counter (shared with
+// streamRichCardText so any sequence on any element/card is monotonic).
+func (p *Platform) updateCardEntity(ctx context.Context, h *feishuPreviewHandle, cardJSON string) error {
+	h.mu.Lock()
+	if h.cardID == "" {
+		h.mu.Unlock()
+		return fmt.Errorf("%s: updateCardEntity: cardID not set", p.tag())
+	}
+	h.sequence++
+	cardID := h.cardID
+	seq := h.sequence
+	h.mu.Unlock()
+
+	apiPath := fmt.Sprintf("/open-apis/cardkit/v1/cards/%s", cardID)
+	body := map[string]any{
+		"card": map[string]any{
+			"type": "card_json",
+			"data": cardJSON,
+		},
+		"sequence": seq,
+	}
+	var apiResp *larkcore.ApiResp
+	if err := p.withFreshTenantAccessTokenRetry(ctx, "update card entity", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+		var err error
+		apiResp, err = client.Put(ctx, apiPath, body, larkcore.AccessTokenTypeTenant, options...)
+		return err
+	}); err != nil {
+		return fmt.Errorf("%s: update card entity: %w", p.tag(), err)
+	}
+	if apiResp == nil || apiResp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s: update card entity: HTTP status %d", p.tag(), apiResp.StatusCode)
+	}
+	var resp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	if err := json.Unmarshal(apiResp.RawBody, &resp); err != nil {
+		return fmt.Errorf("%s: update card entity: parse response: %w", p.tag(), err)
+	}
+	if resp.Code != 0 {
+		return fmt.Errorf("%s: update card entity: code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+	}
+	return nil
 }
 
 func (p *Platform) Stop() error {
