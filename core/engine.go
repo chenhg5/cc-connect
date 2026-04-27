@@ -4478,14 +4478,20 @@ func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDi
 //	line 2: model · out N · in N cw N cr N · ctx N%           (subject to e.showContextIndicator)
 //	line 3: <workdir>                                         (subject to e.showWorkdirIndicator)
 //
-// Returns "" when the master replyFooterEnabled toggle is off.
+// Returns "" when the master replyFooterEnabled toggle is off, or while the
+// turn is still streaming (footer represents finalized turn metadata —
+// token counts aren't yet settled and a live-updating elapsed line creates
+// visual noise during streaming. Header status badge already signals "Working").
 func (e *Engine) composeRichStatusFooter(streaming bool, turnStart time.Time, agent Agent, session AgentSession, workspaceDir string) string {
 	if !e.replyFooterEnabled {
 		return ""
 	}
+	if streaming {
+		return ""
+	}
 	var lines []string
 
-	// Line 1: elapsed timer (always shown when footer enabled)
+	// Line 1: elapsed timer (now always the "done" form since streaming branch returned above)
 	lines = append(lines, formatElapsed(time.Since(turnStart), streaming, e.i18n.currentLang()))
 
 	// Line 2: model + effort + token usage detail + ctx %
