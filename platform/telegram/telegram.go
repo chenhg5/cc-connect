@@ -141,8 +141,10 @@ func New(opts map[string]any) (core.Platform, error) {
 	allowFrom, _ := opts["allow_from"].(string)
 	core.CheckAllowFrom("telegram", allowFrom)
 
-	// Build HTTP client with optional proxy support
-	httpClient := &http.Client{Timeout: 60 * time.Second}
+	// Build HTTP client with optional proxy support.
+	// Timeout must exceed the server-side long-poll duration (pollTimeout − 1s = 59s)
+	// to avoid the HTTP client racing with Telegram's response. 90s gives 30s headroom.
+	httpClient := &http.Client{Timeout: 90 * time.Second}
 	if proxyURL, _ := opts["proxy"].(string); proxyURL != "" {
 		u, err := url.Parse(proxyURL)
 		if err != nil {
