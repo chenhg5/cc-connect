@@ -990,6 +990,69 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		}
 		p.handler(p.dispatchPlatform(), coreMsg)
 
+	case "sticker":
+		var stickerBody struct {
+			FileKey string `json:"file_key"`
+		}
+		if err := json.Unmarshal([]byte(content), &stickerBody); err != nil {
+			slog.Error(p.tag()+": failed to parse sticker content", "error", err)
+			return
+		}
+		slog.Info(p.tag()+": sticker received", "user", userID, "file_key", stickerBody.FileKey)
+		imgData, mimeType, err := p.downloadImage(messageID, stickerBody.FileKey)
+		if err != nil {
+			slog.Warn(p.tag()+": download sticker failed, falling back to placeholder", "error", err)
+			p.handler(p.dispatchPlatform(), &core.Message{
+				SessionKey: sessionKey, Platform: p.platformName,
+				MessageID: messageID,
+				UserID:    userID, UserName: userName, ChatName: chatName,
+				Content: "[sticker]", ExtraContent: quotedPrefix, ReplyCtx: rctx,
+			})
+			return
+		}
+		p.handler(p.dispatchPlatform(), &core.Message{
+			SessionKey: sessionKey, Platform: p.platformName,
+			MessageID: messageID,
+			UserID:    userID, UserName: userName, ChatName: chatName,
+			Images:   []core.ImageAttachment{{MimeType: mimeType, Data: imgData}},
+			ReplyCtx: rctx,
+		})
+
+	case "media":
+		var mediaBody struct {
+			FileKey  string `json:"file_key"`
+			ImageKey string `json:"image_key"`
+			FileName string `json:"file_name"`
+			Duration int    `json:"duration"`
+		}
+		if err := json.Unmarshal([]byte(content), &mediaBody); err != nil {
+			slog.Error(p.tag()+": failed to parse media content", "error", err)
+			return
+		}
+		slog.Info(p.tag()+": media received", "user", userID, "file_key", mediaBody.FileKey, "file_name", mediaBody.FileName)
+		text := "[video"
+		if mediaBody.FileName != "" {
+			text += ": " + mediaBody.FileName
+		}
+		if mediaBody.Duration > 0 {
+			text += fmt.Sprintf(", %ds", mediaBody.Duration/1000)
+		}
+		text += "]"
+		var images []core.ImageAttachment
+		if mediaBody.ImageKey != "" {
+			if thumbData, thumbMime, err := p.downloadImage(messageID, mediaBody.ImageKey); err == nil {
+				images = append(images, core.ImageAttachment{MimeType: thumbMime, Data: thumbData})
+			} else {
+				slog.Warn(p.tag()+": download media thumbnail failed", "error", err)
+			}
+		}
+		p.handler(p.dispatchPlatform(), &core.Message{
+			SessionKey: sessionKey, Platform: p.platformName,
+			MessageID: messageID,
+			UserID:    userID, UserName: userName, ChatName: chatName,
+			Content: text, ExtraContent: quotedPrefix, Images: images, ReplyCtx: rctx,
+		})
+
 	default:
 		slog.Debug(p.tag()+": ignoring unsupported message type", "type", msgType)
 	}
@@ -1339,6 +1402,8 @@ func extractPostPlainText(content string) string {
 			Tag      string `json:"tag"`
 			Text     string `json:"text"`
 			Language string `json:"language,omitempty"`
+			UserId   string `json:"user_id,omitempty"`
+			UserName string `json:"user_name,omitempty"`
 		} `json:"content"`
 		Title string `json:"title"`
 	}
@@ -1369,6 +1434,25 @@ func extractPostPlainText(content string) string {
 				if elem.Text != "" {
 					line = append(line, elem.Text)
 				}
+			case "a":
+				if elem.Text != "" {
+					line = append(line, elem.Text)
+				}
+			case "markdown":
+				if elem.Text != "" {
+					line = append(line, elem.Text)
+				}
+			case "at":
+				switch {
+				case elem.UserId == "all":
+					line = append(line, "@all")
+				case elem.UserName != "":
+					line = append(line, "@"+elem.UserName)
+				case elem.UserId != "":
+					line = append(line, "@user")
+				}
+			case "img":
+				line = append(line, "[image]")
 			case "code_block":
 				if elem.Text != "" {
 					lang := elem.Language
@@ -3334,6 +3418,8 @@ type postElement struct {
 	Language string `json:"language,omitempty"`
 	ImageKey string `json:"image_key,omitempty"`
 	Href     string `json:"href,omitempty"`
+	UserId   string `json:"user_id,omitempty"`
+	UserName string `json:"user_name,omitempty"`
 }
 
 type postLang struct {
@@ -3382,6 +3468,22 @@ func (p *Platform) extractPostParts(messageID string, post *postLang) ([]string,
 				if elem.Text != "" {
 					lang := elem.Language
 					textParts = append(textParts, "```"+lang+"\n"+elem.Text+"\n```")
+				}
+			case "markdown":
+				if elem.Text != "" {
+					textParts = append(textParts, elem.Text)
+				}
+			case "at":
+				if p.botOpenID != "" && elem.UserId == p.botOpenID {
+					continue
+				}
+				switch {
+				case elem.UserId == "all":
+					textParts = append(textParts, "@all")
+				case elem.UserName != "":
+					textParts = append(textParts, "@"+elem.UserName)
+				case elem.UserId != "":
+					textParts = append(textParts, "@"+p.resolveUserName(elem.UserId))
 				}
 			case "img":
 				if elem.ImageKey != "" {
