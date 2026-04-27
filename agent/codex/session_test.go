@@ -36,6 +36,94 @@ func TestAvailableReasoningEfforts_ExcludesMinimal(t *testing.T) {
 	}
 }
 
+func TestWorkspaceAgentOptions_IncludesNativePermissionOverrides(t *testing.T) {
+	agent := &Agent{
+		mode:    "full-auto",
+		backend: "exec",
+		permissions: codexPermissionOverrides{
+			ApprovalPolicy:    "on-request",
+			ApprovalsReviewer: "auto_review",
+			SandboxMode:       "workspace-write",
+		},
+	}
+
+	opts := agent.WorkspaceAgentOptions()
+
+	if got := opts["approval_policy"]; got != "on-request" {
+		t.Fatalf("approval_policy = %#v, want on-request", got)
+	}
+	if got := opts["approvals_reviewer"]; got != "auto_review" {
+		t.Fatalf("approvals_reviewer = %#v, want auto_review", got)
+	}
+	if got := opts["sandbox_mode"]; got != "workspace-write" {
+		t.Fatalf("sandbox_mode = %#v, want workspace-write", got)
+	}
+}
+
+func TestCodexPermissionOverridesFromOptions_TrimsNativePermissionOptions(t *testing.T) {
+	got := codexPermissionOverridesFromOptions(map[string]any{
+		"approval_policy":    " on-request ",
+		"approvals_reviewer": " guardian_subagent ",
+		"sandbox_mode":       " workspace-write ",
+	})
+
+	if got.ApprovalPolicy != "on-request" {
+		t.Fatalf("ApprovalPolicy = %q, want on-request", got.ApprovalPolicy)
+	}
+	if got.ApprovalsReviewer != "guardian_subagent" {
+		t.Fatalf("ApprovalsReviewer = %q, want guardian_subagent", got.ApprovalsReviewer)
+	}
+	if got.SandboxMode != "workspace-write" {
+		t.Fatalf("SandboxMode = %q, want workspace-write", got.SandboxMode)
+	}
+}
+
+func TestCodexNewPreservesNativePermissionOptions(t *testing.T) {
+	binDir := t.TempDir()
+	writeFakeCodexExecutable(t, binDir)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	agent, err := New(map[string]any{
+		"mode":               "full-auto",
+		"approval_policy":    "on-request",
+		"approvals_reviewer": "auto_review",
+		"sandbox_mode":       "workspace-write",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	codexAgent, ok := agent.(*Agent)
+	if !ok {
+		t.Fatalf("New returned %T, want *Agent", agent)
+	}
+	opts := codexAgent.WorkspaceAgentOptions()
+	if got := opts["approval_policy"]; got != "on-request" {
+		t.Fatalf("approval_policy = %#v, want on-request", got)
+	}
+	if got := opts["approvals_reviewer"]; got != "auto_review" {
+		t.Fatalf("approvals_reviewer = %#v, want auto_review", got)
+	}
+	if got := opts["sandbox_mode"]; got != "workspace-write" {
+		t.Fatalf("sandbox_mode = %#v, want workspace-write", got)
+	}
+}
+
+func writeFakeCodexExecutable(t *testing.T, dir string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		path := filepath.Join(dir, "codex.cmd")
+		if err := os.WriteFile(path, []byte("@echo off\r\n"), 0o755); err != nil {
+			t.Fatalf("write fake codex: %v", err)
+		}
+		return
+	}
+	path := filepath.Join(dir, "codex")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+}
+
 func TestBuildExecArgs_IncludesReasoningEffort(t *testing.T) {
 	cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "o3", "high", "full-auto", "", "", nil, "")
 	if err != nil {
@@ -114,6 +202,126 @@ func TestBuildExecArgs_ResumeOmitsCdFlag(t *testing.T) {
 	// --json and stdin marker must still be present.
 	if !containsSequence(args, []string{"--json", "-"}) {
 		t.Fatalf("resume args missing --json + stdin marker: %v", args)
+	}
+}
+
+func TestBuildExecArgs_NativePermissionOverrides(t *testing.T) {
+	cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "", "", "full-auto", "", "", nil, "")
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+	cs.permissions = codexPermissionOverrides{
+		ApprovalPolicy:    "on-request",
+		ApprovalsReviewer: "auto_review",
+		SandboxMode:       "workspace-write",
+	}
+
+	args := cs.buildExecArgs("hello", nil)
+
+	for _, flag := range []string{"--full-auto", "--dangerously-bypass-approvals-and-sandbox"} {
+		if indexOf(args, flag) >= 0 {
+			t.Fatalf("args should not contain conflicting %s flag when native overrides are set: %v", flag, args)
+		}
+	}
+	for _, want := range [][]string{
+		{"-c", `approval_policy="on-request"`},
+		{"-c", `approvals_reviewer="auto_review"`},
+		{"-c", `sandbox_mode="workspace-write"`},
+	} {
+		if !containsSequence(args, want) {
+			t.Fatalf("args missing %v: %v", want, args)
+		}
+	}
+}
+
+func TestBuildExecArgs_PartialNativePermissionOverridePreservesModeAxis(t *testing.T) {
+	cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "", "", "full-auto", "", "", nil, "")
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+	cs.permissions = codexPermissionOverrides{SandboxMode: "read-only"}
+
+	args := cs.buildExecArgs("hello", nil)
+
+	if indexOf(args, "--full-auto") >= 0 {
+		t.Fatalf("args should not contain --full-auto when sandbox axis is overridden: %v", args)
+	}
+	if !containsSequence(args, []string{"-c", `approval_policy="never"`}) {
+		t.Fatalf("args should preserve full-auto approval axis as native config: %v", args)
+	}
+	if !containsSequence(args, []string{"-c", `sandbox_mode="read-only"`}) {
+		t.Fatalf("args missing explicit sandbox override: %v", args)
+	}
+}
+
+func TestBuildExecArgs_YoloPartialNativePermissionOverridePreservesSandboxAxis(t *testing.T) {
+	cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "", "", "yolo", "", "", nil, "")
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+	cs.permissions = codexPermissionOverrides{ApprovalPolicy: "on-request"}
+
+	args := cs.buildExecArgs("hello", nil)
+
+	if indexOf(args, "--dangerously-bypass-approvals-and-sandbox") >= 0 {
+		t.Fatalf("args should not contain bypass flag when approval axis is overridden: %v", args)
+	}
+	if !containsSequence(args, []string{"-c", `approval_policy="on-request"`}) {
+		t.Fatalf("args missing explicit approval override: %v", args)
+	}
+	if !containsSequence(args, []string{"-c", `sandbox_mode="danger-full-access"`}) {
+		t.Fatalf("args should preserve yolo sandbox axis as native config: %v", args)
+	}
+}
+
+func TestBuildExecArgs_SuggestPartialNativePermissionOverridePreservesApprovalAxis(t *testing.T) {
+	cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "", "", "suggest", "", "", nil, "")
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+	cs.permissions = codexPermissionOverrides{SandboxMode: "workspace-write"}
+
+	args := cs.buildExecArgs("hello", nil)
+
+	if !containsSequence(args, []string{"-c", `approval_policy="on-request"`}) {
+		t.Fatalf("args should preserve suggest approval axis as native config: %v", args)
+	}
+	if !containsSequence(args, []string{"-c", `sandbox_mode="workspace-write"`}) {
+		t.Fatalf("args missing explicit sandbox override: %v", args)
+	}
+}
+
+func TestBuildExecArgs_SuggestPartialNativePermissionOverridePreservesSandboxAxis(t *testing.T) {
+	cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "", "", "suggest", "", "", nil, "")
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+	cs.permissions = codexPermissionOverrides{ApprovalPolicy: "never"}
+
+	args := cs.buildExecArgs("hello", nil)
+
+	if !containsSequence(args, []string{"-c", `approval_policy="never"`}) {
+		t.Fatalf("args missing explicit approval override: %v", args)
+	}
+	if !containsSequence(args, []string{"-c", `sandbox_mode="read-only"`}) {
+		t.Fatalf("args should preserve suggest sandbox axis as native config: %v", args)
+	}
+}
+
+func TestBuildExecArgs_ReviewerOnlyKeepsModeFlag(t *testing.T) {
+	cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "", "", "full-auto", "", "", nil, "")
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+	cs.permissions = codexPermissionOverrides{ApprovalsReviewer: "guardian_subagent"}
+
+	args := cs.buildExecArgs("hello", nil)
+
+	if indexOf(args, "--full-auto") < 0 {
+		t.Fatalf("reviewer-only override should keep --full-auto mode flag: %v", args)
+	}
+	if !containsSequence(args, []string{"-c", `approvals_reviewer="guardian_subagent"`}) {
+		t.Fatalf("args missing reviewer config: %v", args)
 	}
 }
 

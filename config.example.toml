@@ -1230,6 +1230,20 @@ app_secret = "your-feishu-app-secret"
 # - "full-auto": auto-approve everything with workspace sandbox / 全部自动通过，工作区沙箱保护
 # - "yolo":      bypass all approvals and sandbox (dangerous) / 跳过所有审批和沙箱（危险）
 #
+# Optional: pass native Codex permission config through to codex exec/app-server.
+# 可选：将 Codex 原生权限配置透传给 codex exec/app-server。
+# If approval_policy or sandbox_mode is set, cc-connect expands mode into native
+# config values first, then applies the explicit override.
+# 如果设置 approval_policy 或 sandbox_mode，cc-connect 会先把 mode 展开为原生配置，
+# 再应用显式覆盖，因此另一条权限轴会保留 mode 的行为。
+# approval_policy = "on-request"       # common: "untrusted" | "on-request" | "never"
+# approvals_reviewer = "auto_review"   # "user" | "auto_review" | "guardian_subagent"
+# sandbox_mode = "workspace-write"     # "read-only" | "workspace-write" | "danger-full-access"
+# approval_policy passes through other Codex-supported values, such as deprecated "on-failure".
+# sandbox_mode is limited to the three values listed above because app-server maps it to structured policy.
+# approval_policy 会透传其他 Codex 支持的值，例如已弃用的 "on-failure"。
+# sandbox_mode 当前仅支持上面列出的三个值，因为 app-server 会把它映射为结构化 policy。
+#
 # Optional: specify a model / 可选：指定模型
 # model = "o3"
 #

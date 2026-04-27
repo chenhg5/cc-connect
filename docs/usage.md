@@ -83,6 +83,25 @@ All agents support permission modes switchable at runtime via `/mode`.
 | Full Auto | `full-auto` | Auto-approve with sandbox |
 | YOLO | `yolo` | Bypass all approvals and sandbox |
 
+Codex also accepts native permission overrides in `[projects.agent.options]`.
+These keys are passed through to `codex exec -c ...` and `codex app-server -c ...`:
+
+```toml
+approval_policy = "on-request"       # common: "untrusted" | "on-request" | "never"
+approvals_reviewer = "auto_review"   # "user" | "auto_review" | "guardian_subagent"
+sandbox_mode = "workspace-write"     # "read-only" | "workspace-write" | "danger-full-access"
+```
+
+When `approval_policy` or `sandbox_mode` is set, cc-connect expands the selected
+Codex `mode` into native config values and then applies the explicit override,
+so the other permission axis keeps the mode's behavior. `approvals_reviewer`
+only changes who reviews approvals and can be used by itself. `auto_review` is
+the preferred automatic reviewer value; `guardian_subagent` is kept for Codex
+legacy compatibility. `approval_policy` also passes through other
+Codex-supported values, such as the deprecated `on-failure`; `sandbox_mode`
+is currently limited to the three values listed above because the app-server
+RPC path maps it to structured sandbox policy fields.
+
 ### Cursor Agent Modes
 
 | Mode | Config Value | Behavior |
