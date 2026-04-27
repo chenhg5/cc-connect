@@ -3,6 +3,7 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -23,6 +24,237 @@ func TestAppServerSession_ApplyThreadRuntimeState(t *testing.T) {
 	if got := s.GetReasoningEffort(); got != "xhigh" {
 		t.Fatalf("GetReasoningEffort() = %q, want xhigh", got)
 	}
+}
+
+func TestAppServerCommandArgs_IncludesNativePermissionOverrides(t *testing.T) {
+	s := &appServerSession{
+		url: "stdio://",
+		permissions: codexPermissionOverrides{
+			ApprovalPolicy:    "on-request",
+			ApprovalsReviewer: "auto_review",
+			SandboxMode:       "workspace-write",
+		},
+	}
+
+	args := s.appServerCommandArgs()
+
+	for _, want := range [][]string{
+		{"-c", `approval_policy="on-request"`},
+		{"-c", `approvals_reviewer="auto_review"`},
+		{"-c", `sandbox_mode="workspace-write"`},
+	} {
+		if !containsSequence(args, want) {
+			t.Fatalf("args missing %v: %v", want, args)
+		}
+	}
+}
+
+func TestAppServerSession_ThreadRequestParamsNativePermissionOverrides(t *testing.T) {
+	s := &appServerSession{
+		mode: "full-auto",
+		permissions: codexPermissionOverrides{
+			ApprovalPolicy:    "on-request",
+			ApprovalsReviewer: "auto_review",
+			SandboxMode:       "read-only",
+		},
+	}
+
+	params := s.threadRequestParams()
+
+	if got := params["approvalPolicy"]; got != "on-request" {
+		t.Fatalf("approvalPolicy = %#v, want on-request", got)
+	}
+	if got := params["approvalsReviewer"]; got != "auto_review" {
+		t.Fatalf("approvalsReviewer = %#v, want auto_review", got)
+	}
+	if got := params["sandbox"]; got != "read-only" {
+		t.Fatalf("sandbox = %#v, want read-only", got)
+	}
+}
+
+func TestAppServerSession_ThreadRequestParamsPartialNativePermissionOverrides(t *testing.T) {
+	tests := []struct {
+		name        string
+		mode        string
+		permissions codexPermissionOverrides
+		want        map[string]any
+		absent      []string
+	}{
+		{
+			name:        "sandbox only preserves full-auto approval",
+			mode:        "full-auto",
+			permissions: codexPermissionOverrides{SandboxMode: "read-only"},
+			want: map[string]any{
+				"approvalPolicy": "never",
+				"sandbox":        "read-only",
+			},
+			absent: []string{"approvalsReviewer"},
+		},
+		{
+			name:        "approval only preserves yolo sandbox",
+			mode:        "yolo",
+			permissions: codexPermissionOverrides{ApprovalPolicy: "on-request"},
+			want: map[string]any{
+				"approvalPolicy": "on-request",
+				"sandbox":        "danger-full-access",
+			},
+			absent: []string{"approvalsReviewer"},
+		},
+		{
+			name:        "reviewer only preserves full-auto mode settings",
+			mode:        "full-auto",
+			permissions: codexPermissionOverrides{ApprovalsReviewer: "guardian_subagent"},
+			want: map[string]any{
+				"approvalPolicy":    "never",
+				"sandbox":           "workspace-write",
+				"approvalsReviewer": "guardian_subagent",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &appServerSession{
+				mode:        tt.mode,
+				permissions: tt.permissions,
+			}
+
+			params := s.threadRequestParams()
+
+			for key, want := range tt.want {
+				if got := params[key]; got != want {
+					t.Fatalf("%s = %#v, want %#v; params=%#v", key, got, want, params)
+				}
+			}
+			for _, key := range tt.absent {
+				if _, ok := params[key]; ok {
+					t.Fatalf("%s present, want absent; params=%#v", key, params)
+				}
+			}
+		})
+	}
+}
+
+func TestAppServerSession_TurnRequestParamsNativePermissionOverrides(t *testing.T) {
+	s := &appServerSession{
+		mode:   "full-auto",
+		effort: "high",
+		permissions: codexPermissionOverrides{
+			ApprovalPolicy:    "on-request",
+			ApprovalsReviewer: "guardian_subagent",
+			SandboxMode:       "workspace-write",
+		},
+	}
+
+	params, err := s.turnRequestParams("thread-1", []map[string]any{{"type": "text", "text": "hello"}})
+	if err != nil {
+		t.Fatalf("turnRequestParams: %v", err)
+	}
+
+	if got := params["approvalPolicy"]; got != "on-request" {
+		t.Fatalf("approvalPolicy = %#v, want on-request", got)
+	}
+	if got := params["approvalsReviewer"]; got != "guardian_subagent" {
+		t.Fatalf("approvalsReviewer = %#v, want guardian_subagent", got)
+	}
+	sandboxPolicy, ok := params["sandboxPolicy"].(map[string]any)
+	if !ok {
+		t.Fatalf("sandboxPolicy = %#v, want map", params["sandboxPolicy"])
+	}
+	if got := sandboxPolicy["type"]; got != "workspaceWrite" {
+		t.Fatalf("sandboxPolicy.type = %#v, want workspaceWrite", got)
+	}
+}
+
+func TestAppServerSession_TurnRequestParamsPartialNativePermissionOverrides(t *testing.T) {
+	tests := []struct {
+		name              string
+		mode              string
+		permissions       codexPermissionOverrides
+		wantApproval      string
+		wantReviewer      string
+		wantSandboxPolicy map[string]any
+	}{
+		{
+			name:              "sandbox only preserves full-auto approval",
+			mode:              "full-auto",
+			permissions:       codexPermissionOverrides{SandboxMode: "read-only"},
+			wantApproval:      "never",
+			wantSandboxPolicy: map[string]any{"type": "readOnly"},
+		},
+		{
+			name:         "approval only leaves yolo sandbox unchanged",
+			mode:         "yolo",
+			permissions:  codexPermissionOverrides{ApprovalPolicy: "on-request"},
+			wantApproval: "on-request",
+		},
+		{
+			name:         "reviewer only preserves full-auto approval",
+			mode:         "full-auto",
+			permissions:  codexPermissionOverrides{ApprovalsReviewer: "guardian_subagent"},
+			wantApproval: "never",
+			wantReviewer: "guardian_subagent",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &appServerSession{
+				mode:        tt.mode,
+				permissions: tt.permissions,
+			}
+
+			params, err := s.turnRequestParams("thread-1", []map[string]any{{"type": "text", "text": "hello"}})
+			if err != nil {
+				t.Fatalf("turnRequestParams: %v", err)
+			}
+
+			if got := params["approvalPolicy"]; got != tt.wantApproval {
+				t.Fatalf("approvalPolicy = %#v, want %#v; params=%#v", got, tt.wantApproval, params)
+			}
+			if tt.wantReviewer != "" {
+				if got := params["approvalsReviewer"]; got != tt.wantReviewer {
+					t.Fatalf("approvalsReviewer = %#v, want %#v; params=%#v", got, tt.wantReviewer, params)
+				}
+			} else if _, ok := params["approvalsReviewer"]; ok {
+				t.Fatalf("approvalsReviewer present, want absent; params=%#v", params)
+			}
+			if tt.wantSandboxPolicy != nil {
+				if got := params["sandboxPolicy"]; !mapsEqual(got, tt.wantSandboxPolicy) {
+					t.Fatalf("sandboxPolicy = %#v, want %#v; params=%#v", got, tt.wantSandboxPolicy, params)
+				}
+			} else if _, ok := params["sandboxPolicy"]; ok {
+				t.Fatalf("sandboxPolicy present, want omitted to keep thread sandbox; params=%#v", params)
+			}
+		})
+	}
+}
+
+func TestAppServerSession_TurnRequestParamsRejectsUnknownSandboxMode(t *testing.T) {
+	s := &appServerSession{
+		permissions: codexPermissionOverrides{SandboxMode: "container"},
+	}
+
+	_, err := s.turnRequestParams("thread-1", []map[string]any{{"type": "text", "text": "hello"}})
+	if err == nil {
+		t.Fatal("turnRequestParams() error = nil, want unsupported sandbox_mode error")
+	}
+	if !strings.Contains(err.Error(), "unsupported codex sandbox_mode") {
+		t.Fatalf("turnRequestParams() error = %v, want unsupported sandbox_mode", err)
+	}
+}
+
+func mapsEqual(got any, want map[string]any) bool {
+	gotMap, ok := got.(map[string]any)
+	if !ok || len(gotMap) != len(want) {
+		return false
+	}
+	for key, wantValue := range want {
+		if gotMap[key] != wantValue {
+			return false
+		}
+	}
+	return true
 }
 
 func TestAppServerSession_HandleRateLimitsUpdatedCachesUsage(t *testing.T) {
