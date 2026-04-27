@@ -614,3 +614,145 @@ func TestMultiWorkspaceAgent_NoPropagationWhenParentHasNoRunAs(t *testing.T) {
 		t.Errorf("run_as_env should not be present in opts when parent has no isolation; got %v", opts["run_as_env"])
 	}
 }
+
+// TestCommandContextWithWorkspace_BoundChannel exercises the helper that
+// executeSkill / executeCustomCommand use to route slash commands to the
+// per-channel workspace agent. The previous implementation always handed
+// back the global e.agent, so any /bug, /mode, custom command etc. would
+// run in the project-default work_dir even if the user had bound the
+// channel via /workspace bind.
+func TestCommandContextWithWorkspace_BoundChannel(t *testing.T) {
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "bound-workspace")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	e := newTestEngineWithMultiWorkspaceAgent(t, baseDir)
+	channelID := "C-bound"
+	channelKey := "test-platform:" + channelID
+	e.workspaceBindings.Bind("project:test", channelKey, "bound-channel", wsDir)
+
+	p := &mockChannelResolver{name: "test-platform", names: map[string]string{}}
+	msg := &Message{
+		Platform:   "test-platform",
+		ChannelKey: channelID,
+		SessionKey: channelKey + ":U-001",
+	}
+
+	agent, sessions, interactiveKey, workspaceDir, err := e.commandContextWithWorkspace(p, msg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if agent == nil || sessions == nil {
+		t.Fatalf("expected non-nil workspace agent/sessions, got agent=%v sessions=%v", agent, sessions)
+	}
+	if agent == e.agent {
+		t.Errorf("agent should be a workspace-scoped agent, but got the global e.agent")
+	}
+	if sessions == e.sessions {
+		t.Errorf("sessions should be a workspace-scoped manager, but got the global e.sessions")
+	}
+	wantWS := normalizeWorkspacePath(wsDir)
+	if workspaceDir != wantWS {
+		t.Errorf("workspaceDir = %q, want %q", workspaceDir, wantWS)
+	}
+	wantKey := wantWS + ":" + msg.SessionKey
+	if interactiveKey != wantKey {
+		t.Errorf("interactiveKey = %q, want %q", interactiveKey, wantKey)
+	}
+}
+
+// TestExecuteSkill_MultiWorkspaceUsesWorkspaceSession exercises the full
+// executeSkill path end-to-end (sans actual claude spawn) and confirms that
+// the active session lands on the workspace-scoped SessionManager with a
+// workspace-prefixed interactiveKey, NOT on the global e.sessions. Before
+// the fix, a /bug or any custom command in a bound channel would leak to
+// the global session manager + global agent and run in the project's
+// default work_dir rather than the bound workspace.
+func TestExecuteSkill_MultiWorkspaceUsesWorkspaceSession(t *testing.T) {
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "skill-bound-workspace")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	e := newTestEngineWithMultiWorkspaceAgent(t, baseDir)
+	channelID := "C-skill-bound"
+	channelKey := "test-platform:" + channelID
+	e.workspaceBindings.Bind("project:test", channelKey, "skill-bound", wsDir)
+
+	p := &mockChannelResolver{name: "test-platform"}
+	msg := &Message{
+		Platform:   "test-platform",
+		ChannelKey: channelID,
+		SessionKey: channelKey + ":U-skill-tester",
+	}
+	skill := &Skill{Name: "noop", Prompt: "do nothing"}
+
+	// Pre-resolve the workspace-scoped sessions so we can inspect it after
+	// executeSkill returns. workspaceContext is the same call executeSkill
+	// uses internally; calling it now produces the SessionManager that
+	// should receive the new active session.
+	wantWS := normalizeWorkspacePath(wsDir)
+	_, wsSessions, _, _, err := e.workspaceContext(wantWS, msg.SessionKey)
+	if err != nil {
+		t.Fatalf("pre-resolve workspaceContext: %v", err)
+	}
+	expectedKey := wantWS + ":" + msg.SessionKey
+
+	// Sanity: nothing on either session manager yet.
+	if id := wsSessions.ActiveSessionID(expectedKey); id != "" {
+		t.Fatalf("workspace sessions already had an active session at %q before executeSkill: %s", expectedKey, id)
+	}
+	if id := e.sessions.ActiveSessionID(msg.SessionKey); id != "" {
+		t.Fatalf("global sessions already had an active session at %q before executeSkill: %s", msg.SessionKey, id)
+	}
+
+	// executeSkill kicks off processInteractiveMessageWith in a goroutine,
+	// but the synchronous portion creates the session before returning.
+	e.executeSkill(p, msg, skill, nil)
+
+	// Workspace sessions must have an active session at the prefixed key.
+	if id := wsSessions.ActiveSessionID(expectedKey); id == "" {
+		t.Errorf("expected workspace-scoped active session at %q, got none", expectedKey)
+	}
+	// Global sessions must NOT have leaked the unprefixed key. This is the
+	// exact regression we are guarding against.
+	if id := e.sessions.ActiveSessionID(msg.SessionKey); id != "" {
+		t.Errorf("regression: skill leaked into global e.sessions at %q (id=%s)", msg.SessionKey, id)
+	}
+}
+
+// TestCommandContextWithWorkspace_UnboundChannelFallsBack guards the
+// fallback path: when no binding exists for the channel, the helper must
+// keep returning the global agent/sessions and an empty workspaceDir so
+// behaviour outside multi-workspace bindings is unchanged.
+func TestCommandContextWithWorkspace_UnboundChannelFallsBack(t *testing.T) {
+	baseDir := t.TempDir()
+	e := newTestEngineWithMultiWorkspaceAgent(t, baseDir)
+
+	p := &mockChannelResolver{name: "test-platform", names: map[string]string{}}
+	msg := &Message{
+		Platform:   "test-platform",
+		ChannelKey: "C-unbound",
+		SessionKey: "test-platform:C-unbound:U-001",
+	}
+
+	agent, sessions, interactiveKey, workspaceDir, err := e.commandContextWithWorkspace(p, msg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if agent != e.agent {
+		t.Errorf("expected global e.agent when no binding exists, got different agent")
+	}
+	if sessions != e.sessions {
+		t.Errorf("expected global e.sessions when no binding exists, got different manager")
+	}
+	if workspaceDir != "" {
+		t.Errorf("expected empty workspaceDir when unbound, got %q", workspaceDir)
+	}
+	if interactiveKey != msg.SessionKey {
+		t.Errorf("expected interactiveKey to equal sessionKey when unbound, got %q want %q", interactiveKey, msg.SessionKey)
+	}
+}
