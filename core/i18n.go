@@ -140,6 +140,7 @@ const (
 	MsgToolAllowFailed           MsgKey = "tool_allow_failed"
 	MsgToolAllowedNew            MsgKey = "tool_allowed_new"
 	MsgError                     MsgKey = "error"
+	MsgSessionNotFound           MsgKey = "session_not_found"
 	MsgFailedToStartAgentSession MsgKey = "failed_to_start_agent_session"
 	MsgFailedToDeleteSession     MsgKey = "failed_to_delete_session"
 	MsgEmptyResponse             MsgKey = "empty_response"
@@ -716,6 +717,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 錯誤: %v",
 		LangJapanese:           "❌ エラー: %v",
 		LangSpanish:            "❌ Error: %v",
+	},
+	MsgSessionNotFound: {
+		LangEnglish:            "⚠️ Session expired. Use /new to start a fresh conversation.",
+		LangChinese:            "⚠️ 会话已过期，请发送 /new 开始新会话",
+		LangTraditionalChinese: "⚠️ 會話已過期，請發送 /new 開始新會話",
+		LangJapanese:           "⚠️ セッションが期限切れです。/new で新しい会話を開始してください。",
+		LangSpanish:            "⚠️ Sesión expirada. Usa /new para iniciar una nueva conversación.",
 	},
 	MsgFailedToStartAgentSession: {
 		LangEnglish:            "❌ Error: failed to start agent session",
