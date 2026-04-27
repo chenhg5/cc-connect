@@ -3197,22 +3197,20 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 
 	// Card 2.0 path: engine passes a pre-built rich card JSON; pass it through.
 	var cardJSON string
-	var sendContent string // what goes into the Im.Message.Create content field
+	var sendContent string // what goes into the Im.Message.Create / Reply content field
 	var cardID string      // cardkit-v1 entity id (empty = no streaming text path)
 	if isCardJSON(content) {
 		cardJSON = content
-		// Try cardkit-v1 two-step flow (only for non-thread/reply path; Reply
-		// API doesn't document card_id reference support).
-		if !p.shouldUseThreadOrReplyAPI(rc) {
-			if id, err := p.createCardEntity(ctx, cardJSON); err == nil {
-				cardID = id
-				sendContent = fmt.Sprintf(`{"type":"card","data":{"card_id":"%s"}}`, id)
-			} else {
-				slog.Debug(p.tag()+": create card entity failed, falling back to inline card JSON",
-					"error", err)
-				sendContent = cardJSON
-			}
+		// Try cardkit-v1 two-step flow regardless of Reply vs Create. Both
+		// Im.Message.Reply and Im.Message.Create accept the {type:card,data:{card_id}}
+		// content schema (verified by direct API call); skipping Reply mode would
+		// disable cardkit-v1 streaming on every @-mention turn (the dominant case).
+		if id, err := p.createCardEntity(ctx, cardJSON); err == nil {
+			cardID = id
+			sendContent = fmt.Sprintf(`{"type":"card","data":{"card_id":"%s"}}`, id)
 		} else {
+			slog.Info(p.tag()+": create card entity failed, falling back to inline card JSON",
+				"error", err)
 			sendContent = cardJSON
 		}
 	} else {
