@@ -3472,11 +3472,11 @@ func (p *Platform) onBotMenu(event *larkapplication.P2BotMenuV6) error {
 const defaultToolIcon = "setting-inter_outlined"
 
 var toolIconMap = map[string]string{
-	"Bash":      "terminal-two_outlined",
+	"Bash":      "code_outlined",          // was: terminal-two_outlined (not in official Lark icon library)
 	"Edit":      "edit_outlined",
-	"Read":      "file-open_outlined",
-	"Write":     "notes_outlined",
-	"Glob":      "folder-open_outlined",
+	"Read":      "file-link-text_outlined", // was: file-open_outlined (not in official Lark icon library)
+	"Write":     "richtext_outlined",      // was: notes_outlined (not in official Lark icon library)
+	"Glob":      "creat-folder_outlined",  // was: folder-open_outlined (not in official Lark icon library; "creat" is the official spelling)
 	"Grep":      "search_outlined",
 	"WebFetch":  "internet_outlined",
 	"WebSearch": "internet_outlined",
@@ -3538,7 +3538,7 @@ func buildCardJSONWithStatus(content string, status core.CardStatus) string {
 	card := map[string]any{
 		"schema": "2.0",
 		"config": map[string]any{
-			"wide_screen_mode": true,
+			"width_mode": "default", // schema 2.0 field; was wide_screen_mode (schema 1.0)
 		},
 		"header": map[string]any{
 			"template": template,
