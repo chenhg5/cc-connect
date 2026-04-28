@@ -1242,6 +1242,12 @@ app_secret = "your-feishu-app-secret"
 # Optional: specify Codex reasoning effort / 可选：指定 Codex 推理强度
 # reasoning_effort = "high"  # "minimal" | "low" | "medium" | "high" | "xhigh"
 #
+# Optional: override whether tool call progress messages are sent for this project.
+# This only changes the startup default for the project; /quiet and /config can still change it at runtime.
+# 可选：覆盖当前项目是否发送工具调用进度消息。
+# 这只会修改项目启动时的默认值；运行时仍可通过 /quiet 和 /config 变更。
+# tool_messages = false
+#
 # # Active provider / 当前激活的 provider
 # # provider = "openai"
 #

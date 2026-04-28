@@ -412,15 +412,7 @@ func main() {
 		}
 
 		// Wire display truncation settings (includes legacy quiet → display mapping)
-		{
-			tm, tool, tmlen, toollen := config.EffectiveDisplay(cfg, &proj)
-			engine.SetDisplayConfig(core.DisplayCfg{
-				ThinkingMessages: tm,
-				ThinkingMaxLen:   tmlen,
-				ToolMaxLen:       toollen,
-				ToolMessages:     tool,
-			})
-		}
+		engine.SetDisplayConfig(projectDisplayCfg(cfg, &proj))
 
 		// Wire hooks
 		if len(cfg.Hooks) > 0 {
@@ -1249,6 +1241,43 @@ func auditEnabled(cfg config.AuditConfig) bool {
 	return strings.TrimSpace(cfg.Postgres.DSN) != "" || strings.TrimSpace(cfg.MongoDB.URI) != ""
 }
 
+func projectDisplayCfg(cfg *config.Config, proj *config.ProjectConfig) core.DisplayCfg {
+	tm, tool, tmlen, toollen := config.EffectiveDisplay(cfg, proj)
+	if override, ok := projectAgentToolMessagesOverride(proj.Agent.Options); ok {
+		tool = override
+	}
+	return core.DisplayCfg{
+		ThinkingMessages: tm,
+		ThinkingMaxLen:   tmlen,
+		ToolMaxLen:       toollen,
+		ToolMessages:     tool,
+	}
+}
+
+func projectAgentToolMessagesOverride(opts map[string]any) (bool, bool) {
+	if len(opts) == 0 {
+		return false, false
+	}
+	raw, ok := opts["tool_messages"]
+	if !ok || raw == nil {
+		return false, false
+	}
+	switch v := raw.(type) {
+	case bool:
+		return v, true
+	case string:
+		parsed, err := strconv.ParseBool(strings.TrimSpace(v))
+		if err != nil {
+			slog.Warn("ignoring invalid agent.options.tool_messages override", "value", v)
+			return false, false
+		}
+		return parsed, true
+	default:
+		slog.Warn("ignoring invalid agent.options.tool_messages override type", "type", fmt.Sprintf("%T", raw))
+		return false, false
+	}
+}
+
 func resolveAuditTimeout(cfg config.AuditConfig) time.Duration {
 	if cfg.TimeoutMs != nil {
 		return time.Duration(*cfg.TimeoutMs) * time.Millisecond
@@ -1438,13 +1467,7 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	}
 
 	// Reload display config (includes legacy quiet → display mapping)
-	tm, tool, tmlen, toollen := config.EffectiveDisplay(cfg, proj)
-	engine.SetDisplayConfig(core.DisplayCfg{
-		ThinkingMessages: tm,
-		ThinkingMaxLen:   tmlen,
-		ToolMaxLen:       toollen,
-		ToolMessages:     tool,
-	})
+	engine.SetDisplayConfig(projectDisplayCfg(cfg, proj))
 	result.DisplayUpdated = true
 
 	// Reload auto-compress settings

@@ -145,6 +145,67 @@ func TestBuildAgentOptionsInjectsProjectScope(t *testing.T) {
 	}
 }
 
+func TestProjectDisplayCfg_InheritsGlobalToolMessagesByDefault(t *testing.T) {
+	tool := false
+	cfg := &config.Config{
+		Display: config.DisplayConfig{
+			ToolMessages: &tool,
+		},
+	}
+	proj := &config.ProjectConfig{
+		Agent: config.AgentConfig{
+			Options: map[string]any{},
+		},
+	}
+
+	got := projectDisplayCfg(cfg, proj)
+	if got.ToolMessages {
+		t.Fatal("ToolMessages = true, want false from global display config")
+	}
+}
+
+func TestProjectDisplayCfg_AgentOptionsOverrideToolMessages(t *testing.T) {
+	global := false
+	cfg := &config.Config{
+		Display: config.DisplayConfig{
+			ToolMessages: &global,
+		},
+	}
+	proj := &config.ProjectConfig{
+		Agent: config.AgentConfig{
+			Options: map[string]any{
+				"tool_messages": true,
+			},
+		},
+	}
+
+	got := projectDisplayCfg(cfg, proj)
+	if !got.ToolMessages {
+		t.Fatal("ToolMessages = false, want true from agent.options override")
+	}
+}
+
+func TestProjectDisplayCfg_InvalidAgentOptionsToolMessagesIgnored(t *testing.T) {
+	global := false
+	cfg := &config.Config{
+		Display: config.DisplayConfig{
+			ToolMessages: &global,
+		},
+	}
+	proj := &config.ProjectConfig{
+		Agent: config.AgentConfig{
+			Options: map[string]any{
+				"tool_messages": "definitely-not-a-bool",
+			},
+		},
+	}
+
+	got := projectDisplayCfg(cfg, proj)
+	if got.ToolMessages {
+		t.Fatal("ToolMessages = true, want invalid override to fall back to global false")
+	}
+}
+
 func TestWireAgentProvidersStartsRefreshAfterProviderWiring(t *testing.T) {
 	agent := &stubProviderRefreshAgent{activateOK: true}
 	proj := config.ProjectConfig{
