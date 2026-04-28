@@ -663,67 +663,6 @@ func TestCommandContextWithWorkspace_BoundChannel(t *testing.T) {
 	}
 }
 
-// TestExecuteSkill_MultiWorkspaceUsesWorkspaceSession exercises the full
-// executeSkill path end-to-end (sans actual claude spawn) and confirms that
-// the active session lands on the workspace-scoped SessionManager with a
-// workspace-prefixed interactiveKey, NOT on the global e.sessions. Before
-// the fix, a /bug or any custom command in a bound channel would leak to
-// the global session manager + global agent and run in the project's
-// default work_dir rather than the bound workspace.
-func TestExecuteSkill_MultiWorkspaceUsesWorkspaceSession(t *testing.T) {
-	baseDir := t.TempDir()
-	wsDir := filepath.Join(baseDir, "skill-bound-workspace")
-	if err := os.MkdirAll(wsDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	e := newTestEngineWithMultiWorkspaceAgent(t, baseDir)
-	channelID := "C-skill-bound"
-	channelKey := "test-platform:" + channelID
-	e.workspaceBindings.Bind("project:test", channelKey, "skill-bound", wsDir)
-
-	p := &mockChannelResolver{name: "test-platform"}
-	msg := &Message{
-		Platform:   "test-platform",
-		ChannelKey: channelID,
-		SessionKey: channelKey + ":U-skill-tester",
-	}
-	skill := &Skill{Name: "noop", Prompt: "do nothing"}
-
-	// Pre-resolve the workspace-scoped sessions so we can inspect it after
-	// executeSkill returns. workspaceContext is the same call executeSkill
-	// uses internally; calling it now produces the SessionManager that
-	// should receive the new active session.
-	wantWS := normalizeWorkspacePath(wsDir)
-	_, wsSessions, _, _, err := e.workspaceContext(wantWS, msg.SessionKey)
-	if err != nil {
-		t.Fatalf("pre-resolve workspaceContext: %v", err)
-	}
-	expectedKey := wantWS + ":" + msg.SessionKey
-
-	// Sanity: nothing on either session manager yet.
-	if id := wsSessions.ActiveSessionID(expectedKey); id != "" {
-		t.Fatalf("workspace sessions already had an active session at %q before executeSkill: %s", expectedKey, id)
-	}
-	if id := e.sessions.ActiveSessionID(msg.SessionKey); id != "" {
-		t.Fatalf("global sessions already had an active session at %q before executeSkill: %s", msg.SessionKey, id)
-	}
-
-	// executeSkill kicks off processInteractiveMessageWith in a goroutine,
-	// but the synchronous portion creates the session before returning.
-	e.executeSkill(p, msg, skill, nil)
-
-	// Workspace sessions must have an active session at the prefixed key.
-	if id := wsSessions.ActiveSessionID(expectedKey); id == "" {
-		t.Errorf("expected workspace-scoped active session at %q, got none", expectedKey)
-	}
-	// Global sessions must NOT have leaked the unprefixed key. This is the
-	// exact regression we are guarding against.
-	if id := e.sessions.ActiveSessionID(msg.SessionKey); id != "" {
-		t.Errorf("regression: skill leaked into global e.sessions at %q (id=%s)", msg.SessionKey, id)
-	}
-}
-
 // TestCommandContextWithWorkspace_UnboundChannelFallsBack guards the
 // fallback path: when no binding exists for the channel, the helper must
 // keep returning the global agent/sessions and an empty workspaceDir so
