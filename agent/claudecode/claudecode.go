@@ -302,9 +302,10 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 		return models
 	}
 	return []core.ModelOption{
-		{Name: "sonnet", Desc: "Claude Sonnet 4 (balanced)"},
-		{Name: "opus", Desc: "Claude Opus 4 (most capable)"},
-		{Name: "haiku", Desc: "Claude Haiku 3.5 (fastest)"},
+		{Name: "sonnet", Desc: "Claude Sonnet (balanced)"},
+		{Name: "opus", Desc: "Claude Opus (most capable)"},
+		{Name: "opus[1m]", Desc: "Claude Opus (1M context)"},
+		{Name: "haiku", Desc: "Claude Haiku (fastest)"},
 	}
 }
 
@@ -1096,7 +1097,9 @@ func boolVal(m map[string]any, key string) bool {
 // 1. Replacing path separators (/ or \) with "-"
 // 2. Replacing colons (:) with "-" (Windows drive letters)
 // 3. Replacing underscores (_) with "-"
-// 4. Replacing all non-ASCII characters with "-"
+// 4. Replacing spaces and tildes (~) with "-" (common in macOS iCloud paths like
+//    "/Users/x/Library/Mobile Documents/com~apple~CloudDocs/...")
+// 5. Replacing all non-ASCII characters with "-"
 func encodeClaudeProjectKey(absPath string) string {
 	// First, normalize to forward slashes for consistent processing
 	normalized := strings.ReplaceAll(absPath, "\\", "/")
@@ -1104,7 +1107,7 @@ func encodeClaudeProjectKey(absPath string) string {
 	// Build the encoded key character by character
 	var result strings.Builder
 	for _, r := range normalized {
-		if r == '/' || r == ':' || r == '_' {
+		if r == '/' || r == ':' || r == '_' || r == ' ' || r == '~' {
 			result.WriteRune('-')
 		} else if r < 128 { // ASCII range (0-127)
 			result.WriteRune(r)

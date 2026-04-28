@@ -22,6 +22,7 @@ type Agent struct {
 	workDir     string
 	command     string
 	args        []string
+	staticEnv   map[string]string
 	extraEnv    []string
 	sessionEnv  []string
 	authMethod  string // optional, e.g. "cursor_login" for Cursor CLI (see authenticate RPC)
@@ -81,6 +82,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 
 	args := parseStringSlice(opts["args"])
+	staticEnv := envMapFromOpts(opts)
 	extra := envPairsFromOpts(opts)
 	authMethod, _ := opts["auth_method"].(string)
 	authMethod = strings.TrimSpace(authMethod)
@@ -96,11 +98,35 @@ func New(opts map[string]any) (core.Agent, error) {
 		workDir:     workDir,
 		command:     cmdStr,
 		args:        args,
+		staticEnv:   staticEnv,
 		extraEnv:    extra,
 		authMethod:  authMethod,
 		displayName: displayName,
 		mode:        mode,
 	}, nil
+}
+
+func envMapFromOpts(opts map[string]any) map[string]string {
+	raw, ok := opts["env"]
+	if !ok || raw == nil {
+		return nil
+	}
+	switch m := raw.(type) {
+	case map[string]string:
+		out := make(map[string]string, len(m))
+		for k, v := range m {
+			out[k] = v
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]string, len(m))
+		for k, v := range m {
+			out[k] = fmt.Sprint(v)
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 func envPairsFromOpts(opts map[string]any) []string {
@@ -161,6 +187,32 @@ func (a *Agent) GetWorkDir() string {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.workDir
+}
+
+func (a *Agent) WorkspaceAgentOptions() map[string]any {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	opts := map[string]any{
+		"command": a.command,
+	}
+	if len(a.args) > 0 {
+		opts["args"] = append([]string(nil), a.args...)
+	}
+	if len(a.staticEnv) > 0 {
+		env := make(map[string]string, len(a.staticEnv))
+		for k, v := range a.staticEnv {
+			env[k] = v
+		}
+		opts["env"] = env
+	}
+	if a.authMethod != "" {
+		opts["auth_method"] = a.authMethod
+	}
+	if a.displayName != "" {
+		opts["display_name"] = a.displayName
+	}
+	return opts
 }
 
 func (a *Agent) SetSessionEnv(env []string) {

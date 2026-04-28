@@ -549,46 +549,9 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 			}
 		}
 
-		var images []core.ImageAttachment
-		var audio *core.AudioAttachment
-		var files []core.FileAttachment
-		for _, att := range m.Attachments {
-			ct := strings.ToLower(att.ContentType)
-			if strings.HasPrefix(ct, "audio/") {
-				data, err := downloadURL(att.URL)
-				if err != nil {
-					slog.Error("discord: download audio failed", "url", att.URL, "error", err)
-					continue
-				}
-				format := "ogg"
-				if parts := strings.SplitN(ct, "/", 2); len(parts) == 2 {
-					format = parts[1]
-				}
-				audio = &core.AudioAttachment{
-					MimeType: ct, Data: data, Format: format,
-				}
-			} else if att.Width > 0 && att.Height > 0 {
-				data, err := downloadURL(att.URL)
-				if err != nil {
-					slog.Error("discord: download attachment failed", "url", att.URL, "error", err)
-					continue
-				}
-				images = append(images, core.ImageAttachment{
-					MimeType: att.ContentType, Data: data, FileName: att.Filename,
-				})
-			} else {
-				data, err := downloadURL(att.URL)
-				if err != nil {
-					slog.Error("discord: download file attachment failed", "url", att.URL, "error", err)
-					continue
-				}
-				files = append(files, core.FileAttachment{
-					MimeType: att.ContentType, Data: data, FileName: att.Filename,
-				})
-			}
-		}
+		images, files, audio := classifyAttachments(m.Attachments, downloadURL)
 
-		if m.Content == "" && len(images) == 0 && audio == nil && len(files) == 0 {
+		if m.Content == "" && len(images) == 0 && len(files) == 0 && audio == nil {
 			return
 		}
 
@@ -1266,6 +1229,49 @@ func (p *Platform) resolveBotRoleIDForGuild(s *discordgo.Session, guildID string
 		}
 	}
 	return "", nil
+}
+
+// classifyAttachments downloads and sorts Discord message attachments into
+// images, files, and a single voice/audio attachment based on ContentType.
+// Attachments whose ContentType is empty fall back to width/height for
+// image detection; anything unrecognized is treated as a generic file so
+// PDFs, documents, archives, etc. are not silently dropped. If multiple
+// audio attachments appear only the last successful one is kept.
+func classifyAttachments(atts []*discordgo.MessageAttachment, download func(string) ([]byte, error)) (images []core.ImageAttachment, files []core.FileAttachment, audio *core.AudioAttachment) {
+	for _, att := range atts {
+		if att == nil {
+			continue
+		}
+		ct := strings.ToLower(att.ContentType)
+		switch {
+		case strings.HasPrefix(ct, "audio/"):
+			data, err := download(att.URL)
+			if err != nil {
+				slog.Error("discord: download audio failed", "url", att.URL, "error", err)
+				continue
+			}
+			format := "ogg"
+			if parts := strings.SplitN(ct, "/", 2); len(parts) == 2 {
+				format = parts[1]
+			}
+			audio = &core.AudioAttachment{MimeType: ct, Data: data, Format: format}
+		case strings.HasPrefix(ct, "image/"), ct == "" && att.Width > 0 && att.Height > 0:
+			data, err := download(att.URL)
+			if err != nil {
+				slog.Error("discord: download image failed", "url", att.URL, "file_name", att.Filename, "error", err)
+				continue
+			}
+			images = append(images, core.ImageAttachment{MimeType: att.ContentType, Data: data, FileName: att.Filename})
+		default:
+			data, err := download(att.URL)
+			if err != nil {
+				slog.Error("discord: download file failed", "url", att.URL, "file_name", att.Filename, "error", err)
+				continue
+			}
+			files = append(files, core.FileAttachment{MimeType: att.ContentType, Data: data, FileName: att.Filename})
+		}
+	}
+	return images, files, audio
 }
 
 const maxDownloadBytes = 50 << 20 // 50 MiB

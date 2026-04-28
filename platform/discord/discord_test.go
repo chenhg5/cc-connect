@@ -1205,3 +1205,74 @@ func TestReplyContextForDeferredInteractionFallback(t *testing.T) {
 		})
 	}
 }
+
+func TestClassifyAttachments_RoutesPDFAndOtherFilesToFiles(t *testing.T) {
+	payloads := map[string][]byte{
+		"https://cdn.discord/pdf":   []byte("%PDF-1.4 pretend"),
+		"https://cdn.discord/zip":   []byte("PK\x03\x04 pretend"),
+		"https://cdn.discord/png":   []byte("\x89PNG pretend"),
+		"https://cdn.discord/ogg":   []byte("OggS pretend"),
+		"https://cdn.discord/blank": []byte("legacy image bytes"),
+	}
+	download := func(u string) ([]byte, error) {
+		data, ok := payloads[u]
+		if !ok {
+			return nil, fmt.Errorf("unexpected url %s", u)
+		}
+		return data, nil
+	}
+
+	atts := []*discordgo.MessageAttachment{
+		{URL: "https://cdn.discord/pdf", ContentType: "application/pdf", Filename: "report.pdf"},
+		{URL: "https://cdn.discord/zip", ContentType: "application/zip", Filename: "bundle.zip"},
+		{URL: "https://cdn.discord/png", ContentType: "image/png", Filename: "shot.png", Width: 1024, Height: 768},
+		{URL: "https://cdn.discord/ogg", ContentType: "audio/ogg", Filename: "voice.ogg"},
+		{URL: "https://cdn.discord/blank", ContentType: "", Filename: "legacy.jpg", Width: 640, Height: 480},
+	}
+
+	images, files, audio := classifyAttachments(atts, download)
+
+	if len(images) != 2 {
+		t.Fatalf("images = %d, want 2 (png + empty-ct fallback)", len(images))
+	}
+	if images[0].FileName != "shot.png" || images[0].MimeType != "image/png" {
+		t.Fatalf("images[0] = %+v, want png attachment", images[0])
+	}
+	if images[1].FileName != "legacy.jpg" {
+		t.Fatalf("images[1] = %+v, want legacy jpg via width/height fallback", images[1])
+	}
+
+	if len(files) != 2 {
+		t.Fatalf("files = %d, want 2 (pdf + zip)", len(files))
+	}
+	gotNames := []string{files[0].FileName, files[1].FileName}
+	if !reflect.DeepEqual(gotNames, []string{"report.pdf", "bundle.zip"}) {
+		t.Fatalf("file names = %v, want [report.pdf bundle.zip]", gotNames)
+	}
+	if files[0].MimeType != "application/pdf" || string(files[0].Data) != "%PDF-1.4 pretend" {
+		t.Fatalf("files[0] = %+v, want downloaded pdf bytes", files[0])
+	}
+
+	if audio == nil || audio.Format != "ogg" || string(audio.Data) != "OggS pretend" {
+		t.Fatalf("audio = %+v, want ogg voice attachment", audio)
+	}
+}
+
+func TestClassifyAttachments_SkipsFailedDownloadsButKeepsSiblings(t *testing.T) {
+	download := func(u string) ([]byte, error) {
+		if strings.HasSuffix(u, "broken") {
+			return nil, fmt.Errorf("boom")
+		}
+		return []byte("ok"), nil
+	}
+
+	atts := []*discordgo.MessageAttachment{
+		{URL: "https://cdn.discord/broken", ContentType: "application/pdf", Filename: "bad.pdf"},
+		{URL: "https://cdn.discord/good", ContentType: "application/pdf", Filename: "good.pdf"},
+	}
+
+	_, files, _ := classifyAttachments(atts, download)
+	if len(files) != 1 || files[0].FileName != "good.pdf" {
+		t.Fatalf("files = %+v, want only good.pdf", files)
+	}
+}

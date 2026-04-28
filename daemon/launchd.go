@@ -16,6 +16,12 @@ const (
 	launchdLabel = "com.cc-connect.service"
 )
 
+var runLaunchctl = func(args ...string) (string, error) {
+	cmd := exec.Command("launchctl", args...)
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
 type launchdManager struct{}
 
 func newPlatformManager() (Manager, error) {
@@ -34,28 +40,28 @@ func (m *launchdManager) Install(cfg Config) error {
 		return fmt.Errorf("create log dir: %w", err)
 	}
 
-	// Unload existing service first (ignore errors)
-	_ = exec.Command("launchctl", "bootout", fmt.Sprintf("gui/%d/%s", os.Getuid(), launchdLabel)).Run()
+	// Unload existing service first (ignore errors) so we do not leave a stale
+	// job behind when switching between GUI and headless sessions.
+	bootoutLaunchdTargets()
 
 	plist := buildPlist(cfg)
 	if err := os.WriteFile(plistPath, []byte(plist), 0644); err != nil {
 		return fmt.Errorf("write plist: %w", err)
 	}
 
-	domain := fmt.Sprintf("gui/%d", os.Getuid())
+	domain := preferredLaunchdDomain()
 	if out, err := runLaunchctl("bootstrap", domain, plistPath); err != nil {
 		return fmt.Errorf("launchctl bootstrap: %s (%w)", out, err)
 	}
 
-	if _, err := runLaunchctl("kickstart", "-kp", fmt.Sprintf("%s/%s", domain, launchdLabel)); err != nil {
+	if _, err := runLaunchctl("kickstart", "-kp", launchdTarget(domain)); err != nil {
 		return fmt.Errorf("launchctl kickstart: %w", err)
 	}
 	return nil
 }
 
 func (m *launchdManager) Uninstall() error {
-	domain := fmt.Sprintf("gui/%d", os.Getuid())
-	_, _ = runLaunchctl("bootout", fmt.Sprintf("%s/%s", domain, launchdLabel))
+	bootoutLaunchdTargets()
 
 	plistPath := launchdPlistPath()
 	if err := os.Remove(plistPath); err != nil && !os.IsNotExist(err) {
@@ -65,12 +71,20 @@ func (m *launchdManager) Uninstall() error {
 }
 
 func (*launchdManager) Start() error {
-	domain := fmt.Sprintf("gui/%d", os.Getuid())
+	if _, target, _, ok := loadedLaunchdTarget(); ok {
+		out, err := runLaunchctl("kickstart", "-kp", target)
+		if err != nil {
+			return fmt.Errorf("start: %s (%w)", out, err)
+		}
+		return nil
+	}
+
+	domain := preferredLaunchdDomain()
 	plistPath := launchdPlistPath()
 	var out string
 	if _, err := runLaunchctl("bootstrap", domain, plistPath); err != nil {
 		// already bootstrapped — try kickstart
-		out, err = runLaunchctl("kickstart", "-kp", fmt.Sprintf("%s/%s", domain, launchdLabel))
+		out, err = runLaunchctl("kickstart", "-kp", launchdTarget(domain))
 		if err != nil {
 			return fmt.Errorf("start: %s (%w)", out, err)
 		}
@@ -79,18 +93,29 @@ func (*launchdManager) Start() error {
 }
 
 func (*launchdManager) Stop() error {
-	domain := fmt.Sprintf("gui/%d", os.Getuid())
-	out, err := runLaunchctl("bootout", fmt.Sprintf("%s/%s", domain, launchdLabel))
-	if err != nil {
-		return fmt.Errorf("stop: %s (%w)", out, err)
+	var lastOut string
+	var lastErr error
+	for _, target := range launchdTargets() {
+		out, err := runLaunchctl("bootout", target)
+		if err == nil {
+			return nil
+		}
+		lastOut = out
+		lastErr = err
+	}
+	if lastErr != nil {
+		return fmt.Errorf("stop: %s (%w)", lastOut, lastErr)
 	}
 	return nil
 }
 
 func (*launchdManager) Restart() error {
-	domain := fmt.Sprintf("gui/%d", os.Getuid())
-	target := fmt.Sprintf("%s/%s", domain, launchdLabel)
-	_, _ = runLaunchctl("bootout", target)
+	domain := preferredLaunchdDomain()
+	if loadedDomain, _, _, ok := loadedLaunchdTarget(); ok && domain != launchdGUIDomain() {
+		domain = loadedDomain
+	}
+	target := launchdTarget(domain)
+	bootoutLaunchdTargets()
 
 	plistPath := launchdPlistPath()
 
@@ -125,9 +150,10 @@ func (*launchdManager) Status() (*Status, error) {
 	}
 	st.Installed = true
 
-	domain := fmt.Sprintf("gui/%d", os.Getuid())
-	target := fmt.Sprintf("%s/%s", domain, launchdLabel)
-	out, _ := runLaunchctl("print", target)
+	_, _, out, ok := loadedLaunchdTarget()
+	if !ok {
+		return st, nil
+	}
 
 	for _, line := range strings.Split(out, "\n") {
 		trimmed := strings.TrimSpace(line)
@@ -151,6 +177,62 @@ func launchdPlistPath() string {
 	return filepath.Join(home, "Library", "LaunchAgents", launchdLabel+".plist")
 }
 
+func launchdUserDomain() string {
+	return fmt.Sprintf("user/%d", os.Getuid())
+}
+
+func launchdGUIDomain() string {
+	return fmt.Sprintf("gui/%d", os.Getuid())
+}
+
+func preferredLaunchdDomain() string {
+	guiDomain := launchdGUIDomain()
+	if _, err := runLaunchctl("print", guiDomain); err == nil {
+		return guiDomain
+	}
+	return launchdUserDomain()
+}
+
+func launchdDomains() []string {
+	preferred := preferredLaunchdDomain()
+	guiDomain := launchdGUIDomain()
+	userDomain := launchdUserDomain()
+	if preferred == guiDomain {
+		return []string{guiDomain, userDomain}
+	}
+	return []string{userDomain, guiDomain}
+}
+
+func launchdTarget(domain string) string {
+	return fmt.Sprintf("%s/%s", domain, launchdLabel)
+}
+
+func launchdTargets() []string {
+	domains := launchdDomains()
+	targets := make([]string, 0, len(domains))
+	for _, domain := range domains {
+		targets = append(targets, launchdTarget(domain))
+	}
+	return targets
+}
+
+func loadedLaunchdTarget() (string, string, string, bool) {
+	for _, domain := range launchdDomains() {
+		target := launchdTarget(domain)
+		out, err := runLaunchctl("print", target)
+		if err == nil {
+			return domain, target, out, true
+		}
+	}
+	return "", "", "", false
+}
+
+func bootoutLaunchdTargets() {
+	for _, target := range launchdTargets() {
+		_, _ = runLaunchctl("bootout", target)
+	}
+}
+
 func buildPlist(cfg Config) string {
 	envPATH := cfg.EnvPATH
 	if envPATH == "" {
@@ -170,6 +252,11 @@ func buildPlist(cfg Config) string {
 	<string>%s</string>
 	<key>RunAtLoad</key>
 	<true/>
+	<key>LimitLoadToSessionType</key>
+	<array>
+		<string>Aqua</string>
+		<string>Background</string>
+	</array>
 	<key>KeepAlive</key>
 	<dict>
 		<key>SuccessfulExit</key>
@@ -191,10 +278,4 @@ func buildPlist(cfg Config) string {
 </dict>
 </plist>
 `, launchdLabel, cfg.BinaryPath, cfg.WorkDir, cfg.LogFile, cfg.LogMaxSize, envPATH)
-}
-
-func runLaunchctl(args ...string) (string, error) {
-	cmd := exec.Command("launchctl", args...)
-	out, err := cmd.CombinedOutput()
-	return strings.TrimSpace(string(out)), err
 }

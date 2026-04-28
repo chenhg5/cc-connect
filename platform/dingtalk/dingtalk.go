@@ -513,6 +513,81 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 
 var _ core.ImageSender = (*Platform)(nil)
 
+// SendFile uploads and sends a file via DingTalk oToMessages API.
+// Implements core.FileSender.
+func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachment) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("dingtalk: SendFile: invalid reply context type %T", rctx)
+	}
+
+	name := file.FileName
+	if name == "" {
+		name = "file"
+	}
+
+	mediaID, err := p.uploadMedia(ctx, file.Data, name, "file")
+	if err != nil {
+		return fmt.Errorf("dingtalk: upload file: %w", err)
+	}
+
+	slog.Debug("dingtalk: file uploaded", "media_id", mediaID, "name", name, "size", len(file.Data))
+
+	token, err := p.getAccessToken()
+	if err != nil {
+		return fmt.Errorf("dingtalk: get access token: %w", err)
+	}
+
+	ext := ""
+	if idx := strings.LastIndex(name, "."); idx >= 0 {
+		ext = name[idx+1:]
+	}
+
+	msgParamBytes, _ := json.Marshal(map[string]string{
+		"mediaId":  mediaID,
+		"fileName": name,
+		"fileType": ext,
+	})
+	requestBody := map[string]any{
+		"robotCode": p.robotCode,
+		"userIds":   []string{rc.senderStaffId},
+		"msgKey":    "sampleFile",
+		"msgParam":  string(msgParamBytes),
+	}
+
+	body, err := json.Marshal(requestBody)
+	if err != nil {
+		return fmt.Errorf("dingtalk: marshal file message: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		"https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend",
+		bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("dingtalk: create file request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-acs-dingtalk-access-token", token)
+
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("dingtalk: send file request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	slog.Debug("dingtalk: oToMessages file response", "status", resp.StatusCode, "body", string(respBody))
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("dingtalk: send file failed: status=%d, body=%s", resp.StatusCode, string(respBody))
+	}
+
+	slog.Info("dingtalk: file message sent", "media_id", mediaID, "name", name, "user", rc.senderStaffId)
+	return nil
+}
+
+var _ core.FileSender = (*Platform)(nil)
+
 // SendAudio uploads audio bytes to DingTalk and sends a voice message.
 // Implements core.AudioSender interface.
 // Uses DingTalk oToMessages API with msgKey: "sampleAudio" (voice messages).

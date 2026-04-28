@@ -169,6 +169,13 @@ func main() {
 	config.ConfigPath = configPath
 	slog.Info("config loaded", "path", configPath)
 
+	if len(cfg.Projects) == 0 {
+		fmt.Fprintf(os.Stderr, "Error: no projects configured in %s\n", configPath)
+		fmt.Fprintln(os.Stderr, "Add at least one [[project]] section to your config.toml, or run:")
+		fmt.Fprintln(os.Stderr, "  cc-connect init")
+		os.Exit(1)
+	}
+
 	setupLogger(cfg.Log.Level, logWriter)
 
 	// run_as_user preflight + isolation audit. MUST run before any engine
@@ -481,6 +488,11 @@ func main() {
 			} else {
 				engine.SetEventIdleTimeout(time.Duration(mins) * time.Minute)
 			}
+		}
+
+		// Wire queue depth
+		if cfg.Queue.MaxDepth != nil && *cfg.Queue.MaxDepth > 0 {
+			engine.SetMaxQueuedMessages(*cfg.Queue.MaxDepth)
 		}
 
 		// Wire auto-compress settings
