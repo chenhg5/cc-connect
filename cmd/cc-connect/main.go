@@ -272,10 +272,11 @@ func main() {
 			}
 			bindingStore := filepath.Join(cfg.DataDir, "workspace_bindings.json")
 			engine.SetMultiWorkspace(baseDir, bindingStore)
-			// Per-project value takes precedence over the global.
-			idleMins := proj.WorkspaceIdleTimeoutMins
-			if idleMins == nil {
-				idleMins = cfg.WorkspaceIdleTimeoutMins
+			idleMins := cfg.WorkspaceIdleTimeoutMins
+			if idleMins == nil && proj.WorkspaceIdleTimeoutMinsLegacy != nil {
+				slog.Warn("workspace_idle_timeout_mins under [[projects]] is deprecated; move it to the top level of config.toml. Honoring the legacy value for backwards compatibility.",
+					"project", proj.Name, "value", *proj.WorkspaceIdleTimeoutMinsLegacy)
+				idleMins = proj.WorkspaceIdleTimeoutMinsLegacy
 			}
 			if idleMins != nil {
 				mins := *idleMins

@@ -109,10 +109,11 @@ type Config struct {
 	Management        ManagementConfig        `toml:"management"`
 	Hooks             []HookConfig            `toml:"hooks"`
 	IdleTimeoutMins   *int                    `toml:"idle_timeout_mins,omitempty"` // max minutes between agent events; 0 = no timeout; default 120
-	// WorkspaceIdleTimeoutMins overrides the workspace idle reaper timeout
-	// for all projects running in multi-workspace mode. 0 disables reaping.
-	// A per-project value (ProjectConfig.WorkspaceIdleTimeoutMins) takes
-	// precedence over this global. Default: 15 minutes.
+	// WorkspaceIdleTimeoutMins controls the workspace idle reaper timeout
+	// (multi-workspace mode) for every engine in the process. 0 disables
+	// reaping. Default: 15 minutes. Defined as a top-level (process-global)
+	// setting so the reaper policy is consistent across projects; per-project
+	// configuration is intentionally not supported.
 	WorkspaceIdleTimeoutMins *int `toml:"workspace_idle_timeout_mins,omitempty"`
 }
 
@@ -330,10 +331,12 @@ type ProjectConfig struct {
 	DisabledCommands []string     `toml:"disabled_commands,omitempty"` // commands to disable for this project (e.g. ["restart", "upgrade"])
 	AdminFrom        string       `toml:"admin_from,omitempty"`        // comma-separated user IDs allowed to run privileged commands; "*" = all allowed users
 	Users            *UsersConfig `toml:"users,omitempty"`             // per-user role config; nil = legacy behavior
-	// WorkspaceIdleTimeoutMins overrides the workspace idle reaper timeout for
-	// multi-workspace mode, taking precedence over the global
-	// Config.WorkspaceIdleTimeoutMins. 0 disables reaping. Default: 15 minutes.
-	WorkspaceIdleTimeoutMins *int `toml:"workspace_idle_timeout_mins,omitempty"`
+	// WorkspaceIdleTimeoutMinsLegacy is the deprecated per-project form of
+	// the workspace idle reaper timeout. New configs should set the top-level
+	// Config.WorkspaceIdleTimeoutMins instead. When the top-level field is
+	// unset, this legacy value is still honored (with a deprecation warning)
+	// to keep existing configs working. Will be removed in a future release.
+	WorkspaceIdleTimeoutMinsLegacy *int `toml:"workspace_idle_timeout_mins,omitempty"`
 	// Quiet is legacy per-project override; see Config.Quiet. When true and global [display]
 	// omits thinking_messages / tool_messages, those default to off for this project.
 	Quiet      *bool           `toml:"quiet,omitempty"`

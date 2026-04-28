@@ -9724,6 +9724,443 @@ func (s *stubPlatformWithObserve) SendObservation(_ context.Context, _, _ string
 	return nil
 }
 
+// ===========================================================================
+// Unsolicited events tests
+// ===========================================================================
+
+// waitForPlatformSend polls until the platform has at least n messages or timeout.
+func waitForPlatformSend(p *stubPlatformEngine, n int, timeout time.Duration) []string {
+	deadline := time.After(timeout)
+	for {
+		sent := p.getSent()
+		if len(sent) >= n {
+			return sent
+		}
+		select {
+		case <-deadline:
+			return sent
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// TestUnsolicitedReader_RelaysEventResult verifies that the unsolicited reader
+// goroutine relays EventResult content to the platform.
+func TestUnsolicitedReader_RelaysEventResult(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newControllableSession("unsol-relay")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+
+	sessions := e.sessions
+	session := sessions.GetOrCreateActive("test:ch1:u1")
+
+	state := &interactiveState{
+		agentSession:     sess,
+		platform:         p,
+		replyCtx:         "ctx",
+		eventsNeedResync: false,
+	}
+	iKey := "test:ch1:u1"
+	e.interactiveMu.Lock()
+	e.interactiveStates[iKey] = state
+	e.interactiveMu.Unlock()
+
+	e.startUnsolicitedReader(state, session, sessions, iKey, "")
+	defer e.stopUnsolicitedReader(state)
+
+	// Send only EventResult (no EventText) to ensure the reader uses EventResult.Content.
+	sess.events <- Event{Type: EventResult, Content: "All 5 campaigns created successfully"}
+
+	sent := waitForPlatformSend(p, 1, 5*time.Second)
+	if len(sent) == 0 {
+		t.Fatal("expected unsolicited reader to relay EventResult to platform, got nothing")
+	}
+	found := false
+	for _, s := range sent {
+		if strings.Contains(s, "5 campaigns created successfully") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected relayed content to contain '5 campaigns created successfully', got %v", sent)
+	}
+
+	// Verify eventsNeedResync is false after clean EventResult.
+	state.mu.Lock()
+	resync := state.eventsNeedResync
+	state.mu.Unlock()
+	if resync {
+		t.Error("expected eventsNeedResync=false after clean unsolicited EventResult")
+	}
+}
+
+// TestUnsolicitedReader_StopsOnCancel verifies that stopUnsolicitedReader
+// cleanly stops the reader goroutine and waits for it to exit.
+func TestUnsolicitedReader_StopsOnCancel(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newControllableSession("unsol-cancel")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+
+	sessions := e.sessions
+	session := sessions.GetOrCreateActive("test:ch1:u1")
+
+	state := &interactiveState{
+		agentSession:     sess,
+		platform:         p,
+		replyCtx:         "ctx",
+		eventsNeedResync: false,
+	}
+
+	e.startUnsolicitedReader(state, session, sessions, "test:ch1:u1", "")
+
+	// Capture the done channel before stop nils it.
+	state.mu.Lock()
+	doneCh := state.unsolicitedDone
+	state.mu.Unlock()
+
+	if doneCh == nil {
+		t.Fatal("expected unsolicitedDone to be set after startUnsolicitedReader")
+	}
+
+	start := time.Now()
+	e.stopUnsolicitedReader(state)
+	elapsed := time.Since(start)
+
+	if elapsed > 3*time.Second {
+		t.Errorf("stopUnsolicitedReader took too long: %v", elapsed)
+	}
+
+	// Verify the goroutine actually exited by checking the done channel.
+	select {
+	case <-doneCh:
+		// Good — goroutine exited.
+	default:
+		t.Error("expected unsolicited reader goroutine to have exited (done channel not closed)")
+	}
+}
+
+// TestUnsolicitedReader_SetsResyncOnChannelClose verifies that when the agent
+// process exits (events channel closed), eventsNeedResync is set to true.
+func TestUnsolicitedReader_SetsResyncOnChannelClose(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newControllableSession("unsol-close")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+
+	sessions := e.sessions
+	session := sessions.GetOrCreateActive("test:close:u1")
+
+	state := &interactiveState{
+		agentSession:     sess,
+		platform:         p,
+		replyCtx:         "ctx",
+		eventsNeedResync: false,
+	}
+
+	e.startUnsolicitedReader(state, session, sessions, "test:close:u1", "")
+
+	state.mu.Lock()
+	doneCh := state.unsolicitedDone
+	state.mu.Unlock()
+
+	// Close the events channel (simulates agent process exit).
+	close(sess.events)
+
+	// Wait for reader to detect the close.
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("unsolicited reader did not exit after channel close")
+	}
+
+	state.mu.Lock()
+	resync := state.eventsNeedResync
+	state.mu.Unlock()
+	if !resync {
+		t.Error("expected eventsNeedResync=true after channel close")
+	}
+}
+
+// TestUnsolicitedReader_SetsResyncOnEventError verifies that EventError
+// sets eventsNeedResync to true and relays the error.
+func TestUnsolicitedReader_SetsResyncOnEventError(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newControllableSession("unsol-error")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+
+	sessions := e.sessions
+	session := sessions.GetOrCreateActive("test:error:u1")
+
+	state := &interactiveState{
+		agentSession:     sess,
+		platform:         p,
+		replyCtx:         "ctx",
+		eventsNeedResync: false,
+	}
+
+	e.startUnsolicitedReader(state, session, sessions, "test:error:u1", "")
+
+	state.mu.Lock()
+	doneCh := state.unsolicitedDone
+	state.mu.Unlock()
+
+	// Send an error event.
+	sess.events <- Event{Type: EventError, Error: errors.New("something broke")}
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("unsolicited reader did not exit after EventError")
+	}
+
+	state.mu.Lock()
+	resync := state.eventsNeedResync
+	state.mu.Unlock()
+	if !resync {
+		t.Error("expected eventsNeedResync=true after EventError")
+	}
+
+	// Verify error was relayed to platform.
+	sent := p.getSent()
+	found := false
+	for _, s := range sent {
+		if strings.Contains(s, "something broke") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected error to be relayed to platform, got %v", sent)
+	}
+}
+
+// TestUnsolicitedReader_PermissionDeny verifies that unsolicited permission
+// requests are denied when approveAll is false.
+func TestUnsolicitedReader_PermissionDeny(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+
+	sess := newControllableSession("unsol-perm")
+	permRecorder := &permRecordingSession{
+		controllableAgentSession: *sess,
+	}
+
+	sessions := e.sessions
+	session := sessions.GetOrCreateActive("test:perm:u1")
+
+	state := &interactiveState{
+		agentSession:     permRecorder,
+		platform:         p,
+		replyCtx:         "ctx",
+		eventsNeedResync: false,
+		approveAll:       false,
+	}
+
+	e.startUnsolicitedReader(state, session, sessions, "test:perm:u1", "")
+
+	// Send a permission request.
+	permRecorder.events <- Event{
+		Type:      EventPermissionRequest,
+		RequestID: "req-1",
+		ToolName:  "Bash",
+	}
+
+	// Wait for the response.
+	deadline := time.After(5 * time.Second)
+	for {
+		permRecorder.mu.Lock()
+		calls := permRecorder.permCalls
+		permRecorder.mu.Unlock()
+		if calls > 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for permission response")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	permRecorder.mu.Lock()
+	result := permRecorder.lastPermResult
+	permRecorder.mu.Unlock()
+
+	if result.Behavior != "deny" {
+		t.Errorf("expected deny, got %q", result.Behavior)
+	}
+
+	e.stopUnsolicitedReader(state)
+}
+
+// permRecordingSession wraps controllableAgentSession and records permission responses.
+type permRecordingSession struct {
+	controllableAgentSession
+	mu             sync.Mutex
+	permCalls      int
+	lastPermResult PermissionResult
+}
+
+func (s *permRecordingSession) RespondPermission(_ string, res PermissionResult) error {
+	s.mu.Lock()
+	s.permCalls++
+	s.lastPermResult = res
+	s.mu.Unlock()
+	return nil
+}
+
+// TestEventsNeedResync_DefaultTrue verifies that new interactiveState
+// constructors set eventsNeedResync to true.
+func TestEventsNeedResync_DefaultTrue(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+
+	e.ensureInteractiveStateForQueueing("key1", p, "ctx")
+
+	e.interactiveMu.Lock()
+	state := e.interactiveStates["key1"]
+	e.interactiveMu.Unlock()
+
+	if state == nil {
+		t.Fatal("expected state to be created")
+	}
+	if !state.eventsNeedResync {
+		t.Error("expected eventsNeedResync to be true for new state")
+	}
+}
+
+// TestEventsNeedResync_ClearedOnCleanResult verifies that eventsNeedResync
+// is cleared after a clean EventResult in processInteractiveEvents.
+func TestEventsNeedResync_ClearedOnCleanResult(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newControllableSession("resync-clean")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+
+	sessions := e.sessions
+	session := sessions.GetOrCreateActive("test:resync:u1")
+	session.TryLock()
+
+	state := &interactiveState{
+		agentSession:     sess,
+		platform:         p,
+		replyCtx:         "ctx",
+		eventsNeedResync: true,
+	}
+
+	// Send EventResult to trigger clean exit.
+	go func() {
+		sess.events <- Event{Type: EventResult, Content: "done"}
+	}()
+
+	sendDone := make(chan error, 1)
+	sendDone <- nil
+	e.processInteractiveEvents(state, session, sessions, "test:resync:u1", "", time.Now(), nil, sendDone, "ctx")
+
+	state.mu.Lock()
+	resync := state.eventsNeedResync
+	state.mu.Unlock()
+
+	if resync {
+		t.Error("expected eventsNeedResync to be false after clean EventResult")
+	}
+}
+
+// TestCleanupInteractiveState_StopsUnsolicitedReader verifies that cleanup
+// stops the unsolicited reader goroutine and waits for it to exit.
+func TestCleanupInteractiveState_StopsUnsolicitedReader(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newControllableSession("cleanup-unsol")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+
+	sessions := e.sessions
+	session := sessions.GetOrCreateActive("test:cleanup:u1")
+
+	state := &interactiveState{
+		agentSession:     sess,
+		platform:         p,
+		replyCtx:         "ctx",
+		eventsNeedResync: false,
+	}
+	iKey := "test:cleanup:u1"
+	e.interactiveMu.Lock()
+	e.interactiveStates[iKey] = state
+	e.interactiveMu.Unlock()
+
+	e.startUnsolicitedReader(state, session, sessions, iKey, "")
+
+	// Capture the done channel before cleanup nils it.
+	state.mu.Lock()
+	doneCh := state.unsolicitedDone
+	state.mu.Unlock()
+
+	// Cleanup should stop the reader and close the session.
+	e.cleanupInteractiveState(iKey)
+
+	// Verify the goroutine actually exited.
+	select {
+	case <-doneCh:
+		// Good.
+	case <-time.After(5 * time.Second):
+		t.Fatal("unsolicited reader goroutine did not exit after cleanup")
+	}
+}
+
+// TestWorkspaceIdleTimeout_Configurable verifies that SetWorkspaceIdleTimeout
+// changes the workspace pool's idle timeout.
+func TestWorkspaceIdleTimeout_Configurable(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+
+	tmpDir := t.TempDir()
+	e.SetMultiWorkspace(tmpDir, filepath.Join(tmpDir, "bindings.json"))
+
+	// Default should be DefaultWorkspaceIdleTimeout
+	e.workspacePool.mu.RLock()
+	defaultTimeout := e.workspacePool.idleTimeout
+	e.workspacePool.mu.RUnlock()
+	if defaultTimeout != DefaultWorkspaceIdleTimeout {
+		t.Errorf("expected default timeout %v, got %v", DefaultWorkspaceIdleTimeout, defaultTimeout)
+	}
+
+	// Set custom timeout
+	e.SetWorkspaceIdleTimeout(30 * time.Minute)
+	e.workspacePool.mu.RLock()
+	newTimeout := e.workspacePool.idleTimeout
+	e.workspacePool.mu.RUnlock()
+	if newTimeout != 30*time.Minute {
+		t.Errorf("expected 30m timeout, got %v", newTimeout)
+	}
+
+	// Disable reaping
+	e.SetWorkspaceIdleTimeout(0)
+	e.workspacePool.mu.RLock()
+	zeroTimeout := e.workspacePool.idleTimeout
+	e.workspacePool.mu.RUnlock()
+	if zeroTimeout != 0 {
+		t.Errorf("expected 0 timeout, got %v", zeroTimeout)
+	}
+}
+
+// TestReapIdle_DisabledWhenZeroTimeout verifies that ReapIdle returns nil
+// when idleTimeout is zero.
+func TestReapIdle_DisabledWhenZeroTimeout(t *testing.T) {
+	pool := newWorkspacePool(0)
+	ws := pool.GetOrCreate("/test/workspace")
+	ws.Touch()
+	// Even with an existing workspace, zero timeout disables reaping.
+	reaped := pool.ReapIdle()
+	if len(reaped) != 0 {
+		t.Errorf("expected no reaping with zero timeout, got %v", reaped)
+	}
+}
 // ---------------------------------------------------------------------------
 // Integration tests for /list visibility after /new and provider switches
 // ---------------------------------------------------------------------------
