@@ -169,8 +169,9 @@ func (s *opencodeSession) buildRunArgs(prompt string, imagePaths []string, chatI
 		args = append(args, "--file", imagePath)
 	}
 
-	// Append prompt as positional arg.
-	args = append(args, prompt)
+	// Use "--" to separate flags from the positional prompt so that
+	// --file (yargs [array]) does not greedily consume the prompt text.
+	args = append(args, "--", prompt)
 	return args
 }
 
