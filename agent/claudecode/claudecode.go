@@ -211,6 +211,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		allowedTools:     allowedTools,
 		disallowedTools:  disallowedTools,
 		maxContextTokens: maxContextTokens,
+		sessionEnv:       sessionEnv,
 		activeIdx:        -1,
 		routerURL:        routerURL,
 		routerAPIKey:     routerAPIKey,
