@@ -697,7 +697,7 @@ After upgrading, restart the running cc-connect process.
 
 ## Step 8: Run as Background Service (Optional)
 
-You can run cc-connect as a daemon managed by the OS init system (Linux systemd user service, macOS launchd LaunchAgent).
+You can run cc-connect as a daemon managed by the OS init system (Linux systemd user service, macOS launchd LaunchAgent, Windows Task Scheduler task).
 
 ### Install the daemon
 
@@ -732,6 +732,11 @@ cc-connect daemon logs --log-file /path/to/log  # custom log file
 ```
 
 Logs auto-rotate at the configured max size and keep one backup.
+
+On Windows, `daemon install` creates a native Task Scheduler task named `cc-connect`.
+The task runs at user logon and is also started immediately after installation. The
+installer writes a small PowerShell launcher under `~/.cc-connect` so the scheduled
+task uses the selected config directory, log file, PATH, and proxy environment.
 
 ### Uninstall
 
