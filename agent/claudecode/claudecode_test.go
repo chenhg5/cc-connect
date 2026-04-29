@@ -3,6 +3,8 @@ package claudecode
 import (
 	"os"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"testing"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -495,5 +497,168 @@ func TestFindProjectDir_ICloudPath(t *testing.T) {
 	found := findProjectDir(homeDir, iCloudWorkDir)
 	if found != mockProjectDir {
 		t.Errorf("findProjectDir(%q, %q) = %q, want %q", homeDir, iCloudWorkDir, found, mockProjectDir)
+	}
+}
+
+func TestSnapshotCLIPath(t *testing.T) {
+	cases := []struct {
+		name      string
+		cliBin    string
+		extraArgs []string
+		want      string
+	}{
+		{"default-claude-skipped", "claude", nil, ""},
+		{"empty-binary-skipped", "", nil, ""},
+		{"custom-binary-only", "/usr/local/bin/claude", nil, "/usr/local/bin/claude"},
+		{"wrapper-with-args", "my-cli", []string{"code", "-t", "foo"}, "my-cli code -t foo"},
+		{"claude-with-add-dir", "claude", []string{"--add-dir", "/parent"}, "claude --add-dir /parent"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := snapshotCLIPath(tc.cliBin, tc.extraArgs)
+			if got != tc.want {
+				t.Errorf("snapshotCLIPath(%q, %v) = %q, want %q", tc.cliBin, tc.extraArgs, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWorkspaceAgentOptions_FullSnapshot(t *testing.T) {
+	// Construct an Agent directly so we don't depend on `claude` being on
+	// PATH. WorkspaceAgentOptions only reads fields that the production
+	// New() also writes; this just verifies the snapshot shape.
+	a := &Agent{
+		cliBin:           "my-cli",
+		cliExtraArgs:     []string{"--add-dir", "/parent"},
+		cliArgsFlag:      "-a",
+		model:            "claude-opus-4-7",
+		reasoningEffort:  "high",
+		mode:             "acceptEdits",
+		allowedTools:     []string{"Edit", "Read"},
+		disallowedTools:  []string{"Bash"},
+		maxContextTokens: 200000,
+		routerURL:        "http://127.0.0.1:3456",
+		routerAPIKey:     "secret",
+	}
+	got := a.WorkspaceAgentOptions()
+
+	want := map[string]any{
+		"mode":               "acceptEdits",
+		"cli_path":           "my-cli --add-dir /parent",
+		"cli_args_flag":      "-a",
+		"model":              "claude-opus-4-7",
+		"reasoning_effort":   "high",
+		"allowed_tools":      []any{"Edit", "Read"},
+		"disallowed_tools":   []any{"Bash"},
+		"max_context_tokens": 200000,
+		"router_url":         "http://127.0.0.1:3456",
+		"router_api_key":     "secret",
+	}
+	if len(got) != len(want) {
+		t.Errorf("snapshot len = %d, want %d (got=%v)", len(got), len(want), got)
+	}
+	for k, wv := range want {
+		gv, ok := got[k]
+		if !ok {
+			t.Errorf("snapshot missing key %q", k)
+			continue
+		}
+		if !reflect.DeepEqual(gv, wv) {
+			t.Errorf("snapshot[%q] = %v (%T), want %v (%T)", k, gv, gv, wv, wv)
+		}
+	}
+}
+
+func TestWorkspaceAgentOptions_OmitsZeroValues(t *testing.T) {
+	// Default agent (only mode is always emitted, plus default cliBin
+	// "claude" should be skipped by snapshotCLIPath).
+	a := &Agent{cliBin: "claude", mode: "default"}
+	got := a.WorkspaceAgentOptions()
+
+	if len(got) != 1 {
+		t.Errorf("snapshot len = %d, want 1 (got=%v)", len(got), got)
+	}
+	if got["mode"] != "default" {
+		t.Errorf("snapshot[mode] = %v, want %q", got["mode"], "default")
+	}
+	for _, k := range []string{
+		"cli_path", "cli_args_flag", "model", "reasoning_effort",
+		"allowed_tools", "disallowed_tools", "max_context_tokens",
+		"router_url", "router_api_key",
+	} {
+		if _, ok := got[k]; ok {
+			t.Errorf("snapshot unexpectedly includes %q = %v", k, got[k])
+		}
+	}
+}
+
+func TestWorkspaceAgentOptions_RoundTripsThroughNew(t *testing.T) {
+	// End-to-end: snapshot → New() should reproduce every field. Use
+	// run_as_user to skip the supervisor-side LookPath check, since the
+	// fake "my-cli" binary doesn't exist on the test host's PATH.
+	//
+	// run_as_user only short-circuits LookPath on platforms where
+	// SpawnOptions.IsolationMode() can be true — i.e. Unix. On Windows
+	// it always returns false (see core/runas_windows.go), so the fake
+	// CLI would fail LookPath and New() would error out before the
+	// round-trip assertions run.
+	if runtime.GOOS == "windows" {
+		t.Skip("run_as_user-based LookPath bypass is Unix-only")
+	}
+	parent := &Agent{
+		cliBin:           "my-cli",
+		cliExtraArgs:     []string{"code", "--add-dir", "/parent"},
+		cliArgsFlag:      "-a",
+		model:            "claude-opus-4-7",
+		reasoningEffort:  "high",
+		mode:             "acceptEdits",
+		allowedTools:     []string{"Edit", "Read"},
+		disallowedTools:  []string{"Bash"},
+		maxContextTokens: 200000,
+		routerURL:        "http://127.0.0.1:3456",
+		routerAPIKey:     "secret",
+	}
+	opts := parent.WorkspaceAgentOptions()
+	opts["work_dir"] = "/tmp/claudecode-test"
+	opts["run_as_user"] = "skip-lookpath"
+
+	a, err := New(opts)
+	if err != nil {
+		t.Fatalf("New(snapshot) returned error: %v", err)
+	}
+	child := a.(*Agent)
+
+	if child.cliBin != "my-cli" {
+		t.Errorf("cliBin = %q, want %q", child.cliBin, "my-cli")
+	}
+	if !reflect.DeepEqual(child.cliExtraArgs, []string{"code", "--add-dir", "/parent"}) {
+		t.Errorf("cliExtraArgs = %v, want [code --add-dir /parent]", child.cliExtraArgs)
+	}
+	if child.cliArgsFlag != "-a" {
+		t.Errorf("cliArgsFlag = %q, want -a", child.cliArgsFlag)
+	}
+	if child.model != "claude-opus-4-7" {
+		t.Errorf("model = %q, want claude-opus-4-7", child.model)
+	}
+	if child.reasoningEffort != "high" {
+		t.Errorf("reasoningEffort = %q, want high", child.reasoningEffort)
+	}
+	if child.mode != "acceptEdits" {
+		t.Errorf("mode = %q, want acceptEdits", child.mode)
+	}
+	if !reflect.DeepEqual(child.allowedTools, []string{"Edit", "Read"}) {
+		t.Errorf("allowedTools = %v, want [Edit Read]", child.allowedTools)
+	}
+	if !reflect.DeepEqual(child.disallowedTools, []string{"Bash"}) {
+		t.Errorf("disallowedTools = %v, want [Bash]", child.disallowedTools)
+	}
+	if child.maxContextTokens != 200000 {
+		t.Errorf("maxContextTokens = %d, want 200000", child.maxContextTokens)
+	}
+	if child.routerURL != "http://127.0.0.1:3456" {
+		t.Errorf("routerURL = %q, want http://127.0.0.1:3456", child.routerURL)
+	}
+	if child.routerAPIKey != "secret" {
+		t.Errorf("routerAPIKey = %q, want secret", child.routerAPIKey)
 	}
 }
