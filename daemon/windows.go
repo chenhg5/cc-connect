@@ -59,6 +59,12 @@ func (m *schtasksManager) Install(cfg Config) error {
 	}
 	if err := deleteWindowsTask(); err != nil {
 		slog.Warn("schtasks: delete existing task failed", "error", err)
+		if windowsTaskUsesScript(scriptPath) {
+			if err := m.Start(); err != nil {
+				return fmt.Errorf("start existing task: %w", err)
+			}
+			return nil
+		}
 	}
 
 	action := windowsTaskAction(scriptPath)
@@ -143,6 +149,22 @@ func windowsTaskScriptPath() string {
 
 func windowsTaskAction(scriptPath string) string {
 	return fmt.Sprintf(`powershell.exe -WindowStyle Hidden -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%s"`, scriptPath)
+}
+
+func windowsTaskUsesScript(scriptPath string) bool {
+	out, err := runPowerShell(fmt.Sprintf(`
+$task = Get-ScheduledTask -TaskName %s -ErrorAction SilentlyContinue
+if ($null -eq $task) { exit 1 }
+$expected = %s
+foreach ($action in $task.Actions) {
+	if (($action.Execute -like '*powershell*') -and ($action.Arguments -like ('*' + $expected + '*'))) {
+		Write-Output 'true'
+		exit 0
+	}
+}
+exit 1
+`, powerShellLiteral(windowsTaskName), powerShellLiteral(scriptPath)))
+	return err == nil && strings.EqualFold(strings.TrimSpace(out), "true")
 }
 
 func buildWindowsTaskScript(cfg Config) string {
