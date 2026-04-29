@@ -7,6 +7,16 @@ import (
 	"testing"
 )
 
+func TestStrictPowerShellStopsOnCmdletErrors(t *testing.T) {
+	script := strictPowerShell("Write-Output 'ok'")
+	if !strings.HasPrefix(script, "$ErrorActionPreference = 'Stop'\n") {
+		t.Fatalf("strictPowerShell() missing stop prelude:\n%s", script)
+	}
+	if !strings.Contains(script, "Write-Output 'ok'") {
+		t.Fatalf("strictPowerShell() missing original script:\n%s", script)
+	}
+}
+
 func TestBuildWindowsTaskScript(t *testing.T) {
 	cfg := Config{
 		BinaryPath: `C:\Program Files\cc-connect\cc-connect.exe`,

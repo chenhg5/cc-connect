@@ -19,9 +19,13 @@ const (
 )
 
 var runPowerShell = func(script string) (string, error) {
-	cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script)
+	cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", strictPowerShell(script))
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
+}
+
+func strictPowerShell(script string) string {
+	return "$ErrorActionPreference = 'Stop'\n" + script
 }
 
 type schtasksManager struct{}
