@@ -190,7 +190,14 @@ if ($null -eq $task) { exit 0 }
 if ($task.State -eq 'Running') {
 	Stop-ScheduledTask -TaskName %s
 }
-`, powerShellLiteral(windowsTaskName), powerShellLiteral(windowsTaskName)))
+for ($i = 0; $i -lt 20; $i++) {
+	$task = Get-ScheduledTask -TaskName %s -ErrorAction SilentlyContinue
+	if ($null -eq $task -or $task.State -ne 'Running') { exit 0 }
+	Start-Sleep -Milliseconds 500
+}
+Write-Error 'scheduled task did not stop within timeout'
+exit 1
+`, powerShellLiteral(windowsTaskName), powerShellLiteral(windowsTaskName), powerShellLiteral(windowsTaskName)))
 	if err != nil {
 		return fmt.Errorf("stop scheduled task: %s (%w)", out, err)
 	}
