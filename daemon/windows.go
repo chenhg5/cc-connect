@@ -67,15 +67,8 @@ func (m *schtasksManager) Install(cfg Config) error {
 		}
 	}
 
-	action := windowsTaskAction(scriptPath)
-	if out, err := runSchtasks(
-		"/Create",
-		"/TN", windowsTaskName,
-		"/TR", action,
-		"/SC", "ONLOGON",
-		"/F",
-	); err != nil {
-		return fmt.Errorf("schtasks create: %s (%w)", out, err)
+	if err := createWindowsTask(scriptPath); err != nil {
+		return err
 	}
 
 	if err := m.Start(); err != nil {
@@ -149,6 +142,19 @@ func windowsTaskScriptPath() string {
 
 func windowsTaskAction(scriptPath string) string {
 	return fmt.Sprintf(`powershell.exe -WindowStyle Hidden -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%s"`, scriptPath)
+}
+
+func createWindowsTask(scriptPath string) error {
+	out, err := runPowerShell(fmt.Sprintf(`
+$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument %s
+$trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
+Register-ScheduledTask -TaskName %s -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
+`, powerShellLiteral(`-WindowStyle Hidden -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "`+scriptPath+`"`), powerShellLiteral(windowsTaskName)))
+	if err != nil {
+		return fmt.Errorf("register scheduled task: %s (%w)", out, err)
+	}
+	return nil
 }
 
 func windowsTaskUsesScript(scriptPath string) bool {

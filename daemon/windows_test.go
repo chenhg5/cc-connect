@@ -55,6 +55,33 @@ func TestWindowsTaskActionRunsHidden(t *testing.T) {
 	}
 }
 
+func TestWindowsTaskCreateUsesLimitedInteractivePrincipal(t *testing.T) {
+	orig := runPowerShell
+	t.Cleanup(func() { runPowerShell = orig })
+
+	var script string
+	runPowerShell = func(s string) (string, error) {
+		script = s
+		return "", nil
+	}
+
+	if err := createWindowsTask(`C:\Users\me\.cc-connect\cc-connect-daemon.ps1`); err != nil {
+		t.Fatalf("createWindowsTask() error = %v", err)
+	}
+	for _, want := range []string{
+		`New-ScheduledTaskAction`,
+		`Register-ScheduledTask`,
+		`-LogonType Interactive`,
+		`-RunLevel Limited`,
+		`-WindowStyle Hidden`,
+		`C:\Users\me\.cc-connect\cc-connect-daemon.ps1`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("create script missing %q:\n%s", want, script)
+		}
+	}
+}
+
 func TestPowerShellLiteralEscapesSingleQuotes(t *testing.T) {
 	got := powerShellLiteral(`C:\Users\O'Brien\.cc-connect`)
 	want := `'C:\Users\O''Brien\.cc-connect'`
