@@ -1222,13 +1222,16 @@ app_secret = "your-feishu-app-secret"
 #
 # [projects.agent.options]
 # work_dir = "/path/to/project"
-# mode = "suggest"  # "suggest" | "auto-edit" | "full-auto" | "yolo"
+# mode = "default"  # "default" | "auto-review" | "full-access"
 #
 # Mode options / 模式说明:
-# - "suggest":   ask permission for every tool call (default, safest) / 每次调用都需确认（默认，最安全）
-# - "auto-edit": auto-approve file edits, ask for shell commands / 文件编辑自动通过，Shell 命令仍需确认
-# - "full-auto": auto-approve everything with workspace sandbox / 全部自动通过，工作区沙箱保护
-# - "yolo":      bypass all approvals and sandbox (dangerous) / 跳过所有审批和沙箱（危险）
+# - "default":     Codex default preset: workspace-write sandbox with approvals on request / Codex 默认权限：工作区可写沙箱，按需审批
+# - "auto-review": Codex auto-reviewer handles approval requests / 由 Codex 自动审查器处理审批请求
+# - "full-access": bypass approvals and sandbox (dangerous) / 跳过审批和沙箱（危险）
+# Legacy aliases are accepted for compatibility:
+# 兼容旧别名：
+# - "suggest", "auto-edit", "full-auto" -> "default"
+# - "yolo", "bypassPermissions" -> "full-access"
 #
 # Optional: specify a model / 可选：指定模型
 # model = "o3"

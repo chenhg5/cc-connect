@@ -78,10 +78,11 @@ All agents support permission modes switchable at runtime via `/mode`.
 
 | Mode | Config Value | Behavior |
 |------|-------------|----------|
-| Suggest | `suggest` | Only trusted commands run without approval |
-| Auto Edit | `auto-edit` | Model decides when to ask |
-| Full Auto | `full-auto` | Auto-approve with sandbox |
-| YOLO | `yolo` | Bypass all approvals and sandbox |
+| Default | `default` | Workspace-write sandbox with approvals on request |
+| Auto Review | `auto-review` | Route approval requests to Codex auto-reviewer |
+| Full Access | `full-access` | Bypass approvals and sandbox |
+
+Legacy aliases are still accepted: `suggest`, `auto-edit`, and `full-auto` map to `default`; `yolo` and `bypassPermissions` map to `full-access`.
 
 ### Cursor Agent Modes
 
@@ -119,7 +120,7 @@ mode = "default"
 Switch at runtime:
 ```
 /mode          # show current and available modes
-/mode yolo     # switch to YOLO mode
+/mode full-access # switch to full access mode
 /mode default  # switch back
 ```
 

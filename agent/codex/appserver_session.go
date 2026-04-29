@@ -162,7 +162,7 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
 		workDir:   workDir,
 		model:     model,
 		effort:    effort,
-		mode:      mode,
+		mode:      normalizeMode(mode),
 		extraEnv:  append([]string(nil), extraEnv...),
 		codexHome: strings.TrimSpace(codexHome),
 		events:    make(chan core.Event, 128),
@@ -308,23 +308,53 @@ func (s *appServerSession) threadRequestParams() map[string]any {
 	if model := s.GetModel(); model != "" {
 		params["model"] = model
 	}
-	if approval, sandbox := appServerModeSettings(s.mode); approval != "" {
-		params["approvalPolicy"] = approval
-		if sandbox != "" {
-			params["sandbox"] = sandbox
-		}
+	settings := appServerModeSettings(s.mode)
+	if settings.approvalPolicy != "" {
+		params["approvalPolicy"] = settings.approvalPolicy
+	}
+	if settings.sandbox != "" {
+		params["sandbox"] = settings.sandbox
+	}
+	if settings.approvalsReviewer != "" {
+		params["approvalsReviewer"] = settings.approvalsReviewer
 	}
 	return params
 }
 
-func appServerModeSettings(mode string) (approval string, sandbox string) {
+type appServerModeConfig struct {
+	approvalPolicy    string
+	sandbox           string
+	sandboxPolicy     map[string]any
+	approvalsReviewer string
+}
+
+func appServerModeSettings(mode string) appServerModeConfig {
 	switch normalizeMode(mode) {
-	case "auto-edit", "full-auto":
-		return "never", "workspace-write"
-	case "yolo":
-		return "never", "danger-full-access"
+	case "default":
+		return appServerModeConfig{
+			approvalPolicy: "on-request",
+			sandbox:        "workspace-write",
+			sandboxPolicy:  map[string]any{"type": "workspaceWrite"},
+		}
+	case "auto-review":
+		return appServerModeConfig{
+			approvalPolicy:    "on-request",
+			sandbox:           "workspace-write",
+			sandboxPolicy:     map[string]any{"type": "workspaceWrite"},
+			approvalsReviewer: "auto_review",
+		}
+	case "full-access":
+		return appServerModeConfig{
+			approvalPolicy: "never",
+			sandbox:        "danger-full-access",
+			sandboxPolicy:  map[string]any{"type": "dangerFullAccess"},
+		}
 	default:
-		return "on-request", "read-only"
+		return appServerModeConfig{
+			approvalPolicy: "on-request",
+			sandbox:        "workspace-write",
+			sandboxPolicy:  map[string]any{"type": "workspaceWrite"},
+		}
 	}
 }
 
@@ -431,8 +461,15 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	if effort := s.GetReasoningEffort(); effort != "" {
 		params["effort"] = effort
 	}
-	if approval, _ := appServerModeSettings(s.mode); approval != "" {
-		params["approvalPolicy"] = approval
+	settings := appServerModeSettings(s.mode)
+	if settings.approvalPolicy != "" {
+		params["approvalPolicy"] = settings.approvalPolicy
+	}
+	if settings.sandboxPolicy != nil {
+		params["sandboxPolicy"] = settings.sandboxPolicy
+	}
+	if settings.approvalsReviewer != "" {
+		params["approvalsReviewer"] = settings.approvalsReviewer
 	}
 
 	var resp turnStartResponse

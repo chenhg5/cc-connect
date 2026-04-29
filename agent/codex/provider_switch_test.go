@@ -160,7 +160,7 @@ func TestIntegration_Codex_ProviderSwitch_SessionArgs(t *testing.T) {
 				activeIdx: -1,
 				workDir:   workDir,
 				codexHome: codexHome,
-				mode:      "suggest",
+				mode:      "default",
 				backend:   "exec",
 			}
 			a.SetActiveProvider(prov.Name)
@@ -293,7 +293,7 @@ func TestIntegration_Codex_ProviderSwitch_SendMessage(t *testing.T) {
 				activeIdx: -1,
 				workDir:   workDir,
 				codexHome: codexHome,
-				mode:      "full-auto",
+				mode:      "default",
 				backend:   "exec",
 			}
 			a.SetActiveProvider(prov.Name)

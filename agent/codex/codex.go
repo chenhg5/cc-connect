@@ -22,16 +22,15 @@ func init() {
 
 // Agent drives OpenAI Codex CLI using `codex exec --json`.
 //
-// Modes (maps to codex exec flags):
-//   - "suggest":   default, no special flags (safe commands only)
-//   - "auto-edit": --full-auto (sandbox-protected auto execution)
-//   - "full-auto": --full-auto (sandbox-protected auto execution)
-//   - "yolo":      --dangerously-bypass-approvals-and-sandbox
+// Modes (maps to Codex permission presets):
+//   - "default":     Codex default sandbox and approval behavior
+//   - "auto-review": Codex auto-reviewer handles approval requests
+//   - "full-access": bypass approvals and sandbox
 type Agent struct {
 	workDir         string
 	model           string
 	reasoningEffort string
-	mode            string // "suggest" | "auto-edit" | "full-auto" | "yolo"
+	mode            string // "default" | "auto-review" | "full-access"
 	backend         string // "exec" | "app_server"
 	appServerURL    string
 	codexHome       string
@@ -101,14 +100,19 @@ func normalizeBackend(raw string) string {
 
 func normalizeMode(raw string) string {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "auto-edit", "autoedit", "auto_edit", "edit":
-		return "auto-edit"
-	case "full-auto", "fullauto", "full_auto", "auto":
-		return "full-auto"
-	case "yolo", "bypass", "dangerously-bypass":
-		return "yolo"
+	case "", "default", "suggest":
+		return "default"
+	case "auto-review", "autoreview", "auto_review":
+		return "auto-review"
+	case "full-access", "fullaccess", "full_access", "danger-full-access",
+		"dangerously-bypass", "dangerously-bypass-approvals-and-sandbox",
+		"bypass", "bypasspermissions", "bypass-permissions", "bypass_permissions", "yolo":
+		return "full-access"
+	case "auto-edit", "autoedit", "auto_edit", "edit",
+		"full-auto", "fullauto", "full_auto", "auto":
+		return "default"
 	default:
-		return "suggest"
+		return "default"
 	}
 }
 
@@ -639,9 +643,8 @@ func (a *Agent) activeProviderCodexConfig() (name string, apiKey string, wireAPI
 
 func (a *Agent) PermissionModes() []core.PermissionModeInfo {
 	return []core.PermissionModeInfo{
-		{Key: "suggest", Name: "Suggest", NameZh: "建议", Desc: "Ask permission for every tool call", DescZh: "每次工具调用都需确认"},
-		{Key: "auto-edit", Name: "Auto Edit", NameZh: "自动编辑", Desc: "Auto-approve file edits, ask for shell commands", DescZh: "自动允许文件编辑，Shell 命令需确认"},
-		{Key: "full-auto", Name: "Full Auto", NameZh: "全自动", Desc: "Auto-approve with workspace sandbox", DescZh: "自动通过（工作区沙箱）"},
-		{Key: "yolo", Name: "YOLO", NameZh: "YOLO 模式", Desc: "Bypass all approvals and sandbox", DescZh: "跳过所有审批和沙箱"},
+		{Key: "default", Name: "Default", NameZh: "默认", Desc: "Use Codex default sandbox and approval behavior", DescZh: "使用 Codex 默认沙箱和审批行为"},
+		{Key: "auto-review", Name: "Auto Review", NameZh: "自动审查", Desc: "Use Codex auto-reviewer for approval requests", DescZh: "使用 Codex 自动审查器处理审批请求"},
+		{Key: "full-access", Name: "Full Access", NameZh: "完全访问", Desc: "Bypass approvals and sandbox", DescZh: "跳过审批和沙箱"},
 	}
 }

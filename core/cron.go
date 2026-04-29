@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"reflect"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -80,17 +80,29 @@ func NormalizeCronSessionMode(s string) string {
 	}
 }
 
+func isValidCronMode(mode string) bool {
+	switch mode {
+	case "", "default",
+		"acceptEdits", "plan", "auto", "bypassPermissions", "dontAsk",
+		"auto-review", "autoreview", "auto_review",
+		"full-access", "fullaccess", "full_access", "danger-full-access",
+		"dangerously-bypass", "dangerously-bypass-approvals-and-sandbox",
+		"bypass", "bypasspermissions", "bypass-permissions", "bypass_permissions", "yolo",
+		"suggest", "auto-edit", "autoedit", "auto_edit", "edit",
+		"full-auto", "fullauto", "full_auto":
+		return true
+	default:
+		return false
+	}
+}
+
 func validateCronJob(j *CronJob) error {
 	mode := NormalizeCronSessionMode(j.SessionMode)
 	if mode != "" && mode != "new_per_run" {
 		return fmt.Errorf("invalid session_mode %q (want reuse, new_per_run, or new-per-run)", j.SessionMode)
 	}
-	if j.Mode != "" {
-		switch j.Mode {
-		case "default", "bypassPermissions", "acceptEdits", "plan", "auto", "dontAsk":
-		default:
-			return fmt.Errorf("invalid mode %q (want default, bypassPermissions, acceptEdits, plan, auto, or dontAsk)", j.Mode)
-		}
+	if !isValidCronMode(j.Mode) {
+		return fmt.Errorf("invalid mode %q (want a supported agent permission mode)", j.Mode)
 	}
 	if j.TimeoutMins != nil && *j.TimeoutMins < 0 {
 		return fmt.Errorf("timeout_mins must be >= 0")
@@ -396,13 +408,13 @@ func toExportedFieldName(s string) string {
 
 // CronScheduler runs cron jobs by injecting synthetic messages into engines.
 type CronScheduler struct {
-	store         *CronStore
-	cron          *cron.Cron
-	engines       map[string]*Engine // project name → engine
-	mu            sync.RWMutex
-	entries       map[string]cron.EntryID // job ID → cron entry
-	defaultSilent      bool   // global default for suppressing cron start notifications
-	defaultSessionMode string // global default session mode; "" = reuse, "new_per_run" = fresh session each run
+	store              *CronStore
+	cron               *cron.Cron
+	engines            map[string]*Engine // project name → engine
+	mu                 sync.RWMutex
+	entries            map[string]cron.EntryID // job ID → cron entry
+	defaultSilent      bool                    // global default for suppressing cron start notifications
+	defaultSessionMode string                  // global default session mode; "" = reuse, "new_per_run" = fresh session each run
 }
 
 func NewCronScheduler(store *CronStore) *CronScheduler {
@@ -535,12 +547,8 @@ func (cs *CronScheduler) UpdateJob(id string, field string, value any) error {
 
 	// Validate mode if updating mode field
 	if field == "mode" {
-		if v, ok := value.(string); ok && v != "" {
-			switch v {
-			case "default", "bypassPermissions", "acceptEdits", "plan", "auto", "dontAsk":
-			default:
-				return fmt.Errorf("invalid mode %q (want default, bypassPermissions, acceptEdits, plan, auto, or dontAsk)", v)
-			}
+		if v, ok := value.(string); ok && !isValidCronMode(v) {
+			return fmt.Errorf("invalid mode %q (want a supported agent permission mode)", v)
 		}
 	}
 
