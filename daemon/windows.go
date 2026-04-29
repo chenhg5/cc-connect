@@ -3,7 +3,6 @@
 package daemon
 
 import (
-	"encoding/csv"
 	"fmt"
 	"log/slog"
 	"os"
@@ -19,8 +18,8 @@ const (
 	windowsScriptName = "cc-connect-daemon.ps1"
 )
 
-var runSchtasks = func(args ...string) (string, error) {
-	cmd := exec.Command("schtasks", args...)
+var runPowerShell = func(script string) (string, error) {
+	cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script)
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
 }
@@ -28,8 +27,8 @@ var runSchtasks = func(args ...string) (string, error) {
 type schtasksManager struct{}
 
 func newPlatformManager() (Manager, error) {
-	if _, err := exec.LookPath("schtasks.exe"); err != nil {
-		return nil, fmt.Errorf("schtasks.exe not found: Windows Task Scheduler is required")
+	if _, err := exec.LookPath("powershell.exe"); err != nil {
+		return nil, fmt.Errorf("powershell.exe not found: Windows Task Scheduler management requires PowerShell")
 	}
 	return &schtasksManager{}, nil
 }
@@ -49,19 +48,21 @@ func (m *schtasksManager) Install(cfg Config) error {
 		return fmt.Errorf("write task script: %w", err)
 	}
 
+	if err := stopWindowsTask(); err != nil {
+		slog.Warn("schtasks: stop existing task failed", "error", err)
+	}
 	if err := deleteWindowsTask(); err != nil {
-		slog.Warn("schtasks: delete existing task failed", "error", err)
+		if windowsTaskMatchesAction(scriptPath) {
+			if err := m.Start(); err != nil {
+				return fmt.Errorf("start existing task: %w", err)
+			}
+			return nil
+		}
+		return err
 	}
 
-	action := windowsTaskAction(scriptPath)
-	if out, err := runSchtasks(
-		"/Create",
-		"/TN", windowsTaskName,
-		"/TR", action,
-		"/SC", "ONLOGON",
-		"/F",
-	); err != nil {
-		return fmt.Errorf("schtasks create: %s (%w)", out, err)
+	if err := createWindowsTask(scriptPath); err != nil {
+		return err
 	}
 
 	if err := m.Start(); err != nil {
@@ -84,11 +85,7 @@ func (*schtasksManager) Uninstall() error {
 }
 
 func (*schtasksManager) Start() error {
-	out, err := runSchtasks("/Run", "/TN", windowsTaskName)
-	if err != nil && !windowsTaskAlreadyRunning(out) {
-		return fmt.Errorf("schtasks run: %s (%w)", out, err)
-	}
-	return nil
+	return startWindowsTask()
 }
 
 func (*schtasksManager) Stop() error {
@@ -102,23 +99,23 @@ func (*schtasksManager) Restart() error {
 	if err := stopWindowsTask(); err != nil {
 		slog.Warn("schtasks: stop before restart failed", "error", err)
 	}
-	out, err := runSchtasks("/Run", "/TN", windowsTaskName)
-	if err != nil && !windowsTaskAlreadyRunning(out) {
-		return fmt.Errorf("schtasks run: %s (%w)", out, err)
-	}
-	return nil
+	return startWindowsTask()
 }
 
 func (*schtasksManager) Status() (*Status, error) {
 	st := &Status{Platform: "schtasks"}
 
-	out, err := runSchtasks("/Query", "/TN", windowsTaskName, "/FO", "CSV", "/V")
+	out, err := runPowerShell(fmt.Sprintf(`
+$task = Get-ScheduledTask -TaskName %s -ErrorAction SilentlyContinue
+if ($null -eq $task) { exit 1 }
+Write-Output $task.State
+`, powerShellLiteral(windowsTaskName)))
 	if err != nil {
 		return st, nil
 	}
 	st.Installed = true
 
-	taskStatus := parseWindowsTaskStatus(out)
+	taskStatus := strings.TrimSpace(out)
 	if strings.EqualFold(taskStatus, "Running") {
 		st.Running = true
 	}
@@ -130,7 +127,40 @@ func windowsTaskScriptPath() string {
 }
 
 func windowsTaskAction(scriptPath string) string {
-	return fmt.Sprintf(`powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%s"`, scriptPath)
+	return fmt.Sprintf(`powershell.exe %s`, windowsTaskActionArgs(scriptPath))
+}
+
+func windowsTaskActionArgs(scriptPath string) string {
+	return fmt.Sprintf(`-WindowStyle Hidden -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%s"`, scriptPath)
+}
+
+func createWindowsTask(scriptPath string) error {
+	out, err := runPowerShell(fmt.Sprintf(`
+$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument %s
+$trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
+Register-ScheduledTask -TaskName %s -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
+`, powerShellLiteral(windowsTaskActionArgs(scriptPath)), powerShellLiteral(windowsTaskName)))
+	if err != nil {
+		return fmt.Errorf("register scheduled task: %s (%w)", out, err)
+	}
+	return nil
+}
+
+func windowsTaskMatchesAction(scriptPath string) bool {
+	out, err := runPowerShell(fmt.Sprintf(`
+$task = Get-ScheduledTask -TaskName %s -ErrorAction SilentlyContinue
+if ($null -eq $task) { exit 1 }
+$expectedArgs = %s
+foreach ($action in $task.Actions) {
+	if (($action.Execute -ieq 'powershell.exe') -and ($action.Arguments -eq $expectedArgs)) {
+		Write-Output 'true'
+		exit 0
+	}
+}
+exit 1
+`, powerShellLiteral(windowsTaskName), powerShellLiteral(windowsTaskActionArgs(scriptPath))))
+	return err == nil && strings.EqualFold(strings.TrimSpace(out), "true")
 }
 
 func buildWindowsTaskScript(cfg Config) string {
@@ -171,77 +201,47 @@ func powerShellLiteral(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
-func parseWindowsTaskStatus(out string) string {
-	reader := csv.NewReader(strings.NewReader(out))
-	records, err := reader.ReadAll()
-	if err != nil || len(records) < 2 {
-		if strings.Contains(out, "Running") {
-			return "Running"
-		}
-		return ""
+func stopWindowsTask() error {
+	out, err := runPowerShell(fmt.Sprintf(`
+$task = Get-ScheduledTask -TaskName %s -ErrorAction SilentlyContinue
+if ($null -eq $task) { exit 0 }
+if ($task.State -eq 'Running') {
+	Stop-ScheduledTask -TaskName %s
+}
+for ($i = 0; $i -lt 20; $i++) {
+	$task = Get-ScheduledTask -TaskName %s -ErrorAction SilentlyContinue
+	if ($null -eq $task -or $task.State -ne 'Running') { exit 0 }
+	Start-Sleep -Milliseconds 500
+}
+Write-Error 'scheduled task did not stop within timeout'
+exit 1
+`, powerShellLiteral(windowsTaskName), powerShellLiteral(windowsTaskName), powerShellLiteral(windowsTaskName)))
+	if err != nil {
+		return fmt.Errorf("stop scheduled task: %s (%w)", out, err)
 	}
-
-	statusIdx := -1
-	taskNameIdx := -1
-	for i, header := range records[0] {
-		switch strings.TrimSpace(header) {
-		case "Status":
-			statusIdx = i
-		case "TaskName":
-			taskNameIdx = i
-		}
-	}
-	if statusIdx < 0 {
-		return ""
-	}
-
-	for _, record := range records[1:] {
-		if statusIdx >= len(record) {
-			continue
-		}
-		if taskNameIdx >= 0 && taskNameIdx < len(record) {
-			name := strings.TrimPrefix(strings.TrimSpace(record[taskNameIdx]), `\`)
-			if !strings.EqualFold(name, windowsTaskName) {
-				continue
-			}
-		}
-		return strings.TrimSpace(record[statusIdx])
-	}
-	return ""
+	return nil
 }
 
-func stopWindowsTask() error {
-	out, err := runSchtasks("/End", "/TN", windowsTaskName)
-	if err != nil && !windowsTaskAlreadyStopped(out) {
-		return fmt.Errorf("schtasks end: %s (%w)", out, err)
+func startWindowsTask() error {
+	out, err := runPowerShell(fmt.Sprintf(`
+$task = Get-ScheduledTask -TaskName %s -ErrorAction SilentlyContinue
+if ($null -eq $task) { Write-Error 'scheduled task not found'; exit 1 }
+if ($task.State -ne 'Running') { Start-ScheduledTask -TaskName %s }
+`, powerShellLiteral(windowsTaskName), powerShellLiteral(windowsTaskName)))
+	if err != nil {
+		return fmt.Errorf("start scheduled task: %s (%w)", out, err)
 	}
 	return nil
 }
 
 func deleteWindowsTask() error {
-	out, err := runSchtasks("/Delete", "/TN", windowsTaskName, "/F")
-	if err != nil && !windowsTaskNotFound(out) {
-		return fmt.Errorf("schtasks delete: %s (%w)", out, err)
+	out, err := runPowerShell(fmt.Sprintf(`
+$task = Get-ScheduledTask -TaskName %s -ErrorAction SilentlyContinue
+if ($null -eq $task) { exit 0 }
+Unregister-ScheduledTask -TaskName %s -Confirm:$false
+`, powerShellLiteral(windowsTaskName), powerShellLiteral(windowsTaskName)))
+	if err != nil {
+		return fmt.Errorf("delete scheduled task: %s (%w)", out, err)
 	}
 	return nil
-}
-
-func windowsTaskNotFound(out string) bool {
-	lower := strings.ToLower(out)
-	return strings.Contains(lower, "cannot find") ||
-		strings.Contains(lower, "does not exist") ||
-		strings.Contains(lower, "not found")
-}
-
-func windowsTaskAlreadyStopped(out string) bool {
-	lower := strings.ToLower(out)
-	return strings.Contains(lower, "not currently running") ||
-		strings.Contains(lower, "has not yet run") ||
-		strings.Contains(lower, "is not running")
-}
-
-func windowsTaskAlreadyRunning(out string) bool {
-	lower := strings.ToLower(out)
-	return strings.Contains(lower, "already running") ||
-		strings.Contains(lower, "is currently running")
 }

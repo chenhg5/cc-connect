@@ -39,31 +39,77 @@ func TestBuildWindowsTaskScript(t *testing.T) {
 	}
 }
 
+func TestWindowsTaskActionRunsHidden(t *testing.T) {
+	got := windowsTaskAction(`C:\Users\me\.cc-connect\cc-connect-daemon.ps1`)
+	for _, want := range []string{
+		`powershell.exe`,
+		`-WindowStyle Hidden`,
+		`-NoProfile`,
+		`-NonInteractive`,
+		`-ExecutionPolicy Bypass`,
+		`-File "C:\Users\me\.cc-connect\cc-connect-daemon.ps1"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("windowsTaskAction() missing %q: %q", want, got)
+		}
+	}
+}
+
+func TestWindowsTaskCreateUsesLimitedInteractivePrincipal(t *testing.T) {
+	orig := runPowerShell
+	t.Cleanup(func() { runPowerShell = orig })
+
+	var script string
+	runPowerShell = func(s string) (string, error) {
+		script = s
+		return "", nil
+	}
+
+	if err := createWindowsTask(`C:\Users\me\.cc-connect\cc-connect-daemon.ps1`); err != nil {
+		t.Fatalf("createWindowsTask() error = %v", err)
+	}
+	for _, want := range []string{
+		`New-ScheduledTaskAction`,
+		`Register-ScheduledTask`,
+		`-LogonType Interactive`,
+		`-RunLevel Limited`,
+		`-WindowStyle Hidden`,
+		`C:\Users\me\.cc-connect\cc-connect-daemon.ps1`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("create script missing %q:\n%s", want, script)
+		}
+	}
+}
+
+func TestWindowsTaskMatchesActionRequiresExactAction(t *testing.T) {
+	orig := runPowerShell
+	t.Cleanup(func() { runPowerShell = orig })
+
+	var script string
+	runPowerShell = func(s string) (string, error) {
+		script = s
+		return "true", nil
+	}
+
+	if !windowsTaskMatchesAction(`C:\Users\me\.cc-connect\cc-connect-daemon.ps1`) {
+		t.Fatal("windowsTaskMatchesAction() = false, want true")
+	}
+	for _, want := range []string{
+		`$expectedArgs = '-WindowStyle Hidden -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "C:\Users\me\.cc-connect\cc-connect-daemon.ps1"'`,
+		`$action.Execute -ieq 'powershell.exe'`,
+		`$action.Arguments -eq $expectedArgs`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("reuse check script missing %q:\n%s", want, script)
+		}
+	}
+}
+
 func TestPowerShellLiteralEscapesSingleQuotes(t *testing.T) {
 	got := powerShellLiteral(`C:\Users\O'Brien\.cc-connect`)
 	want := `'C:\Users\O''Brien\.cc-connect'`
 	if got != want {
 		t.Fatalf("powerShellLiteral() = %q, want %q", got, want)
-	}
-}
-
-func TestParseWindowsTaskStatus(t *testing.T) {
-	out := `"HostName","TaskName","Next Run Time","Status"` + "\r\n" +
-		`"DESKTOP","\cc-connect","N/A","Running"` + "\r\n"
-
-	if got := parseWindowsTaskStatus(out); got != "Running" {
-		t.Fatalf("parseWindowsTaskStatus() = %q, want Running", got)
-	}
-}
-
-func TestWindowsTaskStatePredicates(t *testing.T) {
-	if !windowsTaskAlreadyRunning("ERROR: The task is already running.") {
-		t.Fatal("expected already-running schtasks output to be accepted")
-	}
-	if !windowsTaskAlreadyStopped("ERROR: The scheduled task is not currently running.") {
-		t.Fatal("expected already-stopped schtasks output to be accepted")
-	}
-	if !windowsTaskNotFound("ERROR: The system cannot find the file specified.") {
-		t.Fatal("expected not-found schtasks output to be accepted")
 	}
 }
