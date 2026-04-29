@@ -892,6 +892,9 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		imgData, mimeType, err := p.downloadImage(messageID, imgBody.ImageKey)
 		if err != nil {
 			slog.Error(p.tag()+": download image failed", "error", err)
+			if sendErr := p.Send(ctx, rctx, "⚠️ Image download failed (network error). Please resend."); sendErr != nil {
+				slog.Error(p.tag()+": failed to notify user about image download failure", "error", sendErr)
+			}
 			return
 		}
 		p.handler(p.dispatchPlatform(), &core.Message{
@@ -915,6 +918,9 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		audioData, err := p.downloadResource(messageID, audioBody.FileKey, "file")
 		if err != nil {
 			slog.Error(p.tag()+": download audio failed", "error", err)
+			if sendErr := p.Send(ctx, rctx, "⚠️ Voice message download failed (network error). Please resend."); sendErr != nil {
+				slog.Error(p.tag()+": failed to notify user about audio download failure", "error", sendErr)
+			}
 			return
 		}
 		p.handler(p.dispatchPlatform(), &core.Message{
@@ -957,6 +963,9 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		fileData, err := p.downloadResource(messageID, fileBody.FileKey, "file")
 		if err != nil {
 			slog.Error(p.tag()+": download file failed", "error", err)
+			if sendErr := p.Send(ctx, rctx, "⚠️ File download failed (network error). Please resend."); sendErr != nil {
+				slog.Error(p.tag()+": failed to notify user about file download failure", "error", sendErr)
+			}
 			return
 		}
 		slog.Debug(p.tag()+": file downloaded", "file_name", fileBody.FileName, "size", len(fileData))
