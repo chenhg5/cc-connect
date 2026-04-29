@@ -39,6 +39,22 @@ func TestBuildWindowsTaskScript(t *testing.T) {
 	}
 }
 
+func TestWindowsTaskActionRunsHidden(t *testing.T) {
+	got := windowsTaskAction(`C:\Users\me\.cc-connect\cc-connect-daemon.ps1`)
+	for _, want := range []string{
+		`powershell.exe`,
+		`-WindowStyle Hidden`,
+		`-NoProfile`,
+		`-NonInteractive`,
+		`-ExecutionPolicy Bypass`,
+		`-File "C:\Users\me\.cc-connect\cc-connect-daemon.ps1"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("windowsTaskAction() missing %q: %q", want, got)
+		}
+	}
+}
+
 func TestPowerShellLiteralEscapesSingleQuotes(t *testing.T) {
 	got := powerShellLiteral(`C:\Users\O'Brien\.cc-connect`)
 	want := `'C:\Users\O''Brien\.cc-connect'`

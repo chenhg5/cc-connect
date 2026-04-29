@@ -130,7 +130,7 @@ func windowsTaskScriptPath() string {
 }
 
 func windowsTaskAction(scriptPath string) string {
-	return fmt.Sprintf(`powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%s"`, scriptPath)
+	return fmt.Sprintf(`powershell.exe -WindowStyle Hidden -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%s"`, scriptPath)
 }
 
 func buildWindowsTaskScript(cfg Config) string {
