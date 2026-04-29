@@ -63,23 +63,8 @@ func TestPowerShellLiteralEscapesSingleQuotes(t *testing.T) {
 	}
 }
 
-func TestParseWindowsTaskStatus(t *testing.T) {
-	out := `"HostName","TaskName","Next Run Time","Status"` + "\r\n" +
-		`"DESKTOP","\cc-connect","N/A","Running"` + "\r\n"
-
-	if got := parseWindowsTaskStatus(out); got != "Running" {
-		t.Fatalf("parseWindowsTaskStatus() = %q, want Running", got)
-	}
-}
-
 func TestWindowsTaskStatePredicates(t *testing.T) {
 	if !windowsTaskAlreadyRunning("ERROR: The task is already running.") {
 		t.Fatal("expected already-running schtasks output to be accepted")
-	}
-	if !windowsTaskAlreadyStopped("ERROR: The scheduled task is not currently running.") {
-		t.Fatal("expected already-stopped schtasks output to be accepted")
-	}
-	if !windowsTaskNotFound("ERROR: The system cannot find the file specified.") {
-		t.Fatal("expected not-found schtasks output to be accepted")
 	}
 }

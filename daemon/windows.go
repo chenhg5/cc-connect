@@ -3,7 +3,6 @@
 package daemon
 
 import (
-	"encoding/csv"
 	"fmt"
 	"log/slog"
 	"os"
@@ -21,6 +20,12 @@ const (
 
 var runSchtasks = func(args ...string) (string, error) {
 	cmd := exec.Command("schtasks", args...)
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
+var runPowerShell = func(script string) (string, error) {
+	cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script)
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
 }
@@ -112,13 +117,17 @@ func (*schtasksManager) Restart() error {
 func (*schtasksManager) Status() (*Status, error) {
 	st := &Status{Platform: "schtasks"}
 
-	out, err := runSchtasks("/Query", "/TN", windowsTaskName, "/FO", "CSV", "/V")
+	out, err := runPowerShell(fmt.Sprintf(`
+$task = Get-ScheduledTask -TaskName %s -ErrorAction SilentlyContinue
+if ($null -eq $task) { exit 1 }
+Write-Output $task.State
+`, powerShellLiteral(windowsTaskName)))
 	if err != nil {
 		return st, nil
 	}
 	st.Installed = true
 
-	taskStatus := parseWindowsTaskStatus(out)
+	taskStatus := strings.TrimSpace(out)
 	if strings.EqualFold(taskStatus, "Running") {
 		st.Running = true
 	}
@@ -171,73 +180,30 @@ func powerShellLiteral(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
-func parseWindowsTaskStatus(out string) string {
-	reader := csv.NewReader(strings.NewReader(out))
-	records, err := reader.ReadAll()
-	if err != nil || len(records) < 2 {
-		if strings.Contains(out, "Running") {
-			return "Running"
-		}
-		return ""
-	}
-
-	statusIdx := -1
-	taskNameIdx := -1
-	for i, header := range records[0] {
-		switch strings.TrimSpace(header) {
-		case "Status":
-			statusIdx = i
-		case "TaskName":
-			taskNameIdx = i
-		}
-	}
-	if statusIdx < 0 {
-		return ""
-	}
-
-	for _, record := range records[1:] {
-		if statusIdx >= len(record) {
-			continue
-		}
-		if taskNameIdx >= 0 && taskNameIdx < len(record) {
-			name := strings.TrimPrefix(strings.TrimSpace(record[taskNameIdx]), `\`)
-			if !strings.EqualFold(name, windowsTaskName) {
-				continue
-			}
-		}
-		return strings.TrimSpace(record[statusIdx])
-	}
-	return ""
-}
-
 func stopWindowsTask() error {
-	out, err := runSchtasks("/End", "/TN", windowsTaskName)
-	if err != nil && !windowsTaskAlreadyStopped(out) {
-		return fmt.Errorf("schtasks end: %s (%w)", out, err)
+	out, err := runPowerShell(fmt.Sprintf(`
+$task = Get-ScheduledTask -TaskName %s -ErrorAction SilentlyContinue
+if ($null -eq $task) { exit 0 }
+if ($task.State -eq 'Running') {
+	Stop-ScheduledTask -TaskName %s
+}
+`, powerShellLiteral(windowsTaskName), powerShellLiteral(windowsTaskName)))
+	if err != nil {
+		return fmt.Errorf("stop scheduled task: %s (%w)", out, err)
 	}
 	return nil
 }
 
 func deleteWindowsTask() error {
-	out, err := runSchtasks("/Delete", "/TN", windowsTaskName, "/F")
-	if err != nil && !windowsTaskNotFound(out) {
-		return fmt.Errorf("schtasks delete: %s (%w)", out, err)
+	out, err := runPowerShell(fmt.Sprintf(`
+$task = Get-ScheduledTask -TaskName %s -ErrorAction SilentlyContinue
+if ($null -eq $task) { exit 0 }
+Unregister-ScheduledTask -TaskName %s -Confirm:$false
+`, powerShellLiteral(windowsTaskName), powerShellLiteral(windowsTaskName)))
+	if err != nil {
+		return fmt.Errorf("delete scheduled task: %s (%w)", out, err)
 	}
 	return nil
-}
-
-func windowsTaskNotFound(out string) bool {
-	lower := strings.ToLower(out)
-	return strings.Contains(lower, "cannot find") ||
-		strings.Contains(lower, "does not exist") ||
-		strings.Contains(lower, "not found")
-}
-
-func windowsTaskAlreadyStopped(out string) bool {
-	lower := strings.ToLower(out)
-	return strings.Contains(lower, "not currently running") ||
-		strings.Contains(lower, "has not yet run") ||
-		strings.Contains(lower, "is not running")
 }
 
 func windowsTaskAlreadyRunning(out string) bool {
