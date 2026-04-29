@@ -82,16 +82,34 @@ func TestWindowsTaskCreateUsesLimitedInteractivePrincipal(t *testing.T) {
 	}
 }
 
+func TestWindowsTaskMatchesActionRequiresExactAction(t *testing.T) {
+	orig := runPowerShell
+	t.Cleanup(func() { runPowerShell = orig })
+
+	var script string
+	runPowerShell = func(s string) (string, error) {
+		script = s
+		return "true", nil
+	}
+
+	if !windowsTaskMatchesAction(`C:\Users\me\.cc-connect\cc-connect-daemon.ps1`) {
+		t.Fatal("windowsTaskMatchesAction() = false, want true")
+	}
+	for _, want := range []string{
+		`$expectedArgs = '-WindowStyle Hidden -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "C:\Users\me\.cc-connect\cc-connect-daemon.ps1"'`,
+		`$action.Execute -ieq 'powershell.exe'`,
+		`$action.Arguments -eq $expectedArgs`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("reuse check script missing %q:\n%s", want, script)
+		}
+	}
+}
+
 func TestPowerShellLiteralEscapesSingleQuotes(t *testing.T) {
 	got := powerShellLiteral(`C:\Users\O'Brien\.cc-connect`)
 	want := `'C:\Users\O''Brien\.cc-connect'`
 	if got != want {
 		t.Fatalf("powerShellLiteral() = %q, want %q", got, want)
-	}
-}
-
-func TestWindowsTaskStatePredicates(t *testing.T) {
-	if !windowsTaskAlreadyRunning("ERROR: The task is already running.") {
-		t.Fatal("expected already-running schtasks output to be accepted")
 	}
 }
