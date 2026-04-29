@@ -15,6 +15,8 @@ type AuditRecordKind string
 const (
 	AuditKindInboundReceived AuditRecordKind = "inbound_received"
 	AuditKindAgentResult     AuditRecordKind = "agent_result"
+	AuditKindToolUse         AuditRecordKind = "tool_use"
+	AuditKindToolResult      AuditRecordKind = "tool_result"
 	AuditKindOutboundSent    AuditRecordKind = "outbound_sent"
 	AuditKindOutboundFailed  AuditRecordKind = "outbound_failed"
 )

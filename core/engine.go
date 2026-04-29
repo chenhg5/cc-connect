@@ -544,6 +544,59 @@ func (e *Engine) auditOutboundDelivery(kind AuditRecordKind, p Platform, replyCt
 	e.audit(record)
 }
 
+func (e *Engine) auditToolEvent(kind AuditRecordKind, p Platform, replyCtx any, sessionKey, msgID string, event Event, toolEventIndex, toolCount int, visible bool) {
+	platformName := ""
+	if p != nil {
+		platformName = p.Name()
+	}
+	meta := e.auditReplyMetadata(p, replyCtx)
+
+	extra := MergeAuditExtra(meta.Extra)
+	if extra == nil {
+		extra = map[string]any{}
+	}
+	extra["tool_name"] = event.ToolName
+	extra["tool_event_index"] = toolEventIndex
+	extra["tool_count"] = toolCount
+	extra["tool_message_visible"] = visible
+
+	switch kind {
+	case AuditKindToolUse:
+		extra["tool_input"] = event.ToolInput
+	case AuditKindToolResult:
+		if event.ToolResult != "" {
+			extra["tool_result"] = event.ToolResult
+		} else if event.Content != "" {
+			extra["tool_result"] = event.Content
+		}
+		if event.ToolStatus != "" {
+			extra["tool_status"] = event.ToolStatus
+		}
+		if event.ToolExitCode != nil {
+			extra["tool_exit_code"] = *event.ToolExitCode
+		}
+		if event.ToolSuccess != nil {
+			extra["tool_success"] = *event.ToolSuccess
+		}
+	}
+
+	e.audit(AuditRecord{
+		Kind:             kind,
+		Platform:         platformName,
+		SessionKey:       firstNonEmpty(meta.SessionKey, sessionKey),
+		UserID:           meta.UserID,
+		UserName:         meta.UserName,
+		ChatName:         meta.ChatName,
+		ChannelKey:       meta.ChannelKey,
+		ThreadID:         meta.ThreadID,
+		InboundMessageID: msgID,
+		ParentMessageID:  meta.ParentMessageID,
+		RootMessageID:    meta.RootMessageID,
+		ReplyToMessageID: firstNonEmpty(meta.ReplyToMessageID, msgID),
+		Extra:            extra,
+	})
+}
+
 func receiptMessageID(receipt *SendReceipt) string {
 	if receipt == nil {
 		return ""
@@ -2716,6 +2769,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	var textParts []string
 	var segmentStart int // index into textParts: text before this has been sent/displayed
 	toolCount := 0
+	toolEventCount := 0
 	waitStart := time.Now()
 	firstEventLogged := false
 	triggerAutoCompress := false
@@ -2885,6 +2939,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventToolUse:
 			toolCount++
+			toolEventCount++
+			e.auditToolEvent(AuditKindToolUse, p, replyCtx, sessionKey, msgID, event, toolEventCount, toolCount, e.display.ToolMessages)
 			// When tool messages are hidden, split text segments.
 			if !e.display.ToolMessages && len(textParts) > segmentStart {
 				if sp.canPreview() {
@@ -2946,6 +3002,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventToolResult:
+			toolEventCount++
+			e.auditToolEvent(AuditKindToolResult, p, replyCtx, sessionKey, msgID, event, toolEventCount, toolCount, e.display.ToolMessages)
 			if e.display.ToolMessages {
 				result := strings.TrimSpace(event.ToolResult)
 				if result == "" {

@@ -317,3 +317,76 @@ func TestProcessInteractiveEventsAuditsAgentResultAndPreviewFinalize(t *testing.
 		t.Fatalf("delivery_method = %#v, want %q", outboundRecord.Extra["delivery_method"], "preview_update")
 	}
 }
+
+func TestProcessInteractiveEvents_AuditsToolEventsWhenToolMessagesDisabled(t *testing.T) {
+	sink := &captureAuditSink{}
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("proj", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetAuditor(NewAuditor(0, sink))
+	e.SetDisplayConfig(DisplayCfg{
+		ThinkingMessages: true,
+		ThinkingMaxLen:   300,
+		ToolMessages:     false,
+		ToolMaxLen:       500,
+	})
+
+	sessionKey := "telegram:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-1",
+		agent:        e.agent,
+	}
+
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "echo hi"}
+	agentSession.events <- Event{Type: EventToolResult, ToolName: "Bash", ToolResult: "hi"}
+	agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "msg-1", time.Now(), nil, nil, state.replyCtx)
+
+	records := sink.recordsSnapshot()
+	var toolUseRecord, toolResultRecord *AuditRecord
+	for i := range records {
+		record := records[i]
+		switch record.Kind {
+		case AuditKindToolUse:
+			toolUseRecord = &record
+		case AuditKindToolResult:
+			toolResultRecord = &record
+		}
+	}
+
+	if toolUseRecord == nil {
+		t.Fatal("expected a tool_use audit record")
+	}
+	if toolUseRecord.SessionKey != sessionKey {
+		t.Fatalf("tool_use SessionKey = %q, want %q", toolUseRecord.SessionKey, sessionKey)
+	}
+	if toolUseRecord.ReplyToMessageID != "msg-1" {
+		t.Fatalf("tool_use ReplyToMessageID = %q, want %q", toolUseRecord.ReplyToMessageID, "msg-1")
+	}
+	if got := toolUseRecord.Extra["tool_name"]; got != "Bash" {
+		t.Fatalf("tool_use extra.tool_name = %#v, want %q", got, "Bash")
+	}
+	if got := toolUseRecord.Extra["tool_input"]; got != "echo hi" {
+		t.Fatalf("tool_use extra.tool_input = %#v, want %q", got, "echo hi")
+	}
+	if got := toolUseRecord.Extra["tool_message_visible"]; got != false {
+		t.Fatalf("tool_use extra.tool_message_visible = %#v, want false", got)
+	}
+
+	if toolResultRecord == nil {
+		t.Fatal("expected a tool_result audit record")
+	}
+	if toolResultRecord.SessionKey != sessionKey {
+		t.Fatalf("tool_result SessionKey = %q, want %q", toolResultRecord.SessionKey, sessionKey)
+	}
+	if got := toolResultRecord.Extra["tool_result"]; got != "hi" {
+		t.Fatalf("tool_result extra.tool_result = %#v, want %q", got, "hi")
+	}
+	if got := toolResultRecord.Extra["tool_message_visible"]; got != false {
+		t.Fatalf("tool_result extra.tool_message_visible = %#v, want false", got)
+	}
+}
