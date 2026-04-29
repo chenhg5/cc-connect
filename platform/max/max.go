@@ -3,6 +3,7 @@ package max
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -63,6 +64,8 @@ type Platform struct {
 	// (long-polling is being throttled to 2 RPS).
 	webhookURL    string
 	webhookListen string
+	webhookPath   string
+	webhookSecret string
 
 	mu           sync.RWMutex
 	handler      core.MessageHandler
@@ -85,6 +88,11 @@ type Platform struct {
 //	webhook_url    = "https://your.domain/webhook"  # optional; switches
 //	                                               # platform to webhook mode
 //	webhook_listen = ":8080"                       # optional, default ":8080"
+//	webhook_path   = "/webhook"                    # optional, default "/webhook";
+//	                                               # must match the path in webhook_url
+//	webhook_secret = "<random-string>"             # optional; if set, incoming
+//	                                               # requests must carry it in the
+//	                                               # X-Webhook-Secret header or ?s= query
 func New(opts map[string]any) (core.Platform, error) {
 	token, _ := opts["token"].(string)
 	if token == "" {
@@ -99,8 +107,15 @@ func New(opts map[string]any) (core.Platform, error) {
 
 	webhookURL, _ := opts["webhook_url"].(string)
 	webhookListen, _ := opts["webhook_listen"].(string)
+	webhookPath, _ := opts["webhook_path"].(string)
+	webhookSecret, _ := opts["webhook_secret"].(string)
 	if webhookURL != "" && webhookListen == "" {
 		webhookListen = ":8080"
+	}
+	if webhookPath == "" {
+		webhookPath = "/webhook"
+	} else if !strings.HasPrefix(webhookPath, "/") {
+		webhookPath = "/" + webhookPath
 	}
 
 	return &Platform{
@@ -109,6 +124,8 @@ func New(opts map[string]any) (core.Platform, error) {
 		allowFrom:     allowFrom,
 		webhookURL:    webhookURL,
 		webhookListen: webhookListen,
+		webhookPath:   webhookPath,
+		webhookSecret: webhookSecret,
 		client:        &http.Client{Timeout: httpTimeout},
 		uploadClient:  &http.Client{Timeout: attachmentUploadTO},
 	}, nil
@@ -180,7 +197,7 @@ func (p *Platform) Stop() error {
 // each update to one transport).
 func (p *Platform) startWebhook(ctx context.Context) error {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/webhook", p.webhookHandler)
+	mux.HandleFunc(p.webhookPath, p.webhookHandler)
 	srv := &http.Server{
 		Addr:              p.webhookListen,
 		Handler:           mux,
@@ -191,7 +208,7 @@ func (p *Platform) startWebhook(ctx context.Context) error {
 	p.webServer = srv
 
 	go func() {
-		slog.Info("max: webhook listening", "addr", p.webhookListen, "url", p.webhookURL)
+		slog.Info("max: webhook listening", "addr", p.webhookListen, "path", p.webhookPath, "url", p.webhookURL)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("max: webhook listener stopped", "err", err)
 		}
@@ -210,6 +227,17 @@ func (p *Platform) webhookHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
+	}
+	if p.webhookSecret != "" {
+		got := r.Header.Get("X-Webhook-Secret")
+		if got == "" {
+			got = r.URL.Query().Get("s")
+		}
+		if subtle.ConstantTimeCompare([]byte(got), []byte(p.webhookSecret)) != 1 {
+			slog.Warn("max: webhook secret mismatch", "remote", r.RemoteAddr)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
 	}
 	defer r.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(r.Body, 4*1024*1024))

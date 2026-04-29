@@ -946,7 +946,8 @@ app_secret = "your-feishu-app-secret"
 # 1. Create a bot via @MasterBot in MAX, get the access token
 #    在 MAX 中通过 @MasterBot 创建机器人，获取 access token
 # 2. Paste the token below / 填入下方 token
-# Connection: Long polling via platform-api.max.ru (no public URL needed) / 长轮询，无需公网 IP
+# Connection: long-poll by default; webhook supported (see docs/max-webhook.md)
+# 默认长轮询；如需 webhook 模式见 docs/max-webhook.md
 
 # [[projects.platforms]]
 # type = "max"
@@ -956,6 +957,16 @@ app_secret = "your-feishu-app-secret"
 # allow_from = "*"    # Allowed MAX user IDs, e.g. "66624886,12345678"; "*" = all
 #                     # 允许的 MAX 用户 ID，如 "66624886,12345678"；"*" 表示所有
 # api_base = "https://platform-api.max.ru"   # optional override / 可选覆盖默认 API
+#
+# --- Webhook mode (optional) ---
+# Set webhook_url to switch from long-poll to webhook. Required for high-traffic
+# bots since MAX throttles long-poll to 2 RPS from 2026-05-11.
+# 设置 webhook_url 即切换为 webhook 模式（高流量场景必需，MAX 自 2026-05-11 起限制长轮询为 2 RPS）
+# Full guide with nginx/Caddy/systemd samples: docs/max-webhook.md
+# webhook_url    = "https://bot.example.com/webhook"
+# webhook_listen = "127.0.0.1:8090"   # bot binds here; reverse proxy in front
+# webhook_path   = "/webhook"          # default; must match the path in webhook_url
+# webhook_secret = "long-random-string"  # optional; checked via X-Webhook-Secret header or ?s= query
 
 # Slack (uncomment to enable / 取消注释以启用)
 # 1. Create an app at https://api.slack.com/apps / 创建应用
