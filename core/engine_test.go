@@ -2297,6 +2297,139 @@ func TestHandlePendingPermission_MultiWorkspaceLookup(t *testing.T) {
 	}
 }
 
+// Regression for the Discord thread_isolation + multi-workspace auto-bind
+// path: workspace binding is keyed by the *parent* channel ID, but the
+// sessionKey driving follow-up lookups is the *thread* ID.
+//
+// sessionContextForKey must follow the same fallback as
+// interactiveKeyForSessionKey, otherwise commands like /compress would
+// resolve the workspace state correctly via interactiveKeyForSessionKey
+// (live-state scan finds it) but lock the *global* session manager via
+// sessionContextForKey (channel-binding misses, falls through to
+// e.agent/e.sessions). That mismatch lets a normal thread message run
+// concurrently against the same workspace agent session — the exact
+// race we just fixed in interactiveKeyForSessionKey.
+func TestSessionContextForKey_RecoversWorkspaceFromLiveState(t *testing.T) {
+	baseDir := t.TempDir()
+	e := newTestEngineWithMultiWorkspaceAgent(t, baseDir)
+
+	// Workspace dir must exist so getOrCreateWorkspaceAgent can build under it.
+	wsDir := filepath.Join(baseDir, "ws-thread")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	threadSessionKey := "discord:T-thread"
+	storedKey := normalizeWorkspacePath(wsDir) + ":" + threadSessionKey
+
+	// Live state is keyed under the workspace prefix but no binding exists
+	// for the thread channel — exactly the Discord thread_isolation shape.
+	e.interactiveMu.Lock()
+	e.interactiveStates[storedKey] = &interactiveState{}
+	e.interactiveMu.Unlock()
+
+	agent, sessions := e.sessionContextForKey(threadSessionKey)
+	if agent == e.agent {
+		t.Fatal("sessionContextForKey returned the global agent; live-state recovery did not engage")
+	}
+	if sessions == e.sessions {
+		t.Fatal("sessionContextForKey returned the global session manager; live-state recovery did not engage")
+	}
+}
+
+// Same shape as the case above, but exercising interactiveKeyForSessionKey.
+func TestInteractiveKeyForSessionKey_RecoversByLiveStateScan(t *testing.T) {
+	e := newTestEngine()
+	wsDir := t.TempDir()
+	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(t.TempDir(), bindingPath)
+
+	parentChannel := "C-parent"
+	threadID := "T-thread"
+	// Bind the workspace under the *parent* channel — mirrors what the
+	// Discord platform does when thread_isolation is on.
+	e.workspaceBindings.Bind("project:test", "discord:"+parentChannel, "chan", wsDir)
+
+	// Live interactive state is stored under the workspace-prefixed thread
+	// session key, exactly how processInteractiveMessageWith would key it.
+	threadSessionKey := "discord:" + threadID
+	storedInteractiveKey := normalizeWorkspacePath(wsDir) + ":" + threadSessionKey
+	e.interactiveMu.Lock()
+	e.interactiveStates[storedInteractiveKey] = &interactiveState{}
+	e.interactiveMu.Unlock()
+
+	got := e.interactiveKeyForSessionKey(threadSessionKey)
+	if got != storedInteractiveKey {
+		t.Errorf("interactiveKeyForSessionKey(%q) = %q, want %q (suffix-scan fallback failed)",
+			threadSessionKey, got, storedInteractiveKey)
+	}
+}
+
+func TestInteractiveKeyForSessionKey_PrefersCurrentBindingOverStaleState(t *testing.T) {
+	// When a channel is rebound to a new workspace while old workspace state
+	// hasn't been cleaned up, the *current* binding must win. Otherwise the
+	// rebinding silently strands sessions on the old workspace, and a map-
+	// iteration race could send /stop or pending replies to the wrong state.
+	e := newTestEngine()
+	wsBound := t.TempDir()
+	wsStale := t.TempDir()
+	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(t.TempDir(), bindingPath)
+
+	channelID := "C1"
+	sessionKey := "slack:" + channelID + ":U1"
+	e.workspaceBindings.Bind("project:test", "slack:"+channelID, "chan", wsBound)
+
+	// Stale state from before rebinding is still in the map.
+	staleKey := normalizeWorkspacePath(wsStale) + ":" + sessionKey
+	e.interactiveMu.Lock()
+	e.interactiveStates[staleKey] = &interactiveState{}
+	e.interactiveMu.Unlock()
+
+	want := normalizeWorkspacePath(wsBound) + ":" + sessionKey
+	if got := e.interactiveKeyForSessionKey(sessionKey); got != want {
+		t.Errorf("interactiveKeyForSessionKey = %q, want current-binding key %q", got, want)
+	}
+}
+
+func TestFindInteractiveKeyForSession(t *testing.T) {
+	e := newTestEngine()
+	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(t.TempDir(), bindingPath)
+
+	cases := []struct {
+		name     string
+		stored   []string
+		query    string
+		expected string
+	}{
+		{"empty-query", []string{}, "", ""},
+		{"no-matches", []string{"/ws:slack:C1:U1"}, "discord:T1", ""},
+		{"exact-match", []string{"slack:C1:U1"}, "slack:C1:U1", "slack:C1:U1"},
+		{"suffix-match", []string{"/ws:discord:T1"}, "discord:T1", "/ws:discord:T1"},
+		{"first-of-multiple", []string{"/wsA:discord:T1", "/wsB:slack:C1:U1"}, "slack:C1:U1", "/wsB:slack:C1:U1"},
+		// Precedence: exact key beats suffix-matched workspace-prefixed key.
+		// Without this, map iteration order would be visible to callers, making
+		// /stop and pending-permission routing non-deterministic when both
+		// raw and workspace-prefixed states coexist.
+		{"exact-beats-prefixed", []string{"slack:C1:U1", "/ws:slack:C1:U1"}, "slack:C1:U1", "slack:C1:U1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e.interactiveMu.Lock()
+			e.interactiveStates = make(map[string]*interactiveState)
+			for _, k := range tc.stored {
+				e.interactiveStates[k] = &interactiveState{}
+			}
+			e.interactiveMu.Unlock()
+
+			if got := e.findInteractiveKeyForSession(tc.query); got != tc.expected {
+				t.Errorf("findInteractiveKeyForSession(%q) = %q, want %q", tc.query, got, tc.expected)
+			}
+		})
+	}
+}
+
 func TestHandleMessage_MultiWorkspacePreservesCCSessionKey(t *testing.T) {
 	p := &stubPlatformEngine{n: "discord"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)

@@ -7230,7 +7230,9 @@ func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images
 	if sessionKey != "" {
 		state = e.interactiveStates[sessionKey]
 		if state == nil && e.multiWorkspace {
-			if iKey := e.interactiveKeyForSessionKey(sessionKey); iKey != sessionKey {
+			// We already hold interactiveMu, so call the *Locked variant
+			// to avoid a self-deadlock on the non-reentrant mutex.
+			if iKey := e.interactiveKeyForSessionKeyLocked(sessionKey); iKey != sessionKey {
 				state = e.interactiveStates[iKey]
 			}
 		}
@@ -11654,32 +11656,139 @@ func (e *Engine) sessionContextForKey(sessionKey string) (Agent, *SessionManager
 	if !e.multiWorkspace || e.workspaceBindings == nil {
 		return e.agent, e.sessions
 	}
-	channelKey := extractWorkspaceChannelKey(sessionKey)
-	if channelKey == "" {
-		return e.agent, e.sessions
+	if channelKey := extractWorkspaceChannelKey(sessionKey); channelKey != "" {
+		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
+			if wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(normalizeWorkspacePath(b.Workspace)); err == nil {
+				return wsAgent, wsSessions
+			}
+		}
 	}
-	if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
-		if wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(normalizeWorkspacePath(b.Workspace)); err == nil {
+	// Live-state fallback: when channel-derived binding misses (Discord
+	// thread_isolation case where binding is keyed by parent channel but
+	// sessionKey is the thread ID), recover the workspace from any live
+	// interactive state keyed as "<workspace>:<sessionKey>". Without this,
+	// callers would route to the global agent while interactiveKeyForSessionKey
+	// returns the workspace-prefixed key, allowing concurrent unlocked sends
+	// to the same agent session.
+	if workspace := e.workspaceFromLiveState(sessionKey); workspace != "" {
+		if wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(workspace); err == nil {
 			return wsAgent, wsSessions
 		}
 	}
 	return e.agent, e.sessions
 }
 
+// workspaceFromLiveState extracts the workspace path embedded in a live
+// interactive state key for sessionKey, or "" if no live state references
+// this sessionKey. Used as a recovery path when channel-binding-derived
+// workspace resolution misses.
+func (e *Engine) workspaceFromLiveState(sessionKey string) string {
+	if sessionKey == "" {
+		return ""
+	}
+	e.interactiveMu.Lock()
+	defer e.interactiveMu.Unlock()
+	suffix := ":" + sessionKey
+	for k := range e.interactiveStates {
+		if strings.HasSuffix(k, suffix) {
+			return strings.TrimSuffix(k, suffix)
+		}
+	}
+	return ""
+}
+
 // interactiveKeyForSessionKey returns the interactive state key for a sessionKey.
 // In multi-workspace mode, it prefixes with the bound workspace path when available.
 func (e *Engine) interactiveKeyForSessionKey(sessionKey string) string {
+	// Single-workspace fast path: no scan, no binding lookup, no lock.
 	if !e.multiWorkspace || e.workspaceBindings == nil {
 		return sessionKey
 	}
-	channelKey := extractWorkspaceChannelKey(sessionKey)
-	if channelKey == "" {
+	e.interactiveMu.Lock()
+	defer e.interactiveMu.Unlock()
+	return e.interactiveKeyForSessionKeyLocked(sessionKey)
+}
+
+// interactiveKeyForSessionKeyLocked is the lock-free variant of
+// interactiveKeyForSessionKey. It assumes the caller already holds
+// e.interactiveMu (e.g. SendToSessionWithAttachments which scans
+// interactiveStates under the lock and then needs to resolve the
+// canonical key for a session).
+//
+// Resolution precedence:
+//
+//  1. Exact match — if state already exists under raw sessionKey, prefer it
+//     so a single-workspace placeholder isn't shadowed by a workspace-
+//     prefixed state created later.
+//  2. Channel-binding-derived — if the channel resolves to a workspace,
+//     return "<workspace>:<sessionKey>". This is deterministic even when
+//     multiple workspace-prefixed states for the same sessionKey coexist
+//     (e.g. a channel rebound to a new workspace while the old workspace's
+//     state hasn't been cleaned up yet) — the *current* binding wins, and
+//     any stale workspace state becomes unreachable through this lookup,
+//     which is exactly what we want.
+//  3. Live-state suffix scan — only fires when channel-binding lookup
+//     fails. This is the recovery path for Discord thread_isolation: the
+//     binding is keyed by the parent channel, but sessionKey is the thread
+//     ID, so step 2 misses. The state map was keyed correctly at processing
+//     time, so we recover the workspace prefix from there.
+func (e *Engine) interactiveKeyForSessionKeyLocked(sessionKey string) string {
+	if !e.multiWorkspace || e.workspaceBindings == nil {
 		return sessionKey
 	}
-	if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
-		return normalizeWorkspacePath(b.Workspace) + ":" + sessionKey
+	if _, ok := e.interactiveStates[sessionKey]; ok {
+		return sessionKey
+	}
+	if channelKey := extractWorkspaceChannelKey(sessionKey); channelKey != "" {
+		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
+			return normalizeWorkspacePath(b.Workspace) + ":" + sessionKey
+		}
+	}
+	if found := findInteractiveKeyInStatesLocked(e.interactiveStates, sessionKey); found != "" {
+		return found
 	}
 	return sessionKey
+}
+
+// findInteractiveKeyForSession scans the live interactiveStates map for an
+// interactive key that matches sessionKey, either as the key itself or as
+// the trailing "<workspace>:<sessionKey>" segment. Returns "" when no live
+// state references this sessionKey. Acquires e.interactiveMu internally;
+// callers that already hold the lock must use findInteractiveKeyInStatesLocked.
+//
+// The scan is bounded by the number of in-flight interactive sessions
+// (typically <10), so the linear cost is negligible compared to even one
+// binding lookup. Avoiding a parallel sessionKey→interactiveKey map keeps
+// the engine's state surface single-source-of-truth.
+func (e *Engine) findInteractiveKeyForSession(sessionKey string) string {
+	e.interactiveMu.Lock()
+	defer e.interactiveMu.Unlock()
+	return findInteractiveKeyInStatesLocked(e.interactiveStates, sessionKey)
+}
+
+// findInteractiveKeyInStatesLocked is the lock-free body of the scan; it
+// assumes the caller holds e.interactiveMu.
+//
+// Precedence is exact match first, then suffix scan. The exact path matters
+// because Go map iteration order is randomized: if both `sessionKey` and
+// `<workspace>:<sessionKey>` are live (e.g. a raw placeholder created before
+// multi-workspace was enabled coexisting with a workspace-prefixed turn),
+// a pure scan could non-deterministically return either, sending /stop or
+// pending-permission handling at the wrong state.
+func findInteractiveKeyInStatesLocked(states map[string]*interactiveState, sessionKey string) string {
+	if sessionKey == "" {
+		return ""
+	}
+	if _, ok := states[sessionKey]; ok {
+		return sessionKey
+	}
+	suffix := ":" + sessionKey
+	for k := range states {
+		if strings.HasSuffix(k, suffix) {
+			return k
+		}
+	}
+	return ""
 }
 
 // lookupEffectiveWorkspaceBinding returns the effective binding for a channel

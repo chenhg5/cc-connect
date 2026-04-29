@@ -93,6 +93,16 @@ func TestResolveThreadReplyContext_UsesExistingThreadChannel(t *testing.T) {
 		return nil
 	}
 
+	// Override resolveChannel to return a thread with a populated ParentID,
+	// so the helper can surface the parent channel for workspace binding.
+	ops.resolveChannel = func(channelID string) (*discordgo.Channel, error) {
+		return &discordgo.Channel{
+			ID:       channelID,
+			Type:     discordgo.ChannelTypeGuildPublicThread,
+			ParentID: "channel-parent",
+		}, nil
+	}
+
 	msg := &discordgo.MessageCreate{
 		Message: &discordgo.Message{
 			ID:        "m1",
@@ -102,7 +112,7 @@ func TestResolveThreadReplyContext_UsesExistingThreadChannel(t *testing.T) {
 		},
 	}
 
-	sessionKey, rc, err := resolveThreadReplyContext(msg, "bot-1", ops)
+	sessionKey, rc, parentChannelID, err := resolveThreadReplyContext(msg, "bot-1", ops)
 	if err != nil {
 		t.Fatalf("resolveThreadReplyContext() error = %v", err)
 	}
@@ -112,8 +122,40 @@ func TestResolveThreadReplyContext_UsesExistingThreadChannel(t *testing.T) {
 	if rc.channelID != "thread-1" || rc.threadID != "thread-1" {
 		t.Fatalf("replyContext = %#v, want thread channel routing", rc)
 	}
+	if parentChannelID != "channel-parent" {
+		t.Fatalf("parentChannelID = %q, want channel-parent", parentChannelID)
+	}
 	if joinedThread != "thread-1" {
 		t.Fatalf("joinedThread = %q, want thread-1", joinedThread)
+	}
+}
+
+func TestResolveThreadReplyContext_FallsBackToMessageChannelWhenParentMissing(t *testing.T) {
+	// Defensive path: if discordgo (or a future API change) ever leaves
+	// ParentID empty on a thread channel, the helper must still return
+	// *some* parent channel ID — best fallback is the thread ID itself,
+	// matching m.ChannelID. Auto-bind will then key off the thread name,
+	// which is no worse than the pre-fix behavior.
+	ops := fakeThreadOps{
+		resolveChannel: func(channelID string) (*discordgo.Channel, error) {
+			return &discordgo.Channel{ID: channelID, Type: discordgo.ChannelTypeGuildPublicThread}, nil
+		},
+		joinThread: func(string) error { return nil },
+	}
+	msg := &discordgo.MessageCreate{
+		Message: &discordgo.Message{
+			ID:        "m1",
+			ChannelID: "thread-orphan",
+			GuildID:   "guild-1",
+			Author:    &discordgo.User{ID: "u1"},
+		},
+	}
+	_, _, parentChannelID, err := resolveThreadReplyContext(msg, "bot-1", ops)
+	if err != nil {
+		t.Fatalf("resolveThreadReplyContext() error = %v", err)
+	}
+	if parentChannelID != "thread-orphan" {
+		t.Fatalf("parentChannelID = %q, want thread-orphan (fallback)", parentChannelID)
 	}
 }
 
@@ -154,7 +196,7 @@ func TestResolveThreadReplyContext_CreatesThreadForGuildMessage(t *testing.T) {
 		},
 	}
 
-	sessionKey, rc, err := resolveThreadReplyContext(msg, "bot-1", ops)
+	sessionKey, rc, parentChannelID, err := resolveThreadReplyContext(msg, "bot-1", ops)
 	if err != nil {
 		t.Fatalf("resolveThreadReplyContext() error = %v", err)
 	}
@@ -163,6 +205,9 @@ func TestResolveThreadReplyContext_CreatesThreadForGuildMessage(t *testing.T) {
 	}
 	if rc.channelID != "thread-99" || rc.threadID != "thread-99" {
 		t.Fatalf("replyContext = %#v, want thread channel routing", rc)
+	}
+	if parentChannelID != "channel-1" {
+		t.Fatalf("parentChannelID = %q, want channel-1", parentChannelID)
 	}
 	if startChannelID != "channel-1" || startMessageID != "msg-42" {
 		t.Fatalf("thread start args = (%q, %q), want (channel-1, msg-42)", startChannelID, startMessageID)
@@ -184,6 +229,55 @@ func TestSessionKeyForChannel_UsesThreadKeyWhenChannelIsThread(t *testing.T) {
 
 	if got := resolveSessionKeyForChannel("thread-7", "user-1", false, true, ops); got != "discord:thread-7" {
 		t.Fatalf("resolveSessionKeyForChannel() = %q, want discord:thread-7", got)
+	}
+}
+
+func TestResolveParentChannelID(t *testing.T) {
+	cases := []struct {
+		name      string
+		channelID string
+		channel   *discordgo.Channel
+		resolve   func(string) (*discordgo.Channel, error)
+		want      string
+	}{
+		{
+			name:      "thread-with-parent",
+			channelID: "thread-1",
+			channel:   &discordgo.Channel{ID: "thread-1", Type: discordgo.ChannelTypeGuildPublicThread, ParentID: "channel-parent"},
+			want:      "channel-parent",
+		},
+		{
+			name:      "regular-channel-passes-through",
+			channelID: "channel-1",
+			channel:   &discordgo.Channel{ID: "channel-1", Type: discordgo.ChannelTypeGuildText},
+			want:      "channel-1",
+		},
+		{
+			name:      "thread-without-parent-falls-back",
+			channelID: "thread-orphan",
+			channel:   &discordgo.Channel{ID: "thread-orphan", Type: discordgo.ChannelTypeGuildPublicThread},
+			want:      "thread-orphan",
+		},
+		{
+			name:      "resolve-error-falls-back",
+			channelID: "channel-x",
+			resolve:   func(string) (*discordgo.Channel, error) { return nil, fmt.Errorf("not found") },
+			want:      "channel-x",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ops := fakeThreadOps{}
+			if tc.resolve != nil {
+				ops.resolveChannel = tc.resolve
+			} else {
+				ch := tc.channel
+				ops.resolveChannel = func(string) (*discordgo.Channel, error) { return ch, nil }
+			}
+			if got := resolveParentChannelID(tc.channelID, ops); got != tc.want {
+				t.Errorf("resolveParentChannelID(%q) = %q, want %q", tc.channelID, got, tc.want)
+			}
+		})
 	}
 }
 
