@@ -399,6 +399,41 @@ func TestCronScheduler_AddJob_InvalidSessionMode(t *testing.T) {
 	}
 }
 
+func TestCronScheduler_AddJob_AllowsCodexPermissionModes(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := NewCronScheduler(store)
+
+	for _, mode := range []string{
+		"default",
+		"auto-review",
+		"auto_review",
+		"full-access",
+		"full_access",
+		"bypassPermissions",
+		"bypass",
+		"yolo",
+		"full-auto",
+	} {
+		t.Run(mode, func(t *testing.T) {
+			err := cs.AddJob(&CronJob{
+				ID:         "job-" + strings.ReplaceAll(mode, "-", "_"),
+				Project:    "p",
+				SessionKey: "test:1:1",
+				CronExpr:   "0 6 * * *",
+				Prompt:     "hi",
+				Mode:       mode,
+			})
+			if err != nil {
+				t.Fatalf("AddJob mode %q: %v", mode, err)
+			}
+		})
+	}
+}
+
 func TestCronJob_UsesNewSessionPerRun(t *testing.T) {
 	for _, mode := range []string{"new_per_run", "new-per-run", "NEW_PER_RUN"} {
 		j := &CronJob{SessionMode: mode}

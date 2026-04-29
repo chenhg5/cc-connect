@@ -28,20 +28,20 @@ type codexSession struct {
 	model         string
 	effort        string
 	mode          string
-	baseURL       string // provider base URL; passed as -c openai_base_url=<url>
-	modelProvider string // Codex model_provider name; passed as -c model_provider=<name>
+	baseURL       string   // provider base URL; passed as -c openai_base_url=<url>
+	modelProvider string   // Codex model_provider name; passed as -c model_provider=<name>
 	cliBin        string   // CLI binary, default "codex"
 	cliExtraArgs  []string // extra args from cli_path, prepended before exec args
 	extraEnv      []string
 	events        chan core.Event
-	threadID  atomic.Value // stores string — Codex thread_id
-	ctx       context.Context
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
-	alive     atomic.Bool
-	closeOnce sync.Once
-	cmdMu     sync.Mutex
-	cmds      map[*exec.Cmd]struct{}
+	threadID      atomic.Value // stores string — Codex thread_id
+	ctx           context.Context
+	cancel        context.CancelFunc
+	wg            sync.WaitGroup
+	alive         atomic.Bool
+	closeOnce     sync.Once
+	cmdMu         sync.Mutex
+	cmds          map[*exec.Cmd]struct{}
 
 	pendingMsgs []string // buffered agent_message texts awaiting classification
 
@@ -70,7 +70,7 @@ func newCodexSession(ctx context.Context, cliBin string, cliExtraArgs []string, 
 		workDir:       workDir,
 		model:         model,
 		effort:        effort,
-		mode:          mode,
+		mode:          normalizeMode(mode),
 		baseURL:       baseURL,
 		modelProvider: modelProvider,
 		cliBin:        cliBin,
@@ -189,9 +189,18 @@ func (cs *codexSession) buildExecArgs(prompt string, imagePaths []string) []stri
 	}
 
 	switch cs.mode {
-	case "auto-edit", "full-auto":
-		args = append(args, "--full-auto")
-	case "yolo":
+	case "default":
+		args = append(args,
+			"-c", `approval_policy="on-request"`,
+			"-c", `sandbox_mode="workspace-write"`,
+		)
+	case "auto-review":
+		args = append(args,
+			"-c", `approval_policy="on-request"`,
+			"-c", `sandbox_mode="workspace-write"`,
+			"-c", `approvals_reviewer="auto_review"`,
+		)
+	case "full-access":
 		args = append(args, "--dangerously-bypass-approvals-and-sandbox")
 	}
 

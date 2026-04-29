@@ -126,6 +126,84 @@ func TestAppServerSession_HandleThreadTokenUsageUpdatedCachesContextUsage(t *tes
 	}
 }
 
+func TestAppServerModeSettings_CodexPermissionPresets(t *testing.T) {
+	tests := []struct {
+		name              string
+		mode              string
+		approvalPolicy    string
+		sandbox           string
+		sandboxPolicyType string
+		approvalsReviewer string
+	}{
+		{
+			name:              "default",
+			mode:              "default",
+			approvalPolicy:    "on-request",
+			sandbox:           "workspace-write",
+			sandboxPolicyType: "workspaceWrite",
+		},
+		{
+			name:              "auto review",
+			mode:              "auto-review",
+			approvalPolicy:    "on-request",
+			sandbox:           "workspace-write",
+			sandboxPolicyType: "workspaceWrite",
+			approvalsReviewer: "auto_review",
+		},
+		{
+			name:              "full access",
+			mode:              "full-access",
+			approvalPolicy:    "never",
+			sandbox:           "danger-full-access",
+			sandboxPolicyType: "dangerFullAccess",
+		},
+		{
+			name:              "bypassPermissions legacy alias",
+			mode:              "bypassPermissions",
+			approvalPolicy:    "never",
+			sandbox:           "danger-full-access",
+			sandboxPolicyType: "dangerFullAccess",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			settings := appServerModeSettings(tt.mode)
+			if settings.approvalPolicy != tt.approvalPolicy {
+				t.Fatalf("approvalPolicy = %q, want %q", settings.approvalPolicy, tt.approvalPolicy)
+			}
+			if settings.sandbox != tt.sandbox {
+				t.Fatalf("sandbox = %q, want %q", settings.sandbox, tt.sandbox)
+			}
+			if settings.approvalsReviewer != tt.approvalsReviewer {
+				t.Fatalf("approvalsReviewer = %q, want %q", settings.approvalsReviewer, tt.approvalsReviewer)
+			}
+			if settings.sandboxPolicy == nil {
+				t.Fatal("sandboxPolicy = nil, want policy")
+			}
+			if got, _ := settings.sandboxPolicy["type"].(string); got != tt.sandboxPolicyType {
+				t.Fatalf("sandboxPolicy.type = %q, want %q", got, tt.sandboxPolicyType)
+			}
+		})
+	}
+}
+
+func TestAppServerSession_ThreadRequestParamsIncludesModeSettings(t *testing.T) {
+	s := &appServerSession{mode: "auto-review"}
+
+	params := s.threadRequestParams()
+
+	if got := params["approvalPolicy"]; got != "on-request" {
+		t.Fatalf("approvalPolicy = %v, want on-request", got)
+	}
+	if got := params["sandbox"]; got != "workspace-write" {
+		t.Fatalf("sandbox = %v, want workspace-write", got)
+	}
+	if got := params["approvalsReviewer"]; got != "auto_review" {
+		t.Fatalf("approvalsReviewer = %v, want auto_review", got)
+	}
+}
+
 func TestMapAppServerRateLimits_PrefersMultiBucketView(t *testing.T) {
 	report := mapAppServerRateLimits(appServerRateLimitsResponse{
 		RateLimits: appServerRateLimitSnapshot{

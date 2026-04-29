@@ -10,7 +10,8 @@ import { listProjects, type ProjectSummary } from '@/api/projects';
 import { listSessions, type Session } from '@/api/sessions';
 import { formatTime, cn } from '@/lib/utils';
 
-const MODE_OPTIONS = ['bypassPermissions', 'acceptEdits', 'auto', 'plan', 'dontAsk'] as const;
+const DEFAULT_MODE_OPTIONS = ['default', 'bypassPermissions', 'acceptEdits', 'auto', 'plan', 'dontAsk'];
+const CODEX_MODE_OPTIONS = ['default', 'auto-review', 'full-access'];
 
 /* ── Cron presets ── */
 interface CronPreset {
@@ -194,6 +195,15 @@ export default function CronList() {
     () => projects.map(p => ({ value: p.name, label: p.name })),
     [projects],
   );
+
+  const modeOptions = useMemo(() => {
+    const agentType = projects.find(p => p.name === form.project)?.agent_type;
+    const base = agentType === 'codex' ? [...CODEX_MODE_OPTIONS] : [...DEFAULT_MODE_OPTIONS];
+    if (form.mode && !base.includes(form.mode)) {
+      base.push(form.mode);
+    }
+    return base;
+  }, [form.mode, form.project, projects]);
 
   useEffect(() => {
     if (!form.project) { setSessionKeys([]); return; }
@@ -501,7 +511,7 @@ export default function CronList() {
             label={t('cron.mode')}
             value={form.mode}
             onChange={v => setForm({ ...form, mode: v })}
-            options={MODE_OPTIONS.map(m => ({ value: m, label: m }))}
+            options={modeOptions.map(m => ({ value: m, label: m }))}
             placeholder={t('cron.modeDefault')}
           />
 
