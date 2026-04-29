@@ -19,7 +19,7 @@ const (
 )
 
 var runSchtasks = func(args ...string) (string, error) {
-	cmd := exec.Command("schtasks", args...)
+	cmd := exec.Command("schtasks.exe", args...)
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
 }
