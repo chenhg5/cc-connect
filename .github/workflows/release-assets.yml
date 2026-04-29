@@ -1,0 +1,65 @@
+name: Release Assets
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build and upload assets for
+        required: true
+        default: v1.3.3
+
+permissions:
+  contents: write
+
+jobs:
+  linux-amd64:
+    name: Linux amd64
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build binary
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          commit="$(git rev-parse HEAD)"
+          build_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -buildvcs=false -tags no_web \
+            -ldflags "-s -w -X main.version=${TAG} -X main.commit=${commit} -X main.buildTime=${build_time}" \
+            -o "dist/cc-connect-linux-amd64" ./cmd/cc-connect
+          "dist/cc-connect-linux-amd64" --version
+
+      - name: Package assets
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          asset="cc-connect-${TAG}-linux-amd64.tar.gz"
+          tar -C dist -czf "dist/${asset}" cc-connect-linux-amd64
+          (cd dist && sha256sum "${asset}" > "${asset}.sha256")
+          ls -lh "dist/${asset}" "dist/${asset}.sha256"
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release upload "${TAG}" \
+            "dist/cc-connect-${TAG}-linux-amd64.tar.gz" \
+            "dist/cc-connect-${TAG}-linux-amd64.tar.gz.sha256" \
+            --clobber \
+            --repo "${GITHUB_REPOSITORY}"
