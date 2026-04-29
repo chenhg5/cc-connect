@@ -54,6 +54,9 @@ func (m *schtasksManager) Install(cfg Config) error {
 		return fmt.Errorf("write task script: %w", err)
 	}
 
+	if err := stopWindowsTask(); err != nil {
+		slog.Warn("schtasks: stop existing task failed", "error", err)
+	}
 	if err := deleteWindowsTask(); err != nil {
 		slog.Warn("schtasks: delete existing task failed", "error", err)
 	}
