@@ -7431,7 +7431,7 @@ func TestBuildSenderPrompt_Enabled(t *testing.T) {
 	e := newTestEngine()
 	e.SetInjectSender(true)
 
-	result := e.buildSenderPrompt("hello world", "user123", "Alice", "feishu", "feishu:channel42:user123")
+	result := e.buildSenderPrompt("hello world", "user123", "Alice", "feishu", "feishu:channel42:user123", "")
 	expected := "[cc-connect sender_id=user123 sender_name=\"Alice\" platform=feishu chat_id=channel42]\nhello world"
 	if result != expected {
 		t.Fatalf("got %q, want %q", result, expected)
@@ -7442,7 +7442,7 @@ func TestBuildSenderPrompt_Disabled(t *testing.T) {
 	e := newTestEngine()
 	e.SetInjectSender(false)
 
-	result := e.buildSenderPrompt("hello", "user1", "Alice", "feishu", "feishu:ch:user1")
+	result := e.buildSenderPrompt("hello", "user1", "Alice", "feishu", "feishu:ch:user1", "")
 	if result != "hello" {
 		t.Fatalf("expected raw content when disabled, got %q", result)
 	}
@@ -7452,7 +7452,7 @@ func TestBuildSenderPrompt_EmptyUserID(t *testing.T) {
 	e := newTestEngine()
 	e.SetInjectSender(true)
 
-	result := e.buildSenderPrompt("hello", "", "Bob", "telegram", "telegram:ch:user1")
+	result := e.buildSenderPrompt("hello", "", "Bob", "telegram", "telegram:ch:user1", "")
 	if result != "hello" {
 		t.Fatalf("expected raw content when userID is empty, got %q", result)
 	}
@@ -7462,7 +7462,7 @@ func TestBuildSenderPrompt_EmptyUserName(t *testing.T) {
 	e := newTestEngine()
 	e.SetInjectSender(true)
 
-	result := e.buildSenderPrompt("hello", "user1", "", "feishu", "feishu:ch:user1")
+	result := e.buildSenderPrompt("hello", "user1", "", "feishu", "feishu:ch:user1", "")
 	expected := "[cc-connect sender_id=user1 platform=feishu chat_id=ch]\nhello"
 	if result != expected {
 		t.Fatalf("got %q, want %q", result, expected)
@@ -7473,7 +7473,7 @@ func TestBuildSenderPrompt_NameWithSpaces(t *testing.T) {
 	e := newTestEngine()
 	e.SetInjectSender(true)
 
-	result := e.buildSenderPrompt("hi", "U999", "Jim Tang", "slack", "slack:C012:U999")
+	result := e.buildSenderPrompt("hi", "U999", "Jim Tang", "slack", "slack:C012:U999", "")
 	expected := "[cc-connect sender_id=U999 sender_name=\"Jim Tang\" platform=slack chat_id=C012]\nhi"
 	if result != expected {
 		t.Fatalf("got %q, want %q", result, expected)
@@ -7489,7 +7489,9 @@ func TestExtractChannelID(t *testing.T) {
 		{"telegram:group123:user2", "group123"},
 		{"plain", ""},
 		{"a:b", "b"},
-		{"a:b:c:d", "b"},
+		{"a:bb:c:d", "bb"},
+		{"dingtalk:g:cidXXX:staff1", "cidXXX"},
+		{"dingtalk:d:cidYYY:staff2", "cidYYY"},
 	}
 	for _, tt := range tests {
 		got := extractChannelID(tt.key)
@@ -7513,7 +7515,7 @@ func TestBuildSenderPrompt_DifferentPlatforms(t *testing.T) {
 		{"slack", "slack:C012345:carol", "C012345"},
 	}
 	for _, tc := range platforms {
-		result := e.buildSenderPrompt("msg", "uid", "TestUser", tc.platform, tc.sessionKey)
+		result := e.buildSenderPrompt("msg", "uid", "TestUser", tc.platform, tc.sessionKey, "")
 		if !strings.Contains(result, "platform="+tc.platform) {
 			t.Errorf("missing platform=%s in %q", tc.platform, result)
 		}
@@ -7527,12 +7529,38 @@ func TestBuildSenderPrompt_SanitizesSpecialChars(t *testing.T) {
 	e := newTestEngine()
 	e.SetInjectSender(true)
 
-	result := e.buildSenderPrompt("hi", "U1", "Evil\"Name\nInject", "slack", "slack:C1:U1")
+	result := e.buildSenderPrompt("hi", "U1", "Evil\"Name\nInject", "slack", "slack:C1:U1", "")
 	if strings.Contains(result, `"Name`) || strings.Contains(result, "\n"+`Inject`) {
 		t.Fatalf("quotes/newlines should be sanitized, got %q", result)
 	}
 	if !strings.Contains(result, `sender_name="Evil'Name Inject"`) {
 		t.Fatalf("expected sanitized name, got %q", result)
+	}
+}
+
+func TestBuildSenderPrompt_ChannelKeyOverridesSessionKey(t *testing.T) {
+	e := newTestEngine()
+	e.SetInjectSender(true)
+
+	// When channelKey is provided, it should be used as chat_id instead of
+	// extracting from sessionKey (which would give "g" for dingtalk).
+	result := e.buildSenderPrompt("hello", "staff1", "Alice", "dingtalk", "dingtalk:g:cidXXX:staff1", "cidXXX")
+	expected := "[cc-connect sender_id=staff1 sender_name=\"Alice\" platform=dingtalk chat_id=cidXXX]\nhello"
+	if result != expected {
+		t.Fatalf("got %q, want %q", result, expected)
+	}
+}
+
+func TestBuildSenderPrompt_FallbackWithoutChannelKey(t *testing.T) {
+	e := newTestEngine()
+	e.SetInjectSender(true)
+
+	// When channelKey is empty, extractChannelID heuristic should detect
+	// the 4-segment format and extract the correct channel.
+	result := e.buildSenderPrompt("hello", "staff1", "Alice", "dingtalk", "dingtalk:g:cidXXX:staff1", "")
+	expected := "[cc-connect sender_id=staff1 sender_name=\"Alice\" platform=dingtalk chat_id=cidXXX]\nhello"
+	if result != expected {
+		t.Fatalf("got %q, want %q", result, expected)
 	}
 }
 
@@ -9718,6 +9746,7 @@ func TestExtractSessionKeyParts(t *testing.T) {
 		{"single colon", "discord:channel1", "discord", "channel1", "discord:channel1", ""},
 		{"empty string", "", "", "", "", ""},
 		{"just platform colon user", "line::user1", "line", "", "", "user1"},
+		{"four-segment with type tag", "dingtalk:g:cidXXX:staff1", "dingtalk", "cidXXX", "dingtalk:cidXXX", "staff1"},
 	}
 
 	for _, tt := range tests {
@@ -9784,6 +9813,242 @@ type stubPlatformWithObserve struct {
 
 func (s *stubPlatformWithObserve) SendObservation(_ context.Context, _, _ string) error {
 	return nil
+}
+
+// --- Instant Reply tests ---
+
+// stubStreamingCardPlatform simulates a platform that supports StreamingCardPlatform
+// (e.g. DingTalk with AI Card configured), so instant reply should be skipped.
+type stubStreamingCardPlatform struct {
+	stubPlatformEngine
+	cardCreated bool
+	cardFail    bool // when true, CreateStreamingCard returns an error
+}
+
+func (p *stubStreamingCardPlatform) CreateStreamingCard(_ context.Context, _ any) (StreamingCard, error) {
+	if p.cardFail {
+		return nil, fmt.Errorf("stub: card_template_id not configured")
+	}
+	p.cardCreated = true
+	return &stubStreamingCard{}, nil
+}
+
+// stubStreamingCard is a minimal StreamingCard for tests.
+type stubStreamingCard struct{}
+
+func (c *stubStreamingCard) Update(_ context.Context, _ string) error { return nil }
+func (c *stubStreamingCard) Finalize(_ context.Context, _ string) error { return nil }
+func (c *stubStreamingCard) Failed() bool                                { return false }
+
+func TestHandleMessage_InstantReply_SendsConfirmationWhenEnabled(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agentSession := newResultAgentSession("agent reply")
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetInstantReply(InstantReplyCfg{Enabled: true, Content: "🤔 Thinking..."})
+
+	msg := &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "hello",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	// Wait for async processing to complete
+	deadline := time.After(2 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) >= 2 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for replies, got: %v", p.getSent())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	sent := p.getSent()
+	if sent[0] != "🤔 Thinking..." {
+		t.Fatalf("first reply = %q, want instant reply '🤔 Thinking...'", sent[0])
+	}
+}
+
+func TestHandleMessage_InstantReply_UsesDefaultI18nWhenContentEmpty(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agentSession := newResultAgentSession("agent reply")
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangChinese)
+	e.SetInstantReply(InstantReplyCfg{Enabled: true}) // Content empty → use MsgStarting
+
+	msg := &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "hello",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	deadline := time.After(2 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) >= 2 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for replies, got: %v", p.getSent())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	sent := p.getSent()
+	if sent[0] != "⏳ 处理中..." {
+		t.Fatalf("first reply = %q, want i18n default '⏳ 处理中...'", sent[0])
+	}
+}
+
+func TestHandleMessage_InstantReply_SkippedWhenDisabled(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agentSession := newResultAgentSession("agent reply")
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	// InstantReply not set (default: disabled)
+
+	msg := &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "hello",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	deadline := time.After(2 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) >= 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for replies, got: %v", p.getSent())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	sent := p.getSent()
+	// The only reply should be the agent result, no instant reply
+	if len(sent) != 1 {
+		t.Fatalf("sent messages = %d, want exactly 1 (no instant reply), got: %v", len(sent), sent)
+	}
+	if sent[0] != "agent reply" {
+		t.Fatalf("first reply = %q, want 'agent reply'", sent[0])
+	}
+}
+
+func TestHandleMessage_InstantReply_SkippedForStreamingCardPlatform(t *testing.T) {
+	p := &stubStreamingCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "dingtalk"}}
+	agentSession := newResultAgentSession("agent reply")
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetInstantReply(InstantReplyCfg{Enabled: true, Content: "🤔 Thinking..."})
+
+	msg := &Message{
+		SessionKey: "dingtalk:user1",
+		Platform:   "dingtalk",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "hello",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	// When streaming card succeeds, the agent reply goes through streamCard.Finalize,
+	// not p.Send. Wait briefly then verify no instant reply was sent via p.Send.
+	time.Sleep(500 * time.Millisecond)
+
+	sent := p.getSent()
+	for _, s := range sent {
+		if s == "🤔 Thinking..." {
+			t.Fatalf("instant reply should be skipped for StreamingCardPlatform, but got: %v", sent)
+		}
+	}
+}
+
+func TestHandleMessage_InstantReply_SentWhenStreamingCardFails(t *testing.T) {
+	p := &stubStreamingCardPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "dingtalk"},
+		cardFail:           true,
+	}
+	agentSession := newResultAgentSession("agent reply")
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetInstantReply(InstantReplyCfg{Enabled: true, Content: "🤔 Thinking..."})
+
+	msg := &Message{
+		SessionKey: "dingtalk:user1",
+		Platform:   "dingtalk",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "hello",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	deadline := time.After(2 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) >= 2 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for replies, got: %v", p.getSent())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	sent := p.getSent()
+	if sent[0] != "🤔 Thinking..." {
+		t.Fatalf("first reply = %q, want instant reply when card creation fails", sent[0])
+	}
+}
+
+func TestHandleMessage_InstantReply_SkippedForSlashCommands(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetInstantReply(InstantReplyCfg{Enabled: true, Content: "🤔 Thinking..."})
+
+	msg := &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "/help",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	// Give a short time for any async processing
+	time.Sleep(200 * time.Millisecond)
+
+	sent := p.getSent()
+	for _, s := range sent {
+		if s == "🤔 Thinking..." {
+			t.Fatalf("instant reply should be skipped for slash commands, but got: %v", sent)
+		}
+	}
 }
 
 func TestIsSilentReply(t *testing.T) {

@@ -100,6 +100,7 @@ type Config struct {
 	TTS               TTSConfig               `toml:"tts"`
 	Display           DisplayConfig           `toml:"display"`
 	StreamPreview     StreamPreviewConfig     `toml:"stream_preview"`      // real-time streaming preview
+	InstantReply      InstantReplyConfig      `toml:"instant_reply"`       // immediate confirmation reply
 	RateLimit         RateLimitConfig         `toml:"rate_limit"`          // per-session rate limiting
 	OutgoingRateLimit OutgoingRateLimitConfig `toml:"outgoing_rate_limit"` // outgoing message throttling
 	Relay             RelayConfig             `toml:"relay"`               // bot-to-bot relay behavior
@@ -173,6 +174,14 @@ type StreamPreviewConfig struct {
 	IntervalMs        *int     `toml:"interval_ms"`                  // min ms between updates; default 1500
 	MinDeltaChars     *int     `toml:"min_delta_chars"`              // min new chars before update; default 30
 	MaxChars          *int     `toml:"max_chars"`                    // max preview length; default 2000
+}
+
+// InstantReplyConfig controls the immediate confirmation reply sent when a message
+// is received, before the agent starts processing. This gives users quick feedback
+// that their message was received (e.g. "🤔 Thinking...").
+type InstantReplyConfig struct {
+	Enabled *bool  `toml:"enabled"` // default false
+	Content string `toml:"content"` // custom reply text; empty = use i18n default ("⏳ Processing...")
 }
 
 // RateLimitConfig controls per-session message rate limiting.
