@@ -296,6 +296,18 @@ type interactiveState struct {
 	pendingProviderAdd     *pendingProviderAddState
 	lastAutoCompressAt     time.Time
 	lastAutoCompressTokens int
+
+	// Unsolicited event reader: a background goroutine that consumes agent
+	// events between user-initiated turns (e.g. background task completions).
+	// Cancel unsolicitedCancel to stop the reader; wait on unsolicitedDone
+	// to confirm it has exited before starting a new foreground turn.
+	unsolicitedCancel context.CancelFunc // nil when no reader is running
+	unsolicitedDone   chan struct{}      // closed when the reader goroutine exits
+
+	// eventsNeedResync is true when buffered events should be drained before
+	// the next turn (e.g. after an abnormal exit). Defaults to true (safe);
+	// cleared to false only after a clean EventResult.
+	eventsNeedResync bool
 }
 
 type pendingProviderAddState struct {
@@ -410,14 +422,28 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 	return e
 }
 
+// DefaultWorkspaceIdleTimeout is the default time a workspace can be idle
+// before the reaper reclaims it.
+const DefaultWorkspaceIdleTimeout = 15 * time.Minute
+
 // SetMultiWorkspace enables multi-workspace mode for the engine.
 func (e *Engine) SetMultiWorkspace(baseDir, bindingStorePath string) {
 	e.multiWorkspace = true
 	e.baseDir = baseDir
 	e.workspaceBindings = NewWorkspaceBindingManager(bindingStorePath)
-	e.workspacePool = newWorkspacePool(15 * time.Minute)
+	e.workspacePool = newWorkspacePool(DefaultWorkspaceIdleTimeout)
 	e.initFlows = make(map[string]*workspaceInitFlow)
 	go e.runIdleReaper()
+}
+
+// SetWorkspaceIdleTimeout overrides the workspace idle reaper timeout.
+// Must be called after SetMultiWorkspace. A zero value disables reaping.
+func (e *Engine) SetWorkspaceIdleTimeout(d time.Duration) {
+	if e.workspacePool != nil {
+		e.workspacePool.mu.Lock()
+		e.workspacePool.idleTimeout = d
+		e.workspacePool.mu.Unlock()
+	}
 }
 
 func (e *Engine) runIdleReaper() {
@@ -1811,8 +1837,9 @@ func (e *Engine) ensureInteractiveStateForQueueing(key string, p Platform, reply
 	defer e.interactiveMu.Unlock()
 	if _, ok := e.interactiveStates[key]; !ok {
 		e.interactiveStates[key] = &interactiveState{
-			platform: p,
-			replyCtx: replyCtx,
+			platform:         p,
+			replyCtx:         replyCtx,
+			eventsNeedResync: true,
 		}
 	}
 }
@@ -1840,7 +1867,19 @@ func (e *Engine) drainOrphanedQueue(session *Session, sessions *SessionManager, 
 		return
 	}
 
+	// Stop unsolicited reader before draining — drainPendingMessages reads
+	// from Events() and we must not have concurrent readers.
+	e.stopUnsolicitedReader(state)
+
 	unlocked = e.drainPendingMessages(state, session, sessions, interactiveKey)
+
+	// Restart unsolicited reader if the session is still alive and clean.
+	state.mu.Lock()
+	alive := state.agentSession != nil && state.agentSession.Alive() && !state.stopped && !state.eventsNeedResync
+	state.mu.Unlock()
+	if alive {
+		e.startUnsolicitedReader(state, session, sessions, interactiveKey, workspaceDir)
+	}
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -2182,10 +2221,16 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		}
 	}()
 
-	// Drain any stale events left in the channel from a previous turn.
-	// This prevents the next processInteractiveEvents from reading an old
-	// EventResult that was pushed after the previous turn already returned.
-	drainEvents(state.agentSession.Events())
+	// Stop the unsolicited reader (if running) and hand off event channel
+	// ownership to this foreground turn. Only drain events when the previous
+	// turn ended abnormally (eventsNeedResync=true, the default).
+	e.stopUnsolicitedReader(state)
+	state.mu.Lock()
+	needResync := state.eventsNeedResync
+	state.mu.Unlock()
+	if needResync {
+		drainEvents(state.agentSession.Events())
+	}
 
 	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey)
 
@@ -2215,6 +2260,16 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	// the message to queueMessageForBusySession). Drain any such orphans.
 	if e.drainPendingMessages(state, session, sessions, interactiveKey) {
 		unlocked = true
+	}
+
+	// Start unsolicited reader if the session is still alive and the last
+	// turn ended cleanly. This goroutine will consume agent-initiated events
+	// (e.g. background task completions) and relay them to the platform.
+	state.mu.Lock()
+	alive := state.agentSession != nil && state.agentSession.Alive() && !state.stopped && !state.eventsNeedResync
+	state.mu.Unlock()
+	if alive {
+		e.startUnsolicitedReader(state, session, sessions, interactiveKey, workspaceDir)
 	}
 }
 
@@ -2375,6 +2430,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 			"want_agent_session", wantID,
 			"have_agent_session", currentID,
 		)
+		e.stopUnsolicitedReader(state)
 		state.markStopped()
 		// Close synchronously to prevent race condition where old agent
 		// continues outputting while new agent starts (issue #327).
@@ -2425,7 +2481,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	// Check if context is already canceled (e.g. during shutdown/restart)
 	if e.ctx.Err() != nil {
 		slog.Debug("skipping session start: context canceled", "session_key", sessionKey)
-		newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent}
+		newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent, eventsNeedResync: true}
 		adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
 		state = newState
 		e.interactiveStates[sessionKey] = state
@@ -2462,7 +2518,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 				Platform:   p.Name(),
 				Error:      fmt.Sprintf("failed to start session: %v", err),
 			})
-			newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent}
+			newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent, eventsNeedResync: true}
 			adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
 			state = newState
 			e.interactiveStates[sessionKey] = state
@@ -2484,10 +2540,11 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	}
 
 	newState := &interactiveState{
-		agentSession: agentSession,
-		platform:     p,
-		replyCtx:     replyCtx,
-		agent:        agent,
+		agentSession:     agentSession,
+		platform:         p,
+		replyCtx:         replyCtx,
+		agent:            agent,
+		eventsNeedResync: true,
 	}
 	adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
 	state = newState
@@ -2536,7 +2593,21 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 
 	// Notify senders of any queued messages that will never be processed.
 	if ok && state != nil {
+		// Stop unsolicited reader before marking stopped to avoid goroutine leak.
+		e.stopUnsolicitedReader(state)
+
 		state.markStopped()
+
+		// Resolve any pending permission so the reader goroutine (or event
+		// loop) does not block on <-pending.Resolved forever.
+		state.mu.Lock()
+		pending := state.pending
+		state.pending = nil
+		state.mu.Unlock()
+		if pending != nil {
+			pending.resolve()
+		}
+
 		e.notifyDroppedQueuedMessages(state, fmt.Errorf("session reset"))
 	}
 
@@ -2602,6 +2673,274 @@ func (e *Engine) closeAgentSessionWithTimeout(sessionKey string, agentSession Ag
 }
 
 const defaultEventIdleTimeout = 2 * time.Hour
+
+// unsolicitedReaderStopTimeout bounds how long stopUnsolicitedReader waits
+// for the reader goroutine to exit. The reader is structured so its iterations
+// are short (blocking adapter calls like RespondPermission are offloaded), so
+// this timeout should almost always be non-binding. If it does fire, callers
+// force a resync of the Events channel to preserve single-reader correctness.
+const unsolicitedReaderStopTimeout = 5 * time.Second
+
+// stopUnsolicitedReader cancels any running unsolicited reader goroutine and
+// waits (bounded) for it to exit. If the reader does not exit in time, the
+// caller is responsible for draining/resyncing the Events channel before a
+// new foreground turn reads from it — we set eventsNeedResync here so that
+// any downstream consumer drains before resuming. We do NOT wait unbounded:
+// some callers hold interactiveMu, and a reader stuck in a blocking adapter
+// call would stall unrelated sessions.
+func (e *Engine) stopUnsolicitedReader(state *interactiveState) {
+	state.mu.Lock()
+	cancel := state.unsolicitedCancel
+	done := state.unsolicitedDone
+	state.unsolicitedCancel = nil
+	state.unsolicitedDone = nil
+	state.mu.Unlock()
+
+	if cancel == nil {
+		return
+	}
+	cancel()
+	if done == nil {
+		return
+	}
+	select {
+	case <-done:
+	case <-time.After(unsolicitedReaderStopTimeout):
+		slog.Warn("unsolicited reader stop timed out; forcing resync",
+			"timeout", unsolicitedReaderStopTimeout)
+		// Force the next foreground turn to drain Events() defensively.
+		// The old reader may still be alive; its ctx-double-check will drop
+		// any event read after cancellation, so concurrent consumers cannot
+		// silently steal foreground events.
+		state.mu.Lock()
+		state.eventsNeedResync = true
+		state.mu.Unlock()
+	}
+}
+
+// startUnsolicitedReader launches a background goroutine that consumes agent
+// events produced between user-initiated turns (e.g. background task
+// completions in Claude Code). Events are relayed to the platform immediately.
+// The goroutine exits when its context is cancelled (by a new foreground turn
+// or session cleanup) or when the Events channel is closed.
+func (e *Engine) startUnsolicitedReader(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, workspaceDir string) {
+	// Ensure no previous reader is still running.
+	e.stopUnsolicitedReader(state)
+
+	// Capture the agent session under lock. cleanupInteractiveState may nil
+	// state.agentSession concurrently, so reading it inside the goroutine
+	// without synchronisation is a data race.
+	state.mu.Lock()
+	agentSession := state.agentSession
+	state.mu.Unlock()
+	if agentSession == nil {
+		return
+	}
+
+	ctx, cancel := context.WithCancel(e.ctx)
+	done := make(chan struct{})
+
+	state.mu.Lock()
+	state.unsolicitedCancel = cancel
+	state.unsolicitedDone = done
+	state.mu.Unlock()
+
+	go e.runUnsolicitedReader(ctx, cancel, done, state, agentSession, session, sessions, sessionKey, workspaceDir)
+}
+
+// runUnsolicitedReader is the goroutine body for the unsolicited event reader.
+// agentSession is captured by the caller so we don't race with
+// cleanupInteractiveState nilling state.agentSession.
+func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.CancelFunc, done chan struct{}, state *interactiveState, agentSession AgentSession, session *Session, sessions *SessionManager, sessionKey string, workspaceDir string) {
+	defer close(done)
+	defer cancel()
+
+	events := agentSession.Events()
+
+	var turnActive bool // true after first event, cleared on EventResult
+	defer func() {
+		if turnActive {
+			if workspaceDir != "" && e.workspacePool != nil {
+				if ws := e.workspacePool.Get(workspaceDir); ws != nil {
+					ws.EndTurn()
+				}
+			}
+		}
+	}()
+
+	var textParts []string
+	var toolsUsed []string
+
+	for {
+		select {
+		case <-ctx.Done():
+			// Context cancelled (new foreground turn or cleanup). Don't set
+			// eventsNeedResync — the caller (stopUnsolicitedReader) knows the
+			// channel state is clean because it just took ownership.
+			return
+
+		case event, ok := <-events:
+			if !ok {
+				// Channel closed — agent process exited. Log any buffered
+				// tool/text context so it isn't lost silently.
+				if len(toolsUsed) > 0 || len(textParts) > 0 {
+					slog.Warn("unsolicited reader: agent channel closed mid-turn",
+						"session", sessionKey,
+						"tools_used", toolsUsed,
+						"text_fragments", len(textParts))
+				}
+				state.mu.Lock()
+				state.eventsNeedResync = true
+				state.mu.Unlock()
+				return
+			}
+
+			// Go's select is non-deterministic when multiple cases are
+			// ready, so even after ctx is cancelled we may still read one
+			// last event from the channel. If ownership has been handed
+			// off, drop the event rather than processing it — otherwise we
+			// could relay (or worse, respond to) an event that belongs to
+			// the incoming foreground turn. The caller has already set
+			// eventsNeedResync on timeout, so any buffered events will be
+			// drained before the foreground turn reads them.
+			select {
+			case <-ctx.Done():
+				slog.Warn("unsolicited reader: event received after cancellation, dropping",
+					"session", sessionKey, "event_type", event.Type)
+				state.mu.Lock()
+				state.eventsNeedResync = true
+				state.mu.Unlock()
+				return
+			default:
+			}
+
+			// Mark workspace active on first event.
+			if !turnActive {
+				turnActive = true
+				if workspaceDir != "" && e.workspacePool != nil {
+					if ws := e.workspacePool.Get(workspaceDir); ws != nil {
+						ws.BeginTurn()
+					}
+				}
+				slog.Info("unsolicited events detected, relaying to platform",
+					"session", sessionKey)
+			}
+
+			state.mu.Lock()
+			p := state.platform
+			replyCtx := state.replyCtx
+			state.mu.Unlock()
+
+			switch event.Type {
+			case EventText:
+				if event.Content != "" {
+					textParts = append(textParts, event.Content)
+				}
+
+			case EventToolUse:
+				// Record tool name so we can log or surface context if the
+				// channel closes before a clean EventResult. Output is
+				// delivered via EventResult; we intentionally do not relay
+				// per-tool progress here (no active user turn to observe it).
+				if event.ToolName != "" {
+					toolsUsed = append(toolsUsed, event.ToolName)
+				}
+				slog.Debug("unsolicited tool use",
+					"session", sessionKey,
+					"tool", event.ToolName)
+
+			case EventToolResult:
+				slog.Debug("unsolicited tool result",
+					"session", sessionKey,
+					"status", event.ToolStatus)
+
+			case EventResult:
+				fullResponse := event.Content
+				if fullResponse == "" && len(textParts) > 0 {
+					fullResponse = strings.Join(textParts, "")
+				}
+
+				if fullResponse != "" {
+					if e.showContextIndicator && event.InputTokens >= 100 {
+						fullResponse += contextIndicator(event.InputTokens)
+					}
+					for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
+						e.send(p, replyCtx, chunk)
+					}
+				}
+
+				// Safety note: concurrent writes to session.History by the
+				// unsolicited reader and a foreground turn cannot overlap.
+				// Session.AddHistory takes session.mu internally, and
+				// stopUnsolicitedReader (called before any foreground turn
+				// takes event-channel ownership) blocks until this goroutine
+				// exits — so a foreground AddHistory is always ordered after
+				// any unsolicited AddHistory.
+				session.AddHistory("assistant", fullResponse)
+				sessions.Save()
+
+				// Reset for potential subsequent unsolicited turn.
+				textParts = nil
+				toolsUsed = nil
+				turnActive = false
+				if workspaceDir != "" && e.workspacePool != nil {
+					if ws := e.workspacePool.Get(workspaceDir); ws != nil {
+						ws.EndTurn()
+					}
+				}
+
+				// Mark clean exit so next foreground turn preserves events.
+				state.mu.Lock()
+				state.eventsNeedResync = false
+				state.mu.Unlock()
+
+				slog.Info("unsolicited turn complete",
+					"session", sessionKey,
+					"response_len", len(fullResponse))
+
+			case EventPermissionRequest:
+				// If approveAll (/yolo) is set, grant the request. Otherwise
+				// deny — there is no active user turn to consult — and notify
+				// the user on the platform so a silently blocked background
+				// task is not invisible. RespondPermission may make a slow
+				// adapter call, so we run it in a detached goroutine to keep
+				// reader iterations fast (stopUnsolicitedReader relies on a
+				// bounded wait for the reader to exit).
+				state.mu.Lock()
+				autoApprove := state.approveAll
+				state.mu.Unlock()
+
+				result := PermissionResult{Behavior: "deny", Message: "denied: no active user turn"}
+				if autoApprove {
+					result = PermissionResult{Behavior: "allow", UpdatedInput: event.ToolInputRaw}
+				}
+				reqID := event.RequestID
+				go func() {
+					if err := agentSession.RespondPermission(reqID, result); err != nil {
+						slog.Error("unsolicited: failed to respond permission", "error", err)
+					}
+				}()
+				if !autoApprove {
+					toolName := event.ToolName
+					if toolName == "" {
+						toolName = "(unknown)"
+					}
+					e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgBackgroundAutoDenied), toolName))
+				}
+
+			case EventError:
+				if event.Error != nil {
+					slog.Error("unsolicited agent error", "error", event.Error, "session", sessionKey)
+					e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
+				}
+				state.mu.Lock()
+				state.eventsNeedResync = true
+				state.mu.Unlock()
+				return
+			}
+		}
+	}
+}
 
 type agentErrorHandler struct {
 	contains string
@@ -2705,17 +3044,24 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			cp.Finalize(ProgressCardStateFailed)
 			sp.discard()
 			state.mu.Lock()
+			state.eventsNeedResync = true
 			p := state.platform
 			state.mu.Unlock()
 			e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out (no response)"))
 			e.cleanupInteractiveState(sessionKey, state)
 			return
 		case <-e.ctx.Done():
+			state.mu.Lock()
+			state.eventsNeedResync = true
+			state.mu.Unlock()
 			return
 		}
 
 		if state.isStopped() {
 			sp.discard()
+			state.mu.Lock()
+			state.eventsNeedResync = true
+			state.mu.Unlock()
 			return
 		}
 
@@ -3002,6 +3348,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					sessions.Save()
 				}
 			}
+
+			// Mark clean exit so unsolicited reader preserves buffered events.
+			state.mu.Lock()
+			state.eventsNeedResync = false
+			state.mu.Unlock()
 
 			fullResponse := event.Content
 			// When tool progress is hidden, segmentStart stays 0 and textParts
@@ -3296,6 +3647,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case EventError:
 			cp.Finalize(ProgressCardStateFailed)
 			sp.discard()
+			state.mu.Lock()
+			state.eventsNeedResync = true
+			state.mu.Unlock()
 			if event.Error != nil {
 				errMsg := event.Error.Error()
 				slog.Error("agent error", "error", event.Error)
@@ -3327,6 +3681,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 channelClosed:
 	// Channel closed - process exited unexpectedly
 	slog.Warn("agent process exited", "session_key", sessionKey)
+	state.mu.Lock()
+	state.eventsNeedResync = true
+	state.mu.Unlock()
 	e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent process exited"))
 	e.cleanupInteractiveState(sessionKey, state)
 
@@ -6502,6 +6859,9 @@ func (e *Engine) stopInteractiveSession(sessionKey string, quietPlatform Platfor
 		return false
 	}
 
+	// Stop unsolicited reader before touching state to avoid races.
+	e.stopUnsolicitedReader(state)
+
 	state.mu.Lock()
 	pending := state.pending
 	state.pending = nil
@@ -6567,6 +6927,9 @@ func (e *Engine) runCompress(state *interactiveState, session *Session, sessions
 			session.Unlock()
 		}
 	}()
+
+	// Stop unsolicited reader before taking event channel ownership.
+	e.stopUnsolicitedReader(state)
 
 	state.mu.Lock()
 	state.platform = p
@@ -8158,7 +8521,7 @@ func (e *Engine) getOrCreateDeleteModeState(sessionKey string, p Platform, reply
 	e.interactiveMu.Lock()
 	state, ok := e.interactiveStates[interactiveKey]
 	if !ok || state == nil {
-		state = &interactiveState{platform: p, replyCtx: replyCtx}
+		state = &interactiveState{platform: p, replyCtx: replyCtx, eventsNeedResync: true}
 		e.interactiveStates[interactiveKey] = state
 	} else {
 		state.platform = p
