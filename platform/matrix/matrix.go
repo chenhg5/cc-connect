@@ -2,11 +2,14 @@ package matrix
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +17,8 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 
 	"maunium.net/go/mautrix"
+	"maunium.net/go/mautrix/crypto"
+	"maunium.net/go/mautrix/crypto/cryptohelper"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/format"
 	"maunium.net/go/mautrix/id"
@@ -50,6 +55,7 @@ type Platform struct {
 	unavailableNotified bool
 	dedup               core.MessageDedup
 	httpClient          *http.Client
+	cryptoHelper        *cryptohelper.CryptoHelper
 }
 
 const (
@@ -177,15 +183,19 @@ func (p *Platform) runConnection(ctx context.Context) error {
 	}
 	client.Client = p.httpClient
 
-	// Auto-detect user ID if not configured
+	// Always call Whoami to validate token and get device ID (needed for E2EE)
 	selfUserID := id.UserID(p.userID)
+	var deviceID id.DeviceID
+	resp, err := client.Whoami(ctx)
+	if err != nil {
+		return fmt.Errorf("matrix: whoami: %w", err)
+	}
 	if selfUserID == "" {
-		resp, err := client.Whoami(ctx)
-		if err != nil {
-			return fmt.Errorf("matrix: whoami: %w", err)
-		}
 		selfUserID = resp.UserID
 	}
+	deviceID = resp.DeviceID
+	client.UserID = selfUserID
+	client.DeviceID = deviceID
 
 	if ctx.Err() != nil || p.isStopping() {
 		return nil
@@ -196,17 +206,27 @@ func (p *Platform) runConnection(ctx context.Context) error {
 		return nil
 	}
 
+	// Initialize E2EE crypto helper
+	ch, err := p.initCrypto(ctx, client)
+	if err != nil {
+		slog.Warn("matrix: E2EE not available, encrypted rooms won't work", "error", err)
+	} else {
+		ch.DecryptErrorCallback = func(evt *event.Event, decryptErr error) {
+			slog.Warn("matrix: decrypt failed", "event_id", evt.ID, "sender", evt.Sender, "room", evt.RoomID, "error", decryptErr)
+		}
+		p.setCryptoHelper(ch)
+		slog.Info("matrix: E2EE enabled", "device_id", client.DeviceID)
+	}
+
 	slog.Info("matrix: connected", "user_id", selfUserID)
 	p.emitReady(gen)
 
-	// Register event handlers
+	// Register event handlers.
+	// Note: EventEncrypted is handled by cryptohelper which decrypts and
+	// re-dispatches as EventMessage, so we only need EventMessage here.
 	syncer := client.Syncer.(*mautrix.DefaultSyncer)
 	syncer.OnEventType(event.EventMessage, func(ctx context.Context, evt *event.Event) {
 		p.handleMessage(ctx, evt)
-	})
-	syncer.OnEventType(event.EventEncrypted, func(ctx context.Context, evt *event.Event) {
-		slog.Warn("matrix: received encrypted message — encryption not supported, skipping",
-			"room", evt.RoomID, "sender", evt.Sender)
 	})
 	syncer.OnEventType(event.StateMember, func(ctx context.Context, evt *event.Event) {
 		p.handleMemberState(ctx, evt)
@@ -215,11 +235,77 @@ func (p *Platform) runConnection(ctx context.Context) error {
 	// Blocks until ctx cancelled or fatal error
 	err = client.SyncWithContext(ctx)
 
+	// Cleanup
+	p.closeCryptoHelper()
 	p.clearClient(gen, client)
 	if ctx.Err() != nil {
 		return nil
 	}
 	return fmt.Errorf("matrix: sync ended: %w", err)
+}
+
+func (p *Platform) initCrypto(ctx context.Context, client *mautrix.Client) (*cryptohelper.CryptoHelper, error) {
+	if client.DeviceID == "" {
+		return nil, fmt.Errorf("device ID not available from whoami")
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("get home dir: %w", err)
+	}
+	cryptoDir := filepath.Join(homeDir, ".cc-connect")
+	if err := os.MkdirAll(cryptoDir, 0o700); err != nil {
+		return nil, fmt.Errorf("create data dir: %w", err)
+	}
+	dbPath := filepath.Join(cryptoDir, fmt.Sprintf("matrix-crypto-%s.db", client.DeviceID))
+
+	// Derive a stable pickle key from the access token
+	h := sha256.Sum256([]byte(p.accessToken))
+	pickleKey := make([]byte, 32)
+	copy(pickleKey, h[:])
+
+	return p.tryInitCrypto(ctx, client, pickleKey, dbPath, false)
+}
+
+func (p *Platform) tryInitCrypto(ctx context.Context, client *mautrix.Client, pickleKey []byte, dbPath string, isRetry bool) (*cryptohelper.CryptoHelper, error) {
+	ch, err := cryptohelper.NewCryptoHelper(client, pickleKey, dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("create crypto helper: %w", err)
+	}
+	ch.DBAccountID = client.UserID.String()
+
+	if err := ch.Init(ctx); err != nil {
+		if !isRetry && strings.Contains(err.Error(), "not marked as shared") {
+			// Init failed because the server has old device keys that don't match
+			// our fresh local account. Force-upload new keys to replace them.
+			// After Init fails at verifyDeviceKeysOnServer, the olm machine is
+			// initialized and the account is loaded, so Machine() is safe.
+			slog.Warn("matrix: stale device keys on server, force-uploading new keys")
+			func() {
+				defer func() { recover() }() // Machine() panics if mach is nil
+				if mach := ch.Machine(); mach != nil {
+					if shareErr := mach.ShareKeys(ctx, -1); shareErr != nil {
+						slog.Error("matrix: failed to force-share keys", "error", shareErr)
+					}
+				}
+			}()
+			ch.Close()
+			client.StateStore = nil
+			client.Store = mautrix.NewMemorySyncStore()
+			return p.tryInitCrypto(ctx, client, pickleKey, dbPath, true)
+		}
+		p.cleanupFailedCrypto(client, ch)
+		return nil, fmt.Errorf("init crypto: %w", err)
+	}
+	return ch, nil
+}
+
+func (p *Platform) cleanupFailedCrypto(client *mautrix.Client, ch *cryptohelper.CryptoHelper) {
+	ch.Close()
+	// Reset client stores to avoid references to the closed DB.
+	// NewCryptoHelper sets client.StateStore; Init() may overwrite client.Store.
+	client.StateStore = nil
+	client.Store = mautrix.NewMemorySyncStore()
 }
 
 func (p *Platform) handleMessage(ctx context.Context, evt *event.Event) {
@@ -357,29 +443,64 @@ func (p *Platform) dispatch(msg *core.Message) {
 	handler(p, msg)
 }
 
-func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
-	rc, ok := rctx.(replyContext)
-	if !ok {
-		return fmt.Errorf("matrix: invalid reply context type %T", rctx)
-	}
+// sendRoomEvent sends an event to a room, encrypting it if the room has E2EE enabled.
+func (p *Platform) sendRoomEvent(ctx context.Context, roomID id.RoomID, evtType event.Type, content any) error {
 	client := p.getClient()
 	if client == nil {
 		return fmt.Errorf("matrix: not connected")
 	}
 
+	ch := p.getCryptoHelper()
+	encrypted := ch != nil && p.isRoomEncrypted(ctx, roomID)
+	if encrypted {
+		encContent, err := ch.Encrypt(ctx, roomID, evtType, content)
+		if err != nil {
+			return fmt.Errorf("matrix: encrypt: %w", err)
+		}
+		_, err = client.SendMessageEvent(ctx, roomID, event.EventEncrypted, encContent)
+		if err != nil {
+			return fmt.Errorf("matrix: send encrypted: %w", err)
+		}
+		return nil
+	}
+
+	_, err := client.SendMessageEvent(ctx, roomID, evtType, content)
+	if err != nil {
+		return fmt.Errorf("matrix: send: %w", err)
+	}
+	return nil
+}
+
+func (p *Platform) isRoomEncrypted(ctx context.Context, roomID id.RoomID) bool {
+	client := p.getClient()
+	if client == nil || client.StateStore == nil {
+		return false
+	}
+	ss, ok := client.StateStore.(crypto.StateStore)
+	if !ok {
+		return false
+	}
+	enc, err := ss.IsEncrypted(ctx, roomID)
+	if err != nil {
+		return false
+	}
+	return enc
+}
+
+func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("matrix: invalid reply context type %T", rctx)
+	}
+
 	parsed := format.RenderMarkdown(content, true, false)
 	parsed.Body = content
 	if content != "" {
-		// Set reply relation
 		parsed.RelatesTo = &event.RelatesTo{}
 		parsed.RelatesTo.SetReplyTo(rc.messageID)
 	}
 
-	_, err := client.SendMessageEvent(ctx, rc.roomID, event.EventMessage, &parsed)
-	if err != nil {
-		return fmt.Errorf("matrix: reply: %w", err)
-	}
-	return nil
+	return p.sendRoomEvent(ctx, rc.roomID, event.EventMessage, &parsed)
 }
 
 func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
@@ -387,19 +508,11 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	if !ok {
 		return fmt.Errorf("matrix: invalid reply context type %T", rctx)
 	}
-	client := p.getClient()
-	if client == nil {
-		return fmt.Errorf("matrix: not connected")
-	}
 
 	parsed := format.RenderMarkdown(content, true, false)
 	parsed.Body = content
 
-	_, err := client.SendMessageEvent(ctx, rc.roomID, event.EventMessage, &parsed)
-	if err != nil {
-		return fmt.Errorf("matrix: send: %w", err)
-	}
-	return nil
+	return p.sendRoomEvent(ctx, rc.roomID, event.EventMessage, &parsed)
 }
 
 func (p *Platform) Stop() error {
@@ -466,11 +579,7 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 		}
 	}
 
-	_, err = client.SendMessageEvent(ctx, rc.roomID, event.EventMessage, content)
-	if err != nil {
-		return fmt.Errorf("matrix: send image: %w", err)
-	}
-	return nil
+	return p.sendRoomEvent(ctx, rc.roomID, event.EventMessage, content)
 }
 
 func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachment) error {
@@ -517,11 +626,7 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 		}
 	}
 
-	_, err = client.SendMessageEvent(ctx, rc.roomID, event.EventMessage, content)
-	if err != nil {
-		return fmt.Errorf("matrix: send file: %w", err)
-	}
-	return nil
+	return p.sendRoomEvent(ctx, rc.roomID, event.EventMessage, content)
 }
 
 func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
@@ -570,10 +675,6 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 	if !ok {
 		return fmt.Errorf("matrix: invalid preview handle type %T", previewHandle)
 	}
-	client := p.getClient()
-	if client == nil {
-		return fmt.Errorf("matrix: not connected")
-	}
 
 	parsed := format.RenderMarkdown(content, true, false)
 	parsed.Body = content
@@ -589,11 +690,7 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 	}
 	parsed.Body = "* " + content
 
-	_, err := client.SendMessageEvent(ctx, rc.roomID, event.EventMessage, &parsed)
-	if err != nil {
-		return fmt.Errorf("matrix: update message: %w", err)
-	}
-	return nil
+	return p.sendRoomEvent(ctx, rc.roomID, event.EventMessage, &parsed)
 }
 
 func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
@@ -786,6 +883,29 @@ func (p *Platform) getHandler() core.MessageHandler {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.handler
+}
+
+func (p *Platform) getCryptoHelper() *cryptohelper.CryptoHelper {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.cryptoHelper
+}
+
+func (p *Platform) setCryptoHelper(ch *cryptohelper.CryptoHelper) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.cryptoHelper = ch
+}
+
+func (p *Platform) closeCryptoHelper() {
+	p.mu.Lock()
+	ch := p.cryptoHelper
+	p.cryptoHelper = nil
+	p.mu.Unlock()
+
+	if ch != nil {
+		ch.Close()
+	}
 }
 
 func (p *Platform) publishClient(client *mautrix.Client, selfUserID id.UserID) (uint64, bool) {
