@@ -25,8 +25,13 @@ func init() {
 }
 
 type replyContext struct {
-	channel   string
-	timestamp string // thread_ts for threading replies
+	channel    string
+	timestamp  string // reply target ts used for threading replies
+	threadTS   string // root thread timestamp when the inbound message belongs to a thread
+	sessionKey string
+	userID     string
+	userName   string
+	chatName   string
 }
 
 type Platform struct {
@@ -62,6 +67,31 @@ func New(opts map[string]any) (core.Platform, error) {
 }
 
 func (p *Platform) Name() string { return "slack" }
+
+func (p *Platform) AuditReplyMetadata(replyCtx any) core.AuditReplyMetadata {
+	rc, ok := replyCtx.(replyContext)
+	if !ok {
+		return core.AuditReplyMetadata{}
+	}
+	threadID := strings.TrimSpace(rc.threadTS)
+	if threadID == "" && rc.timestamp != "" {
+		threadID = rc.timestamp
+	}
+	return core.AuditReplyMetadata{
+		SessionKey:       rc.sessionKey,
+		UserID:           rc.userID,
+		UserName:         rc.userName,
+		ChatName:         rc.chatName,
+		ChannelKey:       rc.channel,
+		ReplyToMessageID: rc.timestamp,
+		ParentMessageID:  rc.timestamp,
+		RootMessageID:    threadID,
+		ThreadID:         threadID,
+		Extra: map[string]any{
+			"channel_id": rc.channel,
+		},
+	}
+}
 
 func (p *Platform) Start(handler core.MessageHandler) error {
 	p.handler = handler
@@ -150,16 +180,39 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 				if content == "" && len(images) == 0 && audio == nil && len(docFiles) == 0 {
 					return
 				}
+				rctx := replyContext{
+					channel:    ev.Channel,
+					timestamp:  ev.TimeStamp,
+					threadTS:   ev.ThreadTimeStamp,
+					sessionKey: sessionKey,
+					userID:     ev.User,
+					userName:   p.resolveUserName(ev.User),
+					chatName:   p.resolveChannelNameForMsg(ev.Channel),
+				}
 				msg := &core.Message{
 					SessionKey: sessionKey, Platform: "slack",
-					UserID: ev.User, UserName: p.resolveUserName(ev.User),
-					ChatName:  p.resolveChannelNameForMsg(ev.Channel),
-					Content:   content,
-					Images:    images,
-					Files:     docFiles,
-					Audio:     audio,
-					MessageID: ev.TimeStamp,
-					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: ev.TimeStamp},
+					UserID:     rctx.userID,
+					UserName:   rctx.userName,
+					ChatName:   rctx.chatName,
+					Content:    content,
+					Images:     images,
+					Files:      docFiles,
+					Audio:      audio,
+					MessageID:  ev.TimeStamp,
+					ChannelKey: ev.Channel,
+					ThreadID:   ev.ThreadTimeStamp,
+					ReplyCtx:   rctx,
+					AuditExtra: map[string]any{
+						"channel_id":  ev.Channel,
+						"event_ts":    ev.EventTimeStamp,
+						"thread_ts":   ev.ThreadTimeStamp,
+						"source_team": ev.SourceTeam,
+						"user_team":   ev.UserTeam,
+					},
+				}
+				if ev.ThreadTimeStamp != "" {
+					msg.ParentMessageID = ev.ThreadTimeStamp
+					msg.RootMessageID = ev.ThreadTimeStamp
 				}
 				p.handler(p, msg)
 
@@ -200,13 +253,41 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					return
 				}
 
+				rctx := replyContext{
+					channel:    ev.Channel,
+					timestamp:  ts,
+					threadTS:   ev.ThreadTimeStamp,
+					sessionKey: sessionKey,
+					userID:     ev.User,
+					userName:   p.resolveUserName(ev.User),
+					chatName:   p.resolveChannelNameForMsg(ev.Channel),
+				}
 				msg := &core.Message{
 					SessionKey: sessionKey, Platform: "slack",
-					UserID: ev.User, UserName: p.resolveUserName(ev.User),
-					ChatName: p.resolveChannelNameForMsg(ev.Channel),
-					Content:  ev.Text, Images: images, Files: docFiles, Audio: audio,
-					MessageID: ts,
-					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: ts},
+					UserID:     rctx.userID,
+					UserName:   rctx.userName,
+					ChatName:   rctx.chatName,
+					Content:    ev.Text,
+					Images:     images,
+					Files:      docFiles,
+					Audio:      audio,
+					MessageID:  ts,
+					ChannelKey: ev.Channel,
+					ThreadID:   ev.ThreadTimeStamp,
+					ReplyCtx:   rctx,
+					AuditExtra: map[string]any{
+						"channel_id":    ev.Channel,
+						"channel_type":  ev.ChannelType,
+						"client_msg_id": ev.ClientMsgID,
+						"event_ts":      ev.EventTimeStamp,
+						"thread_ts":     ev.ThreadTimeStamp,
+						"source_team":   ev.SourceTeam,
+						"user_team":     ev.UserTeam,
+					},
+				}
+				if ev.ThreadTimeStamp != "" {
+					msg.ParentMessageID = ev.ThreadTimeStamp
+					msg.RootMessageID = ev.ThreadTimeStamp
 				}
 				p.handler(p, msg)
 			}
@@ -244,9 +325,22 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 
 		msg := &core.Message{
 			SessionKey: sessionKey, Platform: "slack",
-			UserID: cmd.UserID, UserName: cmd.UserName,
-			Content:  content,
-			ReplyCtx: replyContext{channel: cmd.ChannelID},
+			UserID:     cmd.UserID,
+			UserName:   cmd.UserName,
+			ChatName:   p.resolveChannelNameForMsg(cmd.ChannelID),
+			Content:    content,
+			ChannelKey: cmd.ChannelID,
+			ReplyCtx: replyContext{
+				channel:    cmd.ChannelID,
+				sessionKey: sessionKey,
+				userID:     cmd.UserID,
+				userName:   cmd.UserName,
+				chatName:   p.resolveChannelNameForMsg(cmd.ChannelID),
+			},
+			AuditExtra: map[string]any{
+				"channel_id": cmd.ChannelID,
+				"command":    cmd.Command,
+			},
 		}
 		slog.Debug("slack: slash command", "command", cmd.Command, "text", cmd.Text, "user", cmd.UserID)
 		p.handler(p, msg)
@@ -353,9 +447,14 @@ func slackFileDisplayName(f slackevents.File) string {
 }
 
 func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
+	_, err := p.ReplyWithReceipt(ctx, rctx, content)
+	return err
+}
+
+func (p *Platform) ReplyWithReceipt(ctx context.Context, rctx any, content string) (*core.SendReceipt, error) {
 	rc, ok := rctx.(replyContext)
 	if !ok {
-		return fmt.Errorf("slack: invalid reply context type %T", rctx)
+		return nil, fmt.Errorf("slack: invalid reply context type %T", rctx)
 	}
 
 	opts := []slack.MsgOption{
@@ -365,25 +464,47 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 		opts = append(opts, slack.MsgOptionTS(rc.timestamp))
 	}
 
-	_, _, err := p.client.PostMessageContext(ctx, rc.channel, opts...)
+	_, ts, err := p.client.PostMessageContext(ctx, rc.channel, opts...)
 	if err != nil {
-		return fmt.Errorf("slack: send: %w", err)
+		return nil, fmt.Errorf("slack: send: %w", err)
 	}
-	return nil
+	threadID := strings.TrimSpace(rc.threadTS)
+	if threadID == "" && rc.timestamp != "" {
+		threadID = rc.timestamp
+	}
+	return &core.SendReceipt{
+		MessageID:       ts,
+		ParentMessageID: rc.timestamp,
+		RootMessageID:   threadID,
+		ThreadID:        threadID,
+		Extra: map[string]any{
+			"channel_id": rc.channel,
+		},
+	}, nil
 }
 
 // Send sends a new message (not a reply)
 func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
+	_, err := p.SendWithReceipt(ctx, rctx, content)
+	return err
+}
+
+func (p *Platform) SendWithReceipt(ctx context.Context, rctx any, content string) (*core.SendReceipt, error) {
 	rc, ok := rctx.(replyContext)
 	if !ok {
-		return fmt.Errorf("slack: invalid reply context type %T", rctx)
+		return nil, fmt.Errorf("slack: invalid reply context type %T", rctx)
 	}
 
-	_, _, err := p.client.PostMessageContext(ctx, rc.channel, slack.MsgOptionText(core.MarkdownToSlackMrkdwn(content), false))
+	_, ts, err := p.client.PostMessageContext(ctx, rc.channel, slack.MsgOptionText(core.MarkdownToSlackMrkdwn(content), false))
 	if err != nil {
-		return fmt.Errorf("slack: send: %w", err)
+		return nil, fmt.Errorf("slack: send: %w", err)
 	}
-	return nil
+	return &core.SendReceipt{
+		MessageID: ts,
+		Extra: map[string]any{
+			"channel_id": rc.channel,
+		},
+	}, nil
 }
 
 // SendImage uploads and sends an image to the channel.
@@ -492,7 +613,7 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	if len(parts) < 2 || parts[0] != "slack" {
 		return nil, fmt.Errorf("slack: invalid session key %q", sessionKey)
 	}
-	return replyContext{channel: parts[1]}, nil
+	return replyContext{channel: parts[1], sessionKey: sessionKey}, nil
 }
 
 func (p *Platform) resolveUserName(userID string) string {

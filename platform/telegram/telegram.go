@@ -29,9 +29,14 @@ func init() {
 }
 
 type replyContext struct {
-	chatID    int64
-	threadID  int
-	messageID int
+	chatID     int64
+	threadID   int
+	messageID  int
+	sessionKey string
+	userID     string
+	userName   string
+	chatName   string
+	channelKey string
 }
 
 // telegramBot abstracts the Telegram bot API methods for testability.
@@ -166,6 +171,34 @@ func New(opts map[string]any) (core.Platform, error) {
 }
 
 func (p *Platform) Name() string { return "telegram" }
+
+func (p *Platform) AuditReplyMetadata(replyCtx any) core.AuditReplyMetadata {
+	rc, ok := replyCtx.(replyContext)
+	if !ok {
+		return core.AuditReplyMetadata{}
+	}
+	threadID := ""
+	if rc.threadID != 0 {
+		threadID = strconv.Itoa(rc.threadID)
+	}
+	channelKey := rc.channelKey
+	if channelKey == "" {
+		channelKey = buildChannelKey(rc.chatID, rc.threadID)
+	}
+	extra := map[string]any{
+		"chat_id": rc.chatID,
+	}
+	return core.AuditReplyMetadata{
+		SessionKey:       rc.sessionKey,
+		UserID:           rc.userID,
+		UserName:         rc.userName,
+		ChatName:         rc.chatName,
+		ChannelKey:       channelKey,
+		ReplyToMessageID: strconv.Itoa(rc.messageID),
+		ThreadID:         threadID,
+		Extra:            extra,
+	}
+}
 
 func (p *Platform) Start(handler core.MessageHandler) error {
 	p.mu.Lock()
@@ -359,7 +392,16 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 		}
 	}
 
-	rctx := replyContext{chatID: msg.Chat.ID, threadID: threadID, messageID: msg.ID}
+	rctx := replyContext{
+		chatID:     msg.Chat.ID,
+		threadID:   threadID,
+		messageID:  msg.ID,
+		sessionKey: sessionKey,
+		userID:     userID,
+		userName:   userName,
+		chatName:   chatName,
+		channelKey: channelKey,
+	}
 	if p.enableReactions {
 		go p.reactToMessage(ctx, msg.Chat.ID, msg.ID, "⚡")
 	}
@@ -373,15 +415,19 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 			return
 		}
 		caption := stripBotMention(msg.Caption, botName)
-		p.dispatchMessage(&core.Message{
+		inbound := &core.Message{
 			SessionKey: sessionKey, Platform: "telegram",
 			UserID: userID, UserName: userName, ChatName: chatName,
 			Content:    caption,
 			MessageID:  strconv.Itoa(msg.ID),
 			ChannelKey: channelKey,
+			ThreadID:   telegramThreadIDString(threadID),
 			Images:     []core.ImageAttachment{{MimeType: "image/jpeg", Data: imgData}},
 			ReplyCtx:   rctx,
-		}, msg)
+			AuditExtra: telegramAuditExtra(msg, threadID),
+		}
+		applyTelegramReplyMetadata(inbound, msg, threadID)
+		p.dispatchMessage(inbound, msg)
 		return
 	}
 
@@ -392,19 +438,23 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 			slog.Error("telegram: download voice failed", "error", err)
 			return
 		}
-		p.dispatchMessage(&core.Message{
+		inbound := &core.Message{
 			SessionKey: sessionKey, Platform: "telegram",
 			UserID: userID, UserName: userName, ChatName: chatName,
 			MessageID:  strconv.Itoa(msg.ID),
 			ChannelKey: channelKey,
+			ThreadID:   telegramThreadIDString(threadID),
 			Audio: &core.AudioAttachment{
 				MimeType: msg.Voice.MimeType,
 				Data:     audioData,
 				Format:   "ogg",
 				Duration: msg.Voice.Duration,
 			},
-			ReplyCtx: rctx,
-		}, msg)
+			ReplyCtx:   rctx,
+			AuditExtra: telegramAuditExtra(msg, threadID),
+		}
+		applyTelegramReplyMetadata(inbound, msg, threadID)
+		p.dispatchMessage(inbound, msg)
 		return
 	}
 
@@ -422,19 +472,23 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 				format = parts[1]
 			}
 		}
-		p.dispatchMessage(&core.Message{
+		inbound := &core.Message{
 			SessionKey: sessionKey, Platform: "telegram",
 			UserID: userID, UserName: userName, ChatName: chatName,
 			MessageID:  strconv.Itoa(msg.ID),
 			ChannelKey: channelKey,
+			ThreadID:   telegramThreadIDString(threadID),
 			Audio: &core.AudioAttachment{
 				MimeType: msg.Audio.MimeType,
 				Data:     audioData,
 				Format:   format,
 				Duration: msg.Audio.Duration,
 			},
-			ReplyCtx: rctx,
-		}, msg)
+			ReplyCtx:   rctx,
+			AuditExtra: telegramAuditExtra(msg, threadID),
+		}
+		applyTelegramReplyMetadata(inbound, msg, threadID)
+		p.dispatchMessage(inbound, msg)
 		return
 	}
 
@@ -446,25 +500,30 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 			return
 		}
 		caption := stripBotMention(msg.Caption, botName)
-		p.dispatchMessage(&core.Message{
+		inbound := &core.Message{
 			SessionKey: sessionKey, Platform: "telegram",
 			UserID: userID, UserName: userName, ChatName: chatName,
 			Content:    caption,
 			MessageID:  strconv.Itoa(msg.ID),
 			ChannelKey: channelKey,
+			ThreadID:   telegramThreadIDString(threadID),
 			Files:      []core.FileAttachment{{MimeType: msg.Document.MimeType, Data: fileData, FileName: msg.Document.FileName}},
 			ReplyCtx:   rctx,
-		}, msg)
+			AuditExtra: telegramAuditExtra(msg, threadID),
+		}
+		applyTelegramReplyMetadata(inbound, msg, threadID)
+		p.dispatchMessage(inbound, msg)
 		return
 	}
 
 	if msg.Location != nil {
 		slog.Info("telegram: location received", "user", userName, "latitude", msg.Location.Latitude, "longitude", msg.Location.Longitude)
-		p.dispatchMessage(&core.Message{
+		inbound := &core.Message{
 			SessionKey: sessionKey, Platform: "telegram",
 			UserID: userID, UserName: userName, ChatName: chatName,
 			MessageID:  strconv.Itoa(msg.ID),
 			ChannelKey: channelKey,
+			ThreadID:   telegramThreadIDString(threadID),
 			Location: &core.LocationAttachment{
 				Latitude:             msg.Location.Latitude,
 				Longitude:            msg.Location.Longitude,
@@ -473,8 +532,11 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 				Heading:              msg.Location.Heading,
 				ProximityAlertRadius: msg.Location.ProximityAlertRadius,
 			},
-			ReplyCtx: rctx,
-		}, msg)
+			ReplyCtx:   rctx,
+			AuditExtra: telegramAuditExtra(msg, threadID),
+		}
+		applyTelegramReplyMetadata(inbound, msg, threadID)
+		p.dispatchMessage(inbound, msg)
 		return
 	}
 	if msg.Text == "" {
@@ -483,14 +545,18 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 
 	text := stripBotMention(msg.Text, botName)
 	slog.Debug("telegram: message received", "user", userName, "chat", msg.Chat.ID)
-	p.dispatchMessage(&core.Message{
+	inbound := &core.Message{
 		SessionKey: sessionKey, Platform: "telegram",
 		UserID: userID, UserName: userName, ChatName: chatName,
 		Content:    text,
 		MessageID:  strconv.Itoa(msg.ID),
 		ChannelKey: channelKey,
+		ThreadID:   telegramThreadIDString(threadID),
 		ReplyCtx:   rctx,
-	}, msg)
+		AuditExtra: telegramAuditExtra(msg, threadID),
+	}
+	applyTelegramReplyMetadata(inbound, msg, threadID)
+	p.dispatchMessage(inbound, msg)
 }
 
 func (p *Platform) dispatchMessage(msg *core.Message, tgMsg *models.Message) {
@@ -511,6 +577,68 @@ func (p *Platform) dispatchMessage(msg *core.Message, tgMsg *models.Message) {
 		return
 	}
 	handler(p, msg)
+}
+
+func telegramThreadIDString(threadID int) string {
+	if threadID == 0 {
+		return ""
+	}
+	return strconv.Itoa(threadID)
+}
+
+func telegramAuditExtra(msg *models.Message, threadID int) map[string]any {
+	if msg == nil {
+		return nil
+	}
+	return map[string]any{
+		"chat_id":    msg.Chat.ID,
+		"chat_type":  msg.Chat.Type,
+		"is_forum":   msg.Chat.IsForum,
+		"thread_id":  telegramThreadIDString(threadID),
+		"message_id": msg.ID,
+	}
+}
+
+func applyTelegramReplyMetadata(inbound *core.Message, tgMsg *models.Message, threadID int) {
+	if inbound == nil || tgMsg == nil {
+		return
+	}
+	inbound.ThreadID = telegramThreadIDString(threadID)
+	if tgMsg.ReplyToMessage != nil {
+		replyToID := strconv.Itoa(tgMsg.ReplyToMessage.ID)
+		inbound.ParentMessageID = replyToID
+	}
+}
+
+func telegramReceiptFromMessage(sent *models.Message, chatID int64, threadID int, parentMessageID int) *core.SendReceipt {
+	if sent == nil {
+		return &core.SendReceipt{
+			ParentMessageID: telegramReplyParentMessageID(parentMessageID),
+			ThreadID:        telegramThreadIDString(threadID),
+			Extra: map[string]any{
+				"chat_id": chatID,
+			},
+		}
+	}
+	receiptThreadID := threadID
+	if sent.MessageThreadID != 0 {
+		receiptThreadID = sent.MessageThreadID
+	}
+	return &core.SendReceipt{
+		MessageID:       strconv.Itoa(sent.ID),
+		ParentMessageID: telegramReplyParentMessageID(parentMessageID),
+		ThreadID:        telegramThreadIDString(receiptThreadID),
+		Extra: map[string]any{
+			"chat_id": chatID,
+		},
+	}
+}
+
+func telegramReplyParentMessageID(parentMessageID int) string {
+	if parentMessageID == 0 {
+		return ""
+	}
+	return strconv.Itoa(parentMessageID)
 }
 
 func (p *Platform) messageHandler() core.MessageHandler {
@@ -730,7 +858,16 @@ func (p *Platform) handleCallbackQuery(ctx context.Context, cb *models.CallbackQ
 	if isGroup {
 		chatName = msg.Chat.Title
 	}
-	rctx := replyContext{chatID: chatID, threadID: threadID, messageID: msgID}
+	rctx := replyContext{
+		chatID:     chatID,
+		threadID:   threadID,
+		messageID:  msgID,
+		sessionKey: sessionKey,
+		userID:     userID,
+		userName:   userName,
+		chatName:   chatName,
+		channelKey: channelKey,
+	}
 
 	emptyMarkup := &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{}}
 
@@ -760,7 +897,13 @@ func (p *Platform) handleCallbackQuery(ctx context.Context, cb *models.CallbackQ
 			Content:    command,
 			MessageID:  strconv.Itoa(msgID),
 			ChannelKey: channelKey,
+			ThreadID:   telegramThreadIDString(threadID),
 			ReplyCtx:   rctx,
+			AuditExtra: map[string]any{
+				"callback_query_id": cb.ID,
+				"chat_id":           chatID,
+				"thread_id":         telegramThreadIDString(threadID),
+			},
 		})
 		return
 	}
@@ -803,7 +946,13 @@ func (p *Platform) handleCallbackQuery(ctx context.Context, cb *models.CallbackQ
 			Content:    data,
 			MessageID:  strconv.Itoa(msgID),
 			ChannelKey: channelKey,
+			ThreadID:   telegramThreadIDString(threadID),
 			ReplyCtx:   rctx,
+			AuditExtra: map[string]any{
+				"callback_query_id": cb.ID,
+				"chat_id":           chatID,
+				"thread_id":         telegramThreadIDString(threadID),
+			},
 		})
 		return
 	}
@@ -854,7 +1003,13 @@ func (p *Platform) handleCallbackQuery(ctx context.Context, cb *models.CallbackQ
 		Content:    responseText,
 		MessageID:  strconv.Itoa(msgID),
 		ChannelKey: channelKey,
+		ThreadID:   telegramThreadIDString(threadID),
 		ReplyCtx:   rctx,
+		AuditExtra: map[string]any{
+			"callback_query_id": cb.ID,
+			"chat_id":           chatID,
+			"thread_id":         telegramThreadIDString(threadID),
+		},
 	})
 }
 
@@ -937,13 +1092,18 @@ func isCommand(msg *models.Message) bool {
 }
 
 func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
+	_, err := p.ReplyWithReceipt(ctx, rctx, content)
+	return err
+}
+
+func (p *Platform) ReplyWithReceipt(ctx context.Context, rctx any, content string) (*core.SendReceipt, error) {
 	rc, ok := rctx.(replyContext)
 	if !ok {
-		return fmt.Errorf("telegram: invalid reply context type %T", rctx)
+		return nil, fmt.Errorf("telegram: invalid reply context type %T", rctx)
 	}
 	bot, err := p.connectedBot("reply")
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	html := core.MarkdownToSimpleHTML(content)
@@ -955,7 +1115,8 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 		ReplyParameters: &models.ReplyParameters{MessageID: rc.messageID},
 	}
 
-	if _, err := bot.SendMessage(ctx, params); err != nil {
+	sent, err := bot.SendMessage(ctx, params)
+	if err != nil {
 		if strings.Contains(err.Error(), "can't parse") {
 			slog.Warn("telegram: HTML rejected by Telegram, sending as plain text",
 				"method", "Reply",
@@ -965,24 +1126,29 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 			)
 			params.Text = content
 			params.ParseMode = ""
-			_, err = bot.SendMessage(ctx, params)
+			sent, err = bot.SendMessage(ctx, params)
 		}
 		if err != nil {
-			return fmt.Errorf("telegram: send: %w", err)
+			return nil, fmt.Errorf("telegram: send: %w", err)
 		}
 	}
-	return nil
+	return telegramReceiptFromMessage(sent, rc.chatID, rc.threadID, rc.messageID), nil
 }
 
 // Send sends a new message (not a reply)
 func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
+	_, err := p.SendWithReceipt(ctx, rctx, content)
+	return err
+}
+
+func (p *Platform) SendWithReceipt(ctx context.Context, rctx any, content string) (*core.SendReceipt, error) {
 	rc, ok := rctx.(replyContext)
 	if !ok {
-		return fmt.Errorf("telegram: invalid reply context type %T", rctx)
+		return nil, fmt.Errorf("telegram: invalid reply context type %T", rctx)
 	}
 	bot, err := p.connectedBot("send")
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	html := core.MarkdownToSimpleHTML(content)
@@ -993,7 +1159,8 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 		ParseMode:       models.ParseModeHTML,
 	}
 
-	if _, err := bot.SendMessage(ctx, params); err != nil {
+	sent, err := bot.SendMessage(ctx, params)
+	if err != nil {
 		if strings.Contains(err.Error(), "can't parse") {
 			slog.Warn("telegram: HTML rejected by Telegram, sending as plain text",
 				"method", "Send",
@@ -1003,13 +1170,13 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 			)
 			params.Text = content
 			params.ParseMode = ""
-			_, err = bot.SendMessage(ctx, params)
+			sent, err = bot.SendMessage(ctx, params)
 		}
 		if err != nil {
-			return fmt.Errorf("telegram: send: %w", err)
+			return nil, fmt.Errorf("telegram: send: %w", err)
 		}
 	}
-	return nil
+	return telegramReceiptFromMessage(sent, rc.chatID, rc.threadID, 0), nil
 }
 
 func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttachment) error {
@@ -1272,7 +1439,12 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 		threadID, _ = strconv.Atoi(parts[2])
 	}
 
-	return replyContext{chatID: chatID, threadID: threadID}, nil
+	return replyContext{
+		chatID:     chatID,
+		threadID:   threadID,
+		sessionKey: sessionKey,
+		channelKey: buildChannelKey(chatID, threadID),
+	}, nil
 }
 
 // telegramPreviewHandle stores the chat, thread, and message IDs for an editable preview message.
@@ -1280,6 +1452,20 @@ type telegramPreviewHandle struct {
 	chatID    int64
 	threadID  int
 	messageID int
+}
+
+func (p *Platform) PreviewReceipt(previewHandle any) *core.SendReceipt {
+	h, ok := previewHandle.(*telegramPreviewHandle)
+	if !ok || h == nil {
+		return nil
+	}
+	return &core.SendReceipt{
+		MessageID: strconv.Itoa(h.messageID),
+		ThreadID:  telegramThreadIDString(h.threadID),
+		Extra: map[string]any{
+			"chat_id": h.chatID,
+		},
+	}
 }
 
 // SendPreviewStart sends a new message and returns a handle for subsequent edits.

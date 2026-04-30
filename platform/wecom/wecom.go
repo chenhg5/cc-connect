@@ -56,7 +56,11 @@ type xmlMessage struct {
 }
 
 type replyContext struct {
-	userID string
+	userID     string
+	messageID  string
+	sessionKey string
+	userName   string
+	chatName   string
 }
 
 type tokenCache struct {
@@ -199,6 +203,25 @@ func New(opts map[string]any) (core.Platform, error) {
 }
 
 func (p *Platform) Name() string { return "wecom" }
+
+func (p *Platform) AuditReplyMetadata(replyCtx any) core.AuditReplyMetadata {
+	rc, ok := replyCtx.(replyContext)
+	if !ok {
+		return core.AuditReplyMetadata{}
+	}
+	return core.AuditReplyMetadata{
+		SessionKey:       rc.sessionKey,
+		UserID:           rc.userID,
+		UserName:         rc.userName,
+		ChatName:         rc.chatName,
+		ChannelKey:       rc.userID,
+		ReplyToMessageID: rc.messageID,
+		ParentMessageID:  rc.messageID,
+		Extra: map[string]any{
+			"target_user_id": rc.userID,
+		},
+	}
+}
 
 func (p *Platform) wecomAPIURL(path string, query url.Values) string {
 	base := strings.TrimRight(strings.TrimSpace(p.apiBaseURL), "/")
@@ -360,7 +383,21 @@ func (p *Platform) handleMessage(w http.ResponseWriter, r *http.Request, msgSig,
 	}
 
 	sessionKey := fmt.Sprintf("wecom:%s", msg.FromUserName)
-	rctx := replyContext{userID: msg.FromUserName}
+	userName := p.resolveUserName(msg.FromUserName)
+	msgID := strconv.FormatInt(msg.MsgId, 10)
+	rctx := replyContext{
+		userID:     msg.FromUserName,
+		messageID:  msgID,
+		sessionKey: sessionKey,
+		userName:   userName,
+	}
+	auditExtra := map[string]any{
+		"msg_type":       msg.MsgType,
+		"agent_id":       msg.AgentID,
+		"create_time":    msg.CreateTime,
+		"has_media_id":   msg.MediaId != "",
+		"target_user_id": msg.FromUserName,
+	}
 
 	switch msg.MsgType {
 	case "text":
@@ -368,9 +405,13 @@ func (p *Platform) handleMessage(w http.ResponseWriter, r *http.Request, msgSig,
 		slog.Debug("wecom: message received", "user", msg.FromUserName, "text_len", len(text))
 		go p.handler(p, &core.Message{
 			SessionKey: sessionKey, Platform: "wecom",
-			MessageID: strconv.FormatInt(msg.MsgId, 10),
-			UserID:    msg.FromUserName, UserName: p.resolveUserName(msg.FromUserName),
-			Content: text, ReplyCtx: rctx,
+			MessageID:  msgID,
+			UserID:     msg.FromUserName,
+			UserName:   userName,
+			Content:    text,
+			ChannelKey: msg.FromUserName,
+			ReplyCtx:   rctx,
+			AuditExtra: core.CloneAuditExtra(auditExtra),
 		})
 
 	case "image":
@@ -383,10 +424,13 @@ func (p *Platform) handleMessage(w http.ResponseWriter, r *http.Request, msgSig,
 			}
 			p.handler(p, &core.Message{
 				SessionKey: sessionKey, Platform: "wecom",
-				MessageID: strconv.FormatInt(msg.MsgId, 10),
-				UserID:    msg.FromUserName, UserName: p.resolveUserName(msg.FromUserName),
-				Images:   []core.ImageAttachment{{MimeType: "image/jpeg", Data: imgData}},
-				ReplyCtx: rctx,
+				MessageID:  msgID,
+				UserID:     msg.FromUserName,
+				UserName:   userName,
+				ChannelKey: msg.FromUserName,
+				Images:     []core.ImageAttachment{{MimeType: "image/jpeg", Data: imgData}},
+				ReplyCtx:   rctx,
+				AuditExtra: core.CloneAuditExtra(auditExtra),
 			})
 		}()
 
@@ -404,10 +448,13 @@ func (p *Platform) handleMessage(w http.ResponseWriter, r *http.Request, msgSig,
 			}
 			p.handler(p, &core.Message{
 				SessionKey: sessionKey, Platform: "wecom",
-				MessageID: strconv.FormatInt(msg.MsgId, 10),
-				UserID:    msg.FromUserName, UserName: p.resolveUserName(msg.FromUserName),
-				Audio:    &core.AudioAttachment{MimeType: "audio/" + format, Data: audioData, Format: format},
-				ReplyCtx: rctx,
+				MessageID:  msgID,
+				UserID:     msg.FromUserName,
+				UserName:   userName,
+				ChannelKey: msg.FromUserName,
+				Audio:      &core.AudioAttachment{MimeType: "audio/" + format, Data: audioData, Format: format},
+				ReplyCtx:   rctx,
+				AuditExtra: core.CloneAuditExtra(auditExtra),
 			})
 		}()
 
@@ -430,14 +477,17 @@ func (p *Platform) handleMessage(w http.ResponseWriter, r *http.Request, msgSig,
 			mt := wecomInboundFileMime(baseName, fileData)
 			p.handler(p, &core.Message{
 				SessionKey: sessionKey, Platform: "wecom",
-				MessageID: strconv.FormatInt(msg.MsgId, 10),
-				UserID:    msg.FromUserName, UserName: p.resolveUserName(msg.FromUserName),
+				MessageID:  msgID,
+				UserID:     msg.FromUserName,
+				UserName:   userName,
+				ChannelKey: msg.FromUserName,
 				Files: []core.FileAttachment{{
 					MimeType: mt,
 					Data:     fileData,
 					FileName: baseName,
 				}},
-				ReplyCtx: rctx,
+				ReplyCtx:   rctx,
+				AuditExtra: core.CloneAuditExtra(auditExtra),
 			})
 		}()
 
@@ -450,18 +500,23 @@ func (p *Platform) handleMessage(w http.ResponseWriter, r *http.Request, msgSig,
 }
 
 func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
+	_, err := p.ReplyWithReceipt(ctx, rctx, content)
+	return err
+}
+
+func (p *Platform) ReplyWithReceipt(ctx context.Context, rctx any, content string) (*core.SendReceipt, error) {
 	rc, ok := rctx.(replyContext)
 	if !ok {
-		return fmt.Errorf("wecom: invalid reply context type %T", rctx)
+		return nil, fmt.Errorf("wecom: invalid reply context type %T", rctx)
 	}
 	if content == "" {
-		return nil
+		return nil, nil
 	}
 
 	accessToken, err := p.getAccessToken()
 	if err != nil {
 		slog.Error("wecom: get access_token failed", "error", err)
-		return fmt.Errorf("wecom: get access_token: %w", err)
+		return nil, fmt.Errorf("wecom: get access_token: %w", err)
 	}
 
 	if !p.enableMarkdown {
@@ -478,16 +533,26 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 		}
 		if sendErr != nil {
 			slog.Error("wecom: send failed", "user", rc.userID, "chunk", i, "error", sendErr)
-			return sendErr
+			return nil, sendErr
 		}
 	}
 	slog.Debug("wecom: message sent", "user", rc.userID, "chunks", len(chunks), "total_len", len(content))
-	return nil
+	return &core.SendReceipt{
+		ParentMessageID: rc.messageID,
+		Extra: map[string]any{
+			"target_user_id": rc.userID,
+		},
+	}, nil
 }
 
 // Send sends a new message (same as Reply for WeChat Work)
 func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
-	return p.Reply(ctx, rctx, content)
+	_, err := p.SendWithReceipt(ctx, rctx, content)
+	return err
+}
+
+func (p *Platform) SendWithReceipt(ctx context.Context, rctx any, content string) (*core.SendReceipt, error) {
+	return p.ReplyWithReceipt(ctx, rctx, content)
 }
 
 // SendImage uploads and sends an image to the user.
@@ -699,7 +764,7 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	if len(parts) < 2 || parts[0] != "wecom" {
 		return nil, fmt.Errorf("wecom: invalid session key %q", sessionKey)
 	}
-	return replyContext{userID: parts[1]}, nil
+	return replyContext{userID: parts[1], sessionKey: sessionKey}, nil
 }
 
 func (p *Platform) Stop() error {

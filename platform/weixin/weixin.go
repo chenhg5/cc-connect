@@ -42,6 +42,9 @@ const (
 type replyContext struct {
 	peerUserID   string
 	contextToken string
+	messageID    string
+	sessionKey   string
+	userName     string
 }
 
 // Platform implements core.Platform for Weixin personal chat via the ilink bot HTTP API
@@ -205,6 +208,26 @@ func pickInt(v any) int {
 }
 
 func (p *Platform) Name() string { return "weixin" }
+
+func (p *Platform) AuditReplyMetadata(replyCtx any) core.AuditReplyMetadata {
+	rc, ok := replyCtx.(*replyContext)
+	if !ok || rc == nil {
+		return core.AuditReplyMetadata{}
+	}
+	return core.AuditReplyMetadata{
+		SessionKey:       rc.sessionKey,
+		UserID:           rc.peerUserID,
+		UserName:         rc.userName,
+		ChatName:         rc.userName,
+		ChannelKey:       rc.peerUserID,
+		ReplyToMessageID: rc.messageID,
+		ParentMessageID:  rc.messageID,
+		Extra: map[string]any{
+			"peer_user_id":      rc.peerUserID,
+			"has_context_token": strings.TrimSpace(rc.contextToken) != "",
+		},
+	}
+}
 
 func (p *Platform) loadSyncBuf() {
 	if p.syncBufPath == "" {
@@ -446,10 +469,17 @@ func (p *Platform) dispatchInbound(ctx context.Context, m *weixinMessage, h core
 		return
 	}
 
-	rc := &replyContext{peerUserID: from, contextToken: strings.TrimSpace(m.ContextToken)}
 	msgID := fmt.Sprintf("%d", m.MessageID)
 	if m.MessageID == 0 {
 		msgID = randomHex(8)
+	}
+
+	rc := &replyContext{
+		peerUserID:   from,
+		contextToken: strings.TrimSpace(m.ContextToken),
+		messageID:    msgID,
+		sessionKey:   sessionKeyPrefix + from,
+		userName:     shortWeixinUser(from),
 	}
 
 	h(p, &core.Message{
@@ -458,11 +488,22 @@ func (p *Platform) dispatchInbound(ctx context.Context, m *weixinMessage, h core
 		MessageID:  msgID,
 		UserID:     from,
 		UserName:   shortWeixinUser(from),
+		ChatName:   shortWeixinUser(from),
+		ChannelKey: from,
 		Content:    body,
 		Images:     images,
 		Files:      files,
 		Audio:      audio,
 		ReplyCtx:   rc,
+		AuditExtra: map[string]any{
+			"session_id":        m.SessionID,
+			"message_type":      m.MessageType,
+			"message_state":     m.MessageState,
+			"sequence":          m.Seq,
+			"create_time_ms":    m.CreateTimeMs,
+			"item_count":        len(m.ItemList),
+			"has_context_token": strings.TrimSpace(m.ContextToken) != "",
+		},
 	})
 }
 
@@ -496,11 +537,21 @@ func randomHex(n int) string {
 }
 
 func (p *Platform) Reply(ctx context.Context, replyCtx any, content string) error {
-	return p.sendChunks(ctx, replyCtx, content)
+	_, err := p.ReplyWithReceipt(ctx, replyCtx, content)
+	return err
 }
 
 func (p *Platform) Send(ctx context.Context, replyCtx any, content string) error {
-	return p.sendChunks(ctx, replyCtx, content)
+	_, err := p.SendWithReceipt(ctx, replyCtx, content)
+	return err
+}
+
+func (p *Platform) ReplyWithReceipt(ctx context.Context, replyCtx any, content string) (*core.SendReceipt, error) {
+	return p.sendChunksWithReceipt(ctx, replyCtx, content)
+}
+
+func (p *Platform) SendWithReceipt(ctx context.Context, replyCtx any, content string) (*core.SendReceipt, error) {
+	return p.sendChunksWithReceipt(ctx, replyCtx, content)
 }
 
 // StartTyping sends a typing indicator to the peer and repeats every few seconds
@@ -599,44 +650,57 @@ func (p *Platform) refreshTypingTicket(ctx context.Context, peerID, contextToken
 }
 
 func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string) error {
+	_, err := p.sendChunksWithReceipt(ctx, replyCtx, content)
+	return err
+}
+
+func (p *Platform) sendChunksWithReceipt(ctx context.Context, replyCtx any, content string) (*core.SendReceipt, error) {
 	rc, ok := replyCtx.(*replyContext)
 	if !ok || rc == nil {
-		return fmt.Errorf("weixin: invalid reply context")
+		return nil, fmt.Errorf("weixin: invalid reply context")
 	}
 	if strings.TrimSpace(rc.contextToken) == "" {
 		rc.contextToken = p.getContextToken(rc.peerUserID)
 	}
 	if strings.TrimSpace(rc.contextToken) == "" {
-		return fmt.Errorf("weixin: missing context_token for peer %q", rc.peerUserID)
+		return nil, fmt.Errorf("weixin: missing context_token for peer %q", rc.peerUserID)
 	}
 	if strings.TrimSpace(content) == "" {
-		return nil
+		return nil, nil
 	}
 	chunks := splitUTF8(content, maxWeixinChunk)
+	clientIDs := make([]string, 0, len(chunks))
 	for i, chunk := range chunks {
 		// Add delay between chunks to avoid rate limiting (except for first chunk)
 		if i > 0 {
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				return nil, ctx.Err()
 			case <-time.After(weixinChunkSendDelay):
 			}
 		}
 		// Retry sendText with context_token refresh on failure
-		err := p.sendChunkWithRetry(ctx, rc, chunk)
+		clientID := "cc-" + randomHex(6)
+		err := p.sendChunkWithRetry(ctx, rc, chunk, clientID)
 		if err != nil {
-			return fmt.Errorf("weixin: send: %w", err)
+			return nil, fmt.Errorf("weixin: send: %w", err)
 		}
+		clientIDs = append(clientIDs, clientID)
 	}
-	return nil
+	return &core.SendReceipt{
+		ParentMessageID: rc.messageID,
+		Extra: map[string]any{
+			"peer_user_id": rc.peerUserID,
+			"client_ids":   clientIDs,
+		},
+	}, nil
 }
 
 // sendChunkWithRetry sends a single chunk with retry mechanism.
 // When sendMessage returns ret=-2, it retries with a fresh context_token.
-func (p *Platform) sendChunkWithRetry(ctx context.Context, rc *replyContext, chunk string) error {
+func (p *Platform) sendChunkWithRetry(ctx context.Context, rc *replyContext, chunk, clientID string) error {
 	var lastErr error
 	for attempt := 0; attempt < weixinSendMaxRetries; attempt++ {
-		clientID := "cc-" + randomHex(6)
 		err := p.api.sendText(ctx, rc.peerUserID, chunk, rc.contextToken, clientID)
 		if err == nil {
 			return nil
@@ -693,7 +757,7 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	if tok == "" {
 		return nil, fmt.Errorf("weixin: no stored context_token for %q (user must message the bot first)", peer)
 	}
-	return &replyContext{peerUserID: peer, contextToken: tok}, nil
+	return &replyContext{peerUserID: peer, contextToken: tok, sessionKey: sessionKey, userName: shortWeixinUser(peer)}, nil
 }
 
 // FormattingInstructions implements core.FormattingInstructionProvider.

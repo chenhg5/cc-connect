@@ -26,18 +26,23 @@ func init() {
 type replyContext struct {
 	targetID   string
 	targetType string // "user" or "group" or "room"
+	messageID  string
+	sessionKey string
+	userID     string
+	userName   string
+	chatName   string
 }
 
 type Platform struct {
-	channelSecret string
-	channelToken  string
-	allowFrom     string
-	port          string
-	callbackPath  string
-	bot           *messaging_api.MessagingApiAPI
-	server        *http.Server
-	handler       core.MessageHandler
-	userNameCache sync.Map // userID -> display name
+	channelSecret  string
+	channelToken   string
+	allowFrom      string
+	port           string
+	callbackPath   string
+	bot            *messaging_api.MessagingApiAPI
+	server         *http.Server
+	handler        core.MessageHandler
+	userNameCache  sync.Map // userID -> display name
 	groupNameCache sync.Map // groupID -> group name
 }
 
@@ -69,6 +74,26 @@ func New(opts map[string]any) (core.Platform, error) {
 }
 
 func (p *Platform) Name() string { return "line" }
+
+func (p *Platform) AuditReplyMetadata(replyCtx any) core.AuditReplyMetadata {
+	rc, ok := replyCtx.(replyContext)
+	if !ok {
+		return core.AuditReplyMetadata{}
+	}
+	return core.AuditReplyMetadata{
+		SessionKey:       rc.sessionKey,
+		UserID:           rc.userID,
+		UserName:         rc.userName,
+		ChatName:         rc.chatName,
+		ChannelKey:       rc.targetID,
+		ReplyToMessageID: rc.messageID,
+		ParentMessageID:  rc.messageID,
+		Extra: map[string]any{
+			"target_id":   rc.targetID,
+			"target_type": rc.targetType,
+		},
+	}
+}
 
 func (p *Platform) Start(handler core.MessageHandler) error {
 	p.handler = handler
@@ -127,11 +152,17 @@ func (p *Platform) webhookHandler(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		sessionKey := fmt.Sprintf("line:%s", targetID)
-		rctx := replyContext{targetID: targetID, targetType: targetType}
-
 		chatName := ""
 		if targetType == "group" {
 			chatName = p.resolveGroupName(targetID)
+		}
+		rctx := replyContext{
+			targetID:   targetID,
+			targetType: targetType,
+			sessionKey: sessionKey,
+			userID:     userID,
+			userName:   p.resolveUserName(userID),
+			chatName:   chatName,
 		}
 
 		switch m := e.Message.(type) {
@@ -140,9 +171,21 @@ func (p *Platform) webhookHandler(w http.ResponseWriter, r *http.Request) {
 			p.handler(p, &core.Message{
 				SessionKey: sessionKey, Platform: "line",
 				MessageID: m.Id,
-				UserID: userID, UserName: p.resolveUserName(userID),
+				UserID:    userID, UserName: rctx.userName,
 				ChatName: chatName,
-				Content: m.Text, ReplyCtx: rctx,
+				Content:  m.Text, ChannelKey: targetID, ReplyCtx: replyContext{
+					targetID:   rctx.targetID,
+					targetType: rctx.targetType,
+					messageID:  m.Id,
+					sessionKey: rctx.sessionKey,
+					userID:     rctx.userID,
+					userName:   rctx.userName,
+					chatName:   rctx.chatName,
+				},
+				AuditExtra: map[string]any{
+					"target_id":   targetID,
+					"target_type": targetType,
+				},
 			})
 
 		case webhook.ImageMessageContent:
@@ -155,10 +198,23 @@ func (p *Platform) webhookHandler(w http.ResponseWriter, r *http.Request) {
 			p.handler(p, &core.Message{
 				SessionKey: sessionKey, Platform: "line",
 				MessageID: m.Id,
-				UserID: userID, UserName: p.resolveUserName(userID),
-				ChatName: chatName,
-				Images:  []core.ImageAttachment{{MimeType: "image/jpeg", Data: imgData}},
-				ReplyCtx: rctx,
+				UserID:    userID, UserName: rctx.userName,
+				ChatName:   chatName,
+				ChannelKey: targetID,
+				Images:     []core.ImageAttachment{{MimeType: "image/jpeg", Data: imgData}},
+				ReplyCtx: replyContext{
+					targetID:   rctx.targetID,
+					targetType: rctx.targetType,
+					messageID:  m.Id,
+					sessionKey: rctx.sessionKey,
+					userID:     rctx.userID,
+					userName:   rctx.userName,
+					chatName:   rctx.chatName,
+				},
+				AuditExtra: map[string]any{
+					"target_id":   targetID,
+					"target_type": targetType,
+				},
 			})
 
 		case webhook.AudioMessageContent:
@@ -175,15 +231,28 @@ func (p *Platform) webhookHandler(w http.ResponseWriter, r *http.Request) {
 			p.handler(p, &core.Message{
 				SessionKey: sessionKey, Platform: "line",
 				MessageID: m.Id,
-				UserID: userID, UserName: p.resolveUserName(userID),
-				ChatName: chatName,
+				UserID:    userID, UserName: rctx.userName,
+				ChatName:   chatName,
+				ChannelKey: targetID,
 				Audio: &core.AudioAttachment{
 					MimeType: "audio/m4a",
 					Data:     audioData,
 					Format:   "m4a",
 					Duration: dur,
 				},
-				ReplyCtx: rctx,
+				ReplyCtx: replyContext{
+					targetID:   rctx.targetID,
+					targetType: rctx.targetType,
+					messageID:  m.Id,
+					sessionKey: rctx.sessionKey,
+					userID:     rctx.userID,
+					userName:   rctx.userName,
+					chatName:   rctx.chatName,
+				},
+				AuditExtra: map[string]any{
+					"target_id":   targetID,
+					"target_type": targetType,
+				},
 			})
 
 		default:
@@ -239,6 +308,19 @@ func extractSource(src webhook.SourceInterface) (targetID, targetType, userID st
 	}
 }
 
+func inferTargetType(targetID string) string {
+	switch {
+	case strings.HasPrefix(targetID, "U"):
+		return "user"
+	case strings.HasPrefix(targetID, "C"):
+		return "group"
+	case strings.HasPrefix(targetID, "R"):
+		return "room"
+	default:
+		return "unknown"
+	}
+}
+
 func (p *Platform) downloadContent(messageID string) ([]byte, error) {
 	url := fmt.Sprintf("https://api-data.line.me/v2/bot/message/%s/content", messageID)
 	req, _ := http.NewRequest("GET", url, nil)
@@ -252,21 +334,27 @@ func (p *Platform) downloadContent(messageID string) ([]byte, error) {
 }
 
 func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
+	_, err := p.ReplyWithReceipt(ctx, rctx, content)
+	return err
+}
+
+func (p *Platform) ReplyWithReceipt(ctx context.Context, rctx any, content string) (*core.SendReceipt, error) {
 	rc, ok := rctx.(replyContext)
 	if !ok {
-		return fmt.Errorf("line: invalid reply context type %T", rctx)
+		return nil, fmt.Errorf("line: invalid reply context type %T", rctx)
 	}
 
 	if content == "" {
-		return nil
+		return nil, nil
 	}
 
 	content = core.StripMarkdown(content)
 
 	// LINE text message limit is 5000 characters
 	messages := splitMessage(content, 5000)
+	var sentMessageIDs []string
 	for _, text := range messages {
-		_, err := p.bot.PushMessage(
+		resp, err := p.bot.PushMessage(
 			&messaging_api.PushMessageRequest{
 				To: rc.targetID,
 				Messages: []messaging_api.MessageInterface{
@@ -277,15 +365,33 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 			}, "",
 		)
 		if err != nil {
-			return fmt.Errorf("line: push message: %w", err)
+			return nil, fmt.Errorf("line: push message: %w", err)
+		}
+		for _, sent := range resp.SentMessages {
+			if id := strings.TrimSpace(sent.Id); id != "" {
+				sentMessageIDs = append(sentMessageIDs, id)
+			}
 		}
 	}
-	return nil
+	return &core.SendReceipt{
+		MessageID:       lastLineMessageID(sentMessageIDs),
+		ParentMessageID: rc.messageID,
+		Extra: map[string]any{
+			"target_id":        rc.targetID,
+			"target_type":      rc.targetType,
+			"sent_message_ids": sentMessageIDs,
+		},
+	}, nil
 }
 
 // Send sends a new message (same as Reply for LINE)
 func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
-	return p.Reply(ctx, rctx, content)
+	_, err := p.SendWithReceipt(ctx, rctx, content)
+	return err
+}
+
+func (p *Platform) SendWithReceipt(ctx context.Context, rctx any, content string) (*core.SendReceipt, error) {
+	return p.ReplyWithReceipt(ctx, rctx, content)
 }
 
 func splitMessage(s string, maxLen int) []string {
@@ -311,7 +417,20 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	if len(parts) < 2 || parts[0] != "line" {
 		return nil, fmt.Errorf("line: invalid session key %q", sessionKey)
 	}
-	return replyContext{targetID: parts[1], targetType: "user"}, nil
+	targetID := parts[1]
+	return replyContext{
+		targetID:   targetID,
+		targetType: inferTargetType(targetID),
+		sessionKey: sessionKey,
+		chatName:   targetID,
+	}, nil
+}
+
+func lastLineMessageID(ids []string) string {
+	if len(ids) == 0 {
+		return ""
+	}
+	return ids[len(ids)-1]
 }
 
 func (p *Platform) Stop() error {

@@ -42,10 +42,14 @@ const wsAckTimeout = 5 * time.Second
 
 // wsReplyContext holds the context needed to reply to a specific message.
 type wsReplyContext struct {
-	reqID    string // req_id from headers of aibot_msg_callback
-	chatID   string // chatid for aibot_send_msg
-	chatType string // chattype: "single" or "group"
-	userID   string // from.userid
+	reqID      string // req_id from headers of aibot_msg_callback
+	chatID     string // chatid for aibot_send_msg
+	chatType   string // chattype: "single" or "group"
+	userID     string // from.userid
+	messageID  string
+	sessionKey string
+	userName   string
+	chatName   string
 }
 
 // --- WebSocket protocol frame types (matching official SDK) ---
@@ -128,6 +132,26 @@ func (p *WSPlatform) generateReqID(prefix string) string {
 }
 
 func (p *WSPlatform) Name() string { return "wecom" }
+
+func (p *WSPlatform) AuditReplyMetadata(replyCtx any) core.AuditReplyMetadata {
+	rc, ok := replyCtx.(wsReplyContext)
+	if !ok {
+		return core.AuditReplyMetadata{}
+	}
+	return core.AuditReplyMetadata{
+		SessionKey:       rc.sessionKey,
+		UserID:           rc.userID,
+		UserName:         rc.userName,
+		ChatName:         rc.chatName,
+		ChannelKey:       rc.chatID,
+		ReplyToMessageID: rc.messageID,
+		ParentMessageID:  rc.messageID,
+		Extra: map[string]any{
+			"chat_id":   rc.chatID,
+			"chat_type": rc.chatType,
+		},
+	}
+}
 
 func (p *WSPlatform) Start(handler core.MessageHandler) error {
 	p.handler = handler
@@ -368,10 +392,13 @@ func (p *WSPlatform) handleMsgCallback(frame wsFrame) {
 
 	sessionKey := fmt.Sprintf("wecom:%s:%s", chatID, body.From.UserID)
 	rctx := wsReplyContext{
-		reqID:    reqID,
-		chatID:   chatID,
-		chatType: body.ChatType,
-		userID:   body.From.UserID,
+		reqID:      reqID,
+		chatID:     chatID,
+		chatType:   body.ChatType,
+		userID:     body.From.UserID,
+		messageID:  body.MsgID,
+		sessionKey: sessionKey,
+		userName:   body.From.UserID,
 	}
 
 	// WS mode does not provide display names; the protocol only carries userID.
@@ -380,6 +407,15 @@ func (p *WSPlatform) handleMsgCallback(frame wsFrame) {
 	chatName := ""
 	if body.ChatType == "group" {
 		chatName = body.ChatID
+	}
+	rctx.chatName = chatName
+	auditExtra := map[string]any{
+		"chat_id":     chatID,
+		"chat_type":   body.ChatType,
+		"msg_type":    body.MsgType,
+		"req_id":      reqID,
+		"aibot_id":    body.AibotID,
+		"create_time": body.CreateTime,
 	}
 
 	texts, imgRefs, fileRefs := wsCollectInboundParts(&body)
@@ -406,8 +442,12 @@ func (p *WSPlatform) handleMsgCallback(frame wsFrame) {
 			SessionKey: sessionKey, Platform: "wecom",
 			MessageID: body.MsgID,
 			UserID:    body.From.UserID, UserName: body.From.UserID,
-			ChatName: chatName,
-			Content:  vt, ReplyCtx: rctx, FromVoice: true,
+			ChatName:   chatName,
+			ChannelKey: chatID,
+			Content:    vt,
+			ReplyCtx:   rctx,
+			FromVoice:  true,
+			AuditExtra: core.CloneAuditExtra(auditExtra),
 		})
 		return
 	}
@@ -423,8 +463,11 @@ func (p *WSPlatform) handleMsgCallback(frame wsFrame) {
 			SessionKey: sessionKey, Platform: "wecom",
 			MessageID: body.MsgID,
 			UserID:    body.From.UserID, UserName: body.From.UserID,
-			ChatName: chatName,
-			Content:  content, ReplyCtx: rctx,
+			ChatName:   chatName,
+			ChannelKey: chatID,
+			Content:    content,
+			ReplyCtx:   rctx,
+			AuditExtra: core.CloneAuditExtra(auditExtra),
 		})
 		return
 	}
@@ -440,12 +483,17 @@ func (p *WSPlatform) handleMsgCallback(frame wsFrame) {
 // send the complete content in one frame with finish=true.
 // Markdown is natively supported by the stream reply format.
 func (p *WSPlatform) Reply(ctx context.Context, rctx any, content string) error {
+	_, err := p.ReplyWithReceipt(ctx, rctx, content)
+	return err
+}
+
+func (p *WSPlatform) ReplyWithReceipt(ctx context.Context, rctx any, content string) (*core.SendReceipt, error) {
 	rc, ok := rctx.(wsReplyContext)
 	if !ok {
-		return fmt.Errorf("wecom-ws: invalid reply context type %T", rctx)
+		return nil, fmt.Errorf("wecom-ws: invalid reply context type %T", rctx)
 	}
 	if content == "" {
-		return nil
+		return nil, nil
 	}
 
 	streamID := p.generateReqID("stream")
@@ -463,30 +511,45 @@ func (p *WSPlatform) Reply(ctx context.Context, rctx any, content string) error 
 	}
 	if err := p.writeJSON(frame); err != nil {
 		slog.Error("wecom-ws: reply failed", "user", rc.userID, "error", err)
-		return err
+		return nil, err
 	}
 	slog.Debug("wecom-ws: reply sent", "user", rc.userID, "len", len(content))
-	return nil
+	return &core.SendReceipt{
+		ParentMessageID: rc.messageID,
+		Extra: map[string]any{
+			"chat_id":        rc.chatID,
+			"chat_type":      rc.chatType,
+			"respond_req_id": rc.reqID,
+			"stream_id":      streamID,
+		},
+	}, nil
 }
 
 // Send sends a proactive message via aibot_send_msg (markdown format).
 // Used for follow-up messages and cron-triggered messages where no req_id is available.
 // Markdown is natively supported.
 func (p *WSPlatform) Send(ctx context.Context, rctx any, content string) error {
+	_, err := p.SendWithReceipt(ctx, rctx, content)
+	return err
+}
+
+func (p *WSPlatform) SendWithReceipt(ctx context.Context, rctx any, content string) (*core.SendReceipt, error) {
 	rc, ok := rctx.(wsReplyContext)
 	if !ok {
-		return fmt.Errorf("wecom-ws: invalid reply context type %T", rctx)
+		return nil, fmt.Errorf("wecom-ws: invalid reply context type %T", rctx)
 	}
 	if content == "" {
-		return nil
+		return nil, nil
 	}
 	if rc.chatID == "" {
-		return fmt.Errorf("wecom-ws: chatID is empty, cannot send proactive message")
+		return nil, fmt.Errorf("wecom-ws: chatID is empty, cannot send proactive message")
 	}
 
 	chunks := splitByBytes(content, 2000)
+	var lastReqID string
 	for i, chunk := range chunks {
 		reqID := p.generateReqID("aibot_send_msg")
+		lastReqID = reqID
 		frame := map[string]any{
 			"cmd":     "aibot_send_msg",
 			"headers": map[string]string{"req_id": reqID},
@@ -500,11 +563,18 @@ func (p *WSPlatform) Send(ctx context.Context, rctx any, content string) error {
 		}
 		if err := p.writeAndWaitAck(ctx, frame, reqID); err != nil {
 			slog.Error("wecom-ws: send failed", "user", rc.userID, "chunk", i, "error", err)
-			return err
+			return nil, err
 		}
 	}
 	slog.Debug("wecom-ws: message sent", "user", rc.userID, "chunks", len(chunks), "total_len", len(content))
-	return nil
+	return &core.SendReceipt{
+		ParentMessageID: rc.messageID,
+		Extra: map[string]any{
+			"chat_id":     rc.chatID,
+			"chat_type":   rc.chatType,
+			"last_req_id": lastReqID,
+		},
+	}, nil
 }
 
 // ReconstructReplyCtx rebuilds a reply context from a session key.
@@ -518,7 +588,7 @@ func (p *WSPlatform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	if len(parts) < 3 || parts[0] != "wecom" {
 		return nil, fmt.Errorf("wecom-ws: invalid session key %q", sessionKey)
 	}
-	return wsReplyContext{chatID: parts[1], userID: parts[2]}, nil
+	return wsReplyContext{chatID: parts[1], userID: parts[2], sessionKey: sessionKey}, nil
 }
 
 func (p *WSPlatform) Stop() error {

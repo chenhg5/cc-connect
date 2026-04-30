@@ -25,9 +25,13 @@ func init() {
 const maxDiscordLen = 2000
 
 type replyContext struct {
-	channelID string
-	messageID string
-	threadID  string
+	channelID  string
+	messageID  string
+	threadID   string
+	sessionKey string
+	userID     string
+	userName   string
+	chatName   string
 }
 
 // interactionReplyCtx handles Discord slash command (Application Command)
@@ -36,6 +40,11 @@ type replyContext struct {
 type interactionReplyCtx struct {
 	interaction *discordgo.Interaction
 	channelID   string
+	threadID    string
+	sessionKey  string
+	userID      string
+	userName    string
+	chatName    string
 	mu          sync.Mutex
 	firstDone   bool
 }
@@ -125,6 +134,56 @@ func New(opts map[string]any) (core.Platform, error) {
 }
 
 func (p *Platform) Name() string { return "discord" }
+
+func (p *Platform) AuditReplyMetadata(replyCtx any) core.AuditReplyMetadata {
+	switch rc := replyCtx.(type) {
+	case replyContext:
+		return discordAuditReplyMetadata(
+			rc.sessionKey,
+			rc.userID,
+			rc.userName,
+			rc.chatName,
+			rc.targetChannelID(),
+			rc.messageID,
+			rc.threadID,
+		)
+	case *interactionReplyCtx:
+		if rc == nil {
+			return core.AuditReplyMetadata{}
+		}
+		return discordAuditReplyMetadata(
+			rc.sessionKey,
+			rc.userID,
+			rc.userName,
+			rc.chatName,
+			rc.channelID,
+			"",
+			rc.threadID,
+		)
+	default:
+		return core.AuditReplyMetadata{}
+	}
+}
+
+func discordAuditReplyMetadata(sessionKey, userID, userName, chatName, channelID, replyToMessageID, threadID string) core.AuditReplyMetadata {
+	extra := map[string]any{
+		"channel_id": channelID,
+	}
+	if threadID != "" {
+		extra["thread_id"] = threadID
+	}
+	return core.AuditReplyMetadata{
+		SessionKey:       sessionKey,
+		UserID:           userID,
+		UserName:         userName,
+		ChatName:         chatName,
+		ChannelKey:       channelID,
+		ReplyToMessageID: replyToMessageID,
+		ParentMessageID:  replyToMessageID,
+		ThreadID:         threadID,
+		Extra:            extra,
+	}
+}
 
 func (p *Platform) selfPlatform() core.Platform {
 	if p != nil && p.self != nil {
@@ -538,7 +597,14 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		slog.Debug("discord: message received", "user", m.Author.Username, "channel", m.ChannelID)
 
 		sessionKey := p.makeSessionKey(m.ChannelID, m.Author.ID)
-		rctx := replyContext{channelID: m.ChannelID, messageID: m.ID}
+		rctx := replyContext{
+			channelID:  m.ChannelID,
+			messageID:  m.ID,
+			sessionKey: sessionKey,
+			userID:     m.Author.ID,
+			userName:   m.Author.Username,
+			chatName:   p.resolveChannelName(m.ChannelID),
+		}
 		if p.threadIsolation && m.GuildID != "" {
 			threadSessionKey, threadCtx, err := resolveThreadReplyContext(m, p.botID, sessionThreadOps{session: p.session})
 			if err != nil {
@@ -546,6 +612,10 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 			} else {
 				sessionKey = threadSessionKey
 				rctx = threadCtx
+				rctx.sessionKey = threadSessionKey
+				rctx.userID = m.Author.ID
+				rctx.userName = m.Author.Username
+				rctx.chatName = p.resolveChannelName(rctx.targetChannelID())
 			}
 		}
 
@@ -559,8 +629,22 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 			SessionKey: sessionKey, Platform: "discord",
 			MessageID: m.ID,
 			UserID:    m.Author.ID, UserName: m.Author.Username,
-			ChatName: p.resolveChannelName(m.ChannelID),
-			Content:  m.Content, Images: images, Files: files, Audio: audio, ReplyCtx: rctx,
+			ChatName:   rctx.chatName,
+			Content:    m.Content,
+			Images:     images,
+			Files:      files,
+			Audio:      audio,
+			ChannelKey: rctx.targetChannelID(),
+			ThreadID:   rctx.threadID,
+			ReplyCtx:   rctx,
+			AuditExtra: map[string]any{
+				"channel_id":        m.ChannelID,
+				"guild_id":          m.GuildID,
+				"thread_channel_id": rctx.threadID,
+			},
+		}
+		if m.MessageReference != nil {
+			msg.ParentMessageID = m.MessageReference.MessageID
 		}
 		p.dispatchMessage(msg)
 	})
@@ -613,6 +697,13 @@ func (p *Platform) handleInteraction(s *discordgo.Session, i *discordgo.Interact
 		return
 	}
 
+	channelID := i.ChannelID
+	chatName := p.resolveChannelName(channelID)
+	threadID := ""
+	if ch, chErr := s.Channel(channelID); chErr == nil && ch != nil && isThreadChannelType(ch.Type) {
+		threadID = channelID
+	}
+
 	var rctx any
 	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
@@ -629,17 +720,25 @@ func (p *Platform) handleInteraction(s *discordgo.Session, i *discordgo.Interact
 		} else {
 			rc = replyContextForDeferredInteractionFallback(ch, channelID)
 		}
+		rc.sessionKey = resolveSessionKeyForChannel(channelID, userID, p.shareSessionInChannel, p.threadIsolation, sessionThreadOps{session: p.session})
+		rc.userID = userID
+		rc.userName = userName
+		rc.chatName = p.resolveChannelName(rc.targetChannelID())
 		rctx = rc
 	} else {
 		rctx = &interactionReplyCtx{
 			interaction: i.Interaction,
 			channelID:   i.ChannelID,
+			threadID:    threadID,
+			sessionKey:  resolveSessionKeyForChannel(channelID, userID, p.shareSessionInChannel, p.threadIsolation, sessionThreadOps{session: p.session}),
+			userID:      userID,
+			userName:    userName,
+			chatName:    chatName,
 		}
 	}
 
 	data := i.ApplicationCommandData()
 	cmdText := reconstructCommand(data)
-	channelID := i.ChannelID
 
 	slog.Debug("discord: slash command", "user", userName, "command", cmdText, "channel", channelID)
 
@@ -649,8 +748,15 @@ func (p *Platform) handleInteraction(s *discordgo.Session, i *discordgo.Interact
 		SessionKey: sessionKey, Platform: "discord",
 		MessageID: i.ID,
 		UserID:    userID, UserName: userName,
-		ChatName: p.resolveChannelName(channelID),
-		Content:  cmdText, ReplyCtx: rctx,
+		ChatName:   chatName,
+		Content:    cmdText,
+		ChannelKey: channelID,
+		ThreadID:   threadID,
+		ReplyCtx:   rctx,
+		AuditExtra: map[string]any{
+			"channel_id": channelID,
+			"guild_id":   i.GuildID,
+		},
 	}
 	p.dispatchMessage(msg)
 }
@@ -712,7 +818,18 @@ func (p *Platform) handleComponentInteraction(s *discordgo.Session, i *discordgo
 
 	channelID := i.ChannelID
 	sessionKey := resolveSessionKeyForChannel(channelID, userID, p.shareSessionInChannel, p.threadIsolation, sessionThreadOps{session: p.session})
-	rc := replyContext{channelID: channelID}
+	threadID := ""
+	if ch, chErr := s.Channel(channelID); chErr == nil && ch != nil && isThreadChannelType(ch.Type) {
+		threadID = channelID
+	}
+	rc := replyContext{
+		channelID:  channelID,
+		threadID:   threadID,
+		sessionKey: sessionKey,
+		userID:     userID,
+		userName:   userName,
+		chatName:   p.resolveChannelName(channelID),
+	}
 	if i.Message != nil {
 		rc.messageID = i.Message.ID
 	}
@@ -722,32 +839,48 @@ func (p *Platform) handleComponentInteraction(s *discordgo.Session, i *discordgo
 		MessageID:  i.ID,
 		UserID:     userID,
 		UserName:   userName,
-		ChatName:   p.resolveChannelName(channelID),
+		ChatName:   rc.chatName,
 		Content:    command,
+		ChannelKey: channelID,
+		ThreadID:   rc.threadID,
 		ReplyCtx:   rc,
+		AuditExtra: map[string]any{
+			"channel_id": channelID,
+			"guild_id":   i.GuildID,
+		},
 	})
 }
 
 func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
+	_, err := p.ReplyWithReceipt(ctx, rctx, content)
+	return err
+}
+
+func (p *Platform) ReplyWithReceipt(ctx context.Context, rctx any, content string) (*core.SendReceipt, error) {
 	switch rc := rctx.(type) {
 	case *interactionReplyCtx:
-		return p.sendInteraction(rc, content)
+		return p.sendInteractionWithReceipt(rc, content)
 	case replyContext:
-		return p.sendChannelReply(rc, content)
+		return p.sendChannelReplyWithReceipt(rc, content)
 	default:
-		return fmt.Errorf("discord: invalid reply context type %T", rctx)
+		return nil, fmt.Errorf("discord: invalid reply context type %T", rctx)
 	}
 }
 
 // Send sends a new message (not a reply).
 func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
+	_, err := p.SendWithReceipt(ctx, rctx, content)
+	return err
+}
+
+func (p *Platform) SendWithReceipt(ctx context.Context, rctx any, content string) (*core.SendReceipt, error) {
 	switch rc := rctx.(type) {
 	case *interactionReplyCtx:
-		return p.sendInteraction(rc, content)
+		return p.sendInteractionWithReceipt(rc, content)
 	case replyContext:
-		return p.sendChannel(rc, content)
+		return p.sendChannelWithReceipt(rc, content)
 	default:
-		return fmt.Errorf("discord: invalid reply context type %T", rctx)
+		return nil, fmt.Errorf("discord: invalid reply context type %T", rctx)
 	}
 }
 
@@ -755,7 +888,13 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 // mechanism. The first call edits the deferred "thinking" response; subsequent
 // calls create followup messages.
 func (p *Platform) sendInteraction(ictx *interactionReplyCtx, content string) error {
+	_, err := p.sendInteractionWithReceipt(ictx, content)
+	return err
+}
+
+func (p *Platform) sendInteractionWithReceipt(ictx *interactionReplyCtx, content string) (*core.SendReceipt, error) {
 	chunks := core.SplitMessageCodeFenceAware(wrapTablesInCodeBlocks(content), maxDiscordLen)
+	var lastMessageID string
 	for _, chunk := range chunks {
 		ictx.mu.Lock()
 		first := !ictx.firstDone
@@ -767,48 +906,102 @@ func (p *Platform) sendInteraction(ictx *interactionReplyCtx, content string) er
 		var err error
 		if first {
 			c := chunk
-			_, err = p.session.InteractionResponseEdit(ictx.interaction, &discordgo.WebhookEdit{Content: &c})
+			msg, editErr := p.session.InteractionResponseEdit(ictx.interaction, &discordgo.WebhookEdit{Content: &c})
+			if msg != nil {
+				lastMessageID = msg.ID
+			}
+			err = editErr
 		} else {
-			_, err = p.session.FollowupMessageCreate(ictx.interaction, true, &discordgo.WebhookParams{Content: chunk})
+			msg, followupErr := p.session.FollowupMessageCreate(ictx.interaction, true, &discordgo.WebhookParams{Content: chunk})
+			if msg != nil {
+				lastMessageID = msg.ID
+			}
+			err = followupErr
 		}
 
 		if err != nil {
 			slog.Warn("discord: interaction response failed, falling back to channel message", "error", err)
-			_, err = p.session.ChannelMessageSend(ictx.channelID, chunk)
+			msg, sendErr := p.session.ChannelMessageSend(ictx.channelID, chunk)
+			if msg != nil {
+				lastMessageID = msg.ID
+			}
+			err = sendErr
 			if err != nil {
-				return fmt.Errorf("discord: send fallback: %w", err)
+				return nil, fmt.Errorf("discord: send fallback: %w", err)
 			}
 		}
 	}
-	return nil
+	return &core.SendReceipt{
+		MessageID: lastMessageID,
+		ThreadID:  ictx.threadID,
+		Extra: map[string]any{
+			"channel_id": ictx.channelID,
+		},
+	}, nil
 }
 
 func (p *Platform) sendChannelReply(rc replyContext, content string) error {
+	_, err := p.sendChannelReplyWithReceipt(rc, content)
+	return err
+}
+
+func (p *Platform) sendChannelReplyWithReceipt(rc replyContext, content string) (*core.SendReceipt, error) {
 	chunks := core.SplitMessageCodeFenceAware(wrapTablesInCodeBlocks(content), maxDiscordLen)
+	var lastMessageID string
 	for _, chunk := range chunks {
 		var err error
 		if rc.useThreadChannel() || rc.messageID == "" {
-			_, err = p.session.ChannelMessageSend(rc.targetChannelID(), chunk)
+			msg, sendErr := p.session.ChannelMessageSend(rc.targetChannelID(), chunk)
+			if msg != nil {
+				lastMessageID = msg.ID
+			}
+			err = sendErr
 		} else {
 			ref := &discordgo.MessageReference{MessageID: rc.messageID}
-			_, err = p.session.ChannelMessageSendReply(rc.channelID, chunk, ref)
+			msg, sendErr := p.session.ChannelMessageSendReply(rc.channelID, chunk, ref)
+			if msg != nil {
+				lastMessageID = msg.ID
+			}
+			err = sendErr
 		}
 		if err != nil {
-			return fmt.Errorf("discord: send: %w", err)
+			return nil, fmt.Errorf("discord: send: %w", err)
 		}
 	}
-	return nil
+	return &core.SendReceipt{
+		MessageID:       lastMessageID,
+		ParentMessageID: rc.messageID,
+		ThreadID:        rc.threadID,
+		Extra: map[string]any{
+			"channel_id": rc.targetChannelID(),
+		},
+	}, nil
 }
 
 func (p *Platform) sendChannel(rc replyContext, content string) error {
+	_, err := p.sendChannelWithReceipt(rc, content)
+	return err
+}
+
+func (p *Platform) sendChannelWithReceipt(rc replyContext, content string) (*core.SendReceipt, error) {
 	chunks := core.SplitMessageCodeFenceAware(wrapTablesInCodeBlocks(content), maxDiscordLen)
+	var lastMessageID string
 	for _, chunk := range chunks {
-		_, err := p.session.ChannelMessageSend(rc.targetChannelID(), chunk)
+		msg, err := p.session.ChannelMessageSend(rc.targetChannelID(), chunk)
+		if msg != nil {
+			lastMessageID = msg.ID
+		}
 		if err != nil {
-			return fmt.Errorf("discord: send: %w", err)
+			return nil, fmt.Errorf("discord: send: %w", err)
 		}
 	}
-	return nil
+	return &core.SendReceipt{
+		MessageID: lastMessageID,
+		ThreadID:  rc.threadID,
+		Extra: map[string]any{
+			"channel_id": rc.targetChannelID(),
+		},
+	}, nil
 }
 
 // SendImage sends an image to the channel or interaction.
@@ -990,9 +1183,11 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	if len(parts) < 2 || parts[0] != "discord" {
 		return nil, fmt.Errorf("discord: invalid session key %q", sessionKey)
 	}
-	rc := replyContext{channelID: parts[1]}
+	rc := replyContext{channelID: parts[1], sessionKey: sessionKey}
 	if len(parts) == 2 {
 		rc.threadID = parts[1]
+	} else if len(parts) == 3 {
+		rc.userID = parts[2]
 	}
 	return rc, nil
 }
@@ -1012,6 +1207,19 @@ func (p *Platform) ResolveCronReplyTarget(sessionKey string, title string) (stri
 type discordPreviewHandle struct {
 	channelID string
 	messageID string
+}
+
+func (p *Platform) PreviewReceipt(previewHandle any) *core.SendReceipt {
+	h, ok := previewHandle.(*discordPreviewHandle)
+	if !ok || h == nil {
+		return nil
+	}
+	return &core.SendReceipt{
+		MessageID: h.messageID,
+		Extra: map[string]any{
+			"channel_id": h.channelID,
+		},
+	}
 }
 
 // SendPreviewStart sends a new message and returns a handle for subsequent edits.
