@@ -61,6 +61,29 @@ func TestBuildFeishuUploadedFileMessage_UsesNativeMsgTypes(t *testing.T) {
 	}
 }
 
+func TestBuildFeishuCreateFileReqBody_IncludesDuration(t *testing.T) {
+	body := buildFeishuCreateFileReqBody(larkim.FileTypeOpus, "voice.opus", []byte("opus"), 1234)
+	if body.Duration == nil || *body.Duration != 1234 {
+		t.Fatalf("Duration = %v, want 1234", body.Duration)
+	}
+	if body.FileType == nil || *body.FileType != larkim.FileTypeOpus {
+		t.Fatalf("FileType = %v, want opus", body.FileType)
+	}
+	if body.FileName == nil || *body.FileName != "voice.opus" {
+		t.Fatalf("FileName = %v, want voice.opus", body.FileName)
+	}
+	if body.File == nil {
+		t.Fatal("File reader is nil")
+	}
+}
+
+func TestBuildFeishuCreateFileReqBody_OmitsEmptyDuration(t *testing.T) {
+	body := buildFeishuCreateFileReqBody(larkim.FileTypeMp4, "clip.mp4", []byte("mp4"), 0)
+	if body.Duration != nil {
+		t.Fatalf("Duration = %v, want nil", *body.Duration)
+	}
+}
+
 func TestDetectFeishuAudioFormat(t *testing.T) {
 	if got := detectFeishuAudioFormat("application/octet-stream", "reply.mp3"); got != "mp3" {
 		t.Fatalf("extension format = %q, want mp3", got)
