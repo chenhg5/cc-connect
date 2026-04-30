@@ -401,6 +401,11 @@ func TestEncodeClaudeProjectKey(t *testing.T) {
 			expected: "-Users-username-Library-Mobile-Documents-com-apple-CloudDocs-my-project",
 		},
 		{
+			name:     "path with dots (e.g. username in home dir)",
+			input:    "/home/user.name/project",
+			expected: "-home-user-name-project",
+		},
+		{
 			name:     "mixed ASCII and non-ASCII",
 			input:    "/Users/username/中文folder/english文件夹",
 			expected: "-Users-username---folder-english---", // "/中文" = 3 hyphens, "/文件夹" = 4 hyphens
@@ -495,5 +500,27 @@ func TestFindProjectDir_ICloudPath(t *testing.T) {
 	found := findProjectDir(homeDir, iCloudWorkDir)
 	if found != mockProjectDir {
 		t.Errorf("findProjectDir(%q, %q) = %q, want %q", homeDir, iCloudWorkDir, found, mockProjectDir)
+	}
+}
+
+func TestFindProjectDir_DotInPath(t *testing.T) {
+	// Regression for issue #500: paths containing dots (e.g. /home/user.name/)
+	// must match the on-disk project key that Claude Code CLI generates, which
+	// collapses dots to "-" alongside other special characters.
+	homeDir := t.TempDir()
+	projectsBase := filepath.Join(homeDir, ".claude", "projects")
+
+	workDir := "/home/user.name/project"
+	// The on-disk key Claude Code CLI actually writes (dots → "-").
+	expectedKey := "-home-user-name-project"
+
+	mockProjectDir := filepath.Join(projectsBase, expectedKey)
+	if err := os.MkdirAll(mockProjectDir, 0755); err != nil {
+		t.Fatalf("failed to create mock project dir: %v", err)
+	}
+
+	found := findProjectDir(homeDir, workDir)
+	if found != mockProjectDir {
+		t.Errorf("findProjectDir(%q, %q) = %q, want %q", homeDir, workDir, found, mockProjectDir)
 	}
 }
