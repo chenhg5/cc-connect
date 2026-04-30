@@ -29,6 +29,20 @@
 
 你需要一个 access token 让 cc-connect 以你的 Matrix 用户身份进行认证。
 
+### 通过 curl（推荐）
+
+使用 curl 登录并创建专用设备，这样可以获得独立的 device ID，确保 E2EE（端到端加密）正常工作：
+
+```bash
+curl -XPOST "https://matrix.org/_matrix/client/v3/login" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"m.login.password","user":"your-username","password":"your-password","device_id":"CC-CONNECT"}'
+```
+
+响应中包含 `"access_token": "syt_..."`，将它记录下来用于配置。
+
+> **推荐**：将 `device_id` 设为 `CC-CONNECT` 或其他易于识别的名称。专用设备能确保加密密钥正确分发。
+
 ### 通过 Element（网页/桌面端）
 
 1. 登录 **Element**（[app.element.io](https://app.element.io)）
@@ -36,16 +50,9 @@
 3. 进入 **帮助与关于** → 滚动到 **高级**
 4. 点击 **Access Token** → 复制令牌
 
+> **注意**：从 Element 获取的 token 会复用 Element 的设备 ID，可能导致 E2EE 加密消息无法解密。建议使用上面的 curl 方式创建专用设备。
+
 > **警告**：请像对待密码一样保护你的 access token。任何拥有它的人都可以以你的身份发送消息。如果令牌泄露，可以在 Element 中登出所有会话来使其失效。
-
-### 通过 curl（备选方式）
-
-```bash
-curl -XPOST "https://matrix.org/_matrix/client/v3/login" \
-  -d '{"type":"m.login.password","user":"your-username","password":"your-password"}'
-```
-
-响应中包含 `"access_token": "syt_..."`。
 
 ---
 
@@ -103,10 +110,13 @@ cc-connect -config /path/to/config.toml
 你应该能看到类似日志：
 
 ```
+level=INFO msg="matrix: E2EE enabled" device_id=CC-CONNECT
 level=INFO msg="matrix: connected" user=@bot:matrix.org
 level=INFO msg="platform started" project=my-project platform=matrix
 level=INFO msg="cc-connect is running" projects=1
 ```
+
+如果看到 `E2EE not available`，说明加密初始化失败，加密房间的消息将无法正常收发。请参考下方常见问题。
 
 ---
 
@@ -173,6 +183,7 @@ level=INFO msg="cc-connect is running" projects=1
 1. cc-connect 是否在运行，且日志中显示 `matrix: connected`？
 2. access token 是否有效？尝试重新生成。
 3. 在群聊中，机器人是否被 @ 提及？或是否设置了 `group_reply_all = true`？
+4. 如果日志显示 `E2EE not available` 或 `decrypt failed`，请参考下方 E2EE 相关问题。
 
 ### 如何限制谁可以使用机器人？
 
@@ -185,6 +196,44 @@ allow_from = "@alice:matrix.org,@bob:matrix.org"
 ### 机器人不加入房间？
 
 确保 `auto_join = true`（这是默认值）。如果机器人在 cc-connect 启动之前就被邀请了，请重新邀请一次。
+
+### E2EE（端到端加密）
+
+cc-connect 自动支持加密房间（E2EE），无需额外配置。启动时如果看到 `matrix: E2EE enabled`，说明加密功能正常。
+
+#### 日志显示 "E2EE not available"？
+
+可能原因和解决方案：
+
+1. **`device ID not available from whoami`** — 服务器未返回 device ID。请使用 curl 创建带 `device_id` 的专用设备。
+2. **`not marked as shared, but there are keys on the server`** — 旧的加密数据与当前设备冲突。cc-connect 会自动尝试修复。如果持续失败，删除旧的加密数据库：`rm ~/.cc-connect/matrix-crypto-*.db*`
+3. **`mismatching device ID in client and crypto store`** — token 对应的 device ID 与加密数据库不匹配。删除对应数据库：`rm ~/.cc-connect/matrix-crypto-*.db*`
+
+#### 日志显示 "decrypt failed: no session found"？
+
+说明对方客户端没有把加密密钥发给 bot 的设备。这通常发生在以下情况：
+
+1. **复用了 Element 的 access token** — Element 的设备 ID 和 bot 的加密密钥冲突。请使用 curl 创建专用设备（见第 2 步）。
+2. **刚更换了 access token** — 对方客户端可能还没发现 bot 的新设备。等待 1-2 分钟后重新发送消息。
+3. **加密数据库损坏** — 删除数据库后重启：`rm ~/.cc-connect/matrix-crypto-*.db*`
+
+#### 如何获取专用的 access token（推荐方式）？
+
+使用 Matrix API 创建一个专用设备，避免与 Element 等 App 冲突：
+
+```bash
+# 替换 homeserver URL、用户名和密码
+curl -XPOST "https://your-homeserver.com/_matrix/client/v3/login" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "m.login.password",
+    "user": "your-bot-username",
+    "password": "your-password",
+    "device_id": "CC-CONNECT"
+  }'
+```
+
+响应中的 `access_token` 即可用于配置。`device_id` 为 `CC-CONNECT`，便于识别和管理。
 
 ### 如何使用自建 Matrix 服务器？
 
