@@ -188,9 +188,9 @@ func (ExecSudoRunner) Run(ctx context.Context, args ...string) ([]byte, error) {
 // VerifyRunAsUserCheap runs the two cheap preflight checks that must pass
 // before every spawn, not just at startup:
 //
-//  1. `sudo -n -iu <user> -- /bin/true` must succeed — the supervisor still
+//  1. `sudo -n -iu <user> -- /usr/bin/true` must succeed — the supervisor still
 //     has passwordless sudo to the target user.
-//  2. `sudo -n -iu <user> -- sudo -n /bin/true` must FAIL — the target user
+//  2. `sudo -n -iu <user> -- sudo -n /usr/bin/true` must FAIL — the target user
 //     cannot non-interactively escalate.
 //
 // Returns nil if both checks behave as expected. Results are cached for
@@ -208,11 +208,11 @@ func VerifyRunAsUserCheap(ctx context.Context, runner SudoRunner, runAsUser stri
 	if verifyCacheHit(runAsUser) {
 		return nil
 	}
-	if out, err := runner.Run(ctx, "-n", "-iu", runAsUser, "--", "/bin/true"); err != nil {
+	if out, err := runner.Run(ctx, "-n", "-iu", runAsUser, "--", "/usr/bin/true"); err != nil {
 		verifyCacheEvict(runAsUser)
 		return fmt.Errorf("passwordless sudo to user %q failed (check that your sudoers rule is present and scoped to this user): %w: %s", runAsUser, err, strings.TrimSpace(string(out)))
 	}
-	out, err := runner.Run(ctx, "-n", "-iu", runAsUser, "--", "sudo", "-n", "/bin/true")
+	out, err := runner.Run(ctx, "-n", "-iu", runAsUser, "--", "sudo", "-n", "/usr/bin/true")
 	if err == nil {
 		verifyCacheEvict(runAsUser)
 		return fmt.Errorf("target user %q can run passwordless sudo; isolation is meaningless. Remove NOPASSWD sudo for this user. Output: %s", runAsUser, strings.TrimSpace(string(out)))

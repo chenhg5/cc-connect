@@ -9,6 +9,7 @@
 *.dylib
 *.test
 *.out
+*.old
 
 # ============================================================================
 # Go workspace & tooling
@@ -36,7 +37,8 @@ vendor/
 # ============================================================================
 # Runtime configuration (contains secrets)
 config.toml
-config.test.toml
+config.*.toml
+!config.example.toml
 .env
 *.local.toml
 

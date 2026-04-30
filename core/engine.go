@@ -25,7 +25,7 @@ import (
 
 const maxPlatformMessageLen = 4000
 const telegramBotCommandLimit = 100
-const maxQueuedMessages = 5 // cap queued messages to bound memory usage
+const defaultMaxQueuedMessages = 5 // default cap for queued messages per session
 
 const (
 	defaultThinkingMaxLen = 300
@@ -203,6 +203,7 @@ type Engine struct {
 	references       ReferenceRenderCfg
 	relayManager     *RelayManager
 	eventIdleTimeout time.Duration
+	maxQueuedMessages int
 	dirHistory       *DirHistory
 	baseWorkDir      string
 	projectState     *ProjectStateStore
@@ -391,6 +392,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		streamPreview:         DefaultStreamPreviewCfg(),
 		references:            DefaultReferenceRenderCfg(),
 		eventIdleTimeout:      defaultEventIdleTimeout,
+		maxQueuedMessages:    defaultMaxQueuedMessages,
 		showContextIndicator:  true,
 	}
 
@@ -875,6 +877,14 @@ func (e *Engine) SetStreamPreviewCfg(cfg StreamPreviewCfg) {
 // 0 disables the timeout entirely.
 func (e *Engine) SetEventIdleTimeout(d time.Duration) {
 	e.eventIdleTimeout = d
+}
+
+// SetMaxQueuedMessages sets the per-session message queue depth.
+// Values <= 0 are ignored.
+func (e *Engine) SetMaxQueuedMessages(n int) {
+	if n > 0 {
+		e.maxQueuedMessages = n
+	}
 }
 
 func (e *Engine) SetRelayManager(rm *RelayManager) {
@@ -1536,8 +1546,8 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		return
 	}
 
-	// Banned words check (skip for slash commands)
-	if !strings.HasPrefix(content, "/") {
+	// Banned words check (skip for slash commands and ! shell shortcut)
+	if !strings.HasPrefix(content, "/") && !strings.HasPrefix(content, "!") {
 		if word := e.matchBannedWord(content); word != "" {
 			slog.Info("message blocked by banned word", "word", word, "user", msg.UserName)
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgBannedWordBlocked))
@@ -1604,6 +1614,37 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		return
 	}
 
+	// "!" prefix: treat as shell command (same as /shell)
+	// Placed after permission handling so "!yes" doesn't hijack permission responses.
+	if len(msg.Images) == 0 && strings.HasPrefix(content, "!") {
+		shellCmd := strings.TrimSpace(content[1:])
+		if shellCmd != "" {
+			// Check disabled / admin just like handleCommand does for "shell"
+			e.userRolesMu.RLock()
+			disabledCmds := e.disabledCmds
+			urm := e.userRoles
+			e.userRolesMu.RUnlock()
+			if urm != nil {
+				if role := urm.ResolveRole(msg.UserID); role != nil {
+					disabledCmds = role.DisabledCmds
+				}
+			}
+			if disabledCmds["shell"] {
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandDisabled), "!"))
+				return
+			}
+			if !e.isAdmin(msg.UserID) {
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgAdminRequired), "!"))
+				return
+			}
+			slog.Info("audit: command_executed",
+				"user_id", msg.UserID, "platform", msg.Platform,
+				"project", e.name, "command", "shell")
+			e.cmdShell(p, msg, "/shell "+shellCmd)
+			return
+		}
+	}
+
 	// Pending provider add (card-driven multi-step flow)
 	if e.handlePendingProviderAdd(p, msg, content) {
 		return
@@ -1622,25 +1663,6 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	session := sessions.GetOrCreateActive(msg.SessionKey)
 	sessions.UpdateUserMeta(msg.SessionKey, msg.UserName, msg.ChatName)
 	if !session.TryLock() {
-		// Check for /btw — inject into the running session mid-turn
-		trimmed := strings.TrimSpace(content)
-		if isBtwCommand(trimmed) {
-			btw := strings.TrimSpace(trimmed[len(matchBtwPrefix(trimmed)):])
-			if btw != "" {
-				e.interactiveMu.Lock()
-				state, ok := e.interactiveStates[interactiveKey]
-				e.interactiveMu.Unlock()
-				if ok && state.agentSession != nil && state.agentSession.Alive() {
-					if err := state.agentSession.Send(btw, nil, nil); err != nil {
-						slog.Error("btw: send failed", "error", err)
-						e.reply(p, msg.ReplyCtx, e.i18n.T(MsgBtwSendFailed))
-					} else {
-						e.reply(p, msg.ReplyCtx, e.i18n.T(MsgBtwSent))
-					}
-					return
-				}
-			}
-		}
 		// Session is busy — try to queue the message for the running turn
 		// so the agent processes it immediately after the current turn ends.
 		if e.queueMessageForBusySession(p, msg, interactiveKey) {
@@ -1749,9 +1771,11 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 	// EventResult that never arrives. Instead, the event loop sends the
 	// message after the current turn's EventResult is received.
 	state.mu.Lock()
-	if len(state.pendingMessages) >= maxQueuedMessages {
+	if len(state.pendingMessages) >= e.maxQueuedMessages {
+		depth := len(state.pendingMessages)
 		state.mu.Unlock()
-		return false // fall back to "previous processing" reply
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgQueueFull), depth))
+		return true // handled: queue-full reply sent
 	}
 	state.pendingMessages = append(state.pendingMessages, queuedMessage{
 		platform:      p,
@@ -2197,6 +2221,9 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 // getOrCreateWorkspaceAgent returns (or creates) a per-workspace agent and session manager.
 // workspace must be a normalized path (from resolveWorkspace or normalizeWorkspacePath).
 func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionManager, error) {
+	if e.workspacePool == nil {
+		return nil, nil, fmt.Errorf("workspace pool not initialized (multi-workspace mode not enabled)")
+	}
 	ws := e.workspacePool.GetOrCreate(workspace)
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
@@ -2576,9 +2603,19 @@ func (e *Engine) closeAgentSessionWithTimeout(sessionKey string, agentSession Ag
 
 const defaultEventIdleTimeout = 2 * time.Hour
 
+type agentErrorHandler struct {
+	contains string
+	msgKey   MsgKey
+}
+
+var agentErrorHandlers = []agentErrorHandler{
+	{"Session not found", MsgSessionNotFound},
+}
+
 func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func(), sendDone <-chan error, replyCtx any) {
 	var textParts []string
 	var segmentStart int // index into textParts: text before this has been sent/displayed
+	silentHold := false  // true while accumulated segment text could still resolve to a bare NO_REPLY marker
 	toolCount := 0
 	waitStart := time.Now()
 	firstEventLogged := false
@@ -2721,6 +2758,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 				segmentStart = len(textParts)
+				silentHold = false
 			}
 			if e.display.ThinkingMessages && event.Content != "" {
 				// Flush accumulated text segment before thinking display
@@ -2735,6 +2773,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						}
 					}
 					segmentStart = len(textParts)
+					silentHold = false
 				}
 				sp.freeze()
 				if previewActive {
@@ -2764,6 +2803,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 				segmentStart = len(textParts)
+				silentHold = false
 			}
 			if e.display.ToolMessages {
 				// Flush accumulated text segment before tool display
@@ -2778,6 +2818,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						}
 					}
 					segmentStart = len(textParts)
+					silentHold = false
 				}
 				sp.freeze()
 				if previewActive {
@@ -2839,7 +2880,20 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case EventText:
 			if event.Content != "" {
 				textParts = append(textParts, event.Content)
-				if sp.canPreview() {
+				segmentText := strings.Join(textParts[segmentStart:], "")
+				if silentHold {
+					if !couldBeSilentPrefix(segmentText) {
+						silentHold = false
+						if sp.canPreview() {
+							sp.appendText(segmentText) // flush all held chunks at once
+						}
+					}
+				} else if couldBeSilentPrefix(segmentText) {
+					// Hold streaming until we know whether this segment is NO_REPLY.
+					// Safe because once segmentText is no longer a prefix of "NO_REPLY",
+					// it can never become one again — we only ever transition held→released once.
+					silentHold = true
+				} else if sp.canPreview() {
 					sp.appendText(event.Content)
 				}
 			}
@@ -2881,6 +2935,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 				segmentStart = len(textParts)
+				silentHold = false
 			}
 			sp.freeze()
 			if previewActive {
@@ -2986,25 +3041,48 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			}
 
+			// Detect NO_REPLY marker on the base response (before indicators/footer are appended).
+			// Three cases:
+			//   1. bare marker (isSilentReply)               → fully silent
+			//   2. trailing marker with non-empty reasoning  → strip marker, deliver reasoning
+			//   3. trailing marker with empty strip result   → fully silent
+			// History records the ORIGINAL baseResponse so the agent retains context of its own
+			// decision; only the outbound platform text gets rewritten/suppressed.
 			session.AddHistory("assistant", baseResponse)
 			sessions.Save()
 
-			e.hooks.Emit(HookEvent{
-				Event:      HookEventMessageSent,
-				SessionKey: sessionKey,
-				Platform:   p.Name(),
-				Content:    baseResponse,
-			})
+			isSilent := isSilentReply(baseResponse)
+			if !isSilent {
+				if stripped, ok := stripTrailingSilent(baseResponse); ok {
+					if strings.TrimSpace(stripped) == "" {
+						isSilent = true
+					} else {
+						baseResponse = stripped
+						cleanResponse = stripped
+					}
+				}
+			}
 
-			if e.showContextIndicator {
+			if !isSilent {
+				e.hooks.Emit(HookEvent{
+					Event:      HookEventMessageSent,
+					SessionKey: sessionKey,
+					Platform:   p.Name(),
+					Content:    baseResponse,
+				})
+			}
+
+			if e.showContextIndicator && !isSilent {
 				if sdkPlausible {
 					cleanResponse += contextIndicator(event.InputTokens)
 				} else if selfPct > 0 {
 					cleanResponse += fmt.Sprintf("\n[ctx: ~%d%%]", selfPct)
 				}
 			}
-			if footer := e.buildReplyFooter(replyAgent, state.agentSession, workspaceDir, replyFooterContextText(replyFooterSessionContextUsage(state.agentSession), e.i18n)); footer != "" {
-				cleanResponse = appendReplyFooter(cleanResponse, footer)
+			if !isSilent {
+				if footer := e.buildReplyFooter(replyAgent, state.agentSession, workspaceDir, replyFooterContextText(replyFooterSessionContextUsage(state.agentSession), e.i18n)); footer != "" {
+					cleanResponse = appendReplyFooter(cleanResponse, footer)
+				}
 			}
 			fullResponse = cleanResponse
 
@@ -3018,6 +3096,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				"turn_duration", turnDuration,
 				"input_tokens", event.InputTokens,
 				"output_tokens", event.OutputTokens,
+				"silent", isSilent,
 			)
 
 			replyStart := time.Now()
@@ -3027,10 +3106,16 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.sideText = ""
 			state.mu.Unlock()
 
-			// When tool calls happened and prior text was already surfaced in segments,
-			// only send the unsent remainder. When tool progress is hidden, tool events don't surface
-			// side-channel messages and segmentStart stays 0, so keep normal finalize flow.
-			if toolCount > 0 && segmentStart > 0 {
+			// Silent reply: drop any in-flight preview and skip all send paths.
+			// sp.discard() clears previewMsgID so sp.needsDoneReaction() also returns false,
+			// preventing a stray done_emoji push.
+			if isSilent {
+				sp.discard()
+				slog.Info("silent reply suppressed", "session", session.ID)
+			} else if toolCount > 0 && segmentStart > 0 {
+				// When tool calls happened and prior text was already surfaced in segments,
+				// only send the unsent remainder. When tool progress is hidden, tool events don't surface
+				// side-channel messages and segmentStart stays 0, so keep normal finalize flow.
 				sp.discard()
 				if segmentStart < len(textParts) {
 					unsent := strings.Join(textParts[segmentStart:], "")
@@ -3067,8 +3152,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				slog.Warn("slow final reply send", "platform", p.Name(), "elapsed", elapsed, "response_len", len(fullResponse))
 			}
 
-			// TTS: async voice reply if enabled
-			if e.tts != nil && e.tts.Enabled && e.tts.TTS != nil {
+			// TTS: async voice reply if enabled (skipped for silent replies)
+			if !isSilent && e.tts != nil && e.tts.Enabled && e.tts.TTS != nil {
 				state.mu.Lock()
 				fromVoice := state.fromVoice
 				state.mu.Unlock()
@@ -3198,8 +3283,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// Add a "done" reaction so the user knows the agent finished.
 			// The reaction is added after stopTyping (deferred) so the
 			// "doing" emoji is removed first.
-			if doneTI, ok := p.(TypingIndicatorDone); ok {
-				doneReaction = func() { doneTI.AddDoneReaction(replyCtx) }
+			// Skip for silent (NO_REPLY) turns — the user should not know
+			// the agent processed anything.
+			if !isSilent {
+				if doneTI, ok := p.(TypingIndicatorDone); ok {
+					doneReaction = func() { doneTI.AddDoneReaction(replyCtx) }
+				}
 			}
 
 			return
@@ -3208,6 +3297,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			cp.Finalize(ProgressCardStateFailed)
 			sp.discard()
 			if event.Error != nil {
+				errMsg := event.Error.Error()
 				slog.Error("agent error", "error", event.Error)
 				e.hooks.Emit(HookEvent{
 					Event:      HookEventError,
@@ -3215,7 +3305,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					Platform:   p.Name(),
 					Error:      event.Error.Error(),
 				})
-				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
+				userMsg := fmt.Sprintf(e.i18n.T(MsgError), errMsg)
+				for _, h := range agentErrorHandlers {
+					if strings.Contains(errMsg, h.contains) {
+						userMsg = e.i18n.T(h.msgKey)
+						break
+					}
+				}
+				e.send(p, replyCtx, userMsg)
 			}
 			// Only drop queued messages if the agent session is dead.
 			// Some agents (e.g. Codex) emit EventError for per-turn failures
@@ -3240,6 +3337,20 @@ channelClosed:
 
 		fullResponse := strings.Join(textParts, "")
 		session.AddHistory("assistant", fullResponse)
+
+		// Respect NO_REPLY even on abnormal exit so silent turns stay silent.
+		if isSilentReply(fullResponse) {
+			sp.discard()
+			slog.Info("silent reply suppressed (channel closed)", "session", session.ID)
+			return
+		}
+		if stripped, ok := stripTrailingSilent(fullResponse); ok {
+			if strings.TrimSpace(stripped) == "" {
+				sp.discard()
+				return
+			}
+			fullResponse = stripped
+		}
 
 		e.hooks.Emit(HookEvent{
 			Event:      HookEventMessageSent,
@@ -3383,26 +3494,29 @@ var builtinCommands = []struct {
 	{[]string{"whoami", "myid"}, "whoami"},
 	{[]string{"web"}, "web"},
 	{[]string{"diff"}, "diff"},
+	{[]string{"ps", "btw"}, "ps"},
 }
 
-// isBtwCommand checks if a trimmed message starts with a /btw command.
-func isBtwCommand(trimmed string) bool {
-	return matchBtwPrefix(trimmed) != ""
-}
-
-// matchBtwPrefix returns the prefix portion (e.g. "/btw ") if the
-// message starts with a btw command, or "" if it doesn't match.
-func matchBtwPrefix(trimmed string) string {
-	lower := strings.ToLower(trimmed)
-	for _, prefix := range []string{"/btw"} {
-		if strings.HasPrefix(lower, prefix) {
-			rest := trimmed[len(prefix):]
-			if rest == "" || rest[0] == ' ' {
-				return trimmed[:len(prefix)]
-			}
-		}
+func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
+	text := strings.TrimSpace(strings.Join(args, " "))
+	if text == "" {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsEmpty))
+		return
 	}
-	return ""
+	iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
+	e.interactiveMu.Lock()
+	state, ok := e.interactiveStates[iKey]
+	e.interactiveMu.Unlock()
+	if !ok || state == nil || state.agentSession == nil || !state.agentSession.Alive() {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsNoSession))
+		return
+	}
+	if err := state.agentSession.Send(text, nil, nil); err != nil {
+		slog.Error("ps: send failed", "error", err)
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsSendFailed))
+		return
+	}
+	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsSent))
 }
 
 // matchPrefix finds a unique command matching the given prefix.
@@ -3583,6 +3697,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdWhoami(p, msg)
 	case "web":
 		e.cmdWeb(p, msg, args)
+	case "ps":
+		e.cmdPs(p, msg, args)
 	default:
 		if custom, ok := e.commands.Resolve(cmd); ok {
 			if disabledCmds[strings.ToLower(custom.Name)] {
@@ -4137,21 +4253,26 @@ func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDi
 	}
 
 	var parts []string
+	hasStatus := false
 	if model := replyFooterModel(session, agent); model != "" {
 		parts = append(parts, model)
+		hasStatus = true
 	}
 	if effort := replyFooterReasoningEffort(session, agent); effort != "" {
 		parts = append(parts, effort)
+		hasStatus = true
 	}
 	if left := strings.TrimSpace(contextLeft); left != "" {
 		parts = append(parts, left)
+		hasStatus = true
 	} else if usage := e.replyFooterUsageText(session, agent); usage != "" {
 		parts = append(parts, usage)
+		hasStatus = true
 	}
 	if dir := replyFooterWorkDir(session, agent, workspaceDir); dir != "" {
 		parts = append(parts, dir)
 	}
-	if len(parts) == 0 {
+	if !hasStatus {
 		return ""
 	}
 	return strings.Join(parts, " · ")
@@ -4416,8 +4537,22 @@ func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
 	shellCmd = strings.TrimSpace(shellCmd)
 
 	if shellCmd == "" {
-		e.reply(p, msg.ReplyCtx, "Usage: /shell <command>\nExample: /shell ls -la")
+		e.reply(p, msg.ReplyCtx, "Usage: /shell [--timeout <seconds>] <command>\nExample: /shell ls -la\nExample: /shell --timeout 300 npm install")
 		return
+	}
+
+	// Parse optional --timeout at the beginning of the command.
+	// Placed before the actual command so no CLI tool's own --timeout can conflict.
+	// Supported: /shell --timeout 300 npm install, ! --timeout 300 npm install
+	timeout := 60 * time.Second
+	if strings.HasPrefix(shellCmd, "--timeout ") {
+		rest := shellCmd[len("--timeout "):]
+		if idx := strings.IndexByte(rest, ' '); idx > 0 {
+			if secs, err := strconv.Atoi(rest[:idx]); err == nil && secs > 0 {
+				timeout = time.Duration(secs) * time.Second
+				shellCmd = strings.TrimSpace(rest[idx:])
+			}
+		}
 	}
 
 	agent, _, _, err := e.commandContext(p, msg)
@@ -4431,7 +4566,7 @@ func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
 	}
 
 	go func() {
-		ctx, cancel := context.WithTimeout(e.ctx, 60*time.Second)
+		ctx, cancel := context.WithTimeout(e.ctx, timeout)
 		defer cancel()
 
 		cmd := exec.CommandContext(ctx, "sh", "-c", shellCmd)
@@ -5672,6 +5807,7 @@ func helpCardGroups() []helpCardGroup {
 				{command: "/skills", action: "nav:/skills"},
 				{command: "/compress", action: "cmd:/compress"},
 				{command: "/stop", action: "act:/stop"},
+				{command: "/ps", action: "cmd:/ps"},
 			},
 		},
 		{
@@ -10166,7 +10302,7 @@ func (e *Engine) cmdSkills(p Platform, msg *Message) {
 		sb.WriteString(e.i18n.Tf(MsgSkillsTitle, e.agent.Name(), len(skills)))
 
 		for _, s := range skills {
-			sb.WriteString(fmt.Sprintf("  /%s — %s\n", s.Name, s.Description))
+			sb.WriteString(fmt.Sprintf("  /%s — %s\n", displayCommandForPlatform(p.Name(), s.Name), s.Description))
 		}
 
 		sb.WriteString("\n" + e.i18n.T(MsgSkillsHint))
@@ -10178,6 +10314,41 @@ func (e *Engine) cmdSkills(p Platform, msg *Message) {
 	}
 
 	e.replyWithCard(p, msg.ReplyCtx, e.renderSkillsCard())
+}
+
+func displayCommandForPlatform(platformName, command string) string {
+	if !strings.EqualFold(platformName, "telegram") {
+		return command
+	}
+	if sanitized := sanitizeTelegramDisplayCommand(command); sanitized != "" {
+		return sanitized
+	}
+	return command
+}
+
+func sanitizeTelegramDisplayCommand(cmd string) string {
+	cmd = strings.ToLower(cmd)
+	var b strings.Builder
+	for _, c := range cmd {
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+			b.WriteRune(c)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	result := b.String()
+	for strings.Contains(result, "__") {
+		result = strings.ReplaceAll(result, "__", "_")
+	}
+	result = strings.Trim(result, "_")
+	if len(result) == 0 || result[0] < 'a' || result[0] > 'z' {
+		return ""
+	}
+	if len(result) > 32 {
+		result = result[:32]
+	}
+	return result
 }
 
 // ── /config command ──────────────────────────────────────────
@@ -11788,6 +11959,43 @@ func contextIndicator(inputTokens int) string {
 
 // ctxSelfReportRe matches agent self-reported context lines like "[ctx: ~42%]".
 var ctxSelfReportRe = regexp.MustCompile(`(?m)\n?\[ctx: ~\d+%\]`)
+
+// silentReplyRe matches a bare NO_REPLY marker (case-insensitive, optional surrounding whitespace).
+// When the agent emits exactly this as its full response, the platform send is suppressed
+// so the agent stays silent in group chats where a reply would be noise.
+var silentReplyRe = regexp.MustCompile(`(?i)^\s*NO_REPLY\s*$`)
+
+// silentReplyTrailingRe matches a trailing NO_REPLY marker preceded by whitespace or
+// markdown emphasis (`*`). Lets agents that narrate their reasoning before the marker
+// still suppress the marker from the delivered text (mirroring OpenClaw's stripSilentToken).
+var silentReplyTrailingRe = regexp.MustCompile(`(?i)(?:^|\s+|\*+)NO_REPLY\s*$`)
+
+// isSilentReply reports whether text is exactly a NO_REPLY marker.
+func isSilentReply(text string) bool {
+	return silentReplyRe.MatchString(text)
+}
+
+// stripTrailingSilent removes a trailing NO_REPLY marker and returns the stripped text
+// along with whether a strip occurred. Caller must first check isSilentReply for the
+// bare-marker case; this helper assumes mixed content.
+func stripTrailingSilent(text string) (string, bool) {
+	stripped := silentReplyTrailingRe.ReplaceAllString(text, "")
+	if stripped == text {
+		return text, false
+	}
+	return strings.TrimRight(stripped, " \t\r\n"), true
+}
+
+// couldBeSilentPrefix reports whether the trimmed text is still a case-insensitive
+// prefix of "NO_REPLY". Used during streaming to hold the preview until we know
+// whether the response will resolve to a pure NO_REPLY marker.
+func couldBeSilentPrefix(text string) bool {
+	t := strings.TrimSpace(text)
+	if t == "" {
+		return true
+	}
+	return strings.HasPrefix("NO_REPLY", strings.ToUpper(t))
+}
 
 // parseSelfReportedCtx extracts the percentage from a self-reported "[ctx: ~XX%]" line.
 func parseSelfReportedCtx(s string) int {
