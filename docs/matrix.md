@@ -29,6 +29,20 @@ You can also use any existing Matrix account — a dedicated bot account is reco
 
 You need an access token so cc-connect can authenticate as your Matrix user.
 
+### Via curl (Recommended)
+
+Use curl to create a dedicated device with its own device ID. This ensures E2EE (end-to-end encryption) works correctly:
+
+```bash
+curl -XPOST "https://matrix.org/_matrix/client/v3/login" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"m.login.password","user":"your-username","password":"your-password","device_id":"CC-CONNECT"}'
+```
+
+The response contains `"access_token": "syt_..."`. Copy it for the config.
+
+> **Recommended**: Set `device_id` to `CC-CONNECT` or another recognizable name. A dedicated device ensures encryption keys are distributed correctly.
+
 ### Via Element (Web/Desktop)
 
 1. Log in to **Element** ([app.element.io](https://app.element.io))
@@ -36,16 +50,9 @@ You need an access token so cc-connect can authenticate as your Matrix user.
 3. Go to **Help & About** → scroll to **Advanced**
 4. Click **Access Token** → copy the token
 
+> **Note**: Tokens from Element reuse Element's device ID, which may cause E2EE issues. Creating a dedicated device via curl is recommended.
+
 > **Warning**: Treat your access token like a password. Anyone with it can send messages as you. If it leaks, you can invalidate it by logging out of all sessions in Element.
-
-### Via curl (alternative)
-
-```bash
-curl -XPOST "https://matrix.org/_matrix/client/v3/login" \
-  -d '{"type":"m.login.password","user":"your-username","password":"your-password"}'
-```
-
-The response contains `"access_token": "syt_..."`.
 
 ---
 
@@ -103,10 +110,13 @@ cc-connect -config /path/to/config.toml
 You should see logs like:
 
 ```
+level=INFO msg="matrix: E2EE enabled" device_id=CC-CONNECT
 level=INFO msg="matrix: connected" user=@bot:matrix.org
 level=INFO msg="platform started" project=my-project platform=matrix
 level=INFO msg="cc-connect is running" projects=1
 ```
+
+If you see `E2EE not available`, encryption initialization failed. Encrypted rooms won't work. See the FAQ below.
 
 ---
 
@@ -173,6 +183,7 @@ level=INFO msg="cc-connect is running" projects=1
 1. Is cc-connect running and showing `matrix: connected` in logs?
 2. Is the access token valid? Try regenerating it.
 3. In group rooms, is the bot mentioned or is `group_reply_all = true` set?
+4. If logs show `E2EE not available` or `decrypt failed`, see E2EE questions below.
 
 ### Q: How to restrict who can use the bot?
 
@@ -185,6 +196,44 @@ allow_from = "@alice:matrix.org,@bob:matrix.org"
 ### Q: Bot doesn't join rooms?
 
 Make sure `auto_join = true` (this is the default). If the bot was already invited before cc-connect started, re-invite it.
+
+### Q: E2EE (End-to-End Encryption)
+
+cc-connect automatically supports encrypted rooms (E2EE) with no extra configuration. If you see `matrix: E2EE enabled` at startup, encryption is working.
+
+#### Logs show "E2EE not available"?
+
+Possible causes and fixes:
+
+1. **`device ID not available from whoami`** — The server didn't return a device ID. Create a dedicated device via curl with `device_id`.
+2. **`not marked as shared, but there are keys on the server`** — Old crypto data conflicts with the current device. cc-connect tries to auto-recover. If it persists, delete old crypto databases: `rm ~/.cc-connect/matrix-crypto-*.db*`
+3. **`mismatching device ID in client and crypto store`** — The token's device ID doesn't match the crypto database. Delete the database: `rm ~/.cc-connect/matrix-crypto-*.db*`
+
+#### Logs show "decrypt failed: no session found"?
+
+The sender's client didn't send the encryption key to the bot's device. This usually happens when:
+
+1. **Reusing Element's access token** — Element's device ID conflicts with the bot's encryption keys. Create a dedicated device via curl (see Step 2).
+2. **Just changed the access token** — The sender's client may not have discovered the bot's new device yet. Wait 1-2 minutes and send a new message.
+3. **Corrupted crypto database** — Delete and restart: `rm ~/.cc-connect/matrix-crypto-*.db*`
+
+#### How to get a dedicated access token (recommended)?
+
+Use the Matrix API to create a dedicated device, avoiding conflicts with Element or other apps:
+
+```bash
+# Replace homeserver URL, username, and password
+curl -XPOST "https://your-homeserver.com/_matrix/client/v3/login" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "m.login.password",
+    "user": "your-bot-username",
+    "password": "your-password",
+    "device_id": "CC-CONNECT"
+  }'
+```
+
+The `access_token` in the response can be used in config. The `device_id` will be `CC-CONNECT`, easy to identify and manage.
 
 ### Q: How to use a self-hosted Matrix server?
 
