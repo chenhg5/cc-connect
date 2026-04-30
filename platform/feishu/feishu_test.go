@@ -1,11 +1,91 @@
 package feishu
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
+
+func TestDetectFeishuFileType_NativeMedia(t *testing.T) {
+	tests := []struct {
+		name     string
+		mimeType string
+		fileName string
+		want     string
+	}{
+		{name: "mp4 mime", mimeType: "video/mp4", fileName: "clip.bin", want: larkim.FileTypeMp4},
+		{name: "mp4 extension", mimeType: "application/octet-stream", fileName: "clip.mp4", want: larkim.FileTypeMp4},
+		{name: "opus mime", mimeType: "audio/opus", fileName: "voice.bin", want: larkim.FileTypeOpus},
+		{name: "mp3 extension", mimeType: "application/octet-stream", fileName: "voice.mp3", want: larkim.FileTypeOpus},
+		{name: "wav mime", mimeType: "audio/wav", fileName: "voice", want: larkim.FileTypeOpus},
+		{name: "regular file", mimeType: "application/zip", fileName: "archive.zip", want: larkim.FileTypeStream},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := detectFeishuFileType(tt.mimeType, tt.fileName); got != tt.want {
+				t.Fatalf("detectFeishuFileType(%q, %q) = %q, want %q", tt.mimeType, tt.fileName, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildFeishuUploadedFileMessage_UsesNativeMsgTypes(t *testing.T) {
+	tests := []struct {
+		name        string
+		fileType    string
+		wantMsgType string
+	}{
+		{name: "audio", fileType: larkim.FileTypeOpus, wantMsgType: larkim.MsgTypeAudio},
+		{name: "video", fileType: larkim.FileTypeMp4, wantMsgType: larkim.MsgTypeMedia},
+		{name: "file", fileType: larkim.FileTypeStream, wantMsgType: larkim.MsgTypeFile},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msgType, content, err := buildFeishuUploadedFileMessage(tt.fileType, "file_key_123")
+			if err != nil {
+				t.Fatalf("buildFeishuUploadedFileMessage: %v", err)
+			}
+			if msgType != tt.wantMsgType {
+				t.Fatalf("msgType = %q, want %q", msgType, tt.wantMsgType)
+			}
+			var body map[string]string
+			if err := json.Unmarshal([]byte(content), &body); err != nil {
+				t.Fatalf("content is not json: %v", err)
+			}
+			if body["file_key"] != "file_key_123" {
+				t.Fatalf("file_key = %q, want file_key_123", body["file_key"])
+			}
+		})
+	}
+}
+
+func TestDetectFeishuAudioFormat(t *testing.T) {
+	if got := detectFeishuAudioFormat("application/octet-stream", "reply.mp3"); got != "mp3" {
+		t.Fatalf("extension format = %q, want mp3", got)
+	}
+	if got := detectFeishuAudioFormat("audio/x-m4a", "reply"); got != "m4a" {
+		t.Fatalf("mime format = %q, want m4a", got)
+	}
+	if got := detectFeishuAudioFormat("audio/opus", "reply.bin"); got != "opus" {
+		t.Fatalf("opus mime format = %q, want opus", got)
+	}
+}
+
+func TestReplaceFileExtension(t *testing.T) {
+	tests := map[string]string{
+		"voice.mp3":      "voice.opus",
+		"voice":          "voice.opus",
+		"/tmp/voice.wav": "/tmp/voice.opus",
+		"":               "attachment.opus",
+	}
+	for in, want := range tests {
+		if got := replaceFileExtension(in, ".opus"); got != want {
+			t.Fatalf("replaceFileExtension(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
 
 func TestExtractPostParts_TextOnly(t *testing.T) {
 	p := &Platform{}
