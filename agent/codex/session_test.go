@@ -36,8 +36,51 @@ func TestAvailableReasoningEfforts_ExcludesMinimal(t *testing.T) {
 	}
 }
 
+func TestNormalizeMode_CodexPermissionPresetsAndAliases(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "empty defaults to default", raw: "", want: "default"},
+		{name: "suggest legacy alias", raw: "suggest", want: "default"},
+		{name: "default", raw: "default", want: "default"},
+		{name: "auto review", raw: "auto-review", want: "auto-review"},
+		{name: "auto review underscore", raw: "auto_review", want: "auto-review"},
+		{name: "full access", raw: "full-access", want: "full-access"},
+		{name: "danger full access", raw: "danger-full-access", want: "full-access"},
+		{name: "bypassPermissions legacy alias", raw: "bypassPermissions", want: "full-access"},
+		{name: "yolo legacy alias", raw: "yolo", want: "full-access"},
+		{name: "full auto legacy alias", raw: "full-auto", want: "default"},
+		{name: "auto edit legacy alias", raw: "auto-edit", want: "default"},
+		{name: "unknown falls back to default", raw: "unknown", want: "default"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := normalizeMode(tt.raw); got != tt.want {
+				t.Fatalf("normalizeMode(%q) = %q, want %q", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPermissionModes_CodexShowsCurrentPresets(t *testing.T) {
+	agent := &Agent{}
+	got := agent.PermissionModes()
+	want := []string{"default", "auto-review", "full-access"}
+	if len(got) != len(want) {
+		t.Fatalf("PermissionModes len = %d, want %d, got=%v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i].Key != want[i] {
+			t.Fatalf("PermissionModes[%d].Key = %q, want %q, got=%v", i, got[i].Key, want[i], got)
+		}
+	}
+}
+
 func TestBuildExecArgs_IncludesReasoningEffort(t *testing.T) {
-	cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "o3", "high", "full-auto", "", "", nil, "")
+	cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "o3", "high", "default", "", "", nil, "")
 	if err != nil {
 		t.Fatalf("newCodexSession: %v", err)
 	}
@@ -47,7 +90,10 @@ func TestBuildExecArgs_IncludesReasoningEffort(t *testing.T) {
 	want := []string{
 		"exec",
 		"--skip-git-repo-check",
-		"--full-auto",
+		"-c",
+		`approval_policy="on-request"`,
+		"-c",
+		`sandbox_mode="workspace-write"`,
 		"--model",
 		"o3",
 		"-c",
@@ -64,6 +110,69 @@ func TestBuildExecArgs_IncludesReasoningEffort(t *testing.T) {
 		if args[i] != want[i] {
 			t.Fatalf("args[%d] = %q, want %q, args=%v", i, args[i], want[i], args)
 		}
+	}
+}
+
+func TestBuildExecArgs_CodexPermissionModes(t *testing.T) {
+	tests := []struct {
+		name      string
+		mode      string
+		wantSeqs  [][]string
+		absentArg string
+	}{
+		{
+			name: "default uses Codex default preset",
+			mode: "default",
+			wantSeqs: [][]string{
+				{"-c", `approval_policy="on-request"`},
+				{"-c", `sandbox_mode="workspace-write"`},
+			},
+			absentArg: "--dangerously-bypass-approvals-and-sandbox",
+		},
+		{
+			name: "auto review routes approvals to reviewer",
+			mode: "auto-review",
+			wantSeqs: [][]string{
+				{"-c", `approval_policy="on-request"`},
+				{"-c", `sandbox_mode="workspace-write"`},
+				{"-c", `approvals_reviewer="auto_review"`},
+			},
+			absentArg: "--dangerously-bypass-approvals-and-sandbox",
+		},
+		{
+			name: "full access bypasses sandbox and approvals",
+			mode: "full-access",
+			wantSeqs: [][]string{
+				{"--dangerously-bypass-approvals-and-sandbox"},
+			},
+			absentArg: `approvals_reviewer="auto_review"`,
+		},
+		{
+			name: "bypassPermissions legacy alias is full access",
+			mode: "bypassPermissions",
+			wantSeqs: [][]string{
+				{"--dangerously-bypass-approvals-and-sandbox"},
+			},
+			absentArg: `sandbox_mode="workspace-write"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "", "", tt.mode, "", "", nil, "")
+			if err != nil {
+				t.Fatalf("newCodexSession: %v", err)
+			}
+			args := cs.buildExecArgs("hello", nil)
+			for _, want := range tt.wantSeqs {
+				if !containsSequence(args, want) {
+					t.Fatalf("args missing %v: %v", want, args)
+				}
+			}
+			if tt.absentArg != "" && containsArg(args, tt.absentArg) {
+				t.Fatalf("args unexpectedly contain %q: %v", tt.absentArg, args)
+			}
+		})
 	}
 }
 
@@ -503,6 +612,15 @@ func containsSequence(args, want []string) bool {
 			}
 		}
 		if match {
+			return true
+		}
+	}
+	return false
+}
+
+func containsArg(args []string, want string) bool {
+	for _, arg := range args {
+		if arg == want {
 			return true
 		}
 	}

@@ -88,7 +88,8 @@ func TestIntegration_CodexProviderFlow(t *testing.T) {
 		"--model", "openai/gpt-5.3-codex",
 		"-c", `model_provider="shengsuanyun-codex"`,
 		"-c", `openai_base_url="https://router.shengsuanyun.com/api/v1"`,
-		"--full-auto",
+		"-c", `approval_policy="on-request"`,
+		"-c", `sandbox_mode="workspace-write"`,
 	)
 	cmd.Dir = workDir
 	cmd.Env = append(os.Environ(),

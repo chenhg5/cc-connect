@@ -29,6 +29,9 @@ const PLATFORM_OPTIONS: { key: string; label: string; color: string; abbr: strin
   { key: 'weibo', label: 'Weibo (微博)', abbr: 'WB', color: 'bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-400' },
 ];
 
+const DEFAULT_MODE_OPTIONS = ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions', 'dontAsk'];
+const CODEX_MODE_OPTIONS = ['default', 'auto-review', 'full-access'];
+
 const isQRPlatform = (type: string) => type === 'feishu' || type === 'lark' || type === 'weixin';
 
 type Tab = 'overview' | 'providers' | 'heartbeat' | 'settings';
@@ -82,6 +85,8 @@ export default function ProjectDetail() {
   const navigate = useNavigate();
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
+
+  const agentModeOptions = selectedAgentType === 'codex' ? CODEX_MODE_OPTIONS : DEFAULT_MODE_OPTIONS;
 
   const handleDeleteProject = async () => {
     if (!name) return;
@@ -516,11 +521,12 @@ export default function ProjectDetail() {
                 onChange={(e) => setAgentMode(e.target.value)}
                 className="w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-accent/50"
               >
-                <option value="default">default</option>
-                <option value="acceptEdits">acceptEdits (edit)</option>
-                <option value="plan">plan</option>
-                <option value="bypassPermissions">bypassPermissions (yolo)</option>
-                <option value="dontAsk">dontAsk</option>
+                {agentModeOptions.map(mode => (
+                  <option key={mode} value={mode}>{mode}</option>
+                ))}
+                {agentMode && !agentModeOptions.includes(agentMode) && (
+                  <option value={agentMode}>{agentMode}</option>
+                )}
               </select>
             </div>
           </div>

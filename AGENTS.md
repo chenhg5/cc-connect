@@ -135,6 +135,26 @@ All user-facing strings must go through `core/i18n.go`:
 - Add translations for all supported languages (EN, ZH, ZH-TW, JA, ES)
 - Use `e.i18n.T(MsgKey)` or `e.i18n.Tf(MsgKey, args...)`
 
+### 8. Local Carry Patch: Codex Permission Modes
+
+When syncing this local fork with upstream, verify that the Codex permission-mode
+fix from commit `5b30734` is still present. If upstream does not contain an
+equivalent fix, keep or reapply the local patch instead of dropping it.
+
+Required behavior:
+- Codex exposes exactly these canonical modes: `default`, `auto-review`,
+  `full-access`
+- Codex legacy aliases such as `suggest`, `auto-edit`, `full-auto`, `auto`,
+  `edit`, `yolo`, `bypass`, and `bypassPermissions` continue to normalize
+  without breaking existing configs
+- Codex `default` uses `approval_policy="on-request"` with
+  `sandbox_mode="workspace-write"`
+- Codex `auto-review` additionally enables `approvals_reviewer="auto_review"`
+- Codex `full-access` uses `--dangerously-bypass-approvals-and-sandbox`
+- Claude Code mode handling remains unchanged
+- Cron config validation and the web project settings UI remain compatible with
+  the Codex-specific modes above
+
 ## Code Style
 
 - Follow standard Go conventions (`gofmt`, `go vet`)

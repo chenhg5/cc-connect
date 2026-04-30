@@ -80,10 +80,11 @@ reset_on_idle_mins = 60
 
 | 模式 | 配置值 | 行为 |
 |------|--------|------|
-| 建议 | `suggest` | 仅受信命令自动执行 |
-| 自动编辑 | `auto-edit` | 模型自行决定 |
-| 全自动 | `full-auto` | 自动通过 + 沙箱保护 |
-| YOLO | `yolo` | 跳过所有审批 |
+| 默认 | `default` | 工作区可写沙箱，按需审批 |
+| 自动审查 | `auto-review` | 由 Codex 自动审查器处理审批请求 |
+| 完全访问 | `full-access` | 跳过审批和沙箱 |
+
+仍兼容旧别名：`suggest`、`auto-edit`、`full-auto` 会映射到 `default`；`yolo`、`bypassPermissions` 会映射到 `full-access`。
 
 ### Cursor Agent 模式
 
@@ -121,7 +122,7 @@ mode = "default"
 运行时切换：
 ```
 /mode          # 查看当前和可用模式
-/mode yolo     # 切换到 YOLO 模式
+/mode full-access # 切换到完全访问模式
 /mode default  # 切回默认
 ```
 
