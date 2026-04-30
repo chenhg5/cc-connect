@@ -600,17 +600,28 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	// Formats:
 	//   matrix:{roomID}:{userID}   - per-user session
 	//   matrix:{roomID}            - shared session
-	parts := strings.SplitN(sessionKey, ":", 4)
-	if len(parts) < 2 || parts[0] != "matrix" {
+	// Room IDs contain a colon (!localpart:server), so we can't simply split on colons.
+	if !strings.HasPrefix(sessionKey, "matrix:") {
 		return nil, fmt.Errorf("matrix: invalid session key %q", sessionKey)
 	}
-	roomID := id.RoomID(parts[1])
-	if strings.HasPrefix(roomID.String(), "!") {
-		// valid room ID
+	rest := sessionKey[len("matrix:"):]
+	if rest == "" {
+		return nil, fmt.Errorf("matrix: invalid session key %q", sessionKey)
+	}
+
+	// Find boundary between room ID and optional user ID.
+	// User IDs start with @, so ":@" only appears at the roomID:userID boundary.
+	var roomIDStr string
+	if idx := strings.Index(rest, ":@"); idx >= 0 {
+		roomIDStr = rest[:idx]
 	} else {
+		roomIDStr = rest
+	}
+
+	if !strings.HasPrefix(roomIDStr, "!") {
 		return nil, fmt.Errorf("matrix: invalid room ID in %q", sessionKey)
 	}
-	return replyContext{roomID: roomID}, nil
+	return replyContext{roomID: id.RoomID(roomIDStr)}, nil
 }
 
 // --- Internal helpers ---
@@ -739,9 +750,9 @@ func stripBotMention(text string, selfID id.UserID) string {
 	if selfID == "" {
 		return text
 	}
-	text = strings.ReplaceAll(text, selfID.String(), "")
-	// Also strip matrix.to links from plain text fallback
+	// Strip matrix.to links first (longer pattern), then plain user ID
 	text = strings.ReplaceAll(text, fmt.Sprintf("https://matrix.to/#/%s", selfID), "")
+	text = strings.ReplaceAll(text, selfID.String(), "")
 	return strings.TrimSpace(text)
 }
 
