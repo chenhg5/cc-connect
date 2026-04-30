@@ -173,6 +173,12 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel) {
 		return
 	}
 
+	// Handle image messages
+	if data.Msgtype == "image" {
+		p.handleImageMessage(data, sessionKey)
+		return
+	}
+
 	// Handle text messages (default)
 	msg := &core.Message{
 		SessionKey: sessionKey,
@@ -256,6 +262,74 @@ func (p *Platform) handleAudioMessage(data *chatbot.BotCallbackDataModel, sessio
 			Data:     audioBytes,
 			Format:   "amr", // DingTalk typically uses AMR format
 		},
+	}
+
+	p.handler(p, msg)
+}
+
+func (p *Platform) handleImageMessage(data *chatbot.BotCallbackDataModel, sessionKey string) {
+	slog.Debug("dingtalk: image message received", "user", data.SenderNick)
+
+	// Parse image content from the raw content
+	imageData, ok := data.Content.(map[string]interface{})
+	if !ok {
+		slog.Error("dingtalk: invalid image content type", "type", fmt.Sprintf("%T", data.Content))
+		return
+	}
+
+	downloadCode, _ := imageData["downloadCode"].(string)
+	if downloadCode == "" {
+		slog.Error("dingtalk: image message missing downloadCode")
+		return
+	}
+
+	// Download image file using the same messageFiles/download API as audio
+	downloadURL, err := p.getDownloadURL(downloadCode)
+	if err != nil {
+		slog.Error("dingtalk: failed to get image download URL", "error", err)
+		return
+	}
+
+	resp, err := p.httpClient.Get(downloadURL)
+	if err != nil {
+		slog.Error("dingtalk: failed to download image", "error", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		slog.Error("dingtalk: image download returned status", "status", resp.StatusCode)
+		return
+	}
+
+	imgBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		slog.Error("dingtalk: failed to read image data", "error", err)
+		return
+	}
+
+	mimeType := resp.Header.Get("Content-Type")
+	if mimeType == "" {
+		mimeType = "image/png"
+	}
+
+	slog.Info("dingtalk: image downloaded successfully", "size", len(imgBytes), "mime", mimeType)
+
+	msg := &core.Message{
+		SessionKey: sessionKey,
+		Platform:   "dingtalk",
+		UserID:     data.SenderStaffId,
+		UserName:   data.SenderNick,
+		MessageID:  data.MsgId,
+		ReplyCtx: replyContext{
+			sessionWebhook:  data.SessionWebhook,
+			conversationId:  data.ConversationId,
+			senderStaffId:   data.SenderStaffId,
+		},
+		Images: []core.ImageAttachment{{
+			MimeType: mimeType,
+			Data:     imgBytes,
+		}},
 	}
 
 	p.handler(p, msg)
