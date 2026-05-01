@@ -230,7 +230,7 @@ func (p *Platform) runConnection(ctx context.Context) error {
 			slog.Warn("matrix: decrypt failed", "event_id", evt.ID, "sender", evt.Sender, "room", evt.RoomID, "error", decryptErr)
 		}
 		ch.CustomPostDecrypt = func(ctx context.Context, evt *event.Event) {
-			slog.Info("matrix: decrypted event", "type", evt.Type.Type, "event_id", evt.ID, "sender", evt.Sender, "room", evt.RoomID)
+			slog.Debug("matrix: decrypted event", "type", evt.Type.Type, "event_id", evt.ID, "sender", evt.Sender, "room", evt.RoomID)
 
 			// Fix transaction ID for in-room verification events from other users.
 			// The verificationhelper's wrapHandler uses evt.ID as the transaction ID,
@@ -239,7 +239,7 @@ func (p *Platform) runConnection(ctx context.Context) error {
 			if evt.RoomID != "" && evt.Sender != client.UserID && strings.HasPrefix(evt.Type.Type, "m.key.verification.") {
 				if relatable, ok := evt.Content.Parsed.(event.Relatable); ok {
 					if rel := relatable.OptionalGetRelatesTo(); rel != nil && rel.EventID != "" {
-						slog.Info("matrix: fixing verification event txn ID", "original_id", evt.ID, "txn_id", rel.EventID)
+						slog.Debug("matrix: fixing verification event txn ID", "original_id", evt.ID, "txn_id", rel.EventID)
 						evt.ID = rel.EventID
 					}
 				}
@@ -272,7 +272,7 @@ func (p *Platform) runConnection(ctx context.Context) error {
 			if vErr := p.initVerification(ctx, ch); vErr != nil {
 				slog.Warn("matrix: verification helper not available", "error", vErr)
 			} else {
-				slog.Info("matrix: SAS verification enabled (auto-verify)")
+				slog.Info("matrix: SAS verification enabled", "mode", "auto-verify")
 			}
 		}
 	}
