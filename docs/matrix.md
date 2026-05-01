@@ -205,13 +205,15 @@ Make sure `auto_join = true` (this is the default). If the bot was already invit
 
 cc-connect automatically supports encrypted rooms (E2EE) with no extra configuration. If you see `matrix: E2EE enabled` at startup, encryption is working.
 
+> **Note**: To remove the red question mark ("encrypted by a device not verified by its owner") on bot messages, cross-signing must be set up. cc-connect does this automatically on first run, but some servers require `cross_signing_password` in config for the initial setup. See the red question mark FAQ below.
+
 #### Logs show "E2EE not available"?
 
 Possible causes and fixes:
 
 1. **`device ID not available from whoami`** — The server didn't return a device ID. Create a dedicated device via curl with `device_id`.
-2. **`not marked as shared, but there are keys on the server`** — Old crypto data conflicts with the current device. cc-connect tries to auto-recover. If it persists, delete old crypto databases: `rm ~/.cc-connect/matrix-crypto-*.db*`
-3. **`mismatching device ID in client and crypto store`** — The token's device ID doesn't match the crypto database. Delete the database: `rm ~/.cc-connect/matrix-crypto-*.db*`
+2. **`not marked as shared, but there are keys on the server`** — Old crypto data conflicts with the current device. cc-connect tries to auto-recover. If it persists, delete old crypto databases and cross-signing seeds: `rm ~/.cc-connect/matrix-crypto-*.db* ~/.cc-connect/matrix-cross-signing-*.json`
+3. **`mismatching device ID in client and crypto store`** — The token's device ID doesn't match the crypto database. Delete the database and seeds: `rm ~/.cc-connect/matrix-crypto-*.db* ~/.cc-connect/matrix-cross-signing-*.json`
 
 #### Logs show "decrypt failed: no session found"?
 
@@ -219,7 +221,7 @@ The sender's client didn't send the encryption key to the bot's device. This usu
 
 1. **Reusing Element's access token** — Element's device ID conflicts with the bot's encryption keys. Create a dedicated device via curl (see Step 2).
 2. **Just changed the access token** — The sender's client may not have discovered the bot's new device yet. Wait 1-2 minutes and send a new message.
-3. **Corrupted crypto database** — Delete and restart: `rm ~/.cc-connect/matrix-crypto-*.db*`
+3. **Corrupted crypto database** — Delete and restart: `rm ~/.cc-connect/matrix-crypto-*.db* ~/.cc-connect/matrix-cross-signing-*.json`
 
 #### How to get a dedicated access token (recommended)?
 
@@ -239,7 +241,7 @@ curl -XPOST "https://your-homeserver.com/_matrix/client/v3/login" \
 
 The `access_token` in the response can be used in config. The `device_id` will be `CC-CONNECT`, easy to identify and manage.
 
-#### Red exclamation mark on bot messages ("encrypted by a device not verified by its owner")?
+#### Red question mark on bot messages ("encrypted by a device not verified by its owner")?
 
 This means the bot's device hasn't been cross-signed. cc-connect automatically sets up cross-signing on first run, but some Matrix servers require password authentication (UIA) to publish the cross-signing keys.
 

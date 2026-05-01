@@ -916,8 +916,14 @@ app_secret = "your-feishu-app-secret"
 # Matrix (uncomment to enable / 取消注释以启用)
 # 1. Create an account on your Matrix homeserver (matrix.org or self-hosted)
 #    在 Matrix 服务器上创建账号（matrix.org 或自建服务器）
-# 2. Get an access token: Element > Settings > Help & About > Advanced > Access Token
-#    获取 access token：Element > 设置 > 关于 > 高级 > Access Token
+# 2. Get an access token via curl (recommended, ensures E2EE works):
+#    curl -XPOST "https://matrix.org/_matrix/client/v3/login" \
+#      -H "Content-Type: application/json" \
+#      -d '{"type":"m.login.password","user":"YOUR_USER","password":"YOUR_PASS","device_id":"CC-CONNECT"}'
+#    通过 curl 获取 access token（推荐，确保 E2EE 正常工作）：
+#    curl -XPOST "https://matrix.org/_matrix/client/v3/login" \
+#      -H "Content-Type: application/json" \
+#      -d '{"type":"m.login.password","user":"你的用户名","password":"你的密码","device_id":"CC-CONNECT"}'
 # Connection: Long polling via /sync (no public URL needed) / 长轮询，无需公网 IP
 
 # [[projects.platforms]]
