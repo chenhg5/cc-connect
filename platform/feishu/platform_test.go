@@ -756,7 +756,7 @@ func TestBuildReplyMessageReqBody_SetsReplyInThreadFlag(t *testing.T) {
 		{
 			name:          "thread isolation enabled",
 			platform:      &Platform{threadIsolation: true},
-			replyCtx:      replyContext{messageID: "om_reply", sessionKey: "feishu:oc_chat:root:om_root"},
+			replyCtx:      replyContext{messageID: "om_reply", sessionKey: "feishu:oc_chat:root:om_root", inThread: true},
 			wantThreading: true,
 		},
 		{
@@ -770,6 +770,18 @@ func TestBuildReplyMessageReqBody_SetsReplyInThreadFlag(t *testing.T) {
 			platform:      &Platform{},
 			replyCtx:      replyContext{messageID: "om_reply"},
 			wantThreading: false,
+		},
+		{
+			name:          "reply_in_thread config creates thread for non-thread message",
+			platform:      &Platform{replyInThread: true},
+			replyCtx:      replyContext{messageID: "om_reply", sessionKey: "feishu:oc_chat:root:om_reply"},
+			wantThreading: true,
+		},
+		{
+			name:          "reply_in_thread config does not affect already-threaded message",
+			platform:      &Platform{replyInThread: false},
+			replyCtx:      replyContext{messageID: "om_reply", sessionKey: "feishu:oc_chat:root:om_root", inThread: true},
+			wantThreading: true,
 		},
 	}
 
@@ -1188,5 +1200,397 @@ func TestResolveMentions_SpecialCharsEscaped(t *testing.T) {
 	}
 	if !strings.Contains(result, "A&lt;") {
 		t.Fatalf("expected HTML-escaped name, got %q", result)
+	}
+}
+
+// --- Thread isolation improvements tests ---
+
+func TestThreadIsolation_GroupMessageNoThread_NoReplyInThread(t *testing.T) {
+	p, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+		"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true, "thread_isolation": true,
+	})
+	if err != nil {
+		t.Fatalf("newPlatform error = %v", err)
+	}
+	ip := p.(*interactivePlatform)
+
+	messageID := "om_standalone"
+	chatID := "oc_test"
+	openID := "ou_test"
+	msgType := "text"
+	chatType := "group"
+	senderType := "user"
+	content := `{"text":"@bot run inspection"}`
+	createText := strconv.FormatInt(time.Now().UnixMilli(), 10)
+
+	var receivedMsg *core.Message
+	var wg sync.WaitGroup
+	wg.Add(1)
+	ip.botOpenID = "ou_bot"
+	ip.handler = func(_ core.Platform, msg *core.Message) {
+		defer wg.Done()
+		receivedMsg = msg
+	}
+	_ = ip.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId:   &larkim.UserId{OpenId: &openID},
+				SenderType: &senderType,
+			},
+			Message: &larkim.EventMessage{
+				MessageId: &messageID, ChatId: &chatID, ChatType: &chatType,
+				MessageType: &msgType, Content: &content, CreateTime: &createText,
+				Mentions: []*larkim.MentionEvent{
+					{Key: stringPtr("@bot"), Id: &larkim.UserId{OpenId: stringPtr("ou_bot")}},
+				},
+			},
+		},
+	})
+	wg.Wait()
+	if receivedMsg == nil {
+		t.Fatal("handler not called")
+	}
+	rc := receivedMsg.ReplyCtx.(replyContext)
+	if rc.inThread {
+		t.Fatal("inThread should be false for standalone group message")
+	}
+	if ip.shouldReplyInThread(rc) {
+		t.Fatal("shouldReplyInThread should be false for standalone group message")
+	}
+}
+
+func TestThreadIsolation_ThreadMessage_ReplyInThread(t *testing.T) {
+	p, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+		"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true, "thread_isolation": true,
+	})
+	if err != nil {
+		t.Fatalf("newPlatform error = %v", err)
+	}
+	ip := p.(*interactivePlatform)
+
+	messageID := "om_reply"
+	rootID := "om_thread_root"
+	threadID := "omt_thread_123"
+	chatID := "oc_test"
+	openID := "ou_test"
+	msgType := "text"
+	chatType := "group"
+	senderType := "user"
+	content := `{"text":"@bot check this"}`
+	createText := strconv.FormatInt(time.Now().UnixMilli(), 10)
+
+	var receivedMsg *core.Message
+	var wg sync.WaitGroup
+	wg.Add(1)
+	ip.botOpenID = "ou_bot"
+	ip.handler = func(_ core.Platform, msg *core.Message) {
+		defer wg.Done()
+		receivedMsg = msg
+	}
+	_ = ip.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId:   &larkim.UserId{OpenId: &openID},
+				SenderType: &senderType,
+			},
+			Message: &larkim.EventMessage{
+				MessageId: &messageID, RootId: &rootID, ThreadId: &threadID, ChatId: &chatID,
+				ChatType: &chatType, MessageType: &msgType, Content: &content,
+				CreateTime: &createText,
+				Mentions: []*larkim.MentionEvent{
+					{Key: stringPtr("@bot"), Id: &larkim.UserId{OpenId: stringPtr("ou_bot")}},
+				},
+			},
+		},
+	})
+	wg.Wait()
+	if receivedMsg == nil {
+		t.Fatal("handler not called")
+	}
+	rc := receivedMsg.ReplyCtx.(replyContext)
+	if !rc.inThread {
+		t.Fatal("inThread should be true for thread message")
+	}
+	if !ip.shouldReplyInThread(rc) {
+		t.Fatal("shouldReplyInThread should be true for thread message")
+	}
+}
+
+func TestThreadIsolation_NestedThreadInheritSessionKey(t *testing.T) {
+	p, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+		"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true, "thread_isolation": true,
+	})
+	if err != nil {
+		t.Fatalf("newPlatform error = %v", err)
+	}
+	ip := p.(*interactivePlatform)
+
+	originalRoot := "om_original_root"
+	msg1ID := "om_msg1"
+	chatID := "oc_test"
+	openID := "ou_test"
+	msgType := "text"
+	chatType := "group"
+	senderType := "user"
+	createText := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	ip.botOpenID = "ou_bot"
+
+	// Step 1: msg1 in thread A (root = originalRoot)
+	content1 := `{"text":"@bot check alert"}`
+	var msg1Received *core.Message
+	var wg sync.WaitGroup
+	wg.Add(1)
+	ip.handler = func(_ core.Platform, msg *core.Message) {
+		defer wg.Done()
+		msg1Received = msg
+	}
+	_ = ip.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId:   &larkim.UserId{OpenId: &openID},
+				SenderType: &senderType,
+			},
+			Message: &larkim.EventMessage{
+				MessageId: &msg1ID, RootId: &originalRoot, ParentId: &originalRoot,
+				ChatId: &chatID, ChatType: &chatType, MessageType: &msgType,
+				Content: &content1, CreateTime: &createText,
+				Mentions: []*larkim.MentionEvent{
+					{Key: stringPtr("@bot"), Id: &larkim.UserId{OpenId: stringPtr("ou_bot")}},
+				},
+			},
+		},
+	})
+	wg.Wait()
+	if msg1Received == nil {
+		t.Fatal("msg1 handler not called")
+	}
+	session1Key := msg1Received.SessionKey
+
+	// Step 2: msg2 in nested thread (root = msg1ID)
+	msg2ID := "om_msg2"
+	content2 := `{"text":"@bot continue"}`
+	var msg2Received *core.Message
+	wg.Add(1)
+	ip.handler = func(_ core.Platform, msg *core.Message) {
+		defer wg.Done()
+		msg2Received = msg
+	}
+	_ = ip.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId:   &larkim.UserId{OpenId: &openID},
+				SenderType: &senderType,
+			},
+			Message: &larkim.EventMessage{
+				MessageId: &msg2ID, RootId: &msg1ID, ParentId: &msg1ID,
+				ChatId: &chatID, ChatType: &chatType, MessageType: &msgType,
+				Content: &content2, CreateTime: &createText,
+				Mentions: []*larkim.MentionEvent{
+					{Key: stringPtr("@bot"), Id: &larkim.UserId{OpenId: stringPtr("ou_bot")}},
+				},
+			},
+		},
+	})
+	wg.Wait()
+	if msg2Received == nil {
+		t.Fatal("msg2 handler not called")
+	}
+	if msg2Received.SessionKey != session1Key {
+		t.Fatalf("msg2 SessionKey = %q, want same as msg1 %q", msg2Received.SessionKey, session1Key)
+	}
+}
+
+func TestThreadRootContext_FirstMessageMarksSession(t *testing.T) {
+	p, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+		"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true, "thread_isolation": true,
+	})
+	if err != nil {
+		t.Fatalf("newPlatform error = %v", err)
+	}
+	ip := p.(*interactivePlatform)
+
+	messageID := "om_msg1"
+	rootID := "om_root"
+	parentID := "om_root"
+	chatID := "oc_test"
+	openID := "ou_test"
+	msgType := "text"
+	chatType := "group"
+	senderType := "user"
+	content := `{"text":"@bot check this"}`
+	createText := strconv.FormatInt(time.Now().UnixMilli(), 10)
+
+	var receivedMsg *core.Message
+	var wg sync.WaitGroup
+	wg.Add(1)
+	ip.botOpenID = "ou_bot"
+	ip.handler = func(_ core.Platform, msg *core.Message) {
+		defer wg.Done()
+		receivedMsg = msg
+	}
+	_ = ip.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId:   &larkim.UserId{OpenId: &openID},
+				SenderType: &senderType,
+			},
+			Message: &larkim.EventMessage{
+				MessageId: &messageID, RootId: &rootID, ParentId: &parentID,
+				ChatId: &chatID, ChatType: &chatType, MessageType: &msgType,
+				Content: &content, CreateTime: &createText,
+				Mentions: []*larkim.MentionEvent{
+					{Key: stringPtr("@bot"), Id: &larkim.UserId{OpenId: stringPtr("ou_bot")}},
+				},
+			},
+		},
+	})
+	wg.Wait()
+	if receivedMsg == nil {
+		t.Fatal("handler not called")
+	}
+	if _, ok := ip.rootContextSent.Load(receivedMsg.SessionKey); !ok {
+		t.Fatal("rootContextSent should be marked after first thread message")
+	}
+}
+
+func TestThreadRootContext_SecondMessageSkipsRootContext(t *testing.T) {
+	p, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+		"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true, "thread_isolation": true,
+	})
+	if err != nil {
+		t.Fatalf("newPlatform error = %v", err)
+	}
+	ip := p.(*interactivePlatform)
+
+	rootID := "om_root"
+	parentID := "om_root"
+	chatID := "oc_test"
+	openID := "ou_test"
+	msgType := "text"
+	chatType := "group"
+	senderType := "user"
+	createText := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	ip.botOpenID = "ou_bot"
+
+	sessionKey := "feishu:oc_test:root:om_root"
+	ip.rootContextSent.Store(sessionKey, true)
+
+	msg1ID := "om_msg2"
+	content := `{"text":"@bot second message"}`
+	var receivedMsg *core.Message
+	var wg sync.WaitGroup
+	wg.Add(1)
+	ip.handler = func(_ core.Platform, msg *core.Message) {
+		defer wg.Done()
+		receivedMsg = msg
+	}
+	_ = ip.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId:   &larkim.UserId{OpenId: &openID},
+				SenderType: &senderType,
+			},
+			Message: &larkim.EventMessage{
+				MessageId: &msg1ID, RootId: &rootID, ParentId: &parentID,
+				ChatId: &chatID, ChatType: &chatType, MessageType: &msgType,
+				Content: &content, CreateTime: &createText,
+				Mentions: []*larkim.MentionEvent{
+					{Key: stringPtr("@bot"), Id: &larkim.UserId{OpenId: stringPtr("ou_bot")}},
+				},
+			},
+		},
+	})
+	wg.Wait()
+	if receivedMsg == nil {
+		t.Fatal("handler not called")
+	}
+	if strings.Contains(receivedMsg.Content, "[Thread root message") {
+		t.Fatalf("second message should not contain root context, got %q", receivedMsg.Content)
+	}
+}
+
+func TestResolveCronReplyTarget_ReturnsReplyCtxWithoutMessageID(t *testing.T) {
+	p, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+		"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true, "thread_isolation": true,
+	})
+	if err != nil {
+		t.Fatalf("newPlatform error = %v", err)
+	}
+	ip := p.(*interactivePlatform)
+
+	sessionKey := "feishu:oc_chat123:root:om_msg456"
+	_, rctx, err := ip.ResolveCronReplyTarget(sessionKey, "Daily report")
+	if err != nil {
+		t.Fatalf("ResolveCronReplyTarget error = %v", err)
+	}
+	rc := rctx.(replyContext)
+	if rc.chatID != "oc_chat123" {
+		t.Fatalf("chatID = %q, want oc_chat123", rc.chatID)
+	}
+	if rc.messageID != "" {
+		t.Fatalf("messageID = %q, want empty", rc.messageID)
+	}
+}
+
+func TestReconstructReplyCtx_ThreadKey_SetsInThread(t *testing.T) {
+	p, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+		"app_id": "cli_xxx", "app_secret": "secret",
+	})
+	if err != nil {
+		t.Fatalf("newPlatform error = %v", err)
+	}
+	rctx, err := p.(*interactivePlatform).ReconstructReplyCtx("feishu:oc_chat:root:om_root123")
+	if err != nil {
+		t.Fatalf("error = %v", err)
+	}
+	rc := rctx.(replyContext)
+	if !rc.inThread {
+		t.Fatal("inThread should be true for root: session key")
+	}
+}
+
+func TestReconstructReplyCtx_NonThreadKey_NoInThread(t *testing.T) {
+	p, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+		"app_id": "cli_xxx", "app_secret": "secret",
+	})
+	if err != nil {
+		t.Fatalf("newPlatform error = %v", err)
+	}
+	rctx, err := p.(*interactivePlatform).ReconstructReplyCtx("feishu:oc_chat:ou_user123")
+	if err != nil {
+		t.Fatalf("error = %v", err)
+	}
+	rc := rctx.(replyContext)
+	if rc.inThread {
+		t.Fatal("inThread should be false for user-scoped key")
+	}
+}
+
+func TestFetchThreadRootMessage_Truncation(t *testing.T) {
+	input := "[Quoted message from AlertBot]:\n" + strings.Repeat("A", 2500) + "\n\n"
+	const oldPrefix = "[Quoted message from "
+	const newPrefix = "[Thread root message from "
+	result := newPrefix + input[len(oldPrefix):]
+	if idx := strings.Index(result, "]:\n"); idx >= 0 {
+		header := result[:idx+len("]:\n")]
+		body := result[idx+len("]:\n"):]
+		body = strings.TrimSuffix(body, "\n\n")
+		if len(body) > threadRootMaxLen {
+			body = body[:threadRootMaxLen] + "[...truncated]"
+		}
+		result = header + body + "\n\n"
+	}
+	if !strings.HasPrefix(result, "[Thread root message from AlertBot]:\n") {
+		t.Fatalf("expected thread root prefix, got %q", result[:60])
+	}
+	bodyStart := strings.Index(result, "]:\n") + len("]:\n")
+	body := result[bodyStart:]
+	body = strings.TrimSuffix(body, "\n\n")
+	if !strings.HasSuffix(body, "[...truncated]") {
+		t.Fatalf("expected truncation suffix, got ...%q", body[len(body)-20:])
+	}
+	bodyWithoutSuffix := strings.TrimSuffix(body, "[...truncated]")
+	if len(bodyWithoutSuffix) != threadRootMaxLen {
+		t.Fatalf("truncated body length = %d, want %d", len(bodyWithoutSuffix), threadRootMaxLen)
 	}
 }

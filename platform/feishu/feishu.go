@@ -109,6 +109,7 @@ type replyContext struct {
 	messageID  string
 	chatID     string
 	sessionKey string
+	inThread   bool // true only when the message originates from a real thread (has root_id)
 }
 
 type Platform struct {
@@ -130,6 +131,7 @@ type Platform struct {
 	threadIsolation            bool
 	// noReplyToTrigger: when true, send via Create instead of Im.Message.Reply (no quote to the user's message).
 	noReplyToTrigger bool
+	replyInThread    bool // when true, bot replies create threads even for non-thread messages
 	resolveMentions  bool
 	client           *lark.Client
 	replayClient     *lark.Client
@@ -142,6 +144,8 @@ type Platform struct {
 	botOpenID        string
 	userNameCache    sync.Map // open_id -> display name
 	chatNameCache    sync.Map // chat_id -> chat name
+	msgSessionMap    sync.Map // messageID -> sessionKey; tracks which session a message belongs to
+	rootContextSent  sync.Map // sessionKey -> bool; tracks which sessions already received thread root context
 	chatMemberCache  sync.Map // chatID -> *chatMemberEntry
 	// Webhook mode fields (for Lark international version)
 	server       *http.Server
@@ -205,6 +209,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	respondToAtEveryoneAndHere, _ := opts["respond_to_at_everyone_and_here"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	threadIsolation, _ := opts["thread_isolation"].(bool)
+	replyInThread, _ := opts["reply_in_thread"].(bool)
 	resolveMentionsOpt, _ := opts["resolve_mentions"].(bool)
 	noReplyToTrigger := false
 	if v, ok := opts["reply_to_trigger"].(bool); ok && !v {
@@ -259,6 +264,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		respondToAtEveryoneAndHere: respondToAtEveryoneAndHere,
 		shareSessionInChannel:      shareSessionInChannel,
 		threadIsolation:            threadIsolation,
+		replyInThread:              replyInThread,
 		resolveMentions:            resolveMentionsOpt,
 		noReplyToTrigger:           noReplyToTrigger,
 		client:                     lark.NewClient(appID, appSecret, clientOpts...),
@@ -571,7 +577,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 			return nil, nil
 		}
 
-		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
+		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey, inThread: isThreadSessionKey(sessionKey)}
 		go p.handler(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey,
 			Platform:   p.platformName,
@@ -602,7 +608,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 
 	// askq: — AskUserQuestion option selected, forward as user message
 	if strings.HasPrefix(actionVal, "askq:") {
-		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
+		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey, inThread: isThreadSessionKey(sessionKey)}
 		go p.handler(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey,
 			Platform:   p.platformName,
@@ -634,7 +640,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 	// cmd: — async command dispatch
 	if strings.HasPrefix(actionVal, "cmd:") {
 		cmdText := strings.TrimPrefix(actionVal, "cmd:")
-		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
+		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey, inThread: isThreadSessionKey(sessionKey)}
 
 		slog.Info(p.tag()+": card action dispatched as command", "cmd", cmdText, "user", userID)
 
@@ -820,20 +826,35 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	}
 	mentions := msg.Mentions
 	parentID := stringValue(msg.ParentId)
+	rootID := stringValue(msg.RootId)
 
 	sessionKey := p.makeSessionKey(msg, chatID, userID)
-	rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
-	slog.Debug(p.tag()+": routed inbound message",
+	// Record which session this message belongs to, so that if a bot reply
+	// creates a nested thread on this message, subsequent messages in that
+	// thread can be routed back to the same session.
+	if p.threadIsolation {
+		p.msgSessionMap.Store(messageID, sessionKey)
+	}
+	threadID := stringValue(msg.ThreadId)
+	rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey, inThread: threadID != ""}
+	mappedFrom := ""
+	if v, ok := p.msgSessionMap.Load(rootID); ok {
+		mappedFrom = v.(string)
+	}
+	slog.Info(p.tag()+": routed inbound message",
 		"message_id", messageID,
+		"root_id", rootID,
+		"parent_id", parentID,
 		"session_key", sessionKey,
-		"reply_in_thread", p.shouldReplyInThread(rctx),
+		"in_thread", rctx.inThread,
+		"msgSessionMap_hit", mappedFrom,
 	)
 
 	// Dispatch message handling asynchronously so the SDK event loop is not
 	// blocked by IO-heavy operations (image/audio download, handler HTTP calls).
 	// The dedup and old-message checks above remain synchronous to guarantee
 	// correctness before spawning the goroutine.
-	go p.dispatchMessage(ctx, msgType, content, mentions, messageID, sessionKey, userID, chatID, rctx, parentID)
+	go p.dispatchMessage(ctx, msgType, content, mentions, messageID, sessionKey, userID, chatID, rctx, parentID, rootID)
 
 	return nil
 }
@@ -841,7 +862,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 // dispatchMessage handles the message content parsing, media download, and
 // handler invocation. It runs in its own goroutine so that onMessage returns
 // quickly and does not block the SDK event loop.
-func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string, mentions []*larkim.MentionEvent, messageID, sessionKey, userID, chatID string, rctx replyContext, parentID string) {
+func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string, mentions []*larkim.MentionEvent, messageID, sessionKey, userID, chatID string, rctx replyContext, parentID, rootID string) {
 	// Resolve user and chat names asynchronously so SDK dispatcher is not blocked.
 	userName := ""
 	if userID != "" {
@@ -849,11 +870,21 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 	}
 	chatName := p.resolveChatName(chatID)
 
-	// If this message is a reply to another message, fetch the quoted content
-	// and prepend it so the agent has full context.
+	// Determine context prefix based on parent/root relationship:
+	// - parentID == rootID: thread-level reply (Feishu auto-sets parent to root).
+	//   Only inject root message content on the first message of this session.
+	// - parentID != rootID: explicit quote-reply to a specific sub-message.
+	//   Always inject the quoted message content.
 	quotedPrefix := ""
 	if parentID != "" {
-		quotedPrefix = p.fetchQuotedMessage(ctx, parentID)
+		if rootID != "" && parentID == rootID {
+			// Thread root context: only inject once per session.
+			if _, alreadySent := p.rootContextSent.LoadOrStore(sessionKey, true); !alreadySent {
+				quotedPrefix = p.fetchThreadRootMessage(ctx, parentID)
+			}
+		} else {
+			quotedPrefix = p.fetchQuotedMessage(ctx, parentID)
+		}
 	}
 
 	switch msgType {
@@ -1393,6 +1424,35 @@ func formatReplyChain(chain []chainMessage) string {
 	}
 	b.WriteString("---\n\n")
 	return b.String()
+}
+
+const threadRootMaxLen = 2000
+
+// fetchThreadRootMessage retrieves the thread root message and formats it with
+// a distinct prefix. Content is truncated to threadRootMaxLen characters to
+// avoid excessive token usage. Returns empty string on any failure (graceful
+// degradation).
+func (p *Platform) fetchThreadRootMessage(ctx context.Context, rootID string) string {
+	raw := p.fetchQuotedMessage(ctx, rootID)
+	if raw == "" {
+		return ""
+	}
+	const oldPrefix = "[Quoted message from "
+	const newPrefix = "[Thread root message from "
+	result := raw
+	if strings.HasPrefix(raw, oldPrefix) {
+		result = newPrefix + raw[len(oldPrefix):]
+	}
+	if idx := strings.Index(result, "]:\n"); idx >= 0 {
+		header := result[:idx+len("]:\n")]
+		body := result[idx+len("]:\n"):]
+		body = strings.TrimSuffix(body, "\n\n")
+		if len(body) > threadRootMaxLen {
+			body = body[:threadRootMaxLen] + "[...truncated]"
+		}
+		result = header + body + "\n\n"
+	}
+	return result
 }
 
 // extractPostPlainText extracts plain text from a Lark post (rich text) JSON content.
@@ -2485,6 +2545,13 @@ func (p *Platform) makeSessionKey(msg *larkim.EventMessage, chatID, userID strin
 			rootID = stringValue(msg.MessageId)
 		}
 		if rootID != "" {
+			// When a bot reply creates a nested thread on a user's message,
+			// subsequent messages in that thread have root_id = user's messageID.
+			// Look up whether that root was a message in an existing session
+			// and reuse that session key to maintain conversation continuity.
+			if mapped, ok := p.msgSessionMap.Load(rootID); ok {
+				return mapped.(string)
+			}
 			return fmt.Sprintf("%s:%s:root:%s", p.tag(), chatID, rootID)
 		}
 	}
@@ -2510,7 +2577,10 @@ func (p *Platform) shouldReplyInThread(rc replyContext) bool {
 	if rc.messageID == "" {
 		return false
 	}
-	return p.threadIsolation && isThreadSessionKey(rc.sessionKey)
+	if rc.inThread {
+		return true // message is in a thread → always reply in thread
+	}
+	return p.replyInThread // not in a thread → reply_in_thread config decides
 }
 
 // shouldUseThreadOrReplyAPI is true when we should call Im.Message.Reply (optionally with ReplyInThread).
@@ -2551,6 +2621,20 @@ func (p *Platform) replyMessage(ctx context.Context, rc replyContext, msgType, c
 			}
 			if !resp.Success() {
 				return fmt.Errorf("%s: reply failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+			}
+			if resp.Data != nil && resp.Data.MessageId != nil {
+				botMsgID := *resp.Data.MessageId
+				slog.Info(p.tag()+": bot reply sent",
+					"bot_reply_id", botMsgID,
+					"reply_to", rc.messageID,
+					"session_key", rc.sessionKey,
+				)
+				// Track bot reply in msgSessionMap so that if a user opens
+				// a thread on this reply, the thread can be traced back to
+				// the same session.
+				if p.threadIsolation && rc.sessionKey != "" {
+					p.msgSessionMap.Store(botMsgID, rc.sessionKey)
+				}
 			}
 			return nil
 		})
@@ -2742,9 +2826,24 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	if len(parts) == 3 {
 		if rootID, ok := parseThreadRootID(parts[2]); ok {
 			rc.messageID = rootID
+			rc.inThread = true
 		}
 	}
 	return rc, nil
+}
+
+// ResolveCronReplyTarget implements CronReplyTargetResolver. For cron jobs,
+// return a replyContext with only chatID (no messageID) so that Send() uses
+// sendNewMessageToChat instead of ReplyInThread. Without this, cron jobs
+// bound to a thread-isolated session key (feishu:chat:root:msgID) would
+// reply inside a thread rather than posting a new message in the group.
+func (p *Platform) ResolveCronReplyTarget(sessionKey string, title string) (string, any, error) {
+	parts := strings.SplitN(sessionKey, ":", 3)
+	if len(parts) < 2 || parts[0] != p.platformName {
+		return "", nil, fmt.Errorf("%s: invalid session key %q", p.tag(), sessionKey)
+	}
+	rc := replyContext{chatID: parts[1], sessionKey: sessionKey}
+	return sessionKey, rc, nil
 }
 
 func parseThreadRootID(sessionTail string) (string, bool) {
@@ -3223,6 +3322,10 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 		if resp.Data != nil && resp.Data.MessageId != nil {
 			msgID = *resp.Data.MessageId
 		}
+		// Track preview card message for session continuity
+		if p.threadIsolation && msgID != "" && rc.sessionKey != "" {
+			p.msgSessionMap.Store(msgID, rc.sessionKey)
+		}
 	} else {
 		req := larkim.NewCreateMessageReqBuilder().
 			ReceiveIdType(larkim.ReceiveIdTypeChatId).
@@ -3250,6 +3353,10 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 		}
 		if resp.Data != nil && resp.Data.MessageId != nil {
 			msgID = *resp.Data.MessageId
+		}
+		// Track preview card message for session continuity
+		if p.threadIsolation && msgID != "" && rc.sessionKey != "" {
+			p.msgSessionMap.Store(msgID, rc.sessionKey)
 		}
 	}
 
