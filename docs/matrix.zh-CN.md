@@ -90,6 +90,8 @@ access_token = "syt_xxx_xxx"
 # user_id = "@bot:matrix.org"        # 省略则自动检测
 # allow_from = "*"                   # "*" = 所有用户，或 "id1,id2"
 # auto_join = true                   # 自动接受房间邀请（默认：true）
+# auto_verify = true                 # 自动接受 SAS 密钥验证（默认：true）
+# cross_signing_password = ""        # 用于跨签名初始化的 bot 账号密码（一次性）
 # share_session_in_channel = false   # true = 房间内所有用户共享一个会话
 # group_reply_all = false            # true = 回复群聊中的所有消息
 # proxy = ""                         # HTTP/SOCKS5 代理，例如 "http://proxy:8080"
@@ -170,6 +172,8 @@ level=INFO msg="cc-connect is running" projects=1
 | `user_id` | 否 | 自动检测 | Matrix 用户 ID（如 `@bot:matrix.org`） |
 | `allow_from` | 否 | `"*"` | 允许交互的用户 ID 列表，逗号分隔，或 `"*"` 表示所有人 |
 | `auto_join` | 否 | `true` | 自动接受房间邀请 |
+| `auto_verify` | 否 | `true` | 自动接受 SAS 密钥验证请求 |
+| `cross_signing_password` | 否 | `""` | Bot 账号密码，用于跨签名密钥初始化（一次性，仅首次运行或密钥重置时需要） |
 | `share_session_in_channel` | 否 | `false` | 房间内所有用户共享同一个 Agent 会话 |
 | `group_reply_all` | 否 | `false` | 回复群聊中的所有消息（不仅限于 @ 提及） |
 | `proxy` | 否 | `""` | HTTP 或 SOCKS5 代理 URL |
@@ -234,6 +238,29 @@ curl -XPOST "https://your-homeserver.com/_matrix/client/v3/login" \
 ```
 
 响应中的 `access_token` 即可用于配置。`device_id` 为 `CC-CONNECT`，便于识别和管理。
+
+#### 机器人消息有红叹号（"由未经其所有者验证的设备加密"）？
+
+这说明机器人的设备未被跨签名。cc-connect 首次运行时会自动设置跨签名，但部分 Matrix 服务器需要密码认证（UIA）才能发布跨签名密钥。
+
+如果日志显示 `no supported UIA flow for cross-signing`，请在配置中添加 bot 账号的密码：
+
+```toml
+cross_signing_password = "你的bot密码"
+```
+
+这是一次性操作——跨签名密钥发布并保存后，密码就不再需要了。
+
+#### 如何验证机器人的设备？
+
+cc-connect 会自动接受 SAS 密钥验证请求（`auto_verify = true`，默认开启）。从 Element 验证机器人的步骤：
+
+1. 打开与机器人的私聊
+2. 点击机器人头像 → **验证**（或在 **设置** → **安全** 中找到机器人的设备）
+3. 机器人会自动接受并确认验证
+4. Element 将显示该设备已验证
+
+验证完成后，机器人的加密消息将不再显示警告。
 
 ### 如何使用自建 Matrix 服务器？
 

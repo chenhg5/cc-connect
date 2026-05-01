@@ -930,6 +930,7 @@ app_secret = "your-feishu-app-secret"
 # allow_from = "*"                        # Matrix user IDs, e.g. "@user:matrix.org,@other:example.com"
 # auto_join = true                        # auto-join room invites (default true) / 自动加入被邀请的房间（默认 true）
 # auto_verify = true                     # auto-accept SAS key verification (default true) / 自动接受 SAS 密钥验证（默认 true）
+# cross_signing_password = ""            # bot account password for cross-signing setup (one-time) / 跨签名初始化密码（一次性）
 # share_session_in_channel = false        # share one agent session per room / 房间内所有用户共享会话
 # group_reply_all = false                 # respond to all room messages without @mention / 群聊无需 @ 也响应
 # proxy = ""                              # optional HTTP/SOCKS5 proxy / 可选代理

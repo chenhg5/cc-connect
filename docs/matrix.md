@@ -90,6 +90,8 @@ access_token = "syt_xxx_xxx"
 # user_id = "@bot:matrix.org"        # auto-detected if omitted
 # allow_from = "*"                   # "*" = all users, or "id1,id2"
 # auto_join = true                   # auto-accept room invites (default: true)
+# auto_verify = true                 # auto-accept SAS key verification (default: true)
+# cross_signing_password = ""        # bot account password for cross-signing setup (one-time)
 # share_session_in_channel = false   # true = all users share one session per room
 # group_reply_all = false            # true = respond to all messages in group rooms
 # proxy = ""                         # HTTP/SOCKS5 proxy, e.g. "http://proxy:8080"
@@ -170,6 +172,8 @@ If you see `E2EE not available`, encryption initialization failed. Encrypted roo
 | `user_id` | No | auto-detected | Matrix user ID (e.g. `@bot:matrix.org`) |
 | `allow_from` | No | `"*"` | Comma-separated user IDs allowed to interact, or `"*"` for all |
 | `auto_join` | No | `true` | Automatically accept room invitations |
+| `auto_verify` | No | `true` | Auto-accept SAS key verification requests |
+| `cross_signing_password` | No | `""` | Bot account password for cross-signing key setup (one-time, needed on first run or when keys are reset) |
 | `share_session_in_channel` | No | `false` | Share a single agent session among all users in a room |
 | `group_reply_all` | No | `false` | Respond to all messages in group rooms (not just mentions) |
 | `proxy` | No | `""` | HTTP or SOCKS5 proxy URL |
@@ -234,6 +238,29 @@ curl -XPOST "https://your-homeserver.com/_matrix/client/v3/login" \
 ```
 
 The `access_token` in the response can be used in config. The `device_id` will be `CC-CONNECT`, easy to identify and manage.
+
+#### Red exclamation mark on bot messages ("encrypted by a device not verified by its owner")?
+
+This means the bot's device hasn't been cross-signed. cc-connect automatically sets up cross-signing on first run, but some Matrix servers require password authentication (UIA) to publish the cross-signing keys.
+
+If logs show `no supported UIA flow for cross-signing`, add the bot account's password to config:
+
+```toml
+cross_signing_password = "your-bot-password"
+```
+
+This is a one-time operation — once cross-signing keys are published and saved, the password is no longer needed.
+
+#### How to verify the bot's device?
+
+cc-connect auto-accepts SAS key verification requests (when `auto_verify = true`, which is the default). To verify from Element:
+
+1. Open a DM with the bot
+2. Click the bot's avatar → **Verify** (or go to **Settings** → **Security** → find the bot's device)
+3. The bot will automatically accept and confirm the verification
+4. Element will show the device as verified
+
+After verification, encrypted messages from the bot will no longer show warnings.
 
 ### Q: How to use a self-hosted Matrix server?
 
