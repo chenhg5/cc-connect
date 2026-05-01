@@ -38,16 +38,16 @@ func isValidRunAsUserName(name string) bool {
 }
 
 var dangerousEnvVars = map[string]bool{
-	"LD_PRELOAD":           true,
-	"LD_LIBRARY_PATH":      true,
+	"LD_PRELOAD":            true,
+	"LD_LIBRARY_PATH":       true,
 	"DYLD_INSERT_LIBRARIES": true,
-	"DYLD_LIBRARY_PATH":    true,
-	"PATH":                 true,
-	"HOME":                 true,
-	"USER":                 true,
-	"SHELL":                true,
-	"SUDO_USER":            true,
-	"SUDO_COMMAND":         true,
+	"DYLD_LIBRARY_PATH":     true,
+	"PATH":                  true,
+	"HOME":                  true,
+	"USER":                  true,
+	"SHELL":                 true,
+	"SUDO_USER":             true,
+	"SUDO_COMMAND":          true,
 }
 
 func validateRunAsEnv(prefix string, envVars []string) error {
@@ -87,29 +87,29 @@ type Config struct {
 	AttachmentSend string `toml:"attachment_send"`
 	// Quiet is legacy: when true and [display] does not set thinking_messages / tool_messages,
 	// engines behave as if those flags were false. Per-project quiet overrides when set.
-	Quiet             *bool                   `toml:"quiet,omitempty"`
-	Providers         []ProviderConfig        `toml:"providers"`          // global shared providers
-	ProviderPresetsURL string                 `toml:"provider_presets_url,omitempty"` // remote JSON URL for provider presets
-	Projects          []ProjectConfig         `toml:"projects"`
-	Commands          []CommandConfig         `toml:"commands"`     // global custom slash commands
-	Aliases           []AliasConfig           `toml:"aliases"`      // global command aliases
-	BannedWords       []string                `toml:"banned_words"` // messages containing any of these words are blocked
-	Log               LogConfig               `toml:"log"`
-	Language          string                  `toml:"language"` // "en" or "zh", default is "en"
-	Speech            SpeechConfig            `toml:"speech"`
-	TTS               TTSConfig               `toml:"tts"`
-	Display           DisplayConfig           `toml:"display"`
-	StreamPreview     StreamPreviewConfig     `toml:"stream_preview"`      // real-time streaming preview
-	RateLimit         RateLimitConfig         `toml:"rate_limit"`          // per-session rate limiting
-	OutgoingRateLimit OutgoingRateLimitConfig `toml:"outgoing_rate_limit"` // outgoing message throttling
-	Relay             RelayConfig             `toml:"relay"`               // bot-to-bot relay behavior
-	Cron              CronConfig              `toml:"cron"`
-	Queue             QueueConfig             `toml:"queue"`
-	Webhook           WebhookConfig           `toml:"webhook"`
-	Bridge            BridgeConfig            `toml:"bridge"`
-	Management        ManagementConfig        `toml:"management"`
-	Hooks             []HookConfig            `toml:"hooks"`
-	IdleTimeoutMins   *int                    `toml:"idle_timeout_mins,omitempty"` // max minutes between agent events; 0 = no timeout; default 120
+	Quiet              *bool                   `toml:"quiet,omitempty"`
+	Providers          []ProviderConfig        `toml:"providers"`                      // global shared providers
+	ProviderPresetsURL string                  `toml:"provider_presets_url,omitempty"` // remote JSON URL for provider presets
+	Projects           []ProjectConfig         `toml:"projects"`
+	Commands           []CommandConfig         `toml:"commands"`     // global custom slash commands
+	Aliases            []AliasConfig           `toml:"aliases"`      // global command aliases
+	BannedWords        []string                `toml:"banned_words"` // messages containing any of these words are blocked
+	Log                LogConfig               `toml:"log"`
+	Language           string                  `toml:"language"` // "en" or "zh", default is "en"
+	Speech             SpeechConfig            `toml:"speech"`
+	TTS                TTSConfig               `toml:"tts"`
+	Display            DisplayConfig           `toml:"display"`
+	StreamPreview      StreamPreviewConfig     `toml:"stream_preview"`      // real-time streaming preview
+	RateLimit          RateLimitConfig         `toml:"rate_limit"`          // per-session rate limiting
+	OutgoingRateLimit  OutgoingRateLimitConfig `toml:"outgoing_rate_limit"` // outgoing message throttling
+	Relay              RelayConfig             `toml:"relay"`               // bot-to-bot relay behavior
+	Cron               CronConfig              `toml:"cron"`
+	Queue              QueueConfig             `toml:"queue"`
+	Webhook            WebhookConfig           `toml:"webhook"`
+	Bridge             BridgeConfig            `toml:"bridge"`
+	Management         ManagementConfig        `toml:"management"`
+	Hooks              []HookConfig            `toml:"hooks"`
+	IdleTimeoutMins    *int                    `toml:"idle_timeout_mins,omitempty"` // max minutes between agent events; 0 = no timeout; default 120
 }
 
 // CronConfig controls cron job behavior.
@@ -357,18 +357,18 @@ type ProviderModelConfig struct {
 }
 
 type ProviderConfig struct {
-	Name        string                `toml:"name"`
-	APIKey      string                `toml:"api_key"`
-	BaseURL     string                `toml:"base_url,omitempty"`
-	Model       string                `toml:"model,omitempty"`
-	Models      []ProviderModelConfig `toml:"models,omitempty"`
-	Thinking    string                `toml:"thinking,omitempty"`
-	Env         map[string]string     `toml:"env,omitempty"`
-	AgentTypes      []string                          `toml:"agent_types,omitempty"`       // optional: restrict to specific agent types (e.g. ["claudecode", "codex"])
-	Endpoints       map[string]string                 `toml:"endpoints,omitempty"`         // per-agent-type base URL overrides (e.g. codex = "https://x/v1")
-	AgentModels     map[string]string                 `toml:"agent_models,omitempty"`      // per-agent-type default model (e.g. codex = "openai/gpt-5.3-codex")
-	AgentModelLists map[string][]ProviderModelConfig  `toml:"agent_model_lists,omitempty"` // per-agent-type model lists (overrides Models when matched)
-	Codex           *CodexProviderConfig              `toml:"codex,omitempty"`             // Codex-specific provider settings
+	Name            string                           `toml:"name"`
+	APIKey          string                           `toml:"api_key"`
+	BaseURL         string                           `toml:"base_url,omitempty"`
+	Model           string                           `toml:"model,omitempty"`
+	Models          []ProviderModelConfig            `toml:"models,omitempty"`
+	Thinking        string                           `toml:"thinking,omitempty"`
+	Env             map[string]string                `toml:"env,omitempty"`
+	AgentTypes      []string                         `toml:"agent_types,omitempty"`       // optional: restrict to specific agent types (e.g. ["claudecode", "codex"])
+	Endpoints       map[string]string                `toml:"endpoints,omitempty"`         // per-agent-type base URL overrides (e.g. codex = "https://x/v1")
+	AgentModels     map[string]string                `toml:"agent_models,omitempty"`      // per-agent-type default model (e.g. codex = "openai/gpt-5.3-codex")
+	AgentModelLists map[string][]ProviderModelConfig `toml:"agent_model_lists,omitempty"` // per-agent-type model lists (overrides Models when matched)
+	Codex           *CodexProviderConfig             `toml:"codex,omitempty"`             // Codex-specific provider settings
 }
 
 // CodexProviderConfig holds Codex CLI-specific provider fields
@@ -983,7 +983,7 @@ func (cfg *Config) ResolveProviderRefs() {
 					"provider_agents", gp.AgentTypes, "project_agent", agentType)
 				continue
 			}
-		resolved = append(resolved, gp.ResolveForAgent(agentType))
+			resolved = append(resolved, gp.ResolveForAgent(agentType))
 		}
 		cfg.Projects[i].Agent.Providers = append(resolved, cfg.Projects[i].Agent.Providers...)
 	}
@@ -2638,6 +2638,22 @@ type ProjectSettingsUpdate struct {
 	ReplyFooter          *bool
 	InjectSender         *bool
 	PlatformAllowFrom    map[string]string
+	PlatformOptions      []PlatformOptionsUpdate
+}
+
+// PlatformOptionsUpdate updates non-secret platform options for one platform
+// instance in a project. Index is the zero-based position in [[projects.platforms]].
+type PlatformOptionsUpdate struct {
+	Index   int
+	Type    string
+	Options map[string]any
+}
+
+var editablePlatformOptionKeys = map[string]struct{}{
+	"allow_from":               {},
+	"group_reply_all":          {},
+	"share_session_in_channel": {},
+	"thread_isolation":         {},
 }
 
 // SaveProjectSettings persists project-level settings and the global language to config.toml.
@@ -2766,6 +2782,38 @@ func SaveProjectSettings(projectName string, update ProjectSettingsUpdate) error
 				proj.Platforms[j].Options["allow_from"] = strings.TrimSpace(af)
 			}
 		}
+		for _, platformUpdate := range update.PlatformOptions {
+			if platformUpdate.Index < 0 || platformUpdate.Index >= len(proj.Platforms) {
+				return fmt.Errorf("platform index %d out of range", platformUpdate.Index)
+			}
+			platform := &proj.Platforms[platformUpdate.Index]
+			if !strings.EqualFold(strings.TrimSpace(platformUpdate.Type), strings.TrimSpace(platform.Type)) {
+				return fmt.Errorf("platform index %d type mismatch: got %q, want %q", platformUpdate.Index, platformUpdate.Type, platform.Type)
+			}
+			if platform.Options == nil {
+				platform.Options = map[string]any{}
+			}
+			for key, value := range platformUpdate.Options {
+				normalizedKey := strings.ToLower(strings.TrimSpace(key))
+				if _, ok := editablePlatformOptionKeys[normalizedKey]; !ok {
+					return fmt.Errorf("platform option %q is not editable", key)
+				}
+				switch normalizedKey {
+				case "allow_from":
+					if s, ok := value.(string); ok {
+						platform.Options[normalizedKey] = strings.TrimSpace(s)
+						continue
+					}
+					return fmt.Errorf("platform option %q must be a string", normalizedKey)
+				default:
+					if b, ok := value.(bool); ok {
+						platform.Options[normalizedKey] = b
+						continue
+					}
+					return fmt.Errorf("platform option %q must be a boolean", normalizedKey)
+				}
+			}
+		}
 		return saveConfig(cfg)
 	}
 	return fmt.Errorf("project %q not found", projectName)
@@ -2808,10 +2856,19 @@ func GetProjectConfigDetails(projectName string) map[string]any {
 		}
 		platConfigs := make([]map[string]any, len(p.Platforms))
 		for j, plat := range p.Platforms {
-			pc := map[string]any{"type": plat.Type}
+			pc := map[string]any{"index": j, "type": plat.Type}
 			if plat.Options != nil {
 				if af, ok := plat.Options["allow_from"].(string); ok {
 					pc["allow_from"] = af
+				}
+				options := make(map[string]any)
+				for key := range editablePlatformOptionKeys {
+					if value, ok := plat.Options[key]; ok {
+						options[key] = value
+					}
+				}
+				if len(options) > 0 {
+					pc["options"] = options
 				}
 			}
 			platConfigs[j] = pc

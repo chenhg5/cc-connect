@@ -884,6 +884,17 @@ func main() {
 				ReplyFooter:          u.ReplyFooter,
 				InjectSender:         u.InjectSender,
 				PlatformAllowFrom:    u.PlatformAllowFrom,
+				PlatformOptions: func() []config.PlatformOptionsUpdate {
+					updates := make([]config.PlatformOptionsUpdate, 0, len(u.PlatformOptions))
+					for _, platformUpdate := range u.PlatformOptions {
+						updates = append(updates, config.PlatformOptionsUpdate{
+							Index:   platformUpdate.Index,
+							Type:    platformUpdate.Type,
+							Options: platformUpdate.Options,
+						})
+					}
+					return updates
+				}(),
 			})
 		})
 		mgmtSrv.SetGetProjectConfig(config.GetProjectConfigDetails)

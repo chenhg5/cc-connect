@@ -303,6 +303,52 @@ func TestMgmt_ProjectPatch(t *testing.T) {
 	}
 }
 
+func TestMgmt_ProjectPatch_PlatformOptionsRequireRestart(t *testing.T) {
+	mgmt, ts, _ := testManagementServer(t, "tok")
+
+	var saved ProjectSettingsUpdate
+	mgmt.SetSaveProjectSettings(func(_ string, update ProjectSettingsUpdate) error {
+		saved = update
+		return nil
+	})
+
+	r := mgmtPatch(t, ts.URL+"/api/v1/projects/test-project", "tok", map[string]any{
+		"platform_options": []map[string]any{
+			{
+				"index": 0,
+				"type":  "telegram",
+				"options": map[string]any{
+					"allow_from":               "123",
+					"group_reply_all":          true,
+					"share_session_in_channel": false,
+				},
+			},
+		},
+	})
+	if !r.OK {
+		t.Fatalf("patch failed: %s", r.Error)
+	}
+	var data map[string]any
+	if err := json.Unmarshal(r.Data, &data); err != nil {
+		t.Fatalf("decode data: %v", err)
+	}
+	if data["restart_required"] != true {
+		t.Fatalf("restart_required = %#v, want true", data["restart_required"])
+	}
+	if len(saved.PlatformOptions) != 1 {
+		t.Fatalf("saved platform options = %#v", saved.PlatformOptions)
+	}
+	if saved.PlatformOptions[0].Index != 0 || saved.PlatformOptions[0].Type != "telegram" {
+		t.Fatalf("saved platform target = %#v", saved.PlatformOptions[0])
+	}
+	if saved.PlatformOptions[0].Options["group_reply_all"] != true {
+		t.Fatalf("group_reply_all = %#v, want true", saved.PlatformOptions[0].Options["group_reply_all"])
+	}
+	if saved.PlatformOptions[0].Options["share_session_in_channel"] != false {
+		t.Fatalf("share_session_in_channel = %#v, want false", saved.PlatformOptions[0].Options["share_session_in_channel"])
+	}
+}
+
 func TestMgmt_Sessions(t *testing.T) {
 	_, ts, e := testManagementServer(t, "tok")
 

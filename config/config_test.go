@@ -1600,6 +1600,16 @@ func stringMapValue(m map[string]any, key string) string {
 	return ""
 }
 
+func boolMapValue(m map[string]any, key string) bool {
+	if m == nil {
+		return false
+	}
+	if v, ok := m[key].(bool); ok {
+		return v
+	}
+	return false
+}
+
 const baseConfigTOML = `
 [[projects]]
 name = "demo"
@@ -2308,6 +2318,86 @@ func TestSaveProjectSettings_ExtraFields(t *testing.T) {
 	}
 }
 
+func TestSaveProjectSettings_PlatformOptionsByIndex(t *testing.T) {
+	configPath := writeConfigFixture(t, `
+[[projects]]
+name = "alpha"
+
+[projects.agent]
+type = "codex"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+token = "token_one"
+group_reply_all = true
+share_session_in_channel = true
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+token = "token_two"
+group_reply_all = true
+share_session_in_channel = false
+`)
+	patchConfigPath(t, configPath)
+
+	err := SaveProjectSettings("alpha", ProjectSettingsUpdate{
+		PlatformOptions: []PlatformOptionsUpdate{
+			{
+				Index: 1,
+				Type:  "telegram",
+				Options: map[string]any{
+					"allow_from":               "123,456",
+					"group_reply_all":          false,
+					"share_session_in_channel": true,
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("SaveProjectSettings: %v", err)
+	}
+
+	cfg := readConfigFixture(t, configPath)
+	first := cfg.Projects[0].Platforms[0].Options
+	second := cfg.Projects[0].Platforms[1].Options
+	if boolMapValue(first, "group_reply_all") != true {
+		t.Fatalf("first group_reply_all changed: %#v", first["group_reply_all"])
+	}
+	if stringMapValue(first, "allow_from") != "" {
+		t.Fatalf("first allow_from = %q, want empty", stringMapValue(first, "allow_from"))
+	}
+	if boolMapValue(second, "group_reply_all") != false {
+		t.Fatalf("second group_reply_all = %#v, want false", second["group_reply_all"])
+	}
+	if boolMapValue(second, "share_session_in_channel") != true {
+		t.Fatalf("second share_session_in_channel = %#v, want true", second["share_session_in_channel"])
+	}
+	if stringMapValue(second, "allow_from") != "123,456" {
+		t.Fatalf("second allow_from = %q, want 123,456", stringMapValue(second, "allow_from"))
+	}
+}
+
+func TestSaveProjectSettings_PlatformOptionsRejectSecret(t *testing.T) {
+	configPath := writeConfigFixture(t, feishuConfigFixture)
+	patchConfigPath(t, configPath)
+
+	err := SaveProjectSettings("alpha", ProjectSettingsUpdate{
+		PlatformOptions: []PlatformOptionsUpdate{
+			{Index: 0, Type: "telegram", Options: map[string]any{"token": "new-token"}},
+		},
+	})
+	if err == nil {
+		t.Fatal("SaveProjectSettings accepted secret option")
+	}
+	if !strings.Contains(err.Error(), "not editable") {
+		t.Fatalf("error = %q, want not editable", err)
+	}
+}
+
 func TestGetProjectConfigDetails(t *testing.T) {
 	configPath := writeConfigFixture(t, feishuConfigFixture)
 	patchConfigPath(t, configPath)
@@ -2322,6 +2412,51 @@ func TestGetProjectConfigDetails(t *testing.T) {
 	pcs, ok := details["platform_configs"].([]map[string]any)
 	if !ok || len(pcs) < 2 {
 		t.Fatalf("platform_configs = %#v", details["platform_configs"])
+	}
+}
+
+func TestGetProjectConfigDetails_PlatformOptionsRedactsSecrets(t *testing.T) {
+	configPath := writeConfigFixture(t, `
+[[projects]]
+name = "alpha"
+
+[projects.agent]
+type = "codex"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+token = "token_one"
+allow_from = "123"
+group_reply_all = true
+share_session_in_channel = false
+`)
+	patchConfigPath(t, configPath)
+
+	details := GetProjectConfigDetails("alpha")
+	pcs, ok := details["platform_configs"].([]map[string]any)
+	if !ok || len(pcs) != 1 {
+		t.Fatalf("platform_configs = %#v", details["platform_configs"])
+	}
+	if pcs[0]["index"] != 0 {
+		t.Fatalf("index = %#v, want 0", pcs[0]["index"])
+	}
+	options, ok := pcs[0]["options"].(map[string]any)
+	if !ok {
+		t.Fatalf("options = %#v", pcs[0]["options"])
+	}
+	if _, ok := options["token"]; ok {
+		t.Fatal("options leaked token")
+	}
+	if options["allow_from"] != "123" {
+		t.Fatalf("allow_from = %#v, want 123", options["allow_from"])
+	}
+	if options["group_reply_all"] != true {
+		t.Fatalf("group_reply_all = %#v, want true", options["group_reply_all"])
+	}
+	if options["share_session_in_channel"] != false {
+		t.Fatalf("share_session_in_channel = %#v, want false", options["share_session_in_channel"])
 	}
 }
 

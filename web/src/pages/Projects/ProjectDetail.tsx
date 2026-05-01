@@ -52,7 +52,8 @@ export default function ProjectDetail() {
   const [showCtxIndicator, setShowCtxIndicator] = useState(true);
   const [replyFooter, setReplyFooter] = useState(true);
   const [injectSender, setInjectSender] = useState(false);
-  const [platformAllowFrom, setPlatformAllowFrom] = useState<Record<string, string>>({});
+  const [platformOptions, setPlatformOptions] = useState<Record<number, Record<string, any>>>({});
+  const [initialPlatformOptions, setInitialPlatformOptions] = useState<Record<number, Record<string, any>>>({});
   const [saving, setSaving] = useState(false);
 
   // Agent type
@@ -139,11 +140,18 @@ export default function ProjectDetail() {
         setReplyFooter(proj.value.reply_footer !== false);
         setInjectSender(proj.value.inject_sender === true);
         setProviderRefs(proj.value.provider_refs || []);
-        const afMap: Record<string, string> = {};
+        const optionsMap: Record<number, Record<string, any>> = {};
         proj.value.platform_configs?.forEach(pc => {
-          if (pc.allow_from !== undefined) afMap[pc.type] = pc.allow_from;
+          const idx = pc.index ?? -1;
+          if (idx >= 0) {
+            optionsMap[idx] = {
+              ...(pc.options || {}),
+              ...(pc.allow_from !== undefined ? { allow_from: pc.allow_from } : {}),
+            };
+          }
         });
-        setPlatformAllowFrom(afMap);
+        setPlatformOptions(optionsMap);
+        setInitialPlatformOptions(optionsMap);
       }
       if (provs.status === 'fulfilled') {
         setProviders(provs.value.providers || []);
@@ -176,6 +184,16 @@ export default function ProjectDetail() {
     setSaving(true);
     try {
       const agentTypeChanged = project && selectedAgentType !== project.agent_type;
+      const changedPlatformOptions = (project?.platform_configs || [])
+        .map(pc => {
+          const index = pc.index ?? -1;
+          return {
+            index,
+            type: pc.type,
+            options: platformOptions[index] || {},
+          };
+        })
+        .filter(pc => pc.index >= 0 && JSON.stringify(pc.options) !== JSON.stringify(initialPlatformOptions[pc.index] || {}));
       const res = await updateProject(name, {
         language,
         admin_from: adminFrom,
@@ -186,7 +204,7 @@ export default function ProjectDetail() {
         show_context_indicator: showCtxIndicator,
         reply_footer: replyFooter,
         inject_sender: injectSender,
-        platform_allow_from: platformAllowFrom,
+        ...(changedPlatformOptions.length > 0 ? { platform_options: changedPlatformOptions } : {}),
       });
       if (res && (res as any).restart_required) {
         setShowRestartModal(true);
@@ -572,20 +590,56 @@ export default function ProjectDetail() {
           </div>
         </Card>
 
-        {/* Per-platform allow_from */}
-        {project.platform_configs && project.platform_configs.length > 0 && (
+        {/* Per-platform rules */}
+        {(project.platform_configs || []).length > 0 && (
         <Card>
-          <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-4">{t('projects.platformAccess', 'Platform access control')}</h3>
-          <div className="space-y-3 max-w-lg">
-            {project.platform_configs.map(pc => (
-              <Input
-                key={pc.type}
-                label={`${pc.type} — ${t('fields.allowFrom')}`}
-                value={platformAllowFrom[pc.type] ?? pc.allow_from ?? ''}
-                onChange={(e) => setPlatformAllowFrom(prev => ({ ...prev, [pc.type]: e.target.value }))}
-                placeholder='user1,user2 or *'
-              />
-            ))}
+          <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-4">{t('projects.platformRules', 'Platform rules')}</h3>
+          <div className="space-y-4 max-w-2xl">
+            {(project.platform_configs || []).map((pc, order, platformConfigs) => {
+              const index = pc.index ?? order;
+              const opts = platformOptions[index] || {};
+              const setPlatformOption = (key: string, value: any) => {
+                setPlatformOptions(prev => ({
+                  ...prev,
+                  [index]: {
+                    ...(prev[index] || {}),
+                    [key]: value,
+                  },
+                }));
+              };
+              return (
+                <div key={`${pc.type}-${index}`} className="rounded-lg border border-gray-200 dark:border-gray-700 p-3 space-y-3">
+                  <div className="flex items-center gap-2">
+                    <Badge>{pc.type}</Badge>
+                    {platformConfigs.filter(item => item.type === pc.type).length > 1 && (
+                      <span className="text-[11px] text-gray-400">#{index + 1}</span>
+                    )}
+                  </div>
+                  <Input
+                    label={t('fields.allowFrom')}
+                    value={opts.allow_from ?? pc.allow_from ?? ''}
+                    onChange={(e) => setPlatformOption('allow_from', e.target.value)}
+                    placeholder='user1,user2 or *'
+                  />
+                  {pc.type === 'telegram' && (
+                    <>
+                      <RuleToggle
+                        label={t('fields.groupReplyAll')}
+                        hint={t('projects.groupReplyAllHint', 'When disabled, group chats only respond to messages directed at the bot.')}
+                        checked={opts.group_reply_all === true}
+                        onChange={(checked) => setPlatformOption('group_reply_all', checked)}
+                      />
+                      <RuleToggle
+                        label={t('fields.sharedGroupSession')}
+                        hint={t('projects.sharedSessionHint', 'When enabled, users in the same group or forum topic share one session. Changes affect future session keys after restart.')}
+                        checked={opts.share_session_in_channel === true}
+                        onChange={(checked) => setPlatformOption('share_session_in_channel', checked)}
+                      />
+                    </>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </Card>
         )}
@@ -696,6 +750,34 @@ export default function ProjectDetail() {
           </div>
         </div>
       </Modal>
+    </div>
+  );
+}
+
+function RuleToggle({
+  label,
+  hint,
+  checked,
+  onChange,
+}: {
+  label: string;
+  hint: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-4">
+      <div className="min-w-0">
+        <label className="text-sm font-medium text-gray-700 dark:text-gray-300">{label}</label>
+        <p className="text-[11px] text-gray-400 mt-0.5">{hint}</p>
+      </div>
+      <button
+        type="button"
+        onClick={() => onChange(!checked)}
+        className={cn('w-10 h-6 rounded-full transition-colors shrink-0', checked ? 'bg-accent' : 'bg-gray-300 dark:bg-gray-700')}
+      >
+        <div className={cn('w-4 h-4 bg-white rounded-full transition-transform mx-1', checked ? 'translate-x-4' : 'translate-x-0')} />
+      </button>
     </div>
   );
 }
