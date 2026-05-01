@@ -19,6 +19,7 @@ import (
 	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/crypto"
 	"maunium.net/go/mautrix/crypto/cryptohelper"
+	"maunium.net/go/mautrix/crypto/verificationhelper"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/format"
 	"maunium.net/go/mautrix/id"
@@ -41,6 +42,7 @@ type Platform struct {
 	shareSessionInChan  bool
 	groupReplyAll       bool
 	autoJoin            bool
+	autoVerify          bool
 	proxyURL            string
 
 	mu                  sync.RWMutex
@@ -56,6 +58,9 @@ type Platform struct {
 	dedup               core.MessageDedup
 	httpClient          *http.Client
 	cryptoHelper        *cryptohelper.CryptoHelper
+	verificationHelper  *verificationhelper.VerificationHelper
+	verifyDeviceID      id.DeviceID
+		crossSigningPassword   string
 }
 
 const (
@@ -86,7 +91,15 @@ func New(opts map[string]any) (core.Platform, error) {
 			autoJoin = true // default true
 		}
 	}
+	autoVerify, _ := opts["auto_verify"].(bool)
+	if !autoVerify {
+		_, hasKey := opts["auto_verify"]
+		if !hasKey {
+			autoVerify = true // default true
+		}
+	}
 	proxyURL, _ := opts["proxy"].(string)
+		crossSigningPassword, _ := opts["cross_signing_password"].(string)
 
 	httpClient := &http.Client{Timeout: 120 * time.Second}
 	if proxyURL != "" {
@@ -107,6 +120,8 @@ func New(opts map[string]any) (core.Platform, error) {
 		shareSessionInChan: shareSession,
 		autoJoin:           autoJoin,
 		proxyURL:           proxyURL,
+			autoVerify:         autoVerify,
+		crossSigningPassword: crossSigningPassword,
 		httpClient:         httpClient,
 		dedup:              core.MessageDedup{},
 	}, nil
@@ -214,8 +229,52 @@ func (p *Platform) runConnection(ctx context.Context) error {
 		ch.DecryptErrorCallback = func(evt *event.Event, decryptErr error) {
 			slog.Warn("matrix: decrypt failed", "event_id", evt.ID, "sender", evt.Sender, "room", evt.RoomID, "error", decryptErr)
 		}
+		ch.CustomPostDecrypt = func(ctx context.Context, evt *event.Event) {
+			slog.Info("matrix: decrypted event", "type", evt.Type.Type, "event_id", evt.ID, "sender", evt.Sender, "room", evt.RoomID)
+
+			// Fix transaction ID for in-room verification events from other users.
+			// The verificationhelper's wrapHandler uses evt.ID as the transaction ID,
+			// but for in-room events the correct transaction ID is in m.relates_to.event_id
+			// (pointing to the original m.key.verification.request message).
+			if evt.RoomID != "" && evt.Sender != client.UserID && strings.HasPrefix(evt.Type.Type, "m.key.verification.") {
+				if relatable, ok := evt.Content.Parsed.(event.Relatable); ok {
+					if rel := relatable.OptionalGetRelatesTo(); rel != nil && rel.EventID != "" {
+						slog.Info("matrix: fixing verification event txn ID", "original_id", evt.ID, "txn_id", rel.EventID)
+						evt.ID = rel.EventID
+					}
+				}
+			}
+
+
+			// Workaround for mautrix library bug: onVerificationMAC uses
+			// GetOwnCrossSigningPublicKeys() instead of GetCrossSigningPublicKeys(ctx, theirUserID)
+			// for cross-user verification, causing "unknown key ID" errors.
+			// Intercept MAC events from other users and handle device trust directly.
+			if evt.Type.Type == "m.key.verification.mac" && evt.RoomID != "" && evt.Sender != client.UserID {
+				p.handleVerificationMAC(ctx, client, ch, evt)
+				return
+			}
+			client.Syncer.(mautrix.DispatchableSyncer).Dispatch(ctx, evt)
+		}
 		p.setCryptoHelper(ch)
 		slog.Info("matrix: E2EE enabled", "device_id", client.DeviceID)
+
+		// Bootstrap cross-signing: generate keys, publish to server,
+		// and sign our own device. Without this, Element shows
+		// "encrypted by a device not verified by its owner".
+		p.setupCrossSigning(ctx, ch)
+
+		// client.Crypto must be set for VerificationHelper
+		client.Crypto = ch
+
+		// Initialize SAS verification helper (auto-accept verification requests)
+		if p.autoVerify {
+			if vErr := p.initVerification(ctx, ch); vErr != nil {
+				slog.Warn("matrix: verification helper not available", "error", vErr)
+			} else {
+				slog.Info("matrix: SAS verification enabled (auto-verify)")
+			}
+		}
 	}
 
 	slog.Info("matrix: connected", "user_id", selfUserID)
@@ -895,6 +954,18 @@ func (p *Platform) setCryptoHelper(ch *cryptohelper.CryptoHelper) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.cryptoHelper = ch
+}
+
+func (p *Platform) getVerificationHelper() *verificationhelper.VerificationHelper {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.verificationHelper
+}
+
+func (p *Platform) setVerificationHelper(vh *verificationhelper.VerificationHelper) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.verificationHelper = vh
 }
 
 func (p *Platform) closeCryptoHelper() {

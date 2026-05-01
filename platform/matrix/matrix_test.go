@@ -76,6 +76,29 @@ func TestNew_AutoJoinExplicitFalse(t *testing.T) {
 	}
 }
 
+func TestNew_AutoVerifyDefault(t *testing.T) {
+	p, _ := New(map[string]any{
+		"homeserver":   "https://matrix.org",
+		"access_token": "tok",
+	})
+	plat := p.(*Platform)
+	if !plat.autoVerify {
+		t.Error("autoVerify should default to true when not specified")
+	}
+}
+
+func TestNew_AutoVerifyExplicitFalse(t *testing.T) {
+	p, _ := New(map[string]any{
+		"homeserver":   "https://matrix.org",
+		"access_token": "tok",
+		"auto_verify":  false,
+	})
+	plat := p.(*Platform)
+	if plat.autoVerify {
+		t.Error("autoVerify should be false when explicitly set to false")
+	}
+}
+
 func TestNew_ProxyInvalidURL(t *testing.T) {
 	_, err := New(map[string]any{
 		"homeserver":   "https://matrix.org",
