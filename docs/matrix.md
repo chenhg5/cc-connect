@@ -203,7 +203,11 @@ Make sure `auto_join = true` (this is the default). If the bot was already invit
 
 ### Q: E2EE (End-to-End Encryption)
 
-cc-connect automatically supports encrypted rooms (E2EE) with no extra configuration. If you see `matrix: E2EE enabled` at startup, encryption is working.
+cc-connect supports encrypted rooms (E2EE) when built with the `goolm` build tag. If you see `matrix: E2EE enabled` at startup, encryption is working. If you see `matrix: E2EE not available (build with -tags goolm to enable)`, rebuild with E2EE support:
+
+```bash
+go build -tags goolm ./cmd/cc-connect
+```
 
 > **Note**: To remove the red question mark ("encrypted by a device not verified by its owner") on bot messages, cross-signing must be set up. cc-connect does this automatically on first run, but some servers require `cross_signing_password` in config for the initial setup. See the red question mark FAQ below.
 

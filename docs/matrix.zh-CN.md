@@ -203,7 +203,11 @@ allow_from = "@alice:matrix.org,@bob:matrix.org"
 
 ### E2EE（端到端加密）
 
-cc-connect 自动支持加密房间（E2EE），无需额外配置。启动时如果看到 `matrix: E2EE enabled`，说明加密功能正常。
+cc-connect 需要使用 `goolm` build tag 编译才能支持加密房间（E2EE）。启动时如果看到 `matrix: E2EE enabled`，说明加密功能正常。如果看到 `matrix: E2EE not available (build with -tags goolm to enable)`，需要重新编译：
+
+```bash
+go build -tags goolm ./cmd/cc-connect
+```
 
 > **注意**：要消除机器人消息上的红问号（"由未经其所有者验证的设备加密"），需要完成跨签名设置。cc-connect 会在首次运行时自动设置，但部分服务器需要在配置中设置 `cross_signing_password`。详见下方红问号相关常见问题。
 

@@ -2,14 +2,11 @@ package matrix
 
 import (
 	"context"
-	"crypto/sha256"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -17,9 +14,6 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 
 	"maunium.net/go/mautrix"
-	"maunium.net/go/mautrix/crypto"
-	"maunium.net/go/mautrix/crypto/cryptohelper"
-	"maunium.net/go/mautrix/crypto/verificationhelper"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/format"
 	"maunium.net/go/mautrix/id"
@@ -57,9 +51,7 @@ type Platform struct {
 	unavailableNotified  bool
 	dedup                core.MessageDedup
 	httpClient           *http.Client
-	cryptoHelper         *cryptohelper.CryptoHelper
-	verificationHelper   *verificationhelper.VerificationHelper
-	verifyDeviceID       id.DeviceID
+	cryptoHelper         any // *cryptohelper.CryptoHelper when built with goolm tag
 	crossSigningPassword string
 }
 
@@ -222,59 +214,7 @@ func (p *Platform) runConnection(ctx context.Context) error {
 	}
 
 	// Initialize E2EE crypto helper
-	ch, err := p.initCrypto(ctx, client)
-	if err != nil {
-		slog.Warn("matrix: E2EE not available, encrypted rooms won't work", "error", err)
-	} else {
-		ch.DecryptErrorCallback = func(evt *event.Event, decryptErr error) {
-			slog.Warn("matrix: decrypt failed", "event_id", evt.ID, "sender", evt.Sender, "room", evt.RoomID, "error", decryptErr)
-		}
-		ch.CustomPostDecrypt = func(ctx context.Context, evt *event.Event) {
-			slog.Debug("matrix: decrypted event", "type", evt.Type.Type, "event_id", evt.ID, "sender", evt.Sender, "room", evt.RoomID)
-
-			// Fix transaction ID for in-room verification events from other users.
-			// The verificationhelper's wrapHandler uses evt.ID as the transaction ID,
-			// but for in-room events the correct transaction ID is in m.relates_to.event_id
-			// (pointing to the original m.key.verification.request message).
-			if evt.RoomID != "" && evt.Sender != client.UserID && strings.HasPrefix(evt.Type.Type, "m.key.verification.") {
-				if relatable, ok := evt.Content.Parsed.(event.Relatable); ok {
-					if rel := relatable.OptionalGetRelatesTo(); rel != nil && rel.EventID != "" {
-						slog.Debug("matrix: fixing verification event txn ID", "original_id", evt.ID, "txn_id", rel.EventID)
-						evt.ID = rel.EventID
-					}
-				}
-			}
-
-			// Workaround for mautrix library bug: onVerificationMAC uses
-			// GetOwnCrossSigningPublicKeys() instead of GetCrossSigningPublicKeys(ctx, theirUserID)
-			// for cross-user verification, causing "unknown key ID" errors.
-			// Intercept MAC events from other users and handle device trust directly.
-			if evt.Type.Type == "m.key.verification.mac" && evt.RoomID != "" && evt.Sender != client.UserID {
-				p.handleVerificationMAC(ctx, client, ch, evt)
-				return
-			}
-			client.Syncer.(mautrix.DispatchableSyncer).Dispatch(ctx, evt)
-		}
-		p.setCryptoHelper(ch)
-		slog.Info("matrix: E2EE enabled", "device_id", client.DeviceID)
-
-		// Bootstrap cross-signing: generate keys, publish to server,
-		// and sign our own device. Without this, Element shows
-		// "encrypted by a device not verified by its owner".
-		p.setupCrossSigning(ctx, ch)
-
-		// client.Crypto must be set for VerificationHelper
-		client.Crypto = ch
-
-		// Initialize SAS verification helper (auto-accept verification requests)
-		if p.autoVerify {
-			if vErr := p.initVerification(ctx, ch); vErr != nil {
-				slog.Warn("matrix: verification helper not available", "error", vErr)
-			} else {
-				slog.Info("matrix: SAS verification enabled", "mode", "auto-verify")
-			}
-		}
-	}
+	p.initE2EE(ctx, client)
 
 	slog.Info("matrix: connected", "user_id", selfUserID)
 	p.emitReady(gen)
@@ -300,70 +240,6 @@ func (p *Platform) runConnection(ctx context.Context) error {
 		return nil
 	}
 	return fmt.Errorf("matrix: sync ended: %w", err)
-}
-
-func (p *Platform) initCrypto(ctx context.Context, client *mautrix.Client) (*cryptohelper.CryptoHelper, error) {
-	if client.DeviceID == "" {
-		return nil, fmt.Errorf("device ID not available from whoami")
-	}
-
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return nil, fmt.Errorf("get home dir: %w", err)
-	}
-	cryptoDir := filepath.Join(homeDir, ".cc-connect")
-	if err := os.MkdirAll(cryptoDir, 0o700); err != nil {
-		return nil, fmt.Errorf("create data dir: %w", err)
-	}
-	dbPath := filepath.Join(cryptoDir, fmt.Sprintf("matrix-crypto-%s.db", client.DeviceID))
-
-	// Derive a stable pickle key from the access token
-	h := sha256.Sum256([]byte(p.accessToken))
-	pickleKey := make([]byte, 32)
-	copy(pickleKey, h[:])
-
-	return p.tryInitCrypto(ctx, client, pickleKey, dbPath, false)
-}
-
-func (p *Platform) tryInitCrypto(ctx context.Context, client *mautrix.Client, pickleKey []byte, dbPath string, isRetry bool) (*cryptohelper.CryptoHelper, error) {
-	ch, err := cryptohelper.NewCryptoHelper(client, pickleKey, dbPath)
-	if err != nil {
-		return nil, fmt.Errorf("create crypto helper: %w", err)
-	}
-	ch.DBAccountID = client.UserID.String()
-
-	if err := ch.Init(ctx); err != nil {
-		if !isRetry && strings.Contains(err.Error(), "not marked as shared") {
-			// Init failed because the server has old device keys that don't match
-			// our fresh local account. Force-upload new keys to replace them.
-			// After Init fails at verifyDeviceKeysOnServer, the olm machine is
-			// initialized and the account is loaded, so Machine() is safe.
-			slog.Warn("matrix: stale device keys on server, force-uploading new keys")
-			func() {
-				defer func() { recover() }() // Machine() panics if mach is nil
-				if mach := ch.Machine(); mach != nil {
-					if shareErr := mach.ShareKeys(ctx, -1); shareErr != nil {
-						slog.Error("matrix: failed to force-share keys", "error", shareErr)
-					}
-				}
-			}()
-			ch.Close()
-			client.StateStore = nil
-			client.Store = mautrix.NewMemorySyncStore()
-			return p.tryInitCrypto(ctx, client, pickleKey, dbPath, true)
-		}
-		p.cleanupFailedCrypto(client, ch)
-		return nil, fmt.Errorf("init crypto: %w", err)
-	}
-	return ch, nil
-}
-
-func (p *Platform) cleanupFailedCrypto(client *mautrix.Client, ch *cryptohelper.CryptoHelper) {
-	ch.Close()
-	// Reset client stores to avoid references to the closed DB.
-	// NewCryptoHelper sets client.StateStore; Init() may overwrite client.Store.
-	client.StateStore = nil
-	client.Store = mautrix.NewMemorySyncStore()
 }
 
 func (p *Platform) handleMessage(ctx context.Context, evt *event.Event) {
@@ -501,25 +377,16 @@ func (p *Platform) dispatch(msg *core.Message) {
 	handler(p, msg)
 }
 
-// sendRoomEvent sends an event to a room, encrypting it if the room has E2EE enabled.
+// sendRoomEvent sends an event to a room, encrypting it if E2EE is available and the room is encrypted.
 func (p *Platform) sendRoomEvent(ctx context.Context, roomID id.RoomID, evtType event.Type, content any) error {
 	client := p.getClient()
 	if client == nil {
 		return fmt.Errorf("matrix: not connected")
 	}
 
-	ch := p.getCryptoHelper()
-	encrypted := ch != nil && p.isRoomEncrypted(ctx, roomID)
-	if encrypted {
-		encContent, err := ch.Encrypt(ctx, roomID, evtType, content)
-		if err != nil {
-			return fmt.Errorf("matrix: encrypt: %w", err)
-		}
-		_, err = client.SendMessageEvent(ctx, roomID, event.EventEncrypted, encContent)
-		if err != nil {
-			return fmt.Errorf("matrix: send encrypted: %w", err)
-		}
-		return nil
+	// Try E2EE path first (only available when built with goolm tag)
+	if handled, err := p.tryEncryptAndSend(ctx, client, roomID, evtType, content); handled {
+		return err
 	}
 
 	_, err := client.SendMessageEvent(ctx, roomID, evtType, content)
@@ -527,22 +394,6 @@ func (p *Platform) sendRoomEvent(ctx context.Context, roomID id.RoomID, evtType 
 		return fmt.Errorf("matrix: send: %w", err)
 	}
 	return nil
-}
-
-func (p *Platform) isRoomEncrypted(ctx context.Context, roomID id.RoomID) bool {
-	client := p.getClient()
-	if client == nil || client.StateStore == nil {
-		return false
-	}
-	ss, ok := client.StateStore.(crypto.StateStore)
-	if !ok {
-		return false
-	}
-	enc, err := ss.IsEncrypted(ctx, roomID)
-	if err != nil {
-		return false
-	}
-	return enc
 }
 
 func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
@@ -941,41 +792,6 @@ func (p *Platform) getHandler() core.MessageHandler {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.handler
-}
-
-func (p *Platform) getCryptoHelper() *cryptohelper.CryptoHelper {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return p.cryptoHelper
-}
-
-func (p *Platform) setCryptoHelper(ch *cryptohelper.CryptoHelper) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.cryptoHelper = ch
-}
-
-func (p *Platform) getVerificationHelper() *verificationhelper.VerificationHelper {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return p.verificationHelper
-}
-
-func (p *Platform) setVerificationHelper(vh *verificationhelper.VerificationHelper) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.verificationHelper = vh
-}
-
-func (p *Platform) closeCryptoHelper() {
-	p.mu.Lock()
-	ch := p.cryptoHelper
-	p.cryptoHelper = nil
-	p.mu.Unlock()
-
-	if ch != nil {
-		ch.Close()
-	}
 }
 
 func (p *Platform) publishClient(client *mautrix.Client, selfUserID id.UserID) (uint64, bool) {

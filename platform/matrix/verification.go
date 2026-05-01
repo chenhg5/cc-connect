@@ -1,3 +1,5 @@
+//go:build goolm
+
 package matrix
 
 import (
@@ -58,7 +60,7 @@ func (t *encryptingTransport) RoundTrip(req *http.Request) (*http.Response, erro
 		return t.base.RoundTrip(req)
 	}
 
-	ch := t.p.getCryptoHelper()
+	ch := t.p.getE2EECryptoHelper()
 	if ch == nil {
 		slog.Warn("matrix: no crypto helper, sending verification event unencrypted")
 		return t.base.RoundTrip(req)
@@ -143,7 +145,7 @@ func (vc *verificationCallbacks) VerificationRequested(ctx context.Context, txnI
 	slog.Info("matrix: verification requested", "txn_id", txnID, "from", from, "device", fromDevice)
 
 	// Store the device ID so handleVerificationMAC can trust only this device.
-	vc.platform.verifyDeviceID = fromDevice
+	vc.platform.setVerifyDeviceID(fromDevice)
 
 	helper := vc.platform.getVerificationHelper()
 	if helper == nil {
@@ -241,7 +243,7 @@ func (p *Platform) handleVerificationMAC(ctx context.Context, client *mautrix.Cl
 
 	// Trust only the specific device that initiated verification.
 	// The device ID was saved in VerificationRequested.
-	deviceID := p.verifyDeviceID
+	deviceID := p.getVerifyDeviceID()
 	if deviceID == "" {
 		slog.Error("matrix: no verify device ID stored, cannot trust device")
 		return
@@ -257,7 +259,7 @@ func (p *Platform) handleVerificationMAC(ctx context.Context, client *mautrix.Cl
 		return
 	}
 	slog.Info("matrix: device trusted", "user", evt.Sender, "device", deviceID)
-	p.verifyDeviceID = ""
+	p.setVerifyDeviceID("")
 
 	// Send m.key.verification.done to the room
 	doneContent := &event.VerificationDoneEventContent{}
