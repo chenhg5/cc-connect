@@ -161,6 +161,31 @@ func TestNormalizePermissionMode(t *testing.T) {
 	}
 }
 
+func TestNormalizeEffort(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"", ""},
+		{"low", "low"},
+		{"medium", "medium"},
+		{"med", "medium"},
+		{"high", "high"},
+		{"xhigh", "xhigh"},
+		{"x-high", "xhigh"},
+		{"x_high", "xhigh"},
+		{"XHIGH", "xhigh"},
+		{"max", "max"},
+		{"unknown", ""},
+	}
+	for _, tt := range tests {
+		got := normalizeEffort(tt.input)
+		if got != tt.want {
+			t.Errorf("normalizeEffort(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
 func TestClaudeSessionSetLiveMode(t *testing.T) {
 	cs := &claudeSession{}
 	cs.setPermissionMode("default")
