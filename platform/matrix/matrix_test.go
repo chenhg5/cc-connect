@@ -146,8 +146,8 @@ func TestNew_AllOptions(t *testing.T) {
 	if plat.allowFrom != "@alice:matrix.org" {
 		t.Errorf("allowFrom = %q", plat.allowFrom)
 	}
-	if plat.shareSessionInChan != true {
-		t.Error("shareSessionInChan should be true")
+	if plat.shareSessionInChannel != true {
+		t.Error("shareSessionInChannel should be true")
 	}
 	if plat.groupReplyAll != true {
 		t.Error("groupReplyAll should be true")
@@ -223,7 +223,7 @@ func TestBuildSessionKey(t *testing.T) {
 	}
 
 	// Shared session
-	p.shareSessionInChan = true
+	p.shareSessionInChannel = true
 	key = p.buildSessionKey("!room:server", "@user:server")
 	want = "matrix:!room:server"
 	if key != want {

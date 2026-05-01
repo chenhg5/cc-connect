@@ -35,32 +35,32 @@ type replyContext struct {
 }
 
 type Platform struct {
-	homeserver          string
-	accessToken         string
-	userID              string
-	allowFrom           string
-	shareSessionInChan  bool
-	groupReplyAll       bool
-	autoJoin            bool
-	autoVerify          bool
-	proxyURL            string
+	homeserver            string
+	accessToken           string
+	userID                string
+	allowFrom             string
+	shareSessionInChannel bool
+	groupReplyAll         bool
+	autoJoin              bool
+	autoVerify            bool
+	proxyURL              string
 
-	mu                  sync.RWMutex
-	client              *mautrix.Client
-	selfUserID          id.UserID
-	handler             core.MessageHandler
-	lifecycleHandler    core.PlatformLifecycleHandler
-	cancel              context.CancelFunc
-	stopping            bool
-	generation          uint64
-	everConnected       bool
-	unavailableNotified bool
-	dedup               core.MessageDedup
-	httpClient          *http.Client
-	cryptoHelper        *cryptohelper.CryptoHelper
-	verificationHelper  *verificationhelper.VerificationHelper
-	verifyDeviceID      id.DeviceID
-		crossSigningPassword   string
+	mu                   sync.RWMutex
+	client               *mautrix.Client
+	selfUserID           id.UserID
+	handler              core.MessageHandler
+	lifecycleHandler     core.PlatformLifecycleHandler
+	cancel               context.CancelFunc
+	stopping             bool
+	generation           uint64
+	everConnected        bool
+	unavailableNotified  bool
+	dedup                core.MessageDedup
+	httpClient           *http.Client
+	cryptoHelper         *cryptohelper.CryptoHelper
+	verificationHelper   *verificationhelper.VerificationHelper
+	verifyDeviceID       id.DeviceID
+	crossSigningPassword string
 }
 
 const (
@@ -99,7 +99,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		}
 	}
 	proxyURL, _ := opts["proxy"].(string)
-		crossSigningPassword, _ := opts["cross_signing_password"].(string)
+	crossSigningPassword, _ := opts["cross_signing_password"].(string)
 
 	httpClient := &http.Client{Timeout: 120 * time.Second}
 	if proxyURL != "" {
@@ -112,18 +112,18 @@ func New(opts map[string]any) (core.Platform, error) {
 	}
 
 	return &Platform{
-		homeserver:         homeserver,
-		accessToken:        accessToken,
-		userID:             userID,
-		allowFrom:          allowFrom,
-		groupReplyAll:      groupReplyAll,
-		shareSessionInChan: shareSession,
-		autoJoin:           autoJoin,
-		proxyURL:           proxyURL,
-			autoVerify:         autoVerify,
-		crossSigningPassword: crossSigningPassword,
-		httpClient:         httpClient,
-		dedup:              core.MessageDedup{},
+		homeserver:            homeserver,
+		accessToken:           accessToken,
+		userID:                userID,
+		allowFrom:             allowFrom,
+		groupReplyAll:         groupReplyAll,
+		shareSessionInChannel: shareSession,
+		autoJoin:              autoJoin,
+		proxyURL:              proxyURL,
+		autoVerify:            autoVerify,
+		crossSigningPassword:  crossSigningPassword,
+		httpClient:            httpClient,
+		dedup:                 core.MessageDedup{},
 	}, nil
 }
 
@@ -177,7 +177,7 @@ func (p *Platform) connectLoop(ctx context.Context) {
 		}
 
 		if err != nil {
-			slog.Warn("matrix: connection error, retrying", "error", err, "backoff", wait)
+			slog.Warn("matrix: connection error, retrying", "error", core.RedactToken(err.Error(), p.accessToken), "backoff", wait)
 			p.notifyUnavailable(err)
 		}
 
@@ -244,7 +244,6 @@ func (p *Platform) runConnection(ctx context.Context) error {
 					}
 				}
 			}
-
 
 			// Workaround for mautrix library bug: onVerificationMAC uses
 			// GetOwnCrossSigningPublicKeys() instead of GetCrossSigningPublicKeys(ctx, theirUserID)
@@ -462,7 +461,7 @@ func (p *Platform) handleMessage(ctx context.Context, evt *event.Event) {
 		p.dispatch(&core.Message{
 			SessionKey: sessionKey, Platform: "matrix",
 			UserID: senderStr, UserName: userName,
-			MessageID: evt.ID.String(),
+			MessageID:  evt.ID.String(),
 			ChannelKey: channelKey, ReplyCtx: rctx,
 			Audio: audio,
 		})
@@ -783,7 +782,7 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 // --- Internal helpers ---
 
 func (p *Platform) buildSessionKey(roomID id.RoomID, sender id.UserID) string {
-	if p.shareSessionInChan {
+	if p.shareSessionInChannel {
 		return fmt.Sprintf("matrix:%s", roomID)
 	}
 	return fmt.Sprintf("matrix:%s:%s", roomID, sender)
