@@ -51,7 +51,7 @@ type Platform struct {
 	unavailableNotified  bool
 	dedup                core.MessageDedup
 	httpClient           *http.Client
-	cryptoHelper         any // *cryptohelper.CryptoHelper when built with goolm tag
+	cryptoHelper         any //nolint:unused // *cryptohelper.CryptoHelper when built with goolm tag
 	crossSigningPassword string
 }
 
