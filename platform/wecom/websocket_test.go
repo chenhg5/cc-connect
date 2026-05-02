@@ -1,9 +1,11 @@
 package wecom
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -254,26 +256,33 @@ func TestReconstructReplyCtx_TooFewParts(t *testing.T) {
 // writeAndWaitAck
 // ---------------------------------------------------------------------------
 
+// pendingAcks now stores chan *wsFrame (not chan error) so callers that need
+// to read the ack body (e.g. uploadMedia parsing upload_id / media_id) can.
+// These tests exercise the channel mechanics directly.
+
 func TestWriteAndWaitAck_SuccessfulAck(t *testing.T) {
 	p := &WSPlatform{}
 
 	reqID := "send_1"
-	ch := make(chan error, 1)
+	ch := make(chan *wsFrame, 1)
 	p.pendingAcks.Store(reqID, ch)
 
-	// Simulate receiving ack in another goroutine
 	go func() {
 		time.Sleep(10 * time.Millisecond)
 		if v, ok := p.pendingAcks.LoadAndDelete(reqID); ok {
-			v.(chan error) <- nil
+			ec := 0
+			v.(chan *wsFrame) <- &wsFrame{ErrCode: &ec, ErrMsg: "ok"}
 		}
 	}()
 
 	ctx := context.Background()
 	select {
-	case err := <-ch:
-		if err != nil {
-			t.Fatalf("expected nil ack error, got %v", err)
+	case f := <-ch:
+		if f == nil {
+			t.Fatal("expected non-nil frame on success")
+		}
+		if f.ErrCode == nil || *f.ErrCode != 0 {
+			t.Fatalf("expected errcode=0, got frame=%+v", f)
 		}
 	case <-ctx.Done():
 		t.Fatal("context cancelled unexpectedly")
@@ -286,24 +295,24 @@ func TestWriteAndWaitAck_AckWithError(t *testing.T) {
 	p := &WSPlatform{}
 
 	reqID := "send_2"
-	ch := make(chan error, 1)
+	ch := make(chan *wsFrame, 1)
 	p.pendingAcks.Store(reqID, ch)
 
-	ackErr := fmt.Errorf("wecom-ws: ack error: errcode=40001 errmsg=invalid token")
 	go func() {
 		time.Sleep(10 * time.Millisecond)
 		if v, ok := p.pendingAcks.LoadAndDelete(reqID); ok {
-			v.(chan error) <- ackErr
+			ec := 40001
+			v.(chan *wsFrame) <- &wsFrame{ErrCode: &ec, ErrMsg: "invalid token"}
 		}
 	}()
 
 	select {
-	case err := <-ch:
-		if err == nil {
-			t.Fatal("expected ack error, got nil")
+	case f := <-ch:
+		if f == nil || f.ErrCode == nil || *f.ErrCode == 0 {
+			t.Fatalf("expected error frame, got %+v", f)
 		}
-		if err.Error() != ackErr.Error() {
-			t.Fatalf("unexpected error: %v", err)
+		if f.ErrMsg != "invalid token" {
+			t.Fatalf("unexpected errmsg: %q", f.ErrMsg)
 		}
 	case <-time.After(1 * time.Second):
 		t.Fatal("timed out waiting for ack")
@@ -314,23 +323,19 @@ func TestWriteAndWaitAck_Timeout(t *testing.T) {
 	p := &WSPlatform{}
 
 	reqID := "send_timeout"
-	ch := make(chan error, 1)
+	ch := make(chan *wsFrame, 1)
 	p.pendingAcks.Store(reqID, ch)
 
-	// Nobody sends ack → should timeout
 	start := time.Now()
 	select {
 	case <-ch:
 		t.Fatal("should not receive from channel without ack")
 	case <-time.After(100 * time.Millisecond):
-		// Expected: timed out without blocking forever
+		// Expected
 	}
-	elapsed := time.Since(start)
-	if elapsed > 1*time.Second {
+	if elapsed := time.Since(start); elapsed > 1*time.Second {
 		t.Fatalf("timeout took too long: %v", elapsed)
 	}
-
-	// Clean up
 	p.pendingAcks.Delete(reqID)
 }
 
@@ -338,11 +343,10 @@ func TestWriteAndWaitAck_ContextCancelled(t *testing.T) {
 	p := &WSPlatform{}
 
 	reqID := "send_cancel"
-	ch := make(chan error, 1)
+	ch := make(chan *wsFrame, 1)
 	p.pendingAcks.Store(reqID, ch)
 
 	ctx, cancel := context.WithCancel(context.Background())
-
 	go func() {
 		time.Sleep(20 * time.Millisecond)
 		cancel()
@@ -352,11 +356,10 @@ func TestWriteAndWaitAck_ContextCancelled(t *testing.T) {
 	case <-ch:
 		t.Fatal("should not receive ack")
 	case <-ctx.Done():
-		// Expected: context cancelled
+		// Expected
 	case <-time.After(1 * time.Second):
 		t.Fatal("timed out")
 	}
-
 	p.pendingAcks.Delete(reqID)
 }
 
@@ -368,7 +371,7 @@ func TestHandleFrame_AckDispatch(t *testing.T) {
 	p := &WSPlatform{}
 
 	reqID := "aibot_send_msg_1"
-	ch := make(chan error, 1)
+	ch := make(chan *wsFrame, 1)
 	p.pendingAcks.Store(reqID, ch)
 
 	errCode := 0
@@ -382,9 +385,9 @@ func TestHandleFrame_AckDispatch(t *testing.T) {
 	p.handleFrame(frame)
 
 	select {
-	case err := <-ch:
-		if err != nil {
-			t.Fatalf("expected nil error for successful ack, got %v", err)
+	case f := <-ch:
+		if f == nil || f.ErrCode == nil || *f.ErrCode != 0 {
+			t.Fatalf("expected ok frame, got %+v", f)
 		}
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("ack not dispatched")
@@ -395,7 +398,7 @@ func TestHandleFrame_AckDispatch_WithError(t *testing.T) {
 	p := &WSPlatform{}
 
 	reqID := "aibot_send_msg_2"
-	ch := make(chan error, 1)
+	ch := make(chan *wsFrame, 1)
 	p.pendingAcks.Store(reqID, ch)
 
 	errCode := 40001
@@ -409,9 +412,12 @@ func TestHandleFrame_AckDispatch_WithError(t *testing.T) {
 	p.handleFrame(frame)
 
 	select {
-	case err := <-ch:
-		if err == nil {
-			t.Fatal("expected error for failed ack, got nil")
+	case f := <-ch:
+		if f == nil || f.ErrCode == nil || *f.ErrCode == 0 {
+			t.Fatalf("expected error frame, got %+v", f)
+		}
+		if f.ErrMsg != "invalid token" {
+			t.Fatalf("expected errmsg 'invalid token', got %q", f.ErrMsg)
 		}
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("ack not dispatched")
@@ -452,14 +458,25 @@ func TestGenerateReqID_Monotonic(t *testing.T) {
 }
 
 func TestGenerateReqID_Format(t *testing.T) {
+	// Format is "<prefix>_<unix_ms>_<seq>_<rand_hex>" per the WeCom SDK
+	// pattern: bare per-process sequence is NOT enough — after a restart the
+	// IDs would collide with stream IDs the server already committed and the
+	// WeChat Work client silently drops the frames.
 	p := &WSPlatform{}
-	id := p.generateReqID("ping")
-	if id != "ping_1" {
-		t.Fatalf("expected ping_1, got %s", id)
+	id1 := p.generateReqID("ping")
+	if !strings.HasPrefix(id1, "ping_") {
+		t.Fatalf("expected prefix 'ping_', got %s", id1)
 	}
-	id2 := p.generateReqID("aibot_send_msg")
-	if id2 != "aibot_send_msg_2" {
-		t.Fatalf("expected aibot_send_msg_2, got %s", id2)
+	id2 := p.generateReqID("ping")
+	if id1 == id2 {
+		t.Fatalf("expected unique ids, got duplicate %s", id1)
+	}
+	parts := strings.SplitN(id1, "_", 4)
+	if len(parts) != 4 {
+		t.Fatalf("expected 4 parts (prefix_ms_seq_rand), got %d in %q", len(parts), id1)
+	}
+	if parts[0] != "ping" {
+		t.Fatalf("expected prefix 'ping', got %q in %s", parts[0], id1)
 	}
 }
 
@@ -522,5 +539,176 @@ func TestNewWebSocket_ValidConfig(t *testing.T) {
 	ws := p.(*WSPlatform)
 	if ws.botID != "aibTest" || ws.secret != "secretXYZ" || ws.allowFrom != "user1,user2" {
 		t.Fatalf("unexpected config: botID=%s secret=%s allowFrom=%s", ws.botID, ws.secret, ws.allowFrom)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Streaming preview interface contract: SendPreviewStart / UpdateMessage /
+// FinalizeStream / KeepPreviewOnFinish (cmd: aibot_respond_msg, msgtype: stream)
+// ---------------------------------------------------------------------------
+
+func TestSendPreviewStart_RejectsWrongCtxType(t *testing.T) {
+	p := &WSPlatform{}
+	_, err := p.SendPreviewStart(context.Background(), "not-a-wsReplyContext", "hi")
+	if err == nil {
+		t.Fatal("expected error for wrong reply context type")
+	}
+}
+
+func TestSendPreviewStart_RejectsEmptyReqID(t *testing.T) {
+	// Without reqID we cannot anchor an aibot_respond_msg stream to the
+	// original user message; caller is expected to fall back to Send().
+	p := &WSPlatform{}
+	rctx := wsReplyContext{chatID: "c1", userID: "u1"} // reqID intentionally empty
+	_, err := p.SendPreviewStart(context.Background(), rctx, "hi")
+	if err == nil {
+		t.Fatal("expected error when reqID is empty")
+	}
+}
+
+func TestUpdateMessage_RejectsWrongHandleType(t *testing.T) {
+	p := &WSPlatform{}
+	err := p.UpdateMessage(context.Background(), "not-a-handle", "hi")
+	if err == nil {
+		t.Fatal("expected error for wrong handle type")
+	}
+}
+
+func TestFinalizeStream_RejectsWrongHandleType(t *testing.T) {
+	p := &WSPlatform{}
+	err := p.FinalizeStream(context.Background(), 42, "final")
+	if err == nil {
+		t.Fatal("expected error for wrong handle type")
+	}
+}
+
+func TestKeepPreviewOnFinish_True(t *testing.T) {
+	// The stream preview message IS the final delivered message — finish()
+	// must call FinalizeStream rather than delete the preview.
+	p := &WSPlatform{}
+	if !p.KeepPreviewOnFinish() {
+		t.Fatal("KeepPreviewOnFinish must be true so finish() reaches FinalizeStream")
+	}
+}
+
+// Compile-time assertions: confirm WSPlatform satisfies all preview-related
+// optional interfaces. If any is dropped accidentally these will fail to build.
+var (
+	_ core.Platform                = (*WSPlatform)(nil)
+	_ core.MessageUpdater          = (*WSPlatform)(nil)
+	_ core.PreviewStarter          = (*WSPlatform)(nil)
+	_ core.StreamFinalizer         = (*WSPlatform)(nil)
+	_ core.PreviewFinishPreference = (*WSPlatform)(nil)
+	_ core.TypingIndicator         = (*WSPlatform)(nil)
+	_ core.ImageSender             = (*WSPlatform)(nil)
+	_ core.FileSender              = (*WSPlatform)(nil)
+)
+
+// ---------------------------------------------------------------------------
+// chunkBytes — binary-safe slicing for media upload
+// ---------------------------------------------------------------------------
+
+func TestChunkBytes_ExactBoundary(t *testing.T) {
+	in := bytes.Repeat([]byte{0xAB}, 256)
+	chunks := chunkBytes(in, 256)
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 chunk at exact boundary, got %d", len(chunks))
+	}
+	if !bytes.Equal(chunks[0], in) {
+		t.Fatalf("chunk content mismatch")
+	}
+}
+
+func TestChunkBytes_Splits(t *testing.T) {
+	in := bytes.Repeat([]byte{0xCD}, 600)
+	chunks := chunkBytes(in, 256)
+	if len(chunks) != 3 {
+		t.Fatalf("expected 3 chunks (256+256+88), got %d", len(chunks))
+	}
+	if len(chunks[0]) != 256 || len(chunks[1]) != 256 || len(chunks[2]) != 88 {
+		t.Fatalf("unexpected chunk sizes: %d %d %d", len(chunks[0]), len(chunks[1]), len(chunks[2]))
+	}
+	// Reassemble must equal input — must NOT be UTF-8 aware (binary-safe).
+	var reassembled []byte
+	for _, c := range chunks {
+		reassembled = append(reassembled, c...)
+	}
+	if !bytes.Equal(reassembled, in) {
+		t.Fatalf("reassembled bytes differ from input")
+	}
+}
+
+func TestChunkBytes_Empty(t *testing.T) {
+	chunks := chunkBytes(nil, 256)
+	if len(chunks) != 0 {
+		t.Fatalf("expected 0 chunks for empty input, got %d", len(chunks))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SendImage / SendFile — context type validation (full upload requires a
+// live ws connection and is exercised by integration testing).
+// ---------------------------------------------------------------------------
+
+func TestSendImage_RejectsWrongCtxType(t *testing.T) {
+	p := &WSPlatform{}
+	err := p.SendImage(context.Background(), "not-a-wsReplyContext", core.ImageAttachment{Data: []byte("x")})
+	if err == nil {
+		t.Fatal("expected error for wrong reply context type")
+	}
+}
+
+func TestSendFile_RejectsWrongCtxType(t *testing.T) {
+	p := &WSPlatform{}
+	err := p.SendFile(context.Background(), 42, core.FileAttachment{Data: []byte("x")})
+	if err == nil {
+		t.Fatal("expected error for wrong reply context type")
+	}
+}
+
+func TestImageExtFromMime(t *testing.T) {
+	cases := []struct{ mime, want string }{
+		{"image/png", ".png"},
+		{"IMAGE/PNG", ".png"},
+		{"image/jpeg", ".jpg"},
+		{"image/jpg", ".jpg"},
+		{"image/gif", ".gif"},
+		{"image/webp", ".webp"},
+		{"", ".jpg"},
+		{"application/octet-stream", ".jpg"},
+	}
+	for _, c := range cases {
+		if got := imageExtFromMime(c.mime); got != c.want {
+			t.Errorf("imageExtFromMime(%q) = %q, want %q", c.mime, got, c.want)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TypingIndicator: placeholder stream + hand-off to SendPreviewStart
+// ---------------------------------------------------------------------------
+
+func TestStartTyping_RejectsWrongCtxType(t *testing.T) {
+	p := &WSPlatform{}
+	stop := p.StartTyping(context.Background(), "not-a-wsReplyContext")
+	if stop == nil {
+		t.Fatal("StartTyping must always return a non-nil stop func")
+	}
+	stop() // no-op stop should not panic
+}
+
+func TestStartTyping_NoOpWhenReqIDMissing(t *testing.T) {
+	// Without reqID we can't anchor an aibot_respond_msg stream — should
+	// silently no-op rather than fail the user turn.
+	p := &WSPlatform{}
+	stop := p.StartTyping(context.Background(), wsReplyContext{chatID: "c1", userID: "u1"})
+	if stop == nil {
+		t.Fatal("StartTyping must always return a non-nil stop func")
+	}
+	stop()
+	count := 0
+	p.streamStates.Range(func(_, _ any) bool { count++; return true })
+	if count != 0 {
+		t.Fatalf("expected no typing handles registered, got %d", count)
 	}
 }

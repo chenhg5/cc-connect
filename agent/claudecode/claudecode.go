@@ -39,7 +39,7 @@ type Agent struct {
 	cliExtraArgs     []string // extra args parsed from cli_path (e.g. ["code", "-t", "foo"])
 	cliArgsFlag      string   // if set, claude args are passed as a single string via this flag (e.g. "-a")
 	model            string
-	reasoningEffort  string // "low" | "medium" | "high" | "max"
+	reasoningEffort  string // "low" | "medium" | "high" | "xhigh" | "max"
 	mode             string // "default" | "acceptEdits" | "plan" | "auto" | "bypassPermissions" | "dontAsk"
 	allowedTools     []string
 	disallowedTools  []string
@@ -215,6 +215,8 @@ func normalizeEffort(raw string) string {
 		return "medium"
 	case "high":
 		return "high"
+	case "xhigh", "x-high", "x_high":
+		return "xhigh"
 	case "max":
 		return "max"
 	default:
@@ -285,7 +287,7 @@ func (a *Agent) GetReasoningEffort() string {
 }
 
 func (a *Agent) AvailableReasoningEfforts() []string {
-	return []string{"low", "medium", "high", "max"}
+	return []string{"low", "medium", "high", "xhigh", "max"}
 }
 
 func (a *Agent) configuredModels() []core.ModelOption {
