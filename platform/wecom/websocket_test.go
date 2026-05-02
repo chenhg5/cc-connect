@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -452,14 +453,25 @@ func TestGenerateReqID_Monotonic(t *testing.T) {
 }
 
 func TestGenerateReqID_Format(t *testing.T) {
+	// Format is "<prefix>_<unix_ms>_<seq>_<rand_hex>" per the WeCom SDK
+	// pattern: bare per-process sequence is NOT enough — after a restart the
+	// IDs would collide with stream IDs the server already committed and the
+	// WeChat Work client silently drops the frames.
 	p := &WSPlatform{}
-	id := p.generateReqID("ping")
-	if id != "ping_1" {
-		t.Fatalf("expected ping_1, got %s", id)
+	id1 := p.generateReqID("ping")
+	if !strings.HasPrefix(id1, "ping_") {
+		t.Fatalf("expected prefix 'ping_', got %s", id1)
 	}
-	id2 := p.generateReqID("aibot_send_msg")
-	if id2 != "aibot_send_msg_2" {
-		t.Fatalf("expected aibot_send_msg_2, got %s", id2)
+	id2 := p.generateReqID("ping")
+	if id1 == id2 {
+		t.Fatalf("expected unique ids, got duplicate %s", id1)
+	}
+	parts := strings.SplitN(id1, "_", 4)
+	if len(parts) != 4 {
+		t.Fatalf("expected 4 parts (prefix_ms_seq_rand), got %d in %q", len(parts), id1)
+	}
+	if parts[0] != "ping" {
+		t.Fatalf("expected prefix 'ping', got %q in %s", parts[0], id1)
 	}
 }
 
@@ -522,5 +534,94 @@ func TestNewWebSocket_ValidConfig(t *testing.T) {
 	ws := p.(*WSPlatform)
 	if ws.botID != "aibTest" || ws.secret != "secretXYZ" || ws.allowFrom != "user1,user2" {
 		t.Fatalf("unexpected config: botID=%s secret=%s allowFrom=%s", ws.botID, ws.secret, ws.allowFrom)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Streaming preview interface contract: SendPreviewStart / UpdateMessage /
+// FinalizeStream / KeepPreviewOnFinish (cmd: aibot_respond_msg, msgtype: stream)
+// ---------------------------------------------------------------------------
+
+func TestSendPreviewStart_RejectsWrongCtxType(t *testing.T) {
+	p := &WSPlatform{}
+	_, err := p.SendPreviewStart(context.Background(), "not-a-wsReplyContext", "hi")
+	if err == nil {
+		t.Fatal("expected error for wrong reply context type")
+	}
+}
+
+func TestSendPreviewStart_RejectsEmptyReqID(t *testing.T) {
+	// Without reqID we cannot anchor an aibot_respond_msg stream to the
+	// original user message; caller is expected to fall back to Send().
+	p := &WSPlatform{}
+	rctx := wsReplyContext{chatID: "c1", userID: "u1"} // reqID intentionally empty
+	_, err := p.SendPreviewStart(context.Background(), rctx, "hi")
+	if err == nil {
+		t.Fatal("expected error when reqID is empty")
+	}
+}
+
+func TestUpdateMessage_RejectsWrongHandleType(t *testing.T) {
+	p := &WSPlatform{}
+	err := p.UpdateMessage(context.Background(), "not-a-handle", "hi")
+	if err == nil {
+		t.Fatal("expected error for wrong handle type")
+	}
+}
+
+func TestFinalizeStream_RejectsWrongHandleType(t *testing.T) {
+	p := &WSPlatform{}
+	err := p.FinalizeStream(context.Background(), 42, "final")
+	if err == nil {
+		t.Fatal("expected error for wrong handle type")
+	}
+}
+
+func TestKeepPreviewOnFinish_True(t *testing.T) {
+	// The stream preview message IS the final delivered message — finish()
+	// must call FinalizeStream rather than delete the preview.
+	p := &WSPlatform{}
+	if !p.KeepPreviewOnFinish() {
+		t.Fatal("KeepPreviewOnFinish must be true so finish() reaches FinalizeStream")
+	}
+}
+
+// Compile-time assertions: confirm WSPlatform satisfies all preview-related
+// optional interfaces. If any is dropped accidentally these will fail to build.
+var (
+	_ core.Platform                = (*WSPlatform)(nil)
+	_ core.MessageUpdater          = (*WSPlatform)(nil)
+	_ core.PreviewStarter          = (*WSPlatform)(nil)
+	_ core.StreamFinalizer         = (*WSPlatform)(nil)
+	_ core.PreviewFinishPreference = (*WSPlatform)(nil)
+	_ core.TypingIndicator         = (*WSPlatform)(nil)
+)
+
+// ---------------------------------------------------------------------------
+// TypingIndicator: placeholder stream + hand-off to SendPreviewStart
+// ---------------------------------------------------------------------------
+
+func TestStartTyping_RejectsWrongCtxType(t *testing.T) {
+	p := &WSPlatform{}
+	stop := p.StartTyping(context.Background(), "not-a-wsReplyContext")
+	if stop == nil {
+		t.Fatal("StartTyping must always return a non-nil stop func")
+	}
+	stop() // no-op stop should not panic
+}
+
+func TestStartTyping_NoOpWhenReqIDMissing(t *testing.T) {
+	// Without reqID we can't anchor an aibot_respond_msg stream — should
+	// silently no-op rather than fail the user turn.
+	p := &WSPlatform{}
+	stop := p.StartTyping(context.Background(), wsReplyContext{chatID: "c1", userID: "u1"})
+	if stop == nil {
+		t.Fatal("StartTyping must always return a non-nil stop func")
+	}
+	stop()
+	count := 0
+	p.streamStates.Range(func(_, _ any) bool { count++; return true })
+	if count != 0 {
+		t.Fatalf("expected no typing handles registered, got %d", count)
 	}
 }

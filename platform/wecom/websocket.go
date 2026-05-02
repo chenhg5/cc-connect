@@ -2,6 +2,8 @@ package wecom
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -36,9 +38,45 @@ type WSPlatform struct {
 	reqSeq      atomic.Int64 // monotonic counter for generating unique req_id
 	missedPong  atomic.Int32 // consecutive heartbeat acks not received
 	pendingAcks sync.Map     // req_id -> chan error, for sequential send with ack waiting
+	// streamStates tracks the currently-open aibot_respond_msg stream for each
+	// in-flight user message. Key: original aibot_msg_callback req_id (string).
+	// Value: *wsStreamState. Every Reply/Send/UpdateMessage call accumulates
+	// content into the same state and emits frames with the same stream.id, so
+	// the WeChat Work client renders progressive typing inside one bubble.
+	// The stream is closed (finish=true) when the engine's TypingIndicator
+	// stop function fires at turn end (engine.go defers stopTyping() in
+	// processInteractiveEvents).
+	streamStates sync.Map
+}
+
+// wsStreamState owns the running aibot_respond_msg/stream for one user
+// message. Content is full-replacement (per protocol), so we keep a builder
+// and re-emit the entire accumulated text on every frame. The placeholder
+// from StartTyping is intentionally NOT seeded into the builder — first real
+// Send/Reply call replaces the "🤔 思考中..." text with real content because
+// stream.content overwrites the bubble's display.
+type wsStreamState struct {
+	streamID string
+	reqID    string
+	chatID   string
+	userID   string
+	// sendMu serializes outbound frames for this stream. WeChat Work rejects
+	// concurrent aibot_respond_msg calls for the same req_id with errcode=6000
+	// "data version conflict". Acquire sendMu around the (mutate accumulator
+	// → emit frame → wait ack) critical section so frame order matches the
+	// order writes were applied to the accumulator.
+	sendMu      sync.Mutex
+	mu          sync.Mutex
+	accumulated strings.Builder
+	finalized   bool
 }
 
 const wsAckTimeout = 5 * time.Second
+
+// typingRenderDelay is held under the per-stream sendMu after StartTyping's
+// placeholder frame is acked, gating any follow-up frame so the WeChat Work
+// client has time to render the "🤔 思考中..." bubble before it gets replaced.
+const typingRenderDelay = 800 * time.Millisecond
 
 // wsReplyContext holds the context needed to reply to a specific message.
 type wsReplyContext struct {
@@ -46,6 +84,17 @@ type wsReplyContext struct {
 	chatID   string // chatid for aibot_send_msg
 	chatType string // chattype: "single" or "group"
 	userID   string // from.userid
+}
+
+// wsPreviewHandle is returned from SendPreviewStart and identifies an in-progress
+// streaming response. The same streamID is reused across UpdateMessage and the
+// final FinalizeStream call so the WeChat Work client can render a typing-style
+// progressive update inside one message bubble.
+type wsPreviewHandle struct {
+	streamID string // generated id used in stream.id for every frame
+	reqID    string // original aibot_msg_callback req_id (echoed in headers)
+	chatID   string
+	userID   string
 }
 
 // --- WebSocket protocol frame types (matching official SDK) ---
@@ -121,10 +170,17 @@ func newWebSocket(opts map[string]any) (core.Platform, error) {
 	}, nil
 }
 
-// generateReqID creates a unique req_id with the given prefix (e.g. "ping_1", "aibot_subscribe_2").
+// generateReqID creates a globally-unique id with the given prefix.
+// Format: "<prefix>_<unix_ms>_<seq>_<rand_hex>" — matches the WeCom official
+// SDK pattern (timestamp + entropy). Process-unique seq alone is NOT enough:
+// after a restart the sequence resets and stream.id collides with previously
+// committed stream IDs on the server, causing the WeChat Work client to
+// silently drop the frames as duplicate/stale data.
 func (p *WSPlatform) generateReqID(prefix string) string {
 	seq := p.reqSeq.Add(1)
-	return fmt.Sprintf("%s_%d", prefix, seq)
+	var buf [4]byte
+	_, _ = rand.Read(buf[:])
+	return fmt.Sprintf("%s_%d_%d_%s", prefix, time.Now().UnixMilli(), seq, hex.EncodeToString(buf[:]))
 }
 
 func (p *WSPlatform) Name() string { return "wecom" }
@@ -434,44 +490,247 @@ func (p *WSPlatform) handleMsgCallback(frame wsFrame) {
 	go p.deliverWSMediaInbound(&body, sessionKey, chatName, rctx, texts, imgRefs, fileRefs)
 }
 
-// Reply sends a response message via aibot_respond_msg using the stream format.
-// Uses the req_id from the original callback.
-// The stream content field is a full-replacement (not incremental append), so we
-// send the complete content in one frame with finish=true.
-// Markdown is natively supported by the stream reply format.
+// sendStreamFrame writes a single aibot_respond_msg/stream frame using the
+// streamID and reqID from the handle and BLOCKS until the server ack is
+// received. WeChat Work serializes per-req_id processing on the server side
+// and rejects parallel frames with errcode=6000 ("data version conflict"),
+// so callers must already hold sendMu (per-stream) before invoking this.
+// content is a full replacement (not incremental append).
+func (p *WSPlatform) sendStreamFrame(h wsPreviewHandle, content string, finish bool) error {
+	frame := map[string]any{
+		"cmd":     "aibot_respond_msg",
+		"headers": map[string]string{"req_id": h.reqID},
+		"body": map[string]any{
+			"msgtype": "stream",
+			"stream": map[string]any{
+				"id":      h.streamID,
+				"finish":  finish,
+				"content": content,
+			},
+		},
+	}
+	if err := p.writeAndWaitAck(p.ctx, frame, h.reqID); err != nil {
+		slog.Error("wecom-ws: stream frame failed",
+			"stream_id", h.streamID, "finish", finish, "user", h.userID, "error", err)
+		return err
+	}
+	slog.Debug("wecom-ws: stream frame sent",
+		"stream_id", h.streamID, "finish", finish, "user", h.userID, "content_len", len(content))
+	return nil
+}
+
+// streamStateFor returns the wsStreamState for a given user message reqID,
+// creating one with a fresh streamID on first access. All subsequent
+// Reply/Send/UpdateMessage calls for the same user turn share this state so
+// every frame goes out under the same stream.id (the WeChat Work client
+// renders progressive typing in the same message bubble).
+func (p *WSPlatform) streamStateFor(rc wsReplyContext) *wsStreamState {
+	if v, ok := p.streamStates.Load(rc.reqID); ok {
+		return v.(*wsStreamState)
+	}
+	fresh := &wsStreamState{
+		streamID: p.generateReqID("stream"),
+		reqID:    rc.reqID,
+		chatID:   rc.chatID,
+		userID:   rc.userID,
+	}
+	if existing, loaded := p.streamStates.LoadOrStore(rc.reqID, fresh); loaded {
+		return existing.(*wsStreamState)
+	}
+	return fresh
+}
+
+// streamHandleFromState builds a wsPreviewHandle from state for sendStreamFrame.
+func streamHandleFromState(st *wsStreamState) wsPreviewHandle {
+	return wsPreviewHandle{streamID: st.streamID, reqID: st.reqID, chatID: st.chatID, userID: st.userID}
+}
+
+// emitAccumulated appends to the accumulator and emits the frame.
+// sendMu is held across the entire mutate-emit-ack so frame order matches
+// the accumulation order even under concurrent callers.
+func (p *WSPlatform) emitAccumulated(rc wsReplyContext, content string, finish bool) error {
+	st := p.streamStateFor(rc)
+	st.sendMu.Lock()
+	defer st.sendMu.Unlock()
+
+	st.mu.Lock()
+	if st.finalized {
+		st.mu.Unlock()
+		return nil
+	}
+	st.accumulated.WriteString(content)
+	if finish {
+		st.finalized = true
+	}
+	text := st.accumulated.String()
+	h := streamHandleFromState(st)
+	st.mu.Unlock()
+
+	if finish {
+		p.streamStates.Delete(rc.reqID)
+	}
+	return p.sendStreamFrame(h, text, finish)
+}
+
+// emitReplaceAccumulated overwrites the accumulator (used by stream-preview
+// callbacks where the engine already maintains its own running buffer).
+func (p *WSPlatform) emitReplaceAccumulated(rc wsReplyContext, content string, finish bool) error {
+	st := p.streamStateFor(rc)
+	st.sendMu.Lock()
+	defer st.sendMu.Unlock()
+
+	st.mu.Lock()
+	if st.finalized {
+		st.mu.Unlock()
+		return nil
+	}
+	st.accumulated.Reset()
+	st.accumulated.WriteString(content)
+	if finish {
+		st.finalized = true
+	}
+	h := streamHandleFromState(st)
+	st.mu.Unlock()
+
+	if finish {
+		p.streamStates.Delete(rc.reqID)
+	}
+	return p.sendStreamFrame(h, content, finish)
+}
+
+// Reply forwards content via the active aibot_respond_msg stream. Multiple
+// Reply/Send calls for the same user turn append to the same stream so the
+// WeChat Work client renders them as a single, progressively-updated bubble.
+// finish=true is NOT emitted here — the engine's TypingIndicator stop hook
+// closes the stream at turn end.
 func (p *WSPlatform) Reply(ctx context.Context, rctx any, content string) error {
 	rc, ok := rctx.(wsReplyContext)
 	if !ok {
 		return fmt.Errorf("wecom-ws: invalid reply context type %T", rctx)
 	}
-	if content == "" {
+	if content == "" || rc.reqID == "" {
 		return nil
 	}
-
-	streamID := p.generateReqID("stream")
-	frame := map[string]any{
-		"cmd":     "aibot_respond_msg",
-		"headers": map[string]string{"req_id": rc.reqID},
-		"body": map[string]any{
-			"msgtype": "stream",
-			"stream": map[string]any{
-				"id":      streamID,
-				"finish":  true,
-				"content": content,
-			},
-		},
-	}
-	if err := p.writeJSON(frame); err != nil {
-		slog.Error("wecom-ws: reply failed", "user", rc.userID, "error", err)
-		return err
-	}
-	slog.Debug("wecom-ws: reply sent", "user", rc.userID, "len", len(content))
-	return nil
+	return p.emitAccumulated(rc, content, false)
 }
 
-// Send sends a proactive message via aibot_send_msg (markdown format).
-// Used for follow-up messages and cron-triggered messages where no req_id is available.
-// Markdown is natively supported.
+// SendPreviewStart implements core.PreviewStarter. It writes the first chunk
+// into the running stream (or creates one) and returns a handle for later
+// UpdateMessage / FinalizeStream calls. Note: in the typical wecom turn the
+// engine never reaches this path because thinking_messages=true freezes
+// stream preview before it starts; Reply/Send carry the actual content.
+func (p *WSPlatform) SendPreviewStart(ctx context.Context, rctx any, content string) (any, error) {
+	rc, ok := rctx.(wsReplyContext)
+	if !ok {
+		return nil, fmt.Errorf("wecom-ws: invalid reply context type %T", rctx)
+	}
+	if rc.reqID == "" {
+		return nil, fmt.Errorf("wecom-ws: stream preview requires reqID (cron/relay paths use Send instead)")
+	}
+	if err := p.emitReplaceAccumulated(rc, content, false); err != nil {
+		return nil, err
+	}
+	return rc, nil
+}
+
+// StartTyping implements core.TypingIndicator. WeChat Work智能机器人 has no
+// native typing frame; we emulate it by opening the user-turn stream with
+// "🤔 思考中..." as the placeholder content. The placeholder is intentionally
+// NOT written into the accumulator — when the first real Reply/Send arrives,
+// the stream's full-replacement semantics overwrite the placeholder text in
+// the same bubble.
+//
+// The returned stop func is invoked from engine's defer at the end of every
+// processInteractiveEvents turn, which is exactly when we should emit
+// finish=true to close the stream and commit the final content.
+func (p *WSPlatform) StartTyping(ctx context.Context, rctx any) (stop func()) {
+	rc, ok := rctx.(wsReplyContext)
+	if !ok || rc.reqID == "" {
+		return func() {}
+	}
+	st := p.streamStateFor(rc)
+	h := streamHandleFromState(st)
+	// Hold sendMu across the placeholder frame AND a short render delay so
+	// that any subsequent Reply/Send racing in (e.g. fast Claude Code thinking
+	// block) is gated behind the typing bubble actually appearing on the
+	// client. Without this delay the WeChat Work desktop client sometimes
+	// coalesces back-to-back stream frames and only renders the latest state,
+	// making the "🤔 思考中..." flash too briefly to be seen.
+	st.sendMu.Lock()
+	err := p.sendStreamFrame(h, "🤔 思考中...", false)
+	if err == nil {
+		time.Sleep(typingRenderDelay)
+	}
+	st.sendMu.Unlock()
+	if err != nil {
+		// Best-effort: drop the state we just created so it doesn't leak.
+		p.streamStates.CompareAndDelete(rc.reqID, st)
+		return func() {}
+	}
+	return func() {
+		v, ok := p.streamStates.LoadAndDelete(rc.reqID)
+		if !ok {
+			return // already finalized via FinalizeStream / Reply path
+		}
+		state := v.(*wsStreamState)
+		// Hold sendMu across the close so any in-flight emit completes
+		// before we send finish=true (avoids data version conflict).
+		state.sendMu.Lock()
+		defer state.sendMu.Unlock()
+		state.mu.Lock()
+		if state.finalized {
+			state.mu.Unlock()
+			return
+		}
+		state.finalized = true
+		text := state.accumulated.String()
+		streamID := state.streamID
+		state.mu.Unlock()
+		if text == "" {
+			// No real content arrived (turn ended before any Reply/Send) —
+			// keep the placeholder so the bubble has SOMETHING when the
+			// stream closes.
+			text = "🤔 思考中..."
+		}
+		closing := wsPreviewHandle{streamID: streamID, reqID: rc.reqID, chatID: rc.chatID, userID: rc.userID}
+		_ = p.sendStreamFrame(closing, text, true)
+	}
+}
+
+// UpdateMessage implements core.MessageUpdater. previewHandle is the
+// wsReplyContext returned by SendPreviewStart. content is the full accumulated
+// response so far (per stream-preview semantics).
+func (p *WSPlatform) UpdateMessage(ctx context.Context, previewHandle any, content string) error {
+	rc, ok := previewHandle.(wsReplyContext)
+	if !ok {
+		return fmt.Errorf("wecom-ws: invalid preview handle type %T", previewHandle)
+	}
+	return p.emitReplaceAccumulated(rc, content, false)
+}
+
+// FinalizeStream implements core.StreamFinalizer.
+func (p *WSPlatform) FinalizeStream(ctx context.Context, previewHandle any, finalContent string) error {
+	rc, ok := previewHandle.(wsReplyContext)
+	if !ok {
+		return fmt.Errorf("wecom-ws: invalid preview handle type %T", previewHandle)
+	}
+	return p.emitReplaceAccumulated(rc, finalContent, true)
+}
+
+// KeepPreviewOnFinish implements core.PreviewFinishPreference. The stream
+// preview message IS the final delivered message, so we want streamPreview.finish()
+// to call FinalizeStream rather than delete the preview.
+func (p *WSPlatform) KeepPreviewOnFinish() bool {
+	return true
+}
+
+// Send routes outgoing content based on whether we have a reqID:
+//   - reqID present (responding to a user message): append to the running
+//     aibot_respond_msg stream so the WeChat Work client renders progressive
+//     typing in one bubble. The stream closes (finish=true) at turn end via
+//     the TypingIndicator stop hook.
+//   - reqID absent (cron / proactive push, or reply context reconstructed
+//     for a one-off message): use aibot_send_msg/markdown — no stream.
 func (p *WSPlatform) Send(ctx context.Context, rctx any, content string) error {
 	rc, ok := rctx.(wsReplyContext)
 	if !ok {
@@ -479,6 +738,9 @@ func (p *WSPlatform) Send(ctx context.Context, rctx any, content string) error {
 	}
 	if content == "" {
 		return nil
+	}
+	if rc.reqID != "" {
+		return p.emitAccumulated(rc, content, false)
 	}
 	if rc.chatID == "" {
 		return fmt.Errorf("wecom-ws: chatID is empty, cannot send proactive message")

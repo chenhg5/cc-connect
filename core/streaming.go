@@ -73,6 +73,15 @@ type PreviewFinishPreference interface {
 	KeepPreviewOnFinish() bool
 }
 
+// StreamFinalizer is an optional interface for platforms whose update protocol
+// distinguishes intermediate updates from a closing "stream finished" frame
+// (e.g. WeChat Work智能机器人 aibot_respond_msg with stream.finish=true).
+// When implemented, streamPreview.finish() calls FinalizeStream instead of the
+// regular UpdateMessage so the platform can emit the closing frame.
+type StreamFinalizer interface {
+	FinalizeStream(ctx context.Context, previewHandle any, finalContent string) error
+}
+
 func newStreamPreview(cfg StreamPreviewCfg, p Platform, replyCtx any, ctx context.Context, transform func(string) string) *streamPreview {
 	return &streamPreview{
 		cfg:       cfg,
@@ -342,6 +351,22 @@ func (sp *streamPreview) finish(finalText string) bool {
 	// Try to update the preview in-place with the full final text.
 	// maxChars only throttles intermediate streaming updates; at finish time
 	// we always attempt a single final update regardless of length.
+	// Platforms that need to emit a closing frame (e.g. wecom stream finish=true)
+	// can implement StreamFinalizer to be notified that this is the last update.
+	if finalizer, ok := sp.platform.(StreamFinalizer); ok {
+		slog.Debug("stream preview finish: sending final via FinalizeStream",
+			"text_len", len(finalText), "lastSent_len", len(sp.lastSentText))
+		if err := finalizer.FinalizeStream(sp.ctx, sp.previewMsgID, finalText); err != nil {
+			slog.Debug("stream preview finish: FinalizeStream FAILED, cleaning up preview", "error", err)
+			if cleaner, ok := sp.platform.(PreviewCleaner); ok {
+				_ = cleaner.DeletePreviewMessage(sp.ctx, sp.previewMsgID)
+			}
+			return false
+		}
+		slog.Debug("stream preview finish: success via FinalizeStream")
+		return true
+	}
+
 	slog.Debug("stream preview finish: sending final UpdateMessage",
 		"text_len", len(finalText), "lastSent_len", len(sp.lastSentText),
 		"same", finalText == sp.lastSentText, "viaUpdate", sp.lastSentViaUpdate)
