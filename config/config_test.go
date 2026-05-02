@@ -465,6 +465,31 @@ func TestValidateProjectDisplayConfig(t *testing.T) {
 	}
 }
 
+func TestEffectiveBusyInputMode(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *Config
+		proj *ProjectConfig
+		want string
+	}{
+		{name: "nil defaults steer", cfg: nil, want: "steer"},
+		{name: "empty defaults steer", cfg: &Config{}, want: "steer"},
+		{name: "explicit steer", cfg: &Config{Display: DisplayConfig{BusyInputMode: "steer"}}, want: "steer"},
+		{name: "explicit queue", cfg: &Config{Display: DisplayConfig{BusyInputMode: "queue"}}, want: "queue"},
+		{name: "unknown defaults steer", cfg: &Config{Display: DisplayConfig{BusyInputMode: "drop"}}, want: "steer"},
+		{name: "project queue overrides global steer", cfg: &Config{Display: DisplayConfig{BusyInputMode: "steer"}}, proj: &ProjectConfig{Display: &DisplayConfig{BusyInputMode: "queue"}}, want: "queue"},
+		{name: "project steer overrides global queue", cfg: &Config{Display: DisplayConfig{BusyInputMode: "queue"}}, proj: &ProjectConfig{Display: &DisplayConfig{BusyInputMode: "steer"}}, want: "steer"},
+		{name: "empty project falls back global", cfg: &Config{Display: DisplayConfig{BusyInputMode: "queue"}}, proj: &ProjectConfig{Display: &DisplayConfig{}}, want: "queue"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := EffectiveBusyInputMode(tt.cfg, tt.proj); got != tt.want {
+				t.Fatalf("EffectiveBusyInputMode() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestLoad_DefaultsDataDir(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)

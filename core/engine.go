@@ -147,6 +147,7 @@ type DisplayCfg struct {
 	ThinkingMaxLen   int // max runes for thinking preview; 0 = no truncation
 	ToolMaxLen       int // max runes for tool use preview; 0 = no truncation
 	ToolMessages     bool
+	BusyInputMode    string // "steer" (default) or "queue"
 }
 
 // InstantReplyCfg controls the immediate confirmation reply sent when a message
@@ -415,7 +416,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		cancel:                cancel,
 		i18n:                  NewI18n(lang),
 		attachmentSendEnabled: true,
-		display:               DisplayCfg{Mode: "full", ThinkingMessages: true, ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen, ToolMessages: true, CardMode: "legacy"},
+		display:               DisplayCfg{Mode: "full", CardMode: "legacy", ThinkingMessages: true, ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen, ToolMessages: true, BusyInputMode: "steer"},
 		commands:              NewCommandRegistry(),
 		skills:                NewSkillRegistry(),
 		aliases:               make(map[string]string),
@@ -538,12 +539,20 @@ func (e *Engine) SetTTSSaveFunc(fn func(mode string) error) {
 
 // SetDisplayConfig overrides the default truncation settings.
 func (e *Engine) SetDisplayConfig(cfg DisplayCfg) {
+	cfg.BusyInputMode = normalizeBusyInputMode(cfg.BusyInputMode)
 	e.display = cfg
 }
 
 // SetInstantReply configures the immediate confirmation reply.
 func (e *Engine) SetInstantReply(cfg InstantReplyCfg) {
 	e.instantReply = cfg
+}
+
+func normalizeBusyInputMode(mode string) string {
+	if strings.EqualFold(strings.TrimSpace(mode), "queue") {
+		return "queue"
+	}
+	return "steer"
 }
 
 // SetReferenceConfig configures local reference normalization/rendering.
@@ -2059,8 +2068,13 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
 			return
 		}
-		// Session is busy — try to queue the message for the running turn
-		// so the agent processes it immediately after the current turn ends.
+		// Session is busy. Plain text defaults to same-turn steering; media
+		// still queues because mid-turn attachment delivery is backend-specific.
+		if e.steerBusyMessage(p, msg, interactiveKey) {
+			return
+		}
+		// If steering is disabled or unavailable, queue the message so the
+		// agent processes it immediately after the current turn ends.
 		if e.queueMessageForBusySession(p, msg, interactiveKey) {
 			// Race guard: the drain loop in processInteractiveMessageWith may
 			// have just finished (session unlocked) between our TryLock failure
@@ -2092,6 +2106,41 @@ sessionLocked:
 	)
 
 	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, resolvedWorkspace, msg.SessionKey)
+}
+
+func (e *Engine) steerBusyMessage(p Platform, msg *Message, interactiveKey string) bool {
+	if normalizeBusyInputMode(e.display.BusyInputMode) != "steer" {
+		return false
+	}
+	if strings.TrimSpace(msg.Content) == "" || len(msg.Images) > 0 || len(msg.Files) > 0 {
+		return false
+	}
+	e.interactiveMu.Lock()
+	state, ok := e.interactiveStates[interactiveKey]
+	e.interactiveMu.Unlock()
+	if !ok || state == nil || state.agentSession == nil || !state.agentSession.Alive() {
+		return false
+	}
+
+	prompt := e.buildSenderPrompt(
+		msg.Content,
+		msg.UserID,
+		msg.UserName,
+		msg.Platform,
+		msg.SessionKey,
+		msg.ChannelKey,
+	)
+	steerer, ok := state.agentSession.(AgentSessionSteerer)
+	if !ok {
+		return false
+	}
+	err := steerer.Steer(prompt)
+	if err != nil {
+		slog.Error("busy steer: send failed", "error", err)
+		return false
+	}
+	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsSent))
+	return true
 }
 
 func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions *SessionManager, interactiveKey string, session *Session) *Session {
@@ -3087,7 +3136,6 @@ func buildCardContent(thinking string, tools []cardToolEntry, answer string) str
 	return sb.String()
 }
 
-
 // unsolicitedReaderStopTimeout bounds how long stopUnsolicitedReader waits
 // for the reader goroutine to exit. The reader is structured so its iterations
 // are short (blocking adapter calls like RespondPermission are offloaded), so
@@ -3430,8 +3478,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 	// Streaming card: aggregate entire turn into a single updatable card.
 	var streamCard StreamingCard
-	var cardToolCalls []cardToolEntry // track tool calls for card content
-	var cardThinkingText string       // latest thinking text
+	var cardToolCalls []cardToolEntry  // track tool calls for card content
+	var cardThinkingText string        // latest thinking text
 	var cardAnswerText strings.Builder // accumulated answer text
 
 	if scp, ok := state.platform.(StreamingCardPlatform); ok {

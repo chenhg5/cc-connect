@@ -6392,6 +6392,23 @@ func (s *queuingAgentSession) Send(prompt string, _ []ImageAttachment, _ []FileA
 	return nil
 }
 
+type steerableQueuingSession struct {
+	*queuingAgentSession
+	steerCalls []string
+	steerMu    sync.Mutex
+}
+
+func newSteerableQueuingSession(id string) *steerableQueuingSession {
+	return &steerableQueuingSession{queuingAgentSession: newQueuingSession(id)}
+}
+
+func (s *steerableQueuingSession) Steer(prompt string) error {
+	s.steerMu.Lock()
+	s.steerCalls = append(s.steerCalls, prompt)
+	s.steerMu.Unlock()
+	return nil
+}
+
 // blockingSendAgentSession blocks in Send until unblock is closed, mimicking agents
 // whose Send does not return until the prompt turn completes (e.g. ACP session/prompt).
 type blockingSendAgentSession struct {
@@ -6740,6 +6757,146 @@ func TestQueueMessageForBusySession_FIFODequeue(t *testing.T) {
 			state.pendingMessages[0].content, state.pendingMessages[1].content)
 	}
 	state.mu.Unlock()
+}
+
+func TestHandleMessage_BusyPlainTextDefaultsToSteer(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newSteerableQueuingSession("busy-steer")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	session := e.sessions.GetOrCreateActive(key)
+	if !session.TryLock() {
+		t.Fatal("expected to lock session")
+	}
+	defer session.Unlock()
+
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx1"}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	e.handleMessage(p, &Message{
+		Platform:   "test",
+		SessionKey: key,
+		Content:    "adjust the current approach",
+		ReplyCtx:   "ctx-followup",
+	})
+
+	sess.steerMu.Lock()
+	steerCalls := append([]string(nil), sess.steerCalls...)
+	sess.steerMu.Unlock()
+	if len(steerCalls) != 1 {
+		t.Fatalf("steerCalls len = %d, want 1 (%v)", len(steerCalls), steerCalls)
+	}
+	if steerCalls[0] != "adjust the current approach" {
+		t.Fatalf("steered prompt = %q", steerCalls[0])
+	}
+
+	sess.sendMu.Lock()
+	sendCalls := append([]string(nil), sess.sendCalls...)
+	sess.sendMu.Unlock()
+	if len(sendCalls) != 0 {
+		t.Fatalf("sendCalls = %v, want none", sendCalls)
+	}
+
+	state.mu.Lock()
+	pendingLen := len(state.pendingMessages)
+	state.mu.Unlock()
+	if pendingLen != 0 {
+		t.Fatalf("pendingMessages len = %d, want 0", pendingLen)
+	}
+	if sent := p.getSent(); len(sent) != 1 || !strings.Contains(sent[0], e.i18n.T(MsgPsSent)) {
+		t.Fatalf("sent replies = %v, want ps ack", sent)
+	}
+}
+
+func TestHandleMessage_BusyPlainTextQueuesWhenSteerUnsupported(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("busy-no-steer")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	session := e.sessions.GetOrCreateActive(key)
+	if !session.TryLock() {
+		t.Fatal("expected to lock session")
+	}
+	defer session.Unlock()
+
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx1"}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	e.handleMessage(p, &Message{
+		Platform:   "test",
+		SessionKey: key,
+		Content:    "later",
+		ReplyCtx:   "ctx-followup",
+	})
+
+	sess.sendMu.Lock()
+	sendCalls := append([]string(nil), sess.sendCalls...)
+	sess.sendMu.Unlock()
+	if len(sendCalls) != 0 {
+		t.Fatalf("sendCalls = %v, want none", sendCalls)
+	}
+
+	state.mu.Lock()
+	pendingLen := len(state.pendingMessages)
+	state.mu.Unlock()
+	if pendingLen != 1 {
+		t.Fatalf("pendingMessages len = %d, want 1", pendingLen)
+	}
+	if sent := p.getSent(); len(sent) != 1 || !strings.Contains(sent[0], e.i18n.T(MsgMessageQueued)) {
+		t.Fatalf("sent replies = %v, want queued ack", sent)
+	}
+}
+
+func TestHandleMessage_BusyInputModeQueueKeepsQueueing(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("busy-queue")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{ThinkingMessages: true, ToolMessages: true, BusyInputMode: "queue"})
+
+	key := "test:user1"
+	session := e.sessions.GetOrCreateActive(key)
+	if !session.TryLock() {
+		t.Fatal("expected to lock session")
+	}
+	defer session.Unlock()
+
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx1"}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	e.handleMessage(p, &Message{
+		Platform:   "test",
+		SessionKey: key,
+		Content:    "later",
+		ReplyCtx:   "ctx-followup",
+	})
+
+	sess.sendMu.Lock()
+	sendCalls := append([]string(nil), sess.sendCalls...)
+	sess.sendMu.Unlock()
+	if len(sendCalls) != 0 {
+		t.Fatalf("sendCalls = %v, want none", sendCalls)
+	}
+
+	state.mu.Lock()
+	pendingLen := len(state.pendingMessages)
+	state.mu.Unlock()
+	if pendingLen != 1 {
+		t.Fatalf("pendingMessages len = %d, want 1", pendingLen)
+	}
+	if sent := p.getSent(); len(sent) != 1 || !strings.Contains(sent[0], e.i18n.T(MsgMessageQueued)) {
+		t.Fatalf("sent replies = %v, want queued ack", sent)
+	}
 }
 
 func TestProcessInteractiveEvents_DrainsQueuedMessages(t *testing.T) {
@@ -10871,9 +11028,9 @@ func (p *stubStreamingCardPlatform) CreateStreamingCard(_ context.Context, _ any
 // stubStreamingCard is a minimal StreamingCard for tests.
 type stubStreamingCard struct{}
 
-func (c *stubStreamingCard) Update(_ context.Context, _ string) error { return nil }
+func (c *stubStreamingCard) Update(_ context.Context, _ string) error   { return nil }
 func (c *stubStreamingCard) Finalize(_ context.Context, _ string) error { return nil }
-func (c *stubStreamingCard) Failed() bool                                { return false }
+func (c *stubStreamingCard) Failed() bool                               { return false }
 
 func TestHandleMessage_InstantReply_SendsConfirmationWhenEnabled(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}

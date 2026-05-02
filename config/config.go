@@ -181,6 +181,7 @@ type DisplayConfig struct {
 	ThinkingMaxLen   *int    `toml:"thinking_max_len"`  // max chars for thinking messages; 0 = no truncation; default 300
 	ToolMaxLen       *int    `toml:"tool_max_len"`      // max chars for tool use messages; 0 = no truncation; default 500
 	ToolMessages     *bool   `toml:"tool_messages"`     // whether tool progress messages are shown; default true
+	BusyInputMode    string  `toml:"busy_input_mode"`   // "steer" (default) or "queue" for busy-session messages
 }
 
 // StreamPreviewConfig controls real-time streaming preview in IM.
@@ -732,6 +733,25 @@ func EffectiveCardMode(cfg *Config, proj *ProjectConfig) string {
 		}
 	}
 	return "legacy"
+}
+
+func EffectiveBusyInputMode(cfg *Config, proj *ProjectConfig) string {
+	if proj != nil && proj.Display != nil && strings.TrimSpace(proj.Display.BusyInputMode) != "" {
+		return normalizeBusyInputMode(proj.Display.BusyInputMode)
+	}
+	if cfg == nil {
+		return "steer"
+	}
+	return normalizeBusyInputMode(cfg.Display.BusyInputMode)
+}
+
+func normalizeBusyInputMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "queue":
+		return "queue"
+	default:
+		return "steer"
+	}
 }
 
 func (c *Config) validate() error {
