@@ -59,6 +59,8 @@ func New(opts map[string]any) (core.Agent, error) {
 
 	if appServerURL == "" {
 		appServerURL = "ws://127.0.0.1:3845"
+	} else if strings.EqualFold(strings.TrimSpace(appServerURL), "stdio") {
+		appServerURL = ""
 	}
 
 	// cli_path allows overriding the binary, e.g. "omx" or "omx --flag val"
@@ -359,7 +361,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 
 	if backend == "app_server" {
-		return newAppServerSession(ctx, appServerURL, a.workDir, model, reasoningEffort, mode, sessionID, extraEnv, codexHome)
+		return newAppServerSession(ctx, appServerURL, a.workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome)
 	}
 	if codexHome != "" {
 		extraEnv = append(extraEnv, "CODEX_HOME="+codexHome)
