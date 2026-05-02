@@ -545,31 +545,41 @@ func streamHandleFromState(st *wsStreamState) wsPreviewHandle {
 	return wsPreviewHandle{streamID: st.streamID, reqID: st.reqID, chatID: st.chatID, userID: st.userID}
 }
 
-// emitAccumulated appends to the accumulator and emits the frame.
-// sendMu is held across the entire mutate-emit-ack so frame order matches
-// the accumulation order even under concurrent callers.
-func (p *WSPlatform) emitAccumulated(rc wsReplyContext, content string, finish bool) error {
-	st := p.streamStateFor(rc)
-	st.sendMu.Lock()
-	defer st.sendMu.Unlock()
-
-	st.mu.Lock()
-	if st.finalized {
+// emitIndependentBubble sends `content` as one self-contained bubble (a
+// single aibot_respond_msg/stream frame with finish=true).
+//
+// If a typing-placeholder stream is currently registered for rc.reqID it
+// is taken over: the same stream.id is reused so the placeholder text is
+// replaced by `content` in the existing bubble, and finish=true closes the
+// stream out. After that the entry is gone, so the next call allocates a
+// fresh stream.id and lands in a brand-new bubble — giving each Reply/Send
+// invocation its own message in the WeChat Work conversation.
+func (p *WSPlatform) emitIndependentBubble(rc wsReplyContext, content string) error {
+	var (
+		streamID string
+		st       *wsStreamState
+	)
+	if v, ok := p.streamStates.LoadAndDelete(rc.reqID); ok {
+		st = v.(*wsStreamState)
+		st.sendMu.Lock()
+		defer st.sendMu.Unlock()
+		st.mu.Lock()
+		if !st.finalized {
+			st.finalized = true
+			streamID = st.streamID
+		}
 		st.mu.Unlock()
-		return nil
 	}
-	st.accumulated.WriteString(content)
-	if finish {
-		st.finalized = true
+	if streamID == "" {
+		streamID = p.generateReqID("stream")
 	}
-	text := st.accumulated.String()
-	h := streamHandleFromState(st)
-	st.mu.Unlock()
-
-	if finish {
-		p.streamStates.Delete(rc.reqID)
+	h := wsPreviewHandle{
+		streamID: streamID,
+		reqID:    rc.reqID,
+		chatID:   rc.chatID,
+		userID:   rc.userID,
 	}
-	return p.sendStreamFrame(h, text, finish)
+	return p.sendStreamFrame(h, content, true)
 }
 
 // emitReplaceAccumulated overwrites the accumulator (used by stream-preview
@@ -598,11 +608,11 @@ func (p *WSPlatform) emitReplaceAccumulated(rc wsReplyContext, content string, f
 	return p.sendStreamFrame(h, content, finish)
 }
 
-// Reply forwards content via the active aibot_respond_msg stream. Multiple
-// Reply/Send calls for the same user turn append to the same stream so the
-// WeChat Work client renders them as a single, progressively-updated bubble.
-// finish=true is NOT emitted here — the engine's TypingIndicator stop hook
-// closes the stream at turn end.
+// Reply emits content as a self-contained bubble. The first Reply/Send for
+// a given user message takes over the typing-placeholder stream so the
+// "🤔 思考中..." bubble morphs into the first real message; subsequent
+// Reply/Send calls land in fresh bubbles, so thinking blocks and the final
+// answer end up as separate messages in the WeChat Work conversation.
 func (p *WSPlatform) Reply(ctx context.Context, rctx any, content string) error {
 	rc, ok := rctx.(wsReplyContext)
 	if !ok {
@@ -611,7 +621,7 @@ func (p *WSPlatform) Reply(ctx context.Context, rctx any, content string) error 
 	if content == "" || rc.reqID == "" {
 		return nil
 	}
-	return p.emitAccumulated(rc, content, false)
+	return p.emitIndependentBubble(rc, content)
 }
 
 // SendPreviewStart implements core.PreviewStarter. It writes the first chunk
@@ -634,15 +644,17 @@ func (p *WSPlatform) SendPreviewStart(ctx context.Context, rctx any, content str
 }
 
 // StartTyping implements core.TypingIndicator. WeChat Work智能机器人 has no
-// native typing frame; we emulate it by opening the user-turn stream with
-// "🤔 思考中..." as the placeholder content. The placeholder is intentionally
-// NOT written into the accumulator — when the first real Reply/Send arrives,
-// the stream's full-replacement semantics overwrite the placeholder text in
-// the same bubble.
+// native typing frame; we emulate it by opening a stream with "🤔 思考中..."
+// as the placeholder content (finish=false). The first follow-up Reply/Send
+// takes over this stream.id and emits finish=true with the real content,
+// which morphs the placeholder bubble into the first real message. Any
+// further Reply/Send for the same turn allocates a fresh stream.id, so each
+// landing message becomes its own bubble.
 //
-// The returned stop func is invoked from engine's defer at the end of every
-// processInteractiveEvents turn, which is exactly when we should emit
-// finish=true to close the stream and commit the final content.
+// The returned stop func runs from engine's defer at turn end. If the
+// placeholder was never taken over (rare: the engine produced no output for
+// this turn), it closes the stream out so the bubble doesn't linger as a
+// perpetual "🤔 思考中..." stub.
 func (p *WSPlatform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 	rc, ok := rctx.(wsReplyContext)
 	if !ok || rc.reqID == "" {
@@ -725,10 +737,10 @@ func (p *WSPlatform) KeepPreviewOnFinish() bool {
 }
 
 // Send routes outgoing content based on whether we have a reqID:
-//   - reqID present (responding to a user message): append to the running
-//     aibot_respond_msg stream so the WeChat Work client renders progressive
-//     typing in one bubble. The stream closes (finish=true) at turn end via
-//     the TypingIndicator stop hook.
+//   - reqID present (responding to a user message): emit one self-contained
+//     stream bubble per call. First call takes over the typing placeholder;
+//     follow-up calls (e.g. thinking-block then final answer) each land in
+//     their own bubble.
 //   - reqID absent (cron / proactive push, or reply context reconstructed
 //     for a one-off message): use aibot_send_msg/markdown — no stream.
 func (p *WSPlatform) Send(ctx context.Context, rctx any, content string) error {
@@ -740,7 +752,7 @@ func (p *WSPlatform) Send(ctx context.Context, rctx any, content string) error {
 		return nil
 	}
 	if rc.reqID != "" {
-		return p.emitAccumulated(rc, content, false)
+		return p.emitIndependentBubble(rc, content)
 	}
 	if rc.chatID == "" {
 		return fmt.Errorf("wecom-ws: chatID is empty, cannot send proactive message")
