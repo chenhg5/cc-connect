@@ -382,6 +382,7 @@ func main() {
 				ThinkingMaxLen:   tmlen,
 				ToolMaxLen:       toollen,
 				ToolMessages:     tool,
+				BusyInputMode:    config.EffectiveBusyInputMode(cfg),
 			})
 		}
 
@@ -1393,6 +1394,7 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		ThinkingMaxLen:   tmlen,
 		ToolMaxLen:       toollen,
 		ToolMessages:     tool,
+		BusyInputMode:    config.EffectiveBusyInputMode(cfg),
 	})
 	result.DisplayUpdated = true
 

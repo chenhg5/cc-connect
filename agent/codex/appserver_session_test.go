@@ -3,6 +3,8 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"sync"
 	"testing"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -126,6 +128,51 @@ func TestAppServerSession_HandleThreadTokenUsageUpdatedCachesContextUsage(t *tes
 	}
 }
 
+func TestAppServerSession_SteerUsesActiveTurn(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s := &appServerSession{
+		ctx:     ctx,
+		pending: make(map[int64]chan rpcResponseEnvelope),
+	}
+	s.alive.Store(true)
+	s.threadID.Store("thread-1")
+	s.currentTurn = "turn-1"
+	w := &captureRPCWriteCloser{t: t, session: s}
+	s.stdin = w
+
+	if err := s.Steer("adjust course"); err != nil {
+		t.Fatalf("Steer() returned error: %v", err)
+	}
+
+	req := w.request()
+	if got := req["method"]; got != "turn/steer" {
+		t.Fatalf("method = %v, want turn/steer", got)
+	}
+	params, ok := req["params"].(map[string]any)
+	if !ok {
+		t.Fatalf("params = %#v, want object", req["params"])
+	}
+	if got := params["threadId"]; got != "thread-1" {
+		t.Fatalf("threadId = %v, want thread-1", got)
+	}
+	if got := params["expectedTurnId"]; got != "turn-1" {
+		t.Fatalf("expectedTurnId = %v, want turn-1", got)
+	}
+	input, ok := params["input"].([]any)
+	if !ok || len(input) != 1 {
+		t.Fatalf("input = %#v, want one item", params["input"])
+	}
+	first, ok := input[0].(map[string]any)
+	if !ok {
+		t.Fatalf("input[0] = %#v, want object", input[0])
+	}
+	if got := first["text"]; got != "adjust course" {
+		t.Fatalf("input text = %v, want adjust course", got)
+	}
+}
+
 func TestMapAppServerRateLimits_PrefersMultiBucketView(t *testing.T) {
 	report := mapAppServerRateLimits(appServerRateLimitsResponse{
 		RateLimits: appServerRateLimitSnapshot{
@@ -161,6 +208,49 @@ func TestMapAppServerRateLimits_PrefersMultiBucketView(t *testing.T) {
 		t.Fatalf("second bucket = %q, want codex_other", report.Buckets[1].Name)
 	}
 }
+
+type captureRPCWriteCloser struct {
+	t       *testing.T
+	session *appServerSession
+	mu      sync.Mutex
+	req     map[string]any
+}
+
+func (w *captureRPCWriteCloser) Write(p []byte) (int, error) {
+	var req map[string]any
+	if err := json.Unmarshal(p, &req); err != nil {
+		w.t.Fatalf("unmarshal request: %v", err)
+	}
+	w.mu.Lock()
+	w.req = req
+	w.mu.Unlock()
+
+	id, ok := rpcIDToInt64(req["id"])
+	if !ok {
+		w.t.Fatalf("request id = %#v, want numeric id", req["id"])
+	}
+	w.session.pendingMu.Lock()
+	ch := w.session.pending[id]
+	w.session.pendingMu.Unlock()
+	if ch == nil {
+		w.t.Fatalf("pending channel for id %d not found", id)
+	}
+	ch <- rpcResponseEnvelope{ID: id, Result: json.RawMessage(`{"turnId":"turn-1"}`)}
+	return len(p), nil
+}
+
+func (w *captureRPCWriteCloser) Close() error { return nil }
+
+func (w *captureRPCWriteCloser) request() map[string]any {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.req == nil {
+		w.t.Fatal("no request captured")
+	}
+	return w.req
+}
+
+var _ io.WriteCloser = (*captureRPCWriteCloser)(nil)
 
 var _ interface {
 	GetUsage(context.Context) (*core.UsageReport, error)

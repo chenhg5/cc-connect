@@ -268,6 +268,27 @@ func TestEffectiveDisplayQuiet(t *testing.T) {
 	}
 }
 
+func TestEffectiveBusyInputMode(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *Config
+		want string
+	}{
+		{name: "nil defaults steer", cfg: nil, want: "steer"},
+		{name: "empty defaults steer", cfg: &Config{}, want: "steer"},
+		{name: "explicit steer", cfg: &Config{Display: DisplayConfig{BusyInputMode: "steer"}}, want: "steer"},
+		{name: "explicit queue", cfg: &Config{Display: DisplayConfig{BusyInputMode: "queue"}}, want: "queue"},
+		{name: "unknown defaults steer", cfg: &Config{Display: DisplayConfig{BusyInputMode: "drop"}}, want: "steer"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := EffectiveBusyInputMode(tt.cfg); got != tt.want {
+				t.Fatalf("EffectiveBusyInputMode() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestLoad_DefaultsDataDir(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
