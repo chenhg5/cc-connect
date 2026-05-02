@@ -3288,6 +3288,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if !e.display.ThinkingMessages {
 					break
 				}
+				if thinking := strings.TrimSpace(truncateIf(event.Content, e.display.ThinkingMaxLen)); thinking != "" {
+					toolSteps = append(toolSteps, ToolStep{
+						Kind:    ToolStepKindThinking,
+						Name:    "Thinking",
+						Summary: thinking,
+						Done:    true,
+					})
+				}
 				if cardMessageID == nil {
 					card := richCardSupporter.BuildRichCard(CardStatusThinking, "", toolSteps, partialText, true, time.Since(turnStart))
 					if starter, ok := p.(PreviewStarter); ok {
@@ -3297,6 +3305,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						} else {
 							cardMessageID = handle
 						}
+					}
+				} else if updater, ok := p.(MessageUpdater); ok {
+					card := richCardSupporter.BuildRichCard(CardStatusThinking, "", toolSteps, partialText, true, time.Since(turnStart))
+					if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
+						slog.Debug("rich card: failed to update thinking card", "platform", p.Name(), "error", err)
 					}
 				}
 				break
@@ -3356,6 +3369,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					break
 				}
 				toolSteps = append(toolSteps, ToolStep{
+					Kind:    ToolStepKindTool,
 					Name:    event.ToolName,
 					Summary: truncateIf(event.ToolInput, e.display.ToolMaxLen),
 				})
@@ -3448,6 +3462,26 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					result = truncateIf(result, e.display.ToolMaxLen)
 				}
 				if result != "" || event.ToolStatus != "" || event.ToolExitCode != nil || event.ToolSuccess != nil {
+					if hasRichCard {
+						toolSteps = mergeRichToolResult(toolSteps, event, result, e.display.ToolMaxLen)
+						if cardMessageID == nil {
+							card := richCardSupporter.BuildRichCard(CardStatusWorking, "", toolSteps, partialText, true, time.Since(turnStart))
+							if starter, ok := p.(PreviewStarter); ok {
+								handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
+								if err != nil {
+									slog.Debug("rich card: failed to create tool-result card", "platform", p.Name(), "error", err)
+								} else {
+									cardMessageID = handle
+								}
+							}
+						} else if updater, ok := p.(MessageUpdater); ok {
+							card := richCardSupporter.BuildRichCard(CardStatusWorking, "", toolSteps, partialText, true, time.Since(turnStart))
+							if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
+								slog.Debug("rich card: failed to update tool-result card", "platform", p.Name(), "error", err)
+							}
+						}
+						break
+					}
 					resultMsg := e.formatToolResultEventFallback(event.ToolName, result, event.ToolStatus, event.ToolExitCode, event.ToolSuccess)
 					entry := ProgressCardEntry{
 						Kind:     ProgressEntryToolResult,
@@ -4067,6 +4101,52 @@ channelClosed:
 			}
 		}
 	}
+}
+
+func mergeRichToolResult(steps []ToolStep, event Event, result string, maxLen int) []ToolStep {
+	toolName := strings.TrimSpace(event.ToolName)
+	if toolName == "" {
+		toolName = "Tool"
+	}
+
+	idx := -1
+	for i := len(steps) - 1; i >= 0; i-- {
+		if steps[i].Kind == ToolStepKindThinking {
+			continue
+		}
+		if strings.TrimSpace(steps[i].Name) == "" || strings.TrimSpace(steps[i].Name) == toolName {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		summary := strings.TrimSpace(event.ToolInput)
+		if summary != "" {
+			summary = truncateIf(summary, maxLen)
+		}
+		steps = append(steps, ToolStep{
+			Kind:    ToolStepKindTool,
+			Name:    toolName,
+			Summary: summary,
+		})
+		idx = len(steps) - 1
+	}
+
+	if strings.TrimSpace(steps[idx].Name) == "" {
+		steps[idx].Name = toolName
+	}
+	if steps[idx].Kind == "" {
+		steps[idx].Kind = ToolStepKindTool
+	}
+	if strings.TrimSpace(steps[idx].Summary) == "" && strings.TrimSpace(event.ToolInput) != "" {
+		steps[idx].Summary = truncateIf(strings.TrimSpace(event.ToolInput), maxLen)
+	}
+	steps[idx].Result = result
+	steps[idx].Status = strings.TrimSpace(event.ToolStatus)
+	steps[idx].ExitCode = event.ToolExitCode
+	steps[idx].Success = event.ToolSuccess
+	steps[idx].Done = true
+	return steps
 }
 
 // notifyDroppedQueuedMessages drains pendingMessages from the state and

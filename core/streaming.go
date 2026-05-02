@@ -53,10 +53,24 @@ type streamPreview struct {
 	pendingStatus CardStatus // last status set via setStatus(); applied on recovery
 }
 
-// ToolStep is one summarized tool invocation shown in rich progress cards.
+// ToolStepKind identifies the kind of progress row shown in rich cards.
+type ToolStepKind string
+
+const (
+	ToolStepKindTool     ToolStepKind = "tool"
+	ToolStepKindThinking ToolStepKind = "thinking"
+)
+
+// ToolStep is one summarized progress row shown in rich progress cards.
 type ToolStep struct {
-	Name    string // tool name (e.g. "Bash", "Edit")
-	Summary string // human-readable summary shown in the card
+	Kind     ToolStepKind // progress row kind; empty means tool for backward compatibility
+	Name     string       // tool name (e.g. "Bash", "Edit")
+	Summary  string       // human-readable summary shown in the card
+	Result   string       // optional tool output/result summary
+	Status   string       // optional tool status (e.g. completed/failed)
+	ExitCode *int         // optional process exit code
+	Success  *bool        // optional success flag
+	Done     bool         // true once a tool result has been observed
 }
 
 // RichCardSupporter is an optional interface for platforms that can build

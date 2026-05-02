@@ -388,7 +388,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		})
 
 	if p.useInteractiveCard {
-		slog.Info(p.platformName+": interactive card mode enabled, ensure card.action.trigger event is subscribed in Feishu console")
+		slog.Info(p.platformName + ": interactive card mode enabled, ensure card.action.trigger event is subscribed in Feishu console")
 	}
 
 	if p.shouldUseWebhookMode() {
@@ -3653,6 +3653,51 @@ func getToolIcon(toolName string) string {
 	return defaultToolIcon
 }
 
+func richStepDisplayName(step core.ToolStep) string {
+	if step.Kind == core.ToolStepKindThinking {
+		return "Thinking"
+	}
+	name := strings.TrimSpace(step.Name)
+	if name == "" {
+		return "Tool"
+	}
+	return name
+}
+
+func richStepBody(step core.ToolStep) string {
+	name := richStepDisplayName(step)
+	summary := strings.TrimSpace(step.Summary)
+	if summary == "" {
+		summary = name
+	}
+	if step.Kind == core.ToolStepKindThinking {
+		return summary
+	}
+
+	lines := []string{summary}
+	var statusParts []string
+	status := strings.TrimSpace(step.Status)
+	if status != "" {
+		statusParts = append(statusParts, "status: "+status)
+	} else if step.Success != nil {
+		if *step.Success {
+			statusParts = append(statusParts, "status: ok")
+		} else {
+			statusParts = append(statusParts, "status: failed")
+		}
+	}
+	if step.ExitCode != nil {
+		statusParts = append(statusParts, fmt.Sprintf("exit: %d", *step.ExitCode))
+	}
+	if len(statusParts) > 0 {
+		lines = append(lines, strings.Join(statusParts, " | "))
+	}
+	if result := strings.TrimSpace(step.Result); result != "" {
+		lines = append(lines, result)
+	}
+	return strings.Join(lines, "\n")
+}
+
 // isCardJSON returns true if content looks like a complete Feishu card JSON
 // (has "schema" and "body"). Used to avoid double-wrapping rich card output.
 func isCardJSON(content string) bool {
@@ -3724,15 +3769,24 @@ func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, mark
 	panelTitle := "Thinking..."
 	if len(steps) > 0 {
 		if streaming {
-			panelTitle = fmt.Sprintf("Working on it (%d steps)", len(steps))
+			toolCount := 0
+			for _, step := range steps {
+				if step.Kind != core.ToolStepKindThinking {
+					toolCount++
+				}
+			}
+			if toolCount > 0 {
+				panelTitle = fmt.Sprintf("Working on it (%d steps)", len(steps))
+			}
 		} else {
 			toolCounts := make(map[string]int)
 			var toolOrder []string
 			for _, s := range steps {
-				if toolCounts[s.Name] == 0 {
-					toolOrder = append(toolOrder, s.Name)
+				name := richStepDisplayName(s)
+				if toolCounts[name] == 0 {
+					toolOrder = append(toolOrder, name)
 				}
-				toolCounts[s.Name]++
+				toolCounts[name]++
 			}
 			var toolParts []string
 			for _, name := range toolOrder {
@@ -3780,10 +3834,7 @@ func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, mark
 			overflow = len(steps) - maxPanelSteps
 		}
 		for _, step := range visible {
-			summary := strings.TrimSpace(step.Summary)
-			if summary == "" {
-				summary = step.Name
-			}
+			summary := richStepBody(step)
 			panelElements = append(panelElements, map[string]any{
 				"tag":  "div",
 				"icon": map[string]any{"tag": "standard_icon", "token": getToolIcon(step.Name)},
