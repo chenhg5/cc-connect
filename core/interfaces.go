@@ -269,6 +269,12 @@ type AgentSession interface {
 	Close() error
 }
 
+// AgentSessionSteerer injects user input into an active turn without starting
+// a new turn.
+type AgentSessionSteerer interface {
+	Steer(prompt string) error
+}
+
 // PermissionResult represents the user's decision on a permission request.
 type PermissionResult struct {
 	Behavior     string         `json:"behavior"`               // "allow" or "deny"

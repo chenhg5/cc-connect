@@ -64,6 +64,10 @@ type turnStartResponse struct {
 	} `json:"turn"`
 }
 
+type turnSteerResponse struct {
+	TurnID string `json:"turnId"`
+}
+
 type turnNotification struct {
 	ThreadID string `json:"threadId"`
 	Turn     struct {
@@ -448,6 +452,40 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	s.pendingMsgs = s.pendingMsgs[:0]
 	s.stateMu.Unlock()
 
+	return nil
+}
+
+func (s *appServerSession) Steer(prompt string) error {
+	if !s.alive.Load() {
+		return fmt.Errorf("session is closed")
+	}
+
+	threadID := s.CurrentSessionID()
+	if threadID == "" {
+		return fmt.Errorf("codex app-server thread id is empty")
+	}
+
+	s.stateMu.Lock()
+	turnID := s.currentTurn
+	s.stateMu.Unlock()
+	if turnID == "" {
+		return fmt.Errorf("codex app-server active turn id is empty")
+	}
+
+	params := map[string]any{
+		"threadId": threadID,
+		"input": []map[string]any{{
+			"type":          "text",
+			"text":          prompt,
+			"text_elements": []any{},
+		}},
+		"expectedTurnId": turnID,
+	}
+
+	var resp turnSteerResponse
+	if err := s.request("turn/steer", params, &resp); err != nil {
+		return fmt.Errorf("codex app-server turn/steer: %w", err)
+	}
 	return nil
 }
 

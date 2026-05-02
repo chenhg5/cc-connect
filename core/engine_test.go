@@ -6311,6 +6311,96 @@ func TestQueueMessageForBusySession_FIFODequeue(t *testing.T) {
 	state.mu.Unlock()
 }
 
+func TestHandleMessage_BusyPlainTextDefaultsToSteer(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("busy-steer")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	session := e.sessions.GetOrCreateActive(key)
+	if !session.TryLock() {
+		t.Fatal("expected to lock session")
+	}
+	defer session.Unlock()
+
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx1"}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	e.handleMessage(p, &Message{
+		Platform:   "test",
+		SessionKey: key,
+		Content:    "adjust the current approach",
+		ReplyCtx:   "ctx-followup",
+	})
+
+	sess.sendMu.Lock()
+	sendCalls := append([]string(nil), sess.sendCalls...)
+	sess.sendMu.Unlock()
+	if len(sendCalls) != 1 {
+		t.Fatalf("sendCalls len = %d, want 1 (%v)", len(sendCalls), sendCalls)
+	}
+	if sendCalls[0] != "adjust the current approach" {
+		t.Fatalf("sent prompt = %q", sendCalls[0])
+	}
+
+	state.mu.Lock()
+	pendingLen := len(state.pendingMessages)
+	state.mu.Unlock()
+	if pendingLen != 0 {
+		t.Fatalf("pendingMessages len = %d, want 0", pendingLen)
+	}
+	if sent := p.getSent(); len(sent) != 1 || !strings.Contains(sent[0], e.i18n.T(MsgPsSent)) {
+		t.Fatalf("sent replies = %v, want ps ack", sent)
+	}
+}
+
+func TestHandleMessage_BusyInputModeQueueKeepsQueueing(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("busy-queue")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{ThinkingMessages: true, ToolMessages: true, BusyInputMode: "queue"})
+
+	key := "test:user1"
+	session := e.sessions.GetOrCreateActive(key)
+	if !session.TryLock() {
+		t.Fatal("expected to lock session")
+	}
+	defer session.Unlock()
+
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx1"}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	e.handleMessage(p, &Message{
+		Platform:   "test",
+		SessionKey: key,
+		Content:    "later",
+		ReplyCtx:   "ctx-followup",
+	})
+
+	sess.sendMu.Lock()
+	sendCalls := append([]string(nil), sess.sendCalls...)
+	sess.sendMu.Unlock()
+	if len(sendCalls) != 0 {
+		t.Fatalf("sendCalls = %v, want none", sendCalls)
+	}
+
+	state.mu.Lock()
+	pendingLen := len(state.pendingMessages)
+	state.mu.Unlock()
+	if pendingLen != 1 {
+		t.Fatalf("pendingMessages len = %d, want 1", pendingLen)
+	}
+	if sent := p.getSent(); len(sent) != 1 || !strings.Contains(sent[0], e.i18n.T(MsgMessageQueued)) {
+		t.Fatalf("sent replies = %v, want queued ack", sent)
+	}
+}
+
 func TestProcessInteractiveEvents_DrainsQueuedMessages(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newQueuingSession("qs2")
