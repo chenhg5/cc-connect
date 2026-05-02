@@ -2,7 +2,9 @@ package wecom
 
 import (
 	"context"
+	"crypto/md5"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -254,9 +256,9 @@ func (p *WSPlatform) runConnection() error {
 		// not guaranteed safe by the sync.Map contract.
 		var staleKeys []any
 		p.pendingAcks.Range(func(key, value any) bool {
-			if ch, ok := value.(chan error); ok {
+			if ch, ok := value.(chan *wsFrame); ok {
 				select {
-				case ch <- fmt.Errorf("wecom-ws: connection closed"):
+				case ch <- nil: // nil signals connection-closed to writeAndWaitAckFrame
 				default:
 				}
 			}
@@ -344,15 +346,17 @@ func (p *WSPlatform) handleFrame(frame wsFrame) {
 			// Late subscribe ack (should have been consumed in runConnection)
 			slog.Debug("wecom-ws: late subscribe ack")
 		default:
-			var ackErr error
 			if frame.ErrCode != nil && *frame.ErrCode != 0 {
-				ackErr = fmt.Errorf("wecom-ws: ack error: errcode=%d errmsg=%s", *frame.ErrCode, frame.ErrMsg)
 				slog.Warn("wecom-ws: reply/send ack error", "req_id", reqID, "errcode", *frame.ErrCode, "errmsg", frame.ErrMsg)
 			} else {
 				slog.Debug("wecom-ws: reply/send ack ok", "req_id", reqID)
 			}
 			if ch, ok := p.pendingAcks.LoadAndDelete(reqID); ok {
-				ch.(chan error) <- ackErr
+				// Capture frame in a local so the channel pointer doesn't
+				// alias the loop's frame (frame is a function-scope value
+				// here, but a fresh allocation is clearer for the reader).
+				f := frame
+				ch.(chan *wsFrame) <- &f
 			}
 		}
 	default:
@@ -819,25 +823,269 @@ func (p *WSPlatform) writeJSON(v any) error {
 }
 
 // writeAndWaitAck sends a frame and waits for the server ack before returning.
+// Discards the ack body. For callers that need to read the ack body (e.g.
+// aibot_upload_media_init returning upload_id) use writeAndWaitAckFrame.
 // Falls back to non-blocking on timeout to avoid deadlocks.
 func (p *WSPlatform) writeAndWaitAck(ctx context.Context, frame map[string]any, reqID string) error {
-	ch := make(chan error, 1)
+	_, err := p.writeAndWaitAckFrame(ctx, frame, reqID)
+	return err
+}
+
+// writeAndWaitAckFrame is the body-aware variant: it returns the full server
+// response frame so callers can json.Unmarshal frame.Body. The error is
+// non-nil iff frame.errcode is non-zero (or transport/timeout failed); on
+// timeout it returns (nil, nil) for backward compat with writeAndWaitAck.
+func (p *WSPlatform) writeAndWaitAckFrame(ctx context.Context, frame map[string]any, reqID string) (*wsFrame, error) {
+	ch := make(chan *wsFrame, 1)
 	p.pendingAcks.Store(reqID, ch)
 
 	if err := p.writeJSON(frame); err != nil {
 		p.pendingAcks.Delete(reqID)
-		return err
+		return nil, err
 	}
 
 	select {
-	case err := <-ch:
-		return err
+	case f := <-ch:
+		if f == nil {
+			return nil, fmt.Errorf("wecom-ws: connection closed")
+		}
+		if f.ErrCode != nil && *f.ErrCode != 0 {
+			return f, fmt.Errorf("wecom-ws: ack error: errcode=%d errmsg=%s", *f.ErrCode, f.ErrMsg)
+		}
+		return f, nil
 	case <-ctx.Done():
 		p.pendingAcks.Delete(reqID)
-		return ctx.Err()
+		return nil, ctx.Err()
 	case <-time.After(wsAckTimeout):
 		p.pendingAcks.Delete(reqID)
 		slog.Debug("wecom-ws: ack timeout, proceeding", "req_id", reqID)
-		return nil
+		return nil, nil
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Media upload (aibot_upload_media_init / chunk / finish) and outbound
+// image / file delivery for WeChat Work智能机器人.
+//
+// Protocol summary (verified against the official Node SDK & developer docs):
+//
+//   1) aibot_upload_media_init  body{type, filename, total_size, total_chunks, md5}
+//      → ack body{upload_id}
+//   2) aibot_upload_media_chunk body{upload_id, chunk_index (1-based), base64_data}
+//      → ack body{}
+//   3) aibot_upload_media_finish body{upload_id}
+//      → ack body{media_id}
+//   4) aibot_send_msg body{chatid, chat_type?, msgtype: image|file, image|file:{media_id}}
+//      → ack body{}
+//
+// Limits per the official docs:
+//   - chunk size: ≤ 512 KB before base64 encoding
+//   - max chunks: 100  (so total payload ≤ ~50 MB raw, well above the 10 MB image cap)
+//   - image / video: 10 MB; voice: 2 MB; generic file: 20 MB
+// ─────────────────────────────────────────────────────────────────────────────
+
+const (
+	// wsUploadChunkSize is the raw byte size per upload chunk. Server requires
+	// ≤ 512 KB BEFORE base64 encoding, so this is the chunk slice size we feed
+	// into base64.StdEncoding.EncodeToString.
+	wsUploadChunkSize = 256 * 1024 // 256 KB — well under the 512 KB cap
+
+	// wsMediaUploadTimeout caps the entire 3-step upload sequence.
+	wsMediaUploadTimeout = 60 * time.Second
+)
+
+// uploadMedia runs the 3-step aibot_upload_media handshake and returns the
+// media_id allocated by WeChat Work. mediaType is one of "image" / "voice" /
+// "video" / "file" per the protocol.
+func (p *WSPlatform) uploadMedia(ctx context.Context, mediaType, filename string, data []byte) (string, error) {
+	if len(data) == 0 {
+		return "", fmt.Errorf("wecom-ws: uploadMedia: empty payload")
+	}
+	if filename == "" {
+		filename = fmt.Sprintf("file_%d.bin", time.Now().UnixMilli())
+	}
+	chunks := chunkBytes(data, wsUploadChunkSize)
+	if len(chunks) > 100 {
+		return "", fmt.Errorf("wecom-ws: uploadMedia: %d chunks exceeds 100-chunk limit (file too large for ws upload)", len(chunks))
+	}
+
+	uploadCtx, cancel := context.WithTimeout(ctx, wsMediaUploadTimeout)
+	defer cancel()
+
+	sum := md5.Sum(data)
+	md5Hex := hex.EncodeToString(sum[:])
+
+	// ── 1. init ─────────────────────────────────────────────────────────────
+	initReqID := p.generateReqID("aibot_upload_media_init")
+	initFrame := map[string]any{
+		"cmd":     "aibot_upload_media_init",
+		"headers": map[string]string{"req_id": initReqID},
+		"body": map[string]any{
+			"type":         mediaType,
+			"filename":     filename,
+			"total_size":   len(data),
+			"total_chunks": len(chunks),
+			"md5":          md5Hex,
+		},
+	}
+	initAck, err := p.writeAndWaitAckFrame(uploadCtx, initFrame, initReqID)
+	if err != nil {
+		return "", fmt.Errorf("upload init: %w", err)
+	}
+	if initAck == nil {
+		return "", fmt.Errorf("upload init: ack timeout")
+	}
+	var initBody struct {
+		UploadID string `json:"upload_id"`
+	}
+	if err := json.Unmarshal(initAck.Body, &initBody); err != nil {
+		return "", fmt.Errorf("upload init: parse body: %w", err)
+	}
+	if initBody.UploadID == "" {
+		return "", fmt.Errorf("upload init: empty upload_id (body=%s)", string(initAck.Body))
+	}
+
+	// ── 2. chunks ───────────────────────────────────────────────────────────
+	for i, raw := range chunks {
+		chunkReqID := p.generateReqID("aibot_upload_media_chunk")
+		chunkFrame := map[string]any{
+			"cmd":     "aibot_upload_media_chunk",
+			"headers": map[string]string{"req_id": chunkReqID},
+			"body": map[string]any{
+				"upload_id":   initBody.UploadID,
+				"chunk_index": i, // 0-based per protocol
+				"base64_data": base64.StdEncoding.EncodeToString(raw),
+			},
+		}
+		if _, err := p.writeAndWaitAckFrame(uploadCtx, chunkFrame, chunkReqID); err != nil {
+			return "", fmt.Errorf("upload chunk %d/%d: %w", i+1, len(chunks), err)
+		}
+	}
+
+	// ── 3. finish ───────────────────────────────────────────────────────────
+	finishReqID := p.generateReqID("aibot_upload_media_finish")
+	finishFrame := map[string]any{
+		"cmd":     "aibot_upload_media_finish",
+		"headers": map[string]string{"req_id": finishReqID},
+		"body":    map[string]any{"upload_id": initBody.UploadID},
+	}
+	finishAck, err := p.writeAndWaitAckFrame(uploadCtx, finishFrame, finishReqID)
+	if err != nil {
+		return "", fmt.Errorf("upload finish: %w", err)
+	}
+	if finishAck == nil {
+		return "", fmt.Errorf("upload finish: ack timeout")
+	}
+	var finishBody struct {
+		MediaID string `json:"media_id"`
+	}
+	if err := json.Unmarshal(finishAck.Body, &finishBody); err != nil {
+		return "", fmt.Errorf("upload finish: parse body: %w", err)
+	}
+	if finishBody.MediaID == "" {
+		return "", fmt.Errorf("upload finish: empty media_id (body=%s)", string(finishAck.Body))
+	}
+	slog.Info("wecom-ws: media uploaded", "type", mediaType, "filename", filename, "size", len(data), "chunks", len(chunks), "media_id", finishBody.MediaID)
+	return finishBody.MediaID, nil
+}
+
+// sendMediaMessage emits an aibot_send_msg with msgtype=image|file pointing at
+// an already-uploaded media_id.
+func (p *WSPlatform) sendMediaMessage(ctx context.Context, rc wsReplyContext, msgtype, mediaID string) error {
+	if rc.chatID == "" {
+		return fmt.Errorf("wecom-ws: sendMediaMessage: chatID is empty")
+	}
+	reqID := p.generateReqID("aibot_send_msg")
+	frame := map[string]any{
+		"cmd":     "aibot_send_msg",
+		"headers": map[string]string{"req_id": reqID},
+		"body": map[string]any{
+			"chatid":  rc.chatID,
+			"msgtype": msgtype,
+			msgtype:   map[string]string{"media_id": mediaID},
+		},
+	}
+	if err := p.writeAndWaitAck(ctx, frame, reqID); err != nil {
+		return err
+	}
+	slog.Debug("wecom-ws: media message sent", "user", rc.userID, "msgtype", msgtype, "media_id", mediaID)
+	return nil
+}
+
+// SendImage implements core.ImageSender. Uploads img.Data via the 3-step
+// handshake and emits an aibot_send_msg/image referencing the resulting
+// media_id. Works in both single and group chats; a reqID-bearing reply
+// context is NOT required (we use chatID for proactive delivery).
+func (p *WSPlatform) SendImage(ctx context.Context, rctx any, img core.ImageAttachment) error {
+	rc, ok := rctx.(wsReplyContext)
+	if !ok {
+		return fmt.Errorf("wecom-ws: SendImage: invalid reply context type %T", rctx)
+	}
+	filename := img.FileName
+	if filename == "" {
+		ext := imageExtFromMime(img.MimeType)
+		filename = fmt.Sprintf("image_%d%s", time.Now().UnixMilli(), ext)
+	}
+	mediaID, err := p.uploadMedia(ctx, "image", filename, img.Data)
+	if err != nil {
+		return fmt.Errorf("wecom-ws: SendImage upload: %w", err)
+	}
+	return p.sendMediaMessage(ctx, rc, "image", mediaID)
+}
+
+// SendFile implements core.FileSender. Uploads file.Data and emits an
+// aibot_send_msg/file referencing the resulting media_id.
+func (p *WSPlatform) SendFile(ctx context.Context, rctx any, file core.FileAttachment) error {
+	rc, ok := rctx.(wsReplyContext)
+	if !ok {
+		return fmt.Errorf("wecom-ws: SendFile: invalid reply context type %T", rctx)
+	}
+	filename := file.FileName
+	if filename == "" {
+		filename = fmt.Sprintf("file_%d", time.Now().UnixMilli())
+	}
+	mediaID, err := p.uploadMedia(ctx, "file", filename, file.Data)
+	if err != nil {
+		return fmt.Errorf("wecom-ws: SendFile upload: %w", err)
+	}
+	return p.sendMediaMessage(ctx, rc, "file", mediaID)
+}
+
+// chunkBytes splits a byte slice into fixed-size chunks (last chunk may be
+// shorter). Unlike splitByBytes (which is UTF-8 aware) this is byte-exact and
+// safe for binary payloads.
+func chunkBytes(data []byte, size int) [][]byte {
+	if size <= 0 {
+		return [][]byte{data}
+	}
+	n := (len(data) + size - 1) / size
+	chunks := make([][]byte, 0, n)
+	for i := 0; i < len(data); i += size {
+		end := i + size
+		if end > len(data) {
+			end = len(data)
+		}
+		chunks = append(chunks, data[i:end])
+	}
+	return chunks
+}
+
+// imageExtFromMime returns a sensible filename extension for an image MIME
+// type. Defaults to ".jpg" when the MIME is unknown — WeChat Work treats
+// unknown extensions as files rather than displayable images.
+func imageExtFromMime(mime string) string {
+	switch strings.ToLower(strings.TrimSpace(mime)) {
+	case "image/png":
+		return ".png"
+	case "image/gif":
+		return ".gif"
+	case "image/webp":
+		return ".webp"
+	case "image/bmp":
+		return ".bmp"
+	case "image/jpeg", "image/jpg", "":
+		return ".jpg"
+	default:
+		return ".jpg"
 	}
 }

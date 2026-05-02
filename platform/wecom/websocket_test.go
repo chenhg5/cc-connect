@@ -1,6 +1,7 @@
 package wecom
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -255,26 +256,33 @@ func TestReconstructReplyCtx_TooFewParts(t *testing.T) {
 // writeAndWaitAck
 // ---------------------------------------------------------------------------
 
+// pendingAcks now stores chan *wsFrame (not chan error) so callers that need
+// to read the ack body (e.g. uploadMedia parsing upload_id / media_id) can.
+// These tests exercise the channel mechanics directly.
+
 func TestWriteAndWaitAck_SuccessfulAck(t *testing.T) {
 	p := &WSPlatform{}
 
 	reqID := "send_1"
-	ch := make(chan error, 1)
+	ch := make(chan *wsFrame, 1)
 	p.pendingAcks.Store(reqID, ch)
 
-	// Simulate receiving ack in another goroutine
 	go func() {
 		time.Sleep(10 * time.Millisecond)
 		if v, ok := p.pendingAcks.LoadAndDelete(reqID); ok {
-			v.(chan error) <- nil
+			ec := 0
+			v.(chan *wsFrame) <- &wsFrame{ErrCode: &ec, ErrMsg: "ok"}
 		}
 	}()
 
 	ctx := context.Background()
 	select {
-	case err := <-ch:
-		if err != nil {
-			t.Fatalf("expected nil ack error, got %v", err)
+	case f := <-ch:
+		if f == nil {
+			t.Fatal("expected non-nil frame on success")
+		}
+		if f.ErrCode == nil || *f.ErrCode != 0 {
+			t.Fatalf("expected errcode=0, got frame=%+v", f)
 		}
 	case <-ctx.Done():
 		t.Fatal("context cancelled unexpectedly")
@@ -287,24 +295,24 @@ func TestWriteAndWaitAck_AckWithError(t *testing.T) {
 	p := &WSPlatform{}
 
 	reqID := "send_2"
-	ch := make(chan error, 1)
+	ch := make(chan *wsFrame, 1)
 	p.pendingAcks.Store(reqID, ch)
 
-	ackErr := fmt.Errorf("wecom-ws: ack error: errcode=40001 errmsg=invalid token")
 	go func() {
 		time.Sleep(10 * time.Millisecond)
 		if v, ok := p.pendingAcks.LoadAndDelete(reqID); ok {
-			v.(chan error) <- ackErr
+			ec := 40001
+			v.(chan *wsFrame) <- &wsFrame{ErrCode: &ec, ErrMsg: "invalid token"}
 		}
 	}()
 
 	select {
-	case err := <-ch:
-		if err == nil {
-			t.Fatal("expected ack error, got nil")
+	case f := <-ch:
+		if f == nil || f.ErrCode == nil || *f.ErrCode == 0 {
+			t.Fatalf("expected error frame, got %+v", f)
 		}
-		if err.Error() != ackErr.Error() {
-			t.Fatalf("unexpected error: %v", err)
+		if f.ErrMsg != "invalid token" {
+			t.Fatalf("unexpected errmsg: %q", f.ErrMsg)
 		}
 	case <-time.After(1 * time.Second):
 		t.Fatal("timed out waiting for ack")
@@ -315,23 +323,19 @@ func TestWriteAndWaitAck_Timeout(t *testing.T) {
 	p := &WSPlatform{}
 
 	reqID := "send_timeout"
-	ch := make(chan error, 1)
+	ch := make(chan *wsFrame, 1)
 	p.pendingAcks.Store(reqID, ch)
 
-	// Nobody sends ack → should timeout
 	start := time.Now()
 	select {
 	case <-ch:
 		t.Fatal("should not receive from channel without ack")
 	case <-time.After(100 * time.Millisecond):
-		// Expected: timed out without blocking forever
+		// Expected
 	}
-	elapsed := time.Since(start)
-	if elapsed > 1*time.Second {
+	if elapsed := time.Since(start); elapsed > 1*time.Second {
 		t.Fatalf("timeout took too long: %v", elapsed)
 	}
-
-	// Clean up
 	p.pendingAcks.Delete(reqID)
 }
 
@@ -339,11 +343,10 @@ func TestWriteAndWaitAck_ContextCancelled(t *testing.T) {
 	p := &WSPlatform{}
 
 	reqID := "send_cancel"
-	ch := make(chan error, 1)
+	ch := make(chan *wsFrame, 1)
 	p.pendingAcks.Store(reqID, ch)
 
 	ctx, cancel := context.WithCancel(context.Background())
-
 	go func() {
 		time.Sleep(20 * time.Millisecond)
 		cancel()
@@ -353,11 +356,10 @@ func TestWriteAndWaitAck_ContextCancelled(t *testing.T) {
 	case <-ch:
 		t.Fatal("should not receive ack")
 	case <-ctx.Done():
-		// Expected: context cancelled
+		// Expected
 	case <-time.After(1 * time.Second):
 		t.Fatal("timed out")
 	}
-
 	p.pendingAcks.Delete(reqID)
 }
 
@@ -369,7 +371,7 @@ func TestHandleFrame_AckDispatch(t *testing.T) {
 	p := &WSPlatform{}
 
 	reqID := "aibot_send_msg_1"
-	ch := make(chan error, 1)
+	ch := make(chan *wsFrame, 1)
 	p.pendingAcks.Store(reqID, ch)
 
 	errCode := 0
@@ -383,9 +385,9 @@ func TestHandleFrame_AckDispatch(t *testing.T) {
 	p.handleFrame(frame)
 
 	select {
-	case err := <-ch:
-		if err != nil {
-			t.Fatalf("expected nil error for successful ack, got %v", err)
+	case f := <-ch:
+		if f == nil || f.ErrCode == nil || *f.ErrCode != 0 {
+			t.Fatalf("expected ok frame, got %+v", f)
 		}
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("ack not dispatched")
@@ -396,7 +398,7 @@ func TestHandleFrame_AckDispatch_WithError(t *testing.T) {
 	p := &WSPlatform{}
 
 	reqID := "aibot_send_msg_2"
-	ch := make(chan error, 1)
+	ch := make(chan *wsFrame, 1)
 	p.pendingAcks.Store(reqID, ch)
 
 	errCode := 40001
@@ -410,9 +412,12 @@ func TestHandleFrame_AckDispatch_WithError(t *testing.T) {
 	p.handleFrame(frame)
 
 	select {
-	case err := <-ch:
-		if err == nil {
-			t.Fatal("expected error for failed ack, got nil")
+	case f := <-ch:
+		if f == nil || f.ErrCode == nil || *f.ErrCode == 0 {
+			t.Fatalf("expected error frame, got %+v", f)
+		}
+		if f.ErrMsg != "invalid token" {
+			t.Fatalf("expected errmsg 'invalid token', got %q", f.ErrMsg)
 		}
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("ack not dispatched")
@@ -595,7 +600,89 @@ var (
 	_ core.StreamFinalizer         = (*WSPlatform)(nil)
 	_ core.PreviewFinishPreference = (*WSPlatform)(nil)
 	_ core.TypingIndicator         = (*WSPlatform)(nil)
+	_ core.ImageSender             = (*WSPlatform)(nil)
+	_ core.FileSender              = (*WSPlatform)(nil)
 )
+
+// ---------------------------------------------------------------------------
+// chunkBytes — binary-safe slicing for media upload
+// ---------------------------------------------------------------------------
+
+func TestChunkBytes_ExactBoundary(t *testing.T) {
+	in := bytes.Repeat([]byte{0xAB}, 256)
+	chunks := chunkBytes(in, 256)
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 chunk at exact boundary, got %d", len(chunks))
+	}
+	if !bytes.Equal(chunks[0], in) {
+		t.Fatalf("chunk content mismatch")
+	}
+}
+
+func TestChunkBytes_Splits(t *testing.T) {
+	in := bytes.Repeat([]byte{0xCD}, 600)
+	chunks := chunkBytes(in, 256)
+	if len(chunks) != 3 {
+		t.Fatalf("expected 3 chunks (256+256+88), got %d", len(chunks))
+	}
+	if len(chunks[0]) != 256 || len(chunks[1]) != 256 || len(chunks[2]) != 88 {
+		t.Fatalf("unexpected chunk sizes: %d %d %d", len(chunks[0]), len(chunks[1]), len(chunks[2]))
+	}
+	// Reassemble must equal input — must NOT be UTF-8 aware (binary-safe).
+	var reassembled []byte
+	for _, c := range chunks {
+		reassembled = append(reassembled, c...)
+	}
+	if !bytes.Equal(reassembled, in) {
+		t.Fatalf("reassembled bytes differ from input")
+	}
+}
+
+func TestChunkBytes_Empty(t *testing.T) {
+	chunks := chunkBytes(nil, 256)
+	if len(chunks) != 0 {
+		t.Fatalf("expected 0 chunks for empty input, got %d", len(chunks))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SendImage / SendFile — context type validation (full upload requires a
+// live ws connection and is exercised by integration testing).
+// ---------------------------------------------------------------------------
+
+func TestSendImage_RejectsWrongCtxType(t *testing.T) {
+	p := &WSPlatform{}
+	err := p.SendImage(context.Background(), "not-a-wsReplyContext", core.ImageAttachment{Data: []byte("x")})
+	if err == nil {
+		t.Fatal("expected error for wrong reply context type")
+	}
+}
+
+func TestSendFile_RejectsWrongCtxType(t *testing.T) {
+	p := &WSPlatform{}
+	err := p.SendFile(context.Background(), 42, core.FileAttachment{Data: []byte("x")})
+	if err == nil {
+		t.Fatal("expected error for wrong reply context type")
+	}
+}
+
+func TestImageExtFromMime(t *testing.T) {
+	cases := []struct{ mime, want string }{
+		{"image/png", ".png"},
+		{"IMAGE/PNG", ".png"},
+		{"image/jpeg", ".jpg"},
+		{"image/jpg", ".jpg"},
+		{"image/gif", ".gif"},
+		{"image/webp", ".webp"},
+		{"", ".jpg"},
+		{"application/octet-stream", ".jpg"},
+	}
+	for _, c := range cases {
+		if got := imageExtFromMime(c.mime); got != c.want {
+			t.Errorf("imageExtFromMime(%q) = %q, want %q", c.mime, got, c.want)
+		}
+	}
+}
 
 // ---------------------------------------------------------------------------
 // TypingIndicator: placeholder stream + hand-off to SendPreviewStart
