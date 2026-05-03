@@ -144,6 +144,8 @@ type Platform struct {
 	userNameCache    sync.Map          // open_id -> display name
 	chatNameCache    sync.Map          // chat_id -> chat name
 	chatMemberCache  sync.Map          // chatID -> *chatMemberEntry
+	recalledMu       sync.Mutex
+	recalledMsgIDs   map[string]time.Time // message_id -> recall time, short TTL race guard
 	// Webhook mode fields (for Lark international version)
 	server       *http.Server
 	port         string
@@ -347,6 +349,14 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 			}
 			return nil
 		}).
+		OnP2MessageRecalledV1(func(ctx context.Context, event *larkim.P2MessageRecalledV1) error {
+			for _, sibling := range p.sharedGroup.allPlatforms() {
+				if err := sibling.onMessageRecalled(ctx, event); err != nil {
+					slog.Error("shared ws: onMessageRecalled error", "err", err)
+				}
+			}
+			return nil
+		}).
 		OnP2MessageReadV1(func(ctx context.Context, event *larkim.P2MessageReadV1) error {
 			return nil // ignore read receipts
 		}).
@@ -388,7 +398,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		})
 
 	if p.useInteractiveCard {
-		slog.Info(p.platformName+": interactive card mode enabled, ensure card.action.trigger event is subscribed in Feishu console")
+		slog.Info(p.platformName + ": interactive card mode enabled, ensure card.action.trigger event is subscribed in Feishu console")
 	}
 
 	if p.shouldUseWebhookMode() {
@@ -736,6 +746,172 @@ func (p *Platform) AddDoneReaction(rctx any) {
 	go p.addReactionWithEmoji(rc.messageID, p.doneEmoji)
 }
 
+const recalledMessageTTL = 10 * time.Minute
+
+func (p *Platform) markMessageRecalled(messageID string) {
+	messageID = strings.TrimSpace(messageID)
+	if messageID == "" {
+		return
+	}
+
+	now := time.Now()
+	p.recalledMu.Lock()
+	defer p.recalledMu.Unlock()
+
+	if p.recalledMsgIDs == nil {
+		p.recalledMsgIDs = make(map[string]time.Time)
+	}
+	for id, markedAt := range p.recalledMsgIDs {
+		if now.Sub(markedAt) > recalledMessageTTL {
+			delete(p.recalledMsgIDs, id)
+		}
+	}
+	p.recalledMsgIDs[messageID] = now
+}
+
+func (p *Platform) isMessageRecalled(messageID string) bool {
+	messageID = strings.TrimSpace(messageID)
+	if messageID == "" {
+		return false
+	}
+
+	now := time.Now()
+	p.recalledMu.Lock()
+	defer p.recalledMu.Unlock()
+
+	markedAt, ok := p.recalledMsgIDs[messageID]
+	if !ok {
+		return false
+	}
+	if now.Sub(markedAt) > recalledMessageTTL {
+		delete(p.recalledMsgIDs, messageID)
+		return false
+	}
+	return true
+}
+
+func isMessageWithdrawnCode(code int, msg string) bool {
+	msg = strings.ToLower(strings.TrimSpace(msg))
+	if code == 230011 {
+		return true
+	}
+	for _, needle := range []string{"withdrawn", "recalled", "recall", "deleted", "not found", "not exist", "撤回"} {
+		if strings.Contains(msg, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *Platform) IsMessageRecalled(ctx context.Context, rctx any) (bool, error) {
+	rc, ok := rctx.(replyContext)
+	if !ok || strings.TrimSpace(rc.messageID) == "" {
+		return false, nil
+	}
+	messageID := strings.TrimSpace(rc.messageID)
+	if p.isMessageRecalled(messageID) {
+		return true, nil
+	}
+	if p.client == nil {
+		return false, fmt.Errorf("%s: client not initialized", p.tag())
+	}
+
+	req := larkim.NewGetMessageReqBuilder().
+		MessageId(messageID).
+		UserIdType(larkim.UserIdTypeGetMessageOpenId).
+		Build()
+
+	var resp *larkim.GetMessageResp
+	if err := p.withTransientRetry(ctx, "get message", func() error {
+		return p.withFreshTenantAccessTokenRetry(ctx, "get message", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+			var err error
+			resp, err = client.Im.Message.Get(ctx, req, options...)
+			if err != nil {
+				return fmt.Errorf("%s: get message api call: %w", p.tag(), err)
+			}
+			if !resp.Success() {
+				return fmt.Errorf("%s: get message failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+			}
+			return nil
+		})
+	}); err != nil {
+		if resp != nil && isMessageWithdrawnCode(resp.Code, resp.Msg) {
+			p.markMessageRecalled(messageID)
+			return true, nil
+		}
+		if isMessageWithdrawnError(err) {
+			p.markMessageRecalled(messageID)
+			return true, nil
+		}
+		return false, err
+	}
+
+	if resp == nil || resp.Data == nil || len(resp.Data.Items) == 0 {
+		p.markMessageRecalled(messageID)
+		return true, nil
+	}
+	for _, item := range resp.Data.Items {
+		if item != nil && item.Deleted != nil && *item.Deleted {
+			p.markMessageRecalled(messageID)
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func isMessageWithdrawnError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return isMessageWithdrawnCode(0, err.Error())
+}
+
+func (p *Platform) dispatchCoreMessage(msg *core.Message) {
+	if msg == nil || p.handler == nil {
+		return
+	}
+	if p.isMessageRecalled(msg.MessageID) {
+		slog.Debug(p.tag()+": recalled message dispatch dropped", "message_id", msg.MessageID)
+		return
+	}
+	p.handler(p.dispatchPlatform(), msg)
+}
+
+func (p *Platform) onMessageRecalled(_ context.Context, event *larkim.P2MessageRecalledV1) error {
+	if event == nil || event.Event == nil {
+		return nil
+	}
+
+	messageID := stringValue(event.Event.MessageId)
+	chatID := stringValue(event.Event.ChatId)
+	if messageID == "" {
+		slog.Debug(p.tag()+": recall event without message id", "chat_id", chatID)
+		return nil
+	}
+	if chatID != "" && !core.AllowList(p.allowChat, chatID) {
+		slog.Debug(p.tag()+": recall event from unauthorized chat", "chat_id", chatID, "message_id", messageID)
+		return nil
+	}
+
+	p.markMessageRecalled(messageID)
+	slog.Info(p.tag()+": message recalled",
+		"message_id", messageID,
+		"chat_id", chatID,
+		"recall_type", stringValue(event.Event.RecallType),
+	)
+
+	if p.handler == nil {
+		return nil
+	}
+	p.handler(p.dispatchPlatform(), &core.Message{
+		Platform:  p.platformName,
+		MessageID: messageID,
+		Recalled:  true,
+		ReplyCtx:  replyContext{messageID: messageID, chatID: chatID},
+	})
+	return nil
+}
+
 func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
 	msg := event.Event.Message
 	sender := event.Event.Sender
@@ -759,6 +935,11 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	messageID := ""
 	if msg.MessageId != nil {
 		messageID = *msg.MessageId
+	}
+
+	if p.isMessageRecalled(messageID) {
+		slog.Debug(p.tag()+": recalled message ignored before dispatch", "message_id", messageID)
+		return nil
 	}
 
 	if p.dedup.IsDuplicate(messageID) {
@@ -853,6 +1034,11 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 // handler invocation. It runs in its own goroutine so that onMessage returns
 // quickly and does not block the SDK event loop.
 func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string, mentions []*larkim.MentionEvent, messageID, sessionKey, userID, chatID string, rctx replyContext, parentID string) {
+	if p.isMessageRecalled(messageID) {
+		slog.Debug(p.tag()+": recalled message ignored in async dispatch", "message_id", messageID)
+		return
+	}
+
 	// Resolve user and chat names asynchronously so SDK dispatcher is not blocked.
 	userName := ""
 	if userID != "" {
@@ -888,7 +1074,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			)
 			return
 		}
-		p.handler(p.dispatchPlatform(), &core.Message{
+		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
@@ -911,7 +1097,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			}
 			return
 		}
-		p.handler(p.dispatchPlatform(), &core.Message{
+		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
@@ -937,7 +1123,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			}
 			return
 		}
-		p.handler(p.dispatchPlatform(), &core.Message{
+		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
@@ -956,7 +1142,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		if text == "" && len(images) == 0 {
 			return
 		}
-		p.handler(p.dispatchPlatform(), &core.Message{
+		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
@@ -984,7 +1170,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		}
 		slog.Debug(p.tag()+": file downloaded", "file_name", fileBody.FileName, "size", len(fileData))
 		mimeType := detectMimeType(fileData)
-		p.handler(p.dispatchPlatform(), &core.Message{
+		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
@@ -1011,7 +1197,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			Files:    files,
 			ReplyCtx: rctx,
 		}
-		p.handler(p.dispatchPlatform(), coreMsg)
+		p.dispatchCoreMessage(coreMsg)
 
 	case "sticker":
 		var stickerBody struct {
@@ -1025,7 +1211,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		imgData, mimeType, err := p.downloadImage(messageID, stickerBody.FileKey)
 		if err != nil {
 			slog.Warn(p.tag()+": download sticker failed, falling back to placeholder", "error", err)
-			p.handler(p.dispatchPlatform(), &core.Message{
+			p.dispatchCoreMessage(&core.Message{
 				SessionKey: sessionKey, Platform: p.platformName,
 				MessageID: messageID,
 				UserID:    userID, UserName: userName, ChatName: chatName,
@@ -1033,7 +1219,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			})
 			return
 		}
-		p.handler(p.dispatchPlatform(), &core.Message{
+		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
@@ -1069,7 +1255,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 				slog.Warn(p.tag()+": download media thumbnail failed", "error", err)
 			}
 		}
-		p.handler(p.dispatchPlatform(), &core.Message{
+		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
