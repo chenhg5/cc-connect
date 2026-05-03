@@ -43,6 +43,10 @@ type claudeSession struct {
 	done            chan struct{}
 	alive           atomic.Bool
 
+	// Raw pipe FDs for zero-downtime restart export.
+	stdinFD  int
+	stdoutFD int
+
 	// gracefulStopTimeout is how long Close() waits for a clean exit
 	// (stdin close → Stop hooks → process exit) before escalating to
 	// SIGTERM and then SIGKILL. Default: 120s to match claude-mem's
@@ -197,6 +201,13 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		done:                make(chan struct{}),
 		gracefulStopTimeout: 120 * time.Second,
 	}
+	// Extract raw pipe FDs for zero-downtime restart export.
+	if f, ok := stdin.(interface{ Fd() uintptr }); ok {
+		cs.stdinFD = int(f.Fd())
+	}
+	if f, ok := stdout.(interface{ Fd() uintptr }); ok {
+		cs.stdoutFD = int(f.Fd())
+	}
 	cs.setPermissionMode(mode)
 	cs.sessionID.Store(sessionID)
 	cs.alive.Store(true)
@@ -207,7 +218,15 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 }
 
 func (cs *claudeSession) readLoop(stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
-	waitErrCh, waitDone := cs.startReadLoopWait(stdout)
+	var waitErrCh <-chan error
+	var waitDone <-chan struct{}
+	if cs.cmd != nil {
+		waitErrCh, waitDone = cs.startReadLoopWait(stdout)
+	} else {
+		// Restored session (zero-downtime restart): cmd is nil because the
+		// original exec.Cmd was lost. We poll the PID for liveness instead.
+		waitErrCh, waitDone = cs.startRestoredReadLoopWait(stdout)
+	}
 	defer cs.finishReadLoop(waitErrCh, stderrBuf)
 
 	scanner := bufio.NewScanner(stdout)
@@ -245,6 +264,28 @@ func (cs *claudeSession) startReadLoopWait(stdout io.ReadCloser) (<-chan error, 
 			return
 		case <-time.After(50 * time.Millisecond):
 		}
+		_ = stdout.Close()
+	}()
+
+	return waitErrCh, waitDone
+}
+
+// startRestoredReadLoopWait is used when the session was reconstructed from
+// inherited FDs after a zero-downtime restart. We can't call cmd.Wait()
+// because cmd is nil, so we poll the PID for liveness instead.
+func (cs *claudeSession) startRestoredReadLoopWait(stdout io.ReadCloser) (<-chan error, <-chan struct{}) {
+	waitErrCh := make(chan error, 1)
+	waitDone := make(chan struct{})
+
+	// For restored sessions cmd is nil, so we can't call cmd.Wait().
+	// Send nil immediately — finishReadLoop will proceed as soon as the
+	// scanner returns EOF (child closed stdout or was killed).
+	waitErrCh <- nil
+	close(waitDone)
+
+	// Second goroutine: clean up stdout when the session is cancelled.
+	go func() {
+		<-cs.ctx.Done()
 		_ = stdout.Close()
 	}()
 
@@ -774,4 +815,129 @@ func filterEnv(env []string, key string) []string {
 		}
 	}
 	return out
+}
+
+// ExportRestartData implements core.SessionRestartDataExporter.
+// It dups the pipe FDs without CLOEXEC so they survive exec.
+func (cs *claudeSession) ExportRestartData() (*core.SessionRestartData, error) {
+	// Dup stdin FD (write end) without CLOEXEC.
+	stdinDup, err := syscall.Dup(cs.stdinFD)
+	if err != nil {
+		return nil, fmt.Errorf("dup stdin fd %d: %w", cs.stdinFD, err)
+	}
+	// Clear CLOEXEC on the dup'd fd so it survives exec.
+	if err := setFDCloexec(stdinDup, false); err != nil {
+		syscall.Close(stdinDup)
+		return nil, fmt.Errorf("clear CLOEXEC on stdin fd %d: %w", stdinDup, err)
+	}
+
+	// Dup stdout FD (read end) without CLOEXEC.
+	stdoutDup, err := syscall.Dup(cs.stdoutFD)
+	if err != nil {
+		syscall.Close(stdinDup)
+		return nil, fmt.Errorf("dup stdout fd %d: %w", cs.stdoutFD, err)
+	}
+	if err := setFDCloexec(stdoutDup, false); err != nil {
+		syscall.Close(stdinDup)
+		syscall.Close(stdoutDup)
+		return nil, fmt.Errorf("clear CLOEXEC on stdout fd %d: %w", stdoutDup, err)
+	}
+
+	pid := 0
+	if cs.cmd != nil && cs.cmd.Process != nil {
+		pid = cs.cmd.Process.Pid
+	}
+
+	return &core.SessionRestartData{
+		StdinFD:        stdinDup,
+		StdoutFD:       stdoutDup,
+		AgentPID:       pid,
+		WorkDir:        cs.workDir,
+		AgentSessionID: cs.CurrentSessionID(),
+		PermissionMode: cs.getPermissionMode(),
+	}, nil
+}
+
+func (cs *claudeSession) getPermissionMode() string {
+	if v := cs.permissionMode.Load(); v != nil {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+// setFDCloexec sets or clears the CLOEXEC flag on a file descriptor.
+func setFDCloexec(fd int, cloexec bool) error {
+	// Use raw syscall for F_GETFD/F_SETFD since FcntlInt is not available on all platforms.
+	raw := uintptr(fd)
+	flags, _, err := syscall.Syscall(syscall.SYS_FCNTL, raw, syscall.F_GETFD, 0)
+	if err != 0 {
+		return err
+	}
+	if cloexec {
+		flags |= syscall.FD_CLOEXEC
+	} else {
+		flags &^= syscall.FD_CLOEXEC
+	}
+	_, _, err = syscall.Syscall(syscall.SYS_FCNTL, raw, syscall.F_SETFD, flags)
+	if err != 0 {
+		return err
+	}
+	return nil
+}
+
+// restoreClaudeSessionFromFDs reconstructs a claudeSession from dup'd FDs
+// after a zero-downtime server restart. The FDs were dup'd without CLOEXEC
+// and are now owned by this session.
+func restoreClaudeSessionFromFDs(ctx context.Context, data core.SessionRestartData) (*claudeSession, error) {
+	sessionCtx, cancel := context.WithCancel(ctx)
+
+	// Recreate the stdin pipe from the inherited FD.
+	stdinFile := os.NewFile(uintptr(data.StdinFD), "restored-stdin")
+	if stdinFile == nil {
+		cancel()
+		return nil, fmt.Errorf("restore stdin: os.NewFile(%d) failed", data.StdinFD)
+	}
+	// Restore CLOEXEC so the fd is cleaned up on future execs.
+	_ = setFDCloexec(data.StdinFD, true)
+
+	// Recreate the stdout pipe from the inherited FD.
+	stdoutFile := os.NewFile(uintptr(data.StdoutFD), "restored-stdout")
+	if stdoutFile == nil {
+		stdinFile.Close()
+		cancel()
+		return nil, fmt.Errorf("restore stdout: os.NewFile(%d) failed", data.StdoutFD)
+	}
+	_ = setFDCloexec(data.StdoutFD, true)
+
+	alive := true
+	if data.AgentPID > 0 {
+		// Check if process is still alive (signal 0 = test, no actual signal sent).
+		err := syscall.Kill(data.AgentPID, syscall.Signal(0))
+		if err != nil {
+			alive = false
+		}
+	}
+
+	cs := &claudeSession{
+		cmd:                 nil, // cmd is nil — we only have the FDs, not the exec.Cmd
+		stdin:               stdinFile,
+		stdinFD:             data.StdinFD,
+		stdoutFD:            data.StdoutFD,
+		events:              make(chan core.Event, 64),
+		workDir:             data.WorkDir,
+		ctx:                 sessionCtx,
+		cancel:              cancel,
+		done:                make(chan struct{}),
+		gracefulStopTimeout: 120 * time.Second,
+	}
+	cs.sessionID.Store(data.AgentSessionID)
+	cs.setPermissionMode(data.PermissionMode)
+	cs.alive.Store(alive)
+
+	// Start readLoop on the restored stdout FD.
+	go cs.readLoop(stdoutFile, nil)
+
+	return cs, nil
 }

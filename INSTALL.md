@@ -739,6 +739,27 @@ Logs auto-rotate at the configured max size and keep one backup.
 cc-connect daemon uninstall
 ```
 
+### Zero-Downtime Restart
+
+cc-connect supports graceful restart via `SIGHUP` — running agent sessions are preserved across the restart without message loss:
+
+```bash
+# Find the cc-connect PID and send SIGHUP
+kill -HUP $(pidof cc-connect)
+
+# Or if using systemd
+systemctl kill -s HUP --user cc-connect
+```
+
+On `SIGHUP`, cc-connect:
+1. Exports all active agent session pipe FDs (with `CLOEXEC` cleared so they survive `exec`)
+2. Saves restart metadata to `{data_dir}/run/restart_sessions_{project}.json`
+3. `exec`s the same binary with the same arguments
+4. On startup, reads the restart state file, reconstructs sessions from inherited FDs
+5. Resumes normal message processing — user messages seamlessly continue existing sessions
+
+If the agent supports the `SessionResumer` interface (Claude Code ships with full support), agent CLI processes also survive the restart.
+
 ## Additional Features
 
 The following additional features are available:

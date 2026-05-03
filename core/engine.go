@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+	"syscall"
 )
 
 const maxPlatformMessageLen = 4000
@@ -242,9 +243,16 @@ type Engine struct {
 	interactiveMu     sync.Mutex
 	interactiveStates map[string]*interactiveState // key = sessionKey
 
+	// restoredSessions holds agent sessions reconstructed from inherited FDs
+	// after a zero-downtime restart. Consumed by
+	// getOrCreateInteractiveStateWith on the next user message keyed by
+	// session key.
+	restoredSessions map[string]*restoredSessionInfo
+
 	platformLifecycleMu sync.Mutex
 	platformReady       map[Platform]bool
 	stopping            bool
+	restarting          bool // when true, Stop() skips closing agent sessions
 	replyFooterMu       sync.Mutex
 	replyFooterUsage    replyFooterUsageCache
 
@@ -309,6 +317,14 @@ type interactiveState struct {
 	// the next turn (e.g. after an abnormal exit). Defaults to true (safe);
 	// cleared to false only after a clean EventResult.
 	eventsNeedResync bool
+}
+
+// restoredSessionInfo holds a pre-constructed agent session from a
+// zero-downtime restart, keyed by session key in restoredSessions.
+type restoredSessionInfo struct {
+	agentSession AgentSession
+	agent        Agent
+	session      *Session
 }
 
 type pendingProviderAddState struct {
@@ -1359,12 +1375,24 @@ func (e *Engine) Stop() error {
 	}
 	e.interactiveMu.Unlock()
 
-	for key, state := range states {
-		if state.agentSession != nil {
-			slog.Debug("engine.Stop: closing agent session", "session", key)
-			state.agentSession.Close()
+	if e.restarting {
+		slog.Info("engine.Stop: restarting, preserving agent sessions",
+			"engine", e.name, "sessions", len(states))
+		// During restart we do NOT close agent sessions — the FDs have been
+		// dup'd without CLOEXEC and will be inherited by the new process.
+	} else {
+		for key, state := range states {
+			if state.agentSession != nil {
+				slog.Debug("engine.Stop: closing agent session", "session", key)
+				state.agentSession.Close()
+			}
 		}
 	}
+	// Close any restored sessions that were never claimed by a user message.
+	for _, rs := range e.restoredSessions {
+		rs.agentSession.Close()
+	}
+	e.restoredSessions = nil
 
 	if e.rateLimiter != nil {
 		e.rateLimiter.Stop()
@@ -1382,6 +1410,142 @@ func (e *Engine) Stop() error {
 		return fmt.Errorf("engine stop errors: %v", errs)
 	}
 	return nil
+	}
+
+// PrepareRestart marks the engine as restarting and exports all running
+// agent session FDs to a state file so they can be inherited by the new
+// process. Call this BEFORE the main shutdown sequence.
+func (e *Engine) PrepareRestart() error {
+	e.platformLifecycleMu.Lock()
+	e.restarting = true
+	e.platformLifecycleMu.Unlock()
+
+	e.interactiveMu.Lock()
+	defer e.interactiveMu.Unlock()
+
+	var sessionsData []SessionRestartData
+
+	for sessionKey, state := range e.interactiveStates {
+		if state.agentSession == nil {
+			continue
+		}
+		exporter, ok := state.agentSession.(SessionRestartDataExporter)
+		if !ok {
+			slog.Warn("agent session does not support restart export, skipping",
+				"session_key", sessionKey, "agent", state.agent.Name())
+			continue
+		}
+		data, err := exporter.ExportRestartData()
+		if err != nil {
+			slog.Error("failed to export restart data for session",
+				"session_key", sessionKey, "error", err)
+			continue
+		}
+		data.SessionKey = sessionKey
+		data.AgentType = state.agent.Name()
+		sessionsData = append(sessionsData, *data)
+	}
+
+	if len(sessionsData) == 0 {
+		slog.Info("PrepareRestart: no sessions to preserve", "engine", e.name)
+		return nil
+	}
+
+	slog.Info("PrepareRestart: exporting sessions", "engine", e.name, "count", len(sessionsData))
+
+	stateFile := filepath.Join(e.dataDir, "run", "restart_sessions_"+e.name+".json")
+	dir := filepath.Dir(stateFile)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("mkdir restart state dir: %w", err)
+	}
+
+	payload, err := json.Marshal(sessionsData)
+	if err != nil {
+		return fmt.Errorf("marshal restart state: %w", err)
+	}
+	if err := os.WriteFile(stateFile, payload, 0o644); err != nil {
+		return fmt.Errorf("write restart state file: %w", err)
+	}
+
+	slog.Info("PrepareRestart: state saved", "engine", e.name, "file", stateFile)
+	return nil
+}
+
+// closeRestartFDs closes file descriptors from a SessionRestartData entry.
+// FDs <= 0 are skipped (they are either unset or invalid).
+func closeRestartFDs(fds ...int) {
+	for _, fd := range fds {
+		if fd > 0 {
+			syscall.Close(fd)
+		}
+	}
+}
+
+// ConsumeRestartSessions reads the restart state file and reconstructs agent
+// sessions from inherited file descriptors. Call this AFTER engine startup,
+// before any messages are processed. Returns the number of restored sessions.
+func (e *Engine) ConsumeRestartSessions() int {
+	stateFile := filepath.Join(e.dataDir, "run", "restart_sessions_"+e.name+".json")
+	data, err := os.ReadFile(stateFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0
+		}
+		slog.Warn("ConsumeRestartSessions: read failed", "engine", e.name, "error", err)
+		return 0
+	}
+	os.Remove(stateFile)
+
+	var sessionsData []SessionRestartData
+	if err := json.Unmarshal(data, &sessionsData); err != nil {
+		slog.Error("ConsumeRestartSessions: unmarshal failed", "engine", e.name, "error", err)
+		return 0
+	}
+
+	resumer, ok := e.agent.(SessionResumer)
+	if !ok {
+		slog.Warn("ConsumeRestartSessions: agent does not support resume", "engine", e.name, "agent", e.agent.Name())
+		return 0
+	}
+
+	e.interactiveMu.Lock()
+	defer e.interactiveMu.Unlock()
+
+	if e.restoredSessions == nil {
+		e.restoredSessions = make(map[string]*restoredSessionInfo)
+	}
+
+	restored := 0
+	for _, sd := range sessionsData {
+		if sd.SessionKey == "" {
+			slog.Warn("ConsumeRestartSessions: empty session key, skipping")
+			closeRestartFDs(sd.StdinFD, sd.StdoutFD)
+			continue
+		}
+
+		as, err := resumer.ResumeSession(e.ctx, sd)
+		if err != nil {
+			slog.Error("ConsumeRestartSessions: resume failed",
+				"session_key", sd.SessionKey, "error", err)
+			closeRestartFDs(sd.StdinFD, sd.StdoutFD)
+			continue
+		}
+
+		e.restoredSessions[sd.SessionKey] = &restoredSessionInfo{
+			agentSession: as,
+			agent:        e.agent,
+			// session is nil here; it will be associated when
+			// getOrCreateInteractiveStateWith is called with this sessionKey
+		}
+		restored++
+		slog.Info("ConsumeRestartSessions: session restored",
+			"session_key", sd.SessionKey,
+			"agent_session_id", as.CurrentSessionID(),
+			"alive", as.Alive())
+	}
+
+	slog.Info("ConsumeRestartSessions: done", "engine", e.name, "restored", restored, "total", len(sessionsData))
+	return restored
 }
 
 // OnPlatformReady marks an async platform as ready and initializes platform-level
@@ -2407,6 +2571,23 @@ func adoptPendingFromPlaceholder(existing, newState *interactiveState) {
 func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string) *interactiveState {
 	e.interactiveMu.Lock()
 	defer e.interactiveMu.Unlock()
+
+	// Check if this session was restored from a zero-downtime restart.
+	if len(e.restoredSessions) > 0 {
+		if rs, ok := e.restoredSessions[sessionKey]; ok {
+			delete(e.restoredSessions, sessionKey)
+			slog.Info("using restored agent session", "session_key", sessionKey)
+			state := &interactiveState{
+				agentSession: rs.agentSession,
+				platform:     p,
+				replyCtx:     replyCtx,
+				agent:        rs.agent,
+				stopCh:       make(chan struct{}),
+			}
+			e.interactiveStates[sessionKey] = state
+			return state
+		}
+	}
 
 	state, ok := e.interactiveStates[sessionKey]
 	if ok && state.agentSession != nil && state.agentSession.Alive() {
