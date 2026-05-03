@@ -1,6 +1,7 @@
 package line
 
 import (
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -220,5 +221,74 @@ func TestDispatchReply_NoToken_UsesPush(t *testing.T) {
 	}
 	if fake.pushCalls[0].to != "U999" {
 		t.Errorf("to = %q, want %q", fake.pushCalls[0].to, "U999")
+	}
+}
+
+func TestDispatchReply_TokenInvalid_FallsBackToPush(t *testing.T) {
+	fake := &fakeLineClient{
+		replyErr: errors.New("unexpected status code: 400, {\"message\":\"Invalid reply token\"}"),
+	}
+	p := &Platform{bot: fake}
+	p.cacheReplyToken("U123", "tok-bad")
+
+	rc := replyContext{targetID: "U123", targetType: "user"}
+	if err := p.dispatchReply(rc, []string{"hello"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(fake.replyCalls) != 1 {
+		t.Errorf("expected 1 ReplyMessage attempt, got %d", len(fake.replyCalls))
+	}
+	if len(fake.pushCalls) != 1 {
+		t.Errorf("expected fallback to PushMessage (1 call), got %d", len(fake.pushCalls))
+	}
+}
+
+func TestDispatchReply_TokenExpiredString_FallsBackToPush(t *testing.T) {
+	fake := &fakeLineClient{
+		replyErr: errors.New("unexpected status code: 400, {\"message\":\"The reply token has expired\"}"),
+	}
+	p := &Platform{bot: fake}
+	p.cacheReplyToken("U123", "tok-old")
+
+	rc := replyContext{targetID: "U123", targetType: "user"}
+	if err := p.dispatchReply(rc, []string{"hi"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(fake.pushCalls) != 1 {
+		t.Errorf("expected fallback Push, got %d push calls", len(fake.pushCalls))
+	}
+}
+
+func TestDispatchReply_OtherError_NoFallback(t *testing.T) {
+	fake := &fakeLineClient{
+		replyErr: errors.New("network unreachable"),
+	}
+	p := &Platform{bot: fake}
+	p.cacheReplyToken("U123", "tok-x")
+
+	rc := replyContext{targetID: "U123", targetType: "user"}
+	err := p.dispatchReply(rc, []string{"hello"})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if len(fake.pushCalls) != 0 {
+		t.Errorf("expected NO fallback Push (duplicate risk), got %d push calls", len(fake.pushCalls))
+	}
+}
+
+func TestDispatchReply_500Error_NoFallback(t *testing.T) {
+	fake := &fakeLineClient{
+		replyErr: errors.New("unexpected status code: 500, {\"message\":\"internal server error\"}"),
+	}
+	p := &Platform{bot: fake}
+	p.cacheReplyToken("U123", "tok-x")
+
+	rc := replyContext{targetID: "U123", targetType: "user"}
+	err := p.dispatchReply(rc, []string{"hello"})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if len(fake.pushCalls) != 0 {
+		t.Errorf("500 should NOT fallback (ambiguous outcome), got %d push calls", len(fake.pushCalls))
 	}
 }

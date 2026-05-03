@@ -3,6 +3,7 @@ package line
 import (
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/line/line-bot-sdk-go/v8/linebot/messaging_api"
@@ -78,6 +79,25 @@ func (p *Platform) pushAll(rc replyContext, messages []string, reason string) er
 	return nil
 }
 
+// isReplyTokenInvalid 判斷 ReplyMessage 的錯誤是否「reply token 失效」
+// （要走 Push fallback）。判斷邏輯：錯誤訊息含 "400" + ("reply token" 或 "expired")。
+//
+// 對比下，網路錯、5xx、未知 400 都不判定為 invalid，因為 Reply 可能已送達，
+// 再 Push 一次會造成使用者收到重複訊息。
+//
+// SDK 目前的錯誤格式：fmt.Errorf("unexpected status code: %d, %s", status, body)
+// 故用字串 contains 即可；若未來 SDK 改成 typed error，這裡再升級用 errors.As。
+func isReplyTokenInvalid(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if !strings.Contains(msg, "400") {
+		return false
+	}
+	return strings.Contains(msg, "reply token") || strings.Contains(msg, "expired")
+}
+
 // dispatchReply 把切好的訊息送出去。若有新鮮 reply token，前 5 段走 Reply API
 // （免費，不吃 push quota）；其餘段或 token 過期/缺失時走 Push API。
 //
@@ -110,7 +130,12 @@ func (p *Platform) dispatchReply(rc replyContext, messages []string) error {
 		Messages:   msgObjs,
 	})
 	if err != nil {
-		// Task 4 會處理 token-invalid fallback，這裡先簡化：任何錯回傳。
+		if isReplyTokenInvalid(err) {
+			slog.Debug("line: dispatch", "method", "push", "reason", "reply_token_invalid", "target_type", rc.targetType)
+			return p.pushAll(rc, messages, "reply_token_invalid")
+		}
+		// 其他錯誤：可能 Reply 已送出但回應失敗，不退回 Push 避免重複。
+		slog.Debug("line: dispatch", "method", "reply", "reason", "reply_api_error", "target_type", rc.targetType, "error", err.Error())
 		return fmt.Errorf("line: reply message: %w", err)
 	}
 
