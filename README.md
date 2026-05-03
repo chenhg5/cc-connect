@@ -18,6 +18,9 @@
   <a href="https://goreportcard.com/report/github.com/chenhg5/cc-connect">
     <img src="https://goreportcard.com/badge/github.com/chenhg5/cc-connect" alt="Go Report Card"/>
   </a>
+  <a href="https://trendshift.io/repositories/23266" target="_blank">
+    <img src="https://trendshift.io/api/badge/repositories/23266" alt="chenhg5/cc-connect | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/>
+  </a>
 </p>
 
 <p align="center">
