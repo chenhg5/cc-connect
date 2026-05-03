@@ -46,6 +46,7 @@ type Platform struct {
 	userNameCache  sync.Map // userID -> display name
 	groupNameCache sync.Map // groupID -> group name
 	replyTokens    sync.Map // targetID -> tokenEntry  (Reply/Push hybrid dispatch)
+	sweepCancel    context.CancelFunc
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -103,6 +104,10 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		Addr:    ":" + p.port,
 		Handler: mux,
 	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	p.sweepCancel = cancel
+	go p.sweepExpiredTokens(ctx)
 
 	go func() {
 		slog.Info("line: webhook server listening", "port", p.port, "path", p.callbackPath)
@@ -466,6 +471,9 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 }
 
 func (p *Platform) Stop() error {
+	if p.sweepCancel != nil {
+		p.sweepCancel()
+	}
 	if p.server != nil {
 		return p.server.Shutdown(context.Background())
 	}

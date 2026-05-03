@@ -349,3 +349,18 @@ func TestDispatchReply_BatchOver5_OverflowToPush(t *testing.T) {
 		t.Errorf("want 2 Push calls for overflow, got %d", len(fake.pushCalls))
 	}
 }
+
+func TestSweepExpiredTokens_RemovesExpired(t *testing.T) {
+	p := &Platform{}
+	p.replyTokens.Store("U_old", tokenEntry{token: "old", at: time.Now().Add(-2 * replyTokenTTL)})
+	p.replyTokens.Store("U_new", tokenEntry{token: "new", at: time.Now()})
+
+	p.sweepOnce()
+
+	if _, ok := p.replyTokens.Load("U_old"); ok {
+		t.Error("expected expired entry to be removed")
+	}
+	if _, ok := p.replyTokens.Load("U_new"); !ok {
+		t.Error("expected fresh entry to remain")
+	}
+}

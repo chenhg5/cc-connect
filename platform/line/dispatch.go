@@ -1,6 +1,7 @@
 package line
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -146,4 +147,34 @@ func (p *Platform) dispatchReply(rc replyContext, messages []string) error {
 		return p.pushAll(rc, messages[batchEnd:], "after_reply_overflow")
 	}
 	return nil
+}
+
+// sweepOnce 跑一輪掃描，清掉所有過期的 cache entry。
+func (p *Platform) sweepOnce() {
+	now := time.Now()
+	p.replyTokens.Range(func(k, v any) bool {
+		entry, ok := v.(tokenEntry)
+		if !ok {
+			p.replyTokens.Delete(k)
+			return true
+		}
+		if now.Sub(entry.at) >= replyTokenTTL {
+			p.replyTokens.Delete(k)
+		}
+		return true
+	})
+}
+
+// sweepExpiredTokens 是 sweeper 主迴圈。Start() 啟動，Stop() 透過 ctx cancel 收掉。
+func (p *Platform) sweepExpiredTokens(ctx context.Context) {
+	ticker := time.NewTicker(sweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			p.sweepOnce()
+		}
+	}
 }
