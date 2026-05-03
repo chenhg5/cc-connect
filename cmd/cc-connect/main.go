@@ -251,6 +251,7 @@ func main() {
 		}
 
 		engine := core.NewEngine(proj.Name, agent, platforms, sessionFile, lang)
+		engine.SetDataDir(cfg.DataDir)
 		showCtx := true
 		if proj.ShowContextIndicator != nil {
 			showCtx = *proj.ShowContextIndicator

@@ -160,6 +160,7 @@ type Engine struct {
 	injectSender          bool
 	attachmentSendEnabled bool
 	startedAt             time.Time
+	dataDir               string
 
 	providerSaveFunc        func(providerName string) error
 	providerAddSaveFunc     func(p ProviderConfig) error
@@ -2455,6 +2456,9 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		envVars := []string{
 			"CC_PROJECT=" + e.name,
 			"CC_SESSION_KEY=" + ccKey,
+		}
+		if sock := e.socketPath(); sock != "" {
+			envVars = append(envVars, "CC_CONNECT_SOCKET="+sock)
 		}
 		if exePath, err := os.Executable(); err == nil {
 			binDir := filepath.Dir(exePath)
@@ -10429,6 +10433,9 @@ func (e *Engine) executeShellCommand(p Platform, msg *Message, cmd *CustomComman
 		"CC_PROJECT=" + e.name,
 		"CC_SESSION_KEY=" + msg.SessionKey,
 	}
+	if sock := e.socketPath(); sock != "" {
+		envVars = append(envVars, "CC_CONNECT_SOCKET="+sock)
+	}
 	// Prepend the cc-connect binary dir on Windows only (native shell fix);
 	// on Unix it would change command resolution for user scripts.
 	if runtime.GOOS == "windows" {
@@ -11521,6 +11528,9 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 			"CC_PROJECT=" + e.name,
 			"CC_SESSION_KEY=" + relaySessionKey,
 		}
+		if sock := e.socketPath(); sock != "" {
+			envVars = append(envVars, "CC_CONNECT_SOCKET="+sock)
+		}
 		if exePath, err := os.Executable(); err == nil {
 			binDir := filepath.Dir(exePath)
 			if curPath := os.Getenv("PATH"); curPath != "" {
@@ -12428,4 +12438,22 @@ func (e *Engine) cmdWebStatus(p Platform, msg *Message) {
 		return
 	}
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgWebStatus), url))
+}
+
+// SetDataDir sets the cc-connect data directory for socket path resolution.
+func (e *Engine) SetDataDir(dataDir string) {
+	e.dataDir = dataDir
+}
+
+// socketPath returns the path to the cc-connect daemon Unix socket.
+// Uses the configured dataDir if available, otherwise falls back to ~/.cc-connect.
+func (e *Engine) socketPath() string {
+	if e.dataDir != "" {
+		return filepath.Join(e.dataDir, "run", "api.sock")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".cc-connect", "run", "api.sock")
 }
