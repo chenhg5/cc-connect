@@ -119,5 +119,85 @@ func TestOpencodeSessionBuildRunArgsIncludesImagesAsFiles(t *testing.T) {
 	}
 }
 
+func TestHandleStepStart(t *testing.T) {
+	s, _ := newOpencodeSession(context.Background(), "echo", "/tmp", "", "default", "", nil)
+	defer s.Close()
+
+	s.handleStepStart(map[string]any{
+		"type": "step_start", "sessionID": "ses_123", "part": map[string]any{},
+	})
+
+	if got := s.CurrentSessionID(); got != "ses_123" {
+		t.Errorf("chatID = %q, want %q", got, "ses_123")
+	}
+}
+
+func TestHandleStepFinish(t *testing.T) {
+	tests := []struct {
+		name      string
+		raw       map[string]any
+		wantEvent bool
+	}{
+		{
+			name:      "reason stop sends EventResult",
+			raw:       map[string]any{"type": "step_finish", "part": map[string]any{"reason": "stop"}},
+			wantEvent: true,
+		},
+		{
+			name:      "reason tool-calls no EventResult",
+			raw:       map[string]any{"type": "step_finish", "part": map[string]any{"reason": "tool-calls"}},
+			wantEvent: false,
+		},
+		{
+			name:      "no reason no EventResult",
+			raw:       map[string]any{"type": "step_finish", "part": map[string]any{}},
+			wantEvent: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, _ := newOpencodeSession(context.Background(), "echo", "/tmp", "", "default", "", nil)
+			defer s.Close()
+
+			s.handleStepFinish(tt.raw)
+
+			select {
+			case evt := <-s.events:
+				if !tt.wantEvent {
+					t.Errorf("unexpected event: %+v", evt)
+				}
+			default:
+				if tt.wantEvent {
+					t.Error("expected EventResult, got none")
+				}
+			}
+		})
+	}
+}
+
+func TestHandleStepFinishDuplicateEventResult(t *testing.T) {
+	s, _ := newOpencodeSession(context.Background(), "echo", "/tmp", "", "default", "", nil)
+	defer s.Close()
+
+	raw := map[string]any{"type": "step_finish", "part": map[string]any{"reason": "stop"}}
+	s.handleStepFinish(raw)
+	s.handleStepFinish(raw)
+
+	count := 0
+	drain := true
+	for drain {
+		select {
+		case <-s.events:
+			count++
+		default:
+			drain = false
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected 1 EventResult, got %d", count)
+	}
+}
+
 // verify Agent implements core.Agent
 var _ core.Agent = (*Agent)(nil)
