@@ -45,6 +45,7 @@ type Platform struct {
 	handler        core.MessageHandler
 	userNameCache  sync.Map // userID -> display name
 	groupNameCache sync.Map // groupID -> group name
+	replyTokens    sync.Map // targetID -> tokenEntry  (Reply/Push hybrid dispatch)
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -165,6 +166,12 @@ func (p *Platform) webhookHandler(w http.ResponseWriter, r *http.Request) {
 			slog.Debug("line: message from unauthorized user", "user", userID)
 			continue
 		}
+
+		// Cache reply token for Reply/Push hybrid dispatch
+		if e.ReplyToken != "" {
+			p.cacheReplyToken(targetID, e.ReplyToken)
+		}
+
 		sessionKey := fmt.Sprintf("line:%s", targetID)
 		rctx := replyContext{targetID: targetID, targetType: targetType}
 
