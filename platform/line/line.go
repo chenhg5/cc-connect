@@ -40,7 +40,7 @@ type Platform struct {
 	port           string
 	callbackPath   string
 	groupReplyAll  bool // if true, respond to ALL group messages without @mention
-	bot            *messaging_api.MessagingApiAPI
+	bot            lineClient
 	server         *http.Server
 	handler        core.MessageHandler
 	userNameCache  sync.Map // userID -> display name
