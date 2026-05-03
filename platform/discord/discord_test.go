@@ -149,12 +149,12 @@ func TestResolveThreadReplyContext_CreatesThreadForGuildMessage(t *testing.T) {
 			ID:        "msg-42",
 			ChannelID: "channel-1",
 			GuildID:   "guild-1",
-			Content:   "<@bot-1> investigate build failure",
+			Content:   "<@100000> investigate build failure",
 			Author:    &discordgo.User{ID: "u1", Username: "jun"},
 		},
 	}
 
-	sessionKey, rc, err := resolveThreadReplyContext(msg, "bot-1", ops)
+	sessionKey, rc, err := resolveThreadReplyContext(msg, "100000", ops)
 	if err != nil {
 		t.Fatalf("resolveThreadReplyContext() error = %v", err)
 	}
@@ -173,6 +173,72 @@ func TestResolveThreadReplyContext_CreatesThreadForGuildMessage(t *testing.T) {
 	if joinedThread != "thread-99" {
 		t.Fatalf("joinedThread = %q, want thread-99", joinedThread)
 	}
+}
+
+func TestResolveThreadReplyContext_JoinsExistingThreadOnCreateFailure(t *testing.T) {
+	t.Run("StartThread fails, JoinThread succeeds — joins existing thread", func(t *testing.T) {
+		ops := fakeThreadOps{
+			resolveChannel: func(channelID string) (*discordgo.Channel, error) {
+				return &discordgo.Channel{ID: channelID, Type: discordgo.ChannelTypeGuildText}, nil
+			},
+			startThread: func(channelID, messageID, name string, archiveDuration int) (*discordgo.Channel, error) {
+				return nil, fmt.Errorf("thread already exists")
+			},
+			joinThread: func(threadID string) error {
+				return nil
+			},
+		}
+
+		msg := &discordgo.MessageCreate{
+			Message: &discordgo.Message{
+				ID:        "msg-42",
+				ChannelID: "channel-1",
+				GuildID:   "guild-1",
+				Content:   "hello",
+				Author:    &discordgo.User{ID: "u1", Username: "jun"},
+			},
+		}
+
+		sessionKey, rc, err := resolveThreadReplyContext(msg, "bot-1", ops)
+		if err != nil {
+			t.Fatalf("resolveThreadReplyContext() error = %v", err)
+		}
+		if sessionKey != "discord:msg-42" {
+			t.Fatalf("sessionKey = %q, want discord:msg-42", sessionKey)
+		}
+		if rc.channelID != "msg-42" || rc.threadID != "msg-42" {
+			t.Fatalf("replyContext = %#v, want thread routing via message ID", rc)
+		}
+	})
+
+	t.Run("StartThread fails, JoinThread also fails — returns error", func(t *testing.T) {
+		ops := fakeThreadOps{
+			resolveChannel: func(channelID string) (*discordgo.Channel, error) {
+				return &discordgo.Channel{ID: channelID, Type: discordgo.ChannelTypeGuildText}, nil
+			},
+			startThread: func(channelID, messageID, name string, archiveDuration int) (*discordgo.Channel, error) {
+				return nil, fmt.Errorf("thread already exists")
+			},
+			joinThread: func(threadID string) error {
+				return fmt.Errorf("join failed")
+			},
+		}
+
+		msg := &discordgo.MessageCreate{
+			Message: &discordgo.Message{
+				ID:        "msg-42",
+				ChannelID: "channel-1",
+				GuildID:   "guild-1",
+				Content:   "hello",
+				Author:    &discordgo.User{ID: "u1", Username: "jun"},
+			},
+		}
+
+		_, _, err := resolveThreadReplyContext(msg, "bot-1", ops)
+		if err == nil {
+			t.Fatal("expected error when both StartThread and JoinThread fail")
+		}
+	})
 }
 
 func TestSessionKeyForChannel_UsesThreadKeyWhenChannelIsThread(t *testing.T) {
@@ -1150,6 +1216,43 @@ func TestIsDiscordBotMention_Everyone(t *testing.T) {
 			if got != tt.want {
 				t.Errorf("isDiscordBotMention(respondToAtEveryoneAndHere=%v, MentionEveryone=%v) = %v, want %v",
 					tt.respondToAtEveryoneAndHere, tt.mentionEveryone, got, tt.want)
+			}
+		})
+	}
+}
+
+// ── Thread name tests ────────────────────────────────────────
+
+func TestThreadNameForMessage(t *testing.T) {
+	tests := []struct {
+		name         string
+		content      string
+		mentionRoles []string
+		want         string
+	}{
+		{"strips user mention", "<@123> fix the bug", nil, "fix the bug"},
+		{"strips nick mention", "<@!123> fix the bug", nil, "fix the bug"},
+		{"strips multiple mentions", "<@111> <@222> fix the bug", nil, "fix the bug"},
+		{"strips @everyone", "@everyone hello", nil, "hello"},
+		{"strips @here", "@here hello", nil, "hello"},
+		{"strips mixed mentions and @everyone", "<@111> @everyone fix it", nil, "fix it"},
+		{"strips role mention", "<@&456> hello", []string{"456"}, "hello"},
+		{"strips mixed user and role mentions", "<@111> <@&789> fix it", []string{"789"}, "fix it"},
+		{"empty after strip uses author", "<@123>", nil, "cc testuser"},
+		{"empty content no author", "", nil, "cc session"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := &discordgo.MessageCreate{
+				Message: &discordgo.Message{Content: tt.content, MentionRoles: tt.mentionRoles},
+			}
+			if tt.want == "cc testuser" {
+				m.Author = &discordgo.User{Username: "testuser"}
+			}
+			got := threadNameForMessage(m)
+			if got != tt.want {
+				t.Errorf("threadNameForMessage(%q) = %q, want %q", tt.content, got, tt.want)
 			}
 		})
 	}
