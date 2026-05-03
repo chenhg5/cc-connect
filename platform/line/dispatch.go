@@ -76,7 +76,7 @@ func (p *Platform) pushAll(rc replyContext, messages []string, reason string) er
 			return fmt.Errorf("line: push message: %w", err)
 		}
 	}
-	slog.Debug("line: dispatch", "method", "push", "reason", reason, "target_type", rc.targetType, "segments", len(messages))
+	slog.Info("line: dispatch", "method", "push", "reason", reason, "target_type", rc.targetType, "segments", len(messages))
 	return nil
 }
 
@@ -132,15 +132,15 @@ func (p *Platform) dispatchReply(rc replyContext, messages []string) error {
 	})
 	if err != nil {
 		if isReplyTokenInvalid(err) {
-			slog.Debug("line: dispatch", "method", "push", "reason", "reply_token_invalid", "target_type", rc.targetType)
+			slog.Info("line: dispatch", "method", "push", "reason", "reply_token_invalid", "target_type", rc.targetType)
 			return p.pushAll(rc, messages, "reply_token_invalid")
 		}
 		// 其他錯誤：可能 Reply 已送出但回應失敗，不退回 Push 避免重複。
-		slog.Debug("line: dispatch", "method", "reply", "reason", "reply_api_error", "target_type", rc.targetType, "error", err.Error())
+		slog.Warn("line: dispatch", "method", "reply", "reason", "reply_api_error", "target_type", rc.targetType, "error", err.Error())
 		return fmt.Errorf("line: reply message: %w", err)
 	}
 
-	slog.Debug("line: dispatch", "method", "reply", "reason", "fresh_token", "target_type", rc.targetType, "segments", batchEnd)
+	slog.Info("line: dispatch", "method", "reply", "reason", "fresh_token", "target_type", rc.targetType, "segments", batchEnd)
 
 	// 還有剩餘段（>5）走 Push
 	if batchEnd < len(messages) {
