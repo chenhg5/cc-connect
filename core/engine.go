@@ -324,7 +324,6 @@ type interactiveState struct {
 type restoredSessionInfo struct {
 	agentSession AgentSession
 	agent        Agent
-	session      *Session
 }
 
 type pendingProviderAddState struct {
@@ -1534,8 +1533,6 @@ func (e *Engine) ConsumeRestartSessions() int {
 		e.restoredSessions[sd.SessionKey] = &restoredSessionInfo{
 			agentSession: as,
 			agent:        e.agent,
-			// session is nil here; it will be associated when
-			// getOrCreateInteractiveStateWith is called with this sessionKey
 		}
 		restored++
 		slog.Info("ConsumeRestartSessions: session restored",
