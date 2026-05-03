@@ -292,3 +292,60 @@ func TestDispatchReply_500Error_NoFallback(t *testing.T) {
 		t.Errorf("500 should NOT fallback (ambiguous outcome), got %d push calls", len(fake.pushCalls))
 	}
 }
+
+func TestDispatchReply_BatchUnder5(t *testing.T) {
+	fake := &fakeLineClient{}
+	p := &Platform{bot: fake}
+	p.cacheReplyToken("U123", "tok")
+
+	msgs := []string{"a", "b", "c"}
+	rc := replyContext{targetID: "U123", targetType: "user"}
+	if err := p.dispatchReply(rc, msgs); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(fake.replyCalls) != 1 {
+		t.Fatalf("want 1 ReplyMessage call, got %d", len(fake.replyCalls))
+	}
+	if got := len(fake.replyCalls[0].msgs); got != 3 {
+		t.Errorf("want 3 messages in single Reply, got %d", got)
+	}
+	if len(fake.pushCalls) != 0 {
+		t.Errorf("want 0 Push calls, got %d", len(fake.pushCalls))
+	}
+}
+
+func TestDispatchReply_BatchExactly5(t *testing.T) {
+	fake := &fakeLineClient{}
+	p := &Platform{bot: fake}
+	p.cacheReplyToken("U123", "tok")
+
+	msgs := []string{"a", "b", "c", "d", "e"}
+	rc := replyContext{targetID: "U123", targetType: "user"}
+	if err := p.dispatchReply(rc, msgs); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(fake.replyCalls) != 1 || len(fake.replyCalls[0].msgs) != 5 {
+		t.Errorf("want 1 Reply with 5 msgs, got replies=%d msgs=%d", len(fake.replyCalls), len(fake.replyCalls[0].msgs))
+	}
+	if len(fake.pushCalls) != 0 {
+		t.Errorf("want 0 Push calls at exactly 5, got %d", len(fake.pushCalls))
+	}
+}
+
+func TestDispatchReply_BatchOver5_OverflowToPush(t *testing.T) {
+	fake := &fakeLineClient{}
+	p := &Platform{bot: fake}
+	p.cacheReplyToken("U123", "tok")
+
+	msgs := []string{"a", "b", "c", "d", "e", "f", "g"}
+	rc := replyContext{targetID: "U123", targetType: "user"}
+	if err := p.dispatchReply(rc, msgs); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(fake.replyCalls) != 1 || len(fake.replyCalls[0].msgs) != 5 {
+		t.Errorf("want 1 Reply with first 5 msgs, got replies=%d msgs=%d", len(fake.replyCalls), len(fake.replyCalls[0].msgs))
+	}
+	if len(fake.pushCalls) != 2 {
+		t.Errorf("want 2 Push calls for overflow, got %d", len(fake.pushCalls))
+	}
+}
