@@ -284,6 +284,28 @@ func TestBuildReplyContent_FallbackWhenManyTables(t *testing.T) {
 	}
 }
 
+func TestBuildReplyContent_StripsANSISequences(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{name: "text", content: "status: \x1b[31mfailed\x1b[0m"},
+		{name: "interactive", content: "```text\n\x1b[31mfailed\x1b[0m\n```"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, body := buildReplyContent(tt.content)
+			if strings.Contains(body, "\u001b") || strings.Contains(body, "[31m") {
+				t.Fatalf("buildReplyContent() leaked ANSI sequence: %q", body)
+			}
+			if !strings.Contains(body, "failed") {
+				t.Fatalf("buildReplyContent() body = %q, want readable text", body)
+			}
+		})
+	}
+}
+
 func TestParseInlineMarkdown_BoldAndCode(t *testing.T) {
 	elements := parseInlineMarkdown("**bold** and `code`")
 	hasBold, hasCode := false, false
