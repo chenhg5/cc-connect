@@ -3033,6 +3033,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				state.mu.Lock()
 				p := state.platform
+				replyCtx := state.replyCtx // use current state, not initial parameter (fixes #591)
 				state.mu.Unlock()
 				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
 				return
@@ -3046,6 +3047,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.mu.Lock()
 			state.eventsNeedResync = true
 			p := state.platform
+			replyCtx := state.replyCtx // use current state, not initial parameter (fixes #591)
 			state.mu.Unlock()
 			e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out (no response)"))
 			e.cleanupInteractiveState(sessionKey, state)
@@ -3085,6 +3087,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		state.mu.Lock()
 		p := state.platform
+		replyCtx = state.replyCtx // use current state, not initial parameter (fixes #591)
 		state.mu.Unlock()
 
 		switch event.Type {
@@ -3690,6 +3693,7 @@ channelClosed:
 	if len(textParts) > 0 {
 		state.mu.Lock()
 		p := state.platform
+		replyCtx = state.replyCtx // use current state, not initial parameter (fixes #591)
 		state.mu.Unlock()
 
 		fullResponse := strings.Join(textParts, "")

@@ -6405,6 +6405,105 @@ func TestProcessInteractiveEvents_DrainsQueuedMessages(t *testing.T) {
 	}
 }
 
+// stubReplyCtxTrackingPlatform tracks which replyCtx was used for each Send call.
+type stubReplyCtxTrackingPlatform struct {
+	stubPlatformEngine
+	replyCtxCalls []any
+	replyCtxMu    sync.Mutex
+}
+
+func (p *stubReplyCtxTrackingPlatform) Send(_ context.Context, replyCtx any, _ string) error {
+	p.replyCtxMu.Lock()
+	p.replyCtxCalls = append(p.replyCtxCalls, replyCtx)
+	p.replyCtxMu.Unlock()
+	return nil
+}
+
+func (p *stubReplyCtxTrackingPlatform) getReplyCtxCalls() []any {
+	p.replyCtxMu.Lock()
+	defer p.replyCtxMu.Unlock()
+	cp := make([]any, len(p.replyCtxCalls))
+	copy(cp, p.replyCtxCalls)
+	return cp
+}
+
+// TestProcessInteractiveEvents_QueuedMessageRoutesToOriginThread verifies that
+// when a queued message is processed, the response (including errors) goes to
+// the queued message's thread (replyCtx) rather than the initial turn's thread.
+// This is the fix for issue #591.
+func TestProcessInteractiveEvents_QueuedMessageRoutesToOriginThread(t *testing.T) {
+	p := &stubReplyCtxTrackingPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	sess := newQueuingSession("qs-thread-routing")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	session := e.sessions.GetOrCreateActive(key)
+
+	// Pre-populate the interactive state with a queued message from Thread B.
+	// Initial turn is on Thread A (replyCtx: "thread-A"), queued message is from Thread B.
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "thread-A",
+		pendingMessages: []queuedMessage{
+			{platform: p, replyCtx: "thread-B", content: "queued-msg-from-thread-B"},
+		},
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	// Simulate turn 1 completing on Thread A, then turn 2 (queued message) with an error.
+	go func() {
+		// Turn 1 result (Thread A)
+		sess.events <- Event{Type: EventText, Content: "response1"}
+		sess.events <- Event{Type: EventResult, Content: "response1", Done: true}
+
+		// Wait for the queued message's Send() call before pushing turn 2 events.
+		sess.sendMu.Lock()
+		for len(sess.sendCalls) == 0 {
+			sess.sendMu.Unlock()
+			time.Sleep(5 * time.Millisecond)
+			sess.sendMu.Lock()
+		}
+		sess.sendMu.Unlock()
+
+		// Turn 2: Queued message from Thread B gets an error
+		sess.events <- Event{Type: EventError, Error: fmt.Errorf("turn2 error")}
+	}()
+
+	session.AddHistory("user", "initial-msg")
+
+	sendDone := make(chan error, 1)
+	sendDone <- nil
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), nil, sendDone, nil)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// ok
+	case <-time.After(5 * time.Second):
+		t.Fatal("processInteractiveEvents did not complete in time")
+	}
+
+	// Verify the error was sent to Thread B's replyCtx, not Thread A's.
+	replyCtxCalls := p.getReplyCtxCalls()
+	if len(replyCtxCalls) < 1 {
+		t.Fatalf("replyCtxCalls = %d, want >= 1", len(replyCtxCalls))
+	}
+
+	// The last Send call (for the error) should use "thread-B" as replyCtx.
+	lastReplyCtx := replyCtxCalls[len(replyCtxCalls)-1]
+	if lastReplyCtx != "thread-B" {
+		t.Fatalf("last replyCtx = %v, want thread-B (queued message's thread)", lastReplyCtx)
+	}
+}
+
 // TestDrainOrphanedQueue_UsesWorkspaceSessionManager verifies that
 // drainOrphanedQueue saves session history through the passed sessions
 // manager (workspace-specific) rather than e.sessions (global).
