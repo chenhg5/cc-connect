@@ -4,7 +4,55 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/line/line-bot-sdk-go/v8/linebot/messaging_api"
 )
+
+// fakeLineClient is a test double for lineClient.
+type replyCall struct {
+	token string
+	msgs  []messaging_api.MessageInterface
+}
+
+type pushCall struct {
+	to   string
+	msgs []messaging_api.MessageInterface
+}
+
+type fakeLineClient struct {
+	replyCalls []replyCall
+	pushCalls  []pushCall
+	replyErr   error
+	pushErr    error
+}
+
+func (f *fakeLineClient) ReplyMessage(req *messaging_api.ReplyMessageRequest) (*messaging_api.ReplyMessageResponse, error) {
+	f.replyCalls = append(f.replyCalls, replyCall{token: req.ReplyToken, msgs: req.Messages})
+	if f.replyErr != nil {
+		return nil, f.replyErr
+	}
+	return &messaging_api.ReplyMessageResponse{}, nil
+}
+
+func (f *fakeLineClient) PushMessage(req *messaging_api.PushMessageRequest, retryKey string) (*messaging_api.PushMessageResponse, error) {
+	f.pushCalls = append(f.pushCalls, pushCall{to: req.To, msgs: req.Messages})
+	if f.pushErr != nil {
+		return nil, f.pushErr
+	}
+	return &messaging_api.PushMessageResponse{}, nil
+}
+
+func (f *fakeLineClient) GetProfile(userId string) (*messaging_api.UserProfileResponse, error) {
+	return &messaging_api.UserProfileResponse{}, nil
+}
+
+func (f *fakeLineClient) GetGroupSummary(groupId string) (*messaging_api.GroupSummaryResponse, error) {
+	return &messaging_api.GroupSummaryResponse{}, nil
+}
+
+func (f *fakeLineClient) ShowLoadingAnimation(req *messaging_api.ShowLoadingAnimationRequest) (*map[string]interface{}, error) {
+	return nil, nil
+}
 
 // TestCacheReplyToken_StoresAndReads verifies that cacheReplyToken stores a token
 // and loadAndDeleteFreshToken can retrieve it.
@@ -133,5 +181,44 @@ func TestCacheReplyToken_EmptyInputsIgnored(t *testing.T) {
 	_, ok2 := p.loadAndDeleteFreshToken("U12345")
 	if ok2 {
 		t.Fatal("empty token should not have been cached")
+	}
+}
+
+func TestDispatchReply_FreshToken_UsesReply(t *testing.T) {
+	fake := &fakeLineClient{}
+	p := &Platform{bot: fake}
+	p.cacheReplyToken("U123", "tok-fresh")
+
+	rc := replyContext{targetID: "U123", targetType: "user"}
+	if err := p.dispatchReply(rc, []string{"hello"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(fake.replyCalls) != 1 {
+		t.Fatalf("expected 1 ReplyMessage call, got %d", len(fake.replyCalls))
+	}
+	if fake.replyCalls[0].token != "tok-fresh" {
+		t.Errorf("token = %q, want %q", fake.replyCalls[0].token, "tok-fresh")
+	}
+	if len(fake.pushCalls) != 0 {
+		t.Errorf("expected 0 PushMessage calls, got %d", len(fake.pushCalls))
+	}
+}
+
+func TestDispatchReply_NoToken_UsesPush(t *testing.T) {
+	fake := &fakeLineClient{}
+	p := &Platform{bot: fake}
+
+	rc := replyContext{targetID: "U999", targetType: "user"}
+	if err := p.dispatchReply(rc, []string{"hello"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(fake.replyCalls) != 0 {
+		t.Errorf("expected 0 ReplyMessage calls, got %d", len(fake.replyCalls))
+	}
+	if len(fake.pushCalls) != 1 {
+		t.Fatalf("expected 1 PushMessage call, got %d", len(fake.pushCalls))
+	}
+	if fake.pushCalls[0].to != "U999" {
+		t.Errorf("to = %q, want %q", fake.pushCalls[0].to, "U999")
 	}
 }
