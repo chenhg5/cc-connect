@@ -25,9 +25,9 @@ func init() {
 	core.RegisterPlatform("line", New)
 }
 
-// replyContext stores the user/group ID for push messages.
-// We use PushMessage instead of ReplyMessage because reply tokens
-// expire in ~1 minute, which is too short for AI agent processing.
+// replyContext stores the user/group/room ID for outbound dispatch.
+// 派送策略 see dispatch.go: webhook 收到的 reply token 會以 targetID 為 key
+// 暫存 ~50s；Reply() 時若 token 還新鮮就走 LINE Reply API（免費），否則走 Push API。
 type replyContext struct {
 	targetID   string
 	targetType string // "user" or "group" or "room"
@@ -415,26 +415,14 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 
 	// LINE text message limit is 5000 characters
 	messages := splitMessage(content, 5000)
-	for _, text := range messages {
-		_, err := p.bot.PushMessage(
-			&messaging_api.PushMessageRequest{
-				To: rc.targetID,
-				Messages: []messaging_api.MessageInterface{
-					messaging_api.TextMessage{
-						Text: text,
-					},
-				},
-			}, "",
-		)
-		if err != nil {
-			core.AlertError("line_push_failed", "LINE PushMessage API returned error", map[string]any{
-				"target_id":   rc.targetID,
-				"target_type": rc.targetType,
-				"content_len": len(text),
-				"error":       err.Error(),
-			})
-			return fmt.Errorf("line: push message: %w", err)
-		}
+	if err := p.dispatchReply(rc, messages); err != nil {
+		core.AlertError("line_dispatch_failed", "LINE dispatch (Reply/Push) returned error", map[string]any{
+			"target_id":   rc.targetID,
+			"target_type": rc.targetType,
+			"segments":    len(messages),
+			"error":       err.Error(),
+		})
+		return err
 	}
 	return nil
 }

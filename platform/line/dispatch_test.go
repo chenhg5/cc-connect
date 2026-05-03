@@ -1,6 +1,7 @@
 package line
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"testing"
@@ -362,5 +363,61 @@ func TestSweepExpiredTokens_RemovesExpired(t *testing.T) {
 	}
 	if _, ok := p.replyTokens.Load("U_new"); !ok {
 		t.Error("expected fresh entry to remain")
+	}
+}
+
+func TestReply_FreshToken_UsesReplyAPI(t *testing.T) {
+	fake := &fakeLineClient{}
+	p := &Platform{bot: fake}
+	p.cacheReplyToken("U123", "tok-fresh")
+
+	rc := replyContext{targetID: "U123", targetType: "user"}
+	if err := p.Reply(context.Background(), rc, "hello world"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(fake.replyCalls) != 1 {
+		t.Errorf("want 1 ReplyMessage, got %d", len(fake.replyCalls))
+	}
+	if len(fake.pushCalls) != 0 {
+		t.Errorf("want 0 PushMessage, got %d", len(fake.pushCalls))
+	}
+}
+
+func TestReply_NoToken_UsesPushAPI(t *testing.T) {
+	fake := &fakeLineClient{}
+	p := &Platform{bot: fake}
+
+	rc := replyContext{targetID: "U999", targetType: "user"}
+	if err := p.Reply(context.Background(), rc, "hello"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(fake.replyCalls) != 0 {
+		t.Errorf("want 0 ReplyMessage, got %d", len(fake.replyCalls))
+	}
+	if len(fake.pushCalls) != 1 {
+		t.Errorf("want 1 PushMessage, got %d", len(fake.pushCalls))
+	}
+}
+
+func TestReply_EmptyContent_NoCall(t *testing.T) {
+	fake := &fakeLineClient{}
+	p := &Platform{bot: fake}
+
+	rc := replyContext{targetID: "U123", targetType: "user"}
+	if err := p.Reply(context.Background(), rc, ""); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(fake.replyCalls) != 0 || len(fake.pushCalls) != 0 {
+		t.Error("empty content should result in zero API calls")
+	}
+}
+
+func TestReply_InvalidContext_ReturnsError(t *testing.T) {
+	fake := &fakeLineClient{}
+	p := &Platform{bot: fake}
+
+	err := p.Reply(context.Background(), "not a replyContext", "hi")
+	if err == nil {
+		t.Fatal("expected error for invalid reply context type")
 	}
 }

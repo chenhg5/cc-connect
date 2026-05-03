@@ -66,7 +66,7 @@
 |---|---|---|---|
 | `slow_agent_send` | agent Send() 超過閾值（目前 20s） | 低-中 | 觀察 `elapsed_ms`；多次連發可能是網路或 Anthropic API 慢 |
 | `webhook_queue_full` | `/hook` 進來但 session busy 且 queue 滿 → prompt 被丟 | 中 | 檢查 session 為何卡、必要時叫老闆重傳 |
-| `line_push_failed` | LINE PushMessage API 非 2xx | 高 | 看 `error` 欄位；常見：channel token 失效、target_id 錯、LINE 限流 |
+| `line_dispatch_failed` | LINE Reply 或 Push API 非 2xx | 高 | 看 `error` 欄位；常見：channel token 失效、target_id 錯、LINE 限流。Reply API token 失效會自動 fallback 到 Push，此 alert 表示連 Push 也失敗 |
 | `session_spawn_failed` | agent.StartSession 失敗（包括 resume→fresh fallback 都失敗） | 嚴重 | Claude binary 不存在？mode 配置錯？可能要重啟 main |
 | `agent_died_unexpectedly` | Claude 子行程跑到一半 stdout EOF（panic/OOM/被殺） | 嚴重 | 看 `partial_bytes` 判斷跑多遠就掛；`/tmp/cc-connect.log` 前後看有無 panic stack |
 | `rule13_violation` | bot 回覆含實作細節字（thread_id/t_jw_/ins_2/CDN 快取/InsForge/phase=awaiting-/context bundle/CloudFront） | 低（觀察用） | 看 `matches` 和 `text_preview`，決定是 skill 邏輯漏洞還是 regex 誤報 |
@@ -111,7 +111,7 @@
 
 一次全查完：兩個 instance 的 `/api/v1/status`、errors 按 category 聚合、turns 統計、最慢 turn 預覽。退出碼：
 - `0` 全綠
-- `1` 有高嚴重度錯誤（session_spawn_failed / agent_died_unexpectedly / line_push_failed）
+- `1` 有高嚴重度錯誤（session_spawn_failed / agent_died_unexpectedly / line_dispatch_failed）
 - `2` 有 instance 不回應
 
 若要用 jq 自己撈特定內容：
@@ -138,7 +138,7 @@ jq -s 'group_by(.category) | map({category: .[0].category, count: length, latest
    - `message received` — LINE webhook 有進來嗎？
    - `session busy` — 是否被隊列擋住？
    - `turn complete` — 有完但可能 push 失敗？
-4. 若 turn 有紀錄但 bot_reply 看起來怪 → 對照 errors.jsonl 同時間點的 `rule13_violation` / `line_push_failed`。
+4. 若 turn 有紀錄但 bot_reply 看起來怪 → 對照 errors.jsonl 同時間點的 `rule13_violation` / `line_dispatch_failed`。
 
 ### Q3：「為什麼慢」
 
