@@ -4926,7 +4926,13 @@ func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
 		ctx, cancel := context.WithTimeout(e.ctx, timeout)
 		defer cancel()
 
-		cmd := exec.CommandContext(ctx, "sh", "-c", shellCmd)
+		// Use native shell on Windows (cmd.exe), sh on Unix.
+		var cmd *exec.Cmd
+		if runtime.GOOS == "windows" {
+			cmd = exec.CommandContext(ctx, "cmd.exe", "/C", shellCmd)
+		} else {
+			cmd = exec.CommandContext(ctx, "sh", "-c", shellCmd)
+		}
 		cmd.Dir = workDir
 		output, err := cmd.CombinedOutput()
 
