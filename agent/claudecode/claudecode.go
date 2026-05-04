@@ -414,6 +414,12 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	return newClaudeSession(ctx, a.workDir, a.cliBin, a.cliExtraArgs, a.cliArgsFlag, model, effort, sessionID, a.mode, tools, disTools, extraEnv, platformPrompt, disableVerbose, a.spawnOpts, maxTok)
 }
 
+// ResumeSession implements core.SessionResumer. It reconstructs a running
+// Claude Code session from file descriptors inherited after a server restart.
+func (a *Agent) ResumeSession(ctx context.Context, data core.SessionRestartData) (core.AgentSession, error) {
+	return restoreClaudeSessionFromFDs(ctx, data)
+}
+
 func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {

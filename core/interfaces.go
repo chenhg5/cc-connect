@@ -492,3 +492,28 @@ type CommandRegistrar interface {
 type ChannelNameResolver interface {
 	ResolveChannelName(channelID string) (string, error)
 }
+
+// SessionRestartData carries enough info to reconstruct an agent session
+// from inherited file descriptors after a server restart (zero-downtime).
+type SessionRestartData struct {
+	SessionKey      string `json:"session_key"`
+	AgentType       string `json:"agent_type"`
+	WorkDir         string `json:"work_dir"`
+	StdinFD         int    `json:"stdin_fd"`   // dup'd fd without CLOEXEC
+	StdoutFD        int    `json:"stdout_fd"`  // dup'd fd without CLOEXEC
+	AgentSessionID  string `json:"agent_session_id"`
+	PermissionMode  string `json:"permission_mode"`
+	AgentPID        int    `json:"agent_pid"` // PID for signaling (SIGTERM/SIGKILL fallback)
+}
+
+// SessionResumer is an optional interface for Agents that can reconstruct
+// a running session from restart data after a zero-downtime restart.
+type SessionResumer interface {
+	ResumeSession(ctx context.Context, data SessionRestartData) (AgentSession, error)
+}
+
+// SessionRestartDataExporter is an optional interface for AgentSession
+// that exports restart data (duped FDs + metadata) before a server restart.
+type SessionRestartDataExporter interface {
+	ExportRestartData() (*SessionRestartData, error)
+}

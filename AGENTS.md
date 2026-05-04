@@ -58,6 +58,8 @@ Optional capability interfaces (implement only when needed):
 - `ProviderSwitcher` — multi-model switching
 - `DoctorChecker` — agent-specific health checks
 - `AgentDoctorInfo` — CLI binary metadata for diagnostics
+- `SessionResumer` — reconstruct agent sessions from inherited FDs (zero-downtime restart)
+- `SessionRestartDataExporter` — export agent session pipe FDs before daemon restart
 
 ## Development Rules
 

@@ -233,6 +233,10 @@ func decodeSendPayload(data []byte, req *core.SendRequest) error {
 }
 
 func resolveSocketPath(dataDir string) string {
+	// CC_CONNECT_SOCKET env var overrides everything except --data-dir
+	if envSock := os.Getenv("CC_CONNECT_SOCKET"); envSock != "" {
+		return envSock
+	}
 	if dataDir != "" {
 		return filepath.Join(dataDir, "run", "api.sock")
 	}

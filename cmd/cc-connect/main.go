@@ -251,6 +251,7 @@ func main() {
 		}
 
 		engine := core.NewEngine(proj.Name, agent, platforms, sessionFile, lang)
+		engine.SetDataDir(cfg.DataDir)
 		showCtx := true
 		if proj.ShowContextIndicator != nil {
 			showCtx = *proj.ShowContextIndicator
@@ -1018,6 +1019,13 @@ func main() {
 
 	slog.Info("cc-connect is running", "projects", len(engines))
 
+	// After startup, consume any zero-downtime restart state and restore sessions
+	for _, e := range engines {
+		if n := e.ConsumeRestartSessions(); n > 0 {
+			slog.Info("restored sessions from zero-downtime restart", "project", e.ProjectName(), "count", n)
+		}
+	}
+
 	// After startup, check if we were restarted and send success notification
 	if notify := core.ConsumeRestartNotify(cfg.DataDir); notify != nil {
 		slog.Info("post-restart: sending success notification", "platform", notify.Platform, "session", notify.SessionKey)
@@ -1027,17 +1035,34 @@ func main() {
 	}
 
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 
 	var restartReq *core.RestartRequest
+	var sigHup bool
 	select {
-	case <-sigCh:
+	case sig := <-sigCh:
+		if sig == syscall.SIGHUP {
+			sigHup = true
+			restartReq = &core.RestartRequest{} // restart will exec with same binary
+			slog.Info("SIGHUP received, performing zero-downtime restart")
+		}
 	case req := <-core.RestartCh:
 		restartReq = &req
 		slog.Info("restart requested via /restart command", "session", req.SessionKey, "platform", req.Platform)
 	}
 
 	slog.Info("shutting down...")
+
+	// For zero-downtime restart (SIGHUP), export all session FDs before shutdown
+	if sigHup {
+		slog.Info("restart: preparing engines for zero-downtime restart")
+		for _, e := range engines {
+			if err := e.PrepareRestart(); err != nil {
+				slog.Error("restart: PrepareRestart failed", "project", e.ProjectName(), "error", err)
+			}
+		}
+	}
+
 	if mgmtSrv != nil {
 		mgmtSrv.Stop()
 	}
@@ -1065,7 +1090,9 @@ func main() {
 	instanceLock.Release()
 
 	if restartReq != nil {
-		if err := core.SaveRestartNotify(cfg.DataDir, *restartReq); err != nil {
+		if sigHup {
+			slog.Info("restart: SIGHUP restart, skipping per-session notification")
+		} else if err := core.SaveRestartNotify(cfg.DataDir, *restartReq); err != nil {
 			slog.Error("restart: save notify failed", "error", err)
 		}
 		execPath, err := os.Executable()

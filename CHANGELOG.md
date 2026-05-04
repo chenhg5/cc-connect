@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.3.3-beta.2 (2026-05-03)
+
+Beta release with zero-downtime restart support and session persistence.
+
+### New Features
+- **Zero-downtime restart (SIGHUP)**: send `SIGHUP` to the cc-connect process to perform a graceful restart without interrupting active agent sessions. The daemon exports running session pipe FDs, `exec`s the same binary, and reconstructs sessions from inherited file descriptors — no message loss, no reconfiguration needed. (#XXX)
+- **`SessionResumer` / `SessionRestartDataExporter` interfaces**: two new optional capability interfaces in `core/` that enable agents to opt into session preservation across restarts. Claude Code agent ships with full support; other agents can implement `ExportRestartData()` and `ResumeSession()` to participate.
+
+### Fixed
+- **Session close on restart**: engine `Stop()` no longer closes agent sessions during a restart — FDs are dup'd without CLOEXEC and inherited by the new process.
+
 ## v1.3.3-beta.1 (2026-04-25)
 
 Beta release with new agents, new features, and broad platform fixes. No breaking changes.
