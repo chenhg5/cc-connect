@@ -112,6 +112,21 @@ MiniMax-M2.7 is a next-generation large language model designed for autonomous e
 </tr>
 
 <tr>
+<td width="150"><a href="https://aicanapi.com"><img src="assets/sponsors/aican.jpg" alt="aicanapi.com" width="120"></a></td>
+<td>Thanks to aicanapi.com for sponsoring this project! aicanapi.com provides reliable AI model API relay services with support for Claude, GPT, Gemini and more. Stable, fast, and cost-effective access to mainstream AI models for developers. Register via <a href="https://aicanapi.com">this link</a> to get started.</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://pateway.ai/?ch=2qn568&aff=DRA4VUFS"><img src="assets/sponsors/patewayai.png" alt="Pateway" width="120"></a></td>
+<td>Thanks to Pateway for sponsoring this project! Pateway is a high-quality AI model API relay platform providing stable access to Claude, GPT, Gemini and other mainstream models. Fast response, transparent pricing, enterprise-grade reliability. Register via <a href="https://pateway.ai/?ch=2qn568&aff=DRA4VUFS">this link</a> to get started.</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://cy.10dianai.com/register?aff=7QjR"><img src="assets/sponsors/10dianai.png" alt="10点AI" width="120"></a></td>
+<td>Thanks to 10点AI for sponsoring this project! 10点AI provides reliable AI model API relay services with support for Claude, GPT, Gemini and more. Cost-effective, stable access for developers and teams. Register via <a href="https://cy.10dianai.com/register?aff=7QjR">this link</a> to get started.</td>
+</tr>
+
+<tr>
 <td width="150"><a href="https://ddshub.short.gy/ccconnect"><img src="assets/sponsors/ddshub.png" alt="DDS Hub" width="120"></a></td>
 <td>Thanks to DDS for sponsoring this project! DDS Hub is a reliable and high-performance Claude and CodeX API proxy service. We provides cost-effective domestic Claude direct acceleration services for both individual and enterprise users. We offer stable and low-latency Claude Max number pools, with full support for Claude Haiku, Opus, Sonnet, GPT 5.4 and other flagship models. Invoices are available for recharges of 1000 RMB or more. Enterprise customers can also enjoy customized grouping and dedicated technical support services. Exclusive benefit for CC connect users: Register via <a href="https://ddshub.short.gy/ccconnect">this link</a> and enjoy an extra 10% credit on your first recharge (please contact the group admin to claim after recharging)!</td>
 </tr>
