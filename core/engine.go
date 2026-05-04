@@ -133,6 +133,7 @@ var RestartCh = make(chan RestartRequest, 1)
 // DisplayCfg controls how intermediate messages are surfaced.
 // A value of -1 means "use default", 0 means "no truncation".
 type DisplayCfg struct {
+	Mode             string // "full" (default), "compact", or "quiet"
 	ThinkingMessages bool
 	ThinkingMaxLen   int // max runes for thinking preview; 0 = no truncation
 	ToolMaxLen       int // max runes for tool use preview; 0 = no truncation
@@ -174,7 +175,7 @@ type Engine struct {
 	commandSaveAddFunc func(name, description, prompt, exec, workDir string) error
 	commandSaveDelFunc func(name string) error
 
-	displaySaveFunc  func(thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error
+	displaySaveFunc  func(mode *string, thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error
 	configReloadFunc func() (*ConfigReloadResult, error)
 
 	hooks              *HookManager
@@ -394,7 +395,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		cancel:                cancel,
 		i18n:                  NewI18n(lang),
 		attachmentSendEnabled: true,
-		display:               DisplayCfg{ThinkingMessages: true, ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen, ToolMessages: true},
+		display:               DisplayCfg{Mode: "full", ThinkingMessages: true, ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen, ToolMessages: true},
 		commands:              NewCommandRegistry(),
 		skills:                NewSkillRegistry(),
 		aliases:               make(map[string]string),
@@ -680,7 +681,7 @@ func (e *Engine) SetCommandSaveDelFunc(fn func(name string) error) {
 	e.commandSaveDelFunc = fn
 }
 
-func (e *Engine) SetDisplaySaveFunc(fn func(thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error) {
+func (e *Engine) SetDisplaySaveFunc(fn func(mode *string, thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error) {
 	e.displaySaveFunc = fn
 }
 
@@ -3089,21 +3090,28 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		switch event.Type {
 		case EventThinking:
-			// In quiet mode, still split text segments so they don't merge.
+			// When thinking messages are hidden, behavior depends on display mode:
+			//   quiet:   append separator to keep all text in one card
+			//   compact: freeze+detach to split text into separate cards
 			if !e.display.ThinkingMessages && len(textParts) > segmentStart {
-				if sp.canPreview() {
-					sp.freeze()
-					sp.detachPreview()
+				if e.display.Mode == "quiet" {
+					if sp.canPreview() && sp.appendSeparator("\n\n") {
+						textParts = append(textParts, "\n\n")
+					}
 				} else {
-					// Preview degraded — send accumulated text directly
-					segment := strings.Join(textParts[segmentStart:], "")
-					if segment != "" {
-						for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
-							sendWorkspace(p, replyCtx, chunk)
+					if sp.canPreview() {
+						sp.freeze()
+						sp.detachPreview()
+					} else {
+						segment := strings.Join(textParts[segmentStart:], "")
+						if segment != "" {
+							for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
+								sendWorkspace(p, replyCtx, chunk)
+							}
 						}
 					}
+					segmentStart = len(textParts)
 				}
-				segmentStart = len(textParts)
 				silentHold = false
 			}
 			if e.display.ThinkingMessages && event.Content != "" {
@@ -3134,21 +3142,28 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventToolUse:
 			toolCount++
-			// When tool messages are hidden, split text segments.
+			// When tool messages are hidden, behavior depends on display mode:
+			//   quiet:   append separator to keep all text in one card
+			//   compact: freeze+detach to split text into separate cards
 			if !e.display.ToolMessages && len(textParts) > segmentStart {
-				if sp.canPreview() {
-					sp.freeze()
-					sp.detachPreview()
+				if e.display.Mode == "quiet" {
+					if sp.canPreview() && sp.appendSeparator("\n\n") {
+						textParts = append(textParts, "\n\n")
+					}
 				} else {
-					// Preview degraded — send accumulated text directly
-					segment := strings.Join(textParts[segmentStart:], "")
-					if segment != "" {
-						for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
-							sendWorkspace(p, replyCtx, chunk)
+					if sp.canPreview() {
+						sp.freeze()
+						sp.detachPreview()
+					} else {
+						segment := strings.Join(textParts[segmentStart:], "")
+						if segment != "" {
+							for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
+								sendWorkspace(p, replyCtx, chunk)
+							}
 						}
 					}
+					segmentStart = len(textParts)
 				}
-				segmentStart = len(textParts)
 				silentHold = false
 			}
 			if e.display.ToolMessages {
@@ -3631,12 +3646,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			}
 
-			// Add a "done" reaction so the user knows the agent finished.
-			// The reaction is added after stopTyping (deferred) so the
-			// "doing" emoji is removed first.
-			// Skip for silent (NO_REPLY) turns — the user should not know
-			// the agent processed anything.
-			if !isSilent {
+			// Add a "done" reaction when the preview was updated in-place
+			// (user only got a push for the initial send). The reaction is
+			// added after stopTyping (deferred) so the "doing" emoji is
+			// removed first.
+			if sp.needsDoneReaction() {
 				if doneTI, ok := p.(TypingIndicatorDone); ok {
 					doneReaction = func() { doneTI.AddDoneReaction(replyCtx) }
 				}
@@ -6793,23 +6807,53 @@ func (e *Engine) applyLiveModeChange(sessionKey, mode string) bool {
 }
 
 func (e *Engine) cmdQuiet(p Platform, msg *Message, args []string) {
-	// /quiet toggles both ThinkingMessages and ToolMessages.
-	// Quiet ON = both hidden; Quiet OFF = both shown.
-	isQuiet := e.display.ThinkingMessages || e.display.ToolMessages
-	e.display.ThinkingMessages = !isQuiet
-	e.display.ToolMessages = !isQuiet
+	// /quiet [full|compact|quiet]
+	// Without argument: cycle full → quiet → compact → full.
+	// With argument: set mode directly.
+	var newMode string
+	if len(args) > 0 {
+		switch strings.ToLower(args[0]) {
+		case "full", "compact", "quiet":
+			newMode = strings.ToLower(args[0])
+		default:
+			e.reply(p, msg.ReplyCtx, "Usage: /quiet [full|compact|quiet]")
+			return
+		}
+	} else {
+		switch e.display.Mode {
+		case "full", "":
+			newMode = "quiet"
+		case "quiet":
+			newMode = "compact"
+		default: // "compact" or unknown
+			newMode = "full"
+		}
+	}
+
+	e.display.Mode = newMode
+	switch newMode {
+	case "compact", "quiet":
+		e.display.ThinkingMessages = false
+		e.display.ToolMessages = false
+	default:
+		e.display.ThinkingMessages = true
+		e.display.ToolMessages = true
+	}
 
 	if e.displaySaveFunc != nil {
 		tm := e.display.ThinkingMessages
 		tool := e.display.ToolMessages
-		if err := e.displaySaveFunc(&tm, nil, nil, &tool); err != nil {
+		if err := e.displaySaveFunc(&newMode, &tm, nil, nil, &tool); err != nil {
 			slog.Error("failed to persist display config after /quiet", "error", err)
 		}
 	}
 
-	if isQuiet {
+	switch newMode {
+	case "quiet":
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQuietOn))
-	} else {
+	case "compact":
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDisplayModeCompact))
+	default:
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQuietOff))
 	}
 }
@@ -10735,6 +10779,37 @@ func (ci configItem) description(isZh bool) string {
 func (e *Engine) configItems() []configItem {
 	return []configItem{
 		{
+			key:    "mode",
+			desc:   "Display mode: full, compact, quiet",
+			descZh: "显示模式: full, compact, quiet",
+			getFunc: func() string {
+				if e.display.Mode == "" {
+					return "full"
+				}
+				return e.display.Mode
+			},
+			setFunc: func(v string) error {
+				switch v {
+				case "full":
+					e.display.Mode = "full"
+					e.display.ThinkingMessages = true
+					e.display.ToolMessages = true
+				case "compact", "quiet":
+					e.display.Mode = v
+					e.display.ThinkingMessages = false
+					e.display.ToolMessages = false
+				default:
+					return fmt.Errorf("must be full, compact, or quiet")
+				}
+				if e.displaySaveFunc != nil {
+					tm := e.display.ThinkingMessages
+					tool := e.display.ToolMessages
+					return e.displaySaveFunc(&v, &tm, nil, nil, &tool)
+				}
+				return nil
+			},
+		},
+		{
 			key:    "thinking_messages",
 			desc:   "Whether thinking messages are shown (true/false)",
 			descZh: "是否显示思考消息 (true/false)",
@@ -10748,7 +10823,7 @@ func (e *Engine) configItems() []configItem {
 				}
 				e.display.ThinkingMessages = b
 				if e.displaySaveFunc != nil {
-					return e.displaySaveFunc(&b, nil, nil, nil)
+					return e.displaySaveFunc(nil, &b, nil, nil, nil)
 				}
 				return nil
 			},
@@ -10770,7 +10845,7 @@ func (e *Engine) configItems() []configItem {
 				}
 				e.display.ThinkingMaxLen = n
 				if e.displaySaveFunc != nil {
-					return e.displaySaveFunc(nil, &n, nil, nil)
+					return e.displaySaveFunc(nil, nil, &n, nil, nil)
 				}
 				return nil
 			},
@@ -10789,7 +10864,7 @@ func (e *Engine) configItems() []configItem {
 				}
 				e.display.ToolMessages = b
 				if e.displaySaveFunc != nil {
-					return e.displaySaveFunc(nil, nil, nil, &b)
+					return e.displaySaveFunc(nil, nil, nil, nil, &b)
 				}
 				return nil
 			},
@@ -10811,7 +10886,7 @@ func (e *Engine) configItems() []configItem {
 				}
 				e.display.ToolMaxLen = n
 				if e.displaySaveFunc != nil {
-					return e.displaySaveFunc(nil, nil, &n, nil)
+					return e.displaySaveFunc(nil, nil, nil, &n, nil)
 				}
 				return nil
 			},

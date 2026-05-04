@@ -164,12 +164,20 @@ type ManagementConfig struct {
 	CORSOrigins []string `toml:"cors_origins,omitempty"` // allowed CORS origins; empty = no CORS
 }
 
+// Display mode constants.
+const (
+	DisplayModeFull    = "full"    // show thinking + tool messages as separate messages (default)
+	DisplayModeCompact = "compact" // hide thinking/tool, each text segment is a separate card
+	DisplayModeQuiet   = "quiet"   // hide thinking/tool, all text appends to one card
+)
+
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
 type DisplayConfig struct {
-	ThinkingMessages *bool `toml:"thinking_messages"` // whether thinking messages are shown; default true
-	ThinkingMaxLen   *int  `toml:"thinking_max_len"`  // max chars for thinking messages; 0 = no truncation; default 300
-	ToolMaxLen       *int  `toml:"tool_max_len"`      // max chars for tool use messages; 0 = no truncation; default 500
-	ToolMessages     *bool `toml:"tool_messages"`     // whether tool progress messages are shown; default true
+	Mode             *string `toml:"mode"`              // "full" (default), "compact", or "quiet"
+	ThinkingMessages *bool   `toml:"thinking_messages"` // whether thinking messages are shown; default true
+	ThinkingMaxLen   *int    `toml:"thinking_max_len"`  // max chars for thinking messages; 0 = no truncation; default 300
+	ToolMaxLen       *int    `toml:"tool_max_len"`      // max chars for tool use messages; 0 = no truncation; default 500
+	ToolMessages     *bool   `toml:"tool_messages"`     // whether tool progress messages are shown; default true
 }
 
 // StreamPreviewConfig controls real-time streaming preview in IM.
@@ -589,37 +597,60 @@ func projectQuietEffective(cfg *Config, proj *ProjectConfig) bool {
 }
 
 // EffectiveDisplay resolves global [display] together with legacy quiet (root or per-project).
-// If quiet is in effect and thinking_messages / tool_messages were not explicitly set in [display],
-// they map to false (backward-compatible with pre-display quiet = true).
-func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (thinkingMessages, toolMessages bool, thinkingMaxLen, toolMaxLen int) {
-	thinkingMessages = true
-	toolMessages = true
-	thinkingMaxLen = 300
-	toolMaxLen = 500
+//
+// Resolution order for mode:
+//  1. Explicit display.mode wins.
+//  2. Legacy quiet = true (without display.mode) → "quiet".
+//  3. Default → "full".
+//
+// Both "compact" and "quiet" modes default ThinkingMessages/ToolMessages to false
+// unless explicitly overridden in [display].
+func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMessages, toolMessages bool, thinkingMaxLen, toolMaxLen int) {
+	// Resolve mode.
+	mode = DisplayModeFull
+	if cfg.Display.Mode != nil {
+		mode = *cfg.Display.Mode
+	} else if projectQuietEffective(cfg, proj) {
+		mode = DisplayModeQuiet
+	}
+
+	// Defaults based on mode.
+	switch mode {
+	case DisplayModeCompact, DisplayModeQuiet:
+		thinkingMessages = false
+		toolMessages = false
+	default: // "full"
+		thinkingMessages = true
+		toolMessages = true
+	}
+
+	// Explicit [display] overrides.
 	if cfg.Display.ThinkingMessages != nil {
 		thinkingMessages = *cfg.Display.ThinkingMessages
 	}
 	if cfg.Display.ToolMessages != nil {
 		toolMessages = *cfg.Display.ToolMessages
 	}
+
+	thinkingMaxLen = 300
+	toolMaxLen = 500
 	if cfg.Display.ThinkingMaxLen != nil {
 		thinkingMaxLen = *cfg.Display.ThinkingMaxLen
 	}
 	if cfg.Display.ToolMaxLen != nil {
 		toolMaxLen = *cfg.Display.ToolMaxLen
 	}
-	if projectQuietEffective(cfg, proj) {
-		if cfg.Display.ThinkingMessages == nil {
-			thinkingMessages = false
-		}
-		if cfg.Display.ToolMessages == nil {
-			toolMessages = false
-		}
-	}
-	return thinkingMessages, toolMessages, thinkingMaxLen, toolMaxLen
+	return
 }
 
 func (c *Config) validate() error {
+	if c.Display.Mode != nil {
+		switch *c.Display.Mode {
+		case DisplayModeFull, DisplayModeCompact, DisplayModeQuiet:
+		default:
+			return fmt.Errorf("config: display.mode must be \"full\", \"compact\", or \"quiet\"")
+		}
+	}
 	switch strings.ToLower(strings.TrimSpace(c.AttachmentSend)) {
 	case "", "on", "off":
 	default:
@@ -1368,9 +1399,14 @@ func RemoveAlias(name string) error {
 
 // SaveDisplayConfig persists the display settings to the config file.
 // Uses surgical text editing to preserve comments and unknown fields.
-func SaveDisplayConfig(thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
+func SaveDisplayConfig(mode *string, thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
 	configMu.Lock()
 	defer configMu.Unlock()
+	if mode != nil {
+		if err := patchSectionField("display", "mode", quoteTomlString(*mode)); err != nil {
+			return err
+		}
+	}
 	if thinkingMessages != nil {
 		if err := patchSectionField("display", "thinking_messages", fmt.Sprintf("%t", *thinkingMessages)); err != nil {
 			return err
