@@ -32,6 +32,7 @@ type Agent struct {
 	model           string
 	reasoningEffort string
 	mode            string // "suggest" | "auto-edit" | "full-auto" | "yolo"
+	permissions     codexPermissionOverrides
 	backend         string // "exec" | "app_server"
 	appServerURL    string
 	codexHome       string
@@ -56,6 +57,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	codexHome, _ := opts["codex_home"].(string)
 	mode = normalizeMode(mode)
 	backend = normalizeBackend(backend)
+	permissions := codexPermissionOverridesFromOptions(opts)
 
 	if appServerURL == "" {
 		appServerURL = "ws://127.0.0.1:3845"
@@ -81,6 +83,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		model:           model,
 		reasoningEffort: normalizeReasoningEffort(reasoningEffort),
 		mode:            mode,
+		permissions:     permissions,
 		backend:         backend,
 		appServerURL:    appServerURL,
 		codexHome:       strings.TrimSpace(codexHome),
@@ -88,6 +91,68 @@ func New(opts map[string]any) (core.Agent, error) {
 		cliExtraArgs:    cliExtraArgs,
 		activeIdx:       -1,
 	}, nil
+}
+
+type codexPermissionOverrides struct {
+	ApprovalPolicy    string
+	ApprovalsReviewer string
+	SandboxMode       string
+}
+
+func codexPermissionOverridesFromOptions(opts map[string]any) codexPermissionOverrides {
+	return codexPermissionOverrides{
+		ApprovalPolicy:    codexStringOption(opts["approval_policy"]),
+		ApprovalsReviewer: codexStringOption(opts["approvals_reviewer"]),
+		SandboxMode:       codexStringOption(opts["sandbox_mode"]),
+	}
+}
+
+func codexStringOption(v any) string {
+	s, _ := v.(string)
+	return strings.TrimSpace(s)
+}
+
+func (p codexPermissionOverrides) hasApprovalOrSandboxOverride() bool {
+	return p.ApprovalPolicy != "" || p.SandboxMode != ""
+}
+
+func (p codexPermissionOverrides) effectiveForMode(mode string) codexPermissionOverrides {
+	approval, sandbox := codexModePermissionDefaults(mode)
+	if p.ApprovalPolicy != "" {
+		approval = p.ApprovalPolicy
+	}
+	if p.SandboxMode != "" {
+		sandbox = p.SandboxMode
+	}
+	return codexPermissionOverrides{
+		ApprovalPolicy:    approval,
+		ApprovalsReviewer: p.ApprovalsReviewer,
+		SandboxMode:       sandbox,
+	}
+}
+
+func (p codexPermissionOverrides) appendConfigArgs(args []string) []string {
+	if p.ApprovalPolicy != "" {
+		args = append(args, "-c", fmt.Sprintf("approval_policy=%q", p.ApprovalPolicy))
+	}
+	if p.ApprovalsReviewer != "" {
+		args = append(args, "-c", fmt.Sprintf("approvals_reviewer=%q", p.ApprovalsReviewer))
+	}
+	if p.SandboxMode != "" {
+		args = append(args, "-c", fmt.Sprintf("sandbox_mode=%q", p.SandboxMode))
+	}
+	return args
+}
+
+func codexModePermissionDefaults(mode string) (approval string, sandbox string) {
+	switch normalizeMode(mode) {
+	case "auto-edit", "full-auto":
+		return "never", "workspace-write"
+	case "yolo":
+		return "never", "danger-full-access"
+	default:
+		return "on-request", "read-only"
+	}
 }
 
 func normalizeBackend(raw string) string {
@@ -330,6 +395,7 @@ func (a *Agent) SetSessionEnv(env []string) {
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
 	a.mu.Lock()
 	mode := a.mode
+	permissions := a.permissions
 	model := a.model
 	reasoningEffort := a.reasoningEffort
 	backend := a.backend
@@ -359,13 +425,18 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 
 	if backend == "app_server" {
-		return newAppServerSession(ctx, appServerURL, a.workDir, model, reasoningEffort, mode, sessionID, extraEnv, codexHome)
+		return newAppServerSession(ctx, appServerURL, a.workDir, model, reasoningEffort, mode, sessionID, extraEnv, codexHome, permissions)
 	}
 	if codexHome != "" {
 		extraEnv = append(extraEnv, "CODEX_HOME="+codexHome)
 	}
 
-	return newCodexSession(ctx, cliBin, cliExtraArgs, a.workDir, model, reasoningEffort, mode, sessionID, baseURL, extraEnv, provName)
+	session, err := newCodexSession(ctx, cliBin, cliExtraArgs, a.workDir, model, reasoningEffort, mode, sessionID, baseURL, extraEnv, provName)
+	if err != nil {
+		return nil, err
+	}
+	session.permissions = permissions
+	return session, nil
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
@@ -429,6 +500,15 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	}
 	if a.codexHome != "" {
 		opts["codex_home"] = a.codexHome
+	}
+	if a.permissions.ApprovalPolicy != "" {
+		opts["approval_policy"] = a.permissions.ApprovalPolicy
+	}
+	if a.permissions.ApprovalsReviewer != "" {
+		opts["approvals_reviewer"] = a.permissions.ApprovalsReviewer
+	}
+	if a.permissions.SandboxMode != "" {
+		opts["sandbox_mode"] = a.permissions.SandboxMode
 	}
 	return opts
 }

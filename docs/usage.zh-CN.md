@@ -85,6 +85,22 @@ reset_on_idle_mins = 60
 | 全自动 | `full-auto` | 自动通过 + 沙箱保护 |
 | YOLO | `yolo` | 跳过所有审批 |
 
+Codex 还可以在 `[projects.agent.options]` 中配置原生权限覆盖项。
+这些键会透传给 `codex exec -c ...` 和 `codex app-server -c ...`：
+
+```toml
+approval_policy = "on-request"       # 常用："untrusted" | "on-request" | "never"
+approvals_reviewer = "auto_review"   # "user" | "auto_review" | "guardian_subagent"
+sandbox_mode = "workspace-write"     # "read-only" | "workspace-write" | "danger-full-access"
+```
+
+当设置 `approval_policy` 或 `sandbox_mode` 时，cc-connect 会先把当前 Codex
+`mode` 展开为原生配置值，再应用显式覆盖，因此另一条权限轴仍保留该 mode
+的行为。`approvals_reviewer` 只改变审批人，可以单独使用。自动审查推荐使用
+`auto_review`；`guardian_subagent` 保留为 Codex legacy 兼容值。`approval_policy`
+还会透传其他 Codex 支持的值，例如已弃用的 `on-failure`；`sandbox_mode`
+当前仅支持上面列出的三个值，因为 app-server RPC 路径会把它映射为结构化 sandbox policy。
+
 ### Cursor Agent 模式
 
 | 模式 | 配置值 | 行为 |
