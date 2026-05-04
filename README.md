@@ -97,8 +97,8 @@ MiniMax-M2.7 is a next-generation large language model designed for autonomous e
 </tr>
 
 <tr>
-<td width="150"><a href="https://cy.10dianai.com/register?aff=7QjR"><img src="assets/sponsors/10dianai.png" alt="10点AI" width="120"></a></td>
-<td>Thanks to 10点AI for sponsoring this project! 10点AI provides reliable AI model API relay services with support for Claude, GPT, Gemini and more. Cost-effective, stable access for developers and teams. Register via <a href="https://cy.10dianai.com/register?aff=7QjR">this link</a> to get started.</td>
+<td width="150"><a href="https://cy.10dianai.com/register?aff=3FQn"><img src="assets/sponsors/10dianai.png" alt="10点AI" width="120"></a></td>
+<td>Thanks to 10点AI for sponsoring this project! 10点AI provides reliable AI model API relay services with support for Claude, GPT, Gemini and more. Cost-effective, stable access for developers and teams. Register via <a href="https://cy.10dianai.com/register?aff=3FQn">this link</a> to get started.</td>
 </tr>
 
 <tr>
