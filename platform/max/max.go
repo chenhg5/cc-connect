@@ -62,10 +62,11 @@ type Platform struct {
 	// subscription with MAX, listens on webhookListen for incoming updates
 	// and DOES NOT run the long-poll loop. Required by MAX from 2026-05-11
 	// (long-polling is being throttled to 2 RPS).
-	webhookURL    string
-	webhookListen string
-	webhookPath   string
-	webhookSecret string
+	webhookURL          string
+	webhookListen       string
+	webhookPath         string
+	webhookSecret       string
+	resubscribeInterval time.Duration
 
 	mu           sync.RWMutex
 	handler      core.MessageHandler
@@ -90,9 +91,15 @@ type Platform struct {
 //	webhook_listen = ":8080"                       # optional, default ":8080"
 //	webhook_path   = "/webhook"                    # optional, default "/webhook";
 //	                                               # must match the path in webhook_url
-//	webhook_secret = "<random-string>"             # optional; if set, incoming
-//	                                               # requests must carry it in the
-//	                                               # X-Webhook-Secret header or ?s= query
+//	webhook_secret = "<random-string>"             # optional; if set, sent to MAX
+//	                                               # so MAX includes it in the
+//	                                               # X-Max-Bot-Api-Secret header
+//	                                               # of every webhook POST (?s= also
+//	                                               # accepted for manual testing)
+//	webhook_resubscribe_interval = "5m"            # optional, default 5m; cc-connect
+//	                                               # periodically re-POSTs the
+//	                                               # subscription because MAX has been
+//	                                               # observed to silently drop it
 func New(opts map[string]any) (core.Platform, error) {
 	token, _ := opts["token"].(string)
 	if token == "" {
@@ -118,16 +125,26 @@ func New(opts map[string]any) (core.Platform, error) {
 		webhookPath = "/" + webhookPath
 	}
 
+	resubscribeInterval := 5 * time.Minute
+	if raw, ok := opts["webhook_resubscribe_interval"].(string); ok && raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return nil, fmt.Errorf("max: webhook_resubscribe_interval: %w", err)
+		}
+		resubscribeInterval = d
+	}
+
 	return &Platform{
-		token:         token,
-		apiBase:       apiBase,
-		allowFrom:     allowFrom,
-		webhookURL:    webhookURL,
-		webhookListen: webhookListen,
-		webhookPath:   webhookPath,
-		webhookSecret: webhookSecret,
-		client:        &http.Client{Timeout: httpTimeout},
-		uploadClient:  &http.Client{Timeout: attachmentUploadTO},
+		token:               token,
+		apiBase:             apiBase,
+		allowFrom:           allowFrom,
+		webhookURL:          webhookURL,
+		webhookListen:       webhookListen,
+		webhookPath:         webhookPath,
+		webhookSecret:       webhookSecret,
+		resubscribeInterval: resubscribeInterval,
+		client:              &http.Client{Timeout: httpTimeout},
+		uploadClient:        &http.Client{Timeout: attachmentUploadTO},
 	}, nil
 }
 
@@ -218,7 +235,35 @@ func (p *Platform) startWebhook(ctx context.Context) error {
 		return fmt.Errorf("subscribe: %w", err)
 	}
 	slog.Info("max: webhook subscribed", "url", p.webhookURL)
+
+	// MAX has been observed to silently drop the webhook subscription
+	// server-side without any delivery error. The documented 8h failure
+	// window does not match the observed cadence (drops every 25–60min),
+	// so we periodically re-POST the subscription. MAX overwrites the
+	// existing registration in-place, so re-subscribing is idempotent.
+	if p.resubscribeInterval > 0 {
+		go p.resubscribeLoop(ctx)
+	}
 	return nil
+}
+
+func (p *Platform) resubscribeLoop(ctx context.Context) {
+	t := time.NewTicker(p.resubscribeInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			rsCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			if err := p.subscribe(rsCtx, p.webhookURL); err != nil {
+				slog.Warn("max: periodic re-subscribe failed", "err", err)
+			} else {
+				slog.Debug("max: periodic re-subscribe ok")
+			}
+			cancel()
+		}
+	}
 }
 
 // webhookHandler accepts a POST from MAX with a single update and routes it
@@ -229,7 +274,10 @@ func (p *Platform) webhookHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if p.webhookSecret != "" {
-		got := r.Header.Get("X-Webhook-Secret")
+		// MAX sends the secret in X-Max-Bot-Api-Secret on every webhook POST
+		// when the subscription was created with a "secret" field.
+		// ?s= query is accepted as a fallback for manual curl testing.
+		got := r.Header.Get("X-Max-Bot-Api-Secret")
 		if got == "" {
 			got = r.URL.Query().Get("s")
 		}
@@ -274,10 +322,14 @@ func (p *Platform) webhookHandler(w http.ResponseWriter, r *http.Request) {
 // only one webhook per bot — if an old URL is registered, MAX overwrites
 // it on a successful subscribe, so no explicit cleanup is required.
 func (p *Platform) subscribe(ctx context.Context, url string) error {
-	body, err := json.Marshal(map[string]any{
+	payload := map[string]any{
 		"url":          url,
 		"update_types": []string{"message_created", "message_callback"},
-	})
+	}
+	if p.webhookSecret != "" {
+		payload["secret"] = p.webhookSecret
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}

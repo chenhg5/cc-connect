@@ -806,7 +806,7 @@ func TestWebhookHandlerSecretViaHeader(t *testing.T) {
 	p, _ := New(map[string]any{"token": "t", "webhook_secret": "s3cret"})
 	pl := p.(*Platform)
 	req := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(`{"update_type":"unknown"}`))
-	req.Header.Set("X-Webhook-Secret", "s3cret")
+	req.Header.Set("X-Max-Bot-Api-Secret", "s3cret")
 	rec := httptest.NewRecorder()
 	pl.webhookHandler(rec, req)
 	if rec.Code != http.StatusOK {
