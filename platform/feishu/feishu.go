@@ -1143,40 +1143,48 @@ func (p *Platform) fetchChatMembers(ctx context.Context, chatID string) (map[str
 	if p.client == nil {
 		return nil, fmt.Errorf("%s: client not initialized", p.tag())
 	}
-	members := make(map[string]string)
-	req := larkim.NewGetChatMembersReqBuilder().
-		ChatId(chatID).
-		MemberIdType("open_id").
-		PageSize(100).
-		Build()
 	timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	token, err := p.fetchFreshTenantAccessToken(timeoutCtx)
-	if err != nil {
-		return nil, fmt.Errorf("%s: fetch tenant token for chat members: %w", p.tag(), err)
-	}
-	iter, err := p.client.Im.ChatMembers.GetByIterator(timeoutCtx, req, larkcore.WithTenantAccessToken(token))
-	if err != nil {
-		return nil, fmt.Errorf("%s: list chat members: %w", p.tag(), err)
-	}
+
+	members := make(map[string]string)
+	pageToken := ""
 	for {
-		hasMore, member, err := iter.Next()
+		reqBuilder := larkim.NewGetChatMembersReqBuilder().
+			ChatId(chatID).
+			MemberIdType("open_id").
+			PageSize(100)
+		if pageToken != "" {
+			reqBuilder.PageToken(pageToken)
+		}
+		resp, err := p.client.Im.ChatMembers.Get(timeoutCtx, reqBuilder.Build())
 		if err != nil {
-			slog.Debug(p.tag()+": fetch chat members page error", "chat_id", chatID, "error", err)
+			return nil, fmt.Errorf("%s: list chat members: %w", p.tag(), err)
+		}
+		if !resp.Success() {
+			return nil, fmt.Errorf("%s: list chat members code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+		}
+		if resp.Data == nil {
 			break
 		}
-		if member != nil && member.Name != nil && member.MemberId != nil {
-			name := *member.Name
-			if _, exists := members[name]; !exists {
-				members[name] = *member.MemberId
-			} else {
-				members[name] = ""
+		for _, member := range resp.Data.Items {
+			if member.Name != nil && member.MemberId != nil {
+				name := *member.Name
+				if _, exists := members[name]; !exists {
+					members[name] = *member.MemberId
+				} else {
+					members[name] = ""
+				}
 			}
 		}
-		if !hasMore {
+		if resp.Data.HasMore == nil || !*resp.Data.HasMore {
 			break
 		}
+		if resp.Data.PageToken == nil || *resp.Data.PageToken == "" {
+			break
+		}
+		pageToken = *resp.Data.PageToken
 	}
+	slog.Info(p.tag()+": fetched chat members", "chat_id", chatID, "count", len(members))
 	return members, nil
 }
 
@@ -1235,6 +1243,33 @@ func (p *Platform) resolveMentionsInContent(ctx context.Context, chatID, content
 			atTag = fmt.Sprintf(`<at user_id="%s">%s</at>`, openID, escapedName)
 		}
 		slog.Debug(p.tag()+": mention resolved", "name", name, "card_format", useCardFormat)
+		result = strings.ReplaceAll(result, pattern, atTag)
+	}
+	return result
+}
+
+// resolveMentionsForCard replaces @name with card-format at tags (<at id=openID></at>).
+// Used by UpdateMessage and SendPreviewStart which always produce card output.
+func (p *Platform) resolveMentionsForCard(ctx context.Context, chatID, content string) string {
+	members := p.getChatMembers(ctx, chatID)
+	if len(members) == 0 {
+		return content
+	}
+	names := make([]string, 0, len(members))
+	for name := range members {
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool { return len(names[i]) > len(names[j]) })
+
+	result := content
+	for _, name := range names {
+		pattern := "@" + name
+		if !strings.Contains(result, pattern) {
+			continue
+		}
+		openID := members[name]
+		atTag := fmt.Sprintf(`<at id=%s></at>`, openID)
+		slog.Info(p.tag()+": mention resolved (card)", "name", name, "open_id", openID)
 		result = strings.ReplaceAll(result, pattern, atTag)
 	}
 	return result
@@ -3221,6 +3256,11 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 		return nil, fmt.Errorf("%s: chatID is empty", p.tag())
 	}
 
+	// Resolve @mentions before building card
+	if p.resolveMentions && chatID != "" && strings.Contains(content, "@") {
+		content = p.resolveMentionsForCard(ctx, chatID, content)
+	}
+
 	cardJSON := buildPreviewCardJSON(content)
 
 	var msgID string
@@ -3295,6 +3335,11 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 	h, ok := previewHandle.(*feishuPreviewHandle)
 	if !ok {
 		return fmt.Errorf("%s: invalid preview handle type %T", p.tag(), previewHandle)
+	}
+
+	// Resolve @mentions before building card
+	if p.resolveMentions && h.chatID != "" && strings.Contains(content, "@") {
+		content = p.resolveMentionsForCard(ctx, h.chatID, content)
 	}
 
 	cardJSON := ""
