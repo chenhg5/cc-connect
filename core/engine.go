@@ -199,16 +199,16 @@ type Engine struct {
 	userRoles    *UserRoleManager // nil = legacy mode (no per-user policies)
 	userRolesMu  sync.RWMutex     // protects userRoles, disabledCmds, and adminFrom
 
-	rateLimiter      *RateLimiter
-	outgoingRL       *OutgoingRateLimiter
-	streamPreview    StreamPreviewCfg
-	references       ReferenceRenderCfg
-	relayManager     *RelayManager
-	eventIdleTimeout time.Duration
+	rateLimiter       *RateLimiter
+	outgoingRL        *OutgoingRateLimiter
+	streamPreview     StreamPreviewCfg
+	references        ReferenceRenderCfg
+	relayManager      *RelayManager
+	eventIdleTimeout  time.Duration
 	maxQueuedMessages int
-	dirHistory       *DirHistory
-	baseWorkDir      string
-	projectState     *ProjectStateStore
+	dirHistory        *DirHistory
+	baseWorkDir       string
+	projectState      *ProjectStateStore
 
 	// Auto-compress settings
 	autoCompressEnabled   bool
@@ -406,7 +406,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		streamPreview:         DefaultStreamPreviewCfg(),
 		references:            DefaultReferenceRenderCfg(),
 		eventIdleTimeout:      defaultEventIdleTimeout,
-		maxQueuedMessages:    defaultMaxQueuedMessages,
+		maxQueuedMessages:     defaultMaxQueuedMessages,
 		showContextIndicator:  true,
 	}
 
@@ -1079,13 +1079,14 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 	}
 
 	msg := &Message{
-		SessionKey:   sessionKey,
-		Platform:     platformName,
-		UserID:       "cron",
-		UserName:     "cron",
-		Content:      job.Prompt,
-		ReplyCtx:     replyCtx,
-		ModeOverride: job.Mode,
+		SessionKey:     sessionKey,
+		Platform:       platformName,
+		UserID:         "cron",
+		UserName:       "cron",
+		Content:        job.Prompt,
+		ReplyCtx:       replyCtx,
+		ModeOverride:   job.Mode,
+		EffortOverride: strings.TrimSpace(job.Effort),
 	}
 
 	// Resolve workspace-specific agent and sessions for multi-workspace mode.
@@ -2318,7 +2319,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	if agent != e.agent {
 		agentOverride = agent
 	}
-	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey)
+	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey, msg.EffortOverride)
 
 	// Set workspaceDir on the state for idle reaper identification
 	if workspaceDir != "" {
@@ -2559,7 +2560,7 @@ func adoptPendingFromPlaceholder(existing, newState *interactiveState) {
 
 // When agentOverride is non-nil it is used instead of e.agent to start the session.
 // ccSessionKey, when non-empty, is used for CC_SESSION_KEY env injection; otherwise sessionKey is used.
-func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string) *interactiveState {
+func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string, effortOverride string) *interactiveState {
 	e.interactiveMu.Lock()
 	defer e.interactiveMu.Unlock()
 
@@ -2650,7 +2651,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	startSessionID := session.GetAgentSessionID()
 	isResume := startSessionID != ""
 	startAt := time.Now()
-	agentSession, err := agent.StartSession(e.ctx, startSessionID)
+	agentSession, err := e.startAgentSessionWithOptionalEffort(agent, startSessionID, effortOverride)
 	startElapsed := time.Since(startAt)
 	if err != nil {
 		// If resume/continue failed, try a fresh session as fallback.
@@ -2659,7 +2660,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 				"session_key", sessionKey, "failed_session_id", startSessionID,
 				"error", err, "elapsed", startElapsed)
 			startAt = time.Now()
-			agentSession, err = agent.StartSession(e.ctx, "")
+			agentSession, err = e.startAgentSessionWithOptionalEffort(agent, "", effortOverride)
 			startElapsed = time.Since(startAt)
 			if err == nil {
 				slog.Info("fresh session started after resume failure",
@@ -2719,6 +2720,45 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	})
 
 	return state
+}
+
+func (e *Engine) startAgentSessionWithOptionalEffort(agent Agent, sessionID, effortOverride string) (AgentSession, error) {
+	effortOverride, err := validateSessionEffortOverride(agent, effortOverride)
+	if err != nil {
+		return nil, err
+	}
+	if effortOverride == "" {
+		return agent.StartSession(e.ctx, sessionID)
+	}
+	starter := agent.(SessionEffortStarter)
+	return starter.StartSessionWithEffort(e.ctx, sessionID, effortOverride)
+}
+
+func validateSessionEffortOverride(agent Agent, effortOverride string) (string, error) {
+	effortOverride = strings.TrimSpace(effortOverride)
+	if effortOverride == "" {
+		return "", nil
+	}
+
+	_, ok := agent.(SessionEffortStarter)
+	if !ok {
+		return "", fmt.Errorf("agent %q does not support per-session reasoning effort override", agent.Name())
+	}
+
+	if switcher, ok := agent.(ReasoningEffortSwitcher); ok {
+		if allowed := switcher.AvailableReasoningEfforts(); len(allowed) > 0 {
+			for _, candidate := range allowed {
+				if strings.EqualFold(candidate, effortOverride) {
+					return candidate, nil
+				}
+			}
+			return "", fmt.Errorf("invalid reasoning effort %q for agent %q (supported: %s)", effortOverride, agent.Name(), strings.Join(allowed, ", "))
+		}
+	}
+
+	// No AvailableReasoningEfforts to validate against; the agent is
+	// responsible for rejecting unknown effort values.
+	return effortOverride, nil
 }
 
 // cleanupInteractiveState removes the interactive state for the given session key
