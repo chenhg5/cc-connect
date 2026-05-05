@@ -606,8 +606,13 @@ name = "my-backend"
 # filter_external_sessions：为 true 时，/list /switch /delete 仅显示由 cc-connect 创建的会话，
 # 隐藏在相同 work_dir 下通过直接 CLI 创建的会话。默认 false = 显示 agent 的全部会话。
 #
-# admin_from controls who can run privileged commands (/dir, /shell, /restart, /upgrade, /commands addexec).
-# admin_from 控制谁可以执行特权命令（/dir, /shell, /restart, /upgrade, /commands addexec）。
+# admin_from controls who can run privileged commands (/dir, /shell, /restart, /upgrade, /commands addexec, /cron addexec).
+# admin_from 控制谁可以执行特权命令（/dir, /shell, /restart, /upgrade, /commands addexec, /cron addexec）。
+#
+# admin_from must be defined at the [[projects]] level.
+# Do NOT put it under [projects.platforms.options], or it will be ignored.
+# admin_from 必须写在 [[projects]] 这一层。
+# 不要写到 [projects.platforms.options] 下面，否则会被忽略。
 #
 # 💡 TIP: Send /whoami or /status to the bot to get your User ID for allow_from / admin_from.
 # 💡 提示：向机器人发送 /whoami 或者 /status  即可获取你的 User ID，用于填写 allow_from / admin_from。
