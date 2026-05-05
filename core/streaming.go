@@ -336,6 +336,7 @@ func (sp *streamPreview) finish(finalText string) bool {
 	if finalText == sp.lastSentText && sp.lastSentViaUpdate {
 		slog.Debug("stream preview finish: text unchanged since last UpdateMessage, skipping",
 			"text_len", len(finalText))
+		sp.finishStream()
 		return true
 	}
 
@@ -355,7 +356,18 @@ func (sp *streamPreview) finish(finalText string) bool {
 		return false
 	}
 	slog.Debug("stream preview finish: success via UpdateMessage")
+	sp.finishStream()
 	return true
+}
+
+// finishStream notifies platforms that require an explicit end-of-stream signal
+// (e.g. WeChat Work's stream finish frame). Must hold sp.mu.
+func (sp *streamPreview) finishStream() {
+	if sf, ok := sp.platform.(StreamFinisher); ok {
+		if err := sf.FinishStream(sp.ctx, sp.previewMsgID); err != nil {
+			slog.Debug("stream preview: FinishStream failed", "error", err)
+		}
+	}
 }
 
 // detachPreview clears the preview message handle so that finish() won't

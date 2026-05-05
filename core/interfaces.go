@@ -163,6 +163,15 @@ type MessageUpdater interface {
 	UpdateMessage(ctx context.Context, replyCtx any, content string) error
 }
 
+// StreamFinisher is an optional interface for platforms that need an explicit
+// signal when a streaming preview is complete. This is used by platforms like
+// WeChat Work where the streaming protocol requires a finish frame to stop the
+// client-side loading animation. Platforms that use message-editing (e.g. Feishu,
+// Telegram) do not need this — they simply stop editing.
+type StreamFinisher interface {
+	FinishStream(ctx context.Context, previewHandle any) error
+}
+
 // ProgressStyleProvider is an optional interface for platforms that expose
 // a preferred style for intermediate progress rendering.
 // Typical values: "legacy", "compact", "card".

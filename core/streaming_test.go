@@ -371,6 +371,107 @@ func TestStreamPreview_NeedsDoneReaction_FalseWhenDisabled(t *testing.T) {
 	}
 }
 
+// mockStreamFinisherPlatform adds StreamFinisher to mockKeepPreviewPlatform.
+type mockStreamFinisherPlatform struct {
+	mockKeepPreviewPlatform
+	finished []any // handles passed to FinishStream
+}
+
+func (m *mockStreamFinisherPlatform) FinishStream(_ context.Context, handle any) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.finished = append(m.finished, handle)
+	return nil
+}
+
+func TestStreamPreview_FinishCallsStreamFinisher(t *testing.T) {
+	mp := &mockStreamFinisherPlatform{}
+	cfg := StreamPreviewCfg{
+		Enabled:       true,
+		IntervalMs:    50,
+		MinDeltaChars: 1,
+		MaxChars:      500,
+	}
+
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
+	sp.appendText("Hello World")
+	time.Sleep(100 * time.Millisecond)
+
+	ok := sp.finish("Hello World Final")
+	if !ok {
+		t.Fatal("finish should return true")
+	}
+
+	mp.mu.Lock()
+	finishedCount := len(mp.finished)
+	mp.mu.Unlock()
+	if finishedCount != 1 {
+		t.Fatalf("expected 1 FinishStream call, got %d", finishedCount)
+	}
+}
+
+func TestStreamPreview_FinishCallsStreamFinisher_WhenTextUnchanged(t *testing.T) {
+	mp := &mockStreamFinisherPlatform{}
+	cfg := StreamPreviewCfg{
+		Enabled:       true,
+		IntervalMs:    50,
+		MinDeltaChars: 1,
+		MaxChars:      500,
+	}
+
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
+	sp.appendText("Hello")
+	time.Sleep(100 * time.Millisecond)
+
+	// Append more to trigger an UpdateMessage (not just SendPreviewStart)
+	sp.appendText(" World")
+	time.Sleep(100 * time.Millisecond)
+
+	// finish with same text as last update — should skip UpdateMessage but still call FinishStream
+	msgs := mp.getMessages()
+	lastContent := ""
+	for _, m := range msgs {
+		for _, prefix := range []string{"update:", "start:"} {
+			if strings.HasPrefix(m, prefix) {
+				lastContent = m[len(prefix):]
+			}
+		}
+	}
+
+	ok := sp.finish(lastContent)
+	if !ok {
+		t.Fatal("finish should return true when text unchanged")
+	}
+
+	mp.mu.Lock()
+	finishedCount := len(mp.finished)
+	mp.mu.Unlock()
+	if finishedCount != 1 {
+		t.Fatalf("expected 1 FinishStream call, got %d", finishedCount)
+	}
+}
+
+func TestStreamPreview_NoStreamFinisherNoPanic(t *testing.T) {
+	// mockKeepPreviewPlatform does NOT implement StreamFinisher — ensure no panic
+	mp := &mockKeepPreviewPlatform{}
+	cfg := StreamPreviewCfg{
+		Enabled:       true,
+		IntervalMs:    50,
+		MinDeltaChars: 1,
+		MaxChars:      500,
+	}
+
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
+	sp.appendText("Hello World")
+	time.Sleep(100 * time.Millisecond)
+
+	ok := sp.finish("Hello World Final")
+	if !ok {
+		t.Fatal("finish should return true")
+	}
+	// No panic = pass
+}
+
 func TestStreamPreview_AppliesTransform(t *testing.T) {
 	mp := &mockUpdaterPlatform{}
 	cfg := StreamPreviewCfg{
