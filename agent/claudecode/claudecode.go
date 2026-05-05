@@ -398,6 +398,14 @@ func (a *Agent) SetPlatformPrompt(prompt string) {
 
 // StartSession creates a persistent interactive Claude Code session.
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
+	return a.startSession(ctx, sessionID, "")
+}
+
+func (a *Agent) StartSessionWithEffort(ctx context.Context, sessionID string, effort string) (core.AgentSession, error) {
+	return a.startSession(ctx, sessionID, effort)
+}
+
+func (a *Agent) startSession(ctx context.Context, sessionID string, effortOverride string) (core.AgentSession, error) {
 	a.mu.Lock()
 	tools := make([]string, len(a.allowedTools))
 	copy(tools, a.allowedTools)
@@ -406,6 +414,9 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	maxTok := a.maxContextTokens
 	model := a.model
 	effort := a.reasoningEffort
+	if override := normalizeEffort(effortOverride); override != "" {
+		effort = override
+	}
 	extraEnv := a.runtimeEnvLocked()
 
 	activeIdx := a.activeIdx

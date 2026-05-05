@@ -328,10 +328,21 @@ func (a *Agent) SetSessionEnv(env []string) {
 }
 
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
+	return a.startSession(ctx, sessionID, "")
+}
+
+func (a *Agent) StartSessionWithEffort(ctx context.Context, sessionID string, effort string) (core.AgentSession, error) {
+	return a.startSession(ctx, sessionID, effort)
+}
+
+func (a *Agent) startSession(ctx context.Context, sessionID string, effortOverride string) (core.AgentSession, error) {
 	a.mu.Lock()
 	mode := a.mode
 	model := a.model
 	reasoningEffort := a.reasoningEffort
+	if override := normalizeReasoningEffort(effortOverride); override != "" {
+		reasoningEffort = override
+	}
 	backend := a.backend
 	appServerURL := a.appServerURL
 	codexHome := a.codexHome
