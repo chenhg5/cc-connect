@@ -428,6 +428,39 @@ allow_from = "*"                 # allowed QQ user IDs: "12345,67890" or "*" for
 
 ---
 
+### Matrix — No public IP needed
+
+Connection: Long Polling via /sync
+
+**Setup steps:**
+1. Create an account on a Matrix homeserver (e.g. [matrix.org](https://matrix.org), or your own self-hosted server)
+2. Get an access token:
+   - Open **Element** (or your preferred Matrix client)
+   - Go to **Settings** → **Help & About** → **Advanced** → click **Access Token**
+   - Copy the token (it starts with `syt_` on most servers)
+3. (Optional) Note your user ID (e.g. `@bot:matrix.org`)
+
+**Config:**
+
+```toml
+[[projects.platforms]]
+type = "matrix"
+
+[projects.platforms.options]
+homeserver = "https://matrix.org"
+access_token = "syt_xxx_xxx"
+# user_id = "@bot:matrix.org"           # optional, auto-detected
+# allow_from = "*"
+# auto_join = true                       # default true
+# share_session_in_channel = false
+# group_reply_all = false
+# proxy = ""
+```
+
+**Detailed guide:** [docs/matrix.md](docs/matrix.md)
+
+---
+
 ## Step 5: Run cc-connect
 
 **Open the Web UI (recommended):**

@@ -34,7 +34,7 @@ PLATFORMS := \
 # ---------------------------------------------------------------------------
 
 ALL_AGENTS    := acp claudecode codex cursor devin gemini iflow kimi opencode pi qoder
-ALL_PLATFORMS := feishu telegram discord slack dingtalk wecom weixin qq qqbot line weibo max
+ALL_PLATFORMS := feishu telegram discord slack dingtalk wecom weixin qq qqbot line weibo max matrix
 ALL_EXTRAS    := web
 
 COMMA := ,
@@ -62,7 +62,7 @@ ifdef NO_WEB
   _EXCLUDE_TAGS += no_web
 endif
 
-_BUILD_TAGS := $(strip $(_EXCLUDE_TAGS))
+_BUILD_TAGS := $(strip $(_EXCLUDE_TAGS) goolm)
 _TAGS_FLAG  := $(if $(_BUILD_TAGS),-tags '$(_BUILD_TAGS)',)
 
 .PHONY: build run clean test test-fast test-full test-smoke test-e2e test-release test-performance pre-test lint release release-all web
