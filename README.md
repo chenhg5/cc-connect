@@ -88,7 +88,7 @@ MiniMax-M2.7 is a next-generation large language model designed for autonomous e
 
 <tr>
 <td width="150"><a href="https://aicanapi.com"><img src="assets/sponsors/aican.jpg" alt="aicanapi.com" width="120"></a></td>
-<td>Thanks to aicanapi.com for sponsoring this project! aicanapi.com provides reliable AI model API relay services with support for Claude, GPT, Gemini and more. Stable, fast, and cost-effective access to mainstream AI models for developers. Register via <a href="https://aicanapi.com">this link</a> to get started.</td>
+<td>Thanks to aicanapi.com for sponsoring this project! Aican API provides high-performance, low-latency, high-concurrency API services for enterprises and developers. Claude Code models at up to 84% off, other models at 80% off official price. Doubao Seedance 2 real-person generation service with queue-free access for faster responses. Choose Aican API for simpler, more efficient, and more cost-effective enterprise-grade AI services. Register via <a href="https://aicanapi.com">this link</a> to get started.</td>
 </tr>
 
 <tr>
@@ -98,7 +98,7 @@ MiniMax-M2.7 is a next-generation large language model designed for autonomous e
 
 <tr>
 <td width="150"><a href="https://cy.10dianai.com/register?aff=3FQn"><img src="assets/sponsors/10dianai.png" alt="10点AI" width="120"></a></td>
-<td>Thanks to 10点AI for sponsoring this project! 10点AI provides reliable AI model API relay services with support for Claude, GPT, Gemini and more. Cost-effective, stable access for developers and teams. Register via <a href="https://cy.10dianai.com/register?aff=3FQn">this link</a> to get ¥5 free credit!</td>
+<td>Thanks to 10点AI for sponsoring this project! 10dian-AI Enterprise Platform is an AI API gateway for developers and enterprises, aggregating GPT, Claude, Gemini, DeepSeek and more. Optimized for production environments with stable high-concurrency operation, avoiding interface jitter and timeout issues. Affordable pricing, stable uptime, official guarantee. Register via <a href="https://cy.10dianai.com/register?aff=3FQn">this link</a> to get ¥5 free credit!</td>
 </tr>
 
 <tr>
