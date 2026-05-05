@@ -120,6 +120,9 @@ func (r *ccPermissionHookRunner) loadSettings() (*ccSettings, error) {
 	for _, p := range settingsPaths(r.workDir) {
 		s, err := readSettingsFile(p)
 		if err != nil {
+			if !os.IsNotExist(err) {
+				slog.Debug("ccHooks: skipping settings file", "path", p, "error", err)
+			}
 			continue
 		}
 		merged.Hooks.PermissionRequest = append(merged.Hooks.PermissionRequest, s.Hooks.PermissionRequest...)
@@ -212,12 +215,17 @@ func stripJSONC(data []byte) []byte {
 			if next == '*' {
 				// Block comment — skip to closing */.
 				i += 2
+				closed := false
 				for i+1 < len(data) {
 					if data[i] == '*' && data[i+1] == '/' {
 						i += 2
+						closed = true
 						break
 					}
 					i++
+				}
+				if !closed {
+					return data // return original; json.Unmarshal will give a clear error
 				}
 				continue
 			}
@@ -239,7 +247,7 @@ func matchHookEntry(matcher, toolName string) bool {
 }
 
 // runHookCommand executes a hook command with tool info on stdin.
-// Returns the parsed decision. Timeout: 10s.
+// Returns the parsed decision. Timeout: 60s (matching Claude Code's own).
 func runHookCommand(
 	ctx context.Context,
 	command string,
@@ -250,7 +258,7 @@ func runHookCommand(
 		return ccHookDecision{}, fmt.Errorf("marshal stdin: %w", err)
 	}
 
-	timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	timeoutCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(timeoutCtx, "sh", "-c", command)
@@ -312,9 +320,10 @@ func parseHookOutput(data []byte) (ccHookDecision, error) {
 // buildHookStdin constructs the JSON payload for the hook's stdin.
 func buildHookStdin(toolName string, input map[string]any, cwd, sessionID string) map[string]any {
 	m := map[string]any{
-		"session_id": sessionID,
-		"tool_name":  toolName,
-		"tool_input": input,
+		"session_id":      sessionID,
+		"hook_event_name": "PermissionRequest",
+		"tool_name":       toolName,
+		"tool_input":      input,
 	}
 	if cwd != "" {
 		m["cwd"] = cwd

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestStripJSONC(t *testing.T) {
@@ -19,6 +20,7 @@ func TestStripJSONC(t *testing.T) {
 		{"block comment", "{\n  /* block */\n  \"a\": 1\n}", "{\n  \n  \"a\": 1\n}"},
 		{"comment in string", `{"url": "http://example.com"}`, `{"url": "http://example.com"}`},
 		{"empty", "", ""},
+		{"unclosed block comment", `{"a": 1 /* oops`, `{"a": 1 /* oops`},
 		{"mixed", `{
   // top comment
   "a": "http://x.com", /* inline */
@@ -132,21 +134,22 @@ func TestReadSettingsFile(t *testing.T) {
 
 func TestParseHookOutput(t *testing.T) {
 	tests := []struct {
-		name       string
-		stdout     string
+		name         string
+		stdout       string
 		wantBehavior string
+		wantMessage  string
 		wantFallthrough bool
-		wantErr    bool
+		wantErr      bool
 	}{
-		{"allow", "allow", "allow", false, false},
-		{"deny", "deny", "deny", false, false},
-		{"ask", "ask", "", true, false},
-		{"empty", "", "", true, false},
-		{"uppercase allow", "ALLOW", "allow", false, false},
-		{"structured allow", `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}`, "allow", false, false},
-		{"structured deny", `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"blocked"}}}`, "deny", false, false},
-		{"structured deny message", `{"hookSpecificOutput":{"decision":{"behavior":"deny","message":"nope"}}}`, "deny", false, false},
-		{"unknown json", `{"foo":"bar"}`, "", true, false},
+		{"allow", "allow", "allow", "", false, false},
+		{"deny", "deny", "deny", "", false, false},
+		{"ask", "ask", "", "", true, false},
+		{"empty", "", "", "", true, false},
+		{"uppercase allow", "ALLOW", "allow", "", false, false},
+		{"structured allow", `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}`, "allow", "", false, false},
+		{"structured deny", `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"blocked"}}}`, "deny", "blocked", false, false},
+		{"structured deny message", `{"hookSpecificOutput":{"decision":{"behavior":"deny","message":"nope"}}}`, "deny", "nope", false, false},
+		{"unknown json", `{"foo":"bar"}`, "", "", true, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -156,6 +159,9 @@ func TestParseHookOutput(t *testing.T) {
 			}
 			if decision.Behavior != tt.wantBehavior {
 				t.Errorf("behavior = %q, want %q", decision.Behavior, tt.wantBehavior)
+			}
+			if decision.Message != tt.wantMessage {
+				t.Errorf("message = %q, want %q", decision.Message, tt.wantMessage)
 			}
 			isFallthrough := decision.Behavior == ""
 			if isFallthrough != tt.wantFallthrough {
@@ -197,6 +203,28 @@ func TestRunHookCommand(t *testing.T) {
 		_, err := runHookCommand(context.Background(), "/nonexistent/command", map[string]any{})
 		if err == nil {
 			t.Fatal("expected error for missing command")
+		}
+	})
+
+	t.Run("timeout", func(t *testing.T) {
+		shortCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		_, err := runHookCommand(shortCtx, "sleep 10", map[string]any{})
+		if err == nil {
+			t.Fatal("expected error for timeout")
+		}
+	})
+
+	t.Run("env strips CC_CONNECT_PERMISSION_HOOK_SKIP", func(t *testing.T) {
+		t.Setenv("CC_CONNECT_PERMISSION_HOOK_SKIP", "1")
+		// The hook prints "allow" only if the skip flag is absent.
+		decision, err := runHookCommand(context.Background(),
+			`if [ -n "$CC_CONNECT_PERMISSION_HOOK_SKIP" ]; then echo deny; else echo allow; fi`, map[string]any{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if decision.Behavior != "allow" {
+			t.Errorf("behavior = %q, want allow (skip flag was not stripped)", decision.Behavior)
 		}
 	})
 }
@@ -299,12 +327,70 @@ func TestTryHook(t *testing.T) {
 			t.Fatal("expected no match when no settings exist")
 		}
 	})
+
+	t.Run("multi-entry fallthrough", func(t *testing.T) {
+		dir := t.TempDir()
+		claudeDir := filepath.Join(dir, ".claude")
+		os.MkdirAll(claudeDir, 0755)
+		os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{
+			"hooks": {
+				"PermissionRequest": [
+					{"matcher": "*", "hooks": [{"type": "command", "command": "echo ask"}]},
+					{"matcher": "*", "hooks": [{"type": "command", "command": "echo allow"}]}
+				]
+			}
+		}`), 0644)
+
+		r := newCCPermissionHookRunner(dir)
+		decision, ok := r.tryHook(context.Background(), "Bash", map[string]any{}, "test-session")
+		if !ok {
+			t.Fatal("expected second entry to match")
+		}
+		if decision.Behavior != "allow" {
+			t.Errorf("behavior = %q, want allow (should fall through from first 'ask')", decision.Behavior)
+		}
+	})
+
+	t.Run("settings merging across files", func(t *testing.T) {
+		configDir := t.TempDir()
+		t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+		os.WriteFile(filepath.Join(configDir, "settings.json"), []byte(`{
+			"hooks": {
+				"PermissionRequest": [
+					{"matcher": "*", "hooks": [{"type": "command", "command": "echo ask"}]}
+				]
+			}
+		}`), 0644)
+
+		dir := t.TempDir()
+		claudeDir := filepath.Join(dir, ".claude")
+		os.MkdirAll(claudeDir, 0755)
+		os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{
+			"hooks": {
+				"PermissionRequest": [
+					{"matcher": "*", "hooks": [{"type": "command", "command": "echo allow"}]}
+				]
+			}
+		}`), 0644)
+
+		r := newCCPermissionHookRunner(dir)
+		decision, ok := r.tryHook(context.Background(), "Bash", map[string]any{}, "test-session")
+		if !ok {
+			t.Fatal("expected merged settings to produce a match")
+		}
+		if decision.Behavior != "allow" {
+			t.Errorf("behavior = %q, want allow (project settings should override global)", decision.Behavior)
+		}
+	})
 }
 
 func TestBuildHookStdin(t *testing.T) {
 	data := buildHookStdin("Bash", map[string]any{"command": "ls"}, "/workdir", "sess-123")
 	if data["tool_name"] != "Bash" {
 		t.Errorf("tool_name = %v, want Bash", data["tool_name"])
+	}
+	if data["hook_event_name"] != "PermissionRequest" {
+		t.Errorf("hook_event_name = %v, want PermissionRequest", data["hook_event_name"])
 	}
 	if data["cwd"] != "/workdir" {
 		t.Errorf("cwd = %v, want /workdir", data["cwd"])
