@@ -302,9 +302,14 @@ func (p *Platform) handleImageMessage(data *chatbot.BotCallbackDataModel, sessio
 		return
 	}
 
-	imgBytes, err := io.ReadAll(resp.Body)
+	const maxImageBytes = 25 * 1024 * 1024 // 25 MiB, same cap as other platforms
+	imgBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxImageBytes+1))
 	if err != nil {
 		slog.Error("dingtalk: failed to read image data", "error", err)
+		return
+	}
+	if len(imgBytes) > maxImageBytes {
+		slog.Error("dingtalk: image too large, dropping", "size", len(imgBytes), "limit", maxImageBytes)
 		return
 	}
 

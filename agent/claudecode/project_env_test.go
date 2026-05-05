@@ -28,11 +28,11 @@ func TestNew_ParsesProjectEnvFromOpts(t *testing.T) {
 	agent.mu.Lock()
 	defer agent.mu.Unlock()
 
-	if len(agent.sessionEnv) != 5 {
-		t.Fatalf("expected 5 env vars, got %d: %v", len(agent.sessionEnv), agent.sessionEnv)
+	if len(agent.configEnv) != 5 {
+		t.Fatalf("expected 5 env vars, got %d: %v", len(agent.configEnv), agent.configEnv)
 	}
 
-	envMap := envSliceToMap(agent.sessionEnv)
+	envMap := envSliceToMap(agent.configEnv)
 	if got := envMap["ANTHROPIC_BASE_URL"]; got != "https://api.kimi.com/coding" {
 		t.Errorf("ANTHROPIC_BASE_URL = %q, want %q", got, "https://api.kimi.com/coding")
 	}
@@ -64,7 +64,7 @@ func TestNew_ParsesProjectEnvFromMapStringAny(t *testing.T) {
 	agent.mu.Lock()
 	defer agent.mu.Unlock()
 
-	envMap := envSliceToMap(agent.sessionEnv)
+	envMap := envSliceToMap(agent.configEnv)
 	if got := envMap["ANTHROPIC_BASE_URL"]; got != "https://api.mimo.com/v1" {
 		t.Errorf("ANTHROPIC_BASE_URL = %q, want %q", got, "https://api.mimo.com/v1")
 	}
@@ -88,8 +88,8 @@ func TestNew_NoEnvOpts(t *testing.T) {
 	agent.mu.Lock()
 	defer agent.mu.Unlock()
 
-	if len(agent.sessionEnv) != 0 {
-		t.Fatalf("expected 0 env vars when no env in opts, got %d: %v", len(agent.sessionEnv), agent.sessionEnv)
+	if len(agent.configEnv) != 0 {
+		t.Fatalf("expected 0 env vars when no env in opts, got %d: %v", len(agent.configEnv), agent.configEnv)
 	}
 }
 
@@ -121,8 +121,8 @@ func TestNew_ProjectEnvOverridesProviderEnv(t *testing.T) {
 	}
 	agent.activeIdx = 0
 
-	// runtimeEnvLocked merges providerEnv + sessionEnv
-	// sessionEnv (from opts["env"]) should be present
+	// runtimeEnvLocked merges configEnv + providerEnv + sessionEnv
+	// configEnv (from opts["env"]) should be present
 	env := agent.runtimeEnvLocked()
 	envMap := envSliceToMap(env)
 

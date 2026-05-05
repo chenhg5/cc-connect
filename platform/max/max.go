@@ -51,12 +51,13 @@ type Platform struct {
 	apiBase   string
 	allowFrom string
 
-	mu       sync.RWMutex
-	handler  core.MessageHandler
-	cancel   context.CancelFunc
-	stopping bool
-	client   *http.Client
-	dedup    core.MessageDedup
+	mu           sync.RWMutex
+	handler      core.MessageHandler
+	cancel       context.CancelFunc
+	stopping     bool
+	client       *http.Client // general API calls — httpTimeout
+	uploadClient *http.Client // CDN uploads — attachmentUploadTO (overrides short client Timeout)
+	dedup        core.MessageDedup
 }
 
 // New creates a MAX platform from config options.
@@ -80,10 +81,11 @@ func New(opts map[string]any) (core.Platform, error) {
 	core.CheckAllowFrom("max", allowFrom)
 
 	return &Platform{
-		token:     token,
-		apiBase:   apiBase,
-		allowFrom: allowFrom,
-		client:    &http.Client{Timeout: httpTimeout},
+		token:        token,
+		apiBase:      apiBase,
+		allowFrom:    allowFrom,
+		client:       &http.Client{Timeout: httpTimeout},
+		uploadClient: &http.Client{Timeout: attachmentUploadTO},
 	}, nil
 }
 
@@ -269,6 +271,9 @@ func (p *Platform) uploadAttachment(ctx context.Context, kind string, data []byt
 	if len(data) == 0 {
 		return "", fmt.Errorf("empty attachment data")
 	}
+	// Use a 5-minute context AND a dedicated http.Client with a matching Timeout.
+	// p.client has a 35 s Timeout which fires independently of the context deadline
+	// and would abort large CDN uploads before the context expires.
 	uploadCtx, cancel := context.WithTimeout(ctx, attachmentUploadTO)
 	defer cancel()
 
@@ -281,7 +286,7 @@ func (p *Platform) uploadAttachment(ctx context.Context, kind string, data []byt
 	q.Set("type", kind)
 	urlReq.URL.RawQuery = q.Encode()
 
-	urlResp, err := p.client.Do(urlReq)
+	urlResp, err := p.uploadClient.Do(urlReq)
 	if err != nil {
 		return "", fmt.Errorf("request upload url: %w", err)
 	}
@@ -324,7 +329,7 @@ func (p *Platform) uploadAttachment(ctx context.Context, kind string, data []byt
 	p.setAuth(cdnReq)
 	cdnReq.Header.Set("Content-Type", mw.FormDataContentType())
 
-	cdnResp, err := p.client.Do(cdnReq)
+	cdnResp, err := p.uploadClient.Do(cdnReq)
 	if err != nil {
 		return "", fmt.Errorf("cdn upload: %w", err)
 	}
@@ -1205,3 +1210,16 @@ func splitMessage(text string, maxLen int) []string {
 	}
 	return chunks
 }
+
+// Compile-time interface compliance assertions.
+var (
+	_ core.Platform                    = (*Platform)(nil)
+	_ core.ImageSender                 = (*Platform)(nil)
+	_ core.FileSender                  = (*Platform)(nil)
+	_ core.AudioSender                 = (*Platform)(nil)
+	_ core.InlineButtonSender          = (*Platform)(nil)
+	_ core.MessageUpdater              = (*Platform)(nil)
+	_ core.TypingIndicator             = (*Platform)(nil)
+	_ core.FormattingInstructionProvider = (*Platform)(nil)
+	_ core.ReplyContextReconstructor   = (*Platform)(nil)
+)

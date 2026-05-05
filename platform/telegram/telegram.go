@@ -333,7 +333,18 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 		userName = strings.TrimSpace(msg.From.FirstName + " " + msg.From.LastName)
 	}
 
-	threadID := msg.MessageThreadID
+	// Use MessageThreadID only when it meaningfully isolates a sub-session:
+	//  - Forum groups (IsForum=true): Topics feature — thread ID is the topic ID.
+	//  - Non-group chats (private, channel): thread ID is safe to use since
+	//    there are no "reply threads" that would accidentally fragment sessions.
+	// Regular groups (IsForum=false): thread replies produce a non-zero
+	// MessageThreadID, but using it would split an existing session each time
+	// a user replies to a specific message — so we ignore it there.
+	isGroup := msg.Chat.Type == models.ChatTypeGroup || msg.Chat.Type == models.ChatTypeSupergroup
+	threadID := 0
+	if msg.Chat.IsForum || !isGroup {
+		threadID = msg.MessageThreadID
+	}
 	sessionKey := p.buildSessionKey(msg.Chat.ID, threadID, msg.From.ID)
 	channelKey := buildChannelKey(msg.Chat.ID, threadID)
 
@@ -343,7 +354,6 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 		return
 	}
 
-	isGroup := msg.Chat.Type == models.ChatTypeGroup || msg.Chat.Type == models.ChatTypeSupergroup
 	chatName := ""
 	if isGroup {
 		chatName = msg.Chat.Title
@@ -715,11 +725,15 @@ func (p *Platform) handleCallbackQuery(ctx context.Context, cb *models.CallbackQ
 		userName = strings.TrimSpace(cb.From.FirstName + " " + cb.From.LastName)
 	}
 
-	threadID := msg.MessageThreadID
+	isGroupChat := msg.Chat.Type == models.ChatTypeGroup || msg.Chat.Type == models.ChatTypeSupergroup
+	threadID := 0
+	if msg.Chat.IsForum || !isGroupChat {
+		threadID = msg.MessageThreadID
+	}
 	sessionKey := p.buildSessionKey(chatID, threadID, cb.From.ID)
 	channelKey := buildChannelKey(chatID, threadID)
 
-	isGroup := msg.Chat.Type == models.ChatTypeGroup || msg.Chat.Type == models.ChatTypeSupergroup
+	isGroup := isGroupChat
 	chatName := ""
 	if isGroup {
 		chatName = msg.Chat.Title

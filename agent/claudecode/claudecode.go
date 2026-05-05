@@ -37,6 +37,7 @@ type Agent struct {
 	workDir          string
 	cliBin           string   // CLI binary name or path (default: "claude")
 	cliExtraArgs     []string // extra args parsed from cli_path (e.g. ["code", "-t", "foo"])
+	configEnv        []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
 	cliArgsFlag      string   // if set, claude args are passed as a single string via this flag (e.g. "-a")
 	model            string
 	reasoningEffort  string // "low" | "medium" | "high" | "max"
@@ -186,16 +187,17 @@ func New(opts map[string]any) (core.Agent, error) {
 		}
 	}
 
-	// Parse project-level env from opts["env"] (set via [projects.agent.options.env] in config.toml)
-	var sessionEnv []string
+	// Parse project-level env from opts["env"] (set via [projects.agent.options.env] in config.toml).
+	// Stored separately from runtime sessionEnv so SetSessionEnv calls cannot overwrite it.
+	var configEnv []string
 	if envMap, ok := opts["env"].(map[string]string); ok {
 		for k, v := range envMap {
-			sessionEnv = append(sessionEnv, k+"="+v)
+			configEnv = append(configEnv, k+"="+v)
 		}
 	} else if envMap, ok := opts["env"].(map[string]any); ok {
 		for k, v := range envMap {
 			if s, ok := v.(string); ok {
-				sessionEnv = append(sessionEnv, k+"="+s)
+				configEnv = append(configEnv, k+"="+s)
 			}
 		}
 	}
@@ -211,7 +213,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		allowedTools:     allowedTools,
 		disallowedTools:  disallowedTools,
 		maxContextTokens: maxContextTokens,
-		sessionEnv:       sessionEnv,
+		configEnv:        configEnv,
 		activeIdx:        -1,
 		routerURL:        routerURL,
 		routerAPIKey:     routerAPIKey,
@@ -697,6 +699,9 @@ func (a *Agent) GetRunAsEnv() []string {
 // is intentionally omitted: providers are rewired separately by the engine
 // after construction; the rest is per-session and recomputed.
 //
+// configEnv IS included because it comes from the static config file and must
+// propagate to every workspace agent. sessionEnv is excluded (runtime-only).
+//
 // run_as_user / run_as_env are also omitted because the engine has its own
 // dedicated propagation path via GetRunAsUser/GetRunAsEnv (see cc-connect#496).
 func (a *Agent) WorkspaceAgentOptions() map[string]any {
@@ -705,6 +710,14 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 
 	opts := map[string]any{
 		"mode": a.mode,
+	}
+	if len(a.configEnv) > 0 {
+		envMap := make(map[string]string, len(a.configEnv))
+		for _, kv := range a.configEnv {
+			k, v, _ := strings.Cut(kv, "=")
+			envMap[k] = v
+		}
+		opts["env"] = envMap
 	}
 	if cliPath := snapshotCLIPath(a.cliBin, a.cliExtraArgs); cliPath != "" {
 		opts["cli_path"] = cliPath
@@ -741,8 +754,12 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 // default "claude" binary is in use, so we don't pollute the workspace
 // opts with a redundant default.
 func snapshotCLIPath(cliBin string, cliExtraArgs []string) string {
-	if cliBin == "" || (cliBin == "claude" && len(cliExtraArgs) == 0) {
-		return ""
+	// Normalise empty to the default binary so we can reason about extra args.
+	if cliBin == "" {
+		cliBin = "claude"
+	}
+	if cliBin == "claude" && len(cliExtraArgs) == 0 {
+		return "" // default binary, no extra args — no need to persist
 	}
 	if len(cliExtraArgs) == 0 {
 		return cliBin
@@ -1039,7 +1056,11 @@ func (a *Agent) providerEnvLocked() []string {
 }
 
 func (a *Agent) runtimeEnvLocked() []string {
-	env := append([]string(nil), a.providerEnvLocked()...)
+	// configEnv (from config.toml [env]) is lower priority than provider keys or
+	// session-injected vars, but must survive SetSessionEnv calls (which only
+	// overwrite sessionEnv). Prepend it so later entries win on conflict.
+	env := append([]string(nil), a.configEnv...)
+	env = append(env, a.providerEnvLocked()...)
 	env = append(env, a.sessionEnv...)
 
 	if a.routerURL != "" {

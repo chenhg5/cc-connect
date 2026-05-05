@@ -1235,10 +1235,17 @@ func (e *Engine) executeCronShell(p Platform, replyCtx any, job *CronJob) error 
 			mu.Unlock()
 		}
 	}
-	go readPipe(stdout)
-	go readPipe(stderr)
+	// Use a WaitGroup so both pipe-reader goroutines drain completely before
+	// doneCh is closed. Without this, shellCmd.Wait() can return (closing the
+	// pipe write-ends) while the scanners still have unread data in the OS
+	// buffer, causing finishCronShell to read a truncated output.
+	var pipeWg sync.WaitGroup
+	pipeWg.Add(2)
+	go func() { defer pipeWg.Done(); readPipe(stdout) }()
+	go func() { defer pipeWg.Done(); readPipe(stderr) }()
 
 	go func() {
+		pipeWg.Wait()
 		_ = shellCmd.Wait()
 		close(doneCh)
 	}()
@@ -3070,12 +3077,23 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				if autoApprove {
 					result = PermissionResult{Behavior: "allow", UpdatedInput: event.ToolInputRaw}
 				}
-				reqID := event.RequestID
-				go func() {
-					if err := agentSession.RespondPermission(reqID, result); err != nil {
+			reqID := event.RequestID
+			respondCtx := ctx // capture current unsolicited reader context
+			go func() {
+				// Run in a goroutine to keep reader iterations fast, but honour
+				// the reader's context so we don't call into a dead session after
+				// stopUnsolicitedReader cancels the context.
+				select {
+				case <-respondCtx.Done():
+					return
+				default:
+				}
+				if err := agentSession.RespondPermission(reqID, result); err != nil {
+					if respondCtx.Err() == nil {
 						slog.Error("unsolicited: failed to respond permission", "error", err)
 					}
-				}()
+				}
+			}()
 				if !autoApprove {
 					toolName := event.ToolName
 					if toolName == "" {
@@ -6505,7 +6523,11 @@ func (e *Engine) cmdHelp(p Platform, msg *Message) {
 // behavior consistent with every other Telegram bot framework, and is a
 // no-op improvement on platforms where /start has no special meaning.
 func (e *Engine) cmdStart(p Platform, msg *Message) {
-	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgWelcome), e.name))
+	name := e.name
+	if name == "" {
+		name = e.agent.Name()
+	}
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgWelcome), name))
 }
 
 const defaultHelpGroup = "session"
