@@ -152,6 +152,13 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 	if len(extraEnv) > 0 {
 		env = core.MergeEnv(env, extraEnv)
 	}
+	// Signal to PermissionRequest hooks that they are running inside
+	// cc-connect. Hooks can check this env var to skip LLM calls on
+	// the Claude Code side (the hook result is ignored anyway when
+	// --permission-prompt-tool stdio is active). cc-connect runs the
+	// hook itself without this env var, so the real work happens only
+	// once.
+	env = core.MergeEnv(env, []string{"CC_CONNECT_PERMISSION_HOOK_SKIP=1"})
 	// When run_as_user is set, strip the supervisor's environment down to
 	// the allowlist before passing it to sudo. sudo --preserve-env also
 	// enforces this, but filtering here makes the cc-connect spawn argv

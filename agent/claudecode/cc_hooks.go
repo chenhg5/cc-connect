@@ -258,6 +258,9 @@ func runHookCommand(
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	// Strip the skip flag so the hook does real work when cc-connect
+	// calls it (even if the host environment has it set).
+	cmd.Env = filterEnv(os.Environ(), "CC_CONNECT_PERMISSION_HOOK_SKIP")
 
 	if err := cmd.Run(); err != nil {
 		return ccHookDecision{}, fmt.Errorf("hook exec: %w (stderr: %s)", err, truncateStr(strings.TrimSpace(stderr.String()), 200))
