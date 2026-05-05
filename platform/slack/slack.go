@@ -455,6 +455,118 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 
 var _ core.FileSender = (*Platform)(nil)
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Progress writer (compact style)
+//
+// cc-connect's core compact progress writer coalesces intermediate events
+// (thinking, tool_use, tool_result) into a SINGLE message that is updated in
+// place via chat.update, rather than posting a fresh Slack message per event
+// (the "legacy" behaviour). For Slack we want the compact style because:
+//
+//   - One progress message per turn instead of N. Main channel stays quiet.
+//   - Slack's native long-text clipping kicks in on both mobile (~1500 chars)
+//     and desktop (~4000 chars), rendering an inline "Show more" / "Show less"
+//     link without any interactive-component wiring on our side. This gives
+//     the "collapsible card" user experience for free.
+//   - The final agent reply is posted as a separate threaded message
+//     underneath the progress bubble, so the thread ends up with exactly
+//     two messages: [progress] + [answer].
+//
+// To opt in we implement three optional interfaces from core/interfaces.go:
+//
+//   - ProgressStyleProvider — returns "compact" so the core writer enables.
+//   - PreviewStarter        — posts the initial progress message and returns
+//                             a handle carrying the new message's channel+ts.
+//   - MessageUpdater        — edits the progress message in place via
+//                             chat.update as new events stream in.
+// ──────────────────────────────────────────────────────────────────────────────
+
+// slackPreviewHandle carries the channel + ts of the progress message we
+// posted via SendPreviewStart, so UpdateMessage knows which Slack message to
+// chat.update as intermediate events accumulate. The handle is threaded
+// through the core progress writer as an opaque `any` and type-asserted on
+// the way in.
+type slackPreviewHandle struct {
+	channel string
+	ts      string
+}
+
+// ProgressStyle opts the Slack platform into the compact in-place progress
+// writer. See core/progress_compact.go for the writer itself and the block
+// comment at the top of this section for the rationale.
+func (p *Platform) ProgressStyle() string {
+	return "compact"
+}
+
+// SendPreviewStart posts the initial progress message and returns a handle
+// carrying its channel + ts, which subsequent UpdateMessage calls use for
+// in-place edits.
+//
+// The progress message is always threaded off the triggering user message
+// when a thread ts is available in the reply context — that keeps the
+// progress bubble, the tool-call noise, and the final agent reply all
+// inside the same thread as the user's original message, matching the
+// auto-thread behaviour of Send for final replies.
+func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content string) (any, error) {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return nil, fmt.Errorf("slack: SendPreviewStart: invalid reply context type %T", rctx)
+	}
+
+	opts := []slack.MsgOption{
+		slack.MsgOptionText(content, false),
+	}
+	if rc.timestamp != "" {
+		opts = append(opts, slack.MsgOptionTS(rc.timestamp))
+	}
+
+	_, ts, err := p.client.PostMessageContext(ctx, rc.channel, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("slack: send preview start: %w", err)
+	}
+	return &slackPreviewHandle{channel: rc.channel, ts: ts}, nil
+}
+
+// UpdateMessage edits the progress message in place via Slack's chat.update
+// API. The handle was returned by SendPreviewStart and holds the channel +
+// ts of the message to edit.
+//
+// Failures here cause the core compact writer to mark itself failed and
+// fall back to legacy per-event posts for the rest of the turn, so the
+// user never loses visibility into what the agent is doing — they just
+// get slightly noisier output for that one turn.
+//
+// Note on Slack API quirks:
+//   - "message_not_updated" / identical-content responses return nil error
+//     from slack-go, so they are implicitly a no-op.
+//   - chat.update has an approximate rate limit of ~1 call per second per
+//     message; if a turn streams faster than that we may get rate-limited
+//     and the writer will fall back mid-turn. That is acceptable for an
+//     initial implementation and can be revisited later if it shows up in
+//     practice.
+func (p *Platform) UpdateMessage(ctx context.Context, handle any, content string) error {
+	h, ok := handle.(*slackPreviewHandle)
+	if !ok {
+		return fmt.Errorf("slack: UpdateMessage: invalid handle type %T", handle)
+	}
+
+	_, _, _, err := p.client.UpdateMessageContext(ctx, h.channel, h.ts,
+		slack.MsgOptionText(content, false),
+	)
+	if err != nil {
+		return fmt.Errorf("slack: update message: %w", err)
+	}
+	return nil
+}
+
+// Compile-time assertions that the Slack platform implements the optional
+// progress-writer interfaces used by core/progress_compact.go.
+var (
+	_ core.ProgressStyleProvider = (*Platform)(nil)
+	_ core.PreviewStarter        = (*Platform)(nil)
+	_ core.MessageUpdater        = (*Platform)(nil)
+)
+
 func (p *Platform) downloadSlackFile(url string) ([]byte, error) {
 	if url == "" {
 		return nil, fmt.Errorf("empty URL")
