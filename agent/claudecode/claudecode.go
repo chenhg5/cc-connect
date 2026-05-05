@@ -671,6 +671,80 @@ func (a *Agent) GetRunAsEnv() []string {
 	return out
 }
 
+// WorkspaceAgentOptions returns a snapshot of user-configured options that
+// must propagate to per-workspace agent instances created lazily by
+// core.Engine.getOrCreateWorkspaceAgent. Without this snapshot, the engine
+// constructs workspace agents from a fresh opts map and silently drops
+// every claudecode field except mode/model — so cli_path, allowed_tools,
+// and friends would only take effect on the project-level agent.
+//
+// Runtime-only state (providers, sessionEnv, providerProxy, platformPrompt)
+// is intentionally omitted: providers are rewired separately by the engine
+// after construction; the rest is per-session and recomputed.
+//
+// run_as_user / run_as_env are also omitted because the engine has its own
+// dedicated propagation path via GetRunAsUser/GetRunAsEnv (see cc-connect#496).
+func (a *Agent) WorkspaceAgentOptions() map[string]any {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	opts := map[string]any{
+		"mode": a.mode,
+	}
+	if cliPath := snapshotCLIPath(a.cliBin, a.cliExtraArgs); cliPath != "" {
+		opts["cli_path"] = cliPath
+	}
+	if a.cliArgsFlag != "" {
+		opts["cli_args_flag"] = a.cliArgsFlag
+	}
+	if a.model != "" {
+		opts["model"] = a.model
+	}
+	if a.reasoningEffort != "" {
+		opts["reasoning_effort"] = a.reasoningEffort
+	}
+	if len(a.allowedTools) > 0 {
+		opts["allowed_tools"] = stringsToAny(a.allowedTools)
+	}
+	if len(a.disallowedTools) > 0 {
+		opts["disallowed_tools"] = stringsToAny(a.disallowedTools)
+	}
+	if a.maxContextTokens > 0 {
+		opts["max_context_tokens"] = a.maxContextTokens
+	}
+	if a.routerURL != "" {
+		opts["router_url"] = a.routerURL
+	}
+	if a.routerAPIKey != "" {
+		opts["router_api_key"] = a.routerAPIKey
+	}
+	return opts
+}
+
+// snapshotCLIPath rebuilds the cli_path opts string from cliBin and the
+// extra-args tail captured at construction. Returns "" when only the
+// default "claude" binary is in use, so we don't pollute the workspace
+// opts with a redundant default.
+func snapshotCLIPath(cliBin string, cliExtraArgs []string) string {
+	if cliBin == "" || (cliBin == "claude" && len(cliExtraArgs) == 0) {
+		return ""
+	}
+	if len(cliExtraArgs) == 0 {
+		return cliBin
+	}
+	return cliBin + " " + strings.Join(cliExtraArgs, " ")
+}
+
+// stringsToAny copies a []string into a fresh []any so it round-trips
+// through New()'s opts["..."].([]any) type assertion.
+func stringsToAny(in []string) []any {
+	out := make([]any, len(in))
+	for i, s := range in {
+		out[i] = s
+	}
+	return out
+}
+
 // PermissionModes returns all supported permission modes.
 func (a *Agent) PermissionModes() []core.PermissionModeInfo {
 	return []core.PermissionModeInfo{
