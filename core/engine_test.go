@@ -4330,6 +4330,39 @@ func TestCmdMode_AppliesLiveModeWithoutReset(t *testing.T) {
 	}
 }
 
+func TestCmdMode_MultiWorkspaceUpdatesWorkspaceAgent(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	globalAgent := &stubModelModeAgent{mode: "default"}
+	e := NewEngine("test", globalAgent, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindingPath)
+
+	wsDir := filepath.Join(baseDir, "ws1")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	normalizedWsDir := normalizeWorkspacePath(wsDir)
+	channelID := "C123"
+	e.workspaceBindings.Bind("project:test", channelID, "chan", normalizedWsDir)
+
+	wsAgent := &stubModelModeAgent{mode: "default"}
+	ws := e.workspacePool.GetOrCreate(normalizedWsDir)
+	ws.agent = wsAgent
+	ws.sessions = NewSessionManager("")
+
+	msg := &Message{SessionKey: "slack:" + channelID + ":U1", ReplyCtx: "ctx"}
+	e.cmdMode(p, msg, []string{"yolo"})
+
+	if wsAgent.mode != "yolo" {
+		t.Fatalf("workspace agent mode = %q, want yolo", wsAgent.mode)
+	}
+	if globalAgent.mode == "yolo" {
+		t.Fatalf("global agent mode = %q, want unchanged", globalAgent.mode)
+	}
+}
+
 func TestCmdStatus_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -6925,6 +6958,51 @@ func TestExecuteCardAction_ModeCleansUpWithInteractiveKey(t *testing.T) {
 	e.interactiveMu.Unlock()
 	if exists {
 		t.Error("expected interactive state to be cleaned up after /mode")
+	}
+}
+
+func TestExecuteCardAction_ModeUsesWorkspaceAgent(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	globalAgent := &stubModelModeAgent{mode: "default"}
+	e := NewEngine("test", globalAgent, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindingPath)
+
+	wsDir := filepath.Join(baseDir, "ws1")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	normalizedWsDir := normalizeWorkspacePath(wsDir)
+	channelID := "channel1"
+	sessionKey := "feishu:" + channelID + ":user1"
+	e.workspaceBindings.Bind("project:test", channelID, "chan", normalizedWsDir)
+
+	wsAgent := &stubModelModeAgent{mode: "default"}
+	ws := e.workspacePool.GetOrCreate(normalizedWsDir)
+	ws.agent = wsAgent
+	ws.sessions = NewSessionManager("")
+
+	interactiveKey := normalizedWsDir + ":" + sessionKey
+	e.interactiveMu.Lock()
+	e.interactiveStates[interactiveKey] = &interactiveState{}
+	e.interactiveMu.Unlock()
+
+	e.executeCardAction("/mode", "yolo", sessionKey)
+
+	if wsAgent.mode != "yolo" {
+		t.Fatalf("workspace agent mode = %q, want yolo", wsAgent.mode)
+	}
+	if globalAgent.mode == "yolo" {
+		t.Fatalf("global agent mode = %q, want unchanged", globalAgent.mode)
+	}
+
+	e.interactiveMu.Lock()
+	_, exists := e.interactiveStates[interactiveKey]
+	e.interactiveMu.Unlock()
+	if exists {
+		t.Error("expected workspace interactive state to be cleaned up after /mode")
 	}
 }
 

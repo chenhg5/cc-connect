@@ -7087,7 +7087,13 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 }
 
 func (e *Engine) cmdMode(p Platform, msg *Message, args []string) {
-	switcher, ok := e.agent.(ModeSwitcher)
+	agent, sessions, interactiveKey, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+
+	switcher, ok := agent.(ModeSwitcher)
 	if !ok {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgModeNotSupported))
 		return
@@ -7135,7 +7141,7 @@ func (e *Engine) cmdMode(p Platform, msg *Message, args []string) {
 			e.replyWithButtons(p, msg.ReplyCtx, sb.String(), buttons)
 			return
 		}
-		e.replyWithCard(p, msg.ReplyCtx, e.renderModeCard())
+		e.replyWithCard(p, msg.ReplyCtx, e.renderModeCardForAgent(agent))
 		return
 	}
 
@@ -7145,7 +7151,12 @@ func (e *Engine) cmdMode(p Platform, msg *Message, args []string) {
 	appliedLive := e.applyLiveModeChange(msg.SessionKey, newMode)
 
 	if !appliedLive {
-		e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
+		e.cleanupInteractiveState(interactiveKey)
+		// Live switch unavailable: recreate the session so the new mode takes effect.
+		s := sessions.GetOrCreateActive(msg.SessionKey)
+		s.SetAgentSessionID("", "")
+		s.ClearHistory()
+		sessions.Save()
 	}
 
 	modes := switcher.PermissionModes()
@@ -8545,7 +8556,8 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 	case "/reasoning":
 		return e.renderReasoningCard()
 	case "/mode":
-		return e.renderModeCard()
+		agent, _ := e.sessionContextForKey(sessionKey)
+		return e.renderModeCardForAgent(agent)
 	case "/lang":
 		return e.renderLangCard()
 	case "/status":
@@ -8710,7 +8722,8 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		if args == "" {
 			return
 		}
-		switcher, ok := e.agent.(ModeSwitcher)
+		agent, sessions := e.sessionContextForKey(sessionKey)
+		switcher, ok := agent.(ModeSwitcher)
 		if !ok {
 			return
 		}
@@ -8723,10 +8736,10 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		}
 		e.cleanupInteractiveState(interactiveKey)
 		// Mode change requires a new session to take effect
-		s := e.sessions.GetOrCreateActive(sessionKey)
+		s := sessions.GetOrCreateActive(sessionKey)
 		s.SetAgentSessionID("", "")
 		s.ClearHistory()
-		e.sessions.Save()
+		sessions.Save()
 
 	case "/lang":
 		if args == "" {
@@ -9518,8 +9531,8 @@ func (e *Engine) renderReasoningCard() *Card {
 	return cb.Build()
 }
 
-func (e *Engine) renderModeCard() *Card {
-	switcher, ok := e.agent.(ModeSwitcher)
+func (e *Engine) renderModeCardForAgent(agent Agent) *Card {
+	switcher, ok := agent.(ModeSwitcher)
 	if !ok {
 		return e.simpleCard(e.i18n.T(MsgCardTitleMode), "violet", e.i18n.T(MsgModeNotSupported))
 	}
