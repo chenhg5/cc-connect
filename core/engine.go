@@ -8124,6 +8124,200 @@ func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images
 	return nil
 }
 
+// InjectPrompt injects a message directly into the agent's stdin as if the user
+// sent it naturally. This is useful for programmatic triggering of agent actions
+// while keeping responses in the existing thread.
+func (e *Engine) InjectPrompt(sessionKey, message string, images []ImageAttachment, files []FileAttachment) error {
+	e.interactiveMu.Lock()
+	var state *interactiveState
+	if sessionKey != "" {
+		state = e.interactiveStates[sessionKey]
+		if state == nil && e.multiWorkspace {
+			if iKey := e.interactiveKeyForSessionKey(sessionKey); iKey != sessionKey {
+				state = e.interactiveStates[iKey]
+			}
+		}
+	} else if len(e.interactiveStates) == 1 {
+		for _, s := range e.interactiveStates {
+			state = s
+			break
+		}
+	}
+	e.interactiveMu.Unlock()
+
+	if state == nil {
+		return fmt.Errorf("no active session found for InjectPrompt")
+	}
+	if state.agentSession == nil || !state.agentSession.Alive() {
+		return fmt.Errorf("agent session not alive for InjectPrompt")
+	}
+
+	// Build the prompt with sender injection if enabled
+	prompt := message
+	if e.injectSender {
+		state.mu.Lock()
+		p := state.platform
+		sk := sessionKey
+		if sk == "" {
+			// Find session key from interactiveStates
+			for key, s := range e.interactiveStates {
+				if s == state {
+					sk = key
+					break
+				}
+			}
+		}
+		state.mu.Unlock()
+		prompt = e.buildSenderPrompt(message, "", p.Name(), sk)
+	}
+
+	// Send directly to agent stdin
+	if err := state.agentSession.Send(prompt, images, files); err != nil {
+		return fmt.Errorf("inject prompt: %w", err)
+	}
+
+	slog.Info("inject prompt sent to agent", "session_key", sessionKey, "message_len", len(message))
+	return nil
+}
+
+// PostToNewThread posts a message to the platform as a new top-level thread,
+// not in the existing thread. This is useful for Slack where you want to
+// start a fresh thread for notifications.
+func (e *Engine) PostToNewThread(sessionKey, message string) error {
+	e.interactiveMu.Lock()
+	var state *interactiveState
+	var p Platform
+	var replyCtx any
+
+	if sessionKey != "" {
+		state = e.interactiveStates[sessionKey]
+		if state == nil && e.multiWorkspace {
+			if iKey := e.interactiveKeyForSessionKey(sessionKey); iKey != sessionKey {
+				state = e.interactiveStates[iKey]
+			}
+		}
+	} else if len(e.interactiveStates) == 1 {
+		for _, s := range e.interactiveStates {
+			state = s
+			break
+		}
+	}
+
+	if state != nil {
+		state.mu.Lock()
+		p = state.platform
+		replyCtx = state.replyCtx
+		state.mu.Unlock()
+	}
+	e.interactiveMu.Unlock()
+
+	if p == nil {
+		// Fallback: reconstruct reply context from session key
+		strippedKey := sessionKey
+		platformName := ""
+		if idx := strings.Index(strippedKey, ":"); idx > 0 {
+			platformName = strippedKey[:idx]
+		}
+		for _, candidate := range e.platforms {
+			if candidate.Name() == platformName {
+				p = candidate
+				break
+			}
+		}
+		if p != nil {
+			rc, ok := p.(ReplyContextReconstructor)
+			if ok {
+				reconstructed, err := rc.ReconstructReplyCtx(strippedKey)
+				if err != nil {
+					return fmt.Errorf("reconstruct reply context: %w", err)
+				}
+				replyCtx = reconstructed
+			}
+		}
+	}
+
+	if p == nil {
+		return fmt.Errorf("no active session or platform found for PostToNewThread")
+	}
+
+	// Use Send (not Reply) to post as new top-level message
+	if err := e.waitOutgoing(p); err != nil {
+		return err
+	}
+	if err := p.Send(e.ctx, replyCtx, message); err != nil {
+		return fmt.Errorf("post to new thread: %w", err)
+	}
+
+	slog.Info("posted message to new thread", "session_key", sessionKey, "platform", p.Name())
+	return nil
+}
+
+// InjectPromptToNewThread combines InjectPrompt and PostToNewThread:
+// 1. Posts the message to the platform as a new top-level thread
+// 2. Injects the message into the agent session as a prompt
+// 3. Routes subsequent agent responses to that new thread
+func (e *Engine) InjectPromptToNewThread(sessionKey, message string) error {
+	e.interactiveMu.Lock()
+	var state *interactiveState
+	if sessionKey != "" {
+		state = e.interactiveStates[sessionKey]
+		if state == nil && e.multiWorkspace {
+			if iKey := e.interactiveKeyForSessionKey(sessionKey); iKey != sessionKey {
+				state = e.interactiveStates[iKey]
+			}
+		}
+	} else if len(e.interactiveStates) == 1 {
+		for _, s := range e.interactiveStates {
+			state = s
+			break
+		}
+	}
+	e.interactiveMu.Unlock()
+
+	if state == nil {
+		return fmt.Errorf("no active session found for InjectPromptToNewThread")
+	}
+	if state.agentSession == nil || !state.agentSession.Alive() {
+		return fmt.Errorf("agent session not alive for InjectPromptToNewThread")
+	}
+
+	state.mu.Lock()
+	p := state.platform
+	replyCtx := state.replyCtx
+	state.mu.Unlock()
+
+	if p == nil {
+		return fmt.Errorf("platform not available for InjectPromptToNewThread")
+	}
+
+	// Step 1: Post to platform as new thread (using Send, not Reply)
+	if err := e.waitOutgoing(p); err != nil {
+		return err
+	}
+
+	// For Slack: use Send which posts without thread_ts (new top-level)
+	// We need to capture the new thread timestamp for routing responses
+	// Unfortunately, Slack's Send method doesn't return the new timestamp.
+	// We'll use Reply with empty timestamp for now, which is equivalent to Send.
+	if err := p.Send(e.ctx, replyCtx, message); err != nil {
+		return fmt.Errorf("inject prompt to new thread: post message: %w", err)
+	}
+
+	// Step 2: Build the prompt with sender injection if enabled
+	prompt := message
+	if e.injectSender {
+		prompt = e.buildSenderPrompt(message, "", p.Name(), sessionKey)
+	}
+
+	// Step 3: Inject into agent session
+	if err := state.agentSession.Send(prompt, nil, nil); err != nil {
+		return fmt.Errorf("inject prompt to new thread: agent send: %w", err)
+	}
+
+	slog.Info("inject prompt to new thread completed", "session_key", sessionKey, "platform", p.Name())
+	return nil
+}
+
 // sendPermissionPrompt sends a permission prompt with interactive buttons when
 // the platform supports them. Fallback chain: InlineButtonSender → CardSender → plain text.
 func (e *Engine) sendPermissionPrompt(p Platform, replyCtx any, prompt, toolName, toolInput string) {

@@ -33,6 +33,8 @@ type SendRequest struct {
 	Message    string            `json:"message"`
 	Images     []ImageAttachment `json:"images,omitempty"`
 	Files      []FileAttachment  `json:"files,omitempty"`
+	AsPrompt   bool              `json:"as_prompt,omitempty"`   // inject message into agent session as a prompt
+	NewThread  bool              `json:"new_thread,omitempty"` // post to platform as a new thread (for Slack)
 }
 
 // NewAPIServer creates an API server on a Unix socket.
@@ -167,7 +169,25 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := engine.SendToSessionWithAttachments(req.SessionKey, req.Message, req.Images, req.Files); err != nil {
+	// Handle combined flags: AsPrompt + NewThread
+	var err error
+	if req.AsPrompt {
+		if req.NewThread {
+			// Combined: post to new thread AND inject prompt
+			err = engine.InjectPromptToNewThread(req.SessionKey, req.Message)
+		} else {
+			// Inject prompt without posting to new thread
+			err = engine.InjectPrompt(req.SessionKey, req.Message, req.Images, req.Files)
+		}
+	} else if req.NewThread {
+		// Post to new thread without injecting prompt
+		err = engine.PostToNewThread(req.SessionKey, req.Message)
+	} else {
+		// Default behavior: send to existing session/thread
+		err = engine.SendToSessionWithAttachments(req.SessionKey, req.Message, req.Images, req.Files)
+	}
+
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

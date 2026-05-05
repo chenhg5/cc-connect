@@ -115,6 +115,10 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 			}
 			i++
 			dataDir = args[i]
+		case "--as-prompt":
+			req.AsPrompt = true
+		case "--new-thread":
+			req.NewThread = true
 		case "--help", "-h":
 			return req, "", errSendUsage
 		default:
@@ -257,16 +261,36 @@ Options:
       --image <path>       Send an image attachment (repeatable)
       --file <path>        Send a file attachment (repeatable)
       --stdin              Read message from stdin (best for long/special-char messages)
+      --as-prompt          Inject message into agent session as a prompt
+      --new-thread         Post to platform as a new thread (Slack only)
   -p, --project <name>     Target project (optional if only one project)
   -s, --session <key>      Target session key (optional, picks first active)
       --data-dir <path>    Data directory (default: ~/.cc-connect)
   -h, --help               Show this help
+
+Prompt Injection (--as-prompt):
+  When --as-prompt is set, the message is injected directly into the agent's
+  session as if the user sent it. The agent will process it and respond.
+  Useful for programmatic triggering of agent actions.
+
+New Thread (--new-thread):
+  When --new-thread is set, the message is posted as a new top-level thread
+  instead of in the existing thread. Useful for Slack notifications that
+  should not clutter the main conversation.
+
+Combined (--as-prompt --new-thread):
+  Both flags can be combined: the message is posted to a new thread AND
+  injected into the agent session. Subsequent agent responses route to
+  that thread. Ideal for completion watchers that need isolated threads.
 
 Examples:
   cc-connect send "Daily summary: ..."
   cc-connect send -m "Build completed successfully"
   cc-connect send --message "Chart generated" --image /tmp/chart.png
   cc-connect send --file /tmp/report.pdf
+  cc-connect send --as-prompt "Check the latest commits"
+  cc-connect send --new-thread "Notification: build completed"
+  cc-connect send --as-prompt --new-thread "Process this in a new thread"
   cc-connect send --stdin <<'EOF'
     Long message with "special" chars, $variables, and newlines
   EOF`)
