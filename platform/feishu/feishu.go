@@ -13,6 +13,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
 	"regexp"
 	"sort"
 	"strconv"
@@ -388,7 +390,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		})
 
 	if p.useInteractiveCard {
-		slog.Info(p.platformName+": interactive card mode enabled, ensure card.action.trigger event is subscribed in Feishu console")
+		slog.Info(p.platformName + ": interactive card mode enabled, ensure card.action.trigger event is subscribed in Feishu console")
 	}
 
 	if p.shouldUseWebhookMode() {
@@ -1984,39 +1986,90 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 		fileName = "attachment"
 	}
 	fileType := detectFeishuFileType(file.MimeType, fileName)
+	data := file.Data
+	durationMS := 0
+	if fileType == larkim.FileTypeOpus {
+		format := detectFeishuAudioFormat(file.MimeType, fileName)
+		durationMS = probeFeishuMediaDurationMS(ctx, data, format)
+		if format != "opus" {
+			converted, err := core.ConvertAudioToOpus(ctx, data, format)
+			if err != nil {
+				return fmt.Errorf("%s: convert file audio to opus: %w", p.tag(), err)
+			}
+			data = converted
+			if durationMS == 0 {
+				durationMS = probeFeishuMediaDurationMS(ctx, data, "opus")
+			}
+		}
+		if !strings.HasSuffix(strings.ToLower(fileName), ".opus") {
+			fileName = replaceFileExtension(fileName, ".opus")
+		}
+	} else if fileType == larkim.FileTypeMp4 {
+		durationMS = probeFeishuMediaDurationMS(ctx, data, "mp4")
+	}
+
+	fileKey, err := p.uploadFeishuFile(ctx, "upload file", fileType, fileName, data, durationMS)
+	if err != nil {
+		return err
+	}
+
+	msgType, fileContent, err := buildFeishuUploadedFileMessage(fileType, fileKey)
+	if err != nil {
+		return fmt.Errorf("%s: build uploaded file message: %w", p.tag(), err)
+	}
+
+	return p.sendMediaMessage(ctx, rc, msgType, fileContent)
+}
+
+func (p *Platform) uploadFeishuFile(ctx context.Context, operation, fileType, fileName string, data []byte, durationMS int) (string, error) {
 	var uploadResp *larkim.CreateFileResp
-	if err := p.withTransientRetry(ctx, "upload file", func() error {
-		return p.withFreshTenantAccessTokenRetry(ctx, "upload file", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+	if err := p.withTransientRetry(ctx, operation, func() error {
+		return p.withFreshTenantAccessTokenRetry(ctx, operation, func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
 			req := larkim.NewCreateFileReqBuilder().
-				Body(larkim.NewCreateFileReqBodyBuilder().
-					FileType(fileType).
-					FileName(fileName).
-					File(bytes.NewReader(file.Data)).
-					Build()).
+				Body(buildFeishuCreateFileReqBody(fileType, fileName, data, durationMS)).
 				Build()
 			var err error
 			uploadResp, err = client.Im.File.Create(ctx, req, options...)
 			if err != nil {
-				return fmt.Errorf("%s: upload file: %w", p.tag(), err)
+				return fmt.Errorf("%s: %s: %w", p.tag(), operation, err)
 			}
 			if !uploadResp.Success() {
-				return fmt.Errorf("%s: upload file code=%d msg=%s", p.tag(), uploadResp.Code, uploadResp.Msg)
+				return fmt.Errorf("%s: %s code=%d msg=%s", p.tag(), operation, uploadResp.Code, uploadResp.Msg)
 			}
 			return nil
 		})
 	}); err != nil {
-		return err
+		return "", err
 	}
 	if uploadResp.Data == nil || uploadResp.Data.FileKey == nil {
-		return fmt.Errorf("%s: upload file: no file_key returned", p.tag())
+		return "", fmt.Errorf("%s: %s: no file_key returned", p.tag(), operation)
 	}
+	return *uploadResp.Data.FileKey, nil
+}
 
-	fileContent, err := (&larkim.MessageFile{FileKey: *uploadResp.Data.FileKey}).String()
-	if err != nil {
-		return fmt.Errorf("%s: build file message: %w", p.tag(), err)
+func buildFeishuCreateFileReqBody(fileType, fileName string, data []byte, durationMS int) *larkim.CreateFileReqBody {
+	builder := larkim.NewCreateFileReqBodyBuilder().
+		FileType(fileType).
+		FileName(fileName).
+		File(bytes.NewReader(data))
+	if durationMS > 0 {
+		builder.Duration(durationMS)
 	}
+	return builder.Build()
+}
 
-	return p.sendMediaMessage(ctx, rc, larkim.MsgTypeFile, fileContent)
+func buildFeishuUploadedFileMessage(fileType, fileKey string) (string, string, error) {
+	switch fileType {
+	case larkim.FileTypeOpus:
+		content, err := (&larkim.MessageAudio{FileKey: fileKey}).String()
+		return larkim.MsgTypeAudio, content, err
+	case larkim.FileTypeMp4:
+		content, err := (&larkim.MessageMedia{FileKey: fileKey}).String()
+		return larkim.MsgTypeMedia, content, err
+	default:
+		content, err := (&larkim.MessageFile{FileKey: fileKey}).String()
+		return larkim.MsgTypeFile, content, err
+	}
 }
 
 func (p *Platform) sendMediaMessage(ctx context.Context, rc replyContext, msgType, content string) error {
@@ -2039,11 +2092,138 @@ func detectFeishuFileType(mimeType, fileName string) string {
 		return larkim.FileTypePpt
 	case mimeType == "video/mp4" || strings.HasSuffix(name, ".mp4"):
 		return larkim.FileTypeMp4
-	case mimeType == "audio/ogg" || mimeType == "audio/opus" || strings.HasSuffix(name, ".opus"):
+	case detectFeishuAudioFormat(mimeType, fileName) != "":
 		return larkim.FileTypeOpus
 	default:
 		return larkim.FileTypeStream
 	}
+}
+
+func detectFeishuAudioFormat(mimeType, fileName string) string {
+	name := strings.ToLower(fileName)
+	switch {
+	case strings.HasSuffix(name, ".opus"):
+		return "opus"
+	case strings.HasSuffix(name, ".ogg"):
+		return "ogg"
+	case strings.HasSuffix(name, ".mp3"):
+		return "mp3"
+	case strings.HasSuffix(name, ".wav"):
+		return "wav"
+	case strings.HasSuffix(name, ".m4a"):
+		return "m4a"
+	case strings.HasSuffix(name, ".aac"):
+		return "aac"
+	case strings.HasSuffix(name, ".flac"):
+		return "flac"
+	case strings.HasSuffix(name, ".webm"):
+		return "webm"
+	case strings.HasSuffix(name, ".amr"):
+		return "amr"
+	case strings.HasSuffix(name, ".silk"):
+		return "silk"
+	}
+
+	mt := strings.ToLower(strings.TrimSpace(mimeType))
+	switch mt {
+	case "audio/opus":
+		return "opus"
+	case "audio/ogg", "application/ogg":
+		return "ogg"
+	case "audio/mpeg", "audio/mp3":
+		return "mp3"
+	case "audio/wav", "audio/x-wav", "audio/wave":
+		return "wav"
+	case "audio/mp4", "audio/x-m4a":
+		return "m4a"
+	case "audio/aac":
+		return "aac"
+	case "audio/flac", "audio/x-flac":
+		return "flac"
+	case "audio/webm":
+		return "webm"
+	case "audio/amr":
+		return "amr"
+	case "audio/silk":
+		return "silk"
+	default:
+		return ""
+	}
+}
+
+func probeFeishuMediaDurationMS(ctx context.Context, data []byte, format string) int {
+	if len(data) == 0 {
+		return 0
+	}
+	ffprobePath, err := exec.LookPath("ffprobe")
+	if err != nil {
+		return 0
+	}
+
+	tmp, err := os.CreateTemp("", "cc-connect-feishu-media-*")
+	if err != nil {
+		return 0
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return 0
+	}
+	if err := tmp.Close(); err != nil {
+		return 0
+	}
+
+	if durationMS, err := ffprobeFeishuDurationMS(ctx, ffprobePath, tmpPath, ""); err == nil && durationMS > 0 {
+		return durationMS
+	}
+	if format != "" {
+		if durationMS, err := ffprobeFeishuDurationMS(ctx, ffprobePath, tmpPath, format); err == nil && durationMS > 0 {
+			return durationMS
+		}
+	}
+	return 0
+}
+
+func ffprobeFeishuDurationMS(ctx context.Context, ffprobePath, filePath, format string) (int, error) {
+	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	args := []string{"-v", "error"}
+	if format != "" {
+		args = append(args, "-f", format)
+	}
+	args = append(args, "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", filePath)
+
+	out, err := exec.CommandContext(probeCtx, ffprobePath, args...).Output()
+	if err != nil {
+		return 0, err
+	}
+	line := strings.TrimSpace(string(out))
+	if idx := strings.IndexAny(line, "\r\n"); idx >= 0 {
+		line = strings.TrimSpace(line[:idx])
+	}
+	seconds, err := strconv.ParseFloat(line, 64)
+	if err != nil || seconds <= 0 {
+		return 0, err
+	}
+	durationMS := int(seconds*1000 + 0.5)
+	if durationMS < 1 {
+		durationMS = 1
+	}
+	return durationMS, nil
+}
+
+func replaceFileExtension(fileName, ext string) string {
+	if fileName == "" {
+		return "attachment" + ext
+	}
+	dot := strings.LastIndex(fileName, ".")
+	slash := strings.LastIndexAny(fileName, `/\`)
+	if dot > slash {
+		return fileName[:dot] + ext
+	}
+	return fileName + ext
 }
 
 func (p *Platform) downloadImage(messageID, imageKey string) ([]byte, string, error) {
@@ -3398,35 +3578,13 @@ func (p *Platform) SendAudio(ctx context.Context, rctx any, audio []byte, format
 		format = "opus"
 	}
 
-	var uploadResp *larkim.CreateFileResp
-	if err := p.withTransientRetry(ctx, "upload audio", func() error {
-		return p.withFreshTenantAccessTokenRetry(ctx, "upload audio", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
-			req := larkim.NewCreateFileReqBuilder().
-				Body(larkim.NewCreateFileReqBodyBuilder().
-					FileType(larkim.FileTypeOpus).
-					FileName("tts_audio.opus").
-					File(bytes.NewReader(audio)).
-					Build()).
-				Build()
-			var err error
-			uploadResp, err = client.Im.File.Create(ctx, req, options...)
-			if err != nil {
-				return fmt.Errorf("%s: upload audio: %w", p.tag(), err)
-			}
-			if !uploadResp.Success() {
-				return fmt.Errorf("%s: upload audio code=%d msg=%s", p.tag(), uploadResp.Code, uploadResp.Msg)
-			}
-			return nil
-		})
-	}); err != nil {
+	durationMS := probeFeishuMediaDurationMS(ctx, audio, "opus")
+	fileKey, err := p.uploadFeishuFile(ctx, "upload audio", larkim.FileTypeOpus, "tts_audio.opus", audio, durationMS)
+	if err != nil {
 		return err
 	}
-	if uploadResp.Data == nil || uploadResp.Data.FileKey == nil {
-		return fmt.Errorf("%s: upload audio: no file_key returned", p.tag())
-	}
-	fileKey := *uploadResp.Data.FileKey
 
-	slog.Debug(p.tag()+": audio uploaded", "file_key", fileKey, "format", format, "size", len(audio))
+	slog.Debug(p.tag()+": audio uploaded", "file_key", fileKey, "format", format, "size", len(audio), "duration_ms", durationMS)
 
 	audioMsg := larkim.MessageAudio{FileKey: fileKey}
 	audioContent, err := audioMsg.String()
