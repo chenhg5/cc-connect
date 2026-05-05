@@ -3384,9 +3384,6 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				}
 
 				if fullResponse != "" {
-					if e.showContextIndicator && event.InputTokens >= 100 {
-						fullResponse += contextIndicator(event.InputTokens)
-					}
 					for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
 						e.send(p, replyCtx, chunk)
 					}
