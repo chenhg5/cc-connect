@@ -960,7 +960,7 @@ func TestBuildRichCard_RendersThinkingAndToolResultRows(t *testing.T) {
 			Success:  &success,
 			Done:     true,
 		},
-	}, "done", true, time.Second)
+	}, "done", true, "")
 
 	for _, want := range []string{"Inspecting event routing", "echo hi", "completed", "exit: 0", "hi"} {
 		if !strings.Contains(cardJSON, want) {
