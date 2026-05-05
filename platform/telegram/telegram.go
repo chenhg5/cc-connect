@@ -333,10 +333,7 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 		userName = strings.TrimSpace(msg.From.FirstName + " " + msg.From.LastName)
 	}
 
-	threadID := 0
-	if msg.Chat.IsForum {
-		threadID = msg.MessageThreadID
-	}
+	threadID := msg.MessageThreadID
 	sessionKey := p.buildSessionKey(msg.Chat.ID, threadID, msg.From.ID)
 	channelKey := buildChannelKey(msg.Chat.ID, threadID)
 
@@ -718,10 +715,7 @@ func (p *Platform) handleCallbackQuery(ctx context.Context, cb *models.CallbackQ
 		userName = strings.TrimSpace(cb.From.FirstName + " " + cb.From.LastName)
 	}
 
-	threadID := 0
-	if msg.Chat.IsForum {
-		threadID = msg.MessageThreadID
-	}
+	threadID := msg.MessageThreadID
 	sessionKey := p.buildSessionKey(chatID, threadID, cb.From.ID)
 	channelKey := buildChannelKey(chatID, threadID)
 
