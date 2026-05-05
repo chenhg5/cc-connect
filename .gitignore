@@ -2,6 +2,7 @@
 # Binary outputs
 # ============================================================================
 /cc-connect
+cc-connect.bak-*
 *.exe
 *.exe~
 *.dll
@@ -41,6 +42,9 @@ config.*.toml
 !config.example.toml
 .env
 *.local.toml
+
+# Instance lock files (created at startup, released on shutdown)
+*.toml.lock
 
 # CC-Connect runtime state
 .cc-connect/

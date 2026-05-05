@@ -3,6 +3,7 @@ package max
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,9 +23,15 @@ func init() {
 }
 
 const (
-	defaultAPIBase          = "https://platform-api.max.ru"
-	pollTimeout             = 20 // seconds, long-poll timeout
-	httpTimeout             = 35 * time.Second
+	defaultAPIBase = "https://platform-api.max.ru"
+	// pollTimeout — long-poll timeout sent to MAX (seconds). API allows 0–90,
+	// dev docs default = 30. Using 30 balances responsiveness and load.
+	pollTimeout = 30
+	// httpTimeout caps the HTTP client wait. Must be much larger than
+	// pollTimeout, otherwise transient MAX backend lag pushes header arrival
+	// past the deadline and the client cancels the long-poll, triggering a
+	// retry storm.
+	httpTimeout = 90 * time.Second
 	initialReconnectBackoff = time.Second
 	maxReconnectBackoff     = 30 * time.Second
 	stableConnectionWindow  = 10 * time.Second
@@ -51,6 +58,16 @@ type Platform struct {
 	apiBase   string
 	allowFrom string
 
+	// Webhook mode: if webhookURL is set, the platform registers a
+	// subscription with MAX, listens on webhookListen for incoming updates
+	// and DOES NOT run the long-poll loop. Required by MAX from 2026-05-11
+	// (long-polling is being throttled to 2 RPS).
+	webhookURL          string
+	webhookListen       string
+	webhookPath         string
+	webhookSecret       string
+	resubscribeInterval time.Duration
+
 	mu           sync.RWMutex
 	handler      core.MessageHandler
 	cancel       context.CancelFunc
@@ -58,6 +75,7 @@ type Platform struct {
 	client       *http.Client // general API calls — httpTimeout
 	uploadClient *http.Client // CDN uploads — attachmentUploadTO (overrides short client Timeout)
 	dedup        core.MessageDedup
+	webServer    *http.Server
 }
 
 // New creates a MAX platform from config options.
@@ -65,9 +83,23 @@ type Platform struct {
 //	[[projects.platforms]]
 //	type = "max"
 //	[projects.platforms.options]
-//	token      = "<bot-token>"
-//	allow_from = "<user_id>,<user_id>"   # optional, "*" or empty = all
-//	api_base   = "https://platform-api.max.ru"  # optional override
+//	token          = "<bot-token>"
+//	allow_from     = "<user_id>,<user_id>"   # optional, "*" or empty = all
+//	api_base       = "https://platform-api.max.ru"  # optional override
+//	webhook_url    = "https://your.domain/webhook"  # optional; switches
+//	                                               # platform to webhook mode
+//	webhook_listen = ":8080"                       # optional, default ":8080"
+//	webhook_path   = "/webhook"                    # optional, default "/webhook";
+//	                                               # must match the path in webhook_url
+//	webhook_secret = "<random-string>"             # optional; if set, sent to MAX
+//	                                               # so MAX includes it in the
+//	                                               # X-Max-Bot-Api-Secret header
+//	                                               # of every webhook POST (?s= also
+//	                                               # accepted for manual testing)
+//	webhook_resubscribe_interval = "5m"            # optional, default 5m; cc-connect
+//	                                               # periodically re-POSTs the
+//	                                               # subscription because MAX has been
+//	                                               # observed to silently drop it
 func New(opts map[string]any) (core.Platform, error) {
 	token, _ := opts["token"].(string)
 	if token == "" {
@@ -80,12 +112,39 @@ func New(opts map[string]any) (core.Platform, error) {
 	allowFrom, _ := opts["allow_from"].(string)
 	core.CheckAllowFrom("max", allowFrom)
 
+	webhookURL, _ := opts["webhook_url"].(string)
+	webhookListen, _ := opts["webhook_listen"].(string)
+	webhookPath, _ := opts["webhook_path"].(string)
+	webhookSecret, _ := opts["webhook_secret"].(string)
+	if webhookURL != "" && webhookListen == "" {
+		webhookListen = ":8080"
+	}
+	if webhookPath == "" {
+		webhookPath = "/webhook"
+	} else if !strings.HasPrefix(webhookPath, "/") {
+		webhookPath = "/" + webhookPath
+	}
+
+	resubscribeInterval := 5 * time.Minute
+	if raw, ok := opts["webhook_resubscribe_interval"].(string); ok && raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return nil, fmt.Errorf("max: webhook_resubscribe_interval: %w", err)
+		}
+		resubscribeInterval = d
+	}
+
 	return &Platform{
-		token:        token,
-		apiBase:      apiBase,
-		allowFrom:    allowFrom,
-		client:       &http.Client{Timeout: httpTimeout},
-		uploadClient: &http.Client{Timeout: attachmentUploadTO},
+		token:               token,
+		apiBase:             apiBase,
+		allowFrom:           allowFrom,
+		webhookURL:          webhookURL,
+		webhookListen:       webhookListen,
+		webhookPath:         webhookPath,
+		webhookSecret:       webhookSecret,
+		resubscribeInterval: resubscribeInterval,
+		client:              &http.Client{Timeout: httpTimeout},
+		uploadClient:        &http.Client{Timeout: attachmentUploadTO},
 	}, nil
 }
 
@@ -110,18 +169,215 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		slog.Info("max: connected", "bot", name, "id", id)
 	}
 
+	if p.webhookURL != "" {
+		if err := p.startWebhook(ctx); err != nil {
+			cancel()
+			return fmt.Errorf("max: start webhook: %w", err)
+		}
+		return nil
+	}
+
 	go p.pollLoop(ctx)
 	return nil
 }
 
 func (p *Platform) Stop() error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	srv := p.webServer
+	url := p.webhookURL
 	p.stopping = true
 	if p.cancel != nil {
 		p.cancel()
 	}
+	p.mu.Unlock()
+	if srv != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+	}
+	if url != "" {
+		// Best-effort unsubscribe so MAX doesn't keep delivering events to a
+		// dead URL. Failures here are not fatal — service is shutting down.
+		unsubCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := p.unsubscribe(unsubCtx, url); err != nil {
+			slog.Warn("max: unsubscribe webhook failed", "url", url, "err", err)
+		}
+	}
 	return nil
+}
+
+// startWebhook registers a webhook subscription with MAX and brings up an
+// HTTP server on webhookListen so MAX can POST updates to webhookURL.
+// Called from Start() when webhook_url is configured. Long-polling is NOT
+// started in webhook mode — the two are mutually exclusive (MAX delivers
+// each update to one transport).
+func (p *Platform) startWebhook(ctx context.Context) error {
+	mux := http.NewServeMux()
+	mux.HandleFunc(p.webhookPath, p.webhookHandler)
+	srv := &http.Server{
+		Addr:              p.webhookListen,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	// Caller (Start) already holds p.mu, so assign directly — re-locking
+	// a non-reentrant sync.RWMutex would deadlock.
+	p.webServer = srv
+
+	go func() {
+		slog.Info("max: webhook listening", "addr", p.webhookListen, "path", p.webhookPath, "url", p.webhookURL)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("max: webhook listener stopped", "err", err)
+		}
+	}()
+
+	if err := p.subscribe(ctx, p.webhookURL); err != nil {
+		return fmt.Errorf("subscribe: %w", err)
+	}
+	slog.Info("max: webhook subscribed", "url", p.webhookURL)
+
+	// MAX has been observed to silently drop the webhook subscription
+	// server-side without any delivery error. The documented 8h failure
+	// window does not match the observed cadence (drops every 25–60min),
+	// so we periodically re-POST the subscription. MAX overwrites the
+	// existing registration in-place, so re-subscribing is idempotent.
+	if p.resubscribeInterval > 0 {
+		go p.resubscribeLoop(ctx)
+	}
+	return nil
+}
+
+func (p *Platform) resubscribeLoop(ctx context.Context) {
+	t := time.NewTicker(p.resubscribeInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			rsCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			if err := p.subscribe(rsCtx, p.webhookURL); err != nil {
+				slog.Warn("max: periodic re-subscribe failed", "err", err)
+			} else {
+				slog.Debug("max: periodic re-subscribe ok")
+			}
+			cancel()
+		}
+	}
+}
+
+// webhookHandler accepts a POST from MAX with a single update and routes it
+// through the same handleUpdate path used by long-polling.
+func (p *Platform) webhookHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if p.webhookSecret != "" {
+		// MAX sends the secret in X-Max-Bot-Api-Secret on every webhook POST
+		// when the subscription was created with a "secret" field.
+		// ?s= query is accepted as a fallback for manual curl testing.
+		got := r.Header.Get("X-Max-Bot-Api-Secret")
+		if got == "" {
+			got = r.URL.Query().Get("s")
+		}
+		if subtle.ConstantTimeCompare([]byte(got), []byte(p.webhookSecret)) != 1 {
+			slog.Warn("max: webhook secret mismatch", "remote", r.RemoteAddr)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+	}
+	defer r.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(r.Body, 4*1024*1024))
+	if err != nil {
+		slog.Warn("max: webhook read body", "err", err)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	var upd maxUpdate
+	if err := json.Unmarshal(body, &upd); err != nil {
+		slog.Warn("max: webhook unmarshal", "err", err, "body", string(body[:min(len(body), 256)]))
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	// MAX expects a fast 200 — process the update asynchronously so we
+	// never let agent latency back-pressure the delivery side.
+	go func() {
+		p.mu.RLock()
+		ctx := context.Background()
+		if p.cancel != nil {
+			// Use the platform's own cancellation context so a Stop() also
+			// short-circuits in-flight handler work.
+			ctx2, cancel := context.WithCancel(ctx)
+			_ = cancel
+			ctx = ctx2
+		}
+		p.mu.RUnlock()
+		p.handleUpdate(ctx, &upd)
+	}()
+	w.WriteHeader(http.StatusOK)
+}
+
+// subscribe registers a webhook URL with MAX. The MAX bot API supports
+// only one webhook per bot — if an old URL is registered, MAX overwrites
+// it on a successful subscribe, so no explicit cleanup is required.
+func (p *Platform) subscribe(ctx context.Context, url string) error {
+	payload := map[string]any{
+		"url":          url,
+		"update_types": []string{"message_created", "message_callback"},
+	}
+	if p.webhookSecret != "" {
+		payload["secret"] = p.webhookSecret
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.apiBase+"/subscriptions", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	p.setAuth(req)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, respBody)
+	}
+	return nil
+}
+
+// unsubscribe removes the webhook registration. Only used during Stop().
+func (p *Platform) unsubscribe(ctx context.Context, url string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, p.apiBase+"/subscriptions", nil)
+	if err != nil {
+		return err
+	}
+	p.setAuth(req)
+	q := req.URL.Query()
+	q.Set("url", url)
+	req.URL.RawQuery = q.Encode()
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, respBody)
+	}
+	return nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // --- Sending ---
@@ -397,16 +653,63 @@ func defaultFilename(kind string) string {
 	return "file.bin"
 }
 
-// StartTyping implements core.TypingIndicator — sends "..." periodically while working.
+// StartTyping implements core.TypingIndicator — drives the MAX "is typing"
+// presence indicator via POST /chats/{id}/actions {"action":"typing_on"}.
+// MAX clears the indicator automatically after ~10s of inactivity, so we
+// re-arm it on a ticker until the returned cancel func is called.
 func (p *Platform) StartTyping(ctx context.Context, replyCtx any) (stop func()) {
 	rctx, ok := replyCtx.(replyContext)
-	if !ok {
+	if !ok || rctx.chatID == "" {
 		return func() {}
 	}
-	// MAX doesn't have a dedicated typing action, so we do nothing here.
-	// The engine already sends a "..." message via Reply before processing.
-	_ = rctx
-	return func() {}
+	tickCtx, cancel := context.WithCancel(ctx)
+	_ = p.sendChatAction(tickCtx, rctx.chatID, "typing_on")
+	go func() {
+		ticker := time.NewTicker(typingInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-tickCtx.Done():
+				return
+			case <-ticker.C:
+				_ = p.sendChatAction(tickCtx, rctx.chatID, "typing_on")
+			}
+		}
+	}()
+	return cancel
+}
+
+// sendChatAction posts a presence action to MAX (typing_on / mark_seen).
+// Best-effort: errors are logged at debug level only and never block the
+// main message-handling flow.
+func (p *Platform) sendChatAction(ctx context.Context, chatID, action string) error {
+	if chatID == "" || action == "" {
+		return nil
+	}
+	body, err := json.Marshal(map[string]string{"action": action})
+	if err != nil {
+		return err
+	}
+	url := p.apiBase + "/chats/" + chatID + "/actions"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	p.setAuth(req)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := p.client.Do(req)
+	if err != nil {
+		slog.Debug("max: chat action failed", "chat", chatID, "action", action, "err", err)
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+		slog.Debug("max: chat action non-2xx",
+			"chat", chatID, "action", action, "status", resp.StatusCode, "body", string(respBody))
+		return fmt.Errorf("max: chat action %s: status %d", action, resp.StatusCode)
+	}
+	return nil
 }
 
 // FormattingInstructions implements core.FormattingInstructionProvider.
@@ -681,6 +984,10 @@ func (p *Platform) handleMessage(ctx context.Context, msg *maxMessage) {
 	chatID := strconv.FormatInt(msg.Recipient.ChatID, 10)
 	sessionKey := fmt.Sprintf("max:%s:%s", chatID, userID)
 	rctx := replyContext{chatID: chatID, messageID: msg.Body.Mid}
+
+	// Acknowledge the message so the user gets a "read" tick in MAX.
+	// Fire-and-forget — must never block the routing flow.
+	go func() { _ = p.sendChatAction(ctx, chatID, "mark_seen") }()
 
 	images, files, audio := p.fetchAttachments(ctx, atts)
 
