@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -40,60 +41,32 @@ type providerWiringResult struct {
 	canStartInitialRefresh    bool
 }
 
+var topLevelCommandHandlers = map[string]func([]string){
+	"config-example": func(_ []string) {
+		fmt.Print(ccconnect.ConfigExampleTOML)
+	},
+	"config": runConfig,
+	"update": func(_ []string) {
+		runUpdate()
+	},
+	"check-update": func(_ []string) {
+		checkUpdate()
+	},
+	"provider": runProviderCommand,
+	"send":     runSend,
+	"cron":     runCron,
+	"relay":    runRelay,
+	"sessions": runSessions,
+	"agent-sid": runAgentSID,
+	"daemon":   runDaemon,
+	"feishu":   runFeishu,
+	"weixin":   runWeixin,
+	"doctor":   runDoctor,
+	"web":      runWeb,
+}
+
 func main() {
 	checkUpdateAsync()
-
-	// Handle subcommands before flag parsing
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "config-example":
-			fmt.Print(ccconnect.ConfigExampleTOML)
-			return
-		case "config":
-			runConfig(os.Args[2:])
-			return
-		case "update":
-			runUpdate()
-			return
-		case "check-update":
-			checkUpdate()
-			return
-		case "provider":
-			runProviderCommand(os.Args[2:])
-			return
-		case "send":
-			runSend(os.Args[2:])
-			return
-		case "cron":
-			runCron(os.Args[2:])
-			return
-		case "relay":
-			runRelay(os.Args[2:])
-			return
-		case "sessions":
-			runSessions(os.Args[2:])
-			return
-		case "agent-sid":
-			runAgentSID(os.Args[2:])
-			return
-		case "daemon":
-			runDaemon(os.Args[2:])
-			return
-		case "feishu":
-			runFeishu(os.Args[2:])
-			return
-		case "weixin":
-			runWeixin(os.Args[2:])
-			return
-		case "doctor":
-			runDoctor(os.Args[2:])
-			return
-		case "web":
-			runWeb(os.Args[2:])
-			return
-		}
-	}
-
 	// When started as a daemon (CC_LOG_FILE set), redirect logs to a rotating file.
 	var logWriter io.Writer
 	var logCloser io.Closer
@@ -114,17 +87,27 @@ func main() {
 		slog.SetDefault(slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	}
 
-	configFlag := flag.String("config", "", "path to config file (default: ./config.toml or ~/.cc-connect/config.toml)")
-	showVersion := flag.Bool("version", false, "print version and exit")
-	observeFlag := flag.Bool("observe", false, "observe native terminal Claude Code sessions and forward to Slack")
-	observeChannel := flag.String("observe-channel", "", "Slack channel ID to forward terminal observations to (requires --observe)")
-	forceFlag := flag.Bool("force", false, "kill any existing instance with the same config before starting")
-	flag.Usage = printUsage
-	flag.Parse()
+	rootOpts, err := parseRootCLIOptions(os.Args[1:])
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return
+		}
+		os.Exit(2)
+	}
 
-	if *showVersion {
+	if rootOpts.showVersion {
 		fmt.Printf("cc-connect %s\ncommit:  %s\nbuilt:   %s\n", version, commit, buildTime)
 		return
+	}
+
+	if runTopLevelCommand(rootOpts.args) {
+		return
+	}
+
+	if err := validateNoExtraTopLevelArgs(rootOpts.args); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n\n", err)
+		printUsage()
+		os.Exit(1)
 	}
 
 	core.VersionInfo = fmt.Sprintf("cc-connect %s\ncommit: %s\nbuilt: %s", version, commit, buildTime)
@@ -132,10 +115,10 @@ func main() {
 	core.CurrentCommit = commit
 	core.CurrentBuildTime = buildTime
 
-	configPath := resolveConfigPath(*configFlag)
+	configPath := resolveConfigPath(rootOpts.configPath)
 
 	// Handle --force: kill any existing instance before we try to acquire the lock
-	if *forceFlag {
+	if rootOpts.force {
 		if KillExistingInstance(configPath) {
 			slog.Info("killed existing instance via --force")
 		}
@@ -297,8 +280,8 @@ func main() {
 		}
 
 		// Wire terminal observation (--observe / [projects.observe])
-		observeEnabled := *observeFlag
-		obsChan := *observeChannel
+		observeEnabled := rootOpts.observe
+		obsChan := rootOpts.observeChannel
 		if proj.Observe != nil {
 			if !observeEnabled && proj.Observe.Enabled {
 				observeEnabled = true
@@ -1089,6 +1072,59 @@ func main() {
 	}
 
 	slog.Info("bye")
+}
+
+func runTopLevelCommand(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	handler, ok := topLevelCommandHandlers[args[0]]
+	if !ok {
+		return false
+	}
+	handler(args[1:])
+	return true
+}
+
+type rootCLIOptions struct {
+	configPath     string
+	force          bool
+	observe        bool
+	observeChannel string
+	showVersion    bool
+	args           []string
+}
+
+func parseRootCLIOptions(args []string) (rootCLIOptions, error) {
+	fs := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	fs.Usage = printUsage
+
+	configPath := fs.String("config", "", "path to config file (default: ./config.toml or ~/.cc-connect/config.toml)")
+	force := fs.Bool("force", false, "kill any existing instance with the same config before starting")
+	observe := fs.Bool("observe", false, "observe native terminal Claude Code sessions and forward to Slack")
+	observeChannel := fs.String("observe-channel", "", "Slack channel ID to forward terminal observations to (requires --observe)")
+	showVersion := fs.Bool("version", false, "print version and exit")
+
+	if err := fs.Parse(args); err != nil {
+		return rootCLIOptions{}, err
+	}
+
+	return rootCLIOptions{
+		configPath:     *configPath,
+		force:          *force,
+		observe:        *observe,
+		observeChannel: *observeChannel,
+		showVersion:    *showVersion,
+		args:           fs.Args(),
+	}, nil
+}
+
+func validateNoExtraTopLevelArgs(args []string) error {
+	if len(args) == 0 {
+		return nil
+	}
+	return fmt.Errorf("unknown top-level command: %s", args[0])
 }
 
 // sessionStorePath builds a unique filename from project name + work_dir.
