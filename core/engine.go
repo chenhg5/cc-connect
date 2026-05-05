@@ -11873,17 +11873,76 @@ func (e *Engine) sendTTSReply(p Platform, replyCtx any, text string) {
 // Bot-to-bot relay
 // ──────────────────────────────────────────────────────────────
 
+type platformNameOnly struct {
+	name string
+}
+
+func (p platformNameOnly) Name() string                           { return p.name }
+func (platformNameOnly) Start(MessageHandler) error               { return nil }
+func (platformNameOnly) Reply(context.Context, any, string) error { return nil }
+func (platformNameOnly) Send(context.Context, any, string) error  { return nil }
+func (platformNameOnly) Stop() error                              { return nil }
+
+func relayConversationKey(fromProject, platformName, chatID string) string {
+	return "relay:" + fromProject + ":" + workspaceChannelKey(platformName, chatID)
+}
+
+func (e *Engine) platformForName(name string) Platform {
+	for _, p := range e.platforms {
+		if strings.EqualFold(p.Name(), name) {
+			return p
+		}
+	}
+	return platformNameOnly{name: name}
+}
+
+func (e *Engine) relayContextForSourceSessionKey(fromProject, sourceSessionKey string) (Agent, *SessionManager, string, error) {
+	platformName, chatID, err := parseSessionKeyParts(sourceSessionKey)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("invalid source session key: %w", err)
+	}
+
+	relaySessionKey := relayConversationKey(fromProject, platformName, chatID)
+	if !e.multiWorkspace || e.workspaceBindings == nil {
+		return e.agent, e.sessions, relaySessionKey, nil
+	}
+
+	channelKey := workspaceChannelKey(platformName, chatID)
+	workspace, _, err := e.resolveWorkspace(e.platformForName(platformName), chatID)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("resolve relay workspace: %w", err)
+	}
+	if workspace == "" {
+		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); b != nil && !usable {
+			return nil, nil, "", fmt.Errorf("workspace binding unavailable for source channel %q", channelKey)
+		}
+		return nil, nil, "", fmt.Errorf("no workspace binding for source channel %q", channelKey)
+	}
+
+	agent, sessions, err := e.getOrCreateWorkspaceAgent(workspace)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("get relay workspace agent: %w", err)
+	}
+	if ws := e.workspacePool.Get(workspace); ws != nil {
+		ws.Touch()
+	}
+	return agent, sessions, relaySessionKey, nil
+}
+
 // HandleRelay processes a relay message synchronously: starts or resumes a
 // dedicated relay session, sends the message to the agent, and blocks until
 // the complete response is collected (or the relay context times out).
-func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message string) (string, error) {
-	relaySessionKey := "relay:" + fromProject + ":" + chatID
-	session := e.sessions.GetOrCreateActive(relaySessionKey)
+func (e *Engine) HandleRelay(ctx context.Context, fromProject, sourceSessionKey, message string) (string, error) {
+	agent, sessions, relaySessionKey, err := e.relayContextForSourceSessionKey(fromProject, sourceSessionKey)
+	if err != nil {
+		return "", err
+	}
+	session := sessions.GetOrCreateActive(relaySessionKey)
 
-	if inj, ok := e.agent.(SessionEnvInjector); ok {
+	if inj, ok := agent.(SessionEnvInjector); ok {
 		envVars := []string{
 			"CC_PROJECT=" + e.name,
-			"CC_SESSION_KEY=" + relaySessionKey,
+			"CC_SESSION_KEY=" + sourceSessionKey,
 		}
 		if exePath, err := os.Executable(); err == nil {
 			binDir := filepath.Dir(exePath)
@@ -11897,31 +11956,44 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 	// Use the engine context (not the relay timeout context) so that the
 	// agent process is not killed when the relay deadline fires. The relay
 	// timeout only controls how long we *wait* for the response.
-	agentSession, err := e.agent.StartSession(e.ctx, session.GetAgentSessionID())
+	agentSession, err := agent.StartSession(e.ctx, session.GetAgentSessionID())
 	if err != nil {
 		// Resume failed — fall back to a fresh session so the relay is not
 		// permanently broken by a corrupted/stale session ID.
 		if session.GetAgentSessionID() != "" {
 			slog.Warn("relay: session resume failed, trying fresh session",
 				"relay_key", relaySessionKey, "error", err)
-			session.SetAgentSessionID("", e.agent.Name())
-			e.sessions.Save()
-			agentSession, err = e.agent.StartSession(e.ctx, "")
+			session.SetAgentSessionID("", agent.Name())
+			sessions.Save()
+			agentSession, err = agent.StartSession(e.ctx, "")
 		}
 		if err != nil {
 			return "", fmt.Errorf("start relay session: %w", err)
 		}
 	}
 
-	if newID := agentSession.CurrentSessionID(); newID != "" {
-		if session.CompareAndSetAgentSessionID(newID, e.agent.Name()) {
-			pendingName := session.GetName()
-			if pendingName != "" && pendingName != "session" && pendingName != "default" {
-				e.sessions.SetSessionName(newID, pendingName)
-			}
-			e.sessions.Save()
+	saveRelaySessionID := func(id string, force bool) {
+		if id == "" {
+			return
 		}
+		changed := false
+		if force {
+			session.SetAgentSessionID(id, agent.Name())
+			changed = true
+		} else {
+			changed = session.CompareAndSetAgentSessionID(id, agent.Name())
+		}
+		if !changed {
+			return
+		}
+		pendingName := session.GetName()
+		if pendingName != "" && pendingName != "session" && pendingName != "default" {
+			sessions.SetSessionName(id, pendingName)
+		}
+		sessions.Save()
 	}
+
+	saveRelaySessionID(agentSession.CurrentSessionID(), false)
 
 	if err := agentSession.Send(message, nil, nil); err != nil {
 		agentSession.Close()
@@ -11936,13 +12008,7 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 				textParts = append(textParts, event.Content)
 			}
 			if event.SessionID != "" {
-				if session.CompareAndSetAgentSessionID(event.SessionID, e.agent.Name()) {
-					pendingName := session.GetName()
-					if pendingName != "" && pendingName != "session" && pendingName != "default" {
-						e.sessions.SetSessionName(event.SessionID, pendingName)
-					}
-					e.sessions.Save()
-				}
+				saveRelaySessionID(event.SessionID, false)
 			}
 		case EventToolResult:
 			out := strings.TrimSpace(event.Content)
@@ -11959,13 +12025,7 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 		case EventResult:
 			// Use agentSession.CurrentSessionID() for the same reason as above.
 			if currentID := agentSession.CurrentSessionID(); currentID != "" {
-				if session.CompareAndSetAgentSessionID(currentID, e.agent.Name()) {
-					pendingName := session.GetName()
-					if pendingName != "" && pendingName != "session" && pendingName != "default" {
-						e.sessions.SetSessionName(currentID, pendingName)
-					}
-				}
-				e.sessions.Save()
+				saveRelaySessionID(currentID, true)
 			}
 			resp := event.Content
 			if resp == "" && len(textParts) > 0 {
@@ -11994,7 +12054,7 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 			// Relay timed out. Let the agent finish its turn in the
 			// background so the session state is saved cleanly and the
 			// session remains resumable for the next relay call.
-			go e.drainRelaySession(agentSession, session, relaySessionKey)
+			go e.drainRelaySession(agentSession, session, sessions, agent.Name(), relaySessionKey)
 			return relayPartialResponseOrError(ctx.Err(), textParts, fromProject, e.name)
 		}
 	}
@@ -12031,7 +12091,7 @@ func relayPartialResponseOrError(ctxErr error, textParts []string, fromProject, 
 // agent finish its current turn (saving the session ID for future resumption),
 // auto-approves any permission requests, and then closes the session. A 10-minute
 // safety timeout prevents the goroutine from leaking if the agent hangs.
-func (e *Engine) drainRelaySession(agentSession AgentSession, session *Session, relaySessionKey string) {
+func (e *Engine) drainRelaySession(agentSession AgentSession, session *Session, sessions *SessionManager, agentName, relaySessionKey string) {
 	timer := time.NewTimer(10 * time.Minute)
 	defer timer.Stop()
 
@@ -12044,8 +12104,8 @@ func (e *Engine) drainRelaySession(agentSession AgentSession, session *Session, 
 				return
 			}
 			if ev.SessionID != "" {
-				session.SetAgentSessionID(ev.SessionID, e.agent.Name())
-				e.sessions.Save()
+				session.SetAgentSessionID(ev.SessionID, agentName)
+				sessions.Save()
 			}
 			switch ev.Type {
 			case EventResult:

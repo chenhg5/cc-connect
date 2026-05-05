@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -62,7 +65,7 @@ func TestHandleRelay_ReturnsPartialOnTimeout(t *testing.T) {
 	}
 	done := make(chan relayResult, 1)
 	go func() {
-		resp, err := e.HandleRelay(ctx, "source", "chat-1", "hello")
+		resp, err := e.HandleRelay(ctx, "source", "test:chat-1:user", "hello")
 		done <- relayResult{resp: resp, err: err}
 	}()
 
@@ -105,7 +108,7 @@ func TestHandleRelay_TimeoutWithoutTextReturnsContextError(t *testing.T) {
 	}
 	done := make(chan relayResult, 1)
 	go func() {
-		resp, err := e.HandleRelay(ctx, "source", "chat-1", "hello")
+		resp, err := e.HandleRelay(ctx, "source", "test:chat-1:user", "hello")
 		done <- relayResult{resp: resp, err: err}
 	}()
 
@@ -156,7 +159,8 @@ func TestHandleRelay_ResumeFailureFallsBackToFreshSession(t *testing.T) {
 	e.agent = &relayFallbackAgent{freshSession: freshSession}
 
 	// Pre-set a stale session ID so that the first StartSession tries to resume.
-	relaySessionKey := "relay:source:chat-1"
+	sourceSessionKey := "test:chat-1:user"
+	relaySessionKey := "relay:source:test:chat-1"
 	sess := e.sessions.GetOrCreateActive(relaySessionKey)
 	sess.SetAgentSessionID("stale-id", "fallback")
 	e.sessions.Save()
@@ -164,7 +168,7 @@ func TestHandleRelay_ResumeFailureFallsBackToFreshSession(t *testing.T) {
 	ctx := context.Background()
 	done := make(chan string, 1)
 	go func() {
-		resp, err := e.HandleRelay(ctx, "source", "chat-1", "hello")
+		resp, err := e.HandleRelay(ctx, "source", sourceSessionKey, "hello")
 		if err != nil {
 			done <- "error: " + err.Error()
 			return
@@ -185,5 +189,91 @@ func TestHandleRelay_ResumeFailureFallsBackToFreshSession(t *testing.T) {
 	case <-freshSession.closed:
 	case <-time.After(2 * time.Second):
 		t.Fatal("session was not closed after EventResult")
+	}
+}
+
+func TestHandleRelay_SingleWorkspaceUsesGlobalAgentAndSourceSessionKey(t *testing.T) {
+	e := newTestEngine()
+	agent := &sessionEnvRecordingAgent{session: newResultAgentSession("global")}
+	e.agent = agent
+
+	sourceSessionKey := "discord:C1:U1"
+	resp, err := e.HandleRelay(context.Background(), "source", sourceSessionKey, "hello")
+	if err != nil {
+		t.Fatalf("HandleRelay() error = %v", err)
+	}
+	if resp != "global" {
+		t.Fatalf("HandleRelay() response = %q, want %q", resp, "global")
+	}
+	if got := agent.EnvValue("CC_SESSION_KEY"); got != sourceSessionKey {
+		t.Fatalf("CC_SESSION_KEY = %q, want %q", got, sourceSessionKey)
+	}
+	if got := e.sessions.ActiveSessionID("relay:source:discord:C1"); got == "" {
+		t.Fatal("expected relay session to be stored under platform-qualified relay key")
+	}
+}
+
+func TestHandleRelay_MultiWorkspaceRoutesBySourceSessionKey(t *testing.T) {
+	baseDir := t.TempDir()
+	channelID := "C42"
+	wsDir := filepath.Join(baseDir, "relay-ws")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	p := &mockChannelResolver{name: "mock", names: map[string]string{channelID: "relay-ws"}}
+	globalAgent := &sessionEnvRecordingAgent{session: newResultAgentSession("global")}
+	e := NewEngine("test", globalAgent, []Platform{p}, "", LangEnglish)
+	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+
+	normalizedWsDir := normalizeWorkspacePath(wsDir)
+	workspaceAgent := &sessionEnvRecordingAgent{session: newResultAgentSession("workspace")}
+	ws := e.workspacePool.GetOrCreate(normalizedWsDir)
+	ws.agent = workspaceAgent
+	ws.sessions = NewSessionManager("")
+
+	sourceSessionKey := "mock:" + channelID + ":U1"
+	resp, err := e.HandleRelay(context.Background(), "source", sourceSessionKey, "hello")
+	if err != nil {
+		t.Fatalf("HandleRelay() error = %v", err)
+	}
+	if resp != "workspace" {
+		t.Fatalf("HandleRelay() response = %q, want %q", resp, "workspace")
+	}
+	if got := workspaceAgent.EnvValue("CC_SESSION_KEY"); got != sourceSessionKey {
+		t.Fatalf("workspace CC_SESSION_KEY = %q, want %q", got, sourceSessionKey)
+	}
+	if got := globalAgent.EnvValue("CC_SESSION_KEY"); got != "" {
+		t.Fatalf("global agent should not receive relay env, got %q", got)
+	}
+	if got := e.sessions.ActiveSessionID("relay:source:mock:" + channelID); got != "" {
+		t.Fatalf("expected no global relay session, got %q", got)
+	}
+	if got := ws.sessions.ActiveSessionID("relay:source:mock:" + channelID); got == "" {
+		t.Fatal("expected relay session in workspace session manager")
+	}
+	if b := e.workspaceBindings.Lookup("project:test", workspaceChannelKey("mock", channelID)); b == nil || b.Workspace != normalizedWsDir {
+		t.Fatalf("expected convention binding to be created for %q", normalizedWsDir)
+	}
+}
+
+func TestHandleRelay_MultiWorkspaceRequiresWorkspaceBinding(t *testing.T) {
+	baseDir := t.TempDir()
+	globalAgent := &sessionEnvRecordingAgent{session: newResultAgentSession("global")}
+	e := NewEngine("test", globalAgent, nil, "", LangEnglish)
+	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+
+	resp, err := e.HandleRelay(context.Background(), "source", "mock:C404:U1", "hello")
+	if err == nil {
+		t.Fatal("expected error for unbound relay workspace")
+	}
+	if resp != "" {
+		t.Fatalf("HandleRelay() response = %q, want empty", resp)
+	}
+	if !strings.Contains(err.Error(), "no workspace binding") {
+		t.Fatalf("HandleRelay() error = %v, want missing workspace binding", err)
+	}
+	if got := e.sessions.ActiveSessionID("relay:source:mock:C404"); got != "" {
+		t.Fatalf("expected no global relay session, got %q", got)
 	}
 }
