@@ -358,6 +358,18 @@ func (p *stubCompactProgressPlatform) UpdateMessage(_ context.Context, _ any, co
 	return nil
 }
 
+func (p *stubCompactProgressPlatform) BuildRichCard(status CardStatus, title string, steps []ToolStep, markdown string, streaming bool, elapsed time.Duration) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "rich status=%s title=%s streaming=%t elapsed=%s\n", status, title, streaming, elapsed)
+	for _, step := range steps {
+		fmt.Fprintf(&b, "step=%+v\n", step)
+	}
+	if markdown != "" {
+		fmt.Fprintf(&b, "markdown=%s\n", markdown)
+	}
+	return b.String()
+}
+
 func (p *stubCompactProgressPlatform) getPreviewStarts() []string {
 	p.previewMu.Lock()
 	defer p.previewMu.Unlock()
@@ -1510,6 +1522,90 @@ func TestProcessInteractiveEvents_CardProgressUsesStructuredPayloadWhenSupported
 	}
 	if finalPayload.State != ProgressCardStateCompleted {
 		t.Fatalf("final payload state = %q, want %q", finalPayload.State, ProgressCardStateCompleted)
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardShowsThinkingContent(t *testing.T) {
+	p := &stubCompactProgressPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		style:              "card",
+		supportPayload:     true,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		ThinkingMessages: true,
+		ThinkingMaxLen:   300,
+		ToolMaxLen:       500,
+		ToolMessages:     true,
+		Mode:             "rich",
+	})
+	sessionKey := "feishu:user-rich-thinking"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-thinking")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-rich-thinking",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventThinking, Content: "Inspecting event routing"}
+	agentSession.events <- Event{Type: EventText, Content: "answer"}
+	agentSession.events <- Event{Type: EventResult, Content: "answer", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-thinking", time.Now(), nil, nil, state.replyCtx)
+
+	starts := p.getPreviewStarts()
+	if len(starts) != 1 {
+		t.Fatalf("preview starts = %d, want 1", len(starts))
+	}
+	if !strings.Contains(starts[0], "Inspecting event routing") {
+		t.Fatalf("rich card start should contain thinking content, got %q", starts[0])
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardCoalescesToolResult(t *testing.T) {
+	p := &stubCompactProgressPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		style:              "card",
+		supportPayload:     true,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		ThinkingMessages: true,
+		ThinkingMaxLen:   300,
+		ToolMaxLen:       500,
+		ToolMessages:     true,
+		Mode:             "rich",
+	})
+	sessionKey := "feishu:user-rich-tool-result"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-tool-result")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-rich-tool-result",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	code := 0
+	success := true
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "echo hi"}
+	agentSession.events <- Event{Type: EventToolResult, ToolName: "Bash", ToolResult: "hi", ToolStatus: "completed", ToolExitCode: &code, ToolSuccess: &success}
+	agentSession.events <- Event{Type: EventText, Content: "done"}
+	agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-tool-result", time.Now(), nil, nil, state.replyCtx)
+
+	starts := p.getPreviewStarts()
+	if len(starts) != 1 {
+		t.Fatalf("preview starts = %d, want only the rich card start and no separate progress card", len(starts))
+	}
+	rendered := strings.Join(append(starts, p.getPreviewEdits()...), "\n")
+	for _, want := range []string{"echo hi", "completed", "hi"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("rich card should contain %q, got %q", want, rendered)
+		}
 	}
 }
 
@@ -11736,8 +11832,8 @@ func TestSessionName_ClaudeCodeLikeFlow(t *testing.T) {
 }
 
 // acpLikeSession simulates ACP behavior:
-// - CurrentSessionID() returns the thread ID immediately after creation
-//   (ACP does handshake before returning from StartSession)
+//   - CurrentSessionID() returns the thread ID immediately after creation
+//     (ACP does handshake before returning from StartSession)
 type acpLikeSession struct {
 	threadID string
 	events   chan Event
