@@ -37,6 +37,7 @@ func listCodexSessions(workDir, codexHome string) ([]core.AgentSessionInfo, erro
 	if err != nil {
 		absWorkDir = workDir
 	}
+	absWorkDir = core.NormalizeDirPath(absWorkDir)
 
 	sessionsDir := filepath.Join(resolveCodexHomeDir(codexHome), "sessions")
 
@@ -144,6 +145,10 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 				}
 			}
 		}
+	}
+
+	if sessionCwd != "" {
+		sessionCwd = core.NormalizeDirPath(sessionCwd)
 	}
 
 	// Filter by cwd

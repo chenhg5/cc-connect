@@ -35,6 +35,7 @@ func NewDirHistory(dataDir string) *DirHistory {
 // Add adds a directory to the history for the given project.
 // If the directory already exists, it's moved to the front.
 func (dh *DirHistory) Add(project, dir string) {
+	dir = NormalizeDirPath(dir)
 	if dir == "" {
 		return
 	}
@@ -42,20 +43,7 @@ func (dh *DirHistory) Add(project, dir string) {
 	dh.mu.Lock()
 	defer dh.mu.Unlock()
 
-	entries := dh.entries[project]
-
-	// Remove if exists
-	for i, d := range entries {
-		if d == dir {
-			entries = append(entries[:i], entries[i+1:]...)
-			break
-		}
-	}
-
-	// Add to front
-	entries = append([]string{dir}, entries...)
-
-	// Trim to max size
+	entries := dedupeNormalizedDirs(append([]string{dir}, dh.entries[project]...))
 	if len(entries) > dh.maxSize {
 		entries = entries[:dh.maxSize]
 	}
@@ -142,8 +130,44 @@ func (dh *DirHistory) load() {
 	}
 
 	if entries != nil {
-		dh.entries = entries
+		migrated := make(map[string][]string, len(entries))
+		changed := false
+		for project, dirs := range entries {
+			normalized := dedupeNormalizedDirs(dirs)
+			migrated[project] = normalized
+			if len(normalized) != len(dirs) {
+				changed = true
+				continue
+			}
+			for i := range dirs {
+				if normalized[i] != dirs[i] {
+					changed = true
+					break
+				}
+			}
+		}
+		dh.entries = migrated
+		if changed {
+			dh.saveLocked()
+		}
 	}
+}
+
+func dedupeNormalizedDirs(dirs []string) []string {
+	seen := make(map[string]struct{}, len(dirs))
+	out := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		normalized := NormalizeDirPath(dir)
+		if normalized == "" {
+			continue
+		}
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		out = append(out, normalized)
+	}
+	return out
 }
 
 func (dh *DirHistory) saveLocked() {

@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/chenhg5/cc-connect/config"
@@ -73,6 +76,70 @@ func TestApplyProjectStateOverride(t *testing.T) {
 	}
 	if agent.workDir != overrideDir {
 		t.Fatalf("agent workDir = %q, want %q", agent.workDir, overrideDir)
+	}
+}
+
+func TestApplyProjectStateOverride_NormalizesSymlink(t *testing.T) {
+	baseDir := t.TempDir()
+	realDir := filepath.Join(baseDir, "real")
+	if err := os.Mkdir(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkDir := filepath.Join(baseDir, "link")
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Skip("symlinks not supported")
+	}
+
+	resolvedRealDir, err := filepath.EvalSymlinks(realDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store := core.NewProjectStateStore(filepath.Join(t.TempDir(), "projects", "demo.state.json"))
+	store.SetWorkDirOverride(linkDir)
+
+	agent := &stubMainAgent{workDir: baseDir}
+	got := applyProjectStateOverride("demo", agent, baseDir, store)
+
+	if got != resolvedRealDir {
+		t.Fatalf("applyProjectStateOverride() = %q, want %q", got, resolvedRealDir)
+	}
+	if agent.workDir != resolvedRealDir {
+		t.Fatalf("agent workDir = %q, want %q", agent.workDir, resolvedRealDir)
+	}
+}
+
+func TestSessionStorePath_PrefersExistingSymlinkHashFile(t *testing.T) {
+	dataDir := t.TempDir()
+	realDir := filepath.Join(t.TempDir(), "real")
+	if err := os.Mkdir(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkDir := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Skip("symlinks not supported")
+	}
+
+	absLink, err := filepath.Abs(linkDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := sha256.Sum256([]byte(absLink))
+	legacyName := "demo_" + hex.EncodeToString(h[:4]) + ".json"
+	legacyPath := filepath.Join(dataDir, "sessions", legacyName)
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyPath, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := sessionStorePath(dataDir, "demo", linkDir)
+	if got != legacyPath {
+		t.Fatalf("sessionStorePath() = %q, want %q", got, legacyPath)
+	}
+	if strings.Contains(filepath.Base(got), "sessions.json") {
+		t.Fatalf("sessionStorePath() = %q, want sessions dir file", got)
 	}
 }
 

@@ -228,6 +228,10 @@ func main() {
 		}
 
 		workDir, _ := proj.Agent.Options["work_dir"].(string)
+		if workDir != "" {
+			workDir = core.NormalizeDirPath(workDir)
+			proj.Agent.Options["work_dir"] = workDir
+		}
 		projectState := core.NewProjectStateStore(projectStatePath(cfg.DataDir, proj.Name))
 		effectiveWorkDir := applyProjectStateOverride(proj.Name, agent, workDir, projectState)
 		startInitialRefreshIfReady(agent, providerWiring)
@@ -1095,32 +1099,59 @@ func main() {
 // It checks for legacy session files (without the sessions/ subdirectory) in dataDir
 // for backward compatibility; if found, uses that path. Otherwise uses dataDir/sessions/.
 func sessionStorePath(dataDir, name, workDir string) string {
-	var filename string
+	filenames := sessionStoreFilenames(name, workDir)
+	if len(filenames) == 0 {
+		return filepath.Join(dataDir, "sessions", name+".json")
+	}
+
+	for _, filename := range filenames {
+		preferred := filepath.Join(dataDir, "sessions", filename)
+		if _, err := os.Stat(preferred); err == nil {
+			return preferred
+		}
+
+		for _, legacy := range []string{
+			filepath.Join(dataDir, filename),
+			filepath.Join(dataDir, strings.TrimSuffix(filename, ".json")+".sessions.json"),
+		} {
+			if _, err := os.Stat(legacy); err == nil {
+				slog.Info("session: using legacy file in dataDir", "path", legacy)
+				return legacy
+			}
+		}
+	}
+
+	return filepath.Join(dataDir, "sessions", filenames[0])
+}
+
+func sessionStoreFilenames(name, workDir string) []string {
 	if workDir == "" {
-		filename = name + ".json"
-	} else {
-		abs, err := filepath.Abs(workDir)
-		if err != nil {
-			abs = workDir
-		}
-		h := sha256.Sum256([]byte(abs))
+		return []string{name + ".json"}
+	}
+
+	abs, err := filepath.Abs(workDir)
+	if err != nil {
+		abs = workDir
+	}
+	canonical := core.NormalizeDirPath(abs)
+	candidates := []string{canonical}
+	if canonical != abs {
+		candidates = append(candidates, abs)
+	}
+
+	seen := make(map[string]struct{}, len(candidates))
+	filenames := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		h := sha256.Sum256([]byte(candidate))
 		short := hex.EncodeToString(h[:4])
-		filename = fmt.Sprintf("%s_%s.json", name, short)
-	}
-
-	// Check legacy path in dataDir (without sessions/ subdirectory) for backward compatibility.
-	// Also check for the older .sessions.json naming convention.
-	for _, legacy := range []string{
-		filepath.Join(dataDir, filename),
-		filepath.Join(dataDir, strings.TrimSuffix(filename, ".json")+".sessions.json"),
-	} {
-		if _, err := os.Stat(legacy); err == nil {
-			slog.Info("session: using legacy file in dataDir", "path", legacy)
-			return legacy
+		filename := fmt.Sprintf("%s_%s.json", name, short)
+		if _, ok := seen[filename]; ok {
+			continue
 		}
+		seen[filename] = struct{}{}
+		filenames = append(filenames, filename)
 	}
-
-	return filepath.Join(dataDir, "sessions", filename)
+	return filenames
 }
 
 func projectStatePath(dataDir, projectName string) string {
@@ -1161,6 +1192,7 @@ func applyProjectStateOverride(projectName string, agent core.Agent, configuredW
 	if abs, err := filepath.Abs(override); err == nil {
 		override = abs
 	}
+	override = core.NormalizeDirPath(override)
 
 	info, err := os.Stat(override)
 	if err != nil || !info.IsDir() {

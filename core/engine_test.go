@@ -3816,6 +3816,34 @@ func TestCmdDir_PersistsAbsoluteOverride(t *testing.T) {
 	}
 }
 
+func TestCmdDir_SymlinkSwitchStoresCanonicalPath(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	tmp := t.TempDir()
+	realDir := filepath.Join(tmp, "real-project")
+	if err := os.Mkdir(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkDir := filepath.Join(tmp, "link-project")
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Skip("symlinks not supported")
+	}
+
+	resolvedRealDir, err := filepath.EvalSymlinks(realDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	agent := &stubWorkDirAgent{workDir: tmp}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	e.cmdDir(p, msg, []string{linkDir})
+
+	if agent.workDir != resolvedRealDir {
+		t.Fatalf("workDir = %q, want %q", agent.workDir, resolvedRealDir)
+	}
+}
+
 func TestDirApply_MultiWorkspacePersistsWorkspaceSpecificOverride(t *testing.T) {
 	baseDir := t.TempDir()
 	workspace := normalizeWorkspacePath(t.TempDir())
@@ -4054,9 +4082,10 @@ func TestCmdDir_ExpandsTilde(t *testing.T) {
 		if err := os.MkdirAll(tc.wantDir, 0o755); err != nil {
 			t.Fatalf("MkdirAll %q: %v", tc.wantDir, err)
 		}
+		wantDir := NormalizeDirPath(tc.wantDir)
 		e.cmdDir(p, msg, []string{tc.input})
-		if agent.workDir != tc.wantDir {
-			t.Errorf("input %q: workDir = %q, want %q", tc.input, agent.workDir, tc.wantDir)
+		if agent.workDir != wantDir {
+			t.Errorf("input %q: workDir = %q, want %q", tc.input, agent.workDir, wantDir)
 		}
 	}
 }
