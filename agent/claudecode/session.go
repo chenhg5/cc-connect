@@ -49,6 +49,7 @@ type claudeSession struct {
 	// Stop hook timeout. The wait ends as soon as the process exits,
 	// so typical shutdowns take seconds, not the full timeout.
 	gracefulStopTimeout time.Duration
+	ccHooks             *ccPermissionHookRunner // Claude Code PermissionRequest hook runner
 }
 
 func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cliArgsFlag string, model, effort, sessionID, mode, systemPrompt string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int) (*claudeSession, error) {
@@ -202,6 +203,7 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		cancel:              cancel,
 		done:                make(chan struct{}),
 		gracefulStopTimeout: 120 * time.Second,
+		ccHooks:             newCCPermissionHookRunner(workDir),
 	}
 	cs.setPermissionMode(mode)
 	cs.sessionID.Store(sessionID)
@@ -493,6 +495,21 @@ func (cs *claudeSession) handleControlRequest(raw map[string]any) {
 			Behavior:     "allow",
 			UpdatedInput: input,
 		})
+		return
+	}
+
+	// Check Claude Code's PermissionRequest hooks before forwarding to platform.
+	if decision, ok := cs.ccHooks.tryHook(cs.ctx, toolName, input, cs.CurrentSessionID()); ok {
+		slog.Info("claudeSession: hook decided",
+			"request_id", requestID, "tool", toolName, "behavior", decision.Behavior)
+		result := core.PermissionResult{
+			Behavior:     decision.Behavior,
+			UpdatedInput: input,
+		}
+		if decision.Behavior == "deny" && decision.Message != "" {
+			result.Message = decision.Message
+		}
+		_ = cs.RespondPermission(requestID, result)
 		return
 	}
 
