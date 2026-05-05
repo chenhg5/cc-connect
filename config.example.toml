@@ -121,10 +121,19 @@ level = "info" # debug, info, warn, error
 # Auto-reset the active session after the user has been inactive for a while.
 # Unlike idle_timeout_mins, this does not detect stuck agent execution. It
 # rotates to a fresh cc-connect session when the user comes back after being idle.
+# This avoids "context drift", where stale chat history (failed commands,
+# debugging noise, abandoned tangents) gets re-ingested via --continue every
+# time the workspace pool evicts the session, and starts to dominate the model's
+# attention. The previous session is preserved and remains accessible via
+# /list and /switch.
+#
+# Default: 30 minutes when unset. Set to 0 to opt out and always continue the
+# previous session (the pre-default behavior).
 # 用户长时间未发消息后，自动切换到一个新的活跃会话。
 # 这与 idle_timeout_mins 不同：它不是检测 agent 卡住，而是用户回来后自动开始新会话。
+# 默认值为 30 分钟（未设置时）。设为 0 可以禁用此行为，恢复始终继续上次会话。
 # [[projects]]
-# reset_on_idle_mins = 60   # 0 or unset = disabled / 设为 0 或留空表示禁用
+# reset_on_idle_mins = 30   # default when unset / 未设置时的默认值；设为 0 表示禁用
 
 # =============================================================================
 # OS-user isolation via run_as_user (Linux/macOS only)
