@@ -8904,6 +8904,8 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 			_ = e.cronScheduler.EnableJob(id)
 		case "disable":
 			_ = e.cronScheduler.DisableJob(id)
+		case "exec", "run", "trigger":
+			_ = e.cronScheduler.TriggerJob(id)
 		case "delete":
 			e.cronScheduler.RemoveJob(id)
 		case "mute":
@@ -10034,6 +10036,7 @@ func (e *Engine) renderCronCard(sessionKey string, userID string) *Card {
 		} else {
 			btns = append(btns, PrimaryBtn(e.i18n.T(MsgCronBtnEnable), fmt.Sprintf("act:/cron enable %s", j.ID)))
 		}
+		btns = append(btns, PrimaryBtn(e.i18n.T(MsgCronBtnRun), fmt.Sprintf("act:/cron exec %s", j.ID)))
 		if j.Mute {
 			btns = append(btns, DefaultBtn(e.i18n.T(MsgCronBtnUnmute), fmt.Sprintf("act:/cron unmute %s", j.ID)))
 		} else {
@@ -10333,7 +10336,7 @@ func (e *Engine) cmdCron(p Platform, msg *Message, args []string) {
 	}
 
 	sub := matchSubCommand(strings.ToLower(args[0]), []string{
-		"add", "addexec", "list", "del", "delete", "rm", "remove", "enable", "disable", "mute", "unmute", "setup",
+		"add", "addexec", "list", "del", "delete", "rm", "remove", "enable", "disable", "mute", "unmute", "exec", "run", "trigger", "setup",
 	})
 	switch sub {
 	case "add":
@@ -10352,6 +10355,8 @@ func (e *Engine) cmdCron(p Platform, msg *Message, args []string) {
 		e.cmdCronMute(p, msg, args[1:], true)
 	case "unmute":
 		e.cmdCronMute(p, msg, args[1:], false)
+	case "exec", "run", "trigger":
+		e.cmdCronExec(p, msg, args[1:])
 	case "setup":
 		e.cmdCronSetup(p, msg)
 	default:
@@ -10532,6 +10537,19 @@ func (e *Engine) cmdCronMute(p Platform, msg *Message, args []string, mute bool)
 	} else {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronUnmuted), id))
 	}
+}
+
+func (e *Engine) cmdCronExec(p Platform, msg *Message, args []string) {
+	if len(args) == 0 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCronExecUsage))
+		return
+	}
+	id := args[0]
+	if err := e.cronScheduler.TriggerJob(id); err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
+		return
+	}
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronTriggered), id))
 }
 
 func (e *Engine) cmdCronSetup(p Platform, msg *Message) {
