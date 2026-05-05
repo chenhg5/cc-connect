@@ -770,6 +770,7 @@ Example:
 ```bash
 cc-connect cron add --cron "0 6 * * *" --prompt "Summarize GitHub trending" --desc "Daily Trending"
 cc-connect cron list
+cc-connect cron edit <job-id> <field> <value>   # e.g. cron_expr, prompt, enabled, mute, timeout_mins
 cc-connect cron del <job-id>
 ```
 

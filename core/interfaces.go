@@ -97,9 +97,25 @@ Examples:
   cc-connect cron add --cron "0 9 * * 1" --prompt "Generate a weekly project status report" --desc "Weekly Report"
   cc-connect cron add --cron "*/2 * * * *" --exec "ipconfig" --session-mode new-per-run --desc "Every 2 min ipconfig"
 
-You can also list or delete cron jobs:
+You can also list, edit, or delete cron jobs:
   cc-connect cron list
+  cc-connect cron edit <job-id> <field> <value>
   cc-connect cron del <job-id>
+
+Use ` + "`cron edit`" + ` instead of delete-and-recreate when only one field changes.
+Common editable fields:
+  cron_expr     new schedule, e.g. "0 9 * * *"
+  prompt        new task prompt (or ` + "`exec`" + ` for shell command)
+  description   short label
+  enabled       true / false  (pause without deleting)
+  mute          true / false  (silence all messages)
+  timeout_mins  integer minutes (0 = unlimited)
+Run ` + "`cc-connect cron edit --help`" + ` for the full field list.
+
+Examples:
+  cc-connect cron edit abc123 cron_expr "0 9 * * *"
+  cc-connect cron edit abc123 enabled false
+  cc-connect cron edit abc123 prompt "Updated daily summary task"
 
 ### Bot-to-bot relay
 When you need to communicate with another bot (e.g. ask another AI agent a question), use:
