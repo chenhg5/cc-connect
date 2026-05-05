@@ -199,16 +199,16 @@ type Engine struct {
 	userRoles    *UserRoleManager // nil = legacy mode (no per-user policies)
 	userRolesMu  sync.RWMutex     // protects userRoles, disabledCmds, and adminFrom
 
-	rateLimiter      *RateLimiter
-	outgoingRL       *OutgoingRateLimiter
-	streamPreview    StreamPreviewCfg
-	references       ReferenceRenderCfg
-	relayManager     *RelayManager
-	eventIdleTimeout time.Duration
+	rateLimiter       *RateLimiter
+	outgoingRL        *OutgoingRateLimiter
+	streamPreview     StreamPreviewCfg
+	references        ReferenceRenderCfg
+	relayManager      *RelayManager
+	eventIdleTimeout  time.Duration
 	maxQueuedMessages int
-	dirHistory       *DirHistory
-	baseWorkDir      string
-	projectState     *ProjectStateStore
+	dirHistory        *DirHistory
+	baseWorkDir       string
+	projectState      *ProjectStateStore
 
 	// Auto-compress settings
 	autoCompressEnabled   bool
@@ -406,7 +406,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		streamPreview:         DefaultStreamPreviewCfg(),
 		references:            DefaultReferenceRenderCfg(),
 		eventIdleTimeout:      defaultEventIdleTimeout,
-		maxQueuedMessages:    defaultMaxQueuedMessages,
+		maxQueuedMessages:     defaultMaxQueuedMessages,
 		showContextIndicator:  true,
 	}
 
@@ -3993,6 +3993,7 @@ var builtinCommands = []struct {
 	{[]string{"cron"}, "cron"},
 	{[]string{"heartbeat", "hb"}, "heartbeat"},
 	{[]string{"compress", "compact"}, "compress"},
+	{[]string{"clear"}, "clear"},
 	{[]string{"stop"}, "stop"},
 	{[]string{"help"}, "help"},
 	{[]string{"version"}, "version"},
@@ -4179,6 +4180,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdHeartbeat(p, msg, args)
 	case "compress":
 		e.cmdCompress(p, msg)
+	case "clear":
+		e.cmdClear(p, msg, args)
 	case "stop":
 		e.cmdStop(p, msg)
 	case "help":
@@ -4555,6 +4558,15 @@ func filterOwnedSessions(sessions []AgentSessionInfo, known map[string]struct{})
 		}
 	}
 	return filtered
+}
+
+func (e *Engine) resetCurrentSessionState(msg *Message, sessions *SessionManager, interactiveKey string) *Session {
+	e.cleanupInteractiveState(interactiveKey)
+	session := sessions.GetOrCreateActive(msg.SessionKey)
+	session.SetAgentSessionID("", "")
+	session.ClearHistory()
+	sessions.Save()
+	return session
 }
 
 const listPageSize = 20
@@ -7250,6 +7262,25 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 		return
 	}
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
+}
+
+func (e *Engine) cmdClear(p Platform, msg *Message, args []string) {
+	mode := "reset"
+	if len(args) > 0 {
+		mode = matchSubCommand(strings.ToLower(args[0]), []string{"reset"})
+	}
+	if mode != "reset" {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgClearUsage))
+		return
+	}
+
+	_, sessions, interactiveKey, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+	e.resetCurrentSessionState(msg, sessions, interactiveKey)
+	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgClearDone))
 }
 
 func (e *Engine) stopInteractiveSession(sessionKey string, quietPlatform Platform, quietReplyCtx any) bool {

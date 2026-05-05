@@ -32,6 +32,7 @@ Each user gets an independent session with full conversation context. Manage ses
 | Command | Description |
 |---------|-------------|
 | `/new [name]` | Start a new session |
+| `/clear [reset]` | Clear the current session context in place |
 | `/list` | List all agent sessions for this project |
 | `/switch <id>` | Switch to a different session |
 | `/current` | Show current session info |
@@ -61,6 +62,10 @@ When enabled, the next normal message after a long idle period starts in a fresh
 ### Model switch preserves history
 
 `/model` preserves the current session — the agent resumes the conversation with the new model (no extra token cost). Model switching affects the shared agent instance — if multiple platforms use the same project, the model change applies to all of them.
+
+### Clear current context
+
+`/clear` keeps the current logical session but resets its conversation state. By default it behaves like `/clear reset`: it detaches the current backend agent session so the next message starts a fresh one without creating a new entry in `/list`.
 
 ---
 
