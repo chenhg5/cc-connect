@@ -42,6 +42,8 @@ type claudeSession struct {
 	cancel          context.CancelFunc
 	done            chan struct{}
 	alive           atomic.Bool
+	interruptMu     sync.Mutex
+	interrupt       *pendingInterrupt
 
 	// gracefulStopTimeout is how long Close() waits for a clean exit
 	// (stdin close → Stop hooks → process exit) before escalating to
@@ -49,6 +51,12 @@ type claudeSession struct {
 	// Stop hook timeout. The wait ends as soon as the process exits,
 	// so typical shutdowns take seconds, not the full timeout.
 	gracefulStopTimeout time.Duration
+}
+
+type pendingInterrupt struct {
+	requestID string
+	ack       chan error
+	done      chan error
 }
 
 func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cliArgsFlag string, model, effort, sessionID, mode string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int) (*claudeSession, error) {
@@ -97,7 +105,7 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 	if maxContextTokens > 0 {
 		innerArgs = append(innerArgs, "--max-context-tokens", strconv.Itoa(maxContextTokens))
 	}
-	
+
 	// outerArgs are understood by both the wrapper and Claude CLI directly.
 	var outerArgs []string
 	if model != "" {
@@ -254,6 +262,8 @@ func (cs *claudeSession) startReadLoopWait(stdout io.ReadCloser) (<-chan error, 
 func (cs *claudeSession) finishReadLoop(waitErrCh <-chan error, stderrBuf *bytes.Buffer) {
 	err := <-waitErrCh
 
+	cs.resolveInterruptAck("", io.EOF)
+	cs.resolveInterruptDone(io.EOF)
 	cs.alive.Store(false)
 	if err != nil {
 		stderrMsg := ""
@@ -321,6 +331,8 @@ func (cs *claudeSession) handleReadLoopLine(line string) {
 		cs.handleUser(raw)
 	case "result":
 		cs.handleResult(raw)
+	case "control_response":
+		cs.handleControlResponse(raw)
 	case "control_request":
 		cs.handleControlRequest(raw)
 	case "control_cancel_request":
@@ -435,6 +447,13 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 		}
 	}
 
+	terminalReason, _ := raw["terminal_reason"].(string)
+	if terminalReason == "aborted_streaming" || terminalReason == "aborted_tools" {
+		cs.resolveInterruptDone(nil)
+	} else if terminalReason != "" {
+		cs.resolveInterruptDone(fmt.Errorf("claude interrupt ended with terminal reason %q", terminalReason))
+	}
+
 	evt := core.Event{
 		Type:         core.EventResult,
 		Content:      content,
@@ -447,6 +466,64 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 	case cs.events <- evt:
 	case <-cs.ctx.Done():
 		return
+	}
+}
+
+func (cs *claudeSession) handleControlResponse(raw map[string]any) {
+	resp, _ := raw["response"].(map[string]any)
+	if resp == nil {
+		return
+	}
+
+	requestID, _ := resp["request_id"].(string)
+	if requestID == "" {
+		return
+	}
+
+	subtype, _ := resp["subtype"].(string)
+	if subtype == "" {
+		subtype = "success"
+	}
+	if subtype == "success" {
+		cs.resolveInterruptAck(requestID, nil)
+		return
+	}
+
+	msg := subtype
+	if errMap, _ := resp["error"].(map[string]any); errMap != nil {
+		if errMsg, _ := errMap["message"].(string); strings.TrimSpace(errMsg) != "" {
+			msg = errMsg
+		}
+	}
+	cs.resolveInterruptAck(requestID, fmt.Errorf("claude interrupt rejected: %s", msg))
+}
+
+func (cs *claudeSession) resolveInterruptAck(requestID string, err error) {
+	cs.interruptMu.Lock()
+	pending := cs.interrupt
+	cs.interruptMu.Unlock()
+	if pending == nil {
+		return
+	}
+	if requestID != "" && pending.requestID != requestID {
+		return
+	}
+	select {
+	case pending.ack <- err:
+	default:
+	}
+}
+
+func (cs *claudeSession) resolveInterruptDone(err error) {
+	cs.interruptMu.Lock()
+	pending := cs.interrupt
+	cs.interruptMu.Unlock()
+	if pending == nil {
+		return
+	}
+	select {
+	case pending.done <- err:
+	default:
 	}
 }
 
@@ -637,6 +714,66 @@ func (cs *claudeSession) RespondPermission(requestID string, result core.Permiss
 	return cs.writeJSON(controlResponse)
 }
 
+func (cs *claudeSession) InterruptSession(ctx context.Context) error {
+	if !cs.alive.Load() {
+		return fmt.Errorf("session process is not running")
+	}
+
+	reqID := fmt.Sprintf("cc-connect-interrupt-%d", time.Now().UnixNano())
+	pending := &pendingInterrupt{
+		requestID: reqID,
+		ack:       make(chan error, 1),
+		done:      make(chan error, 1),
+	}
+
+	cs.interruptMu.Lock()
+	cs.interrupt = pending
+	cs.interruptMu.Unlock()
+	defer func() {
+		cs.interruptMu.Lock()
+		if cs.interrupt == pending {
+			cs.interrupt = nil
+		}
+		cs.interruptMu.Unlock()
+	}()
+
+	writeDone := make(chan error, 1)
+	go func() {
+		writeDone <- cs.writeJSON(map[string]any{
+			"type":       "control_request",
+			"request_id": reqID,
+			"request": map[string]any{
+				"subtype": "interrupt",
+			},
+		})
+	}()
+
+	select {
+	case err := <-writeDone:
+		if err != nil {
+			return err
+		}
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	select {
+	case err := <-pending.ack:
+		if err != nil {
+			return err
+		}
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	select {
+	case err := <-pending.done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (cs *claudeSession) writeJSON(v any) error {
 	cs.stdinMu.Lock()
 	defer cs.stdinMu.Unlock()
@@ -690,6 +827,9 @@ func (cs *claudeSession) Alive() bool {
 }
 
 func (cs *claudeSession) Close() error {
+	cs.resolveInterruptAck("", fmt.Errorf("session process is stopping"))
+	cs.resolveInterruptDone(fmt.Errorf("session process is stopping"))
+
 	// Phase 1: Close stdin to signal EOF. Claude Code exits cleanly on
 	// stdin close, running Stop hooks (e.g. claude-mem session summary).
 	cs.stdinMu.Lock()
@@ -740,7 +880,7 @@ func (cs *claudeSession) Close() error {
 // Uses single quotes because some splitters (e.g. my_cli) don't support
 // backslash escapes inside double quotes. For values containing single
 // quotes, we close the single-quoted segment, add an escaped single
-// quote, and reopen: 'it'\''s' → it's
+// quote, and reopen: 'it'\”s' → it's
 func shellJoinArgs(args []string) string {
 	var b strings.Builder
 	for i, a := range args {
