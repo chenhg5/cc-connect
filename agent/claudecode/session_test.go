@@ -12,7 +12,7 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
-func TestHandleResultParsesUsage(t *testing.T) {
+func TestHandleResultUsesPerSubCallSnapshot(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -23,24 +23,133 @@ func TestHandleResultParsesUsage(t *testing.T) {
 	cs.sessionID.Store("test-session")
 	cs.alive.Store(true)
 
+	cs.handleAssistant(map[string]any{
+		"message": map[string]any{
+			"usage": map[string]any{
+				"input_tokens": float64(150000),
+			},
+			"content": []any{},
+		},
+	})
+
 	raw := map[string]any{
 		"type":       "result",
 		"result":     "done",
 		"session_id": "test-session",
 		"usage": map[string]any{
-			"input_tokens":  float64(150000),
+			"input_tokens":  float64(99999999),
 			"output_tokens": float64(2000),
 		},
 	}
-
 	cs.handleResult(raw)
 
 	evt := <-cs.events
 	if evt.InputTokens != 150000 {
-		t.Errorf("InputTokens = %d, want 150000", evt.InputTokens)
+		t.Errorf("InputTokens = %d, want 150000 (per-sub-call snapshot, not result.usage)", evt.InputTokens)
 	}
 	if evt.OutputTokens != 2000 {
 		t.Errorf("OutputTokens = %d, want 2000", evt.OutputTokens)
+	}
+}
+
+func TestHandleResultSnapshotSumsCacheAndModel1MWindow(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cs := &claudeSession{
+		events: make(chan core.Event, 8),
+		ctx:    ctx,
+		model:  "claude-opus-4-7[1m]",
+	}
+	cs.sessionID.Store("test-session")
+	cs.alive.Store(true)
+
+	cs.handleAssistant(map[string]any{
+		"message": map[string]any{
+			"usage": map[string]any{
+				"input_tokens":                float64(500),
+				"cache_read_input_tokens":     float64(98000),
+				"cache_creation_input_tokens": float64(1500),
+			},
+			"content": []any{},
+		},
+	})
+
+	raw := map[string]any{
+		"type":       "result",
+		"result":     "done",
+		"session_id": "test-session",
+		"usage": map[string]any{
+			"input_tokens":                float64(99999999),
+			"cache_read_input_tokens":     float64(99999999),
+			"cache_creation_input_tokens": float64(99999999),
+			"output_tokens":               float64(800),
+		},
+	}
+	cs.handleResult(raw)
+
+	evt := <-cs.events
+	if evt.InputTokens != 100000 {
+		t.Errorf("InputTokens = %d, want 100000 (500 + 98000 + 1500 from snapshot)", evt.InputTokens)
+	}
+	if evt.ContextWindow != 1_000_000 {
+		t.Errorf("ContextWindow = %d, want 1_000_000 for [1m] model", evt.ContextWindow)
+	}
+}
+
+func TestHandleAssistantSnapshotIsLastSubCall(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cs := &claudeSession{
+		events: make(chan core.Event, 8),
+		ctx:    ctx,
+	}
+	cs.sessionID.Store("test-session")
+	cs.alive.Store(true)
+
+	cs.handleAssistant(map[string]any{
+		"message": map[string]any{
+			"usage":   map[string]any{"input_tokens": float64(10000), "cache_read_input_tokens": float64(40000)},
+			"content": []any{},
+		},
+	})
+	cs.handleAssistant(map[string]any{
+		"message": map[string]any{
+			"usage":   map[string]any{"input_tokens": float64(20000), "cache_read_input_tokens": float64(100000)},
+			"content": []any{},
+		},
+	})
+
+	cs.handleResult(map[string]any{
+		"type":   "result",
+		"result": "done",
+		"usage":  map[string]any{"output_tokens": float64(500)},
+	})
+
+	evt := <-cs.events
+	if evt.InputTokens != 120000 {
+		t.Errorf("InputTokens = %d, want 120000 (last sub-call: 20000 + 100000)", evt.InputTokens)
+	}
+}
+
+func TestModelContextWindow(t *testing.T) {
+	tests := []struct {
+		model string
+		want  int
+	}{
+		{"claude-opus-4-7[1m]", 1_000_000},
+		{"CLAUDE-OPUS-4-7[1M]", 1_000_000},
+		{"claude-sonnet-4-6-1m", 1_000_000},
+		{"claude-opus-4-7", 200_000},
+		{"claude-sonnet-4-6", 200_000},
+		{"claude-haiku-4-5-20251001", 200_000},
+		{"", 200_000},
+	}
+	for _, tt := range tests {
+		if got := modelContextWindow(tt.model); got != tt.want {
+			t.Errorf("modelContextWindow(%q) = %d, want %d", tt.model, got, tt.want)
+		}
 	}
 }
 

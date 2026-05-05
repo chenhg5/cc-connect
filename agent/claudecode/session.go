@@ -22,6 +22,17 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
+// modelContextWindow returns the context window size (in tokens) for a given
+// Claude model ID. The "[1m]" suffix signals the 1M-context variant; everything
+// else falls back to the 200k default. Empty/unknown model names also get 200k.
+func modelContextWindow(model string) int {
+	m := strings.ToLower(strings.TrimSpace(model))
+	if strings.Contains(m, "[1m]") || strings.HasSuffix(m, "-1m") {
+		return 1_000_000
+	}
+	return 200_000
+}
+
 // claudeSession manages a long-running Claude Code process using
 // --input-format stream-json and --permission-prompt-tool stdio.
 //
@@ -38,10 +49,20 @@ type claudeSession struct {
 	acceptEditsOnly atomic.Bool
 	dontAsk         atomic.Bool
 	workDir         string
+	model           string
 	ctx             context.Context
 	cancel          context.CancelFunc
 	done            chan struct{}
 	alive           atomic.Bool
+
+	// lastInputTokens is the prompt size of the most recent assistant API
+	// sub-call (input + cache_creation + cache_read). Sourced per-call from
+	// handleAssistant so the ctx % indicator reflects current prompt
+	// occupancy. The result event's usage is a per-turn aggregate that
+	// sums cache_read across every sub-call, which on long agentic turns
+	// inflates the value far beyond the actual context window.
+	usageMu         sync.Mutex
+	lastInputTokens int
 
 	// gracefulStopTimeout is how long Close() waits for a clean exit
 	// (stdin close → Stop hooks → process exit) before escalating to
@@ -97,7 +118,7 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 	if maxContextTokens > 0 {
 		innerArgs = append(innerArgs, "--max-context-tokens", strconv.Itoa(maxContextTokens))
 	}
-	
+
 	// outerArgs are understood by both the wrapper and Claude CLI directly.
 	var outerArgs []string
 	if model != "" {
@@ -192,6 +213,7 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		stdin:               stdin,
 		events:              make(chan core.Event, 64),
 		workDir:             workDir,
+		model:               model,
 		ctx:                 sessionCtx,
 		cancel:              cancel,
 		done:                make(chan struct{}),
@@ -346,6 +368,25 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 	if !ok {
 		return
 	}
+
+	if usageRaw, ok := msg["usage"].(map[string]any); ok {
+		var input, cc, cr int
+		if v, ok := usageRaw["input_tokens"].(float64); ok {
+			input = int(v)
+		}
+		if v, ok := usageRaw["cache_creation_input_tokens"].(float64); ok {
+			cc = int(v)
+		}
+		if v, ok := usageRaw["cache_read_input_tokens"].(float64); ok {
+			cr = int(v)
+		}
+		if used := input + cc + cr; used > 0 {
+			cs.usageMu.Lock()
+			cs.lastInputTokens = used
+			cs.usageMu.Unlock()
+		}
+	}
+
 	contentArr, ok := msg["content"].([]any)
 	if !ok {
 		return
@@ -425,23 +466,25 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 		cs.sessionID.Store(sid)
 	}
 
-	var inputTokens, outputTokens int
+	var outputTokens int
 	if usage, ok := raw["usage"].(map[string]any); ok {
-		if v, ok := usage["input_tokens"].(float64); ok {
-			inputTokens = int(v)
-		}
 		if v, ok := usage["output_tokens"].(float64); ok {
 			outputTokens = int(v)
 		}
 	}
 
+	cs.usageMu.Lock()
+	inputTokens := cs.lastInputTokens
+	cs.usageMu.Unlock()
+
 	evt := core.Event{
-		Type:         core.EventResult,
-		Content:      content,
-		SessionID:    cs.CurrentSessionID(),
-		Done:         true,
-		InputTokens:  inputTokens,
-		OutputTokens: outputTokens,
+		Type:          core.EventResult,
+		Content:       content,
+		SessionID:     cs.CurrentSessionID(),
+		Done:          true,
+		InputTokens:   inputTokens,
+		OutputTokens:  outputTokens,
+		ContextWindow: modelContextWindow(cs.model),
 	}
 	select {
 	case cs.events <- evt:
@@ -740,7 +783,7 @@ func (cs *claudeSession) Close() error {
 // Uses single quotes because some splitters (e.g. my_cli) don't support
 // backslash escapes inside double quotes. For values containing single
 // quotes, we close the single-quoted segment, add an escaped single
-// quote, and reopen: 'it'\''s' → it's
+// quote, and reopen: 'it'\”s' → it's
 func shellJoinArgs(args []string) string {
 	var b strings.Builder
 	for i, a := range args {

@@ -128,32 +128,32 @@ type AudioAttachment struct {
 
 // LocationAttachment represents a geographical location sent by the user.
 type LocationAttachment struct {
-	Latitude            float64 // latitude coordinate
-	Longitude           float64 // longitude coordinate
-	HorizontalAccuracy  float64 // accuracy radius in meters (optional)
-	LivePeriod          int     // time period for live location updates in seconds (optional)
-	Heading             int     // direction of movement in degrees (optional)
-	ProximityAlertRadius int    // maximum distance for proximity alerts in meters (optional)
+	Latitude             float64 // latitude coordinate
+	Longitude            float64 // longitude coordinate
+	HorizontalAccuracy   float64 // accuracy radius in meters (optional)
+	LivePeriod           int     // time period for live location updates in seconds (optional)
+	Heading              int     // direction of movement in degrees (optional)
+	ProximityAlertRadius int     // maximum distance for proximity alerts in meters (optional)
 }
 
 // Message represents a unified incoming message from any platform.
 type Message struct {
-	SessionKey string // unique key for user context, e.g. "feishu:{chatID}:{userID}"
-	Platform   string
-	MessageID  string // platform message ID for tracing
-	UserID     string
-	UserName   string
-	ChatName   string // human-readable chat/group name (optional)
-	Content    string
-	Images     []ImageAttachment // attached images (if any)
-	Files      []FileAttachment  // attached files (if any)
-	Audio        *AudioAttachment // voice message (if any)
+	SessionKey   string // unique key for user context, e.g. "feishu:{chatID}:{userID}"
+	Platform     string
+	MessageID    string // platform message ID for tracing
+	UserID       string
+	UserName     string
+	ChatName     string // human-readable chat/group name (optional)
+	Content      string
+	Images       []ImageAttachment   // attached images (if any)
+	Files        []FileAttachment    // attached files (if any)
+	Audio        *AudioAttachment    // voice message (if any)
 	Location     *LocationAttachment // geographical location (if any)
 	ExtraContent string              // platform-enriched content (e.g. location text, reply quote) prepended for the agent
 	ChannelKey   string              // platform-provided channel identifier for workspace binding (optional)
-	ReplyCtx     any             // platform-specific context needed for replying
-	FromVoice    bool            // true if message originated from voice transcription
-	ModeOverride string          // if set, temporarily override agent permission mode for this message
+	ReplyCtx     any                 // platform-specific context needed for replying
+	FromVoice    bool                // true if message originated from voice transcription
+	ModeOverride string              // if set, temporarily override agent permission mode for this message
 }
 
 // EventType distinguishes different kinds of agent output.
@@ -185,24 +185,25 @@ type UserQuestionOption struct {
 
 // Event represents a single piece of agent output streamed back to the engine.
 type Event struct {
-	Type         EventType
-	Content      string
-	ToolName     string         // populated for EventToolUse, EventPermissionRequest
-	ToolInput    string         // human-readable summary of tool input
-	ToolInputRaw map[string]any // raw tool input (for EventPermissionRequest, used in allow response)
-	ToolResult   string         // populated for EventToolResult
-	ToolStatus   string         // optional status for EventToolResult (e.g. completed/failed)
-	ToolExitCode *int           // optional exit code for EventToolResult
-	ToolSuccess  *bool          // optional success flag for EventToolResult
-	SessionID    string         // agent-managed session ID for conversation continuity
-	RequestID    string         // unique request ID for EventPermissionRequest
-	Questions    []UserQuestion // populated when ToolName == "AskUserQuestion"
-	Done         bool
-	Error        error
-	InputTokens  int // token usage from agent result events
-	OutputTokens int
-	Metadata     map[string]any // optional metadata from agent (e.g. compaction_continue)
-	Synthetic    bool           // true if this is a synthetic/generated message (not from real user)
+	Type          EventType
+	Content       string
+	ToolName      string         // populated for EventToolUse, EventPermissionRequest
+	ToolInput     string         // human-readable summary of tool input
+	ToolInputRaw  map[string]any // raw tool input (for EventPermissionRequest, used in allow response)
+	ToolResult    string         // populated for EventToolResult
+	ToolStatus    string         // optional status for EventToolResult (e.g. completed/failed)
+	ToolExitCode  *int           // optional exit code for EventToolResult
+	ToolSuccess   *bool          // optional success flag for EventToolResult
+	SessionID     string         // agent-managed session ID for conversation continuity
+	RequestID     string         // unique request ID for EventPermissionRequest
+	Questions     []UserQuestion // populated when ToolName == "AskUserQuestion"
+	Done          bool
+	Error         error
+	InputTokens   int // token usage from agent result events
+	OutputTokens  int
+	ContextWindow int            // model's context window size, for context usage percentage
+	Metadata      map[string]any // optional metadata from agent (e.g. compaction_continue)
+	Synthetic     bool           // true if this is a synthetic/generated message (not from real user)
 }
 
 // HistoryEntry is one turn in a conversation.
