@@ -138,7 +138,7 @@ type Platform struct {
 	handler          core.MessageHandler
 	cardNavHandler   core.CardNavigationHandler
 	cancel           context.CancelFunc
-	dedup            core.MessageDedup
+	dedup            *core.MessageDedup
 	botOpenID        string
 	peerBots         map[string]string // app_id -> friendly alias, for quoted-reply attribution
 	userNameCache    sync.Map          // open_id -> display name
@@ -273,6 +273,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		noReplyToTrigger:           noReplyToTrigger,
 		client:                     lark.NewClient(appID, appSecret, clientOpts...),
 		replayClient:               newFeishuReplayClient(appID, appSecret, domain),
+		dedup:                     &core.MessageDedup{},
 		port:                       port,
 		callbackPath:               callbackPath,
 		encryptKey:                 encryptKey,
