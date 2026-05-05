@@ -173,6 +173,31 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel) {
 		return
 	}
 
+	// Handle richText messages — extract plain text from rich content
+	if data.Msgtype == "richText" {
+		text := extractRichText(data.Content)
+		if text == "" {
+			slog.Debug("dingtalk: richText message with no extractable text", "msg_id", data.MsgId)
+			return
+		}
+		msg := &core.Message{
+			SessionKey: sessionKey,
+			Platform:   "dingtalk",
+			UserID:     data.SenderStaffId,
+			UserName:   data.SenderNick,
+			ChatName:   data.ConversationTitle,
+			Content:    text,
+			MessageID:  data.MsgId,
+			ReplyCtx: replyContext{
+				sessionWebhook: data.SessionWebhook,
+				conversationId: data.ConversationId,
+				senderStaffId:  data.SenderStaffId,
+			},
+		}
+		p.handler(p, msg)
+		return
+	}
+
 	// Handle image messages
 	if data.Msgtype == "image" {
 		p.handleImageMessage(data, sessionKey)
@@ -196,6 +221,31 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel) {
 	}
 
 	p.handler(p, msg)
+}
+
+// extractRichText extracts plain text from a DingTalk richText content payload.
+// The expected structure is: {"richText": [{"text": "..."}, {"text": "...", "attrs": {...}}, ...]}
+// Non-text elements (e.g. pictureDownloadCode) are skipped.
+func extractRichText(content interface{}) string {
+	m, ok := content.(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	parts, ok := m["richText"].([]interface{})
+	if !ok {
+		return ""
+	}
+	var b strings.Builder
+	for _, part := range parts {
+		item, ok := part.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if text, ok := item["text"].(string); ok {
+			b.WriteString(text)
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func (p *Platform) handleAudioMessage(data *chatbot.BotCallbackDataModel, sessionKey string) {
