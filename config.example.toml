@@ -1297,6 +1297,9 @@ app_secret = "your-feishu-app-secret"
 # [projects.platforms.options]
 # ws_url = "ws://127.0.0.1:3001"  # NapCat Forward WebSocket URL
 # token = ""                       # optional: access_token / 可选鉴权 token
+# http_url = ""                    # optional: OneBot HTTP API URL for file operations, e.g. "http://127.0.0.1:3000"
+#                                  # Required for SendFile. Useful when OneBot runs in WSL/Docker.
+#                                  # 可选：OneBot HTTP API 地址，用于文件发送。OneBot 在 WSL/Docker 中时必须配置。
 # allow_from = "*"                 # allowed QQ user IDs, e.g. "12345,67890" or "*" for all
 #                                  # 允许的 QQ 号，如 "12345,67890"，"*" 表示所有
 # share_session_in_channel = false  # If true, all users in a group share one agent session / 群聊共享会话
