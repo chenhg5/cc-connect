@@ -41,20 +41,16 @@ type ccHookDecision struct {
 }
 
 // ccPermissionHookRunner reads and executes Claude Code PermissionRequest
-// hooks. Settings are cached for 30 seconds.
+// hooks. Settings are loaded once on first use and reused for the session.
 type ccPermissionHookRunner struct {
-	workDir string
-
-	mu        sync.RWMutex
-	cached    *ccSettings
-	cacheTime time.Time
-	cacheTTL  time.Duration
+	workDir  string
+	once     sync.Once
+	settings *ccSettings
 }
 
 func newCCPermissionHookRunner(workDir string) *ccPermissionHookRunner {
 	return &ccPermissionHookRunner{
-		workDir:  workDir,
-		cacheTTL: 30 * time.Second,
+		workDir: workDir,
 	}
 }
 
@@ -67,11 +63,11 @@ func (r *ccPermissionHookRunner) tryHook(
 	input map[string]any,
 	sessionID string,
 ) (ccHookDecision, bool) {
-	settings, err := r.loadSettings()
-	if err != nil {
-		slog.Debug("ccHooks: no settings loaded", "error", err)
+	r.once.Do(func() { r.settings = r.loadSettings() })
+	if r.settings == nil {
 		return ccHookDecision{}, false
 	}
+	settings := r.settings
 
 	for _, entry := range settings.Hooks.PermissionRequest {
 		if !matchHookEntry(entry.Matcher, toolName) {
@@ -97,24 +93,8 @@ func (r *ccPermissionHookRunner) tryHook(
 	return ccHookDecision{}, false
 }
 
-// loadSettings reads and merges settings.json files. Cached for cacheTTL.
-func (r *ccPermissionHookRunner) loadSettings() (*ccSettings, error) {
-	r.mu.RLock()
-	if r.cached != nil && time.Since(r.cacheTime) < r.cacheTTL {
-		s := r.cached
-		r.mu.RUnlock()
-		return s, nil
-	}
-	r.mu.RUnlock()
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	// Double-check after acquiring write lock.
-	if r.cached != nil && time.Since(r.cacheTime) < r.cacheTTL {
-		return r.cached, nil
-	}
-
+// loadSettings reads and merges settings.json files. Called once per session.
+func (r *ccPermissionHookRunner) loadSettings() *ccSettings {
 	merged := &ccSettings{}
 	found := false
 	for _, p := range settingsPaths(r.workDir) {
@@ -129,12 +109,10 @@ func (r *ccPermissionHookRunner) loadSettings() (*ccSettings, error) {
 		found = true
 	}
 	if !found {
-		return nil, fmt.Errorf("no settings files found")
+		slog.Debug("ccHooks: no settings files found")
+		return nil
 	}
-
-	r.cached = merged
-	r.cacheTime = time.Now()
-	return merged, nil
+	return merged
 }
 
 // settingsPaths returns the settings.json paths to read, in order.
