@@ -47,6 +47,7 @@ ws_base = "wss://im.live.360.cn:8282"
 - Text replies and slash commands
 - Image/file send-back through `cc-connect send --image` and `cc-connect send --file`
 - Inbound image/file/voice download for agent processing
+- Chat history reads and history attachment downloads through `cc-connect tuitui`
 - Cron/proactive sends through session-key reply context reconstruction
 
 ## Access Policy / 权限策略
@@ -74,3 +75,43 @@ When `share_session_in_channel = true`, group chats use a shared session key:
 ```text
 tuitui:<group_id>
 ```
+
+## Reading History / 读取历史
+
+`cc-connect` includes TuiTui history helpers for agents and operators. Credentials are loaded from the configured TuiTui platform by default, or from `TUITUI_APP_ID` / `TUITUI_APP_SECRET`.
+
+Read recent messages:
+
+```bash
+cc-connect tuitui messages \
+  --project my-project \
+  --chat 7652669648832580 \
+  --chat-type group \
+  --relative-time last_7_days \
+  --limit 100
+```
+
+Search recent history:
+
+```bash
+cc-connect tuitui search \
+  --project my-project \
+  --chat 7652669648832580 \
+  --chat-type group \
+  --relative-time last_7_days \
+  --q 周报
+```
+
+Download a file or image URL found in history:
+
+```bash
+cc-connect tuitui download \
+  --url "https://example.com/report.xlsx" \
+  --out ./tmp/tuitui
+```
+
+Supported chat types:
+
+- `direct`: `--chat <user_account>` uses `/robot/message/single/sync`
+- `group`: `--chat <group_id>` uses `/robot/message/group/sync`
+- `channel`: `--chat teams_<team_id>_<channel_id>_<thread_id>` or `--chat <channel_id>` uses `/robot/teams/post/topic/list`

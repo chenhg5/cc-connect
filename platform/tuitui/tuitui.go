@@ -206,7 +206,14 @@ func (p *Platform) FormattingInstructions() string {
 	return `Formatting rules for TuiTui:
 - Plain Markdown is accepted in teams/channel messages.
 - Direct and group chats render plain text most reliably.
-- Keep tables short; prefer concise lists for mobile chat readability.`
+- Keep tables short; prefer concise lists for mobile chat readability.
+
+TuiTui history tools:
+- When chat history, earlier context, group files, links, reports, or prior discussion are needed, use Bash to run:
+  cc-connect tuitui messages --chat <chat_id> --chat-type <direct|group|channel> --relative-time last_7_days --limit 100
+  cc-connect tuitui search --chat <chat_id> --chat-type <direct|group|channel> --relative-time last_7_days --q <keyword>
+  cc-connect tuitui download --url <file_or_image_url> --out ./tmp/tuitui
+- The current chat id is the ` + "`chat_id`" + ` value in the injected sender context when present.`
 }
 
 func (p *Platform) connectLoop(ctx context.Context) {
@@ -618,6 +625,10 @@ func (p *Platform) downloadAttachment(ctx context.Context, rawURL string) ([]byt
 	}
 	name := filenameFromResponse(rawURL, resp.Header.Get("Content-Disposition"))
 	return buf, mimeType, name, nil
+}
+
+func (p *Platform) DownloadHistoryFile(ctx context.Context, rawURL string) ([]byte, string, string, error) {
+	return p.downloadAttachment(ctx, rawURL)
 }
 
 type tuituiFrame struct {

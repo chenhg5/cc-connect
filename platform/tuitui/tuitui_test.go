@@ -94,6 +94,67 @@ func TestBuildEnvelopeChannelThread(t *testing.T) {
 	}
 }
 
+func TestFetchHistoryGroup(t *testing.T) {
+	var gotPath string
+	var gotPayload map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		if err := json.NewDecoder(r.Body).Decode(&gotPayload); err != nil {
+			t.Fatalf("decode payload: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"errcode":0,"cursor":"c2","has_more":true,"msgs":[{"user_account":"alice","user_name":"Alice","timestamp":1710000000,"data":{"text":"hello","msgid":"m1","group_id":"g1"}}]}`))
+	}))
+	defer server.Close()
+
+	p := &Platform{appID: "app", appSecret: "secret", apiBase: server.URL, client: server.Client()}
+	asc := true
+	got, err := p.FetchHistory(context.Background(), "g1", chatTypeGroup, HistoryOptions{RelativeTime: "today", Limit: 10, OrderAsc: &asc})
+	if err != nil {
+		t.Fatalf("FetchHistory() error = %v", err)
+	}
+	if gotPath != "/robot/message/group/sync" {
+		t.Fatalf("path = %q", gotPath)
+	}
+	if gotPayload["group_id"] != "g1" || gotPayload["relative_time"] != "today" || gotPayload["limit"].(float64) != 10 {
+		t.Fatalf("payload = %#v", gotPayload)
+	}
+	if !got.HasMore || got.Cursor != "c2" || len(got.Messages) != 1 || got.Messages[0]["msgid"] != nil {
+		t.Fatalf("history result = %#v", got)
+	}
+	if got.Messages[0]["text"] != "hello" || got.Messages[0]["user_account"] != "alice" {
+		t.Fatalf("message = %#v", got.Messages[0])
+	}
+}
+
+func TestFetchHistoryChannel(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		switch r.URL.Path {
+		case "/robot/teams/post/topic/list":
+			_, _ = w.Write([]byte(`{"errcode":0,"datas":{"post_list":[{"topic":{"post_id":"p1","from_name":"Alice","create_time":1710000000000,"last_reply_time":1710000000000,"content":"topic","properties":{"files":[{"name":"a.txt","url":"https://example/a.txt"}]}},"reply_list":[{"post_id":"p2","from_name":"Bob","create_time":1710000001000,"content":"reply"}]}]}}`))
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	p := &Platform{appID: "app", appSecret: "secret", apiBase: server.URL, client: server.Client()}
+	got, err := p.FetchHistory(context.Background(), "teams_team-1_chan-1_root-1", chatTypeChannel, HistoryOptions{Limit: 20})
+	if err != nil {
+		t.Fatalf("FetchHistory(channel) error = %v", err)
+	}
+	if len(paths) != 1 || paths[0] != "/robot/teams/post/topic/list" {
+		t.Fatalf("paths = %#v", paths)
+	}
+	if len(got.Threads) != 1 || !strings.Contains(got.Threads[0], "文件 a.txt: https://example/a.txt") {
+		t.Fatalf("threads = %#v", got.Threads)
+	}
+	if got.Cursor != "1710000000001" {
+		t.Fatalf("cursor = %q", got.Cursor)
+	}
+}
+
 func TestPolicyGroupRequiresMentionAndAllowlist(t *testing.T) {
 	p := &Platform{
 		allowFrom:      "alice",
