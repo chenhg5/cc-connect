@@ -5282,6 +5282,58 @@ func (s *controllableAgentSession) Close() error {
 	return nil
 }
 
+type interruptibleAgentSession struct {
+	*controllableAgentSession
+	mu    sync.Mutex
+	calls int
+	err   error
+	wait  chan struct{}
+}
+
+func (s *interruptibleAgentSession) InterruptSession(ctx context.Context) error {
+	s.mu.Lock()
+	s.calls++
+	wait := s.wait
+	err := s.err
+	s.mu.Unlock()
+	if wait != nil {
+		select {
+		case <-wait:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return err
+}
+
+func (s *interruptibleAgentSession) callCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
+}
+
+func (s *interruptibleAgentSession) setErr(err error) {
+	s.mu.Lock()
+	s.err = err
+	s.mu.Unlock()
+}
+
+func (s *interruptibleAgentSession) setWait(ch chan struct{}) {
+	s.mu.Lock()
+	s.wait = ch
+	s.mu.Unlock()
+}
+
+func (s *interruptibleAgentSession) unblock() {
+	s.mu.Lock()
+	wait := s.wait
+	s.wait = nil
+	s.mu.Unlock()
+	if wait != nil {
+		close(wait)
+	}
+}
+
 // controllableAgent lets tests control which session is returned by StartSession.
 type controllableAgent struct {
 	nextSession AgentSession
@@ -7785,6 +7837,154 @@ func TestCmdStop_UsesInteractiveKeyForMultiWorkspace(t *testing.T) {
 
 	if exists {
 		t.Error("expected interactive state to be cleaned up by /stop using interactiveKey")
+	}
+}
+
+func TestCmdInterrupt_NoExecution(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	e.cmdInterrupt(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"})
+
+	sent := p.getSent()
+	if len(sent) != 1 || sent[0] != e.i18n.T(MsgNoExecution) {
+		t.Fatalf("sent messages = %v, want only no-execution reply", sent)
+	}
+}
+
+func TestCmdInterrupt_RequestsSessionInterrupt(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	sess := &interruptibleAgentSession{controllableAgentSession: newControllableSession("interrupt-test")}
+	wait := make(chan struct{})
+	sess.setWait(wait)
+	key := "test:user1"
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{agentSession: sess}
+	e.interactiveMu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		e.cmdInterrupt(p, &Message{SessionKey: key, ReplyCtx: "ctx"})
+		close(done)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		sent := p.getSent()
+		if len(sent) >= 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	sent := p.getSent()
+	if len(sent) < 1 || sent[0] != e.i18n.T(MsgInterrupting) {
+		t.Fatalf("sent messages = %v, want leading interrupting reply", sent)
+	}
+
+	sess.unblock()
+	<-done
+
+	if sess.callCount() != 1 {
+		t.Fatalf("InterruptSession calls = %d, want 1", sess.callCount())
+	}
+
+	e.interactiveMu.Lock()
+	_, exists := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	if !exists {
+		t.Fatal("expected interactive state to remain after /interrupt")
+	}
+
+	sent = p.getSent()
+	if len(sent) != 2 || sent[0] != e.i18n.T(MsgInterrupting) || sent[1] != e.i18n.T(MsgInterruptDone) {
+		t.Fatalf("sent messages = %v, want interrupting + interrupt done replies", sent)
+	}
+}
+
+func TestCmdInterrupt_NotSupported(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{agentSession: newControllableSession("plain")}
+	e.interactiveMu.Unlock()
+
+	e.cmdInterrupt(p, &Message{SessionKey: key, ReplyCtx: "ctx"})
+
+	sent := p.getSent()
+	if len(sent) != 1 || sent[0] != e.i18n.T(MsgInterruptNotSupported) {
+		t.Fatalf("sent messages = %v, want only interrupt-not-supported reply", sent)
+	}
+}
+
+func TestCmdInterrupt_FailedInterruptSuggestsStop(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	sess := &interruptibleAgentSession{controllableAgentSession: newControllableSession("interrupt-fail")}
+	sess.setErr(errors.New("rejected"))
+	key := "test:user1"
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{agentSession: sess}
+	e.interactiveMu.Unlock()
+
+	e.cmdInterrupt(p, &Message{SessionKey: key, ReplyCtx: "ctx"})
+
+	sent := p.getSent()
+	if len(sent) != 2 || sent[0] != e.i18n.T(MsgInterrupting) || sent[1] != e.i18n.T(MsgInterruptUseStop) {
+		t.Fatalf("sent messages = %v, want interrupting + use-stop replies", sent)
+	}
+}
+
+func TestCmdInterrupt_TimeoutSuggestsStop(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	sess := &interruptibleAgentSession{controllableAgentSession: newControllableSession("interrupt-timeout")}
+	sess.setWait(make(chan struct{}))
+	key := "test:user1"
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{agentSession: sess}
+	e.interactiveMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(e.ctx, 20*time.Millisecond)
+	defer cancel()
+	orig := e.ctx
+	e.ctx = ctx
+	defer func() { e.ctx = orig }()
+
+	e.cmdInterrupt(p, &Message{SessionKey: key, ReplyCtx: "ctx"})
+
+	sent := p.getSent()
+	if len(sent) != 2 || sent[0] != e.i18n.T(MsgInterrupting) || sent[1] != e.i18n.T(MsgInterruptTimedOutUseStop) {
+		t.Fatalf("sent messages = %v, want interrupting + timeout replies", sent)
+	}
+}
+
+func TestCmdInterrupt_UsesInteractiveKeyForMultiWorkspace(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	sess := &interruptibleAgentSession{controllableAgentSession: newControllableSession("ws-interrupt")}
+	wsDir := t.TempDir()
+	rawKey := "feishu:ch1:user1"
+	wsKey := wsDir + ":" + rawKey
+	iKey := e.interactiveKeyForSessionKey(wsKey)
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[iKey] = &interactiveState{agentSession: sess}
+	e.interactiveMu.Unlock()
+
+	e.cmdInterrupt(p, &Message{SessionKey: wsKey, ReplyCtx: "ctx"})
+
+	if sess.callCount() != 1 {
+		t.Fatalf("InterruptSession calls = %d, want 1", sess.callCount())
 	}
 }
 
@@ -11736,8 +11936,8 @@ func TestSessionName_ClaudeCodeLikeFlow(t *testing.T) {
 }
 
 // acpLikeSession simulates ACP behavior:
-// - CurrentSessionID() returns the thread ID immediately after creation
-//   (ACP does handshake before returning from StartSession)
+//   - CurrentSessionID() returns the thread ID immediately after creation
+//     (ACP does handshake before returning from StartSession)
 type acpLikeSession struct {
 	threadID string
 	events   chan Event

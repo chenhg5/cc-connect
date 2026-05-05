@@ -130,6 +130,12 @@ const (
 	MsgToolResultFmtFailed       MsgKey = "tool_result_fmt_failed"
 	MsgExecutionStopped          MsgKey = "execution_stopped"
 	MsgNoExecution               MsgKey = "no_execution"
+	MsgInterruptNotSupported     MsgKey = "interrupt_not_supported"
+	MsgInterruptRequested        MsgKey = "interrupt_requested"
+	MsgInterrupting              MsgKey = "interrupting"
+	MsgInterruptDone             MsgKey = "interrupt_done"
+	MsgInterruptUseStop          MsgKey = "interrupt_use_stop"
+	MsgInterruptTimedOutUseStop  MsgKey = "interrupt_timed_out_use_stop"
 	MsgPreviousProcessing        MsgKey = "previous_processing"
 	MsgQueueFull                 MsgKey = "queue_full"
 	MsgMessageQueued             MsgKey = "message_queued"
@@ -249,8 +255,8 @@ const (
 	MsgCronBtnUnmute    MsgKey = "cron_btn_unmute"
 	MsgCronBtnDelete    MsgKey = "cron_btn_delete"
 
-	MsgStatusTitle          MsgKey = "status_title"
-	MsgReplyFooterRemaining MsgKey = "reply_footer_remaining"
+	MsgStatusTitle           MsgKey = "status_title"
+	MsgReplyFooterRemaining  MsgKey = "reply_footer_remaining"
 	MsgModelCurrent          MsgKey = "model_current"
 	MsgModelChanged          MsgKey = "model_changed"
 	MsgModelChangeFailed     MsgKey = "model_change_failed"
@@ -442,10 +448,10 @@ const (
 	MsgCommandDisabled   MsgKey = "command_disabled"
 	MsgAdminRequired     MsgKey = "admin_required"
 	MsgRateLimited       MsgKey = "rate_limited"
-	MsgPsSent       MsgKey = "ps_sent"
-	MsgPsSendFailed MsgKey = "ps_send_failed"
-	MsgPsEmpty      MsgKey = "ps_empty"
-	MsgPsNoSession  MsgKey = "ps_no_session"
+	MsgPsSent            MsgKey = "ps_sent"
+	MsgPsSendFailed      MsgKey = "ps_send_failed"
+	MsgPsEmpty           MsgKey = "ps_empty"
+	MsgPsNoSession       MsgKey = "ps_no_session"
 
 	MsgWhoamiTitle     MsgKey = "whoami_title"
 	MsgWhoamiCardTitle MsgKey = "whoami_card_title"
@@ -494,6 +500,7 @@ const (
 	MsgBuiltinCmdLang      MsgKey = "lang"
 	MsgBuiltinCmdQuiet     MsgKey = "quiet"
 	MsgBuiltinCmdCompress  MsgKey = "compress"
+	MsgBuiltinCmdInterrupt MsgKey = "interrupt"
 	MsgBuiltinCmdStop      MsgKey = "stop"
 	MsgBuiltinCmdCron      MsgKey = "cron"
 	MsgBuiltinCmdCommands  MsgKey = "commands"
@@ -649,6 +656,48 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "沒有正在執行的任務。",
 		LangJapanese:           "実行中のタスクはありません。",
 		LangSpanish:            "No hay ejecución en progreso.",
+	},
+	MsgInterruptNotSupported: {
+		LangEnglish:            "Interrupt is not supported by the current agent/backend.",
+		LangChinese:            "当前 Agent/后端不支持中断。",
+		LangTraditionalChinese: "目前 Agent/後端不支援中斷。",
+		LangJapanese:           "現在のエージェント/バックエンドは interrupt をサポートしていません。",
+		LangSpanish:            "El agente/backend actual no admite interrupción.",
+	},
+	MsgInterruptRequested: {
+		LangEnglish:            "Interrupt requested.",
+		LangChinese:            "已请求中断。",
+		LangTraditionalChinese: "已請求中斷。",
+		LangJapanese:           "中断を要求しました。",
+		LangSpanish:            "Interrupción solicitada.",
+	},
+	MsgInterrupting: {
+		LangEnglish:            "Interrupting current execution...",
+		LangChinese:            "正在中断当前执行...",
+		LangTraditionalChinese: "正在中斷目前執行...",
+		LangJapanese:           "現在の実行を中断しています...",
+		LangSpanish:            "Interrumpiendo la ejecución actual...",
+	},
+	MsgInterruptDone: {
+		LangEnglish:            "Current execution interrupted.",
+		LangChinese:            "当前执行已中断。",
+		LangTraditionalChinese: "目前執行已中斷。",
+		LangJapanese:           "現在の実行を中断しました。",
+		LangSpanish:            "La ejecución actual se ha interrumpido.",
+	},
+	MsgInterruptUseStop: {
+		LangEnglish:            "Unable to interrupt the current execution. Please try `/stop`.",
+		LangChinese:            "无法中断当前执行，请尝试 `/stop`。",
+		LangTraditionalChinese: "無法中斷目前執行，請嘗試 `/stop`。",
+		LangJapanese:           "現在の実行を中断できませんでした。`/stop` を試してください。",
+		LangSpanish:            "No se pudo interrumpir la ejecución actual. Pruebe `/stop`.",
+	},
+	MsgInterruptTimedOutUseStop: {
+		LangEnglish:            "Interrupt was not confirmed in time. Please consider `/stop`.",
+		LangChinese:            "未能及时确认中断完成，请考虑使用 `/stop`。",
+		LangTraditionalChinese: "未能及時確認中斷完成，請考慮使用 `/stop`。",
+		LangJapanese:           "中断完了を時間内に確認できませんでした。`/stop` を検討してください。",
+		LangSpanish:            "La interrupción no se confirmó a tiempo. Considere usar `/stop`.",
 	},
 	MsgPreviousProcessing: {
 		LangEnglish:            "⏳ Previous request still processing. Use `/ps <message>` to send a P.S. to the running task.",
@@ -899,6 +948,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/mode [name]\n  View/switch permission mode\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  View/switch language\n\n" +
 			"/compress\n  Compress conversation context\n\n" +
+			"/interrupt\n  Interrupt current execution without closing the session\n\n" +
 			"/tts [always|voice_only]\n  View/switch text-to-speech mode\n\n" +
 			"/shell [--timeout <sec>] <command>\n  Run a shell command and return the output (! prefix shortcut: !cmd)\n\n" +
 			"/show <ref>\n  View a file, directory, or code snippet by reference\n\n" +
@@ -942,6 +992,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/mode [名称]\n  查看/切换权限模式\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  查看/切换语言\n\n" +
 			"/compress\n  压缩会话上下文\n\n" +
+			"/interrupt\n  中断当前执行但保留会话\n\n" +
 			"/tts [always|voice_only]\n  查看/切换语音合成模式\n\n" +
 			"/shell [--timeout <秒>] <命令>\n  执行 Shell 命令并返回结果（快捷方式：!命令）\n\n" +
 			"/show <引用>\n  按引用查看文件、目录或代码片段\n\n" +
@@ -985,6 +1036,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/mode [名稱]\n  查看/切換權限模式\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  查看/切換語言\n\n" +
 			"/compress\n  壓縮會話上下文\n\n" +
+			"/interrupt\n  中斷當前執行但保留會話\n\n" +
 			"/tts [always|voice_only]\n  查看/切換語音合成模式\n\n" +
 			"/shell [--timeout <秒>] <命令>\n  執行 Shell 命令並返回結果（快捷方式：!命令）\n\n" +
 			"/dir [路徑|reset]\n  查看、切換或重置 Agent 工作目錄\n\n" +
@@ -1026,6 +1078,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/mode [名前]\n  権限モードの表示/切り替え\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  言語の表示/切り替え\n\n" +
 			"/compress\n  会話コンテキストを圧縮\n\n" +
+			"/interrupt\n  セッションを閉じずに現在の実行を中断\n\n" +
 			"/tts [always|voice_only]\n  音声合成モードの表示/切り替え\n\n" +
 			"/shell [--timeout <秒>] <コマンド>\n  シェルコマンドを実行して結果を返す（ショートカット：!コマンド）\n\n" +
 			"/dir [パス|reset]\n  エージェントの作業ディレクトリを表示/切り替え/リセット\n\n" +
@@ -1067,6 +1120,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/mode [nombre]\n  Ver/cambiar modo de permisos\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  Ver/cambiar idioma\n\n" +
 			"/compress\n  Comprimir contexto de conversación\n\n" +
+			"/interrupt\n  Interrumpir la ejecución actual sin cerrar la sesión\n\n" +
 			"/tts [always|voice_only]\n  Ver/cambiar modo de síntesis de voz\n\n" +
 			"/shell [--timeout <seg>] <comando>\n  Ejecutar un comando shell y devolver la salida (atajo: !comando)\n\n" +
 			"/dir [ruta|reset]\n  Ver, cambiar o restablecer el directorio de trabajo del agente\n\n" +
@@ -1194,6 +1248,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/alias [add|del] — Command aliases\n" +
 			"/skills — List agent skills\n" +
 			"/compress — Compress context\n" +
+			"/interrupt — Interrupt current execution\n" +
 			"/stop — Stop current execution",
 		LangChinese: "**工具与自动化**\n" +
 			"/shell <命令> — 执行 Shell 命令（!快捷方式）\n" +
@@ -1204,6 +1259,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/alias [add|del] — 命令别名\n" +
 			"/skills — 列出 Agent Skills\n" +
 			"/compress — 压缩上下文\n" +
+			"/interrupt — 中断当前执行\n" +
 			"/stop — 停止当前执行",
 		LangTraditionalChinese: "**工具與自動化**\n" +
 			"/shell <命令> — 執行 Shell 命令（!快捷方式）\n" +
@@ -1214,6 +1270,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/alias [add|del] — 命令別名\n" +
 			"/skills — 列出 Agent Skills\n" +
 			"/compress — 壓縮上下文\n" +
+			"/interrupt — 中斷當前執行\n" +
 			"/stop — 停止當前執行",
 		LangJapanese: "**ツール・自動化**\n" +
 			"/shell <コマンド> — シェルコマンド実行（!ショートカット）\n" +
@@ -1224,6 +1281,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/alias [add|del] — コマンドエイリアス\n" +
 			"/skills — エージェントスキル一覧\n" +
 			"/compress — コンテキスト圧縮\n" +
+			"/interrupt — 現在の実行を中断\n" +
 			"/stop — 現在の実行を停止",
 		LangSpanish: "**Herramientas y automatización**\n" +
 			"/shell <comando> — Ejecutar comando shell (! atajo)\n" +
@@ -1234,6 +1292,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/alias [add|del] — Alias de comandos\n" +
 			"/skills — Listar skills del agente\n" +
 			"/compress — Comprimir contexto\n" +
+			"/interrupt — Interrumpir la ejecución actual\n" +
 			"/stop — Detener ejecución actual",
 	},
 	MsgHelpSystemSection: {
@@ -3366,6 +3425,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "壓縮會話上下文",
 		LangJapanese:           "会話コンテキストを圧縮",
 		LangSpanish:            "Comprimir contexto de conversación",
+	},
+	MsgBuiltinCmdInterrupt: {
+		LangEnglish:            "Interrupt current execution without closing the session",
+		LangChinese:            "中断当前执行但保留会话",
+		LangTraditionalChinese: "中斷當前執行但保留會話",
+		LangJapanese:           "セッションを閉じずに現在の実行を中断",
+		LangSpanish:            "Interrumpir la ejecución actual sin cerrar la sesión",
 	},
 	MsgBuiltinCmdStop: {
 		LangEnglish:            "Stop current execution",

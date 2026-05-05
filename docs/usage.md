@@ -43,10 +43,13 @@ Each user gets an independent session with full conversation context. Manage ses
 | `/allow <tool>` | Pre-allow a tool (next session) |
 | `/reasoning [level]` | View or switch reasoning effort (Codex) |
 | `/mode [name]` | View or switch permission mode |
-| `/stop` | Stop current execution |
+| `/interrupt` | Interrupt current execution without closing the session when the current agent/backend supports native interrupt |
+| `/stop` | Stop current execution and end the current interactive run/session |
 | `/help` | Show available commands |
 
 During a session, the agent may request tool permissions. Reply **allow** / **deny** / **allow all**.
+
+`/interrupt` is a lighter command than `/stop`: it tries to interrupt only the current in-flight turn and keep the session usable. `/stop` keeps its stronger existing behavior and is still the fallback when native interrupt is unavailable or cannot be confirmed.
 
 You can also configure automatic session rotation after inactivity:
 
