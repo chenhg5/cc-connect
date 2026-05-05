@@ -43,6 +43,7 @@ Each user gets an independent session with full conversation context. Manage ses
 | `/allow <tool>` | Pre-allow a tool (next session) |
 | `/reasoning [level]` | View or switch reasoning effort (Codex) |
 | `/mode [name]` | View or switch permission mode |
+| `/flush` | Flush buffered messages in collect/manual mode |
 | `/stop` | Stop current execution |
 | `/help` | Show available commands |
 
@@ -61,6 +62,27 @@ When enabled, the next normal message after a long idle period starts in a fresh
 ### Model switch preserves history
 
 `/model` preserves the current session — the agent resumes the conversation with the new model (no extra token cost). Model switching affects the shared agent instance — if multiple platforms use the same project, the model change applies to all of them.
+
+### Message buffering
+
+You can also opt into message buffering per project:
+
+```toml
+[[projects]]
+name = "demo"
+
+[projects.message_queue]
+mode = "collect"         # immediate | collect | manual
+collect_wait_ms = 5000
+```
+
+- `immediate`: current behavior, each message starts processing right away
+- `collect`: buffer rapid consecutive messages and auto-flush after a short idle window
+- `manual`: buffer messages until you explicitly send `/flush`
+
+Runtime changes are available through `/config`, for example:
+- `/config messages.mode collect`
+- `/config messages.collect_wait_ms 5000`
 
 ---
 
