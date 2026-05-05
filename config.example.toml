@@ -708,6 +708,21 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # Optional: specify a model / 可选：指定模型
 # model = "claude-sonnet-4-20250514"
 
+# Optional: per-project environment variables injected into Claude Code sessions.
+# This allows different projects to use different model providers (Kimi, Mimo, DeepSeek, etc.)
+# without modifying global ~/.claude/settings.json.
+# 可选：为每个项目单独配置环境变量，注入到 Claude Code 会话中。
+# 这样不同项目可以使用不同的模型供应商，无需修改全局的 ~/.claude/settings.json。
+#
+# [projects.agent.options.env]
+# ANTHROPIC_BASE_URL = "https://api.kimi.com/coding"
+# ANTHROPIC_AUTH_TOKEN = "sk-kimi-xxx"
+# ANTHROPIC_MODEL = "K2.6"
+# ANTHROPIC_REASONING_MODEL = "K2.6"
+# ANTHROPIC_DEFAULT_HAIKU_MODEL = "K2.6"
+# ANTHROPIC_DEFAULT_SONNET_MODEL = "K2.6"
+# ANTHROPIC_DEFAULT_OPUS_MODEL = "K2.6"
+
 # Claude Code Router Integration / Claude Code Router 集成
 # Route Claude Code requests through Claude Code Router to use different model providers.
 # 通过 Claude Code Router 路由 Claude Code 请求，使用不同的模型提供商。

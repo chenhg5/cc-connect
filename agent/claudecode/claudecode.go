@@ -186,6 +186,20 @@ func New(opts map[string]any) (core.Agent, error) {
 		}
 	}
 
+	// Parse project-level env from opts["env"] (set via [projects.agent.options.env] in config.toml)
+	var sessionEnv []string
+	if envMap, ok := opts["env"].(map[string]string); ok {
+		for k, v := range envMap {
+			sessionEnv = append(sessionEnv, k+"="+v)
+		}
+	} else if envMap, ok := opts["env"].(map[string]any); ok {
+		for k, v := range envMap {
+			if s, ok := v.(string); ok {
+				sessionEnv = append(sessionEnv, k+"="+s)
+			}
+		}
+	}
+
 	return &Agent{
 		workDir:          workDir,
 		cliBin:           cliBin,
@@ -197,6 +211,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		allowedTools:     allowedTools,
 		disallowedTools:  disallowedTools,
 		maxContextTokens: maxContextTokens,
+		sessionEnv:       sessionEnv,
 		activeIdx:        -1,
 		routerURL:        routerURL,
 		routerAPIKey:     routerAPIKey,
@@ -1168,12 +1183,12 @@ func boolVal(m map[string]any, key string) bool {
 
 // encodeClaudeProjectKey converts an absolute path to Claude Code's project key format.
 // Claude Code encodes paths by:
-// 1. Replacing path separators (/ or \) with "-"
-// 2. Replacing colons (:) with "-" (Windows drive letters)
-// 3. Replacing underscores (_) with "-"
-// 4. Replacing spaces and tildes (~) with "-" (common in macOS iCloud paths like
-//    "/Users/x/Library/Mobile Documents/com~apple~CloudDocs/...")
-// 5. Replacing all non-ASCII characters with "-"
+//  1. Replacing path separators (/ or \) with "-"
+//  2. Replacing colons (:) with "-" (Windows drive letters)
+//  3. Replacing underscores (_) with "-"
+//  4. Replacing spaces and tildes (~) with "-" (common in macOS iCloud paths like
+//     "/Users/x/Library/Mobile Documents/com~apple~CloudDocs/...")
+//  5. Replacing all non-ASCII characters with "-"
 func encodeClaudeProjectKey(absPath string) string {
 	// First, normalize to forward slashes for consistent processing
 	normalized := strings.ReplaceAll(absPath, "\\", "/")
