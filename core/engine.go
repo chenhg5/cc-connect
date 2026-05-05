@@ -768,6 +768,7 @@ func (e *Engine) GetDisabledCommands() []string {
 	for k := range e.disabledCmds {
 		out = append(out, k)
 	}
+	sort.Strings(out)
 	return out
 }
 

@@ -3,6 +3,7 @@ package codex
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -13,7 +14,7 @@ func TestSkillDirs_UsesProjectAgentAndCodexHomes(t *testing.T) {
 	repo := filepath.Join(tmp, "repo")
 	workDir := filepath.Join(repo, "nested", "pkg")
 
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	t.Setenv("CODEX_HOME", "")
 
 	for _, dir := range []string{
@@ -61,7 +62,7 @@ func TestSkillDirs_FallsBackToEnvCodexHome(t *testing.T) {
 		t.Fatalf("mkdir workdir: %v", err)
 	}
 
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	t.Setenv("CODEX_HOME", codexHome)
 
 	a := &Agent{workDir: workDir}
@@ -75,5 +76,15 @@ func TestSkillDirs_FallsBackToEnvCodexHome(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("SkillDirs() missing CODEX_HOME skills dir: %v", got)
+	}
+}
+
+func setTestHome(t *testing.T, home string) {
+	t.Helper()
+	t.Setenv("HOME", home)
+	if runtime.GOOS == "windows" {
+		t.Setenv("USERPROFILE", home)
+		t.Setenv("HOMEDRIVE", "")
+		t.Setenv("HOMEPATH", "")
 	}
 }
