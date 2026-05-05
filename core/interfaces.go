@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"errors"
+	"time"
 )
 
 // Platform abstracts a messaging platform (Feishu, DingTalk, Slack, etc.).
@@ -196,6 +197,12 @@ type ProgressStyleProvider interface {
 // parse and render structured progress-card payloads.
 type ProgressCardPayloadSupport interface {
 	SupportsProgressCardPayload() bool
+}
+
+// ProgressUpdateThrottler is an optional interface for platforms that need
+// rate-limited progress edits (e.g. Discord's ~5 edits / 5s per channel).
+type ProgressUpdateThrottler interface {
+	ProgressUpdateInterval() time.Duration
 }
 
 // ButtonOption represents a clickable inline button.
