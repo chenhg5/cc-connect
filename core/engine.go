@@ -2091,6 +2091,15 @@ func (e *Engine) handlePendingPermission(p Platform, msg *Message, content strin
 	state, ok := e.interactiveStates[iKey]
 	e.interactiveMu.Unlock()
 	if !ok || state == nil {
+		// Stale platform-callback permission click (e.g. user tapped an old
+		// "Allow"/"Deny" button after the session was reset or the bot
+		// restarted). Drop silently so the synthesized "allow"/"deny" payload
+		// is not forwarded to the agent or queued as a normal user message.
+		if msg.IsPermissionResponse {
+			slog.Debug("dropping stale permission callback (no interactive state)",
+				"session", msg.SessionKey, "content", content)
+			return true
+		}
 		return false
 	}
 
@@ -2098,6 +2107,11 @@ func (e *Engine) handlePendingPermission(p Platform, msg *Message, content strin
 	pending := state.pending
 	state.mu.Unlock()
 	if pending == nil {
+		if msg.IsPermissionResponse {
+			slog.Debug("dropping stale permission callback (no pending request)",
+				"session", msg.SessionKey, "content", content)
+			return true
+		}
 		return false
 	}
 

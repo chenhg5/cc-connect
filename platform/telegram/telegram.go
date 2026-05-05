@@ -840,15 +840,16 @@ func (p *Platform) handleCallbackQuery(ctx context.Context, cb *models.CallbackQ
 	}
 
 	p.handler(p, &core.Message{
-		SessionKey: sessionKey,
-		Platform:   "telegram",
-		UserID:     userID,
-		UserName:   userName,
-		ChatName:   chatName,
-		Content:    responseText,
-		MessageID:  strconv.Itoa(msgID),
-		ChannelKey: channelKey,
-		ReplyCtx:   rctx,
+		SessionKey:           sessionKey,
+		Platform:             "telegram",
+		UserID:               userID,
+		UserName:             userName,
+		ChatName:             chatName,
+		Content:              responseText,
+		MessageID:            strconv.Itoa(msgID),
+		ChannelKey:           channelKey,
+		ReplyCtx:             rctx,
+		IsPermissionResponse: true,
 	})
 }
 

@@ -2298,6 +2298,73 @@ func TestHandlePendingPermission_MultiWorkspaceLookup(t *testing.T) {
 	}
 }
 
+// Stale permission callback (no interactive state for the session, e.g. clicked
+// after bot restart). Must be dropped silently and never reach the agent or
+// queue, regardless of session-busy state.
+func TestHandlePendingPermission_StaleCallback_NoState_Dropped(t *testing.T) {
+	e := newTestEngine()
+
+	p := &stubPlatformEngine{n: "telegram"}
+	msg := &Message{
+		SessionKey:           "telegram:1:2",
+		ReplyCtx:             "ctx",
+		IsPermissionResponse: true,
+	}
+
+	if !e.handlePendingPermission(p, msg, "allow") {
+		t.Fatal("expected stale permission callback to be handled (dropped)")
+	}
+	if got := p.getSent(); len(got) != 0 {
+		t.Fatalf("expected no reply for dropped stale callback, got %v", got)
+	}
+}
+
+// Stale permission callback when state exists but pending is nil (e.g. previous
+// permission was already resolved). Must also be dropped silently.
+func TestHandlePendingPermission_StaleCallback_NoPending_Dropped(t *testing.T) {
+	e := newTestEngine()
+
+	sessionKey := "telegram:1:2"
+	e.interactiveMu.Lock()
+	e.interactiveStates[sessionKey] = &interactiveState{
+		agentSession: &recordingAgentSession{},
+		pending:      nil,
+	}
+	e.interactiveMu.Unlock()
+
+	p := &stubPlatformEngine{n: "telegram"}
+	msg := &Message{
+		SessionKey:           sessionKey,
+		ReplyCtx:             "ctx",
+		IsPermissionResponse: true,
+	}
+
+	if !e.handlePendingPermission(p, msg, "deny") {
+		t.Fatal("expected stale permission callback to be handled (dropped)")
+	}
+	if got := p.getSent(); len(got) != 0 {
+		t.Fatalf("expected no reply for dropped stale callback, got %v", got)
+	}
+}
+
+// A user that types literal "allow" without any pending must NOT be treated as
+// a stale permission response — it should fall through to normal message flow.
+// IsPermissionResponse is the marker that prevents fall-through.
+func TestHandlePendingPermission_UserTextAllow_FallsThrough(t *testing.T) {
+	e := newTestEngine()
+
+	p := &stubPlatformEngine{n: "telegram"}
+	msg := &Message{
+		SessionKey: "telegram:1:2",
+		ReplyCtx:   "ctx",
+		// IsPermissionResponse intentionally false — typed by user
+	}
+
+	if e.handlePendingPermission(p, msg, "allow") {
+		t.Fatal("expected user-typed 'allow' to fall through to normal handling")
+	}
+}
+
 func TestHandleMessage_MultiWorkspacePreservesCCSessionKey(t *testing.T) {
 	p := &stubPlatformEngine{n: "discord"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)

@@ -154,6 +154,15 @@ type Message struct {
 	ReplyCtx     any             // platform-specific context needed for replying
 	FromVoice    bool            // true if message originated from voice transcription
 	ModeOverride string          // if set, temporarily override agent permission mode for this message
+
+	// IsPermissionResponse marks this Message as a synthesized permission decision
+	// produced by a platform inline-button / card callback (e.g. "perm:allow"
+	// → Content="allow"). When set, the engine treats it as a permission response
+	// only and never falls through to normal user-message handling: if no
+	// pending permission exists for the session, the click is silently dropped
+	// instead of being forwarded to the agent or queued behind the running turn.
+	// Plain text "allow"/"deny" typed by the user must NOT set this flag.
+	IsPermissionResponse bool
 }
 
 // EventType distinguishes different kinds of agent output.

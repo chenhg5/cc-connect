@@ -938,6 +938,74 @@ func TestHandleMessagePrivateTopicUsesThreadID(t *testing.T) {
 	}
 }
 
+// Permission callback (perm:allow / perm:deny / perm:allow_all) must mark the
+// synthesized core.Message with IsPermissionResponse=true so the engine can
+// distinguish a button click from a user typing the literal word "allow".
+// This guards against stale-button clicks being forwarded to the agent or
+// queued behind the running turn.
+func TestHandleCallbackQuery_PermissionMarksIsPermissionResponse(t *testing.T) {
+	cases := []struct {
+		data string
+		want string
+	}{
+		{"perm:allow", "allow"},
+		{"perm:deny", "deny"},
+		{"perm:allow_all", "allow all"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.data, func(t *testing.T) {
+			handled := make(chan *core.Message, 1)
+			p := &Platform{
+				token:      "token",
+				httpClient: &http.Client{},
+				allowFrom:  "*",
+			}
+			p.handler = func(_ core.Platform, msg *core.Message) {
+				handled <- msg
+			}
+			stubBot := newStubTelegramBot()
+			p.bot = stubBot
+			p.selfUser = &models.User{ID: 42, Username: "mybot"}
+
+			cb := &models.CallbackQuery{
+				ID: "cb-1",
+				From: models.User{
+					ID:        7,
+					Username:  "alice",
+					FirstName: "Alice",
+				},
+				Data: tc.data,
+				Message: models.MaybeInaccessibleMessage{
+					Message: &models.Message{
+						ID:   10,
+						Text: "permission request",
+						Chat: models.Chat{
+							ID:    100,
+							Type:  models.ChatTypePrivate,
+							Title: "DM",
+						},
+					},
+				},
+			}
+
+			p.handleCallbackQuery(context.Background(), cb)
+
+			select {
+			case got := <-handled:
+				if got.Content != tc.want {
+					t.Fatalf("Content = %q, want %q", got.Content, tc.want)
+				}
+				if !got.IsPermissionResponse {
+					t.Fatal("expected IsPermissionResponse=true on permission callback")
+				}
+			case <-time.After(time.Second):
+				t.Fatal("callback not handled")
+			}
+		})
+	}
+}
+
 func newTelegramTestPlatform(t *testing.T, handler func(http.ResponseWriter, *http.Request)) *Platform {
 	t.Helper()
 

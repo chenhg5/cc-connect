@@ -584,13 +584,14 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 
 		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
 		go p.handler(p.dispatchPlatform(), &core.Message{
-			SessionKey: sessionKey,
-			Platform:   p.platformName,
-			UserID:     userID,
-			UserName:   p.resolveUserName(userID),
-			ChatName:   p.resolveChatName(chatID),
-			Content:    responseText,
-			ReplyCtx:   rctx,
+			SessionKey:           sessionKey,
+			Platform:             p.platformName,
+			UserID:               userID,
+			UserName:             p.resolveUserName(userID),
+			ChatName:             p.resolveChatName(chatID),
+			Content:              responseText,
+			ReplyCtx:             rctx,
+			IsPermissionResponse: true,
 		})
 
 		permLabel, _ := event.Event.Action.Value["perm_label"].(string)
