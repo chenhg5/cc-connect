@@ -58,6 +58,10 @@ reset_on_idle_mins = 60
 
 When enabled, the next normal message after a long idle period starts in a fresh session automatically, without deleting the old session from `/list`.
 
+### Model switch preserves history
+
+`/model` preserves the current session — the agent resumes the conversation with the new model (no extra token cost). Model switching affects the shared agent instance — if multiple platforms use the same project, the model change applies to all of them.
+
 ---
 
 ## Permission Modes

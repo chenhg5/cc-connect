@@ -161,6 +161,7 @@ const (
 	MsgLangInvalid               MsgKey = "lang_invalid"
 	MsgLangCurrent               MsgKey = "lang_current"
 	MsgUnknownCommand            MsgKey = "unknown_command"
+	MsgWelcome                   MsgKey = "welcome"
 	MsgHelp                      MsgKey = "message_help" // change from "help", which is used now for builtin command help
 	MsgHelpTitle                 MsgKey = "help_title"
 	MsgHelpSessionSection        MsgKey = "help_session_section"
@@ -571,6 +572,7 @@ const (
 	MsgWsCloneFailed           MsgKey = "ws_clone_failed"
 	MsgWsInitDirNotFound       MsgKey = "ws_init_dir_not_found"
 	MsgWsInitInvalidTarget     MsgKey = "ws_init_invalid_target"
+	MsgBackgroundAutoDenied    MsgKey = "background_auto_denied"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -718,6 +720,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "❌ エラー: %v",
 		LangSpanish:            "❌ Error: %v",
 	},
+	MsgBackgroundAutoDenied: {
+		LangEnglish:            "⚠️ Background task requested permission for `%s` but was auto-denied (no active user turn). Send a message or use `/yolo` to approve future requests.",
+		LangChinese:            "⚠️ 后台任务请求使用工具 `%s` 的权限，但已自动拒绝（当前无活跃会话）。请发送消息或使用 `/yolo` 授权后续请求。",
+		LangTraditionalChinese: "⚠️ 後台任務請求使用工具 `%s` 的權限，但已自動拒絕（目前無活躍會話）。請發送訊息或使用 `/yolo` 授權後續請求。",
+		LangJapanese:           "⚠️ バックグラウンドタスクがツール `%s` の権限を要求しましたが、自動的に拒否されました（アクティブなユーザーターンなし）。メッセージを送信するか `/yolo` を使用して今後のリクエストを承認してください。",
+		LangSpanish:            "⚠️ Una tarea en segundo plano solicitó permiso para `%s` pero se denegó automáticamente (sin turno de usuario activo). Envía un mensaje o usa `/yolo` para aprobar solicitudes futuras.",
+	},
 	MsgSessionNotFound: {
 		LangEnglish:            "⚠️ Session expired. Use /new to start a fresh conversation.",
 		LangChinese:            "⚠️ 会话已过期，请发送 /new 开始新会话",
@@ -864,6 +873,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "`%s` 不是 cc-connect 命令，已轉發給 Agent 處理...",
 		LangJapanese:           "`%s` は cc-connect のコマンドではありません。エージェントに転送します...",
 		LangSpanish:            "`%s` no es un comando de cc-connect, reenviando al agente...",
+	},
+	MsgWelcome: {
+		LangEnglish:            "👋 Hi! I'm cc-connect, bridging you to **%s**.\n\nJust send a message to chat with the agent. Type /help to see built-in commands.",
+		LangChinese:            "👋 你好！我是 cc-connect，已为你连接到 **%s**。\n\n直接发送消息即可与 Agent 对话。输入 /help 查看内置命令。",
+		LangTraditionalChinese: "👋 你好！我是 cc-connect，已為你連接到 **%s**。\n\n直接發送訊息即可與 Agent 對話。輸入 /help 查看內建命令。",
+		LangJapanese:           "👋 こんにちは！cc-connect が **%s** に接続しました。\n\nメッセージを送信すればエージェントと会話できます。/help で組み込みコマンド一覧を確認できます。",
+		LangSpanish:            "👋 ¡Hola! Soy cc-connect, conectándote con **%s**.\n\nEnvía un mensaje para chatear con el agente. Usa /help para ver los comandos integrados.",
 	},
 	MsgHelp: {
 		LangEnglish: "📖 Available Commands\n\n" +

@@ -185,6 +185,13 @@ level=INFO msg="cc-connect is running" projects=1
 3. Search and add your bot
 4. Send messages in the group
 
+### 6.3 Topic Sessions
+
+Telegram topics include a `message_thread_id`. cc-connect uses that thread ID
+as part of the Telegram session key, so each topic has its own independent
+conversation context. This applies to forum topics in groups and private chat
+topics when Telegram includes `message_thread_id`.
+
 ---
 
 ## Usage Example

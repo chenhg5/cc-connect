@@ -191,6 +191,23 @@ func TestSession_TryLockUnlock(t *testing.T) {
 	}
 }
 
+func TestSession_Busy(t *testing.T) {
+	s := &Session{}
+	if s.Busy() {
+		t.Error("fresh session should not be busy")
+	}
+	if !s.TryLock() {
+		t.Fatal("TryLock should succeed")
+	}
+	if !s.Busy() {
+		t.Error("session should be busy after TryLock")
+	}
+	s.Unlock()
+	if s.Busy() {
+		t.Error("session should not be busy after Unlock")
+	}
+}
+
 func TestSession_History(t *testing.T) {
 	s := &Session{}
 	s.AddHistory("user", "hello")

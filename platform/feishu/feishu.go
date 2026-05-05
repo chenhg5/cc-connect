@@ -140,9 +140,10 @@ type Platform struct {
 	cancel           context.CancelFunc
 	dedup            core.MessageDedup
 	botOpenID        string
-	userNameCache    sync.Map // open_id -> display name
-	chatNameCache    sync.Map // chat_id -> chat name
-	chatMemberCache  sync.Map // chatID -> *chatMemberEntry
+	peerBots         map[string]string // app_id -> friendly alias, for quoted-reply attribution
+	userNameCache    sync.Map          // open_id -> display name
+	chatNameCache    sync.Map          // chat_id -> chat name
+	chatMemberCache  sync.Map          // chatID -> *chatMemberEntry
 	// Webhook mode fields (for Lark international version)
 	server       *http.Server
 	port         string
@@ -211,6 +212,15 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		noReplyToTrigger = true
 	}
 
+	peerBots := map[string]string{}
+	if raw, ok := opts["peer_bots"].(map[string]any); ok {
+		for k, v := range raw {
+			if s, ok := v.(string); ok && s != "" {
+				peerBots[k] = s
+			}
+		}
+	}
+
 	progressStyle := "legacy"
 	if v, ok := opts["progress_style"].(string); ok {
 		switch strings.ToLower(strings.TrimSpace(v)) {
@@ -266,6 +276,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		port:                       port,
 		callbackPath:               callbackPath,
 		encryptKey:                 encryptKey,
+		peerBots:                   peerBots,
 	}
 	if !useInteractiveCard {
 		base.self = base
@@ -851,8 +862,11 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 
 	// If this message is a reply to another message, fetch the quoted content
 	// and prepend it so the agent has full context.
+	// Skip quote injection when thread_isolation is enabled and the message is
+	// inside a thread — the thread already provides conversational context, and
+	// long quoted prefixes can drown out the user's actual text (issue #764).
 	quotedPrefix := ""
-	if parentID != "" {
+	if parentID != "" && !(p.threadIsolation && isThreadSessionKey(sessionKey)) {
 		quotedPrefix = p.fetchQuotedMessage(ctx, parentID)
 	}
 
@@ -892,6 +906,9 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		imgData, mimeType, err := p.downloadImage(messageID, imgBody.ImageKey)
 		if err != nil {
 			slog.Error(p.tag()+": download image failed", "error", err)
+			if sendErr := p.Send(ctx, rctx, "⚠️ Image download failed (network error). Please resend."); sendErr != nil {
+				slog.Error(p.tag()+": failed to notify user about image download failure", "error", sendErr)
+			}
 			return
 		}
 		p.handler(p.dispatchPlatform(), &core.Message{
@@ -915,6 +932,9 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		audioData, err := p.downloadResource(messageID, audioBody.FileKey, "file")
 		if err != nil {
 			slog.Error(p.tag()+": download audio failed", "error", err)
+			if sendErr := p.Send(ctx, rctx, "⚠️ Voice message download failed (network error). Please resend."); sendErr != nil {
+				slog.Error(p.tag()+": failed to notify user about audio download failure", "error", sendErr)
+			}
 			return
 		}
 		p.handler(p.dispatchPlatform(), &core.Message{
@@ -957,6 +977,9 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		fileData, err := p.downloadResource(messageID, fileBody.FileKey, "file")
 		if err != nil {
 			slog.Error(p.tag()+": download file failed", "error", err)
+			if sendErr := p.Send(ctx, rctx, "⚠️ File download failed (network error). Please resend."); sendErr != nil {
+				slog.Error(p.tag()+": failed to notify user about file download failure", "error", sendErr)
+			}
 			return
 		}
 		slog.Debug(p.tag()+": file downloaded", "file_name", fileBody.FileName, "size", len(fileData))
@@ -1255,6 +1278,21 @@ func (p *Platform) fetchQuotedMessage(ctx context.Context, parentID string) stri
 	return formatReplyChain(chain)
 }
 
+// resolveBotSenderName returns a display name for a bot sender in a quoted
+// reply chain. Feishu sets sender.id to the bot's app_id (globally stable,
+// not an open_id). We consult the peer_bots config to map app_id → alias;
+// if the app is unknown, we surface the app_id so operators can add it to
+// the config rather than seeing an ambiguous "Bot".
+func (p *Platform) resolveBotSenderName(appID string) string {
+	if appID == "" {
+		return "Bot"
+	}
+	if alias := p.peerBots[appID]; alias != "" {
+		return alias
+	}
+	return "Bot[" + appID + "]"
+}
+
 // fetchSingleMessage retrieves one message by ID from the Feishu API and
 // returns its extracted content as a chainMessage. Returns nil on any failure.
 func (p *Platform) fetchSingleMessage(ctx context.Context, messageID string) *chainMessage {
@@ -1316,8 +1354,7 @@ func (p *Platform) fetchSingleMessage(ctx context.Context, messageID string) *ch
 	// Resolve sender name.
 	senderName := ""
 	if item.Sender.SenderType == "app" {
-		// Bot messages: sender ID is app_id, not a user open_id.
-		senderName = "Bot"
+		senderName = p.resolveBotSenderName(item.Sender.ID)
 	} else if item.Sender.ID != "" {
 		resolved := p.resolveUserName(item.Sender.ID)
 		if resolved != item.Sender.ID {

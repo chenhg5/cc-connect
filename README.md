@@ -33,6 +33,12 @@
   <a href="./README.md">English</a> | <a href="./README.zh-CN.md">中文</a>
 </p>
 
+<p align="center">
+  <a href="https://trendshift.io/repositories/23266" target="_blank">
+    <img src="https://trendshift.io/api/badge/repositories/23266" alt="chenhg5/cc-connect | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/>
+  </a>
+</p>
+
 
 ## ❤️ Sponsor
 
@@ -81,8 +87,28 @@ MiniMax-M2.7 is a next-generation large language model designed for autonomous e
 </tr>
 
 <tr>
+<td width="150"><a href="https://aicanapi.com"><img src="assets/sponsors/aican.jpg" alt="aicanapi.com" width="120"></a></td>
+<td>Thanks to aicanapi.com for sponsoring this project! aicanapi.com provides reliable AI model API relay services with support for Claude, GPT, Gemini and more. Stable, fast, and cost-effective access to mainstream AI models for developers. Register via <a href="https://aicanapi.com">this link</a> to get started.</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://pateway.ai/?ch=2qn568&aff=DRA4VUFS"><img src="assets/sponsors/patewayai.png" alt="Pateway" width="120"></a></td>
+<td>Thanks to Pateway for sponsoring this project! Pateway is a high-quality AI model API relay platform providing stable access to Claude, GPT, Gemini and other mainstream models. Fast response, transparent pricing, enterprise-grade reliability. Register via <a href="https://pateway.ai/?ch=2qn568&aff=DRA4VUFS">this link</a> to get started.</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://cy.10dianai.com/register?aff=3FQn"><img src="assets/sponsors/10dianai.png" alt="10点AI" width="120"></a></td>
+<td>Thanks to 10点AI for sponsoring this project! 10点AI provides reliable AI model API relay services with support for Claude, GPT, Gemini and more. Cost-effective, stable access for developers and teams. Register via <a href="https://cy.10dianai.com/register?aff=3FQn">this link</a> to get started.</td>
+</tr>
+
+<tr>
 <td width="150"><a href="https://code0.ai/register?aff=5cGO"><img src="assets/sponsors/code0.svg" alt="Code0" width="120"></a></td>
 <td>Thanks to Code0 for sponsoring this project! Code0 is an AI model aggregation API relay service for Chinese developers, compatible with OpenAI / Anthropic / Gemini protocols. One key for all mainstream models, stable support for Claude Code, Codex, Gemini CLI, cc-connect and more. Fixed exchange rate: ¥1.5 CNY = $1 USD API credit, transparent pricing, domestic direct connection, ready to use. Register via <a href="https://code0.ai/register?aff=5cGO">this link</a>.</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://passport.compshare.cn/register?referral_code=H65IOClRGu5CM7nn5ykfad&ytag=GPU_YY_YX_git_cc-connect"><img src="assets/sponsors/youyunzhisuan.png" alt="优云智算" width="120"></a></td>
+<td>Thanks to 优云智算 for sponsoring this project! 优云智算 (UCloud AI Cloud Platform) provides stable and comprehensive domestic and international model APIs with just one key. Featuring high-value Coding Plan packages (monthly or per-use), plus stable official relay for overseas models. Supports Claude Code, Codex, and API calls. Enterprise features include high concurrency, 7x24 technical support, and self-service invoicing. Register via <a href="https://passport.compshare.cn/register?referral_code=H65IOClRGu5CM7nn5ykfad&ytag=GPU_YY_YX_git_cc-connect">this link</a> to receive ¥5 free platform credit!</td>
 </tr>
 
 <tr>
@@ -98,11 +124,6 @@ MiniMax-M2.7 is a next-generation large language model designed for autonomous e
 <tr>
 <td width="150"><a href="https://console.claudeapi.com/register?aff=GDbA"><img src="assets/sponsors/claudeapi.svg" alt="claudeapi.com" width="120"></a></td>
 <td>Thanks to claudeapi.com for sponsoring this project! claudeapi is a high-quality direct Claude connection service for mid-to-high-end users. It is fully integrated with Anthropic's official first-party Keys and AWS Bedrock official channels — no reverse engineering, no intelligence degradation, no stitching. It fully preserves the official capabilities, long context, and tool-calling performance of Opus / Sonnet / Haiku. Designed specifically for Claude Code power users, Agent developers, and enterprise teams, it focuses on out-of-the-box usability and enterprise-grade stability. Invoicing and team onboarding are supported. Register via <a href="https://console.claudeapi.com/register?aff=GDbA">this link</a>.</td>
-</tr>
-
-<tr>
-<td width="150"><a href="https://passport.compshare.cn/register?referral_code=H65IOClRGu5CM7nn5ykfad&ytag=GPU_YY_YX_git_cc-connect"><img src="assets/sponsors/youyunzhisuan.png" alt="优云智算" width="120"></a></td>
-<td>Thanks to 优云智算 for sponsoring this project! 优云智算 (UCloud AI Cloud Platform) provides stable and comprehensive domestic and international model APIs with just one key. Featuring high-value Coding Plan packages (monthly or per-use), plus stable official relay for overseas models. Supports Claude Code, Codex, and API calls. Enterprise features include high concurrency, 7x24 technical support, and self-service invoicing. Register via <a href="https://passport.compshare.cn/register?referral_code=H65IOClRGu5CM7nn5ykfad&ytag=GPU_YY_YX_git_cc-connect">this link</a> to receive ¥5 free platform credit!</td>
 </tr>
 
 <tr>
@@ -524,11 +545,9 @@ If cc-connect has been helpful to you, consider buying us a coffee! Your support
 We're grateful to everyone who has supported this project. Leave your GitHub username in the donation message if you'd like to be recognized here!
 
 <!-- Donors will be listed below -->
-<!--
-| GitHub Username | Date |
-|-----------------|------|
-| @username | YYYY-MM-DD |
--->
+| Avatar | GitHub Username | Date |
+|--------|-----------------|------|
+| <img src="https://avatars.githubusercontent.com/u/1762560?v=4" width="40" height="40" style="border-radius: 50%;"> | [@thx0701](https://github.com/thx0701) | 2026-04-29 |
 
 
 ## 🤝 Commercial Cooperation

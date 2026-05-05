@@ -112,7 +112,7 @@ func TestOpencodeSessionBuildRunArgsIncludesImagesAsFiles(t *testing.T) {
 		"--thinking",
 		"--file", "/tmp/a.png",
 		"--file", "/tmp/b.jpg",
-		"describe these images",
+		"--", "describe these images",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("args = %#v, want %#v", got, want)

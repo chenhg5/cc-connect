@@ -37,6 +37,7 @@ type Agent struct {
 	workDir          string
 	cliBin           string   // CLI binary name or path (default: "claude")
 	cliExtraArgs     []string // extra args parsed from cli_path (e.g. ["code", "-t", "foo"])
+	configEnv        []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
 	cliArgsFlag      string   // if set, claude args are passed as a single string via this flag (e.g. "-a")
 	model            string
 	reasoningEffort  string // "low" | "medium" | "high" | "max"
@@ -186,6 +187,21 @@ func New(opts map[string]any) (core.Agent, error) {
 		}
 	}
 
+	// Parse project-level env from opts["env"] (set via [projects.agent.options.env] in config.toml).
+	// Stored separately from runtime sessionEnv so SetSessionEnv calls cannot overwrite it.
+	var configEnv []string
+	if envMap, ok := opts["env"].(map[string]string); ok {
+		for k, v := range envMap {
+			configEnv = append(configEnv, k+"="+v)
+		}
+	} else if envMap, ok := opts["env"].(map[string]any); ok {
+		for k, v := range envMap {
+			if s, ok := v.(string); ok {
+				configEnv = append(configEnv, k+"="+s)
+			}
+		}
+	}
+
 	return &Agent{
 		workDir:          workDir,
 		cliBin:           cliBin,
@@ -197,6 +213,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		allowedTools:     allowedTools,
 		disallowedTools:  disallowedTools,
 		maxContextTokens: maxContextTokens,
+		configEnv:        configEnv,
 		activeIdx:        -1,
 		routerURL:        routerURL,
 		routerAPIKey:     routerAPIKey,
@@ -671,6 +688,95 @@ func (a *Agent) GetRunAsEnv() []string {
 	return out
 }
 
+// WorkspaceAgentOptions returns a snapshot of user-configured options that
+// must propagate to per-workspace agent instances created lazily by
+// core.Engine.getOrCreateWorkspaceAgent. Without this snapshot, the engine
+// constructs workspace agents from a fresh opts map and silently drops
+// every claudecode field except mode/model — so cli_path, allowed_tools,
+// and friends would only take effect on the project-level agent.
+//
+// Runtime-only state (providers, sessionEnv, providerProxy, platformPrompt)
+// is intentionally omitted: providers are rewired separately by the engine
+// after construction; the rest is per-session and recomputed.
+//
+// configEnv IS included because it comes from the static config file and must
+// propagate to every workspace agent. sessionEnv is excluded (runtime-only).
+//
+// run_as_user / run_as_env are also omitted because the engine has its own
+// dedicated propagation path via GetRunAsUser/GetRunAsEnv (see cc-connect#496).
+func (a *Agent) WorkspaceAgentOptions() map[string]any {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	opts := map[string]any{
+		"mode": a.mode,
+	}
+	if len(a.configEnv) > 0 {
+		envMap := make(map[string]string, len(a.configEnv))
+		for _, kv := range a.configEnv {
+			k, v, _ := strings.Cut(kv, "=")
+			envMap[k] = v
+		}
+		opts["env"] = envMap
+	}
+	if cliPath := snapshotCLIPath(a.cliBin, a.cliExtraArgs); cliPath != "" {
+		opts["cli_path"] = cliPath
+	}
+	if a.cliArgsFlag != "" {
+		opts["cli_args_flag"] = a.cliArgsFlag
+	}
+	if a.model != "" {
+		opts["model"] = a.model
+	}
+	if a.reasoningEffort != "" {
+		opts["reasoning_effort"] = a.reasoningEffort
+	}
+	if len(a.allowedTools) > 0 {
+		opts["allowed_tools"] = stringsToAny(a.allowedTools)
+	}
+	if len(a.disallowedTools) > 0 {
+		opts["disallowed_tools"] = stringsToAny(a.disallowedTools)
+	}
+	if a.maxContextTokens > 0 {
+		opts["max_context_tokens"] = a.maxContextTokens
+	}
+	if a.routerURL != "" {
+		opts["router_url"] = a.routerURL
+	}
+	if a.routerAPIKey != "" {
+		opts["router_api_key"] = a.routerAPIKey
+	}
+	return opts
+}
+
+// snapshotCLIPath rebuilds the cli_path opts string from cliBin and the
+// extra-args tail captured at construction. Returns "" when only the
+// default "claude" binary is in use, so we don't pollute the workspace
+// opts with a redundant default.
+func snapshotCLIPath(cliBin string, cliExtraArgs []string) string {
+	// Normalise empty to the default binary so we can reason about extra args.
+	if cliBin == "" {
+		cliBin = "claude"
+	}
+	if cliBin == "claude" && len(cliExtraArgs) == 0 {
+		return "" // default binary, no extra args — no need to persist
+	}
+	if len(cliExtraArgs) == 0 {
+		return cliBin
+	}
+	return cliBin + " " + strings.Join(cliExtraArgs, " ")
+}
+
+// stringsToAny copies a []string into a fresh []any so it round-trips
+// through New()'s opts["..."].([]any) type assertion.
+func stringsToAny(in []string) []any {
+	out := make([]any, len(in))
+	for i, s := range in {
+		out[i] = s
+	}
+	return out
+}
+
 // PermissionModes returns all supported permission modes.
 func (a *Agent) PermissionModes() []core.PermissionModeInfo {
 	return []core.PermissionModeInfo{
@@ -950,7 +1056,11 @@ func (a *Agent) providerEnvLocked() []string {
 }
 
 func (a *Agent) runtimeEnvLocked() []string {
-	env := append([]string(nil), a.providerEnvLocked()...)
+	// configEnv (from config.toml [env]) is lower priority than provider keys or
+	// session-injected vars, but must survive SetSessionEnv calls (which only
+	// overwrite sessionEnv). Prepend it so later entries win on conflict.
+	env := append([]string(nil), a.configEnv...)
+	env = append(env, a.providerEnvLocked()...)
 	env = append(env, a.sessionEnv...)
 
 	if a.routerURL != "" {
@@ -1094,12 +1204,12 @@ func boolVal(m map[string]any, key string) bool {
 
 // encodeClaudeProjectKey converts an absolute path to Claude Code's project key format.
 // Claude Code encodes paths by:
-// 1. Replacing path separators (/ or \) with "-"
-// 2. Replacing colons (:) with "-" (Windows drive letters)
-// 3. Replacing underscores (_) with "-"
-// 4. Replacing spaces and tildes (~) with "-" (common in macOS iCloud paths like
-//    "/Users/x/Library/Mobile Documents/com~apple~CloudDocs/...")
-// 5. Replacing all non-ASCII characters with "-"
+//  1. Replacing path separators (/ or \) with "-"
+//  2. Replacing colons (:) with "-" (Windows drive letters)
+//  3. Replacing underscores (_) with "-"
+//  4. Replacing spaces and tildes (~) with "-" (common in macOS iCloud paths like
+//     "/Users/x/Library/Mobile Documents/com~apple~CloudDocs/...")
+//  5. Replacing all non-ASCII characters with "-"
 func encodeClaudeProjectKey(absPath string) string {
 	// First, normalize to forward slashes for consistent processing
 	normalized := strings.ReplaceAll(absPath, "\\", "/")
