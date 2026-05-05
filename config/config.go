@@ -141,9 +141,10 @@ type WebhookConfig struct {
 type BridgeConfig struct {
 	Enabled     *bool    `toml:"enabled"`                // default false
 	Port        int      `toml:"port,omitempty"`         // listen port; default 9810
-	Token       string   `toml:"token,omitempty"`        // shared secret for authentication; required
+	Token       string   `toml:"token,omitempty"`        // shared secret for authentication; required unless insecure=true
 	Path        string   `toml:"path,omitempty"`         // URL path; default "/bridge/ws"
 	CORSOrigins []string `toml:"cors_origins,omitempty"` // allowed CORS origins; empty = no CORS
+	Insecure    *bool    `toml:"insecure,omitempty"`     // allow running without token (local dev only); default false
 }
 
 // HookConfig is a single event hook rule.

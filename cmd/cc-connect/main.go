@@ -791,7 +791,17 @@ func main() {
 		if path == "" {
 			path = "/bridge/ws"
 		}
-		bridgeSrv = core.NewBridgeServer(port, cfg.Bridge.Token, path, cfg.Bridge.CORSOrigins)
+		// Check insecure flag for local development mode
+		insecure := cfg.Bridge.Insecure != nil && *cfg.Bridge.Insecure
+		if insecure {
+			bridgeSrv = core.NewBridgeServerInsecure(port, cfg.Bridge.Token, path, cfg.Bridge.CORSOrigins)
+		} else {
+			bridgeSrv = core.NewBridgeServer(port, cfg.Bridge.Token, path, cfg.Bridge.CORSOrigins)
+		}
+		if bridgeSrv == nil {
+			slog.Error("bridge: failed to create server - token is required (or set insecure=true for local dev)")
+			os.Exit(1)
+		}
 		for i, e := range engines {
 			bp := bridgeSrv.NewPlatform(cfg.Projects[i].Name)
 			bridgeSrv.RegisterEngine(cfg.Projects[i].Name, e, bp)
