@@ -18,6 +18,17 @@ func TestNewRequiresCredentials(t *testing.T) {
 	}
 }
 
+func TestNewRejectsInvalidGroupPolicy(t *testing.T) {
+	_, err := New(map[string]any{
+		"app_id":       "app",
+		"app_secret":   "secret",
+		"group_policy": "opne",
+	})
+	if err == nil {
+		t.Fatal("New() error = nil, want invalid group_policy error")
+	}
+}
+
 func TestBuildEnvelopeGroupMessage(t *testing.T) {
 	frame := &tuituiFrame{
 		Body: tuituiBody{
@@ -142,6 +153,33 @@ func TestPolicyExplicitUserAllowlistCanUseAnyMentionedGroup(t *testing.T) {
 	}
 }
 
+func TestPolicyOpenDoesNotBypassChannelAllowlist(t *testing.T) {
+	p := &Platform{
+		groupPolicy: "open",
+	}
+	if p.isAllowed(inboundEnvelope{chatType: chatTypeChannel, teamID: "team-1", channelID: "chan-1", senderID: "bob"}) {
+		t.Fatal("group_policy=open should not allow unlisted channel posts")
+	}
+
+	p.groupAllowFrom = "chan-1"
+	if !p.isAllowed(inboundEnvelope{chatType: chatTypeChannel, teamID: "team-1", channelID: "chan-1", senderID: "bob"}) {
+		t.Fatal("group_allow_from should allow channel posts")
+	}
+}
+
+func TestSessionKeyUsesCoreChannelFormat(t *testing.T) {
+	p := &Platform{}
+	if got := p.sessionKey(inboundEnvelope{chatType: chatTypeDirect, chatID: "alice", senderID: "alice"}); got != "tuitui:alice" {
+		t.Fatalf("direct session key = %q", got)
+	}
+	if got := p.sessionKey(inboundEnvelope{chatType: chatTypeGroup, chatID: "g1", senderID: "alice"}); got != "tuitui:g1:alice" {
+		t.Fatalf("group session key = %q", got)
+	}
+	if got := p.sessionKey(inboundEnvelope{chatType: chatTypeChannel, chatID: "teams_team-1_chan-1_root-1", senderID: "alice"}); got != "tuitui:teams_team-1_chan-1_root-1" {
+		t.Fatalf("channel session key = %q", got)
+	}
+}
+
 func TestSendTextGroupPayload(t *testing.T) {
 	var gotPath string
 	var gotQuery string
@@ -180,9 +218,17 @@ func TestSendTextGroupPayload(t *testing.T) {
 	}
 }
 
+func TestExtractMentionsTrimsTrailingPunctuation(t *testing.T) {
+	got := extractMentions("hi @alice, please ask @bob。and @carol!")
+	want := []string{"alice", "bob", "carol"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("extractMentions() = %#v, want %#v", got, want)
+	}
+}
+
 func TestReconstructReplyCtx(t *testing.T) {
 	p := &Platform{}
-	rc, err := p.ReconstructReplyCtx("tuitui:channel:teams_team-1_chan-1_root-1")
+	rc, err := p.ReconstructReplyCtx("tuitui:teams_team-1_chan-1_root-1")
 	if err != nil {
 		t.Fatalf("ReconstructReplyCtx() error = %v", err)
 	}

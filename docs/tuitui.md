@@ -57,19 +57,20 @@ ws_base = "wss://im.live.360.cn:8282"
 - `allow_from = "*"` does not bypass group/channel allowlists.
 - `group_allow_from` allows whole groups, teams, or channels.
 - `group_policy = "disabled"` disables group/channel handling; `group_policy = "open"` allows mentioned group messages without a group allowlist.
+- Channel posts remain gated by explicit `allow_from` users or `group_allow_from` even when `group_policy = "open"`.
 
 ## Session Keys / 会话键
 
 TuiTui session keys use these formats:
 
 ```text
-tuitui:direct:<user>
-tuitui:group:<group_id>:<user>
-tuitui:channel:teams_<team_id>_<channel_id>_<thread_id>
+tuitui:<user>
+tuitui:<group_id>:<user>
+tuitui:teams_<team_id>_<channel_id>_<thread_id>
 ```
 
 When `share_session_in_channel = true`, group chats use a shared session key:
 
 ```text
-tuitui:group:<group_id>
+tuitui:<group_id>
 ```

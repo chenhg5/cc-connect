@@ -94,6 +94,12 @@ func New(opts map[string]any) (core.Platform, error) {
 	if groupPolicy == "" {
 		groupPolicy = "allowlist"
 	}
+	groupPolicy = strings.ToLower(strings.TrimSpace(groupPolicy))
+	switch groupPolicy {
+	case "allowlist", "open", "disabled":
+	default:
+		return nil, fmt.Errorf("tuitui: invalid group_policy %q (want allowlist, open, or disabled)", groupPolicy)
+	}
 	requireMention := true
 	if v, ok := opts["require_mention"].(bool); ok {
 		requireMention = v
@@ -185,16 +191,15 @@ func (p *Platform) SendFile(ctx context.Context, replyCtx any, file core.FileAtt
 }
 
 func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
-	parts := strings.SplitN(sessionKey, ":", 4)
-	if len(parts) < 3 || parts[0] != "tuitui" {
+	parts := strings.SplitN(sessionKey, ":", 3)
+	if len(parts) < 2 || parts[0] != "tuitui" {
 		return nil, fmt.Errorf("tuitui: invalid session key %q", sessionKey)
 	}
-	chatType := parts[1]
-	chatID := parts[2]
-	if chatType == "" || chatID == "" {
+	chatID := parts[1]
+	if chatID == "" {
 		return nil, fmt.Errorf("tuitui: invalid session key %q", sessionKey)
 	}
-	return replyContext{chatID: chatID, chatType: chatType}, nil
+	return replyContext{chatID: chatID, chatType: guessChatType(chatID)}, nil
 }
 
 func (p *Platform) FormattingInstructions() string {
@@ -323,7 +328,7 @@ func (p *Platform) handleEvent(ctx context.Context, frame *tuituiFrame) {
 		Images:     images,
 		Files:      files,
 		Audio:      audio,
-		ChannelKey: "tuitui:" + env.chatType + ":" + env.chatID,
+		ChannelKey: env.chatID,
 		ReplyCtx:   rctx,
 	})
 }
@@ -353,23 +358,23 @@ func (p *Platform) isAllowed(env inboundEnvelope) bool {
 	if explicitUserAllowed(p.allowFrom, env.senderID) {
 		return true
 	}
-	if p.groupPolicy == "open" {
-		return true
-	}
 	if env.chatType == chatTypeChannel {
 		return allowListConfigured(p.groupAllowFrom, env.teamID) || allowListConfigured(p.groupAllowFrom, env.channelID)
+	}
+	if p.groupPolicy == "open" {
+		return true
 	}
 	return allowListConfigured(p.groupAllowFrom, env.chatID)
 }
 
 func (p *Platform) sessionKey(env inboundEnvelope) string {
 	if env.chatType == chatTypeDirect {
-		return "tuitui:direct:" + env.senderID
+		return "tuitui:" + env.senderID
 	}
 	if p.shareSessionInChannel || env.chatType == chatTypeChannel {
-		return "tuitui:" + env.chatType + ":" + env.chatID
+		return "tuitui:" + env.chatID
 	}
-	return "tuitui:" + env.chatType + ":" + env.chatID + ":" + env.senderID
+	return "tuitui:" + env.chatID + ":" + env.senderID
 }
 
 func requireReplyContext(replyCtx any) (replyContext, error) {
@@ -839,7 +844,7 @@ func teamsParseChatID(chatID string) map[string]string {
 	return out
 }
 
-var mentionRE = regexp.MustCompile(`(^|[\s\r\n　、。，！？…])@([^\s]+)`)
+var mentionRE = regexp.MustCompile(`(^|[\s\r\n　、。，！？…])@([^\s,，.。;；:：!！?？、)）\]】}｝]+)`)
 
 func extractMentions(text string) []string {
 	seen := map[string]bool{}
