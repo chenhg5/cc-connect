@@ -1,11 +1,208 @@
 package feishu
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/chenhg5/cc-connect/core"
+	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
+
+func TestOnMessageRecalledDispatchesCoreRecallMessage(t *testing.T) {
+	got := make(chan *core.Message, 1)
+	p := &Platform{
+		platformName: "feishu",
+		handler: func(_ core.Platform, msg *core.Message) {
+			got <- msg
+		},
+	}
+	messageID := "om_recalled"
+	chatID := "oc_chat"
+	recallTime := "1710000000000"
+	recallType := "user"
+
+	err := p.onMessageRecalled(context.Background(), &larkim.P2MessageRecalledV1{
+		Event: &larkim.P2MessageRecalledV1Data{
+			MessageId:  &messageID,
+			ChatId:     &chatID,
+			RecallTime: &recallTime,
+			RecallType: &recallType,
+		},
+	})
+	if err != nil {
+		t.Fatalf("onMessageRecalled returned error: %v", err)
+	}
+
+	select {
+	case msg := <-got:
+		if msg.Platform != "feishu" {
+			t.Fatalf("Platform = %q, want feishu", msg.Platform)
+		}
+		if msg.MessageID != messageID {
+			t.Fatalf("MessageID = %q, want %q", msg.MessageID, messageID)
+		}
+		if !msg.Recalled {
+			t.Fatal("Recalled = false, want true")
+		}
+		if msg.Content != "" {
+			t.Fatalf("Content = %q, want empty recall payload", msg.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for recall message")
+	}
+}
+
+func TestDispatchMessageDropsRecalledMessageBeforeHandler(t *testing.T) {
+	called := false
+	p := &Platform{
+		platformName: "feishu",
+		handler: func(_ core.Platform, _ *core.Message) {
+			called = true
+		},
+	}
+	p.markMessageRecalled("om_drop")
+
+	p.dispatchMessage(
+		context.Background(),
+		"text",
+		`{"text":"hello"}`,
+		nil,
+		"om_drop",
+		"feishu:ou_user:ou_user",
+		"",
+		"",
+		replyContext{messageID: "om_drop", sessionKey: "feishu:ou_user:ou_user"},
+		"",
+	)
+
+	if called {
+		t.Fatal("handler was called for a message already marked recalled")
+	}
+}
+
+func TestIsMessageRecalledDetectsWithdrawnMessageFromGetAPI(t *testing.T) {
+	const appID = "cli_recall_probe"
+	const appSecret = "secret-recall-probe"
+
+	getCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/open-apis/auth/v3/tenant_access_token/internal":
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "success",
+				"expire":              7200,
+				"tenant_access_token": "tenant-token",
+			})
+		case "/open-apis/im/v1/messages/om_withdrawn":
+			getCalls++
+			writeJSON(t, w, map[string]any{
+				"code": 230011,
+				"msg":  "The message was withdrawn.",
+			})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName: "feishu",
+		domain:       srv.URL,
+		appID:        appID,
+		appSecret:    appSecret,
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+		replayClient: lark.NewClient(appID, appSecret,
+			lark.WithEnableTokenCache(false),
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+	}
+
+	recalled, err := p.IsMessageRecalled(context.Background(), replyContext{messageID: "om_withdrawn", chatID: "oc_chat"})
+	if err != nil {
+		t.Fatalf("IsMessageRecalled() error = %v", err)
+	}
+	if !recalled {
+		t.Fatal("IsMessageRecalled() = false, want true")
+	}
+	if getCalls != 1 {
+		t.Fatalf("getCalls = %d, want 1", getCalls)
+	}
+	if !p.isMessageRecalled("om_withdrawn") {
+		t.Fatal("withdrawn message id was not cached after detection")
+	}
+}
+
+func TestIsMessageRecalledDetectsDeletedMessageItem(t *testing.T) {
+	const appID = "cli_recall_probe"
+	const appSecret = "secret-recall-probe"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/open-apis/auth/v3/tenant_access_token/internal":
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "success",
+				"expire":              7200,
+				"tenant_access_token": "tenant-token",
+			})
+		case "/open-apis/im/v1/messages/om_deleted":
+			writeJSON(t, w, map[string]any{
+				"code": 0,
+				"msg":  "success",
+				"data": map[string]any{
+					"items": []map[string]any{
+						{
+							"message_id": "om_deleted",
+							"deleted":    true,
+						},
+					},
+				},
+			})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName: "feishu",
+		domain:       srv.URL,
+		appID:        appID,
+		appSecret:    appSecret,
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+		replayClient: lark.NewClient(appID, appSecret,
+			lark.WithEnableTokenCache(false),
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+	}
+
+	recalled, err := p.IsMessageRecalled(context.Background(), replyContext{messageID: "om_deleted", chatID: "oc_chat"})
+	if err != nil {
+		t.Fatalf("IsMessageRecalled() error = %v", err)
+	}
+	if !recalled {
+		t.Fatal("IsMessageRecalled() = false, want true for deleted message item")
+	}
+	if !p.isMessageRecalled("om_deleted") {
+		t.Fatal("deleted message id was not cached after detection")
+	}
+}
 
 func TestExtractPostParts_TextOnly(t *testing.T) {
 	p := &Platform{}

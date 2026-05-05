@@ -49,6 +49,12 @@ const (
 	replyFooterUsageCacheTTL = 30 * time.Second
 )
 
+const (
+	messageRecallCheckTimeout = 2 * time.Second
+	messageRecallPollInterval = 2 * time.Second
+	recalledStopLockWait      = 2 * time.Second
+)
+
 // VersionInfo is set by main at startup so that /version works.
 var VersionInfo string
 
@@ -199,16 +205,16 @@ type Engine struct {
 	userRoles    *UserRoleManager // nil = legacy mode (no per-user policies)
 	userRolesMu  sync.RWMutex     // protects userRoles, disabledCmds, and adminFrom
 
-	rateLimiter      *RateLimiter
-	outgoingRL       *OutgoingRateLimiter
-	streamPreview    StreamPreviewCfg
-	references       ReferenceRenderCfg
-	relayManager     *RelayManager
-	eventIdleTimeout time.Duration
+	rateLimiter       *RateLimiter
+	outgoingRL        *OutgoingRateLimiter
+	streamPreview     StreamPreviewCfg
+	references        ReferenceRenderCfg
+	relayManager      *RelayManager
+	eventIdleTimeout  time.Duration
 	maxQueuedMessages int
-	dirHistory       *DirHistory
-	baseWorkDir      string
-	projectState     *ProjectStateStore
+	dirHistory        *DirHistory
+	baseWorkDir       string
+	projectState      *ProjectStateStore
 
 	// Auto-compress settings
 	autoCompressEnabled   bool
@@ -266,6 +272,7 @@ type workspaceInitFlow struct {
 // The message is NOT sent to agent stdin at queue time; the event loop
 // sends it after the current turn completes to avoid mid-turn interference.
 type queuedMessage struct {
+	messageID     string
 	platform      Platform
 	replyCtx      any
 	content       string
@@ -283,6 +290,7 @@ type interactiveState struct {
 	agentSession           AgentSession
 	platform               Platform
 	replyCtx               any
+	currentMessageID       string
 	workspaceDir           string
 	agent                  Agent
 	mu                     sync.Mutex
@@ -406,7 +414,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		streamPreview:         DefaultStreamPreviewCfg(),
 		references:            DefaultReferenceRenderCfg(),
 		eventIdleTimeout:      defaultEventIdleTimeout,
-		maxQueuedMessages:    defaultMaxQueuedMessages,
+		maxQueuedMessages:     defaultMaxQueuedMessages,
 		showContextIndicator:  true,
 	}
 
@@ -1659,7 +1667,184 @@ func (e *Engine) resolveAlias(content string) string {
 	return content
 }
 
+func (e *Engine) handleMessageRecall(p Platform, msg *Message) {
+	messageID := strings.TrimSpace(msg.MessageID)
+	if messageID == "" {
+		slog.Debug("message recall ignored without message id", "platform", msg.Platform)
+		return
+	}
+
+	if sessionKey, ok := e.findCurrentMessageSession(messageID); ok {
+		if e.stopInteractiveSessionSilently(sessionKey) {
+			slog.Info("active message recalled; session stopped",
+				"platform", p.Name(),
+				"msg_id", messageID,
+				"session", sessionKey,
+			)
+			return
+		}
+	}
+
+	if sessionKey, ok := e.removeQueuedMessageByID(messageID); ok {
+		slog.Info("queued message recalled; removed from pending queue",
+			"platform", p.Name(),
+			"msg_id", messageID,
+			"session", sessionKey,
+		)
+		return
+	}
+
+	slog.Debug("message recall ignored; no active or queued message matched",
+		"platform", p.Name(),
+		"msg_id", messageID,
+	)
+}
+
+func (e *Engine) findCurrentMessageSession(messageID string) (string, bool) {
+	e.interactiveMu.Lock()
+	defer e.interactiveMu.Unlock()
+
+	for sessionKey, state := range e.interactiveStates {
+		if state == nil {
+			continue
+		}
+		state.mu.Lock()
+		currentMessageID := state.currentMessageID
+		state.mu.Unlock()
+		if currentMessageID == messageID {
+			return sessionKey, true
+		}
+	}
+	return "", false
+}
+
+func (e *Engine) removeQueuedMessageByID(messageID string) (string, bool) {
+	e.interactiveMu.Lock()
+	states := make(map[string]*interactiveState, len(e.interactiveStates))
+	for sessionKey, state := range e.interactiveStates {
+		states[sessionKey] = state
+	}
+	e.interactiveMu.Unlock()
+
+	for sessionKey, state := range states {
+		if state == nil {
+			continue
+		}
+		state.mu.Lock()
+		pending := state.pendingMessages
+		if len(pending) == 0 {
+			state.mu.Unlock()
+			continue
+		}
+		filtered := pending[:0]
+		removed := false
+		for _, queued := range pending {
+			if queued.messageID == messageID {
+				removed = true
+				continue
+			}
+			filtered = append(filtered, queued)
+		}
+		if removed {
+			state.pendingMessages = filtered
+			state.mu.Unlock()
+			return sessionKey, true
+		}
+		state.mu.Unlock()
+	}
+	return "", false
+}
+
+func (e *Engine) stopCurrentMessageIfRecalled(sessionKey string) bool {
+	e.interactiveMu.Lock()
+	state, ok := e.interactiveStates[sessionKey]
+	e.interactiveMu.Unlock()
+	if !ok || state == nil {
+		return false
+	}
+
+	state.mu.Lock()
+	platform := state.platform
+	replyCtx := state.replyCtx
+	messageID := state.currentMessageID
+	state.mu.Unlock()
+	if platform == nil || replyCtx == nil || messageID == "" {
+		return false
+	}
+
+	detector, ok := platform.(MessageRecallDetector)
+	if !ok {
+		return false
+	}
+
+	ctx, cancel := context.WithTimeout(e.ctx, messageRecallCheckTimeout)
+	defer cancel()
+	recalled, err := detector.IsMessageRecalled(ctx, replyCtx)
+	if err != nil {
+		slog.Debug("message recall fallback check failed",
+			"platform", platform.Name(),
+			"msg_id", messageID,
+			"session", sessionKey,
+			"error", err,
+		)
+		return false
+	}
+	if !recalled {
+		return false
+	}
+	if e.stopInteractiveSessionSilently(sessionKey) {
+		slog.Info("active message recalled by fallback probe; session stopped",
+			"platform", platform.Name(),
+			"msg_id", messageID,
+			"session", sessionKey,
+		)
+		return true
+	}
+	return false
+}
+
+func (e *Engine) waitForSessionLock(session *Session, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if session.TryLock() {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		select {
+		case <-e.ctx.Done():
+			return false
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
+func (e *Engine) startMessageRecallMonitor(sessionKey string) context.CancelFunc {
+	ctx, cancel := context.WithCancel(e.ctx)
+	go func() {
+		ticker := time.NewTicker(messageRecallPollInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if e.stopCurrentMessageIfRecalled(sessionKey) {
+					return
+				}
+			}
+		}
+	}()
+	return cancel
+}
+
 func (e *Engine) handleMessage(p Platform, msg *Message) {
+	if msg.Recalled {
+		e.handleMessageRecall(p, msg)
+		return
+	}
+
 	slog.Info("message received",
 		"platform", msg.Platform, "msg_id", msg.MessageID,
 		"session", msg.SessionKey, "user", msg.UserName,
@@ -1850,6 +2035,13 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	session := sessions.GetOrCreateActive(msg.SessionKey)
 	sessions.UpdateUserMeta(msg.SessionKey, msg.UserName, msg.ChatName)
 	if !session.TryLock() {
+		if e.stopCurrentMessageIfRecalled(interactiveKey) {
+			if e.waitForSessionLock(session, recalledStopLockWait) {
+				goto sessionLocked
+			}
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
+			return
+		}
 		// Session is busy — try to queue the message for the running turn
 		// so the agent processes it immediately after the current turn ends.
 		if e.queueMessageForBusySession(p, msg, interactiveKey) {
@@ -1866,6 +2058,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		return
 	}
 
+sessionLocked:
 	if rotated := e.maybeAutoResetSessionOnIdle(p, msg, sessions, interactiveKey, session); rotated != nil {
 		session = rotated
 	}
@@ -1965,6 +2158,7 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		return true // handled: queue-full reply sent
 	}
 	state.pendingMessages = append(state.pendingMessages, queuedMessage{
+		messageID:     msg.MessageID,
 		platform:      p,
 		replyCtx:      msg.ReplyCtx,
 		content:       msg.Content,
@@ -2338,7 +2532,10 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.mu.Lock()
 	state.platform = p
 	state.replyCtx = msg.ReplyCtx
+	state.currentMessageID = msg.MessageID
 	state.mu.Unlock()
+	stopRecallMonitor := e.startMessageRecallMonitor(interactiveKey)
+	defer stopRecallMonitor()
 
 	if state.agentSession == nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgFailedToStartAgentSession))
@@ -2399,6 +2596,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 
 	sendStart := time.Now()
 	state.mu.Lock()
+	state.currentMessageID = msg.MessageID
 	state.fromVoice = msg.FromVoice
 	state.sideText = ""
 	state.mu.Unlock()
@@ -3126,6 +3324,12 @@ var agentErrorHandlers = []agentErrorHandler{
 }
 
 func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func(), sendDone <-chan error, replyCtx any) {
+	if msgID != "" {
+		state.mu.Lock()
+		state.currentMessageID = msgID
+		state.mu.Unlock()
+	}
+
 	var textParts []string
 	var segmentStart int // index into textParts: text before this has been sent/displayed
 	silentHold := false  // true while accumulated segment text could still resolve to a bare NO_REPLY marker
@@ -3728,6 +3932,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				remainingQueue := len(state.pendingMessages)
 				state.platform = queued.platform
 				state.replyCtx = queued.replyCtx
+				state.currentMessageID = queued.messageID
 				state.fromVoice = queued.fromVoice
 				state.mu.Unlock()
 
@@ -3767,6 +3972,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				e.i18n.DetectAndSet(queued.content)
 
 				// Reset per-turn state for the next turn
+				msgID = queued.messageID
 				textParts = nil
 				segmentStart = 0
 				toolCount = 0
@@ -3951,6 +4157,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		state.pendingMessages = state.pendingMessages[1:]
 		state.platform = queued.platform
 		state.replyCtx = queued.replyCtx
+		state.currentMessageID = queued.messageID
 		state.fromVoice = queued.fromVoice
 		state.mu.Unlock()
 
@@ -3978,7 +4185,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		}
 
 		slog.Info("processing queued message", "session", sessionKey)
-		e.processInteractiveEvents(state, session, sessions, sessionKey, "", time.Now(), stopTyping, sendDone, queued.replyCtx)
+		e.processInteractiveEvents(state, session, sessions, sessionKey, queued.messageID, time.Now(), stopTyping, sendDone, queued.replyCtx)
 	}
 }
 
@@ -7275,6 +7482,14 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 }
 
 func (e *Engine) stopInteractiveSession(sessionKey string, quietPlatform Platform, quietReplyCtx any) bool {
+	return e.stopInteractiveSessionWithOptions(sessionKey, true)
+}
+
+func (e *Engine) stopInteractiveSessionSilently(sessionKey string) bool {
+	return e.stopInteractiveSessionWithOptions(sessionKey, false)
+}
+
+func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueued bool) bool {
 	e.interactiveMu.Lock()
 	state, ok := e.interactiveStates[sessionKey]
 	if !ok || state == nil {
@@ -7298,7 +7513,13 @@ func (e *Engine) stopInteractiveSession(sessionKey string, quietPlatform Platfor
 	if pending != nil {
 		pending.resolve()
 	}
-	e.notifyDroppedQueuedMessages(state, fmt.Errorf("session reset"))
+	if notifyQueued {
+		e.notifyDroppedQueuedMessages(state, fmt.Errorf("session reset"))
+	} else {
+		state.mu.Lock()
+		state.pendingMessages = nil
+		state.mu.Unlock()
+	}
 	e.closeAgentSessionAsync(sessionKey, agentSession)
 
 	e.hooks.Emit(HookEvent{
