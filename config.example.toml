@@ -92,6 +92,20 @@ level = "info" # debug, info, warn, error
 # tool_max_len = 500       # Max chars for tool use messages (default: 500) / 工具调用消息最大字符数（默认 500）
 # tool_messages = true     # Show/hide tool progress messages (default: true) / 是否显示工具进度消息（默认 true）
 
+# Per-project override: each [[projects]] entry may have its own [projects.display]
+# block that overrides individual fields of the global [display] block above.
+# Resolution order is per-field — set fields win, unset fields fall back to global,
+# then to built-in defaults. Useful when one project should be quiet while others
+# stay verbose, or vice versa.
+# 每个 [[projects]] 条目可以有自己的 [projects.display] 块，逐字段覆盖全局
+# [display]。已设字段优先，未设字段回落到全局值，再回落到默认值。
+#
+# [[projects]]
+# name = "noisy-project"
+# [projects.display]
+# thinking_messages = false  # Override only this field; others inherit from global
+# tool_messages = false
+
 # Agent idle timeout: max minutes between consecutive agent events before
 # considering the session stuck. Set to 0 to disable the timeout entirely.
 # Agent 空闲超时：两次 agent 事件之间的最大等待分钟数，超时则认为会话卡住。设为 0 禁用。

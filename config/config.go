@@ -346,6 +346,22 @@ type ProjectConfig struct {
 	// Quiet is legacy per-project override; see Config.Quiet. When true and global [display]
 	// omits thinking_messages / tool_messages, those default to off for this project.
 	Quiet      *bool           `toml:"quiet,omitempty"`
+	// Display, when non-nil, overrides individual fields of the global [display]
+	// block for this project. Each sub-field is independently optional; unset
+	// fields fall back to the global [display] value, then to the built-in
+	// defaults. Example: enable verbose display globally but force quiet on a
+	// specific noisy project, or vice versa.
+	//
+	//   [display]
+	//   thinking_messages = true
+	//   tool_messages = true
+	//
+	//   [[projects]]
+	//   name = "noisy-project"
+	//   [projects.display]
+	//   thinking_messages = false
+	//   tool_messages = false
+	Display    *DisplayConfig  `toml:"display,omitempty"`
 	Observe    *ObserveConfig  `toml:"observe,omitempty"`
 	References ReferenceConfig `toml:"references,omitempty"`
 	// FilterExternalSessions: when true, /list only shows sessions created by
@@ -588,31 +604,85 @@ func projectQuietEffective(cfg *Config, proj *ProjectConfig) bool {
 	return false
 }
 
-// EffectiveDisplay resolves global [display] together with legacy quiet (root or per-project).
-// If quiet is in effect and thinking_messages / tool_messages were not explicitly set in [display],
-// they map to false (backward-compatible with pre-display quiet = true).
+// EffectiveDisplay resolves the per-project [projects.display] override on top
+// of the global [display] block, falling back to built-in defaults. Resolution
+// order for each field:
+//  1. project-level [projects.display].<field>  (highest precedence)
+//  2. global [display].<field>
+//  3. built-in default
+//
+// Legacy quiet (root or per-project) is preserved: if quiet is in effect AND
+// neither layer explicitly set thinking_messages / tool_messages, they default
+// to false (backward-compatible with pre-display quiet = true).
 func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (thinkingMessages, toolMessages bool, thinkingMaxLen, toolMaxLen int) {
-	thinkingMessages = true
-	toolMessages = true
-	thinkingMaxLen = 300
-	toolMaxLen = 500
-	if cfg.Display.ThinkingMessages != nil {
-		thinkingMessages = *cfg.Display.ThinkingMessages
+	pickBool := func(projVal, globalVal *bool, dflt bool) bool {
+		if projVal != nil {
+			return *projVal
+		}
+		if globalVal != nil {
+			return *globalVal
+		}
+		return dflt
 	}
-	if cfg.Display.ToolMessages != nil {
-		toolMessages = *cfg.Display.ToolMessages
+	pickInt := func(projVal, globalVal *int, dflt int) int {
+		if projVal != nil {
+			return *projVal
+		}
+		if globalVal != nil {
+			return *globalVal
+		}
+		return dflt
 	}
-	if cfg.Display.ThinkingMaxLen != nil {
-		thinkingMaxLen = *cfg.Display.ThinkingMaxLen
+
+	var projDisp *DisplayConfig
+	if proj != nil {
+		projDisp = proj.Display
 	}
-	if cfg.Display.ToolMaxLen != nil {
-		toolMaxLen = *cfg.Display.ToolMaxLen
+	getProjBool := func(f func(*DisplayConfig) *bool) *bool {
+		if projDisp == nil {
+			return nil
+		}
+		return f(projDisp)
 	}
+	getProjInt := func(f func(*DisplayConfig) *int) *int {
+		if projDisp == nil {
+			return nil
+		}
+		return f(projDisp)
+	}
+
+	thinkingMessages = pickBool(
+		getProjBool(func(d *DisplayConfig) *bool { return d.ThinkingMessages }),
+		cfg.Display.ThinkingMessages,
+		true,
+	)
+	toolMessages = pickBool(
+		getProjBool(func(d *DisplayConfig) *bool { return d.ToolMessages }),
+		cfg.Display.ToolMessages,
+		true,
+	)
+	thinkingMaxLen = pickInt(
+		getProjInt(func(d *DisplayConfig) *int { return d.ThinkingMaxLen }),
+		cfg.Display.ThinkingMaxLen,
+		300,
+	)
+	toolMaxLen = pickInt(
+		getProjInt(func(d *DisplayConfig) *int { return d.ToolMaxLen }),
+		cfg.Display.ToolMaxLen,
+		500,
+	)
+
+	// Legacy quiet behavior preserved: when project-level quiet is on AND
+	// neither layer explicitly set thinking_messages / tool_messages, they
+	// default to off. Per-project [projects.display] takes precedence over
+	// both global display and quiet.
 	if projectQuietEffective(cfg, proj) {
-		if cfg.Display.ThinkingMessages == nil {
+		projThink := getProjBool(func(d *DisplayConfig) *bool { return d.ThinkingMessages })
+		projTool := getProjBool(func(d *DisplayConfig) *bool { return d.ToolMessages })
+		if cfg.Display.ThinkingMessages == nil && projThink == nil {
 			thinkingMessages = false
 		}
-		if cfg.Display.ToolMessages == nil {
+		if cfg.Display.ToolMessages == nil && projTool == nil {
 			toolMessages = false
 		}
 	}

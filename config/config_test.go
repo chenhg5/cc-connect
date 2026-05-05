@@ -268,6 +268,122 @@ func TestEffectiveDisplayQuiet(t *testing.T) {
 	}
 }
 
+func TestEffectiveDisplay_ProjectOverride(t *testing.T) {
+	tru, fal := true, false
+	maxA, maxB := 100, 200
+
+	tests := []struct {
+		name           string
+		cfg            Config
+		proj           ProjectConfig
+		wantTM         bool
+		wantTool       bool
+		wantThinkLen   int
+		wantToolMaxLen int
+	}{
+		{
+			name: "project overrides global thinking_messages",
+			cfg: Config{
+				Display: DisplayConfig{ThinkingMessages: &tru, ToolMessages: &tru},
+			},
+			proj: ProjectConfig{
+				Display: &DisplayConfig{ThinkingMessages: &fal},
+			},
+			wantTM:         false,
+			wantTool:       true,
+			wantThinkLen:   300,
+			wantToolMaxLen: 500,
+		},
+		{
+			name: "project unset falls back to global",
+			cfg: Config{
+				Display: DisplayConfig{ThinkingMessages: &fal, ToolMessages: &fal},
+			},
+			proj: ProjectConfig{
+				Display: &DisplayConfig{},
+			},
+			wantTM:         false,
+			wantTool:       false,
+			wantThinkLen:   300,
+			wantToolMaxLen: 500,
+		},
+		{
+			name: "both unset falls back to default",
+			cfg:  Config{},
+			proj: ProjectConfig{
+				Display: &DisplayConfig{},
+			},
+			wantTM:         true,
+			wantTool:       true,
+			wantThinkLen:   300,
+			wantToolMaxLen: 500,
+		},
+		{
+			name: "project overrides max-len fields",
+			cfg: Config{
+				Display: DisplayConfig{ThinkingMaxLen: &maxA, ToolMaxLen: &maxA},
+			},
+			proj: ProjectConfig{
+				Display: &DisplayConfig{ThinkingMaxLen: &maxB, ToolMaxLen: &maxB},
+			},
+			wantTM:         true,
+			wantTool:       true,
+			wantThinkLen:   200,
+			wantToolMaxLen: 200,
+		},
+		{
+			name: "project quiet still respected when project display unset",
+			cfg:  Config{Quiet: &tru},
+			proj: ProjectConfig{
+				Display: &DisplayConfig{},
+			},
+			wantTM:         false,
+			wantTool:       false,
+			wantThinkLen:   300,
+			wantToolMaxLen: 500,
+		},
+		{
+			name: "project display.thinking_messages true overrides project quiet",
+			cfg:  Config{Quiet: &tru},
+			proj: ProjectConfig{
+				Display: &DisplayConfig{ThinkingMessages: &tru},
+			},
+			wantTM:         true,
+			wantTool:       false,
+			wantThinkLen:   300,
+			wantToolMaxLen: 500,
+		},
+		{
+			name: "nil project display behaves like before",
+			cfg: Config{
+				Display: DisplayConfig{ThinkingMessages: &fal},
+			},
+			proj:           ProjectConfig{},
+			wantTM:         false,
+			wantTool:       true,
+			wantThinkLen:   300,
+			wantToolMaxLen: 500,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tm, tool, thinkLen, toolMaxLen := EffectiveDisplay(&tt.cfg, &tt.proj)
+			if tm != tt.wantTM {
+				t.Errorf("ThinkingMessages = %v, want %v", tm, tt.wantTM)
+			}
+			if tool != tt.wantTool {
+				t.Errorf("ToolMessages = %v, want %v", tool, tt.wantTool)
+			}
+			if thinkLen != tt.wantThinkLen {
+				t.Errorf("ThinkingMaxLen = %d, want %d", thinkLen, tt.wantThinkLen)
+			}
+			if toolMaxLen != tt.wantToolMaxLen {
+				t.Errorf("ToolMaxLen = %d, want %d", toolMaxLen, tt.wantToolMaxLen)
+			}
+		})
+	}
+}
+
 func TestLoad_DefaultsDataDir(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
