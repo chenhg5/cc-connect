@@ -248,7 +248,8 @@ func TestTryHook(t *testing.T) {
 		}`), 0644)
 
 		r := newCCPermissionHookRunner(dir)
-		decision, ok := r.tryHook(context.Background(), "Bash", map[string]any{"command": "ls"}, "test-session")
+		hctx := hookContext{sessionID: "test-session", toolName: "Bash", toolInput: map[string]any{"command": "ls"}, cwd: dir}
+		decision, ok := r.tryHook(context.Background(), hctx)
 		if !ok {
 			t.Fatal("expected hook to match")
 		}
@@ -271,7 +272,8 @@ func TestTryHook(t *testing.T) {
 		}`), 0644)
 
 		r := newCCPermissionHookRunner(dir)
-		_, ok := r.tryHook(context.Background(), "Bash", map[string]any{"command": "ls"}, "test-session")
+		hctx := hookContext{sessionID: "test-session", toolName: "Bash", toolInput: map[string]any{"command": "ls"}, cwd: dir}
+		_, ok := r.tryHook(context.Background(), hctx)
 		if ok {
 			t.Fatal("expected no match")
 		}
@@ -291,7 +293,8 @@ func TestTryHook(t *testing.T) {
 		}`), 0644)
 
 		r := newCCPermissionHookRunner(dir)
-		_, ok := r.tryHook(context.Background(), "Bash", map[string]any{}, "test-session")
+		hctx := hookContext{sessionID: "test-session", toolName: "Bash", toolInput: map[string]any{}, cwd: dir}
+		_, ok := r.tryHook(context.Background(), hctx)
 		if ok {
 			t.Fatal("expected fallthrough for 'ask'")
 		}
@@ -311,7 +314,8 @@ func TestTryHook(t *testing.T) {
 		}`), 0644)
 
 		r := newCCPermissionHookRunner(dir)
-		decision, ok := r.tryHook(context.Background(), "AnyTool", map[string]any{}, "test-session")
+		hctx := hookContext{sessionID: "test-session", toolName: "AnyTool", toolInput: map[string]any{}, cwd: dir}
+		decision, ok := r.tryHook(context.Background(), hctx)
 		if !ok {
 			t.Fatal("expected wildcard match")
 		}
@@ -322,7 +326,8 @@ func TestTryHook(t *testing.T) {
 
 	t.Run("no settings files", func(t *testing.T) {
 		r := newCCPermissionHookRunner("/nonexistent/path")
-		_, ok := r.tryHook(context.Background(), "Bash", map[string]any{}, "test-session")
+		hctx := hookContext{sessionID: "test-session", toolName: "Bash", toolInput: map[string]any{}}
+		_, ok := r.tryHook(context.Background(), hctx)
 		if ok {
 			t.Fatal("expected no match when no settings exist")
 		}
@@ -342,7 +347,8 @@ func TestTryHook(t *testing.T) {
 		}`), 0644)
 
 		r := newCCPermissionHookRunner(dir)
-		decision, ok := r.tryHook(context.Background(), "Bash", map[string]any{}, "test-session")
+		hctx := hookContext{sessionID: "test-session", toolName: "Bash", toolInput: map[string]any{}, cwd: dir}
+		decision, ok := r.tryHook(context.Background(), hctx)
 		if !ok {
 			t.Fatal("expected second entry to match")
 		}
@@ -374,7 +380,8 @@ func TestTryHook(t *testing.T) {
 		}`), 0644)
 
 		r := newCCPermissionHookRunner(dir)
-		decision, ok := r.tryHook(context.Background(), "Bash", map[string]any{}, "test-session")
+		hctx := hookContext{sessionID: "test-session", toolName: "Bash", toolInput: map[string]any{}, cwd: dir}
+		decision, ok := r.tryHook(context.Background(), hctx)
 		if !ok {
 			t.Fatal("expected merged settings to produce a match")
 		}
@@ -385,7 +392,16 @@ func TestTryHook(t *testing.T) {
 }
 
 func TestBuildHookStdin(t *testing.T) {
-	data := buildHookStdin("Bash", map[string]any{"command": "ls"}, "/workdir", "sess-123")
+	hctx := hookContext{
+		sessionID:          "sess-123",
+		toolName:           "Bash",
+		toolInput:          map[string]any{"command": "ls"},
+		cwd:                "/workdir",
+		permissionMode:     "default",
+		transcriptPath:     "/tmp/transcript.jsonl",
+		permissionSuggestions: []any{},
+	}
+	data := buildHookStdin(hctx)
 	if data["tool_name"] != "Bash" {
 		t.Errorf("tool_name = %v, want Bash", data["tool_name"])
 	}
@@ -397,6 +413,12 @@ func TestBuildHookStdin(t *testing.T) {
 	}
 	if data["session_id"] != "sess-123" {
 		t.Errorf("session_id = %v, want sess-123", data["session_id"])
+	}
+	if data["permission_mode"] != "default" {
+		t.Errorf("permission_mode = %v, want default", data["permission_mode"])
+	}
+	if data["transcript_path"] != "/tmp/transcript.jsonl" {
+		t.Errorf("transcript_path = %v, want /tmp/transcript.jsonl", data["transcript_path"])
 	}
 	input, ok := data["tool_input"].(map[string]any)
 	if !ok {
@@ -410,5 +432,20 @@ func TestBuildHookStdin(t *testing.T) {
 	_, err := json.Marshal(data)
 	if err != nil {
 		t.Fatalf("json.Marshal failed: %v", err)
+	}
+
+	// Verify optional fields are omitted when empty.
+	minimal := buildHookStdin(hookContext{sessionID: "s", toolName: "Read", toolInput: map[string]any{}})
+	if _, ok := minimal["permission_mode"]; ok {
+		t.Error("permission_mode should be omitted when empty")
+	}
+	if _, ok := minimal["transcript_path"]; ok {
+		t.Error("transcript_path should be omitted when empty")
+	}
+	if _, ok := minimal["agent_id"]; ok {
+		t.Error("agent_id should be omitted when empty")
+	}
+	if _, ok := minimal["agent_type"]; ok {
+		t.Error("agent_type should be omitted when empty")
 	}
 }

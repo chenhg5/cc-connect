@@ -506,7 +506,15 @@ func (cs *claudeSession) handleControlRequest(raw map[string]any) {
 	}
 
 	// Check Claude Code's PermissionRequest hooks before forwarding to platform.
-	if decision, ok := cs.ccHooks.tryHook(cs.ctx, toolName, input, cs.CurrentSessionID()); ok {
+	hctx := hookContext{
+		sessionID:      cs.CurrentSessionID(),
+		toolName:       toolName,
+		toolInput:      input,
+		cwd:            cs.workDir,
+		permissionMode: cs.permissionModeValue(),
+		transcriptPath: cs.transcriptPath(),
+	}
+	if decision, ok := cs.ccHooks.tryHook(cs.ctx, hctx); ok {
 		slog.Info("claudeSession: hook decided",
 			"request_id", requestID, "tool", toolName, "behavior", decision.Behavior)
 		result := core.PermissionResult{
@@ -713,6 +721,33 @@ func (cs *claudeSession) Events() <-chan core.Event {
 func (cs *claudeSession) CurrentSessionID() string {
 	v, _ := cs.sessionID.Load().(string)
 	return v
+}
+
+func (cs *claudeSession) permissionModeValue() string {
+	v, _ := cs.permissionMode.Load().(string)
+	return v
+}
+
+// transcriptPath returns the path to the Claude Code JSONL transcript
+// for the current session, or "" if it cannot be determined.
+func (cs *claudeSession) transcriptPath() string {
+	sessionID := cs.CurrentSessionID()
+	if sessionID == "" || cs.workDir == "" {
+		return ""
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	absWorkDir, err := filepath.Abs(cs.workDir)
+	if err != nil {
+		return ""
+	}
+	projectDir := findProjectDir(homeDir, absWorkDir)
+	if projectDir == "" {
+		return ""
+	}
+	return filepath.Join(projectDir, sessionID+".jsonl")
 }
 
 func (cs *claudeSession) Alive() bool {

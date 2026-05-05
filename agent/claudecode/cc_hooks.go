@@ -40,6 +40,20 @@ type ccHookDecision struct {
 	Message  string // reason for deny (optional)
 }
 
+// hookContext carries the session context needed to build hook stdin.
+// Fields mirror Claude Code's PermissionRequest hook input spec.
+type hookContext struct {
+	sessionID          string
+	toolName           string
+	toolInput          map[string]any
+	cwd                string
+	permissionMode     string
+	transcriptPath     string
+	permissionSuggestions []any // nil = omit from stdin
+	agentID            string // empty = omit
+	agentType          string // empty = omit
+}
+
 // ccPermissionHookRunner reads and executes Claude Code PermissionRequest
 // hooks. Settings are loaded once on first use and reused for the session.
 type ccPermissionHookRunner struct {
@@ -59,9 +73,7 @@ func newCCPermissionHookRunner(workDir string) *ccPermissionHookRunner {
 // Returns (_, false) if no hook matched, hook returned "ask", or any error.
 func (r *ccPermissionHookRunner) tryHook(
 	ctx context.Context,
-	toolName string,
-	input map[string]any,
-	sessionID string,
+	hctx hookContext,
 ) (ccHookDecision, bool) {
 	r.once.Do(func() { r.settings = r.loadSettings() })
 	if r.settings == nil {
@@ -70,14 +82,14 @@ func (r *ccPermissionHookRunner) tryHook(
 	settings := r.settings
 
 	for _, entry := range settings.Hooks.PermissionRequest {
-		if !matchHookEntry(entry.Matcher, toolName) {
+		if !matchHookEntry(entry.Matcher, hctx.toolName) {
 			continue
 		}
 		for _, h := range entry.Hooks {
 			if h.Type != "command" || h.Command == "" {
 				continue
 			}
-			stdinData := buildHookStdin(toolName, input, r.workDir, sessionID)
+			stdinData := buildHookStdin(hctx)
 			decision, err := runHookCommand(ctx, h.Command, stdinData)
 			if err != nil {
 				slog.Warn("ccHooks: hook command failed",
@@ -295,16 +307,32 @@ func parseHookOutput(data []byte) (ccHookDecision, error) {
 	return ccHookDecision{}, nil
 }
 
-// buildHookStdin constructs the JSON payload for the hook's stdin.
-func buildHookStdin(toolName string, input map[string]any, cwd, sessionID string) map[string]any {
+// buildHookStdin constructs the JSON payload for the hook's stdin,
+// matching Claude Code's PermissionRequest hook input spec.
+func buildHookStdin(hctx hookContext) map[string]any {
 	m := map[string]any{
-		"session_id":      sessionID,
+		"session_id":      hctx.sessionID,
 		"hook_event_name": "PermissionRequest",
-		"tool_name":       toolName,
-		"tool_input":      input,
+		"tool_name":       hctx.toolName,
+		"tool_input":      hctx.toolInput,
 	}
-	if cwd != "" {
-		m["cwd"] = cwd
+	if hctx.cwd != "" {
+		m["cwd"] = hctx.cwd
+	}
+	if hctx.permissionMode != "" {
+		m["permission_mode"] = hctx.permissionMode
+	}
+	if hctx.transcriptPath != "" {
+		m["transcript_path"] = hctx.transcriptPath
+	}
+	if hctx.permissionSuggestions != nil {
+		m["permission_suggestions"] = hctx.permissionSuggestions
+	}
+	if hctx.agentID != "" {
+		m["agent_id"] = hctx.agentID
+	}
+	if hctx.agentType != "" {
+		m["agent_type"] = hctx.agentType
 	}
 	return m
 }
