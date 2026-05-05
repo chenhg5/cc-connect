@@ -984,6 +984,29 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			ReplyCtx: rctx,
 		})
 
+	case "interactive":
+		// The content pushed by Feishu's im.message.receive_v1 event for
+		// interactive cards is a simplified representation (often just an image
+		// key + placeholder text like "请升级至最新版本客户端").
+		// We need to fetch the full card content via the message API with
+		// card_msg_content_type=raw_card_content to get the actual text.
+		cardText := p.fetchInteractiveCardText(ctx, messageID)
+		if cardText == "" {
+			slog.Debug(p.tag()+": interactive card produced no content", "message_id", messageID)
+			return
+		}
+		text := stripMentions(cardText, mentions, p.botOpenID)
+		if text == "" {
+			slog.Debug(p.tag()+": interactive card text empty after mention stripping", "message_id", messageID)
+			return
+		}
+		p.handler(p.dispatchPlatform(), &core.Message{
+			SessionKey: sessionKey, Platform: p.platformName,
+			MessageID: messageID,
+			UserID:    userID, UserName: userName, ChatName: chatName,
+			Content: quotedPrefix + text, ReplyCtx: rctx,
+		})
+
 	case "merge_forward":
 		text, images, files := p.parseMergeForward(messageID)
 		if text == "" && len(images) == 0 && len(files) == 0 {
@@ -1418,6 +1441,39 @@ func formatReplyChain(chain []chainMessage) string {
 	}
 	b.WriteString("---\n\n")
 	return b.String()
+}
+
+// fetchInteractiveCardText fetches the full card content for an interactive
+// message via the GET /open-apis/im/v1/messages/{message_id} API with
+// card_msg_content_type=raw_card_content. The event-pushed content for
+// interactive cards is a simplified representation; this call retrieves the
+// complete card JSON so we can extract the actual text.
+func (p *Platform) fetchInteractiveCardText(ctx context.Context, messageID string) string {
+	apiPath := fmt.Sprintf("/open-apis/im/v1/messages/%s?card_msg_content_type=raw_card_content", messageID)
+	apiResp, err := p.client.Get(ctx, apiPath, nil, larkcore.AccessTokenTypeTenant)
+	if err != nil {
+		slog.Debug(p.tag()+": fetch interactive card failed", "message_id", messageID, "error", err)
+		return ""
+	}
+	var resp struct {
+		Code int `json:"code"`
+		Data struct {
+			Items []struct {
+				Body struct {
+					Content string `json:"content"`
+				} `json:"body"`
+			} `json:"items"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(apiResp.RawBody, &resp); err != nil || resp.Code != 0 || len(resp.Data.Items) == 0 {
+		slog.Debug(p.tag()+": fetch interactive card: parse failed or no data", "message_id", messageID, "code", resp.Code)
+		return ""
+	}
+	content := resp.Data.Items[0].Body.Content
+	if content == "" {
+		return ""
+	}
+	return extractInteractiveCardText(content)
 }
 
 // extractPostPlainText extracts plain text from a Lark post (rich text) JSON content.
