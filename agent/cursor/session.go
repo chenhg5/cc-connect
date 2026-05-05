@@ -34,6 +34,10 @@ type cursorSession struct {
 	wg       sync.WaitGroup
 	alive    atomic.Bool
 
+	// stdin for writing permission responses back to Cursor process
+	stdin   io.WriteCloser
+	stdinMu sync.Mutex
+
 	thinkingBuf strings.Builder // accumulate thinking deltas
 }
 
@@ -111,6 +115,12 @@ func (cs *cursorSession) Send(prompt string, images []core.ImageAttachment, file
 	if err != nil {
 		return fmt.Errorf("cursorSession: stdout pipe: %w", err)
 	}
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("cursorSession: stdin pipe: %w", err)
+	}
+	cs.stdin = stdin
 
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = &stderrBuf
@@ -304,12 +314,62 @@ func (cs *cursorSession) handleInteractionQuery(raw map[string]any) {
 		return
 	}
 
+	// Extract the inner query to get request ID and args
+	var innerQuery map[string]any
+	switch queryType {
+	case "webFetchRequestQuery":
+		innerQuery, _ = query["webFetchRequestQuery"].(map[string]any)
+	case "shellRequestQuery":
+		innerQuery, _ = query["shellRequestQuery"].(map[string]any)
+	default:
+		// Try to find any nested map with "args" key
+		for _, v := range query {
+			if m, ok := v.(map[string]any); ok {
+				if _, hasArgs := m["args"]; hasArgs {
+					innerQuery = m
+					break
+				}
+			}
+		}
+	}
+	if innerQuery == nil {
+		return
+	}
+
+	requestID, _ := innerQuery["id"].(float64) // JSON numbers are float64
+	args, _ := innerQuery["args"].(map[string]any)
+
 	toolName, input := extractInteractionQueryInfo(queryType, query)
 	if toolName == "" {
 		return
 	}
 
-	evt := core.Event{Type: core.EventToolUse, ToolName: toolName, ToolInput: input}
+	// For yolo/force mode, auto-approve
+	if cs.mode == "force" || cs.mode == "yolo" {
+		slog.Debug("cursorSession: auto-approving interaction query", "tool", toolName, "mode", cs.mode)
+		_ = cs.RespondPermission(fmt.Sprintf("%d", int(requestID)), core.PermissionResult{
+			Behavior:     "allow",
+			UpdatedInput: args,
+		})
+		// Still emit tool use for visibility
+		evt := core.Event{Type: core.EventToolUse, ToolName: toolName, ToolInput: input}
+		select {
+		case cs.events <- evt:
+		case <-cs.ctx.Done():
+			return
+		}
+		return
+	}
+
+	// For default mode, emit permission request and wait for user response
+	slog.Info("cursorSession: permission request", "request_id", int(requestID), "tool", toolName)
+	evt := core.Event{
+		Type:         core.EventPermissionRequest,
+		RequestID:    fmt.Sprintf("%d", int(requestID)),
+		ToolName:     toolName,
+		ToolInput:    input,
+		ToolInputRaw: args,
+	}
 	select {
 	case cs.events <- evt:
 	case <-cs.ctx.Done():
@@ -436,8 +496,61 @@ func (cs *cursorSession) handleResult(raw map[string]any) {
 	}
 }
 
-// RespondPermission is a no-op — Cursor Agent permissions are handled via --trust/--force flags.
-func (cs *cursorSession) RespondPermission(_ string, _ core.PermissionResult) error {
+// RespondPermission writes an interaction_query/response to the Cursor process stdin.
+// This is called by the Engine after the user approves or denies a tool use.
+func (cs *cursorSession) RespondPermission(requestID string, result core.PermissionResult) error {
+	if !cs.alive.Load() {
+		return fmt.Errorf("session process is not running")
+	}
+
+	var queryResponse map[string]any
+	if result.Behavior == "allow" {
+		updatedInput := result.UpdatedInput
+		if updatedInput == nil {
+			updatedInput = make(map[string]any)
+		}
+		queryResponse = map[string]any{
+			"approved":    true,
+			"updatedArgs": updatedInput,
+		}
+	} else {
+		msg := result.Message
+		if msg == "" {
+			msg = "User denied this tool use."
+		}
+		queryResponse = map[string]any{
+			"approved": false,
+			"reason":   msg,
+		}
+	}
+
+	// Cursor expects the response in this format:
+	// {"type": "interaction_query", "subtype": "response", "query_type": "...", "response": {...}}
+	response := map[string]any{
+		"type":      "interaction_query",
+		"subtype":   "response",
+		"query_type": "permission", // generic type for all permission responses
+		"response": map[string]any{
+			"id":       requestID,
+			"response": queryResponse,
+		},
+	}
+
+	slog.Debug("cursorSession: permission response", "request_id", requestID, "behavior", result.Behavior)
+	return cs.writeJSON(response)
+}
+
+func (cs *cursorSession) writeJSON(v any) error {
+	cs.stdinMu.Lock()
+	defer cs.stdinMu.Unlock()
+
+	data, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Errorf("marshal: %w", err)
+	}
+	if _, err := cs.stdin.Write(append(data, '\n')); err != nil {
+		return fmt.Errorf("write stdin: %w", err)
+	}
 	return nil
 }
 
