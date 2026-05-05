@@ -199,16 +199,16 @@ type Engine struct {
 	userRoles    *UserRoleManager // nil = legacy mode (no per-user policies)
 	userRolesMu  sync.RWMutex     // protects userRoles, disabledCmds, and adminFrom
 
-	rateLimiter      *RateLimiter
-	outgoingRL       *OutgoingRateLimiter
-	streamPreview    StreamPreviewCfg
-	references       ReferenceRenderCfg
-	relayManager     *RelayManager
-	eventIdleTimeout time.Duration
+	rateLimiter       *RateLimiter
+	outgoingRL        *OutgoingRateLimiter
+	streamPreview     StreamPreviewCfg
+	references        ReferenceRenderCfg
+	relayManager      *RelayManager
+	eventIdleTimeout  time.Duration
 	maxQueuedMessages int
-	dirHistory       *DirHistory
-	baseWorkDir      string
-	projectState     *ProjectStateStore
+	dirHistory        *DirHistory
+	baseWorkDir       string
+	projectState      *ProjectStateStore
 
 	// Auto-compress settings
 	autoCompressEnabled   bool
@@ -406,7 +406,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		streamPreview:         DefaultStreamPreviewCfg(),
 		references:            DefaultReferenceRenderCfg(),
 		eventIdleTimeout:      defaultEventIdleTimeout,
-		maxQueuedMessages:    defaultMaxQueuedMessages,
+		maxQueuedMessages:     defaultMaxQueuedMessages,
 		showContextIndicator:  true,
 	}
 
@@ -3077,23 +3077,23 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				if autoApprove {
 					result = PermissionResult{Behavior: "allow", UpdatedInput: event.ToolInputRaw}
 				}
-			reqID := event.RequestID
-			respondCtx := ctx // capture current unsolicited reader context
-			go func() {
-				// Run in a goroutine to keep reader iterations fast, but honour
-				// the reader's context so we don't call into a dead session after
-				// stopUnsolicitedReader cancels the context.
-				select {
-				case <-respondCtx.Done():
-					return
-				default:
-				}
-				if err := agentSession.RespondPermission(reqID, result); err != nil {
-					if respondCtx.Err() == nil {
-						slog.Error("unsolicited: failed to respond permission", "error", err)
+				reqID := event.RequestID
+				respondCtx := ctx // capture current unsolicited reader context
+				go func() {
+					// Run in a goroutine to keep reader iterations fast, but honour
+					// the reader's context so we don't call into a dead session after
+					// stopUnsolicitedReader cancels the context.
+					select {
+					case <-respondCtx.Done():
+						return
+					default:
 					}
-				}
-			}()
+					if err := agentSession.RespondPermission(reqID, result); err != nil {
+						if respondCtx.Err() == nil {
+							slog.Error("unsolicited: failed to respond permission", "error", err)
+						}
+					}
+				}()
 				if !autoApprove {
 					toolName := event.ToolName
 					if toolName == "" {
@@ -3693,8 +3693,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 			// Auto-compress after finishing a turn, before sending any queued messages.
 			if triggerAutoCompress {
-				compressor, ok := e.agent.(ContextCompressor)
-				if ok && compressor.CompressCommand() != "" {
+				_, hasNativeCompactor := state.agentSession.(SessionCompactor)
+				compressor, hasLegacyCompressor := e.agent.(ContextCompressor)
+				if hasNativeCompactor || (hasLegacyCompressor && compressor.CompressCommand() != "") {
 					if pendingSend != nil {
 						if err := <-pendingSend; err != nil {
 							slog.Debug("async send error before compress", "error", err)
@@ -5787,6 +5788,18 @@ func (e *Engine) cmdName(p Platform, msg *Message, args []string) {
 
 	sessions.SetSessionName(targetID, name)
 
+	iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
+	e.interactiveMu.Lock()
+	state, ok := e.interactiveStates[iKey]
+	e.interactiveMu.Unlock()
+	if ok && state != nil && state.agentSession != nil && state.agentSession.CurrentSessionID() == targetID {
+		if namer, ok := state.agentSession.(SessionThreadNamer); ok {
+			if err := namer.SetThreadName(name); err != nil {
+				slog.Warn("failed to sync native thread name", "agent_session", targetID, "error", err)
+			}
+		}
+	}
+
 	shortID := targetID
 	if len(shortID) > 12 {
 		shortID = shortID[:12]
@@ -7310,16 +7323,21 @@ func (e *Engine) stopInteractiveSession(sessionKey string, quietPlatform Platfor
 }
 
 func (e *Engine) cmdCompress(p Platform, msg *Message) {
-	compressor, ok := e.agent.(ContextCompressor)
-	if !ok || compressor.CompressCommand() == "" {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCompressNotSupported))
-		return
-	}
-
 	iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
 	e.interactiveMu.Lock()
 	state, hasState := e.interactiveStates[iKey]
 	e.interactiveMu.Unlock()
+
+	hasNativeCompactor := false
+	if hasState && state != nil && state.agentSession != nil {
+		_, hasNativeCompactor = state.agentSession.(SessionCompactor)
+	}
+	compressor, hasLegacyCompressor := e.agent.(ContextCompressor)
+	supportsLegacy := hasLegacyCompressor && compressor.CompressCommand() != ""
+	if !hasNativeCompactor && !supportsLegacy {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCompressNotSupported))
+		return
+	}
 
 	if !hasState || state == nil || state.agentSession == nil || !state.agentSession.Alive() {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCompressNoSession))
@@ -7360,6 +7378,20 @@ func (e *Engine) runCompress(state *interactiveState, session *Session, sessions
 	state.mu.Unlock()
 
 	drainEvents(state.agentSession.Events())
+
+	if compactor, ok := state.agentSession.(SessionCompactor); ok {
+		if err := compactor.CompactSession(); err != nil {
+			if !auto {
+				e.reply(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+			}
+			if !state.agentSession.Alive() {
+				e.cleanupInteractiveState(iKey)
+			}
+			return
+		}
+		e.processCompressEvents(state, session, sessions, iKey, p, replyCtx, &compressUnlocked, auto)
+		return
+	}
 
 	compressor, ok := e.agent.(ContextCompressor)
 	if !ok || compressor.CompressCommand() == "" {
@@ -8609,7 +8641,7 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 	case "/config":
 		return e.renderConfigCard()
 	case "/skills":
-		return e.renderSkillsCard()
+		return e.renderSkillsCard(sessionKey)
 	case "/doctor":
 		return e.renderDoctorCard()
 	case "/whoami":
@@ -10150,8 +10182,40 @@ func (e *Engine) renderConfigCard() *Card {
 		Build()
 }
 
-func (e *Engine) renderSkillsCard() *Card {
+func (e *Engine) skillListForDisplay(sessionKey string) []RuntimeSkill {
+	iKey := e.interactiveKeyForSessionKey(sessionKey)
+	e.interactiveMu.Lock()
+	state, ok := e.interactiveStates[iKey]
+	e.interactiveMu.Unlock()
+	if !ok || state == nil || state.agentSession == nil || !state.agentSession.Alive() {
+		return e.localSkillListForDisplay()
+	}
+	lister, ok := state.agentSession.(SessionSkillLister)
+	if !ok {
+		return e.localSkillListForDisplay()
+	}
+	skills, err := lister.ListRuntimeSkills(false)
+	if err != nil {
+		slog.Warn("failed to list runtime skills", "session_key", sessionKey, "error", err)
+		return e.localSkillListForDisplay()
+	}
+	return skills
+}
+
+func (e *Engine) localSkillListForDisplay() []RuntimeSkill {
 	skills := e.skills.ListAll()
+	out := make([]RuntimeSkill, 0, len(skills))
+	for _, s := range skills {
+		out = append(out, RuntimeSkill{
+			Name:        s.Name,
+			Description: s.Description,
+		})
+	}
+	return out
+}
+
+func (e *Engine) renderSkillsCard(sessionKey string) *Card {
+	skills := e.skillListForDisplay(sessionKey)
 	if len(skills) == 0 {
 		return e.simpleCard(e.i18n.T(MsgCardTitleSkills), "purple", e.i18n.T(MsgSkillsEmpty))
 	}
@@ -11042,8 +11106,8 @@ func (e *Engine) executeSkill(p Platform, msg *Message, skill *Skill, args []str
 }
 
 func (e *Engine) cmdSkills(p Platform, msg *Message) {
+	skills := e.skillListForDisplay(msg.SessionKey)
 	if !supportsCards(p) {
-		skills := e.skills.ListAll()
 		if len(skills) == 0 {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSkillsEmpty))
 			return
@@ -11064,7 +11128,7 @@ func (e *Engine) cmdSkills(p Platform, msg *Message) {
 		return
 	}
 
-	e.replyWithCard(p, msg.ReplyCtx, e.renderSkillsCard())
+	e.replyWithCard(p, msg.ReplyCtx, e.renderSkillsCard(msg.SessionKey))
 }
 
 func displayCommandForPlatform(platformName, command string) string {
