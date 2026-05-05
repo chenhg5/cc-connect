@@ -231,6 +231,20 @@ func TestSession_History(t *testing.T) {
 	if h := s.GetHistory(0); len(h) != 0 {
 		t.Errorf("expected empty history after clear, got %d", len(h))
 	}
+	if got := len(s.GetEventTimelines()); got != 0 {
+		t.Errorf("expected cleared timelines, got %d", got)
+	}
+}
+
+func TestSession_EventTimelinesTrim(t *testing.T) {
+	s := &Session{}
+	s.AppendEventTimeline(EventTimeline{Events: []TimelineEvent{{Index: 1, Kind: EventThinking}}}, 3)
+	s.AppendEventTimeline(EventTimeline{Events: []TimelineEvent{{Index: 1, Kind: EventThinking}}}, 3)
+	s.AppendEventTimeline(EventTimeline{Events: []TimelineEvent{{Index: 1, Kind: EventThinking}}}, 3)
+	s.AppendEventTimeline(EventTimeline{Events: []TimelineEvent{{Index: 1, Kind: EventThinking}}}, 3)
+	if got := len(s.GetEventTimelines()); got != 3 {
+		t.Fatalf("timeline count = %d, want 3", got)
+	}
 }
 
 func TestSession_ConcurrentHistory(t *testing.T) {
