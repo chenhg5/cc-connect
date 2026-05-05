@@ -3243,11 +3243,25 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		switch event.Type {
 		case EventThinking:
-			// In quiet mode, still split text segments so they don't merge.
+			// When thinking messages are hidden, this event won't surface a
+			// visible message of its own. To keep the streaming preview
+			// rendering one in-place updated card across the whole turn
+			// (rather than freezing it into a permanent message and
+			// emitting subsequent text as fresh sends), insert a paragraph
+			// separator into the live preview instead of freezing. The
+			// separator is mirrored into textParts so the final response
+			// text includes the same break that appeared on screen.
+			//
+			// When the preview is degraded (platform doesn't support edits,
+			// or a prior visible thinking/tool event already froze it),
+			// fall back to flushing the accumulated text segment as a
+			// standalone message — matches the legacy behavior for those
+			// platforms.
 			if !e.display.ThinkingMessages && len(textParts) > segmentStart {
 				if sp.canPreview() {
-					sp.freeze()
-					sp.detachPreview()
+					if sp.appendSeparator("\n\n") {
+						textParts = append(textParts, "\n\n")
+					}
 				} else {
 					// Preview degraded — send accumulated text directly
 					segment := strings.Join(textParts[segmentStart:], "")
@@ -3256,9 +3270,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 							sendWorkspace(p, replyCtx, chunk)
 						}
 					}
+					segmentStart = len(textParts)
+					silentHold = false
 				}
-				segmentStart = len(textParts)
-				silentHold = false
 			}
 			if e.display.ThinkingMessages && event.Content != "" {
 				// Flush accumulated text segment before thinking display
@@ -3288,11 +3302,17 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventToolUse:
 			toolCount++
-			// When tool messages are hidden, split text segments.
+			// When tool messages are hidden, this event won't surface a
+			// visible message of its own. To keep the streaming preview
+			// rendering one in-place updated card across the whole turn,
+			// insert a paragraph separator into the live preview instead
+			// of freezing it. See the symmetric EventThinking case above
+			// for rationale and the degraded-preview fallback.
 			if !e.display.ToolMessages && len(textParts) > segmentStart {
 				if sp.canPreview() {
-					sp.freeze()
-					sp.detachPreview()
+					if sp.appendSeparator("\n\n") {
+						textParts = append(textParts, "\n\n")
+					}
 				} else {
 					// Preview degraded — send accumulated text directly
 					segment := strings.Join(textParts[segmentStart:], "")
@@ -3301,9 +3321,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 							sendWorkspace(p, replyCtx, chunk)
 						}
 					}
+					segmentStart = len(textParts)
+					silentHold = false
 				}
-				segmentStart = len(textParts)
-				silentHold = false
 			}
 			if e.display.ToolMessages {
 				// Flush accumulated text segment before tool display

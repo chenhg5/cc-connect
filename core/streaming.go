@@ -367,6 +367,28 @@ func (sp *streamPreview) detachPreview() {
 	sp.previewMsgID = nil
 }
 
+// appendSeparator inserts a literal separator string into the accumulated
+// preview text without sending an update. Use it at hidden segment
+// boundaries (e.g. EventThinking / EventToolUse with thinking_messages /
+// tool_messages = false) so the next text segment is visually offset
+// from the previous one within the same in-place updated card.
+//
+// Returns true when the separator was appended, false when it was
+// suppressed because the preview is degraded, disabled, or has no
+// content yet (we don't want a leading separator on an otherwise empty
+// card). Callers should mirror the separator into their own text
+// accumulator (engine.textParts) only when this returns true so the
+// final response text matches what the live preview shows.
+func (sp *streamPreview) appendSeparator(sep string) bool {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	if sp.degraded || !sp.cfg.Enabled || sp.fullText == "" {
+		return false
+	}
+	sp.fullText += sep
+	return true
+}
+
 // needsDoneReaction returns true if the preview was delivered via in-place
 // UpdateMessage at least once, meaning the user only received a push for the
 // initial SendPreviewStart and subsequent updates were silent. In this case a

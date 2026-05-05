@@ -402,3 +402,89 @@ func TestStreamPreview_AppliesTransform(t *testing.T) {
 		t.Fatalf("final message = %q, want transformed final preview", got)
 	}
 }
+
+func TestStreamPreview_AppendSeparator_AppendsAfterText(t *testing.T) {
+	mp := &mockUpdaterPlatform{}
+	cfg := StreamPreviewCfg{
+		Enabled:       true,
+		IntervalMs:    50,
+		MinDeltaChars: 1,
+		MaxChars:      500,
+	}
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
+	sp.appendText("Hello")
+	time.Sleep(100 * time.Millisecond)
+
+	if !sp.appendSeparator("\n\n") {
+		t.Fatal("appendSeparator should return true after text exists")
+	}
+	if got := sp.fullText; got != "Hello\n\n" {
+		t.Fatalf("fullText = %q, want %q", got, "Hello\n\n")
+	}
+
+	// Subsequent text concatenates onto the separator.
+	sp.appendText("World")
+	time.Sleep(100 * time.Millisecond)
+	if got := sp.fullText; got != "Hello\n\nWorld" {
+		t.Fatalf("fullText = %q, want %q", got, "Hello\n\nWorld")
+	}
+}
+
+func TestStreamPreview_AppendSeparator_SuppressedOnEmptyPreview(t *testing.T) {
+	mp := &mockUpdaterPlatform{}
+	cfg := StreamPreviewCfg{
+		Enabled:       true,
+		IntervalMs:    50,
+		MinDeltaChars: 1,
+		MaxChars:      500,
+	}
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
+
+	if sp.appendSeparator("\n\n") {
+		t.Error("appendSeparator should return false when preview has no text yet")
+	}
+	if got := sp.fullText; got != "" {
+		t.Errorf("fullText = %q, want empty", got)
+	}
+}
+
+func TestStreamPreview_AppendSeparator_SuppressedAfterFreeze(t *testing.T) {
+	mp := &mockUpdaterPlatform{}
+	cfg := StreamPreviewCfg{
+		Enabled:       true,
+		IntervalMs:    50,
+		MinDeltaChars: 1,
+		MaxChars:      500,
+	}
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
+	sp.appendText("Hello")
+	time.Sleep(100 * time.Millisecond)
+	sp.freeze() // simulates a visible thinking/tool event taking over
+
+	if sp.appendSeparator("\n\n") {
+		t.Error("appendSeparator should return false once preview is degraded by freeze")
+	}
+}
+
+func TestStreamPreview_AppendSeparator_DoesNotTriggerFlush(t *testing.T) {
+	mp := &mockUpdaterPlatform{}
+	cfg := StreamPreviewCfg{
+		Enabled:       true,
+		IntervalMs:    50,
+		MinDeltaChars: 1,
+		MaxChars:      500,
+	}
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
+	sp.appendText("Hello")
+	time.Sleep(100 * time.Millisecond)
+
+	startCount := len(mp.getMessages())
+	sp.appendSeparator("\n\n")
+	// Give any spurious timer a chance to fire.
+	time.Sleep(150 * time.Millisecond)
+
+	endCount := len(mp.getMessages())
+	if endCount != startCount {
+		t.Errorf("appendSeparator triggered an extra send: %d → %d", startCount, endCount)
+	}
+}

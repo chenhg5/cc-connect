@@ -1193,6 +1193,121 @@ func TestProcessInteractiveEvents_SuppressesReplyFooterWhenOnlyWorkDir(t *testin
 	}
 }
 
+// TestProcessInteractiveEvents_FullyQuietKeepsSinglePreviewAcrossToolCalls is
+// the regression test for the bug where stream_preview + progress_style=card
+// + ThinkingMessages=false + ToolMessages=false produced multiple messages
+// (one per tool boundary) instead of a single edit-updated card.
+//
+// Expected behavior: when no event class is visible (fully quiet), the
+// streaming preview must accumulate text across tool calls into a single
+// card and finalize via in-place UpdateMessage — never falling back to
+// freestanding sendWorkspace messages or extra preview-start calls. The
+// final card must also carry paragraph separators between text segments
+// that were bounded by tool calls so they don't visually merge.
+func TestProcessInteractiveEvents_FullyQuietKeepsSinglePreviewAcrossToolCalls(t *testing.T) {
+	p := &mockKeepPreviewPlatform{}
+	p.n = "feishu"
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{ThinkingMessages: false, ThinkingMaxLen: 300, ToolMaxLen: 500, ToolMessages: false})
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-1",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "before "}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "echo 1"}
+	agentSession.events <- Event{Type: EventToolResult, ToolName: "Bash", ToolResult: "1"}
+	agentSession.events <- Event{Type: EventText, Content: "after "}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "echo 2"}
+	agentSession.events <- Event{Type: EventToolResult, ToolName: "Bash", ToolResult: "2"}
+	agentSession.events <- Event{Type: EventText, Content: "tool"}
+	agentSession.events <- Event{Type: EventResult, Content: "before \n\nafter \n\ntool", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, nil)
+
+	if got := p.getSent(); len(got) != 0 {
+		t.Fatalf("sent text fallbacks = %#v, want zero (fully quiet should never fall back to sendWorkspace)", got)
+	}
+
+	p.mu.Lock()
+	deletedCount := len(p.deleted)
+	previewMsgs := append([]string(nil), p.messages...)
+	p.mu.Unlock()
+
+	if deletedCount != 0 {
+		t.Fatalf("deleted previews = %d, want 0 (preview must survive tool boundaries)", deletedCount)
+	}
+	if len(previewMsgs) == 0 {
+		t.Fatalf("no preview messages recorded; expected one start + at least one update")
+	}
+	startCount := 0
+	for _, m := range previewMsgs {
+		if strings.HasPrefix(m, "start:") {
+			startCount++
+		}
+	}
+	if startCount != 1 {
+		t.Fatalf("preview start count = %d, want exactly 1 (single card across whole turn). messages=%#v", startCount, previewMsgs)
+	}
+	last := previewMsgs[len(previewMsgs)-1]
+	if !strings.HasPrefix(last, "update:") {
+		t.Fatalf("last preview op = %q, want a final UpdateMessage", last)
+	}
+	for _, sub := range []string{"before ", "after ", "tool"} {
+		if !strings.Contains(last, sub) {
+			t.Fatalf("final update missing segment %q\nfull: %q", sub, last)
+		}
+	}
+	if !strings.Contains(last, "\n\n") {
+		t.Errorf("final update missing paragraph separator between segments\nfull: %q", last)
+	}
+}
+
+// TestProcessInteractiveEvents_FullyQuietInsertsBlankLinesBetweenSegments is
+// a focused regression for the appendSeparator restoration: a turn with
+// text → tool → text in fully-quiet mode must show the two text fragments
+// separated by a blank line in the final card.
+func TestProcessInteractiveEvents_FullyQuietInsertsBlankLinesBetweenSegments(t *testing.T) {
+	p := &mockKeepPreviewPlatform{}
+	p.n = "feishu"
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{ThinkingMessages: false, ThinkingMaxLen: 300, ToolMaxLen: 500, ToolMessages: false})
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-1",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "first segment"}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "echo"}
+	agentSession.events <- Event{Type: EventToolResult, ToolName: "Bash", ToolResult: "ok"}
+	agentSession.events <- Event{Type: EventText, Content: "second segment"}
+	agentSession.events <- Event{Type: EventResult, Content: "first segment\n\nsecond segment", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, nil)
+
+	p.mu.Lock()
+	previewMsgs := append([]string(nil), p.messages...)
+	p.mu.Unlock()
+
+	if len(previewMsgs) == 0 {
+		t.Fatal("no preview messages recorded")
+	}
+	last := previewMsgs[len(previewMsgs)-1]
+	if !strings.Contains(last, "first segment\n\nsecond segment") {
+		t.Errorf("expected blank-line separated segments in final card, got %q", last)
+	}
+}
+
 func TestProcessInteractiveEvents_HiddenToolProgressKeepsPreviewOnFinalize(t *testing.T) {
 	p := &mockKeepPreviewPlatform{}
 	p.n = "feishu"
