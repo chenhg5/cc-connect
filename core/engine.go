@@ -4468,6 +4468,8 @@ channelClosed:
 					}
 				}
 			}
+		} else if sp.finish(fullResponse) {
+			slog.Debug("channelClosed: updated streaming preview in-place", "response_len", len(fullResponse))
 		} else {
 			for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
 				if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
