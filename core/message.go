@@ -213,9 +213,17 @@ type HistoryEntry struct {
 }
 
 // AgentSessionInfo describes one session as reported by the agent backend.
+//
+// Summary historically carries the LAST user message in the session, which
+// is what /list and /switch want (the most recent topic). FirstSummary was
+// added for /resume, which wants the ORIGINAL user message so the user can
+// recognise a session by how it started, not by wherever it happens to be
+// right now — a live terminal session in particular is constantly drifting
+// and its "latest" message is noisy as an identifier.
 type AgentSessionInfo struct {
 	ID           string
-	Summary      string
+	Summary      string // latest user message (≈40 chars, trimmed)
+	FirstSummary string // first user message (≈40 chars, trimmed)
 	MessageCount int
 	ModifiedAt   time.Time
 	GitBranch    string

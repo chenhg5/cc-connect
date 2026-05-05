@@ -451,11 +451,12 @@ func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, erro
 			continue
 		}
 
-		summary, msgCount := scanSessionMeta(filepath.Join(projectDir, name))
+		firstSummary, summary, msgCount := scanSessionMeta(filepath.Join(projectDir, name))
 
 		sessions = append(sessions, core.AgentSessionInfo{
 			ID:           sessionID,
 			Summary:      summary,
+			FirstSummary: firstSummary,
 			MessageCount: msgCount,
 			ModifiedAt:   info.ModTime(),
 		})
@@ -488,18 +489,24 @@ func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
 	return os.Remove(path)
 }
 
-func scanSessionMeta(path string) (string, int) {
+// scanSessionMeta parses a claude JSONL session file and returns
+// (firstUserSummary, lastUserSummary, messageCount). Both summaries are
+// XML-tag stripped and truncated to ~40 runes so they fit cleanly in a
+// Slack list row. firstUserSummary is the opening user message in the
+// file (what the user originally started the session with); lastUserSummary
+// is the most recent user message (what the session is currently about).
+// Used by /list, /switch (which want the "current topic" = Summary) and
+// by /resume (which also wants the original starting point = FirstSummary
+// so long-running drifted sessions remain identifiable).
+func scanSessionMeta(path string) (firstSummary, summary string, count int) {
 	f, err := os.Open(path)
 	if err != nil {
-		return "", 0
+		return "", "", 0
 	}
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 256*1024), 256*1024)
-
-	var summary string
-	var count int
 
 	for scanner.Scan() {
 		var entry struct {
@@ -514,16 +521,33 @@ func scanSessionMeta(path string) (string, int) {
 		if entry.Type == "user" || entry.Type == "assistant" {
 			count++
 			if entry.Type == "user" && entry.Message.Content != "" {
+				if firstSummary == "" {
+					firstSummary = entry.Message.Content
+				}
 				summary = entry.Message.Content
 			}
 		}
 	}
-	summary = stripXMLTags(summary)
-	summary = strings.TrimSpace(summary)
-	if utf8.RuneCountInString(summary) > 40 {
-		summary = string([]rune(summary)[:40]) + "..."
+	firstSummary = truncateSummaryForList(stripXMLTags(firstSummary))
+	summary = truncateSummaryForList(stripXMLTags(summary))
+	return firstSummary, summary, count
+}
+
+// truncateSummaryForList trims whitespace, collapses interior newlines to
+// spaces (so a multi-line user message does not blow out the picker row),
+// and truncates to ~40 runes with an ellipsis.
+func truncateSummaryForList(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\r", " ")
+	// Collapse runs of whitespace.
+	for strings.Contains(s, "  ") {
+		s = strings.ReplaceAll(s, "  ", " ")
 	}
-	return summary, count
+	if utf8.RuneCountInString(s) > 40 {
+		s = string([]rune(s)[:40]) + "..."
+	}
+	return s
 }
 
 var xmlTagRe = regexp.MustCompile(`<[^>]+>`)

@@ -2646,6 +2646,21 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	// is unbound, force a fresh start instead of attaching to whichever CLI
 	// conversation happens to be "latest" in this workspace.
 	startSessionID := session.GetAgentSessionID()
+
+	// /resume <n> arms forkOnNextStart with a workspace session ID that the
+	// user explicitly picked. Consume it here and convert to the fork
+	// sentinel so the claudecode agent spawns with --resume <id>
+	// --fork-session. This overrides any AgentSessionID that might already
+	// be on the session (though cmdResume clears it anyway) and is a
+	// one-shot: next spawn falls back to the normal resume path.
+	if forkID := session.ConsumeForkOnNextStart(); forkID != "" {
+		startSessionID = ResumeForkPrefix + forkID
+		slog.Info("session: fork-on-next-start consumed",
+			"session_key", sessionKey,
+			"fork_from_backend_session", forkID,
+		)
+	}
+
 	isResume := startSessionID != ""
 	startAt := time.Now()
 	agentSession, err := agent.StartSession(e.ctx, startSessionID)
@@ -3973,6 +3988,7 @@ var builtinCommands = []struct {
 	id    string
 }{
 	{[]string{"new"}, "new"},
+	{[]string{"resume"}, "resume"},
 	{[]string{"list", "sessions"}, "list"},
 	{[]string{"switch"}, "switch"},
 	{[]string{"name", "rename"}, "name"},
@@ -4141,6 +4157,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 	switch cmdID {
 	case "new":
 		e.cmdNew(p, msg, args)
+	case "resume":
+		e.cmdResume(p, msg, args)
 	case "list":
 		e.cmdList(p, msg, args)
 	case "switch":
@@ -4553,6 +4571,164 @@ func filterOwnedSessions(sessions []AgentSessionInfo, known map[string]struct{})
 		}
 	}
 	return filtered
+}
+
+// resumePickerLimit is the maximum number of prior workspace sessions
+// shown to the user by /resume. Enough to cover a day or two of work
+// without blowing out the mobile screen.
+const resumePickerLimit = 10
+
+// cmdResume implements the /resume slash command.
+//
+// Two modes:
+//
+//   - /resume            — list up to resumePickerLimit of the most recent
+//                          workspace sessions known to the agent backend.
+//                          Each row shows the numbered index, a relative
+//                          timestamp, the session's opening user message,
+//                          and (indented on a second line) the most recent
+//                          user message so the user can identify a drifted
+//                          long-running session by both its origin and its
+//                          current topic. The session IDs are stashed on
+//                          the Session object as pendingResumeCandidates
+//                          for the next invocation to resolve.
+//
+//   - /resume <n>        — pick the Nth candidate from the last list. Starts
+//                          a new cc-connect session with --resume <id>
+//                          --fork-session via the ResumeForkPrefix sentinel
+//                          so the source session is not mutated (it may
+//                          still be live in a terminal or another Slack
+//                          conversation). Cleans up any prior interactive
+//                          state for this session_key first.
+//
+// TODO: i18n. First cut uses hardcoded English strings. Once the feature
+// shape stabilises, promote these to MsgKey constants in core/i18n.go.
+func (e *Engine) cmdResume(p Platform, msg *Message, args []string) {
+	agent, sessions, interactiveKey, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+
+	session := sessions.GetOrCreateActive(msg.SessionKey)
+
+	// Pick mode: /resume <n>
+	if len(args) > 0 {
+		n, parseErr := strconv.Atoi(strings.TrimSpace(args[0]))
+		if parseErr != nil || n < 1 {
+			e.reply(p, msg.ReplyCtx,
+				"/resume <n> expects a positive integer picked from the list. Run /resume with no args first to see the options.")
+			return
+		}
+		sessionID, ok := session.TakePendingResumeCandidate(n)
+		if !ok {
+			e.reply(p, msg.ReplyCtx,
+				"No /resume list is pending — run /resume with no args to see the candidates, then pick one.")
+			return
+		}
+
+		// Safe to fork off the picked session: the source session (which may
+		// be a live terminal session) is never mutated because claudecode
+		// strips the ResumeForkPrefix and passes --fork-session to claude.
+		slog.Info("cmdResume: picking candidate",
+			"session_key", msg.SessionKey,
+			"picked_session_id", sessionID,
+			"index", n,
+		)
+
+		e.cleanupInteractiveState(interactiveKey)
+
+		// Arm the next StartSession call on this session to fork off the
+		// picked session. We deliberately do NOT stash the fork sentinel in
+		// AgentSessionID — that field is persisted to disk and a crash in
+		// the window between here and the first message would leave a
+		// stale sentinel on the next startup. forkOnNextStart is a
+		// transient field that survives only in memory; worst case is
+		// cc-connect crashes and the user re-picks from a fresh /resume.
+		//
+		// Clear the existing AgentSessionID so the engine's normal resume
+		// path does not race ahead of the fork. The engine consumes
+		// forkOnNextStart before falling back to AgentSessionID, but
+		// clearing it removes the fallback entirely and makes the logged
+		// state easier to reason about.
+		session.SetAgentInfo("", agent.Name(), "")
+		session.SetForkOnNextStart(sessionID)
+		sessions.Save()
+
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(
+			"Forked from session #%d. Your next message will branch off that session's context — the original is unchanged.",
+			n,
+		))
+		return
+	}
+
+	// List mode: /resume (no args)
+	agentSessions, err := agent.ListSessions(e.ctx)
+	if err != nil {
+		session.ClearPendingResumeCandidates()
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("/resume: could not list workspace sessions: %v", err))
+		return
+	}
+
+	// The session the user is currently in (according to cc-connect's own
+	// session store) stays in the list — filtering it out makes the
+	// chronological "most recent" row mysteriously missing. Instead, we
+	// note its ID so the picker can label that row with "(current)" and
+	// the user still has the option to re-pick it explicitly (e.g. to
+	// branch off their own current thread).
+	currentID := session.GetAgentSessionID()
+
+	if len(agentSessions) == 0 {
+		session.ClearPendingResumeCandidates()
+		e.reply(p, msg.ReplyCtx,
+			"/resume: no prior sessions found in this workspace. Start talking and one will be created.")
+		return
+	}
+
+	if len(agentSessions) > resumePickerLimit {
+		agentSessions = agentSessions[:resumePickerLimit]
+	}
+
+	ids := make([]string, 0, len(agentSessions))
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("*Recent sessions in this workspace* (showing %d of the most recent):\n", len(agentSessions)))
+	for i, s := range agentSessions {
+		ids = append(ids, s.ID)
+		rel := formatRelativeAge(time.Since(s.ModifiedAt))
+		first := s.FirstSummary
+		if first == "" {
+			first = "(no opening user message)"
+		}
+		marker := ""
+		if currentID != "" && s.ID == currentID {
+			marker = " *(current)*"
+		}
+		fmt.Fprintf(&b, "%2d. %s%s  — \"%s\"\n", i+1, rel, marker, first)
+		if last := s.Summary; last != "" && last != s.FirstSummary {
+			fmt.Fprintf(&b, "     ↳ \"%s\"\n", last)
+		}
+	}
+	b.WriteString("\nType `/resume <n>` to fork the chosen session into this conversation. The source session will not be modified.")
+
+	session.SetPendingResumeCandidates(ids)
+	e.reply(p, msg.ReplyCtx, b.String())
+}
+
+// formatRelativeAge renders a duration as a compact human-readable string
+// for the /resume picker rows ("2m ago", "1h ago", "3d ago", etc.).
+func formatRelativeAge(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d/time.Minute))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d/time.Hour))
+	case d < 7*24*time.Hour:
+		return fmt.Sprintf("%dd ago", int(d/(24*time.Hour)))
+	default:
+		return fmt.Sprintf("%dw ago", int(d/(7*24*time.Hour)))
+	}
 }
 
 const listPageSize = 20
@@ -6526,6 +6702,7 @@ func helpCardGroups() []helpCardGroup {
 			titleKey: MsgHelpSessionSection,
 			items: []helpCardItem{
 				{command: "/new", action: "act:/new"},
+				{command: "/resume", action: "cmd:/resume"},
 				{command: "/list", action: "nav:/list"},
 				{command: "/current", action: "nav:/current"},
 				{command: "/switch", action: "nav:/list"},
