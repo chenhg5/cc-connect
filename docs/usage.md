@@ -43,6 +43,7 @@ Each user gets an independent session with full conversation context. Manage ses
 | `/allow <tool>` | Pre-allow a tool (next session) |
 | `/reasoning [level]` | View or switch reasoning effort (Codex) |
 | `/mode [name]` | View or switch permission mode |
+| `/steer <message>` | Add guidance to the current in-flight task |
 | `/stop` | Stop current execution |
 | `/help` | Show available commands |
 
