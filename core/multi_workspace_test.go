@@ -614,3 +614,84 @@ func TestMultiWorkspaceAgent_NoPropagationWhenParentHasNoRunAs(t *testing.T) {
 		t.Errorf("run_as_env should not be present in opts when parent has no isolation; got %v", opts["run_as_env"])
 	}
 }
+
+// TestCommandContextWithWorkspace_BoundChannel exercises the helper that
+// executeSkill / executeCustomCommand use to route slash commands to the
+// per-channel workspace agent. The previous implementation always handed
+// back the global e.agent, so any /bug, /mode, custom command etc. would
+// run in the project-default work_dir even if the user had bound the
+// channel via /workspace bind.
+func TestCommandContextWithWorkspace_BoundChannel(t *testing.T) {
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "bound-workspace")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	e := newTestEngineWithMultiWorkspaceAgent(t, baseDir)
+	channelID := "C-bound"
+	channelKey := "test-platform:" + channelID
+	e.workspaceBindings.Bind("project:test", channelKey, "bound-channel", wsDir)
+
+	p := &mockChannelResolver{name: "test-platform", names: map[string]string{}}
+	msg := &Message{
+		Platform:   "test-platform",
+		ChannelKey: channelID,
+		SessionKey: channelKey + ":U-001",
+	}
+
+	agent, sessions, interactiveKey, workspaceDir, err := e.commandContextWithWorkspace(p, msg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if agent == nil || sessions == nil {
+		t.Fatalf("expected non-nil workspace agent/sessions, got agent=%v sessions=%v", agent, sessions)
+	}
+	if agent == e.agent {
+		t.Errorf("agent should be a workspace-scoped agent, but got the global e.agent")
+	}
+	if sessions == e.sessions {
+		t.Errorf("sessions should be a workspace-scoped manager, but got the global e.sessions")
+	}
+	wantWS := normalizeWorkspacePath(wsDir)
+	if workspaceDir != wantWS {
+		t.Errorf("workspaceDir = %q, want %q", workspaceDir, wantWS)
+	}
+	wantKey := wantWS + ":" + msg.SessionKey
+	if interactiveKey != wantKey {
+		t.Errorf("interactiveKey = %q, want %q", interactiveKey, wantKey)
+	}
+}
+
+// TestCommandContextWithWorkspace_UnboundChannelFallsBack guards the
+// fallback path: when no binding exists for the channel, the helper must
+// keep returning the global agent/sessions and an empty workspaceDir so
+// behaviour outside multi-workspace bindings is unchanged.
+func TestCommandContextWithWorkspace_UnboundChannelFallsBack(t *testing.T) {
+	baseDir := t.TempDir()
+	e := newTestEngineWithMultiWorkspaceAgent(t, baseDir)
+
+	p := &mockChannelResolver{name: "test-platform", names: map[string]string{}}
+	msg := &Message{
+		Platform:   "test-platform",
+		ChannelKey: "C-unbound",
+		SessionKey: "test-platform:C-unbound:U-001",
+	}
+
+	agent, sessions, interactiveKey, workspaceDir, err := e.commandContextWithWorkspace(p, msg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if agent != e.agent {
+		t.Errorf("expected global e.agent when no binding exists, got different agent")
+	}
+	if sessions != e.sessions {
+		t.Errorf("expected global e.sessions when no binding exists, got different manager")
+	}
+	if workspaceDir != "" {
+		t.Errorf("expected empty workspaceDir when unbound, got %q", workspaceDir)
+	}
+	if interactiveKey != msg.SessionKey {
+		t.Errorf("expected interactiveKey to equal sessionKey when unbound, got %q want %q", interactiveKey, msg.SessionKey)
+	}
+}
