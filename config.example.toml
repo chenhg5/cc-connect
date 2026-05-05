@@ -705,6 +705,9 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # 也可以禁用特定工具（传递给 --disallowedTools）：
 # disallowed_tools = ["WebSearch", "WebFetch"]
 
+# Optional: specify a custom system prompt / 可选：指定自定义系统提示
+# system_prompt = "You are a helpful AI assistant that specializes in Python development."
+
 # Optional: specify a model / 可选：指定模型
 # model = "claude-sonnet-4-20250514"
 

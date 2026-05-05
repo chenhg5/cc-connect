@@ -49,6 +49,7 @@ type Agent struct {
 	sessionEnv       []string
 	routerURL        string // Claude Code Router URL (e.g., "http://127.0.0.1:3456")
 	routerAPIKey     string // Claude Code Router API key (optional)
+	systemPrompt     string // Custom system prompt to pass to Claude CLI
 
 	providerProxy  *core.ProviderProxy // local proxy for third-party providers
 	proxyLocalURL  string              // local URL of the proxy
@@ -124,6 +125,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	reasoningEffort, _ := opts["reasoning_effort"].(string)
 	mode, _ := opts["mode"].(string)
 	mode = normalizePermissionMode(mode)
+	systemPrompt, _ := opts["system_prompt"].(string)
 
 	var allowedTools []string
 	if tools, ok := opts["allowed_tools"].([]any); ok {
@@ -194,6 +196,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		model:            model,
 		reasoningEffort:  normalizeEffort(reasoningEffort),
 		mode:             mode,
+		systemPrompt:     systemPrompt,
 		allowedTools:     allowedTools,
 		disallowedTools:  disallowedTools,
 		maxContextTokens: maxContextTokens,
@@ -406,12 +409,13 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 		"sessionID", sessionID,
 		"providerCount", len(a.providers))
 	platformPrompt := a.platformPrompt
+	systemPrompt := a.systemPrompt
 	// When router_url is set, --verbose conflicts with --output-format stream-json
 	// (verbose emits non-JSON text to stdout that corrupts the JSON stream).
 	disableVerbose := a.routerURL != ""
 	a.mu.Unlock()
 
-	return newClaudeSession(ctx, a.workDir, a.cliBin, a.cliExtraArgs, a.cliArgsFlag, model, effort, sessionID, a.mode, tools, disTools, extraEnv, platformPrompt, disableVerbose, a.spawnOpts, maxTok)
+	return newClaudeSession(ctx, a.workDir, a.cliBin, a.cliExtraArgs, a.cliArgsFlag, model, effort, sessionID, a.mode, systemPrompt, tools, disTools, extraEnv, platformPrompt, disableVerbose, a.spawnOpts, maxTok)
 }
 
 func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {
