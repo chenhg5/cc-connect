@@ -357,6 +357,7 @@ cc-connect update --pre     # 含预发布版本
 | Telegram | [docs/telegram.md](docs/telegram.md) | Long Polling | 不需要 |
 | Slack | [docs/slack.md](docs/slack.md) | Socket Mode | 不需要 |
 | Discord | [docs/discord.md](docs/discord.md) | Gateway | 不需要 |
+| TuiTui / 推推 | [docs/tuitui.md](docs/tuitui.md) | WebSocket | 不需要 |
 | 微博 | [docs/weibo.md](docs/weibo.md) | WebSocket | 不需要 |
 | 企业微信 | [docs/wecom.md](docs/wecom.md) | WebSocket / Webhook | 不需要 (WS) / 需要 (Webhook) |
 | 微信个人号（ilink） | [docs/weixin.md](docs/weixin.md) | HTTP 长轮询（ilink） | 不需要 |

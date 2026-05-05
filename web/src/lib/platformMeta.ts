@@ -103,4 +103,18 @@ export const platformMeta: Record<string, PlatformMeta> = {
       { key: 'allow_from', labelKey: 'fields.allowFrom', placeholder: '* (all)', group: 'advanced' },
     ],
   },
+  tuitui: {
+    label: 'TuiTui',
+    fields: [
+      { key: 'app_id', labelKey: 'fields.appId', required: true },
+      { key: 'app_secret', labelKey: 'fields.appSecret', required: true, type: 'password' },
+      { key: 'allow_from', labelKey: 'fields.allowFrom', placeholder: '* (all)', group: 'advanced' },
+      { key: 'group_allow_from', labelKey: 'fields.groupAllowFrom', placeholder: 'group/team/channel IDs', group: 'advanced' },
+      { key: 'group_policy', labelKey: 'fields.groupPolicy', placeholder: 'allowlist / open / disabled', group: 'advanced' },
+      { key: 'require_mention', labelKey: 'fields.requireMention', type: 'boolean', group: 'advanced' },
+      { key: 'share_session_in_channel', labelKey: 'fields.sharedGroupSession', type: 'boolean', group: 'advanced' },
+      { key: 'api_base', labelKey: 'fields.apiBaseUrl', placeholder: 'https://im.live.360.cn:8282', group: 'advanced' },
+      { key: 'ws_base', labelKey: 'fields.wsUrl', placeholder: 'wss://im.live.360.cn:8282', group: 'advanced' },
+    ],
+  },
 };
