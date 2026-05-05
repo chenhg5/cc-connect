@@ -87,10 +87,17 @@ level = "info" # debug, info, warn, error
 # 设为 0 表示不截断（显示完整内容）。
 
 # [display]
-# thinking_messages = true # Show/hide thinking messages (default: true) / 是否显示思考消息（默认 true）
-# thinking_max_len = 300   # Max chars for thinking messages (default: 300) / 思考消息最大字符数（默认 300）
-# tool_max_len = 500       # Max chars for tool use messages (default: 500) / 工具调用消息最大字符数（默认 500）
-# tool_messages = true     # Show/hide tool progress messages (default: true) / 是否显示工具进度消息（默认 true）
+# mode = "full"             # Display mode: "full" (default), "compact", or "quiet"
+#                           # full: show thinking + tool messages as separate messages
+#                           #       显示思考和工具消息，每条单独发送
+#                           # compact: hide thinking/tool, each text segment sent separately
+#                           #          隐藏思考和工具消息，每段文本独立发送
+#                           # quiet: hide thinking/tool, all text in one card, done emoji at end
+#                           #        隐藏思考和工具消息，所有文本合并到同一张卡片，完成后发送 done emoji
+# thinking_messages = true  # Show/hide thinking messages (default: true) / 是否显示思考消息（默认 true）
+# thinking_max_len = 300    # Max chars for thinking messages (default: 300) / 思考消息最大字符数（默认 300）
+# tool_max_len = 500        # Max chars for tool use messages (default: 500) / 工具调用消息最大字符数（默认 500）
+# tool_messages = true      # Show/hide tool progress messages (default: true) / 是否显示工具进度消息（默认 true）
 
 # Per-project override: each [[projects]] entry may have its own [projects.display]
 # block that overrides individual fields of the global [display] block above.

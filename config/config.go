@@ -164,13 +164,21 @@ type ManagementConfig struct {
 	CORSOrigins []string `toml:"cors_origins,omitempty"` // allowed CORS origins; empty = no CORS
 }
 
+// Display mode constants.
+const (
+	DisplayModeFull    = "full"    // show thinking + tool messages as separate messages (default)
+	DisplayModeCompact = "compact" // hide thinking/tool, each text segment is a separate card
+	DisplayModeQuiet   = "quiet"   // hide thinking/tool, all text appends to one card
+)
+
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
 type DisplayConfig struct {
+	Mode             *string `toml:"mode"`              // "full" (default), "compact", or "quiet"
+	CardMode         *string `toml:"card_mode"`         // "legacy" (default) or "rich" (Card 2.0 Feishu)
 	ThinkingMessages *bool   `toml:"thinking_messages"` // whether thinking messages are shown; default true
 	ThinkingMaxLen   *int    `toml:"thinking_max_len"`  // max chars for thinking messages; 0 = no truncation; default 300
 	ToolMaxLen       *int    `toml:"tool_max_len"`      // max chars for tool use messages; 0 = no truncation; default 500
 	ToolMessages     *bool   `toml:"tool_messages"`     // whether tool progress messages are shown; default true
-	Mode             *string `toml:"mode"`              // "legacy" (default, upstream behavior) or "rich" (Card 2.0 single-card streaming with timing footer, feishu only)
 }
 
 // StreamPreviewConfig controls real-time streaming preview in IM.
@@ -606,16 +614,33 @@ func projectQuietEffective(cfg *Config, proj *ProjectConfig) bool {
 }
 
 // EffectiveDisplay resolves the per-project [projects.display] override on top
-// of the global [display] block, falling back to built-in defaults. Resolution
-// order for each field:
-//  1. project-level [projects.display].<field>  (highest precedence)
-//  2. global [display].<field>
-//  3. built-in default
+// of the global [display] block, falling back to built-in defaults.
 //
-// Legacy quiet (root or per-project) is preserved: if quiet is in effect AND
-// neither layer explicitly set thinking_messages / tool_messages, they default
-// to false (backward-compatible with pre-display quiet = true).
-func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (thinkingMessages, toolMessages bool, thinkingMaxLen, toolMaxLen int, mode string) {
+// Resolution order for mode (thinking/tool visibility):
+//  1. Explicit [display].mode wins.
+//  2. Legacy quiet = true (without display.mode) → "quiet".
+//  3. Default → "full".
+//
+// Resolution order for thinking_messages / tool_messages:
+//  1. project-level [projects.display].<field> (highest precedence)
+//  2. global [display].<field>
+//  3. mode-derived default (compact/quiet → false, full → true)
+func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMessages, toolMessages bool, thinkingMaxLen, toolMaxLen int) {
+	// Resolve mode.
+	mode = DisplayModeFull
+	if cfg.Display.Mode != nil {
+		mode = *cfg.Display.Mode
+	} else if projectQuietEffective(cfg, proj) {
+		mode = DisplayModeQuiet
+	}
+
+	// Mode-derived defaults.
+	thinkingDefault, toolDefault := true, true
+	switch mode {
+	case DisplayModeCompact, DisplayModeQuiet:
+		thinkingDefault, toolDefault = false, false
+	}
+
 	pickBool := func(projVal, globalVal *bool, dflt bool) bool {
 		if projVal != nil {
 			return *projVal
@@ -651,22 +676,16 @@ func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (thinkingMessages, toolM
 		}
 		return f(projDisp)
 	}
-	getProjString := func(f func(*DisplayConfig) *string) *string {
-		if projDisp == nil {
-			return nil
-		}
-		return f(projDisp)
-	}
 
 	thinkingMessages = pickBool(
 		getProjBool(func(d *DisplayConfig) *bool { return d.ThinkingMessages }),
 		cfg.Display.ThinkingMessages,
-		true,
+		thinkingDefault,
 	)
 	toolMessages = pickBool(
 		getProjBool(func(d *DisplayConfig) *bool { return d.ToolMessages }),
 		cfg.Display.ToolMessages,
-		true,
+		toolDefault,
 	)
 	thinkingMaxLen = pickInt(
 		getProjInt(func(d *DisplayConfig) *int { return d.ThinkingMaxLen }),
@@ -678,39 +697,44 @@ func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (thinkingMessages, toolM
 		cfg.Display.ToolMaxLen,
 		500,
 	)
+	return
+}
 
-	mode = "legacy"
-	if modePtr := cfg.Display.Mode; modePtr != nil {
-		m := strings.ToLower(strings.TrimSpace(*modePtr))
-		if m == "rich" || m == "legacy" {
-			mode = m
+// EffectiveCardMode returns the card rendering mode for the project: "rich" (Feishu Card 2.0)
+// or "legacy" (default plain messages). Per-project overrides global.
+func EffectiveCardMode(cfg *Config, proj *ProjectConfig) string {
+	var projDisp *DisplayConfig
+	if proj != nil {
+		projDisp = proj.Display
+	}
+	if projDisp != nil && projDisp.CardMode != nil {
+		if m := strings.ToLower(strings.TrimSpace(*projDisp.CardMode)); m == "rich" || m == "legacy" {
+			return m
 		}
 	}
-	if modePtr := getProjString(func(d *DisplayConfig) *string { return d.Mode }); modePtr != nil {
-		m := strings.ToLower(strings.TrimSpace(*modePtr))
-		if m == "rich" || m == "legacy" {
-			mode = m
+	if cfg.Display.CardMode != nil {
+		if m := strings.ToLower(strings.TrimSpace(*cfg.Display.CardMode)); m == "rich" || m == "legacy" {
+			return m
 		}
 	}
-
-	// Legacy quiet behavior preserved: when project-level quiet is on AND
-	// neither layer explicitly set thinking_messages / tool_messages, they
-	// default to off. Per-project [projects.display] takes precedence over
-	// both global display and quiet.
-	if projectQuietEffective(cfg, proj) {
-		projThink := getProjBool(func(d *DisplayConfig) *bool { return d.ThinkingMessages })
-		projTool := getProjBool(func(d *DisplayConfig) *bool { return d.ToolMessages })
-		if cfg.Display.ThinkingMessages == nil && projThink == nil {
-			thinkingMessages = false
-		}
-		if cfg.Display.ToolMessages == nil && projTool == nil {
-			toolMessages = false
-		}
-	}
-	return thinkingMessages, toolMessages, thinkingMaxLen, toolMaxLen, mode
+	return "legacy"
 }
 
 func (c *Config) validate() error {
+	if c.Display.Mode != nil {
+		switch *c.Display.Mode {
+		case DisplayModeFull, DisplayModeCompact, DisplayModeQuiet:
+		default:
+			return fmt.Errorf("config: display.mode must be \"full\", \"compact\", or \"quiet\"")
+		}
+	}
+	if c.Display.CardMode != nil {
+		switch strings.ToLower(strings.TrimSpace(*c.Display.CardMode)) {
+		case "legacy", "rich":
+		default:
+			return fmt.Errorf("config: display.card_mode must be \"legacy\" or \"rich\"")
+		}
+	}
 	switch strings.ToLower(strings.TrimSpace(c.AttachmentSend)) {
 	case "", "on", "off":
 	default:
@@ -1459,9 +1483,14 @@ func RemoveAlias(name string) error {
 
 // SaveDisplayConfig persists the display settings to the config file.
 // Uses surgical text editing to preserve comments and unknown fields.
-func SaveDisplayConfig(thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
+func SaveDisplayConfig(mode *string, thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
 	configMu.Lock()
 	defer configMu.Unlock()
+	if mode != nil {
+		if err := patchSectionField("display", "mode", quoteTomlString(*mode)); err != nil {
+			return err
+		}
+	}
 	if thinkingMessages != nil {
 		if err := patchSectionField("display", "thinking_messages", fmt.Sprintf("%t", *thinkingMessages)); err != nil {
 			return err
