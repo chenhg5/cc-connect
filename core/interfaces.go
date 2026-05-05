@@ -24,6 +24,12 @@ type ReplyContextReconstructor interface {
 	ReconstructReplyCtx(sessionKey string) (any, error)
 }
 
+// MessageRecallDetector is an optional interface for platforms that can check
+// whether the message targeted by a reply context was recalled/deleted.
+type MessageRecallDetector interface {
+	IsMessageRecalled(ctx context.Context, replyCtx any) (bool, error)
+}
+
 // CronReplyTargetResolver is an optional interface for platforms that need to
 // map a logical cron session key to the actual reply target used at execution
 // time. This is useful for platforms where proactive replies may need to create
