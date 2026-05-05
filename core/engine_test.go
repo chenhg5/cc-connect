@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // --- stubs for Engine tests ---
@@ -7888,12 +7889,267 @@ func TestCmdShell_MultiWorkspaceIgnoresMissingSharedBinding(t *testing.T) {
 	for {
 		sent := p.getSent()
 		if len(sent) > 0 {
-			output := sent[0]
+			// With streaming progress, the final result is the last sent message
+			output := sent[len(sent)-1]
 			if !strings.Contains(output, agent.workDir) && !strings.Contains(output, expectedResolved) {
 				t.Fatalf("expected shell output to fall back to agent work dir %q (resolved %q), got %q", agent.workDir, expectedResolved, output)
 			}
 			if strings.Contains(output, missingDir) || strings.Contains(output, missingResolved) {
 				t.Fatalf("expected shell output to ignore missing shared workspace %q, got %q", missingDir, output)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for shell response")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// --- truncateRunes tests ---
+
+func TestTruncateRunes(t *testing.T) {
+	t.Run("short string unchanged", func(t *testing.T) {
+		if got := truncateRunes("hello", 10); got != "hello" {
+			t.Errorf("got %q", got)
+		}
+	})
+	t.Run("exact limit unchanged", func(t *testing.T) {
+		if got := truncateRunes("abcde", 5); got != "abcde" {
+			t.Errorf("got %q", got)
+		}
+	})
+	t.Run("ascii truncation", func(t *testing.T) {
+		got := truncateRunes("abcdefghij", 7)
+		if got != "abcd..." {
+			t.Errorf("got %q", got)
+		}
+	})
+	t.Run("multi-byte truncation at rune boundary", func(t *testing.T) {
+		input := strings.Repeat("中", 10)
+		got := truncateRunes(input, 7)
+		if !utf8.ValidString(got) {
+			t.Errorf("produced invalid UTF-8: %q", got)
+		}
+		runes := []rune(got)
+		if len(runes) != 7 {
+			t.Errorf("expected 7 runes, got %d (%q)", len(runes), got)
+		}
+		if !strings.HasSuffix(got, "...") {
+			t.Errorf("expected trailing ..., got %q", got)
+		}
+	})
+	t.Run("exact max multi-byte unchanged", func(t *testing.T) {
+		input := strings.Repeat("中", 5)
+		got := truncateRunes(input, 5)
+		if got != input {
+			t.Errorf("expected no truncation, got %q", got)
+		}
+	})
+	t.Run("max less than 4 clamped", func(t *testing.T) {
+		// Should not panic when max < 4
+		got := truncateRunes("abcdefgh", 2)
+		runes := []rune(got)
+		if len(runes) != 4 {
+			t.Errorf("expected 4 runes (clamped), got %d (%q)", len(runes), got)
+		}
+	})
+}
+
+// --- runShellWithProgress tests ---
+
+func TestRunShellWithProgress_BasicOutput(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	err := e.runShellWithProgress(p, "ctx", "echo hello", t.TempDir(), 5*time.Second, 4000)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) > 0 {
+			last := sent[len(sent)-1]
+			if !strings.Contains(last, "hello") {
+				t.Errorf("expected output to contain 'hello', got %q", last)
+			}
+			if !strings.Contains(last, "✅") {
+				t.Errorf("expected success emoji, got %q", last)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for shell response")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestRunShellWithProgress_FailedCommand(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	err := e.runShellWithProgress(p, "ctx", "exit 42", t.TempDir(), 5*time.Second, 4000)
+	if err == nil {
+		t.Fatal("expected error for non-zero exit")
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) > 0 {
+			last := sent[len(sent)-1]
+			if !strings.Contains(last, "❌") {
+				t.Errorf("expected failure emoji, got %q", last)
+			}
+			if !strings.Contains(last, "42") {
+				t.Errorf("expected exit code 42 in output, got %q", last)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for shell response")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestRunShellWithProgress_Timeout(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	err := e.runShellWithProgress(p, "ctx", "sleep 30", t.TempDir(), 200*time.Millisecond, 4000)
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("expected 'timed out' in error, got %q", err.Error())
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) > 0 {
+			last := sent[len(sent)-1]
+			if !strings.Contains(last, "⚠️") && !strings.Contains(last, "timeout") {
+				t.Errorf("expected timeout indicator, got %q", last)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for timeout message")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestRunShellWithProgress_EmptyOutput(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	err := e.runShellWithProgress(p, "ctx", "true", t.TempDir(), 5*time.Second, 4000)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) > 0 {
+			last := sent[len(sent)-1]
+			if !strings.Contains(last, "(no output)") {
+				t.Errorf("expected '(no output)', got %q", last)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for shell response")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestRunShellWithProgress_StderrOutput(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	err := e.runShellWithProgress(p, "ctx", "echo err >&2", t.TempDir(), 5*time.Second, 4000)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) > 0 {
+			last := sent[len(sent)-1]
+			if !strings.Contains(last, "err") {
+				t.Errorf("expected stderr output 'err', got %q", last)
+			}
+			if !strings.Contains(last, "✅") {
+				t.Errorf("expected success emoji, got %q", last)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for shell response")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestRunShellWithProgress_LongOutputTruncated(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	// Generate output longer than maxOutput
+	err := e.runShellWithProgress(p, "ctx", "python3 -c 'print(\"x\" * 5000)'", t.TempDir(), 5*time.Second, 100)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) > 0 {
+			last := sent[len(sent)-1]
+			if !utf8.ValidString(last) {
+				t.Errorf("output contains invalid UTF-8")
+			}
+			// Should be truncated — the code block content should end with "..."
+			if !strings.Contains(last, "...") {
+				t.Errorf("expected truncation marker '...', got %q", last)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for shell response")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestRunShellWithProgress_NonexistentCommand(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	err := e.runShellWithProgress(p, "ctx", "nonexistent_command_xyz_12345", t.TempDir(), 5*time.Second, 4000)
+	if err == nil {
+		t.Fatal("expected error for nonexistent command")
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) > 0 {
+			last := sent[len(sent)-1]
+			if !strings.Contains(last, "❌") {
+				t.Errorf("expected failure emoji, got %q", last)
+			}
+			if !strings.Contains(last, "failed to start") && !strings.Contains(last, "not found") && !strings.Contains(last, "executable file not found") {
+				t.Errorf("expected start failure message, got %q", last)
 			}
 			return
 		}

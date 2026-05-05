@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -8,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"os"
@@ -1186,38 +1188,190 @@ func (e *Engine) executeCronShell(p Platform, replyCtx any, job *CronJob) error 
 	}
 
 	timeout := job.ExecutionTimeout()
-	var ctx context.Context
-	var cancel context.CancelFunc
-	if timeout > 0 {
-		ctx, cancel = context.WithTimeout(e.ctx, timeout)
-	} else {
-		ctx, cancel = context.WithCancel(e.ctx)
+	if timeout <= 0 {
+		timeout = 60 * time.Second
 	}
+
+	cmdLabel := truncateStr(job.Exec, 60)
+
+	ctx, cancel := context.WithTimeout(e.ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", job.Exec)
-	cmd.Dir = workDir
-	output, err := cmd.CombinedOutput()
+	var shellCmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		shellCmd = exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", job.Exec)
+	} else {
+		shellCmd = exec.CommandContext(ctx, "sh", "-c", job.Exec)
+	}
+	shellCmd.Dir = workDir
 
-	if ctx.Err() == context.DeadlineExceeded {
-		e.send(p, replyCtx, fmt.Sprintf("⏰ ⚠️ timeout: `%s`", truncateStr(job.Exec, 60)))
+	stdout, err := shellCmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("shell: stdout pipe: %w", err)
+	}
+	stderr, err := shellCmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("shell: stderr pipe: %w", err)
+	}
+
+	if err := shellCmd.Start(); err != nil {
+		e.send(p, replyCtx, fmt.Sprintf("⏰ ❌ `%s`\nerror: failed to start: %v", cmdLabel, err))
+		return fmt.Errorf("shell: start: %w", err)
+	}
+
+	var mu sync.Mutex
+	var buf bytes.Buffer
+	doneCh := make(chan struct{})
+
+	readPipe := func(r io.Reader) {
+		scanner := bufio.NewScanner(r)
+		scanner.Buffer(make([]byte, 0, 64*1024), 64*1024)
+		for scanner.Scan() {
+			mu.Lock()
+			if buf.Len() > 0 {
+				buf.WriteByte('\n')
+			}
+			buf.WriteString(scanner.Text())
+			mu.Unlock()
+		}
+	}
+	go readPipe(stdout)
+	go readPipe(stderr)
+
+	go func() {
+		_ = shellCmd.Wait()
+		close(doneCh)
+	}()
+
+	// Wait briefly to see if the command finishes quickly
+	select {
+	case <-doneCh:
+		return e.finishCronShell(p, replyCtx, shellCmd, &mu, &buf, cmdLabel)
+	case <-ctx.Done():
+		killAndWait(shellCmd, doneCh)
+		mu.Lock()
+		output := buf.String()
+		mu.Unlock()
+		msg := fmt.Sprintf("⏰ ⚠️ timeout: `%s`", cmdLabel)
+		if output != "" {
+			msg = fmt.Sprintf("⏰ ⚠️ timeout: `%s`\n\n%s", cmdLabel, truncateStr(output, 3000))
+		}
+		e.send(p, replyCtx, msg)
+		return fmt.Errorf("shell command timed out")
+	case <-time.After(quickFinishTimeout):
+		// Still running — fall through to progress mode
+	}
+
+	// Long-running command. Try in-place updates.
+	var previewHandle any
+	var useUpdate bool
+	if _, ok := p.(MessageUpdater); ok {
+		if starter, ok := p.(PreviewStarter); ok {
+			mu.Lock()
+			output := buf.String()
+			mu.Unlock()
+			progressMsg := fmt.Sprintf("⏰ ⏳ `%s`", cmdLabel)
+			if output != "" {
+				progressMsg = fmt.Sprintf("⏰ ⏳ `%s`\n\n%s", cmdLabel, truncateStr(output, 3000))
+			}
+			handle, err := starter.SendPreviewStart(e.ctx, replyCtx, progressMsg)
+			if err == nil && handle != nil {
+				previewHandle = handle
+				useUpdate = true
+			}
+		}
+	}
+	if !useUpdate {
+		e.send(p, replyCtx, fmt.Sprintf("⏰ ⏳ `%s`", cmdLabel))
+	}
+
+	updateDone := make(chan struct{})
+	if useUpdate {
+		go func() {
+			ticker := time.NewTicker(2 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					mu.Lock()
+					output := buf.String()
+					mu.Unlock()
+					msg := fmt.Sprintf("⏰ ⏳ `%s`", cmdLabel)
+					if output != "" {
+						msg = fmt.Sprintf("⏰ ⏳ `%s`\n\n%s", cmdLabel, truncateStr(output, 3000))
+					}
+					_ = updaterFor(p).UpdateMessage(e.ctx, previewHandle, msg)
+				case <-updateDone:
+					return
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+
+	select {
+	case <-doneCh:
+		close(updateDone)
+		return e.finishCronShell(p, replyCtx, shellCmd, &mu, &buf, cmdLabel, useUpdate, previewHandle)
+	case <-ctx.Done():
+		close(updateDone)
+		killAndWait(shellCmd, doneCh)
+		mu.Lock()
+		output := buf.String()
+		mu.Unlock()
+		msg := fmt.Sprintf("⏰ ⚠️ timeout: `%s`", cmdLabel)
+		if output != "" {
+			msg = fmt.Sprintf("⏰ ⚠️ timeout: `%s`\n\n%s", cmdLabel, truncateStr(output, 3000))
+		}
+		if useUpdate {
+			_ = updaterFor(p).UpdateMessage(e.ctx, previewHandle, msg)
+		} else {
+			e.send(p, replyCtx, msg)
+		}
 		return fmt.Errorf("shell command timed out")
 	}
+}
 
-	result := strings.TrimSpace(string(output))
-	if err != nil {
-		if result != "" {
-			e.send(p, replyCtx, fmt.Sprintf("⏰ ❌ `%s`\n\n%s\n\nerror: %v", truncateStr(job.Exec, 60), truncateStr(result, 3000), err))
-		} else {
-			e.send(p, replyCtx, fmt.Sprintf("⏰ ❌ `%s`\nerror: %v", truncateStr(job.Exec, 60), err))
+func (e *Engine) finishCronShell(p Platform, replyCtx any, cmd *exec.Cmd, mu *sync.Mutex, buf *bytes.Buffer, cmdLabel string, opts ...any) error {
+	mu.Lock()
+	output := buf.String()
+	mu.Unlock()
+
+	exitOK := cmd.ProcessState.ExitCode() == 0
+
+	var finalMsg string
+	if exitOK {
+		result := strings.TrimSpace(output)
+		if result == "" {
+			result = "(no output)"
 		}
-		return fmt.Errorf("shell: %w", err)
+		finalMsg = fmt.Sprintf("⏰ ✅ `%s`\n\n%s", cmdLabel, truncateStr(result, 3000))
+	} else {
+		errMsg := output
+		if errMsg != "" {
+			finalMsg = fmt.Sprintf("⏰ ❌ `%s`\n\n%s\n\nerror: exit code %d", cmdLabel, truncateStr(errMsg, 3000), cmd.ProcessState.ExitCode())
+		} else {
+			finalMsg = fmt.Sprintf("⏰ ❌ `%s`\n\nerror: exit code %d", cmdLabel, cmd.ProcessState.ExitCode())
+		}
 	}
 
-	if result == "" {
-		result = "(no output)"
+	if len(opts) >= 2 {
+		if useUpdate, ok := opts[0].(bool); ok && useUpdate {
+			if handle := opts[1]; handle != nil {
+				_ = updaterFor(p).UpdateMessage(e.ctx, handle, finalMsg)
+				if !exitOK {
+					return fmt.Errorf("shell: exit code %d", cmd.ProcessState.ExitCode())
+				}
+				return nil
+			}
+		}
 	}
-	e.send(p, replyCtx, fmt.Sprintf("⏰ ✅ `%s`\n\n%s", truncateStr(job.Exec, 60), truncateStr(result, 3000)))
+
+	e.send(p, replyCtx, finalMsg)
+	if !exitOK {
+		return fmt.Errorf("shell: exit code %d", cmd.ProcessState.ExitCode())
+	}
 	return nil
 }
 
@@ -4882,6 +5036,242 @@ func (e *Engine) cmdShow(p Platform, msg *Message, args []string) {
 	e.reply(p, msg.ReplyCtx, content)
 }
 
+// quickFinishTimeout is how long to wait before assuming the command is long-running.
+const quickFinishTimeout = 500 * time.Millisecond
+
+// runShellWithProgress executes a shell command with live progress feedback.
+// Strategy: start the command, wait 500ms. If it finishes within that window,
+// just send the result directly (no intermediate messages). If it's still running,
+// send a progress message and keep updating until completion.
+func (e *Engine) runShellWithProgress(p Platform, replyCtx any, command string, workDir string, timeout time.Duration, maxOutput int) error {
+	cmdLabel := truncateStr(command, 60)
+
+	ctx, cancel := context.WithTimeout(e.ctx, timeout)
+	defer cancel()
+
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command)
+	} else {
+		cmd = exec.CommandContext(ctx, "sh", "-c", command)
+	}
+	cmd.Dir = workDir
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("stdout pipe: %w", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("stderr pipe: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		errMsg := fmt.Sprintf("failed to start command: %v", err)
+		e.reply(p, replyCtx, fmt.Sprintf("❌ `%s`\n```\n%s\n```", cmdLabel, errMsg))
+		return err
+	}
+
+	// Read stdout and stderr concurrently
+	var mu sync.Mutex
+	var buf bytes.Buffer
+	doneCh := make(chan struct{})
+	var cmdWaitErr error
+
+	readPipe := func(r io.Reader) {
+		scanner := bufio.NewScanner(r)
+		scanner.Buffer(make([]byte, 0, 64*1024), 64*1024)
+		for scanner.Scan() {
+			mu.Lock()
+			if buf.Len() > 0 {
+				buf.WriteByte('\n')
+			}
+			buf.WriteString(scanner.Text())
+			mu.Unlock()
+		}
+	}
+
+	go func() {
+		// Pipes must be fully drained before cmd.Wait() per Go API contract.
+		var pipeWg sync.WaitGroup
+		pipeWg.Add(2)
+		go func() { defer pipeWg.Done(); readPipe(stdout) }()
+		go func() { defer pipeWg.Done(); readPipe(stderr) }()
+		pipeWg.Wait()
+		cmdWaitErr = cmd.Wait()
+		close(doneCh)
+	}()
+
+	// Wait a bit to see if the command finishes quickly
+	select {
+	case <-doneCh:
+		// Command finished within the quick window — send result directly
+		return e.finishShellCmd(p, replyCtx, cmd, &mu, &buf, cmdLabel, maxOutput, false, cmdWaitErr)
+	case <-ctx.Done():
+		// Timeout before even the quick window elapsed (very short timeout)
+		killAndWait(cmd, doneCh)
+		mu.Lock()
+		output := buf.String()
+		mu.Unlock()
+		e.send(p, replyCtx, e.formatShellTimeout(cmdLabel, output, maxOutput))
+		return fmt.Errorf("command timed out after %s", timeout)
+	case <-time.After(quickFinishTimeout):
+		// Still running — fall through to progress mode
+	}
+
+	// Command is long-running. Try to send a progress message.
+	var previewHandle any
+	var useUpdate bool
+	if _, ok := p.(MessageUpdater); ok {
+		if starter, ok := p.(PreviewStarter); ok {
+			mu.Lock()
+			output := buf.String()
+			mu.Unlock()
+			progressMsg := e.formatShellProgress(cmdLabel, output, maxOutput)
+			handle, err := starter.SendPreviewStart(e.ctx, replyCtx, progressMsg)
+			if err == nil && handle != nil {
+				previewHandle = handle
+				useUpdate = true
+			}
+		}
+	}
+
+	if !useUpdate {
+		// Platform doesn't support in-place updates — send a status message
+		e.send(p, replyCtx, fmt.Sprintf("⏳ `%s`", cmdLabel))
+	}
+
+	// Periodic updates (only for platforms that support UpdateMessage)
+	updateDone := make(chan struct{})
+	if useUpdate {
+		go func() {
+			ticker := time.NewTicker(2 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					mu.Lock()
+					output := buf.String()
+					mu.Unlock()
+					msg := e.formatShellProgress(cmdLabel, output, maxOutput)
+					_ = updaterFor(p).UpdateMessage(e.ctx, previewHandle, msg)
+				case <-updateDone:
+					return
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+
+	// Wait for completion or timeout
+	select {
+	case <-doneCh:
+		close(updateDone)
+		return e.finishShellCmd(p, replyCtx, cmd, &mu, &buf, cmdLabel, maxOutput, useUpdate, previewHandle, cmdWaitErr)
+	case <-ctx.Done():
+		close(updateDone)
+		killAndWait(cmd, doneCh)
+		mu.Lock()
+		output := buf.String()
+		mu.Unlock()
+		timeoutMsg := e.formatShellTimeout(cmdLabel, output, maxOutput)
+		if useUpdate {
+			_ = updaterFor(p).UpdateMessage(e.ctx, previewHandle, timeoutMsg)
+		} else {
+			e.send(p, replyCtx, timeoutMsg)
+		}
+		return fmt.Errorf("command timed out after %s", timeout)
+	}
+}
+
+func truncateRunes(s string, max int) string {
+	if max < 4 {
+		max = 4
+	}
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return string(runes[:max-3]) + "..."
+}
+
+func (e *Engine) finishShellCmd(p Platform, replyCtx any, cmd *exec.Cmd, mu *sync.Mutex, buf *bytes.Buffer, cmdLabel string, maxOutput int, opts ...any) error {
+	var waitErr error
+	// Extract waitErr from opts if provided as the last error argument.
+	for _, o := range opts {
+		if err, ok := o.(error); ok {
+			waitErr = err
+		}
+	}
+
+	mu.Lock()
+	output := buf.String()
+	mu.Unlock()
+
+	exitCode := cmd.ProcessState.ExitCode()
+	exitOK := exitCode == 0
+
+	display := strings.TrimSpace(output)
+	if display == "" && exitOK {
+		display = "(no output)"
+	}
+	display = truncateRunes(display, maxOutput)
+
+	var finalMsg string
+	if exitOK {
+		finalMsg = fmt.Sprintf("✅ `%s`\n```\n%s\n```", cmdLabel, display)
+	} else {
+		// Prefer the wait error message when we have no captured output,
+		// since it often contains the actual failure reason.
+		if display == "" && waitErr != nil {
+			display = truncateRunes(waitErr.Error(), maxOutput)
+		}
+		finalMsg = fmt.Sprintf("❌ `%s` (exit code %d)\n```\n%s\n```", cmdLabel, exitCode, display)
+	}
+
+	// opts: [useUpdate bool, previewHandle any]
+	if len(opts) >= 2 {
+		if useUpdate, ok := opts[0].(bool); ok && useUpdate {
+			if handle := opts[1]; handle != nil {
+				_ = updaterFor(p).UpdateMessage(e.ctx, handle, finalMsg)
+				if !exitOK {
+					return fmt.Errorf("exit code %d", exitCode)
+				}
+				return nil
+			}
+		}
+	}
+
+	// No in-place update available, or command finished quickly — send final reply
+	e.reply(p, replyCtx, finalMsg)
+	if !exitOK {
+		return fmt.Errorf("exit code %d", exitCode)
+	}
+	return nil
+}
+
+func (e *Engine) formatShellProgress(cmdLabel, output string, maxOutput int) string {
+	display := truncateRunes(output, maxOutput)
+	return fmt.Sprintf("⏳ `%s`\n```\n%s\n```", cmdLabel, display)
+}
+
+func (e *Engine) formatShellTimeout(cmdLabel, output string, maxOutput int) string {
+	display := truncateRunes(output, maxOutput)
+	return fmt.Sprintf("⚠️ `%s` (timeout)\n```\n%s\n```", cmdLabel, display)
+}
+
+func killAndWait(cmd *exec.Cmd, doneCh <-chan struct{}) {
+	if cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
+	<-doneCh
+}
+
+func updaterFor(p Platform) MessageUpdater {
+	return p.(MessageUpdater)
+}
+
 func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
 	// Strip the command prefix ("/shell ", "/sh ", "/exec ", "/run ")
 	shellCmd := raw
@@ -4922,32 +5312,7 @@ func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
 		workDir, _ = os.Getwd()
 	}
 
-	go func() {
-		ctx, cancel := context.WithTimeout(e.ctx, timeout)
-		defer cancel()
-
-		cmd := exec.CommandContext(ctx, "sh", "-c", shellCmd)
-		cmd.Dir = workDir
-		output, err := cmd.CombinedOutput()
-
-		if ctx.Err() == context.DeadlineExceeded {
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandTimeout), shellCmd))
-			return
-		}
-
-		result := strings.TrimSpace(string(output))
-		if err != nil && result == "" {
-			result = err.Error()
-		}
-		if result == "" {
-			result = "(no output)"
-		}
-		if runes := []rune(result); len(runes) > 4000 {
-			result = string(runes[:3997]) + "..."
-		}
-
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf("$ %s\n```\n%s\n```", shellCmd, result))
-	}()
+	go func() { _ = e.runShellWithProgress(p, msg.ReplyCtx, shellCmd, workDir, timeout, 4000) }()
 }
 
 func (e *Engine) cmdDiff(p Platform, msg *Message, raw string) {
@@ -10407,59 +10772,7 @@ func (e *Engine) executeShellCommand(p Platform, msg *Message, cmd *CustomComman
 		workDir, _ = os.Getwd()
 	}
 
-	// Create context with timeout
-	ctx, cancel := context.WithTimeout(e.ctx, 60*time.Second)
-	defer cancel()
-
-	// Execute command using the native shell so Windows config commands work too.
-	var shellCmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		shellCmd = exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", execCmd)
-	} else {
-		shellCmd = exec.CommandContext(ctx, "sh", "-c", execCmd)
-	}
-	shellCmd.Dir = workDir
-	envVars := []string{
-		"CC_PROJECT=" + e.name,
-		"CC_SESSION_KEY=" + msg.SessionKey,
-	}
-	// Prepend the cc-connect binary dir on Windows only (native shell fix);
-	// on Unix it would change command resolution for user scripts.
-	if runtime.GOOS == "windows" {
-		if exePath, err := os.Executable(); err == nil {
-			binDir := filepath.Dir(exePath)
-			if curPath := os.Getenv("PATH"); curPath != "" {
-				envVars = append(envVars, "PATH="+binDir+string(filepath.ListSeparator)+curPath)
-			} else {
-				envVars = append(envVars, "PATH="+binDir)
-			}
-		}
-	}
-	shellCmd.Env = MergeEnv(os.Environ(), envVars)
-	output, err := shellCmd.CombinedOutput()
-
-	if ctx.Err() == context.DeadlineExceeded {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandExecTimeout), cmd.Name))
-		return
-	}
-
-	if err != nil {
-		errMsg := string(output)
-		if errMsg == "" {
-			errMsg = err.Error()
-		}
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandExecError), cmd.Name, truncateStr(errMsg, 1000)))
-		return
-	}
-
-	result := strings.TrimSpace(string(output))
-	if result == "" {
-		result = e.i18n.T(MsgCommandExecSuccess)
-	} else if len(result) > 4000 {
-		result = result[:3997] + "..."
-	}
-
-	e.reply(p, msg.ReplyCtx, result)
+	_ = e.runShellWithProgress(p, msg.ReplyCtx, execCmd, workDir, 60*time.Second, 4000)
 }
 
 func (e *Engine) cmdCommands(p Platform, msg *Message, args []string) {
