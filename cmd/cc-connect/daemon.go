@@ -29,7 +29,7 @@ func runDaemon(args []string) {
 	case "stop":
 		daemonStop()
 	case "restart":
-		daemonRestart()
+		daemonRestart(args[1:])
 	case "status":
 		daemonStatus()
 	case "logs":
@@ -223,9 +223,24 @@ func daemonStop() {
 	fmt.Println("cc-connect daemon stopped.")
 }
 
-func daemonRestart() {
+func daemonRestart(args []string) {
+	force := false
+	for _, a := range args {
+		if a == "--force" {
+			force = true
+		}
+	}
+
 	mgr := mustManager()
 	requireInstalled(mgr)
+
+	if force {
+		if meta, err := daemon.LoadMeta(); err == nil {
+			configPath := meta.WorkDir + "/config.toml"
+			KillExistingInstance(configPath)
+		}
+	}
+
 	if err := mgr.Restart(); err != nil {
 		fmt.Fprintf(os.Stderr, "Restart failed: %v\n", err)
 		os.Exit(1)
@@ -404,6 +419,9 @@ Install flags:
   --log-max-size N      Max log file size in MB (default: 10)
   --work-dir DIR        Directory containing config.toml (default: current dir)
   --force               Overwrite existing installation
+
+Restart flags:
+  --force               Kill existing process before restarting
 
 Logs flags:
   -f, --follow          Follow log output (like tail -f)
