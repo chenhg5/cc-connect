@@ -269,6 +269,25 @@ type AgentSession interface {
 	Close() error
 }
 
+// SessionCompactor is an optional interface for running agent sessions that
+// support native context compaction without sending a slash command string
+// through the conversation stream.
+type SessionCompactor interface {
+	CompactSession() error
+}
+
+// SessionThreadNamer is an optional interface for running agent sessions that
+// can update the agent/backend's user-facing thread name for the active session.
+type SessionThreadNamer interface {
+	SetThreadName(name string) error
+}
+
+// RuntimeSkill describes one skill surfaced by a running agent/backend.
+type RuntimeSkill struct {
+	Name        string
+	Description string
+}
+
 // PermissionResult represents the user's decision on a permission request.
 type PermissionResult struct {
 	Behavior     string         `json:"behavior"`               // "allow" or "deny"
@@ -411,6 +430,8 @@ type ContextUsage struct {
 // compressing/compacting the conversation context within a running session.
 // CompressCommand returns the native slash command (e.g. "/compact", "/compress")
 // that will be forwarded to the agent process. Return "" if not supported.
+// This is a legacy fallback for CLIs whose interactive compact support is
+// expressed as user-visible slash commands rather than native session RPCs.
 type ContextCompressor interface {
 	CompressCommand() string
 }
@@ -428,6 +449,12 @@ type CommandProvider interface {
 // agent-specific — they are NOT shared across different agent types.
 type SkillProvider interface {
 	SkillDirs() []string
+}
+
+// SessionSkillLister is an optional interface for running agent sessions that
+// can enumerate the runtime skill inventory exposed by the backend.
+type SessionSkillLister interface {
+	ListRuntimeSkills(forceReload bool) ([]RuntimeSkill, error)
 }
 
 // SessionDeleter is an optional interface for agents that support deleting sessions.

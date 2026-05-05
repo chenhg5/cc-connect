@@ -4745,6 +4745,71 @@ func TestCmdSkills_TelegramShowsManualInvocationHintWhenSkillsAreOmittedFromMenu
 	}
 }
 
+func TestCmdSkills_UsesRuntimeSkillListWhenAvailable(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sess := newStubSkillListSession("skills-runtime")
+	sess.skills = []RuntimeSkill{{Name: "runtime-skill", Description: "Runtime description"}}
+
+	key := "test:user1"
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Unlock()
+
+	e.cmdSkills(p, &Message{SessionKey: key, ReplyCtx: "ctx"})
+
+	if sess.calls != 1 {
+		t.Fatalf("ListRuntimeSkills calls = %d, want 1", sess.calls)
+	}
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "/runtime-skill") || !strings.Contains(p.sent[0], "Runtime description") {
+		t.Fatalf("skills text = %q, want runtime skills list", p.sent[0])
+	}
+}
+
+func TestCmdSkills_RuntimeSkillListFallbacksToLocalRegistryOnError(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	temp := t.TempDir()
+	skillDir := temp + "/demo"
+	if err := os.Mkdir(skillDir, 0o755); err != nil {
+		t.Fatalf("mkdir skill dir: %v", err)
+	}
+	if err := os.WriteFile(skillDir+"/SKILL.md", []byte("---\ndescription: Demo skill\n---\nDo demo"), 0o644); err != nil {
+		t.Fatalf("write skill file: %v", err)
+	}
+	e.skills.SetDirs([]string{temp})
+
+	sess := newStubSkillListSession("skills-runtime")
+	sess.err = fmt.Errorf("boom")
+	key := "test:user1"
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Unlock()
+
+	e.cmdSkills(p, &Message{SessionKey: key, ReplyCtx: "ctx"})
+
+	if sess.calls != 1 {
+		t.Fatalf("ListRuntimeSkills calls = %d, want 1", sess.calls)
+	}
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "/demo") {
+		t.Fatalf("skills text = %q, want local fallback skill", p.sent[0])
+	}
+}
+
 func TestRenderListCard_MakesEveryVisibleSessionClickable(t *testing.T) {
 	sessions := make([]AgentSessionInfo, 0, 7)
 	base := time.Date(2026, 3, 9, 10, 0, 0, 0, time.UTC)
@@ -7068,6 +7133,64 @@ type stubCompressorAgent struct {
 
 func (a *stubCompressorAgent) CompressCommand() string { return a.cmd }
 
+type stubCompactSession struct {
+	*queuingAgentSession
+	compactMu    sync.Mutex
+	compactCalls int
+	compactErr   error
+}
+
+func newStubCompactSession(id string) *stubCompactSession {
+	return &stubCompactSession{queuingAgentSession: newQueuingSession(id)}
+}
+
+func (s *stubCompactSession) CompactSession() error {
+	s.compactMu.Lock()
+	defer s.compactMu.Unlock()
+	s.compactCalls++
+	return s.compactErr
+}
+
+func (s *stubCompactSession) CompactCalls() int {
+	s.compactMu.Lock()
+	defer s.compactMu.Unlock()
+	return s.compactCalls
+}
+
+type stubThreadNameSession struct {
+	*queuingAgentSession
+	names   []string
+	nameErr error
+}
+
+func newStubThreadNameSession(id string) *stubThreadNameSession {
+	return &stubThreadNameSession{queuingAgentSession: newQueuingSession(id)}
+}
+
+func (s *stubThreadNameSession) SetThreadName(name string) error {
+	s.names = append(s.names, name)
+	return s.nameErr
+}
+
+type stubSkillListSession struct {
+	*queuingAgentSession
+	skills []RuntimeSkill
+	err    error
+	calls  int
+}
+
+func newStubSkillListSession(id string) *stubSkillListSession {
+	return &stubSkillListSession{queuingAgentSession: newQueuingSession(id)}
+}
+
+func (s *stubSkillListSession) ListRuntimeSkills(_ bool) ([]RuntimeSkill, error) {
+	s.calls++
+	if s.err != nil {
+		return nil, s.err
+	}
+	return append([]RuntimeSkill(nil), s.skills...), nil
+}
+
 func TestCmdCompress_NoCompressor_RepliesNotSupported(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -7152,6 +7275,52 @@ func TestAutoCompress_TriggerAfterResult(t *testing.T) {
 	}
 }
 
+func TestAutoCompress_TriggerAfterResult_NativeSessionCompactor(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newStubCompactSession("auto-compress-native")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetAutoCompressConfig(true, 4, 0)
+
+	key := "test:user1"
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	session := e.sessions.GetOrCreateActive(key)
+	session.AddHistory("user", "hello world")
+
+	go e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), func() {}, nil, nil)
+
+	sess.events <- Event{Type: EventResult, Content: "response", Done: true}
+
+	deadline := time.After(2 * time.Second)
+	for {
+		if sess.CompactCalls() > 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for native auto-compress call")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	sess.sendMu.Lock()
+	sendCalls := append([]string(nil), sess.sendCalls...)
+	sess.sendMu.Unlock()
+	if len(sendCalls) != 0 {
+		t.Fatalf("sendCalls = %v, want none for native auto-compactor", sendCalls)
+	}
+
+	sess.events <- Event{Type: EventResult, Content: "", Done: true}
+}
+
 func TestCmdCompress_SessionBusy_RepliesPreviousProcessing(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newQueuingSession("compress-busy")
@@ -7225,6 +7394,65 @@ func TestCmdCompress_Success_SendsCompressDone(t *testing.T) {
 		default:
 			time.Sleep(5 * time.Millisecond)
 		}
+	}
+
+	sess.events <- Event{Type: EventResult, Content: "", Done: true}
+
+	for {
+		sent := p.getSent()
+		foundDone := false
+		for _, s := range sent {
+			if strings.Contains(s, e.i18n.T(MsgCompressDone)) {
+				foundDone = true
+			}
+		}
+		if foundDone {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for MsgCompressDone, sent = %v", p.getSent())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
+func TestCmdCompress_NativeSessionCompactor_SendsCompressDone(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newStubCompactSession("compress-native")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	msg := &Message{SessionKey: key, Content: "/compress", ReplyCtx: "ctx"}
+	e.cmdCompress(p, msg)
+
+	deadline := time.After(3 * time.Second)
+	for {
+		if sess.CompactCalls() == 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for native compact call, compactCalls = %d", sess.CompactCalls())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	sess.sendMu.Lock()
+	sendCalls := append([]string(nil), sess.sendCalls...)
+	sess.sendMu.Unlock()
+	if len(sendCalls) != 0 {
+		t.Fatalf("sendCalls = %v, want none for native compactor", sendCalls)
 	}
 
 	sess.events <- Event{Type: EventResult, Content: "", Done: true}
@@ -7371,6 +7599,65 @@ func TestCmdCompress_DrainsQueueAfterSuccess(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("queued message not found in send calls: %v", calls)
+	}
+}
+
+func TestCmdName_CurrentSessionSyncsNativeThreadName(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sess := newStubThreadNameSession("thread-1")
+
+	key := "test:user1"
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	session := e.sessions.GetOrCreateActive(key)
+	session.SetAgentSessionID("thread-1", "stub")
+
+	e.cmdName(p, &Message{SessionKey: key, ReplyCtx: "ctx"}, []string{"feature-branch"})
+
+	if got := e.sessions.GetSessionName("thread-1"); got != "feature-branch" {
+		t.Fatalf("session name = %q, want feature-branch", got)
+	}
+	if len(sess.names) != 1 || sess.names[0] != "feature-branch" {
+		t.Fatalf("native SetThreadName calls = %v, want [feature-branch]", sess.names)
+	}
+}
+
+func TestCmdName_NumberedTargetDoesNotSyncDifferentActiveThread(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agent := &stubListAgent{sessions: []AgentSessionInfo{{ID: "thread-2", Summary: "other"}}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	sess := newStubThreadNameSession("thread-1")
+
+	key := "test:user1"
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	active := e.sessions.GetOrCreateActive(key)
+	active.SetAgentSessionID("thread-1", "stub")
+	other := e.sessions.NewSession(key, "other")
+	other.SetAgentSessionID("thread-2", "stub")
+
+	e.cmdName(p, &Message{SessionKey: key, ReplyCtx: "ctx"}, []string{"1", "backlog"})
+
+	if got := e.sessions.GetSessionName("thread-2"); got != "backlog" {
+		t.Fatalf("session name = %q, want backlog", got)
+	}
+	if len(sess.names) != 0 {
+		t.Fatalf("native SetThreadName calls = %v, want none", sess.names)
 	}
 }
 
@@ -11736,8 +12023,8 @@ func TestSessionName_ClaudeCodeLikeFlow(t *testing.T) {
 }
 
 // acpLikeSession simulates ACP behavior:
-// - CurrentSessionID() returns the thread ID immediately after creation
-//   (ACP does handshake before returning from StartSession)
+//   - CurrentSessionID() returns the thread ID immediately after creation
+//     (ACP does handshake before returning from StartSession)
 type acpLikeSession struct {
 	threadID string
 	events   chan Event
