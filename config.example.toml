@@ -675,6 +675,21 @@ name = "my-backend"
 #   - check background tasks
 #   - continue unfinished work
 
+# Optional: message buffering before an execution starts
+# 可选：在开始处理前先缓冲多条消息
+#
+# [projects.message_queue]
+# mode = "collect"               # "immediate" | "collect" | "manual"
+# collect_wait_ms = 5000          # idle window before auto-flush in collect mode
+# collect_max_messages = 20       # flush immediately when buffered message count reaches this limit
+# collect_max_bytes = 262144      # flush immediately when buffered payload size reaches this limit
+#
+# Runtime changes are also supported:
+# 也支持运行时修改：
+#   /config messages.mode collect
+#   /config messages.collect_wait_ms 5000
+#   /flush                           # manual mode trigger / 手动模式提交命令
+
 [projects.agent]
 type = "claudecode"
 

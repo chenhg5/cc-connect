@@ -265,6 +265,15 @@ func main() {
 		engine.SetFilterExternalSessions(proj.FilterExternalSessions != nil && *proj.FilterExternalSessions)
 		engine.SetBaseWorkDir(workDir)
 		engine.SetProjectStateStore(projectState)
+		engine.SetMessageQueueConfig(core.MessageQueueCfg{
+			Mode:            proj.MessageQueue.Mode,
+			CollectWait:     time.Duration(derefInt(proj.MessageQueue.CollectWaitMs)) * time.Millisecond,
+			CollectMaxMsgs:  derefInt(proj.MessageQueue.CollectMaxMessages),
+			CollectMaxBytes: derefInt(proj.MessageQueue.CollectMaxBytes),
+		})
+		engine.SetMessageQueueSaveFunc(func(mode *string, collectWaitMs, collectMaxMsgs, collectMaxBytes *int) error {
+			return config.SaveProjectMessageQueueConfig(proj.Name, mode, collectWaitMs, collectMaxMsgs, collectMaxBytes)
+		})
 
 		// Wire multi-workspace mode
 		if proj.Mode == "multi-workspace" {
@@ -1429,6 +1438,13 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 
 	// Reload sender injection
 	engine.SetInjectSender(proj.InjectSender != nil && *proj.InjectSender)
+
+	engine.SetMessageQueueConfig(core.MessageQueueCfg{
+		Mode:            proj.MessageQueue.Mode,
+		CollectWait:     time.Duration(derefInt(proj.MessageQueue.CollectWaitMs)) * time.Millisecond,
+		CollectMaxMsgs:  derefInt(proj.MessageQueue.CollectMaxMessages),
+		CollectMaxBytes: derefInt(proj.MessageQueue.CollectMaxBytes),
+	})
 
 	// Reload attachment send-back switch
 	engine.SetAttachmentSendEnabled(cfg.AttachmentSend != "off")
