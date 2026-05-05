@@ -1463,6 +1463,18 @@ app_secret = "your-feishu-app-secret"
 # --- Example: OpenClaw (Gateway-backed ACP bridge) ---
 # Docs: https://docs.openclaw.ai/cli/acp
 # Install the OpenClaw CLI, run a Gateway, then point cc-connect at `openclaw acp`.
+#
+# IMPORTANT: Remote OpenClaw requires pairing authorization before use!
+#
+# For remote gateways, you MUST complete the pairing process:
+#   1. Start OpenClaw gateway: openclaw acp --url wss://your-gateway:18789
+#   2. In another terminal, run: openclaw pair
+#   3. Approve the pairing request in the OpenClaw UI
+#   4. Now cc-connect can communicate with the authorized gateway
+#
+# Without pairing, OpenClaw will return empty responses ("pairing required" error).
+# Reference: https://zhuanlan.zhihu.com/p/2005687480976970296
+#
 # [[projects]]
 # name = "openclaw-acp"
 #
