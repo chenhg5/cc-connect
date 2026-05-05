@@ -3261,8 +3261,8 @@ func TestCmdModel_UpdatesActiveProviderModel(t *testing.T) {
 	if savedProvider != "openai" || savedModel != "gpt-4.1" {
 		t.Fatalf("saved provider/model = %q/%q, want openai/gpt-4.1", savedProvider, savedModel)
 	}
-	if active := e.sessions.GetOrCreateActive(msg.SessionKey); active.AgentSessionID != "" {
-		t.Fatalf("session id = %q, want cleared after model switch", active.AgentSessionID)
+	if active := e.sessions.GetOrCreateActive(msg.SessionKey); active.AgentSessionID != "existing-session" {
+		t.Fatalf("session id = %q, want preserved after model switch", active.AgentSessionID)
 	}
 }
 
@@ -3430,8 +3430,8 @@ func TestCmdModel_MultiWorkspaceUsesWorkspaceAgentAndSessions(t *testing.T) {
 	if globalAgent.model != "gpt-4.1-mini" {
 		t.Fatalf("global agent model = %q, want unchanged", globalAgent.model)
 	}
-	if got := ws.sessions.GetOrCreateActive(msg.SessionKey).AgentSessionID; got != "" {
-		t.Fatalf("workspace session id = %q, want cleared", got)
+	if got := ws.sessions.GetOrCreateActive(msg.SessionKey).AgentSessionID; got != "workspace-session" {
+		t.Fatalf("workspace session id = %q, want preserved", got)
 	}
 	if got := e.sessions.GetOrCreateActive(msg.SessionKey).AgentSessionID; got != "global-session" {
 		t.Fatalf("global session id = %q, want untouched", got)
@@ -3473,6 +3473,35 @@ func TestCmdModel_MultiWorkspaceSwitchDoesNotMutateProviderModel(t *testing.T) {
 	}
 	if got := wsAgent.GetActiveProvider(); got == nil || got.Model != "gpt-4.1-mini" {
 		t.Fatalf("workspace active provider = %#v, want unchanged model gpt-4.1-mini", got)
+	}
+}
+
+func TestCmdModel_KeepHistoryPreservesSessionID(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubModelModeAgent{
+		model: "gpt-4.1-mini",
+		providers: []ProviderConfig{
+			{
+				Name:   "openai",
+				Model:  "gpt-4.1-mini",
+				Models: []ModelOption{{Name: "gpt-4.1", Alias: "gpt"}, {Name: "gpt-4.1-mini", Alias: "mini"}},
+			},
+		},
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	s := e.sessions.GetOrCreateActive(msg.SessionKey)
+	s.SetAgentSessionID("existing-session-id", "test")
+	s.AddHistory("user", "hello")
+
+	e.cmdModel(p, msg, []string{"switch", "gpt"})
+
+	if got := s.GetAgentSessionID(); got != "existing-session-id" {
+		t.Fatalf("session id = %q, want existing-session-id (should be preserved)", got)
+	}
+	if got := len(s.GetHistory(0)); got != 1 {
+		t.Fatalf("history len = %d, want 1 (original entry preserved)", got)
 	}
 }
 
@@ -6550,8 +6579,8 @@ func TestHandleCardNav_ModelUsesWorkspaceContext(t *testing.T) {
 	if globalAgent.model != "global-old" {
 		t.Fatalf("global agent model = %q, want unchanged", globalAgent.model)
 	}
-	if got := ws.sessions.GetOrCreateActive(sessionKey).AgentSessionID; got != "" {
-		t.Fatalf("workspace session id = %q, want cleared", got)
+	if got := ws.sessions.GetOrCreateActive(sessionKey).AgentSessionID; got != "workspace-session" {
+		t.Fatalf("workspace session id = %q, want preserved", got)
 	}
 	if got := e.sessions.GetOrCreateActive(sessionKey).AgentSessionID; got != "global-session" {
 		t.Fatalf("global session id = %q, want untouched", got)

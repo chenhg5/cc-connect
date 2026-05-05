@@ -6486,9 +6486,9 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 	}
 	e.cleanupInteractiveState(interactiveKey)
 
-	s := sessions.GetOrCreateActive(msg.SessionKey)
-	s.SetAgentSessionID("", "")
-	s.ClearHistory()
+	// Keep the existing agent session ID so the next StartSession uses
+	// --resume <id> --model <new>, which lets the CLI agent restore context
+	// natively without replaying history (no extra token cost).
 	sessions.Save()
 
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChanged, target))
@@ -8234,9 +8234,6 @@ func (e *Engine) handleModelCardAction(args, sessionKey string) *Card {
 	resolved, err := e.switchModelOnAgent(agent, target, agent == e.agent)
 	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(sessionKey))
 	if err == nil {
-		s := sessions.GetOrCreateActive(sessionKey)
-		s.SetAgentSessionID("", "")
-		s.ClearHistory()
 		sessions.Save()
 	}
 
@@ -8792,9 +8789,6 @@ func (e *Engine) pushDeleteModeResultCard(sessionKey string) {
 func (e *Engine) performModelSwitchAsync(sessionKey string, state *interactiveState, agent Agent, sessions *SessionManager, target string) {
 	resolved, err := e.switchModelOnAgent(agent, target, agent == e.agent)
 	if err == nil {
-		s := sessions.GetOrCreateActive(sessionKey)
-		s.SetAgentSessionID("", "")
-		s.ClearHistory()
 		sessions.Save()
 	}
 
