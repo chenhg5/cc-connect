@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/chenhg5/cc-connect/config"
 	"github.com/chenhg5/cc-connect/core"
@@ -52,6 +53,48 @@ func TestProjectStatePath(t *testing.T) {
 	want := filepath.Join(dataDir, "projects", "my_project_one.state.json")
 	if got != want {
 		t.Fatalf("projectStatePath() = %q, want %q", got, want)
+	}
+}
+
+func TestResolveResetOnIdle(t *testing.T) {
+	intPtr := func(v int) *int { return &v }
+
+	cases := []struct {
+		name          string
+		configured    *int
+		wantDuration  time.Duration
+		wantDefaulted bool
+	}{
+		{
+			name:          "unset applies default and reports defaulted",
+			configured:    nil,
+			wantDuration:  time.Duration(defaultResetOnIdleMins) * time.Minute,
+			wantDefaulted: true,
+		},
+		{
+			name:          "explicit zero opts out and is not defaulted",
+			configured:    intPtr(0),
+			wantDuration:  0,
+			wantDefaulted: false,
+		},
+		{
+			name:          "explicit positive value is honored",
+			configured:    intPtr(45),
+			wantDuration:  45 * time.Minute,
+			wantDefaulted: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotDuration, gotDefaulted := resolveResetOnIdle(tc.configured)
+			if gotDuration != tc.wantDuration {
+				t.Errorf("duration = %v, want %v", gotDuration, tc.wantDuration)
+			}
+			if gotDefaulted != tc.wantDefaulted {
+				t.Errorf("defaulted = %v, want %v", gotDefaulted, tc.wantDefaulted)
+			}
+		})
 	}
 }
 
