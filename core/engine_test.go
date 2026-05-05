@@ -6435,6 +6435,114 @@ func TestProcessInteractiveEvents_DrainsQueuedMessages(t *testing.T) {
 	}
 }
 
+// replyCtxRecordingPlatform records (replyCtx, content) for each Send/Reply
+// so tests can assert which trigger context was used for which message.
+type replyCtxRecordingPlatform struct {
+	stubPlatformEngine
+	mu     sync.Mutex
+	events []replyCtxCall
+}
+
+type replyCtxCall struct {
+	op       string
+	replyCtx any
+	content  string
+}
+
+func (p *replyCtxRecordingPlatform) Reply(_ context.Context, replyCtx any, content string) error {
+	p.mu.Lock()
+	p.events = append(p.events, replyCtxCall{op: "reply", replyCtx: replyCtx, content: content})
+	p.mu.Unlock()
+	return nil
+}
+
+func (p *replyCtxRecordingPlatform) Send(_ context.Context, replyCtx any, content string) error {
+	p.mu.Lock()
+	p.events = append(p.events, replyCtxCall{op: "send", replyCtx: replyCtx, content: content})
+	p.mu.Unlock()
+	return nil
+}
+
+func (p *replyCtxRecordingPlatform) recordedEvents() []replyCtxCall {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]replyCtxCall, len(p.events))
+	copy(out, p.events)
+	return out
+}
+
+// TestProcessInteractiveEvents_QueuedMessageUsesItsOwnReplyCtx verifies that
+// when a queued message is dequeued mid-loop, subsequent Send/Reply calls use
+// the queued message's reply context (not the original turn's). Without this,
+// platforms that derive the parent message_id from replyCtx (e.g. feishu Reply
+// API for the reply quote) would quote the wrong message.
+func TestProcessInteractiveEvents_QueuedMessageUsesItsOwnReplyCtx(t *testing.T) {
+	p := &replyCtxRecordingPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	sess := newQueuingSession("qs-replyctx")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	session := e.sessions.GetOrCreateActive(key)
+
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx-turn1",
+		pendingMessages: []queuedMessage{
+			{platform: p, replyCtx: "ctx-turn2", content: "queued-msg"},
+		},
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	go func() {
+		// Turn 1 result — final reply should use ctx-turn1.
+		sess.events <- Event{Type: EventResult, Content: "response1", Done: true}
+		// Wait for the queued message's Send() before pushing turn 2.
+		sess.sendMu.Lock()
+		for len(sess.sendCalls) == 0 {
+			sess.sendMu.Unlock()
+			time.Sleep(5 * time.Millisecond)
+			sess.sendMu.Lock()
+		}
+		sess.sendMu.Unlock()
+		// Turn 2 result — final reply should use ctx-turn2.
+		sess.events <- Event{Type: EventResult, Content: "response2", Done: true}
+	}()
+
+	session.AddHistory("user", "initial-msg")
+	sendDone := make(chan error, 1)
+	sendDone <- nil
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), nil, sendDone, "ctx-turn1")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("processInteractiveEvents did not complete in time")
+	}
+
+	// Map each recorded send to the responsible turn by content match.
+	for _, ev := range p.recordedEvents() {
+		switch ev.content {
+		case "response1":
+			if ev.replyCtx != "ctx-turn1" {
+				t.Errorf("turn1 reply used replyCtx=%v, want ctx-turn1", ev.replyCtx)
+			}
+		case "response2":
+			if ev.replyCtx != "ctx-turn2" {
+				t.Errorf("turn2 reply used replyCtx=%v, want ctx-turn2 (regression: msg2's reply quoted msg1)", ev.replyCtx)
+			}
+		}
+	}
+}
+
 // TestDrainOrphanedQueue_UsesWorkspaceSessionManager verifies that
 // drainOrphanedQueue saves session history through the passed sessions
 // manager (workspace-specific) rather than e.sessions (global).

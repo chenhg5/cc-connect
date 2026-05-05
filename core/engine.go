@@ -3753,6 +3753,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				turnStart = time.Now()
 				firstEventLogged = false
 				waitStart = time.Now()
+				// Reassign the local replyCtx parameter to the queued message's
+				// trigger context. state.replyCtx was updated above, but the
+				// function-scope replyCtx is what gets passed to p.Send / p.Reply
+				// further down — and platforms derive the parent message_id from
+				// it for the reply quote. Without this reassignment, msg2's
+				// reply would quote msg1's bubble.
+				replyCtx = queued.replyCtx
 				queuedRenderer := func(content string) string {
 					return e.renderOutgoingContentForWorkspace(queued.platform, content, workspaceDir)
 				}
