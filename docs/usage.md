@@ -12,6 +12,7 @@ Complete guide to using cc-connect features.
 - [Feishu Setup CLI](#feishu-setup-cli)
 - [Weixin (personal) Setup CLI](#weixin-personal-setup-cli)
 - [Claude Code Router Integration](#claude-code-router-integration)
+- [Claude Code PermissionRequest Hooks](#claude-code-permissionrequest-hooks)
 - [Voice Messages (STT)](#voice-messages-speech-to-text)
 - [Voice Reply (TTS)](#voice-reply-text-to-speech)
 - [Image and File Send-Back](#image-and-file-send-back)
@@ -608,6 +609,35 @@ Notes:
 router_url = "http://127.0.0.1:3456"
 router_api_key = "your-secret-key"  # optional
 ```
+
+---
+
+## Claude Code PermissionRequest Hooks
+
+If you have [PermissionRequest hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) configured in your Claude Code `settings.json`, cc-connect will respect them — matching hooks can auto-approve or deny tool requests before they reach the messaging platform.
+
+### Why hooks run twice
+
+cc-connect launches Claude Code with `--permission-prompt-tool stdio`, which means Claude Code's own hook execution output is discarded (stdout is consumed by the protocol). To make your hooks actually take effect, cc-connect reads the hook definitions from `settings.json` and **re-runs them independently**.
+
+This means your hook command is executed **twice** per permission request:
+
+1. Once by Claude Code (result discarded)
+2. Once by cc-connect (result used)
+
+### Avoiding double cost for LLM-based hooks
+
+If your hook is rule-based (e.g. "deny `rm -rf`"), running twice is harmless. But if your hook calls an LLM (like [ccgate](https://github.com/tak848/ccgate)), the first execution wastes tokens. Add this guard at the top of your hook:
+
+```bash
+#!/bin/bash
+if [ -n "$CC_CONNECT_PERMISSION_HOOK_SKIP" ]; then
+  exit 0  # cc-connect will re-run us without this flag
+fi
+# ... your actual hook logic ...
+```
+
+cc-connect sets `CC_CONNECT_PERMISSION_HOOK_SKIP=1` in the Claude Code subprocess environment. When your hook sees this variable, it's running inside Claude Code (result will be discarded) — skip the expensive work. cc-connect strips this variable when it runs the hook itself, so the second execution proceeds normally.
 
 ---
 

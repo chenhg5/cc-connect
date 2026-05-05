@@ -13,6 +13,7 @@ cc-connect 完整功能使用指南。
 - [飞书配置 CLI](#飞书配置-cli)
 - [微信个人号配置 CLI](#微信个人号配置-cli)
 - [Claude Code Router 集成](#claude-code-router-集成)
+- [Claude Code PermissionRequest Hooks](#claude-code-permissionrequest-hooks)
 - [语音消息（语音转文字）](#语音消息语音转文字)
 - [语音回复（文字转语音）](#语音回复文字转语音)
 - [图片与文件回传](#图片与文件回传)
@@ -523,6 +524,35 @@ cc-connect weixin new --project my-project
 router_url = "http://127.0.0.1:3456"
 router_api_key = "your-secret-key"
 ```
+
+---
+
+## Claude Code PermissionRequest Hooks
+
+如果你在 Claude Code 的 `settings.json` 中配置了 [PermissionRequest hooks](https://docs.anthropic.com/en/docs/claude-code/hooks)，cc-connect 会读取并执行它们——匹配的 hook 可以在请求到达消息平台之前自动批准或拒绝。
+
+### 为什么 hook 会被执行两次
+
+cc-connect 使用 `--permission-prompt-tool stdio` 模式启动 Claude Code，这意味着 Claude Code 自身执行 hook 的输出会被丢弃（stdout 被协议占用）。为了让你的 hook 真正生效，cc-connect 会从 `settings.json` 中读取 hook 定义，然后**独立重新执行一次**。
+
+也就是说，每次权限请求你的 hook 命令会被执行**两次**：
+
+1. Claude Code 执行一次（结果丢弃）
+2. cc-connect 执行一次（结果生效）
+
+### LLM 类 hook 如何避免重复消耗
+
+如果你的 hook 是规则类的（例如"拒绝 `rm -rf`"），执行两次无所谓。但如果你的 hook 调用了 LLM（如 [ccgate](https://github.com/tak848/ccgate)），第一次执行就是在白白浪费 token。在 hook 开头加上这个判断：
+
+```bash
+#!/bin/bash
+if [ -n "$CC_CONNECT_PERMISSION_HOOK_SKIP" ]; then
+  exit 0  # cc-connect 会在不含此变量的环境下重新执行我们
+fi
+# ... 你的 hook 逻辑 ...
+```
+
+cc-connect 启动 Claude Code 子进程时会在环境中设置 `CC_CONNECT_PERMISSION_HOOK_SKIP=1`。当你的 hook 检测到这个变量时，说明它运行在 Claude Code 内部（结果会被丢弃）——跳过昂贵的逻辑即可。cc-connect 在自己执行 hook 时会剥离这个变量，所以第二次执行会正常运行。
 
 ---
 
