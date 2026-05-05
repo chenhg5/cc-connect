@@ -39,6 +39,14 @@ func (s *Session) TryLock() bool {
 	return true
 }
 
+// Busy reports whether the session is currently locked for an in-flight turn.
+// Used by commands (e.g. /ps) that only make sense while a task is running.
+func (s *Session) Busy() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.busy
+}
+
 func (s *Session) Unlock() {
 	s.unlock(true)
 }

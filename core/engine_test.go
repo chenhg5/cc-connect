@@ -7133,6 +7133,103 @@ func TestCmdCompress_DrainsQueueAfterSuccess(t *testing.T) {
 	}
 }
 
+// --- cmdPs ---
+
+func TestCmdPs_EmptyArgs_RepliesUsage(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	msg := &Message{SessionKey: "test:user1", Content: "/ps", ReplyCtx: "ctx"}
+	e.cmdPs(p, msg, nil)
+
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[0], e.i18n.T(MsgPsEmpty)) {
+		t.Fatalf("expected MsgPsEmpty, got %v", sent)
+	}
+}
+
+func TestCmdPs_NoAgentSession_RepliesNoSession(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	msg := &Message{SessionKey: "test:user1", Content: "/ps hello", ReplyCtx: "ctx"}
+	e.cmdPs(p, msg, []string{"hello"})
+
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[0], e.i18n.T(MsgPsNoSession)) {
+		t.Fatalf("expected MsgPsNoSession, got %v", sent)
+	}
+}
+
+func TestCmdPs_IdleSession_RepliesNoSession(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("ps-idle")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	state := &interactiveState{agentSession: sess, platform: p}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	// Session is alive but idle (not locked by an in-flight turn).
+	msg := &Message{SessionKey: key, Content: "/ps hello", ReplyCtx: "ctx"}
+	e.cmdPs(p, msg, []string{"hello"})
+
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[0], e.i18n.T(MsgPsNoSession)) {
+		t.Fatalf("expected MsgPsNoSession on idle session, got %v", sent)
+	}
+
+	sess.sendMu.Lock()
+	n := len(sess.sendCalls)
+	sess.sendMu.Unlock()
+	if n != 0 {
+		t.Fatalf("expected no Send on idle session, got %d call(s)", n)
+	}
+}
+
+func TestCmdPs_BusySession_InjectsToAgent(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("ps-busy")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	state := &interactiveState{agentSession: sess, platform: p}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	// Simulate a turn in flight.
+	session := e.sessions.GetOrCreateActive(key)
+	if !session.TryLock() {
+		t.Fatal("expected TryLock to succeed")
+	}
+	defer session.Unlock()
+
+	msg := &Message{SessionKey: key, Content: "/ps add unit tests", ReplyCtx: "ctx"}
+	e.cmdPs(p, msg, []string{"add", "unit", "tests"})
+
+	sess.sendMu.Lock()
+	calls := append([]string(nil), sess.sendCalls...)
+	sess.sendMu.Unlock()
+	if len(calls) != 1 || calls[0] != "add unit tests" {
+		t.Fatalf("expected Send(\"add unit tests\"), got %v", calls)
+	}
+
+	sent := p.getSent()
+	found := false
+	for _, s := range sent {
+		if strings.Contains(s, e.i18n.T(MsgPsSent)) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected MsgPsSent reply, got %v", sent)
+	}
+}
+
 // --- 3. executeCardAction routing ---
 
 func TestExecuteCardAction_CronEnable(t *testing.T) {

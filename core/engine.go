@@ -4022,6 +4022,15 @@ func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsNoSession))
 		return
 	}
+	// /ps is only meaningful as a supplement to a turn already in flight.
+	// When the session is idle, injecting via agentSession.Send bypasses the
+	// session lock and races with concurrent normal messages on the CLI's
+	// stdin, so reject instead.
+	_, sessions := e.sessionContextForKey(msg.SessionKey)
+	if session := sessions.GetOrCreateActive(msg.SessionKey); !session.Busy() {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsNoSession))
+		return
+	}
 	if err := state.agentSession.Send(text, nil, nil); err != nil {
 		slog.Error("ps: send failed", "error", err)
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsSendFailed))
