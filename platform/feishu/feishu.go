@@ -862,8 +862,11 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 
 	// If this message is a reply to another message, fetch the quoted content
 	// and prepend it so the agent has full context.
+	// Skip quote injection when thread_isolation is enabled and the message is
+	// inside a thread — the thread already provides conversational context, and
+	// long quoted prefixes can drown out the user's actual text (issue #764).
 	quotedPrefix := ""
-	if parentID != "" {
+	if parentID != "" && !(p.threadIsolation && isThreadSessionKey(sessionKey)) {
 		quotedPrefix = p.fetchQuotedMessage(ctx, parentID)
 	}
 
