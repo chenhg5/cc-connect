@@ -16,14 +16,15 @@ const ContinueSession = "__continue__"
 
 // Session tracks one conversation between a user and the agent.
 type Session struct {
-	ID                  string         `json:"id"`
-	Name                string         `json:"name"`
-	AgentSessionID      string         `json:"agent_session_id"`
-	AgentType           string         `json:"agent_type,omitempty"`
-	PastAgentSessionIDs []string       `json:"past_agent_session_ids,omitempty"`
-	History             []HistoryEntry `json:"history"`
-	CreatedAt           time.Time      `json:"created_at"`
-	UpdatedAt           time.Time      `json:"updated_at"`
+	ID                  string          `json:"id"`
+	Name                string          `json:"name"`
+	AgentSessionID      string          `json:"agent_session_id"`
+	AgentType           string          `json:"agent_type,omitempty"`
+	PastAgentSessionIDs []string        `json:"past_agent_session_ids,omitempty"`
+	History             []HistoryEntry  `json:"history"`
+	EventTimelines      []EventTimeline `json:"event_timelines,omitempty"`
+	CreatedAt           time.Time       `json:"created_at"`
+	UpdatedAt           time.Time       `json:"updated_at"`
 
 	mu   sync.Mutex `json:"-"`
 	busy bool       `json:"-"`
@@ -87,6 +88,17 @@ func (s *Session) recordPastAgentSessionID() {
 		}
 	}
 	s.PastAgentSessionIDs = append(s.PastAgentSessionIDs, s.AgentSessionID)
+}
+
+func (s *Session) AddHistoryAndReturnIndex(role, content string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.History = append(s.History, HistoryEntry{
+		Role:      role,
+		Content:   content,
+		Timestamp: time.Now(),
+	})
+	return len(s.History) - 1
 }
 
 // SetAgentInfo atomically sets the agent session ID, agent type, and name.
@@ -171,6 +183,7 @@ func (s *Session) ClearHistory() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.History = nil
+	s.EventTimelines = nil
 }
 
 // GetHistory returns the last n entries. If n <= 0, returns all.
@@ -183,6 +196,30 @@ func (s *Session) GetHistory(n int) []HistoryEntry {
 	}
 	out := make([]HistoryEntry, n)
 	copy(out, s.History[total-n:])
+	return out
+}
+
+func (s *Session) AppendEventTimeline(t EventTimeline, maxTurns int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.EventTimelines = append(s.EventTimelines, t)
+	if maxTurns > 0 && len(s.EventTimelines) > maxTurns {
+		s.EventTimelines = s.EventTimelines[len(s.EventTimelines)-maxTurns:]
+	}
+}
+
+func (s *Session) GetEventTimelines() []EventTimeline {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]EventTimeline, len(s.EventTimelines))
+	for i, tl := range s.EventTimelines {
+		out[i] = EventTimeline{
+			AssistantHistoryIdx: tl.AssistantHistoryIdx,
+			StartedAt:           tl.StartedAt,
+			CompletedAt:         tl.CompletedAt,
+			Events:              append([]TimelineEvent(nil), tl.Events...),
+		}
+	}
 	return out
 }
 
@@ -570,6 +607,15 @@ func (sm *SessionManager) saveLocked() {
 			agentSID = ""
 			s.AgentSessionID = ""
 		}
+		timelines := make([]EventTimeline, len(s.EventTimelines))
+		for i, tl := range s.EventTimelines {
+			timelines[i] = EventTimeline{
+				AssistantHistoryIdx: tl.AssistantHistoryIdx,
+				StartedAt:           tl.StartedAt,
+				CompletedAt:         tl.CompletedAt,
+				Events:              append([]TimelineEvent(nil), tl.Events...),
+			}
+		}
 		snapSessions[id] = &Session{
 			ID:                  s.ID,
 			Name:                s.Name,
@@ -577,6 +623,7 @@ func (sm *SessionManager) saveLocked() {
 			AgentType:           s.AgentType,
 			PastAgentSessionIDs: append([]string(nil), s.PastAgentSessionIDs...),
 			History:             append([]HistoryEntry(nil), s.History...),
+			EventTimelines:      timelines,
 			CreatedAt:           s.CreatedAt,
 			UpdatedAt:           s.UpdatedAt,
 		}
