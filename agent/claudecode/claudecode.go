@@ -1097,9 +1097,10 @@ func boolVal(m map[string]any, key string) bool {
 // 1. Replacing path separators (/ or \) with "-"
 // 2. Replacing colons (:) with "-" (Windows drive letters)
 // 3. Replacing underscores (_) with "-"
-// 4. Replacing spaces and tildes (~) with "-" (common in macOS iCloud paths like
+// 4. Replacing dots (.) with "-"
+// 5. Replacing spaces and tildes (~) with "-" (common in macOS iCloud paths like
 //    "/Users/x/Library/Mobile Documents/com~apple~CloudDocs/...")
-// 5. Replacing all non-ASCII characters with "-"
+// 6. Replacing all non-ASCII characters with "-"
 func encodeClaudeProjectKey(absPath string) string {
 	// First, normalize to forward slashes for consistent processing
 	normalized := strings.ReplaceAll(absPath, "\\", "/")
@@ -1107,7 +1108,7 @@ func encodeClaudeProjectKey(absPath string) string {
 	// Build the encoded key character by character
 	var result strings.Builder
 	for _, r := range normalized {
-		if r == '/' || r == ':' || r == '_' || r == ' ' || r == '~' {
+		if r == '/' || r == ':' || r == '_' || r == ' ' || r == '~' || r == '.' {
 			result.WriteRune('-')
 		} else if r < 128 { // ASCII range (0-127)
 			result.WriteRune(r)
