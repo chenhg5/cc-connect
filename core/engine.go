@@ -4510,11 +4510,14 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 	e.cleanupInteractiveState(interactiveKey)
 	slog.Info("cmdNew: cleanup done, creating new session", "session_key", msg.SessionKey)
 
-	// Clear old session's agent session ID so it cannot be resumed
-	old := sessions.GetOrCreateActive(msg.SessionKey)
-	old.SetAgentSessionID("", "")
-	old.ClearHistory()
-	sessions.Save()
+	// Clear old session's agent session ID so it cannot be resumed.
+	// Only do this if there's an existing session; don't create a placeholder.
+	old := sessions.GetActive(msg.SessionKey)
+	if old != nil {
+		old.SetAgentSessionID("", "")
+		old.ClearHistory()
+		sessions.Save()
+	}
 
 	name := ""
 	if len(args) > 0 {

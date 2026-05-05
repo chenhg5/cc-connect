@@ -269,6 +269,17 @@ func (sm *SessionManager) GetOrCreateActive(userKey string) *Session {
 	return s
 }
 
+// GetActive returns the current active session for userKey, or nil if none exists.
+// Unlike GetOrCreateActive, this does not create a placeholder session.
+func (sm *SessionManager) GetActive(userKey string) *Session {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	if sid, ok := sm.activeSession[userKey]; ok {
+		return sm.sessions[sid]
+	}
+	return nil
+}
+
 func (sm *SessionManager) NewSession(userKey, name string) *Session {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
