@@ -406,6 +406,16 @@ func TestEncodeClaudeProjectKey(t *testing.T) {
 			expected: "-Users-username---folder-english---", // "/中文" = 3 hyphens, "/文件夹" = 4 hyphens
 		},
 		{
+			name:     "macOS username with dot",
+			input:    "/Users/yinglong.li/Documents/project",
+			expected: "-Users-yinglong-li-Documents-project",
+		},
+		{
+			name:     "path with multiple dots",
+			input:    "/Users/test.user.name/my.project",
+			expected: "-Users-test-user-name-my-project",
+		},
+		{
 			name:     "empty path",
 			input:    "",
 			expected: "",
