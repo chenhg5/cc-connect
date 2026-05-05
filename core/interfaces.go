@@ -24,6 +24,12 @@ type ReplyContextReconstructor interface {
 	ReconstructReplyCtx(sessionKey string) (any, error)
 }
 
+// MessageRecallDetector is an optional interface for platforms that can check
+// whether the message targeted by a reply context was recalled/deleted.
+type MessageRecallDetector interface {
+	IsMessageRecalled(ctx context.Context, replyCtx any) (bool, error)
+}
+
 // CronReplyTargetResolver is an optional interface for platforms that need to
 // map a logical cron session key to the actual reply target used at execution
 // time. This is useful for platforms where proactive replies may need to create
@@ -91,9 +97,25 @@ Examples:
   cc-connect cron add --cron "0 9 * * 1" --prompt "Generate a weekly project status report" --desc "Weekly Report"
   cc-connect cron add --cron "*/2 * * * *" --exec "ipconfig" --session-mode new-per-run --desc "Every 2 min ipconfig"
 
-You can also list or delete cron jobs:
+You can also list, edit, or delete cron jobs:
   cc-connect cron list
+  cc-connect cron edit <job-id> <field> <value>
   cc-connect cron del <job-id>
+
+Use ` + "`cron edit`" + ` instead of delete-and-recreate when only one field changes.
+Common editable fields:
+  cron_expr     new schedule, e.g. "0 9 * * *"
+  prompt        new task prompt (or ` + "`exec`" + ` for shell command)
+  description   short label
+  enabled       true / false  (pause without deleting)
+  mute          true / false  (silence all messages)
+  timeout_mins  integer minutes (0 = unlimited)
+Run ` + "`cc-connect cron edit --help`" + ` for the full field list.
+
+Examples:
+  cc-connect cron edit abc123 cron_expr "0 9 * * *"
+  cc-connect cron edit abc123 enabled false
+  cc-connect cron edit abc123 prompt "Updated daily summary task"
 
 ### Bot-to-bot relay
 When you need to communicate with another bot (e.g. ask another AI agent a question), use:
@@ -107,6 +129,20 @@ This sends a message to the target bot and waits for its response (printed to st
 The conversation is visible in the group chat and each bot maintains its own relay session.
 
 Environment variables CC_PROJECT and CC_SESSION_KEY are already set, so the relay knows which group chat to use.
+
+### Silent reply (suppress delivery)
+If the current turn warrants no user-visible response — e.g. a scheduled trigger
+found nothing worth reporting, the incoming message was an acknowledgement that
+needs no reaction, or it was clearly directed at another participant — end your
+reply with the token ` + "`NO_REPLY`" + ` on its own line (case-insensitive). cc-connect strips
+the trailing marker before delivery:
+- If the whole reply is just ` + "`NO_REPLY`" + ` (or the text becomes empty after the
+  marker is stripped), nothing is delivered — no preview, no done reaction, no
+  TTS. Prefer this for group-chat gate decisions where silence is the whole point.
+- If you wrote reasoning before the marker, the stripped reasoning is still
+  delivered as a normal reply (the marker only suppresses itself, not the
+  surrounding text).
+Use this sparingly; when in doubt, send a brief reply instead.
 `
 }
 
@@ -124,6 +160,14 @@ type SystemPromptSupporter interface {
 // a stop function that the caller must invoke when processing ends.
 type TypingIndicator interface {
 	StartTyping(ctx context.Context, replyCtx any) (stop func())
+}
+
+// TypingIndicatorDone is an optional interface for platforms that can show a
+// "done" reaction after processing completes. The engine calls AddDoneReaction
+// when the agent finishes a multi-round turn in quiet mode, so the user gets
+// a push notification (e.g. Feishu card edits don't trigger pushes).
+type TypingIndicatorDone interface {
+	AddDoneReaction(replyCtx any)
 }
 
 // ImageSender is an optional interface for platforms that support sending images.
@@ -184,6 +228,16 @@ type CardNavigationHandler func(action string, sessionKey string) *Card
 // card navigation (updating the existing card instead of sending a new message).
 type CardNavigable interface {
 	SetCardNavigationHandler(h CardNavigationHandler)
+}
+
+// CardRefresher is an optional interface for platforms that can update a
+// previously rendered card in-place after the original callback has returned.
+// This is used when async operations (e.g. delete-mode deletion) need to
+// refresh a "loading" card with the final result. Platforms that implement
+// this interface should track the message ID from card action callbacks and
+// use it to patch the card content.
+type CardRefresher interface {
+	RefreshCard(ctx context.Context, sessionKey string, card *Card) error
 }
 
 // PlatformLifecycleHandler receives readiness state transitions from async
@@ -265,6 +319,9 @@ type ProviderConfig struct {
 	Models   []ModelOption     // pre-configured list of available models for this provider
 	Thinking string            // override thinking type sent to this provider ("disabled", "enabled", or "" for no rewrite)
 	Env      map[string]string // arbitrary extra env vars (e.g. CLAUDE_CODE_USE_BEDROCK=1)
+	// Codex-specific provider config (maps to Codex model_providers.<name>)
+	CodexWireAPI     string            // wire API format (e.g. "responses")
+	CodexHTTPHeaders map[string]string // custom HTTP headers
 }
 
 // ProviderSwitcher is an optional interface for agents that support multiple API providers.
@@ -349,6 +406,29 @@ type UsageCredits struct {
 	Balance    string
 }
 
+// ContextUsageReporter is an optional interface for running agent sessions that
+// can report real runtime context usage for the active conversation.
+type ContextUsageReporter interface {
+	GetContextUsage() *ContextUsage
+}
+
+// ContextUsage describes runtime context consumption for the active session.
+type ContextUsage struct {
+	// UsedTokens is the current token load to compare against ContextWindow when
+	// computing remaining context capacity for the next turn.
+	UsedTokens int
+	// BaselineTokens is the portion of the context window always occupied by
+	// fixed runtime/system instructions and therefore excluded from user-visible
+	// "left" calculations when the agent provides it.
+	BaselineTokens        int
+	TotalTokens           int
+	InputTokens           int
+	CachedInputTokens     int
+	OutputTokens          int
+	ReasoningOutputTokens int
+	ContextWindow         int
+}
+
 // ContextCompressor is an optional interface for agents that support
 // compressing/compacting the conversation context within a running session.
 // CompressCommand returns the native slash command (e.g. "/compact", "/compress")
@@ -392,6 +472,15 @@ type ModeSwitcher interface {
 	PermissionModes() []PermissionModeInfo
 }
 
+// WorkspaceAgentOptionSnapshotter is an optional interface for agents that can
+// export reusable constructor options needed to recreate an equivalent agent in
+// a different workspace. Snapshot values should omit work_dir; the caller is
+// responsible for setting the target workspace explicitly. Provider wiring and
+// run_as propagation may still be handled separately by the engine.
+type WorkspaceAgentOptionSnapshotter interface {
+	WorkspaceAgentOptions() map[string]any
+}
+
 // LiveModeSwitcher is an optional interface for running agent sessions that can
 // apply a mode change immediately without restarting the process.
 type LiveModeSwitcher interface {
@@ -411,6 +500,7 @@ type PermissionModeInfo struct {
 type BotCommandInfo struct {
 	Command     string // command name without leading "/"
 	Description string // short description for the menu
+	IsSkill     bool   // whether this entry comes from a skill
 }
 
 // CommandRegistrar is an optional interface for platforms that support
@@ -423,4 +513,20 @@ type CommandRegistrar interface {
 // channel IDs to human-readable names.
 type ChannelNameResolver interface {
 	ResolveChannelName(channelID string) (string, error)
+}
+
+// CardStatus represents the visual status of a card header.
+type CardStatus string
+
+const (
+	CardStatusThinking CardStatus = "thinking" // grey
+	CardStatusWorking  CardStatus = "working"  // blue
+	CardStatusDone     CardStatus = "done"     // green
+	CardStatusError    CardStatus = "error"    // red
+)
+
+// PreviewStatusUpdater is an optional interface for platforms that support
+// updating the visual status of a preview card header.
+type PreviewStatusUpdater interface {
+	SetPreviewStatus(previewHandle any, status CardStatus)
 }

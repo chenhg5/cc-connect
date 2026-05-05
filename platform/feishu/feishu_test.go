@@ -1,11 +1,208 @@
 package feishu
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/chenhg5/cc-connect/core"
+	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
+
+func TestOnMessageRecalledDispatchesCoreRecallMessage(t *testing.T) {
+	got := make(chan *core.Message, 1)
+	p := &Platform{
+		platformName: "feishu",
+		handler: func(_ core.Platform, msg *core.Message) {
+			got <- msg
+		},
+	}
+	messageID := "om_recalled"
+	chatID := "oc_chat"
+	recallTime := "1710000000000"
+	recallType := "user"
+
+	err := p.onMessageRecalled(context.Background(), &larkim.P2MessageRecalledV1{
+		Event: &larkim.P2MessageRecalledV1Data{
+			MessageId:  &messageID,
+			ChatId:     &chatID,
+			RecallTime: &recallTime,
+			RecallType: &recallType,
+		},
+	})
+	if err != nil {
+		t.Fatalf("onMessageRecalled returned error: %v", err)
+	}
+
+	select {
+	case msg := <-got:
+		if msg.Platform != "feishu" {
+			t.Fatalf("Platform = %q, want feishu", msg.Platform)
+		}
+		if msg.MessageID != messageID {
+			t.Fatalf("MessageID = %q, want %q", msg.MessageID, messageID)
+		}
+		if !msg.Recalled {
+			t.Fatal("Recalled = false, want true")
+		}
+		if msg.Content != "" {
+			t.Fatalf("Content = %q, want empty recall payload", msg.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for recall message")
+	}
+}
+
+func TestDispatchMessageDropsRecalledMessageBeforeHandler(t *testing.T) {
+	called := false
+	p := &Platform{
+		platformName: "feishu",
+		handler: func(_ core.Platform, _ *core.Message) {
+			called = true
+		},
+	}
+	p.markMessageRecalled("om_drop")
+
+	p.dispatchMessage(
+		context.Background(),
+		"text",
+		`{"text":"hello"}`,
+		nil,
+		"om_drop",
+		"feishu:ou_user:ou_user",
+		"",
+		"",
+		replyContext{messageID: "om_drop", sessionKey: "feishu:ou_user:ou_user"},
+		"",
+	)
+
+	if called {
+		t.Fatal("handler was called for a message already marked recalled")
+	}
+}
+
+func TestIsMessageRecalledDetectsWithdrawnMessageFromGetAPI(t *testing.T) {
+	const appID = "cli_recall_probe"
+	const appSecret = "secret-recall-probe"
+
+	getCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/open-apis/auth/v3/tenant_access_token/internal":
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "success",
+				"expire":              7200,
+				"tenant_access_token": "tenant-token",
+			})
+		case "/open-apis/im/v1/messages/om_withdrawn":
+			getCalls++
+			writeJSON(t, w, map[string]any{
+				"code": 230011,
+				"msg":  "The message was withdrawn.",
+			})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName: "feishu",
+		domain:       srv.URL,
+		appID:        appID,
+		appSecret:    appSecret,
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+		replayClient: lark.NewClient(appID, appSecret,
+			lark.WithEnableTokenCache(false),
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+	}
+
+	recalled, err := p.IsMessageRecalled(context.Background(), replyContext{messageID: "om_withdrawn", chatID: "oc_chat"})
+	if err != nil {
+		t.Fatalf("IsMessageRecalled() error = %v", err)
+	}
+	if !recalled {
+		t.Fatal("IsMessageRecalled() = false, want true")
+	}
+	if getCalls != 1 {
+		t.Fatalf("getCalls = %d, want 1", getCalls)
+	}
+	if !p.isMessageRecalled("om_withdrawn") {
+		t.Fatal("withdrawn message id was not cached after detection")
+	}
+}
+
+func TestIsMessageRecalledDetectsDeletedMessageItem(t *testing.T) {
+	const appID = "cli_recall_probe"
+	const appSecret = "secret-recall-probe"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/open-apis/auth/v3/tenant_access_token/internal":
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "success",
+				"expire":              7200,
+				"tenant_access_token": "tenant-token",
+			})
+		case "/open-apis/im/v1/messages/om_deleted":
+			writeJSON(t, w, map[string]any{
+				"code": 0,
+				"msg":  "success",
+				"data": map[string]any{
+					"items": []map[string]any{
+						{
+							"message_id": "om_deleted",
+							"deleted":    true,
+						},
+					},
+				},
+			})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName: "feishu",
+		domain:       srv.URL,
+		appID:        appID,
+		appSecret:    appSecret,
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+		replayClient: lark.NewClient(appID, appSecret,
+			lark.WithEnableTokenCache(false),
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+	}
+
+	recalled, err := p.IsMessageRecalled(context.Background(), replyContext{messageID: "om_deleted", chatID: "oc_chat"})
+	if err != nil {
+		t.Fatalf("IsMessageRecalled() error = %v", err)
+	}
+	if !recalled {
+		t.Fatal("IsMessageRecalled() = false, want true for deleted message item")
+	}
+	if !p.isMessageRecalled("om_deleted") {
+		t.Fatal("deleted message id was not cached after detection")
+	}
+}
 
 func TestExtractPostParts_TextOnly(t *testing.T) {
 	p := &Platform{}
@@ -75,6 +272,41 @@ func TestExtractPostParts_NoTitle(t *testing.T) {
 	}
 	texts, _ := p.extractPostParts("", post)
 	if len(texts) != 1 || texts[0] != "只有正文" {
+		t.Errorf("unexpected texts: %v", texts)
+	}
+}
+
+func TestExtractPostParts_AtMention(t *testing.T) {
+	p := &Platform{botOpenID: "ou_bot"}
+	post := &postLang{
+		Content: [][]postElement{
+			{
+				{Tag: "text", Text: "hi "},
+				{Tag: "at", UserId: "ou_alice", UserName: "Alice"},
+				{Tag: "text", Text: " and "},
+				{Tag: "at", UserId: "all"},
+				{Tag: "text", Text: " but not "},
+				{Tag: "at", UserId: "ou_bot", UserName: "Bot"},
+			},
+		},
+	}
+	texts, _ := p.extractPostParts("", post)
+	joined := strings.Join(texts, "")
+	want := "hi @Alice and @all but not "
+	if joined != want {
+		t.Errorf("want %q, got %q", want, joined)
+	}
+}
+
+func TestExtractPostParts_Markdown(t *testing.T) {
+	p := &Platform{}
+	post := &postLang{
+		Content: [][]postElement{
+			{{Tag: "markdown", Text: "**bold**"}},
+		},
+	}
+	texts, _ := p.extractPostParts("", post)
+	if len(texts) != 1 || texts[0] != "**bold**" {
 		t.Errorf("unexpected texts: %v", texts)
 	}
 }
@@ -300,11 +532,38 @@ func TestExtractPostPlainText_Empty(t *testing.T) {
 	}
 }
 
-func TestExtractPostPlainText_NonTextTagsIgnored(t *testing.T) {
-	content := `{"content":[[{"tag":"text","text":"hello"},{"tag":"a","text":"link","href":"http://x.com"}]]}`
+func TestExtractPostPlainText_LinkText(t *testing.T) {
+	content := `{"content":[[{"tag":"text","text":"hello "},{"tag":"a","text":"link","href":"http://x.com"}]]}`
 	got := extractPostPlainText(content)
-	if got != "hello" {
-		t.Errorf("expected 'hello', got %q", got)
+	if got != "hello link" {
+		t.Errorf("expected 'hello link', got %q", got)
+	}
+}
+
+func TestExtractPostPlainText_AtMention(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{"named", `{"content":[[{"tag":"text","text":"hi "},{"tag":"at","user_id":"ou_x","user_name":"Alice"}]]}`, "hi @Alice"},
+		{"all", `{"content":[[{"tag":"at","user_id":"all"}]]}`, "@all"},
+		{"fallback", `{"content":[[{"tag":"at","user_id":"ou_x"}]]}`, "@user"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := extractPostPlainText(tc.content); got != tc.want {
+				t.Errorf("want %q, got %q", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestExtractPostPlainText_Markdown(t *testing.T) {
+	content := `{"content":[[{"tag":"markdown","text":"**bold** and *italic*"}]]}`
+	got := extractPostPlainText(content)
+	if got != "**bold** and *italic*" {
+		t.Errorf("expected markdown passthrough, got %q", got)
 	}
 }
 
@@ -399,5 +658,40 @@ func TestStripMentions(t *testing.T) {
 				t.Errorf("stripMentions() = %q, want %q", got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestResolveBotSenderName(t *testing.T) {
+	p := &Platform{peerBots: map[string]string{
+		"cli_known": "Jeeves",
+		"cli_other": "Ivy",
+	}}
+	tests := []struct {
+		name  string
+		appID string
+		want  string
+	}{
+		{"empty app id falls back to Bot", "", "Bot"},
+		{"known app id resolves to alias", "cli_known", "Jeeves"},
+		{"another known app id", "cli_other", "Ivy"},
+		{"unknown app id surfaces id", "cli_unknown", "Bot[cli_unknown]"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := p.resolveBotSenderName(tt.appID)
+			if got != tt.want {
+				t.Errorf("resolveBotSenderName(%q) = %q, want %q", tt.appID, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveBotSenderName_NilMap(t *testing.T) {
+	p := &Platform{}
+	if got := p.resolveBotSenderName("cli_any"); got != "Bot[cli_any]" {
+		t.Errorf("nil peerBots: got %q, want %q", got, "Bot[cli_any]")
+	}
+	if got := p.resolveBotSenderName(""); got != "Bot" {
+		t.Errorf("nil peerBots + empty id: got %q, want %q", got, "Bot")
 	}
 }

@@ -68,7 +68,7 @@ export default function SystemConfig() {
   };
 
   return (
-    <div className="space-y-6 animate-fade-in">
+    <div className="space-y-6 animate-fade-in ">
       {/* Actions */}
       <div className="flex flex-wrap gap-3">
         <Button variant="secondary" onClick={handleReload}><RefreshCw size={16} /> {t('system.reload')}</Button>

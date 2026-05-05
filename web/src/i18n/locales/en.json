@@ -2,10 +2,12 @@
   "nav": {
     "dashboard": "Dashboard",
     "projects": "Projects",
+    "providers": "Providers",
     "sessions": "Sessions",
     "chat": "Chat",
     "cron": "Cron",
     "bridge": "Bridge",
+    "skills": "Skills",
     "system": "System"
   },
   "dashboard": {
@@ -34,11 +36,17 @@
     "detail": "Details",
     "noProjects": "No projects configured",
     "workDir": "Working directory",
+    "agentType": "Agent type",
+    "agentTypeChangeHint": "Changing agent type requires restart. Incompatible providers will be removed.",
     "agentMode": "Permission mode",
     "agentSettings": "Agent",
     "generalSettings": "General",
     "showCtxIndicator": "Context indicator",
     "showCtxIndicatorHint": "Show [ctx: ~N%] suffix on replies",
+    "replyFooter": "Reply footer",
+    "replyFooterHint": "Append model/usage metadata to replies",
+    "injectSender": "Inject sender",
+    "injectSenderHint": "Prepend sender identity to messages sent to agent",
     "platformAccess": "Platform access control",
     "deleteTitle": "Delete Project",
     "deleteConfirm": "Are you sure you want to delete project \"{{name}}\"? This will remove it from the config file.",
@@ -86,7 +94,14 @@
     "remove": "Remove",
     "activate": "Activate",
     "setModel": "Set model",
-    "models": "Models"
+    "models": "Models",
+    "global": "global",
+    "emptyProject": "No providers configured for this project.",
+    "emptyProjectHint": "Link a global provider or add a custom one.",
+    "linkGlobal": "Link global",
+    "addCustom": "Add custom",
+    "allLinked": "All global providers are already linked.",
+    "manageGlobal": "Manage global providers"
   },
   "cron": {
     "title": "Scheduled jobs",
@@ -127,7 +142,8 @@
     "runCount": "Run count",
     "errorCount": "Error count",
     "skippedBusy": "Skipped (busy)",
-    "lastRun": "Last run"
+    "lastRun": "Last run",
+    "notEnabled": "Heartbeat is not configured for this project. Add [heartbeat] section in config.toml to enable."
   },
   "bridge": {
     "title": "Bridge",
@@ -172,7 +188,9 @@
     "actions": "Actions",
     "viewAll": "View all",
     "optional": "optional",
-    "confirmDelete": "Are you sure you want to delete this?"
+    "confirmDelete": "Are you sure you want to delete this?",
+    "close": "Close",
+    "saving": "Saving…"
   },
   "setup": {
     "addPlatform": "Add platform",
@@ -294,8 +312,12 @@
     "idleTimeout": "Idle timeout (min)",
     "idleTimeoutHint": "Auto-stop agent after N minutes of inactivity; 0 = disabled",
     "display": "Display",
+    "thinkingMessages": "Thinking messages",
+    "thinkingMessagesHint": "Show or hide intermediate thinking messages",
     "thinkingMaxLen": "Thinking max length",
     "thinkingMaxLenHint": "Max characters for thinking messages; 0 = no truncation",
+    "toolMessages": "Tool progress",
+    "toolMessagesHint": "Show or hide tool progress messages",
     "toolMaxLen": "Tool max length",
     "toolMaxLenHint": "Max characters for tool use messages; 0 = no truncation",
     "streamPreview": "Stream preview",
@@ -310,6 +332,73 @@
     "rlWindowSecsHint": "Time window in seconds",
     "log": "Log",
     "logLevel": "Log level"
+  },
+  "globalProviders": {
+    "title": "Providers",
+    "subtitle": "Manage shared API providers across all projects",
+    "add": "Add Provider",
+    "importCCSwitch": "Import from CC-Switch",
+    "edit": "Edit Provider",
+    "empty": "No providers configured",
+    "emptyHint": "Add a global provider or import from presets to get started.",
+    "deleteHint": "Remove provider \"{{name}}\"? Projects referencing it will lose access.",
+    "noPresets": "No presets available",
+    "noPresetsHint": "Provider presets could not be loaded. Check your network connection.",
+    "register": "Register",
+    "addPreset": "Add",
+    "added": "Added",
+    "tab": {
+      "providers": "My Providers",
+      "presets": "Presets"
+    },
+    "form": {
+      "name": "Name",
+      "model": "Default model",
+      "modelHint": "The model used when switching to this provider. Click ✓ on a model below to set it.",
+      "models": "Available models",
+      "modelsHint": "Models users can switch to via /model. Click ✓ to set as default.",
+      "agentTypes": "Agent types",
+      "agentTypesHint": "Leave empty for all agent types",
+      "thinkingDefault": "Default (auto)",
+      "perAgentHint": "Different agents may use different Base URL / models. Configure per agent type below.",
+      "defaultConfig": "Default",
+      "baseUrl": "Base URL",
+      "codexWireApi": "Wire API"
+    },
+    "ccSwitch": {
+      "title": "Import from CC-Switch",
+      "notFound": "CC-Switch database not found. Make sure CC-Switch is installed.",
+      "empty": "No providers configured in CC-Switch.",
+      "hint": "Found {{count}} providers in CC-Switch. Select which to import:",
+      "active": "active",
+      "exists": "exists",
+      "import": "Import ({{count}})",
+      "result": "Import complete: {{imported}} imported, {{skipped}} skipped."
+    }
+  },
+  "skills": {
+    "title": "Skills",
+    "subtitle": "Manage agent skills and discover new ones",
+    "tab": {
+      "local": "Local Skills",
+      "recommended": "Recommended"
+    },
+    "projects": "Projects",
+    "skillCount": "{{count}} skills",
+    "scanDirs": "Scan directories",
+    "noSkills": "No skills found",
+    "noSkillsHint": "Skills are loaded from agent skill directories (e.g. ~/.claude/skills/)",
+    "emptyProject": "No skills found in this project's directories",
+    "noPresets": "No recommended skills available",
+    "noPresetsHint": "Skill recommendations could not be loaded. Check your network connection.",
+    "featured": "Featured",
+    "allSkills": "All Skills",
+    "author": "Author",
+    "source": "From",
+    "download": "Download",
+    "free": "Free",
+    "freemium": "Freemium",
+    "paid": "Paid"
   },
   "theme": {
     "light": "Light",

@@ -2,10 +2,12 @@
   "nav": {
     "dashboard": "總覽",
     "projects": "專案",
+    "providers": "服務商",
     "sessions": "工作階段",
     "chat": "對話",
     "cron": "排程工作",
     "bridge": "橋接",
+    "skills": "技能",
     "system": "系統"
   },
   "dashboard": {
@@ -34,11 +36,17 @@
     "detail": "詳細資料",
     "noProjects": "尚未設定專案",
     "workDir": "工作目錄",
+    "agentType": "Agent 類型",
+    "agentTypeChangeHint": "切換 Agent 類型需要重新啟動，不相容的服務商將被移除。",
     "agentMode": "權限模式",
     "agentSettings": "Agent 設定",
     "generalSettings": "通用設定",
     "showCtxIndicator": "上下文指示",
     "showCtxIndicatorHint": "在回覆末尾顯示 [ctx: ~N%]",
+    "replyFooter": "回覆尾部資訊",
+    "replyFooterHint": "在回覆末尾附加模型/用量元資訊",
+    "injectSender": "注入發送者",
+    "injectSenderHint": "在發送給 Agent 的訊息前附加發送者身份資訊",
     "platformAccess": "平台存取控制",
     "deleteTitle": "刪除專案",
     "deleteConfirm": "確定要刪除專案「{{name}}」嗎？這將從設定檔中移除該專案。",
@@ -86,7 +94,14 @@
     "remove": "移除",
     "activate": "啟用",
     "setModel": "設定模型",
-    "models": "可用模型"
+    "models": "可用模型",
+    "global": "全域",
+    "emptyProject": "此專案尚未設定服務商。",
+    "emptyProjectHint": "關聯全域服務商或新增自訂服務商。",
+    "linkGlobal": "關聯全域服務商",
+    "addCustom": "自訂新增",
+    "allLinked": "所有全域服務商已關聯。",
+    "manageGlobal": "管理全域服務商"
   },
   "cron": {
     "title": "排程工作",
@@ -127,7 +142,8 @@
     "runCount": "執行次數",
     "errorCount": "錯誤次數",
     "skippedBusy": "略過（忙碌）",
-    "lastRun": "上次執行"
+    "lastRun": "上次執行",
+    "notEnabled": "該專案未配置心跳功能。請在 config.toml 中添加 [heartbeat] 配置段以啟用。"
   },
   "bridge": {
     "title": "橋接",
@@ -172,7 +188,9 @@
     "actions": "操作",
     "viewAll": "檢視全部",
     "optional": "選填",
-    "confirmDelete": "確定要刪除嗎？"
+    "confirmDelete": "確定要刪除嗎？",
+    "close": "關閉",
+    "saving": "儲存中…"
   },
   "setup": {
     "addPlatform": "新增平台",
@@ -294,8 +312,12 @@
     "idleTimeout": "閒置逾時（分鐘）",
     "idleTimeoutHint": "Agent 閒置 N 分鐘後自動停止；0 = 不啟用",
     "display": "顯示",
+    "thinkingMessages": "思考訊息",
+    "thinkingMessagesHint": "顯示或隱藏中間思考過程訊息",
     "thinkingMaxLen": "思考最大長度",
     "thinkingMaxLenHint": "思考訊息的最大字元數；0 = 不截斷",
+    "toolMessages": "工具進度",
+    "toolMessagesHint": "顯示或隱藏工具呼叫進度訊息",
     "toolMaxLen": "工具最大長度",
     "toolMaxLenHint": "工具使用訊息的最大字元數；0 = 不截斷",
     "streamPreview": "串流預覽",
@@ -310,6 +332,73 @@
     "rlWindowSecsHint": "時間視窗的秒數",
     "log": "記錄",
     "logLevel": "記錄層級"
+  },
+  "globalProviders": {
+    "title": "服務商管理",
+    "subtitle": "管理全域共用的 API 服務商，可被所有專案引用",
+    "add": "新增服務商",
+    "importCCSwitch": "從 CC-Switch 匯入",
+    "edit": "編輯服務商",
+    "empty": "尚未配置服務商",
+    "emptyHint": "新增全域服務商或從預設清單中匯入。",
+    "deleteHint": "移除服務商「{{name}}」？引用該服務商的專案將失去存取權限。",
+    "noPresets": "暫無預設",
+    "noPresetsHint": "無法載入服務商預設清單，請確認網路連線。",
+    "register": "註冊",
+    "addPreset": "新增",
+    "added": "已新增",
+    "tab": {
+      "providers": "我的服務商",
+      "presets": "推薦預設"
+    },
+    "form": {
+      "name": "名稱",
+      "model": "預設模型",
+      "modelHint": "切換到該服務商時使用的模型",
+      "models": "可用模型",
+      "modelsHint": "使用者可透過 /model 指令切換的模型列表",
+      "agentTypes": "適用 Agent 類型",
+      "agentTypesHint": "留空表示適用所有 Agent 類型",
+      "thinkingDefault": "預設（自動）",
+      "perAgentHint": "不同 Agent 可能使用不同的 Base URL / 模型，可按 Agent 類型分別設定。",
+      "defaultConfig": "預設",
+      "baseUrl": "Base URL",
+      "codexWireApi": "Wire API"
+    },
+    "ccSwitch": {
+      "title": "從 CC-Switch 匯入",
+      "notFound": "未找到 CC-Switch 資料庫，請確認已安裝 CC-Switch。",
+      "empty": "CC-Switch 中沒有已設定的服務商。",
+      "hint": "在 CC-Switch 中找到 {{count}} 個服務商，選擇要匯入的：",
+      "active": "目前",
+      "exists": "已存在",
+      "import": "匯入 ({{count}})",
+      "result": "匯入完成：成功 {{imported}} 個，跳過 {{skipped}} 個。"
+    }
+  },
+  "skills": {
+    "title": "技能",
+    "subtitle": "管理 Agent 技能，探索更多推薦技能",
+    "tab": {
+      "local": "本地技能",
+      "recommended": "推薦"
+    },
+    "projects": "專案",
+    "skillCount": "{{count}} 個技能",
+    "scanDirs": "掃描目錄",
+    "noSkills": "未發現技能",
+    "noSkillsHint": "技能從 Agent 技能目錄載入（如 ~/.claude/skills/）",
+    "emptyProject": "此專案的技能目錄中未發現技能",
+    "noPresets": "暫無推薦技能",
+    "noPresetsHint": "無法載入推薦技能列表，請檢查網路連線。",
+    "featured": "精選",
+    "allSkills": "全部技能",
+    "author": "作者",
+    "source": "來源",
+    "download": "下載",
+    "free": "免費",
+    "freemium": "免費增值",
+    "paid": "付費"
   },
   "theme": {
     "light": "淺色",

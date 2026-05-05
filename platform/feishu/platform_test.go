@@ -443,7 +443,7 @@ func TestInteractivePlatform_CardActionUsesCallbackSessionKey(t *testing.T) {
 	}
 }
 
-func TestInteractivePlatform_ModelCardActionDispatchesCommandAsync(t *testing.T) {
+func TestInteractivePlatform_ModelCardActionReturnsCardUpdate(t *testing.T) {
 	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -453,15 +453,11 @@ func TestInteractivePlatform_ModelCardActionDispatchesCommandAsync(t *testing.T)
 		t.Fatalf("platform type = %T, want *interactivePlatform", platformAny)
 	}
 
-	cardNavCalled := make(chan struct{}, 1)
+	var gotAction, gotSessionKey string
 	ip.cardNavHandler = func(action string, sessionKey string) *core.Card {
-		cardNavCalled <- struct{}{}
-		return core.NewCard().Markdown("unexpected").Build()
-	}
-
-	msgCh := make(chan *core.Message, 1)
-	ip.handler = func(_ core.Platform, msg *core.Message) {
-		msgCh <- msg
+		gotAction = action
+		gotSessionKey = sessionKey
+		return core.NewCard().Markdown("switching").Build()
 	}
 
 	resp, err := ip.onCardAction(&callback.CardActionTriggerEvent{
@@ -474,23 +470,20 @@ func TestInteractivePlatform_ModelCardActionDispatchesCommandAsync(t *testing.T)
 	if err != nil {
 		t.Fatalf("onCardAction() error = %v", err)
 	}
-	if resp == nil || resp.Toast == nil {
-		t.Fatalf("expected toast response, got %#v", resp)
+	if resp == nil || resp.Card == nil {
+		t.Fatalf("expected card response, got %#v", resp)
 	}
-
-	select {
-	case <-cardNavCalled:
-		t.Fatal("expected model card action to skip synchronous card nav")
-	default:
+	if gotAction != "act:/model switch 1" {
+		t.Fatalf("action = %q, want act:/model switch 1", gotAction)
 	}
-
-	select {
-	case msg := <-msgCh:
-		if msg.Content != "/model switch 1" {
-			t.Fatalf("message content = %q, want /model switch 1", msg.Content)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("expected model card action message")
+	if gotSessionKey == "" {
+		t.Fatal("expected non-empty session key")
+	}
+	ip.cardActionMsgMu.Lock()
+	tracked := ip.cardActionMsgIDs[gotSessionKey]
+	ip.cardActionMsgMu.Unlock()
+	if tracked != "om_test_message" {
+		t.Fatalf("tracked message id = %q, want om_test_message", tracked)
 	}
 }
 
@@ -510,6 +503,29 @@ func TestNewLark_PlatformNameAndDomain(t *testing.T) {
 	}
 	if ip.domain != lark.LarkBaseUrl {
 		t.Fatalf("domain = %q, want %q", ip.domain, lark.LarkBaseUrl)
+	}
+}
+
+func TestPlatformShouldUseWebhookMode(t *testing.T) {
+	tests := []struct {
+		name       string
+		platform   string
+		encryptKey string
+		want       bool
+	}{
+		{name: "lark defaults to websocket", platform: "lark", want: false},
+		{name: "lark webhook when encrypt key set", platform: "lark", encryptKey: "enc-key", want: true},
+		{name: "feishu defaults to websocket", platform: "feishu", want: false},
+		{name: "feishu webhook when encrypt key set", platform: "feishu", encryptKey: "enc-key", want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &Platform{platformName: tt.platform, encryptKey: tt.encryptKey}
+			if got := p.shouldUseWebhookMode(); got != tt.want {
+				t.Fatalf("shouldUseWebhookMode() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -912,6 +928,33 @@ func TestBuildPreviewCardJSON_ProgressPayloadUsesStructuredCard(t *testing.T) {
 	}
 }
 
+func TestBuildRichCard_RendersThinkingAndToolResultRows(t *testing.T) {
+	code := 0
+	success := true
+	cardJSON := buildRichCard(core.CardStatusWorking, "", []core.ToolStep{
+		{Kind: core.ToolStepKindThinking, Name: "Thinking", Summary: "Inspecting event routing"},
+		{
+			Kind:     core.ToolStepKindTool,
+			Name:     "Bash",
+			Summary:  "echo hi",
+			Result:   "hi",
+			Status:   "completed",
+			ExitCode: &code,
+			Success:  &success,
+			Done:     true,
+		},
+	}, "done", true, time.Second)
+
+	for _, want := range []string{"Inspecting event routing", "echo hi", "completed", "exit: 0", "hi"} {
+		if !strings.Contains(cardJSON, want) {
+			t.Fatalf("rich card should contain %q, got %q", want, cardJSON)
+		}
+	}
+	if strings.Contains(cardJSON, core.ProgressCardPayloadPrefix) {
+		t.Fatalf("rich card should not contain progress payload prefix, got %q", cardJSON)
+	}
+}
+
 func TestBuildPreviewCardJSON_NormalTextFallback(t *testing.T) {
 	cardJSON := buildPreviewCardJSON("plain progress text")
 	if strings.Contains(cardJSON, "cc-connect · 进度") {
@@ -924,9 +967,9 @@ func TestBuildPreviewCardJSON_NormalTextFallback(t *testing.T) {
 
 func TestFormatProgressToolInput_TodoWrite(t *testing.T) {
 	tests := []struct {
-		name     string
-		input    string
-		wantContains []string
+		name            string
+		input           string
+		wantContains    []string
 		notWantContains []string
 	}{
 		{
@@ -936,23 +979,23 @@ func TestFormatProgressToolInput_TodoWrite(t *testing.T) {
 				{"content": "Task 2", "status": "in_progress", "activeForm": "Working on task 2"},
 				{"content": "Task 3", "status": "pending", "activeForm": "Planning task 3"}
 			]}`,
-			wantContains: []string{"✅", "🔄", "⏳", "Task 1", "Task 2", "Task 3", "Completing task 1", "Working on task 2"},
+			wantContains:    []string{"✅", "🔄", "⏳", "Task 1", "Task 2", "Task 3", "Completing task 1", "Working on task 2"},
 			notWantContains: []string{"```"},
 		},
 		{
-			name:  "todos without activeForm",
-			input: `{"todos": [{"content": "Simple task", "status": "pending"}]}`,
-			wantContains: []string{"⏳", "Simple task"},
+			name:            "todos without activeForm",
+			input:           `{"todos": [{"content": "Simple task", "status": "pending"}]}`,
+			wantContains:    []string{"⏳", "Simple task"},
 			notWantContains: []string{"(", ")"},
 		},
 		{
-			name:     "invalid JSON falls back to default",
-			input:    `not valid json`,
+			name:         "invalid JSON falls back to default",
+			input:        `not valid json`,
 			wantContains: []string{"```text"},
 		},
 		{
-			name:     "empty todos array",
-			input:    `{"todos": []}`,
+			name:         "empty todos array",
+			input:        `{"todos": []}`,
 			wantContains: []string{"```text"},
 		},
 	}
@@ -985,6 +1028,81 @@ func TestFormatProgressToolInput_OtherTools(t *testing.T) {
 	result = formatProgressToolInput("TodoWrite", "not json")
 	if !strings.Contains(result, "```text") {
 		t.Errorf("TodoWrite with invalid JSON should fall back to text block, got %q", result)
+	}
+}
+
+func TestAllowChat_FiltersGroupMessages(t *testing.T) {
+	tests := []struct {
+		name      string
+		allowChat string
+		chatID    string
+		chatType  string
+		wantPass  bool
+	}{
+		{"empty allow_chat permits all groups", "", "oc_abc", "group", true},
+		{"wildcard permits all groups", "*", "oc_abc", "group", true},
+		{"matching chat_id passes", "oc_abc", "oc_abc", "group", true},
+		{"non-matching chat_id blocked", "oc_abc", "oc_xyz", "group", false},
+		{"multiple chat_ids, match second", "oc_abc,oc_xyz", "oc_xyz", "group", true},
+		{"multiple chat_ids, no match", "oc_abc,oc_def", "oc_xyz", "group", false},
+		{"private chat bypasses allow_chat filter", "oc_abc", "oc_xyz", "p2p", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+				"app_id": "cli_xxx", "app_secret": "secret",
+				"enable_feishu_card": true,
+				"group_reply_all":    true,
+				"allow_chat":         tt.allowChat,
+			})
+			if err != nil {
+				t.Fatalf("newPlatform() error = %v", err)
+			}
+			ip := p.(*interactivePlatform)
+
+			messageID := "om_test_" + tt.name
+			openID := "ou_test"
+			msgType := "text"
+			senderType := "user"
+			content := `{"text":"hello"}`
+			createTime := strconv.FormatInt(time.Now().UnixMilli(), 10)
+
+			msgCh := make(chan *core.Message, 1)
+			ip.handler = func(_ core.Platform, msg *core.Message) {
+				msgCh <- msg
+			}
+
+			if err := ip.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
+				Event: &larkim.P2MessageReceiveV1Data{
+					Sender: &larkim.EventSender{
+						SenderId:   &larkim.UserId{OpenId: &openID},
+						SenderType: &senderType,
+					},
+					Message: &larkim.EventMessage{
+						MessageId:   &messageID,
+						ChatId:      &tt.chatID,
+						ChatType:    &tt.chatType,
+						MessageType: &msgType,
+						Content:     &content,
+						CreateTime:  &createTime,
+					},
+				},
+			}); err != nil {
+				t.Fatalf("onMessage() error = %v", err)
+			}
+
+			select {
+			case <-msgCh:
+				if !tt.wantPass {
+					t.Fatal("expected message to be blocked by allow_chat, but it was delivered")
+				}
+			case <-time.After(2 * time.Second):
+				if tt.wantPass {
+					t.Fatal("expected message to pass allow_chat filter, but it was blocked")
+				}
+			}
+		})
 	}
 }
 

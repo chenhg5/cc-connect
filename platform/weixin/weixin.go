@@ -613,6 +613,7 @@ func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string)
 		return nil
 	}
 	chunks := splitUTF8(content, maxWeixinChunk)
+	total := len(chunks)
 	for i, chunk := range chunks {
 		// Add delay between chunks to avoid rate limiting (except for first chunk)
 		if i > 0 {
@@ -623,9 +624,20 @@ func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string)
 			}
 		}
 		// Retry sendText with context_token refresh on failure
-		err := p.sendChunkWithRetry(ctx, rc, chunk)
+		err := p.sendChunkWithRetry(ctx, rc, chunk, i+1, total)
 		if err != nil {
-			return fmt.Errorf("weixin: send: %w", err)
+			slog.Error("weixin: chunk send failed, message incomplete",
+				"peer", rc.peerUserID,
+				"failed_chunk", fmt.Sprintf("%d/%d", i+1, total),
+				"error", err)
+			// Notify user that message delivery was incomplete.
+			// Use a short message that is unlikely to fail itself.
+			notice := "⚠️ 消息发送不完整，请在终端查看完整结果。"
+			noticeID := "cc-" + randomHex(6)
+			if nerr := p.api.sendText(ctx, rc.peerUserID, notice, rc.contextToken, noticeID); nerr != nil {
+				slog.Warn("weixin: failed to send incomplete-delivery notice", "peer", rc.peerUserID, "error", nerr)
+			}
+			return fmt.Errorf("weixin: send chunk %d/%d: %w", i+1, total, err)
 		}
 	}
 	return nil
@@ -633,7 +645,8 @@ func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string)
 
 // sendChunkWithRetry sends a single chunk with retry mechanism.
 // When sendMessage returns ret=-2, it retries with a fresh context_token.
-func (p *Platform) sendChunkWithRetry(ctx context.Context, rc *replyContext, chunk string) error {
+// chunkIdx and totalChunks are 1-based indices used for logging context.
+func (p *Platform) sendChunkWithRetry(ctx context.Context, rc *replyContext, chunk string, chunkIdx, totalChunks int) error {
 	var lastErr error
 	for attempt := 0; attempt < weixinSendMaxRetries; attempt++ {
 		clientID := "cc-" + randomHex(6)
@@ -644,8 +657,15 @@ func (p *Platform) sendChunkWithRetry(ctx context.Context, rc *replyContext, chu
 		lastErr = err
 		// Check if error is ret=-2 (API declined) - retry with fresh token
 		if strings.Contains(err.Error(), "ret=-2") {
+			preview := []rune(chunk)
+			if len(preview) > 50 {
+				preview = preview[:50]
+			}
 			slog.Warn("weixin: sendMessage ret=-2, retrying with fresh context_token",
-				"attempt", attempt+1, "peer", rc.peerUserID, "chunk_len", len(chunk))
+				"attempt", attempt+1, "peer", rc.peerUserID,
+				"chunk", fmt.Sprintf("%d/%d", chunkIdx, totalChunks),
+				"chunk_runes", utf8.RuneCountInString(chunk),
+				"preview", string(preview))
 			// Add delay before retry
 			select {
 			case <-ctx.Done():
