@@ -38,16 +38,16 @@ func isValidRunAsUserName(name string) bool {
 }
 
 var dangerousEnvVars = map[string]bool{
-	"LD_PRELOAD":           true,
-	"LD_LIBRARY_PATH":      true,
+	"LD_PRELOAD":            true,
+	"LD_LIBRARY_PATH":       true,
 	"DYLD_INSERT_LIBRARIES": true,
-	"DYLD_LIBRARY_PATH":    true,
-	"PATH":                 true,
-	"HOME":                 true,
-	"USER":                 true,
-	"SHELL":                true,
-	"SUDO_USER":            true,
-	"SUDO_COMMAND":         true,
+	"DYLD_LIBRARY_PATH":     true,
+	"PATH":                  true,
+	"HOME":                  true,
+	"USER":                  true,
+	"SHELL":                 true,
+	"SUDO_USER":             true,
+	"SUDO_COMMAND":          true,
 }
 
 func validateRunAsEnv(prefix string, envVars []string) error {
@@ -87,29 +87,29 @@ type Config struct {
 	AttachmentSend string `toml:"attachment_send"`
 	// Quiet is legacy: when true and [display] does not set thinking_messages / tool_messages,
 	// engines behave as if those flags were false. Per-project quiet overrides when set.
-	Quiet             *bool                   `toml:"quiet,omitempty"`
-	Providers         []ProviderConfig        `toml:"providers"`          // global shared providers
-	ProviderPresetsURL string                 `toml:"provider_presets_url,omitempty"` // remote JSON URL for provider presets
-	Projects          []ProjectConfig         `toml:"projects"`
-	Commands          []CommandConfig         `toml:"commands"`     // global custom slash commands
-	Aliases           []AliasConfig           `toml:"aliases"`      // global command aliases
-	BannedWords       []string                `toml:"banned_words"` // messages containing any of these words are blocked
-	Log               LogConfig               `toml:"log"`
-	Language          string                  `toml:"language"` // "en" or "zh", default is "en"
-	Speech            SpeechConfig            `toml:"speech"`
-	TTS               TTSConfig               `toml:"tts"`
-	Display           DisplayConfig           `toml:"display"`
-	StreamPreview     StreamPreviewConfig     `toml:"stream_preview"`      // real-time streaming preview
-	RateLimit         RateLimitConfig         `toml:"rate_limit"`          // per-session rate limiting
-	OutgoingRateLimit OutgoingRateLimitConfig `toml:"outgoing_rate_limit"` // outgoing message throttling
-	Relay             RelayConfig             `toml:"relay"`               // bot-to-bot relay behavior
-	Cron              CronConfig              `toml:"cron"`
-	Queue             QueueConfig             `toml:"queue"`
-	Webhook           WebhookConfig           `toml:"webhook"`
-	Bridge            BridgeConfig            `toml:"bridge"`
-	Management        ManagementConfig        `toml:"management"`
-	Hooks             []HookConfig            `toml:"hooks"`
-	IdleTimeoutMins   *int                    `toml:"idle_timeout_mins,omitempty"` // max minutes between agent events; 0 = no timeout; default 120
+	Quiet              *bool                   `toml:"quiet,omitempty"`
+	Providers          []ProviderConfig        `toml:"providers"`                      // global shared providers
+	ProviderPresetsURL string                  `toml:"provider_presets_url,omitempty"` // remote JSON URL for provider presets
+	Projects           []ProjectConfig         `toml:"projects"`
+	Commands           []CommandConfig         `toml:"commands"`     // global custom slash commands
+	Aliases            []AliasConfig           `toml:"aliases"`      // global command aliases
+	BannedWords        []string                `toml:"banned_words"` // messages containing any of these words are blocked
+	Log                LogConfig               `toml:"log"`
+	Language           string                  `toml:"language"` // "en" or "zh", default is "en"
+	Speech             SpeechConfig            `toml:"speech"`
+	TTS                TTSConfig               `toml:"tts"`
+	Display            DisplayConfig           `toml:"display"`
+	StreamPreview      StreamPreviewConfig     `toml:"stream_preview"`      // real-time streaming preview
+	RateLimit          RateLimitConfig         `toml:"rate_limit"`          // per-session rate limiting
+	OutgoingRateLimit  OutgoingRateLimitConfig `toml:"outgoing_rate_limit"` // outgoing message throttling
+	Relay              RelayConfig             `toml:"relay"`               // bot-to-bot relay behavior
+	Cron               CronConfig              `toml:"cron"`
+	Queue              QueueConfig             `toml:"queue"`
+	Webhook            WebhookConfig           `toml:"webhook"`
+	Bridge             BridgeConfig            `toml:"bridge"`
+	Management         ManagementConfig        `toml:"management"`
+	Hooks              []HookConfig            `toml:"hooks"`
+	IdleTimeoutMins    *int                    `toml:"idle_timeout_mins,omitempty"` // max minutes between agent events; 0 = no timeout; default 120
 	// WorkspaceIdleTimeoutMins controls the workspace idle reaper timeout
 	// (multi-workspace mode) for every engine in the process. 0 disables
 	// reaping. Default: 15 minutes. Defined as a top-level (process-global)
@@ -166,10 +166,16 @@ type ManagementConfig struct {
 
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
 type DisplayConfig struct {
-	ThinkingMessages *bool `toml:"thinking_messages"` // whether thinking messages are shown; default true
-	ThinkingMaxLen   *int  `toml:"thinking_max_len"`  // max chars for thinking messages; 0 = no truncation; default 300
-	ToolMaxLen       *int  `toml:"tool_max_len"`      // max chars for tool use messages; 0 = no truncation; default 500
-	ToolMessages     *bool `toml:"tool_messages"`     // whether tool progress messages are shown; default true
+	ThinkingMessages     *bool   `toml:"thinking_messages"`        // whether thinking messages are shown; default true
+	ThinkingMaxLen       *int    `toml:"thinking_max_len"`         // max chars for thinking messages; 0 = no truncation; default 300
+	ToolMaxLen           *int    `toml:"tool_max_len"`             // max chars for tool bodies; 0 = no truncation; default 500
+	ToolMessages         *bool   `toml:"tool_messages"`            // whether tool progress messages are shown; default true
+	ProgressStyle        *string `toml:"progress_style,omitempty"` // "" = platform default; legacy | compact | card
+	ToolLayout           *string `toml:"tool_layout,omitempty"`    // split | merged; default merged
+	ToolShowInput        *bool   `toml:"tool_show_input"`          // whether tool input is shown; default true
+	ToolShowResultBody   *bool   `toml:"tool_show_result_body"`    // whether tool result body is shown; default true
+	ProgressMaxEntries   *int    `toml:"progress_max_entries"`     // max recent progress entries shown in compact/card; 0 = unlimited; default 20
+	ProgressHistoryTurns *int    `toml:"progress_history_turns"`   // number of assistant turns with persisted event timelines; 0 = disabled; default 3
 }
 
 // StreamPreviewConfig controls real-time streaming preview in IM.
@@ -345,7 +351,7 @@ type ProjectConfig struct {
 	WorkspaceIdleTimeoutMinsLegacy *int `toml:"workspace_idle_timeout_mins,omitempty"`
 	// Quiet is legacy per-project override; see Config.Quiet. When true and global [display]
 	// omits thinking_messages / tool_messages, those default to off for this project.
-	Quiet      *bool           `toml:"quiet,omitempty"`
+	Quiet *bool `toml:"quiet,omitempty"`
 	// Display, when non-nil, overrides individual fields of the global [display]
 	// block for this project. Each sub-field is independently optional; unset
 	// fields fall back to the global [display] value, then to the built-in
@@ -385,18 +391,18 @@ type ProviderModelConfig struct {
 }
 
 type ProviderConfig struct {
-	Name        string                `toml:"name"`
-	APIKey      string                `toml:"api_key"`
-	BaseURL     string                `toml:"base_url,omitempty"`
-	Model       string                `toml:"model,omitempty"`
-	Models      []ProviderModelConfig `toml:"models,omitempty"`
-	Thinking    string                `toml:"thinking,omitempty"`
-	Env         map[string]string     `toml:"env,omitempty"`
-	AgentTypes      []string                          `toml:"agent_types,omitempty"`       // optional: restrict to specific agent types (e.g. ["claudecode", "codex"])
-	Endpoints       map[string]string                 `toml:"endpoints,omitempty"`         // per-agent-type base URL overrides (e.g. codex = "https://x/v1")
-	AgentModels     map[string]string                 `toml:"agent_models,omitempty"`      // per-agent-type default model (e.g. codex = "openai/gpt-5.3-codex")
-	AgentModelLists map[string][]ProviderModelConfig  `toml:"agent_model_lists,omitempty"` // per-agent-type model lists (overrides Models when matched)
-	Codex           *CodexProviderConfig              `toml:"codex,omitempty"`             // Codex-specific provider settings
+	Name            string                           `toml:"name"`
+	APIKey          string                           `toml:"api_key"`
+	BaseURL         string                           `toml:"base_url,omitempty"`
+	Model           string                           `toml:"model,omitempty"`
+	Models          []ProviderModelConfig            `toml:"models,omitempty"`
+	Thinking        string                           `toml:"thinking,omitempty"`
+	Env             map[string]string                `toml:"env,omitempty"`
+	AgentTypes      []string                         `toml:"agent_types,omitempty"`       // optional: restrict to specific agent types (e.g. ["claudecode", "codex"])
+	Endpoints       map[string]string                `toml:"endpoints,omitempty"`         // per-agent-type base URL overrides (e.g. codex = "https://x/v1")
+	AgentModels     map[string]string                `toml:"agent_models,omitempty"`      // per-agent-type default model (e.g. codex = "openai/gpt-5.3-codex")
+	AgentModelLists map[string][]ProviderModelConfig `toml:"agent_model_lists,omitempty"` // per-agent-type model lists (overrides Models when matched)
+	Codex           *CodexProviderConfig             `toml:"codex,omitempty"`             // Codex-specific provider settings
 }
 
 // CodexProviderConfig holds Codex CLI-specific provider fields
@@ -595,7 +601,7 @@ func resolveEnvPlaceholders(s string) string {
 // projectQuietEffective returns whether legacy quiet applies to this project: an explicit
 // per-project quiet overrides; otherwise the global root quiet applies.
 func projectQuietEffective(cfg *Config, proj *ProjectConfig) bool {
-	if proj.Quiet != nil {
+	if proj != nil && proj.Quiet != nil {
 		return *proj.Quiet
 	}
 	if cfg.Quiet != nil {
@@ -1065,7 +1071,7 @@ func (cfg *Config) ResolveProviderRefs() {
 					"provider_agents", gp.AgentTypes, "project_agent", agentType)
 				continue
 			}
-		resolved = append(resolved, gp.ResolveForAgent(agentType))
+			resolved = append(resolved, gp.ResolveForAgent(agentType))
 		}
 		cfg.Projects[i].Agent.Providers = append(resolved, cfg.Projects[i].Agent.Providers...)
 	}
@@ -1436,28 +1442,78 @@ func RemoveAlias(name string) error {
 	return saveConfig(cfg)
 }
 
+type DisplayConfigUpdate struct {
+	ThinkingMessages     *bool
+	ThinkingMaxLen       *int
+	ToolMaxLen           *int
+	ToolMessages         *bool
+	ProgressStyle        *string
+	ToolLayout           *string
+	ToolShowInput        *bool
+	ToolShowResultBody   *bool
+	ProgressMaxEntries   *int
+	ProgressHistoryTurns *int
+}
+
 // SaveDisplayConfig persists the display settings to the config file.
 // Uses surgical text editing to preserve comments and unknown fields.
-func SaveDisplayConfig(thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
+func SaveDisplayConfig(u DisplayConfigUpdate) error {
 	configMu.Lock()
 	defer configMu.Unlock()
-	if thinkingMessages != nil {
-		if err := patchSectionField("display", "thinking_messages", fmt.Sprintf("%t", *thinkingMessages)); err != nil {
+	if u.ThinkingMessages != nil {
+		if err := patchSectionField("display", "thinking_messages", fmt.Sprintf("%t", *u.ThinkingMessages)); err != nil {
 			return err
 		}
 	}
-	if thinkingMaxLen != nil {
-		if err := patchSectionField("display", "thinking_max_len", fmt.Sprintf("%d", *thinkingMaxLen)); err != nil {
+	if u.ThinkingMaxLen != nil {
+		if err := patchSectionField("display", "thinking_max_len", fmt.Sprintf("%d", *u.ThinkingMaxLen)); err != nil {
 			return err
 		}
 	}
-	if toolMaxLen != nil {
-		if err := patchSectionField("display", "tool_max_len", fmt.Sprintf("%d", *toolMaxLen)); err != nil {
+	if u.ToolMaxLen != nil {
+		if err := patchSectionField("display", "tool_max_len", fmt.Sprintf("%d", *u.ToolMaxLen)); err != nil {
 			return err
 		}
 	}
-	if toolMessages != nil {
-		if err := patchSectionField("display", "tool_messages", fmt.Sprintf("%t", *toolMessages)); err != nil {
+	if u.ToolMessages != nil {
+		if err := patchSectionField("display", "tool_messages", fmt.Sprintf("%t", *u.ToolMessages)); err != nil {
+			return err
+		}
+	}
+	if u.ProgressStyle != nil {
+		style := strings.ToLower(strings.TrimSpace(*u.ProgressStyle))
+		if style == "" || style == "auto" {
+			if err := removeSectionField("display", "progress_style"); err != nil {
+				return err
+			}
+		} else {
+			if err := patchSectionField("display", "progress_style", quoteTomlString(style)); err != nil {
+				return err
+			}
+		}
+	}
+	if u.ToolLayout != nil {
+		if err := patchSectionField("display", "tool_layout", quoteTomlString(*u.ToolLayout)); err != nil {
+			return err
+		}
+	}
+	if u.ToolShowInput != nil {
+		if err := patchSectionField("display", "tool_show_input", fmt.Sprintf("%t", *u.ToolShowInput)); err != nil {
+			return err
+		}
+	}
+	if u.ToolShowResultBody != nil {
+		if err := patchSectionField("display", "tool_show_result_body", fmt.Sprintf("%t", *u.ToolShowResultBody)); err != nil {
+			return err
+		}
+	}
+	if u.ProgressMaxEntries != nil {
+		if err := patchSectionField("display", "progress_max_entries", fmt.Sprintf("%d", *u.ProgressMaxEntries)); err != nil {
+			return err
+		}
+	}
+	if u.ProgressHistoryTurns != nil {
+		if err := patchSectionField("display", "progress_history_turns", fmt.Sprintf("%d", *u.ProgressHistoryTurns)); err != nil {
 			return err
 		}
 	}
@@ -2413,6 +2469,44 @@ func patchSectionField(section, key, tomlValue string) error {
 	return writeRawConfig(joinConfigLines(lines, hadTrailing))
 }
 
+// removeSectionField surgically removes a single key under [section] while
+// preserving surrounding comments and unknown fields. The caller must hold configMu.
+func removeSectionField(section, key string) error {
+	if ConfigPath == "" {
+		return fmt.Errorf("config path not set")
+	}
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	raw := string(data)
+	lines, hadTrailing := splitConfigLines(raw)
+
+	sectionStart := -1
+	sectionEnd := len(lines) - 1
+	header := "[" + section + "]"
+	for i := range lines {
+		if sectionStart < 0 && matchTableHeader(lines[i], header) {
+			sectionStart = i
+			continue
+		}
+		if sectionStart >= 0 && isAnyTableHeader(lines[i]) {
+			sectionEnd = i - 1
+			break
+		}
+	}
+	if sectionStart < 0 {
+		return nil
+	}
+	for i := sectionStart + 1; i <= sectionEnd && i < len(lines); i++ {
+		if matchTomlStringKey(lines[i], key) {
+			lines = append(lines[:i], lines[i+1:]...)
+			return writeRawConfig(joinConfigLines(lines, hadTrailing))
+		}
+	}
+	return nil
+}
+
 type rawProjectSpan struct {
 	start     int
 	end       int
@@ -3116,6 +3210,36 @@ func GetGlobalSettings() map[string]any {
 	} else {
 		result["tool_max_len"] = 500
 	}
+	if cfg.Display.ProgressStyle != nil && strings.TrimSpace(*cfg.Display.ProgressStyle) != "" {
+		result["progress_style"] = strings.TrimSpace(*cfg.Display.ProgressStyle)
+	} else {
+		result["progress_style"] = "auto"
+	}
+	if cfg.Display.ToolLayout != nil && strings.TrimSpace(*cfg.Display.ToolLayout) != "" {
+		result["tool_layout"] = *cfg.Display.ToolLayout
+	} else {
+		result["tool_layout"] = "merged"
+	}
+	if cfg.Display.ToolShowInput != nil {
+		result["tool_show_input"] = *cfg.Display.ToolShowInput
+	} else {
+		result["tool_show_input"] = true
+	}
+	if cfg.Display.ToolShowResultBody != nil {
+		result["tool_show_result_body"] = *cfg.Display.ToolShowResultBody
+	} else {
+		result["tool_show_result_body"] = true
+	}
+	if cfg.Display.ProgressMaxEntries != nil {
+		result["progress_max_entries"] = *cfg.Display.ProgressMaxEntries
+	} else {
+		result["progress_max_entries"] = 20
+	}
+	if cfg.Display.ProgressHistoryTurns != nil {
+		result["progress_history_turns"] = *cfg.Display.ProgressHistoryTurns
+	} else {
+		result["progress_history_turns"] = 3
+	}
 	// Stream preview
 	spEnabled := true
 	if cfg.StreamPreview.Enabled != nil {
@@ -3149,19 +3273,25 @@ func GetGlobalSettings() map[string]any {
 
 // GlobalSettingsUpdate holds fields to update in global config.
 type GlobalSettingsUpdate struct {
-	Language           *string `json:"language"`
-	AttachmentSend     *string `json:"attachment_send"`
-	LogLevel           *string `json:"log_level"`
-	IdleTimeoutMins    *int    `json:"idle_timeout_mins"`
-	ThinkingMessages   *bool   `json:"thinking_messages"`
-	ThinkingMaxLen     *int    `json:"thinking_max_len"`
-	ToolMessages       *bool   `json:"tool_messages"`
-	ToolMaxLen         *int    `json:"tool_max_len"`
-	StreamPreviewOn    *bool   `json:"stream_preview_enabled"`
-	StreamPreviewIntMs *int    `json:"stream_preview_interval_ms"`
-	RateLimitMax       *int    `json:"rate_limit_max_messages"`
-	RateLimitWindow    *int    `json:"rate_limit_window_secs"`
-	QueueMaxDepth      *int    `json:"queue_max_depth"`
+	Language             *string `json:"language"`
+	AttachmentSend       *string `json:"attachment_send"`
+	LogLevel             *string `json:"log_level"`
+	IdleTimeoutMins      *int    `json:"idle_timeout_mins"`
+	ThinkingMessages     *bool   `json:"thinking_messages"`
+	ThinkingMaxLen       *int    `json:"thinking_max_len"`
+	ToolMaxLen           *int    `json:"tool_max_len"`
+	ToolMessages         *bool   `json:"tool_messages"`
+	ProgressStyle        *string `json:"progress_style"`
+	ToolLayout           *string `json:"tool_layout"`
+	ToolShowInput        *bool   `json:"tool_show_input"`
+	ToolShowResultBody   *bool   `json:"tool_show_result_body"`
+	ProgressMaxEntries   *int    `json:"progress_max_entries"`
+	ProgressHistoryTurns *int    `json:"progress_history_turns"`
+	StreamPreviewOn      *bool   `json:"stream_preview_enabled"`
+	StreamPreviewIntMs   *int    `json:"stream_preview_interval_ms"`
+	RateLimitMax         *int    `json:"rate_limit_max_messages"`
+	RateLimitWindow      *int    `json:"rate_limit_window_secs"`
+	QueueMaxDepth        *int    `json:"queue_max_depth"`
 }
 
 // SaveGlobalSettings persists global settings to config.toml.
@@ -3202,6 +3332,29 @@ func SaveGlobalSettings(u GlobalSettingsUpdate) error {
 	}
 	if u.ToolMaxLen != nil {
 		cfg.Display.ToolMaxLen = u.ToolMaxLen
+	}
+	if u.ProgressStyle != nil {
+		style := strings.ToLower(strings.TrimSpace(*u.ProgressStyle))
+		if style == "" || style == "auto" {
+			cfg.Display.ProgressStyle = nil
+		} else {
+			cfg.Display.ProgressStyle = &style
+		}
+	}
+	if u.ToolLayout != nil {
+		cfg.Display.ToolLayout = u.ToolLayout
+	}
+	if u.ToolShowInput != nil {
+		cfg.Display.ToolShowInput = u.ToolShowInput
+	}
+	if u.ToolShowResultBody != nil {
+		cfg.Display.ToolShowResultBody = u.ToolShowResultBody
+	}
+	if u.ProgressMaxEntries != nil {
+		cfg.Display.ProgressMaxEntries = u.ProgressMaxEntries
+	}
+	if u.ProgressHistoryTurns != nil {
+		cfg.Display.ProgressHistoryTurns = u.ProgressHistoryTurns
 	}
 	if u.StreamPreviewOn != nil {
 		cfg.StreamPreview.Enabled = u.StreamPreviewOn

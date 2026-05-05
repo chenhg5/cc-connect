@@ -14,6 +14,8 @@ const (
 	progressStyleLegacy  = "legacy"
 	progressStyleCompact = "compact"
 	progressStyleCard    = "card"
+	toolLayoutSplit      = "split"
+	toolLayoutMerged     = "merged"
 
 	// ProgressCardPayloadPrefix marks a structured payload for card-style progress.
 	ProgressCardPayloadPrefix = "__cc_connect_progress_card_v1__:"
@@ -45,12 +47,15 @@ const (
 )
 
 type ProgressCardEntry struct {
-	Kind     ProgressCardEntryKind `json:"kind"`
-	Text     string                `json:"text"`
-	Tool     string                `json:"tool,omitempty"`
-	Status   string                `json:"status,omitempty"`
-	ExitCode *int                  `json:"exit_code,omitempty"`
-	Success  *bool                 `json:"success,omitempty"`
+	Kind       ProgressCardEntryKind `json:"kind"`
+	Text       string                `json:"text,omitempty"`
+	Tool       string                `json:"tool,omitempty"`
+	Status     string                `json:"status,omitempty"`
+	ExitCode   *int                  `json:"exit_code,omitempty"`
+	Success    *bool                 `json:"success,omitempty"`
+	ToolInput  string                `json:"tool_input,omitempty"`
+	ToolResult string                `json:"tool_result,omitempty"`
+	Running    bool                  `json:"running,omitempty"`
 }
 
 // ProgressCardPayload carries structured progress entries for platforms that
@@ -94,7 +99,11 @@ func BuildProgressCardPayloadV2(items []ProgressCardEntry, truncated bool, agent
 	cleaned := make([]ProgressCardEntry, 0, len(items))
 	for _, item := range items {
 		text := strings.TrimSpace(item.Text)
-		if text == "" {
+		input := strings.TrimSpace(item.ToolInput)
+		result := strings.TrimSpace(item.ToolResult)
+		tool := strings.TrimSpace(item.Tool)
+		status := strings.TrimSpace(item.Status)
+		if text == "" && input == "" && result == "" && tool == "" {
 			continue
 		}
 		kind := item.Kind
@@ -102,12 +111,15 @@ func BuildProgressCardPayloadV2(items []ProgressCardEntry, truncated bool, agent
 			kind = ProgressEntryInfo
 		}
 		cleaned = append(cleaned, ProgressCardEntry{
-			Kind:     kind,
-			Text:     text,
-			Tool:     strings.TrimSpace(item.Tool),
-			Status:   strings.TrimSpace(item.Status),
-			ExitCode: item.ExitCode,
-			Success:  item.Success,
+			Kind:       kind,
+			Text:       text,
+			Tool:       tool,
+			Status:     status,
+			ExitCode:   item.ExitCode,
+			Success:    item.Success,
+			ToolInput:  input,
+			ToolResult: result,
+			Running:    item.Running,
 		})
 	}
 	if len(cleaned) == 0 {
@@ -153,7 +165,9 @@ func ParseProgressCardPayload(content string) (*ProgressCardPayload, bool) {
 		item.Text = strings.TrimSpace(item.Text)
 		item.Tool = strings.TrimSpace(item.Tool)
 		item.Status = strings.TrimSpace(item.Status)
-		if item.Text == "" {
+		item.ToolInput = strings.TrimSpace(item.ToolInput)
+		item.ToolResult = strings.TrimSpace(item.ToolResult)
+		if item.Text == "" && item.ToolInput == "" && item.ToolResult == "" && item.Tool == "" {
 			continue
 		}
 		if item.Kind == "" {
@@ -227,6 +241,16 @@ type compactProgressWriter struct {
 	truncated  bool
 	lastSent   string
 	maxEntries int
+	toolLayout string
+	showInput  bool
+	showResult bool
+	pending    []pendingToolBlock
+}
+
+type pendingToolBlock struct {
+	itemIndex int
+	toolName  string
+	resolved  bool
 }
 
 func normalizeProgressStyle(style string) string {
@@ -239,6 +263,17 @@ func normalizeProgressStyle(style string) string {
 		return progressStyleCard
 	default:
 		return progressStyleLegacy
+	}
+}
+
+func normalizeToolLayout(layout string) string {
+	switch strings.ToLower(strings.TrimSpace(layout)) {
+	case "", toolLayoutMerged:
+		return toolLayoutMerged
+	case toolLayoutSplit:
+		return toolLayoutSplit
+	default:
+		return toolLayoutMerged
 	}
 }
 
@@ -258,7 +293,15 @@ type progressCardPayloadHintProvider interface {
 	supportsProgressCardPayloadHint() bool
 }
 
-func progressStyleForTarget(p Platform, replyCtx any) string {
+func progressStyleFor(p Platform, replyCtx any, display DisplayCfg) string {
+	if override := strings.ToLower(strings.TrimSpace(display.ProgressStyle)); override != "" {
+		switch override {
+		case "auto":
+			// Fall through to reply context / platform defaults below.
+		case progressStyleLegacy, progressStyleCompact, progressStyleCard:
+			return override
+		}
+	}
 	if hint, ok := replyCtx.(progressStyleHintProvider); ok {
 		return normalizeProgressStyle(hint.progressStyleHint())
 	}
@@ -280,25 +323,28 @@ func progressCardPayloadForTarget(p Platform, replyCtx any) bool {
 // lines are still shown, but a separate chat message for EventToolResult is
 // skipped to avoid duplicate noise (e.g. Codex structured tool results on Feishu).
 // Platforms without ProgressStyleProvider keep showing standalone tool results.
-func SuppressStandaloneToolResultEvent(p Platform) bool {
+func SuppressStandaloneToolResultEvent(p Platform, display DisplayCfg) bool {
 	_, ok := p.(ProgressStyleProvider)
 	if !ok {
 		return false
 	}
-	return progressStyleForPlatform(p) == progressStyleLegacy
+	return progressStyleFor(p, nil, display) == progressStyleLegacy
 }
 
-func newCompactProgressWriter(ctx context.Context, p Platform, replyCtx any, agentName string, lang Language, transform func(string) string) *compactProgressWriter {
+func newCompactProgressWriter(ctx context.Context, p Platform, replyCtx any, agentName string, lang Language, display DisplayCfg, transform func(string) string) *compactProgressWriter {
 	w := &compactProgressWriter{
 		ctx:        ctx,
 		platform:   p,
 		replyCtx:   replyCtx,
 		transform:  transform,
-		style:      progressStyleForTarget(p, replyCtx),
+		style:      progressStyleFor(p, replyCtx, display),
 		state:      ProgressCardStateRunning,
 		agentName:  normalizeProgressAgentLabel(agentName),
 		lang:       lang,
-		maxEntries: 10,
+		maxEntries: display.ProgressMaxEntries,
+		toolLayout: normalizeToolLayout(display.ToolLayout),
+		showInput:  display.ToolShowInput,
+		showResult: display.ToolShowResultBody,
 	}
 	if w.style != progressStyleCompact && w.style != progressStyleCard {
 		slog.Debug("progress writer disabled: unsupported style", "platform", p.Name(), "style", w.style)
@@ -374,68 +420,33 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 	if !w.enabled || w.failed {
 		return false
 	}
-	text := strings.TrimSpace(item.Text)
+	item = normalizeProgressItem(item)
 	fallback = strings.TrimSpace(fallback)
-	if text == "" && fallback == "" {
+	if item.Text == "" && item.ToolInput == "" && item.ToolResult == "" && fallback == "" {
 		return true
 	}
-	if text == "" {
-		text = fallback
+	if fallback == "" {
+		fallback = progressFallbackText(item)
 	}
 	if fallback == "" {
-		fallback = text
+		fallback = item.Text
 	}
 	switch item.Kind {
 	case ProgressEntryThinking, ProgressEntryError, ProgressEntryInfo:
 		if w.transform != nil {
-			text = w.transform(text)
+			item.Text = w.transform(item.Text)
 			fallback = w.transform(fallback)
 		}
 	}
-	kind := item.Kind
-	if kind == "" {
-		kind = ProgressEntryInfo
-	}
-	item.Kind = kind
-	item.Text = text
-	item.Tool = strings.TrimSpace(item.Tool)
-	item.Status = strings.TrimSpace(item.Status)
 
-	switch w.style {
-	case progressStyleCard:
+	if w.toolLayout == toolLayoutMerged && (item.Kind == ProgressEntryToolUse || item.Kind == ProgressEntryToolResult) {
+		w.appendMerged(item, fallback)
+	} else {
 		w.items = append(w.items, item)
 		w.entries = append(w.entries, fallback)
-		truncated := false
-		if w.maxEntries > 0 && len(w.items) > w.maxEntries {
-			w.items = w.items[len(w.items)-w.maxEntries:]
-			if len(w.entries) > w.maxEntries {
-				w.entries = w.entries[len(w.entries)-w.maxEntries:]
-			}
-			truncated = true
-		} else if w.maxEntries > 0 && len(w.entries) > w.maxEntries {
-			w.entries = w.entries[len(w.entries)-w.maxEntries:]
-			truncated = true
-		}
-		w.truncated = truncated
-		if w.usePayload {
-			w.content = BuildProgressCardPayloadV2(w.items, w.truncated, w.agentName, w.lang, w.state)
-			if w.content == "" {
-				slog.Warn("progress writer: failed to build structured payload", "platform", w.platform.Name())
-				w.failed = true
-				return false
-			}
-		} else {
-			w.content = renderCardProgressMarkdownFallback(w.entries, truncated)
-			w.content = trimCompactProgressText(w.content, compactProgressMaxChars)
-		}
-	default:
-		if w.content == "" {
-			w.content = fallback
-		} else {
-			w.content += "\n\n" + fallback
-		}
-		w.content = trimCompactProgressText(w.content, compactProgressMaxChars)
 	}
+	w.trimEntries()
+	w.rebuildContent()
 
 	if w.content == w.lastSent {
 		return true
@@ -478,6 +489,282 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 	}
 	w.lastSent = w.content
 	return true
+}
+
+func normalizeProgressItem(item ProgressCardEntry) ProgressCardEntry {
+	item.Kind = ProgressCardEntryKind(strings.TrimSpace(string(item.Kind)))
+	if item.Kind == "" {
+		item.Kind = ProgressEntryInfo
+	}
+	item.Text = strings.TrimSpace(item.Text)
+	item.Tool = strings.TrimSpace(item.Tool)
+	item.Status = strings.TrimSpace(item.Status)
+	item.ToolInput = strings.TrimSpace(item.ToolInput)
+	item.ToolResult = strings.TrimSpace(item.ToolResult)
+	if item.Text == "" {
+		switch item.Kind {
+		case ProgressEntryToolUse:
+			item.Text = item.ToolInput
+		case ProgressEntryToolResult:
+			item.Text = item.ToolResult
+		}
+	}
+	return item
+}
+
+func progressFallbackText(item ProgressCardEntry) string {
+	switch item.Kind {
+	case ProgressEntryToolUse:
+		if item.ToolInput != "" {
+			return item.ToolInput
+		}
+		return item.Text
+	case ProgressEntryToolResult:
+		if item.ToolResult != "" {
+			return item.ToolResult
+		}
+		return item.Text
+	default:
+		return item.Text
+	}
+}
+
+func (w *compactProgressWriter) appendMerged(item ProgressCardEntry, fallback string) {
+	switch item.Kind {
+	case ProgressEntryToolUse:
+		merged := ProgressCardEntry{
+			Kind:      ProgressEntryToolUse,
+			Tool:      item.Tool,
+			ToolInput: item.ToolInput,
+			Running:   true,
+		}
+		if merged.ToolInput == "" {
+			merged.ToolInput = item.Text
+		}
+		merged.Text = merged.ToolInput
+		entry := fallback
+		if entry == "" {
+			entry = progressFallbackText(merged)
+		}
+		w.items = append(w.items, merged)
+		w.entries = append(w.entries, entry)
+		w.pending = append(w.pending, pendingToolBlock{
+			itemIndex: len(w.items) - 1,
+			toolName:  merged.Tool,
+		})
+	case ProgressEntryToolResult:
+		idx := w.findPendingToolIndex(item.Tool)
+		if idx < 0 {
+			w.items = append(w.items, item)
+			w.entries = append(w.entries, fallback)
+			return
+		}
+		pending := &w.pending[idx]
+		target := pending.itemIndex
+		if target < 0 || target >= len(w.items) {
+			w.items = append(w.items, item)
+			w.entries = append(w.entries, fallback)
+			pending.resolved = true
+			return
+		}
+		existing := w.items[target]
+		existing.Kind = ProgressEntryToolResult
+		existing.Running = false
+		if existing.Tool == "" {
+			existing.Tool = item.Tool
+		}
+		existing.Status = item.Status
+		existing.ExitCode = item.ExitCode
+		existing.Success = item.Success
+		if item.ToolInput != "" {
+			existing.ToolInput = item.ToolInput
+		}
+		if item.ToolResult != "" {
+			existing.ToolResult = item.ToolResult
+		} else if item.Text != "" {
+			existing.ToolResult = item.Text
+		}
+		if existing.Text == "" {
+			existing.Text = existing.ToolInput
+		}
+		w.items[target] = existing
+		w.entries[target] = mergedFallbackText(existing)
+		pending.resolved = true
+	}
+}
+
+func mergedFallbackText(item ProgressCardEntry) string {
+	parts := make([]string, 0, 2)
+	if item.ToolInput != "" {
+		parts = append(parts, item.ToolInput)
+	}
+	if item.ToolResult != "" {
+		parts = append(parts, item.ToolResult)
+	}
+	if len(parts) == 0 {
+		return item.Text
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+func buildProgressItemsFromTimeline(events []TimelineEvent, display DisplayCfg) []ProgressCardEntry {
+	collector := compactProgressWriter{
+		toolLayout: normalizeToolLayout(display.ToolLayout),
+		showInput:  display.ToolShowInput,
+		showResult: display.ToolShowResultBody,
+	}
+	for _, ev := range events {
+		item, fallback, ok := progressEntryFromTimelineEvent(ev, display)
+		if !ok {
+			continue
+		}
+		if collector.toolLayout == toolLayoutMerged && (item.Kind == ProgressEntryToolUse || item.Kind == ProgressEntryToolResult) {
+			collector.appendMerged(item, fallback)
+		} else {
+			collector.items = append(collector.items, item)
+			collector.entries = append(collector.entries, fallback)
+		}
+	}
+	return collector.items
+}
+
+func progressEntryFromTimelineEvent(ev TimelineEvent, display DisplayCfg) (ProgressCardEntry, string, bool) {
+	switch ev.Kind {
+	case EventThinking:
+		text := strings.TrimSpace(truncateIf(ev.Text, display.ThinkingMaxLen))
+		if text == "" {
+			return ProgressCardEntry{}, "", false
+		}
+		item := ProgressCardEntry{
+			Kind: ProgressEntryThinking,
+			Text: text,
+		}
+		return item, text, true
+	case EventToolUse:
+		if !display.ToolMessages {
+			return ProgressCardEntry{}, "", false
+		}
+		input := strings.TrimSpace(ev.ToolInput)
+		item := ProgressCardEntry{
+			Kind: ProgressEntryToolUse,
+			Tool: strings.TrimSpace(ev.ToolName),
+		}
+		if display.ToolShowInput {
+			item.ToolInput = input
+			item.Text = input
+		}
+		return item, progressFallbackText(item), true
+	case EventToolResult:
+		if !display.ToolMessages {
+			return ProgressCardEntry{}, "", false
+		}
+		result := strings.TrimSpace(ev.ToolResult)
+		if result == "" {
+			result = strings.TrimSpace(ev.Text)
+		}
+		if display.ToolShowResultBody {
+			result = strings.TrimSpace(truncateIf(result, display.ToolMaxLen))
+		} else {
+			result = ""
+		}
+		item := ProgressCardEntry{
+			Kind:       ProgressEntryToolResult,
+			Tool:       strings.TrimSpace(ev.ToolName),
+			Status:     strings.TrimSpace(ev.Status),
+			ExitCode:   ev.ExitCode,
+			Success:    ev.Success,
+			ToolResult: result,
+		}
+		return item, progressFallbackText(item), true
+	case EventError:
+		text := strings.TrimSpace(ev.Text)
+		if text == "" {
+			return ProgressCardEntry{}, "", false
+		}
+		item := ProgressCardEntry{
+			Kind: ProgressEntryError,
+			Text: text,
+		}
+		return item, text, true
+	default:
+		text := strings.TrimSpace(ev.Text)
+		if text == "" {
+			return ProgressCardEntry{}, "", false
+		}
+		item := ProgressCardEntry{
+			Kind: ProgressEntryInfo,
+			Text: text,
+		}
+		return item, text, true
+	}
+}
+
+func (w *compactProgressWriter) findPendingToolIndex(toolName string) int {
+	toolName = strings.TrimSpace(toolName)
+	for i, pending := range w.pending {
+		if pending.resolved {
+			continue
+		}
+		if toolName != "" && strings.EqualFold(strings.TrimSpace(pending.toolName), toolName) {
+			return i
+		}
+	}
+	for i, pending := range w.pending {
+		if !pending.resolved {
+			return i
+		}
+	}
+	return -1
+}
+
+func (w *compactProgressWriter) trimEntries() {
+	truncated := false
+	if w.maxEntries > 0 && len(w.items) > w.maxEntries {
+		overflow := len(w.items) - w.maxEntries
+		w.items = w.items[overflow:]
+		if len(w.entries) > overflow {
+			w.entries = w.entries[overflow:]
+		} else {
+			w.entries = nil
+		}
+		if len(w.pending) > 0 {
+			next := make([]pendingToolBlock, 0, len(w.pending))
+			for _, pending := range w.pending {
+				if pending.resolved {
+					continue
+				}
+				pending.itemIndex -= overflow
+				if pending.itemIndex >= 0 && pending.itemIndex < len(w.items) {
+					next = append(next, pending)
+				}
+			}
+			w.pending = next
+		}
+		truncated = true
+	} else if w.maxEntries > 0 && len(w.entries) > w.maxEntries {
+		w.entries = w.entries[len(w.entries)-w.maxEntries:]
+		truncated = true
+	}
+	w.truncated = truncated
+}
+
+func (w *compactProgressWriter) rebuildContent() {
+	switch w.style {
+	case progressStyleCard:
+		if w.usePayload {
+			w.content = BuildProgressCardPayloadV2(w.items, w.truncated, w.agentName, w.lang, w.state)
+		} else {
+			w.content = renderCardProgressMarkdownFallback(w.entries, w.truncated)
+			w.content = trimCompactProgressText(w.content, compactProgressMaxChars)
+		}
+	default:
+		w.content = strings.Join(w.entries, "\n\n")
+		w.content = trimCompactProgressText(w.content, compactProgressMaxChars)
+	}
+	if w.usePayload && w.content == "" {
+		slog.Warn("progress writer: failed to build structured payload", "platform", w.platform.Name())
+		w.failed = true
+	}
 }
 
 // Finalize updates card progress state (running/completed/failed) without
