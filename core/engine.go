@@ -3384,9 +3384,6 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				}
 
 				if fullResponse != "" {
-					if e.showContextIndicator && event.InputTokens >= 100 {
-						fullResponse += contextIndicator(event.InputTokens)
-					}
 					for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
 						e.send(p, replyCtx, chunk)
 					}
@@ -3754,7 +3751,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						}
 					}
 				} else if updater, ok := p.(MessageUpdater); ok {
-					card := richCardSupporter.BuildRichCard(CardStatusThinking, "", toolSteps, partialText, true, time.Since(turnStart))
+					card := richCardSupporter.BuildRichCard(CardStatusThinking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
 					if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
 						slog.Debug("rich card: failed to update thinking card", "platform", p.Name(), "error", err)
 					}
@@ -3957,7 +3954,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					if hasRichCard {
 						toolSteps = mergeRichToolResult(toolSteps, event, result, e.display.ToolMaxLen)
 						if cardMessageID == nil {
-							card := richCardSupporter.BuildRichCard(CardStatusWorking, "", toolSteps, partialText, true, time.Since(turnStart))
+							card := richCardSupporter.BuildRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
 							if starter, ok := p.(PreviewStarter); ok {
 								handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
 								if err != nil {
@@ -3967,7 +3964,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 								}
 							}
 						} else if updater, ok := p.(MessageUpdater); ok {
-							card := richCardSupporter.BuildRichCard(CardStatusWorking, "", toolSteps, partialText, true, time.Since(turnStart))
+							card := richCardSupporter.BuildRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
 							if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
 								slog.Debug("rich card: failed to update tool-result card", "platform", p.Name(), "error", err)
 							}
@@ -5777,7 +5774,11 @@ func buildClaudeStatusLineFooter(model, effort string, usage *ContextUsage) stri
 //   < 1000      -> "168"
 //   < 1_000_000 -> "40.8k"
 //   else        -> "1.2M"
+// Negative inputs clamp to zero (defensive against bad token deltas).
 func formatStatusTokenCount(n int) string {
+	if n < 0 {
+		n = 0
+	}
 	switch {
 	case n < 1000:
 		return fmt.Sprintf("%d", n)
@@ -6118,18 +6119,6 @@ func (e *Engine) buildClaudeStatusLineFooter(agent Agent, session AgentSession, 
 	default:
 		return ""
 	}
-}
-
-// formatStatusTokenCount renders a token count the way CCD's statusline
-// does: values >= 1000 are shown with one decimal and a "k" suffix.
-func formatStatusTokenCount(n int) string {
-	if n < 0 {
-		n = 0
-	}
-	if n >= 1000 {
-		return fmt.Sprintf("%.1fk", float64(n)/1000)
-	}
-	return strconv.Itoa(n)
 }
 
 // sendChunksWithStatusFooter splits body across maxPlatformMessageLen and sends
