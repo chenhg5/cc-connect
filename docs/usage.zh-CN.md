@@ -17,6 +17,7 @@ cc-connect 完整功能使用指南。
 - [语音回复（文字转语音）](#语音回复文字转语音)
 - [图片与文件回传](#图片与文件回传)
 - [定时任务 (Cron)](#定时任务-cron)
+- [Shell 配置](#shell-配置)
 - [多机器人中继](#多机器人中继)
 - [守护进程模式](#守护进程模式)
 - [多工作区模式](#多工作区模式)
@@ -711,6 +712,78 @@ cc-connect cron del <job-id>
 > "每天早上6点帮我总结 GitHub trending"
 
 Claude Code 会自动创建定时任务。对依赖记忆文件的其他 Agent，先执行一次 `/cron setup` 或 `/bind setup`，效果相同。
+
+---
+
+## Shell 配置
+
+默认情况下，cc-connect 在 Unix 上使用 `sh`，Windows 上使用 `powershell.exe` 来执行所有 shell 命令（`/shell`、cron exec、hooks 和 webhook exec）。你可以配置使用其他 shell。
+
+### 支持的 Shell
+
+| Shell | 配置值 | 参数标志 |
+|-------|--------|---------|
+| sh（Unix 默认） | `sh` | `-c` |
+| bash | `/bin/bash` | `-c` |
+| zsh | `/bin/zsh` | `-c` |
+| fish | `/bin/fish` | `-c` |
+| cmd（Windows） | `cmd` | `/C` |
+| PowerShell（Windows 默认） | `powershell.exe` | `-Command` |
+| PowerShell Core | `pwsh` | `-Command` |
+
+参数标志会根据 shell 名称自动检测，无需手动配置。
+
+### 全局配置
+
+在 `config.toml` 顶层设置 `shell`，更改所有项目的默认 shell：
+
+```toml
+shell = "/bin/zsh"
+```
+
+### 项目级覆盖
+
+为特定项目覆盖 shell：
+
+```toml
+[[projects]]
+name = "my-project"
+shell = "/bin/fish"
+```
+
+### 初始化命令
+
+使用 `init_command` 在每条 shell 命令前添加初始化脚本。适用于加载 shell profile，使自定义函数、别名和环境变量可用：
+
+```toml
+shell = "/bin/zsh"
+init_command = "source ~/.zshrc"
+```
+
+初始化命令和用户命令会用换行符拼接后作为一个整体脚本传给 shell，避免引号转义问题。例如 `/shell echo $MY_VAR` 实际执行的是：
+
+```zsh
+source ~/.zshrc
+echo $MY_VAR
+```
+
+`init_command` 同样支持项目级覆盖：
+
+```toml
+[[projects]]
+name = "my-project"
+shell = "/bin/fish"
+init_command = "source ~/.config/fish/config.fish"
+```
+
+### 影响范围
+
+Shell 配置适用于 cc-connect 中所有命令执行路径：
+
+- **`/shell` 命令** — 聊天中的交互式 shell 命令
+- **Cron exec 任务** — `[[cron]]` 中 `exec` 字段的定时任务
+- **Hooks** — `[[hooks]]` 中 `type = "command"` 的钩子
+- **Webhook exec** — webhook 请求中 `exec` 字段的命令
 
 ---
 

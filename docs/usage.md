@@ -16,6 +16,7 @@ Complete guide to using cc-connect features.
 - [Voice Reply (TTS)](#voice-reply-text-to-speech)
 - [Image and File Send-Back](#image-and-file-send-back)
 - [Scheduled Tasks (Cron)](#scheduled-tasks-cron)
+- [Shell Configuration](#shell-configuration)
 - [Multi-Bot Relay](#multi-bot-relay)
 - [Daemon Mode](#daemon-mode)
 - [Multi-Workspace Mode](#multi-workspace-mode)
@@ -799,6 +800,78 @@ Optional: `--session-mode new-per-run` starts a fresh agent session on each run 
 > "Every day at 6am, summarize GitHub trending"
 
 Claude Code auto-creates the cron job. For other agents that rely on memory files, run `/cron setup` or `/bind setup` once first; both write the same instructions.
+
+---
+
+## Shell Configuration
+
+By default, cc-connect uses `sh` on Unix and `powershell.exe` on Windows for all shell execution (`/shell` commands, cron exec jobs, hooks, and webhook exec). You can override this to use a different shell.
+
+### Supported Shells
+
+| Shell | Config value | Flag |
+|-------|-------------|------|
+| sh (default on Unix) | `sh` | `-c` |
+| bash | `/bin/bash` | `-c` |
+| zsh | `/bin/zsh` | `-c` |
+| fish | `/bin/fish` | `-c` |
+| cmd (Windows) | `cmd` | `/C` |
+| PowerShell (default on Windows) | `powershell.exe` | `-Command` |
+| PowerShell Core | `pwsh` | `-Command` |
+
+The flag is auto-detected from the shell name — no manual configuration needed.
+
+### Global Configuration
+
+Set `shell` at the top level of `config.toml` to change the default for all projects:
+
+```toml
+shell = "/bin/zsh"
+```
+
+### Per-Project Override
+
+Override the shell for a specific project:
+
+```toml
+[[projects]]
+name = "my-project"
+shell = "/bin/fish"
+```
+
+### Init Command
+
+Use `init_command` to prepend a setup script to every shell command. This is useful for sourcing your shell profile so that custom functions, aliases, and environment variables are available:
+
+```toml
+shell = "/bin/zsh"
+init_command = "source ~/.zshrc"
+```
+
+The init command and the user's command are joined with a newline and passed as a single script to the shell, avoiding quoting issues. For example, `/shell echo $MY_VAR` becomes:
+
+```zsh
+source ~/.zshrc
+echo $MY_VAR
+```
+
+`init_command` also supports per-project override:
+
+```toml
+[[projects]]
+name = "my-project"
+shell = "/bin/fish"
+init_command = "source ~/.config/fish/config.fish"
+```
+
+### Affected Execution Paths
+
+The shell configuration applies to all command execution in cc-connect:
+
+- **`/shell` command** — interactive shell commands from chat
+- **Cron exec jobs** — `[[cron]]` entries with `exec` field
+- **Hooks** — `[[hooks]]` entries with `type = "command"`
+- **Webhook exec** — webhook requests with `exec` field
 
 ---
 
