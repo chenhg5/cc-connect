@@ -302,6 +302,14 @@ type ObserveConfig struct {
 	Channel string `toml:"channel"`
 }
 
+// MessageQueueConfig controls optional pre-execution message aggregation.
+type MessageQueueConfig struct {
+	Mode               string `toml:"mode,omitempty"`                 // immediate | collect | manual
+	CollectWaitMs      *int   `toml:"collect_wait_ms,omitempty"`      // quiet window for collect mode; default 5000
+	CollectMaxMessages *int   `toml:"collect_max_messages,omitempty"` // max buffered messages before immediate flush; default 20
+	CollectMaxBytes    *int   `toml:"collect_max_bytes,omitempty"`    // max buffered bytes before immediate flush; default 262144
+}
+
 // ReferenceConfig controls local file reference normalization and rendering.
 type ReferenceConfig struct {
 	NormalizeAgents []string `toml:"normalize_agents,omitempty"`
@@ -371,9 +379,10 @@ type ProjectConfig struct {
 	//   [projects.display]
 	//   thinking_messages = false
 	//   tool_messages = false
-	Display    *DisplayConfig  `toml:"display,omitempty"`
-	Observe    *ObserveConfig  `toml:"observe,omitempty"`
-	References ReferenceConfig `toml:"references,omitempty"`
+	Display      *DisplayConfig     `toml:"display,omitempty"`
+	Observe      *ObserveConfig     `toml:"observe,omitempty"`
+	MessageQueue MessageQueueConfig `toml:"message_queue,omitempty"`
+	References   ReferenceConfig    `toml:"references,omitempty"`
 	// FilterExternalSessions: when true, /list only shows sessions created by
 	// cc-connect, hiding sessions created by direct CLI usage in the same work_dir.
 	// Default is false (show all sessions).
@@ -783,6 +792,9 @@ func (c *Config) validate() error {
 		if err := validateReferenceConfig(prefix, proj.References); err != nil {
 			return err
 		}
+		if err := validateMessageQueueConfig(prefix, proj.MessageQueue); err != nil {
+			return err
+		}
 		if err := validateUsersConfig(prefix, proj.Users); err != nil {
 			return err
 		}
@@ -848,6 +860,25 @@ func validateReferenceConfig(prefix string, rc ReferenceConfig) error {
 	}
 	if _, ok := supportedReferenceEnclosureStyles[strings.ToLower(strings.TrimSpace(rc.EnclosureStyle))]; !ok {
 		return fmt.Errorf("config: %s.references.enclosure_style has unsupported value %q", prefix, rc.EnclosureStyle)
+	}
+	return nil
+}
+
+func validateMessageQueueConfig(prefix string, mq MessageQueueConfig) error {
+	mode := strings.ToLower(strings.TrimSpace(mq.Mode))
+	switch mode {
+	case "", "immediate", "collect", "manual":
+	default:
+		return fmt.Errorf("config: %s.message_queue.mode has unsupported value %q", prefix, mq.Mode)
+	}
+	if mq.CollectWaitMs != nil && *mq.CollectWaitMs <= 0 {
+		return fmt.Errorf("config: %s.message_queue.collect_wait_ms must be > 0", prefix)
+	}
+	if mq.CollectMaxMessages != nil && *mq.CollectMaxMessages <= 0 {
+		return fmt.Errorf("config: %s.message_queue.collect_max_messages must be > 0", prefix)
+	}
+	if mq.CollectMaxBytes != nil && *mq.CollectMaxBytes <= 0 {
+		return fmt.Errorf("config: %s.message_queue.collect_max_bytes must be > 0", prefix)
 	}
 	return nil
 }
@@ -2904,6 +2935,48 @@ func SaveProjectSettings(projectName string, update ProjectSettingsUpdate) error
 	return fmt.Errorf("project %q not found", projectName)
 }
 
+// SaveProjectMessageQueueConfig persists project-level message_queue settings.
+func SaveProjectMessageQueueConfig(projectName string, mode *string, collectWaitMs, collectMaxMessages, collectMaxBytes *int) error {
+	configMu.Lock()
+	defer configMu.Unlock()
+	if ConfigPath == "" {
+		return fmt.Errorf("config path not set")
+	}
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+	for i := range cfg.Projects {
+		if cfg.Projects[i].Name != projectName {
+			continue
+		}
+		if mode != nil {
+			cfg.Projects[i].MessageQueue.Mode = strings.TrimSpace(*mode)
+		}
+		if collectWaitMs != nil {
+			v := *collectWaitMs
+			cfg.Projects[i].MessageQueue.CollectWaitMs = &v
+		}
+		if collectMaxMessages != nil {
+			v := *collectMaxMessages
+			cfg.Projects[i].MessageQueue.CollectMaxMessages = &v
+		}
+		if collectMaxBytes != nil {
+			v := *collectMaxBytes
+			cfg.Projects[i].MessageQueue.CollectMaxBytes = &v
+		}
+		if err := validateMessageQueueConfig(fmt.Sprintf("projects[%d]", i), cfg.Projects[i].MessageQueue); err != nil {
+			return err
+		}
+		return saveConfig(cfg)
+	}
+	return fmt.Errorf("project %q not found", projectName)
+}
+
 // GetProjectConfigDetails returns persisted project fields from the config file for the management API.
 func GetProjectConfigDetails(projectName string) map[string]any {
 	if ConfigPath == "" {
@@ -2938,6 +3011,18 @@ func GetProjectConfigDetails(projectName string) map[string]any {
 		}
 		if p.InjectSender != nil {
 			result["inject_sender"] = *p.InjectSender
+		}
+		if strings.TrimSpace(p.MessageQueue.Mode) != "" {
+			result["messages.mode"] = p.MessageQueue.Mode
+		}
+		if p.MessageQueue.CollectWaitMs != nil {
+			result["messages.collect_wait_ms"] = *p.MessageQueue.CollectWaitMs
+		}
+		if p.MessageQueue.CollectMaxMessages != nil {
+			result["messages.collect_max_messages"] = *p.MessageQueue.CollectMaxMessages
+		}
+		if p.MessageQueue.CollectMaxBytes != nil {
+			result["messages.collect_max_bytes"] = *p.MessageQueue.CollectMaxBytes
 		}
 		platConfigs := make([]map[string]any, len(p.Platforms))
 		for j, plat := range p.Platforms {
