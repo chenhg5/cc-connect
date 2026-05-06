@@ -95,6 +95,7 @@ func (s *opencodeSession) Send(prompt string, images []core.ImageAttachment, fil
 
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = &stderrBuf
+	cmd.Stdin = strings.NewReader(prompt)
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("opencodeSession: start: %w", err)
@@ -170,9 +171,6 @@ func (s *opencodeSession) buildRunArgs(prompt string, imagePaths []string, chatI
 		args = append(args, "--file", imagePath)
 	}
 
-	// Use "--" to separate flags from the positional prompt so that
-	// --file (yargs [array]) does not greedily consume the prompt text.
-	args = append(args, "--", prompt)
 	return args
 }
 
