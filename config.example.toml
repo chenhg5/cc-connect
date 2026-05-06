@@ -1765,6 +1765,37 @@ app_secret = "your-feishu-app-secret"
 # token = "your-telegram-bot-token"
 
 # =============================================================================
+# Project: Using GitHub Copilot / 项目：使用 GitHub Copilot (uncomment to enable / 取消注释以启用)
+# =============================================================================
+# Prerequisites / 前置条件:
+#   - Install GitHub Copilot CLI: https://docs.github.com/copilot/how-tos/copilot-cli
+#     Example: brew install github/copilot/copilot
+#   - copilot login (GitHub authentication)
+#
+# GitHub Copilot CLI uses --headless --stdio for JSON-RPC communication.
+# GitHub Copilot CLI 使用 --headless --stdio 进行 JSON-RPC 通信。
+# The generic ACP configuration above is also supported; this first-class agent
+# adds cc-connect model/mode switching plus session list/delete integration.
+
+# [[projects]]
+# name = "my-copilot-project"
+#
+# [projects.agent]
+# type = "copilot"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/code"
+# model = "gpt-4.1"           # or claude-sonnet-4.6, o3-mini, etc.
+# mode = "default"            # "default" or "bypassPermissions" (yolo)
+# cli_path = "copilot"        # CLI binary name or path (default: "copilot")
+#
+# [[projects.platforms]]
+# type = "telegram"
+#
+# [projects.platforms.options]
+# token = "your-telegram-bot-token"
+
+# =============================================================================
 # Project 8: Another example / 项目 8：更多示例 (uncomment to enable / 取消注释以启用)
 # =============================================================================
 
