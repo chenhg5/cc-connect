@@ -45,10 +45,13 @@ cc-connect 完整功能使用指南。
 | `/allow <工具名>` | 预授权工具 |
 | `/reasoning [等级]` | 查看或切换推理强度（Codex）|
 | `/mode [名称]` | 查看或切换权限模式 |
+| `/mcp` | 列出当前 Agent / backend 可见的 MCP servers |
 | `/stop` | 停止当前执行 |
 | `/help` | 显示可用命令 |
 
 会话中 Agent 请求工具权限时，回复 **允许** / **拒绝** / **允许所有**。
+
+对 Codex 而言，`/mcp` 当前分为两种语义：`app_server` 显示 **运行时 MCP Servers**，`exec` 显示从本地配置解析出的 **已配置 MCP Servers**。其他 Agent / backend 目前仍可能返回不支持。
 
 也可以为项目开启“空闲后自动切换新会话”：
 
