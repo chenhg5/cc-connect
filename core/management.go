@@ -67,16 +67,21 @@ type ManagementServer struct {
 
 	// cc-switch migration callback
 	listCCSwitchProviders func() ([]CCSwitchProviderInfo, error)
+
+	// Aelios Companion: cached JSONL stores keyed by file path.
+	aeliosStoresMu sync.Mutex
+	aeliosStores   map[string]*AeliosStore
 }
 
 // NewManagementServer creates a new management API server.
 func NewManagementServer(port int, token string, corsOrigins []string) *ManagementServer {
 	return &ManagementServer{
-		port:        port,
-		token:       token,
-		corsOrigins: corsOrigins,
-		engines:     make(map[string]*Engine),
-		startedAt:   time.Now(),
+		port:         port,
+		token:        token,
+		corsOrigins:  corsOrigins,
+		engines:      make(map[string]*Engine),
+		aeliosStores: make(map[string]*AeliosStore),
+		startedAt:    time.Now(),
 	}
 }
 
@@ -246,6 +251,9 @@ func (m *ManagementServer) buildHandler(mux *http.ServeMux) http.Handler {
 
 	// Bridge
 	mux.HandleFunc(prefix+"/bridge/adapters", m.wrap(m.handleBridgeAdapters))
+
+	// Aelios Companion
+	m.registerAeliosRoutes(mux, prefix)
 
 	// Static file serving for cc-connect-web (SPA)
 	return m.withStaticFallback(mux)

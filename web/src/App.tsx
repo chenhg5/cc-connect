@@ -11,6 +11,12 @@ import CronList from '@/pages/Cron/CronList';
 import SystemConfig from '@/pages/System/Config';
 import ProviderList from '@/pages/Providers/ProviderList';
 import SkillList from '@/pages/Skills/SkillList';
+import CompanionLayout from '@/pages/Companion/CompanionLayout';
+import CompanionChat from '@/pages/Companion/ChatView';
+import CompanionDiary from '@/pages/Companion/DiaryView';
+import CompanionTimeline from '@/pages/Companion/TimelineView';
+import CompanionSaved from '@/pages/Companion/SavedView';
+import CompanionSettings from '@/pages/Companion/SettingsView';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
@@ -34,6 +40,13 @@ export default function App() {
         <Route path="chat/:name" element={<ChatView />} />
         <Route path="cron" element={<CronList />} />
         <Route path="system" element={<SystemConfig />} />
+      </Route>
+      <Route path="/companion" element={<ProtectedRoute><CompanionLayout /></ProtectedRoute>}>
+        <Route index element={<CompanionChat />} />
+        <Route path="diary" element={<CompanionDiary />} />
+        <Route path="timeline" element={<CompanionTimeline />} />
+        <Route path="saved" element={<CompanionSaved />} />
+        <Route path="settings" element={<CompanionSettings />} />
       </Route>
     </Routes>
   );

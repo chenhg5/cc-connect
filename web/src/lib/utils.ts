@@ -21,3 +21,11 @@ export function formatTime(iso: string): string {
 export function truncate(s: string, max: number): string {
   return s.length > max ? s.slice(0, max) + '...' : s;
 }
+
+/** Format a Date as YYYY-MM-DD in local timezone (not UTC). */
+export function formatLocalDate(d: Date = new Date()): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
