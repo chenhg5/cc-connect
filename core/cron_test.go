@@ -424,6 +424,35 @@ func TestCronJob_JSONLegacyUnmarshal(t *testing.T) {
 	if j.TimeoutMins != nil {
 		t.Errorf("legacy JSON: TimeoutMins = %v, want nil", j.TimeoutMins)
 	}
+	if j.Effort != "" {
+		t.Errorf("legacy JSON: Effort = %q, want empty", j.Effort)
+	}
+}
+
+func TestCronStoreUpdate_Effort(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := &CronJob{
+		ID:         "eff-1",
+		Project:    "p",
+		SessionKey: "test:1:1",
+		CronExpr:   "0 6 * * *",
+		Prompt:     "hi",
+		Enabled:    true,
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatal(err)
+	}
+	if !store.Update("eff-1", "effort", "medium") {
+		t.Fatal("expected effort update to succeed")
+	}
+	got := store.Get("eff-1")
+	if got == nil || got.Effort != "medium" {
+		t.Fatalf("updated effort = %#v, want medium", got)
+	}
 }
 
 func TestCronScheduler_AddJob_NegativeTimeoutMins(t *testing.T) {

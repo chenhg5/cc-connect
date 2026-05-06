@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 type deadlineAwareModelAgent struct {
@@ -510,6 +511,71 @@ func TestMgmt_CronWithScheduler(t *testing.T) {
 	r = mgmtDelete(t, ts.URL+"/api/v1/cron/nonexistent", "tok")
 	if r.OK {
 		t.Fatal("expected 404 for nonexistent cron job")
+	}
+}
+
+func TestMgmt_CronWithScheduler_ValidatesEffortOnCreate(t *testing.T) {
+	mgmt, ts, e := testManagementServer(t, "tok")
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := NewCronScheduler(store)
+	cs.RegisterEngine("test-project", e)
+	mgmt.SetCronScheduler(cs)
+	e.agent = &effortRecordingAgent{
+		session:         newResultAgentSession("ok"),
+		availableEffort: []string{"low", "medium", "high", "max"},
+	}
+
+	r := mgmtPost(t, ts.URL+"/api/v1/cron", "tok", map[string]any{
+		"project":     "test-project",
+		"session_key": "user1",
+		"cron_expr":   "0 9 * * *",
+		"prompt":      "hello",
+		"effort":      "turbo",
+	})
+	if r.OK {
+		t.Fatal("expected invalid effort to fail")
+	}
+	if !strings.Contains(r.Error, "invalid reasoning effort") {
+		t.Fatalf("error = %q, want invalid reasoning effort", r.Error)
+	}
+}
+
+func TestMgmt_CronWithScheduler_ValidatesEffortOnPatch(t *testing.T) {
+	mgmt, ts, e := testManagementServer(t, "tok")
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := NewCronScheduler(store)
+	cs.RegisterEngine("test-project", e)
+	mgmt.SetCronScheduler(cs)
+	e.agent = &effortRecordingAgent{
+		session:         newResultAgentSession("ok"),
+		availableEffort: []string{"low", "medium", "high", "max"},
+	}
+	if err := store.Add(&CronJob{
+		ID:         "job1",
+		Project:    "test-project",
+		SessionKey: "user1",
+		CronExpr:   "0 9 * * *",
+		Prompt:     "hello",
+		Enabled:    true,
+		CreatedAt:  time.Now(),
+	}); err != nil {
+		t.Fatalf("store.Add() error = %v", err)
+	}
+
+	r := mgmtPatch(t, ts.URL+"/api/v1/cron/job1", "tok", map[string]any{
+		"effort": "turbo",
+	})
+	if r.OK {
+		t.Fatal("expected invalid effort patch to fail")
+	}
+	if !strings.Contains(r.Error, "update effort: invalid reasoning effort") {
+		t.Fatalf("error = %q, want update effort validation failure", r.Error)
 	}
 }
 
