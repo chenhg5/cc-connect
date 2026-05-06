@@ -70,6 +70,7 @@ type Platform struct {
 	intents               int
 	markdownSupport       bool // enable markdown messages (msg_type: 2)
 	handler               core.MessageHandler
+	ctx                   context.Context    // lifetime context for the platform
 	cancel                context.CancelFunc
 
 	// OAuth2 token management
@@ -85,6 +86,7 @@ type Platform struct {
 	heartbeatMs  int
 	heartbeatOK  atomic.Bool
 	reconnecting atomic.Bool
+	connCancel   context.CancelFunc // cancels per-connection goroutines (heartbeatLoop, readLoop)
 
 	// Message dedup
 	dedup core.MessageDedup
@@ -217,6 +219,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	p.ctx = ctx
 	p.cancel = cancel
 
 	if err := p.connectGateway(ctx); err != nil {
@@ -630,9 +633,12 @@ func (p *Platform) connectGateway(ctx context.Context) error {
 		return err
 	}
 
-	// Start heartbeat and read loop
-	go p.heartbeatLoop(ctx)
-	go p.readLoop(ctx)
+	// Start heartbeat and read loop with a per-connection context
+	// so we can cancel them cleanly on reconnect.
+	connCtx, connCancel := context.WithCancel(ctx)
+	p.connCancel = connCancel
+	go p.heartbeatLoop(connCtx)
+	go p.readLoop(connCtx)
 
 	return nil
 }
@@ -836,16 +842,25 @@ func (p *Platform) readLoop(ctx context.Context) {
 	}
 }
 
-func (p *Platform) triggerReconnect(ctx context.Context) {
+func (p *Platform) triggerReconnect(_ context.Context) {
 	if p.reconnecting.CompareAndSwap(false, true) {
 		go func() {
 			defer p.reconnecting.Store(false)
-			p.reconnectLoop(ctx)
+			// Use the platform lifetime context, NOT the per-connection context
+			// that was just canceled. The caller's ctx is a child of connCtx
+			// which connCancel() will cancel inside reconnectLoop.
+			p.reconnectLoop(p.ctx)
 		}()
 	}
 }
 
 func (p *Platform) reconnectLoop(ctx context.Context) {
+	// Cancel old heartbeatLoop/readLoop goroutines before closing the
+	// connection, so they stop promptly instead of racing with the new pair.
+	if p.connCancel != nil {
+		p.connCancel()
+	}
+
 	// Close existing connection
 	p.wsMu.Lock()
 	if p.wsConn != nil {
@@ -940,8 +955,10 @@ func (p *Platform) reconnectLoop(ctx context.Context) {
 		}
 
 		slog.Info("qqbot: reconnected successfully")
-		go p.heartbeatLoop(ctx)
-		go p.readLoop(ctx)
+		connCtx, connCancel := context.WithCancel(ctx)
+		p.connCancel = connCancel
+		go p.heartbeatLoop(connCtx)
+		go p.readLoop(connCtx)
 		return
 	}
 	slog.Error("qqbot: failed to reconnect after max attempts", "attempts", maxReconnectAttempts)

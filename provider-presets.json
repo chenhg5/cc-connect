@@ -247,6 +247,62 @@
       }
     },
     {
+      "name": "dragoncode",
+      "display_name": "DragonCode",
+      "invite_url": "https://dragoncode.codes/register?ref=23ZELCPX",
+      "description": "AI model API relay service. Register via link to get started.",
+      "description_zh": "AI 模型 API 中转服务。通过链接注册即可开始体验。",
+      "features": ["Claude Code", "Codex", "Gemini"],
+      "tier": 2,
+      "website": "https://dragoncode.codes",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://api.dragoncode.codes",
+          "model": "claude-sonnet-4-20250514",
+          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+        },
+        "codex": {
+          "base_url": "https://api.dragoncode.codes/v1",
+          "model": "gpt-5.4",
+          "models": ["gpt-5.4"],
+          "codex_config": { "wire_api": "responses" }
+        },
+        "opencode": {
+          "base_url": "https://api.dragoncode.codes/v1",
+          "model": "claude-sonnet-4-20250514",
+          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+        }
+      }
+    },
+    {
+      "name": "youyunzhisuan",
+      "display_name": "优云智算 (UCloud AI)",
+      "invite_url": "https://passport.compshare.cn/register?referral_code=H65IOClRGu5CM7nn5ykfad&ytag=GPU_YY_YX_git_cc-connect",
+      "description": "UCloud AI Cloud Platform. One key for all domestic and international models. High-value Coding Plan packages, enterprise support. ¥5 free credit for new users!",
+      "description_zh": "UCloud 旗下 AI 云平台，一个 key 调用国内外模型。高性价比 Coding Plan 套餐，企业级支持。新用户送 5 元体验金！",
+      "features": ["UCloud", "Coding Plan", "Enterprise Support", "¥5 Free"],
+      "tier": 2,
+      "website": "https://passport.compshare.cn",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://api.compshare.cn",
+          "model": "claude-sonnet-4-20250514",
+          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+        },
+        "codex": {
+          "base_url": "https://api.compshare.cn/v1",
+          "model": "gpt-5.4",
+          "models": ["gpt-5.4"],
+          "codex_config": { "wire_api": "responses" }
+        },
+        "opencode": {
+          "base_url": "https://api.compshare.cn/v1",
+          "model": "claude-sonnet-4-20250514",
+          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+        }
+      }
+    },
+    {
       "name": "claudeapi",
       "display_name": "claudeapi.com",
       "invite_url": "https://console.claudeapi.com/register?aff=GDbA",

@@ -59,11 +59,26 @@ func TestAgentNew(t *testing.T) {
 	assert.Equal(t, "kimi-k2", a.GetModel())
 }
 
+// TestAgentFields verifies Name/WorkDir/Mode/Model without requiring
+// the kimi CLI on PATH — constructs the struct directly.
+func TestAgentFields(t *testing.T) {
+	a := &Agent{
+		workDir:   "/tmp",
+		model:     "kimi-k2",
+		mode:      "yolo",
+		cmd:       "kimi",
+		activeIdx: -1,
+	}
+	assert.Equal(t, "kimi", a.Name())
+	assert.Equal(t, "Kimi", a.CLIDisplayName())
+	assert.Equal(t, "kimi", a.CLIBinaryName())
+	assert.Equal(t, "/tmp", a.GetWorkDir())
+	assert.Equal(t, "yolo", a.GetMode())
+	assert.Equal(t, "kimi-k2", a.GetModel())
+}
+
 func TestAgentSetters(t *testing.T) {
-	skipUnlessKimiAvailable(t)
-	agentInf, err := New(map[string]any{"work_dir": "/tmp"})
-	require.NoError(t, err)
-	a := agentInf.(*Agent)
+	a := &Agent{workDir: "/tmp", mode: "default", activeIdx: -1}
 
 	a.SetWorkDir("/new/path")
 	assert.Equal(t, "/new/path", a.GetWorkDir())
@@ -76,10 +91,7 @@ func TestAgentSetters(t *testing.T) {
 }
 
 func TestAgentPermissionModes(t *testing.T) {
-	skipUnlessKimiAvailable(t)
-	agentInf, err := New(map[string]any{"work_dir": "/tmp"})
-	require.NoError(t, err)
-	a := agentInf.(*Agent)
+	a := &Agent{}
 
 	modes := a.PermissionModes()
 	require.Len(t, modes, 4)
@@ -90,10 +102,7 @@ func TestAgentPermissionModes(t *testing.T) {
 }
 
 func TestAgentProviderSwitcher(t *testing.T) {
-	skipUnlessKimiAvailable(t)
-	agentInf, err := New(map[string]any{"work_dir": "/tmp"})
-	require.NoError(t, err)
-	a := agentInf.(*Agent)
+	a := &Agent{workDir: "/tmp", activeIdx: -1}
 
 	providers := []core.ProviderConfig{
 		{Name: "moonshot", APIKey: "sk-123"},
@@ -135,10 +144,7 @@ func TestAgentStartSession(t *testing.T) {
 }
 
 func TestAgentMemoryAndSkill(t *testing.T) {
-	skipUnlessKimiAvailable(t)
-	agentInf, err := New(map[string]any{"work_dir": "/tmp/my-project"})
-	require.NoError(t, err)
-	a := agentInf.(*Agent)
+	a := &Agent{workDir: "/tmp/my-project", activeIdx: -1}
 
 	assert.Equal(t, "/tmp/my-project/AGENTS.md", a.ProjectMemoryFile())
 	assert.NotEmpty(t, a.GlobalMemoryFile())
@@ -150,10 +156,7 @@ func TestAgentMemoryAndSkill(t *testing.T) {
 }
 
 func TestAgentAvailableModels(t *testing.T) {
-	skipUnlessKimiAvailable(t)
-	agentInf, err := New(map[string]any{"work_dir": "/tmp"})
-	require.NoError(t, err)
-	a := agentInf.(*Agent)
+	a := &Agent{workDir: "/tmp", activeIdx: -1}
 
 	models := a.AvailableModels(context.Background())
 	require.True(t, len(models) > 0)

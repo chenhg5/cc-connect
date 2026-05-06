@@ -216,6 +216,20 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 				}
 				p.handler(p, msg)
 
+			case *slackevents.AssistantThreadStartedEvent:
+				// User opened a Slack Assistant Chat thread for this app.
+				// Subsequent messages arrive with ThreadTimeStamp set;
+				// assistantOrThreadTS() routes replies into that thread (Chat tab UI).
+				slog.Info("slack: assistant_thread_started",
+					"user", ev.AssistantThread.UserID,
+					"channel", ev.AssistantThread.ChannelID,
+					"thread_ts", ev.AssistantThread.ThreadTimeStamp)
+				_ = p.client.SetAssistantThreadsStatus(slack.AssistantThreadsSetStatusParameters{
+					ChannelID: ev.AssistantThread.ChannelID,
+					ThreadTS:  ev.AssistantThread.ThreadTimeStamp,
+					Status:    "",
+				})
+
 			case *slackevents.MessageEvent:
 				if ev.BotID != "" || ev.User == "" {
 					return
@@ -289,6 +303,8 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					msg.ParentMessageID = ev.ThreadTimeStamp
 					msg.RootMessageID = ev.ThreadTimeStamp
 				}
+				rctx.timestamp = assistantOrThreadTS(ev)
+				msg.ReplyCtx = rctx
 				p.handler(p, msg)
 			}
 		}
@@ -446,6 +462,34 @@ func slackFileDisplayName(f slackevents.File) string {
 	return f.Title
 }
 
+// assistantOrThreadTS returns the thread_ts to use for the bot's reply.
+//
+// For Slack Assistant apps (Agent toggle on), the user's "Chat" tab is a
+// dedicated thread. Messages typed there arrive as message.im events with
+// ThreadTimeStamp set to the assistant thread's root ts. The bot's reply
+// MUST include that thread_ts on chat.postMessage to land in the Chat tab
+// — without it, the reply goes to the DM root and surfaces in the History
+// tab feed instead, breaking the conversational UX.
+//
+// For regular channel messages (not DM, not already in a thread): use the
+// message's own TimeStamp so replies are threaded under the user's message,
+// preserving the old behavior of keeping conversations in threads.
+//
+// For DM messages (channel_type=im) that are not in an Assistant thread:
+// return empty so replies go top-level (natural 1-on-1 conversation).
+func assistantOrThreadTS(ev *slackevents.MessageEvent) string {
+	if ev.ThreadTimeStamp != "" {
+		// Already in a thread (Assistant Chat tab or regular thread reply).
+		return ev.ThreadTimeStamp
+	}
+	// For non-DM channels, thread under the user's message.
+	if ev.ChannelType != "im" {
+		return ev.TimeStamp
+	}
+	// DM top-level: top-level reply is natural.
+	return ""
+}
+
 func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	_, err := p.ReplyWithReceipt(ctx, rctx, content)
 	return err
@@ -458,10 +502,10 @@ func (p *Platform) ReplyWithReceipt(ctx context.Context, rctx any, content strin
 	}
 
 	opts := []slack.MsgOption{
-		slack.MsgOptionText(content, false),
+		slack.MsgOptionText(core.MarkdownToSlackMrkdwn(content), false),
 	}
 	if rc.timestamp != "" {
-		opts = append(opts, slack.MsgOptionTS(rc.timestamp))
+		opts = append(opts, slack.MsgOptionPostMessageParameters(slack.PostMessageParameters{ThreadTimestamp: rc.timestamp}))
 	}
 
 	_, ts, err := p.client.PostMessageContext(ctx, rc.channel, opts...)
@@ -483,7 +527,9 @@ func (p *Platform) ReplyWithReceipt(ctx context.Context, rctx any, content strin
 	}, nil
 }
 
-// Send sends a new message (not a reply)
+// Send sends a new message (or threaded reply if rctx has timestamp).
+// Patched 2026-05-03: use thread_ts when present so replies in Slack Assistant
+// Chat tab land in the right thread (not the History tab feed).
 func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	_, err := p.SendWithReceipt(ctx, rctx, content)
 	return err
@@ -495,7 +541,13 @@ func (p *Platform) SendWithReceipt(ctx context.Context, rctx any, content string
 		return nil, fmt.Errorf("slack: invalid reply context type %T", rctx)
 	}
 
-	_, ts, err := p.client.PostMessageContext(ctx, rc.channel, slack.MsgOptionText(content, false))
+	opts := []slack.MsgOption{
+		slack.MsgOptionText(core.MarkdownToSlackMrkdwn(content), false),
+	}
+	if rc.timestamp != "" {
+		opts = append(opts, slack.MsgOptionPostMessageParameters(slack.PostMessageParameters{ThreadTimestamp: rc.timestamp}))
+	}
+	_, ts, err := p.client.PostMessageContext(ctx, rc.channel, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("slack: send: %w", err)
 	}

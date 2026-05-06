@@ -105,7 +105,7 @@ qodercli --version
 
 ## Step 3: Create config.toml
 
-> **💡 Recommended: Use the Web UI** — After installing, run `cc-connect web` to open the built-in management dashboard. You can visually create projects, add platforms, manage API providers, and even chat with your agent directly from the browser — no need to edit TOML files by hand. The web UI is the easiest way to get started for both new and existing users.
+> **💡 Recommended: Use the Web UI** — After installing, run `cc-connect web` to configure the web admin and open the dashboard in your browser. You can visually create projects, add platforms, manage API providers, and even chat with your agent directly from the browser — no need to edit TOML files by hand. **Note:** `cc-connect web` only configures and opens the browser — you still need to run `cc-connect` separately to start the service.
 
 If you prefer manual configuration, cc-connect looks for config in this order:
 1. `-config <path>` flag (explicit)
@@ -433,10 +433,11 @@ allow_from = "*"                 # allowed QQ user IDs: "12345,67890" or "*" for
 **Open the Web UI (recommended):**
 
 ```bash
-cc-connect web
+cc-connect web    # configure web admin & open browser (does NOT start cc-connect)
+cc-connect        # start the service
 ```
 
-This launches cc-connect and opens the management dashboard in your browser. From there you can manage all projects, platforms, providers, sessions, and chat with your agent visually.
+> **Note:** `cc-connect web` only configures the web admin and opens the dashboard in your browser — it does **not** start the cc-connect service itself. You still need to run `cc-connect` (or `cc-connect --config <path>`) separately to actually start the bridge. Think of it as two steps: configure first, then run.
 
 **Important: If you are running inside a Claude Code session** (e.g., Claude Code helped you install and configure cc-connect), you must unset the `CLAUDECODE` environment variable before starting, otherwise Claude Code will refuse to launch as a subprocess:
 
@@ -528,9 +529,19 @@ Examples:
   cc-connect cron add --cron "0 6 * * *" --prompt "Collect GitHub trending repos and send a summary" --desc "Daily GitHub Trending"
   cc-connect cron add --cron "0 9 * * 1" --prompt "Generate a weekly project status report" --desc "Weekly Report"
 
-To list or delete cron jobs:
+To list, edit, or delete cron jobs:
   cc-connect cron list
+  cc-connect cron edit <job-id> <field> <value>
   cc-connect cron del <job-id>
+
+Use `cron edit` to modify a single field instead of delete-and-recreate.
+Common editable fields: cron_expr, prompt, exec, description, enabled (true/false), mute (true/false), timeout_mins (int).
+Run `cc-connect cron edit --help` for the full field list.
+
+Examples:
+  cc-connect cron edit abc123 cron_expr "0 9 * * *"
+  cc-connect cron edit abc123 enabled false
+  cc-connect cron edit abc123 prompt "Updated daily summary task"
 
 ## Send message to current chat
 To proactively send a message back to the user's chat session (use --stdin heredoc for long/multi-line messages):
@@ -696,7 +707,7 @@ After upgrading, restart the running cc-connect process.
 
 ## Step 8: Run as Background Service (Optional)
 
-You can run cc-connect as a daemon managed by the OS init system (Linux systemd user service, macOS launchd LaunchAgent).
+You can run cc-connect as a daemon managed by the OS init system (Linux systemd user service, macOS launchd LaunchAgent, Windows Task Scheduler task).
 
 ### Install the daemon
 
@@ -731,6 +742,11 @@ cc-connect daemon logs --log-file /path/to/log  # custom log file
 ```
 
 Logs auto-rotate at the configured max size and keep one backup.
+
+On Windows, `daemon install` creates a native Task Scheduler task named `cc-connect`.
+The task runs at user logon and is also started immediately after installation. The
+installer writes a small PowerShell launcher under `~/.cc-connect` so the scheduled
+task uses the selected config directory, log file, PATH, and proxy environment.
 
 ### Uninstall
 

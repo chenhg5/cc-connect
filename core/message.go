@@ -141,6 +141,7 @@ type Message struct {
 	SessionKey      string // unique key for user context, e.g. "feishu:{chatID}:{userID}"
 	Platform        string
 	MessageID       string // platform message ID for tracing
+	Recalled        bool   // true for platform message recall/delete events targeting MessageID
 	ParentMessageID string // direct parent/replied-to message ID when available
 	RootMessageID   string // root thread/conversation message ID when available
 	ThreadID        string // platform-native thread identifier when available
@@ -205,6 +206,8 @@ type Event struct {
 	Error        error
 	InputTokens  int // token usage from agent result events
 	OutputTokens int
+	Metadata     map[string]any // optional metadata from agent (e.g. compaction_continue)
+	Synthetic    bool           // true if this is a synthetic/generated message (not from real user)
 }
 
 // HistoryEntry is one turn in a conversation.

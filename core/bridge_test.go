@@ -20,7 +20,16 @@ import (
 
 func startTestBridge(t *testing.T, token string) (*BridgeServer, string) {
 	t.Helper()
-	bs := NewBridgeServer(0, token, "/bridge/ws", nil)
+	var bs *BridgeServer
+	if token == "" {
+		// Use insecure mode for tests without token
+		bs = NewBridgeServerInsecure(0, token, "/bridge/ws", nil)
+	} else {
+		bs = NewBridgeServer(0, token, "/bridge/ws", nil)
+	}
+	if bs == nil {
+		t.Fatalf("failed to create bridge server")
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/bridge/ws", bs.handleWS)
@@ -636,7 +645,15 @@ func TestSerializeCard(t *testing.T) {
 // startTestBridgeWithREST creates a bridge server with both WS and REST endpoints.
 func startTestBridgeWithREST(t *testing.T, token string) (*BridgeServer, string) {
 	t.Helper()
-	bs := NewBridgeServer(0, token, "/bridge/ws", nil)
+	var bs *BridgeServer
+	if token == "" {
+		bs = NewBridgeServerInsecure(0, token, "/bridge/ws", nil)
+	} else {
+		bs = NewBridgeServer(0, token, "/bridge/ws", nil)
+	}
+	if bs == nil {
+		t.Fatalf("failed to create bridge server")
+	}
 
 	agent := &stubAgent{}
 	sm := NewSessionManager("")

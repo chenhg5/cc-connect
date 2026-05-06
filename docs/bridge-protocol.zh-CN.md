@@ -405,6 +405,36 @@ token = "your-secret"     # 认证密钥，必填
 }
 ```
 
+#### `image`
+
+发送图片给用户。仅在适配器声明了 `"image"` 能力时发送。
+
+```json
+{
+  "type": "image",
+  "session_key": "wechat:user123:user123",
+  "reply_ctx": "conv-abc-123",
+  "data": "<base64 编码的图片数据>",
+  "mime_type": "image/png",
+  "file_name": "screenshot.png"
+}
+```
+
+#### `file`
+
+发送文件给用户。仅在适配器声明了 `"file"` 能力时发送。
+
+```json
+{
+  "type": "file",
+  "session_key": "wechat:user123:user123",
+  "reply_ctx": "conv-abc-123",
+  "data": "<base64 编码的文件数据>",
+  "mime_type": "application/pdf",
+  "file_name": "report.pdf"
+}
+```
+
 #### `pong`
 
 对 `ping` 的回应。
@@ -437,8 +467,8 @@ token = "your-secret"     # 认证密钥，必填
 | 能力 | 说明 | 启用的消息类型 |
 |------|------|--------------|
 | `text` | 基础文本消息（必须） | `message`、`reply` |
-| `image` | 接收用户发送的图片 | `message.images` |
-| `file` | 接收用户发送的文件 | `message.files` |
+| `image` | 收发图片 | `message.images`、`image` 回复 |
+| `file` | 收发文件 | `message.files`、`file` 回复 |
 | `audio` | 收发语音消息 | `message.audio`、`audio` 回复 |
 | `card` | 结构化富卡片渲染 | `card` 回复 |
 | `buttons` | 可点击的内联按钮 | `buttons` 回复、`card_action` |

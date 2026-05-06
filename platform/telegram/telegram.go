@@ -146,8 +146,10 @@ func New(opts map[string]any) (core.Platform, error) {
 	allowFrom, _ := opts["allow_from"].(string)
 	core.CheckAllowFrom("telegram", allowFrom)
 
-	// Build HTTP client with optional proxy support
-	httpClient := &http.Client{Timeout: 60 * time.Second}
+	// Build HTTP client with optional proxy support.
+	// Timeout must exceed the server-side long-poll duration (pollTimeout − 1s = 59s)
+	// to avoid the HTTP client racing with Telegram's response. 90s gives 30s headroom.
+	httpClient := &http.Client{Timeout: 90 * time.Second}
 	if proxyURL, _ := opts["proxy"].(string); proxyURL != "" {
 		u, err := url.Parse(proxyURL)
 		if err != nil {
@@ -364,8 +366,16 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 		userName = strings.TrimSpace(msg.From.FirstName + " " + msg.From.LastName)
 	}
 
+	// Use MessageThreadID only when it meaningfully isolates a sub-session:
+	//  - Forum groups (IsForum=true): Topics feature — thread ID is the topic ID.
+	//  - Non-group chats (private, channel): thread ID is safe to use since
+	//    there are no "reply threads" that would accidentally fragment sessions.
+	// Regular groups (IsForum=false): thread replies produce a non-zero
+	// MessageThreadID, but using it would split an existing session each time
+	// a user replies to a specific message — so we ignore it there.
+	isGroup := msg.Chat.Type == models.ChatTypeGroup || msg.Chat.Type == models.ChatTypeSupergroup
 	threadID := 0
-	if msg.Chat.IsForum {
+	if msg.Chat.IsForum || !isGroup {
 		threadID = msg.MessageThreadID
 	}
 	sessionKey := p.buildSessionKey(msg.Chat.ID, threadID, msg.From.ID)
@@ -377,7 +387,6 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 		return
 	}
 
-	isGroup := msg.Chat.Type == models.ChatTypeGroup || msg.Chat.Type == models.ChatTypeSupergroup
 	chatName := ""
 	if isGroup {
 		chatName = msg.Chat.Title
@@ -844,14 +853,15 @@ func (p *Platform) handleCallbackQuery(ctx context.Context, cb *models.CallbackQ
 		userName = strings.TrimSpace(cb.From.FirstName + " " + cb.From.LastName)
 	}
 
+	isGroupChat := msg.Chat.Type == models.ChatTypeGroup || msg.Chat.Type == models.ChatTypeSupergroup
 	threadID := 0
-	if msg.Chat.IsForum {
+	if msg.Chat.IsForum || !isGroupChat {
 		threadID = msg.MessageThreadID
 	}
 	sessionKey := p.buildSessionKey(chatID, threadID, cb.From.ID)
 	channelKey := buildChannelKey(chatID, threadID)
 
-	isGroup := msg.Chat.Type == models.ChatTypeGroup || msg.Chat.Type == models.ChatTypeSupergroup
+	isGroup := isGroupChat
 	chatName := ""
 	if isGroup {
 		chatName = msg.Chat.Title
@@ -1116,6 +1126,12 @@ func (p *Platform) ReplyWithReceipt(ctx context.Context, rctx any, content strin
 	sent, err := bot.SendMessage(ctx, params)
 	if err != nil {
 		if strings.Contains(err.Error(), "can't parse") {
+			slog.Warn("telegram: HTML rejected by Telegram, sending as plain text",
+				"method", "Reply",
+				"error", err.Error(),
+				"html_prefix", truncateForLog(html, 200),
+				"html_len", len(html),
+			)
 			params.Text = content
 			params.ParseMode = ""
 			sent, err = bot.SendMessage(ctx, params)
@@ -1154,6 +1170,12 @@ func (p *Platform) SendWithReceipt(ctx context.Context, rctx any, content string
 	sent, err := bot.SendMessage(ctx, params)
 	if err != nil {
 		if strings.Contains(err.Error(), "can't parse") {
+			slog.Warn("telegram: HTML rejected by Telegram, sending as plain text",
+				"method", "Send",
+				"error", err.Error(),
+				"html_prefix", truncateForLog(html, 200),
+				"html_len", len(html),
+			)
 			params.Text = content
 			params.ParseMode = ""
 			sent, err = bot.SendMessage(ctx, params)
@@ -1335,6 +1357,12 @@ func (p *Platform) SendWithButtons(ctx context.Context, rctx any, content string
 
 	if _, err := bot.SendMessage(ctx, params); err != nil {
 		if strings.Contains(err.Error(), "can't parse") {
+			slog.Warn("telegram: HTML rejected by Telegram, sending as plain text",
+				"method", "SendWithButtons",
+				"error", err.Error(),
+				"html_prefix", truncateForLog(html, 200),
+				"html_len", len(html),
+			)
 			params.Text = content
 			params.ParseMode = ""
 			_, err = bot.SendMessage(ctx, params)
@@ -1470,6 +1498,12 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 	sent, err := bot.SendMessage(ctx, params)
 	if err != nil {
 		if strings.Contains(err.Error(), "can't parse") {
+			slog.Warn("telegram: HTML rejected by Telegram, sending preview as plain text",
+				"method", "SendPreviewStart",
+				"error", err.Error(),
+				"html_prefix", truncateForLog(html, 200),
+				"html_len", len(html),
+			)
 			params.Text = content
 			params.ParseMode = ""
 			sent, err = bot.SendMessage(ctx, params)
@@ -1512,7 +1546,12 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 			return nil
 		}
 		if strings.Contains(errMsg, "can't parse") {
-			slog.Debug("telegram: UpdateMessage falling back to plain text", "full_html", html)
+			slog.Warn("telegram: HTML rejected by Telegram, editing as plain text",
+				"method", "UpdateMessage",
+				"error", errMsg,
+				"html_prefix", truncateForLog(html, 200),
+				"html_len", len(html),
+			)
 			params.Text = content
 			params.ParseMode = ""
 			if _, err2 := bot.EditMessageText(ctx, params); err2 != nil {

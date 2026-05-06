@@ -1,5 +1,46 @@
 # Changelog
 
+## v1.3.3-beta.1 (2026-04-25)
+
+Beta release with new agents, new features, and broad platform fixes. No breaking changes.
+
+### New Features
+- **Devin agent**: add Devin CLI as a first-class agent with full `/list`, `/mode`, and session management (#672)
+- **`/ps` command** (replaces `/btw`): send a message to a busy session mid-turn; `/btw` kept as alias for backward compatibility (#620)
+- **`!` shell shortcut**: use `!ls -la` as shorthand for `/shell ls -la`, with optional `--timeout` parameter (#658)
+- **NO_REPLY suppression**: agents can return `NO_REPLY` to silently skip platform delivery, useful for cron/analysis tasks (#682)
+- **Feishu shared WebSocket**: multiple projects sharing the same `app_id` now share one WebSocket connection with per-project `allow_chat` / `group_only` filtering (#613)
+- **Message queue depth configurable**: new `[queue] max_depth` config option (default 5) (#690)
+- **Claude Code opus[1m]**: add 1M-context Opus model option with shorthand descriptions (#660)
+- **QQ Bot file send/receive**: full file attachment support with robustness checks (#685)
+- **Bridge ImageSender/FileSender**: `cc-connect send --image/--file` now works through bridge protocol (#712)
+- **Provider presets**: add NekoCode, VisionCoder, and AIHubMix to provider presets; add Trae CLI ACP and COCO ACP config examples (#739)
+
+### Fixed
+- **OpenCode image handling**: inbound images from WeChat/WeCom are now correctly passed to OpenCode CLI via `--file` flags (#717)
+- **Slack Markdown**: convert standard Markdown to Slack mrkdwn format (bold, italic, strike, links, headings) (#680)
+- **QQ Bot reconnect**: cancel stale goroutines on WebSocket reconnect to prevent race conditions (#678)
+- **Gemini multiline prompt**: pass prompt via stdin to preserve newlines (#695)
+- **Telegram HTML fallback**: upgrade silent HTML parse failures to Warn-level logs (#674)
+- **Telegram /skills**: show Telegram-safe skill command format (#571)
+- **Feishu webhook mode**: skip bot open_id fetch in webhook mode for private deployments (#696)
+- **Reply footer**: suppress footer when only workdir is known (#701)
+- **Web UI add-platform**: fix "project not found" error when adding a new platform to an uncreated project
+
+### Contributors
+Thanks to all contributors who made this release possible:
+- @YoungShook — Devin agent integration, Telegram HTML fallback
+- @Cigarrr — /ps command, NO_REPLY feature
+- @vinnyxiong — Feishu shared WebSocket and allow_chat
+- @happyTonakai — Shell `!` prefix and `--timeout`
+- @AaronZ345 — Claude Code opus[1m] model
+- @ferocknew — QQ Bot file support
+- @soaringk — OpenCode image fix
+- @Zx55 — Telegram /skills fix
+- @zhaomoran — Feishu webhook mode fix
+- @LyInfi — Reply footer suppression
+- @meloalright — Trae/COCO ACP config examples
+
 ## v1.3.2 (2026-04-21)
 
 Hotfix release: session filtering is now configurable and defaults to showing all sessions.
