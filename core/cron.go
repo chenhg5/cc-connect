@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"reflect"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -396,13 +396,13 @@ func toExportedFieldName(s string) string {
 
 // CronScheduler runs cron jobs by injecting synthetic messages into engines.
 type CronScheduler struct {
-	store         *CronStore
-	cron          *cron.Cron
-	engines       map[string]*Engine // project name → engine
-	mu            sync.RWMutex
-	entries       map[string]cron.EntryID // job ID → cron entry
-	defaultSilent      bool   // global default for suppressing cron start notifications
-	defaultSessionMode string // global default session mode; "" = reuse, "new_per_run" = fresh session each run
+	store              *CronStore
+	cron               *cron.Cron
+	engines            map[string]*Engine // project name → engine
+	mu                 sync.RWMutex
+	entries            map[string]cron.EntryID // job ID → cron entry
+	defaultSilent      bool                    // global default for suppressing cron start notifications
+	defaultSessionMode string                  // global default session mode; "" = reuse, "new_per_run" = fresh session each run
 }
 
 func NewCronScheduler(store *CronStore) *CronScheduler {
@@ -677,6 +677,47 @@ type mutePlatform struct {
 
 func (m *mutePlatform) Reply(_ context.Context, _ any, _ string) error { return nil }
 func (m *mutePlatform) Send(_ context.Context, _ any, _ string) error  { return nil }
+
+type cronDeliveryTracker struct {
+	emptyResponse string
+
+	mu              sync.Mutex
+	delivered       int
+	suppressedEmpty bool
+}
+
+func (t *cronDeliveryTracker) shouldDeliver(content string) bool {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" || trimmed == strings.TrimSpace(t.emptyResponse) {
+		t.markSuppressedEmpty()
+		return false
+	}
+	return true
+}
+
+func (t *cronDeliveryTracker) markSuppressedEmpty() {
+	t.mu.Lock()
+	t.suppressedEmpty = true
+	t.mu.Unlock()
+}
+
+func (t *cronDeliveryTracker) markDelivered() {
+	t.mu.Lock()
+	t.delivered++
+	t.mu.Unlock()
+}
+
+func (t *cronDeliveryTracker) deliveredCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.delivered
+}
+
+func (t *cronDeliveryTracker) suppressedEmptyResponse() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.suppressedEmpty
+}
 
 func GenerateCronID() string {
 	b := make([]byte, 4)

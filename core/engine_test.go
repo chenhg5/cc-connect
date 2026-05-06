@@ -170,6 +170,7 @@ func (a *sessionEnvRecordingAgent) EnvValue(key string) string {
 type resultAgentSession struct {
 	events      chan Event
 	result      string
+	inputTokens int
 	sendOnce    sync.Once
 	sentPrompts []string
 }
@@ -184,7 +185,7 @@ func newResultAgentSession(result string) *resultAgentSession {
 func (s *resultAgentSession) Send(prompt string, _ []ImageAttachment, _ []FileAttachment) error {
 	s.sentPrompts = append(s.sentPrompts, prompt)
 	s.sendOnce.Do(func() {
-		s.events <- Event{Type: EventResult, Content: s.result, Done: true}
+		s.events <- Event{Type: EventResult, Content: s.result, Done: true, InputTokens: s.inputTokens}
 	})
 	return nil
 }
@@ -6438,7 +6439,7 @@ func TestReapIdleWorkspaces_SkipsWorkspaceWithActiveTurn(t *testing.T) {
 			UserID:     "user1",
 			Content:    "long running task",
 			ReplyCtx:   "ctx",
-		}, session, e.agent, e.sessions, sessionKey, workspaceDir, sessionKey)
+		}, session, e.agent, e.sessions, sessionKey, workspaceDir, sessionKey, nil)
 		close(done)
 	}()
 
@@ -6491,7 +6492,7 @@ func TestReapIdleWorkspaces_SkipsWorkspaceWaitingForPermission(t *testing.T) {
 			UserID:     "user2",
 			Content:    "needs approval",
 			ReplyCtx:   "ctx",
-		}, session, e.agent, e.sessions, sessionKey, workspaceDir, sessionKey)
+		}, session, e.agent, e.sessions, sessionKey, workspaceDir, sessionKey, nil)
 		close(done)
 	}()
 
@@ -6700,6 +6701,105 @@ func TestProcessInteractiveEvents_DrainsQueuedMessages(t *testing.T) {
 	}
 	if len(userMsgs) < 2 {
 		t.Fatalf("user history entries = %d, want >= 2", len(userMsgs))
+	}
+}
+
+func TestProcessInteractiveEvents_CronDeliveryDoesNotSuppressQueuedTurn(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("qs-cron-queue")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	session := e.sessions.GetOrCreateActive(key)
+	tracker := &cronDeliveryTracker{emptyResponse: e.i18n.T(MsgEmptyResponse)}
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx-turn1",
+		cronDelivery: tracker,
+		pendingMessages: []queuedMessage{
+			{platform: p, replyCtx: "ctx-turn2", content: "queued-msg"},
+		},
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	go func() {
+		sess.events <- Event{Type: EventResult, Content: "response1", Done: true}
+		sess.sendMu.Lock()
+		for len(sess.sendCalls) == 0 {
+			sess.sendMu.Unlock()
+			time.Sleep(5 * time.Millisecond)
+			sess.sendMu.Lock()
+		}
+		sess.sendMu.Unlock()
+		sess.events <- Event{Type: EventResult, Content: "", Done: true}
+	}()
+
+	session.AddHistory("user", "initial-msg")
+	sendDone := make(chan error, 1)
+	sendDone <- nil
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), nil, sendDone, "ctx-turn1")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("processInteractiveEvents did not complete in time")
+	}
+
+	sent := p.getSent()
+	if len(sent) != 2 {
+		t.Fatalf("sent messages = %d, want both turns delivered: %#v", len(sent), sent)
+	}
+	if sent[1] != e.i18n.T(MsgEmptyResponse) {
+		t.Fatalf("queued turn response = %q, want empty-response message", sent[1])
+	}
+	if tracker.deliveredCount() != 1 {
+		t.Fatalf("cron tracker delivered count = %d, want only first turn", tracker.deliveredCount())
+	}
+}
+
+func TestProcessInteractiveEvents_CronDeliveryIgnoresProgressBeforeEmptyFinal(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{ThinkingMessages: false, ThinkingMaxLen: 300, ToolMaxLen: 500, ToolMessages: true})
+
+	key := "test:user-cron-progress"
+	session := e.sessions.GetOrCreateActive(key)
+	agentSession := newControllableSession("s-cron-progress")
+	tracker := &cronDeliveryTracker{emptyResponse: e.i18n.T(MsgEmptyResponse)}
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-cron-progress",
+		cronDelivery: tracker,
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	agentSession.events <- Event{Type: EventText, Content: "pre-tool"}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "echo hi"}
+	agentSession.events <- Event{Type: EventResult, Content: "", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, key, "msg-cron-progress", time.Now(), nil, nil, state.replyCtx)
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("expected progress/segment messages to be sent")
+	}
+	if tracker.deliveredCount() != 0 {
+		t.Fatalf("cron tracker delivered count = %d, want no final delivery", tracker.deliveredCount())
+	}
+	if !tracker.suppressedEmptyResponse() {
+		t.Fatal("expected empty final response to be tracked as suppressed")
 	}
 }
 
@@ -10555,6 +10655,88 @@ func TestExecuteCronJob_ResolvesCronReplyTarget(t *testing.T) {
 
 	if len(agentSession.sentPrompts) != 1 || !strings.Contains(agentSession.sentPrompts[0], "summarize activity") {
 		t.Fatalf("agent prompts = %#v, want prompt containing summarize activity", agentSession.sentPrompts)
+	}
+}
+
+func TestExecuteCronJob_EmptyAgentResponseFails(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatalf("NewCronStore() error = %v", err)
+	}
+	scheduler := NewCronScheduler(store)
+
+	platform := &stubCronReplyTargetPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "discord"},
+	}
+	agentSession := newResultAgentSession("")
+	agent := &resultAgent{session: agentSession}
+
+	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+	e.cronScheduler = scheduler
+
+	job := &CronJob{
+		ID:          "job-empty",
+		SessionKey:  "discord:channel-1:user-1",
+		Prompt:      "summarize activity",
+		Description: "Daily summary",
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatalf("store.Add() error = %v", err)
+	}
+
+	err = e.ExecuteCronJob(job)
+	if err == nil || !strings.Contains(err.Error(), "empty response") {
+		t.Fatalf("ExecuteCronJob() error = %v, want empty response error", err)
+	}
+
+	sent := platform.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("sent messages = %d, want only start notice: %#v", len(sent), sent)
+	}
+	if sent[0] != "⏰ Daily summary" {
+		t.Fatalf("sent[0] = %q, want cron start notice", sent[0])
+	}
+}
+
+func TestExecuteCronJob_EmptyAgentResponseWithContextIndicatorFails(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatalf("NewCronStore() error = %v", err)
+	}
+	scheduler := NewCronScheduler(store)
+
+	platform := &stubCronReplyTargetPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "discord"},
+	}
+	agentSession := newResultAgentSession("")
+	agentSession.inputTokens = 1000
+	agent := &resultAgent{session: agentSession}
+
+	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+	e.cronScheduler = scheduler
+
+	job := &CronJob{
+		ID:          "job-empty-ctx",
+		SessionKey:  "discord:channel-1:user-1",
+		Prompt:      "summarize activity",
+		Description: "Daily summary",
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatalf("store.Add() error = %v", err)
+	}
+
+	err = e.ExecuteCronJob(job)
+	if err == nil || !strings.Contains(err.Error(), "empty response") {
+		t.Fatalf("ExecuteCronJob() error = %v, want empty response error", err)
+	}
+
+	sent := platform.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("sent messages = %d, want only start notice: %#v", len(sent), sent)
 	}
 }
 

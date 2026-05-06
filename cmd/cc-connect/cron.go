@@ -42,6 +42,7 @@ func runCron(args []string) {
 func runCronAdd(args []string) {
 	var project, sessionKey, cronExpr, prompt, execCmd, desc, dataDir, sessionMode string
 	var timeoutMins *int
+	var silent bool
 
 	var positional []string
 	for i := 0; i < len(args); i++ {
@@ -96,6 +97,8 @@ func runCronAdd(args []string) {
 				}
 				timeoutMins = &n
 			}
+		case "--silent":
+			silent = true
 		case "--help", "-h":
 			printCronAddUsage()
 			return
@@ -151,6 +154,9 @@ func runCronAdd(args []string) {
 	}
 	if timeoutMins != nil {
 		body["timeout_mins"] = *timeoutMins
+	}
+	if silent {
+		body["silent"] = true
 	}
 	payload, _ := json.Marshal(body)
 
@@ -452,7 +458,7 @@ func runCronEdit(args []string) {
 	// Parse value based on field type
 	var value any
 	switch field {
-	case "enabled", "mute":
+	case "enabled", "mute", "silent":
 		v, err := strconv.ParseBool(valueStr)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %s must be true or false\n", field)
