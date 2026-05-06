@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -262,6 +263,36 @@ func (p *Platform) webhookHandler(w http.ResponseWriter, r *http.Request) {
 				ReplyCtx: rctx,
 			})
 
+		case webhook.FileMessageContent:
+			if requireMention {
+				slog.Debug("line: skip group file (no @mention concept for files)", "user", userID)
+				continue
+			}
+			ext := strings.ToLower(filepath.Ext(m.FileName))
+			if !isAudioExt(ext) {
+				slog.Debug("line: ignoring non-audio file", "filename", m.FileName, "ext", ext)
+				continue
+			}
+			slog.Debug("line: audio file received", "user", userID, "filename", m.FileName, "size", m.FileSize)
+			audioData, err := p.downloadContent(m.Id)
+			if err != nil {
+				slog.Error("line: download audio file failed", "error", err)
+				continue
+			}
+			format := strings.TrimPrefix(ext, ".")
+			p.handler(p, &core.Message{
+				SessionKey: sessionKey, Platform: "line",
+				MessageID: m.Id,
+				UserID:    userID, UserName: p.resolveUserName(userID),
+				ChatName:  chatName,
+				Audio: &core.AudioAttachment{
+					MimeType: mimeFromAudioExt(ext),
+					Data:     audioData,
+					Format:   format,
+				},
+				ReplyCtx: rctx,
+			})
+
 		default:
 			slog.Debug("line: ignoring unsupported message type")
 		}
@@ -375,14 +406,36 @@ func extractSource(src webhook.SourceInterface) (targetID, targetType, userID st
 
 func (p *Platform) downloadContent(messageID string) ([]byte, error) {
 	url := fmt.Sprintf("https://api-data.line.me/v2/bot/message/%s/content", messageID)
-	req, _ := http.NewRequest("GET", url, nil)
-	req.Header.Set("Authorization", "Bearer "+p.channelToken)
-	resp, err := core.HTTPClient.Do(req)
-	if err != nil {
-		return nil, err
+	// LINE returns 202 for audio/video while transcoding; retry with backoff.
+	var lastStatus int
+	var lastBody []byte
+	for attempt := 0; attempt < 6; attempt++ {
+		req, _ := http.NewRequest("GET", url, nil)
+		req.Header.Set("Authorization", "Bearer "+p.channelToken)
+		resp, err := core.HTTPClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		body, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		if resp.StatusCode == http.StatusOK {
+			if len(body) == 0 {
+				return nil, fmt.Errorf("line: content empty (status 200, message_id=%s)", messageID)
+			}
+			return body, nil
+		}
+		lastStatus = resp.StatusCode
+		lastBody = body
+		if resp.StatusCode == http.StatusAccepted {
+			time.Sleep(time.Duration(500*(attempt+1)) * time.Millisecond)
+			continue
+		}
+		return nil, fmt.Errorf("line: download content status %d: %s", resp.StatusCode, string(body))
 	}
-	defer resp.Body.Close()
-	return io.ReadAll(resp.Body)
+	return nil, fmt.Errorf("line: content not ready after retries (last status %d: %s)", lastStatus, string(lastBody))
 }
 
 func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
@@ -490,6 +543,34 @@ var rule13Patterns = []*regexp.Regexp{
 	regexp.MustCompile(`CDN\s*快取`),
 	regexp.MustCompile(`CloudFront`),
 	regexp.MustCompile(`InsForge`),
+}
+
+// isAudioExt reports whether the file extension (with leading dot, lowercased)
+// is an audio container Grok STT can ingest directly.
+func isAudioExt(ext string) bool {
+	switch ext {
+	case ".ogg", ".oga", ".opus", ".m4a", ".mp3", ".wav", ".aac", ".flac", ".mp4", ".mkv":
+		return true
+	}
+	return false
+}
+
+func mimeFromAudioExt(ext string) string {
+	switch ext {
+	case ".ogg", ".oga", ".opus":
+		return "audio/ogg"
+	case ".m4a", ".aac", ".mp4":
+		return "audio/mp4"
+	case ".mp3":
+		return "audio/mpeg"
+	case ".wav":
+		return "audio/wav"
+	case ".flac":
+		return "audio/flac"
+	case ".mkv":
+		return "audio/x-matroska"
+	}
+	return "application/octet-stream"
 }
 
 func scanRule13Violations(s string) []string {
