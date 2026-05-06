@@ -269,6 +269,13 @@ func TestSendTextGroupPayload(t *testing.T) {
 	if gotPayload["msgtype"] != "text" {
 		t.Fatalf("msgtype = %v", gotPayload["msgtype"])
 	}
+	text, ok := gotPayload["text"].(map[string]any)
+	if !ok {
+		t.Fatalf("text = %#v", gotPayload["text"])
+	}
+	if got := text["content"]; got != "hi @alice" {
+		t.Fatalf("text content = %#v", got)
+	}
 	groups, ok := gotPayload["togroups"].([]any)
 	if !ok || len(groups) != 1 || groups[0] != "g1" {
 		t.Fatalf("togroups = %#v", gotPayload["togroups"])

@@ -63,6 +63,14 @@ type Platform struct {
 	dedup    core.MessageDedup
 }
 
+var (
+	_ core.Platform                      = (*Platform)(nil)
+	_ core.ImageSender                   = (*Platform)(nil)
+	_ core.FileSender                    = (*Platform)(nil)
+	_ core.ReplyContextReconstructor     = (*Platform)(nil)
+	_ core.FormattingInstructionProvider = (*Platform)(nil)
+)
+
 // New creates a TuiTui platform from config options.
 //
 //	[[projects.platforms]]
@@ -204,8 +212,9 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 
 func (p *Platform) FormattingInstructions() string {
 	return `Formatting rules for TuiTui:
-- Plain Markdown is accepted in teams/channel messages.
-- Direct and group chats render plain text most reliably.
+- Plain Markdown is accepted in group text messages and teams/channel messages.
+- For group chats, use standard Markdown in normal text replies; do not ask for
+  page/card messages unless a folded article-style message is explicitly wanted.
 - Keep tables short; prefer concise lists for mobile chat readability.
 
 TuiTui history tools:
