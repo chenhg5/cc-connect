@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -121,6 +122,42 @@ func TestCronJob_MuteField(t *testing.T) {
 	job.Mute = true
 	if !job.Mute {
 		t.Error("should be muted after setting")
+	}
+}
+
+func TestEngine_ExpandCronSkillPrompt(t *testing.T) {
+	dir := t.TempDir()
+	skillDir := filepath.Join(dir, "daily-brief")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("write the daily brief"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	e := NewEngine("test", &stubAgent{}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
+	e.skills.SetDirs([]string{dir})
+
+	got, ok := e.expandCronSkillPrompt("/daily-brief for today")
+	if !ok {
+		t.Fatal("expected cron skill prompt to expand")
+	}
+	if !strings.Contains(got, "## Skill: daily-brief") {
+		t.Fatalf("expanded prompt missing skill name: %q", got)
+	}
+	if !strings.Contains(got, "write the daily brief") {
+		t.Fatalf("expanded prompt missing skill body: %q", got)
+	}
+	if !strings.Contains(got, "for today") {
+		t.Fatalf("expanded prompt missing args: %q", got)
+	}
+
+	plain, ok := e.expandCronSkillPrompt("daily-brief for today")
+	if ok {
+		t.Fatal("non-slash prompt should not expand")
+	}
+	if plain != "daily-brief for today" {
+		t.Fatalf("plain prompt changed: %q", plain)
 	}
 }
 

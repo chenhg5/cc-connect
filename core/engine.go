@@ -308,6 +308,7 @@ type interactiveState struct {
 	pendingProviderAdd     *pendingProviderAddState
 	lastAutoCompressAt     time.Time
 	lastAutoCompressTokens int
+	cronDelivery           *cronDeliveryTracker
 
 	// Unsolicited event reader: a background goroutine that consumes agent
 	// events between user-initiated turns (e.g. background task completions).
@@ -1062,8 +1063,13 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 
 	// Wrap platform to discard all outgoing messages when muted
 	effectivePlatform := targetPlatform
+	var deliveryTracker *cronDeliveryTracker
 	if job.Mute {
 		effectivePlatform = &mutePlatform{targetPlatform}
+	} else {
+		deliveryTracker = &cronDeliveryTracker{
+			emptyResponse: e.i18n.T(MsgEmptyResponse),
+		}
 	}
 
 	// Notify user that a cron job is executing (unless silent/muted)
@@ -1089,12 +1095,17 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		return e.executeCronShell(effectivePlatform, replyCtx, job)
 	}
 
+	prompt := job.Prompt
+	if expanded, ok := e.expandCronSkillPrompt(prompt); ok {
+		prompt = expanded
+	}
+
 	msg := &Message{
 		SessionKey:   sessionKey,
 		Platform:     platformName,
 		UserID:       "cron",
 		UserName:     "cron",
-		Content:      job.Prompt,
+		Content:      prompt,
 		ReplyCtx:     replyCtx,
 		ModeOverride: job.Mode,
 	}
@@ -1149,9 +1160,9 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		if workspaceDir != "" {
 			iKey = workspaceDir + ":" + iKey
 		}
-		e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, runSessionKey)
+		e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, runSessionKey, deliveryTracker)
 		e.cleanupInteractiveState(iKey)
-		return nil
+		return e.checkCronDelivery(job, deliveryTracker)
 	}
 
 	session := sessions.GetOrCreateActive(sessionKey)
@@ -1163,8 +1174,42 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 	if workspaceDir != "" {
 		iKey = workspaceDir + ":" + sessionKey
 	}
-	e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, sessionKey)
-	return nil
+	e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, sessionKey, deliveryTracker)
+	return e.checkCronDelivery(job, deliveryTracker)
+}
+
+func (e *Engine) checkCronDelivery(job *CronJob, tracker *cronDeliveryTracker) error {
+	if job == nil || job.Mute || tracker == nil {
+		return nil
+	}
+	if tracker.deliveredCount() > 0 {
+		return nil
+	}
+	if tracker.suppressedEmptyResponse() {
+		return fmt.Errorf("cron produced an empty response")
+	}
+	return fmt.Errorf("cron completed without sending a response")
+}
+
+func (e *Engine) expandCronSkillPrompt(raw string) (string, bool) {
+	content := strings.TrimSpace(raw)
+	if content == "" || !strings.HasPrefix(content, "/") {
+		return raw, false
+	}
+
+	parts := strings.Fields(content)
+	if len(parts) == 0 {
+		return raw, false
+	}
+	cmd := strings.TrimPrefix(parts[0], "/")
+	if cmd == "" {
+		return raw, false
+	}
+	skill := e.skills.Resolve(cmd)
+	if skill == nil {
+		return raw, false
+	}
+	return BuildSkillInvocationPrompt(skill, parts[1:]), true
 }
 
 func cronRunTitle(job *CronJob) string {
@@ -2077,7 +2122,7 @@ sessionLocked:
 		"session", session.ID,
 	)
 
-	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, resolvedWorkspace, msg.SessionKey)
+	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, resolvedWorkspace, msg.SessionKey, nil)
 }
 
 func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions *SessionManager, interactiveKey string, session *Session) *Session {
@@ -2489,14 +2534,14 @@ func isDenyResponse(s string) bool {
 // ──────────────────────────────────────────────────────────────
 
 func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Session) {
-	e.processInteractiveMessageWith(p, msg, session, e.agent, e.sessions, msg.SessionKey, "", "")
+	e.processInteractiveMessageWith(p, msg, session, e.agent, e.sessions, msg.SessionKey, "", "", nil)
 }
 
 // processInteractiveMessageWith is the core interactive processing loop.
 // It accepts an explicit agent, interactiveKey (for the interactiveStates map),
 // and workspaceDir so that multi-workspace mode can route to per-workspace agents.
 // ccSessionKey, when non-empty, is used for CC_SESSION_KEY in the agent env; otherwise interactiveKey is used.
-func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session *Session, agent Agent, sessions *SessionManager, interactiveKey string, workspaceDir string, ccSessionKey string) {
+func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session *Session, agent Agent, sessions *SessionManager, interactiveKey string, workspaceDir string, ccSessionKey string, cronDelivery *cronDeliveryTracker) {
 	// session.Unlock() is NOT deferred here — it is called explicitly in
 	// the drain loop below while holding state.mu to close the race window
 	// between "queue is empty" and "session unlocked". A deferred fallback
@@ -2536,7 +2581,15 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.platform = p
 	state.replyCtx = msg.ReplyCtx
 	state.currentMessageID = msg.MessageID
+	state.cronDelivery = cronDelivery
 	state.mu.Unlock()
+	defer func() {
+		state.mu.Lock()
+		if state.cronDelivery == cronDelivery {
+			state.cronDelivery = nil
+		}
+		state.mu.Unlock()
+	}()
 	stopRecallMonitor := e.startMessageRecallMonitor(interactiveKey)
 	defer stopRecallMonitor()
 
@@ -3278,23 +3331,23 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				if autoApprove {
 					result = PermissionResult{Behavior: "allow", UpdatedInput: event.ToolInputRaw}
 				}
-			reqID := event.RequestID
-			respondCtx := ctx // capture current unsolicited reader context
-			go func() {
-				// Run in a goroutine to keep reader iterations fast, but honour
-				// the reader's context so we don't call into a dead session after
-				// stopUnsolicitedReader cancels the context.
-				select {
-				case <-respondCtx.Done():
-					return
-				default:
-				}
-				if err := agentSession.RespondPermission(reqID, result); err != nil {
-					if respondCtx.Err() == nil {
-						slog.Error("unsolicited: failed to respond permission", "error", err)
+				reqID := event.RequestID
+				respondCtx := ctx // capture current unsolicited reader context
+				go func() {
+					// Run in a goroutine to keep reader iterations fast, but honour
+					// the reader's context so we don't call into a dead session after
+					// stopUnsolicitedReader cancels the context.
+					select {
+					case <-respondCtx.Done():
+						return
+					default:
 					}
-				}
-			}()
+					if err := agentSession.RespondPermission(reqID, result); err != nil {
+						if respondCtx.Err() == nil {
+							slog.Error("unsolicited: failed to respond permission", "error", err)
+						}
+					}
+				}()
 				if !autoApprove {
 					toolName := event.ToolName
 					if toolName == "" {
@@ -3372,10 +3425,29 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		return e.renderOutgoingContentForWorkspace(state.platform, content, workspaceDir)
 	}
 	sendWorkspace := func(p Platform, replyCtx any, content string) {
+		state.mu.Lock()
+		tracker := state.cronDelivery
+		state.mu.Unlock()
+		if tracker != nil && !tracker.shouldDeliver(content) {
+			return
+		}
 		e.sendForWorkspace(p, replyCtx, content, workspaceDir)
+		if tracker != nil {
+			tracker.markDelivered()
+		}
 	}
 	sendWorkspaceWithError := func(p Platform, replyCtx any, content string) error {
-		return e.sendWithErrorForWorkspace(p, replyCtx, content, workspaceDir)
+		state.mu.Lock()
+		tracker := state.cronDelivery
+		state.mu.Unlock()
+		if tracker != nil && !tracker.shouldDeliver(content) {
+			return nil
+		}
+		err := e.sendWithErrorForWorkspace(p, replyCtx, content, workspaceDir)
+		if err == nil && tracker != nil {
+			tracker.markDelivered()
+		}
+		return err
 	}
 	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
 	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer)
@@ -3886,6 +3958,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if fullResponse == "" {
 				fullResponse = e.i18n.T(MsgEmptyResponse)
 			}
+			emptyAgentResponse := strings.TrimSpace(fullResponse) == strings.TrimSpace(e.i18n.T(MsgEmptyResponse))
 
 			// Context usage indicator: prefer SDK tokens, fall back to self-reported.
 			sdkPlausible := event.InputTokens >= 100
@@ -3996,6 +4069,20 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					cardMessageID = nil
 				}
 				slog.Info("silent reply suppressed", "session", session.ID)
+			} else if emptyAgentResponse {
+				sp.discard()
+				state.mu.Lock()
+				tracker := state.cronDelivery
+				state.mu.Unlock()
+				if tracker != nil {
+					tracker.markSuppressedEmpty()
+				} else {
+					for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
+						if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
+							return
+						}
+					}
+				}
 			} else if hasRichCard {
 				parts := []string{fullResponse}
 				if splitter, ok := p.(MarkdownTableSplitter); ok {
@@ -4024,6 +4111,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						slog.Error("failed to send overflow rich card", "error", err)
 						return
 					}
+				}
+				state.mu.Lock()
+				tracker := state.cronDelivery
+				state.mu.Unlock()
+				if tracker != nil {
+					tracker.markDelivered()
 				}
 			} else if toolCount > 0 && segmentStart > 0 {
 				// When tool calls happened and prior text was already surfaced in segments,
@@ -4062,6 +4155,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if elapsed := time.Since(replyStart); elapsed >= slowPlatformSend {
 				slog.Warn("slow final reply send", "platform", p.Name(), "elapsed", elapsed, "response_len", len(fullResponse))
 			}
+			state.mu.Lock()
+			state.cronDelivery = nil
+			state.mu.Unlock()
 
 			// TTS: async voice reply if enabled (skipped for silent replies)
 			if !isSilent && e.tts != nil && e.tts.Enabled && e.tts.TTS != nil {
@@ -11299,7 +11395,7 @@ func (e *Engine) executeCustomCommand(p Platform, msg *Message, cmd *CustomComma
 	)
 
 	msg.Content = prompt
-	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, workspaceDir, msg.SessionKey)
+	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, workspaceDir, msg.SessionKey, nil)
 }
 
 // executeShellCommand runs a shell command and sends the output to the user.
@@ -11522,7 +11618,7 @@ func (e *Engine) executeSkill(p Platform, msg *Message, skill *Skill, args []str
 	)
 
 	msg.Content = prompt
-	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, workspaceDir, msg.SessionKey)
+	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, workspaceDir, msg.SessionKey, nil)
 }
 
 func (e *Engine) cmdSkills(p Platform, msg *Message) {
