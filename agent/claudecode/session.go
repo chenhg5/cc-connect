@@ -590,6 +590,21 @@ func (cs *claudeSession) Send(prompt string, images []core.ImageAttachment, file
 	})
 }
 
+// Steer appends additional guidance to the current in-flight Claude task.
+// We map this to a normal user message on the same live session with
+// priority=next, which matches Claude's native queue semantics for
+// "process after the current step/tool boundary but before the next turn".
+func (cs *claudeSession) Steer(prompt string) error {
+	if !cs.alive.Load() {
+		return fmt.Errorf("session process is not running")
+	}
+	return cs.writeJSON(map[string]any{
+		"type":     "user",
+		"priority": "next",
+		"message":  map[string]any{"role": "user", "content": prompt},
+	})
+}
+
 func extFromMime(mime string) string {
 	switch mime {
 	case "image/jpeg":
@@ -746,7 +761,7 @@ func (cs *claudeSession) Close() error {
 // Uses single quotes because some splitters (e.g. my_cli) don't support
 // backslash escapes inside double quotes. For values containing single
 // quotes, we close the single-quoted segment, add an escaped single
-// quote, and reopen: 'it'\”s' → it's
+// quote, and reopen: 'it'\”s' -> it's
 func shellJoinArgs(args []string) string {
 	var b strings.Builder
 	for i, a := range args {

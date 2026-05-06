@@ -13,7 +13,7 @@ func TestBridgeBuildCapabilitiesSnapshotIncludesProjectCatalog(t *testing.T) {
 		CurrentBuildTime = prevBuildTime
 	}()
 
-	bs := NewBridgeServer(0, "", "/bridge/ws", nil)
+	bs := NewBridgeServer(0, "test-token", "/bridge/ws", nil)
 	bp := bs.NewPlatform("test-proj")
 	e := NewEngine("test-proj", &stubAgent{}, []Platform{bp}, "", LangEnglish)
 	e.AddCommand("deploy", "Deploy app", "ship it", "", "", "config")

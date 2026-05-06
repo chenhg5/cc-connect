@@ -1,8 +1,11 @@
 package codex
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"sync"
 	"testing"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -161,6 +164,93 @@ func TestMapAppServerRateLimits_PrefersMultiBucketView(t *testing.T) {
 		t.Fatalf("second bucket = %q, want codex_other", report.Buckets[1].Name)
 	}
 }
+
+func TestAppServerSessionSteer_RequiresActiveTurn(t *testing.T) {
+	s := &appServerSession{
+		ctx:     context.Background(),
+		pending: make(map[int64]chan rpcResponseEnvelope),
+	}
+	s.alive.Store(true)
+	s.threadID.Store("thread-1")
+
+	err := s.Steer("focus on failing tests first")
+	if err == nil || err.Error() != "codex app-server has no active turn to steer" {
+		t.Fatalf("Steer() error = %v, want no active turn error", err)
+	}
+}
+
+func TestAppServerSessionSteer_RequestShape(t *testing.T) {
+	var buf bytes.Buffer
+	s := &appServerSession{
+		ctx:     context.Background(),
+		stdin:   nopAppServerWriteCloser{Writer: &buf},
+		pending: make(map[int64]chan rpcResponseEnvelope),
+	}
+	s.alive.Store(true)
+	s.threadID.Store("thread-1")
+	s.currentTurn = "turn-1"
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			s.pendingMu.Lock()
+			ch := s.pending[1]
+			s.pendingMu.Unlock()
+			if ch != nil {
+				ch <- rpcResponseEnvelope{ID: int64(1), Result: json.RawMessage(`{"turnId":"turn-1"}`)}
+				return
+			}
+		}
+	}()
+
+	if err := s.Steer("focus on failing tests first"); err != nil {
+		t.Fatalf("Steer() error = %v", err)
+	}
+	wg.Wait()
+
+	var payload map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &payload); err != nil {
+		t.Fatalf("decode steer payload: %v", err)
+	}
+
+	if got := payload["method"]; got != "turn/steer" {
+		t.Fatalf("method = %#v, want turn/steer", got)
+	}
+
+	params, ok := payload["params"].(map[string]any)
+	if !ok {
+		t.Fatalf("params = %#v, want object", payload["params"])
+	}
+	if got := params["threadId"]; got != "thread-1" {
+		t.Fatalf("threadId = %#v, want thread-1", got)
+	}
+	if got := params["expectedTurnId"]; got != "turn-1" {
+		t.Fatalf("expectedTurnId = %#v, want turn-1", got)
+	}
+
+	input, ok := params["input"].([]any)
+	if !ok || len(input) != 1 {
+		t.Fatalf("input = %#v, want single-element array", params["input"])
+	}
+	item, ok := input[0].(map[string]any)
+	if !ok {
+		t.Fatalf("input[0] = %#v, want object", input[0])
+	}
+	if got := item["type"]; got != "text" {
+		t.Fatalf("input[0].type = %#v, want text", got)
+	}
+	if got := item["text"]; got != "focus on failing tests first" {
+		t.Fatalf("input[0].text = %#v, want steer text", got)
+	}
+}
+
+type nopAppServerWriteCloser struct {
+	io.Writer
+}
+
+func (nopAppServerWriteCloser) Close() error { return nil }
 
 var _ interface {
 	GetUsage(context.Context) (*core.UsageReport, error)
