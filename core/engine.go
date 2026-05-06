@@ -3425,18 +3425,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		return e.renderOutgoingContentForWorkspace(state.platform, content, workspaceDir)
 	}
 	sendWorkspace := func(p Platform, replyCtx any, content string) {
-		state.mu.Lock()
-		tracker := state.cronDelivery
-		state.mu.Unlock()
-		if tracker != nil && !tracker.shouldDeliver(content) {
-			return
-		}
 		e.sendForWorkspace(p, replyCtx, content, workspaceDir)
-		if tracker != nil {
-			tracker.markDelivered()
-		}
 	}
 	sendWorkspaceWithError := func(p Platform, replyCtx any, content string) error {
+		return e.sendWithErrorForWorkspace(p, replyCtx, content, workspaceDir)
+	}
+	sendFinalWorkspaceWithError := func(p Platform, replyCtx any, content string) error {
 		state.mu.Lock()
 		tracker := state.cronDelivery
 		state.mu.Unlock()
@@ -4123,21 +4117,31 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// only send the unsent remainder. When tool progress is hidden, tool events don't surface
 				// side-channel messages and segmentStart stays 0, so keep normal finalize flow.
 				sp.discard()
+				deliveredFinal := false
 				if segmentStart < len(textParts) {
 					unsent := strings.Join(textParts[segmentStart:], "")
 					if unsent != "" {
 						for _, chunk := range splitMessage(unsent, maxPlatformMessageLen) {
-							if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
+							if err := sendFinalWorkspaceWithError(p, replyCtx, chunk); err != nil {
 								return
 							}
+							deliveredFinal = true
 						}
+					}
+				}
+				if !deliveredFinal {
+					state.mu.Lock()
+					tracker := state.cronDelivery
+					state.mu.Unlock()
+					if tracker != nil {
+						tracker.markSuppressedEmpty()
 					}
 				}
 			} else if suppressDuplicate {
 				sp.discard()
 				if metaOnly := strings.TrimSpace(strings.TrimPrefix(fullResponse, baseResponse)); metaOnly != "" {
 					for _, chunk := range splitMessage(metaOnly, maxPlatformMessageLen) {
-						if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
+						if err := sendFinalWorkspaceWithError(p, replyCtx, chunk); err != nil {
 							return
 						}
 					}
@@ -4146,7 +4150,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			} else {
 				slog.Debug("EventResult: sending via p.Send (preview inactive or failed)", "response_len", len(fullResponse), "chunks", len(splitMessage(fullResponse, maxPlatformMessageLen)))
 				for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
-					if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
+					if err := sendFinalWorkspaceWithError(p, replyCtx, chunk); err != nil {
 						return
 					}
 				}
@@ -4390,19 +4394,29 @@ channelClosed:
 
 		if toolCount > 0 && segmentStart > 0 {
 			sp.discard()
+			deliveredFinal := false
 			if segmentStart < len(textParts) {
 				unsent := strings.Join(textParts[segmentStart:], "")
 				if unsent != "" {
 					for _, chunk := range splitMessage(unsent, maxPlatformMessageLen) {
-						if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
+						if err := sendFinalWorkspaceWithError(p, replyCtx, chunk); err != nil {
 							return
 						}
+						deliveredFinal = true
 					}
+				}
+			}
+			if !deliveredFinal {
+				state.mu.Lock()
+				tracker := state.cronDelivery
+				state.mu.Unlock()
+				if tracker != nil {
+					tracker.markSuppressedEmpty()
 				}
 			}
 		} else {
 			for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
-				if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
+				if err := sendFinalWorkspaceWithError(p, replyCtx, chunk); err != nil {
 					return
 				}
 			}

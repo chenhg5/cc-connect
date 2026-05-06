@@ -6766,6 +6766,43 @@ func TestProcessInteractiveEvents_CronDeliveryDoesNotSuppressQueuedTurn(t *testi
 	}
 }
 
+func TestProcessInteractiveEvents_CronDeliveryIgnoresProgressBeforeEmptyFinal(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{ThinkingMessages: false, ThinkingMaxLen: 300, ToolMaxLen: 500, ToolMessages: true})
+
+	key := "test:user-cron-progress"
+	session := e.sessions.GetOrCreateActive(key)
+	agentSession := newControllableSession("s-cron-progress")
+	tracker := &cronDeliveryTracker{emptyResponse: e.i18n.T(MsgEmptyResponse)}
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-cron-progress",
+		cronDelivery: tracker,
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	agentSession.events <- Event{Type: EventText, Content: "pre-tool"}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "echo hi"}
+	agentSession.events <- Event{Type: EventResult, Content: "", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, key, "msg-cron-progress", time.Now(), nil, nil, state.replyCtx)
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("expected progress/segment messages to be sent")
+	}
+	if tracker.deliveredCount() != 0 {
+		t.Fatalf("cron tracker delivered count = %d, want no final delivery", tracker.deliveredCount())
+	}
+	if !tracker.suppressedEmptyResponse() {
+		t.Fatal("expected empty final response to be tracked as suppressed")
+	}
+}
+
 // replyCtxRecordingPlatform records (replyCtx, content) for each Send/Reply
 // so tests can assert which trigger context was used for which message.
 type replyCtxRecordingPlatform struct {
