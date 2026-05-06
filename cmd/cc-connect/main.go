@@ -30,6 +30,29 @@ var (
 	buildTime = "unknown"
 )
 
+// defaultResetOnIdleMins is applied when a project does not set
+// reset_on_idle_mins. After this many minutes of user inactivity, cc-connect
+// rotates to a fresh session for the next message instead of resuming the
+// previous transcript via --continue. This avoids "context drift" where stale
+// chat history (failed commands, debugging noise, abandoned tangents) is
+// repeatedly re-ingested and starts to dominate the model's attention. The
+// previous session is preserved and remains accessible via /list and /switch.
+//
+// Set reset_on_idle_mins = 0 in config.toml to opt out and restore the
+// previous behavior of always continuing the prior session.
+const defaultResetOnIdleMins = 30
+
+// resolveResetOnIdle returns the configured reset-on-idle duration for a
+// project, applying defaultResetOnIdleMins when the field is unset. The second
+// return value indicates whether the default was applied, so the caller can
+// emit a one-time nudge log directing users to the docs.
+func resolveResetOnIdle(configured *int) (time.Duration, bool) {
+	if configured != nil {
+		return time.Duration(*configured) * time.Minute, false
+	}
+	return time.Duration(defaultResetOnIdleMins) * time.Minute, true
+}
+
 type initialModelRefreshStarter interface {
 	StartInitialModelRefresh()
 }
@@ -87,6 +110,9 @@ func main() {
 			return
 		case "doctor":
 			runDoctor(os.Args[2:])
+			return
+		case "web":
+			runWeb(os.Args[2:])
 			return
 		}
 	}
@@ -165,6 +191,13 @@ func main() {
 
 	config.ConfigPath = configPath
 	slog.Info("config loaded", "path", configPath)
+
+	if len(cfg.Projects) == 0 {
+		fmt.Fprintf(os.Stderr, "Error: no projects configured in %s\n", configPath)
+		fmt.Fprintln(os.Stderr, "Add at least one [[project]] section to your config.toml, or run:")
+		fmt.Fprintln(os.Stderr, "  cc-connect init")
+		os.Exit(1)
+	}
 
 	setupLogger(cfg.Log.Level, logWriter)
 
@@ -252,6 +285,7 @@ func main() {
 		}
 		engine.SetReplyFooterEnabled(showFooter)
 		engine.SetAttachmentSendEnabled(cfg.AttachmentSend != "off")
+		engine.SetFilterExternalSessions(proj.FilterExternalSessions != nil && *proj.FilterExternalSessions)
 		engine.SetBaseWorkDir(workDir)
 		engine.SetProjectStateStore(projectState)
 
@@ -268,6 +302,20 @@ func main() {
 			}
 			bindingStore := filepath.Join(cfg.DataDir, "workspace_bindings.json")
 			engine.SetMultiWorkspace(baseDir, bindingStore)
+			idleMins := cfg.WorkspaceIdleTimeoutMins
+			if idleMins == nil && proj.WorkspaceIdleTimeoutMinsLegacy != nil {
+				slog.Warn("workspace_idle_timeout_mins under [[projects]] is deprecated; move it to the top level of config.toml. Honoring the legacy value for backwards compatibility.",
+					"project", proj.Name, "value", *proj.WorkspaceIdleTimeoutMinsLegacy)
+				idleMins = proj.WorkspaceIdleTimeoutMinsLegacy
+			}
+			if idleMins != nil {
+				mins := *idleMins
+				if mins <= 0 {
+					engine.SetWorkspaceIdleTimeout(0)
+				} else {
+					engine.SetWorkspaceIdleTimeout(time.Duration(mins) * time.Minute)
+				}
+			}
 			slog.Info("multi-workspace mode enabled", "project", proj.Name, "base_dir", baseDir)
 		}
 
@@ -351,13 +399,31 @@ func main() {
 
 		// Wire display truncation settings (includes legacy quiet → display mapping)
 		{
-			tm, tool, tmlen, toollen := config.EffectiveDisplay(cfg, &proj)
+			mode, tm, tool, tmlen, toollen := config.EffectiveDisplay(cfg, &proj)
 			engine.SetDisplayConfig(core.DisplayCfg{
+				Mode:             mode,
+				CardMode:         config.EffectiveCardMode(cfg, &proj),
 				ThinkingMessages: tm,
 				ThinkingMaxLen:   tmlen,
 				ToolMaxLen:       toollen,
 				ToolMessages:     tool,
 			})
+		}
+
+		// Wire hooks
+		if len(cfg.Hooks) > 0 {
+			coreHooks := make([]core.HookConfig, len(cfg.Hooks))
+			for i, h := range cfg.Hooks {
+				coreHooks[i] = core.HookConfig{
+					Event:   h.Event,
+					Type:    h.Type,
+					Command: h.Command,
+					URL:     h.URL,
+					Timeout: h.Timeout,
+					Async:   h.Async,
+				}
+			}
+			engine.SetHooks(core.NewHookManager(proj.Name, coreHooks))
 		}
 
 		// Wire local reference normalization / rendering
@@ -435,8 +501,8 @@ func main() {
 			}
 		}
 
-		engine.SetDisplaySaveFunc(func(thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
-			return config.SaveDisplayConfig(thinkingMessages, thinkingMaxLen, toolMaxLen, toolMessages)
+		engine.SetDisplaySaveFunc(func(mode *string, thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
+			return config.SaveDisplayConfig(mode, thinkingMessages, thinkingMaxLen, toolMaxLen, toolMessages)
 		})
 
 		// Wire idle timeout
@@ -447,6 +513,11 @@ func main() {
 			} else {
 				engine.SetEventIdleTimeout(time.Duration(mins) * time.Minute)
 			}
+		}
+
+		// Wire queue depth
+		if cfg.Queue.MaxDepth != nil && *cfg.Queue.MaxDepth > 0 {
+			engine.SetMaxQueuedMessages(*cfg.Queue.MaxDepth)
 		}
 
 		// Wire auto-compress settings
@@ -461,8 +532,11 @@ func main() {
 			}
 			engine.SetAutoCompressConfig(true, maxTokens, minGap)
 		}
-		if proj.ResetOnIdleMins != nil {
-			engine.SetResetOnIdle(time.Duration(*proj.ResetOnIdleMins) * time.Minute)
+		resetIdle, defaulted := resolveResetOnIdle(proj.ResetOnIdleMins)
+		engine.SetResetOnIdle(resetIdle)
+		if defaulted {
+			slog.Info("project: reset_on_idle_mins not set, applying default — set reset_on_idle_mins = 0 to opt out, see docs/usage.md",
+				"project", proj.Name, "default_minutes", defaultResetOnIdleMins)
 		}
 
 		// Wire sender injection
@@ -613,16 +687,39 @@ func main() {
 			return config.SaveActiveProvider(projName, providerName)
 		})
 		engine.SetProviderAddSaveFunc(func(p core.ProviderConfig) error {
-			return config.AddProviderToConfig(projName, config.ProviderConfig{
+			cp := config.ProviderConfig{
 				Name: p.Name, APIKey: p.APIKey, BaseURL: p.BaseURL,
 				Model: p.Model, Models: convertCoreModels(p.Models), Thinking: p.Thinking, Env: p.Env,
-			})
+			}
+			if p.CodexWireAPI != "" || len(p.CodexHTTPHeaders) > 0 {
+				cp.Codex = &config.CodexProviderConfig{
+					WireAPI: p.CodexWireAPI, HTTPHeaders: p.CodexHTTPHeaders,
+				}
+			}
+			return config.AddProviderToConfig(projName, cp)
 		})
 		engine.SetProviderRemoveSaveFunc(func(name string) error {
 			return config.RemoveProviderFromConfig(projName, name)
 		})
 		engine.SetProviderModelSaveFunc(func(providerName, model string) error {
 			return config.SaveProviderModel(projName, providerName, model)
+		})
+		engine.SetProviderRefsSaveFunc(func(refs []string) error {
+			return config.SaveProviderRefs(projName, refs)
+		})
+		engine.SetListGlobalProvidersFunc(func(agentType string) ([]core.ProviderConfig, error) {
+			globals, err := config.ListGlobalProviders()
+			if err != nil {
+				return nil, err
+			}
+			var result []core.ProviderConfig
+			for _, g := range globals {
+				if len(g.AgentTypes) > 0 && !containsString(g.AgentTypes, agentType) {
+					continue
+				}
+				result = append(result, configProviderToCore(g.ResolveForAgent(agentType)))
+			}
+			return result, nil
 		})
 		engine.SetModelSaveFunc(func(model string) error {
 			return config.SaveAgentModel(projName, model)
@@ -722,7 +819,17 @@ func main() {
 		if path == "" {
 			path = "/bridge/ws"
 		}
-		bridgeSrv = core.NewBridgeServer(port, cfg.Bridge.Token, path, cfg.Bridge.CORSOrigins)
+		// Check insecure flag for local development mode
+		insecure := cfg.Bridge.Insecure != nil && *cfg.Bridge.Insecure
+		if insecure {
+			bridgeSrv = core.NewBridgeServerInsecure(port, cfg.Bridge.Token, path, cfg.Bridge.CORSOrigins)
+		} else {
+			bridgeSrv = core.NewBridgeServer(port, cfg.Bridge.Token, path, cfg.Bridge.CORSOrigins)
+		}
+		if bridgeSrv == nil {
+			slog.Error("bridge: failed to create server - token is required (or set insecure=true for local dev)")
+			os.Exit(1)
+		}
 		for i, e := range engines {
 			bp := bridgeSrv.NewPlatform(cfg.Projects[i].Name)
 			bridgeSrv.RegisterEngine(cfg.Projects[i].Name, e, bp)
@@ -824,7 +931,10 @@ func main() {
 				DisabledCommands:     u.DisabledCommands,
 				WorkDir:              u.WorkDir,
 				Mode:                 u.Mode,
+				AgentType:            u.AgentType,
 				ShowContextIndicator: u.ShowContextIndicator,
+				ReplyFooter:          u.ReplyFooter,
+				InjectSender:         u.InjectSender,
 				PlatformAllowFrom:    u.PlatformAllowFrom,
 			})
 		})
@@ -899,9 +1009,11 @@ func main() {
 			return config.RemoveGlobalProvider(name)
 		})
 		mgmtSrv.SetFetchPresets(core.FetchProviderPresets)
+		mgmtSrv.SetFetchSkillPresets(core.FetchSkillPresets)
 		if cfg.ProviderPresetsURL != "" {
 			core.SetPresetsURL(cfg.ProviderPresetsURL)
 		}
+		mgmtSrv.SetListCCSwitchProviders(listCCSwitchProvidersForWeb)
 		mgmtSrv.Start()
 	}
 
@@ -1203,7 +1315,7 @@ Flags:
   --help             Show this help message
 
 Commands:
-  daemon             Manage cc-connect as a background service (systemd/launchd)
+  daemon             Manage cc-connect as a background service (systemd/launchd/schtasks)
     install          Install and start the daemon service
     uninstall        Remove the daemon service
     start            Start the daemon
@@ -1313,8 +1425,10 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	}
 
 	// Reload display config (includes legacy quiet → display mapping)
-	tm, tool, tmlen, toollen := config.EffectiveDisplay(cfg, proj)
+	mode, tm, tool, tmlen, toollen := config.EffectiveDisplay(cfg, proj)
 	engine.SetDisplayConfig(core.DisplayCfg{
+		Mode:             mode,
+		CardMode:         config.EffectiveCardMode(cfg, proj),
 		ThinkingMessages: tm,
 		ThinkingMaxLen:   tmlen,
 		ToolMaxLen:       toollen,
@@ -1336,10 +1450,11 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	} else {
 		engine.SetAutoCompressConfig(false, 0, 0)
 	}
-	if proj.ResetOnIdleMins != nil {
-		engine.SetResetOnIdle(time.Duration(*proj.ResetOnIdleMins) * time.Minute)
-	} else {
-		engine.SetResetOnIdle(0)
+	resetIdle, defaulted := resolveResetOnIdle(proj.ResetOnIdleMins)
+	engine.SetResetOnIdle(resetIdle)
+	if defaulted {
+		slog.Info("project: reset_on_idle_mins not set, applying default — set reset_on_idle_mins = 0 to opt out, see docs/usage.md",
+			"project", proj.Name, "default_minutes", defaultResetOnIdleMins)
 	}
 
 	showCtx := true
@@ -1359,14 +1474,14 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	// Reload attachment send-back switch
 	engine.SetAttachmentSendEnabled(cfg.AttachmentSend != "off")
 
+	// Reload filter_external_sessions
+	engine.SetFilterExternalSessions(proj.FilterExternalSessions != nil && *proj.FilterExternalSessions)
+
 	// Reload providers
 	if ps, ok := engine.GetAgent().(core.ProviderSwitcher); ok {
 		providers := make([]core.ProviderConfig, len(proj.Agent.Providers))
 		for i, p := range proj.Agent.Providers {
-			providers[i] = core.ProviderConfig{
-				Name: p.Name, APIKey: p.APIKey, BaseURL: p.BaseURL,
-				Model: p.Model, Models: convertProviderModels(p.Models), Thinking: p.Thinking, Env: p.Env,
-			}
+			providers[i] = configProviderToCore(p)
 		}
 		ps.SetProviders(providers)
 		result.ProvidersUpdated = len(providers)
@@ -1442,6 +1557,19 @@ func buildUserRoleManager(uc *config.UsersConfig) *core.UserRoleManager {
 	return urm
 }
 
+func configProviderToCore(p config.ProviderConfig) core.ProviderConfig {
+	c := core.ProviderConfig{
+		Name: p.Name, APIKey: p.APIKey, BaseURL: p.BaseURL,
+		Model: p.Model, Models: convertProviderModels(p.Models),
+		Thinking: p.Thinking, Env: p.Env,
+	}
+	if p.Codex != nil {
+		c.CodexWireAPI = p.Codex.WireAPI
+		c.CodexHTTPHeaders = p.Codex.HTTPHeaders
+	}
+	return c
+}
+
 func convertProviderModels(ms []config.ProviderModelConfig) []core.ModelOption {
 	if len(ms) == 0 {
 		return nil
@@ -1475,15 +1603,7 @@ func wireAgentProviders(agent core.Agent, agentCfg config.AgentConfig) providerW
 
 	providers := make([]core.ProviderConfig, len(agentCfg.Providers))
 	for i, p := range agentCfg.Providers {
-		providers[i] = core.ProviderConfig{
-			Name:     p.Name,
-			APIKey:   p.APIKey,
-			BaseURL:  p.BaseURL,
-			Model:    p.Model,
-			Models:   convertProviderModels(p.Models),
-			Thinking: p.Thinking,
-			Env:      p.Env,
-		}
+		providers[i] = configProviderToCore(p)
 	}
 	ps.SetProviders(providers)
 	if result.explicitProviderRequested {
@@ -1504,13 +1624,15 @@ func startInitialRefreshIfReady(agent core.Agent, result providerWiringResult) {
 
 func configProviderToGlobal(p config.ProviderConfig) core.GlobalProviderInfo {
 	info := core.GlobalProviderInfo{
-		Name:       p.Name,
-		APIKey:     p.APIKey,
-		BaseURL:    p.BaseURL,
-		Model:      p.Model,
-		Thinking:   p.Thinking,
-		Env:        p.Env,
-		AgentTypes: p.AgentTypes,
+		Name:        p.Name,
+		APIKey:      p.APIKey,
+		BaseURL:     p.BaseURL,
+		Model:       p.Model,
+		Thinking:    p.Thinking,
+		Env:         p.Env,
+		AgentTypes:  p.AgentTypes,
+		Endpoints:   p.Endpoints,
+		AgentModels: p.AgentModels,
 	}
 	for _, m := range p.Models {
 		info.Models = append(info.Models, struct {
@@ -1518,21 +1640,55 @@ func configProviderToGlobal(p config.ProviderConfig) core.GlobalProviderInfo {
 			Alias string `json:"alias,omitempty"`
 		}{Model: m.Model, Alias: m.Alias})
 	}
+	if len(p.AgentModelLists) > 0 {
+		info.AgentModelLists = make(map[string][]core.GlobalModelEntry, len(p.AgentModelLists))
+		for at, ml := range p.AgentModelLists {
+			entries := make([]core.GlobalModelEntry, len(ml))
+			for i, m := range ml {
+				entries[i] = core.GlobalModelEntry{Model: m.Model, Alias: m.Alias}
+			}
+			info.AgentModelLists[at] = entries
+		}
+	}
+	if p.Codex != nil {
+		info.Codex = &core.GlobalCodexConfig{
+			WireAPI:     p.Codex.WireAPI,
+			HTTPHeaders: p.Codex.HTTPHeaders,
+		}
+	}
 	return info
 }
 
 func globalProviderToConfig(info core.GlobalProviderInfo) config.ProviderConfig {
 	p := config.ProviderConfig{
-		Name:       info.Name,
-		APIKey:     info.APIKey,
-		BaseURL:    info.BaseURL,
-		Model:      info.Model,
-		Thinking:   info.Thinking,
-		Env:        info.Env,
-		AgentTypes: info.AgentTypes,
+		Name:        info.Name,
+		APIKey:      info.APIKey,
+		BaseURL:     info.BaseURL,
+		Model:       info.Model,
+		Thinking:    info.Thinking,
+		Env:         info.Env,
+		AgentTypes:  info.AgentTypes,
+		Endpoints:   info.Endpoints,
+		AgentModels: info.AgentModels,
 	}
 	for _, m := range info.Models {
 		p.Models = append(p.Models, config.ProviderModelConfig{Model: m.Model, Alias: m.Alias})
+	}
+	if len(info.AgentModelLists) > 0 {
+		p.AgentModelLists = make(map[string][]config.ProviderModelConfig, len(info.AgentModelLists))
+		for at, ml := range info.AgentModelLists {
+			entries := make([]config.ProviderModelConfig, len(ml))
+			for i, m := range ml {
+				entries[i] = config.ProviderModelConfig{Model: m.Model, Alias: m.Alias}
+			}
+			p.AgentModelLists[at] = entries
+		}
+	}
+	if info.Codex != nil {
+		p.Codex = &config.CodexProviderConfig{
+			WireAPI:     info.Codex.WireAPI,
+			HTTPHeaders: info.Codex.HTTPHeaders,
+		}
 	}
 	return p
 }

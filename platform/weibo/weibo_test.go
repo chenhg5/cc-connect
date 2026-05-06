@@ -1,6 +1,8 @@
 package weibo
 
 import (
+	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -219,7 +221,258 @@ func TestHandleInbound_EmptyText(t *testing.T) {
 	p.handleInbound(raw)
 
 	if called {
-		t.Error("handler should not be called for empty text")
+		t.Error("handler should not be called for empty text without attachments")
+	}
+}
+
+func TestHandleInbound_WithImage(t *testing.T) {
+	p := &Platform{
+		name:      "weibo",
+		allowFrom: "*",
+		seen:      make(map[string]struct{}),
+	}
+
+	var received *core.Message
+	var mu sync.Mutex
+	p.handler = func(_ core.Platform, msg *core.Message) {
+		mu.Lock()
+		received = msg
+		mu.Unlock()
+	}
+
+	imgData := []byte("fake-png-data")
+	b64 := base64.StdEncoding.EncodeToString(imgData)
+
+	payload := messagePayload{
+		MessageID:  "img-1",
+		FromUserID: "user1",
+		Text:       "check this image",
+		Input: []messageInputItem{{
+			Type: "message",
+			Role: "user",
+			Content: []contentPart{{
+				Type:     "input_image",
+				FileName: "photo.png",
+				Source:   &inputSource{Type: "base64", MediaType: "image/png", Data: b64},
+			}},
+		}},
+	}
+	raw, _ := json.Marshal(payload)
+	p.handleInbound(raw)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if received == nil {
+		t.Fatal("handler not called")
+	}
+	if received.Content != "check this image" {
+		t.Errorf("content = %q", received.Content)
+	}
+	if len(received.Images) != 1 {
+		t.Fatalf("images = %d, want 1", len(received.Images))
+	}
+	if received.Images[0].MimeType != "image/png" {
+		t.Errorf("image mime = %q", received.Images[0].MimeType)
+	}
+	if received.Images[0].FileName != "photo.png" {
+		t.Errorf("image filename = %q", received.Images[0].FileName)
+	}
+	if string(received.Images[0].Data) != "fake-png-data" {
+		t.Errorf("image data mismatch")
+	}
+}
+
+func TestHandleInbound_WithFile(t *testing.T) {
+	p := &Platform{
+		name:      "weibo",
+		allowFrom: "*",
+		seen:      make(map[string]struct{}),
+	}
+
+	var received *core.Message
+	var mu sync.Mutex
+	p.handler = func(_ core.Platform, msg *core.Message) {
+		mu.Lock()
+		received = msg
+		mu.Unlock()
+	}
+
+	fileData := []byte("hello world pdf content")
+	b64 := base64.StdEncoding.EncodeToString(fileData)
+
+	payload := messagePayload{
+		MessageID:  "file-1",
+		FromUserID: "user1",
+		Text:       "",
+		Input: []messageInputItem{{
+			Type: "message",
+			Role: "user",
+			Content: []contentPart{
+				{Type: "input_text", Text: "here is my file"},
+				{
+					Type:     "input_file",
+					FileName: "doc.pdf",
+					Source:   &inputSource{Type: "base64", MediaType: "application/pdf", Data: b64},
+				},
+			},
+		}},
+	}
+	raw, _ := json.Marshal(payload)
+	p.handleInbound(raw)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if received == nil {
+		t.Fatal("handler not called")
+	}
+	if received.Content != "here is my file" {
+		t.Errorf("content = %q, want %q", received.Content, "here is my file")
+	}
+	if len(received.Files) != 1 {
+		t.Fatalf("files = %d, want 1", len(received.Files))
+	}
+	if received.Files[0].MimeType != "application/pdf" {
+		t.Errorf("file mime = %q", received.Files[0].MimeType)
+	}
+	if received.Files[0].FileName != "doc.pdf" {
+		t.Errorf("file name = %q", received.Files[0].FileName)
+	}
+}
+
+func TestHandleInbound_ImageOnlyNoText(t *testing.T) {
+	p := &Platform{
+		name:      "weibo",
+		allowFrom: "*",
+		seen:      make(map[string]struct{}),
+	}
+
+	var received *core.Message
+	p.handler = func(_ core.Platform, msg *core.Message) {
+		received = msg
+	}
+
+	imgData := []byte("image-bytes")
+	b64 := base64.StdEncoding.EncodeToString(imgData)
+
+	payload := messagePayload{
+		MessageID:  "imgonly-1",
+		FromUserID: "user1",
+		Text:       "",
+		Input: []messageInputItem{{
+			Type: "message",
+			Role: "user",
+			Content: []contentPart{{
+				Type:   "input_image",
+				Source: &inputSource{Type: "base64", MediaType: "image/jpeg", Data: b64},
+			}},
+		}},
+	}
+	raw, _ := json.Marshal(payload)
+	p.handleInbound(raw)
+
+	if received == nil {
+		t.Fatal("handler should be called for image-only message")
+	}
+	if len(received.Images) != 1 {
+		t.Errorf("images = %d, want 1", len(received.Images))
+	}
+}
+
+func TestHandleInbound_UnsupportedImageMime(t *testing.T) {
+	p := &Platform{
+		name:      "weibo",
+		allowFrom: "*",
+		seen:      make(map[string]struct{}),
+	}
+
+	var received *core.Message
+	p.handler = func(_ core.Platform, msg *core.Message) {
+		received = msg
+	}
+
+	b64 := base64.StdEncoding.EncodeToString([]byte("bmp-data"))
+
+	payload := messagePayload{
+		MessageID:  "bmp-1",
+		FromUserID: "user1",
+		Text:       "a bmp image",
+		Input: []messageInputItem{{
+			Type: "message",
+			Role: "user",
+			Content: []contentPart{{
+				Type:   "input_image",
+				Source: &inputSource{Type: "base64", MediaType: "image/bmp", Data: b64},
+			}},
+		}},
+	}
+	raw, _ := json.Marshal(payload)
+	p.handleInbound(raw)
+
+	if received == nil {
+		t.Fatal("handler should be called for text content")
+	}
+	if len(received.Images) != 0 {
+		t.Errorf("unsupported image should be filtered, got %d images", len(received.Images))
+	}
+}
+
+func TestHandleInbound_InputTextOverridesPayloadText(t *testing.T) {
+	p := &Platform{
+		name:      "weibo",
+		allowFrom: "*",
+		seen:      make(map[string]struct{}),
+	}
+
+	var received *core.Message
+	p.handler = func(_ core.Platform, msg *core.Message) {
+		received = msg
+	}
+
+	payload := messagePayload{
+		MessageID:  "override-1",
+		FromUserID: "user1",
+		Text:       "payload text",
+		Input: []messageInputItem{{
+			Type: "message",
+			Role: "user",
+			Content: []contentPart{
+				{Type: "input_text", Text: "input part 1"},
+				{Type: "input_text", Text: "input part 2"},
+			},
+		}},
+	}
+	raw, _ := json.Marshal(payload)
+	p.handleInbound(raw)
+
+	if received == nil {
+		t.Fatal("handler not called")
+	}
+	if received.Content != "input part 1\ninput part 2" {
+		t.Errorf("content = %q, want joined input_text", received.Content)
+	}
+}
+
+func TestNormalizeInboundInput_SkipsNonUserRole(t *testing.T) {
+	payload := messagePayload{
+		FromUserID: "user1",
+		Text:       "fallback",
+		Input: []messageInputItem{
+			{
+				Type: "message",
+				Role: "assistant",
+				Content: []contentPart{
+					{Type: "input_text", Text: "should be ignored"},
+				},
+			},
+		},
+	}
+
+	text, images, files := normalizeInboundInput(payload)
+	if text != "fallback" {
+		t.Errorf("text = %q, want fallback", text)
+	}
+	if len(images) != 0 || len(files) != 0 {
+		t.Error("should have no attachments from non-user role")
 	}
 }
 
@@ -316,4 +569,162 @@ func TestSendMessage(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for message")
 	}
+}
+
+func newWSTestPlatform(t *testing.T) (*Platform, chan map[string]any) {
+	t.Helper()
+	upgrader := websocket.Upgrader{}
+	gotMsg := make(chan map[string]any, 5)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		for {
+			_, msg, err := c.ReadMessage()
+			if err != nil {
+				return
+			}
+			var m map[string]any
+			json.Unmarshal(msg, &m)
+			gotMsg <- m
+		}
+	}))
+	t.Cleanup(ts.Close)
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http")
+	ws, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ws.Close() })
+
+	p := &Platform{name: "weibo", ws: ws, seen: make(map[string]struct{})}
+	return p, gotMsg
+}
+
+func TestSendImage(t *testing.T) {
+	p, gotMsg := newWSTestPlatform(t)
+
+	rctx := replyContext{fromUserID: "user1", sessionKey: "weibo:user1:user1"}
+	imgData := []byte("fake-image-bytes")
+
+	err := p.SendImage(context.Background(), rctx, core.ImageAttachment{
+		MimeType: "image/png",
+		Data:     imgData,
+		FileName: "screenshot.png",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case m := <-gotMsg:
+		if m["type"] != "send_message" {
+			t.Errorf("type = %v", m["type"])
+		}
+		payload := m["payload"].(map[string]any)
+		if payload["toUserId"] != "user1" {
+			t.Errorf("toUserId = %v", payload["toUserId"])
+		}
+		if payload["done"] != true {
+			t.Errorf("done = %v", payload["done"])
+		}
+
+		input, ok := payload["input"].([]any)
+		if !ok || len(input) == 0 {
+			t.Fatal("input missing or empty")
+		}
+		item := input[0].(map[string]any)
+		if item["role"] != "assistant" {
+			t.Errorf("role = %v", item["role"])
+		}
+		content := item["content"].([]any)
+		part := content[0].(map[string]any)
+		if part["type"] != "input_image" {
+			t.Errorf("part type = %v", part["type"])
+		}
+		if part["filename"] != "screenshot.png" {
+			t.Errorf("filename = %v", part["filename"])
+		}
+		src := part["source"].(map[string]any)
+		if src["media_type"] != "image/png" {
+			t.Errorf("media_type = %v", src["media_type"])
+		}
+		decoded, _ := base64.StdEncoding.DecodeString(src["data"].(string))
+		if string(decoded) != string(imgData) {
+			t.Error("image data mismatch after round-trip")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out")
+	}
+}
+
+func TestSendFile(t *testing.T) {
+	p, gotMsg := newWSTestPlatform(t)
+
+	rctx := replyContext{fromUserID: "user1", sessionKey: "weibo:user1:user1"}
+	fileData := []byte("pdf-content-here")
+
+	err := p.SendFile(context.Background(), rctx, core.FileAttachment{
+		MimeType: "application/pdf",
+		Data:     fileData,
+		FileName: "report.pdf",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case m := <-gotMsg:
+		payload := m["payload"].(map[string]any)
+		input := payload["input"].([]any)
+		item := input[0].(map[string]any)
+		content := item["content"].([]any)
+		part := content[0].(map[string]any)
+		if part["type"] != "input_file" {
+			t.Errorf("part type = %v", part["type"])
+		}
+		if part["filename"] != "report.pdf" {
+			t.Errorf("filename = %v", part["filename"])
+		}
+		src := part["source"].(map[string]any)
+		if src["media_type"] != "application/pdf" {
+			t.Errorf("media_type = %v", src["media_type"])
+		}
+		decoded, _ := base64.StdEncoding.DecodeString(src["data"].(string))
+		if string(decoded) != string(fileData) {
+			t.Error("file data mismatch")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out")
+	}
+}
+
+func TestSendImage_NotConnected(t *testing.T) {
+	p := &Platform{name: "weibo", seen: make(map[string]struct{})}
+	rctx := replyContext{fromUserID: "u1"}
+
+	err := p.SendImage(context.Background(), rctx, core.ImageAttachment{Data: []byte("x")})
+	if err == nil {
+		t.Error("expected error when not connected")
+	}
+	if !strings.Contains(err.Error(), "not connected") {
+		t.Errorf("error = %q, want 'not connected'", err.Error())
+	}
+}
+
+func TestSendFile_InvalidContext(t *testing.T) {
+	p := &Platform{name: "weibo", seen: make(map[string]struct{})}
+	err := p.SendFile(context.Background(), "invalid", core.FileAttachment{Data: []byte("x")})
+	if err == nil {
+		t.Error("expected error for invalid context")
+	}
+}
+
+func TestInterfaceCompliance(t *testing.T) {
+	var _ core.ImageSender = (*Platform)(nil)
+	var _ core.FileSender = (*Platform)(nil)
 }

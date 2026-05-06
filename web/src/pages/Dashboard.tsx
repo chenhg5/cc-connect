@@ -65,7 +65,7 @@ export default function Dashboard() {
   }
 
   return (
-    <div className="space-y-8 animate-fade-in">
+    <div className="space-y-8 animate-fade-in ">
       {/* Stats */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <StatCard label={t('dashboard.version')} value={status?.version || '-'} accent />
@@ -107,9 +107,12 @@ export default function Dashboard() {
                   </div>
                 </div>
                 <div className="flex flex-wrap gap-1 mb-2">
-                  {p.platforms?.map((pl) => (
+                  {p.platforms?.slice(0, 3).map((pl) => (
                     <Badge key={pl} className="text-xs">{pl}</Badge>
                   ))}
+                  {(p.platforms?.length ?? 0) > 3 && (
+                    <Badge className="text-xs">+{p.platforms!.length - 3}</Badge>
+                  )}
                 </div>
                 <p className="text-xs text-gray-400">{p.sessions_count} sessions</p>
               </Link>

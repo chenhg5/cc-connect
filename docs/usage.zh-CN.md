@@ -60,6 +60,10 @@ reset_on_idle_mins = 60
 
 开启后，如果用户长时间未发消息，下一条普通消息会自动进入一个新的会话；旧会话仍会保留在 `/list` 中，不会被删除。
 
+### 切换模型时保留历史
+
+`/model` 切换模型时保留当前会话——agent 会在新模型下继续对话（不额外消耗 token）。注意模型切换作用于共享的 agent 实例——如果多个平台使用同一个 project，模型变更会影响所有平台。
+
 ---
 
 ## 权限模式
@@ -405,6 +409,7 @@ enclosure_style = "code"
 
 - `/show` 只解析“纯引用文本”，不解析前端展示层包装后的 `📄 ...` / `[FILE] ...` 这类样式
 - `/show` 属于本地文件系统查看命令，与 `/shell`、`/dir` 类似，默认受 `admin_from` 权限控制
+- 执行 Shell 命令支持 `!` 快捷前缀：`!ls -la` 等同于 `/shell ls -la`，`! --timeout 300 npm install` 可指定超时时间
 
 示例：
 
@@ -681,6 +686,7 @@ cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/ch
 ```bash
 cc-connect cron add --cron "0 6 * * *" --prompt "总结 GitHub trending" --desc "每日趋势"
 cc-connect cron list
+cc-connect cron edit <job-id> <field> <value>   # 可改 cron_expr / prompt / enabled / mute / timeout_mins 等
 cc-connect cron del <job-id>
 ```
 

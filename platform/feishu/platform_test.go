@@ -928,6 +928,33 @@ func TestBuildPreviewCardJSON_ProgressPayloadUsesStructuredCard(t *testing.T) {
 	}
 }
 
+func TestBuildRichCard_RendersThinkingAndToolResultRows(t *testing.T) {
+	code := 0
+	success := true
+	cardJSON := buildRichCard(core.CardStatusWorking, "", []core.ToolStep{
+		{Kind: core.ToolStepKindThinking, Name: "Thinking", Summary: "Inspecting event routing"},
+		{
+			Kind:     core.ToolStepKindTool,
+			Name:     "Bash",
+			Summary:  "echo hi",
+			Result:   "hi",
+			Status:   "completed",
+			ExitCode: &code,
+			Success:  &success,
+			Done:     true,
+		},
+	}, "done", true, time.Second)
+
+	for _, want := range []string{"Inspecting event routing", "echo hi", "completed", "exit: 0", "hi"} {
+		if !strings.Contains(cardJSON, want) {
+			t.Fatalf("rich card should contain %q, got %q", want, cardJSON)
+		}
+	}
+	if strings.Contains(cardJSON, core.ProgressCardPayloadPrefix) {
+		t.Fatalf("rich card should not contain progress payload prefix, got %q", cardJSON)
+	}
+}
+
 func TestBuildPreviewCardJSON_NormalTextFallback(t *testing.T) {
 	cardJSON := buildPreviewCardJSON("plain progress text")
 	if strings.Contains(cardJSON, "cc-connect · 进度") {
@@ -1001,6 +1028,81 @@ func TestFormatProgressToolInput_OtherTools(t *testing.T) {
 	result = formatProgressToolInput("TodoWrite", "not json")
 	if !strings.Contains(result, "```text") {
 		t.Errorf("TodoWrite with invalid JSON should fall back to text block, got %q", result)
+	}
+}
+
+func TestAllowChat_FiltersGroupMessages(t *testing.T) {
+	tests := []struct {
+		name      string
+		allowChat string
+		chatID    string
+		chatType  string
+		wantPass  bool
+	}{
+		{"empty allow_chat permits all groups", "", "oc_abc", "group", true},
+		{"wildcard permits all groups", "*", "oc_abc", "group", true},
+		{"matching chat_id passes", "oc_abc", "oc_abc", "group", true},
+		{"non-matching chat_id blocked", "oc_abc", "oc_xyz", "group", false},
+		{"multiple chat_ids, match second", "oc_abc,oc_xyz", "oc_xyz", "group", true},
+		{"multiple chat_ids, no match", "oc_abc,oc_def", "oc_xyz", "group", false},
+		{"private chat bypasses allow_chat filter", "oc_abc", "oc_xyz", "p2p", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+				"app_id": "cli_xxx", "app_secret": "secret",
+				"enable_feishu_card": true,
+				"group_reply_all":    true,
+				"allow_chat":         tt.allowChat,
+			})
+			if err != nil {
+				t.Fatalf("newPlatform() error = %v", err)
+			}
+			ip := p.(*interactivePlatform)
+
+			messageID := "om_test_" + tt.name
+			openID := "ou_test"
+			msgType := "text"
+			senderType := "user"
+			content := `{"text":"hello"}`
+			createTime := strconv.FormatInt(time.Now().UnixMilli(), 10)
+
+			msgCh := make(chan *core.Message, 1)
+			ip.handler = func(_ core.Platform, msg *core.Message) {
+				msgCh <- msg
+			}
+
+			if err := ip.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
+				Event: &larkim.P2MessageReceiveV1Data{
+					Sender: &larkim.EventSender{
+						SenderId:   &larkim.UserId{OpenId: &openID},
+						SenderType: &senderType,
+					},
+					Message: &larkim.EventMessage{
+						MessageId:   &messageID,
+						ChatId:      &tt.chatID,
+						ChatType:    &tt.chatType,
+						MessageType: &msgType,
+						Content:     &content,
+						CreateTime:  &createTime,
+					},
+				},
+			}); err != nil {
+				t.Fatalf("onMessage() error = %v", err)
+			}
+
+			select {
+			case <-msgCh:
+				if !tt.wantPass {
+					t.Fatal("expected message to be blocked by allow_chat, but it was delivered")
+				}
+			case <-time.After(2 * time.Second):
+				if tt.wantPass {
+					t.Fatal("expected message to pass allow_chat filter, but it was blocked")
+				}
+			}
+		})
 	}
 }
 

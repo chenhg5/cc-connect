@@ -21,8 +21,9 @@ import (
 )
 
 // geminiSession manages multi-turn conversations with the Gemini CLI.
-// Each Send() launches a new `gemini -p ... --output-format stream-json` process
-// with --resume for conversation continuity.
+// Each Send() launches a new `gemini -p - --output-format stream-json` process
+// with --resume for conversation continuity. The prompt is passed via stdin
+// (using -p - flag) to preserve newlines in multi-line messages.
 type geminiSession struct {
 	cmd      string
 	workDir  string
@@ -146,7 +147,9 @@ func (gs *geminiSession) Send(prompt string, images []core.ImageAttachment, file
 		fullPrompt += "\n\n[Attached files saved at: " + strings.Join(fileRefs, ", ") + "]"
 	}
 
-	args = append(args, "-p", fullPrompt)
+	// Pass prompt via stdin instead of -p flag to preserve newlines.
+	// The -p flag can truncate at newline characters in some Gemini CLI versions.
+	args = append(args, "-p", "-")
 
 	// Add timeout for each turn to prevent hanging processes
 	var cancel context.CancelFunc
@@ -175,6 +178,7 @@ func (gs *geminiSession) Send(prompt string, images []core.ImageAttachment, file
 		env = core.MergeEnv(env, gs.extraEnv)
 	}
 	cmd.Env = env
+	cmd.Stdin = strings.NewReader(fullPrompt)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {

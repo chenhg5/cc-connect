@@ -24,13 +24,16 @@ import (
 // codexSession manages a multi-turn Codex conversation.
 // First Send() uses `codex exec`, subsequent ones use `codex exec resume <threadID>`.
 type codexSession struct {
-	workDir   string
-	model     string
-	effort    string
-	mode      string
-	baseURL   string   // provider base URL; passed as -c openai_base_url=<url>
-	extraEnv  []string
-	events    chan core.Event
+	workDir       string
+	model         string
+	effort        string
+	mode          string
+	baseURL       string // provider base URL; passed as -c openai_base_url=<url>
+	modelProvider string // Codex model_provider name; passed as -c model_provider=<name>
+	cliBin        string   // CLI binary, default "codex"
+	cliExtraArgs  []string // extra args from cli_path, prepended before exec args
+	extraEnv      []string
+	events        chan core.Event
 	threadID  atomic.Value // stores string — Codex thread_id
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -60,20 +63,23 @@ var codexRuntimeConfigTimeout = 1500 * time.Millisecond
 var codexContextUsageRetryDelay = 50 * time.Millisecond
 var codexContextUsageRetryCount = 4
 
-func newCodexSession(ctx context.Context, workDir, model, effort, mode, resumeID, baseURL string, extraEnv []string) (*codexSession, error) {
+func newCodexSession(ctx context.Context, cliBin string, cliExtraArgs []string, workDir, model, effort, mode, resumeID, baseURL string, extraEnv []string, modelProvider string) (*codexSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	cs := &codexSession{
-		workDir:  workDir,
-		model:    model,
-		effort:   effort,
-		mode:     mode,
-		baseURL:  baseURL,
-		extraEnv: extraEnv,
-		events:   make(chan core.Event, 64),
-		ctx:      sessionCtx,
-		cancel:   cancel,
-		cmds:     make(map[*exec.Cmd]struct{}),
+		workDir:       workDir,
+		model:         model,
+		effort:        effort,
+		mode:          mode,
+		baseURL:       baseURL,
+		modelProvider: modelProvider,
+		cliBin:        cliBin,
+		cliExtraArgs:  cliExtraArgs,
+		extraEnv:      extraEnv,
+		events:        make(chan core.Event, 64),
+		ctx:           sessionCtx,
+		cancel:        cancel,
+		cmds:          make(map[*exec.Cmd]struct{}),
 	}
 	cs.alive.Store(true)
 
@@ -103,10 +109,18 @@ func (cs *codexSession) Send(prompt string, images []core.ImageAttachment, files
 
 	isResume := cs.CurrentSessionID() != ""
 	args := cs.buildExecArgs(prompt, imagePaths)
+	if len(cs.cliExtraArgs) > 0 {
+		args = append(append([]string{}, cs.cliExtraArgs...), args...)
+	}
+
+	bin := cs.cliBin
+	if bin == "" {
+		bin = "codex"
+	}
 
 	slog.Debug("codexSession: launching", "resume", isResume, "args", core.RedactArgs(args))
 
-	cmd := exec.CommandContext(cs.ctx, "codex", args...)
+	cmd := exec.CommandContext(cs.ctx, bin, args...)
 	cmd.Dir = cs.workDir
 	prepareCmdForKill(cmd)
 	if len(cs.extraEnv) > 0 {
@@ -184,6 +198,9 @@ func (cs *codexSession) buildExecArgs(prompt string, imagePaths []string) []stri
 	if cs.model != "" {
 		args = append(args, "--model", cs.model)
 	}
+	if cs.modelProvider != "" {
+		args = append(args, "-c", fmt.Sprintf("model_provider=%q", cs.modelProvider))
+	}
 	if cs.baseURL != "" {
 		args = append(args, "-c", fmt.Sprintf("openai_base_url=%q", cs.baseURL))
 	}
@@ -238,7 +255,7 @@ func (cs *codexSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf 
 			}
 		}
 		if tid := cs.CurrentSessionID(); tid != "" {
-			patchSessionSource(tid)
+			patchSessionSource(tid, getenvFromList(cs.extraEnv, "CODEX_HOME"))
 		}
 	}()
 

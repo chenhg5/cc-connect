@@ -211,17 +211,12 @@ func TestStreamPreview_FreezeDeletesOnFinish(t *testing.T) {
 	// Simulate a tool/thinking event → freeze
 	sp.freeze()
 
-	// finish should return false (degraded) and delete the stale preview
+	// With degraded recovery, finish attempts UpdateMessage on the degraded
+	// preview. Since mockCleanerPlatform embeds mockUpdaterPlatform,
+	// UpdateMessage succeeds and finish returns true (recovered).
 	ok := sp.finish("Hello World Final")
-	if ok {
-		t.Error("finish should return false when degraded")
-	}
-
-	mp.mu.Lock()
-	deletedCount := len(mp.deleted)
-	mp.mu.Unlock()
-	if deletedCount != 1 {
-		t.Errorf("expected 1 delete call, got %d", deletedCount)
+	if !ok {
+		t.Error("finish should return true when degraded recovery via UpdateMessage succeeds")
 	}
 }
 

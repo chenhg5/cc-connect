@@ -6,8 +6,8 @@ import {
   Trash2, Plus, Check, Clock, ExternalLink, Link2,
 } from 'lucide-react';
 import { Card, Badge, Button, Input, Modal, EmptyState } from '@/components/ui';
-import { getProject, updateProject, deleteProject, type ProjectDetail as ProjectDetailType } from '@/api/projects';
-import { listProviders, addProvider, removeProvider, activateProvider, listModels, setModel, type Provider, listGlobalProviders, type GlobalProvider, saveProviderRefs } from '@/api/providers';
+import { getProject, updateProject, deleteProject, listAgentTypes, type ProjectDetail as ProjectDetailType } from '@/api/projects';
+import { listProviders, addProvider, removeProvider, activateProvider, type Provider, listGlobalProviders, type GlobalProvider, saveProviderRefs } from '@/api/providers';
 import { getHeartbeat, pauseHeartbeat, resumeHeartbeat, triggerHeartbeat, setHeartbeatInterval, type HeartbeatStatus } from '@/api/heartbeat';
 import { restartSystem } from '@/api/status';
 import { formatTime, cn } from '@/lib/utils';
@@ -26,6 +26,7 @@ const PLATFORM_OPTIONS: { key: string; label: string; color: string; abbr: strin
   { key: 'qq', label: 'QQ (OneBot)', abbr: 'QQ', color: 'bg-cyan-50 dark:bg-cyan-900/30 text-cyan-600 dark:text-cyan-400' },
   { key: 'qqbot', label: 'QQ Bot (Official)', abbr: 'QB', color: 'bg-cyan-50 dark:bg-cyan-900/30 text-cyan-600 dark:text-cyan-400' },
   { key: 'line', label: 'LINE', abbr: 'LN', color: 'bg-lime-50 dark:bg-lime-900/30 text-lime-600 dark:text-lime-400' },
+  { key: 'weibo', label: 'Weibo (微博)', abbr: 'WB', color: 'bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-400' },
 ];
 
 const isQRPlatform = (type: string) => type === 'feishu' || type === 'lark' || type === 'weixin';
@@ -40,8 +41,6 @@ export default function ProjectDetail() {
   const [providers, setProviders] = useState<Provider[]>([]);
   const [activeProvider, setActiveProvider] = useState('');
   const [heartbeat, setHeartbeatState] = useState<HeartbeatStatus | null>(null);
-  const [models, setModels] = useState<string[]>([]);
-  const [currentModel, setCurrentModel] = useState('');
   const [loading, setLoading] = useState(true);
 
   // Settings form
@@ -51,8 +50,14 @@ export default function ProjectDetail() {
   const [workDir, setWorkDir] = useState('');
   const [agentMode, setAgentMode] = useState('');
   const [showCtxIndicator, setShowCtxIndicator] = useState(true);
+  const [replyFooter, setReplyFooter] = useState(true);
+  const [injectSender, setInjectSender] = useState(false);
   const [platformAllowFrom, setPlatformAllowFrom] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
+
+  // Agent type
+  const [agentTypes, setAgentTypes] = useState<string[]>([]);
+  const [selectedAgentType, setSelectedAgentType] = useState('');
 
   // Global providers & refs
   const [globalProviders, setGlobalProviders] = useState<GlobalProvider[]>([]);
@@ -115,12 +120,12 @@ export default function ProjectDetail() {
     if (!name) return;
     try {
       setLoading(true);
-      const [proj, provs, hb, mdls, gp] = await Promise.allSettled([
+      const [proj, provs, hb, gp, at] = await Promise.allSettled([
         getProject(name),
         listProviders(name),
         getHeartbeat(name),
-        listModels(name),
         listGlobalProviders(),
+        listAgentTypes(),
       ]);
       if (proj.status === 'fulfilled') {
         setProject(proj.value);
@@ -129,7 +134,10 @@ export default function ProjectDetail() {
         setDisabledCmds(proj.value.settings?.disabled_commands?.join(', ') || '');
         setWorkDir(proj.value.work_dir || '');
         setAgentMode(proj.value.agent_mode || 'default');
+        setSelectedAgentType(proj.value.agent_type || '');
         setShowCtxIndicator(proj.value.show_context_indicator !== false);
+        setReplyFooter(proj.value.reply_footer !== false);
+        setInjectSender(proj.value.inject_sender === true);
         setProviderRefs(proj.value.provider_refs || []);
         const afMap: Record<string, string> = {};
         proj.value.platform_configs?.forEach(pc => {
@@ -141,13 +149,15 @@ export default function ProjectDetail() {
         setProviders(provs.value.providers || []);
         setActiveProvider(provs.value.active_provider || '');
       }
-      if (hb.status === 'fulfilled') setHeartbeatState(hb.value);
-      if (mdls.status === 'fulfilled') {
-        setModels(mdls.value.models || []);
-        setCurrentModel(mdls.value.current || '');
+      if (hb.status === 'fulfilled') {
+        const hbVal = hb.value;
+        setHeartbeatState(hbVal?.enabled ? hbVal : null);
       }
       if (gp.status === 'fulfilled') {
         setGlobalProviders(gp.value.providers || []);
+      }
+      if (at.status === 'fulfilled') {
+        setAgentTypes((at.value.agents || []).sort());
       }
     } finally {
       setLoading(false);
@@ -165,15 +175,23 @@ export default function ProjectDetail() {
     if (!name) return;
     setSaving(true);
     try {
-      await updateProject(name, {
+      const agentTypeChanged = project && selectedAgentType !== project.agent_type;
+      const res = await updateProject(name, {
         language,
         admin_from: adminFrom,
         disabled_commands: disabledCmds.split(',').map(s => s.trim()).filter(Boolean),
         work_dir: workDir,
         mode: agentMode,
+        ...(agentTypeChanged ? { agent_type: selectedAgentType } : {}),
         show_context_indicator: showCtxIndicator,
+        reply_footer: replyFooter,
+        inject_sender: injectSender,
         platform_allow_from: platformAllowFrom,
       });
+      if (res && (res as any).restart_required) {
+        setShowRestartModal(true);
+        return;
+      }
       await fetchAll();
     } finally {
       setSaving(false);
@@ -207,7 +225,7 @@ export default function ProjectDetail() {
   }
 
   return (
-    <div className="space-y-6 animate-fade-in">
+    <div className="space-y-6 animate-fade-in ">
       {/* Back + title */}
       <div className="flex items-center gap-3">
         <Link to="/projects" className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors">
@@ -273,7 +291,11 @@ export default function ProjectDetail() {
       {tab === 'providers' && (() => {
         const globalNames = new Set(globalProviders.map(g => g.name));
         const isGlobal = (pName: string) => globalNames.has(pName) && providerRefs.includes(pName);
-        const unlinkedGlobals = globalProviders.filter(g => !providerRefs.includes(g.name));
+        const currentAgentType = project?.agent_type || selectedAgentType || '';
+        const unlinkedGlobals = globalProviders.filter(g =>
+          !providerRefs.includes(g.name) &&
+          (!g.agent_types?.length || g.agent_types.includes(currentAgentType))
+        );
         return (
         <div className="space-y-4">
           {/* Header */}
@@ -334,7 +356,6 @@ export default function ProjectDetail() {
                             setSavingRefs(true);
                             try {
                               await saveProviderRefs(name!, next);
-                              await removeProvider(name!, p.name);
                               await fetchAll();
                             } finally { setSavingRefs(false); }
                           }}
@@ -351,29 +372,6 @@ export default function ProjectDetail() {
                 </div>
               ))}
             </div>
-          )}
-
-          {/* Models */}
-          {models.length > 0 && (
-            <Card>
-              <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-3">{t('providers.models')}</h3>
-              <div className="flex flex-wrap gap-2">
-                {models.map((m) => (
-                  <button
-                    key={m}
-                    onClick={() => { setModel(name!, m).then(fetchAll); }}
-                    className={cn(
-                      'px-3 py-1.5 rounded-lg text-xs font-medium transition-all',
-                      m === currentModel
-                        ? 'bg-accent/20 text-accent border border-accent/30'
-                        : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700'
-                    )}
-                  >
-                    {m}
-                  </button>
-                ))}
-              </div>
-            </Card>
           )}
 
           {/* Add Provider Modal */}
@@ -410,7 +408,6 @@ export default function ProjectDetail() {
                           setSavingRefs(true);
                           try {
                             await saveProviderRefs(name!, next);
-                            await addProvider(name!, { name: gp.name, api_key: gp.api_key || '', base_url: gp.base_url || '', model: gp.model || '' });
                             await fetchAll();
                           } finally { setSavingRefs(false); }
                           setShowAddProvider(false);
@@ -446,7 +443,7 @@ export default function ProjectDetail() {
       {tab === 'heartbeat' && (
         <div className="space-y-4">
           {!heartbeat ? (
-            <EmptyState message={t('common.noData')} />
+            <EmptyState message={t('heartbeat.notEnabled', 'Heartbeat is not configured for this project. Add [heartbeat] section in config.toml to enable.')} />
           ) : (
             <>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -491,6 +488,24 @@ export default function ProjectDetail() {
         <Card>
           <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-4">{t('projects.agentSettings', 'Agent')}</h3>
           <div className="space-y-4 max-w-lg">
+            <div>
+              <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
+                {t('projects.agentType', 'Agent type')}
+              </label>
+              <select
+                value={selectedAgentType}
+                onChange={(e) => setSelectedAgentType(e.target.value)}
+                className="w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-accent/50"
+              >
+                {agentTypes.map(a => <option key={a} value={a}>{a}</option>)}
+                {selectedAgentType && !agentTypes.includes(selectedAgentType) && (
+                  <option value={selectedAgentType}>{selectedAgentType}</option>
+                )}
+              </select>
+              {selectedAgentType !== project.agent_type && (
+                <p className="text-[11px] text-amber-500 mt-1">{t('projects.agentTypeChangeHint', 'Changing agent type requires restart. Incompatible providers will be removed.')}</p>
+              )}
+            </div>
             <Input label={t('projects.workDir', 'Working directory')} value={workDir} onChange={(e) => setWorkDir(e.target.value)} placeholder="/path/to/project" />
             <div>
               <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
@@ -525,6 +540,30 @@ export default function ProjectDetail() {
                 className={cn('w-10 h-6 rounded-full transition-colors', showCtxIndicator ? 'bg-accent' : 'bg-gray-300 dark:bg-gray-700')}
               >
                 <div className={cn('w-4 h-4 bg-white rounded-full transition-transform mx-1', showCtxIndicator ? 'translate-x-4' : 'translate-x-0')} />
+              </button>
+            </div>
+            <div className="flex items-center justify-between">
+              <div>
+                <label className="text-sm font-medium text-gray-700 dark:text-gray-300">{t('projects.replyFooter', 'Reply footer')}</label>
+                <p className="text-[11px] text-gray-400 mt-0.5">{t('projects.replyFooterHint', 'Append model/usage metadata to replies')}</p>
+              </div>
+              <button
+                onClick={() => setReplyFooter(!replyFooter)}
+                className={cn('w-10 h-6 rounded-full transition-colors', replyFooter ? 'bg-accent' : 'bg-gray-300 dark:bg-gray-700')}
+              >
+                <div className={cn('w-4 h-4 bg-white rounded-full transition-transform mx-1', replyFooter ? 'translate-x-4' : 'translate-x-0')} />
+              </button>
+            </div>
+            <div className="flex items-center justify-between">
+              <div>
+                <label className="text-sm font-medium text-gray-700 dark:text-gray-300">{t('projects.injectSender', 'Inject sender')}</label>
+                <p className="text-[11px] text-gray-400 mt-0.5">{t('projects.injectSenderHint', 'Prepend sender identity to messages sent to agent')}</p>
+              </div>
+              <button
+                onClick={() => setInjectSender(!injectSender)}
+                className={cn('w-10 h-6 rounded-full transition-colors', injectSender ? 'bg-accent' : 'bg-gray-300 dark:bg-gray-700')}
+              >
+                <div className={cn('w-4 h-4 bg-white rounded-full transition-transform mx-1', injectSender ? 'translate-x-4' : 'translate-x-0')} />
               </button>
             </div>
             <Input label={t('projects.language')} value={language} onChange={(e) => setLanguage(e.target.value)} placeholder="en, zh, ja..." />
@@ -648,10 +687,10 @@ export default function ProjectDetail() {
             {t('setup.restartHint', 'Restart the service for the new platform to take effect.')}
           </p>
           <div className="flex justify-end gap-2">
-            <Button variant="secondary" onClick={() => { setShowRestartModal(false); fetchAll(); }}>
+            <Button variant="secondary" onClick={() => { setShowRestartModal(false); setTimeout(fetchAll, 300); }}>
               {t('setup.later', 'Later')}
             </Button>
-            <Button onClick={async () => { await restartSystem(); setShowRestartModal(false); fetchAll(); }}>
+            <Button onClick={async () => { await restartSystem(); setShowRestartModal(false); await waitForService(8000); await fetchAll(); }}>
               {t('setup.restartNow', 'Restart now')}
             </Button>
           </div>

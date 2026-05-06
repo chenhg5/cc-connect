@@ -35,6 +35,8 @@ type Agent struct {
 	backend         string // "exec" | "app_server"
 	appServerURL    string
 	codexHome       string
+	cliBin          string   // CLI binary name, default "codex"
+	cliExtraArgs    []string // extra args parsed from cli_path after the binary
 	providers       []core.ProviderConfig
 	activeIdx       int // -1 = no provider set
 	sessionEnv      []string
@@ -57,10 +59,23 @@ func New(opts map[string]any) (core.Agent, error) {
 
 	if appServerURL == "" {
 		appServerURL = "ws://127.0.0.1:3845"
+	} else if strings.EqualFold(strings.TrimSpace(appServerURL), "stdio") {
+		appServerURL = ""
 	}
 
-	if _, err := exec.LookPath("codex"); err != nil {
-		return nil, fmt.Errorf("codex: 'codex' CLI not found in PATH, install with: npm install -g @openai/codex")
+	// cli_path allows overriding the binary, e.g. "omx" or "omx --flag val"
+	cliBin := "codex"
+	var cliExtraArgs []string
+	if cliPath, _ := opts["cli_path"].(string); strings.TrimSpace(cliPath) != "" {
+		parts := strings.Fields(cliPath)
+		cliBin = parts[0]
+		if len(parts) > 1 {
+			cliExtraArgs = parts[1:]
+		}
+	}
+
+	if _, err := exec.LookPath(cliBin); err != nil {
+		return nil, fmt.Errorf("codex: %q CLI not found in PATH, install with: npm install -g @openai/codex", cliBin)
 	}
 
 	return &Agent{
@@ -71,6 +86,8 @@ func New(opts map[string]any) (core.Agent, error) {
 		backend:         backend,
 		appServerURL:    appServerURL,
 		codexHome:       strings.TrimSpace(codexHome),
+		cliBin:          cliBin,
+		cliExtraArgs:    cliExtraArgs,
 		activeIdx:       -1,
 	}, nil
 }
@@ -320,6 +337,8 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	backend := a.backend
 	appServerURL := a.appServerURL
 	codexHome := a.codexHome
+	cliBin := a.cliBin
+	cliExtraArgs := a.cliExtraArgs
 	extraEnv := a.providerEnvLocked()
 	extraEnv = append(extraEnv, a.sessionEnv...)
 	var baseURL string
@@ -329,28 +348,48 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 		}
 		baseURL = a.providers[a.activeIdx].BaseURL
 	}
+	provName, provAPIKey, provWireAPI, provHeaders := a.activeProviderCodexConfig()
 	a.mu.Unlock()
 
+	if provName != "" {
+		if err := ensureCodexProviderConfig(codexHome, provName, baseURL, provWireAPI, provHeaders); err != nil {
+			slog.Warn("codex: failed to write provider config", "provider", provName, "error", err)
+		}
+		if err := ensureCodexAuth(codexHome, provAPIKey); err != nil {
+			slog.Warn("codex: failed to write auth.json", "provider", provName, "error", err)
+		}
+	}
+
 	if backend == "app_server" {
-		return newAppServerSession(ctx, appServerURL, a.workDir, model, reasoningEffort, mode, sessionID, extraEnv, codexHome)
+		return newAppServerSession(ctx, appServerURL, a.workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome)
 	}
 	if codexHome != "" {
 		extraEnv = append(extraEnv, "CODEX_HOME="+codexHome)
 	}
 
-	return newCodexSession(ctx, a.workDir, model, reasoningEffort, mode, sessionID, baseURL, extraEnv)
+	return newCodexSession(ctx, cliBin, cliExtraArgs, a.workDir, model, reasoningEffort, mode, sessionID, baseURL, extraEnv, provName)
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
-	return listCodexSessions(a.workDir)
+	a.mu.RLock()
+	codexHome := a.codexHome
+	workDir := a.workDir
+	a.mu.RUnlock()
+	return listCodexSessions(workDir, codexHome)
 }
 
 func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int) ([]core.HistoryEntry, error) {
-	return getSessionHistory(sessionID, limit)
+	a.mu.RLock()
+	codexHome := a.codexHome
+	a.mu.RUnlock()
+	return getSessionHistory(sessionID, codexHome, limit)
 }
 
 func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
-	path := findSessionFile(sessionID)
+	a.mu.RLock()
+	codexHome := a.codexHome
+	a.mu.RUnlock()
+	path := findSessionFile(sessionID, codexHome)
 	if path == "" {
 		return fmt.Errorf("session file not found: %s", sessionID)
 	}
@@ -582,6 +621,22 @@ func (a *Agent) providerEnvLocked() []string {
 		env = append(env, k+"="+v)
 	}
 	return env
+}
+
+// activeProviderCodexConfig returns Codex-specific config for the active provider.
+// Returns non-empty name when the provider has codex config (wire_api, headers)
+// OR when it has a BaseURL (third-party provider needing auth.json).
+func (a *Agent) activeProviderCodexConfig() (name string, apiKey string, wireAPI string, headers map[string]string) {
+	if a.activeIdx < 0 || a.activeIdx >= len(a.providers) {
+		return
+	}
+	p := a.providers[a.activeIdx]
+	hasCodexConfig := p.CodexWireAPI != "" || len(p.CodexHTTPHeaders) > 0
+	isThirdParty := p.BaseURL != "" && p.APIKey != ""
+	if !hasCodexConfig && !isThirdParty {
+		return
+	}
+	return p.Name, p.APIKey, p.CodexWireAPI, p.CodexHTTPHeaders
 }
 
 func (a *Agent) PermissionModes() []core.PermissionModeInfo {

@@ -12,6 +12,11 @@ export interface Provider {
   base_url: string;
 }
 
+export interface CodexConfig {
+  wire_api?: string;
+  http_headers?: Record<string, string>;
+}
+
 export interface GlobalProvider {
   name: string;
   api_key?: string;
@@ -21,16 +26,23 @@ export interface GlobalProvider {
   env?: Record<string, string>;
   agent_types?: string[];
   models?: ProviderModel[];
+  endpoints?: Record<string, string>;
+  agent_models?: Record<string, string>;
+  agent_model_lists?: Record<string, ProviderModel[]>;
+  codex?: CodexConfig;
+}
+
+export interface PresetAgentConfig {
+  base_url: string;
+  model: string;
+  models?: string[];
+  codex_config?: { wire_api?: string; http_headers?: Record<string, string> };
 }
 
 export interface ProviderPreset {
   name: string;
   display_name: string;
-  base_url: string;
-  endpoints?: Record<string, string>;
-  models?: string[];
-  agent_models?: Record<string, string>;
-  agents?: string[];
+  agents: Record<string, PresetAgentConfig>;
   invite_url?: string;
   description?: string;
   description_zh?: string;
@@ -73,3 +85,17 @@ export const removeGlobalProvider = (name: string) =>
   api.delete<{ message: string }>(`/providers/${name}`);
 export const fetchProviderPresets = () =>
   api.get<PresetsResponse>('/providers/presets');
+
+// cc-switch migration
+export interface CCSwitchProvider {
+  name: string;
+  app_type: string;
+  api_key?: string;
+  base_url?: string;
+  model?: string;
+  is_current: boolean;
+}
+export const listCCSwitchProviders = () =>
+  api.get<{ providers: CCSwitchProvider[]; available: boolean; error?: string }>('/providers/cc-switch');
+export const importCCSwitchProviders = (names: string[]) =>
+  api.post<{ imported: string[]; skipped: string[] }>('/providers/cc-switch', { names });

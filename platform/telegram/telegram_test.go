@@ -895,7 +895,7 @@ func TestHandleMessageWithForumTopic(t *testing.T) {
 	}
 }
 
-func TestHandleMessageNonForumIgnoresThreadID(t *testing.T) {
+func TestHandleMessagePrivateTopicUsesThreadID(t *testing.T) {
 	handled := make(chan *core.Message, 1)
 	p := &Platform{
 		token:         "token",
@@ -911,14 +911,13 @@ func TestHandleMessageNonForumIgnoresThreadID(t *testing.T) {
 
 	msg := &models.Message{
 		ID:              10,
-		MessageThreadID: 55, // set but not a forum
+		MessageThreadID: 55,
 		Text:            "hello",
 		Date:            int(time.Now().Unix()),
 		From:            &models.User{ID: 7, Username: "alice"},
 		Chat: models.Chat{
 			ID:      100,
-			Type:    models.ChatTypeGroup,
-			Title:   "Test Group",
+			Type:    models.ChatTypePrivate,
 			IsForum: false,
 		},
 	}
@@ -927,12 +926,12 @@ func TestHandleMessageNonForumIgnoresThreadID(t *testing.T) {
 
 	select {
 	case got := <-handled:
-		if got.SessionKey != "telegram:100:7" {
-			t.Fatalf("SessionKey = %q, want %q (no thread)", got.SessionKey, "telegram:100:7")
+		if got.SessionKey != "telegram:100:55:7" {
+			t.Fatalf("SessionKey = %q, want %q", got.SessionKey, "telegram:100:55:7")
 		}
 		rc := got.ReplyCtx.(replyContext)
-		if rc.threadID != 0 {
-			t.Fatalf("threadID = %d, want 0", rc.threadID)
+		if rc.threadID != 55 {
+			t.Fatalf("threadID = %d, want 55", rc.threadID)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("message not handled")
