@@ -4451,6 +4451,7 @@ var builtinCommands = []struct {
 	{[]string{"cron"}, "cron"},
 	{[]string{"heartbeat", "hb"}, "heartbeat"},
 	{[]string{"compress", "compact"}, "compress"},
+	{[]string{"interrupt"}, "interrupt"},
 	{[]string{"stop"}, "stop"},
 	{[]string{"help"}, "help"},
 	{[]string{"version"}, "version"},
@@ -4637,6 +4638,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdHeartbeat(p, msg, args)
 	case "compress":
 		e.cmdCompress(p, msg)
+	case "interrupt":
+		e.cmdInterrupt(p, msg)
 	case "stop":
 		e.cmdStop(p, msg)
 	case "help":
@@ -7742,6 +7745,47 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 		return
 	}
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
+}
+
+func (e *Engine) cmdInterrupt(p Platform, msg *Message) {
+	iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
+	e.interactiveMu.Lock()
+	state, ok := e.interactiveStates[iKey]
+	e.interactiveMu.Unlock()
+	if !ok || state == nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNoExecution))
+		return
+	}
+
+	state.mu.Lock()
+	agentSession := state.agentSession
+	state.mu.Unlock()
+	if agentSession == nil || !agentSession.Alive() {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNoExecution))
+		return
+	}
+
+	interrupter, ok := agentSession.(SessionInterrupter)
+	if !ok {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgInterruptNotSupported))
+		return
+	}
+
+	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgInterrupting))
+
+	ctx, cancel := context.WithTimeout(e.ctx, 15*time.Second)
+	defer cancel()
+
+	if err := interrupter.InterruptSession(ctx); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgInterruptTimedOutUseStop))
+			return
+		}
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgInterruptUseStop))
+		return
+	}
+
+	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgInterruptDone))
 }
 
 func (e *Engine) stopInteractiveSession(sessionKey string, quietPlatform Platform, quietReplyCtx any) bool {
