@@ -312,6 +312,11 @@ func main() {
 			showFooter = *proj.ReplyFooter
 		}
 		engine.SetReplyFooterEnabled(showFooter)
+		showFooterTokens := false
+		if proj.ReplyFooterTokens != nil {
+			showFooterTokens = *proj.ReplyFooterTokens
+		}
+		engine.SetReplyFooterTokensEnabled(showFooterTokens)
 		engine.SetAttachmentSendEnabled(cfg.AttachmentSend != "off")
 		engine.SetFilterExternalSessions(proj.FilterExternalSessions != nil && *proj.FilterExternalSessions)
 		engine.SetBaseWorkDir(workDir)
@@ -920,6 +925,7 @@ func main() {
 				AgentType:            u.AgentType,
 				ShowContextIndicator: u.ShowContextIndicator,
 				ReplyFooter:          u.ReplyFooter,
+				ReplyFooterTokens:    u.ReplyFooterTokens,
 				InjectSender:         u.InjectSender,
 				PlatformAllowFrom:    u.PlatformAllowFrom,
 			})
@@ -1500,6 +1506,11 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		showFooter = *proj.ReplyFooter
 	}
 	engine.SetReplyFooterEnabled(showFooter)
+	showFooterTokens := false
+	if proj.ReplyFooterTokens != nil {
+		showFooterTokens = *proj.ReplyFooterTokens
+	}
+	engine.SetReplyFooterTokensEnabled(showFooterTokens)
 
 	// Reload sender injection
 	engine.SetInjectSender(proj.InjectSender != nil && *proj.InjectSender)

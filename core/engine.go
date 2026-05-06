@@ -217,6 +217,7 @@ type Engine struct {
 	// When true, append [ctx: ~N%] (or model self-report) to assistant replies shown on platforms.
 	showContextIndicator bool
 	replyFooterEnabled   bool
+	replyFooterTokens    bool
 
 	// When true, /list etc. only show sessions tracked by cc-connect,
 	// hiding sessions created by direct CLI usage in the same work_dir.
@@ -709,6 +710,12 @@ func (e *Engine) SetShowContextIndicator(show bool) {
 // footer line with model / reasoning / usage / workdir metadata when available.
 func (e *Engine) SetReplyFooterEnabled(show bool) {
 	e.replyFooterEnabled = show
+}
+
+// SetReplyFooterTokensEnabled controls whether assistant replies include
+// per-turn token counts in the footer when they are available.
+func (e *Engine) SetReplyFooterTokensEnabled(show bool) {
+	e.replyFooterTokens = show
 }
 
 // SetFilterExternalSessions controls whether /list, /switch, /delete, etc.
@@ -3183,7 +3190,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			session.AddHistory("assistant", baseResponse)
 			sessions.Save()
 
+			tokenUsage := resolveReplyFooterTokenUsage(state.agentSession, event)
 			meta := e.auditReplyMetadata(p, replyCtx)
+			agentAuditExtra := map[string]any{
+				"tool_count": toolCount,
+			}
+			if tokenUsage.hasInputOutput() {
+				agentAuditExtra["input_tokens"] = tokenUsage.inputTokens
+				agentAuditExtra["output_tokens"] = tokenUsage.outputTokens
+			}
+			if tokenUsage.hasCachedInputTokens {
+				agentAuditExtra["cached_input_tokens"] = tokenUsage.cachedInputTokens
+			}
 			e.audit(AuditRecord{
 				Kind:             AuditKindAgentResult,
 				Platform:         p.Name(),
@@ -3198,11 +3216,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				RootMessageID:    meta.RootMessageID,
 				ReplyToMessageID: firstNonEmpty(meta.ReplyToMessageID, msgID),
 				AgentOutput:      baseResponse,
-				Extra: map[string]any{
-					"input_tokens":  event.InputTokens,
-					"output_tokens": event.OutputTokens,
-					"tool_count":    toolCount,
-				},
+				Extra:            agentAuditExtra,
 			})
 
 			e.hooks.Emit(HookEvent{
@@ -3219,7 +3233,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					cleanResponse += fmt.Sprintf("\n[ctx: ~%d%%]", selfPct)
 				}
 			}
-			if footer := e.buildReplyFooter(replyAgent, state.agentSession, workspaceDir, replyFooterContextText(replyFooterSessionContextUsage(state.agentSession), e.i18n)); footer != "" {
+			contextUsage := replyFooterSessionContextUsage(state.agentSession)
+			if footer := e.buildReplyFooter(
+				replyAgent,
+				state.agentSession,
+				workspaceDir,
+				replyFooterContextText(contextUsage, e.i18n),
+				replyFooterTokenText(tokenUsage, e.i18n, e.replyFooterTokens),
+			); footer != "" {
 				cleanResponse = appendReplyFooter(cleanResponse, footer)
 			}
 			fullResponse = cleanResponse
@@ -3232,8 +3253,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				"tools", toolCount,
 				"response_len", len(fullResponse),
 				"turn_duration", turnDuration,
-				"input_tokens", event.InputTokens,
-				"output_tokens", event.OutputTokens,
+				"input_tokens", tokenUsage.inputTokens,
+				"output_tokens", tokenUsage.outputTokens,
+				"cached_input_tokens", tokenUsage.cachedInputTokens,
 			)
 
 			replyStart := time.Now()
@@ -4376,7 +4398,7 @@ func (e *Engine) commandWorkDir(agent Agent, msg *Message) string {
 	return ""
 }
 
-func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDir string, contextLeft string) string {
+func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDir string, contextLeft string, tokenText string) string {
 	if !e.replyFooterEnabled || agent == nil {
 		return ""
 	}
@@ -4387,6 +4409,9 @@ func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDi
 	}
 	if effort := replyFooterReasoningEffort(session, agent); effort != "" {
 		parts = append(parts, effort)
+	}
+	if tokens := strings.TrimSpace(tokenText); tokens != "" {
+		parts = append(parts, tokens)
 	}
 	if left := strings.TrimSpace(contextLeft); left != "" {
 		parts = append(parts, left)
@@ -4542,6 +4567,63 @@ func replyFooterContextText(usage *ContextUsage, i18n *I18n) string {
 		left = 100
 	}
 	return i18n.Tf(MsgReplyFooterRemaining, left)
+}
+
+type replyFooterTokenUsage struct {
+	inputTokens          int
+	outputTokens         int
+	cachedInputTokens    int
+	hasInputTokens       bool
+	hasOutputTokens      bool
+	hasCachedInputTokens bool
+}
+
+func (u replyFooterTokenUsage) hasInputOutput() bool {
+	return u.hasInputTokens || u.hasOutputTokens
+}
+
+func resolveReplyFooterTokenUsage(session AgentSession, event Event) replyFooterTokenUsage {
+	resolved := replyFooterTokenUsage{}
+	if event.InputTokens > 0 {
+		resolved.inputTokens = event.InputTokens
+		resolved.hasInputTokens = true
+	}
+	if event.OutputTokens > 0 {
+		resolved.outputTokens = event.OutputTokens
+		resolved.hasOutputTokens = true
+	}
+
+	usage := replyFooterSessionContextUsage(session)
+	if usage == nil {
+		return resolved
+	}
+
+	if usage.InputTokens > 0 {
+		resolved.inputTokens = usage.InputTokens
+		resolved.hasInputTokens = true
+	}
+	if usage.OutputTokens > 0 {
+		resolved.outputTokens = usage.OutputTokens
+		resolved.hasOutputTokens = true
+	}
+	if usage.CachedInputTokens > 0 || usage.InputTokens > 0 || usage.OutputTokens > 0 || usage.TotalTokens > 0 || usage.UsedTokens > 0 {
+		resolved.cachedInputTokens = usage.CachedInputTokens
+		resolved.hasCachedInputTokens = true
+	}
+
+	return resolved
+}
+
+func replyFooterTokenText(usage replyFooterTokenUsage, i18n *I18n, enabled bool) string {
+	if !enabled || i18n == nil || !usage.hasInputOutput() {
+		return ""
+	}
+	input := strconv.Itoa(usage.inputTokens)
+	output := strconv.Itoa(usage.outputTokens)
+	if usage.cachedInputTokens > 0 {
+		return i18n.Tf(MsgReplyFooterTokensWithCache, input, output, strconv.Itoa(usage.cachedInputTokens))
+	}
+	return i18n.Tf(MsgReplyFooterTokens, input, output)
 }
 
 func replyFooterWorkDir(session AgentSession, agent Agent, workspaceDir string) string {

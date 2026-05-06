@@ -2375,12 +2375,14 @@ func TestSaveProjectSettings_ExtraFields(t *testing.T) {
 	patchConfigPath(t, configPath)
 
 	show := true
+	footerTokens := true
 	wd := "/tmp/patched"
 	mode := "yolo"
 	err := SaveProjectSettings("alpha", ProjectSettingsUpdate{
 		WorkDir:              &wd,
 		Mode:                 &mode,
 		ShowContextIndicator: &show,
+		ReplyFooterTokens:    &footerTokens,
 		PlatformAllowFrom:    map[string]string{"telegram": "u1", "Feishu": "u2"},
 	})
 	if err != nil {
@@ -2398,6 +2400,9 @@ func TestSaveProjectSettings_ExtraFields(t *testing.T) {
 	if proj.ShowContextIndicator == nil || !*proj.ShowContextIndicator {
 		t.Fatalf("ShowContextIndicator = %v, want true", proj.ShowContextIndicator)
 	}
+	if proj.ReplyFooterTokens == nil || !*proj.ReplyFooterTokens {
+		t.Fatalf("ReplyFooterTokens = %v, want true", proj.ReplyFooterTokens)
+	}
 	if stringMapValue(proj.Platforms[0].Options, "allow_from") != "u1" {
 		t.Fatalf("telegram allow_from = %q, want u1", stringMapValue(proj.Platforms[0].Options, "allow_from"))
 	}
@@ -2410,12 +2415,20 @@ func TestGetProjectConfigDetails(t *testing.T) {
 	configPath := writeConfigFixture(t, feishuConfigFixture)
 	patchConfigPath(t, configPath)
 
+	footerTokens := true
+	if err := SaveProjectSettings("alpha", ProjectSettingsUpdate{ReplyFooterTokens: &footerTokens}); err != nil {
+		t.Fatalf("SaveProjectSettings: %v", err)
+	}
+
 	details := GetProjectConfigDetails("alpha")
 	if details == nil {
 		t.Fatal("GetProjectConfigDetails returned nil")
 	}
 	if details["work_dir"] != "/tmp/alpha" {
 		t.Fatalf("work_dir = %v", details["work_dir"])
+	}
+	if details["reply_footer_tokens"] != true {
+		t.Fatalf("reply_footer_tokens = %#v, want true", details["reply_footer_tokens"])
 	}
 	pcs, ok := details["platform_configs"].([]map[string]any)
 	if !ok || len(pcs) < 2 {

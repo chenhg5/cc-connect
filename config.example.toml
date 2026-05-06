@@ -607,6 +607,8 @@ name = "my-backend"
 #                                   # 不在助手回复末尾显示「[ctx: ~N%]」上下文占用提示（默认 true 显示）
 # reply_footer = false             # Hide the Codex-like footer on assistant replies (default: true / show)
 #                                   # 不在助手回复底部显示类似 Codex 的状态行（默认 true 显示）
+# reply_footer_tokens = true       # Show per-turn token counts in the footer when available (default: false / hide)
+#                                   # 在回复底部显示每轮 token 消耗（如可用，默认 false 隐藏）
 # disabled_commands = ["restart", "upgrade", "cron"]  # Disable specific commands for this project
 #                                                     # 禁用该项目的指定命令
 #

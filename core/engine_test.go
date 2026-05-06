@@ -1035,7 +1035,7 @@ func TestProcessInteractiveEvents_AppendsReplyFooterWhenEnabled(t *testing.T) {
 	if len(sent) != 1 {
 		t.Fatalf("sent = %#v, want one final reply", sent)
 	}
-	want := "answer\n\n*gpt-5.4 · xhigh · 100% left · ~/codes/cc-connect*"
+	want := fmt.Sprintf("answer\n\n*gpt-5.4 · xhigh · 100%% left · %s*", compactReplyFooterPath(filepath.Join(homeDir, "codes", "cc-connect")))
 	if sent[0] != want {
 		t.Fatalf("final reply = %q, want %q", sent[0], want)
 	}
@@ -1150,7 +1150,103 @@ func TestProcessInteractiveEvents_ReplyFooterPrefersSessionRuntimeState(t *testi
 	if len(sent) != 1 {
 		t.Fatalf("sent = %#v, want one final reply", sent)
 	}
-	want := "answer\n\n*gpt-5.4 · xhigh · 31% left · ~/codes/cc-connect*"
+	want := fmt.Sprintf("answer\n\n*gpt-5.4 · xhigh · 31%% left · %s*", compactReplyFooterPath(filepath.Join(homeDir, "codes", "cc-connect")))
+	if sent[0] != want {
+		t.Fatalf("final reply = %q, want %q", sent[0], want)
+	}
+}
+
+func TestProcessInteractiveEvents_AppendsReplyFooterTokensWhenEnabled(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	agent := &stubReplyFooterAgent{
+		stubModelModeAgent: stubModelModeAgent{
+			model:           "gpt-5.4",
+			reasoningEffort: "xhigh",
+		},
+		workDir: filepath.Join(homeDir, "codes", "cc-connect"),
+	}
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetReplyFooterEnabled(true)
+	e.SetReplyFooterTokensEnabled(true)
+
+	sessionKey := "telegram:user-footer-tokens"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-footer-tokens")
+	agentSession.model = "gpt-5.4"
+	agentSession.reasoningEffort = "xhigh"
+	agentSession.workDir = filepath.Join(homeDir, "codes", "cc-connect")
+	agentSession.contextUsage = &ContextUsage{
+		UsedTokens:        181424,
+		BaselineTokens:    12000,
+		TotalTokens:       50821769,
+		InputTokens:       180805,
+		CachedInputTokens: 139776,
+		OutputTokens:      619,
+		ContextWindow:     258400,
+	}
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-footer-tokens",
+		agent:        agent,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventResult, Content: "answer", InputTokens: 7, OutputTokens: 3, Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-footer-tokens", time.Now(), nil, nil, state.replyCtx)
+
+	sent := p.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("sent = %#v, want one final reply", sent)
+	}
+	want := fmt.Sprintf("answer\n\n*gpt-5.4 · xhigh · in: 180805 / out: 619 / cache: 139776 · 31%% left · %s*", compactReplyFooterPath(filepath.Join(homeDir, "codes", "cc-connect")))
+	if sent[0] != want {
+		t.Fatalf("final reply = %q, want %q", sent[0], want)
+	}
+}
+
+func TestProcessInteractiveEvents_ReplyFooterTokensFallbackToEventUsage(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	agent := &stubReplyFooterAgent{
+		stubModelModeAgent: stubModelModeAgent{
+			model:           "gpt-5.4",
+			reasoningEffort: "xhigh",
+		},
+		workDir: filepath.Join(homeDir, "codes", "cc-connect"),
+	}
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetReplyFooterEnabled(true)
+	e.SetReplyFooterTokensEnabled(true)
+	e.SetShowContextIndicator(false)
+
+	sessionKey := "telegram:user-footer-event-tokens"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-footer-event-tokens")
+	agentSession.model = "gpt-5.4"
+	agentSession.reasoningEffort = "xhigh"
+	agentSession.workDir = filepath.Join(homeDir, "codes", "cc-connect")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-footer-event-tokens",
+		agent:        agent,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventResult, Content: "answer", InputTokens: 123, OutputTokens: 45, Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-footer-event-tokens", time.Now(), nil, nil, state.replyCtx)
+
+	sent := p.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("sent = %#v, want one final reply", sent)
+	}
+	want := fmt.Sprintf("answer\n\n*gpt-5.4 · xhigh · in: 123 / out: 45 · %s*", compactReplyFooterPath(filepath.Join(homeDir, "codes", "cc-connect")))
 	if sent[0] != want {
 		t.Fatalf("final reply = %q, want %q", sent[0], want)
 	}
@@ -10515,8 +10611,8 @@ func TestSessionName_ClaudeCodeLikeFlow(t *testing.T) {
 }
 
 // acpLikeSession simulates ACP behavior:
-// - CurrentSessionID() returns the thread ID immediately after creation
-//   (ACP does handshake before returning from StartSession)
+//   - CurrentSessionID() returns the thread ID immediately after creation
+//     (ACP does handshake before returning from StartSession)
 type acpLikeSession struct {
 	threadID string
 	events   chan Event

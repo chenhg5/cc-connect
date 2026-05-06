@@ -246,18 +246,20 @@ const (
 	MsgCronBtnUnmute    MsgKey = "cron_btn_unmute"
 	MsgCronBtnDelete    MsgKey = "cron_btn_delete"
 
-	MsgStatusTitle          MsgKey = "status_title"
-	MsgReplyFooterRemaining MsgKey = "reply_footer_remaining"
-	MsgModelCurrent          MsgKey = "model_current"
-	MsgModelChanged          MsgKey = "model_changed"
-	MsgModelChangeFailed     MsgKey = "model_change_failed"
-	MsgModelCardSwitching    MsgKey = "model_card_switching"
-	MsgModelCardSwitched     MsgKey = "model_card_switched"
-	MsgModelCardSwitchFailed MsgKey = "model_card_switch_failed"
-	MsgModelNotSupported     MsgKey = "model_not_supported"
-	MsgReasoningCurrent      MsgKey = "reasoning_current"
-	MsgReasoningChanged      MsgKey = "reasoning_changed"
-	MsgReasoningNotSupported MsgKey = "reasoning_not_supported"
+	MsgStatusTitle                MsgKey = "status_title"
+	MsgReplyFooterRemaining       MsgKey = "reply_footer_remaining"
+	MsgReplyFooterTokens          MsgKey = "reply_footer_tokens"
+	MsgReplyFooterTokensWithCache MsgKey = "reply_footer_tokens_with_cache"
+	MsgModelCurrent               MsgKey = "model_current"
+	MsgModelChanged               MsgKey = "model_changed"
+	MsgModelChangeFailed          MsgKey = "model_change_failed"
+	MsgModelCardSwitching         MsgKey = "model_card_switching"
+	MsgModelCardSwitched          MsgKey = "model_card_switched"
+	MsgModelCardSwitchFailed      MsgKey = "model_card_switch_failed"
+	MsgModelNotSupported          MsgKey = "model_not_supported"
+	MsgReasoningCurrent           MsgKey = "reasoning_current"
+	MsgReasoningChanged           MsgKey = "reasoning_changed"
+	MsgReasoningNotSupported      MsgKey = "reasoning_not_supported"
 
 	MsgCompressNotSupported MsgKey = "compress_not_supported"
 	MsgCompressing          MsgKey = "compressing"
@@ -1871,6 +1873,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "剩餘 %d%%",
 		LangJapanese:           "残り %d%%",
 		LangSpanish:            "%d%% restante",
+	},
+	MsgReplyFooterTokens: {
+		LangEnglish:            "in: %s / out: %s",
+		LangChinese:            "in: %s / out: %s",
+		LangTraditionalChinese: "in: %s / out: %s",
+		LangJapanese:           "in: %s / out: %s",
+		LangSpanish:            "in: %s / out: %s",
+	},
+	MsgReplyFooterTokensWithCache: {
+		LangEnglish:            "in: %s / out: %s / cache: %s",
+		LangChinese:            "in: %s / out: %s / cache: %s",
+		LangTraditionalChinese: "in: %s / out: %s / cache: %s",
+		LangJapanese:           "in: %s / out: %s / cache: %s",
+		LangSpanish:            "in: %s / out: %s / cache: %s",
 	},
 	MsgModelCurrent: {
 		LangEnglish:            "Current model: %s",

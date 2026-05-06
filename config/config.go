@@ -349,11 +349,14 @@ type ProjectConfig struct {
 	ShowContextIndicator *bool `toml:"show_context_indicator,omitempty"`
 	// ReplyFooter: nil/true = append a Codex-style footer; false = disable.
 	// (model/reasoning/usage/workdir, when available) to assistant replies.
-	ReplyFooter      *bool        `toml:"reply_footer,omitempty"`
-	InjectSender     *bool        `toml:"inject_sender,omitempty"`     // prepend sender identity (platform + user ID) to each message sent to the agent
-	DisabledCommands []string     `toml:"disabled_commands,omitempty"` // commands to disable for this project (e.g. ["restart", "upgrade"])
-	AdminFrom        string       `toml:"admin_from,omitempty"`        // comma-separated user IDs allowed to run privileged commands; "*" = all allowed users
-	Users            *UsersConfig `toml:"users,omitempty"`             // per-user role config; nil = legacy behavior
+	ReplyFooter *bool `toml:"reply_footer,omitempty"`
+	// ReplyFooterTokens: nil/false = keep token counts out of the footer; true = show
+	// per-turn input/output/cache token counts when available.
+	ReplyFooterTokens *bool        `toml:"reply_footer_tokens,omitempty"`
+	InjectSender      *bool        `toml:"inject_sender,omitempty"`     // prepend sender identity (platform + user ID) to each message sent to the agent
+	DisabledCommands  []string     `toml:"disabled_commands,omitempty"` // commands to disable for this project (e.g. ["restart", "upgrade"])
+	AdminFrom         string       `toml:"admin_from,omitempty"`        // comma-separated user IDs allowed to run privileged commands; "*" = all allowed users
+	Users             *UsersConfig `toml:"users,omitempty"`             // per-user role config; nil = legacy behavior
 	// Quiet is legacy per-project override; see Config.Quiet. When true and global [display]
 	// omits thinking_messages / tool_messages, those default to off for this project.
 	Quiet      *bool           `toml:"quiet,omitempty"`
@@ -2712,6 +2715,7 @@ type ProjectSettingsUpdate struct {
 	AgentType            *string
 	ShowContextIndicator *bool
 	ReplyFooter          *bool
+	ReplyFooterTokens    *bool
 	InjectSender         *bool
 	PlatformAllowFrom    map[string]string
 }
@@ -2793,6 +2797,10 @@ func SaveProjectSettings(projectName string, update ProjectSettingsUpdate) error
 		if update.ReplyFooter != nil {
 			v := *update.ReplyFooter
 			proj.ReplyFooter = &v
+		}
+		if update.ReplyFooterTokens != nil {
+			v := *update.ReplyFooterTokens
+			proj.ReplyFooterTokens = &v
 		}
 		if update.InjectSender != nil {
 			v := *update.InjectSender
@@ -2878,6 +2886,9 @@ func GetProjectConfigDetails(projectName string) map[string]any {
 		}
 		if p.ReplyFooter != nil {
 			result["reply_footer"] = *p.ReplyFooter
+		}
+		if p.ReplyFooterTokens != nil {
+			result["reply_footer_tokens"] = *p.ReplyFooterTokens
 		}
 		if p.InjectSender != nil {
 			result["inject_sender"] = *p.InjectSender

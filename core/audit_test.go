@@ -274,9 +274,14 @@ func TestProcessInteractiveEventsAuditsAgentResultAndPreviewFinalize(t *testing.
 
 	sessionKey := "preview-session"
 	session := e.sessions.GetOrCreateActive(sessionKey)
-	agentSession := &resultAgentSession{events: make(chan Event, 2)}
+	agentSession := newControllableSession("preview-agent-session")
+	agentSession.contextUsage = &ContextUsage{
+		InputTokens:       180805,
+		CachedInputTokens: 139776,
+		OutputTokens:      619,
+	}
 	agentSession.events <- Event{Type: EventText, Content: "hello "}
-	agentSession.events <- Event{Type: EventResult, Content: "hello world", Done: true}
+	agentSession.events <- Event{Type: EventResult, Content: "hello world", InputTokens: 7, OutputTokens: 3, Done: true}
 
 	state := &interactiveState{
 		agentSession: agentSession,
@@ -309,6 +314,15 @@ func TestProcessInteractiveEventsAuditsAgentResultAndPreviewFinalize(t *testing.
 	}
 	if agentRecord.AgentOutput != "hello world" {
 		t.Fatalf("AgentOutput = %q, want %q", agentRecord.AgentOutput, "hello world")
+	}
+	if got := agentRecord.Extra["input_tokens"]; got != 180805 {
+		t.Fatalf("input_tokens = %#v, want %d", got, 180805)
+	}
+	if got := agentRecord.Extra["output_tokens"]; got != 619 {
+		t.Fatalf("output_tokens = %#v, want %d", got, 619)
+	}
+	if got := agentRecord.Extra["cached_input_tokens"]; got != 139776 {
+		t.Fatalf("cached_input_tokens = %#v, want %d", got, 139776)
 	}
 	if outboundRecord == nil {
 		t.Fatal("expected an outbound_sent record for the preview handle")
