@@ -173,6 +173,37 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel) {
 		return
 	}
 
+	// Handle richText messages — extract plain text from rich content
+	if data.Msgtype == "richText" {
+		text := extractRichText(data.Content)
+		if text == "" {
+			slog.Debug("dingtalk: richText message with no extractable text", "msg_id", data.MsgId)
+			return
+		}
+		msg := &core.Message{
+			SessionKey: sessionKey,
+			Platform:   "dingtalk",
+			UserID:     data.SenderStaffId,
+			UserName:   data.SenderNick,
+			ChatName:   data.ConversationTitle,
+			Content:    text,
+			MessageID:  data.MsgId,
+			ReplyCtx: replyContext{
+				sessionWebhook: data.SessionWebhook,
+				conversationId: data.ConversationId,
+				senderStaffId:  data.SenderStaffId,
+			},
+		}
+		p.handler(p, msg)
+		return
+	}
+
+	// Handle image messages
+	if data.Msgtype == "image" {
+		p.handleImageMessage(data, sessionKey)
+		return
+	}
+
 	// Handle text messages (default)
 	msg := &core.Message{
 		SessionKey: sessionKey,
@@ -190,6 +221,31 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel) {
 	}
 
 	p.handler(p, msg)
+}
+
+// extractRichText extracts plain text from a DingTalk richText content payload.
+// The expected structure is: {"richText": [{"text": "..."}, {"text": "...", "attrs": {...}}, ...]}
+// Non-text elements (e.g. pictureDownloadCode) are skipped.
+func extractRichText(content interface{}) string {
+	m, ok := content.(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	parts, ok := m["richText"].([]interface{})
+	if !ok {
+		return ""
+	}
+	var b strings.Builder
+	for _, part := range parts {
+		item, ok := part.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if text, ok := item["text"].(string); ok {
+			b.WriteString(text)
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func (p *Platform) handleAudioMessage(data *chatbot.BotCallbackDataModel, sessionKey string) {
@@ -256,6 +312,79 @@ func (p *Platform) handleAudioMessage(data *chatbot.BotCallbackDataModel, sessio
 			Data:     audioBytes,
 			Format:   "amr", // DingTalk typically uses AMR format
 		},
+	}
+
+	p.handler(p, msg)
+}
+
+func (p *Platform) handleImageMessage(data *chatbot.BotCallbackDataModel, sessionKey string) {
+	slog.Debug("dingtalk: image message received", "user", data.SenderNick)
+
+	// Parse image content from the raw content
+	imageData, ok := data.Content.(map[string]interface{})
+	if !ok {
+		slog.Error("dingtalk: invalid image content type", "type", fmt.Sprintf("%T", data.Content))
+		return
+	}
+
+	downloadCode, _ := imageData["downloadCode"].(string)
+	if downloadCode == "" {
+		slog.Error("dingtalk: image message missing downloadCode")
+		return
+	}
+
+	// Download image file using the same messageFiles/download API as audio
+	downloadURL, err := p.getDownloadURL(downloadCode)
+	if err != nil {
+		slog.Error("dingtalk: failed to get image download URL", "error", err)
+		return
+	}
+
+	resp, err := p.httpClient.Get(downloadURL)
+	if err != nil {
+		slog.Error("dingtalk: failed to download image", "error", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		slog.Error("dingtalk: image download returned status", "status", resp.StatusCode)
+		return
+	}
+
+	const maxImageBytes = 25 * 1024 * 1024 // 25 MiB, same cap as other platforms
+	imgBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxImageBytes+1))
+	if err != nil {
+		slog.Error("dingtalk: failed to read image data", "error", err)
+		return
+	}
+	if len(imgBytes) > maxImageBytes {
+		slog.Error("dingtalk: image too large, dropping", "size", len(imgBytes), "limit", maxImageBytes)
+		return
+	}
+
+	mimeType := resp.Header.Get("Content-Type")
+	if mimeType == "" {
+		mimeType = "image/png"
+	}
+
+	slog.Info("dingtalk: image downloaded successfully", "size", len(imgBytes), "mime", mimeType)
+
+	msg := &core.Message{
+		SessionKey: sessionKey,
+		Platform:   "dingtalk",
+		UserID:     data.SenderStaffId,
+		UserName:   data.SenderNick,
+		MessageID:  data.MsgId,
+		ReplyCtx: replyContext{
+			sessionWebhook:  data.SessionWebhook,
+			conversationId:  data.ConversationId,
+			senderStaffId:   data.SenderStaffId,
+		},
+		Images: []core.ImageAttachment{{
+			MimeType: mimeType,
+			Data:     imgBytes,
+		}},
 	}
 
 	p.handler(p, msg)

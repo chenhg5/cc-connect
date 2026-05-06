@@ -16,8 +16,9 @@ require (
 	github.com/mdp/qrterminal/v3 v3.2.1
 	github.com/open-dingtalk/dingtalk-stream-sdk-go v0.9.1
 	github.com/robfig/cron/v3 v3.0.1
-	github.com/slack-go/slack v0.15.0
+	github.com/slack-go/slack v0.16.0
 	github.com/stretchr/testify v1.9.0
+	modernc.org/sqlite v1.49.1
 	rsc.io/qr v0.2.0
 )
 
@@ -56,5 +57,4 @@ require (
 	modernc.org/libc v1.72.0 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
-	modernc.org/sqlite v1.49.1 // indirect
 )

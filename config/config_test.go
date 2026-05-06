@@ -209,10 +209,13 @@ func TestRunAsEnv_RejectsDangerousVars(t *testing.T) {
 
 func TestEffectiveDisplayQuiet(t *testing.T) {
 	tru, fal := true, false
+	compact := DisplayModeCompact
+	quiet := DisplayModeQuiet
 	tests := []struct {
 		name     string
 		cfg      Config
 		proj     ProjectConfig
+		wantMode string
 		wantTM   bool
 		wantTool bool
 	}{
@@ -220,20 +223,23 @@ func TestEffectiveDisplayQuiet(t *testing.T) {
 			name:     "defaults no quiet",
 			cfg:      Config{},
 			proj:     ProjectConfig{},
+			wantMode: "full",
 			wantTM:   true,
 			wantTool: true,
 		},
 		{
-			name:     "global quiet maps when display unset",
+			name:     "global quiet maps to quiet mode",
 			cfg:      Config{Quiet: &tru},
 			proj:     ProjectConfig{},
+			wantMode: "quiet",
 			wantTM:   false,
 			wantTool: false,
 		},
 		{
-			name:     "project quiet maps when display unset",
+			name:     "project quiet maps to quiet mode",
 			cfg:      Config{},
 			proj:     ProjectConfig{Quiet: &tru},
+			wantMode: "quiet",
 			wantTM:   false,
 			wantTool: false,
 		},
@@ -244,6 +250,7 @@ func TestEffectiveDisplayQuiet(t *testing.T) {
 				Display: DisplayConfig{ThinkingMessages: &tru},
 			},
 			proj:     ProjectConfig{},
+			wantMode: "quiet",
 			wantTM:   true,
 			wantTool: false,
 		},
@@ -251,18 +258,164 @@ func TestEffectiveDisplayQuiet(t *testing.T) {
 			name:     "project quiet false overrides global quiet",
 			cfg:      Config{Quiet: &tru},
 			proj:     ProjectConfig{Quiet: &fal},
+			wantMode: "full",
 			wantTM:   true,
 			wantTool: true,
+		},
+		{
+			name:     "explicit mode compact",
+			cfg:      Config{Display: DisplayConfig{Mode: &compact}},
+			proj:     ProjectConfig{},
+			wantMode: "compact",
+			wantTM:   false,
+			wantTool: false,
+		},
+		{
+			name:     "explicit mode wins over legacy quiet",
+			cfg:      Config{Quiet: &tru, Display: DisplayConfig{Mode: &compact}},
+			proj:     ProjectConfig{},
+			wantMode: "compact",
+			wantTM:   false,
+			wantTool: false,
+		},
+		{
+			name: "explicit mode quiet with thinking override",
+			cfg: Config{
+				Display: DisplayConfig{Mode: &quiet, ThinkingMessages: &tru},
+			},
+			proj:     ProjectConfig{},
+			wantMode: "quiet",
+			wantTM:   true,
+			wantTool: false,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tm, tool, _, _ := EffectiveDisplay(&tt.cfg, &tt.proj)
+			mode, tm, tool, _, _ := EffectiveDisplay(&tt.cfg, &tt.proj)
+			if mode != tt.wantMode {
+				t.Fatalf("Mode = %q, want %q", mode, tt.wantMode)
+			}
 			if tm != tt.wantTM {
 				t.Fatalf("ThinkingMessages = %v, want %v", tm, tt.wantTM)
 			}
 			if tool != tt.wantTool {
 				t.Fatalf("ToolMessages = %v, want %v", tool, tt.wantTool)
+			}
+		})
+	}
+}
+
+func TestEffectiveDisplay_ProjectOverride(t *testing.T) {
+	tru, fal := true, false
+	maxA, maxB := 100, 200
+
+	tests := []struct {
+		name           string
+		cfg            Config
+		proj           ProjectConfig
+		wantTM         bool
+		wantTool       bool
+		wantThinkLen   int
+		wantToolMaxLen int
+	}{
+		{
+			name: "project overrides global thinking_messages",
+			cfg: Config{
+				Display: DisplayConfig{ThinkingMessages: &tru, ToolMessages: &tru},
+			},
+			proj: ProjectConfig{
+				Display: &DisplayConfig{ThinkingMessages: &fal},
+			},
+			wantTM:         false,
+			wantTool:       true,
+			wantThinkLen:   300,
+			wantToolMaxLen: 500,
+		},
+		{
+			name: "project unset falls back to global",
+			cfg: Config{
+				Display: DisplayConfig{ThinkingMessages: &fal, ToolMessages: &fal},
+			},
+			proj: ProjectConfig{
+				Display: &DisplayConfig{},
+			},
+			wantTM:         false,
+			wantTool:       false,
+			wantThinkLen:   300,
+			wantToolMaxLen: 500,
+		},
+		{
+			name: "both unset falls back to default",
+			cfg:  Config{},
+			proj: ProjectConfig{
+				Display: &DisplayConfig{},
+			},
+			wantTM:         true,
+			wantTool:       true,
+			wantThinkLen:   300,
+			wantToolMaxLen: 500,
+		},
+		{
+			name: "project overrides max-len fields",
+			cfg: Config{
+				Display: DisplayConfig{ThinkingMaxLen: &maxA, ToolMaxLen: &maxA},
+			},
+			proj: ProjectConfig{
+				Display: &DisplayConfig{ThinkingMaxLen: &maxB, ToolMaxLen: &maxB},
+			},
+			wantTM:         true,
+			wantTool:       true,
+			wantThinkLen:   200,
+			wantToolMaxLen: 200,
+		},
+		{
+			name: "project quiet still respected when project display unset",
+			cfg:  Config{Quiet: &tru},
+			proj: ProjectConfig{
+				Display: &DisplayConfig{},
+			},
+			wantTM:         false,
+			wantTool:       false,
+			wantThinkLen:   300,
+			wantToolMaxLen: 500,
+		},
+		{
+			name: "project display.thinking_messages true overrides project quiet",
+			cfg:  Config{Quiet: &tru},
+			proj: ProjectConfig{
+				Display: &DisplayConfig{ThinkingMessages: &tru},
+			},
+			wantTM:         true,
+			wantTool:       false,
+			wantThinkLen:   300,
+			wantToolMaxLen: 500,
+		},
+		{
+			name: "nil project display behaves like before",
+			cfg: Config{
+				Display: DisplayConfig{ThinkingMessages: &fal},
+			},
+			proj:           ProjectConfig{},
+			wantTM:         false,
+			wantTool:       true,
+			wantThinkLen:   300,
+			wantToolMaxLen: 500,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, tm, tool, thinkLen, toolMaxLen := EffectiveDisplay(&tt.cfg, &tt.proj)
+			if tm != tt.wantTM {
+				t.Errorf("ThinkingMessages = %v, want %v", tm, tt.wantTM)
+			}
+			if tool != tt.wantTool {
+				t.Errorf("ToolMessages = %v, want %v", tool, tt.wantTool)
+			}
+			if thinkLen != tt.wantThinkLen {
+				t.Errorf("ThinkingMaxLen = %d, want %d", thinkLen, tt.wantThinkLen)
+			}
+			if toolMaxLen != tt.wantToolMaxLen {
+				t.Errorf("ToolMaxLen = %d, want %d", toolMaxLen, tt.wantToolMaxLen)
 			}
 		})
 	}
@@ -680,7 +833,7 @@ custom_display = "keep" # also keep
 
 	thinking := 200
 	toolShow := false
-	if err := SaveDisplayConfig(nil, &thinking, nil, &toolShow); err != nil {
+	if err := SaveDisplayConfig(nil, nil, &thinking, nil, &toolShow); err != nil {
 		t.Fatalf("SaveDisplayConfig() error: %v", err)
 	}
 
@@ -901,7 +1054,7 @@ func TestDisplayConfig_Save(t *testing.T) {
 	thinking := 120
 	tool := 240
 	showTools := false
-	if err := SaveDisplayConfig(nil, &thinking, &tool, &showTools); err != nil {
+	if err := SaveDisplayConfig(nil, nil, &thinking, &tool, &showTools); err != nil {
 		t.Fatalf("SaveDisplayConfig() error: %v", err)
 	}
 
@@ -917,7 +1070,7 @@ func TestDisplayConfig_Save(t *testing.T) {
 	}
 
 	thinking = 360
-	if err := SaveDisplayConfig(nil, &thinking, nil, nil); err != nil {
+	if err := SaveDisplayConfig(nil, nil, &thinking, nil, nil); err != nil {
 		t.Fatalf("SaveDisplayConfig() second update error: %v", err)
 	}
 

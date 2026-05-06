@@ -140,11 +140,14 @@ type Platform struct {
 	handler          core.MessageHandler
 	cardNavHandler   core.CardNavigationHandler
 	cancel           context.CancelFunc
-	dedup            core.MessageDedup
+	dedup            *core.MessageDedup
 	botOpenID        string
-	userNameCache    sync.Map // open_id -> display name
-	chatNameCache    sync.Map // chat_id -> chat name
-	chatMemberCache  sync.Map // chatID -> *chatMemberEntry
+	peerBots         map[string]string // app_id -> friendly alias, for quoted-reply attribution
+	userNameCache    sync.Map          // open_id -> display name
+	chatNameCache    sync.Map          // chat_id -> chat name
+	chatMemberCache  sync.Map          // chatID -> *chatMemberEntry
+	recalledMu       sync.Mutex
+	recalledMsgIDs   map[string]time.Time // message_id -> recall time, short TTL race guard
 	// Webhook mode fields (for Lark international version)
 	server       *http.Server
 	port         string
@@ -213,6 +216,15 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		noReplyToTrigger = true
 	}
 
+	peerBots := map[string]string{}
+	if raw, ok := opts["peer_bots"].(map[string]any); ok {
+		for k, v := range raw {
+			if s, ok := v.(string); ok && s != "" {
+				peerBots[k] = s
+			}
+		}
+	}
+
 	progressStyle := "legacy"
 	if v, ok := opts["progress_style"].(string); ok {
 		switch strings.ToLower(strings.TrimSpace(v)) {
@@ -265,9 +277,11 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		noReplyToTrigger:           noReplyToTrigger,
 		client:                     lark.NewClient(appID, appSecret, clientOpts...),
 		replayClient:               newFeishuReplayClient(appID, appSecret, domain),
+		dedup:                      &core.MessageDedup{},
 		port:                       port,
 		callbackPath:               callbackPath,
 		encryptKey:                 encryptKey,
+		peerBots:                   peerBots,
 	}
 	if !useInteractiveCard {
 		base.self = base
@@ -334,6 +348,14 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 			for _, sibling := range p.sharedGroup.allPlatforms() {
 				if err := sibling.onMessage(ctx, event); err != nil {
 					slog.Error("shared ws: onMessage error", "err", err)
+				}
+			}
+			return nil
+		}).
+		OnP2MessageRecalledV1(func(ctx context.Context, event *larkim.P2MessageRecalledV1) error {
+			for _, sibling := range p.sharedGroup.allPlatforms() {
+				if err := sibling.onMessageRecalled(ctx, event); err != nil {
+					slog.Error("shared ws: onMessageRecalled error", "err", err)
 				}
 			}
 			return nil
@@ -727,6 +749,172 @@ func (p *Platform) AddDoneReaction(rctx any) {
 	go p.addReactionWithEmoji(rc.messageID, p.doneEmoji)
 }
 
+const recalledMessageTTL = 10 * time.Minute
+
+func (p *Platform) markMessageRecalled(messageID string) {
+	messageID = strings.TrimSpace(messageID)
+	if messageID == "" {
+		return
+	}
+
+	now := time.Now()
+	p.recalledMu.Lock()
+	defer p.recalledMu.Unlock()
+
+	if p.recalledMsgIDs == nil {
+		p.recalledMsgIDs = make(map[string]time.Time)
+	}
+	for id, markedAt := range p.recalledMsgIDs {
+		if now.Sub(markedAt) > recalledMessageTTL {
+			delete(p.recalledMsgIDs, id)
+		}
+	}
+	p.recalledMsgIDs[messageID] = now
+}
+
+func (p *Platform) isMessageRecalled(messageID string) bool {
+	messageID = strings.TrimSpace(messageID)
+	if messageID == "" {
+		return false
+	}
+
+	now := time.Now()
+	p.recalledMu.Lock()
+	defer p.recalledMu.Unlock()
+
+	markedAt, ok := p.recalledMsgIDs[messageID]
+	if !ok {
+		return false
+	}
+	if now.Sub(markedAt) > recalledMessageTTL {
+		delete(p.recalledMsgIDs, messageID)
+		return false
+	}
+	return true
+}
+
+func isMessageWithdrawnCode(code int, msg string) bool {
+	msg = strings.ToLower(strings.TrimSpace(msg))
+	if code == 230011 {
+		return true
+	}
+	for _, needle := range []string{"withdrawn", "recalled", "recall", "deleted", "not found", "not exist", "撤回"} {
+		if strings.Contains(msg, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *Platform) IsMessageRecalled(ctx context.Context, rctx any) (bool, error) {
+	rc, ok := rctx.(replyContext)
+	if !ok || strings.TrimSpace(rc.messageID) == "" {
+		return false, nil
+	}
+	messageID := strings.TrimSpace(rc.messageID)
+	if p.isMessageRecalled(messageID) {
+		return true, nil
+	}
+	if p.client == nil {
+		return false, fmt.Errorf("%s: client not initialized", p.tag())
+	}
+
+	req := larkim.NewGetMessageReqBuilder().
+		MessageId(messageID).
+		UserIdType(larkim.UserIdTypeGetMessageOpenId).
+		Build()
+
+	var resp *larkim.GetMessageResp
+	if err := p.withTransientRetry(ctx, "get message", func() error {
+		return p.withFreshTenantAccessTokenRetry(ctx, "get message", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+			var err error
+			resp, err = client.Im.Message.Get(ctx, req, options...)
+			if err != nil {
+				return fmt.Errorf("%s: get message api call: %w", p.tag(), err)
+			}
+			if !resp.Success() {
+				return fmt.Errorf("%s: get message failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+			}
+			return nil
+		})
+	}); err != nil {
+		if resp != nil && isMessageWithdrawnCode(resp.Code, resp.Msg) {
+			p.markMessageRecalled(messageID)
+			return true, nil
+		}
+		if isMessageWithdrawnError(err) {
+			p.markMessageRecalled(messageID)
+			return true, nil
+		}
+		return false, err
+	}
+
+	if resp == nil || resp.Data == nil || len(resp.Data.Items) == 0 {
+		p.markMessageRecalled(messageID)
+		return true, nil
+	}
+	for _, item := range resp.Data.Items {
+		if item != nil && item.Deleted != nil && *item.Deleted {
+			p.markMessageRecalled(messageID)
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func isMessageWithdrawnError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return isMessageWithdrawnCode(0, err.Error())
+}
+
+func (p *Platform) dispatchCoreMessage(msg *core.Message) {
+	if msg == nil || p.handler == nil {
+		return
+	}
+	if p.isMessageRecalled(msg.MessageID) {
+		slog.Debug(p.tag()+": recalled message dispatch dropped", "message_id", msg.MessageID)
+		return
+	}
+	p.handler(p.dispatchPlatform(), msg)
+}
+
+func (p *Platform) onMessageRecalled(_ context.Context, event *larkim.P2MessageRecalledV1) error {
+	if event == nil || event.Event == nil {
+		return nil
+	}
+
+	messageID := stringValue(event.Event.MessageId)
+	chatID := stringValue(event.Event.ChatId)
+	if messageID == "" {
+		slog.Debug(p.tag()+": recall event without message id", "chat_id", chatID)
+		return nil
+	}
+	if chatID != "" && !core.AllowList(p.allowChat, chatID) {
+		slog.Debug(p.tag()+": recall event from unauthorized chat", "chat_id", chatID, "message_id", messageID)
+		return nil
+	}
+
+	p.markMessageRecalled(messageID)
+	slog.Info(p.tag()+": message recalled",
+		"message_id", messageID,
+		"chat_id", chatID,
+		"recall_type", stringValue(event.Event.RecallType),
+	)
+
+	if p.handler == nil {
+		return nil
+	}
+	p.handler(p.dispatchPlatform(), &core.Message{
+		Platform:  p.platformName,
+		MessageID: messageID,
+		Recalled:  true,
+		ReplyCtx:  replyContext{messageID: messageID, chatID: chatID},
+	})
+	return nil
+}
+
 func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
 	msg := event.Event.Message
 	sender := event.Event.Sender
@@ -750,6 +938,11 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	messageID := ""
 	if msg.MessageId != nil {
 		messageID = *msg.MessageId
+	}
+
+	if p.isMessageRecalled(messageID) {
+		slog.Debug(p.tag()+": recalled message ignored before dispatch", "message_id", messageID)
+		return nil
 	}
 
 	if p.dedup.IsDuplicate(messageID) {
@@ -844,6 +1037,11 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 // handler invocation. It runs in its own goroutine so that onMessage returns
 // quickly and does not block the SDK event loop.
 func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string, mentions []*larkim.MentionEvent, messageID, sessionKey, userID, chatID string, rctx replyContext, parentID string) {
+	if p.isMessageRecalled(messageID) {
+		slog.Debug(p.tag()+": recalled message ignored in async dispatch", "message_id", messageID)
+		return
+	}
+
 	// Resolve user and chat names asynchronously so SDK dispatcher is not blocked.
 	userName := ""
 	if userID != "" {
@@ -853,8 +1051,11 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 
 	// If this message is a reply to another message, fetch the quoted content
 	// and prepend it so the agent has full context.
+	// Skip quote injection when thread_isolation is enabled and the message is
+	// inside a thread — the thread already provides conversational context, and
+	// long quoted prefixes can drown out the user's actual text (issue #764).
 	quotedPrefix := ""
-	if parentID != "" {
+	if parentID != "" && !(p.threadIsolation && isThreadSessionKey(sessionKey)) {
 		quotedPrefix = p.fetchQuotedMessage(ctx, parentID)
 	}
 
@@ -876,7 +1077,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			)
 			return
 		}
-		p.handler(p.dispatchPlatform(), &core.Message{
+		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
@@ -894,9 +1095,12 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		imgData, mimeType, err := p.downloadImage(messageID, imgBody.ImageKey)
 		if err != nil {
 			slog.Error(p.tag()+": download image failed", "error", err)
+			if sendErr := p.Send(ctx, rctx, "⚠️ Image download failed (network error). Please resend."); sendErr != nil {
+				slog.Error(p.tag()+": failed to notify user about image download failure", "error", sendErr)
+			}
 			return
 		}
-		p.handler(p.dispatchPlatform(), &core.Message{
+		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
@@ -917,9 +1121,12 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		audioData, err := p.downloadResource(messageID, audioBody.FileKey, "file")
 		if err != nil {
 			slog.Error(p.tag()+": download audio failed", "error", err)
+			if sendErr := p.Send(ctx, rctx, "⚠️ Voice message download failed (network error). Please resend."); sendErr != nil {
+				slog.Error(p.tag()+": failed to notify user about audio download failure", "error", sendErr)
+			}
 			return
 		}
-		p.handler(p.dispatchPlatform(), &core.Message{
+		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
@@ -938,7 +1145,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		if text == "" && len(images) == 0 {
 			return
 		}
-		p.handler(p.dispatchPlatform(), &core.Message{
+		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
@@ -959,11 +1166,14 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		fileData, err := p.downloadResource(messageID, fileBody.FileKey, "file")
 		if err != nil {
 			slog.Error(p.tag()+": download file failed", "error", err)
+			if sendErr := p.Send(ctx, rctx, "⚠️ File download failed (network error). Please resend."); sendErr != nil {
+				slog.Error(p.tag()+": failed to notify user about file download failure", "error", sendErr)
+			}
 			return
 		}
 		slog.Debug(p.tag()+": file downloaded", "file_name", fileBody.FileName, "size", len(fileData))
 		mimeType := detectMimeType(fileData)
-		p.handler(p.dispatchPlatform(), &core.Message{
+		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
@@ -990,7 +1200,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			Files:    files,
 			ReplyCtx: rctx,
 		}
-		p.handler(p.dispatchPlatform(), coreMsg)
+		p.dispatchCoreMessage(coreMsg)
 
 	case "sticker":
 		var stickerBody struct {
@@ -1004,7 +1214,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		imgData, mimeType, err := p.downloadImage(messageID, stickerBody.FileKey)
 		if err != nil {
 			slog.Warn(p.tag()+": download sticker failed, falling back to placeholder", "error", err)
-			p.handler(p.dispatchPlatform(), &core.Message{
+			p.dispatchCoreMessage(&core.Message{
 				SessionKey: sessionKey, Platform: p.platformName,
 				MessageID: messageID,
 				UserID:    userID, UserName: userName, ChatName: chatName,
@@ -1012,7 +1222,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			})
 			return
 		}
-		p.handler(p.dispatchPlatform(), &core.Message{
+		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
@@ -1048,7 +1258,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 				slog.Warn(p.tag()+": download media thumbnail failed", "error", err)
 			}
 		}
-		p.handler(p.dispatchPlatform(), &core.Message{
+		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
@@ -1257,6 +1467,21 @@ func (p *Platform) fetchQuotedMessage(ctx context.Context, parentID string) stri
 	return formatReplyChain(chain)
 }
 
+// resolveBotSenderName returns a display name for a bot sender in a quoted
+// reply chain. Feishu sets sender.id to the bot's app_id (globally stable,
+// not an open_id). We consult the peer_bots config to map app_id → alias;
+// if the app is unknown, we surface the app_id so operators can add it to
+// the config rather than seeing an ambiguous "Bot".
+func (p *Platform) resolveBotSenderName(appID string) string {
+	if appID == "" {
+		return "Bot"
+	}
+	if alias := p.peerBots[appID]; alias != "" {
+		return alias
+	}
+	return "Bot[" + appID + "]"
+}
+
 // fetchSingleMessage retrieves one message by ID from the Feishu API and
 // returns its extracted content as a chainMessage. Returns nil on any failure.
 func (p *Platform) fetchSingleMessage(ctx context.Context, messageID string) *chainMessage {
@@ -1318,8 +1543,7 @@ func (p *Platform) fetchSingleMessage(ctx context.Context, messageID string) *ch
 	// Resolve sender name.
 	senderName := ""
 	if item.Sender.SenderType == "app" {
-		// Bot messages: sender ID is app_id, not a user open_id.
-		senderName = "Bot"
+		senderName = p.resolveBotSenderName(item.Sender.ID)
 	} else if item.Sender.ID != "" {
 		resolved := p.resolveUserName(item.Sender.ID)
 		if resolved != item.Sender.ID {
@@ -1969,14 +2193,19 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 		if format != "opus" {
 			converted, err := core.ConvertAudioToOpus(ctx, data, format)
 			if err != nil {
-				return fmt.Errorf("%s: convert file audio to opus: %w", p.tag(), err)
+				slog.Warn(p.tag()+": file audio conversion failed, falling back to generic file", "file_name", fileName, "format", format, "error", err)
+				fileType = larkim.FileTypeStream
+				durationMS = 0
+			} else {
+				data = converted
+				if durationMS == 0 {
+					durationMS = probeFeishuMediaDurationMS(ctx, data, "opus")
+				}
+				if !strings.HasSuffix(strings.ToLower(fileName), ".opus") {
+					fileName = replaceFileExtension(fileName, ".opus")
+				}
 			}
-			data = converted
-			if durationMS == 0 {
-				durationMS = probeFeishuMediaDurationMS(ctx, data, "opus")
-			}
-		}
-		if !strings.HasSuffix(strings.ToLower(fileName), ".opus") {
+		} else if !strings.HasSuffix(strings.ToLower(fileName), ".opus") {
 			fileName = replaceFileExtension(fileName, ".opus")
 		}
 	} else if fileType == larkim.FileTypeMp4 {
@@ -2950,9 +3179,14 @@ func isThreadSessionKey(sessionKey string) bool {
 }
 
 // feishuPreviewHandle stores the message ID for an editable preview message.
+// Card 2.0 path needs mu/status/lastContent to let SetPreviewStatus patch
+// the header color without re-rendering the whole card.
 type feishuPreviewHandle struct {
-	messageID string
-	chatID    string
+	mu          sync.Mutex
+	messageID   string
+	chatID      string
+	status      core.CardStatus
+	lastContent string
 }
 
 // buildCardJSON builds a Feishu interactive card JSON string with a markdown element.
@@ -3376,7 +3610,13 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 		return nil, fmt.Errorf("%s: chatID is empty", p.tag())
 	}
 
-	cardJSON := buildPreviewCardJSON(content)
+	// Card 2.0 path: engine passes a pre-built rich card JSON; pass it through.
+	var cardJSON string
+	if isCardJSON(content) {
+		cardJSON = content
+	} else {
+		cardJSON = buildPreviewCardJSON(content)
+	}
 
 	var msgID string
 	if p.shouldUseThreadOrReplyAPI(rc) {
@@ -3453,7 +3693,13 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 	}
 
 	cardJSON := ""
-	if payload, ok := core.ParseProgressCardPayload(content); ok {
+	if isCardJSON(content) {
+		// Card 2.0: engine passes full card JSON directly, skip all processing.
+		cardJSON = content
+		h.mu.Lock()
+		h.lastContent = content
+		h.mu.Unlock()
+	} else if payload, ok := core.ParseProgressCardPayload(content); ok {
 		cardJSON = buildProgressCardJSONFromPayload(payload)
 	} else {
 		processed := content
@@ -3705,4 +3951,414 @@ func (p *Platform) onBotMenu(event *larkapplication.P2BotMenuV6) error {
 		ReplyCtx:   replyContext{chatID: userID, sessionKey: sessionKey},
 	})
 	return nil
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Card 2.0 rich card support (based on upstream PR #309 + #306,
+// extended with "agent reply elapsed time" in the footer).
+// ═══════════════════════════════════════════════════════════════
+
+const defaultToolIcon = "setting-inter_outlined"
+
+var toolIconMap = map[string]string{
+	"Bash":      "terminal-two_outlined",
+	"Edit":      "edit_outlined",
+	"Read":      "file-open_outlined",
+	"Write":     "notes_outlined",
+	"Glob":      "folder-open_outlined",
+	"Grep":      "search_outlined",
+	"WebFetch":  "internet_outlined",
+	"WebSearch": "internet_outlined",
+	"Agent":     "robot_outlined",
+	"Skill":     "code_outlined",
+	"LSP":       "code_outlined",
+}
+
+var thinkingVerbs = []string{
+	"Churning", "Clauding", "Coalescing", "Cogitating", "Computing",
+	"Combobulating", "Concocting", "Conjuring", "Considering", "Contemplating",
+	"Cooking", "Crafting", "Creating", "Crunching", "Deciphering",
+	"Deliberating", "Divining", "Effecting", "Elucidating", "Enchanting",
+	"Envisioning", "Finagling", "Forging", "Generating", "Germinating",
+	"Hatching", "Ideating", "Imagining", "Incubating", "Inferring",
+	"Manifesting", "Marinating", "Meandering", "Mulling", "Musing",
+	"Noodling", "Percolating", "Perusing", "Pondering", "Processing",
+	"Puzzling", "Reticulating", "Ruminating", "Scheming", "Simmering",
+	"Spelunking", "Spinning", "Stewing", "Sussing", "Synthesizing",
+	"Thinking", "Tinkering", "Transmuting", "Unfurling", "Unravelling",
+	"Vibing", "Wandering", "Whirring", "Wizarding", "Working", "Wrangling",
+}
+
+func pickThinkingVerb() string {
+	idx := time.Now().Unix() % int64(len(thinkingVerbs))
+	return thinkingVerbs[idx] + "..."
+}
+
+var markdownTablePattern = regexp.MustCompile(`(?m)^\|.+\|\s*\n\|[\s:|-]+\|\s*\n(?:\|.+\|\s*\n?)+`)
+
+func getToolIcon(toolName string) string {
+	if icon, ok := toolIconMap[toolName]; ok {
+		return icon
+	}
+	return defaultToolIcon
+}
+
+func richStepDisplayName(step core.ToolStep) string {
+	if step.Kind == core.ToolStepKindThinking {
+		return "Thinking"
+	}
+	name := strings.TrimSpace(step.Name)
+	if name == "" {
+		return "Tool"
+	}
+	return name
+}
+
+func richStepBody(step core.ToolStep) string {
+	name := richStepDisplayName(step)
+	summary := strings.TrimSpace(step.Summary)
+	if summary == "" {
+		summary = name
+	}
+	if step.Kind == core.ToolStepKindThinking {
+		return summary
+	}
+
+	lines := []string{summary}
+	var statusParts []string
+	status := strings.TrimSpace(step.Status)
+	if status != "" {
+		statusParts = append(statusParts, "status: "+status)
+	} else if step.Success != nil {
+		if *step.Success {
+			statusParts = append(statusParts, "status: ok")
+		} else {
+			statusParts = append(statusParts, "status: failed")
+		}
+	}
+	if step.ExitCode != nil {
+		statusParts = append(statusParts, fmt.Sprintf("exit: %d", *step.ExitCode))
+	}
+	if len(statusParts) > 0 {
+		lines = append(lines, strings.Join(statusParts, " | "))
+	}
+	if result := strings.TrimSpace(step.Result); result != "" {
+		lines = append(lines, result)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// isCardJSON returns true if content looks like a complete Feishu card JSON
+// (has "schema" and "body"). Used to avoid double-wrapping rich card output.
+func isCardJSON(content string) bool {
+	if len(content) < 10 || content[0] != '{' {
+		return false
+	}
+	return strings.Contains(content, `"schema"`) && strings.Contains(content, `"body"`)
+}
+
+// buildCardJSONWithStatus builds a Feishu card JSON with a colored header
+// reflecting the given status. Used as a fallback when rich-card assembly fails.
+func buildCardJSONWithStatus(content string, status core.CardStatus) string {
+	template := "grey"
+	switch status {
+	case core.CardStatusWorking, core.CardStatusThinking:
+		template = "blue"
+	case core.CardStatusDone:
+		template = "green"
+	case core.CardStatusError:
+		template = "red"
+	}
+	card := map[string]any{
+		"schema": "2.0",
+		"config": map[string]any{
+			"wide_screen_mode": true,
+		},
+		"header": map[string]any{
+			"template": template,
+			"title":    map[string]any{"tag": "plain_text", "content": ""},
+		},
+		"body": map[string]any{
+			"elements": []map[string]any{
+				{
+					"tag":     "markdown",
+					"content": content,
+				},
+			},
+		},
+	}
+	b, _ := json.Marshal(card)
+	return string(b)
+}
+
+// formatElapsedCN renders a human-readable duration in Chinese.
+// Examples: "3.2 秒", "1 分 23 秒", "1 小时 05 分"。
+func formatElapsedCN(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	totalSec := int64(d / time.Second)
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%.1f 秒", d.Seconds())
+	case d < time.Hour:
+		m := totalSec / 60
+		s := totalSec % 60
+		return fmt.Sprintf("%d 分 %02d 秒", m, s)
+	default:
+		h := totalSec / 3600
+		m := (totalSec % 3600) / 60
+		return fmt.Sprintf("%d 小时 %02d 分", h, m)
+	}
+}
+
+// buildRichCard renders a Card 2.0 "single-card" turn with collapsible
+// tool-step panel, streaming markdown body, status-colored header, and
+// an elapsed-time footer.
+func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, markdown string, streaming bool, elapsed time.Duration) string {
+	panelTitle := "Thinking..."
+	if len(steps) > 0 {
+		if streaming {
+			toolCount := 0
+			for _, step := range steps {
+				if step.Kind != core.ToolStepKindThinking {
+					toolCount++
+				}
+			}
+			if toolCount > 0 {
+				panelTitle = fmt.Sprintf("Working on it (%d steps)", len(steps))
+			}
+		} else {
+			toolCounts := make(map[string]int)
+			var toolOrder []string
+			for _, s := range steps {
+				name := richStepDisplayName(s)
+				if toolCounts[name] == 0 {
+					toolOrder = append(toolOrder, name)
+				}
+				toolCounts[name]++
+			}
+			var toolParts []string
+			for _, name := range toolOrder {
+				if toolCounts[name] > 1 {
+					toolParts = append(toolParts, fmt.Sprintf("%s×%d", name, toolCounts[name]))
+				} else {
+					toolParts = append(toolParts, name)
+				}
+			}
+			toolSummary := strings.Join(toolParts, ", ")
+			preview := strings.TrimSpace(markdown)
+			if idx := strings.IndexByte(preview, '\n'); idx > 0 {
+				preview = preview[:idx]
+			}
+			if runes := []rune(preview); len(runes) > 20 {
+				preview = string(runes[:20]) + "..."
+			}
+			if preview != "" {
+				panelTitle = fmt.Sprintf("%s · %s", toolSummary, preview)
+			} else {
+				panelTitle = toolSummary
+			}
+		}
+	}
+
+	panelCap := len(steps)
+	if panelCap < 1 {
+		panelCap = 1
+	}
+	panelElements := make([]map[string]any, 0, panelCap)
+	if len(steps) == 0 {
+		panelElements = append(panelElements, map[string]any{
+			"tag":  "div",
+			"text": map[string]any{"tag": "plain_text", "content": "Thinking..."},
+		})
+	} else {
+		// Cap the number of step rows so the collapsible panel doesn't
+		// balloon into hundreds of elements (lark client renders that
+		// poorly and the whole card can hit the ~30KB API limit).
+		const maxPanelSteps = 30
+		visible := steps
+		overflow := 0
+		if len(steps) > maxPanelSteps {
+			visible = steps[:maxPanelSteps]
+			overflow = len(steps) - maxPanelSteps
+		}
+		for _, step := range visible {
+			summary := richStepBody(step)
+			panelElements = append(panelElements, map[string]any{
+				"tag":  "div",
+				"icon": map[string]any{"tag": "standard_icon", "token": getToolIcon(step.Name)},
+				"text": map[string]any{"tag": "plain_text", "content": summary},
+			})
+		}
+		if overflow > 0 {
+			panelElements = append(panelElements, map[string]any{
+				"tag":  "div",
+				"text": map[string]any{"tag": "plain_text", "content": fmt.Sprintf("… and %d more steps", overflow)},
+			})
+		}
+	}
+
+	panelMap := map[string]any{
+		"tag":              "collapsible_panel",
+		"expanded":         streaming,
+		"background_color": "grey",
+		"header": map[string]any{
+			"title": map[string]any{"tag": "plain_text", "content": panelTitle},
+		},
+		"border":           map[string]any{"color": "grey"},
+		"vertical_spacing": "8px",
+		"padding":          "4px 8px",
+		"elements":         panelElements,
+	}
+	markdownMap := map[string]any{
+		"tag":     "markdown",
+		"content": preprocessFeishuMarkdown(markdown),
+	}
+
+	// Footer shows elapsed time: "⏱ 运行中 12.3 秒..." during streaming,
+	// "⏱ 用时 1 分 23 秒" on completion. Skip when elapsed == 0 to avoid noise.
+	var footerMap map[string]any
+	if elapsed > 0 {
+		var footerText string
+		if streaming {
+			footerText = fmt.Sprintf("⏱ 运行中 %s...", formatElapsedCN(elapsed))
+		} else {
+			footerText = fmt.Sprintf("⏱ 用时 %s", formatElapsedCN(elapsed))
+		}
+		footerMap = map[string]any{
+			"tag": "div",
+			"text": map[string]any{
+				"tag":     "plain_text",
+				"content": footerText,
+			},
+		}
+	}
+
+	var elements []map[string]any
+	if len(steps) > 0 || streaming {
+		elements = append(elements, panelMap, markdownMap)
+	} else {
+		elements = append(elements, markdownMap)
+	}
+	if footerMap != nil {
+		elements = append(elements, footerMap)
+	}
+
+	// Header template color follows status.
+	headerTemplate := "blue"
+	headerTitle := pickThinkingVerb()
+	switch status {
+	case core.CardStatusDone:
+		headerTemplate = "green"
+		headerTitle = "Done"
+	case core.CardStatusError:
+		headerTemplate = "red"
+		headerTitle = "Error"
+	case core.CardStatusThinking, core.CardStatusWorking:
+		headerTemplate = "blue"
+		headerTitle = pickThinkingVerb()
+	}
+
+	card := map[string]any{
+		"schema": "2.0",
+		"config": map[string]any{
+			"streaming_mode":             streaming,
+			"update_multi":               true,
+			"enable_forward_interaction": true,
+		},
+		"header": map[string]any{
+			"template": headerTemplate,
+			"title":    map[string]any{"tag": "plain_text", "content": headerTitle},
+		},
+		"body": map[string]any{"elements": elements},
+	}
+
+	b, err := json.Marshal(card)
+	if err != nil {
+		slog.Debug("feishu: build rich card marshal failed, fallback to basic card", "error", err)
+		return buildCardJSONWithStatus(preprocessFeishuMarkdown(markdown), status)
+	}
+	// Feishu interactive card payload limit is ~30KB; over that the API
+	// rejects the whole card and the lark client may render it as a
+	// mangled JSON dump. Drop the panel and keep just the markdown body.
+	const maxCardJSONBytes = 28000
+	if len(b) > maxCardJSONBytes {
+		slog.Debug("feishu: rich card exceeds size limit, fallback to basic card", "size", len(b))
+		return buildCardJSONWithStatus(preprocessFeishuMarkdown(markdown), status)
+	}
+	return string(b)
+}
+
+func splitMarkdownByTables(md string, maxTables int) []string {
+	if maxTables <= 0 {
+		return []string{md}
+	}
+	matches := markdownTablePattern.FindAllStringIndex(md, -1)
+	if len(matches) <= maxTables {
+		return []string{md}
+	}
+	parts := make([]string, 0, len(matches)-maxTables+1)
+	firstEnd := len(md)
+	if len(matches) > maxTables {
+		firstEnd = matches[maxTables][0]
+	}
+	first := strings.TrimSpace(md[:firstEnd])
+	if first != "" {
+		parts = append(parts, first)
+	}
+	for _, match := range matches[maxTables:] {
+		block := strings.TrimSpace(md[match[0]:match[1]])
+		if block != "" {
+			parts = append(parts, block)
+		}
+	}
+	return parts
+}
+
+// BuildRichCard implements core.RichCardSupporter. Feishu engine passes an
+// elapsed duration via the preview handle; buildRichCard itself is the
+// renderer and must be called with the duration from engine state.
+func (p *Platform) BuildRichCard(status core.CardStatus, title string, steps []core.ToolStep, markdown string, streaming bool, elapsed time.Duration) string {
+	return buildRichCard(status, title, steps, markdown, streaming, elapsed)
+}
+
+// SplitMarkdownByTables implements core.MarkdownTableSplitter.
+func (p *Platform) SplitMarkdownByTables(md string, maxTables int) []string {
+	return splitMarkdownByTables(md, maxTables)
+}
+
+// SetPreviewStatus updates the card header color to reflect the agent's current state.
+func (p *Platform) SetPreviewStatus(previewHandle any, status core.CardStatus) {
+	h, ok := previewHandle.(*feishuPreviewHandle)
+	if !ok {
+		return
+	}
+
+	h.mu.Lock()
+	h.status = status
+	lastContent := h.lastContent
+	h.mu.Unlock()
+
+	if lastContent == "" {
+		return
+	}
+	cardJSON := buildCardJSONWithStatus(lastContent, status)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resp, err := p.client.Im.Message.Patch(ctx, larkim.NewPatchMessageReqBuilder().
+		MessageId(h.messageID).
+		Body(larkim.NewPatchMessageReqBodyBuilder().
+			Content(cardJSON).
+			Build()).
+		Build())
+	if err != nil {
+		slog.Debug("feishu: set preview status patch failed", "error", err)
+		return
+	}
+	if !resp.Success() {
+		slog.Debug("feishu: set preview status patch failed", "code", resp.Code, "msg", resp.Msg)
+	}
 }

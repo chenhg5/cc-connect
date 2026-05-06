@@ -30,6 +30,29 @@ var (
 	buildTime = "unknown"
 )
 
+// defaultResetOnIdleMins is applied when a project does not set
+// reset_on_idle_mins. After this many minutes of user inactivity, cc-connect
+// rotates to a fresh session for the next message instead of resuming the
+// previous transcript via --continue. This avoids "context drift" where stale
+// chat history (failed commands, debugging noise, abandoned tangents) is
+// repeatedly re-ingested and starts to dominate the model's attention. The
+// previous session is preserved and remains accessible via /list and /switch.
+//
+// Set reset_on_idle_mins = 0 in config.toml to opt out and restore the
+// previous behavior of always continuing the prior session.
+const defaultResetOnIdleMins = 30
+
+// resolveResetOnIdle returns the configured reset-on-idle duration for a
+// project, applying defaultResetOnIdleMins when the field is unset. The second
+// return value indicates whether the default was applied, so the caller can
+// emit a one-time nudge log directing users to the docs.
+func resolveResetOnIdle(configured *int) (time.Duration, bool) {
+	if configured != nil {
+		return time.Duration(*configured) * time.Minute, false
+	}
+	return time.Duration(defaultResetOnIdleMins) * time.Minute, true
+}
+
 type initialModelRefreshStarter interface {
 	StartInitialModelRefresh()
 }
@@ -279,6 +302,20 @@ func main() {
 			}
 			bindingStore := filepath.Join(cfg.DataDir, "workspace_bindings.json")
 			engine.SetMultiWorkspace(baseDir, bindingStore)
+			idleMins := cfg.WorkspaceIdleTimeoutMins
+			if idleMins == nil && proj.WorkspaceIdleTimeoutMinsLegacy != nil {
+				slog.Warn("workspace_idle_timeout_mins under [[projects]] is deprecated; move it to the top level of config.toml. Honoring the legacy value for backwards compatibility.",
+					"project", proj.Name, "value", *proj.WorkspaceIdleTimeoutMinsLegacy)
+				idleMins = proj.WorkspaceIdleTimeoutMinsLegacy
+			}
+			if idleMins != nil {
+				mins := *idleMins
+				if mins <= 0 {
+					engine.SetWorkspaceIdleTimeout(0)
+				} else {
+					engine.SetWorkspaceIdleTimeout(time.Duration(mins) * time.Minute)
+				}
+			}
 			slog.Info("multi-workspace mode enabled", "project", proj.Name, "base_dir", baseDir)
 		}
 
@@ -362,8 +399,10 @@ func main() {
 
 		// Wire display truncation settings (includes legacy quiet → display mapping)
 		{
-			tm, tool, tmlen, toollen := config.EffectiveDisplay(cfg, &proj)
+			mode, tm, tool, tmlen, toollen := config.EffectiveDisplay(cfg, &proj)
 			engine.SetDisplayConfig(core.DisplayCfg{
+				Mode:             mode,
+				CardMode:         config.EffectiveCardMode(cfg, &proj),
 				ThinkingMessages: tm,
 				ThinkingMaxLen:   tmlen,
 				ToolMaxLen:       toollen,
@@ -462,8 +501,8 @@ func main() {
 			}
 		}
 
-		engine.SetDisplaySaveFunc(func(thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
-			return config.SaveDisplayConfig(thinkingMessages, thinkingMaxLen, toolMaxLen, toolMessages)
+		engine.SetDisplaySaveFunc(func(mode *string, thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
+			return config.SaveDisplayConfig(mode, thinkingMessages, thinkingMaxLen, toolMaxLen, toolMessages)
 		})
 
 		// Wire idle timeout
@@ -493,8 +532,11 @@ func main() {
 			}
 			engine.SetAutoCompressConfig(true, maxTokens, minGap)
 		}
-		if proj.ResetOnIdleMins != nil {
-			engine.SetResetOnIdle(time.Duration(*proj.ResetOnIdleMins) * time.Minute)
+		resetIdle, defaulted := resolveResetOnIdle(proj.ResetOnIdleMins)
+		engine.SetResetOnIdle(resetIdle)
+		if defaulted {
+			slog.Info("project: reset_on_idle_mins not set, applying default — set reset_on_idle_mins = 0 to opt out, see docs/usage.md",
+				"project", proj.Name, "default_minutes", defaultResetOnIdleMins)
 		}
 
 		// Wire sender injection
@@ -777,7 +819,17 @@ func main() {
 		if path == "" {
 			path = "/bridge/ws"
 		}
-		bridgeSrv = core.NewBridgeServer(port, cfg.Bridge.Token, path, cfg.Bridge.CORSOrigins)
+		// Check insecure flag for local development mode
+		insecure := cfg.Bridge.Insecure != nil && *cfg.Bridge.Insecure
+		if insecure {
+			bridgeSrv = core.NewBridgeServerInsecure(port, cfg.Bridge.Token, path, cfg.Bridge.CORSOrigins)
+		} else {
+			bridgeSrv = core.NewBridgeServer(port, cfg.Bridge.Token, path, cfg.Bridge.CORSOrigins)
+		}
+		if bridgeSrv == nil {
+			slog.Error("bridge: failed to create server - token is required (or set insecure=true for local dev)")
+			os.Exit(1)
+		}
 		for i, e := range engines {
 			bp := bridgeSrv.NewPlatform(cfg.Projects[i].Name)
 			bridgeSrv.RegisterEngine(cfg.Projects[i].Name, e, bp)
@@ -1263,7 +1315,7 @@ Flags:
   --help             Show this help message
 
 Commands:
-  daemon             Manage cc-connect as a background service (systemd/launchd)
+  daemon             Manage cc-connect as a background service (systemd/launchd/schtasks)
     install          Install and start the daemon service
     uninstall        Remove the daemon service
     start            Start the daemon
@@ -1373,8 +1425,10 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	}
 
 	// Reload display config (includes legacy quiet → display mapping)
-	tm, tool, tmlen, toollen := config.EffectiveDisplay(cfg, proj)
+	mode, tm, tool, tmlen, toollen := config.EffectiveDisplay(cfg, proj)
 	engine.SetDisplayConfig(core.DisplayCfg{
+		Mode:             mode,
+		CardMode:         config.EffectiveCardMode(cfg, proj),
 		ThinkingMessages: tm,
 		ThinkingMaxLen:   tmlen,
 		ToolMaxLen:       toollen,
@@ -1396,10 +1450,11 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	} else {
 		engine.SetAutoCompressConfig(false, 0, 0)
 	}
-	if proj.ResetOnIdleMins != nil {
-		engine.SetResetOnIdle(time.Duration(*proj.ResetOnIdleMins) * time.Minute)
-	} else {
-		engine.SetResetOnIdle(0)
+	resetIdle, defaulted := resolveResetOnIdle(proj.ResetOnIdleMins)
+	engine.SetResetOnIdle(resetIdle)
+	if defaulted {
+		slog.Info("project: reset_on_idle_mins not set, applying default — set reset_on_idle_mins = 0 to opt out, see docs/usage.md",
+			"project", proj.Name, "default_minutes", defaultResetOnIdleMins)
 	}
 
 	showCtx := true

@@ -529,9 +529,19 @@ Examples:
   cc-connect cron add --cron "0 6 * * *" --prompt "Collect GitHub trending repos and send a summary" --desc "Daily GitHub Trending"
   cc-connect cron add --cron "0 9 * * 1" --prompt "Generate a weekly project status report" --desc "Weekly Report"
 
-To list or delete cron jobs:
+To list, edit, or delete cron jobs:
   cc-connect cron list
+  cc-connect cron edit <job-id> <field> <value>
   cc-connect cron del <job-id>
+
+Use `cron edit` to modify a single field instead of delete-and-recreate.
+Common editable fields: cron_expr, prompt, exec, description, enabled (true/false), mute (true/false), timeout_mins (int).
+Run `cc-connect cron edit --help` for the full field list.
+
+Examples:
+  cc-connect cron edit abc123 cron_expr "0 9 * * *"
+  cc-connect cron edit abc123 enabled false
+  cc-connect cron edit abc123 prompt "Updated daily summary task"
 
 ## Send message to current chat
 To proactively send a message back to the user's chat session (use --stdin heredoc for long/multi-line messages):
@@ -697,7 +707,7 @@ After upgrading, restart the running cc-connect process.
 
 ## Step 8: Run as Background Service (Optional)
 
-You can run cc-connect as a daemon managed by the OS init system (Linux systemd user service, macOS launchd LaunchAgent).
+You can run cc-connect as a daemon managed by the OS init system (Linux systemd user service, macOS launchd LaunchAgent, Windows Task Scheduler task).
 
 ### Install the daemon
 
@@ -732,6 +742,11 @@ cc-connect daemon logs --log-file /path/to/log  # custom log file
 ```
 
 Logs auto-rotate at the configured max size and keep one backup.
+
+On Windows, `daemon install` creates a native Task Scheduler task named `cc-connect`.
+The task runs at user logon and is also started immediately after installation. The
+installer writes a small PowerShell launcher under `~/.cc-connect` so the scheduled
+task uses the selected config directory, log file, PATH, and proxy environment.
 
 ### Uninstall
 

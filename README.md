@@ -33,6 +33,12 @@
   <a href="./README.md">English</a> | <a href="./README.zh-CN.md">中文</a>
 </p>
 
+<p align="center">
+  <a href="https://trendshift.io/repositories/23266" target="_blank">
+    <img src="https://trendshift.io/api/badge/repositories/23266" alt="chenhg5/cc-connect | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/>
+  </a>
+</p>
+
 
 ## ❤️ Sponsor
 
@@ -81,8 +87,33 @@ MiniMax-M2.7 is a next-generation large language model designed for autonomous e
 </tr>
 
 <tr>
+<td width="150"><a href="https://cc.anyroute.io/register?aff=CR455DSQSKEV"><img src="assets/sponsors/anyrouteio.png" alt="AnyRoute.io" width="120"></a></td>
+<td>Thanks to AnyRoute.io for sponsoring this project! AnyRoute.io is a reliable, stable, and efficient API relay platform integrating the latest Claude Code and Codex models. Transparent pricing with rates as low as 93% off official prices (just 0.7x), supports invoicing and enterprise-grade high-concurrency usage. Register via <a href="https://cc.anyroute.io/register?aff=CR455DSQSKEV">this link</a> to get started.</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://aicanapi.com/register?aff=rIEy"><img src="assets/sponsors/aican.jpg" alt="aicanapi.com" width="120"></a></td>
+<td>Thanks to aicanapi.com for sponsoring this project! Aican API provides high-performance, low-latency, high-concurrency API services for enterprises and developers. Claude Code models at up to 84% off, other models at 80% off official price. Doubao Seedance 2 real-person generation service with queue-free access for faster responses. Choose Aican API for simpler, more efficient, and more cost-effective enterprise-grade AI services. Register via <a href="https://aicanapi.com/register?aff=rIEy">this link</a> to get started.</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://pateway.ai/?ch=2qn568&aff=DRA4VUFS"><img src="assets/sponsors/patewayai.png" alt="Pateway" width="120"></a></td>
+<td>Thanks to Pateway for sponsoring this project! PatewayAI is a premium API relay service for serious AI developers, offering 100% official direct access to Claude and Codex models — no reverse engineering, no quality degradation. Transparent billing with token-level verification. Enterprise-grade concurrency, formal contracts and invoicing available. Register via <a href="https://pateway.ai/?ch=2qn568&aff=DRA4VUFS">this link</a> to get $3 free trial credit, up to 40% off on top-ups, and referral rewards up to $150!</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://cy.10dianai.com/register?aff=3FQn"><img src="assets/sponsors/10dianai.png" alt="10点AI" width="120"></a></td>
+<td>Thanks to 10点AI for sponsoring this project! 10dian-AI Enterprise Platform is an AI API gateway for developers and enterprises, aggregating GPT, Claude, Gemini, DeepSeek and more. Optimized for production environments with stable high-concurrency operation, avoiding interface jitter and timeout issues. Affordable pricing, stable uptime, official guarantee. Register via <a href="https://cy.10dianai.com/register?aff=3FQn">this link</a> to get ¥5 free credit!</td>
+</tr>
+
+<tr>
 <td width="150"><a href="https://code0.ai/register?aff=5cGO"><img src="assets/sponsors/code0.svg" alt="Code0" width="120"></a></td>
 <td>Thanks to Code0 for sponsoring this project! Code0 is an AI model aggregation API relay service for Chinese developers, compatible with OpenAI / Anthropic / Gemini protocols. One key for all mainstream models, stable support for Claude Code, Codex, Gemini CLI, cc-connect and more. Fixed exchange rate: ¥1.5 CNY = $1 USD API credit, transparent pricing, domestic direct connection, ready to use. Register via <a href="https://code0.ai/register?aff=5cGO">this link</a>.</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://passport.compshare.cn/register?referral_code=H65IOClRGu5CM7nn5ykfad&ytag=GPU_YY_YX_git_cc-connect"><img src="assets/sponsors/youyunzhisuan.png" alt="优云智算" width="120"></a></td>
+<td>Thanks to 优云智算 for sponsoring this project! 优云智算 (UCloud AI Cloud Platform) provides stable and comprehensive domestic and international model APIs with just one key. Featuring high-value Coding Plan packages (monthly or per-use), plus stable official relay for overseas models. Supports Claude Code, Codex, and API calls. Enterprise features include high concurrency, 7x24 technical support, and self-service invoicing. Register via <a href="https://passport.compshare.cn/register?referral_code=H65IOClRGu5CM7nn5ykfad&ytag=GPU_YY_YX_git_cc-connect">this link</a> to receive ¥5 free platform credit!</td>
 </tr>
 
 <tr>
@@ -98,11 +129,6 @@ MiniMax-M2.7 is a next-generation large language model designed for autonomous e
 <tr>
 <td width="150"><a href="https://console.claudeapi.com/register?aff=GDbA"><img src="assets/sponsors/claudeapi.svg" alt="claudeapi.com" width="120"></a></td>
 <td>Thanks to claudeapi.com for sponsoring this project! claudeapi is a high-quality direct Claude connection service for mid-to-high-end users. It is fully integrated with Anthropic's official first-party Keys and AWS Bedrock official channels — no reverse engineering, no intelligence degradation, no stitching. It fully preserves the official capabilities, long context, and tool-calling performance of Opus / Sonnet / Haiku. Designed specifically for Claude Code power users, Agent developers, and enterprise teams, it focuses on out-of-the-box usability and enterprise-grade stability. Invoicing and team onboarding are supported. Register via <a href="https://console.claudeapi.com/register?aff=GDbA">this link</a>.</td>
-</tr>
-
-<tr>
-<td width="150"><a href="https://passport.compshare.cn/register?referral_code=H65IOClRGu5CM7nn5ykfad&ytag=GPU_YY_YX_git_cc-connect"><img src="assets/sponsors/youyunzhisuan.png" alt="优云智算" width="120"></a></td>
-<td>Thanks to 优云智算 for sponsoring this project! 优云智算 (UCloud AI Cloud Platform) provides stable and comprehensive domestic and international model APIs with just one key. Featuring high-value Coding Plan packages (monthly or per-use), plus stable official relay for overseas models. Supports Claude Code, Codex, and API calls. Enterprise features include high concurrency, 7x24 technical support, and self-service invoicing. Register via <a href="https://passport.compshare.cn/register?referral_code=H65IOClRGu5CM7nn5ykfad&ytag=GPU_YY_YX_git_cc-connect">this link</a> to receive ¥5 free platform credit!</td>
 </tr>
 
 <tr>
@@ -354,13 +380,14 @@ cc-connect update --pre     # Include pre-releases
 /dir [path|reset] Show, switch, or reset work directory
 ```
 
-Project configs can also rotate to a fresh session automatically after long inactivity:
+Project configs rotate to a fresh session automatically after long inactivity. This prevents "context drift" where stale chat history (failed commands, debugging noise) is repeatedly re-ingested via `--continue` and starts to dominate the model's attention. The previous session is preserved and remains accessible via `/list` and `/switch`.
 
 ```toml
 [[projects]]
-reset_on_idle_mins = 60
+reset_on_idle_mins = 30   # default when unset; set to 0 to disable
 ```
 
+The default is **30 minutes** when unset. Set `reset_on_idle_mins = 0` to opt out and always continue the previous session.
 
 ### 🛡️ OS-User Isolation (`run_as_user`)
 
@@ -524,11 +551,9 @@ If cc-connect has been helpful to you, consider buying us a coffee! Your support
 We're grateful to everyone who has supported this project. Leave your GitHub username in the donation message if you'd like to be recognized here!
 
 <!-- Donors will be listed below -->
-<!--
-| GitHub Username | Date |
-|-----------------|------|
-| @username | YYYY-MM-DD |
--->
+| Avatar | GitHub Username | Date |
+|--------|-----------------|------|
+| <img src="https://avatars.githubusercontent.com/u/1762560?v=4" width="40" height="40" style="border-radius: 50%;"> | [@thx0701](https://github.com/thx0701) | 2026-04-29 |
 
 
 ## 🤝 Commercial Cooperation

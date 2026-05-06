@@ -87,10 +87,31 @@ level = "info" # debug, info, warn, error
 # 设为 0 表示不截断（显示完整内容）。
 
 # [display]
-# thinking_messages = true # Show/hide thinking messages (default: true) / 是否显示思考消息（默认 true）
-# thinking_max_len = 300   # Max chars for thinking messages (default: 300) / 思考消息最大字符数（默认 300）
-# tool_max_len = 500       # Max chars for tool use messages (default: 500) / 工具调用消息最大字符数（默认 500）
-# tool_messages = true     # Show/hide tool progress messages (default: true) / 是否显示工具进度消息（默认 true）
+# mode = "full"             # Display mode: "full" (default), "compact", or "quiet"
+#                           # full: show thinking + tool messages as separate messages
+#                           #       显示思考和工具消息，每条单独发送
+#                           # compact: hide thinking/tool, each text segment sent separately
+#                           #          隐藏思考和工具消息，每段文本独立发送
+#                           # quiet: hide thinking/tool, all text in one card, done emoji at end
+#                           #        隐藏思考和工具消息，所有文本合并到同一张卡片，完成后发送 done emoji
+# thinking_messages = true  # Show/hide thinking messages (default: true) / 是否显示思考消息（默认 true）
+# thinking_max_len = 300    # Max chars for thinking messages (default: 300) / 思考消息最大字符数（默认 300）
+# tool_max_len = 500        # Max chars for tool use messages (default: 500) / 工具调用消息最大字符数（默认 500）
+# tool_messages = true      # Show/hide tool progress messages (default: true) / 是否显示工具进度消息（默认 true）
+
+# Per-project override: each [[projects]] entry may have its own [projects.display]
+# block that overrides individual fields of the global [display] block above.
+# Resolution order is per-field — set fields win, unset fields fall back to global,
+# then to built-in defaults. Useful when one project should be quiet while others
+# stay verbose, or vice versa.
+# 每个 [[projects]] 条目可以有自己的 [projects.display] 块，逐字段覆盖全局
+# [display]。已设字段优先，未设字段回落到全局值，再回落到默认值。
+#
+# [[projects]]
+# name = "noisy-project"
+# [projects.display]
+# thinking_messages = false  # Override only this field; others inherit from global
+# tool_messages = false
 
 # Agent idle timeout: max minutes between consecutive agent events before
 # considering the session stuck. Set to 0 to disable the timeout entirely.
@@ -100,10 +121,19 @@ level = "info" # debug, info, warn, error
 # Auto-reset the active session after the user has been inactive for a while.
 # Unlike idle_timeout_mins, this does not detect stuck agent execution. It
 # rotates to a fresh cc-connect session when the user comes back after being idle.
+# This avoids "context drift", where stale chat history (failed commands,
+# debugging noise, abandoned tangents) gets re-ingested via --continue every
+# time the workspace pool evicts the session, and starts to dominate the model's
+# attention. The previous session is preserved and remains accessible via
+# /list and /switch.
+#
+# Default: 30 minutes when unset. Set to 0 to opt out and always continue the
+# previous session (the pre-default behavior).
 # 用户长时间未发消息后，自动切换到一个新的活跃会话。
 # 这与 idle_timeout_mins 不同：它不是检测 agent 卡住，而是用户回来后自动开始新会话。
+# 默认值为 30 分钟（未设置时）。设为 0 可以禁用此行为，恢复始终继续上次会话。
 # [[projects]]
-# reset_on_idle_mins = 60   # 0 or unset = disabled / 设为 0 或留空表示禁用
+# reset_on_idle_mins = 30   # default when unset / 未设置时的默认值；设为 0 表示禁用
 
 # =============================================================================
 # OS-user isolation via run_as_user (Linux/macOS only)
@@ -691,8 +721,26 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # 也可以禁用特定工具（传递给 --disallowedTools）：
 # disallowed_tools = ["WebSearch", "WebFetch"]
 
+# Optional: specify a custom system prompt / 可选：指定自定义系统提示
+# system_prompt = "You are a helpful AI assistant that specializes in Python development."
+
 # Optional: specify a model / 可选：指定模型
 # model = "claude-sonnet-4-20250514"
+
+# Optional: per-project environment variables injected into Claude Code sessions.
+# This allows different projects to use different model providers (Kimi, Mimo, DeepSeek, etc.)
+# without modifying global ~/.claude/settings.json.
+# 可选：为每个项目单独配置环境变量，注入到 Claude Code 会话中。
+# 这样不同项目可以使用不同的模型供应商，无需修改全局的 ~/.claude/settings.json。
+#
+# [projects.agent.options.env]
+# ANTHROPIC_BASE_URL = "https://api.kimi.com/coding"
+# ANTHROPIC_AUTH_TOKEN = "sk-kimi-xxx"
+# ANTHROPIC_MODEL = "K2.6"
+# ANTHROPIC_REASONING_MODEL = "K2.6"
+# ANTHROPIC_DEFAULT_HAIKU_MODEL = "K2.6"
+# ANTHROPIC_DEFAULT_SONNET_MODEL = "K2.6"
+# ANTHROPIC_DEFAULT_OPUS_MODEL = "K2.6"
 
 # Claude Code Router Integration / Claude Code Router 集成
 # Route Claude Code requests through Claude Code Router to use different model providers.
@@ -917,7 +965,8 @@ app_secret = "your-feishu-app-secret"
 # 1. Create a bot via @MasterBot in MAX, get the access token
 #    在 MAX 中通过 @MasterBot 创建机器人，获取 access token
 # 2. Paste the token below / 填入下方 token
-# Connection: Long polling via platform-api.max.ru (no public URL needed) / 长轮询，无需公网 IP
+# Connection: long-poll by default; webhook supported (see docs/max-webhook.md)
+# 默认长轮询；如需 webhook 模式见 docs/max-webhook.md
 
 # [[projects.platforms]]
 # type = "max"
@@ -927,6 +976,16 @@ app_secret = "your-feishu-app-secret"
 # allow_from = "*"    # Allowed MAX user IDs, e.g. "66624886,12345678"; "*" = all
 #                     # 允许的 MAX 用户 ID，如 "66624886,12345678"；"*" 表示所有
 # api_base = "https://platform-api.max.ru"   # optional override / 可选覆盖默认 API
+#
+# --- Webhook mode (optional) ---
+# Set webhook_url to switch from long-poll to webhook. Required for high-traffic
+# bots since MAX throttles long-poll to 2 RPS from 2026-05-11.
+# 设置 webhook_url 即切换为 webhook 模式（高流量场景必需，MAX 自 2026-05-11 起限制长轮询为 2 RPS）
+# Full guide with nginx/Caddy/systemd samples: docs/max-webhook.md
+# webhook_url    = "https://bot.example.com/webhook"
+# webhook_listen = "127.0.0.1:8090"   # bot binds here; reverse proxy in front
+# webhook_path   = "/webhook"          # default; must match the path in webhook_url
+# webhook_secret = "long-random-string"  # optional; checked via X-Webhook-Secret header or ?s= query
 
 # Slack (uncomment to enable / 取消注释以启用)
 # 1. Create an app at https://api.slack.com/apps / 创建应用

@@ -1,10 +1,17 @@
 package feishu
 
 import (
+	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/chenhg5/cc-connect/core"
+	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
@@ -84,6 +91,114 @@ func TestBuildFeishuCreateFileReqBody_OmitsEmptyDuration(t *testing.T) {
 	}
 }
 
+func TestSendFileFallsBackToGenericFileWhenAudioConversionUnavailable(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+
+	const appID = "cli_file_fallback"
+	const appSecret = "secret-file-fallback"
+
+	uploadCalls := 0
+	createCalls := 0
+	var uploadedFileType string
+	var uploadedFileName string
+	var uploadedFileData string
+	var sentMsgType string
+	var sentContent string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/open-apis/auth/v3/tenant_access_token/internal":
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "success",
+				"expire":              7200,
+				"tenant_access_token": "valid-token",
+			})
+		case "/open-apis/im/v1/files":
+			uploadCalls++
+			fileType, fileName, fileData := readFeishuFileUpload(t, r)
+			uploadedFileType = fileType
+			uploadedFileName = fileName
+			uploadedFileData = fileData
+			writeJSON(t, w, map[string]any{
+				"code": 0,
+				"msg":  "success",
+				"data": map[string]any{"file_key": "file_key_stream"},
+			})
+		case "/open-apis/im/v1/messages":
+			createCalls++
+			var body struct {
+				MsgType string `json:"msg_type"`
+				Content string `json:"content"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode create message body: %v", err)
+			}
+			sentMsgType = body.MsgType
+			sentContent = body.Content
+			writeJSON(t, w, map[string]any{
+				"code": 0,
+				"msg":  "success",
+				"data": map[string]any{"message_id": "om_file_ok"},
+			})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName: "feishu",
+		domain:       srv.URL,
+		appID:        appID,
+		appSecret:    appSecret,
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+		replayClient: lark.NewClient(appID, appSecret,
+			lark.WithEnableTokenCache(false),
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+	}
+
+	err := p.SendFile(context.Background(), replyContext{chatID: "oc_chat"}, core.FileAttachment{
+		Data:     []byte("mp3 bytes"),
+		MimeType: "audio/mpeg",
+		FileName: "voice.mp3",
+	})
+	if err != nil {
+		t.Fatalf("SendFile() error = %v", err)
+	}
+	if uploadCalls != 1 {
+		t.Fatalf("uploadCalls = %d, want 1", uploadCalls)
+	}
+	if createCalls != 1 {
+		t.Fatalf("createCalls = %d, want 1", createCalls)
+	}
+	if uploadedFileType != larkim.FileTypeStream {
+		t.Fatalf("uploaded file_type = %q, want %q", uploadedFileType, larkim.FileTypeStream)
+	}
+	if uploadedFileName != "voice.mp3" {
+		t.Fatalf("uploaded file_name = %q, want voice.mp3", uploadedFileName)
+	}
+	if uploadedFileData != "mp3 bytes" {
+		t.Fatalf("uploaded file data = %q, want original data", uploadedFileData)
+	}
+	if sentMsgType != larkim.MsgTypeFile {
+		t.Fatalf("sent msg_type = %q, want %q", sentMsgType, larkim.MsgTypeFile)
+	}
+	var content map[string]string
+	if err := json.Unmarshal([]byte(sentContent), &content); err != nil {
+		t.Fatalf("sent content is not json: %v", err)
+	}
+	if content["file_key"] != "file_key_stream" {
+		t.Fatalf("sent file_key = %q, want file_key_stream", content["file_key"])
+	}
+}
+
 func TestDetectFeishuAudioFormat(t *testing.T) {
 	if got := detectFeishuAudioFormat("application/octet-stream", "reply.mp3"); got != "mp3" {
 		t.Fatalf("extension format = %q, want mp3", got)
@@ -107,6 +222,197 @@ func TestReplaceFileExtension(t *testing.T) {
 		if got := replaceFileExtension(in, ".opus"); got != want {
 			t.Fatalf("replaceFileExtension(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestOnMessageRecalledDispatchesCoreRecallMessage(t *testing.T) {
+	got := make(chan *core.Message, 1)
+	p := &Platform{
+		platformName: "feishu",
+		handler: func(_ core.Platform, msg *core.Message) {
+			got <- msg
+		},
+	}
+	messageID := "om_recalled"
+	chatID := "oc_chat"
+	recallTime := "1710000000000"
+	recallType := "user"
+
+	err := p.onMessageRecalled(context.Background(), &larkim.P2MessageRecalledV1{
+		Event: &larkim.P2MessageRecalledV1Data{
+			MessageId:  &messageID,
+			ChatId:     &chatID,
+			RecallTime: &recallTime,
+			RecallType: &recallType,
+		},
+	})
+	if err != nil {
+		t.Fatalf("onMessageRecalled returned error: %v", err)
+	}
+
+	select {
+	case msg := <-got:
+		if msg.Platform != "feishu" {
+			t.Fatalf("Platform = %q, want feishu", msg.Platform)
+		}
+		if msg.MessageID != messageID {
+			t.Fatalf("MessageID = %q, want %q", msg.MessageID, messageID)
+		}
+		if !msg.Recalled {
+			t.Fatal("Recalled = false, want true")
+		}
+		if msg.Content != "" {
+			t.Fatalf("Content = %q, want empty recall payload", msg.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for recall message")
+	}
+}
+
+func TestDispatchMessageDropsRecalledMessageBeforeHandler(t *testing.T) {
+	called := false
+	p := &Platform{
+		platformName: "feishu",
+		handler: func(_ core.Platform, _ *core.Message) {
+			called = true
+		},
+	}
+	p.markMessageRecalled("om_drop")
+
+	p.dispatchMessage(
+		context.Background(),
+		"text",
+		`{"text":"hello"}`,
+		nil,
+		"om_drop",
+		"feishu:ou_user:ou_user",
+		"",
+		"",
+		replyContext{messageID: "om_drop", sessionKey: "feishu:ou_user:ou_user"},
+		"",
+	)
+
+	if called {
+		t.Fatal("handler was called for a message already marked recalled")
+	}
+}
+
+func TestIsMessageRecalledDetectsWithdrawnMessageFromGetAPI(t *testing.T) {
+	const appID = "cli_recall_probe"
+	const appSecret = "secret-recall-probe"
+
+	getCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/open-apis/auth/v3/tenant_access_token/internal":
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "success",
+				"expire":              7200,
+				"tenant_access_token": "tenant-token",
+			})
+		case "/open-apis/im/v1/messages/om_withdrawn":
+			getCalls++
+			writeJSON(t, w, map[string]any{
+				"code": 230011,
+				"msg":  "The message was withdrawn.",
+			})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName: "feishu",
+		domain:       srv.URL,
+		appID:        appID,
+		appSecret:    appSecret,
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+		replayClient: lark.NewClient(appID, appSecret,
+			lark.WithEnableTokenCache(false),
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+	}
+
+	recalled, err := p.IsMessageRecalled(context.Background(), replyContext{messageID: "om_withdrawn", chatID: "oc_chat"})
+	if err != nil {
+		t.Fatalf("IsMessageRecalled() error = %v", err)
+	}
+	if !recalled {
+		t.Fatal("IsMessageRecalled() = false, want true")
+	}
+	if getCalls != 1 {
+		t.Fatalf("getCalls = %d, want 1", getCalls)
+	}
+	if !p.isMessageRecalled("om_withdrawn") {
+		t.Fatal("withdrawn message id was not cached after detection")
+	}
+}
+
+func TestIsMessageRecalledDetectsDeletedMessageItem(t *testing.T) {
+	const appID = "cli_recall_probe"
+	const appSecret = "secret-recall-probe"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/open-apis/auth/v3/tenant_access_token/internal":
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "success",
+				"expire":              7200,
+				"tenant_access_token": "tenant-token",
+			})
+		case "/open-apis/im/v1/messages/om_deleted":
+			writeJSON(t, w, map[string]any{
+				"code": 0,
+				"msg":  "success",
+				"data": map[string]any{
+					"items": []map[string]any{
+						{
+							"message_id": "om_deleted",
+							"deleted":    true,
+						},
+					},
+				},
+			})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName: "feishu",
+		domain:       srv.URL,
+		appID:        appID,
+		appSecret:    appSecret,
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+		replayClient: lark.NewClient(appID, appSecret,
+			lark.WithEnableTokenCache(false),
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+	}
+
+	recalled, err := p.IsMessageRecalled(context.Background(), replyContext{messageID: "om_deleted", chatID: "oc_chat"})
+	if err != nil {
+		t.Fatalf("IsMessageRecalled() error = %v", err)
+	}
+	if !recalled {
+		t.Fatal("IsMessageRecalled() = false, want true for deleted message item")
+	}
+	if !p.isMessageRecalled("om_deleted") {
+		t.Fatal("deleted message id was not cached after detection")
 	}
 }
 
@@ -485,6 +791,45 @@ func TestExtractPostPlainText_CodeBlock(t *testing.T) {
 
 func strPtr(s string) *string { return &s }
 
+func readFeishuFileUpload(t *testing.T, r *http.Request) (string, string, string) {
+	t.Helper()
+
+	reader, err := r.MultipartReader()
+	if err != nil {
+		t.Fatalf("multipart reader: %v", err)
+	}
+
+	var fileType, fileName, fileData string
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("read multipart part: %v", err)
+		}
+		data, err := io.ReadAll(part)
+		if err != nil {
+			t.Fatalf("read multipart field %q: %v", part.FormName(), err)
+		}
+		switch part.FormName() {
+		case "file_type":
+			fileType = string(data)
+		case "file_name":
+			fileName = string(data)
+		case "file":
+			fileData = string(data)
+		}
+	}
+	if fileType == "" {
+		t.Fatal("missing multipart file_type")
+	}
+	if fileName == "" {
+		t.Fatal("missing multipart file_name")
+	}
+	return fileType, fileName, fileData
+}
+
 func TestStripMentions(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -564,5 +909,40 @@ func TestStripMentions(t *testing.T) {
 				t.Errorf("stripMentions() = %q, want %q", got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestResolveBotSenderName(t *testing.T) {
+	p := &Platform{peerBots: map[string]string{
+		"cli_known": "Jeeves",
+		"cli_other": "Ivy",
+	}}
+	tests := []struct {
+		name  string
+		appID string
+		want  string
+	}{
+		{"empty app id falls back to Bot", "", "Bot"},
+		{"known app id resolves to alias", "cli_known", "Jeeves"},
+		{"another known app id", "cli_other", "Ivy"},
+		{"unknown app id surfaces id", "cli_unknown", "Bot[cli_unknown]"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := p.resolveBotSenderName(tt.appID)
+			if got != tt.want {
+				t.Errorf("resolveBotSenderName(%q) = %q, want %q", tt.appID, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveBotSenderName_NilMap(t *testing.T) {
+	p := &Platform{}
+	if got := p.resolveBotSenderName("cli_any"); got != "Bot[cli_any]" {
+		t.Errorf("nil peerBots: got %q, want %q", got, "Bot[cli_any]")
+	}
+	if got := p.resolveBotSenderName(""); got != "Bot" {
+		t.Errorf("nil peerBots + empty id: got %q, want %q", got, "Bot")
 	}
 }
