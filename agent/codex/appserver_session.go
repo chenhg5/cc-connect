@@ -59,7 +59,10 @@ type threadResumeResponse struct {
 }
 
 type turnStartResponse struct {
-	Turn struct {
+	Cwd             string  `json:"cwd"`
+	Model           string  `json:"model"`
+	ReasoningEffort *string `json:"reasoningEffort"`
+	Turn            struct {
 		ID string `json:"id"`
 	} `json:"turn"`
 }
@@ -360,6 +363,20 @@ func (s *appServerSession) applyThreadRuntimeState(workDir, model string, effort
 	s.effort = normalizeRuntimeReasoningEffort(stringValue(effort))
 }
 
+func (s *appServerSession) applyTurnRuntimeState(workDir, model string, effort *string) {
+	s.runtimeMu.Lock()
+	defer s.runtimeMu.Unlock()
+	if dir := strings.TrimSpace(workDir); dir != "" {
+		s.workDir = dir
+	}
+	if m := strings.TrimSpace(model); m != "" {
+		s.model = m
+	}
+	if effort != nil {
+		s.effort = normalizeRuntimeReasoningEffort(stringValue(effort))
+	}
+}
+
 func (s *appServerSession) refreshUsage(ctx context.Context) error {
 	timeout := appServerUsageRefreshTimeout
 	if ctx != nil {
@@ -462,6 +479,7 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	if resp.Turn.ID == "" {
 		return fmt.Errorf("codex app-server turn/start returned empty turn id")
 	}
+	s.applyTurnRuntimeState(resp.Cwd, resp.Model, resp.ReasoningEffort)
 
 	s.stateMu.Lock()
 	s.currentTurn = resp.Turn.ID

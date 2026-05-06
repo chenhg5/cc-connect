@@ -1069,7 +1069,7 @@ func TestProcessInteractiveEvents_AppendsReplyFooterWhenEnabled(t *testing.T) {
 	if len(sent) != 1 {
 		t.Fatalf("sent = %#v, want one final reply", sent)
 	}
-	want := fmt.Sprintf("answer\n\n*gpt-5.4 · xhigh · 100%% left · %s*", compactReplyFooterPath(filepath.Join(homeDir, "codes", "cc-connect")))
+	want := fmt.Sprintf("answer\n\n*xhigh · 100%% left · %s*", compactReplyFooterPath(filepath.Join(homeDir, "codes", "cc-connect")))
 	if sent[0] != want {
 		t.Fatalf("final reply = %q, want %q", sent[0], want)
 	}

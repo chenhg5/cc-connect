@@ -25,6 +25,21 @@ func TestAppServerSession_ApplyThreadRuntimeState(t *testing.T) {
 	}
 }
 
+func TestAppServerSession_ApplyTurnRuntimeStateUpdatesModelWithoutClearingEffort(t *testing.T) {
+	s := &appServerSession{}
+	effort := "high"
+	s.applyThreadRuntimeState("/tmp/project", "gpt-5.4", &effort)
+
+	s.applyTurnRuntimeState("", "gpt-5.5", nil)
+
+	if got := s.GetModel(); got != "gpt-5.5" {
+		t.Fatalf("GetModel() = %q, want gpt-5.5", got)
+	}
+	if got := s.GetReasoningEffort(); got != "high" {
+		t.Fatalf("GetReasoningEffort() = %q, want high", got)
+	}
+}
+
 func TestAppServerSession_HandleRateLimitsUpdatedCachesUsage(t *testing.T) {
 	s := &appServerSession{}
 	raw, err := json.Marshal(appServerRateLimitsResponse{

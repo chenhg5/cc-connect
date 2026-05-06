@@ -5532,7 +5532,7 @@ func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDi
 
 	var parts []string
 	hasStatus := false
-	if model := replyFooterModel(session, agent); model != "" {
+	if model := replyFooterModel(session); model != "" {
 		parts = append(parts, model)
 		hasStatus = true
 	}
@@ -5560,16 +5560,13 @@ func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDi
 	return strings.Join(parts, " · ")
 }
 
-func replyFooterModel(session AgentSession, agent Agent) string {
+func replyFooterModel(session AgentSession) string {
 	if session != nil {
 		if getter, ok := session.(interface{ GetModel() string }); ok {
 			if model := strings.TrimSpace(getter.GetModel()); model != "" {
 				return model
 			}
 		}
-	}
-	if getter, ok := agent.(interface{ GetModel() string }); ok {
-		return strings.TrimSpace(getter.GetModel())
 	}
 	return ""
 }
