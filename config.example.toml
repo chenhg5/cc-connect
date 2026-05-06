@@ -23,6 +23,17 @@
 # - "" (empty/not set): Auto-detect from user's first message / 留空自动检测
 # language = "en"
 
+# Shell for /shell commands, cron exec, hooks, and webhook exec.
+# /shell 命令、cron exec、hooks 和 webhook exec 使用的 shell。
+# Default / 默认: "sh" (Unix) or "powershell.exe" (Windows)
+# Supported / 支持: sh, bash, zsh, fish, cmd, powershell, pwsh
+# shell = "/bin/zsh"
+
+# Init command prepended to every shell command. Useful for sourcing profiles
+# so user-defined functions and aliases are available.
+# 初始化命令，会添加到每条 shell 命令前面。用于加载 profile，使自定义函数和别名可用。
+# init_command = "source ~/.zshrc"
+
 # Session data storage directory (default: ~/.cc-connect)
 # Stores conversation history and session state as JSON files.
 # 会话数据存储目录（默认 ~/.cc-connect），以 JSON 文件保存对话历史和会话状态。
@@ -668,6 +679,9 @@ name = "my-backend"
 # filter_external_sessions = false
 # filter_external_sessions：为 true 时，/list /switch /delete 仅显示由 cc-connect 创建的会话，
 # 隐藏在相同 work_dir 下通过直接 CLI 创建的会话。默认 false = 显示 agent 的全部会话。
+#
+# shell = "/bin/fish"                        # Per-project shell override / 项目级 shell 覆盖
+# init_command = "source ~/.config/fish/config.fish"  # Per-project init / 项目级初始化命令
 #
 # admin_from controls who can run privileged commands (/dir, /shell, /restart, /upgrade, /commands addexec, /cron addexec).
 # admin_from 控制谁可以执行特权命令（/dir, /shell, /restart, /upgrade, /commands addexec, /cron addexec）。

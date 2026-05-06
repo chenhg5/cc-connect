@@ -417,6 +417,10 @@ func main() {
 			})
 		}
 
+		// Wire shell configuration
+		shell, shellFlag, initCmd := config.EffectiveShell(cfg, &proj)
+		engine.SetShell(shell, shellFlag, initCmd)
+
 		// Wire hooks
 		if len(cfg.Hooks) > 0 {
 			coreHooks := make([]core.HookConfig, len(cfg.Hooks))
@@ -430,7 +434,7 @@ func main() {
 					Async:   h.Async,
 				}
 			}
-			engine.SetHooks(core.NewHookManager(proj.Name, coreHooks))
+			engine.SetHooks(core.NewHookManager(proj.Name, coreHooks, shell, shellFlag, initCmd))
 		}
 
 		// Wire local reference normalization / rendering

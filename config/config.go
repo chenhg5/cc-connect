@@ -118,6 +118,15 @@ type Config struct {
 	// setting so the reaper policy is consistent across projects; per-project
 	// configuration is intentionally not supported.
 	WorkspaceIdleTimeoutMins *int `toml:"workspace_idle_timeout_mins,omitempty"`
+	// Shell overrides the default shell used for /shell commands, cron exec,
+	// hooks, and webhook exec. On Unix the default is "sh"; on Windows it is
+	// "powershell.exe". Set to an absolute path (e.g. "/bin/zsh") to use a
+	// different shell. Supported: sh, bash, zsh, fish, cmd, powershell, pwsh.
+	Shell string `toml:"shell,omitempty"`
+	// InitCommand is prepended to every shell command before execution. Useful
+	// for sourcing shell profiles so that user-defined functions and aliases are
+	// available. Example: "source ~/.zshrc"
+	InitCommand string `toml:"init_command,omitempty"`
 }
 
 // CronConfig controls cron job behavior.
@@ -407,6 +416,10 @@ type ProjectConfig struct {
 	// cc-connect, hiding sessions created by direct CLI usage in the same work_dir.
 	// Default is false (show all sessions).
 	FilterExternalSessions *bool `toml:"filter_external_sessions,omitempty"`
+	// Shell overrides the global shell for this project. See Config.Shell.
+	Shell string `toml:"shell,omitempty"`
+	// InitCommand overrides the global init_command for this project.
+	InitCommand string `toml:"init_command,omitempty"`
 }
 
 type AgentConfig struct {
@@ -773,6 +786,39 @@ func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMe
 	}
 
 	return
+}
+
+// EffectiveShell returns the shell binary, flag, and init command for the project.
+// Resolution: per-project > global > platform default.
+// The flag is auto-detected: "/C" for cmd, "-Command" for powershell/pwsh, "-c" for everything else.
+func EffectiveShell(cfg *Config, proj *ProjectConfig) (shell, flag, initCmd string) {
+	s := ""
+	p := ""
+	if proj != nil {
+		s = proj.Shell
+		p = proj.InitCommand
+	}
+	if s == "" {
+		s = cfg.Shell
+	}
+	if p == "" {
+		p = cfg.InitCommand
+	}
+	if s == "" {
+		if runtime.GOOS == "windows" {
+			return "powershell.exe", "-Command", p
+		}
+		return "sh", "-c", p
+	}
+	base := strings.ToLower(filepath.Base(s))
+	switch {
+	case base == "cmd" || base == "cmd.exe":
+		return s, "/C", p
+	case strings.HasPrefix(base, "powershell") || strings.HasPrefix(base, "pwsh"):
+		return s, "-Command", p
+	default:
+		return s, "-c", p
+	}
 }
 
 // EffectiveCardMode returns the card rendering mode for the project: "rich" (Feishu Card 2.0)
