@@ -2721,17 +2721,36 @@ var mdLinkRe = regexp.MustCompile(`\[([^\]]*)\]\(([^)]+)\)`)
 // sanitizeMarkdownURLs rewrites markdown links with non-HTTP(S) schemes
 // to plain text, preventing Feishu API rejection (code 230001).
 func sanitizeMarkdownURLs(md string) string {
-	return mdLinkRe.ReplaceAllStringFunc(md, func(match string) string {
-		parts := mdLinkRe.FindStringSubmatch(match)
-		if len(parts) < 3 {
-			return match
+	var b strings.Builder
+	last := 0
+	for _, loc := range mdLinkRe.FindAllStringSubmatchIndex(md, -1) {
+		if len(loc) < 6 {
+			continue
 		}
-		if isValidFeishuHref(parts[2]) {
-			return match
+		start, end := loc[0], loc[1]
+		// `![alt](img_xxx)` is Feishu's native card-image syntax. The link
+		// regex also matches the `[alt](...)` suffix, so image references must
+		// be left alone for the card markdown sanitizer to handle.
+		if start > 0 && md[start-1] == '!' {
+			continue
 		}
-		// Convert invalid-scheme link to "text (url)" plain text
-		return parts[1] + " (" + parts[2] + ")"
-	})
+		b.WriteString(md[last:start])
+		text := md[loc[2]:loc[3]]
+		href := md[loc[4]:loc[5]]
+		match := md[start:end]
+		if isValidFeishuHref(href) {
+			b.WriteString(match)
+		} else {
+			// Convert invalid-scheme link to "text (url)" plain text.
+			b.WriteString(text + " (" + href + ")")
+		}
+		last = end
+	}
+	if last == 0 {
+		return md
+	}
+	b.WriteString(md[last:])
+	return b.String()
 }
 
 // parseInlineMarkdown parses a single line of markdown into Feishu post elements.
@@ -3266,6 +3285,7 @@ type feishuPreviewHandle struct {
 // Uses schema 2.0 which supports code blocks, tables, and inline formatting.
 // Card font is inherently smaller than Post/Text — this is a Feishu platform limitation.
 func buildCardJSON(content string) string {
+	content = sanitizeCardMarkdownForCard(content)
 	card := map[string]any{
 		"schema": "2.0",
 		"config": map[string]any{
@@ -3291,13 +3311,16 @@ func buildCardJSONWithStatusFooter(content, footer string) string {
 	if strings.TrimSpace(footer) == "" {
 		return buildCardJSON(content)
 	}
+	segments := sanitizeCardMarkdownSegmentsForCard([]string{content, footer})
+	content = segments[0]
+	footer = segments[1]
 	elements := []map[string]any{
 		{
 			"tag":     "markdown",
 			"content": content,
 		},
 		{
-			"tag":     "hr",
+			"tag": "hr",
 		},
 		{
 			"tag":       "markdown",
@@ -3562,6 +3585,20 @@ func progressResultDot(item core.ProgressCardEntry) string {
 	return "⚪"
 }
 
+func progressToolElement(iconToken string, content string) map[string]any {
+	elem := map[string]any{
+		"tag": "div",
+		"text": map[string]any{
+			"tag":     "lark_md",
+			"content": content,
+		},
+	}
+	if iconToken != "" {
+		elem["icon"] = map[string]any{"tag": "standard_icon", "token": iconToken}
+	}
+	return elem
+}
+
 func renderProgressEntryElement(item core.ProgressCardEntry, lang string) map[string]any {
 	text := strings.TrimSpace(item.Text)
 	if text == "" {
@@ -3583,37 +3620,30 @@ func renderProgressEntryElement(item core.ProgressCardEntry, lang string) map[st
 		if toolName == "" {
 			toolName = "Tool"
 		}
-		content := fmt.Sprintf("<text_tag color='blue'>%s</text_tag> `%s`", progressKindLabel(item.Kind, lang), inlineCodeText(toolName))
-		if body := formatProgressToolInput(toolName, text); body != "" {
+		display := buildToolDisplay(toolName, text)
+		content := fmt.Sprintf("<text_tag color='blue'>%s</text_tag> **%s**", progressKindLabel(item.Kind, lang), inlineCodeText(display.Title))
+		if body := formatProgressToolInput(toolName, display.Detail); body != "" {
 			content += "\n" + body
 		}
-		return map[string]any{
-			"tag":     "markdown",
-			"content": content,
-		}
+		return progressToolElement(display.IconToken, content)
 	case core.ProgressEntryToolResult:
 		toolName := strings.TrimSpace(item.Tool)
-		content := fmt.Sprintf("<text_tag color='turquoise'>%s</text_tag>", progressKindLabel(item.Kind, lang))
-		if toolName != "" {
-			content += " `" + inlineCodeText(toolName) + "`"
-		}
+		display := buildToolDisplay(toolName, "")
+		content := fmt.Sprintf("<text_tag color='turquoise'>%s</text_tag> **%s**", progressKindLabel(item.Kind, lang), inlineCodeText(display.Title))
 		dot := progressResultDot(item)
 		meta := dot
 		if item.ExitCode != nil {
 			meta += fmt.Sprintf(" exit code: `%d`", *item.ExitCode)
 		}
 		content += "\n" + meta
-		if body := formatProgressToolResult(item.Text); body != "" {
+		if body := formatProgressToolResult(sanitizeToolDetail(toolSanitizerGeneric, item.Text)); body != "" {
 			content += "\n" + body
 		} else {
 			content += "\n_" + progressNoOutputText(lang) + "_"
 		}
-		return map[string]any{
-			"tag":     "markdown",
-			"content": content,
-		}
+		return progressToolElement(display.IconToken, content)
 	case core.ProgressEntryError:
-		content := fmt.Sprintf("<text_tag color='red'>%s</text_tag>\n%s", progressKindLabel(item.Kind, lang), preprocessFeishuMarkdown(sanitizeMarkdownURLs(text)))
+		content := fmt.Sprintf("<text_tag color='red'>%s</text_tag>\n%s", progressKindLabel(item.Kind, lang), sanitizeCardMarkdownForCard(text))
 		return map[string]any{
 			"tag":     "markdown",
 			"content": content,
@@ -3621,9 +3651,89 @@ func renderProgressEntryElement(item core.ProgressCardEntry, lang string) map[st
 	default:
 		return map[string]any{
 			"tag":     "markdown",
-			"content": preprocessFeishuMarkdown(sanitizeMarkdownURLs(text)),
+			"content": sanitizeCardMarkdownForCard(text),
 		}
 	}
+}
+
+func splitProgressItemsByLane(items []core.ProgressCardEntry) (reasoning []core.ProgressCardEntry, tools []core.ProgressCardEntry, others []core.ProgressCardEntry) {
+	for _, item := range items {
+		switch item.Kind {
+		case core.ProgressEntryThinking:
+			reasoning = append(reasoning, item)
+		case core.ProgressEntryToolUse, core.ProgressEntryToolResult:
+			tools = append(tools, item)
+		default:
+			others = append(others, item)
+		}
+	}
+	return reasoning, tools, others
+}
+
+func progressPanelTitle(label string, count int, lang string) string {
+	if isZhLikeProgressLang(lang) {
+		switch label {
+		case "Reasoning":
+			label = "思考"
+		case "Tools":
+			label = "工具"
+		case "Updates":
+			label = "更新"
+		}
+	}
+	if count > 0 {
+		return fmt.Sprintf("%s (%d)", label, count)
+	}
+	return label
+}
+
+func buildProgressPanel(title string, expanded bool, elements []map[string]any) map[string]any {
+	return map[string]any{
+		"tag":              "collapsible_panel",
+		"expanded":         expanded,
+		"background_color": "grey",
+		"header": map[string]any{
+			"title": map[string]any{"tag": "plain_text", "content": title},
+		},
+		"border":           map[string]any{"color": "grey"},
+		"vertical_spacing": "8px",
+		"padding":          "4px 8px",
+		"elements":         elements,
+	}
+}
+
+func buildProgressPanelElements(items []core.ProgressCardEntry, lang string) []map[string]any {
+	elements := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		elements = append(elements, renderProgressEntryElement(item, lang))
+	}
+	return elements
+}
+
+func appendProgressGroupedElements(elements []map[string]any, items []core.ProgressCardEntry, lang string, running bool) []map[string]any {
+	reasoning, tools, others := splitProgressItemsByLane(items)
+	if len(reasoning) > 0 {
+		elements = append(elements, buildProgressPanel(
+			progressPanelTitle("Reasoning", len(reasoning), lang),
+			running,
+			buildProgressPanelElements(reasoning, lang),
+		))
+	}
+	if len(tools) > 0 {
+		elements = append(elements, buildProgressPanel(
+			progressPanelTitle("Tools", len(tools), lang),
+			running,
+			buildProgressPanelElements(tools, lang),
+		))
+	}
+	if len(others) > 0 {
+		elements = append(elements, buildProgressPanel(
+			progressPanelTitle("Updates", len(others), lang),
+			running,
+			buildProgressPanelElements(others, lang),
+		))
+	}
+	return elements
 }
 
 func buildProgressCardJSONFromPayload(payload *core.ProgressCardPayload) string {
@@ -3634,6 +3744,7 @@ func buildProgressCardJSONFromPayload(payload *core.ProgressCardPayload) string 
 
 	agent := progressAgentLabel(payload.Agent)
 	title, template, footer := progressStateMeta(payload.State, payload.Lang, agent)
+	running := payload.State == core.ProgressCardStateRunning
 
 	elements := make([]map[string]any, 0, len(items)+3)
 	if payload.Truncated {
@@ -3653,12 +3764,7 @@ func buildProgressCardJSONFromPayload(payload *core.ProgressCardPayload) string 
 		elements = append(elements, map[string]any{"tag": "hr"})
 	}
 
-	for i, item := range items {
-		elements = append(elements, renderProgressEntryElement(item, payload.Lang))
-		if i < len(items)-1 {
-			elements = append(elements, map[string]any{"tag": "hr"})
-		}
-	}
+	elements = appendProgressGroupedElements(elements, items, payload.Lang, running)
 	if footer != "" {
 		elements = append(elements, map[string]any{"tag": "hr"})
 		elements = append(elements, map[string]any{
@@ -3851,7 +3957,7 @@ func (p *Platform) createCardEntity(ctx context.Context, cardJSON string) (strin
 		return "", fmt.Errorf("%s: create card entity: parse response: %w", p.tag(), err)
 	}
 	if resp.Code != 0 {
-		return "", fmt.Errorf("%s: create card entity: code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+		return "", fmt.Errorf("%s: %w", p.tag(), classifyFeishuCardAPIError("create card entity", resp.Code, resp.Msg))
 	}
 	if resp.Data.CardID == "" {
 		return "", fmt.Errorf("%s: create card entity: empty card_id in response", p.tag())
@@ -3910,7 +4016,12 @@ func (p *Platform) StreamRichCardText(ctx context.Context, previewHandle any, fu
 		return fmt.Errorf("%s: stream rich card text: parse response: %w", p.tag(), err)
 	}
 	if resp.Code != 0 {
-		return fmt.Errorf("%s: stream rich card text: code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+		err := classifyFeishuCardAPIError("stream rich card text", resp.Code, resp.Msg)
+		if errors.Is(err, errFeishuCardRateLimited) {
+			slog.Debug(p.tag()+": stream rich card text rate limited; skipping frame", "code", resp.Code)
+			return nil
+		}
+		return fmt.Errorf("%s: %w", p.tag(), err)
 	}
 	return nil
 }
@@ -4052,7 +4163,7 @@ func (p *Platform) updateCardEntity(ctx context.Context, h *feishuPreviewHandle,
 		return fmt.Errorf("%s: update card entity: parse response: %w", p.tag(), err)
 	}
 	if resp.Code != 0 {
-		return fmt.Errorf("%s: update card entity: code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+		return fmt.Errorf("%s: %w", p.tag(), classifyFeishuCardAPIError("update card entity", resp.Code, resp.Msg))
 	}
 	return nil
 }
@@ -4311,7 +4422,58 @@ func (p *Platform) onBotMenu(event *larkapplication.P2BotMenuV6) error {
 // extended with "agent reply elapsed time" in the footer).
 // ═══════════════════════════════════════════════════════════════
 
-const defaultToolIcon = "setting-inter_outlined"
+const (
+	defaultToolIcon      = "setting-inter_outlined"
+	feishuCardTableLimit = 3
+)
+
+var (
+	errFeishuCardRateLimited = errors.New("feishu card rate limited")
+	errFeishuCardTableLimit  = errors.New("feishu card table limit")
+)
+
+type feishuCardAPIError struct {
+	API     string
+	Code    int
+	Msg     string
+	SubCode int
+}
+
+func (e *feishuCardAPIError) Error() string {
+	if e == nil {
+		return "feishu card api error"
+	}
+	if e.SubCode != 0 {
+		return fmt.Sprintf("feishu card %s failed: code=%d sub_code=%d msg=%s", e.API, e.Code, e.SubCode, e.Msg)
+	}
+	return fmt.Sprintf("feishu card %s failed: code=%d msg=%s", e.API, e.Code, e.Msg)
+}
+
+func (e *feishuCardAPIError) Is(target error) bool {
+	if e == nil {
+		return false
+	}
+	switch target {
+	case errFeishuCardRateLimited:
+		return e.Code == 230020
+	case errFeishuCardTableLimit:
+		return e.Code == 230099 && e.SubCode == 11310 && strings.Contains(strings.ToLower(e.Msg), "table number over limit")
+	default:
+		return false
+	}
+}
+
+var feishuCardSubCodePattern = regexp.MustCompile(`ErrCode:\s*(\d+)`)
+
+func classifyFeishuCardAPIError(api string, code int, msg string) error {
+	subCode := 0
+	if m := feishuCardSubCodePattern.FindStringSubmatch(msg); len(m) == 2 {
+		if parsed, err := strconv.Atoi(m[1]); err == nil {
+			subCode = parsed
+		}
+	}
+	return &feishuCardAPIError{API: api, Code: code, Msg: msg, SubCode: subCode}
+}
 
 // richCardMainTextElementID is the fixed element_id assigned to the markdown
 // body block of every rich card. The cardkit-v1 streaming text update API
@@ -4319,18 +4481,444 @@ const defaultToolIcon = "setting-inter_outlined"
 // Hardcoded because each rich card has exactly one streaming-text element.
 const richCardMainTextElementID = "main_text"
 
-var toolIconMap = map[string]string{
-	"Bash":      "code_outlined",          // was: terminal-two_outlined (not in official Lark icon library)
-	"Edit":      "edit_outlined",
-	"Read":      "file-link-text_outlined", // was: file-open_outlined (not in official Lark icon library)
-	"Write":     "richtext_outlined",      // was: notes_outlined (not in official Lark icon library)
-	"Glob":      "creat-folder_outlined",  // was: folder-open_outlined (not in official Lark icon library; "creat" is the official spelling)
-	"Grep":      "search_outlined",
-	"WebFetch":  "internet_outlined",
-	"WebSearch": "internet_outlined",
-	"Agent":     "robot_outlined",
-	"Skill":     "code_outlined",
-	"LSP":       "code_outlined",
+type toolSanitizer string
+
+const (
+	toolSanitizerGeneric toolSanitizer = "generic"
+	toolSanitizerSkill   toolSanitizer = "skill"
+	toolSanitizerPath    toolSanitizer = "path"
+	toolSanitizerSearch  toolSanitizer = "search"
+	toolSanitizerURL     toolSanitizer = "url"
+	toolSanitizerCommand toolSanitizer = "command"
+)
+
+type toolDescriptor struct {
+	Aliases         []string
+	IconToken       string
+	Title           string
+	Sanitizer       toolSanitizer
+	ParamKeys       []string
+	SummaryPatterns []*regexp.Regexp
+}
+
+type toolDisplay struct {
+	Title     string
+	IconToken string
+	Detail    string
+}
+
+var toolDescriptors = []toolDescriptor{
+	{
+		Aliases:         []string{"skill"},
+		IconToken:       "app-default_outlined",
+		Title:           "Load skill",
+		Sanitizer:       toolSanitizerSkill,
+		ParamKeys:       []string{"skill", "name"},
+		SummaryPatterns: []*regexp.Regexp{regexp.MustCompile(`(?i)^(?:load|use)\s+skill\s+(.+)$`)},
+	},
+	{
+		Aliases:         []string{"read", "open"},
+		IconToken:       "file-link-text_outlined",
+		Title:           "Read",
+		Sanitizer:       toolSanitizerPath,
+		ParamKeys:       []string{"file_path", "path", "file"},
+		SummaryPatterns: []*regexp.Regexp{regexp.MustCompile(`(?i)^(?:read|open)\s+(?:file\s+)?(.+)$`)},
+	},
+	{
+		Aliases:         []string{"write", "edit", "patch", "file_change", "filechange"},
+		IconToken:       "edit_outlined",
+		Title:           "Edit",
+		Sanitizer:       toolSanitizerPath,
+		ParamKeys:       []string{"file_path", "path", "file"},
+		SummaryPatterns: []*regexp.Regexp{regexp.MustCompile(`(?i)^(?:edit|write|patch)\s+(?:file\s+)?(.+)$`)},
+	},
+	{
+		Aliases:         []string{"web_search", "websearch", "web-search", "search"},
+		IconToken:       "search_outlined",
+		Title:           "Search web",
+		Sanitizer:       toolSanitizerSearch,
+		ParamKeys:       []string{"query", "q"},
+		SummaryPatterns: []*regexp.Regexp{regexp.MustCompile(`(?i)^(?:search\s+(?:web\s+)?(?:for|about)|query)\s+(.+)$`)},
+	},
+	{
+		Aliases:         []string{"web_fetch", "webfetch", "web-fetch", "fetch"},
+		IconToken:       "language_outlined",
+		Title:           "Fetch web page",
+		Sanitizer:       toolSanitizerURL,
+		ParamKeys:       []string{"url"},
+		SummaryPatterns: []*regexp.Regexp{regexp.MustCompile(`(?i)^(?:fetch|open)\s+(?:web\s+page\s+)?(?:from\s+)?(.+)$`)},
+	},
+	{
+		Aliases:         []string{"grep"},
+		IconToken:       "doc-search_outlined",
+		Title:           "Search text",
+		Sanitizer:       toolSanitizerGeneric,
+		ParamKeys:       []string{"pattern"},
+		SummaryPatterns: []*regexp.Regexp{regexp.MustCompile(`(?i)^(?:search\s+text(?:\s+by\s+pattern)?|grep)\s+(.+)$`)},
+	},
+	{
+		Aliases:         []string{"glob", "file_search", "filesearch"},
+		IconToken:       "folder_outlined",
+		Title:           "Search files",
+		Sanitizer:       toolSanitizerGeneric,
+		ParamKeys:       []string{"pattern", "query"},
+		SummaryPatterns: []*regexp.Regexp{regexp.MustCompile(`(?i)^(?:search\s+files(?:\s+by\s+pattern)?|glob)\s+(.+)$`)},
+	},
+	{
+		Aliases:         []string{"exec", "bash", "shell", "run_shell_command", "command", "run"},
+		IconToken:       "setting_outlined",
+		Title:           "Run command",
+		Sanitizer:       toolSanitizerCommand,
+		ParamKeys:       []string{"description", "command", "script"},
+		SummaryPatterns: []*regexp.Regexp{regexp.MustCompile(`(?i)^(?:run|execute)\s+(?:command|script)?\s*(.+)$`)},
+	},
+	{
+		Aliases:         []string{"browser", "playwright", "navigate"},
+		IconToken:       "browser-mac_outlined",
+		Title:           "Browser",
+		Sanitizer:       toolSanitizerURL,
+		ParamKeys:       []string{"url"},
+		SummaryPatterns: []*regexp.Regexp{regexp.MustCompile(`(?i)^(?:open|browse|visit|navigate\s+to)\s+(.+)$`)},
+	},
+	{
+		Aliases:         []string{"agent", "task", "spawn"},
+		IconToken:       "robot_outlined",
+		Title:           "Run sub-agent",
+		Sanitizer:       toolSanitizerGeneric,
+		ParamKeys:       []string{"task", "description", "prompt"},
+		SummaryPatterns: []*regexp.Regexp{regexp.MustCompile(`(?i)^(?:run\s+sub-?agent|spawn\s+agent)\s+(.+)$`)},
+	},
+	{
+		Aliases:   []string{"check", "determine", "verify", "todowrite", "todo_write"},
+		IconToken: "list-check_outlined",
+		Title:     "Check",
+		Sanitizer: toolSanitizerGeneric,
+		ParamKeys: []string{"target", "subject", "description"},
+	},
+	{
+		Aliases:   []string{"summarize", "analyze", "prepare"},
+		IconToken: "report_outlined",
+		Title:     "Analyze",
+		Sanitizer: toolSanitizerGeneric,
+		ParamKeys: []string{"target", "subject", "description"},
+	},
+	{
+		Aliases:   []string{"mcp", "mcp_tool", "mcptool"},
+		IconToken: "code_outlined",
+		Title:     "MCP tool",
+		Sanitizer: toolSanitizerGeneric,
+		ParamKeys: []string{"tool", "name", "server"},
+	},
+	{
+		Aliases:   []string{"permissions", "permission"},
+		IconToken: "setting-inter_outlined",
+		Title:     "Permissions",
+		Sanitizer: toolSanitizerGeneric,
+	},
+	{
+		Aliases:   []string{"computer_use", "computeruse"},
+		IconToken: "robot_outlined",
+		Title:     "Computer use",
+		Sanitizer: toolSanitizerGeneric,
+	},
+	{
+		Aliases:   []string{"code_interpreter", "codeinterpreter"},
+		IconToken: "code_outlined",
+		Title:     "Code interpreter",
+		Sanitizer: toolSanitizerGeneric,
+	},
+	{
+		Aliases:   []string{"ask_user_question", "askuserquestion"},
+		IconToken: "robot_outlined",
+		Title:     "Ask user",
+		Sanitizer: toolSanitizerGeneric,
+	},
+	{
+		Aliases:   []string{"lsp"},
+		IconToken: "code_outlined",
+		Title:     "LSP",
+		Sanitizer: toolSanitizerGeneric,
+	},
+}
+
+func normalizeToolNameForDisplay(name string) string {
+	return strings.ToLower(strings.TrimSpace(name))
+}
+
+func compactToolNameForDisplay(name string) string {
+	name = normalizeToolNameForDisplay(name)
+	replacer := strings.NewReplacer("_", "", "-", "", " ", "", ".", "")
+	return replacer.Replace(name)
+}
+
+func toolDescriptorMatches(desc toolDescriptor, toolName string) bool {
+	normalized := normalizeToolNameForDisplay(toolName)
+	compact := compactToolNameForDisplay(toolName)
+	for _, alias := range desc.Aliases {
+		alias = normalizeToolNameForDisplay(alias)
+		if normalized == alias || strings.HasPrefix(normalized, alias+"_") || strings.HasPrefix(normalized, alias+"-") {
+			return true
+		}
+		aliasCompact := compactToolNameForDisplay(alias)
+		if compact == aliasCompact || strings.HasPrefix(compact, aliasCompact) {
+			return true
+		}
+	}
+	return false
+}
+
+func resolveToolDescriptor(toolName string) *toolDescriptor {
+	for i := range toolDescriptors {
+		if toolDescriptorMatches(toolDescriptors[i], toolName) {
+			return &toolDescriptors[i]
+		}
+	}
+	return nil
+}
+
+func humanizeToolName(toolName string) string {
+	name := strings.TrimSpace(toolName)
+	if name == "" {
+		return "Tool"
+	}
+	name = strings.NewReplacer("_", " ", "-", " ").Replace(name)
+	words := strings.Fields(name)
+	if len(words) == 0 {
+		return "Tool"
+	}
+	for i, word := range words {
+		if word == strings.ToUpper(word) {
+			continue
+		}
+		lower := strings.ToLower(word)
+		words[i] = strings.ToUpper(lower[:1]) + lower[1:]
+	}
+	return strings.Join(words, " ")
+}
+
+func buildToolDisplay(toolName, detail string) toolDisplay {
+	desc := resolveToolDescriptor(toolName)
+	title := humanizeToolName(toolName)
+	icon := defaultToolIcon
+	sanitizer := toolSanitizerGeneric
+	if desc != nil {
+		title = desc.Title
+		icon = desc.IconToken
+		sanitizer = desc.Sanitizer
+	}
+
+	rawDetail := strings.TrimSpace(detail)
+	if desc != nil {
+		if extracted := extractToolDetailFromJSON(rawDetail, *desc); extracted != "" {
+			rawDetail = extracted
+		} else if extracted := extractToolDetailFromSummary(rawDetail, *desc); extracted != "" {
+			rawDetail = extracted
+		}
+	}
+	cleanDetail := sanitizeToolDetail(sanitizer, rawDetail)
+	if desc != nil && desc.Title == "Read" && isSkillPathValue(cleanDetail) {
+		title = "Skill Read"
+	}
+	return toolDisplay{Title: title, IconToken: icon, Detail: cleanDetail}
+}
+
+func extractToolDetailFromJSON(text string, desc toolDescriptor) string {
+	text = strings.TrimSpace(text)
+	if text == "" || len(desc.ParamKeys) == 0 {
+		return ""
+	}
+	candidates := []string{text}
+	if idx := strings.Index(text, "{"); idx > 0 {
+		candidates = append(candidates, text[idx:])
+	}
+	for _, candidate := range candidates {
+		var params map[string]any
+		if err := json.Unmarshal([]byte(candidate), &params); err != nil {
+			continue
+		}
+		if desc.Title == "Search text" {
+			if pattern := extractScalarText(params["pattern"]); pattern != "" {
+				if target := extractScalarText(params["glob"]); target != "" {
+					return pattern + " in " + target
+				}
+				if target := extractScalarText(params["path"]); target != "" {
+					return pattern + " in " + target
+				}
+				if target := extractScalarText(params["file_path"]); target != "" {
+					return pattern + " in " + target
+				}
+				return pattern
+			}
+		}
+		for _, key := range desc.ParamKeys {
+			if value := extractScalarText(params[key]); value != "" {
+				return value
+			}
+		}
+	}
+	return ""
+}
+
+func extractScalarText(value any) string {
+	switch v := value.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	case int:
+		return strconv.Itoa(v)
+	case bool:
+		return strconv.FormatBool(v)
+	default:
+		return ""
+	}
+}
+
+func extractToolDetailFromSummary(text string, desc toolDescriptor) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	for _, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
+		line = strings.TrimSpace(stripToolDisplayMarkdown(line))
+		if line == "" {
+			continue
+		}
+		if desc.Sanitizer == toolSanitizerURL {
+			if urlText := extractFirstURL(line); urlText != "" {
+				return urlText
+			}
+		}
+		for _, pattern := range desc.SummaryPatterns {
+			if match := pattern.FindStringSubmatch(line); len(match) > 1 {
+				return strings.TrimSpace(match[1])
+			}
+		}
+		if code := extractFirstCodeSpan(line); code != "" {
+			return code
+		}
+		if quoted := extractFirstQuotedText(line); quoted != "" {
+			return quoted
+		}
+		return line
+	}
+	return ""
+}
+
+func stripToolDisplayMarkdown(text string) string {
+	text = strings.TrimSpace(text)
+	text = strings.TrimPrefix(text, "- ")
+	text = strings.TrimPrefix(text, "* ")
+	text = strings.Trim(text, "`")
+	text = strings.Trim(text, "_")
+	return strings.TrimSpace(text)
+}
+
+var (
+	firstURLRe        = regexp.MustCompile(`https?://[^\s'"` + "`" + `<>]+`)
+	firstCodeSpanRe   = regexp.MustCompile("`([^`]+)`")
+	firstQuotedTextRe = regexp.MustCompile(`"([^"]+)"|'([^']+)'`)
+	secretAssignRe    = regexp.MustCompile(`(?i)\b([A-Za-z_][A-Za-z0-9_]*(?:token|secret|password|api[_-]?key|authorization|cookie|credential|bearer|session[_-]?id|client[_-]?secret|access[_-]?key)[A-Za-z0-9_]*)=("[^"]*"|'[^']*'|[^\s"'` + "`" + `]+)`)
+	authHeaderRe      = regexp.MustCompile(`(?i)(Authorization\s*:\s*(?:Bearer|Basic|Token)\s+)([^\s'"` + "`" + `]+)`)
+	sensitiveNameRe   = regexp.MustCompile(`(?i)(token|secret|password|api[_-]?key|authorization|cookie|credential|bearer|session[_-]?id|client[_-]?secret|access[_-]?key)`)
+)
+
+func extractFirstURL(text string) string {
+	return firstURLRe.FindString(text)
+}
+
+func extractFirstCodeSpan(text string) string {
+	if match := firstCodeSpanRe.FindStringSubmatch(text); len(match) > 1 {
+		return strings.TrimSpace(match[1])
+	}
+	return ""
+}
+
+func extractFirstQuotedText(text string) string {
+	if match := firstQuotedTextRe.FindStringSubmatch(text); len(match) > 2 {
+		if strings.TrimSpace(match[1]) != "" {
+			return strings.TrimSpace(match[1])
+		}
+		return strings.TrimSpace(match[2])
+	}
+	return ""
+}
+
+func sanitizeToolDetail(kind toolSanitizer, value string) string {
+	cleaned := sanitizeGenericToolText(value)
+	if cleaned == "" {
+		return ""
+	}
+	switch kind {
+	case toolSanitizerSkill:
+		cleaned = regexp.MustCompile(`(?i)^skill\s+`).ReplaceAllString(cleaned, "")
+		cleaned = strings.NewReplacer("-", " ", "_", " ").Replace(cleaned)
+		return strings.TrimSpace(cleaned)
+	case toolSanitizerSearch:
+		return stripToolDisplayQuotes(cleaned)
+	case toolSanitizerURL:
+		return sanitizeURLText(stripToolDisplayQuotes(cleaned))
+	case toolSanitizerCommand:
+		return sanitizeCommandLike(cleaned)
+	case toolSanitizerPath:
+		return redactInlineSecrets(strings.TrimSpace(cleaned))
+	default:
+		return redactInlineSecrets(cleaned)
+	}
+}
+
+func sanitizeGenericToolText(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	return redactInlineSecrets(value)
+}
+
+func stripToolDisplayQuotes(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) >= 2 {
+		if (value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'') {
+			return strings.TrimSpace(value[1 : len(value)-1])
+		}
+	}
+	return value
+}
+
+func sanitizeURLText(value string) string {
+	value = strings.TrimSpace(strings.TrimPrefix(value, "from "))
+	if value == "" {
+		return ""
+	}
+	if u, err := url.Parse(value); err == nil && u.Scheme != "" && u.Host != "" {
+		u.User = nil
+		q := u.Query()
+		for key := range q {
+			if sensitiveNameRe.MatchString(key) {
+				q.Set(key, "[redacted]")
+			}
+		}
+		u.RawQuery = q.Encode()
+		return u.String()
+	}
+	return redactInlineSecrets(value)
+}
+
+func sanitizeCommandLike(value string) string {
+	value = strings.TrimSpace(stripToolDisplayQuotes(value))
+	value = regexp.MustCompile(`(?i)^(?:command|script|description)\s+`).ReplaceAllString(value, "")
+	return redactInlineSecrets(value)
+}
+
+func redactInlineSecrets(value string) string {
+	value = secretAssignRe.ReplaceAllString(value, "$1=[redacted]")
+	value = authHeaderRe.ReplaceAllString(value, "$1[redacted]")
+	return value
+}
+
+func isSkillPathValue(value string) bool {
+	return strings.Contains(strings.ToLower(value), "/skills/")
 }
 
 var thinkingVerbs = []string{
@@ -4355,9 +4943,191 @@ func pickThinkingVerb() string {
 
 var markdownTablePattern = regexp.MustCompile(`(?m)^\|.+\|\s*\n\|[\s:|-]+\|\s*\n(?:\|.+\|\s*\n?)+`)
 
+type markdownTextMatch struct {
+	start int
+	end   int
+	raw   string
+}
+
+type markdownLine struct {
+	text       string
+	start, end int
+}
+
+var feishuCardImagePattern = regexp.MustCompile(`!\[([^\]]*)\]\(([^)\s]+)\)`)
+
+func markdownLinesWithOffsets(text string) []markdownLine {
+	if text == "" {
+		return nil
+	}
+	parts := strings.SplitAfter(text, "\n")
+	lines := make([]markdownLine, 0, len(parts))
+	offset := 0
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		next := offset + len(part)
+		lines = append(lines, markdownLine{text: part, start: offset, end: next})
+		offset = next
+	}
+	return lines
+}
+
+func isMarkdownTableRow(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	return len(trimmed) >= 2 && strings.HasPrefix(trimmed, "|") && strings.HasSuffix(trimmed, "|")
+}
+
+func isMarkdownTableSeparator(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if !isMarkdownTableRow(trimmed) {
+		return false
+	}
+	hasDash := false
+	for _, r := range trimmed {
+		switch r {
+		case '|', '-', ':', ' ':
+			if r == '-' {
+				hasDash = true
+			}
+		default:
+			return false
+		}
+	}
+	return hasDash
+}
+
+func findMarkdownTablesOutsideCodeBlocks(text string) []markdownTextMatch {
+	lines := markdownLinesWithOffsets(text)
+	var matches []markdownTextMatch
+	inCodeBlock := false
+	for i := 0; i < len(lines); i++ {
+		trimmed := strings.TrimSpace(lines[i].text)
+		if strings.HasPrefix(trimmed, "```") {
+			inCodeBlock = !inCodeBlock
+			continue
+		}
+		if inCodeBlock || i+1 >= len(lines) || !isMarkdownTableRow(lines[i].text) || !isMarkdownTableSeparator(lines[i+1].text) {
+			continue
+		}
+		start := lines[i].start
+		end := lines[i+1].end
+		j := i + 2
+		for j < len(lines) && isMarkdownTableRow(lines[j].text) {
+			end = lines[j].end
+			j++
+		}
+		matches = append(matches, markdownTextMatch{
+			start: start,
+			end:   end,
+			raw:   strings.TrimSpace(text[start:end]),
+		})
+		i = j - 1
+	}
+	return matches
+}
+
+func wrapTablesBeyondLimit(text string, matches []markdownTextMatch, keepCount int) string {
+	if len(matches) <= keepCount {
+		return text
+	}
+	if keepCount < 0 {
+		keepCount = 0
+	}
+	result := text
+	for i := len(matches) - 1; i >= keepCount; i-- {
+		match := matches[i]
+		replacement := "```\n" + match.raw + "\n```"
+		result = result[:match.start] + replacement + result[match.end:]
+	}
+	return result
+}
+
+func sanitizeCardMarkdownTables(text string, remainingBudget int) (string, int) {
+	matches := findMarkdownTablesOutsideCodeBlocks(text)
+	if len(matches) <= remainingBudget {
+		return text, remainingBudget - len(matches)
+	}
+	return wrapTablesBeyondLimit(text, matches, remainingBudget), 0
+}
+
+func stripInvalidFeishuCardImages(text string) string {
+	if !strings.Contains(text, "![") {
+		return text
+	}
+	return feishuCardImagePattern.ReplaceAllStringFunc(text, func(match string) string {
+		parts := feishuCardImagePattern.FindStringSubmatch(match)
+		if len(parts) == 3 && strings.HasPrefix(parts[2], "img_") {
+			return match
+		}
+		return ""
+	})
+}
+
+func protectFencedCodeBlocks(text string) (string, []string) {
+	var blocks []string
+	var b strings.Builder
+	for i := 0; i < len(text); {
+		start := strings.Index(text[i:], "```")
+		if start < 0 {
+			b.WriteString(text[i:])
+			break
+		}
+		start += i
+		end := strings.Index(text[start+3:], "```")
+		if end < 0 {
+			b.WriteString(text[i:])
+			break
+		}
+		end += start + 6
+		b.WriteString(text[i:start])
+		placeholder := fmt.Sprintf("\x00CC_FEISHU_CODE_BLOCK_%d\x00", len(blocks))
+		blocks = append(blocks, text[start:end])
+		b.WriteString(placeholder)
+		i = end
+	}
+	return b.String(), blocks
+}
+
+func restoreFencedCodeBlocks(text string, blocks []string) string {
+	for i, block := range blocks {
+		placeholder := fmt.Sprintf("\x00CC_FEISHU_CODE_BLOCK_%d\x00", i)
+		text = strings.ReplaceAll(text, placeholder, block)
+	}
+	return text
+}
+
+func optimizeFeishuCardMarkdown(text string) string {
+	protected, blocks := protectFencedCodeBlocks(text)
+	if regexp.MustCompile(`(?m)^#{1,3} `).MatchString(protected) {
+		protected = regexp.MustCompile(`(?m)^#{2,6} (.+)$`).ReplaceAllString(protected, "##### $1")
+		protected = regexp.MustCompile(`(?m)^# (.+)$`).ReplaceAllString(protected, "#### $1")
+	}
+	protected = regexp.MustCompile(`\n{3,}`).ReplaceAllString(protected, "\n\n")
+	return restoreFencedCodeBlocks(protected, blocks)
+}
+
+func sanitizeCardMarkdownSegmentsForCard(texts []string) []string {
+	out := make([]string, len(texts))
+	remainingBudget := feishuCardTableLimit
+	for i, text := range texts {
+		prepared := sanitizeMarkdownURLs(preprocessFeishuMarkdown(text))
+		prepared = stripInvalidFeishuCardImages(prepared)
+		prepared = optimizeFeishuCardMarkdown(prepared)
+		prepared, remainingBudget = sanitizeCardMarkdownTables(prepared, remainingBudget)
+		out[i] = prepared
+	}
+	return out
+}
+
+func sanitizeCardMarkdownForCard(text string) string {
+	return sanitizeCardMarkdownSegmentsForCard([]string{text})[0]
+}
+
 func getToolIcon(toolName string) string {
-	if icon, ok := toolIconMap[toolName]; ok {
-		return icon
+	if desc := resolveToolDescriptor(toolName); desc != nil && desc.IconToken != "" {
+		return desc.IconToken
 	}
 	return defaultToolIcon
 }
@@ -4366,16 +5136,12 @@ func richStepDisplayName(step core.ToolStep) string {
 	if step.Kind == core.ToolStepKindThinking {
 		return "Thinking"
 	}
-	name := strings.TrimSpace(step.Name)
-	if name == "" {
-		return "Tool"
-	}
-	return name
+	return buildToolDisplay(step.Name, "").Title
 }
 
 func richStepBody(step core.ToolStep) string {
 	name := richStepDisplayName(step)
-	summary := strings.TrimSpace(step.Summary)
+	summary := buildToolDisplay(step.Name, step.Summary).Detail
 	if summary == "" {
 		summary = name
 	}
@@ -4419,6 +5185,7 @@ func isCardJSON(content string) bool {
 // buildCardJSONWithStatus builds a Feishu card JSON with a colored header
 // reflecting the given status. Used as a fallback when rich-card assembly fails.
 func buildCardJSONWithStatus(content string, status core.CardStatus) string {
+	content = sanitizeCardMarkdownForCard(content)
 	template := "grey"
 	switch status {
 	case core.CardStatusWorking, core.CardStatusThinking:
@@ -4450,109 +5217,130 @@ func buildCardJSONWithStatus(content string, status core.CardStatus) string {
 	return string(b)
 }
 
-// buildRichCard renders a Card 2.0 "single-card" turn with collapsible
-// tool-step panel, streaming markdown body, status-colored header, and a
-// pre-composed multi-line statusFooter (engine-owned, includes elapsed).
-func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) string {
-	panelTitle := "Thinking..."
-	if len(steps) > 0 {
-		if streaming {
-			toolCount := 0
-			for _, step := range steps {
-				if step.Kind != core.ToolStepKindThinking {
-					toolCount++
-				}
-			}
-			if toolCount > 0 {
-				panelTitle = fmt.Sprintf("Working on it (%d steps)", len(steps))
-			}
-		} else {
-			toolCounts := make(map[string]int)
-			var toolOrder []string
-			for _, s := range steps {
-				name := richStepDisplayName(s)
-				if toolCounts[name] == 0 {
-					toolOrder = append(toolOrder, name)
-				}
-				toolCounts[name]++
-			}
-			var toolParts []string
-			for _, name := range toolOrder {
-				if toolCounts[name] > 1 {
-					toolParts = append(toolParts, fmt.Sprintf("%s×%d", name, toolCounts[name]))
-				} else {
-					toolParts = append(toolParts, name)
-				}
-			}
-			toolSummary := strings.Join(toolParts, ", ")
-			preview := strings.TrimSpace(markdown)
-			if idx := strings.IndexByte(preview, '\n'); idx > 0 {
-				preview = preview[:idx]
-			}
-			if runes := []rune(preview); len(runes) > 20 {
-				preview = string(runes[:20]) + "..."
-			}
-			if preview != "" {
-				panelTitle = fmt.Sprintf("%s · %s", toolSummary, preview)
-			} else {
-				panelTitle = toolSummary
-			}
+func splitRichStepsByLane(steps []core.ToolStep) (reasoning []core.ToolStep, tools []core.ToolStep) {
+	for _, step := range steps {
+		if step.Kind == core.ToolStepKindThinking {
+			reasoning = append(reasoning, step)
+			continue
 		}
+		tools = append(tools, step)
 	}
+	return reasoning, tools
+}
 
-	panelCap := len(steps)
-	if panelCap < 1 {
-		panelCap = 1
+func richLaneTitle(label string, count int) string {
+	if count > 0 {
+		return fmt.Sprintf("%s (%d)", label, count)
 	}
-	panelElements := make([]map[string]any, 0, panelCap)
+	return label
+}
+
+func richStepRowContent(step core.ToolStep) string {
+	body := richStepBody(step)
+	if step.Kind == core.ToolStepKindThinking {
+		return body
+	}
+	name := richStepDisplayName(step)
+	if body == name || strings.HasPrefix(body, name+"\n") {
+		return body
+	}
+	return name + "\n" + body
+}
+
+func richStepElement(step core.ToolStep) map[string]any {
+	text := map[string]any{
+		"tag":       "plain_text",
+		"content":   richStepRowContent(step),
+		"text_size": "notation",
+	}
+	elem := map[string]any{
+		"tag":  "div",
+		"text": text,
+	}
+	if step.Kind == core.ToolStepKindThinking {
+		text["text_color"] = "grey"
+		return elem
+	}
+	elem["icon"] = map[string]any{"tag": "standard_icon", "token": getToolIcon(step.Name)}
+	return elem
+}
+
+func richPlaceholderElement(text string) map[string]any {
+	return map[string]any{
+		"tag": "div",
+		"text": map[string]any{
+			"tag":        "plain_text",
+			"content":    text,
+			"text_size":  "notation",
+			"text_color": "grey",
+		},
+	}
+}
+
+func richPanelElements(steps []core.ToolStep, emptyText string) []map[string]any {
 	if len(steps) == 0 {
-		panelElements = append(panelElements, map[string]any{
-			"tag":  "div",
-			"text": map[string]any{"tag": "plain_text", "content": "Thinking..."},
-		})
-	} else {
-		// Cap the number of step rows so the collapsible panel doesn't
-		// balloon into hundreds of elements (lark client renders that
-		// poorly and the whole card can hit the ~30KB API limit).
-		const maxPanelSteps = 30
-		visible := steps
-		overflow := 0
-		if len(steps) > maxPanelSteps {
-			visible = steps[:maxPanelSteps]
-			overflow = len(steps) - maxPanelSteps
-		}
-		for _, step := range visible {
-			summary := richStepBody(step)
-			panelElements = append(panelElements, map[string]any{
-				"tag":  "div",
-				"icon": map[string]any{"tag": "standard_icon", "token": getToolIcon(step.Name)},
-				"text": map[string]any{"tag": "plain_text", "content": summary},
-			})
-		}
-		if overflow > 0 {
-			panelElements = append(panelElements, map[string]any{
-				"tag":  "div",
-				"text": map[string]any{"tag": "plain_text", "content": fmt.Sprintf("… and %d more steps", overflow)},
-			})
-		}
+		return []map[string]any{richPlaceholderElement(emptyText)}
 	}
+	const maxPanelSteps = 30
+	visible := steps
+	overflow := 0
+	if len(steps) > maxPanelSteps {
+		visible = steps[:maxPanelSteps]
+		overflow = len(steps) - maxPanelSteps
+	}
+	elements := make([]map[string]any, 0, len(visible)+1)
+	for _, step := range visible {
+		elements = append(elements, richStepElement(step))
+	}
+	if overflow > 0 {
+		elements = append(elements, richPlaceholderElement(fmt.Sprintf("... and %d more steps", overflow)))
+	}
+	return elements
+}
 
-	panelMap := map[string]any{
+func buildRichPanel(title string, expanded bool, elements []map[string]any) map[string]any {
+	return map[string]any{
 		"tag":              "collapsible_panel",
-		"expanded":         streaming,
+		"expanded":         expanded,
 		"background_color": "grey",
 		"header": map[string]any{
-			"title": map[string]any{"tag": "plain_text", "content": panelTitle},
+			"title": map[string]any{"tag": "plain_text", "content": title},
 		},
 		"border":           map[string]any{"color": "grey"},
 		"vertical_spacing": "8px",
 		"padding":          "4px 8px",
-		"elements":         panelElements,
+		"elements":         elements,
 	}
+}
+
+// buildRichCard renders a Card 2.0 "single-card" turn with collapsible
+// reasoning/tool panels, streaming markdown body, status-colored header, and a
+// pre-composed multi-line statusFooter (engine-owned, includes elapsed).
+func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) string {
+	reasoningSteps, toolSteps := splitRichStepsByLane(steps)
+	panelMaps := make([]map[string]any, 0, 2)
+	if len(reasoningSteps) > 0 {
+		panelMaps = append(panelMaps, buildRichPanel(
+			richLaneTitle("Reasoning", len(reasoningSteps)),
+			streaming,
+			richPanelElements(reasoningSteps, "Thinking..."),
+		))
+	}
+	if len(toolSteps) > 0 {
+		panelMaps = append(panelMaps, buildRichPanel(
+			richLaneTitle("Tools", len(toolSteps)),
+			streaming,
+			richPanelElements(toolSteps, "No tool steps"),
+		))
+	}
+	if len(panelMaps) == 0 && streaming {
+		panelMaps = append(panelMaps, buildRichPanel("Reasoning", true, richPanelElements(nil, "Thinking...")))
+	}
+
 	markdownMap := map[string]any{
 		"tag":        "markdown",
 		"element_id": richCardMainTextElementID, // required for cardkit-v1 streaming text update
-		"content":    preprocessFeishuMarkdown(markdown),
+		"content":    sanitizeCardMarkdownForCard(markdown),
 	}
 
 	// Footer: engine pre-composes a multi-line statusFooter (lines separated by \n).
@@ -4567,17 +5355,18 @@ func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, mark
 				continue
 			}
 			footerElements = append(footerElements, map[string]any{
-				"tag": "markdown",
-				"content": line,
-				"text_size": "notation",
+				"tag":        "markdown",
+				"content":    sanitizeCardMarkdownForCard(line),
+				"text_size":  "notation",
 				"text_color": "grey",
 			})
 		}
 	}
 
 	var elements []map[string]any
-	if len(steps) > 0 || streaming {
-		elements = append(elements, panelMap, markdownMap)
+	if len(panelMaps) > 0 {
+		elements = append(elements, panelMaps...)
+		elements = append(elements, markdownMap)
 	} else {
 		elements = append(elements, markdownMap)
 	}
@@ -4619,7 +5408,7 @@ func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, mark
 	b, err := json.Marshal(card)
 	if err != nil {
 		slog.Debug("feishu: build rich card marshal failed, fallback to basic card", "error", err)
-		return buildCardJSONWithStatus(preprocessFeishuMarkdown(markdown), status)
+		return buildCardJSONWithStatus(markdown, status)
 	}
 	// Feishu interactive card payload limit is ~30KB; over that the API
 	// rejects the whole card and the lark client may render it as a
@@ -4627,7 +5416,7 @@ func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, mark
 	const maxCardJSONBytes = 28000
 	if len(b) > maxCardJSONBytes {
 		slog.Debug("feishu: rich card exceeds size limit, fallback to basic card", "size", len(b))
-		return buildCardJSONWithStatus(preprocessFeishuMarkdown(markdown), status)
+		return buildCardJSONWithStatus(markdown, status)
 	}
 	return string(b)
 }
