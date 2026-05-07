@@ -3398,7 +3398,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		select {
 		case <-stopCh:
-			sp.discard()
+			sp.finish(strings.Join(textParts, ""))
 			return
 		case event, ok = <-events:
 			if !ok {
@@ -3444,7 +3444,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		}
 
 		if state.isStopped() {
-			sp.discard()
+			sp.finish(strings.Join(textParts, ""))
 			state.mu.Lock()
 			state.eventsNeedResync = true
 			state.mu.Unlock()
