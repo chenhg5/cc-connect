@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -928,6 +929,52 @@ func TestBuildPreviewCardJSON_ProgressPayloadUsesStructuredCard(t *testing.T) {
 	}
 }
 
+func TestBuildPreviewCardJSON_ProgressPayloadSeparatesReasoningAndTools(t *testing.T) {
+	exitCode := 0
+	payload := core.BuildProgressCardPayloadV2([]core.ProgressCardEntry{
+		{Kind: core.ProgressEntryThinking, Text: "Inspecting event routing"},
+		{Kind: core.ProgressEntryToolUse, Tool: "Bash", Text: "pwd"},
+		{Kind: core.ProgressEntryToolResult, Tool: "Bash", Text: "/tmp/project", ExitCode: &exitCode},
+	}, false, "Codex", core.LangEnglish, core.ProgressCardStateRunning)
+
+	panels := collectCardPanels(t, buildPreviewCardJSON(payload))
+	if len(panels) != 2 {
+		t.Fatalf("panel count = %d, want 2 panels: %#v", len(panels), panels)
+	}
+	if got := cardPanelTitle(panels[0]); got != "Reasoning (1)" {
+		t.Fatalf("first panel title = %q, want Reasoning (1)", got)
+	}
+	if got := cardPanelTitle(panels[1]); got != "Tools (2)" {
+		t.Fatalf("second panel title = %q, want Tools (2)", got)
+	}
+	if panelContains(t, panels[0], "pwd") {
+		t.Fatalf("reasoning panel should not include tool content: %#v", panels[0])
+	}
+	if panelContains(t, panels[1], "Inspecting event routing") {
+		t.Fatalf("tools panel should not include reasoning content: %#v", panels[1])
+	}
+}
+
+func TestBuildPreviewCardJSON_ProgressPayloadUsesToolDescriptors(t *testing.T) {
+	payload := core.BuildProgressCardPayloadV2([]core.ProgressCardEntry{
+		{Kind: core.ProgressEntryToolUse, Tool: "web_fetch", Text: "https://example.com/docs?token=secret"},
+	}, false, "Codex", core.LangEnglish, core.ProgressCardStateRunning)
+
+	panels := collectCardPanels(t, buildPreviewCardJSON(payload))
+	if len(panels) != 1 {
+		t.Fatalf("panel count = %d, want 1 tools panel: %#v", len(panels), panels)
+	}
+	if !panelContains(t, panels[0], "language_outlined") {
+		t.Fatalf("tools panel should use web fetch icon: %#v", panels[0])
+	}
+	if !panelContains(t, panels[0], "Fetch web page") {
+		t.Fatalf("tools panel should use descriptor title: %#v", panels[0])
+	}
+	if panelContains(t, panels[0], "token=secret") {
+		t.Fatalf("tools panel should redact sensitive URL query params: %#v", panels[0])
+	}
+}
+
 func TestBuildRichCard_RendersThinkingAndToolResultRows(t *testing.T) {
 	code := 0
 	success := true
@@ -955,6 +1002,155 @@ func TestBuildRichCard_RendersThinkingAndToolResultRows(t *testing.T) {
 	}
 }
 
+func TestBuildRichCard_SeparatesReasoningAndTools(t *testing.T) {
+	cardJSON := buildRichCard(core.CardStatusWorking, "", []core.ToolStep{
+		{Kind: core.ToolStepKindThinking, Summary: "Inspecting event routing"},
+		{Kind: core.ToolStepKindTool, Name: "Bash", Summary: "pwd"},
+	}, "answer", true, "")
+
+	panels := collectCardPanels(t, cardJSON)
+	if len(panels) != 2 {
+		t.Fatalf("panel count = %d, want 2 panels: %#v", len(panels), panels)
+	}
+	if got := cardPanelTitle(panels[0]); got != "Reasoning (1)" {
+		t.Fatalf("first panel title = %q, want Reasoning (1)", got)
+	}
+	if got := cardPanelTitle(panels[1]); got != "Tools (1)" {
+		t.Fatalf("second panel title = %q, want Tools (1)", got)
+	}
+	if panelContains(t, panels[0], "pwd") {
+		t.Fatalf("reasoning panel should not include tool content: %#v", panels[0])
+	}
+	if panelContains(t, panels[1], "Inspecting event routing") {
+		t.Fatalf("tools panel should not include reasoning content: %#v", panels[1])
+	}
+}
+
+func TestBuildRichCard_UsesToolDescriptorsForAliases(t *testing.T) {
+	cardJSON := buildRichCard(core.CardStatusWorking, "", []core.ToolStep{
+		{Kind: core.ToolStepKindTool, Name: "web_fetch", Summary: "https://example.com/docs?token=secret"},
+	}, "answer", true, "")
+
+	panels := collectCardPanels(t, cardJSON)
+	if len(panels) != 1 {
+		t.Fatalf("panel count = %d, want 1 tools panel: %#v", len(panels), panels)
+	}
+	if !panelContains(t, panels[0], "language_outlined") {
+		t.Fatalf("tools panel should use web fetch icon: %#v", panels[0])
+	}
+	if !panelContains(t, panels[0], "Fetch web page") {
+		t.Fatalf("tools panel should use descriptor title: %#v", panels[0])
+	}
+	if panelContains(t, panels[0], "token=secret") {
+		t.Fatalf("tools panel should redact sensitive URL query params: %#v", panels[0])
+	}
+}
+
+func TestBuildRichCard_SanitizesMarkdownForCardLimits(t *testing.T) {
+	markdown := strings.Join([]string{
+		"```",
+		"| code |",
+		"|---|",
+		"| example |",
+		"```",
+		"",
+		"# Big Result",
+		"| A |",
+		"|---|",
+		"| 1 |",
+		"",
+		"| B |",
+		"|---|",
+		"| 2 |",
+		"",
+		"| C |",
+		"|---|",
+		"| 3 |",
+		"",
+		"| D |",
+		"|---|",
+		"| 4 |",
+		"",
+		"![remote](https://example.com/image.png)",
+		"![ok](img_v3_abc)",
+	}, "\n")
+
+	content := strings.Join(collectCardMarkdownContents(t, buildRichCard(core.CardStatusDone, "", nil, markdown, false, "")), "\n")
+	if containsMarkdownLine(content, "# Big Result") {
+		t.Fatalf("card markdown should downgrade h1 headings, got %q", content)
+	}
+	if !strings.Contains(content, "#### Big Result") {
+		t.Fatalf("card markdown should render h1 as h4, got %q", content)
+	}
+	if !strings.Contains(content, "```\n| D |\n|---|\n| 4 |\n```") {
+		t.Fatalf("fourth table should be downgraded to a code block, got %q", content)
+	}
+	if !strings.Contains(content, "```\n| code |\n|---|\n| example |\n```") {
+		t.Fatalf("existing code block tables should stay intact, got %q", content)
+	}
+	if strings.Contains(content, "![remote]") || strings.Contains(content, "https://example.com/image.png") {
+		t.Fatalf("card markdown should strip unresolved non-img_ images, got %q", content)
+	}
+	if !strings.Contains(content, "![ok](img_v3_abc)") {
+		t.Fatalf("card markdown should preserve Feishu image keys, got %q", content)
+	}
+}
+
+func containsMarkdownLine(content string, want string) bool {
+	for _, line := range strings.Split(content, "\n") {
+		if strings.TrimSpace(line) == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestBuildCardJSONWithStatusFooter_SharesCardTableBudget(t *testing.T) {
+	body := strings.Join([]string{
+		"| A |",
+		"|---|",
+		"| 1 |",
+		"",
+		"| B |",
+		"|---|",
+		"| 2 |",
+	}, "\n")
+	footer := strings.Join([]string{
+		"| C |",
+		"|---|",
+		"| 3 |",
+		"",
+		"| D |",
+		"|---|",
+		"| 4 |",
+	}, "\n")
+
+	content := strings.Join(collectCardMarkdownContents(t, buildCardJSONWithStatusFooter(body, footer)), "\n")
+	if !strings.Contains(content, "| C |\n|---|\n| 3 |") {
+		t.Fatalf("third table should remain renderable, got %q", content)
+	}
+	if !strings.Contains(content, "```\n| D |\n|---|\n| 4 |\n```") {
+		t.Fatalf("fourth table across card elements should be downgraded, got %q", content)
+	}
+}
+
+func TestFeishuCardAPIErrorClassification(t *testing.T) {
+	rateLimitErr := classifyFeishuCardAPIError("stream", 230020, "rate limited")
+	if !errors.Is(rateLimitErr, errFeishuCardRateLimited) {
+		t.Fatalf("230020 should be rate limit, got %v", rateLimitErr)
+	}
+
+	tableErr := classifyFeishuCardAPIError("update", 230099, "Failed to create card content, ext=ErrCode: 11310; ErrMsg: card table number over limit; ErrorValue: table;")
+	if !errors.Is(tableErr, errFeishuCardTableLimit) {
+		t.Fatalf("230099/11310 table error should be table limit, got %v", tableErr)
+	}
+
+	otherElementErr := classifyFeishuCardAPIError("update", 230099, "Failed to create card content, ext=ErrCode: 11310; ErrMsg: element exceeds the limit;")
+	if errors.Is(otherElementErr, errFeishuCardTableLimit) {
+		t.Fatalf("generic 11310 element errors should not be treated as table limit: %v", otherElementErr)
+	}
+}
+
 func TestBuildPreviewCardJSON_NormalTextFallback(t *testing.T) {
 	cardJSON := buildPreviewCardJSON("plain progress text")
 	if strings.Contains(cardJSON, "cc-connect · 进度") {
@@ -963,6 +1159,78 @@ func TestBuildPreviewCardJSON_NormalTextFallback(t *testing.T) {
 	if !strings.Contains(cardJSON, "\"tag\":\"markdown\"") {
 		t.Fatalf("default preview card should contain markdown element, got %q", cardJSON)
 	}
+}
+
+func collectCardPanels(t *testing.T, cardJSON string) []map[string]any {
+	t.Helper()
+	var card map[string]any
+	if err := json.Unmarshal([]byte(cardJSON), &card); err != nil {
+		t.Fatalf("card JSON is invalid: %v\n%s", err, cardJSON)
+	}
+	body, ok := card["body"].(map[string]any)
+	if !ok || body == nil {
+		t.Fatalf("card JSON missing body: %#v", card)
+	}
+	rawElements, ok := body["elements"].([]any)
+	if !ok {
+		t.Fatalf("card body elements have unexpected type: %#v", body["elements"])
+	}
+	var panels []map[string]any
+	for _, raw := range rawElements {
+		elem, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if elem["tag"] == "collapsible_panel" {
+			panels = append(panels, elem)
+		}
+	}
+	return panels
+}
+
+func collectCardMarkdownContents(t *testing.T, cardJSON string) []string {
+	t.Helper()
+	var card any
+	if err := json.Unmarshal([]byte(cardJSON), &card); err != nil {
+		t.Fatalf("card JSON is invalid: %v\n%s", err, cardJSON)
+	}
+	var contents []string
+	var walk func(any)
+	walk = func(v any) {
+		switch node := v.(type) {
+		case map[string]any:
+			if node["tag"] == "markdown" {
+				if content, ok := node["content"].(string); ok {
+					contents = append(contents, content)
+				}
+			}
+			for _, child := range node {
+				walk(child)
+			}
+		case []any:
+			for _, child := range node {
+				walk(child)
+			}
+		}
+	}
+	walk(card)
+	return contents
+}
+
+func cardPanelTitle(panel map[string]any) string {
+	header, _ := panel["header"].(map[string]any)
+	title, _ := header["title"].(map[string]any)
+	content, _ := title["content"].(string)
+	return content
+}
+
+func panelContains(t *testing.T, panel map[string]any, want string) bool {
+	t.Helper()
+	b, err := json.Marshal(panel)
+	if err != nil {
+		t.Fatalf("panel marshal failed: %v", err)
+	}
+	return strings.Contains(string(b), want)
 }
 
 func TestFormatProgressToolInput_TodoWrite(t *testing.T) {
