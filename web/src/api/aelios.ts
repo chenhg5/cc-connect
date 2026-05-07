@@ -97,3 +97,15 @@ export const getDiary = (id: string) =>
 
 export const deleteDiary = (id: string) =>
   api.delete(`/aelios/diary/${id}`);
+
+// ── Status ────────────────────────────────────────────────────
+
+export interface AeliosStatus {
+  cc_connect: string;
+  storage: string;
+  data_dir: string;
+  memory_adapter: string;
+}
+
+export const getAeliosStatus = () =>
+  api.get<AeliosStatus>('/aelios/status');
