@@ -151,6 +151,7 @@ const (
 	MsgPermissionHint            MsgKey = "permission_hint"
 	MsgQuietOn                   MsgKey = "quiet_on"
 	MsgQuietOff                  MsgKey = "quiet_off"
+	MsgDisplayModeCompact        MsgKey = "display_mode_compact"
 	MsgQuietGlobalOn             MsgKey = "quiet_global_on"
 	MsgQuietGlobalOff            MsgKey = "quiet_global_off"
 	MsgModeChanged               MsgKey = "mode_changed"
@@ -803,6 +804,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "🔔 安靜模式已關閉 — 將恢復推送思考和工具調用進度訊息。",
 		LangJapanese:           "🔔 静音モード OFF — 思考とツール実行の進捗メッセージを表示します。",
 		LangSpanish:            "🔔 Modo silencioso desactivado — los mensajes de progreso se mostrarán.",
+	},
+	MsgDisplayModeCompact: {
+		LangEnglish:            "📋 Compact mode — thinking/tool hidden, each text segment sent separately.",
+		LangChinese:            "📋 紧凑模式 — 隐藏思考和工具消息，每段文本独立发送。",
+		LangTraditionalChinese: "📋 緊湊模式 — 隱藏思考和工具訊息，每段文字獨立發送。",
+		LangJapanese:           "📋 コンパクトモード — 思考・ツール非表示、テキストは個別に送信。",
+		LangSpanish:            "📋 Modo compacto — pensamiento/herramientas ocultos, cada segmento de texto enviado por separado.",
 	},
 	MsgQuietGlobalOn: {
 		LangEnglish:            "🔇 Global quiet mode ON — all sessions will hide thinking and tool progress.",

@@ -38,16 +38,16 @@ func isValidRunAsUserName(name string) bool {
 }
 
 var dangerousEnvVars = map[string]bool{
-	"LD_PRELOAD":           true,
-	"LD_LIBRARY_PATH":      true,
+	"LD_PRELOAD":            true,
+	"LD_LIBRARY_PATH":       true,
 	"DYLD_INSERT_LIBRARIES": true,
-	"DYLD_LIBRARY_PATH":    true,
-	"PATH":                 true,
-	"HOME":                 true,
-	"USER":                 true,
-	"SHELL":                true,
-	"SUDO_USER":            true,
-	"SUDO_COMMAND":         true,
+	"DYLD_LIBRARY_PATH":     true,
+	"PATH":                  true,
+	"HOME":                  true,
+	"USER":                  true,
+	"SHELL":                 true,
+	"SUDO_USER":             true,
+	"SUDO_COMMAND":          true,
 }
 
 func validateRunAsEnv(prefix string, envVars []string) error {
@@ -87,30 +87,30 @@ type Config struct {
 	AttachmentSend string `toml:"attachment_send"`
 	// Quiet is legacy: when true and [display] does not set thinking_messages / tool_messages,
 	// engines behave as if those flags were false. Per-project quiet overrides when set.
-	Quiet             *bool                   `toml:"quiet,omitempty"`
-	Providers         []ProviderConfig        `toml:"providers"`          // global shared providers
-	ProviderPresetsURL string                 `toml:"provider_presets_url,omitempty"` // remote JSON URL for provider presets
-	Projects          []ProjectConfig         `toml:"projects"`
-	Commands          []CommandConfig         `toml:"commands"`     // global custom slash commands
-	Aliases           []AliasConfig           `toml:"aliases"`      // global command aliases
-	BannedWords       []string                `toml:"banned_words"` // messages containing any of these words are blocked
-	Log               LogConfig               `toml:"log"`
-	Language          string                  `toml:"language"` // "en" or "zh", default is "en"
-	Speech            SpeechConfig            `toml:"speech"`
-	TTS               TTSConfig               `toml:"tts"`
-	Display           DisplayConfig           `toml:"display"`
-	StreamPreview     StreamPreviewConfig     `toml:"stream_preview"`      // real-time streaming preview
-	InstantReply      InstantReplyConfig      `toml:"instant_reply"`       // immediate confirmation reply
-	RateLimit         RateLimitConfig         `toml:"rate_limit"`          // per-session rate limiting
-	OutgoingRateLimit OutgoingRateLimitConfig `toml:"outgoing_rate_limit"` // outgoing message throttling
-	Relay             RelayConfig             `toml:"relay"`               // bot-to-bot relay behavior
-	Cron              CronConfig              `toml:"cron"`
-	Queue             QueueConfig             `toml:"queue"`
-	Webhook           WebhookConfig           `toml:"webhook"`
-	Bridge            BridgeConfig            `toml:"bridge"`
-	Management        ManagementConfig        `toml:"management"`
-	Hooks             []HookConfig            `toml:"hooks"`
-	IdleTimeoutMins   *int                    `toml:"idle_timeout_mins,omitempty"` // max minutes between agent events; 0 = no timeout; default 120
+	Quiet              *bool                   `toml:"quiet,omitempty"`
+	Providers          []ProviderConfig        `toml:"providers"`                      // global shared providers
+	ProviderPresetsURL string                  `toml:"provider_presets_url,omitempty"` // remote JSON URL for provider presets
+	Projects           []ProjectConfig         `toml:"projects"`
+	Commands           []CommandConfig         `toml:"commands"`     // global custom slash commands
+	Aliases            []AliasConfig           `toml:"aliases"`      // global command aliases
+	BannedWords        []string                `toml:"banned_words"` // messages containing any of these words are blocked
+	Log                LogConfig               `toml:"log"`
+	Language           string                  `toml:"language"` // "en" or "zh", default is "en"
+	Speech             SpeechConfig            `toml:"speech"`
+	TTS                TTSConfig               `toml:"tts"`
+	Display            DisplayConfig           `toml:"display"`
+	StreamPreview      StreamPreviewConfig     `toml:"stream_preview"`      // real-time streaming preview
+	InstantReply       InstantReplyConfig      `toml:"instant_reply"`       // immediate confirmation reply
+	RateLimit          RateLimitConfig         `toml:"rate_limit"`          // per-session rate limiting
+	OutgoingRateLimit  OutgoingRateLimitConfig `toml:"outgoing_rate_limit"` // outgoing message throttling
+	Relay              RelayConfig             `toml:"relay"`               // bot-to-bot relay behavior
+	Cron               CronConfig              `toml:"cron"`
+	Queue              QueueConfig             `toml:"queue"`
+	Webhook            WebhookConfig           `toml:"webhook"`
+	Bridge             BridgeConfig            `toml:"bridge"`
+	Management         ManagementConfig        `toml:"management"`
+	Hooks              []HookConfig            `toml:"hooks"`
+	IdleTimeoutMins    *int                    `toml:"idle_timeout_mins,omitempty"` // max minutes between agent events; 0 = no timeout; default 120
 	// WorkspaceIdleTimeoutMins controls the workspace idle reaper timeout
 	// (multi-workspace mode) for every engine in the process. 0 disables
 	// reaping. Default: 15 minutes. Defined as a top-level (process-global)
@@ -142,9 +142,10 @@ type WebhookConfig struct {
 type BridgeConfig struct {
 	Enabled     *bool    `toml:"enabled"`                // default false
 	Port        int      `toml:"port,omitempty"`         // listen port; default 9810
-	Token       string   `toml:"token,omitempty"`        // shared secret for authentication; required
+	Token       string   `toml:"token,omitempty"`        // shared secret for authentication; required unless insecure=true
 	Path        string   `toml:"path,omitempty"`         // URL path; default "/bridge/ws"
 	CORSOrigins []string `toml:"cors_origins,omitempty"` // allowed CORS origins; empty = no CORS
+	Insecure    *bool    `toml:"insecure,omitempty"`     // allow running without token (local dev only); default false
 }
 
 // HookConfig is a single event hook rule.
@@ -165,12 +166,21 @@ type ManagementConfig struct {
 	CORSOrigins []string `toml:"cors_origins,omitempty"` // allowed CORS origins; empty = no CORS
 }
 
+// Display mode constants.
+const (
+	DisplayModeFull    = "full"    // show thinking + tool messages as separate messages (default)
+	DisplayModeCompact = "compact" // hide thinking/tool, each text segment is a separate card
+	DisplayModeQuiet   = "quiet"   // hide thinking/tool, all text appends to one card
+)
+
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
 type DisplayConfig struct {
-	ThinkingMessages *bool `toml:"thinking_messages"` // whether thinking messages are shown; default true
-	ThinkingMaxLen   *int  `toml:"thinking_max_len"`  // max chars for thinking messages; 0 = no truncation; default 300
-	ToolMaxLen       *int  `toml:"tool_max_len"`      // max chars for tool use messages; 0 = no truncation; default 500
-	ToolMessages     *bool `toml:"tool_messages"`     // whether tool progress messages are shown; default true
+	Mode             *string `toml:"mode"`              // "full" (default), "compact", or "quiet"
+	CardMode         *string `toml:"card_mode"`         // "legacy" (default) or "rich" (Card 2.0 Feishu)
+	ThinkingMessages *bool   `toml:"thinking_messages"` // whether thinking messages are shown; default true
+	ThinkingMaxLen   *int    `toml:"thinking_max_len"`  // max chars for thinking messages; 0 = no truncation; default 300
+	ToolMaxLen       *int    `toml:"tool_max_len"`      // max chars for tool use messages; 0 = no truncation; default 500
+	ToolMessages     *bool   `toml:"tool_messages"`     // whether tool progress messages are shown; default true
 }
 
 // StreamPreviewConfig controls real-time streaming preview in IM.
@@ -354,7 +364,7 @@ type ProjectConfig struct {
 	WorkspaceIdleTimeoutMinsLegacy *int `toml:"workspace_idle_timeout_mins,omitempty"`
 	// Quiet is legacy per-project override; see Config.Quiet. When true and global [display]
 	// omits thinking_messages / tool_messages, those default to off for this project.
-	Quiet      *bool           `toml:"quiet,omitempty"`
+	Quiet *bool `toml:"quiet,omitempty"`
 	// Display, when non-nil, overrides individual fields of the global [display]
 	// block for this project. Each sub-field is independently optional; unset
 	// fields fall back to the global [display] value, then to the built-in
@@ -394,18 +404,18 @@ type ProviderModelConfig struct {
 }
 
 type ProviderConfig struct {
-	Name        string                `toml:"name"`
-	APIKey      string                `toml:"api_key"`
-	BaseURL     string                `toml:"base_url,omitempty"`
-	Model       string                `toml:"model,omitempty"`
-	Models      []ProviderModelConfig `toml:"models,omitempty"`
-	Thinking    string                `toml:"thinking,omitempty"`
-	Env         map[string]string     `toml:"env,omitempty"`
-	AgentTypes      []string                          `toml:"agent_types,omitempty"`       // optional: restrict to specific agent types (e.g. ["claudecode", "codex"])
-	Endpoints       map[string]string                 `toml:"endpoints,omitempty"`         // per-agent-type base URL overrides (e.g. codex = "https://x/v1")
-	AgentModels     map[string]string                 `toml:"agent_models,omitempty"`      // per-agent-type default model (e.g. codex = "openai/gpt-5.3-codex")
-	AgentModelLists map[string][]ProviderModelConfig  `toml:"agent_model_lists,omitempty"` // per-agent-type model lists (overrides Models when matched)
-	Codex           *CodexProviderConfig              `toml:"codex,omitempty"`             // Codex-specific provider settings
+	Name            string                           `toml:"name"`
+	APIKey          string                           `toml:"api_key"`
+	BaseURL         string                           `toml:"base_url,omitempty"`
+	Model           string                           `toml:"model,omitempty"`
+	Models          []ProviderModelConfig            `toml:"models,omitempty"`
+	Thinking        string                           `toml:"thinking,omitempty"`
+	Env             map[string]string                `toml:"env,omitempty"`
+	AgentTypes      []string                         `toml:"agent_types,omitempty"`       // optional: restrict to specific agent types (e.g. ["claudecode", "codex"])
+	Endpoints       map[string]string                `toml:"endpoints,omitempty"`         // per-agent-type base URL overrides (e.g. codex = "https://x/v1")
+	AgentModels     map[string]string                `toml:"agent_models,omitempty"`      // per-agent-type default model (e.g. codex = "openai/gpt-5.3-codex")
+	AgentModelLists map[string][]ProviderModelConfig `toml:"agent_model_lists,omitempty"` // per-agent-type model lists (overrides Models when matched)
+	Codex           *CodexProviderConfig             `toml:"codex,omitempty"`             // Codex-specific provider settings
 }
 
 // CodexProviderConfig holds Codex CLI-specific provider fields
@@ -614,16 +624,33 @@ func projectQuietEffective(cfg *Config, proj *ProjectConfig) bool {
 }
 
 // EffectiveDisplay resolves the per-project [projects.display] override on top
-// of the global [display] block, falling back to built-in defaults. Resolution
-// order for each field:
-//  1. project-level [projects.display].<field>  (highest precedence)
-//  2. global [display].<field>
-//  3. built-in default
+// of the global [display] block, falling back to built-in defaults.
 //
-// Legacy quiet (root or per-project) is preserved: if quiet is in effect AND
-// neither layer explicitly set thinking_messages / tool_messages, they default
-// to false (backward-compatible with pre-display quiet = true).
-func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (thinkingMessages, toolMessages bool, thinkingMaxLen, toolMaxLen int) {
+// Resolution order for mode (thinking/tool visibility):
+//  1. Explicit [display].mode wins.
+//  2. Legacy quiet = true (without display.mode) → "quiet".
+//  3. Default → "full".
+//
+// Resolution order for thinking_messages / tool_messages:
+//  1. project-level [projects.display].<field> (highest precedence)
+//  2. global [display].<field>
+//  3. mode-derived default (compact/quiet → false, full → true)
+func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMessages, toolMessages bool, thinkingMaxLen, toolMaxLen int) {
+	// Resolve mode.
+	mode = DisplayModeFull
+	if cfg.Display.Mode != nil {
+		mode = *cfg.Display.Mode
+	} else if projectQuietEffective(cfg, proj) {
+		mode = DisplayModeQuiet
+	}
+
+	// Mode-derived defaults.
+	thinkingDefault, toolDefault := true, true
+	switch mode {
+	case DisplayModeCompact, DisplayModeQuiet:
+		thinkingDefault, toolDefault = false, false
+	}
+
 	pickBool := func(projVal, globalVal *bool, dflt bool) bool {
 		if projVal != nil {
 			return *projVal
@@ -663,12 +690,12 @@ func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (thinkingMessages, toolM
 	thinkingMessages = pickBool(
 		getProjBool(func(d *DisplayConfig) *bool { return d.ThinkingMessages }),
 		cfg.Display.ThinkingMessages,
-		true,
+		thinkingDefault,
 	)
 	toolMessages = pickBool(
 		getProjBool(func(d *DisplayConfig) *bool { return d.ToolMessages }),
 		cfg.Display.ToolMessages,
-		true,
+		toolDefault,
 	)
 	thinkingMaxLen = pickInt(
 		getProjInt(func(d *DisplayConfig) *int { return d.ThinkingMaxLen }),
@@ -680,25 +707,44 @@ func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (thinkingMessages, toolM
 		cfg.Display.ToolMaxLen,
 		500,
 	)
+	return
+}
 
-	// Legacy quiet behavior preserved: when project-level quiet is on AND
-	// neither layer explicitly set thinking_messages / tool_messages, they
-	// default to off. Per-project [projects.display] takes precedence over
-	// both global display and quiet.
-	if projectQuietEffective(cfg, proj) {
-		projThink := getProjBool(func(d *DisplayConfig) *bool { return d.ThinkingMessages })
-		projTool := getProjBool(func(d *DisplayConfig) *bool { return d.ToolMessages })
-		if cfg.Display.ThinkingMessages == nil && projThink == nil {
-			thinkingMessages = false
-		}
-		if cfg.Display.ToolMessages == nil && projTool == nil {
-			toolMessages = false
+// EffectiveCardMode returns the card rendering mode for the project: "rich" (Feishu Card 2.0)
+// or "legacy" (default plain messages). Per-project overrides global.
+func EffectiveCardMode(cfg *Config, proj *ProjectConfig) string {
+	var projDisp *DisplayConfig
+	if proj != nil {
+		projDisp = proj.Display
+	}
+	if projDisp != nil && projDisp.CardMode != nil {
+		if m := strings.ToLower(strings.TrimSpace(*projDisp.CardMode)); m == "rich" || m == "legacy" {
+			return m
 		}
 	}
-	return thinkingMessages, toolMessages, thinkingMaxLen, toolMaxLen
+	if cfg.Display.CardMode != nil {
+		if m := strings.ToLower(strings.TrimSpace(*cfg.Display.CardMode)); m == "rich" || m == "legacy" {
+			return m
+		}
+	}
+	return "legacy"
 }
 
 func (c *Config) validate() error {
+	if c.Display.Mode != nil {
+		switch *c.Display.Mode {
+		case DisplayModeFull, DisplayModeCompact, DisplayModeQuiet:
+		default:
+			return fmt.Errorf("config: display.mode must be \"full\", \"compact\", or \"quiet\"")
+		}
+	}
+	if c.Display.CardMode != nil {
+		switch strings.ToLower(strings.TrimSpace(*c.Display.CardMode)) {
+		case "legacy", "rich":
+		default:
+			return fmt.Errorf("config: display.card_mode must be \"legacy\" or \"rich\"")
+		}
+	}
 	switch strings.ToLower(strings.TrimSpace(c.AttachmentSend)) {
 	case "", "on", "off":
 	default:
@@ -1074,7 +1120,7 @@ func (cfg *Config) ResolveProviderRefs() {
 					"provider_agents", gp.AgentTypes, "project_agent", agentType)
 				continue
 			}
-		resolved = append(resolved, gp.ResolveForAgent(agentType))
+			resolved = append(resolved, gp.ResolveForAgent(agentType))
 		}
 		cfg.Projects[i].Agent.Providers = append(resolved, cfg.Projects[i].Agent.Providers...)
 	}
@@ -1447,9 +1493,14 @@ func RemoveAlias(name string) error {
 
 // SaveDisplayConfig persists the display settings to the config file.
 // Uses surgical text editing to preserve comments and unknown fields.
-func SaveDisplayConfig(thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
+func SaveDisplayConfig(mode *string, thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
 	configMu.Lock()
 	defer configMu.Unlock()
+	if mode != nil {
+		if err := patchSectionField("display", "mode", quoteTomlString(*mode)); err != nil {
+			return err
+		}
+	}
 	if thinkingMessages != nil {
 		if err := patchSectionField("display", "thinking_messages", fmt.Sprintf("%t", *thinkingMessages)); err != nil {
 			return err

@@ -769,3 +769,91 @@ func TestReplyMessagePreservesUserPayload(t *testing.T) {
 		t.Errorf("reply should not merge attachments, got %d", len(atts))
 	}
 }
+
+func TestNewWebhookPathDefaults(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"", "/webhook"},
+		{"/webhook", "/webhook"},
+		{"webhook", "/webhook"},
+		{"/bot1", "/bot1"},
+		{"bot1/inbox", "/bot1/inbox"},
+	}
+	for _, c := range cases {
+		p, err := New(map[string]any{"token": "t", "webhook_path": c.in})
+		if err != nil {
+			t.Fatalf("New(%q): %v", c.in, err)
+		}
+		if got := p.(*Platform).webhookPath; got != c.want {
+			t.Errorf("webhook_path=%q: got %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestWebhookHandlerNoSecret(t *testing.T) {
+	p, _ := New(map[string]any{"token": "t"})
+	pl := p.(*Platform)
+	req := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(`{"update_type":"unknown"}`))
+	rec := httptest.NewRecorder()
+	pl.webhookHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200", rec.Code)
+	}
+}
+
+func TestWebhookHandlerSecretViaHeader(t *testing.T) {
+	p, _ := New(map[string]any{"token": "t", "webhook_secret": "s3cret"})
+	pl := p.(*Platform)
+	req := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(`{"update_type":"unknown"}`))
+	req.Header.Set("X-Max-Bot-Api-Secret", "s3cret")
+	rec := httptest.NewRecorder()
+	pl.webhookHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200", rec.Code)
+	}
+}
+
+func TestWebhookHandlerSecretViaQuery(t *testing.T) {
+	p, _ := New(map[string]any{"token": "t", "webhook_secret": "s3cret"})
+	pl := p.(*Platform)
+	req := httptest.NewRequest(http.MethodPost, "/webhook?s=s3cret", strings.NewReader(`{"update_type":"unknown"}`))
+	rec := httptest.NewRecorder()
+	pl.webhookHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200", rec.Code)
+	}
+}
+
+func TestWebhookHandlerSecretMismatch(t *testing.T) {
+	p, _ := New(map[string]any{"token": "t", "webhook_secret": "s3cret"})
+	pl := p.(*Platform)
+	req := httptest.NewRequest(http.MethodPost, "/webhook?s=wrong", strings.NewReader(`{}`))
+	rec := httptest.NewRecorder()
+	pl.webhookHandler(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401", rec.Code)
+	}
+}
+
+func TestWebhookHandlerSecretMissing(t *testing.T) {
+	p, _ := New(map[string]any{"token": "t", "webhook_secret": "s3cret"})
+	pl := p.(*Platform)
+	req := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(`{}`))
+	rec := httptest.NewRecorder()
+	pl.webhookHandler(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401", rec.Code)
+	}
+}
+
+func TestWebhookHandlerWrongMethod(t *testing.T) {
+	p, _ := New(map[string]any{"token": "t"})
+	pl := p.(*Platform)
+	req := httptest.NewRequest(http.MethodGet, "/webhook", nil)
+	rec := httptest.NewRecorder()
+	pl.webhookHandler(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("got %d, want 405", rec.Code)
+	}
+}

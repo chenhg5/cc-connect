@@ -87,18 +87,23 @@ MiniMax-M2.7 is a next-generation large language model designed for autonomous e
 </tr>
 
 <tr>
-<td width="150"><a href="https://aicanapi.com"><img src="assets/sponsors/aican.jpg" alt="aicanapi.com" width="120"></a></td>
-<td>Thanks to aicanapi.com for sponsoring this project! aicanapi.com provides reliable AI model API relay services with support for Claude, GPT, Gemini and more. Stable, fast, and cost-effective access to mainstream AI models for developers. Register via <a href="https://aicanapi.com">this link</a> to get started.</td>
+<td width="150"><a href="https://cc.anyroute.io/register?aff=CR455DSQSKEV"><img src="assets/sponsors/anyrouteio.png" alt="AnyRoute.io" width="120"></a></td>
+<td>Thanks to AnyRoute.io for sponsoring this project! AnyRoute.io is a reliable, stable, and efficient API relay platform integrating the latest Claude Code and Codex models. Transparent pricing with rates as low as 93% off official prices (just 0.7x), supports invoicing and enterprise-grade high-concurrency usage. Register via <a href="https://cc.anyroute.io/register?aff=CR455DSQSKEV">this link</a> to get started.</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://aicanapi.com/register?aff=rIEy"><img src="assets/sponsors/aican.jpg" alt="aicanapi.com" width="120"></a></td>
+<td>Thanks to aicanapi.com for sponsoring this project! Aican API provides high-performance, low-latency, high-concurrency API services for enterprises and developers. Claude Code models at up to 84% off, other models at 80% off official price. Doubao Seedance 2 real-person generation service with queue-free access for faster responses. Choose Aican API for simpler, more efficient, and more cost-effective enterprise-grade AI services. Register via <a href="https://aicanapi.com/register?aff=rIEy">this link</a> to get started.</td>
 </tr>
 
 <tr>
 <td width="150"><a href="https://pateway.ai/?ch=2qn568&aff=DRA4VUFS"><img src="assets/sponsors/patewayai.png" alt="Pateway" width="120"></a></td>
-<td>Thanks to Pateway for sponsoring this project! Pateway is a high-quality AI model API relay platform providing stable access to Claude, GPT, Gemini and other mainstream models. Fast response, transparent pricing, enterprise-grade reliability. Register via <a href="https://pateway.ai/?ch=2qn568&aff=DRA4VUFS">this link</a> to get started.</td>
+<td>Thanks to Pateway for sponsoring this project! PatewayAI is a premium API relay service for serious AI developers, offering 100% official direct access to Claude and Codex models — no reverse engineering, no quality degradation. Transparent billing with token-level verification. Enterprise-grade concurrency, formal contracts and invoicing available. Register via <a href="https://pateway.ai/?ch=2qn568&aff=DRA4VUFS">this link</a> to get $3 free trial credit, up to 40% off on top-ups, and referral rewards up to $150!</td>
 </tr>
 
 <tr>
 <td width="150"><a href="https://cy.10dianai.com/register?aff=3FQn"><img src="assets/sponsors/10dianai.png" alt="10点AI" width="120"></a></td>
-<td>Thanks to 10点AI for sponsoring this project! 10点AI provides reliable AI model API relay services with support for Claude, GPT, Gemini and more. Cost-effective, stable access for developers and teams. Register via <a href="https://cy.10dianai.com/register?aff=3FQn">this link</a> to get started.</td>
+<td>Thanks to 10点AI for sponsoring this project! 10dian-AI Enterprise Platform is an AI API gateway for developers and enterprises, aggregating GPT, Claude, Gemini, DeepSeek and more. Optimized for production environments with stable high-concurrency operation, avoiding interface jitter and timeout issues. Affordable pricing, stable uptime, official guarantee. Register via <a href="https://cy.10dianai.com/register?aff=3FQn">this link</a> to get ¥5 free credit!</td>
 </tr>
 
 <tr>
@@ -375,13 +380,14 @@ cc-connect update --pre     # Include pre-releases
 /dir [path|reset] Show, switch, or reset work directory
 ```
 
-Project configs can also rotate to a fresh session automatically after long inactivity:
+Project configs rotate to a fresh session automatically after long inactivity. This prevents "context drift" where stale chat history (failed commands, debugging noise) is repeatedly re-ingested via `--continue` and starts to dominate the model's attention. The previous session is preserved and remains accessible via `/list` and `/switch`.
 
 ```toml
 [[projects]]
-reset_on_idle_mins = 60
+reset_on_idle_mins = 30   # default when unset; set to 0 to disable
 ```
 
+The default is **30 minutes** when unset. Set `reset_on_idle_mins = 0` to opt out and always continue the previous session.
 
 ### 🛡️ OS-User Isolation (`run_as_user`)
 

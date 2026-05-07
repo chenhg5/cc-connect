@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -137,10 +138,16 @@ while IFS= read -r line; do
   esac
 done
 `
-	scriptPath := filepath.Join(binDir, "codex")
-	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake codex: %v", err)
-	}
+	powershellScript := `
+while (($line = [Console]::In.ReadLine()) -ne $null) {
+  if ($line -like '*"method":"initialize"*') {
+    [Console]::Out.WriteLine('{"id":1,"result":{"protocolVersion":"2"}}')
+  } elseif ($line -like '*"method":"config/read"*') {
+    [Console]::Out.WriteLine('{"id":2,"result":{"config":{"model":"gpt-5.4","model_reasoning_effort":"xhigh"},"origins":{}}}')
+  }
+}
+`
+	writeFakeCodexScript(t, binDir, script, powershellScript)
 
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
@@ -219,10 +226,12 @@ func TestSend_WithImages_PassesImageArgsAndDefaultPrompt(t *testing.T) {
 		"printf '%s\\n' \"$@\" > \"$CODEX_ARGS_FILE\"\n" +
 		"printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}'\n" +
 		"printf '%s\\n' '{\"type\":\"turn.completed\"}'\n"
-	scriptPath := filepath.Join(binDir, "codex")
-	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake codex: %v", err)
-	}
+	powershellScript := `
+[IO.File]::WriteAllLines($env:CODEX_ARGS_FILE, (fakeCodexArgs))
+[Console]::Out.WriteLine('{"type":"thread.started","thread_id":"thread-1"}')
+[Console]::Out.WriteLine('{"type":"turn.completed"}')
+`
+	writeFakeCodexScript(t, binDir, script, powershellScript)
 
 	t.Setenv("CODEX_ARGS_FILE", argsFile)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -279,10 +288,11 @@ func TestSend_ResumeWithImages_PlacesSessionBeforeImageFlags(t *testing.T) {
 	script := "#!/bin/sh\n" +
 		"printf '%s\\n' \"$@\" > \"$CODEX_ARGS_FILE\"\n" +
 		"printf '%s\\n' '{\"type\":\"turn.completed\"}'\n"
-	scriptPath := filepath.Join(binDir, "codex")
-	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake codex: %v", err)
-	}
+	powershellScript := `
+[IO.File]::WriteAllLines($env:CODEX_ARGS_FILE, (fakeCodexArgs))
+[Console]::Out.WriteLine('{"type":"turn.completed"}')
+`
+	writeFakeCodexScript(t, binDir, script, powershellScript)
 
 	t.Setenv("CODEX_ARGS_FILE", argsFile)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -328,10 +338,13 @@ func TestSend_UsesStdinForMultilinePrompt(t *testing.T) {
 		"cat > \"$CODEX_STDIN_FILE\"\n" +
 		"printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"thread-stdin\"}'\n" +
 		"printf '%s\\n' '{\"type\":\"turn.completed\"}'\n"
-	scriptPath := filepath.Join(binDir, "codex")
-	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake codex: %v", err)
-	}
+	powershellScript := `
+[IO.File]::WriteAllLines($env:CODEX_ARGS_FILE, (fakeCodexArgs))
+[IO.File]::WriteAllText($env:CODEX_STDIN_FILE, [Console]::In.ReadToEnd())
+[Console]::Out.WriteLine('{"type":"thread.started","thread_id":"thread-stdin"}')
+[Console]::Out.WriteLine('{"type":"turn.completed"}')
+`
+	writeFakeCodexScript(t, binDir, script, powershellScript)
 
 	t.Setenv("CODEX_ARGS_FILE", argsFile)
 	t.Setenv("CODEX_STDIN_FILE", stdinFile)
@@ -383,10 +396,9 @@ func TestSend_HandlesLargeJSONLines(t *testing.T) {
 	}
 
 	script := "#!/bin/sh\ncat \"$CODEX_PAYLOAD_FILE\"\n"
-	scriptPath := filepath.Join(binDir, "codex")
-	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake codex: %v", err)
-	}
+	powershellScript := `[Console]::Out.Write([IO.File]::ReadAllText($env:CODEX_PAYLOAD_FILE))
+`
+	writeFakeCodexScript(t, binDir, script, powershellScript)
 
 	t.Setenv("CODEX_PAYLOAD_FILE", payloadFile)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -446,6 +458,75 @@ func TestWaitForArgsFile_WaitsForNonEmptyContent(t *testing.T) {
 	args := waitForArgsFile(t, argsFile)
 	if !containsSequence(args, []string{"exec", "--json"}) {
 		t.Fatalf("expected non-empty args sequence, got: %v", args)
+	}
+}
+
+func TestWriteFakeCodexScript_PreservesArgsWithSpaces(t *testing.T) {
+	workDir := t.TempDir()
+	binDir := filepath.Join(workDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+
+	argsFile := filepath.Join(workDir, "args.txt")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CODEX_ARGS_FILE\"\n"
+	powershellScript := `[IO.File]::WriteAllLines($env:CODEX_ARGS_FILE, (fakeCodexArgs))
+`
+	writeFakeCodexScript(t, binDir, script, powershellScript)
+	t.Setenv("CODEX_ARGS_FILE", argsFile)
+
+	cmd := exec.Command(filepath.Join(binDir, "codex"), "exec", "--cd", filepath.Join(workDir, "dir with spaces"), "-")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("fake codex run: %v", err)
+	}
+
+	args := waitForArgsFile(t, argsFile)
+	wantPath := filepath.Join(workDir, "dir with spaces")
+	if !containsSequence(args, []string{"exec", "--cd", wantPath, "-"}) {
+		t.Fatalf("args = %v, want path with spaces preserved as %q", args, wantPath)
+	}
+}
+
+const fakeCodexPowerShellPrelude = `
+function fakeCodexArgs {
+  if ([string]::IsNullOrWhiteSpace($env:CODEX_FAKE_ARGS_FILE) -or -not (Test-Path -LiteralPath $env:CODEX_FAKE_ARGS_FILE)) {
+    return @()
+  }
+  return @(Get-Content -LiteralPath $env:CODEX_FAKE_ARGS_FILE)
+}
+`
+
+func writeFakeCodexScript(t *testing.T, dir, shellScript, powershellScript string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		psPath := filepath.Join(dir, "codex.ps1")
+		if err := os.WriteFile(psPath, []byte(fakeCodexPowerShellPrelude+powershellScript), 0o644); err != nil {
+			t.Fatalf("write fake codex powershell script: %v", err)
+		}
+		cmdPath := filepath.Join(dir, "codex.cmd")
+		cmdScript := "@echo off\r\n" +
+			"setlocal\r\n" +
+			"set \"CODEX_FAKE_SCRIPT=%~dp0codex.ps1\"\r\n" +
+			"set \"CODEX_FAKE_ARGS_FILE=%TEMP%\\codex-fake-args-%RANDOM%-%RANDOM%.txt\"\r\n" +
+			"type nul > \"%CODEX_FAKE_ARGS_FILE%\"\r\n" +
+			":args\r\n" +
+			"if \"%~1\"==\"\" goto run\r\n" +
+			">> \"%CODEX_FAKE_ARGS_FILE%\" echo(%~1\r\n" +
+			"shift\r\n" +
+			"goto args\r\n" +
+			":run\r\n" +
+			"powershell -NoProfile -ExecutionPolicy Bypass -File \"%CODEX_FAKE_SCRIPT%\"\r\n" +
+			"set \"CODEX_FAKE_EXIT=%ERRORLEVEL%\"\r\n" +
+			"del \"%CODEX_FAKE_ARGS_FILE%\" >nul 2>nul\r\n" +
+			"exit /b %CODEX_FAKE_EXIT%\r\n"
+		if err := os.WriteFile(cmdPath, []byte(cmdScript), 0o755); err != nil {
+			t.Fatalf("write fake codex cmd shim: %v", err)
+		}
+		return
+	}
+	scriptPath := filepath.Join(dir, "codex")
+	if err := os.WriteFile(scriptPath, []byte(shellScript), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
 	}
 }
 

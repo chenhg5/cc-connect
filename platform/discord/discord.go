@@ -1034,11 +1034,16 @@ func (p *Platform) SendWithButtons(ctx context.Context, rctx any, content string
 	return nil
 }
 
+func (p *progressPlatform) ProgressUpdateInterval() time.Duration {
+	return 2 * time.Second
+}
+
 var _ core.ImageSender = (*Platform)(nil)
 var _ core.FileSender = (*Platform)(nil)
 var _ core.InlineButtonSender = (*Platform)(nil)
 var _ core.ProgressStyleProvider = (*progressPlatform)(nil)
 var _ core.ProgressCardPayloadSupport = (*progressPlatform)(nil)
+var _ core.ProgressUpdateThrottler = (*progressPlatform)(nil)
 
 func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	// discord:{channelID}:{userID} or discord:{threadID}

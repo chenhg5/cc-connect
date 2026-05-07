@@ -85,6 +85,27 @@ func (p *stubPlatformEngine) clearSent() {
 	p.mu.Unlock()
 }
 
+type recallCheckingPlatform struct {
+	stubPlatformEngine
+	recalled bool
+	checked  []any
+}
+
+func (p *recallCheckingPlatform) IsMessageRecalled(_ context.Context, replyCtx any) (bool, error) {
+	p.mu.Lock()
+	p.checked = append(p.checked, replyCtx)
+	p.mu.Unlock()
+	return p.recalled, nil
+}
+
+func (p *recallCheckingPlatform) checkedReplyCtxs() []any {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]any, len(p.checked))
+	copy(out, p.checked)
+	return out
+}
+
 type stubCronReplyTargetPlatform struct {
 	stubPlatformEngine
 	reconstructSessionKey string
@@ -356,6 +377,18 @@ func (p *stubCompactProgressPlatform) UpdateMessage(_ context.Context, _ any, co
 	p.previewEdits = append(p.previewEdits, content)
 	p.previewMu.Unlock()
 	return nil
+}
+
+func (p *stubCompactProgressPlatform) BuildRichCard(status CardStatus, title string, steps []ToolStep, markdown string, streaming bool, elapsed time.Duration) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "rich status=%s title=%s streaming=%t elapsed=%s\n", status, title, streaming, elapsed)
+	for _, step := range steps {
+		fmt.Fprintf(&b, "step=%+v\n", step)
+	}
+	if markdown != "" {
+		fmt.Fprintf(&b, "markdown=%s\n", markdown)
+	}
+	return b.String()
 }
 
 func (p *stubCompactProgressPlatform) getPreviewStarts() []string {
@@ -1510,6 +1543,90 @@ func TestProcessInteractiveEvents_CardProgressUsesStructuredPayloadWhenSupported
 	}
 	if finalPayload.State != ProgressCardStateCompleted {
 		t.Fatalf("final payload state = %q, want %q", finalPayload.State, ProgressCardStateCompleted)
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardShowsThinkingContent(t *testing.T) {
+	p := &stubCompactProgressPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		style:              "card",
+		supportPayload:     true,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		ThinkingMessages: true,
+		ThinkingMaxLen:   300,
+		ToolMaxLen:       500,
+		ToolMessages:     true,
+		Mode:             "rich",
+	})
+	sessionKey := "feishu:user-rich-thinking"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-thinking")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-rich-thinking",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventThinking, Content: "Inspecting event routing"}
+	agentSession.events <- Event{Type: EventText, Content: "answer"}
+	agentSession.events <- Event{Type: EventResult, Content: "answer", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-thinking", time.Now(), nil, nil, state.replyCtx)
+
+	starts := p.getPreviewStarts()
+	if len(starts) != 1 {
+		t.Fatalf("preview starts = %d, want 1", len(starts))
+	}
+	if !strings.Contains(starts[0], "Inspecting event routing") {
+		t.Fatalf("rich card start should contain thinking content, got %q", starts[0])
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardCoalescesToolResult(t *testing.T) {
+	p := &stubCompactProgressPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		style:              "card",
+		supportPayload:     true,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		ThinkingMessages: true,
+		ThinkingMaxLen:   300,
+		ToolMaxLen:       500,
+		ToolMessages:     true,
+		Mode:             "rich",
+	})
+	sessionKey := "feishu:user-rich-tool-result"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-tool-result")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-rich-tool-result",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	code := 0
+	success := true
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "echo hi"}
+	agentSession.events <- Event{Type: EventToolResult, ToolName: "Bash", ToolResult: "hi", ToolStatus: "completed", ToolExitCode: &code, ToolSuccess: &success}
+	agentSession.events <- Event{Type: EventText, Content: "done"}
+	agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-tool-result", time.Now(), nil, nil, state.replyCtx)
+
+	starts := p.getPreviewStarts()
+	if len(starts) != 1 {
+		t.Fatalf("preview starts = %d, want only the rich card start and no separate progress card", len(starts))
+	}
+	rendered := strings.Join(append(starts, p.getPreviewEdits()...), "\n")
+	for _, want := range []string{"echo hi", "completed", "hi"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("rich card should contain %q, got %q", want, rendered)
+		}
 	}
 }
 
@@ -4351,28 +4468,46 @@ func TestCmdStatus_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 func TestCmdQuiet_TogglesDisplay(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	e.SetDisplayConfig(DisplayCfg{ThinkingMessages: true, ToolMessages: true, ThinkingMaxLen: 300, ToolMaxLen: 500})
+	e.SetDisplayConfig(DisplayCfg{Mode: "full", ThinkingMessages: true, ToolMessages: true, ThinkingMaxLen: 300, ToolMaxLen: 500})
 	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
 
-	// First /quiet: both on → both off (quiet ON)
+	// 1st /quiet: full → quiet
 	e.cmdQuiet(p, msg, nil)
-	if e.display.ThinkingMessages || e.display.ToolMessages {
-		t.Fatalf("after first /quiet: ThinkingMessages=%v, ToolMessages=%v, want both false",
-			e.display.ThinkingMessages, e.display.ToolMessages)
+	if e.display.Mode != "quiet" || e.display.ThinkingMessages || e.display.ToolMessages {
+		t.Fatalf("after 1st /quiet: Mode=%q, TM=%v, Tool=%v, want quiet/false/false",
+			e.display.Mode, e.display.ThinkingMessages, e.display.ToolMessages)
 	}
 	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "Quiet mode ON") {
 		t.Fatalf("sent = %q, want quiet ON message", p.sent)
 	}
 
-	// Second /quiet: both off → both on (quiet OFF)
+	// 2nd /quiet: quiet → compact
 	p.sent = nil
 	e.cmdQuiet(p, msg, nil)
-	if !e.display.ThinkingMessages || !e.display.ToolMessages {
-		t.Fatalf("after second /quiet: ThinkingMessages=%v, ToolMessages=%v, want both true",
-			e.display.ThinkingMessages, e.display.ToolMessages)
+	if e.display.Mode != "compact" || e.display.ThinkingMessages || e.display.ToolMessages {
+		t.Fatalf("after 2nd /quiet: Mode=%q, TM=%v, Tool=%v, want compact/false/false",
+			e.display.Mode, e.display.ThinkingMessages, e.display.ToolMessages)
+	}
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "Compact mode") {
+		t.Fatalf("sent = %q, want compact mode message", p.sent)
+	}
+
+	// 3rd /quiet: compact → full
+	p.sent = nil
+	e.cmdQuiet(p, msg, nil)
+	if e.display.Mode != "full" || !e.display.ThinkingMessages || !e.display.ToolMessages {
+		t.Fatalf("after 3rd /quiet: Mode=%q, TM=%v, Tool=%v, want full/true/true",
+			e.display.Mode, e.display.ThinkingMessages, e.display.ToolMessages)
 	}
 	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "Quiet mode OFF") {
 		t.Fatalf("sent = %q, want quiet OFF message", p.sent)
+	}
+
+	// /quiet with explicit argument
+	p.sent = nil
+	e.cmdQuiet(p, msg, []string{"compact"})
+	if e.display.Mode != "compact" {
+		t.Fatalf("after /quiet compact: Mode=%q, want compact", e.display.Mode)
 	}
 }
 
@@ -7692,6 +7827,150 @@ func TestCmdStop_ReturnsWhileCloseBlockedAndStopsEventLoop(t *testing.T) {
 	}
 }
 
+func TestHandleMessageRecallStopsCurrentMessageSilently(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newBlockingCloseSession("recall-active")
+	defer close(sess.releaseClose)
+
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	key := "test:user1"
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{
+		agentSession:     sess,
+		platform:         p,
+		replyCtx:         "ctx-active",
+		currentMessageID: "msg-active",
+		pendingMessages: []queuedMessage{
+			{messageID: "msg-queued", platform: p, replyCtx: "ctx-queued", content: "queued"},
+		},
+	}
+	e.interactiveMu.Unlock()
+
+	e.ReceiveMessage(p, &Message{
+		Platform:  "test",
+		MessageID: "msg-active",
+		Recalled:  true,
+	})
+
+	select {
+	case <-sess.closeStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected Close to start after recalling the active message")
+	}
+
+	e.interactiveMu.Lock()
+	_, exists := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	if exists {
+		t.Fatal("expected interactive state to be removed after active message recall")
+	}
+
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Fatalf("sent messages = %v, want no user-visible stop reply for recall", sent)
+	}
+}
+
+func TestHandleMessageRecallRemovesQueuedMessageSilently(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	key := "test:user1"
+	state := &interactiveState{
+		agentSession: newControllableSession("recall-queued"),
+		platform:     p,
+		replyCtx:     "ctx-active",
+		pendingMessages: []queuedMessage{
+			{messageID: "msg-1", platform: p, replyCtx: "ctx-1", content: "first"},
+			{messageID: "msg-2", platform: p, replyCtx: "ctx-2", content: "second"},
+			{messageID: "msg-3", platform: p, replyCtx: "ctx-3", content: "third"},
+		},
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	e.ReceiveMessage(p, &Message{
+		Platform:  "test",
+		MessageID: "msg-2",
+		Recalled:  true,
+	})
+
+	state.mu.Lock()
+	got := make([]string, len(state.pendingMessages))
+	for i, queued := range state.pendingMessages {
+		got[i] = queued.messageID
+	}
+	state.mu.Unlock()
+
+	want := []string{"msg-1", "msg-3"}
+	if len(got) != len(want) {
+		t.Fatalf("pending message IDs = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("pending message IDs = %v, want %v", got, want)
+		}
+	}
+
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Fatalf("sent messages = %v, want no user-visible queue removal reply for recall", sent)
+	}
+}
+
+func TestHandleMessageBusyRecalledCurrentStopsAndProcessesNewMessage(t *testing.T) {
+	p := &recallCheckingPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "test"},
+		recalled:           true,
+	}
+	newAgentSession := newResultAgentSession("new message processed")
+	e := NewEngine("test", &resultAgent{session: newAgentSession}, []Platform{p}, "", LangEnglish)
+	key := "test:user1"
+	session := e.sessions.GetOrCreateActive(key)
+	if !session.TryLock() {
+		t.Fatal("expected to lock session for busy setup")
+	}
+
+	oldState := &interactiveState{
+		agentSession:     newControllableSession("old-current"),
+		platform:         p,
+		replyCtx:         "old-reply-ctx",
+		currentMessageID: "old-msg",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = oldState
+	e.interactiveMu.Unlock()
+
+	oldStopped := oldState.stopSignal()
+	go func() {
+		<-oldStopped
+		session.Unlock()
+	}()
+
+	e.ReceiveMessage(p, &Message{
+		SessionKey: key,
+		Platform:   "test",
+		MessageID:  "new-msg",
+		Content:    "please handle this",
+		ReplyCtx:   "new-reply-ctx",
+	})
+
+	sent := waitForPlatformSend(&p.stubPlatformEngine, 1, 3*time.Second)
+	if len(sent) == 0 || sent[0] != "new message processed" {
+		t.Fatalf("sent = %v, want new message processed", sent)
+	}
+	for _, line := range sent {
+		if strings.Contains(line, e.i18n.T(MsgMessageQueued)) {
+			t.Fatalf("unexpected queued reply after recalled active message: %v", sent)
+		}
+	}
+	checked := p.checkedReplyCtxs()
+	if len(checked) == 0 || checked[0] != "old-reply-ctx" {
+		t.Fatalf("checked reply contexts = %v, want old-reply-ctx first", checked)
+	}
+	if len(newAgentSession.sentPrompts) != 1 || !strings.Contains(newAgentSession.sentPrompts[0], "please handle this") {
+		t.Fatalf("new session prompts = %#v, want new message prompt", newAgentSession.sentPrompts)
+	}
+}
+
 func TestExecuteCardAction_NewCleansUpAndCreatesSession(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -10154,7 +10433,7 @@ func TestEngine_SetterMethods(t *testing.T) {
 	})
 
 	// Test SetDisplaySaveFunc
-	e.SetDisplaySaveFunc(func(thinkingMessages *bool, thinkMax, toolMax *int, toolMessages *bool) error {
+	e.SetDisplaySaveFunc(func(mode *string, thinkingMessages *bool, thinkMax, toolMax *int, toolMessages *bool) error {
 		return nil
 	})
 
@@ -12001,8 +12280,8 @@ func TestSessionName_ClaudeCodeLikeFlow(t *testing.T) {
 }
 
 // acpLikeSession simulates ACP behavior:
-// - CurrentSessionID() returns the thread ID immediately after creation
-//   (ACP does handshake before returning from StartSession)
+//   - CurrentSessionID() returns the thread ID immediately after creation
+//     (ACP does handshake before returning from StartSession)
 type acpLikeSession struct {
 	threadID string
 	events   chan Event
