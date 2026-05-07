@@ -118,6 +118,16 @@ All agents support permission modes switchable at runtime via `/mode`.
 | Default | `default` | Standard permissions |
 | YOLO | `yolo` | Skip all checks |
 
+OpenCode can optionally keep a local `opencode serve` process alive:
+
+```toml
+[projects.agent.options]
+attach_server = true
+attach_server_port = 0
+```
+
+Use this when OpenCode background subagents need to continue after the main turn finishes. The server is reused while the project/session environment and active provider stay the same. If those settings actually change, such as after switching providers, starting a different session, or changing project options, cc-connect restarts the server and any background subagents running inside it stop.
+
 ### Configuration
 
 ```toml

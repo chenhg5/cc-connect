@@ -1144,6 +1144,8 @@ func main() {
 				WorkDir:              u.WorkDir,
 				Mode:                 u.Mode,
 				AgentType:            u.AgentType,
+				AttachServer:         u.AttachServer,
+				AttachServerPort:     u.AttachServerPort,
 				ShowContextIndicator: u.ShowContextIndicator,
 				ShowWorkdirIndicator: u.ShowWorkdirIndicator,
 				ReplyFooter:          u.ReplyFooter,

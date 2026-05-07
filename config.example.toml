@@ -1649,6 +1649,24 @@ app_secret = "your-feishu-app-secret"
 # Optional: specify a model (provider/model format) / 可选：指定模型
 # model = "anthropic/claude-sonnet-4-20250514"
 #
+# Optional: keep a local OpenCode server alive and attach each `opencode run`
+# to it. Enable this when you need OpenCode background subagents to survive
+# after the main turn completes. By default this is off to preserve the classic
+# one-process-per-turn behavior.
+# The server is reused while the project/session environment and active provider
+# stay the same. It is restarted when those settings actually change, such as
+# after switching providers, starting a different session, or changing project
+# options; restarting stops any background subagents running inside that server.
+# 可选：启动本机常驻 OpenCode server，并让每次 `opencode run` 连接到它。
+# 需要让 OpenCode background subagent 在主回合结束后继续运行时启用。
+# 默认关闭，以保留传统的每回合独立进程行为。
+# 当项目/会话环境和当前 provider 不变时会复用该 server；如果切换 provider、
+# 切换会话或修改项目选项导致这些设置实际变化，server 会重启，运行中的
+# background subagent 也会停止。
+# attach_server = true
+# attach_server_port = 0  # 0 = OS-assigned local port; set a fixed port to make it visible/predictable.
+#                         # 0 = 系统分配本机端口；也可以填固定端口方便观察和运维。
+#
 # [[projects.platforms]]
 # type = "telegram"
 #

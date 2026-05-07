@@ -61,7 +61,7 @@ func TestOpencodeSessionEntry_Unmarshal(t *testing.T) {
 // the ContinueSession sentinel (__continue__) is not passed as a literal
 // session ID to the CLI. This was fixed in PR #249.
 func TestNewOpencodeSession_ContinueSessionTreatedAsFresh(t *testing.T) {
-	s, err := newOpencodeSession(context.Background(), "echo", "/tmp", "", "default", "", core.ContinueSession, nil)
+	s, err := newOpencodeSession(context.Background(), "echo", "/tmp", "", "default", "", core.ContinueSession, nil, "")
 	if err != nil {
 		t.Fatalf("newOpencodeSession: %v", err)
 	}
@@ -103,11 +103,12 @@ func TestOpencodeSessionStageImages(t *testing.T) {
 }
 
 func TestOpencodeSessionBuildRunArgsIncludesImagesAsFiles(t *testing.T) {
-	s := &opencodeSession{workDir: "/repo", model: "provider/model"}
+	s := &opencodeSession{workDir: "/repo", model: "provider/model", attachURL: "http://127.0.0.1:4097"}
 
 	got := s.buildRunArgs("describe these images", []string{"/tmp/a.png", "/tmp/b.jpg"}, "ses_123")
 	want := []string{
 		"run", "--format", "json",
+		"--attach", "http://127.0.0.1:4097",
 		"--session", "ses_123",
 		"--model", "provider/model",
 		"--dir", "/repo",
@@ -260,6 +261,7 @@ func TestHandleToolUsePermissionDeniedEmitsEventText(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s := &opencodeSession{events: make(chan core.Event, 4), ctx: ctx}
+	s.alive.Store(true)
 	s.handleToolUse(raw)
 
 	var events []core.Event
@@ -294,6 +296,7 @@ func TestHandleToolUseCompletedDoesNotEmitExtraText(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s := &opencodeSession{events: make(chan core.Event, 4), ctx: ctx}
+	s.alive.Store(true)
 	s.handleToolUse(raw)
 
 	var events []core.Event
@@ -324,6 +327,7 @@ func TestHandleToolUseErrorNoMessageNoText(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s := &opencodeSession{events: make(chan core.Event, 4), ctx: ctx}
+	s.alive.Store(true)
 	s.handleToolUse(raw)
 
 	for len(s.events) > 0 {
@@ -331,6 +335,40 @@ func TestHandleToolUseErrorNoMessageNoText(t *testing.T) {
 		if evt.Type == core.EventText {
 			t.Errorf("unexpected EventText for error with no message: %q", evt.Content)
 		}
+	}
+}
+
+func TestOpencodeSessionCloseIsIdempotent(t *testing.T) {
+	s, err := newOpencodeSession(context.Background(), "echo", t.TempDir(), "", "default", "", "", nil, "")
+	if err != nil {
+		t.Fatalf("newOpencodeSession: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+}
+
+func TestParseAttachServerOptions(t *testing.T) {
+	if !parseAttachServerOption(true) {
+		t.Fatal("parseAttachServerOption(true) = false, want true")
+	}
+	if !parseAttachServerOption("auto") {
+		t.Fatal(`parseAttachServerOption("auto") = false, want true`)
+	}
+	if parseAttachServerOption("off") {
+		t.Fatal(`parseAttachServerOption("off") = true, want false`)
+	}
+	if got := parseAttachServerPortOption(4097); got != 4097 {
+		t.Fatalf("parseAttachServerPortOption(4097) = %d, want 4097", got)
+	}
+	if got := parseAttachServerPortOption("49990"); got != 49990 {
+		t.Fatalf(`parseAttachServerPortOption("49990") = %d, want 49990`, got)
+	}
+	if got := parseAttachServerPortOption(70000); got != 0 {
+		t.Fatalf("parseAttachServerPortOption(70000) = %d, want 0", got)
 	}
 }
 
