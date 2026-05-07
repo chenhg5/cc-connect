@@ -177,9 +177,7 @@ func (s *opencodeSession) streamSSEOnce(ctx context.Context, sid, eventURL strin
 		if !ok {
 			continue
 		}
-		if strings.HasPrefix(value, " ") {
-			value = value[1:]
-		}
+		value = strings.TrimPrefix(value, " ")
 		if field == "data" {
 			dataLines = append(dataLines, value)
 		}

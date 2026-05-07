@@ -395,7 +395,7 @@ func TestOpenCodeSSEWatcherEmitsAssistantStopMessage(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	s, err := newOpencodeSession(context.Background(), "opencode", "", "", "default", sid, nil, server.URL)
+	s, err := newOpencodeSession(context.Background(), "opencode", "", "", "default", "", sid, nil, server.URL)
 	if err != nil {
 		t.Fatalf("newOpencodeSession: %v", err)
 	}
@@ -439,7 +439,7 @@ func TestOpenCodeSSEWatcherSkipsStdoutSeenPart(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	s, err := newOpencodeSession(context.Background(), "opencode", "", "", "default", sid, nil, server.URL)
+	s, err := newOpencodeSession(context.Background(), "opencode", "", "", "default", "", sid, nil, server.URL)
 	if err != nil {
 		t.Fatalf("newOpencodeSession: %v", err)
 	}
@@ -472,7 +472,7 @@ func TestOpenCodeSSEWatcherEmitsNewPartForStdoutSeenMessage(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	s, err := newOpencodeSession(context.Background(), "opencode", "", "", "default", sid, nil, server.URL)
+	s, err := newOpencodeSession(context.Background(), "opencode", "", "", "default", "", sid, nil, server.URL)
 	if err != nil {
 		t.Fatalf("newOpencodeSession: %v", err)
 	}
@@ -514,7 +514,7 @@ func TestOpenCodeSSEWatcherEmitsNewPartForStdoutSeenMessage(t *testing.T) {
 }
 
 func TestOpenCodeProducerHandlesEmptyAttachURL(t *testing.T) {
-	s, err := newOpencodeSession(context.Background(), "opencode", "", "", "default", "ses_empty_attach", nil, "")
+	s, err := newOpencodeSession(context.Background(), "opencode", "", "", "default", "", "ses_empty_attach", nil, "")
 	if err != nil {
 		t.Fatalf("newOpencodeSession: %v", err)
 	}
@@ -550,7 +550,7 @@ func TestOpenCodeProducerStopsOnContextCancel(t *testing.T) {
 	defer server.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	s, err := newOpencodeSession(context.Background(), "opencode", "", "", "default", sid, nil, server.URL)
+	s, err := newOpencodeSession(context.Background(), "opencode", "", "", "default", "", sid, nil, server.URL)
 	if err != nil {
 		t.Fatalf("newOpencodeSession: %v", err)
 	}
