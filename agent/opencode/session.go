@@ -42,22 +42,34 @@ type opencodeSession struct {
 	alive             atomic.Bool
 	expectingContinue atomic.Bool // true when compaction_continue received, waiting for next step
 	resultSent        atomic.Bool // true when EventResult has been sent for this turn
+	seenMu            sync.Mutex
+	seenMessages      map[string]struct{}
+	seenParts         map[string]struct{}
+	sseMu             sync.Mutex
+	sseMessages       map[string]opencodeSSEMessage
+	sseParts          map[string]opencodeSSEPart
+	ssePartOrder      map[string][]string
 }
 
 func newOpencodeSession(ctx context.Context, cmd, workDir, model, mode, agentName, resumeID string, extraEnv []string, attachURL string) (*opencodeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	s := &opencodeSession{
-		cmd:       cmd,
-		workDir:   workDir,
-		model:     model,
-		mode:      mode,
-		agentName: agentName,
-		extraEnv:  extraEnv,
-		attachURL: attachURL,
-		events:    make(chan core.Event, 64),
-		ctx:       sessionCtx,
-		cancel:    cancel,
+		cmd:          cmd,
+		workDir:      workDir,
+		model:        model,
+		mode:         mode,
+		agentName:    agentName,
+		extraEnv:     extraEnv,
+		attachURL:    attachURL,
+		events:       make(chan core.Event, 64),
+		ctx:          sessionCtx,
+		cancel:       cancel,
+		seenMessages: make(map[string]struct{}),
+		seenParts:    make(map[string]struct{}),
+		sseMessages:  make(map[string]opencodeSSEMessage),
+		sseParts:     make(map[string]opencodeSSEPart),
+		ssePartOrder: make(map[string][]string),
 	}
 	s.alive.Store(true)
 
@@ -300,6 +312,8 @@ func (s *opencodeSession) emit(evt core.Event) bool {
 //	{ "type": "text|tool_use|reasoning|step_start|step_finish",
 //	  "part": { "type": "text|tool|reasoning|step-start|step-finish", ... } }
 func (s *opencodeSession) handleEvent(raw map[string]any) {
+	s.markSeenFromRaw(raw)
+
 	eventType, _ := raw["type"].(string)
 
 	switch eventType {

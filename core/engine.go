@@ -3996,12 +3996,10 @@ func buildCardContent(thinking string, tools []cardToolEntry, answer string) str
 const unsolicitedReaderStopTimeout = 5 * time.Second
 
 // stopUnsolicitedReader cancels any running unsolicited reader goroutine and
-// waits (bounded) for it to exit. If the reader does not exit in time, the
-// caller is responsible for draining/resyncing the Events channel before a
-// new foreground turn reads from it — we set eventsNeedResync here so that
-// any downstream consumer drains before resuming. We do NOT wait unbounded:
-// some callers hold interactiveMu, and a reader stuck in a blocking adapter
-// call would stall unrelated sessions.
+// waits (bounded) for it to exit. Cancelling the reader hands event-channel
+// ownership back to the next foreground turn, so we force a resync/drain before
+// that turn reads. We do NOT wait unbounded: some callers hold interactiveMu,
+// and a reader stuck in a blocking adapter call would stall unrelated sessions.
 func (e *Engine) stopUnsolicitedReader(state *interactiveState) {
 	state.mu.Lock()
 	cancel := state.unsolicitedCancel
@@ -4014,6 +4012,9 @@ func (e *Engine) stopUnsolicitedReader(state *interactiveState) {
 		return
 	}
 	cancel()
+	state.mu.Lock()
+	state.eventsNeedResync = true
+	state.mu.Unlock()
 	if done == nil {
 		return
 	}
@@ -4022,13 +4023,9 @@ func (e *Engine) stopUnsolicitedReader(state *interactiveState) {
 	case <-time.After(unsolicitedReaderStopTimeout):
 		slog.Warn("unsolicited reader stop timed out; forcing resync",
 			"timeout", unsolicitedReaderStopTimeout)
-		// Force the next foreground turn to drain Events() defensively.
 		// The old reader may still be alive; its ctx-double-check will drop
 		// any event read after cancellation, so concurrent consumers cannot
 		// silently steal foreground events.
-		state.mu.Lock()
-		state.eventsNeedResync = true
-		state.mu.Unlock()
 	}
 }
 
@@ -4059,6 +4056,14 @@ func (e *Engine) startUnsolicitedReader(state *interactiveState, session *Sessio
 	state.unsolicitedDone = done
 	state.mu.Unlock()
 
+	if producer, ok := agentSession.(UnsolicitedEventProducer); ok {
+		if err := producer.StartUnsolicitedEvents(ctx); err != nil {
+			slog.Warn("unsolicited producer failed to start",
+				"session", sessionKey,
+				"error", err)
+		}
+	}
+
 	go e.runUnsolicitedReader(ctx, cancel, done, state, agentSession, session, sessions, sessionKey, workspaceDir)
 }
 
@@ -4088,9 +4093,9 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 	for {
 		select {
 		case <-ctx.Done():
-			// Context cancelled (new foreground turn or cleanup). Don't set
-			// eventsNeedResync — the caller (stopUnsolicitedReader) knows the
-			// channel state is clean because it just took ownership.
+			// Context cancelled (new foreground turn or cleanup). The caller
+			// has already marked the state for event-channel resync before the
+			// next foreground turn reads from it.
 			return
 
 		case event, ok := <-events:
