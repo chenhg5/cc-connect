@@ -9,9 +9,12 @@ var (
 	reCodeBlock   = regexp.MustCompile("(?s)```[a-zA-Z]*\n?(.*?)```")
 	reInlineCode  = regexp.MustCompile("`([^`]+)`")
 	reBoldAst     = regexp.MustCompile(`\*\*(.+?)\*\*`)
-	reBoldUnd     = regexp.MustCompile(`__(.+?)__`)
+	// Underscore emphasis requires word boundaries on both sides so that
+	// intra-word underscores (e.g. snake_case identifiers) are preserved.
+	// Per CommonMark, "underscores cannot be used for intra-word emphasis."
+	reBoldUnd     = regexp.MustCompile(`\b__(.+?)__\b`)
 	reItalicAst   = regexp.MustCompile(`\*(.+?)\*`)
-	reItalicUnd   = regexp.MustCompile(`_(.+?)_`)
+	reItalicUnd   = regexp.MustCompile(`\b_(.+?)_\b`)
 	reStrike      = regexp.MustCompile(`~~(.+?)~~`)
 	reLink        = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
 	reHeading     = regexp.MustCompile(`(?m)^#{1,6}\s+`)
