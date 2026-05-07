@@ -474,14 +474,26 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	}
 	if len(parts) == 3 {
 		if parts[1] == "g" {
-			gid, _ := strconv.ParseInt(parts[2], 10, 64)
+			gid, err := strconv.ParseInt(parts[2], 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("qq: invalid group ID in %q: %w", sessionKey, err)
+			}
 			return &replyContext{messageType: "group", groupID: gid}, nil
 		}
-		gid, _ := strconv.ParseInt(parts[1], 10, 64)
-		uid, _ := strconv.ParseInt(parts[2], 10, 64)
+		gid, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("qq: invalid group ID in %q: %w", sessionKey, err)
+		}
+		uid, err := strconv.ParseInt(parts[2], 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("qq: invalid user ID in %q: %w", sessionKey, err)
+		}
 		return &replyContext{messageType: "group", groupID: gid, userID: uid}, nil
 	}
-	uid, _ := strconv.ParseInt(parts[1], 10, 64)
+	uid, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("qq: invalid user ID in %q: %w", sessionKey, err)
+	}
 	return &replyContext{messageType: "private", userID: uid}, nil
 }
 
