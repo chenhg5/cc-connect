@@ -118,12 +118,16 @@ func (s *recordingSession) Close() error {
 }
 
 func (s *recordingSession) releaseFirstResult(content string) {
+	s.releaseFirstEvent(core.Event{Type: core.EventResult, Content: content, Done: true})
+}
+
+func (s *recordingSession) releaseFirstEvent(event core.Event) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.blocked {
 		return
 	}
-	s.events <- core.Event{Type: core.EventResult, Content: content, Done: true}
+	s.events <- event
 	s.blocked = false
 }
 
@@ -324,6 +328,62 @@ func TestSendToSessionWithAttachmentsDeliversTextImagesAndFiles(t *testing.T) {
 		if ctx != "reply-ctx-1" {
 			t.Fatalf("reply context = %#v, want original reply context", replyCtx)
 		}
+	}
+}
+
+func TestSendToSessionWithAttachmentsDoesNotDuplicateEchoedFinalTextWithContextIndicator(t *testing.T) {
+	engine, agent, platform := newMediaEngine(t)
+	agent.session.blockFirstResult()
+
+	msg := mediaMessage("start long task")
+	engine.ReceiveMessage(platform, msg)
+	agent.session.waitRecords(t, 1)
+
+	sideText := "delivery ready"
+	err := engine.SendToSessionWithAttachments(
+		msg.SessionKey,
+		sideText,
+		nil,
+		[]core.FileAttachment{{MimeType: "text/plain", FileName: "report.txt", Data: []byte("report")}},
+	)
+	if err != nil {
+		t.Fatalf("SendToSessionWithAttachments() error = %v", err)
+	}
+
+	agent.session.releaseFirstEvent(core.Event{
+		Type:        core.EventResult,
+		Content:     sideText,
+		InputTokens: 52000,
+		Done:        true,
+	})
+
+	deadline := time.Now().Add(300 * time.Millisecond)
+	var lastTexts []string
+	for time.Now().Before(deadline) {
+		texts, _, _, _ := platform.snapshot()
+		lastTexts = texts
+		count := 0
+		for _, text := range texts {
+			if strings.Contains(text, sideText) {
+				count++
+			}
+			if strings.Contains(text, "[ctx:") {
+				t.Fatalf("unexpected duplicate context indicator reply: %#v", texts)
+			}
+		}
+		if count > 1 {
+			t.Fatalf("texts = %#v, want no duplicate delivery message", texts)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	count := 0
+	for _, text := range lastTexts {
+		if strings.Contains(text, sideText) {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("texts = %#v, want exactly one side-channel delivery message", lastTexts)
 	}
 }
 

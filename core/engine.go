@@ -3278,23 +3278,23 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				if autoApprove {
 					result = PermissionResult{Behavior: "allow", UpdatedInput: event.ToolInputRaw}
 				}
-			reqID := event.RequestID
-			respondCtx := ctx // capture current unsolicited reader context
-			go func() {
-				// Run in a goroutine to keep reader iterations fast, but honour
-				// the reader's context so we don't call into a dead session after
-				// stopUnsolicitedReader cancels the context.
-				select {
-				case <-respondCtx.Done():
-					return
-				default:
-				}
-				if err := agentSession.RespondPermission(reqID, result); err != nil {
-					if respondCtx.Err() == nil {
-						slog.Error("unsolicited: failed to respond permission", "error", err)
+				reqID := event.RequestID
+				respondCtx := ctx // capture current unsolicited reader context
+				go func() {
+					// Run in a goroutine to keep reader iterations fast, but honour
+					// the reader's context so we don't call into a dead session after
+					// stopUnsolicitedReader cancels the context.
+					select {
+					case <-respondCtx.Done():
+						return
+					default:
 					}
-				}
-			}()
+					if err := agentSession.RespondPermission(reqID, result); err != nil {
+						if respondCtx.Err() == nil {
+							slog.Error("unsolicited: failed to respond permission", "error", err)
+						}
+					}
+				}()
 				if !autoApprove {
 					toolName := event.ToolName
 					if toolName == "" {
@@ -3485,6 +3485,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		switch event.Type {
 		case EventThinking:
+			if isEllipsisOnly(event.Content) {
+				break
+			}
 			if hasRichCard {
 				// When thinking messages are suppressed, skip card creation.
 				if !e.display.ThinkingMessages {
@@ -3712,7 +3715,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventText:
-			if event.Content != "" {
+			if event.Content != "" && !isEllipsisOnly(event.Content) {
 				if len(textParts) == 0 {
 					if hasRichCard {
 						if cardMessageID == nil {
@@ -3943,16 +3946,23 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				})
 			}
 
+			contextText := ""
 			if e.showContextIndicator && !isSilent {
 				if sdkPlausible {
-					cleanResponse += contextIndicator(event.InputTokens)
+					contextText = contextIndicatorText(event.InputTokens)
 				} else if selfPct > 0 {
-					cleanResponse += fmt.Sprintf("\n[ctx: ~%d%%]", selfPct)
+					contextText = fmt.Sprintf("[ctx: ~%d%%]", selfPct)
 				}
 			}
 			if !isSilent {
-				if footer := e.buildReplyFooter(replyAgent, state.agentSession, workspaceDir, replyFooterContextText(replyFooterSessionContextUsage(state.agentSession), e.i18n)); footer != "" {
+				footerContext := replyFooterContextText(replyFooterSessionContextUsage(state.agentSession), e.i18n)
+				if contextText != "" && e.replyFooterEnabled {
+					footerContext = contextText
+				}
+				if footer := e.buildReplyFooter(replyAgent, state.agentSession, workspaceDir, footerContext); footer != "" {
 					cleanResponse = appendReplyFooter(cleanResponse, footer)
+				} else if contextText != "" {
+					cleanResponse += "\n" + contextText
 				}
 			}
 			fullResponse = cleanResponse
@@ -4030,26 +4040,22 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// only send the unsent remainder. When tool progress is hidden, tool events don't surface
 				// side-channel messages and segmentStart stays 0, so keep normal finalize flow.
 				sp.discard()
-				if segmentStart < len(textParts) {
-					unsent := strings.Join(textParts[segmentStart:], "")
-					if unsent != "" {
-						for _, chunk := range splitMessage(unsent, maxPlatformMessageLen) {
-							if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
-								return
-							}
-						}
-					}
+				unsent := strings.Join(textParts[segmentStart:], "")
+				if strings.TrimSpace(unsent) != "" {
+					unsent = appendFinalMetadataToSegment(unsent, fullResponse)
 				}
-			} else if suppressDuplicate {
-				sp.discard()
-				if metaOnly := strings.TrimSpace(strings.TrimPrefix(fullResponse, baseResponse)); metaOnly != "" {
-					for _, chunk := range splitMessage(metaOnly, maxPlatformMessageLen) {
+				if unsent != "" {
+					for _, chunk := range splitMessage(unsent, maxPlatformMessageLen) {
 						if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
 							return
 						}
 					}
 				}
+			} else if suppressDuplicate {
+				sp.discard()
 				slog.Debug("EventResult: suppressed duplicate side-channel text", "response_len", len(fullResponse))
+			} else if sp.finish(fullResponse) {
+				slog.Debug("EventResult: finalized stream preview in-place", "response_len", len(fullResponse))
 			} else {
 				slog.Debug("EventResult: sending via p.Send (preview inactive or failed)", "response_len", len(fullResponse), "chunks", len(splitMessage(fullResponse, maxPlatformMessageLen)))
 				for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
@@ -5243,6 +5249,12 @@ func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDi
 
 	var parts []string
 	hasStatus := false
+	contextLeft = strings.TrimSpace(contextLeft)
+	contextFirst := strings.HasPrefix(contextLeft, "[ctx:")
+	if contextFirst {
+		parts = append(parts, contextLeft)
+		hasStatus = true
+	}
 	if model := replyFooterModel(session, agent); model != "" {
 		parts = append(parts, model)
 		hasStatus = true
@@ -5251,8 +5263,10 @@ func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDi
 		parts = append(parts, effort)
 		hasStatus = true
 	}
-	if left := strings.TrimSpace(contextLeft); left != "" {
-		parts = append(parts, left)
+	if contextFirst {
+		// Already added before model so "[ctx]" stays on the same footer line.
+	} else if contextLeft != "" {
+		parts = append(parts, contextLeft)
 		hasStatus = true
 	} else if usage := e.replyFooterUsageText(session, agent); usage != "" {
 		parts = append(parts, usage)
@@ -5479,6 +5493,28 @@ func appendReplyFooter(content, footer string) string {
 		return "*" + footer + "*"
 	}
 	return content + "\n\n*" + footer + "*"
+}
+
+func appendFinalMetadataToSegment(segment, fullResponse string) string {
+	segment = strings.TrimRight(segment, "\n ")
+	if segment == "" {
+		return fullResponse
+	}
+	fullResponse = strings.TrimSpace(fullResponse)
+	if fullResponse == "" || strings.TrimSpace(segment) == fullResponse {
+		return segment
+	}
+
+	metadata := ""
+	if idx := strings.LastIndex(fullResponse, "\n\n*"); idx >= 0 && strings.HasSuffix(fullResponse, "*") {
+		metadata = fullResponse[idx:]
+	} else if match := ctxSelfReportRe.FindString(fullResponse); match != "" {
+		metadata = "\n" + strings.TrimSpace(match)
+	}
+	if metadata == "" || strings.Contains(segment, strings.TrimSpace(metadata)) {
+		return segment
+	}
+	return segment + metadata
 }
 
 func (e *Engine) cmdShow(p Platform, msg *Message, args []string) {
@@ -8609,7 +8645,7 @@ func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images
 		if err := p.Send(e.ctx, replyCtx, message); err != nil {
 			return err
 		}
-		if state != nil && (len(images) > 0 || len(files) > 0) {
+		if state != nil {
 			state.mu.Lock()
 			state.sideText = strings.TrimSpace(message)
 			state.mu.Unlock()
@@ -13328,6 +13364,14 @@ const modelContextWindow = 200_000 // generic fallback window for heuristic cont
 
 // contextIndicator returns a suffix like "\n[ctx: ~42%]" based on SDK-reported input tokens.
 func contextIndicator(inputTokens int) string {
+	text := contextIndicatorText(inputTokens)
+	if text == "" {
+		return ""
+	}
+	return "\n" + text
+}
+
+func contextIndicatorText(inputTokens int) string {
 	if inputTokens <= 0 {
 		return ""
 	}
@@ -13335,7 +13379,7 @@ func contextIndicator(inputTokens int) string {
 	if pct > 100 {
 		pct = 100
 	}
-	return fmt.Sprintf("\n[ctx: ~%d%%]", pct)
+	return fmt.Sprintf("[ctx: ~%d%%]", pct)
 }
 
 // ctxSelfReportRe matches agent self-reported context lines like "[ctx: ~42%]".
@@ -13376,6 +13420,11 @@ func couldBeSilentPrefix(text string) bool {
 		return true
 	}
 	return strings.HasPrefix("NO_REPLY", strings.ToUpper(t))
+}
+
+func isEllipsisOnly(text string) bool {
+	t := strings.TrimSpace(text)
+	return t == "..." || t == "…"
 }
 
 // parseSelfReportedCtx extracts the percentage from a self-reported "[ctx: ~XX%]" line.
