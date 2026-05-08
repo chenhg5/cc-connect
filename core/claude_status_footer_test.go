@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -252,6 +253,21 @@ func TestBuildReplyFooter_LegacyAllSegments(t *testing.T) {
 	// Segments joined by " · ".
 	if !strings.Contains(got, " · ") {
 		t.Errorf("legacy footer = %q, expected ' · ' separators", got)
+	}
+}
+
+func TestCompactReplyFooterPath_HomeRelativeDeepPathKeepsTail(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	shortPath := filepath.Join(homeDir, "codes", "cc-connect")
+	if got, want := compactReplyFooterPath(shortPath), "~/codes/cc-connect"; got != want {
+		t.Fatalf("short home path = %q, want %q", got, want)
+	}
+
+	deepPath := filepath.Join(homeDir, "code", "TechStudio", "projects", "core", "agents", "ceo")
+	if got, want := compactReplyFooterPath(deepPath), "…/agents/ceo"; got != want {
+		t.Fatalf("deep home path = %q, want %q", got, want)
 	}
 }
 
