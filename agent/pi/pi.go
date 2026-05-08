@@ -83,8 +83,85 @@ func (a *Agent) GetModel() string {
 	return a.model
 }
 
-func (a *Agent) AvailableModels(_ context.Context) []core.ModelOption {
-	return nil // Pi uses its own model registry; no static list here.
+func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
+	a.mu.RLock()
+	cmd := a.cmd
+	a.mu.RUnlock()
+
+models := a.discoverModels(ctx, cmd)
+	if len(models) > 0 {
+		return models
+	}
+	return nil
+}
+
+// discoverModels runs `pi --list-models` and parses the output.
+// Output format:
+//
+//	provider     model                  context  max-out  thinking  images
+//	opencode-go  deepseek-v4-flash      1M       384K     yes       no
+func (a *Agent) discoverModels(ctx context.Context, cmd string) []core.ModelOption {
+	c := exec.CommandContext(ctx, cmd, "--list-models")
+	c.Dir = a.workDir
+
+	a.mu.RLock()
+	extraEnv := append([]string(nil), a.sessionEnv...)
+	a.mu.RUnlock()
+
+	if len(extraEnv) > 0 {
+		c.Env = append(os.Environ(), extraEnv...)
+	}
+
+	out, err := c.Output()
+	if err != nil {
+		slog.Debug("pi: discoverModels failed", "err", err)
+		return nil
+	}
+
+	var models []core.ModelOption
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "provider") || strings.HasPrefix(line, "No models") {
+			continue
+		}
+
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+
+		provider := fields[0]
+		modelName := fields[1]
+
+		// Skip if this provider requires login (no API key)
+		if strings.Contains(line, "Use /login") {
+			continue
+		}
+
+		fullName := provider + "/" + modelName
+		models = append(models, core.ModelOption{Name: fullName})
+	}
+
+	if len(models) == 0 {
+		return nil
+	}
+
+	// Deduplicate and sort
+	seen := make(map[string]bool)
+	var unique []core.ModelOption
+	for _, m := range models {
+		if !seen[m.Name] {
+			seen[m.Name] = true
+			unique = append(unique, m)
+		}
+	}
+
+	sort.Slice(unique, func(i, j int) bool {
+		return unique[i].Name < unique[j].Name
+	})
+
+	return unique
 }
 
 func (a *Agent) SetSessionEnv(env []string) {
