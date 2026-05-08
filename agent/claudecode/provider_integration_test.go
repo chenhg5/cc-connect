@@ -16,12 +16,16 @@ import (
 // They verify that provider switching correctly sets up env vars and that agent
 // sessions can be started with the right configuration.
 //
-// Skip in CI: set CC_SKIP_INTEGRATION=1 or simply don't have the config file.
+// Run with: CC_RUN_PROVIDER_INTEGRATION=1 go test ./agent/claudecode -run TestIntegration -v
+// Skip explicitly with: CC_SKIP_INTEGRATION=1
 
 func skipIfNoConfig(t *testing.T) *config.Config {
 	t.Helper()
 	if os.Getenv("CC_SKIP_INTEGRATION") == "1" {
 		t.Skip("CC_SKIP_INTEGRATION=1")
+	}
+	if os.Getenv("CC_RUN_PROVIDER_INTEGRATION") != "1" {
+		t.Skip("set CC_RUN_PROVIDER_INTEGRATION=1 to run provider integration tests")
 	}
 	cfgPath := os.ExpandEnv("$HOME/.cc-connect/config.toml")
 	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {

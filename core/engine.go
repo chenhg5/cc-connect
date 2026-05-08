@@ -2965,8 +2965,10 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 	// concurrent cleanup (without expected) from closing the same session.
 	var agentSession AgentSession
 	if ok && state != nil {
+		state.mu.Lock()
 		agentSession = state.agentSession
 		state.agentSession = nil
+		state.mu.Unlock()
 	}
 	e.interactiveMu.Unlock()
 

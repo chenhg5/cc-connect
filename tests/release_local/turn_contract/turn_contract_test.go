@@ -19,6 +19,8 @@ type turnRecord struct {
 
 type turnAgent struct {
 	session *turnSession
+	model   string
+	workDir string
 }
 
 func newTurnAgent() *turnAgent {
@@ -26,6 +28,12 @@ func newTurnAgent() *turnAgent {
 }
 
 func (a *turnAgent) Name() string { return "turn-agent" }
+func (a *turnAgent) GetModel() string {
+	return strings.TrimSpace(a.model)
+}
+func (a *turnAgent) GetWorkDir() string {
+	return strings.TrimSpace(a.workDir)
+}
 
 func (a *turnAgent) StartSession(_ context.Context, sessionID string) (core.AgentSession, error) {
 	a.session.setID(sessionID)
@@ -549,6 +557,318 @@ func TestStreamingPreviewFinalizationContractExposesDuplicateFinalSend(t *testin
 	}
 }
 
+func TestStreamingPreviewConfigurationMatrix(t *testing.T) {
+	tests := []struct {
+		name        string
+		cfg         core.StreamPreviewCfg
+		wantPreview bool
+	}{
+		{
+			name: "enabled_keeps_preview_in_place",
+			cfg: core.StreamPreviewCfg{
+				Enabled:       true,
+				IntervalMs:    1,
+				MinDeltaChars: 1,
+				MaxChars:      5000,
+			},
+			wantPreview: true,
+		},
+		{
+			name: "disabled_globally_sends_final_once",
+			cfg: core.StreamPreviewCfg{
+				Enabled:       false,
+				IntervalMs:    1,
+				MinDeltaChars: 1,
+				MaxChars:      5000,
+			},
+		},
+		{
+			name: "disabled_for_platform_sends_final_once",
+			cfg: core.StreamPreviewCfg{
+				Enabled:           true,
+				DisabledPlatforms: []string{"feishu"},
+				IntervalMs:        1,
+				MinDeltaChars:     1,
+				MaxChars:          5000,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			agent := newTurnAgent()
+			platform := &previewLifecyclePlatform{}
+			engine := core.NewEngine("release-preview-matrix", agent, []core.Platform{platform}, t.TempDir()+"/sessions.json", core.LangEnglish)
+			engine.SetStreamPreviewCfg(tt.cfg)
+			t.Cleanup(func() {
+				engine.Stop()
+				_ = agent.Stop()
+			})
+			agent.session.blockFirstResult()
+
+			msg := turnMessage("streaming config matrix")
+			go engine.ReceiveMessage(platform, msg)
+			agent.session.waitRecords(t, 1)
+
+			body := strings.Repeat("stream body ", 20)
+			agent.session.emit(core.Event{Type: core.EventText, Content: body})
+			agent.session.releaseFirstResult(core.Event{Type: core.EventResult, Content: body, InputTokens: 52000, Done: true})
+
+			if tt.wantPreview {
+				platform.waitPreviewUpdates(t, 1)
+			} else {
+				platform.waitSentTexts(t, 1)
+			}
+
+			texts, starts, updates, deletes := platform.snapshotPreviewLifecycle()
+			if tt.wantPreview {
+				if len(texts) != 0 || len(starts) != 1 || len(updates) == 0 || len(deletes) != 0 {
+					t.Fatalf("preview lifecycle = texts:%#v starts:%#v updates:%#v deletes:%#v, want in-place preview finalize", texts, starts, updates, deletes)
+				}
+				if !strings.Contains(updates[len(updates)-1], "[ctx:") {
+					t.Fatalf("final preview update = %q, want context indicator", updates[len(updates)-1])
+				}
+				return
+			}
+			if len(starts) != 0 || len(updates) != 0 || len(deletes) != 0 {
+				t.Fatalf("preview lifecycle = starts:%#v updates:%#v deletes:%#v, want no preview when disabled", starts, updates, deletes)
+			}
+			if len(texts) != 1 || !strings.Contains(texts[0], strings.TrimSpace(body)) || strings.Count(texts[0], "[ctx:") != 1 {
+				t.Fatalf("texts = %#v, want one final send with context indicator", texts)
+			}
+		})
+	}
+}
+
+func TestStreamingPreviewMaxCharsOnlyTruncatesIntermediatePreview(t *testing.T) {
+	agent := newTurnAgent()
+	platform := &previewLifecyclePlatform{}
+	engine := core.NewEngine("release-preview-maxchars", agent, []core.Platform{platform}, t.TempDir()+"/sessions.json", core.LangEnglish)
+	engine.SetStreamPreviewCfg(core.StreamPreviewCfg{
+		Enabled:       true,
+		IntervalMs:    1,
+		MinDeltaChars: 1,
+		MaxChars:      20,
+	})
+	t.Cleanup(func() {
+		engine.Stop()
+		_ = agent.Stop()
+	})
+	agent.session.blockFirstResult()
+
+	msg := turnMessage("stream max chars")
+	go engine.ReceiveMessage(platform, msg)
+	agent.session.waitRecords(t, 1)
+
+	body := strings.Repeat("full final body ", 30)
+	agent.session.emit(core.Event{Type: core.EventText, Content: body})
+	platform.waitPreviewStarts(t, 1)
+	agent.session.releaseFirstResult(core.Event{Type: core.EventResult, Content: body, InputTokens: 52000, Done: true})
+	platform.waitPreviewUpdates(t, 1)
+
+	_, starts, updates, _ := platform.snapshotPreviewLifecycle()
+	if !strings.Contains(starts[0], "…") {
+		t.Fatalf("initial preview = %q, want max_chars truncation marker", starts[0])
+	}
+	final := updates[len(updates)-1]
+	if !strings.Contains(final, strings.TrimSpace(body)) {
+		t.Fatalf("final preview update = %q, want full untruncated final body", final)
+	}
+}
+
+func TestReplyMetadataConfigurationMatrix(t *testing.T) {
+	tests := []struct {
+		name       string
+		showCtx    bool
+		showFooter bool
+		want       []string
+		forbid     []string
+	}{
+		{
+			name:       "context_and_footer_on_share_one_line",
+			showCtx:    true,
+			showFooter: true,
+			want:       []string{"answer", "*[ctx: ~14%] · glm-5.1 · …/tmp/release-agent*"},
+		},
+		{
+			name:       "context_off_footer_on_keeps_model_footer",
+			showCtx:    false,
+			showFooter: true,
+			want:       []string{"answer", "*glm-5.1 · …/tmp/release-agent*"},
+			forbid:     []string{"[ctx:"},
+		},
+		{
+			name:       "context_on_footer_off_uses_legacy_context_suffix",
+			showCtx:    true,
+			showFooter: false,
+			want:       []string{"answer\n[ctx: ~14%]"},
+			forbid:     []string{"glm-5.1", "/tmp/release-agent"},
+		},
+		{
+			name:       "context_and_footer_off_plain_answer",
+			showCtx:    false,
+			showFooter: false,
+			want:       []string{"answer"},
+			forbid:     []string{"[ctx:", "glm-5.1", "/tmp/release-agent"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			engine, agent, platform := newTurnEngine(t)
+			agent.model = "glm-5.1"
+			agent.workDir = "/tmp/release-agent"
+			engine.SetShowContextIndicator(tt.showCtx)
+			engine.SetReplyFooterEnabled(tt.showFooter)
+			agent.session.setResult(core.Event{Type: core.EventResult, Content: "answer", InputTokens: 28000, Done: true})
+
+			engine.ReceiveMessage(platform, turnMessage("metadata matrix"))
+			platform.waitTextContaining(t, "answer")
+
+			texts, _, _, _ := platform.snapshot()
+			if len(texts) != 1 {
+				t.Fatalf("texts = %#v, want exactly one final reply", texts)
+			}
+			for _, want := range tt.want {
+				if !strings.Contains(texts[0], want) {
+					t.Fatalf("reply = %q, want contains %q", texts[0], want)
+				}
+			}
+			for _, forbidden := range tt.forbid {
+				if strings.Contains(texts[0], forbidden) {
+					t.Fatalf("reply = %q, should not contain %q", texts[0], forbidden)
+				}
+			}
+		})
+	}
+}
+
+func TestLongFinalResponseKeepsMetadataOnceAtTail(t *testing.T) {
+	engine, agent, platform := newTurnEngine(t)
+	agent.model = "glm-5.1"
+	agent.workDir = "/tmp/release-agent"
+	engine.SetReplyFooterEnabled(true)
+
+	body := strings.Repeat("long-response ", 420)
+	agent.session.setResult(core.Event{Type: core.EventResult, Content: body, InputTokens: 28000, Done: true})
+
+	engine.ReceiveMessage(platform, turnMessage("long final"))
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		texts, _, _, _ := platform.snapshot()
+		if len(texts) >= 2 {
+			joined := strings.Join(texts, "")
+			if strings.Count(joined, "[ctx:") != 1 || strings.Count(joined, "glm-5.1") != 1 {
+				t.Fatalf("chunks = %#v, want metadata exactly once", texts)
+			}
+			if !strings.Contains(texts[len(texts)-1], "[ctx: ~14%] · glm-5.1") {
+				t.Fatalf("last chunk = %q, want metadata at tail", texts[len(texts)-1])
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	texts, _, _, _ := platform.snapshot()
+	t.Fatalf("texts = %#v, want long response split into multiple chunks", texts)
+}
+
+func TestDisplayVisibilityConfigurationMatrix(t *testing.T) {
+	tests := []struct {
+		name         string
+		thinking     bool
+		tools        bool
+		wantThinking bool
+		wantTool     bool
+	}{
+		{name: "show_both", thinking: true, tools: true, wantThinking: true, wantTool: true},
+		{name: "hide_thinking", thinking: false, tools: true, wantTool: true},
+		{name: "hide_tools", thinking: true, tools: false, wantThinking: true},
+		{name: "hide_both", thinking: false, tools: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			engine, agent, platform := newTurnEngine(t)
+			engine.SetDisplayConfig(core.DisplayCfg{
+				Mode:             "full",
+				CardMode:         "legacy",
+				ThinkingMessages: tt.thinking,
+				ToolMessages:     tt.tools,
+				ThinkingMaxLen:   300,
+				ToolMaxLen:       500,
+			})
+			agent.session.blockFirstResult()
+
+			msg := turnMessage("visibility matrix")
+			go engine.ReceiveMessage(platform, msg)
+			agent.session.waitRecords(t, 1)
+
+			agent.session.emit(core.Event{Type: core.EventThinking, Content: "matrix thinking"})
+			agent.session.emit(core.Event{Type: core.EventToolUse, ToolName: "Bash", ToolInput: "echo visible"})
+			agent.session.emit(core.Event{Type: core.EventToolResult, ToolName: "Bash", ToolResult: "visible output", ToolStatus: "completed"})
+			agent.session.releaseFirstResult(core.Event{Type: core.EventResult, Content: "matrix final", InputTokens: 52000, Done: true})
+			platform.waitTextContaining(t, "matrix final")
+
+			texts, _, _, _ := platform.snapshot()
+			joined := strings.Join(texts, "\n")
+			if got := strings.Contains(joined, "matrix thinking"); got != tt.wantThinking {
+				t.Fatalf("thinking visibility = %v, want %v; texts=%#v", got, tt.wantThinking, texts)
+			}
+			hasTool := strings.Contains(joined, "Bash") || strings.Contains(joined, "echo visible") || strings.Contains(joined, "visible output")
+			if hasTool != tt.wantTool {
+				t.Fatalf("tool visibility = %v, want %v; texts=%#v", hasTool, tt.wantTool, texts)
+			}
+			if countContaining(texts, "matrix final") != 1 {
+				t.Fatalf("texts=%#v, want exactly one final answer", texts)
+			}
+		})
+	}
+}
+
+func TestRichCardModeKeepsToolStepsAndFinalMetadataInOneCard(t *testing.T) {
+	agent := newTurnAgent()
+	agent.model = "glm-5.1"
+	agent.workDir = "/tmp/release-agent"
+	platform := &richPreviewPlatform{}
+	engine := core.NewEngine("release-rich-card", agent, []core.Platform{platform}, t.TempDir()+"/sessions.json", core.LangEnglish)
+	engine.SetReplyFooterEnabled(true)
+	engine.SetDisplayConfig(core.DisplayCfg{
+		Mode:             "full",
+		CardMode:         "rich",
+		ThinkingMessages: true,
+		ToolMessages:     true,
+		ThinkingMaxLen:   300,
+		ToolMaxLen:       500,
+	})
+	t.Cleanup(func() {
+		engine.Stop()
+		_ = agent.Stop()
+	})
+	agent.session.blockFirstResult()
+
+	msg := turnMessage("rich card tool turn")
+	go engine.ReceiveMessage(platform, msg)
+	agent.session.waitRecords(t, 1)
+
+	agent.session.emit(core.Event{Type: core.EventThinking, Content: "rich thinking"})
+	agent.session.emit(core.Event{Type: core.EventToolUse, ToolName: "Bash", ToolInput: "echo rich"})
+	agent.session.emit(core.Event{Type: core.EventToolResult, ToolName: "Bash", ToolResult: "rich output", ToolStatus: "completed"})
+	agent.session.releaseFirstResult(core.Event{Type: core.EventResult, Content: "rich final", InputTokens: 28000, Done: true})
+	platform.waitPreviewUpdates(t, 3)
+
+	texts, starts, updates, deletes := platform.snapshotPreviewLifecycle()
+	if len(texts) != 0 || len(starts) != 1 || len(updates) == 0 || len(deletes) != 0 {
+		t.Fatalf("rich lifecycle = texts:%#v starts:%#v updates:%#v deletes:%#v, want one editable rich card", texts, starts, updates, deletes)
+	}
+	final := updates[len(updates)-1]
+	for _, want := range []string{"status=done", "step=Bash", "rich output", "markdown=rich final", "[ctx: ~14%] · glm-5.1"} {
+		if !strings.Contains(final, want) {
+			t.Fatalf("final rich card = %q, want contains %q", final, want)
+		}
+	}
+}
+
 type previewLifecyclePlatform struct {
 	turnPlatform
 
@@ -635,6 +955,37 @@ func (p *previewLifecyclePlatform) snapshotPreviewLifecycle() (texts []string, s
 		append([]string(nil), p.previewStarts...),
 		append([]string(nil), p.previewUpdates...),
 		append([]any(nil), p.previewDeletes...)
+}
+
+type richPreviewPlatform struct {
+	previewLifecyclePlatform
+}
+
+func (p *richPreviewPlatform) BuildRichCard(status core.CardStatus, title string, steps []core.ToolStep, markdown string, streaming bool, elapsed time.Duration) string {
+	var b strings.Builder
+	b.WriteString("status=")
+	b.WriteString(string(status))
+	if streaming {
+		b.WriteString(" streaming=true")
+	}
+	b.WriteString("\n")
+	for _, step := range steps {
+		b.WriteString("step=")
+		b.WriteString(step.Name)
+		b.WriteString(" summary=")
+		b.WriteString(step.Summary)
+		if step.Result != "" {
+			b.WriteString(" result=")
+			b.WriteString(step.Result)
+		}
+		b.WriteString("\n")
+	}
+	if markdown != "" {
+		b.WriteString("markdown=")
+		b.WriteString(markdown)
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 func assertStableSideChannelOnly(t *testing.T, platform *turnPlatform, sideText string) {
