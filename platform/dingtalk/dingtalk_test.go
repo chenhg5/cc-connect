@@ -1,16 +1,297 @@
 package dingtalk
 
 import (
+	"context"
 	"encoding/json"
+	"io"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/chenhg5/cc-connect/core"
 )
 
 // ──────────────────────────────────────────────────────────────
 // Thread safety tests for token caching
 // ──────────────────────────────────────────────────────────────
+
+type dingtalkEmotionRequest struct {
+	method string
+	path   string
+	token  string
+	body   map[string]any
+}
+
+type rewriteDingTalkTransport struct {
+	target *url.URL
+	base   http.RoundTripper
+}
+
+func (rt rewriteDingTalkTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	clone := req.Clone(req.Context())
+	clone.URL.Scheme = rt.target.Scheme
+	clone.URL.Host = rt.target.Host
+	clone.Host = rt.target.Host
+	return rt.base.RoundTrip(clone)
+}
+
+type failRoundTripper struct {
+	t *testing.T
+}
+
+func (rt failRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	rt.t.Fatalf("unexpected HTTP call to %s", req.URL.String())
+	return nil, nil
+}
+
+func newEmotionTestPlatform(t *testing.T, reactionEmoji, doneEmoji string) (*Platform, <-chan dingtalkEmotionRequest) {
+	t.Helper()
+
+	requests := make(chan dingtalkEmotionRequest, 10)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		var body map[string]any
+		if err := json.Unmarshal(bodyBytes, &body); err != nil {
+			t.Errorf("decode request body: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		requests <- dingtalkEmotionRequest{
+			method: r.Method,
+			path:   r.URL.Path,
+			token:  r.Header.Get("x-acs-dingtalk-access-token"),
+			body:   body,
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+
+	targetURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse test server URL: %v", err)
+	}
+
+	return &Platform{
+		clientID:      "test_client",
+		clientSecret:  "test_secret",
+		robotCode:     "test_robot",
+		httpClient:    &http.Client{Transport: rewriteDingTalkTransport{target: targetURL, base: http.DefaultTransport}},
+		accessToken:   "test_token",
+		tokenExpiry:   time.Now().Add(time.Hour),
+		reactionEmoji: reactionEmoji,
+		doneEmoji:     doneEmoji,
+	}, requests
+}
+
+func waitEmotionRequest(t *testing.T, requests <-chan dingtalkEmotionRequest) dingtalkEmotionRequest {
+	t.Helper()
+	select {
+	case req := <-requests:
+		return req
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for emotion request")
+		return dingtalkEmotionRequest{}
+	}
+}
+
+func assertEmotionRequest(t *testing.T, req dingtalkEmotionRequest, path, emoji string) {
+	t.Helper()
+	if req.method != http.MethodPost {
+		t.Fatalf("method = %q, want %q", req.method, http.MethodPost)
+	}
+	if req.path != path {
+		t.Fatalf("path = %q, want %q", req.path, path)
+	}
+	if req.token != "test_token" {
+		t.Fatalf("access token header = %q, want test_token", req.token)
+	}
+	if req.body["robotCode"] != "test_robot" {
+		t.Fatalf("robotCode = %v, want test_robot", req.body["robotCode"])
+	}
+	if req.body["openMsgId"] != "msg_123" {
+		t.Fatalf("openMsgId = %v, want msg_123", req.body["openMsgId"])
+	}
+	if req.body["openConversationId"] != "conv_123" {
+		t.Fatalf("openConversationId = %v, want conv_123", req.body["openConversationId"])
+	}
+	if req.body["emotionName"] != emoji {
+		t.Fatalf("emotionName = %v, want %q", req.body["emotionName"], emoji)
+	}
+	if req.body["emotionType"] != float64(2) {
+		t.Fatalf("emotionType = %v, want 2", req.body["emotionType"])
+	}
+	textEmotion, ok := req.body["textEmotion"].(map[string]any)
+	if !ok {
+		t.Fatalf("textEmotion should be an object, got %T", req.body["textEmotion"])
+	}
+	if textEmotion["emotionId"] != "2659900" {
+		t.Fatalf("textEmotion.emotionId = %v, want 2659900", textEmotion["emotionId"])
+	}
+	if textEmotion["backgroundId"] != "im_bg_1" {
+		t.Fatalf("textEmotion.backgroundId = %v, want im_bg_1", textEmotion["backgroundId"])
+	}
+	if textEmotion["emotionName"] != emoji || textEmotion["text"] != emoji {
+		t.Fatalf("textEmotion emoji fields = %#v, want %q", textEmotion, emoji)
+	}
+}
+
+func validEmotionReplyContext() replyContext {
+	return replyContext{
+		sessionWebhook: "https://example.test/webhook",
+		conversationId: "conv_123",
+		senderStaffId:  "staff_123",
+		messageId:      "msg_123",
+	}
+}
+
+func TestNewReactionOptions(t *testing.T) {
+	baseOpts := map[string]any{
+		"client_id":     "test_client",
+		"client_secret": "test_secret",
+		"robot_code":    "test_robot",
+	}
+
+	t.Run("reaction enabled by default", func(t *testing.T) {
+		p, err := New(baseOpts)
+		if err != nil {
+			t.Fatalf("New returned error: %v", err)
+		}
+		got := p.(*Platform)
+		if got.reactionEmoji != "🤔思考中" {
+			t.Fatalf("reactionEmoji = %q, want default value", got.reactionEmoji)
+		}
+		if got.doneEmoji != "" {
+			t.Fatalf("doneEmoji = %q, want empty", got.doneEmoji)
+		}
+	})
+
+	t.Run("configured", func(t *testing.T) {
+		opts := map[string]any{
+			"client_id":      "test_client",
+			"client_secret":  "test_secret",
+			"robot_code":     "test_robot",
+			"reaction_emoji": "🤔思考中",
+			"done_emoji":     "✅完成",
+		}
+		p, err := New(opts)
+		if err != nil {
+			t.Fatalf("New returned error: %v", err)
+		}
+		got := p.(*Platform)
+		if got.reactionEmoji != "🤔思考中" {
+			t.Fatalf("reactionEmoji = %q, want configured value", got.reactionEmoji)
+		}
+		if got.doneEmoji != "✅完成" {
+			t.Fatalf("doneEmoji = %q, want configured value", got.doneEmoji)
+		}
+	})
+
+	t.Run("none disables", func(t *testing.T) {
+		opts := map[string]any{
+			"client_id":      "test_client",
+			"client_secret":  "test_secret",
+			"robot_code":     "test_robot",
+			"reaction_emoji": "none",
+			"done_emoji":     "NONE",
+		}
+		p, err := New(opts)
+		if err != nil {
+			t.Fatalf("New returned error: %v", err)
+		}
+		got := p.(*Platform)
+		if got.reactionEmoji != "" {
+			t.Fatalf("reactionEmoji = %q, want empty", got.reactionEmoji)
+		}
+		if got.doneEmoji != "" {
+			t.Fatalf("doneEmoji = %q, want empty", got.doneEmoji)
+		}
+	})
+}
+
+func TestStartTypingDisabledDoesNotCallHTTP(t *testing.T) {
+	p := &Platform{
+		httpClient:  &http.Client{Transport: failRoundTripper{t: t}},
+		accessToken: "test_token",
+		tokenExpiry: time.Now().Add(time.Hour),
+	}
+
+	stop := p.StartTyping(context.Background(), validEmotionReplyContext())
+	stop()
+}
+
+func TestStartTypingSendsAndRecallsEmotion(t *testing.T) {
+	p, requests := newEmotionTestPlatform(t, "🤔思考中", "")
+
+	stop := p.StartTyping(context.Background(), validEmotionReplyContext())
+	assertEmotionRequest(t, waitEmotionRequest(t, requests), "/v1.0/robot/emotion/reply", "🤔思考中")
+
+	stop()
+	assertEmotionRequest(t, waitEmotionRequest(t, requests), "/v1.0/robot/emotion/recall", "🤔思考中")
+}
+
+func TestAddDoneReactionSendsEmotionWhenConfigured(t *testing.T) {
+	p, requests := newEmotionTestPlatform(t, "", "✅完成")
+
+	p.AddDoneReaction(validEmotionReplyContext())
+	assertEmotionRequest(t, waitEmotionRequest(t, requests), "/v1.0/robot/emotion/reply", "✅完成")
+}
+
+func TestAddDoneReactionDisabledDoesNotCallHTTP(t *testing.T) {
+	p := &Platform{
+		httpClient:  &http.Client{Transport: failRoundTripper{t: t}},
+		accessToken: "test_token",
+		tokenExpiry: time.Now().Add(time.Hour),
+	}
+
+	p.AddDoneReaction(validEmotionReplyContext())
+}
+
+func TestReactionInvalidReplyContextDoesNotCallHTTP(t *testing.T) {
+	p := &Platform{
+		httpClient:    &http.Client{Transport: failRoundTripper{t: t}},
+		accessToken:   "test_token",
+		tokenExpiry:   time.Now().Add(time.Hour),
+		reactionEmoji: "🤔思考中",
+		doneEmoji:     "✅完成",
+	}
+
+	stop := p.StartTyping(context.Background(), "not a reply context")
+	stop()
+	p.AddDoneReaction("not a reply context")
+}
+
+func TestReactionMissingMessageOrConversationDoesNotCallHTTP(t *testing.T) {
+	p := &Platform{
+		httpClient:    &http.Client{Transport: failRoundTripper{t: t}},
+		accessToken:   "test_token",
+		tokenExpiry:   time.Now().Add(time.Hour),
+		reactionEmoji: "🤔思考中",
+		doneEmoji:     "✅完成",
+	}
+
+	missingMessageID := validEmotionReplyContext()
+	missingMessageID.messageId = ""
+	stop := p.StartTyping(context.Background(), missingMessageID)
+	stop()
+	p.AddDoneReaction(missingMessageID)
+
+	missingConversationID := validEmotionReplyContext()
+	missingConversationID.conversationId = ""
+	stop = p.StartTyping(context.Background(), missingConversationID)
+	stop()
+	p.AddDoneReaction(missingConversationID)
+}
+
+var _ core.TypingIndicator = (*Platform)(nil)
+var _ core.TypingIndicatorDone = (*Platform)(nil)
 
 func TestGetAccessToken_ConcurrentAccess(t *testing.T) {
 	// This test verifies that concurrent calls to getAccessToken
@@ -56,7 +337,7 @@ func TestGetAccessToken_ConcurrentAccess(t *testing.T) {
 func TestGetAccessToken_MutexExists(t *testing.T) {
 	// Verify that the tokenMu mutex field exists and works
 	p := &Platform{
-		clientID:    "test_client",
+		clientID:     "test_client",
 		clientSecret: "test_secret",
 	}
 

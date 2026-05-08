@@ -74,6 +74,10 @@ type = "dingtalk"
 [projects.platforms.options]
 client_id = "dingxxxxxxxxxxxxxxx"
 client_secret = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+# 可选：原生钉钉表情反馈
+reaction_emoji = "🤔思考中"
+done_emoji = "✅完成"
 ```
 
 ---
@@ -253,6 +257,27 @@ cc-connect: ✅ 这是一个 Node.js 项目，包含以下目录...
 | 配置复杂度 | 简单 | 较复杂 |
 | 连接方式 | WebSocket | HTTP 回调 |
 | 适用场景 | 本地开发、内网 | 生产环境 |
+
+---
+
+## 原生表情反馈（可选）
+
+钉钉平台支持可选的原生表情反馈：
+
+- `reaction_emoji`：cc-connect 开始处理收到的消息时，给原消息添加一个钉钉原生表情。默认值为 `"🤔思考中"`，设置为 `"none"` 可关闭。
+- `done_emoji`：处理完成后可添加一个完成表情。默认关闭，设置为空或 `"none"` 表示关闭。
+
+示例：
+
+```toml
+[projects.platforms.options]
+client_id = "dingxxxxxxxxxxxxxxx"
+client_secret = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+reaction_emoji = "🤔思考中"
+done_emoji = "✅完成"
+```
+
+该功能使用钉钉机器人 emotion 接口，需要应用具备对应 API 权限。若钉钉拒绝某个表情文本，或接口调用失败，cc-connect 只会记录调试日志并继续正常回复，不会中断本轮对话。
 
 ---
 

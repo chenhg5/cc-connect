@@ -27,11 +27,12 @@ func init() {
 }
 
 type replyContext struct {
-	sessionWebhook  string
-	conversationId  string
-	senderStaffId   string
-	isGroup         bool
-	proactive       bool // true when constructed by ReconstructReplyCtx (no sessionWebhook)
+	sessionWebhook string
+	conversationId string
+	senderStaffId  string
+	messageId      string
+	isGroup        bool
+	proactive      bool // true when constructed by ReconstructReplyCtx (no sessionWebhook)
 }
 
 // richTextContent mirrors the full structure of the DingTalk "text" JSON field,
@@ -60,7 +61,7 @@ type Platform struct {
 	clientID              string
 	clientSecret          string
 	robotCode             string
-	agentID               int64    // Agent ID for work notifications API (numeric)
+	agentID               int64 // Agent ID for work notifications API (numeric)
 	allowFrom             string
 	shareSessionInChannel bool
 	streamClient          *dingtalkClient.StreamClient
@@ -71,6 +72,8 @@ type Platform struct {
 	tokenMu               sync.Mutex
 	accessToken           string
 	tokenExpiry           time.Time
+	reactionEmoji         string
+	doneEmoji             string
 	// AI Card configuration
 	cardTemplateID  string
 	cardTemplateKey string
@@ -86,6 +89,11 @@ func New(opts map[string]any) (core.Platform, error) {
 	allowFrom, _ := opts["allow_from"].(string)
 	core.CheckAllowFrom("dingtalk", allowFrom)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
+	reactionEmoji, _ := opts["reaction_emoji"].(string)
+	if reactionEmoji == "" {
+		reactionEmoji = "🤔思考中"
+	}
+	doneEmoji, _ := opts["done_emoji"].(string)
 	if clientID == "" || clientSecret == "" {
 		return nil, fmt.Errorf("dingtalk: client_id and client_secret are required")
 	}
@@ -132,6 +140,8 @@ func New(opts map[string]any) (core.Platform, error) {
 		allowFrom:             allowFrom,
 		shareSessionInChannel: shareSessionInChannel,
 		httpClient:            &http.Client{Timeout: 30 * time.Second},
+		reactionEmoji:         normalizeDingTalkReactionEmoji(reactionEmoji),
+		doneEmoji:             normalizeDingTalkReactionEmoji(doneEmoji),
 		cardTemplateID:        cardTemplateID,
 		cardTemplateKey:       cardTemplateKey,
 		cardThrottleMs:        cardThrottleMs,
@@ -139,6 +149,14 @@ func New(opts map[string]any) (core.Platform, error) {
 }
 
 func (p *Platform) Name() string { return "dingtalk" }
+
+func normalizeDingTalkReactionEmoji(v string) string {
+	v = strings.TrimSpace(v)
+	if strings.EqualFold(v, "none") {
+		return ""
+	}
+	return v
+}
 
 func (p *Platform) Start(handler core.MessageHandler) error {
 	p.handler = handler
@@ -270,6 +288,8 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel, richText *richT
 				sessionWebhook: data.SessionWebhook,
 				conversationId: data.ConversationId,
 				senderStaffId:  data.SenderStaffId,
+				messageId:      data.MsgId,
+				isGroup:        data.ConversationType == "2",
 			},
 		}
 		p.handler(p, msg)
@@ -300,10 +320,11 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel, richText *richT
 		MessageID:  data.MsgId,
 		ChannelKey: data.ConversationId,
 		ReplyCtx: replyContext{
-			sessionWebhook:  data.SessionWebhook,
-			conversationId:  data.ConversationId,
-			senderStaffId:   data.SenderStaffId,
-			isGroup:         data.ConversationType == "2",
+			sessionWebhook: data.SessionWebhook,
+			conversationId: data.ConversationId,
+			senderStaffId:  data.SenderStaffId,
+			messageId:      data.MsgId,
+			isGroup:        data.ConversationType == "2",
 		},
 	}
 
@@ -368,12 +389,13 @@ func (p *Platform) handleAudioMessage(data *chatbot.BotCallbackDataModel, sessio
 				MessageID:  data.MsgId,
 				ChannelKey: data.ConversationId,
 				ReplyCtx: replyContext{
-					sessionWebhook:  data.SessionWebhook,
-					conversationId:  data.ConversationId,
-					senderStaffId:   data.SenderStaffId,
-					isGroup:         data.ConversationType == "2",
+					sessionWebhook: data.SessionWebhook,
+					conversationId: data.ConversationId,
+					senderStaffId:  data.SenderStaffId,
+					messageId:      data.MsgId,
+					isGroup:        data.ConversationType == "2",
 				},
-				FromVoice:  true,
+				FromVoice: true,
 			}
 			p.handler(p, msg)
 		}
@@ -392,12 +414,13 @@ func (p *Platform) handleAudioMessage(data *chatbot.BotCallbackDataModel, sessio
 		MessageID:  data.MsgId,
 		ChannelKey: data.ConversationId,
 		ReplyCtx: replyContext{
-			sessionWebhook:  data.SessionWebhook,
-			conversationId:  data.ConversationId,
-			senderStaffId:   data.SenderStaffId,
-			isGroup:         data.ConversationType == "2",
+			sessionWebhook: data.SessionWebhook,
+			conversationId: data.ConversationId,
+			senderStaffId:  data.SenderStaffId,
+			messageId:      data.MsgId,
+			isGroup:        data.ConversationType == "2",
 		},
-		FromVoice:  true,
+		FromVoice: true,
 		Audio: &core.AudioAttachment{
 			MimeType: mimeType,
 			Data:     audioBytes,
@@ -468,9 +491,11 @@ func (p *Platform) handleImageMessage(data *chatbot.BotCallbackDataModel, sessio
 		UserName:   data.SenderNick,
 		MessageID:  data.MsgId,
 		ReplyCtx: replyContext{
-			sessionWebhook:  data.SessionWebhook,
-			conversationId:  data.ConversationId,
-			senderStaffId:   data.SenderStaffId,
+			sessionWebhook: data.SessionWebhook,
+			conversationId: data.ConversationId,
+			senderStaffId:  data.SenderStaffId,
+			messageId:      data.MsgId,
+			isGroup:        data.ConversationType == "2",
 		},
 		Images: []core.ImageAttachment{{
 			MimeType: mimeType,
@@ -625,6 +650,112 @@ func (p *Platform) getAccessToken() (string, error) {
 
 	slog.Debug("dingtalk: access token refreshed", "expires_at", p.tokenExpiry)
 	return p.accessToken, nil
+}
+
+const (
+	dingTalkEmotionReplyEndpoint  = "https://api.dingtalk.com/v1.0/robot/emotion/reply"
+	dingTalkEmotionRecallEndpoint = "https://api.dingtalk.com/v1.0/robot/emotion/recall"
+	dingTalkEmotionTimeout        = 5 * time.Second
+)
+
+// StartTyping adds a native DingTalk emotion reply to the inbound message and
+// returns a stop function that recalls it when processing completes.
+func (p *Platform) StartTyping(ctx context.Context, rctx any) func() {
+	if p.reactionEmoji == "" {
+		return func() {}
+	}
+	rc, ok := rctx.(replyContext)
+	if !ok || rc.messageId == "" || rc.conversationId == "" {
+		return func() {}
+	}
+	emotionCtx, cancel := context.WithTimeout(ctx, dingTalkEmotionTimeout)
+	p.replyEmotion(emotionCtx, rc, p.reactionEmoji)
+	cancel()
+	return func() {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), dingTalkEmotionTimeout)
+			defer cancel()
+			p.recallEmotion(ctx, rc, p.reactionEmoji)
+		}()
+	}
+}
+
+// AddDoneReaction adds a final native DingTalk emotion reply when configured.
+func (p *Platform) AddDoneReaction(rctx any) {
+	if p.doneEmoji == "" {
+		return
+	}
+	rc, ok := rctx.(replyContext)
+	if !ok || rc.messageId == "" || rc.conversationId == "" {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), dingTalkEmotionTimeout)
+		defer cancel()
+		p.replyEmotion(ctx, rc, p.doneEmoji)
+	}()
+}
+
+func (p *Platform) replyEmotion(ctx context.Context, rc replyContext, emoji string) bool {
+	return p.callEmotionAPI(ctx, dingTalkEmotionReplyEndpoint, rc, emoji)
+}
+
+func (p *Platform) recallEmotion(ctx context.Context, rc replyContext, emoji string) {
+	p.callEmotionAPI(ctx, dingTalkEmotionRecallEndpoint, rc, emoji)
+}
+
+func (p *Platform) callEmotionAPI(ctx context.Context, endpoint string, rc replyContext, emoji string) bool {
+	if rc.messageId == "" || rc.conversationId == "" || emoji == "" {
+		return false
+	}
+
+	token, err := p.getAccessToken()
+	if err != nil {
+		slog.Warn("dingtalk: emotion access token failed", "error", err)
+		return false
+	}
+
+	payload := map[string]any{
+		"robotCode":          p.robotCode,
+		"openMsgId":          rc.messageId,
+		"openConversationId": rc.conversationId,
+		"emotionType":        2,
+		"emotionName":        emoji,
+		"textEmotion": map[string]string{
+			"emotionId":    "2659900",
+			"emotionName":  emoji,
+			"text":         emoji,
+			"backgroundId": "im_bg_1",
+		},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		slog.Warn("dingtalk: marshal emotion request failed", "error", err)
+		return false
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		slog.Warn("dingtalk: create emotion request failed", "error", err)
+		return false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-acs-dingtalk-access-token", token)
+
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		slog.Warn("dingtalk: emotion request failed", "endpoint", endpoint, "error", err)
+		return false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		slog.Warn("dingtalk: emotion request returned status", "endpoint", endpoint, "status", resp.StatusCode, "body", string(respBody))
+		return false
+	}
+
+	return true
 }
 
 func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
@@ -984,8 +1115,8 @@ func (p *Platform) compressAudioWithFFmpeg(ctx context.Context, audio []byte, fo
 	args := []string{
 		"-i", "pipe:0",
 		"-ar", "16000", // 16kHz sample rate for voice
-		"-ac", "1",     // mono
-		"-b:a", "64k",  // 64 kbps bitrate (voice quality)
+		"-ac", "1", // mono
+		"-b:a", "64k", // 64 kbps bitrate (voice quality)
 		"-f", "mp3",
 		"-y",
 		"pipe:1",
