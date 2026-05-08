@@ -960,8 +960,8 @@ app_secret = "your-feishu-app-secret"
 # client_secret = "your-dingtalk-client-secret"
 # allow_from = "*"  # Allowed staff IDs / 允许的员工 ID
 # share_session_in_channel = false  # If true, all users in a group share one agent session / 群聊共享会话
-# reaction_emoji = "🤔思考中"  # Native DingTalk emotion while processing (default: "🤔思考中"); set to "none" to disable
-# done_emoji = "✅完成"        # Optional native DingTalk emotion when the agent finishes (default: "none")
+# reaction_emoji = "🤔思考中"  # Native DingTalk emotion on incoming messages (default: "🤔思考中"); set to "none" to disable
+# done_emoji = "none"          # Native DingTalk emotion when agent finishes a reply (e.g. "✅完成"); set to "none" to disable
 
 # Telegram (uncomment to enable / 取消注释以启用)
 # 1. Message @BotFather on Telegram, send /newbot to create a bot

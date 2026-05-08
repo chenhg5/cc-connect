@@ -77,7 +77,7 @@ client_secret = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
 # 可选：原生钉钉表情反馈
 reaction_emoji = "🤔思考中"
-done_emoji = "✅完成"
+done_emoji = "none"
 ```
 
 ---
@@ -274,10 +274,12 @@ cc-connect: ✅ 这是一个 Node.js 项目，包含以下目录...
 client_id = "dingxxxxxxxxxxxxxxx"
 client_secret = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 reaction_emoji = "🤔思考中"
-done_emoji = "✅完成"
+done_emoji = "none"
 ```
 
-该功能使用钉钉机器人 emotion 接口，需要应用具备对应 API 权限。若钉钉拒绝某个表情文本，或接口调用失败，cc-connect 只会记录调试日志并继续正常回复，不会中断本轮对话。
+如需处理完成时也添加表情，可将 `done_emoji` 设置为钉钉兼容的文本表情，例如 `"✅完成"`。
+
+该功能使用钉钉机器人 emotion 接口，需要应用具备对应 API 权限。若钉钉拒绝某个表情文本，或接口调用失败，cc-connect 只会记录日志并继续正常回复，不会中断本轮对话。
 
 ---
 
