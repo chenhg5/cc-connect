@@ -186,7 +186,7 @@ type RelayResponse struct {
 
 // Send delivers a message from one bot to another and returns the response.
 func (rm *RelayManager) Send(ctx context.Context, req RelayRequest) (*RelayResponse, error) {
-	platform, chatID, err := parseSessionKeyParts(req.SessionKey)
+	platform, chatID, fullChatID, err := parseSessionKeyParts(req.SessionKey)
 	if err != nil {
 		return nil, fmt.Errorf("relay: invalid session key: %w", err)
 	}
@@ -233,7 +233,7 @@ func (rm *RelayManager) Send(ctx context.Context, req RelayRequest) (*RelayRespo
 	relayCtx, cancel := rm.relayContext(ctx)
 	defer cancel()
 
-	response, err := targetEngine.HandleRelay(relayCtx, req.From, chatID, req.Message)
+	response, err := targetEngine.HandleRelay(relayCtx, req.From, fullChatID, req.Message)
 	if err != nil {
 		return nil, fmt.Errorf("relay: %w", err)
 	}
@@ -287,18 +287,34 @@ func (rm *RelayManager) relayContext(ctx context.Context) (context.Context, cont
 	return context.WithTimeout(ctx, timeout)
 }
 
-func parseSessionKeyParts(sessionKey string) (platform, chatID string, err error) {
-	// Format: "platform:chatID:userID"
-	// Relay session format: "relay:sourceProject:chatID"
+// parseSessionKeyParts splits a session key into its components.
+//
+// Format: "platform:chatID[:suffix]" where suffix may be userID, threadID,
+// or "root:threadID" (Feishu thread_isolation).
+//
+// Returns:
+//   - platform: the first segment (e.g., "feishu", "telegram", "relay")
+//   - chatID:   the second segment only — used for binding lookups (chat-level)
+//   - fullChatID: chatID + ":" + suffix when a suffix exists; otherwise equals chatID.
+//     Used for relay session construction so that relay sessions match the
+//     isolation boundary of reply sessions (per-user or per-thread).
+func parseSessionKeyParts(sessionKey string) (platform, chatID, fullChatID string, err error) {
 	parts := strings.SplitN(sessionKey, ":", 3)
 	if len(parts) < 2 {
-		return "", "", fmt.Errorf("invalid session key format: %q", sessionKey)
+		return "", "", "", fmt.Errorf("invalid session key format: %q", sessionKey)
 	}
+	// Relay session format: "relay:sourceProject:chatID" — suffix not applicable.
 	if parts[0] == "relay" && len(parts) == 3 {
 		// For relay sessions, chatID is the third part: "relay:sourceProject:chatID"
-		return parts[0], parts[2], nil
+		return parts[0], parts[2], parts[2], nil
 	}
-	return parts[0], parts[1], nil
+	platform = parts[0]
+	chatID = parts[1]
+	fullChatID = parts[1]
+	if len(parts) == 3 && parts[2] != "" {
+		fullChatID = parts[1] + ":" + parts[2]
+	}
+	return platform, chatID, fullChatID, nil
 }
 
 // ── Persistence ─────────────────────────────────────────────

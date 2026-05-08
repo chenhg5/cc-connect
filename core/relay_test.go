@@ -8,6 +8,108 @@ import (
 	"time"
 )
 
+func TestParseSessionKeyParts(t *testing.T) {
+	tests := []struct {
+		name             string
+		sessionKey       string
+		wantPlatform     string
+		wantChatID       string
+		wantFullChatID   string
+		wantErr          bool
+	}{
+		{
+			name:           "feishu thread isolation",
+			sessionKey:     "feishu:oc_abc:root:om_xyz",
+			wantPlatform:   "feishu",
+			wantChatID:     "oc_abc",
+			wantFullChatID: "oc_abc:root:om_xyz",
+		},
+		{
+			name:           "feishu share_session_in_channel",
+			sessionKey:     "feishu:oc_abc",
+			wantPlatform:   "feishu",
+			wantChatID:     "oc_abc",
+			wantFullChatID: "oc_abc",
+		},
+		{
+			name:           "telegram shared channel with topic",
+			sessionKey:     "telegram:123:456",
+			wantPlatform:   "telegram",
+			wantChatID:     "123",
+			wantFullChatID: "123:456",
+		},
+		{
+			name:           "telegram per-user with topic",
+			sessionKey:     "telegram:123:456:789",
+			wantPlatform:   "telegram",
+			wantChatID:     "123",
+			wantFullChatID: "123:456:789",
+		},
+		{
+			name:           "telegram shared channel no topic",
+			sessionKey:     "telegram:123",
+			wantPlatform:   "telegram",
+			wantChatID:     "123",
+			wantFullChatID: "123",
+		},
+		{
+			name:           "discord per-user",
+			sessionKey:     "discord:CHAN:USER",
+			wantPlatform:   "discord",
+			wantChatID:     "CHAN",
+			wantFullChatID: "CHAN:USER",
+		},
+		{
+			name:           "discord shared channel",
+			sessionKey:     "discord:CHAN",
+			wantPlatform:   "discord",
+			wantChatID:     "CHAN",
+			wantFullChatID: "CHAN",
+		},
+		{
+			name:           "relay session key",
+			sessionKey:     "relay:source:chatID",
+			wantPlatform:   "relay",
+			wantChatID:     "chatID",
+			wantFullChatID: "chatID",
+		},
+		{
+			name:        "invalid format",
+			sessionKey:  "invalid",
+			wantErr:     true,
+		},
+		{
+			name:        "empty string",
+			sessionKey:  "",
+			wantErr:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			platform, chatID, fullChatID, err := parseSessionKeyParts(tt.sessionKey)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if platform != tt.wantPlatform {
+				t.Fatalf("platform = %q, want %q", platform, tt.wantPlatform)
+			}
+			if chatID != tt.wantChatID {
+				t.Fatalf("chatID = %q, want %q", chatID, tt.wantChatID)
+			}
+			if fullChatID != tt.wantFullChatID {
+				t.Fatalf("fullChatID = %q, want %q", fullChatID, tt.wantFullChatID)
+			}
+		})
+	}
+}
+
 func TestRelayManager_DefaultTimeout(t *testing.T) {
 	rm := NewRelayManager("")
 
