@@ -550,9 +550,13 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 
 	content = preprocessDingTalkMarkdown(content)
 
+	title := content
+	if len(title) > 10 {
+		title = title[:10]
+	}
 	payload := map[string]any{
 		"msgtype":  "markdown",
-		"markdown": map[string]string{"title": "reply", "text": content},
+		"markdown": map[string]string{"title": title, "text": content},
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
