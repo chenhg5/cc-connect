@@ -65,7 +65,7 @@ endif
 _BUILD_TAGS := $(strip $(_EXCLUDE_TAGS))
 _TAGS_FLAG  := $(if $(_BUILD_TAGS),-tags '$(_BUILD_TAGS)',)
 
-.PHONY: build run clean test test-fast test-full test-smoke test-e2e test-release test-performance pre-test lint release release-all web
+.PHONY: build run clean test test-fast test-full test-smoke test-e2e test-release test-release-local test-performance pre-test lint release release-all web
 
 web:
 	@if [ ! -d web/node_modules ]; then cd web && npm install; fi
@@ -128,6 +128,14 @@ test-release: pre-test
 	go test -parallel=4 -tags=smoke ./tests/e2e/...
 	go test -parallel=2 -tags=regression ./tests/e2e/...
 	go test -bench=. -benchmem -tags=performance ./tests/performance/...
+
+# Release-local gate: deterministic release checks that do not require real IM
+# credentials, real provider accounts, or supervisor-managed services.
+test-release-local:
+	go test ./tests/release_local/...
+	go test ./config
+	go test ./core -run 'TestEngineSendToSessionWithAttachments|TestCmdList_AllSessionsVisibleAfterRepeatedNew|TestCmdList_SessionVisibleDuringAgentProcessing|TestEngine_Alias|TestEngine_BannedWords|TestEngine_DisabledCommands'
+	go test ./platform/feishu -run 'TestUserIDFromEventFallsBackToUserID|TestResolveUserNameSkipsInvalidLookupID|TestNew_CanDisableInteractiveCards'
 
 # Legacy: runs unit tests only
 test:
