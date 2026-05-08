@@ -120,6 +120,76 @@ func TestReleaseConfig_DefaultsKeepAttachmentsAndFullDisplayEnabled(t *testing.T
 	}
 }
 
+func TestReleaseConfig_BehaviorControlSwitchesParseFromLoadedConfig(t *testing.T) {
+	path := writeConfig(t, `
+[stream_preview]
+enabled = false
+disabled_platforms = ["feishu", "telegram"]
+interval_ms = 250
+min_delta_chars = 12
+max_chars = 777
+
+[[projects]]
+name = "release"
+show_context_indicator = false
+reply_footer = false
+disabled_commands = ["restart", "shell"]
+
+[projects.display]
+mode = "quiet"
+card_mode = "rich"
+thinking_messages = false
+tool_messages = false
+
+[projects.agent]
+type = "claudecode"
+work_dir = "/tmp/cc-connect-release-work"
+
+[[projects.platforms]]
+type = "feishu"
+app_id = "cli_release"
+app_secret = "secret"
+`)
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.StreamPreview.Enabled == nil || *cfg.StreamPreview.Enabled {
+		t.Fatalf("stream_preview.enabled = %#v, want false", cfg.StreamPreview.Enabled)
+	}
+	if got := strings.Join(cfg.StreamPreview.DisabledPlatforms, ","); got != "feishu,telegram" {
+		t.Fatalf("stream_preview.disabled_platforms = %#v", cfg.StreamPreview.DisabledPlatforms)
+	}
+	if cfg.StreamPreview.IntervalMs == nil || *cfg.StreamPreview.IntervalMs != 250 {
+		t.Fatalf("stream_preview.interval_ms = %#v, want 250", cfg.StreamPreview.IntervalMs)
+	}
+	if cfg.StreamPreview.MinDeltaChars == nil || *cfg.StreamPreview.MinDeltaChars != 12 {
+		t.Fatalf("stream_preview.min_delta_chars = %#v, want 12", cfg.StreamPreview.MinDeltaChars)
+	}
+	if cfg.StreamPreview.MaxChars == nil || *cfg.StreamPreview.MaxChars != 777 {
+		t.Fatalf("stream_preview.max_chars = %#v, want 777", cfg.StreamPreview.MaxChars)
+	}
+
+	proj := &cfg.Projects[0]
+	if proj.ShowContextIndicator == nil || *proj.ShowContextIndicator {
+		t.Fatalf("show_context_indicator = %#v, want false", proj.ShowContextIndicator)
+	}
+	if proj.ReplyFooter == nil || *proj.ReplyFooter {
+		t.Fatalf("reply_footer = %#v, want false", proj.ReplyFooter)
+	}
+	if strings.Join(proj.DisabledCommands, ",") != "restart,shell" {
+		t.Fatalf("disabled_commands = %#v", proj.DisabledCommands)
+	}
+	mode, thinking, tools, _, _ := config.EffectiveDisplay(cfg, proj)
+	if mode != config.DisplayModeQuiet || thinking || tools {
+		t.Fatalf("display = mode:%s thinking:%v tools:%v, want quiet/false/false", mode, thinking, tools)
+	}
+	if got := config.EffectiveCardMode(cfg, proj); got != "rich" {
+		t.Fatalf("card mode = %q, want rich", got)
+	}
+}
+
 func TestReleaseConfig_InvalidCriticalOptionsFailFast(t *testing.T) {
 	tests := []struct {
 		name    string
