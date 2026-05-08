@@ -1213,13 +1213,16 @@ func TestProcessInteractiveEvents_AppendsReplyFooterTokensWhenEnabled(t *testing
 	agentSession.reasoningEffort = "xhigh"
 	agentSession.workDir = filepath.Join(homeDir, "codes", "cc-connect")
 	agentSession.contextUsage = &ContextUsage{
-		UsedTokens:        181424,
-		BaselineTokens:    12000,
-		TotalTokens:       50821769,
+		UsedTokens:     181424,
+		BaselineTokens: 12000,
+		TotalTokens:    181424,
+		ContextWindow:  258400,
+	}
+	agentSession.turnUsage = &TokenUsage{
+		TotalTokens:       181424,
 		InputTokens:       180805,
 		CachedInputTokens: 139776,
 		OutputTokens:      619,
-		ContextWindow:     258400,
 	}
 	state := &interactiveState{
 		agentSession: agentSession,
@@ -5473,6 +5476,7 @@ type controllableAgentSession struct {
 	workDir         string
 	report          *UsageReport
 	contextUsage    *ContextUsage
+	turnUsage       *TokenUsage
 	usageErr        error
 }
 
@@ -5501,6 +5505,7 @@ func (s *controllableAgentSession) GetUsage(_ context.Context) (*UsageReport, er
 	return s.report, s.usageErr
 }
 func (s *controllableAgentSession) GetContextUsage() *ContextUsage { return s.contextUsage }
+func (s *controllableAgentSession) GetTurnUsage() *TokenUsage      { return s.turnUsage }
 func (s *controllableAgentSession) Alive() bool                    { return s.alive }
 func (s *controllableAgentSession) Close() error {
 	s.alive = false

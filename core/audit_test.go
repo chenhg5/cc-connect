@@ -276,6 +276,13 @@ func TestProcessInteractiveEventsAuditsAgentResultAndPreviewFinalize(t *testing.
 	session := e.sessions.GetOrCreateActive(sessionKey)
 	agentSession := newControllableSession("preview-agent-session")
 	agentSession.contextUsage = &ContextUsage{
+		UsedTokens:     181424,
+		BaselineTokens: 12000,
+		TotalTokens:    181424,
+		ContextWindow:  258400,
+	}
+	agentSession.turnUsage = &TokenUsage{
+		TotalTokens:       181424,
 		InputTokens:       180805,
 		CachedInputTokens: 139776,
 		OutputTokens:      619,

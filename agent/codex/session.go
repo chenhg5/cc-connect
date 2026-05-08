@@ -53,6 +53,9 @@ type codexSession struct {
 
 	contextMu    sync.RWMutex
 	contextUsage *core.ContextUsage
+	turnUsage    *core.TokenUsage
+	totalUsage   *core.TokenUsage
+	turnBaseline *core.TokenUsage
 	sessionFile  string
 }
 
@@ -320,6 +323,9 @@ func (cs *codexSession) handleEvent(raw map[string]any) {
 			cs.contextMu.Lock()
 			cs.sessionFile = ""
 			cs.contextUsage = nil
+			cs.turnUsage = nil
+			cs.totalUsage = nil
+			cs.turnBaseline = nil
 			cs.contextMu.Unlock()
 			slog.Debug("codexSession: thread started", "thread_id", tid)
 		}
@@ -327,6 +333,8 @@ func (cs *codexSession) handleEvent(raw map[string]any) {
 	case "turn.started":
 		cs.pendingMsgs = cs.pendingMsgs[:0]
 		cs.contextMu.Lock()
+		cs.turnBaseline = cloneTokenUsage(cs.totalUsage)
+		cs.turnUsage = nil
 		cs.contextUsage = nil
 		cs.contextMu.Unlock()
 		slog.Debug("codexSession: turn started")
@@ -769,6 +777,12 @@ func (cs *codexSession) GetContextUsage() *core.ContextUsage {
 	return cloneContextUsage(cs.contextUsage)
 }
 
+func (cs *codexSession) GetTurnUsage() *core.TokenUsage {
+	cs.contextMu.RLock()
+	defer cs.contextMu.RUnlock()
+	return cloneTokenUsage(cs.turnUsage)
+}
+
 func (cs *codexSession) runtimeConfig() (string, string) {
 	cs.runtimeCfgMu.Lock()
 	defer cs.runtimeCfgMu.Unlock()
@@ -807,11 +821,16 @@ func (cs *codexSession) refreshContextUsageFromRollout() {
 		cachedPath := cs.sessionFile
 		cs.contextMu.RUnlock()
 
-		usage, path, err := loadContextUsageFromRollout(cs.extraEnv, sessionID, cachedPath)
-		if err == nil && usage != nil {
+		snapshot, path, err := loadUsageSnapshotFromRollout(cs.extraEnv, sessionID, cachedPath)
+		if err == nil && snapshot != nil {
 			cs.contextMu.Lock()
 			cs.sessionFile = path
-			cs.contextUsage = cloneContextUsage(usage)
+			cs.contextUsage = cloneContextUsage(snapshot.Context)
+			cs.turnUsage = cloneTokenUsage(snapshot.Turn)
+			if cs.turnUsage == nil {
+				cs.turnUsage = turnUsageFromCumulativeAndLast(snapshot.Total, snapshot.Last, cs.turnBaseline)
+			}
+			cs.totalUsage = cloneTokenUsage(snapshot.Total)
 			cs.contextMu.Unlock()
 			return
 		}

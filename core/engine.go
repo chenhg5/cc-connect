@@ -4152,8 +4152,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				agentAuditExtra["input_tokens"] = tokenUsage.inputTokens
 				agentAuditExtra["output_tokens"] = tokenUsage.outputTokens
 			}
+			if tokenUsage.hasTotalTokens {
+				agentAuditExtra["total_tokens"] = tokenUsage.totalTokens
+			}
 			if tokenUsage.hasCachedInputTokens {
 				agentAuditExtra["cached_input_tokens"] = tokenUsage.cachedInputTokens
+			}
+			if tokenUsage.hasReasoningOutputTokens {
+				agentAuditExtra["reasoning_output_tokens"] = tokenUsage.reasoningOutputTokens
 			}
 			e.audit(AuditRecord{
 				Kind:             AuditKindAgentResult,
@@ -5651,6 +5657,17 @@ func replyFooterSessionContextUsage(session AgentSession) *ContextUsage {
 	return reporter.GetContextUsage()
 }
 
+func replyFooterSessionTurnUsage(session AgentSession) *TokenUsage {
+	if session == nil {
+		return nil
+	}
+	reporter, ok := session.(TurnUsageReporter)
+	if !ok {
+		return nil
+	}
+	return reporter.GetTurnUsage()
+}
+
 func replyFooterContextText(usage *ContextUsage, i18n *I18n) string {
 	if usage == nil || i18n == nil {
 		return ""
@@ -5700,12 +5717,16 @@ func replyFooterContextText(usage *ContextUsage, i18n *I18n) string {
 }
 
 type replyFooterTokenUsage struct {
-	inputTokens          int
-	outputTokens         int
-	cachedInputTokens    int
-	hasInputTokens       bool
-	hasOutputTokens      bool
-	hasCachedInputTokens bool
+	totalTokens              int
+	inputTokens              int
+	outputTokens             int
+	cachedInputTokens        int
+	reasoningOutputTokens    int
+	hasTotalTokens           bool
+	hasInputTokens           bool
+	hasOutputTokens          bool
+	hasCachedInputTokens     bool
+	hasReasoningOutputTokens bool
 }
 
 func (u replyFooterTokenUsage) hasInputOutput() bool {
@@ -5714,6 +5735,32 @@ func (u replyFooterTokenUsage) hasInputOutput() bool {
 
 func resolveReplyFooterTokenUsage(session AgentSession, event Event) replyFooterTokenUsage {
 	resolved := replyFooterTokenUsage{}
+	if usage := replyFooterSessionTurnUsage(session); usage != nil {
+		if usage.TotalTokens > 0 {
+			resolved.totalTokens = usage.TotalTokens
+			resolved.hasTotalTokens = true
+		}
+		if usage.InputTokens > 0 {
+			resolved.inputTokens = usage.InputTokens
+			resolved.hasInputTokens = true
+		}
+		if usage.OutputTokens > 0 {
+			resolved.outputTokens = usage.OutputTokens
+			resolved.hasOutputTokens = true
+		}
+		if usage.CachedInputTokens > 0 {
+			resolved.cachedInputTokens = usage.CachedInputTokens
+			resolved.hasCachedInputTokens = true
+		}
+		if usage.ReasoningOutputTokens > 0 {
+			resolved.reasoningOutputTokens = usage.ReasoningOutputTokens
+			resolved.hasReasoningOutputTokens = true
+		}
+		if resolved.hasInputOutput() || resolved.hasTotalTokens || resolved.hasCachedInputTokens || resolved.hasReasoningOutputTokens {
+			return resolved
+		}
+	}
+
 	if event.InputTokens > 0 {
 		resolved.inputTokens = event.InputTokens
 		resolved.hasInputTokens = true
@@ -5721,24 +5768,6 @@ func resolveReplyFooterTokenUsage(session AgentSession, event Event) replyFooter
 	if event.OutputTokens > 0 {
 		resolved.outputTokens = event.OutputTokens
 		resolved.hasOutputTokens = true
-	}
-
-	usage := replyFooterSessionContextUsage(session)
-	if usage == nil {
-		return resolved
-	}
-
-	if usage.InputTokens > 0 {
-		resolved.inputTokens = usage.InputTokens
-		resolved.hasInputTokens = true
-	}
-	if usage.OutputTokens > 0 {
-		resolved.outputTokens = usage.OutputTokens
-		resolved.hasOutputTokens = true
-	}
-	if usage.CachedInputTokens > 0 || usage.InputTokens > 0 || usage.OutputTokens > 0 || usage.TotalTokens > 0 || usage.UsedTokens > 0 {
-		resolved.cachedInputTokens = usage.CachedInputTokens
-		resolved.hasCachedInputTokens = true
 	}
 
 	return resolved
