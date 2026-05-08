@@ -4227,6 +4227,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// Strip any agent-self-reported "[ctx: ~XX%]" marker so it does not
 			// leak into the delivered text. The on-screen ctx indicator is now
 			// rendered exclusively in the reply footer.
+			sdkPlausible := event.InputTokens >= 100
+			selfPct := parseSelfReportedCtx(fullResponse)
 			cleanResponse := ctxSelfReportRe.ReplaceAllString(fullResponse, "")
 			cleanResponse = strings.TrimRight(cleanResponse, "\n ")
 			baseResponse := cleanResponse
@@ -4291,13 +4293,23 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// through BuildRichCard, so re-appending the legacy footer here
 			// would double-print model/ctx/workdir into the card body.
 			var statusFooter string
+			var legacyStatusFooter string
 			if !isSilent {
+				footerContext := replyFooterContextText(replyFooterSessionContextUsage(state.agentSession), e.i18n)
+				if e.showContextIndicator {
+					if sdkPlausible {
+						if text := contextIndicatorText(event.InputTokens); text != "" {
+							footerContext = text
+						}
+					} else if selfPct > 0 {
+						footerContext = fmt.Sprintf("[ctx: ~%d%%]", selfPct)
+					}
+				}
 				if status := e.buildClaudeStatusLineFooter(replyAgent, state.agentSession, workspaceDir); status != "" {
 					statusFooter = status
-				} else if !hasRichCard {
-					if footer := e.buildReplyFooter(replyAgent, state.agentSession, workspaceDir, replyFooterContextText(replyFooterSessionContextUsage(state.agentSession), e.i18n)); footer != "" {
-						cleanResponse = appendReplyFooter(cleanResponse, footer)
-					}
+				} else if footer := e.buildReplyFooter(replyAgent, state.agentSession, workspaceDir, footerContext); footer != "" {
+					statusFooter = footer
+					legacyStatusFooter = footer
 				}
 			}
 			fullResponse = cleanResponse
@@ -4382,7 +4394,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if splitter, ok := p.(MarkdownTableSplitter); ok {
 					parts = splitter.SplitMarkdownByTables(fullResponse, 5)
 				}
-				finalCard := richCardSupporter.BuildRichCard(CardStatusDone, "", toolSteps, parts[0], false, e.composeRichStatusFooter(false, turnStart, e.agent, state.agentSession, state.workspaceDir))
+				richStatusFooter := e.composeRichStatusFooter(false, turnStart, e.agent, state.agentSession, state.workspaceDir)
+				if legacyStatusFooter != "" {
+					richStatusFooter = formatElapsed(time.Since(turnStart), false, e.i18n.currentLang()) + "\n" + legacyStatusFooter
+				}
+				finalCard := richCardSupporter.BuildRichCard(CardStatusDone, "", toolSteps, parts[0], false, richStatusFooter)
 				if cardMessageID != nil {
 					// Forced final flush via cardkit-v1 streaming text update before
 					// flipping status to Done via full-card Patch. The throttle in the
@@ -4411,7 +4427,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 				for _, overflow := range parts[1:] {
-					overflowCard := richCardSupporter.BuildRichCard(CardStatusDone, "", nil, overflow, false, e.composeRichStatusFooter(false, turnStart, e.agent, state.agentSession, state.workspaceDir))
+					overflowCard := richCardSupporter.BuildRichCard(CardStatusDone, "", nil, overflow, false, richStatusFooter)
 					if err := p.Send(e.ctx, replyCtx, overflowCard); err != nil {
 						slog.Error("failed to send overflow rich card", "error", err)
 						return
@@ -4432,7 +4448,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			} else if suppressDuplicate {
 				sp.discard()
-				if metaOnly := strings.TrimSpace(strings.TrimPrefix(fullResponse, baseResponse)); metaOnly != "" {
+				metaOnly := strings.TrimSpace(strings.TrimPrefix(fullResponse, baseResponse))
+				if metaOnly != "" || statusFooter != "" {
 					if !sendChunksWithStatusFooter(e.ctx, p, replyCtx, metaOnly, statusFooter, sendWorkspaceWithError) {
 						return
 					}
@@ -5671,6 +5688,12 @@ func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDi
 	var parts []string
 	hasStatus := false
 	if e.showContextIndicator {
+		contextLeft = strings.TrimSpace(contextLeft)
+		contextFirst := strings.HasPrefix(contextLeft, "[ctx:")
+		if contextFirst {
+			parts = append(parts, contextLeft)
+			hasStatus = true
+		}
 		if model := replyFooterModel(session, agent); model != "" {
 			parts = append(parts, model)
 			hasStatus = true
@@ -5679,8 +5702,10 @@ func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDi
 			parts = append(parts, effort)
 			hasStatus = true
 		}
-		if left := strings.TrimSpace(contextLeft); left != "" {
-			parts = append(parts, left)
+		if contextFirst {
+			// Already added before model so "[ctx]" stays on the same footer line.
+		} else if contextLeft != "" {
+			parts = append(parts, contextLeft)
 			hasStatus = true
 		} else if usage := e.replyFooterUsageText(session, agent); usage != "" {
 			parts = append(parts, usage)
@@ -14262,6 +14287,21 @@ func gitClone(repoURL, dest string) error {
 		return fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)
 	}
 	return nil
+}
+
+// ── Context usage indicator ──────────────────────────────────
+
+const modelContextWindow = 200_000 // generic fallback window for heuristic context estimates
+
+func contextIndicatorText(inputTokens int) string {
+	if inputTokens <= 0 {
+		return ""
+	}
+	pct := inputTokens * 100 / modelContextWindow
+	if pct > 100 {
+		pct = 100
+	}
+	return fmt.Sprintf("[ctx: ~%d%%]", pct)
 }
 
 // ctxSelfReportRe matches agent self-reported context lines like "[ctx: ~42%]".
