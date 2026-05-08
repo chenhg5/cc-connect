@@ -403,6 +403,16 @@ func TestEncodeClaudeProjectKey(t *testing.T) {
 			expected: "-Users-username-Library-Mobile-Documents-com-apple-CloudDocs-my-project",
 		},
 		{
+			name:     "macOS username with dot",
+			input:    "/Users/yinglong.li/dev/project",
+			expected: "-Users-yinglong-li-dev-project",
+		},
+		{
+			name:     "directory name with dot",
+			input:    "/Users/username/projects/my.project.v2",
+			expected: "-Users-username-projects-my-project-v2",
+		},
+		{
 			name:     "mixed ASCII and non-ASCII",
 			input:    "/Users/username/中文folder/english文件夹",
 			expected: "-Users-username---folder-english---", // "/中文" = 3 hyphens, "/文件夹" = 4 hyphens
