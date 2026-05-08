@@ -419,6 +419,21 @@ type ContextUsageReporter interface {
 	GetContextUsage() *ContextUsage
 }
 
+// TurnUsageReporter is an optional interface for running agent sessions that
+// can report the final token usage for the current user turn.
+type TurnUsageReporter interface {
+	GetTurnUsage() *TokenUsage
+}
+
+// TokenUsage describes token accounting for one completed turn.
+type TokenUsage struct {
+	TotalTokens           int
+	InputTokens           int
+	CachedInputTokens     int
+	OutputTokens          int
+	ReasoningOutputTokens int
+}
+
 // ContextUsage describes runtime context consumption for the active session.
 type ContextUsage struct {
 	// UsedTokens is the current token load to compare against ContextWindow when

@@ -76,7 +76,9 @@ func TestDispatchMessageDropsRecalledMessageBeforeHandler(t *testing.T) {
 		"feishu:ou_user:ou_user",
 		"",
 		"",
-		replyContext{messageID: "om_drop", sessionKey: "feishu:ou_user:ou_user"},
+		"",
+		"",
+		"",
 		"",
 	)
 
@@ -574,6 +576,38 @@ func TestExtractPostPlainText_CodeBlock(t *testing.T) {
 	want := "see:```go\nfmt.Println()\n```"
 	if got != want {
 		t.Errorf("expected %q, got %q", want, got)
+	}
+}
+
+func TestPreserveInteractiveCardPayload_KeepsRawLinksAndUserDSL(t *testing.T) {
+	content := `{"title":"反馈-ui异常","elements":[[{"tag":"text","text":"诊断附件"},{"tag":"text","text":"\n"},{"tag":"a","href":"https://example.com/preview","text":"日志预览"},{"tag":"text","text":" "},{"tag":"a","href":"https://example.com/appLog.zip","text":"appLog.zip"}]],"user_dsl":"{\"elements\":[{\"content\":\"**诊断附件**\\n[日志预览](https://example.com/preview) [appLog.zip](https://example.com/appLog.zip)\",\"tag\":\"markdown\"}]}"}` //nolint:lll
+
+	got := preserveInteractiveCardPayload(content)
+	if got != content {
+		t.Fatalf("preserveInteractiveCardPayload() changed content\n got: %s\nwant: %s", got, content)
+	}
+	if !strings.Contains(got, `"href":"https://example.com/preview"`) {
+		t.Fatalf("raw href missing from preserved payload: %s", got)
+	}
+	if !strings.Contains(got, `[日志预览](https://example.com/preview)`) {
+		t.Fatalf("user_dsl markdown link missing from preserved payload: %s", got)
+	}
+}
+
+func TestFormatReplyChain_SingleInteractivePayloadPreserved(t *testing.T) {
+	payload := `{"title":"反馈-ui异常","elements":[[{"tag":"a","href":"https://example.com/preview","text":"日志预览"}]]}`
+
+	got := formatReplyChain([]chainMessage{{
+		senderName: "Bot",
+		senderType: "app",
+		text:       payload,
+	}})
+
+	if !strings.Contains(got, payload) {
+		t.Fatalf("quoted reply should contain raw payload, got %s", got)
+	}
+	if strings.Contains(got, "[interactive card]") {
+		t.Fatalf("quoted reply unexpectedly fell back to placeholder: %s", got)
 	}
 }
 

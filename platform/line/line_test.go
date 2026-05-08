@@ -40,7 +40,7 @@ func TestNew_MissingChannelToken(t *testing.T) {
 func TestNew_WithValidCredentials(t *testing.T) {
 	p, err := New(map[string]any{
 		"channel_secret": "test-secret",
-		"channel_token": "test-token",
+		"channel_token":  "test-token",
 	})
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
@@ -56,7 +56,7 @@ func TestNew_WithValidCredentials(t *testing.T) {
 func TestNew_DefaultPort(t *testing.T) {
 	p, err := New(map[string]any{
 		"channel_secret": "test-secret",
-		"channel_token": "test-token",
+		"channel_token":  "test-token",
 	})
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
@@ -73,8 +73,8 @@ func TestNew_DefaultPort(t *testing.T) {
 func TestNew_CustomPortAndPath(t *testing.T) {
 	p, err := New(map[string]any{
 		"channel_secret": "test-secret",
-		"channel_token": "test-token",
-		"port":          "9090",
+		"channel_token":  "test-token",
+		"port":           "9090",
 		"callback_path":  "/webhook",
 	})
 	if err != nil {
@@ -89,11 +89,37 @@ func TestNew_CustomPortAndPath(t *testing.T) {
 	}
 }
 
+func TestInferTargetType(t *testing.T) {
+	tests := map[string]string{
+		"U123": "user",
+		"C123": "group",
+		"R123": "room",
+		"X123": "unknown",
+	}
+	for input, want := range tests {
+		if got := inferTargetType(input); got != want {
+			t.Fatalf("inferTargetType(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestReconstructReplyCtx_TargetType(t *testing.T) {
+	p := &Platform{}
+	rctx, err := p.ReconstructReplyCtx("line:C123")
+	if err != nil {
+		t.Fatalf("ReconstructReplyCtx() error = %v", err)
+	}
+	rc := rctx.(replyContext)
+	if rc.targetID != "C123" || rc.targetType != "group" || rc.sessionKey != "line:C123" {
+		t.Fatalf("replyContext = %#v, want reconstructed group context", rc)
+	}
+}
+
 func TestNew_WithAllowFrom(t *testing.T) {
 	p, err := New(map[string]any{
 		"channel_secret": "test-secret",
-		"channel_token": "test-token",
-		"allow_from":    "user1,user2",
+		"channel_token":  "test-token",
+		"allow_from":     "user1,user2",
 	})
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)

@@ -188,6 +188,7 @@ type Engine struct {
 	configReloadFunc func() (*ConfigReloadResult, error)
 
 	hooks              *HookManager
+	auditor            *Auditor
 	cronScheduler      *CronScheduler
 	heartbeatScheduler *HeartbeatScheduler
 
@@ -227,6 +228,7 @@ type Engine struct {
 	// When true, append [ctx: ~N%] (or model self-report) to assistant replies shown on platforms.
 	showContextIndicator bool
 	replyFooterEnabled   bool
+	replyFooterTokens    bool
 
 	// When true, /list etc. only show sessions tracked by cc-connect,
 	// hiding sessions created by direct CLI usage in the same work_dir.
@@ -513,6 +515,166 @@ func (e *Engine) SetHooks(hm *HookManager) {
 	e.hooks = hm
 }
 
+// SetAuditor configures the project audit logger.
+func (e *Engine) SetAuditor(a *Auditor) {
+	e.auditor = a
+}
+
+func (e *Engine) audit(record AuditRecord) {
+	if e.auditor == nil {
+		return
+	}
+	if record.Project == "" {
+		record.Project = e.name
+	}
+	if record.Agent == "" && e.agent != nil {
+		record.Agent = e.agent.Name()
+	}
+	e.auditor.Record(e.ctx, record)
+}
+
+func (e *Engine) auditReplyMetadata(p Platform, replyCtx any) AuditReplyMetadata {
+	if p == nil {
+		return AuditReplyMetadata{}
+	}
+	if provider, ok := p.(AuditReplyMetadataProvider); ok {
+		meta := provider.AuditReplyMetadata(replyCtx)
+		meta.Extra = CloneAuditExtra(meta.Extra)
+		return meta
+	}
+	return AuditReplyMetadata{}
+}
+
+func (e *Engine) auditOutboundDelivery(kind AuditRecordKind, p Platform, replyCtx any, content, deliveryMethod string, receipt *SendReceipt, err error) {
+	platformName := ""
+	if p != nil {
+		platformName = p.Name()
+	}
+	meta := e.auditReplyMetadata(p, replyCtx)
+	extra := MergeAuditExtra(meta.Extra)
+	if deliveryMethod != "" {
+		if extra == nil {
+			extra = map[string]any{}
+		}
+		extra["delivery_method"] = deliveryMethod
+	}
+	if receipt != nil {
+		extra = MergeAuditExtra(extra, receipt.Extra)
+	}
+
+	record := AuditRecord{
+		Kind:              kind,
+		Platform:          platformName,
+		SessionKey:        meta.SessionKey,
+		UserID:            meta.UserID,
+		UserName:          meta.UserName,
+		ChatName:          meta.ChatName,
+		ChannelKey:        meta.ChannelKey,
+		ThreadID:          firstNonEmpty(meta.ThreadID, receiptThreadID(receipt)),
+		InboundMessageID:  meta.ReplyToMessageID,
+		ParentMessageID:   firstNonEmpty(receiptParentMessageID(receipt), meta.ParentMessageID),
+		RootMessageID:     firstNonEmpty(receiptRootMessageID(receipt), meta.RootMessageID),
+		ReplyToMessageID:  meta.ReplyToMessageID,
+		OutboundMessageID: receiptMessageID(receipt),
+		ContentSent:       content,
+		Extra:             extra,
+	}
+	if err != nil {
+		record.Error = err.Error()
+	}
+	e.audit(record)
+}
+
+func (e *Engine) auditToolEvent(kind AuditRecordKind, p Platform, replyCtx any, sessionKey, msgID string, event Event, toolEventIndex, toolCount int, visible bool) {
+	platformName := ""
+	if p != nil {
+		platformName = p.Name()
+	}
+	meta := e.auditReplyMetadata(p, replyCtx)
+
+	extra := MergeAuditExtra(meta.Extra)
+	if extra == nil {
+		extra = map[string]any{}
+	}
+	extra["tool_name"] = event.ToolName
+	extra["tool_event_index"] = toolEventIndex
+	extra["tool_count"] = toolCount
+	extra["tool_message_visible"] = visible
+
+	switch kind {
+	case AuditKindToolUse:
+		extra["tool_input"] = event.ToolInput
+	case AuditKindToolResult:
+		if event.ToolResult != "" {
+			extra["tool_result"] = event.ToolResult
+		} else if event.Content != "" {
+			extra["tool_result"] = event.Content
+		}
+		if event.ToolStatus != "" {
+			extra["tool_status"] = event.ToolStatus
+		}
+		if event.ToolExitCode != nil {
+			extra["tool_exit_code"] = *event.ToolExitCode
+		}
+		if event.ToolSuccess != nil {
+			extra["tool_success"] = *event.ToolSuccess
+		}
+	}
+
+	e.audit(AuditRecord{
+		Kind:             kind,
+		Platform:         platformName,
+		SessionKey:       firstNonEmpty(meta.SessionKey, sessionKey),
+		UserID:           meta.UserID,
+		UserName:         meta.UserName,
+		ChatName:         meta.ChatName,
+		ChannelKey:       meta.ChannelKey,
+		ThreadID:         meta.ThreadID,
+		InboundMessageID: msgID,
+		ParentMessageID:  meta.ParentMessageID,
+		RootMessageID:    meta.RootMessageID,
+		ReplyToMessageID: firstNonEmpty(meta.ReplyToMessageID, msgID),
+		Extra:            extra,
+	})
+}
+
+func receiptMessageID(receipt *SendReceipt) string {
+	if receipt == nil {
+		return ""
+	}
+	return receipt.MessageID
+}
+
+func receiptParentMessageID(receipt *SendReceipt) string {
+	if receipt == nil {
+		return ""
+	}
+	return receipt.ParentMessageID
+}
+
+func receiptRootMessageID(receipt *SendReceipt) string {
+	if receipt == nil {
+		return ""
+	}
+	return receipt.RootMessageID
+}
+
+func receiptThreadID(receipt *SendReceipt) string {
+	if receipt == nil {
+		return ""
+	}
+	return receipt.ThreadID
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func (e *Engine) SetSpeechConfig(cfg SpeechCfg) {
 	e.speech = cfg
 }
@@ -588,6 +750,12 @@ func (e *Engine) SetShowContextIndicator(show bool) {
 // footer line with model / reasoning / usage / workdir metadata when available.
 func (e *Engine) SetReplyFooterEnabled(show bool) {
 	e.replyFooterEnabled = show
+}
+
+// SetReplyFooterTokensEnabled controls whether assistant replies include
+// per-turn token counts in the footer when they are available.
+func (e *Engine) SetReplyFooterTokensEnabled(show bool) {
+	e.replyFooterTokens = show
 }
 
 // SetFilterExternalSessions controls whether /list, /switch, /delete, etc.
@@ -1843,11 +2011,11 @@ func (e *Engine) startMessageRecallMonitor(sessionKey string) context.CancelFunc
 }
 
 func (e *Engine) handleMessage(p Platform, msg *Message) {
+	originalContent := msg.Content
 	if msg.Recalled {
 		e.handleMessageRecall(p, msg)
 		return
 	}
-
 	slog.Info("message received",
 		"platform", msg.Platform, "msg_id", msg.MessageID,
 		"session", msg.SessionKey, "user", msg.UserName,
@@ -1912,6 +2080,31 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	} else {
 		msg.Content = content
 	}
+
+	e.audit(AuditRecord{
+		Kind:             AuditKindInboundReceived,
+		Platform:         msg.Platform,
+		SessionKey:       msg.SessionKey,
+		UserID:           msg.UserID,
+		UserName:         msg.UserName,
+		ChatName:         msg.ChatName,
+		ChannelKey:       msg.ChannelKey,
+		ThreadID:         msg.ThreadID,
+		InboundMessageID: msg.MessageID,
+		ParentMessageID:  msg.ParentMessageID,
+		RootMessageID:    msg.RootMessageID,
+		ContentOriginal:  originalContent,
+		ExtraContent:     msg.ExtraContent,
+		ContentToAgent:   msg.Content,
+		Extra: MergeAuditExtra(msg.AuditExtra, map[string]any{
+			"images_count":  len(msg.Images),
+			"files_count":   len(msg.Files),
+			"has_audio":     msg.Audio != nil,
+			"has_location":  msg.Location != nil,
+			"from_voice":    msg.FromVoice,
+			"mode_override": msg.ModeOverride,
+		}),
+	})
 
 	// Rate limit check (per-user role-based, then global fallback)
 	if !e.checkRateLimit(msg) {
@@ -2041,6 +2234,28 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		if e.stopCurrentMessageIfRecalled(interactiveKey) {
 			if e.waitForSessionLock(session, recalledStopLockWait) {
 				goto sessionLocked
+			}
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
+			return
+		}
+		// Check for /btw -- inject into the running session mid-turn.
+		trimmed := strings.TrimSpace(content)
+		if fields := strings.Fields(trimmed); len(fields) > 0 && strings.HasPrefix(fields[0], "/") && matchPrefix(strings.TrimPrefix(fields[0], "/"), builtinCommands) == "ps" {
+			btw := strings.TrimSpace(strings.TrimPrefix(trimmed, fields[0]))
+			if btw != "" {
+				e.interactiveMu.Lock()
+				state, ok := e.interactiveStates[interactiveKey]
+				e.interactiveMu.Unlock()
+				if ok && state.agentSession != nil && state.agentSession.Alive() {
+					agentSession := state.agentSession
+					if err := agentSession.Send(btw, nil, nil); err != nil {
+						slog.Error("btw: send failed", "error", err)
+						e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsSendFailed))
+					} else {
+						e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsSent))
+					}
+					return
+				}
 			}
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
 			return
@@ -2544,6 +2759,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgFailedToStartAgentSession))
 		return
 	}
+	agentSession := state.agentSession
 
 	if workspaceDir != "" && e.workspacePool != nil {
 		ws := e.workspacePool.GetOrCreate(workspaceDir)
@@ -2554,7 +2770,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	// Apply per-message permission mode override (e.g. cron jobs with mode = "bypassPermissions").
 	// Defer restores only when SetLiveMode succeeds for the override.
 	if msg.ModeOverride != "" {
-		if switcher, ok := state.agentSession.(LiveModeSwitcher); ok {
+		if switcher, ok := agentSession.(LiveModeSwitcher); ok {
 			if switcher.SetLiveMode(msg.ModeOverride) {
 				defer func() {
 					defaultMode := "default"
@@ -2609,7 +2825,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	// EventPermissionRequest while blocked — the event loop must run in parallel.
 	sendDone := make(chan error, 1)
 	go func() {
-		sendDone <- state.agentSession.Send(promptContent, msg.Images, msg.Files)
+		sendDone <- agentSession.Send(promptContent, msg.Images, msg.Files)
 	}()
 
 	e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx)
@@ -3278,23 +3494,23 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				if autoApprove {
 					result = PermissionResult{Behavior: "allow", UpdatedInput: event.ToolInputRaw}
 				}
-			reqID := event.RequestID
-			respondCtx := ctx // capture current unsolicited reader context
-			go func() {
-				// Run in a goroutine to keep reader iterations fast, but honour
-				// the reader's context so we don't call into a dead session after
-				// stopUnsolicitedReader cancels the context.
-				select {
-				case <-respondCtx.Done():
-					return
-				default:
-				}
-				if err := agentSession.RespondPermission(reqID, result); err != nil {
-					if respondCtx.Err() == nil {
-						slog.Error("unsolicited: failed to respond permission", "error", err)
+				reqID := event.RequestID
+				respondCtx := ctx // capture current unsolicited reader context
+				go func() {
+					// Run in a goroutine to keep reader iterations fast, but honour
+					// the reader's context so we don't call into a dead session after
+					// stopUnsolicitedReader cancels the context.
+					select {
+					case <-respondCtx.Done():
+						return
+					default:
 					}
-				}
-			}()
+					if err := agentSession.RespondPermission(reqID, result); err != nil {
+						if respondCtx.Err() == nil {
+							slog.Error("unsolicited: failed to respond permission", "error", err)
+						}
+					}
+				}()
 				if !autoApprove {
 					toolName := event.ToolName
 					if toolName == "" {
@@ -3337,6 +3553,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	var segmentStart int // index into textParts: text before this has been sent/displayed
 	silentHold := false  // true while accumulated segment text could still resolve to a bare NO_REPLY marker
 	toolCount := 0
+	toolEventCount := 0
 	waitStart := time.Now()
 	firstEventLogged := false
 	var toolSteps []ToolStep
@@ -3568,6 +3785,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventToolUse:
 			toolCount++
+			toolEventCount++
+			e.auditToolEvent(AuditKindToolUse, p, replyCtx, sessionKey, msgID, event, toolEventCount, toolCount, e.display.ToolMessages)
 			if hasRichCard {
 				// When tool messages are suppressed, skip card updates on tool events.
 				if !e.display.ToolMessages {
@@ -3665,6 +3884,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventToolResult:
+			toolEventCount++
+			e.auditToolEvent(AuditKindToolResult, p, replyCtx, sessionKey, msgID, event, toolEventCount, toolCount, e.display.ToolMessages)
 			if e.display.ToolMessages {
 				result := strings.TrimSpace(event.ToolResult)
 				if result == "" {
@@ -3922,6 +4143,40 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			session.AddHistory("assistant", baseResponse)
 			sessions.Save()
 
+			tokenUsage := resolveReplyFooterTokenUsage(state.agentSession, event)
+			meta := e.auditReplyMetadata(p, replyCtx)
+			agentAuditExtra := map[string]any{
+				"tool_count": toolCount,
+			}
+			if tokenUsage.hasInputOutput() {
+				agentAuditExtra["input_tokens"] = tokenUsage.inputTokens
+				agentAuditExtra["output_tokens"] = tokenUsage.outputTokens
+			}
+			if tokenUsage.hasTotalTokens {
+				agentAuditExtra["total_tokens"] = tokenUsage.totalTokens
+			}
+			if tokenUsage.hasCachedInputTokens {
+				agentAuditExtra["cached_input_tokens"] = tokenUsage.cachedInputTokens
+			}
+			if tokenUsage.hasReasoningOutputTokens {
+				agentAuditExtra["reasoning_output_tokens"] = tokenUsage.reasoningOutputTokens
+			}
+			e.audit(AuditRecord{
+				Kind:             AuditKindAgentResult,
+				Platform:         p.Name(),
+				SessionKey:       firstNonEmpty(meta.SessionKey, sessionKey),
+				UserID:           meta.UserID,
+				UserName:         meta.UserName,
+				ChatName:         meta.ChatName,
+				ChannelKey:       meta.ChannelKey,
+				ThreadID:         meta.ThreadID,
+				InboundMessageID: msgID,
+				ParentMessageID:  meta.ParentMessageID,
+				RootMessageID:    meta.RootMessageID,
+				ReplyToMessageID: firstNonEmpty(meta.ReplyToMessageID, msgID),
+				AgentOutput:      baseResponse,
+				Extra:            agentAuditExtra,
+			})
 			isSilent := isSilentReply(baseResponse)
 			if !isSilent {
 				if stripped, ok := stripTrailingSilent(baseResponse); ok {
@@ -3950,8 +4205,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					cleanResponse += fmt.Sprintf("\n[ctx: ~%d%%]", selfPct)
 				}
 			}
+			contextUsage := replyFooterSessionContextUsage(state.agentSession)
 			if !isSilent {
-				if footer := e.buildReplyFooter(replyAgent, state.agentSession, workspaceDir, replyFooterContextText(replyFooterSessionContextUsage(state.agentSession), e.i18n)); footer != "" {
+				if footer := e.buildReplyFooter(
+					replyAgent,
+					state.agentSession,
+					workspaceDir,
+					replyFooterContextText(contextUsage, e.i18n),
+					replyFooterTokenText(tokenUsage, e.i18n, e.replyFooterTokens),
+				); footer != "" {
 					cleanResponse = appendReplyFooter(cleanResponse, footer)
 				}
 			}
@@ -3965,8 +4227,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				"tools", toolCount,
 				"response_len", len(fullResponse),
 				"turn_duration", turnDuration,
-				"input_tokens", event.InputTokens,
-				"output_tokens", event.OutputTokens,
+				"input_tokens", tokenUsage.inputTokens,
+				"output_tokens", tokenUsage.outputTokens,
+				"cached_input_tokens", tokenUsage.cachedInputTokens,
 				"silent", isSilent,
 			)
 
@@ -4050,6 +4313,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 				slog.Debug("EventResult: suppressed duplicate side-channel text", "response_len", len(fullResponse))
+			} else if sp.finish(fullResponse) {
+				e.auditOutboundDelivery(AuditKindOutboundSent, p, replyCtx, fullResponse, "preview_update", sp.receipt(), nil)
+				slog.Debug("EventResult: finalized via stream preview", "response_len", len(fullResponse))
 			} else {
 				slog.Debug("EventResult: sending via p.Send (preview inactive or failed)", "response_len", len(fullResponse), "chunks", len(splitMessage(fullResponse, maxPlatformMessageLen)))
 				for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
@@ -4133,7 +4399,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// Drain stale events before starting the next turn. Between
 				// EventResult and Send(), the only buffered events would be
 				// stale leftovers (e.g. a deferred EventError from cmd.Wait()).
-				drainEvents(state.agentSession.Events())
+				if state.agentSession == nil {
+					e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent session ended"))
+					return
+				}
+				queuedAgentSession := state.agentSession
+				drainEvents(queuedAgentSession.Events())
 
 				if pendingSend != nil {
 					if err := <-pendingSend; err != nil {
@@ -4145,7 +4416,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 				nextSend := make(chan error, 1)
 				go func() {
-					nextSend <- state.agentSession.Send(queuedPrompt, queued.images, queued.files)
+					nextSend <- queuedAgentSession.Send(queuedPrompt, queued.images, queued.files)
 				}()
 				pendingSend = nextSend
 
@@ -4271,6 +4542,26 @@ channelClosed:
 		fullResponse := strings.Join(textParts, "")
 		session.AddHistory("assistant", fullResponse)
 
+		meta := e.auditReplyMetadata(p, replyCtx)
+		e.audit(AuditRecord{
+			Kind:             AuditKindAgentResult,
+			Platform:         p.Name(),
+			SessionKey:       firstNonEmpty(meta.SessionKey, sessionKey),
+			UserID:           meta.UserID,
+			UserName:         meta.UserName,
+			ChatName:         meta.ChatName,
+			ChannelKey:       meta.ChannelKey,
+			ThreadID:         meta.ThreadID,
+			InboundMessageID: msgID,
+			ParentMessageID:  meta.ParentMessageID,
+			RootMessageID:    meta.RootMessageID,
+			ReplyToMessageID: firstNonEmpty(meta.ReplyToMessageID, msgID),
+			AgentOutput:      fullResponse,
+			Extra: map[string]any{
+				"tool_count":     toolCount,
+				"channel_closed": true,
+			},
+		})
 		// Respect NO_REPLY even on abnormal exit so silent turns stay silent.
 		if isSilentReply(fullResponse) {
 			sp.discard()
@@ -4304,6 +4595,9 @@ channelClosed:
 					}
 				}
 			}
+		} else if sp.finish(fullResponse) {
+			e.auditOutboundDelivery(AuditKindOutboundSent, p, replyCtx, fullResponse, "preview_update", sp.receipt(), nil)
+			slog.Debug("stream preview: finalized in-place (process exited)")
 		} else {
 			for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
 				if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
@@ -4402,14 +4696,15 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 			e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent session ended"))
 			return false
 		}
+		agentSession := state.agentSession
 
-		drainEvents(state.agentSession.Events())
+		drainEvents(agentSession.Events())
 
 		session.AddHistory("user", queued.content)
 
 		sendDone := make(chan error, 1)
 		go func() {
-			sendDone <- state.agentSession.Send(prompt, queued.images, queued.files)
+			sendDone <- agentSession.Send(prompt, queued.images, queued.files)
 		}()
 
 		var stopTyping func()
@@ -5236,19 +5531,23 @@ func (e *Engine) commandWorkDir(agent Agent, msg *Message) string {
 	return ""
 }
 
-func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDir string, contextLeft string) string {
+func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDir string, contextLeft string, tokenText string) string {
 	if !e.replyFooterEnabled || agent == nil {
 		return ""
 	}
 
 	var parts []string
 	hasStatus := false
-	if model := replyFooterModel(session, agent); model != "" {
+	if model := replyFooterModel(session); model != "" {
 		parts = append(parts, model)
 		hasStatus = true
 	}
 	if effort := replyFooterReasoningEffort(session, agent); effort != "" {
 		parts = append(parts, effort)
+		hasStatus = true
+	}
+	if tokens := strings.TrimSpace(tokenText); tokens != "" {
+		parts = append(parts, tokens)
 		hasStatus = true
 	}
 	if left := strings.TrimSpace(contextLeft); left != "" {
@@ -5267,16 +5566,13 @@ func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDi
 	return strings.Join(parts, " · ")
 }
 
-func replyFooterModel(session AgentSession, agent Agent) string {
+func replyFooterModel(session AgentSession) string {
 	if session != nil {
 		if getter, ok := session.(interface{ GetModel() string }); ok {
 			if model := strings.TrimSpace(getter.GetModel()); model != "" {
 				return model
 			}
 		}
-	}
-	if getter, ok := agent.(interface{ GetModel() string }); ok {
-		return strings.TrimSpace(getter.GetModel())
 	}
 	return ""
 }
@@ -5361,6 +5657,17 @@ func replyFooterSessionContextUsage(session AgentSession) *ContextUsage {
 	return reporter.GetContextUsage()
 }
 
+func replyFooterSessionTurnUsage(session AgentSession) *TokenUsage {
+	if session == nil {
+		return nil
+	}
+	reporter, ok := session.(TurnUsageReporter)
+	if !ok {
+		return nil
+	}
+	return reporter.GetTurnUsage()
+}
+
 func replyFooterContextText(usage *ContextUsage, i18n *I18n) string {
 	if usage == nil || i18n == nil {
 		return ""
@@ -5407,6 +5714,75 @@ func replyFooterContextText(usage *ContextUsage, i18n *I18n) string {
 		left = 100
 	}
 	return i18n.Tf(MsgReplyFooterRemaining, left)
+}
+
+type replyFooterTokenUsage struct {
+	totalTokens              int
+	inputTokens              int
+	outputTokens             int
+	cachedInputTokens        int
+	reasoningOutputTokens    int
+	hasTotalTokens           bool
+	hasInputTokens           bool
+	hasOutputTokens          bool
+	hasCachedInputTokens     bool
+	hasReasoningOutputTokens bool
+}
+
+func (u replyFooterTokenUsage) hasInputOutput() bool {
+	return u.hasInputTokens || u.hasOutputTokens
+}
+
+func resolveReplyFooterTokenUsage(session AgentSession, event Event) replyFooterTokenUsage {
+	resolved := replyFooterTokenUsage{}
+	if usage := replyFooterSessionTurnUsage(session); usage != nil {
+		if usage.TotalTokens > 0 {
+			resolved.totalTokens = usage.TotalTokens
+			resolved.hasTotalTokens = true
+		}
+		if usage.InputTokens > 0 {
+			resolved.inputTokens = usage.InputTokens
+			resolved.hasInputTokens = true
+		}
+		if usage.OutputTokens > 0 {
+			resolved.outputTokens = usage.OutputTokens
+			resolved.hasOutputTokens = true
+		}
+		if usage.CachedInputTokens > 0 {
+			resolved.cachedInputTokens = usage.CachedInputTokens
+			resolved.hasCachedInputTokens = true
+		}
+		if usage.ReasoningOutputTokens > 0 {
+			resolved.reasoningOutputTokens = usage.ReasoningOutputTokens
+			resolved.hasReasoningOutputTokens = true
+		}
+		if resolved.hasInputOutput() || resolved.hasTotalTokens || resolved.hasCachedInputTokens || resolved.hasReasoningOutputTokens {
+			return resolved
+		}
+	}
+
+	if event.InputTokens > 0 {
+		resolved.inputTokens = event.InputTokens
+		resolved.hasInputTokens = true
+	}
+	if event.OutputTokens > 0 {
+		resolved.outputTokens = event.OutputTokens
+		resolved.hasOutputTokens = true
+	}
+
+	return resolved
+}
+
+func replyFooterTokenText(usage replyFooterTokenUsage, i18n *I18n, enabled bool) string {
+	if !enabled || i18n == nil || !usage.hasInputOutput() {
+		return ""
+	}
+	input := strconv.Itoa(usage.inputTokens)
+	output := strconv.Itoa(usage.outputTokens)
+	if usage.cachedInputTokens > 0 {
+		return i18n.Tf(MsgReplyFooterTokensWithCache, input, output, strconv.Itoa(usage.cachedInputTokens))
+	}
+	return i18n.Tf(MsgReplyFooterTokens, input, output)
 }
 
 func replyFooterWorkDir(session AgentSession, agent Agent, workspaceDir string) string {
@@ -7842,8 +8218,15 @@ func (e *Engine) runCompress(state *interactiveState, session *Session, sessions
 	state.platform = p
 	state.replyCtx = replyCtx
 	state.mu.Unlock()
+	if state.agentSession == nil {
+		if !auto {
+			e.reply(p, replyCtx, e.i18n.T(MsgFailedToStartAgentSession))
+		}
+		return
+	}
+	agentSession := state.agentSession
 
-	drainEvents(state.agentSession.Events())
+	drainEvents(agentSession.Events())
 
 	compressor, ok := e.agent.(ContextCompressor)
 	if !ok || compressor.CompressCommand() == "" {
@@ -7854,11 +8237,11 @@ func (e *Engine) runCompress(state *interactiveState, session *Session, sessions
 	}
 
 	cmd := compressor.CompressCommand()
-	if err := state.agentSession.Send(cmd, nil, nil); err != nil {
+	if err := agentSession.Send(cmd, nil, nil); err != nil {
 		if !auto {
 			e.reply(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
 		}
-		if !state.agentSession.Alive() {
+		if !agentSession.Alive() {
 			e.cleanupInteractiveState(iKey)
 		}
 		return
@@ -8885,10 +9268,21 @@ func (e *Engine) sendWithError(p Platform, replyCtx any, content string) error {
 
 func (e *Engine) sendAlreadyRenderedWithError(p Platform, replyCtx any, content string) error {
 	start := time.Now()
-	if err := p.Send(e.ctx, replyCtx, content); err != nil {
+	var (
+		err     error
+		receipt *SendReceipt
+	)
+	if reporter, ok := p.(DeliveryReporter); ok {
+		receipt, err = reporter.SendWithReceipt(e.ctx, replyCtx, content)
+	} else {
+		err = p.Send(e.ctx, replyCtx, content)
+	}
+	if err != nil {
+		e.auditOutboundDelivery(AuditKindOutboundFailed, p, replyCtx, content, "send", receipt, err)
 		slog.Error("platform send failed", "platform", p.Name(), "error", err, "content_len", len(content))
 		return err
 	}
+	e.auditOutboundDelivery(AuditKindOutboundSent, p, replyCtx, content, "send", receipt, nil)
 	if elapsed := time.Since(start); elapsed >= slowPlatformSend {
 		slog.Warn("slow platform send", "platform", p.Name(), "elapsed", elapsed, "content_len", len(content))
 	}
@@ -8940,10 +9334,21 @@ func (e *Engine) replyWithError(p Platform, replyCtx any, content string) error 
 		return err
 	}
 	start := time.Now()
-	if err := p.Reply(e.ctx, replyCtx, content); err != nil {
+	var (
+		err     error
+		receipt *SendReceipt
+	)
+	if reporter, ok := p.(DeliveryReporter); ok {
+		receipt, err = reporter.ReplyWithReceipt(e.ctx, replyCtx, content)
+	} else {
+		err = p.Reply(e.ctx, replyCtx, content)
+	}
+	if err != nil {
+		e.auditOutboundDelivery(AuditKindOutboundFailed, p, replyCtx, content, "reply", receipt, err)
 		slog.Error("platform reply failed", "platform", p.Name(), "error", err, "content_len", len(content))
 		return err
 	}
+	e.auditOutboundDelivery(AuditKindOutboundSent, p, replyCtx, content, "reply", receipt, nil)
 	if elapsed := time.Since(start); elapsed >= slowPlatformSend {
 		slog.Warn("slow platform reply", "platform", p.Name(), "elapsed", elapsed, "content_len", len(content))
 	}

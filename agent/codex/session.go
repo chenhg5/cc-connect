@@ -28,20 +28,20 @@ type codexSession struct {
 	model         string
 	effort        string
 	mode          string
-	baseURL       string // provider base URL; passed as -c openai_base_url=<url>
-	modelProvider string // Codex model_provider name; passed as -c model_provider=<name>
+	baseURL       string   // provider base URL; passed as -c openai_base_url=<url>
+	modelProvider string   // Codex model_provider name; passed as -c model_provider=<name>
 	cliBin        string   // CLI binary, default "codex"
 	cliExtraArgs  []string // extra args from cli_path, prepended before exec args
 	extraEnv      []string
 	events        chan core.Event
-	threadID  atomic.Value // stores string — Codex thread_id
-	ctx       context.Context
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
-	alive     atomic.Bool
-	closeOnce sync.Once
-	cmdMu     sync.Mutex
-	cmds      map[*exec.Cmd]struct{}
+	threadID      atomic.Value // stores string — Codex thread_id
+	ctx           context.Context
+	cancel        context.CancelFunc
+	wg            sync.WaitGroup
+	alive         atomic.Bool
+	closeOnce     sync.Once
+	cmdMu         sync.Mutex
+	cmds          map[*exec.Cmd]struct{}
 
 	pendingMsgs []string // buffered agent_message texts awaiting classification
 
@@ -53,12 +53,14 @@ type codexSession struct {
 
 	contextMu    sync.RWMutex
 	contextUsage *core.ContextUsage
+	turnUsage    *core.TokenUsage
+	totalUsage   *core.TokenUsage
+	turnBaseline *core.TokenUsage
 	sessionFile  string
 }
 
 var codexSessionCloseTimeout = 8 * time.Second
 var codexSessionForceKillWait = 2 * time.Second
-var codexRuntimeConfigCacheTTL = 5 * time.Second
 var codexRuntimeConfigTimeout = 1500 * time.Millisecond
 var codexContextUsageRetryDelay = 50 * time.Millisecond
 var codexContextUsageRetryCount = 4
@@ -321,6 +323,9 @@ func (cs *codexSession) handleEvent(raw map[string]any) {
 			cs.contextMu.Lock()
 			cs.sessionFile = ""
 			cs.contextUsage = nil
+			cs.turnUsage = nil
+			cs.totalUsage = nil
+			cs.turnBaseline = nil
 			cs.contextMu.Unlock()
 			slog.Debug("codexSession: thread started", "thread_id", tid)
 		}
@@ -328,6 +333,8 @@ func (cs *codexSession) handleEvent(raw map[string]any) {
 	case "turn.started":
 		cs.pendingMsgs = cs.pendingMsgs[:0]
 		cs.contextMu.Lock()
+		cs.turnBaseline = cloneTokenUsage(cs.totalUsage)
+		cs.turnUsage = nil
 		cs.contextUsage = nil
 		cs.contextMu.Unlock()
 		slog.Debug("codexSession: turn started")
@@ -770,11 +777,17 @@ func (cs *codexSession) GetContextUsage() *core.ContextUsage {
 	return cloneContextUsage(cs.contextUsage)
 }
 
+func (cs *codexSession) GetTurnUsage() *core.TokenUsage {
+	cs.contextMu.RLock()
+	defer cs.contextMu.RUnlock()
+	return cloneTokenUsage(cs.turnUsage)
+}
+
 func (cs *codexSession) runtimeConfig() (string, string) {
 	cs.runtimeCfgMu.Lock()
 	defer cs.runtimeCfgMu.Unlock()
 
-	if !cs.runtimeCfgFetched.IsZero() && time.Since(cs.runtimeCfgFetched) < codexRuntimeConfigCacheTTL {
+	if !cs.runtimeCfgFetched.IsZero() {
 		return cs.runtimeCfgModel, cs.runtimeCfgEffort
 	}
 
@@ -808,11 +821,16 @@ func (cs *codexSession) refreshContextUsageFromRollout() {
 		cachedPath := cs.sessionFile
 		cs.contextMu.RUnlock()
 
-		usage, path, err := loadContextUsageFromRollout(cs.extraEnv, sessionID, cachedPath)
-		if err == nil && usage != nil {
+		snapshot, path, err := loadUsageSnapshotFromRollout(cs.extraEnv, sessionID, cachedPath)
+		if err == nil && snapshot != nil {
 			cs.contextMu.Lock()
 			cs.sessionFile = path
-			cs.contextUsage = cloneContextUsage(usage)
+			cs.contextUsage = cloneContextUsage(snapshot.Context)
+			cs.turnUsage = cloneTokenUsage(snapshot.Turn)
+			if cs.turnUsage == nil {
+				cs.turnUsage = turnUsageFromCumulativeAndLast(snapshot.Total, snapshot.Last, cs.turnBaseline)
+			}
+			cs.totalUsage = cloneTokenUsage(snapshot.Total)
 			cs.contextMu.Unlock()
 			return
 		}

@@ -325,6 +325,31 @@ level = "info" # debug, info, warn, error
 # cors_origins = ["http://localhost:3000"]  # Allowed CORS origins / 允许的 CORS 来源
 
 # =============================================================================
+# Audit (Structured Message Audit)
+# =============================================================================
+# Persist inbound/outbound audit records to one or more database sinks.
+#
+# [audit]
+# enabled = true
+# timeout_ms = 2000
+#
+# [audit.postgres]
+# dsn = "postgres://user:password@localhost:5432/ccconnect?sslmode=disable"
+# table = "audit_records"
+# auto_create = true
+# index_profile = "minimal"           # minimal (default), lookup, or full
+# max_open_conns = 10
+# max_idle_conns = 5
+# conn_max_lifetime_mins = 30
+#
+# [audit.mongodb]
+# uri = "mongodb://localhost:27017"
+# database = "ccconnect"
+# collection = "audit_records"
+# auto_create_indexes = true
+# index_profile = "minimal"           # minimal (default), lookup, or full
+
+# =============================================================================
 # Hooks (Event Triggers / 事件钩子)
 # =============================================================================
 # Execute shell commands or send HTTP requests when lifecycle events occur.
@@ -612,6 +637,8 @@ name = "my-backend"
 #                                   # 不在助手回复末尾显示「[ctx: ~N%]」上下文占用提示（默认 true 显示）
 # reply_footer = false             # Hide the Codex-like footer on assistant replies (default: true / show)
 #                                   # 不在助手回复底部显示类似 Codex 的状态行（默认 true 显示）
+# reply_footer_tokens = true       # Show per-turn token counts in the footer when available (default: false / hide)
+#                                   # 在回复底部显示每轮 token 消耗（如可用，默认 false 隐藏）
 # disabled_commands = ["restart", "upgrade", "cron"]  # Disable specific commands for this project
 #                                                     # 禁用该项目的指定命令
 #
@@ -1294,6 +1321,12 @@ app_secret = "your-feishu-app-secret"
 #
 # Optional: specify Codex reasoning effort / 可选：指定 Codex 推理强度
 # reasoning_effort = "high"  # "minimal" | "low" | "medium" | "high" | "xhigh"
+#
+# Optional: override whether tool call progress messages are sent for this project.
+# This only changes the startup default for the project; /quiet and /config can still change it at runtime.
+# 可选：覆盖当前项目是否发送工具调用进度消息。
+# 这只会修改项目启动时的默认值；运行时仍可通过 /quiet 和 /config 变更。
+# tool_messages = false
 #
 # # Active provider / 当前激活的 provider
 # # provider = "openai"
