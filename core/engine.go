@@ -12632,7 +12632,7 @@ func (e *Engine) cmdBind(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	_, chatID, err := parseSessionKeyParts(msg.SessionKey)
+	_, chatID, _, err := parseSessionKeyParts(msg.SessionKey)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgRelayNotAvailable))
 		return

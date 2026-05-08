@@ -222,8 +222,10 @@ func (rm *RelayManager) Send(ctx context.Context, req RelayRequest) (*RelayRespo
 		toName = binding.Bots[req.To]
 	}
 
-	// Post the forwarded message to the group chat for visibility
-	groupSessionKey := platform + ":" + chatID + ":relay"
+	// Post the forwarded message to the group chat for visibility.
+	// Use fullChatID so the message routes to the correct thread/topic
+	// when the source platform has per-thread session keys.
+	groupSessionKey := platform + ":" + fullChatID
 	if sourceEngine != nil {
 		label := fmt.Sprintf("[%s → %s] %s", fromName, toName, req.Message)
 		rm.sendToGroup(ctx, sourceEngine, platform, groupSessionKey, label)
