@@ -28,7 +28,7 @@ type Agent struct {
 	mode       string // "default" | "yolo"
 	thinking   string // reasoning effort: off, minimal, low, medium, high, xhigh
 	sessionEnv []string
-	mu         sync.Mutex
+	mu         sync.RWMutex
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -88,7 +88,7 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	cmd := a.cmd
 	a.mu.RUnlock()
 
-models := a.discoverModels(ctx, cmd)
+	models := a.discoverModels(ctx, cmd)
 	if len(models) > 0 {
 		return models
 	}
@@ -96,10 +96,6 @@ models := a.discoverModels(ctx, cmd)
 }
 
 // discoverModels runs `pi --list-models` and parses the output.
-// Output format:
-//
-//	provider     model                  context  max-out  thinking  images
-//	opencode-go  deepseek-v4-flash      1M       384K     yes       no
 func (a *Agent) discoverModels(ctx context.Context, cmd string) []core.ModelOption {
 	c := exec.CommandContext(ctx, cmd, "--list-models")
 	c.Dir = a.workDir
@@ -114,12 +110,23 @@ func (a *Agent) discoverModels(ctx context.Context, cmd string) []core.ModelOpti
 
 	out, err := c.Output()
 	if err != nil {
-		slog.Debug("pi: discoverModels failed", "err", err)
+		slog.Warn("pi: discoverModels failed", "err", err)
 		return nil
 	}
 
+	return parseModelsOutput(string(out))
+}
+
+// parseModelsOutput parses the `pi --list-models` table output.
+// Expected format:
+//
+//	provider     model                  context  max-out  thinking  images
+//	opencode-go  deepseek-v4-flash      1M       384K     yes       no
+//
+// Rows containing "Use /login" (providers needing auth) are skipped.
+func parseModelsOutput(output string) []core.ModelOption {
+	lines := strings.Split(output, "\n")
 	var models []core.ModelOption
-	lines := strings.Split(string(out), "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "provider") || strings.HasPrefix(line, "No models") {

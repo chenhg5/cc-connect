@@ -159,6 +159,107 @@ func TestAgent_AvailableModels(t *testing.T) {
 	}
 }
 
+// ── parseModelsOutput ──────────────────────────────────────
+
+func TestParseModelsOutput_NormalOutput(t *testing.T) {
+	input := `provider     model                  context  max-out  thinking  images
+opencode-go  deepseek-v4-flash      1M       384K     yes       no
+anthropic    claude-sonnet-4-5        200K       8K     yes       yes
+google       gemini-2.5-pro           1M        64K     yes       yes
+`
+	models := parseModelsOutput(input)
+	if len(models) != 3 {
+		t.Fatalf("got %d models, want 3", len(models))
+	}
+	want := []string{
+		"anthropic/claude-sonnet-4-5",
+		"google/gemini-2.5-pro",
+		"opencode-go/deepseek-v4-flash",
+	}
+	for i, m := range models {
+		if m.Name != want[i] {
+			t.Errorf("models[%d].Name = %q, want %q", i, m.Name, want[i])
+		}
+	}
+}
+
+func TestParseModelsOutput_Empty(t *testing.T) {
+	if models := parseModelsOutput(""); models != nil {
+		t.Errorf("expected nil, got %v", models)
+	}
+}
+
+func TestParseModelsOutput_SkipsHeader(t *testing.T) {
+	input := "provider     model                  context\nanthropic  claude-sonnet-4-5      200K"
+	models := parseModelsOutput(input)
+	if len(models) != 1 {
+		t.Fatalf("got %d, want 1", len(models))
+	}
+	if models[0].Name != "anthropic/claude-sonnet-4-5" {
+		t.Errorf("got %q", models[0].Name)
+	}
+}
+
+func TestParseModelsOutput_SkipsNoModels(t *testing.T) {
+	input := "No models available"
+	if models := parseModelsOutput(input); models != nil {
+		t.Errorf("expected nil, got %v", models)
+	}
+}
+
+func TestParseModelsOutput_SkipsUseLogin(t *testing.T) {
+	input := `provider     model                  context
+google       gemini-2.5-pro         1M
+unknown      some-model            128K  Use /login to authenticate
+anthropic    claude-sonnet-4-5      200K
+`
+	models := parseModelsOutput(input)
+	if len(models) != 2 {
+		t.Fatalf("got %d, want 2 (skipped Use /login row)", len(models))
+	}
+	// The "unknown" row should be skipped.
+	if models[0].Name != "anthropic/claude-sonnet-4-5" {
+		t.Errorf("models[0] = %q", models[0].Name)
+	}
+	if models[1].Name != "google/gemini-2.5-pro" {
+		t.Errorf("models[1] = %q", models[1].Name)
+	}
+}
+
+func TestParseModelsOutput_Deduplicates(t *testing.T) {
+	input := `provider     model
+openai       gpt-4o
+openai       gpt-4o
+anthropic    claude-sonnet
+`
+	models := parseModelsOutput(input)
+	if len(models) != 2 {
+		t.Fatalf("got %d, want 2 after dedup", len(models))
+	}
+}
+
+func TestParseModelsOutput_SortsAlphabetically(t *testing.T) {
+	input := `provider     model
+openai       gpt-4o
+anthropic    claude-sonnet
+google       gemini-pro
+`
+	models := parseModelsOutput(input)
+	if models[0].Name != "anthropic/claude-sonnet" {
+		t.Errorf("expected sorted, got %q first", models[0].Name)
+	}
+	if models[2].Name != "openai/gpt-4o" {
+		t.Errorf("expected sorted, got %q last", models[2].Name)
+	}
+}
+
+func TestParseModelsOutput_ShortLines(t *testing.T) {
+	input := "only-one-column"
+	if models := parseModelsOutput(input); models != nil {
+		t.Errorf("expected nil for short line, got %v", models)
+	}
+}
+
 func TestAgent_SetSessionEnv(t *testing.T) {
 	a := &Agent{}
 	a.SetSessionEnv([]string{"FOO=bar", "BAZ=qux"})
