@@ -101,8 +101,28 @@ type stdlibTypingTicker struct {
 
 func (t *stdlibTypingTicker) C() <-chan time.Time { return t.Ticker.C }
 
+// telegramHTTPClient routes Telegram Bot API requests to one of two underlying
+// http.Clients depending on the API method. The long-poll (getUpdates) keeps a
+// 90s ceiling so a hung connection self-recovers; everything else (sendMessage,
+// sendDocument, sendPhoto, …) honours only the caller's context, so large file
+// uploads — up to cc-connect's 50 MB attachment cap — can outlast the poll
+// window on slow uplinks. Without this split, the 90s Client.Timeout applies to
+// SendDocument as well and aborts uploads with `context deadline exceeded`
+// (see issue #539).
+type telegramHTTPClient struct {
+	poll *http.Client
+	send *http.Client
+}
+
+func (c *telegramHTTPClient) Do(req *http.Request) (*http.Response, error) {
+	if strings.HasSuffix(req.URL.Path, "/getUpdates") {
+		return c.poll.Do(req)
+	}
+	return c.send.Do(req)
+}
+
 // botFactory creates a bot, returns it plus self user info and a blocking poll function.
-type botFactory func(token string, onUpdate func(context.Context, *models.Update), httpClient *http.Client) (telegramBot, *models.User, func(context.Context), error)
+type botFactory func(token string, onUpdate func(context.Context, *models.Update), httpClient tgbot.HttpClient) (telegramBot, *models.User, func(context.Context), error)
 
 type Platform struct {
 	token                 string
@@ -110,7 +130,10 @@ type Platform struct {
 	groupReplyAll         bool
 	shareSessionInChannel bool
 	enableReactions       bool
-	httpClient            *http.Client
+	// httpClient is used for direct attachment downloads (no fixed timeout).
+	httpClient *http.Client
+	// pollHTTPClient bounds the SDK long-poll request (90s); see telegramHTTPClient.
+	pollHTTPClient *http.Client
 
 	mu                  sync.RWMutex
 	bot                 telegramBot
@@ -141,10 +164,20 @@ func New(opts map[string]any) (core.Platform, error) {
 	allowFrom, _ := opts["allow_from"].(string)
 	core.CheckAllowFrom("telegram", allowFrom)
 
-	// Build HTTP client with optional proxy support.
-	// Timeout must exceed the server-side long-poll duration (pollTimeout − 1s = 59s)
-	// to avoid the HTTP client racing with Telegram's response. 90s gives 30s headroom.
-	httpClient := &http.Client{Timeout: 90 * time.Second}
+	// Build HTTP clients with optional proxy support.
+	//
+	// pollHTTPClient is used by the SDK long-poll loop (getUpdates). Its timeout
+	// must exceed the server-side long-poll duration (pollTimeout − 1s = 59s)
+	// to avoid the HTTP client racing with Telegram's response; 90s gives 30s
+	// headroom and lets a hung poll self-recover.
+	//
+	// sendHTTPClient has no fixed timeout. It is used for every non-poll Bot
+	// API call (sendDocument/sendPhoto/sendMessage/...) and for direct
+	// attachment downloads. File uploads up to cc-connect's 50 MB cap can
+	// legitimately exceed 90s on slow uplinks (issue #539), so they rely on
+	// the caller's context instead of a one-size-fits-all client timeout.
+	pollHTTPClient := &http.Client{Timeout: 90 * time.Second}
+	sendHTTPClient := &http.Client{}
 	if proxyURL, _ := opts["proxy"].(string); proxyURL != "" {
 		u, err := url.Parse(proxyURL)
 		if err != nil {
@@ -155,14 +188,24 @@ func New(opts map[string]any) (core.Platform, error) {
 		if proxyUser != "" {
 			u.User = url.UserPassword(proxyUser, proxyPass)
 		}
-		httpClient.Transport = &http.Transport{Proxy: http.ProxyURL(u)}
+		transport := &http.Transport{Proxy: http.ProxyURL(u)}
+		pollHTTPClient.Transport = transport
+		sendHTTPClient.Transport = transport
 		slog.Info("telegram: using proxy", "proxy", u.Host, "auth", proxyUser != "")
 	}
 
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	enableReactions, _ := opts["enable_reactions"].(bool)
-	return &Platform{token: token, allowFrom: allowFrom, groupReplyAll: groupReplyAll, shareSessionInChannel: shareSessionInChannel, enableReactions: enableReactions, httpClient: httpClient}, nil
+	return &Platform{
+		token:                 token,
+		allowFrom:             allowFrom,
+		groupReplyAll:         groupReplyAll,
+		shareSessionInChannel: shareSessionInChannel,
+		enableReactions:       enableReactions,
+		pollHTTPClient:        pollHTTPClient,
+		httpClient:            sendHTTPClient,
+	}, nil
 }
 
 func (p *Platform) Name() string { return "telegram" }
@@ -204,7 +247,7 @@ func (p *Platform) SetLifecycleHandler(h core.PlatformLifecycleHandler) {
 	p.lifecycleHandler = h
 }
 
-func defaultNewBot(token string, onUpdate func(context.Context, *models.Update), httpClient *http.Client) (telegramBot, *models.User, func(context.Context), error) {
+func defaultNewBot(token string, onUpdate func(context.Context, *models.Update), httpClient tgbot.HttpClient) (telegramBot, *models.User, func(context.Context), error) {
 	handler := func(ctx context.Context, b *tgbot.Bot, update *models.Update) {
 		onUpdate(ctx, update)
 	}
@@ -276,7 +319,15 @@ func (p *Platform) connectLoop(ctx context.Context) {
 
 func (p *Platform) runConnection(ctx context.Context) error {
 	factory := p.getNewBot()
-	b, me, startPoll, err := factory(p.token, p.processUpdate, p.httpClient)
+	// The SDK uses a single HttpClient for the long-poll and for every other
+	// API call. Wrap so getUpdates honours pollHTTPClient's 90s ceiling while
+	// sendDocument/sendPhoto/... fall through to httpClient with no fixed
+	// timeout (large file uploads, see telegramHTTPClient).
+	var sdkClient tgbot.HttpClient = p.httpClient
+	if p.pollHTTPClient != nil {
+		sdkClient = &telegramHTTPClient{poll: p.pollHTTPClient, send: p.httpClient}
+	}
+	b, me, startPoll, err := factory(p.token, p.processUpdate, sdkClient)
 	if err != nil {
 		cause := retryCauseInitialConnectFailure
 		if p.hasEverConnected() {
