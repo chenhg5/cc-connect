@@ -452,6 +452,14 @@ func (sp *streamPreview) appendSeparator(sep string) bool {
 	return true
 }
 
+// previewEnabled returns true if preview messages are enabled
+// (previewMsgID was set at least once via SendPreviewStart).
+func (sp *streamPreview) previewEnabled() bool {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	return sp.previewMsgID != nil
+}
+
 // needsDoneReaction returns true if the preview was delivered via in-place
 // UpdateMessage at least once, meaning the user only received a push for the
 // initial SendPreviewStart and subsequent updates were silent. In this case a

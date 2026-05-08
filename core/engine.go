@@ -4204,7 +4204,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// (user only got a push for the initial send). Skip for silent
 			// (NO_REPLY) turns and for rich card mode (the card itself shows
 			// the done status already).
-			if !isSilent && !hasRichCard && sp.needsDoneReaction() {
+			if !isSilent && !hasRichCard && (sp.needsDoneReaction() || !sp.previewEnabled()) {
 				if doneTI, ok := p.(TypingIndicatorDone); ok {
 					doneReaction = func() { doneTI.AddDoneReaction(replyCtx) }
 				}

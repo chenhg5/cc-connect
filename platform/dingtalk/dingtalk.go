@@ -28,6 +28,7 @@ type replyContext struct {
 	sessionWebhook  string
 	conversationId  string
 	senderStaffId   string
+	messageId       string // inbound message ID for emotion reactions
 }
 
 type downloadResponse struct {
@@ -192,6 +193,7 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel) {
 				sessionWebhook: data.SessionWebhook,
 				conversationId: data.ConversationId,
 				senderStaffId:  data.SenderStaffId,
+				messageId:      data.MsgId,
 			},
 		}
 		p.handler(p, msg)
@@ -217,6 +219,7 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel) {
 			sessionWebhook:  data.SessionWebhook,
 			conversationId:  data.ConversationId,
 			senderStaffId:   data.SenderStaffId,
+			messageId:       data.MsgId,
 		},
 	}
 
@@ -283,6 +286,7 @@ func (p *Platform) handleAudioMessage(data *chatbot.BotCallbackDataModel, sessio
 					sessionWebhook:  data.SessionWebhook,
 					conversationId:  data.ConversationId,
 					senderStaffId:   data.SenderStaffId,
+					messageId:       data.MsgId,
 				},
 				FromVoice:  true,
 			}
@@ -305,6 +309,7 @@ func (p *Platform) handleAudioMessage(data *chatbot.BotCallbackDataModel, sessio
 			sessionWebhook:  data.SessionWebhook,
 			conversationId:  data.ConversationId,
 			senderStaffId:   data.SenderStaffId,
+			messageId:       data.MsgId,
 		},
 		FromVoice:  true,
 		Audio: &core.AudioAttachment{
@@ -380,6 +385,7 @@ func (p *Platform) handleImageMessage(data *chatbot.BotCallbackDataModel, sessio
 			sessionWebhook:  data.SessionWebhook,
 			conversationId:  data.ConversationId,
 			senderStaffId:   data.SenderStaffId,
+			messageId:       data.MsgId,
 		},
 		Images: []core.ImageAttachment{{
 			MimeType: mimeType,
@@ -952,6 +958,130 @@ func (p *Platform) uploadMedia(ctx context.Context, data []byte, fileName, media
 	slog.Debug("dingtalk: media uploaded successfully", "media_id", uploadResp.MediaID, "type", mediaType, "size", len(data))
 	return uploadResp.MediaID, nil
 }
+
+// sendEmotion adds or recalls an emoji reaction on a message.
+// emotionName examples: "🤔Thinking", "🥳Done"
+func (p *Platform) sendEmotion(ctx context.Context, openMsgID, openConversationID, emotionName string, recall bool) error {
+	if openMsgID == "" || openConversationID == "" {
+		return fmt.Errorf("dingtalk: sendEmotion: openMsgID and openConversationID are required")
+	}
+
+	token, err := p.getAccessToken()
+	if err != nil {
+		return fmt.Errorf("dingtalk: get access token: %w", err)
+	}
+
+	action := "reply"
+	if recall {
+		action = "recall"
+	}
+
+	url := fmt.Sprintf("https://api.dingtalk.com/v1.0/robot/emotion/%s", action)
+
+	reqBody := map[string]any{
+		"robotCode":            p.robotCode,
+		"openMsgId":            openMsgID,
+		"openConversationId":   openConversationID,
+		"emotionType":          2, // text emotion
+		"emotionName":          emotionName,
+		"textEmotion": map[string]any{
+			"emotionId":    "2659900",
+			"emotionName":  emotionName,
+			"text":         emotionName,
+			"backgroundId": "im_bg_1",
+		},
+	}
+
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("dingtalk: marshal emotion request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return fmt.Errorf("dingtalk: create emotion request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-acs-dingtalk-access-token", token)
+
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("dingtalk: send emotion request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		slog.Debug("dingtalk: send emotion failed", "status", resp.StatusCode, "body", string(respBody), "action", action, "emoji", emotionName)
+		return fmt.Errorf("dingtalk: send emotion failed: status=%d, body=%s", resp.StatusCode, string(respBody))
+	}
+
+	slog.Debug("dingtalk: emotion sent", "action", action, "emoji", emotionName, "msg_id", openMsgID[:min(24, len(openMsgID))])
+	return nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// StartTyping implements core.TypingIndicator.
+// Adds a "🤔Thinking" emoji reaction to the user's message to signal
+// that the agent is processing. Returns a stop function that removes
+// the reaction when processing completes.
+func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
+	rc, ok := rctx.(replyContext)
+	if !ok || rc.conversationId == "" || rc.messageId == "" {
+		return func() {}
+	}
+
+	// Fire-and-forget: add thinking reaction in background
+	go func() {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := p.sendEmotion(bgCtx, rc.messageId, rc.conversationId, "🤔Thinking", false); err != nil {
+			slog.Debug("dingtalk: StartTyping reaction failed", "error", err)
+		}
+	}()
+
+	// Return a stop function that cleans up the thinking reaction
+	return func() {
+		go func() {
+			bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := p.sendEmotion(bgCtx, rc.messageId, rc.conversationId, "🤔Thinking", true); err != nil {
+				slog.Debug("dingtalk: StartTyping stop cleanup failed", "error", err)
+			}
+		}()
+	}
+}
+
+// AddDoneReaction implements core.TypingIndicatorDone.
+// Recalls the "🤔Thinking" reaction and adds a "🥳Done" reaction
+// to signal that the agent has finished processing.
+func (p *Platform) AddDoneReaction(rctx any) {
+	rc, ok := rctx.(replyContext)
+	if !ok || rc.conversationId == "" || rc.messageId == "" {
+		return
+	}
+
+	// Fire-and-forget: recall thinking + add done reaction
+	go func() {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		// Recall the thinking emoji first
+		_ = p.sendEmotion(bgCtx, rc.messageId, rc.conversationId, "🤔Thinking", true)
+		// Then add the done emoji
+		if err := p.sendEmotion(bgCtx, rc.messageId, rc.conversationId, "🥳Done", false); err != nil {
+			slog.Debug("dingtalk: AddDoneReaction failed", "error", err)
+		}
+	}()
+}
+
+var _ core.TypingIndicator = (*Platform)(nil)
+var _ core.TypingIndicatorDone = (*Platform)(nil)
 
 func (p *Platform) Stop() error {
 	if p.streamCtxCancel != nil {
