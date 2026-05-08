@@ -618,18 +618,26 @@ func projectQuietEffective(cfg *Config, proj *ProjectConfig) bool {
 // of the global [display] block, falling back to built-in defaults.
 //
 // Resolution order for mode (thinking/tool visibility):
-//  1. Explicit [display].mode wins.
-//  2. Legacy quiet = true (without display.mode) → "quiet".
-//  3. Default → "full".
+//  1. Explicit [projects.display].mode wins.
+//  2. Explicit [display].mode wins.
+//  3. Legacy quiet = true (without display.mode) → "quiet".
+//  4. Default → "full".
 //
 // Resolution order for thinking_messages / tool_messages:
 //  1. project-level [projects.display].<field> (highest precedence)
 //  2. global [display].<field>
 //  3. mode-derived default (compact/quiet → false, full → true)
 func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMessages, toolMessages bool, thinkingMaxLen, toolMaxLen int) {
+	var projDisp *DisplayConfig
+	if proj != nil {
+		projDisp = proj.Display
+	}
+
 	// Resolve mode.
 	mode = DisplayModeFull
-	if cfg.Display.Mode != nil {
+	if projDisp != nil && projDisp.Mode != nil {
+		mode = *projDisp.Mode
+	} else if cfg.Display.Mode != nil {
 		mode = *cfg.Display.Mode
 	} else if projectQuietEffective(cfg, proj) {
 		mode = DisplayModeQuiet
@@ -661,10 +669,6 @@ func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMe
 		return dflt
 	}
 
-	var projDisp *DisplayConfig
-	if proj != nil {
-		projDisp = proj.Display
-	}
 	getProjBool := func(f func(*DisplayConfig) *bool) *bool {
 		if projDisp == nil {
 			return nil
@@ -722,19 +726,8 @@ func EffectiveCardMode(cfg *Config, proj *ProjectConfig) string {
 }
 
 func (c *Config) validate() error {
-	if c.Display.Mode != nil {
-		switch *c.Display.Mode {
-		case DisplayModeFull, DisplayModeCompact, DisplayModeQuiet:
-		default:
-			return fmt.Errorf("config: display.mode must be \"full\", \"compact\", or \"quiet\"")
-		}
-	}
-	if c.Display.CardMode != nil {
-		switch strings.ToLower(strings.TrimSpace(*c.Display.CardMode)) {
-		case "legacy", "rich":
-		default:
-			return fmt.Errorf("config: display.card_mode must be \"legacy\" or \"rich\"")
-		}
+	if err := validateDisplayConfig("display", &c.Display); err != nil {
+		return err
 	}
 	switch strings.ToLower(strings.TrimSpace(c.AttachmentSend)) {
 	case "", "on", "off":
@@ -785,6 +778,30 @@ func (c *Config) validate() error {
 		}
 		if err := validateUsersConfig(prefix, proj.Users); err != nil {
 			return err
+		}
+		if err := validateDisplayConfig(prefix+".display", proj.Display); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateDisplayConfig(prefix string, display *DisplayConfig) error {
+	if display == nil {
+		return nil
+	}
+	if display.Mode != nil {
+		switch *display.Mode {
+		case DisplayModeFull, DisplayModeCompact, DisplayModeQuiet:
+		default:
+			return fmt.Errorf("config: %s.mode must be \"full\", \"compact\", or \"quiet\"", prefix)
+		}
+	}
+	if display.CardMode != nil {
+		switch strings.ToLower(strings.TrimSpace(*display.CardMode)) {
+		case "legacy", "rich":
+		default:
+			return fmt.Errorf("config: %s.card_mode must be \"legacy\" or \"rich\"", prefix)
 		}
 	}
 	return nil
