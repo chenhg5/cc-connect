@@ -994,6 +994,36 @@ func TestProcessInteractiveEvents_SuppressesDuplicateSideChannelText(t *testing.
 	}
 }
 
+func TestProcessInteractiveEvents_SuppressesDuplicateSideChannelTextWithContextIndicator(t *testing.T) {
+	p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-1",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	sideText := "已发送 AGENTS.md 文件给你。"
+	if err := e.SendToSessionWithAttachments(sessionKey, sideText, nil, []FileAttachment{{
+		MimeType: "text/markdown",
+		Data:     []byte("body"),
+		FileName: "AGENTS.md",
+	}}); err != nil {
+		t.Fatalf("SendToSessionWithAttachments returned error: %v", err)
+	}
+
+	agentSession.events <- Event{Type: EventResult, Content: sideText, InputTokens: 52000, Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, nil)
+
+	if got := p.getSent(); len(got) != 1 || got[0] != sideText {
+		t.Fatalf("sent text = %#v, want only the side-channel message without duplicate ctx reply", got)
+	}
+}
+
 func TestProcessInteractiveEvents_DoesNotSuppressDifferentFinalText(t *testing.T) {
 	p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -1072,6 +1102,109 @@ func TestProcessInteractiveEvents_AppendsReplyFooterWhenEnabled(t *testing.T) {
 	want := "answer\n\n*gpt-5.4 · xhigh · 100% left · ~/codes/cc-connect*"
 	if sent[0] != want {
 		t.Fatalf("final reply = %q, want %q", sent[0], want)
+	}
+}
+
+func TestProcessInteractiveEvents_AppendsContextIndicatorInsideReplyFooter(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	agent := &stubReplyFooterAgent{
+		stubModelModeAgent: stubModelModeAgent{model: "glm-5.1"},
+		workDir:            filepath.Join(homeDir, "code", "TechStudio", "projects", "core", "agents", "ceo"),
+	}
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetReplyFooterEnabled(true)
+
+	sessionKey := "telegram:user-footer-context"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-footer-context")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-footer-context",
+		agent:        agent,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventResult, Content: "answer", InputTokens: 28000, Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-footer-context", time.Now(), nil, nil, state.replyCtx)
+
+	sent := p.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("sent = %#v, want one final reply", sent)
+	}
+	want := "answer\n\n*[ctx: ~14%] · glm-5.1 · ~/code/TechStudio/projects/core/agents/ceo*"
+	if sent[0] != want {
+		t.Fatalf("final reply = %q, want %q", sent[0], want)
+	}
+}
+
+func TestProcessInteractiveEvents_ToolSegmentsKeepFinalFooter(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	agent := &stubReplyFooterAgent{
+		stubModelModeAgent: stubModelModeAgent{model: "glm-5.1"},
+		workDir:            filepath.Join(homeDir, "code", "TechStudio", "projects", "core", "agents", "ceo"),
+	}
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetReplyFooterEnabled(true)
+	e.SetDisplayConfig(DisplayCfg{ThinkingMessages: true, ThinkingMaxLen: 300, ToolMaxLen: 500, ToolMessages: true})
+
+	sessionKey := "telegram:user-tool-footer"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-tool-footer")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-tool-footer",
+		agent:        agent,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "先检查一下。"}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "pwd"}
+	agentSession.events <- Event{Type: EventText, Content: "已处理完成。"}
+	agentSession.events <- Event{Type: EventResult, Content: "已处理完成。", InputTokens: 28000, Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-tool-footer", time.Now(), nil, nil, state.replyCtx)
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("sent = nil, want final reply")
+	}
+	final := sent[len(sent)-1]
+	want := "已处理完成。\n\n*[ctx: ~14%] · glm-5.1 · ~/code/TechStudio/projects/core/agents/ceo*"
+	if final != want {
+		t.Fatalf("final reply = %q, want %q\nall sent = %#v", final, want, sent)
+	}
+}
+
+func TestProcessInteractiveEvents_DropsStandaloneEllipsisProgress(t *testing.T) {
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{ThinkingMessages: true, ThinkingMaxLen: 300, ToolMaxLen: 500, ToolMessages: true})
+
+	sessionKey := "telegram:user-ellipsis"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-ellipsis")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-ellipsis",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventThinking, Content: "..."}
+	agentSession.events <- Event{Type: EventText, Content: "..."}
+	agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-ellipsis", time.Now(), nil, nil, state.replyCtx)
+
+	sent := p.getSent()
+	if len(sent) != 1 || sent[0] != "done" {
+		t.Fatalf("sent = %#v, want only final answer without standalone ellipsis progress", sent)
 	}
 }
 

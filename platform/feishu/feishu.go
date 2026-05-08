@@ -275,7 +275,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		noReplyToTrigger:           noReplyToTrigger,
 		client:                     lark.NewClient(appID, appSecret, clientOpts...),
 		replayClient:               newFeishuReplayClient(appID, appSecret, domain),
-		dedup:                     &core.MessageDedup{},
+		dedup:                      &core.MessageDedup{},
 		port:                       port,
 		callbackPath:               callbackPath,
 		encryptKey:                 encryptKey,
@@ -926,10 +926,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	if msg.ChatId != nil {
 		chatID = *msg.ChatId
 	}
-	userID := ""
-	if sender.SenderId != nil && sender.SenderId.OpenId != nil {
-		userID = *sender.SenderId.OpenId
-	}
+	userID := userIDFromEvent(sender.SenderId)
 	// userName and chatName are resolved in dispatchMessage to avoid blocking
 	// the SDK dispatcher goroutine with synchronous HTTP calls.
 
@@ -1270,6 +1267,9 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 
 // resolveUserName fetches a user's display name via the Contact API, with caching.
 func (p *Platform) resolveUserName(openID string) string {
+	if !isValidFeishuLookupID(openID) {
+		return openID
+	}
 	if cached, ok := p.userNameCache.Load(openID); ok {
 		return cached.(string)
 	}
@@ -1289,6 +1289,39 @@ func (p *Platform) resolveUserName(openID string) string {
 	name := *resp.Data.User.Name
 	p.userNameCache.Store(openID, name)
 	return name
+}
+
+func userIDFromEvent(id *larkim.UserId) string {
+	if id == nil {
+		return ""
+	}
+	if id.OpenId != nil && *id.OpenId != "" {
+		return *id.OpenId
+	}
+	if id.UserId != nil && *id.UserId != "" {
+		return *id.UserId
+	}
+	if id.UnionId != nil && *id.UnionId != "" {
+		return *id.UnionId
+	}
+	return ""
+}
+
+func isValidFeishuLookupID(id string) bool {
+	if id == "" {
+		return false
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '_' || r == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // resolveUserNames batch-resolves open_ids to display names.

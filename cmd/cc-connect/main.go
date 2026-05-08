@@ -40,7 +40,7 @@ var (
 //
 // Set reset_on_idle_mins = 0 in config.toml to opt out and restore the
 // previous behavior of always continuing the prior session.
-const defaultResetOnIdleMins = 30
+const defaultResetOnIdleMins = 0
 
 // resolveResetOnIdle returns the configured reset-on-idle duration for a
 // project, applying defaultResetOnIdleMins when the field is unset. The second

@@ -828,6 +828,22 @@ func TestLark_ReconstructReplyCtx(t *testing.T) {
 	}
 }
 
+func TestUserIDFromEventFallsBackToUserID(t *testing.T) {
+	userID := "uid_user123"
+	if got := userIDFromEvent(&larkim.UserId{UserId: &userID}); got != userID {
+		t.Fatalf("userIDFromEvent() = %q, want %q", got, userID)
+	}
+}
+
+func TestResolveUserNameSkipsInvalidLookupID(t *testing.T) {
+	p := &Platform{}
+	for _, id := range []string{"", "feishu:oc_chat:ou_user", "ou user"} {
+		if got := p.resolveUserName(id); got != id {
+			t.Fatalf("resolveUserName(%q) = %q, want unchanged", id, got)
+		}
+	}
+}
+
 func stringPtr(s string) *string { return &s }
 
 func TestSanitizeMarkdownURLs(t *testing.T) {

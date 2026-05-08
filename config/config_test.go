@@ -271,6 +271,14 @@ func TestEffectiveDisplayQuiet(t *testing.T) {
 			wantTool: false,
 		},
 		{
+			name:     "project mode overrides global mode",
+			cfg:      Config{Display: DisplayConfig{Mode: &quiet}},
+			proj:     ProjectConfig{Display: &DisplayConfig{Mode: &compact}},
+			wantMode: "compact",
+			wantTM:   false,
+			wantTool: false,
+		},
+		{
 			name:     "explicit mode wins over legacy quiet",
 			cfg:      Config{Quiet: &tru, Display: DisplayConfig{Mode: &compact}},
 			proj:     ProjectConfig{},
@@ -416,6 +424,42 @@ func TestEffectiveDisplay_ProjectOverride(t *testing.T) {
 			}
 			if toolMaxLen != tt.wantToolMaxLen {
 				t.Errorf("ToolMaxLen = %d, want %d", toolMaxLen, tt.wantToolMaxLen)
+			}
+		})
+	}
+}
+
+func TestValidateProjectDisplayConfig(t *testing.T) {
+	mode := "verbose"
+	cardMode := "modern"
+
+	tests := []struct {
+		name    string
+		display *DisplayConfig
+		wantErr string
+	}{
+		{
+			name:    "invalid project display mode",
+			display: &DisplayConfig{Mode: &mode},
+			wantErr: `projects[0].display.mode must be "full", "compact", or "quiet"`,
+		},
+		{
+			name:    "invalid project card mode",
+			display: &DisplayConfig{CardMode: &cardMode},
+			wantErr: `projects[0].display.card_mode must be "legacy" or "rich"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{Projects: []ProjectConfig{validProject("demo")}}
+			cfg.Projects[0].Display = tt.display
+			err := cfg.validate()
+			if err == nil {
+				t.Fatalf("validate() = nil, want %q", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validate() = %q, want contains %q", err.Error(), tt.wantErr)
 			}
 		})
 	}
