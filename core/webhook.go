@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -305,7 +306,12 @@ func (ws *WebhookServer) executeShell(engine *Engine, req WebhookRequest, event 
 	ctx, cancel := context.WithTimeout(context.Background(), webhookShellTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", req.Exec)
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", req.Exec)
+	} else {
+		cmd = exec.CommandContext(ctx, "sh", "-c", req.Exec)
+	}
 	cmd.Dir = workDir
 	output, execErr := cmd.CombinedOutput()
 
