@@ -6078,15 +6078,21 @@ func compactReplyFooterPath(path string) string {
 	if path == "" {
 		return ""
 	}
-	path = normalizeWorkspacePath(path)
+	cleanPath := filepath.Clean(path)
+	path = normalizeWorkspacePath(cleanPath)
 	if home, err := os.UserHomeDir(); err == nil {
-		home = normalizeWorkspacePath(home)
-		if path == home {
+		cleanHome := filepath.Clean(home)
+		normalizedHome := normalizeWorkspacePath(cleanHome)
+		if path == normalizedHome || cleanPath == cleanHome {
 			return "~"
 		}
-		prefix := home + string(os.PathSeparator)
+		prefix := normalizedHome + string(os.PathSeparator)
 		if strings.HasPrefix(path, prefix) {
-			return "~" + filepath.ToSlash(strings.TrimPrefix(path, home))
+			return compactHomeRelativeReplyFooterPath("~" + filepath.ToSlash(strings.TrimPrefix(path, normalizedHome)))
+		}
+		cleanPrefix := cleanHome + string(os.PathSeparator)
+		if strings.HasPrefix(cleanPath, cleanPrefix) {
+			return compactHomeRelativeReplyFooterPath("~" + filepath.ToSlash(strings.TrimPrefix(cleanPath, cleanHome)))
 		}
 	}
 
@@ -6107,6 +6113,14 @@ func compactReplyFooterPath(path string) string {
 		return "…/" + strings.Join(parts[start:], "/")
 	}
 	return slash
+}
+
+func compactHomeRelativeReplyFooterPath(path string) string {
+	parts := strings.Split(strings.TrimPrefix(path, "~/"), "/")
+	if len(parts) <= 2 {
+		return path
+	}
+	return "…/" + strings.Join(parts[len(parts)-2:], "/")
 }
 
 // buildClaudeStatusLineFooter renders a CCD-statusline-style footer for the
