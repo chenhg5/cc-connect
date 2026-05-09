@@ -578,3 +578,32 @@ func TestMarkdownToSimpleHTML_Callout(t *testing.T) {
 		})
 	}
 }
+
+// TestMarkdownToSimpleHTML_ManyInlineCodePlaceholders is a regression test for
+// a placeholder-collision bug in convertInlineHTML: the placeholder key used
+// to encode the index as `string(rune('0'+phIdx))`, which rolled past '9' once
+// phIdx hit 10. phIdx == 12 produced a key containing '<' and phIdx == 14 one
+// containing '>'. The whole-string escapeHTML pass then rewrote those chars
+// inside the keys to "&lt;" / "&gt;", so the restore pass at the end could no
+// longer find the keys and the final HTML leaked literal "\x00PH<\x00" /
+// "\x00PH>\x00" fragments while losing the original code/link content.
+func TestMarkdownToSimpleHTML_ManyInlineCodePlaceholders(t *testing.T) {
+	// 15 inline-code segments forces phIdx through 12 ('<') and 14 ('>').
+	in := "Functions are " +
+		"`f0`, `f1`, `f2`, `f3`, `f4`, `f5`, `f6`, `f7`, " +
+		"`f8`, `f9`, `fA`, `fB`, `fC`, `fD`, `fE` here."
+	out := MarkdownToSimpleHTML(in)
+
+	if strings.ContainsRune(out, 0) {
+		t.Fatalf("output leaked NUL placeholder: %q", out)
+	}
+	if strings.Contains(out, "PH&lt;") || strings.Contains(out, "PH&gt;") {
+		t.Fatalf("output leaked escaped placeholder fragment: %q", out)
+	}
+	for _, name := range []string{"f0", "f1", "f9", "fA", "fB", "fC", "fD", "fE"} {
+		want := "<code>" + name + "</code>"
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %s, got %q", want, out)
+		}
+	}
+}

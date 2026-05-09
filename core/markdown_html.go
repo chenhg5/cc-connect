@@ -2,6 +2,7 @@ package core
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -295,8 +296,17 @@ func convertInlineHTML(s string) string {
 	var phs []placeholder
 	phIdx := 0
 
+	// The placeholder key embeds phIdx as decimal digits. The previous
+	// `string(rune('0'+phIdx))` form rolled past '9' once phIdx hit 10, so
+	// phIdx == 12 produced a key containing '<' and phIdx == 14 produced one
+	// containing '>'. Step 3 (escapeHTML on the entire string) then rewrote
+	// '<'/'>' inside those keys to "&lt;"/"&gt;" before step 8 could restore
+	// them, leaking literal "\x00PH<\x00" / "\x00PH>\x00" fragments into the
+	// rendered Telegram message and dropping the original code/link content.
+	// Decimal digits stay in the safe ASCII range regardless of phIdx, and
+	// no two indices collide.
 	nextPH := func(html string) string {
-		key := "\x00PH" + string(rune('0'+phIdx)) + "\x00"
+		key := "\x00PH" + strconv.Itoa(phIdx) + "\x00"
 		phs = append(phs, placeholder{key: key, html: html})
 		phIdx++
 		return key
