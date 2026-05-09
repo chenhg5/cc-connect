@@ -560,8 +560,14 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 				},
 			}, nil
 		}
-		if p.cardNavHandler != nil {
-			card := p.cardNavHandler(actionVal, sessionKey)
+	if p.cardNavHandler != nil {
+		done := make(chan *core.Card, 1)
+		go func() {
+			done <- p.cardNavHandler(actionVal, sessionKey)
+		}()
+
+		select {
+		case card := <-done:
 			if card != nil {
 				return &callback.CardActionTriggerResponse{
 					Card: &callback.Card{
@@ -570,13 +576,32 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 					},
 				}, nil
 			}
+		case <-time.After(cardNavTimeout):
+			go func() {
+				card := <-done
+				if card == nil {
+					return
+				}
+				if refresher, ok := p.self.(core.CardRefresher); ok {
+					if err := refresher.RefreshCard(context.Background(), sessionKey, card); err != nil {
+						slog.Warn(p.tag()+": async card refresh failed", "action", actionVal, "err", err)
+					}
+				}
+			}()
+			return &callback.CardActionTriggerResponse{
+				Toast: &callback.Toast{
+					Type:    "info",
+					Content: "⏳ Loading... / 加载中...",
+				},
+			}, nil
 		}
-		if strings.HasPrefix(actionVal, "act:") {
-			slog.Debug(p.tag()+": card action produced no card update", "action", actionVal)
-			return nil, nil
-		}
-		slog.Warn(p.tag()+": card nav returned nil, ignoring", "action", actionVal)
+	}
+	if strings.HasPrefix(actionVal, "act:") {
+		slog.Debug(p.tag()+": card action produced no card update", "action", actionVal)
 		return nil, nil
+	}
+	slog.Warn(p.tag()+": card nav returned nil, ignoring", "action", actionVal)
+	return nil, nil
 	}
 
 	// perm: — permission response with in-place card update
@@ -748,6 +773,8 @@ func (p *Platform) AddDoneReaction(rctx any) {
 }
 
 const recalledMessageTTL = 10 * time.Minute
+
+const cardNavTimeout = 2500 * time.Millisecond
 
 func (p *Platform) markMessageRecalled(messageID string) {
 	messageID = strings.TrimSpace(messageID)
