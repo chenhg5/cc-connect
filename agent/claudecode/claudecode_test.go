@@ -412,6 +412,16 @@ func TestEncodeClaudeProjectKey(t *testing.T) {
 			input:    "",
 			expected: "",
 		},
+		{
+			name:     "path with dots in username",
+			input:    "/home/john.doe/projects/myapp",
+			expected: "-home-john-doe-projects-myapp",
+		},
+		{
+			name:     "path with multiple dots",
+			input:    "/home/j.doe/src/my.app",
+			expected: "-home-j-doe-src-my-app",
+		},
 	}
 
 	for _, tt := range tests {
