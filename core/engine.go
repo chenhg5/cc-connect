@@ -3738,14 +3738,38 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				textParts = append(textParts, event.Content)
 				partialText += event.Content
 				if hasRichCard {
-					if cardMessageID != nil && (time.Since(lastRichCardUpdate) > 1500*time.Millisecond || len(partialText)-lastRichCardLen > 30) {
-						card := richCardSupporter.BuildRichCard(CardStatusWorking, "", toolSteps, partialText, true, time.Since(turnStart))
-						if updater, ok := p.(MessageUpdater); ok {
-							if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err == nil {
+					// Throttle: cardkit-v1 streaming text path uses tighter limits (200ms / 20 chars)
+					// for smoother typewriter UX; full-card Patch fallback keeps the original 1500ms / 30 chars.
+					streamer, hasStreamer := p.(RichCardTextStreamer)
+					throttleDur := 1500 * time.Millisecond
+					throttleChars := 30
+					if hasStreamer && cardMessageID != nil {
+						throttleDur = 200 * time.Millisecond
+						throttleChars = 20
+					}
+					if cardMessageID != nil && (time.Since(lastRichCardUpdate) > throttleDur || len(partialText)-lastRichCardLen > throttleChars) {
+						// Prefer per-element streaming text update (cardkit-v1) when available;
+						// it engages Lark's native typewriter rendering. Falls back to
+						// full-card Patch on ErrNotSupported (handle without cardID) or any error.
+						streamed := false
+						if hasStreamer {
+							if err := streamer.StreamRichCardText(e.ctx, cardMessageID, partialText); err == nil {
 								lastRichCardUpdate = time.Now()
 								lastRichCardLen = len(partialText)
-							} else {
-								slog.Debug("rich card: failed to update text card", "platform", p.Name(), "error", err)
+								streamed = true
+							} else if !errors.Is(err, ErrNotSupported) {
+								slog.Debug("rich card: streaming text update failed, falling back to full Patch", "platform", p.Name(), "error", err)
+							}
+						}
+						if !streamed {
+							card := richCardSupporter.BuildRichCard(CardStatusWorking, "", toolSteps, partialText, true, time.Since(turnStart))
+							if updater, ok := p.(MessageUpdater); ok {
+								if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err == nil {
+									lastRichCardUpdate = time.Now()
+									lastRichCardLen = len(partialText)
+								} else {
+									slog.Debug("rich card: failed to update text card", "platform", p.Name(), "error", err)
+								}
 							}
 						}
 					}
@@ -4015,6 +4039,17 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				finalCard := richCardSupporter.BuildRichCard(CardStatusDone, "", toolSteps, parts[0], false, time.Since(turnStart))
 				if cardMessageID != nil {
+					// Forced final flush via cardkit-v1 streaming text update before
+					// flipping status to Done via full-card Patch. The throttle in the
+					// EventText path may have skipped the last <200ms / <20 chars; this
+					// catch-up keeps the typewriter rendering smooth all the way to the
+					// end. ErrNotSupported (no cardID) and any error are silent — the
+					// subsequent UpdateMessage will rewrite the body anyway.
+					if streamer, ok := p.(RichCardTextStreamer); ok {
+						if err := streamer.StreamRichCardText(e.ctx, cardMessageID, parts[0]); err != nil && !errors.Is(err, ErrNotSupported) {
+							slog.Debug("rich card: final streaming flush failed (proceeding to full Patch)", "platform", p.Name(), "error", err)
+						}
+					}
 					if updater, ok := p.(MessageUpdater); ok {
 						if err := updater.UpdateMessage(e.ctx, cardMessageID, finalCard); err != nil {
 							slog.Debug("rich card: final update failed, falling back to send", "platform", p.Name(), "error", err)
@@ -4176,6 +4211,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// it for the reply quote. Without this reassignment, msg2's
 				// reply would quote msg1's bubble.
 				replyCtx = queued.replyCtx
+				// Rich-mode per-turn state must reset too — otherwise EventText for
+				// the queued message would StreamRichCardText against the previous
+				// turn's cardID, overwriting that card's body with the new turn's
+				// content. Same risk for partialText/toolSteps leaking across turns.
+				cardMessageID = nil
+				toolSteps = nil
+				partialText = ""
+				lastRichCardUpdate = time.Time{}
+				lastRichCardLen = 0
 				queuedRenderer := func(content string) string {
 					return e.renderOutgoingContentForWorkspace(queued.platform, content, workspaceDir)
 				}
