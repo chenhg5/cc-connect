@@ -186,6 +186,22 @@ type MessageUpdater interface {
 	UpdateMessage(ctx context.Context, replyCtx any, content string) error
 }
 
+// StatusFooterSender is an optional Platform extension for sending a reply
+// with a structured per-turn status footer rendered using platform-specific
+// dim/small styling (e.g. Lark `text_size: "notation"`). Platforms that do
+// not implement it fall back to receiving the footer appended inline to the
+// content via Send/SendWithButtons/...
+type StatusFooterSender interface {
+	SendWithStatusFooter(ctx context.Context, replyCtx any, content, footer string) error
+}
+
+// StatusFooterUpdater is the streaming-preview counterpart of
+// StatusFooterSender: it patches an existing preview message with a final
+// content + structured status footer block.
+type StatusFooterUpdater interface {
+	UpdateMessageWithStatusFooter(ctx context.Context, replyCtx any, content, footer string) error
+}
+
 // ProgressStyleProvider is an optional interface for platforms that expose
 // a preferred style for intermediate progress rendering.
 // Typical values: "legacy", "compact", "card".
@@ -419,6 +435,20 @@ type ContextUsageReporter interface {
 	GetContextUsage() *ContextUsage
 }
 
+// CCDStatusFooterCapable is an optional Agent capability marker. Agents whose
+// session emits CCD-statusline-compatible token usage (the stable
+// out / in / cw / cr / ctx fields suitable for the multi-line reply footer
+// rendered with text_size:"notation" by Lark/Feishu) implement it and return
+// true. The engine emits the CCD-style multi-line footer only when this
+// capability reports true; other agents fall through to the default
+// (legacy single-line) reply footer.
+//
+// Implementing this is an explicit opt-in, used in lieu of hardcoding the
+// agent registry name in core (see CLAUDE.md §1).
+type CCDStatusFooterCapable interface {
+	UsesCCDStatusFooter() bool
+}
+
 // ContextUsage describes runtime context consumption for the active session.
 type ContextUsage struct {
 	// UsedTokens is the current token load to compare against ContextWindow when
@@ -427,13 +457,14 @@ type ContextUsage struct {
 	// BaselineTokens is the portion of the context window always occupied by
 	// fixed runtime/system instructions and therefore excluded from user-visible
 	// "left" calculations when the agent provides it.
-	BaselineTokens        int
-	TotalTokens           int
-	InputTokens           int
-	CachedInputTokens     int
-	OutputTokens          int
-	ReasoningOutputTokens int
-	ContextWindow         int
+	BaselineTokens           int
+	TotalTokens              int
+	InputTokens              int
+	CachedInputTokens        int // cache-read tokens (prior context retrieved from cache)
+	CacheCreationInputTokens int // cache-write tokens (new content written to cache)
+	OutputTokens             int
+	ReasoningOutputTokens    int
+	ContextWindow            int
 }
 
 // ContextCompressor is an optional interface for agents that support

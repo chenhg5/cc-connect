@@ -2165,6 +2165,28 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	return p.sendNewMessageToChat(ctx, rc, msgType, msgBody)
 }
 
+// SendWithStatusFooter implements core.StatusFooterSender: send a reply with
+// the body content followed by a small/dim status-footer block. Always uses
+// the interactive card path so the footer can render with text_size:
+// "notation". Falls back to plain Send when the footer is empty.
+func (p *Platform) SendWithStatusFooter(ctx context.Context, rctx any, content, footer string) error {
+	if strings.TrimSpace(footer) == "" {
+		return p.Send(ctx, rctx, content)
+	}
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
+	}
+	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
+	processedBody := sanitizeMarkdownURLs(preprocessFeishuMarkdown(content))
+	processedFooter := sanitizeMarkdownURLs(preprocessFeishuMarkdown(footer))
+	cardJSON := buildCardJSONWithStatusFooter(processedBody, processedFooter)
+	if p.shouldUseThreadOrReplyAPI(rc) {
+		return p.replyMessage(ctx, rc, larkim.MsgTypeInteractive, cardJSON)
+	}
+	return p.sendNewMessageToChat(ctx, rc, larkim.MsgTypeInteractive, cardJSON)
+}
+
 func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttachment) error {
 	rc, ok := rctx.(replyContext)
 	if !ok {
@@ -3029,10 +3051,18 @@ func isThreadSessionKey(sessionKey string) bool {
 // feishuPreviewHandle stores the message ID for an editable preview message.
 // Card 2.0 path needs mu/status/lastContent to let SetPreviewStatus patch
 // the header color without re-rendering the whole card.
+//
+// Card 2.0 + cardkit-v1 streaming text path additionally needs cardID and a
+// monotonically increasing sequence counter. cardID is empty when the
+// preview was created via the legacy inline-card-JSON path (Create Card
+// Entity failed → fallback), in which case streamRichCardText must NOT be
+// called and the engine falls back to full-card Patch via UpdateMessage.
 type feishuPreviewHandle struct {
 	mu          sync.Mutex
 	messageID   string
 	chatID      string
+	cardID      string // cardkit-v1 entity id (empty = no streaming text path)
+	sequence    int    // cardkit-v1 streaming text monotonic counter (++ before use; first call = 1)
 	status      core.CardStatus
 	lastContent string
 }
@@ -3053,6 +3083,40 @@ func buildCardJSON(content string) string {
 					"content": content,
 				},
 			},
+		},
+	}
+	b, _ := json.Marshal(card)
+	return string(b)
+}
+
+// buildCardJSONWithStatusFooter builds an interactive card with a body
+// markdown element followed by a small/dim status-footer markdown element
+// (Lark `text_size: "notation"`). Empty footer falls through to buildCardJSON.
+func buildCardJSONWithStatusFooter(content, footer string) string {
+	if strings.TrimSpace(footer) == "" {
+		return buildCardJSON(content)
+	}
+	elements := []map[string]any{
+		{
+			"tag":     "markdown",
+			"content": content,
+		},
+		{
+			"tag":     "hr",
+		},
+		{
+			"tag":       "markdown",
+			"content":   footer,
+			"text_size": "notation",
+		},
+	}
+	card := map[string]any{
+		"schema": "2.0",
+		"config": map[string]any{
+			"wide_screen_mode": true,
+		},
+		"body": map[string]any{
+			"elements": elements,
 		},
 	}
 	b, _ := json.Marshal(card)
@@ -3443,6 +3507,20 @@ func buildPreviewCardJSON(content string) string {
 // SendPreviewStart sends a new card message and returns a handle for subsequent edits.
 // Using card (interactive) type for both preview and final message so updates
 // are in-place without needing to delete and resend.
+//
+// Card 2.0 + cardkit-v1 path (when content is a rich card JSON and we're NOT
+// in thread/reply mode): runs a two-step flow that captures a card_id usable
+// for streaming text updates:
+//
+//  1. POST /open-apis/cardkit/v1/cards with {type:"card_json", data:<cardJSON>}
+//     → returns card_id (numeric string, 14-day TTL).
+//  2. Im.Message.Create with content {"type":"card","data":{"card_id":"..."}}
+//     → returns message_id; both ids are stored on feishuPreviewHandle.
+//
+// If step (1) fails OR we're in thread/reply mode (Reply API doesn't accept
+// card_id reference), we fall back to the inline-card-JSON path. The handle's
+// cardID stays empty in that case and the engine routes EventText through the
+// full-card Patch path (= original #657 behavior, no typewriter).
 func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content string) (any, error) {
 	if !p.useInteractiveCard {
 		return nil, core.ErrNotSupported
@@ -3460,17 +3538,32 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 
 	// Card 2.0 path: engine passes a pre-built rich card JSON; pass it through.
 	var cardJSON string
+	var sendContent string // what goes into the Im.Message.Create / Reply content field
+	var cardID string      // cardkit-v1 entity id (empty = no streaming text path)
 	if isCardJSON(content) {
 		cardJSON = content
+		// Try cardkit-v1 two-step flow regardless of Reply vs Create. Both
+		// Im.Message.Reply and Im.Message.Create accept the {type:card,data:{card_id}}
+		// content schema (verified by direct API call); skipping Reply mode would
+		// disable cardkit-v1 streaming on every @-mention turn (the dominant case).
+		if id, err := p.createCardEntity(ctx, cardJSON); err == nil {
+			cardID = id
+			sendContent = fmt.Sprintf(`{"type":"card","data":{"card_id":"%s"}}`, id)
+		} else {
+			slog.Info(p.tag()+": create card entity failed, falling back to inline card JSON",
+				"error", err)
+			sendContent = cardJSON
+		}
 	} else {
 		cardJSON = buildPreviewCardJSON(content)
+		sendContent = cardJSON
 	}
 
 	var msgID string
 	if p.shouldUseThreadOrReplyAPI(rc) {
 		req := larkim.NewReplyMessageReqBuilder().
 			MessageId(rc.messageID).
-			Body(p.buildReplyMessageReqBody(rc, larkim.MsgTypeInteractive, cardJSON)).
+			Body(p.buildReplyMessageReqBody(rc, larkim.MsgTypeInteractive, sendContent)).
 			Build()
 		var resp *larkim.ReplyMessageResp
 		if err := p.withTransientRetry(ctx, "send preview", func() error {
@@ -3497,7 +3590,7 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 			Body(larkim.NewCreateMessageReqBodyBuilder().
 				ReceiveId(chatID).
 				MsgType(larkim.MsgTypeInteractive).
-				Content(cardJSON).
+				Content(sendContent).
 				Build()).
 			Build()
 		var resp *larkim.CreateMessageResp
@@ -3525,7 +3618,106 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 		return nil, fmt.Errorf("%s: send preview: no message ID returned", p.tag())
 	}
 
-	return &feishuPreviewHandle{messageID: msgID, chatID: chatID}, nil
+	return &feishuPreviewHandle{messageID: msgID, chatID: chatID, cardID: cardID}, nil
+}
+
+// createCardEntity calls the cardkit-v1 Create Card Entity API
+// (POST /open-apis/cardkit/v1/cards) and returns the card_id.
+//
+// The card_id is required to drive the streaming text update path
+// (PUT /open-apis/cardkit/v1/cards/{card_id}/elements/{element_id}/content).
+// If this call fails the caller should fall back to inline card JSON via the
+// regular Im.Message.Create path; the rich card will still render but without
+// native typewriter streaming.
+func (p *Platform) createCardEntity(ctx context.Context, cardJSON string) (string, error) {
+	body := map[string]any{
+		"type": "card_json",
+		"data": cardJSON,
+	}
+	var apiResp *larkcore.ApiResp
+	if err := p.withFreshTenantAccessTokenRetry(ctx, "create card entity", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+		var err error
+		apiResp, err = client.Post(ctx, "/open-apis/cardkit/v1/cards", body, larkcore.AccessTokenTypeTenant, options...)
+		return err
+	}); err != nil {
+		return "", fmt.Errorf("%s: create card entity: %w", p.tag(), err)
+	}
+	if apiResp == nil || apiResp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("%s: create card entity: HTTP status %d", p.tag(), apiResp.StatusCode)
+	}
+	var resp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			CardID string `json:"card_id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(apiResp.RawBody, &resp); err != nil {
+		return "", fmt.Errorf("%s: create card entity: parse response: %w", p.tag(), err)
+	}
+	if resp.Code != 0 {
+		return "", fmt.Errorf("%s: create card entity: code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+	}
+	if resp.Data.CardID == "" {
+		return "", fmt.Errorf("%s: create card entity: empty card_id in response", p.tag())
+	}
+	return resp.Data.CardID, nil
+}
+
+// StreamRichCardText implements core.RichCardTextStreamer. Pushes the latest
+// fullText to the rich card's main_text element via cardkit-v1 streaming text
+// update API. The Lark client renders the increment between consecutive PUTs
+// with a typewriter animation (controlled by the card's streaming_config).
+//
+// Returns ErrNotSupported when the handle has no cardID (preview was created
+// via the inline-card-JSON fallback path; engine should fall back to full-card
+// Patch).
+func (p *Platform) StreamRichCardText(ctx context.Context, previewHandle any, fullText string) error {
+	h, ok := previewHandle.(*feishuPreviewHandle)
+	if !ok {
+		return fmt.Errorf("%s: StreamRichCardText: invalid preview handle type %T", p.tag(), previewHandle)
+	}
+
+	// Serialize all PUTs for one card so the monotonic sequence counter is
+	// preserved across concurrent EventText calls; rate-limit headroom is
+	// huge (Lark allows 50 QPS per element).
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.cardID == "" {
+		return core.ErrNotSupported
+	}
+
+	h.sequence++
+	apiPath := fmt.Sprintf("/open-apis/cardkit/v1/cards/%s/elements/%s/content",
+		h.cardID, richCardMainTextElementID)
+	body := map[string]any{
+		"content":  fullText,
+		"sequence": h.sequence,
+	}
+
+	var apiResp *larkcore.ApiResp
+	if err := p.withFreshTenantAccessTokenRetry(ctx, "stream rich card text", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+		var err error
+		apiResp, err = client.Put(ctx, apiPath, body, larkcore.AccessTokenTypeTenant, options...)
+		return err
+	}); err != nil {
+		return fmt.Errorf("%s: stream rich card text: %w", p.tag(), err)
+	}
+	if apiResp == nil || apiResp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s: stream rich card text: HTTP status %d", p.tag(), apiResp.StatusCode)
+	}
+	var resp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	if err := json.Unmarshal(apiResp.RawBody, &resp); err != nil {
+		return fmt.Errorf("%s: stream rich card text: parse response: %w", p.tag(), err)
+	}
+	if resp.Code != 0 {
+		return fmt.Errorf("%s: stream rich card text: code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+	}
+	return nil
 }
 
 // UpdateMessage edits an existing card message identified by previewHandle.
@@ -3556,8 +3748,52 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 		}
 		cardJSON = buildCardJSON(sanitizeMarkdownURLs(processed))
 	}
+	// Route card-entity-bound messages to cardkit-v1 full-card update API.
+	// Im.Message.Patch on entity-referenced messages is silently no-op for the
+	// card body / header — only inline card JSON messages can be patched that way.
+	h.mu.Lock()
+	cardID := h.cardID
+	h.mu.Unlock()
+	if cardID != "" {
+		return p.updateCardEntity(ctx, h, cardJSON)
+	}
+	return p.patchCardMessage(ctx, h.messageID, cardJSON)
+}
+
+// UpdateMessageWithStatusFooter implements core.StatusFooterUpdater: edit an
+// existing card to render the body markdown plus a small/dim status-footer
+// block (Lark `text_size: "notation"`). Falls through to UpdateMessage when
+// the footer is empty.
+func (p *Platform) UpdateMessageWithStatusFooter(ctx context.Context, previewHandle any, content, footer string) error {
+	if !p.useInteractiveCard {
+		return core.ErrNotSupported
+	}
+	if strings.TrimSpace(footer) == "" {
+		return p.UpdateMessage(ctx, previewHandle, content)
+	}
+	h, ok := previewHandle.(*feishuPreviewHandle)
+	if !ok {
+		return fmt.Errorf("%s: invalid preview handle type %T", p.tag(), previewHandle)
+	}
+	// Mirror UpdateMessage's existing behavior: it does not resolve
+	// @mentions on the card-edit path either. SendWithStatusFooter does
+	// resolve since the matching Send path resolves on the chat-thread API.
+	processedBody := sanitizeMarkdownURLs(preprocessFeishuMarkdown(content))
+	processedFooter := sanitizeMarkdownURLs(preprocessFeishuMarkdown(footer))
+	cardJSON := buildCardJSONWithStatusFooter(processedBody, processedFooter)
+	// Same card-entity routing as UpdateMessage above.
+	h.mu.Lock()
+	cardID := h.cardID
+	h.mu.Unlock()
+	if cardID != "" {
+		return p.updateCardEntity(ctx, h, cardJSON)
+	}
+	return p.patchCardMessage(ctx, h.messageID, cardJSON)
+}
+
+func (p *Platform) patchCardMessage(ctx context.Context, messageID, cardJSON string) error {
 	req := larkim.NewPatchMessageReqBuilder().
-		MessageId(h.messageID).
+		MessageId(messageID).
 		Body(larkim.NewPatchMessageReqBodyBuilder().
 			Content(cardJSON).
 			Build()).
@@ -3574,6 +3810,56 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 			return nil
 		})
 	})
+}
+
+// updateCardEntity performs a full-card replacement on a cardkit-v1 entity via
+// PUT /open-apis/cardkit/v1/cards/{card_id}. Required for messages that were
+// sent as card_id references (rich-mode path) — Im.Message.Patch does not
+// affect the rendered content of such messages.
+//
+// Reuses h.sequence as the monotonic ordering counter (shared with
+// streamRichCardText so any sequence on any element/card is monotonic).
+func (p *Platform) updateCardEntity(ctx context.Context, h *feishuPreviewHandle, cardJSON string) error {
+	h.mu.Lock()
+	if h.cardID == "" {
+		h.mu.Unlock()
+		return fmt.Errorf("%s: updateCardEntity: cardID not set", p.tag())
+	}
+	h.sequence++
+	cardID := h.cardID
+	seq := h.sequence
+	h.mu.Unlock()
+
+	apiPath := fmt.Sprintf("/open-apis/cardkit/v1/cards/%s", cardID)
+	body := map[string]any{
+		"card": map[string]any{
+			"type": "card_json",
+			"data": cardJSON,
+		},
+		"sequence": seq,
+	}
+	var apiResp *larkcore.ApiResp
+	if err := p.withFreshTenantAccessTokenRetry(ctx, "update card entity", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+		var err error
+		apiResp, err = client.Put(ctx, apiPath, body, larkcore.AccessTokenTypeTenant, options...)
+		return err
+	}); err != nil {
+		return fmt.Errorf("%s: update card entity: %w", p.tag(), err)
+	}
+	if apiResp == nil || apiResp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s: update card entity: HTTP status %d", p.tag(), apiResp.StatusCode)
+	}
+	var resp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	if err := json.Unmarshal(apiResp.RawBody, &resp); err != nil {
+		return fmt.Errorf("%s: update card entity: parse response: %w", p.tag(), err)
+	}
+	if resp.Code != 0 {
+		return fmt.Errorf("%s: update card entity: code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+	}
+	return nil
 }
 
 func (p *Platform) Stop() error {
@@ -3830,6 +4116,12 @@ func (p *Platform) onBotMenu(event *larkapplication.P2BotMenuV6) error {
 
 const defaultToolIcon = "setting-inter_outlined"
 
+// richCardMainTextElementID is the fixed element_id assigned to the markdown
+// body block of every rich card. The cardkit-v1 streaming text update API
+// targets card elements by this id (PUT /open-apis/cardkit/v1/cards/{card_id}/elements/{element_id}/content).
+// Hardcoded because each rich card has exactly one streaming-text element.
+const richCardMainTextElementID = "main_text"
+
 var toolIconMap = map[string]string{
 	"Bash":      "terminal-two_outlined",
 	"Edit":      "edit_outlined",
@@ -3961,31 +4253,10 @@ func buildCardJSONWithStatus(content string, status core.CardStatus) string {
 	return string(b)
 }
 
-// formatElapsedCN renders a human-readable duration in Chinese.
-// Examples: "3.2 秒", "1 分 23 秒", "1 小时 05 分"。
-func formatElapsedCN(d time.Duration) string {
-	if d < 0 {
-		d = 0
-	}
-	totalSec := int64(d / time.Second)
-	switch {
-	case d < time.Minute:
-		return fmt.Sprintf("%.1f 秒", d.Seconds())
-	case d < time.Hour:
-		m := totalSec / 60
-		s := totalSec % 60
-		return fmt.Sprintf("%d 分 %02d 秒", m, s)
-	default:
-		h := totalSec / 3600
-		m := (totalSec % 3600) / 60
-		return fmt.Sprintf("%d 小时 %02d 分", h, m)
-	}
-}
-
 // buildRichCard renders a Card 2.0 "single-card" turn with collapsible
-// tool-step panel, streaming markdown body, status-colored header, and
-// an elapsed-time footer.
-func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, markdown string, streaming bool, elapsed time.Duration) string {
+// tool-step panel, streaming markdown body, status-colored header, and a
+// pre-composed multi-line statusFooter (engine-owned, includes elapsed).
+func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) string {
 	panelTitle := "Thinking..."
 	if len(steps) > 0 {
 		if streaming {
@@ -4082,26 +4353,28 @@ func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, mark
 		"elements":         panelElements,
 	}
 	markdownMap := map[string]any{
-		"tag":     "markdown",
-		"content": preprocessFeishuMarkdown(markdown),
+		"tag":        "markdown",
+		"element_id": richCardMainTextElementID, // required for cardkit-v1 streaming text update
+		"content":    preprocessFeishuMarkdown(markdown),
 	}
 
-	// Footer shows elapsed time: "⏱ 运行中 12.3 秒..." during streaming,
-	// "⏱ 用时 1 分 23 秒" on completion. Skip when elapsed == 0 to avoid noise.
-	var footerMap map[string]any
-	if elapsed > 0 {
-		var footerText string
-		if streaming {
-			footerText = fmt.Sprintf("⏱ 运行中 %s...", formatElapsedCN(elapsed))
-		} else {
-			footerText = fmt.Sprintf("⏱ 用时 %s", formatElapsedCN(elapsed))
-		}
-		footerMap = map[string]any{
-			"tag": "div",
-			"text": map[string]any{
-				"tag":     "plain_text",
-				"content": footerText,
-			},
+	// Footer: engine pre-composes a multi-line statusFooter (lines separated by \n).
+	// Each line renders as its own dim "notation"-sized markdown block so they
+	// visually sit below the body without being mistaken for content. Skip
+	// rendering when statusFooter is empty (footer disabled / nothing to show).
+	var footerElements []map[string]any
+	if statusFooter != "" {
+		for _, line := range strings.Split(statusFooter, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			footerElements = append(footerElements, map[string]any{
+				"tag": "markdown",
+				"content": line,
+				"text_size": "notation",
+				"text_color": "grey",
+			})
 		}
 	}
 
@@ -4111,8 +4384,10 @@ func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, mark
 	} else {
 		elements = append(elements, markdownMap)
 	}
-	if footerMap != nil {
-		elements = append(elements, footerMap)
+	if len(footerElements) > 0 {
+		// Insert a horizontal separator between body and footer so the boundary is clear.
+		elements = append(elements, map[string]any{"tag": "hr"})
+		elements = append(elements, footerElements...)
 	}
 
 	// Header template color follows status.
@@ -4186,11 +4461,11 @@ func splitMarkdownByTables(md string, maxTables int) []string {
 	return parts
 }
 
-// BuildRichCard implements core.RichCardSupporter. Feishu engine passes an
-// elapsed duration via the preview handle; buildRichCard itself is the
-// renderer and must be called with the duration from engine state.
-func (p *Platform) BuildRichCard(status core.CardStatus, title string, steps []core.ToolStep, markdown string, streaming bool, elapsed time.Duration) string {
-	return buildRichCard(status, title, steps, markdown, streaming, elapsed)
+// BuildRichCard implements core.RichCardSupporter. The engine pre-composes
+// statusFooter (multi-line, '\n'-separated) and passes it through; the renderer
+// splits it back into one dim notation block per line.
+func (p *Platform) BuildRichCard(status core.CardStatus, title string, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) string {
+	return buildRichCard(status, title, steps, markdown, streaming, statusFooter)
 }
 
 // SplitMarkdownByTables implements core.MarkdownTableSplitter.

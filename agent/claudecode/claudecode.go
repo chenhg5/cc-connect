@@ -265,6 +265,12 @@ func (a *Agent) Name() string           { return "claudecode" }
 func (a *Agent) CLIBinaryName() string  { return a.cliBin }
 func (a *Agent) CLIDisplayName() string { return "Claude" }
 
+// UsesCCDStatusFooter implements core.CCDStatusFooterCapable: claudecode's
+// stream-json contract emits per-sub-call usage shape (out / in / cw / cr /
+// ctx) that the multi-line reply footer renders with text_size:"notation"
+// styling. Opt-in via this capability avoids hardcoding the agent name in core.
+func (a *Agent) UsesCCDStatusFooter() bool { return true }
+
 func (a *Agent) SetWorkDir(dir string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
