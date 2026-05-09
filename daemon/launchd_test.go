@@ -26,6 +26,17 @@ func TestBuildPlist_KeepAliveDoesNotRestartOnCleanExit(t *testing.T) {
 	if strings.Contains(xml, "<key>KeepAlive</key>\n\t<true/>") {
 		t.Fatal("plist must not use boolean KeepAlive true")
 	}
+	// launchd.plist(5): SuccessfulExit=true means restart ONLY after a successful
+	// (exit 0) exit; false means restart ONLY after an unsuccessful exit. cc-connect
+	// returns 0 on graceful SIGTERM shutdown but a non-zero status on crash, so the
+	// daemon's "restart on failure but not on graceful stop" intent maps to
+	// SuccessfulExit=false. The previous wiring used <true/>, which was the inverse:
+	// it respawned after every clean SIGTERM shutdown and did NOT recover from
+	// crashes. Pin the correct value here so a future edit can't silently re-invert
+	// it.
+	if !strings.Contains(xml, "<key>SuccessfulExit</key>\n\t\t<false/>") {
+		t.Fatalf("plist must set SuccessfulExit=false so crashes restart and clean SIGTERM does not respawn; got:\n%s", xml)
+	}
 	if !strings.Contains(xml, "<key>LimitLoadToSessionType</key>") ||
 		!strings.Contains(xml, "<string>Aqua</string>") ||
 		!strings.Contains(xml, "<string>Background</string>") {
