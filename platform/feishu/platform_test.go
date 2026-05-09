@@ -970,6 +970,9 @@ func TestBuildPreviewCardJSON_ProgressPayloadSeparatesReasoningAndTools(t *testi
 	if panelContains(t, panels[1], "Inspecting event routing") {
 		t.Fatalf("tools panel should not include reasoning content: %#v", panels[1])
 	}
+	if !panelContains(t, panels[0], "report_outlined") {
+		t.Fatalf("reasoning panel should render a reasoning icon: %#v", panels[0])
+	}
 }
 
 func TestBuildPreviewCardJSON_ProgressPayloadUsesToolDescriptors(t *testing.T) {
@@ -989,6 +992,40 @@ func TestBuildPreviewCardJSON_ProgressPayloadUsesToolDescriptors(t *testing.T) {
 	}
 	if panelContains(t, panels[0], "token=secret") {
 		t.Fatalf("tools panel should redact sensitive URL query params: %#v", panels[0])
+	}
+}
+
+func TestBuildRichCard_UsesCodexRuntimeToolDescriptors(t *testing.T) {
+	cardJSON := buildRichCard(core.CardStatusWorking, "", []core.ToolStep{
+		{Kind: core.ToolStepKindTool, Name: "functions.exec_command", Summary: `{"cmd":"pwd"}`},
+		{Kind: core.ToolStepKindTool, Name: "functions.write_stdin", Summary: `{"chars":"q"}`},
+		{Kind: core.ToolStepKindTool, Name: "apply_patch", Summary: "/tmp/file.go"},
+		{Kind: core.ToolStepKindTool, Name: "multi_tool_use.parallel", Summary: "3 tool calls"},
+		{Kind: core.ToolStepKindTool, Name: "tool_search_tool", Summary: "search available tools"},
+		{Kind: core.ToolStepKindTool, Name: "update_plan", Summary: "revise checklist"},
+		{Kind: core.ToolStepKindTool, Name: "request_user_input", Summary: "ask for confirmation"},
+	}, "answer", true, "")
+
+	panels := collectCardPanels(t, cardJSON)
+	if len(panels) != 1 {
+		t.Fatalf("panel count = %d, want 1 tools panel: %#v", len(panels), panels)
+	}
+	for _, want := range []string{
+		"Run command",
+		"Edit",
+		"Run tools",
+		"Search tools",
+		"Update plan",
+		"Ask user",
+		"setting_outlined",
+		"edit_outlined",
+		"list-check_outlined",
+		"search_outlined",
+		"robot_outlined",
+	} {
+		if !panelContains(t, panels[0], want) {
+			t.Fatalf("tools panel should contain %q: %#v", want, panels[0])
+		}
 	}
 }
 
@@ -1040,6 +1077,9 @@ func TestBuildRichCard_SeparatesReasoningAndTools(t *testing.T) {
 	}
 	if panelContains(t, panels[1], "Inspecting event routing") {
 		t.Fatalf("tools panel should not include reasoning content: %#v", panels[1])
+	}
+	if !panelContains(t, panels[0], "report_outlined") {
+		t.Fatalf("reasoning panel should render a reasoning icon: %#v", panels[0])
 	}
 }
 
