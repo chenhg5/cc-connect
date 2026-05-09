@@ -2243,12 +2243,13 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 		return fmt.Errorf("%s: upload file: no file_key returned", p.tag())
 	}
 
-	fileContent, err := (&larkim.MessageFile{FileKey: *uploadResp.Data.FileKey}).String()
+	msgType := detectFeishuFileMessageType(fileType)
+	fileContent, err := buildFeishuFileMessageContent(msgType, *uploadResp.Data.FileKey)
 	if err != nil {
 		return fmt.Errorf("%s: build file message: %w", p.tag(), err)
 	}
 
-	return p.sendMediaMessage(ctx, rc, larkim.MsgTypeFile, fileContent)
+	return p.sendMediaMessage(ctx, rc, msgType, fileContent)
 }
 
 func (p *Platform) sendMediaMessage(ctx context.Context, rc replyContext, msgType, content string) error {
@@ -2271,10 +2272,32 @@ func detectFeishuFileType(mimeType, fileName string) string {
 		return larkim.FileTypePpt
 	case mimeType == "video/mp4" || strings.HasSuffix(name, ".mp4"):
 		return larkim.FileTypeMp4
-	case mimeType == "audio/ogg" || mimeType == "audio/opus" || strings.HasSuffix(name, ".opus"):
+	case mimeType == "audio/ogg" || mimeType == "audio/opus" || mimeType == "application/ogg" || strings.HasSuffix(name, ".ogg") || strings.HasSuffix(name, ".opus"):
 		return larkim.FileTypeOpus
 	default:
 		return larkim.FileTypeStream
+	}
+}
+
+func detectFeishuFileMessageType(fileType string) string {
+	switch fileType {
+	case larkim.FileTypeOpus:
+		return larkim.MsgTypeAudio
+	case larkim.FileTypeMp4:
+		return larkim.MsgTypeMedia
+	default:
+		return larkim.MsgTypeFile
+	}
+}
+
+func buildFeishuFileMessageContent(msgType, fileKey string) (string, error) {
+	switch msgType {
+	case larkim.MsgTypeAudio:
+		return (&larkim.MessageAudio{FileKey: fileKey}).String()
+	case larkim.MsgTypeMedia:
+		return (&larkim.MessageMedia{FileKey: fileKey}).String()
+	default:
+		return (&larkim.MessageFile{FileKey: fileKey}).String()
 	}
 }
 
