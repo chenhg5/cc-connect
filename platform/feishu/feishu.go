@@ -3607,7 +3607,8 @@ func renderProgressEntryElement(item core.ProgressCardEntry, lang string) map[st
 	switch item.Kind {
 	case core.ProgressEntryThinking:
 		return map[string]any{
-			"tag": "div",
+			"tag":  "div",
+			"icon": map[string]any{"tag": "standard_icon", "token": reasoningToolIcon},
 			"text": map[string]any{
 				"tag":        "plain_text",
 				"content":    "💭 " + inlineCodeText(text),
@@ -4424,6 +4425,7 @@ func (p *Platform) onBotMenu(event *larkapplication.P2BotMenuV6) error {
 
 const (
 	defaultToolIcon      = "setting-inter_outlined"
+	reasoningToolIcon    = "report_outlined"
 	feishuCardTableLimit = 3
 )
 
@@ -4525,7 +4527,7 @@ var toolDescriptors = []toolDescriptor{
 		SummaryPatterns: []*regexp.Regexp{regexp.MustCompile(`(?i)^(?:read|open)\s+(?:file\s+)?(.+)$`)},
 	},
 	{
-		Aliases:         []string{"write", "edit", "patch", "file_change", "filechange"},
+		Aliases:         []string{"write", "edit", "patch", "apply_patch", "file_change", "filechange"},
 		IconToken:       "edit_outlined",
 		Title:           "Edit",
 		Sanitizer:       toolSanitizerPath,
@@ -4533,7 +4535,14 @@ var toolDescriptors = []toolDescriptor{
 		SummaryPatterns: []*regexp.Regexp{regexp.MustCompile(`(?i)^(?:edit|write|patch)\s+(?:file\s+)?(.+)$`)},
 	},
 	{
-		Aliases:         []string{"web_search", "websearch", "web-search", "search"},
+		Aliases:   []string{"tool_search", "tool_search_tool", "find_tools", "search_tools"},
+		IconToken: "search_outlined",
+		Title:     "Search tools",
+		Sanitizer: toolSanitizerSearch,
+		ParamKeys: []string{"query", "q"},
+	},
+	{
+		Aliases:         []string{"web_search", "websearch", "web-search", "web.run", "web_run", "search"},
 		IconToken:       "search_outlined",
 		Title:           "Search web",
 		Sanitizer:       toolSanitizerSearch,
@@ -4565,7 +4574,7 @@ var toolDescriptors = []toolDescriptor{
 		SummaryPatterns: []*regexp.Regexp{regexp.MustCompile(`(?i)^(?:search\s+files(?:\s+by\s+pattern)?|glob)\s+(.+)$`)},
 	},
 	{
-		Aliases:         []string{"exec", "bash", "shell", "run_shell_command", "command", "run"},
+		Aliases:         []string{"exec", "exec_command", "bash", "shell", "run_shell_command", "write_stdin", "command", "run"},
 		IconToken:       "setting_outlined",
 		Title:           "Run command",
 		Sanitizer:       toolSanitizerCommand,
@@ -4581,12 +4590,26 @@ var toolDescriptors = []toolDescriptor{
 		SummaryPatterns: []*regexp.Regexp{regexp.MustCompile(`(?i)^(?:open|browse|visit|navigate\s+to)\s+(.+)$`)},
 	},
 	{
-		Aliases:         []string{"agent", "task", "spawn"},
+		Aliases:         []string{"agent", "task", "spawn", "spawn_agent", "wait_agent", "close_agent", "send_input", "resume_agent"},
 		IconToken:       "robot_outlined",
 		Title:           "Run sub-agent",
 		Sanitizer:       toolSanitizerGeneric,
 		ParamKeys:       []string{"task", "description", "prompt"},
 		SummaryPatterns: []*regexp.Regexp{regexp.MustCompile(`(?i)^(?:run\s+sub-?agent|spawn\s+agent)\s+(.+)$`)},
+	},
+	{
+		Aliases:   []string{"multi_tool_use", "multi_tool_use.parallel", "parallel"},
+		IconToken: "list-check_outlined",
+		Title:     "Run tools",
+		Sanitizer: toolSanitizerGeneric,
+		ParamKeys: []string{"description", "prompt"},
+	},
+	{
+		Aliases:   []string{"update_plan", "plan_update"},
+		IconToken: "list-check_outlined",
+		Title:     "Update plan",
+		Sanitizer: toolSanitizerGeneric,
+		ParamKeys: []string{"target", "subject", "description"},
 	},
 	{
 		Aliases:   []string{"check", "determine", "verify", "todowrite", "todo_write"},
@@ -4628,7 +4651,7 @@ var toolDescriptors = []toolDescriptor{
 		Sanitizer: toolSanitizerGeneric,
 	},
 	{
-		Aliases:   []string{"ask_user_question", "askuserquestion"},
+		Aliases:   []string{"ask_user_question", "askuserquestion", "request_user_input"},
 		IconToken: "robot_outlined",
 		Title:     "Ask user",
 		Sanitizer: toolSanitizerGeneric,
@@ -4651,17 +4674,48 @@ func compactToolNameForDisplay(name string) string {
 	return replacer.Replace(name)
 }
 
-func toolDescriptorMatches(desc toolDescriptor, toolName string) bool {
-	normalized := normalizeToolNameForDisplay(toolName)
-	compact := compactToolNameForDisplay(toolName)
+func toolNameDisplayVariants(name string) []string {
+	normalized := normalizeToolNameForDisplay(name)
+	if normalized == "" {
+		return nil
+	}
+	variants := []string{normalized}
+	for _, sep := range []string{".", ":", "/"} {
+		if idx := strings.LastIndex(normalized, sep); idx >= 0 && idx+1 < len(normalized) {
+			variants = append(variants, strings.TrimSpace(normalized[idx+1:]))
+		}
+	}
+	seen := make(map[string]struct{}, len(variants))
+	out := variants[:0]
+	for _, variant := range variants {
+		if variant == "" {
+			continue
+		}
+		if _, ok := seen[variant]; ok {
+			continue
+		}
+		seen[variant] = struct{}{}
+		out = append(out, variant)
+	}
+	return out
+}
+
+func toolDescriptorMatches(desc toolDescriptor, toolName string, allowPrefix bool) bool {
+	variants := toolNameDisplayVariants(toolName)
 	for _, alias := range desc.Aliases {
 		alias = normalizeToolNameForDisplay(alias)
-		if normalized == alias || strings.HasPrefix(normalized, alias+"_") || strings.HasPrefix(normalized, alias+"-") {
-			return true
-		}
 		aliasCompact := compactToolNameForDisplay(alias)
-		if compact == aliasCompact || strings.HasPrefix(compact, aliasCompact) {
-			return true
+		for _, variant := range variants {
+			if variant == alias {
+				return true
+			}
+			compact := compactToolNameForDisplay(variant)
+			if compact == aliasCompact {
+				return true
+			}
+			if allowPrefix && (strings.HasPrefix(variant, alias+"_") || strings.HasPrefix(variant, alias+"-") || strings.HasPrefix(compact, aliasCompact)) {
+				return true
+			}
 		}
 	}
 	return false
@@ -4669,7 +4723,12 @@ func toolDescriptorMatches(desc toolDescriptor, toolName string) bool {
 
 func resolveToolDescriptor(toolName string) *toolDescriptor {
 	for i := range toolDescriptors {
-		if toolDescriptorMatches(toolDescriptors[i], toolName) {
+		if toolDescriptorMatches(toolDescriptors[i], toolName, false) {
+			return &toolDescriptors[i]
+		}
+	}
+	for i := range toolDescriptors {
+		if toolDescriptorMatches(toolDescriptors[i], toolName, true) {
 			return &toolDescriptors[i]
 		}
 	}
@@ -5259,6 +5318,7 @@ func richStepElement(step core.ToolStep) map[string]any {
 	}
 	if step.Kind == core.ToolStepKindThinking {
 		text["text_color"] = "grey"
+		elem["icon"] = map[string]any{"tag": "standard_icon", "token": reasoningToolIcon}
 		return elem
 	}
 	elem["icon"] = map[string]any{"tag": "standard_icon", "token": getToolIcon(step.Name)}
