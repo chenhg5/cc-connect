@@ -41,6 +41,140 @@ func TestStripAppMentionText(t *testing.T) {
 	}
 }
 
+func TestShouldHandleSlackMessageEventRequiresMentionOutsideDM(t *testing.T) {
+	tests := []struct {
+		name string
+		ev   *slackevents.MessageEvent
+		want bool
+	}{
+		{
+			name: "dm message is handled",
+			ev:   &slackevents.MessageEvent{ChannelType: "im", Channel: "D123", Text: "hello"},
+			want: true,
+		},
+		{
+			name: "assistant dm thread is handled",
+			ev:   &slackevents.MessageEvent{ChannelType: "im", Channel: "D123", ThreadTimeStamp: "1710000000.000001", Text: "hello"},
+			want: true,
+		},
+		{
+			name: "channel message is ignored",
+			ev:   &slackevents.MessageEvent{ChannelType: "channel", Channel: "C123", Text: "hello"},
+			want: false,
+		},
+		{
+			name: "channel thread reply is ignored",
+			ev:   &slackevents.MessageEvent{ChannelType: "channel", Channel: "C123", ThreadTimeStamp: "1710000000.000001", Text: "hello"},
+			want: false,
+		},
+		{
+			name: "private channel message is ignored",
+			ev:   &slackevents.MessageEvent{ChannelType: "group", Channel: "G123", Text: "hello"},
+			want: false,
+		},
+		{
+			name: "mpim message is ignored",
+			ev:   &slackevents.MessageEvent{ChannelType: "mpim", Channel: "G123", Text: "hello"},
+			want: false,
+		},
+		{
+			name: "empty channel type falls back to dm channel id",
+			ev:   &slackevents.MessageEvent{Channel: "D123", Text: "hello"},
+			want: true,
+		},
+		{
+			name: "empty channel type non-dm channel is ignored",
+			ev:   &slackevents.MessageEvent{Channel: "C123", Text: "hello"},
+			want: false,
+		},
+		{
+			name: "nil event is ignored",
+			ev:   nil,
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldHandleSlackMessageEvent(tt.ev); got != tt.want {
+				t.Fatalf("shouldHandleSlackMessageEvent() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAppMentionReplyTSUsesExistingThread(t *testing.T) {
+	tests := []struct {
+		name string
+		ev   *slackevents.AppMentionEvent
+		want string
+	}{
+		{
+			name: "top-level mention replies under mention message",
+			ev:   &slackevents.AppMentionEvent{TimeStamp: "1710000000.000001"},
+			want: "1710000000.000001",
+		},
+		{
+			name: "thread mention replies in existing thread",
+			ev: &slackevents.AppMentionEvent{
+				TimeStamp:       "1710000001.000002",
+				ThreadTimeStamp: "1710000000.000001",
+			},
+			want: "1710000000.000001",
+		},
+		{
+			name: "nil mention has no reply timestamp",
+			ev:   nil,
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := appMentionReplyTS(tt.ev); got != tt.want {
+				t.Fatalf("appMentionReplyTS() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAssistantOrThreadTSForDirectMessages(t *testing.T) {
+	tests := []struct {
+		name string
+		ev   *slackevents.MessageEvent
+		want string
+	}{
+		{
+			name: "dm top-level reply stays top-level",
+			ev:   &slackevents.MessageEvent{ChannelType: "im", Channel: "D123", TimeStamp: "1710000000.000001"},
+			want: "",
+		},
+		{
+			name: "dm fallback by channel id stays top-level",
+			ev:   &slackevents.MessageEvent{Channel: "D123", TimeStamp: "1710000000.000001"},
+			want: "",
+		},
+		{
+			name: "assistant thread reply stays in thread",
+			ev: &slackevents.MessageEvent{
+				ChannelType:     "im",
+				Channel:         "D123",
+				TimeStamp:       "1710000001.000002",
+				ThreadTimeStamp: "1710000000.000001",
+			},
+			want: "1710000000.000001",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := assistantOrThreadTS(tt.ev); got != tt.want {
+				t.Fatalf("assistantOrThreadTS() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestDownloadSlackFile_HTMLDetection(t *testing.T) {
 	// Test that we detect HTML responses (Slack login page) and return an error
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

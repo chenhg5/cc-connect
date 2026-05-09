@@ -127,7 +127,7 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					}
 				}
 
-				slog.Debug("slack: app_mention received", "user", ev.User, "channel", ev.Channel)
+				slog.Debug("slack: app_mention received", "user", ev.User, "channel", ev.Channel, "thread_ts", ev.ThreadTimeStamp)
 
 				if !core.AllowList(p.allowFrom, ev.User) {
 					slog.Debug("slack: app_mention from unauthorized user", "user", ev.User)
@@ -159,7 +159,7 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					Files:     docFiles,
 					Audio:     audio,
 					MessageID: ev.TimeStamp,
-					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: ev.TimeStamp},
+					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: appMentionReplyTS(ev)},
 				}
 				p.handler(p, msg)
 
@@ -193,7 +193,16 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					}
 				}
 
-				slog.Debug("slack: message received", "user", ev.User, "channel", ev.Channel)
+				slog.Debug("slack: message received", "user", ev.User, "channel", ev.Channel, "channel_type", ev.ChannelType, "thread_ts", ev.ThreadTimeStamp)
+
+				if !shouldHandleSlackMessageEvent(ev) {
+					slog.Debug("slack: ignoring non-DM message without app mention",
+						"user", ev.User,
+						"channel", ev.Channel,
+						"channel_type", ev.ChannelType,
+						"thread_ts", ev.ThreadTimeStamp)
+					return
+				}
 
 				if !core.AllowList(p.allowFrom, ev.User) {
 					slog.Debug("slack: message from unauthorized user", "user", ev.User)
@@ -281,6 +290,30 @@ func stripAppMentionText(text string) string {
 	return text
 }
 
+func appMentionReplyTS(ev *slackevents.AppMentionEvent) string {
+	if ev == nil {
+		return ""
+	}
+	if ev.ThreadTimeStamp != "" {
+		return ev.ThreadTimeStamp
+	}
+	return ev.TimeStamp
+}
+
+func shouldHandleSlackMessageEvent(ev *slackevents.MessageEvent) bool {
+	return isSlackDirectMessage(ev)
+}
+
+func isSlackDirectMessage(ev *slackevents.MessageEvent) bool {
+	if ev == nil {
+		return false
+	}
+	if ev.ChannelType == "im" {
+		return true
+	}
+	return ev.ChannelType == "" && strings.HasPrefix(ev.Channel, "D")
+}
+
 // parseSlackInnerEventFiles extracts the files array from a raw Events API inner
 // event. AppMentionEvent is unmarshaled without a Files field in slack-go, but
 // Slack still includes "files" in the JSON when a mention is sent with uploads.
@@ -366,7 +399,6 @@ func slackFileDisplayName(f slackevents.File) string {
 	return f.Title
 }
 
-
 // assistantOrThreadTS returns the thread_ts to use for the bot's reply.
 //
 // For Slack Assistant apps (Agent toggle on), the user's "Chat" tab is a
@@ -378,17 +410,20 @@ func slackFileDisplayName(f slackevents.File) string {
 //
 // For regular channel messages (not DM, not already in a thread): use the
 // message's own TimeStamp so replies are threaded under the user's message,
-// preserving the old behavior of keeping conversations in threads.
+// preserving the old behavior for any non-DM message path.
 //
 // For DM messages (channel_type=im) that are not in an Assistant thread:
 // return empty so replies go top-level (natural 1-on-1 conversation).
 func assistantOrThreadTS(ev *slackevents.MessageEvent) string {
+	if ev == nil {
+		return ""
+	}
 	if ev.ThreadTimeStamp != "" {
 		// Already in a thread (Assistant Chat tab or regular thread reply).
 		return ev.ThreadTimeStamp
 	}
 	// For non-DM channels, thread under the user's message.
-	if ev.ChannelType != "im" {
+	if !isSlackDirectMessage(ev) {
 		return ev.TimeStamp
 	}
 	// DM top-level: top-level reply is natural.
