@@ -12,6 +12,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"sort"
@@ -166,10 +167,20 @@ type Platform struct {
 	// without requiring another @bot mention. Value is the last-seen time so
 	// stale entries can be expired by a future TTL sweep if needed.
 	activeThreadSessions sync.Map // sessionKey -> time.Time
+
+	richCardImageMu         sync.Mutex
+	richCardImageResolved   map[string]string
+	richCardImagePending    map[string]*richCardImageUpload
+	richCardImageFailed     map[string]struct{}
+	richCardImageUploadFunc func(context.Context, string) (string, error)
 }
 
 type interactivePlatform struct {
 	*Platform
+}
+
+type richCardImageUpload struct {
+	done chan struct{}
 }
 
 type feishuRequestFunc func(client *lark.Client, options ...larkcore.RequestOptionFunc) error
@@ -2356,13 +2367,26 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 		return fmt.Errorf("%s: SendImage: invalid reply context type %T", p.tag(), rctx)
 	}
 
+	imageKey, err := p.uploadImageKey(ctx, img.Data)
+	if err != nil {
+		return err
+	}
+	imageContent, err := (&larkim.MessageImage{ImageKey: imageKey}).String()
+	if err != nil {
+		return fmt.Errorf("%s: build image message: %w", p.tag(), err)
+	}
+
+	return p.sendMediaMessage(ctx, rc, larkim.MsgTypeImage, imageContent)
+}
+
+func (p *Platform) uploadImageKey(ctx context.Context, data []byte) (string, error) {
 	var uploadResp *larkim.CreateImageResp
 	if err := p.withTransientRetry(ctx, "upload image", func() error {
 		return p.withFreshTenantAccessTokenRetry(ctx, "upload image", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
 			req := larkim.NewCreateImageReqBuilder().
 				Body(larkim.NewCreateImageReqBodyBuilder().
 					ImageType("message").
-					Image(bytes.NewReader(img.Data)).
+					Image(bytes.NewReader(data)).
 					Build()).
 				Build()
 			var err error
@@ -2376,18 +2400,13 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 			return nil
 		})
 	}); err != nil {
-		return err
+		return "", err
 	}
 	if uploadResp.Data == nil || uploadResp.Data.ImageKey == nil {
-		return fmt.Errorf("%s: upload image: no image_key returned", p.tag())
+		return "", fmt.Errorf("%s: upload image: no image_key returned", p.tag())
 	}
 
-	imageContent, err := (&larkim.MessageImage{ImageKey: *uploadResp.Data.ImageKey}).String()
-	if err != nil {
-		return fmt.Errorf("%s: build image message: %w", p.tag(), err)
-	}
-
-	return p.sendMediaMessage(ctx, rc, larkim.MsgTypeImage, imageContent)
+	return *uploadResp.Data.ImageKey, nil
 }
 
 func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachment) error {
@@ -5077,6 +5096,322 @@ type markdownLine struct {
 }
 
 var feishuCardImagePattern = regexp.MustCompile(`!\[([^\]]*)\]\(([^)\s]+)\)`)
+
+const (
+	richCardImageFinalWait = 4 * time.Second
+	richCardImageMaxBytes  = 10 * 1024 * 1024
+	richCardImageMaxCount  = 4
+)
+
+var blockedRichCardImagePrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("10.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("127.0.0.0/8"),
+	netip.MustParsePrefix("169.254.0.0/16"),
+	netip.MustParsePrefix("172.16.0.0/12"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("192.88.99.0/24"),
+	netip.MustParsePrefix("192.168.0.0/16"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("224.0.0.0/4"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("::/128"),
+	netip.MustParsePrefix("::1/128"),
+	netip.MustParsePrefix("fc00::/7"),
+	netip.MustParsePrefix("fe80::/10"),
+	netip.MustParsePrefix("ff00::/8"),
+	netip.MustParsePrefix("2001:db8::/32"),
+}
+
+// ResolveRichCardMarkdown implements core.RichCardMarkdownResolver. It turns
+// remote markdown image URLs into Feishu image keys so Card 2.0 can render them.
+// Streaming frames start uploads and strip unresolved images; final frames wait
+// briefly so resolved images can be embedded before the Done update.
+func (p *Platform) ResolveRichCardMarkdown(ctx context.Context, markdown string, final bool) string {
+	if !strings.Contains(markdown, "![") {
+		return markdown
+	}
+	pending := map[*richCardImageUpload]struct{}{}
+	resolved := p.replaceRichCardMarkdownImages(ctx, markdown, pending)
+	if final && len(pending) > 0 {
+		waitCtx, cancel := context.WithTimeout(ctx, richCardImageFinalWait)
+		defer cancel()
+		for upload := range pending {
+			select {
+			case <-upload.done:
+			case <-waitCtx.Done():
+				return p.replaceRichCardMarkdownImages(ctx, markdown, nil)
+			}
+		}
+		resolved = p.replaceRichCardMarkdownImages(ctx, markdown, nil)
+	}
+	return resolved
+}
+
+func (p *Platform) replaceRichCardMarkdownImages(ctx context.Context, markdown string, pending map[*richCardImageUpload]struct{}) string {
+	seen := map[string]struct{}{}
+	return feishuCardImagePattern.ReplaceAllStringFunc(markdown, func(match string) string {
+		parts := feishuCardImagePattern.FindStringSubmatch(match)
+		if len(parts) != 3 {
+			return ""
+		}
+		alt, value := parts[1], parts[2]
+		if strings.HasPrefix(value, "img_") {
+			return match
+		}
+		if !isRemoteRichCardImageURL(value) {
+			return ""
+		}
+		if _, ok := seen[value]; !ok {
+			if len(seen) >= richCardImageMaxCount {
+				return ""
+			}
+			seen[value] = struct{}{}
+		}
+		if imageKey, ok := p.richCardImageKey(value); ok {
+			return fmt.Sprintf("![%s](%s)", alt, imageKey)
+		}
+		if p.richCardImageFailedURL(value) {
+			return ""
+		}
+		upload := p.ensureRichCardImageUpload(ctx, value)
+		if upload != nil && pending != nil {
+			pending[upload] = struct{}{}
+		}
+		return ""
+	})
+}
+
+func (p *Platform) richCardImageKey(rawURL string) (string, bool) {
+	p.richCardImageMu.Lock()
+	defer p.richCardImageMu.Unlock()
+	imageKey, ok := p.richCardImageResolved[rawURL]
+	return imageKey, ok && imageKey != ""
+}
+
+func (p *Platform) richCardImageFailedURL(rawURL string) bool {
+	p.richCardImageMu.Lock()
+	defer p.richCardImageMu.Unlock()
+	_, failed := p.richCardImageFailed[rawURL]
+	return failed
+}
+
+func (p *Platform) ensureRichCardImageUpload(ctx context.Context, rawURL string) *richCardImageUpload {
+	p.richCardImageMu.Lock()
+	if p.richCardImageResolved == nil {
+		p.richCardImageResolved = map[string]string{}
+	}
+	if p.richCardImagePending == nil {
+		p.richCardImagePending = map[string]*richCardImageUpload{}
+	}
+	if p.richCardImageFailed == nil {
+		p.richCardImageFailed = map[string]struct{}{}
+	}
+	if imageKey := p.richCardImageResolved[rawURL]; imageKey != "" {
+		upload := &richCardImageUpload{done: make(chan struct{})}
+		close(upload.done)
+		p.richCardImageMu.Unlock()
+		return upload
+	}
+	if _, failed := p.richCardImageFailed[rawURL]; failed {
+		p.richCardImageMu.Unlock()
+		return nil
+	}
+	if upload := p.richCardImagePending[rawURL]; upload != nil {
+		p.richCardImageMu.Unlock()
+		return upload
+	}
+	upload := &richCardImageUpload{done: make(chan struct{})}
+	p.richCardImagePending[rawURL] = upload
+	p.richCardImageMu.Unlock()
+
+	go p.finishRichCardImageUpload(ctx, rawURL, upload)
+	return upload
+}
+
+func (p *Platform) finishRichCardImageUpload(ctx context.Context, rawURL string, upload *richCardImageUpload) {
+	imageKey, err := p.uploadRichCardImageURL(ctx, rawURL)
+
+	p.richCardImageMu.Lock()
+	defer p.richCardImageMu.Unlock()
+	delete(p.richCardImagePending, rawURL)
+	if err != nil {
+		if p.richCardImageFailed == nil {
+			p.richCardImageFailed = map[string]struct{}{}
+		}
+		p.richCardImageFailed[rawURL] = struct{}{}
+		slog.Debug(p.tag()+": rich card image upload failed", "host", richCardImageURLHost(rawURL), "error", err)
+	} else {
+		if p.richCardImageResolved == nil {
+			p.richCardImageResolved = map[string]string{}
+		}
+		p.richCardImageResolved[rawURL] = imageKey
+		slog.Debug(p.tag()+": rich card image uploaded", "host", richCardImageURLHost(rawURL), "image_key", imageKey)
+	}
+	close(upload.done)
+}
+
+func (p *Platform) uploadRichCardImageURL(ctx context.Context, rawURL string) (string, error) {
+	if p.richCardImageUploadFunc != nil {
+		return p.richCardImageUploadFunc(ctx, rawURL)
+	}
+	data, mimeType, err := fetchRichCardRemoteImage(ctx, rawURL)
+	if err != nil {
+		return "", err
+	}
+	imageKey, err := p.uploadImageKey(ctx, data)
+	if err != nil {
+		return "", err
+	}
+	slog.Debug(p.tag()+": rich card image ready", "host", richCardImageURLHost(rawURL), "mime", mimeType, "bytes", len(data))
+	return imageKey, nil
+}
+
+func isRemoteRichCardImageURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	return (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
+}
+
+func richCardImageURLHost(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	return u.Hostname()
+}
+
+func fetchRichCardRemoteImage(ctx context.Context, rawURL string) ([]byte, string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return nil, "", errors.New("invalid remote image URL")
+	}
+
+	client := &http.Client{
+		Timeout: richCardImageFinalWait,
+		Transport: &http.Transport{
+			DialContext:           dialPublicRichCardImageContext,
+			ResponseHeaderTimeout: richCardImageFinalWait,
+		},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 3 {
+				return errors.New("too many redirects")
+			}
+			if !isRemoteRichCardImageURL(req.URL.String()) {
+				return errors.New("redirected to unsupported image URL")
+			}
+			return nil
+		},
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	req.Header.Set("User-Agent", "cc-connect-feishu-rich-card-image-resolver/1.0")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, "", fmt.Errorf("remote image HTTP status %d", resp.StatusCode)
+	}
+	if resp.ContentLength > richCardImageMaxBytes {
+		return nil, "", fmt.Errorf("remote image too large: %d bytes", resp.ContentLength)
+	}
+
+	data, err := io.ReadAll(io.LimitReader(resp.Body, richCardImageMaxBytes+1))
+	if err != nil {
+		return nil, "", err
+	}
+	if len(data) > richCardImageMaxBytes {
+		return nil, "", fmt.Errorf("remote image exceeds %d bytes", richCardImageMaxBytes)
+	}
+	mimeType := http.DetectContentType(data)
+	if !isSupportedRichCardImageMIME(mimeType) {
+		return nil, "", fmt.Errorf("unsupported remote image MIME %q", mimeType)
+	}
+	return data, mimeType, nil
+}
+
+func dialPublicRichCardImageContext(ctx context.Context, network, address string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+
+	var ips []net.IP
+	if parsed := net.ParseIP(host); parsed != nil {
+		ips = []net.IP{parsed}
+	} else {
+		resolved, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		if err != nil {
+			return nil, err
+		}
+		for _, addr := range resolved {
+			ips = append(ips, addr.IP)
+		}
+	}
+
+	var firstBlocked net.IP
+	for _, ip := range ips {
+		if isBlockedRichCardImageIP(ip) {
+			if firstBlocked == nil {
+				firstBlocked = ip
+			}
+			continue
+		}
+		dialer := &net.Dialer{Timeout: richCardImageFinalWait}
+		return dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+	}
+	if firstBlocked != nil {
+		return nil, fmt.Errorf("remote image host resolved to blocked IP %s", firstBlocked.String())
+	}
+	return nil, errors.New("remote image host resolved to no usable IPs")
+}
+
+func isBlockedRichCardImageIP(ip net.IP) bool {
+	addr, err := netip.ParseAddr(ip.String())
+	if err != nil {
+		return true
+	}
+	addr = addr.Unmap()
+	return !addr.IsGlobalUnicast() ||
+		addr.IsLoopback() ||
+		addr.IsPrivate() ||
+		addr.IsLinkLocalUnicast() ||
+		addr.IsLinkLocalMulticast() ||
+		addr.IsMulticast() ||
+		addr.IsUnspecified() ||
+		richCardImageIPInBlockedPrefix(addr)
+}
+
+func richCardImageIPInBlockedPrefix(addr netip.Addr) bool {
+	for _, prefix := range blockedRichCardImagePrefixes {
+		if prefix.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+func isSupportedRichCardImageMIME(mimeType string) bool {
+	switch strings.ToLower(strings.TrimSpace(mimeType)) {
+	case "image/png", "image/jpeg", "image/gif", "image/bmp", "image/webp":
+		return true
+	default:
+		return false
+	}
+}
 
 func markdownLinesWithOffsets(text string) []markdownLine {
 	if text == "" {
